@@ -67,14 +67,9 @@ pub use tool_bridge::{build_tool_bridges, McpToolBridge, ToolCallError};
 #[path = "mcp_v4_seam_test.rs"]
 mod mcp_v4_seam_tests;
 
-// Builtin MCP spike：同进程内存 transport（真实 rmcp server 对端）的可行性验证，
-// 只做实验、不接生产；模块名参与 `cargo test` 过滤（`builtin_spike`）。
-#[cfg(test)]
-#[path = "builtin_spike_test.rs"]
-mod builtin_spike_tests;
-
-// Git Watch 下沉（builtin workspace 订阅回传）的线路级验收：Step 0 先证伪 rmcp 推送面，
-// 通过后承载 T4–T6。模块名参与 `cargo test` 过滤（`builtin_subscription_wire`）。
+// Git Watch 下沉（builtin workspace 订阅回传）的线路级验收：T4–T7b 经生产链路装配的
+// 端到端回传证据（T7b 另复用本文件的订阅探针 handler）。模块名参与 `cargo test`
+// 过滤（`builtin_subscription_wire`）。
 #[cfg(test)]
 #[path = "builtin_subscription_wire_test.rs"]
 mod builtin_subscription_wire_tests;

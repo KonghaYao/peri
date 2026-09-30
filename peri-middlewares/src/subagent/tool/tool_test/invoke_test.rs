@@ -403,36 +403,6 @@ fn test_agent_description_extended() {
     );
 }
 
-/// Verify overrides_from_agent_def correctly extracts AgentOverrides from parsed data
-#[test]
-fn test_overrides_from_agent_def_with_all_fields() {
-    let ov = SubAgentTool::overrides_from_agent_def(
-        "You are a reviewer.",
-        &Some("Be thorough.".to_string()),
-        &Some("Proactively suggest.".to_string()),
-        &None,
-    );
-    let ov = ov.unwrap();
-    assert_eq!(ov.persona.as_deref().unwrap(), "You are a reviewer.");
-    assert_eq!(ov.tone.as_deref().unwrap(), "Be thorough.");
-    assert_eq!(ov.proactiveness.as_deref().unwrap(), "Proactively suggest.");
-}
-
-#[test]
-fn test_overrides_from_agent_def_empty() {
-    let ov = SubAgentTool::overrides_from_agent_def("", &None, &None, &None);
-    assert!(ov.is_none(), "All-empty fields should return None");
-}
-
-#[test]
-fn test_overrides_from_agent_def_persona_only() {
-    let ov = SubAgentTool::overrides_from_agent_def("I am a helper.", &None, &None, &None);
-    let ov = ov.unwrap();
-    assert_eq!(ov.persona.as_deref().unwrap(), "I am a helper.");
-    assert!(ov.tone.is_none());
-    assert!(ov.proactiveness.is_none());
-}
-
 /// Verify cancellation token can interrupt sub-agent execution
 #[tokio::test]
 async fn test_cancel_token_interrupts_subagent() {

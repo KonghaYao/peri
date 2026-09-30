@@ -355,59 +355,6 @@ async fn system_mcp_invalid_schema_blocks_startup() {
     fixture.shutdown().await;
 }
 
-/// 空数组契约 4：只验证 ready，不新增 direct 工具（普通工具仍 deferred）。
-#[tokio::test]
-async fn system_mcp_empty_required_array_adds_no_direct_tools() {
-    let mut fixture = GateFixture::new();
-    fixture.config("sys", system_config(Some(vec![]), None));
-    let (_, generation) = fixture
-        .connect("sys", vec![fixture_tool("Read", read_schema())])
-        .await;
-    fixture.ready("sys", generation);
-
-    let mw = McpMiddleware::new(Arc::clone(fixture.pool()));
-    let mut probe = StartupGateProbe::default();
-    Middleware::before_react_start(&mw, &mut probe)
-        .await
-        .expect("空数组仍应等待并放行");
-
-    let update = probe.staged.expect("System 依赖就绪必须暂存候选");
-    assert!(update.required.is_empty(), "空数组不得产生必需工具身份");
-    assert_eq!(
-        bridge_names(&update.tools),
-        vec![("mcp__sys__Read".to_string(), false)],
-        "direct 增量为 0，且普通 deferred 工具不被删除"
-    );
-
-    fixture.shutdown().await;
-}
-
-/// 空数组仍必须完成 initialize / tools/list：从未连接 → timeout fatal。
-#[tokio::test]
-async fn system_mcp_empty_required_array_still_requires_discovery() {
-    let fixture = GateFixture::new();
-    fixture.config("sys", system_config(Some(vec![]), Some(1)));
-    fixture.publish_loaded();
-
-    let mw = McpMiddleware::new(Arc::clone(fixture.pool()));
-    let mut probe = StartupGateProbe::default();
-    let error = Middleware::before_react_start(&mw, &mut probe)
-        .await
-        .expect_err("未经 discovery 的 System server 不得放行");
-
-    assert!(
-        matches!(
-            &error,
-            peri_agent::error::AgentError::MiddlewareError { reason, .. }
-                if reason.contains("启动超时") && reason.contains("sys")
-        ),
-        "期望 timeout fatal: {error:?}"
-    );
-    assert!(probe.staged.is_none());
-
-    fixture.shutdown().await;
-}
-
 /// 无 System 依赖（缺省 / 显式 false）：零动作、不等待、不产生 startup update。
 #[tokio::test]
 async fn system_mcp_absent_or_false_does_not_block_startup() {

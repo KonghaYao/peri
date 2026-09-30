@@ -86,14 +86,12 @@ use crate::mcp::tool_bridge::{build_typed_tool_bridges, McpToolBridge};
 use crate::permission::{default_requires_approval, PermissionMiddleware};
 use peri_mcp_cron::CronScheduler;
 
-/// 握手/关闭上界：同进程链路，取值远大于实测（spike 与 `runtime_test` 同口径）。
+/// 握手/关闭上界：同进程链路，取值远大于实测（与 `runtime_test` 同口径）。
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const CLOSE_TIMEOUT: Duration = Duration::from_millis(1000);
-/// 大 payload 正文（A16）：单行、~300 KiB，远大于 `BUILTIN_DUPLEX_BUF`（8 KiB）。
-/// 单行是刻意的：`McpToolBridge::invoke` 的**行数**截断（`MAX_MCP_LINES`）不在本用例
-/// 的观测面内，本用例只问「远大于 duplex 容量的一帧能否完整往返」。
-const LARGE_BODY_BYTES: usize = 300 * 1024;
-/// 大请求帧（反向）：参数里的字符串长度。
+/// 大请求帧（A16 的反向；大**结果**方向见 `mcp::builtin::runtime::tests` 的
+/// `large_payload_round_trips_intact`）：参数里的字符串长度，远大于
+/// `BUILTIN_DUPLEX_BUF`（8 KiB）。
 const LARGE_INPUT_BYTES: usize = 200 * 1024;
 
 // ─── 夹具环境隔离 ────────────────────────────────────────────────────────────────
@@ -850,7 +848,7 @@ impl TappedLink {
         let exit = self.converge_task().await;
         assert!(
             matches!(exit, BuiltinServerExit::Quit(_)),
-            "正常关闭必须靠 EOF 自然收敛（spike Q2 证据），实际: {exit:?}"
+            "正常关闭必须靠 EOF 自然收敛，实际: {exit:?}"
         );
         assert!(
             self.server_task.is_finished(),

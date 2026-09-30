@@ -513,3 +513,7 @@ fn project_resource(payload: crate::resources::ResourcePayload) -> ResourceConte
     }
     contents
 }
+
+#[cfg(test)]
+#[path = "workspace_test.rs"]
+mod tests;

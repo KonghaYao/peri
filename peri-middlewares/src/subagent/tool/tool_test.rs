@@ -24,7 +24,6 @@ use peri_agent::{
 use tempfile::tempdir;
 
 use super::*;
-use crate::claude_agent_parser::ToolsValue;
 
 // Mock LLM: returns final answer directly
 struct EchoLLM;
@@ -805,8 +804,6 @@ mod model_tier_test;
 mod resume_integration_test;
 #[path = "tool_test/resume_test.rs"]
 mod resume_test;
-#[path = "tool_test/tool_filter_test.rs"]
-mod tool_filter_test;
 
 /// W5 关闭矩阵 E2E（生产链路）：agent 面关闭（`SubAgentMiddleware` 链槽关闭位 =
 /// `SUB_AGENT_FACE_CLOSED_KEY`）⇒ 本地来源**不可发现、不可激活**，且**零磁盘兜底**

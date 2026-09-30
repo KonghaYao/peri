@@ -1,7 +1,7 @@
 //! T4–T7b：真实 `workspace` MCP handler 的线路证据（`builtin_subscription_wire_test.rs`
 //! 的子模块——拆分原因见父文件尾部注释与 STD-SIZE-001）。
 //!
-//! 与父文件 Step 0 探针的分工：探针用替身 handler 验证 rmcp 推送面；本模块用**真实**
+//! 与父文件探针夹具的分工：探针用替身 handler 验证订阅推送面；本模块用**真实**
 //! `WorkspaceMcpServer`（生产 handler、7 个真实工具、git 采样）经**生产**链路装配
 //! （`spawn_builtin_transport_with_handler`）与**生产** client 握手段，验证
 //! `workspace://git/ref` 的对外契约与回传闭环。
@@ -15,7 +15,10 @@ use peri_acp_types::system_reminder::{
     ReminderAudience, ReminderCategory, ReminderDelivery, ReminderSeverity,
 };
 use peri_mcp_workspace::WorkspaceMcpServer;
-use rmcp::model::{CallToolRequestParams, ReadResourceRequestParams};
+use rmcp::model::{
+    CallToolRequestParams, ErrorCode, GetMeta, ReadResourceRequestParams, ServerNotification,
+};
+use rmcp::service::ServiceError;
 use std::{path::Path, process::Command as StdCommand};
 
 use crate::mcp::builtin::context::BuiltinInstanceContext;
@@ -26,7 +29,7 @@ use crate::mcp::{ClientStatus, McpClientHandle, McpClientPool};
 
 // ─── T4–T6：workspace 真实 handler 的线路证据 ────────────────────────────────
 //
-// 与 Step 0 探针的分工：探针用替身 handler 验证 rmcp 推送面；本节用**真实**
+// 与父文件探针夹具的分工：探针用替身 handler 验证订阅推送面；本节用**真实**
 // `WorkspaceMcpServer`（生产 handler、7 个真实工具、git 采样）经**生产**链路装配
 // （`spawn_builtin_transport_with_handler`）与**生产** client 握手段，验证
 // `workspace://git/ref` 的对外契约与回传闭环。
@@ -479,7 +482,7 @@ async fn t6_session_delivery_is_info_and_closure_skips_subscription() {
 /// 资源正文读不回来（server 不支持 `resources/read`）时，git ref 通知必须退化为既有通用
 /// 订阅提醒（`Defer` + 唤醒），不得静默丢弃。
 ///
-/// 夹具：Step 0 的探针 handler（只实现订阅面，`resources/read` 走 rmcp 默认 →
+/// 夹具：父文件的探针 handler（只实现订阅面，`resources/read` 走 rmcp 默认 →
 /// `-32601`），以 `workspace` 之名接进 pool 的生产订阅消费循环。
 #[tokio::test]
 async fn t7b_read_failure_falls_back_to_generic_reminder() {
@@ -496,7 +499,6 @@ async fn t7b_read_failure_falls_back_to_generic_reminder() {
     let transport = spawn_builtin_transport_with_handler(
         "workspace",
         SpikeSubscriptionServer {
-            shape: FilterShape::Advertised,
             probe: Arc::clone(&probe),
         },
     );

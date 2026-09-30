@@ -1,4 +1,10 @@
 //! Regression scenarios through the real workspace server and MCP bridge.
+//!
+//! 观测面是**宿主侧语义**：真实 MCP 桥的取消/超时/期限与进程收尾（无 orphan）、
+//! session 级 TaskManager 的登记与回收、以及共享映射的脱敏烟测。
+//! 工具语义与逐工具诊断文本（recovery / path hints / 失败正文）的覆盖在 package 侧
+//! （`peri-mcp-workspace` 的 `filesystem/path_hints_test.rs`、`filesystem/*_test.rs`、
+//! `terminal_evidence_test.rs`），本文件不重复。
 use crate::mcp::apps::McpCapabilityProfile;
 use crate::mcp::builtin::runtime::{
     spawn_builtin_transport_with_handler, BuiltinInstanceSupervisor, BUILTIN_CONVERGE_TIMEOUT,
@@ -12,7 +18,7 @@ use peri_agent::agent::async_tasks::TaskManager as ConcreteTaskManager;
 use peri_agent::tools::{BaseTool, ToolContext};
 use peri_mcp_workspace::{WorkspaceInstanceInput, WorkspaceMcpServer};
 use rmcp::{
-    model::{CallToolRequestParams, CallToolResponse, CallToolResult},
+    model::CallToolRequestParams,
     service::{Peer, RoleClient},
     ServiceError,
 };
@@ -49,76 +55,6 @@ async fn wait_file(path: &std::path::Path) {
     })
     .await
     .expect("shell reached its start marker");
-}
-
-/// [回归测试] Safe diagnostics let the model correct requests without exposing paths/content.
-#[tokio::test]
-async fn read_edit_and_search_errors_support_recovery_over_wire() {
-    let (dir, cwd) = workspace_dir();
-    let pair = connect(&cwd, None).await;
-    for (name, input, expected) in [
-        ("Read", json!({}), "file_path"),
-        (
-            "Read",
-            json!({"file_path":"secret-marker-missing"}),
-            "File not found",
-        ),
-        ("Write", json!({"file_path":"example"}), "content"),
-        (
-            "Glob",
-            json!({"pattern":"[secret-marker"}),
-            "Pattern syntax error",
-        ),
-        ("Grep", json!({"pattern":"[secret-marker"}), "Invalid regex"),
-        (
-            "folder_operations",
-            json!({"operation":"list","folder_path":"secret-marker-missing"}),
-            "Folder not found",
-        ),
-    ] {
-        let result = complete(pair.peer().call_tool_once(call(name, input)).await.unwrap());
-        assert_eq!(result.is_error, Some(true));
-        let text = first_text(&result).unwrap();
-        assert!(text.contains(expected), "{name}: {text}");
-        assert!(
-            !text.contains("secret-marker"),
-            "diagnostic leaked input: {text}"
-        );
-    }
-    std::fs::write(
-        dir.path().join("edit.txt"),
-        "private-content\nprivate-content\n",
-    )
-    .unwrap();
-    let input =
-        json!({"file_path":"edit.txt", "old_string":"private-content", "new_string":"corrected"});
-    let result = complete(
-        pair.peer()
-            .call_tool_once(call("Edit", input.clone()))
-            .await
-            .unwrap(),
-    );
-    let text = first_text(&result).unwrap();
-    assert_eq!(result.is_error, Some(true));
-    assert!(text.contains("not unique") && text.contains("replace_all=true"));
-    assert!(!text.contains("private-content"));
-    let mut retry = input;
-    retry["replace_all"] = json!(true);
-    let result = complete(
-        pair.peer()
-            .call_tool_once(call("Edit", retry))
-            .await
-            .unwrap(),
-    );
-    assert!(!result.is_error.unwrap_or(false));
-    let read = complete(
-        pair.peer()
-            .call_tool_once(call("Read", json!({"file_path":"edit.txt"})))
-            .await
-            .unwrap(),
-    );
-    assert!(first_text(&read).unwrap().contains("corrected"));
-    pair.shutdown().await;
 }
 
 #[test]
@@ -317,43 +253,6 @@ async fn request_timeout_stops_server_shell() {
     pair.shutdown().await;
 }
 
-#[tokio::test]
-async fn safe_missing_path_diagnostic_carries_path_suggestion() {
-    let (dir, cwd) = workspace_dir();
-    std::fs::write(dir.path().join("main.rs"), "fn main() {}").unwrap();
-    let pair = connect(&cwd, None).await;
-    let input = json!({"file_path":"maiin.rs"});
-    let failure = bridge(&pair, "Read", true)
-        .await
-        .invoke(input, ToolContext::new(&[], &cwd))
-        .await
-        .unwrap_err()
-        .to_string();
-    // 候选由工具在失败点生成（mcp-packages/workspace path_hints），peri 侧仅
-    // 透传 recovery：安全诊断不得抑制可纠错的 did-you-mean。
-    assert!(failure.contains("main.rs"), "{failure}");
-    pair.shutdown().await;
-}
-
-#[tokio::test]
-async fn failed_shell_preserves_command_diagnostics() {
-    let (_dir, cwd) = workspace_dir();
-    let pair = connect(&cwd, None).await;
-    let result = bridge(&pair, "Bash", true)
-        .await
-        .invoke(
-            json!({"command":"echo failure-marker >&2; exit 7"}),
-            ToolContext::new(&[], &cwd),
-        )
-        .await
-        .unwrap();
-    assert!(
-        result.contains("failure-marker") && result.contains('7'),
-        "{result}"
-    );
-    pair.shutdown().await;
-}
-
 /// Reserved-looking names cannot bypass the external MCP deadline without builtin provenance.
 #[cfg(unix)]
 #[tokio::test]
@@ -459,21 +358,3 @@ fn call(name: &str, arguments: Value) -> CallToolRequestParams {
     CallToolRequestParams::new(name.to_string())
         .with_arguments(arguments.as_object().cloned().unwrap_or_default())
 }
-
-/// 结果里的首个文本块。
-fn first_text(result: &CallToolResult) -> Option<String> {
-    result.content.iter().find_map(|block| match block {
-        rmcp::model::ContentBlock::Text(text) => Some(text.text.clone()),
-        _ => None,
-    })
-}
-
-/// 断言响应是 `Complete` 并取出结果（IF-D14 的失败形态**不是** `Err`）。
-fn complete(response: CallToolResponse) -> CallToolResult {
-    match response {
-        CallToolResponse::Complete(result) => result,
-        other => panic!("期望 Complete 结果，实际：{other:?}"),
-    }
-}
-
-// ─── 线路：握手 + tools/list ───────────────────────────────────────────────────

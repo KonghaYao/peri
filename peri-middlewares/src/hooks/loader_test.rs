@@ -295,69 +295,6 @@ fn test_load_from_real_project_dir() {
     assert!(has_perm, "Should have PermissionRequest hook");
 }
 
-#[test]
-#[ignore = "需要 ~/.claude/settings.json 真实文件，CI 环境不存在"]
-fn test_load_global_settings_hooks_real_file() {
-    // 读取真实 ~/.claude/settings.json 并验证 hooks 解析
-    let settings_path = dirs_next::home_dir()
-        .expect("Cannot determine home directory")
-        .join(".claude")
-        .join("settings.json");
-    assert!(
-        settings_path.exists(),
-        "settings.json not found at {}",
-        settings_path.display()
-    );
-
-    let hooks = load_global_settings_hooks();
-
-    // 预期 6 个事件，每个事件 1 个 command hook
-    assert_eq!(
-        hooks.len(),
-        6,
-        "Expected 6 hooks (6 events x 1 command), got {}",
-        hooks.len()
-    );
-
-    // 验证所有期望的事件都存在
-    let expected_events = [
-        HookEvent::PermissionRequest,
-        HookEvent::PreToolUse,
-        HookEvent::SessionEnd,
-        HookEvent::SessionStart,
-        HookEvent::Stop,
-        HookEvent::UserPromptSubmit,
-    ];
-    for expected_event in &expected_events {
-        let found = hooks.iter().any(|h| &h.event == expected_event);
-        assert!(found, "Missing hook for event {:?}", expected_event);
-    }
-
-    // 验证每个 hook 的字段
-    for hook in &hooks {
-        assert_eq!(
-            hook.plugin_name, "settings.json",
-            "plugin_name should be 'settings.json' for event {:?}",
-            hook.event
-        );
-        assert_eq!(
-            hook.plugin_id, "settings.global",
-            "plugin_id should be 'settings.global'"
-        );
-        // 验证是 Command 类型，且命令包含 herdr-agent-state.sh
-        match &hook.hook {
-            HookType::Command { command, .. } => {
-                assert!(
-                    command.contains("herdr-agent-state.sh"),
-                    "Command should contain herdr-agent-state.sh, got: {}",
-                    command
-                );
-            }
-            other => panic!("Expected Command hook, got {:?}", other),
-        }
-    }
-}
-
 // ===== load_settings_project_hooks 测试 =====
 
 #[test]

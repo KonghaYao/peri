@@ -344,3 +344,105 @@ async fn test_sync_timeout_without_registry_kills_and_persists_partial() {
     );
     let _ = std::fs::remove_file(path_str);
 }
+
+/// 无 TaskManager 时显式 `run_in_background` 必须被拒绝：退化分支的原始错误点明
+/// `run_in_background` 与「未配置 manager」。
+///
+/// handler 面的固定脱敏投影（模型面文本不含原因短语）由 `workspace_test.rs` 的
+/// `tool_failures_return_sanitized_error_result` 覆盖。
+/// （自 `peri-middlewares` 的 host wire 证据下沉：断言主体即本工具行为。）
+#[tokio::test]
+async fn test_bg_without_task_manager_rejects_run_in_background() {
+    let tool = BashTool::new(std::env::temp_dir().to_str().unwrap());
+    let error = tool
+        .invoke(
+            serde_json::json!({"command": "sleep 1", "run_in_background": true}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .expect_err("无 manager 的 BashTool 必须拒绝 run_in_background");
+    let text = error.to_string();
+    assert!(
+        text.contains("run_in_background is not available"),
+        "退化分支必须点明 run_in_background：{text}"
+    );
+    assert!(
+        text.contains("no background task manager configured"),
+        "退化分支必须点明缺 manager：{text}"
+    );
+}
+
+/// 同步超时 + 注册表占满：提升的 `register` 必被拒 ⇒ 回落杀进程组，
+/// 回执点明「无法提升」，typed evidence 为 `TimedOut` 且无 task_id。
+///
+/// （自 `peri-middlewares` 的 host wire 证据下沉：断言主体即本工具行为；
+/// 成功提升与无注册表杀组的对照见 `test_sync_timeout_promotes_to_background`
+/// 与 `test_sync_timeout_without_registry_kills_and_persists_partial`。）
+#[cfg(unix)]
+#[tokio::test]
+async fn test_sync_timeout_with_rejected_promotion_falls_back_to_killing_the_group() {
+    use peri_acp_types::tasks::{BgTaskKind, BgTaskRegistration};
+    use peri_agent::agent::async_tasks::BackgroundTaskRegistry;
+
+    let cwd = std::env::temp_dir();
+    let manager: Arc<dyn peri_acp_types::tasks::TaskManager> = Arc::new(TaskManager::new());
+    // 占满 Shell 类并发位（纯登记表条目，不产生真进程）⇒ 提升时 `register` 必被拒。
+    for index in 0..BackgroundTaskRegistry::SHELL_LIMIT {
+        manager
+            .register(BgTaskRegistration {
+                task_id: format!("occupied-{index}"),
+                kind: BgTaskKind::Shell,
+                summary: "capacity fixture".into(),
+                pid: None,
+                kill: Some(Box::new(|| {})),
+            })
+            .expect("占位登记必须成功");
+    }
+    assert_eq!(manager.active_count(), BackgroundTaskRegistry::SHELL_LIMIT);
+
+    let out = BashTool::new(cwd.to_str().unwrap())
+        .with_task_manager(Arc::clone(&manager))
+        .invoke_output(
+            serde_json::json!({"command": "sleep 5", "timeout": 300}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .expect("工具层超时不是 Err（转 Err 的是 `invoke`）");
+    assert!(
+        out.text
+            .contains("could not be promoted to a background task"),
+        "提升被拒的回执必须点明「无法提升」：{}",
+        out.text
+    );
+    assert!(
+        out.text.contains("The process group has been terminated"),
+        "提升被拒必须回落到杀进程组：{}",
+        out.text
+    );
+    assert!(
+        !out.text.contains("has been promoted to a background task"),
+        "被拒路径不得出现成功提升的措辞：{}",
+        out.text
+    );
+    let evidence = out.execution.expect("BashTool 必须带 typed evidence");
+    assert_eq!(
+        evidence.status,
+        ToolExecutionStatus::TimedOut,
+        "提升被拒 ⇒ 回落 TimedOut（成功提升是 RunningAfterTimeout）"
+    );
+    assert_eq!(evidence.task_id, None, "提升被拒 ⇒ 没有 task_id");
+
+    // 收尾：占位条目按既有夹具的口径撤销（cancel + confirm），再把 manager 关干净。
+    for index in 0..BackgroundTaskRegistry::SHELL_LIMIT {
+        let id = format!("occupied-{index}");
+        manager.cancel(&id).expect("占位条目可取消");
+        manager.confirm_external_execution_stopped(&id);
+    }
+    assert_eq!(manager.active_count(), 0, "占位条目必须全部撤销");
+    let report = manager.shutdown().await;
+    assert_eq!(
+        manager.active_count(),
+        0,
+        "shutdown 之后不得残留活跃任务（报告：{report:?}）"
+    );
+}

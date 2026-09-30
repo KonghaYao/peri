@@ -14,22 +14,20 @@
 //! 输入的上下文断言各实例拿到**自己的**变体（含「注入的同一份状态对象进了 handler」）以及
 //! `workspace` 在**无**输入时的可见但退化。
 //!
-//! V 矩阵（v4-part-3 sub-plan V §8）第 20/22/23 行的具名用例在同文件末尾：
+//! V 矩阵（v4-part-3 sub-plan V §8）第 20/22 行的具名用例在同文件末尾：
 //! - [`all_registered_instances_have_handler`]：注册表 → 工厂的一一映射（遍历注册表派生）；
 //! - [`builtin_source_propagates`]：cron / lsp 的 `ConfigSource::Builtin` 经 overlay →
 //!   建传输（三分类）→ status 快照 → `DiscoverMCP` 只读投影保留，transport 分类 = builtin；
-//! - [`call_tool_uses_shared_result_mapping`]：真 handler 经 effective 桥的成功 / 业务 Err /
-//!   未知工具三形态都走 `peri_mcp_common::invoke_tool_call` 唯一共享助手；
-//! - [`call_tool_error_text_is_fixed_and_redacted`]：cron 两类 / LSP 六类业务错误经 handler
-//!   路径的文本全部等于固定脱敏文本（`LspToolError::NotReady` 的可触发性与现场判定见该
-//!   用例文档，属 UNVERIFIED，不写 flaky 断言）。
+//! - [`call_tool_smoke_and_effective_bridge_round_trip`]（原第 22 行 `call_tool_uses_shared_result_mapping`，
+//!   改名以匹配精炼后的观测面）：跨实例烟测 + effective 桥一致性。第 23 行
+//!   `call_tool_error_text_is_fixed_and_redacted` 的规则细节（固定脱敏文本、逐类变体）
+//!   已由各 package 的 `server_test.rs` 覆盖，宿主侧重复证据删除（宿主无映射实现）。
 
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
 use parking_lot::Mutex;
 use peri_acp_types::builtin_mcp::{
     find, is_reserved_instance_name, BUILTIN_MCP_INSTANCES, BUILTIN_RESERVED_INSTANCE_NAMES,
@@ -67,9 +65,7 @@ use crate::mcp::discover_tool::DiscoverMCPTool;
 use crate::mcp::tool_bridge::{build_deferred_tool_bridges, McpToolBridge};
 use crate::mcp::transport::{require_known_builtin_instance, TransportConfig, TransportKind};
 use crate::mcp::ToolCallError;
-use peri_mcp_common::invoke_tool_call;
-use peri_mcp_cron::{CronScheduler, CronTrigger, MAX_CRON_TASKS};
-use peri_mcp_lsp::LspTool;
+use peri_mcp_cron::{CronScheduler, CronTrigger};
 use peri_mcp_workspace::{
     ResourceRoot, ResourceScope, WorkspaceInstanceInput, WorkspaceMcpServer,
     WorkspaceResourcesInput,
@@ -297,94 +293,17 @@ fn complete(response: CallToolResponse) -> CallToolResult {
     }
 }
 
-/// handler 路径的**业务失败**文本：协议必须成功（`is_error` 承载语义），且必须有文本块。
-async fn call_error_text(pair: &Pair, tool: &str, input: Value) -> String {
-    let response = pair
-        .peer()
-        .call_tool_once(call(tool, input))
-        .await
-        .unwrap_or_else(|error| panic!("{tool}: 业务失败仍走协议成功（IF-D14），实际：{error:?}"));
-    let result = complete(response);
-    assert_eq!(
-        result.is_error,
-        Some(true),
-        "{tool}: 业务失败必须是 error 结果"
-    );
-    first_text(&result).unwrap_or_else(|| panic!("{tool}: error 结果必须有文本块"))
-}
-
-/// 只为派生 IF-D14 固定文本的替身工具：`invoke` 恒失败，错误原文可辨认（不得出现在模型面）。
-struct FailingStubTool {
-    name: String,
-}
-
-#[async_trait]
-impl BaseTool for FailingStubTool {
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    fn description(&self) -> &str {
-        "派生 IF-D14 固定文本的替身工具（不触网、不读实例状态）"
-    }
-
-    fn parameters(&self) -> Value {
-        json!({ "type": "object", "properties": {} })
-    }
-
-    async fn invoke(
-        &self,
-        _input: Value,
-        _ctx: ToolContext<'_>,
-    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        Err(format!("STUB-DETAIL-must-not-leak: raw failure of {}", self.name).into())
-    }
-}
-
-/// IF-D14 失败形态的**固定文本**：由唯一共享助手 [`invoke_tool_call`] 对**同名**替身工具
-/// 派生——本文件不复制映射逻辑、不硬编码规则字面量（规则文本只由工具名决定）。
-async fn shared_failure_text(tool_name: &str) -> String {
-    let stub: Vec<Arc<dyn BaseTool>> = vec![Arc::new(FailingStubTool {
-        name: tool_name.to_string(),
-    })];
-    let response = invoke_tool_call(&stub, "", &call(tool_name, json!({})))
-        .await
-        .expect("工具级失败必须是 Ok(Complete(error 结果))，不是 Err");
-    let result = complete(response);
-    assert_eq!(
-        result.is_error,
-        Some(true),
-        "共享助手对工具级失败必须产出 error 结果"
-    );
-    let text = first_text(&result).expect("error 结果必须有文本块");
-    assert!(
-        !text.contains("STUB-DETAIL-must-not-leak"),
-        "固定文本本身不得含替身工具的原文：{text}"
-    );
-    text
-}
-
-/// 把命中文本的泄漏标记追加进 `leaks`（计数口径：「泄露计数 == 0」）。
-fn collect_leaks<'a>(
-    text: &str,
-    markers: impl IntoIterator<Item = &'a str>,
-    leaks: &mut Vec<String>,
-) {
-    for marker in markers {
-        if !marker.is_empty() && text.contains(marker) {
-            leaks.push(marker.to_string());
-        }
-    }
-}
-
-/// V 矩阵第 22 行：真 handler（经 dispatch 工厂 + 真实 wire）的成功 / 业务 Err / 未知工具
-/// 三形态，与唯一共享助手 `peri_mcp_common::invoke_tool_call` 的输出逐字一致；effective 名字（模型面）
-/// 经生产 `McpToolBridge` 打回同一条真实链路。
+/// V 矩阵第 22 行（**宿主面**，原具名用例 `call_tool_uses_shared_result_mapping`）：cron / lsp
+/// 两实例经 dispatch 工厂 + 真实 wire 的**跨实例烟测**（成功 / 业务失败两形态的协议外观），
+/// 以及 effective 名字（模型面）经生产 `McpToolBridge` 打回同一条真实链路的**桥接一致性**
+/// （成功文本 == 线路文本；失败转 `ToolCallError::CallFailed`，reason == 线路失败文本）。
 ///
-/// 判据来源：固定文本由共享助手对**同名**替身工具派生（不硬编码规则字面量），未知工具协议
-/// 错误与共享助手的 `invalid_params` 逐字比较——若 handler 另写了一份映射，任一条立刻红。
+/// 映射**规则本身**（固定脱敏文本、未知工具 → `invalid_params`、业务细节不入模型面）由各
+/// package 的 `server_test.rs` 逐实例覆盖，本文件不重复断言规则字面量：宿主已无映射实现
+/// （dispatch 的 `call_tool` 把请求原样转给 package handler），规则细节在这里没有第二个
+/// 可失败面。
 #[tokio::test]
-async fn call_tool_uses_shared_result_mapping() {
+async fn call_tool_smoke_and_effective_bridge_round_trip() {
     let fixture = CrossFixture::new();
     let src = fixture.write_file("main.rs", "fn main() {}\n");
     let cases = [
@@ -428,7 +347,6 @@ async fn call_tool_uses_shared_result_mapping() {
         // 真实链路：dispatch 工厂 → 真实 transport → 生产 client 握手。
         let pair = connect_via_dispatch(case.instance, &fixture.ctx).await;
         let peer = pair.peer();
-        let expected_failure = shared_failure_text(case.fail_tool).await;
 
         // ① 成功形态：`Complete(success 结果)`，文本非空。
         let success = complete(
@@ -449,7 +367,7 @@ async fn call_tool_uses_shared_result_mapping() {
             case.instance
         );
 
-        // ② 业务 Err 形态：`Complete(error 结果)` + 固定脱敏文本。
+        // ② 业务 Err 形态 smoke：`Complete(error 结果)` + 非空文本（规则细节见用例文档）。
         let failure = complete(
             peer.call_tool_once(call(case.fail_tool, case.fail_input.clone()))
                 .await
@@ -462,46 +380,13 @@ async fn call_tool_uses_shared_result_mapping() {
             case.instance
         );
         let failure_text = first_text(&failure).expect("error 结果必须有文本块");
-        assert_eq!(
-            failure_text, expected_failure,
-            "{}: 失败文本必须等于共享助手的固定文本",
+        assert!(
+            !failure_text.is_empty(),
+            "{}: 失败文本不得为空",
             case.instance
         );
-        assert!(
-            failure_text.contains(case.fail_tool),
-            "固定文本只带工具名：{failure_text}"
-        );
 
-        // ③ 未知工具形态：invalid params，且与共享助手逐字同源（不 panic）。
-        let unknown = "wave2-unknown-tool";
-        let helper_error = invoke_tool_call(&[], "", &call(unknown, json!({})))
-            .await
-            .expect_err("共享助手的未知工具分支必须是协议错误");
-        let wire_error = peer
-            .call_tool_once(call(unknown, json!({})))
-            .await
-            .expect_err("线上未知工具名必须是协议错误");
-        match wire_error {
-            ServiceError::McpError(data) => {
-                assert_eq!(
-                    data.code.0,
-                    ErrorCode::INVALID_PARAMS.0,
-                    "{}: 未知工具必须是 -32602",
-                    case.instance
-                );
-                assert_eq!(
-                    data.message, helper_error.message,
-                    "{}: 未知工具错误必须与共享助手逐字一致",
-                    case.instance
-                );
-            }
-            other => panic!(
-                "{}: 期望 McpError(invalid_params)，实际 {other:?}",
-                case.instance
-            ),
-        }
-
-        // ④ effective 调用桥接：模型面名字（注册表冻结的 effective name）经生产
+        // ③ effective 调用桥接：模型面名字（注册表冻结的 effective name）经生产
         //    `build_deferred_tool_bridges` 打回**同一条**真实链路的 handler。
         let pool = bridge_pool(case.instance, &peer).await;
         let bridges = build_deferred_tool_bridges(&pool);
@@ -533,27 +418,27 @@ async fn call_tool_uses_shared_result_mapping() {
             Some(ToolCallError::CallFailed { reason, tool, .. }) => {
                 assert_eq!(
                     reason.as_str(),
-                    expected_failure.as_str(),
-                    "{}: 桥接失败原因必须是同一份固定脱敏文本",
+                    failure_text.as_str(),
+                    "{}: 桥接失败原因必须与线路失败文本逐字一致",
                     case.instance
                 );
                 assert_eq!(tool, case.fail_tool);
             }
             other => panic!(
-                "{}: 期望 CallFailed（reason = 固定文本），实际 {other:?}",
+                "{}: 期望 CallFailed（reason = 线路失败文本），实际 {other:?}",
                 case.instance
             ),
         }
 
         println!(
-            "[W2 dispatch/source] instance={} success=1 error=1 invalid_params=1 bridged=2",
+            "[W2 dispatch/source] instance={} success=1 error=1 bridged=2",
             case.instance
         );
         pair.shutdown().await;
     }
 }
 
-/// 一个 wave 2 实例的三形态用例输入（工具名必须能在注册表里查到）。
+/// 一个 wave 2 实例的烟测用例输入（成功 / 业务失败两形态，各配桥接对照；工具名必须能在注册表里查到）。
 struct Wave2CallCase {
     instance: &'static str,
     success_tool: &'static str,
@@ -609,206 +494,6 @@ fn bridge_of<'a>(bridges: &'a [McpToolBridge], effective_name: &str) -> &'a McpT
                     .collect::<Vec<_>>()
             )
         })
-}
-
-/// V 矩阵第 23 行：cron 两类 + LSP 六类业务错误**经 handler 路径**返回的文本全部等于固定
-/// 脱敏文本（只含工具名），且不含原始错误 Display、表达式原文、用户 prompt、文件路径 / 扩展名。
-///
-/// 触发方式：每类先用**工具实现层**（同一 pool / 同一 scheduler）跑一次同一输入，取其错误
-/// Display 作为「确实落到该变体」的正控与泄漏对照，再断言 handler 路径（真实 wire）的文本。
-///
-/// **UNVERIFIED（不写 flaky 断言）**：`LspToolError::NotReady` 需要
-/// `ensure_server_for_file` / `ensure_initialized` 返回 `Ok` 而没有任何 server `Running`；
-/// 而 `LspClient::start` 成功即以 `ServerState::Running` 收尾（`mcp-packages/lsp/src/client/lifecycle.rs`
-/// 的 `do_start`），`is_ready()` 与 `any_server()` 用同一谓词，唯一剩余路径是「ensure 与
-/// ready 复查之间服务器转 `Error`」的竞态，无法由输入稳定构造，因此本用例只断言可稳定
-/// 触发的 7 类（2 + 5），`NotReady` 记 UNVERIFIED。
-#[tokio::test]
-async fn call_tool_error_text_is_fixed_and_redacted() {
-    let fixture = CrossFixture::new();
-    let src = fixture.write_file("main.rs", "fn main() {}\n");
-    // 无路由扩展名路径：目录名与扩展名都是可辨认的泄漏标记。
-    let no_route = fixture.write_file(
-        &format!("{LEAK_PATH_MARKER}/private.{LEAK_EXTENSION}"),
-        "no server routes this extension\n",
-    );
-
-    let mut matched = 0usize;
-    let mut leaks: Vec<String> = Vec::new();
-
-    // ─── cron：两类业务错误 ───────────────────────────────────────────────────
-    let cron = connect_via_dispatch("cron", &fixture.ctx).await;
-    let expected_cron = shared_failure_text("cron_register").await;
-    // 正控 ①：非法表达式在**同一 scheduler** 的工具实现层失败（原文即泄漏对照）。
-    let raw_invalid = fixture
-        .scheduler
-        .lock()
-        .register(INVALID_EXPRESSION, LEAK_PROMPT)
-        .expect_err("非法表达式必须在 CronScheduler::register 失败")
-        .to_string();
-    // 正控 ②：先填到上限（次数读 `MAX_CRON_TASKS`，不硬编码 20）再注册。
-    while fixture.scheduler.lock().list_tasks().len() < MAX_CRON_TASKS {
-        fixture
-            .scheduler
-            .lock()
-            .register(VALID_EXPRESSION, LEAK_PROMPT)
-            .expect("上限内的注册必须成功");
-    }
-    let raw_limit = fixture
-        .scheduler
-        .lock()
-        .register(VALID_EXPRESSION, LEAK_PROMPT)
-        .expect_err("达到上限后注册必须失败")
-        .to_string();
-    assert_ne!(raw_invalid, raw_limit, "两个变体的原文必须可区分");
-    let limit_text = MAX_CRON_TASKS.to_string();
-
-    for input in [
-        json!({ "expression": INVALID_EXPRESSION, "prompt": LEAK_PROMPT }),
-        json!({ "expression": VALID_EXPRESSION, "prompt": LEAK_PROMPT }),
-    ] {
-        matched += 1;
-        let text = call_error_text(&cron, "cron_register", input).await;
-        assert_eq!(
-            text, expected_cron,
-            "cron 的业务错误文本必须等于固定脱敏文本（与失败原因无关）"
-        );
-        collect_leaks(
-            &text,
-            [
-                raw_invalid.as_str(),
-                raw_limit.as_str(),
-                limit_text.as_str(),
-                INVALID_EXPRESSION,
-                LEAK_PROMPT,
-            ],
-            &mut leaks,
-        );
-    }
-    cron.shutdown().await;
-
-    // ─── lsp：六类中的五类（NotReady 见用例文档：无法稳定构造） ────────────────
-    let lsp = connect_via_dispatch("lsp", &fixture.ctx).await;
-    let expected_lsp = shared_failure_text("LSP").await;
-    let tool = LspTool::new(Arc::clone(&fixture.pool));
-    let cases: [(&str, Value); 5] = [
-        // MissingParam：缺 `file_path`（不进 pool）。
-        ("MissingParam", json!({ "operation": "documentSymbol" })),
-        // InvalidOperation：服务器就绪后落到 `_` 分支。
-        (
-            "InvalidOperation",
-            json!({ "operation": "wave2-no-such-operation", "file_path": src, "line": 1, "character": 1 }),
-        ),
-        // RequestFailed：prepareCallHierarchy 回 `null` ⇒ 反序列化调用层级数组失败。
-        (
-            "RequestFailed",
-            json!({ "operation": "incomingCalls", "file_path": src, "line": 1, "character": 1 }),
-        ),
-        // InvalidPosition：`line == 0`（在任何服务器访问之前返回）。
-        (
-            "InvalidPosition",
-            json!({ "operation": "goToDefinition", "file_path": src, "line": 0, "character": 1 }),
-        ),
-        // NoServerForExtension：扩展名无路由（原文内嵌路径与扩展名）。
-        (
-            "NoServerForExtension",
-            json!({ "operation": "documentSymbol", "file_path": no_route }),
-        ),
-    ];
-    let mut raws: Vec<String> = Vec::new();
-    for (variant, input) in &cases {
-        // 正控：同一输入必须在工具实现层落到该变体（否则本行断言是空转）。
-        let raw = tool
-            .invoke(input.clone(), ToolContext::new(&[], ""))
-            .await
-            .unwrap_err()
-            .to_string();
-        assert!(!raw.is_empty(), "{variant}: 错误原文不得为空");
-        // 变体身份：只允许用**本文件给出的**输入事实或可独立复算的事实证伪「其实落到别的
-        // 变体」，不硬编码生产 Display 字面量。
-        match *variant {
-            "MissingParam" => assert!(raw.contains("file_path"), "缺参变体必须回传缺失的参数名"),
-            "InvalidOperation" => assert!(
-                raw.contains("wave2-no-such-operation"),
-                "无效 operation 变体必须回传被拒的 operation"
-            ),
-            "NoServerForExtension" => assert!(
-                raw.contains(LEAK_PATH_MARKER) && raw.contains(LEAK_EXTENSION),
-                "无路由扩展名变体的原文必须内嵌路径与扩展名（这正是它的泄漏面）"
-            ),
-            "RequestFailed" => {
-                // 本行的构造是「请求返回 `null` ⇒ 反序列化调用层级数组失败」：serde 的错误
-                // 文本可由本文件对同一 `null` 载荷独立复算（不引用生产字面量）。
-                let recomputed = serde_json::from_value::<Vec<Value>>(Value::Null)
-                    .expect_err("null 不得反序列化成数组")
-                    .to_string();
-                assert!(
-                    raw.contains(&recomputed),
-                    "RequestFailed 行必须是 null 载荷反序列化失败：{raw}"
-                );
-            }
-            "InvalidPosition" => {}
-            other => panic!("未登记的变体 {other}"),
-        }
-        raws.push(format!("{variant}: {raw}"));
-
-        matched += 1;
-        let text = call_error_text(&lsp, "LSP", input.clone()).await;
-        assert_eq!(
-            text, expected_lsp,
-            "{variant}: LSP 的错误文本必须等于固定脱敏文本"
-        );
-        collect_leaks(
-            &text,
-            [
-                raw.as_str(),
-                src.as_str(),
-                no_route.as_str(),
-                LEAK_PATH_MARKER,
-                LEAK_EXTENSION,
-                LEAK_PROMPT,
-            ],
-            &mut leaks,
-        );
-    }
-    // 正控有效性：五个变体的原文必须两两不同（否则「逐类」是同一类的重复计数）。
-    let mut distinct_raws = raws.clone();
-    distinct_raws.sort();
-    distinct_raws.dedup();
-    assert_eq!(
-        distinct_raws.len(),
-        cases.len(),
-        "五个 LSP 变体必须各自触发不同的错误原文：{raws:#?}"
-    );
-    // InvalidOperation / RequestFailed 两行必须在**就绪**的 language server 上打到（fake
-    // server 的 spawn 观测文件非空）；配合 `call_tool_uses_shared_result_mapping` 的成功行，
-    // 「就绪」这一前提有独立证据。
-    let spawns = std::fs::read_to_string(fixture.dir().join("spawn_count.txt"))
-        .unwrap_or_default()
-        .lines()
-        .count();
-    assert!(
-        spawns >= 1,
-        "InvalidOperation / RequestFailed 必须有真实拉起的 language server"
-    );
-    lsp.shutdown().await;
-
-    // 固定文本只由工具名决定：两条期望的差异必须恰是工具名槽位。
-    assert_eq!(
-        expected_lsp.replace("`LSP`", "`cron_register`"),
-        expected_cron,
-        "cron / lsp 的固定文本必须只差工具名槽位"
-    );
-    // 夹具前置：无路由扩展名文件与真实源文件都存在（否则 NoServerForExtension 会变体漂移）。
-    assert!(Path::new(&no_route).exists() && Path::new(&src).exists());
-
-    // 先 assert 再打印（`--nocapture` 抄录用）：matched = 2（cron）+ 5（LSP 可稳定触发类）。
-    println!(
-        "[W2 dispatch/source] error-variants declared=8 matched={matched} unverified=NotReady leaks={}",
-        leaks.len()
-    );
-    assert_eq!(matched, 7, "8 类中 7 类可在 handler 路径稳定触发");
-    assert_eq!(leaks.len(), 0, "业务细节不得进入模型面文本：{leaks:?}");
 }
 
 #[path = "dispatch_resource_wire_test.rs"]

@@ -1,7 +1,6 @@
 //! Builtin 运行时（`mcp::builtin::runtime`）的 crate 内验证。
 //!
-//! 夹具形态与 W0 spike 同源（`mcp/builtin_spike_test.rs`，只读证据、本文件不复用它）：
-//! server 半边是**真实** `rmcp::serve_server`，client 半边是**生产**
+//! 夹具形态：server 半边是**真实** `rmcp::serve_server`，client 半边是**生产**
 //! `serve_client_auto`（真实 Auto lifecycle），两侧用 `(ReadHalf, WriteHalf)` 元组交给
 //! `IntoTransport`。每个用例都有界收尾，不留 orphan task。
 
@@ -204,7 +203,7 @@ async fn builtin_link_uses_modern_handshake_and_keeps_peer_info() {
     let peer = link.service.peer().clone();
     let info = peer
         .peer_info()
-        .unwrap_or_else(|| panic!("modern 路径下 peer_info 必须是 Some（spike Q1(a) 证据）"));
+        .unwrap_or_else(|| panic!("modern 路径下 peer_info 必须是 Some"));
     assert_eq!(
         info.protocol_version,
         ProtocolVersion::V_2026_07_28,
@@ -232,8 +231,7 @@ async fn builtin_link_uses_modern_handshake_and_keeps_peer_info() {
     );
 }
 
-/// 线路级证据：modern 路径下线路**不含** `initialize`，且 `tools/list` 真的上了线路
-/// （spike Q1(b)/Q3(b) 的反面教材不得复现）。
+/// 线路级证据：modern 路径下线路**不含** `initialize`，且 `tools/list` 真的上了线路。
 #[tokio::test]
 async fn builtin_wire_has_no_initialize_and_tools_list_reaches_server() {
     let (server, probe) = fixture("fixture_tool", "reply");

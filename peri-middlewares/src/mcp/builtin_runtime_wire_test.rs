@@ -1,4 +1,5 @@
 use super::*;
+use crate::mcp::builtin::runtime::BUILTIN_DUPLEX_BUF;
 
 // B. 线路观测（per-instance wire，A13 ④）：现代握手 / 审批两态 / 大 payload / 不串
 // ══════════════════════════════════════════════════════════════════════════════════
@@ -219,28 +220,22 @@ async fn old_namespaced_name_is_not_a_wire_alias_on_real_handler() {
     link.shutdown().await;
 }
 
-/// 大 payload（A16）：`BUILTIN_DUPLEX_BUF` 只影响背压，**不是单帧上限**。
+/// 大 payload（A16）：`BUILTIN_DUPLEX_BUF` 只影响背压，**不是单帧上限**——本用例走
+/// **大请求**方向（~200 KiB 参数完整到达 server，经生产 `McpToolBridge`）。
 ///
-/// 两个方向都试：① 大**结果**（~300 KiB 正文，WebFetch 级）逐字节完整返回；
-/// ② 大**请求**（~200 KiB 参数）完整到达 server。
+/// 大**结果**方向（~300 KiB 正文逐字节返回）的生产装配版本在
+/// `mcp::builtin::runtime::tests::large_payload_round_trips_intact`（真实
+/// `spawn_builtin_transport_with_handler` 链路），本文件不重复该方向。
 #[tokio::test]
 async fn large_payload_crosses_builtin_instance_intact() {
     let web = find("web").expect("web 已实现");
     let declaration = &web.tools[0];
-    let body = format!("HEAD:{}:TAIL", "x".repeat(LARGE_BODY_BYTES));
-    assert_eq!(body.lines().count(), 1, "用例前提：正文单行");
-    assert!(
-        body.len() > LARGE_BODY_BYTES,
-        "用例前提：正文必须远大于 duplex 容量"
-    );
-
-    let reply_body = body.clone();
     let stub = Arc::new(StubTool::new(
         declaration.original_name,
         Arc::new(
-            move |input: &Value| match input.get("payload").and_then(Value::as_str) {
+            |input: &Value| match input.get("payload").and_then(Value::as_str) {
                 Some(payload) => format!("received-bytes:{}", payload.len()),
-                None => reply_body.clone(),
+                None => "no-payload".to_string(),
             },
         ),
     ));
@@ -248,15 +243,11 @@ async fn large_payload_crosses_builtin_instance_intact() {
     let link = TappedLink::connect(web, "runtime-fixture-web", vec![stub_tool]).await;
     let bridge = link.bridge(declaration.effective_name);
 
-    let text = bridge
-        .invoke(json!({}), ToolContext::new(&[], "/tmp"))
-        .await
-        .expect("大正文必须完整往返");
-    assert_eq!(text.len(), body.len(), "大正文长度不得被截断");
-    assert_eq!(text, body, "大正文必须逐字节完整");
-    assert_eq!(link.wire_call_tool_count(), 1);
-
     let payload = "y".repeat(LARGE_INPUT_BYTES);
+    assert!(
+        payload.len() > 4 * BUILTIN_DUPLEX_BUF,
+        "用例前提：参数必须远大于 duplex 容量（{BUILTIN_DUPLEX_BUF}）"
+    );
     let echo = bridge
         .invoke(
             json!({ "payload": payload.clone() }),
@@ -269,8 +260,8 @@ async fn large_payload_crosses_builtin_instance_intact() {
         format!("received-bytes:{}", payload.len()),
         "server 侧必须收到完整的大参数"
     );
-    assert_eq!(link.wire_call_tool_count(), 2);
-    assert_eq!(stub.call_count(), 2);
+    assert_eq!(link.wire_call_tool_count(), 1);
+    assert_eq!(stub.call_count(), 1);
 
     link.shutdown().await;
 }

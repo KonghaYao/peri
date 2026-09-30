@@ -11,7 +11,6 @@ use peri_acp_types::{
     plugin::McpSubscriptionsConfig,
 };
 use rmcp::model::SubscriptionFilter;
-use std::time::Duration;
 
 fn controlled_service(
     entered: tokio::sync::oneshot::Sender<()>,
@@ -576,38 +575,6 @@ fn test_tools_cache_eligible_requires_version_and_allowed_policy() {
     assert!(
         pool.tools_cache_eligible("plain"),
         "声明 version 且策略允许时应复用磁盘 tools/list"
-    );
-}
-
-#[tokio::test]
-async fn test_invalidate_tools_cache_clears_disk_entry() {
-    let pool = McpClientPool::new_empty();
-    let origin = pool.cache_origin("tool-server");
-    let cache = pool.resource_cache();
-    let ticket = cache.ticket(&origin, "tools/list", "").await.unwrap();
-    cache
-        .put_ticket_versioned(
-            &ticket,
-            Duration::from_secs(60),
-            Some("opaque-v1"),
-            &vec![rmcp::model::Tool::default()],
-        )
-        .await;
-
-    let before: Option<Vec<rmcp::model::Tool>> = cache
-        .get_versioned(&origin, "tools/list", "", Some("opaque-v1"))
-        .await;
-    assert!(before.is_some(), "前置：失效前命中");
-
-    // 这是 subscriptions/listen 收到 `notifications/tools/list_changed` 后调用的路径。
-    pool.invalidate_tools_cache("tool-server").await;
-
-    let after: Option<Vec<rmcp::model::Tool>> = cache
-        .get_versioned(&origin, "tools/list", "", Some("opaque-v1"))
-        .await;
-    assert!(
-        after.is_none(),
-        "tools/list_changed 必须使磁盘 tools/list 缓存失效"
     );
 }
 

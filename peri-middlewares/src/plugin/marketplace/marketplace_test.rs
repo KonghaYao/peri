@@ -137,8 +137,8 @@ fn test_read_directory_not_found() {
     }
 }
 
+/// 拉取失败（连接被拒）⇒ 回退缓存：不需要外部网络，`127.0.0.1:1` 恒无监听。
 #[tokio::test]
-#[ignore] // 需要 network，CI 环境手动启用
 async fn test_fetch_url_cache_fallback() {
     let dir = tempdir().unwrap();
     let cache_base = dir.path().join("marketplaces");
@@ -151,8 +151,8 @@ async fn test_fetch_url_cache_fallback() {
     assert_eq!(manifest.name, "cached-url");
 }
 
+/// 拉取失败且无缓存 ⇒ `HttpFailed`（不静默给出空 manifest）。
 #[tokio::test]
-#[ignore] // 需要 network，CI 环境手动启用
 async fn test_fetch_url_no_cache_no_server() {
     let dir = tempdir().unwrap();
     let cache_base = dir.path().join("marketplaces");
