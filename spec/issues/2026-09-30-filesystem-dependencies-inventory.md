@@ -101,29 +101,9 @@
 
 `peri-model`、`peri-controller`、`peri-runtime`、`langfuse-client`、`peri-process`（进程树/Job Object，OS 非 fs）；`peri-acp-types` 无 fs I/O，仅有 `PathBuf` 类型（skills / hooks / workspace / plugin / session_store / lsp）。
 
-## 四、Session ID 与机器 env 分区（P2 / 核心改动）
+## 四、Session ID 与机器 env 分区（已实施）
 
-### 4.1 现状与问题
-
-- `cwd` 以 `String` / `Arc<str>` / `&Path` 贯穿：会话固化 `meta.cwd`（子会话继承、重启不漂移）、`middleware/state.rs` 暴露 `cwd()`。
-- 契约层 `ResolvedWorkspace { project_id, workspace_id, cwd: PathBuf, root: PathBuf, relative_cwd }`（`peri-acp-types/src/workspace.rs:75`）：身份（ID）与路径（PathBuf）并存，`cwd_relative_to_workspace` 已相对化。
-- 执行准入依赖本地 fs 语义：`peri-acp/src/host/workspace.rs:668` 用 `tokio::fs::canonicalize` 比较调用方 cwd 与绑定 cwd；`host/prepared.rs:259` canonicalize 启动目录。
-- 设备间同步（`peri-tui/src/sync`）以本地路径定位内容：`~/.claude/...` 固定路径之外，项目级 MCP 配置用 **`{cwd}/.mcp.json`**（同步的输入本身依赖本地 cwd）；会话执行绑定（workspace/cwd）跨设备同步后同样无法直接解析。
-- 多设备交织（本地 / 远端 SSH / 云 worker）下，"cwd = 本机路径"不成立：路径在不同设备上可能有、可能无、可能语义不同。
-
-### 4.2 可复用基础与待删除门槛
-
-- `WorkspaceId` / `ProjectId` 与相对 cwd 可保留为工作区记录，不作为 root session 归属权或 ID 恢复门槛。
-- `SessionStoreLocator` 已支持本机/远端存储，不要求统一改成文件 URI；本次演进 env 元数据，不更换 SQLite 后端。
-- session 文件锁、lease/dirty 恢复认领与前端确认仍存在，获批目标要求移除；不能把机器 env 分区重新解释成全局执行 owner。
-
-### 4.3 已批准目标（待实施）
-
-- root session 按唯一 ID 查找和恢复，父子关系保持；路径匹配和持锁 owner 不决定会话身份。
-- 持久机器 env ID 提供数据库分区及列表 scope；同一路径在不同 env 中不混淆，显式 ID 查询不隐式限制为当前机器。
-- 移除 session sidecar 锁、dirty 恢复门槛及相关前端弹窗，不以新的分布式 owner/lease 替代。
-- 会话恢复与实际工具执行分开：历史恢复不要求目录可用，工具仍需明确可用环境，不偷偷在当前机器执行同名路径。
-- 权威目标见 [Session ID 恢复与机器环境分区](../../docs/design/session-id-environment.md)，迁移与验收见 [核心改动清单](2026-09-30-session-id-environment-core-change.md)。
+已实施 ID 恢复、持久 machine ID 与 env 查询 scope、不升版本的幂等数据回填，以及 session 文件锁/dirty 弹窗移除；算法、并发限制与未覆盖验证见 [设计](../../docs/design/session-id-environment.md) 和 [核心改动清单](2026-09-30-session-id-environment-core-change.md)。
 
 ## 五、用户等级表
 
@@ -131,7 +111,7 @@
 
 | 等级 | 项 | 现状位置 | 处置 |
 | --- | --- | --- | --- |
-| **P2 / 核心改动** | Session ID 恢复、机器 env 分区、移除 session 文件锁与恢复弹窗 | 第四节与核心改动清单 | 已批准目标、待实施；不推进全面 URI 化 |
+当前无待实施的核心整改项；远端部署端到端验证仍见核心改动清单。
 
 P2 的实现方式与难度见 [实施可行性调研](2026-09-30-p2-filesystem-implementation-assessment.md)；调研不代表已实施。MCP 缓存与插件体系已移至暂缓项，不作为当前核心工作的前置条件。
 
@@ -189,5 +169,5 @@ P2 的实现方式与难度见 [实施可行性调研](2026-09-30-p2-filesystem-
 - 未核对 `peri-tui/src/sync` 协议全量字段（仅扫描 fs 触点与 staging 语义）
 - 未跑全库/E2E、Windows 原生执行或 120 秒 ignored 用例
 - P2 已开展源码级方案/难度调研，未做原型、端到端远端部署或工期实验；P3 Plugin MCP 尚未实施拆解
-- Session ID 恢复与机器 env 分区已有获批目标设计及核心改动清单，运行时代码和契约测试尚未迁移
+- Session ID / env 核心实现与定向契约测试已迁移；未做远端多机器端到端部署验证
 - metrics → Langfuse 未做端到端上报验证（本地无 Langfuse 凭据，未观察 Langfuse 服务端落库；含指标归属到活跃 turn trace 的服务端表现）

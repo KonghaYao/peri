@@ -490,8 +490,9 @@ fn new_session(thread_id: &str, snapshot_at: Option<MessageId>) -> NewSession {
     }
 }
 
-#[test]
-fn write_sql_is_static_and_all_values_are_bound() {
+#[tokio::test]
+async fn write_sql_is_static_and_all_values_are_bound() {
+    let machine_id = crate::sessions::machine::initialize().await.unwrap();
     let first = new_session("session-a", None);
     let second = new_session("session-b", Some(MessageId::new()));
     let one = session_sql::insert_session_statements(&session_sql::session_insert(&first, 0, None))
@@ -499,10 +500,22 @@ fn write_sql_is_static_and_all_values_are_bound() {
     let two =
         session_sql::insert_session_statements(&session_sql::session_insert(&second, 3, None))
             .expect("encodable");
-    // 创建路径就是两条语句：canonical `threads` 行 + `session_bindings` 行。
-    assert_eq!(one.len(), 2);
+    assert_eq!(one.len(), 3);
     assert_eq!(one[0].sql, two[0].sql);
     assert_eq!(one[1].sql, two[1].sql);
+    assert_eq!(one[2].sql, two[2].sql);
+    assert_eq!(
+        one[2].sql,
+        crate::sessions::canonical::INSERT_ENVIRONMENT_SQL
+    );
+    assert_eq!(
+        one[2].params,
+        vec![
+            Value::Text("session-a".to_owned()),
+            Value::Null,
+            Value::Text(machine_id.to_owned())
+        ]
+    );
     assert_ne!(one[0].params, two[0].params);
     assert!(one[0].sql.starts_with("INSERT INTO threads"));
     assert!(one[1].sql.starts_with("INSERT INTO session_bindings"));
@@ -512,6 +525,7 @@ fn write_sql_is_static_and_all_values_are_bound() {
     for secret in ["session-a", "session-b", "/home/u/project"] {
         assert!(!one[0].sql.contains(secret));
         assert!(!one[1].sql.contains(secret));
+        assert!(!one[2].sql.contains(secret));
     }
     // 会话 id 与绑定身份落到参数位置。
     assert_eq!(one[0].params[0], Value::Text("session-a".to_owned()));
@@ -533,14 +547,24 @@ fn write_sql_is_static_and_all_values_are_bound() {
         )
     );
     // child 多一条继承区写入：与本机 child 路径同一句形态。
+    let mut child_session = new_session("child", None);
+    child_session.meta.parent_thread_id = Some(first.thread_id.clone());
     let child = session_sql::insert_session_statements(&session_sql::session_insert(
-        &first,
+        &child_session,
         0,
         Some("{\"inherited\":true}"),
     ))
     .expect("encodable");
-    assert_eq!(child.len(), 3);
-    assert!(child[2]
+    assert_eq!(child.len(), 4);
+    assert_eq!(
+        child[2].params,
+        vec![
+            Value::Text("child".to_owned()),
+            Value::Text(first.thread_id.clone()),
+            Value::Text(machine_id.to_owned())
+        ]
+    );
+    assert!(child[3]
         .sql
         .starts_with("UPDATE threads SET inherited_context"));
 }
@@ -556,6 +580,78 @@ fn binding_cwd_must_be_relative_and_textual() {
         error.kind(),
         SessionResourceErrorKind::InvalidInput { .. }
     ));
+}
+
+#[tokio::test]
+async fn draft_revocation_cleans_environment_without_cascade_and_preserves_committed_rows() {
+    use sqlx::Connection;
+
+    let mut connection = sqlx::SqliteConnection::connect("sqlite::memory:")
+        .await
+        .unwrap();
+    sqlx::query("PRAGMA foreign_keys = OFF")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    let foreign_keys: (i64,) = sqlx::query_as("PRAGMA foreign_keys")
+        .fetch_one(&mut connection)
+        .await
+        .unwrap();
+    assert_eq!(foreign_keys.0, 0);
+    for sql in crate::sessions::canonical::CREATE_TABLES {
+        sqlx::query(*sql).execute(&mut connection).await.unwrap();
+    }
+    for (id, frozen, expected_deleted) in [("draft", None, 1), ("committed", Some("{}"), 0)] {
+        sqlx::query("INSERT INTO threads(id, created_at, updated_at, frozen_context) VALUES (?1, 'now', 'now', ?2)")
+            .bind(id).bind(frozen).execute(&mut connection).await.unwrap();
+        sqlx::query("INSERT INTO messages(message_id, thread_id, role, content) VALUES (?1, ?1, 'human', '{}')")
+            .bind(id).execute(&mut connection).await.unwrap();
+        sqlx::query("INSERT INTO session_bindings(thread_id, schema_version, project_id, workspace_id, relative_cwd) VALUES (?1, 1, 'project', 'workspace', '')")
+            .bind(id).execute(&mut connection).await.unwrap();
+        sqlx::query("INSERT INTO session_environments(thread_id, machine_id) VALUES (?1, 'original-machine')")
+            .bind(id).execute(&mut connection).await.unwrap();
+        let statements = session_sql::revoke_draft_statements(id);
+        assert_eq!(statements.len(), 4);
+        assert!(statements[2]
+            .sql
+            .starts_with("DELETE FROM session_environments"));
+        assert!(statements[3].sql.starts_with("DELETE FROM threads"));
+        let mut transaction = connection.begin().await.unwrap();
+        for statement in &statements {
+            assert_eq!(statement.params, vec![Value::Text(id.to_owned())]);
+            assert!(statement.sql.contains("frozen_context IS NULL"));
+            let result = sqlx::query(statement.sql)
+                .bind(id)
+                .execute(&mut *transaction)
+                .await
+                .unwrap();
+            assert_eq!(
+                result.rows_affected(),
+                expected_deleted,
+                "{}",
+                statement.sql
+            );
+        }
+        transaction.commit().await.unwrap();
+        for statement in &statements {
+            let result = sqlx::query(statement.sql)
+                .bind(id)
+                .execute(&mut connection)
+                .await
+                .unwrap();
+            assert_eq!(result.rows_affected(), 0);
+        }
+        let environment: Option<(String,)> =
+            sqlx::query_as("SELECT machine_id FROM session_environments WHERE thread_id = ?1")
+                .bind(id)
+                .fetch_optional(&mut connection)
+                .await
+                .unwrap();
+        assert_eq!(
+            environment,
+            frozen.map(|_| ("original-machine".to_owned(),))
+        );
+    }
 }
 
 #[test]

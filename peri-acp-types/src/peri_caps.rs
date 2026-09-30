@@ -96,7 +96,7 @@ impl PeriCaps {
             system_reminder: meta_bool(meta, "peri.systemReminder"),
             user_input_queue: meta_bool(meta, "peri.userInputQueue"),
             session_workspace_v1: meta_bool(meta, "peri.sessionWorkspaceV1"),
-            session_recovery_v1: meta_bool(meta, "peri.sessionRecoveryV1"),
+            session_recovery_v1: false,
             ui_commands: Self::meta_ui_commands(meta),
         }
     }
@@ -192,7 +192,7 @@ impl PeriCaps {
             system_reminder: true,
             user_input_queue: true,
             session_workspace_v1: true,
-            session_recovery_v1: true,
+            session_recovery_v1: false,
             ui_commands: default_ui_commands(),
         }
     }

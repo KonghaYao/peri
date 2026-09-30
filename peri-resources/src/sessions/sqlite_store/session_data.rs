@@ -1,21 +1,3 @@
-//! SQLite 数据适配器：`SessionDataPort` 的本机实现。
-//!
-//! 与执行/登记面共用同一个 [`SqliteSessionDatabase`]（同一 pool、同一个库），因此
-//! 「数据保存」与「执行准入」看到的是同一份事实，不需要第二个连接真相。事务、锁文件、
-//! 连接与 CAS 都在本模块及相邻私有模块内部，端口不导出任何一项。
-//!
-//! 两类事实的边界：
-//!
-//! - 本机 workspace 的目录/Git 证据属于执行面；本模块只读取与写入**已登记**的关系。
-//! - `BindingState::{LegacyConfirmed, ExternalOrUnregistered}` 由执行面按目录来源
-//!   联合判定后对外表达；数据面只回答「有绑定且登记一致」「无绑定」「绑定指向的登记
-//!   已不存在」这三种记录事实，不把「没有绑定」冒充成 legacy 或损坏。
-//!
-//! 本机没有跨进程的生命周期锚点（v10 删除了 `session_lifecycle_commitments`）：撤销与
-//! 删除都是同事务的数据事实，没有「先留证据、再动作、之后收尾」的三步。提交阶段的失败由
-//! [`commit_failure`] 报成未决持久化（效果 `Unknown`），未决证据只在进程内的租约上，
-//! 崩溃后由 `execution_runs.clean = 0` 走既有的显式恢复流程。
-
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -164,201 +146,16 @@ impl SqliteSessionData {
 
 // ─── 行读取原语 ───────────────────────────────────────────────────────────────
 
-/// 线程树（含自身）：删除与归属判定都用同一遍递归。
-async fn thread_tree_on(
-    connection: &mut SqliteConnection,
-    root: &ThreadId,
-) -> anyhow::Result<Vec<String>> {
-    let rows: Vec<(String,)> = sqlx::query_as(
-        "WITH RECURSIVE session_tree AS (
-            SELECT id FROM threads WHERE id = ?1
-            UNION ALL
-            SELECT t.id FROM threads t INNER JOIN session_tree st ON t.parent_thread_id = st.id
-        )
-        SELECT id FROM session_tree",
-    )
-    .bind(root.as_str())
-    .fetch_all(&mut *connection)
-    .await?;
-    Ok(rows.into_iter().map(|(id,)| id).collect())
-}
-
-/// 会话树根的持久化事实：沿 parent 链向上回溯。
-pub(super) async fn thread_root_on(
-    connection: &mut SqliteConnection,
-    id: &ThreadId,
-) -> anyhow::Result<ThreadId> {
-    let mut current = id.clone();
-    let mut visited = HashSet::new();
-    loop {
-        if !visited.insert(current.clone()) {
-            anyhow::bail!("cyclic thread ancestry");
-        }
-        let row: Option<(Option<String>,)> =
-            sqlx::query_as("SELECT parent_thread_id FROM threads WHERE id = ?1")
-                .bind(current.as_str())
-                .fetch_optional(&mut *connection)
-                .await?;
-        match row {
-            Some((Some(parent),)) => current = parent,
-            Some((None,)) => return Ok(current),
-            None => anyhow::bail!("session row is missing"),
-        }
-    }
-}
-
-/// 本机库自己的会话事实：数据与执行在**同一个库**时（迁移桥、本机组合的内部调用）的读法。
-///
-/// 判定与远端组合完全一致，差别只在事实来源：这里从本机 `session_bindings` 与 `threads`
-/// 父链读出调用方在远端组合里要从数据端口取的三件事（绑定字节、这棵树有没有绑定、树根）。
-/// 远端组合**不能**用它——那时本机没有这条会话的行，三件事只能由数据端口回答。
-impl SqliteSessionDatabase {
-    pub(super) async fn local_session_facts(&self, id: &ThreadId) -> anyhow::Result<SessionFacts> {
-        let binding = self.load_session_binding_impl(id).await?;
-        let mut connection = self.pool.acquire().await?;
-        let root = thread_root_on(&mut connection, id)
-            .await
-            .unwrap_or_else(|_| id.clone());
-        // 自身或 root 有绑定即算这棵树有绑定：接纳过的 legacy root 可以有自己没有绑定行的子会话。
-        let bound = match &binding {
-            Some(_) => true,
-            None if root == *id => false,
-            None => self.load_session_binding_impl(&root).await?.is_some(),
-        };
-        Ok(SessionFacts {
-            binding,
-            bound,
-            root,
-        })
-    }
-}
-
-/// 绑定行的事实：绑定、指向已消失的登记、或没有绑定行。
-enum BindingRowState {
-    Bound(SessionBinding),
-    /// 有绑定行，但它指向的本机登记不存在：记录在、身份无法在本机验证。
-    Unregistered,
-    Absent,
-}
-
-/// 绑定行的事实分类；不判断 legacy（那是本机来源证据与执行面的联合结论）。
-async fn binding_row_state_on(
-    connection: &mut SqliteConnection,
-    id: &ThreadId,
-) -> SessionResourceResult<BindingRowState> {
-    let row: Option<(i64, String, String, String)> = sqlx::query_as(
-        "SELECT schema_version, project_id, workspace_id, relative_cwd
-         FROM session_bindings WHERE thread_id = ?1",
-    )
-    .bind(id.as_str())
-    .fetch_optional(&mut *connection)
-    .await
-    .map_err(|error| map_sqlx(&error))?;
-    let Some((version, project_id, workspace_id, relative_cwd)) = row else {
-        return Ok(BindingRowState::Absent);
-    };
-    // 版本不被本构建接受与记录损坏是两种事实，分开报告。
-    if version != i64::from(SESSION_BINDING_VERSION) {
-        return Err(SessionResourceError::new(
-            SessionResourceErrorKind::Unsupported,
-        ));
-    }
-    let binding =
-        workspace_store::decode_binding((version, project_id, workspace_id, relative_cwd))
-            .map_err(|_| corrupt("session binding is not decodable"))?;
-    let registered: Option<(String,)> =
-        sqlx::query_as("SELECT id FROM workspaces WHERE id = ?1 AND project_id = ?2")
-            .bind(binding.workspace_id.to_string())
-            .bind(binding.project_id.to_string())
-            .fetch_optional(&mut *connection)
-            .await
-            .map_err(|error| map_sqlx(&error))?;
-    if registered.is_none() {
-        return Ok(BindingRowState::Unregistered);
-    }
-    Ok(BindingRowState::Bound(binding))
-}
-
-/// 会话自身的 frozen 列；`None` 表示从未保存过快照（legacy 缺失）。
-async fn frozen_bytes_on(
-    connection: &mut SqliteConnection,
-    id: &ThreadId,
-) -> anyhow::Result<Option<String>> {
-    let row: Option<(Option<String>,)> =
-        sqlx::query_as("SELECT frozen_context FROM threads WHERE id = ?1")
-            .bind(id.as_str())
-            .fetch_optional(&mut *connection)
-            .await?;
-    match row {
-        Some((frozen,)) => Ok(frozen),
-        None => anyhow::bail!("session row is missing"),
-    }
-}
-
-/// `NewSession` 的 `threads` 行插入参数（创建路径与 fork/child 共用同一列形状）。
-pub(super) fn new_session_row<'a>(
-    input: &'a NewSession,
-    snapshot_at_message_id: Option<&'a str>,
-    frozen: Option<&'a str>,
-    message_count: i64,
-) -> ThreadRowInsert<'a> {
-    ThreadRowInsert {
-        id: &input.thread_id,
-        title: input.meta.title.as_deref(),
-        cwd: &input.meta.cwd,
-        created_at: &input.created_at,
-        updated_at: &input.created_at,
-        message_count,
-        parent_thread_id: input.meta.parent_thread_id.as_deref(),
-        snapshot_at_message_id,
-        hidden: input.meta.hidden,
-        cancel_policy: input.meta.cancel_policy.as_str(),
-        config: None,
-        agent_status: AgentStatus::Active.as_str(),
-        frozen_context: frozen,
-    }
-}
-
-/// `NewSessionDraft` 的 `threads` 行插入参数：与 [`new_session_row`] 同一列形状，
-/// 只有 `frozen_context` 固定为 `NULL`（内容准入在取得所有权之后定稿）。
-pub(super) fn new_session_draft_row<'a>(
-    draft: &'a NewSessionDraft,
-    snapshot_at_message_id: Option<&'a str>,
-    message_count: i64,
-) -> ThreadRowInsert<'a> {
-    ThreadRowInsert {
-        id: &draft.thread_id,
-        title: draft.meta.title.as_deref(),
-        cwd: &draft.meta.cwd,
-        created_at: &draft.created_at,
-        updated_at: &draft.created_at,
-        message_count,
-        parent_thread_id: draft.meta.parent_thread_id.as_deref(),
-        snapshot_at_message_id,
-        hidden: draft.meta.hidden,
-        cancel_policy: draft.meta.cancel_policy.as_str(),
-        config: None,
-        agent_status: AgentStatus::Active.as_str(),
-        frozen_context: None,
-    }
-}
-
-/// 会话是否存在（用于 fork 来源、child 父行等关系检查）。
-async fn thread_exists_on(
-    connection: &mut SqliteConnection,
-    id: &ThreadId,
-) -> anyhow::Result<bool> {
-    let row: Option<(i64,)> = sqlx::query_as("SELECT 1 FROM threads WHERE id = ?1")
-        .bind(id.as_str())
-        .fetch_optional(&mut *connection)
-        .await?;
-    Ok(row.is_some())
-}
-
-// ─── 端口实现 ─────────────────────────────────────────────────────────────────
+#[path = "session_data_helpers.rs"]
+mod helpers;
+use helpers::*;
+pub(super) use helpers::{new_session_draft_row, new_session_row};
 
 #[async_trait]
 impl SessionDataPort for SqliteSessionData {
+    async fn machine_id_of(&self, id: &ThreadId) -> SessionResourceResult<Option<String>> {
+        machine_id_on(&self.database.pool, id).await
+    }
     async fn save_new_session(&self, input: &NewSession) -> SessionResourceResult<()> {
         self.writable()?;
         let snapshot_at = input
@@ -447,11 +244,6 @@ impl SessionDataPort for SqliteSessionData {
         frozen: &FrozenSnapshotBytes,
     ) -> SessionResourceResult<()> {
         self.writable()?;
-        if !std::path::Path::new(saved_cwd).is_absolute() {
-            return Err(SessionResourceError::new(
-                SessionResourceErrorKind::Workspace(WorkspaceError::Unavailable),
-            ));
-        }
         let mut tx = self
             .database
             .pool
@@ -473,24 +265,18 @@ impl SessionDataPort for SqliteSessionData {
                 SessionResourceErrorKind::Workspace(WorkspaceError::ExecutionBindingMismatch),
             ));
         }
-        // 本机登记关系必须一致（关键文件对象与目录证据由执行面在同一准入内复核）。
-        let registered: Option<(String, String)> =
-            sqlx::query_as("SELECT project_id, root FROM workspaces WHERE id = ?1")
-                .bind(workspace.workspace_id.to_string())
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(|error| map_sqlx(&error))?;
         let binding = SessionBinding::from_workspace(workspace);
-        match registered {
-            Some((project_id, root))
-                if project_id == binding.project_id.to_string()
-                    && std::path::Path::new(&root) == workspace.root => {}
-            _ => {
-                return Err(SessionResourceError::new(
-                    SessionResourceErrorKind::Workspace(WorkspaceError::ExecutionBindingMismatch),
-                ));
-            }
-        }
+        sqlx::query(
+            "INSERT OR IGNORE INTO projects(id, locator, object_identity) VALUES (?1, ?2, ?1)",
+        )
+        .bind(binding.project_id.to_string())
+        .bind(&workspace.root.to_string_lossy().into_owned())
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| write_failure(error.into()))?;
+        sqlx::query("INSERT OR IGNORE INTO workspaces(id, project_id, root, root_identity, discovery) VALUES (?1, ?2, ?3, ?1, 'null')")
+            .bind(binding.workspace_id.to_string()).bind(binding.project_id.to_string()).bind(&workspace.root.to_string_lossy().into_owned())
+            .execute(&mut *tx).await.map_err(|error| write_failure(error.into()))?;
         match binding_row_state_on(&mut tx, id).await? {
             BindingRowState::Bound(existing) => {
                 // 竞争：已有绑定不覆盖、不修复，必须就是本 workspace。
@@ -502,24 +288,7 @@ impl SessionDataPort for SqliteSessionData {
                     ));
                 }
             }
-            BindingRowState::Unregistered => {
-                return Err(SessionResourceError::new(
-                    SessionResourceErrorKind::Workspace(WorkspaceError::ExecutionBindingMismatch),
-                ));
-            }
             BindingRowState::Absent => {
-                let run: Option<(i64,)> =
-                    sqlx::query_as("SELECT generation FROM execution_runs WHERE thread_id = ?1")
-                        .bind(id.as_str())
-                        .fetch_optional(&mut *tx)
-                        .await
-                        .map_err(|error| map_sqlx(&error))?;
-                if run.is_some() {
-                    // 丢掉本机绑定不能成为绕过 dirty 恢复的路径。
-                    return Err(SessionResourceError::new(
-                        SessionResourceErrorKind::Workspace(WorkspaceError::InvalidBinding),
-                    ));
-                }
                 sqlx::query(
                     "UPDATE threads SET frozen_context = COALESCE(frozen_context, ?1) WHERE id = ?2",
                 )
@@ -558,7 +327,6 @@ impl SessionDataPort for SqliteSessionData {
         let parent = meta.parent_thread_id.clone();
         let binding = match binding_row_state_on(&mut tx, id).await? {
             BindingRowState::Bound(binding) => BindingState::Bound(binding),
-            BindingRowState::Unregistered => BindingState::ExternalOrUnregistered,
             BindingRowState::Absent if parent.is_some() => BindingState::ExternalOrUnregistered,
             BindingRowState::Absent => BindingState::Missing,
         };
@@ -603,7 +371,6 @@ impl SessionDataPort for SqliteSessionData {
             .map_err(read_failure)?;
         let state = match binding_row_state_on(&mut tx, id).await? {
             BindingRowState::Bound(binding) => BindingState::Bound(binding),
-            BindingRowState::Unregistered => BindingState::ExternalOrUnregistered,
             BindingRowState::Absent if meta.parent_thread_id.is_some() => {
                 BindingState::ExternalOrUnregistered
             }
@@ -1220,59 +987,4 @@ impl SessionDataPort for SqliteSessionData {
         self.closed.store(true, Ordering::Release);
         Ok(())
     }
-}
-
-/// 批量插入 canonical payload；返回批次内 ID 集合。
-async fn insert_history_rows(
-    connection: &mut SqliteConnection,
-    thread_id: &ThreadId,
-    payloads: &[PersistedPayload],
-) -> anyhow::Result<HashSet<MessageId>> {
-    let mut ids = HashSet::with_capacity(payloads.len());
-    for payload in payloads {
-        if !ids.insert(payload.id()) {
-            anyhow::bail!("history batch repeats a message id");
-        }
-        sqlx::query(
-            "INSERT INTO messages (message_id, thread_id, role, content)
-             VALUES (?1, ?2, ?3, ?4)",
-        )
-        .bind(payload.id().as_uuid().to_string())
-        .bind(thread_id.as_str())
-        .bind(payload_role(payload))
-        .bind(serialize_persisted_payload(payload)?)
-        .execute(&mut *connection)
-        .await?;
-    }
-    Ok(ids)
-}
-
-fn projection_json(flags: &MessageFlags) -> SessionResourceResult<Option<String>> {
-    flags
-        .projection
-        .as_ref()
-        .map(serde_json::to_string)
-        .transpose()
-        .map_err(|_| corrupt("message projection is not serializable"))
-}
-
-/// 历史变更后同步派生视图：计数、时间戳与缓存版本一起更新。
-async fn refresh_history_derivations(
-    connection: &mut SqliteConnection,
-    id: &ThreadId,
-) -> SessionResourceResult<()> {
-    let now = Utc::now().to_rfc3339();
-    sqlx::query(
-        "UPDATE threads SET updated_at = ?1,
-                message_count = (SELECT COUNT(*) FROM messages WHERE thread_id = ?2),
-                cached_context = NULL,
-                context_cache_epoch = context_cache_epoch + 1
-             WHERE id = ?2",
-    )
-    .bind(&now)
-    .bind(id.as_str())
-    .execute(&mut *connection)
-    .await
-    .map_err(|error| map_sqlx(&error))?;
-    Ok(())
 }

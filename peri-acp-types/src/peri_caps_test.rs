@@ -1,6 +1,20 @@
 use super::{default_ui_commands, PeriCaps};
 
 #[test]
+fn test_session_recovery_v1_is_always_disabled() {
+    for meta in [
+        serde_json::json!({}),
+        serde_json::json!({"peri.sessionRecoveryV1": true}),
+        serde_json::json!({"peri.sessionRecoveryV1": false}),
+        serde_json::json!({"peri.sessionRecoveryV1": "true"}),
+    ] {
+        let caps = PeriCaps::from_client_meta(meta.as_object().unwrap());
+        assert!(!caps.session_recovery_v1, "client meta: {meta}");
+        assert_eq!(caps.to_agent_meta()["peri.sessionRecoveryV1"], false);
+    }
+}
+
+#[test]
 fn test_session_workspace_v1_requires_explicit_negotiation() {
     for value in [
         serde_json::json!({}),
@@ -52,6 +66,8 @@ fn test_default_all_false() {
     assert!(!caps.prediction);
     assert!(!caps.plan_entry_active_form);
     assert!(!caps.rewind);
+    assert!(!caps.session_recovery_v1);
+    assert_eq!(caps.to_agent_meta()["peri.sessionRecoveryV1"], false);
     assert!(caps.ui_commands.is_empty());
 }
 
@@ -137,6 +153,8 @@ fn test_to_agent_meta_roundtrip() {
 #[test]
 fn test_all_enabled() {
     let caps = PeriCaps::all_enabled();
+    assert!(!caps.session_recovery_v1);
+    assert_eq!(caps.to_agent_meta()["peri.sessionRecoveryV1"], false);
     assert!(caps.token_stats);
     assert!(caps.skill_names);
     assert!(caps.replay);

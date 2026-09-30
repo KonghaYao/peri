@@ -3,11 +3,11 @@
 //! 与 [`super::data::SessionDataPort`] 的分工是事实归属，不是实现细节：
 //!
 //! - 数据端口回答 canonical 会话数据（会话行、绑定字节、历史、frozen、父链）；
-//! - 本端口回答**只可能由本机回答**的事：工作区发现与登记证据、执行代际、OS 锁、
+//! - 本端口回答**只可能由本机回答**的事：工作区发现与登记证据、执行代际、运行句柄、
 //!   在途写入门禁、创建准入。lease 只在这里出现，数据端口里没有它。
 //!
 //! 只有唯一实现 [`LocalExecution`]（本机 SQLite）：远端组合的 canonical 数据在远端，
-//! 但执行事实（代际、锁、owner）仍只写在本机库。绑定字节与父链由数据端口提供——远端
+//! 但执行记录仍只写在本机库。绑定字节与父链由数据端口提供——远端
 //! 组合给的是远端会话行自带的 `binding_*` 列，本机组合给的是本机 `session_bindings`。
 //! 本端口因此不查绑定行，只接受调用方给出的字节并做**本机复核**（目录证据、关系）。
 //!
@@ -31,28 +31,13 @@ use super::sqlite_store::{ExclusiveExecutionGuard, ExecutionLease, ExecutionWrit
 
 /// 一次撤销补偿（放弃未发布创建时由门面提供的唯一副作用）。
 ///
-/// 调用方只给「撤销这次创建」这一件事，执行/锁顺序仍由本端口实现决定：补偿先成功，
-/// 才关闭准入并释放 OS 锁。
+/// 调用方只给「撤销这次创建」这一件事，收尾顺序由本端口实现决定：补偿先成功，
+/// 才关闭本次运行句柄。
 pub(in crate::sessions) type RevokeEffect<'a> =
     Pin<Box<dyn Future<Output = SessionResourceResult<()>> + Send + 'a>>;
 
-/// 数据面给出的会话事实：绑定字节、这棵树有没有绑定、树根。
-///
-/// 三件都只可能由持有 canonical 数据的一侧回答（[`super::data::SessionDataPort::binding_of`] /
-/// [`super::data::SessionDataPort::session_root`]）：远端组合里本机没有这条会话的任何行，本机
-/// 执行面因此不查本机的 `threads` / `session_bindings`，只按调用方给出的值判定。
-///
-/// 用途是确定的：绑定字节用于取得所有权前的关系复核，`bound` 区分「无绑定历史（没有可保护
-/// 的执行域）」与「有绑定但无活 owner（必须拒绝写入）」，`root` 定位子会话的 owner——子会话
-/// 由 root 的租约与它的关闭事务统一持有，自己没有租约也不写 `execution_runs`。
+/// 数据面沿父链确定的树根，用于共享当前运行实例的写入与关闭屏障。
 pub(in crate::sessions) struct SessionFacts {
-    /// 这条会话自己的绑定字节；没有绑定行时 `None`。
-    pub binding: Option<SessionBinding>,
-    /// 这棵**树**在数据面上有没有绑定：自身或 root 有绑定即算有。
-    ///
-    /// 两种来源都要看：接纳过的 legacy root 可以有自己没有绑定行的子会话，那些子会话的写入
-    /// 同样落在 root 的执行域里，不能因为「自己无绑定」就当成无主放行。
-    pub bound: bool,
     /// 这条会话在树中的根，含自身。
     pub root: ThreadId,
 }
@@ -180,15 +165,14 @@ pub(in crate::sessions) trait LocalExecutionPort: Send + Sync {
     /// 半写草稿（`bound && frozen IS NULL`）的检测与清理。
     ///
     /// 判据不成立（无绑定行、或已提交 frozen）时返回 typed 冲突且不删除；本进程存在活
-    /// owner 或 OS 锁被别的进程持有时同样拒绝（那不是崩溃残留）。
+    /// 初始化句柄时同样拒绝（那不是崩溃残留）。
     async fn discard_incomplete_initialization(&self, id: &ThreadId) -> SessionResourceResult<()>;
 
     /// 为「数据已完整保存、还没有执行代际」的会话建立准入（收敛，不是重建）。
     ///
     /// `binding` 是**数据面给出的绑定字节**（本机组合来自本机 `session_bindings`，远程组合
-    /// 来自远端会话行）——会话是否存在由数据面回答，本机只做本机能回答的那部分：执行代际
-    /// 的唯一性、sidecar 锁，以及「这组字节指向本机已登记的目录」这条复核。调用方必须先在
-    /// 数据面证明会话已保存；本端口不查本机会话表来代它证明。
+    /// 来自远端会话行）；调用方已确认数据保存及机器环境可用。本端口仅登记运行句柄，
+    /// 不按目录对象认领会话，也不查本机会话表代替数据面证明。
     async fn admit_existing(
         &self,
         id: &ThreadId,

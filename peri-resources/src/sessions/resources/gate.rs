@@ -196,17 +196,7 @@ impl MutationGate {
     /// 自身无绑定时再看 root 的——接纳过的 legacy root 可以有自己没有绑定行的子会话，那些子
     /// 会话的写入同样落在 root 的执行域里，不能因为「自己没有绑定」就当成无主放行。
     pub(super) async fn session_facts(&self, id: &ThreadId) -> SessionResourceResult<SessionFacts> {
-        let binding = self.data.binding_of(id).await?;
         let root = self.data.session_root(id).await?;
-        let bound = match &binding {
-            Some(_) => true,
-            None if root == *id => false,
-            None => self.data.binding_of(&root).await?.is_some(),
-        };
-        Ok(SessionFacts {
-            binding,
-            bound,
-            root,
-        })
+        Ok(SessionFacts { root })
     }
 }

@@ -1,7 +1,7 @@
 //! 本机执行面：发现、登记、owner、dirty、创建准入与关闭。
 //!
 //! 本模块是「本机事实」的唯一持有者：项目/工作区证据来自发现（[`super::discovery`]），
-//! 执行所有权来自 `execution_runs` 与 sidecar OS 锁，创建准入把两者与 durable 数据
+//! 运行记录来自 `execution_runs`，创建准入把执行状态与 durable 数据
 //! 按本地事实组合起来。数据面（[`super::session_data`]）只回答数据事实，不判断
 //! 「这条会话在本机能不能执行」。
 //!
@@ -9,7 +9,7 @@
 //! 业务侧，也不提供无 guard 的写入入口。
 //!
 //! v10 之后它是 [`LocalExecutionPort`] 的**唯一**实现：远端组合的 canonical 数据在远端，
-//! 但执行事实（workspace 证据、执行代际、OS 锁、owner）仍只写在本机库，绑定字节与父链由
+//! 但执行事实（workspace 证据、执行代际与运行句柄）仍只写在本机库，绑定字节与父链由
 //! 数据端口提供。执行域因此只有一个——按 `thread_id` 原文，没有 store 维度。
 
 use std::path::{Path, PathBuf};
@@ -24,9 +24,7 @@ use peri_acp_types::workspace::{
 
 use super::connection::ReadOnlyThreadStoreError;
 use super::database::SqliteSessionDatabase;
-use super::execution::{
-    local_lock_name, ExclusiveExecutionGuard, ExecutionLease, ExecutionWriteGuard,
-};
+use super::execution::{ExclusiveExecutionGuard, ExecutionLease, ExecutionWriteGuard};
 use super::failure::{
     binding_relation_failure, commit_failure, execution_failure, lease_required, map_sqlx,
 };
@@ -119,7 +117,7 @@ impl LocalExecution {
     /// 传入的 lease 必须是**本进程这条 identity 的活 owner**：撤销会删除执行行，
     /// 不能让另一个 owner（或另一条会话的 lease）替它承担补偿。补偿动作由调用方给出
     /// （数据面的撤销行为），本函数只负责准入顺序：关闭准入 → 等待在途写入 → 补偿 →
-    /// 释放 OS 锁。
+    /// 结束本次运行句柄。
     ///
     /// 所有权按**精确 identity** 认：撤销的对象是这次创建的那条会话，它的租约就登记在这个
     /// id 上（子会话的写入另走 root 的门禁，不参与撤销）。
@@ -301,12 +299,6 @@ impl LocalExecution {
         if self.database.is_read_only() {
             return Err(super::failure::read_only_store());
         }
-        // 先占稳定 OS 锁：同一 identity 的创建与他处执行互斥，且在写库之前就排除。
-        let file = self
-            .database
-            .lock_execution(&local_lock_name(&input.thread_id))
-            .await
-            .map_err(execution_failure)?;
         let snapshot_at = input
             .meta
             .snapshot_at_message_id
@@ -347,7 +339,7 @@ impl LocalExecution {
         tx.commit()
             .await
             .map_err(|_| commit_failure(Some(input.thread_id.clone())))?;
-        self.register_lease(input.thread_id.clone(), 1, Some(file))
+        self.register_lease(input.thread_id.clone(), 1)
     }
 
     /// 未发布创建的第一阶段：OS 预留 → 草稿数据与执行代际同一事务 → 返回 owner。
@@ -363,11 +355,6 @@ impl LocalExecution {
         if self.database.is_read_only() {
             return Err(super::failure::read_only_store());
         }
-        let file = self
-            .database
-            .lock_execution(&local_lock_name(&draft.thread_id))
-            .await
-            .map_err(execution_failure)?;
         let snapshot_at = draft
             .meta
             .snapshot_at_message_id
@@ -399,7 +386,7 @@ impl LocalExecution {
         tx.commit()
             .await
             .map_err(|_| commit_failure(Some(draft.thread_id.clone())))?;
-        self.register_lease(draft.thread_id.clone(), 1, Some(file))
+        self.register_lease(draft.thread_id.clone(), 1)
     }
 
     /// 一次性提交 frozen：owner/代际校验与 write-once CAS 在同一 `BEGIN IMMEDIATE` 内。
@@ -501,13 +488,13 @@ impl LocalExecution {
         }
     }
 
-    /// 半写草稿的清理：判据成立、无活 owner、拿到 OS 锁之后，删除草稿的全部行。
+    /// 半写草稿的清理：判据成立、无本进程活跃句柄后，删除草稿的全部行。
     ///
     /// 判据（§5.3，与 legacy「无绑定且无代际行」互斥）：
     ///
     /// - 有绑定行（`session_bindings` 命中）**且** `threads.frozen_context IS NULL`；
-    /// - 已提交 frozen 的会话**不是**半写草稿：返回 typed 冲突，交给既有 dirty 恢复；
-    /// - 本进程有活 owner、或 OS 锁被其他进程持有 ⇒ 拒绝（那不是崩溃残留）。
+    /// - 已提交 frozen 的会话**不是**半写草稿：返回 typed 冲突；
+    /// - 本进程有活跃初始化句柄 ⇒ 拒绝（那不是崩溃残留）。
     ///
     /// 删除在一条 `BEGIN IMMEDIATE` 里完成（执行代际 + 子表 + threads 行），与
     /// [`super::session_data`] 的撤销同一顺序、同一判据。
@@ -555,11 +542,6 @@ impl LocalExecution {
                 ));
             }
         }
-        let _file = self
-            .database
-            .lock_execution(&local_lock_name(id))
-            .await
-            .map_err(execution_failure)?;
         let mut tx = self
             .database
             .pool
@@ -591,15 +573,12 @@ impl LocalExecution {
     /// 保存完整（远程保存、或进程在准入前结束），此时不能重造 binding/frozen，也不能
     /// 报「确定未创建」。
     ///
-    /// **绑定字节由调用方给出**（来自数据端口：本机组合是本机 `session_bindings` 行，
-    /// 远程组合是远端会话行）。本机只做本机的事：执行代际的唯一性、sidecar 锁、以及
-    /// 「这组绑定字节指向本机已登记的 workspace」这一条复核——canonical 会话是否存在
-    /// 由数据面回答，本机不查 `threads`/`session_bindings`（远程组合里它们本来就没有这
-    /// 条会话的行）。
+    /// 数据保存及机器环境可用性由门面确认，本机仅记录本次运行与生命周期句柄。
+    /// 不按历史绑定的目录对象认领会话。
     pub(in crate::sessions) async fn admit_existing(
         &self,
         id: &ThreadId,
-        binding: &SessionBinding,
+        _binding: &SessionBinding,
     ) -> SessionResourceResult<Arc<dyn SessionExecutionLease>> {
         if self.database.is_read_only() {
             return Err(super::failure::read_only_store());
@@ -615,21 +594,12 @@ impl LocalExecution {
                 "session already has an execution generation",
             ));
         }
-        let file = self
-            .database
-            .lock_execution(&local_lock_name(id))
-            .await
-            .map_err(execution_failure)?;
         let mut tx = self
             .database
             .pool
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(|error| map_sqlx(&error))?;
-        // 业务前提必须仍然成立：绑定关系与关键对象在准入这一刻复核。
-        SqliteSessionDatabase::validate_binding_relation_on(&mut tx, binding)
-            .await
-            .map_err(binding_relation_failure)?;
         sqlx::query("INSERT INTO execution_runs (thread_id, generation, clean) VALUES (?1, 1, 0)")
             .bind(id.as_str())
             .execute(&mut *tx)
@@ -638,7 +608,7 @@ impl LocalExecution {
         tx.commit()
             .await
             .map_err(|_| commit_failure(Some(id.clone())))?;
-        self.register_lease(id.clone(), 1, Some(file))
+        self.register_lease(id.clone(), 1)
     }
 
     /// 登记租约并返回：`ExecutionLease` 的持有者是调用方，库里只留弱引用用于复核准入。
@@ -646,14 +616,12 @@ impl LocalExecution {
         &self,
         id: ThreadId,
         generation: i64,
-        file: Option<std::fs::File>,
     ) -> SessionResourceResult<Arc<dyn SessionExecutionLease>> {
         let key = id.clone();
         let lease = Arc::new(ExecutionLease::new(
             id.clone(),
             generation,
             self.database.pool.clone(),
-            file,
         ));
         self.database
             .execution_leases

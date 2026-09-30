@@ -208,6 +208,7 @@ impl ThreadStore for SqliteThreadStore {
 
     async fn create_thread(&self, meta: ThreadMeta) -> Result<ThreadId> {
         let id = meta.id.clone();
+        let mut transaction = self.database.pool.begin_with("BEGIN IMMEDIATE").await?;
         sqlx::query(
             "INSERT INTO threads (id, title, cwd, created_at, updated_at, message_count,
                 parent_thread_id, snapshot_at_message_id, hidden, cancel_policy, config, cached_context, agent_status, context_cache_epoch)
@@ -226,8 +227,15 @@ impl ThreadStore for SqliteThreadStore {
         .bind(&meta.config)
         .bind(&meta.cached_context)
         .bind(meta.agent_status.as_str())
-        .execute(&self.database.pool)
+        .execute(&mut *transaction)
         .await?;
+        session_rows::insert_environment_row(
+            &mut transaction,
+            &meta.id,
+            meta.parent_thread_id.as_deref(),
+        )
+        .await?;
+        transaction.commit().await?;
         Ok(id)
     }
 
@@ -743,3 +751,7 @@ mod schema_v7_tests;
 #[cfg(test)]
 #[path = "sqlite_store/schema_v10_test.rs"]
 mod schema_v10_tests;
+
+#[cfg(test)]
+#[path = "sqlite_store/session_id_environment_test.rs"]
+mod session_id_environment_tests;

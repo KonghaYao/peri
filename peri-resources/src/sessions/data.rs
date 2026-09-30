@@ -45,6 +45,7 @@ pub struct ChildResumeRecord {
 /// 「未生效」报告成成功，也不得在失败后遗留部分写入。
 #[async_trait]
 pub(crate) trait SessionDataPort: Send + Sync {
+    async fn machine_id_of(&self, id: &ThreadId) -> SessionResourceResult<Option<String>>;
     /// 保存新会话：meta/binding/frozen 完整落库（本机准入由执行面另行完成）。
     ///
     /// 本地塌缩把「完整数据 + 执行代际」并成一次提交，因此本机构建不经过本方法；

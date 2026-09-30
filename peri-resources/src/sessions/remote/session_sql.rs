@@ -163,6 +163,15 @@ const SELECT_PAGE_SQL: &str = concat!(
     ORDER BY s.updated_at DESC, s.id DESC LIMIT ?7"
 );
 
+const SELECT_ENV_PAGE_SQL: &str = concat!(
+    "SELECT ", page_columns!(),
+    " FROM threads s LEFT JOIN session_bindings b ON b.thread_id = s.id
+    WHERE s.hidden = 0 AND s.message_count > 0
+      AND EXISTS (SELECT 1 FROM session_environments env WHERE env.thread_id = s.id AND env.machine_id = ?2)
+      AND (?4 = 0 OR (s.updated_at, s.id) < (?5, ?6))
+    ORDER BY s.updated_at DESC, s.id DESC LIMIT ?7"
+);
+
 /// 会话事实行（含绑定、frozen、继承区）。
 pub(super) fn select_session_statement(id: &str) -> StatementSpec {
     StatementSpec::new(SELECT_SESSION_SQL, vec![Value::Text(id.to_owned())])
@@ -192,6 +201,7 @@ pub(super) fn select_messages_statement(id: &str) -> StatementSpec {
 /// 也不把「无法比较」静默当成「匹配为空」）。
 pub(super) fn page_statement(query: &ScopedThreadQuery) -> SessionResourceResult<StatementSpec> {
     let (kind, scope_id, relative) = match &query.scope {
+        ThreadScope::Environment(machine_id) => (4, Value::Text(machine_id.clone()), Value::Null),
         ThreadScope::All => (0_i64, Value::Null, Value::Null),
         ThreadScope::Project(project) => (1, Value::Text(project.to_string()), Value::Null),
         ThreadScope::Workspace(workspace) => (2, Value::Text(workspace.to_string()), Value::Null),
@@ -221,7 +231,11 @@ pub(super) fn page_statement(query: &ScopedThreadQuery) -> SessionResourceResult
     };
     let limit = i64::from(query.limit.clamp(1, 200)) + 1;
     Ok(StatementSpec::new(
-        SELECT_PAGE_SQL,
+        if matches!(query.scope, ThreadScope::Environment(_)) {
+            SELECT_ENV_PAGE_SQL
+        } else {
+            SELECT_PAGE_SQL
+        },
         vec![
             int_value(kind),
             scope_id,
@@ -268,7 +282,7 @@ pub(super) const DELETE_SESSION_BINDINGS_SQL: &str = canonical::DELETE_BINDINGS_
 /// 删除会话行（与 `canonical::DELETE_THREAD_ROW_SQL` 同一份语句）。
 pub(super) const DELETE_SESSION_SQL: &str = canonical::DELETE_THREAD_ROW_SQL;
 
-/// write-once 未发布创建的撤销语句集（fork 等失败补偿）：三条删除**不带** frozen 判据。
+/// write-once 未发布创建的撤销语句集（fork 等失败补偿）：四条删除**不带** frozen 判据。
 ///
 /// 与 [`revoke_draft_statements`] 的唯一差别就是判据：那一条按调用方语义分档
 /// （两阶段草稿要求 `frozen IS NULL`），不由本函数推断。
@@ -276,6 +290,7 @@ pub(super) fn revoke_session_statements(id: &str) -> Vec<StatementSpec> {
     [
         DELETE_SESSION_MESSAGES_SQL,
         DELETE_SESSION_BINDINGS_SQL,
+        "DELETE FROM session_environments WHERE thread_id = ?1",
         DELETE_SESSION_SQL,
     ]
     .into_iter()
@@ -283,7 +298,7 @@ pub(super) fn revoke_session_statements(id: &str) -> Vec<StatementSpec> {
     .collect()
 }
 
-/// 未发布创建的撤销：三条删除都带同一判据（`frozen_context IS NULL`），因此同一批里
+/// 未发布创建的撤销：各条删除都带同一判据（`frozen_context IS NULL`），因此同一批里
 /// 「会话行还在不在」与「历史/绑定删没删」不会分叉——已提交 frozen 的会话一条都不删。
 const DELETE_DRAFT_MESSAGES_SQL: &str = concat!(
     "DELETE FROM messages WHERE thread_id = ?1",
@@ -410,6 +425,7 @@ pub(super) fn insert_session_statements(
             ],
         ),
     ];
+    statements.push(environment_statement(row.thread_id, row.parent_thread_id)?);
     if let Some(inherited) = row.inherited {
         statements.push(StatementSpec::new(
             UPDATE_INHERITED_SQL,
@@ -462,7 +478,30 @@ pub(super) fn insert_session_draft_statements(
                 Value::Text(relative),
             ],
         ),
+        environment_statement(
+            draft.thread_id.as_str(),
+            draft.meta.parent_thread_id.as_deref(),
+        )?,
     ])
+}
+
+fn environment_statement(id: &str, parent: Option<&str>) -> SessionResourceResult<StatementSpec> {
+    Ok(StatementSpec::new(
+        canonical::INSERT_ENVIRONMENT_SQL,
+        vec![
+            Value::Text(id.to_owned()),
+            optional_text(parent),
+            Value::Text(
+                crate::sessions::machine::current()
+                    .map_err(|_| {
+                        crate::sessions::sqlite_store::unavailable(
+                            "machine identity is not initialized",
+                        )
+                    })?
+                    .to_owned(),
+            ),
+        ],
+    ))
 }
 
 /// 一次性提交 frozen 的语句（write-once CAS；受影响行数由调用方按 1 核对）。
@@ -478,6 +517,7 @@ pub(super) fn revoke_draft_statements(id: &str) -> Vec<StatementSpec> {
     [
         DELETE_DRAFT_MESSAGES_SQL,
         DELETE_DRAFT_BINDINGS_SQL,
+        "DELETE FROM session_environments WHERE thread_id = ?1 AND EXISTS (SELECT 1 FROM threads WHERE id = ?1 AND frozen_context IS NULL)",
         DELETE_DRAFT_SESSION_SQL,
     ]
     .into_iter()
@@ -561,12 +601,12 @@ mod tests {
     use super::*;
 
     /// 远端两条撤销入口的判据点：write-once（fork 补偿）不叠加 frozen 判据，
-    /// 两阶段草稿的三条删除全部带 `frozen_context IS NULL`。
+    /// 两阶段草稿的四条删除全部带 `frozen_context IS NULL`。
     #[test]
     fn revocation_statements_split_by_entry_point() {
         // 两阶段草稿：判据在每一条删除上（同一批内不会出现「历史删了、会话行还在」）。
         let draft = revoke_draft_statements("s");
-        assert_eq!(draft.len(), 3);
+        assert_eq!(draft.len(), 4);
         for statement in &draft {
             assert!(
                 statement.sql.contains("frozen_context IS NULL"),
@@ -582,7 +622,7 @@ mod tests {
         // write-once：撤销未发布创建（fork 等）不叠加 frozen 判据——目标创建即带 frozen，
         // 补偿就是把它整条删掉。
         let write_once = revoke_session_statements("s");
-        assert_eq!(write_once.len(), 3);
+        assert_eq!(write_once.len(), 4);
         for statement in &write_once {
             assert!(
                 !statement.sql.contains("frozen_context"),

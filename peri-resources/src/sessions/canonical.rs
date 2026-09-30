@@ -44,6 +44,13 @@ pub(super) const WORKSPACES_TABLE: &str = "workspaces";
 
 /// 不可变执行绑定。
 pub(super) const SESSION_BINDINGS_TABLE: &str = "session_bindings";
+pub(super) const SESSION_ENVIRONMENTS_TABLE: &str = "session_environments";
+pub(super) const INSERT_ENVIRONMENT_SQL: &str = "INSERT INTO session_environments(thread_id, machine_id) VALUES (?1, COALESCE((SELECT machine_id FROM session_environments WHERE thread_id = ?2), ?3))";
+pub(super) const BACKFILL_ENVIRONMENTS_SQL: &str = "WITH RECURSIVE tree(thread_id, machine_id) AS (
+    SELECT t.id, COALESCE(env.machine_id, ?1) FROM threads t
+    LEFT JOIN session_environments env ON env.thread_id = t.id WHERE t.parent_thread_id IS NULL
+    UNION ALL SELECT child.id, tree.machine_id FROM threads child JOIN tree ON child.parent_thread_id = tree.thread_id
+) INSERT OR IGNORE INTO session_environments(thread_id, machine_id) SELECT thread_id, machine_id FROM tree";
 
 /// canonical 表清单（父表在前，与 [`CREATE_TABLES_SQL`] 的顺序一致）。
 pub(super) const CANONICAL_TABLES: &[&str] = &[
@@ -52,6 +59,7 @@ pub(super) const CANONICAL_TABLES: &[&str] = &[
     PROJECTS_TABLE,
     WORKSPACES_TABLE,
     SESSION_BINDINGS_TABLE,
+    SESSION_ENVIRONMENTS_TABLE,
 ];
 
 /// 建表语句：本机新库与远端初始化下发的**同一份清单**，一条语句一个元素。
@@ -64,6 +72,12 @@ pub(super) const CANONICAL_TABLES: &[&str] = &[
 /// 远端重复打开时同样是空操作。`REFERENCES` 子句保留原样：本机读写在同一连接上打开
 /// `PRAGMA foreign_keys`，远端服务端不强制外键（读数恒为 0、且不可开启）——同一份 DDL 在两种
 /// 执行器上的差别是**强制与否**，不是形状。顺序即依赖顺序：父表在前。
+pub(super) const CREATE_ENVIRONMENTS_TABLE_SQL: &str =
+    "CREATE TABLE IF NOT EXISTS session_environments (
+    thread_id TEXT PRIMARY KEY REFERENCES threads(id) ON DELETE CASCADE,
+    machine_id TEXT NOT NULL
+)";
+
 pub(super) const CREATE_TABLES: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS threads (
     id TEXT PRIMARY KEY, title TEXT, cwd TEXT NOT NULL DEFAULT '',
@@ -93,6 +107,7 @@ pub(super) const CREATE_TABLES: &[&str] = &[
     project_id TEXT NOT NULL, workspace_id TEXT NOT NULL, relative_cwd TEXT NOT NULL,
     FOREIGN KEY(workspace_id, project_id) REFERENCES workspaces(id, project_id)
 )",
+    CREATE_ENVIRONMENTS_TABLE_SQL,
 ];
 
 /// canonical 索引名（与 [`CREATE_INDEXES`] 的顺序一一对应）：形状核对按名字断言索引齐全。
@@ -102,6 +117,7 @@ pub(super) const CANONICAL_INDEXES: &[&str] = &[
     "idx_bindings_project",
     "idx_bindings_workspace",
     "idx_threads_updated",
+    "idx_session_environments_machine",
 ];
 
 /// 索引语句：必须在建表**与旧库补列之后**执行（`idx_threads_updated` 引用后补的列）。
@@ -110,6 +126,7 @@ pub(super) const CREATE_INDEXES: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS idx_bindings_project ON session_bindings(project_id, thread_id)",
     "CREATE INDEX IF NOT EXISTS idx_bindings_workspace ON session_bindings(workspace_id, relative_cwd, thread_id)",
     "CREATE INDEX IF NOT EXISTS idx_threads_updated ON threads(updated_at DESC, id DESC) WHERE hidden = 0 AND message_count > 0",
+    "CREATE INDEX IF NOT EXISTS idx_session_environments_machine ON session_environments(machine_id, thread_id)",
 ];
 
 /// 删除一条 `threads` 行之前必须显式清理的子表：子表名 + 语句。
@@ -121,6 +138,10 @@ pub(super) const CREATE_INDEXES: &[&str] = &[
 pub(super) const THREAD_CHILD_DELETES: &[(&str, &str)] = &[
     (MESSAGES_TABLE, DELETE_MESSAGES_BY_THREAD_SQL),
     (SESSION_BINDINGS_TABLE, DELETE_BINDINGS_BY_THREAD_SQL),
+    (
+        SESSION_ENVIRONMENTS_TABLE,
+        "DELETE FROM session_environments WHERE thread_id = ?1",
+    ),
 ];
 
 /// 删除一个会话的全部历史行。

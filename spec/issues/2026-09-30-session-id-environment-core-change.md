@@ -1,43 +1,36 @@
 # 核心改动：Session ID 恢复、移除文件锁与机器 env 分区
 
-状态：用户已批准方向，待实施；本次只记录契约，没有移除运行时代码中的锁或弹窗。
+状态：核心实现与文档已同步；保留待验收工作，不据此宣称全量验证通过。
 
-权威目标：[Session ID 恢复与机器环境分区](../../docs/design/session-id-environment.md)。
+权威设计：[Session ID 恢复与机器环境分区](../../docs/design/session-id-environment.md)。
 
-## 获批核心改动
+已实施：持久机器 UUID/override、canonical env 表与本机/远端回填、父子继承和 Environment scope、按 ID 恢复、跨 env 执行只读、删除 session sidecar 锁与 TUI dirty/reset 交互；执行句柄、事务与资源收尾保留。
 
-- root session 只以 ID 标识，持有 ID 可在可访问的数据库中恢复；不以机器 owner、路径或持锁状态判定归属。
-- 父子关系保持不动；根归属由 ID 与父链表达，不按 cwd 推导。
-- execution_environment_id 表达机器位置，在数据库中提供 env 分区；不承担用户授权、运行 owner 或锁语义。
-- 删除 session 执行文件锁、dirty 恢复认领门槛与相应前端确认弹窗，不替换成分布式 owner/lease。
-- 数据库路径仅用于过滤、展示与工具定位；显式 ID 恢复不被目录不匹配阻断。
+## 代码与验证证据
 
-## 待实施切片
+本次定向验证已通过资源门面 34 项、工作区/运行生命周期 36 项、机器身份 3 项、迁移/恢复分区 3 项、远端 SQL 形状 16 项、撤销语句 1 项、TUI 恢复 3 项、caps 11 项、ACP 恢复 6 项、legacy 历史恢复 6 项；`peri-acp-types` doc tests 为 1 passed / 2 ignored。相关包编译、格式及依赖边界检查通过；未运行全 workspace 或真实多机器远端 E2E，不将定向通过扩展为全量验收。
 
-| 范围 | 当前入口 | 目标 |
-| --- | --- | --- |
-| 本机执行文件锁 | `peri-resources/src/sessions/sqlite_store/execution.rs` | 删除 session sidecar 文件锁及依赖它的准入/持锁写入门槛，保留事务与实际资源收尾 |
-| 恢复关系与契约 | `peri-acp-types/src/workspace.rs`、`peri-acp-types/src/session_resources.rs` | 删除作为恢复认领门槛的 lease/dirty 契约，root 按 ID、子关系不变；外部协议兼容按影响评估 |
-| ACP 恢复入口 | `peri-acp/src/host/workspace.rs`、`peri-acp/src/host/requests/session_lifecycle.rs` | load/resume 按 ID，不执行目录归属认领与 dirty reset；工具环境装配单独处理 |
-| 前端弹窗 | `peri-tui/src/acp_client/client/session.rs`、`peri-tui/src/kit/popups/confirm_popup.rs` | 删除 session dirty 恢复确认、reset_dirty 交互与能力协商；保留无关确认弹窗 |
-| env 元数据与查询 | `peri-resources/src/sessions/canonical.rs`、本机/远端 session adapters | 增加稳定机器 env 归属与 scoped 查询，同步 schema/序列化/迁移；不改变 Session ID 主键 |
-| 路径条件 | 工作区登记、会话查询与 Agent 环境装配 | 路径过滤与工具定位和会话身份分开，不因当前 cwd 不同拒绝 ID 恢复 |
+本次文档检查：`git diff --check`、六份文档的本地链接与表格行结构检查通过；resources 索引的旧 OS 锁与 `SessionFacts { binding, bound, root }` 描述已清除。
 
-不要只删除弹窗或跳过一次锁获取：须收敛契约、调用方、数据库 schema、写入门槛与相邻测试，删除过时内部实现而非留下兼容双轨。
+| 行为 | 事实源 / 已有回归入口 |
+| --- | --- |
+| 机器身份与原子发布 | `peri-resources/src/sessions/machine.rs`、`machine_test.rs`（持久读取、竞争创建、损坏值拒绝） |
+| schema 10 幂等回填、路径/dirty/多实例恢复、scope 与 child 继承 | `peri-resources/src/sessions/sqlite_store/session_id_environment_test.rs` |
+| 旧远端未知归属 | `peri-resources/src/sessions/remote/session_data.rs`（回填 `legacy:{store_id}`）、`canonical.rs`（共用 SQL）；不等同于真实远端验收 |
+| ACP 恢复与执行准入 | `peri-acp/src/host/requests/session_restore.rs`、`host/workspace.rs`；`peri-resources/src/sessions/resources.rs` |
+| TUI 不确认、不 reset，保留只读投影 | `peri-tui/src/acp_client/client/recovery_test.rs`：`load_by_id_has_no_recovery_popup_or_reset_request`、`unavailable_environment_restores_history_without_confirmation`、`dirty_session_restores_history_without_recovery_popup_or_reset_request` |
+| 恢复能力关闭 | `peri-acp-types/src/peri_caps.rs`；保留 wire 键但置 false，客户端声明 true 不再启用 |
 
-## 验收目标
+## 未完成项
 
-- [ ] 持有 root ID 能恢复，不要求持有文件锁或匹配当前目录；父子树仍正确。
-- [ ] 两个 env 下相同路径互不混入列表；明确指定 ID 不因当前 env/cwd 不同隐藏会话。
-- [ ] 机器 env ID 重启稳定；旧库有可解释的归属迁移，导入来源不明的数据不盲目认领。
-- [ ] 热/冷恢复不弹 dirty/owner 认领确认，不再产生相应 reset_dirty 请求。
-- [ ] 运行时没有 session 执行 sidecar 锁，普通事务、幂等写入、取消与资源关闭保持。
-- [ ] 原环境不可用时历史仍可恢复；工具实际执行报明确错误，不偷偷执行本机同名路径。
-- [ ] 明确并发续写和多实例执行的支持范围；不宣称移除锁后仍有跨机单 owner 保证。
+- [ ] 复核变更后的相关 resources / ACP / TUI 契约测试结果与失败范围，补齐已报告测试未覆盖的热/冷按 ID 恢复、父子树、取消及关闭跨层验收；不把早先 resources 结果当成新增生产路径的验证。
+- [ ] 验收旧远端幂等回填、已有 env 不覆盖与同路径双 env 列表隔离；确认真实远端 adapter 与 schema 10 契约一致。
+- [ ] 验收跨 env 和保存 cwd 不可用时可读取历史且执行被拒绝，包括先判 env、仅可执行才 legacy 冻结/接纳，MCP/LSP/后台资源不产生本机副作用；补充只读跳过 frozen 与可执行路径缺失/损坏 frozen 的边界。
+- [ ] 明确多实例同时续写的数据冲突与工具副作用支持范围；删除文件锁不构成单 owner、全局串行或全面并发安全保证，不未经裁决重新引入恢复认领锁。
+- [ ] 补齐身份初始化的 override、权限失败、hardlink 不支持与崩溃边界验证；核对 Unix 新文件 `0600`，不把它扩展成目录/既有文件/非 Unix 权限保证。
 
-## 风险与待细化
+## 限制与授权边界
 
-- 持有普通 Session ID 不等于具备安全凭证；数据库/服务的外部访问权限与 env 分类分开。
-- 同时恢复同一根会话可能产生多份计算和工具副作用，需明确产品支持范围及数据冲突处理，但不得未经裁决重新加回恢复认领锁。
-- 多机器 env 登记属于新的元数据契约，不是更换 SQLite 后端；本机与远端 adapters 必须同步演进。
-- 当前实现仍有锁、dirty/lease 和弹窗；具体完成状态以代码与契约测试为准。
+- 本机旧库回填按当前安装认领，不自动识别复制/导入来源；远端未知归属用 `legacy:{store_id}`，不得冒充当前机器或因打开而自动迁移。
+- hardlink 原子发布只保护身份文件创建；父目录未 fsync、临时文件仅尽力清理、已有文件权限/符号链接未额外校验，仍需平台与故障验收。
+- Session ID 与 machine ID 不是安全凭证，Environment scope 不是多用户授权隔离；数据库/服务访问控制独立。

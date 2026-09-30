@@ -541,9 +541,9 @@ pub trait SessionResources: Send + Sync {
         workspace: &ResolvedWorkspace,
     ) -> SessionResourceResult<()>;
 
-    /// 取得本机执行所有权（唯一 owner）。
+    /// 建立当前机器的运行生命周期句柄，不认领持久会话的唯一所有权。
     ///
-    /// 他处持有、dirty 未解除、存在未决持久化或本次只读时明确拒绝，不降级为成功。
+    /// 拒绝跨机器环境执行与只读打开；旧 dirty 或其他实例恢复不构成认领门槛。
     async fn acquire_execution(
         &self,
         id: &ThreadId,
@@ -623,11 +623,9 @@ pub trait SessionResources: Send + Sync {
     /// [`SessionResourceErrorKind::NotFound`]，损坏与版本不支持是错误，不冒充状态。
     async fn load_session_binding(&self, id: &ThreadId) -> SessionResourceResult<BindingState>;
 
-    /// 按会话 identity 复核绑定并给出执行目录；不取得执行所有权。
+    /// 按会话 ID 读取保存的工作区定位信息，不做目录归属认领或改绑。
     ///
-    /// 绑定缺失、绑定指向的本机登记已不存在或当前目录与记录不一致时明确失败，
-    /// 不降级成「没有绑定」，也不在复核中改绑。`check` 决定复核力度，见
-    /// [`BindingRecheck`]。
+    /// 目录存在性属于工具执行资格，不阻断历史定位；不依赖调用方当前目录。
     async fn validate_bound_workspace(
         &self,
         id: &ThreadId,
@@ -643,6 +641,12 @@ pub trait SessionResources: Send + Sync {
 
     /// 小型 metadata 投影；不加载历史或大快照。
     async fn load_session_meta(&self, id: &ThreadId) -> SessionResourceResult<ThreadMeta>;
+    async fn session_environment_id(
+        &self,
+        _id: &ThreadId,
+    ) -> SessionResourceResult<Option<String>> {
+        Ok(None)
+    }
 
     /// 按 scope/cursor/limit 分页列举；过滤在数据端完成。
     async fn list_sessions(

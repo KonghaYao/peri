@@ -7,7 +7,7 @@
 //!
 //! 四条贯穿全部 mutation 的规则：
 //!
-//! 1. **统一准入**：能力/权限 → 未决持久化 → 本 root 有效 owner，检查在门面内部完成
+//! 1. **统一准入**：能力/权限 → 未决持久化 → 当前实例的运行屏障，检查在门面内部完成
 //!    （[`MutationGate`]），不靠调用方先查。
 //! 2. **效果结清**：只有 `Applied | NotApplied` 才释放写入准入；`Unknown`（取消、
 //!    提交未确认）把范围交给 `Drop`，在租约上留下未决证据。
@@ -40,8 +40,8 @@ use peri_acp_types::session_resources::{
 use peri_acp_types::store::{CompactionChange, MessageFlags, PersistedPayload};
 use peri_acp_types::thread::{AgentStatus, ThreadId, ThreadMeta};
 use peri_acp_types::workspace::{
-    RecoveryRequiredDetails, ResolvedWorkspace, ScopedThreadPage, ScopedThreadQuery,
-    SessionBinding, SessionExecutionLease, WorkspaceError,
+    ResolvedWorkspace, ScopedThreadPage, ScopedThreadQuery, SessionBinding, SessionExecutionLease,
+    WorkspaceError,
 };
 
 use super::data::{ensure_child_relation, ChildResumeRecord, SessionDataPort};
@@ -50,6 +50,8 @@ use super::sqlite_store::{
     execution_failure, invalid_input, lease_required, not_found, same_lease, LocalExecution,
     ReadOnlyThreadStoreError,
 };
+#[cfg(test)]
+use peri_acp_types::workspace::RecoveryRequiredDetails;
 
 use claim::ChildResumeClaimHandle;
 use gate::MutationGate;
@@ -195,10 +197,6 @@ impl SessionResourcesImpl {
         }
     }
 
-    /// 会话级执行资格：只读事实、未决持久化与代际事实分开表达。
-    ///
-    /// 本方法不取得所有权、不创建锁文件：跨进程的持有者只能由
-    /// [`SessionResources::acquire_execution`] 的稳定锁判定。
     async fn execution_availability(
         &self,
         id: &ThreadId,
@@ -210,39 +208,26 @@ impl SessionResourcesImpl {
         if !self.gate.data().session_exists(id).await? {
             return Err(not_found());
         }
-        // 数据面事实一次取齐：活 owner 判定要树根，绑定复核要绑定字节。两者都不是本机事实，
-        // 远端组合里本机没有这条会话的行。
-        let facts = self.gate.session_facts(id).await?;
-        // 活 owner 优先于代际事实：正在运行的会话必然是 `clean = 0`，那是「有主」而不是
-        // 「需要恢复」。`OwnedElsewhere` 因此表达「执行权已在某处且活跃，本次不能再次取得」。
-        if local
-            .live_owner(id, &facts)
-            .await
-            .map_err(execution_failure)?
-            .is_some_and(|lease| lease.is_active())
-        {
-            return Ok(ExecutionAvailability::OwnedElsewhere);
-        }
-        if let Some((generation, false)) =
-            local.execution_state(id).await.map_err(execution_failure)?
-        {
-            return Ok(ExecutionAvailability::Dirty(RecoveryRequiredDetails {
-                thread_id: id.clone(),
-                generation,
-            }));
-        }
-        match self.recheck_binding(facts.binding.as_ref(), false).await {
-            Ok(_) => Ok(ExecutionAvailability::Available),
-            Err(error)
-                if matches!(
-                    error.workspace_error(),
-                    Some(WorkspaceError::BindingMissing)
-                ) =>
+        if let Some(machine_id) = self.gate.data().machine_id_of(id).await? {
+            if machine_id
+                != crate::sessions::machine::current().map_err(|_| {
+                    crate::sessions::sqlite_store::unavailable(
+                        "machine identity is not initialized",
+                    )
+                })?
             {
-                Ok(ExecutionAvailability::BindingMissing)
+                return Ok(ExecutionAvailability::WorkspaceUnavailable);
             }
-            Err(_) => Ok(ExecutionAvailability::WorkspaceUnavailable),
         }
+        let meta = self.gate.data().load_meta(id).await?;
+        if !tokio::fs::metadata(&meta.cwd)
+            .await
+            .map(|metadata| metadata.is_dir())
+            .unwrap_or(false)
+        {
+            return Ok(ExecutionAvailability::WorkspaceUnavailable);
+        }
+        Ok(ExecutionAvailability::Available)
     }
 
     /// 用 canonical 绑定字节做本机复核（`full` 为真时叠一次完整发现快照比对）。
@@ -327,7 +312,10 @@ impl SessionResourcesImpl {
         }
         let saved = self.gate.data().binding_of(id).await?;
         let premise_holds = saved.as_ref() == Some(binding)
-            && self.recheck_binding(saved.as_ref(), false).await.is_ok();
+            && matches!(
+                self.execution_availability(id).await?,
+                ExecutionAvailability::Available
+            );
         if !premise_holds {
             return Err(SessionResourceError::saved_but_not_admitted(id.clone()));
         }
@@ -414,12 +402,20 @@ impl SessionResources for SessionResourcesImpl {
         workspace: &ResolvedWorkspace,
     ) -> SessionResourceResult<Arc<dyn SessionExecutionLease>> {
         self.gate.ensure_session_write()?;
-        // 先复核再取锁：binding 不可变，先复核不与取得所有权竞争，且失败时不会留下
-        // 一个新的 dirty 代际。
         let facts = self.gate.session_facts(id).await?;
-        let resolved = self.recheck_binding(facts.binding.as_ref(), true).await?;
-        if &resolved != workspace {
-            return Err(Self::workspace_mismatch());
+        let _ = workspace;
+        if let Some(machine_id) = self.gate.data().machine_id_of(id).await? {
+            if machine_id
+                != crate::sessions::machine::current().map_err(|_| {
+                    crate::sessions::sqlite_store::unavailable(
+                        "machine identity is not initialized",
+                    )
+                })?
+            {
+                return Err(SessionResourceError::new(
+                    SessionResourceErrorKind::Workspace(WorkspaceError::Unavailable),
+                ));
+            }
         }
         self.gate
             .local()
@@ -463,13 +459,8 @@ impl SessionResources for SessionResourcesImpl {
             SessionDataHome::LocalLibrary => local.create_session(input).await,
             SessionDataHome::RemoteStore => {
                 self.gate.data().save_new_session(input).await?;
-                match local.admit_existing(&input.thread_id, &input.binding).await {
-                    Ok(lease) => Ok(lease),
-                    Err(error) if error.is_persistence_uncertain() => Err(error),
-                    Err(_) => Err(SessionResourceError::saved_but_not_admitted(
-                        input.thread_id.clone(),
-                    )),
-                }
+                self.admit_saved_creation(&input.thread_id, &input.binding)
+                    .await
             }
         }
     }
@@ -563,12 +554,40 @@ impl SessionResources for SessionResourcesImpl {
     async fn validate_bound_workspace(
         &self,
         id: &ThreadId,
-        check: BindingRecheck,
+        _check: BindingRecheck,
     ) -> SessionResourceResult<ResolvedWorkspace> {
-        // 复核不改绑、不取执行权：与 `execution_availability` 走同一对本机原语，
-        // 因此「能不能执行」与「绑定向哪里」不会出现两套结论。
-        self.recheck_binding_of(id, matches!(check, BindingRecheck::Full))
-            .await
+        let meta = self.gate.data().load_meta(id).await?;
+        let binding = self.gate.data().binding_of(id).await?;
+        let cwd = std::path::PathBuf::from(&meta.cwd);
+        let relative_cwd = binding
+            .as_ref()
+            .map(|binding| binding.cwd_relative_to_workspace.clone())
+            .unwrap_or_default();
+        let mut root = cwd.clone();
+        for _ in relative_cwd.components() {
+            root.pop();
+        }
+        let (project_id, workspace_id) = match binding {
+            Some(binding) => (binding.project_id, binding.workspace_id),
+            None => {
+                use sha2::{Digest, Sha256};
+                let digest = Sha256::digest(id.as_bytes());
+                let identity =
+                    uuid::Uuid::from_bytes(digest[..16].try_into().expect("UUID digest prefix"))
+                        .to_string();
+                (
+                    identity.parse().expect("project UUID"),
+                    identity.parse().expect("workspace UUID"),
+                )
+            }
+        };
+        Ok(ResolvedWorkspace {
+            project_id,
+            workspace_id,
+            cwd,
+            root,
+            relative_cwd,
+        })
     }
 
     async fn load_session_history(
@@ -580,6 +599,10 @@ impl SessionResources for SessionResourcesImpl {
 
     async fn load_session_meta(&self, id: &ThreadId) -> SessionResourceResult<ThreadMeta> {
         self.gate.data().load_meta(id).await
+    }
+
+    async fn session_environment_id(&self, id: &ThreadId) -> SessionResourceResult<Option<String>> {
+        self.gate.data().machine_id_of(id).await
     }
 
     async fn list_sessions(
@@ -614,7 +637,6 @@ impl SessionResources for SessionResourcesImpl {
         fork: &ForkSnapshot,
     ) -> SessionResourceResult<Arc<dyn SessionExecutionLease>> {
         self.gate.ensure_registration_write()?;
-        let local = self.gate.local();
         let data = self.gate.data();
         if !data.session_exists(&fork.source_id).await? {
             return Err(not_found());
@@ -634,16 +656,8 @@ impl SessionResources for SessionResourcesImpl {
         // 收敛，因此不需要在别处留下未决证据。与 child 的差别在于 child 的写入归属
         // root 执行域，没有自己的 identity 可解释残留。
         self.gate.data().save_fork(fork).await?;
-        match local
-            .admit_existing(&fork.target.thread_id, &fork.target.binding)
+        self.admit_saved_creation(&fork.target.thread_id, &fork.target.binding)
             .await
-        {
-            Ok(lease) => Ok(lease),
-            Err(error) if error.is_persistence_uncertain() => Err(error),
-            Err(_) => Err(SessionResourceError::saved_but_not_admitted(
-                fork.target.thread_id.clone(),
-            )),
-        }
     }
 
     async fn save_child(

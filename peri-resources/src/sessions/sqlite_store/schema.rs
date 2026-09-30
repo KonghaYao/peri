@@ -135,10 +135,11 @@ async fn column_names(connection: &mut SqliteConnection, table: &str) -> Result<
 impl SqliteSessionDatabase {
     /// DDL 与版本号在同一事务中提交；不回填历史 SessionBinding。
     pub(super) async fn init_schema(&self) -> Result<()> {
+        crate::sessions::machine::initialize().await?;
         let mut connection = self.pool.acquire().await?;
         let state = inspect(&mut connection).await?;
         if state == SchemaState::Current {
-            return Ok(());
+            return Self::migrate_environments(&mut connection).await;
         }
         // 登记表重建要对被引用的父表执行 DROP TABLE：SQLite 对父表做隐式删除时会
         // 立即检查外键，`defer_foreign_keys` 也挡不住。该 PRAGMA 只在事务外生效，
@@ -160,6 +161,22 @@ impl SqliteSessionDatabase {
         } else {
             migrated?;
         }
+        Self::migrate_environments(&mut connection).await
+    }
+
+    async fn migrate_environments(connection: &mut SqliteConnection) -> Result<()> {
+        let mut transaction = connection.begin_with("BEGIN IMMEDIATE").await?;
+        sqlx::query(AssertSqlSafe(canonical::CREATE_ENVIRONMENTS_TABLE_SQL))
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_session_environments_machine ON session_environments(machine_id, thread_id)")
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query(AssertSqlSafe(canonical::BACKFILL_ENVIRONMENTS_SQL))
+            .bind(crate::sessions::machine::current()?)
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
         Ok(())
     }
 

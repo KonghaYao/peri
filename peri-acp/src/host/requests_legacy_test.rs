@@ -149,7 +149,8 @@ async fn legacy_history_missing_directory_is_readable_without_adoption() {
         &tmp,
     )
     .await;
-    let id = old_thread(&bridge, &tmp.path().join("removed")).await;
+    let saved = tmp.path().join("removed");
+    let id = old_thread(&bridge, &saved).await;
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let mut sessions = HashMap::new();
     let response = handle_request(
@@ -163,7 +164,7 @@ async fn legacy_history_missing_directory_is_readable_without_adoption() {
     .unwrap();
     assert_eq!(response["payloads"].as_array().unwrap().len(), 1);
     assert!(response["binding"].is_null());
-    let error = handle_request(
+    handle_request(
         "session/load",
         &json!({"sessionId":id,"cwd":tmp.path()}),
         &cfg,
@@ -171,16 +172,21 @@ async fn legacy_history_missing_directory_is_readable_without_adoption() {
         &transport,
     )
     .await
-    .unwrap_err();
-    assert!(error.message.contains("unavailable"), "{}", error.message);
-    assert!(sessions.is_empty());
+    .unwrap();
+    let state = &sessions[&id];
+    assert_eq!(Path::new(&state.cwd), saved);
+    assert_eq!(state.history[0].content(), "legacy user message");
+    assert!(state.execution_owner.is_none());
+    assert!(state.environment.is_none());
+    assert!(state.frozen.is_none());
+    assert!(state.workflow_middleware.is_none());
     assert!(bridge.load_session_binding(&id).await.unwrap().is_none());
     assert!(bridge.load_frozen_snapshot(&id).await.unwrap().is_none());
 }
 
 #[tokio::test]
 #[serial]
-async fn legacy_history_rejects_wrong_directory_and_bad_frozen_without_adoption() {
+async fn legacy_history_load_ignores_wrong_directory_and_preserves_saved_cwd() {
     let tmp = tempfile::tempdir().unwrap();
     let _home = HomeDirGuard::set(tmp.path());
     let root = std::fs::canonicalize(tmp.path()).unwrap();
@@ -199,7 +205,7 @@ async fn legacy_history_rejects_wrong_directory_and_bad_frozen_without_adoption(
     let id = old_thread(&bridge, &saved).await;
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let mut sessions = HashMap::new();
-    let error = handle_request(
+    handle_request(
         "session/load",
         &json!({"sessionId":id,"cwd":other}),
         &cfg,
@@ -207,14 +213,40 @@ async fn legacy_history_rejects_wrong_directory_and_bad_frozen_without_adoption(
         &transport,
     )
     .await
-    .unwrap_err();
-    assert!(
-        error.message.contains("does not match"),
-        "{}",
-        error.message
-    );
-    assert!(bridge.load_session_binding(&id).await.unwrap().is_none());
-    assert!(bridge.load_frozen_snapshot(&id).await.unwrap().is_none());
+    .unwrap();
+    assert_eq!(Path::new(&sessions[&id].cwd), saved);
+    assert_eq!(sessions[&id].history[0].content(), "legacy user message");
+    assert!(sessions[&id].execution_owner.is_some());
+    assert_eq!(Path::new(&bridge.load_meta(&id).await.unwrap().cwd), saved);
+    assert!(bridge.load_session_binding(&id).await.unwrap().is_some());
+    assert!(bridge.load_frozen_snapshot(&id).await.unwrap().is_some());
+    handle_request(
+        "session/close",
+        &json!({"sessionId":id}),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+#[serial]
+async fn legacy_history_rejects_bad_frozen_without_adoption() {
+    let tmp = tempfile::tempdir().unwrap();
+    let _home = HomeDirGuard::set(tmp.path());
+    let saved = std::fs::canonicalize(tmp.path()).unwrap();
+    let config =
+        make_peri_config_with_provider(make_provider_config("test", "openai", "test", "model"));
+    let (cfg, bridge) = make_server_config_with_bridge(
+        config.clone(),
+        LlmProvider::from_config(&config).unwrap(),
+        &tmp,
+    )
+    .await;
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
+    let mut sessions = HashMap::new();
     for snapshot in ["broken", r#"{"version":999,"data":{}}"#] {
         let id = old_thread(&bridge, &saved).await;
         bridge
@@ -239,6 +271,15 @@ async fn legacy_history_rejects_wrong_directory_and_bad_frozen_without_adoption(
         assert_eq!(
             bridge.load_frozen_snapshot(&id).await.unwrap().as_deref(),
             Some(snapshot)
+        );
+        assert!(cfg.session_manager.get_session(&id).is_none());
+        assert_eq!(
+            cfg.session_resources
+                .inspect_availability(Some(&id))
+                .await
+                .unwrap()
+                .execution,
+            Some(peri_acp_types::session_resources::ExecutionAvailability::Available)
         );
     }
     assert!(sessions.is_empty());

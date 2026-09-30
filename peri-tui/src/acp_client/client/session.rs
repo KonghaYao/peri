@@ -3,7 +3,7 @@
 use std::sync::{Arc, Mutex};
 
 use peri_acp::transport::{AcpTransport, types::AcpError};
-use peri_acp_types::workspace::{ReadOnlyAdmission, RecoveryRequiredDetails};
+use peri_acp_types::workspace::ReadOnlyAdmission;
 use serde_json::{Value, json};
 #[cfg(test)]
 use tokio::sync::mpsc;
@@ -434,77 +434,8 @@ impl AcpTuiClient {
             .await;
         // 准入可能是只读的：历史已可读，但执行所有权不在本节点。它不是失败（不再用
         // 错误挡住进入），只把「本次准入只读」与原因带走。
-        let mut read_only = first.as_ref().ok().and_then(read_only_admission);
-        let mut result = first;
-        if let Some(target) = recovery_target(&result, session_id)
-            && self.projection_mode == ClientProjectionMode::Interactive
-            && self
-                .session_recovery
-                .load(std::sync::atomic::Ordering::Acquire)
-            && crate::kit::popups::confirm_popup::confirm_risk_choice(
-                crate::kit::popups::confirm_popup::RiskPrompt::DirtyRecovery(target.clone()),
-            )
-            .await
-                == crate::kit::popups::confirm_popup::RiskChoice::Accepted
-        {
-            // operation gate 固定 source/target；确认等待期间不能提交其他 transition。
-            let ack = peri_acp_types::workspace::ResetDirtyRequest {
-                target,
-                accept_risk: true,
-            };
-            let recovered = match self
-                .transport
-                .send_request(
-                    "peri/session_reset_dirty",
-                    serde_json::to_value(ack).expect("recovery request serialize"),
-                )
-                .await
-            {
-                Ok(_) => {
-                    // 第二次 load 会让宿主把整段历史再回放一次：回放边界与回放请求必须
-                    // 一一对应，否则两次回放叠加在同一个 committed 上，消息区整段重复。
-                    // 边界放在 reset 成功之后：reset 失败时视图保持不动，无需重取历史。
-                    crate::kit::session_boundary::project_session_boundary(Some(session_id));
-                    self.transport
-                        .send_request("session/load", params.clone())
-                        .await
-                }
-                Err(error) => Err(error),
-            };
-            match recovered {
-                Ok(response) => {
-                    read_only = read_only_admission(&response);
-                    result = Ok(response);
-                }
-                Err(error) => {
-                    tracing::warn!(%error, session_id, "dirty recovery failed");
-                    if read_only.is_some() {
-                        // 首次准入本身是只读：它仍然有效，会话不因取回失败被丢弃。按只读
-                        // 准入重取历史——成功即恢复渲染，失败就保留空视图与状态栏里的
-                        // 只读原因。
-                        //
-                        // 重取同样会被宿主回放历史，因此先投影一次回放边界：边界与会被
-                        // 回放的 load 一一对应，视图不会叠加两次历史。
-                        crate::kit::session_boundary::project_session_boundary(Some(session_id));
-                        match self.transport.send_request("session/load", params).await {
-                            Ok(response) => {
-                                read_only = read_only_admission(&response);
-                                result = Ok(response);
-                            }
-                            Err(error) => tracing::warn!(
-                                %error,
-                                session_id,
-                                "read-only re-admission after failed recovery failed"
-                            ),
-                        }
-                    } else {
-                        // 首次准入本身就是错误（未协商只读标记，或原因不是执行所有权）：
-                        // 没有可回退的准入，按本次取回失败收敛，让用户看到最新的原因。
-                        result = Err(error);
-                    }
-                }
-            }
-        }
+        let read_only = first.as_ref().ok().and_then(read_only_admission);
+        let result = first;
         if let Err(error) = result {
             *self.restore_error.lock().unwrap() = Some(error.to_string());
             self.lifecycle.fail_transition(start.generation);
@@ -625,27 +556,4 @@ fn read_only_admission(response: &Value) -> Option<ReadOnlyAdmission> {
             .clone(),
     )
     .ok()
-}
-
-/// 本次准入需要用户显式接受风险才能回到可执行，及其精确代际。
-///
-/// 两种携带方式指向同一件事：未协商只读标记的客户端从准入错误里读（`data`），协商过
-/// 的从只读标记里读——后者已经进入只读会话，风险确认流程不变。
-fn recovery_target(
-    result: &Result<Value, AcpError>,
-    session_id: &str,
-) -> Option<RecoveryRequiredDetails> {
-    let target = match result {
-        Err(error) => match error.data.clone().and_then(|data| {
-            serde_json::from_value::<peri_acp_types::workspace::WorkspaceErrorData>(data).ok()
-        }) {
-            Some(peri_acp_types::workspace::WorkspaceErrorData::RecoveryRequired(target)) => target,
-            _ => return None,
-        },
-        Ok(response) => match read_only_admission(response) {
-            Some(ReadOnlyAdmission::RecoveryRequired(target)) => target,
-            _ => return None,
-        },
-    };
-    (target.thread_id == session_id && target.generation > 0).then_some(target)
 }

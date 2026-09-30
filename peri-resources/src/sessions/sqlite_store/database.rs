@@ -23,6 +23,7 @@ use super::execution::ExecutionLease;
 pub(in crate::sessions) struct SqliteSessionDatabase {
     pub(super) pool: SqlitePool,
     pub(super) read_only: bool,
+    #[cfg(test)]
     pub(super) db_path: PathBuf,
     /// root owner 的弱引用登记：lease 的持有者是调用方，这里只用于复核准入。
     /// 键是 `thread_id` 原文（v10 之后只有这一个执行域）。
@@ -30,11 +31,12 @@ pub(in crate::sessions) struct SqliteSessionDatabase {
 }
 
 impl SqliteSessionDatabase {
-    pub(super) fn new(pool: SqlitePool, read_only: bool, db_path: PathBuf) -> Self {
+    pub(super) fn new(pool: SqlitePool, read_only: bool, _db_path: PathBuf) -> Self {
         Self {
             pool,
             read_only,
-            db_path,
+            #[cfg(test)]
+            db_path: _db_path,
             execution_leases: Mutex::new(HashMap::new()),
         }
     }

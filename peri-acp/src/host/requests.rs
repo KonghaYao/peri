@@ -76,14 +76,6 @@ pub(crate) async fn handle_request(
     if method == "workflow/resume" {
         super::workspace::validate_expected(cfg, session_id.expect("checked"), None).await?;
     }
-    // Renaming an unloaded session is a short mutation lease; never steals a live owner.
-    let transient_owner = if method == "session/rename"
-        && session_id.is_some_and(|id| !sessions.contains_key(id))
-    {
-        Some(super::workspace::acquire_transient_owner(cfg, session_id.expect("checked")).await?)
-    } else {
-        None
-    };
     let result = match method {
         "initialize" => session_lifecycle::handle_initialize(params, cfg),
         "session/new" => session_lifecycle::handle_new(params, cfg, sessions).await,
@@ -92,7 +84,6 @@ pub(crate) async fn handle_request(
             config_options::handle_set_config_option(params, cfg, sessions, transport).await
         }
         "session/load" => session_lifecycle::handle_load(params, cfg, sessions, transport).await,
-        "peri/session_reset_dirty" => session_lifecycle::handle_reset_dirty(params, cfg).await,
         "session/list" => session_lifecycle::handle_list(params, cfg).await,
         "peri/session_context" => session_lifecycle::handle_context(params, cfg).await,
         "session/metadata" => session_lifecycle::handle_metadata(params, cfg, false).await,
@@ -134,12 +125,6 @@ pub(crate) async fn handle_request(
         "mcp/oauth_cancel" => mcp_oauth::handle_oauth_cancel(params, cfg),
         _ => Err(AcpError::new(-32601, format!("Method not found: {method}"))),
     };
-    if let Some(owner) = transient_owner {
-        owner
-            .mark_clean()
-            .await
-            .map_err(super::workspace::workspace_error)?;
-    }
     result
 }
 

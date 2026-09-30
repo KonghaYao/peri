@@ -1,14 +1,13 @@
 //! A session owns one verified execution environment and its resource lifetime.
 
-use std::{path::Path, sync::Arc};
+use std::sync::Arc;
 
 use super::{assemble, task_scope, AcpServerConfig, SessionState};
 use crate::transport::types::AcpError;
 use peri_acp_types::session_resources::{BindingRecheck, SessionResourceError};
 use peri_acp_types::thread::ThreadId;
 use peri_acp_types::workspace::{
-    ReadOnlyAdmission, RecoveryRequiredDetails, ResolvedWorkspace, SessionExecutionLease,
-    WorkspaceError, WorkspaceErrorData,
+    ReadOnlyAdmission, ResolvedWorkspace, SessionExecutionLease, WorkspaceError, WorkspaceErrorData,
 };
 
 enum SessionEndState {
@@ -635,7 +634,7 @@ pub(crate) async fn reassert_expected(
 async fn check_expected(
     cfg: &AcpServerConfig,
     session_id: &str,
-    expected: Option<&str>,
+    _expected: Option<&str>,
     check: BindingCheck,
 ) -> Result<ResolvedWorkspace, AcpError> {
     let id = ThreadId::from(session_id.to_owned());
@@ -649,53 +648,7 @@ async fn check_expected(
         .validate_bound_workspace(&id, recheck)
         .await
         .map_err(resource_error)?;
-    if let Some(expected) = expected {
-        expect_directory(expected, &workspace).await?;
-    }
     Ok(workspace)
-}
-
-/// 调用方给出的执行目录必须与绑定指向同一目录。
-///
-/// 绑定的 cwd 在登记时已规范化，因此比对规范化后的路径即可：同一目录的等价路径
-/// （符号链接、`/var` 与 `/private/var`）仍然一致，别的目录与绑定不符。比较不再
-/// 解析登记——解析会为比较再跑一轮完整发现，也顺带登记一个与本次执行无关的目录。
-pub(crate) async fn expect_directory(
-    expected: &str,
-    workspace: &ResolvedWorkspace,
-) -> Result<(), AcpError> {
-    let expected = tokio::fs::canonicalize(expected)
-        .await
-        .map_err(|_| workspace_error(WorkspaceError::Unavailable))?;
-    if expected != workspace.cwd {
-        return Err(workspace_error(WorkspaceError::ExecutionBindingMismatch));
-    }
-    Ok(())
-}
-
-/// 未加载会话的短时执行准入：按保存的 cwd 解析绑定目录后取得 owner。
-///
-/// 用于 `session/rename`、`session/delete` 这类「会话不在本进程会话表里」的显式
-/// 生命周期行为：所有权是改标题/删除的前提，但不需要装配执行环境（不启动
-/// MCP/LSP/hooks）。他处持有时原样拒绝，不降级、不抢占。
-pub(crate) async fn acquire_transient_owner(
-    cfg: &AcpServerConfig,
-    session_id: &str,
-) -> Result<Arc<dyn SessionExecutionLease>, AcpError> {
-    let resources = &cfg.session_resources;
-    let id = session_id.to_owned();
-    let meta = resources
-        .load_session_meta(&id)
-        .await
-        .map_err(resource_error)?;
-    let workspace = resources
-        .resolve_workspace(Path::new(&meta.cwd))
-        .await
-        .map_err(resource_error)?;
-    resources
-        .acquire_execution(&id, &workspace)
-        .await
-        .map_err(resource_error)
 }
 
 /// 一次加载准入的结果：绑定与执行目录已复核，执行所有权可能不可得。
@@ -713,10 +666,6 @@ pub(crate) enum ExecutionAdmission {
     /// 本次准入持有执行所有权。
     Owned(Arc<dyn SessionExecutionLease>),
     /// 执行所有权不可得，但会话历史仍可只读访问；携带原因供调用方上报与降级。
-    ///
-    /// `RecoveryRequired` 对协商了 `peri.sessionRecoveryV1` 的连接是终局（它自己有确认
-    /// 交互）；没有确认交互的连接会先按观测到的精确代际解除 dirty 再重取一次，因此这里
-    /// 只承载重取之后仍未取得所有权的原因（见 [`acquire_lease_with_recovery`]）。
     Unavailable(ReadOnlyAdmission),
 }
 
@@ -774,19 +723,16 @@ async fn acquire_for_load_with(
     expected: Option<&str>,
     check: BindingCheck,
 ) -> Result<LoadAdmission, AcpError> {
-    // 绑定与执行目录不符直接失败：只读降级只针对执行所有权不可得，不掩盖身份问题。
     let workspace = check_expected(cfg, session_id, expected, check).await?;
-    // 已持有所有权直接复用；只读会话与冷会话都重新尝试取得——他处释放后再次准入
-    // 才有机会升级回可执行，而不是一次只读就永久只读。
     let held = match sessions.get(session_id) {
         Some(state) if state.closing => return Err(AcpError::new(-32010, "Session is closing")),
         Some(state) => state.execution_owner.clone(),
         None => None,
     };
-    let (owner, acquired_here) = match held {
-        Some(owner) => (owner, false),
-        None => match acquire_lease_with_recovery(cfg, session_id, &workspace).await? {
-            ExecutionAdmission::Owned(owner) => (owner, true),
+    let owner = match held {
+        Some(owner) => owner,
+        None => match try_acquire_lease(cfg, session_id, &workspace).await? {
+            ExecutionAdmission::Owned(owner) => owner,
             ExecutionAdmission::Unavailable(reason) => {
                 return Ok(LoadAdmission {
                     workspace,
@@ -795,78 +741,30 @@ async fn acquire_for_load_with(
             }
         },
     };
-    // 取得所有权后复核的是同一件事：重新发现的证据与首次复核相同，这里只复核已记录证据。
-    let workspace = match check_expected(cfg, session_id, expected, BindingCheck::Recorded).await {
-        Ok(workspace) => workspace,
-        Err(error) => {
-            // 本次准入自己取得的代际必须收尾，否则会留下既无持有者又未标 clean 的运行。
-            if acquired_here {
-                let _ = owner.mark_clean().await;
-            }
-            return Err(error);
-        }
-    };
-    if let Some(state) = sessions.get(session_id) {
-        if Path::new(&state.cwd) != workspace.cwd {
-            return Err(workspace_error(WorkspaceError::ExecutionBindingMismatch));
-        }
-    }
     Ok(LoadAdmission {
         workspace,
         execution: ExecutionAdmission::Owned(owner),
     })
 }
 
-/// 取执行所有权：先直接取一次，dirty 代际且本连接没有确认交互时由 host 解除后重取。
-///
-/// 解除只发生在观测到的精确 `(thread_id, generation)` 上；解除失败（例如并发的
-/// CAS 错配）不升级为准入失败，仍按第一次尝试的只读原因收敛。
-async fn acquire_lease_with_recovery(
-    cfg: &AcpServerConfig,
-    session_id: &str,
-    workspace: &ResolvedWorkspace,
-) -> Result<ExecutionAdmission, AcpError> {
-    let first = try_acquire_lease(cfg, session_id, workspace).await?;
-    let ExecutionAdmission::Unavailable(ReadOnlyAdmission::RecoveryRequired(ref target)) = first
-    else {
-        return Ok(first);
-    };
-    // 协商过恢复能力的客户端自己确认并调用 `peri/session_reset_dirty`：dirty 原因
-    // 就是它要看的信号，host 不替它解除。
-    if cfg.session_manager.negotiated_caps().session_recovery_v1 {
-        return Ok(first);
-    }
-    if let Err(error) = clear_dirty_generation(cfg, session_id, target).await {
-        tracing::warn!(
-            session_id,
-            thread_id = %target.thread_id,
-            generation = target.generation,
-            error = %error.message,
-            "dirty generation was not cleared; admitting read-only"
-        );
-        return Ok(first);
-    }
-    let acquired = try_acquire_lease(cfg, session_id, workspace).await;
-    // 重取失败（存储故障等不可降级的原因）此前到不了这里——那时这一步只会只读返回；
-    // 判定不变（代际已解除，没有可收敛的只读原因），只补上诊断线索。
-    if let Err(error) = &acquired {
-        tracing::warn!(
-            session_id,
-            thread_id = %target.thread_id,
-            generation = target.generation,
-            error = %error.message,
-            "dirty generation was cleared but ownership was not re-acquired"
-        );
-    }
-    acquired
-}
-
-/// 取一次执行所有权：只有「所有权不可得」的三类原因才按只读收敛，其他失败原样上报。
 async fn try_acquire_lease(
     cfg: &AcpServerConfig,
     session_id: &str,
     workspace: &ResolvedWorkspace,
 ) -> Result<ExecutionAdmission, AcpError> {
+    let availability = cfg
+        .session_resources
+        .inspect_availability(Some(&session_id.to_owned()))
+        .await
+        .map_err(resource_error)?;
+    if matches!(
+        availability.execution,
+        Some(peri_acp_types::session_resources::ExecutionAvailability::WorkspaceUnavailable)
+    ) {
+        return Ok(ExecutionAdmission::Unavailable(
+            ReadOnlyAdmission::ExecutionLeaseRequired,
+        ));
+    }
     match cfg
         .session_resources
         .acquire_execution(&session_id.to_owned(), workspace)
@@ -878,32 +776,4 @@ async fn try_acquire_lease(
             None => Err(resource_error(error)),
         },
     }
-}
-
-/// 未协商恢复能力的连接遇到 dirty 代际：host 直接解除该精确代际。
-///
-/// 这是拿风险换可用的裁决：停在只读等于 dirty 会话在这类客户端上永远不可用，而它
-/// 没有确认交互可以承担这个选择。解除仍只针对观测到的精确 `(thread_id, generation)`
-/// （稳定 OS 锁与代次 CAS 语义不变），旧执行是否已收尾依旧未知——解除不构成
-/// 「上一代已正常结束」的证明，只是把进入放在已知风险之上。
-async fn clear_dirty_generation(
-    cfg: &AcpServerConfig,
-    session_id: &str,
-    target: &RecoveryRequiredDetails,
-) -> Result<(), AcpError> {
-    cfg.session_resources
-        .reset_dirty_execution(&peri_acp_types::workspace::ResetDirtyRequest {
-            target: target.clone(),
-            // host 自动解除是「拿风险换可用」的既有裁决；门面要求调用方显式承担。
-            accept_risk: true,
-        })
-        .await
-        .map_err(resource_error)?;
-    tracing::warn!(
-        session_id,
-        thread_id = %target.thread_id,
-        generation = target.generation,
-        "cleared dirty execution generation for a client without recovery interaction"
-    );
-    Ok(())
 }

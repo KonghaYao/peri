@@ -8,6 +8,7 @@ mod canonical;
 mod data;
 mod filesystem;
 mod local_port;
+mod machine;
 mod open;
 mod remote;
 // `CredentialError` 只做 crate 内最小 re-export：分类（`classify_open_failure`）要按类型认出

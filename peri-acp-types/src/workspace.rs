@@ -83,6 +83,7 @@ pub struct ResolvedWorkspace {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum ThreadScope {
+    Environment(String),
     Project(ProjectId),
     Workspace(WorkspaceId),
     ExactDirectory {
@@ -238,12 +239,12 @@ pub enum WorkspaceError {
     Unsupported,
 }
 
-/// Exclusive local execution capability, held across all owned resources.
-/// Dropping it releases only the OS lock and deliberately leaves the run dirty.
+/// Local runtime lifecycle handle, retained until its resources have stopped.
+/// This handle does not provide exclusive session ownership or an OS lock.
 #[async_trait]
 pub trait SessionExecutionLease: Send + Sync {
     fn thread_id(&self) -> &ThreadId;
-    /// Persist clean and release ownership only after all owned resources have stopped.
+    /// Persist diagnostic completion only after this runtime's resources have stopped.
     async fn mark_clean(&self) -> anyhow::Result<()>;
 }
 

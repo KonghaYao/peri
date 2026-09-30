@@ -782,8 +782,6 @@ pub static NOTIFICATION: AtomStatic<Option<Notification>> = AtomStatic::new(|| N
 /// 确认弹窗要执行的操作
 #[derive(Debug, Clone)]
 pub enum ConfirmAction {
-    /// 仅发起它的那次会话操作消费的一次性风险选择（dirty 解除）。
-    RiskChoice(std::sync::Arc<crate::kit::popups::confirm_popup::RiskConfirmation>),
     /// 切换到指定 thread_id
     ThreadSwitch(String),
     /// 用户确认拒绝回答 AskUser 提问

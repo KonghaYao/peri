@@ -423,6 +423,11 @@ impl SqliteSessionDatabase {
             FROM threads t LEFT JOIN session_bindings b ON b.thread_id = t.id LEFT JOIN workspaces w ON w.id = b.workspace_id
             WHERE t.hidden = 0 AND t.message_count > 0");
         match &query.scope {
+            ThreadScope::Environment(machine_id) => {
+                sql.push(" AND EXISTS (SELECT 1 FROM session_environments env WHERE env.thread_id = t.id AND env.machine_id = ")
+                    .push_bind(machine_id)
+                    .push(")");
+            }
             ThreadScope::Project(id) => {
                 sql.push(" AND (b.project_id = ").push_bind(id.to_string());
                 push_legacy_scope(&mut sql, "project_id", id.to_string());

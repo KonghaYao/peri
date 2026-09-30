@@ -121,7 +121,6 @@ impl SqliteSessionDatabase {
                 .await
                 .with_context(|| format!("创建目录失败: {}", parent.display()))?;
         }
-        let _schema_lock = lock_schema_open(&db_path).await?;
         // 在 WAL/DDL 写入前识别未知 schema；已知旧库交给事务升级。
         if tokio::fs::metadata(&db_path)
             .await
@@ -240,44 +239,4 @@ impl SqliteSessionDatabase {
     pub(crate) fn default_database_path() -> Result<PathBuf> {
         super::super::default_database_path().context("无法获取 home 目录")
     }
-}
-
-/// SQLite's initial journal-mode switch can return BUSY despite busy_timeout when
-/// two fresh connections upgrade together. Serialize writable opens before connecting.
-async fn lock_schema_open(path: &Path) -> Result<std::fs::File> {
-    let canonical = if tokio::fs::try_exists(path).await? {
-        tokio::fs::canonicalize(path).await?
-    } else {
-        let parent = path
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-            .unwrap_or(Path::new("."));
-        tokio::fs::canonicalize(parent)
-            .await?
-            .join(path.file_name().context("database filename missing")?)
-    };
-    let mut lock_path = canonical.into_os_string();
-    lock_path.push(".schema-lock");
-    tokio::task::spawn_blocking(move || {
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(lock_path)?;
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        loop {
-            match file.try_lock() {
-                Ok(()) => return Ok(file),
-                Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-                Err(std::fs::TryLockError::WouldBlock) => {
-                    anyhow::bail!("session database initialization is busy")
-                }
-                Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
-            }
-        }
-    })
-    .await?
 }

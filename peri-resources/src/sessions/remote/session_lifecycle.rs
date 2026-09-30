@@ -28,10 +28,7 @@ use turso_serverless::Value;
 use super::mutation::incomplete_reply;
 use super::session_codec as codec;
 use super::session_data::{invalid_input, not_found, RemoteSessionData};
-use super::session_sql::{
-    self, binding_relative_text, DELETE_SESSION_BINDINGS_SQL, DELETE_SESSION_MESSAGES_SQL,
-    DELETE_SESSION_SQL,
-};
+use super::session_sql::{self, binding_relative_text, DELETE_SESSION_SQL};
 use super::sql::{int_at, text_at, StatementSpec};
 use crate::sessions::data::ChildResumeRecord;
 
@@ -247,8 +244,8 @@ impl RemoteSessionData {
         // 删除不新增墓碑：树上的每个会话先清子行（messages → session_bindings，
         // 与 `canonical::THREAD_CHILD_DELETES` 同一份语句与顺序）再清会话行，
         // 全部在同一个批里。
-        let mut effects = Vec::with_capacity(tree.len() * 3);
-        for statement in [DELETE_SESSION_MESSAGES_SQL, DELETE_SESSION_BINDINGS_SQL] {
+        let mut effects = Vec::with_capacity(tree.len() * 4);
+        for (_, statement) in crate::sessions::canonical::THREAD_CHILD_DELETES {
             for thread in &tree {
                 effects.push(StatementSpec::new(
                     statement,
@@ -373,6 +370,7 @@ fn revocation_gate(children: Option<i64>) -> SessionResourceResult<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::session_sql::{DELETE_SESSION_BINDINGS_SQL, DELETE_SESSION_MESSAGES_SQL};
     use super::*;
 
     fn placeholders(sql: &str) -> usize {

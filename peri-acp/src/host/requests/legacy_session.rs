@@ -3,9 +3,8 @@
 use peri_acp_types::{
     session_resources::{BindingState, FrozenSnapshotBytes, FrozenState},
     thread::ThreadMeta,
-    workspace::{ResolvedWorkspace, WorkspaceError},
+    workspace::ResolvedWorkspace,
 };
-use std::path::Path;
 
 use super::{decode_frozen_snapshot, AcpError, AcpServerConfig};
 use crate::host::prepared::PreparedSessionInputs;
@@ -15,23 +14,19 @@ pub(super) async fn resolve_saved_workspace(
     cfg: &AcpServerConfig,
     meta: &ThreadMeta,
 ) -> Result<ResolvedWorkspace, AcpError> {
-    if meta.parent_thread_id.is_some() {
-        return Err(workspace_error(WorkspaceError::ExecutionLeaseRequired));
-    }
-    if !Path::new(&meta.cwd).is_absolute() {
-        return Err(workspace_error(WorkspaceError::Unavailable));
-    }
     cfg.session_resources
-        .resolve_workspace(Path::new(&meta.cwd))
+        .validate_bound_workspace(
+            &meta.id,
+            peri_acp_types::session_resources::BindingRecheck::Recorded,
+        )
         .await
         .map_err(resource_error)
 }
 
 /// 恢复前的 legacy 准备：已绑定会话返回 `None`。
 ///
-/// 绑定分类与 frozen 状态来自门面的一次一致读取：只有本机确认的 legacy
-/// （[`BindingState::LegacyConfirmed`]）才进入接纳，外来登记、缺登记与损坏不会被
-/// 解释成「没有 legacy」。无 frozen 的 legacy 会话按保存的绝对 cwd 只读定格一份完整
+/// 绑定分类与 frozen 状态来自门面的一次一致读取。调用方先确认机器环境可执行；
+/// 无 frozen 的 legacy 会话按保存的 cwd 只读定格一份完整
 /// 准备输入——插件发现走严格只读入口，不生成合成清单、不写插件缓存。
 pub(super) async fn prepare_for_restore(
     cfg: &AcpServerConfig,
@@ -40,37 +35,16 @@ pub(super) async fn prepare_for_restore(
 ) -> Result<Option<PreparedSessionInputs>, AcpError> {
     let resources = cfg.session_resources.clone();
     let id = session_id.to_owned();
-    let mut snapshot = resources
+    let snapshot = resources
         .load_session_snapshot(&id)
         .await
         .map_err(resource_error)?;
     let meta = snapshot.meta.clone();
-    // 本机 legacy 的证据是「保存的绝对 cwd 落在已登记 workspace 之下」。新库/新节点
-    // 上该目录尚未登记，Missing 因此先按保存路径解析登记一次再复判——不把「尚未登记」
-    // 直接当成本机 legacy，已绑定会话也不为这一轮多跑发现。
-    let workspace = match snapshot.binding {
-        BindingState::Bound(_) => return Ok(None),
-        BindingState::LegacyConfirmed => resolve_saved_workspace(cfg, &meta).await?,
-        BindingState::Missing => {
-            let workspace = resolve_saved_workspace(cfg, &meta).await?;
-            snapshot = resources
-                .load_session_snapshot(&id)
-                .await
-                .map_err(resource_error)?;
-            if !matches!(snapshot.binding, BindingState::LegacyConfirmed) {
-                return Err(workspace_error(WorkspaceError::Unavailable));
-            }
-            workspace
-        }
-        // 外来会话或本机登记缺失：历史可读，但不能按 legacy 自动接纳。
-        BindingState::ExternalOrUnregistered => {
-            return Err(workspace_error(WorkspaceError::Unavailable))
-        }
-    };
-    if let Some(expected) = expected_cwd {
-        // 与绑定比对的是「同一目录」，不需要为此再解析登记（那会多跑一轮完整发现）。
-        crate::host::workspace::expect_directory(expected, &workspace).await?;
+    if matches!(snapshot.binding, BindingState::Bound(_)) {
+        return Ok(None);
     }
+    let _ = expected_cwd;
+    let workspace = resolve_saved_workspace(cfg, &meta).await?;
     // frozen 呈现两条事实源：持久字节（Present）当场接纳；LegacyAbsent 在接纳事务前
     // 构建一次候选（J2 §3.1：legacy 不走两阶段——存储要求绑定先于执行所有权，接纳
     // 之前无法取得执行环境，因此这里没有 MCP 资源面可用；覆盖不可得按 X8 保持内置）。

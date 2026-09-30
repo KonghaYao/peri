@@ -222,10 +222,19 @@ impl RemoteSessionData {
         // 不覆盖，已初始化的 store 上是一次幂等的空操作。这一步不能只在「身份刚建立」时
         // 跑——身份早于会话表建立的 store（例如只做过机制实测的库）同样需要补齐。
         if access == StoreAccess::ReadWrite {
+            crate::sessions::machine::initialize().await.map_err(|_| {
+                crate::sessions::sqlite_store::unavailable("machine identity initialization failed")
+            })?;
             // 父行检查先归位：canonical 形状里的外键在远端没有可满足的父行（见方法文档）。
             store.force_parent_checks_off().await?;
             store
                 .apply_schema(session_schema::initialization_plan())
+                .await?;
+            store
+                .apply_schema(vec![StatementSpec::new(
+                    crate::sessions::canonical::BACKFILL_ENVIRONMENTS_SQL,
+                    vec![Value::Text(format!("legacy:{}", store_id.as_str()))],
+                )])
                 .await?;
         }
         Ok((
@@ -556,6 +565,19 @@ fn unsupported_behavior(behavior: &'static str) -> SessionResourceError {
 
 #[async_trait]
 impl SessionDataPort for RemoteSessionData {
+    async fn machine_id_of(&self, id: &ThreadId) -> SessionResourceResult<Option<String>> {
+        let store = self.store().await?;
+        if store.fetch_row(&StatementSpec::bare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'session_environments'")).await?.is_none() {
+            return Ok(None);
+        }
+        let row = store
+            .fetch_row(&StatementSpec::new(
+                "SELECT machine_id FROM session_environments WHERE thread_id = ?1",
+                vec![Value::Text(id.clone())],
+            ))
+            .await?;
+        Ok(row.and_then(|values| super::sql::text_at(&values, 0).map(str::to_owned)))
+    }
     async fn save_new_session(&self, input: &NewSession) -> SessionResourceResult<()> {
         self.write_new_session(input).await
     }
