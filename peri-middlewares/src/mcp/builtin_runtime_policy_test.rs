@@ -293,7 +293,7 @@ async fn policy_close_five_dimensions() {
             "生产 spawn 点必须为 tick_enabled=true 的 cron 代挂上**运行中**的 tick（TickGuard 未结束）"
         );
         let mut extra_service =
-            serve_client_auto(io, None, None, &pool.capability_profile, HANDSHAKE_TIMEOUT)
+            serve_client_auto(io, None, &pool.capability_profile, HANDSHAKE_TIMEOUT)
                 .await
                 .expect("附加代的 builtin 握手不得超时")
                 .expect("附加代的 builtin 握手不得失败");

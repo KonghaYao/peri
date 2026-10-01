@@ -12,7 +12,6 @@ fn test_overrides_after_boundary_marker() {
         &MetaHarnessState::default(),
         Some(&overrides),
         "/tmp",
-        PromptFeatures::none(),
         &AgentCatalogProvider::new(),
         None,
         None,
@@ -62,7 +61,7 @@ fn tmp_dir(prefix: &str) -> std::path::PathBuf {
 fn test_available_agents_placeholder_replaced() {
     // W5：候选目录来自会话级 MCP Agent registry 的资源面投影（不再扫盘）。
     let dir = tmp_dir("prompt_test_agent_replaced");
-    let features = PromptFeatures::none();
+
     let catalog = bound_catalog(&[(
         peri_acp_types::workspace_resources::ResourceScope::Project,
         "tester",
@@ -72,7 +71,6 @@ fn test_available_agents_placeholder_replaced() {
         &MetaHarnessState::default(),
         None,
         dir.to_str().unwrap(),
-        features,
         &catalog,
         None,
         None,
@@ -99,7 +97,7 @@ fn test_available_agents_placeholder_replaced() {
 fn test_available_agents_placeholder_empty_dir() {
     // W5：无 project agent 定义时，builtin 静态表仍经资源面进目录。
     let dir = tmp_dir("prompt_test_agent_empty");
-    let features = PromptFeatures::none();
+
     let catalog = bound_catalog(&[(
         peri_acp_types::workspace_resources::ResourceScope::Builtin,
         "explorer",
@@ -109,7 +107,6 @@ fn test_available_agents_placeholder_empty_dir() {
         &MetaHarnessState::default(),
         None,
         dir.to_str().unwrap(),
-        features,
         &catalog,
         None,
         None,
@@ -132,12 +129,11 @@ fn test_available_agents_placeholder_empty_dir() {
 #[test]
 fn test_available_agents_replaced_when_subagent_holder_enabled() {
     let dir = tmp_dir("prompt_test_agent_holder");
-    let features = PromptFeatures::none();
+
     let result = build_system_prompt(
         &MetaHarnessState::default(),
         None,
         dir.to_str().unwrap(),
-        features,
         &AgentCatalogProvider::new(),
         None,
         None,
@@ -161,7 +157,7 @@ fn meta_harness_disabling_holder_removes_section() {
     state
         .disabled_middlewares
         .insert("SubAgentMiddleware".to_string());
-    let result = render_with_state(&state, PromptFeatures::none());
+    let result = render_with_state(&state);
     assert!(
         !result.contains("SubAgent Delegation"),
         "关闭 SubAgentMiddleware 后 11_subagent 段落应消失（盲区闭合）"
@@ -236,7 +232,6 @@ fn test_language_simplified_chinese_injected() {
         &MetaHarnessState::default(),
         None,
         "/tmp",
-        PromptFeatures::none(),
         &AgentCatalogProvider::new(),
         None,
         Some("zh-CN"),
@@ -262,7 +257,6 @@ fn test_language_none_no_injection() {
         &MetaHarnessState::default(),
         None,
         "/tmp",
-        PromptFeatures::none(),
         &AgentCatalogProvider::new(),
         None,
         None,
@@ -279,7 +273,6 @@ fn test_language_section_after_dynamic_content() {
         &MetaHarnessState::default(),
         None,
         "/tmp",
-        PromptFeatures::none(),
         &AgentCatalogProvider::new(),
         None,
         Some("zh-CN"),
@@ -304,7 +297,6 @@ fn test_language_zh_maps_to_simplified_chinese() {
         &MetaHarnessState::default(),
         None,
         "/tmp",
-        PromptFeatures::none(),
         &AgentCatalogProvider::new(),
         None,
         Some("zh"),
@@ -321,7 +313,6 @@ fn test_language_custom_code_passthrough() {
         &MetaHarnessState::default(),
         None,
         "/tmp",
-        PromptFeatures::none(),
         &AgentCatalogProvider::new(),
         None,
         Some("fr"),
@@ -354,104 +345,80 @@ fn test_prompt_template_byte_identical_to_build_system_prompt() {
         mode: None,
     };
 
-    // 覆盖多种 features 组合（C3：gate 判定仅剩 channel——收集段恒渲染，
-    // 组合保持以验证两条渲染路径在所有 gate 配置下字节一致）
-    let features_combos = [
-        PromptFeatures::none(),
-        PromptFeatures {
-            channel_enabled: true,
-        },
-        PromptFeatures::detect(),
-    ];
-
     let language_combos: [Option<&str>; 3] = [None, Some("zh-CN"), Some("fr")];
 
-    for features in &features_combos {
-        for language in &language_combos {
-            // No overrides
-            {
-                let old = build_system_prompt(
-                    &MetaHarnessState::default(),
-                    no_overrides,
-                    cwd,
-                    *features,
-                    &AgentCatalogProvider::new(),
-                    Some(frozen_date),
-                    *language,
-                );
-                let env = PromptEnv::with_frozen_date(cwd, frozen_date);
-                let collected = crate::session::build_collected_sections(
-                    &MetaHarnessState::default(),
-                    no_overrides,
-                    *language,
-                );
-                let new = PromptTemplate::new(&MetaHarnessState::default(), &collected).render(
-                    &env,
-                    features,
-                    &AgentCatalogProvider::new(),
-                );
-                assert_eq!(
-                    old, new,
-                    "byte mismatch: features={:?}, lang={:?}, overrides=None",
-                    features, language
-                );
-            }
-            // With non-empty overrides
-            {
-                let old = build_system_prompt(
-                    &MetaHarnessState::default(),
-                    Some(&with_overrides),
-                    cwd,
-                    *features,
-                    &AgentCatalogProvider::new(),
-                    Some(frozen_date),
-                    *language,
-                );
-                let env = PromptEnv::with_frozen_date(cwd, frozen_date);
-                let collected = crate::session::build_collected_sections(
-                    &MetaHarnessState::default(),
-                    Some(&with_overrides),
-                    *language,
-                );
-                let new = PromptTemplate::new(&MetaHarnessState::default(), &collected).render(
-                    &env,
-                    features,
-                    &AgentCatalogProvider::new(),
-                );
-                assert_eq!(
-                    old, new,
-                    "byte mismatch: features={:?}, lang={:?}, overrides=Some",
-                    features, language
-                );
-            }
-            // With empty overrides (should behave same as None)
-            {
-                let old = build_system_prompt(
-                    &MetaHarnessState::default(),
-                    Some(&empty_overrides),
-                    cwd,
-                    *features,
-                    &AgentCatalogProvider::new(),
-                    Some(frozen_date),
-                    *language,
-                );
-                let env = PromptEnv::with_frozen_date(cwd, frozen_date);
-                let collected = crate::session::build_collected_sections(
-                    &MetaHarnessState::default(),
-                    Some(&empty_overrides),
-                    *language,
-                );
-                let new = PromptTemplate::new(&MetaHarnessState::default(), &collected).render(
-                    &env,
-                    features,
-                    &AgentCatalogProvider::new(),
-                );
-                assert_eq!(
-                    old, new,
-                    "byte mismatch: features={:?}, lang={:?}, overrides=Some(empty)",
-                    features, language
-                );
-            }
+    for language in &language_combos {
+        // No overrides
+        {
+            let old = build_system_prompt(
+                &MetaHarnessState::default(),
+                no_overrides,
+                cwd,
+                &AgentCatalogProvider::new(),
+                Some(frozen_date),
+                *language,
+            );
+            let env = PromptEnv::with_frozen_date(cwd, frozen_date);
+            let collected = crate::session::build_collected_sections(
+                &MetaHarnessState::default(),
+                no_overrides,
+                *language,
+            );
+            let new = PromptTemplate::new(&MetaHarnessState::default(), &collected)
+                .render(&env, &AgentCatalogProvider::new());
+            assert_eq!(
+                old, new,
+                "byte mismatch: lang={:?}, overrides=None",
+                language
+            );
+        }
+        // With non-empty overrides
+        {
+            let old = build_system_prompt(
+                &MetaHarnessState::default(),
+                Some(&with_overrides),
+                cwd,
+                &AgentCatalogProvider::new(),
+                Some(frozen_date),
+                *language,
+            );
+            let env = PromptEnv::with_frozen_date(cwd, frozen_date);
+            let collected = crate::session::build_collected_sections(
+                &MetaHarnessState::default(),
+                Some(&with_overrides),
+                *language,
+            );
+            let new = PromptTemplate::new(&MetaHarnessState::default(), &collected)
+                .render(&env, &AgentCatalogProvider::new());
+            assert_eq!(
+                old, new,
+                "byte mismatch: lang={:?}, overrides=Some",
+                language
+            );
+        }
+        // With empty overrides (should behave same as None)
+        {
+            let old = build_system_prompt(
+                &MetaHarnessState::default(),
+                Some(&empty_overrides),
+                cwd,
+                &AgentCatalogProvider::new(),
+                Some(frozen_date),
+                *language,
+            );
+            let env = PromptEnv::with_frozen_date(cwd, frozen_date);
+            let collected = crate::session::build_collected_sections(
+                &MetaHarnessState::default(),
+                Some(&empty_overrides),
+                *language,
+            );
+            let new = PromptTemplate::new(&MetaHarnessState::default(), &collected)
+                .render(&env, &AgentCatalogProvider::new());
+            assert_eq!(
+                old, new,
+                "byte mismatch: lang={:?}, overrides=Some(empty)",
+                language
+            );
         }
     }
 }
@@ -465,7 +432,6 @@ fn test_template_byte_identical_and_one_boundary_marker() {
         &MetaHarnessState::default(),
         None,
         "/tmp",
-        PromptFeatures::detect(),
         &AgentCatalogProvider::new(),
         None,
         None,
@@ -473,11 +439,8 @@ fn test_template_byte_identical_and_one_boundary_marker() {
     let env = PromptEnv::detect("/tmp");
     let collected =
         crate::session::build_collected_sections(&MetaHarnessState::default(), None, None);
-    let new = PromptTemplate::new(&MetaHarnessState::default(), &collected).render(
-        &env,
-        &PromptFeatures::detect(),
-        &AgentCatalogProvider::new(),
-    );
+    let new = PromptTemplate::new(&MetaHarnessState::default(), &collected)
+        .render(&env, &AgentCatalogProvider::new());
     assert_eq!(old, new, "两条渲染路径字节一致");
     assert_eq!(
         new.matches(SYSTEM_PROMPT_DYNAMIC_BOUNDARY).count(),
@@ -506,7 +469,6 @@ fn test_render_full_mode_preserves_immutable_layers() {
         &MetaHarnessState::default(),
         Some(&overrides),
         "/tmp",
-        PromptFeatures::none(),
         &AgentCatalogProvider::new(),
         Some("2026-01-01"),
         None,
@@ -547,7 +509,6 @@ fn test_render_full_mode_preserves_secret_policy() {
         &MetaHarnessState::default(),
         Some(&overrides),
         "/tmp",
-        PromptFeatures::none(),
         &AgentCatalogProvider::new(),
         Some("2026-01-01"),
         None,
@@ -574,7 +535,6 @@ fn test_render_full_mode_preserves_git_guardrails() {
         &MetaHarnessState::default(),
         Some(&overrides),
         "/tmp",
-        PromptFeatures::none(),
         &AgentCatalogProvider::new(),
         Some("2026-01-01"),
         None,
@@ -601,7 +561,6 @@ fn test_render_full_mode_preserves_tool_discipline() {
         &MetaHarnessState::default(),
         Some(&overrides),
         "/tmp",
-        PromptFeatures::none(),
         &AgentCatalogProvider::new(),
         Some("2026-01-01"),
         None,
@@ -645,7 +604,6 @@ fn test_render_full_mode_prefix_aligned_with_extend() {
         &MetaHarnessState::default(),
         Some(&full_overrides),
         "/tmp",
-        PromptFeatures::none(),
         &AgentCatalogProvider::new(),
         Some("2026-01-01"),
         None,
@@ -654,7 +612,6 @@ fn test_render_full_mode_prefix_aligned_with_extend() {
         &MetaHarnessState::default(),
         None,
         "/tmp",
-        PromptFeatures::none(),
         &AgentCatalogProvider::new(),
         Some("2026-01-01"),
         None,
@@ -679,14 +636,10 @@ fn test_render_full_mode_prefix_aligned_with_extend() {
 #[test]
 fn test_render_immutable_layer_order() {
     // frozen_date 参数化，避免触发 chrono::Local::now()（testing-standards 4.1 确定性）
-    let features = PromptFeatures {
-        channel_enabled: true,
-    };
     let result = build_system_prompt(
         &MetaHarnessState::default(),
         None,
         "/tmp",
-        features,
         &AgentCatalogProvider::new(),
         Some("2026-01-01"),
         None,
@@ -722,7 +675,6 @@ fn test_render_full_mode_keeps_env() {
         &MetaHarnessState::default(),
         Some(&overrides),
         "/custom/project",
-        PromptFeatures::none(),
         &AgentCatalogProvider::new(),
         Some("2026-01-01"),
         None,
@@ -757,7 +709,6 @@ fn test_render_extend_mode_unchanged() {
         &MetaHarnessState::default(),
         Some(&overrides_none),
         "/tmp",
-        PromptFeatures::none(),
         &AgentCatalogProvider::new(),
         Some("2026-01-01"),
         None,
@@ -766,7 +717,6 @@ fn test_render_extend_mode_unchanged() {
         &MetaHarnessState::default(),
         Some(&overrides_extend),
         "/tmp",
-        PromptFeatures::none(),
         &AgentCatalogProvider::new(),
         Some("2026-01-01"),
         None,
@@ -906,12 +856,11 @@ fn unbound_catalog_still_replaces_the_placeholder_without_leaking_it() {
     // W5 防回归：面未装配（未绑定 registry）时占位符也必须被替换（空目录提示），
     // 且**不得**把 `{{available_agents}}` 原文泄漏进 prompt。
     let dir = tmp_dir("prompt_test_agent_unbound");
-    let features = PromptFeatures::none();
+
     let result = build_system_prompt(
         &MetaHarnessState::default(),
         None,
         dir.to_str().unwrap(),
-        features,
         &AgentCatalogProvider::new(),
         None,
         None,

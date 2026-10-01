@@ -581,7 +581,6 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
                     &claude_home_clone,
                     init_tx,
                     oauth_event_callback,
-                    None,
                 )
                 .await;
             }
@@ -768,7 +767,6 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         dynamic_mcp: Some(dynamic_mcp),
         oauth_event_tx: Some(oauth_event_tx),
         oauth_event_rx: Some(oauth_event_rx),
-        channel_state: None, // ServiceRegistry.channel_state 已删除
         plugin_skill_roots,
         plugin_command_entries,
         plugin_hooks: flat_hooks,

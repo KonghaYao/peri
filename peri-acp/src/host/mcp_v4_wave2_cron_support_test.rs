@@ -175,15 +175,8 @@ impl AssembledHostFixture {
         let workspace = dirs.workspace.clone();
         let claude_home = dirs.claude_home.clone();
         let init_task = tokio::spawn(async move {
-            McpClientPool::run_initialize(
-                init_pool,
-                &workspace,
-                &claude_home,
-                status_tx,
-                None,
-                None,
-            )
-            .await;
+            McpClientPool::run_initialize(init_pool, &workspace, &claude_home, status_tx, None)
+                .await;
         });
         tokio::time::timeout(std::time::Duration::from_secs(30), async {
             loop {

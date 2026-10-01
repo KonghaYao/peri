@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::collections::HashMap;
 
 use peri_acp_types::plugin::McpProtocolVersion;
 use rmcp::{
@@ -7,7 +7,6 @@ use rmcp::{
     transport::IntoTransport,
 };
 
-use super::super::channel_handler::ChannelHandler;
 use super::McpServiceWrapper;
 
 /// 使用官方 lifecycle 协商并限制总连接时间（initialize / reconnect 共用）。
@@ -17,7 +16,6 @@ use super::McpServiceWrapper;
 #[allow(clippy::result_large_err)]
 pub(crate) async fn serve_client_auto<T, E, A>(
     transport: T,
-    channel_handler: Option<&Arc<ChannelHandler>>,
     protocol_version: Option<&McpProtocolVersion>,
     capability_profile: &crate::mcp::apps::McpCapabilityProfile,
     timeout: std::time::Duration,
@@ -37,21 +35,13 @@ where
         }
     };
     tokio::time::timeout(timeout, async {
-        match channel_handler {
-            Some(handler) => {
-                let handler = Arc::new(handler.with_capability_profile(capability_profile.clone()));
-                rmcp::service::serve_client_with_lifecycle(handler, transport, lifecycle)
-                    .await
-                    .map(McpServiceWrapper::Channel)
-            }
-            None => rmcp::service::serve_client_with_lifecycle(
-                super::mcpp_client_info_for_profile(capability_profile),
-                transport,
-                lifecycle,
-            )
-            .await
-            .map(McpServiceWrapper::Default),
-        }
+        rmcp::service::serve_client_with_lifecycle(
+            super::mcpp_client_info_for_profile(capability_profile),
+            transport,
+            lifecycle,
+        )
+        .await
+        .map(McpServiceWrapper::Default)
     })
     .await
 }

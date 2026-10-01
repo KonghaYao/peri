@@ -95,8 +95,6 @@ pub struct McpClientHandle {
     pub source: Option<ConfigSource>,
     /// 服务器 URL（HTTP 传输）
     pub url: Option<String>,
-    /// Whether the MCP server declared experimental.claude/channel capability
-    pub channel_capable: bool,
     /// Whether the MCP server declared the `io.modelcontextprotocol/skills`
     /// extension (SEP-2640)：true 时 skill 发现走 `skills/list` + digest 校验，
     /// false 时回退 legacy `skill://` resources 扫描兜底。

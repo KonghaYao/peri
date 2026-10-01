@@ -117,7 +117,6 @@ impl McpClientPool {
                 source,
                 url,
                 skills_capable: false,
-                channel_capable: false,
             });
             pool.advance_handle_generation(&handle);
             pool.clients.write().insert(name.to_string(), handle);
@@ -165,7 +164,6 @@ impl McpClientPool {
                 source,
                 url,
                 skills_capable: false,
-                channel_capable: false,
             });
             pool.advance_handle_generation(&handle);
             pool.clients.write().insert(name.to_string(), handle);

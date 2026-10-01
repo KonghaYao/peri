@@ -165,7 +165,7 @@ use peri_acp_types::cron::CronSchedulerPort;
 use peri_acp_types::event::AgentEventHandler;
 use peri_acp_types::goal::GoalController;
 use peri_acp_types::hooks::RegisteredHook;
-use peri_acp_types::interaction::{ChannelState, UserInteractionBroker};
+use peri_acp_types::interaction::UserInteractionBroker;
 use peri_acp_types::lsp::LspServerConfig;
 use peri_acp_types::mcp_skills::McpSkillRegistry;
 use peri_acp_types::plugin::LoadedPlugin;
@@ -285,8 +285,6 @@ pub struct AssemblyContext {
         Arc<parking_lot::Mutex<Option<Arc<dyn peri_acp_types::ports::SessionMcpProjectionLease>>>>,
     /// Session ID bound into DynamicMCP operations.
     pub session_id: String,
-    /// Channel 状态（MultiplexBroker 包装用）
-    pub channel_state: Option<Arc<ChannelState>>,
     /// 工具搜索索引端口
     pub tool_search_index: Arc<dyn ToolSearchPort>,
     /// 共享工具注册表（deferred tools；AskUserTool 插入、snapshot 构造）

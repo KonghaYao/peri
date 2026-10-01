@@ -1,6 +1,5 @@
 //! rmcp service 适配与连接能力声明。
 
-use crate::mcp::channel_handler::ChannelHandler;
 use rmcp::{
     model::{ClientCapabilities, Implementation, InitializeRequestParams},
     service::{Peer, QuitReason, RoleClient, RunningService},
@@ -18,7 +17,6 @@ impl McpServiceOwner {
     pub(crate) fn new(service: McpServiceWrapper) -> Self {
         let cancellation = match &service {
             McpServiceWrapper::Default(service) => Some(service.cancellation_token()),
-            McpServiceWrapper::Channel(service) => Some(service.cancellation_token()),
             _ => None,
         };
         Self {
@@ -62,10 +60,9 @@ impl Drop for McpServiceOwner {
     }
 }
 
-/// Wrapper for RunningService that can hold either handler type
+/// Wrapper for RunningService and its close lifecycle
 pub(crate) enum McpServiceWrapper {
     Default(RunningService<RoleClient, InitializeRequestParams>),
-    Channel(RunningService<RoleClient, Arc<ChannelHandler>>),
     Closing(tokio::task::JoinHandle<Result<QuitReason, tokio::task::JoinError>>),
     Closed,
     Shared(McpServiceHandle),
@@ -149,12 +146,11 @@ impl McpServiceWrapper {
         // rmcp's timed close consumes its internal join handle before awaiting it.
         // Keep our own worker handle across timeout/cancellation so retry still waits
         // for the original protocol service and transport cleanup.
-        if matches!(self, Self::Default(_) | Self::Channel(_)) {
+        if matches!(self, Self::Default(_)) {
             let service = std::mem::replace(self, Self::Closed);
             *self = Self::Closing(tokio::spawn(async move {
                 match service {
                     Self::Default(service) => service.cancel().await,
-                    Self::Channel(service) => service.cancel().await,
                     _ => unreachable!(),
                 }
             }));
@@ -172,7 +168,7 @@ impl McpServiceWrapper {
             },
             Self::Closed => Ok(Some(QuitReason::Closed)),
             Self::Shared(service) => Box::pin(service.owner.close_with_timeout(timeout)).await,
-            Self::Default(_) | Self::Channel(_) => unreachable!(),
+            Self::Default(_) => unreachable!(),
             #[cfg(test)]
             McpServiceWrapper::Controlled(svc) => svc.close().await,
         }
@@ -181,7 +177,6 @@ impl McpServiceWrapper {
     pub fn peer(&self) -> &Peer<RoleClient> {
         match self {
             McpServiceWrapper::Default(svc) => svc.peer(),
-            McpServiceWrapper::Channel(svc) => svc.peer(),
             McpServiceWrapper::Shared(service) => &service.peer,
             McpServiceWrapper::Closing(_) | McpServiceWrapper::Closed => {
                 panic!("closing service has no active protocol peer")

@@ -93,20 +93,10 @@ pub meta_harness: Option<HashMap<String, bool>>,
 文档存在性校验在冻结期，见 2.3，避免解析期二次读盘；**非 bool 值保持
 serde 类型错误 fail**——"warn 不 fail"仅适用于成功解析后的未知 key）：
 
-```rust
-for (key, v) in meta_harness {
-    match (key, v) {
-        (k, _) if !SECTION_IDS.contains(k) && !MIDDLEWARE_NAMES.contains(k)
-            => warn!("meta_harness: unknown key {k}"), // 忽略
-        (k, false) if SECTION_IDS.contains(k) => { /* 段落显式不覆盖：合法，静默 */ }
-        (k, true)  if MIDDLEWARE_NAMES.contains(k) => { /* 显式恢复装配：合法，静默 */ }
-        _ => {}
-    }
-}
-```
-
-`SECTION_IDS` / `MIDDLEWARE_NAMES` 为编译期常量：段落文件名清单 +
-装配面 middleware name 清单。
+合法键集合由 `peri-acp-types/src/meta_harness.rs` 的 `SECTION_IDS`、
+`MIDDLEWARE_NAMES`、`BUILTIN_INSTANCE_POLICY_KEYS` 与 `BUILT_IN_SUBAGENTS_KEY`
+共同定义；校验实现为 `AppConfig::validate_meta_harness`，设计不复制校验代码。
+段落的 `false` 与链槽位/实例策略的 `true` 都是合法的显式恢复值。
 
 ### 2.2 段落覆盖来源：workspace `peri-meta://`（原宿主加载器已删除）
 
@@ -120,7 +110,7 @@ for (key, v) in meta_harness {
   （`ConfigSource::Builtin { instance: "workspace" }` 且 `Connected`）；外部 origin 的同 scheme
   资源一律拒绝并记录，判定依据是实例身份而非资源文本自称。
 - **关闭与失败（X8）**：覆盖不可得（实例关闭 / 文档缺失 / 读取失败）⇒ warn 并保持内置段落、
-  不阻塞会话创建、**不回落磁盘**；new 路径的读取失败按 J2 走发布前失败补偿，legacy 首次接纳
+  不阻塞会话创建、**不回落磁盘**；必选输入的读取失败仍按其契约走发布前失败补偿，legacy 首次接纳
   无执行环境 ⇒ 覆盖不可得（保持内置）。
 - **既有扫描语义**（今在 provider 侧）：仅一级目录 `{cwd}/.peri/meta/*.md`（不递归）；非 `.md`
   文件忽略；文件 stem 即 section_id（`"01_intro.md"` → `"01_intro"`）；读取失败跳过该文件、
@@ -132,15 +122,9 @@ for (key, v) in meta_harness {
 
 ### 2.3 冻结状态：MetaHarnessState
 
-```rust
-/// 冻结期构建，随冻结载体传播；会话内不可变
-pub struct MetaHarnessState {
-    /// 段落 ID → md 全文；仅含"开关 true 且文档存在"的条目
-    pub section_overrides: HashMap<String, Arc<str>>,
-    /// 装配期关闭的 middleware 名集合（v=false 条目）
-    pub disabled_middlewares: HashSet<String>,
-}
-```
+契约类型唯一声明在 `peri-acp-types/src/meta_harness.rs::MetaHarnessState`：
+冻结覆盖正文、关闭的链槽位/builtin 策略键，以及内置 SubAgent 定义开关。
+本文不复制结构字段，避免合法键与冻结状态漂移。
 
 - **构建时点**：`build_frozen_data` 冻结期、渲染 system prompt 之前——一次
   读取 settings +（J6 后）workspace `peri-meta://` 资源读取（宿主 scanner 已删除）。
@@ -156,39 +140,15 @@ pub struct MetaHarnessState {
 
 ### 2.4 段落覆盖
 
-**数组升级**：系统提示词三个段落数组均携带 ID：
-`IMMUTABLE_SECTIONS` / `ALWAYS_UNCACHED_SECTIONS` 为 "ID + 内容" 二元组；
-`GATED_SECTIONS` 为 "ID + 内容 + Gate" 三元组。
-ID 即 `prompts/sections/` 文件名去 `.md`（`01_intro`、`05_using_tools`…），
-维护成本为零。
+段落声明的唯一来源是已装配 middleware 的 `PromptSection`；ID 对应模板名或
+渲染生成段，位置与缓存语义由声明的 zone/order 决定，不另建 Layer。
+channel 退役后不保留无持有者的内置段落数组或 feature gate。
 
-位置与缓存语义只由数组归属和段内序号决定，不另建内容分类 Layer。
-
-**覆盖注入方式：PromptTemplate 构造期合并**（物化容器而非覆盖 map，内容源零拷贝双态）：
-`PromptTemplate` 构造期按 ID 将段落内容替换为 md 全文后**物化为三个段落
-容器**（`immutable_sections` / `always_uncached_sections` /
-`gated_sections`，元素含 id/content），**不保留覆盖 map**（避免与
-物化结果重复存储）；**render 签名与全部调用点不变**，改动收敛到 `new`
-一处，render 零查表直接拼接：
-
-```rust
-// 内容来源双态：内置静态文本零拷贝借 &'static str，
-// 覆盖全文持 Arc<str>——避免 Arc::from(builtin) 全量堆拷贝
-enum SectionContent {
-    Builtin(&'static str),   // include_str! 静态文本，零拷贝
-    Override(Arc<str>),      // MetaHarness 覆盖全文（冻结期扫描）
-}
-struct ResolvedSection { id: &'static str, content: SectionContent }
-// PromptTemplate::new(state: &MetaHarnessState) 内：
-let immutable = IMMUTABLE_SECTIONS.map(|(id, content)| ResolvedSection {
-    id,
-    content: match state.section_overrides.get(id) {
-        Some(overridden) => SectionContent::Override(Arc::clone(overridden)),
-        None => SectionContent::Builtin(content),
-    },
-});
-```
-（`section_overrides` 字段仅存在于 `MetaHarnessState`，模板侧不重复持有。）
+**覆盖注入方式：PromptTemplate 构造期合并**：`new(state, collected)` 按 ID
+替换已收集段落的内容，过滤空正文并排序，物化为 cached/uncached 两个容器。
+不保留第二份覆盖 map；`render(env, agent_catalog)` 只拼接内容及替换环境占位符，
+不读盘、不重新加载配置。内容源为 builtin 静态文本、冻结的覆盖正文或 middleware
+动态正文；覆盖不能创建未装配持有者的段落。
 
 **同源一致性要求**：所有 PromptTemplate 构造点统一从冻结载体取
 MetaHarnessState 传入——冻结渲染与后续重渲染必须同一覆盖源，禁止出现
@@ -196,8 +156,8 @@ MetaHarnessState 传入——冻结渲染与后续重渲染必须同一覆盖源
 
 **边界**：
 
-- **gated 段落**：覆盖只改内容来源，`FeatureGate` 判定不变——未启用功能的
-  段落即使被覆盖也不渲染（现状 gate 判定事实见 3.4）。
+- **功能段落**：覆盖只改内容来源，是否装配持有 middleware 的判定不变；未装配功能的
+  段落即使被覆盖也不渲染。
 - **缓存区 transport seam**：现状 `__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__` 由
   `PromptTemplate::render` 生成，不在段落文件内；段落位置属性（契约 2）负责
   装配，保留控制字负责把 seam 跨越 `String` handoff 传给 provider。provider

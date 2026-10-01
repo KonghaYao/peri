@@ -252,7 +252,6 @@ async fn context_injected_before_initialize_and_rejects_duplicate() {
             &dirs.claude_home,
             status_tx,
             None,
-            None,
         ),
     )
     .await
@@ -295,14 +294,7 @@ async fn context_injected_before_initialize_and_rejects_duplicate() {
     let claude_home = late_dirs.claude_home.clone();
     tokio::time::timeout(
         std::time::Duration::from_secs(30),
-        McpClientPool::run_initialize(
-            Arc::clone(&pool),
-            &workspace,
-            &claude_home,
-            status_tx,
-            None,
-            None,
-        ),
+        McpClientPool::run_initialize(Arc::clone(&pool), &workspace, &claude_home, status_tx, None),
     )
     .await
     .expect("未注入上下文的真实初始化必须有界收敛（不得挂起）");

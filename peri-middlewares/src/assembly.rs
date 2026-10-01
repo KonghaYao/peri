@@ -131,14 +131,10 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
             tool_search_index_concrete,
             workflow_middleware_concrete,
             auto_classifier,
-            effective_broker,
         } = preparation::resolve_ports(ctx);
 
         // AskUser 工具（2026-08-15 拆分后）由链上 HumanInTheLoopMiddleware
-        // 的 collect_tools 提供（使用原始 broker 而非 MultiplexBroker——
-        // ChannelBroker 对 Questions 立即返回空答案、MultiplexBroker 竞速时
-        // Channel 总是先返回，导致 AskUserQuestion 弹窗被绕过）；宿主级
-        // shared_tools 不再注册任何工具。
+        // 的 collect_tools 提供；宿主级 shared_tools 不再注册任何工具。
 
         let parent_tools = preparation::build_parent_tools(ctx, &mcp_pool_concrete);
 
@@ -301,7 +297,7 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
                 ChainSlot::Permission if disabled.contains("PermissionMiddleware") => {}
                 ChainSlot::Permission => {
                     chain.add(Box::new(PermissionMiddleware::with_shared_mode(
-                        effective_broker.clone(),
+                        broker.clone(),
                         default_requires_approval,
                         permission_mode.clone(),
                         auto_classifier.clone(),
@@ -309,9 +305,6 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
                 }
                 ChainSlot::AskUser if disabled.contains("HumanInTheLoopMiddleware") => {}
                 ChainSlot::AskUser => {
-                    // 使用原始 broker（非 MultiplexBroker）：ChannelBroker 对
-                    // Questions 立即返回空答案、Multiplex 竞速时 Channel 先
-                    // 返回，会绕过 TUI 弹窗（既有约束，见 189-192 注释）。
                     chain.add(Box::new(HumanInTheLoopMiddleware::new(broker.clone())));
                 }
                 // chain 与上层各持一份 SubAgentMiddleware clone：

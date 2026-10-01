@@ -42,7 +42,6 @@ fn make_handle(name: &str, tools: Vec<Tool>, resources: Vec<Resource>) -> Arc<Mc
         source: Some(ConfigSource::Project(PathBuf::from("/tmp/.mcp.json"))),
         url: Some(format!("https://{name}.example.com/mcp")),
         skills_capable: false,
-        channel_capable: false,
     })
 }
 

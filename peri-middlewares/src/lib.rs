@@ -44,9 +44,9 @@ pub use plugin::{
     AvailablePlugin, ClaudeSettings, CommandEntry, CommandProvider, CommandSource, InstallScope,
     InstalledPlugin, InstalledPlugins, KnownMarketplace, LoadedPlugin, LoaderError,
     MarketplaceEntry, MarketplaceError, MarketplaceManager, MarketplaceManifest, MarketplacePlugin,
-    MarketplaceRefreshEvent, MarketplaceSource, PluginAgent, PluginAuthor, PluginChannel,
-    PluginCommand, PluginCommandEntry, PluginCommandProvider, PluginConfigError, PluginLspServer,
-    PluginManifest, PluginMiddleware, PluginOption,
+    MarketplaceRefreshEvent, MarketplaceSource, PluginAgent, PluginAuthor, PluginCommand,
+    PluginCommandEntry, PluginCommandProvider, PluginConfigError, PluginLspServer, PluginManifest,
+    PluginMiddleware, PluginOption,
 };
 pub mod at_mention;
 pub mod skills;
@@ -115,8 +115,8 @@ pub mod prelude {
             InstallScope, InstalledPlugin, InstalledPlugins, KnownMarketplace, LoadedPlugin,
             LoaderError, MarketplaceEntry, MarketplaceError, MarketplaceManager,
             MarketplaceManifest, MarketplacePlugin, MarketplaceRefreshEvent, MarketplaceSource,
-            PluginAgent, PluginAuthor, PluginChannel, PluginCommand, PluginCommandProvider,
-            PluginConfigError, PluginLspServer, PluginManifest, PluginMiddleware, PluginOption,
+            PluginAgent, PluginAuthor, PluginCommand, PluginCommandProvider, PluginConfigError,
+            PluginLspServer, PluginManifest, PluginMiddleware, PluginOption,
         },
         skills::{SkillMetadata, SkillsMiddleware},
         subagent::{SkillPreloadMiddleware, SubAgentMiddleware, SubAgentTool},

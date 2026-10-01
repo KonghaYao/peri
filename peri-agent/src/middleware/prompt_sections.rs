@@ -13,8 +13,8 @@
 //! 契约 3（gate 原子迁移，C2/C3 落地）：段落 gate = "持有该段的 middleware
 //! 是否在链上"。收集机制天然隐含此判定——能收集到段落即持有者已装配
 //! （gate 开启）；[`project_enabled_sections`] 是同一判定的显式投影（映射表
-//! `peri_acp_types::meta_harness::SECTION_HOLDER_MIDDLEWARE`），`PromptFeatures::detect`
-//! 对应硬编码已随段落实体迁移删除（仅剩无持有者的 15_channel）。
+//! `peri_acp_types::meta_harness::SECTION_HOLDER_MIDDLEWARE`），段落可见性由
+//! 持有 middleware 的装配事实决定，不依赖独立的 feature gate。
 //!
 //! 契约 4（运行时缺失防御）：middleware 在链上但未提供段落（默认空列表）
 //! = 跳过渲染不 fail；渲染面物化时过滤空内容段落（见 `PromptTemplate::new`）。
@@ -102,8 +102,8 @@ impl PromptSection {
 ///
 /// 判定规则：段落 gate = 持有该段的 middleware 是否在链上，映射表为
 /// [`SECTION_HOLDER_MIDDLEWARE`]（`peri-acp-types` 契约层）。本函数是收集机制
-/// 的显式视图——从链上能收集到段落即持有者已装配，两者必然一致（C3 起
-/// gated 段全部迁移，`PromptFeatures::detect` 对应硬编码已删除；一致性由
+/// 的显式视图——从链上能收集到段落即持有者已装配，段落可见性由持有
+/// middleware 决定；收集结果与投影的一致性由
 /// `assembly_test.rs` 的 `chain_collected_gated_sections_match_projection`
 /// 锁定）。
 ///

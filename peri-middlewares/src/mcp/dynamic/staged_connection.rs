@@ -464,7 +464,6 @@ pub async fn prepare_single_server(
             process = Some(transport.process_owner());
             serve_client_auto(
                 transport,
-                None,
                 config.protocol_version.as_ref(),
                 &oauth_pool.capability_profile,
                 timeout,
@@ -563,7 +562,6 @@ pub async fn prepare_single_server(
             oauth_lease = Some(guard);
             serve_client_auto(
                 build_authed_transport(url, &headers, auth_manager),
-                None,
                 config.protocol_version.as_ref(),
                 &oauth_pool.capability_profile,
                 timeout,
@@ -631,7 +629,6 @@ pub async fn prepare_single_server(
         oauth_status: OAuthStatus::None,
         source: None,
         url: None,
-        channel_capable: false,
         skills_capable: super::super::client::peer_declares_skills(&peer),
     });
     Ok(staged)
@@ -649,7 +646,6 @@ fn empty_handle() -> McpClientHandle {
         oauth_status: OAuthStatus::None,
         source: None,
         url: None,
-        channel_capable: false,
         skills_capable: false,
     }
 }

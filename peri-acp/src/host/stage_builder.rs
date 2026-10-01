@@ -52,7 +52,7 @@ use peri_agent::session::factory::{
 
 // 渲染面收集（middlewares 段声明）位于 ACP 宿主装配面 session/mod.rs
 // （§0 边 2 豁免），本模块只消费收集结果，不触碰 middlewares
-use crate::prompt::{PromptEnv, PromptFeatures, PromptTemplate};
+use crate::prompt::{PromptEnv, PromptTemplate};
 use crate::session::build_collected_sections;
 
 /// 从投影型 [`SessionContext`] 构造 [`StageBuildInput`] 并调用 peri_agent 正式
@@ -159,16 +159,13 @@ pub(crate) fn build_stage_context(
         let language = frozen.language.as_ref().map(|s| s.to_string());
         let frozen_date = frozen.date.to_string();
         Arc::new(move |ov: Option<&AgentOverrides>, cwd: &str| {
-            // C3：detect 无参（hitl/subagent/skills gate 随段落实体迁移至
-            // 持有者装配判定，permission_mode 不再参与 gate 判定）
-            let features = PromptFeatures::detect();
             // 波 4 演进（C2/C3）：收集结果 = 渲染面静态声明（冻结 disabled
             // 集合 + overrides + 冻结语言驱动）——与链收集同一事实源，禁止
             // 双轨。
             let collected = build_collected_sections(&meta_harness, ov, language.as_deref());
             let template = PromptTemplate::new(&meta_harness, &collected);
             let env = PromptEnv::with_frozen_date(cwd, &frozen_date);
-            template.render(&env, &features, agent_catalog.as_ref())
+            template.render(&env, agent_catalog.as_ref())
         })
     };
 
@@ -178,9 +175,6 @@ pub(crate) fn build_stage_context(
         let frozen_date_for_sub = frozen.date.to_string();
         let frozen_language_for_sub = frozen.language.as_ref().map(|s| s.to_string());
         let agent_catalog_for_sub = Arc::clone(&ctx.agent_catalog);
-        // C3：detect 无参（子链渲染继承主链冻结 disabled 集合驱动的收集
-        // 结果，11_subagent 段存在性不变——设计 §3.5.1 步骤 4 子链语义）
-        let features_for_sub = PromptFeatures::detect();
         // 冻结期 MetaHarness 状态（与主重渲染同源；禁止回退默认空状态）。
         let meta_harness_for_sub = frozen.meta_harness.clone();
         Arc::new(move |overrides: Option<&AgentOverrides>, cwd_dir: &str| {
@@ -193,7 +187,7 @@ pub(crate) fn build_stage_context(
             );
             let t = PromptTemplate::new(&meta_harness_for_sub, &collected);
             let env = PromptEnv::with_frozen_date(cwd_dir, &frozen_date_for_sub);
-            t.render(&env, &features_for_sub, agent_catalog_for_sub.as_ref())
+            t.render(&env, agent_catalog_for_sub.as_ref())
         })
     };
 
@@ -219,7 +213,6 @@ pub(crate) fn build_stage_context(
         dynamic_mcp: ctx.dynamic_mcp.clone(),
         session_mcp_capability: ctx.session_mcp_capability.clone(),
         dynamic_mcp_projection: Arc::clone(&ctx.dynamic_mcp_projection),
-        channel_state: ctx.channel_state.clone(),
         tool_search_index: Arc::clone(&ctx.tool_search_index),
         shared_tools: Arc::clone(&ctx.shared_tools),
         lsp_servers: ctx.lsp_servers.clone(),

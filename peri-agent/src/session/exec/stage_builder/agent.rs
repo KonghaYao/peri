@@ -256,7 +256,6 @@ fn project_assembly(input: &StageBuildInput, turn: TurnAssembly) -> AssemblyCont
         dynamic_mcp: input.dynamic_mcp.clone(),
         dynamic_mcp_projection: Arc::clone(&input.dynamic_mcp_projection),
         session_id: input.session_id.clone(),
-        channel_state: input.channel_state.clone(),
         tool_search_index: input.tool_search_index.clone(),
         shared_tools: input.shared_tools.clone(),
         // MetaHarness：装配期关闭集合（源自会话冻结状态投影，

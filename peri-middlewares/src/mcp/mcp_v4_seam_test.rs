@@ -154,7 +154,6 @@ fn connected_handle(name: &str, tools: Vec<Tool>) -> Arc<McpClientHandle> {
         source: None,
         url: None,
         skills_capable: false,
-        channel_capable: false,
     })
 }
 
@@ -186,7 +185,6 @@ impl SeamFixture {
         let service = serve_client_auto(
             seam_transport(client),
             None,
-            None,
             &McpCapabilityProfile::default(),
             Duration::from_secs(5),
         )
@@ -207,7 +205,6 @@ impl SeamFixture {
             source: None,
             url: None,
             skills_capable: false,
-            channel_capable: false,
         });
         assert!(
             handle

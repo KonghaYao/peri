@@ -7,7 +7,6 @@ pub mod auth_store;
 // builtin MCP 行为层（注册表解析 / 默认层 overlay / 关闭集 / 直连性声明）。
 pub(crate) mod builtin;
 pub mod callback_server;
-pub mod channel_handler;
 pub mod client;
 pub mod client_oauth;
 pub mod config;
@@ -16,7 +15,6 @@ pub mod dynamic;
 // ClientInitializeError 来自 rmcp crate（504 bytes），无法修改其定义
 #[allow(clippy::result_large_err)]
 pub mod initialize;
-pub mod mcp_notify;
 pub mod middleware;
 pub mod oauth_flow;
 pub mod reconnect;
@@ -40,7 +38,6 @@ pub use apps::{
 };
 pub use auth_store::{OAuthCredentialClient, PerServerCredentialStore};
 pub use callback_server::{parse_code_from_url, CallbackError, OAuthCallbackServer};
-pub use channel_handler::ChannelHandler;
 pub use client::{
     redact_mcp_error, ClientStatus, McpClientHandle, McpClientPool, McpInitStatus, McpPoolError,
     OAuthStartDisposition, OAuthStatus, ServerInfo,

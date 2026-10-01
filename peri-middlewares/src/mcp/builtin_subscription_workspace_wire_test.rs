@@ -75,7 +75,6 @@ async fn connect_workspace(cwd: &str) -> WorkspaceLink {
     let service = serve_client_auto(
         io,
         None,
-        None,
         &McpCapabilityProfile::disabled(),
         HANDSHAKE_TIMEOUT,
     )
@@ -360,7 +359,6 @@ async fn t6_session_delivery_is_info_and_closure_skips_subscription() {
         }),
         url: None,
         skills_capable: false,
-        channel_capable: false,
     });
     pool.clients.write().insert("workspace".to_string(), handle);
     let subscription = peer.listen(git_filter()).await.expect("listen 必须成功");
@@ -506,7 +504,6 @@ async fn t7b_read_failure_falls_back_to_generic_reminder() {
     let service = serve_client_auto(
         io,
         None,
-        None,
         &McpCapabilityProfile::disabled(),
         HANDSHAKE_TIMEOUT,
     )
@@ -528,7 +525,6 @@ async fn t7b_read_failure_falls_back_to_generic_reminder() {
             source: None,
             url: None,
             skills_capable: false,
-            channel_capable: false,
         }),
     );
     let subscription = peer.listen(git_filter()).await.expect("listen 必须成功");

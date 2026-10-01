@@ -53,7 +53,6 @@ impl ImageFixture {
                     instance: "workspace".to_owned(),
                 }),
                 url: None,
-                channel_capable: false,
                 skills_capable: false,
             }),
         );

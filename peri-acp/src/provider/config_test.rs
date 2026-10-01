@@ -568,6 +568,29 @@ fn builtin_instance_policy_keys_are_known_keys() {
     }
 }
 
+#[test]
+fn retired_meta_harness_keys_are_ignored() {
+    for enabled in [true, false] {
+        let mut cfg = AppConfig {
+            meta_harness: Some(mh(&[
+                ("15_channel", enabled),
+                ("AgentDefineMiddleware", enabled),
+                ("FilesystemMiddleware", enabled),
+                ("TerminalMiddleware", enabled),
+                ("GitWatchMiddleware", enabled),
+                ("WorkspaceMiddleware", false),
+                ("01_intro", true),
+            ])),
+            ..Default::default()
+        };
+        cfg.validate_meta_harness();
+        assert_eq!(
+            cfg.meta_harness.unwrap(),
+            mh(&[("WorkspaceMiddleware", false), ("01_intro", true)])
+        );
+    }
+}
+
 // ─── extract_overrides（与 merge_overrides 严格互逆，分层写回契约）─────────
 
 /// roundtrip 恒等式：merge(global, extract(merge(global, ws), global)) == merge(global, ws)

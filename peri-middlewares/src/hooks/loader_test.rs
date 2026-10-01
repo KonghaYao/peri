@@ -19,7 +19,6 @@ fn make_manifest_with_hooks(hooks: Option<HooksConfig>) -> PluginManifest {
         mcp_servers: None,
         lsp_servers: None,
         output_styles: None,
-        channels: None,
         options: None,
         settings: None,
         extra: serde_json::json!({}),

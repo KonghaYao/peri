@@ -91,7 +91,7 @@ impl std::fmt::Debug for SessionInbox {
 
 /// Cloneable handle for pushing messages into the SessionInbox.
 ///
-/// Producers (cron_owner, channel_owner, async_router for bg_results) hold this
+/// Producers (cron_owner, async_router for bg_results) hold this
 /// handle to push messages and wake the idle executor. The handle is `Send + Sync`
 /// and cheaply cloneable — safe to store in long-lived components.
 ///

@@ -173,7 +173,6 @@ impl App {
                 &claude_home,
                 init_tx,
                 None,
-                None,
             )
             .await;
         });

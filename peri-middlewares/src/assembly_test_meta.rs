@@ -746,7 +746,6 @@ async fn mcp_slot_derives_discover_agent_face_from_sub_agent_closed_key() {
             }),
             url: None,
             skills_capable: false,
-            channel_capable: false,
         }),
     );
 

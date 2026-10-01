@@ -25,7 +25,6 @@ pub use crate::session::state_builders::{
 use peri_acp_types::command::command_route::RouteEntry;
 use peri_acp_types::cron::CronSchedulerPort;
 use peri_acp_types::hooks::SettingsHooksPort;
-use peri_acp_types::interaction::ChannelState;
 use peri_acp_types::messages::BaseMessage;
 use peri_acp_types::permission::SharedPermissionMode;
 use peri_acp_types::plugin::PluginManagerPort;
@@ -207,7 +206,6 @@ pub struct AcpServerConfig {
         Option<tokio::sync::mpsc::UnboundedSender<crate::event::oauth::HostOAuthEvent>>,
     pub(crate) oauth_event_rx:
         Option<tokio::sync::mpsc::UnboundedReceiver<crate::event::oauth::HostOAuthEvent>>,
-    pub channel_state: Option<Arc<ChannelState>>,
     pub plugin_skill_roots: Vec<peri_acp_types::skills::SkillRoot>,
     /// 插件命令静态条目（Phase 6 B2：`plugin_data.all_commands` 经
     /// `plugin_route_entries` 预转；会话创建时 register_all，注册顺序 =

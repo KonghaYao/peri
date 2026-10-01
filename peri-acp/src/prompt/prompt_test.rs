@@ -16,8 +16,7 @@ use std::sync::Arc;
 /// 从持有者段落 + `prompts/sections/` 目录按固定顺序加载段落：基础段落
 /// （01-06 / 07_runtime / persona / language）与 gated 段（10_hitl /
 /// 11_subagent / 13_skills，经 [`crate::session::crate::session::build_collected_sections`]
-/// 收集）始终包含（除非持有 middleware 被关闭）；15_channel 按
-/// `PromptFeatures` 条件注入（gate 恒 false）；环境占位符替换为运行时值。
+/// 收集）始终包含（除非持有 middleware 被关闭）；环境占位符替换为运行时值。
 ///
 /// `overrides` 存在时，将 agent.md 中定义的角色/风格/主动性拼成一个
 /// Persona 段（`DefaultSystemPromptMiddleware` 动态生成）；`prompt_mode:
@@ -28,7 +27,6 @@ fn build_system_prompt(
     meta_harness: &MetaHarnessState,
     overrides: Option<&AgentOverrides>,
     cwd: &str,
-    features: PromptFeatures,
     agent_catalog: &dyn AgentCatalogPort,
     frozen_date: Option<&str>,
     language: Option<&str>,
@@ -40,7 +38,7 @@ fn build_system_prompt(
     } else {
         PromptEnv::detect(cwd)
     };
-    template.render(&env, &features, agent_catalog)
+    template.render(&env, agent_catalog)
 }
 
 fn render_cache_zones(cached: Option<&'static str>, uncached: Option<&'static str>) -> String {
@@ -63,7 +61,6 @@ fn render_cache_zones(cached: Option<&'static str>, uncached: Option<&'static st
     }
     PromptTemplate::new(&MetaHarnessState::default(), &collected).render(
         &PromptEnv::with_frozen_date("/tmp", "2026-01-01"),
-        &PromptFeatures::none(),
         &AgentCatalogProvider::new(),
     )
 }
@@ -85,12 +82,11 @@ fn override_state(id: &str, content: &str) -> MetaHarnessState {
     state
 }
 
-fn render_with_state(state: &MetaHarnessState, features: PromptFeatures) -> String {
+fn render_with_state(state: &MetaHarnessState) -> String {
     build_system_prompt(
         state,
         None,
         "/tmp",
-        features,
         &AgentCatalogProvider::new(),
         Some("2026-01-01"),
         None,

@@ -29,7 +29,7 @@ use peri_acp_types::{
     goal::GoalController,
     hooks::RegisteredHook,
     identity::AgentId,
-    interaction::{ChannelState, UserInteractionBroker},
+    interaction::UserInteractionBroker,
     lsp::LspServerConfig,
     mcp_skills::McpSkillRegistry,
     plugin::LoadedPlugin,
@@ -113,8 +113,6 @@ pub struct StageBuildInput {
     /// Session-owned checked projection lease holder, shared across stage builds.
     pub dynamic_mcp_projection:
         Arc<parking_lot::Mutex<Option<Arc<dyn peri_acp_types::ports::SessionMcpProjectionLease>>>>,
-    /// Channel 状态
-    pub channel_state: Option<Arc<ChannelState>>,
     /// 工具搜索索引端口
     pub tool_search_index: Arc<dyn ToolSearchPort>,
     /// 共享工具注册表（deferred tools）

@@ -444,7 +444,7 @@ async fn builtin_isolation_fixture() -> BuiltinIsolationFixture {
         .expect("首次注入必须成功（夹具不会二次注入）");
 
     let (status_tx, _status_rx) = tokio::sync::watch::channel(McpInitStatus::Pending);
-    McpClientPool::run_initialize(pool.clone(), &cwd, &claude_home, status_tx, None, None).await;
+    McpClientPool::run_initialize(pool.clone(), &cwd, &claude_home, status_tx, None).await;
 
     BuiltinIsolationFixture {
         _dir: dir,

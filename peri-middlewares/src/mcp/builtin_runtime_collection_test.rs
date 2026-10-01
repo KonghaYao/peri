@@ -33,7 +33,6 @@ fn connected_handle(server: &str, tools: &[&str]) -> Arc<McpClientHandle> {
         }),
         url: None,
         skills_capable: false,
-        channel_capable: false,
     })
 }
 

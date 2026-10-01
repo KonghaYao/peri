@@ -7,8 +7,7 @@ use serde::{Deserialize, Serialize};
 // `InstalledPlugin` 等自本文件迁出；本模块保留 re-export 保兼容。
 pub use peri_acp_types::plugin::{
     InstallScope, InstalledPlugin, McpServerConfig, McpServerEntry, PluginAgent, PluginAuthor,
-    PluginChannel, PluginCommand, PluginCommandEntry, PluginLspServer, PluginManifest,
-    PluginOption, PluginOrigin,
+    PluginCommand, PluginCommandEntry, PluginLspServer, PluginManifest, PluginOption, PluginOrigin,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

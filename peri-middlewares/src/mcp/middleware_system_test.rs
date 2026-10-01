@@ -167,7 +167,6 @@ impl GateFixture {
         let service = crate::mcp::client::serve_client_auto(
             gate_transport(client),
             None,
-            None,
             &McpCapabilityProfile::default(),
             Duration::from_secs(5),
         )
@@ -188,7 +187,6 @@ impl GateFixture {
             source: None,
             url: None,
             skills_capable: false,
-            channel_capable: false,
         });
         assert!(
             handle

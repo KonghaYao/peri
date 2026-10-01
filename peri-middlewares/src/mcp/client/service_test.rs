@@ -75,7 +75,6 @@ async fn delayed_service() -> (
     let service = super::super::transport::serve_client_auto(
         transport,
         None,
-        None,
         &profile,
         Duration::from_secs(5),
     )

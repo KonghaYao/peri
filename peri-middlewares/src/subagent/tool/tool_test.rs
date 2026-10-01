@@ -279,7 +279,6 @@ pub(crate) fn with_agent_catalog(
             }),
             url: None,
             skills_capable: false,
-            channel_capable: false,
         }),
     );
     let registry = Arc::new(crate::mcp::McpAgentRegistry::new(pool));
@@ -523,7 +522,6 @@ async fn mcp_agent_suggestions_require_activation_and_connection() {
             source: None,
             url: None,
             skills_capable: false,
-            channel_capable: false,
         }),
     );
     let registry = Arc::new(McpAgentRegistry::new(pool));

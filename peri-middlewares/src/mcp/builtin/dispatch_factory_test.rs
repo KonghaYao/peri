@@ -394,7 +394,6 @@ async fn builtin_source_propagates() {
                 source: config.source.clone(),
                 url: None,
                 skills_capable: false,
-                channel_capable: false,
             }),
         );
         pairs.push((instance, pair));

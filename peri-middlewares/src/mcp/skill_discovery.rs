@@ -673,8 +673,7 @@ pub(crate) fn mark_system_origins(
 mod tests;
 
 // W4b/F6 收口：`core:{skill}` 投影的「宿主技能面关闭位」差分（投影函数级 +
-// 管道级）。存量 `skill_discovery_test.rs` 已超 STD-SIZE-001 上限，新用例
-// 落在本文件，由本模块统一挂载。
+// 管道级），由本模块统一挂载。
 #[cfg(test)]
 #[path = "skill_core_face_test.rs"]
 mod core_face_tests;

@@ -238,7 +238,6 @@ impl McpClientPool {
                         oauth_status: OAuthStatus::Authorized,
                         source: cfg.source.clone(),
                         url: cfg.url.clone(),
-                        channel_capable: false,
                         skills_capable,
                     });
                     let committed = Arc::clone(&handle);
@@ -397,7 +396,6 @@ impl McpClientPool {
                 source,
                 url,
                 skills_capable: false,
-                channel_capable: false,
             }),
         );
         self.record_status_change(server_name, old_status.as_ref());

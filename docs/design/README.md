@@ -29,7 +29,7 @@ draft、proposal、可行性探查、审计报告和未采纳方案不进入本�
 | Middleware | [middleware-system.md](middleware-system.md) | 生产链、hook、工具与 prompt contribution |
 | 工具系统 | [tool-system.md](tool-system.md) | session-local 可见性、ToolSearch 与执行边界 |
 | PTC | [programmatic-tool-calling.md](programmatic-tool-calling.md) | JavaScript host、RPC 与 effective tool dispatch |
-| 交互 broker | [interaction-brokers.md](interaction-brokers.md) | Approval/Questions broker 与多路审批 |
+| 交互 broker | [interaction-brokers.md](interaction-brokers.md) | Approval/Questions broker 与 transport 交互 |
 | 消息存储 | [message-transcript.md](message-transcript.md) | Transcript、MessageQueue、staging 与持久化 |
 | 会话、项目与 Worktree 身份 | [session-workspace-identity.md](session-workspace-identity.md) | 持久绑定、工作区环境、跨进程 lease 与单库 schema 升级 |
 | 用户待发送队列 | [user-input-queue.md](user-input-queue.md) | Mailbox、单条/全部投递、取回与运行身份 |

@@ -50,7 +50,6 @@ fn insert_server(pool: &McpClientPool, name: &str, tools: Vec<Tool>) {
             source: None,
             url: None,
             skills_capable: false,
-            channel_capable: false,
         }),
     );
 }

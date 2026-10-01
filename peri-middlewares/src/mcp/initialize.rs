@@ -8,7 +8,6 @@ use rmcp::{
 use super::{
     auth_store::static_credential_key,
     builtin::runtime::BUILTIN_CONVERGE_TIMEOUT,
-    channel_handler::ChannelHandler,
     client::{
         build_http_transport, serve_client_auto, setup_subscription, ClientStatus,
         DiscoveryEvidence, McpClientHandle, McpClientPool, McpInitStatus, OAuthStatus,
@@ -153,7 +152,7 @@ impl McpClientPool {
                 return;
             }
         };
-        Self::initialize_config(pool, cwd, config, Default::default(), status_tx, None, None).await;
+        Self::initialize_config(pool, cwd, config, Default::default(), status_tx, None).await;
     }
 
     pub async fn run_initialize(
@@ -162,7 +161,6 @@ impl McpClientPool {
         claude_home: &Path,
         status_tx: tokio::sync::watch::Sender<McpInitStatus>,
         oauth_event_callback: Option<Box<dyn Fn(OAuthFlowEvent) + Send + Sync>>,
-        channel_handler: Option<Arc<ChannelHandler>>,
     ) {
         // 封口（A33 晚注入拒绝）①：本函数是 `run_initialize` 里**配置加载窗口**的起点——
         // 一旦配置加载开始，宿主就不再有机会在「initialize 尚未开始」的语义下注入上下文，
@@ -184,7 +182,6 @@ impl McpClientPool {
             plugin_sources,
             status_tx,
             oauth_event_callback,
-            channel_handler,
         )
         .await;
     }
@@ -196,7 +193,6 @@ impl McpClientPool {
         plugin_sources: std::collections::HashMap<String, String>,
         status_tx: tokio::sync::watch::Sender<McpInitStatus>,
         oauth_event_callback: Option<Box<dyn Fn(OAuthFlowEvent) + Send + Sync>>,
-        channel_handler: Option<Arc<ChannelHandler>>,
     ) {
         // 封口（A33 晚注入拒绝）②：`initialize_config` 也接受直接调用（不经
         // `run_initialize`），配置校验与目录绑定都已越过「注入窗口」的边界；两处封口都是
@@ -291,7 +287,6 @@ impl McpClientPool {
                         source: server_config.source.clone(),
                         url: server_config.url.clone(),
                         skills_capable: false,
-                        channel_capable: false,
                     }),
                 );
                 continue;
@@ -344,14 +339,9 @@ impl McpClientPool {
                     if let Some(previous) = pool.register_builtin_task(name.clone(), supervisor) {
                         let _ = previous.close(BUILTIN_CONVERGE_TIMEOUT).await;
                     }
-                    let connected = serve_client_auto(
-                        io,
-                        channel_handler.as_ref(),
-                        protocol_version,
-                        &pool.capability_profile,
-                        timeout,
-                    )
-                    .await;
+                    let connected =
+                        serve_client_auto(io, protocol_version, &pool.capability_profile, timeout)
+                            .await;
                     // 握手失败 / 超时：本实例的 server task 当场收口（不含糊到 pool 关闭）；
                     // 成功则由重连 / 关闭 / 移除时的有界关闭负责。
                     if !matches!(connected, Ok(Ok(_))) {
@@ -367,7 +357,6 @@ impl McpClientPool {
                     Ok(transport) => {
                         serve_client_auto(
                             transport,
-                            channel_handler.as_ref(),
                             protocol_version,
                             &pool.capability_profile,
                             timeout,
@@ -428,7 +417,6 @@ impl McpClientPool {
                     } else {
                         serve_client_auto(
                             build_http_transport(url, headers),
-                            channel_handler.as_ref(),
                             protocol_version,
                             &pool.capability_profile,
                             timeout,
@@ -480,16 +468,6 @@ impl McpClientPool {
                     };
                     tracing::info!(server = %name, tools = tools.len(), resources = resources.len(), "MCP 连接成功");
                     let peer = rs.peer().clone();
-                    let channel_capable = peer
-                        .peer_info()
-                        .and_then(|info| {
-                            info.capabilities
-                                .experimental
-                                .as_ref()
-                                .and_then(|exp| exp.get("claude/channel"))
-                                .cloned()
-                        })
-                        .is_some();
                     let oauth_status = OAuthStatus::default();
                     let skills_capable = super::client::peer_declares_skills(&peer);
                     let handle = Arc::new(McpClientHandle {
@@ -505,7 +483,6 @@ impl McpClientPool {
                         oauth_status,
                         source: server_config.source.clone(),
                         url: server_config.url.clone(),
-                        channel_capable,
                         skills_capable,
                     });
                     let committed = Arc::clone(&handle);
@@ -617,7 +594,6 @@ impl McpClientPool {
         cwd: &Path,
         claude_home: &Path,
         oauth_event_callback: Option<Box<dyn Fn(OAuthFlowEvent) + Send + Sync>>,
-        channel_handler: Option<Arc<ChannelHandler>>,
     ) -> Arc<Self> {
         let pool = Arc::new(Self::new_pending());
         let (config, plugin_sources) = match super::load_merged_config_full(cwd, claude_home) {
@@ -635,7 +611,6 @@ impl McpClientPool {
             plugin_sources,
             status_tx,
             oauth_event_callback,
-            channel_handler,
         )
         .await;
         pool

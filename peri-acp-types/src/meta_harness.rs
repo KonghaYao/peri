@@ -1,14 +1,13 @@
 //! MetaHarness 契约类型与编译期常量。
 //!
-//! 设计单一事实源：`docs/design/meta-harness-design.md`（§2.1-2.3）。
+//! 设计单一事实源：`docs/design/meta-harness.md`（§2.1-2.3）。
 //! 类型位于跨层契约 crate，同时供 `peri-acp`（settings 校验 / 冻结组装 /
 //! 段落覆盖）与 `peri-middlewares`（装配期过滤）使用，避免依赖环。
 //!
 //! - `SECTION_IDS`：系统提示词段落 ID 清单（`prompts/sections/` 去 `.md` +
 //!   渲染生成段 `persona` / `language`），与持有者段落声明（
 //!   `peri-middlewares` 的 `DefaultSystemPromptMiddleware` / `LangMiddleware`）
-//!   及 `peri-acp/src/prompt/mod.rs` 的 `GATED_SECTIONS` 数组 ID 完全一致
-//!   （有测试锁定，见 `prompt_test.rs`）。
+//!   完全一致（有测试锁定，见 `prompt_overrides_test.rs`）。
 //! - `MIDDLEWARE_NAMES`：装配面 middleware 的 `name()` 返回值清单
 //!   （顶层链 / Workflow agent 链 / 子链并集），与 blueprint/name 映射
 //!   有测试锁定（见 `assembly_test.rs`）。
@@ -25,7 +24,7 @@ pub struct MetaHarnessState {
     /// 段落 ID → md 全文；仅含"开关 true 且文档存在"的条目。
     /// 覆盖发生在 `PromptTemplate::new` 构造期，render 无查表开销。
     pub section_overrides: HashMap<String, Arc<str>>,
-    /// 装配期关闭的 middleware 名集合（配置中 `false` 条目）。
+    /// 装配期关闭的链槽位名与 builtin 实例策略键集合（配置中 `false` 条目）。
     pub disabled_middlewares: HashSet<String>,
     /// 是否允许使用 compile-time 内置 subagent definitions。
     ///
@@ -52,12 +51,10 @@ pub const BUILT_IN_SUBAGENTS_KEY: &str = "BuiltInSubagents";
 /// 波 4 演进（C2/C3）后：基础段（01-06 / 07_runtime / persona / language）
 /// 由 `DefaultSystemPromptMiddleware` / `LangMiddleware` 持有，gated 段
 /// （10_hitl / 11_subagent / 13_skills）由功能 middleware 持有（见
-/// `SECTION_HOLDER_MIDDLEWARE`），15_channel 由 `GATED_SECTIONS` 数组
-/// 持有（无持有者，gate 恒 false）；段落 ID 仍是覆盖与持有权迁移的定位
-/// 键；`persona` / `language` 为渲染生成段 ID（可经
+/// `SECTION_HOLDER_MIDDLEWARE`）；段落 ID 是覆盖与持有权迁移的定位键。
+/// `persona` / `language` 为渲染生成段 ID（可经
 /// `.peri/meta/persona.md` / `.peri/meta/language.md` 覆盖）。与持有者
-/// 段落声明 + `GATED_SECTIONS` 数组 ID 并集完全一致且无重复（由
-/// `prompt_test.rs` 锁定）。
+/// 段落声明完全一致且无重复（由 `prompt_overrides_test.rs` 锁定）。
 ///
 /// 2026-08-15 职责拆分后：`10_hitl`（审批机制）归 `PermissionMiddleware`，
 /// `12_ask_user`（提问纪律）归新 `HumanInTheLoopMiddleware`（持有
@@ -74,7 +71,6 @@ pub const SECTION_IDS: &[&str] = &[
     "11_subagent",
     "12_ask_user",
     "13_skills",
-    "15_channel",
     "persona",
     "language",
 ];
@@ -168,13 +164,12 @@ pub const BUILTIN_INSTANCE_POLICY_KEYS: &[&str] = &[
 /// 段落 → 持有 middleware 名映射表（设计 §3.1.1 拆分持有契约 3）。
 ///
 /// 契约 3（gate 原子迁移，C3 落地）：gated 段落移交给功能 middleware 后，
-/// gate 判定从 `PromptFeatures::detect` 硬编码简化为"持有该段的 middleware
+/// gate 判定为"持有该段的 middleware
 /// 是否在链上"。本表是判定映射的事实源（装配期投影经
 /// `peri_agent::middleware::project_enabled_sections` 消费；收集机制天然
 /// 承担同一判定——能收集到段落即持有者已装配，C1 决策记录 D5）。
 ///
-/// `15_channel` 无对应 middleware（gate 恒 false 直至未来 channel middleware
-/// 装配，见 `SECTION_IDS` 注释），未入表；基础段（01-06 / 07_runtime /
+/// 基础段（01-06 / 07_runtime /
 /// persona / language）gate = 持有者是否装配，由收集机制天然承担
 /// （收集即装配，见 `peri_agent::middleware::prompt_sections`），不入表。
 pub const SECTION_HOLDER_MIDDLEWARE: &[(&str, &str)] = &[

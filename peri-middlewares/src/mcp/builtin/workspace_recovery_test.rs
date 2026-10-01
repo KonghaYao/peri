@@ -40,7 +40,6 @@ async fn bridge(pair: &Pair, name: &str, builtin: bool) -> McpToolBridge {
             instance: "workspace".into(),
         }),
         url: None,
-        channel_capable: false,
         skills_capable: false,
     });
     McpToolBridge::new("workspace", &tool, handle)
@@ -327,7 +326,6 @@ async fn connect(cwd: &str, input: Option<WorkspaceInstanceInput>) -> Pair {
     let (io, supervisor) = transport.into_parts();
     let service = serve_client_auto(
         io,
-        None,
         None,
         &McpCapabilityProfile::disabled(),
         HANDSHAKE_TIMEOUT,

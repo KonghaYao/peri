@@ -15,7 +15,6 @@ fn test_plugin_manifest_minimal() {
     assert!(manifest.mcp_servers.is_none());
     assert!(manifest.lsp_servers.is_none());
     assert!(manifest.output_styles.is_none());
-    assert!(manifest.channels.is_none());
     assert!(manifest.options.is_none());
     assert!(manifest.settings.is_none());
 }
@@ -39,7 +38,6 @@ fn test_plugin_manifest_full() {
             },
             "lspServers": [{"name": "test-lsp", "command": "test-lsp-binary", "args": []}],
             "outputStyles": ["compact"],
-            "channels": [{"name": "test-channel", "mcpServer": "test-server"}],
             "options": [{"name": "opt1", "description": "Option 1", "type": "string", "default": "val1"}],
             "settings": {"key": "value"}
         }"#;
@@ -60,7 +58,6 @@ fn test_plugin_manifest_full() {
         McpServerEntry::FilePath(_) => panic!("expected Config variant"),
     }
     assert_eq!(manifest.lsp_servers.as_ref().unwrap().len(), 1);
-    assert_eq!(manifest.channels.as_ref().unwrap().len(), 1);
     assert_eq!(manifest.options.as_ref().unwrap().len(), 1);
 }
 
@@ -278,7 +275,6 @@ fn test_plugin_manifest_serialization_roundtrip() {
         mcp_servers: None,
         lsp_servers: None,
         output_styles: None,
-        channels: None,
         options: None,
         settings: None,
         extra: serde_json::json!({}),
@@ -451,6 +447,26 @@ fn test_plugin_manifest_unknown_field_stored_in_extra() {
     // extra 非空，含未知字段
     assert!(manifest.extra.is_object());
     assert_eq!(manifest.extra["unknownSetting"].as_str().unwrap(), "yes");
+}
+
+#[test]
+fn retired_channels_are_only_opaque_manifest_metadata() {
+    for channels in [
+        serde_json::json!([{"name": "legacy", "mcpServer": "legacy-server"}]),
+        serde_json::json!("not a channel declaration"),
+    ] {
+        let value = serde_json::json!({"name": "p", "channels": channels});
+        let manifest: PluginManifest = serde_json::from_value(value.clone()).unwrap();
+
+        assert_eq!(manifest.extra["channels"], value["channels"]);
+        assert!(manifest.mcp_servers.is_none());
+        assert!(manifest.commands.is_none());
+        assert!(manifest.hooks.is_none());
+        assert_eq!(
+            serde_json::to_value(&manifest).unwrap()["channels"],
+            value["channels"]
+        );
+    }
 }
 
 #[test]

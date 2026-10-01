@@ -315,15 +315,8 @@ impl WireFixtureHarness {
         let (status_tx, _status_rx) = tokio::sync::watch::channel(McpInitStatus::Pending);
         let init_pool = Arc::clone(&pool);
         let init_task = tokio::spawn(async move {
-            McpClientPool::run_initialize(
-                init_pool,
-                &workspace,
-                &claude_home,
-                status_tx,
-                None,
-                None,
-            )
-            .await;
+            McpClientPool::run_initialize(init_pool, &workspace, &claude_home, status_tx, None)
+                .await;
         });
 
         Self {

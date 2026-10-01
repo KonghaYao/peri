@@ -349,7 +349,6 @@ async fn connect(cwd: &str, input: Option<WorkspaceInstanceInput>) -> Pair {
     let service = serve_client_auto(
         io,
         None,
-        None,
         &McpCapabilityProfile::disabled(),
         HANDSHAKE_TIMEOUT,
     )

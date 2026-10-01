@@ -222,7 +222,6 @@ async fn fixture(
         source: None,
         url: None,
         skills_capable: true,
-        channel_capable: false,
     });
     let registry = Arc::new(McpSkillRegistry::new());
     let token: HandleToken = handle.clone();
@@ -463,7 +462,6 @@ async fn legacy_templates_only_server_probes_without_error() {
         source: None,
         url: None,
         skills_capable: false,
-        channel_capable: false,
     });
     let token: HandleToken = legacy.clone();
     fx.registry.mark_discovery_started(SERVER, token.clone());
@@ -584,7 +582,6 @@ mod real_workspace_provider {
             let service = crate::mcp::client::serve_client_auto(
                 io,
                 None,
-                None,
                 &McpCapabilityProfile::disabled(),
                 HANDSHAKE,
             )
@@ -604,7 +601,6 @@ mod real_workspace_provider {
                 source: None,
                 url: None,
                 skills_capable: true,
-                channel_capable: false,
             });
             let registry = Arc::new(McpSkillRegistry::new());
             let token: HandleToken = handle.clone();

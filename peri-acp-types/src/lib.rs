@@ -14,7 +14,7 @@
 //! - `identity` — §9 身份标识契约（AgentId/EventEnvelope/CancelRequest/...）
 //! - `event` / `event_v2` — 事件契约（ExecutorEvent + v2 三层事件 + EventBus + v1 兼容映射）
 //! - `session` — session 契约（TurnId/MQ/inbox/cron/AgentRuntime）
-//! - `interaction` — HITL/通道交互契约（UserInteractionBroker/ChannelState/...）
+//! - `interaction` — HITL/问答交互契约（UserInteractionBroker/...）
 //! - `goal` — goal steering 契约（ThreadGoal/GoalStatus/GoalStore/...）
 //! - `frozen` — 会话冻结数据契约（FrozenData/ThreadPersistence/...）
 //! - `tasks` — 后台任务契约（BgTaskKind/BgRegistryEvent）

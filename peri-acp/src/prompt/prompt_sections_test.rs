@@ -6,7 +6,6 @@ fn test_no_overrides_contains_all_sections() {
         &MetaHarnessState::default(),
         None,
         "/tmp",
-        PromptFeatures::none(),
         &AgentCatalogProvider::new(),
         None,
         None,
@@ -37,7 +36,6 @@ fn test_no_overrides_no_duplicate_tone_proactiveness() {
         &MetaHarnessState::default(),
         None,
         "/tmp",
-        PromptFeatures::none(),
         &AgentCatalogProvider::new(),
         None,
         None,
@@ -68,7 +66,6 @@ fn test_no_overrides_no_leading_newlines() {
         &MetaHarnessState::default(),
         None,
         "/tmp",
-        PromptFeatures::none(),
         &AgentCatalogProvider::new(),
         None,
         None,
@@ -91,7 +88,6 @@ fn test_with_overrides_uses_override_block() {
         &MetaHarnessState::default(),
         Some(&overrides),
         "/tmp",
-        PromptFeatures::none(),
         &AgentCatalogProvider::new(),
         None,
         None,
@@ -115,7 +111,6 @@ fn test_placeholders_replaced() {
         &MetaHarnessState::default(),
         None,
         "/custom/path",
-        PromptFeatures::none(),
         &AgentCatalogProvider::new(),
         None,
         None,
@@ -130,7 +125,6 @@ fn test_env_contains_cwd() {
         &MetaHarnessState::default(),
         None,
         "/custom/path",
-        PromptFeatures::none(),
         &AgentCatalogProvider::new(),
         None,
         None,
@@ -139,19 +133,17 @@ fn test_env_contains_cwd() {
 }
 
 #[test]
-fn test_features_none_excludes_only_unheld_channel_section() {
+fn test_assembled_holder_sections_are_included() {
     let result = build_system_prompt(
         &MetaHarnessState::default(),
         None,
         "/tmp",
-        PromptFeatures::none(),
         &AgentCatalogProvider::new(),
         None,
         None,
     );
     // C3（gate 原子迁移）：10/11/13 已迁移至功能 middleware 持有——收集段
     // 恒渲染（gate = 持有者是否在链上，收集即装配，契约 3），与
-    // PromptFeatures 字段无关。
     assert!(
         result.contains("Human-in-the-Loop"),
         "10_hitl 收集段恒渲染（持有者装配即渲染）"
@@ -164,11 +156,6 @@ fn test_features_none_excludes_only_unheld_channel_section() {
         result.contains("# Skills"),
         "13_skills 收集段恒渲染（标题保留）"
     );
-    // 15_channel 无持有者：gate 恒 false（PromptFeatures::none），不渲染
-    assert!(
-        !result.contains("Channel 频道消息"),
-        "15_channel 无持有者，按 FeatureGate::Channel 门控"
-    );
 }
 
 #[test]
@@ -180,7 +167,6 @@ fn test_hitl_section_rendered_by_holder() {
         &MetaHarnessState::default(),
         None,
         "/tmp",
-        PromptFeatures::none(),
         &AgentCatalogProvider::new(),
         None,
         None,
@@ -224,7 +210,6 @@ fn test_hitl_sensitive_list_uses_system_mcp_raw_names() {
         &MetaHarnessState::default(),
         None,
         "/tmp",
-        PromptFeatures::none(),
         &AgentCatalogProvider::new(),
         None,
         None,
@@ -274,7 +259,6 @@ fn test_subagent_section_rendered_by_holder() {
         &MetaHarnessState::default(),
         None,
         "/tmp",
-        PromptFeatures::none(),
         &AgentCatalogProvider::new(),
         None,
         None,
@@ -295,7 +279,6 @@ fn test_subagent_section_does_not_hardcode_built_in_agent_ids() {
         &state,
         None,
         "/tmp",
-        PromptFeatures::none(),
         &AgentCatalogProvider::new(),
         None,
         None,
@@ -323,7 +306,6 @@ fn test_skills_section_rendered_by_holder() {
         &MetaHarnessState::default(),
         None,
         "/tmp",
-        PromptFeatures::none(),
         &AgentCatalogProvider::new(),
         None,
         None,
@@ -359,7 +341,6 @@ fn test_subagent_selection_guide_has_no_specific_mapping() {
         &state,
         None,
         "/tmp",
-        PromptFeatures::none(),
         &AgentCatalogProvider::new(),
         None,
         None,
@@ -399,7 +380,6 @@ fn test_gated_sections_render_in_position_order() {
         &MetaHarnessState::default(),
         None,
         "/tmp",
-        PromptFeatures::none(),
         &AgentCatalogProvider::new(),
         Some("2026-01-01"),
         Some("zh"),
@@ -414,97 +394,33 @@ fn test_gated_sections_render_in_position_order() {
     );
 }
 
-/// [回归测试] 16_workflow 已整段删除（波 4 演进 C2，ultracode skill 完整
-/// 覆盖——设计 §3.1.2）：渲染输出与 gate 结构均不得再出现 workflow 段落。
 #[test]
-fn test_workflow_section_deleted_entirely() {
-    // GATED_SECTIONS 不再包含 16_workflow（无持有者 gate 清理）
-    assert!(
-        !GATED_SECTIONS
-            .iter()
-            .any(|(id, _, _, _)| id.contains("16_workflow")),
-        "16_workflow 不应再位于 GATED_SECTIONS"
-    );
-    // 渲染输出不含 workflow 声明（默认配置 + channel 开启均不含）
-    let features_channel = PromptFeatures {
-        channel_enabled: true,
-    };
-    for features in [PromptFeatures::none(), features_channel] {
-        let result = build_system_prompt(
-            &MetaHarnessState::default(),
-            None,
-            "/tmp",
-            features,
-            &AgentCatalogProvider::new(),
-            None,
-            None,
-        );
-        assert!(
-            !result.contains("Workflow Orchestration"),
-            "16_workflow 段落已删除：任何 gate 组合都不应渲染"
-        );
-    }
-}
-
-#[test]
-fn test_all_features_enabled_includes_all() {
-    // 10/11/13 由持有者装配渲染（收集段恒渲染）；channel_enabled=true 时
-    // 15_channel 渲染（FeatureGate::Channel 判定，无持有者）。
-    let features = PromptFeatures {
-        channel_enabled: true,
-    };
+fn test_retired_sections_are_not_rendered() {
     let result = build_system_prompt(
         &MetaHarnessState::default(),
         None,
         "/tmp",
-        features,
         &AgentCatalogProvider::new(),
         None,
         None,
     );
-    assert!(result.contains("Human-in-the-Loop"), "应包含 HITL 段落");
-    assert!(
-        result.contains("SubAgent Delegation"),
-        "应包含 SubAgent 段落"
-    );
-    assert!(result.contains("# Skills"), "应包含 Skills 段落标题");
-    assert!(result.contains("Channel 频道消息"), "应包含 Channel 段落");
+    assert!(!result.contains("Workflow Orchestration"));
+    assert!(!result.contains("Channel 频道消息"));
 }
 
 #[test]
-fn test_detect_default_values() {
-    let features = PromptFeatures::detect();
-    // C3：hitl/subagent/skills gate 已随段落实体迁移（收集即装配，契约 3），
-    // detect 仅剩 channel gate（15_channel 无持有者，恒 false）。
-    assert!(
-        !features.channel_enabled,
-        "detect() 不得把未装配的 channel 宣称为可用能力"
-    );
-}
-
-/// [回归测试] 未装配的 channel 不作为运行时能力（P3-2026-08-02）。
-///
-/// 16_workflow 已删除（C2），无子面向 feature 差异；15_channel 恒不渲染。
-#[test]
-fn test_detect_channel_gate_never_enabled() {
-    let features = PromptFeatures::detect();
-    assert!(
-        !features.channel_enabled,
-        "未装配 ChannelOwner 时 channel 恒不启用"
-    );
+fn test_assembled_capability_sections_are_rendered() {
     let result = build_system_prompt(
         &MetaHarnessState::default(),
         None,
         "/tmp",
-        features,
         &AgentCatalogProvider::new(),
         None,
         None,
     );
-    assert!(
-        !result.contains("Channel 频道消息"),
-        "未装配 channel 时 prompt 不得包含 15_channel"
-    );
+    assert!(result.contains("Human-in-the-Loop"));
+    assert!(result.contains("SubAgent Delegation"));
+    assert!(result.contains("# Skills"));
 }
 
 // ─── system prompt cache boundary tests ────────────────────────────────
@@ -552,7 +468,6 @@ fn test_boundary_marker_before_dynamic_content() {
         &MetaHarnessState::default(),
         None,
         "/tmp",
-        PromptFeatures::none(),
         &AgentCatalogProvider::new(),
         None,
         None,
@@ -572,15 +487,11 @@ fn test_boundary_marker_before_dynamic_content() {
 }
 
 #[test]
-fn test_boundary_marker_with_all_features() {
-    let features = PromptFeatures {
-        channel_enabled: true,
-    };
+fn test_boundary_marker_with_assembled_sections() {
     let result = build_system_prompt(
         &MetaHarnessState::default(),
         None,
         "/tmp",
-        features,
         &AgentCatalogProvider::new(),
         None,
         None,
@@ -603,7 +514,6 @@ fn test_default_production_template_emits_one_cache_boundary() {
         &MetaHarnessState::default(),
         None,
         "/tmp",
-        PromptFeatures::none(),
         &AgentCatalogProvider::new(),
         Some("2026-01-01"),
         None,
@@ -613,7 +523,6 @@ fn test_default_production_template_emits_one_cache_boundary() {
         PromptTemplate::default()
             .render(
                 &PromptEnv::with_frozen_date("/tmp", "2026-01-01"),
-                &PromptFeatures::none(),
                 &AgentCatalogProvider::new(),
             )
             .matches(SYSTEM_PROMPT_DYNAMIC_BOUNDARY)

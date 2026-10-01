@@ -1,4 +1,4 @@
-use peri_acp::prompt::{PromptEnv, PromptFeatures, PromptTemplate};
+use peri_acp::prompt::{PromptEnv, PromptTemplate};
 use peri_acp_types::meta_harness::MetaHarnessState;
 use peri_agent::middleware::{PromptSection, PromptSectionZone};
 use peri_middlewares::host_ports::AgentCatalogProvider;
@@ -24,7 +24,6 @@ fn prompt_template_to_anthropic_preserves_cache_seam_and_dynamic_order() {
     ];
     let rendered = PromptTemplate::new(&MetaHarnessState::default(), &sections).render(
         &PromptEnv::with_frozen_date("/tmp", "2026-01-01"),
-        &PromptFeatures::detect(),
         &AgentCatalogProvider::new(),
     );
     let request = ModelRequest::new(vec![

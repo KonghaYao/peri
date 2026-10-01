@@ -67,7 +67,6 @@ async fn initialization_without_credentials_reports_failure_and_seals_injection(
         Default::default(),
         status_tx,
         None,
-        None,
     )
     .await;
     let handle = pool.get_client("server").unwrap();
@@ -112,7 +111,6 @@ async fn initialization_discovers_stored_oauth_via_injected_port_without_startin
             Some(Box::new(|_| {
                 panic!("initialization must not start interactive OAuth")
             })),
-            None,
         )
         .await;
         let handle = pool.get_client("server").unwrap();

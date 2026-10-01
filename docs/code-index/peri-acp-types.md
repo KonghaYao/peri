@@ -123,6 +123,10 @@
 
 ### builtin MCP 与 MetaHarness 两张名单（src/builtin_mcp.rs + src/meta_harness.rs）
 
+channel 已退役：`SECTION_IDS` 不再包含 `15_channel`，`interaction.rs` 不再提供 channel
+消息/权限通知及共享状态；`plugin.rs` 不再声明 `PluginChannel` 或 `PluginManifest.channels`。
+普通用户交互、MCP 资源与实例策略键保留。
+
 | 功能 | 入口/关键点 |
 | --- | --- |
 | builtin 实例声明表（纯数据） | `builtin_mcp.rs`：`BuiltinMcpTool`（:24：`original_name` / `effective_name` / `direct` / `prompt_declaration`）、`BuiltinMcpInstance`（:42：`name` / `instance` / `policy_key` / `tools`）、`BUILTIN_MCP_INSTANCES`（:197，五个实例 `web` / `artifact` / `cron` / `lsp` / `workspace`：web 2 + artifact 1 + workspace 7 为 direct，cron 3 + lsp 1 为 deferred 且 `prompt_declaration: None`）、`WORKSPACE_TOOLS`（:132，wave 3 新增：`Read` / `Write` / `Edit` / `Glob` / `Grep` / `folder_operations` / `Bash` 七项，逐项 `direct: true` 与 `prompt_declaration` 逐字搬运各工具实现的模板）、`BUILTIN_RESERVED_INSTANCE_NAMES`（:234 = 五个已实现实例，无「预留未实现」名字）、`find`（:238）、`is_reserved_instance_name`（:245） |

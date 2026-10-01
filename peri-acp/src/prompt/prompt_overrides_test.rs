@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn meta_harness_override_replaces_section_full_text() {
     let state = override_state("01_intro", "# Custom Intro\n\n完全替换的角色定义。");
-    let result = render_with_state(&state, PromptFeatures::none());
+    let result = render_with_state(&state);
     assert!(result.contains("# Custom Intro"), "覆盖内容应出现在输出中");
     // 内置 01_intro 不再出现：以持有者段落全文为锚点校验
     let builtin = holder_section_content("01_intro");
@@ -16,7 +16,7 @@ fn meta_harness_override_replaces_section_full_text() {
 #[test]
 fn meta_harness_override_05_using_tools() {
     let state = override_state("05_using_tools", "### Tools Discipline\n\n自定义工具纪律。");
-    let result = render_with_state(&state, PromptFeatures::none());
+    let result = render_with_state(&state);
     assert!(result.contains("自定义工具纪律"), "覆盖内容应出现");
     let builtin = holder_section_content("05_using_tools");
     assert!(!result.contains(&builtin), "内置 05_using_tools 不应再出现");
@@ -25,7 +25,7 @@ fn meta_harness_override_05_using_tools() {
 #[test]
 fn meta_harness_unoverridden_section_unchanged() {
     let state = override_state("01_intro", "custom");
-    let result = render_with_state(&state, PromptFeatures::none());
+    let result = render_with_state(&state);
     let builtin_02 = holder_section_content("02_system");
     assert!(result.contains(&builtin_02), "未覆盖的 02_system 字节不变");
 }
@@ -39,7 +39,7 @@ fn meta_harness_multiple_overrides_apply_together() {
     state
         .section_overrides
         .insert("05_using_tools".to_string(), Arc::from("tools-ovr"));
-    let result = render_with_state(&state, PromptFeatures::none());
+    let result = render_with_state(&state);
     assert!(result.contains("intro-ovr"));
     assert!(result.contains("tools-ovr"));
     // 段落顺序不变：01 在 05 之前
@@ -53,7 +53,7 @@ fn meta_harness_multiple_overrides_apply_together() {
 fn meta_harness_override_not_trimmed() {
     // override 内容保留原样（不 trim）：前后空白原样进入输出
     let state = override_state("01_intro", "\n  # Padded  \n\nbody  \n");
-    let result = render_with_state(&state, PromptFeatures::none());
+    let result = render_with_state(&state);
     assert!(
         result.contains("\n  # Padded  \n\nbody  \n"),
         "覆盖内容不被 trim"
@@ -64,7 +64,7 @@ fn meta_harness_override_not_trimmed() {
 fn meta_harness_override_placeholders_still_substituted() {
     // override 内容中的占位符参与渲染期替换（与内置段落同一通道）
     let state = override_state("01_intro", "cwd={{cwd}} platform={{platform}}");
-    let result = render_with_state(&state, PromptFeatures::none());
+    let result = render_with_state(&state);
     assert!(result.contains("cwd=/tmp"), "{{cwd}} 被替换");
     assert!(result.contains("platform="), "{{platform}} 被替换");
 }
@@ -74,8 +74,8 @@ fn meta_harness_gated_enabled_shows_override() {
     // 10_hitl 由 PermissionMiddleware 持有（收集即装配）：覆盖 10_hitl
     // 应生效（覆盖 = 替换持有者对应段落贡献，设计 §2.4 / §3.5.1 步骤 5）。
     let state = override_state("10_hitl", "HITL-OVERRIDE");
-    let features = PromptFeatures::detect();
-    let result = render_with_state(&state, features);
+
+    let result = render_with_state(&state);
     assert!(result.contains("HITL-OVERRIDE"), "持有者装配时显示覆盖内容");
 }
 
@@ -86,7 +86,7 @@ fn meta_harness_gated_enabled_shows_override() {
 #[test]
 fn meta_harness_override_11_subagent_replaces_holder_section() {
     let state = override_state("11_subagent", "SUBAGENT-OVERRIDE");
-    let result = render_with_state(&state, PromptFeatures::detect());
+    let result = render_with_state(&state);
     assert!(
         result.contains("SUBAGENT-OVERRIDE"),
         "覆盖全文应替换持有者段落"
@@ -123,9 +123,9 @@ fn meta_harness_override_11_subagent_replaces_holder_section() {
 #[test]
 fn meta_harness_gated_override_hidden_only_when_holder_disabled() {
     let mut state = override_state("10_hitl", "HITL-OVERRIDE");
-    let features = PromptFeatures::detect();
+
     // 默认状态：持有者装配（收集段恒渲染）→ 覆盖显示
-    let result = render_with_state(&state, features);
+    let result = render_with_state(&state);
     assert!(
         result.contains("HITL-OVERRIDE"),
         "持有者装配时覆盖应显示（gate 不再依赖 permission_mode）"
@@ -134,7 +134,7 @@ fn meta_harness_gated_override_hidden_only_when_holder_disabled() {
     state
         .disabled_middlewares
         .insert("PermissionMiddleware".to_string());
-    let result = render_with_state(&state, features);
+    let result = render_with_state(&state);
     assert!(
         !result.contains("HITL-OVERRIDE"),
         "关闭 PermissionMiddleware 后 10_hitl（含覆盖）不渲染"
@@ -154,7 +154,6 @@ fn meta_harness_persona_full_keeps_overridden_immutable_sections() {
         &state,
         Some(&overrides),
         "/tmp",
-        PromptFeatures::none(),
         &AgentCatalogProvider::new(),
         Some("2026-01-01"),
         None,
@@ -179,23 +178,19 @@ fn meta_harness_build_and_template_byte_identical() {
         proactiveness: None,
         mode: None,
     };
-    let features = PromptFeatures::detect();
+
     let via_build = build_system_prompt(
         &state,
         Some(&overrides),
         "/tmp",
-        features,
         &AgentCatalogProvider::new(),
         Some("2026-01-01"),
         Some("zh"),
     );
     let env = PromptEnv::with_frozen_date("/tmp", "2026-01-01");
     let collected = crate::session::build_collected_sections(&state, Some(&overrides), Some("zh"));
-    let via_template = PromptTemplate::new(&state, &collected).render(
-        &env,
-        &features,
-        &AgentCatalogProvider::new(),
-    );
+    let via_template =
+        PromptTemplate::new(&state, &collected).render(&env, &AgentCatalogProvider::new());
     assert_eq!(via_build, via_template, "两条渲染路径字节一致");
 }
 
@@ -209,27 +204,17 @@ fn meta_harness_disabled_set_does_not_affect_sections() {
     state
         .disabled_middlewares
         .insert("WebMiddleware".to_string());
-    let result = render_with_state(&state, PromptFeatures::none());
+    let result = render_with_state(&state);
     assert!(result.contains("OVR-INTRO"), "disabled 集合不影响覆盖渲染");
 }
 
 #[test]
-fn section_ids_match_arrays_and_holders() {
+fn section_ids_match_holders() {
     use peri_acp_types::meta_harness::SECTION_IDS;
 
-    // C3：基础段（01-06 / 07_runtime / persona / language）由
-    // DefaultSystemPromptMiddleware / LangMiddleware 持有，gated 段
-    // （10_hitl / 11_subagent / 13_skills）由功能 middleware 持有，
-    // 15_channel 由 GATED_SECTIONS 数组持有——并集必须与 SECTION_IDS
-    // 完全一致（无重复）。
-    let mut actual: Vec<&str> = GATED_SECTIONS
+    let mut actual: Vec<&str> = DefaultSystemPromptMiddleware::sections(None)
         .iter()
-        .map(|(id, _, _, _)| *id)
-        .chain(
-            DefaultSystemPromptMiddleware::sections(None)
-                .iter()
-                .map(|s| s.id),
-        )
+        .map(|section| section.id)
         .chain(LangMiddleware::sections(Some("zh")).iter().map(|s| s.id))
         .chain(
             peri_middlewares::permission::PermissionMiddleware::sections()
@@ -264,12 +249,20 @@ fn section_ids_match_arrays_and_holders() {
 }
 
 #[test]
+fn retired_channel_override_does_not_create_a_section() {
+    let state = override_state("15_channel", "RETIRED-CHANNEL-OVERRIDE");
+    let result = render_with_state(&state);
+    assert!(!result.contains("RETIRED-CHANNEL-OVERRIDE"));
+    assert!(!result.contains("Channel 频道消息"));
+}
+
+#[test]
 fn meta_harness_override_13_skills_gated() {
     // C3：13_skills 由 SkillsMiddleware 持有（收集即装配）：覆盖 13_skills
     // 应生效（持有者装配即渲染）
     let state = override_state("13_skills", "SKILLS-OVERRIDE");
-    let features = PromptFeatures::detect();
-    let result = render_with_state(&state, features);
+
+    let result = render_with_state(&state);
     assert!(result.contains("SKILLS-OVERRIDE"));
 }
 
@@ -291,13 +284,13 @@ fn meta_harness_override_persona_without_overrides() {
     );
     // 2. 无用户配置时覆盖仍可注入：覆盖全文渲染（唯一标记）
     let state = override_state("persona", "PERSONA-OVERRIDE-NO-CONFIG");
-    let result = render_with_state(&state, PromptFeatures::none());
+    let result = render_with_state(&state);
     assert!(
         result.contains("PERSONA-OVERRIDE-NO-CONFIG"),
         "无 overrides 时 persona 覆盖仍应注入"
     );
     // 3. 默认（无覆盖）不渲染空 persona：覆盖标记不出现，段落位置无空残留
-    let default_result = render_with_state(&MetaHarnessState::default(), PromptFeatures::none());
+    let default_result = render_with_state(&MetaHarnessState::default());
     assert!(
         !default_result.contains("PERSONA-OVERRIDE-NO-CONFIG"),
         "无覆盖时默认输出不含 persona 覆盖标记"
@@ -322,13 +315,13 @@ fn meta_harness_override_language_without_config() {
     );
     // 2. 无语言配置时覆盖仍可注入：覆盖全文渲染（唯一标记）
     let state = override_state("language", "LANGUAGE-OVERRIDE-NO-CONFIG");
-    let result = render_with_state(&state, PromptFeatures::none());
+    let result = render_with_state(&state);
     assert!(
         result.contains("LANGUAGE-OVERRIDE-NO-CONFIG"),
         "无语言配置时 language 覆盖仍应注入"
     );
     // 3. 默认（无覆盖）不渲染空 language 段：覆盖标记不出现
-    let default_result = render_with_state(&MetaHarnessState::default(), PromptFeatures::none());
+    let default_result = render_with_state(&MetaHarnessState::default());
     assert!(
         !default_result.contains("LANGUAGE-OVERRIDE-NO-CONFIG"),
         "无覆盖时默认输出不含 language 覆盖标记"
@@ -359,13 +352,10 @@ fn collected_sections_render_in_position_order() {
         8,
         "AA-COLLECTED-EARLY",
     ));
-    let features = PromptFeatures::detect();
+
     let env = PromptEnv::with_frozen_date("/tmp", "2026-01-01");
-    let result = PromptTemplate::new(&MetaHarnessState::default(), &collected).render(
-        &env,
-        &features,
-        &AgentCatalogProvider::new(),
-    );
+    let result = PromptTemplate::new(&MetaHarnessState::default(), &collected)
+        .render(&env, &AgentCatalogProvider::new());
     let pos_runtime = result.find("## System Reminders").unwrap();
     let pos_lang = result.find("# Language").unwrap();
     let pos_aa = result.find("AA-COLLECTED-EARLY").unwrap();
@@ -398,13 +388,10 @@ fn collected_section_overrides_builtin_by_id() {
         1,
         "COLLECTED-INTRO",
     ));
-    let features = PromptFeatures::none();
+
     let env = PromptEnv::with_frozen_date("/tmp", "2026-01-01");
-    let result = PromptTemplate::new(&MetaHarnessState::default(), &collected).render(
-        &env,
-        &features,
-        &AgentCatalogProvider::new(),
-    );
+    let result = PromptTemplate::new(&MetaHarnessState::default(), &collected)
+        .render(&env, &AgentCatalogProvider::new());
     assert!(result.contains("COLLECTED-INTRO"), "收集段落内容渲染");
     assert!(
         !result.contains("Assist with defensive security tasks"),
@@ -430,13 +417,10 @@ fn collected_empty_content_skipped() {
         8,
         "",
     ));
-    let features = PromptFeatures::none();
+
     let env = PromptEnv::with_frozen_date("/tmp", "2026-01-01");
-    let result = PromptTemplate::new(&MetaHarnessState::default(), &collected).render(
-        &env,
-        &features,
-        &AgentCatalogProvider::new(),
-    );
+    let result = PromptTemplate::new(&MetaHarnessState::default(), &collected)
+        .render(&env, &AgentCatalogProvider::new());
     assert!(!result.contains("zz_empty"), "空内容段落不渲染");
     assert!(result.contains("Following conventions"), "其他段落不受影响");
 }
@@ -452,13 +436,10 @@ fn collected_dynamic_content_rendered() {
         8,
         "DYNAMIC-COLLECTED".to_string(),
     ));
-    let features = PromptFeatures::none();
+
     let env = PromptEnv::with_frozen_date("/tmp", "2026-01-01");
-    let result = PromptTemplate::new(&MetaHarnessState::default(), &collected).render(
-        &env,
-        &features,
-        &AgentCatalogProvider::new(),
-    );
+    let result = PromptTemplate::new(&MetaHarnessState::default(), &collected)
+        .render(&env, &AgentCatalogProvider::new());
     assert!(result.contains("DYNAMIC-COLLECTED"), "动态内容段落渲染");
 }
 
@@ -476,13 +457,9 @@ fn collected_content_merged_with_meta_harness_override() {
         "COLLECTED-TOOLS",
     ));
     let state = override_state("05_using_tools", "OVERRIDE-TOOLS");
-    let features = PromptFeatures::none();
+
     let env = PromptEnv::with_frozen_date("/tmp", "2026-01-01");
-    let result = PromptTemplate::new(&state, &collected).render(
-        &env,
-        &features,
-        &AgentCatalogProvider::new(),
-    );
+    let result = PromptTemplate::new(&state, &collected).render(&env, &AgentCatalogProvider::new());
     assert!(result.contains("OVERRIDE-TOOLS"), "覆盖全文替换持有者段落");
     assert!(
         !result.contains("COLLECTED-TOOLS"),
@@ -490,10 +467,9 @@ fn collected_content_merged_with_meta_harness_override() {
     );
 }
 
-/// 收集段不受 gate 硬编码影响（gate = 持有者是否在链上，收集即装配）：
-/// `PromptFeatures::none()` 下收集段仍渲染。
+/// 持有者已装配的收集段参与渲染。
 #[test]
-fn collected_sections_render_regardless_of_feature_gates() {
+fn collected_sections_are_rendered() {
     let mut collected =
         crate::session::build_collected_sections(&MetaHarnessState::default(), None, None);
     collected.push(collected_section(
@@ -502,19 +478,11 @@ fn collected_sections_render_regardless_of_feature_gates() {
         8,
         "GATE-FREE-COLLECTED",
     ));
-    let features = PromptFeatures::none(); // 全部 gate 关闭
+
     let env = PromptEnv::with_frozen_date("/tmp", "2026-01-01");
-    let result = PromptTemplate::new(&MetaHarnessState::default(), &collected).render(
-        &env,
-        &features,
-        &AgentCatalogProvider::new(),
-    );
+    let result = PromptTemplate::new(&MetaHarnessState::default(), &collected)
+        .render(&env, &AgentCatalogProvider::new());
     assert!(result.contains("GATE-FREE-COLLECTED"), "收集段恒渲染");
-    // 对照：未迁移内置 gated 段落（15_channel）仍按硬编码 gate 关闭
-    assert!(
-        !result.contains("Channel 频道消息"),
-        "内置 gated 段（15_channel）不受收集影响，按 PromptFeatures 门控"
-    );
 }
 
 // ─── C 扩展 / E 补测试（2026-08-14 advisor 矩阵缺口）───────────────────────
@@ -524,7 +492,7 @@ fn collected_sections_render_regardless_of_feature_gates() {
 #[test]
 fn meta_harness_override_empty_removes_section() {
     let state = override_state("01_intro", "");
-    let result = render_with_state(&state, PromptFeatures::none());
+    let result = render_with_state(&state);
     assert!(
         !result.contains("Assist with defensive security tasks"),
         "空串覆盖 → 01_intro 经 is_empty 过滤从输出消失"
@@ -538,7 +506,7 @@ fn meta_harness_override_empty_removes_section() {
 #[test]
 fn meta_harness_override_whitespace_renders_as_is() {
     let state = override_state("01_intro", "   ");
-    let result = render_with_state(&state, PromptFeatures::none());
+    let result = render_with_state(&state);
     // 01_intro 为缓存区首段，渲染结果以其内容开头（无前缀分隔符）
     assert!(
         result.starts_with("   "),
@@ -569,13 +537,10 @@ fn collected_duplicate_id_last_wins() {
         9,
         "DUP-SECOND",
     ));
-    let features = PromptFeatures::none();
+
     let env = PromptEnv::with_frozen_date("/tmp", "2026-01-01");
-    let result = PromptTemplate::new(&MetaHarnessState::default(), &collected).render(
-        &env,
-        &features,
-        &AgentCatalogProvider::new(),
-    );
+    let result = PromptTemplate::new(&MetaHarnessState::default(), &collected)
+        .render(&env, &AgentCatalogProvider::new());
     assert!(
         result.contains("DUP-SECOND") && !result.contains("DUP-FIRST"),
         "重复 ID 后者覆盖前者"
@@ -605,13 +570,10 @@ fn collected_same_zone_order_stable() {
         8,
         "STABLE-SECOND",
     ));
-    let features = PromptFeatures::none();
+
     let env = PromptEnv::with_frozen_date("/tmp", "2026-01-01");
-    let result = PromptTemplate::new(&MetaHarnessState::default(), &collected).render(
-        &env,
-        &features,
-        &AgentCatalogProvider::new(),
-    );
+    let result = PromptTemplate::new(&MetaHarnessState::default(), &collected)
+        .render(&env, &AgentCatalogProvider::new());
     let pos_first = result.find("STABLE-FIRST").unwrap();
     let pos_second = result.find("STABLE-SECOND").unwrap();
     assert!(

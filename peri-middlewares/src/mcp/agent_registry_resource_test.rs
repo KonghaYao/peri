@@ -62,7 +62,6 @@ fn handle(
         source,
         url: None,
         skills_capable: false,
-        channel_capable: false,
     })
 }
 

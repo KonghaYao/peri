@@ -238,7 +238,6 @@ fn builtin_direct_bridges() -> Vec<Arc<dyn BaseTool>> {
             }),
             url: None,
             skills_capable: false,
-            channel_capable: false,
         })
     }
 

@@ -148,7 +148,6 @@ async fn connect(instance: &str, server: FixtureServer) -> Link {
     let service = serve_client_auto(
         io,
         None,
-        None,
         &McpCapabilityProfile::disabled(),
         HANDSHAKE_TIMEOUT,
     )
@@ -194,7 +193,7 @@ fn call_reply(response: &CallToolResponse) -> String {
 // ─── ① 握手 / peer_info / 线路 ───────────────────────────────────────────────
 
 /// builtin 链路必须完成 modern 握手且 `peer_info()` 可读——`initialize.rs` 的
-/// `channel_capable` 与 `version` 都从它派生。
+/// `version` 从它派生。
 #[tokio::test]
 async fn builtin_link_uses_modern_handshake_and_keeps_peer_info() {
     let (server, probe) = fixture("fixture_tool", "reply");
@@ -238,7 +237,6 @@ async fn builtin_wire_has_no_initialize_and_tools_list_reaches_server() {
     let (transport, wire) = spawn_builtin_transport_with_tap("web", server);
     let mut service = serve_client_auto(
         transport.io,
-        None,
         None,
         &McpCapabilityProfile::disabled(),
         HANDSHAKE_TIMEOUT,
@@ -480,7 +478,6 @@ async fn registered_web_instance_handshakes_with_real_handler() {
     let mut service = serve_client_auto(
         io,
         None,
-        None,
         &McpCapabilityProfile::disabled(),
         HANDSHAKE_TIMEOUT,
     )
@@ -658,7 +655,6 @@ fn connected_handle(
         source,
         url: None,
         skills_capable: false,
-        channel_capable: false,
     })
 }
 

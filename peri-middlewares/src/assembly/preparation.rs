@@ -7,10 +7,7 @@ use crate::{
     workflow::WorkflowMiddleware,
 };
 use peri_acp_types::mcp_skills::McpSkillRegistry;
-use peri_agent::{
-    interaction::{ChannelBroker, MultiplexBroker, UserInteractionBroker},
-    tools::BaseTool,
-};
+use peri_agent::tools::BaseTool;
 use std::sync::Arc;
 
 pub(super) struct ResolvedPorts {
@@ -19,7 +16,6 @@ pub(super) struct ResolvedPorts {
     pub(super) tool_search_index_concrete: Arc<ToolSearchIndex>,
     pub(super) workflow_middleware_concrete: Option<Arc<WorkflowMiddleware>>,
     pub(super) auto_classifier: Option<Arc<dyn AutoClassifier>>,
-    pub(super) effective_broker: Arc<dyn UserInteractionBroker>,
 }
 
 pub(super) fn resolve_ports(ctx: &AssemblyContext) -> ResolvedPorts {
@@ -28,8 +24,6 @@ pub(super) fn resolve_ports(ctx: &AssemblyContext) -> ResolvedPorts {
         tool_search_index,
         workflow_middleware,
         auto_classifier_model,
-        channel_state,
-        broker,
         ..
     } = ctx;
     // L5：middlewares 具体类型经 peri-acp-types 端口接入，此处 downcast
@@ -81,23 +75,6 @@ pub(super) fn resolve_ports(ctx: &AssemblyContext) -> ResolvedPorts {
     let auto_classifier: Option<Arc<dyn AutoClassifier>> = Some(Arc::new(LlmAutoClassifier::new(
         auto_classifier_model.clone(),
     )));
-    // 构造 permission broker（当 channel_state 存在时用 MultiplexBroker 包装）
-    let effective_broker: Arc<dyn UserInteractionBroker> =
-        match (channel_state, mcp_pool_concrete.as_ref()) {
-            (Some(cs), Some(pool)) => {
-                let pool_arc: Arc<McpClientPool> = Arc::clone(pool);
-                let sender: Arc<dyn peri_agent::interaction::ChannelNotificationSender> = pool_arc;
-                let channel_broker = Arc::new(ChannelBroker::new(cs.clone(), sender));
-                Arc::new(MultiplexBroker::new(vec![
-                    ("tui".to_string(), broker.clone()),
-                    (
-                        "channel".to_string(),
-                        channel_broker as Arc<dyn UserInteractionBroker>,
-                    ),
-                ]))
-            }
-            _ => broker.clone(),
-        };
 
     ResolvedPorts {
         mcp_pool_concrete,
@@ -105,7 +82,6 @@ pub(super) fn resolve_ports(ctx: &AssemblyContext) -> ResolvedPorts {
         tool_search_index_concrete,
         workflow_middleware_concrete,
         auto_classifier,
-        effective_broker,
     }
 }
 

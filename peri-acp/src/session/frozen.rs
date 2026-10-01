@@ -81,7 +81,6 @@ impl SessionManager {
         let meta_harness_state =
             build_meta_harness_state(config.config.meta_harness.as_ref(), docs);
 
-        let features = crate::prompt::PromptFeatures::detect();
         // 波 4 演进（C2）：收集结果 = 渲染面静态声明（冻结 disabled 集合 +
         // overrides + 冻结语言驱动，`build_collected_sections`）——基础段
         // （01-06 / 07_runtime / persona）与 language 段由
@@ -91,7 +90,7 @@ impl SessionManager {
             build_collected_sections(&meta_harness_state, None, frozen_language.as_deref());
         let template = crate::prompt::PromptTemplate::new(&meta_harness_state, &collected);
         let env = crate::prompt::PromptEnv::frozen(cwd, &frozen_date, runtime_env);
-        let system_prompt = template.render(&env, &features, self.inner.agent_catalog.as_ref());
+        let system_prompt = template.render(&env, self.inner.agent_catalog.as_ref());
 
         // 16_workflow 已删除（C2）：子面向 prompt 与主 prompt 字节相同，
         // 不再二次渲染——`FrozenSessionData` 无子面向字段（C5 移除），

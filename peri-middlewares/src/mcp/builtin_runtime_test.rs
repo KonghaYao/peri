@@ -645,7 +645,7 @@ impl StartupFixture {
         ))
         .expect("夹具首次注入上下文必须成功");
         let (status_tx, _status_rx) = tokio::sync::watch::channel(McpInitStatus::Pending);
-        McpClientPool::run_initialize(pool.clone(), &project, &home, status_tx, None, None).await;
+        McpClientPool::run_initialize(pool.clone(), &project, &home, status_tx, None).await;
         Self {
             _fixture: fixture,
             _env: env,
@@ -730,11 +730,10 @@ impl TappedLink {
         let crate::mcp::builtin::runtime::BuiltinTransport {
             io, server_task, ..
         } = transport;
-        let service =
-            serve_client_auto(io, None, None, &pool.capability_profile, HANDSHAKE_TIMEOUT)
-                .await
-                .expect("builtin 握手不得超时（同进程链路）")
-                .expect("builtin 握手不得失败");
+        let service = serve_client_auto(io, None, &pool.capability_profile, HANDSHAKE_TIMEOUT)
+            .await
+            .expect("builtin 握手不得超时（同进程链路）")
+            .expect("builtin 握手不得失败");
 
         // 配置侧：与默认层同形的 builtin 条目（`system_mcp = true` ⇒ live round-trip）。
         let config = builtin_entry(instance);
@@ -759,7 +758,6 @@ impl TappedLink {
             }),
             url: None,
             skills_capable: false,
-            channel_capable: false,
         });
         pool.clients
             .write()

@@ -34,11 +34,10 @@ impl MwLspLink {
         );
         // 生产拆分：client 侧 io + 本代关闭所有权（tick 归属随监督者；lsp 无 tick）。
         let (io, supervisor) = transport.into_parts();
-        let service =
-            serve_client_auto(io, None, None, &pool.capability_profile, HANDSHAKE_TIMEOUT)
-                .await
-                .expect("builtin 握手不得超时（同进程链路）")
-                .expect("builtin 握手不得失败");
+        let service = serve_client_auto(io, None, &pool.capability_profile, HANDSHAKE_TIMEOUT)
+            .await
+            .expect("builtin 握手不得超时（同进程链路）")
+            .expect("builtin 握手不得失败");
 
         // 配置侧：与默认层同形的 builtin 条目（`system_mcp = true` ⇒ live round-trip）。
         let config = builtin_entry(instance);
@@ -65,7 +64,6 @@ impl MwLspLink {
                 }),
                 url: None,
                 skills_capable: false,
-                channel_capable: false,
             }),
         );
         pool.register_builtin_task(instance.name.to_string(), supervisor);

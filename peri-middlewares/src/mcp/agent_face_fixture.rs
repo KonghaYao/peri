@@ -62,7 +62,6 @@ impl AgentFaceFixture {
             let service = serve_client_auto(
                 io,
                 None,
-                None,
                 &McpCapabilityProfile::disabled(),
                 HANDSHAKE_TIMEOUT,
             )
@@ -86,7 +85,6 @@ impl AgentFaceFixture {
                 }),
                 url: None,
                 skills_capable: false,
-                channel_capable: false,
             });
             let mut pool = McpClientPool::new_pending();
             pool.resource_cache = super::resource_cache::McpResourceCache::isolated_for_test();

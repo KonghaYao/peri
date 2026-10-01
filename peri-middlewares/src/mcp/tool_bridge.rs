@@ -554,7 +554,6 @@ mod direct_flag_tests {
             source: None,
             url: None,
             skills_capable: false,
-            channel_capable: false,
         })
     }
 

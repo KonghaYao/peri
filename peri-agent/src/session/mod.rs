@@ -11,13 +11,12 @@
 //!
 //! ## 异步 Owner（v2 新增）
 //!
-//! Session 可选地持有三个异步 owner：
+//! Session 可选地持有两个异步 owner：
 //! - [`SessionInbox`](crate::agent::session::SessionInbox)：await-wake 包装器，用于 idle 期间阻塞唤醒
 //! - [`CronOwner`](crate::agent::session::CronOwner)：cron trigger → inbox 桥接
-//! - [`ChannelOwner`](crate::agent::session::ChannelOwner)：channel notification → inbox 桥接
 //!
 //! 这些 owner 在 `peri-acp` 层通过 `set_async_owners` 注入。持有 owner 后，
-//! cron/channel 事件直接通过 inbox 唤醒 executor，无需 TUI 轮询。
+//! cron 事件直接通过 inbox 唤醒 executor，无需 TUI 轮询。
 //! 不设置 owner 时，TUI 轮询路径仍然有效（向后兼容）。
 //!
 //! cron 主路径由 `AcpSession.cron_bridge`（session 级）持有，跨 turn 存活；
@@ -56,9 +55,7 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 
-use crate::agent::session::{
-    channel_owner::ChannelOwner, cron_owner::CronOwner, inbox::SessionInbox,
-};
+use crate::agent::session::{cron_owner::CronOwner, inbox::SessionInbox};
 use crate::thread::ThreadId;
 
 /// 异步 owner 容器（set-once，RwLock 保护）
@@ -66,7 +63,6 @@ use crate::thread::ThreadId;
 pub struct AsyncOwners {
     inbox: SessionInbox,
     cron_owner: Option<CronOwner>,
-    channel_owner: Option<ChannelOwner>,
 }
 
 /// Session — 会话统一入口
@@ -74,7 +70,7 @@ pub struct AsyncOwners {
 /// 聚合五个核心实体，提供统一的创建和访问 API。
 /// 通过 `Arc<Self>` 共享，外部通过 `Session::new()` 创建。
 ///
-/// 可选持有异步 owner（inbox / cron / channel），用于直接桥接
+/// 可选持有异步 owner（inbox / cron），用于直接桥接
 /// 异步事件到 executor 的 idle-wake 机制。
 pub struct Session {
     /// 会话生命周期数据（不可变）
@@ -250,16 +246,16 @@ impl Session {
     /// Async owners 读守卫。
     ///
     /// 返回 `RwLockReadGuard<Option<AsyncOwners>>`，调用者可访问
-    /// `.inbox` / `.cron_owner` / `.channel_owner`。
+    /// `.inbox` / `.cron_owner`。
     pub fn async_owners_guard(
         &self,
     ) -> Option<parking_lot::RwLockReadGuard<'_, Option<AsyncOwners>>> {
         self.async_owners.as_ref().map(|m| m.read())
     }
 
-    /// 注入异步 owner（SessionInbox + CronOwner + ChannelOwner）。
+    /// 注入异步 owner（SessionInbox + CronOwner）。
     ///
-    /// 由 `peri-acp` 层在构建 v2 session 后调用，将 cron/channel
+    /// 由 `peri-acp` 层在构建 v2 session 后调用，将 cron
     /// 事件直接桥接到 inbox，绕过 TUI 轮询。
     ///
     /// 每个 owner 的 `start()` 方法在此调用前应已执行（background task 已 spawn）。
@@ -272,12 +268,7 @@ impl Session {
     ///
     /// Returns `true` if owners were set successfully, `false` if already set or
     /// no `async_owners` cell was initialized.
-    pub fn set_async_owners(
-        &self,
-        inbox: SessionInbox,
-        cron: Option<CronOwner>,
-        channel: Option<ChannelOwner>,
-    ) -> bool {
+    pub fn set_async_owners(&self, inbox: SessionInbox, cron: Option<CronOwner>) -> bool {
         if let Some(rwlock) = &self.async_owners {
             let mut guard = rwlock.write();
             if guard.is_some() {
@@ -287,7 +278,6 @@ impl Session {
             *guard = Some(AsyncOwners {
                 inbox,
                 cron_owner: cron,
-                channel_owner: channel,
             });
             true
         } else {

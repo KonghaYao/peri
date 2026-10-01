@@ -298,7 +298,6 @@ async fn connect_server(
     let served = serve_client_auto(
         transport,
         None,
-        None,
         &pool.capability_profile,
         HTTP_CONNECT_TIMEOUT,
     )
@@ -352,16 +351,6 @@ async fn connect_server(
         // 会话级连接的来源是声明它的 client，不参与持久缓存。
         cache_version: None,
         skills_capable: peer_declares_skills(&peer),
-        channel_capable: peer
-            .peer_info()
-            .and_then(|info| {
-                info.capabilities
-                    .experimental
-                    .as_ref()
-                    .and_then(|experimental| experimental.get("claude/channel"))
-                    .cloned()
-            })
-            .is_some(),
         peer: Some(peer),
         resources: Vec::new(),
         tools,

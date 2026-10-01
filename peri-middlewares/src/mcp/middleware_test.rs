@@ -74,7 +74,6 @@ fn make_connected_handle(name: &str, tools: usize) -> Arc<McpClientHandle> {
         source: None,
         url: None,
         skills_capable: false,
-        channel_capable: false,
     })
 }
 
@@ -96,7 +95,6 @@ fn make_connected_handle_with_tool(name: &str, tool_name: &str) -> Arc<McpClient
         source: None,
         url: None,
         skills_capable: false,
-        channel_capable: false,
     })
 }
 
@@ -121,7 +119,6 @@ fn test_overview_mixed_statuses() {
             source: None,
             url: None,
             skills_capable: false,
-            channel_capable: false,
         }),
     );
     pool.clients.write().insert(
@@ -138,7 +135,6 @@ fn test_overview_mixed_statuses() {
             source: None,
             url: None,
             skills_capable: false,
-            channel_capable: false,
         }),
     );
     let mw = McpMiddleware::new(pool);
@@ -409,7 +405,6 @@ fn insert_skill_handle(
         source: None,
         url: None,
         skills_capable: false,
-        channel_capable: false,
     });
     pool.clients
         .write()

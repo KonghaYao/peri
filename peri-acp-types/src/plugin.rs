@@ -425,13 +425,6 @@ pub struct PluginLspServer {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PluginChannel {
-    pub name: String,
-    #[serde(rename = "mcpServer")]
-    pub mcp_server: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginOption {
     pub name: String,
     pub description: String,
@@ -486,7 +479,6 @@ pub struct PluginManifest {
     pub lsp_servers: Option<Vec<PluginLspServer>>,
     #[serde(rename = "outputStyles")]
     pub output_styles: Option<Vec<String>>,
-    pub channels: Option<Vec<PluginChannel>>,
     pub options: Option<Vec<PluginOption>>,
     pub settings: Option<serde_json::Value>,
     /// 保留 plugin.json 中未声明的字段，确保前向兼容（read→write roundtrip 不丢字段）。

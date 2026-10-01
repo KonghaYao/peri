@@ -208,7 +208,6 @@ async fn spawn_fixture(blocking_call: bool) -> Fixture {
         oauth_status: OAuthStatus::default(),
         source: None,
         url: None,
-        channel_capable: false,
         skills_capable: false,
     });
     Fixture {

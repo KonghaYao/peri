@@ -268,7 +268,6 @@ impl McpClientPool {
                 source,
                 url,
                 skills_capable: false,
-                channel_capable: false,
             }),
         );
         // 禁用不是「连接中」：本代证据失效，等待方立即得到 Disabled 事实。

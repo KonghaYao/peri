@@ -258,7 +258,6 @@ async fn connect_handler(instance: &str, handler: BuiltinServerHandler) -> Pair 
     let service = serve_client_auto(
         io,
         None,
-        None,
         &McpCapabilityProfile::disabled(),
         HANDSHAKE_TIMEOUT,
     )
@@ -474,7 +473,6 @@ async fn bridge_pool(instance: &str, peer: &Peer<RoleClient>) -> Arc<McpClientPo
             source: None,
             url: None,
             skills_capable: false,
-            channel_capable: false,
         }),
     );
     pool

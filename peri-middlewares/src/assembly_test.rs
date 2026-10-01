@@ -312,7 +312,6 @@ fn base_context() -> AssemblyContext {
         dynamic_mcp: None,
         dynamic_mcp_projection: Arc::new(parking_lot::Mutex::new(None)),
         session_id: "session-contract-test".to_string(),
-        channel_state: None,
         tool_search_index: Arc::new(ToolSearchIndex::new()),
         shared_tools,
         lsp_servers: Vec::new(),
@@ -427,7 +426,6 @@ fn make_connected_handle(server: &str, tools: Vec<rmcp::model::Tool>) -> Arc<Mcp
         }),
         url: None,
         skills_capable: false,
-        channel_capable: false,
     })
 }
 

@@ -34,7 +34,6 @@ fn fixture_handle(server: &str) -> Arc<McpClientHandle> {
         source: None,
         url: None,
         skills_capable: false,
-        channel_capable: false,
     })
 }
 

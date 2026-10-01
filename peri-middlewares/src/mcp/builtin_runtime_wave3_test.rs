@@ -272,7 +272,7 @@ impl Wave3Fixture {
         ))
         .expect("夹具首次注入上下文必须成功");
         let (status_tx, _status_rx) = tokio::sync::watch::channel(McpInitStatus::Pending);
-        McpClientPool::run_initialize(pool.clone(), &project, &home, status_tx, None, None).await;
+        McpClientPool::run_initialize(pool.clone(), &project, &home, status_tx, None).await;
 
         Self {
             _fixture: fixture,

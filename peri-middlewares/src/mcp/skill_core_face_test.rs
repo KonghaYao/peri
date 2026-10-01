@@ -53,7 +53,6 @@ fn builtin_handle(name: &str) -> Arc<McpClientHandle> {
         }),
         url: None,
         skills_capable: false,
-        channel_capable: false,
     })
 }
 

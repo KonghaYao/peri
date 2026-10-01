@@ -182,7 +182,6 @@ async fn build_server_config(
         dynamic_mcp: None,
         oauth_event_tx: None,
         oauth_event_rx: None,
-        channel_state: None,
         plugin_skill_roots: Vec::new(),
         plugin_command_entries: Vec::new(),
         plugin_hooks: Vec::new(),

@@ -146,7 +146,6 @@ impl SystemFixture {
             source: None,
             url: None,
             skills_capable: false,
-            channel_capable: false,
         })
     }
 
@@ -157,7 +156,6 @@ impl SystemFixture {
             .push(spawn_fake_peer(server, FakeInitialize::Legacy));
         let service = serve_client_auto(
             fixture_transport(client),
-            None,
             None,
             &McpCapabilityProfile::default(),
             Duration::from_secs(5),
@@ -193,7 +191,6 @@ impl SystemFixture {
             .push(spawn_fake_peer(server, FakeInitialize::Error));
         let outcome = serve_client_auto(
             fixture_transport(client),
-            None,
             None,
             &McpCapabilityProfile::default(),
             Duration::from_secs(5),

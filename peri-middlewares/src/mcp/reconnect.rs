@@ -115,14 +115,9 @@ impl McpClientPool {
                 {
                     let _ = previous.close(BUILTIN_CONVERGE_TIMEOUT).await;
                 }
-                let connected = serve_client_auto(
-                    io,
-                    None,
-                    protocol_version,
-                    &self.capability_profile,
-                    timeout,
-                )
-                .await;
+                let connected =
+                    serve_client_auto(io, protocol_version, &self.capability_profile, timeout)
+                        .await;
                 // 握手失败 / 超时：新链路当场收口，不留 orphan。
                 if !matches!(connected, Ok(Ok(_))) {
                     self.close_builtin_task(server_name).await;
@@ -139,14 +134,8 @@ impl McpClientPool {
                         })?;
                 match self.spawn_stdio_transport(command, args, env, cwd) {
                     Ok(t) => {
-                        serve_client_auto(
-                            t,
-                            None,
-                            protocol_version,
-                            &self.capability_profile,
-                            timeout,
-                        )
-                        .await
+                        serve_client_auto(t, protocol_version, &self.capability_profile, timeout)
+                            .await
                     }
                     Err(e) => {
                         McpClientPool::insert_failed(self, server_name, format!("stdio 失败: {e}"));
@@ -212,7 +201,6 @@ impl McpClientPool {
                             if let Some(am) = mgr.get_authorization_manager(server_name) {
                                 serve_client_auto(
                                     build_authed_transport(url, headers, am),
-                                    None,
                                     protocol_version,
                                     &self.capability_profile,
                                     timeout,
@@ -221,7 +209,6 @@ impl McpClientPool {
                             } else {
                                 serve_client_auto(
                                     build_http_transport(url, headers),
-                                    None,
                                     protocol_version,
                                     &self.capability_profile,
                                     timeout,
@@ -233,7 +220,6 @@ impl McpClientPool {
                             tracing::warn!(server = %server_name, error = %e, "OAuth 恢复失败，尝试裸连接");
                             serve_client_auto(
                                 build_http_transport(url, headers),
-                                None,
                                 protocol_version,
                                 &self.capability_profile,
                                 timeout,
@@ -244,7 +230,6 @@ impl McpClientPool {
                 } else {
                     serve_client_auto(
                         build_http_transport(url, headers),
-                        None,
                         protocol_version,
                         &self.capability_profile,
                         timeout,
@@ -314,7 +299,6 @@ impl McpClientPool {
                     oauth_status,
                     source: server_config.source.clone(),
                     url: server_config.url.clone(),
-                    channel_capable: false,
                     skills_capable,
                 });
                 let committed = Arc::clone(&handle);

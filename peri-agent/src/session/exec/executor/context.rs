@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use peri_acp_types::{
-    interaction::{ChannelState, UserInteractionBroker},
+    interaction::UserInteractionBroker,
     messages::{BaseMessage, MessageContent},
     session::SessionAccessPort,
 };
@@ -212,7 +212,6 @@ pub struct SessionContext {
     pub session_mcp_capability: Option<Arc<dyn peri_acp_types::ports::SessionMcpCapabilityPort>>,
     pub dynamic_mcp_projection:
         Arc<parking_lot::Mutex<Option<Arc<dyn peri_acp_types::ports::SessionMcpProjectionLease>>>>,
-    pub channel_state: Option<Arc<ChannelState>>,
     pub tool_search_index: Arc<dyn peri_acp_types::ports::ToolSearchPort>,
     /// Agent 候选目录端口（prompt 渲染 `{{available_agents}}` 经此访问；
     /// W5：实现是会话级 MCP Agent registry 的只读投影，不再扫盘）。

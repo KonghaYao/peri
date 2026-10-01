@@ -107,7 +107,6 @@ impl Fixture {
                 instance: "workspace".to_string(),
             }),
             url: None,
-            channel_capable: false,
             skills_capable: false,
         });
         pool.advance_handle_generation(&handle);

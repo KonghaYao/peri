@@ -329,7 +329,7 @@ async fn isolation_fixture() -> IsolationFixture {
     let (tasks, spawner) = McpTaskOwner::new();
     let pool = Arc::new(McpClientPool::new_pending_with_spawner(spawner));
     let (status_tx, _status_rx) = tokio::sync::watch::channel(McpInitStatus::Pending);
-    McpClientPool::run_initialize(pool.clone(), &cwd, &claude_home, status_tx, None, None).await;
+    McpClientPool::run_initialize(pool.clone(), &cwd, &claude_home, status_tx, None).await;
 
     IsolationFixture {
         _dir: dir,

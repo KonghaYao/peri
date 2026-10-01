@@ -114,9 +114,6 @@ pub(crate) fn build_workflow_system_prompt_fallback(
 ) -> WorkflowSystemPromptFallback {
     Arc::new(
         move |cwd: &str, frozen_date: Option<&str>, frozen_language: Option<&str>| {
-            // C3：detect 无参（gate 判定随段落实体迁移至持有者装配判定；
-            // workflow 渲染与主链共用同一段落来源——C2 决定）
-            let features = crate::prompt::PromptFeatures::detect();
             // C2：收集结果 = 渲染面静态声明（冻结 disabled 集合 + 冻结语言
             // 驱动；fallback 无 overrides）。
             // advisor 裁决 B（2026-08-14）：workflow agent 链不装配审批
@@ -137,7 +134,7 @@ pub(crate) fn build_workflow_system_prompt_fallback(
             } else {
                 crate::prompt::PromptEnv::detect(cwd)
             };
-            template.render(&env, &features, agent_catalog.as_ref())
+            template.render(&env, agent_catalog.as_ref())
         },
     )
 }
@@ -155,8 +152,6 @@ pub(crate) fn build_workflow_agent_prompt_builder(
 ) -> WorkflowAgentPromptBuilder {
     Arc::new(
         move |overrides: Option<&AgentOverrides>, cwd, frozen_date, frozen_language| {
-            // C3：detect 无参（同 build_workflow_system_prompt_fallback）
-            let features = crate::prompt::PromptFeatures::detect();
             // C2：收集结果 = 渲染面静态声明（冻结 disabled 集合 + overrides +
             // 冻结语言驱动；persona 段内容依赖 overrides，调用期计算）。
             // advisor 裁决 B：workflow 链无审批 middleware（PermissionMiddleware
@@ -171,7 +166,7 @@ pub(crate) fn build_workflow_agent_prompt_builder(
                 || crate::prompt::PromptEnv::detect(cwd),
                 |date| crate::prompt::PromptEnv::with_frozen_date(cwd, date),
             );
-            template.render(&env, &features, agent_catalog.as_ref())
+            template.render(&env, agent_catalog.as_ref())
         },
     )
 }

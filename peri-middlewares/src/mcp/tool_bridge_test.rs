@@ -28,7 +28,6 @@ fn make_disconnected_handle(name: &str) -> Arc<McpClientHandle> {
         source: None,
         url: None,
         skills_capable: false,
-        channel_capable: false,
     })
 }
 
@@ -242,7 +241,6 @@ fn test_build_tool_bridges_filters_app_only_tool_from_model_catalog() {
             source: None,
             url: None,
             skills_capable: false,
-            channel_capable: false,
         }),
     );
     let bridges = build_tool_bridges(&pool);
@@ -274,7 +272,6 @@ fn connected_handle(name: &str, tools: Vec<Tool>) -> Arc<McpClientHandle> {
         }),
         url: None,
         skills_capable: false,
-        channel_capable: false,
     })
 }
 
@@ -516,7 +513,6 @@ async fn builtin_tool_call_surfaces_timeout_error_after_bridge_deadline() {
     let mut service = crate::mcp::client::serve_client_auto(
         io,
         None,
-        None,
         &crate::mcp::apps::McpCapabilityProfile::disabled(),
         std::time::Duration::from_secs(5),
     )
@@ -541,7 +537,6 @@ async fn builtin_tool_call_surfaces_timeout_error_after_bridge_deadline() {
             source: None,
             url: None,
             skills_capable: false,
-            channel_capable: false,
         }),
     );
     assert_eq!(bridge.name(), "mcp__lsp__LSP");

@@ -210,7 +210,6 @@ pub(crate) async fn run_prompt(
     let hook_groups = deployment.hook_groups.as_slice();
     let mcp_pool = deployment.mcp_pool.clone();
     let dynamic_mcp = deployment.dynamic_mcp.clone();
-    let channel_state = deployment.channel_state.clone();
     let tool_search_index = deployment.tool_search_index.clone();
     let agent_catalog = deployment.agent_catalog.clone();
     let shared_tools = deployment.shared_tools.clone();
@@ -521,7 +520,6 @@ pub(crate) async fn run_prompt(
         dynamic_mcp,
         session_mcp_capability,
         dynamic_mcp_projection,
-        channel_state,
         tool_search_index,
         agent_catalog,
         shared_tools,

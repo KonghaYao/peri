@@ -5,14 +5,16 @@
 > `peri-cool/src/content/docs/docs/features/meta-harness.mdx`。
 
 MetaHarness 是 Peri 的一项配置能力：一个 `settings.json` kv 字段（
-`meta_harness`）同时承载两项能力，bool 值决定动作：
+`meta_harness`）承载段落覆盖、能力裁剪与内置 Agent 定义策略：
 
 - `true` key = **段落 ID** → 覆盖系统提示词段落（用 `.peri/meta/<ID>.md`
   全文替换内置段落；宿主经 workspace 实例的 `peri-meta://workspace/<ID>`
   资源读取——workspace 关闭、文档缺失或读取失败时 warn 并保持内置段落，
   不回落磁盘）；
 - `false` key = **middleware 名** → 装配期关闭该 middleware（卸载其工具与
-  钩子，无需 md 文件）。
+  钩子，无需 md 文件）；builtin 实例策略键则关闭对应 MCP 能力面；
+- `BuiltInSubagents` = **内置定义策略** → bool 控制 compile-time 内置
+  SubAgent 定义（默认开启），不关闭项目/plugin agents、fork/resume 或 Agent 工具。
 
 ## 快速开始
 
@@ -57,12 +59,10 @@ MetaHarness 是 Peri 的一项配置能力：一个 `settings.json` kv 字段（
 
 `01_intro`、`02_system`、`03_doing_tasks`、`04_actions`、`05_using_tools`、
 `06_tone_style`、`07_runtime`、`10_hitl`、`11_subagent`、`12_ask_user`、
-`13_skills`、`15_channel`、`persona`、`language`
+`13_skills`、`persona`、`language`
 
 - `persona` / `language` 是渲染生成段，可经 `.peri/meta/persona.md` /
   `.peri/meta/language.md` 覆盖（同样经 workspace 资源面读取）；
-- `15_channel` 无持有 middleware（gate 恒关闭），覆盖也仅在能力装配后
-  生效；
 - 覆盖全文**整段替换**内置段落，段落渲染顺序（位置 + 段内序号）不变；
 - 覆盖为**空串**时段落整体消失；空白串原样渲染（不 trim）。
 
@@ -85,7 +85,8 @@ MetaHarness 是 Peri 的一项配置能力：一个 `settings.json` kv 字段（
 
 > `FilesystemMiddleware` / `TerminalMiddleware` 已不是链槽位名（v4-part-4 wave 3）：
 > 7 个文件/终端工具迁为由 builtin `workspace` 实例提供，这两个键不再是**已知键**，
-> 配置里继续写它们会按未知键 warn 后丢弃。关闭该能力请用下面的 `WorkspaceMiddleware`。
+> 配置里继续写它们会按未知键 warn 后丢弃。`AgentDefineMiddleware` 也已退役，定义改由 MCP
+> 资源提供。关闭下面的 `WorkspaceMiddleware` 会关闭整个 workspace 能力面，不等于旧单项关闭。
 >
 > `GitWatchMiddleware` 同样已不是已知键（v4 wave 4）：git ref 变化改由 builtin
 > `workspace` 实例的 `workspace://git/ref` 资源 + MCP 2026-07-28 订阅回传，链上不再有
@@ -136,7 +137,7 @@ MetaHarness 是 Peri 的一项配置能力：一个 `settings.json` kv 字段（
   生产入口 `load()` 合并；
 - meta_harness 为**逐 key 合并**专属特例：项目级 key 覆盖全局同 key，
   全局其余 key 保留；
-- 未知 key（非段落 ID、非链槽位名、非 builtin 实例策略键）：解析期 warn + 忽略，
+- 未知 key（非段落 ID、非链槽位名、非 builtin 实例策略键、非 `BuiltInSubagents`）：解析期 warn + 忽略，
   不 fail。
 
 ## 生效时机
@@ -158,9 +159,30 @@ MetaHarness 是 Peri 的一项配置能力：一个 `settings.json` kv 字段（
 
 ## 纯净模式
 
-关闭 `DefaultSystemPromptMiddleware` + `LangMiddleware` + 其余全部
-middleware（AskUserQuestion 除外）= 系统提示词只剩无持有者的
-15_channel（gate 恒关闭）——"完全纯净"路径。
+关闭全部提示词段落持有者后，系统提示词为空；覆盖不能创建没有持有者的段落。
+
+## MCP 为主的生态如何管理
+
+MetaHarness 是**会话内能力使用策略**，不是 MCP server 的安装、连接或生命周期管理器：
+
+| 管理对象 | 配置入口 | 边界 |
+| --- | --- | --- |
+| 宿主消费与编排 adapter | `meta_harness` 中的链槽位键 | 关闭该 adapter 的工具、钩子与段落贡献，不等于停掉资源 provider |
+| 内置 MCP 能力 | `meta_harness` 中的 builtin 实例策略键 | 注册表 `policy_key` 映射到实例关闭集；关闭工具注入与继承，workspace 还关闭资源面 |
+| 外部 MCP server | MCP server 配置、连接/授权管理 | 没有任意 server 名对应的 MetaHarness 键；不要发明 `SomeServerMiddleware` |
+| Agent 的工具权限 | session-local 工具视图与 allowlist/disallowlist、运行时审批 | provider 可连接不等于工具可执行；提示词覆盖也不授予权限 |
+
+全局与项目配置逐 key 合并后冻结到会话，再由装配与工具视图消费。
+`WebMiddleware: false` 等 builtin 策略不会销毁 pool 连接；如需配置层禁用实例，
+使用对应 MCP 配置片段 `{"web": {"disabled": true}}`。
+`McpMiddleware: false` 关闭 MCP 消费 adapter，但不是逐 server 的开关或 pool shutdown。
+`ToolSearch: false` 关闭额外工具发现/执行入口，不等于关闭 MCP 连接或全部 direct 工具。
+
+段落正文通过 workspace 的 `peri-meta://` 资源读取；同 scheme 的外部 server
+不能成为覆盖来源。channel 已退役，`15_channel` 按未知键告警并忽略。
+
+上述是现行职责与契约。关闭闭包、可选覆盖失败降级及跨 cwd 配置同源的已知缺口
+由 `spec/issues/2026-10-01-metaharness-v4-cleanup.md` 跟踪，不能将契约表述当作全部已验收。
 
 ## 相关文档
 

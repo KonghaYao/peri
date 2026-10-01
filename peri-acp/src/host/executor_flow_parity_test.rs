@@ -88,7 +88,6 @@ fn make_parity_context(
         dynamic_mcp: None,
         dynamic_mcp_projection: Arc::new(parking_lot::Mutex::new(None)),
         session_id: "session-parity-test".to_string(),
-        channel_state: None,
         tool_search_index: Arc::new(ToolSearchIndex::new()),
         shared_tools,
         lsp_servers: Vec::new(),
