@@ -73,6 +73,7 @@ pub use types::{
 pub struct McpClientPool {
     cache_policy: std::sync::OnceLock<McpCachePolicy>,
     pub(super) configuration_snapshot: std::sync::OnceLock<Arc<peri_config::ConfigurationSnapshot>>,
+    pub(super) session_servers: std::sync::OnceLock<HashMap<String, McpServerConfig>>,
     credential_client: std::sync::OnceLock<super::auth_store::OAuthCredentialClient>,
     shared_services: parking_lot::Mutex<Vec<Arc<McpServiceOwner>>>,
     /// Includes failed handshakes until their actual process tree and stderr have drained.
@@ -190,6 +191,7 @@ impl McpClientPool {
         Self {
             cache_policy: std::sync::OnceLock::new(),
             configuration_snapshot: std::sync::OnceLock::new(),
+            session_servers: std::sync::OnceLock::new(),
             credential_client: std::sync::OnceLock::new(),
             shared_services: parking_lot::Mutex::new(Vec::new()),
             processes: parking_lot::Mutex::new(Vec::new()),
@@ -271,6 +273,26 @@ impl McpClientPool {
             std::io::Error::new(
                 std::io::ErrorKind::AlreadyExists,
                 "MCP configuration snapshot is already bound",
+            )
+        })
+    }
+
+    /// ACP session setup declarations are scoped to this pool and override file configuration.
+    pub fn set_session_servers(
+        &self,
+        servers: HashMap<String, McpServerConfig>,
+    ) -> std::io::Result<()> {
+        let context = self.builtin_context.lock();
+        if context.initialize_started || !self.is_open() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "session MCP servers must be bound before initialization",
+            ));
+        }
+        self.session_servers.set(servers).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "session MCP servers already bound",
             )
         })
     }

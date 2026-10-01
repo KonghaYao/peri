@@ -148,7 +148,7 @@ pub(super) async fn prepare_existing(
                 // 接纳事务前构建（该时点无执行环境，MCP 资源面不可得），winner 由 adopt
                 // 后的重读定格（J2 §6.3）——装配消费的永远是 winner。
                 let persisted = load_frozen_bytes(cfg, id).await?;
-                let prepared = match legacy_prepared {
+                let mut prepared = match legacy_prepared {
                     Some(mut inputs) => {
                         let winner = decode_frozen_snapshot(&persisted).map_err(workspace_error)?;
                         inputs.inject_frozen(winner, persisted)?;
@@ -156,6 +156,7 @@ pub(super) async fn prepare_existing(
                     }
                     None => PreparedSessionInputs::prepare_restore(cfg, &cwd, &persisted)?,
                 };
+                prepared.session_mcp_servers = super::session_mcp_servers(params)?;
                 let frozen = prepared
                     .frozen
                     .clone()

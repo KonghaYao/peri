@@ -1,6 +1,6 @@
 # peri-acp 代码索引
 
-> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-30（Session ID/environment：`requests/session_restore.rs` 承载 load/resume；按 ID 恢复与执行只读准入分离，删除 dirty reset 协议与恢复能力协商）。
+> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-10-01（ACP 会话级 HTTP/stdio MCP 声明与 Peri instructions 扩展）。
 > 依据：peri-acp/CLAUDE.md、docs/standards/architecture-contracts.md、docs/design/peri-acp-protocol.md、源码
 
 ## 架构速览
@@ -135,6 +135,7 @@ Session ID 恢复与生命周期回归：`src/host/requests_workspace_cases_test
 | EOF 收尾 | host/shutdown.rs + host/lifecycle.rs | `shutdown_host` 借用唯一强 owner；先撤销准入，再取消并 drain 会话，最后关闭 LSP/MCP；`HostExitContext::finish` 在排空为 `Complete` 之后消费部署关闭权（`AcpServerConfig::session_store_shutdown`，仅装配点注入），未确认的关闭报 `Incomplete` 并保留上下文重试（重复关闭重新做真实检查） |
 | 方法注册面（mpsc） | host/requests.rs + host/requests/*.rs | `handle_request`（requests.rs:22，30 个方法分派到子模块；各 handle_* 均为 `pub(super)` 定义在对应子文件） |
 | MCP over ACP（client 声明的 `type: "acp"` server） | host/requests/acp_mcp.rs + host/server_loop.rs + host/workspace.rs | `attach_session_servers`（setup 响应后受理 `mcpServers`）；`AcpTransportGateway`（`AcpMcpGatewayPort` 实现：`mcp/connect` / `mcp/message` / `mcp/disconnect` 出站）；`route_inbound`（按 `connectionId` 定位承载会话服务）；`SessionEnvironment::shutdown` 调 `AcpMcpServerPort::close_session` | 会话 setup 各自解析、会话级服务持有连接；建连在后台（不阻塞会话建立，失败留在 MCP 池状态面），内层 MCP 错误码原样透传；契约 ARC-MCP-ACP-001 |
+| ACP HTTP/stdio MCP 与 Agent 指令 | `host/requests/session_mcp_setup.rs` + `host/requests/session_lifecycle.rs` + `host/prepared.rs` + `host/assemble.rs` + `peri-middlewares/src/mcp/{client,initialize}.rs` | `session_mcp_servers`；`PreparedSessionInputs::build_frozen_after_activation`；`McpClientPool::set_session_servers` | `session/new`、冷 load/resume、fork 的 MCP 声明在池初始化前注入；HTTP `workspace` 取代内置实例，`tools/list` 是工具清单权威；新会话的 `_meta["peri.instructions"]` 写入 frozen system prompt，冷恢复复用快照。ACP `initialize` 仅协商 HTTP 能力，不承载实例配置 |
 | notification 处理 | host/notify.rs | `handle_notification`（:28）/`extract_session_id`（:153）；`host/unify_wire_baseline_test.rs` 锁定发射面 payload 与 schema typed `SessionNotification` 的逐字段一致性；统一 host 入口见 ARC-STDIO-001 与 `docs/design/architecture.md` |
 | prompt 执行编排 | host/prompt.rs | `run_prompt` 借用既有 AcpServerConfig 与当轮参数；`take_recall_for_turn`；保留 session 快照、Controller 执行及 canonical 结果回写顺序 |
 | prompt 模型工厂 | host/prompt/models.rs | `build_model_factories`；闭包复用当轮 provider/config 快照与同一 session AgentPool，缓存按 provider fingerprint 校验 |

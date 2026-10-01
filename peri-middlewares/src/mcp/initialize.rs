@@ -193,13 +193,16 @@ impl McpClientPool {
             }
             None => super::load_merged_config_full(cwd, claude_home),
         };
-        let (config, plugin_sources) = match loaded {
+        let (mut config, plugin_sources) = match loaded {
             Ok(loaded) => loaded,
             Err(error) => {
                 publish_config_failure(&pool, &status_tx, &error.to_string());
                 return;
             }
         };
+        if let Some(servers) = pool.session_servers.get() {
+            config.mcp_servers.extend(servers.clone());
+        }
         Self::initialize_config(
             pool,
             cwd,

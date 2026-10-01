@@ -55,6 +55,11 @@ pub(crate) struct PreparedSessionInputs {
     /// 一次加载的插件聚合（roots/commands/hooks/lsp/mcp）。
     pub(crate) plugin_data: Option<PluginLoadResult>,
     pub(crate) skill_roots: Vec<SkillRoot>,
+    /// ACP session/new 扩展指令；只在新建时加入冻结 system prompt。
+    pub(crate) agent_instructions: Option<String>,
+    /// MCP servers declared by the ACP client for this session.
+    pub(crate) session_mcp_servers:
+        std::collections::HashMap<String, peri_acp_types::plugin::McpServerConfig>,
     /// frozen 事实源：new/legacy 是本次构建产物，恢复路径是持久 blob 的注入结果。
     pub(crate) frozen: Option<FrozenSessionData>,
     /// 版本化 snapshot 字节；与 `frozen` 始终同源。
@@ -189,7 +194,7 @@ impl PreparedSessionInputs {
         if self.frozen.is_some() {
             return Ok(());
         }
-        let frozen = host
+        let mut frozen = host
             .session_manager
             .build_frozen_data_with_config_and_runtime_and_docs(
                 &self.configuration.config,
@@ -199,6 +204,17 @@ impl PreparedSessionInputs {
                 skill_catalog,
                 instructions,
             );
+        if let Some(agent_instructions) = self.agent_instructions.as_deref() {
+            let mut context = frozen.v2_frozen().clone();
+            context.system_prompt = Arc::from(format!(
+                "{}\n\n<agent_instructions>\n{}\n</agent_instructions>",
+                context.system_prompt, agent_instructions
+            ));
+            frozen = FrozenSessionData::from_frozen_parts(
+                context,
+                frozen.claude_local_md().map(Arc::from),
+            );
+        }
         let encoded = encode_frozen_snapshot(&frozen).map_err(|error| {
             AcpError::new(-32603, format!("Frozen snapshot encode failed: {error}"))
         })?;
@@ -234,6 +250,8 @@ impl PreparedSessionInputs {
             configuration,
             plugin_data,
             skill_roots,
+            agent_instructions: None,
+            session_mcp_servers: HashMap::new(),
             frozen,
             frozen_encoded,
             legacy: None,

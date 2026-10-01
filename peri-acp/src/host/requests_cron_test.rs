@@ -80,6 +80,7 @@ async fn deployment(tmp: &tempfile::TempDir, drive_cron_tick: bool) -> AcpServer
         // 宿主技能面关闭位与关闭集同源：本夹具无会话上下文，恒为假。
         skills_face_closed: false,
         prepared_plugins: None,
+        session_mcp_servers: None,
     })
     .await
 }

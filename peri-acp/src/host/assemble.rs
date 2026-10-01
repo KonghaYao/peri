@@ -144,6 +144,9 @@ pub struct HostAssemblyInput {
     /// 准备路径一次加载的插件聚合：`Some` 时装配面不再重读插件目录
     /// （`None` = 既有语义，由装配面自行加载；仅 host 级/非准备调用点如此）。
     pub prepared_plugins: Option<PreparedPlugins>,
+    /// ACP session setup MCP servers, bound before the session pool starts initialization.
+    pub session_mcp_servers:
+        Option<std::collections::HashMap<String, peri_acp_types::plugin::McpServerConfig>>,
     /// A24 关闭集（builtin 实例名）：本会话环境**冻结** policy 的投影
     /// （`frozen.meta_harness.disabled_middlewares` → `builtin_closed_instances`），
     /// 随 builtin 实例上下文一次注入 pool。
@@ -319,6 +322,7 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         workspace_input,
         workspace_resources,
         prepared_plugins,
+        session_mcp_servers,
         builtin_closed,
         skills_face_closed,
     } = input;
@@ -411,6 +415,11 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         if let Some(snapshot) = config_source.snapshot() {
             if let Err(error) = pool.set_configuration_snapshot(snapshot) {
                 tracing::error!(error = %error, "MCP configuration snapshot binding failed");
+            }
+        }
+        if let Some(servers) = session_mcp_servers {
+            if let Err(error) = pool.set_session_servers(servers) {
+                tracing::error!(error = %error, "ACP session MCP server binding failed");
             }
         }
         // ── A33：builtin 实例上下文由**宿主装配**构造并注入，必须早于下面的

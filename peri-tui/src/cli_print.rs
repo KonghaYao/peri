@@ -167,6 +167,7 @@ pub async fn run_print(
         skills_face_closed: false,
         // print 装配点无准备路径提供的插件聚合：按既有语义由装配面自行加载。
         prepared_plugins: None,
+        session_mcp_servers: None,
     })
     .await;
     let (client_transport, server_transport) = mpsc_transport_pair();

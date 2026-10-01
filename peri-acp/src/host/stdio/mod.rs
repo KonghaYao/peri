@@ -168,6 +168,7 @@ async fn assemble_stdio_config(input: StdioInput) -> anyhow::Result<super::AcpSe
             skills_face_closed: false,
             // host 级装配：无准备路径提供的插件聚合，按既有语义自行加载。
             prepared_plugins: None,
+            session_mcp_servers: None,
         },
         apps_enabled,
     )

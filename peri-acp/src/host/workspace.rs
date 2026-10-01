@@ -195,6 +195,7 @@ impl SessionEnvironment {
             None,
             &inputs.plugins(),
             &inputs.configuration,
+            &inputs.session_mcp_servers,
         )
         .await
     }
@@ -217,6 +218,7 @@ impl SessionEnvironment {
             inputs.frozen.as_ref(),
             &inputs.plugins(),
             &inputs.configuration,
+            &inputs.session_mcp_servers,
         )
         .await
     }
@@ -234,6 +236,10 @@ impl SessionEnvironment {
         frozen: Option<&crate::session::executor::FrozenSessionData>,
         plugins: &super::assemble::PreparedPlugins,
         configuration: &super::prepared::PreparedConfiguration,
+        session_mcp_servers: &std::collections::HashMap<
+            String,
+            peri_acp_types::plugin::McpServerConfig,
+        >,
     ) -> Result<Option<Arc<Self>>, AcpError> {
         let Some(source) = host.workspace_assembly.as_ref() else {
             return Ok(None);
@@ -334,6 +340,7 @@ impl SessionEnvironment {
             builtin_closed,
             skills_face_closed,
             prepared_plugins: Some(plugins.clone()),
+            session_mcp_servers: Some(session_mcp_servers.clone()),
         };
         let activation = tokio_util::sync::CancellationToken::new();
         let mut cfg = assemble::assemble_server_config_with_mcp_profile(

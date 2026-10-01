@@ -117,11 +117,26 @@ fn enabled_meta_sections(cfg: &AcpServerConfig) -> std::collections::HashSet<Str
         .unwrap_or_default()
 }
 
+#[path = "session_mcp_setup.rs"]
+mod session_mcp_setup;
+use session_mcp_setup::session_mcp_servers;
+
 pub(crate) async fn handle_new(
     params: &Value,
     cfg: &AcpServerConfig,
     sessions: &mut HashMap<String, SessionState>,
 ) -> Result<Value, AcpError> {
+    let agent_instructions = match params
+        .get("_meta")
+        .and_then(|meta| meta.get("peri.instructions"))
+    {
+        None => None,
+        Some(Value::String(value)) if value.len() <= 64 * 1024 => Some(value.clone()),
+        Some(Value::String(_)) => {
+            return Err(AcpError::new(-32602, "peri.instructions exceeds 64 KiB"))
+        }
+        Some(_) => return Err(AcpError::new(-32602, "peri.instructions must be a string")),
+    };
     let requested = params.get("cwd").and_then(Value::as_str).unwrap_or(".");
     let workspace = cfg
         .session_resources
@@ -136,7 +151,10 @@ pub(crate) async fn handle_new(
     // 只读准备（lease 之前）：定格配置/插件/frozen，不创建 thread、不占 lease、
     // 不启动 MCP/LSP/hooks，也不写任何会话数据或本机登记。new 路径只在这里准备
     // 一次，发布段消费同一个准备对象。
-    let prepared = super::super::prepared::PreparedSessionInputs::prepare_new_deferred(cfg, &cwd)?;
+    let mut prepared =
+        super::super::prepared::PreparedSessionInputs::prepare_new_deferred(cfg, &cwd)?;
+    prepared.agent_instructions = agent_instructions;
+    prepared.session_mcp_servers = session_mcp_servers(params)?;
     new_session_from_prepared(cfg, &workspace, prepared, sessions).await
 }
 
@@ -735,11 +753,12 @@ pub(crate) async fn handle_fork(
     // 普通 fork 复用 source 已持久化的精确 frozen 字节（内存对象只是同一次保存的
     // 解码视图），不按当前日期/目录重冻。frozen 与本次保存同源：字节来自 source
     // 快照，装配消费 `prepared` 的解码视图，不二次构建。
-    let prepared = super::super::prepared::PreparedSessionInputs::prepare_fork(
+    let mut prepared = super::super::prepared::PreparedSessionInputs::prepare_fork(
         cfg,
         cwd,
         fork_source.frozen.as_str(),
     )?;
+    prepared.session_mcp_servers = session_mcp_servers(params)?;
     let frozen_data = prepared
         .frozen
         .clone()

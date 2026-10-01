@@ -203,6 +203,7 @@ pub async fn attach_acp(
                     skills_face_closed: false,
                     // TUI 装配点无准备路径提供的插件聚合：按既有语义由装配面自行加载。
                     prepared_plugins: None,
+                    session_mcp_servers: None,
                 },
             )
             .await;

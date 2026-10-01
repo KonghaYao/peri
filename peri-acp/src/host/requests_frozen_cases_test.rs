@@ -47,7 +47,10 @@ async fn test_session_load_cold_host_restores_original_frozen_prompt() {
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let created = handle_request(
         "session/new",
-        &json!({ "cwd": tmp.path().to_str().unwrap() }),
+        &json!({
+            "cwd": tmp.path().to_str().unwrap(),
+            "_meta": { "peri.instructions": "CUSTOM_AGENT_INSTRUCTIONS_V1" },
+        }),
         &cfg,
         &mut sessions,
         &transport,
@@ -61,6 +64,7 @@ async fn test_session_load_cold_host_restores_original_frozen_prompt() {
         .unwrap()
         .system_prompt()
         .to_string();
+    assert!(original_prompt.contains("CUSTOM_AGENT_INSTRUCTIONS_V1"));
     // W5：项目指令经 builtin `workspace` 资源面在创建期（P4）采集——夹具带生产形态
     // workspace 装配，指令快照必须非空且为创建时磁盘上的内容。
     let original_claude_md = sessions[&session_id]
