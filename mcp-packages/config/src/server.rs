@@ -30,6 +30,24 @@ impl ConfigurationMcpServer {
             ConfigurationRequest::ReadText { path } => {
                 std::fs::read_to_string(path).map(ConfigurationValue::Text)
             }
+            ConfigurationRequest::ReadEnvironment { name } => {
+                if name.is_empty() || name.contains(['=', '\0']) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "invalid configuration environment variable name",
+                    ));
+                }
+                match std::env::var(name) {
+                    Ok(value) => Ok(ConfigurationValue::Environment(Some(value))),
+                    Err(std::env::VarError::NotPresent) => {
+                        Ok(ConfigurationValue::Environment(None))
+                    }
+                    Err(std::env::VarError::NotUnicode(_)) => Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "configuration environment variable is not valid Unicode",
+                    )),
+                }
+            }
             ConfigurationRequest::WriteTextAtomic { path, content } => {
                 write_atomic(&path, &content)?;
                 Ok(ConfigurationValue::Written)

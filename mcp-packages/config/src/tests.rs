@@ -27,6 +27,9 @@ impl rmcp::ServerHandler for RemoteConfiguration {
                 Ok(ConfigurationValue::Text("remote configuration".into()))
             }
             ConfigurationRequest::WriteTextAtomic { .. } => Ok(ConfigurationValue::Written),
+            ConfigurationRequest::ReadEnvironment { name } => Ok(ConfigurationValue::Environment(
+                (name == "PERI_MCP_CACHE").then(|| "false".into()),
+            )),
             _ => Ok(ConfigurationValue::Bool(false)),
         };
         Ok(rmcp::model::CustomResult::new(
@@ -54,6 +57,16 @@ async fn remote_configuration_never_reads_or_writes_the_callers_filesystem() {
     std::fs::write(&denied, "host secret").unwrap();
     let client = ConfigurationClient::connect_tcp(address.to_string()).unwrap();
     crate::install_client(client.clone()).unwrap();
+    assert!(std::env::var_os("PATH").is_some());
+    assert_eq!(client.read_environment("PATH").unwrap(), None);
+    assert_eq!(
+        crate::read_environment("PERI_MCP_CACHE").unwrap(),
+        Some("false".into())
+    );
+    assert_eq!(
+        client.read_environment("UNDECLARED_TEST_VARIABLE").unwrap(),
+        None
+    );
     assert_eq!(
         crate::read_text(&file_path).unwrap(),
         "remote configuration"
@@ -154,4 +167,21 @@ fn shared_configuration_path_redirect_can_be_reset() {
     assert_eq!(client.paths().unwrap().global_settings, redirect);
     client.set_global_config_path(None).unwrap();
     assert_eq!(client.paths().unwrap().global_settings, original);
+}
+
+#[test]
+fn environment_reads_distinguish_missing_values_from_invalid_names() {
+    let client = ConfigurationClient::local().unwrap();
+    let name = format!("PERI_CONFIG_MISSING_{}", uuid::Uuid::new_v4().simple());
+    assert_eq!(client.read_environment(&name).unwrap(), None);
+    for invalid in ["", "invalid=name", "invalid\0name"] {
+        assert_eq!(
+            client.read_environment(invalid).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+    }
+    assert_eq!(
+        client.read_environment("PATH").unwrap(),
+        std::env::var("PATH").ok()
+    );
 }

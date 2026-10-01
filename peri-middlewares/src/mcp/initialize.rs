@@ -26,6 +26,10 @@ mod tests;
 #[path = "initialize_oauth_test.rs"]
 mod oauth_tests;
 
+#[cfg(test)]
+#[path = "cache_policy_initialize_test.rs"]
+mod cache_policy_tests;
+
 /// 三分类超时选择（IF-D1）：由传输形态决定，**禁止**再写成「http / 否则 stdio」的二元
 /// 判定——那会让 builtin 复用 stdio 超时，并把失败日志的 `transport` 字段写成事实错误。
 pub(super) fn connect_timeout(kind: TransportKind) -> std::time::Duration {
@@ -201,6 +205,12 @@ impl McpClientPool {
         // typed 配置（含手工构造）在任何 empty / disabled / ready 分支之前校验：
         // 非法组合必须暴露为 Failed，不能因为「空配置」或「全部 disabled」被跳过。
         if let Err(error) = super::config::validate_config(&config) {
+            publish_config_failure(&pool, &status_tx, &error.to_string());
+            return;
+        }
+        if let Err(error) = pool.bind_cache_policy(super::config::McpCachePolicy::from_setting(
+            config.mcp_cache,
+        )) {
             publish_config_failure(&pool, &status_tx, &error.to_string());
             return;
         }
@@ -444,6 +454,7 @@ impl McpClientPool {
                         }
                     }
                     let peer = rs.peer().clone();
+                    pool.configure_peer_cache(&peer).await;
                     let cache_version = pool.install_peer_cache_version(name, &peer);
                     // 严格发现（契约 2 / 主 plan IF-M3）：`tools/list` 的 `Err` 既不是
                     // 「服务器没有工具」，也不是 ready 证据。只有真实成功的 round-trip

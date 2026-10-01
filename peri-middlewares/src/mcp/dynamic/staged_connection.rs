@@ -589,6 +589,7 @@ pub async fn prepare_single_server(
         Ok(Ok(service)) => service,
     };
     let peer = service.peer().clone();
+    oauth_pool.configure_peer_cache(&peer).await;
     let mut staged = StagedMcpConnection {
         process,
         instance_key,

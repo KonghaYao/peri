@@ -178,6 +178,10 @@ MetaHarness 是**会话内能力使用策略**，不是 MCP server 的安装、�
 `McpMiddleware: false` 关闭 MCP 消费 adapter，但不是逐 server 的开关或 pool shutdown。
 `ToolSearch: false` 关闭额外工具发现/执行入口，不等于关闭 MCP 连接或全部 direct 工具。
 
+MCP 响应缓存由 MCP 配置顶层 `mcpCache` 与环境变量 `PERI_MCP_CACHE` 控制，
+不增加 MetaHarness 键。任一来源关闭即关闭全部实例的响应缓存，但不关闭能力或连接。
+配置合并、pool 生命周期与失效维护边界见 [MCP 缓存设计](design/mcp-cache.md)。
+
 段落正文通过 workspace 的 `peri-meta://` 资源读取；同 scheme 的外部 server
 不能成为覆盖来源。channel 已退役，`15_channel` 按未知键告警并忽略。
 

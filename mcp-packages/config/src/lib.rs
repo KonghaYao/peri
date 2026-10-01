@@ -32,6 +32,10 @@ pub fn read_text(path: &Path) -> io::Result<String> {
     client()?.read_text(path)
 }
 
+pub fn read_environment(name: &str) -> io::Result<Option<String>> {
+    client()?.read_environment(name)
+}
+
 pub fn write_text_atomic(path: &Path, content: &str) -> io::Result<()> {
     client()?.write_text_atomic(path, content)
 }

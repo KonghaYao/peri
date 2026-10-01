@@ -256,6 +256,7 @@ impl McpClientPool {
                     }
                 }
                 let peer = rs.peer().clone();
+                self.configure_peer_cache(&peer).await;
                 let cache_version = self.install_peer_cache_version(server_name, &peer);
                 // 严格发现：`tools/list` 的 `Err` 不是「没有工具」。System MCP 走
                 // 本次 live round-trip（不用历史缓存代替健康证据），失败即

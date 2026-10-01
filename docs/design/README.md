@@ -26,6 +26,7 @@ draft、proposal、可行性探查、审计报告和未采纳方案不进入本�
 | Model adapter | [model-adapters.md](model-adapters.md) | provider 无关协议、stream、retry 与观测 |
 | System Prompt | [system-prompt.md](system-prompt.md) | 冻结 base、request-time contribution 与 cache seam |
 | MetaHarness | [meta-harness.md](meta-harness.md) | 段落覆盖、middleware 关闭与冻结语义 |
+| MCP 响应缓存 | [mcp-cache.md](mcp-cache.md) | 文件/环境总开关、pool 策略与持久化/SDK 缓存关闭闭包 |
 | Middleware | [middleware-system.md](middleware-system.md) | 生产链、hook、工具与 prompt contribution |
 | 工具系统 | [tool-system.md](tool-system.md) | session-local 可见性、ToolSearch 与执行边界 |
 | PTC | [programmatic-tool-calling.md](programmatic-tool-calling.md) | JavaScript host、RPC 与 effective tool dispatch |

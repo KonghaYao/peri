@@ -924,6 +924,9 @@ panel-mcp-cache-protocol-hit = 协议缓存命中
 panel-mcp-cache-saved = 缓存已保存
 panel-mcp-cache-ready = 缓存就绪
 panel-mcp-cache-disabled = 缓存已关闭：已认证服务
+panel-mcp-cache-disabled-config = 缓存关闭：配置
+panel-mcp-cache-disabled-dynamic = 缓存关闭：动态连接
+panel-mcp-cache-pending = 缓存等待初始化
 panel-mcp-cache-live-fetch = 持久化缓存：实时读取
 panel-mcp-cache-none = 持久化缓存：—
 
