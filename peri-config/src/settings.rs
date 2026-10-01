@@ -249,15 +249,6 @@ impl ConfigSource {
         self.authority.as_ref()?.current(self.scope.as_ref()?)
     }
 
-    pub fn environment_provider(&self) -> Option<crate::provider::EnvironmentProvider> {
-        match self.snapshot() {
-            Some(snapshot) => snapshot.environment_provider().cloned(),
-            None => crate::provider::EnvironmentProvider::resolve(
-                &crate::source::read_environment(crate::provider::ENVIRONMENT_KEYS).ok()?,
-            ),
-        }
-    }
-
     pub fn reload_merged(&self) -> Result<PeriConfig> {
         if self.layout_error.is_some() {
             return Err(SettingsError::AuthorityUnavailable);

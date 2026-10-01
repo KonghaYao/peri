@@ -16,13 +16,13 @@ const DRAFT_TARGET_MISMATCH: &str =
 /// Write tool - 与 TypeScript write_tool 对齐
 pub struct WriteFileTool {
     pub cwd: String,
-    /// 失败草稿存储(进程级内存);None = PERI_WRITE_DRAFT=0 关闭
+    /// 失败草稿存储（进程级内存）。
     drafts: Option<Arc<Mutex<DraftStore>>>,
 }
 
 impl WriteFileTool {
     pub fn new(cwd: impl Into<String>) -> Self {
-        Self::with_draft(cwd, super::draft::draft_enabled())
+        Self::with_draft(cwd, true)
     }
 
     /// 测试注入构造:enabled=false 时完全禁用草稿(不创建 store)

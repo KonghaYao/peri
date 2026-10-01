@@ -289,11 +289,8 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
         };
     }
 
-    // Compact config — computed early for command interception and agent building.
-    // （L5：env overrides 在宿主构造点应用，语义与 load_compact_config 一致）
-    let disable_compact = std::env::var("DISABLE_COMPACT").is_ok()
-        || std::env::var("DISABLE_AUTO_COMPACT").is_ok()
-        || !ctx.compact_config.auto_compact_enabled;
+    // The host has already applied environment overrides to this turn's config.
+    let disable_compact = !ctx.compact_config.auto_compact_enabled;
 
     // 解析会话级共享的 v2 MessageQueue（经 SessionAccessPort）。
     // 缺失时（无 session_access / session 不存在）退化为独立 MessageQueue，

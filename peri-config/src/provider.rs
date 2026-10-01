@@ -40,51 +40,61 @@ impl fmt::Debug for ResolvedProvider {
     }
 }
 
-impl From<EnvironmentProvider> for ResolvedProvider {
-    fn from(provider: EnvironmentProvider) -> Self {
-        match provider {
-            EnvironmentProvider::Anthropic {
-                api_key,
-                model,
-                base_url,
-            } => Self::Anthropic {
-                api_key,
-                model,
-                base_url,
-                effort: None,
-                max_tokens: 32000,
-                context_1m: false,
-            },
-            EnvironmentProvider::OpenAi {
-                api_key,
-                model,
-                base_url,
-            } => Self::OpenAi {
-                api_key,
-                model,
-                base_url,
-                effort: None,
-                max_tokens: 32000,
-                context_1m: false,
-            },
-        }
-    }
-}
-
 pub fn resolve(
     settings: &PeriConfig,
     environment: &BTreeMap<String, String>,
 ) -> Option<ResolvedProvider> {
-    resolve_for_alias(settings, &settings.config.active_alias)
-        .or_else(|| EnvironmentProvider::resolve(environment).map(ResolvedProvider::from))
+    match (
+        environment.get("MODEL_PROVIDER"),
+        environment.get("MODEL_TYPE"),
+    ) {
+        (None, None) => resolve_for_alias(settings, &settings.config.active_alias),
+        (Some(provider_id), Some(alias)) => {
+            resolve_for_provider_alias(settings, provider_id, alias)
+        }
+        _ => None,
+    }
 }
 
 pub fn resolve_for_alias(settings: &PeriConfig, alias: &str) -> Option<ResolvedProvider> {
     let (provider, profile) = resolve_profile(&settings.config, alias)?;
+    resolve_configured(
+        provider,
+        profile,
+        resolve_model_name(provider, alias, profile),
+    )
+}
+
+/// Explicit environment selection binds a configured provider ID and a model tier.
+/// The selected provider's model mapping owns the model name; a profile.model bound
+/// to another provider must not silently replace it.
+fn resolve_for_provider_alias(
+    settings: &PeriConfig,
+    provider_id: &str,
+    alias: &str,
+) -> Option<ResolvedProvider> {
+    let provider = settings
+        .config
+        .providers
+        .iter()
+        .find(|provider| provider.id == provider_id && !provider_id.is_empty())?;
+    let profile = settings.config.profiles.get(alias)?;
+    let model = provider
+        .models
+        .get_model(alias)
+        .filter(|model| !model.is_empty())
+        .map(str::to_owned)?;
+    resolve_configured(provider, profile, model)
+}
+
+fn resolve_configured(
+    provider: &ProviderConfig,
+    profile: &ProfileConfig,
+    model: String,
+) -> Option<ResolvedProvider> {
     if provider.api_key.is_empty() {
         return None;
     }
-    let model = resolve_model_name(provider, alias, profile);
     let effort = Some(profile.effort.clone());
     let max_tokens = profile.max_tokens;
     let context_1m = profile.context_1m;
@@ -136,97 +146,18 @@ fn resolve_model_name(provider: &ProviderConfig, alias: &str, profile: &ProfileC
         .get_model(alias)
         .filter(|model| !model.is_empty())
         .map(str::to_owned)
-        .unwrap_or_else(|| match provider.provider_type.as_str() {
-            "anthropic" => DEFAULT_ANTHROPIC_MODEL.to_owned(),
-            _ => DEFAULT_OPENAI_MODEL.to_owned(),
-        })
+        .unwrap_or_else(|| default_model_name(&provider.provider_type).to_owned())
 }
 
-pub const ENVIRONMENT_KEYS: &[&str] = &[
-    "MODEL_PROVIDER",
-    "ANTHROPIC_API_KEY",
-    "ANTHROPIC_MODEL",
-    "ANTHROPIC_BASE_URL",
-    "OPENAI_API_KEY",
-    "OPENAI_API_BASE",
-    "OPENAI_BASE_URL",
-    "OPENAI_MODEL",
-];
-
-#[derive(Clone, PartialEq, Eq)]
-pub enum EnvironmentProvider {
-    Anthropic {
-        api_key: String,
-        model: String,
-        base_url: Option<String>,
-    },
-    OpenAi {
-        api_key: String,
-        base_url: String,
-        model: String,
-    },
-}
-
-impl fmt::Debug for EnvironmentProvider {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Anthropic {
-                model, base_url, ..
-            } => formatter
-                .debug_struct("Anthropic")
-                .field("api_key", &"[REDACTED]")
-                .field("model", model)
-                .field("base_url", base_url)
-                .finish(),
-            Self::OpenAi {
-                base_url, model, ..
-            } => formatter
-                .debug_struct("OpenAi")
-                .field("api_key", &"[REDACTED]")
-                .field("base_url", base_url)
-                .field("model", model)
-                .finish(),
-        }
+fn default_model_name(provider_type: &str) -> &str {
+    if provider_type == "anthropic" {
+        DEFAULT_ANTHROPIC_MODEL
+    } else {
+        DEFAULT_OPENAI_MODEL
     }
 }
 
-impl EnvironmentProvider {
-    pub fn resolve(environment: &BTreeMap<String, String>) -> Option<Self> {
-        let provider_hint = environment
-            .get("MODEL_PROVIDER")
-            .map(String::as_str)
-            .unwrap_or_default();
-        let normalized_hint = provider_hint.to_lowercase();
-
-        if normalized_hint == "anthropic"
-            || (normalized_hint.is_empty() && environment.contains_key("ANTHROPIC_API_KEY"))
-        {
-            let api_key = environment.get("ANTHROPIC_API_KEY")?.clone();
-            return Some(Self::Anthropic {
-                api_key,
-                model: environment
-                    .get("ANTHROPIC_MODEL")
-                    .cloned()
-                    .unwrap_or_else(|| DEFAULT_ANTHROPIC_MODEL.to_owned()),
-                base_url: environment.get("ANTHROPIC_BASE_URL").cloned(),
-            });
-        }
-
-        let api_key = environment.get("OPENAI_API_KEY")?.clone();
-        Some(Self::OpenAi {
-            api_key,
-            base_url: environment
-                .get("OPENAI_API_BASE")
-                .or_else(|| environment.get("OPENAI_BASE_URL"))
-                .cloned()
-                .unwrap_or_else(|| DEFAULT_OPENAI_BASE_URL.to_owned()),
-            model: environment
-                .get("OPENAI_MODEL")
-                .cloned()
-                .unwrap_or_else(|| DEFAULT_OPENAI_MODEL.to_owned()),
-        })
-    }
-}
+pub const ENVIRONMENT_KEYS: &[&str] = &["MODEL_PROVIDER", "MODEL_TYPE"];
 
 #[cfg(test)]
 mod tests {
@@ -250,75 +181,76 @@ mod tests {
     }
 
     #[test]
-    fn explicit_anthropic_uses_defaults_and_optional_endpoint() {
+    fn environment_pair_selects_configured_provider_and_tier() {
+        let mut config = settings("anthropic");
+        config.config.providers.push(ProviderConfig {
+            id: "second".into(),
+            provider_type: "openai".into(),
+            api_key: "second-key".into(),
+            models: ProviderModels {
+                sonnet: "second-sonnet".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        config.config.profiles.sonnet.model = Some("first-provider-model".into());
         assert_eq!(
-            EnvironmentProvider::resolve(&env(&[
-                ("MODEL_PROVIDER", "Anthropic"),
-                ("ANTHROPIC_API_KEY", "secret"),
-            ])),
-            Some(EnvironmentProvider::Anthropic {
-                api_key: "secret".into(),
-                model: "claude-sonnet-4-6".into(),
-                base_url: None,
+            resolve(
+                &config,
+                &env(&[("MODEL_PROVIDER", "second"), ("MODEL_TYPE", "sonnet")])
+            ),
+            Some(ResolvedProvider::OpenAi {
+                api_key: "second-key".into(),
+                model: "second-sonnet".into(),
+                base_url: DEFAULT_OPENAI_BASE_URL.into(),
+                effort: Some("xhigh".into()),
+                max_tokens: 32000,
+                context_1m: false,
             })
         );
     }
 
     #[test]
-    fn empty_provider_hint_prefers_anthropic_key() {
-        assert!(matches!(
-            EnvironmentProvider::resolve(&env(&[
-                ("ANTHROPIC_API_KEY", "secret"),
-                ("OPENAI_API_KEY", "other"),
-            ])),
-            Some(EnvironmentProvider::Anthropic { .. })
-        ));
+    fn incomplete_or_invalid_selection_does_not_use_active_profile() {
+        let config = settings("openai");
+        for selection in [
+            env(&[("MODEL_PROVIDER", "configured")]),
+            env(&[("MODEL_TYPE", "opus")]),
+            env(&[("MODEL_PROVIDER", "missing"), ("MODEL_TYPE", "opus")]),
+            env(&[("MODEL_PROVIDER", "configured"), ("MODEL_TYPE", "bad")]),
+            env(&[("MODEL_PROVIDER", "configured"), ("MODEL_TYPE", "sonnet")]),
+        ] {
+            assert_eq!(resolve(&config, &selection), None);
+        }
     }
 
     #[test]
-    fn openai_api_base_precedes_base_url_even_when_empty() {
+    fn legacy_vendor_variables_do_not_select_or_supply_credentials() {
+        let mut config = settings("openai");
+        config.config.providers[0].api_key.clear();
         assert_eq!(
-            EnvironmentProvider::resolve(&env(&[
-                ("MODEL_PROVIDER", "openai"),
-                ("OPENAI_API_KEY", "secret"),
-                ("OPENAI_API_BASE", ""),
-                ("OPENAI_BASE_URL", "https://fallback.example"),
-            ])),
-            Some(EnvironmentProvider::OpenAi {
-                api_key: "secret".into(),
-                base_url: String::new(),
-                model: "gpt-4o".into(),
-            })
-        );
-    }
-
-    #[test]
-    fn unknown_provider_hint_falls_back_to_openai() {
-        assert!(matches!(
-            EnvironmentProvider::resolve(&env(&[
-                ("MODEL_PROVIDER", "custom"),
-                ("OPENAI_API_KEY", "secret"),
-            ])),
-            Some(EnvironmentProvider::OpenAi { .. })
-        ));
-    }
-
-    #[test]
-    fn missing_required_api_key_returns_none() {
-        assert_eq!(EnvironmentProvider::resolve(&BTreeMap::new()), None);
-        assert_eq!(
-            EnvironmentProvider::resolve(&env(&[("MODEL_PROVIDER", "anthropic")])),
+            resolve(
+                &config,
+                &env(&[
+                    ("OPENAI_API_KEY", "legacy"),
+                    ("ANTHROPIC_API_KEY", "legacy")
+                ])
+            ),
             None
         );
     }
 
     #[test]
-    fn debug_redacts_api_key() {
-        let provider =
-            EnvironmentProvider::resolve(&env(&[("OPENAI_API_KEY", "private-key")])).unwrap();
-        let debug = format!("{provider:?}");
-        assert!(!debug.contains("private-key"));
-        assert!(debug.contains("[REDACTED]"));
+    fn configured_provider_is_required_for_environment_selection() {
+        let mut config = settings("anthropic");
+        config.config.providers[0].api_key.clear();
+        assert_eq!(
+            resolve(
+                &config,
+                &env(&[("MODEL_PROVIDER", "configured"), ("MODEL_TYPE", "opus")])
+            ),
+            None
+        );
     }
 
     fn settings(provider_type: &str) -> PeriConfig {
@@ -342,7 +274,7 @@ mod tests {
     }
 
     #[test]
-    fn settings_take_priority_and_profile_parameters_are_preserved() {
+    fn active_profile_is_used_without_environment_selection() {
         let mut config = settings("openai");
         config.config.profiles.opus = ProfileConfig {
             provider: "configured".into(),
@@ -352,7 +284,7 @@ mod tests {
             context_1m: true,
         };
         assert_eq!(
-            resolve(&config, &env(&[("ANTHROPIC_API_KEY", "environment-key")])),
+            resolve(&config, &BTreeMap::new()),
             Some(ResolvedProvider::OpenAi {
                 api_key: "configured-key".into(),
                 base_url: DEFAULT_OPENAI_BASE_URL.into(),
@@ -365,22 +297,12 @@ mod tests {
     }
 
     #[test]
-    fn invalid_settings_fall_back_to_environment_with_legacy_parameters() {
+    fn invalid_settings_do_not_fall_back_to_vendor_credentials() {
         let environment = env(&[("OPENAI_API_KEY", "environment-key")]);
         let mut config = settings("openai");
         config.config.providers[0].api_key.clear();
         assert_eq!(resolve_for_alias(&config, "opus"), None);
-        assert_eq!(
-            resolve(&config, &environment),
-            Some(ResolvedProvider::OpenAi {
-                api_key: "environment-key".into(),
-                base_url: DEFAULT_OPENAI_BASE_URL.into(),
-                model: DEFAULT_OPENAI_MODEL.into(),
-                effort: None,
-                max_tokens: 32000,
-                context_1m: false,
-            })
-        );
+        assert_eq!(resolve(&config, &environment), None);
     }
 
     #[test]

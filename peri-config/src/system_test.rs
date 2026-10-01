@@ -186,6 +186,28 @@ fn make_default_mcp_server() -> McpServerConfig {
 }
 
 #[test]
+fn provider_selection_uses_scoped_configuration_environment() {
+    let temp = tempfile::tempdir().unwrap();
+    let scope = make_scope(temp.path(), "project");
+    let settings = r#"{"config":{"active_alias":"opus","providers":[{"id":"first","type":"openai","apiKey":"first-key","models":{"opus":"first-model"}},{"id":"second","type":"openai","apiKey":"second-key","models":{"sonnet":"second-model"}}]}}"#;
+    let mut inputs = make_inputs(Some(settings), None, None);
+    inputs
+        .environment
+        .insert("MODEL_PROVIDER".into(), "second".into());
+    inputs
+        .environment
+        .insert("MODEL_TYPE".into(), "sonnet".into());
+    let selected = ConfigurationSnapshot::resolve(scope.clone(), inputs.clone()).unwrap();
+    assert!(
+        matches!(selected.provider(), Some(crate::provider::ResolvedProvider::OpenAi { model, api_key, .. }) if model == "second-model" && api_key == "second-key")
+    );
+
+    inputs.environment.remove("MODEL_TYPE");
+    let incomplete = ConfigurationSnapshot::resolve(scope, inputs).unwrap();
+    assert!(incomplete.provider().is_none());
+}
+
+#[test]
 fn same_scope_inputs_have_deterministic_revision_and_scope_is_part_of_revision() {
     let temp = tempfile::tempdir().unwrap();
     let scope = make_scope(temp.path(), "project-a");

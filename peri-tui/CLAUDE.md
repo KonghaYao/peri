@@ -61,6 +61,7 @@ cargo test -p peri-tui --lib -- app::mcp_lifecycle_tests
 ## 按需引用 / Verify
 
 - 稳定 UI 规则：`../docs/standards/tui.md`。
+- TUI 专属环境变量：`../docs/standards/tui-environment-variables.md`；其他运行变量见 `../docs/standards/environment-variables.md`。
 - 跨模块边界、事件与冻结数据：`../docs/standards/architecture-contracts.md`，重点遵守 `ARC-BOUNDARY-001` 与 `ARC-EVENT-001`。
 - 修改 ACP 数据流时，核对 `src/kit/acp_notifier.rs`、`src/kit/acp_bridge.rs` 和对应组件；修改用户界面文本时核对两份 FTL。
 - 完成后运行相关 `cargo test -p peri-tui --lib`，并运行 `git diff --check`。不得把密钥、token、密码或连接串写入界面、日志、错误或测试 fixture。

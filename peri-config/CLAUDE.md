@@ -33,7 +33,7 @@ session 工具池，不新增 daemon 或模型工具。环境来自选中的配�
 | 来源采集、具名环境、bootstrap I/O | `src/source.rs`、`../mcp-packages/config/` |
 | settings 类型、profiles、MetaHarness 规则 | `src/app.rs`、`src/app_test.rs` |
 | 固定配置布局、差异保存、显式 reload | `src/settings.rs`、`src/settings_test.rs` |
-| provider 默认值、alias/profile、环境 fallback | `src/provider.rs` |
+| provider 默认值、alias/profile、环境档位选择 | `src/provider.rs` |
 | MCP 解析、来源合并、去重、cache 关闭规则 | `src/mcp.rs`、`src/mcp_test.rs` |
 | Langfuse typed projection | `src/observability.rs`、`src/observability_test.rs` |
 | TUI typed projection、extra 读写 | `src/ui.rs`、`src/ui_test.rs` |
@@ -50,8 +50,7 @@ session 工具池，不新增 daemon 或模型工具。环境来自选中的配�
   fallback 已删除，不可据此声称已发布有效快照。
 - `resolve` 成功才发布；失败保留 current。快照只提供只读 typed 引用；旧 `Arc`
   不因显式 reload、保存或来源文件变动而改变。
-- settings 中 profiles 整体替换、MetaHarness 逐 key 合并；provider 先用 settings
-  profile，再用环境 provider fallback；这些规则不能替换成通用递归 merge。
+- settings 中 profiles 整体替换、MetaHarness 逐 key 合并；provider 在未指定模型环境组合时使用 active profile；`MODEL_PROVIDER` 与 `MODEL_TYPE` 成对选择配置中的 provider ID 和档位。这些规则不能替换成通用递归 merge。
 - MCP 规则由 core 单一维护：global → plugin → project、手动配置去重插件、
   任一来源 false 关闭 cache。middleware 负责插件发现、执行参数展开与 builtin
   runtime overlay，不另建文件/环境优先级。

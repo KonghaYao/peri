@@ -307,6 +307,30 @@ async fn artifact_call_tool_upload_success_maps_to_text_content() {
     assert!(lower.contains("x-ttl: 30d"), "ttl 参数必须透传到 X-TTL");
 }
 
+#[tokio::test]
+async fn artifact_instance_environment_reaches_upload_request() {
+    let dir = cwd_with_report();
+    let (base_url, stub) = spawn_upload_stub(STUB_UPLOAD_BODY).await;
+    let env = std::collections::HashMap::from([
+        ("PERI_ARTIFACTS_URL".to_owned(), base_url),
+        ("PERI_ARTIFACTS_TOKEN".to_owned(), FAKE_TOKEN.to_owned()),
+    ]);
+    let server = ArtifactMcpServer::with_instance_env(dir.path(), &env);
+    let response = invoke_tool_call(
+        server.tools(),
+        &server.cwd,
+        &call("artifact", json!({ "file_path": "report.html" })),
+    )
+    .await
+    .expect("实例环境应生成可用上传客户端");
+    assert_eq!(complete(response).is_error, Some(false));
+    let head = stub.await.expect("桩任务不得 panic").expect("桩应收到请求");
+    assert!(head.starts_with("POST /upload "));
+    assert!(head
+        .to_ascii_lowercase()
+        .contains("authorization: bearer test-token-0000"));
+}
+
 // ─── 真实链路（duplex + 生产 client） ─────────────────────────────────────────
 
 #[tokio::test]

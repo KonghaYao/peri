@@ -655,8 +655,7 @@ fn derive_providers(peri_config: &SharedPeriConfig) -> Vec<ProviderSummary> {
         .providers
         .iter()
         .map(|p| {
-            let env_key = format!("{}_API_KEY", p.provider_type.to_uppercase());
-            let has_api_key = !p.api_key.is_empty() || std::env::var(env_key).is_ok();
+            let has_api_key = !p.api_key.is_empty();
             let base_url = if p.base_url.is_empty() {
                 None
             } else {

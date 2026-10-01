@@ -77,17 +77,9 @@ async fn compact_core(input: CompactInput) -> (crate::error::AgentResult<Compact
             }
         };
 
-        // 禁用检查（v2 stage 入口显式判定，替代已删除的 CompactMiddleware::is_disabled）
-        // v1 曾通过 before_model 钩子判定；v2 必须在 stage 入口显式检查，
-        // 否则 DISABLE_COMPACT/DISABLE_AUTO_COMPACT 会被忽略。
-        let is_disabled = std::env::var("DISABLE_COMPACT").is_ok()
-            || std::env::var("DISABLE_AUTO_COMPACT").is_ok()
-            || !config.auto_compact_enabled;
-        if is_disabled {
-            tracing::trace!(
-                step,
-                "Compact 已禁用（env 或 config.auto_compact_enabled=false）"
-            );
+        // The host resolves config and environment overrides before running the loop.
+        if !config.auto_compact_enabled {
+            tracing::trace!(step, "Compact 已禁用（config.auto_compact_enabled=false）");
             break 'compact_core Ok(CompactOutput { compacted: false });
         }
 
