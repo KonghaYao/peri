@@ -59,15 +59,11 @@ impl AgentFaceFixture {
                 WorkspaceMcpServer::new(cwd.to_string_lossy().as_ref(), None).with_resources(input),
             );
             let (io, supervisor) = transport.into_parts();
-            let service = serve_client_auto(
-                io,
-                None,
-                &McpCapabilityProfile::disabled(),
-                HANDSHAKE_TIMEOUT,
-            )
-            .await
-            .expect("builtin 握手不得超时（同进程链路）")
-            .expect("builtin 握手不得失败");
+            let service =
+                serve_client_auto(io, &McpCapabilityProfile::disabled(), HANDSHAKE_TIMEOUT)
+                    .await
+                    .expect("builtin 握手不得超时（同进程链路）")
+                    .expect("builtin 握手不得失败");
             // 目录快照走生产 client 方法（与初始化期同一路径）；工具表本夹具不消费。
             let peer = service.peer().clone();
             let resources = peer.list_all_resources().await.expect("resources/list");

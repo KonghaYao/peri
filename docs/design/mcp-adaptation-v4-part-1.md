@@ -28,7 +28,7 @@ v4 允许两种运行形态，但不改变 MCP 实例的隔离契约：
 - **Builtin MCP**：由 Peri 内部装配和调用；可以使用 `rmcp` 的内存 transport，使 client/server 在同一进程内通过内存通道通信，不启动外部 MCP 进程。
 - **External MCP**：通过现有配置接入外部 stdio 或 HTTP transport。是否提供独立的宿主 CLI 暴露入口不属于本 part-1 的已实现承诺，不能把未存在的命令写成当前用法。
 
-当前客户端缺省配置使用 `rmcp` 的 `Auto` lifecycle；显式配置 `protocolVersion` 时使用对应的严格 discovery 路径。System MCP 不得绕过协议初始化、能力协商或 transport 生命周期；协议版本策略必须与 `peri-middlewares/src/mcp/client/transport.rs` 及测试保持一致，不得在本文中把所有 MCP 连接概括为固定的单一握手版本。
+当前客户端统一使用 `rmcp` 的 `Auto` lifecycle：先尝试 `server/discover`，不支持时回退 legacy `initialize`；用户配置不声明 `protocolVersion`。System MCP 不得绕过协议初始化、能力协商或 transport 生命周期；协商结果由实际连接提供，不按配置假定固定版本。
 
 无论使用 builtin 还是 external transport，每个 MCP 实例都必须保持独立的 transport、状态、凭据和 capability root；复用 Rust library、schema、错误类型或测试 fixture 不构成运行时实例复用。
 

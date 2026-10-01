@@ -2,7 +2,7 @@
 //! 保留名 typed error / 关闭片段反例 / 写回隔离 / hash 无关性 / direct 一致性。
 //!
 //! 口径来源（主 plan §3 IF-D3 + §8「默认层与覆盖语义」行）：
-//! 1. 缺失 → 插入完整 builtin 条目（`protocol_version = None`）；
+//! 1. 缺失 → 插入完整 builtin 条目（协议自动协商）；
 //! 2. 存在且无 `command`/`url` → 填 `source`，`disabled != Some(true)` 时**同时**填
 //!    `system_mcp` + `system_mcp_tools`（A17）；`disabled == Some(true)` 只填 `source`；
 //! 3. 保留名（`web`/`artifact`/`cron`/`lsp`/`workspace`）被 `command`/`url` 接管 →
@@ -116,8 +116,6 @@ fn builtin_default_layer_inserts_complete_entries() {
             Some(declared_direct(instance.name).as_slice()),
             "system_mcp_tools 必须等于声明为 direct 的原始工具名集合（IF-D13/A5）"
         );
-        // protocol_version 必须为 None，否则 Auto 不探测 server/discover（R2 前提）。
-        assert_eq!(entry.protocol_version, None);
         assert_eq!(entry.command, None);
         assert_eq!(entry.url, None);
         assert_eq!(entry.disabled, None);
@@ -497,12 +495,57 @@ fn reserved_instance_names_cannot_be_taken_over_by_command() {
 }
 
 #[test]
+fn remote_workspace_requires_global_or_host_selection_and_no_tool_manifest() {
+    let (_dir, cwd, claude_home, global_path) =
+        project_with_servers(r#"{"workspace":{"url":"https://fake.invalid/mcp"}}"#);
+    let error = load(
+        &cwd,
+        &claude_home,
+        &global_path,
+        &BuiltinInjectionPolicy::all(),
+    )
+    .expect_err("a project cannot select a trusted remote workspace");
+    assert!(matches!(
+        error,
+        McpConfigError::UntrustedWorkspaceSource { .. }
+    ));
+    assert!(!error.to_string().contains("fake.invalid"));
+
+    std::fs::remove_file(cwd.join(".mcp.json")).unwrap();
+    std::fs::write(
+        &global_path,
+        r#"{"mcpServers":{"workspace":{"url":"https://fake.invalid/mcp"}}}"#,
+    )
+    .unwrap();
+    let merged = load(
+        &cwd,
+        &claude_home,
+        &global_path,
+        &BuiltinInjectionPolicy::all(),
+    )
+    .unwrap();
+    let workspace = &merged.mcp_servers["workspace"];
+    assert!(matches!(
+        workspace.source,
+        Some(ConfigSource::WorkspaceRemote)
+    ));
+    assert_eq!(workspace.system_mcp, Some(true));
+    assert!(workspace.system_mcp_tools.is_none());
+    assert!(workspace.subscriptions.is_none());
+
+    let closed = std::collections::BTreeSet::from(["workspace".to_string()]);
+    assert!(!crate::mcp::builtin::is_closed_source(
+        "workspace",
+        workspace.source.as_ref(),
+        &closed,
+    ));
+}
+
+#[test]
 fn reserved_instance_names_cannot_be_taken_over_by_url() {
-    // 与 `reserved_instance_names_cannot_be_taken_over_by_command` 同构：**全保留名**
-    // 遍历（含 wave 2 的 `cron` / `lsp` 与后续波次的 `workspace`）。加载路径对
-    // `command` / `url` 两种接管形态共用 `reserved_name_takeover`，但名字表命中
-    // 是逐名独立的，因此逐名各证一次（否则「某个保留名只对 command 生效」不会被发现）。
-    for name in ["web", "artifact", "cron", "lsp", "workspace"] {
+    // 其余四个保留名仍拒绝 URL 接管；workspace 的项目 URL 拒绝与全局 URL
+    // 允许由 remote_workspace_requires_global_or_host_selection_and_no_tool_manifest 覆盖。
+    for name in ["web", "artifact", "cron", "lsp"] {
         let (_dir, cwd, claude_home, global_path) = project_with_servers(&format!(
             r#"{{"{name}":{{"url":"https://fake.invalid/mcp"}}}}"#
         ));

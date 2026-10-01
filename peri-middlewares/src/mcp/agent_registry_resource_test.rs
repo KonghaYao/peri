@@ -154,6 +154,25 @@ fn local_entries_come_only_from_the_host_bound_workspace_instance() {
 }
 
 #[test]
+fn explicitly_selected_remote_workspace_supplies_local_agent_resources() {
+    let remote_workspace = handle(
+        "workspace",
+        Some(ConfigSource::WorkspaceRemote),
+        vec![agent_resource(
+            ResourceScope::Project,
+            None,
+            "local",
+            LIST_AGENT,
+        )],
+    );
+    let registry = McpAgentRegistry::new(pool_with(vec![("workspace".into(), remote_workspace)]));
+    let entries = registry.entries();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].id, "local");
+    assert!(entries[0].source.is_local());
+}
+
+#[test]
 fn local_catalog_follows_e13_priority_and_keeps_same_name_across_origins() {
     // project 与 builtin 同名：目录只出 project 项（E13 优先级），但两者都可解析。
     let project_local = agent_resource(ResourceScope::Project, None, "coder", LIST_AGENT);

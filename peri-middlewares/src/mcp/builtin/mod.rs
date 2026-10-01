@@ -121,6 +121,8 @@ pub(crate) enum BuiltinOverlayError {
     /// **所有** session，因此必须在加载期拒绝。
     #[error("builtin 实例的关闭片段非法（disabled 与 system_mcp 不得同时声明）: {name}")]
     DisabledWithSystemMcp { name: String },
+    #[error("remote workspace requires host or global configuration: {name}")]
+    UntrustedWorkspaceSource { name: String },
 }
 
 /// effective name 计算：`mcp__{sanitize(instance)}__{sanitize(original_tool)}`。
@@ -206,11 +208,26 @@ pub(crate) fn is_closed(server_name: &str, closed: &BTreeSet<String>) -> bool {
     closed.contains(server_name)
 }
 
+/// A policy key closes only the in-process builtin, never an explicitly selected
+/// HTTP Workspace using the same logical server name.
+pub(crate) fn is_closed_source(
+    server_name: &str,
+    source: Option<&ConfigSource>,
+    closed: &BTreeSet<String>,
+) -> bool {
+    matches!(source, Some(ConfigSource::Builtin { instance }) if instance == server_name)
+        && is_closed(server_name, closed)
+}
+
+pub(crate) fn is_workspace_source(source: Option<&ConfigSource>) -> bool {
+    matches!(source, Some(ConfigSource::Builtin { instance }) if instance == "workspace")
+        || matches!(source, Some(ConfigSource::WorkspaceRemote))
+}
+
 /// 默认配置层 overlay（A1：loader step 6.5 的唯一注入点）。
 ///
 /// 七条冻结规则（IF-D3；规则 7 为 Git Watch 下沉新增）：
-/// 1. 实例名缺失 → 插入完整 builtin 条目（`protocol_version = None` 必须，否则 Auto
-///    不探测 `server/discover`）；
+/// 1. 实例名缺失 → 插入完整 builtin 条目（协议由客户端自动协商）；
 /// 2. 实例名存在且未声明 `command`/`url` → 填 `source`，`disabled != Some(true)` 时
 ///    **同时**填 `system_mcp = Some(true)` 与 `system_mcp_tools = Some(声明 direct 集合)`
 ///    （A17：否则 `{"web": {}}` 会从 direct 静默降级为 deferred）；`disabled == Some(true)`
@@ -221,11 +238,12 @@ pub(crate) fn is_closed(server_name: &str, closed: &BTreeSet<String>) -> bool {
 ///    （`peri-acp-types/src/builtin_mcp.rs:15-16`：当前无「预留但未实现」的名字），
 ///    因此这一限定今日没有额外约束对象；未来新增预留名时它重新生效（注入面仍只认
 ///    已实现表，与规则 3 的保留名接管校验是两个面）；
-/// 3. 实例名存在且声明了 `command` 或 `url` 且是**保留实例名** → 加载期 typed error；
-///    非保留名照旧不受影响；
+/// 3. 保留名不允许 command 接管；除 `workspace` 的宿主/全局显式 HTTP 选择外，
+///    url 接管同样在加载期拒绝。远端 Workspace 使用独立来源身份；
 /// 4. 结果必须通过 loader step 7 的 `validate_config`（本函数只保证自身产出合法）；
 /// 5. 关闭片段形状（A18）：`disabled + system_mcp: true` 组合必须在加载期拒绝；
-/// 6. direct 一致性：`system_mcp_tools` 恒等于声明为 direct 的原始工具名集合；
+/// 6. builtin 的 direct 集合来自声明表；远端 Workspace 的工具清单仅来自 live
+///    `tools/list`，不要求预声明工具名；
 /// 7. 默认订阅（Git Watch 下沉，D-5）：`workspace` 实例的 `subscriptions` 在**缺失**
 ///    时补默认（git ref 资源）；规则 1 随默认条目一并注入。用户显式写 `subscriptions`
 ///    （含空配置）时**不覆盖**——空配置 ⇒ 退化为「不订阅」（`!is_empty()` 过滤）。
@@ -243,6 +261,13 @@ pub(crate) fn apply_builtin_overlay(
     servers: &mut HashMap<String, McpServerConfig>,
     policy: &BuiltinInjectionPolicy,
 ) -> Result<(), BuiltinOverlayError> {
+    if let Some(config) = servers.get("workspace") {
+        if config.url.is_some() && !matches!(config.source, None | Some(ConfigSource::Global(_))) {
+            return Err(BuiltinOverlayError::UntrustedWorkspaceSource {
+                name: "workspace".to_string(),
+            });
+        }
+    }
     // 规则 3：保留名接管检查（含后续波次预留名），首个错误按名字排序稳定返回。
     if let Some(err) = reserved_name_takeover(servers) {
         return Err(err);
@@ -254,6 +279,19 @@ pub(crate) fn apply_builtin_overlay(
     }
     // 规则 1 / 2：只处理策略启用且**已实现**的实例。
     for instance in BUILTIN_MCP_INSTANCES {
+        if instance.name == "workspace" {
+            if let Some(entry) = servers.get_mut("workspace") {
+                if entry.url.is_some() {
+                    entry.source = Some(ConfigSource::WorkspaceRemote);
+                    if entry.disabled != Some(true) {
+                        entry.system_mcp = Some(true);
+                        // The live tools/list result, including an empty list, is authoritative.
+                        entry.system_mcp_tools = None;
+                    }
+                    continue;
+                }
+            }
+        }
         if !policy.enables(instance.name) {
             continue;
         }
@@ -287,7 +325,9 @@ fn reserved_name_takeover(
     let mut names: Vec<&String> = servers
         .iter()
         .filter(|(name, config)| {
-            is_reserved_instance_name(name) && (config.command.is_some() || config.url.is_some())
+            is_reserved_instance_name(name)
+                && (config.command.is_some()
+                    || (config.url.is_some() && name.as_str() != "workspace"))
         })
         .map(|(name, _)| name)
         .collect();
@@ -331,7 +371,6 @@ fn builtin_default_entry(instance: &BuiltinMcpInstance) -> McpServerConfig {
         oauth: None,
         disabled: None,
         // 必须为 None：显式版本会跳过 Auto 的 `server/discover` 探测。
-        protocol_version: None,
         // 规则 7：`workspace` 的默认订阅（其余实例为 None）。
         subscriptions: workspace_subscription::default_subscriptions_for(instance.name),
         system_mcp: Some(true),

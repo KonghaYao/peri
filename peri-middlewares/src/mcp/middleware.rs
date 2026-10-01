@@ -167,6 +167,15 @@ pub struct McpMiddleware {
 }
 
 impl McpMiddleware {
+    fn is_system_source_closed(&self, server: &str) -> bool {
+        let source = self
+            .tool_pool
+            .configs
+            .read()
+            .get(server)
+            .and_then(|config| config.source.clone());
+        super::builtin::is_closed_source(server, source.as_ref(), &self.builtin_closures)
+    }
     pub fn new(pool: Arc<McpClientPool>) -> Self {
         Self {
             tool_pool: Arc::clone(&pool),
@@ -254,7 +263,7 @@ impl McpMiddleware {
     /// 该 bridge 所属实例是否在本 turn 被关闭（唯一判定入口 `builtin::is_closed`）。
     fn is_bridge_closed(&self, bridge: &McpToolBridge) -> bool {
         bridge
-            .mcp_server_name()
+            .builtin_mcp_instance()
             .is_some_and(|server| super::builtin::is_closed(server, &self.builtin_closures))
     }
 }
@@ -294,7 +303,9 @@ pub(crate) fn run_ensure_discovery(
     let connected_handles: Vec<Arc<McpClientHandle>> = pool
         .get_all_clients_visible_to(session_id)
         .into_iter()
-        .filter(|handle| !super::builtin::is_closed(&handle.name, &closed))
+        .filter(|handle| {
+            !super::builtin::is_closed_source(&handle.name, handle.source.as_ref(), &closed)
+        })
         .collect();
     let connected: Vec<(String, HandleToken)> = connected_handles
         .iter()
@@ -492,9 +503,7 @@ impl McpMiddleware {
         // readiness 判定（`await_system_connections`）不受影响——它走 pool 级配置。
         let required: BTreeMap<String, Vec<String>> = negotiated
             .iter()
-            .filter(|item| {
-                !super::builtin::is_closed(&item.requirement.server, &self.builtin_closures)
-            })
+            .filter(|item| !self.is_system_source_closed(&item.requirement.server))
             .map(|item| {
                 (
                     item.requirement.server.clone(),
@@ -650,9 +659,7 @@ impl McpMiddleware {
             .system_requirements()
             .into_iter()
             // 关闭实例不参与必需工具校验（与 `await_system_ready` 同一份关闭集）。
-            .filter(|requirement| {
-                !super::builtin::is_closed(&requirement.server, &self.builtin_closures)
-            })
+            .filter(|requirement| !self.is_system_source_closed(&requirement.server))
             .map(|requirement| (requirement.server, requirement.required_tools))
             .collect();
         if required.is_empty() {

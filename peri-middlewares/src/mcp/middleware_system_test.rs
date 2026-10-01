@@ -96,7 +96,6 @@ fn system_config(required_tools: Option<Vec<String>>, timeout_ms: Option<u64>) -
         headers: None,
         oauth: None,
         disabled: None,
-        protocol_version: None,
         subscriptions: None,
         system_mcp: Some(true),
         system_mcp_tools: required_tools,
@@ -166,7 +165,6 @@ impl GateFixture {
         self.servers.push(spawn_gate_peer(server));
         let service = crate::mcp::client::serve_client_auto(
             gate_transport(client),
-            None,
             &McpCapabilityProfile::default(),
             Duration::from_secs(5),
         )
@@ -184,7 +182,7 @@ impl GateFixture {
             resources: vec![],
             status: ClientStatus::Connected,
             oauth_status: OAuthStatus::default(),
-            source: None,
+            source: self.pool.configs.read().get(name).and_then(|config| config.source.clone()),
             url: None,
             skills_capable: false,
         });
@@ -766,5 +764,31 @@ async fn failed_gate_leaves_no_reusable_candidate() {
         "候选按当次句柄重建，不残留失败批次"
     );
 
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn remote_workspace_uses_discovered_tools_even_with_builtin_workspace_closed() {
+    let mut fixture = GateFixture::new();
+    let mut config = system_config(None, None);
+    config.source = Some(crate::mcp::config::ConfigSource::WorkspaceRemote);
+    fixture.config("workspace", config);
+    let (_, generation) = fixture
+        .connect("workspace", vec![fixture_tool("RemoteOnly", read_schema())])
+        .await;
+    fixture.ready("workspace", generation);
+
+    let mw = McpMiddleware::new(Arc::clone(fixture.pool()))
+        .with_builtin_closures(BTreeSet::from(["workspace".to_string()]));
+    let snapshot = mw.await_system_ready().await.unwrap();
+    assert_eq!(snapshot.bridges.len(), 1);
+    assert_eq!(snapshot.bridges[0].name(), "RemoteOnly");
+    assert!(snapshot.bridges[0].is_direct());
+    assert!(snapshot.required_tools().unwrap().is_empty());
+
+    let (_, generation) = fixture.connect("workspace", vec![]).await;
+    fixture.ready("workspace", generation);
+    let snapshot = mw.await_system_ready().await.unwrap();
+    assert!(snapshot.bridges.is_empty(), "empty live tools/list is valid");
     fixture.shutdown().await;
 }

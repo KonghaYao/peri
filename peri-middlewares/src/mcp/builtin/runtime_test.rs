@@ -145,15 +145,10 @@ impl Link {
 async fn connect(instance: &str, server: FixtureServer) -> Link {
     let transport = spawn_builtin_transport_with_handler(instance, server);
     let (io, supervisor) = transport.into_parts();
-    let service = serve_client_auto(
-        io,
-        None,
-        &McpCapabilityProfile::disabled(),
-        HANDSHAKE_TIMEOUT,
-    )
-    .await
-    .expect("builtin 握手不得超时（同进程链路）")
-    .expect("builtin 握手不得失败");
+    let service = serve_client_auto(io, &McpCapabilityProfile::disabled(), HANDSHAKE_TIMEOUT)
+        .await
+        .expect("builtin 握手不得超时（同进程链路）")
+        .expect("builtin 握手不得失败");
     Link {
         service,
         supervisor,
@@ -237,7 +232,6 @@ async fn builtin_wire_has_no_initialize_and_tools_list_reaches_server() {
     let (transport, wire) = spawn_builtin_transport_with_tap("web", server);
     let mut service = serve_client_auto(
         transport.io,
-        None,
         &McpCapabilityProfile::disabled(),
         HANDSHAKE_TIMEOUT,
     )
@@ -475,15 +469,10 @@ async fn registered_web_instance_handshakes_with_real_handler() {
         .spawn_builtin_transport("web")
         .expect("web 实例必须已接线")
         .into_parts();
-    let mut service = serve_client_auto(
-        io,
-        None,
-        &McpCapabilityProfile::disabled(),
-        HANDSHAKE_TIMEOUT,
-    )
-    .await
-    .expect("web 实例握手不得超时")
-    .expect("web 实例握手不得失败");
+    let mut service = serve_client_auto(io, &McpCapabilityProfile::disabled(), HANDSHAKE_TIMEOUT)
+        .await
+        .expect("web 实例握手不得超时")
+        .expect("web 实例握手不得失败");
 
     let tools = service
         .peer()
@@ -674,7 +663,6 @@ fn builtin_config(instance: &str) -> McpServerConfig {
         headers: None,
         oauth: None,
         disabled: None,
-        protocol_version: None,
         subscriptions: None,
         system_mcp: Some(true),
         system_mcp_tools: Some(Vec::new()),

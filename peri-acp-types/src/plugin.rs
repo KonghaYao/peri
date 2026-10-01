@@ -28,6 +28,9 @@ pub enum ConfigSource {
     Global(PathBuf),
     /// 插件配置
     Plugin,
+    /// 会话明确指定的远端 Workspace MCP。仅由宿主 overlay 设置，
+    /// 不从用户配置反序列化，供资源面识别被选中的来源。
+    WorkspaceRemote,
     /// 会话级声明：client 在 ACP 会话 setup 中以 `McpServer::Acp` 声明的
     /// MCP over ACP 服务器（无配置文件条目，归属绑定声明它的会话）。
     Acp,
@@ -38,14 +41,6 @@ pub enum ConfigSource {
         /// 实例身份（`peri_acp_types::builtin_mcp` 注册表中的 `instance`）。
         instance: String,
     },
-}
-
-/// 显式 MCP 协议版本。
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
-pub enum McpProtocolVersion {
-    /// 使用 `server/discover` lifecycle 的 MCP 2026-07-28。
-    #[serde(rename = "2026-07-28")]
-    V2026_07_28,
 }
 
 /// 单个 MCP 服务器配置
@@ -73,14 +68,6 @@ pub struct McpServerConfig {
     /// 是否禁用（默认 false，不序列化默认值以保持配置简洁）
     #[serde(default, skip_serializing_if = "is_false")]
     pub disabled: Option<bool>,
-    /// 显式 MCP 协议版本。仅 `2026-07-28` 使用 `server/discover` lifecycle；
-    /// 未配置使用官方 Auto 自动协商，未知版本会使配置解析失败。
-    #[serde(
-        default,
-        rename = "protocolVersion",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub protocol_version: Option<McpProtocolVersion>,
     /// subscriptions/listen 订阅配置（2026-07-28 协议；仅负责连接后建立订阅）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subscriptions: Option<McpSubscriptionsConfig>,
@@ -142,8 +129,6 @@ struct McpServerConfigWire {
     oauth: Option<OAuthConfig>,
     #[serde(default)]
     disabled: Option<bool>,
-    #[serde(default, rename = "protocolVersion")]
-    protocol_version: Option<McpProtocolVersion>,
     #[serde(default)]
     subscriptions: Option<McpSubscriptionsConfig>,
     #[serde(
@@ -201,7 +186,6 @@ impl<'de> Deserialize<'de> for McpServerConfig {
             headers: wire.headers,
             oauth: wire.oauth,
             disabled: wire.disabled,
-            protocol_version: wire.protocol_version,
             subscriptions: wire.subscriptions,
             system_mcp: wire.system_mcp,
             system_mcp_tools: wire.system_mcp_tools,
@@ -673,7 +657,6 @@ mod tests {
             headers: None,
             oauth: None,
             disabled: None,
-            protocol_version: None,
             subscriptions: None,
             system_mcp: None,
             system_mcp_tools: None,
@@ -689,20 +672,17 @@ mod tests {
     /// 旧 JSON 兼容：新增 key 全部缺省为 None，输出不出现新 key，既有语义不变。
     #[test]
     fn test_system_mcp_legacy_defaults() {
-        let cfg = parse(r#"{"command":"npx","protocolVersion":"2026-07-28"}"#)
-            .expect("旧 JSON 必须仍可解析");
+        let cfg = parse(r#"{"command":"npx"}"#).expect("既有 JSON 必须仍可解析");
         assert!(cfg.system_mcp.is_none(), "旧 JSON 不得推断出启动依赖");
         assert!(cfg.system_mcp_tools.is_none());
         assert!(cfg.system_mcp_timeout.is_none());
         assert!(cfg.validate().is_ok(), "缺省 System 字段必须合法");
-        assert_eq!(cfg.protocol_version, Some(McpProtocolVersion::V2026_07_28));
         assert!(cfg.source.is_none(), "source 是运行时标记，不从 wire 读取");
 
         let json = serde_json::to_value(&cfg).unwrap();
         for key in ["system_mcp", "system_mcp_tools", "system_mcp_timeout"] {
             assert!(json.get(key).is_none(), "缺省不得序列化 {key}: {json}");
         }
-        assert_eq!(json["protocolVersion"], serde_json::json!("2026-07-28"));
         assert!(json.get("source").is_none(), "source 不进入 wire: {json}");
 
         let legacy = parse(r#"{"command":"npx","disabled":true,"args":["-y"]}"#).unwrap();

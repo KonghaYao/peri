@@ -177,6 +177,23 @@ async fn construct_time_workspace_closure_is_enforced() {
 }
 
 #[tokio::test]
+async fn remote_workspace_file_reader_stays_available_when_builtin_is_closed() {
+    let fixture = Fixture::new().await;
+    Arc::make_mut(fixture.pool.clients.write().get_mut("workspace").unwrap()).source =
+        Some(ConfigSource::WorkspaceRemote);
+    let reader = McpWorkspaceFileReader::new(
+        Some(fixture.pool.clone()),
+        Some("session".to_string()),
+        &std::collections::HashSet::from(["WorkspaceMiddleware".to_string()]),
+    );
+    let read = tokio::spawn(async move { reader.read_text(Path::new("remote.txt")).await });
+    fixture.entered.notified().await;
+    fixture.release.notify_one();
+    assert_eq!(read.await.unwrap().unwrap(), "remote");
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
 async fn dropping_read_notifies_server_cancellation() {
     let fixture = Fixture::new().await;
     let read = fixture.read();

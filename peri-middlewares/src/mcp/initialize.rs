@@ -13,7 +13,7 @@ use super::{
         DiscoveryEvidence, McpClientHandle, McpClientPool, McpInitStatus, OAuthStatus,
         SystemMcpManifest, HTTP_CONNECT_TIMEOUT, SHUTDOWN_TIMEOUT, STDIO_CONNECT_TIMEOUT,
     },
-    config::{McpServerConfig, OAuthConfig},
+    config::{ConfigSource, McpServerConfig, OAuthConfig},
     oauth_flow::OAuthFlowEvent,
     transport::{TransportConfig, TransportKind},
 };
@@ -122,6 +122,17 @@ pub(super) fn downgrade_resource_listing(server_name: &str, error: &str) {
         error = %super::client::redact_mcp_error(error),
         "MCP resources/list 失败，本次不发布资源"
     );
+}
+
+pub(super) fn fail_workspace_resource_discovery(
+    pool: &Arc<McpClientPool>,
+    server_name: &str,
+    error: &str,
+) {
+    let reason = format!("资源发现失败: {}", super::client::redact_mcp_error(error));
+    tracing::warn!(server = %server_name, error = %reason, "Workspace resources/list 失败，不发布连接与 ready 证据");
+    McpClientPool::insert_failed(pool, server_name, reason);
+    commit_discovery_failure(pool, server_name, true);
 }
 
 /// 配置失败的统一发布：面板状态（pool）与 watch 通道同时置 Failed，System 配置
@@ -328,8 +339,7 @@ impl McpClientPool {
             let kind = transport_config.kind();
             let timeout = connect_timeout(kind);
             let is_http = matches!(kind, TransportKind::Http);
-            // lifecycle 仅由显式 protocolVersion 选择；subscriptions 只负责连接后订阅。
-            let protocol_version = server_config.protocol_version.as_ref();
+            // lifecycle 统一自动协商；subscriptions 只负责连接后订阅。
             let subscriptions = server_config
                 .subscriptions
                 .as_ref()
@@ -359,9 +369,7 @@ impl McpClientPool {
                     if let Some(previous) = pool.register_builtin_task(name.clone(), supervisor) {
                         let _ = previous.close(BUILTIN_CONVERGE_TIMEOUT).await;
                     }
-                    let connected =
-                        serve_client_auto(io, protocol_version, &pool.capability_profile, timeout)
-                            .await;
+                    let connected = serve_client_auto(io, &pool.capability_profile, timeout).await;
                     // 握手失败 / 超时：本实例的 server task 当场收口（不含糊到 pool 关闭）；
                     // 成功则由重连 / 关闭 / 移除时的有界关闭负责。
                     if !matches!(connected, Ok(Ok(_))) {
@@ -375,13 +383,7 @@ impl McpClientPool {
                     ref env,
                 } => match pool.spawn_stdio_transport(command, args, env, cwd) {
                     Ok(transport) => {
-                        serve_client_auto(
-                            transport,
-                            protocol_version,
-                            &pool.capability_profile,
-                            timeout,
-                        )
-                        .await
+                        serve_client_auto(transport, &pool.capability_profile, timeout).await
                     }
                     Err(e) => {
                         let err_str = super::client::redact_mcp_error(&e.to_string());
@@ -437,7 +439,6 @@ impl McpClientPool {
                     } else {
                         serve_client_auto(
                             build_http_transport(url, headers),
-                            protocol_version,
                             &pool.capability_profile,
                             timeout,
                         )
@@ -483,6 +484,12 @@ impl McpClientPool {
                     let resources = match pool.list_all_resources_cached(name, &peer).await {
                         Ok(resources) => resources,
                         Err(error) => {
+                            if matches!(server_config.source, Some(ConfigSource::WorkspaceRemote)) {
+                                let mut service = rs;
+                                let _ = service.close_with_timeout(SHUTDOWN_TIMEOUT).await;
+                                fail_workspace_resource_discovery(&pool, name, &error.to_string());
+                                continue;
+                            }
                             downgrade_resource_listing(name, &error.to_string());
                             Vec::new()
                         }

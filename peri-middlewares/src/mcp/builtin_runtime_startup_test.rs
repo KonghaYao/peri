@@ -135,7 +135,7 @@ async fn pool_spawn_point_drives_cron_tick_and_stops_on_generation_close() {
         .expect("cron 必须已接线（dispatch 覆盖四个已实现实例）");
     let (io, supervisor) = transport.into_parts();
     // client 半边走生产握手（同进程链路），保证本代真的进入服务而不是空转。
-    let mut service = serve_client_auto(io, None, &pool.capability_profile, HANDSHAKE_TIMEOUT)
+    let mut service = serve_client_auto(io, &pool.capability_profile, HANDSHAKE_TIMEOUT)
         .await
         .expect("builtin 握手不得超时（同进程链路）")
         .expect("builtin 握手不得失败");

@@ -512,7 +512,6 @@ async fn builtin_tool_call_surfaces_timeout_error_after_bridge_deadline() {
     } = transport;
     let mut service = crate::mcp::client::serve_client_auto(
         io,
-        None,
         &crate::mcp::apps::McpCapabilityProfile::disabled(),
         std::time::Duration::from_secs(5),
     )

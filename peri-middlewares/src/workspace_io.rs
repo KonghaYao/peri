@@ -69,7 +69,12 @@ impl McpWorkspaceFileReader {
     ) -> Self {
         let closed = crate::mcp::builtin::closed_instances(disabled);
         Self {
-            pool: pool.filter(|_| !crate::mcp::builtin::is_closed("workspace", &closed)),
+            pool: pool.filter(|pool| {
+                let source = pool
+                    .get_client("workspace")
+                    .and_then(|handle| handle.source.clone());
+                !crate::mcp::builtin::is_closed_source("workspace", source.as_ref(), &closed)
+            }),
             session_id,
         }
     }
@@ -83,9 +88,10 @@ impl McpWorkspaceFileReader {
             .as_ref()
             .filter(|pool| !workspace_closed(pool))
             .ok_or(WorkspaceReadError::Unavailable)?;
-        let handle = pool.get_client_visible_to("workspace", self.session_id.as_deref())
+        let handle = pool
+            .get_client_visible_to("workspace", self.session_id.as_deref())
             .filter(|handle| matches!(handle.status, ClientStatus::Connected))
-            .filter(|handle| matches!(handle.source.as_ref(), Some(crate::mcp::config::ConfigSource::Builtin { instance }) if instance == "workspace"))
+            .filter(|handle| crate::mcp::builtin::is_workspace_source(handle.source.as_ref()))
             .ok_or(WorkspaceReadError::Unavailable)?;
         let peer = handle
             .peer
@@ -163,9 +169,12 @@ impl WorkspaceFileReader for McpWorkspaceFileReader {
 
 fn workspace_closed(pool: &McpClientPool) -> bool {
     !pool.is_open()
-        || pool
-            .builtin_instance_context()
-            .is_some_and(|context| crate::mcp::builtin::is_closed("workspace", &context.closed))
+        || pool.builtin_instance_context().is_some_and(|context| {
+            let source = pool
+                .get_client("workspace")
+                .and_then(|handle| handle.source.clone());
+            crate::mcp::builtin::is_closed_source("workspace", source.as_ref(), &context.closed)
+        })
 }
 
 #[cfg(test)]

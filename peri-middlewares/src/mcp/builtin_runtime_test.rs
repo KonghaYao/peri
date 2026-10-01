@@ -215,7 +215,6 @@ fn builtin_entry(instance: &BuiltinMcpInstance) -> McpServerConfig {
         oauth: None,
         disabled: None,
         // 必须为 None：显式版本会跳过 Auto 的 `server/discover` 探测。
-        protocol_version: None,
         subscriptions: None,
         system_mcp: Some(true),
         system_mcp_tools: Some(declared_direct_original_names(instance)),
@@ -730,7 +729,7 @@ impl TappedLink {
         let crate::mcp::builtin::runtime::BuiltinTransport {
             io, server_task, ..
         } = transport;
-        let service = serve_client_auto(io, None, &pool.capability_profile, HANDSHAKE_TIMEOUT)
+        let service = serve_client_auto(io, &pool.capability_profile, HANDSHAKE_TIMEOUT)
             .await
             .expect("builtin 握手不得超时（同进程链路）")
             .expect("builtin 握手不得失败");

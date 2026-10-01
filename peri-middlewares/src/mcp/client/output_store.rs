@@ -38,9 +38,12 @@ impl Drop for PendingOutput {
 
 fn workspace_available(pool: &McpClientPool) -> bool {
     pool.is_open()
-        && !pool
-            .builtin_instance_context()
-            .is_some_and(|context| crate::mcp::builtin::is_closed("workspace", &context.closed))
+        && !pool.builtin_instance_context().is_some_and(|context| {
+            let source = pool
+                .get_client("workspace")
+                .and_then(|handle| handle.source.clone());
+            crate::mcp::builtin::is_closed_source("workspace", source.as_ref(), &context.closed)
+        })
 }
 
 impl McpClientPool {
@@ -65,7 +68,7 @@ impl McpClientPool {
         let handle = self
             .get_client_visible_to("workspace", session_id)
             .filter(|handle| matches!(handle.status, ClientStatus::Connected))
-            .filter(|handle| matches!(handle.source.as_ref(), Some(crate::mcp::config::ConfigSource::Builtin { instance }) if instance == "workspace"))
+            .filter(|handle| crate::mcp::builtin::is_workspace_source(handle.source.as_ref()))
             .ok_or("workspace output store unavailable")?;
         let peer = handle.peer.as_ref().ok_or("workspace disconnected")?;
         let generation = self.handle_generation(&handle);

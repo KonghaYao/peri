@@ -295,13 +295,7 @@ async fn connect_server(
         return;
     }
 
-    let served = serve_client_auto(
-        transport,
-        None,
-        &pool.capability_profile,
-        HTTP_CONNECT_TIMEOUT,
-    )
-    .await;
+    let served = serve_client_auto(transport, &pool.capability_profile, HTTP_CONNECT_TIMEOUT).await;
     let service = match served {
         Ok(Ok(service)) => service,
         Ok(Err(error)) => {

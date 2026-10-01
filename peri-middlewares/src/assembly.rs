@@ -393,8 +393,8 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
 ///
 /// Web / Artifact 能力由 builtin bridge 以原名存在于 MCP 目录：
 /// `build_typed_tool_bridges` 应用注册表声明的 direct（IF-D13），本函数再按
-/// 同一份 frozen policy 去掉关闭实例（`closed_instances` / `is_closed` 是
-/// 唯一判定入口，不硬编码实例名或工具名前缀）。
+/// 同一份 frozen policy 去掉关闭的 builtin 实例（按 bridge 的来源身份判定，
+/// 不能按 server 名误关接管同名 Workspace 的远端 MCP）。
 ///
 /// 只保留 direct：workflow agent 没有 ToolSearch；SubAgent 装配时使用本面
 /// 作为初始工具集，在父 Reason 发布时再绑定当前会话的完整静态 MCP 目录。
@@ -407,8 +407,8 @@ pub(crate) fn open_builtin_bridges(
         .into_iter()
         .filter(|bridge| {
             !bridge
-                .mcp_server_name()
-                .is_some_and(|server| crate::mcp::builtin::is_closed(server, &closed))
+                .builtin_mcp_instance()
+                .is_some_and(|instance| crate::mcp::builtin::is_closed(instance, &closed))
         })
         .filter(|bridge| bridge.is_direct())
         .map(|bridge| Box::new(bridge) as Box<dyn BaseTool>)

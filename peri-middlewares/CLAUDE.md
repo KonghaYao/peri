@@ -13,6 +13,7 @@
 
 - 插件提供 skill roots、agent dirs、hook groups 与 MCP 配置，由对应中间件消费。
 - MCP 配置按数据面全局路径（默认 `~/.peri/settings.json`，尊重 `--config-file`）、插件、项目 `{cwd}/.mcp.json` 合并；配置正文、保存与来源身份经独立 `peri-mcp-config` MCP 通道，不依赖尚未启动的工具池。工具与资源仅在 pool 可用时注册。
+- 宿主或全局配置可用 `mcpServers.workspace: { "url": "https://…/mcp" }` 接管内置 Workspace；项目/插件配置不可把同名远端标记为受信 Workspace。此远端的 `tools/list` 是 direct 工具全集的事实源（空列表有效），资源面也从该连接读取；`WorkspaceMiddleware: false` 只关闭内置实现，不关闭显式远端替代。连接协议由 MCP client 自动协商，不声明 `protocolVersion` 或 `system_mcp_tools`。
 - 图片附件及归因/LSP 的文件正文经当前会话可见的 builtin workspace MCP 读取；能力关闭、断连或换代后不回落宿主文件系统。hook loader 的正文与 canonical 来源去重经配置数据面，保留 symlink 同文件判定；身份不可得时跳过项目来源，不假定为独立来源。
 - Skills 的**来源**（用户目录、项目目录、插件根、内置静态资产）由 builtin `workspace` 实例的资源面（`skills/list` + `resources/read`）提供；宿主只做根解析适配器（`src/skills/loader.rs::resolve_skill_roots`：路径 + scope/标签，不检查目录存在性），`src/settings.rs` 只读取 `disableBundledSkills`；`skillsDir` 配置链路已删除。扫描语义（叶子、深度/目录预算、symlink 口径、同名先到先得）在 provider（`mcp-packages/workspace/src/resources/skills.rs`）。
 - SubAgent 从父工具、冻结上下文、取消策略与事件处理器派生执行上下文；具体 agent 定义和内置 agent 请直接查 `src/subagent/` 与项目 `.claude/agents/`，如需举例只使用 `explorer`。

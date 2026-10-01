@@ -72,15 +72,10 @@ async fn connect_workspace(cwd: &str) -> WorkspaceLink {
         WorkspaceMcpServer::new(cwd, None).with_git_throttle(Duration::ZERO),
     );
     let (io, supervisor) = transport.into_parts();
-    let service = serve_client_auto(
-        io,
-        None,
-        &McpCapabilityProfile::disabled(),
-        HANDSHAKE_TIMEOUT,
-    )
-    .await
-    .expect("builtin 握手不得超时（同进程链路）")
-    .expect("builtin 握手不得失败");
+    let service = serve_client_auto(io, &McpCapabilityProfile::disabled(), HANDSHAKE_TIMEOUT)
+        .await
+        .expect("builtin 握手不得超时（同进程链路）")
+        .expect("builtin 握手不得失败");
     WorkspaceLink {
         service,
         supervisor,
@@ -444,9 +439,27 @@ async fn t6_session_delivery_is_info_and_closure_skips_subscription() {
             BuiltinInstanceContext::new(cwd.clone()).with_closed(closed),
         ))
         .expect("上下文可注入");
+    let mut workspace_config: crate::mcp::config::McpServerConfig =
+        serde_json::from_str("{}").unwrap();
+    workspace_config.source = Some(peri_acp_types::plugin::ConfigSource::Builtin {
+        instance: "workspace".to_string(),
+    });
+    closed_pool
+        .configs
+        .write()
+        .insert("workspace".to_string(), workspace_config.clone());
     assert!(
         !closed_pool.subscription_allowed("workspace"),
         "关闭集命中 ⇒ 不建立订阅（零 git 调用）"
+    );
+    workspace_config.source = Some(peri_acp_types::plugin::ConfigSource::WorkspaceRemote);
+    closed_pool
+        .configs
+        .write()
+        .insert("workspace".to_string(), workspace_config);
+    assert!(
+        closed_pool.subscription_allowed("workspace"),
+        "关闭内置实例不得阻断显式远端 Workspace 的订阅"
     );
     assert!(
         closed_pool.subscription_allowed("web"),
@@ -501,15 +514,10 @@ async fn t7b_read_failure_falls_back_to_generic_reminder() {
         },
     );
     let (io, supervisor) = transport.into_parts();
-    let service = serve_client_auto(
-        io,
-        None,
-        &McpCapabilityProfile::disabled(),
-        HANDSHAKE_TIMEOUT,
-    )
-    .await
-    .expect("builtin 握手不得超时")
-    .expect("builtin 握手不得失败");
+    let service = serve_client_auto(io, &McpCapabilityProfile::disabled(), HANDSHAKE_TIMEOUT)
+        .await
+        .expect("builtin 握手不得超时")
+        .expect("builtin 握手不得失败");
     let peer = service.peer().clone();
     pool.clients.write().insert(
         "workspace".to_string(),

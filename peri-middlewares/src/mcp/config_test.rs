@@ -81,7 +81,7 @@ fn test_load_from_valid_json() {
 }
 
 #[test]
-fn test_load_explicit_protocol_version() {
+fn test_removed_protocol_version_is_ignored_by_config() {
     let mut f = NamedTempFile::new().unwrap();
     std::io::Write::write_all(
         &mut f,
@@ -90,22 +90,10 @@ fn test_load_explicit_protocol_version() {
     .unwrap();
 
     let config = load_from_path(f.path()).unwrap();
-    assert_eq!(
-        config.mcp_servers["next"].protocol_version,
-        Some(peri_acp_types::plugin::McpProtocolVersion::V2026_07_28)
-    );
-}
-
-#[test]
-fn test_load_unknown_protocol_version_fails() {
-    let mut f = NamedTempFile::new().unwrap();
-    std::io::Write::write_all(
-        &mut f,
-        br#"{"mcpServers":{"invalid":{"url":"https://example.com/mcp","protocolVersion":"unknown"}}}"#,
-    )
-    .unwrap();
-
-    assert!(load_from_path(f.path()).is_err());
+    let server = &config.mcp_servers["next"];
+    assert_eq!(server.url.as_deref(), Some("https://example.com/mcp"));
+    let encoded = serde_json::to_value(server).unwrap();
+    assert!(encoded.get("protocolVersion").is_none());
 }
 
 #[test]

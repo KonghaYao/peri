@@ -581,7 +581,6 @@ mod real_workspace_provider {
             let (io, supervisor) = transport.into_parts();
             let service = crate::mcp::client::serve_client_auto(
                 io,
-                None,
                 &McpCapabilityProfile::disabled(),
                 HANDSHAKE,
             )

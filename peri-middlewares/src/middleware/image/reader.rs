@@ -9,7 +9,7 @@ use rmcp::{
     service::{Peer, PeerRequestOptions, RoleClient},
 };
 
-use crate::mcp::{config::ConfigSource, ClientStatus, McpClientPool};
+use crate::mcp::{ClientStatus, McpClientPool};
 
 const READ_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -59,7 +59,7 @@ pub(super) async fn read_image(
         .get_client_visible_to("workspace", Some(session_id))
         .ok_or_else(unavailable)?;
     if !matches!(client.status, ClientStatus::Connected)
-        || !matches!(client.source.as_ref(), Some(ConfigSource::Builtin { instance }) if instance == "workspace")
+        || !crate::mcp::builtin::is_workspace_source(client.source.as_ref())
     {
         return Err(unavailable());
     }
@@ -130,8 +130,12 @@ pub(super) async fn read_image(
 }
 
 fn workspace_closed(pool: &McpClientPool) -> bool {
-    pool.builtin_instance_context()
-        .is_some_and(|context| crate::mcp::builtin::is_closed("workspace", &context.closed))
+    pool.builtin_instance_context().is_some_and(|context| {
+        let source = pool
+            .get_client("workspace")
+            .and_then(|handle| handle.source.clone());
+        crate::mcp::builtin::is_closed_source("workspace", source.as_ref(), &context.closed)
+    })
 }
 
 #[cfg(test)]

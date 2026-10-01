@@ -130,7 +130,6 @@ fn capability_snapshot_with_result(
             cwd: None,
         },
         timeout_ms: 1,
-        protocol_version: None,
         subscriptions: None,
     };
     SessionMcpCapabilitySnapshot {

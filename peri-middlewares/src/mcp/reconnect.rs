@@ -10,7 +10,8 @@ use super::{
     },
     initialize::{
         commit_discovery_failure, commit_discovery_success, connect_timeout,
-        downgrade_resource_listing, fail_tool_discovery, list_discovered_tools,
+        downgrade_resource_listing, fail_tool_discovery, fail_workspace_resource_discovery,
+        list_discovered_tools,
     },
     oauth_flow::{OAuthFlowEvent, OAuthFlowManager},
     transport::{TransportConfig, TransportKind},
@@ -81,8 +82,7 @@ impl McpClientPool {
         let kind = tc.kind();
         let timeout = connect_timeout(kind);
         let is_http = matches!(kind, TransportKind::Http);
-        // lifecycle 仅由显式 protocolVersion 选择；subscriptions 只负责连接后订阅。
-        let protocol_version = server_config.protocol_version.as_ref();
+        // lifecycle 自动协商；subscriptions 只负责连接后订阅。
         let subscriptions = server_config
             .subscriptions
             .as_ref()
@@ -115,9 +115,7 @@ impl McpClientPool {
                 {
                     let _ = previous.close(BUILTIN_CONVERGE_TIMEOUT).await;
                 }
-                let connected =
-                    serve_client_auto(io, protocol_version, &self.capability_profile, timeout)
-                        .await;
+                let connected = serve_client_auto(io, &self.capability_profile, timeout).await;
                 // 握手失败 / 超时：新链路当场收口，不留 orphan。
                 if !matches!(connected, Ok(Ok(_))) {
                     self.close_builtin_task(server_name).await;
@@ -133,10 +131,7 @@ impl McpClientPool {
                             reason: "MCP execution directory is not initialized".into(),
                         })?;
                 match self.spawn_stdio_transport(command, args, env, cwd) {
-                    Ok(t) => {
-                        serve_client_auto(t, protocol_version, &self.capability_profile, timeout)
-                            .await
-                    }
+                    Ok(t) => serve_client_auto(t, &self.capability_profile, timeout).await,
                     Err(e) => {
                         McpClientPool::insert_failed(self, server_name, format!("stdio 失败: {e}"));
                         commit_discovery_failure(self, server_name, false);
@@ -201,7 +196,6 @@ impl McpClientPool {
                             if let Some(am) = mgr.get_authorization_manager(server_name) {
                                 serve_client_auto(
                                     build_authed_transport(url, headers, am),
-                                    protocol_version,
                                     &self.capability_profile,
                                     timeout,
                                 )
@@ -209,7 +203,6 @@ impl McpClientPool {
                             } else {
                                 serve_client_auto(
                                     build_http_transport(url, headers),
-                                    protocol_version,
                                     &self.capability_profile,
                                     timeout,
                                 )
@@ -220,7 +213,6 @@ impl McpClientPool {
                             tracing::warn!(server = %server_name, error = %e, "OAuth 恢复失败，尝试裸连接");
                             serve_client_auto(
                                 build_http_transport(url, headers),
-                                protocol_version,
                                 &self.capability_profile,
                                 timeout,
                             )
@@ -230,7 +222,6 @@ impl McpClientPool {
                 } else {
                     serve_client_auto(
                         build_http_transport(url, headers),
-                        protocol_version,
                         &self.capability_profile,
                         timeout,
                     )
@@ -277,6 +268,22 @@ impl McpClientPool {
                 let resources = match self.list_all_resources_cached(server_name, &peer).await {
                     Ok(resources) => resources,
                     Err(error) => {
+                        if matches!(
+                            server_config.source,
+                            Some(super::config::ConfigSource::WorkspaceRemote)
+                        ) {
+                            let mut service = rs;
+                            let _ = service.close_with_timeout(SHUTDOWN_TIMEOUT).await;
+                            fail_workspace_resource_discovery(
+                                self,
+                                server_name,
+                                &error.to_string(),
+                            );
+                            return Err(McpPoolError::ResourceDiscoveryFailed {
+                                server: server_name.to_string(),
+                                reason: super::client::redact_mcp_error(&error.to_string()),
+                            });
+                        }
                         downgrade_resource_listing(server_name, &error.to_string());
                         Vec::new()
                     }

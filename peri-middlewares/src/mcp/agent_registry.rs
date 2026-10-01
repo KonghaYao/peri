@@ -231,10 +231,7 @@ impl McpAgentRegistry {
 
     /// 该句柄是否是**宿主绑定的** builtin `workspace` 实例（身份判定，不含关闭位）。
     fn is_builtin_workspace_handle(handle: &Arc<McpClientHandle>) -> bool {
-        matches!(
-            handle.source.as_ref(),
-            Some(super::config::ConfigSource::Builtin { instance }) if instance == "workspace"
-        )
+        super::builtin::is_workspace_source(handle.source.as_ref())
     }
 
     /// 本地来源判定（host-assigned 信任锚 + 关闭位）。
@@ -245,10 +242,7 @@ impl McpAgentRegistry {
         if !matches!(handle.status, ClientStatus::Connected) {
             return false;
         }
-        if !matches!(
-            handle.source.as_ref(),
-            Some(super::config::ConfigSource::Builtin { instance }) if instance == "workspace"
-        ) {
+        if !super::builtin::is_workspace_source(handle.source.as_ref()) {
             return false;
         }
         let closed = self
@@ -256,7 +250,7 @@ impl McpAgentRegistry {
             .builtin_instance_context()
             .map(|context| context.closed.clone())
             .unwrap_or_default();
-        if super::builtin::is_closed("workspace", &closed) {
+        if super::builtin::is_closed_source("workspace", handle.source.as_ref(), &closed) {
             tracing::debug!(
                 "agents: builtin workspace is closed; local agent sources are unavailable"
             );

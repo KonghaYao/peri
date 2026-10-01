@@ -9,7 +9,7 @@ use std::{collections::BTreeMap, fmt, sync::Arc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{plugin::McpProtocolVersion, tools::BaseTool};
+use crate::tools::BaseTool;
 
 macro_rules! opaque_id {
     ($name:ident, $prefix:literal) => {
@@ -134,8 +134,6 @@ pub struct DynamicMcpConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub protocol_version: Option<McpProtocolVersion>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subscriptions: Option<crate::plugin::McpSubscriptionsConfig>,
 }
 
@@ -161,8 +159,6 @@ pub struct CanonicalDynamicMcpConfig {
     pub transport: CanonicalDynamicMcpTransport,
     pub timeout_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub protocol_version: Option<McpProtocolVersion>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subscriptions: Option<crate::plugin::McpSubscriptionsConfig>,
 }
 
@@ -182,14 +178,12 @@ pub enum DynamicMcpConfigSummary {
         env: BTreeMap<String, String>,
         cwd: Option<String>,
         timeout_ms: u64,
-        protocol_version: Option<McpProtocolVersion>,
         subscriptions: Option<crate::plugin::McpSubscriptionsConfig>,
     },
     StreamableHttp {
         url: String,
         headers: BTreeMap<String, DynamicMcpHeaderSummary>,
         timeout_ms: u64,
-        protocol_version: Option<McpProtocolVersion>,
         subscriptions: Option<crate::plugin::McpSubscriptionsConfig>,
     },
 }
@@ -214,7 +208,6 @@ impl CanonicalDynamicMcpConfig {
                     .collect(),
                 cwd: cwd.clone(),
                 timeout_ms: self.timeout_ms,
-                protocol_version: self.protocol_version,
                 subscriptions: self.subscriptions.clone(),
             },
             CanonicalDynamicMcpTransport::StreamableHttp { url, headers } => {
@@ -235,7 +228,6 @@ impl CanonicalDynamicMcpConfig {
                         })
                         .collect(),
                     timeout_ms: self.timeout_ms,
-                    protocol_version: self.protocol_version,
                     subscriptions: self.subscriptions.clone(),
                 }
             }
@@ -372,7 +364,6 @@ impl DynamicMcpConfig {
         Ok(CanonicalDynamicMcpConfig {
             transport,
             timeout_ms,
-            protocol_version: self.protocol_version,
             subscriptions: self.subscriptions.filter(|value| !value.is_empty()),
         })
     }

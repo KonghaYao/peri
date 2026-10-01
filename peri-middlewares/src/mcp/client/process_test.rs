@@ -58,7 +58,6 @@ async fn cancelled_handshake_keeps_process_owner_until_pool_cleanup() {
     wait_for_marker(&cwd.path().join("marker")).await;
     let result = super::super::transport::serve_client_auto(
         transport,
-        None,
         &pool.capability_profile,
         Duration::from_millis(20),
     )

@@ -33,7 +33,6 @@ fn empty_config() -> McpServerConfig {
         headers: None,
         oauth: None,
         disabled: None,
-        protocol_version: None,
         subscriptions: None,
         system_mcp: None,
         system_mcp_tools: None,

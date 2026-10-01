@@ -346,15 +346,10 @@ async fn connect(cwd: &str, input: Option<WorkspaceInstanceInput>) -> Pair {
     let transport =
         spawn_builtin_transport_with_handler("workspace", WorkspaceMcpServer::new(cwd, input));
     let (io, supervisor) = transport.into_parts();
-    let service = serve_client_auto(
-        io,
-        None,
-        &McpCapabilityProfile::disabled(),
-        HANDSHAKE_TIMEOUT,
-    )
-    .await
-    .expect("builtin 握手不得超时（同进程链路）")
-    .expect("builtin 握手不得失败");
+    let service = serve_client_auto(io, &McpCapabilityProfile::disabled(), HANDSHAKE_TIMEOUT)
+        .await
+        .expect("builtin 握手不得超时（同进程链路）")
+        .expect("builtin 握手不得失败");
     Pair {
         service,
         supervisor,

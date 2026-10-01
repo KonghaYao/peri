@@ -168,9 +168,6 @@ pub fn server_config_hash(config: &McpServerConfig) -> u64 {
             value.hash(&mut hasher);
         }
     }
-    if let Some(protocol_version) = &config.protocol_version {
-        protocol_version.hash(&mut hasher);
-    }
     if let Some(system_mcp) = &config.system_mcp {
         system_mcp.hash(&mut hasher);
     }

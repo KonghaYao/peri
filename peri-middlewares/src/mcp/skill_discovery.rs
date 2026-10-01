@@ -658,10 +658,13 @@ pub(crate) fn mark_system_origins(
     let names: Vec<String> = handles
         .iter()
         .filter(|handle| {
-            matches!(
+            (matches!(
                 handle.source.as_ref(),
                 Some(crate::mcp::config::ConfigSource::Builtin { .. })
-            ) && !super::builtin::is_closed(&handle.name, closed)
+            ) || matches!(
+                handle.source.as_ref(),
+                Some(crate::mcp::config::ConfigSource::WorkspaceRemote)
+            )) && !super::builtin::is_closed_source(&handle.name, handle.source.as_ref(), closed)
         })
         .map(|handle| handle.name.clone())
         .collect();

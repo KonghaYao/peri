@@ -9,7 +9,7 @@ use super::{
     },
     initialize::{
         commit_discovery_failure, commit_discovery_success, downgrade_resource_listing,
-        fail_tool_discovery, list_discovered_tools,
+        fail_tool_discovery, fail_workspace_resource_discovery, list_discovered_tools,
     },
     oauth_flow::{OAuthFailureKind, OAuthFlowEvent, OAuthFlowManager},
 };
@@ -221,6 +221,29 @@ impl McpClientPool {
                     let resources = match self.list_all_resources_cached(server_name, &peer).await {
                         Ok(resources) => resources,
                         Err(error) => {
+                            if matches!(
+                                cfg.source,
+                                Some(super::config::ConfigSource::WorkspaceRemote)
+                            ) {
+                                let mut service = service;
+                                let _ = service.close_with_timeout(SHUTDOWN_TIMEOUT).await;
+                                fail_workspace_resource_discovery(
+                                    self,
+                                    server_name,
+                                    &error.to_string(),
+                                );
+                                let error = McpPoolError::ResourceDiscoveryFailed {
+                                    server: server_name.to_string(),
+                                    reason: super::client::redact_mcp_error(&error.to_string()),
+                                };
+                                self.emit_oauth_failure(
+                                    flow_id,
+                                    server_name,
+                                    OAuthFailureKind::ConnectionFailed,
+                                    &error,
+                                );
+                                return Err(error);
+                            }
                             downgrade_resource_listing(server_name, &error.to_string());
                             Vec::new()
                         }

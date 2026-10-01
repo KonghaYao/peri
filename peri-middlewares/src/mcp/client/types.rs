@@ -73,6 +73,8 @@ pub enum McpPoolError {
     ConnectionFailed { server: String, reason: String },
     #[error("MCP 服务器 \"{server}\" 工具发现失败: {reason}")]
     ToolDiscoveryFailed { server: String, reason: String },
+    #[error("MCP 服务器 \"{server}\" 资源发现失败: {reason}")]
+    ResourceDiscoveryFailed { server: String, reason: String },
     #[error("MCP 服务器 \"{server}\" 未连接 (状态: {status:?})")]
     NotConnected {
         server: String,

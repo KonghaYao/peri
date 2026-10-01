@@ -37,53 +37,20 @@ async fn auto_falls_back_to_legacy() {
     });
     let service = serve_client_auto(
         client,
-        None,
         &crate::mcp::apps::McpCapabilityProfile::disabled(),
         std::time::Duration::from_secs(2),
     )
     .await
     .unwrap()
     .unwrap();
-    assert!(matches!(service, McpServiceWrapper::Default(_)));
-    server.await.unwrap();
-}
-
-#[tokio::test]
-async fn explicit_version_does_not_fall_back() {
-    let (client, server) = tokio::io::duplex(8192);
-    let server = tokio::spawn(async move {
-        let (read, mut write) = tokio::io::split(server);
-        let mut lines = BufReader::new(read).lines();
-        let request: serde_json::Value =
-            serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
-        assert_eq!(request["method"], "server/discover");
-        let error = serde_json::json!({
-            "jsonrpc": "2.0", "id": request["id"],
-            "error": {"code": -32601, "message": "Method not found"}
-        });
-        write
-            .write_all(format!("{error}\n").as_bytes())
-            .await
-            .unwrap();
-        assert!(lines.next_line().await.unwrap().is_none());
-    });
-    let result = serve_client_auto(
-        client,
-        Some(&McpProtocolVersion::V2026_07_28),
-        &crate::mcp::apps::McpCapabilityProfile::disabled(),
-        std::time::Duration::from_secs(2),
-    )
-    .await
-    .unwrap();
-    assert!(
-        matches!(result, Err(ClientInitializeError::JsonRpcError(error))
-        if error.code == rmcp::model::ErrorCode::METHOD_NOT_FOUND)
+    assert_eq!(
+        service.peer().peer_info().unwrap().protocol_version,
+        rmcp::model::ProtocolVersion::V_2025_11_25
     );
     server.await.unwrap();
 }
 
 async fn observe_first_request(
-    protocol_version: Option<&McpProtocolVersion>,
     capability_profile: &crate::mcp::apps::McpCapabilityProfile,
 ) -> serde_json::Value {
     let (client_io, server_io) = tokio::io::duplex(8192);
@@ -125,7 +92,6 @@ async fn observe_first_request(
 
     let _service = serve_client_auto(
         client_io,
-        protocol_version,
         capability_profile,
         std::time::Duration::from_secs(2),
     )
@@ -136,19 +102,8 @@ async fn observe_first_request(
 }
 
 #[tokio::test]
-async fn none_starts_with_discover() {
-    let request =
-        observe_first_request(None, &crate::mcp::apps::McpCapabilityProfile::disabled()).await;
-    assert_eq!(request["method"], "server/discover");
-}
-
-#[tokio::test]
-async fn explicit_2026_07_28_transport_starts_with_discover() {
-    let request = observe_first_request(
-        Some(&McpProtocolVersion::V2026_07_28),
-        &crate::mcp::apps::McpCapabilityProfile::disabled(),
-    )
-    .await;
+async fn auto_starts_with_discover() {
+    let request = observe_first_request(&crate::mcp::apps::McpCapabilityProfile::disabled()).await;
     assert_eq!(request["method"], "server/discover");
 }
 
@@ -156,30 +111,23 @@ async fn explicit_2026_07_28_transport_starts_with_discover() {
 async fn enabled_profile_is_advertised_for_negotiated_versions() {
     let profile =
         crate::mcp::apps::McpCapabilityProfile::negotiated([crate::mcp::MCP_APP_MIME_TYPE]);
-    for protocol_version in [None, Some(&McpProtocolVersion::V2026_07_28)] {
-        let request = observe_first_request(protocol_version, &profile).await;
-        let extensions = if request["method"] == "server/discover" {
-            &request["params"]["_meta"]["io.modelcontextprotocol/clientCapabilities"]["extensions"]
-        } else {
-            &request["params"]["capabilities"]["extensions"]
-        };
-        assert!(
-            extensions[crate::mcp::MCP_UI_EXTENSION].is_object(),
-            "request: {request}"
-        );
-    }
+    let request = observe_first_request(&profile).await;
+    let extensions =
+        &request["params"]["_meta"]["io.modelcontextprotocol/clientCapabilities"]["extensions"];
+    assert!(
+        extensions[crate::mcp::MCP_UI_EXTENSION].is_object(),
+        "request: {request}"
+    );
 }
 
 #[tokio::test]
 async fn disabled_profile_does_not_advertise_apps_for_negotiated_versions() {
     let profile = crate::mcp::apps::McpCapabilityProfile::disabled();
-    for protocol_version in [None, Some(&McpProtocolVersion::V2026_07_28)] {
-        let request = observe_first_request(protocol_version, &profile).await;
-        let extensions =
-            &request["params"]["_meta"]["io.modelcontextprotocol/clientCapabilities"]["extensions"];
-        assert!(
-            extensions[crate::mcp::MCP_UI_EXTENSION].is_null(),
-            "request: {request}"
-        );
-    }
+    let request = observe_first_request(&profile).await;
+    let extensions =
+        &request["params"]["_meta"]["io.modelcontextprotocol/clientCapabilities"]["extensions"];
+    assert!(
+        extensions[crate::mcp::MCP_UI_EXTENSION].is_null(),
+        "request: {request}"
+    );
 }

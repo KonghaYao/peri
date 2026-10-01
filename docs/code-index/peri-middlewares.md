@@ -34,7 +34,7 @@ snapshot；`initialize.rs` 的普通/bare 路径消费冻结输入，middleware 
 
 | 我想做什么 | 主文件 | 入口/关键函数 | 关键逻辑 |
 | --- | --- | --- | --- |
-| 改 MCP 版本协商 | `src/mcp/client/transport.rs` | `serve_client_auto` | 缺省直接使用 rmcp Auto；显式版本使用 Discover；探测、回退和版本选择均由 SDK 负责。initialize/reconnect/Dynamic 共用入口，保留外层总超时；wire 回归见 `transport_test.rs` |
+| 改 MCP 版本协商 | `src/mcp/client/transport.rs` | `serve_client_auto` | 统一使用 rmcp Auto；先探测 `server/discover`，不支持时回退 legacy initialize，版本选择由 SDK 负责。用户配置不再声明 `protocolVersion`；initialize/reconnect/Dynamic 共用入口，保留外层总超时；wire 回归见 `transport_test.rs` |
 | 改 MCP 子进程与协议关闭重试 | `src/mcp/client/{process,service,lifecycle}.rs` + `src/mcp/dynamic/staged_connection.rs` | `McpProcessOwner`、`McpServiceOwner`、`McpServiceWrapper::close_with_timeout` | pool保留stdio child/ProcessTree/stderr及staged协议owner；超时/取消不丢唯一join，重试等待同一次关闭；static与Dynamic共用；真实回归在`client/{process,service}_test.rs` |
 | 改插件 hooks 文件加载 | `src/hooks/loader.rs` + `src/plugin/loader.rs` | `extract_hooks`、`load_enabled_plugins_aggregated` | `hooks/hooks.json` 兼容 `{"hooks": {...}}` 包装与直接事件映射；有效文件优先于 manifest（包括空映射），读取/解析失败告警后沿用 manifest 回退；告警不输出配置内容。格式回归在 `hooks/loader_test.rs`，四个生命周期 hook 聚合回归在 `plugin/loader_test.rs` |
 | 改 hooks 执行 owner 与关闭排空 | `src/hooks/{executor,dispatcher,stage_firing}.rs` + `src/assembly/hooks.rs` | `execute_command_hook_owned`、`fire_standalone_lifecycle_hooks_owned`、`spawn_async_hook`、`with_task_manager` | cwd来自session；async经spawn_owned+execution_cancel_token；command进程树清理保留外部token；SessionEnd内联等待；真实回归在`hooks/lifecycle_test.rs` |

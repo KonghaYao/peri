@@ -502,7 +502,6 @@ pub(crate) fn cache_origin(server_name: &str, config: Option<&McpServerConfig>) 
                 config.command.as_deref(),
                 config.args.as_deref(),
                 env,
-                config.protocol_version,
             ))
             .unwrap_or_default()
         }

@@ -344,7 +344,19 @@ impl McpClientPool {
             .builtin_instance_context()
             .map(|context| context.closed.clone())
             .unwrap_or_default();
-        !super::builtin::is_closed(server, &closed)
+        let source = self
+            .configs
+            .read()
+            .get(server)
+            .and_then(|config| config.source.clone());
+        !super::builtin::is_closed_source(server, source.as_ref(), &closed)
+    }
+
+    fn workspace_source_closed(&self, closed: &std::collections::BTreeSet<String>) -> bool {
+        let source = self
+            .get_client("workspace")
+            .and_then(|handle| handle.source.clone());
+        super::builtin::is_closed_source("workspace", source.as_ref(), closed)
     }
 
     /// builtin 实例的**唯一** spawn 点（IF-P3-04 / A32）：实例解析 → 上下文 → 链路
@@ -409,7 +421,7 @@ impl McpClientPool {
             .builtin_instance_context()
             .map(|context| context.closed.clone())
             .unwrap_or_default();
-        if super::builtin::is_closed("workspace", &closed) {
+        if self.workspace_source_closed(&closed) {
             tracing::warn!("meta_harness: builtin workspace is closed; keeping builtin sections");
             return Ok(HashMap::new());
         }
@@ -417,7 +429,7 @@ impl McpClientPool {
             return Ok(HashMap::new());
         };
         if !matches!(handle.status, ClientStatus::Connected)
-            || !matches!(handle.source.as_ref(), Some(crate::mcp::config::ConfigSource::Builtin { instance }) if instance == "workspace")
+            || !super::builtin::is_workspace_source(handle.source.as_ref())
         {
             return Ok(HashMap::new());
         }
@@ -480,7 +492,7 @@ impl McpClientPool {
             .builtin_instance_context()
             .map(|context| context.closed.clone())
             .unwrap_or_default();
-        if super::builtin::is_closed("workspace", &closed) {
+        if self.workspace_source_closed(&closed) {
             tracing::debug!(
                 "instructions: builtin workspace is closed; instruction face stays unavailable"
             );
@@ -490,7 +502,7 @@ impl McpClientPool {
             return Ok((None, None));
         };
         if !matches!(handle.status, ClientStatus::Connected)
-            || !matches!(handle.source.as_ref(), Some(crate::mcp::config::ConfigSource::Builtin { instance }) if instance == "workspace")
+            || !super::builtin::is_workspace_source(handle.source.as_ref())
         {
             return Ok((None, None));
         }
@@ -560,7 +572,7 @@ impl McpClientPool {
             .builtin_instance_context()
             .map(|context| context.closed.clone())
             .unwrap_or_default();
-        if super::builtin::is_closed("workspace", &closed) {
+        if self.workspace_source_closed(&closed) {
             tracing::debug!("skills: builtin workspace is closed; skill face stays unavailable");
             return Ok(Vec::new());
         }
@@ -568,7 +580,7 @@ impl McpClientPool {
             return Ok(Vec::new());
         };
         if !matches!(handle.status, ClientStatus::Connected)
-            || !matches!(handle.source.as_ref(), Some(crate::mcp::config::ConfigSource::Builtin { instance }) if instance == "workspace")
+            || !super::builtin::is_workspace_source(handle.source.as_ref())
         {
             return Ok(Vec::new());
         }

@@ -195,6 +195,14 @@ impl McpToolBridge {
         self
     }
 
+    /// The explicitly selected HTTP Workspace publishes its complete model tool
+    /// surface through the live tools/list response.
+    pub(crate) fn with_workspace_direct(mut self) -> Self {
+        self = self.with_system_direct();
+        self.model_visible = true;
+        self
+    }
+
     /// MCP 声明的原始工具名（未净化、未加 server 前缀）。
     ///
     /// effective name 的净化不可逆（分隔符与 `__` 都可能出现在分量内），
@@ -481,6 +489,13 @@ fn build_bridges(
                 .with_binding_leases(Arc::clone(&pool.app_binding_leases))
                 .with_output_store(pool, session_id);
             if apply_declared_direct
+                && matches!(
+                    &client.source,
+                    Some(super::config::ConfigSource::WorkspaceRemote)
+                )
+            {
+                bridge = bridge.with_workspace_direct();
+            } else if apply_declared_direct
                 && matches!(&client.source, Some(super::config::ConfigSource::Builtin { instance }) if instance == &client.name)
                 && super::builtin::is_declared_direct(&client.name, tool.name.as_ref())
             {
@@ -626,5 +641,30 @@ mod direct_flag_tests {
         // 既有 generation / binding leases 传递行为不得因提取 typed builder 而丢失
         assert_eq!(typed[0].server_generation, pool.handle_generation(&handle));
         assert!(typed[0].binding_leases.is_some());
+    }
+
+    #[test]
+    fn remote_workspace_direct_tools_follow_live_list_without_registry_names() {
+        let pool = Arc::new(McpClientPool::new_pending());
+        let mut handle = make_handle(
+            "workspace",
+            vec![make_tool("NewRemoteTool")],
+            ClientStatus::Connected,
+        );
+        Arc::get_mut(&mut handle).unwrap().source =
+            Some(super::super::config::ConfigSource::WorkspaceRemote);
+        pool.clients.write().insert("workspace".into(), handle);
+        let typed = build_typed_tool_bridges(&pool);
+        assert_eq!(typed.len(), 1);
+        assert_eq!(typed[0].name(), "NewRemoteTool");
+        assert!(typed[0].is_direct());
+        assert_eq!(typed[0].builtin_mcp_instance(), None);
+
+        let empty = Arc::new(McpClientPool::new_pending());
+        let mut handle = make_handle("workspace", vec![], ClientStatus::Connected);
+        Arc::get_mut(&mut handle).unwrap().source =
+            Some(super::super::config::ConfigSource::WorkspaceRemote);
+        empty.clients.write().insert("workspace".into(), handle);
+        assert!(build_typed_tool_bridges(&empty).is_empty());
     }
 }

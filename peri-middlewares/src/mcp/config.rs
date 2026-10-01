@@ -64,6 +64,8 @@ pub enum McpConfigError {
     /// 错误文本只含实例名，不含路径 / env / 凭据。
     #[error("builtin 保留实例名不得被 command/url 接管: {name}")]
     ReservedBuiltinInstanceName { name: String },
+    #[error("remote workspace requires host or global configuration: {name}")]
+    UntrustedWorkspaceSource { name: String },
     /// builtin 实例的关闭片段非法（A18）：唯一合法写法是只写 `disabled: true`。
     ///
     /// `disabled` 与 `system_mcp` 同时声明在今天会走到 readiness 的
@@ -100,6 +102,9 @@ fn builtin_overlay_error(error: super::builtin::BuiltinOverlayError) -> McpConfi
         }
         super::builtin::BuiltinOverlayError::DisabledWithSystemMcp { name } => {
             McpConfigError::BuiltinClosureFragmentInvalid { name }
+        }
+        super::builtin::BuiltinOverlayError::UntrustedWorkspaceSource { name } => {
+            McpConfigError::UntrustedWorkspaceSource { name }
         }
     }
 }
@@ -258,7 +263,6 @@ pub(crate) fn expand_server_config_with_context(
             scopes: o.scopes.clone(),
         }),
         disabled: config.disabled,
-        protocol_version: config.protocol_version,
         source: config.source.clone(),
         subscriptions: config.subscriptions.clone(),
         // System key 原样复制：工具名数组是字面量，不得走 `expand`（否则 `${VAR}`
@@ -746,7 +750,6 @@ fn test_config() -> McpServerConfig {
         headers: None,
         oauth: None,
         disabled: None,
-        protocol_version: None,
         subscriptions: None,
         system_mcp: None,
         system_mcp_tools: None,

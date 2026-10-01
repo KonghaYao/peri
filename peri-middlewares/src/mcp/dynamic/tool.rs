@@ -138,7 +138,6 @@ impl BaseTool for DynamicMcpTool {
         });
         let common_config = json!({
             "timeoutMs": {"type": "integer", "minimum": 1},
-            "protocolVersion": {"type": "string", "enum": ["2026-07-28"]},
             "subscriptions": subscriptions
         });
         let mut stdio_properties = common_config.as_object().unwrap().clone();

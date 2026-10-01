@@ -402,7 +402,6 @@ async fn dynamic_oauth_without_injection_fails_before_flow_admission() {
                 headers: Default::default(),
             },
             timeout_ms: 1_000,
-            protocol_version: None,
             subscriptions: None,
         };
         let result = prepare_single_server(
@@ -638,7 +637,6 @@ async fn dynamic_process_uses_session_cwd_and_close_drains_its_descendant() {
                 cwd: None,
             },
             timeout_ms: 5_000,
-            protocol_version: None,
             subscriptions: None,
         };
         let staged = prepare_single_server(

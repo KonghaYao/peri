@@ -72,15 +72,11 @@ async fn delayed_service() -> (
         release: release.clone(),
     };
     let profile = crate::mcp::apps::McpCapabilityProfile::default();
-    let service = super::super::transport::serve_client_auto(
-        transport,
-        None,
-        &profile,
-        Duration::from_secs(5),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    let service =
+        super::super::transport::serve_client_auto(transport, &profile, Duration::from_secs(5))
+            .await
+            .unwrap()
+            .unwrap();
     (service, release, server)
 }
 

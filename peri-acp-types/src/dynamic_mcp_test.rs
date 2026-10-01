@@ -169,7 +169,6 @@ fn safe_summary_handles_malformed_canonical_url_without_echoing_it() {
             headers: BTreeMap::new(),
         },
         timeout_ms: 1_000,
-        protocol_version: None,
         subscriptions: None,
     };
 

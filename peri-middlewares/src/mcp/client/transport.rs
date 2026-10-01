@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 
-use peri_acp_types::plugin::McpProtocolVersion;
 use rmcp::{
     model::ProtocolVersion,
     service::{ClientInitializeError, ClientLifecycleMode, RoleClient},
@@ -11,12 +10,11 @@ use super::McpServiceWrapper;
 
 /// 使用官方 lifecycle 协商并限制总连接时间（initialize / reconnect 共用）。
 ///
-/// 缺省使用 Auto；显式版本使用 Discover，不回退 legacy。
+/// 所有连接使用 Auto：先尝试 `server/discover`，不支持时回退 legacy initialize。
 // ClientInitializeError 来自 rmcp crate，无法修改其定义
 #[allow(clippy::result_large_err)]
 pub(crate) async fn serve_client_auto<T, E, A>(
     transport: T,
-    protocol_version: Option<&McpProtocolVersion>,
     capability_profile: &crate::mcp::apps::McpCapabilityProfile,
     timeout: std::time::Duration,
 ) -> Result<Result<McpServiceWrapper, ClientInitializeError>, tokio::time::error::Elapsed>
@@ -25,14 +23,9 @@ where
     E: std::error::Error + Send + Sync + 'static,
 {
     let preferred_versions = vec![ProtocolVersion::V_2026_07_28];
-    let lifecycle = match protocol_version {
-        None => ClientLifecycleMode::Auto {
-            preferred_versions,
-            legacy_version: None,
-        },
-        Some(McpProtocolVersion::V2026_07_28) => {
-            ClientLifecycleMode::Discover { preferred_versions }
-        }
+    let lifecycle = ClientLifecycleMode::Auto {
+        preferred_versions,
+        legacy_version: None,
     };
     tokio::time::timeout(timeout, async {
         rmcp::service::serve_client_with_lifecycle(
