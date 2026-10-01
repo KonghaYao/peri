@@ -362,7 +362,7 @@ async fn test_worktree_repository_losing_git_keeps_registration() {
     assert_eq!(separate.relative_cwd, Path::new(""));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_worktree_concurrent_registration_reuses_winner() {
     let repo = repository();
     let directory = tempfile::tempdir().unwrap();
@@ -370,11 +370,18 @@ async fn test_worktree_concurrent_registration_reuses_winner() {
     let (left, right) = tokio::join!(SqliteThreadStore::new(&path), SqliteThreadStore::new(&path));
     let left = left.unwrap();
     let right = right.unwrap();
-    let (left, right) = tokio::join!(
+    let (left_workspace, right_workspace) = tokio::join!(
         left.resolve_workspace(repo.path()),
         right.resolve_workspace(repo.path())
     );
-    assert_eq!(left.unwrap(), right.unwrap());
+    assert_eq!(left_workspace.unwrap(), right_workspace.unwrap());
+    let (projects, workspaces): (i64, i64) =
+        sqlx::query_as("SELECT (SELECT COUNT(*) FROM projects), (SELECT COUNT(*) FROM workspaces)")
+            .fetch_one(&left.database.pool)
+            .await
+            .unwrap();
+    assert_eq!((projects, workspaces), (1, 1));
+    tokio::join!(left.close(), right.close());
 }
 
 #[tokio::test]

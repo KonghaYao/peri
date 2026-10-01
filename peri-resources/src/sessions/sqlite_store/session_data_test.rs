@@ -10,7 +10,9 @@ use peri_acp_types::session_resources::{
     BindingState, ChildSnapshot, ForkSnapshot, FrozenSnapshotBytes, FrozenState, NewSession,
     NewSessionMeta, PersistenceRecovery, RewindBoundary, SessionMetaPatch,
 };
-use peri_acp_types::store::{CompactionChange, PersistedPayload, ThreadStore};
+use peri_acp_types::store::{
+    serialize_persisted_payload, CompactionChange, PersistedPayload, ThreadStore,
+};
 use peri_acp_types::workspace::{RecoveryRequiredDetails, ResolvedWorkspace};
 use sqlx::Connection;
 use std::collections::HashMap;
@@ -68,6 +70,13 @@ fn session(
 fn payloads(count: usize) -> Vec<PersistedPayload> {
     (0..count)
         .map(|index| PersistedPayload::Message(BaseMessage::human(format!("message {index}"))))
+        .collect()
+}
+
+fn payload_bytes(payloads: &[PersistedPayload]) -> Vec<String> {
+    payloads
+        .iter()
+        .map(|payload| serialize_persisted_payload(payload).unwrap())
         .collect()
 }
 // ─── 新建：完整快照一次保存 ────────────────────────────────────────────────────
@@ -191,9 +200,14 @@ async fn test_snapshot_read_returns_canonical_history_and_metadata() {
 }
 
 #[tokio::test]
-async fn test_load_snapshot_reports_missing_rows_and_unregistered_bindings() {
+async fn test_load_snapshot_reports_missing_rows_and_preserves_unregistered_binding_facts() {
     let (store, data, directory) = database().await;
     let error = data.load_snapshot(&"absent".to_owned()).await.unwrap_err();
+    assert!(matches!(
+        error.kind(),
+        peri_acp_types::session_resources::SessionResourceErrorKind::NotFound
+    ));
+    let error = data.load_binding(&"absent".to_owned()).await.unwrap_err();
     assert!(matches!(
         error.kind(),
         peri_acp_types::session_resources::SessionResourceErrorKind::NotFound
@@ -201,11 +215,27 @@ async fn test_load_snapshot_reports_missing_rows_and_unregistered_bindings() {
 
     let workspace = workspace(&store, directory.path()).await;
     let cwd = workspace.cwd.to_string_lossy().into_owned();
-    data.save_new_session(&session("s-orphan", &cwd, &workspace, frozen("orphan")))
+    let id = "s-orphan".to_owned();
+    let input = session(&id, &cwd, &workspace, frozen("orphan"));
+    data.save_new_session(&input).await.unwrap();
+    data.update_meta(
+        &id,
+        &SessionMetaPatch {
+            config: Some(Some(r#"{"model":"orphan"}"#.to_owned())),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let history = payloads(2);
+    data.append_history(&id, &history).await.unwrap();
+    sqlx::query("INSERT INTO execution_runs (thread_id, generation, clean) VALUES (?1, 3, 0)")
+        .bind(&id)
+        .execute(&store.database.pool)
         .await
         .unwrap();
-    // 登记行被移除（曾有写入方在未强制外键时删掉登记）后，绑定不再能于本机验证：
-    // 报告为「本机登记缺失」而不是损坏，也不是 legacy。
+    let before = data.load_snapshot(&id).await.unwrap();
+    let machine = data.machine_id_of(&id).await.unwrap().unwrap();
     let mut connection = sqlx::SqliteConnection::connect_with(
         &sqlx::sqlite::SqliteConnectOptions::new().filename(directory.path().join("threads.db")),
     )
@@ -215,14 +245,86 @@ async fn test_load_snapshot_reports_missing_rows_and_unregistered_bindings() {
         .execute(&mut connection)
         .await
         .unwrap();
-    sqlx::query("DELETE FROM workspaces WHERE id = ?1")
+    let deleted = sqlx::query("DELETE FROM workspaces WHERE id = ?1")
         .bind(workspace.workspace_id.to_string())
         .execute(&mut connection)
         .await
         .unwrap();
+    assert_eq!(deleted.rows_affected(), 1);
     connection.close().await.unwrap();
-    let snapshot = data.load_snapshot(&"s-orphan".to_owned()).await.unwrap();
-    assert_eq!(snapshot.binding, BindingState::ExternalOrUnregistered);
+    let snapshot = data.load_snapshot(&id).await.unwrap();
+    assert_eq!(snapshot.binding, BindingState::Bound(input.binding.clone()));
+    assert_eq!(data.load_binding(&id).await.unwrap(), snapshot.binding);
+    assert_eq!(snapshot.frozen, FrozenState::Present(input.frozen));
+    assert_eq!(
+        snapshot.meta.config.as_deref(),
+        Some(r#"{"model":"orphan"}"#)
+    );
+    assert_eq!(
+        serde_json::to_value(&snapshot.meta).unwrap(),
+        serde_json::to_value(&before.meta).unwrap()
+    );
+    assert_eq!(payload_bytes(&snapshot.payloads), payload_bytes(&history));
+    assert_eq!(snapshot.flags, before.flags);
+    assert!(snapshot.inherited.payloads.is_empty());
+    assert!(snapshot.inherited.flags.is_empty());
+    assert_eq!(data.machine_id_of(&id).await.unwrap(), Some(machine));
+    assert_eq!(
+        store.database.load_execution_state(&id).await.unwrap(),
+        Some((3, false))
+    );
+}
+
+#[tokio::test]
+async fn test_load_snapshot_rejects_unsupported_and_corrupt_binding_records() {
+    let (store, data, directory) = database().await;
+    let workspace = workspace(&store, directory.path()).await;
+    let cwd = workspace.cwd.to_string_lossy().into_owned();
+    let id = "s-invalid-binding".to_owned();
+    let input = session(&id, &cwd, &workspace, frozen("invalid-binding"));
+    data.save_new_session(&input).await.unwrap();
+    sqlx::query("UPDATE session_bindings SET schema_version = ?1 WHERE thread_id = ?2")
+        .bind(i64::from(input.binding.schema_version) + 1)
+        .bind(&id)
+        .execute(&store.database.pool)
+        .await
+        .unwrap();
+    let snapshot_error = data.load_snapshot(&id).await.unwrap_err();
+    let binding_error = data.load_binding(&id).await.unwrap_err();
+    for error in [snapshot_error, binding_error] {
+        assert!(matches!(
+            error.kind(),
+            peri_acp_types::session_resources::SessionResourceErrorKind::Unsupported
+        ));
+    }
+
+    let mut connection = store.database.pool.acquire().await.unwrap();
+    sqlx::query("PRAGMA foreign_keys = OFF")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE session_bindings SET schema_version = ?1, workspace_id = 'invalid-uuid' WHERE thread_id = ?2",
+    )
+    .bind(i64::from(input.binding.schema_version))
+    .bind(&id)
+    .execute(&mut *connection)
+    .await
+    .unwrap();
+    sqlx::query("PRAGMA foreign_keys = ON")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    drop(connection);
+    let snapshot_error = data.load_snapshot(&id).await.unwrap_err();
+    let binding_error = data.load_binding(&id).await.unwrap_err();
+    for error in [snapshot_error, binding_error] {
+        assert!(matches!(
+            error.kind(),
+            peri_acp_types::session_resources::SessionResourceErrorKind::Corrupt { detail }
+                if detail == "session binding is not decodable"
+        ));
+    }
 }
 
 // ─── append：碰撞失败、派生事实一并维护 ────────────────────────────────────────
@@ -579,36 +681,79 @@ async fn test_adopt_legacy_session_keeps_the_first_winner_bytes() {
 }
 
 #[tokio::test]
-async fn test_adopt_legacy_session_refuses_to_bypass_dirty_execution() {
+async fn test_adopt_legacy_session_preserves_dirty_execution_and_history() {
     let (store, data, directory) = database().await;
     let workspace = workspace(&store, directory.path()).await;
     let cwd = workspace.cwd.to_string_lossy().into_owned();
-    let id = store
-        .create_thread(ThreadMeta::new(cwd.as_str()))
-        .await
-        .unwrap();
+    let mut meta = ThreadMeta::new(cwd.as_str());
+    meta.config = Some(r#"{"model":"legacy"}"#.to_owned());
+    let id = store.create_thread(meta).await.unwrap();
+    let history = payloads(2);
+    data.append_history(&id, &history).await.unwrap();
     sqlx::query("INSERT INTO execution_runs (thread_id, generation, clean) VALUES (?1, 1, 0)")
         .bind(&id)
         .execute(&store.database.pool)
         .await
         .unwrap();
+    let before = data.load_snapshot(&id).await.unwrap();
+    assert_eq!(before.binding, BindingState::Missing);
+    assert_eq!(before.frozen, FrozenState::LegacyAbsent);
+    assert_eq!(before.meta.message_count, 2);
+    assert_eq!(before.meta.config.as_deref(), Some(r#"{"model":"legacy"}"#));
+    let machine = data.machine_id_of(&id).await.unwrap().unwrap();
 
     let error = data
-        .adopt_legacy_session(&id, &cwd, &workspace, &frozen("legacy"))
+        .adopt_legacy_session(&id, "/elsewhere", &workspace, &frozen("legacy"))
         .await
         .unwrap_err();
     assert!(
         matches!(
             error.kind(),
             peri_acp_types::session_resources::SessionResourceErrorKind::Workspace(
-                peri_acp_types::workspace::WorkspaceError::InvalidBinding
+                peri_acp_types::workspace::WorkspaceError::ExecutionBindingMismatch
             )
         ),
         "{error}"
     );
+    let rejected = data.load_snapshot(&id).await.unwrap();
+    assert_eq!(rejected.binding, BindingState::Missing);
+    assert_eq!(rejected.frozen, FrozenState::LegacyAbsent);
+    assert_eq!(
+        serde_json::to_value(&rejected.meta).unwrap(),
+        serde_json::to_value(&before.meta).unwrap()
+    );
+    assert_eq!(payload_bytes(&rejected.payloads), payload_bytes(&history));
+    assert_eq!(
+        store.database.load_execution_state(&id).await.unwrap(),
+        Some((1, false))
+    );
+
+    data.adopt_legacy_session(&id, &cwd, &workspace, &frozen("legacy"))
+        .await
+        .unwrap();
+    data.adopt_legacy_session(&id, &cwd, &workspace, &frozen("candidate"))
+        .await
+        .unwrap();
     let snapshot = data.load_snapshot(&id).await.unwrap();
-    assert_eq!(snapshot.binding, BindingState::Missing);
-    assert_eq!(snapshot.frozen, FrozenState::LegacyAbsent);
+    assert_eq!(
+        snapshot.binding,
+        BindingState::Bound(binding_of(&workspace))
+    );
+    assert_eq!(data.load_binding(&id).await.unwrap(), snapshot.binding);
+    assert_eq!(snapshot.frozen, FrozenState::Present(frozen("legacy")));
+    assert_eq!(
+        serde_json::to_value(&snapshot.meta).unwrap(),
+        serde_json::to_value(&before.meta).unwrap()
+    );
+    assert_eq!(payload_bytes(&snapshot.payloads), payload_bytes(&history));
+    assert_eq!(snapshot.flags, before.flags);
+    assert!(snapshot.inherited.payloads.is_empty());
+    assert!(snapshot.inherited.flags.is_empty());
+    assert_eq!(data.machine_id_of(&id).await.unwrap(), Some(machine));
+    assert_eq!(
+        store.database.load_execution_state(&id).await.unwrap(),
+        Some((1, false))
+    );
 }
 
 // ─── 投影、compaction、rewind ─────────────────────────────────────────────────

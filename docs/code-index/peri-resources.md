@@ -15,6 +15,7 @@
 
 | 任务 | 入口 | 契约与验证 |
 | --- | --- | --- |
+| 本机并发开库与初始化锁 | `src/sessions/sqlite_store/connection.rs` + `sqlite_store/connection_open_test.rs` | `schema_lock_path` / `lock_schema_open`、`SCHEMA_OPEN_LOCK_TIMEOUT`；canonical 数据库路径级 `.schema-lock` 覆盖版本预检、连接池 WAL 初始化与 schema inspect/migrate，有限等待，异常/取消释放，不删除锁文件；只读入口不创建锁，不提供跨实例会话执行互斥；回归含并发冷开库、单次迁移、取消/进程退出、别名与关闭收尾 |
 | schema 11 清理与远端升级 | `src/sessions/schema_cleanup.rs` + `sqlite_store/schema_cleanup.rs` + `remote/schema_upgrade.rs` | `removal_plan`、`RemoteStore::apply_schema_upgrade`；本机在升级事务内校验并删除，远端先一致读取形状、再在托管批中守卫完整 schema 快照与旧版本，删除和版本推进同提交；仅已识别的 v2/schema 10 写打开升级，只读不写，响应丢失/不完整按未决失败；新形状保留 `config`，不再有缓存字段/接口；同名异形目标或外部依赖拒绝，身份/账本/消息 rowid 不变；实库远端发布验收见 active issue |
 
 ### OAuth 凭证路由（实现完成）

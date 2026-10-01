@@ -349,7 +349,10 @@ v10 撤销本机远程痕迹，v11 移除旧会话缓存与历史目标表；支
 缺失列、增加 Project / Workspace / SessionBinding / execution_runs 表及索引。
 新建与旧库补列共享同一组列定义；已存在的 schema 2 在事务中删除无状态用途的
 binding `revision` 列，保留其余绑定与执行状态，最后提交版本号。并发开库由
-schema OS 锁序列化；升级失败回滚整次 DDL。
+canonical 数据库路径对应的 `.schema-lock` OS 锁序列化；锁覆盖版本预检、连接池 WAL
+初始化及 schema inspect/migrate，等待预算由 `SCHEMA_OPEN_LOCK_TIMEOUT` 定义。
+只读打开不创建该锁；异常或取消释放持有句柄，不删除锁文件以免产生不同锁 inode。
+该锁仅协调数据库初始化，不提供跨实例会话执行互斥；升级失败回滚整次 DDL。
 
 远端版本记录在 `peri_store_meta.schema_version`，与本机共用版本常量。仅已识别的
 `peri.session.store/v2` / schema 10 写打开执行一次性升级到 11；只读打开接受其

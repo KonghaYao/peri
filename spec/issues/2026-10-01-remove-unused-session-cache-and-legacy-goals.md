@@ -1,6 +1,6 @@
 # 下一版本：移除闲置会话缓存与遗留目标表，保留配置快照
 
-状态：2026-10-01 用户授权实施后，schema 11 代码与隔离自动化验证已落地；真实远端升级及发布验收仍待完成，不关闭 issue。
+状态：2026-10-01 用户授权实施后，schema 11 已提交 `ac8430e6`；随后七项既有失败已修复并通过资源库全量回归，修复留在工作区待用户审阅、未再提交。真实远端升级及发布验收仍待完成，不关闭 issue。
 
 跟踪位置：仓库本地 `spec/issues/`。发布目标为下一版本，不固定应用版本号。
 
@@ -90,7 +90,7 @@
 
 ## Blocked by
 
-代码已进入 schema 11。发布仍须在隔离的真实远端服务验证 DDL/托管事务能力、失败边界及完整恢复，兑现一致性备份与旧 writer 停止策略。完整回归还有已在未修改基线复现的恢复断言和并发新库锁失败，不能宣称全仓绿灯；本次不改动这些独立行为。环境归属及 OAuth 凭证接线的已批准范围保持不变。
+代码已进入 schema 11。发布仍须在隔离的真实远端服务验证 DDL/托管事务能力、失败边界及完整恢复，兑现一致性备份与旧 writer 停止策略。七项在未修改基线复现的失败已按用户追加授权处理，结果见文末；资源库通过不等同于真实远端或全仓测试全部验收。环境归属及 OAuth 凭证接线的已批准范围保持不变。
 
 ## Luna 对抗审查
 
@@ -129,17 +129,28 @@ Luna 同时确认现稿已覆盖非 NULL 配置保留、只读 probe、投影/�
 | `cargo clippy -p peri-resources -p peri-acp-types --all-targets -- -D warnings` | 通过 |
 | `cargo test -p peri-resources -p peri-acp-types -p peri-agent --doc` | 11 通过、2 个既有示例忽略 |
 
-资源库完整串行回归为 369 通过 / 7 失败 / 21 忽略。七项失败全部在独立 detached HEAD 基线 `fd6464da` 复现；未修复无关行为：
+schema 11 初次实施时资源库完整串行回归为 369 通过 / 7 失败 / 21 忽略。七项失败全部在独立 detached HEAD 基线 `fd6464da` 复现；初次提交未改这些独立行为：
 
 - 三项 `legacy_tests`：并发 adoption、cwd/child/native binding 拒绝、child execution owner。
 - `test_single_database_upgrade_preserves_history_and_binds_only_new_sessions`。
 - `test_adopt_legacy_session_refuses_to_bypass_dirty_execution` 与 `test_load_snapshot_reports_missing_rows_and_unregistered_bindings`。
 - `test_worktree_concurrent_registration_reuses_winner`：并发新库连接遇到 SQLite code 5；旧基线重复运行亦出现相同锁失败。
 
-在最终代码上显式跳过上述七项既有失败后，其余资源库串行回归为 369 通过 / 0 失败 / 21 忽略 / 7 过滤；这不是全量绿灯。修改的 Rust 文件格式与 1000 行上限检查、Markdown 本地链接、`git diff --check` 均通过。临时 baseline 工作树已移除，未创建分支或提交。
+初次实施代码显式跳过上述七项既有失败后，其余资源库串行回归为 369 通过 / 0 失败 / 21 忽略 / 7 过滤；这不是全量绿灯。修改的 Rust 文件格式与 1000 行上限检查、Markdown 本地链接、`git diff --check` 均通过。临时 baseline 工作树已移除。用户随后授权的提交为 `ac8430e6`，没有创建分支或混入原有 WIP。
+
+### 追加授权：七项失败修复，待用户审阅
+
+用户要求 subagent 快速修复并保留审阅控制，三个 worker 采用不重叠写范围；修复未提交。
+
+- 六项 legacy / snapshot / migration 失败来自已退役的跨实例独占、dirty / 绑定登记读门槛以及引用不存在父会话的夹具。依据 `ARC-WORKSPACE-001` 修正场景与断言，而非恢复旧限制；加强配置、消息原始字节、绑定、env、frozen 首次提交与真实拒绝边界。新增损坏/未来绑定拒绝及 lost native binding 独立场景，没有删除或 ignore 失败用例。
+- 并发新库失败发生在 WAL 初始化早于 schema 协调。恢复 canonical 数据库路径级初始化 OS 锁，覆盖预检、WAL 与升级；有限等待、阻塞系统调用在 blocking worker 执行，异常/取消释放。不是 session sidecar 锁，不改变多实例执行政策。
+- 新增 12 项开库回归，包括冷启动、单次迁移、取消、持有者进程退出、只读、别名及关闭收尾。定向模块重复 10 轮全部通过（1280 次并发冷开库）；原失败并发用例重复 30 次全通过。
+- 汇总命令 `PERI_MACHINE_ID=00000000-0000-4000-8000-000000000001 cargo test -p peri-resources --lib -- --test-threads=1`：**390 通过 / 0 失败 / 21 忽略 / 0 过滤**。`cargo clippy -p peri-resources --all-targets -- -D warnings` 通过。真实远端测试仍未运行。
+- 汇总后的 `cargo check --workspace --all-targets`、修改文件定向格式/行数检查及 `git diff --check` 通过；`cargo test -p peri-tui --test meta_session_cli -- --test-threads=1` 为 19 通过 / 0 失败。
+- 用户提出通过代码优化移除 `execution_runs`，目前仅讨论、不扩展已批准删除范围。现有 generation/clean 机制的测试通过不证明持久化必要；移除方案需明确创建重试/重复创建和 binding 缺失完整性语义，并保留运行时未知效果闸门、会话事实与远端账本，不把废状态搬到新列/表。
 
 ### 发布前尚需验收
 
 - 真实远端服务的旧 v2/schema 10 升级（尤其 DROP COLUMN 与托管 DDL 的事务/失败能力），不能以 SQLite 测试传输等价物替代。
 - 在发布环境停止旧 writer、完成包含 WAL 的一致性备份并演练从备份回退。不得让新旧二进制同时写升级后的库。
-- 结合当前恢复/执行面独立工作处理上述既有全量回归失败，再确认完整用户恢复路径。用户真实主库未升级，未测量文件缩容，未运行 VACUUM。
+- 七项修复等待用户审阅；跨层及真实远端完整恢复仍按现行 active spec 验收。用户真实主库未升级，未测量文件缩容，未运行 VACUUM。

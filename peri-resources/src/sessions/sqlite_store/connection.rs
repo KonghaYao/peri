@@ -14,6 +14,7 @@ use std::{
 };
 
 const READ_ONLY_BUSY_TIMEOUT: Duration = Duration::from_millis(250);
+const SCHEMA_OPEN_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 pub(super) const REQUIRED_THREAD_COLUMNS: &[&str] = &[
     "id",
     "title",
@@ -120,6 +121,7 @@ impl SqliteSessionDatabase {
                 .await
                 .with_context(|| format!("创建目录失败: {}", parent.display()))?;
         }
+        let _schema_lock = lock_schema_open(&db_path, SCHEMA_OPEN_LOCK_TIMEOUT).await?;
         // 在 WAL/DDL 写入前识别未知 schema；已知旧库交给事务升级。
         if tokio::fs::metadata(&db_path)
             .await
@@ -239,3 +241,61 @@ impl SqliteSessionDatabase {
         super::super::default_database_path().context("无法获取 home 目录")
     }
 }
+
+async fn schema_lock_path(path: &Path) -> Result<PathBuf> {
+    let canonical = if tokio::fs::try_exists(path).await? {
+        tokio::fs::canonicalize(path).await?
+    } else {
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        tokio::fs::canonicalize(parent)
+            .await?
+            .join(path.file_name().context("database filename missing")?)
+    };
+    let mut lock_path = canonical.into_os_string();
+    lock_path.push(".schema-lock");
+    Ok(lock_path.into())
+}
+
+async fn lock_schema_open(path: &Path, budget: Duration) -> Result<std::fs::File> {
+    let lock_path = schema_lock_path(path).await?;
+    let mut file = tokio::task::spawn_blocking(move || {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(lock_path)
+    })
+    .await??;
+    let deadline = tokio::time::Instant::now() + budget;
+    loop {
+        let (attempted_file, result) = tokio::task::spawn_blocking(move || {
+            let result = file.try_lock();
+            (file, result)
+        })
+        .await?;
+        file = attempted_file;
+        match result {
+            Ok(()) => return Ok(file),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                if remaining.is_zero() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "session database initialization is busy",
+                    )
+                    .into());
+                }
+                tokio::time::sleep(remaining.min(Duration::from_millis(10))).await;
+            }
+            Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "connection_open_test.rs"]
+mod open_tests;

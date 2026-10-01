@@ -162,32 +162,50 @@ async fn legacy_database(path: &Path) -> SqliteConnection {
     connection
 }
 
-/// [回归测试] 默认读写必须沿用原数据库，结构升级不能丢失历史或自动推断旧归属。
+/// [回归测试] 默认读写沿用原数据库，升级保留历史、不补造旧绑定，执行代际独立记录。
 #[tokio::test]
 async fn test_single_database_upgrade_preserves_history_and_binds_only_new_sessions() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("threads.db");
-    legacy_database(&path).await.close().await.unwrap();
+    let mut connection = legacy_database(&path).await;
+    sqlx::raw_sql(
+        "ALTER TABLE threads ADD COLUMN config TEXT;
+        UPDATE threads SET config = '{\"model\":\"legacy\"}' WHERE id = 'old-session';",
+    )
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    let history: Vec<(String, String)> = sqlx::query_as(
+        "SELECT message_id, content FROM messages WHERE thread_id = 'old-session' ORDER BY rowid",
+    )
+    .fetch_all(&mut connection)
+    .await
+    .unwrap();
+    connection.close().await.unwrap();
     let store = SqliteThreadStore::new(&path).await.unwrap();
     let old_id = "old-session".to_owned();
     let old = store.load_meta(&old_id).await.unwrap();
     assert_eq!(old.title.as_deref(), Some("旧会话"));
     assert_eq!(old.cwd, "/old/worktree");
     assert_eq!(old.message_count, 1);
+    assert_eq!(old.config.as_deref(), Some(r#"{"model":"legacy"}"#));
     assert_eq!(
         store.load_messages(&old_id).await.unwrap()[0].content(),
         "保留的历史消息"
     );
     assert_eq!(store.load_session_binding(&old_id).await.unwrap(), None);
-    assert!(matches!(
-        store
-            .acquire_execution_lease(&old_id)
-            .await
-            .err()
-            .unwrap()
-            .downcast_ref::<WorkspaceError>(),
-        Some(WorkspaceError::BindingMissing)
-    ));
+    let old_lease = store.acquire_execution_lease(&old_id).await.unwrap();
+    assert_eq!(
+        store.database.load_execution_state(&old_id).await.unwrap(),
+        Some((1, false))
+    );
+    assert_eq!(store.load_session_binding(&old_id).await.unwrap(), None);
+    assert_eq!(store.load_frozen_snapshot(&old_id).await.unwrap(), None);
+    old_lease.mark_clean().await.unwrap();
+    assert_eq!(
+        store.database.load_execution_state(&old_id).await.unwrap(),
+        Some((1, true))
+    );
     let workspace = store.resolve_workspace(dir.path()).await.unwrap();
     let id = store
         .create_bound_thread(ThreadMeta::new(dir.path().to_str().unwrap()), &workspace)
@@ -222,7 +240,32 @@ async fn test_single_database_upgrade_preserves_history_and_binds_only_new_sessi
         reopened.validate_session_binding(&id).await.unwrap(),
         workspace
     );
-    assert_eq!(reopened.load_meta(&old_id).await.unwrap().cwd, old.cwd);
+    assert_eq!(
+        serde_json::to_value(reopened.load_meta(&old_id).await.unwrap()).unwrap(),
+        serde_json::to_value(&old).unwrap()
+    );
+    let persisted_history: Vec<(String, String)> = sqlx::query_as(
+        "SELECT message_id, content FROM messages WHERE thread_id = ?1 ORDER BY rowid",
+    )
+    .bind(&old_id)
+    .fetch_all(&reopened.database.pool)
+    .await
+    .unwrap();
+    assert_eq!(persisted_history, history);
+    assert_eq!(
+        reopened
+            .database
+            .load_execution_state(&old_id)
+            .await
+            .unwrap(),
+        Some((1, true))
+    );
+    assert_eq!(
+        reopened.database.load_execution_state(&id).await.unwrap(),
+        Some((1, true))
+    );
+    assert_eq!(reopened.load_session_binding(&old_id).await.unwrap(), None);
+    assert_eq!(reopened.load_frozen_snapshot(&old_id).await.unwrap(), None);
     let (version,): (i64,) = sqlx::query_as("PRAGMA user_version")
         .fetch_one(&reopened.database.pool)
         .await
@@ -233,6 +276,15 @@ async fn test_single_database_upgrade_preserves_history_and_binds_only_new_sessi
         .await
         .unwrap();
     assert_eq!(reader.load_meta(&old_id).await.unwrap().title, old.title);
+    let error = reader.acquire_execution_lease(&old_id).await.err().unwrap();
+    assert!(matches!(
+        error.downcast_ref::<WorkspaceError>(),
+        Some(WorkspaceError::ExecutionLeaseRequired)
+    ));
+    assert_eq!(
+        reader.database.load_execution_state(&old_id).await.unwrap(),
+        Some((1, true))
+    );
     reader.close().await;
     assert!(!dir.path().join("threads-v2.db").exists());
 }
