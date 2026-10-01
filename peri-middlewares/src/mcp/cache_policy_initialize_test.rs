@@ -127,6 +127,49 @@ async fn bare_configuration_snapshot_ignores_file_cache_restrictions() {
 }
 
 #[tokio::test]
+async fn bare_session_workspace_replaces_builtin_without_loading_other_servers() {
+    let directory = tempfile::tempdir().unwrap();
+    let pool = Arc::new(McpClientPool::new_pending());
+    pool.set_configuration_snapshot(frozen_snapshot(directory.path(), false))
+        .unwrap();
+    let mut workspace: McpServerConfig = serde_json::from_value(serde_json::json!({
+        "url": "https://workspace.example.test/mcp",
+        "disabled": true
+    }))
+    .unwrap();
+    workspace.source = Some(ConfigSource::WorkspaceRemote);
+    let other: McpServerConfig = serde_json::from_value(serde_json::json!({
+        "url": "https://other.example.test/mcp",
+        "disabled": true
+    }))
+    .unwrap();
+    pool.set_session_servers(std::collections::HashMap::from([
+        ("workspace".to_owned(), workspace),
+        ("other".to_owned(), other),
+    ]))
+    .unwrap();
+
+    let (status, received) = tokio::sync::watch::channel(McpInitStatus::Pending);
+    McpClientPool::run_initialize_bare(pool.clone(), directory.path(), status).await;
+
+    assert_eq!(*received.borrow(), McpInitStatus::Ready { total: 0 });
+    let configs = pool.configs.read();
+    assert_eq!(
+        configs
+            .get("workspace")
+            .and_then(|server| server.url.as_deref()),
+        Some("https://workspace.example.test/mcp")
+    );
+    assert_eq!(
+        configs
+            .get("workspace")
+            .and_then(|server| server.source.as_ref()),
+        Some(&ConfigSource::WorkspaceRemote)
+    );
+    assert!(!configs.contains_key("other"));
+}
+
+#[tokio::test]
 async fn bound_configuration_scope_cannot_be_reused_for_another_project() {
     let directory = tempfile::tempdir().unwrap();
     let other = tempfile::tempdir().unwrap();

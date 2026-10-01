@@ -164,13 +164,24 @@ impl McpClientPool {
             Some(snapshot) => super::config::load_bare_config_from_snapshot(snapshot),
             None => super::config::load_bare_config(),
         };
-        let config = match loaded {
+        let mut config = match loaded {
             Ok(config) => config,
             Err(error) => {
                 publish_config_failure(&pool, &status_tx, &error.to_string());
                 return;
             }
         };
+        // Bare keeps only Workspace, but an explicit session Workspace must still
+        // replace the builtin before discovery and readiness are published.
+        if let Some(workspace) = pool
+            .session_servers
+            .get()
+            .and_then(|servers| servers.get("workspace"))
+        {
+            config
+                .mcp_servers
+                .insert("workspace".to_owned(), workspace.clone());
+        }
         Self::initialize_config(pool, cwd, config, Default::default(), status_tx, None).await;
     }
 
