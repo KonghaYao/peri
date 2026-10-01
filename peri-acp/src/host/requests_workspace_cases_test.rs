@@ -1,7 +1,10 @@
 use super::*;
 
+#[path = "requests_workspace_assembly_test.rs"]
+mod assembly_cases;
+
 #[tokio::test]
-async fn worktree_binding_hot_cold_resume_and_owner_are_consistent() {
+async fn worktree_binding_hot_cold_resume_ignore_caller_cwd_and_keep_saved_facts() {
     let tmp = tempfile::TempDir::new().unwrap();
     let repo = tmp.path().join("main");
     let linked = tmp.path().join("linked");
@@ -64,17 +67,18 @@ async fn worktree_binding_hot_cold_resume_and_owner_are_consistent() {
     );
     let frozen = frozen_snapshot_bytes(&cfg, &id).await;
     append_human_message(&cfg, &id, "visible project session").await;
-    for method in ["session/load", "session/resume", "session/fork"] {
-        assert!(handle_request(
+    for method in ["session/load", "session/resume"] {
+        handle_request(
             method,
             &json!({"sessionId": id, "cwd": linked}),
             &cfg,
             &mut sessions,
-            &transport
+            &transport,
         )
         .await
-        .is_err());
+        .unwrap();
         assert_eq!(sessions[&id].cwd, original_cwd.to_str().unwrap());
+        assert_eq!(frozen_snapshot_bytes(&cfg, &id).await, frozen);
     }
     let project = handle_request(
         "peri/session_context",
@@ -99,7 +103,7 @@ async fn worktree_binding_hot_cold_resume_and_owner_are_consistent() {
     assert!(exact["sessions"].as_array().unwrap().is_empty());
     let forked = handle_request(
         "session/fork",
-        &json!({"sessionId": id}),
+        &json!({"sessionId": id, "cwd": linked}),
         &cfg,
         &mut sessions,
         &transport,
@@ -107,6 +111,7 @@ async fn worktree_binding_hot_cold_resume_and_owner_are_consistent() {
     .await
     .unwrap();
     let fork_id = forked["sessionId"].as_str().unwrap().to_owned();
+    assert_eq!(sessions[&fork_id].cwd, original_cwd.to_str().unwrap());
     assert_eq!(
         cfg.session_resources
             .load_session_binding(&fork_id)
@@ -129,8 +134,7 @@ async fn worktree_binding_hot_cold_resume_and_owner_are_consistent() {
     .await
     .unwrap();
     let mut cold = HashMap::new();
-    // 热会话仍持有执行所有权：冷会话按只读准入进入，历史可读但不取得所有权。
-    let read_only_load = handle_request(
+    let loaded = handle_request(
         "session/load",
         &json!({"sessionId": id, "cwd": sub}),
         &second,
@@ -139,11 +143,9 @@ async fn worktree_binding_hot_cold_resume_and_owner_are_consistent() {
     )
     .await
     .unwrap();
-    assert_eq!(
-        read_only_load["_meta"]["peri.sessionWorkspaceV1"]["read_only"]["kind"],
-        "peri.executionBusyV1"
-    );
-    assert!(cold[&id].execution_owner.is_none());
+    assert!(loaded["_meta"]["peri.sessionWorkspaceV1"]["read_only"].is_null());
+    assert!(cold[&id].execution_owner.is_some());
+    assert_eq!(cold[&id].cwd, original_cwd.to_str().unwrap());
     handle_request(
         "session/close",
         &json!({"sessionId": id}),
@@ -183,7 +185,7 @@ async fn worktree_binding_hot_cold_resume_and_owner_are_consistent() {
 }
 
 #[tokio::test]
-async fn worktree_missing_directory_history_is_read_only_and_load_is_rejected() {
+async fn worktree_missing_directory_load_restores_history_read_only() {
     let tmp = tempfile::TempDir::new().unwrap();
     let cwd = tmp.path().join("project");
     std::fs::create_dir(&cwd).unwrap();
@@ -225,15 +227,44 @@ async fn worktree_missing_directory_history_is_read_only_and_load_is_rejected() 
     .unwrap();
     assert_eq!(history["payloads"].as_array().unwrap().len(), 1);
     assert!(sessions.is_empty());
+    for method in ["session/load", "session/resume"] {
+        let response = handle_request(
+            method,
+            &json!({"sessionId": id}),
+            &cfg,
+            &mut sessions,
+            &transport,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            response["_meta"]["peri.sessionWorkspaceV1"]["read_only"]["kind"],
+            "peri.executionLeaseRequiredV1"
+        );
+        let state = &sessions[id];
+        assert_eq!(state.history[0].content(), "saved history");
+        assert!(state.execution_owner.is_none());
+        assert!(state.environment.is_none());
+        assert!(state.frozen.is_none());
+    }
     assert!(handle_request(
-        "session/load",
-        &json!({"sessionId": id}),
+        "session/rename",
+        &json!({"sessionId": id, "title": "unavailable"}),
         &cfg,
         &mut sessions,
         &transport
     )
     .await
     .is_err());
+    handle_request(
+        "session/close",
+        &json!({"sessionId": id}),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
     assert!(sessions.is_empty());
 }
 
@@ -369,118 +400,6 @@ impl peri_acp_types::ports::McpPoolPort for RetryShutdownPool {
     }
 }
 
-/// 测试夹具：把一次未完成排空的装配保留在会话表里，供关闭重试。
-///
-/// 原为生产侧 fork 补偿链的保留入口；该补偿链已随 fork 门面迁移删除，这里按
-/// 同一形态在测试内构造，继续锁定「Closing + 唯一 owner + 资源保留」不变量。
-fn retain_failed_assembly(
-    sessions: &mut HashMap<String, SessionState>,
-    id: &str,
-    cwd: &str,
-    owner: Arc<dyn peri_acp_types::workspace::SessionExecutionLease>,
-    environment: Arc<crate::host::workspace::SessionEnvironment>,
-) {
-    sessions.insert(
-        id.to_owned(),
-        SessionState {
-            session_id: id.to_owned(),
-            thread_id: id.to_owned(),
-            cwd: cwd.to_owned(),
-            execution_owner: Some(owner),
-            environment: Some(environment),
-            closing: true,
-            history: Vec::new(),
-            history_payloads: Vec::new(),
-            cancel_token: None,
-            frozen: None,
-            recall_items: Vec::new(),
-            agent_pool: crate::session::agent_pool::AgentPool::new(),
-            workflow_middleware: None,
-            lsp_pool: None,
-            title: None,
-            tags: Vec::new(),
-            continuation_armed: false,
-            continuation_epoch: 0,
-            continuation_in_flight: false,
-            continuation_mq_steering_pending: false,
-            lease: crate::host::lease::WriterLease::acquired("default"),
-        },
-    );
-}
-
-#[tokio::test]
-async fn worktree_failed_assembly_retains_resources_and_lease_until_cleanup_retry() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let config =
-        make_peri_config_with_provider(make_provider_config("test", "openai", "key", "model"));
-    let provider = LlmProvider::from_config(&config).unwrap();
-    let mut cfg = make_server_config(config, provider, &tmp).await;
-    let cwd = tmp.path().canonicalize().unwrap();
-    cfg.workspace_assembly = Some(crate::host::assemble::WorkspaceAssembly {
-        startup_cwd: cwd.to_str().unwrap().to_owned(),
-        bare: true,
-        drive_cron_tick: false,
-        mcp_profile: peri_middlewares::mcp::apps::McpCapabilityProfile::disabled(),
-    });
-    let id = create_bound_fixture(&cfg, cwd.to_str().unwrap(), None).await;
-    let owner = acquire_bound_owner(&cfg, &id).await;
-    let mut environment =
-        crate::host::workspace::SessionEnvironment::assemble(&cfg, cwd.to_str().unwrap(), &id)
-            .await
-            .unwrap()
-            .unwrap();
-    let pool = Arc::new(RetryShutdownPool {
-        settled: AtomicBool::new(false),
-        called: AtomicBool::new(false),
-    });
-    Arc::get_mut(&mut environment).unwrap().cfg.mcp_pool = Some(pool.clone());
-    assert!(!environment.shutdown().await);
-    let mut sessions = HashMap::new();
-    retain_failed_assembly(
-        &mut sessions,
-        &id,
-        cwd.to_str().unwrap(),
-        owner,
-        environment,
-    );
-    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let competing = SqliteThreadStore::new(tmp.path().join("threads.db"))
-        .await
-        .unwrap();
-    assert!(sessions[&id].closing);
-    assert!(competing.acquire_execution_lease(&id).await.is_err());
-    let close = json!({"sessionId": id});
-    assert!(
-        handle_request("session/close", &close, &cfg, &mut sessions, &transport)
-            .await
-            .is_err()
-    );
-    assert!(sessions.contains_key(&id));
-    assert!(competing.acquire_execution_lease(&id).await.is_err());
-    // A closing owner cannot mutate session configuration or restart execution.
-    assert!(handle_request(
-        "session/set_mode",
-        &json!({"sessionId": id, "modeId": "ask"}),
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await
-    .is_err());
-    pool.settled.store(true, Ordering::Release);
-    handle_request("session/close", &close, &cfg, &mut sessions, &transport)
-        .await
-        .unwrap();
-    assert!(!sessions.contains_key(&id));
-    competing
-        .acquire_execution_lease(&id)
-        .await
-        .unwrap()
-        .mark_clean()
-        .await
-        .unwrap();
-}
-
 #[tokio::test]
 async fn worktree_scheduled_approval_uses_session_permission_and_rejects_closed_owner() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -550,7 +469,6 @@ async fn worktree_scheduled_approval_uses_session_permission_and_rejects_closed_
 #[tokio::test]
 async fn worktree_session_end_retains_owner_and_joins_same_hook_on_retry() {
     use peri_acp_types::hooks::{HookEvent, RegisteredHook};
-    use peri_acp_types::store::ThreadStore;
 
     let tmp = tempfile::TempDir::new().unwrap();
     let target = tmp.path().join("target");
@@ -594,6 +512,7 @@ async fn worktree_session_end_retains_owner_and_joins_same_hook_on_retry() {
         plugin_data_dir: target.clone(),
         plugin_options: HashMap::new(),
     }]];
+    let retained_owner = sessions[id].execution_owner.as_ref().unwrap().clone();
     let close = json!({"sessionId": id});
     let error = handle_request("session/close", &close, &cfg, &mut sessions, &transport)
         .await
@@ -609,13 +528,11 @@ async fn worktree_session_end_retains_owner_and_joins_same_hook_on_retry() {
             .trim(),
         target.to_str().unwrap()
     );
-    let competing = SqliteThreadStore::new(tmp.path().join("threads.db"))
-        .await
-        .unwrap();
-    assert!(competing
-        .acquire_execution_lease(&id.to_owned())
-        .await
-        .is_err());
+    assert!(Arc::ptr_eq(
+        sessions[id].execution_owner.as_ref().unwrap(),
+        &retained_owner,
+    ));
+    append_human_message(&cfg, id, "waiting for session end").await;
     std::fs::write(target.join("release"), "ready").unwrap();
     handle_request("session/close", &close, &cfg, &mut sessions, &transport)
         .await
@@ -625,105 +542,111 @@ async fn worktree_session_end_retains_owner_and_joins_same_hook_on_retry() {
         std::fs::read_to_string(target.join("ended.count")).unwrap(),
         "end\n"
     );
-    competing
-        .acquire_execution_lease(&id.to_owned())
+    assert!(cfg
+        .session_resources
+        .append_history(&id.to_owned(), &[])
         .await
-        .unwrap()
-        .mark_clean()
-        .await
-        .unwrap();
+        .is_err());
 }
 
 #[tokio::test]
-async fn worktree_invalid_session_end_binding_skips_hook_but_drains_existing_resources() {
+async fn worktree_session_end_uses_saved_directory_and_drains_resources() {
     use peri_acp_types::hooks::{HookEvent, RegisteredHook};
     use peri_acp_types::store::ThreadStore;
 
-    let tmp = tempfile::TempDir::new().unwrap();
-    let target = tmp.path().join("target");
-    std::fs::create_dir(&target).unwrap();
-    let target = target.canonicalize().unwrap();
-    let config =
-        make_peri_config_with_provider(make_provider_config("test", "openai", "key", "model"));
-    let provider = LlmProvider::from_config(&config).unwrap();
-    let mut cfg = make_server_config(config, provider, &tmp).await;
-    cfg.workspace_assembly = Some(crate::host::assemble::WorkspaceAssembly {
-        startup_cwd: target.to_str().unwrap().to_owned(),
-        bare: true,
-        drive_cron_tick: false,
-        mcp_profile: peri_middlewares::mcp::apps::McpCapabilityProfile::disabled(),
-    });
-    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let mut sessions = HashMap::new();
-    let created = handle_request(
-        "session/new",
-        &json!({"cwd": target}),
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await
-    .unwrap();
-    let id = created["sessionId"].as_str().unwrap();
-    let environment =
-        Arc::get_mut(sessions.get_mut(id).unwrap().environment.as_mut().unwrap()).unwrap();
-    environment.cfg.hook_groups = vec![vec![RegisteredHook {
-        hook: serde_json::from_value(
-            json!({"type":"command", "command":"echo unexpected > ended"}),
+    for directory_replaced in [false, true] {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let target = tmp.path().join("target");
+        std::fs::create_dir(&target).unwrap();
+        let target = target.canonicalize().unwrap();
+        let config =
+            make_peri_config_with_provider(make_provider_config("test", "openai", "key", "model"));
+        let provider = LlmProvider::from_config(&config).unwrap();
+        let mut cfg = make_server_config(config, provider, &tmp).await;
+        cfg.workspace_assembly = Some(crate::host::assemble::WorkspaceAssembly {
+            startup_cwd: target.to_str().unwrap().to_owned(),
+            bare: true,
+            drive_cron_tick: false,
+            mcp_profile: peri_middlewares::mcp::apps::McpCapabilityProfile::disabled(),
+        });
+        let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
+        let mut sessions = HashMap::new();
+        let created = handle_request(
+            "session/new",
+            &json!({"cwd": target}),
+            &cfg,
+            &mut sessions,
+            &transport,
         )
-        .unwrap(),
-        event: HookEvent::SessionEnd,
-        matcher: None,
-        plugin_name: "test".into(),
-        plugin_id: "test".into(),
-        plugin_root: target.clone(),
-        plugin_data_dir: target.clone(),
-        plugin_options: HashMap::new(),
-    }]];
-    let pool = Arc::new(RetryShutdownPool {
-        settled: AtomicBool::new(false),
-        called: AtomicBool::new(false),
-    });
-    environment.cfg.mcp_pool = Some(pool.clone());
-    let moved = tmp.path().join("moved");
-    std::fs::rename(&target, &moved).unwrap();
-    std::fs::create_dir(&target).unwrap();
-    let close = json!({"sessionId": id});
-    assert!(
+        .await
+        .unwrap();
+        let id = created["sessionId"].as_str().unwrap();
+        let environment =
+            Arc::get_mut(sessions.get_mut(id).unwrap().environment.as_mut().unwrap()).unwrap();
+        environment.cfg.hook_groups = vec![vec![RegisteredHook {
+            hook: serde_json::from_value(
+                json!({"type":"command", "command":"echo unexpected > ended"}),
+            )
+            .unwrap(),
+            event: HookEvent::SessionEnd,
+            matcher: None,
+            plugin_name: "test".into(),
+            plugin_id: "test".into(),
+            plugin_root: target.clone(),
+            plugin_data_dir: target.clone(),
+            plugin_options: HashMap::new(),
+        }]];
+        let pool = Arc::new(RetryShutdownPool {
+            settled: AtomicBool::new(false),
+            called: AtomicBool::new(false),
+        });
+        environment.cfg.mcp_pool = Some(pool.clone());
+        let moved = tmp.path().join("moved");
+        std::fs::rename(&target, &moved).unwrap();
+        if directory_replaced {
+            std::fs::create_dir(&target).unwrap();
+        }
+        let close = json!({"sessionId": id});
+        assert!(
+            handle_request("session/close", &close, &cfg, &mut sessions, &transport)
+                .await
+                .is_err()
+        );
+        assert!(
+            pool.called.load(Ordering::Acquire),
+            "invalid hook binding must not prevent MCP shutdown"
+        );
+        assert!(!moved.join("ended").exists());
+        assert_eq!(target.join("ended").exists(), directory_replaced);
+        assert!(
+            sessions.contains_key(id),
+            "actual incomplete resource drain must retain the owner"
+        );
+        pool.settled.store(true, Ordering::Release);
         handle_request("session/close", &close, &cfg, &mut sessions, &transport)
             .await
-            .is_err()
-    );
-    assert!(
-        pool.called.load(Ordering::Acquire),
-        "invalid hook binding must not prevent MCP shutdown"
-    );
-    assert!(!target.join("ended").exists());
-    assert!(
-        sessions.contains_key(id),
-        "actual incomplete resource drain must retain the owner"
-    );
-    pool.settled.store(true, Ordering::Release);
-    handle_request("session/close", &close, &cfg, &mut sessions, &transport)
-        .await
-        .unwrap();
-    assert!(!sessions.contains_key(id));
-    assert!(
-        !target.join("ended").exists(),
-        "terminal hook must never run in a replacement directory"
-    );
-    std::fs::remove_dir(&target).unwrap();
-    std::fs::rename(&moved, &target).unwrap();
-    let competing = SqliteThreadStore::new(tmp.path().join("threads.db"))
-        .await
-        .unwrap();
-    competing
-        .acquire_execution_lease(&id.to_owned())
-        .await
-        .unwrap()
-        .mark_clean()
-        .await
-        .unwrap();
+            .unwrap();
+        assert!(!sessions.contains_key(id));
+        assert!(
+            !moved.join("ended").exists(),
+            "terminal hook must not run while the saved directory is missing"
+        );
+        assert_eq!(target.join("ended").exists(), directory_replaced);
+        if directory_replaced {
+            std::fs::remove_dir_all(&target).unwrap();
+        }
+        std::fs::rename(&moved, &target).unwrap();
+        let competing = SqliteThreadStore::new(tmp.path().join("threads.db"))
+            .await
+            .unwrap();
+        competing
+            .acquire_execution_lease(&id.to_owned())
+            .await
+            .unwrap()
+            .mark_clean()
+            .await
+            .unwrap();
+    }
 }
 
 /// frozen 同源（ARC-FROZEN-001 / J2 §6）：冷 load 的会话环境关闭集来自**持久 blob**
