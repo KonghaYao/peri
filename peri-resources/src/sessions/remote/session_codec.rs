@@ -113,7 +113,6 @@ pub(super) fn decode_meta(values: &[Value]) -> SessionResourceResult<ThreadMeta>
             .map_err(|_| corrupt("cancel_policy is not a known value"))?,
         config: optional_text_field(values, META_CONFIG),
         // 远端不保存物化缓存：这里没有第二份真相可返回。
-        cached_context: None,
         agent_status: AgentStatus::from_str(&agent_status)
             .map_err(|_| corrupt("agent_status is not a known value"))?,
     })

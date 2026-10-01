@@ -172,9 +172,6 @@ pub struct ThreadMeta {
     /// JSON 完整配置快照
     #[serde(default)]
     pub config: Option<String>,
-    /// 物化缓存
-    #[serde(default)]
-    pub cached_context: Option<String>,
     /// agent 运行状态（强类型，旧 JSON 缺失时默认 Active）
     #[serde(default)]
     pub agent_status: AgentStatus,
@@ -196,7 +193,6 @@ impl ThreadMeta {
             hidden: false,
             cancel_policy: CancelPolicy::default(),
             config: None,
-            cached_context: None,
             agent_status: AgentStatus::default(),
         }
     }
@@ -221,7 +217,6 @@ impl ThreadMeta {
             hidden: false,
             cancel_policy: CancelPolicy::default(),
             config: None,
-            cached_context: None,
             agent_status: AgentStatus::default(),
         }
     }

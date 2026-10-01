@@ -9,9 +9,9 @@ use peri_acp_types::workspace::WorkspaceError;
 use sqlx::{AssertSqlSafe, Connection, SqliteConnection};
 use std::collections::HashSet;
 
-/// 本构建写入并接受的 schema 版本；2..9 经升级路径收敛到此值，0 视为待建库。
+/// 本构建写入并接受的 schema 版本；2..10 经升级路径收敛到此值，0 视为待建库。
 /// 版本接受判定、迁移收尾写入与拒绝时的「本构建上限」都由它派生，避免三处各写一份。
-pub(in crate::sessions) const CURRENT_SCHEMA_VERSION: i64 = 10;
+pub(in crate::sessions) const CURRENT_SCHEMA_VERSION: i64 = 11;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum SchemaState {
@@ -25,6 +25,7 @@ pub(super) enum SchemaState {
     Version7,
     Version8,
     Version9,
+    Version10,
     Current,
 }
 
@@ -44,6 +45,7 @@ pub(super) async fn inspect(connection: &mut SqliteConnection) -> Result<SchemaS
         .await?;
     match version {
         v if v == CURRENT_SCHEMA_VERSION => return Ok(SchemaState::Current),
+        10 => return Ok(SchemaState::Version10),
         9 => return Ok(SchemaState::Version9),
         8 => return Ok(SchemaState::Version8),
         7 => return Ok(SchemaState::Version7),
@@ -185,6 +187,7 @@ impl SqliteSessionDatabase {
 
     async fn migrate_schema(connection: &mut SqliteConnection, state: SchemaState) -> Result<()> {
         let mut tx = connection.begin_with("BEGIN IMMEDIATE").await?;
+        let removals = super::schema_cleanup::removal_plan(&mut tx).await?;
         if state == SchemaState::Version2 {
             // v2's unused revision column is NOT NULL without a default. Remove
             // it before current writers stop supplying it; all remaining data stays intact.
@@ -212,11 +215,9 @@ impl SqliteSessionDatabase {
                         ("hidden", "BOOLEAN NOT NULL DEFAULT 0"),
                         ("cancel_policy", "TEXT NOT NULL DEFAULT 'cascade'"),
                         ("config", "TEXT"),
-                        ("cached_context", "TEXT"),
                         ("frozen_context", "TEXT"),
                         ("inherited_context", "TEXT"),
                         ("agent_status", "TEXT NOT NULL DEFAULT 'active'"),
-                        ("context_cache_epoch", "INTEGER NOT NULL DEFAULT 0"),
                     ][..],
                 ),
                 (
@@ -274,6 +275,9 @@ impl SqliteSessionDatabase {
         // v10 回退：删除 v7..v9 写下的本机远程痕迹（本机登记、未决锚点、远端操作日志、
         // 按 store 分区的执行域）。对没有这些表的库是幂等的。
         drop_remote_local_state(&mut tx).await?;
+        for statement in removals {
+            sqlx::query(statement).execute(&mut *tx).await?;
+        }
         sqlx::query(AssertSqlSafe(canonical::CREATE_OAUTH_CREDENTIALS_TABLE_SQL))
             .execute(&mut *tx)
             .await?;

@@ -17,6 +17,7 @@ mod local;
 mod oauth_credentials;
 pub(crate) mod row_mapping;
 mod schema;
+mod schema_cleanup;
 mod session_data;
 mod session_rows;
 mod workspace;
@@ -36,9 +37,7 @@ use peri_acp_types::{
 /// `messages.role` 的领域派生：canonical schema 的写入原语两端共用同一份
 /// （见 `sessions::canonical::payload_role`）。
 pub(in crate::sessions) use row_mapping::role_of as role_of_message;
-use row_mapping::{
-    extract_title, meta_from_row, role_of, ThreadRow, THREAD_COLUMNS, THREAD_META_COLUMNS,
-};
+use row_mapping::{extract_title, meta_from_row, role_of, ThreadRow, THREAD_META_COLUMNS};
 use sqlx::AssertSqlSafe;
 use std::{collections::HashMap, path::PathBuf, str::FromStr, sync::Arc};
 
@@ -212,8 +211,8 @@ impl ThreadStore for SqliteThreadStore {
         let mut transaction = self.database.pool.begin_with("BEGIN IMMEDIATE").await?;
         sqlx::query(
             "INSERT INTO threads (id, title, cwd, created_at, updated_at, message_count,
-                parent_thread_id, snapshot_at_message_id, hidden, cancel_policy, config, cached_context, agent_status, context_cache_epoch)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 0)",
+                parent_thread_id, snapshot_at_message_id, hidden, cancel_policy, config, agent_status)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         )
         .bind(&meta.id)
         .bind(&meta.title)
@@ -226,7 +225,6 @@ impl ThreadStore for SqliteThreadStore {
         .bind(meta.hidden)
         .bind(meta.cancel_policy.as_str())
         .bind(&meta.config)
-        .bind(&meta.cached_context)
         .bind(meta.agent_status.as_str())
         .execute(&mut *transaction)
         .await?;
@@ -327,7 +325,7 @@ impl ThreadStore for SqliteThreadStore {
 
     async fn load_meta(&self, id: &ThreadId) -> Result<ThreadMeta> {
         let row: ThreadRow = match sqlx::query_as(AssertSqlSafe(format!(
-            "SELECT {THREAD_COLUMNS} FROM threads t WHERE t.id = ?1"
+            "SELECT {THREAD_META_COLUMNS} FROM threads t WHERE t.id = ?1"
         )))
         .bind(id.as_str())
         .fetch_one(&self.database.pool)
@@ -352,7 +350,7 @@ impl ThreadStore for SqliteThreadStore {
 
         let result = meta_from_row(
             row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7, row.8, row.9, row.10, row.11,
-            row.12, row.13,
+            row.12,
         );
         if self.database.read_only {
             result.map_err(|_| {
@@ -382,8 +380,8 @@ impl ThreadStore for SqliteThreadStore {
             sqlx::query(
                 "UPDATE threads SET title = ?1, cwd = ?2, updated_at = ?3, message_count = ?4,
                 parent_thread_id = ?5, snapshot_at_message_id = ?6, hidden = ?7,
-                cancel_policy = ?8, config = ?9, cached_context = ?10, agent_status = ?11
-             WHERE id = ?12",
+                cancel_policy = ?8, config = ?9, agent_status = ?10
+             WHERE id = ?11",
             )
             .bind(&meta.title)
             .bind(&meta.cwd)
@@ -394,7 +392,6 @@ impl ThreadStore for SqliteThreadStore {
             .bind(meta.hidden)
             .bind(meta.cancel_policy.as_str())
             .bind(&meta.config)
-            .bind(&meta.cached_context)
             .bind(meta.agent_status.as_str())
             .bind(id.as_str())
             .execute(&self.database.pool)
@@ -461,7 +458,7 @@ impl ThreadStore for SqliteThreadStore {
             .map(|row| {
                 meta_from_row(
                     row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7, row.8, row.9, row.10,
-                    row.11, row.12, row.13,
+                    row.11, row.12,
                 )
             })
             .collect()
@@ -620,19 +617,6 @@ impl ThreadStore for SqliteThreadStore {
         result
     }
 
-    async fn invalidate_context_cache(&self, thread_id: &ThreadId) -> Result<()> {
-        let write_guard = self.write_guard(thread_id).await?;
-        let result = async { self.database.invalidate_context_cache(thread_id).await }.await;
-        if let Some(guard) = write_guard {
-            guard.finish();
-        }
-        result
-    }
-
-    async fn get_context_cache_epoch(&self, thread_id: &ThreadId) -> Result<u64> {
-        self.database.get_context_cache_epoch(thread_id).await
-    }
-
     async fn delete_messages(
         &self,
         thread_id: &ThreadId,
@@ -730,6 +714,10 @@ impl ThreadStore for SqliteThreadStore {
 mod tests;
 
 #[cfg(test)]
+#[path = "sqlite_store/read_only_test.rs"]
+mod read_only_tests;
+
+#[cfg(test)]
 #[path = "sqlite_inherited_context_test.rs"]
 mod inherited_context_tests;
 
@@ -752,6 +740,10 @@ mod schema_v7_tests;
 #[cfg(test)]
 #[path = "sqlite_store/schema_v10_test.rs"]
 mod schema_v10_tests;
+
+#[cfg(test)]
+#[path = "sqlite_store/schema_v11_test.rs"]
+mod schema_v11_tests;
 
 #[cfg(test)]
 #[path = "sqlite_store/session_id_environment_test.rs"]

@@ -264,8 +264,6 @@ fn meta_row_decodes_field_by_field() {
     assert!(!meta.hidden);
     assert_eq!(meta.cancel_policy, CancelPolicy::Cascade);
     assert_eq!(meta.agent_status, AgentStatus::Active);
-    // 远端不保存物化缓存：没有第二份真相可返回。
-    assert!(meta.cached_context.is_none());
 }
 
 #[test]

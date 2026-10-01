@@ -1,7 +1,7 @@
 //! Planner — Compact 计划和策略类型
 //!
 //! planner 只能读取 MessageTranscript 和 CompactConfig，绝对不能调用
-//! set_truncated、set_excluded、send_persist、invalidate_context_cache 或 provider。
+//! set_truncated、set_excluded、send_persist 或 provider。
 
 use std::collections::{HashMap, HashSet};
 

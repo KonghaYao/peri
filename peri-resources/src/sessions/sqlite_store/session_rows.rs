@@ -28,7 +28,7 @@ pub(super) struct ThreadRowInsert<'a> {
     pub frozen_context: Option<&'a str>,
 }
 
-/// 插入一条 `threads` 行；`cached_context` 与 `context_cache_epoch` 从缺省值起步
+/// 插入一条 `threads` 行
 /// （派生缓存由行为在失效时清空，不在这里给值）。
 pub(super) async fn insert_thread_row(
     connection: &mut SqliteConnection,
@@ -36,9 +36,9 @@ pub(super) async fn insert_thread_row(
 ) -> Result<()> {
     sqlx::query(
         "INSERT INTO threads (id, title, cwd, created_at, updated_at, message_count,
-            parent_thread_id, snapshot_at_message_id, hidden, cancel_policy, config, cached_context,
-            frozen_context, agent_status, context_cache_epoch)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, NULL, ?12, ?13, 0)",
+            parent_thread_id, snapshot_at_message_id, hidden, cancel_policy, config,
+            frozen_context, agent_status)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
     )
     .bind(row.id)
     .bind(row.title)

@@ -409,13 +409,6 @@ impl ThreadStore for FilesystemThreadStore {
         self.update_meta(id, meta).await
     }
 
-    async fn invalidate_context_cache(&self, thread_id: &ThreadId) -> Result<()> {
-        let _guard = META_UPDATE_LOCK.lock().await;
-        let mut meta = self.load_meta(thread_id).await?;
-        meta.cached_context = None;
-        self.update_meta(thread_id, meta).await
-    }
-
     async fn delete_messages(
         &self,
         thread_id: &ThreadId,
@@ -444,7 +437,6 @@ impl ThreadStore for FilesystemThreadStore {
         file.flush().await?;
         let mut meta = self.load_meta(thread_id).await?;
         meta.message_count = kept.len();
-        meta.cached_context = None;
         meta.updated_at = Utc::now();
         self.update_meta(thread_id, meta).await
     }

@@ -417,7 +417,7 @@ pub trait ThreadStore: Send + Sync {
             .collect())
     }
 
-    /// 加载 thread 的完整上下文（含祖先链 + 缓存）
+    /// 加载 thread 的完整上下文（含祖先链）
     async fn load_context(&self, thread_id: &ThreadId) -> Result<Vec<BaseMessage>>;
 
     /// 列举指定父 thread 的直接子 thread
@@ -429,10 +429,7 @@ pub trait ThreadStore: Send + Sync {
     /// 更新 thread 的 agent_status 字段
     async fn update_thread_status(&self, id: &ThreadId, status: &str) -> Result<()>;
 
-    /// 清除 thread 的 cached_context
-    async fn invalidate_context_cache(&self, thread_id: &ThreadId) -> Result<()>;
-
-    /// 按 message_id 列表精确删除消息，并刷新 cached_context。
+    /// 按 message_id 列表精确删除消息，并刷新派生计数。
     async fn delete_messages(&self, thread_id: &ThreadId, message_ids: &[MessageId]) -> Result<()>;
 
     /// 更新消息的 compact 标记（truncated / excluded / projection directive）
@@ -479,13 +476,6 @@ pub trait ThreadStore: Send + Sync {
     ) -> Result<()> {
         let _ = (thread_id, message_id);
         Ok(()) // 默认 no-op
-    }
-
-    /// H6: 获取 context cache epoch 值。
-    ///
-    /// 每次 compact 提交后递增，用于检测 context_cache 是否因 compact 变更而失效。
-    async fn get_context_cache_epoch(&self, _thread_id: &ThreadId) -> Result<u64> {
-        Ok(0) // 默认无 epoch 支持
     }
 }
 

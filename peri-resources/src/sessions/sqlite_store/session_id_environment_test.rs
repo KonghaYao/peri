@@ -19,7 +19,7 @@ async fn migration_keeps_schema_version_and_existing_history() {
         .fetch_one(&store.database.pool)
         .await
         .unwrap();
-    assert_eq!(before.0, 10);
+    assert_eq!(before.0, super::schema::CURRENT_SCHEMA_VERSION);
     let messages = store.load_messages(&id).await.unwrap();
     sqlx::query("DROP TABLE session_environments")
         .execute(&store.database.pool)

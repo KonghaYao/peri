@@ -319,7 +319,7 @@ impl SessionDataPort for SqliteSessionData {
     async fn load_snapshot(&self, id: &ThreadId) -> SessionResourceResult<SessionSnapshot> {
         // 一次读取视图：同一连接上的延迟事务让 meta/binding/frozen/历史/继承区来自
         // 同一个数据库状态，不让调用方拼多次跨时刻查询。meta 走轻量投影（不含
-        // `cached_context` 正文）：派生缓存不是历史事实，历史由 payloads 给出。
+        // 正文）：历史事实由 payloads 给出。
         let mut connection = self
             .database
             .pool
@@ -777,15 +777,12 @@ impl SessionDataPort for SqliteSessionData {
                 ));
             }
         }
-        // 派生视图与写入同事务失效：调用方不需要再补一次 cache 维护。
-        sqlx::query(
-            "UPDATE threads SET cached_context = NULL, context_cache_epoch = context_cache_epoch + 1
-             WHERE id = ?1",
-        )
-        .bind(id.as_str())
-        .execute(&mut *tx)
-        .await
-        .map_err(|error| map_sqlx(&error))?;
+        sqlx::query("UPDATE threads SET updated_at = ?1 WHERE id = ?2")
+            .bind(Utc::now().to_rfc3339())
+            .bind(id.as_str())
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| map_sqlx(&error))?;
         tx.commit()
             .await
             .map_err(|_| commit_failure(Some(id.clone())))?;

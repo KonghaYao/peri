@@ -255,6 +255,29 @@ pub(super) struct RemoteStore {
 }
 
 impl RemoteStore {
+    pub(super) fn access(&self) -> StoreAccess {
+        self.access
+    }
+
+    pub(super) async fn apply_schema_upgrade(
+        &self,
+        statements: Vec<StatementSpec>,
+    ) -> SessionResourceResult<()> {
+        self.access.ensure_writable()?;
+        self.ensure_autocommit()?;
+        let expected = statements.len();
+        match self.run_managed_batch(statements).await {
+            Ok(counts) if counts.len() == expected && counts.last() == Some(&1) => Ok(()),
+            Ok(_) | Err(BatchFailure::Unknown { .. }) => Err(SessionResourceError::new(
+                SessionResourceErrorKind::PersistenceUncertain { thread_id: None },
+            )),
+            Err(BatchFailure::QualificationConflict) => {
+                Err(RemoteFailureClass::Constraint.into_session_resource_error())
+            }
+            Err(BatchFailure::NotApplied { class, .. }) => Err(class.into_session_resource_error()),
+        }
+    }
+
     /// 装配一条连接：传输面、访问意图、代际号与门禁都是既有事实。
     pub(super) fn new(
         transport: Arc<dyn RemoteTransport>,

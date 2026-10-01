@@ -18,7 +18,7 @@
 //! ## 派生规则
 //!
 //! `message_count` 是存储列，按本机同一规则**重数**（不是自增）；`content_size` 不落列，
-//! 读取时由投影现算。远端没有 `cached_context`/`context_cache_epoch`：那是本机读取缓存，
+//! 读取时由投影现算。
 //! 远端没有这个消费者，因此历史变更不产生缓存失效动作。
 
 use std::collections::HashSet;
@@ -74,11 +74,9 @@ pub(super) const UPDATE_FLAGS_SQL: &str = "UPDATE messages
     WHERE thread_id = ?4 AND message_id = ?5";
 
 /// 重数派生计数并推进 `updated_at`（与本机 `refresh_history_derivations` 同一规则，
-/// 含两个缓存失效位：同一条语句在两种执行器上执行）。
+/// 同一条语句在两种执行器上执行）。
 const REFRESH_COUNTS_SQL: &str = "UPDATE threads SET updated_at = ?1,
-    message_count = (SELECT COUNT(*) FROM messages WHERE thread_id = ?2),
-    cached_context = NULL,
-    context_cache_epoch = context_cache_epoch + 1
+    message_count = (SELECT COUNT(*) FROM messages WHERE thread_id = ?2)
     WHERE id = ?2";
 
 /// 自动标题：只在标题仍缺失时补一次（本机同一规则：`title IS NULL` 才写）。

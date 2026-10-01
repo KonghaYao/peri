@@ -7,6 +7,21 @@
 use super::*;
 
 #[test]
+fn metadata_preserves_config_and_discards_retired_cache_fields_from_old_json() {
+    let mut meta = ThreadMeta::new("/tmp/test");
+    meta.config = Some(r#"{"model":"useful"}"#.into());
+    let mut json = serde_json::to_value(&meta).unwrap();
+    json["cached_context"] = serde_json::json!("obsolete");
+    json["context_cache_epoch"] = serde_json::json!(7);
+    let decoded: ThreadMeta = serde_json::from_value(json).unwrap();
+    assert_eq!(decoded.config, meta.config);
+    let json = serde_json::to_value(decoded).unwrap();
+    assert_eq!(json["config"], r#"{"model":"useful"}"#);
+    assert!(json.get("cached_context").is_none());
+    assert!(json.get("context_cache_epoch").is_none());
+}
+
+#[test]
 fn test_thread_meta_default_values() {
     // new() 创建的根线程应具有正确的默认值
     let meta = ThreadMeta::new("/tmp/test");
@@ -15,7 +30,6 @@ fn test_thread_meta_default_values() {
     assert!(!meta.hidden);
     assert_eq!(meta.cancel_policy, CancelPolicy::Cascade);
     assert_eq!(meta.config, None);
-    assert_eq!(meta.cached_context, None);
     assert_eq!(meta.agent_status, AgentStatus::Active);
     assert!(meta.is_root());
 }
@@ -49,7 +63,6 @@ fn test_thread_meta_deserialize_defaults() {
     assert!(!meta.hidden);
     assert_eq!(meta.cancel_policy, CancelPolicy::Cascade);
     assert_eq!(meta.config, None);
-    assert_eq!(meta.cached_context, None);
     assert_eq!(meta.agent_status, AgentStatus::Active);
 }
 

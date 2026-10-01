@@ -117,6 +117,11 @@ mod ledger;
 mod mutation;
 mod oauth_credentials;
 mod schema;
+mod schema_upgrade;
+
+#[cfg(test)]
+#[path = "schema_upgrade_test.rs"]
+mod schema_upgrade_tests;
 mod session_codec;
 mod session_data;
 mod session_history;

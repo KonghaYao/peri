@@ -396,7 +396,7 @@ async fn test_worktree_scoped_pages_and_exact_directory_are_lightweight() {
         .await
         .unwrap();
     // Deliberately corrupt large owner blobs; listing never decodes or aggregates them.
-    sqlx::query("UPDATE threads SET frozen_context = 'broken', cached_context = 'broken'")
+    sqlx::query("UPDATE threads SET frozen_context = 'broken'")
         .execute(&store.database.pool)
         .await
         .unwrap();

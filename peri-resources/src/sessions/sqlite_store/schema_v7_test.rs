@@ -48,7 +48,13 @@ CREATE TABLE execution_runs (
     thread_id TEXT PRIMARY KEY REFERENCES threads(id) ON DELETE CASCADE,
     generation INTEGER NOT NULL, clean BOOLEAN NOT NULL
 );
-CREATE TABLE thread_goals (thread_id TEXT PRIMARY KEY, objective TEXT NOT NULL);
+CREATE TABLE thread_goals (
+    thread_id TEXT PRIMARY KEY, goal_id TEXT NOT NULL, objective TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('active','paused','blocked','usage_limited','budget_limited','complete')),
+    token_budget INTEGER NULL, tokens_used INTEGER NOT NULL DEFAULT 0,
+    time_used_seconds INTEGER NOT NULL DEFAULT 0, created_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL,
+    FOREIGN KEY(thread_id) REFERENCES threads(id) ON DELETE CASCADE
+);
 "#;
 
 async fn v6_database(path: &Path) -> SqliteConnection {
@@ -93,7 +99,7 @@ async fn populated_v6(path: &Path) -> Vec<u8> {
     .execute(&mut connection)
     .await
     .unwrap();
-    sqlx::query("INSERT INTO thread_goals VALUES ('old-root', '保留目标')")
+    sqlx::query("INSERT INTO thread_goals VALUES ('old-root', 'goal', '保留目标', 'active', NULL, 0, 0, 1, 1)")
         .execute(&mut connection)
         .await
         .unwrap();
@@ -165,11 +171,12 @@ async fn test_v6_upgrade_keeps_dirty_execution_history_and_auxiliary_tables() {
     let expected = BaseMessage::human("history before v7");
     assert_eq!(history.0, "user");
     assert!(history.1.contains("history before v7"));
-    let goals: (String,) = sqlx::query_as("SELECT objective FROM thread_goals")
-        .fetch_one(&mut connection)
-        .await
-        .unwrap();
-    assert_eq!(goals.0, "保留目标");
+    let (goals,): (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM sqlite_master WHERE name = 'thread_goals'")
+            .fetch_one(&mut connection)
+            .await
+            .unwrap();
+    assert_eq!(goals, 0);
     let frozen: (Option<String>,) =
         sqlx::query_as("SELECT frozen_context FROM threads WHERE id = 'old-root'")
             .fetch_one(&mut connection)

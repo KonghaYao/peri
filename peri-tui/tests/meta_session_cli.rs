@@ -78,7 +78,6 @@ fn fixture_meta(id: &str, title: &str, cwd: &str) -> ThreadMeta {
         hidden: true,
         cancel_policy: Default::default(),
         config: Some(FORBIDDEN_CONFIG.to_owned()),
-        cached_context: Some(FORBIDDEN_CONTEXT.to_owned()),
         agent_status: AgentStatus::Done,
     }
 }

@@ -20,6 +20,7 @@ use std::path::Path;
 
 /// v10 回退删掉的本机表。
 const DROPPED_TABLES: &[&str] = &[
+    "thread_goals",
     "session_store_registrations",
     "session_lifecycle_commitments",
     "session_remote_operations",
@@ -63,7 +64,13 @@ CREATE INDEX idx_bindings_project ON session_bindings(project_id, thread_id);
 CREATE TABLE execution_runs (
     thread_id TEXT PRIMARY KEY, generation INTEGER NOT NULL, clean BOOLEAN NOT NULL
 );
-CREATE TABLE thread_goals (thread_id TEXT PRIMARY KEY, objective TEXT NOT NULL);
+CREATE TABLE thread_goals (
+    thread_id TEXT PRIMARY KEY, goal_id TEXT NOT NULL, objective TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('active','paused','blocked','usage_limited','budget_limited','complete')),
+    token_budget INTEGER NULL, tokens_used INTEGER NOT NULL DEFAULT 0,
+    time_used_seconds INTEGER NOT NULL DEFAULT 0, created_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL,
+    FOREIGN KEY(thread_id) REFERENCES threads(id) ON DELETE CASCADE
+);
 CREATE TABLE session_lifecycle_commitments (
     thread_id TEXT PRIMARY KEY, root_id TEXT NOT NULL, kind TEXT NOT NULL, state TEXT NOT NULL,
     generation INTEGER, operation_id TEXT, detail TEXT,
@@ -129,7 +136,6 @@ async fn populate_business(connection: &mut SqliteConnection) {
          VALUES ('w1', 'p1', '/work', 'dev:1', 'git');
          INSERT INTO session_bindings (thread_id, schema_version, project_id, workspace_id, relative_cwd)
          VALUES ('local-root', 1, 'p1', 'w1', '.');
-         INSERT INTO thread_goals (thread_id, objective) VALUES ('local-root', '保留目标');
          INSERT INTO execution_runs (thread_id, generation, clean) VALUES ('local-root', 4, 0);
          INSERT INTO execution_runs (thread_id, generation, clean) VALUES ('remote-root', 7, 0);",
     )
@@ -185,6 +191,7 @@ async fn preserved_table_definitions(connection: &mut SqliteConnection) -> Vec<(
     .unwrap();
     rows.retain(|(name, _)| {
         !DROPPED_TABLES.contains(&name.as_str())
+            && name != "threads"
             && name != OAUTH_CREDENTIALS_TABLE
             && name != SESSION_ENVIRONMENTS_TABLE
     });
@@ -248,12 +255,6 @@ async fn test_v7_v8_v9_all_converge_and_drop_only_the_remote_tables() {
                 .await
                 .unwrap();
         assert_eq!(title, "本机会话");
-        let (objective,): (String,) =
-            sqlx::query_as("SELECT objective FROM thread_goals WHERE thread_id = 'local-root'")
-                .fetch_one(&mut connection)
-                .await
-                .unwrap();
-        assert_eq!(objective, "保留目标");
         let (cwd,): (String,) = sqlx::query_as(
             "SELECT relative_cwd FROM session_bindings WHERE thread_id = 'local-root'",
         )

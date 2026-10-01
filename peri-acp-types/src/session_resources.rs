@@ -115,7 +115,7 @@ impl FrozenSnapshotBytes {
 
 /// 新会话的初始 metadata。
 ///
-/// 不携带 `message_count` / `updated_at` / `cached_context` / `context_cache_epoch`：
+/// 不携带 `message_count` / `updated_at`：
 /// 这些是行为维护的派生事实，构建方给值只会制造第二个真相。
 #[derive(Clone, Debug)]
 pub struct NewSessionMeta {

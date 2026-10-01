@@ -8,8 +8,8 @@
 //!
 //! 契约标签 [`STORE_CONTRACT`] 在统一时推进到 `v2`：形状变了（表名、列名、绑定所在表、
 //! 历史顺序的载体），拿着 v1 标签的库会被 [`acceptance`] / `matches_build` 判为不认识——
-//! 这是有意的 fail-closed。旧形状的库**不迁移、不覆盖**（新库无历史数据，迁移路径没有被
-//! 需求），具体拒绝点见 `session_data` 的旧形状探测。
+//! 这是有意的 fail-closed。统一前的旧形状**不迁移、不覆盖**；canonical v2 / schema 10
+//! 由 `schema_upgrade` 一次性移除旧缓存并推进版本，store 身份与账本保持不变。
 //!
 //! 三条硬规则：
 //!
@@ -102,6 +102,14 @@ impl StoreSnapshot {
         self.contract == STORE_CONTRACT
             && matches!(acceptance(self.schema_version), SchemaAcceptance::Accept)
     }
+
+    pub(super) fn readable(&self) -> bool {
+        self.contract == STORE_CONTRACT
+            && matches!(
+                acceptance(self.schema_version),
+                SchemaAcceptance::Accept | SchemaAcceptance::Upgradeable
+            )
+    }
 }
 
 /// 版本判定（纯函数）。
@@ -109,15 +117,19 @@ impl StoreSnapshot {
 pub(super) enum SchemaAcceptance {
     /// 本构建可读写。
     Accept,
+    /// 已识别的 v10：只读使用同一组查询，写打开先完成一次性升级。
+    Upgradeable,
     /// 高于本构建：拒绝，不迁移、不降级写入。
     TooNew,
-    /// 低于本构建或非法：拒绝，不猜。
+    /// 其他旧版或非法版本：拒绝，不猜。
     Unusable,
 }
 
 pub(super) fn acceptance(version: i64) -> SchemaAcceptance {
     if version == REMOTE_SCHEMA_VERSION {
         SchemaAcceptance::Accept
+    } else if version == 10 {
+        SchemaAcceptance::Upgradeable
     } else if version > REMOTE_SCHEMA_VERSION {
         SchemaAcceptance::TooNew
     } else {

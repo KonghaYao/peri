@@ -26,7 +26,6 @@ pub(super) const REQUIRED_THREAD_COLUMNS: &[&str] = &[
     "hidden",
     "cancel_policy",
     "config",
-    "cached_context",
     "agent_status",
 ];
 pub(super) const REQUIRED_MESSAGE_COLUMNS: &[&str] = &["thread_id", "content"];

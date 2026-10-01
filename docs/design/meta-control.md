@@ -208,7 +208,6 @@ peri --db-path /path/to/threads.db meta session <SESSION_ID> --json
 v1 不返回：
 
 - `config`；
-- `cached_context`；
 - frozen snapshot；
 - `snapshot_at_message_id`；
 - `content_size`、`hidden`、`cancel_policy` 等非基础诊断字段；

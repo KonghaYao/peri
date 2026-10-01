@@ -162,10 +162,6 @@ async fn session_round_trip(target: &CloudTarget, run: &str) -> Result<(), Strin
         root_meta.message_count == 0,
         "session without history must report zero messages",
     )?;
-    check(
-        root_meta.cached_context.is_none(),
-        "remote store must not invent a materialized cache",
-    )?;
 
     let root_snapshot = reader.load_snapshot(&root).await.map_err(failure)?;
     check(

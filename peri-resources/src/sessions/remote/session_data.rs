@@ -39,9 +39,6 @@
 //! - 不持有本机执行事实：workspace 证据与执行代际只在本机库，远端没有这些事实；
 //! - 不解析本机目录、不发执行资格、不判定 legacy：`LegacyConfirmed` 与执行准入由门面与
 //!   执行面按本机证据判定（这也是 `load_binding` 只回答绑定事实的原因）；
-//! - 不保存派生缓存：`threads.cached_context` / `context_cache_epoch` 与本机同列（同一份 DDL，
-//!   形状不能各自漂移），但远端没有「读缓存」这个消费者——远端不读它，只在历史变更时按同一份
-//!   语句把它归位（`session_history::REFRESH_COUNTS_SQL`）。
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -67,6 +64,7 @@ use super::endpoint::RemoteEndpoint;
 use super::generation::{ConnectionFactory, ConnectionGate, RemoteConnectionFactory};
 use super::mutation::{incomplete_reply, RemoteStore, StoreAccess};
 use super::schema::{self, StoreId, StoreIdentityOutcome, StoreIdentityRead};
+use super::schema_upgrade;
 use super::session_schema;
 use super::sql::{int_at, StatementSpec};
 use turso_serverless::Value;
@@ -88,6 +86,7 @@ pub(super) enum StoreInitialization {
 pub(super) enum OpenStep {
     /// 已有本构建认识的身份：本次打开没有建立任何东西。
     Existing(StoreId),
+    Upgrade(schema::StoreSnapshot),
     /// 明确为空：写打开在这里才继续初始化；只读打开到这一步就拒绝。
     NeedsInitialization,
 }
@@ -104,6 +103,10 @@ pub(super) fn open_step(
         StoreIdentityRead::Present(snapshot) if snapshot.matches_build() => {
             Ok(OpenStep::Existing(snapshot.store_id))
         }
+        StoreIdentityRead::Present(snapshot) if snapshot.readable() => match access {
+            StoreAccess::ReadOnly => Ok(OpenStep::Existing(snapshot.store_id)),
+            StoreAccess::ReadWrite => Ok(OpenStep::Upgrade(snapshot)),
+        },
         StoreIdentityRead::Present(_) => {
             Err(unsupported_behavior("unrecognized remote store schema"))
         }
@@ -210,6 +213,10 @@ impl RemoteSessionData {
         let store = factory.connect().await?;
         let (store_id, initialization) = match open_step(store.read_identity().await?, access)? {
             OpenStep::Existing(store_id) => (store_id, StoreInitialization::Existing),
+            OpenStep::Upgrade(snapshot) => {
+                schema_upgrade::upgrade(&store, &snapshot).await?;
+                (snapshot.store_id, StoreInitialization::Existing)
+            }
             // 空库：写打开在这里才参与身份竞争，结论由本事务的结果给出（见 [`open_verdict`]），
             // 不由「刚才读到空库」推定创建。
             OpenStep::NeedsInitialization => {
@@ -341,9 +348,14 @@ impl RemoteSessionData {
     /// 只读打开因此与可写打开走同一条重建路径，且不产生任何写入。
     async fn verify_reconnect(&self, store: &RemoteStore) -> SessionResourceResult<()> {
         match store.read_identity().await? {
-            StoreIdentityRead::Present(snapshot) if !snapshot.matches_build() => Err(
-                unsupported_behavior("unrecognized remote store schema after reconnect"),
-            ),
+            StoreIdentityRead::Present(snapshot)
+                if !(snapshot.matches_build()
+                    || (store.access() == StoreAccess::ReadOnly && snapshot.readable())) =>
+            {
+                Err(unsupported_behavior(
+                    "unrecognized remote store schema after reconnect",
+                ))
+            }
             StoreIdentityRead::Present(snapshot)
                 if snapshot.store_id.as_str() != self.store_id.as_str() =>
             {

@@ -12,11 +12,9 @@ export interface ViewerThread {
   hidden: number;
   cancel_policy?: string | null;
   config?: string | null;
-  cached_context?: string | null;
   frozen_context?: string | null;
   inherited_context?: string | null;
   agent_status: string | null;
-  context_cache_epoch?: number | null;
 }
 
 export interface NormalizedViewerMessage {

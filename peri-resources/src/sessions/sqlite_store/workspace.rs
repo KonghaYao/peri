@@ -232,11 +232,11 @@ impl SqliteSessionDatabase {
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         Self::validate_resolved_on(&mut tx, workspace).await?;
         sqlx::query("INSERT INTO threads (id, title, cwd, created_at, updated_at, message_count,
-            parent_thread_id, snapshot_at_message_id, hidden, cancel_policy, config, cached_context, agent_status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+            parent_thread_id, snapshot_at_message_id, hidden, cancel_policy, config, agent_status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
             .bind(&meta.id).bind(&meta.title).bind(&meta.cwd).bind(meta.created_at.to_rfc3339()).bind(meta.updated_at.to_rfc3339())
             .bind(meta.message_count as i64).bind(&meta.parent_thread_id).bind(&meta.snapshot_at_message_id).bind(meta.hidden)
-            .bind(meta.cancel_policy.as_str()).bind(&meta.config).bind(&meta.cached_context).bind(meta.agent_status.as_str())
+            .bind(meta.cancel_policy.as_str()).bind(&meta.config).bind(meta.agent_status.as_str())
             .execute(&mut *tx).await?;
         sqlx::query("INSERT INTO session_bindings (thread_id, schema_version, project_id, workspace_id, relative_cwd)
             VALUES (?, ?, ?, ?, ?)")

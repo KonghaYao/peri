@@ -223,7 +223,10 @@ async fn current_schema_adds_only_oauth_table_without_version_change_or_json_imp
         .fetch_one(&store.database.pool)
         .await
         .unwrap();
-    assert_eq!(version.0, 10);
+    assert_eq!(
+        version.0,
+        crate::sessions::sqlite_store::schema::CURRENT_SCHEMA_VERSION
+    );
     store.close().await;
     let legacy = r#"{"server":{"token":"synthetic-legacy-fixture"}}"#;
     tokio::fs::write(directory.path().join("oauth_tokens.json"), legacy)

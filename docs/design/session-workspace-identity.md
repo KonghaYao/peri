@@ -338,25 +338,37 @@ hooks、插件与 MCP 展示取当前会话环境。TUI 本地配置面板仍编
 ## 8. 单库存储与版本边界
 
 默认读写始终使用 `~/.peri/threads/threads.db`，`--db-path` 仍可选择显式路径。
-schema 版本记录在 `PRAGMA user_version`，当前为 `10`（`CURRENT_SCHEMA_VERSION`；
-v10 撤销本机远程痕迹后本机表集合回到 v6 时代，版本号仍只增不减，2..9 的库都经升级
-路径收敛到 10），不另建数据库文件。新 writer
+schema 版本记录在 `PRAGMA user_version`，当前为 `11`（`CURRENT_SCHEMA_VERSION`；
+v10 撤销本机远程痕迹，v11 移除旧会话缓存与历史目标表；支持的 2..10 来源仍经
+同一升级路径收敛），不另建数据库文件。新 writer
 按必需的 `threads` / `messages` 真实表及其列识别未设置版本号的旧 schema；
-同库额外业务表（例如 `thread_goals`）及其数据保持原样，不能以整库表数量拒绝
-兼容旧库。在单个事务中补齐
+同库无关扩展表及其数据保持原样，不能以整库表数量拒绝兼容旧库。v11 定向删除
+已识别旧布局的 `thread_goals` 及其历史行，并删除 `cached_context` / `context_cache_epoch`；
+`config` 和所有权威历史/执行事实保留。未知目标布局或外部外键/view/trigger 依赖
+目标对象时拒绝迁移，失败回滚数据和版本，不关闭外键强行删表。在单个事务中补齐
 缺失列、增加 Project / Workspace / SessionBinding / execution_runs 表及索引。
 新建与旧库补列共享同一组列定义；已存在的 schema 2 在事务中删除无状态用途的
 binding `revision` 列，保留其余绑定与执行状态，最后提交版本号。并发开库由
 schema OS 锁序列化；升级失败回滚整次 DDL。
 
-schema 2–5 写打开时在同一事务升级到 6，放宽登记键：重建 `projects` 与 `workspaces`，把 locator /
+远端版本记录在 `peri_store_meta.schema_version`，与本机共用版本常量。仅已识别的
+`peri.session.store/v2` / schema 10 写打开执行一次性升级到 11；只读打开接受其
+可读形状但不迁移，统一前的其他旧形状仍拒绝。远端升级在托管事务批内守卫旧身份、
+版本及 schema 对象快照，删除与版本推进同提交，保留 `store_id` 和幂等账本。
+响应丢失或不完整按持久化未决报告，重新打开读取已提交版本，不猜测删除是否生效。
+
+升级前必须停止所有旧 writer，并取得覆盖 WAL 的一致性备份；远端使用服务端一致性
+快照。schema 11 不支持旧版本继续共库写入，回退只能恢复升级前备份，不补回废列或
+双写。迁移不自动 VACUUM，也不承诺缓存文本负载等于可回收的文件空间。
+
+schema 2–5 写打开时在同一事务完成 schema 6 的登记键升级，放宽登记键：重建 `projects` 与 `workspaces`，把 locator /
 root 与 identity 的单列唯一约束换成 §3.2 的组合键。重建逐列复制行内容与引用
 关系，ProjectId、WorkspaceId、binding、frozen / history 和 execution 状态不变；
 该路径需要在事务外关闭外键强制才能替换被引用的父表，因此提交前显式执行
 `PRAGMA foreign_key_check`，发现悬空引用即回滚。升级前的单列唯一约束会拒绝
 同一路径上的第二个文件对象，这正是升级要解除的限制。schema 2/3 先完成 revision /
 身份 JSON 的既有迁移，再重建登记表，不能跳过中间步骤直接标记最新版本。schema 5
-可能已完成组合键迁移，也可能由旧 writer 漏迁移后误标；两者都重建一次并提交版本 6。
+可能已完成组合键迁移，也可能由旧 writer 漏迁移后误标；两者都重建一次，最终提交当前版本。
 健康 5 已保存的同路径多对象、同对象多路径登记逐行保留，不合并 ID、不清 dirty，
 也不自动把旧会话迁移到新的目录。后续写打开不再重建；旧二进制拒绝版本 6。
 

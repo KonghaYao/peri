@@ -250,14 +250,11 @@ pub(super) fn page_statement(query: &ScopedThreadQuery) -> SessionResourceResult
 
 // ─── 写入语句 ─────────────────────────────────────────────────────────────────
 
-/// 会话行插入：与本机 `sqlite_store/session_rows.rs::insert_thread_row` 同一列清单（含
-/// `cached_context` / `context_cache_epoch` 的缺省起点——那两列是本机读取缓存的失效位，远端
-/// 与本地一样从缺省值起步）。
 const INSERT_THREAD_SQL: &str =
     "INSERT INTO threads (id, title, cwd, created_at, updated_at, message_count,
-        parent_thread_id, snapshot_at_message_id, hidden, cancel_policy, config, cached_context,
-        frozen_context, agent_status, context_cache_epoch)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, NULL, ?12, ?13, 0)";
+        parent_thread_id, snapshot_at_message_id, hidden, cancel_policy, config,
+        frozen_context, agent_status)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)";
 
 /// 未发布创建（J2 第一阶段）：与整份创建同一列形状，只有 `frozen_context` 写 NULL。
 ///
@@ -265,9 +262,9 @@ const INSERT_THREAD_SQL: &str =
 /// [`super::session_write::RemoteSessionData::write_commit_frozen`] 一次性补上。
 const INSERT_THREAD_DRAFT_SQL: &str =
     "INSERT INTO threads (id, title, cwd, created_at, updated_at, message_count,
-        parent_thread_id, snapshot_at_message_id, hidden, cancel_policy, config, cached_context,
-        frozen_context, agent_status, context_cache_epoch)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, NULL, NULL, ?12, 0)";
+        parent_thread_id, snapshot_at_message_id, hidden, cancel_policy, config,
+        frozen_context, agent_status)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, NULL, ?12)";
 
 /// 一次性提交 frozen（write-once CAS）：只对尚未提交的草稿生效。
 const COMMIT_FROZEN_SQL: &str =

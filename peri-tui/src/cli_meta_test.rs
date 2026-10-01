@@ -21,7 +21,6 @@ fn meta_with_control_characters() -> ThreadMeta {
         hidden: true,
         cancel_policy: Default::default(),
         config: Some("forbidden-config-secret".to_owned()),
-        cached_context: Some("forbidden-cached-context".to_owned()),
         agent_status: AgentStatus::Done,
     }
 }

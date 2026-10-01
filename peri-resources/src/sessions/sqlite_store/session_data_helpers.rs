@@ -238,9 +238,7 @@ pub(in crate::sessions) async fn refresh_history_derivations(
     let now = Utc::now().to_rfc3339();
     sqlx::query(
         "UPDATE threads SET updated_at = ?1,
-                message_count = (SELECT COUNT(*) FROM messages WHERE thread_id = ?2),
-                cached_context = NULL,
-                context_cache_epoch = context_cache_epoch + 1
+                message_count = (SELECT COUNT(*) FROM messages WHERE thread_id = ?2)
              WHERE id = ?2",
     )
     .bind(&now)

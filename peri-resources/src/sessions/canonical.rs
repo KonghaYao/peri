@@ -22,19 +22,38 @@
 //! 真引擎上 `rowid` 可投影、按插入序、跨连接稳定（探测项 3a/3b/3c），因此统一到本机
 //! 形状后该列与它的索引一并删除，两种执行器的语句文本才可能逐字一致。
 //!
-//! ## 列的归属细节
-//!
-//! `threads.cached_context` / `threads.context_cache_epoch` 是本机读取缓存的失效位：两端
-//! 同列（形状一致），远端没有缓存消费者，因此它落库后保持缺省值、不参与远端读取。把它
-//! 从这份 schema 里剔除只会让本机 DDL 变成「canonical + 追加列」的第二份形状，与目标相反。
-
 use peri_acp_types::store::PersistedPayload;
 
 /// 会话事实表。
 pub(super) const THREADS_TABLE: &str = "threads";
+pub(super) const THREAD_COLUMN_NAMES: &[&str] = &[
+    "id",
+    "title",
+    "cwd",
+    "created_at",
+    "updated_at",
+    "message_count",
+    "parent_thread_id",
+    "snapshot_at_message_id",
+    "hidden",
+    "cancel_policy",
+    "config",
+    "frozen_context",
+    "inherited_context",
+    "agent_status",
+];
 
 /// canonical 历史表。
 pub(super) const MESSAGES_TABLE: &str = "messages";
+pub(super) const MESSAGE_COLUMN_NAMES: &[&str] = &[
+    "message_id",
+    "thread_id",
+    "role",
+    "content",
+    "truncated",
+    "excluded",
+    "projection",
+];
 
 /// 不可变绑定引用的项目记录。
 pub(super) const PROJECTS_TABLE: &str = "projects";
@@ -100,9 +119,8 @@ pub(super) const CREATE_TABLES: &[&str] = &[
     id TEXT PRIMARY KEY, title TEXT, cwd TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL, updated_at TEXT NOT NULL, message_count INTEGER NOT NULL DEFAULT 0,
     parent_thread_id TEXT, snapshot_at_message_id TEXT, hidden BOOLEAN NOT NULL DEFAULT 0,
-    cancel_policy TEXT NOT NULL DEFAULT 'cascade', config TEXT, cached_context TEXT,
-    frozen_context TEXT, inherited_context TEXT, agent_status TEXT NOT NULL DEFAULT 'active',
-    context_cache_epoch INTEGER NOT NULL DEFAULT 0
+    cancel_policy TEXT NOT NULL DEFAULT 'cascade', config TEXT,
+    frozen_context TEXT, inherited_context TEXT, agent_status TEXT NOT NULL DEFAULT 'active'
 )",
     "CREATE TABLE IF NOT EXISTS messages (
     message_id TEXT PRIMARY KEY, thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,

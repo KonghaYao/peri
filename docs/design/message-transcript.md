@@ -109,7 +109,7 @@ ThreadStore 负责 Transcript 的完整持久化。`ThreadStore` trait 定义已
 | `store_inherited_context` / `load_inherited_context` | 子会话冻结继承 payload 与 flags；未知版本或损坏快照拒绝加载 |
 | `load_meta` / `update_meta` / `update_title` | 元数据读写 |
 | `list_threads` / `list_child_threads` / `list_session_threads` | Thread 列举与层级遍历 |
-| `update_thread_status` / `invalidate_context_cache` | 状态与缓存管理 |
+| `update_thread_status` | 状态管理 |
 | `delete_messages` / `delete_messages_since` | 精确删除 / 按 id 后缀删除（rewind 用） |
 | `update_message_flags` | 更新 compact 标记（truncated / excluded），默认 no-op |
 
