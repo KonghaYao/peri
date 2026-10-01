@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use agent_client_protocol::schema::v1::{SetSessionConfigOptionResponse, SetSessionModeResponse};
 use serde_json::Value;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use super::super::notify::{extract_session_id, send_config_option_update};
 use super::super::{apply_profile_effort, parse_permission_mode, AcpServerConfig, SessionState};
@@ -14,13 +14,13 @@ use crate::dispatch::config_update::make_config_options;
 use crate::provider::LlmProvider;
 use crate::transport::types::AcpError;
 
-fn persist_config(cfg: &AcpServerConfig) {
-    let c = cfg.peri_config.read();
-    // 写回当前生效层：路径决策在 ConfigSource 加载时一次性确定（工作区存在则
-    // 分层写回工作区，否则写全局），与读取完全对称，不存在第二套实现。
-    if let Err(e) = cfg.config_source.save(&c) {
-        tracing::warn!(error = %e, "Failed to persist config");
-    }
+fn expected_revision(
+    cfg: &AcpServerConfig,
+) -> Result<peri_config::ConfigurationRevision, AcpError> {
+    cfg.config_source
+        .snapshot()
+        .map(|snapshot| snapshot.revision())
+        .ok_or_else(|| AcpError::new(-32603, "Configuration authority unavailable"))
 }
 
 pub(crate) async fn handle_set_mode(
@@ -47,6 +47,14 @@ pub(crate) async fn handle_set_config_option(
     sessions: &mut HashMap<String, SessionState>,
     transport: &Arc<dyn crate::transport::AcpTransport>,
 ) -> Result<Value, AcpError> {
+    let revision = if matches!(
+        params.get("configId").and_then(Value::as_str),
+        Some("model" | "thinking_effort" | "context_1m")
+    ) {
+        Some(expected_revision(cfg)?)
+    } else {
+        None
+    };
     let config_id = params
         .get("configId")
         .and_then(|v| v.as_str())
@@ -59,59 +67,41 @@ pub(crate) async fn handle_set_config_option(
             cfg.permission_mode.store(mode);
             info!(mode = %value, "Permission mode changed via configOption");
         }
-        "model" => {
-            {
-                let mut c = cfg.peri_config.write();
-                c.config.active_alias = value.to_string();
-            }
-            let new_provider = {
-                let c = cfg.peri_config.read();
-                LlmProvider::from_config_for_alias(&c, value)
-            };
-            if let Some(new_provider) = new_provider {
-                info!(model_id = %value, model = %new_provider.model_name(), "Model changed via configOption");
-                *cfg.provider.write() = new_provider;
-            }
-            // Model switch → invalidate cached LLM instances
-            if let Some(s) = sessions.get_mut(session_id) {
-                s.agent_pool.invalidate();
-            }
-            persist_config(cfg);
-        }
-        "thinking_effort" => {
-            apply_profile_effort(&cfg.peri_config, value);
-            // 同步更新 LlmProvider（thinking 变更需要重建 provider）
-            let new_provider = {
-                let c = cfg.peri_config.read();
-                LlmProvider::from_config(&c)
-            };
-            if let Some(new_provider) = new_provider {
-                *cfg.provider.write() = new_provider;
-            }
-            // Thinking 变更 → invalidate cached LLM 实例
-            if let Some(s) = sessions.get_mut(session_id) {
-                s.agent_pool.invalidate();
-            }
-            persist_config(cfg);
-            info!(effort = %value, "Thinking effort changed via configOption");
-        }
-        "context_1m" => {
-            let enabled = value == "true" || value == "1";
-            let mut updated = false;
-            {
-                let mut c = cfg.peri_config.write();
-                let alias = c.config.active_alias.clone();
-                if let Some(profile) = c.config.profiles.get_mut(&alias) {
-                    profile.context_1m = enabled;
-                    updated = true;
+        "model" | "thinking_effort" | "context_1m" => {
+            let candidate = parking_lot::RwLock::new(cfg.peri_config.read().clone());
+            match config_id {
+                "model" => candidate.write().config.active_alias = value.to_owned(),
+                "thinking_effort" => apply_profile_effort(&candidate, value),
+                "context_1m" => {
+                    let mut config = candidate.write();
+                    let alias = config.config.active_alias.clone();
+                    let profile = config.config.profiles.get_mut(&alias).ok_or_else(|| {
+                        AcpError::new(-32602, "active profile has no usable provider")
+                    })?;
+                    profile.context_1m = value == "true" || value == "1";
                 }
+                _ => unreachable!(),
             }
-            if updated {
-                persist_config(cfg);
-                info!(enabled = %enabled, "Context 1M changed via configOption (persisted)");
-            } else {
-                warn!(enabled = %enabled, "Context 1M configOption skipped: active profile not found");
+            let candidate = candidate.into_inner();
+            let provider = LlmProvider::from_config(&candidate)
+                .ok_or_else(|| AcpError::new(-32602, "active profile has no usable provider"))?;
+            let accepted = cfg
+                .config_source
+                .save(
+                    revision.expect("persistent option has a revision"),
+                    &candidate,
+                )
+                .map_err(|_| AcpError::new(-32603, "Failed to persist config"))?;
+            *cfg.peri_config.write() = accepted.settings().clone();
+            *cfg.provider.write() = accepted
+                .provider()
+                .cloned()
+                .map(LlmProvider::from_resolved)
+                .unwrap_or(provider);
+            if let Some(state) = sessions.get_mut(session_id) {
+                state.agent_pool.invalidate();
             }
+            info!(config_id = %config_id, value = %value, "Configuration option persisted");
         }
         _ => {
             debug!(config_id = %config_id, "Unknown config option");
@@ -133,10 +123,11 @@ pub(crate) async fn handle_update_config(
     sessions: &mut HashMap<String, SessionState>,
     transport: &Arc<dyn crate::transport::AcpTransport>,
 ) -> Result<Value, AcpError> {
+    let revision = expected_revision(cfg)?;
     let session_id = extract_session_id(params, "");
     let new_cfg: crate::provider::PeriConfig =
         serde_json::from_value(params.get("config").cloned().unwrap_or_default())
-            .map_err(|e| AcpError::new(-32602, format!("Invalid config: {e}")))?;
+            .map_err(|_| AcpError::new(-32602, "Invalid config"))?;
 
     if new_cfg.config.providers.is_empty() {
         return Err(AcpError::new(-32602, "providers cannot be empty"));
@@ -179,11 +170,19 @@ pub(crate) async fn handle_update_config(
         })?;
         refreshed.push((id.clone(), environment.clone(), candidate, provider));
     }
-    cfg.config_source
-        .save(&new_cfg)
+    let accepted = cfg
+        .config_source
+        .save(revision, &new_cfg)
         .map_err(|_| AcpError::new(-32603, "Failed to persist config"))?;
-    *cfg.peri_config.write() = new_cfg;
-    *cfg.provider.write() = new_provider;
+    *cfg.peri_config.write() = accepted.settings().clone();
+    *cfg.provider.write() = accepted
+        .provider()
+        .cloned()
+        .map(LlmProvider::from_resolved)
+        .unwrap_or(new_provider);
+    for (_, _, candidate, _) in &mut refreshed {
+        candidate.config.providers = accepted.settings().config.providers.clone();
+    }
     for (_, environment, candidate, provider) in &refreshed {
         *environment.cfg.peri_config.write() = candidate.clone();
         *environment.cfg.provider.write() = provider.clone();

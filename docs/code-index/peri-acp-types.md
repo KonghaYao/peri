@@ -7,7 +7,10 @@
 
 配置输入通道契约在 `src/configuration.rs`：`ConfigurationRequest::ReadEnvironment`
 按名称读取配置 provider 环境，`ConfigurationValue::Environment` 保留缺省状态；
-该契约只描述来源输入，不承担 Peri 内部有效配置的定义与组装。
+`WriteTextIfUnchanged { expected, content }` 描述目标文件字节 CAS，`Bool(false)`
+表示冲突，expected 的 None 与空正文不同。该契约只描述来源 I/O，不定义有效配置；
+typed schema、默认值、领域合并、scope/revision/explain/update 归
+[`peri-config`](peri-config.md)，本 crate 不反向依赖 core 或业务消费者。
 
 - 定位：契约类型层（type contract layer between layers）——被 peri-agent、peri-acp、peri-middlewares、peri-runtime、peri-tui、peri-workflow、peri-controller、peri-resources 共同依赖（各 Cargo.toml 均声明 `peri-acp-types`）；定义共享类型/枚举/trait；session 契约还包含共享队列、inbox 唤醒、cron task owner 与 cancel 判定，执行编排由 Agent 层负责
 - 事实源矩阵（本层定义、他层 re-export 或消费）：`identity`（AgentId/EventEnvelope/CancelRequest）、`event_v2`（三层事件 + `*_event_to_executor`）、`compact`（CompactConfig/CompactOutcome）、`tools`（BaseTool）、`session`（TurnId/MessageQueue/AgentRuntime）、`messages`（BaseMessage/MessageContent）

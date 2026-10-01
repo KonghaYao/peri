@@ -79,7 +79,11 @@ pub async fn run_kit_fullscreen(
     // 2b0. 从 AppConfig.extra 提取旧 TUI 键初始化 TuiConfig（向后兼容）
     {
         let cfg = app.services.peri_config.read();
-        let tui_config = crate::config::TuiConfig::from_extra(&cfg.config.extra);
+        let tui_config = app
+            .config_source
+            .snapshot()
+            .map(|snapshot| snapshot.ui().clone())
+            .unwrap_or_else(|| crate::config::TuiConfig::from_extra(&cfg.config.extra));
         let _ =
             atoms::TUI_CONFIG_HANDLE.set(std::sync::Arc::new(parking_lot::RwLock::new(tui_config)));
     }

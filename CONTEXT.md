@@ -52,3 +52,20 @@ _Avoid_: 与某个配置文件的原始正文、进程环境或 UI 草稿混用�
 
 **配置权威面（Configuration authority）**：Peri 内部负责定义并组装有效配置及其来源解释、变更接纳的唯一权威；业务消费配置，不自行再次决定来源与合并规则。
 _Avoid_: 将只提供文件/环境输入的通道、外部来源提供方或任意共享可变 map 称为配置权威面。
+
+**配置作用域（Configuration scope）**：`ConfigurationScope` 中的绝对执行目录与选中全局 settings 路径，界定一份项目配置视图。
+_Avoid_: 与 session 身份、权限 scope 或 provider 所在机器环境混用。
+
+**配置快照（Configuration snapshot）**：已采集输入经纯 typed resolver 得到的不可变投影；消费者持有同 scope/revision 的结果，reload 不改变旧快照。
+_Avoid_: 与 UI 草稿、session frozen prefix 或可随文件变动自动热更新的 map 混用。
+
+**配置版本（Configuration revision）**：由 scope、来源正文与具名环境内容确定的版本身份，用于解释与更新冲突检查。
+_Avoid_: 与递增全局序号、时间戳、秘密值或访问令牌混用。
+
+**编辑基线版本（Edit baseline revision）**：编辑开始时从基线配置快照捕获、随草稿保存并作为 expected revision 提交的 token；保存返回的 accepted snapshot 才是发布依据。
+_Avoid_: 提交时读取最新 revision 代替旧草稿基线，或把 public core 的 token 参数等同于延迟 UI / 远程 wire 已接线。
+
+**字节 CAS（Byte compare-and-swap）**：目标正文与预期字节相同才替换；区分文件不存在与空文件，合作写者在比较与替换间共用文件锁。
+_Avoid_: 将它等同于多来源原子事务、对不合作编辑器的写隔离或全系统热更新。
+
+配置术语的现行设计见 [configuration-authority.md](docs/design/configuration-authority.md)；LSP、插件生命周期、hook、OS 执行环境及存储 locator/credentials 仍遵守专属能力边界。

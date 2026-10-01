@@ -8,11 +8,15 @@ Builtin MCP 的工具、server handler 与 LSP 客户端/pool 由独立 crate �
 
 配置数据面还提供 `ConfigurationClient::read_environment`（`ReadEnvironment`）：
 只按名称读取 provider 环境，缺省与非法名称/编码区分，不回落计算宿主。
-该数据面统一输入 I/O；全系统配置的解析、合并与版本快照权威尚未集中。
+该数据面还提供 `write_text_if_unchanged`：expected 正文字节 CAS，进程与按目标路径
+协调的跨进程锁覆盖比较和 atomic replacement；不合作编辑器与跨文件事务不在保证内。
+[`peri-config`](peri-config.md) 已持有核心 settings/provider/MCP/Langfuse/UI 的纯 typed
+规则与资源开关 projection、scoped snapshot/revision/explain/updateCAS；输入 provider 不获得组装权威。
+LSP、插件生命周期、hook 格式、OS 执行环境与存储 locator/credentials 仍按专属边界维护。
 
 | 能力 | crate 与入口 | 主要实现 | 说明 |
 | --- | --- | --- | --- |
-| 配置数据面 | `peri-mcp-config`：`mcp-packages/config/src/{lib,client,server}.rs`；契约 `peri-acp-types/src/configuration.rs` | `ConfigurationClient`、`ConfigurationMcpServer`、`config/execute` | 独立于 session 工具池的启动控制能力；同步消费通过专用 runtime 线程走真实 MCP，读写/atomic 保存/路径权威/来源身份探测由 provider 单一维护。默认 duplex，部署可在首次访问前 `install_client` 注入 TCP 客户端；仅供受信部署通道，不暴露模型工具，不提供本机 fallback。 |
+| 配置数据面 | `peri-mcp-config`：`mcp-packages/config/src/{lib,client,server}.rs`；契约 `peri-acp-types/src/configuration.rs` | `ConfigurationClient`、`ConfigurationMcpServer`、`config/execute`、`write_text_if_unchanged` | 独立 bootstrap byte/env/path I/O 与字节 CAS，合作写者共享跨进程锁；不决定 typed 规则或发布 snapshot。默认 duplex，可首次访问前选 TCP provider，不新增 daemon/model 工具，不回落本机；core 权威见 [peri-config](peri-config.md) |
 | MCP 通用映射 | `peri-mcp-common`：`mcp-packages/common/src/lib.rs` | `server_info`、`rmcp_tool_from_base`、`list_tools_of`、`invoke_tool_call`、`parse_optional_u64`；`failure.rs`、`result_mapping.rs`、`process_env.rs` | 多个实例共用的 server metadata、schema 映射、IF-D14 结果映射、安全失败类型和 process environment lock；不依赖宿主 middleware。 |
 | Agent 定义格式 | `peri-mcp-common`：`mcp-packages/common/src/agent_definition/` | `ClaudeAgent`、`ClaudeAgentFrontmatter`、`ToolsValue`、`parse_agent_file` | 本地与远端 MCP Agent 共用的纯数据与 Markdown/YAML 解析，不扫描目录、不读取文件、不签发授权；保留 omitted / explicit zero / allowlist 三态。workspace 提供扫描与原始资源，宿主 registry 消费定义并按来源实施信任、批准和执行策略；不向计算核心添加 YAML 依赖。 |
 | Workspace 宿主读取 | `peri-mcp-workspace`：`mcp-packages/workspace/src/{image,file_observation}.rs` | custom request `image/read` / `workspace/readText`，由 `workspace.rs::on_custom_request` 分派 | 图片附件读取、格式与大小校验及归因/LSP 的完整正文读取归工具环境；不增加模型工具。宿主 image reader 与 `peri-middlewares/src/workspace_io.rs` 只经当前会话可见的 builtin workspace 句柄读取，关闭/不可得不回落宿主磁盘。 |
@@ -22,7 +26,7 @@ Builtin MCP 的工具、server handler 与 LSP 客户端/pool 由独立 crate �
 | Cron | `peri-mcp-cron`：`mcp-packages/cron/src/lib.rs` | `CronMcpServer`、`scheduler.rs`、`tools.rs` | `CronScheduler`、`CronSchedulerPortHandle`、scheduler types 与三种工具由该 crate 导出。宿主 tick task 的 spawn、join 与 reconnect 仍归 `peri-middlewares` runtime。 |
 | LSP | `peri-mcp-lsp`：`mcp-packages/lsp/src/lib.rs` | `LspMcpServer`、`LspTool`、`LspClient`、`LspServerPool`、`tool.rs`、`formatters.rs`、`config.rs` | MCP 工具、客户端、协议格式化、配置合并与 host 级唯一 pool 归该 crate；host 装配经 `create_host_lsp_pool` 注入同一 `Arc`，`LspSyncMiddleware` 只消费端口，host shutdown 负责调用有界关闭。 |
 | Workspace | `peri-mcp-workspace`：`mcp-packages/workspace/src/lib.rs` | `WorkspaceMcpServer`、`workspace.rs`、`git_watch.rs`、`resources/`、`filesystem/`、`terminal.rs`、`fuzzy.rs`、`shell_hints.rs`、`filesystem/path_hints.rs` | 文件、目录、搜索和 Bash 工具的 handler 与实现归该 crate；`git_watch.rs` 持有 `workspace://git/ref` 资源的采样状态机与正文（原宿主 `GitWatchMiddleware` 的逐字搬迁，v4 wave 4 下沉），订阅面（`list_resources` / `read_resource` / `accepted_subscription_filter` / `listen`）在 `workspace.rs`，只在成功的 `tools/call` 后采样且**无订阅者不采样**；输出持久化使用 `peri-mcp-common::shell`，纯截断复用 `peri-agent::agent::async_tasks`；common 的 `shell_executor.rs` 承载本地后台执行，`shell_output.rs` 承载两路 tee 输出，Agent 仅通过 `ShellExecutor` 注入端口消费。失败点的可行动诊断（路径 did-you-mean、命令未找到的 PATH 候选）也归该 crate，见下节。 |
-| Workspace 资源面 | `peri-mcp-workspace`：`mcp-packages/workspace/src/resources/mod.rs` | `resources/{mod,skills,agents,instructions,builtin,scan,path,frontmatter}.rs`；URI/`_meta`/DTO 契约在 `peri-acp-types/src/workspace_resources.rs`，skills 扩展键在 `peri-acp-types/src/skills.rs` | skills / agents / 项目指令的扫描与只读提供（`resources/list|read|templates/list`、`skills/list|get`）。`WorkspaceResourcesInput` 构造期注入：skill 根为 User/Project/Plugin（带 `plugin_name`），builtin 静态资产唯一副本在 provider，由 `disableBundledSkills` 控制；`skillsDir` 全局根装配已删除。会话装配也注入 Agent 项目/插件根、指令与 meta 面；未装 provider 不声明 skills 扩展。未知 URI `-32602`、不存在 `-32002`；不注册技能工具，宿主 `SkillTool`/`DiscoverSkillsTool` 仍聚合来源。 |
+| Workspace 资源面 | `peri-mcp-workspace`：`mcp-packages/workspace/src/resources/mod.rs` | `resources/{mod,skills,agents,instructions,builtin,scan,path,frontmatter}.rs`；URI/`_meta`/DTO 契约在 `peri-acp-types/src/workspace_resources.rs`，skills 扩展键在 `peri-acp-types/src/skills.rs` | skills / agents / 项目指令的扫描与只读提供（`resources/list|read|templates/list`、`skills/list|get`）。`WorkspaceResourcesInput` 构造期注入：skill 根为 User/Project/Plugin（带 `plugin_name`），builtin 静态资产唯一副本在 provider，由 core `snapshot.resources().disable_bundled_skills` 经资源输入控制，正常 consumer 不重读全局关闭位；`skillsDir` 全局根装配已删除。会话装配也注入 Agent 项目/插件根、指令与 meta 面；未装 provider 不声明 skills 扩展。未知 URI `-32602`、不存在 `-32002`；不注册技能工具，宿主 `SkillTool`/`DiscoverSkillsTool` 仍聚合来源。 |
 
 ## 宿主与插件边界
 

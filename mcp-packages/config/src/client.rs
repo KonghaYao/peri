@@ -243,6 +243,22 @@ impl ConfigurationClient {
         }
     }
 
+    pub fn write_text_if_unchanged(
+        &self,
+        path: &Path,
+        expected: &Option<String>,
+        content: &str,
+    ) -> io::Result<bool> {
+        match self.request(ConfigurationRequest::WriteTextIfUnchanged {
+            path: path.into(),
+            expected: expected.clone(),
+            content: content.into(),
+        })? {
+            ConfigurationValue::Bool(written) => Ok(written),
+            _ => Err(invalid_response()),
+        }
+    }
+
     pub fn exists(&self, path: &Path) -> io::Result<bool> {
         match self.request(ConfigurationRequest::Exists { path: path.into() })? {
             ConfigurationValue::Bool(exists) => Ok(exists),

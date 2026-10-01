@@ -40,6 +40,14 @@ pub fn write_text_atomic(path: &Path, content: &str) -> io::Result<()> {
     client()?.write_text_atomic(path, content)
 }
 
+pub fn write_text_if_unchanged(
+    path: &Path,
+    expected: &Option<String>,
+    content: &str,
+) -> io::Result<bool> {
+    client()?.write_text_if_unchanged(path, expected, content)
+}
+
 pub fn exists(path: &Path) -> io::Result<bool> {
     client()?.exists(path)
 }
@@ -75,5 +83,7 @@ pub fn current_dir() -> io::Result<PathBuf> {
         .ok_or_else(|| io::Error::other("configuration working directory unavailable"))
 }
 
+#[cfg(test)]
+mod cas_test;
 #[cfg(test)]
 mod tests;

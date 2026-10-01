@@ -100,6 +100,13 @@ async fn skill_server_config(tmp: &tempfile::TempDir, startup_cwd: String) -> Ac
         make_peri_config_with_provider(make_provider_config("test", "openai", "key", "model"));
     let provider = LlmProvider::from_config(&config).unwrap();
     let mut cfg = make_server_config(config, provider, tmp).await;
+    cfg.config_source = Arc::new(
+        crate::provider::ConfigSource::load_at(
+            std::path::Path::new(&startup_cwd),
+            crate::provider::config_path(),
+        )
+        .unwrap(),
+    );
     cfg.workspace_assembly = Some(crate::host::assemble::WorkspaceAssembly {
         startup_cwd,
         bare: true,

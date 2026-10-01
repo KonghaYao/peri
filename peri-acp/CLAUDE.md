@@ -22,7 +22,11 @@
 
 ## 稳定不变量
 
-- 配置 I/O 与全局路径权威在 `peri-mcp-config`，启动前使用独立 MCP 通道，不能依赖待配置的 session 工具池；`provider/store.rs::ConfigSource` 保留类型校验、分层合并与差异保存，布局探测失败不得误写全局层，详见 `../mcp-packages/config/CLAUDE.md`。
+- 配置定义、typed 解析、provider/profile 默认值、分层合并与差异保存归 `peri-config`；`provider/{config,store}.rs` 仅 re-export。正常 `peri_config::settings::ConfigSource` 持有 `ConfigurationSystem`，固定 scope/layout，并提供 snapshot、显式 reload 与 CAS 保存；布局或校验失败不得误写全局层。见 `../peri-config/CLAUDE.md`。
+- 配置输入经独立 bootstrap `peri-mcp-config` 采集，不依赖待配置的 session 工具池，不新增 daemon/model 工具；环境来自选中的 source provider，不读计算宿主 fallback。核心不反向依赖 ACP 业务实现。
+- 宿主创建的 MCP pool 在初始化前绑定同一 `ConfigSource` snapshot；host Langfuse 使用该快照的 typed projection，LLM adapter 消费 core `ResolvedProvider`。保存保留同文件兄弟域；失败不 publish，显式 reload 不热替换已初始化 pool 或已冻结 session prefix。
+- workspace 资源输入使用 `snapshot.resources().disable_bundled_skills`，不重新读取全局关闭位；技能回归 fixture 必须使用与生产 source 一致的选中 global 路径。需要新值时显式 reload 并重新取得 snapshot，旧 pool 固定旧 Arc，没有 hot watcher。lenient 无 authority 仅临时可读，不可写。
+- `ConfigSource::save(expected_revision, &PeriConfig)` 返回 accepted snapshot；持久 configOptions / update_config 必须 candidate → 验证 → 保存成功 → 从 accepted snapshot 发布，失败不更新 live provider / agent cache、不 notify、不返回成功。revision 在编辑开始捕获，不得提交时换成最新版；远程 wire 与延迟 UI draft 的基线 token 仍需审计，见配置 active issue。
 - `SessionManager` 在每条 session/new、load、resume 或 fork 路径注册 session caps；发送扩展事件前按该 session 的 caps 门控。
 - 新增 `ExecutorEvent` 或 ACP 扩展事件时，覆盖发射、ACP mapper/forwarder、caps 门控（如适用）和客户端消费；不能只增加枚举或单一发送点。
 - 给 Hub/Web 的事件投影必须从 canonical event 映射为版本化 allowlist DTO；不得复用包含消息、路径、输出或错误正文的 TUI 私有 `event_json`。`peri.agentActivity` 是该安全摘要面，legacy `peri.agentEvent` wire 保持独立兼容。
@@ -53,6 +57,7 @@ cargo test -p peri-acp --doc
 - session/caps 改动：运行相关 crate 测试，并人工检查所有创建、加载、恢复、fork 入口均在 session 就绪后注册 caps。
 - 事件改动：运行 mapper 测试，并人工沿服务端发送点到 TUI/stdio 客户端检查新增事件覆盖；现有 mapper 测试不自动证明全链路完整。
 - Prompt、middleware 或 Langfuse 改动：按 `ARC-FROZEN-001`、`ARC-MIDDLEWARE-001`、`ARC-SECRET-001` 逐项核对。
+- 配置规则改动：先读 `../peri-config/CLAUDE.md` 与 `../docs/design/configuration-authority.md`；领域回归在 core，ACP 验证消费与装配接线。LSP、插件生命周期、hook 格式及存储/执行 credentials 仍遵守专属能力边界。
 - 触碰 builtin `workspace` 资源面的测试（agent / 技能 / 指令 / meta 文档）：用例依赖 `PERI_MCP_BUILTIN` **默认态**，而该进程级 env 由开关组用例在 `#[serial]` 临界区内改写 ⇒ 读侧必须同键 `#[serial]`（`TEST-HERMETIC-001`「串行化」的读侧闭合；漏标时并行窗口内池无 `workspace` 句柄、资源面按 X4 静默缺席，症状是内容断言拿到 `None`/空）。
 
 ## W5（2026-09-29，提交 f66bd251）

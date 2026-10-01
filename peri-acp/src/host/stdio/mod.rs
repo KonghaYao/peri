@@ -106,7 +106,7 @@ async fn assemble_stdio_config(input: StdioInput) -> anyhow::Result<super::AcpSe
     ));
     let peri_config = config_source.loaded_merged();
     let provider = LlmProvider::from_config(&peri_config)
-        .or_else(LlmProvider::from_env)
+        .or_else(|| LlmProvider::from_source(&config_source))
         .ok_or_else(|| anyhow::anyhow!("No LLM provider configured. Set ANTHROPIC_API_KEY or OPENAI_API_KEY, or configure ~/.peri/settings.json"))?;
 
     tracing::info!(

@@ -149,7 +149,11 @@ impl McpClientPool {
         status_tx: tokio::sync::watch::Sender<McpInitStatus>,
     ) {
         pool.seal_builtin_context();
-        let config = match super::config::load_bare_config() {
+        let loaded = match pool.configuration_snapshot.get() {
+            Some(snapshot) => super::config::load_bare_config_from_snapshot(snapshot),
+            None => super::config::load_bare_config(),
+        };
+        let config = match loaded {
             Ok(config) => config,
             Err(error) => {
                 publish_config_failure(&pool, &status_tx, &error.to_string());
@@ -172,7 +176,13 @@ impl McpClientPool {
         pool.seal_builtin_context();
         // 配置加载失败必须是可见的 Failed：不发布 Ready、不标记 initialized、
         // 不注册任何 server（因而也不会开始 transport）。B 在 1R 消费该失败。
-        let (config, plugin_sources) = match super::load_merged_config_full(cwd, claude_home) {
+        let loaded = match pool.configuration_snapshot.get() {
+            Some(snapshot) => {
+                super::config::load_merged_config_from_snapshot(cwd, claude_home, snapshot)
+            }
+            None => super::load_merged_config_full(cwd, claude_home),
+        };
+        let (config, plugin_sources) = match loaded {
             Ok(loaded) => loaded,
             Err(error) => {
                 publish_config_failure(&pool, &status_tx, &error.to_string());

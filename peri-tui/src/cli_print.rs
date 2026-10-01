@@ -88,7 +88,7 @@ pub async fn run_print(
 
     // 构建 provider
     let provider = peri_tui::app::agent::LlmProvider::from_config(&peri_config)
-        .or_else(peri_tui::app::agent::LlmProvider::from_env)
+        .or_else(|| peri_tui::app::agent::LlmProvider::from_source(&config_source))
         .ok_or_else(|| {
             anyhow::anyhow!("未配置 LLM provider。请设置 ANTHROPIC_API_KEY 或 OPENAI_API_KEY")
         })?;

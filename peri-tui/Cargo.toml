@@ -63,6 +63,7 @@ arboard = "3"
 png = "0.18"
 base64 = { version = "0.23.1", features = ["alloc"] }
 peri-theme = { path = "../peri-theme" }
+peri-config.workspace = true
 peri-acp = { path = "../peri-acp" }
 peri-acp-types = { path = "../peri-acp-types" }
 peri-web-pty = { path = "../peri-web-pty" }

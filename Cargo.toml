@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "peri-config",
     "peri-acp",
     "peri-acp-types",
     "peri-agent",
@@ -43,6 +44,7 @@ codegen-units = 1
 # ============================================================================
 
 [workspace.dependencies]
+peri-config = { path = "peri-config" }
 # --- Async runtime ---
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["rt"] }

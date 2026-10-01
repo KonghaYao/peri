@@ -5,6 +5,14 @@
 
 ## 架构速览
 
+配置规则与来源权威见 [`peri-config`](peri-config.md)。ACP `provider/{config,store}.rs`
+仅 re-export core 类型与 `settings::ConfigSource`；正常 source 持有 `ConfigurationSystem`，
+提供同 scope 的 snapshot、revision 与 CAS 保存。host 装配在 MCP 初始化前注入同一
+快照，并取其 provider/Langfuse 投影；Model adapter 构造仍由 ACP 完成。
+workspace 资源输入从 `snapshot.resources().disable_bundled_skills` 取关闭位，不重读
+全局值；技能 fixture 使用选中的 global 配置路径。新值须显式 reload 并重取 snapshot，
+旧 pool 固定旧 Arc，没有 hot watcher。lenient 无 authority 仅临时可读、不可写。
+
 - 数据流：`ACP request → transport(mpsc/stdio) → host 部署单元 → dispatch 纯函数 → SessionManager(frozen/caps) → run_prompt → peri-agent run_session_loop → ExecutorEvent → event/forwarder+mapper → SessionUpdate / AcpEvent → client`
 - 服务入口：`src/host/mod.rs` 的 `run_acp_server(AcpTransport, AcpServerConfig)` 与 `host/lifecycle.rs::spawn_acp_server`（TUI/print 保留返回的 non-Clone `AcpHostHandle`，`session/prompt` spawn 后台 task 保证 cancel 可响应）；stdio 部署单元 `src/host/stdio/mod.rs:38` 的 `run_acp_stdio(StdioInput)`（Provider、合并配置与 `ConfigSource` 统一按 canonicalized `input.cwd` 冻结，经共享 session-map 变体 `run_acp_server_with_sessions` 接入统一 host 核心）。方法分发：`src/host/requests.rs:22` 的 `handle_request` match（按方法分派到 `host/requests/` 子模块：session_lifecycle / plugin / config_options / mcp_oauth / workflow / rewind）——**stdio 与 TUI 共用统一 host 核心 + `handle_request`（单一路径，transport 多态）**
 - 稳定不变量：`SessionManager` 在每条 session/new、load、resume、fork 路径注册 caps，发送扩展事件前按 session caps 门控；frozen 数据经版本化 ThreadStore snapshot 跨进程复用、会话内不可漂移（ARC-FROZEN-001）；事件改动须覆盖发射/mapper/forwarder/caps 门控/客户端五层（ARC-EVENT-001）；Hub/Web 投影必须从 canonical event 映射为版本化 allowlist DTO（`event/activity.rs`），禁止复用 TUI 私有 `event_json`；中间件链序事实源在 Agent 层 `production_blueprint`（ARC-MIDDLEWARE-001），ACP 仅构造装配上下文；Langfuse bridge/tracer 实现在 `peri-controller/src/langfuse/`，ACP `event/forwarder.rs` 只保留协议化前分支的接线点（None=禁用），不参与业务链路
@@ -32,7 +40,7 @@ Session ID 恢复与生命周期回归：`src/host/requests_workspace_cases_test
 | 改 Goal 状态、持久化与客户端投影 | `src/session/goal_state/mod.rs` + `src/session/event_sink/legacy.rs` + `src/event/{mod,mapper}.rs`；契约 DTO 在 `peri-acp-types/src/{goal,event,event_v2}.rs` | `GoalState::snapshot`；`GoalController::increment_continuation`；`StateEvent::GoalSnapshot` → `ExecutorEvent::GoalSnapshot` → `AcpEvent::GoalSnapshot` | continuation 计数归 session Goal 状态持有并随 Goal 持久化；Agent 每轮发只读快照，event sink 按 `agent_event` capability 投递给客户端，TUI 不直读 Agent/Middleware；契约 ARC-BOUNDARY-001 / ARC-EVENT-001 |
 | 改事件发射/forwarder | `src/event/forwarder.rs` | `spawn_eventbus_forwarder(handles, on_event, bridge) -> JoinHandle<()>` | 消费 v2 EventBus 三通道（render/state/observe），**biased select：render 先于 state**（防 partial 污染）；主 executor/workflow 必须在 producer drop 后 await handle，禁止 terminal 越过 final usage；JoinError fail closed；Langfuse 在协议化前分支消费；observe Lagged 容错；映射后经 `on_event(UnstampedEvent, ExecutorEvent)` 送 event_sink |
 | 改 Hub/Web 事件投影 | `src/event/activity.rs` | `map_agent_activity(&ExecutorEvent) -> Option<AgentActivityWire>`（:93）；`AgentActivityKind`（:19）/`AgentActivityStatus`（:36） | `peri.agentActivity` 安全摘要面：allowlist 字段 + `safe_label`/`truncate_utf8`/`hash_correlation` 清洗；禁止携带消息/路径/输出/错误正文；cap 未双向协商不投影 |
-| 改 provider/模型/配置 | `src/provider/mod.rs` + `config.rs` + `store.rs` | `LlmProvider` enum（mod.rs:23，OpenAi/Anthropic）；`from_config`（:118）/`from_config_for_alias`（:125）/`into_model`（:246）；`PeriConfig`（config.rs:13）；`ConfigSource`（store.rs:95，读写路径唯一事实源，`load_at` :107 / `save` :229） | 模型切换走 `session/set_config_option` 的 `configId="model"` 分支（requests/config_options.rs:62，`handle_set_config_option` :44）；`session/update_config` 校验 providers/profile、持久化成功后发布，并更新同配置源会话的 provider 连接及缓存，保留各会话 profile/frozen；`AgentPool::has_valid_cache`（session/agent_pool.rs:64）按 provider 指纹复用 LLM 实例 |
+| 改 provider/模型/配置 | `src/provider/mod.rs`、`src/host/requests/config_options.rs`；core `peri-config/src/{provider,settings,system}.rs` | `LlmProvider::{from_config,from_config_for_alias,from_source,into_model}`；core `ConfigSource::save(expected_revision, &PeriConfig)`；`handle_set_config_option` / `handle_update_config` | 持久字段先构造并验证 candidate，保存成功后用 accepted snapshot 发布；失败不更新 live provider / agent cache、不 notify、不 success。更新同源会话连接保留各自 profile/frozen；延迟 UI draft 和远程 wire 的编辑基线 token 仍需审计 |
 | 改 transport（新增传输） | `src/transport/mod.rs` + `mpsc.rs` + `stdio.rs` + `router.rs` | `AcpTransport` trait；`mpsc_transport_pair()`；`RequestRouter::{register,dispatch,close,wait_closed}`；`PendingRequest`；`StdioTransport::from_reader_writer` | router 以 owned pending handle 统一线性化 response、caller cancellation 与 terminal close，数字 ID 在正数域回绕并以 owner identity 防 stale handle 误删；终止以稳定 `Transport closed` 结算当前/后续请求，连接静默仍无隐式 timeout。MPSC 任一 pump/channel 关闭终止逻辑 pair，并保留已转发 incoming queue；stdio reader EOF/error 与所有 writer 路径汇入同一 terminal 状态。String response id 仍走 unmatched 转发；legacy `{"type":"cancel"}` 仍只在 stdio pump 精确拦截。契约：ARC-TRANSPORT-001；测试：`router_test.rs`、`mpsc_test.rs`、`stdio_test.rs`。 |
 | 改 host 退出 / Langfuse 部署关闭 | `src/host/lifecycle.rs` + `src/host/shutdown.rs` + `src/host/task_scope.rs` + `src/session/mod.rs` | `spawn_acp_server`（lifecycle.rs:37）；`AcpHostHandle::shutdown`（:67）；`HostExitContext::finish`；`SessionManager::take_for_close`（session/mod.rs:249）/`AcpSession::close_resources`（:173） | 真实 host 任务保留至 join，取消等待不取走句柄；Incomplete 把任务和实际待关闭 session 留在退出 context 重试，完整 drain 后才使用 fresh assembly 的 non-Clone Langfuse 关闭权限；共享外部注入不授权（ARC-HOST-SHUTDOWN-001） |
 | 改 prompt 组装（system prompt） | `src/prompt/mod.rs` + `prompts/sections/*.md` | `PromptTemplate::render`；`PromptEnv::with_frozen_date` | render 按 zone/order 拼接 section，并用 `peri_model::prompt_cache::SYSTEM_PROMPT_DYNAMIC_BOUNDARY` 把 cached/uncached seam 交给 provider；剥离 token 后须保持旧 prompt bytes，empty 不生成 token（ARC-SERIAL-001）；frozen date 在会话创建时注入，禁止中途重读（ARC-FROZEN-001） |
@@ -88,9 +96,9 @@ Session ID 恢复与生命周期回归：`src/host/requests_workspace_cases_test
 
 | 功能 | 文件 | 入口/关键点 |
 | --- | --- | --- |
-| Provider 构建 | provider/mod.rs | `LlmProvider`（:23）；`from_config_for_alias`（:125）；`into_model`（:246） |
-| 配置结构 | provider/config.rs | `PeriConfig`（:13）/`AppConfig`（:177，`merge_overrides` :232）/`ProviderConfig`（:456） |
-| 配置加载/保存 | provider/store.rs；数据面 `mcp-packages/config/` | `ConfigSource::{load_at,load_lenient,reload_merged,save}`；读写/存在性/canonical 身份与共享路径权威统一经独立 `peri-mcp-config` MCP 通道。保留 typed 校验、固定分层路径及差异保存；同文件不拆层，布局不可得时 lenient 来源也拒绝保存，避免覆盖全局凭据；分层基准变化仍要求重启 |
+| Provider 构建 | `provider/mod.rs`；规则 `peri-config/src/provider.rs` | `LlmProvider::{from_source,from_resolved,from_config_for_alias,into_model}`；消费 `ResolvedProvider`，alias/profile/default/environment 规则归 core，ACP 适配具体 Model |
+| 配置结构 | `provider/config.rs`（re-export）；事实源 `peri-config/src/app.rs` | `PeriConfig` / `AppConfig` / `ProviderConfig` / `ProfileConfig` / `Profiles`；领域 merge 与 validation 归 core |
+| 配置加载/保存 | `provider/store.rs`（re-export）；`peri-config/src/{settings,system,source}.rs` | `ConfigSource::{load_at,load_lenient,snapshot,reload_merged}`、`save(expected_revision, &PeriConfig) -> Result<Arc<ConfigurationSnapshot>>`；caller 在编辑开始捕获 token，成功后消费 accepted snapshot；正常 source 持有 `ConfigurationSystem`，固定布局/同文件不拆层，workspace 相对差异保存与字节 CAS 保留兄弟域；输入 I/O 经独立配置 MCP，布局/校验失败不可误写全局；reload 显式，不热替换旧 pool 或 session prefix |
 
 ### src/transport/（传输抽象）
 
@@ -135,7 +143,7 @@ Session ID 恢复与生命周期回归：`src/host/requests_workspace_cases_test
 | 续跑调度 | host/continuation.rs | `run_continuation_scheduler`（:111） |
 | Host 任务所有权 | host/task_scope.rs | `HostTaskOwner` / `HostTaskSpawner`；生产 timeout driver + 测试 controlled phase driver |
 | writer lease | host/lease.rs | `WriterLease`（:20，多读者单 writer） |
-| 装配 | host/assemble.rs | `assemble_server_config`；`build_legacy_frozen_data` 仅发现保存目录的配置与插件输入，缺失快照在执行资源装配前构建；Langfuse 会话创建成功时安装指标出口（`peri_agent::metrics::set_sink` + `LangfuseMetricsSink`），未配置时不安装、指标不落盘 |
+| 装配 | `host/assemble.rs` | `assemble_server_config`；`build_legacy_frozen_data` 按保存目录准备配置与插件输入；新建 MCP pool 在初始化前绑定 `ConfigSource` snapshot，host Langfuse 消费同快照的 observability；观测成功时安装指标出口，未配置时不安装、指标不落盘 |
 | stage 构建 | host/stage_builder.rs | `build_stage_context`：消费单一 `FrozenSessionData`，派生 frozen language/MetaHarness/date 与 Agent 装配输入，禁止从当轮 config 建第二事实源；frozen 中的项目指令正文来自 P4 内容准入期经 builtin `workspace` 实例读取的 `peri-instruction://workspace/{main\|local}` 资源（W5：`AgentsMdMiddleware` 为纯 adapter、不读盘） |
 | workflow 薄壳 | host/workflow_agent.rs | `create_session_workflow_middleware`（:192，装配经 `WorkflowMiddlewareFactory` 端口）；生产工厂由 `host/assemble.rs` 经 `default_workflow_middleware_factory_with_pool(mcp_pool_concrete.clone())`（:514）注入**带 MCP 池**的实例，使 workflow agent 工具面与主链一样可见 selected builtin tools using raw names |
 | stdio 部署 | host/stdio/ | `run_acp_stdio`（mod.rs:39，`StdioInput` → `assemble_stdio_config` → `run_acp_server_with_sessions`，业务处理走统一宿主）；集成测试 `run_server_integration_test.rs`（initialize → session/new → 通知 wire 链路） |

@@ -25,11 +25,23 @@ flowchart BT
     Process --> Middleware
     Process --> LSP[LSP transport]
     Process --> JS[JavaScript runtime]
+    Config[Peri Config] --> ACP
+    Config --> Middleware
+    Config --> Controller
+    Config --> TUI
+    Types[共享契约 peri-acp-types] --> Config
+    ConfigInput[输入 I/O peri-mcp-config] --> Config
 ```
 
 - 边含义：Model 提供协议能力；Agent 提供 session 运行单元；Runtime 提供多 session 编排；Controller 提供业务操作；ACP 提供协议服务；Middleware 提供 Hook 实现；Resources 提供外部数据抓手
 - 未声明边一律禁止
 - crate 依赖方向进 CI 验证
+
+`peri-config` 是内部配置权威面，向 ACP、Middleware、Controller、TUI 提供
+typed 结果；消费者依赖 core。core 只消费共享契约与来源 I/O，不反向依赖业务层。
+输入 adapter → 纯 resolver → scoped immutable snapshot/revision/explain/updateCAS
+的边界见 [配置权威面](configuration-authority.md)。来源 MCP 独立 bootstrap，
+不通过待配置工具池启动，不增加 daemon 或模型工具；环境来自选中的 source provider。
 
 `peri-process` 是不依赖业务层的 OS 子进程能力：在 spawn 前配置独立进程组或
 Windows 挂起进程，attach 后提供终止请求与实际退出证据。它不拥有 session、
@@ -93,7 +105,7 @@ Windows 挂起进程，attach 后提供终止请求与实际退出证据。它�
 ## 5. Peri Resources 层
 
 - 外部系统门面：抽象外部数据，对上提供抓手
-  - peri-config：直操配置文件（settings.json 等）
+  - 配置来源 I/O：由独立 `peri-mcp-config` bootstrap 能力提供文件正文、具名环境与字节 CAS；有效配置规则归 `peri-config`，不归 Resources 或输入 provider
   - peri-sessions：直操 sqlite（session 持久化、transcript；SqliteThreadStore 实现迁入）
   - MCP 状态维持、HITL broker、secret
 - 不解释业务语义：只保存与适配状态（存储/配置/连接）；重实现仅限协议适配且显式声明
@@ -116,6 +128,7 @@ Windows 挂起进程，attach 后提供终止请求与实际退出证据。它�
 ## 7. Peri ACP 层
 
 - 纯协议实现：ACP 协议适配，不承载业务
+- settings 类型与 `ConfigSource` 由 `peri-config` 提供；正常 source 持有 `ConfigurationSystem`，宿主把同一 scoped snapshot 注入新建 MCP pool，并适配 provider / Langfuse 投影。ACP 不复制 typed 配置解析和来源规则；workspace 资源 consumer 使用 snapshot 的资源开关投影，不重读全局值。新来源须显式 reload 并重取 snapshot，旧 pool 固定旧 Arc，无 hot watcher。
 - 事件协议化映射、caps 门控
 - 全部客户端（TUI/CLI/stdio/IDE/print）一律经 ACP
 - 部署单元：TUI/print = `peri-tui` 客户端装配；stdio/IDE = `run_acp_stdio(StdioInput)`（`peri-acp/src/host/stdio/mod.rs`）→ `assemble_stdio_config` → `run_acp_server`——与 TUI 共用同一 `run_acp_server`（`handle_request` + `dispatch_prompt_turn`），仅 transport 多态（mpsc vs `transport/stdio.rs` `StdioTransport`，JSON-RPC 2.0 newline-delimited）
@@ -126,7 +139,7 @@ Windows 挂起进程，attach 后提供终止请求与实际退出证据。它�
 - cli = 启动接口：装配 View 与 ACP 客户端，不承载业务
 - print = 同层轻量渲染客户端（无界面，输出文本）
 - 只经 ACP 拿数据，不触碰业务层
-- 部署装配输入：cli 全局参数 `--config-file` / `--db-path`（别名 camelCase）进程级重定向全局配置文件与 SQLite 会话数据库路径，TUI / print / `peri acp` 三路径生效；thread store 实例化在装配面（`Resources::open_with` / agent 侧 `open_thread_store_with`），ACP 协议面不感知。已知边界：`peri sync` 与 middlewares 侧 MCP 全局配置、`disableBundledSkills` 仍读写默认 `~/.peri/settings.json`（不跟随重定向）；自定义全局 skill 根的 `skillsDir` 配置已删除。
+- 部署装配输入：cli 全局参数 `--config-file` / `--db-path`（别名 camelCase）选择全局 settings 与 SQLite 会话数据库路径，TUI / print / `peri acp` 三路径消费；MCP 基础配置使用选中来源的 snapshot，UI 类型归 `peri-config::ui`。存储实例化仍在装配面，locator / credentials 不属于本次核心配置迁移。自定义全局 skill 根的 `skillsDir` 已删除。
 
 ## 9. 横切面
 

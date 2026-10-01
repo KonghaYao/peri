@@ -45,7 +45,7 @@ use thiserror::Error;
 use crate::mcp::tool_bridge::effective_mcp_tool_name;
 
 /// `PERI_MCP_BUILTIN` 环境变量名（紧急闸门，A2：显式运维开关，不是静默降级）。
-pub(crate) const BUILTIN_INJECTION_ENV: &str = "PERI_MCP_BUILTIN";
+pub(crate) const BUILTIN_INJECTION_ENV: &str = peri_config::mcp::MCP_BUILTIN_ENV;
 
 /// 默认层注入策略（显式参数；`_with_paths` 与 overlay 都不读 env）。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,20 +80,12 @@ impl BuiltinInjectionPolicy {
     /// 从 env 解析：`off` / `0` → [`Self::none`]；缺失 / 其它值 → [`Self::all`]
     /// （未知值 warn + `all`，不引入第三种未知状态）。
     pub(crate) fn from_env() -> Self {
-        match std::env::var(BUILTIN_INJECTION_ENV) {
-            Ok(raw) => {
-                let value = raw.trim();
-                if value.eq_ignore_ascii_case("off") || value == "0" {
-                    Self::none()
-                } else {
-                    tracing::warn!(
-                        env = BUILTIN_INJECTION_ENV,
-                        "未知取值，按缺省语义注入全部 builtin 实例"
-                    );
-                    Self::all()
-                }
-            }
-            Err(_) => Self::all(),
+        let environment =
+            peri_config::source::read_environment(&[BUILTIN_INJECTION_ENV]).unwrap_or_default();
+        if peri_config::mcp::builtin_enabled(&environment) {
+            Self::all()
+        } else {
+            Self::none()
         }
     }
 

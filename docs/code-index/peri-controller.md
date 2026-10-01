@@ -5,6 +5,11 @@
 
 ## 架构速览
 
+Langfuse 配置类型与规则已迁至 [`peri-config::observability`](peri-config.md)：
+`resolve(settings, environment)` 是纯解析，默认值/clamp/非法值/batch 语义只保留
+一份。Controller `langfuse/config.rs` re-export，session/tracer 消费 typed 配置；
+ACP host 从同一配置 snapshot 取 observability，不由 bridge 重新读来源。
+
 Controller 是控制面宿主：定位 Runtime / Resources、转发会话操作、发布协议化前事件。
 取消策略与业务终态归 Agent，登记和销毁编排归 Runtime；Controller 不持有第二份 session 表。
 Runtime、Resources 和装配端口只在消费 `self` 的 builder 中替换，发布后按只读字段使用。
@@ -28,7 +33,7 @@ peri-model 和 langfuse-client 是现行 Langfuse 适配依赖，不能由索引
 | 等待、销毁或注入会话 | `peri-controller/src/controller.rs` | `join_session`:364、`destroy_session`:385、`submit_input`:406 | 捕获 Runtime Arc 后调用；销毁返回的已补打事件经 publish 按顺序双投递 |
 | 注入部署端口 | `peri-controller/src/controller.rs` | `Controller::new`、`with_runtime`、`with_mcp_pool`、`with_cron_scheduler`、`with_tool_search`、`with_lsp_servers` | builder 消费 self 后赋值；对应 pick 方法克隆句柄/配置，不引入共享可写配置 |
 | 调整启动参数 | `peri-controller/src/controller.rs` | `AgentRef`:49、`LiteParams`:70 | 仅承载定义引用、cwd、初始消息和工具；消费与执行归 Agent |
-| 配置与创建 Langfuse 批处理 | `peri-controller/src/langfuse/{config,session}.rs` + `langfuse-client/src/{config,batcher}.rs` | `LangfuseSession::new`；`Batcher::try_new` | settings/env 分别配置队列容量、并发、单事件/批次/队列字节预算；构造前校验，沿既有 Option 降级；客户端独占重试语义，见 langfuse-client 索引 |
+| 配置与创建 Langfuse 批处理 | `peri-config/src/observability.rs`；`peri-controller/src/langfuse/{config,session}.rs`；`langfuse-client/src/{config,batcher}.rs` | core `resolve` / `LangfuseConfig`；`LangfuseSession::new`；`Batcher::try_new` | settings/env/default/clamp 规则与 secret-redacted Debug 归 core；Controller 消费 projection，batcher 构造校验沿 Option 降级；客户端独占重试语义 |
 | 关闭部署 Langfuse | `peri-controller/src/langfuse/session.rs` | `LangfuseSession::new_owned`；`LangfuseShutdownOwner::shutdown`；`LangfuseSession::shutdown` | fresh deployment 得到不可克隆的关闭权限；只转发唯一 Batcher join，报告包含已由 turn 观察的累计 HTTP 失败并区分 worker 失败；turn-facing SessionLike 仍只提供 flush（ARC-HOST-SHUTDOWN-001） |
 | 修改 Langfuse 事件入口 | `peri-controller/src/langfuse/bridge.rs` | `LangfuseBridge`:34、`process_event`:92 | 保留统一事件分发与 tracer 锁，trait 入口先持有该 bridge 的 stage 表锁 |
 | 修改 v1 事件转换 | `peri-controller/src/langfuse/bridge/v1_conversion.rs` | `UnifiedLangfuseEvent::from_executor_event` | 无映射事件返回 None；v1 LLM 使用 MAIN_AGENT_KEY，工具优先保留 source_agent_id |
@@ -66,7 +71,7 @@ peri-model 和 langfuse-client 是现行 Langfuse 适配依赖，不能由索引
 | 中间件 Span 与 Compact Span | `peri-controller/src/langfuse/tracer/middleware.rs`、`peri-controller/src/langfuse/tracer/compact.rs` | `MiddlewareTracer`、`CompactSpan`、`CompactEndInfo` |
 | 采样与基础设施 | `peri-controller/src/langfuse/tracer/sampling.rs`、`peri-controller/src/langfuse/tracer/event_builder.rs`、`peri-controller/src/langfuse/tracer/usage.rs` | `SamplingDecider`、`try_add_or_warn_via_session`、`build_usage_details` |
 | 背压丢弃遥测 | `peri-controller/src/langfuse/drop_telemetry.rs` | `LangfuseDropRegistry::record`、`snapshot` |
-| session 抽象和配置 | `peri-controller/src/langfuse/session.rs`、`peri-controller/src/langfuse/session_like.rs`、`peri-controller/src/langfuse/config.rs` | `LangfuseSession`、`LangfuseSessionLike`、`LangfuseConfig` |
+| session 抽象和配置 | `peri-controller/src/langfuse/{session,session_like,config}.rs`；配置事实源 `peri-config/src/observability.rs` | `LangfuseSession`、`LangfuseSessionLike`、core `LangfuseConfig` re-export |
 
 ## 回归与跨模块契约
 

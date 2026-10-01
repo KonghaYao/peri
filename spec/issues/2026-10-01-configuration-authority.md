@@ -1,68 +1,132 @@
-# 配置系统权威面：现状核查与抽象目标
+# 配置系统权威面：核心实现与后续边界
 
-状态：待设计裁决与实施。2026-10-01。
+状态：核心权威面已实现；consumer 接线验收与长期专属领域扩展仍 active。2026-10-01。
 
-## 用户目标
+现行规则见 [配置权威面设计](../../docs/design/configuration-authority.md)，入口见
+[peri-config 索引](../../docs/code-index/peri-config.md) 与
+[核心模块指引](../../peri-config/CLAUDE.md)。本 issue 只保留仍需实施或验收的工作；
+源码与测试入口的存在不等于本轮已运行通过。
 
-配置系统面接受环境变量、各类配置文件与显式部署输入，统一组装后为全局系统提供有效配置；它是配置语义的唯一权威，而不只是通用文件服务。
+## 用户目标与已实现范围
 
-用户已明确：**配置系统权威面的定义与组装在 Peri 内**。schema、默认值、校验、来源合并、scope、revision 与有效快照均由 Peri 内部 Module 持有；配置 MCP provider 只提供输入 I/O，不获得决定系统有效配置的权限。
+配置语义的定义与组装在 Peri 内。来源 MCP 只提供 byte/env/path 输入与字节 CAS，
+不定义默认值、来源优先级或系统有效配置；计算宿主不读取本机 fallback。
 
-## 核查结论：已有输入数据面，未完成有效配置权威面
+| 核心能力 | 当前代码事实 |
+| --- | --- |
+| source adapters | `ConfigurationSource` / `McpConfigurationSource` 采集固定 layout 的文件正文与具名环境；独立 bootstrap，不依赖待配置工具池、不增加 daemon/model 工具 |
+| 纯 typed 权威 | core app/settings/provider/MCP/observability/UI/resources 持有 schema/defaults/validation/domain merge，`ConfigurationSnapshot::resolve` 不做 I/O |
+| scope 与版本 | 绝对 cwd + 选中 global settings 路径；revision 由 scope 与输入内容确定，多个项目隔离 |
+| 发布 | `ConfigurationSystem` 管 scoped immutable `Arc` snapshots，resolve/update 成功才 publish，失败保留 current |
+| 解释与安全 | 领域级 contributors/rule/revision/sensitivity，不输出原始值；输入/snapshot/provider/Langfuse Debug 脱敏 |
+| 更新 | `update` / `update_mcp` 核对 expected revision、重新采集、解析候选、目标字节 CAS 后发布；global 更新失效其他共享路径的 current 项 |
+| 保存 | `ConfigSource::save(expected_revision, &PeriConfig)` 返回 accepted snapshot；token 在编辑开始捕获。settings 保护 nested MCP-owned 键与 workspace schema，避免 only-provider 请求删除或把 effective global 键复制到 workspace；保留顶层兄弟域 |
+| Settings consumer | 正常 core `settings::ConfigSource` 正式持有 `ConfigurationSystem`；ACP re-export；lenient 临时可读/不可写，无 authority 的旧 merge/save fallback 已删除 |
+| ACP/MCP 接线 | `host/assemble.rs` 从同一 source snapshot 绑定新建 pool 与 host Langfuse；pool 只在 init 前绑定一次，普通/bare snapshot loader 委托 core |
+| 资源开关 | `resources::ResourceConfiguration` / `snapshot.resources().disable_bundled_skills` 投影选中 global 来源的关闭位；workspace 资源实际 consumer 不再重读全局；技能 fixture 与该 global path 一致 |
+| Builtin 开关 | core `mcp::builtin_enabled` 解释 `PERI_MCP_BUILTIN`；旧 builtin adapter 只采集 env 并委托统一规则 |
+| Provider/观测/UI | provider defaults/profile/alias/environment fallback 与 Langfuse/UI typed projections 归 core；Model、tracer、UI atoms 留在消费者 |
+| MCP runtime | middleware 只负责插件发现、执行展开与 builtin runtime overlay，基础来源合并、typed 准入、去重与 cache 规则委托 core |
+| 来源写入保护 | `WriteTextIfUnchanged` 比较 expected 正文字节，missing/empty 不同；比较与 atomic replacement 使用进程锁及跨进程目标文件锁 |
 
-| 已有 Module | 当前职责 | 与目标的差距 |
-| --- | --- | --- |
-| `peri-mcp-config` / `ConfigurationMcpServer` | 独立启动通道；文件读取/atomic 写入、路径与同文件身份；本次补按名称读取 provider 环境 | 不解析完整系统配置，不提供统一合并、revision、来源解释或领域投影 |
-| ACP `provider::ConfigSource` | 固定全局/工作区来源、`PeriConfig` 加载与合并、差异保存、来源同文件保护 | 是 ACP 设置领域的权威，不包含全部 MCP/部署/环境来源 |
-| middleware MCP loader | 全局 settings、插件、项目 `.mcp.json` 合并和 builtin overlay；MCP cache 的 file/env 关闭优先策略 | 与 ACP loader 独立解析输入，生命周期与来源选择不在统一快照中 |
-| provider / Langfuse / TUI / resources 配置入口 | 分别解析环境、UI 配置或存储参数 | 业务模块仍可直接读环境、决定默认值与覆盖规则 |
+保留领域语义：profiles 整体替换、MetaHarness 逐 key 合并；provider settings profile
+优先、环境 fallback；MCP global → plugin → project、手动去重插件；cache 任一 false
+关闭；Langfuse global settings 后环境覆盖并保留 clamp/invalid/default/batch 行为。
 
-证据入口：`mcp-packages/config/CLAUDE.md` 明确将 typed parsing/validation/precedence 留在 consumers；契约 `peri-acp-types/src/configuration.rs` 当前是输入 I/O 操作。`peri-acp/src/provider/mod.rs::from_env`、`peri-controller/src/langfuse/config.rs`、`peri-middlewares/src/mcp/config.rs` 仍各自解释环境，未收敛为 Peri 内部统一有效快照。不把缺少 MCP Resolve 方法本身当作缺陷：组装不应交给输入 provider。
+## 已知保证边界
 
-因此不能把已有 `ConfigurationClient` 宣称为已经完成“全局有效配置单一权威”。本次 MCP cache 实现复用它读取环境，但没有冒充全系统迁移完成。
+- 采集多个文件/环境不是跨来源原子事务；revision 标识已采集输入，不证明共同时间点。
+- byte CAS 只协调合作写者，外部不合作编辑器可在比较与替换窗口内写入；跨目标路径
+  或多文件写入不在锁事务保证内。超时写入可能已进入 OS I/O。
+- 解释当前为领域级来源贡献，不是每个标量的精确覆盖胜者或完整来源证明。
+- 显式 reload/save 不热替换既有 immutable pool，不重写已冻结 session prefixes；
+  已持有旧 Arc 的消费者继续使用原 revision。须显式 reload 并重取新 snapshot，
+  旧 pool 固定旧 Arc，没有 hot watcher；宿主操作决定后续 provider/UI/新会话生效。
+- `save_to` 的显式路径也已改为字节 CAS，并保留 siblings；它不发布 scoped snapshot，
+  不等同于带 expected scoped revision 的 system 更新。
+- 配置 provider 的具名环境 ownership 不代表禁止业务访问全部 `std::env`；执行凭据
+  与 OS 运行环境应由执行能力明确提供，不能偷换成配置宿主环境。
 
-## 建议抽象与依赖方向
+## 本轮审查修复与开放项
 
-```text
-部署参数 / 环境输入 / 文件输入 / 插件配置输入
-  → Peri source adapters（文件 I/O 可经现有配置 MCP 数据面）
-  → Peri 内部 ConfigurationSystem
-       schema/defaults → parse → per-domain merge → validate → publish snapshot
-  → typed effective projections
-  → ACP / MCP pool / provider / observability / storage / TUI
+- [x] public core 保存 API 明确接受 expected revision 并返回
+  `Arc<ConfigurationSnapshot>`；caller 必须保留编辑开始的 token，不在提交时取最新版。
+- [x] settings 更新保护目标原文 nested `config.mcpServers` / `config.mcpCache`；
+  only-provider 请求不删除 MCP-owned 键，workspace 不从 effective global 导入这些键，
+  已有 workspace `$schema` 优先保留。
+- [x] `update_mcp` 拒绝 Global / Plugin / Builtin / 其他 cwd.Project server 来源；
+  显式无来源或本项目 Project 输入才可更新，避免 merged projection 导入全局凭据。
+- [x] ACP 持久 configOptions / update_config 已改 candidate → 验证 → 保存成功 →
+  accepted snapshot 发布；失败不更新 live provider / agent cache、不 notify、不 success。
+  回归入口：`peri-acp/src/host/requests_config_options_test.rs`。
+- [ ] 旧 UI 延迟 draft 的版本 token followup：`save_effective` 仍在提交时读取
+  snapshot revision，当前仅为串行当前视图便利入口；延迟编辑器应从编辑开始捕获
+  基线并传入 source.save。审计远程 wire 携带 expected revision，不能以服务端处理
+  请求时现取 token 替代客户端原始草稿基线。public core 与 ACP 失败顺序修复不代表
+  延迟编辑的端到端 CAS 已完成。
+
+## 待做：consumer 接线与写路径审计
+
+- [ ] 独立 TUI MCP panel pool：当前 `App::spawn_mcp_init` 创建的 pool 尚未调用
+  `set_configuration_snapshot`，无快照分支仍经 adapter 委托 core；确定并接入与宿主
+  source 相同的 scoped revision 后，再声称所有部署 pool 均绑定同一快照。
+- [ ] 审计 `remove_server_from_config` / `set_server_disabled` 等 MCP 消费者写入口：
+  当前 middleware 的 atomic helpers 不能等同于 `ConfigurationSystem::update_mcp`；
+  核对 expected revision、global/project 写层及兄弟域保留后完成权威更新接线。
+- [ ] 核对 TUI/print/stdio、不同 cwd session、普通/bare、重连/OAuth/动态/ACP bridge
+  的来源和 revision 一致性；共享旧 pool 不因新 snapshot 发布而改变。
+- [ ] 由架构协调者同步 import 检查声明：core 向 ACP/Middleware/Controller/TUI 提供，
+  core 只依赖共享契约与来源输入。文档声明不替代实际 import gate 验收。
+
+## 待做：专属领域扩展
+
+这些是后续扩展项，不把既有专属能力误报成已迁移：
+
+- [ ] LSP 的配置规则、host pool 构造与关闭生命周期，明确来源/scope 后评估迁入。
+- [ ] 插件安装、市场、enabled 状态与生命周期；插件 MCP 输入已交 core 合并，
+  不意味着插件管理本身成为 snapshot owner。
+- [ ] Hook 的宽松格式与来源优先级；既有输入 I/O 已经复用配置 MCP，格式权威仍专属。
+- [ ] OS 执行环境与工具 credentials 的来源、信任及生命周期；不得把所有环境混一份。
+- [ ] 存储 locator、远端连接 credentials 与部署参数；不让 settings 快照替代存储 owner。
+- [ ] 若需精确字段来源/环境覆盖下的编辑解释或热更新，先定义新语义与生效边界，
+  不把当前 explain 或显式 reload 包装成已完成能力。
+
+## 待验收与证据入口
+
+现有测试入口覆盖 core scope/revision、隔离、冻结、失败不 publish、stale 输入、
+CAS/I/O 失败、兄弟域保留与脱敏；settings 测试覆盖固定路径、同文件身份与差异保存。
+来源 CAS 测试包含 wire、missing/empty 与同进程并发。跨进程文件锁实现存在，不据此
+宣称独立 OS 进程争用或远端部署矩阵已验证。
+
+```bash
+cargo test -p peri-config --lib -- system::tests
+cargo test -p peri-config --lib -- settings::tests
+cargo test -p peri-config --lib -- mcp::tests
+cargo test -p peri-config --lib -- observability::tests
+cargo test -p peri-config --lib -- ui::tests
+cargo test -p peri-config --lib -- resources::tests
+cargo test -p peri-mcp-config --lib -- cas_test
+cargo test -p peri-middlewares --lib -- mcp::config::snapshot_tests
+cargo test -p peri-acp --lib -- host::requests::tests::skill_resources
+cargo test -p peri-acp --lib -- host::requests::tests::update_config_tests::config_options_tests
+cargo test -p peri-acp --lib
 ```
 
-继续使用独立启动配置 MCP 通道作为来源 Adapter，不注册成模型工具，不依赖尚未启动的工具 pool。Peri 内部配置系统不是该 MCP server 的新增业务职责，不要求单独配置服务进程，也不向 source provider 委托组装。
+- [x] 协调者于本轮反馈：先前 3 个失败已修复，全部定向测试 passed；ACP skill
+  fixture 已使用选中的 global 配置路径，相关入口为 `requests_skill_resources_test.rs`。
+  本次文档同步未重跑代码测试，该反馈不扩展为 workspace 全量或远端矩阵通过。
+- [x] 协调者最新反馈：core tests 当前 118 passed。本轮文档同步未执行代码测试，
+  该数字按协调者反馈记录，不代替最终跨 crate 验收。
+- [ ] ACP 最终验证须重跑：此前 724 passed 的全量结果发生在本次 configOptions
+  修复之前，仅为旧基线，不能写成修复后最终通过。等待父 agent 提供最终结果，
+  再记录最终代码对应的退出状态与实际执行用例数。
+- [ ] 协调者汇总 final exit status、实际目标用例数与最终 worktree 对应证据；本 issue
+  不补造未提供的总数或完整门禁结果。
+- [ ] 用真实独立进程证明合作 CAS 单 winner；覆盖失败/冲突与现有正文保持不变。
+- [ ] 远端配置 provider 环境与计算宿主不同：验证 provider 值生效、不可得不本机 fallback，
+  输入和错误/Debug/普通 explain 不泄露 secret。
+- [ ] 两项目并发、文件/环境变更、shared global 失效、reload/save 与既有 pool/session
+  生命周期验证；失败不 publish，global credentials 不复制到 workspace。
 
-建议以 Peri workspace 内独立 `peri-config` Module 承载定义、纯合并规则与快照，读取来源经 Adapter 注入；`peri-mcp-config` 保持来源 I/O。类型与依赖方向在提取时核对，不能让输入 provider 或配置 Module 反向依赖 ACP/业务消费者。从目前的 `PeriConfig` 和 MCP loader 提取现有规则，迁移一个领域就删除该领域旧解析路径，不保留两套权威。输入 provider 返回的 JSON 或环境字符串仍是待校验输入，不得作为“已解析权威配置”直接发布。
-
-### 小 Interface，深 Implementation
-
-- `resolve(scope, inputs)`：Peri 内部 resolver 接受已采集的来源输入，按 Peri 定义的规则返回 typed 有效快照；纯组装不直接读取环境或文件。Peri 的配置系统负责调用来源 Adapter、发布 revision，消费者不拿原始 JSON 再次组装。
-- `explain(scope, field)`：给出来源身份、覆盖/限制原因与生效 revision；敏感值不进入普通解释结果。
-- `update(scope, expected_revision, changes)`：校验、保存并发布，失败不改变有效快照。是否支持环境覆盖下的文件编辑及何时生效必须显式表达。
-
-不做任意 source 名/字符串规则组合的通用插件框架，也不假设所有配置字段可以递归 JSON merge。
-
-## 必须保留的语义
-
-1. **“全局”不是“只有一个 cwd 的 map”**：部署基础配置与按项目/执行目录解析的配置视图有不同 scope；同一进程服务多个项目时不得串配置。
-2. **每个领域规则只有一份**：profile 整体替换、MetaHarness 逐 key 合并、MCP server 覆盖与 namespace 去重、MCP cache 关闭优先不能被一个统一 last-wins 规则覆盖。
-3. **环境所有权显式**：由 Peri 部署装配选择环境来源 Adapter；已有远端配置输入读取 provider 环境，不偷读计算宿主。环境只提供字符串，合法值及合并由 Peri 内部规则决定。某些执行凭据属于工具执行环境，应以显式来源/引用提供，不把所有进程环境混为一份。
-4. **不可变快照**：一次 resolve 内使用已采集的输入；发布 revision 后消费者只持 snapshot。文件发生变动不悄悄改写既有 pool/冻结会话。跨文件若无法原子读取，应规定检测/重试，不宣称物理原子性。
-5. **动态更新按生命周期处理**：TUI 视图、未来会话、现有 provider、MCP pool、存储部署参数的生效边界各不相同，不能一律“立刻全局广播”。
-6. **写权威与读权威统一**：尊重 `--config-file` 与同文件身份保护；保存基于预期 revision 防止覆盖并发编辑；不把环境计算结果反写进文件或意外复制凭据。
-7. **可解释但不泄密**：来源标签与规则可观测；token/secret 等字段按敏感分类处理，默认不进入日志、模型工具或普通 UI 投影。
-8. **失败明确**：未定义的非法值/不可访问输入不能静默开启能力；保留已裁决的领域容错行为，改变 ACP lenient fallback 等契约需要单独裁决。
-
-## 可独立验收的切片
-
-1. 建立 scope、来源与快照契约，先迁移 MCP cache 的文件/环境解析与解释；与现有关闭矩阵和 pool 冻结回归保持一致。
-2. 迁移 MCP server sources、overlay 与 typed 校验；普通/bare/重连/动态接入一致，删除旧 loader 权威路径。
-3. 迁移 ACP 设置及保存，保持项目差异保存、同文件保护、model/provider 切换和 frozen 契约；两个项目并发不会串配置。
-4. 逐领域接入部署/storage、Langfuse 与 UI；明列“进入权威面”的键，而不是把所有 OS 环境变量都禁止业务访问。
-5. 增加 source provenance、revision/update 冲突和远端配置集成验证；迁移完成后审计生产配置读取路径，不只增加一个无人消费的 facade。
-
-验收以消费者收到同 scope/revision 的一致有效值、来源解释、写入冲突和失败行为为准。只统一文件 I/O、只新增 ConfigurationSnapshot 类型或只提供共享 map，都不算完成。
-
-当前未迁移这些全系统领域。目标明确，但字段 schema、变更生效边界及阶段拆分需要确认后执行；本 issue 不作为“配置权威面已实现”的证据。
+核心权威面已经落地。本 issue 保持 active，是因为这些部署接线、验收与专属领域
+扩展仍未全部闭环；不再以“只有统一文件 I/O、尚无配置权威”描述现状。

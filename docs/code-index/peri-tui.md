@@ -5,6 +5,18 @@
 
 ## 架构速览
 
+设置类型和配置源见 [`peri-config`](peri-config.md)：`src/config/mod.rs` 保留公共
+re-export，`tui_config.rs` 只 re-export core `ui::TuiConfig`。`kit/entry.rs` 优先从
+宿主 `ConfigSource` snapshot 初始化 UI projection，面板草稿/atoms 留在 TUI。
+保存走共享配置源的领域更新，保留同文件兄弟域；显式 reload 不热替换旧 MCP pool
+或冻结 session prefix。显式 `save_to` 也用字节 CAS 并保留 siblings；lenient
+无 authority 不可写。新来源需显式 reload 并重取 snapshot，没有 hot watcher。
+`save_effective` 当前是串行当前视图便利入口，仍在提交时读取 snapshot revision。
+core `ConfigSource::save(expected_revision, &PeriConfig)` 返回 accepted snapshot；延迟
+编辑器必须在编辑开始保存 token，远程 wire 也须传递该基线，不能提交时换最新值。
+这一审计尚未闭环；独立 panel pool 接线及 draft token followup 见
+[配置 active issue](../../spec/issues/2026-10-01-configuration-authority.md)。
+
 - 数据流：`ACP transport → acp_client pump（interaction_lifecycle 在 forward 前分配 semantic owner；ordinary notification 按 Stable/Transitioning/NoSession 路由）→ acp_notifier（owner + RequestId debug JSON + payload；同步发布 commands/plan/spinner/context 后转发）→ acp_bridge（publish_if_owned 持 operation gate 完成 final owner/projection check；bridge-local 50 ms single-pending scheduler 合并主/子 Agent Streaming publication，发布状态独立于 projection dirty，reset/terminal/receiver-close/shutdown 失效 pending）→ dispatch_for_bridge（canonical ingest + PublicationIntent）→ VIEW_MODELS/ACP_STATE → components；CurrentTurn mutation lazy projection，response action 只能按 owner first-claim，terminal cleanup compare-and-clear 同 owner surface`
 - 提交链路：`InputArea → SubmitRequest → SUBMIT_TX → submit_consumer → AcpTuiClient::ensure_session（acp_client/client/session.rs）/ prompt（acp_client/client/requests.rs）→ ACP transport`；取消经 `CANCEL_TX → spawn_cancel_consumer → AcpTuiClient::cancel`
 - 入口：`main.rs:613 main` → `run_tui`（:847）→ `kit/entry.rs:52 run_kit_fullscreen`（spawn kit 各链路）→ `launch.rs:41 build_app_and_acp`（App + AcpTuiClient + consumer 装配）
@@ -37,7 +49,7 @@
 | 改 print 计量与终止状态 | `src/cli_print.rs` + `src/acp_client/client/requests.rs` + `src/cli_print_usage_test.rs` + `tests/print_exit.rs` | `PrintUsage::from_meta` / `PrintOutput::{handle_session_update,result}` / `prompt_with_response` / `drain_print_notifications`；`print_elicitation_response` / `print_permission_response`（cli_print.rs） | `assistant.message.usage` 为每次非 replay 调用，`result.usage` 为累计；完整 input 扣缓存后输出 Claude 四字段，未知 usage/成本保留 null；typed ACP 终态进入 result 的 stop_reason/status/is_error，非 EndTurn 非零退出，cleanup_error 与任务状态区分；关闭后排空通知才发 final，契约 ARC-OUTPUT-COMPLETION-001；`-p` 无交互界面：审批回 allow_once，提问按 ARC-HITL-001 声明 `_meta.peri.elicitationUnanswered`（`elicitation_unanswered_response`），不得裸 cancel 让 `AskUserQuestion` 伪造空回答（回归：`tests/print_exit.rs::ask_user_unanswered_exits_process_without_fabricated_answer`） |
 | 验收 print 后台 Bash 完成退出 | `tests/print_background_exit.rs` | `promoted_background_output_is_readable_and_print_exits`、`explicit_background_output_is_readable_and_print_exits` | 本地 provider 驱动真实 Bash、短完成通知和 Read；超过 2 MiB 的 UTF-8 输出与 stderr 完整落盘，保留非零退出码，最终 result 后 CLI 自行退出 |
 | 改内嵌 host / print 退出 | `src/acp_client/deployment.rs` + `src/launch.rs` + `src/cli_print.rs` | `AcpDeployment::shutdown`（deployment.rs:20）/`run`（:27）；`teardown_app`（launch.rs:199）；`run_print`（cli_print.rs:25） | 显式 client close 打破 pump/atoms 的 Arc 保活后等待原 host；print 成功和 new/prompt 错误共用退出路径，资源 Incomplete/TaskFailed 为可见退出错误，HTTP 遥测失败保留旁路报告（ARC-HOST-SHUTDOWN-001） |
-| 改配置/启动流程 | `src/main.rs` + `src/launch.rs` + `src/config/` + `src/app/mod.rs` | `main`；`build_runtime`；`run_tui`；`build_app_and_acp`；`attach_acp`；`App::new`；`TuiConfig::from_extra`；`save_effective` | `PeriConfig` 等类型事实源在 `peri-acp/src/provider/config.rs`，`config/mod.rs` 仅 re-export；CLI 权限使用 `--permission-mode` / `--dangerously-skip-permissions`，默认 Bypass；配置源句柄 `CONFIG_SOURCE_HANDLE` 启动时 set 一次，加载与保存共用同一决策；`teardown_app` 收尾 hooks/MCP 后经 AcpDeployment 关闭并 join ACP host/Langfuse；`Resources::open_deployment` 拆业务句柄（进 `ServiceRegistry`）与部署关闭权（留 `App` → `HostAssemblyInput.session_store_shutdown`），会话存储由宿主在任务排空之后关闭 |
+| 改配置/启动流程 | `src/main.rs` + `src/launch.rs` + `src/config/` + `src/app/mod.rs` | `main`；`build_runtime`；`run_tui`；`build_app_and_acp`；`attach_acp`；`App::new`；`ConfigSource::snapshot`；`TuiConfig::from_extra`；`save_effective` | `PeriConfig` / provider/profile 事实源在 `peri-config/src/{app,provider}.rs`，`TuiConfig` 在 core `ui.rs`，`config/` 仅 re-export；正常 `ConfigSource` 持有 `ConfigurationSystem`；CLI 权限使用 `--permission-mode` / `--dangerously-skip-permissions`，默认 Bypass；配置源句柄 `CONFIG_SOURCE_HANDLE` 启动时 set 一次，加载与保存共用同一决策；`teardown_app` 收尾 hooks/MCP 后经 AcpDeployment 关闭并 join ACP host/Langfuse；`Resources::open_deployment` 拆业务句柄（进 `ServiceRegistry`）与部署关闭权（留 `App` → `HostAssemblyInput.session_store_shutdown`），会话存储由宿主在任务排空之后关闭 |
 | 改首次 setup / 重新配置 | `src/app/setup_wizard/mod.rs` + `src/kit/setup_wizard.rs` + `src/kit/setup_wizard/handler.rs` + `src/kit/entry.rs` | `needs_setup`、`state_from_config`、`save_setup`；`run_kit_fullscreen` 的首次配置 preflight；`launch::attach_acp` | 无可用 provider 时先完成向导，再装配唯一 ACP 和 consumers；取消退出，保存失败留在向导；运行中配置等待 `update_config` 成功后关闭。回归：`e2e/tests/scenarios/fresh-setup.test.ts` |
 | 改 `peri workflow` CLI | `src/cli_workflow.rs` + `src/main.rs` | `argv_requests_workflow`；`run_before_configuration` | 经 Clap 识别与冲突校验，在配置初始化前通过 `peri-acp::workflow_cli` 执行内嵌 Node artifact；CLI grammar/退出码回归在 `cli_workflow_test.rs` 与 `peri-workflow/src/cli_test.rs` |
 | 改 `peri meta session` CLI | `src/main.rs` + `src/cli_meta.rs` + `src/thread/mod.rs` | `MetaAction::Session`；`try_run_meta_before_configuration`；`run_meta_session`；`SessionMetaDtoV1`；`open_thread_store_read_only` re-export | Meta 在 settings/config/env 初始化前按受限 grammar 路由；先校验 UUID，再经 `peri-resources` 只读 seam 调用 `ThreadStore::load_meta`；human/JSON 使用九字段 allowlist，稳定错误与退出码由 adapter 映射；不进入 ACP、Agent、Runtime 或 TUI session owner |
@@ -126,7 +138,7 @@
 | 功能 | 文件 | 入口/关键点 |
 | --- | --- | --- |
 | 应用状态 | src/app/mod.rs | `App`（:32）/`App::new`（:48）；`spawn_mcp_init`、`get_compact_config`；`App::session_store_shutdown`（部署关闭权，non-Clone，`attach_acp` 时移交宿主配置）；子模块 agent.rs/cron_state.rs/provider.rs/service_registry.rs/setup_wizard/ |
-| 配置 | src/config/ | `PeriConfig` 等 re-export 自 `peri-acp/src/provider/config.rs`（事实源）；`TuiConfig`（tui_config.rs:9，本地扩展，`from_extra` :48 / `sync_to_extra` :80）；`save_effective`（mod.rs:21） |
+| 配置 | `src/config/`；事实源 `peri-config/src/{app,settings,ui}.rs` | core 类型与 `ConfigSource` re-export；`tui_config.rs` 只 re-export `TuiConfig`，`from_extra` / `sync_to_extra` 在 core；`save_effective` 使用启动选中的共享 source；`kit/entry.rs` 从 snapshot 取得 UI projection |
 | ACP 客户端入口与构造 | src/acp_client/client.rs | `AcpTuiClient` / `AcpNotification` / `ClientProjectionMode` 保持公共路径；`new_with_mode` 装配 lifecycle、weak notifier 与 Drop settlement worker |
 | ACP 通知泵与 reverse wire admission | src/acp_client/client/pump.rs | `spawn_pump` / `run_pump` / `plan_reverse_request` / `flush_buffered`；按原始接收顺序解码，ordinary notification 经 lifecycle 路由，reverse 在投递前注册 owner |
 | Session 切换与 load reservation | src/acp_client/client/session.rs | `ensure_session` / `new_session` / `load_session` / `delete_session`；`SessionLoadReservation` / `reserve_session_load` / `open_prompt_after_session_loads` 保持 reservation 与 operation gate；`read_only_admission` 投影宿主只读标记。按 ID load 无 dirty 确认或 reset 请求，恢复提交与执行资格分开，执行准入权威仍在 host |

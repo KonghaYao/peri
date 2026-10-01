@@ -3904,6 +3904,7 @@ dependencies = [
  "parking_lot",
  "peri-acp-types",
  "peri-agent",
+ "peri-config",
  "peri-controller",
  "peri-mcp-common",
  "peri-mcp-config",
@@ -3979,6 +3980,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "peri-config"
+version = "0.2.0"
+dependencies = [
+ "peri-acp-types",
+ "peri-mcp-config",
+ "serde",
+ "serde_json",
+ "serial_test",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tracing",
+]
+
+[[package]]
 name = "peri-controller"
 version = "0.2.0"
 dependencies = [
@@ -3989,6 +4005,7 @@ dependencies = [
  "parking_lot",
  "peri-acp-types",
  "peri-agent",
+ "peri-config",
  "peri-model",
  "peri-resources",
  "peri-runtime",
@@ -4066,6 +4083,7 @@ name = "peri-mcp-config"
 version = "0.2.0"
 dependencies = [
  "dirs-next",
+ "fs2",
  "peri-acp-types",
  "rmcp",
  "serde_json",
@@ -4201,6 +4219,7 @@ dependencies = [
  "parking_lot",
  "peri-acp-types",
  "peri-agent",
+ "peri-config",
  "peri-js-runtime",
  "peri-mcp-artifact",
  "peri-mcp-common",
@@ -4334,6 +4353,7 @@ dependencies = [
  "parking_lot",
  "peri-acp",
  "peri-acp-types",
+ "peri-config",
  "peri-mcp-cron",
  "peri-middlewares",
  "peri-resources",

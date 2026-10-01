@@ -7,13 +7,32 @@ pub const CONFIGURATION_METHOD: &str = "config/execute";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case")]
 pub enum ConfigurationRequest {
-    ReadText { path: PathBuf },
-    ReadEnvironment { name: String },
-    WriteTextAtomic { path: PathBuf, content: String },
-    Exists { path: PathBuf },
-    SameFile { first: PathBuf, second: PathBuf },
+    ReadText {
+        path: PathBuf,
+    },
+    ReadEnvironment {
+        name: String,
+    },
+    WriteTextAtomic {
+        path: PathBuf,
+        content: String,
+    },
+    WriteTextIfUnchanged {
+        path: PathBuf,
+        expected: Option<String>,
+        content: String,
+    },
+    Exists {
+        path: PathBuf,
+    },
+    SameFile {
+        first: PathBuf,
+        second: PathBuf,
+    },
     Paths,
-    SetGlobalPath { path: Option<PathBuf> },
+    SetGlobalPath {
+        path: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -272,10 +272,14 @@ impl SessionEnvironment {
         //   适配器的产物，只产出「路径 + scope/标签」，**不读技能
         //   内容**；Builtin 占位根不映射为资源根（资产是 provider 的内置静态面，
         //   由 `disable_bundled` 位控制）。
-        // - `disable_bundled`：宿主配置的真实值（F12 的
-        //   `load_disable_bundled_skills` 语义来源），不再是波次域隔离常量。
+        // - `disable_bundled`：从准备配置 snapshot 投影的全局资源关闭位。
         // - 缺根（目录不存在）交给 provider 既有语义处理（缺失目录 = 空批）。
         // - Agent 项目/插件根与指令面（`peri-instruction://`）由同一 provider 装配。
+        let disable_bundled = configuration
+            .config_source
+            .snapshot()
+            .map(|snapshot| snapshot.resources().disable_bundled_skills)
+            .unwrap_or_else(peri_middlewares::skills::load_disable_bundled_skills);
         let workspace_resources = super::workspace_resources::workspace_resources_input(
             &cwd,
             plugins,
@@ -285,6 +289,7 @@ impl SessionEnvironment {
                 .claude_md_excludes
                 .as_deref()
                 .unwrap_or_default(),
+            disable_bundled,
         );
         // A24 关闭集：从**同一份 frozen snapshot** 派生（设计 §2.5：禁止回退当轮 config；
         // fork 复用 source 的 frozen 字节时两者可能不同）。它是订阅建立门的唯一输入，

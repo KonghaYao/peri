@@ -28,11 +28,11 @@ pub(crate) fn workspace_resources_input(
     cwd: &str,
     plugins: &super::assemble::PreparedPlugins,
     instruction_excludes: &[String],
+    disable_bundled: bool,
 ) -> peri_mcp_workspace::WorkspaceResourcesInput {
     use peri_acp_types::skills::SkillSource;
     use peri_mcp_workspace::{ResourceRoot, ResourceScope};
 
-    let disable_bundled = peri_middlewares::skills::load_disable_bundled_skills();
     let mut input = peri_mcp_workspace::WorkspaceResourcesInput::new()
         .with_disable_bundled(disable_bundled)
         .with_instruction_excludes(instruction_excludes.to_vec());

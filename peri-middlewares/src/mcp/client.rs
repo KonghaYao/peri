@@ -72,6 +72,7 @@ pub use types::{
 /// MCP 客户端连接池
 pub struct McpClientPool {
     cache_policy: std::sync::OnceLock<McpCachePolicy>,
+    pub(super) configuration_snapshot: std::sync::OnceLock<Arc<peri_config::ConfigurationSnapshot>>,
     credential_client: std::sync::OnceLock<super::auth_store::OAuthCredentialClient>,
     shared_services: parking_lot::Mutex<Vec<Arc<McpServiceOwner>>>,
     /// Includes failed handshakes until their actual process tree and stderr have drained.
@@ -188,6 +189,7 @@ impl McpClientPool {
     ) -> Self {
         Self {
             cache_policy: std::sync::OnceLock::new(),
+            configuration_snapshot: std::sync::OnceLock::new(),
             credential_client: std::sync::OnceLock::new(),
             shared_services: parking_lot::Mutex::new(Vec::new()),
             processes: parking_lot::Mutex::new(Vec::new()),
@@ -252,6 +254,31 @@ impl McpClientPool {
         pool.bind_cache_policy(policy).unwrap();
         pool.resource_cache = super::resource_cache::McpResourceCache::isolated_for_test();
         pool
+    }
+
+    pub fn set_configuration_snapshot(
+        &self,
+        snapshot: Arc<peri_config::ConfigurationSnapshot>,
+    ) -> std::io::Result<()> {
+        let context = self.builtin_context.lock();
+        if context.initialize_started || !self.is_open() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "configuration snapshot must be bound before MCP initialization",
+            ));
+        }
+        self.configuration_snapshot.set(snapshot).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "MCP configuration snapshot is already bound",
+            )
+        })
+    }
+
+    pub fn configuration_revision(&self) -> Option<peri_config::ConfigurationRevision> {
+        self.configuration_snapshot
+            .get()
+            .map(|snapshot| snapshot.revision())
     }
 
     pub(super) fn bind_cache_policy(&self, policy: McpCachePolicy) -> std::io::Result<()> {

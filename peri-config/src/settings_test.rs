@@ -1,9 +1,28 @@
 use std::io::Write;
 
+use serde_json::Value;
 use serial_test::serial;
 
 use super::{load_from, save_to, ConfigSource};
-use crate::provider::config::PeriConfig;
+use crate::app::PeriConfig;
+
+fn revision(source: &ConfigSource) -> crate::ConfigurationRevision {
+    source
+        .snapshot()
+        .map(|snapshot| snapshot.revision())
+        .unwrap_or_else(|| {
+            crate::ConfigurationSnapshot::resolve(
+                crate::ConfigurationScope::new(
+                    std::env::temp_dir(),
+                    source.global_path().to_owned(),
+                )
+                .unwrap(),
+                Default::default(),
+            )
+            .unwrap()
+            .revision()
+        })
+}
 
 /// 在临时目录创建 .peri/settings.json
 fn write_settings(dir: &std::path::Path, content: &str) {
@@ -59,7 +78,7 @@ fn test_config_source_load_standalone_ignores_workspace() {
     // 写回仍写该文件（无工作区 → 全量快照落该文件）
     let mut updated = merged.clone();
     updated.config.active_alias = "opus".to_string();
-    source.save(&updated).unwrap();
+    source.save(revision(&source), &updated).unwrap();
     let reloaded = load_from(&settings_file).unwrap();
     assert_eq!(reloaded.config.active_alias, "opus");
     assert_eq!(reloaded.config.providers.len(), 1);
@@ -174,7 +193,7 @@ fn test_config_source_save_routes_to_workspace_layered() {
         }))
         .unwrap(),
     );
-    source.save(&merged).unwrap();
+    source.save(revision(&source), &merged).unwrap();
 
     // 工作区文件：active_alias 恒收录（分层豁免，值为保存时生效值）；
     // providers 整体接管（含全局条目）
@@ -234,7 +253,7 @@ fn test_config_source_save_writes_global_when_no_workspace() {
 
     let mut merged = source.loaded_merged();
     merged.config.active_alias = "haiku".to_string();
-    source.save(&merged).unwrap();
+    source.save(revision(&source), &merged).unwrap();
 
     let content = std::fs::read_to_string(&global_path).unwrap();
     assert!(
@@ -271,7 +290,7 @@ fn test_save_in_home_cwd_keeps_global_config_intact() {
 
     let mut merged = source.loaded_merged();
     merged.config.active_alias = "haiku".to_string();
-    source.save(&merged).unwrap();
+    source.save(revision(&source), &merged).unwrap();
 
     let saved = load_from(&global_path).unwrap();
     assert_eq!(saved.config.active_alias, "haiku", "改动字段应落盘");
@@ -306,7 +325,7 @@ fn test_symlinked_global_path_is_not_workspace() {
 
     let mut merged = source.loaded_merged();
     merged.config.active_alias = "haiku".to_string();
-    source.save(&merged).unwrap();
+    source.save(revision(&source), &merged).unwrap();
 
     let saved = load_from(&home.join(".peri").join("settings.json")).unwrap();
     assert_eq!(saved.config.active_alias, "haiku");
@@ -376,7 +395,7 @@ fn test_config_source_save_unwritable_errors() {
     let source = ConfigSource::load_at(&tmp.path().join("empty-cwd"), target.clone()).unwrap();
     std::fs::write(&f, "not a dir").unwrap();
 
-    let result = source.save(&PeriConfig::default());
+    let result = source.save(revision(&source), &PeriConfig::default());
     assert!(result.is_err());
     assert!(!target.exists());
 }
@@ -388,10 +407,7 @@ fn test_config_source_save_unwritable_errors() {
 fn test_set_global_config_path_none_keeps_default() {
     let _guard = ConfigPathGuard;
     super::set_global_config_path(None);
-    let expected = dirs_next::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".peri")
-        .join("settings.json");
+    let expected = peri_mcp_config::global_config_path();
     assert_eq!(super::config_path(), expected);
 }
 
@@ -407,7 +423,9 @@ fn test_redirect_config_path_and_save_roundtrip() {
     assert_eq!(super::config_path(), target);
 
     let source = ConfigSource::load().unwrap();
-    source.save(&PeriConfig::default()).unwrap();
+    source
+        .save(revision(&source), &PeriConfig::default())
+        .unwrap();
     assert!(target.exists());
     // 写入内容必须是合法 JSON（save_to 内部 serde_json::to_string_pretty 已保证）
     let content = std::fs::read_to_string(&target).unwrap();
@@ -472,7 +490,9 @@ fn config_source_rejects_corrupt_workspace_even_without_global_file() {
     let global = tmp.path().join("missing/settings.json");
     let source = ConfigSource::load_at_lenient(&cwd, global.clone());
     assert!(source.reload_merged().is_err());
-    assert!(source.save(&PeriConfig::default()).is_err());
+    assert!(source
+        .save(revision(&source), &PeriConfig::default())
+        .is_err());
     assert_eq!(
         std::fs::read_to_string(path).unwrap(),
         "{preserve-broken-original"
@@ -494,7 +514,7 @@ fn config_source_reload_preserves_current_workspace_fields_and_chosen_paths() {
     assert_eq!(current.config.language.as_deref(), Some("zh-CN"));
     assert_eq!(current.config.extra["custom-setting"], 42);
     current.config.active_alias = "sonnet".into();
-    source.save(&current).unwrap();
+    source.save(revision(&source), &current).unwrap();
     let stored = load_from(source.workspace_path().unwrap()).unwrap();
     assert_eq!(stored.schema.as_deref(), Some("local-schema"));
     assert_eq!(stored.config.extra["custom-setting"], 42);
@@ -521,8 +541,10 @@ fn config_source_refuses_stale_global_baseline_without_copying_credentials() {
     .unwrap();
     let mut stale = source.loaded_merged();
     stale.config.language = Some("zh-CN".into());
-    assert!(source.save(&stale).is_err());
-    assert!(source.save(&source.reload_merged().unwrap()).is_err());
+    assert!(source.save(revision(&source), &stale).is_err());
+    assert!(source
+        .save(revision(&source), &source.reload_merged().unwrap())
+        .is_err());
     assert_eq!(
         std::fs::read(source.workspace_path().unwrap()).unwrap(),
         old_workspace
@@ -543,8 +565,8 @@ fn config_path_uses_shared_data_plane_authority() {
     assert_eq!(peri_mcp_config::global_config_path(), acp_path);
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn config_io_works_without_workspace_pool_on_current_thread_runtime() {
+#[test]
+fn config_io_works_without_workspace_pool() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("nested/settings.json");
     let mut config = PeriConfig::default();
@@ -584,7 +606,9 @@ fn workspace_probe_failure_prevents_lenient_source_from_writing_global() {
     let source = ConfigSource::load_at_lenient(&cwd, global_path.clone());
     assert_eq!(source.loaded_merged().config.active_alias, "sonnet");
     assert!(source.reload_merged().is_err());
-    assert!(source.save(&PeriConfig::default()).is_err());
+    assert!(source
+        .save(revision(&source), &PeriConfig::default())
+        .is_err());
     assert_eq!(std::fs::read_to_string(global_path).unwrap(), original);
 }
 
@@ -601,9 +625,60 @@ fn same_file_probe_failure_prevents_lenient_source_from_writing_workspace() {
     assert!(ConfigSource::load_at(&cwd, global_path.clone()).is_err());
     let source = ConfigSource::load_at_lenient(&cwd, global_path);
     assert!(source.reload_merged().is_err());
-    assert!(source.save(&PeriConfig::default()).is_err());
+    assert!(source
+        .save(revision(&source), &PeriConfig::default())
+        .is_err());
     assert_eq!(
         std::fs::read_to_string(cwd.join(".peri/settings.json")).unwrap(),
         original
     );
+}
+
+#[test]
+fn config_source_exposes_raw_layers_and_preserves_top_level_siblings() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cwd = tmp.path().join("workspace");
+    let global_path = tmp.path().join("global.json");
+    std::fs::write(
+        &global_path,
+        r#"{"config":{"active_alias":"opus"},"langfuse":{"enabled":true}}"#,
+    )
+    .unwrap();
+    write_settings(
+        &cwd,
+        r#"{"config":{"language":"en"},"mcpServers":{"local":{"command":"tool"}}}"#,
+    );
+
+    let source = ConfigSource::load_at(&cwd, global_path.clone()).unwrap();
+    assert_eq!(source.cwd(), cwd);
+    assert!(source.raw_global().unwrap().contains("langfuse"));
+    assert!(source.raw_workspace().unwrap().contains("mcpServers"));
+    let mut merged = source.loaded_merged();
+    merged.config.language = Some("zh-CN".into());
+    source.save(revision(&source), &merged).unwrap();
+
+    let global: Value =
+        serde_json::from_str(&std::fs::read_to_string(global_path).unwrap()).unwrap();
+    let workspace: Value =
+        serde_json::from_str(&std::fs::read_to_string(source.workspace_path().unwrap()).unwrap())
+            .unwrap();
+    assert_eq!(global["langfuse"]["enabled"], true);
+    assert_eq!(workspace["mcpServers"]["local"]["command"], "tool");
+    assert_eq!(workspace["config"]["language"], "zh-CN");
+}
+
+#[test]
+fn save_to_preserves_unknown_top_level_siblings() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("settings.json");
+    std::fs::write(&path, r#"{"config":{},"mcpServers":{"x":{}},"other":17}"#).unwrap();
+    let mut config = PeriConfig::default();
+    config.config.active_alias = "sonnet".into();
+
+    save_to(&config, &path).unwrap();
+
+    let saved: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    assert_eq!(saved["mcpServers"]["x"], serde_json::json!({}));
+    assert_eq!(saved["other"], 17);
+    assert_eq!(saved["config"]["active_alias"], "sonnet");
 }

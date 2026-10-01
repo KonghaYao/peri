@@ -304,3 +304,80 @@ fn from_config_for_alias_fable_falls_back_to_opus_model() {
     assert_eq!(p.model_name(), "claude-opus-4-6");
     let _ = p;
 }
+
+#[test]
+fn from_resolved_preserves_runtime_fields_for_both_protocols() {
+    let resolved = [
+        ResolvedProvider::Anthropic {
+            api_key: "key".into(),
+            model: "model".into(),
+            base_url: Some("https://configured.example".into()),
+            effort: Some("high".into()),
+            max_tokens: 64000,
+            context_1m: true,
+        },
+        ResolvedProvider::OpenAi {
+            api_key: "key".into(),
+            model: "model".into(),
+            base_url: "https://configured.example".into(),
+            effort: Some("high".into()),
+            max_tokens: 64000,
+            context_1m: true,
+        },
+    ];
+    for provider in resolved {
+        let runtime = LlmProvider::from_resolved(provider);
+        assert_eq!(runtime.model_name(), "model");
+        assert!(runtime.context_1m());
+        assert_eq!(runtime.effort_key(), ":effort=high");
+        match runtime {
+            LlmProvider::Anthropic {
+                api_key,
+                base_url,
+                max_tokens,
+                retry_observer,
+                ..
+            } => {
+                assert_eq!(api_key, "key");
+                assert_eq!(base_url.as_deref(), Some("https://configured.example"));
+                assert_eq!(max_tokens, 64000);
+                assert!(retry_observer.is_none());
+            }
+            LlmProvider::OpenAi {
+                api_key,
+                base_url,
+                max_tokens,
+                retry_observer,
+                ..
+            } => {
+                assert_eq!(api_key, "key");
+                assert_eq!(base_url, "https://configured.example");
+                assert_eq!(max_tokens, 64000);
+                assert!(retry_observer.is_none());
+            }
+        }
+    }
+}
+
+#[test]
+fn from_source_uses_resolved_snapshot_after_disk_changes() {
+    let temporary = tempfile::tempdir().unwrap();
+    let path = temporary.path().join("settings.json");
+    std::fs::write(
+        &path,
+        r#"{"config":{"active_alias":"opus","providers":[{"id":"configured","type":"openai","apiKey":"key","models":{"opus":"frozen-model"}}]}}"#,
+    )
+    .unwrap();
+    let source = ConfigSource::load_at(temporary.path(), path.clone()).unwrap();
+    std::fs::write(&path, "{broken-later}").unwrap();
+
+    let provider = LlmProvider::from_source(&source).unwrap();
+    assert_eq!(provider.model_name(), "frozen-model");
+    assert!(matches!(
+        provider,
+        LlmProvider::OpenAi {
+            retry_observer: None,
+            ..
+        }
+    ));
+}

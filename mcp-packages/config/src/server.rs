@@ -1,9 +1,12 @@
 use std::{
+    collections::hash_map::DefaultHasher,
+    hash::{Hash, Hasher},
     io::{self, Write},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, MutexGuard},
 };
 
+use fs2::FileExt;
 use peri_acp_types::configuration::{
     ConfigurationErrorKind, ConfigurationFailure, ConfigurationPaths, ConfigurationRequest,
     ConfigurationResponse, ConfigurationValue, CONFIGURATION_METHOD,
@@ -14,6 +17,13 @@ use rmcp::{
     ErrorData, ServerHandler,
 };
 use uuid::Uuid;
+
+static WRITE_LOCK: Mutex<()> = Mutex::new(());
+
+struct WriteLockGuard {
+    _process: MutexGuard<'static, ()>,
+    _file: std::fs::File,
+}
 
 #[derive(Clone, Default)]
 pub struct ConfigurationMcpServer {
@@ -49,8 +59,26 @@ impl ConfigurationMcpServer {
                 }
             }
             ConfigurationRequest::WriteTextAtomic { path, content } => {
-                write_atomic(&path, &content)?;
+                let _guard = write_lock(&path)?;
+                write_atomic_locked(&path, &content)?;
                 Ok(ConfigurationValue::Written)
+            }
+            ConfigurationRequest::WriteTextIfUnchanged {
+                path,
+                expected,
+                content,
+            } => {
+                let _guard = write_lock(&path)?;
+                let current = match std::fs::read(&path) {
+                    Ok(current) => Some(current),
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+                    Err(error) => return Err(error),
+                };
+                if current.as_deref() != expected.as_deref().map(str::as_bytes) {
+                    return Ok(ConfigurationValue::Bool(false));
+                }
+                write_atomic_locked(&path, &content)?;
+                Ok(ConfigurationValue::Bool(true))
             }
             ConfigurationRequest::Exists { path } => {
                 path.try_exists().map(ConfigurationValue::Bool)
@@ -146,12 +174,44 @@ impl ServerHandler for ConfigurationMcpServer {
     }
 }
 
-fn write_atomic(path: &Path, content: &str) -> io::Result<()> {
+fn write_lock(path: &Path) -> io::Result<WriteLockGuard> {
+    let guard = WRITE_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent)?;
+    let canonical_parent = std::fs::canonicalize(parent)?;
+    let filename = path.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "configuration file path required",
+        )
+    })?;
+    let lock_target = canonical_parent.join(filename);
+    let mut hasher = DefaultHasher::new();
+    lock_target.hash(&mut hasher);
+    let lock_path = std::env::temp_dir().join(format!("peri-config-{:016x}.lock", hasher.finish()));
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let lock_file = options.open(lock_path)?;
+    FileExt::lock_exclusive(&lock_file)?;
+    Ok(WriteLockGuard {
+        _process: guard,
+        _file: lock_file,
+    })
+}
+
+fn write_atomic_locked(path: &Path, content: &str) -> io::Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
     let temporary = parent.join(format!(".peri-config-{}.tmp", Uuid::new_v4()));
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
@@ -186,10 +246,17 @@ fn failure(error: io::Error) -> ConfigurationFailure {
         io::ErrorKind::TimedOut => ConfigurationErrorKind::TimedOut,
         _ => ConfigurationErrorKind::Other,
     };
-    ConfigurationFailure {
-        kind,
-        message: error.to_string(),
+    let message = match &kind {
+        ConfigurationErrorKind::NotFound => "configuration file not found",
+        ConfigurationErrorKind::PermissionDenied => "configuration access denied",
+        ConfigurationErrorKind::AlreadyExists => "configuration file already exists",
+        ConfigurationErrorKind::InvalidInput => "invalid configuration input",
+        ConfigurationErrorKind::InvalidData => "invalid configuration data",
+        ConfigurationErrorKind::TimedOut => "configuration operation timed out",
+        ConfigurationErrorKind::Other => "configuration I/O failed",
     }
+    .into();
+    ConfigurationFailure { kind, message }
 }
 
 fn canonical_path(path: &Path) -> io::Result<Option<PathBuf>> {

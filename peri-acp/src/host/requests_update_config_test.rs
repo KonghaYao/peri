@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "requests_config_options_test.rs"]
+mod config_options_tests;
+
 /// [回归测试] sessionless setup 更新同一 provider ID 后，现有会话实际使用新连接，
 /// 保留独立 profile 与冻结 prompt，其他工作区的环境和缓存不变。
 #[tokio::test]
@@ -24,6 +27,7 @@ async fn test_update_config_refreshes_existing_owner_environments() {
     let provider = LlmProvider::from_config(&config).unwrap();
     let mut cfg = make_server_config(config.clone(), provider, &tmp).await;
     crate::provider::save_to(&config, cfg.config_source.global_path()).unwrap();
+    cfg.config_source.reload_merged().unwrap();
     cfg.workspace_assembly = Some(crate::host::assemble::WorkspaceAssembly {
         startup_cwd: startup.to_str().unwrap().to_owned(),
         bare: true,

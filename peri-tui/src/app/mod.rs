@@ -76,7 +76,9 @@ impl App {
         let provider_from_config = peri_config
             .as_ref()
             .and_then(agent::LlmProvider::from_config);
-        let provider_name = match provider_from_config.or_else(agent::LlmProvider::from_env) {
+        let provider_name = match provider_from_config
+            .or_else(|| agent::LlmProvider::from_source(&config_source))
+        {
             Some(p) => {
                 let name = p.display_name().to_string();
                 let model = p.model_name().to_string();
@@ -185,7 +187,7 @@ impl App {
         override_path: Option<&std::path::Path>,
     ) -> anyhow::Result<()> {
         match override_path {
-            Some(path) => crate::config::save_to(cfg, path),
+            Some(path) => Ok(crate::config::save_to(cfg, path)?),
             None => crate::config::save_effective(cfg),
         }
     }

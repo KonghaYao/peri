@@ -408,6 +408,11 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
             Some(std::path::Path::new(&cwd)),
             &session_resources,
         );
+        if let Some(snapshot) = config_source.snapshot() {
+            if let Err(error) = pool.set_configuration_snapshot(snapshot) {
+                tracing::error!(error = %error, "MCP configuration snapshot binding failed");
+            }
+        }
         // ── A33：builtin 实例上下文由**宿主装配**构造并注入，必须早于下面的
         //    `run_initialize` 及其后台 spawn ──
         //
@@ -724,10 +729,15 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
     );
 
     // Langfuse 观测（与迁移前 TUI/stdio/print 一致：环境启用时创建）
-    let (langfuse_session, langfuse_shutdown_owner) = if let Some(config) = (!session_scoped)
-        .then(peri_controller::langfuse::LangfuseConfig::from_env)
-        .flatten()
-    {
+    let langfuse_config = if session_scoped {
+        None
+    } else {
+        config_source
+            .snapshot()
+            .map(|snapshot| snapshot.observability().clone())
+            .filter(|config| config.public_key.is_some() && config.secret_key.is_some())
+    };
+    let (langfuse_session, langfuse_shutdown_owner) = if let Some(config) = langfuse_config {
         tracing::info!("Langfuse tracing enabled (host mode)");
         match peri_controller::langfuse::LangfuseSession::new_owned(config, "live".into()).await {
             Some((session, owner)) => (Some(session), Some(owner)),
