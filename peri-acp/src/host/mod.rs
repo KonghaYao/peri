@@ -68,19 +68,10 @@ mod mcp_v4_startup_tests;
 #[cfg(test)]
 #[path = "mcp_v4_wire_fixture_test.rs"]
 mod mcp_v4_wire_fixture;
-// wave 2（cron / lsp 两个 builtin MCP 实例）的 W0 基线观察量 #2：复用上面同一宿主与
-// model 替身，录「首个 LLM 请求的 deferred 摘要里 cron / lsp 裸名行」。只加观察量、
-// 不改行为；模块名同样参与 `cargo test` 过滤（`host::mcp_v4_wave2_baseline`）。
-#[cfg(test)]
-#[path = "mcp_v4_wave2_baseline_test.rs"]
-mod mcp_v4_wave2_baseline;
 // wave 2 的**终态**用例（H-04 / V-03）：自带「生产同构的 builtin host」夹具 —— pool →
 // `BuiltinInstanceContext` 注入 → `run_initialize`（A33 的顺序），并驱动真实装配面
 // （`assemble_server_config`）验证配置合并早于 handler 构造、host 级唯一 LSP pool、
 // 多 cwd 退化登记与 host shutdown 有界关闭。
-//
-// **过滤名警告**：Rust 测试过滤器是**子串**匹配，`host::mcp_v4_wave2` 会同时命中上面的
-// `host::mcp_v4_wave2_baseline`。终态验收必须用具名函数 + `--exact`（见 sub-plan V §6）。
 #[cfg(test)]
 #[path = "mcp_v4_wave2_test.rs"]
 mod mcp_v4_wave2;

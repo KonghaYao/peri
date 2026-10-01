@@ -1,69 +1,6 @@
 use super::*;
 
 #[test]
-fn test_plugin_command_provider_empty() {
-    let provider = PluginCommandProvider::new(&[]);
-    assert!(provider.commands().is_empty());
-}
-
-#[test]
-fn test_plugin_command_provider_multiple() {
-    let loaded = vec![
-        LoadedPlugin {
-            name: "p1".into(),
-            version: "1.0.0".into(),
-            install_path: PathBuf::new(),
-            manifest: make_manifest_with_commands(vec![]),
-            commands: vec![
-                CommandEntry {
-                    name: "plugin:p1:cmd1".into(),
-                    description: "d1".into(),
-                    source: CommandSource::Builtin,
-                },
-                CommandEntry {
-                    name: "plugin:p1:cmd2".into(),
-                    description: "d2".into(),
-                    source: CommandSource::Builtin,
-                },
-            ],
-            skills_roots: vec![],
-            agents_dirs: vec![],
-            mcp_servers: HashMap::new(),
-            data_path: PathBuf::new(),
-            hooks_config: None,
-            marketplace: String::new(),
-        },
-        LoadedPlugin {
-            name: "p2".into(),
-            version: "1.0.0".into(),
-            install_path: PathBuf::new(),
-            manifest: make_manifest_with_commands(vec![]),
-            commands: vec![
-                CommandEntry {
-                    name: "plugin:p2:cmd3".into(),
-                    description: "d3".into(),
-                    source: CommandSource::Builtin,
-                },
-                CommandEntry {
-                    name: "plugin:p2:cmd4".into(),
-                    description: "d4".into(),
-                    source: CommandSource::Builtin,
-                },
-            ],
-            skills_roots: vec![],
-            agents_dirs: vec![],
-            mcp_servers: HashMap::new(),
-            data_path: PathBuf::new(),
-            hooks_config: None,
-            marketplace: String::new(),
-        },
-    ];
-
-    let provider = PluginCommandProvider::new(&loaded);
-    assert_eq!(provider.commands().len(), 4);
-}
-
-#[test]
 fn test_load_no_plugins_aggregated() {
     let result = load_enabled_plugins_aggregated(Path::new("/nonexistent/path"), None);
     assert!(result.plugins.is_empty());

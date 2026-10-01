@@ -1,9 +1,7 @@
 //! H-04 / V-03：wave 2（cron / lsp 实迁为 builtin MCP 实例）的**终态**宿主装配用例。
 //!
-//! 模块名 `host::mcp_v4_wave2`（由 `peri-acp/src/host/mod.rs` 的 `#[path]` 挂载），与
-//! W0 基线模块 `host::mcp_v4_wave2_baseline` 是两个文件：基线只录迁移前的观察量，
-//! 终态断言只写在本文件（主 plan §8 表头「不能用 baseline 代替」）。两个模块名互为
-//! 子串 ⇒ 验收一律用 `--exact`。
+//! 模块名 `host::mcp_v4_wave2`（由 `peri-acp/src/host/mod.rs` 的 `#[path]` 挂载）：
+//! 终态断言只写在本文件（主 plan §8 表头「不能用 baseline 代替」）。
 //!
 //! ## 覆盖（每条都对应主计划 §8 的具名行）
 //!

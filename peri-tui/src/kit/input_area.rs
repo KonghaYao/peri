@@ -76,8 +76,6 @@ use crate::kit::atoms::{ACP_STATE, FILE_LIST, VIEW_MODELS, ViewModelsSnapshot, W
 #[cfg(test)]
 use crate::kit::slash_completion::{ConfirmOutcome, SlashActionKind, confirm_outcome};
 #[cfg(test)]
-use crate::kit::submit_request::{SubmitRequest, parse_submit_request};
-#[cfg(test)]
 use ratatui_kit::ratatui::widgets::Block;
 #[cfg(test)]
 use submit::submit_text;

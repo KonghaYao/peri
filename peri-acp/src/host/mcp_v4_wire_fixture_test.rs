@@ -216,9 +216,6 @@ pub(super) struct WireFixtureHarness {
     _owner: McpTaskOwner,
     init_task: Option<tokio::task::JoinHandle<()>>,
     wire_log: PathBuf,
-    /// **实际注入** `lsp` 实例上下文的配置 = 生产加载函数对夹具临时
-    /// `~/.peri/settings.json` 的解析结果（[`Self::merged_lsp_servers`] 供调用方断言）。
-    lsp_servers: Vec<peri_acp_types::lsp::LspServerConfig>,
 }
 
 impl WireFixtureHarness {
@@ -326,7 +323,6 @@ impl WireFixtureHarness {
             _owner: owner,
             init_task: Some(init_task),
             wire_log,
-            lsp_servers,
         }
     }
 
@@ -395,15 +391,6 @@ impl WireFixtureHarness {
     /// 夹具 pool（公开可见事实：句柄状态 / `all_server_infos()` 的 transport 分类）。
     pub(super) fn pool(&self) -> &Arc<McpClientPool> {
         &self.pool
-    }
-
-    /// **实际注入** `lsp` 实例上下文的配置（= 构造期对夹具临时
-    /// `~/.peri/settings.json` 跑生产加载函数的结果）。
-    ///
-    /// 调用方据此断言「解析面」而非只看结果：`load_merged_lsp_servers` 无命中时返回空表
-    /// （不是错误），故「配置非空 ⇒ host pool 有 server」这一步必须有可观察证据。
-    pub(super) fn merged_lsp_servers(&self) -> &[peri_acp_types::lsp::LspServerConfig] {
-        &self.lsp_servers
     }
 
     /// 注入夹具 pool 的 session 装配面（真实 assembler 会据此构造 McpMiddleware）。

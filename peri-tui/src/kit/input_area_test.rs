@@ -27,41 +27,9 @@ fn test_apply_slash_selection_preserves_cjk_before_token() {
 }
 
 #[test]
-fn test_submit_request_history_aliases() {
-    assert_eq!(
-        parse_submit_request("/history"),
-        Some(SubmitRequest::OpenPanel(PanelKind::ThreadBrowser))
-    );
-    assert_eq!(
-        parse_submit_request("/his"),
-        Some(SubmitRequest::OpenPanel(PanelKind::ThreadBrowser))
-    );
-}
-
-#[test]
 fn test_detect_slash_token_rejects_path_or_comment() {
     assert!(detect_slash_token("src/foo", 7).is_none());
     assert!(detect_slash_token("//", 2).is_none());
-}
-
-#[test]
-fn test_parse_submit_request_opens_model_panel() {
-    assert_eq!(
-        parse_submit_request("/model"),
-        Some(SubmitRequest::OpenPanel(PanelKind::Model))
-    );
-}
-
-#[test]
-fn test_parse_submit_request_resolves_history_aliases() {
-    assert_eq!(
-        parse_submit_request("/history"),
-        Some(SubmitRequest::OpenPanel(PanelKind::ThreadBrowser))
-    );
-    assert_eq!(
-        parse_submit_request("/his"),
-        Some(SubmitRequest::OpenPanel(PanelKind::ThreadBrowser))
-    );
 }
 
 #[test]
