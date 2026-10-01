@@ -1,8 +1,8 @@
 //! 会话资源门面行为测试（本机 SQLite）。
 //!
 //! 断言以可观察结果为准：写入准入是否统一、效果结清是否只认确定性、创建/撤销/认领的
-//! 后置条件、删除与未决证据在级联之后是否仍可判定。构造「数据已保存、执行代际未写」
-//! 这类崩溃态时直接经数据端口写入——那正是远程保存或上次进程留下的状态。
+//! 后置条件、删除与未决证据在级联之后是否仍可判定。构造「数据已保存、runtime 未准入」
+//! 这类状态时直接经数据端口写入——那正是远程保存或上次进程留下的状态。
 
 use super::*;
 use crate::sessions::local_port::SessionFacts;
@@ -12,7 +12,7 @@ use peri_acp_types::session_resources::{
     FrozenState, NewSessionDraft, NewSessionMeta, SessionInitialization, SessionResourceResult,
     SessionResources, SessionStoreShutdownPort,
 };
-use peri_acp_types::workspace::{ResetDirtyRequest, SESSION_BINDING_VERSION};
+use peri_acp_types::workspace::SESSION_BINDING_VERSION;
 use tempfile::TempDir;
 
 fn git(root: &Path, args: &[&str]) {
@@ -144,7 +144,7 @@ impl Fixture {
         self.facade.begin_initialization(&draft).await.unwrap()
     }
 
-    /// 直接经数据面落一份「数据已保存、执行代际未写」的会话（远程保存或崩溃留下的状态）。
+    /// 直接经数据面落一份「数据已保存、runtime 未准入」的会话。
     async fn save_without_admission(&self, id: &str, workspace: &ResolvedWorkspace) {
         let input = self.session(id, workspace, &format!(r#"{{"v":1,"id":"{id}"}}"#));
         self.facade
@@ -171,23 +171,6 @@ impl Fixture {
             id,
         )
         .await
-    }
-
-    async fn count_execution_runs(&self, id: &str) -> i64 {
-        self.count(
-            "SELECT COUNT(*) FROM execution_runs WHERE thread_id = ?1",
-            id,
-        )
-        .await
-    }
-
-    /// 本机执行代际行（`None` 表示这条 identity 没有行）。
-    async fn execution_row(&self, id: &str) -> Option<(i64, bool)> {
-        sqlx::query_as("SELECT generation, clean FROM execution_runs WHERE thread_id = ?1")
-            .bind(id)
-            .fetch_optional(self.facade.local_pool())
-            .await
-            .unwrap()
     }
 
     async fn count(&self, sql: &'static str, id: &str) -> i64 {

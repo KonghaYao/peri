@@ -18,7 +18,10 @@ use super::schema::{self, StoreIdentityRead, StoreSnapshot};
 use super::schema_upgrade;
 use super::session_data::{open_step, OpenStep};
 use super::sql::StatementSpec;
-use crate::sessions::{canonical::CREATE_TABLES, schema_cleanup::LEGACY_GOALS_SQL};
+use crate::sessions::{
+    canonical::CREATE_TABLES,
+    schema_cleanup::{LEGACY_EXECUTION_SQL, LEGACY_GOALS_SQL},
+};
 
 struct SqliteTransport {
     pool: SqlitePool,
@@ -485,4 +488,79 @@ async fn remote_schema_upgrade_lost_or_incomplete_reply_is_uncertain_and_reopen_
         ));
         assert_eq!(fixture.transport.writes.load(Ordering::SeqCst), 1);
     }
+}
+
+#[tokio::test]
+async fn remote_schema_upgrade_removes_recognized_execution_table_but_keeps_ledger() {
+    let fixture = Fixture::new().await;
+    sqlx::query(LEGACY_EXECUTION_SQL)
+        .execute(&fixture.transport.pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO execution_runs VALUES ('session', 7, 0), ('orphan', 9, 0)")
+        .execute(&fixture.transport.pool)
+        .await
+        .unwrap();
+    schema_upgrade::upgrade(&fixture.store(StoreAccess::ReadWrite), &fixture.snapshot)
+        .await
+        .unwrap();
+    assert_eq!(fixture.version().await, 11);
+    let (retired,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM sqlite_schema WHERE name IN ('execution_runs', 'thread_goals')",
+    )
+    .fetch_one(&fixture.transport.pool)
+    .await
+    .unwrap();
+    assert_eq!(retired, 0);
+    let (receipt,): (String,) =
+        sqlx::query_as("SELECT receipt FROM peri_op_ledger WHERE operation_id='operation'")
+            .fetch_one(&fixture.transport.pool)
+            .await
+            .unwrap();
+    assert_eq!(receipt, "receipt");
+}
+
+#[tokio::test]
+async fn remote_schema_upgrade_refuses_unknown_execution_state_without_writing() {
+    let fixture = Fixture::new().await;
+    sqlx::query("CREATE TABLE execution_runs (thread_id TEXT PRIMARY KEY, generation INTEGER NOT NULL, clean BOOLEAN NOT NULL, extension_data TEXT)")
+        .execute(&fixture.transport.pool).await.unwrap();
+    let error = schema_upgrade::upgrade(&fixture.store(StoreAccess::ReadWrite), &fixture.snapshot)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error.kind(),
+        SessionResourceErrorKind::Unsupported
+    ));
+    assert_eq!(fixture.transport.writes.load(Ordering::SeqCst), 0);
+    fixture.assert_old_state().await;
+}
+
+#[tokio::test]
+async fn remote_schema_upgrade_rollback_restores_execution_rows_and_version() {
+    let fixture = Fixture::new().await;
+    sqlx::query(LEGACY_EXECUTION_SQL)
+        .execute(&fixture.transport.pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO execution_runs VALUES ('session', 7, 0)")
+        .execute(&fixture.transport.pool)
+        .await
+        .unwrap();
+    fixture
+        .transport
+        .fail_column_drop
+        .store(true, Ordering::SeqCst);
+    assert!(
+        schema_upgrade::upgrade(&fixture.store(StoreAccess::ReadWrite), &fixture.snapshot)
+            .await
+            .is_err()
+    );
+    fixture.assert_old_state().await;
+    let execution: (String, i64, bool) =
+        sqlx::query_as("SELECT thread_id, generation, clean FROM execution_runs")
+            .fetch_one(&fixture.transport.pool)
+            .await
+            .unwrap();
+    assert_eq!(execution, ("session".to_owned(), 7, false));
 }

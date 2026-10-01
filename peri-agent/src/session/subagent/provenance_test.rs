@@ -9,9 +9,7 @@ use peri_acp_types::projection::{
 };
 use peri_acp_types::session_resources::{SessionResources, SessionStoreShutdownPort};
 use peri_acp_types::store::PersistedPayload;
-use peri_acp_types::workspace::{
-    ResetDirtyRequest, ResolvedWorkspace, SessionExecutionLease, WorkspaceError,
-};
+use peri_acp_types::workspace::{ResolvedWorkspace, SessionExecutionLease};
 
 struct SummaryModel;
 #[async_trait::async_trait]
@@ -137,26 +135,12 @@ async fn flush_session(session: &Arc<Session>) {
     *arc.write() = transcript;
 }
 
-/// 冷重开后的所有权回收：崩溃留下的普通 dirty 必须按精确代际显式确认才可继续。
+/// 冷重开按持久会话事实取得新 runtime owner，不重建上个实例的执行状态。
 async fn reacquire_execution(
     store: &Arc<dyn SessionResources>,
     workspace: &ResolvedWorkspace,
     root: &ThreadId,
 ) -> Arc<dyn SessionExecutionLease> {
-    let error = match store.acquire_execution(root, workspace).await {
-        Ok(lease) => return lease,
-        Err(error) => error,
-    };
-    let Some(WorkspaceError::RecoveryRequired(details)) = error.workspace_error() else {
-        panic!("冷重开应只要求解除 dirty 代际，实际: {error}");
-    };
-    store
-        .reset_dirty_execution(&ResetDirtyRequest {
-            target: details.clone(),
-            accept_risk: true,
-        })
-        .await
-        .unwrap();
     store.acquire_execution(root, workspace).await.unwrap()
 }
 

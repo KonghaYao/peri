@@ -12,7 +12,6 @@ async fn test_abandon_initialization_revokes_data_and_allows_a_fresh_retry() {
     let other = fixture.create("s-other").await;
     let id = "s-abandon".to_owned();
 
-    // 别的 owner 不能替它承担补偿：撤销会删执行行，必须由持有它的同一所有权发起。
     let error = fixture
         .facade
         .abandon_initialization(&id, &other)
@@ -25,40 +24,23 @@ async fn test_abandon_initialization_revokes_data_and_allows_a_fresh_retry() {
     assert_eq!(fixture.count_threads(&id).await, 1);
 
     initialization.clone().abandon().await.unwrap();
-    // 数据与执行代际行一起撤销，本机不留第二份痕迹：撤销判定只依据现有数据事实
-    // （v10 删掉了「初始化被放弃」的终态锚点表）。
     assert_eq!(fixture.count_threads(&id).await, 0);
     assert_eq!(fixture.count_bindings(&id).await, 0);
-    assert_eq!(fixture.count_execution_runs(&id).await, 0);
     // 补偿走的是放弃所有权，不是 clean：这里不会写出一条假的 clean 记录。
     lease.mark_clean().await.unwrap();
-    assert_eq!(
-        fixture
-            .facade
-            .gate
-            .local()
-            .execution_state(&id)
-            .await
-            .unwrap(),
-        None
-    );
     // 同一 identity 可以重来：这条创建从没发布过，客户端按同一个 id 重试是正常动作
     // （删除则更彻底——它删的是已发布会话的数据，见 `test_delete_ends_data_execution_facts_and_ownership`）。
     let workspace = fixture.workspace().await;
     let input = fixture.session(&id, &workspace, r#"{"v":1,"id":"s-abandon"}"#);
     let fresh = fixture.facade.create_session(&input).await.unwrap();
     assert_eq!(fresh.thread_id().as_str(), id);
-    assert_eq!(
-        fixture.execution_row(&id).await,
-        Some((1, false)),
-        "重试建出的是全新会话：代际从 1 开始且未结清"
-    );
+    assert!(!Arc::ptr_eq(&lease, &fresh));
     drop(other);
 }
 
 // ─── J2 两阶段：草稿 → commit_frozen / abandon ────────────────────────────────
 
-/// 第一阶段：草稿行成立（frozen 暂空、代际未结清）、不出现在列表、同 identity 只有一个 owner。
+/// 第一阶段：草稿行成立、不可见，其他实例运行句柄不改变本实例的初始化资格。
 #[tokio::test]
 async fn test_begin_initialization_writes_draft_without_frozen() {
     let fixture = Fixture::new().await;
@@ -68,7 +50,6 @@ async fn test_begin_initialization_writes_draft_without_frozen() {
     assert_eq!(initialization.thread_id(), &id);
     assert_eq!(fixture.count_threads(&id).await, 1);
     assert_eq!(fixture.count_bindings(&id).await, 1);
-    assert_eq!(fixture.execution_row(&id).await, Some((1, false)));
     assert_eq!(fixture.frozen_of(&id).await, None, "草稿不得带 frozen");
     assert!(
         !fixture.visible_ids().await.contains(&id),
@@ -79,11 +60,184 @@ async fn test_begin_initialization_writes_draft_without_frozen() {
     let workspace = fixture.workspace().await;
     let second_run = second.acquire_execution(&id, &workspace).await.unwrap();
     assert_eq!(second_run.thread_id(), &id);
-    assert_eq!(fixture.execution_row(&id).await, Some((2, false)));
     initialization.execution_lease().mark_clean().await.unwrap();
-    assert_eq!(fixture.execution_row(&id).await, Some((2, false)));
     second_run.mark_clean().await.unwrap();
-    assert_eq!(fixture.execution_row(&id).await, Some((2, true)));
+    assert_eq!(fixture.frozen_of(&id).await, None);
+}
+
+#[tokio::test]
+async fn test_draft_frozen_commit_requires_the_exact_live_owner_arc() {
+    let fixture = Fixture::new().await;
+    let initialization = fixture.begin("s-draft-owner").await;
+    let id = initialization.thread_id().clone();
+    let frozen = FrozenSnapshotBytes::new(r#"{"v":1}"#);
+    let second = fixture.second_host().await;
+    let foreign = second
+        .acquire_execution(&id, &fixture.workspace().await)
+        .await
+        .unwrap();
+    let error = fixture
+        .facade
+        .gate
+        .local()
+        .commit_frozen(&id, &foreign, &frozen)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error_kind(&error),
+        SessionResourceErrorKind::Workspace(WorkspaceError::ExecutionLeaseRequired)
+    ));
+    assert_eq!(fixture.frozen_of(&id).await, None);
+    let error = fixture
+        .facade
+        .discard_incomplete_initialization(&id)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error_kind(&error),
+        SessionResourceErrorKind::Conflict { .. }
+    ));
+    initialization.commit_frozen(&frozen).await.unwrap();
+    assert_eq!(
+        fixture.frozen_of(&id).await.as_deref(),
+        Some(frozen.as_str())
+    );
+    initialization.execution_lease().mark_clean().await.unwrap();
+    foreign.mark_clean().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_closed_draft_owner_cannot_commit_or_abandon_a_replacement_run() {
+    let fixture = Fixture::new().await;
+    let initialization = fixture.begin("s-draft-closed").await;
+    let id = initialization.thread_id().clone();
+    let stale = initialization.execution_lease();
+    stale.mark_clean().await.unwrap();
+    let current = fixture
+        .facade
+        .acquire_execution(&id, &fixture.workspace().await)
+        .await
+        .unwrap();
+    assert!(!Arc::ptr_eq(&stale, &current));
+    assert!(initialization
+        .commit_frozen(&FrozenSnapshotBytes::new(r#"{"v":1}"#))
+        .await
+        .is_err());
+    assert!(initialization.clone().abandon().await.is_err());
+    assert_eq!(fixture.count_threads(&id).await, 1);
+    assert_eq!(fixture.frozen_of(&id).await, None);
+    current.mark_clean().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_closed_draft_owner_only_allows_abandon_after_canonical_deletion() {
+    let fixture = Fixture::new().await;
+    let initialization = fixture.begin("s-draft-stopped").await;
+    let id = initialization.thread_id().clone();
+    initialization.execution_lease().mark_clean().await.unwrap();
+    let error = initialization.clone().abandon().await.unwrap_err();
+    assert!(matches!(
+        error_kind(&error),
+        SessionResourceErrorKind::Workspace(WorkspaceError::ExecutionLeaseRequired)
+    ));
+    assert_eq!(fixture.count_threads(&id).await, 1);
+    assert_eq!(fixture.count_bindings(&id).await, 1);
+    fixture
+        .facade
+        .discard_incomplete_initialization(&id)
+        .await
+        .unwrap();
+    assert_eq!(fixture.count_threads(&id).await, 0);
+    initialization.clone().abandon().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_closed_complete_owner_cannot_revoke_saved_canonical_data() {
+    let fixture = Fixture::new().await;
+    let lease = fixture.create("s-complete-stopped").await;
+    let id = lease.thread_id().clone();
+    let before = fixture.facade.load_session_snapshot(&id).await.unwrap();
+    lease.mark_clean().await.unwrap();
+    let error = fixture
+        .facade
+        .abandon_initialization(&id, &lease)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error_kind(&error),
+        SessionResourceErrorKind::Workspace(WorkspaceError::ExecutionLeaseRequired)
+    ));
+    let after = fixture.facade.load_session_snapshot(&id).await.unwrap();
+    assert_eq!(before.binding, after.binding);
+    assert_eq!(before.frozen, after.frozen);
+}
+
+#[tokio::test]
+async fn test_uncertain_draft_owner_cannot_commit_abandon_or_discard() {
+    let fixture = Fixture::new().await;
+    let initialization = fixture.begin("s-draft-uncertain").await;
+    let id = initialization.thread_id().clone();
+    drop(fixture.facade.gate.admit(&id).await.unwrap());
+    assert!(initialization
+        .commit_frozen(&FrozenSnapshotBytes::new(r#"{"v":1}"#))
+        .await
+        .is_err());
+    assert!(initialization.clone().abandon().await.is_err());
+    drop(initialization);
+    assert!(fixture
+        .facade
+        .discard_incomplete_initialization(&id)
+        .await
+        .is_err());
+    assert_eq!(fixture.count_threads(&id).await, 1);
+    assert_eq!(fixture.count_bindings(&id).await, 1);
+    assert_eq!(fixture.frozen_of(&id).await, None);
+}
+
+#[tokio::test]
+async fn test_cancelled_abandon_keeps_unknown_effect_and_blocks_reacquire_commit_and_drain() {
+    let fixture = Fixture::new().await;
+    let initialization = fixture.begin("s-abandon-cancelled").await;
+    let id = initialization.thread_id().clone();
+    let lease = initialization.execution_lease();
+    let local = fixture.facade.gate.local().clone();
+    let abandoning_id = id.clone();
+    let abandoning_lease = lease.clone();
+    let (started_sender, started_receiver) = tokio::sync::oneshot::channel();
+    let abandoning = tokio::spawn(async move {
+        local
+            .abandon_initialization(
+                &abandoning_id,
+                &abandoning_lease,
+                Box::pin(async move {
+                    started_sender.send(()).unwrap();
+                    std::future::pending::<SessionResourceResult<()>>().await
+                }),
+            )
+            .await
+    });
+    started_receiver.await.unwrap();
+    abandoning.abort();
+    assert!(abandoning.await.unwrap_err().is_cancelled());
+    assert!(lease.mark_clean().await.is_err());
+    assert!(fixture
+        .facade
+        .acquire_execution(&id, &fixture.workspace().await)
+        .await
+        .is_err());
+    assert!(initialization
+        .commit_frozen(&FrozenSnapshotBytes::new(r#"{"v":1}"#))
+        .await
+        .is_err());
+    assert!(fixture
+        .facade
+        .drain_persistence(&id)
+        .await
+        .unwrap_err()
+        .is_persistence_uncertain());
+    assert!(initialization.clone().abandon().await.is_err());
+    assert_eq!(fixture.count_threads(&id).await, 1);
+    assert_eq!(fixture.count_bindings(&id).await, 1);
     assert_eq!(fixture.frozen_of(&id).await, None);
 }
 
@@ -102,7 +256,6 @@ async fn test_commit_frozen_is_write_once_and_blocks_abandon() {
     );
     let snapshot = fixture.facade.load_session_snapshot(&id).await.unwrap();
     assert_eq!(snapshot.frozen, FrozenState::Present(frozen.clone()));
-    assert_eq!(fixture.execution_row(&id).await, Some((1, false)));
 
     // 重复提交：typed 冲突，且不覆盖已提交字节。
     let other = FrozenSnapshotBytes::new(r#"{"v":1,"id":"second-write"}"#);
@@ -124,7 +277,6 @@ async fn test_commit_frozen_is_write_once_and_blocks_abandon() {
     ));
     assert_eq!(fixture.count_threads(&id).await, 1);
     assert_eq!(fixture.count_bindings(&id).await, 1);
-    assert_eq!(fixture.count_execution_runs(&id).await, 1);
 }
 
 /// abandon 幂等：先成功后重复调用仍成功（行已不在，目标已达成）。
@@ -138,17 +290,15 @@ async fn test_abandon_is_idempotent_after_success() {
     assert_eq!(fixture.count_threads(&id).await, 0);
     initialization.clone().abandon().await.unwrap();
     assert_eq!(fixture.count_threads(&id).await, 0);
-    assert_eq!(fixture.count_execution_runs(&id).await, 0);
 }
 
 /// 崩溃矩阵（未提交）：重开之后草稿仍不可见、cold load 得到「bound 但无 frozen」，
-/// 清理判据成立时删除全部行；已提交的会话不走清理（交给 dirty 恢复）。
+/// 清理判据成立时删除 canonical 草稿；已提交会话不走清理。
 #[tokio::test]
 async fn test_crash_before_commit_leaves_removable_draft() {
     let fixture = Fixture::new().await;
     let initialization = fixture.begin("s-crash").await;
     let id = "s-crash".to_owned();
-    // 崩溃等价：进程内的 owner 随句柄一起消失（sidecar 锁由内核释放）。
     drop(initialization);
 
     let reopened = fixture.second_host().await;
@@ -174,10 +324,9 @@ async fn test_crash_before_commit_leaves_removable_draft() {
         .unwrap();
     assert_eq!(fixture.count_threads(&id).await, 0);
     assert_eq!(fixture.count_bindings(&id).await, 0);
-    assert_eq!(fixture.count_execution_runs(&id).await, 0);
 }
 
-/// 崩溃矩阵（已提交）：cold load 可读，下一次准入是精确代际的 dirty，显式接受风险后可用。
+/// 崩溃矩阵（已提交）：cold load 可读，下一实例按 ID 准入，不覆盖 frozen。
 #[tokio::test]
 async fn test_crash_after_commit_preserves_snapshot_and_allows_id_recovery() {
     let fixture = Fixture::new().await;
@@ -186,14 +335,12 @@ async fn test_crash_after_commit_preserves_snapshot_and_allows_id_recovery() {
     initialization.commit_frozen(&frozen).await.unwrap();
     let id = "s-post".to_owned();
     drop(initialization);
-    assert_eq!(fixture.execution_row(&id).await, Some((1, false)));
     let reopened = fixture.second_host().await;
     let snapshot = reopened.load_session_snapshot(&id).await.unwrap();
     assert_eq!(snapshot.frozen, FrozenState::Present(frozen.clone()));
     let workspace = fixture.workspace().await;
     let lease = reopened.acquire_execution(&id, &workspace).await.unwrap();
     assert_eq!(lease.thread_id(), &id);
-    assert_eq!(fixture.execution_row(&id).await, Some((2, false)));
     let error = reopened
         .discard_incomplete_initialization(&id)
         .await
@@ -208,7 +355,6 @@ async fn test_crash_after_commit_preserves_snapshot_and_allows_id_recovery() {
         FrozenState::Present(frozen)
     );
     lease.mark_clean().await.unwrap();
-    assert_eq!(fixture.execution_row(&id).await, Some((2, true)));
 }
 
 /// 清理判据与 legacy 互斥：无绑定行的会话不被清理（它不是半写草稿）。
@@ -216,7 +362,6 @@ async fn test_crash_after_commit_preserves_snapshot_and_allows_id_recovery() {
 async fn test_discard_refuses_a_session_without_binding() {
     let fixture = Fixture::new().await;
     let workspace = fixture.workspace().await;
-    // legacy 形态：有行、有 cwd、无绑定、无执行代际。
     sqlx::query(
         "INSERT INTO threads (id, title, cwd, created_at, updated_at, message_count,
             parent_thread_id, snapshot_at_message_id, hidden, cancel_policy, config,

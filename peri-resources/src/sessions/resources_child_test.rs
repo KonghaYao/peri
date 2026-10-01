@@ -57,8 +57,6 @@ async fn test_save_child_requires_the_root_owner_and_shares_its_gate() {
         .save_child(&snapshot, &root_lease)
         .await
         .unwrap();
-    // 子会话没有自己的执行代际：写入落在 root 的 owner 上。
-    assert_eq!(fixture.count_execution_runs("s-child").await, 0);
     fixture
         .facade
         .append_history(&"s-child".to_owned(), &[payload("child turn")])
@@ -76,12 +74,23 @@ async fn test_save_child_requires_the_root_owner_and_shares_its_gate() {
         SessionResourceErrorKind::Workspace(WorkspaceError::ExecutionLeaseRequired)
     ));
     drop(root_lease);
+    assert!(fixture
+        .facade
+        .append_history(&"s-child".to_owned(), &[payload("dropped closed owner")])
+        .await
+        .is_err());
+    let next = fixture
+        .facade
+        .acquire_execution(&"s-child-root".to_owned(), &workspace)
+        .await
+        .unwrap();
     fixture
         .facade
         .append_history(&"s-child".to_owned(), &[payload("after run disposal")])
         .await
         .unwrap();
     assert_eq!(fixture.count_messages("s-child").await, 2);
+    next.mark_clean().await.unwrap();
     drop(foreign);
 }
 
@@ -169,14 +178,8 @@ async fn test_save_child_refuses_a_snapshot_that_disagrees_with_its_parent_relat
             ),
             "{label}: expected InvalidInput, got {error:?}"
         );
-        // 零行：没有会话、没有绑定、没有执行代际。
         assert_eq!(fixture.count_threads("s-rel-child").await, 0, "{label}");
         assert_eq!(fixture.count_bindings("s-rel-child").await, 0, "{label}");
-        assert_eq!(
-            fixture.count_execution_runs("s-rel-child").await,
-            0,
-            "{label}"
-        );
         // 无 lease：这条 identity 不存在，也就没有独立 root 可取得执行权。
         let facts = facts_of(&fixture.facade, "s-rel-child").await;
         assert!(
@@ -219,14 +222,12 @@ async fn test_save_child_refuses_a_snapshot_that_disagrees_with_its_parent_relat
         .await
         .unwrap();
 
-    // 合法的 child 仍然成立，且仍然挂在 root 之下（不是独立 root，也没有自己的执行代际）。
     fixture
         .facade
         .save_child(&legal, &root_lease)
         .await
         .unwrap();
     assert_eq!(fixture.count_threads("s-rel-child").await, 1);
-    assert_eq!(fixture.count_execution_runs("s-rel-child").await, 0);
     assert_eq!(
         fixture
             .facade
@@ -246,7 +247,6 @@ async fn test_save_child_refuses_a_snapshot_that_disagrees_with_its_parent_relat
             .len(),
         1
     );
-    // 子会话没有自己的执行代际：它解析到的是 root 的那条 owner，而不是自己当 root。
     let facts = facts_of(&fixture.facade, "s-rel-child").await;
     let owned = fixture
         .facade
@@ -332,7 +332,7 @@ async fn test_claim_child_resume_serializes_and_restores_previous_state() {
         SessionResourceErrorKind::InvalidInput { .. }
     ));
 
-    // root owner 不在本进程时不能认领。
+    root_lease.mark_clean().await.unwrap();
     drop(root_lease);
     let error = match fixture.facade.claim_child_resume(&child_id, &root_id).await {
         Ok(_) => panic!("expected claim without a live root owner to fail"),

@@ -244,7 +244,8 @@ pub enum WorkspaceError {
 #[async_trait]
 pub trait SessionExecutionLease: Send + Sync {
     fn thread_id(&self) -> &ThreadId;
-    /// Persist diagnostic completion only after this runtime's resources have stopped.
+    /// Drain admitted writes and close this runtime handle only after its resources have stopped.
+    /// An unknown persistence outcome prevents successful completion; no execution state is persisted.
     async fn mark_clean(&self) -> anyhow::Result<()>;
 }
 

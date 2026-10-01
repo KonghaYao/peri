@@ -199,13 +199,6 @@ impl ThreadStore for SqliteThreadStore {
         self.database.acquire_execution_lease_impl(id, &facts).await
     }
 
-    async fn reset_dirty_execution(
-        &self,
-        target: &peri_acp_types::workspace::RecoveryRequiredDetails,
-    ) -> Result<()> {
-        self.database.reset_dirty_execution_impl(target).await
-    }
-
     async fn create_thread(&self, meta: ThreadMeta) -> Result<ThreadId> {
         let id = meta.id.clone();
         let mut transaction = self.database.pool.begin_with("BEGIN IMMEDIATE").await?;
@@ -508,13 +501,6 @@ impl ThreadStore for SqliteThreadStore {
                 idx += 1;
             }
             for tid in &to_delete {
-                // v7 起 `execution_runs` 不再有 `threads` 外键：不显式删除就会留下
-                // 永不收敛的孤儿执行行。v10 起本机也不再写删除墓碑——删除即删除，
-                // 没有「这条 identity 被刻意终止」的另一份本机证据。
-                sqlx::query("DELETE FROM execution_runs WHERE thread_id = ?1")
-                    .bind(tid)
-                    .execute(&mut *tx)
-                    .await?;
                 // `messages` 与 `session_bindings` 同样显式删除，**不再**依赖
                 // `ON DELETE CASCADE`：那份级联只在 SQLite 上存在，远端执行器没有
                 // （见 `session_rows::THREAD_CHILD_DELETES`）。先子后父，顺序与数据面

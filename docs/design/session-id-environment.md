@@ -39,7 +39,7 @@ ACP `requests/session_restore.rs::prepare_existing` 经 `host/workspace.rs::chec
 
 实际执行由 `SessionResourcesImpl::execution_availability` / `acquire_execution` 与 ACP `require_owner` 控制：`execution_availability` 在执行/工具准入时检查保存 cwd 是否为实际目录，不把目录探测作为历史读取的条件；env 不匹配或保存 cwd 缺失/不可用时，ACP 以只读方式恢复历史，不装配可执行的会话环境。`sessionWorkspaceV1` 响应可携带 `read_only`，执行请求由宿主拒绝；不悄悄在当前机器同名绝对路径执行，也不自动把 session 迁入当前 env。这是执行准入，不是 Session ID 的访问授权。
 
-session 执行 sidecar 文件锁及 TUI dirty/owner 恢复确认已移除；不再启用 `peri.sessionRecoveryV1` 协商或发出 `peri/session_reset_dirty`；caps 字段/序列化键仍保留为 false，不表示恢复机制仍存在。普通工具授权、删除等确认弹窗保留。`SessionExecutionLease`、`execution_runs` 与进程内 mutation gate 仍用于活跃执行、写入效果结清及关闭收尾，不代表跨进程互斥，也不能据其名称恢复旧认领语义。取消、子任务关系、MCP/LSP 关闭与事务仍需遵守自身生命周期。
+session 执行 sidecar 文件锁及 TUI dirty/owner 恢复确认已移除；不再启用 `peri.sessionRecoveryV1` 协商或发出 `peri/session_reset_dirty`；caps 字段/序列化键仍保留为 false，不表示恢复机制仍存在。普通工具授权、删除等确认弹窗保留。`SessionExecutionLease` 与进程内 mutation gate 管理当前实例的活跃执行、写入效果结清及关闭收尾；schema 11 删除 `execution_runs` 及其 generation/clean 状态，不移入其他列或表。不提供跨进程互斥，也不把重开当成前次未知写入已结清的证明。同 ID 创建重试只在绑定、冻结快照及父链等不可变事实一致时接纳，不覆盖已有内容；无绑定但已有冻结快照的记录拒绝自动 legacy 接纳，避免掩盖绑定损坏。取消、子任务关系、MCP/LSP 关闭与事务仍需遵守自身生命周期。
 
 ## 保证边界
 

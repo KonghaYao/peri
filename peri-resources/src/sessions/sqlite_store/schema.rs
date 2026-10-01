@@ -1,4 +1,4 @@
-//! 单库 schema 升级：保留历史、执行状态与生命周期锚点，事务内调整结构。
+//! 单库 schema 升级：保留历史与会话身份，事务内清理退役状态。
 
 use super::database::SqliteSessionDatabase;
 #[cfg(test)]
@@ -140,12 +140,6 @@ impl SqliteSessionDatabase {
         crate::sessions::machine::initialize().await?;
         let mut connection = self.pool.acquire().await?;
         let state = inspect(&mut connection).await?;
-        if state == SchemaState::Current {
-            sqlx::query(AssertSqlSafe(canonical::CREATE_OAUTH_CREDENTIALS_TABLE_SQL))
-                .execute(&mut *connection)
-                .await?;
-            return Self::migrate_environments(&mut connection).await;
-        }
         // 登记表重建要对被引用的父表执行 DROP TABLE：SQLite 对父表做隐式删除时会
         // 立即检查外键，`defer_foreign_keys` 也挡不住。该 PRAGMA 只在事务外生效，
         // 因此重建路径整段使用同一条连接：先关外键，提交前用 foreign_key_check 补齐
@@ -267,11 +261,6 @@ impl SqliteSessionDatabase {
                 .into());
             }
         }
-        // 执行代际表：v6 及其以前带 `threads` 外键，v7 起去掉——远程模式下本机不存在
-        // `threads` 行，级联删除会把另一台机器持有的执行代际抹掉。对已升级的库这只是一次
-        // 形状校验，行内容一字不改（`execution_runs` 里的行按 `thread_id` 原文归属，
-        // 不再有 store 维度）。
-        ensure_execution_runs_without_foreign_key(&mut tx).await?;
         // v10 回退：删除 v7..v9 写下的本机远程痕迹（本机登记、未决锚点、远端操作日志、
         // 按 store 分区的执行域）。对没有这些表的库是幂等的。
         drop_remote_local_state(&mut tx).await?;
@@ -309,10 +298,7 @@ impl SqliteSessionDatabase {
 /// 此时**不删**并拒绝升级（fail-closed，整个事务回滚），而不是把不认识的数据丢掉。
 /// 表不存在时跳过，因此对没有这些表的库是幂等的。
 ///
-/// 不触碰 `threads` / `messages` / `session_bindings` / `workspaces` / `projects` 与
-/// `execution_runs` 的任何行。`execution_runs` 里可能残留远程会话的执行代际行（本机
-/// `threads` 里没有对应行）——按用户裁决它们是**有效事实**（执行代际仍按 `thread_id`
-/// 单键存放，唯一执行域），既不删除也不改写。
+/// 不触碰 `threads` / `messages` / `session_bindings` / `workspaces` / `projects`。
 async fn drop_remote_local_state(connection: &mut SqliteConnection) -> Result<()> {
     for (table, columns) in DROPPED_LOCAL_TABLES {
         if !table_exists(connection, table).await? {
@@ -386,71 +372,6 @@ const DROPPED_LOCAL_TABLES: &[(&str, &[&str])] = &[
         ],
     ),
 ];
-
-/// `execution_runs` 收敛到 v7 形状：存在但不带 `threads` 外键。
-///
-/// 新库与 legacy 库直接按目标形状创建；已有带外键的表逐行复制后重建。重建只在
-/// `execution_runs` 自己的子表上进行，不需要关闭外键强制。
-async fn ensure_execution_runs_without_foreign_key(
-    connection: &mut SqliteConnection,
-) -> Result<()> {
-    if !table_exists(connection, "execution_runs").await? {
-        create_execution_runs(connection).await?;
-        return Ok(());
-    }
-    require_columns(
-        connection,
-        "execution_runs",
-        &["thread_id", "generation", "clean"],
-    )
-    .await?;
-    let foreign_tables: Vec<(String,)> =
-        sqlx::query_as("SELECT DISTINCT \"table\" FROM pragma_foreign_key_list('execution_runs')")
-            .fetch_all(&mut *connection)
-            .await?;
-    if !foreign_tables.iter().any(|(table,)| table == "threads") {
-        return Ok(());
-    }
-    let before: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM execution_runs")
-        .fetch_one(&mut *connection)
-        .await?;
-    sqlx::raw_sql(
-        "CREATE TABLE execution_runs_local (
-            thread_id  TEXT PRIMARY KEY,
-            generation INTEGER NOT NULL,
-            clean      BOOLEAN NOT NULL
-        );
-        INSERT INTO execution_runs_local (thread_id, generation, clean)
-            SELECT thread_id, generation, clean FROM execution_runs;
-        DROP TABLE execution_runs;
-        ALTER TABLE execution_runs_local RENAME TO execution_runs;",
-    )
-    .execute(&mut *connection)
-    .await?;
-    let after: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM execution_runs")
-        .fetch_one(&mut *connection)
-        .await?;
-    if before != after {
-        return Err(WorkspaceError::DiscoveryError(
-            "execution state rows changed during schema migration".into(),
-        )
-        .into());
-    }
-    Ok(())
-}
-
-async fn create_execution_runs(connection: &mut SqliteConnection) -> Result<()> {
-    sqlx::raw_sql(
-        "CREATE TABLE execution_runs (
-            thread_id  TEXT PRIMARY KEY,
-            generation INTEGER NOT NULL,
-            clean      BOOLEAN NOT NULL
-        );",
-    )
-    .execute(&mut *connection)
-    .await?;
-    Ok(())
-}
 
 async fn table_exists(connection: &mut SqliteConnection, table: &str) -> Result<bool> {
     let row: Option<(String,)> =

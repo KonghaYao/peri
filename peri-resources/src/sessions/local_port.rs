@@ -3,11 +3,11 @@
 //! 与 [`super::data::SessionDataPort`] 的分工是事实归属，不是实现细节：
 //!
 //! - 数据端口回答 canonical 会话数据（会话行、绑定字节、历史、frozen、父链）；
-//! - 本端口回答**只可能由本机回答**的事：工作区发现与登记证据、执行代际、运行句柄、
+//! - 本端口回答**只可能由本机回答**的事：工作区发现与登记证据、运行句柄、
 //!   在途写入门禁、创建准入。lease 只在这里出现，数据端口里没有它。
 //!
 //! 只有唯一实现 [`LocalExecution`]（本机 SQLite）：远端组合的 canonical 数据在远端，
-//! 但执行记录仍只写在本机库。绑定字节与父链由数据端口提供——远端
+//! 但运行句柄及未知效果仅驻留当前实例。绑定字节与父链由数据端口提供——远端
 //! 组合给的是远端会话行自带的 `binding_*` 列，本机组合给的是本机 `session_bindings`。
 //! 本端口因此不查绑定行，只接受调用方给出的字节并做**本机复核**（目录证据、关系）。
 //!
@@ -23,9 +23,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use peri_acp_types::session_resources::{NewSession, SessionResourceResult};
 use peri_acp_types::thread::ThreadId;
-use peri_acp_types::workspace::{
-    RecoveryRequiredDetails, ResolvedWorkspace, SessionBinding, SessionExecutionLease,
-};
+use peri_acp_types::workspace::{ResolvedWorkspace, SessionBinding, SessionExecutionLease};
 
 use super::sqlite_store::{ExclusiveExecutionGuard, ExecutionLease, ExecutionWriteGuard};
 
@@ -70,11 +68,6 @@ pub(in crate::sessions) trait LocalExecutionPort: Send + Sync {
     /// 本机来源证据是否足以把无绑定历史表达成 legacy（远端组合由门面固定为 `false`）。
     async fn legacy_confirmed(&self, id: &ThreadId) -> Result<bool>;
 
-    // ── owner / dirty ──
-
-    /// 本机执行代际事实（generation, clean）；不创建锁文件、不改状态。
-    async fn execution_state(&self, id: &ThreadId) -> Result<Option<(i64, bool)>>;
-
     /// 沿 root 关系找到活 owner；`None` 表示整棵树既没有绑定也没有活 owner。
     ///
     /// 树形事实由调用方从数据面给出（[`SessionFacts::root`]），本机不沿自己的 `threads` 上溯。
@@ -118,21 +111,18 @@ pub(in crate::sessions) trait LocalExecutionPort: Send + Sync {
         facts: &SessionFacts,
     ) -> Result<Arc<dyn SessionExecutionLease>>;
 
-    /// 解除精确代际的本机 dirty（CAS 在实现内部，不跨接口传递）。
-    async fn reset_dirty(&self, target: &RecoveryRequiredDetails) -> Result<()>;
-
     // ── 创建准入 ──
 
-    /// 新建会话的执行准入（本地塌缩：数据与执行代际一次提交）。
+    /// 新建会话的执行准入：事务保存 canonical 数据，再登记运行句柄。
     ///
-    /// 只有「数据与执行代际在同一个本机库」的组合调它；数据在另一端的组合先由数据端口
+    /// 只有数据在本机库的组合调它；数据在另一端的组合先由数据端口
     /// 保存，再调 [`Self::admit_existing`]（见 `SessionDataHome`）。
     async fn create_session(
         &self,
         input: &NewSession,
     ) -> SessionResourceResult<Arc<dyn SessionExecutionLease>>;
 
-    /// 未发布创建的第一阶段（本地塌缩：草稿行 + 执行代际一次提交）。
+    /// 未发布创建的第一阶段：事务保存 canonical 草稿，再登记运行句柄。
     ///
     /// 与 [`Self::create_session`] 同一形状，只把 frozen 值改为 `NULL`；返回的租约就是
     /// 本条 identity 的活 owner，frozen 提交（[`Self::commit_frozen`]）在同一事务内复核它。
@@ -141,9 +131,9 @@ pub(in crate::sessions) trait LocalExecutionPort: Send + Sync {
         draft: &peri_acp_types::session_resources::NewSessionDraft,
     ) -> SessionResourceResult<Arc<dyn SessionExecutionLease>>;
 
-    /// 一次性提交 frozen（本地塌缩：owner/代际校验与 CAS 同一事务）。
+    /// 一次性提交 frozen：排他门禁内复核 owner，事务内校验 binding 并执行 CAS。
     ///
-    /// `lease` 必须是本进程这条 identity 的活 owner；执行代际必须仍未结清（`clean = 0`）；
+    /// `lease` 必须是当前确切的活跃 Arc，且不存在未知写入效果；
     /// `UPDATE ... WHERE frozen_context IS NULL` 必须恰好命中一行，否则 typed 冲突且不写入。
     async fn commit_frozen(
         &self,
@@ -152,7 +142,7 @@ pub(in crate::sessions) trait LocalExecutionPort: Send + Sync {
         frozen: &peri_acp_types::session_resources::FrozenSnapshotBytes,
     ) -> SessionResourceResult<()>;
 
-    /// 提交前的本机资格复核：本进程仍是这条 identity 的活 owner，且代际未结清。
+    /// 提交前的本机资格复核：当前确切 Arc 仍活跃，且不存在未知写入效果。
     ///
     /// 数据在远端的组合用它把「本机执行事实」叠在远端 CAS 之前（远端组合没有同一个事务
     /// 可以承载本机 owner 判定）。
@@ -168,7 +158,7 @@ pub(in crate::sessions) trait LocalExecutionPort: Send + Sync {
     /// 初始化句柄时同样拒绝（那不是崩溃残留）。
     async fn discard_incomplete_initialization(&self, id: &ThreadId) -> SessionResourceResult<()>;
 
-    /// 为「数据已完整保存、还没有执行代际」的会话建立准入（收敛，不是重建）。
+    /// 为数据已完整保存的会话登记运行句柄（收敛，不是重建）。
     ///
     /// `binding` 是**数据面给出的绑定字节**（本机组合来自本机 `session_bindings`，远程组合
     /// 来自远端会话行）；调用方已确认数据保存及机器环境可用。本端口仅登记运行句柄，
@@ -191,13 +181,8 @@ pub(in crate::sessions) trait LocalExecutionPort: Send + Sync {
 
     /// 会话**数据已被删除**：结束这条 identity 的本机执行事实与所有权。
     ///
-    /// 删除是完整生命周期行为，数据消失之后本机也不该留下任何属于它的执行事实：
-    ///
-    /// 1. 删掉本机 `execution_runs` 里这条 identity 的代际行。本机组合在删数据的同一事务里
-    ///    已经删过（这里是幂等的空操作）；数据在**远端**的组合则靠这一步收敛——远端行消失
-    ///    之后本机还留着一条代际行，那是一条没有对象的行。
-    /// 2. 本进程若持有它的活 owner，按「数据已删除」的终态释放（`ExecutionLease::dispose_ownership`，
-    ///    不做 clean CAS）。没有活 owner 不是错误：数据面已经删干净了，本机没有可结束的所有权。
+    /// 排空并关闭当前实例登记的确切 Arc，不清除未知效果，不更新持久执行状态。
+    /// 没有登记句柄不是错误。
     ///
     /// 只由门面在数据面删除**返回成功之后**调用：本方法不判断数据在不在，也不把「行缺失」
     /// 当成删除的证据。删除失败时门面不会调它（所有权原样保留，调用方仍可重试或显式放弃）。

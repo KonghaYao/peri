@@ -28,7 +28,7 @@ use peri_acp_types::workspace::{
 
 use super::sqlite_store::invalid_input;
 
-// 本机执行事实（执行代际、owner、OS 锁、工作区登记）不属于本端口：它们在
+// 本机执行事实（运行句柄、未结清门禁、工作区登记）不属于本端口：它们在
 // `super::local_port::LocalExecutionPort`。这里只保留两个 adapter 共同承担的会话数据行为。
 
 /// child resume 认领的持久化事实：状态 + 是否处于认领中。
@@ -53,14 +53,14 @@ pub(crate) trait SessionDataPort: Send + Sync {
     async fn machine_id_of(&self, id: &ThreadId) -> SessionResourceResult<Option<String>>;
     /// 保存新会话：meta/binding/frozen 完整落库（本机准入由执行面另行完成）。
     ///
-    /// 本地塌缩把「完整数据 + 执行代际」并成一次提交，因此本机构建不经过本方法；
+    /// 本地创建把完整数据并成一次提交后接纳运行句柄，因此本机构建不经过本方法；
     /// 它的生产调用方是远程组合（先 durable 保存、再本机准入），本地用它构造
-    /// 「数据已保存、执行代际未写」的收敛状态。
+    /// 「数据已保存、运行句柄未接纳」的收敛状态。
     async fn save_new_session(&self, input: &NewSession) -> SessionResourceResult<()>;
 
     /// 保存未发布创建（J2 第一阶段）：身份/绑定落库，frozen 暂空。
     ///
-    /// 本地塌缩把「草稿 + 执行代际」并成一次提交（不经过本方法）；远程组合先由本方法
+    /// 本地创建把草稿并成一次提交后接纳运行句柄（不经过本方法）；远程组合先由本方法
     /// 保存草稿、再取本机执行准入，与 [`Self::save_new_session`] 同一节奏。
     async fn save_new_session_draft(
         &self,

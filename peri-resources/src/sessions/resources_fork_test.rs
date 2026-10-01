@@ -22,8 +22,31 @@ async fn test_save_fork_converges_when_the_target_was_saved_without_admission() 
     fixture.facade.gate.data().save_fork(&fork).await.unwrap();
     let lease = fixture.facade.save_fork(&fork).await.unwrap();
     assert_eq!(lease.thread_id(), &"s-fork-target".to_owned());
-    assert_eq!(fixture.count_execution_runs("s-fork-target").await, 1);
     assert_eq!(fixture.count_messages("s-fork-target").await, 1);
+    fixture
+        .facade
+        .append_history(&"s-fork-target".to_owned(), &[payload("continued fork")])
+        .await
+        .unwrap();
+    lease.mark_clean().await.unwrap();
+    let before = fixture
+        .facade
+        .load_session_snapshot(&"s-fork-target".to_owned())
+        .await
+        .unwrap();
+    let retry = fixture.facade.save_fork(&fork).await.unwrap();
+    let after = fixture
+        .facade
+        .load_session_snapshot(&"s-fork-target".to_owned())
+        .await
+        .unwrap();
+    assert_eq!(after.binding, before.binding);
+    assert_eq!(after.frozen, before.frozen);
+    assert_eq!(after.payloads.len(), 2);
+    assert_eq!(
+        serde_json::to_value(&after.meta).unwrap(),
+        serde_json::to_value(&before.meta).unwrap()
+    );
     // 数据已保存但前提变化时才报「已保存、未准入」。
     let mut changed = fork.clone();
     changed.target.binding.workspace_id = peri_acp_types::workspace::WorkspaceId::new();
@@ -33,8 +56,9 @@ async fn test_save_fork_converges_when_the_target_was_saved_without_admission() 
     };
     assert!(matches!(
         error_kind(&error),
-        SessionResourceErrorKind::InvalidInput { .. }
+        SessionResourceErrorKind::Conflict { .. }
     ));
+    retry.mark_clean().await.unwrap();
     drop(lease);
     drop(source_lease);
 }
@@ -58,7 +82,6 @@ async fn test_abandon_initialization_deletes_a_fork_target_with_frozen() {
         flags: std::collections::HashMap::new(),
     };
     let target_lease = fixture.facade.save_fork(&fork).await.unwrap();
-    assert_eq!(fixture.count_execution_runs("s-fork-target").await, 1);
     assert_eq!(fixture.count_messages("s-fork-target").await, 1);
 
     // 与 `handle_fork` 的失败补偿同一条调用：装配/身份失败后撤销未发布目标。
@@ -68,17 +91,20 @@ async fn test_abandon_initialization_deletes_a_fork_target_with_frozen() {
         .await
         .unwrap();
 
-    // 目标不留残渣：会话行、绑定、历史与执行代际一起消失。
     assert_eq!(fixture.count_threads("s-fork-target").await, 0);
     assert_eq!(fixture.count_bindings("s-fork-target").await, 0);
     assert_eq!(fixture.count_messages("s-fork-target").await, 0);
-    assert_eq!(fixture.count_execution_runs("s-fork-target").await, 0);
     // source 原样保留：撤销不是通用 rollback。
     assert_eq!(fixture.count_threads("s-fork-source").await, 1);
-    assert_eq!(
-        fixture.execution_row("s-fork-source").await,
-        Some((1, false))
-    );
+    fixture
+        .facade
+        .append_history(
+            &"s-fork-source".to_owned(),
+            &[payload("source remains active")],
+        )
+        .await
+        .unwrap();
+    assert_eq!(fixture.count_messages("s-fork-source").await, 1);
 }
 
 /// 数据面两条撤销入口的判据分档：write-once（不叠加 frozen 判据）与两阶段草稿（叠加）。
@@ -124,6 +150,30 @@ async fn test_revoke_entry_points_differ_only_by_the_frozen_criterion() {
 }
 
 #[tokio::test]
+async fn test_closed_draft_owner_cannot_abandon_existing_canonical_draft() {
+    let fixture = Fixture::new().await;
+    let id = "s-closed-draft".to_owned();
+    let initialization = fixture.begin(&id).await;
+    let owner = initialization.execution_lease();
+    owner.mark_clean().await.unwrap();
+    let before = fixture.facade.load_session_snapshot(&id).await.unwrap();
+    let error = initialization.clone().abandon().await.unwrap_err();
+    assert!(matches!(
+        error_kind(&error),
+        SessionResourceErrorKind::Workspace(WorkspaceError::ExecutionLeaseRequired)
+    ));
+    let after = fixture.facade.load_session_snapshot(&id).await.unwrap();
+    assert_eq!(after.binding, before.binding);
+    assert_eq!(after.frozen, FrozenState::LegacyAbsent);
+    assert_eq!(
+        serde_json::to_value(&after.meta).unwrap(),
+        serde_json::to_value(&before.meta).unwrap()
+    );
+    assert_eq!(fixture.count_threads(&id).await, 1);
+    assert_eq!(fixture.count_bindings(&id).await, 1);
+}
+
+#[tokio::test]
 async fn test_revoke_refuses_a_session_that_already_has_children() {
     let fixture = Fixture::new().await;
     let root_lease = fixture.create("s-revoke-root").await;
@@ -143,7 +193,6 @@ async fn test_revoke_refuses_a_session_that_already_has_children() {
     ));
     assert_eq!(fixture.count_threads("s-revoke-root").await, 1);
     assert_eq!(fixture.count_threads("s-revoke-child").await, 1);
-    assert_eq!(fixture.count_execution_runs("s-revoke-root").await, 1);
     // 失败不留半撤销状态：owner 与两条会话都仍然可用。
     fixture
         .facade

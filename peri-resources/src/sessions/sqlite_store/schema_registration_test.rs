@@ -64,7 +64,7 @@ async fn test_version4_upgrade_relaxes_registration_keys_and_preserves_rows() {
     .execute(&mut connection)
     .await;
     assert!(blocked.is_err(), "schema 4 的单列唯一约束必须仍然存在");
-    let before = identity_and_execution_bytes(&mut connection).await;
+    let before = identity_bytes(&mut connection).await;
     let before_history = history_bytes(&mut connection).await;
     connection.close().await.unwrap();
 
@@ -116,7 +116,7 @@ async fn test_version4_upgrade_relaxes_registration_keys_and_preserves_rows() {
     )
     .await
     .unwrap();
-    let after = identity_and_execution_bytes(&mut probe).await;
+    let after = identity_bytes(&mut probe).await;
     let after_history = history_bytes(&mut probe).await;
     probe.close().await.unwrap();
     assert_eq!(before, after, "迁移不得改写登记、绑定或执行状态");
@@ -207,7 +207,7 @@ async fn assert_registration_upgrade_allows_directory_changes(version: i64) {
         .unwrap();
     }
     let old_history = history_bytes(&mut connection).await;
-    let old_identity = identity_and_execution_bytes(&mut connection).await;
+    let old_identity = identity_bytes(&mut connection).await;
     connection.close().await.unwrap();
     let store = SqliteThreadStore::new(&path).await.unwrap();
     let original = dir.path().join("original");
@@ -253,10 +253,10 @@ async fn assert_registration_upgrade_allows_directory_changes(version: i64) {
     let mut connection = store.database.pool.acquire().await.unwrap();
     // 精确读取旧会话，不以新增线程的插入顺序推断目标。
     assert_eq!(history_bytes(&mut connection).await, old_history);
-    let after = identity_and_execution_bytes(&mut connection).await;
+    let after = identity_bytes(&mut connection).await;
     assert!(
         old_identity[2..].iter().all(|row| after.contains(row)),
-        "原 binding 和 dirty generation 不得被迁移清除或改写"
+        "原 binding 不得被迁移清除或改写"
     );
     if version >= 4 {
         assert!(
@@ -335,14 +335,14 @@ async fn test_registration_upgrade_preserves_healthy_v5_composite_registrations(
          INSERT INTO workspaces SELECT '66666666-6666-4666-8666-666666666666', project_id, root, '{\"device\":9,\"inode\":9}', discovery
              FROM workspaces WHERE id = '22222222-2222-4222-8222-222222222222';"
     ).execute(&mut connection).await.unwrap();
-    let before = identity_and_execution_bytes(&mut connection).await;
+    let before = identity_bytes(&mut connection).await;
     let history = history_bytes(&mut connection).await;
     connection.close().await.unwrap();
     // 首次开库升级，第二次开库保持同一结果；不访问 fixture 中不存在的旧目录。
     for _ in 0..2 {
         let store = SqliteThreadStore::new(&path).await.unwrap();
         let mut connection = store.database.pool.acquire().await.unwrap();
-        assert_eq!(identity_and_execution_bytes(&mut connection).await, before);
+        assert_eq!(identity_bytes(&mut connection).await, before);
         assert_eq!(history_bytes(&mut connection).await, history);
         let (version,): (i64,) = sqlx::query_as("PRAGMA user_version")
             .fetch_one(&mut *connection)
@@ -368,7 +368,7 @@ async fn test_registration_upgrade_corrupt_v5_rolls_back_all_state() {
     .execute(&mut connection)
     .await
     .unwrap();
-    let rows = identity_and_execution_bytes(&mut connection).await;
+    let rows = identity_bytes(&mut connection).await;
     let history = history_bytes(&mut connection).await;
     let schema: Vec<(String, Option<String>)> =
         sqlx::query_as("SELECT name, sql FROM sqlite_schema ORDER BY name")
@@ -393,7 +393,7 @@ async fn test_registration_upgrade_corrupt_v5_rolls_back_all_state() {
             .await
             .unwrap();
     assert_eq!(after_schema, schema);
-    assert_eq!(identity_and_execution_bytes(&mut connection).await, rows);
+    assert_eq!(identity_bytes(&mut connection).await, rows);
     assert_eq!(history_bytes(&mut connection).await, history);
     let (version,): (i64,) = sqlx::query_as("PRAGMA user_version")
         .fetch_one(&mut connection)

@@ -14,6 +14,16 @@ pub(super) const LEGACY_GOALS_SQL: &str = "CREATE TABLE thread_goals (
     updated_at_ms INTEGER NOT NULL,
     FOREIGN KEY(thread_id) REFERENCES threads(id) ON DELETE CASCADE
 )";
+pub(super) const LEGACY_EXECUTION_SQL: &str = "CREATE TABLE execution_runs (
+    thread_id TEXT PRIMARY KEY,
+    generation INTEGER NOT NULL,
+    clean BOOLEAN NOT NULL
+)";
+pub(super) const LEGACY_BOUND_EXECUTION_SQL: &str = "CREATE TABLE execution_runs (
+    thread_id TEXT PRIMARY KEY REFERENCES threads(id) ON DELETE CASCADE,
+    generation INTEGER NOT NULL,
+    clean BOOLEAN NOT NULL
+)";
 
 #[derive(Clone, Debug)]
 pub(super) struct SchemaObject {
@@ -48,6 +58,19 @@ pub(super) fn removal_plan(
             return Err("unrecognized legacy goal table");
         }
     }
+    let execution = objects
+        .iter()
+        .find(|object| object.name.eq_ignore_ascii_case("execution_runs"));
+    if let Some(object) = execution {
+        if object.kind != "table"
+            || !object.sql.as_deref().is_some_and(|sql| {
+                known_definition(sql, LEGACY_EXECUTION_SQL)
+                    || known_definition(sql, LEGACY_BOUND_EXECUTION_SQL)
+            })
+        {
+            return Err("unrecognized legacy execution table");
+        }
+    }
     let mut removed = Vec::new();
     for column in columns {
         let expected = match column.name.to_ascii_lowercase().as_str() {
@@ -68,9 +91,10 @@ pub(super) fn removal_plan(
         }
     }
     for object in objects {
-        if object.name.eq_ignore_ascii_case("thread_goals")
-            || (object.kind == "index" && object.table.eq_ignore_ascii_case("thread_goals"))
-        {
+        if ["thread_goals", "execution_runs"].iter().any(|table| {
+            object.name.eq_ignore_ascii_case(table)
+                || (object.kind == "index" && object.table.eq_ignore_ascii_case(table))
+        }) {
             continue;
         }
         if let Some(sql) = &object.sql {
@@ -86,6 +110,10 @@ pub(super) fn removal_plan(
                     && token
                         .trim_matches('\'')
                         .eq_ignore_ascii_case("thread_goals"))
+                    || (execution.is_some()
+                        && token
+                            .trim_matches('\'')
+                            .eq_ignore_ascii_case("execution_runs"))
                     || (!object.name.eq_ignore_ascii_case("threads")
                         && removed
                             .iter()
@@ -105,6 +133,9 @@ pub(super) fn removal_plan(
     let mut plan = Vec::new();
     if goals.is_some() {
         plan.push("DROP TABLE thread_goals");
+    }
+    if execution.is_some() {
+        plan.push("DROP TABLE execution_runs");
     }
     if removed.contains(&"cached_context") {
         plan.push("ALTER TABLE threads DROP COLUMN cached_context");

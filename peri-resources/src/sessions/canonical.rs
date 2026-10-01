@@ -11,7 +11,6 @@
 //! | 归属 | 表 | 为什么 |
 //! | --- | --- | --- |
 //! | canonical 会话数据（两端都有） | `threads` / `messages` / `session_bindings` / `projects` / `workspaces` | 会话事实、canonical 历史、不可变执行绑定与它引用的 workspace 记录（契约 §4.1 允许数据 adapter 保存不可变 binding 记录） |
-//! | 本机执行事实（只有本机） | `execution_runs` | 执行代际是设备事实；远端没有执行面，不建、也不该建 |
 //! | 执行器机制（只有远端） | `peri_op_ledger` / `peri_store_meta` | 幂等资格的账本与版本标记；本机用 `PRAGMA user_version` 与本地事务表达同一件事 |
 //!
 //! ## 排序键是形状的一部分

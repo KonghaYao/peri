@@ -1,5 +1,12 @@
 use super::*;
 
+pub(in crate::sessions::sqlite_store) fn validate_unbound_legacy_frozen(
+    frozen: Option<&str>,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(frozen.is_none(), WorkspaceError::InvalidBinding);
+    Ok(())
+}
+
 pub(super) async fn machine_id_on(
     pool: &sqlx::SqlitePool,
     id: &ThreadId,

@@ -43,7 +43,7 @@ use super::session_data::RemoteSessionData;
 /// 凭证是**值**而不是来源：解析发生在 D 边界（读取进程环境的唯一位置），组合层只消费
 /// 已解析的值，因此云实验可以把进程内解析出的凭证直接注入，不必把它写进进程环境。
 ///
-/// `registry_path` 是本机执行事实所在（workspace 登记、执行代际、sidecar 锁）；它**不是**
+/// `registry_path` 是本机 workspace 登记所在；运行句柄与未结清门禁只在当前实例内。它**不是**
 /// canonical 数据的位置，因此远程组合不会把它当作会话库来读写。
 pub(crate) async fn open_remote(
     endpoint: &RemoteEndpoint,
@@ -66,8 +66,8 @@ pub(crate) async fn open_remote(
 
 /// 本机执行面：写意图可以创建/升级，只读意图只读打开、不创建任何东西。
 ///
-/// 本机库不存在时**如实失败**（`DatabaseNotFound`）：workspace 证据、执行代际与 sidecar
-/// 锁都是本机库持有的事实，没有它就没有可用的执行面。只读打开不创建文件是硬约束
+/// 本机库不存在时**如实失败**（`DatabaseNotFound`）：workspace 证据保存在本机库。
+/// 只读打开不创建文件是硬约束
 /// （不能用「补一个空库」把它变成可写打开），因此这里不回退。
 async fn open_local_execution(
     access: AccessMode,

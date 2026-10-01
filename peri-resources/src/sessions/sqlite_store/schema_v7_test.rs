@@ -1,6 +1,6 @@
-//! schema v6 → v10 迁移：执行状态显式保存，v7..v9 的本机远程痕迹回退删除。
+//! schema v6 → v11 迁移：执行状态不再持久化，历史数据与登记保持不变。
 //!
-//! 覆盖：dirty 代际逐行保留、去外键后的删除语义、v10 回退后本机不再有 store 维度的表、
+//! 覆盖：退役执行表删除、会话删除语义、本机不再有 store 维度的表、
 //! 迁移失败整体回滚、只读打开不迁移也不按版本拒绝。所有库都在 tempdir 中构造，不触碰
 //! 真实本机数据库。
 
@@ -8,7 +8,7 @@ use super::schema::CURRENT_SCHEMA_VERSION;
 use super::*;
 use crate::sessions::data::SessionDataPort;
 use peri_acp_types::store::{serialize_persisted_payload, PersistedPayload, ThreadStore};
-use peri_acp_types::workspace::{RecoveryRequiredDetails, WorkspaceError};
+use peri_acp_types::workspace::WorkspaceError;
 use sqlx::{sqlite::SqliteConnectOptions, AssertSqlSafe, Connection, SqliteConnection};
 use std::path::Path;
 
@@ -128,7 +128,7 @@ async fn table_present(connection: &mut SqliteConnection, table: &str) -> bool {
 }
 
 #[tokio::test]
-async fn test_v6_upgrade_keeps_dirty_execution_history_and_auxiliary_tables() {
+async fn test_v6_upgrade_removes_execution_state_and_keeps_history() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("threads.db");
     populated_v6(&path).await;
@@ -145,22 +145,7 @@ async fn test_v6_upgrade_keeps_dirty_execution_history_and_auxiliary_tables() {
         .unwrap();
     assert_eq!(version, CURRENT_SCHEMA_VERSION);
 
-    // execution_runs：外键去掉了，行内容（generation/clean）逐行保留。
-    let foreign: Vec<(String,)> =
-        sqlx::query_as("SELECT \"table\" FROM pragma_foreign_key_list('execution_runs')")
-            .fetch_all(&mut connection)
-            .await
-            .unwrap();
-    assert!(
-        foreign.is_empty(),
-        "v7 起本机执行行不再依赖 threads 外键：{foreign:?}"
-    );
-    let runs: Vec<(String, i64, bool)> =
-        sqlx::query_as("SELECT thread_id, generation, clean FROM execution_runs")
-            .fetch_all(&mut connection)
-            .await
-            .unwrap();
-    assert_eq!(runs, vec![("old-root".to_owned(), 4, false)]);
+    assert!(!table_present(&mut connection, "execution_runs").await);
 
     // 历史与辅助表逐字节保留。
     let history: (String, String) =
@@ -194,29 +179,13 @@ async fn test_v6_upgrade_keeps_dirty_execution_history_and_auxiliary_tables() {
     }
     connection.close().await.unwrap();
 
-    // dirty 代际在同一 (thread_id, generation) 上仍可精确解除。
-    store
-        .reset_dirty_execution(&RecoveryRequiredDetails {
-            thread_id: "old-root".to_owned(),
-            generation: 4,
-        })
-        .await
-        .unwrap();
-    let (clean,): (bool,) =
-        sqlx::query_as("SELECT clean FROM execution_runs WHERE thread_id = 'old-root'")
-            .fetch_one(&store.database.pool)
-            .await
-            .unwrap();
-    assert!(clean);
-
-    // 删除不再依赖外键级联：执行行由删除路径显式清理（数据面行为见端口测试）。
     let data = SqliteSessionData::new(Arc::clone(&store.database));
     data.delete_tree(&"old-root".to_owned()).await.unwrap();
-    let runs: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM execution_runs")
+    let sessions: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM threads")
         .fetch_one(&store.database.pool)
         .await
         .unwrap();
-    assert_eq!(runs.0, 0);
+    assert_eq!(sessions.0, 0);
 }
 
 #[tokio::test]
@@ -368,10 +337,19 @@ async fn test_upgraded_database_reopens_without_second_migration() {
             "重复打开不重建已回退的表：{table}"
         );
     }
-    let runs: Vec<(String, i64, bool)> =
-        sqlx::query_as("SELECT thread_id, generation, clean FROM execution_runs")
-            .fetch_all(&reopened.database.pool)
+    assert!(
+        !table_present(
+            &mut reopened.database.pool.acquire().await.unwrap(),
+            "execution_runs"
+        )
+        .await
+    );
+    assert_eq!(
+        reopened
+            .load_messages(&"old-root".to_owned())
             .await
-            .unwrap();
-    assert_eq!(runs, vec![("old-root".to_owned(), 4, false)]);
+            .unwrap()
+            .len(),
+        1
+    );
 }

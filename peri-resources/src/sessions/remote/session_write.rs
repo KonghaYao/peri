@@ -267,7 +267,7 @@ impl RemoteSessionData {
     ///
     /// 本机**不再**为这些操作留日志（v10 删除了 `session_remote_operations`，用户裁决不做
     /// 跨安装能力）：跨进程重启后没有「按原 id 向远端求证」这条路径，未结清只在本进程的
-    /// 租约上表达，进程崩溃的未结清代际由 `execution_runs.clean = 0` 表达。
+    /// 租约上表达；进程重开不会自动证明前次未知写入的终态。
     pub(super) async fn commit_effects(
         &self,
         behavior: &str,

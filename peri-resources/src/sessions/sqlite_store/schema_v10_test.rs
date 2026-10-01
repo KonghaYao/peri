@@ -5,7 +5,7 @@
 //!
 //! - v7 / v8 / v9 三种来源库都收敛到同一形状（既有业务表与两张初始化表）；
 //! - 表数据连同表一起消失，**业务表逐行不动**；
-//! - `execution_runs` 的行全部保留，包括远程会话遗留的孤儿行（按裁决它们是有效事实）；
+//! - schema 11 删除 `execution_runs`，不把其状态移入新的表或列；
 //! - 同名但形状不符的表 → fail-closed 拒绝并整体回滚，不删不认识的数据；
 //! - 没有那 5 张表的库是幂等的。
 //!
@@ -192,6 +192,8 @@ async fn preserved_table_definitions(connection: &mut SqliteConnection) -> Vec<(
     rows.retain(|(name, _)| {
         !DROPPED_TABLES.contains(&name.as_str())
             && name != "threads"
+            && name != "execution_runs"
+            && name != "thread_goals"
             && name != OAUTH_CREDENTIALS_TABLE
             && name != SESSION_ENVIRONMENTS_TABLE
     });
@@ -234,7 +236,9 @@ async fn test_v7_v8_v9_all_converge_and_drop_only_the_remote_tables() {
         }
         let mut expected: Vec<String> = tables_before
             .iter()
-            .filter(|name| !DROPPED_TABLES.contains(&name.as_str()))
+            .filter(|name| {
+                !DROPPED_TABLES.contains(&name.as_str()) && name.as_str() != "execution_runs"
+            })
             .cloned()
             .collect();
         expected.extend([
@@ -268,21 +272,7 @@ async fn test_v7_v8_v9_all_converge_and_drop_only_the_remote_tables() {
             .unwrap();
         assert_eq!(locator, "/work");
 
-        // 执行代际全部保留，包括本机没有 `threads` 行的远程遗留行。
-        let runs: Vec<(String, i64, bool)> = sqlx::query_as(
-            "SELECT thread_id, generation, clean FROM execution_runs ORDER BY thread_id",
-        )
-        .fetch_all(&mut connection)
-        .await
-        .unwrap();
-        assert_eq!(
-            runs,
-            vec![
-                ("local-root".to_owned(), 4, false),
-                ("remote-root".to_owned(), 7, false),
-            ],
-            "v10 不重建 execution_runs，也不删除远程遗留的代际行"
-        );
+        assert!(!tables_after.iter().any(|name| name == "execution_runs"));
         connection.close().await.unwrap();
 
         // 迁移后的库可以正常写打开（门面与桥共用同一条连接真相）。
@@ -333,6 +323,7 @@ async fn test_database_without_remote_tables_is_idempotent() {
         .unwrap();
     assert_eq!(version, CURRENT_SCHEMA_VERSION);
     let mut expected = tables_before;
+    expected.retain(|name| name != "execution_runs");
     expected.extend([
         OAUTH_CREDENTIALS_TABLE.to_owned(),
         SESSION_ENVIRONMENTS_TABLE.to_owned(),
@@ -343,19 +334,14 @@ async fn test_database_without_remote_tables_is_idempotent() {
         preserved_table_definitions(&mut connection).await,
         definitions_before
     );
-    // 业务数据一行不动：本机会话与两条（含远程遗留的）代际行都还在。
-    let runs: Vec<(String, i64, bool)> = sqlx::query_as(
-        "SELECT thread_id, generation, clean FROM execution_runs ORDER BY thread_id",
-    )
-    .fetch_all(&mut connection)
-    .await
-    .unwrap();
+    let sessions: Vec<(String, String)> =
+        sqlx::query_as("SELECT id, title FROM threads ORDER BY id")
+            .fetch_all(&mut connection)
+            .await
+            .unwrap();
     assert_eq!(
-        runs,
-        vec![
-            ("local-root".to_owned(), 4, false),
-            ("remote-root".to_owned(), 7, false),
-        ]
+        sessions,
+        vec![("local-root".to_owned(), "本机会话".to_owned())]
     );
     connection.close().await.unwrap();
     store.close().await;

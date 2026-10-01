@@ -4,7 +4,7 @@
 //! 它们直接返回，因此只有被父测试拉起时才工作；断言与安全规则见父模块文档。
 //!
 //! - 写入：真实部署入口 → 创建 → 追加/排空 → compact → fork → child → 标题 A→B→A → close；
-//! - 冷恢复：同一 HOME 的**新进程** → 未决收敛 → 解除 ordinary dirty → rewind → 删除；
+//! - 冷恢复：同一 HOME 的**新进程** → 未决收敛 → 新 runtime owner → rewind → 删除；
 //! - 只读：`fresh`（全新 HOME，本机无库）与 `registered`（沿用写入期 HOME）两种本机状态。
 
 use std::collections::BTreeMap;
@@ -20,7 +20,7 @@ use peri_acp_types::session_resources::{
 use peri_acp_types::session_store::SessionStoreDeployment;
 use peri_acp_types::store::{CompactionChange, InheritedContext, PersistedPayload};
 use peri_acp_types::thread::{CancelPolicy, ThreadId};
-use peri_acp_types::workspace::{ResetDirtyRequest, SessionBinding, SESSION_BINDING_VERSION};
+use peri_acp_types::workspace::{SessionBinding, SESSION_BINDING_VERSION};
 
 use super::cloud_deployment_tests::{
     CHILD_SUFFIX, FORK_SUFFIX, HOME_ENV, READ_ONLY_ENV, ROOT_SUFFIX, RUN_ENV, WORKSPACE_ENV,
@@ -251,8 +251,6 @@ async fn write_flow(context: &ChildContext, target: &CloudTarget) -> Result<Vec<
         "the third update (same title as the first) must still apply",
     )?;
 
-    // ⑦ 关闭：返回后不再接受新写入。进程在这里退出，**不写 clean**：执行代际留在本机，
-    //    下一个进程因此必须走「先收敛未决、再解除 ordinary dirty」的正路。
     facade.close().await.map_err(failure)?;
     drop((lease, fork_lease));
     Ok(lines)
@@ -292,25 +290,15 @@ async fn recover_flow(context: &ChildContext, target: &CloudTarget) -> Result<Ve
         "cold recovery must converge with no unsettled operations",
     )?;
 
-    // ② 上一个进程异常退出留下的 ordinary dirty：先收敛，再按显式风险接受解除。
     let availability = facade
         .inspect_availability(Some(&root))
         .await
         .map_err(failure)?;
-    let Some(ExecutionAvailability::Dirty(details)) = availability.execution else {
-        return Err(format!(
-            "a process that exited without clean must report dirty: {:?}",
-            availability.execution
-        ));
-    };
-    facade
-        .reset_dirty_execution(&ResetDirtyRequest {
-            target: details,
-            accept_risk: true,
-        })
-        .await
-        .map_err(failure)?;
-    lines.push("dirty=reset".to_owned());
+    check(
+        availability.execution == Some(ExecutionAvailability::Available),
+        "runtime ownership must be available in a newly opened process",
+    )?;
+    let before = facade.load_session_snapshot(&root).await.map_err(failure)?;
 
     let workspace = facade
         .resolve_workspace(&context.workspace)
@@ -320,6 +308,12 @@ async fn recover_flow(context: &ChildContext, target: &CloudTarget) -> Result<Ve
         .acquire_execution(&root, &workspace)
         .await
         .map_err(failure)?;
+    let after = facade.load_session_snapshot(&root).await.map_err(failure)?;
+    check(
+        after.binding == before.binding && after.frozen == before.frozen,
+        "acquiring runtime ownership must not change canonical binding or frozen bytes",
+    )?;
+    lines.push("runtime_owner=acquired".to_owned());
 
     // ③ rewind：保留到第一条消息（显式边界），派生计数随之更新。
     let history = facade.load_session_history(&root).await.map_err(failure)?;
@@ -365,7 +359,6 @@ async fn recover_flow(context: &ChildContext, target: &CloudTarget) -> Result<Ve
     )?;
     lines.push("delete=applied".to_owned());
 
-    // ⑤ 终态：删除留下的墓碑不阻止 clean 落盘。
     lease
         .mark_clean()
         .await

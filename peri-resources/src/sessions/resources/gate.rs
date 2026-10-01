@@ -7,7 +7,7 @@
 //! 未决持久化**只在进程内的租约上**表达：v10 移除了本机 durable 锚点（登记、未决写、
 //! 远端操作日志），因为用户裁决不做跨安装/跨 store 的能力。文件里因此没有「查表问未决」
 //! 这一步——`WriteScope::settle` 的 `Drop` 语义与 `is_uncertain` 读取仍覆盖在途写入；
-//! 进程崩溃后的未结清代际由 `execution_runs` 的 `clean = 0` 表达（`Dirty` 分类）。
+//! 不提供进程崩溃后的持久执行状态或恢复代际。
 
 use std::sync::Arc;
 
@@ -55,7 +55,7 @@ impl WriteScope {
 /// 写入准入闸门。
 ///
 /// 两个端口各持一种事实：`data` 是 canonical 会话数据（本机 SQLite 或远端 adapter）、
-/// `local` 是本机执行面（发现、owner、代际、锁）。组合层决定两者指向哪个后端，
+/// `local` 是本机执行面（发现、owner、运行屏障）。组合层决定两者指向哪个后端，
 /// 闸门自己不做后端判断，也不持有任何 store 身份——v10 之后没有「本次服务哪个 store」
 /// 这回事。
 #[derive(Clone)]

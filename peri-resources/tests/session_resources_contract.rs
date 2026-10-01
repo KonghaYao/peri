@@ -15,8 +15,7 @@ use peri_acp_types::session_resources::{
 };
 use peri_acp_types::store::PersistedPayload;
 use peri_acp_types::workspace::{
-    RecoveryRequiredDetails, ResetDirtyRequest, ResolvedWorkspace, ScopedThreadQuery,
-    SessionBinding, ThreadScope, SESSION_BINDING_VERSION,
+    ResolvedWorkspace, ScopedThreadQuery, SessionBinding, ThreadScope, SESSION_BINDING_VERSION,
 };
 use peri_resources::sessions::{ReadOnlyStoreErrorKind, SessionResourcesImpl};
 use peri_resources::SessionStoreShutdownOwner;
@@ -316,7 +315,7 @@ async fn test_contract_delete_removes_the_session_and_its_execution_facts() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_contract_owner_is_exclusive_across_processes() {
+async fn test_contract_process_owners_are_independent_and_crash_preserves_canonical_facts() {
     let repo = repository();
     let db = tempfile::tempdir().unwrap();
     let path = db.path().join("threads.db");
@@ -328,42 +327,34 @@ async fn test_contract_owner_is_exclusive_across_processes() {
         .await
         .unwrap();
 
-    // 本进程持有 owner：另一进程取得所有权必须报忙（锁在，代际还不重要）。
-    let output = child(&path, repo.path(), &id, "busy");
+    let before = facade.load_session_snapshot(&id).await.unwrap();
+    let output = child(&path, repo.path(), &id, "clean");
     assert!(
         output.status.success(),
         "child failed: {} {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    lease.mark_clean().await.unwrap();
-    drop(lease);
-
-    // 释放后另一进程取得所有权并崩溃：脏代际跨进程可见，必须显式接受风险才可解除。
-    let output = child(&path, repo.path(), &id, "crash");
-    assert!(output.status.success());
-    let error = match facade.acquire_execution(&id, &workspace).await {
-        Ok(_) => panic!("expected recovery to be required after the other process crashed"),
-        Err(error) => error,
-    };
-    let SessionResourceErrorKind::Workspace(
-        peri_acp_types::workspace::WorkspaceError::RecoveryRequired(details),
-    ) = error.kind()
-    else {
-        panic!("expected a dirty generation, got: {error:?}");
-    };
-    assert_eq!(details.generation, 2);
+    assert!(String::from_utf8_lossy(&output.stdout).contains("running 1 test"));
     facade
-        .reset_dirty_execution(&ResetDirtyRequest {
-            target: RecoveryRequiredDetails {
-                thread_id: id.clone(),
-                generation: details.generation,
-            },
-            accept_risk: true,
-        })
+        .append_history(&id, &[message("original instance still active")])
         .await
         .unwrap();
+    lease.mark_clean().await.unwrap();
+    let output = child(&path, repo.path(), &id, "crash");
+    assert!(output.status.success());
     let next = facade.acquire_execution(&id, &workspace).await.unwrap();
+    lease.mark_clean().await.unwrap();
+    facade
+        .append_history(&id, &[message("continued after process crash")])
+        .await
+        .unwrap();
+    let after = facade.load_session_snapshot(&id).await.unwrap();
+    assert_eq!(after.binding, before.binding);
+    assert_eq!(after.frozen, before.frozen);
+    assert_eq!(after.payloads.len(), 2);
+    assert_eq!(after.meta.cwd, before.meta.cwd);
+    assert_eq!(after.meta.parent_thread_id, before.meta.parent_thread_id);
     next.mark_clean().await.unwrap();
 }
 
@@ -379,17 +370,9 @@ async fn test_contract_child_process() {
     let facade = SessionResourcesImpl::open(db).await.unwrap();
     let workspace = facade.resolve_workspace(Path::new(&repo)).await.unwrap();
     match expected.as_str() {
-        "busy" => {
-            let error = match facade.acquire_execution(&id, &workspace).await {
-                Ok(_) => panic!("acquired ownership while another process holds it"),
-                Err(error) => error,
-            };
-            assert!(matches!(
-                error.kind(),
-                SessionResourceErrorKind::Workspace(
-                    peri_acp_types::workspace::WorkspaceError::ExecutionBusy
-                )
-            ));
+        "clean" => {
+            let lease = facade.acquire_execution(&id, &workspace).await.unwrap();
+            lease.mark_clean().await.unwrap();
         }
         "crash" => {
             let _lease = facade.acquire_execution(&id, &workspace).await.unwrap();

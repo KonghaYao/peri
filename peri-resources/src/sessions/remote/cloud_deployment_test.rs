@@ -9,7 +9,7 @@
 //! | 阶段 | 进程 | 断言 |
 //! | --- | --- | --- |
 //! | 写入 | 子进程 A（temp HOME） | 创建 → 追加 → 排空 → compact → fork → child → 标题 A→B→A → close |
-//! | 冷恢复 | 子进程 B（同一 HOME，新进程） | 未决收敛 `Recovered` → 上次退出留下的 ordinary dirty → rewind → 删除 → 只读复核 |
+//! | 冷恢复 | 子进程 B（同一 HOME，新进程） | 未决收敛 `Recovered` → 新 runtime owner → rewind → 删除 → 只读复核 |
 //! | 只读（全新 HOME） | 子进程 C（全新 HOME） | 本机没有执行事实 ⇒ 打开按 `NotFound` 如实失败；HOME 一个文件都不建 |
 //! | 只读（沿用 A 的 HOME） | 子进程 D（沿用 A 的 HOME） | 远端历史可读、执行权不可得；写入按 `ReadOnlyStore` 拒绝；本机状态不变 |
 //!
@@ -17,8 +17,8 @@
 //! **只读连接**盘点本机执行面库（阶段间各一次，见下）。
 //!
 //! 本机盘点读的是真实落盘的那个文件（`registry_path(home)`，不是门面自陈）：远端模式下本机
-//! 只留被授权的执行事实——workspace 证据（`projects` / `workspaces`）与执行代际
-//! （`execution_runs`）——不留任何 store 痕迹，也不留任何会话数据（`threads` / `messages` /
+//! 只留被授权的 workspace 证据（`projects` / `workspaces`）；runtime 状态不持久化，
+//! 不留任何 store 痕迹，也不留任何会话数据（`threads` / `messages` /
 //! `session_bindings` 全为 0）。库里本不该有的东西一旦回来，只核对云端计数是看不见的，这条
 //! 盘点就是为它准备的。
 //!
@@ -26,8 +26,8 @@
 //! 新建的库逐表比对（用户裁决「远端库完全 = 本地库的模式」），v10 删掉的五张本机远程表名
 //! 则从 `sqlite_store/schema.rs` 的 `DROPPED_LOCAL_TABLES` 原文派生（见 [`dropped_local_tables`]）。
 //!
-//! 阶段 C 的拒绝与本机库的只读打开是同一个判定：本机执行事实（workspace 证据、执行代际、
-//! sidecar 锁）只存在本机库里，只读意图不许创建它，因此缺库时没有可用的执行面——只读打开
+//! 阶段 C 的拒绝与本机库的只读打开是同一个判定：workspace 证据只存在本机库里，
+//! 只读意图不许创建它，因此缺库时没有可用的执行面——只读打开
 //! 一个不存在的库在两种存储模式下都按 `NotFound` 拒绝，而不是把「没有事实」降级成空事实。
 //!
 //! ## 事实与安全
@@ -66,7 +66,7 @@ pub(super) const READ_ONLY_ENV: &str = "PERI_CLOUD_FACADE_READ_ONLY";
 
 /// 写入阶段创建的三个合成会话（`<run>-<后缀>`）：root 树根、它的子会话、fork 出来的独立树。
 ///
-/// 子进程按这三个后缀造 id，父测试按同样的后缀核对本机执行代际——两处共用同一组常量，
+/// 子进程按这三个后缀造 id，两处共用同一组常量，
 /// 免得「哪条会话有本机执行事实」这件事在父测试里另写一份镜像。
 pub(super) const ROOT_SUFFIX: &str = "root";
 pub(super) const CHILD_SUFFIX: &str = "child";
@@ -79,15 +79,12 @@ pub(super) fn registry_path(home: &Path) -> PathBuf {
 
 // ─── 本机执行面库：父进程侧的只读盘点 ─────────────────────────────────────────
 //
-// 远端模式下本机**只**留被授权的执行事实：workspace 证据（`projects` / `workspaces`）与执行
-// 代际（`execution_runs`）。会话数据（`threads` / `messages` / `session_bindings`）与任何
-// store 痕迹都不该出现在本机——本机库在远端模式下的表集合，与同一构建在本机模式下新建的库
 // 逐表相同。
 //
 // 盘点一律读**真实落盘的那个文件**（只读连接，不建库、不建目录），并且都在子进程退出之后
 // 进行：那时没有写者，读到的是稳定状态，也不是任何门面的自陈。
 
-/// 本机执行面库在一个时刻的盘点：版本、表集合、分组计数，以及执行代际的 `(id, clean)`。
+/// 本机执行面库在一个时刻的盘点：版本、表集合与持久 workspace 事实计数。
 ///
 /// 只有结构与计数，没有会话内容、没有路径——因此可以直接进断言消息与 `PROBE` 行。
 #[derive(Debug, PartialEq, Eq)]
@@ -99,14 +96,10 @@ struct LocalFace {
     bindings: i64,
     projects: i64,
     workspaces: i64,
-    /// 本轮 run 命名空间之外执行代际行数（这个 HOME 里的会话都是本轮造的，应为 0）。
-    other_runs: i64,
-    /// 本轮 run 命名空间下的执行代际行：`(thread_id, clean)`，按 id 排序。
-    runs: Vec<(String, bool)>,
 }
 
 /// 只读盘点本机执行面库；缺文件即失败（不会把「本机没有执行事实」降级成「空的执行事实」）。
-async fn read_local_face(path: &Path, run: &str) -> Result<LocalFace, String> {
+async fn read_local_face(path: &Path) -> Result<LocalFace, String> {
     let options = SqliteConnectOptions::new()
         .filename(path)
         .read_only(true)
@@ -114,7 +107,7 @@ async fn read_local_face(path: &Path, run: &str) -> Result<LocalFace, String> {
     let mut connection = sqlx::SqliteConnection::connect_with(&options)
         .await
         .map_err(|error| format!("the local execution face must open read-only: {error}"))?;
-    let face = collect_local_face(&mut connection, run).await;
+    let face = collect_local_face(&mut connection).await;
     connection
         .close()
         .await
@@ -122,10 +115,7 @@ async fn read_local_face(path: &Path, run: &str) -> Result<LocalFace, String> {
     face
 }
 
-async fn collect_local_face(
-    connection: &mut sqlx::SqliteConnection,
-    run: &str,
-) -> Result<LocalFace, String> {
+async fn collect_local_face(connection: &mut sqlx::SqliteConnection) -> Result<LocalFace, String> {
     let version: i64 = sqlx::query_scalar("PRAGMA user_version")
         .fetch_one(&mut *connection)
         .await
@@ -141,14 +131,6 @@ async fn collect_local_face(
     let bindings = count_rows(connection, "session_bindings").await?;
     let projects = count_rows(connection, "projects").await?;
     let workspaces = count_rows(connection, "workspaces").await?;
-    let runs: Vec<(String, bool)> = sqlx::query_as(
-        "SELECT thread_id, clean FROM execution_runs WHERE thread_id LIKE ?1 ORDER BY thread_id",
-    )
-    .bind(format!("{run}%"))
-    .fetch_all(&mut *connection)
-    .await
-    .map_err(|error| format!("local execution generations are unreadable: {error}"))?;
-    let total_runs = count_rows(connection, "execution_runs").await?;
     Ok(LocalFace {
         version,
         tables,
@@ -157,8 +139,6 @@ async fn collect_local_face(
         bindings,
         projects,
         workspaces,
-        other_runs: total_runs - runs.len() as i64,
-        runs,
     })
 }
 
@@ -178,7 +158,7 @@ async fn count_rows(
 /// 期望值不另抄一份，而是让构建自己造一个库再读回来。用户裁决「远端库完全 = 本地库的模式，
 /// 两个存储模式一致」在这里是同一个断言的另一半：远端模式下本机库的形状，必须与同一构建在
 /// 本机模式下建出来的库逐表相同——schema 版本或表集合一旦分叉，这里先响。
-async fn local_mode_baseline(run: &str) -> Result<LocalFace, String> {
+async fn local_mode_baseline() -> Result<LocalFace, String> {
     let directory = tempfile::tempdir().map_err(|error| format!("baseline temp home: {error}"))?;
     let path = directory.path().join("threads.db");
     let resources =
@@ -190,8 +170,7 @@ async fn local_mode_baseline(run: &str) -> Result<LocalFace, String> {
         .close()
         .await
         .map_err(|error| format!("the local-mode baseline must close: {error}"))?;
-    // 基线库是刚建出来的：它没有任何执行代际，按同一 run 前缀读也只是为了让两个库用同一套读法。
-    read_local_face(&path, run).await
+    read_local_face(&path).await
 }
 
 /// v10 从本机库删掉的表名，**从 schema 源码派生**（`sqlite_store/schema.rs` 的
@@ -331,14 +310,6 @@ fn check_local_face(
             face.projects, face.workspaces
         ),
     )?;
-    check(
-        face.other_runs == 0,
-        &format!(
-            "{phase}: every local execution generation must belong to this run's sessions: \
-             foreign={}",
-            face.other_runs
-        ),
-    )?;
     Ok(())
 }
 
@@ -398,7 +369,7 @@ async fn lifecycle_flow(
 ) -> Result<Vec<String>, String> {
     let mut lines = Vec::new();
     // 期望值先派生出来：同一构建在本机模式下新建的库（形状）+ schema 源码里的 v10 删除清单。
-    let baseline = local_mode_baseline(run).await?;
+    let baseline = local_mode_baseline().await?;
     let dropped = dropped_local_tables()?;
 
     // ① 写入：新进程 + temp HOME + 合成 workspace/frozen，全部经真实部署入口。
@@ -419,35 +390,18 @@ async fn lifecycle_flow(
         "after_write sessions={} messages={} ledger={}",
         written.sessions, written.messages, written.ledger
     ));
-    // 本机侧：远端保存了三棵树，本机只该留下它们的执行代际——root 与 fork（fork 是独立树根）
-    // 各一条未结清代际；child 由 root 的租约持有，自己不写执行代际。写入子进程退出时没有写
-    // clean，因此两行都必须是 `clean = 0`。
-    let local_written = read_local_face(&registry_path(home), run).await?;
+    let local_written = read_local_face(&registry_path(home)).await?;
     check_local_face("after_write", &local_written, &baseline, &dropped)?;
-    check(
-        local_written.runs
-            == vec![
-                (format!("{run}-{FORK_SUFFIX}"), false),
-                (format!("{run}-{ROOT_SUFFIX}"), false),
-            ],
-        &format!(
-            "the root tree and the fork tree must hold a local execution generation, and a process \
-             that exited without clean must leave them unsettled: {:?}",
-            local_written.runs
-        ),
-    )?;
     lines.push(format!(
-        "local_after_write version={} tables={} sessions_rows={}/{}/{} runs={:?} v10_dropped={}",
+        "local_after_write version={} tables={} sessions_rows={}/{}/{} v10_dropped={}",
         local_written.version,
         local_written.tables.len(),
         local_written.threads,
         local_written.messages,
         local_written.bindings,
-        local_written.runs,
         dropped.join(",")
     ));
 
-    // ② 冷恢复：同一 HOME 的**新进程**收敛未决、解除 ordinary dirty、rewind 与删除。
     lines.extend(run_child(RECOVER_CHILD, home, workspace, run, None)?);
     let recovered = counts_now(target, run).await?;
     check(
@@ -461,21 +415,11 @@ async fn lifecycle_flow(
         "after_recovery sessions={} messages={} ledger={}",
         recovered.sessions, recovered.messages, recovered.ledger
     ));
-    // 本机侧：删除收敛执行代际——root 的行随数据消失，存活的 fork 树仍持有它那条未结清代际
-    // （删除只结束被删 identity 的本机所有权，不连带处理别人的树）。
-    let local_recovered = read_local_face(&registry_path(home), run).await?;
+    let local_recovered = read_local_face(&registry_path(home)).await?;
     check_local_face("after_recovery", &local_recovered, &baseline, &dropped)?;
-    check(
-        local_recovered.runs == vec![(format!("{run}-{FORK_SUFFIX}"), false)],
-        &format!(
-            "deleting the root tree must converge the local execution generations of what it \
-             deleted, and leave the surviving fork tree's generation alone: {:?}",
-            local_recovered.runs
-        ),
-    )?;
     lines.push(format!(
-        "local_after_recovery runs={:?}",
-        local_recovered.runs
+        "local_after_recovery sessions_rows={}/{}/{}",
+        local_recovered.threads, local_recovered.messages, local_recovered.bindings
     ));
 
     // ③ 显式只读：全新 HOME（本机无库）与沿用写入期 HOME 两种本机状态。
@@ -512,8 +456,7 @@ async fn lifecycle_flow(
         "after_read_only sessions={} messages={} ledger={}",
         after_read_only.sessions, after_read_only.messages, after_read_only.ledger
     ));
-    // 本机侧：只读打开之后本机库逐项不变——既没有新表、新行，也没有被动过的执行代际。
-    let local_read_only = read_local_face(&registry_path(home), run).await?;
+    let local_read_only = read_local_face(&registry_path(home)).await?;
     check_local_face("after_read_only", &local_read_only, &baseline, &dropped)?;
     check(
         local_read_only == local_recovered,
@@ -523,8 +466,8 @@ async fn lifecycle_flow(
         ),
     )?;
     lines.push(format!(
-        "local_after_read_only runs={:?}",
-        local_read_only.runs
+        "local_after_read_only sessions_rows={}/{}/{}",
+        local_read_only.threads, local_read_only.messages, local_read_only.bindings
     ));
     Ok(lines)
 }

@@ -1,6 +1,6 @@
-# 下一版本：移除闲置会话缓存与遗留目标表，保留配置快照
+# 下一版本：移除闲置会话缓存、遗留目标与执行状态表，保留配置快照
 
-状态：2026-10-01 用户授权实施后，schema 11 已提交 `ac8430e6`；随后七项既有失败已修复并通过资源库全量回归，修复留在工作区待用户审阅、未再提交。真实远端升级及发布验收仍待完成，不关闭 issue。
+状态：2026-10-01 schema 11 首次实施已提交 `ac8430e6`；七项失败修复按用户要求于实施删执行表前提交检查点 `f0ff1f0a`。用户批准将 `execution_runs` 删除合并到同一 schema 11，不升 12；本轮实现与隔离自动化验收完成，用户已授权提交。真实远端升级及发布验收仍待完成，不关闭 issue。
 
 跟踪位置：仓库本地 `spec/issues/`。发布目标为下一版本，不固定应用版本号。
 
@@ -8,7 +8,7 @@
 
 - `threads.config` 有用，保留列、领域字段及本机/远端读写契约；不能根据当前全 NULL 推断为废列，也不在本 issue 补做配置快照功能。
 - 下一版本移除 `threads.cached_context`、`threads.context_cache_epoch` 和遗留 `thread_goals` 表；同步删除它们的生产读写、类型字段与无消费者接口，不保留 deprecated shim、双写或运行时新旧分支。
-- 这里的删除范围是两列和一张表，不是删除 `threads` / `messages` 的行。遗留目标表自身的数据随表删除；不删除 Goal 功能、目标事件或当前内存目标状态机。
+- 删除范围为两列及两张退役表，不删除 `threads` / `messages` 的行。遗留目标与执行表数据随表删除；不删除 Goal 功能、目标事件或当前内存目标状态机。
 - 用户后续已授权实现下一版本；实施与验证限于代码及隔离 fixture，不在用户真实数据库上执行迁移或数据清理。
 
 ## 观察、推断与范围
@@ -24,7 +24,7 @@
 
 静态未发现消费者不代表所有历史安装版本或外部脚本都不用；实施前必须核对发布版本及仓库内消费者。本 issue 将“删除目标表”的授权作为既有“保留所有额外业务表”契约的定向例外，不扩展为任意删表。
 
-物理缩容不是验收承诺：217.22 MiB 是缓存文本值负载，不等于必然回收的文件空间。清理目标表基本没有体积收益；禁止顺手删权威消息、执行事实或自动 VACUUM。
+物理缩容不是验收承诺：217.22 MiB 是缓存文本值负载，不等于必然回收的文件空间。禁止删权威消息或自动 VACUUM；执行表删除是追加明确授权，不扩展为任意删表。
 
 ## What to build
 
@@ -36,13 +36,13 @@
 - 移除旧缓存写入顺带刷新的 `updated_at`：仅读取历史不修改会话时间或最近列表顺序，真正的消息/元数据变更仍按现有规则更新时间。这是本次删除读后写副作用带来的明确行为变化，不另加 touch 写入来保持旧副作用。
 - 本机元数据 SELECT、INSERT、UPDATE，filesystem adapter，远端 SQL 和 codec，创建/发现/恢复路径，read-only shape probe 均不再要求废弃字段。
 - 保留 `config` 的字段、序列化及 `SessionMetaPatch.config` 定向写入语义；以非 NULL 数据验收，不能只验证空库。
-- `messages.content`、`projection`、`truncated`、`excluded`，`frozen_context`、`inherited_context`、`snapshot_at_message_id`，binding/env 和执行事实均不属于删除范围。
+- `messages.content`、`projection`、`truncated`、`excluded`，`frozen_context`、`inherited_context`、`snapshot_at_message_id` 与 binding/env 均不属于删除范围。删除 `execution_runs` 的 generation/clean 持久化，不迁入新表或列；保留实例内活跃句柄、未知效果门禁、取消与排空/关闭。
 - 查看器、缺陷分析器与导入脚本同步移除废弃列的依赖，保留配置快照、消息角色及现有正常展示/分析行为。旧 JSON/对外协议的兼容义务单独评估，不为内部删除再造兼容层。
 
 ### 一次性 schema 升级
 
 - 本机/远端共用版本常量已从 10 推进到 11；不能因为同样能开库就继续冒用 10。应用发布版本号不由本 issue 固定。
-- 新 canonical DDL 不含两列；旧库经版本化迁移删除两列及有明确归属的历史 `thread_goals`，缺失目标表/列时按受支持形状处理。无关扩展表、索引和数据保持原样，未知/不支持的形状 fail-closed。
+- 新 canonical DDL 不含退役两列、目标和执行表；旧库迁移删除两列及有明确归属的 `thread_goals` / `execution_runs`，兼容已带旧执行表的开发版 11，版本仍为 11。删除目标缺失时幂等；无关扩展对象/数据保留，未知 DDL/约束或外部依赖 fail-closed。
 - 删除 `thread_goals` 前核对对象类型、已知历史列/约束布局和归属；不能只凭同名或少数列存在就认领，未知额外布局拒绝升级。额外表入向外键或未知 view/trigger 若依赖待删对象，拒绝本次迁移并保持原库/版本不变，不级联删数据、不关闭外键强行删除、不自动改写扩展对象；执行器无法可靠检查这些依赖时，不宣称可以安全自动删除。
 - 本机迁移必须覆盖现有 legacy / 受支持旧版本到新版本的入口，不能只处理 schema 10；迁移失败不发布新版本标记，不留下半删状态。保持既有支持版本边界，不额外承诺未知更老版本。
 - 远端已补齐 canonical v2 / schema 10 → 11 的写打开升级；只读接受该旧形状但不写入，其他旧 contract/版本仍拒绝。保持 `store_id`、幂等账本及现有执行器契约；不将本地执行器等价测试视为真实远端发布验收。
@@ -50,6 +50,7 @@
 - 一次性版本升级可以理解旧对象；生产 schema 和业务查询只维护新形状，不新增兼容表、缓存字段回填或双写。
 - 按现有只读降级契约验证旧库/新库读取和错误分类；只读打开不执行清理、建表或迁移，不因残留 required-column probe 拒绝正确的新库。
 - 升级前核对所有写入实例已停止或完成版本切换，不能仅依赖旧进程“应该拒绝新版本”；明确当前库升级后旧版本不能继续使用，回退依赖迁移前一致性备份，不支持逆向补列/双写。
+- 本轮复用尚未发布的 schema 11：上一个开发版 11 的 writer 不会被同版本标记阻断，必须显式停止，不能并行写入。对已有开发库的退役执行表清理仍在同一受控事务内完成。
 - 备份与发布流程须覆盖 SQLite WAL 一致性；本轮 clone 的前提是无 WAL 且源文件稳定，不能把该方法直接用于活跃写库。远端使用其存储服务的一致性快照/备份能力，不宣称仅凭复制主文件即可安全恢复。
 
 ## Acceptance criteria
@@ -60,7 +61,7 @@
 - [x] 含非 NULL `config`、非空旧缓存、非零 epoch、历史 goals 的受支持旧库升级成功，目标对象删除，其余事实及扩展数据逐项保持；重复打开幂等。
 - [x] legacy / 支持旧版本迁移覆盖，失败/中断/重复尝试不会留下部分删除与错误版本标记；未知更高版本及不支持形状拒绝写入。
 - [x] 同名异形 `thread_goals`、额外表引用目标表及依赖目标列的 view/trigger 均有拒绝/回滚回归；扩展行、对象定义和旧版本标记逐项不变，不能把关闭外键后的 DROP 成功当验收。
-- [ ] 本机与远端升级都保留 store 身份、历史消息 ID/内容/rowid 顺序、projection flags、binding/env 和执行代际；远端测试不是仅验证 SQL 字符串。
+- [ ] 本机与远端升级都保留 store 身份、历史消息 ID/内容/rowid 顺序、projection flags 与 binding/env；执行代际按追加授权删除。远端测试不是仅验证 SQL 字符串，真实服务发布验收仍需完成。
 - [x] 只读打开和写失败后的降级读取仍可恢复历史，不创建目标对象；新库不再被旧 required-column probe 判为不兼容。
 - [ ] 用户可观察路径：按 ID 恢复、自有/继承上下文、compact/rewind、父子会话、配置快照 round-trip 和 Goal 创建/更新/状态事件不因删除退化。
 - [x] 读取历史不写 `updated_at`，重复读取不改变按更新时间排序的会话列表；真实历史/元数据 mutation 仍正常更新时间，不能一并删掉业务更新。
@@ -140,17 +141,35 @@ schema 11 初次实施时资源库完整串行回归为 369 通过 / 7 失败 / 
 
 ### 追加授权：七项失败修复，待用户审阅
 
-用户要求 subagent 快速修复并保留审阅控制，三个 worker 采用不重叠写范围；修复未提交。
+用户要求 subagent 快速修复并保留审阅控制，三个 worker 采用不重叠写范围；修复已在本轮实施前提交检查点 `f0ff1f0a`。
 
 - 六项 legacy / snapshot / migration 失败来自已退役的跨实例独占、dirty / 绑定登记读门槛以及引用不存在父会话的夹具。依据 `ARC-WORKSPACE-001` 修正场景与断言，而非恢复旧限制；加强配置、消息原始字节、绑定、env、frozen 首次提交与真实拒绝边界。新增损坏/未来绑定拒绝及 lost native binding 独立场景，没有删除或 ignore 失败用例。
 - 并发新库失败发生在 WAL 初始化早于 schema 协调。恢复 canonical 数据库路径级初始化 OS 锁，覆盖预检、WAL 与升级；有限等待、阻塞系统调用在 blocking worker 执行，异常/取消释放。不是 session sidecar 锁，不改变多实例执行政策。
 - 新增 12 项开库回归，包括冷启动、单次迁移、取消、持有者进程退出、只读、别名及关闭收尾。定向模块重复 10 轮全部通过（1280 次并发冷开库）；原失败并发用例重复 30 次全通过。
 - 汇总命令 `PERI_MACHINE_ID=00000000-0000-4000-8000-000000000001 cargo test -p peri-resources --lib -- --test-threads=1`：**390 通过 / 0 失败 / 21 忽略 / 0 过滤**。`cargo clippy -p peri-resources --all-targets -- -D warnings` 通过。真实远端测试仍未运行。
 - 汇总后的 `cargo check --workspace --all-targets`、修改文件定向格式/行数检查及 `git diff --check` 通过；`cargo test -p peri-tui --test meta_session_cli -- --test-threads=1` 为 19 通过 / 0 失败。
-- 用户提出通过代码优化移除 `execution_runs`，目前仅讨论、不扩展已批准删除范围。现有 generation/clean 机制的测试通过不证明持久化必要；移除方案需明确创建重试/重复创建和 binding 缺失完整性语义，并保留运行时未知效果闸门、会话事实与远端账本，不把废状态搬到新列/表。
+- 用户批准优化移除 `execution_runs`，同 schema 11 实施。新建重试核对绑定、冻结及父链等不可变事实，不覆盖既有会话；无绑定但已有 frozen 的记录拒绝自动 legacy 接纳。活跃/未结清句柄强引用登记，丢弃 caller Arc 或重新取得不能绕过未知效果门禁；正常关闭后可重新取得，旧句柄不能关闭新句柄。远端账本保持，重开不证明前次未知写入终态。
+- 检查点提交时另一任务正在修改 ACP/Agent/Middleware，workspace hooks 遇到其在途编译/格式错误；在 staged tree 的独立快照运行 `cargo check --workspace --all-targets`、`cargo fmt --all -- --check` 与 `cargo clippy --workspace -- -W clippy::all` 全通过后提交，仅将上述重复 hooks 排除，本任务 typos/layer-imports hooks 仍通过，未撤销或混入对方改动。
+
+### 追加授权：执行表删除与运行时生命周期验收
+
+- 本机 legacy / 2–10 与已有开发版 11 的受控清理在同一 schema 11 事务内完成；不再创建/重建执行表。识别历史有/无 threads FK 两种 DDL，额外列/约束、同名 view、外部 FK/view/trigger 拒绝，失败恢复执行行及旧版本。远端升级共用删除规划，保留 store 身份和操作账本。
+- 同实例 active Arc 复用，uncertain Arc 强引用保留；取消写入/撤销、caller 丢弃句柄或 reacquire 均不能伪造结清。精确 owner 的冻结 CAS、关闭旧 Arc 不影响新运行、readonly/closed 拒绝、真实子进程重开及取消收尾均有行为回归。
+- 重新创建仅核对一致的不可变事实；冲突不覆盖 canonical 数据。无绑定但有 frozen 的会话不能自动 legacy 接纳，但历史读取仍成功并表达 `BindingState::Missing`，避免把执行完整性门槛变成数据读取门槛。
+
+| 最终验证（隔离 fixture，不运行真实库迁移） | 结果 |
+| --- | --- |
+| `PERI_MACHINE_ID=00000000-0000-4000-8000-000000000001 cargo test -p peri-resources --lib -- --test-threads=1` | **410 通过 / 0 失败 / 21 忽略 / 0 过滤**；包括本机及远端 SQLite 事务等价迁移测试 |
+| `cargo test -p peri-resources --test session_resources_contract -- --test-threads=1` | 6 通过；真实进程生命周期与公开数据契约 |
+| `cargo test -p peri-acp-types --lib -- --test-threads=1` | 516 通过 |
+| Agent `provenance` / `compact_v2` / `compact_cancel` | 5 / 179 / 6 通过 |
+| ACP `compact_recovery` / `goal_state`；TUI `meta_session_cli` | 14 / 25 / 19 通过 |
+| `cargo check --workspace --all-targets`；`cargo clippy -p peri-resources -p peri-acp-types --all-targets -- -D warnings` | 全部通过 |
+| Resources / Types / Agent doc tests | 11 通过，2 个既有示例忽略 |
+| 修改 Rust 文件格式 / 1000 行上限、Markdown 本地链接、全边依赖门与 `git diff --check` | 全部通过；全仓大小扫描另有 15 个既有或其他任务超限文件，不宣称全仓大小合规 |
 
 ### 发布前尚需验收
 
 - 真实远端服务的旧 v2/schema 10 升级（尤其 DROP COLUMN 与托管 DDL 的事务/失败能力），不能以 SQLite 测试传输等价物替代。
 - 在发布环境停止旧 writer、完成包含 WAL 的一致性备份并演练从备份回退。不得让新旧二进制同时写升级后的库。
-- 七项修复等待用户审阅；跨层及真实远端完整恢复仍按现行 active spec 验收。用户真实主库未升级，未测量文件缩容，未运行 VACUUM。
+- 本轮执行表重构已完成并获用户授权提交；跨层及真实远端完整恢复仍按现行 active spec 验收。用户真实主库未升级，未测量文件缩容，未运行 VACUUM。

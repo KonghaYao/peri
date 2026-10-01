@@ -1,7 +1,6 @@
 //! `SessionDataPort`（SQLite 数据面）行为测试。
 //!
-//! 断言以可观察结果为准：一次保存后的完整事实、碰撞是否失败、墓碑与执行行是否
-//! 与数据删除同事务收敛；不复制实现细节。
+//! 断言以可观察结果为准：一次保存后的完整事实、冲突是否失败以及级联删除的后置条件。
 
 use super::*;
 use crate::sessions::data::SessionDataPort;
@@ -13,7 +12,7 @@ use peri_acp_types::session_resources::{
 use peri_acp_types::store::{
     serialize_persisted_payload, CompactionChange, PersistedPayload, ThreadStore,
 };
-use peri_acp_types::workspace::{RecoveryRequiredDetails, ResolvedWorkspace};
+use peri_acp_types::workspace::ResolvedWorkspace;
 use sqlx::Connection;
 use std::collections::HashMap;
 use tempfile::TempDir;
@@ -229,11 +228,6 @@ async fn test_load_snapshot_reports_missing_rows_and_preserves_unregistered_bind
     .unwrap();
     let history = payloads(2);
     data.append_history(&id, &history).await.unwrap();
-    sqlx::query("INSERT INTO execution_runs (thread_id, generation, clean) VALUES (?1, 3, 0)")
-        .bind(&id)
-        .execute(&store.database.pool)
-        .await
-        .unwrap();
     let before = data.load_snapshot(&id).await.unwrap();
     let machine = data.machine_id_of(&id).await.unwrap().unwrap();
     let mut connection = sqlx::SqliteConnection::connect_with(
@@ -269,10 +263,6 @@ async fn test_load_snapshot_reports_missing_rows_and_preserves_unregistered_bind
     assert!(snapshot.inherited.payloads.is_empty());
     assert!(snapshot.inherited.flags.is_empty());
     assert_eq!(data.machine_id_of(&id).await.unwrap(), Some(machine));
-    assert_eq!(
-        store.database.load_execution_state(&id).await.unwrap(),
-        Some((3, false))
-    );
 }
 
 #[tokio::test]
@@ -681,7 +671,7 @@ async fn test_adopt_legacy_session_keeps_the_first_winner_bytes() {
 }
 
 #[tokio::test]
-async fn test_adopt_legacy_session_preserves_dirty_execution_and_history() {
+async fn test_adopt_legacy_session_preserves_canonical_metadata_and_history() {
     let (store, data, directory) = database().await;
     let workspace = workspace(&store, directory.path()).await;
     let cwd = workspace.cwd.to_string_lossy().into_owned();
@@ -690,11 +680,6 @@ async fn test_adopt_legacy_session_preserves_dirty_execution_and_history() {
     let id = store.create_thread(meta).await.unwrap();
     let history = payloads(2);
     data.append_history(&id, &history).await.unwrap();
-    sqlx::query("INSERT INTO execution_runs (thread_id, generation, clean) VALUES (?1, 1, 0)")
-        .bind(&id)
-        .execute(&store.database.pool)
-        .await
-        .unwrap();
     let before = data.load_snapshot(&id).await.unwrap();
     assert_eq!(before.binding, BindingState::Missing);
     assert_eq!(before.frozen, FrozenState::LegacyAbsent);
@@ -723,10 +708,6 @@ async fn test_adopt_legacy_session_preserves_dirty_execution_and_history() {
         serde_json::to_value(&before.meta).unwrap()
     );
     assert_eq!(payload_bytes(&rejected.payloads), payload_bytes(&history));
-    assert_eq!(
-        store.database.load_execution_state(&id).await.unwrap(),
-        Some((1, false))
-    );
 
     data.adopt_legacy_session(&id, &cwd, &workspace, &frozen("legacy"))
         .await
@@ -750,9 +731,45 @@ async fn test_adopt_legacy_session_preserves_dirty_execution_and_history() {
     assert!(snapshot.inherited.payloads.is_empty());
     assert!(snapshot.inherited.flags.is_empty());
     assert_eq!(data.machine_id_of(&id).await.unwrap(), Some(machine));
+}
+
+#[tokio::test]
+async fn test_adopt_legacy_session_rejects_unbound_frozen_canonical_data() {
+    let (store, data, directory) = database().await;
+    let workspace = workspace(&store, directory.path()).await;
+    let cwd = workspace.cwd.to_string_lossy().into_owned();
+    let id = "s-unbound-frozen".to_owned();
+    data.save_new_session(&session(&id, &cwd, &workspace, frozen("canonical")))
+        .await
+        .unwrap();
+    data.append_history(&id, &payloads(2)).await.unwrap();
+    sqlx::query("DELETE FROM session_bindings WHERE thread_id = ?1")
+        .bind(&id)
+        .execute(&store.database.pool)
+        .await
+        .unwrap();
+    let before = data.load_snapshot(&id).await.unwrap();
+    assert_eq!(before.binding, BindingState::Missing);
+    let error = data
+        .adopt_legacy_session(&id, &cwd, &workspace, &frozen("replacement"))
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error.kind(),
+        peri_acp_types::session_resources::SessionResourceErrorKind::Workspace(
+            peri_acp_types::workspace::WorkspaceError::InvalidBinding
+        )
+    ));
+    let after = data.load_snapshot(&id).await.unwrap();
+    assert_eq!(after.binding, before.binding);
+    assert_eq!(after.frozen, before.frozen);
     assert_eq!(
-        store.database.load_execution_state(&id).await.unwrap(),
-        Some((1, false))
+        serde_json::to_value(&after.meta).unwrap(),
+        serde_json::to_value(&before.meta).unwrap()
+    );
+    assert_eq!(
+        payload_bytes(&after.payloads),
+        payload_bytes(&before.payloads)
     );
 }
 

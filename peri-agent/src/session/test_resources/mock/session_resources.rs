@@ -63,13 +63,6 @@ impl SessionResources for MockSessionResources {
         Err(unsupported("acquire_execution"))
     }
 
-    async fn reset_dirty_execution(
-        &self,
-        _request: &peri_acp_types::workspace::ResetDirtyRequest,
-    ) -> SessionResourceResult<()> {
-        Err(unsupported("reset_dirty_execution"))
-    }
-
     async fn create_session(
         &self,
         _input: &NewSession,

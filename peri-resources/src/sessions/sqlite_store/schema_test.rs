@@ -195,17 +195,21 @@ async fn test_single_database_upgrade_preserves_history_and_binds_only_new_sessi
     );
     assert_eq!(store.load_session_binding(&old_id).await.unwrap(), None);
     let old_lease = store.acquire_execution_lease(&old_id).await.unwrap();
-    assert_eq!(
-        store.database.load_execution_state(&old_id).await.unwrap(),
-        Some((1, false))
-    );
+    assert!(store
+        .database
+        .registered_lease(&old_id)
+        .unwrap()
+        .unwrap()
+        .is_active());
     assert_eq!(store.load_session_binding(&old_id).await.unwrap(), None);
     assert_eq!(store.load_frozen_snapshot(&old_id).await.unwrap(), None);
     old_lease.mark_clean().await.unwrap();
-    assert_eq!(
-        store.database.load_execution_state(&old_id).await.unwrap(),
-        Some((1, true))
-    );
+    assert!(!store
+        .database
+        .registered_lease(&old_id)
+        .unwrap()
+        .unwrap()
+        .is_active());
     let workspace = store.resolve_workspace(dir.path()).await.unwrap();
     let id = store
         .create_bound_thread(ThreadMeta::new(dir.path().to_str().unwrap()), &workspace)
@@ -252,18 +256,12 @@ async fn test_single_database_upgrade_preserves_history_and_binds_only_new_sessi
     .await
     .unwrap();
     assert_eq!(persisted_history, history);
-    assert_eq!(
-        reopened
-            .database
-            .load_execution_state(&old_id)
-            .await
-            .unwrap(),
-        Some((1, true))
-    );
-    assert_eq!(
-        reopened.database.load_execution_state(&id).await.unwrap(),
-        Some((1, true))
-    );
+    assert!(reopened
+        .database
+        .registered_lease(&old_id)
+        .unwrap()
+        .is_none());
+    assert!(reopened.database.registered_lease(&id).unwrap().is_none());
     assert_eq!(reopened.load_session_binding(&old_id).await.unwrap(), None);
     assert_eq!(reopened.load_frozen_snapshot(&old_id).await.unwrap(), None);
     let (version,): (i64,) = sqlx::query_as("PRAGMA user_version")
@@ -281,10 +279,7 @@ async fn test_single_database_upgrade_preserves_history_and_binds_only_new_sessi
         error.downcast_ref::<WorkspaceError>(),
         Some(WorkspaceError::ExecutionLeaseRequired)
     ));
-    assert_eq!(
-        reader.database.load_execution_state(&old_id).await.unwrap(),
-        Some((1, true))
-    );
+    assert!(reader.database.registered_lease(&old_id).unwrap().is_none());
     reader.close().await;
     assert!(!dir.path().join("threads-v2.db").exists());
 }
@@ -653,13 +648,12 @@ async fn test_schema3_identity_migration_reuses_binding_and_survives_reopen() {
         workspace.workspace_id.to_string(),
         "22222222-2222-4222-8222-222222222222"
     );
-    let execution: (i64, bool) = sqlx::query_as(
-        "SELECT generation, clean FROM execution_runs WHERE thread_id = 'old-session'",
-    )
-    .fetch_one(&store.database.pool)
-    .await
-    .unwrap();
-    assert_eq!(execution, (7, false));
+    let execution: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM sqlite_schema WHERE name = 'execution_runs'")
+            .fetch_one(&store.database.pool)
+            .await
+            .unwrap();
+    assert_eq!(execution, (0,));
     assert_eq!(
         store
             .load_messages(&"old-session".to_owned())
@@ -710,14 +704,13 @@ async fn test_schema3_identity_migration_reuses_binding_and_survives_reopen() {
     reopened.close().await;
 }
 
-/// 记录 v2 升级不能改动的身份与执行数据。
-async fn identity_and_execution_bytes(connection: &mut SqliteConnection) -> Vec<String> {
+/// 记录 v2 升级不能改动的身份数据。
+async fn identity_bytes(connection: &mut SqliteConnection) -> Vec<String> {
     let mut values = Vec::new();
     for query in [
         "SELECT json_array(id, locator, object_identity) FROM projects ORDER BY id",
         "SELECT json_array(id, project_id, root, root_identity, discovery) FROM workspaces ORDER BY id",
         "SELECT json_array(thread_id, schema_version, project_id, workspace_id, relative_cwd) FROM session_bindings ORDER BY thread_id",
-        "SELECT json_array(thread_id, generation, clean) FROM execution_runs ORDER BY thread_id",
     ] {
         let rows: Vec<(String,)> = sqlx::query_as(AssertSqlSafe(query))
             .fetch_all(&mut *connection)
@@ -729,7 +722,7 @@ async fn identity_and_execution_bytes(connection: &mut SqliteConnection) -> Vec<
 }
 
 #[tokio::test]
-async fn test_version2_upgrade_removes_required_revision_and_preserves_execution_state() {
+async fn test_version2_upgrade_removes_required_revision_and_preserves_identity() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("threads.db");
     let mut connection = version2_database(&path).await;
@@ -743,7 +736,7 @@ async fn test_version2_upgrade_removes_required_revision_and_preserves_execution
     let store = SqliteThreadStore::new(&path).await.unwrap();
     let mut connection = store.database.pool.acquire().await.unwrap();
     assert_eq!(history_bytes(&mut connection).await, before_history);
-    let migrated_identity = identity_and_execution_bytes(&mut connection).await;
+    let migrated_identity = identity_bytes(&mut connection).await;
     assert!(migrated_identity
         .iter()
         .all(|value| !value.contains("birth_")));
@@ -811,7 +804,7 @@ async fn test_version2_failed_column_drop_preserves_schema_version_and_data() {
             .fetch_all(&mut connection)
             .await
             .unwrap();
-    let before_data = identity_and_execution_bytes(&mut connection).await;
+    let before_data = identity_bytes(&mut connection).await;
     connection.close().await.unwrap();
     let error = SqliteThreadStore::new(&path).await.err().unwrap();
     let message = error.to_string();
@@ -830,10 +823,7 @@ async fn test_version2_failed_column_drop_preserves_schema_version_and_data() {
             .await
             .unwrap();
     assert_eq!(after_schema, before_schema);
-    assert_eq!(
-        identity_and_execution_bytes(&mut connection).await,
-        before_data
-    );
+    assert_eq!(identity_bytes(&mut connection).await, before_data);
     let (version,): (i64,) = sqlx::query_as("PRAGMA user_version")
         .fetch_one(&mut connection)
         .await

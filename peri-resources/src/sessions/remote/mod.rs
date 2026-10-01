@@ -59,8 +59,8 @@
 //! 现行语义是**配置即用**：门面按**两个**端口组合（`Arc<dyn SessionDataPort>` +
 //! `Arc<dyn LocalExecutionPort>`），远程组合装配在 [`composition::open_remote`]，并由
 //! `Resources::open_deployment` 在远程 locator 上真实接通（见 `context.rs`）。配了哪个 store
-//! 就直接用哪个，不再有本机登记、准入裁决与启动探测；本机只留执行事实（workspace 登记、
-//! 执行代际、sidecar 锁），不在 `threads` 里为远程会话造行。没有本机锚点之后
+//! 就直接用哪个，不再有本机 store 登记、准入裁决与启动探测；本机保存 workspace 登记，
+//! 执行句柄只在当前实例内，不在 `threads` 里为远程会话造行。没有本机锚点之后
 //! `recover_persistence` 收敛为「会话数据可读即已收敛」，未结清由门面按活跃租约的
 //! `is_uncertain` 判定。
 //!

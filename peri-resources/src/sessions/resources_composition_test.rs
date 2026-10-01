@@ -17,7 +17,7 @@ struct DoubleDbFixture {
     repo: TempDir,
     /// 数据面所在的库（远端 store 的等价物）。
     data: LocalExecution,
-    /// 本机执行面所在的库（workspace 登记、执行代际、sidecar 锁）。
+    /// 本机执行面所在的库，仅持久保存 workspace 登记。
     local: LocalExecution,
     _dirs: (TempDir, TempDir),
 }
@@ -143,7 +143,7 @@ impl DoubleDbFixture {
             .unwrap()
     }
 
-    /// child：数据面写继承区与父子关系，沿用 root owner（child 自己没有执行代际）。
+    /// child：数据面写继承区与父子关系，沿用 root runtime owner。
     async fn save_child(
         &self,
         child: &str,
@@ -233,14 +233,6 @@ impl DoubleDbFixture {
         )
     }
 
-    async fn local_execution_row(&self, id: &str) -> Option<(i64, bool)> {
-        sqlx::query_as("SELECT generation, clean FROM execution_runs WHERE thread_id = ?1")
-            .bind(id)
-            .fetch_optional(self.local.pool())
-            .await
-            .unwrap()
-    }
-
     async fn data_rows(&self, id: &str) -> (i64, i64, i64) {
         (
             Self::count(
@@ -281,13 +273,10 @@ async fn test_double_db_cold_recovery_acquires_execution_from_data_plane_facts()
     let workspace = fixture.workspace().await;
     let id = "r-cold-root".to_owned();
 
-    // ① 远程组合的创建是两步：数据面 durable 保存，本机执行面再建立准入（数据与代际不在
-    //    同一个库，因此没有「一次提交」可塌缩）。
     let lease = fixture.create(&id, &workspace).await;
     assert_eq!(lease.thread_id(), &id);
     // 本机只留执行事实：没有会话行、没有绑定行、没有历史。
     assert_eq!(fixture.local_session_rows(&id).await, (0, 0));
-    assert_eq!(fixture.local_execution_row(&id).await, Some((1, false)));
     // 数据面有完整数据（会话行 + 绑定行）。
     assert_eq!(fixture.data_rows(&id).await, (1, 1, 0));
     // 有主不是「需要恢复」。
@@ -303,28 +292,37 @@ async fn test_double_db_cold_recovery_acquires_execution_from_data_plane_facts()
         .unwrap();
     assert_eq!(fixture.data_rows(&id).await, (1, 1, 1));
 
-    // ② 冷进程等价物：上一个进程退出而没有写 clean，本机剩下的只有未结清的代际。
+    let before = fixture.facade.load_session_snapshot(&id).await.unwrap();
     drop(lease);
     assert_eq!(
         fixture.availability(&id).await,
         Some(ExecutionAvailability::Available)
     );
-    assert_eq!(fixture.local_execution_row(&id).await, Some((1, false)));
 
-    // ③ 取得所有权：绑定复核用数据面的字节，root-only 判定用数据面给出的树根。
-    let recovered = fixture
-        .facade
-        .acquire_execution(&id, &workspace)
+    let reopened_local = LocalExecution::open(fixture._dirs.1.path().join("threads.db"))
         .await
         .unwrap();
+    let reopened = SessionResourcesImpl::from_ports(
+        Arc::new(fixture.data.data_port()),
+        Arc::new(reopened_local),
+        SessionDataHome::RemoteStore,
+    );
+    let recovered = reopened.acquire_execution(&id, &workspace).await.unwrap();
     assert_eq!(recovered.thread_id(), &id);
     assert_eq!(
         fixture.availability(&id).await,
         Some(ExecutionAvailability::Available)
     );
-    // ④ 返回的租约可用：clean 落在**本机**执行代际上（数据面不写执行事实）。
+    let after = reopened.load_session_snapshot(&id).await.unwrap();
+    assert_eq!(after.binding, before.binding);
+    assert_eq!(after.frozen, before.frozen);
+    assert_eq!(after.payloads.len(), before.payloads.len());
+    reopened
+        .append_history(&id, &[payload("reopened instance")])
+        .await
+        .unwrap();
+    assert_eq!(fixture.data_rows(&id).await, (1, 1, 2));
     recovered.mark_clean().await.unwrap();
-    assert_eq!(fixture.local_execution_row(&id).await, Some((2, true)));
     assert_eq!(fixture.local_session_rows(&id).await, (0, 0));
 }
 
@@ -342,7 +340,6 @@ async fn test_double_db_child_mutation_shares_live_root_gate_and_allows_disposal
         .await;
     // child 在本机同样一行都没有：它的写入归属只能由数据面回答（root 在远端父链上）。
     assert_eq!(fixture.local_session_rows(&child).await, (0, 0));
-    assert_eq!(fixture.local_execution_row(&child).await, None);
 
     // 有活 owner：child 的 mutation 落在 root 的门禁上，而不是无门禁放行。
     let root_facts = facts_of(&fixture.facade, &root).await;
@@ -372,7 +369,6 @@ async fn test_double_db_child_mutation_shares_live_root_gate_and_allows_disposal
         .unwrap();
     assert_eq!(fixture.data_rows(&child).await.2, 1);
 
-    // owner 关闭（clean 已落地但本进程仍看得见这条租约）后，同一调用按既有语义失败。
     root_lease.mark_clean().await.unwrap();
     let error = fixture
         .facade
@@ -383,8 +379,17 @@ async fn test_double_db_child_mutation_shares_live_root_gate_and_allows_disposal
         error_kind(&error),
         SessionResourceErrorKind::Workspace(WorkspaceError::ExecutionLeaseRequired)
     ));
-    // 租约消失（进程结束等价）后同样被拒绝：有绑定而没有 owner 不是「无主」，不能免授权。
     drop(root_lease);
+    assert!(fixture
+        .facade
+        .append_history(&child, &[payload("dropped closed owner")])
+        .await
+        .is_err());
+    let next = fixture
+        .facade
+        .acquire_execution(&root, &workspace)
+        .await
+        .unwrap();
     for id in [&child, &root] {
         fixture
             .facade
@@ -394,9 +399,10 @@ async fn test_double_db_child_mutation_shares_live_root_gate_and_allows_disposal
     }
     assert_eq!(fixture.data_rows(&child).await.2, 2);
     assert_eq!(fixture.data_rows(&root).await.2, 1);
+    next.mark_clean().await.unwrap();
 }
 
-/// `execution_availability` 在「有活 owner / ordinary dirty / 绑定缺失」三种情形下的结论与
+/// `execution_availability` 在「有活 owner / 丢弃调用方句柄 / 绑定缺失」三种情形下的结论与
 /// 本机组合一致；「绑定缺失」也不会被本机恰好存在的同 id 行冒充成 legacy。
 #[tokio::test]
 async fn test_double_db_execution_availability_matches_the_local_verdicts() {
@@ -411,7 +417,6 @@ async fn test_double_db_execution_availability_matches_the_local_verdicts() {
         Some(ExecutionAvailability::Available)
     );
 
-    // ordinary dirty：owner 消失后剩下的只有精确代际的未结清事实。
     let dirty = "r-avail-dirty".to_owned();
     let dirty_lease = fixture.create(&dirty, &workspace).await;
     drop(dirty_lease);

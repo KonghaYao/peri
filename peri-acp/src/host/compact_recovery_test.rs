@@ -102,13 +102,6 @@ impl SessionResources for RecoveryStore {
         self.inner.acquire_execution(id, workspace).await
     }
 
-    async fn reset_dirty_execution(
-        &self,
-        request: &peri_acp_types::workspace::ResetDirtyRequest,
-    ) -> SessionResourceResult<()> {
-        self.inner.reset_dirty_execution(request).await
-    }
-
     async fn create_session(
         &self,
         input: &NewSession,

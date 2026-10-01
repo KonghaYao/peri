@@ -1,5 +1,12 @@
 use super::*;
 
+fn canonical_history_bytes(payloads: &[PersistedPayload]) -> Vec<String> {
+    payloads
+        .iter()
+        .map(|payload| peri_acp_types::store::serialize_persisted_payload(payload).unwrap())
+        .collect()
+}
+
 // ─── 创建：完整数据 + owner 一次成立 ───────────────────────────────────────────
 
 #[tokio::test]
@@ -24,17 +31,6 @@ async fn test_create_session_saves_complete_data_and_owner_in_one_step() {
         FrozenState::Present(FrozenSnapshotBytes::new(r#"{"v":1,"id":"s-new"}"#))
     );
 
-    // 执行代际：一次提交里就带着 owner 事实（未结清）。
-    assert_eq!(
-        fixture
-            .facade
-            .gate
-            .local()
-            .execution_state(&"s-new".to_owned())
-            .await
-            .unwrap(),
-        Some((1, false))
-    );
     assert_eq!(lease.thread_id(), &"s-new".to_owned());
     // 活 owner 在册：本次不能再次取得执行权（「有主」不是「需要恢复」）。
     assert_eq!(
@@ -46,7 +42,6 @@ async fn test_create_session_saves_complete_data_and_owner_in_one_step() {
             .execution,
         Some(ExecutionAvailability::Available)
     );
-    // owner 消失（崩溃等价）后剩下的才是代际事实：精确代际的普通 dirty。
     drop(lease);
     assert_eq!(
         fixture
@@ -60,11 +55,9 @@ async fn test_create_session_saves_complete_data_and_owner_in_one_step() {
 }
 
 #[tokio::test]
-async fn test_create_session_collapses_data_and_generation_into_one_commit() {
+async fn test_create_session_rejects_invalid_binding_without_partial_data() {
     let fixture = Fixture::new().await;
     let workspace = fixture.workspace().await;
-    // 用一条会失败的输入（binding 指向未登记工作区）证明失败时什么都不留：
-    // 事务整体回滚，不会留下没有执行代际的会话行。
     let mut input = fixture.session("s-fail", &workspace, r#"{"v":1}"#);
     input.binding.workspace_id = peri_acp_types::workspace::WorkspaceId::new();
     let error = match fixture.facade.create_session(&input).await {
@@ -76,11 +69,11 @@ async fn test_create_session_collapses_data_and_generation_into_one_commit() {
         SessionResourceErrorKind::Workspace(WorkspaceError::InvalidBinding)
     ));
     assert_eq!(fixture.count_threads("s-fail").await, 0);
-    assert_eq!(fixture.count_execution_runs("s-fail").await, 0);
+    assert_eq!(fixture.count_bindings("s-fail").await, 0);
 }
 
 #[tokio::test]
-async fn test_create_session_rejects_a_reused_identity() {
+async fn test_create_session_rejects_a_reused_identity_with_different_frozen() {
     let fixture = Fixture::new().await;
     let _lease = fixture.create("s-dup").await;
     let workspace = fixture.workspace().await;
@@ -91,7 +84,7 @@ async fn test_create_session_rejects_a_reused_identity() {
     };
     assert!(matches!(
         error_kind(&error),
-        SessionResourceErrorKind::InvalidInput { .. }
+        SessionResourceErrorKind::Conflict { .. }
     ));
 }
 
@@ -99,38 +92,25 @@ async fn test_create_session_rejects_a_reused_identity() {
 async fn test_create_session_converges_when_data_was_saved_without_admission() {
     let fixture = Fixture::new().await;
     let workspace = fixture.workspace().await;
-    // 崩在「数据已保存、执行代际未写」之间：下次同一个 ThreadId 的创建收敛准入，
-    // 不重造 binding/frozen，也不报「已存在」。
     fixture
         .save_without_admission("s-converge", &workspace)
         .await;
     let input = fixture.session("s-converge", &workspace, r#"{"v":1,"id":"s-converge"}"#);
     let lease = fixture.facade.create_session(&input).await.unwrap();
     assert_eq!(lease.thread_id(), &"s-converge".to_owned());
-    assert_eq!(
-        fixture
-            .facade
-            .gate
-            .local()
-            .execution_state(&"s-converge".to_owned())
-            .await
-            .unwrap(),
-        Some((1, false))
-    );
     assert_eq!(fixture.count_threads("s-converge").await, 1);
     assert_eq!(fixture.count_bindings("s-converge").await, 1);
     drop(lease);
 }
 
 #[tokio::test]
-async fn test_create_session_reports_saved_but_not_admitted_when_premise_changed() {
+async fn test_create_session_rejects_conflicting_binding_without_overwriting_data() {
     let fixture = Fixture::new().await;
     let workspace = fixture.workspace().await;
     fixture
         .save_without_admission("s-premise", &workspace)
         .await;
-    // 同 identity 但换了一份绑定：数据已保存这一事实不变，准入前提不再成立。
-    let mut input = fixture.session("s-premise", &workspace, r#"{"v":1}"#);
+    let mut input = fixture.session("s-premise", &workspace, r#"{"v":1,"id":"s-premise"}"#);
     input.binding.workspace_id = peri_acp_types::workspace::WorkspaceId::new();
 
     let error = match fixture.facade.create_session(&input).await {
@@ -139,14 +119,180 @@ async fn test_create_session_reports_saved_but_not_admitted_when_premise_changed
     };
     assert!(matches!(
         error_kind(&error),
-        SessionResourceErrorKind::SavedButNotAdmitted { .. }
+        SessionResourceErrorKind::Conflict { .. }
     ));
-    // 效果是「已生效」：数据仍在，不得被调用方据此删除。
     assert_eq!(
         error.effect(),
-        peri_acp_types::session_resources::MutationOutcome::Applied
+        peri_acp_types::session_resources::MutationOutcome::NotApplied
     );
     assert_eq!(fixture.count_threads("s-premise").await, 1);
+}
+
+#[tokio::test]
+async fn test_same_id_creation_retry_reuses_live_run_and_survives_close_and_reopen() {
+    let fixture = Fixture::new().await;
+    let workspace = fixture.workspace().await;
+    let id = "s-retry".to_owned();
+    let input = fixture.session(&id, &workspace, r#"{"v":1,"id":"s-retry"}"#);
+    let first = fixture.facade.create_session(&input).await.unwrap();
+    fixture
+        .facade
+        .append_history(&id, &[payload("persisted")])
+        .await
+        .unwrap();
+    fixture
+        .facade
+        .update_session_meta(
+            &id,
+            &SessionMetaPatch {
+                title: Some(Some("edited title".to_owned())),
+                status: Some(AgentStatus::Cancelled),
+                cancel_policy: Some(peri_acp_types::thread::CancelPolicy::Independent),
+                config: Some(Some(r#"{"custom":true}"#.to_owned())),
+            },
+        )
+        .await
+        .unwrap();
+    let before = fixture.facade.load_session_snapshot(&id).await.unwrap();
+    let retry = fixture.facade.create_session(&input).await.unwrap();
+    assert!(Arc::ptr_eq(&first, &retry));
+    first.mark_clean().await.unwrap();
+    let after_close = fixture.facade.create_session(&input).await.unwrap();
+    assert!(!Arc::ptr_eq(&first, &after_close));
+    after_close.mark_clean().await.unwrap();
+    fixture.shutdown().await.unwrap();
+    assert!(fixture.facade.create_session(&input).await.is_err());
+    let reopened = fixture.second_host().await;
+    let after_reopen = reopened.create_session(&input).await.unwrap();
+    assert_eq!(after_reopen.thread_id(), &id);
+    let after = reopened.load_session_snapshot(&id).await.unwrap();
+    assert_eq!(
+        serde_json::to_value(&before.meta).unwrap(),
+        serde_json::to_value(&after.meta).unwrap()
+    );
+    assert_eq!(
+        canonical_history_bytes(&before.payloads),
+        canonical_history_bytes(&after.payloads)
+    );
+    assert_eq!(before.binding, after.binding);
+    assert_eq!(before.frozen, after.frozen);
+    assert_eq!(fixture.count_threads(&id).await, 1);
+    assert_eq!(fixture.count_bindings(&id).await, 1);
+    after_reopen.mark_clean().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_creation_retry_rejects_all_immutable_conflicts_without_overwriting() {
+    let fixture = Fixture::new().await;
+    let workspace = fixture.workspace().await;
+    let id = "s-immutable".to_owned();
+    let input = fixture.session(&id, &workspace, r#"{"v":1,"id":"s-immutable"}"#);
+    let lease = fixture.facade.create_session(&input).await.unwrap();
+    fixture
+        .facade
+        .append_history(&id, &[payload("original")])
+        .await
+        .unwrap();
+    let before = fixture.facade.load_session_snapshot(&id).await.unwrap();
+    let mut conflicts = vec![input.clone(); 6];
+    conflicts[0].binding.workspace_id = peri_acp_types::workspace::WorkspaceId::new();
+    conflicts[1].frozen = FrozenSnapshotBytes::new(r#"{"different":true}"#);
+    conflicts[2].meta.parent_thread_id = Some("different-parent".to_owned());
+    conflicts[3].meta.snapshot_at_message_id = Some(MessageId::new());
+    conflicts[4].created_at = "2026-09-27T00:00:00Z".to_owned();
+    conflicts[5].meta.cwd.push_str("/different");
+    for conflict in conflicts {
+        let error = match fixture.facade.create_session(&conflict).await {
+            Ok(_) => panic!("immutable conflict was admitted"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error_kind(&error),
+            SessionResourceErrorKind::Conflict { .. }
+        ));
+        let after = fixture.facade.load_session_snapshot(&id).await.unwrap();
+        assert_eq!(
+            serde_json::to_value(&before.meta).unwrap(),
+            serde_json::to_value(&after.meta).unwrap()
+        );
+        assert_eq!(
+            canonical_history_bytes(&before.payloads),
+            canonical_history_bytes(&after.payloads)
+        );
+        assert_eq!(before.binding, after.binding);
+        assert_eq!(before.frozen, after.frozen);
+    }
+    lease.mark_clean().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_same_id_fork_retry_preserves_history_and_checks_target_identity() {
+    let fixture = Fixture::new().await;
+    let source = fixture.create("s-fork-source").await;
+    let workspace = fixture.workspace().await;
+    let id = "s-fork-retry".to_owned();
+    let mut fork = ForkSnapshot {
+        source_id: source.thread_id().clone(),
+        target: fixture.session(&id, &workspace, r#"{"v":1,"id":"s-fork-retry"}"#),
+        payloads: vec![payload("forked history")],
+        flags: Default::default(),
+    };
+    fork.target.meta.snapshot_at_message_id = Some(MessageId::new());
+    let first = fixture.facade.save_fork(&fork).await.unwrap();
+    fixture
+        .facade
+        .append_history(&id, &[payload("continued")])
+        .await
+        .unwrap();
+    first.mark_clean().await.unwrap();
+    fork.payloads = vec![payload("must not replace history")];
+    let second = fixture.facade.save_fork(&fork).await.unwrap();
+    assert!(!Arc::ptr_eq(&first, &second));
+    assert_eq!(fixture.count_messages(&id).await, 2);
+    fork.target.meta.snapshot_at_message_id = Some(MessageId::new());
+    let error = match fixture.facade.save_fork(&fork).await {
+        Ok(_) => panic!("conflicting fork target was admitted"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error_kind(&error),
+        SessionResourceErrorKind::Conflict { .. }
+    ));
+    assert_eq!(fixture.count_messages(&id).await, 2);
+    second.mark_clean().await.unwrap();
+    source.mark_clean().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_same_id_creation_retry_cannot_replace_an_uncertain_run() {
+    let fixture = Fixture::new().await;
+    let workspace = fixture.workspace().await;
+    let id = "s-retry-unknown".to_owned();
+    let input = fixture.session(&id, &workspace, r#"{"v":1,"id":"s-retry-unknown"}"#);
+    let lease = fixture.facade.create_session(&input).await.unwrap();
+    drop(fixture.facade.gate.admit(&id).await.unwrap());
+    drop(lease);
+    match fixture.facade.create_session(&input).await {
+        Ok(_) => panic!("uncertain run must not be readmitted"),
+        Err(error) => assert!(matches!(
+            error_kind(&error),
+            SessionResourceErrorKind::Unavailable { .. }
+                | SessionResourceErrorKind::PersistenceUncertain { .. }
+                | SessionResourceErrorKind::SavedButNotAdmitted { .. }
+        )),
+    }
+    assert!(fixture
+        .facade
+        .append_history(&id, &[payload("blocked")])
+        .await
+        .is_err());
+    assert!(fixture
+        .facade
+        .drain_persistence(&id)
+        .await
+        .unwrap_err()
+        .is_persistence_uncertain());
+    assert_eq!(fixture.count_messages(&id).await, 0);
 }
 
 // ─── 统一写入准入 ─────────────────────────────────────────────────────────────
@@ -232,7 +378,6 @@ async fn test_mutation_without_live_run_does_not_require_ownership_claim() {
         .await
         .unwrap();
     assert_eq!(fixture.count_messages(&id).await, 1);
-    assert_eq!(fixture.execution_row(&id).await, None);
     assert_eq!(
         fixture
             .facade
@@ -248,8 +393,7 @@ async fn test_mutation_without_live_run_does_not_require_ownership_claim() {
 ///
 /// 未决证据只在**进程内的租约**上（v10 删除了本机 durable 锚点：不做跨安装的终态判定）。
 /// 因此这里用真实的准入 + 未知效果驱动同一条 `Drop` 语义，再验证后续写入/删除/排空/clean
-/// 被拒绝、读取面不受影响、被拒的写入没有留下效果；owner 消失之后，durable 事实只剩
-/// `execution_runs` 的未结清代际，由显式风险接受收敛，下一代 owner 从头开始。
+/// 被拒绝、读取面不受影响；丢弃调用方的 Arc 不解除未决，其他实例按 ID 读取 canonical 历史。
 #[tokio::test]
 async fn test_unresolved_write_blocks_active_run_but_allows_restart() {
     let fixture = Fixture::new().await;
@@ -302,22 +446,27 @@ async fn test_unresolved_write_blocks_active_run_but_allows_restart() {
     assert!(page.entries.iter().any(|entry| entry.thread.id == id));
 
     drop(lease);
-    assert_eq!(fixture.execution_row(&id).await, Some((1, false)));
-    let next = fixture
+    let same_run = fixture
         .facade
+        .acquire_execution(&id, &fixture.workspace().await)
+        .await;
+    assert!(same_run.is_err());
+    assert!(fixture
+        .facade
+        .append_history(&id, &[payload("after caller drop")])
+        .await
+        .is_err());
+    let reopened = fixture.second_host().await;
+    let next = reopened
         .acquire_execution(&id, &fixture.workspace().await)
         .await
         .unwrap();
-    assert_eq!(next.thread_id(), &id);
-    assert_eq!(fixture.execution_row(&id).await, Some((2, false)));
-    fixture
-        .facade
+    reopened
         .append_history(&id, &[payload("after restart")])
         .await
         .unwrap();
     assert_eq!(fixture.count_messages(&id).await, 2);
     next.mark_clean().await.unwrap();
-    assert_eq!(fixture.execution_row(&id).await, Some((2, true)));
 }
 
 // ─── guard：只有效果确定才结清 ─────────────────────────────────────────────────
@@ -358,17 +507,6 @@ async fn test_write_scope_settles_only_on_determinate_effect() {
         SessionResourceErrorKind::Unavailable { .. }
     ));
     assert!(lease.mark_clean().await.is_err());
-    // dirty 代际保持在库内：未结清的写入不会被当成干净收尾。
-    assert_eq!(
-        fixture
-            .facade
-            .gate
-            .local()
-            .execution_state(&id)
-            .await
-            .unwrap(),
-        Some((1, false))
-    );
     drop(lease);
 }
 
@@ -386,7 +524,6 @@ async fn test_commit_stage_failure_blocks_writes_and_clean() {
     let scope = fixture.facade.gate.admit(&id).await.unwrap();
     scope.settle(&Err::<(), _>(error));
 
-    // Unknown 不结清范围：同根后续写入与 clean 都被拒绝，库内代际仍是 dirty。
     let blocked = fixture
         .facade
         .append_history(&id, &[payload("after commit failure")])
@@ -397,16 +534,6 @@ async fn test_commit_stage_failure_blocks_writes_and_clean() {
         SessionResourceErrorKind::Unavailable { .. }
     ));
     assert!(lease.mark_clean().await.is_err());
-    assert_eq!(
-        fixture
-            .facade
-            .gate
-            .local()
-            .execution_state(&id)
-            .await
-            .unwrap(),
-        Some((1, false))
-    );
     drop(lease);
 }
 

@@ -9,7 +9,7 @@
 //! 契约标签 [`STORE_CONTRACT`] 在统一时推进到 `v2`：形状变了（表名、列名、绑定所在表、
 //! 历史顺序的载体），拿着 v1 标签的库会被 [`acceptance`] / `matches_build` 判为不认识——
 //! 这是有意的 fail-closed。统一前的旧形状**不迁移、不覆盖**；canonical v2 / schema 10
-//! 由 `schema_upgrade` 一次性移除旧缓存并推进版本，store 身份与账本保持不变。
+//! 由 `schema_upgrade` 一次性移除退役缓存、目标与执行状态表并推进版本，store 身份与账本保持不变。
 //!
 //! 三条硬规则：
 //!

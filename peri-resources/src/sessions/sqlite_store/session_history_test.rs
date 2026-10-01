@@ -440,7 +440,7 @@ async fn test_close_stops_writes_and_keeps_history_readable() {
 }
 
 #[tokio::test]
-async fn test_dirty_execution_generation_survives_a_port_restart() {
+async fn test_runtime_owner_restart_preserves_canonical_snapshot_and_history() {
     let (_store, data, directory) = database().await;
     let store = SqliteThreadStore::new(directory.path().join("threads.db"))
         .await
@@ -450,28 +450,50 @@ async fn test_dirty_execution_generation_survives_a_port_restart() {
     data.save_new_session(&session("s-dirty", &cwd, &workspace, frozen("dirty")))
         .await
         .unwrap();
-    store
+    let lease = store
         .acquire_execution_lease(&"s-dirty".to_owned())
         .await
         .unwrap();
+    store
+        .append_message(
+            &"s-dirty".to_owned(),
+            BaseMessage::human("saved before restart"),
+        )
+        .await
+        .unwrap();
+    let before = data.load_snapshot(&"s-dirty".to_owned()).await.unwrap();
+    drop(lease);
     drop(store);
     assert!(data.load_snapshot(&"s-dirty".to_owned()).await.is_ok());
 
-    // 未 clean 的代际跨实例保留：精确代际解除仍然可用（执行面语义，数据侧只提供事实）。
     let reopened = SqliteThreadStore::new(directory.path().join("threads.db"))
         .await
         .unwrap();
-    let generation: (i64, bool) =
-        sqlx::query_as("SELECT generation, clean FROM execution_runs WHERE thread_id = 's-dirty'")
-            .fetch_one(&reopened.database.pool)
-            .await
-            .unwrap();
-    assert!(!generation.1, "Drop 不代表 clean");
-    reopened
-        .reset_dirty_execution(&RecoveryRequiredDetails {
-            thread_id: "s-dirty".to_owned(),
-            generation: generation.0,
-        })
+    let next = reopened
+        .acquire_execution_lease(&"s-dirty".to_owned())
         .await
         .unwrap();
+    let after = data.load_snapshot(&"s-dirty".to_owned()).await.unwrap();
+    assert_eq!(after.binding, before.binding);
+    assert_eq!(after.frozen, before.frozen);
+    assert_eq!(
+        payload_bytes(&after.payloads),
+        payload_bytes(&before.payloads)
+    );
+    reopened
+        .append_message(
+            &"s-dirty".to_owned(),
+            BaseMessage::human("continued after restart"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        reopened
+            .load_messages(&"s-dirty".to_owned())
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    next.mark_clean().await.unwrap();
 }

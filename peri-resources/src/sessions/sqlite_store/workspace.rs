@@ -275,11 +275,12 @@ impl SqliteSessionDatabase {
             return Err(WorkspaceError::Unavailable.into());
         }
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let (cwd, parent): (String, Option<String>) =
-            sqlx::query_as("SELECT cwd, parent_thread_id FROM threads WHERE id = ?")
-                .bind(id)
-                .fetch_one(&mut *tx)
-                .await?;
+        let (cwd, parent, frozen): (String, Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT cwd, parent_thread_id, frozen_context FROM threads WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await?;
         if cwd != saved_cwd || parent.is_some() {
             return Err(WorkspaceError::ExecutionBindingMismatch.into());
         }
@@ -299,15 +300,7 @@ impl SqliteSessionDatabase {
                 return Err(WorkspaceError::ExecutionBindingMismatch.into());
             }
         } else {
-            let run: Option<(i64,)> =
-                sqlx::query_as("SELECT generation FROM execution_runs WHERE thread_id = ?")
-                    .bind(id)
-                    .fetch_optional(&mut *tx)
-                    .await?;
-            if run.is_some() {
-                // Losing a native binding must not become a way around dirty recovery.
-                return Err(WorkspaceError::InvalidBinding.into());
-            }
+            super::session_data::validate_unbound_legacy_frozen(frozen.as_deref())?;
             sqlx::query(
                 "UPDATE threads SET frozen_context = COALESCE(frozen_context, ?) WHERE id = ?",
             )

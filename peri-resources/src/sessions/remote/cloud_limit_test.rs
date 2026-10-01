@@ -40,9 +40,7 @@ use peri_acp_types::session_resources::{
 };
 use peri_acp_types::store::PersistedPayload;
 use peri_acp_types::thread::{CancelPolicy, ThreadId};
-use peri_acp_types::workspace::{
-    ResetDirtyRequest, SessionBinding, SessionExecutionLease, SESSION_BINDING_VERSION,
-};
+use peri_acp_types::workspace::{SessionBinding, SessionExecutionLease, SESSION_BINDING_VERSION};
 use turso_serverless::Value;
 
 use super::cloud_deployment_tests::synthetic_workspace;
@@ -168,7 +166,7 @@ async fn create_session_at(target: &CloudTarget, env: &Env) -> Result<Session, S
 
 /// 同一份本机执行面库上的**新打开**（新连接、新 owner）：上一段实例必须已经落下。
 ///
-/// 顺序与恢复链路一致：先把未决收敛掉，再按普通 dirty 显式风险接受，最后取 owner。
+/// 顺序与恢复链路一致：先收敛未决操作，再按持久会话事实取得新实例的 owner。
 async fn reopen(target: &CloudTarget, env: &Env) -> Result<Session, String> {
     let facade = env.open(target).await?;
     let recovery = step(
@@ -185,16 +183,10 @@ async fn reopen(target: &CloudTarget, env: &Env) -> Result<Session, String> {
         facade.inspect_availability(Some(&env.root)),
     )
     .await?;
-    if let Some(ExecutionAvailability::Dirty(details)) = availability.execution {
-        step(
-            "reopen dirty reset",
-            facade.reset_dirty_execution(&ResetDirtyRequest {
-                target: details,
-                accept_risk: true,
-            }),
-        )
-        .await?;
-    }
+    check(
+        availability.execution == Some(ExecutionAvailability::Available),
+        "a reopened instance must not reconstruct runtime uncertainty from durable history",
+    )?;
     let resolved = step(
         "reopen resolve workspace",
         facade.resolve_workspace(env.workspace.path()),

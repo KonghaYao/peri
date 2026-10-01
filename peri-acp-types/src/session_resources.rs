@@ -2,7 +2,7 @@
 //!
 //! 业务侧（Agent / ACP / Controller / TUI）只依赖本 trait 的行为语义，注入的是
 //! `Arc<dyn SessionResources>`。数据的持久化位置（本机 SQLite / Turso Cloud）与
-//! 本机执行事实（发现、绑定、owner、dirty、排空）由资源内部两面分别实现，
+//! 本机执行事实（发现、绑定、owner、排空）由资源内部两面分别实现，
 //! 数据端口不向业务暴露事务、CAS、SQL batch、连接或补偿令牌。
 //!
 //! 三条必须成立的约束：
@@ -27,8 +27,8 @@ use crate::messages::MessageId;
 use crate::store::{CompactionChange, InheritedContext, MessageFlags, PersistedPayload};
 use crate::thread::{AgentStatus, CancelPolicy, ThreadId, ThreadMeta};
 use crate::workspace::{
-    ReadOnlyAdmission, RecoveryRequiredDetails, ResetDirtyRequest, ResolvedWorkspace,
-    ScopedThreadPage, ScopedThreadQuery, SessionBinding, SessionExecutionLease, WorkspaceError,
+    ReadOnlyAdmission, RecoveryRequiredDetails, ResolvedWorkspace, ScopedThreadPage,
+    ScopedThreadQuery, SessionBinding, SessionExecutionLease, WorkspaceError,
 };
 
 // ─── 能力与准入 ────────────────────────────────────────────────────────────────
@@ -62,7 +62,7 @@ pub enum ExecutionAvailability {
     WorkspaceUnavailable,
     /// 执行所有权在别处。
     OwnedElsewhere,
-    /// 上次执行未干净收尾：需要按精确代际确认后解除。
+    /// 协议保留的恢复要求；当前资源实现不产生此状态。
     Dirty(RecoveryRequiredDetails),
     /// 存在无法证明终态的持久化写入：先收敛再执行。
     PersistencePending,
@@ -139,7 +139,7 @@ pub struct NewSession {
     pub frozen: FrozenSnapshotBytes,
 }
 
-/// 未发布创建（J2 两阶段）：身份/绑定/执行代际已成立，frozen 尚未提交。
+/// 未发布创建（J2 两阶段）：身份/绑定已保存、运行句柄已登记，frozen 尚未提交。
 ///
 /// 与 [`NewSession`] 的唯一区别是**没有 frozen**：内容准入（资源读取后定稿）发生在取得
 /// 执行所有权之后，因此第一阶段只能写「除 frozen 以外」的全部事实。草稿不对外可见
@@ -476,7 +476,7 @@ impl std::error::Error for SessionResourceError {
 ///
 /// - 提交是 **write-once CAS**：仅当这条 identity 从未提交过 frozen 时生效；重复调用返回
 ///   typed 冲突（[`SessionResourceErrorKind::Conflict`]），不覆盖已提交字节；
-/// - 提交在同一事务内校验本进程仍是该 identity 的活 owner、且执行代际尚未结清；
+/// - 本机提交在 canonical 事务内校验精确的活 owner，且其活跃、没有未决写；
 /// - [`Self::abandon`] 只撤销**未提交**的草稿（幂等）；已提交 frozen 的草稿必须拒绝删除
 ///   ——那会销毁一个「已定稿、未发布」的合法中间态；
 /// - 发布（`sessions.insert`）之后，句柄让位给会话持有的 [`SessionExecutionLease`]，
@@ -548,16 +548,12 @@ pub trait SessionResources: Send + Sync {
 
     /// 建立当前机器的运行生命周期句柄，不认领持久会话的唯一所有权。
     ///
-    /// 拒绝跨机器环境执行与只读打开；旧 dirty 或其他实例恢复不构成认领门槛。
+    /// 拒绝跨机器环境执行与只读打开；其他实例的运行事实不构成认领门槛。
     async fn acquire_execution(
         &self,
         id: &ThreadId,
         workspace: &ResolvedWorkspace,
     ) -> SessionResourceResult<Arc<dyn SessionExecutionLease>>;
-
-    /// 解除精确代际的本机 dirty；永远不解除未决持久化，也不接受把普通 dirty 映射成 reset。
-    async fn reset_dirty_execution(&self, request: &ResetDirtyRequest)
-        -> SessionResourceResult<()>;
 
     // ── 创建与接纳 ──
 
@@ -566,6 +562,8 @@ pub trait SessionResources: Send + Sync {
     /// 数据已保存但准入失败时返回
     /// [`SessionResourceError::saved_but_not_admitted`]，不得报告成「确定未创建」；
     /// 未发布创建的撤销由门面内部承担（见 [`Self::abandon_initialization`]）。
+    /// 同 ID 的不可变创建事实一致时可重复准入，不覆盖历史、配置、标题、状态或 frozen；
+    /// binding、创建时间、cwd、父关系、快照截止点或 frozen 不一致时拒绝。
     async fn create_session(
         &self,
         input: &NewSession,
@@ -583,14 +581,14 @@ pub trait SessionResources: Send + Sync {
         lease: &Arc<dyn SessionExecutionLease>,
     ) -> SessionResourceResult<()>;
 
-    /// 未发布创建的第一阶段：写身份/绑定/执行代际（frozen 暂空）并取得执行所有权。
+    /// 未发布创建的第一阶段：保存身份/绑定（frozen 暂空）并取得本实例运行句柄。
     ///
     /// 内容准入（资源读取后定稿 frozen）需要所有权先成立，因此创建被拆成两段：本方法返回
     /// 的句柄给出 [`SessionInitialization::commit_frozen`] 与
     /// [`SessionInitialization::abandon`] 两个终局动作，二者互斥且各自一次性。
     ///
-    /// 未提交的草稿不可执行、不出现在列表；同 identity 并发只有一个 owner（本机 sidecar 锁
-    /// 与执行代际唯一性）。
+    /// 未提交的草稿不出现在列表；初始化提交须校验本实例的精确活 owner，
+    /// 不提供跨实例执行独占。
     async fn begin_initialization(
         &self,
         draft: &NewSessionDraft,
@@ -598,9 +596,9 @@ pub trait SessionResources: Send + Sync {
 
     /// 半写草稿的检测与清理（崩溃恢复，不会自动删除「已提交未发布」的会话）。
     ///
-    /// 判据：绑定已成立 **且** `frozen IS NULL`（与 legacy「无绑定且无代际行」互斥）；
-    /// 目标进程内无活 owner、且能取得 OS 锁时才删除。已提交 frozen 的会话返回 typed 冲突
-    /// ——它已有定稿快照，走既有 dirty 恢复（`RecoveryRequired` → 显式 `reset_dirty`），
+    /// 判据：绑定已成立 **且** `frozen IS NULL`（与 legacy「无绑定且无 frozen」互斥）；
+    /// 本实例无活 owner 或未决写时才删除。已提交 frozen 的会话返回 typed 冲突
+    /// ——它已有定稿快照，可按 ID 重新建立执行准入，
     /// 不在这里被销毁。
     async fn discard_incomplete_initialization(&self, id: &ThreadId) -> SessionResourceResult<()>;
 

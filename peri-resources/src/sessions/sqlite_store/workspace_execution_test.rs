@@ -21,9 +21,8 @@ fn lease_process(path: &Path, id: &str, expected: &str) {
     assert!(String::from_utf8_lossy(&output.stdout).contains("running 1 test"));
 }
 
-/// 同 `lease_process`，额外把目标代次传给子进程（reset/观测用）。
-fn lease_process_at(path: &Path, id: &str, expected: &str, generation: i64) {
-    let output = std::process::Command::new(std::env::current_exe().unwrap())
+fn lease_process_hold(path: &Path, id: &str) -> std::process::Child {
+    std::process::Command::new(std::env::current_exe().unwrap())
         .args([
             "--exact",
             "sessions::sqlite_store::workspace::tests::execution::test_worktree_execution_child_process",
@@ -31,96 +30,68 @@ fn lease_process_at(path: &Path, id: &str, expected: &str, generation: i64) {
         ])
         .env("PERI_TEST_WORKSPACE_DB", path)
         .env("PERI_TEST_WORKSPACE_ID", id)
-        .env("PERI_TEST_WORKSPACE_EXPECT", expected)
-        .env("PERI_TEST_WORKSPACE_GENERATION", generation.to_string())
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "lease child failed: {} {}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(String::from_utf8_lossy(&output.stdout).contains("running 1 test"));
-}
-
-/// 启动一个「短命持有者」子进程：取得所有权后打印就绪行、保持 `hold_ms` 再正常收尾。
-///
-/// 返回的句柄带 stdout 管道，父进程据此确定「锁已被持有」——`flock` 的持有者何时释放
-/// 取决于调度，只有就绪信号之后的尝试才是确定性的重叠。
-fn lease_process_hold(path: &Path, id: &str) -> std::process::Child {
-    std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "sessions::sqlite_store::workspace::tests::execution::test_worktree_execution_child_process", "--nocapture"])
-        .env("PERI_TEST_WORKSPACE_DB", path)
-        .env("PERI_TEST_WORKSPACE_ID", id)
         .env("PERI_TEST_WORKSPACE_EXPECT", "hold")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .spawn().unwrap()
+        .spawn()
+        .unwrap()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_worktree_execution_overlaps_across_processes_and_recovers_after_crash() {
     let repo = repository();
     let (store, db) = store().await;
-    let (id, _) = bound(&store, repo.path()).await;
+    let (id, workspace) = bound(&store, repo.path()).await;
     let path = db.path().join("threads.db");
     let lease = store.acquire_execution_lease(&id).await.unwrap();
     lease_process(&path, &id, "clean");
-    assert_eq!(
-        store.database.load_execution_state(&id).await.unwrap(),
-        Some((2, true))
-    );
+    store
+        .append_message(&id, BaseMessage::human("original owner still active"))
+        .await
+        .unwrap();
     lease.mark_clean().await.unwrap();
-    assert_eq!(
-        store.database.load_execution_state(&id).await.unwrap(),
-        Some((2, true))
-    );
     lease_process(&path, &id, "crash");
-    assert_eq!(
-        store.database.load_execution_state(&id).await.unwrap(),
-        Some((3, false))
-    );
     let next = store.acquire_execution_lease(&id).await.unwrap();
     assert_eq!(next.thread_id(), &id);
-    assert_eq!(
-        store.database.load_execution_state(&id).await.unwrap(),
-        Some((4, false))
-    );
+    store
+        .append_message(&id, BaseMessage::human("continued after process crash"))
+        .await
+        .unwrap();
     next.mark_clean().await.unwrap();
     assert_eq!(
-        store.database.load_execution_state(&id).await.unwrap(),
-        Some((4, true))
+        store.validate_session_binding(&id).await.unwrap(),
+        workspace
     );
+    assert_eq!(store.load_messages(&id).await.unwrap().len(), 2);
     assert!(!db.path().join("threads.db.execution-locks").exists());
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_worktree_dirty_reset_uses_exact_generation_without_process_lock() {
+#[tokio::test]
+async fn test_worktree_active_reacquisition_reuses_owner_and_old_close_does_not_close_new_owner() {
     let repo = repository();
-    let (store, db) = store().await;
-    let (id, _) = bound(&store, repo.path()).await;
-    let path = db.path().join("threads.db");
-    let before = store.load_session_binding(&id).await.unwrap();
-    let lease = store.acquire_execution_lease(&id).await.unwrap();
-    lease_process_at(&path, &id, "reset_ok", 1);
+    let (store, _db) = store().await;
+    let (id, workspace) = bound(&store, repo.path()).await;
+    let first = store.acquire_execution_lease(&id).await.unwrap();
+    let reused = store.acquire_execution_lease(&id).await.unwrap();
+    assert!(Arc::ptr_eq(&first, &reused));
+    first.mark_clean().await.unwrap();
+    assert!(store
+        .append_message(&id, BaseMessage::human("closed owner"))
+        .await
+        .is_err());
+    let next = store.acquire_execution_lease(&id).await.unwrap();
+    assert!(!Arc::ptr_eq(&first, &next));
+    first.mark_clean().await.unwrap();
+    store
+        .append_message(&id, BaseMessage::human("new owner remains active"))
+        .await
+        .unwrap();
+    assert_eq!(store.load_messages(&id).await.unwrap().len(), 1);
     assert_eq!(
-        store.database.load_execution_state(&id).await.unwrap(),
-        Some((1, true))
+        store.validate_session_binding(&id).await.unwrap(),
+        workspace
     );
-    drop(lease);
-    lease_process_at(&path, &id, "reset_stale", 1);
-    lease_process(&path, &id, "crash");
-    lease_process_at(&path, &id, "generation", 2);
-    lease_process_at(&path, &id, "reset_stale", 1);
-    lease_process_at(&path, &id, "generation", 2);
-    lease_process_at(&path, &id, "reset_ok", 2);
-    lease_process(&path, &id, "clean");
-    assert_eq!(
-        store.database.load_execution_state(&id).await.unwrap(),
-        Some((3, true))
-    );
-    assert_eq!(store.load_session_binding(&id).await.unwrap(), before);
+    next.mark_clean().await.unwrap();
 }
 
 #[tokio::test]
@@ -130,82 +101,56 @@ async fn test_worktree_execution_child_process() {
     };
     let id = std::env::var("PERI_TEST_WORKSPACE_ID").unwrap();
     let expected = std::env::var("PERI_TEST_WORKSPACE_EXPECT").unwrap();
-    let store = SqliteThreadStore::new(Path::new(&path)).await.unwrap();
-    let target = || RecoveryRequiredDetails {
-        thread_id: id.clone(),
-        generation: std::env::var("PERI_TEST_WORKSPACE_GENERATION")
-            .unwrap()
-            .parse()
-            .unwrap(),
-    };
+    let store = SqliteThreadStore::new(path).await.unwrap();
+    let lease = store.acquire_execution_lease(&id).await.unwrap();
     match expected.as_str() {
-        "generation" => {
-            assert_eq!(
-                store.database.load_execution_state(&id).await.unwrap(),
-                Some((target().generation, false))
-            );
-        }
-        "clean" => {
-            let lease = store.acquire_execution_lease(&id).await.unwrap();
-            lease.mark_clean().await.unwrap();
-        }
-        "crash" => {
-            let _lease = store.acquire_execution_lease(&id).await.unwrap();
-            std::process::exit(0);
-        }
+        "clean" => lease.mark_clean().await.unwrap(),
+        "crash" => std::process::exit(0),
         "hold" => {
-            use std::io::Write;
-            let lease = store.acquire_execution_lease(&id).await.unwrap();
-            std::io::stdout().write_all(b"HOLDER-READY\n").unwrap();
+            use std::io::{Read, Write};
+            println!("READY");
             std::io::stdout().flush().unwrap();
-            let mut release = String::new();
-            std::io::stdin().read_line(&mut release).unwrap();
-            assert_eq!(release.trim(), "release");
+            let mut signal = [0_u8; 1];
+            std::io::stdin().read_exact(&mut signal).unwrap();
             lease.mark_clean().await.unwrap();
         }
-        "reset_ok" => store.reset_dirty_execution(&target()).await.unwrap(),
-        "reset_stale" => {
-            let error = store.reset_dirty_execution(&target()).await.unwrap_err();
-            assert!(matches!(
-                error.downcast_ref::<WorkspaceError>(),
-                Some(WorkspaceError::RecoveryGenerationMismatch)
-            ));
-        }
-        _ => panic!("unknown expected child result"),
+        other => panic!("unknown expected child result: {other}"),
     }
 }
 
-/// [回归测试] 短命持有者释放后的取得所有权不得被误报成 ExecutionBusy。
-///
-/// `flock` 的锁挂在 open file description 上：本进程 `fork` 出的子进程在 `exec` 前共享父
-/// 进程的描述符（`CLOEXEC` 只在子进程 `exec` 时关闭），会话生命周期里的 Git 发现、
-/// `sw_vers`、LSP 等子进程因此会留下毫秒级的瞬时持有。没有重试时，这类窗口会被上报成
-/// 「会话已被其他执行宿主占用」，把一次正常的取得所有权变成偶发失败；真正的外部持有者
-/// 并不受重试影响（超时后仍报忙，见 `test_worktree_execution_competes_across_processes_and_crash_remains_dirty`）。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_worktree_live_process_does_not_block_another_run() {
-    use std::io::{BufRead, Write};
+    use std::io::{BufRead, BufReader, Write};
     let repo = repository();
     let (store, db) = store().await;
-    let (id, _) = bound(&store, repo.path()).await;
-    let mut holder = lease_process_hold(&db.path().join("threads.db"), &id);
-    let mut lines = std::io::BufReader::new(holder.stdout.take().unwrap()).lines();
-    assert!(lines.any(|line| line.unwrap().contains("HOLDER-READY")));
-    let acquisition =
-        tokio::time::timeout(Duration::from_secs(2), store.acquire_execution_lease(&id)).await;
-    holder
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"release\n")
+    let (id, workspace) = bound(&store, repo.path()).await;
+    let path = db.path().join("threads.db");
+    let mut child = lease_process_hold(&path, &id);
+    let mut reader = BufReader::new(child.stdout.take().unwrap());
+    loop {
+        let mut line = String::new();
+        assert_ne!(
+            reader.read_line(&mut line).unwrap(),
+            0,
+            "child exited before READY"
+        );
+        if line.trim() == "READY" {
+            break;
+        }
+    }
+    let lease = store.acquire_execution_lease(&id).await.unwrap();
+    store
+        .append_message(&id, BaseMessage::human("concurrent process owner"))
+        .await
         .unwrap();
-    assert!(holder.wait().unwrap().success());
-    let lease = acquisition.unwrap().unwrap();
-    assert_eq!(
-        store.database.load_execution_state(&id).await.unwrap(),
-        Some((2, false))
-    );
     lease.mark_clean().await.unwrap();
+    child.stdin.take().unwrap().write_all(b"x").unwrap();
+    assert!(child.wait().unwrap().success());
+    assert_eq!(
+        store.validate_session_binding(&id).await.unwrap(),
+        workspace
+    );
+    assert_eq!(store.load_messages(&id).await.unwrap().len(), 1);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -226,7 +171,6 @@ async fn test_worktree_clean_waits_for_admitted_mutation_before_closing_run() {
         .unwrap()
         .unwrap();
     let mut close = std::pin::pin!(lease.mark_clean());
-    // Poll once with an admitted mutation suspended: close must not publish clean.
     assert!(matches!(
         close.as_mut().poll(&mut Context::from_waker(Waker::noop())),
         Poll::Pending
@@ -236,26 +180,24 @@ async fn test_worktree_clean_waits_for_admitted_mutation_before_closing_run() {
         .execute(&store.database.pool)
         .await
         .unwrap();
-    let run: (bool,) = sqlx::query_as("SELECT clean FROM execution_runs WHERE thread_id = ?")
-        .bind(&id)
-        .fetch_one(&store.database.pool)
-        .await
-        .unwrap();
-    assert!(!run.0);
     mutation.finish();
     close.await.unwrap();
     assert_eq!(
         store.load_meta(&id).await.unwrap().title.as_deref(),
         Some("last owner write")
     );
+    assert!(store
+        .append_message(&id, BaseMessage::human("after close"))
+        .await
+        .is_err());
     lease_process(&db.path().join("threads.db"), &id, "clean");
 }
 
 #[tokio::test]
-async fn test_worktree_cancelled_mutation_remains_dirty_and_cannot_publish_clean() {
+async fn test_worktree_cancelled_mutation_blocks_reacquisition_until_instance_restart() {
     let repo = repository();
-    let (store, _db) = store().await;
-    let (id, _) = bound(&store, repo.path()).await;
+    let (store, db) = store().await;
+    let (id, workspace) = bound(&store, repo.path()).await;
     let lease = store.acquire_execution_lease(&id).await.unwrap();
     let facts = store.database.local_session_facts(&id).await.unwrap();
     let mutation = store
@@ -264,23 +206,74 @@ async fn test_worktree_cancelled_mutation_remains_dirty_and_cannot_publish_clean
         .await
         .unwrap()
         .unwrap();
-    // Dropping the capability without its completion signal models future cancellation.
     drop(mutation);
     assert!(lease.mark_clean().await.is_err());
-    assert_eq!(
-        store.database.load_execution_state(&id).await.unwrap(),
-        Some((1, false))
-    );
+    assert!(store.acquire_execution_lease(&id).await.is_err());
+    assert!(store
+        .append_message(&id, BaseMessage::human("unknown effect retry"))
+        .await
+        .is_err());
     drop(lease);
-    let next = store.acquire_execution_lease(&id).await.unwrap();
+    assert!(store.acquire_execution_lease(&id).await.is_err());
     assert_eq!(
-        store.database.load_execution_state(&id).await.unwrap(),
-        Some((2, false))
+        store.validate_session_binding(&id).await.unwrap(),
+        workspace
     );
-    next.mark_clean().await.unwrap();
+    assert!(store.load_messages(&id).await.unwrap().is_empty());
+    store.close().await;
+    let reopened = SqliteThreadStore::new(db.path().join("threads.db"))
+        .await
+        .unwrap();
+    let next = reopened.acquire_execution_lease(&id).await.unwrap();
+    reopened
+        .append_message(&id, BaseMessage::human("continued in reopened instance"))
+        .await
+        .unwrap();
     assert_eq!(
-        store.database.load_execution_state(&id).await.unwrap(),
-        Some((2, true))
+        reopened.validate_session_binding(&id).await.unwrap(),
+        workspace
+    );
+    assert_eq!(reopened.load_messages(&id).await.unwrap().len(), 1);
+    next.mark_clean().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_worktree_closed_store_rejects_new_owner() {
+    let repo = repository();
+    let (store, _db) = store().await;
+    let (id, _) = bound(&store, repo.path()).await;
+    let lease = store.acquire_execution_lease(&id).await.unwrap();
+    store.close().await;
+    assert!(store.acquire_execution_lease(&id).await.is_err());
+    lease.mark_clean().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_worktree_readonly_store_rejects_new_owner_without_changing_canonical_facts() {
+    let repo = repository();
+    let (store, db) = store().await;
+    let (id, workspace) = bound(&store, repo.path()).await;
+    store
+        .append_message(&id, BaseMessage::human("readonly history"))
+        .await
+        .unwrap();
+    let before = serde_json::to_value(store.load_meta(&id).await.unwrap()).unwrap();
+    let read = SqliteThreadStore::open_existing_read_only(db.path().join("threads.db"))
+        .await
+        .unwrap();
+    assert!(read.acquire_execution_lease(&id).await.is_err());
+    assert_eq!(
+        read.load_session_binding(&id).await.unwrap(),
+        store.load_session_binding(&id).await.unwrap()
+    );
+    assert_eq!(read.load_messages(&id).await.unwrap().len(), 1);
+    assert_eq!(
+        serde_json::to_value(read.load_meta(&id).await.unwrap()).unwrap(),
+        before
+    );
+    assert_eq!(
+        store.validate_session_binding(&id).await.unwrap(),
+        workspace
     );
 }
 

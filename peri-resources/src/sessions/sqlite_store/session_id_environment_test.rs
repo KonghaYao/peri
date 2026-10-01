@@ -60,17 +60,12 @@ async fn migration_keeps_schema_version_and_existing_history() {
 }
 
 #[tokio::test]
-async fn id_recovery_ignores_missing_paths_dirty_rows_and_other_instances() {
+async fn id_recovery_ignores_missing_paths_and_keeps_instance_owners_independent() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("threads.db");
     let (store, first) = SqliteThreadStore::open_shared(&path).await.unwrap();
     let id = store
         .create_thread(ThreadMeta::new("/missing/original-machine"))
-        .await
-        .unwrap();
-    sqlx::query("INSERT INTO execution_runs(thread_id, generation, clean) VALUES (?1, 8, 0)")
-        .bind(&id)
-        .execute(&store.database.pool)
         .await
         .unwrap();
     let workspace = first
@@ -84,30 +79,41 @@ async fn id_recovery_ignores_missing_paths_dirty_rows_and_other_instances() {
     let first_run = first.acquire_execution(&id, &workspace).await.unwrap();
     let second = SessionResourcesImpl::open(&path).await.unwrap();
     let second_run = second.acquire_execution(&id, &workspace).await.unwrap();
-    let state: (i64, bool) =
-        sqlx::query_as("SELECT generation, clean FROM execution_runs WHERE thread_id = ?1")
-            .bind(&id)
-            .fetch_one(&store.database.pool)
-            .await
-            .unwrap();
-    assert_eq!(state, (10, false));
+    first
+        .append_history(
+            &id,
+            &[PersistedPayload::Message(BaseMessage::human(
+                "first instance",
+            ))],
+        )
+        .await
+        .unwrap();
     assert!(!directory.path().join("threads.db.execution-locks").exists());
     first_run.mark_clean().await.unwrap();
-    let state: (i64, bool) =
-        sqlx::query_as("SELECT generation, clean FROM execution_runs WHERE thread_id = ?1")
-            .bind(&id)
-            .fetch_one(&store.database.pool)
-            .await
-            .unwrap();
-    assert_eq!(state, (10, false));
+    assert!(first
+        .append_history(
+            &id,
+            &[PersistedPayload::Message(BaseMessage::human(
+                "closed first"
+            ))]
+        )
+        .await
+        .is_err());
+    second
+        .append_history(
+            &id,
+            &[PersistedPayload::Message(BaseMessage::human(
+                "second still active",
+            ))],
+        )
+        .await
+        .unwrap();
     second_run.mark_clean().await.unwrap();
-    let state: (i64, bool) =
-        sqlx::query_as("SELECT generation, clean FROM execution_runs WHERE thread_id = ?1")
-            .bind(&id)
-            .fetch_one(&store.database.pool)
-            .await
-            .unwrap();
-    assert_eq!(state, (10, true));
+    assert_eq!(store.load_messages(&id).await.unwrap().len(), 2);
+    assert_eq!(
+        store.load_meta(&id).await.unwrap().cwd,
+        "/missing/original-machine"
+    );
 }
 
 #[tokio::test]

@@ -1,33 +1,23 @@
 use super::*;
 
-// ─── 删除与恢复证据 ───────────────────────────────────────────────────────────
-
 #[tokio::test]
-async fn test_delete_ends_data_execution_facts_and_ownership() {
+async fn test_delete_ends_canonical_data_and_runtime_ownership() {
     let fixture = Fixture::new().await;
     let root_lease = fixture.create("s-del-root").await;
     let _child = fixture
         .child("s-del-child", "s-del-root", &root_lease)
         .await;
-
     fixture
         .facade
         .delete_session_tree(&"s-del-root".to_owned())
         .await
         .unwrap();
-    // 删除即删除：整棵树的数据、绑定、执行代际行都不在，也没有第二份「被删过」的痕迹
-    // （v10 之后本机不为终止状态留锚点——删除的对象是数据，不是身份）。
-    assert_eq!(fixture.count_threads("s-del-root").await, 0);
-    assert_eq!(fixture.count_threads("s-del-child").await, 0);
-    assert_eq!(fixture.count_bindings("s-del-root").await, 0);
-    assert_eq!(fixture.count_execution_runs("s-del-root").await, 0);
-    assert_eq!(fixture.count_execution_runs("s-del-child").await, 0);
-    // 删除同时结束本次所有权：owner 不再接收写入（下面按「没有活 owner」被拒），锁也已
-    // 释放——这一点由本测试末尾用同一 identity 重新创建证明：重建要重新取得同一把
-    // sidecar 锁，锁没释放就会是 `ExecutionBusy`。
+    for id in ["s-del-root", "s-del-child"] {
+        assert_eq!(fixture.count_threads(id).await, 0);
+        assert_eq!(fixture.count_bindings(id).await, 0);
+        assert_eq!(fixture.count_messages(id).await, 0);
+    }
     root_lease.mark_clean().await.unwrap();
-    assert_eq!(fixture.count_execution_runs("s-del-root").await, 0);
-    // 收敛读取没有对象：会话不存在，就没有「可重载」这回事。
     let error = fixture
         .facade
         .recover_session_persistence(&"s-del-root".to_owned())
@@ -37,43 +27,75 @@ async fn test_delete_ends_data_execution_facts_and_ownership() {
         error_kind(&error),
         SessionResourceErrorKind::NotFound
     ));
-    // 收尾中的 owner 仍在册：此刻的写入按「没有活 owner」被拒绝——所有权事实优先于
-    // 数据事实，重试收尾不会被悄悄放行。
-    let error = fixture
+    assert!(fixture
         .facade
-        .delete_session_tree(&"s-del-root".to_owned())
+        .append_history(&"s-del-root".to_owned(), &[payload("deleted owner write")])
         .await
-        .unwrap_err();
-    assert!(matches!(
-        error_kind(&error),
-        SessionResourceErrorKind::Workspace(WorkspaceError::ExecutionLeaseRequired)
-    ));
-    drop(root_lease);
-    // owner 释放后，剩下的结论才是数据事实：这条会话已不存在。
-    let error = fixture
-        .facade
-        .delete_session_tree(&"s-del-root".to_owned())
-        .await
-        .unwrap_err();
-    assert!(matches!(
-        error_kind(&error),
-        SessionResourceErrorKind::NotFound
-    ));
-    // 同一 identity 可以重新创建：删除的对象是这条会话的数据与执行事实，不是这个名字。
-    // 没有 durable 痕迹时不留「不许再用」的封印——那需要一张跨进程存活的表，而本机
-    // 不再有那样的表（见 schema v10 的删除清单）。
+        .is_err());
     let workspace = fixture.workspace().await;
     let input = fixture.session("s-del-root", &workspace, r#"{"v":1}"#);
     let fresh = fixture.facade.create_session(&input).await.unwrap();
     assert_eq!(fresh.thread_id().as_str(), "s-del-root");
-    assert_eq!(
-        fixture.execution_row("s-del-root").await,
-        Some((1, false)),
-        "重新创建是全新的一条会话，代际从 1 开始且未结清"
-    );
+    root_lease.mark_clean().await.unwrap();
+    fixture
+        .facade
+        .append_history(&"s-del-root".to_owned(), &[payload("fresh owner write")])
+        .await
+        .unwrap();
+    assert_eq!(fixture.count_messages("s-del-root").await, 1);
+    assert_eq!(fixture.count_threads("s-del-child").await, 0);
+    fresh.mark_clean().await.unwrap();
 }
 
-// ─── 排空与关闭 ───────────────────────────────────────────────────────────────
+#[tokio::test]
+async fn test_unbound_frozen_session_remains_readable_and_cannot_be_automatically_adopted() {
+    let fixture = Fixture::new().await;
+    let id = "s-unbound-frozen-history".to_owned();
+    let lease = fixture.create(&id).await;
+    fixture
+        .facade
+        .append_history(&id, &[payload("preserved unbound history")])
+        .await
+        .unwrap();
+    let before = fixture.facade.load_session_snapshot(&id).await.unwrap();
+    lease.mark_clean().await.unwrap();
+    sqlx::query("DELETE FROM session_bindings WHERE thread_id = ?1")
+        .bind(&id)
+        .execute(fixture.facade.local_pool())
+        .await
+        .unwrap();
+    let reopened = fixture.second_host().await;
+    let after = reopened.load_session_snapshot(&id).await.unwrap();
+    assert_eq!(after.binding, BindingState::Missing);
+    assert_eq!(after.frozen, before.frozen);
+    assert_eq!(after.payloads.len(), 1);
+    assert_eq!(
+        peri_acp_types::store::serialize_persisted_payload(&after.payloads[0]).unwrap(),
+        peri_acp_types::store::serialize_persisted_payload(&before.payloads[0]).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_value(&after.meta).unwrap(),
+        serde_json::to_value(&before.meta).unwrap()
+    );
+    let workspace = fixture.workspace().await;
+    let error = reopened
+        .adopt_legacy_session(
+            &id,
+            &after.meta.cwd,
+            &workspace,
+            &FrozenSnapshotBytes::new("replacement".to_owned()),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error_kind(&error),
+        SessionResourceErrorKind::Workspace(WorkspaceError::InvalidBinding)
+    ));
+    let rejected = reopened.load_session_snapshot(&id).await.unwrap();
+    assert_eq!(rejected.binding, BindingState::Missing);
+    assert_eq!(rejected.frozen, before.frozen);
+    assert_eq!(rejected.payloads.len(), 1);
+}
 
 #[tokio::test]
 async fn test_close_stops_new_writes_and_reports_unsettled_owners() {
@@ -96,7 +118,6 @@ async fn test_close_stops_new_writes_and_reports_unsettled_owners() {
     assert!(fixture.facade.load_session_meta(&id).await.is_ok());
     // 重复关闭是幂等成功。
     fixture.shutdown().await.unwrap();
-    // 收尾仍由 owner 完成：关闭不等于替 owner 写完 clean。
     lease.mark_clean().await.unwrap();
     drop(lease);
 
@@ -115,8 +136,6 @@ async fn test_close_stops_new_writes_and_reports_unsettled_owners() {
     assert!(error.is_persistence_uncertain());
     drop(lease);
 }
-
-// ─── 跨进程：他处所有权、崩溃后的 dirty 与排空 ─────────────────────────────────
 
 /// 子进程入口：按环境变量在**另一进程**里执行同一门面动作。
 ///
@@ -173,38 +192,33 @@ async fn test_facade_process_runs_overlap_and_crash_does_not_block_recovery() {
     let lease = fixture.create(&id).await;
     let db = fixture._db.path().join("threads.db");
     let repo = fixture.repo.path();
+    let before = fixture.facade.load_session_snapshot(&id).await.unwrap();
     facade_process(&db, repo, &id, "clean");
-    assert_eq!(fixture.execution_row(&id).await, Some((2, true)));
-    lease.mark_clean().await.unwrap();
-    assert_eq!(fixture.execution_row(&id).await, Some((2, true)));
-    drop(lease);
-    facade_process(&db, repo, &id, "crash");
-    assert_eq!(fixture.execution_row(&id).await, Some((3, false)));
-    fixture.facade.drain_persistence(&id).await.unwrap();
-    let error = fixture
+    fixture
         .facade
-        .reset_dirty_execution(&ResetDirtyRequest {
-            target: RecoveryRequiredDetails {
-                thread_id: id.clone(),
-                generation: 3,
-            },
-            accept_risk: false,
-        })
+        .append_history(&id, &[payload("original owner")])
         .await
-        .unwrap_err();
-    assert!(matches!(
-        error_kind(&error),
-        SessionResourceErrorKind::InvalidInput { .. }
-    ));
+        .unwrap();
+    lease.mark_clean().await.unwrap();
+    facade_process(&db, repo, &id, "crash");
+    fixture.facade.drain_persistence(&id).await.unwrap();
     let next = fixture
         .facade
         .acquire_execution(&id, &fixture.workspace().await)
         .await
         .unwrap();
     assert_eq!(next.thread_id(), &id);
-    assert_eq!(fixture.execution_row(&id).await, Some((4, false)));
+    lease.mark_clean().await.unwrap();
+    fixture
+        .facade
+        .append_history(&id, &[payload("after process crash")])
+        .await
+        .unwrap();
+    let after = fixture.facade.load_session_snapshot(&id).await.unwrap();
+    assert_eq!(after.binding, before.binding);
+    assert_eq!(after.frozen, before.frozen);
+    assert_eq!(after.payloads.len(), 2);
     next.mark_clean().await.unwrap();
-    assert_eq!(fixture.execution_row(&id).await, Some((4, true)));
     assert!(!fixture
         ._db
         .path()

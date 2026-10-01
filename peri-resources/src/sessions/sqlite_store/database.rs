@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Mutex, Weak};
+use std::sync::{Arc, Mutex};
 
 use peri_acp_types::thread::ThreadId;
 use sqlx::SqlitePool;
@@ -25,9 +25,9 @@ pub(in crate::sessions) struct SqliteSessionDatabase {
     pub(super) read_only: bool,
     #[cfg(test)]
     pub(super) db_path: PathBuf,
-    /// root owner 的弱引用登记：lease 的持有者是调用方，这里只用于复核准入。
+    /// 保留当前运行句柄，直到明确关闭，避免遗失调用方引用后绕过未决写入门禁。
     /// 键是 `thread_id` 原文（v10 之后只有这一个执行域）。
-    pub(super) execution_leases: Mutex<HashMap<ThreadId, Weak<ExecutionLease>>>,
+    pub(super) execution_leases: Mutex<HashMap<ThreadId, Arc<ExecutionLease>>>,
 }
 
 impl SqliteSessionDatabase {

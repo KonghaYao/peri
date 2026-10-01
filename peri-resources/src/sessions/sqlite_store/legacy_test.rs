@@ -154,15 +154,7 @@ async fn legacy_adoption_commits_snapshot_once_across_concurrent_restorers() {
         winner
     );
     let left_lease = left.acquire_execution_lease(&id).await.unwrap();
-    assert_eq!(
-        left.database.load_execution_state(&id).await.unwrap(),
-        Some((1, false))
-    );
     let right_lease = right.acquire_execution_lease(&id).await.unwrap();
-    assert_eq!(
-        left.database.load_execution_state(&id).await.unwrap(),
-        Some((2, false))
-    );
     left.append_message(&id, BaseMessage::human("continued by left"))
         .await
         .unwrap();
@@ -171,15 +163,7 @@ async fn legacy_adoption_commits_snapshot_once_across_concurrent_restorers() {
         .await
         .unwrap();
     left_lease.mark_clean().await.unwrap();
-    assert_eq!(
-        right.database.load_execution_state(&id).await.unwrap(),
-        Some((2, false))
-    );
     right_lease.mark_clean().await.unwrap();
-    assert_eq!(
-        left.database.load_execution_state(&id).await.unwrap(),
-        Some((2, true))
-    );
     let messages = right.load_messages(&id).await.unwrap();
     assert_eq!(
         messages
@@ -207,20 +191,8 @@ async fn legacy_adoption_commits_snapshot_once_across_concurrent_restorers() {
         serde_json::to_value(reopened.load_messages(&id).await.unwrap()).unwrap(),
         serde_json::to_value(messages).unwrap()
     );
-    assert_eq!(
-        reopened.database.load_execution_state(&id).await.unwrap(),
-        Some((2, true))
-    );
     let reopened_lease = reopened.acquire_execution_lease(&id).await.unwrap();
-    assert_eq!(
-        reopened.database.load_execution_state(&id).await.unwrap(),
-        Some((3, false))
-    );
     reopened_lease.mark_clean().await.unwrap();
-    assert_eq!(
-        reopened.database.load_execution_state(&id).await.unwrap(),
-        Some((3, true))
-    );
     reopened.close().await;
 }
 
@@ -325,17 +297,11 @@ async fn legacy_adoption_rejects_changed_cwd_and_child_without_losing_history() 
         .unwrap()
         .parent_thread_id
         .is_none());
-    assert!(store
-        .database
-        .load_execution_state(&id)
-        .await
-        .unwrap()
-        .is_none());
     store.close().await;
 }
 
 #[tokio::test]
-async fn legacy_adoption_rejects_lost_native_binding_without_losing_data_or_run_state() {
+async fn legacy_adoption_rejects_unbound_frozen_session_without_losing_canonical_data() {
     use peri_acp_types::workspace::WorkspaceError;
     let dir = tempfile::tempdir().unwrap();
     let cwd = std::fs::canonicalize(dir.path()).unwrap();
@@ -364,6 +330,11 @@ async fn legacy_adoption_rejects_lost_native_binding_without_losing_data_or_run_
         .await
         .unwrap();
     assert_eq!(deleted.rows_affected(), 1);
+    lease.mark_clean().await.unwrap();
+    store.close().await;
+    let store = SqliteThreadStore::new(dir.path().join("threads.db"))
+        .await
+        .unwrap();
     let error = store
         .adopt_legacy_thread(&id, cwd.to_str().unwrap(), &workspace, "snapshot")
         .await
@@ -385,15 +356,7 @@ async fn legacy_adoption_rejects_lost_native_binding_without_losing_data_or_run_
         serde_json::to_value(store.load_messages(&id).await.unwrap()).unwrap(),
         messages
     );
-    assert_eq!(
-        store.database.load_execution_state(&id).await.unwrap(),
-        Some((1, false))
-    );
     lease.mark_clean().await.unwrap();
-    assert_eq!(
-        store.database.load_execution_state(&id).await.unwrap(),
-        Some((1, true))
-    );
     store.close().await;
 }
 
@@ -453,12 +416,6 @@ async fn legacy_children_use_root_execution_gate_without_data_ownership_requirem
         ["without owner", "with root owner"]
     );
     assert!(store.load_session_binding(&child).await.unwrap().is_none());
-    assert!(store
-        .database
-        .load_execution_state(&child)
-        .await
-        .unwrap()
-        .is_none());
     lease.mark_clean().await.unwrap();
     assert!(!child_owner.is_active());
     let error = store
@@ -476,6 +433,11 @@ async fn legacy_children_use_root_execution_gate_without_data_ownership_requirem
     drop(child_owner);
     drop(root_owner);
     drop(lease);
+    assert!(store
+        .append_message(&child, BaseMessage::human("dropped closed owner"))
+        .await
+        .is_err());
+    let next = store.acquire_execution_lease(&root).await.unwrap();
     store
         .append_message(&child, BaseMessage::human("after releasing closed handle"))
         .await
@@ -498,16 +460,7 @@ async fn legacy_children_use_root_execution_gate_without_data_ownership_requirem
         store.load_frozen_snapshot(&root).await.unwrap().as_deref(),
         Some("snapshot")
     );
-    assert_eq!(
-        store.database.load_execution_state(&root).await.unwrap(),
-        Some((1, true))
-    );
-    assert!(store
-        .database
-        .load_execution_state(&child)
-        .await
-        .unwrap()
-        .is_none());
+    next.mark_clean().await.unwrap();
     store.close().await;
 }
 
