@@ -31,14 +31,16 @@ pub type Result<Output> = std::result::Result<Output, SettingsError>;
 struct FixedLayoutSource {
     workspace: Option<PathBuf>,
     project: Option<PathBuf>,
+    injected_global: Option<String>,
 }
 
 impl ConfigurationSource for FixedLayoutSource {
     fn collect(&self, scope: &ConfigurationScope) -> std::io::Result<crate::ConfigurationInputs> {
-        crate::source::collect_with_layout(
+        crate::source::collect_with_layout_and_global(
             scope,
             self.workspace.as_deref(),
             self.project.as_deref(),
+            self.injected_global.as_deref(),
         )
     }
 
@@ -48,6 +50,12 @@ impl ConfigurationSource for FixedLayoutSource {
         expected: Option<&str>,
         content: &str,
     ) -> std::io::Result<bool> {
+        if self.injected_global.is_some() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "injected settings are read-only",
+            ));
+        }
         McpConfigurationSource.write_if_unchanged(path, expected, content)
     }
 }
@@ -97,6 +105,19 @@ impl ConfigSource {
             global_path,
             workspace_path,
             Some(cwd.join(".mcp.json")),
+            None,
+        )
+    }
+
+    /// Resolve a complete settings document supplied by a trusted process launcher.
+    /// This source never reads or writes global/workspace settings files.
+    pub fn load_injected_at(cwd: &Path, global_path: PathBuf, settings: String) -> Result<Self> {
+        Self::load_layout(
+            cwd,
+            global_path,
+            None,
+            Some(cwd.join(".mcp.json")),
+            Some(settings),
         )
     }
 
@@ -105,11 +126,13 @@ impl ConfigSource {
         global_path: PathBuf,
         workspace_path: Option<PathBuf>,
         project_path: Option<PathBuf>,
+        injected_global: Option<String>,
     ) -> Result<Self> {
         let scope = ConfigurationScope::new(cwd.to_owned(), global_path.clone())?;
         let authority = ConfigurationSystem::new(Arc::new(FixedLayoutSource {
             workspace: workspace_path.clone(),
             project: project_path,
+            injected_global,
         }));
         let snapshot = authority.resolve(scope.clone())?;
         Ok(Self {
@@ -164,7 +187,7 @@ impl ConfigSource {
             peri_mcp_config::current_dir()?.join(path)
         };
         let cwd = peri_mcp_config::current_dir()?;
-        Self::load_layout(&cwd, path, None, None)
+        Self::load_layout(&cwd, path, None, None, None)
     }
 
     pub fn load_at_lenient(cwd: &Path, global_path: PathBuf) -> Self {

@@ -56,7 +56,19 @@ pub(crate) fn collect_with_layout(
     workspace: Option<&Path>,
     project: Option<&Path>,
 ) -> io::Result<ConfigurationInputs> {
-    let global = read_optional(&scope.global_settings)?;
+    collect_with_layout_and_global(scope, workspace, project, None)
+}
+
+pub(crate) fn collect_with_layout_and_global(
+    scope: &ConfigurationScope,
+    workspace: Option<&Path>,
+    project: Option<&Path>,
+    injected_global: Option<&str>,
+) -> io::Result<ConfigurationInputs> {
+    let global = match injected_global {
+        Some(content) => Some(content.to_owned()),
+        None => read_optional(&scope.global_settings)?,
+    };
     let workspace = workspace.map(read_optional).transpose()?.flatten();
     let project = project.map(read_optional).transpose()?.flatten();
     let mut keys = crate::provider::ENVIRONMENT_KEYS.to_vec();

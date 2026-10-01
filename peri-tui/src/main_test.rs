@@ -14,6 +14,41 @@ fn test_propagate_tui_result_preserves_startup_failure() {
     assert_eq!(error.to_string(), "database open failed");
 }
 
+#[test]
+fn acp_settings_stdin_is_explicit_opt_in() {
+    let cli = Cli::try_parse_from(["peri", "acp", "--settings-stdin"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Some(Commands::Acp {
+            settings_stdin: true,
+            ..
+        })
+    ));
+    let cli = Cli::try_parse_from(["peri", "acp"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Some(Commands::Acp {
+            settings_stdin: false,
+            ..
+        })
+    ));
+    let args = [
+        OsString::from("peri"),
+        OsString::from("acp"),
+        OsString::from("--settings-stdin"),
+    ];
+    assert!(argv_requests_settings_stdin(&args));
+    let cli = Cli::try_parse_from([
+        "peri",
+        "--config-file",
+        "/tmp/settings.json",
+        "acp",
+        "--settings-stdin",
+    ])
+    .unwrap();
+    assert!(validate_cli(&cli).is_err());
+}
+
 fn make_temp_file(content: &str) -> tempfile::TempPath {
     use std::io::Write;
     let mut file = tempfile::NamedTempFile::new().unwrap();

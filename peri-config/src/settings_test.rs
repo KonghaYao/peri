@@ -85,6 +85,29 @@ fn test_config_source_load_standalone_ignores_workspace() {
 }
 
 #[test]
+fn injected_settings_replace_file_inputs_and_cannot_be_saved() {
+    let tmp = tempfile::tempdir().unwrap();
+    let global = tmp.path().join("settings.json");
+    std::fs::write(&global, "invalid global JSON").unwrap();
+    write_settings(tmp.path(), "invalid workspace JSON");
+    let source = ConfigSource::load_injected_at(
+        tmp.path(),
+        global.clone(),
+        r#"{"config":{"active_alias":"sonnet","providers":[{"id":"injected","type":"openai","apiKey":"test"}],"profiles":{"sonnet":{"provider":"injected","model":"test-model"}}}}"#.to_owned(),
+    )
+    .unwrap();
+    assert_eq!(source.loaded_merged().config.active_alias, "sonnet");
+    assert_eq!(source.loaded_merged().config.providers[0].id, "injected");
+    assert!(source
+        .save(revision(&source), &source.loaded_merged())
+        .is_err());
+    assert_eq!(
+        std::fs::read_to_string(global).unwrap(),
+        "invalid global JSON"
+    );
+}
+
+#[test]
 fn test_workspace_config_path_does_not_panic() {
     // workspace_config_path 依赖进程 cwd，仅验证不 panic（只读探测场景）
     let _ = super::workspace_config_path();

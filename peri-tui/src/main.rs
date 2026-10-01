@@ -122,6 +122,9 @@ enum Commands {
         /// Agent 类型（从 .claude/agents/ 中选择）
         #[arg(short = 'g', long)]
         agent: Option<String>,
+        /// Read a trusted, length-prefixed settings JSON document from stdin before ACP.
+        #[arg(long = "settings-stdin")]
+        settings_stdin: bool,
     },
     /// 运行 workflow CLI 子命令（read/list/validate/boundary/adlc/help）
     #[command(disable_help_flag = true)]
@@ -430,6 +433,13 @@ fn pre_scan_config_file(args: impl Iterator<Item = std::ffi::OsString>) -> Optio
     result
 }
 
+fn argv_requests_settings_stdin(args: &[OsString]) -> bool {
+    args.iter()
+        .skip(1)
+        .take_while(|arg| arg.to_str() != Some("--"))
+        .any(|arg| arg.to_str() == Some("--settings-stdin"))
+}
+
 /// 统一创建 tokio runtime（4 workers，4MB stack），避免 7 处重复构造
 fn build_runtime() -> Result<tokio::runtime::Runtime> {
     tokio::runtime::Builder::new_multi_thread()
@@ -441,6 +451,16 @@ fn build_runtime() -> Result<tokio::runtime::Runtime> {
 }
 
 fn validate_cli(cli: &Cli) -> std::result::Result<(), &'static str> {
+    if matches!(
+        cli.command,
+        Some(Commands::Acp {
+            settings_stdin: true,
+            ..
+        })
+    ) && cli.config_file.is_some()
+    {
+        return Err("--settings-stdin cannot be combined with --config-file");
+    }
     if cli.print.is_some() && cli.command.is_some() {
         return Err("--print cannot be used with a subcommand");
     }
@@ -678,19 +698,27 @@ fn main() -> Result<()> {
     // Set jemalloc MALLOC_CONF env vars before ordinary runtime startup.
     peri_tui::alloc_config::init_alloc_conf();
 
+    let settings_stdin = argv_requests_settings_stdin(&args);
+
     // 预扫描 argv 重定向全局配置路径，必须在 env 注入之前（gate 决策 Option A）：
     // --config-file 文件内的 env 字段需注入进程。fail-open：扫描不到时保持
     // 默认路径，后续 clap 解析报错兜底。
-    peri_tui::config::set_global_config_path(pre_scan_config_file(std::env::args_os().skip(1)));
+    if !settings_stdin {
+        peri_tui::config::set_global_config_path(pre_scan_config_file(
+            args.iter().skip(1).cloned(),
+        ));
+    }
 
     // 最先注入环境变量（进程环境变量优先）
     // 优先级：进程环境 > 项目本地配置 > Peri 全局配置 > Claude Code 配置
     // 项目本地配置（./.peri/settings.json），项目覆盖全局
-    if let Some(path) = peri_tui::config::workspace_config_path() {
-        inject_env_from_file(&path, &[&["config", "env"], &["env"]]);
+    if !settings_stdin {
+        if let Some(path) = peri_tui::config::workspace_config_path() {
+            inject_env_from_file(&path, &[&["config", "env"], &["env"]]);
+        }
+        inject_env_from_settings(); // ~/.peri/settings.json
+        inject_env_from_claude_settings(); // ~/.claude/settings.json
     }
-    inject_env_from_settings(); // ~/.peri/settings.json
-    inject_env_from_claude_settings(); // ~/.claude/settings.json
 
     let cli = Cli::parse();
     if let Err(message) = validate_cli(&cli) {
@@ -709,7 +737,11 @@ fn main() -> Result<()> {
     };
 
     // 以 clap 解析结果为准（幂等；prescan 与 clap 同源 argv，二者一致）
-    peri_tui::config::set_global_config_path(cli.config_file.clone());
+    peri_tui::config::set_global_config_path(if settings_stdin {
+        None
+    } else {
+        cli.config_file.clone()
+    });
 
     // -p/--print 模式（优先级高于子命令）
     if cli.print.is_some() {
@@ -754,6 +786,7 @@ fn main() -> Result<()> {
             cwd,
             model: _,
             agent: _,
+            settings_stdin,
         }) => {
             // 限制 worker 数（默认=CPU 核数，18 核=72MB 栈空间浪费），4 MB stack
             let rt = build_runtime()?;
@@ -764,6 +797,7 @@ fn main() -> Result<()> {
                 // （§0 依赖方向，docs/top-level.md §7/§8）；cli 只提供协议面输入。
                 peri_acp::host::stdio::run_acp_stdio(StdioInput {
                     cwd,
+                    settings_stdin,
                     permission_mode: peri_acp_types::permission::SharedPermissionMode::new(
                         peri_acp_types::permission::PermissionMode::Bypass,
                     ),

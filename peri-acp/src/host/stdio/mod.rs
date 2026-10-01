@@ -16,6 +16,7 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use parking_lot::RwLock;
 use peri_acp_types::permission::SharedPermissionMode;
 use peri_acp_types::session_store::SessionStoreDeployment;
+use tokio::io::{AsyncRead, AsyncReadExt};
 
 use crate::provider::LlmProvider;
 use crate::transport::stdio::StdioTransport;
@@ -29,6 +30,29 @@ pub struct StdioInput {
     /// 会话存储的部署参数（定位 + 凭证来源 + 访问意图）。装配时一次性打开；
     /// ACP 层不解释 locator、不读凭证值、不选择后端。
     pub session_store: SessionStoreDeployment,
+    /// Trusted launcher sends a length-prefixed settings document before ACP begins.
+    pub settings_stdin: bool,
+}
+
+const MAX_BOOTSTRAP_SETTINGS_BYTES: usize = 1024 * 1024;
+
+async fn read_bootstrap_settings<R: AsyncRead + Unpin>(reader: &mut R) -> anyhow::Result<String> {
+    let mut length = [0_u8; 4];
+    reader.read_exact(&mut length).await?;
+    let size = u32::from_be_bytes(length) as usize;
+    anyhow::ensure!(
+        (1..=MAX_BOOTSTRAP_SETTINGS_BYTES).contains(&size),
+        "settings bootstrap size is invalid"
+    );
+    let mut bytes = vec![0_u8; size];
+    reader.read_exact(&mut bytes).await?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|_| anyhow::anyhow!("settings bootstrap must be valid JSON"))?;
+    anyhow::ensure!(
+        value.is_object(),
+        "settings bootstrap must be a JSON object"
+    );
+    Ok(serde_json::to_string(&value)?)
 }
 
 /// 启动 ACP stdio 宿主（批 3：统一宿主 `run_acp_server` 接管全部业务处理）。
@@ -38,7 +62,13 @@ pub struct StdioInput {
 /// ACP 层只持端口接口（3.0 批 2 波 2，§0 依赖方向）。
 pub async fn run_acp_stdio(input: StdioInput) -> anyhow::Result<()> {
     let _telemetry = peri_agent::telemetry::init_tracing("peri-acp");
-    let cfg = assemble_stdio_config(input).await?;
+    let mut stdin = tokio::io::stdin();
+    let injected_settings = if input.settings_stdin {
+        Some(read_bootstrap_settings(&mut stdin).await?)
+    } else {
+        None
+    };
+    let cfg = assemble_stdio_config(input, injected_settings.as_deref()).await?;
     let cancel_task_spawner = cfg.host_task_spawner.clone();
 
     // 共享 session 集合：legacy `type:cancel` 全 session 兜底中断回调与宿主
@@ -46,26 +76,27 @@ pub async fn run_acp_stdio(input: StdioInput) -> anyhow::Result<()> {
     // session map 必须由本装配点创建并经 `run_acp_server_with_sessions` 注入）。
     let sessions: super::SharedSessions = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
     let cancel_sessions = sessions.clone();
-    let transport = StdioTransport::new().with_cancel_hook(Some(Arc::new(move |_line| {
-        // 全 session 兜底中断（无 sessionId）：遍历全部 SessionState 对
-        // `cancel_token.cancel()`。与标准 `session/cancel`（按 sessionId +
-        // writer lease + continuation 武装，`host/notify.rs`）并存——type:cancel
-        // 无客户端身份、无续跑语义，仅作 IDE 强停兜底（批 3 §7 #10）。
-        let sessions = cancel_sessions.clone();
-        let _ = cancel_task_spawner.spawn(
-            super::task_scope::HostTaskOwnerKind::Host,
-            super::task_scope::HostTaskKind::LegacyCancelHook,
-            async move {
-                let sessions = sessions.lock().await;
-                for (sid, state) in sessions.iter() {
-                    if let Some(ref token) = state.cancel_token {
-                        token.cancel();
-                        tracing::info!(session_id = %sid, "Cancelled via type:cancel");
+    let transport = StdioTransport::from_reader_writer(stdin, tokio::io::stdout())
+        .with_cancel_hook(Some(Arc::new(move |_line| {
+            // 全 session 兜底中断（无 sessionId）：遍历全部 SessionState 对
+            // `cancel_token.cancel()`。与标准 `session/cancel`（按 sessionId +
+            // writer lease + continuation 武装，`host/notify.rs`）并存——type:cancel
+            // 无客户端身份、无续跑语义，仅作 IDE 强停兜底（批 3 §7 #10）。
+            let sessions = cancel_sessions.clone();
+            let _ = cancel_task_spawner.spawn(
+                super::task_scope::HostTaskOwnerKind::Host,
+                super::task_scope::HostTaskKind::LegacyCancelHook,
+                async move {
+                    let sessions = sessions.lock().await;
+                    for (sid, state) in sessions.iter() {
+                        if let Some(ref token) = state.cancel_token {
+                            token.cancel();
+                            tracing::info!(session_id = %sid, "Cancelled via type:cancel");
+                        }
                     }
-                }
-            },
-        );
-    })));
+                },
+            );
+        })));
     super::run_acp_server_with_sessions(
         Arc::new(transport) as Arc<dyn AcpTransport>,
         cfg,
@@ -90,7 +121,10 @@ fn load_stdio_config_source(
         .unwrap_or_else(|_| crate::provider::ConfigSource::load_at_lenient(cwd, global_path))
 }
 
-async fn assemble_stdio_config(input: StdioInput) -> anyhow::Result<super::AcpServerConfig> {
+async fn assemble_stdio_config(
+    input: StdioInput,
+    injected_settings: Option<&str>,
+) -> anyhow::Result<super::AcpServerConfig> {
     // 解析工作目录
     let cwd = std::path::Path::new(&input.cwd)
         .canonicalize()
@@ -100,13 +134,24 @@ async fn assemble_stdio_config(input: StdioInput) -> anyhow::Result<super::AcpSe
 
     // 加载配置。Provider 与后续 ConfigSource 必须共享同一个 canonical cwd，
     // 避免从进程 cwd 启动 `peri acp --cwd <other-workspace>` 时配置来源错位。
-    let config_source = Arc::new(load_stdio_config_source(
-        std::path::Path::new(&cwd),
-        crate::provider::config_path(),
-    ));
+    let config_source = Arc::new(match injected_settings {
+        Some(settings) => crate::provider::ConfigSource::load_injected_at(
+            std::path::Path::new(&cwd),
+            crate::provider::config_path(),
+            settings.to_owned(),
+        )?,
+        None => {
+            load_stdio_config_source(std::path::Path::new(&cwd), crate::provider::config_path())
+        }
+    });
     let peri_config = config_source.loaded_merged();
-    let provider = LlmProvider::from_source(&config_source)
-        .ok_or_else(|| anyhow::anyhow!("No LLM provider configured. Configure ~/.peri/settings.json and, if selecting by environment, set both MODEL_PROVIDER and MODEL_TYPE"))?;
+    let provider = LlmProvider::from_source(&config_source).ok_or_else(|| {
+        if injected_settings.is_some() {
+            anyhow::anyhow!("No LLM provider configured in injected settings")
+        } else {
+            anyhow::anyhow!("No LLM provider configured. Configure ~/.peri/settings.json and, if selecting by environment, set both MODEL_PROVIDER and MODEL_TYPE")
+        }
+    })?;
 
     tracing::info!(
         provider = %provider.display_name(),
@@ -119,6 +164,7 @@ async fn assemble_stdio_config(input: StdioInput) -> anyhow::Result<super::AcpSe
         cwd: input_cwd,
         permission_mode,
         session_store,
+        settings_stdin: _,
     } = input;
     let _ = input_cwd;
 
@@ -183,3 +229,7 @@ async fn assemble_stdio_config(input: StdioInput) -> anyhow::Result<super::AcpSe
 #[cfg(test)]
 #[path = "run_server_integration_test.rs"]
 mod run_server_integration_tests;
+
+#[cfg(test)]
+#[path = "settings_bootstrap_test.rs"]
+mod settings_bootstrap_tests;

@@ -61,15 +61,19 @@ async fn test_stdio_assembly_uses_input_cwd_workspace() {
     let _guard = StdioStartupGuard;
     crate::provider::set_global_config_path(Some(global_path));
 
-    let assembled = assemble_stdio_config(crate::host::stdio::StdioInput {
-        cwd: input_workspace.to_string_lossy().into_owned(),
-        permission_mode: peri_acp_types::permission::SharedPermissionMode::new(
-            peri_acp_types::permission::PermissionMode::Bypass,
-        ),
-        session_store: peri_acp_types::session_store::SessionStoreDeployment::local_path(
-            tmp.path().join("threads.db"),
-        ),
-    })
+    let assembled = assemble_stdio_config(
+        crate::host::stdio::StdioInput {
+            cwd: input_workspace.to_string_lossy().into_owned(),
+            settings_stdin: false,
+            permission_mode: peri_acp_types::permission::SharedPermissionMode::new(
+                peri_acp_types::permission::PermissionMode::Bypass,
+            ),
+            session_store: peri_acp_types::session_store::SessionStoreDeployment::local_path(
+                tmp.path().join("threads.db"),
+            ),
+        },
+        None,
+    )
     .await
     .unwrap();
 
