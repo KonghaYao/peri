@@ -926,6 +926,9 @@ panel-mcp-cache-protocol-hit = CACHE protocol hit
 panel-mcp-cache-saved = CACHE saved
 panel-mcp-cache-ready = CACHE ready
 panel-mcp-cache-disabled = CACHE off: authenticated
+panel-mcp-cache-disabled-config = CACHE off: configuration
+panel-mcp-cache-disabled-dynamic = CACHE off: dynamic connection
+panel-mcp-cache-pending = CACHE pending initialization
 panel-mcp-cache-live-fetch = Persistent cache: live fetch
 panel-mcp-cache-none = Persistent cache: —
 

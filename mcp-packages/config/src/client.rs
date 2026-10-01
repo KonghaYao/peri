@@ -226,6 +226,13 @@ impl ConfigurationClient {
         }
     }
 
+    pub fn read_environment(&self, name: &str) -> io::Result<Option<String>> {
+        match self.request(ConfigurationRequest::ReadEnvironment { name: name.into() })? {
+            ConfigurationValue::Environment(value) => Ok(value),
+            _ => Err(invalid_response()),
+        }
+    }
+
     pub fn write_text_atomic(&self, path: &Path, content: &str) -> io::Result<()> {
         match self.request(ConfigurationRequest::WriteTextAtomic {
             path: path.into(),

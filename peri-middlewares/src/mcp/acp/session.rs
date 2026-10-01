@@ -325,6 +325,7 @@ async fn connect_server(
 
     let mut service = pool.retain_service(service);
     let peer = service.peer().clone();
+    pool.configure_peer_cache(&peer).await;
     let tools = match peer.list_all_tools().await {
         Ok(tools) => tools,
         Err(error) => {

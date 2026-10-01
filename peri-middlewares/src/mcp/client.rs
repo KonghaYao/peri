@@ -2,6 +2,9 @@
 //! 缓存、OAuth、生命周期及状态投影分别由私有子模块实现。
 
 mod cache;
+#[cfg(test)]
+#[path = "client/cache_policy_test.rs"]
+mod cache_policy_tests;
 mod lifecycle;
 mod oauth;
 pub(crate) mod output_store;
@@ -24,7 +27,7 @@ use super::{
         context::{BuiltinContextError, BuiltinInstanceContext},
         runtime::{BuiltinSpawnError, BuiltinTransport, TickGuard, BUILTIN_TICK_INTERVAL},
     },
-    config::McpServerConfig,
+    config::{McpCachePolicy, McpServerConfig},
     oauth_flow::OAuthFlowEvent,
 };
 use lifecycle::ServiceShutdownState;
@@ -68,6 +71,7 @@ pub use types::{
 
 /// MCP 客户端连接池
 pub struct McpClientPool {
+    cache_policy: std::sync::OnceLock<McpCachePolicy>,
     credential_client: std::sync::OnceLock<super::auth_store::OAuthCredentialClient>,
     shared_services: parking_lot::Mutex<Vec<Arc<McpServiceOwner>>>,
     /// Includes failed handshakes until their actual process tree and stderr have drained.
@@ -183,6 +187,7 @@ impl McpClientPool {
         capability_profile: super::apps::McpCapabilityProfile,
     ) -> Self {
         Self {
+            cache_policy: std::sync::OnceLock::new(),
             credential_client: std::sync::OnceLock::new(),
             shared_services: parking_lot::Mutex::new(Vec::new()),
             processes: parking_lot::Mutex::new(Vec::new()),
@@ -238,9 +243,26 @@ impl McpClientPool {
 
     #[cfg(test)]
     pub fn new_empty() -> Self {
+        Self::new_empty_with_cache_policy(McpCachePolicy::Enabled)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_empty_with_cache_policy(policy: McpCachePolicy) -> Self {
         let mut pool = Self::new_pending();
+        pool.bind_cache_policy(policy).unwrap();
         pool.resource_cache = super::resource_cache::McpResourceCache::isolated_for_test();
         pool
+    }
+
+    pub(super) fn bind_cache_policy(&self, policy: McpCachePolicy) -> std::io::Result<()> {
+        let stored = self.cache_policy.get_or_init(|| policy);
+        if *stored != policy {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "MCP pool cannot change its cache policy",
+            ));
+        }
+        Ok(())
     }
 
     /// 一次性注入 builtin 实例上下文（IF-P3-04 / A33）：首次生效，失败**不覆盖**既有

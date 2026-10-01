@@ -202,6 +202,7 @@ fn test_system_mcp_typed_validation_includes_disabled() {
         );
         let config = McpConfigFile {
             mcp_servers: servers,
+            ..Default::default()
         };
 
         let error = validate_config(&config).expect_err("disabled 不能绕过校验");

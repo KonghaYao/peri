@@ -6,6 +6,10 @@ Builtin MCP 的工具、server handler 与 LSP 客户端/pool 由独立 crate �
 
 ## Package 路由
 
+配置数据面还提供 `ConfigurationClient::read_environment`（`ReadEnvironment`）：
+只按名称读取 provider 环境，缺省与非法名称/编码区分，不回落计算宿主。
+该数据面统一输入 I/O；全系统配置的解析、合并与版本快照权威尚未集中。
+
 | 能力 | crate 与入口 | 主要实现 | 说明 |
 | --- | --- | --- | --- |
 | 配置数据面 | `peri-mcp-config`：`mcp-packages/config/src/{lib,client,server}.rs`；契约 `peri-acp-types/src/configuration.rs` | `ConfigurationClient`、`ConfigurationMcpServer`、`config/execute` | 独立于 session 工具池的启动控制能力；同步消费通过专用 runtime 线程走真实 MCP，读写/atomic 保存/路径权威/来源身份探测由 provider 单一维护。默认 duplex，部署可在首次访问前 `install_client` 注入 TCP 客户端；仅供受信部署通道，不暴露模型工具，不提供本机 fallback。 |

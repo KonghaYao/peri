@@ -3,6 +3,10 @@ use std::{collections::HashMap, path::Path};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+mod cache_policy;
+
+pub use cache_policy::{McpCachePolicy, MCP_CACHE_ENV};
+
 // 3.0 批 2 波 1：协议类型归契约层（定义见 `peri_acp_types::plugin`）。
 // `ConfigSource` / `McpServerConfig` / `OAuthConfig` 自本文件迁出；
 // 本模块保留 re-export 保兼容。
@@ -13,11 +17,21 @@ pub use peri_acp_types::plugin::{ConfigSource, McpServerConfig, OAuthConfig};
 pub struct McpConfigFile {
     #[serde(default)]
     pub mcp_servers: HashMap<String, McpServerConfig>,
+    #[serde(
+        default,
+        deserialize_with = "cache_policy::deserialize_cache_setting",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub mcp_cache: Option<bool>,
 }
 
 /// MCP 配置加载错误
 #[derive(Debug, Error)]
 pub enum McpConfigError {
+    #[error("PERI_MCP_CACHE must be true/false, 1/0, or on/off")]
+    InvalidCacheEnvironment,
+    #[error("MCP cache environment configuration unavailable: {source}")]
+    CacheEnvironmentRead { source: std::io::Error },
     #[error("MCP 配置文件解析失败: {path}: {source}")]
     ParseError {
         path: String,
@@ -120,6 +134,7 @@ fn validate_servers_value(value: &serde_json::Value, path: &Path) -> Result<(), 
     let servers = parse_servers_value(value, path)?;
     validate_config(&McpConfigFile {
         mcp_servers: servers,
+        ..Default::default()
     })
 }
 
@@ -173,9 +188,29 @@ pub(crate) fn load_global_config(
         Some(map) => Some(parse_servers_value(map, settings_json_path)?),
         None => None,
     };
+    let nested_cache = parse_cache_setting(v.get("config"), settings_json_path)?;
+    let top_level_cache = parse_cache_setting(Some(&v), settings_json_path)?;
     Ok(McpConfigFile {
         mcp_servers: nested_servers.or(top_level_servers).unwrap_or_default(),
+        mcp_cache: nested_cache.or(top_level_cache),
     })
+}
+
+fn parse_cache_setting(
+    container: Option<&serde_json::Value>,
+    path: &Path,
+) -> Result<Option<bool>, McpConfigError> {
+    container
+        .and_then(|value| value.get("mcpCache"))
+        .map(|value| {
+            serde_json::from_value::<bool>(value.clone()).map_err(|source| {
+                McpConfigError::ParseError {
+                    path: path.display().to_string(),
+                    source,
+                }
+            })
+        })
+        .transpose()
 }
 
 /// 基于 command+args+env 计算服务器配置的内容 hash，用于去重
@@ -338,14 +373,21 @@ pub(crate) fn load_merged_config_full(
 ) -> Result<(McpConfigFile, HashMap<String, String>), McpConfigError> {
     let global_path = peri_mcp_config::global_config_path();
     let policy = super::builtin::builtin_injection_policy_from_env();
-    load_merged_config_full_with_paths(cwd, claude_home, &global_path, &policy)
+    let environment_cache = cache_policy::load_environment()?;
+    let (mut config, sources) =
+        load_merged_config_full_with_paths(cwd, claude_home, &global_path, &policy)?;
+    config.mcp_cache = cache_policy::merge_settings(&[config.mcp_cache, environment_cache]);
+    Ok((config, sources))
 }
 
 /// Bare 保留本地文件/终端能力，不读取用户、插件或项目 MCP 配置。
 /// 显式运维关闭仍生效；工具声明和校验复用普通配置路径的同一实现。
 pub(crate) fn load_bare_config() -> Result<McpConfigFile, McpConfigError> {
     let policy = super::builtin::builtin_injection_policy_from_env();
-    let mut config = McpConfigFile::default();
+    let mut config = McpConfigFile {
+        mcp_cache: cache_policy::load_environment()?,
+        ..Default::default()
+    };
     super::builtin::apply_builtin_overlay(&mut config.mcp_servers, &policy)
         .map_err(builtin_overlay_error)?;
     config.mcp_servers.retain(|name, _| name == "workspace");
@@ -456,6 +498,7 @@ pub(crate) fn load_merged_config_full_with_paths(
 
     // 5. 三层合并：global → plugin → project
     let mut merged = global;
+    merged.mcp_cache = cache_policy::merge_settings(&[merged.mcp_cache, project.mcp_cache]);
     for (name, cfg) in &plugin_servers {
         merged.mcp_servers.insert(name.clone(), cfg.clone());
     }
@@ -611,6 +654,8 @@ pub(crate) fn remove_server_from_config_with_paths(
 /// 校验全局 settings.json 的 Value 中所有存在的 `mcpServers` map
 /// （nested 与 top-level 都查：写入口可能操作备用 map）。
 fn validate_value_servers(value: &serde_json::Value, path: &Path) -> Result<(), McpConfigError> {
+    parse_cache_setting(value.get("config"), path)?;
+    parse_cache_setting(Some(value), path)?;
     let nested = value.get("config").and_then(|c| c.get("mcpServers"));
     let top_level = value.get("mcpServers");
     for map in [nested, top_level].into_iter().flatten() {
@@ -652,6 +697,7 @@ pub(crate) fn set_server_disabled_with_paths(
                 source: e,
             })?;
 
+        parse_cache_setting(Some(&value), &project_path)?;
         if let Some(map) = value.get("mcpServers") {
             validate_servers_value(map, &project_path)?;
         }
@@ -765,3 +811,7 @@ mod io_tests;
 #[cfg(test)]
 #[path = "config/policy_test.rs"]
 mod policy_tests;
+
+#[cfg(test)]
+#[path = "config/cache_policy_test.rs"]
+mod cache_policy_tests;

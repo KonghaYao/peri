@@ -11,6 +11,12 @@
 
 ## 速查表
 
+Session ID 恢复与生命周期回归：`src/host/requests_workspace_cases_test.rs` 验证
+忽略调用方 cwd、跨实例恢复、缺目录只读历史与 SessionEnd 排空；
+`src/host/requests_workspace_assembly_test.rs` 验证装配失败时保留本实例运行句柄，
+排空成功后关闭写入准入。统一运行 `cargo test -p peri-acp --lib -- host::requests::tests::workspace_cases`。
+重命名持久化及通知回归见 `src/host/requests_lifecycle_cases_test.rs`。
+
 | 我想做什么 | 主文件 | 入口/关键函数 | 关键逻辑 |
 | --- | --- | --- | --- |
 | 改 Session ID 恢复与会话执行环境 | `src/host/workspace.rs` + `src/host/requests/{session_restore,legacy_session,session_lifecycle}.rs` + `src/host/workspace_resources.rs` + `src/host/assemble.rs` | `prepare_existing`；`check_expected` / `acquire_for_load`；`ExecutionAdmission` / `identity_response` / `require_owner`；`SessionEnvironment::{assemble,assemble_prepared,task_manager}` | load/resume 按 ID 使用保存 cwd/binding，不要求请求 cwd 匹配、不取 session 文件锁或执行 dirty reset；env 不匹配或保存 cwd 不可用以只读准入；先判 env/执行资格，仅可执行才 legacy 冻结/接纳，避免读异机路径。实际 prompt/工具执行仍由 host 检查执行句柄，只有可执行路径装配 per-session MCP/LSP/TaskManager；Incomplete 的关闭收尾不变 |

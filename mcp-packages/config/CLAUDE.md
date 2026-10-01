@@ -15,7 +15,7 @@ The default adapter uses an in-process duplex transport, not direct filesystem c
 ## Boundaries
 
 - This is a bootstrap control capability, not a model tool or an entry in the session builtin registry. Do not tie availability to WorkspaceMiddleware or `PERI_MCP_BUILTIN`.
-- The provider owns reads, existence and canonical identity probes, atomic replacement, home/cwd lookup and global-path override. Requests may address deployment-supplied paths; this is not a sandbox or an untrusted public file service.
+- The provider owns reads, named environment lookups, existence and canonical identity probes, atomic replacement, home/cwd lookup and global-path override. Environment values come from the configuration provider, never from a fallback on the compute host. Requests may address deployment-supplied paths; this is not a sandbox or an untrusted public file service.
 - Consumers retain their typed configuration parsing, validation, source precedence and domain projections. Plugin installation/marketplace lifecycle and P2 workspace addressing remain separate work.
 - Missing files and other I/O failures are distinct. Unknown identity must not turn into a distinct configuration layer or a duplicate hook source. No failed write may report success.
 - Synchronous startup and current-thread Tokio callers must not require their own executor to progress the MCP exchange. Requests and initialization are bounded; a timed-out write may already have entered blocking OS I/O.

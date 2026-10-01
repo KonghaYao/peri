@@ -7,6 +7,11 @@
 
 ## 架构速览
 
+MCP 缓存策略入口：`src/mcp/config/cache_policy.rs` 解析 `PERI_MCP_CACHE` 并提供
+`McpCachePolicy`，`config.rs` 合并文件层与环境关闭位，`initialize_config` 安装不可变
+pool 策略，`client/cache.rs` 统一准入与 SDK peer 缓存配置；初始连接、重连、OAuth、
+动态和 ACP 桥接路径均消费该策略。契约见 [MCP 缓存设计](../design/mcp-cache.md)。
+
 - 数据流：`SessionContext/config → Agent 层 session 工厂（build_middleware_chain 唯一触发点 + production_blueprint 链序蓝本）→ assembly.rs 按槽位调用 assembly/ 私有构造模块 → MiddlewareChain → prompt_contribution + collect_tools → Agent stage`
 - 链序事实源：`peri-agent/src/session/factory.rs:91` 的 `production_blueprint()`（`ChainSlot` 枚举 :27，槽位顺序 = 行为契约）；链装配实现 `peri-middlewares/src/assembly.rs` 的 `ProductionChainAssembler::assemble`（按蓝本逐槽位构造，disabled 条件在根判断，复杂构造与 Hook 组展开委托私有模块）
 - 稳定不变量：链顺序只可在蓝本与装配实现中判断/修改（ARC-MIDDLEWARE-001）；`BaseTool::is_direct()` 是工具可见性事实源（ARC-TOOLS-001）；frozen 数据会话内不可漂移（ARC-FROZEN-001）；装配输入经 `peri-acp-types` 端口（McpPoolPort / ToolSearchPort / WorkflowMiddlewarePort / CronSchedulerPort 等）注入，装配时 downcast 还原具体实例；builtin 实例（`web` / `artifact` / `cron` / `lsp` / `workspace`）不是 middleware 也不是链槽位，而是 Mcp 槽位客户端侧的五个同进程 server，关闭走 `BUILTIN_INSTANCE_POLICY_KEYS`（ARC-CAPABILITY-CLOSURE-001）

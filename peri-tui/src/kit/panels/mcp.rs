@@ -405,6 +405,9 @@ fn cache_status_label_key(status: Option<&str>) -> Option<&'static str> {
         Some("stored_after_fetch") => Some("panel-mcp-cache-saved"),
         Some("cache_ready") => Some("panel-mcp-cache-ready"),
         Some("cache_disabled") => Some("panel-mcp-cache-disabled"),
+        Some("cache_disabled_by_config") => Some("panel-mcp-cache-disabled-config"),
+        Some("cache_disabled_dynamic") => Some("panel-mcp-cache-disabled-dynamic"),
+        Some("cache_pending") => Some("panel-mcp-cache-pending"),
         Some("live_fetch") => Some("panel-mcp-cache-live-fetch"),
         _ => None,
     }
@@ -555,6 +558,18 @@ mod tests {
 
     #[test]
     fn cache_status_labels_are_explicit() {
+        assert_eq!(
+            cache_status_label_key(Some("cache_disabled_by_config")),
+            Some("panel-mcp-cache-disabled-config")
+        );
+        assert_eq!(
+            cache_status_label_key(Some("cache_disabled_dynamic")),
+            Some("panel-mcp-cache-disabled-dynamic")
+        );
+        assert_eq!(
+            cache_status_label_key(Some("cache_pending")),
+            Some("panel-mcp-cache-pending")
+        );
         assert_eq!(
             cache_status_label_key(Some("cache_ready")),
             Some("panel-mcp-cache-ready")

@@ -148,6 +148,15 @@ async fn test_rename_persists_title_and_pushes_session_info_update() {
 
     // 真实创建线程（id 即 session id），与 session/new 后的持久层状态一致
     let sid = create_bound_fixture(&cfg, cwd, None).await;
+    handle_request(
+        "session/load",
+        &json!({ "sessionId": sid }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
     let new_title = "重构 ACP 协议".to_string();
 
     let resp = handle_request(
@@ -172,7 +181,10 @@ async fn test_rename_persists_title_and_pushes_session_info_update() {
     let (method, payload) = mock
         .notifications()
         .iter()
-        .find(|(m, _)| m == "session/update")
+        .find(|(method, payload)| {
+            method == "session/update"
+                && payload["update"]["sessionUpdate"] == "session_info_update"
+        })
         .cloned()
         .expect("rename 应推送 session/update 通知");
     assert_eq!(method, "session/update");

@@ -2,7 +2,7 @@
 
 use super::service::peer_cache_version;
 use super::{McpClientPool, McpConnectionKey};
-use crate::mcp::config::McpServerConfig;
+use crate::mcp::config::{McpCachePolicy, McpServerConfig};
 use rmcp::{
     model::{
         CacheScope, PaginatedRequestParams, ReadResourceRequestParams, ReadResourceResult,
@@ -18,7 +18,21 @@ pub(crate) fn cache_scope_allows_persistence(scope: Option<CacheScope>) -> bool 
     }
 }
 
+enum CacheDenial {
+    Pending,
+    Configuration,
+    DynamicConnection,
+    Credentials,
+}
+
 impl McpClientPool {
+    pub(crate) async fn configure_peer_cache(&self, peer: &Peer<RoleClient>) {
+        if self.cache_policy.get() != Some(&McpCachePolicy::Enabled) {
+            peer.set_response_cache_config(rmcp::service::ClientCacheConfig::disabled())
+                .await;
+        }
+    }
+
     fn config_allows_persistent_cache(config: &McpServerConfig) -> bool {
         // `private` 只可在匿名上下文复用。任意静态 header、HTTP query 与
         // stdio env 都可能携带 Cookie、API key 或服务自定义凭据，保守禁用。
@@ -39,15 +53,26 @@ impl McpClientPool {
     }
 
     pub(crate) fn persistent_cache_allowed_for(&self, connection: &McpConnectionKey) -> bool {
+        self.cache_denial(connection).is_none()
+    }
+
+    fn cache_denial(&self, connection: &McpConnectionKey) -> Option<CacheDenial> {
+        match self.cache_policy.get() {
+            None => return Some(CacheDenial::Pending),
+            Some(McpCachePolicy::Disabled) => return Some(CacheDenial::Configuration),
+            Some(McpCachePolicy::Enabled) => {}
+        }
         if connection.is_dynamic() {
             // Dynamic MCP 首版 fail-closed：在 scoped cache ticket/current-instance
             // fencing 完成前，不读取或写入持久化 resource cache。
-            return false;
+            return Some(CacheDenial::DynamicConnection);
         }
-        self.configs
+        let allowed = self
+            .configs
             .read()
             .get(connection.server_name())
-            .is_none_or(Self::config_allows_persistent_cache)
+            .is_none_or(Self::config_allows_persistent_cache);
+        (!allowed).then_some(CacheDenial::Credentials)
     }
 
     pub(crate) fn install_peer_cache_version(
@@ -333,8 +358,16 @@ impl McpClientPool {
     }
 
     pub(super) fn cache_status_for(&self, server_name: &str) -> Option<String> {
-        if !self.persistent_cache_allowed(server_name) {
-            return Some("cache_disabled".to_string());
+        if let Some(reason) = self.cache_denial(&McpConnectionKey::static_server(server_name)) {
+            return Some(
+                match reason {
+                    CacheDenial::Pending => "cache_pending",
+                    CacheDenial::Configuration => "cache_disabled_by_config",
+                    CacheDenial::DynamicConnection => "cache_disabled_dynamic",
+                    CacheDenial::Credentials => "cache_disabled",
+                }
+                .to_string(),
+            );
         }
         let origin = self.cache_origin(server_name);
         if let Some(status) = self.resource_cache.recent_status(&origin) {
@@ -350,11 +383,7 @@ impl McpClientPool {
                 }
             });
         }
-        Some(if self.persistent_cache_allowed(server_name) {
-            "cache_ready".to_string()
-        } else {
-            "cache_disabled".to_string()
-        })
+        Some("cache_ready".to_string())
     }
 
     async fn persist_cacheable_response<T: serde::Serialize>(
