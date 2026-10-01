@@ -6,8 +6,7 @@
 //! 边界（sub-plan F §6.2）：
 //! - `cwd` 来自实例构造点，只用于相对路径解析，**不是**安全沙箱；`ToolContext` 与
 //!   工具自身的 `cwd` 保持一致。
-//! - 凭据（`PERI_ARTIFACTS_URL` / `PERI_ARTIFACTS_TOKEN`）在 `ArtifactTool::new`
-//!   内读取 ⇒ 读取点 = 实例构造点；url / token 不出现在 `ServerInfo`、
+//! - 凭据由实例环境传入，在 Artifact MCP 内解释；url / token 不出现在 `ServerInfo`、
 //!   `Tool::description` 或任何错误文本里（本模块从不打印它们）。
 //! - 不覆写 `discover`（§10 R2）。
 
@@ -37,10 +36,15 @@ pub struct ArtifactMcpServer {
 }
 
 impl ArtifactMcpServer {
-    /// 生产构造：`ArtifactTool::new(cwd)`（客户端在此按 env 构造，凭据绑定到该实例）。
+    /// 默认实例构造；未传入专属环境时使用公共服务。
     pub fn new(cwd: &Path) -> Self {
+        Self::with_instance_env(cwd, &std::collections::HashMap::new())
+    }
+
+    /// MCP 实例环境在构造时冻结，连接重建时由调用方再次提供。
+    pub fn with_instance_env(cwd: &Path, env: &std::collections::HashMap<String, String>) -> Self {
         let cwd = cwd.to_string_lossy().into_owned();
-        let tool = ArtifactTool::new(cwd.clone());
+        let tool = ArtifactTool::with_instance_env(cwd.clone(), env);
         Self {
             tools: vec![Arc::new(tool)],
             cwd,

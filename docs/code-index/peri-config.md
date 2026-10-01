@@ -24,7 +24,7 @@ fallback。纯 resolver 只使用输入值；system 管发布和更新。模块�
 | 固定加载/保存布局 | `settings.rs`：`ConfigSource::{load_at,load_standalone,load_lenient,snapshot,reload_merged}`、`save(expected_revision, &PeriConfig) -> Result<Arc<ConfigurationSnapshot>>` | 编辑开始捕获 revision 随草稿提交；保存返回 accepted snapshot。正常持有 system、同文件不拆层；lenient 临时可读/不可写 |
 | 单文件 helpers | `settings.rs`：`load_from`、`save_to` | `save_to` 显式路径也用字节 CAS 保留其他顶层领域；不发布 scoped snapshot，不等同于 system revision 更新。lenient source 无 authority 时临时可读、不可写 |
 | 资源配置投影 | `resources.rs`：`ResourceConfiguration`、`resolve`；`system.rs::resources` | global `config.disableBundledSkills` 优先于旧顶层键，默认 false；workspace 资源 consumer 使用 snapshot 开关 |
-| Provider 解析 | `provider.rs`：`resolve`、`resolve_for_alias`、`EnvironmentProvider::resolve`、`ResolvedProvider`、`ENVIRONMENT_KEYS` | settings profile 优先，环境 fallback；消费者负责 Model adapter 构造 |
+| Provider 解析 | `provider.rs`：`resolve`、`resolve_for_alias`、`ResolvedProvider`、`ENVIRONMENT_KEYS` | `MODEL_PROVIDER` + `MODEL_TYPE` 选择配置的 provider ID 和档位；缺省用 active profile；消费者负责 Model adapter 构造 |
 | MCP 基础配置 | `mcp.rs`：`parse_global`、`parse_project`、`resolve_from_files`、`validate_config`、`server_config_hash` | global/plugin/project 合并、插件手动去重、typed 准入与 cache 关闭优先 |
 | Builtin 环境策略 | `mcp.rs`：`builtin_enabled` | `PERI_MCP_BUILTIN` 解释规则归 core；旧 builtin adapter 只采集 env，不复制规则 |
 | 快照中的插件/普通/bare 投影 | `system.rs`：`mcp_with_plugins`、`bare_mcp`、`cache_policy`、`builtin_mcp_enabled` | 从冻结原始输入派生；插件发现和执行展开留在 middleware |

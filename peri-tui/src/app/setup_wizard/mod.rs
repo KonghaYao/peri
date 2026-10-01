@@ -406,7 +406,6 @@ pub fn needs_setup(config: &crate::config::AppConfig) -> bool {
         schema: None,
     };
     crate::app::agent::LlmProvider::from_config(&cfg).is_none()
-        && crate::app::agent::LlmProvider::from_env().is_none()
 }
 
 /// 从当前共享配置打开 `/setup` 时构造可编辑草稿。

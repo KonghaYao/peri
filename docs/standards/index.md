@@ -19,6 +19,7 @@
 | `CLAUDE.md` 维护 | [documentation.md](documentation.md) |
 | Git 分支创建、upstream、历史整理与 push 安全 | [git.md](git.md) |
 | 测试（根 workspace、submodule、独立/side project 的范围与命令） | [testing.md](testing.md) |
+| 环境变量控制项、默认值与维护 | [environment-variables.md](environment-variables.md)；TUI 专属项见 [tui-environment-variables.md](tui-environment-variables.md) |
 | 权威设计与参考资料的生命周期 | [documentation.md](documentation.md) |
 
 ## 规则

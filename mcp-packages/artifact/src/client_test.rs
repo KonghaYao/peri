@@ -2,6 +2,25 @@
 
 use super::*;
 
+#[test]
+fn instance_environment_selects_artifact_endpoint_and_token() {
+    let env = std::collections::HashMap::from([
+        (
+            "PERI_ARTIFACTS_URL".to_owned(),
+            "https://instance.example".to_owned(),
+        ),
+        (
+            "PERI_ARTIFACTS_TOKEN".to_owned(),
+            "instance-token".to_owned(),
+        ),
+    ]);
+    let client = ArtifactClient::from_instance_env(&env);
+    assert_eq!(client.upload_url(), "https://instance.example/upload");
+    assert_eq!(client.token, "instance-token");
+    let default_client = ArtifactClient::from_instance_env(&Default::default());
+    assert_eq!(default_client.token, DEFAULT_TOKEN);
+}
+
 #[tokio::test]
 async fn test_build_url_default() {
     let client = ArtifactClient::default();

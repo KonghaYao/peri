@@ -46,21 +46,13 @@ pub enum LlmProvider {
 }
 
 impl LlmProvider {
-    pub fn from_env() -> Option<Self> {
-        use peri_config::provider::EnvironmentProvider;
-
+    pub fn from_source(source: &peri_config::settings::ConfigSource) -> Option<Self> {
+        if let Some(snapshot) = source.snapshot() {
+            return snapshot.provider().cloned().map(Self::from_resolved);
+        }
         let environment =
             peri_config::source::read_environment(peri_config::provider::ENVIRONMENT_KEYS).ok()?;
-        EnvironmentProvider::resolve(&environment)
-            .map(ResolvedProvider::from)
-            .map(Self::from_resolved)
-    }
-
-    pub fn from_source(source: &peri_config::settings::ConfigSource) -> Option<Self> {
-        source
-            .snapshot()
-            .and_then(|snapshot| snapshot.provider().cloned())
-            .or_else(|| source.environment_provider().map(ResolvedProvider::from))
+        peri_config::provider::resolve(&source.loaded_merged(), &environment)
             .map(Self::from_resolved)
     }
 
@@ -101,9 +93,11 @@ impl LlmProvider {
         }
     }
 
-    /// 从 PeriConfig 按 active_alias 对应的 Profile 构造 LlmProvider
+    /// 从当前配置和本地配置环境构造 Provider；初始 scoped 配置优先用 `from_source`。
     pub fn from_config(cfg: &config::PeriConfig) -> Option<Self> {
-        peri_config::provider::resolve(cfg, &Default::default()).map(Self::from_resolved)
+        let environment =
+            peri_config::source::read_environment(peri_config::provider::ENVIRONMENT_KEYS).ok()?;
+        peri_config::provider::resolve(cfg, &environment).map(Self::from_resolved)
     }
 
     /// 从 PeriConfig 按指定档位（"fable"/"opus"/"sonnet"/"haiku"）构造 LlmProvider。

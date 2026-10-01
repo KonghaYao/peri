@@ -268,7 +268,7 @@ async fn test_write_sandbox_error_displays_relative_dirs() {
 async fn test_write_sandbox_tmp_failure_saves_draft() {
     let dir = tempfile::tempdir().unwrap();
     let cwd = dir.path().to_str().unwrap().to_string();
-    let tool = WriteSandboxTool::with_draft(cwd, vec!["sandbox".into()], true).unwrap();
+    let tool = WriteSandboxTool::new(cwd, vec!["sandbox".into()]).unwrap();
     // 沙箱目录只读 → tmp 写入失败
     make_readonly(&dir.path().join("sandbox"));
     let result = tool

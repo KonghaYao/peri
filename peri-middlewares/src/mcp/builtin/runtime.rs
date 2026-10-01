@@ -405,6 +405,7 @@ where
 pub(crate) fn spawn_builtin_transport_with_context(
     instance: &str,
     ctx: &BuiltinInstanceContext,
+    env: &std::collections::HashMap<String, String>,
 ) -> Result<BuiltinTransport, BuiltinSpawnError> {
     crate::mcp::transport::require_known_builtin_instance(instance).map_err(|_| {
         BuiltinSpawnError::UnknownInstance {
@@ -416,11 +417,12 @@ pub(crate) fn spawn_builtin_transport_with_context(
             instance: instance.to_string(),
         });
     }
-    let handler = super::dispatch::builtin_server_handler(instance, ctx).ok_or_else(|| {
-        BuiltinSpawnError::HandlerNotWired {
-            instance: instance.to_string(),
-        }
-    })?;
+    let handler =
+        super::dispatch::builtin_server_handler_with_env(instance, ctx, env).ok_or_else(|| {
+            BuiltinSpawnError::HandlerNotWired {
+                instance: instance.to_string(),
+            }
+        })?;
     Ok(spawn_builtin_transport_with_handler(instance, handler))
 }
 

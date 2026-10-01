@@ -97,14 +97,6 @@ impl DraftStore {
     }
 }
 
-/// 草稿开关:PERI_WRITE_DRAFT=0 或 false(不区分大小写)关闭,其余默认开启。构造时读取一次。
-pub(crate) fn draft_enabled() -> bool {
-    match std::env::var("PERI_WRITE_DRAFT") {
-        Ok(v) => !(v == "0" || v.eq_ignore_ascii_case("false")),
-        Err(_) => true,
-    }
-}
-
 /// 英文草稿提示后缀(Write 工具)。行数 = lines().count(),字节数 = len()(UTF-8 字节)。
 /// 前置空格拼接:`format!("Error ...: {e}{hint}")`;禁用时 hint 为空串。
 /// 文案已核对:不含 PathSuggester ERROR_KEYWORDS("not found"/"no such file"/"does not exist"/

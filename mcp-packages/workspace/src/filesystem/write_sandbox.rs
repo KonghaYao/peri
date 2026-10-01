@@ -28,7 +28,7 @@ pub struct WriteSandboxTool {
     allowed_dirs: Vec<String>,
     /// 动态生成的 description
     description: String,
-    /// 失败草稿存储(进程级内存);None = PERI_WRITE_DRAFT=0 关闭
+    /// 失败草稿存储（进程级内存）。
     drafts: Option<Arc<Mutex<DraftStore>>>,
 }
 
@@ -41,7 +41,7 @@ impl WriteSandboxTool {
         cwd: impl Into<String>,
         allowed_dirs: Vec<String>,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        Self::with_draft(cwd, allowed_dirs, super::draft::draft_enabled())
+        Self::with_draft(cwd, allowed_dirs, true)
     }
 
     /// 测试注入构造;全部现有构造逻辑(沙箱目录自动创建/canonicalize/description)原样保留。

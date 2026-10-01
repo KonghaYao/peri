@@ -372,9 +372,18 @@ impl McpClientPool {
     ///    为**本代** transport spawn 一个 tick（每 `BUILTIN_TICK_INTERVAL` 一次
     ///    `scheduler.lock().tick()`，语义与既有宿主 `HostTaskKind::CronTick` 一致）。
     ///    这是全仓唯一的 tick spawn 点：handler 不持有 tick，tick 随本代监督者一起关闭。
+    #[cfg(test)]
     pub(crate) fn spawn_builtin_transport(
         &self,
         instance: &str,
+    ) -> Result<BuiltinTransport, BuiltinSpawnError> {
+        self.spawn_builtin_transport_with_environment(instance, &std::collections::HashMap::new())
+    }
+
+    pub(crate) fn spawn_builtin_transport_with_environment(
+        &self,
+        instance: &str,
+        env: &std::collections::HashMap<String, String>,
     ) -> Result<BuiltinTransport, BuiltinSpawnError> {
         super::transport::require_known_builtin_instance(instance).map_err(|_| {
             BuiltinSpawnError::UnknownInstance {
@@ -387,7 +396,7 @@ impl McpClientPool {
                     instance: instance.to_string(),
                 })?;
         let mut transport =
-            super::builtin::runtime::spawn_builtin_transport_with_context(instance, &context)?;
+            super::builtin::runtime::spawn_builtin_transport_with_context(instance, &context, env)?;
         // 注册表名判定（不写第二张实例名字表）：只有 `cron` 有 tick 驱动语义。
         if find(instance).is_some_and(|registered| registered.name == "cron") {
             if let Some(cron) = context.cron.as_ref().filter(|cron| cron.tick_enabled) {

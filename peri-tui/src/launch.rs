@@ -165,9 +165,12 @@ pub async fn attach_acp(
     let acp_client = {
         let provider = {
             let cfg_guard = app.services.peri_config.read();
-            LlmProvider::from_config(&cfg_guard)
-        }
-        .or_else(|| LlmProvider::from_source(&app.config_source));
+            if *cfg_guard == app.config_source.loaded_merged() {
+                LlmProvider::from_source(&app.config_source)
+            } else {
+                LlmProvider::from_config(&cfg_guard)
+            }
+        };
 
         if let Some(provider) = provider {
             let host_config = peri_acp::host::assemble::assemble_server_config(

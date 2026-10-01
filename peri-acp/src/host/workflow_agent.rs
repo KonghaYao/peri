@@ -20,7 +20,6 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 use peri_acp_types::{
     agents::AgentOverrides,
-    compact::CompactConfig,
     mcp_skills::McpSkillRegistry,
     ports::{AgentCatalogPort, WorkflowMiddlewarePort},
     workflow::{AgentExecutor, ProgressEvent, WorkflowTaskResult},
@@ -196,8 +195,7 @@ pub(crate) fn create_session_workflow_middleware(
     agent_catalog: Arc<dyn AgentCatalogPort>,
     mcp_skill_registry: Option<Arc<McpSkillRegistry>>,
 ) -> Option<Arc<dyn WorkflowMiddlewarePort>> {
-    let mut compact_config = CompactConfig::default();
-    compact_config.apply_env_overrides();
+    let compact_config = super::compact_config::load_compact_config(&peri_config.read());
     let (progress_tx, progress_rx) = tokio::sync::mpsc::unbounded_channel::<ProgressEvent>();
     let wf_executor = create_executor(WorkflowAgentContext {
         cwd: cwd.to_string(),

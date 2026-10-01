@@ -97,7 +97,10 @@ impl McpClientPool {
                 // 与 initialize 同一条构造入口：实例解析、上下文读取与 tick 挂载都在 pool
                 // 方法内收口；本分支不再自行读 `execution_cwd`（cwd 由注入的上下文提供，
                 // 与 pool 的 `execution_cwd` 同源）。
-                let transport = match self.spawn_builtin_transport(instance) {
+                let transport = match self.spawn_builtin_transport_with_environment(
+                    instance,
+                    server_config.env.as_ref().unwrap_or(&Default::default()),
+                ) {
                     Ok(transport) => transport,
                     Err(error) => {
                         let reason = format!("builtin 启动失败: {error}");

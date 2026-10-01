@@ -213,15 +213,16 @@ impl ServerHandler for BuiltinServerHandler {
 /// 「输入缺失」与「未接线」（`Option` 承载不了两个原因，拆开写会与 seam 的顺序约定
 /// 重复判定）。**直接调用本工厂的代码（如 `dispatch` 的测试）必须自行保证输入齐备**；
 /// `workspace` 是唯一不适用本条的名字（缺输入仍返回 `Some`）。
-pub(crate) fn builtin_server_handler(
+pub(crate) fn builtin_server_handler_with_env(
     instance: &str,
     ctx: &BuiltinInstanceContext,
+    env: &std::collections::HashMap<String, String>,
 ) -> Option<BuiltinServerHandler> {
     match find(instance)?.name {
         "web" => Some(BuiltinServerHandler::Web(WebMcpServer::new())),
-        "artifact" => Some(BuiltinServerHandler::Artifact(ArtifactMcpServer::new(
-            Path::new(&ctx.cwd),
-        ))),
+        "artifact" => Some(BuiltinServerHandler::Artifact(
+            ArtifactMcpServer::with_instance_env(Path::new(&ctx.cwd), env),
+        )),
         "cron" => ctx.cron.as_ref().map(|cron| {
             BuiltinServerHandler::Cron(CronMcpServer::new(Arc::clone(&cron.scheduler)))
         }),
@@ -242,6 +243,14 @@ pub(crate) fn builtin_server_handler(
         }
         _ => None,
     }
+}
+
+#[cfg(test)]
+pub(crate) fn builtin_server_handler(
+    instance: &str,
+    ctx: &BuiltinInstanceContext,
+) -> Option<BuiltinServerHandler> {
+    builtin_server_handler_with_env(instance, ctx, &std::collections::HashMap::new())
 }
 
 #[cfg(test)]

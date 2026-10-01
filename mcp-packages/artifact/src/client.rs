@@ -1,6 +1,5 @@
 const DEFAULT_URL: &str = "https://cloud-artifacts.claude-code-best.win";
 // 免费公共服务使用的共享协议标识，不是用户凭据或 secret；不得写入日志。
-// 环境变量仍可覆盖，以支持兼容部署。
 const DEFAULT_TOKEN: &str = "claude-code-best";
 
 /// CCB Artifacts 服务 HTTP 客户端。
@@ -28,12 +27,16 @@ impl ArtifactClient {
         Self { base_url, token }
     }
 
-    /// 使用默认 CCB 服务端和内置 token。
-    /// 环境变量 PERI_ARTIFACTS_URL / PERI_ARTIFACTS_TOKEN 可覆盖。
-    pub fn from_env_or_default() -> Self {
-        let url = std::env::var("PERI_ARTIFACTS_URL").unwrap_or_else(|_| DEFAULT_URL.to_string());
-        let token =
-            std::env::var("PERI_ARTIFACTS_TOKEN").unwrap_or_else(|_| DEFAULT_TOKEN.to_string());
+    /// 只解释传给本 MCP 实例的环境，不读取宿主进程环境。
+    pub fn from_instance_env(env: &std::collections::HashMap<String, String>) -> Self {
+        let url = env
+            .get("PERI_ARTIFACTS_URL")
+            .cloned()
+            .unwrap_or_else(|| DEFAULT_URL.into());
+        let token = env
+            .get("PERI_ARTIFACTS_TOKEN")
+            .cloned()
+            .unwrap_or_else(|| DEFAULT_TOKEN.into());
         Self::new(url, token)
     }
 

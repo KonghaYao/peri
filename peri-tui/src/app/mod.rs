@@ -73,12 +73,7 @@ impl App {
                 .and_then(|c| c.config.language.as_deref()),
         );
 
-        let provider_from_config = peri_config
-            .as_ref()
-            .and_then(agent::LlmProvider::from_config);
-        let provider_name = match provider_from_config
-            .or_else(|| agent::LlmProvider::from_source(&config_source))
-        {
+        let provider_name = match agent::LlmProvider::from_source(&config_source) {
             Some(p) => {
                 let name = p.display_name().to_string();
                 let model = p.model_name().to_string();

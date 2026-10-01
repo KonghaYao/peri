@@ -87,10 +87,9 @@ pub async fn run_print(
     let peri_config = config_source.loaded_merged();
 
     // 构建 provider
-    let provider = peri_tui::app::agent::LlmProvider::from_config(&peri_config)
-        .or_else(|| peri_tui::app::agent::LlmProvider::from_source(&config_source))
-        .ok_or_else(|| {
-            anyhow::anyhow!("未配置 LLM provider。请设置 ANTHROPIC_API_KEY 或 OPENAI_API_KEY")
+    let provider =
+        peri_tui::app::agent::LlmProvider::from_source(&config_source).ok_or_else(|| {
+            anyhow::anyhow!("未配置 LLM provider。请在 settings 中配置 provider 和模型档位")
         })?;
 
     // --model 覆盖

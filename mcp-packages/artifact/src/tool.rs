@@ -21,9 +21,13 @@ pub struct ArtifactTool {
 
 impl ArtifactTool {
     pub fn new(cwd: String) -> Self {
+        Self::with_instance_env(cwd, &std::collections::HashMap::new())
+    }
+
+    pub fn with_instance_env(cwd: String, env: &std::collections::HashMap<String, String>) -> Self {
         Self {
             cwd,
-            client: ArtifactClient::from_env_or_default(),
+            client: ArtifactClient::from_instance_env(env),
         }
     }
 

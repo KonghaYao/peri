@@ -352,7 +352,10 @@ impl McpClientPool {
                 TransportConfig::Builtin { ref instance } => {
                     // 实例解析与上下文读取都在 pool 方法内统一收口：未注册 / 上下文缺失 /
                     // 输入缺失 / handler 未接线各得 typed 原因 + 失败证据 + continue。
-                    let transport = match pool.spawn_builtin_transport(instance) {
+                    let transport = match pool.spawn_builtin_transport_with_environment(
+                        instance,
+                        server_config.env.as_ref().unwrap_or(&Default::default()),
+                    ) {
                         Ok(transport) => transport,
                         Err(error) => {
                             let reason = format!("builtin 启动失败: {error}");

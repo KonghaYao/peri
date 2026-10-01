@@ -83,8 +83,11 @@ pub(crate) async fn handle_set_config_option(
                 _ => unreachable!(),
             }
             let candidate = candidate.into_inner();
-            let provider = LlmProvider::from_config(&candidate)
-                .ok_or_else(|| AcpError::new(-32602, "active profile has no usable provider"))?;
+            let provider =
+                LlmProvider::from_config_for_alias(&candidate, &candidate.config.active_alias)
+                    .ok_or_else(|| {
+                        AcpError::new(-32602, "active profile has no usable provider")
+                    })?;
             let accepted = cfg
                 .config_source
                 .save(
@@ -148,8 +151,9 @@ pub(crate) async fn handle_update_config(
         }
     }
 
-    let new_provider = LlmProvider::from_config(&new_cfg)
-        .ok_or_else(|| AcpError::new(-32602, "active profile has no usable provider"))?;
+    let new_provider =
+        LlmProvider::from_config_for_alias(&new_cfg, &new_cfg.config.active_alias)
+            .ok_or_else(|| AcpError::new(-32602, "active profile has no usable provider"))?;
     // Each environment owns its model selection; only connection definitions are
     // shared with environments assembled from this exact configuration source.
     // Resolve every candidate before persistence so failure leaves live state intact.
@@ -165,9 +169,11 @@ pub(crate) async fn handle_update_config(
         }
         let mut candidate = environment.cfg.peri_config.read().clone();
         candidate.config.providers = new_cfg.config.providers.clone();
-        let provider = LlmProvider::from_config(&candidate).ok_or_else(|| {
-            AcpError::new(-32602, "existing session profile has no usable provider")
-        })?;
+        let provider =
+            LlmProvider::from_config_for_alias(&candidate, &candidate.config.active_alias)
+                .ok_or_else(|| {
+                    AcpError::new(-32602, "existing session profile has no usable provider")
+                })?;
         refreshed.push((id.clone(), environment.clone(), candidate, provider));
     }
     let accepted = cfg

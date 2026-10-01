@@ -14,7 +14,7 @@ use crate::{
     app::PeriConfig,
     mcp::{McpCachePolicy, McpConfigFile},
     observability::LangfuseConfig,
-    provider::{EnvironmentProvider, ResolvedProvider},
+    provider::ResolvedProvider,
     resources::ResourceConfiguration,
     source::{ConfigurationSource, McpConfigurationSource},
     ui::TuiConfig,
@@ -134,7 +134,6 @@ pub struct ConfigurationSnapshot {
     settings: PeriConfig,
     global_settings: PeriConfig,
     mcp: McpConfigFile,
-    provider: Option<EnvironmentProvider>,
     effective_provider: Option<ResolvedProvider>,
     observability: LangfuseConfig,
     ui: TuiConfig,
@@ -196,7 +195,6 @@ impl ConfigurationSnapshot {
             source_identity: SourceIdentity::Environment(crate::mcp::MCP_CACHE_ENV.to_owned()),
             domain: "MCP cache",
         })?;
-        let provider = EnvironmentProvider::resolve(&inputs.environment);
         let effective_provider = crate::provider::resolve(&settings, &inputs.environment);
         let observability = crate::observability::resolve(&global, &inputs.environment);
         let ui = TuiConfig::from_extra(&settings.config.extra);
@@ -209,7 +207,6 @@ impl ConfigurationSnapshot {
             settings,
             global_settings,
             mcp,
-            provider,
             effective_provider,
             observability,
             ui,
@@ -292,10 +289,6 @@ impl ConfigurationSnapshot {
 
     pub fn cache_policy(&self) -> McpCachePolicy {
         McpCachePolicy::from_setting(self.mcp.mcp_cache)
-    }
-
-    pub fn environment_provider(&self) -> Option<&EnvironmentProvider> {
-        self.provider.as_ref()
     }
 
     pub fn provider(&self) -> Option<&ResolvedProvider> {

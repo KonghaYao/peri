@@ -270,8 +270,7 @@ impl PreparedSessionInputs {
                 .map_err(workspace_error)?,
         );
         let config = source.loaded_merged();
-        let provider = LlmProvider::from_config(&config)
-            .or_else(|| LlmProvider::from_source(&source))
+        let provider = LlmProvider::from_source(&source)
             .ok_or_else(|| AcpError::new(-32603, "No provider configured for session workspace"))?;
         Ok(PreparedConfiguration {
             config_source: source,
