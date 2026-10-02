@@ -307,7 +307,6 @@ async fn test_load_snapshot_reports_missing_rows_and_preserves_unregistered_bind
     let history = payloads(2);
     data.append_history(&id, &history).await.unwrap();
     let before = data.load_snapshot(&id).await.unwrap();
-    let machine = data.machine_id_of(&id).await.unwrap().unwrap();
     let mut connection = sqlx::SqliteConnection::connect_with(
         &sqlx::sqlite::SqliteConnectOptions::new().filename(directory.path().join("threads.db")),
     )

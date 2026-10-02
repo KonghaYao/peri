@@ -12,7 +12,6 @@ use peri_acp_types::session_resources::{
     FrozenState, NewSessionDraft, NewSessionMeta, SessionInitialization, SessionResourceResult,
     SessionResources, SessionStoreShutdownPort,
 };
-use peri_acp_types::workspace::SESSION_BINDING_VERSION;
 use tempfile::TempDir;
 
 fn git(root: &Path, args: &[&str]) {

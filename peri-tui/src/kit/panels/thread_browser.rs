@@ -280,8 +280,18 @@ pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             && let Some(client) = ACP_CLIENT_HANDLE.get() {
                             let client = client.clone();
                             tokio::spawn(async move {
-                                if let Err(error) = client.set_session_archived(&sid, !archived_view).await {
-                                    tracing::warn!(session_id = %sid, %error, "thread browser: archive action failed");
+                                match client.set_session_archived(&sid, !archived_view).await {
+                                    Ok(()) => {
+                                        THREAD_LIST.state().write().retain(|thread| thread.id != sid);
+                                        THREAD_LIST_ERROR.set(None);
+                                    }
+                                    Err(error) => {
+                                        THREAD_LIST_ERROR.set(Some(format!(
+                                            "{}: {error}",
+                                            i18n::tr("thread-browser-archive-error")
+                                        )));
+                                        tracing::warn!(session_id = %sid, %error, "thread browser: archive action failed");
+                                    }
                                 }
                             });
                         }

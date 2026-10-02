@@ -233,6 +233,22 @@ async fn v11_to_v12_remote_batch_preserves_history_and_clears_machine_credential
         .execute(&pool)
         .await
         .unwrap();
+    let mismatched_thread = uuid::Uuid::new_v4().to_string();
+    sqlx::query("INSERT INTO threads(id,cwd,created_at,updated_at,message_count,frozen_context) VALUES (?1,'/other/place','now','now',1,'frozen')")
+        .bind(&mismatched_thread).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO session_bindings VALUES (?1,1,?2,?3,'wrong/relative')")
+        .bind(&mismatched_thread)
+        .bind(&project)
+        .bind(&registration)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO session_environments VALUES (?1,?2)")
+        .bind(&mismatched_thread)
+        .bind(&machine)
+        .execute(&pool)
+        .await
+        .unwrap();
     sqlx::query("INSERT INTO messages(message_id,thread_id,role,content) VALUES ('message',?1,'user','history')")
         .bind(&thread).execute(&pool).await.unwrap();
     sqlx::query(
@@ -261,6 +277,14 @@ async fn v11_to_v12_remote_batch_preserves_history_and_clears_machine_credential
         "SELECT t.cwd,t.archived,w.machine_id FROM threads t JOIN workspaces w ON w.id=t.workspace_id WHERE t.id=?1"
     ).bind(&thread).fetch_one(&transport.pool).await.unwrap();
     assert_eq!(row, ("/repo/src".into(), 0, machine));
+    let fallback: (String, String) = sqlx::query_as(
+        "SELECT w.path,w.path_source FROM threads t JOIN workspaces w ON w.id=t.workspace_id WHERE t.id=?1",
+    )
+    .bind(&mismatched_thread)
+    .fetch_one(&transport.pool)
+    .await
+    .unwrap();
+    assert_eq!(fallback, ("/other/place".into(), "unverified".into()));
     let payload: (String,) = sqlx::query_as("SELECT content FROM messages WHERE thread_id=?1")
         .bind(&thread)
         .fetch_one(&transport.pool)
@@ -272,6 +296,13 @@ async fn v11_to_v12_remote_batch_preserves_history_and_clears_machine_credential
         .await
         .unwrap();
     assert_eq!(credentials.0, 0);
+    let environments: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'session_environments'",
+    )
+    .fetch_one(&transport.pool)
+    .await
+    .unwrap();
+    assert_eq!(environments.0, 0);
     let upgraded = store.read_identity().await.unwrap();
     assert!(matches!(upgraded, StoreIdentityRead::Present(snapshot)
         if snapshot.schema_version == 12 && snapshot.contract == "peri.session.store/v3"));
@@ -376,7 +407,6 @@ async fn remote_schema_upgrade_preserves_identity_ledger_config_and_rowid_histor
     let retained_sql = "SELECT 'threads', json_array(id, title, cwd, created_at, updated_at, message_count, parent_thread_id, snapshot_at_message_id, hidden, cancel_policy, config, frozen_context, inherited_context, agent_status) FROM threads
         UNION ALL SELECT 'projects', json_array(id, locator, object_identity) FROM projects
         UNION ALL SELECT 'bindings', json_array(thread_id, schema_version, project_id, workspace_id, relative_cwd) FROM session_bindings
-        UNION ALL SELECT 'environments', json_array(thread_id, machine_id) FROM session_environments
         ORDER BY 1, 2";
     let before: Vec<(String, String)> = sqlx::query_as(retained_sql)
         .fetch_all(&fixture.transport.pool)
@@ -400,6 +430,13 @@ async fn remote_schema_upgrade_preserves_identity_ledger_config_and_rowid_histor
         .await
         .unwrap();
     assert_eq!(after, before);
+    let environments: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'session_environments'",
+    )
+    .fetch_one(&fixture.transport.pool)
+    .await
+    .unwrap();
+    assert_eq!(environments.0, 0);
     let (identity, timestamp, config): (String, String, String) = sqlx::query_as(
         "SELECT store_id, peri_store_meta.created_at, config FROM peri_store_meta, threads",
     )

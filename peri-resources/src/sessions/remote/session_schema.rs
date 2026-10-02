@@ -19,13 +19,6 @@
 use super::sql::StatementSpec;
 use crate::sessions::canonical::{CREATE_V2_INDEXES, CREATE_V2_TABLES};
 
-/// canonical 索引清单的远端重导出；用途同上。
-#[cfg(test)]
-pub(super) use crate::sessions::canonical::CANONICAL_INDEXES;
-/// canonical 表清单的远端重导出：形状测试按它核对远端表集合（生产路径按名建表，不需要它）。
-#[cfg(test)]
-pub(super) use crate::sessions::canonical::CANONICAL_TABLES;
-
 /// 初始化本任务 schema 的语句集：建表段 + 索引段，**一条语句一个 spec**。
 ///
 /// 远端执行器的语句单元就是一条语句，因此清单直接逐条展开，不把多句拼进一个请求。

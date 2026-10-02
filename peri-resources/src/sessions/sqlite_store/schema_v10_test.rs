@@ -247,7 +247,6 @@ async fn test_v7_v8_v9_all_converge_and_drop_only_the_remote_tables() {
             .collect();
         expected.extend([
             OAUTH_CREDENTIALS_TABLE.to_owned(),
-            SESSION_ENVIRONMENTS_TABLE.to_owned(),
             "legacy_execution_registrations".to_owned(),
             "machines".to_owned(),
         ]);
@@ -332,7 +331,6 @@ async fn test_database_without_remote_tables_is_idempotent() {
     expected.retain(|name| name != "execution_runs");
     expected.extend([
         OAUTH_CREDENTIALS_TABLE.to_owned(),
-        SESSION_ENVIRONMENTS_TABLE.to_owned(),
         "legacy_execution_registrations".to_owned(),
         "machines".to_owned(),
     ]);

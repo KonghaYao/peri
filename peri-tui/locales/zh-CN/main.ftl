@@ -1199,6 +1199,7 @@ thread-browser-selected-path = 路径：{ $path } · ID：{ $id }
 thread-browser-actions = ↑↓ 选择  Enter 继续  v 查看  Tab 范围  a 归档/恢复  r 切换归档  d 删除  Esc 关闭
 thread-browser-actions-compact = Enter 继续  a 归档/恢复  r 切换归档  d 删除  Esc 关闭
 thread-browser-archived = 已归档
+thread-browser-archive-error = 更新归档状态失败
 thread-browser-machine = { $name }（{ $id }）· { $count } 个工作区
 thread-browser-preview-actions = v 返回  ↑↓ 滚动  PgUp/PgDn 翻页  Esc 关闭
 thread-history-preview-hint = 只读历史 · ↑/↓::滚动 · v::返回 · Esc::关闭

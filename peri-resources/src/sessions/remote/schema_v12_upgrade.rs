@@ -149,19 +149,23 @@ pub(super) async fn upgrade(
             .map(|id| id.parse::<WorkspaceId>().map_err(|_| unsupported()))
             .transpose()?;
         let relative = optional_text(row, 5)?;
-        let derived_root = match (registration, relative.as_deref()) {
-            (Some(_), Some(relative)) => {
-                Some(derive_remote_root(&cwd, relative).map_err(|_| unsupported())?)
-            }
-            (Some(_), None) => return Err(unsupported()),
-            (None, _) => None,
+        // An inconsistent legacy relative path cannot prove the old root.
+        // Group by the saved cwd as unverified; the execution binding remains
+        // unchanged and still requires validation before use.
+        let derived_root = registration
+            .and_then(|_| relative.as_deref())
+            .and_then(|relative| derive_remote_root(&cwd, relative).ok());
+        let plan_registration = if registration.is_some() && derived_root.is_none() {
+            None
+        } else {
+            registration
         };
         sessions.push(LegacySession {
             id,
             parent_id,
             cwd: PathBuf::from(cwd),
             machine_id,
-            execution_workspace_id: registration,
+            execution_workspace_id: plan_registration,
             derived_root,
         });
     }
@@ -272,13 +276,14 @@ pub(super) async fn upgrade(
         "ALTER TABLE threads_v12 RENAME TO threads",
     ));
     statements.push(StatementSpec::bare(canonical::CREATE_INDEXES[3]));
-    statements.push(StatementSpec::bare(canonical::CREATE_V2_INDEXES[5]));
+    statements.push(StatementSpec::bare(canonical::CREATE_V2_INDEXES[4]));
     statements.push(StatementSpec::bare(
         "ALTER TABLE session_bindings ADD COLUMN discovery_snapshot TEXT",
     ));
     statements.push(StatementSpec::bare("ALTER TABLE session_bindings ADD COLUMN evidence_origin TEXT NOT NULL DEFAULT 'legacy_missing'"));
     statements.push(StatementSpec::bare("UPDATE session_bindings SET discovery_snapshot = (SELECT discovery FROM legacy_execution_registrations WHERE id = session_bindings.workspace_id)"));
     statements.push(StatementSpec::bare("UPDATE session_bindings SET evidence_origin = 'legacy_last_observation' WHERE discovery_snapshot IS NOT NULL"));
+    statements.push(StatementSpec::bare("DROP TABLE session_environments"));
     statements.push(StatementSpec::bare("DROP TABLE mcp_oauth_credentials"));
     statements.push(StatementSpec::bare(
         canonical::CREATE_V2_OAUTH_CREDENTIALS_TABLE_SQL,

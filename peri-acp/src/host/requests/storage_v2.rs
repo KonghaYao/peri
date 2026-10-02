@@ -31,23 +31,20 @@ pub(super) async fn workspaces(params: &Value, cfg: &AcpServerConfig) -> Result<
     Ok(json!({"workspaces": workspaces}))
 }
 
-pub(super) async fn rename_machine(
-    params: &Value,
-    cfg: &AcpServerConfig,
-) -> Result<Value, AcpError> {
-    let machine_id = field(params, "machineId")?;
-    let name = field(params, "name")?;
-    cfg.session_resources
-        .rename_machine(machine_id, name)
-        .await
-        .map_err(super::super::workspace::resource_error)?;
-    Ok(json!({"success": true}))
-}
-
 pub(super) async fn archive_session(
     params: &Value,
     cfg: &AcpServerConfig,
 ) -> Result<Value, AcpError> {
+    if !cfg
+        .session_manager
+        .effective_host_caps()
+        .session_workspace_v1
+    {
+        return Err(AcpError::new(
+            -32602,
+            "Session workspace capability was not negotiated",
+        ));
+    }
     let session_id = field(params, "sessionId")?.to_owned();
     let archived = params
         .get("archived")

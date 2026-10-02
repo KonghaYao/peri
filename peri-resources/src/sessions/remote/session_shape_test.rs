@@ -175,7 +175,6 @@ fn schema_ddl_matches_the_canonical_shape() {
         "projects",
         "legacy_execution_registrations",
         "session_bindings",
-        "session_environments",
         "mcp_oauth_credentials",
     ] {
         assert!(
@@ -193,11 +192,10 @@ fn schema_ddl_matches_the_canonical_shape() {
         crate::sessions::canonical::CREATE_V2_TABLES.len(),
         "建表段在前、索引段在后"
     );
-    for index in super::session_schema::CANONICAL_INDEXES {
+    for index_sql in crate::sessions::canonical::CREATE_V2_INDEXES {
         assert!(
-            plan.iter()
-                .any(|spec| spec.sql.contains(&format!(" {index} "))),
-            "缺索引: {index}"
+            plan.iter().any(|spec| spec.sql == *index_sql),
+            "v2 canonical index missing: {index_sql}"
         );
     }
     // 会话表主键是会话 id（canonical 列名），历史表主键是消息 id（同一条消息不属于两个会话）。
@@ -500,7 +498,6 @@ fn new_session(thread_id: &str, snapshot_at: Option<MessageId>) -> NewSession {
 
 #[tokio::test]
 async fn write_sql_is_static_and_all_values_are_bound() {
-    let machine_id = crate::sessions::machine::initialize().await.unwrap();
     let first = new_session("session-a", None);
     let second = new_session("session-b", Some(MessageId::new()));
     let one = session_sql::insert_session_statements(&session_sql::session_insert(&first, 0, None))
@@ -508,22 +505,9 @@ async fn write_sql_is_static_and_all_values_are_bound() {
     let two =
         session_sql::insert_session_statements(&session_sql::session_insert(&second, 3, None))
             .expect("encodable");
-    assert_eq!(one.len(), 3);
+    assert_eq!(one.len(), 2);
     assert_eq!(one[0].sql, two[0].sql);
     assert_eq!(one[1].sql, two[1].sql);
-    assert_eq!(one[2].sql, two[2].sql);
-    assert_eq!(
-        one[2].sql,
-        crate::sessions::canonical::INSERT_ENVIRONMENT_SQL
-    );
-    assert_eq!(
-        one[2].params,
-        vec![
-            Value::Text("session-a".to_owned()),
-            Value::Null,
-            Value::Text(machine_id.to_owned())
-        ]
-    );
     assert_ne!(one[0].params, two[0].params);
     assert!(one[0].sql.starts_with("INSERT INTO threads"));
     assert!(one[1].sql.starts_with("INSERT INTO session_bindings"));
@@ -533,7 +517,6 @@ async fn write_sql_is_static_and_all_values_are_bound() {
     for secret in ["session-a", "session-b", "/home/u/project"] {
         assert!(!one[0].sql.contains(secret));
         assert!(!one[1].sql.contains(secret));
-        assert!(!one[2].sql.contains(secret));
     }
     // 会话 id 与绑定身份落到参数位置。
     assert_eq!(one[0].params[0], Value::Text("session-a".to_owned()));
@@ -563,16 +546,8 @@ async fn write_sql_is_static_and_all_values_are_bound() {
         Some("{\"inherited\":true}"),
     ))
     .expect("encodable");
-    assert_eq!(child.len(), 4);
-    assert_eq!(
-        child[2].params,
-        vec![
-            Value::Text("child".to_owned()),
-            Value::Text(first.thread_id.clone()),
-            Value::Text(machine_id.to_owned())
-        ]
-    );
-    assert!(child[3]
+    assert_eq!(child.len(), 3);
+    assert!(child[2]
         .sql
         .starts_with("UPDATE threads SET inherited_context"));
 }
@@ -616,14 +591,9 @@ async fn draft_revocation_cleans_environment_without_cascade_and_preserves_commi
             .bind(id).execute(&mut connection).await.unwrap();
         sqlx::query("INSERT INTO session_bindings(thread_id, schema_version, project_id, workspace_id, relative_cwd) VALUES (?1, 1, 'project', 'workspace', '')")
             .bind(id).execute(&mut connection).await.unwrap();
-        sqlx::query("INSERT INTO session_environments(thread_id, machine_id) VALUES (?1, 'original-machine')")
-            .bind(id).execute(&mut connection).await.unwrap();
         let statements = session_sql::revoke_draft_statements(id);
-        assert_eq!(statements.len(), 4);
-        assert!(statements[2]
-            .sql
-            .starts_with("DELETE FROM session_environments"));
-        assert!(statements[3].sql.starts_with("DELETE FROM threads"));
+        assert_eq!(statements.len(), 3);
+        assert!(statements[2].sql.starts_with("DELETE FROM threads"));
         let mut transaction = connection.begin().await.unwrap();
         for statement in &statements {
             assert_eq!(statement.params, vec![Value::Text(id.to_owned())]);
@@ -649,16 +619,9 @@ async fn draft_revocation_cleans_environment_without_cascade_and_preserves_commi
                 .unwrap();
             assert_eq!(result.rows_affected(), 0);
         }
-        let environment: Option<(String,)> =
-            sqlx::query_as("SELECT machine_id FROM session_environments WHERE thread_id = ?1")
-                .bind(id)
-                .fetch_optional(&mut connection)
-                .await
-                .unwrap();
-        assert_eq!(
-            environment,
-            frozen.map(|_| ("original-machine".to_owned(),))
-        );
+        assert!(statements
+            .iter()
+            .all(|statement| !statement.sql.contains("session_environments")));
     }
 }
 

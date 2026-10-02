@@ -242,8 +242,8 @@ Workspace，也不得由首次访问的 thread 隐式认领。v2 迁移在事务
 机器级凭证，不把旧值带入新 Workspace 键；用户需在所需 Workspace 重新授权。
 迁移失败须回滚清理，不留下仍可被 v2 路径读取的机器级回退。
 
-迁移成功后，每个 thread 都有 Workspace ID。原 `session_environments` 的机器
-归属由 `threads.workspace_id → workspaces.machine_id` 唯一推导；不得长期维护两份
+迁移成功后，每个 thread 都有 Workspace ID，旧 `session_environments` 表在同一
+迁移事务内删除。机器归属由 `threads.workspace_id → workspaces.machine_id` 唯一推导；不得长期维护两份
 可独立修改的机器归属。原 `session_bindings` 中的 Project/worktree 信息若仍服务
 执行准入，应保留为执行事实，不再充当 Session 的归属权威。v2 保留
 `threads`、`messages.thread_id` 和现有 Session ID；不做表名与协议的无关重命名。

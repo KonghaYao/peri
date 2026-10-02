@@ -331,7 +331,6 @@ pub(super) fn revoke_session_statements(id: &str) -> Vec<StatementSpec> {
     [
         DELETE_SESSION_MESSAGES_SQL,
         DELETE_SESSION_BINDINGS_SQL,
-        "DELETE FROM session_environments WHERE thread_id = ?1",
         DELETE_SESSION_SQL,
     ]
     .into_iter()
@@ -477,7 +476,6 @@ pub(super) fn insert_session_statements(
             ],
         ),
     ];
-    statements.push(environment_statement(row.thread_id, row.parent_thread_id)?);
     if let Some(inherited) = row.inherited {
         statements.push(StatementSpec::new(
             UPDATE_INHERITED_SQL,
@@ -537,30 +535,7 @@ pub(super) fn insert_session_draft_statements(
                 optional_text(draft.meta.parent_thread_id.as_deref()),
             ],
         ),
-        environment_statement(
-            draft.thread_id.as_str(),
-            draft.meta.parent_thread_id.as_deref(),
-        )?,
     ])
-}
-
-fn environment_statement(id: &str, parent: Option<&str>) -> SessionResourceResult<StatementSpec> {
-    Ok(StatementSpec::new(
-        canonical::INSERT_ENVIRONMENT_SQL,
-        vec![
-            Value::Text(id.to_owned()),
-            optional_text(parent),
-            Value::Text(
-                crate::sessions::machine::current()
-                    .map_err(|_| {
-                        crate::sessions::sqlite_store::unavailable(
-                            "machine identity is not initialized",
-                        )
-                    })?
-                    .to_owned(),
-            ),
-        ],
-    ))
 }
 
 /// 一次性提交 frozen 的语句（write-once CAS；受影响行数由调用方按 1 核对）。
@@ -576,7 +551,6 @@ pub(super) fn revoke_draft_statements(id: &str) -> Vec<StatementSpec> {
     [
         DELETE_DRAFT_MESSAGES_SQL,
         DELETE_DRAFT_BINDINGS_SQL,
-        "DELETE FROM session_environments WHERE thread_id = ?1 AND EXISTS (SELECT 1 FROM threads WHERE id = ?1 AND frozen_context IS NULL)",
         DELETE_DRAFT_SESSION_SQL,
     ]
     .into_iter()
@@ -660,12 +634,12 @@ mod tests {
     use super::*;
 
     /// 远端两条撤销入口的判据点：write-once（fork 补偿）不叠加 frozen 判据，
-    /// 两阶段草稿的四条删除全部带 `frozen_context IS NULL`。
+    /// 两阶段草稿的三条删除全部带 `frozen_context IS NULL`。
     #[test]
     fn revocation_statements_split_by_entry_point() {
         // 两阶段草稿：判据在每一条删除上（同一批内不会出现「历史删了、会话行还在」）。
         let draft = revoke_draft_statements("s");
-        assert_eq!(draft.len(), 4);
+        assert_eq!(draft.len(), 3);
         for statement in &draft {
             assert!(
                 statement.sql.contains("frozen_context IS NULL"),
@@ -681,7 +655,7 @@ mod tests {
         // write-once：撤销未发布创建（fork 等）不叠加 frozen 判据——目标创建即带 frozen，
         // 补偿就是把它整条删掉。
         let write_once = revoke_session_statements("s");
-        assert_eq!(write_once.len(), 4);
+        assert_eq!(write_once.len(), 3);
         for statement in &write_once {
             assert!(
                 !statement.sql.contains("frozen_context"),

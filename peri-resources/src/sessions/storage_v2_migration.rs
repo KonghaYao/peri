@@ -196,6 +196,9 @@ async fn migrate_transaction(connection: &mut SqliteConnection) -> Result<()> {
     sqlx::query(canonical::CREATE_V2_OAUTH_CREDENTIALS_TABLE_SQL)
         .execute(&mut *tx)
         .await?;
+    sqlx::query("DROP TABLE session_environments")
+        .execute(&mut *tx)
+        .await?;
     let violations: Vec<(String, i64, String, i64)> = sqlx::query_as("PRAGMA foreign_key_check")
         .fetch_all(&mut *tx)
         .await?;

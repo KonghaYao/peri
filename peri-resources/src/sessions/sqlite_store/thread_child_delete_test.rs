@@ -17,7 +17,7 @@
 
 use peri_acp_types::session_resources::{FrozenSnapshotBytes, NewSession, NewSessionMeta};
 use peri_acp_types::store::PersistedPayload;
-use peri_acp_types::workspace::{ResolvedWorkspace, SessionBinding, SESSION_BINDING_VERSION};
+use peri_acp_types::workspace::{ResolvedWorkspace, SessionBinding};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::SqlitePool;
 use tempfile::TempDir;

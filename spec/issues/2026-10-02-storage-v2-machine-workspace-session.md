@@ -24,8 +24,8 @@
 `peri meta machines` 展示当前 ID 与库内 Machine/Workspace，`peri machine adopt`
 先预览目标，再以当前 ID 和无活跃执行确认显式替换本机身份文件，重启后生效。
 TUI 浏览器展示当前 Machine。待完成的外部验收是使用真实远端库执行 schema 12
-升级与 OAuth 网络回环；当前环境未配置远端凭证。旧 `session_environments` 表仍保留
-旧版只读投影和兼容写入，v2 机器归属只从 Workspace 推导。
+升级与 OAuth 网络回环；当前环境未配置远端凭证。旧 `session_environments` 表仅供
+11→12 迁移读取，迁移成功后删除，v2 机器归属只从 Workspace 推导。
 
 ## 验收范围
 

@@ -1201,6 +1201,7 @@ thread-browser-selected-path = Path: { $path } · ID: { $id }
 thread-browser-actions = ↑↓ select  Enter resume  v view  Tab scope  a archive/restore  r archived view  d delete  Esc close
 thread-browser-actions-compact = Enter resume  a archive/restore  r archived view  d delete  Esc close
 thread-browser-archived = Archived
+thread-browser-archive-error = Could not update archive status
 thread-browser-machine = { $name } ({ $id }) · { $count } workspaces
 thread-browser-preview-actions = v back  ↑↓ scroll  PgUp/PgDn page  Esc close
 thread-history-preview-hint = Read-only history · ↑/↓::scroll · v::back · Esc::close

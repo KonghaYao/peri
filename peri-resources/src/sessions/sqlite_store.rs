@@ -234,12 +234,6 @@ impl ThreadStore for SqliteThreadStore {
         .bind(workspace_id.to_string())
         .execute(&mut *transaction)
         .await?;
-        session_rows::insert_environment_row(
-            &mut transaction,
-            &meta.id,
-            meta.parent_thread_id.as_deref(),
-        )
-        .await?;
         transaction.commit().await?;
         Ok(id)
     }

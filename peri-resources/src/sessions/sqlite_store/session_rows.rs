@@ -64,21 +64,6 @@ pub(super) async fn insert_thread_row(
     .bind(workspace_id.to_string())
     .execute(&mut *connection)
     .await?;
-    insert_environment_row(connection, row.id, row.parent_thread_id).await?;
-    Ok(())
-}
-
-pub(super) async fn insert_environment_row(
-    connection: &mut SqliteConnection,
-    id: &str,
-    parent: Option<&str>,
-) -> Result<()> {
-    sqlx::query(sqlx::AssertSqlSafe(canonical::INSERT_ENVIRONMENT_SQL))
-        .bind(id)
-        .bind(parent)
-        .bind(crate::sessions::machine::current()?)
-        .execute(&mut *connection)
-        .await?;
     Ok(())
 }
 

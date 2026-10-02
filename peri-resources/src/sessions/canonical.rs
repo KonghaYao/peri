@@ -73,7 +73,6 @@ pub(super) const CREATE_OAUTH_CREDENTIALS_TABLE_SQL: &str =
     updated_at TEXT NOT NULL,
     PRIMARY KEY (principal_id, machine_id, server_key)
 )";
-pub(super) const INSERT_ENVIRONMENT_SQL: &str = "INSERT INTO session_environments(thread_id, machine_id) VALUES (?1, COALESCE((SELECT machine_id FROM session_environments WHERE thread_id = ?2), ?3))";
 pub(super) const BACKFILL_ENVIRONMENTS_SQL: &str = "WITH RECURSIVE tree(thread_id, machine_id) AS (
     SELECT t.id, COALESCE(env.machine_id, ?1) FROM threads t
     LEFT JOIN session_environments env ON env.thread_id = t.id WHERE t.parent_thread_id IS NULL
@@ -137,16 +136,6 @@ pub(super) const CREATE_TABLES: &[&str] = &[
 )",
     CREATE_ENVIRONMENTS_TABLE_SQL,
     CREATE_OAUTH_CREDENTIALS_TABLE_SQL,
-];
-
-/// canonical 索引名（与 [`CREATE_INDEXES`] 的顺序一一对应）：形状核对按名字断言索引齐全。
-#[cfg(test)]
-pub(super) const CANONICAL_INDEXES: &[&str] = &[
-    "idx_messages_thread_id",
-    "idx_bindings_project",
-    "idx_bindings_workspace",
-    "idx_threads_updated",
-    "idx_session_environments_machine",
 ];
 
 /// 索引语句：必须在建表**与旧库补列之后**执行（`idx_threads_updated` 引用后补的列）。
@@ -217,7 +206,6 @@ pub(super) const CREATE_V2_TABLES: &[&str] = &[
     CREATE_TABLES[2],
     CREATE_V2_LEGACY_REGISTRATIONS_TABLE_SQL,
     CREATE_V2_BINDINGS_TABLE_SQL,
-    CREATE_ENVIRONMENTS_TABLE_SQL,
     CREATE_V2_OAUTH_CREDENTIALS_TABLE_SQL,
 ];
 pub(super) const CREATE_V2_INDEXES: &[&str] = &[
@@ -225,7 +213,6 @@ pub(super) const CREATE_V2_INDEXES: &[&str] = &[
     CREATE_INDEXES[1],
     CREATE_INDEXES[2],
     CREATE_INDEXES[3],
-    CREATE_INDEXES[4],
     "CREATE INDEX IF NOT EXISTS idx_threads_workspace_archived ON threads(workspace_id, archived, updated_at DESC, id DESC) WHERE parent_thread_id IS NULL AND message_count > 0",
 ];
 pub(super) const SELECT_V2_OAUTH_CREDENTIAL_SQL: &str = "SELECT credentials_blob FROM mcp_oauth_credentials WHERE principal_id = ?1 AND workspace_id = ?2 AND server_key = ?3";
@@ -244,10 +231,6 @@ pub(super) const LIST_V2_OAUTH_CREDENTIALS_SQL: &str = "SELECT server_key FROM m
 pub(super) const THREAD_CHILD_DELETES: &[(&str, &str)] = &[
     (MESSAGES_TABLE, DELETE_MESSAGES_BY_THREAD_SQL),
     (SESSION_BINDINGS_TABLE, DELETE_BINDINGS_BY_THREAD_SQL),
-    (
-        SESSION_ENVIRONMENTS_TABLE,
-        "DELETE FROM session_environments WHERE thread_id = ?1",
-    ),
 ];
 
 /// 删除一个会话的全部历史行。

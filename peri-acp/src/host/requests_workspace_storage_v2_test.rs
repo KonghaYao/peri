@@ -36,15 +36,6 @@ async fn storage_v2_machine_and_archive_requests_round_trip() {
         .find(|machine| machine["is_current"] == true)
         .unwrap();
     let machine_id = current["id"].as_str().unwrap();
-    handle_request(
-        "peri/machines/rename",
-        &json!({"machineId": machine_id, "name":"本机测试"}),
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await
-    .unwrap();
     let workspaces = handle_request(
         "peri/workspaces/list",
         &json!({"machineId": machine_id}),
@@ -94,4 +85,30 @@ async fn storage_v2_machine_and_archive_requests_round_trip() {
     )
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn archive_request_requires_session_workspace_capability() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let provider_config = make_provider_config("test", "openai", "key", "model");
+    let peri_config = make_peri_config_with_provider(provider_config);
+    let provider = LlmProvider::from_config(&peri_config).unwrap();
+    let cfg = make_server_config(peri_config, provider, &tmp).await;
+    cfg.session_manager
+        .set_pending_caps(peri_acp_types::PeriCaps::default());
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
+    let error = handle_request(
+        "peri/session/archive",
+        &json!({"sessionId":"00000000-0000-0000-0000-000000000001","archived":true}),
+        &cfg,
+        &mut HashMap::new(),
+        &transport,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, -32602);
+    assert_eq!(
+        error.message,
+        "Session workspace capability was not negotiated"
+    );
 }

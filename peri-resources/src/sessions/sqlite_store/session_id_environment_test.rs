@@ -21,10 +21,6 @@ async fn migration_keeps_schema_version_and_existing_history() {
         .unwrap();
     assert_eq!(before.0, super::schema::CURRENT_SCHEMA_VERSION);
     let messages = store.load_messages(&id).await.unwrap();
-    sqlx::query("DROP TABLE session_environments")
-        .execute(&store.database.pool)
-        .await
-        .unwrap();
     store.close().await;
     let reopened = SqliteThreadStore::new(&path).await.unwrap();
     let after: (i64,) = sqlx::query_as("PRAGMA user_version")
@@ -117,7 +113,7 @@ async fn id_recovery_ignores_missing_paths_and_keeps_instance_owners_independent
 }
 
 #[tokio::test]
-async fn environment_filters_do_not_change_id_lookup_and_children_inherit() {
+async fn machine_filters_follow_workspace_ownership_and_children_inherit() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("threads.db");
     let (store, facade) = SqliteThreadStore::open_shared(&path).await.unwrap();
@@ -125,13 +121,26 @@ async fn environment_filters_do_not_change_id_lookup_and_children_inherit() {
         .create_thread(ThreadMeta::new("/same/path"))
         .await
         .unwrap();
+    let root_workspace: (String,) =
+        sqlx::query_as("SELECT workspace_id FROM threads WHERE id = ?1")
+            .bind(&root)
+            .fetch_one(&store.database.pool)
+            .await
+            .unwrap();
+    let another_machine = uuid::Uuid::new_v4().to_string();
     sqlx::query(
-        "UPDATE session_environments SET machine_id = 'another-machine' WHERE thread_id = ?1",
+        "INSERT INTO machines(id, name, identity_kind) VALUES (?1, 'Another machine', 'known')",
     )
-    .bind(&root)
+    .bind(&another_machine)
     .execute(&store.database.pool)
     .await
     .unwrap();
+    sqlx::query("UPDATE workspaces SET machine_id = ?1 WHERE id = ?2")
+        .bind(&another_machine)
+        .bind(&root_workspace.0)
+        .execute(&store.database.pool)
+        .await
+        .unwrap();
     let mut child = ThreadMeta::new("/same/path");
     child.parent_thread_id = Some(root.clone());
     let child_id = store.create_thread(child).await.unwrap();
@@ -141,7 +150,7 @@ async fn environment_filters_do_not_change_id_lookup_and_children_inherit() {
             .await
             .unwrap()
             .as_deref(),
-        Some(crate::sessions::machine::current().unwrap())
+        Some(another_machine.as_str())
     );
     let mut grandchild = ThreadMeta::new("/missing/child-path");
     grandchild.parent_thread_id = Some(child_id.clone());
@@ -152,7 +161,7 @@ async fn environment_filters_do_not_change_id_lookup_and_children_inherit() {
             .await
             .unwrap()
             .as_deref(),
-        Some(crate::sessions::machine::current().unwrap())
+        Some(another_machine.as_str())
     );
     let other = store
         .create_thread(ThreadMeta::new("/same/path"))
@@ -164,21 +173,29 @@ async fn environment_filters_do_not_change_id_lookup_and_children_inherit() {
             .await
             .unwrap();
     }
-    let page = facade
+    let another_page = facade
         .list_sessions(&ScopedThreadQuery {
-            scope: ThreadScope::Environment("another-machine".to_owned()),
+            scope: ThreadScope::Environment(another_machine.clone()),
             cursor: None,
             limit: 20,
         })
         .await
         .unwrap();
-    assert_eq!(page.entries.len(), 0);
-    assert_eq!(facade.load_session_meta(&other).await.unwrap().id, other);
-    sqlx::query("DELETE FROM session_environments WHERE thread_id = ?1")
-        .bind(&child_id)
-        .execute(&store.database.pool)
+    assert_eq!(another_page.entries.len(), 1);
+    assert_eq!(another_page.entries[0].thread.id, root);
+    let current_page = facade
+        .list_sessions(&ScopedThreadQuery {
+            scope: ThreadScope::Environment(
+                crate::sessions::machine::current().unwrap().to_owned(),
+            ),
+            cursor: None,
+            limit: 20,
+        })
         .await
         .unwrap();
+    assert_eq!(current_page.entries.len(), 1);
+    assert_eq!(current_page.entries[0].thread.id, other);
+    assert_eq!(facade.load_session_meta(&other).await.unwrap().id, other);
     store.database.init_schema().await.unwrap();
     assert_eq!(
         facade
@@ -186,6 +203,13 @@ async fn environment_filters_do_not_change_id_lookup_and_children_inherit() {
             .await
             .unwrap()
             .as_deref(),
-        Some(crate::sessions::machine::current().unwrap())
+        Some(another_machine.as_str())
     );
+    let environment_table: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='session_environments'",
+    )
+    .fetch_one(&store.database.pool)
+    .await
+    .unwrap();
+    assert_eq!(environment_table.0, 0);
 }

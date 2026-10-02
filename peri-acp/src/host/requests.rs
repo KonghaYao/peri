@@ -88,7 +88,6 @@ pub(crate) async fn handle_request(
         "session/list" => session_lifecycle::handle_list(params, cfg).await,
         "peri/machines/list" => storage_v2::machines(cfg).await,
         "peri/workspaces/list" => storage_v2::workspaces(params, cfg).await,
-        "peri/machines/rename" => storage_v2::rename_machine(params, cfg).await,
         "peri/session/archive" => storage_v2::archive_session(params, cfg).await,
         "peri/session_context" => session_lifecycle::handle_context(params, cfg).await,
         "session/metadata" => session_lifecycle::handle_metadata(params, cfg, false).await,
