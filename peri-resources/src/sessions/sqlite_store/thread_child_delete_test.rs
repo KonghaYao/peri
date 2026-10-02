@@ -94,13 +94,7 @@ async fn seed(fixture: &NoCascade, id: &str, parent: Option<&str>) {
             cancel_policy: Default::default(),
             snapshot_at_message_id: None,
         },
-        binding: SessionBinding {
-            schema_version: SESSION_BINDING_VERSION,
-            revision: 1,
-            project_id: workspace.project_id,
-            workspace_id: workspace.workspace_id,
-            cwd_relative_to_workspace: workspace.relative_cwd.clone(),
-        },
+        binding: SessionBinding::from_workspace(&workspace),
         frozen: FrozenSnapshotBytes::new(format!(r#"{{"v":1,"id":"{id}"}}"#)),
     };
     fixture.data.save_new_session(&input).await.unwrap();

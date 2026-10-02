@@ -11,15 +11,43 @@ async fn fixture() -> (tempfile::TempDir, SqliteThreadStore) {
     (directory, store)
 }
 
-fn scoped(store: &SqliteThreadStore, principal: &str, machine: &str) -> SqliteOAuthCredentialStore {
-    SqliteOAuthCredentialStore::with_scope(store.database.clone(), principal, machine)
+async fn scoped(
+    store: &SqliteThreadStore,
+    principal: &str,
+    path: &str,
+) -> SqliteOAuthCredentialStore {
+    let existing: Option<(String,)> =
+        sqlx::query_as("SELECT id FROM workspaces WHERE machine_id = ?1 AND path = ?2")
+            .bind(crate::sessions::machine::current().unwrap())
+            .bind(path)
+            .fetch_optional(&store.database.pool)
+            .await
+            .unwrap();
+    if existing.is_none() {
+        sqlx::query("INSERT INTO workspaces(id, machine_id, path, path_source) VALUES (?1, ?2, ?3, 'unverified')")
+            .bind(WorkspaceId::new().to_string())
+            .bind(crate::sessions::machine::current().unwrap())
+            .bind(path)
+            .execute(&store.database.pool)
+            .await
+            .unwrap();
+    }
+    let (winner,): (String,) =
+        sqlx::query_as("SELECT id FROM workspaces WHERE machine_id = ?1 AND path = ?2")
+            .bind(crate::sessions::machine::current().unwrap())
+            .bind(path)
+            .fetch_one(&store.database.pool)
+            .await
+            .unwrap();
+    SqliteOAuthCredentialStore::with_scope(store.database.clone(), principal, &winner)
 }
 
 #[tokio::test]
 async fn trait_crud_survives_session_database_restart() {
     let (directory, store) = fixture().await;
+    let owner = scoped(&store, "local", "/oauth-fixture").await;
     let port = Arc::new(SqliteSessionData::new(store.database.clone()))
-        .oauth_credentials()
+        .oauth_credentials_for_workspace(owner.workspace_id.parse().unwrap())
         .unwrap();
     assert!(port.load("server").await.unwrap().is_none());
     port.save("server", r#"{"token":"synthetic-fixture"}"#)
@@ -30,19 +58,19 @@ async fn trait_crud_survives_session_database_restart() {
         .unwrap();
     assert_eq!(port.list().await.unwrap(), vec!["server"]);
     let row: (String, String, String) =
-        sqlx::query_as("SELECT principal_id, machine_id, updated_at FROM mcp_oauth_credentials")
+        sqlx::query_as("SELECT principal_id, workspace_id, updated_at FROM mcp_oauth_credentials")
             .fetch_one(&store.database.pool)
             .await
             .unwrap();
     assert_eq!(row.0, "local");
-    assert_eq!(row.1, crate::sessions::machine::current().unwrap());
+    assert_eq!(row.1, owner.workspace_id);
     assert!(chrono::DateTime::parse_from_rfc3339(&row.2).is_ok());
     store.close().await;
     let reopened = SqliteThreadStore::new(directory.path().join("sessions.db"))
         .await
         .unwrap();
     let port = Arc::new(SqliteSessionData::new(reopened.database.clone()))
-        .oauth_credentials()
+        .oauth_credentials_for_workspace(owner.workspace_id.parse().unwrap())
         .unwrap();
     assert_eq!(
         port.load("server").await.unwrap().as_deref(),
@@ -57,9 +85,9 @@ async fn trait_crud_survives_session_database_restart() {
 #[tokio::test]
 async fn all_operations_bind_principal_and_machine_scope() {
     let (_directory, store) = fixture().await;
-    let own = scoped(&store, "principal", "machine");
-    let other_principal = scoped(&store, "other", "machine");
-    let other_machine = scoped(&store, "principal", "other");
+    let own = scoped(&store, "principal", "/workspace-a").await;
+    let other_principal = scoped(&store, "other", "/workspace-a").await;
+    let other_machine = scoped(&store, "principal", "/workspace-b").await;
     for port in [&other_principal, &other_machine] {
         port.save("server", r#"{"fixture":1}"#).await.unwrap();
         port.save("foreign-only", "{}").await.unwrap();
@@ -86,7 +114,7 @@ async fn all_operations_bind_principal_and_machine_scope() {
 #[tokio::test]
 async fn invalid_input_does_not_overwrite_credentials() {
     let (_directory, store) = fixture().await;
-    let port = scoped(&store, "principal", "machine");
+    let port = scoped(&store, "principal", "/workspace-a").await;
     port.save("server", "{}").await.unwrap();
     for payload in ["", "not-json", "{", "{} trailing", "null", "[]"] {
         assert!(matches!(
@@ -124,10 +152,10 @@ async fn invalid_input_does_not_overwrite_credentials() {
 #[tokio::test]
 async fn corrupt_records_and_sql_failures_are_redacted() {
     let (_directory, store) = fixture().await;
-    let port = scoped(&store, "principal", "machine");
+    let port = scoped(&store, "principal", "/workspace-a").await;
     sqlx::query("INSERT INTO mcp_oauth_credentials VALUES (?, ?, ?, ?, ?)")
         .bind("principal")
-        .bind("machine")
+        .bind(&port.workspace_id)
         .bind("server")
         .bind("synthetic-sensitive-invalid-payload")
         .bind("fixture-time")
@@ -154,7 +182,8 @@ async fn corrupt_records_and_sql_failures_are_redacted() {
 #[tokio::test]
 async fn readonly_provider_reads_and_rejects_every_mutation() {
     let (directory, store) = fixture().await;
-    scoped(&store, "principal", "machine")
+    scoped(&store, "principal", "/workspace-a")
+        .await
         .save("server", "{}")
         .await
         .unwrap();
@@ -162,7 +191,7 @@ async fn readonly_provider_reads_and_rejects_every_mutation() {
     let readonly = SqliteThreadStore::open_existing_read_only(directory.path().join("sessions.db"))
         .await
         .unwrap();
-    let port = scoped(&readonly, "principal", "machine");
+    let port = scoped(&readonly, "principal", "/workspace-a").await;
     assert_eq!(port.load("server").await.unwrap().as_deref(), Some("{}"));
     assert_eq!(port.list().await.unwrap(), vec!["server"]);
     assert!(matches!(
@@ -183,7 +212,7 @@ async fn readonly_provider_reads_and_rejects_every_mutation() {
 #[tokio::test]
 async fn closed_shared_pool_rejects_every_operation() {
     let (_directory, store) = fixture().await;
-    let port = scoped(&store, "principal", "machine");
+    let port = scoped(&store, "principal", "/workspace-a").await;
     store.close().await;
     assert!(matches!(
         port.load("server").await,
@@ -235,12 +264,11 @@ async fn current_schema_adds_only_oauth_table_without_version_change_or_json_imp
     let reopened = SqliteThreadStore::new(directory.path().join("sessions.db"))
         .await
         .unwrap();
-    let port = scoped(
-        &reopened,
-        "local",
-        crate::sessions::machine::current().unwrap(),
-    );
-    assert!(port.list().await.unwrap().is_empty());
+    let port = scoped(&reopened, "local", "/workspace-a").await;
+    assert!(matches!(
+        port.list().await,
+        Err(OAuthCredentialError::Unavailable)
+    ));
     let after: Vec<(String, String)> = sqlx::query_as(
         "SELECT name, sql FROM sqlite_schema WHERE sql IS NOT NULL AND name != ? ORDER BY name",
     )
@@ -264,7 +292,7 @@ async fn current_schema_adds_only_oauth_table_without_version_change_or_json_imp
 }
 
 #[tokio::test]
-async fn older_supported_schema_also_creates_oauth_table() {
+async fn mislabeled_v2_schema_is_rejected_without_rebuilding_credentials() {
     let (directory, store) = fixture().await;
     sqlx::query("DROP TABLE mcp_oauth_credentials")
         .execute(&store.database.pool)
@@ -275,11 +303,7 @@ async fn older_supported_schema_also_creates_oauth_table() {
         .await
         .unwrap();
     store.close().await;
-    let reopened = SqliteThreadStore::new(directory.path().join("sessions.db"))
+    assert!(SqliteThreadStore::new(directory.path().join("sessions.db"))
         .await
-        .unwrap();
-    let port = scoped(&reopened, "principal", "machine");
-    port.save("server", "{}").await.unwrap();
-    assert_eq!(port.load("server").await.unwrap().as_deref(), Some("{}"));
-    reopened.close().await;
+        .is_err());
 }

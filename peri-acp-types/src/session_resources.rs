@@ -526,6 +526,13 @@ pub trait SessionResources: Send + Sync {
     ) -> Option<std::sync::Arc<dyn crate::oauth_credentials::OAuthCredentialPort>> {
         None
     }
+    /// 返回已绑定单个 Workspace 的 OAuth 能力；调用方须先取得可信会话归属。
+    fn oauth_credentials_for_workspace(
+        &self,
+        _workspace_id: crate::workspace::WorkspaceId,
+    ) -> Option<std::sync::Arc<dyn crate::oauth_credentials::OAuthCredentialPort>> {
+        None
+    }
     // ── 能力与准入 ──
 
     /// 本次打开的权限、后端能力面；给定 `session` 时附带该会话的执行资格。
@@ -650,12 +657,59 @@ pub trait SessionResources: Send + Sync {
     ) -> SessionResourceResult<Option<String>> {
         Ok(None)
     }
+    async fn session_workspace_id(
+        &self,
+        _id: &ThreadId,
+    ) -> SessionResourceResult<Option<crate::workspace::WorkspaceId>> {
+        Ok(None)
+    }
+
+    async fn list_machines(&self) -> SessionResourceResult<Vec<crate::workspace::MachineInfo>> {
+        Err(SessionResourceError::new(
+            SessionResourceErrorKind::Unsupported,
+        ))
+    }
+
+    async fn list_workspaces(
+        &self,
+        _machine_id: &str,
+    ) -> SessionResourceResult<Vec<crate::workspace::WorkspaceInfo>> {
+        Err(SessionResourceError::new(
+            SessionResourceErrorKind::Unsupported,
+        ))
+    }
+
+    async fn rename_machine(&self, _machine_id: &str, _name: &str) -> SessionResourceResult<()> {
+        Err(SessionResourceError::new(
+            SessionResourceErrorKind::Unsupported,
+        ))
+    }
 
     /// 按 scope/cursor/limit 分页列举；过滤在数据端完成。
     async fn list_sessions(
         &self,
         query: &ScopedThreadQuery,
     ) -> SessionResourceResult<ScopedThreadPage>;
+
+    async fn list_archived_sessions(
+        &self,
+        _query: &ScopedThreadQuery,
+    ) -> SessionResourceResult<ScopedThreadPage> {
+        Err(SessionResourceError::new(
+            SessionResourceErrorKind::Unsupported,
+        ))
+    }
+
+    /// 将根 Session 移入或移出归档；不会改动历史与活动时间。
+    async fn set_session_archived(
+        &self,
+        _id: &ThreadId,
+        _archived: bool,
+    ) -> SessionResourceResult<()> {
+        Err(SessionResourceError::new(
+            SessionResourceErrorKind::Unsupported,
+        ))
+    }
 
     /// 直接子会话 metadata。
     async fn list_children(&self, parent: &ThreadId) -> SessionResourceResult<Vec<ThreadMeta>>;

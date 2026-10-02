@@ -69,6 +69,7 @@ async fn deployment(tmp: &tempfile::TempDir, drive_cron_tick: bool) -> AcpServer
         .await
         .unwrap(),
         session_store_shutdown: None,
+        workspace_id: None,
         cwd: cwd.to_string_lossy().into_owned(),
         bare: false,
         drive_cron_tick,

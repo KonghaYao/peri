@@ -21,6 +21,7 @@
 //! 远程是「durable 数据 + 本机准入」两步，不是分布式事务。
 
 mod claim;
+mod evidence;
 mod gate;
 mod lifecycle;
 mod oauth_credentials;
@@ -284,68 +285,6 @@ impl SessionResourcesImpl {
         Ok(ExecutionAvailability::Available)
     }
 
-    /// 用 canonical 绑定字节做本机复核（`full` 为真时叠一次完整发现快照比对）。
-    ///
-    /// 绑定字节来自数据面：本机组合是本机 `session_bindings`，远程组合是远端会话行。
-    /// 没有绑定行时按 `BindingMissing` 如实失败——执行资格需要一个可复核的绑定。
-    async fn recheck_binding(
-        &self,
-        binding: Option<&SessionBinding>,
-        full: bool,
-    ) -> SessionResourceResult<ResolvedWorkspace> {
-        let binding = binding.ok_or_else(|| {
-            SessionResourceError::new(SessionResourceErrorKind::Workspace(
-                WorkspaceError::BindingMissing,
-            ))
-        })?;
-        self.gate
-            .local()
-            .validate_binding_value(binding, full)
-            .await
-            .map_err(execution_failure)
-    }
-
-    /// 按 id 取数据面绑定字节后复核（只回答「绑定向哪里」的调用方用这个）。
-    async fn recheck_binding_of(
-        &self,
-        id: &ThreadId,
-        full: bool,
-    ) -> SessionResourceResult<ResolvedWorkspace> {
-        let binding = self.gate.data().binding_of(id).await?;
-        self.recheck_binding(binding.as_ref(), full).await
-    }
-
-    /// `Missing` 与 `LegacyConfirmed` 的差别是本机来源证据：无绑定、无父会话、无 frozen，
-    /// 且保存的绝对 cwd 落在本机已登记工作区内，才表达为 legacy 历史；其余的无
-    /// 绑定状态（外来会话、登记缺失）不冒充 legacy。
-    ///
-    /// 这份证据**只属于本机组合**：`legacy_confirmed` 读的是本机 `threads` / `session_bindings`
-    /// / `workspaces`，远端组合里会话行与它的 cwd 都在远端，本机根本没有可读的来源证据。
-    /// 因此远端组合由门面**固定为 false**（端口文档同此），而不是去本机表里碰运气：
-    /// 本机恰有一条同 id 的行就会把远端会话判成 legacy。
-    async fn classify_binding(
-        &self,
-        id: &ThreadId,
-        state: BindingState,
-    ) -> SessionResourceResult<BindingState> {
-        if !matches!(state, BindingState::Missing) {
-            return Ok(state);
-        }
-        if self.home == SessionDataHome::RemoteStore {
-            return Ok(state);
-        }
-        if self
-            .gate
-            .local()
-            .legacy_confirmed(id)
-            .await
-            .map_err(execution_failure)?
-        {
-            return Ok(BindingState::LegacyConfirmed);
-        }
-        Ok(state)
-    }
-
     /// 完整创建的重试：不可变事实一致时只重新建立执行准入。
     ///
     /// 前提（又是同一次创建、工作区证据仍然一致）成立时补上准入；否则保留 identity 并
@@ -408,16 +347,22 @@ impl SessionResourcesImpl {
 
 #[async_trait]
 impl SessionResources for SessionResourcesImpl {
-    fn oauth_credentials(
+    fn oauth_credentials_for_workspace(
         &self,
+        workspace_id: peri_acp_types::workspace::WorkspaceId,
     ) -> Option<Arc<dyn peri_acp_types::oauth_credentials::OAuthCredentialPort>> {
-        self.gate.data().clone().oauth_credentials().map(|inner| {
-            Arc::new(oauth_credentials::LifecycleCredentials::new(
-                inner,
-                self.lifecycle.clone(),
-                self.credential_operations.clone(),
-            )) as Arc<dyn peri_acp_types::oauth_credentials::OAuthCredentialPort>
-        })
+        self.gate
+            .data()
+            .clone()
+            .oauth_credentials_for_workspace(workspace_id)
+            .map(|inner| {
+                Arc::new(oauth_credentials::LifecycleCredentials::new(
+                    inner,
+                    self.lifecycle.clone(),
+                    self.credential_operations.clone(),
+                ))
+                    as Arc<dyn peri_acp_types::oauth_credentials::OAuthCredentialPort>
+            })
     }
     // ── 能力与准入 ──
 
@@ -476,7 +421,7 @@ impl SessionResources for SessionResourcesImpl {
     ) -> SessionResourceResult<Arc<dyn SessionExecutionLease>> {
         self.gate.ensure_session_write()?;
         let facts = self.gate.session_facts(id).await?;
-        let _ = workspace;
+        self.validate_session(id, workspace).await?;
         if let Some(machine_id) = self.gate.data().machine_id_of(id).await? {
             if machine_id
                 != crate::sessions::machine::current().map_err(|_| {
@@ -511,7 +456,11 @@ impl SessionResources for SessionResourcesImpl {
         match self.home {
             SessionDataHome::LocalLibrary => local.create_session(input).await,
             SessionDataHome::RemoteStore => {
-                self.gate.data().save_new_session(input).await?;
+                let workspace = self.recheck_binding(Some(&input.binding), false).await?;
+                self.gate
+                    .data()
+                    .save_new_session_in_workspace(input, &workspace)
+                    .await?;
                 self.admit_saved_creation(input).await
             }
         }
@@ -543,7 +492,11 @@ impl SessionResources for SessionResourcesImpl {
         let lease = match self.home {
             SessionDataHome::LocalLibrary => local.begin_initialization(draft).await?,
             SessionDataHome::RemoteStore => {
-                self.gate.data().save_new_session_draft(draft).await?;
+                let workspace = self.recheck_binding(Some(&draft.binding), false).await?;
+                self.gate
+                    .data()
+                    .save_new_session_draft_in_workspace(draft, &workspace)
+                    .await?;
                 match local.admit_existing(&draft.thread_id, &draft.binding).await {
                     Ok(lease) => lease,
                     Err(error) if error.is_persistence_uncertain() => return Err(error),
@@ -602,40 +555,9 @@ impl SessionResources for SessionResourcesImpl {
     async fn validate_bound_workspace(
         &self,
         id: &ThreadId,
-        _check: BindingRecheck,
+        check: BindingRecheck,
     ) -> SessionResourceResult<ResolvedWorkspace> {
-        let meta = self.gate.data().load_meta(id).await?;
-        let binding = self.gate.data().binding_of(id).await?;
-        let cwd = std::path::PathBuf::from(&meta.cwd);
-        let relative_cwd = binding
-            .as_ref()
-            .map(|binding| binding.cwd_relative_to_workspace.clone())
-            .unwrap_or_default();
-        let mut root = cwd.clone();
-        for _ in relative_cwd.components() {
-            root.pop();
-        }
-        let (project_id, workspace_id) = match binding {
-            Some(binding) => (binding.project_id, binding.workspace_id),
-            None => {
-                use sha2::{Digest, Sha256};
-                let digest = Sha256::digest(id.as_bytes());
-                let identity =
-                    uuid::Uuid::from_bytes(digest[..16].try_into().expect("UUID digest prefix"))
-                        .to_string();
-                (
-                    identity.parse().expect("project UUID"),
-                    identity.parse().expect("workspace UUID"),
-                )
-            }
-        };
-        Ok(ResolvedWorkspace {
-            project_id,
-            workspace_id,
-            cwd,
-            root,
-            relative_cwd,
-        })
+        self.load_workspace_for_session(id, check).await
     }
 
     async fn load_session_history(
@@ -652,12 +574,50 @@ impl SessionResources for SessionResourcesImpl {
     async fn session_environment_id(&self, id: &ThreadId) -> SessionResourceResult<Option<String>> {
         self.gate.data().machine_id_of(id).await
     }
+    async fn session_workspace_id(
+        &self,
+        id: &ThreadId,
+    ) -> SessionResourceResult<Option<peri_acp_types::workspace::WorkspaceId>> {
+        self.gate.data().workspace_id_of(id).await
+    }
+
+    async fn list_machines(
+        &self,
+    ) -> SessionResourceResult<Vec<peri_acp_types::workspace::MachineInfo>> {
+        self.gate.data().list_machines().await
+    }
+
+    async fn list_workspaces(
+        &self,
+        machine_id: &str,
+    ) -> SessionResourceResult<Vec<peri_acp_types::workspace::WorkspaceInfo>> {
+        self.gate.data().list_workspaces(machine_id).await
+    }
+
+    async fn rename_machine(&self, machine_id: &str, name: &str) -> SessionResourceResult<()> {
+        self.gate.data().rename_machine(machine_id, name).await
+    }
 
     async fn list_sessions(
         &self,
         query: &ScopedThreadQuery,
     ) -> SessionResourceResult<ScopedThreadPage> {
         self.gate.data().list_sessions(query).await
+    }
+
+    async fn list_archived_sessions(
+        &self,
+        query: &ScopedThreadQuery,
+    ) -> SessionResourceResult<ScopedThreadPage> {
+        self.gate.data().list_archived_sessions(query).await
+    }
+
+    async fn set_session_archived(
+        &self,
+        id: &ThreadId,
+        archived: bool,
+    ) -> SessionResourceResult<()> {
+        self.gate.data().set_session_archived(id, archived).await
     }
 
     async fn list_children(&self, parent: &ThreadId) -> SessionResourceResult<Vec<ThreadMeta>> {
@@ -694,7 +654,17 @@ impl SessionResources for SessionResourcesImpl {
         }
         // 目标快照先完整落库（数据面一次事务），再建立执行准入；准入失败时数据已保存，
         // 如实报告「已保存、未准入」，不重造目标快照。
-        self.gate.data().save_fork(fork).await?;
+        if self.home == SessionDataHome::RemoteStore {
+            let workspace = self
+                .recheck_binding(Some(&fork.target.binding), false)
+                .await?;
+            self.gate
+                .data()
+                .save_fork_in_workspace(fork, &workspace)
+                .await?;
+        } else {
+            self.gate.data().save_fork(fork).await?;
+        }
         self.admit_saved_creation(&fork.target).await
     }
 

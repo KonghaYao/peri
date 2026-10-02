@@ -270,12 +270,12 @@ async fn test_missing_saved_directory_loads_history_without_tools_then_can_upgra
         Some("must not write")
     );
     std::fs::create_dir(&fixture.cwd).unwrap();
-    let response = fixture
+    let error = fixture
         .request("session/load", &json!({"sessionId":id}))
         .await
-        .unwrap();
-    assert!(read_only(&response).is_none());
-    fixture.assert_owned_history(&id);
+        .unwrap_err();
+    assert_eq!(error.code, -32010);
+    fixture.assert_read_only_history(&id);
     assert_eq!(binding_state(&fixture.cfg, &id).await, binding);
     assert_eq!(frozen_state(&fixture.cfg, &id).await, frozen);
     fixture.close(&id).await;

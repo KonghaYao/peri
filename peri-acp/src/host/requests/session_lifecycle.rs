@@ -525,15 +525,17 @@ pub(crate) async fn handle_list(params: &Value, cfg: &AcpServerConfig) -> Result
             .and_then(Value::as_u64)
             .unwrap_or(100)
             .clamp(1, 500) as u32;
-        let page = cfg
-            .session_resources
-            .list_sessions(&peri_acp_types::workspace::ScopedThreadQuery {
-                scope,
-                cursor,
-                limit,
-            })
-            .await
-            .map_err(super::super::workspace::resource_error)?;
+        let query = peri_acp_types::workspace::ScopedThreadQuery {
+            scope,
+            cursor,
+            limit,
+        };
+        let page = if extension.get("archived").and_then(Value::as_bool) == Some(true) {
+            cfg.session_resources.list_archived_sessions(&query).await
+        } else {
+            cfg.session_resources.list_sessions(&query).await
+        }
+        .map_err(super::super::workspace::resource_error)?;
         let entries = page
             .entries
             .iter()

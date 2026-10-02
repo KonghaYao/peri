@@ -585,6 +585,8 @@ async fn system_discovery_is_live_while_ordinary_server_uses_cache() {
     let (mut tasks, spawner) = super::super::task_scope::McpTaskOwner::new();
     let mut pool = McpClientPool::new_pending_with_spawner(spawner);
     pool.resource_cache = crate::mcp::resource_cache::McpResourceCache::isolated_for_test();
+    pool.bind_workspace_scope(peri_acp_types::workspace::WorkspaceId::new())
+        .unwrap();
     let pool = Arc::new(pool);
 
     for round in 1..=2 {

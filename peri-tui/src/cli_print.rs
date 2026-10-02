@@ -151,6 +151,7 @@ pub async fn run_print(
         config_source: config_source.clone(),
         permission_mode: shared_permission,
         session_resources: session_resources.clone(),
+        workspace_id: None,
         session_store_shutdown: Some(Box::new(session_store_shutdown)),
         cwd: cwd.clone(),
         bare,

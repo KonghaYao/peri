@@ -616,7 +616,7 @@ impl SessionFixture {
                 schema_version: SESSION_BINDING_VERSION,
                 revision: 1,
                 project_id: self.workspace.project_id,
-                workspace_id: self.workspace.workspace_id,
+                workspace_id: self.workspace.execution_registration_id,
                 cwd_relative_to_workspace: self.workspace.relative_cwd.clone(),
             },
             frozen: FrozenSnapshotBytes::new("{\"version\":1,\"fixture\":true}"),

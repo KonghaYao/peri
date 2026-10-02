@@ -181,12 +181,12 @@ async fn test_flush_persistence_makes_appends_visible() {
 /// 已经进入内存但未落库的内容不会被说成已保存。
 #[tokio::test]
 async fn test_flush_persistence_failure_is_sticky() {
-    let mut session = TestSession::open().await;
-    let mut transcript =
-        MessageTranscript::new().with_persistence(session.resources(), session.thread_id.clone());
+    let session = TestSession::open().await;
+    let mut transcript = MessageTranscript::new().with_persistence(
+        session.read_only_resources().await,
+        session.thread_id.clone(),
+    );
     transcript.append(make_human("cannot be persisted"));
-    // 丢弃执行所有权：此后写入按 LeaseRequired 真实失败（不是 mock 假装失败）
-    session.release_lease();
 
     let error = transcript.flush_persistence().await.unwrap_err();
     let repeated = transcript.flush_persistence().await.unwrap_err();

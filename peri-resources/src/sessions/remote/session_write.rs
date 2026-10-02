@@ -20,7 +20,7 @@ use peri_acp_types::session_resources::{
 };
 use peri_acp_types::store::MessageFlags;
 use peri_acp_types::thread::ThreadId;
-use peri_acp_types::workspace::{SessionBinding, WorkspaceError};
+use peri_acp_types::workspace::{ResolvedWorkspace, SessionBinding, WorkspaceError};
 
 use crate::sessions::data::ensure_child_relation;
 
@@ -32,6 +32,91 @@ use super::session_sql::{self, SessionInsert};
 use super::sql::StatementSpec;
 
 impl RemoteSessionData {
+    fn workspace_registration_statements(
+        workspace: &ResolvedWorkspace,
+    ) -> SessionResourceResult<Vec<StatementSpec>> {
+        let machine_id = crate::sessions::machine::current()
+            .map_err(|_| invalid_input("machine identity is not initialized"))?;
+        let path = workspace
+            .root
+            .to_str()
+            .ok_or_else(|| invalid_input("workspace path is not UTF-8"))?;
+        let evidence = workspace
+            .discovery_snapshot
+            .as_deref()
+            .ok_or_else(|| invalid_input("workspace creation evidence is unavailable"))?;
+        let snapshot: serde_json::Value = serde_json::from_str(evidence)
+            .map_err(|_| invalid_input("workspace creation evidence is invalid"))?;
+        if snapshot.get("root").and_then(serde_json::Value::as_str) != Some(path) {
+            return Err(invalid_input(
+                "workspace creation evidence does not match root",
+            ));
+        }
+        let discovered = ["common_dir", "private_dir"]
+            .iter()
+            .any(|field| snapshot.get(*field).is_some_and(|value| !value.is_null()));
+        Ok(vec![
+            StatementSpec::new("INSERT OR IGNORE INTO machines(id, name, identity_kind) VALUES (?1, '我的电脑', 'known')",
+                vec![turso_serverless::Value::Text(machine_id.to_owned())]),
+            StatementSpec::new("INSERT OR IGNORE INTO workspaces(id, machine_id, path, path_source) VALUES (?1, ?2, ?3, ?4)",
+                vec![turso_serverless::Value::Text(workspace.workspace_id.to_string()),
+                    turso_serverless::Value::Text(machine_id.to_owned()),
+                    turso_serverless::Value::Text(path.to_owned()),
+                    turso_serverless::Value::Text(if discovered { "discovered" } else { "unverified" }.to_owned())]),
+            StatementSpec::new("INSERT INTO peri_store_meta(singleton) SELECT 0 WHERE NOT EXISTS (SELECT 1 FROM workspaces WHERE id = ?1 AND machine_id = ?2 AND path = ?3)",
+                vec![turso_serverless::Value::Text(workspace.workspace_id.to_string()),
+                    turso_serverless::Value::Text(machine_id.to_owned()),
+                    turso_serverless::Value::Text(path.to_owned())]),
+        ])
+    }
+
+    pub(super) async fn write_new_session_in_workspace(
+        &self,
+        input: &NewSession,
+        workspace: &ResolvedWorkspace,
+    ) -> SessionResourceResult<()> {
+        if input.meta.parent_thread_id.is_some() {
+            return Err(invalid_input(
+                "child sessions must be saved through the child path",
+            ));
+        }
+        let mut row = session_sql::session_insert(input, 0, None);
+        row.owner_workspace_id = Some(workspace.workspace_id);
+        row.discovery_snapshot = workspace.discovery_snapshot.as_deref();
+        let mut statements = Self::workspace_registration_statements(workspace)?;
+        statements.extend(session_sql::insert_session_statements(&row)?);
+        let inputs = session_inputs(input);
+        self.commit_effects("create_session", &inputs, statements, &input.thread_id)
+            .await
+            .map(|_| ())
+    }
+
+    pub(super) async fn write_new_session_draft_in_workspace(
+        &self,
+        draft: &NewSessionDraft,
+        workspace: &ResolvedWorkspace,
+    ) -> SessionResourceResult<()> {
+        if draft.meta.parent_thread_id.is_some() {
+            return Err(invalid_input(
+                "child sessions must be saved through the child path",
+            ));
+        }
+        let mut statements = Self::workspace_registration_statements(workspace)?;
+        statements.extend(session_sql::insert_session_draft_statements(
+            draft,
+            Some(workspace.workspace_id),
+            workspace.discovery_snapshot.as_deref(),
+        )?);
+        let inputs = draft_inputs(draft);
+        self.commit_effects(
+            "begin_initialization",
+            &inputs,
+            statements,
+            &draft.thread_id,
+        )
+        .await
+        .map(|_| ())
+    }
     /// 保存新会话：meta + 不可变绑定 + frozen 完整落库（执行准入由本机执行面另行完成）。
     pub(super) async fn write_new_session(&self, input: &NewSession) -> SessionResourceResult<()> {
         // 远程新建只接受 **root**：带父的会话必须走 `save_child`，那里才有父子/根归属判定
@@ -71,7 +156,7 @@ impl RemoteSessionData {
                 "child sessions must be saved through the child path",
             ));
         }
-        let statements = session_sql::insert_session_draft_statements(draft)?;
+        let statements = session_sql::insert_session_draft_statements(draft, None, None)?;
         let inputs = draft_inputs(draft);
         self.commit_effects(
             "begin_initialization",
@@ -115,6 +200,22 @@ impl RemoteSessionData {
 
     /// 保存 fork：source 不变，目标带映射后的 payload 与 flags。
     pub(super) async fn write_fork(&self, fork: &ForkSnapshot) -> SessionResourceResult<()> {
+        self.write_fork_with_workspace(fork, None).await
+    }
+
+    pub(super) async fn write_fork_in_workspace(
+        &self,
+        fork: &ForkSnapshot,
+        workspace: &ResolvedWorkspace,
+    ) -> SessionResourceResult<()> {
+        self.write_fork_with_workspace(fork, Some(workspace)).await
+    }
+
+    async fn write_fork_with_workspace(
+        &self,
+        fork: &ForkSnapshot,
+        workspace: Option<&ResolvedWorkspace>,
+    ) -> SessionResourceResult<()> {
         if fork.target.thread_id == fork.source_id {
             return Err(invalid_input("fork target must differ from its source"));
         }
@@ -135,8 +236,17 @@ impl RemoteSessionData {
         if !self.exists(&fork.source_id).await? {
             return Err(not_found());
         }
-        let insert = session_sql::session_insert(&fork.target, fork.payloads.len() as i64, None);
-        let mut statements = session_sql::insert_session_statements(&insert)?;
+        let mut insert =
+            session_sql::session_insert(&fork.target, fork.payloads.len() as i64, None);
+        if let Some(workspace) = workspace {
+            insert.owner_workspace_id = Some(workspace.workspace_id);
+            insert.discovery_snapshot = workspace.discovery_snapshot.as_deref();
+        }
+        let mut statements = workspace
+            .map(Self::workspace_registration_statements)
+            .transpose()?
+            .unwrap_or_default();
+        statements.extend(session_sql::insert_session_statements(&insert)?);
         for payload in &fork.payloads {
             statements.push(session_sql::insert_message_statement(
                 &fork.target.thread_id,

@@ -18,6 +18,7 @@ mod mcp_oauth;
 mod plugin;
 mod rewind;
 pub(crate) mod session_lifecycle;
+mod storage_v2;
 mod user_input;
 mod workflow;
 
@@ -85,6 +86,10 @@ pub(crate) async fn handle_request(
         }
         "session/load" => session_lifecycle::handle_load(params, cfg, sessions, transport).await,
         "session/list" => session_lifecycle::handle_list(params, cfg).await,
+        "peri/machines/list" => storage_v2::machines(cfg).await,
+        "peri/workspaces/list" => storage_v2::workspaces(params, cfg).await,
+        "peri/machines/rename" => storage_v2::rename_machine(params, cfg).await,
+        "peri/session/archive" => storage_v2::archive_session(params, cfg).await,
         "peri/session_context" => session_lifecycle::handle_context(params, cfg).await,
         "session/metadata" => session_lifecycle::handle_metadata(params, cfg, false).await,
         "peri/session_history" => session_lifecycle::handle_metadata(params, cfg, true).await,

@@ -183,6 +183,7 @@ pub(super) struct RemoteSessionData {
     /// 连接代际门禁：哪一代已经不可信。
     gate: Arc<ConnectionGate>,
     store_id: StoreId,
+    pub(super) schema_version: i64,
     /// thread → root 解析缓存：父关系创建后不变（本 adapter 不提供改父行为），因此
     /// 同一条会话只需一次远端上溯；解析失败不缓存，避免把网络失败固化成事实。
     roots: RwLock<HashMap<ThreadId, ThreadId>>,
@@ -239,17 +240,32 @@ impl RemoteSessionData {
                 .await?;
             store
                 .apply_schema(vec![StatementSpec::new(
+                    "INSERT OR IGNORE INTO machines(id, name, identity_kind) VALUES (?1, '我的电脑', 'known')",
+                    vec![Value::Text(crate::sessions::machine::current().map_err(|_| unsupported_behavior("machine identity is not initialized"))?.to_owned())],
+                )])
+                .await?;
+            store
+                .apply_schema(vec![StatementSpec::new(
                     crate::sessions::canonical::BACKFILL_ENVIRONMENTS_SQL,
                     vec![Value::Text(format!("legacy:{}", store_id.as_str()))],
                 )])
                 .await?;
         }
+        let schema_version = match store.read_identity().await? {
+            StoreIdentityRead::Present(snapshot) => snapshot.schema_version,
+            _ => {
+                return Err(unsupported_behavior(
+                    "remote store identity missing after initialization",
+                ))
+            }
+        };
         Ok((
             Self {
                 slot: RwLock::new(ConnectionSlot::serving(store)),
                 factory,
                 gate,
                 store_id,
+                schema_version,
                 roots: RwLock::new(HashMap::new()),
             },
             initialization,
@@ -396,6 +412,7 @@ impl RemoteSessionData {
             factory: Arc::new(NoConnectionFactory),
             gate: Arc::new(ConnectionGate::default()),
             store_id,
+            schema_version: schema::REMOTE_SCHEMA_VERSION,
             roots: RwLock::new(HashMap::new()),
         }
     }
@@ -416,6 +433,7 @@ impl RemoteSessionData {
             factory,
             gate,
             store_id,
+            schema_version: schema::REMOTE_SCHEMA_VERSION,
             roots: RwLock::new(HashMap::new()),
         }
     }
@@ -570,36 +588,90 @@ pub(super) fn invalid_input(detail: &str) -> SessionResourceError {
 }
 
 /// 本阶段尚未落地的行为：明确失败，并留下行为名便于诊断（不含任何会话内容）。
-fn unsupported_behavior(behavior: &'static str) -> SessionResourceError {
+pub(super) fn unsupported_behavior(behavior: &'static str) -> SessionResourceError {
     tracing::debug!(behavior, "remote session data behavior is not implemented");
     SessionResourceError::new(SessionResourceErrorKind::Unsupported)
 }
 
 #[async_trait]
 impl SessionDataPort for RemoteSessionData {
-    fn oauth_credentials(
+    fn oauth_credentials_for_workspace(
         self: Arc<Self>,
+        workspace_id: peri_acp_types::workspace::WorkspaceId,
     ) -> Option<Arc<dyn peri_acp_types::oauth_credentials::OAuthCredentialPort>> {
+        if self.schema_version <= 11 {
+            return None;
+        }
         Some(Arc::new(super::oauth_credentials::RemoteOAuthCredentials(
             self,
+            workspace_id,
         )))
     }
 
     async fn machine_id_of(&self, id: &ThreadId) -> SessionResourceResult<Option<String>> {
         let store = self.store().await?;
-        if store.fetch_row(&StatementSpec::bare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'session_environments'")).await?.is_none() {
-            return Ok(None);
+        if self.schema_version <= 11 {
+            let row = store
+                .fetch_row(&StatementSpec::new(
+                    "SELECT machine_id FROM session_environments WHERE thread_id = ?1",
+                    vec![Value::Text(id.clone())],
+                ))
+                .await?;
+            return Ok(row.and_then(|values| super::sql::text_at(&values, 0).map(str::to_owned)));
         }
         let row = store
             .fetch_row(&StatementSpec::new(
-                "SELECT machine_id FROM session_environments WHERE thread_id = ?1",
+                "SELECT w.machine_id FROM threads t JOIN workspaces w ON w.id = t.workspace_id WHERE t.id = ?1",
                 vec![Value::Text(id.clone())],
             ))
             .await?;
         Ok(row.and_then(|values| super::sql::text_at(&values, 0).map(str::to_owned)))
     }
+    async fn workspace_id_of(
+        &self,
+        id: &ThreadId,
+    ) -> SessionResourceResult<Option<peri_acp_types::workspace::WorkspaceId>> {
+        if self.schema_version <= 11 {
+            return Ok(None);
+        }
+        let store = self.store().await?;
+        let row = store
+            .fetch_row(&StatementSpec::new(
+                "SELECT workspace_id FROM threads WHERE id = ?1",
+                vec![Value::Text(id.clone())],
+            ))
+            .await?;
+        row.map(|row| {
+            super::sql::text_at(&row, 0)
+                .ok_or_else(|| super::session_codec::corrupt("invalid remote workspace id"))?
+                .parse()
+                .map_err(|_| super::session_codec::corrupt("invalid remote workspace id"))
+        })
+        .transpose()
+    }
+    async fn list_machines(
+        &self,
+    ) -> SessionResourceResult<Vec<peri_acp_types::workspace::MachineInfo>> {
+        self.catalog_machines().await
+    }
+    async fn list_workspaces(
+        &self,
+        machine_id: &str,
+    ) -> SessionResourceResult<Vec<peri_acp_types::workspace::WorkspaceInfo>> {
+        self.catalog_workspaces(machine_id).await
+    }
+    async fn rename_machine(&self, machine_id: &str, name: &str) -> SessionResourceResult<()> {
+        self.catalog_rename_machine(machine_id, name).await
+    }
     async fn save_new_session(&self, input: &NewSession) -> SessionResourceResult<()> {
         self.write_new_session(input).await
+    }
+    async fn save_new_session_in_workspace(
+        &self,
+        input: &NewSession,
+        workspace: &ResolvedWorkspace,
+    ) -> SessionResourceResult<()> {
+        self.write_new_session_in_workspace(input, workspace).await
     }
 
     async fn save_new_session_draft(
@@ -607,6 +679,14 @@ impl SessionDataPort for RemoteSessionData {
         draft: &peri_acp_types::session_resources::NewSessionDraft,
     ) -> SessionResourceResult<()> {
         self.write_new_session_draft(draft).await
+    }
+    async fn save_new_session_draft_in_workspace(
+        &self,
+        draft: &peri_acp_types::session_resources::NewSessionDraft,
+        workspace: &ResolvedWorkspace,
+    ) -> SessionResourceResult<()> {
+        self.write_new_session_draft_in_workspace(draft, workspace)
+            .await
     }
 
     async fn commit_frozen(
@@ -662,6 +742,23 @@ impl SessionDataPort for RemoteSessionData {
         self.binding_of(id).await
     }
 
+    async fn binding_discovery_snapshot(
+        &self,
+        id: &ThreadId,
+    ) -> SessionResourceResult<Option<String>> {
+        self.read_binding_discovery_snapshot(id).await
+    }
+
+    async fn complete_legacy_binding_discovery(
+        &self,
+        id: &ThreadId,
+        binding: &SessionBinding,
+        workspace: &ResolvedWorkspace,
+    ) -> SessionResourceResult<()> {
+        self.write_complete_legacy_binding_discovery(id, binding, workspace)
+            .await
+    }
+
     async fn session_root(&self, id: &ThreadId) -> SessionResourceResult<ThreadId> {
         // 远端父链的根；上溯失败按「解析不出」退回自身（范围变窄，但不会把未知当成已知）。
         Ok(self.root_for(id).await)
@@ -672,6 +769,44 @@ impl SessionDataPort for RemoteSessionData {
         query: &ScopedThreadQuery,
     ) -> SessionResourceResult<ScopedThreadPage> {
         self.read_page(query).await
+    }
+    async fn list_archived_sessions(
+        &self,
+        query: &ScopedThreadQuery,
+    ) -> SessionResourceResult<ScopedThreadPage> {
+        self.read_page_by_archive(query, true).await
+    }
+    async fn set_session_archived(
+        &self,
+        id: &ThreadId,
+        archived: bool,
+    ) -> SessionResourceResult<()> {
+        let store = self.store().await?;
+        let row = store
+            .fetch_row(&StatementSpec::new(
+                "SELECT parent_thread_id, frozen_context FROM threads WHERE id = ?1",
+                vec![Value::Text(id.clone())],
+            ))
+            .await?
+            .ok_or_else(not_found)?;
+        if !matches!(row.first(), Some(Value::Null)) {
+            return Err(invalid_input("child sessions cannot be archived"));
+        }
+        if !matches!(row.get(1), Some(Value::Text(_))) {
+            return Err(invalid_input("draft sessions cannot be archived"));
+        }
+        let counts = self.commit_effects("set_session_archived", &[id.clone(), archived.to_string()],
+            vec![StatementSpec::new(
+                "UPDATE threads SET archived = ?1 WHERE id = ?2 AND parent_thread_id IS NULL AND frozen_context IS NOT NULL",
+                vec![Value::Integer(i64::from(archived)), Value::Text(id.clone())],
+            )], id).await?;
+        match counts.first() {
+            None | Some(1) => Ok(()),
+            Some(0) => Err(invalid_input("session is not an archivable root")),
+            _ => Err(super::session_codec::corrupt(
+                "archive updated multiple sessions",
+            )),
+        }
     }
 
     async fn list_children(&self, parent: &ThreadId) -> SessionResourceResult<Vec<ThreadMeta>> {
@@ -692,6 +827,13 @@ impl SessionDataPort for RemoteSessionData {
 
     async fn save_fork(&self, fork: &ForkSnapshot) -> SessionResourceResult<()> {
         self.write_fork(fork).await
+    }
+    async fn save_fork_in_workspace(
+        &self,
+        fork: &ForkSnapshot,
+        workspace: &ResolvedWorkspace,
+    ) -> SessionResourceResult<()> {
+        self.write_fork_in_workspace(fork, workspace).await
     }
 
     async fn save_child(&self, child: &ChildSnapshot) -> SessionResourceResult<()> {

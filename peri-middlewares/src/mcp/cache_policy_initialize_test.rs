@@ -4,6 +4,8 @@ use super::*;
 async fn configuration_policy_is_installed_before_empty_pool_becomes_ready() {
     for setting in [None, Some(true), Some(false)] {
         let pool = Arc::new(McpClientPool::new_pending());
+        pool.bind_workspace_scope(peri_acp_types::workspace::WorkspaceId::new())
+            .unwrap();
         let (status, received) = tokio::sync::watch::channel(McpInitStatus::Pending);
         let directory = tempfile::tempdir().unwrap();
         let config = super::super::config::McpConfigFile {
@@ -118,6 +120,8 @@ async fn bound_configuration_snapshot_freezes_cache_and_files_until_new_pool() {
 async fn bare_configuration_snapshot_ignores_file_cache_restrictions() {
     let directory = tempfile::tempdir().unwrap();
     let pool = Arc::new(McpClientPool::new_pending());
+    pool.bind_workspace_scope(peri_acp_types::workspace::WorkspaceId::new())
+        .unwrap();
     pool.set_configuration_snapshot(frozen_snapshot(directory.path(), false))
         .unwrap();
     let (status, received) = tokio::sync::watch::channel(McpInitStatus::Pending);

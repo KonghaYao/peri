@@ -1,7 +1,14 @@
 use super::super::failure::RemoteFailureClass;
 use super::super::schema::StoreId;
 use super::*;
-use crate::sessions::canonical::CREATE_OAUTH_CREDENTIALS_TABLE_SQL;
+use crate::sessions::canonical::{
+    CREATE_V2_OAUTH_CREDENTIALS_TABLE_SQL,
+    DELETE_ALL_V2_OAUTH_CREDENTIALS_SQL as DELETE_ALL_OAUTH_CREDENTIALS_SQL,
+    DELETE_V2_OAUTH_CREDENTIAL_SQL as DELETE_OAUTH_CREDENTIAL_SQL,
+    LIST_V2_OAUTH_CREDENTIALS_SQL as LIST_OAUTH_CREDENTIALS_SQL,
+    SELECT_V2_OAUTH_CREDENTIAL_SQL as SELECT_OAUTH_CREDENTIAL_SQL,
+    UPSERT_V2_OAUTH_CREDENTIAL_SQL as UPSERT_OAUTH_CREDENTIAL_SQL,
+};
 use crate::sessions::data::SessionDataPort;
 use sqlx::{Connection, Row, SqliteConnection};
 
@@ -37,7 +44,29 @@ async fn database() -> SqliteConnection {
     let mut connection = SqliteConnection::connect("sqlite::memory:").await.unwrap();
     execute(
         &mut connection,
-        StatementSpec::bare(CREATE_OAUTH_CREDENTIALS_TABLE_SQL),
+        StatementSpec::bare(crate::sessions::canonical::CREATE_V2_MACHINES_TABLE_SQL),
+    )
+    .await;
+    execute(
+        &mut connection,
+        StatementSpec::bare(crate::sessions::canonical::CREATE_V2_WORKSPACES_TABLE_SQL),
+    )
+    .await;
+    sqlx::query("INSERT INTO machines VALUES ('test-machine', 'Test', 'known')")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    for id in ["machine", "first", "second"] {
+        sqlx::query("INSERT INTO workspaces VALUES (?1, 'test-machine', ?2, 'unverified')")
+            .bind(id)
+            .bind(format!("/test/{id}"))
+            .execute(&mut connection)
+            .await
+            .unwrap();
+    }
+    execute(
+        &mut connection,
+        StatementSpec::bare(CREATE_V2_OAUTH_CREDENTIALS_TABLE_SQL),
     )
     .await;
     connection
@@ -351,13 +380,15 @@ fn writable_initialization_uses_shared_ddl() {
     let plan = super::super::session_schema::initialization_plan();
     assert!(plan
         .iter()
-        .any(|spec| spec.sql == CREATE_OAUTH_CREDENTIALS_TABLE_SQL && spec.params.is_empty()));
+        .any(|spec| spec.sql == CREATE_V2_OAUTH_CREDENTIALS_TABLE_SQL && spec.params.is_empty()));
 }
 
 #[tokio::test]
 async fn getter_returns_wrapper_and_invalid_input_is_rejected_without_storage() {
     let data = Arc::new(RemoteSessionData::closed_for_test(StoreId::mint()));
-    let port = data.oauth_credentials().unwrap();
+    let port = data
+        .oauth_credentials_for_workspace(peri_acp_types::workspace::WorkspaceId::new())
+        .unwrap();
     assert!(matches!(
         port.load("").await,
         Err(OAuthCredentialError::InvalidInput)

@@ -1,9 +1,70 @@
+use super::MachineAction;
+use anyhow::{Context, Result, bail, ensure};
 use peri_acp_types::session_resources::{SessionResourceError, SessionResourceErrorKind};
 use peri_acp_types::session_store::SessionStoreDeployment;
 use peri_acp_types::thread::{ThreadId, ThreadMeta};
+use peri_acp_types::workspace::MachineIdentityKind;
+use peri_acp_types::workspace::{MachineInfo, WorkspaceInfo};
 use peri_resources::{StoreOpenFailure, classify_open_failure};
 use serde::Serialize;
 use uuid::Uuid;
+
+pub(crate) async fn run_machine_adopt(
+    action: MachineAction,
+    deployment: SessionStoreDeployment,
+) -> Result<()> {
+    let MachineAction::Adopt {
+        target,
+        current,
+        apply,
+        confirm_no_active_executions,
+    } = action;
+    let target = Uuid::parse_str(&target)
+        .context("target Machine ID must be a UUID")?
+        .to_string();
+    let resources = peri_resources::Resources::open_deployment(&deployment).await?;
+    let sessions = resources.session_resources();
+    let current_id = peri_resources::sessions::current_machine_id()?.to_owned();
+    let machines = sessions.list_machines().await?;
+    let selected = machines
+        .iter()
+        .find(|machine| machine.id == target)
+        .context("target Machine ID is not registered in this store")?;
+    ensure!(
+        selected.identity_kind == MachineIdentityKind::Known,
+        "legacy unknown identity cannot be adopted"
+    );
+    let workspaces = sessions.list_workspaces(&target).await?;
+    println!("Current Machine ID: {current_id}");
+    println!("Adopt: {} ({target})", selected.name.escape_debug());
+    for workspace in workspaces {
+        println!(
+            "  {}  {}",
+            workspace.id,
+            workspace.path.to_string_lossy().escape_debug()
+        );
+    }
+    if !apply {
+        println!(
+            "Review this identity, then rerun with --current {current_id} --apply --confirm-no-active-executions."
+        );
+        return Ok(());
+    }
+    ensure!(
+        confirm_no_active_executions,
+        "--apply requires --confirm-no-active-executions"
+    );
+    let Some(expected) = current else {
+        bail!("--apply requires --current with the displayed Machine ID");
+    };
+    ensure!(
+        Uuid::parse_str(&expected)?.to_string() == current_id,
+        "current Machine ID changed; review the catalog again"
+    );
+    peri_resources::sessions::adopt_file_identity(&current_id, &target)?;
+    println!("Machine identity saved. Restart Peri to use {target}.");
+    Ok(())
+}
 
 const SCHEMA_VERSION: u8 = 1;
 
@@ -25,6 +86,87 @@ struct SessionMetaDtoV1 {
     message_count: usize,
     parent_thread_id: Option<String>,
     persisted_agent_status: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MachineCatalogEntry {
+    #[serde(flatten)]
+    machine: MachineInfo,
+    workspaces: Vec<WorkspaceInfo>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MachineCatalogDto {
+    current_machine_id: String,
+    machines: Vec<MachineCatalogEntry>,
+}
+
+pub(crate) async fn run_meta_machines(
+    deployment: SessionStoreDeployment,
+    json: bool,
+) -> MetaCommandOutcome {
+    let resources = match peri_resources::Resources::open_deployment(&deployment).await {
+        Ok(resources) => resources,
+        Err(error) => return error_outcome(map_open_error(&error), json),
+    };
+    let sessions = resources.session_resources();
+    let current_machine_id = match peri_resources::sessions::current_machine_id() {
+        Ok(id) => id.to_owned(),
+        Err(_) => return error_outcome(MetaErrorKind::InternalError, json),
+    };
+    let machines = match sessions.list_machines().await {
+        Ok(machines) => machines,
+        Err(error) => return error_outcome(map_resource_error(&error), json),
+    };
+    let mut entries = Vec::with_capacity(machines.len());
+    for machine in machines {
+        let workspaces = match sessions.list_workspaces(&machine.id).await {
+            Ok(workspaces) => workspaces,
+            Err(error) => return error_outcome(map_resource_error(&error), json),
+        };
+        entries.push(MachineCatalogEntry {
+            machine,
+            workspaces,
+        });
+    }
+    let output = if json {
+        match serde_json::to_string(&MachineCatalogDto {
+            current_machine_id: current_machine_id.clone(),
+            machines: entries,
+        }) {
+            Ok(output) => output,
+            Err(_) => return error_outcome(MetaErrorKind::InternalError, true),
+        }
+    } else {
+        let mut output = format!("Current Machine ID: {current_machine_id}\n");
+        for entry in entries {
+            use std::fmt::Write;
+            let current = if entry.machine.is_current { " *" } else { "" };
+            let _ = writeln!(
+                output,
+                "{} ({}){}",
+                escape_human(&entry.machine.name),
+                entry.machine.id,
+                current
+            );
+            for workspace in entry.workspaces {
+                let _ = writeln!(
+                    output,
+                    "  {}  {}",
+                    workspace.id,
+                    escape_human(&workspace.path.to_string_lossy())
+                );
+            }
+        }
+        output.trim_end_matches('\n').to_owned()
+    };
+    MetaCommandOutcome {
+        stdout: Some(format!("{output}\n")),
+        stderr: None,
+        exit_code: 0,
+    }
 }
 
 impl From<ThreadMeta> for SessionMetaDtoV1 {

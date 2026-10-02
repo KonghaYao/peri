@@ -420,3 +420,35 @@ fn test_meta_grammar_allows_session_store_options() {
         assert!(validate_cli(&cli).is_err());
     }
 }
+
+#[test]
+fn machine_catalog_and_explicit_adoption_parse_as_distinct_actions() {
+    let catalog = Cli::try_parse_from(["peri", "meta", "machines", "--json"]).unwrap();
+    assert!(matches!(
+        catalog.command,
+        Some(Commands::Meta {
+            action: MetaAction::Machines { json: true }
+        })
+    ));
+    let adopt = Cli::try_parse_from([
+        "peri",
+        "machine",
+        "adopt",
+        "550e8400-e29b-41d4-a716-446655440000",
+        "--current",
+        "550e8400-e29b-41d4-a716-446655440001",
+        "--apply",
+        "--confirm-no-active-executions",
+    ])
+    .unwrap();
+    assert!(matches!(
+        adopt.command,
+        Some(Commands::Machine {
+            action: MachineAction::Adopt {
+                apply: true,
+                confirm_no_active_executions: true,
+                ..
+            }
+        })
+    ));
+}

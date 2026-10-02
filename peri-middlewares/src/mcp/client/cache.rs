@@ -20,6 +20,7 @@ pub(crate) fn cache_scope_allows_persistence(scope: Option<CacheScope>) -> bool 
 
 enum CacheDenial {
     Pending,
+    WorkspaceUnbound,
     Configuration,
     DynamicConnection,
     Credentials,
@@ -27,7 +28,9 @@ enum CacheDenial {
 
 impl McpClientPool {
     pub(crate) async fn configure_peer_cache(&self, peer: &Peer<RoleClient>) {
-        if self.cache_policy.get() != Some(&McpCachePolicy::Enabled) {
+        if self.cache_policy.get() != Some(&McpCachePolicy::Enabled)
+            || self.workspace_scope.get().is_none()
+        {
             peer.set_response_cache_config(rmcp::service::ClientCacheConfig::disabled())
                 .await;
         }
@@ -57,6 +60,9 @@ impl McpClientPool {
     }
 
     fn cache_denial(&self, connection: &McpConnectionKey) -> Option<CacheDenial> {
+        if self.workspace_scope.get().is_none() {
+            return Some(CacheDenial::WorkspaceUnbound);
+        }
         match self.cache_policy.get() {
             None => return Some(CacheDenial::Pending),
             Some(McpCachePolicy::Disabled) => return Some(CacheDenial::Configuration),
@@ -272,6 +278,9 @@ impl McpClientPool {
     }
 
     pub(crate) async fn invalidate_resource_cache(&self, server_name: &str, uri: Option<&str>) {
+        if self.workspace_scope.get().is_none() {
+            return;
+        }
         let origin = self.cache_origin(server_name);
         self.invalidate_resource_cache_origin(&origin, uri).await;
     }
@@ -321,6 +330,9 @@ impl McpClientPool {
     /// `notifications/tools/list_changed` 到达时失效该 origin 的磁盘 `tools/list`
     /// 缓存。订阅未启用时由版本比对安全兜底（下次回源用新版本失效旧条目）。
     pub(crate) async fn invalidate_tools_cache(&self, server_name: &str) {
+        if self.workspace_scope.get().is_none() {
+            return;
+        }
         let origin = self.cache_origin(server_name);
         self.resource_cache
             .invalidate(&origin, "tools/list", None)
@@ -328,6 +340,9 @@ impl McpClientPool {
     }
 
     pub(crate) async fn invalidate_resource_cache_origin(&self, origin: &str, uri: Option<&str>) {
+        if self.workspace_scope.get().is_none() {
+            return;
+        }
         match uri {
             Some(_uri) => {
                 // 一个 resources/read 响应可包含多个 contents[] URI；当前 cache
@@ -350,7 +365,11 @@ impl McpClientPool {
 
     pub(crate) fn cache_origin(&self, server_name: &str) -> String {
         let config = self.configs.read().get(server_name).cloned();
-        crate::mcp::resource_cache::cache_origin(server_name, config.as_ref())
+        let origin = crate::mcp::resource_cache::cache_origin(server_name, config.as_ref());
+        match self.workspace_scope.get() {
+            Some(workspace_id) => format!("{workspace_id}:{origin}"),
+            None => format!("unbound:{origin}"),
+        }
     }
 
     pub(crate) fn resource_cache(&self) -> crate::mcp::resource_cache::McpResourceCache {
@@ -362,6 +381,7 @@ impl McpClientPool {
             return Some(
                 match reason {
                     CacheDenial::Pending => "cache_pending",
+                    CacheDenial::WorkspaceUnbound => "cache_disabled_workspace_unbound",
                     CacheDenial::Configuration => "cache_disabled_by_config",
                     CacheDenial::DynamicConnection => "cache_disabled_dynamic",
                     CacheDenial::Credentials => "cache_disabled",

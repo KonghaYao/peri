@@ -92,13 +92,7 @@ impl Fixture {
     }
 
     fn binding(workspace: &ResolvedWorkspace) -> SessionBinding {
-        SessionBinding {
-            schema_version: SESSION_BINDING_VERSION,
-            revision: 1,
-            project_id: workspace.project_id,
-            workspace_id: workspace.workspace_id,
-            cwd_relative_to_workspace: workspace.relative_cwd.clone(),
-        }
+        SessionBinding::from_workspace(workspace)
     }
 
     fn session(&self, id: &str, workspace: &ResolvedWorkspace, frozen: &str) -> NewSession {

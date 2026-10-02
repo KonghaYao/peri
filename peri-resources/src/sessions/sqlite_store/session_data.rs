@@ -36,6 +36,11 @@ use crate::sessions::data::ChildResumeRecord;
 use crate::sessions::data::SessionDataPort;
 use crate::sessions::local_port::SessionFacts;
 
+#[path = "session_data/catalog.rs"]
+mod catalog;
+#[path = "session_data/lifecycle.rs"]
+mod lifecycle;
+
 /// 同一份 [`SqliteSessionDatabase`] 的数据面句柄。
 ///
 /// `closed` 是共享的：门面发给 child resume 认领 handle 的副本与门面自身看到同一个
@@ -141,16 +146,50 @@ pub(super) use helpers::{new_session_draft_row, new_session_row, validate_unboun
 
 #[async_trait]
 impl SessionDataPort for SqliteSessionData {
-    fn oauth_credentials(
+    fn oauth_credentials_for_workspace(
         self: Arc<Self>,
+        workspace_id: peri_acp_types::workspace::WorkspaceId,
     ) -> Option<Arc<dyn peri_acp_types::oauth_credentials::OAuthCredentialPort>> {
         Some(Arc::new(
-            super::oauth_credentials::SqliteOAuthCredentialStore::new(self.database.clone()),
+            super::oauth_credentials::SqliteOAuthCredentialStore::new(
+                self.database.clone(),
+                workspace_id,
+            ),
         ))
     }
 
     async fn machine_id_of(&self, id: &ThreadId) -> SessionResourceResult<Option<String>> {
         machine_id_on(&self.database.pool, id).await
+    }
+    async fn workspace_id_of(
+        &self,
+        id: &ThreadId,
+    ) -> SessionResourceResult<Option<peri_acp_types::workspace::WorkspaceId>> {
+        let row: Option<(String,)> =
+            sqlx::query_as("SELECT workspace_id FROM threads WHERE id = ?1")
+                .bind(id)
+                .fetch_optional(&self.database.pool)
+                .await
+                .map_err(|error| super::failure::read_failure(error.into()))?;
+        row.map(|(id,)| {
+            id.parse()
+                .map_err(|_| super::failure::corrupt("stored workspace id is invalid"))
+        })
+        .transpose()
+    }
+    async fn list_machines(
+        &self,
+    ) -> SessionResourceResult<Vec<peri_acp_types::workspace::MachineInfo>> {
+        self.catalog_machines().await
+    }
+    async fn list_workspaces(
+        &self,
+        machine_id: &str,
+    ) -> SessionResourceResult<Vec<peri_acp_types::workspace::WorkspaceInfo>> {
+        self.catalog_workspaces(machine_id).await
+    }
+    async fn rename_machine(&self, machine_id: &str, name: &str) -> SessionResourceResult<()> {
+        self.catalog_rename_machine(machine_id, name).await
     }
     async fn save_new_session(&self, input: &NewSession) -> SessionResourceResult<()> {
         self.writable()?;
@@ -246,17 +285,20 @@ impl SessionDataPort for SqliteSessionData {
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(|error| map_sqlx(&error))?;
-        let row: Option<(String, Option<String>)> =
-            sqlx::query_as("SELECT cwd, parent_thread_id FROM threads WHERE id = ?1")
+        let row: Option<(String, Option<String>, String)> =
+            sqlx::query_as("SELECT cwd, parent_thread_id, workspace_id FROM threads WHERE id = ?1")
                 .bind(id.as_str())
                 .fetch_optional(&mut *tx)
                 .await
                 .map_err(|error| map_sqlx(&error))?;
-        let Some((cwd, parent)) = row else {
+        let Some((cwd, parent, owner_workspace_id)) = row else {
             return Err(not_found());
         };
         // 保存的绝对 cwd 是接纳依据；调用方不能借接纳顺手改绑或接纳 child。
-        if cwd != saved_cwd || parent.is_some() {
+        if cwd != saved_cwd
+            || parent.is_some()
+            || owner_workspace_id != workspace.workspace_id.to_string()
+        {
             return Err(SessionResourceError::new(
                 SessionResourceErrorKind::Workspace(WorkspaceError::ExecutionBindingMismatch),
             ));
@@ -270,9 +312,22 @@ impl SessionDataPort for SqliteSessionData {
         .execute(&mut *tx)
         .await
         .map_err(|error| write_failure(error.into()))?;
-        sqlx::query("INSERT OR IGNORE INTO workspaces(id, project_id, root, root_identity, discovery) VALUES (?1, ?2, ?3, ?1, 'null')")
-        .bind(binding.workspace_id.to_string()).bind(binding.project_id.to_string()).bind(workspace.root.to_string_lossy().into_owned())
-            .execute(&mut *tx).await.map_err(|error| write_failure(error.into()))?;
+        // The execution registration was established by resolve_workspace.
+        // Adoption may attach its immutable evidence, but must not fabricate a
+        // registration or change the session's logical workspace owner.
+        let registration_exists: Option<(String,)> = sqlx::query_as(
+            "SELECT id FROM legacy_execution_registrations WHERE id = ?1 AND project_id = ?2",
+        )
+        .bind(binding.workspace_id.to_string())
+        .bind(binding.project_id.to_string())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|error| map_sqlx(&error))?;
+        if registration_exists.is_none() {
+            return Err(SessionResourceError::new(
+                SessionResourceErrorKind::Workspace(WorkspaceError::InvalidBinding),
+            ));
+        }
         match binding_row_state_on(&mut tx, id).await? {
             BindingRowState::Bound(existing) => {
                 // 竞争：已有绑定不覆盖、不修复，必须就是本 workspace。
@@ -419,6 +474,19 @@ impl SessionDataPort for SqliteSessionData {
             .map_err(read_failure)
     }
 
+    async fn binding_discovery_snapshot(
+        &self,
+        id: &ThreadId,
+    ) -> SessionResourceResult<Option<String>> {
+        let row: Option<(Option<String>,)> =
+            sqlx::query_as("SELECT discovery_snapshot FROM session_bindings WHERE thread_id = ?1")
+                .bind(id.as_str())
+                .fetch_optional(&self.database.pool)
+                .await
+                .map_err(|error| map_sqlx(&error))?;
+        Ok(row.and_then(|(snapshot,)| snapshot))
+    }
+
     async fn session_root(&self, id: &ThreadId) -> SessionResourceResult<ThreadId> {
         let mut connection = self
             .database
@@ -439,6 +507,24 @@ impl SessionDataPort for SqliteSessionData {
             .list_scoped_threads_impl(query)
             .await
             .map_err(write_failure)
+    }
+
+    async fn list_archived_sessions(
+        &self,
+        query: &ScopedThreadQuery,
+    ) -> SessionResourceResult<ScopedThreadPage> {
+        self.database
+            .list_scoped_threads_by_archive_impl(query, true)
+            .await
+            .map_err(read_failure)
+    }
+
+    async fn set_session_archived(
+        &self,
+        id: &ThreadId,
+        archived: bool,
+    ) -> SessionResourceResult<()> {
+        self.catalog_set_session_archived(id, archived).await
     }
 
     async fn list_children(&self, parent: &ThreadId) -> SessionResourceResult<Vec<ThreadMeta>> {
@@ -875,76 +961,11 @@ impl SessionDataPort for SqliteSessionData {
         id: &ThreadId,
         patch: &SessionMetaPatch,
     ) -> SessionResourceResult<()> {
-        self.writable()?;
-        if patch.title.is_none()
-            && patch.status.is_none()
-            && patch.cancel_policy.is_none()
-            && patch.config.is_none()
-        {
-            // 没有字段要改：不写、也不假装写入了新时间戳。
-            return Ok(());
-        }
-        let now = Utc::now().to_rfc3339();
-        let mut builder: sqlx::QueryBuilder<sqlx::Sqlite> =
-            sqlx::QueryBuilder::new("UPDATE threads SET updated_at = ");
-        builder.push_bind(&now);
-        if let Some(title) = &patch.title {
-            builder.push(", title = ").push_bind(title.clone());
-        }
-        if let Some(status) = &patch.status {
-            builder.push(", agent_status = ").push_bind(status.as_str());
-        }
-        if let Some(policy) = &patch.cancel_policy {
-            builder
-                .push(", cancel_policy = ")
-                .push_bind(policy.as_str());
-        }
-        if let Some(config) = &patch.config {
-            builder.push(", config = ").push_bind(config.clone());
-        }
-        builder.push(" WHERE id = ").push_bind(id.as_str());
-        let updated = builder
-            .build()
-            .execute(&self.database.pool)
-            .await
-            .map_err(|error| map_sqlx(&error))?;
-        if updated.rows_affected() != 1 {
-            return Err(not_found());
-        }
-        Ok(())
+        self.update_stored_meta(id, patch).await
     }
 
     async fn delete_tree(&self, id: &ThreadId) -> SessionResourceResult<()> {
-        self.writable()?;
-        let mut tx = self
-            .database
-            .pool
-            .begin_with("BEGIN IMMEDIATE")
-            .await
-            .map_err(|error| map_sqlx(&error))?;
-        if !thread_exists_on(&mut tx, id).await.map_err(read_failure)? {
-            return Err(not_found());
-        }
-        let tree = thread_tree_on(&mut tx, id).await.map_err(read_failure)?;
-        // 子表行显式删除，不借 `ON DELETE CASCADE`：级联只在 SQLite 上存在，远端执行器
-        // 没有（见 [`session_rows::THREAD_CHILD_DELETES`]）。顺序与远端 delete_tree 一致：
-        // 子行全部先删，最后才删 threads 行。
-        for thread in &tree {
-            delete_thread_child_rows(&mut tx, thread)
-                .await
-                .map_err(|error| map_sqlx(&error))?;
-        }
-        for thread in &tree {
-            sqlx::query(session_rows::DELETE_THREAD_SQL)
-                .bind(thread)
-                .execute(&mut *tx)
-                .await
-                .map_err(|error| map_sqlx(&error))?;
-        }
-        tx.commit()
-            .await
-            .map_err(|_| commit_failure(Some(id.clone())))?;
-        Ok(())
+        self.delete_stored_tree(id).await
     }
 
     async fn recover_persistence(

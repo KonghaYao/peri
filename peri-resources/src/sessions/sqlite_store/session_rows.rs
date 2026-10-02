@@ -5,7 +5,7 @@
 //! 各自维护。这里只做同事务内的行写入，不决定准入、不落锚点。
 
 use anyhow::Result;
-use peri_acp_types::workspace::SessionBinding;
+use peri_acp_types::workspace::{SessionBinding, WorkspaceId};
 use sqlx::SqliteConnection;
 
 use crate::sessions::canonical;
@@ -26,6 +26,7 @@ pub(super) struct ThreadRowInsert<'a> {
     pub config: Option<&'a str>,
     pub agent_status: &'a str,
     pub frozen_context: Option<&'a str>,
+    pub execution_registration_id: Option<&'a WorkspaceId>,
 }
 
 /// 插入一条 `threads` 行
@@ -34,11 +35,18 @@ pub(super) async fn insert_thread_row(
     connection: &mut SqliteConnection,
     row: &ThreadRowInsert<'_>,
 ) -> Result<()> {
+    let workspace_id = super::workspace_identity::identity_for_new_thread(
+        connection,
+        row.parent_thread_id,
+        row.execution_registration_id,
+        row.cwd,
+    )
+    .await?;
     sqlx::query(
         "INSERT INTO threads (id, title, cwd, created_at, updated_at, message_count,
             parent_thread_id, snapshot_at_message_id, hidden, cancel_policy, config,
-            frozen_context, agent_status)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            frozen_context, agent_status, workspace_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
     )
     .bind(row.id)
     .bind(row.title)
@@ -53,6 +61,7 @@ pub(super) async fn insert_thread_row(
     .bind(row.config)
     .bind(row.frozen_context)
     .bind(row.agent_status)
+    .bind(workspace_id.to_string())
     .execute(&mut *connection)
     .await?;
     insert_environment_row(connection, row.id, row.parent_thread_id).await?;
@@ -85,8 +94,10 @@ pub(super) async fn insert_binding_row(
     super::workspace::validate_relative(&binding.cwd_relative_to_workspace)?;
     let version = i64::from(binding.schema_version);
     sqlx::query(
-        "INSERT INTO session_bindings (thread_id, schema_version, project_id, workspace_id, relative_cwd)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
+        "INSERT INTO session_bindings (thread_id, schema_version, project_id, workspace_id, relative_cwd,
+            discovery_snapshot, evidence_origin)
+         VALUES (?1, ?2, ?3, ?4, ?5,
+            (SELECT discovery FROM legacy_execution_registrations WHERE id = ?4), 'creation_snapshot')",
     )
     .bind(thread_id)
     .bind(version)

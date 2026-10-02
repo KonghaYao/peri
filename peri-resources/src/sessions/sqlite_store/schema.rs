@@ -11,7 +11,7 @@ use std::collections::HashSet;
 
 /// 本构建写入并接受的 schema 版本；2..10 经升级路径收敛到此值，0 视为待建库。
 /// 版本接受判定、迁移收尾写入与拒绝时的「本构建上限」都由它派生，避免三处各写一份。
-pub(in crate::sessions) const CURRENT_SCHEMA_VERSION: i64 = 11;
+pub(in crate::sessions) const CURRENT_SCHEMA_VERSION: i64 = 12;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum SchemaState {
@@ -26,6 +26,7 @@ pub(super) enum SchemaState {
     Version8,
     Version9,
     Version10,
+    Version11,
     Current,
 }
 
@@ -45,6 +46,7 @@ pub(super) async fn inspect(connection: &mut SqliteConnection) -> Result<SchemaS
         .await?;
     match version {
         v if v == CURRENT_SCHEMA_VERSION => return Ok(SchemaState::Current),
+        11 => return Ok(SchemaState::Version11),
         10 => return Ok(SchemaState::Version10),
         9 => return Ok(SchemaState::Version9),
         8 => return Ok(SchemaState::Version8),
@@ -140,6 +142,16 @@ impl SqliteSessionDatabase {
         crate::sessions::machine::initialize().await?;
         let mut connection = self.pool.acquire().await?;
         let state = inspect(&mut connection).await?;
+        if state == SchemaState::Current {
+            sqlx::query("INSERT OR IGNORE INTO machines(id, name, identity_kind) VALUES (?1, '我的电脑', 'known')")
+                .bind(crate::sessions::machine::current()?)
+                .execute(&mut *connection)
+                .await?;
+            return Ok(());
+        }
+        if state == SchemaState::Version11 {
+            return super::storage_v2_migration::migrate_local_v2(&mut connection).await;
+        }
         // 登记表重建要对被引用的父表执行 DROP TABLE：SQLite 对父表做隐式删除时会
         // 立即检查外键，`defer_foreign_keys` 也挡不住。该 PRAGMA 只在事务外生效，
         // 因此重建路径整段使用同一条连接：先关外键，提交前用 foreign_key_check 补齐
@@ -160,23 +172,7 @@ impl SqliteSessionDatabase {
         } else {
             migrated?;
         }
-        Self::migrate_environments(&mut connection).await
-    }
-
-    async fn migrate_environments(connection: &mut SqliteConnection) -> Result<()> {
-        let mut transaction = connection.begin_with("BEGIN IMMEDIATE").await?;
-        sqlx::query(AssertSqlSafe(canonical::CREATE_ENVIRONMENTS_TABLE_SQL))
-            .execute(&mut *transaction)
-            .await?;
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_session_environments_machine ON session_environments(machine_id, thread_id)")
-            .execute(&mut *transaction)
-            .await?;
-        sqlx::query(AssertSqlSafe(canonical::BACKFILL_ENVIRONMENTS_SQL))
-            .bind(crate::sessions::machine::current()?)
-            .execute(&mut *transaction)
-            .await?;
-        transaction.commit().await?;
-        Ok(())
+        super::storage_v2_migration::migrate_local_v2(&mut connection).await
     }
 
     async fn migrate_schema(connection: &mut SqliteConnection, state: SchemaState) -> Result<()> {
@@ -270,11 +266,21 @@ impl SqliteSessionDatabase {
         sqlx::query(AssertSqlSafe(canonical::CREATE_OAUTH_CREDENTIALS_TABLE_SQL))
             .execute(&mut *tx)
             .await?;
-        sqlx::query(AssertSqlSafe(format!(
-            "PRAGMA user_version = {CURRENT_SCHEMA_VERSION}"
-        )))
-        .execute(&mut *tx)
-        .await?;
+        // 环境事实与 schema 版本同一事务提交。未来的 Machine/Workspace 归属回填
+        // 必须能使用这些行，不能先留下已推进版本而缺少环境归属的半升级库。
+        sqlx::query(AssertSqlSafe(canonical::CREATE_ENVIRONMENTS_TABLE_SQL))
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_session_environments_machine ON session_environments(machine_id, thread_id)")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(AssertSqlSafe(canonical::BACKFILL_ENVIRONMENTS_SQL))
+            .bind(crate::sessions::machine::current()?)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(AssertSqlSafe(format!("PRAGMA user_version = 11")))
+            .execute(&mut *tx)
+            .await?;
         tx.commit().await?;
         Ok(())
     }

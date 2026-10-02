@@ -68,13 +68,7 @@ async fn test_worktree_binding_keeps_wire_revision_without_persisted_column() {
         .await
         .unwrap();
     lease.mark_clean().await.unwrap();
-    let expected = SessionBinding {
-        schema_version: SESSION_BINDING_VERSION,
-        revision: 1,
-        project_id: workspace.project_id,
-        workspace_id: workspace.workspace_id,
-        cwd_relative_to_workspace: workspace.relative_cwd.clone(),
-    };
+    let expected = SessionBinding::from_workspace(&workspace);
     let loaded = store.load_session_binding(&id).await.unwrap().unwrap();
     assert_eq!(loaded, expected);
     assert_eq!(serde_json::to_value(&loaded).unwrap()["revision"], 1);

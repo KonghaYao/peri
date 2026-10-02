@@ -115,11 +115,28 @@ impl RemoteSessionData {
         &self,
         query: &ScopedThreadQuery,
     ) -> SessionResourceResult<ScopedThreadPage> {
+        self.read_page_by_archive(query, false).await
+    }
+
+    pub(super) async fn read_page_by_archive(
+        &self,
+        query: &ScopedThreadQuery,
+        archived: bool,
+    ) -> SessionResourceResult<ScopedThreadPage> {
+        if self.schema_version == 11 && archived {
+            return Ok(ScopedThreadPage {
+                entries: Vec::new(),
+                next_cursor: None,
+            });
+        }
         let limit = query.limit.clamp(1, 200) as usize;
         let store = self.store().await?;
-        let rows = store
-            .fetch_rows(&session_sql::page_statement(query)?)
-            .await?;
+        let statement = if self.schema_version == 11 {
+            session_sql::page_statement_v11(query)?
+        } else {
+            session_sql::page_statement_for_archive(query, archived)?
+        };
+        let rows = store.fetch_rows(&statement).await?;
         let mut entries = Vec::with_capacity(rows.len());
         for row in &rows {
             let meta = codec::decode_meta(row)?;

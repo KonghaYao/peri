@@ -8,12 +8,15 @@ use super::*;
 /// 才做发现、登记与复核。
 fn doubled_workspace(cwd: &str) -> ResolvedWorkspace {
     let cwd = std::path::PathBuf::from(cwd);
+    let workspace_id = peri_acp_types::workspace::WorkspaceId::new();
     ResolvedWorkspace {
         project_id: peri_acp_types::workspace::ProjectId::new(),
-        workspace_id: peri_acp_types::workspace::WorkspaceId::new(),
+        workspace_id,
+        execution_registration_id: workspace_id,
         cwd: cwd.clone(),
         root: cwd,
         relative_cwd: std::path::PathBuf::new(),
+        discovery_snapshot: None,
     }
 }
 

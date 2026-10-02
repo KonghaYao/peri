@@ -7,11 +7,12 @@ use peri_acp_types::oauth_credentials::{
 };
 use peri_acp_types::session_resources::{SessionResourceError, SessionResourceErrorKind};
 use peri_acp_types::thread::ThreadId;
+use peri_acp_types::workspace::WorkspaceId;
 use turso_serverless::Value;
 
 use crate::sessions::canonical::{
-    DELETE_ALL_OAUTH_CREDENTIALS_SQL, DELETE_OAUTH_CREDENTIAL_SQL, LIST_OAUTH_CREDENTIALS_SQL,
-    SELECT_OAUTH_CREDENTIAL_SQL, UPSERT_OAUTH_CREDENTIAL_SQL,
+    DELETE_ALL_V2_OAUTH_CREDENTIALS_SQL, DELETE_V2_OAUTH_CREDENTIAL_SQL,
+    LIST_V2_OAUTH_CREDENTIALS_SQL, SELECT_V2_OAUTH_CREDENTIAL_SQL, UPSERT_V2_OAUTH_CREDENTIAL_SQL,
 };
 
 use super::ledger::{input_digest, OperationId, OperationIdentity};
@@ -19,29 +20,35 @@ use super::mutation::{MutationOutcome, QualifiedMutation};
 use super::session_data::RemoteSessionData;
 use super::sql::StatementSpec;
 
-pub(super) struct RemoteOAuthCredentials(pub(super) Arc<RemoteSessionData>);
+pub(super) struct RemoteOAuthCredentials(pub(super) Arc<RemoteSessionData>, pub(super) WorkspaceId);
 
-fn scope() -> OAuthCredentialResult<(&'static str, &'static str)> {
-    let machine =
-        crate::sessions::machine::current().map_err(|_| OAuthCredentialError::Unavailable)?;
-    Ok(("local", machine))
+fn scope(workspace_id: WorkspaceId) -> (&'static str, String) {
+    ("local", workspace_id.to_string())
 }
 
 fn statement(
     sql: &'static str,
     principal: &str,
-    machine: &str,
+    workspace_id: &str,
     key: Option<&str>,
 ) -> StatementSpec {
-    let mut params = vec![Value::Text(principal.into()), Value::Text(machine.into())];
+    let mut params = vec![
+        Value::Text(principal.into()),
+        Value::Text(workspace_id.into()),
+    ];
     if let Some(key) = key {
         params.push(Value::Text(key.into()));
     }
     StatementSpec::new(sql, params)
 }
 
-fn save_statement(principal: &str, machine: &str, key: &str, payload: &str) -> StatementSpec {
-    let mut spec = statement(UPSERT_OAUTH_CREDENTIAL_SQL, principal, machine, Some(key));
+fn save_statement(principal: &str, workspace_id: &str, key: &str, payload: &str) -> StatementSpec {
+    let mut spec = statement(
+        UPSERT_V2_OAUTH_CREDENTIAL_SQL,
+        principal,
+        workspace_id,
+        Some(key),
+    );
     spec.params.push(Value::Text(payload.into()));
     spec.params
         .push(Value::Text(chrono::Utc::now().to_rfc3339()));
@@ -136,12 +143,12 @@ impl RemoteOAuthCredentials {
 impl OAuthCredentialPort for RemoteOAuthCredentials {
     async fn load(&self, server_key: &str) -> OAuthCredentialResult<Option<String>> {
         validate_server_key(server_key)?;
-        let (principal, machine) = scope()?;
+        let (principal, workspace_id) = scope(self.1);
         decode_load(
             self.read(statement(
-                SELECT_OAUTH_CREDENTIAL_SQL,
+                SELECT_V2_OAUTH_CREDENTIAL_SQL,
                 principal,
-                machine,
+                &workspace_id,
                 Some(server_key),
             ))
             .await?,
@@ -151,23 +158,23 @@ impl OAuthCredentialPort for RemoteOAuthCredentials {
     async fn save(&self, server_key: &str, credentials: &str) -> OAuthCredentialResult<()> {
         validate_server_key(server_key)?;
         validate_credentials(credentials)?;
-        let (principal, machine) = scope()?;
+        let (principal, workspace_id) = scope(self.1);
         self.write(
             "save_oauth_credentials",
-            save_statement(principal, machine, server_key, credentials),
+            save_statement(principal, &workspace_id, server_key, credentials),
         )
         .await
     }
 
     async fn clear(&self, server_key: &str) -> OAuthCredentialResult<()> {
         validate_server_key(server_key)?;
-        let (principal, machine) = scope()?;
+        let (principal, workspace_id) = scope(self.1);
         self.write(
             "clear_oauth_credentials",
             statement(
-                DELETE_OAUTH_CREDENTIAL_SQL,
+                DELETE_V2_OAUTH_CREDENTIAL_SQL,
                 principal,
-                machine,
+                &workspace_id,
                 Some(server_key),
             ),
         )
@@ -175,21 +182,26 @@ impl OAuthCredentialPort for RemoteOAuthCredentials {
     }
 
     async fn clear_all(&self) -> OAuthCredentialResult<()> {
-        let (principal, machine) = scope()?;
+        let (principal, workspace_id) = scope(self.1);
         self.write(
             "clear_all_oauth_credentials",
-            statement(DELETE_ALL_OAUTH_CREDENTIALS_SQL, principal, machine, None),
+            statement(
+                DELETE_ALL_V2_OAUTH_CREDENTIALS_SQL,
+                principal,
+                &workspace_id,
+                None,
+            ),
         )
         .await
     }
 
     async fn list(&self) -> OAuthCredentialResult<Vec<String>> {
-        let (principal, machine) = scope()?;
+        let (principal, workspace_id) = scope(self.1);
         decode_list(
             self.read(statement(
-                LIST_OAUTH_CREDENTIALS_SQL,
+                LIST_V2_OAUTH_CREDENTIALS_SQL,
                 principal,
-                machine,
+                &workspace_id,
                 None,
             ))
             .await?,

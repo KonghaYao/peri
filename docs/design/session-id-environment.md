@@ -4,6 +4,7 @@
 >
 > Scope：共享后端数据库中的会话身份、机器环境分区与恢复入口。
 > 进度与验收见 [核心改动清单](../../spec/issues/2026-09-30-session-id-environment-core-change.md)。
+> Machine 实体与 Workspace 归属的后续目标见 [存储 v2 设计](storage-v2-machine-workspace-session.md)；本文的 `session_environments` 是当前结构。
 > 本设计取代旧工作区设计中以目录绑定、文件锁和根执行 owner 限制恢复的规则；父子关系与运行资源生命周期保持。
 
 ## 身份与环境归属

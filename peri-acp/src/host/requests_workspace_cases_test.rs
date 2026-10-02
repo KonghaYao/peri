@@ -3,6 +3,9 @@ use super::*;
 #[path = "requests_workspace_assembly_test.rs"]
 mod assembly_cases;
 
+#[path = "requests_workspace_storage_v2_test.rs"]
+mod storage_v2_cases;
+
 #[tokio::test]
 async fn worktree_binding_hot_cold_resume_ignore_caller_cwd_and_keep_saved_facts() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -617,7 +620,7 @@ async fn worktree_session_end_uses_saved_directory_and_drains_resources() {
             "invalid hook binding must not prevent MCP shutdown"
         );
         assert!(!moved.join("ended").exists());
-        assert_eq!(target.join("ended").exists(), directory_replaced);
+        assert!(!target.join("ended").exists());
         assert!(
             sessions.contains_key(id),
             "actual incomplete resource drain must retain the owner"
@@ -631,7 +634,7 @@ async fn worktree_session_end_uses_saved_directory_and_drains_resources() {
             !moved.join("ended").exists(),
             "terminal hook must not run while the saved directory is missing"
         );
-        assert_eq!(target.join("ended").exists(), directory_replaced);
+        assert!(!target.join("ended").exists());
         if directory_replaced {
             std::fs::remove_dir_all(&target).unwrap();
         }

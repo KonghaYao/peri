@@ -67,6 +67,7 @@ fn pending_mcp_pool(
     spawner: peri_middlewares::mcp::McpTaskSpawner,
     profile: peri_middlewares::mcp::apps::McpCapabilityProfile,
     session_cwd: Option<&std::path::Path>,
+    workspace_id: Option<peri_acp_types::workspace::WorkspaceId>,
     resources: &Arc<dyn SessionResources>,
 ) -> Arc<peri_middlewares::mcp::McpClientPool> {
     let pool = Arc::new(
@@ -74,7 +75,14 @@ fn pending_mcp_pool(
             spawner, profile,
         ),
     );
-    if let Some(credentials) = resources.oauth_credentials() {
+    if let Some(workspace_id) = workspace_id {
+        if let Err(error) = pool.bind_workspace_scope(workspace_id) {
+            tracing::error!(%error, "MCP Workspace binding failed");
+        }
+    }
+    if let Some(credentials) = workspace_id
+        .and_then(|workspace_id| resources.oauth_credentials_for_workspace(workspace_id))
+    {
         match peri_mcp_credentials::OAuthCredentialClient::new(credentials)
             .and_then(|client| pool.inject_oauth_credentials(client))
         {
@@ -111,6 +119,8 @@ pub struct HostAssemblyInput {
     /// 会话资源门面（消费侧唯一会话行为句柄）：Agent transcript/subagent、middleware、
     /// 协议面与 Controller 都经它访问会话，装配面不再另开裸存储句柄。
     pub session_resources: Arc<dyn SessionResources>,
+    /// 已保存 Session 的 Workspace 归属；host 级装配为 None。
+    pub workspace_id: Option<peri_acp_types::workspace::WorkspaceId>,
     /// 部署关闭权（non-Clone）：由部署入口（TUI/print/stdio）从资源工厂取得后注入，
     /// 宿主在**自己的任务排空之后**消费它关闭会话存储。会话级装配与测试注入 `None`
     /// ——它们不是部署 owner，没有全局销毁权。
@@ -306,6 +316,7 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         config_source,
         permission_mode,
         session_resources,
+        workspace_id,
         session_store_shutdown,
         cwd,
         bare,
@@ -401,6 +412,7 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
             mcp_task_spawner.clone(),
             mcp_profile.clone(),
             Some(std::path::Path::new(&cwd)),
+            workspace_id,
             &session_resources,
         );
         if let Some(snapshot) = config_source.snapshot() {
@@ -602,6 +614,7 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
                         mcp_task_spawner.clone(),
                         mcp_profile.clone(),
                         session_scoped.then_some(std::path::Path::new(&cwd)),
+                        workspace_id,
                         &session_resources,
                     )
                 }),
@@ -824,6 +837,7 @@ mod tests {
             spawner,
             peri_middlewares::mcp::apps::McpCapabilityProfile::disabled(),
             Some(target.path()),
+            None,
             &resources,
         );
         assert_eq!(pool.snapshot()["initPhase"], "pending");

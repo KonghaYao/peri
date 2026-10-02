@@ -30,13 +30,13 @@
 //! ## 两种存储模式现在说同一份形状（2026-09-27 统一）
 //!
 //! 远端不再有自己的会话表：`threads` / `messages` / `session_bindings` / `projects` /
-//! `workspaces` 与本机 SQLite 逐列一致，**DDL 与删除语句的唯一来源是 `sessions::canonical`**
+//! `workspaces` 与本机 SQLite 共用 canonical 形状，**DDL 与删除语句的唯一来源是 `sessions::canonical`**
 //! （逐条建表/建索引清单、`THREAD_CHILD_DELETES`、`DELETE_THREAD_ROW_SQL`、`payload_role`），
 //! canonical 历史顺序也统一到 `messages.rowid`。远端只剩执行器自己的机制表（`peri_op_ledger`
 //! 幂等账本、`peri_store_meta` 版本标记），版本值与本机 `CURRENT_SCHEMA_VERSION` 同源。
 //! 旧形状的库（`peri_sessions` 那套，或持 `peri.session.store/v1` 契约）一律**拒绝、不迁移**；
-//! `projects` / `workspaces` 在远端是**空表**（workspace 证据是本机事实，远端没有来源），
-//! 所以写打开会把 `PRAGMA foreign_keys` 归位——引用完整性由显式的父子写入/删除顺序保证。
+//! v2 的 `machines` / `workspaces` 在远端保存 Session 归属，执行目录发现证据仍由本机
+//! 登记提供。写打开会把 `PRAGMA foreign_keys` 归位；引用完整性由显式写入/删除顺序保证。
 //!
 //! 已实现（C-03 第一批，`session_data` + `session_read`/`session_write`/`session_sql`/
 //! `session_codec`/`session_schema`）：会话表 schema、一致读取（snapshot/meta/binding/
@@ -118,12 +118,15 @@ mod mutation;
 mod oauth_credentials;
 mod schema;
 mod schema_upgrade;
+mod schema_v12_upgrade;
 
 #[cfg(test)]
 #[path = "schema_upgrade_test.rs"]
 mod schema_upgrade_tests;
+mod session_catalog;
 mod session_codec;
 mod session_data;
+mod session_evidence;
 mod session_history;
 mod session_lifecycle;
 mod session_read;

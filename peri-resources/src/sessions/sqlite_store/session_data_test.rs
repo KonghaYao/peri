@@ -31,13 +31,7 @@ fn frozen(marker: &str) -> FrozenSnapshotBytes {
 }
 
 fn binding_of(workspace: &ResolvedWorkspace) -> peri_acp_types::workspace::SessionBinding {
-    peri_acp_types::workspace::SessionBinding {
-        schema_version: peri_acp_types::workspace::SESSION_BINDING_VERSION,
-        revision: 1,
-        project_id: workspace.project_id,
-        workspace_id: workspace.workspace_id,
-        cwd_relative_to_workspace: workspace.relative_cwd.clone(),
-    }
+    peri_acp_types::workspace::SessionBinding::from_workspace(workspace)
 }
 
 async fn workspace(store: &SqliteThreadStore, cwd: &std::path::Path) -> ResolvedWorkspace {
@@ -77,6 +71,90 @@ fn payload_bytes(payloads: &[PersistedPayload]) -> Vec<String> {
         .iter()
         .map(|payload| serialize_persisted_payload(payload).unwrap())
         .collect()
+}
+
+#[tokio::test]
+async fn archive_hides_only_root_from_regular_list_and_preserves_history_time() {
+    use peri_acp_types::workspace::{ScopedThreadQuery, ThreadScope};
+
+    let (store, data, directory) = database().await;
+    let owner = workspace(&store, directory.path()).await;
+    let id = "archive-root".to_owned();
+    data.save_new_session(&session(
+        &id,
+        owner.cwd.to_str().unwrap(),
+        &owner,
+        frozen("archive"),
+    ))
+    .await
+    .unwrap();
+    data.append_history(&id, &payloads(1)).await.unwrap();
+    let before: (String,) = sqlx::query_as("SELECT updated_at FROM threads WHERE id = ?1")
+        .bind(&id)
+        .fetch_one(&store.database.pool)
+        .await
+        .unwrap();
+    let query = ScopedThreadQuery {
+        scope: ThreadScope::Workspace(owner.workspace_id),
+        cursor: None,
+        limit: 10,
+    };
+    assert_eq!(data.list_sessions(&query).await.unwrap().entries.len(), 1);
+    data.set_session_archived(&id, true).await.unwrap();
+    assert!(data.list_sessions(&query).await.unwrap().entries.is_empty());
+    assert_eq!(
+        data.list_archived_sessions(&query)
+            .await
+            .unwrap()
+            .entries
+            .len(),
+        1
+    );
+    assert_eq!(data.load_snapshot(&id).await.unwrap().payloads.len(), 1);
+    let after: (i64, String) =
+        sqlx::query_as("SELECT archived, updated_at FROM threads WHERE id = ?1")
+            .bind(&id)
+            .fetch_one(&store.database.pool)
+            .await
+            .unwrap();
+    assert_eq!(after, (1, before.0));
+    data.set_session_archived(&id, false).await.unwrap();
+    assert_eq!(data.list_sessions(&query).await.unwrap().entries.len(), 1);
+    assert!(data
+        .list_archived_sessions(&query)
+        .await
+        .unwrap()
+        .entries
+        .is_empty());
+}
+
+#[tokio::test]
+async fn current_machine_name_changes_without_changing_workspace_identity() {
+    let (store, data, directory) = database().await;
+    let owner = workspace(&store, directory.path()).await;
+    let current = data
+        .list_machines()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|machine| machine.is_current)
+        .unwrap();
+    let original_id = current.id.clone();
+    data.rename_machine(&original_id, "开发机").await.unwrap();
+    let renamed = data
+        .list_machines()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|machine| machine.is_current)
+        .unwrap();
+    assert_eq!(renamed.id, original_id);
+    assert_eq!(renamed.name, "开发机");
+    let workspaces = data.list_workspaces(&original_id).await.unwrap();
+    assert!(workspaces
+        .iter()
+        .any(|workspace| workspace.id == owner.workspace_id));
+    assert!(data.rename_machine(&original_id, "  ").await.is_err());
 }
 // ─── 新建：完整快照一次保存 ────────────────────────────────────────────────────
 
@@ -262,7 +340,7 @@ async fn test_load_snapshot_reports_missing_rows_and_preserves_unregistered_bind
     assert_eq!(snapshot.flags, before.flags);
     assert!(snapshot.inherited.payloads.is_empty());
     assert!(snapshot.inherited.flags.is_empty());
-    assert_eq!(data.machine_id_of(&id).await.unwrap(), Some(machine));
+    assert_eq!(data.machine_id_of(&id).await.unwrap(), None);
 }
 
 #[tokio::test]

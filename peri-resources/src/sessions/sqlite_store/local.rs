@@ -188,9 +188,10 @@ impl LocalExecution {
         let Ok(cwd) = cwd.canonicalize() else {
             return Ok(false);
         };
-        let roots: Vec<(String,)> = sqlx::query_as("SELECT root FROM workspaces")
-            .fetch_all(&self.database.pool)
-            .await?;
+        let roots: Vec<(String,)> =
+            sqlx::query_as("SELECT root FROM legacy_execution_registrations")
+                .fetch_all(&self.database.pool)
+                .await?;
         Ok(roots.iter().any(|(root,)| {
             Path::new(root)
                 .canonicalize()

@@ -135,7 +135,17 @@ async fn credentials_reuse_configured_database_and_survive_resource_restart() {
         .await
         .unwrap();
     let (sessions, shutdown) = resources.into_parts();
-    let client = OAuthCredentialClient::new(sessions.oauth_credentials().unwrap()).unwrap();
+    let workspace_id = sessions
+        .resolve_workspace(directory.path())
+        .await
+        .unwrap()
+        .workspace_id;
+    let client = OAuthCredentialClient::new(
+        sessions
+            .oauth_credentials_for_workspace(workspace_id)
+            .unwrap(),
+    )
+    .unwrap();
     client
         .save_server("endpoint-key", credentials("database-client"))
         .await
@@ -162,7 +172,12 @@ async fn credentials_reuse_configured_database_and_survive_resource_restart() {
         .await
         .unwrap();
     let (sessions, shutdown) = resources.into_parts();
-    let client = OAuthCredentialClient::new(sessions.oauth_credentials().unwrap()).unwrap();
+    let client = OAuthCredentialClient::new(
+        sessions
+            .oauth_credentials_for_workspace(workspace_id)
+            .unwrap(),
+    )
+    .unwrap();
     assert_eq!(
         client
             .load_server("endpoint-key")

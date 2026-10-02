@@ -18,7 +18,7 @@ use peri_acp_types::session_resources::{
 };
 use peri_acp_types::store::{MessageFlags, PersistedPayload};
 use peri_acp_types::thread::AgentStatus;
-use peri_acp_types::workspace::{ScopedThreadQuery, SessionBinding, ThreadScope};
+use peri_acp_types::workspace::{ScopedThreadQuery, SessionBinding, ThreadScope, WorkspaceId};
 use turso_serverless::Value;
 
 use super::session_codec::{int_value, optional_text, payload_params};
@@ -154,16 +154,37 @@ const SELECT_PAGE_SQL: &str = concat!(
     "SELECT ",
     page_columns!(),
     " FROM threads s LEFT JOIN session_bindings b ON b.thread_id = s.id
-    WHERE s.hidden = 0 AND s.message_count > 0
+    WHERE s.parent_thread_id IS NULL AND s.hidden = 0 AND s.archived = ?8 AND s.message_count > 0
       AND (?1 = 0
         OR (?1 = 1 AND b.project_id = ?2)
-        OR (?1 = 2 AND b.workspace_id = ?2)
-        OR (?1 = 3 AND b.workspace_id = ?2 AND b.relative_cwd = ?3))
+        OR (?1 = 2 AND s.workspace_id = ?2)
+        OR (?1 = 3 AND s.workspace_id = ?2 AND b.relative_cwd = ?3))
       AND (?4 = 0 OR (s.updated_at, s.id) < (?5, ?6))
     ORDER BY s.updated_at DESC, s.id DESC LIMIT ?7"
 );
 
 const SELECT_ENV_PAGE_SQL: &str = concat!(
+    "SELECT ",
+    page_columns!(),
+    " FROM threads s LEFT JOIN session_bindings b ON b.thread_id = s.id
+    WHERE s.parent_thread_id IS NULL AND s.hidden = 0 AND s.archived = ?8 AND s.message_count > 0
+      AND EXISTS (SELECT 1 FROM workspaces w WHERE w.id = s.workspace_id AND w.machine_id = ?2)
+      AND (?4 = 0 OR (s.updated_at, s.id) < (?5, ?6))
+    ORDER BY s.updated_at DESC, s.id DESC LIMIT ?7"
+);
+
+const SELECT_PAGE_V11_SQL: &str = concat!(
+    "SELECT ",
+    page_columns!(),
+    " FROM threads s LEFT JOIN session_bindings b ON b.thread_id = s.id
+    WHERE s.hidden = 0 AND s.message_count > 0
+      AND (?1 = 0 OR (?1 = 1 AND b.project_id = ?2)
+        OR (?1 = 2 AND b.workspace_id = ?2)
+        OR (?1 = 3 AND b.workspace_id = ?2 AND b.relative_cwd = ?3))
+      AND (?4 = 0 OR (s.updated_at, s.id) < (?5, ?6))
+    ORDER BY s.updated_at DESC, s.id DESC LIMIT ?7"
+);
+const SELECT_ENV_PAGE_V11_SQL: &str = concat!(
     "SELECT ", page_columns!(),
     " FROM threads s LEFT JOIN session_bindings b ON b.thread_id = s.id
     WHERE s.hidden = 0 AND s.message_count > 0
@@ -200,6 +221,13 @@ pub(super) fn select_messages_statement(id: &str) -> StatementSpec {
 /// 分页列举语句；scope 里的相对路径必须能作为文本绑定，否则拒绝（不猜路径相等，
 /// 也不把「无法比较」静默当成「匹配为空」）。
 pub(super) fn page_statement(query: &ScopedThreadQuery) -> SessionResourceResult<StatementSpec> {
+    page_statement_for_archive(query, false)
+}
+
+pub(super) fn page_statement_for_archive(
+    query: &ScopedThreadQuery,
+    archived: bool,
+) -> SessionResourceResult<StatementSpec> {
     let (kind, scope_id, relative) = match &query.scope {
         ThreadScope::Environment(machine_id) => (4, Value::Text(machine_id.clone()), Value::Null),
         ThreadScope::All => (0_i64, Value::Null, Value::Null),
@@ -244,8 +272,22 @@ pub(super) fn page_statement(query: &ScopedThreadQuery) -> SessionResourceResult
             cursor_at,
             cursor_id,
             int_value(limit),
+            int_value(i64::from(archived)),
         ],
     ))
+}
+
+pub(super) fn page_statement_v11(
+    query: &ScopedThreadQuery,
+) -> SessionResourceResult<StatementSpec> {
+    let mut spec = page_statement_for_archive(query, false)?;
+    spec.sql = if matches!(query.scope, ThreadScope::Environment(_)) {
+        SELECT_ENV_PAGE_V11_SQL
+    } else {
+        SELECT_PAGE_V11_SQL
+    };
+    spec.params.pop();
+    Ok(spec)
 }
 
 // ─── 写入语句 ─────────────────────────────────────────────────────────────────
@@ -253,8 +295,9 @@ pub(super) fn page_statement(query: &ScopedThreadQuery) -> SessionResourceResult
 const INSERT_THREAD_SQL: &str =
     "INSERT INTO threads (id, title, cwd, created_at, updated_at, message_count,
         parent_thread_id, snapshot_at_message_id, hidden, cancel_policy, config,
-        frozen_context, agent_status)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)";
+        frozen_context, agent_status, workspace_id)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
+        COALESCE(?14, (SELECT workspace_id FROM threads WHERE id = ?7)))";
 
 /// 未发布创建（J2 第一阶段）：与整份创建同一列形状，只有 `frozen_context` 写 NULL。
 ///
@@ -263,8 +306,9 @@ const INSERT_THREAD_SQL: &str =
 const INSERT_THREAD_DRAFT_SQL: &str =
     "INSERT INTO threads (id, title, cwd, created_at, updated_at, message_count,
         parent_thread_id, snapshot_at_message_id, hidden, cancel_policy, config,
-        frozen_context, agent_status)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, NULL, ?12)";
+        frozen_context, agent_status, workspace_id)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, NULL, ?12,
+        COALESCE(?13, (SELECT workspace_id FROM threads WHERE id = ?7)))";
 
 /// 一次性提交 frozen（write-once CAS）：只对尚未提交的草稿生效。
 const COMMIT_FROZEN_SQL: &str =
@@ -311,8 +355,10 @@ const DELETE_DRAFT_SESSION_SQL: &str =
 /// 不可变绑定行插入：与本机 `session_rows.rs::insert_binding_row` 同一份语句，绑定住在
 /// `session_bindings` 表里（不再是会话行上的四个扁平列）。
 const INSERT_BINDING_SQL: &str =
-    "INSERT INTO session_bindings (thread_id, schema_version, project_id, workspace_id, relative_cwd)
-     VALUES (?1, ?2, ?3, ?4, ?5)";
+    "INSERT INTO session_bindings (thread_id, schema_version, project_id, workspace_id, relative_cwd,
+        discovery_snapshot, evidence_origin)
+     VALUES (?1, ?2, ?3, ?4, ?5, COALESCE(?6,
+        (SELECT discovery_snapshot FROM session_bindings WHERE thread_id = ?7)), 'creation_snapshot')";
 
 /// 继承区写入：与本机 child 路径同一份语句（创建行之后单独写一次，INSERT 不多带一列）。
 const UPDATE_INHERITED_SQL: &str = "UPDATE threads SET inherited_context = ?1 WHERE id = ?2";
@@ -354,6 +400,8 @@ pub(super) struct SessionInsert<'a> {
     pub(super) binding: &'a SessionBinding,
     /// 已生效会话的 agent 状态；新行一律 `active`。
     pub(super) agent_status: &'a str,
+    pub(super) owner_workspace_id: Option<WorkspaceId>,
+    pub(super) discovery_snapshot: Option<&'a str>,
 }
 
 /// 由 [`NewSession`] 组装一行插入参数（创建/fork/child 三条路径共用同一列形状）。
@@ -381,6 +429,8 @@ pub(super) fn session_insert<'a>(
         inherited,
         binding: &input.binding,
         agent_status: AgentStatus::Active.as_str(),
+        owner_workspace_id: None,
+        discovery_snapshot: None,
     }
 }
 
@@ -409,6 +459,9 @@ pub(super) fn insert_session_statements(
                 Value::Null,
                 Value::Text(row.frozen.to_owned()),
                 Value::Text(row.agent_status.to_owned()),
+                row.owner_workspace_id
+                    .map(|id| Value::Text(id.to_string()))
+                    .unwrap_or(Value::Null),
             ],
         ),
         StatementSpec::new(
@@ -419,6 +472,8 @@ pub(super) fn insert_session_statements(
                 Value::Text(row.binding.project_id.to_string()),
                 Value::Text(row.binding.workspace_id.to_string()),
                 Value::Text(relative),
+                optional_text(row.discovery_snapshot),
+                optional_text(row.parent_thread_id),
             ],
         ),
     ];
@@ -441,6 +496,8 @@ pub(super) fn insert_session_statements(
 /// 内容准入由 [`commit_frozen_statement`] 一次性补上。
 pub(super) fn insert_session_draft_statements(
     draft: &NewSessionDraft,
+    owner_workspace_id: Option<WorkspaceId>,
+    discovery_snapshot: Option<&str>,
 ) -> SessionResourceResult<Vec<StatementSpec>> {
     let relative = binding_relative_text(&draft.binding)?;
     let snapshot_at = draft
@@ -463,6 +520,9 @@ pub(super) fn insert_session_draft_statements(
                 Value::Text(draft.meta.cancel_policy.as_str().to_owned()),
                 Value::Null,
                 Value::Text(AgentStatus::Active.as_str().to_owned()),
+                owner_workspace_id
+                    .map(|id| Value::Text(id.to_string()))
+                    .unwrap_or(Value::Null),
             ],
         ),
         StatementSpec::new(
@@ -473,6 +533,8 @@ pub(super) fn insert_session_draft_statements(
                 Value::Text(draft.binding.project_id.to_string()),
                 Value::Text(draft.binding.workspace_id.to_string()),
                 Value::Text(relative),
+                optional_text(discovery_snapshot),
+                optional_text(draft.meta.parent_thread_id.as_deref()),
             ],
         ),
         environment_statement(

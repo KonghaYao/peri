@@ -229,6 +229,11 @@ impl SessionEnvironment {
         let Some(source) = host.workspace_assembly.as_ref() else {
             return Ok(None);
         };
+        let workspace_id = host
+            .session_resources
+            .session_workspace_id(&session_id.to_owned())
+            .await
+            .map_err(|error| AcpError::new(-32603, error.to_string()))?;
         // 配置视图与执行目录来自准备阶段定格的同一份输入：本函数不第二次
         // `ConfigSource::load_at`、不第二次解析 provider（`prepare_new` 的
         // `resolve_configuration` 已按「同目录复用 host 视图 / 异目录只读一次」定过格）。
@@ -299,6 +304,7 @@ impl SessionEnvironment {
                 host.permission_mode.load(),
             ),
             session_resources: host.session_resources.clone(),
+            workspace_id,
             // 会话级装配：这里不是部署 owner，拿不到也不持有全局关闭权。
             session_store_shutdown: None,
             cwd: cwd.clone(),

@@ -346,6 +346,7 @@ pub enum ThreadBrowserScope {
 pub static ACTIVE_EXECUTION_CWD: AtomStatic<Option<String>> = AtomStatic::new(|| None);
 pub static THREAD_BROWSER_SCOPE: AtomStatic<ThreadBrowserScope> =
     AtomStatic::new(ThreadBrowserScope::default);
+pub static THREAD_BROWSER_ARCHIVED: AtomStatic<bool> = AtomStatic::new(|| false);
 pub static THREAD_LIST_ERROR: AtomStatic<Option<String>> = AtomStatic::new(|| None);
 pub static THREAD_LIST_HAS_MORE: AtomStatic<bool> = AtomStatic::new(|| false);
 pub static THREAD_LIST_PAGE_COUNT: AtomStatic<u32> = AtomStatic::new(|| 1);

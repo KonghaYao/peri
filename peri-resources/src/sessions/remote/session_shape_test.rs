@@ -149,8 +149,8 @@ fn schema_ddl_matches_the_canonical_shape() {
     // 一条语句一个 spec：远端执行器的语句单元就是一条语句，多句拼一个请求只会执行第一条。
     assert_eq!(
         plan.len(),
-        super::session_schema::CANONICAL_TABLES.len()
-            + super::session_schema::CANONICAL_INDEXES.len(),
+        crate::sessions::canonical::CREATE_V2_TABLES.len()
+            + crate::sessions::canonical::CREATE_V2_INDEXES.len(),
         "远端下发的 canonical DDL：逐条建表 + 逐条建索引"
     );
     for spec in &plan {
@@ -167,7 +167,17 @@ fn schema_ddl_matches_the_canonical_shape() {
         );
     }
     // 远端建的是本机那一份 canonical 表（清单来自同一处，不另抄一遍）。
-    for table in super::session_schema::CANONICAL_TABLES {
+    for table in [
+        "machines",
+        "workspaces",
+        "threads",
+        "messages",
+        "projects",
+        "legacy_execution_registrations",
+        "session_bindings",
+        "session_environments",
+        "mcp_oauth_credentials",
+    ] {
         assert!(
             plan.iter().any(|spec| spec.sql.contains(table)),
             "canonical 表必须有建表语句: {table}"
@@ -180,7 +190,7 @@ fn schema_ddl_matches_the_canonical_shape() {
         .expect("索引段存在");
     assert_eq!(
         first_index,
-        super::session_schema::CANONICAL_TABLES.len(),
+        crate::sessions::canonical::CREATE_V2_TABLES.len(),
         "建表段在前、索引段在后"
     );
     for index in super::session_schema::CANONICAL_INDEXES {
@@ -517,8 +527,8 @@ async fn write_sql_is_static_and_all_values_are_bound() {
     assert_ne!(one[0].params, two[0].params);
     assert!(one[0].sql.starts_with("INSERT INTO threads"));
     assert!(one[1].sql.starts_with("INSERT INTO session_bindings"));
-    assert_eq!(one[0].params.len(), 13);
-    assert_eq!(one[1].params.len(), 5);
+    assert_eq!(one[0].params.len(), 14);
+    assert_eq!(one[1].params.len(), 7);
     // 全部动态内容都出现在参数里，不出现在 SQL 文本里。
     for secret in ["session-a", "session-b", "/home/u/project"] {
         assert!(!one[0].sql.contains(secret));
@@ -675,7 +685,11 @@ fn read_statements_are_read_only_and_parameterized() {
 
     let page = session_sql::page_statement(&query(ThreadScope::All, None)).expect("bindable");
     assert!(page.is_read_only(), "分页列举不得写: {}", page.sql);
-    assert_eq!(page.params.len(), 7, "scope/游标/上限都是绑定参数");
+    assert_eq!(
+        page.params.len(),
+        8,
+        "scope/游标/上限与归档状态都是绑定参数"
+    );
 }
 
 #[test]

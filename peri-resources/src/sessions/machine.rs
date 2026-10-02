@@ -22,7 +22,7 @@ pub(crate) async fn initialize() -> Result<&'static str> {
     current()
 }
 
-pub(crate) fn current() -> Result<&'static str> {
+pub fn current() -> Result<&'static str> {
     MACHINE_ID
         .get()
         .map(String::as_str)
@@ -63,6 +63,65 @@ fn load_or_create(path: &Path) -> Result<String> {
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => read_identity(path),
             Err(error) => Err(error).context("cannot publish machine identity"),
         }
+    })();
+    let _ = fs::remove_file(staging);
+    result
+}
+
+/// Explicitly adopt a known Machine identity after the caller has reviewed the
+/// target catalog and stopped active executions. The current process keeps its
+/// cached identity; the new value takes effect only after restart.
+pub fn adopt_file_identity(expected: &str, target: &str) -> Result<()> {
+    anyhow::ensure!(
+        std::env::var_os("PERI_MACHINE_ID").is_none(),
+        "PERI_MACHINE_ID override is active; change that deployment value instead"
+    );
+    let expected = Uuid::parse_str(expected)
+        .context("current Machine ID must be a UUID")?
+        .to_string();
+    let target = Uuid::parse_str(target)
+        .context("target Machine ID must be a UUID")?
+        .to_string();
+    let home = dirs_next::home_dir().context("machine identity requires a home directory")?;
+    let path = home.join(".peri/machine-id");
+    adopt_identity_at(&path, &expected, &target)
+}
+
+fn adopt_identity_at(path: &Path, expected: &str, target: &str) -> Result<()> {
+    let parent = path.parent().context("machine identity has no parent")?;
+    let lock = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .open(parent.join("machine-id.adopt.lock"))?;
+    lock.lock()
+        .context("cannot lock machine identity adoption")?;
+    anyhow::ensure!(
+        read_identity(&path)? == expected,
+        "current Machine ID changed"
+    );
+    if expected == target {
+        return Ok(());
+    }
+    let staging = parent.join(format!(".machine-id-adopt-{}", Uuid::new_v4()));
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let result = (|| {
+        use std::io::Write;
+        let mut file = options.open(&staging)?;
+        file.write_all(target.as_bytes())?;
+        file.sync_all()?;
+        anyhow::ensure!(
+            read_identity(&path)? == expected,
+            "current Machine ID changed"
+        );
+        fs::rename(&staging, &path).context("cannot replace machine identity")?;
+        fs::File::open(parent)?.sync_all()?;
+        Ok(())
     })();
     let _ = fs::remove_file(staging);
     result

@@ -2,6 +2,7 @@
 
 > 状态：工作区发现设计；会话恢复与执行归属部分为迁移前记录。
 > 迁移说明：本文记录迁移前实现。会话按 ID 恢复、机器 env 分区及文件锁/dirty 弹窗移除已批准，见 [目标设计](session-id-environment.md)；涉及恢复归属与锁的旧要求不作为新目标约束，新恢复链路已实施；旧锁、dirty 确认及路径归属门槛不再适用。
+> 存储 v2 已另行裁决 Machine → Workspace → Session 的目标归属模型，见 [存储 v2 设计](storage-v2-machine-workspace-session.md)；Git Workspace.path 取各自 worktree 根，非 Git 取启动 cwd，机器身份也参与唯一键。
 > schema 11 同时移除 `execution_runs`；本文关于持久 generation/clean 的迁移前描述不再是现行契约，执行状态与未知效果门禁驻留当前实例。
 >
 > Scope：本机同一 Peri 存储中的会话归属、执行绑定、恢复与执行所有权。

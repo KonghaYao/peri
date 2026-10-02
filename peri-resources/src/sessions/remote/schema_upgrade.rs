@@ -5,7 +5,6 @@ use turso_serverless::Value;
 
 use super::mutation::RemoteStore;
 use super::schema::{self, StoreSnapshot};
-use super::session_schema;
 use super::sql::{int_at, text_at, StatementSpec};
 use crate::sessions::canonical;
 use crate::sessions::schema_cleanup::{self, ColumnShape, SchemaObject};
@@ -21,6 +20,9 @@ pub(super) async fn upgrade(
     store: &RemoteStore,
     snapshot: &StoreSnapshot,
 ) -> SessionResourceResult<()> {
+    if snapshot.schema_version == 11 && snapshot.contract == "peri.session.store/v2" {
+        return super::schema_v12_upgrade::upgrade(store, snapshot).await;
+    }
     let results = store
         .read_batch(vec![
             StatementSpec::bare(schema_cleanup::SCHEMA_OBJECTS_SQL),
@@ -50,7 +52,11 @@ pub(super) async fn upgrade(
     }
     store
         .apply_schema_upgrade(upgrade_plan(snapshot, &objects, &columns)?)
-        .await
+        .await?;
+    let super::schema::StoreIdentityRead::Present(upgraded) = store.read_identity().await? else {
+        return Err(invalid_schema());
+    };
+    super::schema_v12_upgrade::upgrade(store, &upgraded).await
 }
 
 fn decode_columns(rows: &[Vec<Value>]) -> SessionResourceResult<Vec<ColumnShape>> {
@@ -73,7 +79,7 @@ pub(super) fn upgrade_plan(
     objects: &[SchemaObject],
     columns: &[ColumnShape],
 ) -> SessionResourceResult<Vec<StatementSpec>> {
-    if snapshot.schema_version != 10 || snapshot.contract != schema::STORE_CONTRACT {
+    if snapshot.schema_version != 10 || snapshot.contract != "peri.session.store/v2" {
         return Err(invalid_schema());
     }
     if !objects.iter().any(|object| {
@@ -134,12 +140,17 @@ pub(super) fn upgrade_plan(
     }
     plan.extend(removals.into_iter().map(StatementSpec::bare));
     if empty {
-        plan.extend(session_schema::initialization_plan());
+        plan.extend(
+            canonical::CREATE_TABLES
+                .iter()
+                .chain(canonical::CREATE_INDEXES)
+                .map(|sql| StatementSpec::bare(sql)),
+        );
     }
     plan.push(StatementSpec::new(
         ADVANCE_VERSION_SQL,
         vec![
-            Value::Integer(schema::REMOTE_SCHEMA_VERSION),
+            Value::Integer(11),
             Value::Integer(snapshot.schema_version),
             Value::Text(snapshot.store_id.as_str().to_owned()),
             Value::Text(snapshot.contract.clone()),

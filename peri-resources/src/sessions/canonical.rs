@@ -73,12 +73,6 @@ pub(super) const CREATE_OAUTH_CREDENTIALS_TABLE_SQL: &str =
     updated_at TEXT NOT NULL,
     PRIMARY KEY (principal_id, machine_id, server_key)
 )";
-pub(super) const SELECT_OAUTH_CREDENTIAL_SQL: &str = "SELECT credentials_blob FROM mcp_oauth_credentials WHERE principal_id = ?1 AND machine_id = ?2 AND server_key = ?3";
-pub(super) const UPSERT_OAUTH_CREDENTIAL_SQL: &str = "INSERT INTO mcp_oauth_credentials(principal_id, machine_id, server_key, credentials_blob, updated_at) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(principal_id, machine_id, server_key) DO UPDATE SET credentials_blob = excluded.credentials_blob, updated_at = excluded.updated_at";
-pub(super) const DELETE_OAUTH_CREDENTIAL_SQL: &str = "DELETE FROM mcp_oauth_credentials WHERE principal_id = ?1 AND machine_id = ?2 AND server_key = ?3";
-pub(super) const DELETE_ALL_OAUTH_CREDENTIALS_SQL: &str =
-    "DELETE FROM mcp_oauth_credentials WHERE principal_id = ?1 AND machine_id = ?2";
-pub(super) const LIST_OAUTH_CREDENTIALS_SQL: &str = "SELECT server_key FROM mcp_oauth_credentials WHERE principal_id = ?1 AND machine_id = ?2 ORDER BY server_key";
 pub(super) const INSERT_ENVIRONMENT_SQL: &str = "INSERT INTO session_environments(thread_id, machine_id) VALUES (?1, COALESCE((SELECT machine_id FROM session_environments WHERE thread_id = ?2), ?3))";
 pub(super) const BACKFILL_ENVIRONMENTS_SQL: &str = "WITH RECURSIVE tree(thread_id, machine_id) AS (
     SELECT t.id, COALESCE(env.machine_id, ?1) FROM threads t
@@ -163,6 +157,83 @@ pub(super) const CREATE_INDEXES: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS idx_threads_updated ON threads(updated_at DESC, id DESC) WHERE hidden = 0 AND message_count > 0",
     "CREATE INDEX IF NOT EXISTS idx_session_environments_machine ON session_environments(machine_id, thread_id)",
 ];
+
+/// 存储 v2 的目标表定义。11→12 搬运在连接旧读写路径切换前由独立迁移夹具验证；
+/// 新库与远端初始化接线后也使用这些常量，避免两份目标 DDL 漂移。
+pub(super) const CREATE_V2_MACHINES_TABLE_SQL: &str = "CREATE TABLE IF NOT EXISTS machines (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL CHECK(length(trim(name)) > 0),
+    identity_kind TEXT NOT NULL CHECK(identity_kind IN ('known', 'legacy_unknown'))
+)";
+pub(super) const CREATE_V2_WORKSPACES_TABLE_SQL: &str = "CREATE TABLE IF NOT EXISTS workspaces (
+    id TEXT PRIMARY KEY,
+    machine_id TEXT NOT NULL REFERENCES machines(id),
+    path TEXT NOT NULL,
+    path_source TEXT NOT NULL CHECK(path_source IN ('discovered', 'derived_legacy', 'unverified')),
+    UNIQUE(machine_id, path)
+)";
+macro_rules! v2_threads_table_sql {
+    ($name:literal) => { concat!("CREATE TABLE IF NOT EXISTS ", $name, " (
+    id TEXT PRIMARY KEY, title TEXT, cwd TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL, updated_at TEXT NOT NULL, message_count INTEGER NOT NULL DEFAULT 0,
+    parent_thread_id TEXT, snapshot_at_message_id TEXT, hidden BOOLEAN NOT NULL DEFAULT 0,
+    cancel_policy TEXT NOT NULL DEFAULT 'cascade', config TEXT,
+    frozen_context TEXT, inherited_context TEXT, agent_status TEXT NOT NULL DEFAULT 'active',
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+    archived BOOLEAN NOT NULL DEFAULT 0 CHECK(archived IN (0, 1))
+)") };
+}
+pub(super) const CREATE_V2_THREADS_TABLE_SQL: &str = v2_threads_table_sql!("threads");
+pub(super) const CREATE_V2_TEMP_THREADS_TABLE_SQL: &str = v2_threads_table_sql!("threads_v12");
+pub(super) const CREATE_V2_OAUTH_CREDENTIALS_TABLE_SQL: &str =
+    "CREATE TABLE IF NOT EXISTS mcp_oauth_credentials (
+    principal_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+    server_key TEXT NOT NULL,
+    credentials_blob TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(principal_id, workspace_id, server_key)
+)";
+pub(super) const CREATE_V2_LEGACY_REGISTRATIONS_TABLE_SQL: &str =
+    "CREATE TABLE IF NOT EXISTS legacy_execution_registrations (
+    id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
+    root TEXT NOT NULL, root_identity TEXT NOT NULL, discovery TEXT NOT NULL,
+    UNIQUE(root, root_identity), UNIQUE(id, project_id)
+)";
+pub(super) const CREATE_V2_BINDINGS_TABLE_SQL: &str =
+    "CREATE TABLE IF NOT EXISTS session_bindings (
+    thread_id TEXT PRIMARY KEY REFERENCES threads(id) ON DELETE CASCADE,
+    schema_version INTEGER NOT NULL,
+    project_id TEXT NOT NULL, workspace_id TEXT NOT NULL, relative_cwd TEXT NOT NULL,
+    discovery_snapshot TEXT,
+    evidence_origin TEXT NOT NULL,
+    FOREIGN KEY(workspace_id, project_id) REFERENCES legacy_execution_registrations(id, project_id)
+)";
+pub(super) const CREATE_V2_TABLES: &[&str] = &[
+    CREATE_V2_MACHINES_TABLE_SQL,
+    CREATE_V2_WORKSPACES_TABLE_SQL,
+    CREATE_V2_THREADS_TABLE_SQL,
+    CREATE_TABLES[1],
+    CREATE_TABLES[2],
+    CREATE_V2_LEGACY_REGISTRATIONS_TABLE_SQL,
+    CREATE_V2_BINDINGS_TABLE_SQL,
+    CREATE_ENVIRONMENTS_TABLE_SQL,
+    CREATE_V2_OAUTH_CREDENTIALS_TABLE_SQL,
+];
+pub(super) const CREATE_V2_INDEXES: &[&str] = &[
+    CREATE_INDEXES[0],
+    CREATE_INDEXES[1],
+    CREATE_INDEXES[2],
+    CREATE_INDEXES[3],
+    CREATE_INDEXES[4],
+    "CREATE INDEX IF NOT EXISTS idx_threads_workspace_archived ON threads(workspace_id, archived, updated_at DESC, id DESC) WHERE parent_thread_id IS NULL AND message_count > 0",
+];
+pub(super) const SELECT_V2_OAUTH_CREDENTIAL_SQL: &str = "SELECT credentials_blob FROM mcp_oauth_credentials WHERE principal_id = ?1 AND workspace_id = ?2 AND server_key = ?3";
+pub(super) const UPSERT_V2_OAUTH_CREDENTIAL_SQL: &str = "INSERT INTO mcp_oauth_credentials(principal_id, workspace_id, server_key, credentials_blob, updated_at) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(principal_id, workspace_id, server_key) DO UPDATE SET credentials_blob = excluded.credentials_blob, updated_at = excluded.updated_at";
+pub(super) const DELETE_V2_OAUTH_CREDENTIAL_SQL: &str = "DELETE FROM mcp_oauth_credentials WHERE principal_id = ?1 AND workspace_id = ?2 AND server_key = ?3";
+pub(super) const DELETE_ALL_V2_OAUTH_CREDENTIALS_SQL: &str =
+    "DELETE FROM mcp_oauth_credentials WHERE principal_id = ?1 AND workspace_id = ?2";
+pub(super) const LIST_V2_OAUTH_CREDENTIALS_SQL: &str = "SELECT server_key FROM mcp_oauth_credentials WHERE principal_id = ?1 AND workspace_id = ?2 ORDER BY server_key";
 
 /// 删除一条 `threads` 行之前必须显式清理的子表：子表名 + 语句。
 ///

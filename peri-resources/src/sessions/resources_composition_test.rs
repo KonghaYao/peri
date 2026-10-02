@@ -83,15 +83,15 @@ impl DoubleDbFixture {
         .await
         .unwrap();
         let row: (String, String, String, String, String) = sqlx::query_as(
-            "SELECT id, project_id, root, root_identity, discovery FROM workspaces WHERE id = ?1 AND project_id = ?2",
+            "SELECT id, project_id, root, root_identity, discovery FROM legacy_execution_registrations WHERE id = ?1 AND project_id = ?2",
         )
-        .bind(workspace.workspace_id.to_string())
+        .bind(workspace.execution_registration_id.to_string())
         .bind(workspace.project_id.to_string())
         .fetch_one(self.local.pool())
         .await
         .unwrap();
         sqlx::query(
-            "INSERT OR IGNORE INTO workspaces (id, project_id, root, root_identity, discovery)
+            "INSERT OR IGNORE INTO legacy_execution_registrations (id, project_id, root, root_identity, discovery)
              VALUES (?1, ?2, ?3, ?4, ?5)",
         )
         .bind(&row.0)
@@ -102,16 +102,22 @@ impl DoubleDbFixture {
         .execute(self.data.pool())
         .await
         .unwrap();
+        let owner: (String, String, String, String) = sqlx::query_as(
+            "SELECT id, machine_id, path, path_source FROM workspaces WHERE id = ?1",
+        )
+        .bind(workspace.workspace_id.to_string())
+        .fetch_one(self.local.pool())
+        .await
+        .unwrap();
+        sqlx::query("INSERT OR IGNORE INTO machines(id, name, identity_kind) VALUES (?1, '我的电脑', 'known')")
+            .bind(&owner.1).execute(self.data.pool()).await.unwrap();
+        sqlx::query("INSERT OR IGNORE INTO workspaces(id, machine_id, path, path_source) VALUES (?1, ?2, ?3, ?4)")
+            .bind(&owner.0).bind(&owner.1).bind(&owner.2).bind(&owner.3)
+            .execute(self.data.pool()).await.unwrap();
     }
 
     fn binding(workspace: &ResolvedWorkspace) -> SessionBinding {
-        SessionBinding {
-            schema_version: SESSION_BINDING_VERSION,
-            revision: 1,
-            project_id: workspace.project_id,
-            workspace_id: workspace.workspace_id,
-            cwd_relative_to_workspace: workspace.relative_cwd.clone(),
-        }
+        SessionBinding::from_workspace(workspace)
     }
 
     fn session(&self, id: &str, workspace: &ResolvedWorkspace, parent: Option<&str>) -> NewSession {
@@ -183,13 +189,14 @@ impl DoubleDbFixture {
     /// 数据面上只有会话行、没有绑定行的历史会话（远端 store 里的 legacy 历史）。
     async fn save_bindingless_session(&self, id: &str, workspace: &ResolvedWorkspace) {
         sqlx::query(
-            "INSERT INTO threads (id, title, cwd, created_at, updated_at, message_count, agent_status)
-             VALUES (?1, ?2, ?3, ?4, ?4, 0, 'active')",
+            "INSERT INTO threads (id, title, cwd, created_at, updated_at, message_count, agent_status, workspace_id)
+             VALUES (?1, ?2, ?3, ?4, ?4, 0, 'active', ?5)",
         )
         .bind(id)
         .bind(format!("legacy {id}"))
         .bind(workspace.cwd.to_string_lossy().into_owned())
         .bind("2026-09-26T00:00:00Z")
+        .bind(workspace.workspace_id.to_string())
         .execute(self.data.pool())
         .await
         .unwrap();
@@ -198,13 +205,14 @@ impl DoubleDbFixture {
     /// 本机库里恰好有一条同 id 的行（cwd 落在已登记工作区内）：远端会话不能被它冒充。
     async fn save_local_lookalike_row(&self, id: &str, workspace: &ResolvedWorkspace) {
         sqlx::query(
-            "INSERT INTO threads (id, title, cwd, created_at, updated_at, message_count, agent_status)
-             VALUES (?1, ?2, ?3, ?4, ?4, 0, 'active')",
+            "INSERT INTO threads (id, title, cwd, created_at, updated_at, message_count, agent_status, workspace_id)
+             VALUES (?1, ?2, ?3, ?4, ?4, 0, 'active', ?5)",
         )
         .bind(id)
         .bind(format!("lookalike {id}"))
         .bind(workspace.cwd.to_string_lossy().into_owned())
         .bind("2026-09-26T00:00:00Z")
+        .bind(workspace.workspace_id.to_string())
         .execute(self.local.pool())
         .await
         .unwrap();

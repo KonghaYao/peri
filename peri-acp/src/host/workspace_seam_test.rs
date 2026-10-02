@@ -49,6 +49,7 @@ async fn seam_fixture() -> SeamFixture {
         config_source,
         permission_mode: SharedPermissionMode::new(PermissionMode::Bypass),
         session_resources,
+        workspace_id: None,
         session_store_shutdown: None,
         cwd: cwd.clone(),
         // bare：跳过插件/settings hooks，会话只建 workspace 池。

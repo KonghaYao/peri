@@ -50,7 +50,8 @@ const SELECT_TREE_IDS_SQL: &str = "WITH RECURSIVE tree(id) AS (
 const COUNT_CHILDREN_SQL: &str = "SELECT COUNT(*) FROM threads WHERE parent_thread_id = ?1";
 
 /// 接纳依据：保存的绝对 cwd 与父关系。
-const SELECT_ADOPT_FACTS_SQL: &str = "SELECT cwd, parent_thread_id FROM threads WHERE id = ?1";
+const SELECT_ADOPT_FACTS_SQL: &str =
+    "SELECT cwd, parent_thread_id, workspace_id FROM threads WHERE id = ?1";
 
 /// 补 frozen：已有值不变（`IS NULL` 谓词即本机「已有值不变」的同一语义）。
 const ADOPT_FROZEN_SQL: &str = "UPDATE threads SET frozen_context = ?2
@@ -59,8 +60,8 @@ const ADOPT_FROZEN_SQL: &str = "UPDATE threads SET frozen_context = ?2
 /// 补不可变绑定：只在 `session_bindings` 里还没有这一行时写入，之后任何行为都不改写它
 /// （本机同一判定：先读已有绑定，没有才 INSERT）。
 const ADOPT_BINDING_SQL: &str = "INSERT INTO session_bindings
-    (thread_id, schema_version, project_id, workspace_id, relative_cwd)
-    SELECT ?1, ?2, ?3, ?4, ?5
+    (thread_id, schema_version, project_id, workspace_id, relative_cwd, discovery_snapshot, evidence_origin)
+    SELECT ?1, ?2, ?3, ?4, ?5, ?6, 'creation_snapshot'
     WHERE NOT EXISTS (SELECT 1 FROM session_bindings WHERE thread_id = ?1)";
 
 /// child resume 认领事实：状态 + 更新时间（`claimed` 由状态派生，不是独立列）。
@@ -96,7 +97,10 @@ impl RemoteSessionData {
             .ok_or_else(not_found)?;
         let cwd = text_at(&facts, 0).ok_or_else(|| codec::corrupt("session cwd is unreadable"))?;
         // 保存的绝对 cwd 是接纳依据；调用方不能借接纳顺手改绑，也不能接纳 child。
-        if cwd != saved_cwd || text_at(&facts, 1).is_some() {
+        if cwd != saved_cwd
+            || text_at(&facts, 1).is_some()
+            || text_at(&facts, 2) != Some(workspace.workspace_id.to_string().as_str())
+        {
             return Err(SessionResourceError::new(
                 SessionResourceErrorKind::Workspace(WorkspaceError::ExecutionBindingMismatch),
             ));
@@ -130,6 +134,12 @@ impl RemoteSessionData {
                     Value::Text(binding.project_id.to_string()),
                     Value::Text(binding.workspace_id.to_string()),
                     Value::Text(relative),
+                    Value::Text(
+                        workspace
+                            .discovery_snapshot
+                            .clone()
+                            .ok_or_else(|| invalid_input("execution evidence is unavailable"))?,
+                    ),
                 ],
             ));
         }

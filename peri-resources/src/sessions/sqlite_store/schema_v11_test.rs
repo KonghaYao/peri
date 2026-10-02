@@ -67,6 +67,48 @@ async fn history(
 }
 
 #[tokio::test]
+async fn environment_backfill_failure_rolls_back_schema_and_version() {
+    let (directory, mut connection) = old_database().await;
+    sqlx::query("DROP TABLE session_environments")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    sqlx::query("CREATE TABLE session_environments (thread_id TEXT PRIMARY KEY)")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    connection.close().await.unwrap();
+
+    let path = directory.path().join("threads.db");
+    assert!(SqliteThreadStore::new(&path).await.is_err());
+    let mut connection = SqliteConnection::connect_with(
+        &SqliteConnectOptions::new()
+            .filename(&path)
+            .foreign_keys(true),
+    )
+    .await
+    .unwrap();
+    let (version,): (i64,) = sqlx::query_as("PRAGMA user_version")
+        .fetch_one(&mut connection)
+        .await
+        .unwrap();
+    assert_eq!(version, 10);
+    let (cached_column,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM pragma_table_info('threads') WHERE name = 'cached_context'",
+    )
+    .fetch_one(&mut connection)
+    .await
+    .unwrap();
+    assert_eq!(cached_column, 1);
+    let (goals_table,): (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM sqlite_master WHERE name = 'thread_goals'")
+            .fetch_one(&mut connection)
+            .await
+            .unwrap();
+    assert_eq!(goals_table, 1);
+}
+
+#[tokio::test]
 async fn schema_v11_upgrade_removes_only_retired_state_and_keeps_config_and_history() {
     let (directory, mut connection) = old_database().await;
     let before = history(&mut connection).await;
@@ -78,7 +120,7 @@ async fn schema_v11_upgrade_removes_only_retired_state_and_keeps_config_and_hist
         .fetch_one(&mut *connection)
         .await
         .unwrap();
-    assert_eq!(version, 11);
+    assert_eq!(version, 12);
     let (retired,): (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM sqlite_master WHERE name IN ('thread_goals', 'execution_runs')",
     )
@@ -392,7 +434,7 @@ async fn schema_v11_cleans_prior_development_eleven_and_reopens_without_runtime_
                 .fetch_one(&mut *connection)
                 .await
                 .unwrap();
-            assert_eq!(version, 11);
+            assert_eq!(version, 12);
             let (retired,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM sqlite_schema WHERE name IN ('execution_runs', 'idx_execution_generation')")
                 .fetch_one(&mut *connection).await.unwrap();
             assert_eq!(retired, 0);

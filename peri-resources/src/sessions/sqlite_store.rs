@@ -20,7 +20,12 @@ mod schema;
 mod schema_cleanup;
 mod session_data;
 mod session_rows;
+#[path = "storage_v2_migration.rs"]
+mod storage_v2_migration;
+#[path = "storage_v2_plan.rs"]
+pub(super) mod storage_v2_plan;
 mod workspace;
+mod workspace_identity;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -202,10 +207,17 @@ impl ThreadStore for SqliteThreadStore {
     async fn create_thread(&self, meta: ThreadMeta) -> Result<ThreadId> {
         let id = meta.id.clone();
         let mut transaction = self.database.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let workspace_id = workspace_identity::identity_for_new_thread(
+            &mut transaction,
+            meta.parent_thread_id.as_deref(),
+            None,
+            &meta.cwd,
+        )
+        .await?;
         sqlx::query(
             "INSERT INTO threads (id, title, cwd, created_at, updated_at, message_count,
-                parent_thread_id, snapshot_at_message_id, hidden, cancel_policy, config, agent_status)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                parent_thread_id, snapshot_at_message_id, hidden, cancel_policy, config, agent_status, workspace_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         )
         .bind(&meta.id)
         .bind(&meta.title)
@@ -219,6 +231,7 @@ impl ThreadStore for SqliteThreadStore {
         .bind(meta.cancel_policy.as_str())
         .bind(&meta.config)
         .bind(meta.agent_status.as_str())
+        .bind(workspace_id.to_string())
         .execute(&mut *transaction)
         .await?;
         session_rows::insert_environment_row(

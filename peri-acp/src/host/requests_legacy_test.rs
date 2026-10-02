@@ -336,6 +336,7 @@ async fn legacy_history_freezes_saved_workspace_configuration_and_plugins() {
     let target = tmp.path().join("saved");
     std::fs::create_dir(&startup).unwrap();
     std::fs::create_dir_all(target.join(".peri/meta")).unwrap();
+    let target = std::fs::canonicalize(&target).unwrap();
     std::fs::write(target.join(".peri/meta/01_intro.md"), "SAVED_META_HARNESS").unwrap();
     std::fs::write(
         target.join(".peri/settings.json"),

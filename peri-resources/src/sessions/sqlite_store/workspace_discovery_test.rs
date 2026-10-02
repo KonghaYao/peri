@@ -134,12 +134,16 @@ async fn test_worktree_replaced_directory_registers_new_workspace_keeps_old_hist
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(binding.workspace_id, registered.workspace_id);
+    assert_eq!(binding.workspace_id, registered.execution_registration_id);
     assert_eq!(binding.project_id, registered.project_id);
 
     // 新对象得到独立登记，新会话可建，执行目录就是该路径。
     let (replacement_thread, replacement) = bound(&store, &root).await;
-    assert_ne!(replacement.workspace_id, registered.workspace_id);
+    assert_eq!(replacement.workspace_id, registered.workspace_id);
+    assert_ne!(
+        replacement.execution_registration_id,
+        registered.execution_registration_id
+    );
     assert_ne!(replacement.project_id, registered.project_id);
     assert_eq!(
         replacement.cwd,
@@ -304,20 +308,33 @@ async fn test_worktree_directory_gaining_repository_keeps_registration() {
     git(&root, &["init", "-q"]);
 
     // The registered directory object keeps its identity instead of failing closed.
-    assert_eq!(store.resolve_workspace(&root).await.unwrap(), registered);
+    let rediscovered = store.resolve_workspace(&root).await.unwrap();
+    assert_eq!(rediscovered.workspace_id, registered.workspace_id);
+    assert_ne!(
+        rediscovered.discovery_snapshot,
+        registered.discovery_snapshot
+    );
     // Subdirectories now resolve into that same repository workspace.
     let nested = store.resolve_workspace(&nested).await.unwrap();
     assert_eq!(nested.workspace_id, registered.workspace_id);
     assert_eq!(nested.project_id, registered.project_id);
     assert_eq!(nested.relative_cwd, Path::new("sub"));
     // The existing session is neither rebound nor hidden, and new sessions work.
-    assert_eq!(
-        store.validate_session_binding(&root_id).await.unwrap(),
-        registered
-    );
+    assert!(matches!(
+        store
+            .validate_session_binding(&root_id)
+            .await
+            .unwrap_err()
+            .downcast_ref::<WorkspaceError>(),
+        Some(WorkspaceError::NeedsRelink)
+    ));
     let (fresh, fresh_workspace) = bound(&store, &root).await;
     assert_ne!(fresh, root_id);
-    assert_eq!(fresh_workspace, registered);
+    assert_eq!(fresh_workspace.workspace_id, registered.workspace_id);
+    assert_eq!(
+        fresh_workspace.discovery_snapshot,
+        rediscovered.discovery_snapshot
+    );
     // The session registered inside the directory that became a repository root
     // keeps its history but no longer executes there; the layout change is not
     // silently rewritten into a different workspace.
@@ -346,14 +363,20 @@ async fn test_worktree_repository_losing_git_keeps_registration() {
 
     std::fs::remove_dir_all(repo.path().join(".git")).unwrap();
 
-    assert_eq!(
-        store.resolve_workspace(repo.path()).await.unwrap(),
-        registered
+    let rediscovered = store.resolve_workspace(repo.path()).await.unwrap();
+    assert_eq!(rediscovered.workspace_id, registered.workspace_id);
+    assert_ne!(
+        rediscovered.discovery_snapshot,
+        registered.discovery_snapshot
     );
-    assert_eq!(
-        store.validate_session_binding(&id).await.unwrap(),
-        registered
-    );
+    assert!(matches!(
+        store
+            .validate_session_binding(&id)
+            .await
+            .unwrap_err()
+            .downcast_ref::<WorkspaceError>(),
+        Some(WorkspaceError::NeedsRelink)
+    ));
     let _ = bound(&store, repo.path()).await;
     // Without a repository each directory is again its own workspace; the
     // subdirectory no longer belongs to the registered root workspace.

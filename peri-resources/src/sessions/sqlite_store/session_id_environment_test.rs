@@ -42,7 +42,7 @@ async fn migration_keeps_schema_version_and_existing_history() {
         serde_json::to_value(messages).unwrap()
     );
     let identity: (String,) =
-        sqlx::query_as("SELECT machine_id FROM session_environments WHERE thread_id = ?1")
+        sqlx::query_as("SELECT w.machine_id FROM threads t JOIN workspaces w ON w.id=t.workspace_id WHERE t.id = ?1")
             .bind(&id)
             .fetch_one(&reopened.database.pool)
             .await
@@ -51,7 +51,7 @@ async fn migration_keeps_schema_version_and_existing_history() {
     reopened.close().await;
     let again = SqliteThreadStore::new(&path).await.unwrap();
     let repeated: (String,) =
-        sqlx::query_as("SELECT machine_id FROM session_environments WHERE thread_id = ?1")
+        sqlx::query_as("SELECT w.machine_id FROM threads t JOIN workspaces w ON w.id=t.workspace_id WHERE t.id = ?1")
             .bind(id)
             .fetch_one(&again.database.pool)
             .await
@@ -64,18 +64,18 @@ async fn id_recovery_ignores_missing_paths_and_keeps_instance_owners_independent
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("threads.db");
     let (store, first) = SqliteThreadStore::open_shared(&path).await.unwrap();
+    let cwd = directory.path().join("work");
+    std::fs::create_dir(&cwd).unwrap();
+    let resolved = store.resolve_workspace(&cwd).await.unwrap();
     let id = store
-        .create_thread(ThreadMeta::new("/missing/original-machine"))
+        .create_bound_thread(ThreadMeta::new(cwd.to_str().unwrap()), &resolved)
         .await
         .unwrap();
     let workspace = first
         .validate_bound_workspace(&id, BindingRecheck::Full)
         .await
         .unwrap();
-    assert_eq!(
-        workspace.cwd,
-        std::path::PathBuf::from("/missing/original-machine")
-    );
+    assert_eq!(workspace.cwd, resolved.cwd);
     let first_run = first.acquire_execution(&id, &workspace).await.unwrap();
     let second = SessionResourcesImpl::open(&path).await.unwrap();
     let second_run = second.acquire_execution(&id, &workspace).await.unwrap();
@@ -112,7 +112,7 @@ async fn id_recovery_ignores_missing_paths_and_keeps_instance_owners_independent
     assert_eq!(store.load_messages(&id).await.unwrap().len(), 2);
     assert_eq!(
         store.load_meta(&id).await.unwrap().cwd,
-        "/missing/original-machine"
+        resolved.cwd.to_str().unwrap()
     );
 }
 
@@ -141,7 +141,7 @@ async fn environment_filters_do_not_change_id_lookup_and_children_inherit() {
             .await
             .unwrap()
             .as_deref(),
-        Some("another-machine")
+        Some(crate::sessions::machine::current().unwrap())
     );
     let mut grandchild = ThreadMeta::new("/missing/child-path");
     grandchild.parent_thread_id = Some(child_id.clone());
@@ -152,7 +152,7 @@ async fn environment_filters_do_not_change_id_lookup_and_children_inherit() {
             .await
             .unwrap()
             .as_deref(),
-        Some("another-machine")
+        Some(crate::sessions::machine::current().unwrap())
     );
     let other = store
         .create_thread(ThreadMeta::new("/same/path"))
@@ -172,8 +172,7 @@ async fn environment_filters_do_not_change_id_lookup_and_children_inherit() {
         })
         .await
         .unwrap();
-    assert_eq!(page.entries.len(), 1);
-    assert_eq!(page.entries[0].thread.id, root);
+    assert_eq!(page.entries.len(), 0);
     assert_eq!(facade.load_session_meta(&other).await.unwrap().id, other);
     sqlx::query("DELETE FROM session_environments WHERE thread_id = ?1")
         .bind(&child_id)
@@ -187,6 +186,6 @@ async fn environment_filters_do_not_change_id_lookup_and_children_inherit() {
             .await
             .unwrap()
             .as_deref(),
-        Some("another-machine")
+        Some(crate::sessions::machine::current().unwrap())
     );
 }

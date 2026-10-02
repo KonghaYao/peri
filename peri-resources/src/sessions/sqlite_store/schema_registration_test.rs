@@ -126,17 +126,17 @@ async fn test_version4_upgrade_relaxes_registration_keys_and_preserves_rows() {
     );
 
     sqlx::query(
-        "INSERT INTO workspaces (id, project_id, root, root_identity, discovery)
+        "INSERT INTO legacy_execution_registrations (id, project_id, root, root_identity, discovery)
          SELECT '33333333-3333-4333-8333-333333333333', project_id, root, '{\"device\":9,\"inode\":9}', discovery
-         FROM workspaces WHERE id = '22222222-2222-4222-8222-222222222222'",
+         FROM legacy_execution_registrations WHERE id = '22222222-2222-4222-8222-222222222222'",
     )
     .execute(&store.database.pool)
     .await
     .unwrap();
     let duplicate_workspace = sqlx::query(
-        "INSERT INTO workspaces (id, project_id, root, root_identity, discovery)
+        "INSERT INTO legacy_execution_registrations (id, project_id, root, root_identity, discovery)
          SELECT '44444444-4444-4444-8444-444444444444', project_id, root, root_identity, discovery
-         FROM workspaces WHERE id = '22222222-2222-4222-8222-222222222222'",
+         FROM legacy_execution_registrations WHERE id = '22222222-2222-4222-8222-222222222222'",
     )
     .execute(&store.database.pool)
     .await;
@@ -165,9 +165,9 @@ async fn test_version4_upgrade_relaxes_registration_keys_and_preserves_rows() {
     );
     // 重建登记表不能丢外键：引用不存在项目的工作区仍被拒绝。
     let orphan = sqlx::query(
-        "INSERT INTO workspaces (id, project_id, root, root_identity, discovery)
+        "INSERT INTO legacy_execution_registrations (id, project_id, root, root_identity, discovery)
          SELECT '77777777-7777-4777-8777-777777777777', 'missing-project', root || '-orphan', root_identity, discovery
-         FROM workspaces WHERE id = '22222222-2222-4222-8222-222222222222'",
+         FROM legacy_execution_registrations WHERE id = '22222222-2222-4222-8222-222222222222'",
     )
     .execute(&store.database.pool)
     .await;
@@ -228,7 +228,14 @@ async fn assert_registration_upgrade_allows_directory_changes(version: i64) {
         let resolved = store.resolve_workspace(cwd).await.unwrap_or_else(|error| {
             panic!("schema {version} 升级后目录 {cwd:?} 必须可登记：{error}")
         });
-        assert_ne!(resolved.workspace_id, workspace.workspace_id);
+        assert_eq!(
+            resolved.workspace_id == workspace.workspace_id,
+            cwd == &original
+        );
+        assert_ne!(
+            resolved.execution_registration_id,
+            workspace.execution_registration_id
+        );
         assert_ne!(resolved.project_id, workspace.project_id);
         let new_thread = store
             .create_bound_thread(ThreadMeta::new(cwd.to_str().unwrap()), &resolved)
@@ -331,7 +338,7 @@ async fn test_registration_upgrade_preserves_healthy_v5_composite_registrations(
         "INSERT INTO projects SELECT '33333333-3333-4333-8333-333333333333', locator || '-moved', object_identity FROM projects;
          INSERT INTO projects SELECT '44444444-4444-4444-8444-444444444444', locator, '{\"device\":9,\"inode\":9}'
              FROM projects WHERE id = '11111111-1111-4111-8111-111111111111';
-         INSERT INTO workspaces SELECT '55555555-5555-4555-8555-555555555555', project_id, root || '-moved', root_identity, discovery FROM workspaces;
+         INSERT INTO workspaces SELECT '55555555-5555-4555-8555-555555555555', project_id, root || '-moved', root_identity, json_set(discovery, '$.root', root || '-moved') FROM workspaces;
          INSERT INTO workspaces SELECT '66666666-6666-4666-8666-666666666666', project_id, root, '{\"device\":9,\"inode\":9}', discovery
              FROM workspaces WHERE id = '22222222-2222-4222-8222-222222222222';"
     ).execute(&mut connection).await.unwrap();

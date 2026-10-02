@@ -278,7 +278,7 @@ fn pending_policy_is_fail_closed_and_bound_policy_cannot_change() {
     assert!(!pool.persistent_cache_allowed("server"));
     assert_eq!(
         pool.cache_status_for("server").as_deref(),
-        Some("cache_pending")
+        Some("cache_disabled_workspace_unbound")
     );
     pool.bind_cache_policy(McpCachePolicy::Disabled).unwrap();
     pool.bind_cache_policy(McpCachePolicy::Disabled).unwrap();
@@ -288,6 +288,32 @@ fn pending_policy_is_fail_closed_and_bound_policy_cannot_change() {
         .insert("server".into(), VERSION.into());
     assert!(!pool.tools_cache_eligible("server"));
     assert!(!pool.persistent_cache_allowed("server"));
+}
+
+#[test]
+fn persistent_cache_origin_is_partitioned_by_workspace_identity() {
+    use peri_acp_types::workspace::WorkspaceId;
+
+    let workspace_a = WorkspaceId::new();
+    let workspace_b = WorkspaceId::new();
+    let pools = [
+        McpClientPool::new_pending(),
+        McpClientPool::new_pending(),
+        McpClientPool::new_pending(),
+    ];
+    for (pool, workspace) in pools.iter().zip([workspace_a, workspace_a, workspace_b]) {
+        pool.bind_workspace_scope(workspace).unwrap();
+        pool.bind_cache_policy(McpCachePolicy::Enabled).unwrap();
+        assert!(pool.persistent_cache_allowed("server"));
+    }
+    assert_eq!(
+        pools[0].cache_origin("server"),
+        pools[1].cache_origin("server")
+    );
+    assert_ne!(
+        pools[0].cache_origin("server"),
+        pools[2].cache_origin("server")
+    );
 }
 
 #[tokio::test]

@@ -154,10 +154,16 @@ async fn test_worktree_history_access_child() {
             .await
             .unwrap();
         assert_eq!(project.entries.len(), 1);
+        let logical_workspace_id: (String,) =
+            sqlx::query_as("SELECT workspace_id FROM threads WHERE id = ?1")
+                .bind(&thread)
+                .fetch_one(&store.database.pool)
+                .await
+                .unwrap();
         let exact = store
             .list_scoped_threads(&ScopedThreadQuery {
                 scope: ThreadScope::ExactDirectory {
-                    workspace_id: binding.workspace_id,
+                    workspace_id: logical_workspace_id.0.parse().unwrap(),
                     relative_cwd: binding.cwd_relative_to_workspace.clone(),
                 },
                 cursor: None,

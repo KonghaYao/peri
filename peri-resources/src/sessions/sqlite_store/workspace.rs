@@ -75,7 +75,7 @@ impl SqliteSessionDatabase {
         // 登记，但它们是可访问的目录：为其建立新登记，执行 cwd、项目归属和已有绑定
         // 都不移动——引用旧登记的会话继续按各自证据复核，不会静默改绑。
         let registered: Option<(String, String, String)> = sqlx::query_as(
-            "SELECT id, project_id, discovery FROM workspaces WHERE root = ? AND root_identity = ?",
+            "SELECT id, project_id, discovery FROM legacy_execution_registrations WHERE root = ? AND root_identity = ?",
         )
         .bind(root)
         .bind(&root_identity)
@@ -90,11 +90,13 @@ impl SqliteSessionDatabase {
                     if !git_answered {
                         return Err(WorkspaceError::NeedsRelink.into());
                     }
-                    sqlx::query("UPDATE workspaces SET discovery = ? WHERE id = ?")
-                        .bind(&snapshot)
-                        .bind(&id)
-                        .execute(&mut *tx)
-                        .await?;
+                    sqlx::query(
+                        "UPDATE legacy_execution_registrations SET discovery = ? WHERE id = ?",
+                    )
+                    .bind(&snapshot)
+                    .bind(&id)
+                    .execute(&mut *tx)
+                    .await?;
                 }
                 (id.parse::<WorkspaceId>()?, project.parse::<ProjectId>()?)
             }
@@ -128,7 +130,7 @@ impl SqliteSessionDatabase {
                     }
                 };
                 let id = WorkspaceId::new();
-                sqlx::query("INSERT INTO workspaces (id, project_id, root, root_identity, discovery) VALUES (?, ?, ?, ?, ?)")
+                sqlx::query("INSERT INTO legacy_execution_registrations (id, project_id, root, root_identity, discovery) VALUES (?, ?, ?, ?, ?)")
                     .bind(id.to_string()).bind(project_id.to_string()).bind(root).bind(&root_identity).bind(&snapshot).execute(&mut *tx).await?;
                 (id, project_id)
             }
@@ -138,6 +140,29 @@ impl SqliteSessionDatabase {
         // registers. External probing stays outside the lock — the revalidation here
         // re-checks the critical file objects only, so a slow or missing Git never
         // blocks other writers of the same database.
+        let machine = crate::sessions::machine::current()?;
+        let owner_workspace_id = if self.read_only {
+            let row: Option<(String,)> =
+                sqlx::query_as("SELECT id FROM workspaces WHERE machine_id = ?1 AND path = ?2")
+                    .bind(machine)
+                    .bind(root)
+                    .fetch_optional(&mut *tx)
+                    .await?;
+            row.ok_or(WorkspaceError::ReadOnlyStore)?.0.parse()?
+        } else {
+            super::workspace_identity::ensure_current_machine(&mut tx).await?;
+            super::workspace_identity::resolve_identity(
+                &mut tx,
+                machine,
+                root,
+                if discovered.common_dir.is_some() || discovered.private_dir.is_some() {
+                    "discovered"
+                } else {
+                    "unverified"
+                },
+            )
+            .await?
+        };
         discovered.reassert_key_objects(&cwd).await?;
         tx.commit().await?;
         let relative_cwd = cwd
@@ -146,10 +171,12 @@ impl SqliteSessionDatabase {
             .to_path_buf();
         Ok(ResolvedWorkspace {
             project_id,
-            workspace_id,
+            workspace_id: owner_workspace_id,
+            execution_registration_id: workspace_id,
             cwd,
             root: discovered.root,
             relative_cwd,
+            discovery_snapshot: Some(snapshot),
         })
     }
 
@@ -161,16 +188,28 @@ impl SqliteSessionDatabase {
         workspace: &ResolvedWorkspace,
     ) -> Result<()> {
         validate_relative(&workspace.relative_cwd)?;
-        let row: Option<(String, String, String)> =
-            sqlx::query_as("SELECT project_id, root, discovery FROM workspaces WHERE id = ?")
-                .bind(workspace.workspace_id.to_string())
-                .fetch_optional(&mut *connection)
-                .await?;
+        let row: Option<(String, String, String)> = sqlx::query_as(
+            "SELECT project_id, root, discovery FROM legacy_execution_registrations WHERE id = ?",
+        )
+        .bind(workspace.execution_registration_id.to_string())
+        .fetch_optional(&mut *connection)
+        .await?;
         let (project, root, snapshot) = row.ok_or(WorkspaceError::InvalidBinding)?;
         if project != workspace.project_id.to_string()
             || Path::new(&root) != workspace.root
             || binding_cwd(&workspace.root, &workspace.relative_cwd) != workspace.cwd
         {
+            return Err(WorkspaceError::ExecutionBindingMismatch.into());
+        }
+        let owner: Option<(String, String)> =
+            sqlx::query_as("SELECT machine_id, path FROM workspaces WHERE id = ?1")
+                .bind(workspace.workspace_id.to_string())
+                .fetch_optional(&mut *connection)
+                .await?;
+        let current_machine = crate::sessions::machine::current()?;
+        if !owner.is_some_and(|(machine, path)| {
+            machine == current_machine && Path::new(&path) == workspace.root
+        }) {
             return Err(WorkspaceError::ExecutionBindingMismatch.into());
         }
         let discovered: Discovery =
@@ -185,12 +224,13 @@ impl SqliteSessionDatabase {
         connection: &mut SqliteConnection,
         workspace: &ResolvedWorkspace,
     ) -> Result<()> {
-        let row: Option<(String,)> =
-            sqlx::query_as("SELECT discovery FROM workspaces WHERE id = ? AND project_id = ?")
-                .bind(workspace.workspace_id.to_string())
-                .bind(workspace.project_id.to_string())
-                .fetch_optional(&mut *connection)
-                .await?;
+        let row: Option<(String,)> = sqlx::query_as(
+            "SELECT discovery FROM legacy_execution_registrations WHERE id = ? AND project_id = ?",
+        )
+        .bind(workspace.execution_registration_id.to_string())
+        .bind(workspace.project_id.to_string())
+        .fetch_optional(&mut *connection)
+        .await?;
         let (snapshot,) = row.ok_or(WorkspaceError::InvalidBinding)?;
         let discovered: Discovery =
             serde_json::from_str(&snapshot).map_err(|_| WorkspaceError::InvalidBinding)?;
@@ -232,16 +272,19 @@ impl SqliteSessionDatabase {
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         Self::validate_resolved_on(&mut tx, workspace).await?;
         sqlx::query("INSERT INTO threads (id, title, cwd, created_at, updated_at, message_count,
-            parent_thread_id, snapshot_at_message_id, hidden, cancel_policy, config, agent_status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+            parent_thread_id, snapshot_at_message_id, hidden, cancel_policy, config, agent_status, workspace_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
             .bind(&meta.id).bind(&meta.title).bind(&meta.cwd).bind(meta.created_at.to_rfc3339()).bind(meta.updated_at.to_rfc3339())
             .bind(meta.message_count as i64).bind(&meta.parent_thread_id).bind(&meta.snapshot_at_message_id).bind(meta.hidden)
             .bind(meta.cancel_policy.as_str()).bind(&meta.config).bind(meta.agent_status.as_str())
+            .bind(workspace.workspace_id.to_string())
             .execute(&mut *tx).await?;
-        sqlx::query("INSERT INTO session_bindings (thread_id, schema_version, project_id, workspace_id, relative_cwd)
-            VALUES (?, ?, ?, ?, ?)")
+        sqlx::query("INSERT INTO session_bindings (thread_id, schema_version, project_id, workspace_id, relative_cwd,
+            discovery_snapshot, evidence_origin)
+            VALUES (?1, ?2, ?3, ?4, ?5,
+            (SELECT discovery FROM legacy_execution_registrations WHERE id = ?4), 'creation_snapshot')")
             .bind(&meta.id).bind(i64::from(SESSION_BINDING_VERSION)).bind(workspace.project_id.to_string())
-            .bind(workspace.workspace_id.to_string()).bind(discovery::path_text(&workspace.relative_cwd)?)
+            .bind(workspace.execution_registration_id.to_string()).bind(discovery::path_text(&workspace.relative_cwd)?)
             .execute(&mut *tx).await?;
         tx.commit().await?;
         Ok(meta.id)
@@ -275,13 +318,13 @@ impl SqliteSessionDatabase {
             return Err(WorkspaceError::Unavailable.into());
         }
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let (cwd, parent, frozen): (String, Option<String>, Option<String>) = sqlx::query_as(
-            "SELECT cwd, parent_thread_id, frozen_context FROM threads WHERE id = ?",
+        let (cwd, parent, frozen, owner): (String, Option<String>, Option<String>, String) = sqlx::query_as(
+            "SELECT cwd, parent_thread_id, frozen_context, workspace_id FROM threads WHERE id = ?",
         )
         .bind(id)
         .fetch_one(&mut *tx)
         .await?;
-        if cwd != saved_cwd || parent.is_some() {
+        if cwd != saved_cwd || parent.is_some() || owner != workspace.workspace_id.to_string() {
             return Err(WorkspaceError::ExecutionBindingMismatch.into());
         }
         let canonical = tokio::fs::canonicalize(&cwd)
@@ -308,9 +351,12 @@ impl SqliteSessionDatabase {
             .bind(id)
             .execute(&mut *tx)
             .await?;
-            sqlx::query("INSERT INTO session_bindings (thread_id, schema_version, project_id, workspace_id, relative_cwd) VALUES (?, ?, ?, ?, ?)")
+            sqlx::query("INSERT INTO session_bindings (thread_id, schema_version, project_id, workspace_id, relative_cwd,
+                discovery_snapshot, evidence_origin)
+                VALUES (?1, ?2, ?3, ?4, ?5,
+                    (SELECT discovery FROM legacy_execution_registrations WHERE id = ?4), 'legacy_last_observation')")
                 .bind(id).bind(i64::from(SESSION_BINDING_VERSION))
-                .bind(workspace.project_id.to_string()).bind(workspace.workspace_id.to_string())
+                .bind(workspace.project_id.to_string()).bind(workspace.execution_registration_id.to_string())
                 .bind(discovery::path_text(&workspace.relative_cwd)?)
                 .execute(&mut *tx).await?;
         }
@@ -330,7 +376,15 @@ impl SqliteSessionDatabase {
         let mut connection = self.pool.acquire().await?;
         let workspace = Self::validate_session_binding_on(&mut connection, id).await?;
         // 事务外才叠加完整快照复核，写事务内不做 Git 探测（设计 §3.2）。
-        Self::revalidate_registered_observation_on(&mut connection, &workspace).await?;
+        let snapshot: (Option<String>,) =
+            sqlx::query_as("SELECT discovery_snapshot FROM session_bindings WHERE thread_id = ?1")
+                .bind(id)
+                .fetch_one(&mut *connection)
+                .await?;
+        let snapshot = snapshot.0.ok_or(WorkspaceError::NeedsRelink)?;
+        let discovered: Discovery =
+            serde_json::from_str(&snapshot).map_err(|_| WorkspaceError::InvalidBinding)?;
+        discovered.revalidate(&workspace.cwd).await?;
         Ok(workspace)
     }
 
@@ -355,7 +409,27 @@ impl SqliteSessionDatabase {
         let row: Option<BindingRow> = sqlx::query_as("SELECT schema_version, project_id, workspace_id, relative_cwd FROM session_bindings WHERE thread_id = ?")
             .bind(id).fetch_optional(&mut *connection).await?;
         let binding = decode_binding(row.ok_or(WorkspaceError::BindingMissing)?)?;
-        Self::validate_binding_relation_on(connection, &binding).await
+        let workspace = Self::validate_binding_relation_on(connection, &binding).await?;
+        let owner: (String,) = sqlx::query_as("SELECT workspace_id FROM threads WHERE id = ?1")
+            .bind(id)
+            .fetch_one(&mut *connection)
+            .await?;
+        if owner.0 != workspace.workspace_id.to_string() {
+            return Err(WorkspaceError::ExecutionBindingMismatch.into());
+        }
+        let snapshot: (Option<String>,) =
+            sqlx::query_as("SELECT discovery_snapshot FROM session_bindings WHERE thread_id = ?1")
+                .bind(id)
+                .fetch_one(&mut *connection)
+                .await?;
+        let snapshot = snapshot.0.ok_or(WorkspaceError::NeedsRelink)?;
+        let discovered: Discovery =
+            serde_json::from_str(&snapshot).map_err(|_| WorkspaceError::InvalidBinding)?;
+        if discovered.root != workspace.root {
+            return Err(WorkspaceError::ExecutionBindingMismatch.into());
+        }
+        discovered.reassert_key_objects(&workspace.cwd).await?;
+        Ok(workspace)
     }
 
     /// 绑定值的本机复核：登记关系加关键文件对象。
@@ -367,19 +441,28 @@ impl SqliteSessionDatabase {
         connection: &mut SqliteConnection,
         binding: &SessionBinding,
     ) -> Result<ResolvedWorkspace> {
-        let row: (String,) =
-            sqlx::query_as("SELECT root FROM workspaces WHERE id = ? AND project_id = ?")
-                .bind(binding.workspace_id.to_string())
-                .bind(binding.project_id.to_string())
+        let row: (String, String) = sqlx::query_as(
+            "SELECT root, discovery FROM legacy_execution_registrations WHERE id = ? AND project_id = ?",
+        )
+        .bind(binding.workspace_id.to_string())
+        .bind(binding.project_id.to_string())
+        .fetch_one(&mut *connection)
+        .await?;
+        let root = PathBuf::from(&row.0);
+        let owner: (String,) =
+            sqlx::query_as("SELECT id FROM workspaces WHERE machine_id = ?1 AND path = ?2")
+                .bind(crate::sessions::machine::current()?)
+                .bind(&row.0)
                 .fetch_one(&mut *connection)
                 .await?;
-        let root = PathBuf::from(row.0);
         let workspace = ResolvedWorkspace {
             project_id: binding.project_id,
-            workspace_id: binding.workspace_id,
+            workspace_id: owner.0.parse()?,
+            execution_registration_id: binding.workspace_id,
             cwd: binding_cwd(&root, &binding.cwd_relative_to_workspace),
             root,
             relative_cwd: binding.cwd_relative_to_workspace.clone(),
+            discovery_snapshot: Some(row.1),
         };
         Self::validate_resolved_on(connection, &workspace).await?;
         Ok(workspace)
@@ -410,14 +493,24 @@ impl SqliteSessionDatabase {
         &self,
         query: &ScopedThreadQuery,
     ) -> Result<ScopedThreadPage> {
+        self.list_scoped_threads_by_archive_impl(query, false).await
+    }
+
+    pub(super) async fn list_scoped_threads_by_archive_impl(
+        &self,
+        query: &ScopedThreadQuery,
+        archived: bool,
+    ) -> Result<ScopedThreadPage> {
         let limit = query.limit.clamp(1, 200) as usize;
         let mut sql: QueryBuilder<Sqlite> = QueryBuilder::new("SELECT t.id, t.title, t.message_count, t.updated_at,
             b.schema_version, b.project_id, b.workspace_id, b.relative_cwd, w.root, t.cwd, b.thread_id
-            FROM threads t LEFT JOIN session_bindings b ON b.thread_id = t.id LEFT JOIN workspaces w ON w.id = b.workspace_id
-            WHERE t.hidden = 0 AND t.message_count > 0");
+            FROM threads t LEFT JOIN session_bindings b ON b.thread_id = t.id LEFT JOIN legacy_execution_registrations w ON w.id = b.workspace_id
+            WHERE t.parent_thread_id IS NULL AND t.hidden = 0 AND t.archived = ");
+        sql.push_bind(archived);
+        sql.push(" AND t.message_count > 0");
         match &query.scope {
             ThreadScope::Environment(machine_id) => {
-                sql.push(" AND EXISTS (SELECT 1 FROM session_environments env WHERE env.thread_id = t.id AND env.machine_id = ")
+                sql.push(" AND EXISTS (SELECT 1 FROM workspaces owner WHERE owner.id = t.workspace_id AND owner.machine_id = ")
                     .push_bind(machine_id)
                     .push(")");
             }
@@ -426,23 +519,21 @@ impl SqliteSessionDatabase {
                 push_legacy_scope(&mut sql, "project_id", id.to_string());
             }
             ThreadScope::Workspace(id) => {
-                sql.push(" AND (b.workspace_id = ")
-                    .push_bind(id.to_string());
-                push_legacy_scope(&mut sql, "id", id.to_string());
+                sql.push(" AND t.workspace_id = ").push_bind(id.to_string());
             }
             ThreadScope::ExactDirectory {
                 workspace_id,
                 relative_cwd,
             } => {
                 validate_relative(relative_cwd)?;
-                sql.push(" AND ((b.workspace_id = ")
+                sql.push(" AND ((t.workspace_id = ")
                     .push_bind(workspace_id.to_string())
                     .push(" AND b.relative_cwd = ")
                     .push_bind(discovery::path_text(relative_cwd)?)
                     .push(") OR (b.thread_id IS NULL AND EXISTS (SELECT 1 FROM workspaces legacy WHERE legacy.id = ")
                     .push_bind(workspace_id.to_string())
                     .push(" AND ").push(legacy_path_sql("t.cwd"))
-                    .push(" = ").push(legacy_path_sql("legacy.root"));
+                    .push(" = ").push(legacy_path_sql("legacy.path"));
                 if !relative_cwd.as_os_str().is_empty() {
                     sql.push(" || '/' || ").push_bind(if cfg!(windows) {
                         discovery::path_text(relative_cwd)?.replace('\\', "/")
@@ -516,7 +607,7 @@ impl SqliteSessionDatabase {
 fn push_legacy_scope(sql: &mut QueryBuilder<Sqlite>, column: &str, id: String) {
     let cwd = legacy_path_sql("t.cwd");
     let root = legacy_path_sql("legacy.root");
-    sql.push(" OR (b.thread_id IS NULL AND EXISTS (SELECT 1 FROM workspaces legacy WHERE legacy.")
+    sql.push(" OR (b.thread_id IS NULL AND EXISTS (SELECT 1 FROM legacy_execution_registrations legacy WHERE legacy.")
         .push(column)
         .push(" = ")
         .push_bind(id)

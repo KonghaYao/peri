@@ -71,12 +71,18 @@ async fn legacy_history_visible_after_upgrade_and_schema3_reopen() {
     for _ in 0..2 {
         let store = SqliteThreadStore::new(&path).await.unwrap();
         let workspace = store.resolve_workspace(&cwd).await.unwrap();
+        let owner: (String,) = sqlx::query_as("SELECT workspace_id FROM threads WHERE id = ?1")
+            .bind(&id)
+            .fetch_one(&store.database.pool)
+            .await
+            .unwrap();
+        let owner_id = owner.0.parse().unwrap();
         for scope in [
             ThreadScope::Project(workspace.project_id),
-            ThreadScope::Workspace(workspace.workspace_id),
+            ThreadScope::Workspace(owner_id),
             ThreadScope::ExactDirectory {
-                workspace_id: workspace.workspace_id,
-                relative_cwd: workspace.relative_cwd.clone(),
+                workspace_id: owner_id,
+                relative_cwd: std::path::PathBuf::new(),
             },
             ThreadScope::All,
         ] {
@@ -498,7 +504,7 @@ async fn legacy_history_scopes_keep_path_boundaries_and_mixed_pagination() {
             .append_message(&id, BaseMessage::human("old"))
             .await
             .unwrap();
-        if path.starts_with(&cwd) {
+        if path == cwd {
             expected.push(id);
         }
     }

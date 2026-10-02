@@ -13,6 +13,10 @@ mod cli_mcp_start;
 mod cli_meta;
 mod cli_plugin;
 mod cli_print;
+mod cli_tui;
+#[cfg(test)]
+use cli_tui::propagate_tui_result;
+use cli_tui::{TuiOptions, run_tui};
 mod cli_workflow;
 
 // ─── Panic Hook（TUI 专用）───────────────────────────────────────────────────
@@ -113,6 +117,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// 查看或显式采用本机 Machine 身份
+    Machine {
+        #[command(subcommand)]
+        action: MachineAction,
+    },
     /// 启动独立 MCP 能力进程
     #[command(name = "mcp-start")]
     McpStart {
@@ -180,6 +189,12 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum MetaAction {
+    /// 列出 Machine 身份及其 Workspace 路径
+    Machines {
+        /// JSON 输出
+        #[arg(long)]
+        json: bool,
+    },
     /// 查询单条持久化 session metadata
     Session {
         /// Session ID（任意合法 UUID）
@@ -187,6 +202,24 @@ enum MetaAction {
         /// JSON 输出
         #[arg(long)]
         json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum MachineAction {
+    /// 查看候选身份；--apply 后写入身份文件并要求重启
+    Adopt {
+        /// 待采用的已登记 Machine ID
+        target: String,
+        /// 当前 Machine ID；写入时必须再次明确提供
+        #[arg(long)]
+        current: Option<String>,
+        /// 执行身份文件替换
+        #[arg(long)]
+        apply: bool,
+        /// 确认所有 Peri 执行进程已停止
+        #[arg(long)]
+        confirm_no_active_executions: bool,
     },
 }
 
@@ -670,6 +703,9 @@ fn try_run_meta_before_configuration(args: &[OsString]) -> Option<Result<()>> {
         MetaAction::Session { session_id, json } => {
             runtime.block_on(cli_meta::run_meta_session(deployment, session_id, json))
         }
+        MetaAction::Machines { json } => {
+            runtime.block_on(cli_meta::run_meta_machines(deployment, json))
+        }
     };
     Some(emit_meta_outcome(outcome))
 }
@@ -765,6 +801,13 @@ fn main() -> Result<()> {
     }
 
     match cli.command {
+        Some(Commands::Machine { action }) => {
+            let rt = build_runtime()?;
+            rt.block_on(cli_meta::run_machine_adopt(
+                action,
+                session_store.with_access(AccessMode::ReadOnly),
+            ))
+        }
         Some(Commands::McpStart { .. }) => anyhow::bail!("mcp-start must be the first argument"),
         None => match run_tui(TuiOptions {
             permission_mode: cli.permission_mode,
@@ -921,76 +964,6 @@ fn main() -> Result<()> {
 }
 
 // ─── TUI 模式 ──────────────────────────────────────────────────────────────
-
-/// TUI 模式启动选项
-#[allow(dead_code)] // 部分 CLI 桥接字段尚未接入
-struct TuiOptions {
-    permission_mode: Option<String>,
-    skip_permissions: bool,
-    model: Option<String>,
-    effort: Option<String>,
-    continue_session: bool,
-    resume_session: Option<String>,
-    session_id: Option<String>,
-    session_name: Option<String>,
-    settings: Option<String>,
-    allowed_tools: Vec<String>,
-    disallowed_tools: Vec<String>,
-    /// 会话存储定位描述（已由入口归一；恢复会话不再重新解析存储）。
-    session_store: SessionStoreDeployment,
-}
-
-fn propagate_tui_result(result: Result<()>) -> Result<()> {
-    if let Err(e) = result {
-        eprintln!("Error: {e}");
-        return Err(e);
-    }
-    Ok(())
-}
-
-fn run_tui(opts: TuiOptions) -> Result<()> {
-    // --settings 覆盖
-    if let Some(ref settings_path) = opts.settings {
-        inject_settings_override(settings_path);
-    }
-
-    // 在创建 tokio runtime 之前初始化 tracing，确保 reqwest::blocking::Client
-    // 的内部 runtime 与应用 runtime 完全隔离，避免嵌套 runtime drop panic。
-    let _telemetry = peri_acp::telemetry::init_tracing("agent-tui");
-
-    // 安装自定义 panic hook，必须在 enable_raw_mode() 之前，
-    // 否则 Rust 默认 panic hook 的 stderr 输出会破坏 TUI 画面。
-    let panic_notify_rx = init_panic_notify();
-
-    // 限制 worker 数（默认=CPU 核数，18 核=72MB 栈空间浪费），4 MB stack
-    let rt = build_runtime()?;
-
-    let result = rt.block_on(async {
-        // ratatui-kit fullscreen() 自行管理 raw mode / alternate screen / 事件循环。
-        // 外层不做任何终端操作。
-        let launch_opts = peri_tui::launch::TuiLaunchOptions {
-            permission_mode: opts.permission_mode.clone(),
-            skip_permissions: opts.skip_permissions,
-            model: opts.model.clone(),
-            effort: opts.effort.clone(),
-            continue_session: opts.continue_session,
-            resume_session: opts.resume_session.clone(),
-            session_id: opts.session_id.clone(),
-            session_name: opts.session_name.clone(),
-            settings: opts.settings.clone(),
-            allowed_tools: opts.allowed_tools.clone(),
-            disallowed_tools: opts.disallowed_tools.clone(),
-            session_store: opts.session_store.clone(),
-        };
-        peri_tui::kit::entry::run_kit_fullscreen(launch_opts, panic_notify_rx).await
-    });
-
-    // 先 drop rt（关闭所有 tokio 任务），再 drop _telemetry
-    drop(rt);
-    drop(_telemetry);
-
-    propagate_tui_result(result)
-}
 
 #[cfg(test)]
 mod cli_integration_test;

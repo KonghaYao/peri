@@ -9,6 +9,8 @@ mod data;
 mod filesystem;
 mod local_port;
 mod machine;
+pub use machine::adopt_file_identity;
+pub use machine::current as current_machine_id;
 mod open;
 mod remote;
 mod schema_cleanup;

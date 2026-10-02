@@ -36,7 +36,7 @@ pub(super) const REMOTE_SCHEMA_VERSION: i64 = crate::sessions::sqlite_store::CUR
 /// 远程存储契约标签：形状 + 语义代数，和版本一起决定「这是不是我们认识的那个库」。
 ///
 /// `v2` = 远端会话表改为 canonical 形状（统一前是 `peri_sessions` 的混合形状）。
-pub(super) const STORE_CONTRACT: &str = "peri.session.store/v2";
+pub(super) const STORE_CONTRACT: &str = "peri.session.store/v3";
 
 /// 统一之前的远端会话表：出现它们说明这是一个**旧形状的库**（不是空库）。
 ///
@@ -104,11 +104,8 @@ impl StoreSnapshot {
     }
 
     pub(super) fn readable(&self) -> bool {
-        self.contract == STORE_CONTRACT
-            && matches!(
-                acceptance(self.schema_version),
-                SchemaAcceptance::Accept | SchemaAcceptance::Upgradeable
-            )
+        self.matches_build()
+            || (self.contract == "peri.session.store/v2" && matches!(self.schema_version, 10 | 11))
     }
 }
 
@@ -128,7 +125,7 @@ pub(super) enum SchemaAcceptance {
 pub(super) fn acceptance(version: i64) -> SchemaAcceptance {
     if version == REMOTE_SCHEMA_VERSION {
         SchemaAcceptance::Accept
-    } else if version == 10 {
+    } else if matches!(version, 10 | 11) {
         SchemaAcceptance::Upgradeable
     } else if version > REMOTE_SCHEMA_VERSION {
         SchemaAcceptance::TooNew

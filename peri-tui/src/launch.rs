@@ -184,6 +184,7 @@ pub async fn attach_acp(
                     // SettingsHooksLoader / 插件聚合数据）由 ACP Host 装配面内部构造
                     // （peri_acp::host::assemble）；TUI 只提供协议面输入（§0 依赖方向）。
                     session_resources: app.services.session_resources.clone(),
+                    workspace_id: None,
                     // 部署关闭权随宿主移交：任务排空之后由宿主关闭会话存储。
                     session_store_shutdown: app.session_store_shutdown.take(),
                     cwd: app.services.cwd.clone(),

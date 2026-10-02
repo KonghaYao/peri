@@ -133,9 +133,9 @@ async fn populate_business(connection: &mut SqliteConnection) {
          VALUES ('m1', 'local-root', 'user', 'hello');
          INSERT INTO projects (id, locator, object_identity) VALUES ('p1', '/work', 'dev:1');
          INSERT INTO workspaces (id, project_id, root, root_identity, discovery)
-         VALUES ('w1', 'p1', '/work', 'dev:1', 'git');
+         VALUES ('11111111-1111-4111-8111-111111111111', 'p1', '/work', 'dev:1', '{\"root\":\"/work\",\"root_identity\":{\"device\":1,\"inode\":1},\"common_dir\":null,\"common_identity\":null,\"private_dir\":null,\"private_identity\":null}');
          INSERT INTO session_bindings (thread_id, schema_version, project_id, workspace_id, relative_cwd)
-         VALUES ('local-root', 1, 'p1', 'w1', '.');
+         VALUES ('local-root', 1, 'p1', '11111111-1111-4111-8111-111111111111', '');
          INSERT INTO execution_runs (thread_id, generation, clean) VALUES ('local-root', 4, 0);
          INSERT INTO execution_runs (thread_id, generation, clean) VALUES ('remote-root', 7, 0);",
     )
@@ -196,6 +196,10 @@ async fn preserved_table_definitions(connection: &mut SqliteConnection) -> Vec<(
             && name != "thread_goals"
             && name != OAUTH_CREDENTIALS_TABLE
             && name != SESSION_ENVIRONMENTS_TABLE
+            && name != "workspaces"
+            && name != "session_bindings"
+            && name != "legacy_execution_registrations"
+            && name != "machines"
     });
     rows
 }
@@ -244,6 +248,8 @@ async fn test_v7_v8_v9_all_converge_and_drop_only_the_remote_tables() {
         expected.extend([
             OAUTH_CREDENTIALS_TABLE.to_owned(),
             SESSION_ENVIRONMENTS_TABLE.to_owned(),
+            "legacy_execution_registrations".to_owned(),
+            "machines".to_owned(),
         ]);
         expected.sort();
         assert_eq!(tables_after, expected, "来源版本 {source_version}");
@@ -265,7 +271,7 @@ async fn test_v7_v8_v9_all_converge_and_drop_only_the_remote_tables() {
         .fetch_one(&mut connection)
         .await
         .unwrap();
-        assert_eq!(cwd, ".");
+        assert_eq!(cwd, "");
         let (locator,): (String,) = sqlx::query_as("SELECT locator FROM projects WHERE id = 'p1'")
             .fetch_one(&mut connection)
             .await
@@ -327,6 +333,8 @@ async fn test_database_without_remote_tables_is_idempotent() {
     expected.extend([
         OAUTH_CREDENTIALS_TABLE.to_owned(),
         SESSION_ENVIRONMENTS_TABLE.to_owned(),
+        "legacy_execution_registrations".to_owned(),
+        "machines".to_owned(),
     ]);
     expected.sort();
     assert_eq!(table_names(&mut connection).await, expected);

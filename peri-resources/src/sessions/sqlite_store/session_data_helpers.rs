@@ -11,17 +11,8 @@ pub(super) async fn machine_id_on(
     pool: &sqlx::SqlitePool,
     id: &ThreadId,
 ) -> SessionResourceResult<Option<String>> {
-    let table: Option<(i64,)> = sqlx::query_as(
-        "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'session_environments'",
-    )
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| map_sqlx(&error))?;
-    if table.is_none() {
-        return Ok(None);
-    }
     let identity: Option<(String,)> =
-        sqlx::query_as("SELECT machine_id FROM session_environments WHERE thread_id = ?1")
+        sqlx::query_as("SELECT w.machine_id FROM threads t JOIN workspaces w ON w.id = t.workspace_id WHERE t.id = ?1")
             .bind(id.as_str())
             .fetch_optional(pool)
             .await
@@ -160,6 +151,7 @@ pub(in crate::sessions) fn new_session_row<'a>(
         config: None,
         agent_status: AgentStatus::Active.as_str(),
         frozen_context: frozen,
+        execution_registration_id: Some(&input.binding.workspace_id),
     }
 }
 
@@ -184,6 +176,7 @@ pub(in crate::sessions) fn new_session_draft_row<'a>(
         config: None,
         agent_status: AgentStatus::Active.as_str(),
         frozen_context: None,
+        execution_registration_id: Some(&draft.binding.workspace_id),
     }
 }
 

@@ -28,8 +28,8 @@ use tracing::{debug, warn};
 use crate::acp_client::AcpTuiClient;
 use crate::app::service_registry::{ProcessResourceMonitor, SharedPeriConfig};
 use crate::kit::atoms::{
-    ACTIVE_EXECUTION_CWD, THREAD_BROWSER_SCOPE, THREAD_LIST_ERROR, THREAD_LIST_HAS_MORE,
-    THREAD_LIST_PAGE_COUNT, THREAD_LIST_PAGE_SIZE, ThreadBrowserScope,
+    ACTIVE_EXECUTION_CWD, THREAD_BROWSER_ARCHIVED, THREAD_BROWSER_SCOPE, THREAD_LIST_ERROR,
+    THREAD_LIST_HAS_MORE, THREAD_LIST_PAGE_COUNT, THREAD_LIST_PAGE_SIZE, ThreadBrowserScope,
 };
 use crate::kit::atoms::{
     ACTIVE_SESSION_ID, CRON_JOBS, CURRENT_SESSION_TITLE, CronJobSummary, FILE_LIST, HOOK_LIST,
@@ -134,6 +134,7 @@ struct SlowSnapshotRefresh {
     list_cwd: String,
     list_workspace: Option<ResolvedWorkspace>,
     list_scope: ThreadBrowserScope,
+    list_archived: bool,
     list_page_count: u32,
     next_thread_scan: Instant,
     next_memory_scan: Instant,
@@ -153,6 +154,7 @@ impl Default for SlowSnapshotRefresh {
             list_cwd: String::new(),
             list_workspace: None,
             list_scope: ThreadBrowserScope::default(),
+            list_archived: false,
             list_page_count: 1,
             next_thread_scan: Instant::now(),
             next_memory_scan: Instant::now(),
@@ -210,17 +212,21 @@ async fn tick_once(
     let active_cwd = ACTIVE_EXECUTION_CWD.state().read().clone();
     let cwd = active_cwd.clone().unwrap_or_else(|| src.cwd.clone());
     let scope = THREAD_BROWSER_SCOPE.get();
+    let archived = THREAD_BROWSER_ARCHIVED.get();
     let mut thread_error = THREAD_LIST_ERROR.state().read().clone();
     let mut has_more = THREAD_LIST_HAS_MORE.get();
     let page_count = THREAD_LIST_PAGE_COUNT.get();
-    let list_changed =
-        cwd != slow.list_cwd || scope != slow.list_scope || page_count != slow.list_page_count;
+    let list_changed = cwd != slow.list_cwd
+        || scope != slow.list_scope
+        || archived != slow.list_archived
+        || page_count != slow.list_page_count;
     if now >= slow.next_thread_scan || list_changed {
         if cwd != slow.list_cwd {
             slow.list_workspace = None;
         }
         slow.list_cwd = cwd.clone();
         slow.list_scope = scope;
+        slow.list_archived = archived;
         slow.list_page_count = page_count;
         if let Some(client) = &src.client {
             match refresh_threads(client, slow).await {
@@ -368,6 +374,7 @@ async fn tick_once(
     if ACTIVE_EXECUTION_CWD.state().read().clone() != active_cwd
         || ACTIVE_SESSION_ID.state().read().clone() != session_id
         || THREAD_BROWSER_SCOPE.get() != scope
+        || THREAD_BROWSER_ARCHIVED.get() != archived
         || THREAD_LIST_PAGE_COUNT.get() != page_count
     {
         return Ok(());
@@ -421,13 +428,16 @@ async fn refresh_threads(
     let mut cursor = None;
     let mut threads = Vec::new();
     for _ in 0..slow.list_page_count.max(1) {
-        let page = client
-            .list_scoped_threads(&ScopedThreadQuery {
-                scope: scope.clone(),
-                cursor,
-                limit: THREAD_LIST_PAGE_SIZE,
-            })
-            .await?;
+        let query = ScopedThreadQuery {
+            scope: scope.clone(),
+            cursor,
+            limit: THREAD_LIST_PAGE_SIZE,
+        };
+        let page = if slow.list_archived {
+            client.list_archived_threads(&query).await?
+        } else {
+            client.list_scoped_threads(&query).await?
+        };
         threads.extend(page.entries.into_iter().map(|entry| ThreadSummary {
             id: entry.thread.id,
             title: entry.thread.title,

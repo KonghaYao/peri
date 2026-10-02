@@ -436,6 +436,7 @@ async fn assemble_host_with_workspace_input(
                 peri_acp_types::permission::PermissionMode::Bypass,
             ),
             session_resources,
+            workspace_id: None,
             session_store_shutdown: None,
             cwd: dirs.workspace_str(),
             bare: false,

@@ -18,7 +18,8 @@ use async_trait::async_trait;
 use peri_acp_types::messages::MessageId;
 use peri_acp_types::session_resources::{
     BindingState, ChildSnapshot, ForkSnapshot, FrozenSnapshotBytes, NewSession,
-    PersistenceRecovery, RewindBoundary, SessionMetaPatch, SessionResourceResult, SessionSnapshot,
+    PersistenceRecovery, RewindBoundary, SessionMetaPatch, SessionResourceError,
+    SessionResourceErrorKind, SessionResourceResult, SessionSnapshot,
 };
 use peri_acp_types::store::{CompactionChange, MessageFlags, PersistedPayload};
 use peri_acp_types::thread::{ThreadId, ThreadMeta};
@@ -45,18 +46,58 @@ pub struct ChildResumeRecord {
 /// 「未生效」报告成成功，也不得在失败后遗留部分写入。
 #[async_trait]
 pub(crate) trait SessionDataPort: Send + Sync {
-    fn oauth_credentials(
+    fn oauth_credentials_for_workspace(
         self: std::sync::Arc<Self>,
+        _workspace_id: peri_acp_types::workspace::WorkspaceId,
     ) -> Option<std::sync::Arc<dyn peri_acp_types::oauth_credentials::OAuthCredentialPort>> {
         None
     }
     async fn machine_id_of(&self, id: &ThreadId) -> SessionResourceResult<Option<String>>;
+    async fn workspace_id_of(
+        &self,
+        _id: &ThreadId,
+    ) -> SessionResourceResult<Option<peri_acp_types::workspace::WorkspaceId>> {
+        Ok(None)
+    }
+    async fn list_machines(
+        &self,
+    ) -> SessionResourceResult<Vec<peri_acp_types::workspace::MachineInfo>> {
+        Err(
+            peri_acp_types::session_resources::SessionResourceError::new(
+                peri_acp_types::session_resources::SessionResourceErrorKind::Unsupported,
+            ),
+        )
+    }
+    async fn list_workspaces(
+        &self,
+        _machine_id: &str,
+    ) -> SessionResourceResult<Vec<peri_acp_types::workspace::WorkspaceInfo>> {
+        Err(
+            peri_acp_types::session_resources::SessionResourceError::new(
+                peri_acp_types::session_resources::SessionResourceErrorKind::Unsupported,
+            ),
+        )
+    }
+    async fn rename_machine(&self, _machine_id: &str, _name: &str) -> SessionResourceResult<()> {
+        Err(
+            peri_acp_types::session_resources::SessionResourceError::new(
+                peri_acp_types::session_resources::SessionResourceErrorKind::Unsupported,
+            ),
+        )
+    }
     /// 保存新会话：meta/binding/frozen 完整落库（本机准入由执行面另行完成）。
     ///
     /// 本地创建把完整数据并成一次提交后接纳运行句柄，因此本机构建不经过本方法；
     /// 它的生产调用方是远程组合（先 durable 保存、再本机准入），本地用它构造
     /// 「数据已保存、运行句柄未接纳」的收敛状态。
     async fn save_new_session(&self, input: &NewSession) -> SessionResourceResult<()>;
+    async fn save_new_session_in_workspace(
+        &self,
+        input: &NewSession,
+        _workspace: &ResolvedWorkspace,
+    ) -> SessionResourceResult<()> {
+        self.save_new_session(input).await
+    }
 
     /// 保存未发布创建（J2 第一阶段）：身份/绑定落库，frozen 暂空。
     ///
@@ -66,6 +107,13 @@ pub(crate) trait SessionDataPort: Send + Sync {
         &self,
         draft: &peri_acp_types::session_resources::NewSessionDraft,
     ) -> SessionResourceResult<()>;
+    async fn save_new_session_draft_in_workspace(
+        &self,
+        draft: &peri_acp_types::session_resources::NewSessionDraft,
+        _workspace: &ResolvedWorkspace,
+    ) -> SessionResourceResult<()> {
+        self.save_new_session_draft(draft).await
+    }
 
     /// 一次性提交 frozen（write-once CAS）：仅当该 identity 从未提交过时生效。
     ///
@@ -127,6 +175,24 @@ pub(crate) trait SessionDataPort: Send + Sync {
     /// 绑定字节是**数据事实**：本机 adapter 从 `session_bindings` 读，远端 adapter 从远端
     /// 会话行自带的 `binding_*` 列读。执行面只按调用方给出的字节做本机目录复核。
     async fn binding_of(&self, id: &ThreadId) -> SessionResourceResult<Option<SessionBinding>>;
+    /// Per-session immutable execution evidence. `None` means an old remote
+    /// binding awaits a guarded one-time completion, or no binding exists.
+    async fn binding_discovery_snapshot(
+        &self,
+        _id: &ThreadId,
+    ) -> SessionResourceResult<Option<String>> {
+        Ok(None)
+    }
+    async fn complete_legacy_binding_discovery(
+        &self,
+        _id: &ThreadId,
+        _binding: &SessionBinding,
+        _workspace: &ResolvedWorkspace,
+    ) -> SessionResourceResult<()> {
+        Err(SessionResourceError::new(
+            SessionResourceErrorKind::Unsupported,
+        ))
+    }
 
     /// 该会话在树中的根（含自身）。
     ///
@@ -139,6 +205,29 @@ pub(crate) trait SessionDataPort: Send + Sync {
         &self,
         query: &ScopedThreadQuery,
     ) -> SessionResourceResult<ScopedThreadPage>;
+
+    async fn list_archived_sessions(
+        &self,
+        _query: &ScopedThreadQuery,
+    ) -> SessionResourceResult<ScopedThreadPage> {
+        Err(
+            peri_acp_types::session_resources::SessionResourceError::new(
+                peri_acp_types::session_resources::SessionResourceErrorKind::Unsupported,
+            ),
+        )
+    }
+
+    async fn set_session_archived(
+        &self,
+        _id: &ThreadId,
+        _archived: bool,
+    ) -> SessionResourceResult<()> {
+        Err(
+            peri_acp_types::session_resources::SessionResourceError::new(
+                peri_acp_types::session_resources::SessionResourceErrorKind::Unsupported,
+            ),
+        )
+    }
 
     /// 直接子会话 metadata。
     async fn list_children(&self, parent: &ThreadId) -> SessionResourceResult<Vec<ThreadMeta>>;
@@ -156,6 +245,13 @@ pub(crate) trait SessionDataPort: Send + Sync {
 
     /// 保存 fork 目标快照；source 不变。
     async fn save_fork(&self, fork: &ForkSnapshot) -> SessionResourceResult<()>;
+    async fn save_fork_in_workspace(
+        &self,
+        fork: &ForkSnapshot,
+        _workspace: &ResolvedWorkspace,
+    ) -> SessionResourceResult<()> {
+        self.save_fork(fork).await
+    }
 
     /// 保存 child：继承区与父子关系一起成立。
     ///

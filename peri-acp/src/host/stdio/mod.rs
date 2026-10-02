@@ -194,6 +194,7 @@ async fn assemble_stdio_config(
             config_source,
             permission_mode,
             session_resources,
+            workspace_id: None,
             // 部署关闭权留在宿主装配里：stdio 宿主的任务排空之后由它关闭会话存储。
             session_store_shutdown: Some(session_store_shutdown),
             cwd: cwd.clone(),

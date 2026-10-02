@@ -2,8 +2,7 @@
 //!
 //! 不造假的存储替身：写入门禁要求「本 root 有活 owner」，所以夹具真的建立一条会话并
 //! 持有它的 lease——这正是生产路径的前置条件（只读、无主的会话在门面上本来就写不了）。
-//! 需要构造真实写入失败时，调用 [`TestSession::release_lease`]：owner 消失后写入按
-//! `LeaseRequired` 失败，而不是靠 mock 假装失败。
+//! 需要构造真实写入失败时，可使用只读资源句柄。
 
 #[path = "test_resources/mock/mod.rs"]
 pub(crate) mod mock;
@@ -21,7 +20,7 @@ use peri_resources::sessions::SessionResourcesImpl;
 pub(crate) struct TestSession {
     pub(crate) resources: Arc<dyn SessionResources>,
     pub(crate) thread_id: ThreadId,
-    lease: Option<Arc<dyn SessionExecutionLease>>,
+    _lease: Arc<dyn SessionExecutionLease>,
     _db: tempfile::TempDir,
     _repo: tempfile::TempDir,
 }
@@ -52,7 +51,7 @@ impl TestSession {
                 schema_version: SESSION_BINDING_VERSION,
                 revision: 1,
                 project_id: workspace.project_id,
-                workspace_id: workspace.workspace_id,
+                workspace_id: workspace.execution_registration_id,
                 cwd_relative_to_workspace: workspace.relative_cwd.clone(),
             },
             frozen: FrozenSnapshotBytes::new("{\"version\":1,\"test\":true}"),
@@ -61,7 +60,7 @@ impl TestSession {
         Self {
             resources,
             thread_id,
-            lease: Some(lease),
+            _lease: lease,
             _db: db,
             _repo: repo,
         }
@@ -72,9 +71,12 @@ impl TestSession {
         Arc::clone(&self.resources)
     }
 
-    /// 丢弃执行所有权：此后本会话的写入按 `LeaseRequired` 真实失败。
-    pub(crate) fn release_lease(&mut self) {
-        self.lease = None;
+    pub(crate) async fn read_only_resources(&self) -> Arc<dyn SessionResources> {
+        Arc::new(
+            SessionResourcesImpl::open_existing_read_only(self._db.path().join("threads.db"))
+                .await
+                .unwrap(),
+        )
     }
 }
 

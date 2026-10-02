@@ -303,7 +303,7 @@ async fn test_single_database_upgrade_preserves_all_existing_columns_and_context
         ALTER TABLE messages ADD COLUMN truncated BOOLEAN NOT NULL DEFAULT 0;
         ALTER TABLE messages ADD COLUMN excluded BOOLEAN NOT NULL DEFAULT 0;
         ALTER TABLE messages ADD COLUMN projection TEXT;
-        UPDATE threads SET parent_thread_id = 'old-parent', snapshot_at_message_id = 'snapshot',
+        UPDATE threads SET parent_thread_id = NULL, snapshot_at_message_id = 'snapshot',
             hidden = 1, cancel_policy = 'detach', config = 'config bytes', cached_context = 'cache bytes',
             frozen_context = 'frozen bytes', inherited_context = 'inherited bytes', agent_status = 'done',
             context_cache_epoch = 7;
@@ -707,9 +707,18 @@ async fn test_schema3_identity_migration_reuses_binding_and_survives_reopen() {
 /// 记录 v2 升级不能改动的身份数据。
 async fn identity_bytes(connection: &mut SqliteConnection) -> Vec<String> {
     let mut values = Vec::new();
+    let migrated: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'legacy_execution_registrations'",
+    )
+    .fetch_one(&mut *connection).await.unwrap();
+    let registration_query = if migrated.0 == 0 {
+        "SELECT json_array(id, project_id, root, root_identity, discovery) FROM workspaces ORDER BY id"
+    } else {
+        "SELECT json_array(id, project_id, root, root_identity, discovery) FROM legacy_execution_registrations ORDER BY id"
+    };
     for query in [
         "SELECT json_array(id, locator, object_identity) FROM projects ORDER BY id",
-        "SELECT json_array(id, project_id, root, root_identity, discovery) FROM workspaces ORDER BY id",
+        registration_query,
         "SELECT json_array(thread_id, schema_version, project_id, workspace_id, relative_cwd) FROM session_bindings ORDER BY thread_id",
     ] {
         let rows: Vec<(String,)> = sqlx::query_as(AssertSqlSafe(query))

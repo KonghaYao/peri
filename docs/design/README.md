@@ -51,6 +51,7 @@ draft、proposal、可行性探查、审计报告和未采纳方案不进入本�
 
 | 主题 | 文档 | 进度事实源 |
 | --- | --- | --- |
+| 存储 v2：Machine → Workspace → Session | [storage-v2-machine-workspace-session.md](storage-v2-machine-workspace-session.md) | `spec/issues/2026-10-02-storage-v2-machine-workspace-session.md`；schema 12 已接入本机与远端，Git 使用 worktree 根、非 Git 使用启动 cwd；验收状态见 active issue |
 | Session ID 恢复与机器 env 分区 | [session-id-environment.md](session-id-environment.md) | `spec/issues/2026-09-30-session-id-environment-core-change.md`；取代旧文件锁/dirty 恢复准入 |
 | Command 系统 | [command-system.md](command-system.md) | 对应 command active issue 与代码 |
 | TUI Chat Workbench | [tui-chat-workbench.md](tui-chat-workbench.md) | `spec/history/2026-08.md`（2026-08-10 条目） |

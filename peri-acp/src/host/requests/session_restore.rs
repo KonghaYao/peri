@@ -65,6 +65,22 @@ pub(super) async fn prepare_existing(
         .get("sessionId")
         .and_then(Value::as_str)
         .ok_or_else(|| AcpError::new(-32602, "missing sessionId"))?;
+    let availability = cfg
+        .session_resources
+        .inspect_availability(Some(&id.to_owned()))
+        .await
+        .map_err(crate::host::workspace::resource_error)?;
+    let legacy_prepared = if matches!(
+        availability.execution,
+        Some(peri_acp_types::session_resources::ExecutionAvailability::Available)
+    ) && matches!(
+        availability.access,
+        peri_acp_types::session_resources::AccessMode::ReadWrite
+    ) {
+        legacy_session::prepare_for_restore(cfg, id, None).await?
+    } else {
+        None
+    };
     let admission = crate::host::workspace::acquire_for_load(
         cfg,
         sessions,
@@ -83,21 +99,6 @@ pub(super) async fn prepare_existing(
             );
             (None, Some(reason))
         }
-    };
-    let legacy_prepared = if owner.is_some() {
-        match legacy_session::prepare_for_restore(cfg, id, None).await {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                if !sessions.contains_key(id) {
-                    if let Some(owner) = owner.as_ref() {
-                        owner.mark_clean().await.map_err(workspace_error)?;
-                    }
-                }
-                return Err(error);
-            }
-        }
-    } else {
-        None
     };
     let identity = match response_identity(cfg, id).await {
         Ok(identity) => identity,

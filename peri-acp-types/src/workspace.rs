@@ -40,6 +40,42 @@ macro_rules! opaque_id {
 }
 opaque_id!(ProjectId);
 opaque_id!(WorkspaceId);
+opaque_id!(MachineId);
+
+/// 机器记录的来源。迁移占位记录不能被当作本机执行身份使用。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MachineIdentityKind {
+    Known,
+    LegacyUnknown,
+}
+
+/// Machine 的展示投影；名称不参与身份比较。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MachineInfo {
+    pub id: String,
+    pub name: String,
+    pub identity_kind: MachineIdentityKind,
+    pub is_current: bool,
+}
+
+/// Workspace 路径的发现依据，决定其能否宣称为已验证的 Git 根。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspacePathSource {
+    Discovered,
+    DerivedLegacy,
+    Unverified,
+}
+
+/// 会话归属的 Workspace 投影；执行目录仍由各 Session 自己保存。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceInfo {
+    pub id: WorkspaceId,
+    pub machine_id: String,
+    pub path: PathBuf,
+    pub path_source: WorkspacePathSource,
+}
 
 pub const SESSION_BINDING_VERSION: u16 = 1;
 
@@ -64,7 +100,7 @@ impl SessionBinding {
             schema_version: SESSION_BINDING_VERSION,
             revision: 1,
             project_id: workspace.project_id,
-            workspace_id: workspace.workspace_id,
+            workspace_id: workspace.execution_registration_id,
             cwd_relative_to_workspace: workspace.relative_cwd.clone(),
         }
     }
@@ -74,10 +110,16 @@ impl SessionBinding {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolvedWorkspace {
     pub project_id: ProjectId,
+    /// Stable Machine/path ownership identity for Session grouping.
     pub workspace_id: WorkspaceId,
+    /// Local filesystem discovery registration used only to recheck execution evidence.
+    pub execution_registration_id: WorkspaceId,
     pub cwd: PathBuf,
     pub root: PathBuf,
     pub relative_cwd: PathBuf,
+    /// Internal creation evidence. Never expose filesystem identity bytes on ACP wire.
+    #[serde(skip)]
+    pub discovery_snapshot: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

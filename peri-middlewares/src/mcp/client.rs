@@ -72,6 +72,7 @@ pub use types::{
 /// MCP 客户端连接池
 pub struct McpClientPool {
     cache_policy: std::sync::OnceLock<McpCachePolicy>,
+    workspace_scope: std::sync::OnceLock<peri_acp_types::workspace::WorkspaceId>,
     pub(super) configuration_snapshot: std::sync::OnceLock<Arc<peri_config::ConfigurationSnapshot>>,
     pub(super) session_servers: std::sync::OnceLock<HashMap<String, McpServerConfig>>,
     credential_client: std::sync::OnceLock<super::auth_store::OAuthCredentialClient>,
@@ -190,6 +191,7 @@ impl McpClientPool {
     ) -> Self {
         Self {
             cache_policy: std::sync::OnceLock::new(),
+            workspace_scope: std::sync::OnceLock::new(),
             configuration_snapshot: std::sync::OnceLock::new(),
             session_servers: std::sync::OnceLock::new(),
             credential_client: std::sync::OnceLock::new(),
@@ -253,6 +255,8 @@ impl McpClientPool {
     #[cfg(test)]
     pub(crate) fn new_empty_with_cache_policy(policy: McpCachePolicy) -> Self {
         let mut pool = Self::new_pending();
+        pool.bind_workspace_scope(peri_acp_types::workspace::WorkspaceId::new())
+            .unwrap();
         pool.bind_cache_policy(policy).unwrap();
         pool.resource_cache = super::resource_cache::McpResourceCache::isolated_for_test();
         pool
@@ -273,6 +277,26 @@ impl McpClientPool {
             std::io::Error::new(
                 std::io::ErrorKind::AlreadyExists,
                 "MCP configuration snapshot is already bound",
+            )
+        })
+    }
+
+    /// Bind persistent MCP data to the saved Workspace before initialization.
+    pub fn bind_workspace_scope(
+        &self,
+        workspace_id: peri_acp_types::workspace::WorkspaceId,
+    ) -> std::io::Result<()> {
+        let context = self.builtin_context.lock();
+        if context.initialize_started || !self.is_open() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "workspace scope must be bound before MCP initialization",
+            ));
+        }
+        self.workspace_scope.set(workspace_id).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "MCP workspace scope is already bound",
             )
         })
     }

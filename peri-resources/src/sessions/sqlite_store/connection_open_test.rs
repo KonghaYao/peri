@@ -77,7 +77,7 @@ async fn registration_upgrade_fixture(path: &Path) {
          );
          INSERT INTO projects VALUES ('project', '/original', 'project-identity');
          INSERT INTO workspaces VALUES (
-             'workspace', 'project', '/original', 'workspace-identity', 'discovery'
+             '11111111-1111-4111-8111-111111111111', 'project', '/original', 'workspace-identity', '{\"root\":\"/original\",\"root_identity\":{\"device\":1,\"inode\":1},\"common_dir\":null,\"common_identity\":null,\"private_dir\":null,\"private_identity\":null}'
          );
          PRAGMA user_version = 4;",
     )
@@ -108,8 +108,8 @@ async fn concurrent_migration_rebuilds_registration_tables_only_once() {
             .unwrap();
         assert_eq!(cookie, expected_cookie, "DDL must run only once");
         let row: (String, String, String, String) = sqlx::query_as(
-            "SELECT projects.id, projects.object_identity, workspaces.id, workspaces.discovery
-             FROM projects JOIN workspaces ON workspaces.project_id = projects.id",
+            "SELECT projects.id, projects.object_identity, r.id, r.discovery
+             FROM projects JOIN legacy_execution_registrations r ON r.project_id = projects.id",
         )
         .fetch_one(&store.database.pool)
         .await
@@ -119,8 +119,8 @@ async fn concurrent_migration_rebuilds_registration_tables_only_once() {
             (
                 "project".into(),
                 "project-identity".into(),
-                "workspace".into(),
-                "discovery".into()
+                "11111111-1111-4111-8111-111111111111".into(),
+                "{\"root\":\"/original\",\"root_identity\":{\"device\":1,\"inode\":1},\"common_dir\":null,\"common_identity\":null,\"private_dir\":null,\"private_identity\":null}".into()
             )
         );
         store.close().await;

@@ -365,11 +365,12 @@ async fn test_discard_refuses_a_session_without_binding() {
     sqlx::query(
         "INSERT INTO threads (id, title, cwd, created_at, updated_at, message_count,
             parent_thread_id, snapshot_at_message_id, hidden, cancel_policy, config,
-            frozen_context, agent_status)
+            frozen_context, agent_status, workspace_id)
          VALUES ('s-legacy', NULL, ?1, '2026-09-26T00:00:00Z', '2026-09-26T00:00:00Z', 0,
-            NULL, NULL, 0, '{}', NULL, NULL, 'active')",
+            NULL, NULL, 0, '{}', NULL, NULL, 'active', ?2)",
     )
     .bind(workspace.cwd.to_string_lossy().into_owned())
+    .bind(workspace.workspace_id.to_string())
     .execute(fixture.facade.local_pool())
     .await
     .unwrap();
