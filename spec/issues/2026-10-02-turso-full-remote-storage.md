@@ -1,6 +1,6 @@
 # Turso 全量远端存储切换
 
-状态：已批准目标，实施完成，独立验收通过，待提交。权威语义见 `docs/design/storage-v2-machine-workspace-session.md`。
+状态：实施完成，独立验收通过；真实 Turso 云端验收待凭证。权威语义见 `docs/design/storage-v2-machine-workspace-session.md`。
 
 ## 裁决与范围
 
