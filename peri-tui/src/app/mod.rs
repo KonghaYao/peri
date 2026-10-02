@@ -141,13 +141,12 @@ impl App {
         let pool = std::sync::Arc::new(
             peri_middlewares::mcp::McpClientPool::new_pending_with_spawner(spawner),
         );
-        if let Some(credentials) = self.services.session_resources.oauth_credentials() {
-            if peri_middlewares::mcp::OAuthCredentialClient::new(credentials)
+        if let Some(credentials) = self.services.session_resources.oauth_credentials()
+            && peri_middlewares::mcp::OAuthCredentialClient::new(credentials)
                 .and_then(|client| pool.inject_oauth_credentials(client))
                 .is_err()
-            {
-                tracing::error!("OAuth credential MCP initialization failed");
-            }
+        {
+            tracing::error!("OAuth credential MCP initialization failed");
         }
         self.services.mcp_pool = Some(pool.clone());
         self.services.mcp_task_owner = Some(owner);

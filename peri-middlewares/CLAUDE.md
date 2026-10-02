@@ -39,7 +39,7 @@
 
 - **链顺序**：只能在 Agent 层 session 工厂的链序蓝本（`production_blueprint`）与 `src/assembly.rs` 槽位构造中判断与修改生产顺序；不得按名称或局部便利重排。
 - **MCP**：保留三层合并、内容去重和插件命名空间；配置来源或工具注册变更必须同时检查 pool、资源与 bridge 路径。init/OAuth/reconnect/subscription 任务由 deployment-held non-Clone `McpTaskOwner` 持有，并实现契约层 `McpTaskOwnerPort` 供 ACP boxed 注入；pool 只持 weak spawner。正常关闭顺序固定为 pool begin-close → owner abort/join → pool service close。Pool service close 由 pool-held 单一 transaction 持有，waiter 取消/并发/重试必须观察同一 `McpPoolShutdownReport`；cleanup timeout 保持 `Closing`，不得发布 `Closed`（ARC-HOST-SHUTDOWN-001）。
-- **MCP 调用恢复**：仅 workspace builtin 保留原生期限，其他 builtin 与外部 MCP 发送/响应共用 120 秒。超时或 drop 发有界取消，handler 监听 request token；完成证据仍属工具/会话 owner。仅投影安全原因及工具生成的任务、日志、草稿引用，不透传任意错误。宿主入口见 `src/mcp/`，workspace 工具见 `../mcp-packages/workspace/`。blocking 搜索只协作取消，不承诺 drop 时已 join。
+- **MCP 调用恢复**：仅 workspace builtin 保留原生期限，其他 builtin 与外部 MCP 发送/响应共用 120 秒。超时或 drop 发有界取消，handler 监听 request token；Workspace Bash 的后台完成证据归 Workspace MCP Task owner，Peri 通过 `tasks/get` 与 `subscriptions/listen` 消费。仅投影安全原因及工具生成的任务、日志、草稿引用，不透传任意错误。宿主入口见 `src/mcp/`，workspace 工具见 `../mcp-packages/workspace/`。blocking 搜索只协作取消，不承诺 drop 时已 join。
 - **MCP over ACP**：client 在会话 setup 声明的 `type: "acp"` server 由 `src/mcp/acp/`（`AcpMcpService`）承载。`attach` 只登记并后台建连（会话建立不等连接），失败留在池状态面（`ConfigSource::Acp` 条目）而不回抛；连接按声明它的会话归属，工具桥接、发现面与状态面必须按 `is_visible_to_session` 过滤，不得跨会话泄漏；`mcp/message` 内层错误码原样透传（lifecycle 依赖方法级错误码）；会话结束在池关闭前 `close_session`（幂等，`mcp/disconnect` 有上界）（ARC-MCP-ACP-001）。
 - **System MCP 启动准入**：`system_mcp=true` 的 server 须在首个 Reason 前完成 transport、initialize、能力协商与真实 `tools/list`（空数组成功，Err 不是发现证据），由 `before_react_start` 闸门阻断未就绪 loop。失败/timeout 返回类型化错误，不发布 ready；取消按中断分类。`system_mcp_tools` 按所属 server 原始工具名精确匹配；仅选中项 direct，未选中项维持原发现路径，`[]` 仅要求 ready。选中项以原始工具名进入模型面，普通 MCP 与 deferred 工具仍使用 `mcp__<server>__<tool>`。模型名冲突按确定准入顺序 first-wins，记录 warning 并跳过后续项；真实必需工具缺失仍失败。权限使用绑定来源身份，不凭裸名授予 builtin 权限。readiness 不绕过 Permission/HITL/事件/cancel。builtin 同构：web/artifact/workspace 选中各自 direct 集，cron/lsp 零提升。默认层注入，加载期拒绝 `disabled + system_mcp`。
 - **插件 MCP 配置严格路径**：`load_enabled_plugins_for_mcp` 对非法 MCP 配置直接失败、不降级为空配置；宽容展示 API（`load_enabled_plugins_aggregated` 等）行为保持不变。
@@ -54,11 +54,11 @@
 从仓库根目录执行：
 
 ```bash
-cargo build -p peri-middlewares
-cargo test -p peri-middlewares --lib
-cargo test -p peri-middlewares --lib -- mcp::task_scope
-cargo test -p peri-middlewares --lib -- mcp::acp
-cargo test -p peri-acp --lib
+./scripts/cargo-rmcp-patched.sh build --locked -p peri-middlewares
+./scripts/cargo-rmcp-patched.sh test --locked -p peri-middlewares --lib
+./scripts/cargo-rmcp-patched.sh test --locked -p peri-middlewares --lib -- mcp::task_scope
+./scripts/cargo-rmcp-patched.sh test --locked -p peri-middlewares --lib -- mcp::acp
+./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp --lib
 ```
 
 ## 按需引用 / Verify

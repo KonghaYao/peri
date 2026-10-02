@@ -65,12 +65,11 @@ v4 目标是存算分离：持久状态、Agent 计算与工具执行环境独�
 ## Workspace 命令
 
 ```bash
-cargo build --workspace
-cargo test -p <crate> --lib -- <test_name>
-cargo test --workspace --doc
-cargo run -p peri-tui
+./scripts/cargo-rmcp-patched.sh build --locked --workspace
+./scripts/cargo-rmcp-patched.sh test --locked -p <crate> --lib -- <test_name>
 lefthook run pre-commit
-cargo clippy --workspace --all-targets -- -D warnings
 ```
+
+其余 Cargo 命令见 `patches/README.md`。
 
 按范围选择命令；改 doc comment 跑 doc tests；E2E 查其指引。交付前按 `DOC-UPDATE-001` 核对路由。未经要求不 commit。

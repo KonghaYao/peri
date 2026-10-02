@@ -20,7 +20,7 @@ use peri_agent::tools::BaseTool;
 use rmcp::{
     model::{
         CallToolRequestParams, CallToolResponse, ListToolsResult, PaginatedRequestParams,
-        ServerInfo,
+        ServerConfig,
     },
     service::{RequestContext, RoleServer},
     ErrorData as McpError, ServerHandler,
@@ -30,7 +30,7 @@ use peri_mcp_common::{invoke_tool_call, list_tools_of, server_info};
 
 use crate::{CronListTool, CronRegisterTool, CronRemoveTool, CronScheduler};
 
-/// `cron` 实例的 `ServerInfo` 名字（`Implementation::name`）；实例名仍是注册表里的
+/// `cron` 实例的 `ServerConfig` 名字（`Implementation::name`）；实例名仍是注册表里的
 /// `"cron"`（`Implementation::name` 与注册表 key 是两件事，不要合并）。
 const CRON_SERVER_NAME: &str = "peri-cron-mcp";
 
@@ -59,7 +59,7 @@ impl CronMcpServer {
 impl ServerHandler for CronMcpServer {
     // 不覆写 `discover`（§10 R2）。
 
-    fn get_info(&self) -> ServerInfo {
+    fn get_info(&self) -> ServerConfig {
         server_info(CRON_SERVER_NAME, env!("CARGO_PKG_VERSION"))
     }
 

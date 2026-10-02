@@ -57,7 +57,8 @@ jobs:
                   key: ${{ matrix.target }}
 
             - name: Build
-              run: cargo build --workspace --all-targets
+              shell: bash
+              run: ./scripts/cargo-rmcp-patched.sh build --locked --workspace --all-targets
 
             - name: Install Bun
               uses: oven-sh/setup-bun@v2
@@ -72,17 +73,20 @@ jobs:
 
             # 分步记录耗时，也确保 Windows 下第一组失败不会被后续成功覆盖。
             - name: Run workspace tests (excluding middleware and MCP capabilities)
+              shell: bash
               run: >-
-                  cargo test --workspace --exclude peri-middlewares
+                  ./scripts/cargo-rmcp-patched.sh test --locked --workspace --exclude peri-middlewares
                   --exclude peri-mcp-common --exclude peri-mcp-web --exclude peri-mcp-artifact
                   --exclude peri-mcp-cron --exclude peri-mcp-lsp --exclude peri-mcp-workspace
 
             # 涉及进程级全局状态的测试仍须串行执行。
             - name: Run middleware and MCP capability tests (serial)
+              shell: bash
               run: >-
-                  cargo test -p peri-middlewares -p peri-mcp-common -p peri-mcp-web
+                  ./scripts/cargo-rmcp-patched.sh test --locked -p peri-middlewares -p peri-mcp-common -p peri-mcp-web
                   -p peri-mcp-artifact -p peri-mcp-cron -p peri-mcp-lsp -p peri-mcp-workspace
                   -- --test-threads=1
 
             - name: Clippy
-              run: cargo clippy --workspace --all-targets -- -D warnings
+              shell: bash
+              run: ./scripts/cargo-rmcp-patched.sh clippy --locked --workspace --all-targets -- -D warnings

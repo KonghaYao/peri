@@ -14,7 +14,7 @@ Configuration has a separate bootstrap channel owned by `peri-mcp-config`: synch
 
 The ACP host creates the builtin instance context, selects the handler, and owns MCP transport and client lifecycle. A capability package constructs its handler and tools; `peri-mcp-common` supplies shared tool-schema conversion, tool-call result mapping, numeric parameter parsing, and process-environment locking. For LSP, the package constructs the host-scoped pool and the handler owns the same injected `Arc`; the host still retains the shutdown handle and invokes bounded shutdown. The host connects the handler to the client and retains readiness, cancellation, bridge, and shutdown ownership.
 
-Workspace's `WorkspaceInstanceInput` carries the session's task manager and background completion callback into `WorkspaceMcpServer`. The host supplies it before builtin initialization. Missing input is a supported degraded mode; it does not hide the workspace tools. The input does not transfer lifecycle ownership to the package.
+Production Workspace instances own their Bash task state. Both the standalone MCP process and the builtin dispatcher construct `WorkspaceMcpServer::standalone`; the ACP session does not inject its task manager or a completion callback. Background calls return MCP Tasks handles, and task state, cancellation, and completion notifications cross the MCP protocol. `WorkspaceInstanceInput` remains only in the direct constructor used by existing low-level tool tests; it is not part of production assembly.
 
 Host wire, pool, bridge, readiness, and shutdown tests belong in `peri-middlewares`. Package tests cover the capability behavior that can run without host-private APIs. Do not add a dependency from a capability package back to the host to move a host test.
 
@@ -31,7 +31,7 @@ Host wire, pool, bridge, readiness, and shutdown tests belong in `peri-middlewar
 | Artifact conversion/upload tool and handler | `artifact/src/{server,tool,client}.rs` |
 | Cron scheduling and tools/handler | `cron/src/{scheduler,tools,server}.rs` |
 | LSP tool and result formatting | `lsp/src/{tool,formatters,server}.rs` |
-| Workspace handler and session input | `workspace/src/{workspace,input}.rs` |
+| Workspace handler and task owner | `workspace/src/{workspace,shell_tasks}.rs` |
 | Workspace resource provider (skills / agents / project instructions), resource input, URI/`_meta` contract | `workspace/src/resources/`; contract types in `peri-acp-types/src/workspace_resources.rs` (skills extension key: `peri-acp-types/src/skills.rs::SKILLS_EXTENSION_ID`). Owns the local skill reads plus the `skills/list` / `skills/get` manifest and per-file digest (J5); the package registers **no skill tools** — `SkillTool` / `DiscoverSkillsTool` stay in the host and aggregate across origins (J3) |
 | Workspace filesystem behavior | `workspace/src/filesystem/` |
 | Image attachments and full text reads for host observers | `workspace/src/{image,file_observation}.rs`; `image/read` and `workspace/readText` custom requests, not model tools |
@@ -43,9 +43,9 @@ Host wire, pool, bridge, readiness, and shutdown tests belong in `peri-middlewar
 
 - Shared behavior has one implementation in `peri-mcp-common`. Keep safe error projection, argument defaults, schema conversion, and declared tool ordering consistent across packages.
 - `server_info(name, version)` receives the capability package's version; the common package version must not appear as the server implementation version.
-- Output persistence uses `peri_mcp_common::shell`; pure byte truncation and timeout policy remain in `peri_agent::agent::async_tasks`. Agent's `TaskManager::new()` has no shell execution environment; local hosts use `peri_mcp_common::create_local_task_manager()`. Session admission and cleanup evidence remain Agent-owned. Host MCP bridge/resource truncation still invokes common persistence in the host process; this seam does not provide remote output storage or cross-machine Read addressing.
+- Output persistence uses `peri_mcp_common::shell`; pure byte truncation and timeout policy remain in `peri_agent::agent::async_tasks`. Workspace creates its own local shell manager and exposes task status through MCP Tasks. The ACP session task manager remains separate. Host MCP bridge/resource truncation still invokes common persistence in the host process; this seam does not provide remote output storage or cross-machine Read addressing.
 - A package owns its handler and tools. The LSP package additionally owns its client/pool implementation and the builtin handler holds the injected host-scoped pool; the host owns pool visibility, shutdown invocation, readiness admission, task supervision, cancellation delivery, and orderly shutdown. Preserve these shared-pool boundaries when changing call behavior.
-- Workspace tools retain their existing schema, names, declaration order, cwd binding, timeout and cancellation behavior. `WorkspaceInstanceInput` is session-scoped; the host remains its source and lifecycle owner.
+- Workspace tools retain their existing schema, names, declaration order, and cwd binding. Background Bash execution and its cleanup belong to the Workspace instance; Peri observes Tasks through `tasks/get` and `subscriptions/listen`.
 - Preserve direct/deferred visibility and approval behavior. Follow `ARC-MIDDLEWARE-001`, `ARC-CAPABILITY-CLOSURE-001`, `ARC-TOOLS-001`, `ARC-CANCEL-001`, and `ARC-HOST-SHUTDOWN-001` where applicable; the standards are authoritative.
 
 ## Target commands
@@ -53,10 +53,10 @@ Host wire, pool, bridge, readiness, and shutdown tests belong in `peri-middlewar
 From the repository root:
 
 ```bash
-cargo build -p peri-mcp-common -p peri-mcp-web -p peri-mcp-artifact -p peri-mcp-cron -p peri-mcp-lsp -p peri-mcp-workspace
-cargo test -p peri-mcp-common -p peri-mcp-web -p peri-mcp-artifact -p peri-mcp-cron -p peri-mcp-lsp -p peri-mcp-workspace --lib
-cargo test -p peri-middlewares --lib -- mcp::workspace_builtin_tests
-cargo test -p peri-middlewares --lib -- mcp::workspace_recovery_tests
+./scripts/cargo-rmcp-patched.sh build --locked -p peri-mcp-common -p peri-mcp-web -p peri-mcp-artifact -p peri-mcp-cron -p peri-mcp-lsp -p peri-mcp-workspace
+./scripts/cargo-rmcp-patched.sh test --locked -p peri-mcp-common -p peri-mcp-web -p peri-mcp-artifact -p peri-mcp-cron -p peri-mcp-lsp -p peri-mcp-workspace --lib
+./scripts/cargo-rmcp-patched.sh test --locked -p peri-middlewares --lib -- mcp::workspace_builtin_tests
+./scripts/cargo-rmcp-patched.sh test --locked -p peri-middlewares --lib -- mcp::workspace_recovery_tests
 ```
 
 Use exact test module paths when targeting an individual host test module. For the full test scope, host lifecycle and isolation contracts remain in `peri-middlewares` and ACP; package tests do not replace those contracts.

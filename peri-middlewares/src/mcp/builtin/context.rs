@@ -2,17 +2,14 @@
 //!
 //! 边界：
 //! - 宿主上下文类型与 cron/LSP 输入经 `peri_middlewares::assembly` 再导出；
-//!   `WorkspaceInstanceInput` 由 `peri-mcp-workspace` 直接公开。`crate::mcp::builtin` 仍是
+//!   `WorkspaceInstanceInput` 由 `peri-mcp-workspace` 直接公开（仅保留旧构造测试）。`crate::mcp::builtin` 仍是
 //!   `pub(crate)`，宿主（`peri-acp`）不得 import 本模块路径（A33）。
 //! - 字段承载的是**实例构造所需状态**（cron scheduler / LSP pool / cwd / 关闭集 /
-//!   workspace 的 session 级输入），**不是**工具执行上下文：7 个 workspace 工具当前都不读
+//!   workspace 的遗留输入槽），**不是**工具执行上下文：7 个 workspace 工具当前都不读
 //!   `ToolContext::cwd`（`invoke` 一律 `_ctx`），宿主 cwd / session 上下文到 builtin 工具
 //!   执行的贯通是 wave 3 的缺口（F1）。本类型不声称该缺口已贯通，也不把 `cwd` 当作工具
 //!   执行上下文的替代品。
-//! - 字段的**生命周期粒度不同**：`cwd` / `cron` / `lsp` / `closed` 是 host 级，而
-//!   [`BuiltinInstanceContext::workspace`] 承载的是 **session 级**输入（per-session 的
-//!   `TaskManager` 与 bg 完成回调，AW3-11 / 主 plan §2.1）；两者的来源与 `None` 语义见
-//!   各自字段文档。
+//! - 生产 Workspace 不消费 `workspace` 遗留输入槽，后台 Bash 任务由 Workspace 自持。
 //! - 同一个状态对象只注入一次（A33）：注入状态与一次性语义在
 //!   `McpClientPool::set_builtin_instance_context`（同一短锁保护上下文与
 //!   「initialize 已开始」标志）；本模块只提供类型与便利构造，自身不持有注入状态。
@@ -76,15 +73,7 @@ pub struct BuiltinInstanceContext {
     pub cron: Option<CronInstanceInput>,
     /// `lsp` 实例输入；`None` = 未提供（同上）。
     pub lsp: Option<LspInstanceInput>,
-    /// `workspace` 实例输入（**session 级**，见 [`WorkspaceInstanceInput`]）。
-    ///
-    /// `None` = **可见但退化**：`workspace` 实例照常装配（`dispatch` 无条件构造 handler），
-    /// 只有 `Bash` 失去后台任务那一路——与 `cron` / `lsp` 的「缺输入 ⇒ 不可装配」不同，
-    /// 因此 [`Self::instance_input_ready`] 不为它增加 arm（AW3-11）。
-    ///
-    /// 来源：会话环境装配（`peri-acp/src/host/workspace.rs` 的 `SessionEnvironment::assemble`）；
-    /// 顶层三路径与 1:N 形态（`session_resources = true` 当 server root）不产生 session，
-    /// 因此传 `None`（该退化形态进验收记录）。
+    /// 遗留测试输入槽。生产 dispatcher 不读取它；Workspace 自己持有 Bash 任务。
     pub workspace: Option<WorkspaceInstanceInput>,
     /// `workspace` 实例的**资源面**输入（`WorkspaceMcpServer::with_resources` 的装配输入）。
     ///
@@ -92,7 +81,7 @@ pub struct BuiltinInstanceContext {
     /// 但 `resources/list` 只有 git ref，`skills/*` 返回 `-32601`、新 scheme 的
     /// `resources/read` 返回 `-32602`——与「空目录集」不同，不得混同。
     ///
-    /// 与 [`Self::workspace`] 同一节奏的**一次性装配输入**：宿主装配（会话环境）在
+    /// **一次性装配输入**：宿主装配（会话环境）在
     /// `McpClientPool::run_initialize` 之前随本上下文一次注入，dispatch 只读不改、
     /// 不读配置、不派生根（AW3-11 模式）。资源根列表（skills / agents / builtin
     /// 关闭位）的事实源是装配期输入（F11 插件 manifest / F12 配置读取已在该层完成）。
@@ -140,10 +129,7 @@ impl BuiltinInstanceContext {
         self
     }
 
-    /// 提供 `workspace` 实例输入（**session 级**；AW3-11 的 seam 接收端）。
-    ///
-    /// 未调用时 `workspace` 仍是「可见但退化」——本 builder 只表达「有 session 级输入」，
-    /// 与 `with_cron` / `with_lsp` 的「不调用 ⇒ 实例不可装配」不是同一件事。
+    /// 仅供旧装配测试；生产 Workspace 不使用此输入。
     pub fn with_workspace(mut self, input: WorkspaceInstanceInput) -> Self {
         self.workspace = Some(input);
         self

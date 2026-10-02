@@ -30,6 +30,8 @@ LSP、插件生命周期、hook 格式、OS 执行环境与存储 locator/creden
 
 ## 宿主与插件边界
 
+Workspace 后台 Bash 当前运行时入口：`workspace/src/shell_tasks.rs` 持有任务状态并通过 `workspace.rs` 实现 `tasks/get|cancel`、`subscriptions/listen` 的 `taskIds` 通知；独立 CLI 与 builtin dispatch 都构造 `WorkspaceMcpServer::standalone`。Peri 的客户端能力声明在 `peri-middlewares/src/mcp/client/service.rs`，工具回执与订阅消费在 `tool_bridge.rs`、`client/subscription.rs`。ACP 会话装配不再向 Workspace 注入 TaskManager/完成回调。`WorkspaceInstanceInput` 只保留在直接构造器供旧工具测试使用，尚非编译依赖清理。
+
 - `peri-middlewares/src/mcp/builtin/mod.rs` 持有 builtin 配置 overlay、实例关闭策略与名称映射；`dispatch.rs` 构造新 crate 导出的 handler。
 - `context.rs` 持有注入给 server 的宿主上下文，`runtime.rs` 持有内存 transport、server task 与有界关闭；Cron tick 监督也在这里。
 - `peri-acp-types` 持有 builtin 实例与工具声明、名称及 direct/deferred 策略。插件 crate 不复制这些策略表。

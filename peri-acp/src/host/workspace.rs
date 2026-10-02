@@ -27,26 +27,11 @@ pub(crate) struct SessionEnvironment {
     cwd: String,
     end_hooks: tokio::sync::Mutex<SessionEndState>,
     cleanup_tasks: Arc<dyn peri_acp_types::tasks::TaskManager>,
-    /// 本会话环境的 per-session 后台任务管理器（AW3-11 第一成员）。
-    ///
-    /// 产生点在本模块的装配（`assemble` 开头，早于 builtin 上下文构造），随后**同一
-    /// `Arc`** 经 `WorkspaceInstanceInput` 送进 builtin `workspace` 实例，并由三条会话
-    /// 路径交给 `SessionManager::ensure_session_with_task_manager` 登记为
-    /// `AcpSession::task_manager`——三处是同一份（`Arc::ptr_eq` 可观察）。
+    /// ACP 会话自身的后台任务管理器；Workspace Bash 使用 MCP 侧独立 owner。
     task_manager: Arc<dyn peri_acp_types::tasks::TaskManager>,
-    /// 装配面**送进 builtin `workspace` 实例上下文**的那份 [`WorkspaceInstanceInput`]
-    /// （AW3-11 两名成员：per-session `TaskManager` + session 级 `on_bg_complete`）。
-    ///
-    /// 生产运行不读它（输入已随池的上下文一次注入），保留副本的唯一用途是让
-    /// 「送进上下文的那份 == 环境持有的那份（= 会话持有的那份）」这条链**可断言**
-    /// ——两个落点各自持值，断言才有内容；若只从同一个值派生，断言会退化成自比较。
-    /// 因此本字段在非测试构建里无人读 ⇒ 收窄到 `cfg(test)`，而不是加 `#[allow(dead_code)]`
-    /// （本 crate 禁放宽 lint）。
-    #[cfg(test)]
-    workspace_input: peri_mcp_workspace::WorkspaceInstanceInput,
     /// 送进 builtin 实例上下文的那份 A24 关闭集（订阅建立门的唯一输入）。
     ///
-    /// 与 `workspace_input` 同一处置：生产运行不读它（关闭集已随上下文一次注入 pool），
+    /// 生产运行不读它（关闭集已随上下文一次注入 pool），
     /// 保留副本只为让「装配派生自哪份 frozen」**可断言**——冷恢复的装配必须等于持久
     /// blob 的投影，而不是当轮配置/目录状态的投影（ARC-FROZEN-001）。
     #[cfg(test)]
@@ -248,25 +233,9 @@ impl SessionEnvironment {
         // `ConfigSource::load_at`、不第二次解析 provider（`prepare_new` 的
         // `resolve_configuration` 已按「同目录复用 host 视图 / 异目录只读一次」定过格）。
         let cwd = cwd.to_owned();
-        // ── AW3-11：session 级 seam 的两名成员在**构造 `HostAssemblyInput` 之前**
-        //    产生 ──
-        //
-        // `TaskManager` 的产生点上提到这里（原来的产生点是 `ensure_session` →
-        // `build_session`，晚于本函数，见主 plan §2 AW3-11 依据 2）：本环境随后把它
-        // 经 builtin 上下文一次注入 pool（A33，早于 `run_initialize`），并在
-        // `activate()` 之前由会话路径登记为 `AcpSession::task_manager`。
-        //
-        // `on_bg_complete` 是 session 级闭包：装配点 session **尚未注册**，
-        // `session_inbox` 取不到是预期，闭包体内 lazy resolve（禁止急切取）。
+        // ACP 会话任务仍由 SessionManager 登记；Workspace Bash owner 独立，
+        // 通过 MCP Tasks 回执和订阅与本会话通信。
         let task_manager = host.session_manager.new_session_task_manager();
-        let on_bg_complete = peri_agent::session::bg_complete::session_bg_complete_callback(
-            Arc::new(host.session_manager.clone()),
-            session_id.to_owned(),
-        );
-        let workspace_input = peri_mcp_workspace::WorkspaceInstanceInput {
-            task_manager: Some(Arc::clone(&task_manager)),
-            on_bg_complete: Some(on_bg_complete),
-        };
         // ── W4b：builtin `workspace` 实例的**真实资源面**输入 ──
         //
         // 技能来源（J5）整体归位 MCP 侧：user/project 根 + 插件根 + builtin
@@ -335,7 +304,7 @@ impl SessionEnvironment {
             cwd: cwd.clone(),
             bare: source.bare,
             drive_cron_tick: source.drive_cron_tick,
-            workspace_input: Some(workspace_input.clone()),
+            workspace_input: None,
             workspace_resources: Some(workspace_resources),
             builtin_closed,
             skills_face_closed,
@@ -387,8 +356,6 @@ impl SessionEnvironment {
             end_hooks: tokio::sync::Mutex::new(SessionEndState::Pending),
             cleanup_tasks: Arc::new(peri_agent::agent::async_tasks::TaskManager::new()),
             task_manager,
-            #[cfg(test)]
-            workspace_input,
             #[cfg(test)]
             builtin_closed: closed_for_test,
         })))
@@ -448,26 +415,9 @@ impl SessionEnvironment {
         }
     }
 
-    /// 本会话环境的 per-session 后台任务管理器（AW3-11 第一成员）。
-    ///
-    /// 产生点在本模块的装配（`assemble` 开头，早于 builtin 上下文构造），随后**同一
-    /// `Arc`** 经 `WorkspaceInstanceInput` 送进 builtin `workspace` 实例，并由三条会话
-    /// 路径交给 `SessionManager::ensure_session_with_task_manager` 登记为
-    /// `AcpSession::task_manager`——三处是同一份（`Arc::ptr_eq` 可观察）。
+    /// ACP 会话任务管理器；不承担 Workspace Bash 的所有权。
     pub(crate) fn task_manager(&self) -> Arc<dyn peri_acp_types::tasks::TaskManager> {
         Arc::clone(&self.task_manager)
-    }
-
-    /// 装配面送进 builtin `workspace` 实例上下文的那份输入（AW3-11 两名成员）。
-    ///
-    /// 恒为 `Some`（本环境的构造前提就是 `workspace_assembly` 存在）；返回 `Option`
-    /// 只为对齐上下文里 `workspace: Option<WorkspaceInstanceInput>` 的形状。
-    ///
-    /// `cfg(test)`：这是**测试观察面**（验证「送进上下文的那份 == 环境持有的那份 ==
-    /// 会话持有的那份」），生产代码只经 [`Self::task_manager`] 取 manager。
-    #[cfg(test)]
-    pub(crate) fn workspace_input(&self) -> Option<&peri_mcp_workspace::WorkspaceInstanceInput> {
-        Some(&self.workspace_input)
     }
 
     /// 本环境装配时派生的 A24 关闭集（订阅建立门的唯一输入）。

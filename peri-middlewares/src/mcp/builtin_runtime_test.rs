@@ -63,7 +63,7 @@ use peri_mcp_lsp::config::{LspConfigFile, LspServerConfig};
 use peri_mcp_lsp::pool::LspServerPool;
 use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, ErrorCode,
-    Implementation, ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo,
+    Implementation, ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerConfig,
     Tool as RmcpTool,
 };
 use rmcp::service::{RequestContext, RoleServer};
@@ -422,8 +422,8 @@ fn rmcp_tool_of(tool: &dyn BaseTool) -> RmcpTool {
 impl ServerHandler for FixtureBuiltinHandler {
     // 不覆写 `discover`：rmcp 默认实现走 modern（inline `server/discover`）。
 
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new(self.info_name, "runtime-fixture"))
     }
 

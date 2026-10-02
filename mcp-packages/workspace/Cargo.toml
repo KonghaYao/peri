@@ -6,6 +6,10 @@ description = "Workspace filesystem and terminal builtin MCP instance"
 license = "Apache-2.0"
 
 [dependencies]
+anyhow.workspace = true
+axum.workspace = true
+clap = { version = "4", features = ["derive"] }
+dirs-next.workspace = true
 peri-agent = { path = "../../peri-agent" }
 peri-acp-types = { path = "../../peri-acp-types" }
 peri-mcp-common = { path = "../common" }
@@ -18,13 +22,14 @@ glob = "0.3"
 ignore = "0.4"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 parking_lot.workspace = true
-rmcp.workspace = true
+rmcp = { workspace = true, features = ["transport-streamable-http-server"] }
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["process"] }
+tokio-util.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 walkdir = "2.5"

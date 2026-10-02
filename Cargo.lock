@@ -4166,9 +4166,13 @@ dependencies = [
 name = "peri-mcp-workspace"
 version = "0.2.0"
 dependencies = [
+ "anyhow",
  "async-trait",
+ "axum",
  "base64 0.22.1",
  "chrono",
+ "clap",
+ "dirs-next",
  "filetime",
  "futures",
  "fuzzy-matcher",
@@ -4735,9 +4739,9 @@ dependencies = [
 
 [[package]]
 name = "process-wrap"
-version = "9.1.0"
+version = "10.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2e842efad9119158434d193c6682e2ebee4b44d6ad801d7b349623b3f57cdf55"
+checksum = "1f21b97672d2dc848e7b25701ab4535618b92f4861c13cc3f7f7bed52ad3c8da"
 dependencies = [
  "futures",
  "indexmap 2.14.0",
@@ -5331,9 +5335,7 @@ dependencies = [
 
 [[package]]
 name = "rmcp"
-version = "3.1.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a15bc53261a9dc37e105df006e4656c598379a8f9581f8950debb130f27a7cf"
+version = "3.5.0"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -5341,11 +5343,14 @@ dependencies = [
  "chrono",
  "futures",
  "http",
+ "http-body",
+ "http-body-util",
  "indexmap 2.14.0",
  "oauth2",
  "pastey",
  "pin-project-lite",
  "process-wrap",
+ "rand 0.10.2",
  "reqwest",
  "rmcp-macros",
  "schemars 1.2.2",
@@ -5356,6 +5361,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tokio-util",
+ "tower-service",
  "tracing",
  "url",
  "uuid",
@@ -5363,9 +5369,9 @@ dependencies = [
 
 [[package]]
 name = "rmcp-macros"
-version = "3.1.4"
+version = "3.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a85d45508e9b4ba024fe996c2638799635d75b6dd0ba8f32ccf08f8026f0c780"
+checksum = "c7e66877136e969d5a2d561ee5841b17717a0619aebd64abb47a2a2f46e34683"
 dependencies = [
  "darling 0.24.0",
  "proc-macro2",

@@ -15,7 +15,7 @@ use std::{
 use rmcp::{
     model::{
         CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
-        ListToolsResult, PaginatedRequestParams, ProtocolVersion, ServerCapabilities, ServerInfo,
+        ListToolsResult, PaginatedRequestParams, ProtocolVersion, ServerCapabilities, ServerConfig,
         Tool,
     },
     service::{QuitReason, RequestContext, RoleServer},
@@ -70,8 +70,8 @@ struct FixtureServer {
 }
 
 impl ServerHandler for FixtureServer {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("builtin-runtime-fixture", "0.0.1"))
     }
 
@@ -729,7 +729,7 @@ fn transport_type_of_reports_builtin_stdio_and_http() {
         infos
             .iter()
             .find(|info| info.name == name)
-            .unwrap_or_else(|| panic!("缺少 {name} 的 ServerInfo"))
+            .unwrap_or_else(|| panic!("缺少 {name} 的 ServerConfig"))
             .transport_type
             .clone()
     };

@@ -122,19 +122,10 @@ pub struct HostAssemblyInput {
     /// 驱动 cron tick（TUI=true，复刻迁移前 TUI 每秒 tick 行为；print/stdio
     /// 保持现状无 tick——行为零变化，L2 遗留登记 M-TUI issue）。
     pub drive_cron_tick: bool,
-    /// builtin `workspace` 实例的**session 级**输入（AW3-11 的两名成员：
-    /// per-session `TaskManager` + session 级 `on_bg_complete`）。
-    ///
-    /// 只有会话环境装配（[`super::workspace::SessionEnvironment::assemble`]）传
-    /// `Some`——该形态是唯一构造 builtin 上下文的形态（`session_resources = true`，
-    /// 每 session 一个 pool）。顶层三路径与测试夹具传 `None`：那层不构造 builtin
-    /// 上下文（`mcp_pool` 为 `None`），`None` 不改变任何既有行为。
-    ///
-    /// 注入必须**早于** pool 的 `McpClientPool::run_initialize`（A33：上下文一次性
-    /// 注入，第二次必得 `AlreadyInjected`），见本模块的 `.with_workspace(...)` 调用点。
+    /// 遗留测试输入槽；生产传 `None`，Workspace Bash 在 MCP 侧自持任务。
     pub workspace_input: Option<peri_mcp_workspace::WorkspaceInstanceInput>,
     /// builtin `workspace` 实例的**资源面**输入（资源根 / builtin 关闭位 / 预算），
-    /// 与 `workspace_input` 同一注入节奏：随 builtin 实例上下文一次注入 pool，早于
+    /// 随 builtin 实例上下文一次注入 pool，早于
     /// `McpClientPool::run_initialize`（A33）。
     ///
     /// `None` = 资源面未接线（`resources/list` 只有 git ref）：顶层三路径保持 `None`

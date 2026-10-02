@@ -15,7 +15,7 @@ use std::{
 };
 
 use rmcp::{
-    model::{Implementation, ServerCapabilities, ServerInfo, SubscriptionFilter},
+    model::{Implementation, ServerCapabilities, ServerConfig, SubscriptionFilter},
     service::{Peer, RoleClient, SubscriptionContext, SubscriptionSink},
     ErrorData as McpError, ServerHandler,
 };
@@ -78,8 +78,8 @@ impl SpikeSubscriptionServer {
 }
 
 impl ServerHandler for SpikeSubscriptionServer {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(self.capabilities())
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(self.capabilities())
             .with_server_info(Implementation::new(SPIKE_SERVER_NAME, SPIKE_SERVER_VERSION))
     }
 

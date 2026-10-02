@@ -5,7 +5,7 @@ use peri_acp_types::oauth_credentials::{
     OAuthCredentialRequest, OAuthCredentialResponse, OAuthCredentialValue, OAUTH_CREDENTIAL_METHOD,
 };
 use rmcp::{
-    model::{CustomRequest, CustomResult, Implementation, ServerCapabilities, ServerInfo},
+    model::{CustomRequest, CustomResult, Implementation, ServerCapabilities, ServerConfig},
     service::{RequestContext, RoleServer},
     ErrorData, ServerHandler,
 };
@@ -53,8 +53,8 @@ impl OAuthCredentialMcpServer {
 }
 
 impl ServerHandler for OAuthCredentialMcpServer {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::default()).with_server_info(Implementation::new(
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::default()).with_server_info(Implementation::new(
             "peri-credentials",
             env!("CARGO_PKG_VERSION"),
         ))

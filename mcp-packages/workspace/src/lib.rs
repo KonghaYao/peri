@@ -10,6 +10,7 @@ mod input;
 mod output_store;
 pub mod resources;
 mod shell_hints;
+mod shell_tasks;
 pub mod terminal;
 mod workspace;
 

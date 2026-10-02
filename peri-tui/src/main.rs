@@ -9,6 +9,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 mod cli_args;
+mod cli_mcp_start;
 mod cli_meta;
 mod cli_plugin;
 mod cli_print;
@@ -17,6 +18,7 @@ mod cli_workflow;
 // ─── Panic Hook（TUI 专用）───────────────────────────────────────────────────
 // 实现已移至 peri_tui::kit::panic（lib 侧），AppShell mount 后重装 hook，
 // 覆盖 ratatui::init() 的包装 hook——见 kit/panic.rs 模块注释。
+use cli_args::{argv_requests_settings_stdin, build_runtime};
 use peri_acp::host::stdio::StdioInput;
 use peri_acp_types::session_resources::AccessMode;
 use peri_acp_types::session_store::SessionStoreDeployment;
@@ -111,6 +113,12 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// 启动独立 MCP 能力进程
+    #[command(name = "mcp-start")]
+    McpStart {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<OsString>,
+    },
     /// 以 ACP Agent 模式运行（stdin/stdout JSON-RPC）
     Acp {
         /// 工作目录
@@ -433,23 +441,6 @@ fn pre_scan_config_file(args: impl Iterator<Item = std::ffi::OsString>) -> Optio
     result
 }
 
-fn argv_requests_settings_stdin(args: &[OsString]) -> bool {
-    args.iter()
-        .skip(1)
-        .take_while(|arg| arg.to_str() != Some("--"))
-        .any(|arg| arg.to_str() == Some("--settings-stdin"))
-}
-
-/// 统一创建 tokio runtime（4 workers，4MB stack），避免 7 处重复构造
-fn build_runtime() -> Result<tokio::runtime::Runtime> {
-    tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(4)
-        .thread_stack_size(4 * 1024 * 1024)
-        .enable_all()
-        .build()
-        .map_err(Into::into)
-}
-
 fn validate_cli(cli: &Cli) -> std::result::Result<(), &'static str> {
     if matches!(
         cli.command,
@@ -687,6 +678,15 @@ fn try_run_meta_before_configuration(args: &[OsString]) -> Option<Result<()>> {
 
 fn main() -> Result<()> {
     let args: Vec<OsString> = std::env::args_os().collect();
+    if args.get(1).is_some_and(|arg| arg == "mcp-start") {
+        return cli_mcp_start::run(&args[2..]);
+    }
+    if args.iter().skip(2).any(|arg| arg == "mcp-start")
+        && Cli::try_parse_from(&args)
+            .is_ok_and(|cli| matches!(cli.command, Some(Commands::McpStart { .. })))
+    {
+        anyhow::bail!("mcp-start must be the first argument");
+    }
     if cli_workflow::argv_requests_workflow(&args) {
         return cli_workflow::run_before_configuration(&args);
     }
@@ -765,6 +765,7 @@ fn main() -> Result<()> {
     }
 
     match cli.command {
+        Some(Commands::McpStart { .. }) => anyhow::bail!("mcp-start must be the first argument"),
         None => match run_tui(TuiOptions {
             permission_mode: cli.permission_mode,
             skip_permissions: cli.skip_permissions,

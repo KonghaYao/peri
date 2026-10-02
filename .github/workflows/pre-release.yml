@@ -52,7 +52,7 @@ jobs:
                   key: next-major-${{ matrix.target }}
 
             - name: Build peri
-              run: cargo build --locked -p peri-tui --bin peri --release --target ${{ matrix.target }}
+              run: ./scripts/cargo-rmcp-patched.sh build --locked -p peri-tui --bin peri --release --target ${{ matrix.target }}
 
             - name: Smoke test binary
               run: |

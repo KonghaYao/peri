@@ -1,7 +1,7 @@
 //! rmcp service 适配与连接能力声明。
 
 use rmcp::{
-    model::{ClientCapabilities, Implementation, InitializeRequestParams},
+    model::{ClientCapabilities, Implementation, InitializeRequestParams, TASKS_EXTENSION_ID},
     service::{Peer, QuitReason, RoleClient, RunningService},
 };
 use std::sync::Arc;
@@ -201,6 +201,7 @@ pub(crate) fn mcpp_client_info_for_profile(
     if let Some(extension) = profile.ui_extension() {
         extensions.insert(crate::mcp::apps::MCP_UI_EXTENSION.to_string(), extension);
     }
+    extensions.insert(TASKS_EXTENSION_ID.to_string(), serde_json::Map::new());
     let mut capabilities = ClientCapabilities::default();
     capabilities.extensions = Some(extensions);
     InitializeRequestParams::new(capabilities, Implementation::from_build_env())

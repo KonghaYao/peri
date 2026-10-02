@@ -366,7 +366,7 @@ impl BaseTool for BashTool {
 mod tests;
 
 impl BashTool {
-    async fn execute(
+    pub(crate) async fn execute(
         &self,
         input: Value,
         _ctx: peri_agent::tools::ToolContext<'_>,
@@ -820,9 +820,9 @@ impl BashTool {
 }
 
 /// Private execution result keeps recovery references separate from command output.
-struct BashOutput {
-    output: ToolOutput,
-    recovery: Option<String>,
+pub(crate) struct BashOutput {
+    pub(crate) output: ToolOutput,
+    pub(crate) recovery: Option<String>,
 }
 impl BashOutput {
     fn with_execution(text: impl Into<String>, evidence: ToolExecutionEvidence) -> Self {

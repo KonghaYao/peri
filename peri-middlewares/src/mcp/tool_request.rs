@@ -2,7 +2,7 @@
 //! instead of silently leaving server-side work running.
 use rmcp::{
     model::{
-        CallToolRequest, CallToolRequestParams, CallToolResult, CancelledNotificationParam,
+        CallToolRequest, CallToolRequestParams, CallToolResponse, CancelledNotificationParam,
         ClientRequest, RequestId, ServerResult,
     },
     service::{Peer, PeerRequestOptions, RoleClient},
@@ -53,7 +53,7 @@ pub(super) async fn call_tool(
     peer: &Peer<RoleClient>,
     params: CallToolRequestParams,
     timeout: Option<Duration>,
-) -> Result<CallToolResult, ServiceError> {
+) -> Result<CallToolResponse, ServiceError> {
     // One deadline covers transport backpressure and response latency together.
     let deadline = timeout.map(|duration| tokio::time::Instant::now() + duration);
     let send = peer.send_request_with_option(
@@ -87,7 +87,8 @@ pub(super) async fn call_tool(
     };
     pending.id.take();
     match result? {
-        ServerResult::CallToolResult(result) => Ok(result),
+        ServerResult::CallToolResult(result) => Ok(CallToolResponse::Complete(result)),
+        ServerResult::CreateTaskResult(result) => Ok(CallToolResponse::Task(result)),
         _ => Err(ServiceError::UnexpectedResponse),
     }
 }

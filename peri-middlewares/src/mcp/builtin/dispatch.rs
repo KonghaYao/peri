@@ -18,9 +18,10 @@ use std::sync::Arc;
 use peri_acp_types::builtin_mcp::find;
 use rmcp::{
     model::{
-        CallToolRequestParams, CallToolResponse, CustomRequest, CustomResult, ErrorCode,
-        ListResourceTemplatesResult, ListResourcesResult, ListToolsResult, PaginatedRequestParams,
-        ReadResourceRequestParams, ReadResourceResponse, ServerInfo, SubscriptionFilter,
+        CallToolRequestParams, CallToolResponse, CancelTaskParams, CustomRequest, CustomResult,
+        ErrorCode, GetTaskParams, GetTaskResult, ListResourceTemplatesResult, ListResourcesResult,
+        ListToolsResult, PaginatedRequestParams, ReadResourceRequestParams, ReadResourceResponse,
+        ServerConfig, SubscriptionFilter, UpdateTaskParams,
     },
     service::{RequestContext, RoleServer, SubscriptionContext},
     ErrorData as McpError, ServerHandler,
@@ -51,7 +52,7 @@ pub(crate) enum BuiltinServerHandler {
 impl ServerHandler for BuiltinServerHandler {
     // 不覆写 `discover`（§10 R2）。
 
-    fn get_info(&self) -> ServerInfo {
+    fn get_info(&self) -> ServerConfig {
         match self {
             Self::Web(server) => server.get_info(),
             Self::Artifact(server) => server.get_info(),
@@ -170,6 +171,39 @@ impl ServerHandler for BuiltinServerHandler {
             }
         }
     }
+
+    async fn get_task(
+        &self,
+        request: GetTaskParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<GetTaskResult, McpError> {
+        match self {
+            Self::Workspace(server) => server.get_task(request, context).await,
+            _ => Err(McpError::invalid_params("unknown task", None)),
+        }
+    }
+
+    async fn update_task(
+        &self,
+        request: UpdateTaskParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<(), McpError> {
+        match self {
+            Self::Workspace(server) => server.update_task(request, context).await,
+            _ => Err(McpError::invalid_params("unknown task", None)),
+        }
+    }
+
+    async fn cancel_task(
+        &self,
+        request: CancelTaskParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<(), McpError> {
+        match self {
+            Self::Workspace(server) => server.cancel_task(request, context).await,
+            _ => Err(McpError::invalid_params("unknown task", None)),
+        }
+    }
 }
 
 /// 实例名 → handler 工厂（`mcp::builtin::runtime::spawn_builtin_transport_with_context`
@@ -231,7 +265,9 @@ pub(crate) fn builtin_server_handler_with_env(
             .as_ref()
             .map(|lsp| BuiltinServerHandler::Lsp(LspMcpServer::new(Arc::clone(&lsp.pool)))),
         "workspace" => {
-            let server = WorkspaceMcpServer::new(ctx.cwd.clone(), ctx.workspace.clone());
+            // The MCP instance owns its Bash tasks. Session state is never
+            // injected into the capability server.
+            let server = WorkspaceMcpServer::standalone(ctx.cwd.clone());
             // 资源面输入（装配期一次注入的槽位）：`None` = 资源面未接线（既有行为），
             // `Some` = 装载 provider（W4a：会话装配只装 meta 面，见
             // `peri-acp/src/host/workspace.rs` 的构造点）。本工厂不读配置、不派生根。

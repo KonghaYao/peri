@@ -4,15 +4,15 @@ use peri_agent::tools::{BaseTool, ToolContext};
 use rmcp::{
     model::{
         CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
-        ListToolsResult, ServerCapabilities, ServerInfo, Tool,
+        ListToolsResult, ServerCapabilities, ServerConfig, Tool,
     },
     ErrorData as McpError,
 };
 use serde_json::Value;
 
-/// `ServerInfo` with only tool capability enabled and the caller's package version.
-pub fn server_info(name: &'static str, version: &'static str) -> ServerInfo {
-    ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+/// `ServerConfig` with only tool capability enabled and the caller's package version.
+pub fn server_info(name: &'static str, version: &'static str) -> ServerConfig {
+    ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
         .with_server_info(Implementation::new(name, version))
 }
 

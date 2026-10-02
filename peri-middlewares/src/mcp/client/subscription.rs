@@ -8,14 +8,119 @@ use peri_acp_types::system_reminder::{
     TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
 };
 use rmcp::{
-    model::{ServerNotification, SubscriptionFilter},
-    service::{Subscription, SubscriptionEnd},
+    model::{DetailedTask, GetTaskParams, ServerNotification, SubscriptionFilter, TaskPayload},
+    service::{Peer, RoleClient, Subscription, SubscriptionEnd},
 };
 use serde_json::json;
 
 use super::{McpClientPool, McpServiceWrapper};
 
 impl McpClientPool {
+    pub(crate) fn spawn_task_subscription(
+        self: &Arc<Self>,
+        server: String,
+        session_id: String,
+        task_id: String,
+        peer: Peer<RoleClient>,
+    ) {
+        let pool = Arc::clone(self);
+        let key = crate::mcp::McpTaskKey::TaskStatus {
+            server: server.clone(),
+            task_id: task_id.clone(),
+        };
+        let log_server = server.clone();
+        if let Err(error) = self.task_spawner.spawn(key, async move {
+            let filter = SubscriptionFilter::builder().task_id(&task_id).build();
+            let Ok(mut subscription) = peer.listen(filter).await else {
+                tracing::warn!(server = %server, task_id = %task_id, "MCP task subscription failed");
+                return;
+            };
+            // A fast task may finish before the listen acknowledgement. Read
+            // once after subscribing; subsequent changes arrive on the stream.
+            if let Ok(snapshot) = peer.get_task(GetTaskParams::new(&task_id)).await {
+                if snapshot.task.status().is_terminal() {
+                    pool.deliver_task_status(&server, &session_id, &snapshot.task);
+                    return;
+                }
+            }
+            loop {
+                match subscription.next().await {
+                    Ok(Some(ServerNotification::TaskStatusNotification(update))) => {
+                        let task = &update.params.task;
+                        if task.task.task_id == task_id && task.status().is_terminal() {
+                            pool.deliver_task_status(&server, &session_id, task);
+                            break;
+                        }
+                    }
+                    Ok(Some(_)) => {}
+                    Ok(None) | Err(_) => break,
+                }
+            }
+        }) {
+            tracing::warn!(server = %log_server, error = %error, "MCP task monitor not admitted");
+        }
+    }
+
+    fn deliver_task_status(&self, server: &str, session_id: &str, task: &DetailedTask) {
+        let Some(inbox) = self.session_inboxes.read().get(session_id).cloned() else {
+            return;
+        };
+        let task_id = &task.task.task_id;
+        let status = serde_json::to_value(task.status())
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .unwrap_or_else(|| "unknown".into());
+        let output = match &task.payload {
+            TaskPayload::Completed { result } => {
+                let mut text = result
+                    .get("content")
+                    .and_then(serde_json::Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|content| content.get("text").and_then(serde_json::Value::as_str))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if let Some(details) = result.get("structuredContent") {
+                    text.push_str("\nTask details: ");
+                    text.push_str(&details.to_string());
+                }
+                text
+            }
+            TaskPayload::Failed { error } => error
+                .get("message")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("Task failed")
+                .to_owned(),
+            _ => task.task.status_message.clone().unwrap_or_default(),
+        };
+        let body = format!(
+            "MCP task {task_id} on {server} finished with status {status}.\n{}",
+            output.chars().take(16_000).collect::<String>()
+        );
+        let reminder = TrustedSystemReminderFactory::for_producer()
+            .construct(SystemReminder {
+                version: SYSTEM_REMINDER_VERSION,
+                category: ReminderCategory::ExternalEvent,
+                source: CanonicalReminderSource("mcp".into()),
+                kind: "task_status".into(),
+                severity: ReminderSeverity::Info,
+                delivery: ReminderDelivery::Required,
+                audiences: ReminderAudiences(vec![
+                    ReminderAudience::Model,
+                    ReminderAudience::Tui,
+                    ReminderAudience::Automation,
+                ]),
+                body,
+                summary: Some("MCP task completed".into()),
+                metadata: json!({"server": server, "task_id": task_id, "status": status}),
+            })
+            .expect("MCP task reminder mapping must be valid");
+        inbox.push_system_reminder(
+            MessageKind::Defer,
+            MessageSource::DynamicMcpNotification,
+            reminder,
+        );
+    }
     // ── subscriptions/listen（2026-07-28 协议）──────────────────────────────
 
     /// 广播一条订阅通知到所有已注册的会话 inbox。

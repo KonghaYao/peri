@@ -18,10 +18,7 @@ fn roots_forward_missing_plugin_path_and_preserve_priority_and_bundled_switch() 
             expected.push(SkillSource::Builtin);
         }
         assert_eq!(
-            roots
-                .iter()
-                .map(|root| root.source.clone())
-                .collect::<Vec<_>>(),
+            roots.iter().map(|root| root.source).collect::<Vec<_>>(),
             expected
         );
         assert_eq!(roots[0].path, crate::plugin::claude_home().join("skills"));

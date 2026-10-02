@@ -227,6 +227,7 @@ pub(crate) struct BuiltinInstanceSupervisor {
     instance: String,
     tick: Option<TickGuard>,
     server_task: BuiltinServerTask,
+    workspace_tasks: Option<peri_mcp_workspace::WorkspaceMcpServer>,
 }
 
 impl BuiltinInstanceSupervisor {
@@ -240,6 +241,7 @@ impl BuiltinInstanceSupervisor {
             instance,
             tick,
             server_task,
+            workspace_tasks: None,
         }
     }
 
@@ -265,6 +267,14 @@ impl BuiltinInstanceSupervisor {
             None => TickCloseOutcome::NotSpawned,
         };
         let server = self.server_task.converge(timeout).await;
+        if let Some(workspace) = self.workspace_tasks.take() {
+            if tokio::time::timeout(timeout, workspace.shutdown_shell_tasks())
+                .await
+                .is_err()
+            {
+                tracing::warn!("builtin Workspace task cleanup timed out");
+            }
+        }
         if matches!(server, BuiltinServerExit::AbortedAfterTimeout) {
             tracing::warn!(
                 server = %self.instance,
@@ -315,6 +325,7 @@ pub(crate) struct BuiltinTransport {
     /// server 侧 task。**必须**经 [`Self::into_parts`] 的监督者登记进 pool 的 builtin 表，
     /// 否则关闭/重连留 orphan。
     pub(crate) server_task: BuiltinServerTask,
+    workspace_tasks: Option<peri_mcp_workspace::WorkspaceMcpServer>,
 }
 
 impl BuiltinTransport {
@@ -324,10 +335,9 @@ impl BuiltinTransport {
     /// 顺序（先停 tick 再收敛 server task），不新增第二条关闭路径。
     pub(crate) fn into_parts(self) -> (TransportIo, BuiltinInstanceSupervisor) {
         let instance = self.server_task.instance().to_string();
-        (
-            self.io,
-            BuiltinInstanceSupervisor::new(instance, self.server_task, self.tick),
-        )
+        let mut supervisor = BuiltinInstanceSupervisor::new(instance, self.server_task, self.tick);
+        supervisor.workspace_tasks = self.workspace_tasks;
+        (self.io, supervisor)
     }
 }
 
@@ -385,6 +395,7 @@ where
             instance: task_instance,
             handle,
         },
+        workspace_tasks: None,
     }
 }
 
@@ -423,7 +434,13 @@ pub(crate) fn spawn_builtin_transport_with_context(
                 instance: instance.to_string(),
             }
         })?;
-    Ok(spawn_builtin_transport_with_handler(instance, handler))
+    let workspace_tasks = match &handler {
+        super::dispatch::BuiltinServerHandler::Workspace(workspace) => Some(workspace.clone()),
+        _ => None,
+    };
+    let mut transport = spawn_builtin_transport_with_handler(instance, handler);
+    transport.workspace_tasks = workspace_tasks;
+    Ok(transport)
 }
 
 /// 测试专用：把「本代的 tick + server task」组装成监督者。**仅测试用**，生产构造路径不变

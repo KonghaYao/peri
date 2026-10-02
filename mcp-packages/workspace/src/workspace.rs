@@ -6,10 +6,9 @@
 //! capability root: filesystem tools can still address absolute paths outside cwd, and Bash is
 //! not a sandbox. Do not infer stronger isolation from cwd binding.
 //!
-//! `WorkspaceInstanceInput` is session-scoped and passes the session task manager and background
-//! completion callback to Bash unchanged. `None` is supported: all seven tools remain visible,
-//! while Bash rejects explicit background execution, kills a timed-out foreground process group,
-//! and cannot register shell descendants left behind by `command &`.
+//! Production uses `standalone`: Workspace owns background Bash tasks and publishes their state
+//! over MCP Tasks. The direct `new` constructor retains its injected-manager seam for legacy
+//! tool tests; the builtin dispatcher and independent CLI do not use it.
 //!
 //! The handler does not override `discover`; besides the seven tools it exposes the git ref
 //! resource (`workspace://git/ref`) and the 2026-07-28 subscription surface
@@ -29,14 +28,15 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use base64::Engine as _;
-use peri_agent::tools::BaseTool;
+use peri_agent::tools::{BaseTool, ToolContext, ToolExecutionStatus};
 use rmcp::{
     model::{
-        CallToolRequestParams, CallToolResponse, CustomRequest, CustomResult, ErrorCode,
-        ExtensionCapabilities, Implementation, JsonObject, ListResourceTemplatesResult,
-        ListResourcesResult, ListToolsResult, MetaObject, PaginatedRequestParams,
-        ReadResourceRequestParams, ReadResourceResponse, RequestId, Resource, ResourceContents,
-        ResourceTemplate, ServerCapabilities, ServerInfo, SubscriptionFilter,
+        CallToolRequestParams, CallToolResponse, CancelTaskParams, CreateTaskResult, CustomRequest,
+        CustomResult, ErrorCode, ExtensionCapabilities, GetTaskParams, GetTaskResult,
+        Implementation, JsonObject, ListResourceTemplatesResult, ListResourcesResult,
+        ListToolsResult, MetaObject, PaginatedRequestParams, ReadResourceRequestParams,
+        ReadResourceResponse, RequestId, Resource, ResourceContents, ResourceTemplate,
+        ServerCapabilities, ServerConfig, SubscriptionFilter, UpdateTaskParams, TASKS_EXTENSION_ID,
     },
     service::{RequestContext, RoleServer, SubscriptionContext, SubscriptionSink},
     ErrorData as McpError, ServerHandler,
@@ -51,10 +51,11 @@ use crate::git_watch::{run_git_sample, GitWatchState, SampleOutcome, GIT_REF_RES
 use crate::resources::{
     ResourceBody, ResourceError, WorkspaceResourceProvider, WorkspaceResourcesInput,
 };
+use crate::shell_tasks::ShellTasks;
 use crate::terminal::BashTool;
 use crate::WorkspaceInstanceInput;
 
-/// `workspace` 实例的 `ServerInfo` 名字（`Implementation::name`）；实例名仍是注册表里的
+/// `workspace` 实例的 `ServerConfig` 名字（`Implementation::name`）；实例名仍是注册表里的
 /// `"workspace"`（`Implementation::name` 与注册表 key 是两件事，不要合并）。
 const WORKSPACE_SERVER_NAME: &str = "peri-workspace-mcp";
 
@@ -66,8 +67,10 @@ const GIT_REF_RESOURCE_NAME: &str = "git-ref";
 ///
 /// cwd 在构造时取一次；`list_tools` 不重算、运行期不可变更（与 pool 的 `execution_cwd`
 /// 同为 `OnceLock` 语义，AW3-05：不支持多 cwd）。
+#[derive(Clone)]
 pub struct WorkspaceMcpServer {
     tools: Vec<Arc<dyn BaseTool>>,
+    bash: Arc<BashTool>,
     /// 工具面共享的 host cwd（文件工具相对路径解析 + Bash `current_dir`）。
     cwd: String,
     /// git ref 采样状态机（`workspace://git/ref` 资源正文 + 变化判定）。
@@ -84,6 +87,8 @@ pub struct WorkspaceMcpServer {
     /// 新 scheme 的 `resources/read` 返回 `-32602`（见模块头）。
     resources: Option<Arc<WorkspaceResourceProvider>>,
     outputs: Arc<crate::output_store::OutputStore>,
+    /// Workspace-owned Bash tasks shared by all connections to this instance.
+    shell_tasks: Option<ShellTasks>,
 }
 
 impl WorkspaceMcpServer {
@@ -110,6 +115,7 @@ impl WorkspaceMcpServer {
                 bash = bash.with_on_bg_complete(on_bg_complete);
             }
         }
+        let bash = Arc::new(bash);
         let tools: Vec<Arc<dyn BaseTool>> = vec![
             Arc::new(ReadFileTool::new(cwd.as_str())),
             Arc::new(WriteFileTool::new(cwd.as_str())),
@@ -117,16 +123,115 @@ impl WorkspaceMcpServer {
             Arc::new(GlobFilesTool::new(cwd.as_str())),
             Arc::new(GrepTool::new(cwd.as_str())),
             Arc::new(FolderOperationsTool::new(cwd.as_str())),
-            Arc::new(bash),
+            bash.clone(),
         ];
         Self {
             tools,
+            bash,
             cwd,
             git: Arc::new(GitWatchState::new()),
             sinks: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             resources: None,
             outputs: Arc::new(crate::output_store::OutputStore::new()),
+            shell_tasks: None,
         }
+    }
+
+    /// Build a Workspace server whose Bash jobs outlive individual MCP clients.
+    /// Clones share the same task owner, including HTTP connections.
+    pub fn standalone(cwd: impl Into<String>) -> Self {
+        let mut server = Self::new(cwd, None);
+        let tasks = ShellTasks::new();
+        let cwd = server.cwd.clone();
+        let bash = Arc::new(
+            BashTool::new(&cwd)
+                .with_task_manager(tasks.manager())
+                .with_on_bg_complete(tasks.completion_callback()),
+        );
+        server.tools[6] = bash.clone();
+        server.bash = bash;
+        server.shell_tasks = Some(tasks);
+        server
+    }
+
+    /// Stop new work and wait for Workspace-owned shell process cleanup.
+    pub async fn shutdown_shell_tasks(&self) -> Option<peri_acp_types::tasks::TaskShutdownReport> {
+        match &self.shell_tasks {
+            Some(tasks) => Some(tasks.shutdown().await),
+            None => None,
+        }
+    }
+
+    async fn call_owned_bash(
+        &self,
+        request: &CallToolRequestParams,
+        client_supports_tasks: bool,
+    ) -> Result<CallToolResponse, McpError> {
+        let tasks = self
+            .shell_tasks
+            .as_ref()
+            .expect("owned Bash requires task owner");
+        let arguments = request.arguments.as_ref();
+        let background = arguments
+            .and_then(|args| args.get("run_in_background"))
+            .and_then(serde_json::Value::as_bool)
+            == Some(true);
+        if background && client_supports_tasks {
+            let command = arguments
+                .and_then(|args| args.get("command"))
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| McpError::invalid_params("missing Bash command", None))?;
+            let timeout = arguments
+                .and_then(|args| args.get("timeout"))
+                .and_then(serde_json::Value::as_u64)
+                .filter(|timeout| *timeout > 0)
+                .map(|timeout| timeout.min(600_000));
+            let task = tasks
+                .spawn(command.into(), self.cwd.clone(), timeout)
+                .await?;
+            return Ok(CallToolResponse::Task(CreateTaskResult::new(task)));
+        }
+
+        let input = serde_json::Value::Object(request.arguments.clone().unwrap_or_default());
+        let result = match self
+            .bash
+            .execute(input, ToolContext::new(&[], &self.cwd))
+            .await
+        {
+            Ok(output) => {
+                let promoted = output.output.execution.as_ref().and_then(|evidence| {
+                    matches!(
+                        evidence.status,
+                        ToolExecutionStatus::Running | ToolExecutionStatus::RunningAfterTimeout
+                    )
+                    .then(|| evidence.task_id.as_deref())
+                    .flatten()
+                });
+                if let Some(task_id) = promoted {
+                    let task = tasks.track_promoted(task_id);
+                    if client_supports_tasks {
+                        return Ok(CallToolResponse::Task(CreateTaskResult::new(task)));
+                    }
+                }
+                if let Some(recovery) = output.recovery {
+                    let error =
+                        peri_mcp_common::failure::ToolFailure::new(recovery, output.output.text);
+                    rmcp::model::CallToolResult::error(vec![rmcp::model::ContentBlock::text(
+                        peri_mcp_common::result_mapping::failure_text("Bash", &error),
+                    )])
+                } else {
+                    rmcp::model::CallToolResult::success(vec![rmcp::model::ContentBlock::text(
+                        output.output.text,
+                    )])
+                }
+            }
+            Err(error) => {
+                rmcp::model::CallToolResult::error(vec![rmcp::model::ContentBlock::text(
+                    peri_mcp_common::result_mapping::failure_text("Bash", error.as_ref()),
+                )])
+            }
+        };
+        Ok(CallToolResponse::Complete(result))
     }
 
     /// 装配 W1 资源面（独立于 `WorkspaceInstanceInput` 的 session 级 Bash 输入）。
@@ -242,7 +347,7 @@ impl ServerHandler for WorkspaceMcpServer {
     /// 未被调用，例如顶层三路径 / 未接线测试）**不声明**该扩展——「声明即实现」，
     /// 客户端不会对未支持的方法盲调，也不会把「未支持」误认成「空技能集」
     /// （`peri-acp-types::skills::SKILLS_EXTENSION_ID` 是两侧共用的键）。
-    fn get_info(&self) -> ServerInfo {
+    fn get_info(&self) -> ServerConfig {
         let mut caps = ServerCapabilities::builder()
             .enable_tools()
             .enable_resources()
@@ -258,7 +363,12 @@ impl ServerHandler for WorkspaceMcpServer {
             // `"extensions": {}`，与「不声明」在语义上不同，但多一份噪声）。
             caps.extensions = Some(extensions);
         }
-        ServerInfo::new(caps).with_server_info(Implementation::new(
+        if self.shell_tasks.is_some() {
+            caps.extensions
+                .get_or_insert_with(ExtensionCapabilities::new)
+                .insert(TASKS_EXTENSION_ID.to_string(), JsonObject::new());
+        }
+        ServerConfig::new(caps).with_server_info(Implementation::new(
             WORKSPACE_SERVER_NAME,
             env!("CARGO_PKG_VERSION"),
         ))
@@ -452,14 +562,19 @@ impl ServerHandler for WorkspaceMcpServer {
         }
     }
 
-    /// 只接受 git ref 资源 URI（与请求 filter 求交；其余类别不声明 ⇒ 请求它们不会被 ack）。
+    /// Accept the git ref resource subscription supported by rmcp.
     fn accepted_subscription_filter(
         &self,
         requested: &SubscriptionFilter,
     ) -> Option<SubscriptionFilter> {
-        let candidate = SubscriptionFilter::builder()
-            .resource_subscriptions([GIT_REF_RESOURCE_URI])
-            .build();
+        let mut builder =
+            SubscriptionFilter::builder().resource_subscriptions([GIT_REF_RESOURCE_URI]);
+        if self.shell_tasks.is_some() {
+            if let Some(ids) = requested.task_ids.as_ref() {
+                builder = builder.task_ids(ids.iter().cloned());
+            }
+        }
+        let candidate = builder.build();
         Some(requested.intersection(&candidate))
     }
 
@@ -469,8 +584,44 @@ impl ServerHandler for WorkspaceMcpServer {
     /// 因此这里只做注册与收口。
     async fn listen(&self, context: SubscriptionContext) -> Result<(), McpError> {
         let id = context.sink().id().clone();
-        self.sinks.lock().insert(id.clone(), context.sink().clone());
-        context.cancelled().await;
+        let mut updates = self.shell_tasks.as_ref().map(ShellTasks::subscribe);
+        if context.sink().accepted().resource_subscriptions.is_some() {
+            self.sinks.lock().insert(id.clone(), context.sink().clone());
+        }
+        'listen: loop {
+            tokio::select! {
+                _ = context.cancelled() => break,
+                update = async { updates.as_mut().expect("task receiver").recv().await }, if updates.is_some() => {
+                    match update {
+                        Ok(task) => {
+                            if context.sink().accepted().task_ids.as_ref()
+                                .is_some_and(|ids| ids.contains(&task.task.task_id))
+                                && context.sink().notify_task_status(task).await.is_err()
+                            {
+                                break;
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            // The registry is authoritative. Reconcile every
+                            // accepted ID after broadcast backpressure instead
+                            // of silently losing a terminal transition.
+                            if let Some(tasks) = self.shell_tasks.as_ref() {
+                                if let Some(ids) = context.sink().accepted().task_ids.as_ref() {
+                                    for task_id in ids {
+                                        if let Ok(state) = tasks.get(task_id) {
+                                            if context.sink().notify_task_status(state.task).await.is_err() {
+                                                break 'listen;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            }
+        }
         self.sinks.lock().remove(&id);
         Ok(())
     }
@@ -480,6 +631,9 @@ impl ServerHandler for WorkspaceMcpServer {
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, McpError> {
+        let client_supports_tasks = context
+            .client_capabilities()
+            .is_some_and(|caps| caps.supports_tasks());
         // 传实例冻结的 host cwd（不走 `web` / `cron` / `lsp` 的空串形态）。**注意**：本参
         // 只落进 `ToolContext`，而本波 7 个工具都忽略 `ToolContext`（`invoke` 的 `_ctx`），
         // 真正生效的 cwd 绑定点是 [`Self::new`] 注入各工具的 `cwd` 字段——不得据本行推断
@@ -487,7 +641,13 @@ impl ServerHandler for WorkspaceMcpServer {
         let response = tokio::select! {
             biased;
             _ = context.ct.cancelled() => Ok(CallToolResponse::Complete(rmcp::model::CallToolResult::error(vec![rmcp::model::ContentBlock::text("Tool execution cancelled.")]))),
-            result = invoke_tool_call(self.tools(), &self.cwd, &request) => result,
+            result = async {
+                if request.name.as_ref() == "Bash" && self.shell_tasks.is_some() {
+                    self.call_owned_bash(&request, client_supports_tasks).await
+                } else {
+                    invoke_tool_call(self.tools(), &self.cwd, &request).await
+                }
+            } => result,
         };
         // D-1 触发语义：仅**成功**返回后触发（`is_error != Some(true)`，旧 after_tool 门
         // 逐字）；`spawn` 不阻塞响应，采样在后台收口。
@@ -496,6 +656,39 @@ impl ServerHandler for WorkspaceMcpServer {
             self.spawn_git_sample();
         }
         response
+    }
+
+    async fn get_task(
+        &self,
+        request: GetTaskParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<GetTaskResult, McpError> {
+        self.shell_tasks
+            .as_ref()
+            .ok_or_else(|| McpError::invalid_params("unknown task", None))?
+            .get(&request.task_id)
+    }
+
+    async fn update_task(
+        &self,
+        request: UpdateTaskParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<(), McpError> {
+        self.shell_tasks
+            .as_ref()
+            .ok_or_else(|| McpError::invalid_params("unknown task", None))?
+            .update(&request.task_id)
+    }
+
+    async fn cancel_task(
+        &self,
+        request: CancelTaskParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<(), McpError> {
+        self.shell_tasks
+            .as_ref()
+            .ok_or_else(|| McpError::invalid_params("unknown task", None))?
+            .cancel(&request.task_id)
     }
 }
 
@@ -569,3 +762,7 @@ fn project_resource(payload: crate::resources::ResourcePayload) -> ResourceConte
 #[cfg(test)]
 #[path = "workspace_test.rs"]
 mod tests;
+
+#[cfg(all(test, unix))]
+#[path = "workspace_tasks_wire_test.rs"]
+mod tasks_wire_tests;

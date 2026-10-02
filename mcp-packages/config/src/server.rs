@@ -12,7 +12,7 @@ use peri_acp_types::configuration::{
     ConfigurationResponse, ConfigurationValue, CONFIGURATION_METHOD,
 };
 use rmcp::{
-    model::{CustomRequest, CustomResult, Implementation, ServerCapabilities, ServerInfo},
+    model::{CustomRequest, CustomResult, Implementation, ServerCapabilities, ServerConfig},
     service::{RequestContext, RoleServer},
     ErrorData, ServerHandler,
 };
@@ -135,8 +135,8 @@ impl ConfigurationMcpServer {
 }
 
 impl ServerHandler for ConfigurationMcpServer {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::default()).with_server_info(Implementation::new(
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::default()).with_server_info(Implementation::new(
             "peri-config-mcp",
             env!("CARGO_PKG_VERSION"),
         ))

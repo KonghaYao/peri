@@ -11,13 +11,13 @@ use peri_mcp_common::{invoke_tool_call, list_tools_of, server_info};
 use rmcp::{
     model::{
         CallToolRequestParams, CallToolResponse, ListToolsResult, PaginatedRequestParams,
-        ServerInfo,
+        ServerConfig,
     },
     service::{RequestContext, RoleServer},
     ErrorData as McpError, ServerHandler,
 };
 
-/// `web` 实例的 `ServerInfo` 名字（`Implementation::name`）。
+/// `web` 实例的 `ServerConfig` 名字（`Implementation::name`）。
 const WEB_SERVER_NAME: &str = "peri-web-mcp";
 
 /// `web` 实例的 handler：持有 `WebSearch` / `WebFetch` 两个既有工具。
@@ -62,7 +62,7 @@ impl Default for WebMcpServer {
 impl ServerHandler for WebMcpServer {
     // 不覆写 `discover`（§10 R2：覆写会让 `tools/list` 被会话层拒绝）。
 
-    fn get_info(&self) -> ServerInfo {
+    fn get_info(&self) -> ServerConfig {
         server_info(WEB_SERVER_NAME, env!("CARGO_PKG_VERSION"))
     }
 

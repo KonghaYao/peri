@@ -356,6 +356,161 @@ async fn connect(cwd: &str, input: Option<WorkspaceInstanceInput>) -> Pair {
     }
 }
 
+#[tokio::test]
+async fn bridge_accepts_workspace_owned_task_handle() {
+    use peri_acp_types::mcp::McpSubscriptionPort;
+    use peri_acp_types::session::{
+        MessageKind, MessageQueue, MessageSource, QueuedPayload, SessionInbox,
+    };
+    use peri_agent::tools::{BaseTool, ToolContext};
+    use rmcp::model::{GetTaskParams, TaskStatus};
+
+    let (_dir, cwd) = workspace_dir();
+    let transport = crate::mcp::builtin::runtime::spawn_builtin_transport_with_context(
+        "workspace",
+        &crate::mcp::builtin::context::BuiltinInstanceContext::new(cwd.clone()),
+        &std::collections::HashMap::new(),
+    )
+    .expect("builtin Workspace dispatch");
+    let (io, supervisor) = transport.into_parts();
+    let service = serve_client_auto(io, &McpCapabilityProfile::disabled(), HANDSHAKE_TIMEOUT)
+        .await
+        .expect("handshake deadline")
+        .expect("handshake");
+    let pair = Pair {
+        service,
+        supervisor,
+    };
+    let (mut owner, spawner) = crate::mcp::McpTaskOwner::new();
+    let pool = Arc::new(crate::mcp::McpClientPool::new_pending_with_spawner(spawner));
+    let queue = Arc::new(MessageQueue::new());
+    let inbox = SessionInbox::new(Arc::clone(&queue));
+    pool.register_inbox("task-session", inbox.handle());
+    let peer = pair.peer();
+    let tools = peer.list_all_tools().await.expect("tool list");
+    let bash = tools.iter().find(|tool| tool.name == "Bash").expect("Bash");
+    let handle = Arc::new(crate::mcp::client::McpClientHandle {
+        name: "workspace".into(),
+        version: None,
+        cache_version: None,
+        peer: Some(peer.clone()),
+        tools: tools.clone(),
+        resources: vec![],
+        status: crate::mcp::client::ClientStatus::Connected,
+        oauth_status: Default::default(),
+        source: Some(crate::mcp::config::ConfigSource::Builtin {
+            instance: "workspace".into(),
+        }),
+        url: None,
+        skills_capable: false,
+    });
+    let bridge = crate::mcp::tool_bridge::McpToolBridge::new("workspace", bash, handle)
+        .with_output_store(&pool, Some("task-session"));
+    let receipt = bridge
+        .invoke(
+            json!({"command":"sleep 0.2; printf bridge-ok", "run_in_background":true}),
+            ToolContext::new(&[], &cwd),
+        )
+        .await
+        .expect("bridge accepts Tasks response");
+    let task_id = receipt
+        .split("Background task started: ")
+        .nth(1)
+        .expect("task receipt")
+        .split('.')
+        .next()
+        .expect("task id");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let task = peer
+                .get_task(GetTaskParams::new(task_id))
+                .await
+                .expect("task state");
+            if task.task.status() == TaskStatus::Completed {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("task completion");
+    tokio::time::timeout(Duration::from_secs(5), inbox.await_wake())
+        .await
+        .expect("task completion wakes its session");
+    let notifications = queue.drain_all();
+    assert_eq!(notifications.len(), 1);
+    assert_eq!(notifications[0].kind, MessageKind::Defer);
+    assert_eq!(
+        notifications[0].source,
+        MessageSource::DynamicMcpNotification
+    );
+    let QueuedPayload::SystemReminder(reminder) = &notifications[0].payload else {
+        panic!("expected task reminder")
+    };
+    assert!(reminder.as_reminder().body.contains(task_id));
+    assert!(reminder.as_reminder().body.contains("Task details:"));
+    pair.shutdown().await;
+    let _ = owner.shutdown().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn builtin_close_cleans_up_workspace_owned_bash() {
+    let (dir, cwd) = workspace_dir();
+    let transport = crate::mcp::builtin::runtime::spawn_builtin_transport_with_context(
+        "workspace",
+        &crate::mcp::builtin::context::BuiltinInstanceContext::new(cwd),
+        &std::collections::HashMap::new(),
+    )
+    .expect("builtin Workspace dispatch");
+    let (io, supervisor) = transport.into_parts();
+    let service = serve_client_auto(io, &McpCapabilityProfile::disabled(), HANDSHAKE_TIMEOUT)
+        .await
+        .expect("handshake deadline")
+        .expect("handshake");
+    let pair = Pair {
+        service,
+        supervisor,
+    };
+    let response = pair
+        .peer()
+        .call_tool_once(call(
+            "Bash",
+            json!({"command":"echo $$ > running.pid; sleep 30", "run_in_background":true}),
+        ))
+        .await
+        .expect("start background Bash");
+    assert!(matches!(response, CallToolResponse::Task(_)));
+    let marker = dir.path().join("running.pid");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !marker.exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("Bash process marker");
+    let pid: i32 = std::fs::read_to_string(marker)
+        .expect("pid file")
+        .trim()
+        .parse()
+        .expect("pid");
+    pair.shutdown().await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while std::process::Command::new("kill")
+            .args(["-0", &format!("-{pid}")])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("check process group")
+            .success()
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("Workspace Bash process group must exit with builtin");
+}
+
 /// 临时工作目录（**已 canonicalize**）。
 ///
 /// macOS 的 `/var` 是 `/private/var` 的符号链接：不规范化时工具内部的

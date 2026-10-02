@@ -12,11 +12,11 @@ pre-commit:
 
     check:
       glob: "*.rs"
-      run: cargo check
+      run: ./scripts/cargo-rmcp-patched.sh check --locked
 
     clippy:
       glob: "*.rs"
-      run: cargo clippy -- -W clippy::all
+      run: ./scripts/cargo-rmcp-patched.sh clippy --locked -- -W clippy::all
 
     typos:
       run: typos
@@ -31,7 +31,7 @@ pre-commit:
       run: bash scripts/check-layer-imports.sh
 
     # doc-tests 不在 pre-commit 中运行——cargo check/clippy 不编译 doc test，
-    # 显式验证用: cargo test --workspace --doc
+    # 显式验证用: ./scripts/cargo-rmcp-patched.sh test --locked --workspace --doc
 
     # security-audit:
     #   run: cargo audit

@@ -116,42 +116,42 @@ async fn test_image_later_input_reaches_model_after_micro_compact() {
         matches!(result, LoopResult::Completed),
         "循环应正常完成：{result:?}"
     );
-    let requests = requests.lock().unwrap();
-    assert_eq!(requests.len(), 2, "追加输入驱动第二次模型请求");
-    use base64::Engine;
-    let expected_image = ContentBlock::image_base64(
-        "image/png",
-        base64::engine::general_purpose::STANDARD.encode(std::fs::read(image_path).unwrap()),
-    );
-    for (request, input) in [
-        (&requests[0], &first),
-        (&requests[1], &first),
-        (&requests[1], &later),
-    ] {
-        let message = request
-            .iter()
-            .find(|message| message.id() == input.id())
-            .unwrap();
-        assert!(
-            message.content_blocks().contains(&expected_image),
-            "每批输入都必须向模型传递图片字节"
+    {
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2, "追加输入驱动第二次模型请求");
+        use base64::Engine;
+        let expected_image = ContentBlock::image_base64(
+            "image/png",
+            base64::engine::general_purpose::STANDARD.encode(std::fs::read(image_path).unwrap()),
         );
-        assert!(!message.content().contains("@image"), "附件引用应完成转换");
+        for (request, input) in [
+            (&requests[0], &first),
+            (&requests[1], &first),
+            (&requests[1], &later),
+        ] {
+            let message = request
+                .iter()
+                .find(|message| message.id() == input.id())
+                .unwrap();
+            assert!(
+                message.content_blocks().contains(&expected_image),
+                "每批输入都必须向模型传递图片字节"
+            );
+            assert!(!message.content().contains("@image"), "附件引用应完成转换");
+        }
+        let transcript = ctx.session.transcript.read();
+        assert!(
+            transcript
+                .entries()
+                .iter()
+                .any(|entry| transcript.flags(entry.id()).truncated),
+            "必须实际执行 Micro Compact"
+        );
+        assert!(
+            !transcript.flags(later.id()).truncated,
+            "用户图片不参与 Micro 投影"
+        );
     }
-    let transcript = ctx.session.transcript.read();
-    assert!(
-        transcript
-            .entries()
-            .iter()
-            .any(|entry| transcript.flags(entry.id()).truncated),
-        "必须实际执行 Micro Compact"
-    );
-    assert!(
-        !transcript.flags(later.id()).truncated,
-        "用户图片不参与 Micro 投影"
-    );
-    drop(transcript);
-    drop(requests);
     fixture.shutdown().await;
 }
 
@@ -178,15 +178,16 @@ async fn image_replacement_reaches_transcript_with_the_original_message_id() {
 
     run_before_agent(&ctx, &[original.id()]).await.unwrap();
 
-    let transcript = ctx.session.transcript.read();
-    assert_eq!(transcript.len(), 1);
-    let updated = transcript.get(original.id()).unwrap().message();
-    assert_eq!(updated.id(), original.id());
-    assert!(matches!(updated, BaseMessage::Human { .. }));
-    assert!(updated.content().contains("inspect"));
-    assert!(updated.content().contains("Image not found:"));
-    assert!(!updated.content().contains("@image"));
-    drop(transcript);
+    {
+        let transcript = ctx.session.transcript.read();
+        assert_eq!(transcript.len(), 1);
+        let updated = transcript.get(original.id()).unwrap().message();
+        assert_eq!(updated.id(), original.id());
+        assert!(matches!(updated, BaseMessage::Human { .. }));
+        assert!(updated.content().contains("inspect"));
+        assert!(updated.content().contains("Image not found:"));
+        assert!(!updated.content().contains("@image"));
+    }
     fixture.shutdown().await;
 }
 
@@ -242,46 +243,48 @@ async fn test_image_batch_prepares_first_input_and_never_reloads_history() {
     run_before_agent(&ctx, &received.input_message_ids)
         .await
         .unwrap();
-    let transcript = ctx.session.transcript.read();
-    assert_eq!(transcript.len(), 4, "附件转换不增删或重排消息");
-    let updated = transcript.get(first.id()).unwrap().message();
-    assert_eq!(updated.id(), first.id(), "批次首条保留原消息身份");
-    assert!(!updated.content().contains("@image"), "首条附件标记已处理");
-    assert!(
-        updated.content().contains("Image not found:"),
-        "错误落在原输入"
-    );
-    let images = updated
-        .content_blocks()
-        .into_iter()
-        .filter(|block| matches!(block, ContentBlock::Image { .. }))
-        .collect::<Vec<_>>();
-    assert_eq!(images.len(), 2, "文件图片与原有粘贴附件均保留");
-    assert_eq!(
-        images[0],
-        ContentBlock::image_base64("image/png", "already-attached"),
-        "已有附件载荷不改变"
-    );
-    use base64::Engine;
-    assert_eq!(
-        images[1],
-        ContentBlock::image_base64(
-            "image/png",
-            base64::engine::general_purpose::STANDARD.encode(std::fs::read(image_path).unwrap())
-        ),
-        "本批首条图片必须读取真实文件"
-    );
-    assert_eq!(
-        serde_json::to_value(transcript.get(last.id()).unwrap().message()).unwrap(),
-        serde_json::to_value(&last).unwrap(),
-        "末条普通内容与身份不改变"
-    );
-    assert_eq!(
-        serde_json::to_value(transcript.get(old.id()).unwrap().message()).unwrap(),
-        serde_json::to_value(&old).unwrap(),
-        "旧历史的附件引用不能重读或改写"
-    );
-    drop(transcript);
+    {
+        let transcript = ctx.session.transcript.read();
+        assert_eq!(transcript.len(), 4, "附件转换不增删或重排消息");
+        let updated = transcript.get(first.id()).unwrap().message();
+        assert_eq!(updated.id(), first.id(), "批次首条保留原消息身份");
+        assert!(!updated.content().contains("@image"), "首条附件标记已处理");
+        assert!(
+            updated.content().contains("Image not found:"),
+            "错误落在原输入"
+        );
+        let images = updated
+            .content_blocks()
+            .into_iter()
+            .filter(|block| matches!(block, ContentBlock::Image { .. }))
+            .collect::<Vec<_>>();
+        assert_eq!(images.len(), 2, "文件图片与原有粘贴附件均保留");
+        assert_eq!(
+            images[0],
+            ContentBlock::image_base64("image/png", "already-attached"),
+            "已有附件载荷不改变"
+        );
+        use base64::Engine;
+        assert_eq!(
+            images[1],
+            ContentBlock::image_base64(
+                "image/png",
+                base64::engine::general_purpose::STANDARD
+                    .encode(std::fs::read(image_path).unwrap())
+            ),
+            "本批首条图片必须读取真实文件"
+        );
+        assert_eq!(
+            serde_json::to_value(transcript.get(last.id()).unwrap().message()).unwrap(),
+            serde_json::to_value(&last).unwrap(),
+            "末条普通内容与身份不改变"
+        );
+        assert_eq!(
+            serde_json::to_value(transcript.get(old.id()).unwrap().message()).unwrap(),
+            serde_json::to_value(&old).unwrap(),
+            "旧历史的附件引用不能重读或改写"
+        );
+    }
     fixture.shutdown().await;
 }
 

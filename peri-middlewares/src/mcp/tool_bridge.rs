@@ -301,7 +301,7 @@ impl BaseTool for McpToolBridge {
             Some(super::config::ConfigSource::Builtin { instance }) if instance == "workspace"
         ))
         .then_some(TOOL_CALL_TIMEOUT);
-        let result = super::tool_request::call_tool(peer, request, timeout)
+        let response = super::tool_request::call_tool(peer, request, timeout)
             .await
             .map_err(|e| {
                 if let rmcp::ServiceError::Timeout { timeout } = e {
@@ -318,6 +318,36 @@ impl BaseTool for McpToolBridge {
                     }
                 }
             })?;
+        let result = match response {
+            rmcp::model::CallToolResponse::Complete(result) => result,
+            rmcp::model::CallToolResponse::Task(created) => {
+                let task_id = created.task.task_id;
+                if let Some(pool) = self.output_pool.as_ref().and_then(std::sync::Weak::upgrade) {
+                    if let Some(session_id) = ctx
+                        .session_id
+                        .as_deref()
+                        .or(self.output_session_id.as_deref())
+                    {
+                        pool.spawn_task_subscription(
+                            self.server_name.clone(),
+                            session_id.to_owned(),
+                            task_id.clone(),
+                            peer.clone(),
+                        );
+                    }
+                }
+                rmcp::model::CallToolResult::success(vec![ContentBlock::text(format!(
+                    "Background task started: {task_id}. Completion is delivered by MCP Tasks subscription."
+                ))])
+            }
+            _ => {
+                return Err(Box::new(ToolCallError::CallFailed {
+                    server: self.server_name.clone(),
+                    tool: self.tool_name.clone(),
+                    reason: "unsupported MCP tool response".into(),
+                }));
+            }
+        };
 
         // 4. 处理 is_error 标志。失败的实例化调用不得签发 App lease。
         if result.is_error.unwrap_or(false) {

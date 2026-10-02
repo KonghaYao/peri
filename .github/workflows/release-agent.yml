@@ -83,11 +83,13 @@ jobs:
 
             - name: Build agent-tui (Linux)
               if: runner.os == 'Linux'
-              run: cross build -p peri-tui --release --target ${{ matrix.target }}
+              shell: bash
+              run: ./scripts/cargo-rmcp-patched.sh --cross build --locked -p peri-tui --release --target ${{ matrix.target }}
 
             - name: Build agent-tui (non-Linux)
               if: runner.os != 'Linux'
-              run: cargo build -p peri-tui --release --target ${{ matrix.target }}
+              shell: bash
+              run: ./scripts/cargo-rmcp-patched.sh build --locked -p peri-tui --release --target ${{ matrix.target }}
 
             - name: Package binaries (Unix)
               if: matrix.ext == ''
