@@ -2,7 +2,7 @@
 //!
 //! | 实验 | 断言的事实 |
 //! | --- | --- |
-//! | 生命周期 | child resume 认领事实由状态派生；legacy 接纳只补缺失值（已有值不变）、有父会话与 cwd 不符照实拒绝；删树移除整棵子树、二次删树 `NotFound`；有子会话的撤销被拒绝且一行都不删 |
+//! | 生命周期 | child resume 认领事实由状态派生；远端 legacy 接纳拒绝补造执行证据；删树移除整棵子树、二次删树 `NotFound`；有子会话的撤销被拒绝且一行都不删 |
 //! | 批内守卫 | 谓词成立 → 整批回滚（效果一条不落、资格写也不留）；谓词不成立 → **一行都不插**（单行表仍只有身份行）且批照常提交 |
 //!
 //! 守卫实验用**生产同一条守卫语句**（`session_history::GUARD_MESSAGE_NOT_IN_SESSION_SQL`）驱动
@@ -170,7 +170,7 @@ async fn lifecycle_flow(target: &CloudTarget, run: &str) -> Result<(), String> {
         "terminal status must read back as not claimed",
     )?;
 
-    // legacy 接纳：已有值不变（只补缺失），错误前置条件照实拒绝。
+    // Remote legacy adoption cannot mint present-day evidence for old history.
     let workspace = ResolvedWorkspace {
         project_id: binding.project_id,
         workspace_id: binding.workspace_id,
@@ -180,7 +180,7 @@ async fn lifecycle_flow(target: &CloudTarget, run: &str) -> Result<(), String> {
         relative_cwd: PathBuf::from("sub"),
         discovery_snapshot: None,
     };
-    writer
+    let rejected = writer
         .adopt_legacy_session(
             &root,
             "/tmp/peri-cloud-synth",
@@ -188,56 +188,15 @@ async fn lifecycle_flow(target: &CloudTarget, run: &str) -> Result<(), String> {
             &FrozenSnapshotBytes::new(format!("{{\"adopted\":\"{run}\"}}")),
         )
         .await
-        .map_err(failure)?;
-    let adopted = writer.load_snapshot(&root).await.map_err(failure)?;
+        .expect_err("remote legacy adoption must remain read-only");
     check(
-        matches!(
-            &adopted.frozen,
-            FrozenState::Present(bytes) if bytes.as_str() == frozen
-        ),
-        "adoption must not overwrite an existing frozen snapshot",
+        matches!(rejected.kind(), SessionResourceErrorKind::Unsupported),
+        "remote legacy adoption must be unsupported",
     )?;
-
-    let absent = writer
-        .adopt_legacy_session(
-            &synth_thread(&format!("{run}-absent")),
-            "/tmp/peri-cloud-synth",
-            &workspace,
-            &FrozenSnapshotBytes::new(frozen.clone()),
-        )
-        .await
-        .expect_err("adopting a session that does not exist must fail");
+    let preserved = writer.load_snapshot(&root).await.map_err(failure)?;
     check(
-        matches!(absent.kind(), SessionResourceErrorKind::NotFound),
-        "adopting an absent session must be NotFound",
-    )?;
-
-    let wrong_cwd = writer
-        .adopt_legacy_session(
-            &root,
-            "/tmp/peri-other",
-            &workspace,
-            &FrozenSnapshotBytes::new(frozen.clone()),
-        )
-        .await
-        .expect_err("adopting with a different saved cwd must fail");
-    check(
-        matches!(wrong_cwd.kind(), SessionResourceErrorKind::Workspace(_)),
-        "saved cwd mismatch must be a workspace error",
-    )?;
-
-    let with_parent = writer
-        .adopt_legacy_session(
-            &child,
-            "/tmp/peri-cloud-synth",
-            &workspace,
-            &FrozenSnapshotBytes::new(frozen.clone()),
-        )
-        .await
-        .expect_err("adopting a session that already has a parent must fail");
-    check(
-        matches!(with_parent.kind(), SessionResourceErrorKind::Workspace(_)),
-        "adopting a child session must be a workspace error",
+        matches!(&preserved.frozen, FrozenState::Present(bytes) if bytes.as_str() == frozen),
+        "rejected adoption must preserve the existing frozen snapshot",
     )?;
 
     // 删树：整棵子树（含根）消失；根不存在时是 NotFound，不是「成功但没删」。

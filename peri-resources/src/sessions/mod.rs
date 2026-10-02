@@ -6,6 +6,8 @@
 
 mod canonical;
 mod data;
+mod discovery;
+mod execution;
 mod filesystem;
 mod local_port;
 mod machine;

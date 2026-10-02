@@ -6,6 +6,36 @@ use peri_acp_types::session_resources::SessionResourceResult;
 use turso_serverless::Value;
 
 impl RemoteSessionData {
+    pub(super) async fn workspace_for_path(
+        &self,
+        machine_id: &str,
+        path: &str,
+    ) -> SessionResourceResult<Option<peri_acp_types::workspace::WorkspaceId>> {
+        if self.schema_version <= 11 {
+            return Err(unsupported_behavior(
+                "workspace ownership requires schema 12",
+            ));
+        }
+        let row = self
+            .store()
+            .await?
+            .fetch_row(&StatementSpec::new(
+                "SELECT id FROM workspaces WHERE machine_id = ?1 AND path = ?2",
+                vec![
+                    Value::Text(machine_id.to_owned()),
+                    Value::Text(path.to_owned()),
+                ],
+            ))
+            .await?;
+        row.map(|row| {
+            super::sql::text_at(&row, 0)
+                .ok_or_else(|| super::session_codec::corrupt("invalid workspace id"))?
+                .parse()
+                .map_err(|_| super::session_codec::corrupt("invalid workspace id"))
+        })
+        .transpose()
+    }
+
     pub(super) async fn catalog_machines(
         &self,
     ) -> SessionResourceResult<Vec<peri_acp_types::workspace::MachineInfo>> {

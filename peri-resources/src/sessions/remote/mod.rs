@@ -35,8 +35,7 @@
 //! canonical 历史顺序也统一到 `messages.rowid`。远端只剩执行器自己的机制表（`peri_op_ledger`
 //! 幂等账本、`peri_store_meta` 版本标记），版本值与本机 `CURRENT_SCHEMA_VERSION` 同源。
 //! 旧形状的库（`peri_sessions` 那套，或持 `peri.session.store/v1` 契约）一律**拒绝、不迁移**；
-//! v2 的 `machines` / `workspaces` 在远端保存 Session 归属，执行目录发现证据仍由本机
-//! 登记提供。写打开会把 `PRAGMA foreign_keys` 归位；引用完整性由显式写入/删除顺序保证。
+//! v2 的 `machines` / `workspaces` 在远端保存 Session 归属，执行目录发现快照随绑定保存在远端。写打开会把 `PRAGMA foreign_keys` 归位；引用完整性由显式写入/删除顺序保证。
 //!
 //! 已实现（C-03 第一批，`session_data` + `session_read`/`session_write`/`session_sql`/
 //! `session_codec`/`session_schema`）：会话表 schema、一致读取（snapshot/meta/binding/
@@ -59,8 +58,8 @@
 //! 现行语义是**配置即用**：门面按**两个**端口组合（`Arc<dyn SessionDataPort>` +
 //! `Arc<dyn LocalExecutionPort>`），远程组合装配在 [`composition::open_remote`]，并由
 //! `Resources::open_deployment` 在远程 locator 上真实接通（见 `context.rs`）。配了哪个 store
-//! 就直接用哪个，不再有本机 store 登记、准入裁决与启动探测；本机保存 workspace 登记，
-//! 执行句柄只在当前实例内，不在 `threads` 里为远程会话造行。没有本机锚点之后
+//! 就直接用哪个，不再有本机 store 登记、准入裁决与启动探测；Turso 模式不打开本机 SQLite，
+//! 执行句柄只在当前实例内。没有本机锚点之后
 //! `recover_persistence` 收敛为「会话数据可读即已收敛」，未结清由门面按活跃租约的
 //! `is_uncertain` 判定。
 //!
@@ -111,6 +110,7 @@ mod composition;
 mod connection;
 mod credentials;
 mod endpoint;
+mod execution;
 mod failure;
 mod generation;
 mod ledger;

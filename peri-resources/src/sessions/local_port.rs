@@ -6,8 +6,8 @@
 //! - 本端口回答**只可能由本机回答**的事：工作区发现与登记证据、运行句柄、
 //!   在途写入门禁、创建准入。lease 只在这里出现，数据端口里没有它。
 //!
-//! 只有唯一实现 [`LocalExecution`]（本机 SQLite）：远端组合的 canonical 数据在远端，
-//! 但运行句柄及未知效果仅驻留当前实例。绑定字节与父链由数据端口提供——远端
+//! 本地由 [`LocalExecution`] 实现；Turso 由进程内 `RemoteExecution` 实现，
+//! 不持有本地 SQLite。运行句柄及未知效果仅驻留当前实例。绑定字节与父链由数据端口提供——远端
 //! 组合给的是远端会话行自带的 `binding_*` 列，本机组合给的是本机 `session_bindings`。
 //! 本端口因此不查绑定行，只接受调用方给出的字节并做**本机复核**（目录证据、关系）。
 //!
@@ -23,9 +23,11 @@ use anyhow::Result;
 use async_trait::async_trait;
 use peri_acp_types::session_resources::{NewSession, SessionResourceResult};
 use peri_acp_types::thread::ThreadId;
-use peri_acp_types::workspace::{ResolvedWorkspace, SessionBinding, SessionExecutionLease};
+use peri_acp_types::workspace::{
+    ResolvedWorkspace, SessionBinding, SessionExecutionLease, WorkspaceId,
+};
 
-use super::sqlite_store::{ExclusiveExecutionGuard, ExecutionLease, ExecutionWriteGuard};
+use super::execution::{ExclusiveExecutionGuard, ExecutionLease, ExecutionWriteGuard};
 
 /// 一次撤销补偿（放弃未发布创建时由门面提供的唯一副作用）。
 ///
@@ -64,6 +66,18 @@ pub(in crate::sessions) trait LocalExecutionPort: Send + Sync {
         binding: &SessionBinding,
         full: bool,
     ) -> Result<ResolvedWorkspace>;
+
+    /// Recheck immutable evidence loaded from the canonical store. The remote adapter
+    /// uses this after restart; a missing snapshot must never be reconstructed.
+    async fn validate_saved_binding(
+        &self,
+        binding: &SessionBinding,
+        _snapshot: &str,
+        _owner: WorkspaceId,
+        full: bool,
+    ) -> Result<ResolvedWorkspace> {
+        self.validate_binding_value(binding, full).await
+    }
 
     /// 本机来源证据是否足以把无绑定历史表达成 legacy（远端组合由门面固定为 `false`）。
     async fn legacy_confirmed(&self, id: &ThreadId) -> Result<bool>;

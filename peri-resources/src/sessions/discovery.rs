@@ -15,7 +15,7 @@ use tokio::{
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(super) struct ObjectIdentity {
+pub(in crate::sessions) struct ObjectIdentity {
     device: u64,
     inode: u64,
 }
@@ -80,7 +80,7 @@ pub(super) fn normalize_discovery_json(value: &serde_json::Value) -> Result<Stri
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(super) struct Discovery {
+pub(in crate::sessions) struct Discovery {
     pub root: PathBuf,
     pub root_identity: ObjectIdentity,
     pub common_dir: Option<PathBuf>,
@@ -428,12 +428,12 @@ async fn common_directory(private_dir: &Path) -> Result<PathBuf> {
 /// Git 不可用时得到的是不完整的目录模式观测：它不能证明该路径不是仓库，因此
 /// 登记层不得据它改写已登记的 Git 布局。
 #[derive(Debug)]
-pub(super) struct Observation {
-    pub(super) discovery: Discovery,
-    pub(super) git_answered: bool,
+pub(in crate::sessions) struct Observation {
+    pub(in crate::sessions) discovery: Discovery,
+    pub(in crate::sessions) git_answered: bool,
 }
 
-pub(super) async fn observe(cwd: &Path) -> Result<(PathBuf, Observation)> {
+pub(in crate::sessions) async fn observe(cwd: &Path) -> Result<(PathBuf, Observation)> {
     observe_with_git(cwd, OsStr::new("git")).await
 }
 
@@ -551,7 +551,7 @@ impl Discovery {
     /// 布局是同一目录的派生观测，登记层会在下一次准入刷新它，因此在持有 SQLite
     /// 写事务期间重新执行完整发现既无必要，也会把 Git 的等待时间摊到同库其他
     /// writer 身上。
-    pub(super) async fn reassert_key_objects(&self, cwd: &Path) -> Result<()> {
+    pub(in crate::sessions) async fn reassert_key_objects(&self, cwd: &Path) -> Result<()> {
         let canonical = tokio::fs::canonicalize(cwd)
             .await
             .map_err(|_| WorkspaceError::Unavailable)?;
@@ -588,5 +588,5 @@ impl Discovery {
 }
 
 #[cfg(test)]
-#[path = "discovery_test.rs"]
+#[path = "sqlite_store/discovery_test.rs"]
 mod tests;

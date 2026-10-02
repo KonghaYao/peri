@@ -707,3 +707,8 @@ async fn remote_schema_upgrade_rollback_restores_execution_rows_and_version() {
             .unwrap();
     assert_eq!(execution, ("session".to_owned(), 7, false));
 }
+
+// Full remote application behavior is tested with the same SQL transport fixture.
+mod full_remote_tests {
+    include!("full_remote_test.rs");
+}

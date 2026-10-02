@@ -399,11 +399,7 @@ async fn test_missing_remote_credential_child_process() {
     // 受控环境：变量确实不存在——不读 `.env`，也不会有任何真实网络调用。
     std::env::remove_var(ABSENT_CREDENTIAL_ENV);
     assert!(std::env::var_os(ABSENT_CREDENTIAL_ENV).is_none());
-    // HOME 控制已生效：默认登记库位置指向临时目录（只解析，不创建）。
-    assert_eq!(
-        Resources::local_registry_path().unwrap(),
-        home.join(".peri").join("threads").join("threads.db")
-    );
+    // Remote configuration must not resolve or open a local SQLite registry.
 
     let deployment = SessionStoreDeployment::from_locator(LOCATOR_SENTINEL)
         .with_credential_env(ABSENT_CREDENTIAL_ENV)

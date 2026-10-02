@@ -1,199 +1,14 @@
+//! SQLite adapter for storage-independent execution leases.
+
 use super::database::SqliteSessionDatabase;
+pub(in crate::sessions) use crate::sessions::execution::{
+    ExclusiveExecutionGuard, ExecutionLease, ExecutionWriteGuard,
+};
 use crate::sessions::local_port::SessionFacts;
 use anyhow::Result;
-use async_trait::async_trait;
-use peri_acp_types::{
-    session_resources::{MutationOutcome, SessionResourceResult},
-    thread::ThreadId,
-    workspace::{SessionExecutionLease, WorkspaceError},
-};
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
-
-pub(in crate::sessions) struct ExecutionLease {
-    thread_id: ThreadId,
-    active: AtomicBool,
-    mutation_gate: Arc<tokio::sync::RwLock<()>>,
-    mutation_uncertain: AtomicBool,
-}
-
-impl ExecutionLease {
-    pub(super) fn new(thread_id: ThreadId) -> Self {
-        Self {
-            thread_id,
-            active: AtomicBool::new(true),
-            mutation_gate: Arc::new(tokio::sync::RwLock::new(())),
-            mutation_uncertain: AtomicBool::new(false),
-        }
-    }
-
-    /// 本次所有权是否仍接受新写入（关闭不可逆）。
-    pub(in crate::sessions) fn is_active(&self) -> bool {
-        self.active.load(Ordering::Acquire)
-    }
-
-    /// 是否存在无法证明终态的写入。
-    pub(in crate::sessions) fn is_uncertain(&self) -> bool {
-        self.mutation_uncertain.load(Ordering::Acquire)
-    }
-
-    /// 有界排空屏障：取写侧门禁再释放，证明此刻没有已准入写入在途。
-    ///
-    /// 调用方负责超时：等待外部 future 时不持普通全局互斥量。
-    pub(in crate::sessions) async fn wait_for_in_flight(&self) {
-        let _gate = self.mutation_gate.clone().write_owned().await;
-    }
-
-    /// 会话数据已删除时排空并关闭本次句柄，不清除未知效果。
-    pub(in crate::sessions) async fn dispose_ownership(&self) {
-        let _writes = self.mutation_gate.clone().write_owned().await;
-        self.active.store(false, Ordering::Release);
-    }
-}
-
-/// The guard retains both the lease and admission lock until the complete SQL operation finishes.
-/// A cancelled mutation retains uncertain effects even if SQLx still has a queued command.
-pub(in crate::sessions) struct ExecutionWriteGuard {
-    lease: Arc<ExecutionLease>,
-    _gate: tokio::sync::OwnedRwLockReadGuard<()>,
-    completed: bool,
-}
-
-impl ExecutionWriteGuard {
-    pub(in crate::sessions) fn finish(mut self) {
-        self.completed = true;
-    }
-}
-
-impl Drop for ExecutionWriteGuard {
-    fn drop(&mut self) {
-        if !self.completed {
-            self.lease.mutation_uncertain.store(true, Ordering::Release);
-        }
-    }
-}
-
-/// 排他写入范围：持有同一 owner 的写侧门禁。
-///
-/// 与 [`ExecutionWriteGuard`] 的区别是并发语义：读侧门禁允许同 root 的多个 mutation
-/// 并发（SQLite 自己保证事务串行），写侧门禁用来把「检查 + 写入」做成一段不可插入的
-/// 区间（child resume 认领的状态检查与写入、未发布创建的撤销）。
-pub(in crate::sessions) struct ExclusiveExecutionGuard {
-    lease: Arc<ExecutionLease>,
-    _gate: tokio::sync::OwnedRwLockWriteGuard<()>,
-    completed: bool,
-}
-
-impl ExclusiveExecutionGuard {
-    pub(in crate::sessions) fn finish(mut self) {
-        self.completed = true;
-    }
-}
-
-impl Drop for ExclusiveExecutionGuard {
-    fn drop(&mut self) {
-        if !self.completed {
-            self.lease.mutation_uncertain.store(true, Ordering::Release);
-        }
-    }
-}
-
-/// 事务性写入的效果边界：进入 `commit` 前可证明「未生效」，提交成功后是「已生效」，
-/// 只有提交自身的失败落在证明之外。
-///
-/// `sqlx` 的 SQLite 事务在 `commit()` 失败后由连接回滚，但「回滚是否真的完成」不由
-/// 调用方观察得到；这里把不可证明的那一小段标出来，让写入准入保持未决，而不是用
-/// `Err` 冒充「没生效」。
-#[derive(Default)]
-pub(in crate::sessions) struct TransactionEffect {
-    committing: bool,
-    committed: bool,
-}
-
-impl TransactionEffect {
-    pub(super) fn new() -> Self {
-        Self::default()
-    }
-
-    /// 即将调用 `commit()`：此后失败不再能证明未生效。
-    pub(super) fn enter_commit(&mut self) {
-        self.committing = true;
-    }
-
-    /// `commit()` 已成功返回。
-    pub(super) fn commit_succeeded(&mut self) {
-        self.committing = false;
-        self.committed = true;
-    }
-
-    /// 按效果结清准入：可证明「未生效」或「已生效」时才 `finish`；其余情况释放 guard
-    /// 由 `Drop` 留下未决证据。
-    pub(super) fn settle(&self, guard: Option<ExecutionWriteGuard>) {
-        if !self.committing {
-            if let Some(guard) = guard {
-                guard.finish();
-            }
-        }
-    }
-}
-
-#[async_trait]
-impl SessionExecutionLease for ExecutionLease {
-    fn thread_id(&self) -> &ThreadId {
-        &self.thread_id
-    }
-
-    async fn mark_clean(&self) -> Result<()> {
-        let _writes = self.mutation_gate.write().await;
-        if self.mutation_uncertain.load(Ordering::Acquire) {
-            anyhow::bail!("session persistence outcome is uncertain");
-        }
-        self.active.store(false, Ordering::Release);
-        Ok(())
-    }
-}
-
-impl ExecutionLease {
-    /// 放弃本次所有权：等待已准入写入 → 执行补偿 → 关闭本次运行句柄。
-    ///
-    /// 只用于本次创建被撤销；不声明此前未知写入的效果。
-    ///
-    /// 已知失败不关闭句柄；取消或未知效果保留未决门禁，不能用失败冒充未生效。
-    pub(in crate::sessions) async fn abandon_ownership<F, Fut, T>(
-        self: &Arc<Self>,
-        compensate: F,
-    ) -> SessionResourceResult<T>
-    where
-        F: FnOnce() -> Fut,
-        Fut: std::future::Future<Output = SessionResourceResult<T>>,
-    {
-        // 补偿期间取写侧门禁：已准入的写入先结束，新写入等在这里。
-        let gate = self.mutation_gate.clone().write_owned().await;
-        if self.is_uncertain() {
-            return Err(super::failure::conflict(
-                "session persistence outcome is uncertain",
-            ));
-        }
-        let guard = ExclusiveExecutionGuard {
-            lease: Arc::clone(self),
-            _gate: gate,
-            completed: false,
-        };
-        let outcome = compensate().await;
-        if outcome.is_ok() {
-            self.active.store(false, Ordering::Release);
-        }
-        if !outcome
-            .as_ref()
-            .is_err_and(|error| error.effect() == MutationOutcome::Unknown)
-        {
-            guard.finish();
-        }
-        outcome
-    }
-}
+use peri_acp_types::thread::ThreadId;
+use peri_acp_types::workspace::{SessionExecutionLease, WorkspaceError};
+use std::sync::Arc;
 
 impl SqliteSessionDatabase {
     pub(super) async fn acquire_execution_lease_impl(
@@ -220,10 +35,9 @@ impl SqliteSessionDatabase {
             if lease.is_active() {
                 return Ok(Arc::clone(lease));
             }
-            let _closed = lease
-                .mutation_gate
-                .try_write()
-                .map_err(|_| WorkspaceError::ExecutionLeaseRequired)?;
+            if !lease.can_replace() {
+                return Err(WorkspaceError::ExecutionLeaseRequired.into());
+            }
         }
         let lease = Arc::new(ExecutionLease::new(id.clone()));
         leases.insert(id.clone(), Arc::clone(&lease));
@@ -301,19 +115,7 @@ impl SqliteSessionDatabase {
         &self,
         lease: Arc<ExecutionLease>,
     ) -> Result<Option<ExecutionWriteGuard>> {
-        let gate = lease.mutation_gate.clone().read_owned().await;
-        // Close may have won while admission waited behind its write lock.
-        if !lease.active.load(Ordering::Acquire) {
-            return Err(WorkspaceError::ExecutionLeaseRequired.into());
-        }
-        if lease.mutation_uncertain.load(Ordering::Acquire) {
-            anyhow::bail!("session persistence outcome is uncertain");
-        }
-        Ok(Some(ExecutionWriteGuard {
-            lease,
-            _gate: gate,
-            completed: false,
-        }))
+        Ok(Some(lease.write_guard().await?))
     }
 
     /// 排他范围：与 [`Self::require_execution_lease`] 相同的准入判定（同一套数据面事实），
@@ -337,17 +139,6 @@ impl SqliteSessionDatabase {
         &self,
         lease: Arc<ExecutionLease>,
     ) -> Result<Option<ExclusiveExecutionGuard>> {
-        let gate = lease.mutation_gate.clone().write_owned().await;
-        if !lease.active.load(Ordering::Acquire) {
-            return Err(WorkspaceError::ExecutionLeaseRequired.into());
-        }
-        if lease.mutation_uncertain.load(Ordering::Acquire) {
-            anyhow::bail!("session persistence outcome is uncertain");
-        }
-        Ok(Some(ExclusiveExecutionGuard {
-            lease,
-            _gate: gate,
-            completed: false,
-        }))
+        Ok(Some(lease.exclusive_guard().await?))
     }
 }

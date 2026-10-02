@@ -102,9 +102,8 @@ impl Resources {
     /// 只读意图绝不做写探测，也不退回写打开再降级。
     ///
     /// 后端选择只发生在这里：本机 locator 走既有 SQLite 装配，远程 locator 走
-    /// `sessions::open_remote`（本机登记库 + 远端数据 adapter，见 `sessions::remote`），
-    /// **不静默回落到本机库**。远程存储是否被本机接纳由那次装配裁决：没有登记的存储
-    /// 只读历史可用、执行与写入被拒绝，而不是换一个后端继续。
+    /// `sessions::open_remote`（远端数据 adapter + 进程内执行端口），
+    /// 不打开本地 SQLite，也不静默回落到本机库。
     ///
     /// 环境变量只在两处被读取：`--session-store env:` 形式的 locator，以及远程 adapter
     /// 打开时按凭证来源取凭证值。**仅仅存在某个云 URL/token 变量不会切换后端**，
@@ -131,30 +130,21 @@ impl Resources {
         }
     }
 
-    /// 远程 locator 的装配：本机登记库 + 远端数据 adapter，装配点仍是这里。
-    ///
-    /// 本机事实（登记、未决锚点、执行代际、sidecar 锁）落在默认本机库
-    /// （`~/.peri/threads/threads.db`）里——那是本机唯一的登记位置，不是会话数据的副本。
-    /// 显式只读意图只读打开它（不创建文件、不升级 schema、不写登记）。
+    /// Turso locator: all persistent Session facts use the remote store.
+    /// Local SQLite is never resolved or opened on this branch.
     async fn open_remote(
         request: &SessionStoreOpenRequest,
         endpoint: &crate::sessions::RemoteEndpoint,
     ) -> Result<Self> {
-        let registry_path = Self::local_registry_path()?;
         // 凭证解析在任何 I/O 之前：来源缺失、变量未设置、空值都在这里失败。
         let Some(source) = request.credential_source() else {
             return Err(LocatorError::MissingCredentialSource.into());
         };
         let credential = source.resolve()?;
-        crate::sessions::open_remote(endpoint, &credential, request.access(), registry_path)
+        crate::sessions::open_remote(endpoint, &credential, request.access())
             .await
             .map(Self::from_facade)
             .map_err(|error| error.context("无法打开远程会话存储"))
-    }
-
-    /// 本机登记库位置：默认本机库（只解析，不创建）。
-    fn local_registry_path() -> Result<PathBuf> {
-        crate::sessions::SessionResourcesImpl::default_database_path()
     }
 
     /// 本机 locator 的既有装配：写打开失败且历史仍可读时降级为只读打开。

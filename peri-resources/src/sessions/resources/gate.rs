@@ -18,11 +18,11 @@ use peri_acp_types::thread::ThreadId;
 use peri_acp_types::workspace::WorkspaceError;
 
 use crate::sessions::data::SessionDataPort;
+use crate::sessions::execution::{ExclusiveExecutionGuard, ExecutionWriteGuard};
 use crate::sessions::local_port::{LocalExecutionPort, SessionFacts};
 use crate::sessions::resources::lifecycle::{Lifecycle, LifecycleState};
 use crate::sessions::sqlite_store::{
-    execution_failure, lease_required, read_only_store, unavailable, ExclusiveExecutionGuard,
-    ExecutionWriteGuard,
+    execution_failure, lease_required, read_only_store, unavailable,
 };
 
 /// 一次写入准入持有的范围。

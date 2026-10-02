@@ -116,8 +116,8 @@ MCP server，也不能读取或覆盖彼此的凭证和私有状态。Git worktr
 
 现有 `workspaces` 表保存 `project_id`、发现出的 `root`、`root_identity` 和
 `discovery`，唯一键是 `(root, root_identity)`。本机用它登记和复核 Git/worktree
-位置；`session_bindings.workspace_id` 引用它，列表用它还原执行目录。远端会话库
-目前创建同形状的表，但 Workspace 证据只驻留本机，远端表通常没有这些登记行。
+位置；`session_bindings.workspace_id` 引用它，列表用它还原执行目录。旧远端会话库
+创建同形状的表，但旧执行登记曾只驻留本机，远端旧表通常没有这些登记行。
 因此它可以作为 v2 Workspace 的**同一张表**继续使用，但现有唯一键、登记查询
 和行含义必须迁移：增加 `machine_id`、`path`、`path_source`，以
 `(machine_id, path)` 为归属键；原 `root`/`root_identity`/`discovery` 不再决定
@@ -142,17 +142,17 @@ directory 证据及执行目录相对路径。旧本机绑定只能复制迁移�
 旧实现可能原地更新 `workspaces.discovery`，故不能把该值冒称为 Session 创建时证据。
 旧绑定标明 `evidence_origin=legacy_last_observation`，按旧环境规则重新复核；无法
 证明原对象连续性时只读历史。新 Session 使用 `evidence_origin=creation_snapshot`。
-旧远端迁移若无法取得原机器的本机登记证据，快照明确缺失，并在绑定中保留旧
-执行 Workspace UUID 作为**待补齐证据的迁移键**；该 Session 保持历史可读，
-本次执行不可用。原 Machine 后续打开时，只有机器 ID 与该 Session 归属精确
-相等、旧 UUID 在本机只读的 `legacy_execution_registrations` 映射中命中，并完成
-原绑定要求的完整执行准入复核，才可
-原子地 write-once 补齐快照；竞争失败方重读赢家，损坏或不一致时拒绝，不能
-借同路径的新 Workspace 伪造旧证据。补齐成功后迁移键退出使用；异机先升级
-远端不能使原机器永久丧失这条恢复路径。不再创建第二张 Workspace 归属表；
-目录重建后复用 Workspace ID，也不会覆盖旧 Session 的执行证据。该只读映射
-仅保存旧执行登记 UUID、最后观测值和迁移来源，不参与 Workspace 归属或新会话
-创建；迁移前先复制再合并/拆分旧 Workspace 行。
+旧远端迁移若没有远端保存的执行发现快照，快照明确缺失并保留原
+`session_bindings.workspace_id` 执行登记 UUID；该 Session 仅可按 ID 读取历史，
+不得用当前同名目录、本地旧 SQLite 登记或新的文件系统观测补造执行资格。
+已有远端快照的旧 v2 Session 即使执行登记 UUID 与 `threads.workspace_id` 不同，
+仍可按其远端快照、当前文件系统/Git、远端 Machine/path 归属重新复核。
+
+选择 Turso locator 是持久化后端的全量切换：Machine、Workspace、Session、消息、
+绑定、执行发现快照与 Workspace 级 OAuth 只读写远端库。运行时可以读取机器 ID
+文件、访问工作目录并在进程内持有 lease；写打开和只读打开均不得打开、创建、
+升级或查询本地 SQLite（包括 `~/.peri/threads/threads.db`）。本地 locator 才使用
+本地 SQLite 及其迁移路径。
 
 机器、Workspace 与 Session 的归属关系是持久事实：普通 load、resume、列表查询
 和更改归档状态都不得重写 `machine_id`、`path` 或 `workspace_id`。需要跨机器或
@@ -303,7 +303,7 @@ canonical DDL 在 `peri-resources/src/sessions/canonical.rs` 保持一份，本�
 | `workspaces` | 复用现表，新增 `machine_id`, `path`, `path_source`；旧 `project_id/root/root_identity/discovery` 的执行证据职责迁出 | `id` UUID 主键，`machine_id` 非空引用 machines，`path` 非空，`UNIQUE(machine_id,path)`；远端可创建无本机文件证据的行 |
 | `threads` | 增加 `workspace_id`, `archived` | workspace_id 非空引用 workspaces；archived 非空默认 false；`parent_thread_id` 及其他列保留 |
 | `session_bindings` | 历史列名 `workspace_id` 保留为**执行登记 UUID**，不是逻辑 Workspace 归属；保存版本化执行发现快照与 `evidence_origin` | 逻辑归属只通过 `threads.workspace_id` 读取；旧远端缺证据不伪造，新创建必须有完整快照。保留列名避免改写旧不可变绑定字节及其外键，类型层用 `ResolvedWorkspace.execution_registration_id` 区分 |
-| `legacy_execution_registrations`（仅本机迁移辅助） | 旧登记 UUID → 最后观测的执行发现值 | 只读历史证据索引，不参与 Workspace 归属；保留到旧远端绑定不再需要补齐 |
+| `legacy_execution_registrations`（仅本机迁移辅助） | 旧登记 UUID → 最后观测的执行发现值 | 仅本地旧库迁移使用；Turso 模式不访问该表或本地库 |
 | `mcp_oauth_credentials` | machine_id 改为 workspace_id | 主键 `(principal_id,workspace_id,server_key)`；不能通过 machine_id 或 server 名兜底查找 |
 
 迁移版本从当前 schema 11 推进到 12；远端 `peri_store_meta.schema_version`
@@ -323,7 +323,7 @@ SQLite 的表重建须按已有 schema migration 方式在事务外处理外键�
 
 新根 Session 的持久化顺序是：取得 Machine → 发现 Workspace.path → 原子查找或
 创建 Workspace → 在创建 Session 的同一事务/托管批内确认 Workspace 归属并写入
-`threads.workspace_id`、执行快照和原有创建事实。远端本机执行准入仍是后续步骤；
+`threads.workspace_id`、执行快照和原有创建事实。远端保存后由进程内执行端口按远端快照复核并取得 lease；
 保存成功但准入失败继续如实报告，不能回滚已确认的远端数据或认作执行成功。
 
 ### 6.3 旧数据回填的判定表
@@ -331,8 +331,8 @@ SQLite 的表重建须按已有 schema migration 方式在事务外处理外键�
 | 旧记录 | Workspace.path 来源 | Machine 来源 | 执行证据 |
 | --- | --- | --- | --- |
 | 本机有绑定及登记 | 旧登记的 root；同 worktree 子目录不拆分 | root Session 的 environment；child 继承 | 在改写旧登记前复制最后观测值，标 `legacy_last_observation`；不能声称创建时证据 |
-| 远端有绑定但无登记 | 保存 cwd 减去已校验 relative_cwd；组内逐条交叉核对 | 保存的 environment | 保留旧绑定 UUID；原机器后续凭本机登记完整复核并 write-once 补齐 |
-| 无绑定但有可信本机登记 | 保存 cwd 可证实的所属 root | 保存的 environment | 不伪造过去的快照；按现行 legacy 接纳规则执行 |
+| 远端有绑定但无登记 | 保存 cwd 减去已校验 relative_cwd；组内逐条交叉核对 | 保存的 environment | 保留旧绑定 UUID；缺远端快照时只读历史，不自动补造 |
+| 无绑定但有可信本机登记（仅本地模式） | 保存 cwd 可证实的所属 root | 保存的 environment | 不伪造过去的快照；按本地 legacy 接纳规则执行；远端不接纳 legacy |
 | 无法证实 Git 根的旧记录 | 保存 cwd，`path_source=unverified` | 已知原 env；未知来源为 legacy_unknown | 历史可读；不因归组获得执行资格 |
 
 同一旧 Workspace UUID 跨 Machine 使用时按 Machine 拆分，同一 Machine/path 的
@@ -361,10 +361,11 @@ SQL 的 `WHERE`/主键中使用。ACP 装配先由 Session 取得 Workspace ID�
   各自保持；linked worktree 独立。
 - 同机同路径目录对象重建：Workspace ID 不变，旧绑定的执行快照不被新发现覆盖；
   新 Session 保存新快照。
+- Turso 写打开、只读打开及冷恢复在全新或损坏本地 SQLite 的 HOME 均不访问本地库。
 - 旧本机库、旧远端库、跨 Machine 共用旧 Workspace UUID、Git 不可用与缺目录：
   迁移保存 ThreadId/消息/frozen，归档全 false；不确定归属或证据保持只读。
-- 旧远端由异机先升级：原机器仍可通过旧绑定 UUID 和本机登记一次性补齐执行
-  快照；异机及同名路径不能补齐。
+- 旧远端由异机先升级：原机器仍能按 ID 读取历史；远端已有快照才可执行复核，
+  缺快照的记录保持只读。
 - 两阶段草稿、零消息、child、归档/取消归档、按 ID 加载分别保持列表和历史
   契约；归档不改变运行资格。
 - 身份文件丢失后，列表如实显示新旧 Machine，只有显式切换并重启才使用旧 ID；

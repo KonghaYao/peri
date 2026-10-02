@@ -12,7 +12,7 @@
 //! | `update_meta`（title/status/cancel_policy/config 定向更新） | 已实现 |
 //! | `append_history` / `apply_message_projections` / `apply_compaction` | 已实现（[`super::session_history`]：批内守卫，整批生效或整批不生效） |
 //! | `rewind_history`（显式两边界）/ `remove_history_entries` | 已实现（同上；未知截止点保持无变更语义） |
-//! | `delete_tree` / `revoke_unpublished_session` / `adopt_legacy_session` | 已实现（[`super::session_lifecycle`]；远端无墓碑/执行行，删除是刻意删除数据事实） |
+//! | `delete_tree` / `revoke_unpublished_session` | 已实现（[`super::session_lifecycle`]；远端无墓碑/执行行，删除是刻意删除数据事实） |
 //! | `load_child_resume_record` / `store_child_resume_record` | 已实现（`agent_status` + 由状态派生的认领标记） |
 //! | `drain` | 已实现为「无队列可排空，但未结清不算已排空」（见方法文档） |
 //! | `close` | 已实现（真正关闭连接，之后写入明确失败） |
@@ -25,8 +25,8 @@
 //! 在活跃租约上表达（见 `recover_persistence` 的方法文档）。等价的公开行为仍只有门面暴露的
 //! 那 33 条——adapter 不另立一套平行行为。
 //!
-//! 本机执行事实不在本模块：workspace 证据与进程内运行句柄由 `LocalExecution` 持有
-//! （见 `sessions::local_port`）。adapter 只回答 canonical 数据事实。
+//! Workspace 归属与执行快照保存在远端；文件系统发现和进程内运行句柄由
+//! `RemoteExecution` 持有（见 `sessions::local_port`）。
 //!
 //! 打开的两种访问模式：
 //!
@@ -231,7 +231,9 @@ impl RemoteSessionData {
         // 跑——身份早于会话表建立的 store（例如只做过机制实测的库）同样需要补齐。
         if access == StoreAccess::ReadWrite {
             crate::sessions::machine::initialize().await.map_err(|_| {
-                crate::sessions::sqlite_store::unavailable("machine identity initialization failed")
+                SessionResourceError::new(SessionResourceErrorKind::Unavailable {
+                    detail: "machine identity initialization failed".to_owned(),
+                })
             })?;
             // 父行检查先归位：canonical 形状里的外键在远端没有可满足的父行（见方法文档）。
             store.force_parent_checks_off().await?;
@@ -707,12 +709,15 @@ impl SessionDataPort for RemoteSessionData {
 
     async fn adopt_legacy_session(
         &self,
-        id: &ThreadId,
-        saved_cwd: &str,
-        workspace: &ResolvedWorkspace,
-        frozen: &FrozenSnapshotBytes,
+        _id: &ThreadId,
+        _saved_cwd: &str,
+        _workspace: &ResolvedWorkspace,
+        _frozen: &FrozenSnapshotBytes,
     ) -> SessionResourceResult<()> {
-        self.adopt_legacy(id, saved_cwd, workspace, frozen).await
+        // Old remote sessions without immutable evidence remain history-only.
+        Err(SessionResourceError::new(
+            SessionResourceErrorKind::Unsupported,
+        ))
     }
 
     async fn load_snapshot(&self, id: &ThreadId) -> SessionResourceResult<SessionSnapshot> {
@@ -747,16 +752,6 @@ impl SessionDataPort for RemoteSessionData {
         id: &ThreadId,
     ) -> SessionResourceResult<Option<String>> {
         self.read_binding_discovery_snapshot(id).await
-    }
-
-    async fn complete_legacy_binding_discovery(
-        &self,
-        id: &ThreadId,
-        binding: &SessionBinding,
-        workspace: &ResolvedWorkspace,
-    ) -> SessionResourceResult<()> {
-        self.write_complete_legacy_binding_discovery(id, binding, workspace)
-            .await
     }
 
     async fn session_root(&self, id: &ThreadId) -> SessionResourceResult<ThreadId> {

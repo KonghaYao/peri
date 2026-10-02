@@ -395,32 +395,6 @@ async fn read_only_flow(
     let mut lines = Vec::new();
     let before = listing(&context.home)?;
 
-    // `fresh`：本机没有执行事实库。只读意图不许创建它，因此这次打开在建立任何远端连接
-    // 之前就如实失败——与本机库「只读打开一个不存在的库」是同一个判定（`NotFound`），
-    // 两种存储模式下这句话必须是同一句。
-    if mode == "fresh" {
-        let error = match open_facade_error(context, AccessMode::ReadOnly).await {
-            Ok(_) => {
-                return Err("a read-only open without local execution facts must fail".to_owned())
-            }
-            Err(error) => error,
-        };
-        let failure = crate::classify_open_failure(&error);
-        check(
-            failure == crate::StoreOpenFailure::NotFound,
-            &format!("a missing local execution face must open as NotFound, got {failure:?}"),
-        )?;
-        let after = listing(&context.home)?;
-        check(
-            before == after,
-            &format!(
-                "a refused read-only open must not create local files: before={before:?} after={after:?}"
-            ),
-        )?;
-        lines.push(format!("read_only_mode={mode} refusal={failure:?}"));
-        return Ok(lines);
-    }
-
     let facade = open_facade(context, AccessMode::ReadOnly, target).await?;
     let availability = facade.inspect_availability(None).await.map_err(failure)?;
     check(
@@ -440,8 +414,7 @@ async fn read_only_flow(
         .inspect_availability(Some(&fork))
         .await
         .map_err(failure)?;
-    // 本机执行事实在，但这次是只读打开：执行权一律不可得，如实回答 `ReadOnlyStore`
-    // （历史照常可读）。有本机库不改变只读这件事。
+    // Both fresh and existing HOME read the remote history without execution rights.
     check(
         fork_availability.execution == Some(ExecutionAvailability::ReadOnlyStore),
         "a read-only open must report the read-only execution face",

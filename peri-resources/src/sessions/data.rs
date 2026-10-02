@@ -18,8 +18,7 @@ use async_trait::async_trait;
 use peri_acp_types::messages::MessageId;
 use peri_acp_types::session_resources::{
     BindingState, ChildSnapshot, ForkSnapshot, FrozenSnapshotBytes, NewSession,
-    PersistenceRecovery, RewindBoundary, SessionMetaPatch, SessionResourceError,
-    SessionResourceErrorKind, SessionResourceResult, SessionSnapshot,
+    PersistenceRecovery, RewindBoundary, SessionMetaPatch, SessionResourceResult, SessionSnapshot,
 };
 use peri_acp_types::store::{CompactionChange, MessageFlags, PersistedPayload};
 use peri_acp_types::thread::{ThreadId, ThreadMeta};
@@ -175,25 +174,14 @@ pub(crate) trait SessionDataPort: Send + Sync {
     /// 绑定字节是**数据事实**：本机 adapter 从 `session_bindings` 读，远端 adapter 从远端
     /// 会话行自带的 `binding_*` 列读。执行面只按调用方给出的字节做本机目录复核。
     async fn binding_of(&self, id: &ThreadId) -> SessionResourceResult<Option<SessionBinding>>;
-    /// Per-session immutable execution evidence. `None` means an old remote
-    /// binding awaits a guarded one-time completion, or no binding exists.
+    /// Per-session immutable execution evidence. `None` denies execution;
+    /// history remains readable by Session ID.
     async fn binding_discovery_snapshot(
         &self,
         _id: &ThreadId,
     ) -> SessionResourceResult<Option<String>> {
         Ok(None)
     }
-    async fn complete_legacy_binding_discovery(
-        &self,
-        _id: &ThreadId,
-        _binding: &SessionBinding,
-        _workspace: &ResolvedWorkspace,
-    ) -> SessionResourceResult<()> {
-        Err(SessionResourceError::new(
-            SessionResourceErrorKind::Unsupported,
-        ))
-    }
-
     /// 该会话在树中的根（含自身）。
     ///
     /// 父链是数据事实：未结清判定按整棵树聚合时，远端会话在本机没有 `threads` 行，

@@ -275,12 +275,31 @@ impl SessionResourcesImpl {
             }
         }
         let meta = self.gate.data().load_meta(id).await?;
+        if matches!(self.home, SessionDataHome::RemoteStore)
+            && self
+                .gate
+                .data()
+                .binding_discovery_snapshot(id)
+                .await?
+                .is_none()
+        {
+            return Ok(ExecutionAvailability::WorkspaceUnavailable);
+        }
         if !tokio::fs::metadata(&meta.cwd)
             .await
             .map(|metadata| metadata.is_dir())
             .unwrap_or(false)
         {
             return Ok(ExecutionAvailability::WorkspaceUnavailable);
+        }
+        if matches!(self.home, SessionDataHome::RemoteStore) {
+            match self.recheck_binding_of(id, true).await {
+                Ok(_) => {}
+                Err(error) if matches!(error.kind(), SessionResourceErrorKind::Workspace(_)) => {
+                    return Ok(ExecutionAvailability::WorkspaceUnavailable);
+                }
+                Err(error) => return Err(error),
+            }
         }
         Ok(ExecutionAvailability::Available)
     }
@@ -519,10 +538,27 @@ impl SessionResources for SessionResourcesImpl {
 
     async fn discard_incomplete_initialization(&self, id: &ThreadId) -> SessionResourceResult<()> {
         self.gate.ensure_session_write()?;
-        self.gate
-            .local()
-            .discard_incomplete_initialization(id)
-            .await
+        match self.home {
+            SessionDataHome::LocalLibrary => {
+                self.gate
+                    .local()
+                    .discard_incomplete_initialization(id)
+                    .await
+            }
+            SessionDataHome::RemoteStore => {
+                if self
+                    .gate
+                    .local()
+                    .live_owner(id, &SessionFacts { root: id.clone() })
+                    .await
+                    .map_err(execution_failure)?
+                    .is_some()
+                {
+                    return Err(lease_required());
+                }
+                self.gate.data().revoke_unpublished_draft(id).await
+            }
+        }
     }
 
     async fn adopt_legacy_session(
@@ -533,6 +569,11 @@ impl SessionResources for SessionResourcesImpl {
         frozen: &FrozenSnapshotBytes,
     ) -> SessionResourceResult<()> {
         self.gate.ensure_session_write()?;
+        if matches!(self.home, SessionDataHome::RemoteStore) {
+            return Err(SessionResourceError::new(
+                SessionResourceErrorKind::Unsupported,
+            ));
+        }
         self.gate
             .data()
             .adopt_legacy_session(id, saved_cwd, workspace, frozen)

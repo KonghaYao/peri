@@ -1,16 +1,16 @@
 use super::*;
 
-// ─── 双库：数据面在别处（远程组合的离线等价物） ───────────────────────────────
+// ─── 双库：数据面在别处（旧双库门禁夹具） ───────────────────────────────
 
 /// 执行面事实：与门面内部（`MutationGate::session_facts`）用的是同一个取法。
 ///
 /// 直接驱动本机执行面的测试必须按同一组事实判定：「绑定/树根由数据面回答」这条契约不能只
 /// 在门面里成立，否则测试锁的会是「本机恰好查得到自己那张表」这个实现细节。
-/// 数据面与本机执行面在**两个**库里的门面：远程组合的离线等价物。
+/// 数据面与本机执行面在**两个**库里的门面：旧双库门禁夹具。
 ///
 /// 装配点与远程组合相同（`SessionResourcesImpl::from_ports` + `SessionDataHome::RemoteStore`），
 /// 只是数据面用另一个真 sqlite 顶替远端 adapter：本机执行面库因此**没有**这条会话的任何
-/// 会话表行（`threads` / `session_bindings`），与远端会话在本机的处境逐条相同，从而可以在
+/// 会话表行（`threads` / `session_bindings`），与远端会话与执行端口分离这一门禁形状相同，从而可以在
 /// 离线环境里证明执行面只按数据面给出的事实判定。
 struct DoubleDbFixture {
     facade: Arc<SessionResourcesImpl>,
@@ -438,7 +438,7 @@ async fn test_double_db_execution_availability_matches_the_local_verdicts() {
     fixture.save_bindingless_session(&missing, &workspace).await;
     assert_eq!(
         fixture.availability(&missing).await,
-        Some(ExecutionAvailability::Available)
+        Some(ExecutionAvailability::WorkspaceUnavailable)
     );
     // 本机恰好有一条同 id、cwd 落在已登记工作区里的无绑定行：那是**本机** legacy 的来源证据，
     // 远端会话不看它（否则远端历史会被判成 legacy）。
@@ -453,7 +453,7 @@ async fn test_double_db_execution_availability_matches_the_local_verdicts() {
     );
     assert_eq!(
         fixture.availability(&missing).await,
-        Some(ExecutionAvailability::Available)
+        Some(ExecutionAvailability::WorkspaceUnavailable)
     );
 
     drop(lease);

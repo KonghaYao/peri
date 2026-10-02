@@ -20,8 +20,15 @@ impl SessionResourcesImpl {
             .machine_id_of(id)
             .await?
             .is_some_and(|machine| {
-                crate::sessions::machine::current().is_ok_and(|current| machine != current)
+                crate::sessions::machine::current().map_or(true, |current| machine != current)
             });
+        let missing_remote_evidence = matches!(self.home, SessionDataHome::RemoteStore)
+            && self
+                .gate
+                .data()
+                .binding_discovery_snapshot(id)
+                .await?
+                .is_none();
         if binding.is_none() && !missing_directory && !foreign_machine {
             if let Ok(resolved) = self
                 .gate
@@ -39,7 +46,7 @@ impl SessionResourcesImpl {
         // absent, its directory is gone, or it belongs to another machine.
         // The returned projection carries no execution proof; the separate
         // validate_session gate still checks the immutable evidence.
-        if binding.is_none() || missing_directory || foreign_machine {
+        if binding.is_none() || missing_directory || foreign_machine || missing_remote_evidence {
             let relative_cwd = binding
                 .as_ref()
                 .map(|binding| binding.cwd_relative_to_workspace.clone())
@@ -123,17 +130,39 @@ impl SessionResourcesImpl {
         full: bool,
     ) -> SessionResourceResult<ResolvedWorkspace> {
         let binding = self.gate.data().binding_of(id).await?;
-        let resolved = self.recheck_binding(binding.as_ref(), full).await?;
+        let binding = binding.as_ref().ok_or_else(|| {
+            SessionResourceError::new(SessionResourceErrorKind::Workspace(
+                WorkspaceError::BindingMissing,
+            ))
+        })?;
         let owner = self
             .gate
             .data()
             .workspace_id_of(id)
             .await?
             .ok_or_else(|| SessionResourceError::new(SessionResourceErrorKind::NotFound))?;
+        let saved = self.gate.data().binding_discovery_snapshot(id).await?;
+        if matches!(self.home, SessionDataHome::RemoteStore) {
+            let saved = saved.ok_or_else(|| {
+                SessionResourceError::new(SessionResourceErrorKind::Workspace(
+                    WorkspaceError::InvalidBinding,
+                ))
+            })?;
+            let resolved = self
+                .gate
+                .local()
+                .validate_saved_binding(binding, &saved, owner, full)
+                .await
+                .map_err(execution_failure)?;
+            if owner != resolved.workspace_id {
+                return Err(Self::workspace_mismatch());
+            }
+            return Ok(resolved);
+        }
+        let resolved = self.recheck_binding(Some(binding), full).await?;
         if owner != resolved.workspace_id {
             return Err(Self::workspace_mismatch());
         }
-        let saved = self.gate.data().binding_discovery_snapshot(id).await?;
         match saved {
             Some(saved) => {
                 let recorded: serde_json::Value = serde_json::from_str(&saved).map_err(|_| {
@@ -156,18 +185,6 @@ impl SessionResourcesImpl {
                 if recorded != observed {
                     return Err(Self::workspace_mismatch());
                 }
-            }
-            None if full && matches!(self.home, SessionDataHome::RemoteStore) => {
-                self.gate
-                    .data()
-                    .complete_legacy_binding_discovery(
-                        id,
-                        binding
-                            .as_ref()
-                            .expect("binding checked by recheck_binding"),
-                        &resolved,
-                    )
-                    .await?;
             }
             None => {
                 return Err(SessionResourceError::new(

@@ -8,9 +8,7 @@
 //! 门面（[`crate::sessions::SessionResourcesImpl`]）是唯一调用方；本类型不导出给
 //! 业务侧，也不提供无 guard 的写入入口。
 //!
-//! v10 之后它是 [`LocalExecutionPort`] 的**唯一**实现：远端组合的 canonical 数据在远端，
-//! 但 workspace 证据在本机登记、运行句柄仅驻留当前实例，绑定字节与父链由
-//! 数据端口提供。执行域因此只有一个——按 `thread_id` 原文，没有 store 维度。
+//! 本类型只服务本地 SQLite locator。Turso locator 使用独立的进程内执行端口。
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -30,6 +28,7 @@ use super::failure::{
 };
 use super::session_data::SqliteSessionData;
 use super::session_rows::{delete_thread_child_rows, insert_binding_row, insert_thread_row};
+use crate::sessions::execution::same_lease;
 use crate::sessions::local_port::{LocalExecutionPort, RevokeEffect, SessionFacts};
 
 /// 本机执行面的句柄：与数据面共用同一个库（同一条连接真相）。
@@ -557,20 +556,6 @@ impl LocalExecution {
 /// 登记失败时 canonical 数据已提交，必须按已保存但未准入上报。
 fn lease_registration_failure(id: &ThreadId) -> SessionResourceError {
     SessionResourceError::saved_but_not_admitted(id.clone())
-}
-
-/// 传入的 `Arc<dyn SessionExecutionLease>` 是否就是本进程登记的那条租约。
-///
-/// 比较的是同一个分配对象的地址：`Arc<dyn Trait>` 与 `Arc<Concrete>` 互转只能靠地址，
-/// 而这里要回答的正是「是不是同一次所有权」，不是「是不是同一个会话」。
-pub(in crate::sessions) fn same_lease(
-    owned: &Arc<ExecutionLease>,
-    lease: &Arc<dyn SessionExecutionLease>,
-) -> bool {
-    std::ptr::eq(
-        Arc::as_ptr(owned) as *const (),
-        Arc::as_ptr(lease) as *const (),
-    )
 }
 
 /// 本机执行面对门面的行为：全部委托到本文件的方法。
