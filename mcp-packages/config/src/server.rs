@@ -84,13 +84,12 @@ impl ConfigurationMcpServer {
                 path.try_exists().map(ConfigurationValue::Bool)
             }
             ConfigurationRequest::SameFile { first, second } => {
-                let same = if first == second {
-                    true
-                } else {
-                    let first = canonical_path(&first)?;
-                    let second = canonical_path(&second)?;
-                    first.is_some() && first == second
-                };
+                // Even identical path strings have no file identity when the file is absent.
+                // Resolve both through the provider so a missing configuration source cannot
+                // be mistaken for an existing layer during bootstrap.
+                let first = canonical_path(&first)?;
+                let second = canonical_path(&second)?;
+                let same = first.is_some() && first == second;
                 Ok(ConfigurationValue::Bool(same))
             }
             ConfigurationRequest::Paths => {

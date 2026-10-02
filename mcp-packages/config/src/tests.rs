@@ -141,9 +141,12 @@ fn same_file_is_resolved_by_the_provider() {
     std::os::unix::fs::symlink(&file_path, &link).unwrap();
     let client = ConfigurationClient::local().unwrap();
     assert!(client.same_file(&file_path, &link).unwrap());
+    assert!(client.same_file(&file_path, &file_path).unwrap());
     assert!(!client
         .same_file(&file_path, &directory.path().join("missing"))
         .unwrap());
+    let missing = directory.path().join("missing");
+    assert!(!client.same_file(&missing, &missing).unwrap());
 }
 
 #[tokio::test(flavor = "current_thread")]
