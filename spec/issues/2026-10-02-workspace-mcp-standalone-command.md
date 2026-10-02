@@ -1,6 +1,6 @@
 # 独立 Workspace MCP 进程：`peri mcp-start workspace`
 
-状态：开发中。用户已确定进程边界：`peri` 是命令分派器，`mcp-start workspace` 启动独立、纯 MCP 的工作进程。CLI/worker、运行时任务边界和定向 wire 测试已落地；发行包、TS SDK 联动与完整集成验收仍待完成。本文其余未验收能力仍是目标设计。
+状态：开发中。用户已确定进程边界：`peri` 是命令分派器，`mcp-start workspace` 启动独立、纯 MCP 的工作进程。CLI/worker、运行时任务边界、定向 wire 测试与 TS SDK HTTP Workspace 联动已落地；发行包与完整集成验收仍待完成。本文其余未验收能力仍是目标设计。
 
 当前开发状态：项目使用 `rmcp 3.5.0`，其发布版本的 `SubscriptionFilter` 尚无 Tasks 扩展的 `taskIds`，`SubscriptionSink` 尚不转发 `notifications/tasks`。[项目补丁](../../patches/rmcp-3.5.0-task-subscriptions.patch)覆盖任务 ID 过滤、客户端能力与任务访问校验、通知发送与接收；通过 [构建脚本](../../scripts/cargo-rmcp-patched.sh)从已校验的 crates.io 发布包重建本地 patched crate，具体命令见 [补丁说明](../../patches/README.md)。仓库不提交第三方源码，也不依赖 GitHub fork。Workspace 已提供 `tasks/get`/`tasks/cancel`、可查询状态和任务订阅；Peri 的工具桥接已消费任务回执与通知，重启后跨进程恢复仍未实现。
 
@@ -48,7 +48,7 @@ peri（薄命令分派器）
 
 HTTP 模式下，Sandbox 持有 Workspace MCP 进程与 URL，生命周期独立于某个 Agent/Session；`Session.start()` 须待其 MCP 协议握手可用，再将 URL 声明为会话级 HTTP `workspace`。Peri 只运行 Agent 并作为 MCP client 消费该外部 Workspace；显式外部来源应替换同名 builtin 来源，`tools/list` 是其 direct 工具清单权威，资源面也来自该连接。Peri 保存由工具调用返回的 task ID 与本地会话/呈现关系，按协议订阅与查询状态；它不成为该 Bash 的任务 owner。MCP Tasks 扩展没有 `tasks/list`，重连后不能靠列举找回 task ID。Agent 关闭不自动关闭 Sandbox 的 Workspace 进程。[^mcp-tasks]
 
-stdio 模式下，可由 MCP client 根据 `command + args` 启动该二进制，连接退出即关闭该 MCP 进程；它适合本地单连接，不承担 HTTP 模式的独立驻留。SDK demo 若演示 Workspace，只启动已打包的命令，不在 Bun 中重写 Workspace MCP handler。现有 demo 的 Bun HTTP server 是假模型端点，不是 Workspace MCP。
+stdio 模式下，可由 MCP client 根据 `command + args` 启动该二进制，连接退出即关闭该 MCP 进程；它适合本地单连接，不承担 HTTP 模式的独立驻留。SDK demo 通过 Sandbox 启动独立 Workspace MCP 命令，由 Bun HTTP server 提供页面与 Session 管理 API。
 
 `Sandbox.id / workspaceId` 属于 TS 与工具环境的身份；此命令不改变 Peri Session Store 当前的 `machine_id` 来源。二者要相等仍是独立的 Peri 启动身份契约缺口，不能借 MCP 参数或环境变量假称已解决。
 
@@ -59,9 +59,9 @@ stdio 模式下，可由 MCP client 根据 `command + args` 启动该二进制�
 - 同一测试夹具分别通过真实 stdio 与真实 HTTP wire 验证七工具的 `tools/list`、代表性 `tools/call`、完整资源清单/读取、订阅、错误映射；两种 transport 的结果一致，不能只调用 handler 单测。
 - 后台 Bash 覆盖创建任务后的立即 `tasks/get`、终态结果、按 task ID 订阅通知、取消、断订重订后的查询对账、进程关闭；Peri 侧验证保存 task ID、会话投影与唤醒，而不传本地回调/manager。其他 Agent/Workflow 任务不受迁移影响。
 - 资源配置覆盖空根、项目/插件根、关闭 builtin 资产、非法路径；外部 client 可选择不读取或不注入任何资源，Workspace 仍如实提供可见资源。必须验证请求不能越权切换工作区根，并记录 Bash 仍具有当前 OS 用户权限的事实。
-- TS SDK 从 Sandbox 启动 HTTP Workspace、等待 MCP 协议握手/发现可用、创建 Agent Session、消费工具/资源、关闭 Agent 后保留 Workspace、最终由 Sandbox 关闭；不要求此 issue 解决多实例接管、Serverless 或 Peri `machine_id` 注入。
+- TS SDK 从 Sandbox 启动 HTTP Workspace、等待 MCP 协议握手与 `tools/list` 发现、创建 Agent Session；Peri 作为 MCP client 消费工具与资源；关闭 Agent 后保留 Workspace，最终由 Sandbox 关闭。不要求此 issue 解决多实例接管、Serverless 或 Peri `machine_id` 注入。
 
-实施完成后，按 `DOC-UPDATE-001` 同步 CLI 帮助、MCP 包代码索引、SDK demo 与当前设计文档；在此之前以上命令仅是目标接口。
+剩余发行与完整集成验收完成后，按 `DOC-UPDATE-001` 同步 CLI 帮助、MCP 包代码索引、SDK demo 与当前设计文档；上述命令已有实现，未验收项仍按本 issue 跟踪。
 
 ## 落地切分
 
