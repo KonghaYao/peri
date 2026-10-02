@@ -1,5 +1,6 @@
+// 详细设计用的场景伪代码；managedAgentKv 等由宿主提供。
 // 实际就是 meta_harness 全部关闭
-const bearHarness = new BearHarness();
+const bearHarness = BareHarnessConfig;
 
 const config = {
     meta_harness: {
@@ -10,84 +11,73 @@ const config = {
     },
 };
 // session 的存储器配置，只需传递给 peri，peri 会自动连接
-const storage = new TrusoStorage();
-const machineId = Bun.env.PERI_MACHINE_ID; // 由业务管理，必须是当前执行机的稳定 UUID
-if (!machineId) throw new Error("PERI_MACHINE_ID 不能为空");
-// 本质是 0728 的 MCP Http 模式的 workspace mcp 配置，传递给 peri 自动连接
-const workspace = new Workspace({
-    path: "/app/workspace",
-    machineId,
-    url: "https://workspace.peri-demo.demo/mcp", // 由宿主映射到 mcpServers.workspace.url，工具以 tools/list 为准
-});
+const storage = new TursoStorage({ url: "libsql://<database>.turso.io", authToken: "<secret>" });
 
+const workspaceId = "workspaceId";
+const sandbox = new Sandbox({
+    id: workspaceId,
+    path: "/tmp/peri-workspace",
+    storage,
+    stdio: {
+        command: "peri",
+        settings: { config: { ...config, active_alias: "sonnet" } },
+    },
+    workspace: { url: "https://<workspace-host>/mcp" },
+});
+// 本质是 0728 的 MCP Http 模式的 workspace mcp 配置，传递给 peri 自动连接
+const workspace = sandbox.getWorkspace()
 // 本地 Transport 的启动输入；以后换 WS Transport 时，Agent / Session 接口不用改。
-// config + model 由本地 Transport 写入 settings.json；ACP 分支目前不消费 --model。
-const periLaunch = {
-    command: "peri",
-    settingsFile: "/app/peri/settings.json",
-    settings: { config: { ...config, model: "sonnet" } }, // 本地 Transport 启动前写入 settingsFile
-    args: [
-        "--config-file", "/app/peri/settings.json",
-        "--session-store", "env:TURSO_URL",
-        "--session-store-token-env", "TURSO_AUTH_TOKEN",
-        "--session-store-engine", "turso",
-        "acp", "--cwd", workspace.path,
-    ],
-    env: { PERI_MACHINE_ID: machineId, TURSO_URL: Bun.env.TURSO_URL, TURSO_AUTH_TOKEN: Bun.env.TURSO_AUTH_TOKEN },
-};
-// ACP 顺序：启动进程 → initialize → session/new。
+// 本地 Transport 在 ACP 开始前，经子进程 stdin 写入 4 字节大端长度 + settings JSON。
+// 现有 Peri 不接受 workspaceId 作为 machineId；此 id 目前只用于 SDK 的 KV 占位作用域。
+// Sandbox 在 Session.start 时启动 Transport，并使用构造时传入的 Storage。
+// ACP 顺序：启动进程 → initialize → session/new 或 session/load。
 // session/new: { cwd: workspace.path, mcpServers: [{ type: "http", name: "workspace",
 //   url: workspace.url, headers: [] }], _meta: { "peri.instructions": instructions } }。
 // 其他 mcpServers 也在会话 setup 数组中传递；load/resume/fork 切换会话时要重传同一声明。
 // initialize 只协商能力。
 
-// 这个是批量管理 Agent 的方案
-// const periManager = new ManagedAgents({
-//
-// })
-// periManager.createAgent()
-
-// Agent 实现一定要分清楚 Transport 层，将 TS 与 peri 的通信抽象为 Transport；遥远未来的集群方案，每个 Transport 可能还会改为 ws 通信，所以先抽象好
-const agent = new Agent({
+// ManagedAgents 同步登记 Agent 声明；一个 Agent 只绑定一个 Session。
+// 宿主注入共享 unjs KV；其占位适配器必须提供原子 claim-if-absent。
+// createAgent 不占位；异步 start 才按 Agent/Session 身份占位，先到先得，后来者报错。
+// Transport 工厂也只在 start 时调用；Sandbox 的进程重试由 Sandbox 自己负责。
+const managedAgents = new ManagedAgents({ kv: managedAgentKv });
+const requestedSessionId: string | null = null; // 业务请求传已有 ID 时恢复，否则新建。
+const agent = managedAgents.createAgent({
     id: "test-agent",
-    transport: createTransport(periLaunch), // Agent 只依赖 Transport 接口
-    config,
-    model: "sonnet",
-    storage,
-    workspace,
+    sandbox,
     // ACP 无标准 instructions 字段；Peri 用 session/new._meta["peri.instructions"] 传递并冻结。
     instructions: "你是一个有趣的 AI 助手，能回答用户的问题",
     // 这里是额外 MCP；Workspace 自动合入 session/new.mcpServers 数组。
     mcpServers: {},
 });
 
-const session = await agent.session.start(); // 这个时候才初始化 ACP 相关的进程
+const session = await agent.session.start(requestedSessionId); // 原子占位成功后才创建 Transport、初始化 ACP 并绑定会话。
 
-(async () => {
-    // 所有的 ACP 往返交互都需要封装为 PeriEvent，发送给 peri的 json 也是这个格式，
-
-    // 监听异步的信息流
-    for await (const event of session.stream()) console.log(event); //所有 Event 都是规范的 PeriEvent extends ACPEvent，Peri业务属性的自定义 Event 需要在这里支持
+// 场景 1：持续消费当前连接的事件；SDK 把 ACP 更新转为 PeriEvent。
+void (async () => {
+    for await (const event of session.stream()) console.log(event);
 })();
 
-// plan a： 查询 sessions，其实就是直接查询 storage， peri 需要提供 sessions 查询的 cli 命令行能力，从而无需开进程；
-//plan b：这个函数本质是 ts 端连接 session 并查询的。
-const sessions = await session.listSessions();
-const sessionId = sessions[0]?.id || null; // null 是新建 session 的标志
-session.changeSession(sessionId); // 这个时候才切换入会话
+// 场景 2：Agent 经 Sandbox 直接查询 Session Store，不经过 ACP；供下一次创建 Agent 时选择。
+const sessions = await agent.getSessions();
+console.log("available sessions", sessions);
+const firstMessage = session.send("Hello, world!");
+await firstMessage; // 只等待这次用户输入被投递；Run 仍可接收后续输入。
 
-(async () => {
-    // 本质上这里的都是 ACP 信道传递信息
-    sleep(1000);
-    session.send("Hello, world!"); // 只有被发送完成才结束 Promise
-    console.log("session status", session.status);
-    sleep(1000);
-    console.log("session status", session.status);
-    const command = session.send("into waiting list"); // 只有被发送完成才结束 Promise
-    console.log("is sent", command.isSent);
-    command.forceSend(); // 强制发送,peri 有这个特定的方式
+// 场景 3：同一个 Run 中继续插入用户输入；忙碌时可先进入待发送队列。
+const followup = session.send("再看看测试覆盖");
+await followup;
+const command = session.send("into waiting list");
+console.log("is sent", command.isSent);
+command.forceSend(); // 请求立即派发；是否执行及何时执行由 Peri 裁决。
+await command;
 
-    await session.cancel();
+// 场景 4：请求中断当前执行，不关闭 Run 或 Session；仍能插入新输入。
+await session.cancel();
+await session.send("换一个更小的问题");
 
-    // 取消后，session.status 会变为正常
-})();
+// 场景 5：另一实例同时 start 同一 Agent/Session 时，KV 占位失败并明确报冲突。
+// 场景 6：服务不再需要此 Agent 时显式关闭；Session 与 Sandbox 仍由各自的 owner 保留。
+async function releaseAgent() {
+    await managedAgents.closeAgent(agent.id); // 仅释放自己持有的 KV 占位。
+}

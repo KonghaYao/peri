@@ -1,0 +1,572 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Peri Chat · SDK Demo</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+  </head>
+  <body class="bg-white text-slate-900 antialiased">
+    <div class="flex h-screen min-h-[32rem] overflow-hidden">
+      <aside
+        class="hidden w-64 shrink-0 flex-col border-r border-slate-200 bg-slate-50 p-4 md:flex"
+      >
+        <div class="flex items-center gap-3 px-2 py-2">
+          <div
+            class="grid size-9 place-items-center rounded-xl bg-slate-900 text-sm font-bold text-white"
+          >
+            P
+          </div>
+          <div class="font-semibold tracking-tight">Peri</div>
+        </div>
+        <a href="/" class="mt-4 rounded-xl border border-slate-200 bg-white px-3 py-2 text-center text-sm font-medium text-slate-700 hover:bg-slate-100">新建会话</a>
+        <div
+          class="mt-8 px-2 text-xs font-semibold uppercase tracking-widest text-slate-400"
+        >
+          对话
+        </div>
+        <div id="session-list" class="mt-3 min-h-0 flex-1 space-y-1 overflow-y-auto" aria-label="会话列表">
+          <div class="px-3 py-2 text-xs text-slate-500">读取会话中…</div>
+        </div>
+        <div
+          class="mt-auto rounded-xl border border-slate-200 bg-white p-3 text-xs leading-relaxed text-slate-500"
+        >
+          SDK 演示环境<br />工作区来自环境变量，会话存储使用本地 HTTP 数据库
+        </div>
+      </aside>
+
+      <main class="flex min-w-0 flex-1 flex-col">
+        <header
+          class="flex h-16 shrink-0 items-center justify-between border-b border-slate-100 px-4 sm:px-7"
+        >
+          <div class="flex items-center gap-3">
+            <div
+              class="grid size-8 place-items-center rounded-lg bg-slate-900 text-xs font-bold text-white md:hidden"
+            >
+              P
+            </div>
+            <div>
+              <h1 class="text-sm font-semibold sm:text-base">Peri Chat</h1>
+              <p id="status" class="text-xs text-slate-500">连接中…</p>
+            </div>
+          </div>
+          <button
+            id="open-info"
+            type="button"
+            aria-haspopup="dialog"
+            class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-slate-400"
+          >
+            <svg
+              aria-hidden="true"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.8"
+              class="size-4"
+            >
+              <circle cx="12" cy="12" r="9" />
+              <path stroke-linecap="round" d="M12 11v5m0-8h.01" />
+            </svg>
+            信息
+          </button>
+        </header>
+
+        <div id="chat-scroll" class="min-h-0 flex-1 overflow-y-auto">
+          <div
+            id="messages"
+            role="log"
+            aria-live="polite"
+            class="mx-auto flex max-w-3xl flex-col gap-7 px-4 py-8 sm:px-8"
+          >
+            <div
+              id="welcome"
+              class="mx-auto flex max-w-md flex-col items-center py-16 text-center sm:py-24"
+            >
+              <div
+                class="grid size-14 place-items-center rounded-2xl bg-slate-900 text-xl font-semibold text-white shadow-sm"
+              >
+                P
+              </div>
+              <h2 class="mt-6 text-2xl font-semibold tracking-tight">
+                有什么可以帮你？
+              </h2>
+              <p class="mt-2 text-sm leading-6 text-slate-500">
+                输入一条消息，开始与 Peri 对话。
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <div
+          class="shrink-0 bg-gradient-to-t from-white via-white to-white/90 px-4 pb-4 pt-2 sm:px-8 sm:pb-6"
+        >
+          <form
+            id="composer"
+            class="mx-auto max-w-3xl rounded-2xl border border-slate-200 bg-white p-2 shadow-[0_4px_24px_rgba(15,23,42,0.08)] focus-within:border-slate-300"
+          >
+            <label class="sr-only" for="message">消息</label>
+            <textarea
+              id="message"
+              rows="2"
+              maxlength="8000"
+              placeholder="向 Peri 发送消息…"
+              class="max-h-40 min-h-14 w-full resize-none bg-transparent px-3 py-2 text-sm leading-6 outline-none placeholder:text-slate-400"
+            ></textarea>
+            <div class="flex items-center justify-between px-2 pb-1">
+              <span class="text-xs text-slate-400"
+                >Enter 发送 · Shift + Enter 换行</span
+              >
+              <button
+                id="send"
+                type="submit"
+                aria-label="发送消息"
+                class="grid size-9 place-items-center rounded-xl bg-slate-900 text-white transition hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                <svg
+                  aria-hidden="true"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  class="size-5"
+                >
+                  <path
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    d="M12 19V5m-6 6 6-6 6 6"
+                  />
+                </svg>
+              </button>
+            </div>
+          </form>
+          <p
+            id="error"
+            role="alert"
+            class="mx-auto mt-2 min-h-4 max-w-3xl text-xs text-rose-600"
+          ></p>
+        </div>
+      </main>
+    </div>
+
+    <div
+      id="info-overlay"
+      class="fixed inset-0 z-50 hidden items-center justify-center bg-slate-950/50 p-3 backdrop-blur-sm sm:p-6"
+    >
+      <section
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="info-title"
+        class="flex h-[min(80vh,780px)] w-full max-w-5xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl"
+      >
+        <header
+          class="flex shrink-0 items-center justify-between border-b border-slate-200 px-5 py-4"
+        >
+          <div>
+            <h2 id="info-title" class="text-base font-semibold">会话信息</h2>
+            <p class="mt-0.5 text-xs text-slate-500">
+              浏览会话字段和原始 ACP 事件
+            </p>
+          </div>
+          <button
+            id="close-info"
+            type="button"
+            aria-label="关闭信息弹窗"
+            class="grid size-9 place-items-center rounded-lg text-slate-500 hover:bg-slate-100 hover:text-slate-900"
+          >
+            ✕
+          </button>
+        </header>
+        <div class="flex min-h-0 flex-1">
+          <nav
+            aria-label="信息列表"
+            class="w-36 shrink-0 overflow-y-auto border-r border-slate-200 bg-slate-50 p-2 sm:w-64 sm:p-3"
+          >
+            <div
+              class="px-2 py-2 text-xs font-semibold uppercase tracking-wider text-slate-400"
+            >
+              概览
+            </div>
+            <div id="info-fields" class="space-y-1"></div>
+            <div
+              class="mt-5 flex items-center justify-between px-2 py-2 text-xs font-semibold uppercase tracking-wider text-slate-400"
+            >
+              <span>事件</span><span id="event-count">0</span>
+            </div>
+            <div id="info-events" class="space-y-1"></div>
+          </nav>
+          <div class="flex min-w-0 flex-1 flex-col">
+            <div class="border-b border-slate-100 px-4 py-3 sm:px-6">
+              <h3 id="detail-title" class="truncate text-sm font-semibold">
+                选择左侧项目
+              </h3>
+            </div>
+            <pre
+              id="detail"
+              class="min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-words p-4 font-mono text-xs leading-6 text-slate-700 sm:p-6"
+            ></pre>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <script type="module">
+      import { EventStreamContentType, fetchEventSource } from "/vendor/fetch-event-source.js";
+      const $ = (id) => document.getElementById(id);
+      let cursor = 0;
+      let session = null;
+      let selected = "field:sessionId";
+      const entries = [];
+      const userMessages = new Map();
+      const assistantMessages = new Map();
+      const toolCalls = new Map();
+      let sessionRefresh;
+      const fieldLabels = {
+        agentId: "Agent",
+        sessionId: "Session",
+        workspace: "Workspace",
+        workspaceMcp: "Workspace MCP",
+      };
+
+      async function postJson(path, body = {}) {
+        const response = await fetch(path, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        const data = await response.json();
+        if (!response.ok)
+          throw new Error(data.error || `HTTP ${response.status}`);
+        return data;
+      }
+
+      function scrollToLatest() {
+        const scroller = $("chat-scroll");
+        scroller.scrollTop = scroller.scrollHeight;
+      }
+
+      function addMessage(role, text) {
+        $("welcome")?.remove();
+        const row = document.createElement("div");
+        row.className = role === "user" ? "flex justify-end" : "flex gap-3";
+        const content = document.createElement("div");
+        if (role === "user") {
+          content.className =
+            "max-w-[85%] whitespace-pre-wrap break-words rounded-2xl bg-slate-100 px-4 py-3 text-sm leading-6 text-slate-800 sm:max-w-[75%]";
+          row.append(content);
+        } else {
+          const avatar = document.createElement("div");
+          avatar.className =
+            "grid size-8 shrink-0 place-items-center rounded-lg bg-slate-900 text-xs font-bold text-white";
+          avatar.textContent = "P";
+          content.className =
+            "min-w-0 flex-1 whitespace-pre-wrap break-words pt-1 text-sm leading-7 text-slate-800";
+          row.append(avatar, content);
+        }
+        content.textContent = text;
+        $("messages").append(row);
+        scrollToLatest();
+        return content;
+      }
+
+      function eventPayload(entry) {
+        const notification = entry.notification;
+        if (notification.method !== "peri/agent_event")
+          return notification.params?.update;
+        try {
+          return JSON.parse(notification.params.event_json);
+        } catch {
+          return notification.params;
+        }
+      }
+
+      function formatToolValue(value) {
+        if (value === undefined || value === null) return "";
+        if (typeof value === "string") return value;
+        if (Array.isArray(value))
+          return value.map((item) => formatToolValue(item.content ?? item)).join("\n");
+        if (value.type === "text") return value.text ?? "";
+        return JSON.stringify(value, null, 2);
+      }
+
+      function showToolEvent(payload) {
+        const id = payload.toolCallId;
+        if (!id) return;
+        let tool = toolCalls.get(id);
+        if (!tool) {
+          $("welcome")?.remove();
+          const row = document.createElement("details");
+          row.className = "ml-11 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-xs text-slate-700";
+          const summary = document.createElement("summary");
+          summary.className = "cursor-pointer font-medium";
+          const body = document.createElement("pre");
+          body.className = "mt-3 max-h-64 overflow-auto whitespace-pre-wrap break-words text-xs leading-5";
+          row.append(summary, body);
+          $("messages").append(row);
+          tool = { summary, body, title: "工具调用", input: "", output: "", status: "进行中" };
+          toolCalls.set(id, tool);
+        }
+        if (payload.title) tool.title = payload.title;
+        if (payload.rawInput !== undefined)
+          tool.input = formatToolValue(payload.rawInput);
+        if (payload.content !== undefined)
+          tool.output = formatToolValue(payload.content);
+        if (payload.status)
+          tool.status = { in_progress: "进行中", completed: "已完成", failed: "失败" }[payload.status] ?? payload.status;
+        tool.summary.textContent = `${tool.title} · ${tool.status}`;
+        tool.body.textContent = [
+          tool.input && `输入\n${tool.input}`,
+          tool.output && `结果\n${tool.output}`,
+        ].filter(Boolean).join("\n\n") || "等待工具结果…";
+        scrollToLatest();
+      }
+
+      function showChatEvent(entry) {
+        const payload = eventPayload(entry);
+        switch (payload?.type ?? payload?.sessionUpdate) {
+          case "user_input_delivered":
+            if (typeof payload.value?.content === "string" && payload.value.input_id) {
+              const key = `input:${payload.value.input_id}`;
+              if (!userMessages.has(key))
+                userMessages.set(key, addMessage("user", payload.value.content));
+            }
+            scheduleSessionRefresh();
+            break;
+          case "user_message_chunk": {
+            if (payload.content?.type !== "text") break;
+            const key = payload.messageId ?? `event:${entry.id}`;
+            let message = userMessages.get(key);
+            if (!message) {
+              message = addMessage("user", "");
+              userMessages.set(key, message);
+            }
+            message.textContent += payload.content.text;
+            scheduleSessionRefresh();
+            scrollToLatest();
+            break;
+          }
+          case "agent_message_chunk": {
+            if (payload.content?.type !== "text") break;
+            const key = payload.messageId ?? `event:${entry.id}`;
+            let message = assistantMessages.get(key);
+            if (!message) {
+              message = addMessage("assistant", "");
+              assistantMessages.set(key, message);
+            }
+            message.textContent += payload.content.text;
+            scrollToLatest();
+            break;
+          }
+          case "tool_call":
+          case "tool_call_update":
+            showToolEvent(payload);
+            break;
+          case "usage_update":
+            scheduleSessionRefresh();
+            break;
+        }
+      }
+
+      async function refreshSessions() {
+        try {
+          const { sessions } = await postJson("/api/session/list");
+          const rows = sessions.map((entry) => {
+            const active = entry.id === session?.sessionId;
+            const row = document.createElement("button");
+            row.type = "button";
+            row.className = `block w-full rounded-xl px-3 py-3 text-left text-sm transition ${active ? "bg-slate-200/70 text-slate-900" : "text-slate-600 hover:bg-slate-100"}`;
+            const title = document.createElement("div");
+            title.className = "truncate font-medium";
+            title.textContent = entry.title || (active ? "当前会话" : "未命名会话");
+            const detail = document.createElement("div");
+            detail.className = "mt-1 truncate text-xs text-slate-500";
+            detail.textContent = `${entry.id.slice(0, 8)} · ${new Date(entry.updatedAt).toLocaleString()} · ${entry.messageCount} 条消息`;
+            row.title = entry.id;
+            row.setAttribute("aria-label", `进入会话 ${entry.title || entry.id}`);
+            if (active) row.setAttribute("aria-current", "page");
+            else row.addEventListener("click", () => {
+              location.assign(`/?sessionId=${encodeURIComponent(entry.id)}`);
+            });
+            row.append(title, detail);
+            return row;
+          });
+          $("session-list").replaceChildren(...rows);
+        } catch (error) {
+          $("session-list").textContent = `读取会话失败：${error.message}`;
+        }
+      }
+
+      function scheduleSessionRefresh() {
+        if (sessionRefresh) return;
+        sessionRefresh = setTimeout(() => {
+          sessionRefresh = undefined;
+          void refreshSessions();
+        }, 500);
+      }
+
+      function infoItems() {
+        const fields = Object.entries(fieldLabels).map(([key, title]) => ({
+          key: `field:${key}`,
+          title,
+          subtitle: session?.[key] ?? "连接中…",
+          detail: session?.[key] ?? "连接中…",
+        }));
+        const events = [...entries].reverse().map((entry) => {
+          const payload = eventPayload(entry);
+          return {
+            key: `event:${entry.id}`,
+            title:
+              payload?.sessionUpdate ??
+              payload?.type ??
+              entry.notification.method,
+            subtitle: `#${entry.id} · ${entry.notification.method}`,
+            detail: JSON.stringify(entry.notification, null, 2),
+          };
+        });
+        return { fields, events };
+      }
+
+      function itemButton(item) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = `w-full rounded-lg px-2 py-2 text-left transition ${selected === item.key ? "bg-slate-200 text-slate-900" : "text-slate-600 hover:bg-slate-100"}`;
+        const label = document.createElement("span");
+        label.className = "block truncate text-xs font-medium sm:text-sm";
+        label.textContent = item.title;
+        const hint = document.createElement("span");
+        hint.className = "mt-0.5 block truncate text-[11px] text-slate-400";
+        hint.textContent = item.subtitle;
+        button.append(label, hint);
+        button.addEventListener("click", () => {
+          selected = item.key;
+          renderInfo();
+        });
+        return button;
+      }
+
+      function renderInfo() {
+        const { fields, events } = infoItems();
+        $("info-fields").replaceChildren(...fields.map(itemButton));
+        $("info-events").replaceChildren(...events.map(itemButton));
+        $("event-count").textContent = String(entries.length);
+        const item = [...fields, ...events].find((row) => row.key === selected);
+        $("detail-title").textContent = item?.title ?? "选择左侧项目";
+        $("detail").textContent = item?.detail ?? "";
+      }
+
+      const eventController = new AbortController();
+      addEventListener("beforeunload", () => eventController.abort(), { once: true });
+
+      function connectSession(requestedSessionId) {
+        let resolveReady;
+        let rejectReady;
+        const ready = new Promise((resolve, reject) => {
+          resolveReady = resolve;
+          rejectReady = reject;
+        });
+        const requestId = crypto.randomUUID();
+        void (async () => {
+          while (!eventController.signal.aborted) {
+            try {
+              await fetchEventSource("/api/session/create", {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({ sessionId: session?.sessionId ?? requestedSessionId, after: cursor, requestId }),
+                signal: eventController.signal,
+                openWhenHidden: true,
+                async onopen(response) {
+                  if (!response.ok || !response.headers.get("content-type")?.startsWith(EventStreamContentType)) {
+                    const data = await response.json().catch(() => ({}));
+                    const error = new Error(data.error || `HTTP ${response.status}`);
+                    error.fatal = response.ok || (response.status >= 400 && response.status < 500);
+                    throw error;
+                  }
+                },
+                onmessage(message) {
+                  if (message.event === "session") {
+                    session = JSON.parse(message.data);
+                    $("status").textContent = "已连接 · 本地演示";
+                    $("error").textContent = "";
+                    resolveReady();
+                    return;
+                  }
+                  if (message.event !== "notification") return;
+                  const entry = JSON.parse(message.data);
+                  if (entry.id <= cursor) return;
+                  cursor = entry.id;
+                  entries.push(entry);
+                  showChatEvent(entry);
+                  if (!$("info-overlay").classList.contains("hidden")) renderInfo();
+                },
+                onclose() { throw new Error("Session event stream closed"); },
+                onerror(error) { throw error; },
+              });
+            } catch (error) {
+              if (eventController.signal.aborted) break;
+              if (error.fatal) {
+                rejectReady(error);
+                $("status").textContent = "连接失败";
+                $("error").textContent = error.message;
+                break;
+              }
+              $("status").textContent = "事件重连中…";
+              await new Promise((resolve) => setTimeout(resolve, 1000));
+            }
+          }
+        })();
+        return ready;
+      }
+
+      $("composer").addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const text = $("message").value.trim();
+        if (!text) return;
+        $("send").disabled = true;
+        $("error").textContent = "";
+        try {
+          await postJson("/api/session/send", { sessionId: session.sessionId, text });
+          $("message").value = "";
+        } catch (error) {
+          $("error").textContent = error.message;
+        } finally {
+          $("send").disabled = false;
+          $("message").focus();
+        }
+      });
+      $("message").addEventListener("keydown", (event) => {
+        if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+          event.preventDefault();
+          $("composer").requestSubmit();
+        }
+      });
+      function closeInfo() {
+        $("info-overlay").classList.replace("flex", "hidden");
+        $("open-info").focus();
+      }
+      $("open-info").addEventListener("click", () => {
+        renderInfo();
+        $("info-overlay").classList.replace("hidden", "flex");
+        $("close-info").focus();
+      });
+      $("close-info").addEventListener("click", closeInfo);
+      $("info-overlay").addEventListener("click", (event) => {
+        if (event.target === $("info-overlay")) closeInfo();
+      });
+      document.addEventListener("keydown", (event) => {
+        if (
+          event.key === "Escape" &&
+          !$("info-overlay").classList.contains("hidden")
+        )
+          closeInfo();
+      });
+
+      try {
+        const selectedId = new URLSearchParams(location.search).get("sessionId");
+        await connectSession(selectedId);
+        await refreshSessions();
+      } catch (error) {
+        $("status").textContent = "连接失败";
+        $("error").textContent = error.message;
+      }
+    </script>
+  </body>
+</html>

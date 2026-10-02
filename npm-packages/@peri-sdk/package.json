@@ -1,0 +1,31 @@
+{
+  "name": "@peri-code/sdk",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Bun host SDK for Peri's existing ACP stdio endpoint",
+  "exports": {
+    ".": {
+      "types": "./dist/sdk/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist", "README.md"],
+  "scripts": {
+    "build": "bun build src/sdk/index.ts --outdir dist --target bun --format esm && tsc --emitDeclarationOnly --declaration --outDir dist",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.demo.json",
+    "test": "bun test",
+    "dev": "bun run examples/demo/demo.ts",
+    "db:dev": "mise exec -- sqld --no-welcome --http-listen-addr 127.0.0.1:8081 --db-path ../../target/peri-sdk-local-turso",
+    "demo": "bun run examples/demo/demo.ts"
+  },
+  "devDependencies": {
+    "bun-types": "^1.4.2",
+    "hono": "^4.6",
+    "typescript": "^7.0.0"
+  },
+  "dependencies": {
+    "@microsoft/fetch-event-source": "2.0.1",
+    "@tursodatabase/serverless": "1.4.0"
+  }
+}
