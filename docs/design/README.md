@@ -33,7 +33,7 @@ draft、proposal、可行性探查、审计报告和未采纳方案不进入本�
 | PTC | [programmatic-tool-calling.md](programmatic-tool-calling.md) | JavaScript host、RPC 与 effective tool dispatch |
 | 交互 broker | [interaction-brokers.md](interaction-brokers.md) | Approval/Questions broker 与 transport 交互 |
 | 消息存储 | [message-transcript.md](message-transcript.md) | Transcript、MessageQueue、staging 与持久化 |
-| 会话、项目与 Worktree 身份 | [session-workspace-identity.md](session-workspace-identity.md) | 持久绑定、工作区环境、跨进程 lease 与单库 schema 升级 |
+| 会话身份、工作区归属与恢复 | [session-id-environment.md](session-id-environment.md) | Session ID 与机器归属、工作区发现与登记、执行绑定与恢复入口；进度与验收见 [核心改动清单](../../spec/issues/2026-09-30-session-id-environment-core-change.md) |
 | 用户待发送队列 | [user-input-queue.md](user-input-queue.md) | Mailbox、单条/全部投递、取回与运行身份 |
 | Compact | [micro-compact.md](micro-compact.md) | 压缩计划与 LLM projection |
 | Dynamic MCP | [dynamic-mcp.md](dynamic-mcp.md) | session 动态加载、目录发布与关闭 |
@@ -53,7 +53,6 @@ draft、proposal、可行性探查、审计报告和未采纳方案不进入本�
 | --- | --- | --- |
 | Session 异步任务统一入口 | [session-async-tasks.md](session-async-tasks.md) | 任务投影、Store 执行代际、Workspace fencing 与可信关闭接管边界见设计第 5–6 节 |
 | 存储 v2：Machine → Workspace → Session | [storage-v2-machine-workspace-session.md](storage-v2-machine-workspace-session.md) | `spec/issues/2026-10-02-storage-v2-machine-workspace-session.md`；schema 版本以代码索引为准，Git 使用 worktree 根、非 Git 使用启动 cwd；验收状态见 active issue |
-| Session ID 恢复与机器 env 分区 | [session-id-environment.md](session-id-environment.md) | `spec/issues/2026-09-30-session-id-environment-core-change.md`；取代旧文件锁/dirty 恢复准入 |
 | Command 系统 | [command-system.md](command-system.md) | 对应 command active issue 与代码 |
 | TUI Chat Workbench | [tui-chat-workbench.md](tui-chat-workbench.md) | `spec/history/2026-08.md`（2026-08-10 条目） |
 | SubAgent 活动行 | [tui-subagent-activity.md](tui-subagent-activity.md) | TUI redesign active issue |

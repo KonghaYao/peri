@@ -322,7 +322,7 @@ JavaScript 执行环境为 ESM-only。Node module 只能在函数体内使用动
 
 会话 TaskManager 持有实际 execution future；调用方停止等待只请求取消，不丢弃
 清理。外部执行 token 在 JS 返回已确认的清理结果后才能结清，`CleanupFailed`
-必须保留未知状态。OS 范围遵循 [会话身份设计](session-workspace-identity.md)。
+必须保留未知状态。OS 范围遵循 [会话身份设计](session-id-environment.md)。
 
 外层 `RunPtcCode` 取消必须：
 

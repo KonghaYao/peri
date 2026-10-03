@@ -87,7 +87,7 @@
 - `peri-resources/src/sessions/remote/{schema,session_schema,session_sql,session_codec,session_history,session_data}.rs`。
 - `peri-acp-types/src/{thread/types,store/mod,session_resources}.rs`，`peri-acp/src/session/construction.rs` 与 `goal_state/`。
 - `side-projects/peri-db-viewer/`、`side-projects/agent-defect-analyzer/`、`scripts/migrate-opencode-to-peri.ts`。
-- [现行资源入口](../../docs/code-index/peri-resources.md)、[会话/workspace 设计](../../docs/design/session-workspace-identity.md)、[元数据控制设计](../../docs/design/meta-control.md)、[架构契约](../../docs/standards/architecture-contracts.md)。
+- [现行资源入口](../../docs/code-index/peri-resources.md)、[会话身份与工作区设计](../../docs/design/session-id-environment.md)、[元数据控制设计](../../docs/design/meta-control.md)、[架构契约](../../docs/standards/architecture-contracts.md)。
 
 ## Blocked by
 

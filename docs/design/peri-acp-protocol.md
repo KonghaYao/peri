@@ -57,8 +57,8 @@ TUI 的所有主动行为通过标准 ACP JSON-RPC 方法调用。不定义自�
   同一种存储模式，两者存储模式一致（schema/SQL 统一是后续工作）。
 - `session/metadata` 读取轻量标题与当前会话配置投影；不做逐 tick Git 发现。
 
-类型事实源为 `peri-acp-types::workspace`；身份、恢复和执行锁约束见
-[会话工作区设计](session-workspace-identity.md)。
+类型事实源为 `peri-acp-types::workspace`；身份、恢复与执行准入约束见
+[会话身份与工作区设计](session-id-environment.md)。
 
 ### 2.2 交互
 
