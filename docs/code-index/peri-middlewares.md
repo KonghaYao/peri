@@ -30,6 +30,10 @@ MCP Tasks 的 UI 与模型投影：`src/mcp/tool_bridge.rs` 在 task receipt 返
 inbox 投递提醒。Builtin workspace Bash 的 `structuredContent` 解析为
 `BackgroundTaskResult`，提醒只包含退出信息与持久输出文件引用，不展开原始 JSON。
 ACP `host/prompt.rs` 按 session 注册事件 sink，session 注销时 pool 清理该 sink。
+Pool 按 session 记录已接收、仍在监视终态的 MCP Task；
+`McpPoolPort::has_active_tasks` 供 Agent 的 idle probe 使用，保证 `--print`
+在后台任务完成并唤醒 inbox 前不会退出。回归见
+`peri-tui/tests/print_background_exit.rs`。
 
 ### OAuth 凭证接入（实现完成）
 

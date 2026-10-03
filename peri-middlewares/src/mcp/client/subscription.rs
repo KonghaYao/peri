@@ -16,6 +16,24 @@ use serde_json::json;
 
 use super::{McpClientPool, McpServiceWrapper};
 
+struct ActiveTaskGuard {
+    pool: Arc<McpClientPool>,
+    session_id: String,
+    task_id: String,
+}
+
+impl Drop for ActiveTaskGuard {
+    fn drop(&mut self) {
+        let mut active = self.pool.active_tasks.write();
+        if let Some(tasks) = active.get_mut(&self.session_id) {
+            tasks.remove(&self.task_id);
+            if tasks.is_empty() {
+                active.remove(&self.session_id);
+            }
+        }
+    }
+}
+
 impl McpClientPool {
     pub fn register_task_event_sink(&self, session_id: &str, sink: Arc<dyn EventSink>) {
         self.task_event_sinks
@@ -52,6 +70,16 @@ impl McpClientPool {
         is_workspace_shell: bool,
         peer: Peer<RoleClient>,
     ) {
+        self.active_tasks
+            .write()
+            .entry(session_id.clone())
+            .or_default()
+            .insert(task_id.clone());
+        let guard = ActiveTaskGuard {
+            pool: Arc::clone(self),
+            session_id: session_id.clone(),
+            task_id: task_id.clone(),
+        };
         let pool = Arc::clone(self);
         let key = crate::mcp::McpTaskKey::TaskStatus {
             server: server.clone(),
@@ -59,6 +87,7 @@ impl McpClientPool {
         };
         let log_server = server.clone();
         if let Err(error) = self.task_spawner.spawn(key, async move {
+            let _guard = guard;
             let filter = SubscriptionFilter::builder().task_id(&task_id).build();
             let Ok(mut subscription) = peer.listen(filter).await else {
                 tracing::warn!(server = %server, task_id = %task_id, "MCP task subscription failed");

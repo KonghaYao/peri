@@ -347,7 +347,14 @@ pub fn build_stage_context(
     let task_manager = task_manager.unwrap_or_else(|| Arc::new(TaskManager::new()));
     let idle_should_wait: Option<Arc<dyn Fn() -> bool + Send + Sync>> = {
         let manager = task_manager.clone();
-        Some(Arc::new(move || manager.active_count() > 0))
+        let mcp_pool = input.mcp_pool.clone();
+        let session_id = session_id.clone();
+        Some(Arc::new(move || {
+            manager.active_count() > 0
+                || mcp_pool
+                    .as_ref()
+                    .is_some_and(|pool| pool.has_active_tasks(&session_id))
+        }))
     };
     // Subscribe before the Receive loop can probe active_count. The watch
     // version is only a retained wake signal; registry remains the state owner.

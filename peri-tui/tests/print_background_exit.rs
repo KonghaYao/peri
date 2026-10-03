@@ -150,17 +150,16 @@ async fn assert_background_output_exits(explicit_background: bool, bare: bool) {
                         })
                         .expect("必须收到指定 Bash 调用的真实工具结果");
                     if !explicit_background {
-                        // Timeout retains a safe background receipt, while command/output
-                        // text stays out of the failure projection.
+                        // MCP Tasks represents foreground timeout promotion as an
+                        // accepted task. Its receipt must remain free of output.
                         let rendered = tool_result.to_string();
                         assert_eq!(
-                            tool_result["is_error"], true,
-                            "前台超时必须如实以失败工具结果收口: {tool_result}"
+                            tool_result["is_error"], false,
+                            "超时提升必须返回可订阅的 MCP Task 回执: {tool_result}"
                         );
                         assert!(
-                            rendered.contains("task_id: shell-")
-                                && rendered.contains("pid: ")
-                                && rendered.contains("background task"),
+                            rendered.contains("Background task started: shell-")
+                                && rendered.contains("MCP Tasks subscription"),
                             "超时必须保留可恢复的后台回执: {tool_result}"
                         );
                         assert!(

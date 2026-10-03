@@ -37,7 +37,11 @@ use peri_acp_types::{
 };
 use readiness::SystemReadinessTracker;
 use rmcp::model::{Resource, ResourceContents, Tool};
-use std::{any::Any, collections::HashMap, sync::Arc};
+use std::{
+    any::Any,
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 pub(crate) use cache::cache_scope_allows_persistence;
 pub use oauth::OAuthStartDisposition;
@@ -144,6 +148,7 @@ pub struct McpClientPool {
     /// completions after the turn can still update the task area.
     pub(crate) task_event_sinks:
         parking_lot::RwLock<HashMap<String, Arc<dyn peri_acp_types::event::EventSink>>>,
+    pub(crate) active_tasks: parking_lot::RwLock<HashMap<String, HashSet<String>>>,
     /// 跨进程的 MCP Resource Cache；是否写入由响应 scope 与安全上下文共同决定。
     pub(crate) resource_cache: super::resource_cache::McpResourceCache,
     /// 进程启动时冻结的 deployment capability profile；初始连接和重连复用。
@@ -227,6 +232,7 @@ impl McpClientPool {
             active_oauth_flows: parking_lot::Mutex::new(HashMap::new()),
             session_inboxes: parking_lot::RwLock::new(HashMap::new()),
             task_event_sinks: parking_lot::RwLock::new(HashMap::new()),
+            active_tasks: parking_lot::RwLock::new(HashMap::new()),
             resource_cache: super::resource_cache::McpResourceCache::new(),
             capability_profile,
             app_binding_leases: Arc::new(super::apps::McpAppBindingLeaseRegistry::default()),
@@ -743,6 +749,13 @@ impl peri_acp_types::ports::McpPoolPort for McpClientPool {
         self
     }
 
+    fn has_active_tasks(&self, session_id: &str) -> bool {
+        self.active_tasks
+            .read()
+            .get(session_id)
+            .is_some_and(|tasks| !tasks.is_empty())
+    }
+
     fn begin_shutdown(&self) {
         McpClientPool::begin_shutdown(self);
     }
@@ -783,6 +796,7 @@ impl McpSubscriptionPort for McpClientPool {
     fn unregister_inbox(&self, session_id: &str) {
         self.session_inboxes.write().remove(session_id);
         self.task_event_sinks.write().remove(session_id);
+        self.active_tasks.write().remove(session_id);
     }
 
     fn as_any(&self) -> &dyn Any {

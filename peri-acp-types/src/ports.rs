@@ -78,6 +78,11 @@ pub trait McpPoolPort: Send + Sync {
     /// 还原具体实现（downcast 还原点，供 middlewares 装配面与装配面宿主使用）。
     fn as_any(&self) -> &dyn Any;
 
+    /// Whether this session has MCP Tasks whose terminal notification is pending.
+    fn has_active_tasks(&self, _session_id: &str) -> bool {
+        false
+    }
+
     /// Synchronously close task/callback/commit admission before external task
     /// owners are joined. Idempotent.
     fn begin_shutdown(&self) {}
