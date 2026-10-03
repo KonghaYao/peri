@@ -58,12 +58,17 @@ verify_dns() {
     grep -q 'emscripten_dns_lookup_async__sig:' "$frontend/src/lib/libsigs.js" &&
     grep -q 'emscripten_dns_lookup_async' "$frontend/system/include/emscripten/emscripten.h"
 }
+verify_workers_module_url() {
+    grep -Fq "createRequire(import.meta.url ?? Module['mainScriptUrlOrBlob'])" "$frontend/src/shell.js" &&
+    grep -Fq "var _scriptName = import.meta.url ?? Module['mainScriptUrlOrBlob'];" "$frontend/src/shell.js"
+}
 base_expected="$(cat "$repo_root/patches/emscripten/epoll-listeners.patch" "$repo_root/patches/emscripten/noderawsockets-dns.patch" | shasum -a 256 | cut -d ' ' -f 1)"
 legacy_base_expected="$(shasum -a 256 "$repo_root/patches/emscripten/epoll-listeners.patch" "$repo_root/patches/emscripten/noderawsockets-dns.patch" | shasum -a 256 | cut -d ' ' -f 1)"
-expected="$(cat "$repo_root/patches/emscripten/epoll-listeners.patch" "$repo_root/patches/emscripten/noderawsockets-dns.patch" "$repo_root/patches/emscripten/noderawsockets-bun.patch" | shasum -a 256 | cut -d ' ' -f 1)"
+previous_expected="$(cat "$repo_root/patches/emscripten/epoll-listeners.patch" "$repo_root/patches/emscripten/noderawsockets-dns.patch" "$repo_root/patches/emscripten/noderawsockets-bun.patch" | shasum -a 256 | cut -d ' ' -f 1)"
+expected="$(cat "$repo_root/patches/emscripten/epoll-listeners.patch" "$repo_root/patches/emscripten/noderawsockets-dns.patch" "$repo_root/patches/emscripten/noderawsockets-bun.patch" "$repo_root/patches/emscripten/workers-module-url.patch" | shasum -a 256 | cut -d ' ' -f 1)"
 if [[ -f "$stamp" ]]; then
     installed="$(cat "$stamp")"
-    if [[ "$installed" != "$expected" && "$installed" != "$base_expected" && "$installed" != "$legacy_base_expected" ]]; then
+    if [[ "$installed" != "$expected" && "$installed" != "$previous_expected" && "$installed" != "$base_expected" && "$installed" != "$legacy_base_expected" ]]; then
         echo "Emscripten patch files changed; reinstall the unpatched 6.0.10 frontend" >&2
         exit 1
     fi
@@ -73,8 +78,10 @@ if [[ -f "$stamp" ]]; then
     fi
     if [[ "$installed" == "$expected" ]]; then
         if ! grep -q "typeof Bun === 'undefined'" "$frontend/src/lib/libsockfs_node.js" ||
-           ! apply_patch --reverse --check "$repo_root/patches/emscripten/noderawsockets-bun.patch" >/dev/null 2>&1; then
-            echo "Emscripten Bun patch stamp exists but patch is missing or incomplete: $frontend" >&2
+           ! apply_patch --reverse --check "$repo_root/patches/emscripten/noderawsockets-bun.patch" >/dev/null 2>&1 ||
+           ! verify_workers_module_url ||
+           ! apply_patch --reverse --check "$repo_root/patches/emscripten/workers-module-url.patch" >/dev/null 2>&1; then
+            echo "Emscripten patch stamp exists but a patch is missing or incomplete: $frontend" >&2
             exit 1
         fi
         exit 0
@@ -115,6 +122,20 @@ elif apply_patch --check "$patch" >/dev/null 2>&1; then
     echo "Applied Bun NODERAWSOCKETS patch" >&2
 else
     echo "Emscripten Bun patch does not match $frontend; reinstall 6.0.10" >&2
+    exit 1
+fi
+patch="$repo_root/patches/emscripten/workers-module-url.patch"
+if apply_patch --reverse --check "$patch" >/dev/null 2>&1; then
+    : # Already installed by a previous interrupted run.
+elif apply_patch --check "$patch" >/dev/null 2>&1; then
+    apply_patch "$patch"
+    echo "Applied Workers module URL patch" >&2
+else
+    echo "Emscripten Workers module URL patch does not match $frontend; reinstall 6.0.10" >&2
+    exit 1
+fi
+if ! verify_workers_module_url; then
+    echo "Emscripten Workers module URL patch is incomplete: $frontend" >&2
     exit 1
 fi
 printf '%s\n' "$expected" > "$stamp"

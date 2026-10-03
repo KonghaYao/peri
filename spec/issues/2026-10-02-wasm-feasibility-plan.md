@@ -1,6 +1,6 @@
 # Peri WASM ACP 接入验收
 
-状态：Node/Bun 的 WASM SDK 接入已完成并通过目标运行时验收；Cloudflare Workers 部署尚未验收。原始目标见 `/Users/konghayao/Downloads/peri-wasm-plan.md`。分支为 `refactor/wasm`。
+状态：Node/Bun 的 WASM SDK 接入已完成并通过目标运行时验收；Wrangler 本地 `workerd` 的 ACP、模型及持久会话验收通过，Cloudflare 托管部署尚未验收。原始目标见 `/Users/konghayao/Downloads/peri-wasm-plan.md`。分支为 `refactor/wasm`。
 
 ## 已确定的边界
 
@@ -8,6 +8,7 @@
 - `peri-wasm::PeriWasmAcp` 只承载原始 JSON-RPC 帧。现有 `peri-acp` Host 处理 ACP 方法、事件、会话、取消和 MCP 反向请求；Rust 和 TypeScript 均不复制 ACP dispatcher。
 - `peri-resources` 以同一 `SessionResources` 契约接入可写 Turso adapter。合并存储 v2 后，Machine、Workspace、Session 归属及执行快照保存在 Turso schema 12；WASM 虚拟工作区只承载宿主观测和进程内 lease。固定 machine UUID 使跨 Host 重启的会话定位保持一致。
 - Emscripten 目标编译闭包排除 SQLx、`peri-process`、stdio transport、本地 LSP 和全部 builtin MCP。远程 HTTP MCP client 与 ACP 承载的 MCP server 保留。文件工具需由外部 MCP 提供。
+- Workers 模块 URL 从 Emscripten 源码补丁接入 `Module.mainScriptUrlOrBlob`；禁用动态执行，Emscripten 日期使用 UTC。构建产物不做文本改写。
 - 模型、远程 MCP 与 Turso 复用 reqwest native/Hyper HTTP。Cloudflare Mio/Tokio 分支提供 hosted Tokio I/O；Emscripten 6.0.10 的 epoll/异步 DNS 补丁、Hyper 异步 DNS 补丁和 Bun socket 补丁由仓库脚本固定。
 
 ## 当前可复现证据
@@ -22,12 +23,13 @@
 | 生命周期 | `node scripts/smoke-wasm-acp-lifecycle.mjs` | 两个并存会话、运行中取消、独立会话完成、Host 关闭重启后历史重放通过 |
 | 真实 SDK | `bun test`，含 `tests/wasm-acp-integration.test.ts` | 41/41 通过；真实 sqld 与模型服务下完成 Agent 创建、发送、列表和加载 |
 | Bun demo | `bun run demo:wasm` 配本地 sqld 与模拟 Anthropic SSE | 首页、前端脚本、Session 创建与列表、`/api/session/send` 交付、SSE 回复均通过 |
+| Workers 本地运行 | `cd peri-wasm/workers && bun install --frozen-lockfile && bun run smoke` | Wrangler 4.147.0 本地 `workerd` 中 initialize/new/prompt、模型 HTTP、session/list/load 及 Host 关闭后恢复通过；使用真实本地 sqld 与模拟模型 |
 | 原生回归 | `./scripts/cargo-rmcp-patched.sh build --locked --workspace` | 通过 |
 
 存储离线契约 111 项通过、21 项需要云库而跳过。中间件选定的 builtin/动态 MCP 回归 11 项通过；ACP 帧桥原生测试 3 项通过。全量文件大小扫描发现 15 个存量超限文件，本次新增/修改的源码未超限。
 
 ## 部署范围
 
-当前已验证宿主是 Node 与 Bun 的 Emscripten JS 模块。Cloudflare Workers 宿主尚无部署环境验收；普通浏览器不能直接使用 Node socket 路线。文件工具需由外部 MCP 提供；全部 builtin MCP 按本次要求从 WASM 中移除。
+当前已验证宿主是 Node、Bun 与 Wrangler 本地 `workerd`。Workers 需要 `nodejs_compat`、独立 ES 模块、预编译 WASM module import，以及 `mainScriptUrlOrBlob` 启动参数；托管部署、生产端点、资源限制和 Workers 中的 TypeScript SDK 入口尚无验收。普通浏览器不能直接使用 Node socket 路线。文件工具需由外部 MCP 提供；全部 builtin MCP 按本次要求从 WASM 中移除。
 
-已按 `DOC-UPDATE-001` 核对代码索引、构建文档和本文件；未 commit、push 或部署。
+已按 `DOC-UPDATE-001` 核对代码索引、构建文档和本文件；尚未 push 或部署。

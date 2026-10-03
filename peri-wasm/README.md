@@ -11,10 +11,15 @@ handling, sessions, prompts, and model calls remain in `peri-acp` and
 Install the `wasm32-unknown-emscripten` Rust target, stock Emscripten
 6.0.10, Node or Bun, Python 3.10 or newer, and `wasm-bindgen-cli 0.2.129`.
 `scripts/cargo-wasm.sh` applies the repository's Cloudflare epoll listener
-and asynchronous DNS backports, plus a Bun socket compatibility patch, to
-Emscripten 6.0.10 when needed. It then selects the pinned Emscripten Mio and
+and asynchronous DNS backports, plus Bun socket and Workers module URL
+patches, to Emscripten 6.0.10 when needed. It then selects the pinned Mio and
 Tokio forks, patches Hyper's Emscripten DNS resolver, and enables the
-wasm-bindgen Tokio runtime flags.
+wasm-bindgen Tokio runtime flags. The Emscripten source patch uses
+`Module.mainScriptUrlOrBlob` when Workers does not provide `import.meta.url`.
+The linker uses `-sDYNAMIC_EXECUTION=0`; Peri formats dates in UTC on
+Emscripten so the runtime does not need timezone script evaluation. Native
+targets keep local date formatting. The generated JS and WASM are copied
+without modification.
 
 ```bash
 ./scripts/cargo-wasm.sh build --locked -p peri-wasm --target wasm32-unknown-emscripten
@@ -61,3 +66,23 @@ Builtin MCP instances are unavailable in this deployment.
 `@peri-code/sdk` uses this export through `WasmAcpTransport` while retaining
 the existing Agent and Session interfaces. Its HTTP demo is
 `npm-packages/@peri-sdk/examples/demo/demo-wasm.ts`.
+
+## Local Cloudflare Workers check
+
+The probe uses Bun for dependency management and Wrangler's local `workerd`.
+It starts a real local sqld, a simulated model HTTP endpoint, and the existing
+ACP Host. It checks initialize, session creation, prompt completion, model
+HTTP, session listing, and loading after the Host closes.
+
+```bash
+cd peri-wasm/workers
+bun install --frozen-lockfile
+bun run smoke
+```
+
+The probe's `wrangler.toml` enables `nodejs_compat`, keeps the generated ES
+module separate from Wrangler's bundler, and imports the precompiled WASM as
+a module. It supplies `mainScriptUrlOrBlob` to the Emscripten module. This
+check runs locally; deployment to Cloudflare's hosted Workers,
+production Turso/model endpoints, resource limits, and the TypeScript SDK
+entrypoint on Workers still need separate acceptance.

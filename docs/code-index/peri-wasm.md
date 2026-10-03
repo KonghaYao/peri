@@ -14,7 +14,9 @@ WASM 依赖图按平台排除 SQLx、进程执行、stdio 和全部 builtin MCP�
 | 工具链 | `scripts/cargo-rmcp-patched.sh`、`scripts/cargo-wasm.sh` |
 | ACP 端到端验收 | `scripts/smoke-wasm-acp.mjs` |
 | 并发、取消与恢复验收 | `scripts/smoke-wasm-acp-lifecycle.mjs` |
+| Workers Emscripten 源码补丁与本地验收 | `patches/emscripten/workers-module-url.patch`、`scripts/prepare-emscripten.sh`、`peri-wasm/workers/{worker.js,smoke.mjs,wrangler.toml}` |
+| Emscripten 日期格式 | `peri-acp-types/src/time.rs` |
 
 `@peri-code/sdk` 的 `scripts/build.ts` 构建本产物并复制到 npm 包的 `dist/wasm/`，`WasmAcpTransport` 使现有 Agent/Session 接口复用 ACP。示例服务器是 `npm-packages/@peri-sdk/examples/demo/demo-wasm.ts`，复用 `demo.html`。
 
-Emscripten 目标、原生 workspace 构建与 release 链接已通过。`scripts/cargo-wasm.sh` 自动对 Emscripten 6.0.10 应用 Cloudflare epoll/异步 DNS 和 Bun socket 补丁；Hyper DNS 的目标补丁在 `patches/`。Node 的 ACP/sqld/模型、远程 MCP、并发取消恢复 smoke，以及 SDK 的 WASM 集成测试和 Bun demo HTTP/SSE 路径已通过。构建条件见 [`peri-wasm/README.md`](../../peri-wasm/README.md)。
+Emscripten 目标、原生 workspace 构建与 release 链接已通过。`scripts/cargo-wasm.sh` 自动对 Emscripten 6.0.10 应用 Cloudflare epoll/异步 DNS、Bun socket 和 Workers 模块 URL 源码补丁；Hyper DNS 的目标补丁在 `patches/`。链接时禁用动态执行，Emscripten 日期格式使用 UTC，生成产物无需改写。Node 的 ACP/sqld/模型、远程 MCP、并发取消恢复 smoke，以及 SDK 的 WASM 集成测试和 Bun demo HTTP/SSE 路径已通过。Bun/Wrangler 本地 `workerd` probe 验证 ACP prompt、模型 HTTP 和 Host 重启后 Turso 恢复；Hosted Workers 尚未部署验收。构建条件见 [`peri-wasm/README.md`](../../peri-wasm/README.md)。

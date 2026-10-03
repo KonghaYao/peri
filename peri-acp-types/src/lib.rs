@@ -80,6 +80,7 @@ pub mod summary;
 pub mod system_reminder;
 pub mod tasks;
 pub mod thread;
+pub mod time;
 pub mod tools;
 pub mod workflow;
 

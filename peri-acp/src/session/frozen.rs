@@ -63,7 +63,7 @@ impl SessionManager {
         skill_catalog: &[peri_acp_types::skills::SkillMetadata],
         instructions: &crate::session::executor::FrozenInstructions,
     ) -> crate::session::executor::FrozenSessionData {
-        let frozen_date = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let frozen_date = peri_acp_types::time::format_now("%Y-%m-%d");
         let frozen_language = config.config.language.clone();
         // W5（E15/J5）：项目指令正文来自内容准入期读取的 MCP 资源快照
         // （`peri-instruction://workspace/{main|local}`）——宿主本地读盘点与

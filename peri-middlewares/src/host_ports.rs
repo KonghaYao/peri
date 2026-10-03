@@ -154,7 +154,7 @@ impl PluginManagerPort for PluginManager {
                 .map_err(|e| e.to_string())?;
         let actual_name = manifest.name;
 
-        let now = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+        let now = peri_acp_types::time::format_now("%Y-%m-%dT%H:%M:%S");
         marketplaces.push(KnownMarketplace {
             source: marketplace_source,
             install_location,
@@ -210,7 +210,7 @@ impl PluginManagerPort for PluginManager {
                 .map_err(|e| e.to_string())?;
 
         let mut updated = marketplaces;
-        let now = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+        let now = peri_acp_types::time::format_now("%Y-%m-%dT%H:%M:%S");
         updated[entry_index].install_location = install_location;
         updated[entry_index].last_updated = now;
 
