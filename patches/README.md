@@ -9,6 +9,6 @@
 ./scripts/cargo-rmcp-patched.sh test --locked -p peri-mcp-workspace --lib
 ```
 
-脚本下载 crates.io 的 `rmcp 3.5.0` 发布包，核验固定 SHA-256，用 `patch`（缺少时以独立临时 Git 仓库执行 `git apply`）应用补丁并反向校验缓存，再以 Cargo `[patch.crates-io]` 配置运行所给命令。生成的源码位于 gitignored 的 `target/peri-rmcp-patches/`，按补丁哈希隔离；第二次运行复用缓存。`Cargo.lock` 记录本地 patched crate，因此直接运行 `cargo --locked` 不会偷偷回退到未打补丁的 registry 版本。CI、pre-release、release 和 Lefthook 的编译命令也使用该脚本。Linux 的 cross 构建使用 `./scripts/cargo-rmcp-patched.sh --cross build …`。更新补丁后，使用脚本执行 `update -p rmcp` 并提交更新后的 lockfile。
+脚本下载 crates.io 的 `rmcp 3.5.0` 发布包，核验固定 SHA-256，用 `patch`（缺少时以独立临时 Git 仓库执行 `git apply`）应用补丁并反向校验缓存，再以 Cargo `[patch.crates-io]` 配置运行所给命令。生成的源码位于 gitignored 的 `target/peri-rmcp-patches/`，按补丁哈希隔离；第二次运行复用缓存。`Cargo.lock` 记录本地 patched crate，因此直接运行 `cargo --locked` 不会偷偷回退到未打补丁的 registry 版本。CI、pre-release、release、Lefthook 和 `./dev.sh` 的编译命令都使用该脚本；脚本保留调用者的工作目录，让 `./dev.sh --cwd=...` 仍以指定目录启动 TUI。Linux 的 cross 构建使用 `./scripts/cargo-rmcp-patched.sh --cross build …`。更新补丁后，使用脚本执行 `update -p rmcp` 并提交更新后的 lockfile。
 
 Workspace 的 Bash 任务通过 `tasks/get`、`tasks/cancel` 和 `subscriptions/listen` 发布状态；Peri 以 Tasks-capable MCP client 接收任务回执和完成通知。完整链路由 Workspace 线路测试与 middleware 桥接测试验证。

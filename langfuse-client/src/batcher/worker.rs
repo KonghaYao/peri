@@ -187,7 +187,7 @@ impl BatchWorker {
                 self.counters
                     .partially_rejected_batches
                     .fetch_add(1, Ordering::Relaxed);
-                let _ = self.counters.rejected_spans.fetch_update(
+                let _ = self.counters.rejected_spans.try_update(
                     Ordering::Relaxed,
                     Ordering::Relaxed,
                     |count| Some(count.saturating_add(rejected_spans)),

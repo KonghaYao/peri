@@ -72,7 +72,9 @@ fn unclassified_errors_cannot_smuggle_recovery_text() {
 
 #[cfg(unix)]
 async fn assert_process_gone(pid: i32) {
-    tokio::time::timeout(Duration::from_secs(5), async {
+    // 取消通知最多用 1s 发送，进程组 TERM 到 KILL 还有 2s 宽限；
+    // 全套并发运行时给调度和进程回收留出余量。
+    tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             if !std::process::Command::new("kill")
                 .args(["-0", &format!("-{pid}")])

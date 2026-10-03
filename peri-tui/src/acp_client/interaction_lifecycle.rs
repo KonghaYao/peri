@@ -201,7 +201,7 @@ impl std::fmt::Debug for InteractionLifecycle {
 impl InteractionLifecycle {
     pub fn new() -> Self {
         let client_instance_id = NEXT_CLIENT_INSTANCE_ID
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
             .unwrap_or(0);
         Self {
             operation_gate: Arc::new(AsyncMutex::new(())),

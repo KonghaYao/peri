@@ -15,7 +15,7 @@ use peri_acp_types::session_resources::{
 };
 use peri_acp_types::store::PersistedPayload;
 use peri_acp_types::workspace::{
-    ResolvedWorkspace, ScopedThreadQuery, SessionBinding, ThreadScope, SESSION_BINDING_VERSION,
+    ResolvedWorkspace, ScopedThreadQuery, SessionBinding, ThreadScope,
 };
 use peri_resources::sessions::{ReadOnlyStoreErrorKind, SessionResourcesImpl};
 use peri_resources::SessionStoreShutdownOwner;

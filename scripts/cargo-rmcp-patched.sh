@@ -86,7 +86,7 @@ pathlib.Path(sys.argv[2]).write_text(
 )
 PY
 
-cd "$repo_root"
+# Keep the caller's directory: dev.sh uses it as the TUI workspace.
 if [[ "$1" == "--cross" ]]; then
     shift
     exec cross --config "$config_file" "$@"

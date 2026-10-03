@@ -138,11 +138,12 @@ while (1) {
 }"#;
 
 /// 响应 initialize 后关闭 stdin 的 fake server（initialized 通知失败路径）：
-/// 收到带 id 的请求后先 `close STDIN`，再回复 initialize 并 sleep 30 保持存活。
+/// 收到带 id 的请求后确认关闭 fd 0，再回复 initialize 并 sleep 30 保持存活。
 /// initialize response 作为同步屏障，确保客户端发送 initialized 前服务端读端已关闭；
 /// stdout 仍打开，read task 不会因 EOF 触发清理——只有 do_start 失败
 /// 路径的主动清理能终止它。
 const CLOSE_STDIN_AFTER_INIT_SCRIPT: &str = r#"open my $p, '>', $ENV{PERI_LSP_TEST_PID} or exit 1;
+use POSIX ();
 print $p $$;
 close $p;
 binmode STDIN;
@@ -161,7 +162,7 @@ while (1) {
     my $b = '';
     read(STDIN, $b, $len) == $len or last;
     if ($b =~ /"id"\s*:\s*(\d+)/) {
-        close STDIN;
+        POSIX::close(0) == 0 or die "failed to close stdin";
         my $r = '{"jsonrpc":"2.0","id":' . $1 . ',"result":null}';
         print "Content-Length: " . length($r) . "\r\n\r\n" . $r;
         sleep 30;

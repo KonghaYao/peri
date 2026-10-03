@@ -18,7 +18,7 @@ pub(super) fn try_reserve_live_attempt(
     maximum: Option<u64>,
 ) -> Option<LiveAttemptPermit> {
     counter
-        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+        .try_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
             let next = current.checked_add(1)?;
             (!maximum.is_some_and(|maximum| next > maximum)).then_some(next)
         })

@@ -255,7 +255,10 @@ async fn cancelling_an_open_during_schema_initialization_releases_its_lock() {
     assert!(!opening.is_finished());
     opening.abort();
     assert!(opening.await.err().unwrap().is_cancelled());
-    let held = lock_schema_open(&path, Duration::ZERO).await.unwrap();
+    // abort 不会中断已启动的 spawn_blocking 锁尝试；等待它归还文件句柄。
+    let held = lock_schema_open(&path, Duration::from_secs(1))
+        .await
+        .unwrap();
     drop(held);
     sqlx::query("ROLLBACK").execute(&mut blocker).await.unwrap();
     blocker.close().await.unwrap();
