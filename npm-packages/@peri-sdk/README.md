@@ -68,3 +68,20 @@ PERI_WORKSPACE=/absolute/workspace ANTHROPIC_API_KEY=... ANTHROPIC_BASE_URL=... 
 ```
 
 The server checks for the `PeriWasmAcp` export before listening and reports a missing ACP Host explicitly. `PERI_WASM_MODULE_URL` selects another WASM glue module; `PERI_WASM_MACHINE_ID` sets a persistent UUID execution identity (the demo defaults to `00000000-0000-4000-8000-000000000001`). `PERI_WORKSPACE_MCP_URL` can supply an external HTTP Workspace MCP endpoint. Builtin MCP servers are not started in WASM.
+
+## Local Cloudflare Workers probe
+
+The [Workers example](examples/workers/worker.js) uses the same SDK package and
+its `bun.lock`. It starts the Peri ACP Host in Wrangler's local `workerd`, with
+a local sqld and simulated model endpoint. The smoke checks a prompt, model
+HTTP, session listing, and loading after the Host closes.
+
+```bash
+cd npm-packages/@peri-sdk
+bun install --frozen-lockfile
+bun run smoke:workers
+```
+
+`bun run build:workers` builds the SDK's WASM artifact and copies it into the
+example's ignored `dist/` directory for Wrangler. The probe does not validate
+a hosted Cloudflare deployment.

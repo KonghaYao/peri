@@ -14,7 +14,7 @@ WASM 依赖图按平台排除 SQLx、进程执行、stdio 和全部 builtin MCP�
 | 工具链 | `scripts/cargo-rmcp-patched.sh`、`scripts/cargo-wasm.sh` |
 | ACP 端到端验收 | `scripts/smoke-wasm-acp.mjs` |
 | 并发、取消与恢复验收 | `scripts/smoke-wasm-acp-lifecycle.mjs` |
-| Workers Emscripten 源码补丁与本地验收 | `patches/emscripten/workers-module-url.patch`、`scripts/prepare-emscripten.sh`、`peri-wasm/workers/{worker.js,smoke.mjs,wrangler.toml}` |
+| Workers Emscripten 源码补丁与本地验收 | `patches/emscripten/workers-module-url.patch`、`scripts/prepare-emscripten.sh`、`npm-packages/@peri-sdk/examples/workers/{worker.js,smoke.mjs,wrangler.toml}` |
 | Emscripten 日期格式 | `peri-acp-types/src/time.rs` |
 
 `@peri-code/sdk` 的 `scripts/build.ts` 构建本产物并复制到 npm 包的 `dist/wasm/`，`WasmAcpTransport` 使现有 Agent/Session 接口复用 ACP。示例服务器是 `npm-packages/@peri-sdk/examples/demo/demo-wasm.ts`，复用 `demo.html`。

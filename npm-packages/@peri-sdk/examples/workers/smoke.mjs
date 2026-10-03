@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 
 const here = import.meta.dir;
-const root = resolve(here, '../..');
+const sdkRoot = resolve(here, '../..');
 const scratch = await mkdtemp(resolve(tmpdir(), 'peri-wrangler-smoke-'));
 let sqld;
 let wrangler;
@@ -44,8 +44,8 @@ async function probe(url) {
 }
 
 try {
-  const build = Bun.spawn(['bun', 'run', 'build'], {
-    cwd: here, stdin: 'inherit', stdout: 'inherit', stderr: 'inherit',
+  const build = Bun.spawn(['bun', 'run', 'build:workers'], {
+    cwd: sdkRoot, stdin: 'inherit', stdout: 'inherit', stderr: 'inherit',
   });
   if (await build.exited !== 0) throw new Error('Workers probe build failed');
 
@@ -53,7 +53,7 @@ try {
   sqld = Bun.spawn([
     'mise', 'exec', '--', 'sqld', '--no-welcome', '--http-listen-addr',
     `127.0.0.1:${sqlPort}`, '--db-path', resolve(scratch, 'sessions'),
-  ], { cwd: resolve(root, 'npm-packages/@peri-sdk'), stdout: 'ignore', stderr: 'ignore' });
+  ], { cwd: sdkRoot, stdout: 'ignore', stderr: 'ignore' });
   await waitForPort(sqlPort, sqld);
 
   let modelCalls = 0;
@@ -74,12 +74,13 @@ try {
   const workerPort = await freePort();
   log = await open(resolve(scratch, 'wrangler.log'), 'w');
   wrangler = Bun.spawn([
-    'bun', 'run', 'wrangler', 'dev', '--local', '--ip', '127.0.0.1',
+    'bun', 'run', 'wrangler', 'dev', '--config', resolve(here, 'wrangler.toml'),
+    '--local', '--ip', '127.0.0.1',
     '--port', String(workerPort),
     '--persist-to', resolve(scratch, 'wrangler-state'),
     '--var', `STORAGE_URL:http://127.0.0.1:${sqlPort}`,
     '--var', `MODEL_URL:http://127.0.0.1:${model.port}/v1`,
-  ], { cwd: here, stdout: log.fd, stderr: log.fd });
+  ], { cwd: sdkRoot, stdout: log.fd, stderr: log.fd });
   const url = `http://127.0.0.1:${workerPort}`;
   let ready = false;
   for (let attempt = 0; attempt < 100; attempt++) {

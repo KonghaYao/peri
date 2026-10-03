@@ -69,15 +69,16 @@ the existing Agent and Session interfaces. Its HTTP demo is
 
 ## Local Cloudflare Workers check
 
-The probe uses Bun for dependency management and Wrangler's local `workerd`.
+The probe lives in `@peri-code/sdk` and uses its Bun dependencies with
+Wrangler's local `workerd`.
 It starts a real local sqld, a simulated model HTTP endpoint, and the existing
 ACP Host. It checks initialize, session creation, prompt completion, model
 HTTP, session listing, and loading after the Host closes.
 
 ```bash
-cd peri-wasm/workers
+cd npm-packages/@peri-sdk
 bun install --frozen-lockfile
-bun run smoke
+bun run smoke:workers
 ```
 
 The probe's `wrangler.toml` enables `nodejs_compat`, keeps the generated ES

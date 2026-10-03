@@ -23,7 +23,7 @@
 | 生命周期 | `node scripts/smoke-wasm-acp-lifecycle.mjs` | 两个并存会话、运行中取消、独立会话完成、Host 关闭重启后历史重放通过 |
 | 真实 SDK | `bun test`，含 `tests/wasm-acp-integration.test.ts` | 41/41 通过；真实 sqld 与模型服务下完成 Agent 创建、发送、列表和加载 |
 | Bun demo | `bun run demo:wasm` 配本地 sqld 与模拟 Anthropic SSE | 首页、前端脚本、Session 创建与列表、`/api/session/send` 交付、SSE 回复均通过 |
-| Workers 本地运行 | `cd peri-wasm/workers && bun install --frozen-lockfile && bun run smoke` | Wrangler 4.147.0 本地 `workerd` 中 initialize/new/prompt、模型 HTTP、session/list/load 及 Host 关闭后恢复通过；使用真实本地 sqld 与模拟模型 |
+| Workers 本地运行 | `cd npm-packages/@peri-sdk && bun install --frozen-lockfile && bun run smoke:workers` | Wrangler 4.147.0 本地 `workerd` 中 initialize/new/prompt、模型 HTTP、session/list/load 及 Host 关闭后恢复通过；使用真实本地 sqld 与模拟模型 |
 | 原生回归 | `./scripts/cargo-rmcp-patched.sh build --locked --workspace` | 通过 |
 
 存储离线契约 111 项通过、21 项需要云库而跳过。中间件选定的 builtin/动态 MCP 回归 11 项通过；ACP 帧桥原生测试 3 项通过。全量文件大小扫描发现 15 个存量超限文件，本次新增/修改的源码未超限。
