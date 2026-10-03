@@ -207,6 +207,7 @@ fn all_direct_effective_names() -> Vec<String> {
 /// 生产默认层的构造是 `builtin::apply_builtin_overlay`，本文件不复制它的覆盖规则。
 fn builtin_entry(instance: &BuiltinMcpInstance) -> McpServerConfig {
     McpServerConfig {
+        task_scope_secret_file: None,
         command: None,
         args: None,
         env: None,

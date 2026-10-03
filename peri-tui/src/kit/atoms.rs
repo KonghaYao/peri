@@ -670,6 +670,9 @@ pub use crate::kit::acp_types::BgTaskEntry;
 /// 活跃的后台任务列表（由 bg-task-started/completed/cancelled 事件维护）
 pub static BG_TASKS: AtomStatic<Vec<BgTaskEntry>> = AtomStatic::new(Vec::new);
 
+/// Last session task revision applied by the TUI; None is the legacy event path.
+pub static BG_TASK_REVISION: AtomStatic<Option<u64>> = AtomStatic::new(|| None);
+
 // ── Background Display Area (后台显示区域) ────────────────────────────────────
 
 #[derive(Debug, Clone, Default)]

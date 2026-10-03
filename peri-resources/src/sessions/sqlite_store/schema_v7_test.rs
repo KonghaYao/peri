@@ -180,6 +180,8 @@ async fn test_v6_upgrade_removes_execution_state_and_keeps_history() {
     connection.close().await.unwrap();
 
     let data = SqliteSessionData::new(Arc::clone(&store.database));
+    let owner = data.claim_execution_owner(&"old-root".to_owned(), false, None).await.unwrap();
+    data.install_execution_owner_token(owner.token);
     data.delete_tree(&"old-root".to_owned()).await.unwrap();
     let sessions: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM threads")
         .fetch_one(&store.database.pool)

@@ -405,6 +405,7 @@ fn test_extract_mcp_servers() {
     servers.insert(
         "s1".into(),
         McpServerEntry::Config(Box::new(McpServerConfig {
+            task_scope_secret_file: None,
             command: Some("node".into()),
             args: None,
             env: None,
@@ -527,6 +528,7 @@ fn test_extract_mcp_servers_manifest_has_priority_over_fallback() {
     servers.insert(
         "inline".into(),
         McpServerEntry::Config(Box::new(McpServerConfig {
+            task_scope_secret_file: None,
             command: Some("inline-cmd".into()),
             args: None,
             env: None,
@@ -618,6 +620,7 @@ fn test_merge_plugin_mcp_servers() {
     p1.mcp_servers.insert(
         "db".into(),
         McpServerConfig {
+            task_scope_secret_file: None,
             command: Some("pg".into()),
             args: None,
             env: None,
@@ -649,6 +652,7 @@ fn test_merge_plugin_mcp_servers() {
     p2.mcp_servers.insert(
         "db".into(),
         McpServerConfig {
+            task_scope_secret_file: None,
             command: Some("mongo".into()),
             args: None,
             env: None,

@@ -219,11 +219,9 @@ fn git_repository() -> tempfile::TempDir {
     directory
 }
 
-/// [P0] 迁移桥与门面必须共享同一库句柄：桥取得的执行权要能被门面的写入准入承认。
+/// [P0] 迁移桥与门面共享本地租约，但 Store 代际只由门面认领。
 ///
-/// 这是本阶段的前提条件——ACP 仍经桥取得 owner，Agent 已改走门面写入。两者若各自
-/// 建一份连接与 owner 登记，门面会把正在跑的会话判成「无主」而拒绝写入；因此
-/// 资源测试入口 `open_store_and_facade_for_tests` 仍提供裸句柄供夹具逐条断言。
+/// 裸桥只登记进程内句柄；会话写入还需要持久 Store owner token。
 #[tokio::test]
 async fn test_bridge_lease_is_visible_to_shared_facade() {
     let repo = git_repository();
@@ -243,6 +241,12 @@ async fn test_bridge_lease_is_visible_to_shared_facade() {
         .unwrap();
     let lease = store.acquire_execution_lease(&thread).await.unwrap();
 
+    assert!(facade.append_history(&thread, &[PersistedPayload::Message(
+        BaseMessage::human("before Store claim"),
+    )]).await.is_err());
+    let claimed = facade.acquire_execution(&thread, &workspace).await.unwrap();
+    assert_eq!(claimed.owner_token(), lease.owner_token());
+
     facade
         .append_history(
             &thread,
@@ -251,7 +255,7 @@ async fn test_bridge_lease_is_visible_to_shared_facade() {
             ))],
         )
         .await
-        .expect("桥取得的 owner 必须被门面写入准入承认");
+        .expect("门面取得 Store 代际后才能写入");
 
     let snapshot = facade.load_session_snapshot(&thread).await.unwrap();
     assert_eq!(snapshot.payloads.len(), 1);

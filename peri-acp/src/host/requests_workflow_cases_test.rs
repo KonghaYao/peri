@@ -1,5 +1,70 @@
 use super::*;
 
+#[tokio::test]
+async fn session_new_and_load_publish_task_snapshots_and_revisioned_changes() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config = make_peri_config_with_provider(make_provider_config(
+        "a", "openai", "sk-openai-test", "gpt-4o",
+    ));
+    let provider = LlmProvider::from_config(&config).unwrap();
+    let cfg = make_server_config(config.clone(), provider, &tmp).await;
+    let mock = Arc::new(MockTransport::default());
+    let transport: Arc<dyn crate::transport::AcpTransport> = mock.clone();
+    let mut sessions = HashMap::new();
+    let created = handle_request("session/new", &json!({"cwd":tmp.path()}),
+        &cfg, &mut sessions, &transport).await.unwrap();
+    let sid = created["sessionId"].as_str().unwrap().to_owned();
+    let first = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            if let Some(data) = mock.notifications().iter().find_map(|(method, payload)|
+                (method == "peri/unstable_event" && payload["event"] == "bg-task-snapshot")
+                    .then(|| payload["data"].clone())) {
+                break data;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }).await.unwrap();
+    assert_eq!(first["revision"], 0);
+    let manager = cfg.session_manager.get_session(&sid).unwrap().task_manager.clone();
+    manager.register(peri_acp_types::tasks::BgTaskRegistration {
+        task_id: "wf-revision-1".into(), kind: BgTaskKind::Workflow,
+        summary: "workflow revision".into(), pid: None,
+        kill: Some(Box::new(|| {})),
+    }).unwrap();
+    let started = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            if let Some(data) = mock.notifications().iter().find_map(|(method, payload)|
+                (method == "peri/unstable_event" && payload["event"] == "bg-task-started")
+                    .then(|| payload["data"].clone())) {
+                break data;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }).await.unwrap();
+    assert_eq!(started["revision"], 1);
+    assert_eq!(started["task_id"], "wf-revision-1");
+
+    let second_cfg = make_server_config(config.clone(),
+        LlmProvider::from_config(&config).unwrap(), &tmp).await;
+    let load_mock = Arc::new(MockTransport::default());
+    let load_transport: Arc<dyn crate::transport::AcpTransport> = load_mock.clone();
+    let mut loaded_sessions = HashMap::new();
+    handle_request("session/load", &json!({"sessionId":sid,"cwd":tmp.path()}),
+        &second_cfg, &mut loaded_sessions, &load_transport).await.unwrap();
+    let loaded = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            if let Some(data) = load_mock.notifications().iter().find_map(|(method, payload)|
+                (method == "peri/unstable_event" && payload["event"] == "bg-task-snapshot")
+                    .then(|| payload["data"].clone())) {
+                break data;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }).await.unwrap();
+    assert!(loaded["revision"].is_u64());
+    assert!(loaded["tasks"].is_array());
+}
+
 /// [回归测试] cancel-bg-task 对 Workflow 类型任务必须真正 kill（issue 2026-08-05）。
 /// 历史 bug：Workflow 注册时固定 `Kill(None)`，cancel() 只 warn 并返回 success——
 /// 条目移除但 runner 继续运行。修复后 kill 闭包（生产路径转发

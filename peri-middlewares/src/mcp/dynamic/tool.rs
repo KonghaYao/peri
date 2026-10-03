@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::{future::Future, pin::Pin};
 
 use async_trait::async_trait;
 use peri_acp_types::{
@@ -10,6 +11,7 @@ use peri_agent::middleware::r#trait::Middleware;
 use serde_json::{json, Value};
 
 pub const DYNAMIC_MCP_TOOL_NAME: &str = "DynamicMCP";
+pub type AsyncOwnerAdmission = Arc<dyn Fn(&str) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>> + Send + Sync>;
 
 #[derive(Debug, thiserror::Error)]
 #[error("Dynamic MCP operation failed: {0}")]
@@ -19,6 +21,7 @@ struct DynamicMcpToolError(String);
 pub struct DynamicMcpTool {
     session_id: String,
     deployment: Arc<dyn DynamicMcpDeploymentPort>,
+    async_owner_admission: Option<AsyncOwnerAdmission>,
 }
 
 impl DynamicMcpTool {
@@ -29,6 +32,7 @@ impl DynamicMcpTool {
         Self {
             session_id: session_id.into(),
             deployment,
+            async_owner_admission: None,
         }
     }
 }
@@ -46,6 +50,12 @@ impl DynamicMcpMiddleware {
             tool: Arc::new(DynamicMcpTool::new(session_id, deployment)),
         }
     }
+
+    pub fn with_async_owner_admission(mut self, admission: AsyncOwnerAdmission) -> Self {
+        Arc::get_mut(&mut self.tool).expect("new middleware tool has one owner")
+            .async_owner_admission = Some(admission);
+        self
+    }
 }
 
 #[async_trait]
@@ -55,10 +65,12 @@ impl Middleware for DynamicMcpMiddleware {
     }
 
     fn collect_tools(&self, _cwd: &str) -> Vec<Box<dyn BaseTool>> {
-        vec![Box::new(DynamicMcpTool::new(
+        let mut tool = DynamicMcpTool::new(
             self.tool.session_id.clone(),
             Arc::clone(&self.tool.deployment),
-        ))]
+        );
+        tool.async_owner_admission = self.tool.async_owner_admission.clone();
+        vec![Box::new(tool)]
     }
 }
 
@@ -67,6 +79,7 @@ struct BoundDynamicMcpTool {
     deployment: Arc<dyn DynamicMcpDeploymentPort>,
     action: CanonicalDynamicMcpAction,
     policy_name: &'static str,
+    async_owner_admission: Option<AsyncOwnerAdmission>,
 }
 
 #[async_trait]
@@ -88,6 +101,12 @@ impl BaseTool for BoundDynamicMcpTool {
         _input: Value,
         _ctx: ToolContext<'_>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        if matches!(self.action, CanonicalDynamicMcpAction::Load(_)) {
+            if let Some(admit) = &self.async_owner_admission {
+                admit(&self.session_id).await.map_err(|error|
+                    Box::new(DynamicMcpToolError(error)) as Box<dyn std::error::Error + Send + Sync>)?;
+            }
+        }
         self.deployment
             .execute(&self.session_id, self.action.clone())
             .await
@@ -286,6 +305,7 @@ impl BaseTool for DynamicMcpTool {
                 deployment: Arc::clone(&self.deployment),
                 action,
                 policy_name: method.policy_name(),
+                async_owner_admission: self.async_owner_admission.clone(),
             }),
         }))
     }

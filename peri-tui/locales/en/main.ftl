@@ -879,6 +879,8 @@ shell-detail-status-succeeded = Status: succeeded
 shell-detail-status-failed = Status: failed
 shell-detail-status-cancelled = Status: cancelled
 bg-task-unknown-kind = Unknown background task type — drawer not opened.
+bg-task-status-lost = connection lost
+bg-task-status-reconciling = reconnecting
 workflow-run-not-synced = Selected workflow run is not in the current snapshot (finished or not synced yet).
 
 # ---- Betas Panel ----

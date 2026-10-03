@@ -1,6 +1,6 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -8,15 +8,18 @@ use peri_acp_types::messages::MessageId;
 use peri_acp_types::session_resources::{
     BindingState, ChildSnapshot, ForkSnapshot, FrozenSnapshotBytes, FrozenState, NewSession,
     NewSessionDraft, PersistenceRecovery, RewindBoundary, SessionMetaPatch, SessionResourceError,
+    CloseSettlement,
     SessionResourceErrorKind, SessionResourceResult, SessionSnapshot,
 };
 use peri_acp_types::store::{
-    serialize_persisted_payload, CompactionChange, InheritedContext, MessageFlags, PersistedPayload,
+    CompactionChange, InheritedContext, MessageFlags, PersistedPayload, serialize_persisted_payload,
 };
+use peri_acp_types::system_reminder::TrustedSystemReminder;
 use peri_acp_types::thread::{AgentStatus, ThreadId, ThreadMeta};
 use peri_acp_types::workspace::{
-    ResolvedWorkspace, ScopedThreadPage, ScopedThreadQuery, SessionBinding, WorkspaceError,
-    SESSION_BINDING_VERSION,
+    ExecutionOwnerClaim, ExecutionOwnerToken, ExecutionWorkspaceOwnerRecord, PriorExecutionOwner,
+    WorkspaceExecutionDescriptor, ResolvedWorkspace, SESSION_BINDING_VERSION, ScopedThreadPage,
+    ScopedThreadQuery, SessionBinding, WorkspaceError,
 };
 use sqlx::SqliteConnection;
 
@@ -27,19 +30,23 @@ use super::failure::{
 };
 use super::row_mapping::extract_title;
 use super::session_rows::{
-    delete_thread_child_rows, insert_binding_row, insert_thread_row, ThreadRowInsert,
+    ThreadRowInsert, delete_thread_child_rows, insert_binding_row, insert_thread_row,
 };
 use super::{compaction, context, session_rows, workspace as workspace_store};
 use crate::sessions::canonical::payload_role;
-use crate::sessions::data::ensure_child_relation;
 use crate::sessions::data::ChildResumeRecord;
 use crate::sessions::data::SessionDataPort;
+use crate::sessions::data::ensure_child_relation;
 use crate::sessions::local_port::SessionFacts;
 
+#[path = "session_data/async_task.rs"]
+mod async_task;
 #[path = "session_data/catalog.rs"]
 mod catalog;
 #[path = "session_data/lifecycle.rs"]
 mod lifecycle;
+#[path = "session_data/owner.rs"]
+mod owner;
 
 /// 同一份 [`SqliteSessionDatabase`] 的数据面句柄。
 ///
@@ -50,6 +57,7 @@ pub(crate) struct SqliteSessionData {
     database: Arc<SqliteSessionDatabase>,
     /// 端口关闭后不再接受新写入；读取不受影响（历史仍可解释）。
     closed: Arc<AtomicBool>,
+    owner_tokens: Arc<Mutex<HashMap<ThreadId, ExecutionOwnerToken>>>,
 }
 
 impl SqliteSessionData {
@@ -57,84 +65,10 @@ impl SqliteSessionData {
         Self {
             database,
             closed: Arc::new(AtomicBool::new(false)),
+            owner_tokens: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
-    /// 写入前置：端口未关闭且本次打开可写。
-    fn writable(&self) -> SessionResourceResult<()> {
-        if self.closed.load(Ordering::Acquire) {
-            return Err(unavailable("session data port is closed"));
-        }
-        if self.database.is_read_only() {
-            return Err(SessionResourceError::new(
-                SessionResourceErrorKind::ReadOnlyStore,
-            ));
-        }
-        Ok(())
-    }
-
-    /// 未发布创建的撤销：`require_uncommitted` 决定是否叠加「未提交 frozen」判据。
-    ///
-    /// 两条入口共用同一份删除顺序（子会话守卫 → 子表 → threads 行），只有
-    /// 判据按调用方语义分档：
-    ///
-    /// - `false`：write-once 完整创建（fork 等）的失败补偿——目标创建即带 frozen，
-    ///   撤销就是把它整条删掉（可由 source 重生成）；
-    /// - `true`：两阶段草稿（`SessionInitialization::abandon`）——已定稿的草稿是
-    ///   「已提交、未发布」的合法中间态，必须拒绝删除（typed 冲突），保留按 ID 打开。
-    async fn revoke_created_row(
-        &self,
-        id: &ThreadId,
-        require_uncommitted: bool,
-    ) -> SessionResourceResult<()> {
-        self.writable()?;
-        let mut tx = self
-            .database
-            .pool
-            .begin_with("BEGIN IMMEDIATE")
-            .await
-            .map_err(|error| map_sqlx(&error))?;
-        // 撤销只针对「本次未发布的创建」：已经派生过子会话的 identity 不能被补偿掉，
-        // 否则子会话会指向一个不存在的父节点。
-        let children: (i64,) =
-            sqlx::query_as("SELECT COUNT(*) FROM threads WHERE parent_thread_id = ?1")
-                .bind(id.as_str())
-                .fetch_one(&mut *tx)
-                .await
-                .map_err(|error| map_sqlx(&error))?;
-        if children.0 > 0 {
-            return Err(invalid_input(
-                "session has published children and cannot be revoked",
-            ));
-        }
-        if require_uncommitted {
-            let committed: Option<(Option<String>,)> =
-                sqlx::query_as("SELECT frozen_context FROM threads WHERE id = ?1")
-                    .bind(id.as_str())
-                    .fetch_optional(&mut *tx)
-                    .await
-                    .map_err(|error| map_sqlx(&error))?;
-            if matches!(committed, Some((Some(_),))) {
-                return Err(SessionResourceError::conflict(
-                    "session has a committed frozen snapshot and cannot be revoked",
-                ));
-            }
-        }
-        // 子表行同样显式删除，不借 `ON DELETE CASCADE`：那份级联只在 SQLite 上存在，
-        // 远端执行器没有（见 [`session_rows::THREAD_CHILD_DELETES`]）。先子后父。
-        delete_thread_child_rows(&mut tx, id.as_str())
-            .await
-            .map_err(|error| map_sqlx(&error))?;
-        sqlx::query(session_rows::DELETE_THREAD_SQL)
-            .bind(id.as_str())
-            .execute(&mut *tx)
-            .await
-            .map_err(|error| map_sqlx(&error))?;
-        tx.commit()
-            .await
-            .map_err(|_| commit_failure(Some(id.clone())))?;
-        Ok(())
-    }
 }
 
 // ─── 行读取原语 ───────────────────────────────────────────────────────────────
@@ -146,6 +80,46 @@ pub(super) use helpers::{new_session_draft_row, new_session_row, validate_unboun
 
 #[async_trait]
 impl SessionDataPort for SqliteSessionData {
+    async fn claim_execution_owner(&self, root: &ThreadId, require_closing: bool, expected_previous_epoch: Option<i64>) -> SessionResourceResult<ExecutionOwnerClaim> {
+        self.claim_owner(root, require_closing, expected_previous_epoch).await
+    }
+
+    async fn renew_execution_owner(&self, token: &ExecutionOwnerToken) -> SessionResourceResult<()> {
+        self.renew_owner(token).await
+    }
+
+    async fn release_execution_owner(&self, token: &ExecutionOwnerToken) -> SessionResourceResult<()> {
+        self.release_owner(token).await
+    }
+
+    async fn finish_close(&self, token: &ExecutionOwnerToken) -> SessionResourceResult<()> {
+        self.finish_close_owner(token).await
+    }
+
+    async fn close_settlement(&self, token: &ExecutionOwnerToken) -> SessionResourceResult<CloseSettlement> {
+        self.read_close_settlement(token).await
+    }
+
+    async fn bind_execution_workspace_owner(&self, token: &ExecutionOwnerToken, descriptor: &WorkspaceExecutionDescriptor) -> SessionResourceResult<()> {
+        self.bind_workspace_owner(token, descriptor).await
+    }
+
+    async fn read_execution_workspace_owner(&self, root: &ThreadId) -> SessionResourceResult<Option<ExecutionWorkspaceOwnerRecord>> {
+        self.read_workspace_owner(root).await
+    }
+
+    async fn mark_unsupported_async_owner(&self, token: &ExecutionOwnerToken) -> SessionResourceResult<()> {
+        self.mark_unsupported_workspace_owner(token).await
+    }
+
+    fn install_execution_owner_token(&self, token: ExecutionOwnerToken) {
+        self.owner_tokens.lock().expect("owner token mutex poisoned").insert(token.root_id.clone(), token);
+    }
+
+    fn execution_owner_token(&self, root: &ThreadId) -> Option<ExecutionOwnerToken> {
+        self.owner_tokens.lock().expect("owner token mutex poisoned").get(root).cloned()
+    }
+
     fn oauth_credentials_for_workspace(
         self: Arc<Self>,
         workspace_id: peri_acp_types::workspace::WorkspaceId,
@@ -285,6 +259,7 @@ impl SessionDataPort for SqliteSessionData {
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(|error| map_sqlx(&error))?;
+        self.assert_owner(&mut tx, id).await?;
         let row: Option<(String, Option<String>, String)> =
             sqlx::query_as("SELECT cwd, parent_thread_id, workspace_id FROM threads WHERE id = ?1")
                 .bind(id.as_str())
@@ -564,6 +539,7 @@ impl SessionDataPort for SqliteSessionData {
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(|error| map_sqlx(&error))?;
+        self.assert_owner(&mut tx, id).await?;
         if !thread_exists_on(&mut tx, id).await.map_err(read_failure)? {
             // 目标会话不存在与「外键拒绝」是两个不同的原因，前者更可诊断。
             return Err(not_found());
@@ -617,6 +593,24 @@ impl SessionDataPort for SqliteSessionData {
         Ok(())
     }
 
+    async fn append_reminder_if_absent(
+        &self,
+        id: &ThreadId,
+        message_id: MessageId,
+        reminder: &TrustedSystemReminder,
+    ) -> SessionResourceResult<bool> {
+        self.append_terminal_reminder(id, message_id, reminder)
+            .await
+    }
+
+    async fn mark_session_closing(&self, id: &ThreadId) -> SessionResourceResult<()> {
+        self.write_close_intent(id).await
+    }
+
+    async fn is_session_closing(&self, id: &ThreadId) -> SessionResourceResult<bool> {
+        self.read_close_intent(id).await
+    }
+
     async fn save_fork(&self, fork: &ForkSnapshot) -> SessionResourceResult<()> {
         self.writable()?;
         if fork.target.thread_id == fork.source_id {
@@ -633,6 +627,7 @@ impl SessionDataPort for SqliteSessionData {
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(|error| map_sqlx(&error))?;
+        self.assert_owner(&mut tx, &fork.source_id).await?;
         if !thread_exists_on(&mut tx, &fork.source_id)
             .await
             .map_err(read_failure)?
@@ -705,6 +700,7 @@ impl SessionDataPort for SqliteSessionData {
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(|error| map_sqlx(&error))?;
+        self.assert_owner(&mut tx, &child.parent_id).await?;
         if !thread_exists_on(&mut tx, &child.parent_id)
             .await
             .map_err(read_failure)?
@@ -792,17 +788,20 @@ impl SessionDataPort for SqliteSessionData {
     ) -> SessionResourceResult<()> {
         self.writable()?;
         let now = Utc::now().to_rfc3339();
+        let mut tx = self.database.pool.begin_with("BEGIN IMMEDIATE").await.map_err(|e| map_sqlx(&e))?;
+        self.assert_owner(&mut tx, child).await?;
         let updated =
             sqlx::query("UPDATE threads SET agent_status = ?1, updated_at = ?2 WHERE id = ?3")
                 .bind(record.status.as_str())
                 .bind(&now)
                 .bind(child.as_str())
-                .execute(&self.database.pool)
+                .execute(&mut *tx)
                 .await
                 .map_err(|error| map_sqlx(&error))?;
         if updated.rows_affected() != 1 {
             return Err(not_found());
         }
+        tx.commit().await.map_err(|_| commit_failure(Some(child.clone())))?;
         Ok(())
     }
 
@@ -812,9 +811,12 @@ impl SessionDataPort for SqliteSessionData {
         change: &CompactionChange,
     ) -> SessionResourceResult<()> {
         self.writable()?;
-        compaction::commit_compaction_lifecycle(&self.database, id, change)
-            .await
-            .map_err(write_failure)
+        let mut tx = self.database.pool.begin_with("BEGIN IMMEDIATE").await.map_err(|e| map_sqlx(&e))?;
+        self.assert_owner(&mut tx, id).await?;
+        compaction::commit_compaction_lifecycle_on(&mut tx, id, change)
+            .await.map_err(write_failure)?;
+        tx.commit().await.map_err(|_| commit_failure(Some(id.clone())))?;
+        Ok(())
     }
 
     async fn apply_message_projections(
@@ -832,6 +834,7 @@ impl SessionDataPort for SqliteSessionData {
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(|error| map_sqlx(&error))?;
+        self.assert_owner(&mut tx, id).await?;
         for (message_id, flags) in updates {
             let updated = sqlx::query(
                 "UPDATE messages SET truncated = ?1, excluded = ?2, projection = ?3
@@ -877,6 +880,7 @@ impl SessionDataPort for SqliteSessionData {
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(|error| map_sqlx(&error))?;
+        self.assert_owner(&mut tx, id).await?;
         let rowid: Option<(i64,)> =
             sqlx::query_as("SELECT rowid FROM messages WHERE thread_id = ?1 AND message_id = ?2")
                 .bind(id.as_str())
@@ -927,6 +931,7 @@ impl SessionDataPort for SqliteSessionData {
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(|error| map_sqlx(&error))?;
+        self.assert_owner(&mut tx, id).await?;
         for message_id in &unique {
             // 别会话的条目不允许被「精确移除」静默命中或静默跳过。
             let owner: Option<(String,)> =

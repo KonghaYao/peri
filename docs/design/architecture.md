@@ -76,10 +76,8 @@ Windows 挂起进程，attach 后提供终止请求与实际退出证据。它�
   - 建 thread：经 Resources 存储，parent_thread_id 挂父子链
   - 建 session：transcript 绑定存储（with_persistence）
   - 运行 + 结束：更新 agent_status
-- async tasks manager：异步 shell 实际执行、bg agent、cron、channel 触发
-  - BackgroundTaskRegistry 归此层统一管理：per-session 实例化，随 session 创建/销毁（生命周期/取消/事件跟随 session）
-  - Middleware 只做定义与启动发起，不持有管理权
-  - 任务启动执行（进程 spawn/进程组/超时/输出收集）在此层
+- Session 异步任务的所有权、运行时目录和外部 MCP 恢复遵循
+  [Session 异步任务架构](session-async-tasks.md)。
 - 消息统一：MessageType（Human/Ai/Tool/SystemReminder，v2 BaseMessage 更名；协议转换在 Reason 阶段）
 - MQ 消息管理：MessageQueue（Prompt/Defer/Info + MessageSource）
 - RCRA 循环：Receive -> Compact -> Reason -> Act，Receive 为唯一退出口
@@ -98,7 +96,8 @@ Windows 挂起进程，attach 后提供终止请求与实际退出证据。它�
 
 - 实现 MiddlewareHook，聚合业务模块：FS/Goal/SubAgent/HITL/...
 - MCP：薄封装 Resources 层 MCP 管理为 middleware（工具注册/执行桥接），连接状态从 Resources context 获取
-- bg：任务定义 + 启动发起（调 Agent 层 TaskManager 接口），不持有管理权
+- 后台任务的登记和执行 owner 依 [Session 异步任务架构](session-async-tasks.md)
+  划分；Middleware 只提供发起入口。
 - 外部依赖一律经 Resources context，不直接触碰外部系统
 - 切面 = hook 挂载 + 工具声明 + prompt 贡献 + 条件守卫
 

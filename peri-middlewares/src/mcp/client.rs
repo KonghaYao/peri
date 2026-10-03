@@ -39,7 +39,7 @@ use readiness::SystemReadinessTracker;
 use rmcp::model::{Resource, ResourceContents, Tool};
 use std::{
     any::Any,
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     sync::Arc,
 };
 
@@ -144,11 +144,12 @@ pub struct McpClientPool {
     /// SessionManager（peri-acp）经 `McpSubscriptionPort` 注册；订阅通知到达
     /// 时向全部注册 inbox 推送 Defer 消息并唤醒 idle agent。
     pub(crate) session_inboxes: parking_lot::RwLock<HashMap<String, InboxHandle>>,
-    /// Session-scoped ACP projection for MCP Tasks. Replaced on each turn so
-    /// completions after the turn can still update the task area.
-    pub(crate) task_event_sinks:
-        parking_lot::RwLock<HashMap<String, Arc<dyn peri_acp_types::event::EventSink>>>,
-    pub(crate) active_tasks: parking_lot::RwLock<HashMap<String, HashSet<String>>>,
+    /// One session runtime handle per session; task records remain owned by Agent.
+    pub(crate) session_tasks: parking_lot::RwLock<HashMap<String, std::sync::Weak<dyn peri_acp_types::tasks::TaskManager>>>,
+    pub(crate) task_scope_authority: peri_mcp_workspace::TaskScopeAuthority,
+    pub(crate) task_scope_tokens: parking_lot::RwLock<HashMap<String, String>>,
+    pub(crate) session_execution_tokens: parking_lot::RwLock<HashMap<String, peri_acp_types::workspace::ExecutionOwnerToken>>,
+    pub(crate) remote_task_scope_authorities: parking_lot::RwLock<HashMap<String, peri_mcp_workspace::TaskScopeAuthority>>,
     /// 跨进程的 MCP Resource Cache；是否写入由响应 scope 与安全上下文共同决定。
     pub(crate) resource_cache: super::resource_cache::McpResourceCache,
     /// 进程启动时冻结的 deployment capability profile；初始连接和重连复用。
@@ -231,8 +232,11 @@ impl McpClientPool {
             pending_oauth_callbacks: parking_lot::Mutex::new(HashMap::new()),
             active_oauth_flows: parking_lot::Mutex::new(HashMap::new()),
             session_inboxes: parking_lot::RwLock::new(HashMap::new()),
-            task_event_sinks: parking_lot::RwLock::new(HashMap::new()),
-            active_tasks: parking_lot::RwLock::new(HashMap::new()),
+            session_tasks: parking_lot::RwLock::new(HashMap::new()),
+            task_scope_authority: peri_mcp_workspace::TaskScopeAuthority::new(),
+            task_scope_tokens: parking_lot::RwLock::new(HashMap::new()),
+            session_execution_tokens: parking_lot::RwLock::new(HashMap::new()),
+            remote_task_scope_authorities: parking_lot::RwLock::new(HashMap::new()),
             resource_cache: super::resource_cache::McpResourceCache::new(),
             capability_profile,
             app_binding_leases: Arc::new(super::apps::McpAppBindingLeaseRegistry::default()),
@@ -338,6 +342,61 @@ impl McpClientPool {
             .map(|snapshot| snapshot.revision())
     }
 
+    /// Reserve session execution before a tool call can create an MCP Task.
+    /// Unconfirmed response loss leaves shutdown incomplete.
+    pub(crate) fn begin_external_task_execution(
+        &self,
+        session_id: &str,
+    ) -> Result<Box<dyn peri_acp_types::tasks::ExternalExecutionGuard>, String> {
+        self.session_tasks
+            .read()
+            .get(session_id)
+            .and_then(std::sync::Weak::upgrade)
+            .ok_or_else(|| "session task manager unavailable".to_owned())?
+            .begin_external_execution()
+    }
+
+    /// Report whether this session can have asynchronous work owned outside
+    /// the trusted Workspace task scope. Read after initialization so failed
+    /// and disconnected configured servers remain in the catalog.
+    pub async fn has_unsupported_async_task_owner(
+        &self,
+        trusted_workspace_endpoint: Option<&str>,
+    ) -> Result<bool, String> {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !self.initialized.load(std::sync::atomic::Ordering::Acquire) {
+            if tokio::time::Instant::now() >= deadline {
+                return Err("MCP owner catalog did not initialize".into());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        let configs = self.configs.read();
+        Ok(configs.values().any(|config| {
+            if config.disabled == Some(true) { return false; }
+            match config.source.as_ref() {
+                Some(peri_acp_types::plugin::ConfigSource::Builtin { .. }) => false,
+                Some(peri_acp_types::plugin::ConfigSource::WorkspaceRemote) =>
+                    config.task_scope_secret_file.is_none() ||
+                    config.oauth.is_some() ||
+                    config.url.as_deref() != trusted_workspace_endpoint,
+                _ => true,
+            }
+        }))
+    }
+
+    /// A dynamic third-party MCP can create remote Tasks. Persist that fact
+    /// before its load operation can connect or expose tools.
+    pub async fn mark_unsupported_async_task_owner(
+        &self,
+        session_id: &str,
+        resources: &dyn peri_acp_types::session_resources::SessionResources,
+    ) -> Result<(), String> {
+        let token = self.session_execution_tokens.read().get(session_id).cloned()
+            .ok_or_else(|| "Store execution owner token is unavailable".to_owned())?;
+        resources.mark_unsupported_async_owner(&token).await
+            .map_err(|error| format!("async owner catalog update failed: {error}"))
+    }
+
     pub(super) fn bind_cache_policy(&self, policy: McpCachePolicy) -> std::io::Result<()> {
         let stored = self.cache_policy.get_or_init(|| policy);
         if *stored != policy {
@@ -370,6 +429,7 @@ impl McpClientPool {
         if slot.context.is_some() {
             return Err(BuiltinContextError::AlreadyInjected);
         }
+        let _ = context.task_scope_authority.set(self.task_scope_authority.clone());
         slot.context = Some(context);
         Ok(())
     }
@@ -750,10 +810,9 @@ impl peri_acp_types::ports::McpPoolPort for McpClientPool {
     }
 
     fn has_active_tasks(&self, session_id: &str) -> bool {
-        self.active_tasks
-            .read()
-            .get(session_id)
-            .is_some_and(|tasks| !tasks.is_empty())
+        self.session_tasks.read().get(session_id)
+            .and_then(std::sync::Weak::upgrade)
+            .is_some_and(|manager| manager.has_unsettled_external())
     }
 
     fn begin_shutdown(&self) {
@@ -795,8 +854,9 @@ impl McpSubscriptionPort for McpClientPool {
 
     fn unregister_inbox(&self, session_id: &str) {
         self.session_inboxes.write().remove(session_id);
-        self.task_event_sinks.write().remove(session_id);
-        self.active_tasks.write().remove(session_id);
+        self.session_tasks.write().remove(session_id);
+        self.task_scope_tokens.write().remove(session_id);
+        self.session_execution_tokens.write().remove(session_id);
     }
 
     fn as_any(&self) -> &dyn Any {

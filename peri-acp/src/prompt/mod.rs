@@ -292,10 +292,9 @@ fn format_available_agents(
 fn os_version_string() -> String {
     #[cfg(target_os = "macos")]
     {
-        if let Ok(out) = std::process::Command::new("sw_vers")
-            .arg("-productVersion")
-            .output()
-        {
+        let mut command = std::process::Command::new("sw_vers");
+        command.arg("-productVersion");
+        if let Ok(out) = peri_process::run_output_blocking(command) {
             let v = String::from_utf8_lossy(&out.stdout).trim().to_string();
             if !v.is_empty() {
                 return format!("macOS {v}");

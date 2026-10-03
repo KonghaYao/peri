@@ -26,9 +26,9 @@ use turso_serverless::Value;
 
 use super::mutation::incomplete_reply;
 use super::session_codec as codec;
-use super::session_data::{invalid_input, not_found, RemoteSessionData};
+use super::session_data::{RemoteSessionData, invalid_input, not_found};
 use super::session_sql::{self, DELETE_SESSION_SQL};
-use super::sql::{int_at, text_at, StatementSpec};
+use super::sql::{StatementSpec, int_at, text_at};
 use crate::sessions::data::ChildResumeRecord;
 
 // ─── 批内守卫 ─────────────────────────────────────────────────────────────────
@@ -55,6 +55,38 @@ const UPDATE_AGENT_STATUS_SQL: &str =
 const SELECT_AGENT_STATUS_SQL: &str = "SELECT agent_status FROM threads WHERE id = ?1";
 
 impl RemoteSessionData {
+    pub(super) async fn write_close_intent(&self, id: &ThreadId) -> SessionResourceResult<()> {
+        if !self.exists(id).await? {
+            return Err(not_found());
+        }
+        self.commit_effects(
+            "mark_session_closing",
+            &[id.as_str().to_owned()],
+            vec![StatementSpec::new(
+                "INSERT OR IGNORE INTO session_close_intents(thread_id, requested_at) VALUES (?1, ?2)",
+                vec![Value::Text(id.as_str().to_owned()), Value::Text(chrono::Utc::now().to_rfc3339())],
+            )],
+            id,
+        ).await.map(|_| ())
+    }
+
+    pub(super) async fn read_close_intent(&self, id: &ThreadId) -> SessionResourceResult<bool> {
+        let store = self.store().await?;
+        let table = store.fetch_row(&StatementSpec::bare(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'session_close_intents'",
+        )).await?;
+        if table.is_none() {
+            return Ok(false);
+        }
+        Ok(store
+            .fetch_row(&StatementSpec::new(
+                "SELECT 1 FROM session_close_intents WHERE thread_id = ?1",
+                vec![Value::Text(id.as_str().to_owned())],
+            ))
+            .await?
+            .is_some())
+    }
+
     /// 撤销未发布的创建（write-once 完整创建的失败补偿：fork 等）。
     ///
     /// 语义由**入口**决定：这里的目标创建即带 frozen（可由 source 重生成），撤销就是把它
@@ -310,9 +342,11 @@ mod tests {
     fn tree_scope_is_the_whole_subtree() {
         assert!(SELECT_TREE_IDS_SQL.starts_with("WITH RECURSIVE tree(id) AS ("));
         assert!(SELECT_TREE_IDS_SQL.contains("UNION ALL"));
-        assert!(SELECT_TREE_IDS_SQL
-            .trim_end()
-            .ends_with("SELECT id FROM tree"));
+        assert!(
+            SELECT_TREE_IDS_SQL
+                .trim_end()
+                .ends_with("SELECT id FROM tree")
+        );
         assert_eq!(DELETE_SESSION_SQL, "DELETE FROM threads WHERE id = ?1");
         assert_eq!(
             DELETE_SESSION_MESSAGES_SQL,

@@ -406,6 +406,38 @@ impl MessageTranscript {
         id
     }
 
+    /// Mirror an already committed, stable-ID reminder into the in-memory view.
+    /// The caller must commit through SessionResources first; this path never
+    /// enters the asynchronous transcript writer a second time.
+    pub fn mirror_committed_reminder(
+        &mut self,
+        id: MessageId,
+        reminder: TrustedSystemReminder,
+    ) -> bool {
+        if self.id_index.contains_key(&id) {
+            return false;
+        }
+        let idx = self.entries.len();
+        self.id_index.insert(id, idx);
+        self.entries
+            .push(TranscriptEntry::Reminder { id, reminder });
+        true
+    }
+
+    pub fn idempotent_reminder_port(
+        &self,
+    ) -> Option<(
+        Arc<dyn SessionResources>,
+        ThreadId,
+        Option<Arc<tokio::sync::mpsc::UnboundedSender<PersistOp>>>,
+    )> {
+        Some((
+            Arc::clone(self.session_resources.as_ref()?),
+            self.thread_id.as_ref()?.clone(),
+            self.persist_tx_handle(),
+        ))
+    }
+
     /// 获取所有**可见**消息的 owned Arc 快照（跳过 excluded 标记的消息）
     ///
     /// 用于在事件边界（如 `RenderEvent::TurnCompleted`）向 TUI/ACP 消费方传递

@@ -59,6 +59,7 @@ async fn test_unbound_frozen_session_remains_readable_and_cannot_be_automaticall
         .unwrap();
     let before = fixture.facade.load_session_snapshot(&id).await.unwrap();
     lease.mark_clean().await.unwrap();
+    fixture.facade.release_execution_owner(&lease.owner_token().unwrap()).await.unwrap();
     sqlx::query("DELETE FROM session_bindings WHERE thread_id = ?1")
         .bind(&id)
         .execute(fixture.facade.local_pool())
@@ -89,8 +90,8 @@ async fn test_unbound_frozen_session_remains_readable_and_cannot_be_automaticall
         .unwrap_err();
     assert!(matches!(
         error_kind(&error),
-        SessionResourceErrorKind::Workspace(WorkspaceError::InvalidBinding)
-    ));
+        SessionResourceErrorKind::Conflict { .. }
+    ), "unclaimed recovered session must not be mutated: {error}");
     let rejected = reopened.load_session_snapshot(&id).await.unwrap();
     assert_eq!(rejected.binding, BindingState::Missing);
     assert_eq!(rejected.frozen, before.frozen);
@@ -151,9 +152,13 @@ async fn test_facade_child_process() {
     let facade = SessionResourcesImpl::open(db).await.unwrap();
     let workspace = facade.resolve_workspace(Path::new(&repo)).await.unwrap();
     match expected.as_str() {
+        "blocked" => {
+            assert!(facade.acquire_execution(&id, &workspace).await.is_err());
+        }
         "clean" => {
             let lease = facade.acquire_execution(&id, &workspace).await.unwrap();
             lease.mark_clean().await.unwrap();
+            facade.release_execution_owner(&lease.owner_token().unwrap()).await.unwrap();
         }
         "crash" => {
             let _lease = facade.acquire_execution(&id, &workspace).await.unwrap();
@@ -193,22 +198,25 @@ async fn test_facade_process_runs_overlap_and_crash_does_not_block_recovery() {
     let db = fixture._db.path().join("threads.db");
     let repo = fixture.repo.path();
     let before = fixture.facade.load_session_snapshot(&id).await.unwrap();
-    facade_process(&db, repo, &id, "clean");
+    facade_process(&db, repo, &id, "blocked");
     fixture
         .facade
         .append_history(&id, &[payload("original owner")])
         .await
         .unwrap();
     lease.mark_clean().await.unwrap();
+    fixture.facade.release_execution_owner(&lease.owner_token().unwrap()).await.unwrap();
+    facade_process(&db, repo, &id, "clean");
     facade_process(&db, repo, &id, "crash");
     fixture.facade.drain_persistence(&id).await.unwrap();
+    assert!(fixture.facade.acquire_execution(&id, &fixture.workspace().await).await.is_err());
+    expire_owner(fixture.facade.local_pool(), &id).await;
     let next = fixture
         .facade
         .acquire_execution(&id, &fixture.workspace().await)
         .await
         .unwrap();
     assert_eq!(next.thread_id(), &id);
-    lease.mark_clean().await.unwrap();
     fixture
         .facade
         .append_history(&id, &[payload("after process crash")])

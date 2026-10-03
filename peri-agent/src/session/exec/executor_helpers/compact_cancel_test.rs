@@ -172,6 +172,25 @@ impl SessionResources for ControlledStore {
         self.inner.append_history(id, payloads).await
     }
 
+    async fn append_reminder_if_absent(
+        &self,
+        id: &ThreadId,
+        message_id: peri_acp_types::messages::MessageId,
+        reminder: &peri_acp_types::system_reminder::TrustedSystemReminder,
+    ) -> SessionResourceResult<bool> {
+        self.inner
+            .append_reminder_if_absent(id, message_id, reminder)
+            .await
+    }
+
+    async fn mark_session_closing(&self, id: &ThreadId) -> SessionResourceResult<()> {
+        self.inner.mark_session_closing(id).await
+    }
+
+    async fn is_session_closing(&self, id: &ThreadId) -> SessionResourceResult<bool> {
+        self.inner.is_session_closing(id).await
+    }
+
     async fn save_fork(
         &self,
         fork: &ForkSnapshot,

@@ -38,6 +38,7 @@ pub(crate) fn background_result_reminder(
         BgTaskKind::Agent => "subagent",
         BgTaskKind::Shell => "shell",
         BgTaskKind::Workflow => "workflow",
+        BgTaskKind::Mcp => "mcp",
     };
     try_trusted_reminder(
         ReminderCategory::Task,
@@ -132,6 +133,7 @@ impl AsyncRouter {
             BgTaskKind::Agent => MessageSource::SubAgentComplete,
             BgTaskKind::Shell => MessageSource::ShellComplete,
             BgTaskKind::Workflow => MessageSource::WorkflowComplete,
+            BgTaskKind::Mcp => MessageSource::DynamicMcpNotification,
         };
         let reminder = background_result_reminder(result, kind);
         self.inbox

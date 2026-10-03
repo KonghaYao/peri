@@ -47,6 +47,162 @@ fn make_context() -> StageContext {
 }
 
 #[tokio::test]
+async fn stable_terminal_delivery_id_is_recorded_once_across_receive_runs() {
+    use peri_acp_types::system_reminder::{
+        ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
+        ReminderSource, SystemReminder, TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
+    };
+    let reminder = TrustedSystemReminderFactory::for_producer()
+        .construct(SystemReminder {
+            version: SYSTEM_REMINDER_VERSION,
+            category: ReminderCategory::Task,
+            source: ReminderSource("mcp".into()),
+            kind: "completed".into(),
+            severity: ReminderSeverity::Info,
+            delivery: ReminderDelivery::Configurable,
+            audiences: ReminderAudiences(vec![ReminderAudience::Model]),
+            body: "completed".into(),
+            summary: None,
+            metadata: serde_json::json!({}),
+        })
+        .unwrap();
+    let context = make_context();
+    let delivery_id = crate::messages::MessageId::new();
+    for _ in 0..2 {
+        context
+            .session
+            .queue
+            .push(QueuedMessage::system_reminder_with_delivery_id(
+                MessageKind::Defer,
+                MessageSource::DynamicMcpNotification,
+                reminder.clone(),
+                delivery_id,
+            ));
+        run_receive(ReceiveInput {
+            context: context.clone(),
+        })
+        .await
+        .unwrap();
+    }
+    let transcript = context.session.transcript.read();
+    assert_eq!(transcript.persisted_payloads().len(), 1);
+    assert!(transcript.get(delivery_id).is_some());
+    drop(transcript);
+    let mut conflicting = reminder.into_inner();
+    conflicting.body = "different terminal".into();
+    let conflicting = TrustedSystemReminderFactory::for_producer()
+        .construct(conflicting)
+        .unwrap();
+    context
+        .session
+        .queue
+        .push(QueuedMessage::system_reminder_with_delivery_id(
+            MessageKind::Defer,
+            MessageSource::DynamicMcpNotification,
+            conflicting,
+            delivery_id,
+        ));
+    assert!(run_receive(ReceiveInput {
+        context: context.clone()
+    })
+    .await
+    .is_err());
+    assert_eq!(
+        context.session.transcript.read().persisted_payloads().len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn durable_terminal_delivery_preserves_order_and_dedups_after_exclusion() {
+    use crate::session::test_resources::TestSession;
+    use crate::session::transcript::MessageTranscript;
+    use peri_acp_types::system_reminder::{
+        ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
+        ReminderSource, SystemReminder, TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
+    };
+    let bound = TestSession::open().await;
+    let context = make_context();
+    *context.session.transcript.write() =
+        MessageTranscript::new().with_persistence(bound.resources(), bound.thread_id());
+    let reminder = TrustedSystemReminderFactory::for_producer()
+        .construct(SystemReminder {
+            version: SYSTEM_REMINDER_VERSION,
+            category: ReminderCategory::Task,
+            source: ReminderSource("mcp".into()),
+            kind: "completed".into(),
+            severity: ReminderSeverity::Info,
+            delivery: ReminderDelivery::Configurable,
+            audiences: ReminderAudiences(vec![ReminderAudience::Model]),
+            body: "owner result".into(),
+            summary: None,
+            metadata: serde_json::json!({}),
+        })
+        .unwrap();
+    let first = BaseMessage::human("prior input");
+    let first_id = first.id();
+    let delivery_id = crate::messages::MessageId::new();
+    context
+        .session
+        .queue
+        .push(QueuedMessage::prompt(MessageSource::UserInput, first));
+    context
+        .session
+        .queue
+        .push(QueuedMessage::system_reminder_with_delivery_id(
+            MessageKind::Defer,
+            MessageSource::DynamicMcpNotification,
+            reminder.clone(),
+            delivery_id,
+        ));
+    run_receive(ReceiveInput {
+        context: context.clone(),
+    })
+    .await
+    .unwrap();
+    let history = bound
+        .resources()
+        .load_session_history(&bound.thread_id())
+        .await
+        .unwrap();
+    assert_eq!(
+        history.iter().map(|item| item.id()).collect::<Vec<_>>(),
+        vec![first_id, delivery_id]
+    );
+
+    context
+        .session
+        .transcript
+        .write()
+        .set_excluded(delivery_id, true);
+    context
+        .session
+        .queue
+        .push(QueuedMessage::system_reminder_with_delivery_id(
+            MessageKind::Defer,
+            MessageSource::DynamicMcpNotification,
+            reminder,
+            delivery_id,
+        ));
+    let output = run_receive(ReceiveInput {
+        context: context.clone(),
+    })
+    .await
+    .unwrap();
+    assert_eq!(output.wake_up_count, 0);
+    assert_eq!(
+        context.session.transcript.read().persisted_payloads().len(),
+        2
+    );
+    let history = bound
+        .resources()
+        .load_session_history(&bound.thread_id())
+        .await
+        .unwrap();
+    assert_eq!(history.len(), 2);
+}
+
+#[tokio::test]
 async fn test_receive_user_input_delivery_keeps_identity_order_and_render_fifo() {
     use crate::agent::events_v2::{EventBus, RenderEvent};
     use crate::session::user_input_mailbox::{UserInputAttemptOutcome, UserInputMailbox};

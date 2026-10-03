@@ -46,9 +46,12 @@ pub async fn install_plugin(
                         let cache_dir = external_cache.clone();
                         move || {
                             let _ = std::fs::create_dir_all(&cache_dir);
-                            let output = std::process::Command::new("git")
-                                .args(["clone", "--depth", "1", &url, cache_dir.to_str().unwrap()])
-                                .output();
+                            let mut command = std::process::Command::new("git");
+                            command.args(["clone", "--depth", "1", &url, cache_dir.to_str().unwrap()]);
+                            #[cfg(unix)]
+                            let output = peri_process::run_output_blocking(command);
+                            #[cfg(not(unix))]
+                            let output = command.output();
                             match output {
                                 Ok(o) if o.status.success() => Ok(()),
                                 Ok(o) => Err(format!(

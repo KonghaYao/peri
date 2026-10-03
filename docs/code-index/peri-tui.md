@@ -78,6 +78,7 @@ core `ConfigSource::save(expected_revision, &PeriConfig)` 返回 accepted snapsh
 | input_history（输入历史） | `input_history.rs` | `push_history`（:23）/`history_up`（:54）；持久化 `~/.peri/input-history.json`（唯一存储，`load_history` :119） |
 | StatusBar（状态栏） | `status_bar.rs` | `StatusBarProps`（:366）/`StatusBar`（:374）：Row1/Row2/NotifRow、模型点击区、权限模式显示、会话建立中的准备提示（`preparing_label`）、只读准入提示（`read_only_label`）；组件顶部应用 `CenterBandHook`，与 transcript / composer 同宽（Row1 折行与点击列随之派生） |
 | BgTaskArea（后台任务栏） | `bg_task_area.rs` | `BgTaskArea`（:48）：bg agent 运行中条目 + 动画；同样收进居中带，行宽取 `grid.line_width()`，耗时列右对齐到带右缘 |
+| 后台任务会话投影 | `src/kit/{session_boundary,acp_events/system,bg_task_live,acp_types/event_data,panels/tasks}.rs` + `src/acp_client/client/session.rs` | 切换 session 清空旧任务 atom，同 session replay 保留；建立会话后回读 `session/bg-tasks` 快照，增量按 revision 水位应用、缺口重取快照；终态快照保留 detail 的终态及已收到的输出，不重置为 Running；TasksPanel 经统一 `session/cancel-bg-task` 请求取消 |
 | Welcome（空态欢迎屏） | `welcome.rs` | `Welcome`（:94）：logo + 会话空态引导 |
 | AppShell / SessionColumn | `app_shell.rs` + `layout.rs` | `AppShell`（app_shell.rs:23）顶层外壳；`SessionColumn`（layout.rs:147）+ `layout_plan`（:122）垂直布局 |
 | SlashCompletion / MentionPopup | `slash_completion.rs` + `mention_popup.rs` | slash 命令补全弹窗（fuzzy 过滤，仅搜索层）；文件 @mention 弹窗 |

@@ -191,6 +191,9 @@ impl AcpTuiClient {
         projection.committed = true;
         transition.disarm();
         self.flush_buffered(buffered);
+        if self.projection_mode == ClientProjectionMode::Interactive {
+            crate::kit::acp_events::request_bg_task_snapshot();
+        }
         Ok(session_id)
     }
 
@@ -459,6 +462,9 @@ impl AcpTuiClient {
         }
         projection.committed = true;
         transition.disarm();
+        if self.projection_mode == ClientProjectionMode::Interactive {
+            crate::kit::acp_events::request_bg_task_snapshot();
+        }
         Ok(session_id.to_string())
     }
 

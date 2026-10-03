@@ -286,9 +286,67 @@ pub enum WorkspaceError {
 #[async_trait]
 pub trait SessionExecutionLease: Send + Sync {
     fn thread_id(&self) -> &ThreadId;
+    /// Store-issued execution generation. A missing token has no cross-process write authority.
+    fn owner_token(&self) -> Option<ExecutionOwnerToken> {
+        None
+    }
+    fn prior_unreleased_generation(&self) -> Option<PriorExecutionOwner> {
+        None
+    }
     /// Drain admitted writes and close this runtime handle only after its resources have stopped.
     /// An unknown persistence outcome prevents successful completion; no execution state is persisted.
     async fn mark_clean(&self) -> anyhow::Result<()>;
+}
+
+/// A Store-issued root execution claim. Both values are required for a write fence.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExecutionOwnerToken {
+    pub root_id: ThreadId,
+    pub epoch: i64,
+    pub nonce: String,
+}
+
+/// Previous owner evidence returned by the Store CAS. A missing generation ID
+/// still requires proof and must fail closed at executable admission.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PriorExecutionOwner {
+    pub agent_generation_id: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExecutionOwnerClaim {
+    pub token: ExecutionOwnerToken,
+    pub prior_unreleased: Option<PriorExecutionOwner>,
+}
+
+/// Nonsecret identity of the only external async owner that supports takeover.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkspaceExecutionDescriptor {
+    pub endpoint: String,
+    pub key_identity: String,
+    pub agent_generation_id: String,
+    pub unsupported_async_owners: bool,
+}
+
+impl WorkspaceExecutionDescriptor {
+    /// The recoverable case must carry a complete, nonsecret authority identity.
+    pub fn valid_for_store(&self) -> bool {
+        self.endpoint.len() <= 4096
+            && self.key_identity.len() <= 256
+            && self.agent_generation_id.len() <= 256
+            && (self.unsupported_async_owners
+                || (!self.endpoint.is_empty()
+                    && self.key_identity.len() == 64
+                    && self.key_identity.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    && !self.agent_generation_id.is_empty()))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExecutionWorkspaceOwnerRecord {
+    pub current_epoch: i64,
+    pub descriptor_epoch: i64,
+    pub descriptor: WorkspaceExecutionDescriptor,
 }
 
 #[cfg(test)]

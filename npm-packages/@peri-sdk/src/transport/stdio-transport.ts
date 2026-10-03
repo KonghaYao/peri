@@ -1,4 +1,6 @@
 import { EventQueue } from "./event-queue";
+import { ProcessBroker } from "./process-broker";
+import { randomBytes } from "node:crypto";
 import type {
   JsonRpcNotification,
   ReverseRequestHandler,
@@ -57,9 +59,18 @@ export class StdioTransport implements Transport {
   private terminalError: Error | undefined;
   private requestHandler: ReverseRequestHandler | undefined;
   private closePromise: Promise<void> | undefined;
+  private readonly terminationProof: Promise<boolean>;
+  private readonly hasProcessBroker: boolean;
+  readonly generationId: string;
 
-  private constructor(process: Bun.Subprocess<"pipe", "pipe", "pipe">) {
+  private constructor(process: Bun.Subprocess<"pipe", "pipe", "pipe">, generationId: string, broker?: ProcessBroker) {
     this.process = process;
+    this.generationId = generationId;
+    this.hasProcessBroker = broker !== undefined;
+    this.terminationProof = process.exited.then(
+      () => broker?.settleAfterAgentExit() ?? false,
+      () => broker?.settleAfterAgentExit() ?? false,
+    );
     void this.readOutput();
     void this.drainStderr();
     void process.exited.then(
@@ -72,16 +83,29 @@ export class StdioTransport implements Transport {
     const frame =
       options.settings === undefined ? undefined : bootstrapFrame(options);
     const env = { ...process.env, ...options.env };
+    const generationId = randomBytes(16).toString("hex");
+    env.PERI_AGENT_GENERATION_ID = generationId;
+    const broker = process.platform === "win32" ? undefined : await ProcessBroker.start();
+    if (broker) {
+      env.PERI_PROCESS_BROKER_SOCKET = broker.socketPath;
+      env.PERI_PROCESS_BROKER_TOKEN = broker.token;
+    }
     for (const [key, value] of Object.entries(env))
       if (value === undefined) delete env[key];
-    const child = Bun.spawn([options.command, ...(options.args ?? [])], {
-      cwd: options.cwd,
-      env: env as Record<string, string>,
-      stdin: "pipe",
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    const transport = new StdioTransport(child);
+    let child: Bun.Subprocess<"pipe", "pipe", "pipe">;
+    try {
+      child = Bun.spawn([options.command, ...(options.args ?? [])], {
+        cwd: options.cwd,
+        env: env as Record<string, string>,
+        stdin: "pipe",
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+    } catch (error) {
+      await broker?.settleAfterAgentExit();
+      throw error;
+    }
+    const transport = new StdioTransport(child, generationId, broker);
     if (frame) {
       try {
         await transport.writeBytes(frame);
@@ -148,11 +172,28 @@ export class StdioTransport implements Transport {
     this.terminate(new Error("ACP transport closed"));
     this.closePromise = (async () => {
       this.process.stdin.end();
-      this.process.kill();
+      // Give ACP its EOF shutdown path so it can drain and release its Store
+      // execution owner. A stuck child still has a bounded forced exit.
+      const exited = await Promise.race([
+        this.process.exited.then(() => true),
+        Bun.sleep(5_000).then(() => false),
+      ]);
+      if (!exited) this.process.kill();
       await this.process.exited;
+      if (this.hasProcessBroker && !(await this.terminationProof)) {
+        throw new Error("ACP subprocess cleanup could not be confirmed");
+      }
     })();
     return this.closePromise;
   }
+
+  /** Trusted supervisor evidence for this exact spawned ACP generation. */
+  waitForTerminationProof(): Promise<boolean> {
+    return this.terminationProof;
+  }
+
+  /** OS identity for host supervision and crash testing. */
+  get pid(): number { return this.process.pid; }
 
   private assertOpen(): void {
     if (this.terminalError) throw this.terminalError;

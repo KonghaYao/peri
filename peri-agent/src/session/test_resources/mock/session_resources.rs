@@ -223,6 +223,47 @@ impl SessionResources for MockSessionResources {
         Ok(())
     }
 
+    async fn append_reminder_if_absent(
+        &self,
+        id: &ThreadId,
+        message_id: peri_acp_types::messages::MessageId,
+        reminder: &peri_acp_types::system_reminder::TrustedSystemReminder,
+    ) -> SessionResourceResult<bool> {
+        self.ensure_writable()?;
+        self.with_region(id, |region| {
+            if let Some(existing) = region
+                .payloads
+                .iter()
+                .find(|payload| payload.id() == message_id)
+            {
+                if let PersistedPayload::SystemReminder {
+                    reminder: stored, ..
+                } = existing
+                {
+                    if stored.as_reminder() == reminder.as_reminder() {
+                        return Ok(false);
+                    }
+                }
+                return Err(unsupported("append_reminder_if_absent conflict"));
+            }
+            region.payloads.push(PersistedPayload::SystemReminder {
+                id: message_id,
+                reminder: reminder.clone(),
+            });
+            Ok(true)
+        })
+    }
+
+    async fn mark_session_closing(&self, id: &ThreadId) -> SessionResourceResult<()> {
+        self.ensure_writable()?;
+        self.closing.lock().unwrap().insert(id.clone());
+        Ok(())
+    }
+
+    async fn is_session_closing(&self, id: &ThreadId) -> SessionResourceResult<bool> {
+        Ok(self.closing.lock().unwrap().contains(id))
+    }
+
     async fn save_fork(
         &self,
         fork: &ForkSnapshot,

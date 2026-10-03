@@ -60,7 +60,7 @@ use peri_acp_types::{
 };
 use tokio_util::sync::CancellationToken as AgentCancellationToken;
 
-use peri_acp_types::tasks::{BgRegistryEvent, BgTaskKind};
+use peri_acp_types::tasks::BgTaskKind;
 
 use crate::agent::react::AgentInput;
 use crate::session::async_router::AsyncRouter;
@@ -151,56 +151,6 @@ struct TurnConfig<'a> {
     session_start_source: Option<String>,
     auxiliary_model: Option<Arc<dyn peri_model::Model>>,
     effective_context_window: u32,
-}
-
-/// BgRegistryEvent → unstable 事件（bg-task-started/completed/cancelled）映射。
-///
-/// TUI bg 面板协议面（`AcpEventData::BgTask*` 解码）依赖的事件名与 payload
-/// 字段保持不变——事件三层化仅改发射/消费路径（发射经 Controller 补打身份、
-/// 消费经 Controller 订阅），不改协议面。
-fn registry_unstable_event(event: &BgRegistryEvent) -> (String, serde_json::Value) {
-    match event {
-        BgRegistryEvent::Started {
-            task_id,
-            kind,
-            summary,
-            started_at,
-        } => (
-            "bg-task-started".to_string(),
-            serde_json::json!({
-                "task_id": task_id,
-                "kind": kind,
-                "summary": summary,
-                "started_at": started_at,
-            }),
-        ),
-        BgRegistryEvent::Completed {
-            task_id,
-            kind,
-            success,
-            output_preview,
-            duration_ms,
-            // route_bg_result 现在在 spawner 中同步执行（在 task_manager.complete()
-            // 之前），不再需要 registry 事件泵异步注入。
-            result: _result,
-        } => (
-            "bg-task-completed".to_string(),
-            serde_json::json!({
-                "task_id": task_id,
-                "kind": kind,
-                "success": success,
-                "output_preview": output_preview,
-                "duration_ms": duration_ms,
-            }),
-        ),
-        BgRegistryEvent::Cancelled { task_id, reason } => (
-            "bg-task-cancelled".to_string(),
-            serde_json::json!({
-                "task_id": task_id,
-                "reason": reason,
-            }),
-        ),
-    }
 }
 
 /// Shared agent execution pipeline with auto-compact support.
@@ -383,86 +333,6 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
         .as_ref()
         .and_then(|sa| sa.task_manager(&ctx.session_id))
         .unwrap_or_else(|| Arc::new(peri_acp_types::tasks::NoopTaskManager));
-
-    // Registry → 事件链泵（事件三层化收尾）：发射经 EventPublisher
-    // （BgRegistryEvent 包装为 ExecutorEvent::BgRegistryEvent 载体；身份降级为
-    // 空串——registry 事件无 turn 归属），消费端从 subscribe() 工厂订阅
-    // 本 session 事件并映射回 bg-task-* unstable 事件（TUI bg 面板协议面不变）。
-    {
-        let (registry_event_tx, mut registry_event_rx) =
-            tokio::sync::mpsc::unbounded_channel::<BgRegistryEvent>();
-        task_manager_for_cmd.set_event_sender(registry_event_tx, ctx.session_id.clone());
-        let mut subscription = (ctx.subscribe)();
-        let registry_sink = Arc::clone(&event_sink);
-        let registry_sid = ctx.session_id.clone();
-        let publisher = Arc::clone(&ctx.event_publisher);
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    msg = subscription.recv() => {
-                        match msg {
-                            Ok(m) if m.envelope.session_id == registry_sid => {
-                                if let Some(ExecutorEvent::BgRegistryEvent(event)) = m.event {
-                                    let (event_name, payload) = registry_unstable_event(&event);
-                                    registry_sink
-                                        .push_unstable_event(&registry_sid, event_name, payload)
-                                        .await;
-                                }
-                            }
-                            Ok(_) => {}
-                            Err(peri_acp_types::event::SubscriptionError::Lagged(n)) => {
-                                tracing::warn!(n, "registry event subscription lagged, events dropped");
-                            }
-                            Err(peri_acp_types::event::SubscriptionError::Closed) => break,
-                        }
-                    }
-                    ev = registry_event_rx.recv() => {
-                        match ev {
-                            Some(event) => {
-                                // 发射端：registry 事件无 turn/agent 身份（身份降级为
-                                // 空串；envelope 仅 ACP 内部使用）。
-                                let source = peri_acp_types::runtime::UnstampedEvent::new(
-                                    String::new(),
-                                    String::new(),
-                                    None,
-                                    peri_acp_types::identity::EventDeliveryClass::Critical,
-                                );
-                                publisher.publish_event(
-                                    &registry_sid,
-                                    &source,
-                                    ExecutorEvent::BgRegistryEvent(event),
-                                );
-                            }
-                            None => {
-                                // 发射点集合结束（registry_event_tx 全 drop）：drain 广播
-                                // 在途事件后退出（与主 pump 同语义）。
-                                loop {
-                                    match subscription.try_recv() {
-                                        Ok(Some(m)) if m.envelope.session_id == registry_sid => {
-                                            if let Some(ExecutorEvent::BgRegistryEvent(event)) = m.event {
-                                                let (event_name, payload) = registry_unstable_event(&event);
-                                                registry_sink
-                                                    .push_unstable_event(&registry_sid, event_name, payload)
-                                                    .await;
-                                            }
-                                        }
-                                        Ok(Some(_)) => {}
-                                        Ok(None) => break,
-                                        Err(peri_acp_types::event::SubscriptionError::Lagged(n)) => {
-                                            tracing::warn!(n, "registry event subscription lagged, events dropped");
-                                            break;
-                                        }
-                                        Err(peri_acp_types::event::SubscriptionError::Closed) => break,
-                                    }
-                                }
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-        });
-    }
 
     // ── L5 命令拦截注入面（注册表 / compact 配置）──
     let command_lookup = Arc::clone(&ctx.command_lookup);

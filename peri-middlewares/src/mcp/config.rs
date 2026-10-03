@@ -66,6 +66,10 @@ pub enum McpConfigError {
     ReservedBuiltinInstanceName { name: String },
     #[error("remote workspace requires host or global configuration: {name}")]
     UntrustedWorkspaceSource { name: String },
+    #[error("task scope secret requires a trusted loopback Workspace MCP: {name}")]
+    InvalidTaskScopeSource { name: String },
+    #[error("task scope secret could not be loaded for Workspace MCP: {name}")]
+    TaskScopeSecretUnavailable { name: String },
     /// builtin 实例的关闭片段非法（A18）：唯一合法写法是只写 `disabled: true`。
     ///
     /// `disabled` 与 `system_mcp` 同时声明在今天会走到 readiness 的
@@ -252,6 +256,7 @@ pub(crate) fn expand_server_config_with_context(
             .as_ref()
             .map(|map| map.iter().map(|(k, v)| (k.clone(), expand(v))).collect()),
         url: config.url.as_ref().map(|s| expand(s)),
+        task_scope_secret_file: config.task_scope_secret_file.as_ref().map(|s| expand(s)),
         headers: config
             .headers
             .as_ref()
@@ -743,6 +748,7 @@ pub(crate) fn set_server_disabled_with_paths(
 #[cfg(test)]
 fn test_config() -> McpServerConfig {
     McpServerConfig {
+        task_scope_secret_file: None,
         command: None,
         args: None,
         env: None,

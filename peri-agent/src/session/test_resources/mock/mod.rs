@@ -4,7 +4,7 @@
 //! 「没覆盖」伪装成「通过」。需要真实 owner/绑定/事务语义的测试请用
 //! [`TestSession`](super::test_resources::TestSession)（真实 `SessionResourcesImpl`）。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -118,6 +118,7 @@ pub(crate) struct MockSessionResources {
     ///
     /// `Arc` 共享给认领 handle：`mark_running` 等写入在 trait 方法返回后仍要落回同一份事实。
     regions: Arc<Mutex<HashMap<ThreadId, Region>>>,
+    closing: Mutex<HashSet<ThreadId>>,
     /// 登记顺序（`threads()` 断言用；HashMap 无序）。
     order: Mutex<Vec<ThreadId>>,
     injection: Mutex<Injection>,
@@ -181,6 +182,7 @@ impl MockSessionResources {
     pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
             regions: Arc::new(Mutex::new(HashMap::new())),
+            closing: Mutex::new(HashSet::new()),
             order: Mutex::new(Vec::new()),
             injection: Mutex::new(Injection::default()),
             writable: true,

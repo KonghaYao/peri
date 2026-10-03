@@ -24,16 +24,20 @@ snapshot；`initialize.rs` 的普通/bare 路径消费冻结输入，middleware 
 
 ## 速查表
 
-MCP Tasks 的 UI 与模型投影：`src/mcp/tool_bridge.rs` 在 task receipt 返回时通过
-`McpClientPool::emit_task_started` 发出既有 `bg-task-started`；
-`src/mcp/client/subscription.rs` 订阅终态并发出 `bg-task-completed`，同时向会话
-inbox 投递提醒。Builtin workspace Bash 的 `structuredContent` 解析为
-`BackgroundTaskResult`，提醒只包含退出信息与持久输出文件引用，不展开原始 JSON。
-ACP `host/prompt.rs` 按 session 注册事件 sink，session 注销时 pool 清理该 sink。
-Pool 按 session 记录已接收、仍在监视终态的 MCP Task；
-`McpPoolPort::has_active_tasks` 供 Agent 的 idle probe 使用，保证 `--print`
-在后台任务完成并唤醒 inbox 前不会退出。回归见
-`peri-tui/tests/print_background_exit.rs`。
+MCP Tasks 的执行适配在 `src/mcp/tool_bridge.rs` 与
+`src/mcp/client/subscription_tasks.rs`（由 `subscription.rs` 装配）：task receipt 登记到 Agent session 的
+`TaskManager`，其 opaque ID 供 ACP 显示与取消；Pool 只保留 session manager 弱引用、
+Workspace scope capability 和 owner 连接。`tasks/get` 轮询与 Workspace
+`workspace/taskSnapshot`/`workspace/taskChanges` cursor 对账将终态交给 Manager，
+Manager 先投递带稳定 delivery ID 的 Defer，再发布终态。Builtin Workspace Bash
+提醒只带退出信息与输出文件引用。`McpPoolPort::has_active_tasks` 查询 Manager
+未结清的外部任务供 Agent idle probe 使用。`taskScopeSecretFile` 仅允许全局可信的
+loopback Workspace HTTP 配置；builtin 使用同进程 scope authority。
+显式删除可调用 `reconcile_closing_workspace_scope`，在 Agent Manager 不存在时从可信
+session ID 重新签 scope，逐 owner 关闭创建、发现、取消并等待终态；缺少 owner 或
+可信 scope 时返回未完成，不允许静默删除。
+scope 快照携 epoch；`taskClose`/`taskOpen` 按该 epoch 做 owner 端 CAS，旧关闭请求
+在重开后不能再次关掉同一 session 的新执行轮次。
 
 ### OAuth 凭证接入（实现完成）
 
@@ -145,7 +149,7 @@ Pool 按 session 记录已接收、仍在监视终态的 MCP Task；
 | 连接 / pool / task owner | client.rs（McpClientPool 状态所有权与稳定 re-export）；client/lifecycle.rs（begin_shutdown/shutdown、try_commit_connection）；client/service.rs（McpServiceWrapper 与 capability 声明）；client/types.rs（句柄、状态、connection key）；task_scope.rs（McpTaskOwner / weak McpTaskSpawner / keyed completion）；client/transport.rs（serve_client_auto、spawn_stdio_transport、build_http_transport）；client/subscription.rs（资源订阅循环；**宿主内置提醒映射**：内置 `workspace` 的 `workspace://git/ref` 通知 ⇒ 回读资源正文 ⇒ canonical `git_watch` `Info` 提醒经 `InboxHandle` 注入会话，回读失败回退通用订阅提醒；纯函数单测见 `client/subscription_test.rs`）；initialize.rs（run_initialize；commit_discovery_success :47 / commit_discovery_failure :61 提交本代 `DiscoveryEvidence`，`Err` 不产生 ready 证据）；reconnect.rs（spawn_reconnect/reconnect） |
 | System 启动准入 | client/readiness.rs（SystemReadinessTracker :239、DiscoveryEvidence :75、SystemReadinessError :159、await_system_connections :385）；middleware.rs（await_system_ready :401、before_react_start :774、startup_tool_update :499、prepared_static_bridges :558） |
 | **Builtin 实例（默认层 / 运行时 / 关闭集）** | 宿主 overlay：`builtin/mod.rs`（注入策略与关闭集；`workspace` 默认订阅 `workspace://git/ref` 的唯一声明在 `builtin/workspace_subscription.rs`）；runtime：`builtin/runtime.rs`（transport task、`TickGuard`、`BuiltinInstanceSupervisor`）；dispatch：`builtin/dispatch.rs`（`BuiltinServerHandler`、`builtin_server_handler`）；实例 handler 与共享映射 helper 已迁入独立 package，见 [MCP packages 代码索引](mcp-packages.md)。实例池入口为 `McpClientPool::spawn_builtin_transport`；订阅建立门 = `McpClientPool::subscription_allowed`（A24 关闭集命中 ⇒ 不建立 `subscriptions/listen`，零服务端副作用）；订阅面线路证据见 `builtin_subscription_wire_test.rs` |
-| MCP 调用失败 / 期限 / 取消 | 通用 `ToolFailure` 与 IF-D14 result mapping 归 `peri-mcp-common`；宿主桥接与期限 / cancel 在 `tool_bridge.rs`、`tool_request.rs`；workspace 的 context 注入、恢复与 host 生命周期测试仍在 `builtin/{context,workspace_test.rs,workspace_recovery_test.rs}`。package 侧测试与入口见 [MCP packages 代码索引](mcp-packages.md) |
+| MCP 调用失败 / 期限 / 取消 | 通用 `ToolFailure` 与 IF-D14 result mapping 归 `peri-mcp-common`；`tool_bridge.rs` 在发出可能创建 MCP Task 的调用前经 `client.rs::begin_external_task_execution` 取得会话执行 guard：完整响应或已登记 Task 才移交所有权，响应丢失、Future 丢弃、取消后未见终态均使关闭保持 Incomplete。`tool_request.rs` 管理请求期限；`client/output_store_test.rs::lost_mcp_task_receipt_keeps_session_shutdown_incomplete` 验证远端已创建 Task 但回执丢失的竞态。workspace 的 context 注入、恢复与 host 生命周期测试仍在 `builtin/{context,workspace_test.rs,workspace_recovery_test.rs}`。package 侧测试与入口见 [MCP packages 代码索引](mcp-packages.md) |
 | Builtin 运行时回归 | host transport、dispatch、overlay、policy 与取消测试位于 `src/mcp/builtin*_test.rs` 和 `src/mcp/builtin/*_test.rs`；Workspace client/recovery 集成测试通过 package handler 验证真实桥接；Cron tick lifecycle 测试在 `builtin_cron_runtime_test.rs`。用 `cargo test -p peri-middlewares --lib -- mcp::builtin_runtime_tests --test-threads=1` 跑运行时套件，用 `cargo test -p peri-middlewares --lib -- mcp::builtin_cron_runtime_tests --test-threads=1` 跑 tick 生命周期 |
 | System 必需工具注入 | system_tools.rs（prepare_system_tools :61、SystemToolError :24）；tool_bridge.rs（build_typed_tool_bridges :422、with_direct :192、original_tool_name :204） |
 | Dynamic registry | dynamic/registry.rs（RegistryState 所有权、deployment port 与公开 re-export）；registry/connector.rs（ProductionDynamicMcpConnector）；registry/load.rs / unload.rs / lifecycle.rs（操作与关闭）；registry/operations.rs（查询与通知）；registry/capability.rs（collision、snapshot 与 projection lease） |

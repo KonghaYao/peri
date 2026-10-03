@@ -97,7 +97,7 @@ TUI 的所有主动行为通过标准 ACP JSON-RPC 方法调用。不定义自�
 
 | 方法 | 参数 | 返回值 | 语义 |
 |------|------|--------|------|
-| `session/cancel-bg-task` | `{ sessionId, taskId }` | `{ success }` | 取消后台任务（会话不存在时如实报错） |
+| `session/cancel-bg-task` | `{ sessionId, taskId }` | `{ success }` | 会话任务取消入口；owner 路由与结果语义见 [Session 异步任务架构](session-async-tasks.md) |
 | `workflow/list_runs` | `{ sessionId }` | `{ runs }` | 列出工作流运行快照 |
 | `workflow/kill_agent` | `{ sessionId, runId, agentId }` | `{ killed }` | 终止运行中的工作流 agent |
 | `workflow/kill_run` | `{ sessionId, runId }` | `{ killed }` | 终止整个工作流运行 |

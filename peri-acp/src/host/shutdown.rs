@@ -170,6 +170,17 @@ pub(super) async fn shutdown_host(
                         1,
                     );
                 }
+                if let Some(token) = owner.owner_token() {
+                    if let Err(error) = cfg.session_resources.release_execution_owner(&token).await {
+                        tracing::warn!(%error, "execution owner release could not be confirmed");
+                        return task_scope::HostTerminalShutdownReport::aggregate(
+                            host_report,
+                            dynamic_report,
+                            pool_report,
+                            1,
+                        );
+                    }
+                }
             }
             sessions.lock().await.clear();
             prompt_locks.lock().await.clear();

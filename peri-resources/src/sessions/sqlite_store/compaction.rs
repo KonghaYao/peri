@@ -74,7 +74,18 @@ pub(super) async fn commit_compaction_lifecycle(
     lifecycle: &CompactionChange,
 ) -> Result<()> {
     let mut tx = database.pool.begin().await?;
+    commit_compaction_lifecycle_on(&mut tx, thread_id, lifecycle).await?;
+    tx.commit()
+        .await
+        .map_err(|_| commit_failure(Some(thread_id.clone())))?;
+    Ok(())
+}
 
+pub(super) async fn commit_compaction_lifecycle_on(
+    tx: &mut SqliteConnection,
+    thread_id: &ThreadId,
+    lifecycle: &CompactionChange,
+) -> Result<()> {
     for (message_id, flags) in &lifecycle.flag_updates {
         let projection_json = flags
             .projection
@@ -128,9 +139,6 @@ pub(super) async fn commit_compaction_lifecycle(
     .execute(&mut *tx)
     .await?;
 
-    tx.commit()
-        .await
-        .map_err(|_| commit_failure(Some(thread_id.clone())))?;
     Ok(())
 }
 

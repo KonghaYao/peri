@@ -21,9 +21,10 @@ use peri_acp_types::session_resources::{
     PersistenceRecovery, RewindBoundary, SessionMetaPatch, SessionResourceResult, SessionSnapshot,
 };
 use peri_acp_types::store::{CompactionChange, MessageFlags, PersistedPayload};
+use peri_acp_types::system_reminder::TrustedSystemReminder;
 use peri_acp_types::thread::{ThreadId, ThreadMeta};
 use peri_acp_types::workspace::{
-    ResolvedWorkspace, ScopedThreadPage, ScopedThreadQuery, SessionBinding,
+    ExecutionOwnerToken, ResolvedWorkspace, ScopedThreadPage, ScopedThreadQuery, SessionBinding,
 };
 
 use super::sqlite_store::invalid_input;
@@ -45,6 +46,24 @@ pub struct ChildResumeRecord {
 /// 「未生效」报告成成功，也不得在失败后遗留部分写入。
 #[async_trait]
 pub(crate) trait SessionDataPort: Send + Sync {
+    /// Claim a root generation in the canonical Store. Closing recovery requires
+    /// a persisted close intent; a live, unexpired generation cannot be stolen.
+    async fn claim_execution_owner(
+        &self,
+        root: &ThreadId,
+        require_closing: bool,
+        expected_previous_epoch: Option<i64>,
+    ) -> SessionResourceResult<peri_acp_types::workspace::ExecutionOwnerClaim>;
+    async fn renew_execution_owner(&self, token: &ExecutionOwnerToken) -> SessionResourceResult<()>;
+    async fn release_execution_owner(&self, token: &ExecutionOwnerToken) -> SessionResourceResult<()>;
+    async fn finish_close(&self, token: &ExecutionOwnerToken) -> SessionResourceResult<()>;
+    async fn close_settlement(&self, token: &ExecutionOwnerToken) -> SessionResourceResult<peri_acp_types::session_resources::CloseSettlement>;
+    async fn bind_execution_workspace_owner(&self, token: &ExecutionOwnerToken, descriptor: &peri_acp_types::workspace::WorkspaceExecutionDescriptor) -> SessionResourceResult<()>;
+    async fn read_execution_workspace_owner(&self, root: &ThreadId) -> SessionResourceResult<Option<peri_acp_types::workspace::ExecutionWorkspaceOwnerRecord>>;
+    async fn mark_unsupported_async_owner(&self, token: &ExecutionOwnerToken) -> SessionResourceResult<()>;
+    fn install_execution_owner_token(&self, token: ExecutionOwnerToken);
+    fn execution_owner_token(&self, root: &ThreadId) -> Option<ExecutionOwnerToken>;
+
     fn oauth_credentials_for_workspace(
         self: std::sync::Arc<Self>,
         _workspace_id: peri_acp_types::workspace::WorkspaceId,
@@ -230,6 +249,16 @@ pub(crate) trait SessionDataPort: Send + Sync {
         id: &ThreadId,
         payloads: &[PersistedPayload],
     ) -> SessionResourceResult<()>;
+
+    async fn append_reminder_if_absent(
+        &self,
+        id: &ThreadId,
+        message_id: MessageId,
+        reminder: &TrustedSystemReminder,
+    ) -> SessionResourceResult<bool>;
+
+    async fn mark_session_closing(&self, id: &ThreadId) -> SessionResourceResult<()>;
+    async fn is_session_closing(&self, id: &ThreadId) -> SessionResourceResult<bool>;
 
     /// 保存 fork 目标快照；source 不变。
     async fn save_fork(&self, fork: &ForkSnapshot) -> SessionResourceResult<()>;

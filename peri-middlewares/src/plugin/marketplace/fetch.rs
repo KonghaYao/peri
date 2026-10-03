@@ -26,17 +26,11 @@ pub(crate) async fn fetch_git(
     let cache_dir = cache_base.join(name);
 
     if !cache_dir.exists() {
+        let mut command = tokio::process::Command::new("git");
+        command.args(["clone", "--depth", "1", url, &cache_dir.display().to_string()]);
         let output = tokio::time::timeout(
             std::time::Duration::from_secs(30),
-            tokio::process::Command::new("git")
-                .args([
-                    "clone",
-                    "--depth",
-                    "1",
-                    url,
-                    &cache_dir.display().to_string(),
-                ])
-                .output(),
+            peri_process::run_output(command),
         )
         .await
         .map_err(|e| MarketplaceError::GitFailed(format!("clone 超时: {e}")))?
@@ -47,11 +41,11 @@ pub(crate) async fn fetch_git(
             return Err(MarketplaceError::GitFailed(format!("clone 失败: {stderr}")));
         }
     } else if auto_update {
+        let mut command = tokio::process::Command::new("git");
+        command.args(["-C", &cache_dir.display().to_string(), "pull", "--ff-only"]);
         let output = tokio::time::timeout(
             std::time::Duration::from_secs(30),
-            tokio::process::Command::new("git")
-                .args(["-C", &cache_dir.display().to_string(), "pull", "--ff-only"])
-                .output(),
+            peri_process::run_output(command),
         )
         .await
         .map_err(|e| MarketplaceError::GitFailed(format!("pull 超时: {e}")))?
@@ -151,16 +145,11 @@ pub(crate) async fn fetch_npm(
 
     let tmp_dir = std::env::temp_dir().join(format!("npm-pack-{package}-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&tmp_dir)?;
+    let mut command = tokio::process::Command::new("npm");
+    command.args(["pack", package, "--pack-destination", &tmp_dir.display().to_string()]);
     let output = tokio::time::timeout(
         std::time::Duration::from_secs(60),
-        tokio::process::Command::new("npm")
-            .args([
-                "pack",
-                package,
-                "--pack-destination",
-                &tmp_dir.display().to_string(),
-            ])
-            .output(),
+        peri_process::run_output(command),
     )
     .await
     .map_err(|e| MarketplaceError::NpmFailed(format!("npm pack 超时: {e}")))?

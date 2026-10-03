@@ -1,5 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdtemp, mkdir, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { createHmac } from "node:crypto";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { createServer, type Server } from "node:http";
@@ -108,6 +109,39 @@ async function unusedLoopbackPort(): Promise<number> {
     throw new Error("TCP listener has no port");
   await new Promise<void>((done) => listener.close(done));
   return address.port;
+}
+
+function taskScopeToken(key: Buffer, sessionId: string, epoch: number, nonce: string): string {
+  const signed = `v2.${Buffer.from(sessionId).toString("base64url")}.${epoch}.${Buffer.from(nonce).toString("base64url")}`;
+  return `${signed}.${createHmac("sha256", key).update(signed).digest("base64url")}`;
+}
+
+async function workspaceRpc(
+  url: string, method: string, id: number | undefined, params: object,
+  mcpSessionId?: string,
+): Promise<{ value: Record<string, any>; mcpSessionId?: string }> {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      accept: "application/json, text/event-stream",
+      "mcp-protocol-version": "2025-11-25",
+      ...(mcpSessionId ? { "mcp-session-id": mcpSessionId } : {}),
+    },
+    body: JSON.stringify({ jsonrpc: "2.0", ...(id === undefined ? {} : { id }), method, params }),
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (!response.ok) throw new Error(`Workspace ${method}: HTTP ${response.status}`);
+  if (id === undefined) return { value: {}, mcpSessionId: response.headers.get("mcp-session-id") ?? mcpSessionId };
+  const body = await response.text();
+  const data = response.headers.get("content-type")?.includes("text/event-stream")
+    ? body.split("\n").filter((line) => line.startsWith("data:"))
+        .map((line) => line.slice(5).trim()).find(Boolean)
+    : body;
+  if (!data) throw new Error(`Workspace ${method}: empty response (${response.headers.get("content-type")}; ${body.slice(0, 300)})`);
+  const value = JSON.parse(data) as Record<string, any>;
+  if (value.error) throw new Error(`Workspace ${method}: ${JSON.stringify(value.error)}`);
+  return { value, mcpSessionId: response.headers.get("mcp-session-id") ?? mcpSessionId };
 }
 
 afterEach(async () => {
@@ -253,7 +287,7 @@ test("ManagedAgents starts one real Peri session and rejects a second owner", as
   const database = new Database(f.database, { readonly: true });
   try {
     const row = database
-      .query("SELECT machine_id FROM session_environments WHERE thread_id = ?")
+      .query("SELECT w.machine_id FROM threads t JOIN workspaces w ON w.id = t.workspace_id WHERE t.id = ?")
       .get(sessionId) as { machine_id: string } | null;
     // Current Peri creates its own machine UUID; ACP has no Sandbox identity input.
     expect(row?.machine_id).toMatch(/^[0-9a-f-]{36}$/);
@@ -366,3 +400,101 @@ test("Sandbox Workspace MCP is discovered before the real ACP Session and outliv
     await sandbox.closeWorkspace();
   }
 }, 30_000);
+
+test("a fresh ACP settles a Workspace shell task after the old ACP is killed during close", async () => {
+  const f = await fixture();
+  const bind = `127.0.0.1:${await unusedLoopbackPort()}`;
+  const sandbox = new Sandbox({
+    id: "crash-close-workspace",
+    path: f.workspace,
+    storage: new SqliteFileStorage({ path: f.database }),
+    stdio: { command: periBinary, env: { HOME: f.home }, settings: f.settings },
+    workspaceProcess: { command: periBinary, bind, env: { HOME: f.home } },
+  });
+  const workspace = await sandbox.startWorkspace();
+  const first = await sandbox.createTransport() as StdioTransport;
+  let second: StdioTransport | undefined;
+  try {
+    await first.request("initialize", {
+      protocolVersion: 1,
+      clientCapabilities: { _meta: { "peri.userInputQueue": true } },
+    });
+    const { sessionId } = await first.request<{ sessionId: string }>("session/new", {
+      cwd: f.workspace,
+      mcpServers: [{ type: "http", name: "workspace", url: workspace.url, headers: [] }],
+    });
+    await sandbox.registerSessionTransport(sessionId, first);
+    const db = new Database(f.database, { readonly: true });
+    const owner = db.query("SELECT epoch, nonce FROM session_execution_owners WHERE root_id = ?")
+      .get(sessionId) as { epoch: number; nonce: string } | null;
+    db.close();
+    expect(owner).not.toBeNull();
+    const key = await readFile(workspace.taskScopeSecretFile!);
+    const capability = taskScopeToken(key, sessionId, owner!.epoch, owner!.nonce);
+    const initialized = await workspaceRpc(workspace.url, "initialize", 1, {
+      protocolVersion: "2025-11-25", capabilities: { extensions: { "io.modelcontextprotocol/tasks": {} } },
+      clientInfo: { name: "crash-close-test", version: "1" },
+    });
+    const peer = initialized.mcpSessionId;
+    await workspaceRpc(workspace.url, "notifications/initialized", undefined, {}, peer);
+    const started = await workspaceRpc(workspace.url, "tools/call", 2, {
+      name: "Bash", arguments: { command: "sleep 120", run_in_background: true },
+      _meta: { "peri/taskScope": capability },
+    }, peer);
+    const rawTaskId = started.value.result?.taskId as string | undefined;
+    if (!rawTaskId) throw new Error(`Workspace Bash did not return Task: ${JSON.stringify(started.value)}`);
+
+    // Seed the exact owner-guarded close intent at the persistence seam. It
+    // creates a deterministic crash point after intent commit and before ACP
+    // has had a chance to cancel the still-running Workspace task.
+    const intentDb = new Database(f.database);
+    const intent = intentDb.query(`
+      INSERT INTO session_close_intents(thread_id, requested_at)
+      SELECT ?, ? WHERE EXISTS (
+        SELECT 1 FROM session_execution_owners
+        WHERE root_id = ? AND epoch = ? AND nonce = ? AND released = 0
+      )
+    `).run(sessionId, new Date().toISOString(), sessionId, owner!.epoch, owner!.nonce);
+    intentDb.close();
+    expect(intent.changes).toBe(1);
+    process.kill(first.pid, "SIGKILL");
+    expect(await first.waitForTerminationProof()).toBe(true);
+
+    const before = await workspaceRpc(workspace.url, "workspace/taskSnapshot", 3, {
+      _meta: { "peri/taskScope": capability },
+    }, peer);
+    const beforeTask = (before.value.result?.tasks as Array<{ task?: { taskId?: string; status?: string } }>)
+      .find((row) => row.task?.taskId === rawTaskId);
+    expect(beforeTask?.task?.status).toBe("working");
+
+    // Advance the test fixture's Store clock boundary after exact process
+    // proof; the production takeover still uses the Store CAS claim.
+    const expired = new Database(f.database);
+    expired.query("UPDATE session_execution_owners SET expires_at_unix = 0 WHERE root_id = ? AND epoch = ?")
+      .run(sessionId, owner!.epoch);
+    expired.close();
+    second = await sandbox.createTransport() as StdioTransport;
+    await initialize(second);
+    await second.request("session/close", { sessionId });
+    const settled = new Database(f.database, { readonly: true });
+    const next = settled.query("SELECT epoch, nonce, released FROM session_execution_owners WHERE root_id = ?")
+      .get(sessionId) as { epoch: number; nonce: string; released: number } | null;
+    const remainingIntent = settled.query("SELECT 1 FROM session_close_intents WHERE thread_id = ?")
+      .get(sessionId);
+    settled.close();
+    expect(next!.epoch).toBeGreaterThan(owner!.epoch);
+    expect(next!.released).toBe(1);
+    expect(remainingIntent).toBeNull();
+    const snapshot = await workspaceRpc(workspace.url, "workspace/taskSnapshot", 4, {
+      _meta: { "peri/taskScope": taskScopeToken(key, sessionId, next!.epoch, next!.nonce) },
+    }, peer);
+    const task = (snapshot.value.result?.tasks as Array<{ task?: { taskId?: string; status?: string } }>)
+      .find((row) => row.task?.taskId === rawTaskId);
+    expect(task).toBeDefined();
+    expect(["completed", "failed", "cancelled"]).toContain(task?.task?.status);
+  } finally {
+    await second?.close().catch(() => {});
+    await first.close().catch(() => {});
+    await sandbox.closeWorkspace();
+  }
+}, 90_000);

@@ -110,6 +110,9 @@ pub struct AcpSession {
     /// 后台任务管理器（Agent 层 per-session 聚合：registry + bg shell 执行；
     /// 随 session 创建/销毁，close_session 时 cancel_all 取消 owned 任务）
     pub task_manager: Arc<dyn peri_acp_types::tasks::TaskManager>,
+    /// The ACP task event stream is bound once per session runtime.
+    pub(crate) task_events_started: std::sync::atomic::AtomicBool,
+    pub(crate) task_events_cancel: CancellationToken,
     /// idle-suspended 标志：executor 在 await_wake 挂起期间置 true（跨 turn
     /// 持久，Arc 共享）。宿主 `dispatch_prompt_turn` 据此把挂起期间到达的
     /// 用户 prompt 注入 inbox 唤醒 loop（而非在 prompt lock 上阻塞）。
@@ -298,6 +301,7 @@ impl SessionManager {
     /// Transfer the removed record to the host's retryable exit context.
     pub(crate) fn take_for_close(&self, session_id: &str) -> Option<AcpSession> {
         self.inner.sessions.remove(session_id).map(|(_, session)| {
+            session.task_events_cancel.cancel();
             if let Some(port) = &session.mcp_subscription {
                 port.unregister_inbox(session_id);
             }
@@ -309,6 +313,7 @@ impl SessionManager {
     /// cooperatively unwinding prompt.
     pub(crate) fn pre_close_session(&self, session_id: &str) {
         if let Some(session) = self.inner.sessions.get(session_id) {
+            session.task_events_cancel.cancel();
             if let Some(mailbox) = &session.user_input_mailbox {
                 mailbox.invalidate();
             }

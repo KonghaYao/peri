@@ -1,6 +1,6 @@
 //! SQLite schema 11 → 12 的数据搬运。接入写打开前由夹具验证完整形状与回滚。
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use sqlx::{Connection, SqliteConnection};
 
 use super::storage_v2_plan::read_local_plan;
@@ -24,6 +24,30 @@ pub(super) async fn migrate_local_v2(connection: &mut SqliteConnection) -> Resul
         .await;
     migrated?;
     restored?;
+    Ok(())
+}
+
+/// Install the durable root execution generation before accepting schema 13 writes.
+pub(super) async fn migrate_local_execution_owner(
+    connection: &mut SqliteConnection,
+) -> Result<()> {
+    let (version,): (i64,) = sqlx::query_as("PRAGMA user_version")
+        .fetch_one(&mut *connection)
+        .await?;
+    if version != 12 {
+        bail!("execution owner migration requires schema 12");
+    }
+    let mut tx = connection.begin_with("BEGIN IMMEDIATE").await?;
+    sqlx::query(canonical::CREATE_SESSION_EXECUTION_OWNERS_TABLE_SQL)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(canonical::CREATE_SESSION_EXECUTION_WORKSPACE_DESCRIPTORS_TABLE_SQL)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("PRAGMA user_version = 13")
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -194,6 +218,9 @@ async fn migrate_transaction(connection: &mut SqliteConnection) -> Result<()> {
         .execute(&mut *tx)
         .await?;
     sqlx::query(canonical::CREATE_V2_OAUTH_CREDENTIALS_TABLE_SQL)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(canonical::CREATE_SESSION_CLOSE_INTENTS_TABLE_SQL)
         .execute(&mut *tx)
         .await?;
     sqlx::query("DROP TABLE session_environments")

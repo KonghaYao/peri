@@ -288,11 +288,39 @@ impl BaseTool for McpToolBridge {
         }
 
         let peer = self.client.peer.as_ref().unwrap();
+        let session_id = ctx.session_id.as_deref().or(self.output_session_id.as_deref());
+        let mut execution_guard = if let Some(session_id) = session_id {
+            let pool = self.output_pool.as_ref().and_then(std::sync::Weak::upgrade)
+                .ok_or_else(|| Box::new(ToolCallError::CallFailed {
+                    server: self.server_name.clone(), tool: self.tool_name.clone(),
+                    reason: "session MCP task owner unavailable".into(),
+                }) as Box<dyn std::error::Error + Send + Sync>)?;
+            Some(pool.begin_external_task_execution(session_id).map_err(|reason| {
+                Box::new(ToolCallError::CallFailed {
+                    server: self.server_name.clone(), tool: self.tool_name.clone(), reason,
+                }) as Box<dyn std::error::Error + Send + Sync>
+            })?)
+        } else { None };
 
         // 2. 构建 rmcp 请求参数
         let arguments = input.as_object().cloned().unwrap_or_default();
-        let request = rmcp::model::CallToolRequestParams::new(self.tool_name.clone())
+        let mut request = rmcp::model::CallToolRequestParams::new(self.tool_name.clone())
             .with_arguments(arguments);
+        if matches!(self.client.source.as_ref(), Some(super::config::ConfigSource::Builtin { instance }) if instance == "workspace")
+            || matches!(
+                self.client.source.as_ref(),
+                Some(super::config::ConfigSource::WorkspaceRemote)
+            )
+        {
+            if let (Some(pool), Some(session_id)) = (
+                self.output_pool.as_ref().and_then(std::sync::Weak::upgrade),
+                ctx.session_id
+                    .as_deref()
+                    .or(self.output_session_id.as_deref()),
+            ) {
+                request.meta = pool.task_scope_meta_for(&self.server_name, session_id);
+            }
+        }
 
         // Workspace tools retain their own deadlines (Bash promotes at <=120s).
         // Source identity, not a spoofable server name, grants this behavior.
@@ -301,6 +329,7 @@ impl BaseTool for McpToolBridge {
             Some(super::config::ConfigSource::Builtin { instance }) if instance == "workspace"
         ))
         .then_some(TOOL_CALL_TIMEOUT);
+        let task_meta = request.meta.clone();
         let response = super::tool_request::call_tool(peer, request, timeout)
             .await
             .map_err(|e| {
@@ -319,8 +348,12 @@ impl BaseTool for McpToolBridge {
                 }
             })?;
         let result = match response {
-            rmcp::model::CallToolResponse::Complete(result) => result,
+            rmcp::model::CallToolResponse::Complete(result) => {
+                if let Some(guard) = execution_guard.as_mut() { guard.confirm_stopped(); }
+                result
+            },
             rmcp::model::CallToolResponse::Task(created) => {
+                let task_created_at = created.task.created_at;
                 let task_id = created.task.task_id;
                 if let Some(pool) = self.output_pool.as_ref().and_then(std::sync::Weak::upgrade) {
                     if let Some(session_id) = ctx
@@ -329,11 +362,14 @@ impl BaseTool for McpToolBridge {
                         .or(self.output_session_id.as_deref())
                     {
                         let is_shell = self.tool_name == "Bash"
-                            && matches!(
+                            && (matches!(
                                 self.client.source.as_ref(),
                                 Some(super::config::ConfigSource::Builtin { instance })
                                     if instance == "workspace"
-                            );
+                            ) || matches!(
+                                self.client.source.as_ref(),
+                                Some(super::config::ConfigSource::WorkspaceRemote)
+                            ));
                         let summary = if is_shell {
                             input
                                 .get("command")
@@ -342,25 +378,66 @@ impl BaseTool for McpToolBridge {
                         } else {
                             self.tool_name.as_str()
                         };
-                        pool.emit_task_started(
+                        let kind = if is_shell {
+                            peri_acp_types::tasks::BgTaskKind::Shell
+                        } else {
+                            peri_acp_types::tasks::BgTaskKind::Mcp
+                        };
+                        let public_id = match pool.register_external_task(
                             session_id,
+                            &self.server_name,
                             &task_id,
-                            if is_shell { "shell" } else { "mcp" },
+                            kind,
                             summary,
-                        )
-                        .await;
-                        pool.spawn_task_subscription(
+                            is_shell,
+                            &task_created_at,
+                        ) {
+                            Ok(task_id) => {
+                                if let Some(guard) = execution_guard.as_mut() { guard.confirm_stopped(); }
+                                task_id
+                            },
+                            Err(reason) => {
+                                let settled = cancel_and_confirm_mcp_task(peer, &task_id, task_meta.clone()).await;
+                                if settled {
+                                    if let Some(guard) = execution_guard.as_mut() { guard.confirm_stopped(); }
+                                }
+                                let reason = if settled { reason } else {
+                                    format!("{reason}; MCP task {task_id} cleanup could not be confirmed")
+                                };
+                                return Err(Box::new(ToolCallError::CallFailed {
+                                    server: self.server_name.clone(),
+                                    tool: self.tool_name.clone(),
+                                    reason,
+                                }));
+                            }
+                        };
+                        pool.spawn_managed_task_subscription(
                             self.server_name.clone(),
                             session_id.to_owned(),
                             task_id.clone(),
+                            public_id.clone(),
                             is_shell,
                             peer.clone(),
                         );
+                        return Ok(format!(
+                            "Background task started: {public_id}. Completion is delivered by MCP Tasks subscription."
+                        ));
                     }
                 }
-                rmcp::model::CallToolResult::success(vec![ContentBlock::text(format!(
-                    "Background task started: {task_id}. Completion is delivered by MCP Tasks subscription."
-                ))])
+                let settled = cancel_and_confirm_mcp_task(peer, &task_id, task_meta).await;
+                if settled {
+                    if let Some(guard) = execution_guard.as_mut() { guard.confirm_stopped(); }
+                }
+                let reason = if settled {
+                    "background task requires a live session task manager".to_owned()
+                } else {
+                    format!("background task {task_id} was not registered and MCP cleanup could not be confirmed")
+                };
+                return Err(Box::new(ToolCallError::CallFailed {
+                    server: self.server_name.clone(),
+                    tool: self.tool_name.clone(),
+                    reason,
+                }));
             }
             _ => {
                 return Err(Box::new(ToolCallError::CallFailed {
@@ -459,6 +536,27 @@ impl BaseTool for McpToolBridge {
 }
 
 /// 将 content 列表格式化为纯文本字符串
+async fn cancel_and_confirm_mcp_task(
+    peer: &rmcp::service::Peer<rmcp::service::RoleClient>,
+    task_id: &str,
+    meta: Option<rmcp::model::RequestMetaObject>,
+) -> bool {
+    let mut cancel = rmcp::model::CancelTaskParams::new(task_id);
+    cancel.meta = meta.clone();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), peer.cancel_task(cancel)).await;
+    let until = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let mut query = rmcp::model::GetTaskParams::new(task_id);
+        query.meta = meta.clone();
+        if matches!(tokio::time::timeout(std::time::Duration::from_secs(1), peer.get_task(query)).await,
+            Ok(Ok(snapshot)) if snapshot.task.status().is_terminal()) {
+            return true;
+        }
+        if tokio::time::Instant::now() >= until { return false; }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
 fn format_contents(contents: &[ContentBlock]) -> String {
     let mut parts = Vec::new();
     for content in contents {

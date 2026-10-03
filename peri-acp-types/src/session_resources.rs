@@ -25,6 +25,7 @@ use async_trait::async_trait;
 
 use crate::messages::MessageId;
 use crate::store::{CompactionChange, InheritedContext, MessageFlags, PersistedPayload};
+use crate::system_reminder::TrustedSystemReminder;
 use crate::thread::{AgentStatus, CancelPolicy, ThreadId, ThreadMeta};
 use crate::workspace::{
     ReadOnlyAdmission, RecoveryRequiredDetails, ResolvedWorkspace, ScopedThreadPage,
@@ -344,6 +345,17 @@ pub struct SessionResourceError {
 /// 会话行为的统一返回类型。
 pub type SessionResourceResult<T> = std::result::Result<T, SessionResourceError>;
 
+/// Readback of an uncertain `finish_close` response for one exact owner generation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CloseSettlement {
+    /// The same owner still holds a durable close intent; finishing may be retried.
+    Pending,
+    /// The same owner was released and its close intent was removed atomically.
+    Finished,
+    /// The owner changed or the rows do not prove either outcome; do not report success.
+    ChangedOwner,
+}
+
 impl SessionResourceError {
     pub fn new(kind: SessionResourceErrorKind) -> Self {
         let effect = match &kind {
@@ -562,6 +574,73 @@ pub trait SessionResources: Send + Sync {
         workspace: &ResolvedWorkspace,
     ) -> SessionResourceResult<Arc<dyn SessionExecutionLease>>;
 
+    /// Resume an accepted close after reading the previous exact Store epoch.
+    /// The compare-and-swap rejects a changed or live generation.
+    async fn claim_closing_execution(
+        &self,
+        _root: &ThreadId,
+        _expected_current_epoch: i64,
+    ) -> SessionResourceResult<Arc<dyn SessionExecutionLease>> {
+        Err(SessionResourceError::new(SessionResourceErrorKind::Unsupported))
+    }
+
+    /// Renew the exact Store generation while the session is running.
+    async fn renew_execution_owner(
+        &self,
+        _token: &crate::workspace::ExecutionOwnerToken,
+    ) -> SessionResourceResult<()> {
+        Err(SessionResourceError::new(SessionResourceErrorKind::Unsupported))
+    }
+
+    /// Release only after all local work and persistence have settled.
+    async fn release_execution_owner(
+        &self,
+        _token: &crate::workspace::ExecutionOwnerToken,
+    ) -> SessionResourceResult<()> {
+        Err(SessionResourceError::new(SessionResourceErrorKind::Unsupported))
+    }
+
+    /// Final close commit: keep the intent until the exact owner generation
+    /// is released in the same Store transaction.
+    async fn finish_close(
+        &self,
+        _token: &crate::workspace::ExecutionOwnerToken,
+    ) -> SessionResourceResult<()> {
+        Err(SessionResourceError::new(SessionResourceErrorKind::Unsupported))
+    }
+
+    async fn close_settlement(
+        &self,
+        _token: &crate::workspace::ExecutionOwnerToken,
+    ) -> SessionResourceResult<CloseSettlement> {
+        Err(SessionResourceError::new(SessionResourceErrorKind::Unsupported))
+    }
+
+    /// Bind a trusted external owner to this exact live Store generation before tools run.
+    async fn bind_execution_workspace_owner(
+        &self,
+        _token: &crate::workspace::ExecutionOwnerToken,
+        _descriptor: &crate::workspace::WorkspaceExecutionDescriptor,
+    ) -> SessionResourceResult<()> {
+        Err(SessionResourceError::new(SessionResourceErrorKind::Unsupported))
+    }
+
+    /// Read nonsecret identity evidence without exposing the Store nonce.
+    async fn read_execution_workspace_owner(
+        &self,
+        _root: &ThreadId,
+    ) -> SessionResourceResult<Option<crate::workspace::ExecutionWorkspaceOwnerRecord>> {
+        Err(SessionResourceError::new(SessionResourceErrorKind::Unsupported))
+    }
+
+    /// Monotonically record an async owner that cannot be recovered by Workspace scope.
+    async fn mark_unsupported_async_owner(
+        &self,
+        _token: &crate::workspace::ExecutionOwnerToken,
+    ) -> SessionResourceResult<()> {
+        Err(SessionResourceError::new(SessionResourceErrorKind::Unsupported))
+    }
+
     // ── 创建与接纳 ──
 
     /// 创建新会话：meta/binding/frozen 完整保存后返回执行准入。
@@ -728,6 +807,21 @@ pub trait SessionResources: Send + Sync {
         id: &ThreadId,
         payloads: &[PersistedPayload],
     ) -> SessionResourceResult<()>;
+
+    /// 按稳定消息 ID 原子落下终态提醒；同一内容的重放只返回 false。
+    /// 同 ID 的不同内容必须失败，不可把它当作已交付。
+    async fn append_reminder_if_absent(
+        &self,
+        id: &ThreadId,
+        message_id: MessageId,
+        reminder: &TrustedSystemReminder,
+    ) -> SessionResourceResult<bool>;
+
+    /// 接纳显式关闭；提交后恢复的 runtime 必须禁止新任务准入。
+    async fn mark_session_closing(&self, id: &ThreadId) -> SessionResourceResult<()>;
+
+    /// 读取显式关闭意图；Agent 意外断连不产生该事实。
+    async fn is_session_closing(&self, id: &ThreadId) -> SessionResourceResult<bool>;
 
     /// 保存 fork 目标快照；source 不变。
     async fn save_fork(

@@ -53,6 +53,15 @@ fn repository() -> TempDir {
     directory
 }
 
+/// Advance the Store clock past a dead process's lease without a 30s test sleep.
+async fn expire_owner(pool: &sqlx::SqlitePool, id: &str) {
+    sqlx::query("UPDATE session_execution_owners SET expires_at_unix = 0 WHERE root_id = ?1")
+        .bind(id)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
 struct Fixture {
     /// 具体实例：`Arc` 让业务侧与部署 owner 指向同一份事实（生产装配同形）。
     facade: Arc<SessionResourcesImpl>,

@@ -1,6 +1,10 @@
 use std::sync::Arc;
 
-use peri_acp_types::tasks::{BgRegistryEvent, BgShellHandle, BgTaskKind, BgTaskRegistration};
+use peri_acp_types::tasks::{
+    BgRegistryEvent, BgShellHandle, BgTaskKind, BgTaskRegistration, ExternalTaskRegistration,
+    TaskChange, TaskSnapshot,
+};
+use sha2::{Digest, Sha256};
 
 use crate::agent::events::BackgroundTaskResult;
 
@@ -18,11 +22,51 @@ use super::{QueuedSubagentMessage, ShellExecutor, SubagentMessageError};
 /// 聚合 `BackgroundTaskRegistry` 与注入的 shell 执行环境端口。随 session 创建/销毁；`cancel_all` 供 session 销毁时
 /// 取消所有 owned 任务（§9 销毁顺序：取消 owned tasks）。
 ///
-/// `set_event_sender`/`clear_event_sender` 为过渡态事件桥接（供 ACP executor
-/// 注入 `BgRegistryEvent` 泵），暂不依赖 M-event-chain。
+/// Session consumers use `snapshot` plus `subscribe_events`; the legacy
+/// single-sender hook remains only for older test adapters.
 pub struct TaskManager {
     registry: Arc<BackgroundTaskRegistry>,
     shell_executor: Option<Arc<dyn ShellExecutor>>,
+    external_registration: parking_lot::Mutex<()>,
+}
+
+fn external_task_id(request: &ExternalTaskRegistration) -> String {
+    let mut hasher = Sha256::new();
+    for part in [
+        &request.session_id,
+        &request.owner_identity,
+        &request.owner_task_id,
+    ] {
+        hasher.update((part.len() as u64).to_be_bytes());
+        hasher.update(part.as_bytes());
+    }
+    format!("mcp-{:x}", hasher.finalize())
+}
+
+fn external_started_at(request: &ExternalTaskRegistration) -> Result<chrono::DateTime<chrono::Utc>, BackgroundRegistryError> {
+    request.started_at.as_deref().map_or_else(
+        || Ok(chrono::Utc::now()),
+        |timestamp| chrono::DateTime::parse_from_rfc3339(timestamp)
+            .map(|parsed| parsed.with_timezone(&chrono::Utc))
+            .map_err(|_| BackgroundRegistryError::InvalidStartedAt),
+    )
+}
+
+fn external_delivery_id(
+    task_id: &str,
+    terminal_transition_id: &str,
+) -> peri_acp_types::messages::MessageId {
+    let mut hasher = Sha256::new();
+    hasher.update((task_id.len() as u64).to_be_bytes());
+    hasher.update(task_id.as_bytes());
+    hasher.update((terminal_transition_id.len() as u64).to_be_bytes());
+    hasher.update(terminal_transition_id.as_bytes());
+    let digest = hasher.finalize();
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    peri_acp_types::messages::MessageId::from(uuid::Uuid::from_bytes(bytes))
 }
 
 impl Default for TaskManager {
@@ -32,6 +76,59 @@ impl Default for TaskManager {
 }
 
 impl peri_acp_types::tasks::TaskManager for TaskManager {
+    fn restore_external_terminal(
+        &self,
+        request: ExternalTaskRegistration,
+        terminal_transition_id: &str,
+        result: BackgroundTaskResult,
+    ) -> Result<String, String> {
+        self.restore_external_terminal(request, terminal_transition_id, result)
+    }
+    fn external_task_ids(&self) -> Vec<String> {
+        self.registry.external_task_ids()
+    }
+    fn has_unsettled_external(&self) -> bool {
+        self.registry.has_unsettled_mcp()
+    }
+    fn mark_external_lost(&self, task_id: &str) -> bool {
+        self.mark_external_lost(task_id)
+    }
+    fn mark_external_running(&self, task_id: &str) -> bool {
+        self.mark_external_running(task_id)
+    }
+    fn snapshot(&self) -> TaskSnapshot {
+        self.registry.snapshot()
+    }
+
+    fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<TaskChange> {
+        self.registry.subscribe_events()
+    }
+
+    fn register_external(&self, request: ExternalTaskRegistration) -> Result<String, String> {
+        self.register_external(request)
+            .map_err(|error| error.to_string())
+    }
+
+    fn settle_external(
+        &self,
+        task_id: &str,
+        terminal_transition_id: &str,
+        result: BackgroundTaskResult,
+    ) -> Result<bool, String> {
+        self.settle_external(task_id, terminal_transition_id, result)
+    }
+
+    fn cancel_async(
+        &self,
+        task_id: &str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + '_>> {
+        let task_id = task_id.to_owned();
+        Box::pin(async move {
+            self.cancel_async(&task_id)
+                .await
+                .map_err(|error| error.to_string())
+        })
+    }
     fn confirm_external_execution_stopped(&self, task_id: &str) {
         self.registry.confirm_external_stopped(task_id);
     }
@@ -75,6 +172,7 @@ impl peri_acp_types::tasks::TaskManager for TaskManager {
             },
             BgTaskKind::Workflow => BgCancelHandle::Kill(request.kill),
             BgTaskKind::Agent => BgCancelHandle::Kill(request.kill),
+            BgTaskKind::Mcp => return Err("MCP tasks must use register_external".into()),
         };
         let task = BackgroundTask {
             id: request.task_id,
@@ -82,6 +180,7 @@ impl peri_acp_types::tasks::TaskManager for TaskManager {
                 BgTaskKind::Shell => "bg-shell",
                 BgTaskKind::Agent => "agent",
                 BgTaskKind::Workflow => "workflow",
+                BgTaskKind::Mcp => "mcp",
             }
             .to_string(),
             prompt_summary: request.summary,
@@ -136,6 +235,7 @@ impl peri_acp_types::tasks::TaskManager for TaskManager {
     > {
         Box::pin(async move {
             self.registry.scope.close();
+            // Deployment/transport release must never cancel remote MCP tasks.
             self.cancel_all();
             if self.registry.scope.wait().await && self.registry.external_settled() {
                 peri_acp_types::tasks::TaskShutdownReport::Complete
@@ -181,10 +281,132 @@ impl peri_acp_types::tasks::TaskManager for TaskManager {
 }
 
 impl TaskManager {
+    pub fn mark_external_lost(&self, task_id: &str) -> bool {
+        self.registry.mark_external_status(task_id, "lost")
+    }
+
+    pub fn mark_external_running(&self, task_id: &str) -> bool {
+        self.registry.mark_external_status(task_id, "running")
+    }
+    pub fn snapshot(&self) -> TaskSnapshot {
+        self.registry.snapshot()
+    }
+
+    pub fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<TaskChange> {
+        self.registry.subscribe_events()
+    }
+
+    pub fn register_external(
+        &self,
+        request: ExternalTaskRegistration,
+    ) -> Result<String, BackgroundRegistryError> {
+        let _registration = self.external_registration.lock();
+        let task_id = external_task_id(&request);
+        let started_at = external_started_at(&request)?;
+        let cancel = Arc::clone(&request.cancel);
+        let on_terminal = Arc::clone(&request.on_terminal);
+        let task = BackgroundTask {
+            id: task_id.clone(),
+            agent_name: "mcp".into(),
+            prompt_summary: request.summary,
+            status: BackgroundTaskStatus::Running,
+            started_at: std::time::Instant::now(),
+            chrono_started_at: started_at,
+            kind: request.kind,
+            cancel_handle: BgCancelHandle::External {
+                cancel: request.cancel,
+                on_terminal: request.on_terminal,
+            },
+            cancel_token: None,
+            pid: None,
+            output_preview: None,
+            agent_inbox: None,
+        };
+        match self.registry.register_with_kind(task) {
+            Ok(()) => {}
+            Err(BackgroundRegistryError::DuplicateTask(_)) => {
+                self.registry
+                    .refresh_external_callbacks(&task_id, cancel, on_terminal);
+            }
+            Err(error) => return Err(error),
+        }
+        Ok(task_id)
+    }
+
+    pub fn restore_external_terminal(
+        &self,
+        request: ExternalTaskRegistration,
+        terminal_transition_id: &str,
+        mut result: BackgroundTaskResult,
+    ) -> Result<String, String> {
+        if terminal_transition_id.is_empty() {
+            return Err("terminal transition ID is required".into());
+        }
+        let _registration = self.external_registration.lock();
+        let task_id = external_task_id(&request);
+        let started_at = external_started_at(&request).map_err(|error| error.to_string())?;
+        if let Some(status) = self.registry.projection_status(&task_id) {
+            if status == "running" || status == "lost" {
+                self.registry.refresh_external_callbacks(
+                    &task_id,
+                    Arc::clone(&request.cancel),
+                    Arc::clone(&request.on_terminal),
+                );
+                self.settle_external(&task_id, terminal_transition_id, result)?;
+            }
+            return Ok(task_id);
+        }
+        result.task_id = task_id.clone();
+        let delivery_id = external_delivery_id(&task_id, terminal_transition_id);
+        (request.on_terminal)(&result, delivery_id)?;
+        self.registry.restore_external_terminal(
+            task_id.clone(),
+            request.kind,
+            request.summary,
+            started_at,
+            result,
+        );
+        Ok(task_id)
+    }
+
+    pub fn settle_external(
+        &self,
+        task_id: &str,
+        terminal_transition_id: &str,
+        mut result: BackgroundTaskResult,
+    ) -> Result<bool, String> {
+        if terminal_transition_id.is_empty() {
+            return Err("terminal transition ID is required".into());
+        }
+        let Some(notify) = self.registry.external_notify(task_id) else {
+            return Ok(false);
+        };
+        if !self.registry.claim_completion(task_id) {
+            return Ok(false);
+        }
+        result.task_id = task_id.to_owned();
+        let delivery_id = external_delivery_id(task_id, terminal_transition_id);
+        if let Err(error) = notify(&result, delivery_id) {
+            self.registry.reset_completion_claim(task_id);
+            return Err(error);
+        }
+        Ok(self.registry.complete(task_id, result))
+    }
+
+    pub async fn cancel_async(&self, task_id: &str) -> Result<(), BackgroundRegistryError> {
+        if let Some(cancel) = self.registry.external_cancel(task_id) {
+            cancel()
+                .await
+                .map_err(|_| BackgroundRegistryError::ExternalCancelFailed(task_id.into()))
+        } else {
+            self.registry.cancel(task_id)
+        }
+    }
     pub fn new() -> Self {
         Self {
             registry: Arc::new(BackgroundTaskRegistry::new()),
             shell_executor: None,
+            external_registration: parking_lot::Mutex::new(()),
         }
     }
 
@@ -263,12 +485,7 @@ impl TaskManager {
     /// 逐条 `cancel()`：不可取消条目（Kill(None)）如实保留（等待自然完成），
     /// 其余按 kind 分发（Abort 优雅退出 + 超时 abort 兜底 / 执行环境 Kill 闭包）。
     pub fn cancel_all(&self) {
-        let task_ids: Vec<String> = self
-            .registry
-            .list_tasks()
-            .into_iter()
-            .map(|(id, _, _)| id)
-            .collect();
+        let task_ids = self.registry.local_task_ids();
         for task_id in task_ids {
             if let Err(e) = self.registry.cancel(&task_id) {
                 tracing::warn!(

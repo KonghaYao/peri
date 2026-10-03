@@ -77,6 +77,9 @@ pub struct BashTool {
     /// bg shell 完成时的同步回调（在 registry.complete() 之前调用）。
     /// 第二参为任务 kind（bg shell 恒为 Shell，供 continuation scheduler 过滤）。
     pub on_bg_complete: Option<OnBgCompleteFn>,
+    /// Owned foreground timeout promotion is registered synchronously before
+    /// returning to the MCP request, so request cancellation cannot hide it.
+    pub on_bg_started: Option<Arc<dyn Fn(&str) + Send + Sync>>,
 }
 
 impl BashTool {
@@ -85,6 +88,7 @@ impl BashTool {
             cwd: cwd.into(),
             task_manager: None,
             on_bg_complete: None,
+            on_bg_started: None,
         }
     }
 
@@ -95,6 +99,11 @@ impl BashTool {
 
     pub fn with_on_bg_complete(mut self, cb: OnBgCompleteFn) -> Self {
         self.on_bg_complete = Some(cb);
+        self
+    }
+
+    pub fn with_on_bg_started(mut self, cb: Arc<dyn Fn(&str) + Send + Sync>) -> Self {
+        self.on_bg_started = Some(cb);
         self
     }
 }
@@ -634,6 +643,9 @@ impl BashTool {
                                     Some(background_output.finish(exit_code)),
                                 );
                             }))?;
+                            if let Some(on_started) = &self.on_bg_started {
+                                on_started(&task_id);
+                            }
                             output_capture.retain_files();
                             let cleanup_hint = background_cleanup_hint(pid, std::env::consts::OS);
                             let log_hint = foreground_log_hint(&output_capture);

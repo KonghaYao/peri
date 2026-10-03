@@ -51,9 +51,10 @@ use peri_acp_types::session_resources::{
     SessionResourceErrorKind, SessionResourceResult, SessionSnapshot,
 };
 use peri_acp_types::store::{CompactionChange, MessageFlags, PersistedPayload};
+use peri_acp_types::system_reminder::TrustedSystemReminder;
 use peri_acp_types::thread::{ThreadId, ThreadMeta};
 use peri_acp_types::workspace::{
-    ResolvedWorkspace, ScopedThreadPage, ScopedThreadQuery, SessionBinding,
+    ExecutionOwnerToken, ResolvedWorkspace, ScopedThreadPage, ScopedThreadQuery, SessionBinding,
 };
 use tokio::sync::{RwLock, RwLockReadGuard};
 
@@ -62,12 +63,17 @@ use crate::sessions::data::{ChildResumeRecord, SessionDataPort};
 use super::credentials::SessionStoreCredential;
 use super::endpoint::RemoteEndpoint;
 use super::generation::{ConnectionFactory, ConnectionGate, RemoteConnectionFactory};
-use super::mutation::{incomplete_reply, RemoteStore, StoreAccess};
-use super::schema::{self, StoreId, StoreIdentityOutcome, StoreIdentityRead};
+use super::mutation::{RemoteStore, StoreAccess};
+use super::schema::{StoreId, StoreIdentityRead};
+#[cfg(test)]
+use super::schema;
 use super::schema_upgrade;
 use super::session_schema;
-use super::sql::{int_at, StatementSpec};
+use super::sql::StatementSpec;
 use turso_serverless::Value;
+
+#[path = "execution_owner.rs"]
+mod execution_owner;
 
 /// 本次打开对远端 store 身份做了什么：首次登记资格的唯一证据。
 ///
@@ -81,88 +87,10 @@ pub(super) enum StoreInitialization {
     CreatedByThisOpen,
 }
 
-/// 只读身份读取之后的下一步（纯函数结论）。
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum OpenStep {
-    /// 已有本构建认识的身份：本次打开没有建立任何东西。
-    Existing(StoreId),
-    Upgrade(schema::StoreSnapshot),
-    /// 明确为空：写打开在这里才继续初始化；只读打开到这一步就拒绝。
-    NeedsInitialization,
-}
-
-/// 身份读取 + 访问意图 → 打开的下一步（纯函数，真引擎 seam 与生产共用）。
-///
-/// 三条拒绝路径都不猜：版本/契约不认识、元数据形状不可解释、只读打开遇上尚未初始化的
-/// store（没有 schema 就没有会话事实可读，也不越权建表）。
-pub(super) fn open_step(
-    read: StoreIdentityRead,
-    access: StoreAccess,
-) -> SessionResourceResult<OpenStep> {
-    match read {
-        StoreIdentityRead::Present(snapshot) if snapshot.matches_build() => {
-            Ok(OpenStep::Existing(snapshot.store_id))
-        }
-        StoreIdentityRead::Present(snapshot) if snapshot.readable() => match access {
-            StoreAccess::ReadOnly => Ok(OpenStep::Existing(snapshot.store_id)),
-            StoreAccess::ReadWrite => Ok(OpenStep::Upgrade(snapshot)),
-        },
-        StoreIdentityRead::Present(_) => {
-            Err(unsupported_behavior("unrecognized remote store schema"))
-        }
-        StoreIdentityRead::Malformed => Err(super::session_codec::corrupt(
-            "remote session store metadata is not interpretable",
-        )),
-        StoreIdentityRead::Uninitialized => match access {
-            StoreAccess::ReadOnly => Err(unsupported_behavior(
-                "read-only open of an uninitialized remote store",
-            )),
-            StoreAccess::ReadWrite => Ok(OpenStep::NeedsInitialization),
-        },
-    }
-}
-
-/// 身份竞争的结论 → 权威身份 + 本次打开的初始化事实（首次登记资格的唯一映射）。
-///
-/// `CreatedByThisOpen` 只能由 `Created` 产生：竞败方读回的胜者身份也是 `Existing`，
-/// 所以败方没有首次登记资格，但它用的仍是同一个权威身份。
-pub(super) fn open_verdict(outcome: StoreIdentityOutcome) -> (StoreId, StoreInitialization) {
-    match outcome {
-        StoreIdentityOutcome::Created(store_id) => {
-            (store_id, StoreInitialization::CreatedByThisOpen)
-        }
-        StoreIdentityOutcome::Existing(store_id) => (store_id, StoreInitialization::Existing),
-    }
-}
-
-/// 旧形状探测（只读、单条 SELECT）：写打开遇上未初始化的库时，先问一次「这里有没有
-/// 统一之前的远端会话表」。
-///
-/// 命中即拒绝（`Unsupported`）：这不是空库，而是一个本构建不认识的旧形状库。
-/// **不自动迁移**——迁移要重命名表并搬运每一行，而本段的运行前提是新库没有历史数据；
-/// **也不覆盖**——覆盖等于替使用者丢掉他看不见的数据。只发一条只读语句，不建表、不写行。
-async fn refuse_legacy_shape(store: &RemoteStore) -> SessionResourceResult<()> {
-    let row = store
-        .fetch_row(&StatementSpec::new(
-            schema::COUNT_LEGACY_TABLES_SQL,
-            schema::LEGACY_SHAPE_TABLES
-                .iter()
-                .map(|table| Value::Text((*table).to_owned()))
-                .collect(),
-        ))
-        .await?;
-    // 读不到计数不是「没有旧表」：形状不完整的读取按未决上报，不放行初始化。
-    let count = row
-        .as_ref()
-        .and_then(|values| int_at(values, 0))
-        .ok_or_else(|| incomplete_reply("legacy shape probe returned no count"))?;
-    if count > 0 {
-        return Err(unsupported_behavior(
-            "remote store has the pre-unification session tables; it is not migrated automatically",
-        ));
-    }
-    Ok(())
-}
+#[path = "session_open.rs"]
+mod session_open;
+pub(super) use session_open::{OpenStep, open_step, open_verdict};
+use session_open::refuse_legacy_shape;
 
 /// 远端会话数据 adapter：一个已初始化（或已读回身份）的远程 store 上的会话行为。
 ///
@@ -187,6 +115,7 @@ pub(super) struct RemoteSessionData {
     /// thread → root 解析缓存：父关系创建后不变（本 adapter 不提供改父行为），因此
     /// 同一条会话只需一次远端上溯；解析失败不缓存，避免把网络失败固化成事实。
     roots: RwLock<HashMap<ThreadId, ThreadId>>,
+    pub(super) owner_tokens: std::sync::Mutex<HashMap<ThreadId, ExecutionOwnerToken>>,
 }
 
 impl RemoteSessionData {
@@ -258,7 +187,7 @@ impl RemoteSessionData {
             _ => {
                 return Err(unsupported_behavior(
                     "remote store identity missing after initialization",
-                ))
+                ));
             }
         };
         Ok((
@@ -269,6 +198,7 @@ impl RemoteSessionData {
                 store_id,
                 schema_version,
                 roots: RwLock::new(HashMap::new()),
+                owner_tokens: std::sync::Mutex::new(HashMap::new()),
             },
             initialization,
         ))
@@ -416,6 +346,7 @@ impl RemoteSessionData {
             store_id,
             schema_version: schema::REMOTE_SCHEMA_VERSION,
             roots: RwLock::new(HashMap::new()),
+            owner_tokens: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -437,6 +368,7 @@ impl RemoteSessionData {
             store_id,
             schema_version: schema::REMOTE_SCHEMA_VERSION,
             roots: RwLock::new(HashMap::new()),
+            owner_tokens: std::sync::Mutex::new(HashMap::new()),
         }
     }
 }
@@ -597,6 +529,51 @@ pub(super) fn unsupported_behavior(behavior: &'static str) -> SessionResourceErr
 
 #[async_trait]
 impl SessionDataPort for RemoteSessionData {
+    async fn claim_execution_owner(
+        &self,
+        root: &ThreadId,
+        require_closing: bool,
+        expected_previous_epoch: Option<i64>,
+    ) -> SessionResourceResult<peri_acp_types::workspace::ExecutionOwnerClaim> {
+        self.claim_owner(root, require_closing, expected_previous_epoch).await
+    }
+
+    async fn renew_execution_owner(&self, token: &ExecutionOwnerToken) -> SessionResourceResult<()> {
+        self.renew_owner(token).await
+    }
+
+    async fn release_execution_owner(&self, token: &ExecutionOwnerToken) -> SessionResourceResult<()> {
+        self.release_owner(token).await
+    }
+
+    async fn finish_close(&self, token: &ExecutionOwnerToken) -> SessionResourceResult<()> {
+        self.finish_owned_close(token).await
+    }
+
+    async fn close_settlement(&self, token: &ExecutionOwnerToken) -> SessionResourceResult<peri_acp_types::session_resources::CloseSettlement> {
+        self.read_close_settlement(token).await
+    }
+
+    async fn bind_execution_workspace_owner(&self, token: &ExecutionOwnerToken, descriptor: &peri_acp_types::workspace::WorkspaceExecutionDescriptor) -> SessionResourceResult<()> {
+        self.bind_workspace_owner(token, descriptor).await
+    }
+
+    async fn read_execution_workspace_owner(&self, root: &ThreadId) -> SessionResourceResult<Option<peri_acp_types::workspace::ExecutionWorkspaceOwnerRecord>> {
+        self.read_workspace_owner(root).await
+    }
+
+    async fn mark_unsupported_async_owner(&self, token: &ExecutionOwnerToken) -> SessionResourceResult<()> {
+        self.mark_workspace_owner_unsupported(token).await
+    }
+
+    fn install_execution_owner_token(&self, token: ExecutionOwnerToken) {
+        self.owner_tokens.lock().unwrap().insert(token.root_id.clone(), token);
+    }
+
+    fn execution_owner_token(&self, root: &ThreadId) -> Option<ExecutionOwnerToken> {
+        self.owner_tokens.lock().unwrap().get(root).cloned()
+    }
+
     fn oauth_credentials_for_workspace(
         self: Arc<Self>,
         workspace_id: peri_acp_types::workspace::WorkspaceId,
@@ -818,6 +795,24 @@ impl SessionDataPort for RemoteSessionData {
         payloads: &[PersistedPayload],
     ) -> SessionResourceResult<()> {
         self.write_history_append(id, payloads).await
+    }
+
+    async fn append_reminder_if_absent(
+        &self,
+        id: &ThreadId,
+        message_id: MessageId,
+        reminder: &TrustedSystemReminder,
+    ) -> SessionResourceResult<bool> {
+        self.write_reminder_if_absent(id, message_id, reminder)
+            .await
+    }
+
+    async fn mark_session_closing(&self, id: &ThreadId) -> SessionResourceResult<()> {
+        self.write_close_intent(id).await
+    }
+
+    async fn is_session_closing(&self, id: &ThreadId) -> SessionResourceResult<bool> {
+        self.read_close_intent(id).await
     }
 
     async fn save_fork(&self, fork: &ForkSnapshot) -> SessionResourceResult<()> {

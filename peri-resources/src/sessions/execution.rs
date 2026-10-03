@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use peri_acp_types::{
     session_resources::{MutationOutcome, SessionResourceError, SessionResourceResult},
     thread::ThreadId,
-    workspace::{SessionExecutionLease, WorkspaceError},
+    workspace::{ExecutionOwnerToken, PriorExecutionOwner, SessionExecutionLease, WorkspaceError},
 };
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -17,15 +17,27 @@ pub(in crate::sessions) struct ExecutionLease {
     active: AtomicBool,
     mutation_gate: Arc<tokio::sync::RwLock<()>>,
     mutation_uncertain: AtomicBool,
+    owner_token: std::sync::RwLock<Option<ExecutionOwnerToken>>,
+    prior_unreleased: std::sync::RwLock<Option<PriorExecutionOwner>>,
 }
 
 impl ExecutionLease {
+    pub(in crate::sessions) fn install_owner_token(&self, token: ExecutionOwnerToken) {
+        *self.owner_token.write().expect("execution owner token lock poisoned") = Some(token);
+    }
+
+    pub(in crate::sessions) fn install_prior_unreleased(&self, prior: Option<PriorExecutionOwner>) {
+        *self.prior_unreleased.write().expect("execution prior owner lock poisoned") = prior;
+    }
+
     pub(in crate::sessions) fn new(thread_id: ThreadId) -> Self {
         Self {
             thread_id,
             active: AtomicBool::new(true),
             mutation_gate: Arc::new(tokio::sync::RwLock::new(())),
             mutation_uncertain: AtomicBool::new(false),
+            owner_token: std::sync::RwLock::new(None),
+            prior_unreleased: std::sync::RwLock::new(None),
         }
     }
 
@@ -179,6 +191,14 @@ impl TransactionEffect {
 impl SessionExecutionLease for ExecutionLease {
     fn thread_id(&self) -> &ThreadId {
         &self.thread_id
+    }
+
+    fn owner_token(&self) -> Option<ExecutionOwnerToken> {
+        self.owner_token.read().ok()?.clone()
+    }
+
+    fn prior_unreleased_generation(&self) -> Option<PriorExecutionOwner> {
+        self.prior_unreleased.read().expect("execution prior owner lock poisoned").clone()
     }
 
     async fn mark_clean(&self) -> Result<()> {

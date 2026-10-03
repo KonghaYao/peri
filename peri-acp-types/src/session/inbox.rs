@@ -141,6 +141,21 @@ impl InboxHandle {
         self.push(QueuedMessage::system_reminder(kind, source, reminder));
     }
 
+    pub fn push_system_reminder_with_delivery_id(
+        &self,
+        kind: MessageKind,
+        source: MessageSource,
+        reminder: TrustedSystemReminder,
+        delivery_id: crate::messages::MessageId,
+    ) {
+        self.push(QueuedMessage::system_reminder_with_delivery_id(
+            kind,
+            source,
+            reminder,
+            delivery_id,
+        ));
+    }
+
     /// Push an arbitrary QueuedMessage and conditionally wake.
     ///
     /// Wakes only if the message kind is Prompt or Defer (i.e., `kind.wakes_up()`).

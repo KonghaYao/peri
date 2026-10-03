@@ -25,7 +25,7 @@ use peri_acp_types::workspace::{ResolvedWorkspace, SessionBinding, WorkspaceErro
 use crate::sessions::data::ensure_child_relation;
 
 use super::ledger::{OperationId, OperationIdentity};
-use super::mutation::QualifiedMutation;
+use super::mutation::{MutationOutcome, QualifiedMutation};
 use super::session_codec::{self as codec, corrupt};
 use super::session_data::{invalid_input, not_found, RemoteSessionData};
 use super::session_sql::{self, SessionInsert};
@@ -270,7 +270,7 @@ impl RemoteSessionData {
             .collect::<Vec<_>>()
             .join(",");
         inputs.push(flag_list);
-        self.commit_effects("fork_session", &inputs, statements, &fork.target.thread_id)
+        self.commit_effects_for_owner("fork_session", &inputs, statements, &fork.target.thread_id, &fork.source_id)
             .await
             .map(|_| ())
     }
@@ -385,11 +385,32 @@ impl RemoteSessionData {
         effects: Vec<StatementSpec>,
         thread: &ThreadId,
     ) -> SessionResourceResult<Vec<u64>> {
+        self.commit_effects_for_owner(behavior, inputs, effects, thread, thread).await
+    }
+
+    pub(super) async fn commit_effects_for_owner(
+        &self,
+        behavior: &str,
+        inputs: &[String],
+        effects: Vec<StatementSpec>,
+        thread: &ThreadId,
+        owner_id: &ThreadId,
+    ) -> SessionResourceResult<Vec<u64>> {
         let identity = mint_identity(behavior, thread, inputs);
+        let root = self.root_for(owner_id).await;
+        let token = self.owner_tokens.lock().unwrap().get(&root).cloned();
+        if token.is_none() && !matches!(behavior, "create_session" | "revoke_unpublished_session" | "revoke_unpublished_draft") {
+            return Err(SessionResourceError::conflict("session execution owner token is absent"));
+        }
         let store = self.store().await?;
         let (outcome, counts) = store
-            .apply_qualified_reporting(&QualifiedMutation { identity, effects })
+            .apply_qualified_reporting_with_owner(&QualifiedMutation { identity, effects }, Some((&root, token.as_ref())))
             .await?;
+        if matches!(outcome, MutationOutcome::NotApplied { rejected_statement: Some(1), .. }) {
+            // Index 1 is exclusively the owner guard in this qualified batch.
+            // The managed transaction rolled back the qualification and all effects.
+            return Err(SessionResourceError::conflict("session execution owner is stale"));
+        }
         match outcome.failure_error(Some(thread)) {
             Some(error) => Err(error),
             None => Ok(counts),

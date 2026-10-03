@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 peri-acp-types = { path = "../peri-acp-types" }
 peri-js-runtime = { path = "../peri-js-runtime" }
+peri-process = { path = "../peri-process" }
 tokio.workspace = true
 tokio-util.workspace = true
 serde.workspace = true

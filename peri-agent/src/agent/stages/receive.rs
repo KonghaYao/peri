@@ -39,7 +39,7 @@ pub async fn run_receive(input: ReceiveInput) -> crate::error::AgentResult<Recei
         mailbox.mark_claimed(&user_ids);
     }
     let count = consumed.len();
-    let wake_up_count = consumed
+    let mut wake_up_count = consumed
         .iter()
         .filter(|message| message.kind.wakes_up())
         .count();
@@ -70,9 +70,74 @@ pub async fn run_receive(input: ReceiveInput) -> crate::error::AgentResult<Recei
     }
 
     if count > 0 {
-        // 在写入 transcript 前，对 Defer 消息 emit SyntheticUserMessage
-        // （复制原 End 阶段 post-wake drain 的同模式 emit，让 TUI bridge 刷新 committed 视图）
-        for msg in &consumed {
+        for (index, msg) in consumed.iter().enumerate() {
+            let mut newly_committed = true;
+            if let Some(delivery_id) = msg.delivery_id {
+                let QueuedPayload::SystemReminder(reminder) = &msg.payload else {
+                    input
+                        .context
+                        .session
+                        .queue
+                        .push_batch(consumed[index..].to_vec());
+                    return Err(anyhow::anyhow!("delivery ID requires a canonical reminder").into());
+                };
+                let (already_present, port) = {
+                    let transcript = input.context.session.transcript.read();
+                    let present = match transcript.get(delivery_id) {
+                        None => false,
+                        Some(crate::session::TranscriptEntry::Reminder {
+                            reminder: stored,
+                            ..
+                        }) if stored.as_reminder() == reminder.as_reminder() => true,
+                        Some(_) => {
+                            return Err(anyhow::anyhow!(
+                                "conflicting canonical terminal delivery ID"
+                            )
+                            .into());
+                        }
+                    };
+                    (present, transcript.idempotent_reminder_port())
+                };
+                if already_present {
+                    newly_committed = false;
+                } else {
+                    if let Some((resources, thread_id, writer)) = port {
+                        let committed = async {
+                            if let Some(writer) = writer {
+                                crate::session::MessageTranscript::flush_via_tx(&writer).await?;
+                            }
+                            resources
+                                .append_reminder_if_absent(&thread_id, delivery_id, reminder)
+                                .await
+                                .map_err(anyhow::Error::from)
+                        }
+                        .await;
+                        if let Err(error) = committed {
+                            input
+                                .context
+                                .session
+                                .queue
+                                .push_batch(consumed[index..].to_vec());
+                            return Err(error.into());
+                        }
+                    }
+                    newly_committed = input
+                        .context
+                        .session
+                        .transcript
+                        .write()
+                        .mirror_committed_reminder(delivery_id, reminder.clone());
+                }
+            } else {
+                let mut transcript = input.context.session.transcript.write();
+                append_messages_to_transcript(&mut transcript, vec![msg.clone()]);
+            }
+            if !newly_committed {
+                if msg.kind.wakes_up() {
+                    wake_up_count -= 1;
+                }
+                continue;
+            }
             if let QueuedPayload::SystemReminder(reminder) = &msg.payload {
                 input
                     .context
@@ -95,10 +160,6 @@ pub async fn run_receive(input: ReceiveInput) -> crate::error::AgentResult<Recei
                     });
             }
         }
-
-        let mut transcript = input.context.session.transcript.write();
-        append_messages_to_transcript(&mut transcript, consumed);
-        drop(transcript);
         if let Some(mailbox) = &input.context.session.user_input_mailbox {
             let delivered = mailbox.mark_delivered(&user_ids);
             for (id, content) in user_inputs {

@@ -134,7 +134,8 @@ impl PoolMcpAppsRelay {
         let tool_call_id = uuid::Uuid::now_v7().to_string();
         let bridge = McpToolBridge::new(&request.server_id, tool, Arc::clone(&handle))
             .with_server_generation(generation)
-            .with_binding_leases(Arc::clone(&self.pool.app_binding_leases));
+            .with_binding_leases(Arc::clone(&self.pool.app_binding_leases))
+            .with_output_store(&self.pool, Some(&request.owner_session_id));
         let effective_tool_name = bridge.name().to_string();
         let arguments = request.arguments.clone();
         let messages: [peri_acp_types::messages::BaseMessage; 0] = [];

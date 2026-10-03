@@ -194,6 +194,8 @@ impl FakeBackend {
                         digest,
                     },
                 );
+            } else if spec.sql.contains("'execution_guard'") {
+                // Owner qualification is a second ledger write, not a business effect.
             } else {
                 effects += 1;
             }
@@ -461,6 +463,13 @@ pub(super) async fn abandon_read(harness: &Harness, id: &ThreadId) {
 
 /// 丢掉一次在途写入：批已经发出（`committed` 决定远端有没有提交），响应没有回来。
 pub(super) async fn abandon_write(harness: &Harness, id: &ThreadId, committed: bool) {
+    harness.adapter.install_execution_owner_token(
+        peri_acp_types::workspace::ExecutionOwnerToken {
+            root_id: id.clone(),
+            epoch: 1,
+            nonce: "fixture-owner".to_owned(),
+        },
+    );
     harness.backend.hang_next(Hang::Batch { committed });
     let payloads = vec![PersistedPayload::Message(
         peri_acp_types::messages::BaseMessage::human("abandoned"),

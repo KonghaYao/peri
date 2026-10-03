@@ -369,6 +369,13 @@ fn map_bg_registry_activity(event: &BgRegistryEvent) -> AgentActivityWire {
             item.is_background = Some(true);
             item
         }
+        BgRegistryEvent::Updated { task_id, status } => {
+            let mut item = AgentActivityWire::new(BackgroundTask,
+                if status == "running" { Running } else { AgentActivityStatus::Warning })
+                .correlated("background_task", task_id);
+            item.is_background = Some(true);
+            item
+        }
     }
 }
 

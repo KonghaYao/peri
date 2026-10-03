@@ -10,13 +10,14 @@ pub mod act;
 pub mod compact;
 mod compact_progress;
 pub mod middleware_runner;
+mod queue_to_transcript;
 pub mod reason;
 pub mod receive;
 pub mod tool_dispatch;
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use parking_lot::RwLock;
 use peri_acp_types::identity::AgentId;
@@ -513,29 +514,7 @@ pub struct ActOutput {
 
 // ─── 工具函数 ────────────────────────────────────────────────────────────────
 
-/// Writes drained queue payloads into the transcript without inferring semantics from scheduling.
-pub fn append_messages_to_transcript(
-    transcript: &mut MessageTranscript,
-    messages: Vec<QueuedMessage>,
-) {
-    use crate::session::QueuedPayload;
-
-    for msg in messages {
-        match msg.payload {
-            QueuedPayload::Message(message) => {
-                if msg.kind == crate::session::MessageKind::Prompt
-                    && message.message_content().is_empty()
-                {
-                    continue;
-                }
-                transcript.append(message);
-            }
-            QueuedPayload::SystemReminder(reminder) => {
-                transcript.append_system_reminder(reminder);
-            }
-        }
-    }
-}
+pub use queue_to_transcript::append_messages_to_transcript;
 
 // ─── 控制流编排 ──────────────────────────────────────────────────────────────
 

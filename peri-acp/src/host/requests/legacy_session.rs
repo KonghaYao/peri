@@ -6,7 +6,7 @@ use peri_acp_types::{
     workspace::ResolvedWorkspace,
 };
 
-use super::{decode_frozen_snapshot, AcpError, AcpServerConfig};
+use super::{AcpError, AcpServerConfig, decode_frozen_snapshot};
 use crate::host::prepared::PreparedSessionInputs;
 use crate::host::workspace::{resource_error, workspace_error};
 
@@ -68,7 +68,7 @@ pub(super) async fn prepare_for_restore(
             return Err(AcpError::new(
                 -32603,
                 "Session frozen snapshot is not readable by this build",
-            ))
+            ));
         }
     };
     // 接纳在门面的一次行为里完成（binding 与缺失的 frozen 一起成立）；登记的保存目录

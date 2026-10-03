@@ -114,6 +114,8 @@ describe("ACP stdio transport", () => {
     try {
       await expect(transport.request("initialize", {})).rejects.toThrow("ACP process exited (code 0)");
       await expect(transport.request("after", {})).rejects.toThrow("ACP process exited (code 0)");
+      if (process.platform !== "win32")
+        expect(await transport.waitForTerminationProof()).toBe(true);
     } finally { await transport.close(); }
   });
 
@@ -124,7 +126,7 @@ describe("ACP stdio transport", () => {
     await transport.close();
     await expect(response).rejects.toThrow("closed");
     expect((await events.next()).done).toBe(true);
-  });
+  }, 30_000);
 
   test("rejects oversized settings before spawning", async () => {
     await expect(start("bootstrap", { data: "x".repeat(1024 * 1024) })).rejects.toThrow("size");

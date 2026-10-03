@@ -79,6 +79,7 @@ fn fixture_transport(client: DuplexStream) -> FixtureTransport {
 
 fn system_config(required_tools: Option<Vec<String>>, timeout_ms: Option<u64>) -> McpServerConfig {
     McpServerConfig {
+        task_scope_secret_file: None,
         command: Some("readiness-fixture".to_string()),
         args: None,
         env: None,

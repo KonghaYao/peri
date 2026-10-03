@@ -84,6 +84,7 @@ export class Session {
                     _meta: {
                         "peri.userInputQueue": true,
                         "peri.agentEvent": true,
+                        "peri.sessionWorkspaceV1": true,
                     },
                 },
             });
@@ -93,6 +94,7 @@ export class Session {
                 mcpServers,
             };
             let id: string;
+            let ownsExecution = true;
             if (requestedSessionId === null) {
                 const response = await transport.request<{ sessionId: string }>(
                     "session/new",
@@ -112,12 +114,16 @@ export class Session {
                 if (!id) throw new Error("Peri returned no sessionId");
                 await claims.claimSession(id);
             } else {
-                await transport.request("session/load", {
+                const loaded = await transport.request<{ _meta?: { "peri.sessionWorkspaceV1"?: { read_only?: unknown } } }>("session/load", {
                     ...params,
                     sessionId: requestedSessionId,
                 });
+                const identity = loaded._meta?.["peri.sessionWorkspaceV1"];
+                ownsExecution = identity !== undefined && identity.read_only === undefined;
                 id = requestedSessionId;
             }
+            if (ownsExecution)
+                await this.agent.options.sandbox.registerSessionTransport(id, transport);
             const snapshot = await transport.request<QueueSnapshot>(
                 "session/input/snapshot",
                 { sessionId: id },

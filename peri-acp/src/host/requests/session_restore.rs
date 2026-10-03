@@ -24,6 +24,25 @@ use super::{create_session_workflow_middleware, prewarm_session_mcp_discovery};
 #[path = "legacy_session.rs"]
 mod legacy_session;
 
+async fn reject_closing_session(params: &Value, cfg: &AcpServerConfig) -> Result<(), AcpError> {
+    let id = params
+        .get("sessionId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| AcpError::new(-32602, "missing sessionId"))?;
+    if cfg
+        .session_resources
+        .is_session_closing(&id.to_owned())
+        .await
+        .map_err(crate::host::workspace::resource_error)?
+    {
+        return Err(AcpError::new(
+            -32010,
+            "Session close incomplete: resume the close before loading this session",
+        ));
+    }
+    Ok(())
+}
+
 /// 读取 bound 会话的持久 frozen **字节**（唯一事实源）：恢复路径的装配输入由它定格。
 ///
 /// 快照缺 frozen 是错误（bound 会话必须有），本构建读不懂也是错误——两者都不是
@@ -100,6 +119,30 @@ pub(super) async fn prepare_existing(
             (None, Some(reason))
         }
     };
+    if let Some(prior) = owner.as_ref().and_then(|lease| lease.prior_unreleased_generation()) {
+        let generation_id = prior.agent_generation_id.as_deref().ok_or_else(||
+            AcpError::new(-32010,
+                "Session restore incomplete: former Agent generation is unknown"))?;
+        let record = cfg.session_resources.read_execution_workspace_owner(&id.to_owned())
+            .await.map_err(crate::host::workspace::resource_error)?
+            .ok_or_else(|| AcpError::new(-32010,
+                "Session restore incomplete: former async owner catalog unavailable"))?;
+        let trusted = super::super::owner_catalog::trusted_workspace_identity()
+            .map_err(|error| AcpError::new(-32010,
+                format!("Session restore incomplete: {error}")))?
+            .ok_or_else(|| AcpError::new(-32010,
+                "Session restore incomplete: trusted Workspace owner unavailable"))?;
+        if record.current_epoch != owner.as_ref().and_then(|lease| lease.owner_token())
+            .map(|token| token.epoch).unwrap_or_default() ||
+            record.descriptor.agent_generation_id != generation_id ||
+            super::super::owner_catalog::verify_recoverable_owner(&record, &trusted).is_err() {
+            return Err(AcpError::new(-32010,
+                "Session restore incomplete: former async task owners cannot be recovered"));
+        }
+        super::super::super::supervisor::previous_generation_stopped(id, generation_id)
+            .await.map_err(|error| AcpError::new(-32010,
+                format!("Session restore incomplete: {error}")))?;
+    }
     let identity = match response_identity(cfg, id).await {
         Ok(identity) => identity,
         Err(error) => {
@@ -446,7 +489,15 @@ pub(crate) async fn handle_load(
     sessions: &mut HashMap<String, SessionState>,
     transport: &Arc<dyn crate::transport::AcpTransport>,
 ) -> Result<Value, AcpError> {
+    reject_closing_session(params, cfg).await?;
+    reject_incomplete_local_close(params, sessions)?;
+    let previous_owner = params
+        .get("sessionId")
+        .and_then(Value::as_str)
+        .and_then(|id| sessions.get(id))
+        .is_some_and(|state| state.execution_owner.is_some());
     let prepared = prepare_existing(params, cfg, sessions).await?;
+    reopen_workspace_scope_after_restore(cfg, sessions, &prepared, previous_owner, params).await?;
     let PreparedSession {
         id,
         identity,
@@ -516,7 +567,15 @@ pub(crate) async fn handle_resume(
     sessions: &mut HashMap<String, SessionState>,
     transport: &Arc<dyn crate::transport::AcpTransport>,
 ) -> Result<Value, AcpError> {
+    reject_closing_session(params, cfg).await?;
+    reject_incomplete_local_close(params, sessions)?;
+    let previous_owner = params
+        .get("sessionId")
+        .and_then(Value::as_str)
+        .and_then(|id| sessions.get(id))
+        .is_some_and(|state| state.execution_owner.is_some());
     let prepared = prepare_existing(params, cfg, sessions).await?;
+    reopen_workspace_scope_after_restore(cfg, sessions, &prepared, previous_owner, params).await?;
     let req_session_id = prepared.id.as_str();
     let environment = sessions
         .get(req_session_id)
@@ -544,6 +603,94 @@ pub(crate) async fn handle_resume(
         prepared.identity,
         prepared.read_only,
     )
+}
+
+fn reject_incomplete_local_close(
+    params: &Value,
+    sessions: &HashMap<String, SessionState>,
+) -> Result<(), AcpError> {
+    if params
+        .get("sessionId")
+        .and_then(Value::as_str)
+        .and_then(|id| sessions.get(id))
+        .is_some_and(|state| state.closing)
+    {
+        return Err(AcpError::new(
+            -32010,
+            "Session restore incomplete: prior runtime cleanup is pending",
+        ));
+    }
+    Ok(())
+}
+
+async fn reopen_workspace_scope_after_restore(
+    cfg: &AcpServerConfig,
+    sessions: &mut HashMap<String, SessionState>,
+    prepared: &PreparedSession,
+    previous_owner: bool,
+    params: &Value,
+) -> Result<(), AcpError> {
+    if prepared.read_only.is_some() || previous_owner {
+        return Ok(());
+    }
+    let id = prepared.id.as_str();
+    let state = sessions.get(id).expect("prepared session");
+    let environment = state.environment.clone();
+    let owner = state.execution_owner.clone();
+    let local = environment.as_ref().map(|env| &env.cfg).unwrap_or(cfg);
+    let pool = local.mcp_pool.clone().and_then(|port| {
+        port.downcast_arc::<peri_middlewares::mcp::McpClientPool>()
+            .ok()
+    });
+    let scope_result = async {
+        let token = owner.as_ref().and_then(|lease| lease.owner_token())
+            .ok_or_else(|| "Store execution owner token unavailable".to_owned())?;
+        let descriptor = super::super::owner_catalog::execution_descriptor(pool.as_ref(), params)
+            .await.map_err(|error| error.to_string())?;
+        local.session_resources.bind_execution_workspace_owner(&token, &descriptor)
+            .await.map_err(|error| error.to_string())?;
+        if let Some(pool) = pool {
+            pool.bind_session_execution_owner(id, token.clone())?;
+            super::super::fence_workspace_with_renewal(
+                &pool, &local.session_resources, &token, id,
+            ).await.map_err(|error| error.to_string())?;
+            pool.open_workspace_task_scope(id).await?;
+        }
+        Ok::<(), String>(())
+    }.await;
+    if let Err(error) = scope_result {
+        // The restored runtime has not been reported to the client. Keep it
+        // inaccessible while disposing its admission and execution lease.
+        sessions.get_mut(id).expect("prepared session").closing = true;
+        let cleanup = async {
+            local
+                .session_manager
+                .close_session(id)
+                .await
+                .map_err(|cause| cause.to_string())?;
+            if let Some(environment) = environment.as_ref() {
+                if !environment.shutdown().await {
+                    return Err("restored environment remains active".to_owned());
+                }
+            }
+            if let Some(owner) = owner.as_ref() {
+                owner
+                    .mark_clean()
+                    .await
+                    .map_err(|cause| cause.to_string())?;
+            }
+            Ok::<(), String>(())
+        }
+        .await;
+        if cleanup.is_ok() {
+            sessions.remove(id);
+        }
+        return Err(AcpError::new(-32010, match cleanup {
+            Ok(()) => format!("Session restore incomplete: Workspace task scope unavailable: {error}"),
+            Err(cause) => format!("Session restore incomplete: Workspace task scope unavailable: {error}; cleanup incomplete: {cause}"),
+        }));
+    }
+    Ok(())
 }
 
 /// Adapts `&dyn AcpTransport` into a `ReplaySender` for the TUI path.

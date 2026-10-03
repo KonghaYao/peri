@@ -267,7 +267,10 @@ pub(crate) fn builtin_server_handler_with_env(
         "workspace" => {
             // The MCP instance owns its Bash tasks. Session state is never
             // injected into the capability server.
-            let server = WorkspaceMcpServer::standalone(ctx.cwd.clone());
+            let mut server = WorkspaceMcpServer::standalone(ctx.cwd.clone());
+            if let Some(authority) = ctx.task_scope_authority.get() {
+                server = server.with_task_scope_authority(authority.clone());
+            }
             // 资源面输入（装配期一次注入的槽位）：`None` = 资源面未接线（既有行为），
             // `Some` = 装载 provider（W4a：会话装配只装 meta 面，见
             // `peri-acp/src/host/workspace.rs` 的构造点）。本工厂不读配置、不派生根。

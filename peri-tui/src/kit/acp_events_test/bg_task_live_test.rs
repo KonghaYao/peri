@@ -1,9 +1,65 @@
 use super::*;
 use crate::kit::acp_types::AcpEventData;
-use crate::kit::atoms::{BG_DISPLAY, BG_LIVE_DETAIL};
+use crate::kit::atoms::{BG_DISPLAY, BG_LIVE_DETAIL, BG_TASK_REVISION, BgLiveStatus};
 use crate::kit::stream_data::{TuiTextChunk, TuiToolEnded, TuiToolStarted};
 use crate::kit::tui_render_unit::TuiRenderUnit;
 use serial_test::serial;
+
+#[test]
+#[serial]
+fn terminal_snapshot_does_not_resurrect_a_running_task() {
+    crate::kit::atoms::init_atoms();
+    BG_TASK_REVISION.set(None);
+    BG_DISPLAY.state().write().clear();
+    BG_LIVE_DETAIL.state().write().clear();
+    assert!(super::super::system::apply_bg_task_snapshot(
+        &[crate::kit::acp_types::BgTaskEntry {
+            task_id: "finished-shell".into(),
+            kind: "shell".into(),
+            summary: "sleep 1".into(),
+            started_at: "2026-10-03T00:00:00Z".into(),
+            pid: None,
+            revision: None,
+            status: Some("completed".into()),
+        }],
+        Some(42),
+    ));
+    let entries = BG_DISPLAY.state();
+    let entries = entries.read();
+    assert_eq!(entries.len(), 1);
+    assert!(!entries[0].is_active);
+    assert!(entries[0].completed_at.is_some());
+    drop(entries);
+    assert_eq!(
+        BG_LIVE_DETAIL.state().read()["finished-shell"].status,
+        BgLiveStatus::Succeeded
+    );
+    crate::kit::bg_task_live::mark_task_completed(
+        "finished-shell",
+        true,
+        123,
+        Some("saved output".into()),
+    );
+    assert!(super::super::system::apply_bg_task_snapshot(
+        &[crate::kit::acp_types::BgTaskEntry {
+            task_id: "finished-shell".into(),
+            kind: "shell".into(),
+            summary: "sleep 1".into(),
+            started_at: "2026-10-03T00:00:00Z".into(),
+            pid: None,
+            revision: None,
+            status: Some("completed".into()),
+        }],
+        Some(43),
+    ));
+    let live = BG_LIVE_DETAIL.state();
+    let details = live.read();
+    let detail = &details["finished-shell"];
+    assert_eq!(detail.status, BgLiveStatus::Succeeded);
+    assert_eq!(detail.duration_ms, Some(123));
+    assert_eq!(detail.output_preview.as_deref(), Some("saved output"));
+    BG_TASK_REVISION.set(None);
+}
 
 #[test]
 #[serial]
@@ -19,6 +75,8 @@ fn test_mcp_shell_task_events_update_bottom_task_area() {
             summary: "sleep 1".into(),
             started_at: "2026-10-03T00:00:00Z".into(),
             pid: None,
+            revision: None,
+            status: None,
         }),
     );
     let entries = BG_DISPLAY.state();
@@ -36,11 +94,45 @@ fn test_mcp_shell_task_events_update_bottom_task_area() {
             success: true,
             duration_ms: 1000,
             output_preview: None,
+            revision: None,
         },
     );
     let done = entries.read();
     assert!(!done[0].is_active);
     assert!(!done[0].is_error);
+}
+
+#[test]
+#[serial]
+fn snapshot_watermark_rejects_late_started_event() {
+    crate::kit::atoms::init_atoms();
+    crate::kit::atoms::BG_TASK_REVISION.set(None);
+    crate::kit::atoms::BG_TASKS.state().write().clear();
+    BG_DISPLAY.state().write().clear();
+    let mut state = make_state();
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::BgTaskSnapshot {
+            revision: Some(3),
+            tasks: vec![],
+        },
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::BgTaskStarted(crate::kit::acp_types::BgTaskEntry {
+            task_id: "already-finished".into(),
+            kind: "shell".into(),
+            summary: "echo done".into(),
+            started_at: String::new(),
+            pid: None,
+            revision: Some(2),
+            status: None,
+        }),
+    );
+    assert!(crate::kit::atoms::BG_TASKS.state().read().is_empty());
+    assert!(BG_DISPLAY.state().read().is_empty());
+    assert_eq!(*crate::kit::atoms::BG_TASK_REVISION.state().read(), Some(3));
+    crate::kit::atoms::BG_TASK_REVISION.set(None);
 }
 
 #[test]
@@ -56,6 +148,8 @@ fn test_bg_task_cancelled_persists_reason_on_live_detail() {
             summary: "echo".into(),
             started_at: String::new(),
             pid: None,
+            revision: None,
+            status: None,
         }),
     );
     dispatch_and_notify(
@@ -63,6 +157,7 @@ fn test_bg_task_cancelled_persists_reason_on_live_detail() {
         &AcpEventData::BgTaskCancelled {
             task_id: "task-shell".into(),
             reason: "user cancelled".into(),
+            revision: None,
         },
     );
     let live_store = BG_LIVE_DETAIL.state();
@@ -87,6 +182,8 @@ fn test_bg_text_chunk_appends_live_detail_not_view_models() {
             summary: "bg".into(),
             started_at: String::new(),
             pid: None,
+            revision: None,
+            status: None,
         }),
     );
     dispatch_and_notify(
@@ -204,6 +301,8 @@ fn test_bg_group_frozen_in_view_models_after_turn_suspended() {
             summary: "bg".into(),
             started_at: String::new(),
             pid: None,
+            revision: None,
+            status: None,
         }),
     );
     dispatch_and_notify(

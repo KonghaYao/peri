@@ -2,6 +2,7 @@
 
 use anyhow::{Context, Result};
 use peri_acp_types::workspace::WorkspaceError;
+use peri_process::ProcessTree;
 use serde::{Deserialize, Serialize};
 use std::{
     ffi::OsStr,
@@ -223,9 +224,16 @@ async fn git(program: &OsStr, cwd: &Path, args: &[&str]) -> Result<Option<std::p
             command.env_remove(name);
         }
     }
+    let mut tree = ProcessTree::new().context("Git discovery process ownership unavailable")?;
+    tree.prepare(&mut command);
     let Some(mut child) = spawn_git(&mut command).await? else {
         return Ok(None);
     };
+    if let Err(error) = tree.attach(&child) {
+        tree.terminate();
+        let _ = child.kill().await;
+        return Err(error).context("Git discovery process ownership unavailable");
+    }
     let stdout = child.stdout.take().context("Git stdout unavailable")?;
     let stderr = child.stderr.take().context("Git stderr unavailable")?;
     let result = tokio::time::timeout(Duration::from_secs(5), async {
@@ -233,6 +241,7 @@ async fn git(program: &OsStr, cwd: &Path, args: &[&str]) -> Result<Option<std::p
             tokio::try_join!(bounded_output(stdout), bounded_output(stderr), async {
                 child.wait().await.map_err(anyhow::Error::from)
             })?;
+        tree.wait_for_exit().await;
         Ok::<_, anyhow::Error>(std::process::Output {
             status,
             stdout,
@@ -243,11 +252,15 @@ async fn git(program: &OsStr, cwd: &Path, args: &[&str]) -> Result<Option<std::p
     match result {
         Ok(Ok(output)) => Ok(Some(output)),
         Ok(Err(error)) => {
+            tree.terminate();
             let _ = child.kill().await;
+            tree.wait_for_exit().await;
             Err(error)
         }
         Err(_) => {
+            tree.terminate();
             let _ = child.kill().await;
+            tree.wait_for_exit().await;
             Err(WorkspaceError::DiscoveryError("Git discovery timed out".into()).into())
         }
     }

@@ -18,6 +18,7 @@ mod turn;
 pub use self::render::handle_plan_update;
 pub(crate) use self::render::push_view_models;
 pub use self::render::push_view_models_for_reset;
+pub(crate) use self::system::request_bg_task_snapshot;
 // 测试文件通过 super::* 获取这些类型——原在 acp_events.rs 中直接可用
 #[cfg(test)]
 pub(crate) use self::render::drain_input_buffer;
@@ -534,7 +535,9 @@ pub(crate) fn dispatch_for_bridge(
         } => tool::handle_replay_tool_ended(state, tool_id, output_summary, *is_error),
 
         // ── §4.7 Background Tasks ──
-        BgTaskSnapshot(tasks) => system::handle_bg_task_snapshot(state, tasks),
+        BgTaskSnapshot { tasks, revision } => {
+            system::handle_bg_task_snapshot(state, tasks, *revision)
+        }
         BgTaskStarted(entry) => system::handle_bg_task_started(state, entry),
         // kind payload 保留（bg task UI 展示 / 未来扩展）；内部续跑由 ACP
         // server 的 continuation scheduler 承担，TUI bridge 不触发 KeepGoing。
@@ -544,13 +547,24 @@ pub(crate) fn dispatch_for_bridge(
             success,
             duration_ms,
             output_preview,
+            revision,
         } => system::handle_bg_task_completed(
             task_id,
             *success,
             *duration_ms,
             output_preview.clone(),
+            *revision,
         ),
-        BgTaskCancelled { task_id, reason } => system::handle_bg_task_cancelled(task_id, reason),
+        BgTaskCancelled {
+            task_id,
+            reason,
+            revision,
+        } => system::handle_bg_task_cancelled(task_id, reason, *revision),
+        BgTaskUpdated {
+            task_id,
+            status,
+            revision,
+        } => system::handle_bg_task_updated(task_id, status, *revision),
     }
 
     let requested = std::mem::take(&mut state.publication_intent);

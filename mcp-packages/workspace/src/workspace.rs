@@ -25,7 +25,11 @@
 //! meta 面（J6；skill / agent 根与真实关闭位属 W4b）；顶层三路径不调用（资源面未接线）。
 //! 宿主侧投递（registry/消费端切换）除外。
 
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
 
 use base64::Engine as _;
 use peri_agent::tools::{BaseTool, ToolContext, ToolExecutionStatus};
@@ -52,6 +56,7 @@ use crate::resources::{
     ResourceBody, ResourceError, WorkspaceResourceProvider, WorkspaceResourcesInput,
 };
 use crate::shell_tasks::ShellTasks;
+use crate::task_scope::{ExecutionGeneration, TaskScopeAuthority, TaskScopeCapability};
 use crate::terminal::BashTool;
 use crate::WorkspaceInstanceInput;
 
@@ -89,6 +94,7 @@ pub struct WorkspaceMcpServer {
     outputs: Arc<crate::output_store::OutputStore>,
     /// Workspace-owned Bash tasks shared by all connections to this instance.
     shell_tasks: Option<ShellTasks>,
+    task_scope_authority: Arc<OnceLock<TaskScopeAuthority>>,
 }
 
 impl WorkspaceMcpServer {
@@ -134,6 +140,7 @@ impl WorkspaceMcpServer {
             resources: None,
             outputs: Arc::new(crate::output_store::OutputStore::new()),
             shell_tasks: None,
+            task_scope_authority: Arc::new(OnceLock::new()),
         }
     }
 
@@ -154,6 +161,37 @@ impl WorkspaceMcpServer {
         server
     }
 
+    /// Enable scoped task recovery. The authority must be shared with the trusted host bridge.
+    /// Once enabled, background Bash and task operations require a host-issued capability.
+    pub fn with_task_scope_authority(self, authority: TaskScopeAuthority) -> Self {
+        assert!(
+            self.task_scope_authority.set(authority).is_ok(),
+            "task scope authority already configured"
+        );
+        self
+    }
+
+    fn task_scope(&self, context: &RequestContext<RoleServer>) -> Result<Option<String>, McpError> {
+        Ok(self
+            .task_capability(context)?
+            .map(|capability| capability.session_id))
+    }
+
+    fn task_capability(
+        &self,
+        context: &RequestContext<RoleServer>,
+    ) -> Result<Option<TaskScopeCapability>, McpError> {
+        let capability = self
+            .task_scope_authority
+            .get()
+            .map(|authority| authority.resolve_capability(&context.meta))
+            .transpose()?;
+        if let (Some(capability), Some(tasks)) = (&capability, &self.shell_tasks) {
+            tasks.check_execution(&capability.session_id, capability.execution.as_ref())?;
+        }
+        Ok(capability)
+    }
+
     /// Stop new work and wait for Workspace-owned shell process cleanup.
     pub async fn shutdown_shell_tasks(&self) -> Option<peri_acp_types::tasks::TaskShutdownReport> {
         match &self.shell_tasks {
@@ -166,17 +204,22 @@ impl WorkspaceMcpServer {
         &self,
         request: &CallToolRequestParams,
         client_supports_tasks: bool,
+        scope: Option<&str>,
+        generation: Option<&ExecutionGeneration>,
     ) -> Result<CallToolResponse, McpError> {
         let tasks = self
             .shell_tasks
             .as_ref()
             .expect("owned Bash requires task owner");
+        let _admission = scope
+            .map(|scope| tasks.admit_fenced(scope, generation))
+            .transpose()?;
         let arguments = request.arguments.as_ref();
         let background = arguments
             .and_then(|args| args.get("run_in_background"))
             .and_then(serde_json::Value::as_bool)
             == Some(true);
-        if background && client_supports_tasks {
+        if background {
             let command = arguments
                 .and_then(|args| args.get("command"))
                 .and_then(serde_json::Value::as_str)
@@ -187,17 +230,38 @@ impl WorkspaceMcpServer {
                 .filter(|timeout| *timeout > 0)
                 .map(|timeout| timeout.min(600_000));
             let task = tasks
-                .spawn(command.into(), self.cwd.clone(), timeout)
+                .spawn_scoped(command.into(), self.cwd.clone(), timeout, scope, generation)
                 .await?;
-            return Ok(CallToolResponse::Task(CreateTaskResult::new(task)));
+            if client_supports_tasks {
+                return Ok(CallToolResponse::Task(CreateTaskResult::new(task)));
+            }
+            return Ok(CallToolResponse::Complete(
+                rmcp::model::CallToolResult::success(vec![rmcp::model::ContentBlock::text(
+                    format!("Background shell task started.\ntask_id: {}", task.task_id),
+                )]),
+            ));
         }
 
         let input = serde_json::Value::Object(request.arguments.clone().unwrap_or_default());
-        let result = match self
-            .bash
-            .execute(input, ToolContext::new(&[], &self.cwd))
-            .await
-        {
+        let command = arguments
+            .and_then(|args| args.get("command"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        let callback = tasks.completion_callback_for(scope.map(str::to_owned), command.clone());
+        let started_owner = tasks.clone();
+        let started_scope = scope.map(str::to_owned);
+        let started_command = command.clone();
+        let bash = BashTool::new(&self.cwd)
+            .with_task_manager(tasks.manager())
+            .with_on_bg_complete(callback)
+            .with_on_bg_started(Arc::new(move |task_id| {
+                started_owner.track_promoted_scoped(
+                    task_id,
+                    started_scope.as_deref(),
+                    started_command.as_deref(),
+                );
+            }));
+        let result = match bash.execute(input, ToolContext::new(&[], &self.cwd)).await {
             Ok(output) => {
                 let promoted = output.output.execution.as_ref().and_then(|evidence| {
                     matches!(
@@ -208,7 +272,10 @@ impl WorkspaceMcpServer {
                     .flatten()
                 });
                 if let Some(task_id) = promoted {
-                    let task = tasks.track_promoted(task_id);
+                    let command = arguments
+                        .and_then(|args| args.get("command"))
+                        .and_then(serde_json::Value::as_str);
+                    let task = tasks.track_promoted_scoped(task_id, scope, command);
                     if client_supports_tasks {
                         return Ok(CallToolResponse::Task(CreateTaskResult::new(task)));
                     }
@@ -476,6 +543,67 @@ impl ServerHandler for WorkspaceMcpServer {
         request: CustomRequest,
         _context: RequestContext<RoleServer>,
     ) -> Result<CustomResult, McpError> {
+        if matches!(
+            request.method.as_str(),
+            "workspace/taskSnapshot"
+                | "workspace/taskChanges"
+                | "workspace/taskClose"
+                | "workspace/taskOpen"
+                | "workspace/taskFence"
+        ) {
+            let tasks = self.shell_tasks.as_ref().ok_or_else(|| {
+                McpError::new(ErrorCode::METHOD_NOT_FOUND, request.method.clone(), None)
+            })?;
+            let authority = self.task_scope_authority.get().ok_or_else(|| {
+                McpError::new(ErrorCode::METHOD_NOT_FOUND, request.method.clone(), None)
+            })?;
+            let params = request.params.unwrap_or_default();
+            let capability = authority.resolve_capability(&_context.meta)?;
+            let scope = capability.session_id.as_str();
+            if request.method != "workspace/taskFence" {
+                tasks.check_execution(scope, capability.execution.as_ref())?;
+            }
+            let value = match request.method.as_str() {
+                "workspace/taskFence" => {
+                    let generation = capability.execution.as_ref().ok_or_else(|| McpError::invalid_params("task fence requires Store execution capability", None))?;
+                    let barrier = tasks.fence_execution(scope, generation).await?;
+                    serde_json::to_value(serde_json::json!({"epoch": generation.epoch, "barrierCursor": barrier}))
+                }
+                "workspace/taskSnapshot" => serde_json::to_value(tasks.snapshot(&scope)),
+                "workspace/taskChanges" => {
+                    let cursor = params
+                        .get("cursor")
+                        .and_then(serde_json::Value::as_u64)
+                        .ok_or_else(|| {
+                            McpError::invalid_params("task changes requires cursor", None)
+                        })?;
+                    let wait_ms = params
+                        .get("waitMs")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0);
+                    let changes = tokio::select! {
+                        biased;
+                        _ = _context.ct.cancelled() => return Err(McpError::internal_error("task change wait cancelled", None)),
+                        changes = tasks.changes(&scope, cursor, wait_ms) => changes?,
+                    };
+                    tasks.check_execution(scope, capability.execution.as_ref())?;
+                    serde_json::to_value(changes)
+                }
+                "workspace/taskClose" => {
+                    let epoch = params.get("epoch").and_then(serde_json::Value::as_u64)
+                        .ok_or_else(|| McpError::invalid_params("task close requires epoch", None))?;
+                    let barrier = tasks.close_scope(scope, epoch, capability.execution.as_ref()).await?;
+                    serde_json::to_value(serde_json::json!({"barrierCursor": barrier, "epoch": epoch}))
+                }
+                _ => {
+                    let epoch = params.get("epoch").and_then(serde_json::Value::as_u64)
+                        .ok_or_else(|| McpError::invalid_params("task open requires epoch", None))?;
+                    serde_json::to_value(tasks.open_scope(scope, epoch, capability.execution.as_ref())?)
+                }
+            }
+            .map_err(|_| McpError::internal_error("task scope response encoding failed", None))?;
+            return Ok(CustomResult::new(value));
+        }
         if request.method == crate::image::READ_IMAGE_METHOD {
             return tokio::select! {
                 biased;
@@ -583,6 +711,10 @@ impl ServerHandler for WorkspaceMcpServer {
     /// ack 由 SDK 在本方法被调用**之前**发出（`SubscriptionContext::establish`），
     /// 因此这里只做注册与收口。
     async fn listen(&self, context: SubscriptionContext) -> Result<(), McpError> {
+        let capability = self.task_capability(context.request_context())?;
+        let scope = capability
+            .as_ref()
+            .map(|capability| capability.session_id.as_str());
         let id = context.sink().id().clone();
         let mut updates = self.shell_tasks.as_ref().map(ShellTasks::subscribe);
         if context.sink().accepted().resource_subscriptions.is_some() {
@@ -594,7 +726,11 @@ impl ServerHandler for WorkspaceMcpServer {
                 update = async { updates.as_mut().expect("task receiver").recv().await }, if updates.is_some() => {
                     match update {
                         Ok(task) => {
-                            if context.sink().accepted().task_ids.as_ref()
+                            if capability.as_ref().is_some_and(|capability| self.shell_tasks.as_ref().is_some_and(|tasks| tasks.check_execution(&capability.session_id, capability.execution.as_ref()).is_err())) {
+                                break;
+                            }
+                            if scope.is_none_or(|scope| self.shell_tasks.as_ref().is_some_and(|tasks| tasks.belongs_to(&task.task.task_id, scope)))
+                                && context.sink().accepted().task_ids.as_ref()
                                 .is_some_and(|ids| ids.contains(&task.task.task_id))
                                 && context.sink().notify_task_status(task).await.is_err()
                             {
@@ -608,7 +744,8 @@ impl ServerHandler for WorkspaceMcpServer {
                             if let Some(tasks) = self.shell_tasks.as_ref() {
                                 if let Some(ids) = context.sink().accepted().task_ids.as_ref() {
                                     for task_id in ids {
-                                        if let Ok(state) = tasks.get(task_id) {
+                                        if capability.as_ref().is_some_and(|capability| tasks.check_execution(&capability.session_id, capability.execution.as_ref()).is_err()) { break 'listen; }
+                                        if let Ok(state) = match scope { Some(scope) => tasks.get_scoped(task_id, scope), None => tasks.get(task_id) } {
                                             if context.sink().notify_task_status(state.task).await.is_err() {
                                                 break 'listen;
                                             }
@@ -643,7 +780,10 @@ impl ServerHandler for WorkspaceMcpServer {
             _ = context.ct.cancelled() => Ok(CallToolResponse::Complete(rmcp::model::CallToolResult::error(vec![rmcp::model::ContentBlock::text("Tool execution cancelled.")]))),
             result = async {
                 if request.name.as_ref() == "Bash" && self.shell_tasks.is_some() {
-                    self.call_owned_bash(&request, client_supports_tasks).await
+                    let capability = self.task_capability(&context)?;
+                    self.call_owned_bash(&request, client_supports_tasks,
+                        capability.as_ref().map(|capability| capability.session_id.as_str()),
+                        capability.as_ref().and_then(|capability| capability.execution.as_ref())).await
                 } else {
                     invoke_tool_call(self.tools(), &self.cwd, &request).await
                 }
@@ -661,34 +801,50 @@ impl ServerHandler for WorkspaceMcpServer {
     async fn get_task(
         &self,
         request: GetTaskParams,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<GetTaskResult, McpError> {
-        self.shell_tasks
+        let tasks = self
+            .shell_tasks
             .as_ref()
-            .ok_or_else(|| McpError::invalid_params("unknown task", None))?
-            .get(&request.task_id)
+            .ok_or_else(|| McpError::invalid_params("unknown task", None))?;
+        match self.task_scope(&context)? {
+            Some(scope) => tasks.get_scoped(&request.task_id, &scope),
+            None => tasks.get(&request.task_id),
+        }
     }
 
     async fn update_task(
         &self,
         request: UpdateTaskParams,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<(), McpError> {
-        self.shell_tasks
+        let tasks = self
+            .shell_tasks
             .as_ref()
-            .ok_or_else(|| McpError::invalid_params("unknown task", None))?
-            .update(&request.task_id)
+            .ok_or_else(|| McpError::invalid_params("unknown task", None))?;
+        match self.task_scope(&context)? {
+            Some(scope) => tasks.update_scoped(&request.task_id, &scope),
+            None => tasks.update(&request.task_id),
+        }
     }
 
     async fn cancel_task(
         &self,
         request: CancelTaskParams,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<(), McpError> {
-        self.shell_tasks
+        let tasks = self
+            .shell_tasks
             .as_ref()
-            .ok_or_else(|| McpError::invalid_params("unknown task", None))?
-            .cancel(&request.task_id)
+            .ok_or_else(|| McpError::invalid_params("unknown task", None))?;
+        match self.task_capability(&context)? {
+            Some(capability) => tasks.cancel_scoped(
+                &request.task_id,
+                &capability.session_id,
+                capability.execution.as_ref(),
+            ),
+            None => tasks.cancel(&request.task_id),
+        }
     }
 }
 

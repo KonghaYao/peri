@@ -203,6 +203,55 @@ impl SessionResources for RecoveryStore {
         self.inner.append_history(id, payloads).await
     }
 
+    async fn append_reminder_if_absent(
+        &self,
+        id: &ThreadId,
+        message_id: peri_acp_types::messages::MessageId,
+        reminder: &peri_acp_types::system_reminder::TrustedSystemReminder,
+    ) -> SessionResourceResult<bool> {
+        self.inner
+            .append_reminder_if_absent(id, message_id, reminder)
+            .await
+    }
+
+    async fn mark_session_closing(&self, id: &ThreadId) -> SessionResourceResult<()> {
+        self.inner.mark_session_closing(id).await
+    }
+
+    async fn claim_closing_execution(
+        &self, id: &ThreadId, expected_current_epoch: i64,
+    ) -> SessionResourceResult<Arc<dyn SessionExecutionLease>> {
+        self.inner.claim_closing_execution(id, expected_current_epoch).await
+    }
+
+    async fn renew_execution_owner(
+        &self, token: &peri_acp_types::workspace::ExecutionOwnerToken,
+    ) -> SessionResourceResult<()> {
+        self.inner.renew_execution_owner(token).await
+    }
+
+    async fn release_execution_owner(
+        &self, token: &peri_acp_types::workspace::ExecutionOwnerToken,
+    ) -> SessionResourceResult<()> {
+        self.inner.release_execution_owner(token).await
+    }
+
+    async fn finish_close(
+        &self, token: &peri_acp_types::workspace::ExecutionOwnerToken,
+    ) -> SessionResourceResult<()> {
+        self.inner.finish_close(token).await
+    }
+
+    async fn close_settlement(
+        &self, token: &peri_acp_types::workspace::ExecutionOwnerToken,
+    ) -> SessionResourceResult<peri_acp_types::session_resources::CloseSettlement> {
+        self.inner.close_settlement(token).await
+    }
+
+    async fn is_session_closing(&self, id: &ThreadId) -> SessionResourceResult<bool> {
+        self.inner.is_session_closing(id).await
+    }
+
     async fn save_fork(
         &self,
         fork: &ForkSnapshot,

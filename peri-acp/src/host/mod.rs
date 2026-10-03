@@ -91,6 +91,7 @@ mod server_loop;
 mod shutdown;
 pub mod stage_builder;
 pub mod stdio;
+mod supervisor;
 mod task_scope;
 #[cfg(test)]
 #[path = "unify_wire_baseline_test.rs"]

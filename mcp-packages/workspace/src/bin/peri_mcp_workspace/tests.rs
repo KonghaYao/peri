@@ -1,6 +1,22 @@
 use clap::Parser;
 
-use super::{resource_input, Args};
+use super::{resource_input, Args, OwnerIncarnationGuard};
+
+#[test]
+fn crashed_owner_marker_blocks_new_incarnation_until_cleanup_proven() {
+    let dir = tempfile::tempdir().unwrap();
+    let secret = dir.path().join("secret");
+    std::fs::write(&secret, [3u8; 32]).unwrap();
+    let guard = OwnerIncarnationGuard::claim(&secret).unwrap();
+    assert!(OwnerIncarnationGuard::claim(&secret).is_err());
+    drop(guard); // Simulates an abrupt process exit: Drop cannot claim cleanup.
+    assert!(OwnerIncarnationGuard::claim(&secret).is_err());
+    let marker = dir.path().join("secret.workspace-owner-unclean");
+    std::fs::remove_file(&marker).unwrap(); // External cleanup proof is required.
+    let guard = OwnerIncarnationGuard::claim(&secret).unwrap();
+    guard.clear_after_cleanup().unwrap();
+    assert!(OwnerIncarnationGuard::claim(&secret).is_ok());
+}
 
 #[test]
 fn transport_is_required_and_exclusive() {

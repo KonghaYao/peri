@@ -34,13 +34,11 @@ Workflow 系统是 Peri 的多 Agent 编排子系统，允许用户通过 JavaSc
 │  ├─ WorkflowPanel        三级树实时展示 (run/phase/agent)              │
 │  ├─ WorkflowSnapshot     WORKFLOW_SNAPSHOT atom (2s ACP 轮询)            │
 │  ├─ /workflows 命令      PanelKind::Workflow (panel_registry.rs)      │
-│  └─ bg-task-completed unstable event → 通知条渲染                      │
+│  └─ 后台任务显示与通知遵循 Session 异步任务架构                       │
 ├──────────────────────────────────────────────────────────────────────┤
 │  peri-agent (Agent 执行层)                                             │
 │  │  agent/workflow/agent.rs    WorkflowAgentExecutor 执行体 (SubAgent) │
-│  │  session/exec/executor.rs   通知消费者 (registry.complete →         │
-│  │                             BgRegistryEvent::Completed →            │
-│  │                             bg-task-completed event + Defer 注入)   │
+│  │  session/exec/executor.rs   Workflow 结果消费与会话任务入口          │
 ├──────────────────────────────────────────────────────────────────────┤
 │  peri-acp (ACP 服务层 / 装配面薄壳)                                     │
 │  │  host/workflow_agent.rs     create_session_workflow_middleware()    │
@@ -360,7 +358,8 @@ pub struct AgentProgress {
 - AgentPool（LLM 实例缓存池）
 - Langfuse session / tracer
 - ThreadStore（持久化）
-- 根会话 TaskManager（Workflow Agent 的 `Bash` 与 builtin `workspace` 实例经 `WorkspaceInstanceInput` 共用同一执行 owner）
+- 根会话任务入口；Workflow Agent 发起的 Bash 由 Workspace MCP 执行 owner 管理，
+  任务关系遵循 [Session 异步任务架构](session-async-tasks.md)。
 
 **条件注册**：
 - `CompactMiddleware`：**已移除**。Workflow agent 的自动 compact 由 v2 `stages/compact.rs` 统一接管（`run_react_loop` 在每轮开头调 `compact_v2::run_compact`）
@@ -390,8 +389,9 @@ fn parameters() -> JSON Schema { script, scriptPath, name, args, maxConcurrency,
 4. Runner 拥有 JS 进程、消息读取和 run 内 Agent；取消后等待实际收尾。
    无法证明进程或子任务排空返回 `CleanupFailed`，会话 owner 保持未结清。
 5. `RunCompletion` 在实际执行结束后结算外部执行证据，再发布最终结果到 registry。
-   这个结算不改变 UI active count；session consumer 仍先投递 Defer，再完成后台任务
-   （§4.2）。调用者取消等待不会丢失实际执行和最终通知。
+   这个结算不改变 UI active count；session consumer 按
+   [Session 异步任务架构](session-async-tasks.md)的顺序投递结果并完成任务。
+   调用者取消等待不会丢失实际执行和最终通知。
 6. 快速窗口观察同一个完成结果：快速失败向工具调用者返回诊断；尚未结束则返回：
    ```
    Workflow 'xxx' started.
@@ -406,81 +406,14 @@ fn parameters() -> JSON Schema { script, scriptPath, name, args, maxConcurrency,
 
 ---
 
-## 4. 通知管线（Notification Pipeline）
+## 4. 完成结果与通知
 
-### 4.1 整体设计
-
-workflow 完成通知采用双路径模型：
-
-```
-workflow 完成
-    ├─ registry.complete() → broadcast::Sender.send(WorkflowTaskResult)
-    │
-    ▼ Session 级 Consumer (peri-agent/src/session/exec/executor.rs,
-    │   首次 turn 构建时 spawn，init_notification_buffer() set-once gate 去重)
-    │
-    │   永久运行，独立于 agent turn 生命周期
-    │
-    ├─ Path A (TUI 通知) ───────────────────────────────────────────┐
-    │   BackgroundTaskResult 写入 registry                           │
-    │   → BgRegistryEvent::Completed                                 │
-    │   → bg-task-completed unstable event                          │
-    │   → peri-tui 事件泵 (AcpEventData::BgTaskCompleted)            │
-    │   → 通知条渲染 + bg 面板更新                                    │
-    │   （不再经 EventSink 直推 BackgroundTaskCompleted——           │
-    │     该映射为死路径，见 spec/issues/2026-08-05-                 │
-    │     background-task-completed-event-dead-path）                │
-    │                                                                │
-    └─ Path B (Agent 感知) ─────────────────────────────────────────┤
-        AsyncRouter → InboxHandle → push_defer(Defer kind)           │
-        → wake Notify 唤醒新 turn                                   │
-        → append_messages_to_transcript 统一包裹注入消息流           │
-        → LLM 在下一轮看到通知                                       │
-```
-
-### 4.2 Session 级 Consumer
-
-consumer 在首次 turn 构建时 spawn，并持续到 session 结束。spawn 去重由 `init_notification_buffer()` 的 set-once gate 保证；具体入口以 `docs/code-index/peri-agent.md` 和源码为准。
-
-**处理顺序（#117）**：对每个 `WorkflowTaskResult`，consumer **先** Path B（`AsyncRouter::route_workflow_event` → `push_defer` + wake），**再** Path A（`TaskManager::complete` → `BgRegistryEvent::Completed`）。`WorkflowTool` 与 notification task **不得**在 broadcast 之前或与之并发地调用 `TaskManager::complete()`。
-
-实现：`peri-agent/src/session/workflow_completion.rs` 的 `apply_workflow_task_result`（由 `exec/executor/agent_build.rs` 的 broadcast 循环调用）。
-
-**Path A 输出格式**（`BackgroundTaskResult`，写入 registry 触发 `BgRegistryEvent::Completed`）：
-```json
-{
-  "agent_name": "workflow:audit",
-  "task_id": "019ef440...",
-  "success": true,
-  "output": "Workflow 'audit' finished with status Completed (5230ms, 3 agents, 12 tool calls). Results in .claude/workflow-runs/{run_id}/state.json",
-  "tool_calls_count": 12,
-  "duration_ms": 5230
-}
-```
-
-**Path B 输出格式**（`Defer` 消息，注入 Agent 消息流；不包裹 `<system-reminder>`——`append_messages_to_transcript` 统一包裹所有 Defer/Info）：
-```
-Workflow 'audit' completed. (5230ms, 3 agents, 12 tool calls)
-- review: 3 agents
-- deploy: 2 agents, 50 tokens
-Results saved to .claude/workflow-runs/{run_id}/state.json
-```
-status 文本区分 `completed` / `killed` / `failed`（幽灵完成事件防护，issue 2026-08-05：killed/failed 不得显示为 "completed"）。
-
-### 4.3 唤醒模型
-
-Path B 通知经 `AsyncRouter → InboxHandle → push_defer(Defer kind)` 注入消息流并触发 wake Notify，由下一轮 Receive 统一排空并写入 Transcript，因此无需用户输入，也不会中断正在执行的模型或工具调用。`init_notification_buffer()` 只承担 consumer 的 set-once gate。
-
-**无 inbox 回退**：AsyncRouter 不可用（无 inbox 场景）时，consumer 回退为直接 push 到 v2 message queue（`QueuedMessage::new(Defer, WorkflowComplete, human(...))`，无 wake），并关闭 `notify_bg` 任务计数以消除 Defer 堆积竞态窗口（issue 2026-08-05）。
-
-### 4.4 防重复机制
-
-防重复通过 **session 级一次 spawn + AtomicBool guard** 实现：
-
-1. `init_notification_buffer()` 以 `AtomicBool::compare_exchange(false, true, ...)` 实现 set-once gate（`peri-middlewares/src/workflow/mod.rs`）
-2. 首次 turn 构建（`build_and_execute_agent`）时 `init_notification_buffer()` 返回 true → spawn session 级 consumer
-3. 后续 turn 构建调用返回 false → 跳过 spawn
-4. WorkflowMiddleware 不再持有 per-turn forwarder；通知消费统一由 executor 的 session 级 consumer 处理（见 §4.2）
+Workflow runner 发布 `WorkflowTaskResult`，由 session 消费者转换为 Agent 可见的
+`Defer` 与 TUI 的任务终态。对 Workflow，结果先进入 MessageQueue 并唤醒 Receive，
+之后才减少任务 active count；任务的统一登记、事件、快照、去重和恢复规则见
+[Session 异步任务架构](session-async-tasks.md)。Workflow 特有的状态词为
+`completed` / `killed` / `failed`，不把 killed 或 failed 显示成 completed。
+当前实现入口见 `docs/code-index/peri-workflow.md`。
 
 ---
 
@@ -605,8 +538,8 @@ DTO 类型镜像 `peri_workflow::progress::RunProgress`（避免直接 crate 依
 | 脚本执行环境 | 独立 Node.js 进程 | 独立管理进程生命周期并复用 workflow-engine；这不是 OS 级安全 sandbox |
 | run_id 生成 | tool.invoke() 中（not runner） | 立即返回 LLM，不等待子进程启动 |
 | 通知模型 | Defer 消息流注入（Receive 阶段消费，AsyncRouter → push_defer）| 避免 push 通知打断正在执行的 agent；通知作为消息流进入下轮 Receive |
-| 完成通知 | 双路径（TUI + Agent） | TUI 需要实时反馈（bg-task-completed unstable event）；Agent 需要文本感知才能行动（Defer 注入） |
-| Consumer 模型 | session 级一次 spawn + AtomicBool guard（`peri-agent/src/session/exec/executor.rs`）| 替代 per-turn forwarder 方案：语义更清晰，broadcast channel 天然单消费者 |
+| 完成通知 | Session 任务入口 | TUI 与 Agent 的投递契约见 [Session 异步任务架构](session-async-tasks.md) |
+| Consumer 模型 | session 级结果消费 | 当前入口见 `docs/code-index/peri-workflow.md`，目标收敛到 [Session 异步任务架构](session-async-tasks.md) |
 | progress 消费 | TUI 轮询（event payload） | 删除 8 跳 push 管线（~190 行），降为 ~100 行轮询 |
 | agent 执行 | 专用 Workflow Agent 链 | 复用 frozen data、tool 与 LLM 基础设施，同时显式限制递归 SubAgent 等能力 |
 | 并发限制 | Registry 上限 3 | 防止 LLM 无限 spawn workflow |

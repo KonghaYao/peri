@@ -363,12 +363,18 @@ async fn bridge_accepts_workspace_owned_task_handle() {
         MessageKind, MessageQueue, MessageSource, QueuedPayload, SessionInbox,
     };
     use peri_agent::tools::{BaseTool, ToolContext};
-    use rmcp::model::{GetTaskParams, TaskStatus};
+    let (mut owner, spawner) = crate::mcp::McpTaskOwner::new();
+    let pool = Arc::new(crate::mcp::McpClientPool::new_pending_with_spawner(spawner));
 
     let (_dir, cwd) = workspace_dir();
+    let context = crate::mcp::builtin::context::BuiltinInstanceContext::new(cwd.clone());
+    context
+        .task_scope_authority
+        .set(pool.task_scope_authority.clone())
+        .ok();
     let transport = crate::mcp::builtin::runtime::spawn_builtin_transport_with_context(
         "workspace",
-        &crate::mcp::builtin::context::BuiltinInstanceContext::new(cwd.clone()),
+        &context,
         &std::collections::HashMap::new(),
     )
     .expect("builtin Workspace dispatch");
@@ -381,8 +387,6 @@ async fn bridge_accepts_workspace_owned_task_handle() {
         service,
         supervisor,
     };
-    let (mut owner, spawner) = crate::mcp::McpTaskOwner::new();
-    let pool = Arc::new(crate::mcp::McpClientPool::new_pending_with_spawner(spawner));
     let queue = Arc::new(MessageQueue::new());
     let inbox = SessionInbox::new(Arc::clone(&queue));
     pool.register_inbox("task-session", inbox.handle());
@@ -404,6 +408,12 @@ async fn bridge_accepts_workspace_owned_task_handle() {
         url: None,
         skills_capable: false,
     });
+    pool.clients
+        .write()
+        .insert("workspace".into(), Arc::clone(&handle));
+    let manager: Arc<dyn TaskManager> =
+        Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
+    pool.bind_session_task_manager("task-session", &manager);
     let bridge = crate::mcp::tool_bridge::McpToolBridge::new("workspace", bash, handle)
         .with_output_store(&pool, Some("task-session"));
     let receipt = bridge
@@ -420,20 +430,7 @@ async fn bridge_accepts_workspace_owned_task_handle() {
         .split('.')
         .next()
         .expect("task id");
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            let task = peer
-                .get_task(GetTaskParams::new(task_id))
-                .await
-                .expect("task state");
-            if task.task.status() == TaskStatus::Completed {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("task completion");
+    assert!(task_id.starts_with("mcp-"));
     tokio::time::timeout(Duration::from_secs(5), inbox.await_wake())
         .await
         .expect("task completion wakes its session");
@@ -447,6 +444,108 @@ async fn bridge_accepts_workspace_owned_task_handle() {
     assert!(reminder.as_reminder().body.contains(&task_id[..8]));
     assert!(reminder.as_reminder().body.contains("stdout 输出文件"));
     assert!(!reminder.as_reminder().body.contains("Task details:"));
+    pair.shutdown().await;
+    let _ = owner.shutdown().await;
+}
+
+#[tokio::test]
+async fn closing_workspace_scope_reconciles_without_live_agent_manager() {
+    let (mut owner, spawner) = crate::mcp::McpTaskOwner::new();
+    let pool = Arc::new(crate::mcp::McpClientPool::new_pending_with_spawner(spawner));
+    let (_dir, cwd) = workspace_dir();
+    let context = crate::mcp::builtin::context::BuiltinInstanceContext::new(cwd.clone());
+    context
+        .task_scope_authority
+        .set(pool.task_scope_authority.clone())
+        .ok();
+    let transport = crate::mcp::builtin::runtime::spawn_builtin_transport_with_context(
+        "workspace",
+        &context,
+        &std::collections::HashMap::new(),
+    )
+    .expect("builtin Workspace dispatch");
+    let (io, supervisor) = transport.into_parts();
+    let service = serve_client_auto(io, &McpCapabilityProfile::disabled(), HANDSHAKE_TIMEOUT)
+        .await
+        .expect("handshake deadline")
+        .expect("handshake");
+    let pair = Pair {
+        service,
+        supervisor,
+    };
+    let peer = pair.peer();
+    let mut config: crate::mcp::config::McpServerConfig =
+        serde_json::from_value(json!({})).expect("empty MCP config");
+    config.source = Some(crate::mcp::config::ConfigSource::Builtin {
+        instance: "workspace".into(),
+    });
+    pool.configs.write().insert("workspace".into(), config);
+    pool.clients.write().insert(
+        "workspace".into(),
+        Arc::new(crate::mcp::client::McpClientHandle {
+            name: "workspace".into(),
+            version: None,
+            cache_version: None,
+            peer: Some(peer.clone()),
+            tools: vec![],
+            resources: vec![],
+            status: crate::mcp::client::ClientStatus::Connected,
+            oauth_status: Default::default(),
+            source: Some(crate::mcp::config::ConfigSource::Builtin {
+                instance: "workspace".into(),
+            }),
+            url: None,
+            skills_capable: false,
+        }),
+    );
+    let mut first_call = call(
+        "Bash",
+        json!({"command":"sleep 30", "run_in_background":true}),
+    );
+    first_call.meta = pool.task_scope_meta_for("workspace", "closing-session");
+    let scope = first_call.meta.clone().expect("trusted scope");
+    let before = peer
+        .send_request(rmcp::model::ClientRequest::CustomRequest(
+            rmcp::model::CustomRequest::new("workspace/taskSnapshot", Some(json!({"_meta":scope}))),
+        ))
+        .await
+        .expect("snapshot before close");
+    let rmcp::model::ServerResult::CustomResult(before) = before else {
+        panic!("scope snapshot result")
+    };
+    let close_epoch = before.0["epoch"].as_u64().expect("scope epoch");
+    let response = peer
+        .call_tool_once(first_call)
+        .await
+        .expect("start scoped Bash");
+    assert!(matches!(response, CallToolResponse::Task(_)));
+    pool.reconcile_closing_workspace_scope("closing-session")
+        .await
+        .expect("owner confirms all tasks terminal without Agent manager");
+    pool.open_workspace_task_scope("closing-session")
+        .await
+        .expect("same session scope opens after close settles");
+    let mut reopened = call(
+        "Bash",
+        json!({"command":"printf reopened", "run_in_background":true}),
+    );
+    reopened.meta = Some(scope.clone());
+    let response = peer
+        .call_tool_once(reopened)
+        .await
+        .expect("Bash accepted after reopen");
+    assert!(matches!(response, CallToolResponse::Task(_)));
+    assert!(
+        peer.send_request(rmcp::model::ClientRequest::CustomRequest(
+            rmcp::model::CustomRequest::new(
+                "workspace/taskClose",
+                Some(json!({"_meta":scope,"epoch":close_epoch})),
+            ),
+        ))
+        .await
+        .is_err(),
+        "stale taskClose must not close reopened scope"
+    );
     pair.shutdown().await;
     let _ = owner.shutdown().await;
 }

@@ -8,6 +8,7 @@ use crate::kit::{acp_events, atoms, input_history, panel_registry};
 /// This is deliberately synchronous: the lifecycle operation gate is held by
 /// the caller across this complete projection.
 pub fn project_session_boundary(target_session_id: Option<&str>) {
+    let previous_session_id = atoms::ACTIVE_SESSION_ID.state().read().clone();
     atoms::ACTIVE_SESSION_ID.set(target_session_id.unwrap_or_default().to_string());
     // 每次会话边界都从「未标记只读」开始：标记由准入方（`session/load` 响应）在本次
     // 准入落定后写入，边界本身不知道下一条会话是否可写。
@@ -61,6 +62,20 @@ pub fn project_session_boundary(target_session_id: Option<&str>) {
     *atoms::TODO_ITEMS.state().write() = Vec::new();
     *atoms::GOAL_SNAPSHOT.state().write() = None;
     panel_registry::close_panel(PanelKind::Goal);
+    if previous_session_id != target_session_id.unwrap_or_default() {
+        atoms::BG_TASKS.state().write().clear();
+        *atoms::BG_TASK_REVISION.state().write() = None;
+        atoms::BG_DISPLAY.state().write().clear();
+        atoms::BG_AGENT_IDS.state().write().clear();
+        atoms::BG_TASK_IDENTITY.state().write().clear();
+        atoms::BG_LIVE_DETAIL.state().write().clear();
+        *atoms::SELECTED_BG_TASK_ID.state().write() = None;
+        *atoms::SELECTED_SUBAGENT_ID.state().write() = None;
+        *atoms::SELECTED_WORKFLOW_RUN_ID.state().write() = None;
+        panel_registry::close_panel(PanelKind::ShellDetail);
+        panel_registry::close_panel(PanelKind::SubAgentDetail);
+        panel_registry::close_panel(PanelKind::Workflow);
+    }
     input_history::reset_history_cursor();
 }
 

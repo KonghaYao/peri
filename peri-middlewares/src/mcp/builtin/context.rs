@@ -86,6 +86,8 @@ pub struct BuiltinInstanceContext {
     /// 不读配置、不派生根（AW3-11 模式）。资源根列表（skills / agents / builtin
     /// 关闭位）的事实源是装配期输入（F11 插件 manifest / F12 配置读取已在该层完成）。
     pub workspace_resources: Option<WorkspaceResourcesInput>,
+    /// Host-issued capabilities shared by all sessions using this builtin instance.
+    pub task_scope_authority: std::sync::OnceLock<peri_mcp_workspace::TaskScopeAuthority>,
     /// A24 关闭集：`policy_key ∈ disabled_middlewares` 的实例名（唯一实现
     /// `mcp::builtin::closed_instances`，宿主经 `peri_middlewares::assembly` 的薄委托派生）。
     ///
@@ -112,6 +114,7 @@ impl BuiltinInstanceContext {
             lsp: None,
             workspace: None,
             workspace_resources: None,
+            task_scope_authority: std::sync::OnceLock::new(),
             closed: BTreeSet::new(),
             skills_face_closed: false,
         }

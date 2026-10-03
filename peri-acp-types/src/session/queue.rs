@@ -1,6 +1,9 @@
 //! Queue payload 与 Prompt/Defer/Info 调度语义。
 
-use crate::{messages::BaseMessage, system_reminder::TrustedSystemReminder};
+use crate::{
+    messages::{BaseMessage, MessageId},
+    system_reminder::TrustedSystemReminder,
+};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::{collections::VecDeque, sync::Arc};
@@ -76,6 +79,8 @@ pub struct QueuedMessage {
     pub source: MessageSource,
     /// 实际消息内容
     pub payload: QueuedPayload,
+    /// Stable canonical ID for an owner-confirmed external terminal reminder.
+    pub delivery_id: Option<MessageId>,
 }
 
 impl QueuedMessage {
@@ -88,6 +93,21 @@ impl QueuedMessage {
             kind,
             source,
             payload,
+            delivery_id: None,
+        }
+    }
+
+    pub fn system_reminder_with_delivery_id(
+        kind: MessageKind,
+        source: MessageSource,
+        reminder: TrustedSystemReminder,
+        delivery_id: MessageId,
+    ) -> Self {
+        Self {
+            kind,
+            source,
+            payload: QueuedPayload::SystemReminder(reminder),
+            delivery_id: Some(delivery_id),
         }
     }
 

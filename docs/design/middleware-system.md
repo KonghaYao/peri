@@ -8,7 +8,7 @@
 ## 1. 设计原则
 
 1. **切面即中间件**：一个切面就是一个中间件。每个切面封装一个独立的外部能力——hook 实现 + 工具声明 + System Prompt 贡献的自包含单元。不再有「中间件容器套切面」的嵌套结构。
-2. **单一职责**：每个切面只做一件事。Agent 注册是独立切面；Background 任务通过 `BackgroundTaskRegistry` 嵌入 `SubAgentMiddleware`（`with_background_registry()`），不作为独立切面存在。
+2. **单一职责**：每个切面只做一件事。Agent 注册是独立切面；后台任务的统一操作入口见 [Session 异步任务架构](session-async-tasks.md)。
 3. **声明式注册**：切面通过声明方式注册 hooks、tools、依赖关系。声明在编译期可检查完整性。
 4. **固定顺序，不可重排**：切面在链中的排列顺序是契约。同一 hook 点上多个切面按声明顺序执行。[TRAP]
 5. **State 为唯一共享上下文**：切面间不直接通信——所有状态变更通过 State 传递。
@@ -37,7 +37,7 @@ graph TB
         C3["fs_tools<br/>→ tools"]
         C3b["git_attribution<br/>→ before_tool + after_tool + prompt"]
         C4["hitl<br/>→ before_tools_batch + before_tool"]
-        C5["agent_tool<br/>→ tools + before_agent<br/>（含 BackgroundTaskRegistry）"]
+        C5["agent_tool<br/>→ tools + before_agent"]
         C6["ptc<br/>→ tools + before_agent + prompt"]
         C7["tool_search<br/>→ tools + before_agent + prompt"]
     end
@@ -141,7 +141,7 @@ MCP / Workflow / LSP / Goal 等槽位还受运行时依赖约束。顺序事实�
 - **#4 plugin**：`PluginMiddleware` 在 `before_agent` hook 中执行插件兼容性校验（name/version/manifest 字段完整性）。
 - **#9 git_attribution**：`before_tool` 暂存 Write/Edit 旧文件内容，`after_tool` 计算贡献字符数；`prompt_contribution()` 声明 Co-Authored-By 指令。
 - **#12/#13**：审批与提问是独立能力。`PermissionMiddleware` 负责审批；`HumanInTheLoopMiddleware::collect_tools()` 使用原始 broker 提供 `AskUserQuestion`。
-- **#14 subagent**：`SubAgentMiddleware` 提供 `Agent`，TaskManager 可用时额外提供 `AgentResultTool`；后台完成事件走独立 unbounded channel。
+- **#14 subagent**：`SubAgentMiddleware` 提供 `Agent`，TaskManager 可用时额外提供 `AgentResultTool`；后台任务生命周期遵循 [Session 异步任务架构](session-async-tasks.md)。
 - **#17/#18**：PTC 必须先于 ToolSearch。两者都在 `before_agent` 基于当前 session-local 工具视图生成 contribution；ToolSearch 随后为包含 `RunPtcCode` 的 deferred 集合建索引。
 - **#20 goal**：`GoalTool` 是 deferred tool，仅通过 `SearchExtraTools` → `ExecuteExtraTool` 访问；`after_agent` 注入 steering 并触发自驱续跑。
 - **#19 lsp**：LSP 工具面已迁 builtin `lsp` 实例（`mcp__lsp__LSP`），槽位只挂薄同步中间件 `LspSyncMiddleware`；`collect_tools` 为空，`after_tool` 在 `Write` / `Edit` 落盘后经既有 `LspPoolPort` 发 `didChange` → `didSave`（顺序发送、失败 debug 降级且不改工具结果）。

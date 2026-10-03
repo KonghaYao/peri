@@ -11,6 +11,7 @@
 use std::sync::atomic::Ordering;
 
 use super::*;
+use peri_acp_types::tasks::ExternalTaskRegistration;
 
 fn make_registry() -> BackgroundTaskRegistry {
     BackgroundTaskRegistry::new()
@@ -32,6 +33,203 @@ fn make_task(id: &str) -> BackgroundTask {
         output_preview: None,
         agent_inbox: None,
     }
+}
+
+#[tokio::test]
+async fn external_completion_notifies_before_terminal_and_retries_failed_delivery() {
+    let manager = TaskManager::new();
+    let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let notify_attempts = attempts.clone();
+    let task_id = manager
+        .register_external(ExternalTaskRegistration {
+            session_id: "session-a".into(),
+            owner_identity: "workspace-a".into(),
+            owner_task_id: "same-raw-id".into(),
+            kind: BgTaskKind::Shell,
+            summary: "sleep 1".into(),
+            started_at: None,
+            cancel: std::sync::Arc::new(|| Box::pin(async { Ok(()) })),
+            on_terminal: std::sync::Arc::new(move |_, _| {
+                let attempt = notify_attempts.fetch_add(1, Ordering::SeqCst);
+                if attempt == 0 {
+                    Err("inbox unavailable".into())
+                } else {
+                    Ok(())
+                }
+            }),
+        })
+        .unwrap();
+    assert!(manager.mark_external_lost(&task_id));
+    assert_eq!(manager.snapshot().tasks[0].status, "lost");
+    assert_eq!(manager.active_count(), 1);
+    assert!(manager.mark_external_running(&task_id));
+    assert_eq!(manager.active_count(), 1);
+    assert!(manager
+        .settle_external(
+            &task_id,
+            "terminal-1",
+            BackgroundTaskResult {
+                task_id: task_id.clone(),
+                agent_name: "bg-shell".into(),
+                prompt_summary: "sleep 1".into(),
+                success: true,
+                output: "done".into(),
+                tool_calls_count: 0,
+                duration_ms: 1,
+                child_thread_id: None,
+                timed_out: false,
+                subagent_failure: None,
+                shell_output: None,
+            }
+        )
+        .is_err());
+    assert_eq!(manager.active_count(), 1);
+    assert_eq!(manager.snapshot().tasks[0].status, "running");
+    let result = BackgroundTaskResult {
+        task_id: task_id.clone(),
+        agent_name: "bg-shell".into(),
+        prompt_summary: "sleep 1".into(),
+        success: true,
+        output: "done".into(),
+        tool_calls_count: 0,
+        duration_ms: 1,
+        child_thread_id: None,
+        timed_out: false,
+        subagent_failure: None,
+        shell_output: None,
+    };
+    assert_eq!(
+        manager
+            .settle_external(&task_id, "terminal-1", result.clone())
+            .unwrap(),
+        true
+    );
+    assert_eq!(manager.active_count(), 0);
+    assert_eq!(manager.snapshot().tasks[0].status, "completed");
+    assert_eq!(
+        manager
+            .settle_external(&task_id, "terminal-1", result)
+            .unwrap(),
+        false
+    );
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn external_cancel_request_keeps_task_active_until_owner_settles() {
+    let manager = TaskManager::new();
+    let task_id = manager
+        .register_external(ExternalTaskRegistration {
+            session_id: "session-a".into(),
+            owner_identity: "workspace-a".into(),
+            owner_task_id: "cancel-raw-id".into(),
+            kind: BgTaskKind::Mcp,
+            summary: "remote task".into(),
+            started_at: None,
+            cancel: std::sync::Arc::new(|| Box::pin(async { Ok(()) })),
+            on_terminal: std::sync::Arc::new(|_, _| Ok(())),
+        })
+        .unwrap();
+    manager.cancel_async(&task_id).await.unwrap();
+    assert_eq!(manager.active_count(), 1);
+    assert_eq!(manager.snapshot().tasks[0].status, "running");
+    assert!(manager
+        .settle_external(
+            &task_id,
+            "terminal-cancel",
+            BackgroundTaskResult {
+                task_id: task_id.clone(),
+                agent_name: "mcp".into(),
+                prompt_summary: "remote task".into(),
+                success: false,
+                output: "cancelled".into(),
+                tool_calls_count: 0,
+                duration_ms: 1,
+                child_thread_id: None,
+                timed_out: false,
+                subagent_failure: None,
+                shell_output: None,
+            }
+        )
+        .unwrap());
+    assert_eq!(manager.active_count(), 0);
+}
+
+#[tokio::test]
+async fn cold_terminal_restore_has_no_running_projection_or_started_event() {
+    let manager = TaskManager::new();
+    let mut changes = manager.subscribe_events();
+    let deliveries = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let make_request = || {
+        let deliveries = deliveries.clone();
+        ExternalTaskRegistration {
+            session_id: "session-a".into(),
+            owner_identity: "workspace-a".into(),
+            owner_task_id: "finished-raw-id".into(),
+            kind: BgTaskKind::Shell,
+            summary: "finished shell".into(),
+            started_at: Some("2026-10-03T00:00:00Z".into()),
+            cancel: std::sync::Arc::new(|| Box::pin(async { Ok(()) })),
+            on_terminal: std::sync::Arc::new(move |_, _| {
+                deliveries.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }),
+        }
+    };
+    let result = BackgroundTaskResult {
+        task_id: "finished-raw-id".into(),
+        agent_name: "bg-shell".into(),
+        prompt_summary: "finished shell".into(),
+        success: true,
+        output: "done".into(),
+        tool_calls_count: 0,
+        duration_ms: 1,
+        child_thread_id: None,
+        timed_out: false,
+        subagent_failure: None,
+        shell_output: None,
+    };
+    let id = manager
+        .restore_external_terminal(make_request(), "transition-1", result.clone())
+        .unwrap();
+    assert_eq!(manager.snapshot().tasks[0].task_id, id);
+    assert_eq!(manager.snapshot().tasks[0].status, "completed");
+    assert_eq!(manager.snapshot().tasks[0].started_at, "2026-10-03T00:00:00+00:00");
+    assert_eq!(manager.active_count(), 0);
+    assert!(matches!(
+        changes.try_recv().unwrap().event,
+        BgRegistryEvent::Completed { .. }
+    ));
+    assert!(changes.try_recv().is_err());
+    assert_eq!(
+        manager
+            .restore_external_terminal(make_request(), "transition-1", result)
+            .unwrap(),
+        id
+    );
+    assert_eq!(deliveries.load(Ordering::SeqCst), 1);
+
+    let live = TaskManager::new();
+    let live_id = live.register_external(make_request()).unwrap();
+    let live_result = BackgroundTaskResult {
+        task_id: "finished-raw-id".into(),
+        agent_name: "bg-shell".into(),
+        prompt_summary: "finished shell".into(),
+        success: true,
+        output: "done".into(),
+        tool_calls_count: 0,
+        duration_ms: 1,
+        child_thread_id: None,
+        timed_out: false,
+        subagent_failure: None,
+        shell_output: None,
+    };
+    assert_eq!(
+        live.restore_external_terminal(make_request(), "transition-1", live_result)
+            .unwrap(),
+        live_id
+    );
+    assert_eq!(live.snapshot().tasks[0].status, "completed");
 }
 
 #[tokio::test]

@@ -18,6 +18,7 @@ pub enum BgTaskKind {
     Shell,
     Agent,
     Workflow,
+    Mcp,
 }
 
 /// 后台任务注册表事件（registry → executor 事件推送通道）
@@ -45,6 +46,54 @@ pub enum BgRegistryEvent {
         task_id: String,
         reason: String,
     },
+    Updated {
+        task_id: String,
+        status: String,
+    },
+}
+
+/// One change in a session task stream. Subscribe before reading a snapshot,
+/// then discard changes at or below its revision.
+#[derive(Debug, Clone)]
+pub struct TaskChange {
+    pub revision: u64,
+    pub event: BgRegistryEvent,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskRecord {
+    pub task_id: String,
+    pub kind: BgTaskKind,
+    pub summary: String,
+    pub started_at: String,
+    pub status: String,
+    pub duration_ms: u64,
+    pub output_preview: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskSnapshot {
+    pub revision: u64,
+    pub tasks: Vec<TaskRecord>,
+}
+
+pub type ExternalCancelFn =
+    Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>> + Send + Sync>;
+pub type ExternalNotifyFn = Arc<
+    dyn Fn(&BackgroundTaskResult, crate::messages::MessageId) -> Result<(), String> + Send + Sync,
+>;
+
+/// Identity is supplied by the trusted connection adapter, never tool input.
+pub struct ExternalTaskRegistration {
+    pub session_id: String,
+    pub owner_identity: String,
+    pub owner_task_id: String,
+    pub kind: BgTaskKind,
+    pub summary: String,
+    /// Owner creation timestamp (RFC3339); absent only when the owner omits it.
+    pub started_at: Option<String>,
+    pub cancel: ExternalCancelFn,
+    pub on_terminal: ExternalNotifyFn,
 }
 
 /// 后台任务注册请求（middleware / workflow 发起面 → `TaskManager::register` 的
@@ -108,6 +157,55 @@ pub struct BgShellHandle {
 /// `TaskManager`；shell 执行与输出由注入的执行环境承担。本 trait 只承载跨层操作，
 /// `Arc<dyn TaskManager>` 由 Agent 层实现、经装配注入到 ACP / middlewares。
 pub trait TaskManager: std::any::Any + Send + Sync {
+    fn restore_external_terminal(
+        &self,
+        _request: ExternalTaskRegistration,
+        _terminal_transition_id: &str,
+        _result: BackgroundTaskResult,
+    ) -> Result<String, String> {
+        Err("external terminal restoration is unavailable".into())
+    }
+    fn external_task_ids(&self) -> Vec<String> {
+        Vec::new()
+    }
+    fn has_unsettled_external(&self) -> bool {
+        false
+    }
+    fn mark_external_lost(&self, _task_id: &str) -> bool {
+        false
+    }
+    fn mark_external_running(&self, _task_id: &str) -> bool {
+        false
+    }
+    fn snapshot(&self) -> TaskSnapshot {
+        TaskSnapshot {
+            revision: 0,
+            tasks: Vec::new(),
+        }
+    }
+    fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<TaskChange> {
+        let (tx, rx) = tokio::sync::broadcast::channel(1);
+        drop(tx);
+        rx
+    }
+    fn register_external(&self, _request: ExternalTaskRegistration) -> Result<String, String> {
+        Err("external tasks are unavailable".into())
+    }
+    fn settle_external(
+        &self,
+        task_id: &str,
+        _terminal_transition_id: &str,
+        result: BackgroundTaskResult,
+    ) -> Result<bool, String> {
+        Ok(self.complete(task_id, result))
+    }
+    fn cancel_async(
+        &self,
+        task_id: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + '_>> {
+        let task_id = task_id.to_owned();
+        Box::pin(async move { self.cancel(&task_id) })
+    }
     /// Record actual external drain without changing notification delivery or UI state.
     /// Call only after the registered execution and its children have joined.
     fn confirm_external_execution_stopped(&self, _task_id: &str) {}

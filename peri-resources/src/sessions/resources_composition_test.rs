@@ -1,5 +1,94 @@
 use super::*;
 
+#[tokio::test]
+async fn terminal_reminder_replay_has_one_canonical_history_entry() {
+    use peri_acp_types::system_reminder::{
+        ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
+        ReminderSource, SystemReminder, TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
+    };
+
+    let fixture = DoubleDbFixture::new().await;
+    let workspace = fixture.workspace().await;
+    let id = "r-reminder-replay".to_owned();
+    let _lease = fixture.create(&id, &workspace).await;
+    let make_reminder = |body: &str| {
+        TrustedSystemReminderFactory::for_producer()
+            .construct(SystemReminder {
+                version: SYSTEM_REMINDER_VERSION,
+                category: ReminderCategory::Task,
+                source: ReminderSource("task_manager".into()),
+                kind: "terminal".into(),
+                severity: ReminderSeverity::Info,
+                delivery: ReminderDelivery::Required,
+                audiences: ReminderAudiences(vec![ReminderAudience::Model]),
+                body: body.into(),
+                summary: None,
+                metadata: serde_json::json!({}),
+            })
+            .unwrap()
+    };
+    let message_id = MessageId::new();
+    assert!(fixture
+        .facade
+        .append_reminder_if_absent(&id, message_id, &make_reminder("done"))
+        .await
+        .unwrap());
+    assert!(!fixture
+        .facade
+        .append_reminder_if_absent(&id, message_id, &make_reminder("done"))
+        .await
+        .unwrap());
+    assert!(fixture
+        .facade
+        .append_reminder_if_absent(&id, message_id, &make_reminder("different"))
+        .await
+        .is_err());
+    assert_eq!(fixture.data_rows(&id).await, (1, 1, 1));
+}
+
+#[tokio::test]
+async fn explicit_close_intent_survives_resource_reopen() {
+    let fixture = DoubleDbFixture::new().await;
+    let workspace = fixture.workspace().await;
+    let id = "r-explicit-close".to_owned();
+    let lease = fixture.create(&id, &workspace).await;
+    assert!(!fixture.facade.is_session_closing(&id).await.unwrap());
+    fixture.facade.mark_session_closing(&id).await.unwrap();
+    fixture.facade.mark_session_closing(&id).await.unwrap();
+    assert!(fixture.facade.is_session_closing(&id).await.unwrap());
+    let token = lease.owner_token().unwrap();
+    lease.mark_clean().await.unwrap();
+    fixture.facade.release_execution_owner(&token).await.unwrap();
+    let reopened_local = LocalExecution::open(fixture._dirs.1.path().join("threads.db"))
+        .await
+        .unwrap();
+    let reopened = SessionResourcesImpl::from_ports(
+        Arc::new(fixture.data.data_port()),
+        Arc::new(reopened_local),
+        SessionDataHome::RemoteStore,
+    );
+    assert!(reopened.is_session_closing(&id).await.unwrap());
+    let takeover = reopened.claim_closing_execution(&id, token.epoch).await.unwrap();
+    let retry = reopened.claim_closing_execution(&id, takeover.owner_token().unwrap().epoch).await.unwrap();
+    assert_eq!(retry.owner_token(), takeover.owner_token(), "an incomplete close reuses its exact Store generation");
+    reopened.finish_close(&takeover.owner_token().unwrap()).await.unwrap();
+    assert!(!reopened.is_session_closing(&id).await.unwrap());
+    assert!(!fixture.facade.is_session_closing(&id).await.unwrap());
+}
+
+#[tokio::test]
+async fn close_intent_and_owner_finish_atomically_after_execution_is_clean() {
+    let fixture = DoubleDbFixture::new().await;
+    let workspace = fixture.workspace().await;
+    let id = "r-close-after-clean".to_owned();
+    let lease = fixture.create(&id, &workspace).await;
+    fixture.facade.mark_session_closing(&id).await.unwrap();
+    let token = lease.owner_token().unwrap();
+    lease.mark_clean().await.unwrap();
+    fixture.facade.finish_close(&token).await.unwrap();
+    assert!(!fixture.facade.is_session_closing(&id).await.unwrap());
+}
+
 // ─── 双库：数据面在别处（旧双库门禁夹具） ───────────────────────────────
 
 /// 执行面事实：与门面内部（`MutationGate::session_facts`）用的是同一个取法。
@@ -315,6 +404,7 @@ async fn test_double_db_cold_recovery_acquires_execution_from_data_plane_facts()
         Arc::new(reopened_local),
         SessionDataHome::RemoteStore,
     );
+    expire_owner(fixture.data.pool(), &id).await;
     let recovered = reopened.acquire_execution(&id, &workspace).await.unwrap();
     assert_eq!(recovered.thread_id(), &id);
     assert_eq!(

@@ -255,6 +255,25 @@ pub(super) struct RemoteStore {
 }
 
 impl RemoteStore {
+    /// One owner CAS transaction. Callers must verify the affected-row count;
+    /// a zero-row conditional update is an ownership conflict.
+    pub(super) async fn apply_owner_batch(
+        &self,
+        statements: Vec<StatementSpec>,
+    ) -> SessionResourceResult<Vec<u64>> {
+        self.access.ensure_writable()?;
+        self.ensure_autocommit()?;
+        match self.run_managed_batch(statements).await {
+            Ok(counts) => Ok(counts),
+            Err(BatchFailure::NotApplied { class, .. }) => Err(class.into_session_resource_error()),
+            Err(BatchFailure::QualificationConflict) =>
+                Err(RemoteFailureClass::Constraint.into_session_resource_error()),
+            Err(BatchFailure::Unknown { .. }) => Err(SessionResourceError::new(
+                SessionResourceErrorKind::PersistenceUncertain { thread_id: None },
+            )),
+        }
+    }
+
     pub(super) fn access(&self) -> StoreAccess {
         self.access
     }
@@ -449,6 +468,14 @@ impl RemoteStore {
         &self,
         mutation: &QualifiedMutation,
     ) -> SessionResourceResult<(MutationOutcome, Vec<u64>)> {
+        self.apply_qualified_reporting_with_owner(mutation, None).await
+    }
+
+    pub(super) async fn apply_qualified_reporting_with_owner(
+        &self,
+        mutation: &QualifiedMutation,
+        owner: Option<(&ThreadId, Option<&peri_acp_types::workspace::ExecutionOwnerToken>)>,
+    ) -> SessionResourceResult<(MutationOutcome, Vec<u64>)> {
         self.access.ensure_writable()?;
         self.ensure_autocommit()?;
         #[cfg(test)]
@@ -463,8 +490,11 @@ impl RemoteStore {
             ));
         }
         let now = now_stamp();
-        let mut statements = Vec::with_capacity(mutation.effects.len() + 1);
+        let mut statements = Vec::with_capacity(mutation.effects.len() + 2);
         statements.push(ledger::qualify_statement(&mutation.identity, &now));
+        if let Some((root, token)) = owner {
+            statements.push(ledger::owner_guard_statement(&mutation.identity, root, token));
+        }
         statements.extend(mutation.effects.iter().cloned());
         Ok(match self.run_managed_batch(statements).await {
             // 第一条是资格写入，不进效果证据。
@@ -485,7 +515,7 @@ impl RemoteStore {
                         receipt: mutation.identity.receipt.clone(),
                         replayed: false,
                     },
-                    counts.into_iter().skip(1).collect(),
+                    counts.into_iter().skip(if owner.is_some() { 2 } else { 1 }).collect(),
                 )
             }
             Err(BatchFailure::QualificationConflict) => (

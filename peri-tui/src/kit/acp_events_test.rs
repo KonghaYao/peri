@@ -140,6 +140,8 @@ fn test_subagent_stopped_removes_only_matching_active_agent() {
                 summary: task_id.into(),
                 started_at: String::new(),
                 pid: None,
+                revision: None,
+                status: None,
             }),
         );
         dispatch_and_notify(
@@ -184,6 +186,8 @@ fn test_unknown_subagent_stopped_keeps_running_agents() {
             summary: "running".into(),
             started_at: String::new(),
             pid: None,
+            revision: None,
+            status: None,
         }),
     );
     dispatch_and_notify(

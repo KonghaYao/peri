@@ -26,15 +26,16 @@ use std::collections::HashSet;
 use peri_acp_types::messages::{BaseMessage, MessageId};
 use peri_acp_types::session_resources::{RewindBoundary, SessionResourceResult};
 use peri_acp_types::store::{
-    deserialize_persisted_payload, serialize_persisted_payload, CompactionChange, MessageFlags,
-    PersistedPayload,
+    CompactionChange, MessageFlags, PersistedPayload, deserialize_persisted_payload,
+    serialize_persisted_payload,
 };
+use peri_acp_types::system_reminder::TrustedSystemReminder;
 use peri_acp_types::thread::ThreadId;
 use turso_serverless::Value;
 
 use super::session_codec as codec;
-use super::session_data::{invalid_input, not_found, RemoteSessionData};
-use super::sql::{int_at, StatementSpec};
+use super::session_data::{RemoteSessionData, invalid_input, not_found};
+use super::sql::{StatementSpec, int_at};
 use crate::sessions::canonical;
 use crate::sessions::sqlite_store::role_of_message;
 
@@ -97,6 +98,48 @@ const SELECT_ROWID_SQL: &str =
     "SELECT rowid FROM messages WHERE thread_id = ?1 AND message_id = ?2";
 
 impl RemoteSessionData {
+    /// 全局消息主键承担并发去重；冲突后的精确读区分重放与内容碰撞。
+    pub(super) async fn write_reminder_if_absent(
+        &self,
+        id: &ThreadId,
+        message_id: MessageId,
+        reminder: &TrustedSystemReminder,
+    ) -> SessionResourceResult<bool> {
+        let payload = PersistedPayload::SystemReminder {
+            id: message_id,
+            reminder: reminder.clone(),
+        };
+        let content = payload_content(&payload)?;
+        if let Some(existing) = self.read_reminder_row(message_id).await? {
+            return check_reminder_row(id, &content, existing).map(|()| false);
+        }
+        match self.write_history_append(id, &[payload]).await {
+            Ok(()) => Ok(true),
+            Err(error) => match self.read_reminder_row(message_id).await? {
+                Some(existing) => check_reminder_row(id, &content, existing).map(|()| false),
+                None => Err(error),
+            },
+        }
+    }
+
+    async fn read_reminder_row(
+        &self,
+        message_id: MessageId,
+    ) -> SessionResourceResult<Option<(String, String)>> {
+        let statement = StatementSpec::new(
+            "SELECT thread_id, content FROM messages WHERE message_id = ?1",
+            vec![Value::Text(message_label(message_id))],
+        );
+        let store = self.store().await?;
+        let Some(row) = store.fetch_row(&statement).await? else {
+            return Ok(None);
+        };
+        let [Value::Text(owner), Value::Text(content), ..] = row.as_slice() else {
+            return Err(codec::corrupt("invalid reminder row"));
+        };
+        Ok(Some((owner.clone(), content.clone())))
+    }
+
     /// 追加 canonical payload 批次：顺序稳定、计数重数、自动标题按本机同一规则补齐。
     ///
     /// 冲突语义与本机一致：批次内重复 id 在发请求前拒绝（`InvalidInput`，同一文案）；
@@ -394,6 +437,20 @@ impl RemoteSessionData {
             ))
             .await?;
         Ok(row.and_then(|values| int_at(&values, 0)))
+    }
+}
+
+fn check_reminder_row(
+    id: &ThreadId,
+    content: &str,
+    existing: (String, String),
+) -> SessionResourceResult<()> {
+    if existing.0 == id.as_str() && existing.1 == content {
+        Ok(())
+    } else {
+        Err(invalid_input(
+            "reminder id conflicts with another history entry",
+        ))
     }
 }
 

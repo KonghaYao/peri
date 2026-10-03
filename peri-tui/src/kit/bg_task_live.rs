@@ -107,6 +107,28 @@ pub fn seed_live_from_started(task_id: &str, kind: &str, summary: &str, pid: Opt
     });
 }
 
+pub fn seed_live_from_terminal_snapshot(
+    task_id: &str,
+    kind: &str,
+    summary: &str,
+    pid: Option<u32>,
+    status: &str,
+) {
+    with_live_detail(task_id, |detail| {
+        detail.kind = kind.to_string();
+        detail.summary = summary.to_string();
+        detail.pid = pid;
+        detail.status = match status {
+            "completed" => BgLiveStatus::Succeeded,
+            "failed" => BgLiveStatus::Failed,
+            "cancelled" => BgLiveStatus::Cancelled,
+            _ => return,
+        };
+        finalize_nested_reasoning(detail);
+        sync_tool_units(detail);
+    });
+}
+
 pub(crate) fn handle_bg_tool_started(
     agent_id: &str,
     ts: &TuiToolStarted,

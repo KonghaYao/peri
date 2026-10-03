@@ -1,7 +1,7 @@
 use super::*;
+use peri_acp_types::PeriCaps;
 use peri_acp_types::messages::BaseMessage;
 use peri_acp_types::workspace::ReadOnlyAdmission;
-use peri_acp_types::PeriCaps;
 
 async fn binding_state(cfg: &AcpServerConfig, id: &str) -> BindingState {
     cfg.session_resources
@@ -116,6 +116,54 @@ impl Fixture {
 
 #[tokio::test]
 #[serial]
+async fn test_unloaded_close_preserves_intent_until_former_owner_is_fenced() {
+    let mut fixture = Fixture::new().await;
+    let id = fixture.id.clone();
+    fixture
+        .cfg
+        .session_resources
+        .mark_session_closing(&id)
+        .await
+        .unwrap();
+    fixture.sessions.clear();
+    let error = fixture
+        .request("session/close", &json!({"sessionId": id}))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, -32010);
+    assert!(
+        fixture
+            .cfg
+            .session_resources
+            .is_session_closing(&id)
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_unloaded_close_cannot_initiate_close_of_active_session() {
+    let mut fixture = Fixture::new().await;
+    let id = fixture.id.clone();
+    fixture.sessions.clear();
+    let error = fixture
+        .request("session/close", &json!({"sessionId": id}))
+        .await
+        .unwrap_err();
+    assert!(error.message.contains("execution owner"));
+    assert!(
+        !fixture
+            .cfg
+            .session_resources
+            .is_session_closing(&id)
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+#[serial]
 async fn test_dirty_load_resume_and_fork_ignore_caller_cwd_and_keep_saved_facts() {
     for caps in [PeriCaps::default(), PeriCaps::all_enabled()] {
         for method in ["session/load", "session/resume", "session/fork"] {
@@ -150,7 +198,7 @@ async fn test_dirty_load_resume_and_fork_ignore_caller_cwd_and_keep_saved_facts(
 
 #[tokio::test]
 #[serial]
-async fn test_load_with_another_instance_handle_keeps_both_sessions_usable() {
+async fn test_load_with_another_instance_handle_rejects_a_second_execution_owner() {
     let mut fixture = Fixture::new().await;
     let original_owner = fixture.sessions[&fixture.id]
         .execution_owner
@@ -170,7 +218,7 @@ async fn test_load_with_another_instance_handle_keeps_both_sessions_usable() {
         .set_pending_caps(PeriCaps::all_enabled());
     let mut other_sessions = HashMap::new();
     let other_cwd = tempfile::tempdir().unwrap();
-    let response = handle_request(
+    let error = handle_request(
         "session/load",
         &json!({"sessionId":fixture.id,"cwd":other_cwd.path()}),
         &other_cfg,
@@ -178,15 +226,10 @@ async fn test_load_with_another_instance_handle_keeps_both_sessions_usable() {
         &fixture.transport,
     )
     .await
-    .unwrap();
-    assert!(read_only(&response).is_none());
-    assert!(other_sessions[&fixture.id].execution_owner.is_some());
-    assert!(other_sessions[&fixture.id].frozen.is_some());
-    assert_eq!(Path::new(&other_sessions[&fixture.id].cwd), fixture.cwd);
-    assert_eq!(
-        other_sessions[&fixture.id].history[0].content(),
-        "preserved recovery history"
-    );
+    .unwrap_err();
+    assert_eq!(error.code, -32010);
+    assert!(error.message.contains("execution owner is still active"));
+    assert!(!other_sessions.contains_key(&fixture.id));
     assert!(Arc::ptr_eq(
         fixture.sessions[&fixture.id]
             .execution_owner
@@ -194,15 +237,6 @@ async fn test_load_with_another_instance_handle_keeps_both_sessions_usable() {
             .unwrap(),
         &original_owner,
     ));
-    handle_request(
-        "session/rename",
-        &json!({"sessionId":fixture.id,"title":"other instance"}),
-        &other_cfg,
-        &mut other_sessions,
-        &fixture.transport,
-    )
-    .await
-    .unwrap();
     fixture
         .request(
             "session/rename",
@@ -212,15 +246,6 @@ async fn test_load_with_another_instance_handle_keeps_both_sessions_usable() {
         .unwrap();
     assert_eq!(binding_state(&fixture.cfg, &fixture.id).await, binding);
     assert_eq!(frozen_state(&fixture.cfg, &fixture.id).await, frozen);
-    handle_request(
-        "session/close",
-        &json!({"sessionId":fixture.id}),
-        &other_cfg,
-        &mut other_sessions,
-        &fixture.transport,
-    )
-    .await
-    .unwrap();
     let id = fixture.id.clone();
     fixture.close(&id).await;
 }
@@ -384,12 +409,14 @@ async fn test_foreign_machine_history_is_read_only_without_legacy_adoption_or_to
         .set_pending_caps(PeriCaps::all_enabled());
     let binding = binding_state(&fixture.cfg, &id).await;
     let frozen = frozen_state(&fixture.cfg, &id).await;
-    assert!(fixture
-        .bridge
-        .load_session_binding(&id)
-        .await
-        .unwrap()
-        .is_none());
+    assert!(
+        fixture
+            .bridge
+            .load_session_binding(&id)
+            .await
+            .unwrap()
+            .is_none()
+    );
     for method in ["session/load", "session/resume"] {
         let response = fixture
             .request(method, &json!({"sessionId":id}))
@@ -408,12 +435,14 @@ async fn test_foreign_machine_history_is_read_only_without_legacy_adoption_or_to
         assert!(state.workflow_middleware.is_none());
         assert_eq!(binding_state(&fixture.cfg, &id).await, binding);
         assert_eq!(frozen_state(&fixture.cfg, &id).await, frozen);
-        assert!(fixture
-            .bridge
-            .load_session_binding(&id)
-            .await
-            .unwrap()
-            .is_none());
+        assert!(
+            fixture
+                .bridge
+                .load_session_binding(&id)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
     fixture.close(&id).await;
     let original_id = fixture.id.clone();

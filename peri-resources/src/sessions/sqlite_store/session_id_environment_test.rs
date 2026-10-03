@@ -56,7 +56,7 @@ async fn migration_keeps_schema_version_and_existing_history() {
 }
 
 #[tokio::test]
-async fn id_recovery_ignores_missing_paths_and_keeps_instance_owners_independent() {
+async fn id_recovery_ignores_missing_paths_and_fences_competing_instances() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("threads.db");
     let (store, first) = SqliteThreadStore::open_shared(&path).await.unwrap();
@@ -74,7 +74,7 @@ async fn id_recovery_ignores_missing_paths_and_keeps_instance_owners_independent
     assert_eq!(workspace.cwd, resolved.cwd);
     let first_run = first.acquire_execution(&id, &workspace).await.unwrap();
     let second = SessionResourcesImpl::open(&path).await.unwrap();
-    let second_run = second.acquire_execution(&id, &workspace).await.unwrap();
+    assert!(second.acquire_execution(&id, &workspace).await.is_err());
     first
         .append_history(
             &id,
@@ -86,6 +86,8 @@ async fn id_recovery_ignores_missing_paths_and_keeps_instance_owners_independent
         .unwrap();
     assert!(!directory.path().join("threads.db.execution-locks").exists());
     first_run.mark_clean().await.unwrap();
+    first.release_execution_owner(&first_run.owner_token().unwrap()).await.unwrap();
+    let second_run = second.acquire_execution(&id, &workspace).await.unwrap();
     assert!(first
         .append_history(
             &id,
@@ -105,6 +107,7 @@ async fn id_recovery_ignores_missing_paths_and_keeps_instance_owners_independent
         .await
         .unwrap();
     second_run.mark_clean().await.unwrap();
+    second.release_execution_owner(&second_run.owner_token().unwrap()).await.unwrap();
     assert_eq!(store.load_messages(&id).await.unwrap().len(), 2);
     assert_eq!(
         store.load_meta(&id).await.unwrap().cwd,

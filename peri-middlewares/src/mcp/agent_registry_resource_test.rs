@@ -292,6 +292,7 @@ fn closed_instance_and_closed_chain_slot_drop_local_entries() {
                 },
                 workspace: None,
                 workspace_resources: None,
+                task_scope_authority: std::sync::OnceLock::new(),
                 skills_face_closed: false,
             },
         ))

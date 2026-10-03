@@ -9,6 +9,7 @@ use agent_client_protocol::schema::v1::{
     CloseSessionResponse, DeleteSessionResponse, ForkSessionResponse, ListSessionsResponse,
     NewSessionResponse, SessionId,
 };
+use peri_acp_types::PeriCaps;
 use peri_acp_types::ports::WorkflowMiddlewarePort;
 use peri_acp_types::session_resources::{
     FrozenSnapshotBytes, FrozenState, NewSessionDraft, NewSessionMeta, SessionInitialization,
@@ -16,12 +17,11 @@ use peri_acp_types::session_resources::{
 };
 use peri_acp_types::thread::CancelPolicy;
 use peri_acp_types::workspace::{ResolvedWorkspace, SessionBinding};
-use peri_acp_types::PeriCaps;
 use serde_json::Value;
 use tracing::{info, warn};
 
 use super::super::notify::send_available_commands_update;
-use super::super::{build_mode_state, AcpServerConfig, SessionState};
+use super::super::{AcpServerConfig, SessionState, build_mode_state};
 use crate::dispatch::config_update::make_config_options;
 use crate::{dispatch, transport::types::AcpError};
 
@@ -133,7 +133,7 @@ pub(crate) async fn handle_new(
         None => None,
         Some(Value::String(value)) if value.len() <= 64 * 1024 => Some(value.clone()),
         Some(Value::String(_)) => {
-            return Err(AcpError::new(-32602, "peri.instructions exceeds 64 KiB"))
+            return Err(AcpError::new(-32602, "peri.instructions exceeds 64 KiB"));
         }
         Some(_) => return Err(AcpError::new(-32602, "peri.instructions must be a string")),
     };
@@ -562,7 +562,7 @@ pub(crate) async fn handle_list(params: &Value, cfg: &AcpServerConfig) -> Result
     serde_json::to_value(resp).map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
 }
 
-pub(super) fn handle_cancel_bg_task(
+pub(super) async fn handle_cancel_bg_task(
     params: &Value,
     cfg: &AcpServerConfig,
 ) -> Result<Value, AcpError> {
@@ -580,101 +580,31 @@ pub(super) fn handle_cancel_bg_task(
         .session_manager
         .get_session(req_session_id)
         .ok_or_else(|| AcpError::new(-32602, format!("session not found: {req_session_id}")))?;
-    session
-        .task_manager
-        .cancel(task_id)
+    let manager = Arc::clone(&session.task_manager);
+    drop(session);
+    manager
+        .cancel_async(task_id)
+        .await
         .map_err(|e| AcpError::new(-32603, e.to_string()))?;
     info!(session_id = %req_session_id, task_id = %task_id, "Background task cancelled via ACP");
     Ok(serde_json::json!({ "success": true }))
 }
 
-async fn close_owned_session(
-    cfg: &AcpServerConfig,
-    sessions: &mut HashMap<String, SessionState>,
-    session_id: &str,
-    delete: bool,
-) -> Result<(), AcpError> {
-    if let Some(state) = sessions.get_mut(session_id) {
-        state.closing = true;
-        state.continuation_armed = false;
-        if let Some(token) = state.cancel_token.as_ref() {
-            token.cancel();
-        }
-        cfg.session_manager.pre_close_session(session_id);
-        if state.cancel_token.is_some() {
-            return Err(AcpError::new(
-                -32010,
-                "Session close incomplete: prompt is still active",
-            ));
-        }
-        let environment = state.environment.clone();
-        let local = environment.as_ref().map(|env| &env.cfg).unwrap_or(cfg);
-        local
-            .session_manager
-            .close_session(session_id)
-            .await
-            .map_err(super::super::workspace::workspace_error)?;
-        // A11/A22：`session/delete` **不**关闭 LSP pool——pool 归 host（同一 `Arc`
-        // 被多 session 共享），关闭只发生在 host shutdown。此处若关闭，会把其它
-        // 仍活跃 session 的 language server 一起掐掉。
-        if let Some(environment) = environment.as_ref() {
-            if !environment.shutdown().await {
-                return Err(AcpError::new(
-                    -32010,
-                    "Session close incomplete: resources are still active",
-                ));
-            }
-        }
-        // 只读会话没有执行所有权：关闭只需释放内存状态，不删除（删除会绕过他处的
-        // 独占锁），也没有本节点持有的代际需要标 clean。
-        let owner = state.execution_owner.clone();
-        // 执行资源已排空（环境 shutdown 成功）后，才请求门面结清持久化并按需删除：
-        // 排空确认在前、结清在最后，任一未完成都保持 Closing 与唯一 owner。
-        let resources = &cfg.session_resources;
-        let target = session_id.to_owned();
-        resources
-            .drain_persistence(&target)
-            .await
-            .map_err(super::super::workspace::resource_error)?;
-        if delete {
-            // 删除是完整生命周期行为：数据、本机执行代际与本次持有都被门面在同一步
-            // 结束（删除成功后 owner 已释放），因此这里不再重复收尾。
-            resources
-                .delete_session_tree(&target)
-                .await
-                .map_err(super::super::workspace::resource_error)?;
-        } else if let Some(owner) = owner {
-            owner
-                .mark_clean()
-                .await
-                .map_err(super::super::workspace::workspace_error)?;
-        }
-        sessions.remove(session_id);
-    } else if delete {
-        // Missing delete remains idempotent；未加载会话不因此变成可删除对象，
-        // 删除仍要求本次取得执行所有权（短时准入，不抢夺活 owner）。
-        let resources = &cfg.session_resources;
-        let target = session_id.to_owned();
-        match resources.load_session_meta(&target).await {
-            Ok(_) => {
-                resources
-                    .delete_session_tree(&target)
-                    .await
-                    .map_err(super::super::workspace::resource_error)?;
-            }
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    peri_acp_types::session_resources::SessionResourceErrorKind::NotFound
-                ) =>
-            {
-                return Ok(());
-            }
-            Err(error) => return Err(super::super::workspace::resource_error(error)),
-        }
-    }
-    Ok(())
+pub(super) fn handle_bg_tasks(params: &Value, cfg: &AcpServerConfig) -> Result<Value, AcpError> {
+    let session_id = params
+        .get("sessionId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| AcpError::new(-32602, "missing sessionId"))?;
+    let session = cfg
+        .session_manager
+        .get_session(session_id)
+        .ok_or_else(|| AcpError::new(-32602, "session not found"))?;
+    Ok(super::task_snapshot_value(session.task_manager.snapshot()))
 }
+
+#[path = "session_close.rs"]
+mod close;
+use close::close_owned_session;
 
 pub(crate) async fn handle_close(
     params: &Value,

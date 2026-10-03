@@ -275,16 +275,28 @@ pub enum AcpEventData {
         success: bool,
         duration_ms: u64,
         output_preview: Option<String>,
+        revision: Option<u64>,
     },
 
     /// `"bg-task-cancelled"` -- a background task was cancelled.
     BgTaskCancelled {
         task_id: String,
         reason: String,
+        revision: Option<u64>,
+    },
+
+    /// `"bg-task-updated"` -- an external task is being reconciled.
+    BgTaskUpdated {
+        task_id: String,
+        status: String,
+        revision: Option<u64>,
     },
 
     /// `"bg-task-snapshot"` -- full list of active background tasks.
-    BgTaskSnapshot(Vec<BgTaskEntry>),
+    BgTaskSnapshot {
+        tasks: Vec<BgTaskEntry>,
+        revision: Option<u64>,
+    },
 
     // -- §4.8 Agent Event Extensions (P1-5) ----------------------------------
     /// `"turn-committed"` — ReAct 迭代提交信号。
@@ -479,15 +491,31 @@ impl AcpEventData {
                     success: d.success,
                     duration_ms: d.duration_ms,
                     output_preview: d.output_preview.filter(|s| !s.is_empty()),
+                    revision: d.revision,
                 }
             }),
             "bg-task-cancelled" => decode_or_unknown(event, data, |d: BgTaskCancelledData| {
                 AcpEventData::BgTaskCancelled {
                     task_id: d.task_id,
                     reason: d.reason,
+                    revision: d.revision,
                 }
             }),
-            "bg-task-snapshot" => decode_or_unknown(event, data, AcpEventData::BgTaskSnapshot),
+            "bg-task-updated" => decode_or_unknown(event, data, |d: BgTaskUpdatedData| {
+                AcpEventData::BgTaskUpdated {
+                    task_id: d.task_id,
+                    status: d.status,
+                    revision: d.revision,
+                }
+            }),
+            "bg-task-snapshot" => {
+                let revision = data.get("revision").and_then(serde_json::Value::as_u64);
+                let tasks = data.get("tasks").cloned().unwrap_or(data);
+                decode_or_unknown(event, tasks, |tasks| AcpEventData::BgTaskSnapshot {
+                    tasks,
+                    revision,
+                })
+            }
 
             "bg-callback-user-message" => {
                 let text = data["text"].as_str().unwrap_or("").to_string();
@@ -557,6 +585,10 @@ pub struct BgTaskEntry {
     pub summary: String,
     pub started_at: String,
     pub pid: Option<u32>,
+    #[serde(default)]
+    pub revision: Option<u64>,
+    #[serde(default)]
+    pub status: Option<String>,
 }
 
 /// Deserialization helper for `bg-task-completed` payload.
@@ -569,6 +601,8 @@ struct BgTaskCompletedData {
     duration_ms: u64,
     #[serde(default)]
     output_preview: Option<String>,
+    #[serde(default)]
+    revision: Option<u64>,
 }
 
 /// Deserialization helper for `bg-task-cancelled` payload.
@@ -576,6 +610,16 @@ struct BgTaskCompletedData {
 struct BgTaskCancelledData {
     task_id: String,
     reason: String,
+    #[serde(default)]
+    revision: Option<u64>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct BgTaskUpdatedData {
+    task_id: String,
+    status: String,
+    #[serde(default)]
+    revision: Option<u64>,
 }
 
 /// Decode `data` into `T` and apply the variant constructor, or fall back to

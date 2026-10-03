@@ -177,6 +177,42 @@ pub(super) fn qualify_statement(identity: &OperationIdentity, now: &str) -> Stat
     )
 }
 
+/// Qualification and owner validation are one SQL statement in the business
+/// transaction. A stale token turns the NOT NULL `kind` column into a
+/// constraint error, so no later effect can commit.
+pub(super) fn owner_guard_statement(
+    identity: &OperationIdentity,
+    root: &ThreadId,
+    token: Option<&peri_acp_types::workspace::ExecutionOwnerToken>,
+) -> StatementSpec {
+    match token {
+        Some(token) => StatementSpec::new(
+            "INSERT INTO peri_op_ledger (operation_id, kind, digest, state, receipt, updated_at)
+             VALUES (?1, (SELECT CASE WHEN EXISTS (
+               SELECT 1 FROM session_execution_owners WHERE root_id = ?2 AND epoch = ?3
+                 AND nonce = ?4 AND released = 0
+                 AND expires_at_unix > CAST(strftime('%s','now') AS INTEGER)
+             ) THEN 'execution_guard' ELSE NULL END), 'owner', 'applied', NULL, datetime('now'))",
+            vec![
+                Value::Text(format!("{}:owner", identity.operation_id.as_str())),
+                Value::Text(root.clone()),
+                Value::Integer(token.epoch),
+                Value::Text(token.nonce.clone()),
+            ],
+        ),
+        None => StatementSpec::new(
+            "INSERT INTO peri_op_ledger (operation_id, kind, digest, state, receipt, updated_at)
+             VALUES (?1, (SELECT CASE WHEN NOT EXISTS (
+               SELECT 1 FROM session_execution_owners WHERE root_id = ?2
+             ) THEN 'execution_guard' ELSE NULL END), 'owner', 'applied', NULL, datetime('now'))",
+            vec![
+                Value::Text(format!("{}:owner", identity.operation_id.as_str())),
+                Value::Text(root.clone()),
+            ],
+        ),
+    }
+}
+
 /// 终态封闭：插入终结行，与资格写竞争同一主键。
 pub(super) fn closure_statement(identity: &OperationIdentity, now: &str) -> StatementSpec {
     StatementSpec::new(

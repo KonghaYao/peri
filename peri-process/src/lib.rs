@@ -8,6 +8,8 @@ use tokio::process::{Child, Command};
 
 #[cfg(windows)]
 mod windows;
+#[cfg(unix)]
+mod broker;
 
 /// One dedicated Unix process group or Windows Job, prepared before child execution.
 /// Keep this owner until `wait_for_exit` completes; Drop only requests termination.
@@ -17,6 +19,8 @@ pub struct ProcessTree {
     pid: Option<u32>,
     settled: AtomicBool,
     terminate_on_drop: bool,
+    #[cfg(unix)]
+    broker: Option<broker::Registration>,
     #[cfg(windows)]
     job: windows::WindowsJob,
 }
@@ -28,6 +32,8 @@ impl ProcessTree {
             pid: None,
             settled: AtomicBool::new(false),
             terminate_on_drop: true,
+            #[cfg(unix)]
+            broker: broker::Registration::from_environment()?,
             #[cfg(windows)]
             job: windows::WindowsJob::new()?,
         })
@@ -35,10 +41,46 @@ impl ProcessTree {
 
     pub fn prepare(&self, command: &mut Command) {
         command.kill_on_drop(true);
+        command.env_remove("PERI_SUPERVISOR_SOCKET")
+            .env_remove("PERI_SUPERVISOR_TOKEN")
+            .env_remove("PERI_TRUSTED_WORKSPACE_URL")
+            .env_remove("PERI_TRUSTED_WORKSPACE_SCOPE_SECRET_FILE");
         #[cfg(unix)]
         command.process_group(0);
+        #[cfg(unix)]
+        if let Some(broker) = &self.broker {
+            broker.prepare(command);
+        }
         #[cfg(windows)]
         command.creation_flags(windows_sys::Win32::System::Threading::CREATE_SUSPENDED);
+    }
+
+    /// Prepare a synchronous Unix subprocess through the same broker protocol.
+    #[cfg(unix)]
+    pub fn prepare_std(&self, command: &mut std::process::Command) {
+        use std::os::unix::process::CommandExt;
+        command.env_remove("PERI_SUPERVISOR_SOCKET")
+            .env_remove("PERI_SUPERVISOR_TOKEN")
+            .env_remove("PERI_TRUSTED_WORKSPACE_URL")
+            .env_remove("PERI_TRUSTED_WORKSPACE_SCOPE_SECRET_FILE");
+        command.process_group(0);
+        if let Some(broker) = &self.broker { broker.prepare_std(command); }
+    }
+
+    #[cfg(unix)]
+    pub fn attach_pid(&mut self, pid: u32) -> io::Result<()> {
+        if self.attempted { return Err(io::Error::other("process tree already attached")); }
+        self.attempted = true;
+        self.pid = Some(pid);
+        if pid > 0 && i32::try_from(pid).is_ok() { Ok(()) }
+        else { Err(io::Error::other("child process group unavailable")) }
+    }
+
+    #[cfg(unix)]
+    pub fn wait_for_exit_blocking(&self) {
+        while !self.is_stopped() {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
     }
 
     /// Call immediately after spawning the prepared command, before publishing its handle.
@@ -117,6 +159,39 @@ impl Drop for ProcessTree {
             self.terminate();
         }
     }
+}
+
+/// Run a short-lived command under the same process-group ownership as tools.
+pub async fn run_output(mut command: Command) -> io::Result<std::process::Output> {
+    command.stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut tree = ProcessTree::new()?;
+    tree.prepare(&mut command);
+    let mut child = command.spawn()?;
+    if let Err(error) = tree.attach(&child) {
+        tree.terminate();
+        let _ = child.start_kill();
+        return Err(error);
+    }
+    let output = child.wait_with_output().await;
+    if output.is_err() { tree.terminate(); }
+    tree.wait_for_exit().await;
+    output
+}
+
+/// Blocking variant for Git checks already running in a blocking worker.
+#[cfg(unix)]
+pub fn run_output_blocking(mut command: std::process::Command) -> io::Result<std::process::Output> {
+    use std::process::Stdio;
+    let mut tree = ProcessTree::new()?;
+    tree.prepare_std(&mut command);
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let child = command.spawn()?;
+    tree.attach_pid(child.id())?;
+    let output = child.wait_with_output();
+    if output.is_err() { tree.terminate(); }
+    tree.wait_for_exit_blocking();
+    output
 }
 
 #[cfg(all(test, unix))]

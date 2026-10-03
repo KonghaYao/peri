@@ -1,7 +1,7 @@
 use super::TuiReplaySender;
 use crate::dispatch::replay_persisted_session_history;
-use crate::transport::{mpsc::mpsc_transport_pair, stdio::StdioTransport, AcpTransport};
-use peri_acp_types::{messages::BaseMessage, store::PersistedPayload, PeriCaps};
+use crate::transport::{AcpTransport, mpsc::mpsc_transport_pair, stdio::StdioTransport};
+use peri_acp_types::{PeriCaps, messages::BaseMessage, store::PersistedPayload};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 fn history() -> Vec<PersistedPayload> {

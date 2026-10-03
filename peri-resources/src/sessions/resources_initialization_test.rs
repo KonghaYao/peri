@@ -58,10 +58,15 @@ async fn test_begin_initialization_writes_draft_without_frozen() {
 
     let second = fixture.second_host().await;
     let workspace = fixture.workspace().await;
+    assert!(second.acquire_execution(&id, &workspace).await.is_err());
+    let first = initialization.execution_lease();
+    let token = first.owner_token().unwrap();
+    first.mark_clean().await.unwrap();
+    fixture.facade.release_execution_owner(&token).await.unwrap();
     let second_run = second.acquire_execution(&id, &workspace).await.unwrap();
     assert_eq!(second_run.thread_id(), &id);
-    initialization.execution_lease().mark_clean().await.unwrap();
     second_run.mark_clean().await.unwrap();
+    second.release_execution_owner(&second_run.owner_token().unwrap()).await.unwrap();
     assert_eq!(fixture.frozen_of(&id).await, None);
 }
 
@@ -71,11 +76,8 @@ async fn test_draft_frozen_commit_requires_the_exact_live_owner_arc() {
     let initialization = fixture.begin("s-draft-owner").await;
     let id = initialization.thread_id().clone();
     let frozen = FrozenSnapshotBytes::new(r#"{"v":1}"#);
-    let second = fixture.second_host().await;
-    let foreign = second
-        .acquire_execution(&id, &fixture.workspace().await)
-        .await
-        .unwrap();
+    let foreign: Arc<dyn SessionExecutionLease> =
+        Arc::new(crate::sessions::execution::ExecutionLease::new(id.clone()));
     let error = fixture
         .facade
         .gate
@@ -103,7 +105,6 @@ async fn test_draft_frozen_commit_requires_the_exact_live_owner_arc() {
         Some(frozen.as_str())
     );
     initialization.execution_lease().mark_clean().await.unwrap();
-    foreign.mark_clean().await.unwrap();
 }
 
 #[tokio::test]
@@ -339,6 +340,8 @@ async fn test_crash_after_commit_preserves_snapshot_and_allows_id_recovery() {
     let snapshot = reopened.load_session_snapshot(&id).await.unwrap();
     assert_eq!(snapshot.frozen, FrozenState::Present(frozen.clone()));
     let workspace = fixture.workspace().await;
+    assert!(reopened.acquire_execution(&id, &workspace).await.is_err());
+    expire_owner(fixture.facade.local_pool(), &id).await;
     let lease = reopened.acquire_execution(&id, &workspace).await.unwrap();
     assert_eq!(lease.thread_id(), &id);
     let error = reopened

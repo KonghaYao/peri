@@ -150,15 +150,23 @@ impl McpClientPool {
                 headers,
                 oauth,
             } => {
-                let token_store =
-                    self.oauth_credentials()
+                // The trusted Workspace owner is authenticated by its
+                // host-only task-scope key. A close-recovery pool has no
+                // session OAuth store and must not require one to reconnect.
+                let scoped_workspace = matches!(server_config.source.as_ref(),
+                    Some(super::config::ConfigSource::WorkspaceRemote))
+                    && server_config.task_scope_secret_file.is_some()
+                    && oauth.is_none();
+                let token_store = if scoped_workspace { None } else {
+                    Some(self.oauth_credentials()
                         .map_err(|error| McpPoolError::ConnectionFailed {
                             server: server_name.to_string(),
                             reason: error.to_string(),
-                        })?;
+                        })?)
+                };
                 let oauth_cfg = if let Some(config) = oauth.as_ref() {
                     Some(config.clone())
-                } else {
+                } else if let Some(token_store) = token_store.as_ref() {
                     let default_oauth = super::config::OAuthConfig::default();
                     let key = static_credential_key(server_name, url, &default_oauth);
                     token_store
@@ -169,8 +177,11 @@ impl McpClientPool {
                             reason: error.to_string(),
                         })?
                         .map(|_| default_oauth)
+                } else {
+                    None
                 };
                 if let Some(cfg) = oauth_cfg {
+                    let token_store = token_store.expect("OAuth path has credential client");
                     let flow_id = uuid::Uuid::now_v7().to_string();
                     match self.reserve_oauth_flow(server_name, &flow_id) {
                         OAuthStartDisposition::Started => {}

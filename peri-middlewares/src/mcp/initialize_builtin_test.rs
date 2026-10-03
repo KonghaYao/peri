@@ -9,6 +9,7 @@ use super::*;
 /// builtin 默认层的条目形状：无 command / url，身份来自 `source`。
 fn builtin_server_config(instance: &str) -> crate::mcp::config::McpServerConfig {
     crate::mcp::config::McpServerConfig {
+        task_scope_secret_file: None,
         command: None,
         args: None,
         env: None,

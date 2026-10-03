@@ -384,6 +384,24 @@ impl LocalExecution {
                 .begin_with("BEGIN IMMEDIATE")
                 .await
                 .map_err(|error| map_sqlx(&error))?;
+            let token = lease.owner_token().ok_or_else(lease_required)?;
+            if token.root_id != *id {
+                return Err(lease_required());
+            }
+            let owner: Option<(i64,)> = sqlx::query_as(
+                "SELECT 1 FROM session_execution_owners WHERE root_id = ?1 AND epoch = ?2
+                 AND nonce = ?3 AND released = 0
+                 AND expires_at_unix > CAST(strftime('%s','now') AS INTEGER)",
+            )
+            .bind(id.as_str())
+            .bind(token.epoch)
+            .bind(&token.nonce)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|error| map_sqlx(&error))?;
+            if owner.is_none() {
+                return Err(super::failure::conflict("session execution owner is stale"));
+            }
             let updated = sqlx::query(
                 "UPDATE threads SET frozen_context = ?1 WHERE id = ?2 AND frozen_context IS NULL
                  AND EXISTS (SELECT 1 FROM session_bindings WHERE thread_id = ?2)",

@@ -156,10 +156,14 @@ async fn test_same_id_creation_retry_reuses_live_run_and_survives_close_and_reop
     let before = fixture.facade.load_session_snapshot(&id).await.unwrap();
     let retry = fixture.facade.create_session(&input).await.unwrap();
     assert!(Arc::ptr_eq(&first, &retry));
+    let first_token = first.owner_token().unwrap();
     first.mark_clean().await.unwrap();
+    fixture.facade.release_execution_owner(&first_token).await.unwrap();
     let after_close = fixture.facade.create_session(&input).await.unwrap();
     assert!(!Arc::ptr_eq(&first, &after_close));
+    let second_token = after_close.owner_token().unwrap();
     after_close.mark_clean().await.unwrap();
+    fixture.facade.release_execution_owner(&second_token).await.unwrap();
     fixture.shutdown().await.unwrap();
     assert!(fixture.facade.create_session(&input).await.is_err());
     let reopened = fixture.second_host().await;
@@ -367,17 +371,18 @@ async fn read_only_workspace(fixture: &Fixture) -> ResolvedWorkspace {
 }
 
 #[tokio::test]
-async fn test_mutation_without_live_run_does_not_require_ownership_claim() {
+async fn test_mutation_without_execution_owner_is_rejected() {
     let fixture = Fixture::new().await;
     let workspace = fixture.workspace().await;
     let id = "s-owner".to_owned();
     fixture.save_without_admission(&id, &workspace).await;
-    fixture
+    let error = fixture
         .facade
         .append_history(&id, &[payload("without live run")])
         .await
-        .unwrap();
-    assert_eq!(fixture.count_messages(&id).await, 1);
+        .unwrap_err();
+    assert!(matches!(error_kind(&error), SessionResourceErrorKind::Conflict { .. }));
+    assert_eq!(fixture.count_messages(&id).await, 0);
     assert_eq!(
         fixture
             .facade
@@ -457,10 +462,24 @@ async fn test_unresolved_write_blocks_active_run_but_allows_restart() {
         .await
         .is_err());
     let reopened = fixture.second_host().await;
+    assert!(reopened
+        .acquire_execution(&id, &fixture.workspace().await)
+        .await
+        .is_err(), "live Store generation blocks cross-process takeover");
+    let options = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(fixture._db.path().join("threads.db"));
+    let pool = sqlx::SqlitePool::connect_with(options).await.unwrap();
+    sqlx::query("UPDATE session_execution_owners SET expires_at_unix = 0 WHERE root_id = ?1")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    pool.close().await;
     let next = reopened
         .acquire_execution(&id, &fixture.workspace().await)
         .await
         .unwrap();
+    assert!(fixture.facade.append_history(&id, &[payload("stale old owner")]).await.is_err());
     reopened
         .append_history(&id, &[payload("after restart")])
         .await

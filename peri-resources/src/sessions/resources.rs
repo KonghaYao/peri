@@ -25,6 +25,7 @@ mod evidence;
 mod gate;
 mod lifecycle;
 mod oauth_credentials;
+mod owner;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -33,7 +34,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use peri_acp_types::messages::MessageId;
 use peri_acp_types::session_resources::{
-    AccessMode, BindingRecheck, BindingState, ChildResumeClaim, ChildSnapshot, DataCapabilities,
+    AccessMode, BindingRecheck, BindingState, ChildResumeClaim, ChildSnapshot, CloseSettlement, DataCapabilities,
     ExecutionAvailability, ForkSnapshot, FrozenSnapshotBytes, FrozenState, NewSession,
     NewSessionDraft, PersistenceRecovery, RewindBoundary, SessionAvailability,
     SessionInitialization, SessionMetaPatch, SessionResourceError, SessionResourceErrorKind,
@@ -42,8 +43,9 @@ use peri_acp_types::session_resources::{
 use peri_acp_types::store::{CompactionChange, MessageFlags, PersistedPayload};
 use peri_acp_types::thread::{AgentStatus, ThreadId, ThreadMeta};
 use peri_acp_types::workspace::{
-    ResolvedWorkspace, ScopedThreadPage, ScopedThreadQuery, SessionBinding, SessionExecutionLease,
-    WorkspaceError,
+    ExecutionOwnerToken, ExecutionWorkspaceOwnerRecord, ResolvedWorkspace,
+    ScopedThreadPage, ScopedThreadQuery, SessionBinding, SessionExecutionLease,
+    WorkspaceError, WorkspaceExecutionDescriptor,
 };
 
 use super::data::{ensure_child_relation, ChildResumeRecord, SessionDataPort};
@@ -63,40 +65,7 @@ use lifecycle::{Lifecycle, LifecycleState};
 /// 此时报告未结清，而不是无限期等待一个外部 future。
 const SETTLE_WAIT: Duration = Duration::from_secs(10);
 
-async fn abandon_with_canonical_guard<'a>(
-    local: &'a dyn LocalExecutionPort,
-    data: &'a dyn SessionDataPort,
-    id: &'a ThreadId,
-    lease: &'a Arc<dyn SessionExecutionLease>,
-    revoke: RevokeEffect<'a>,
-) -> SessionResourceResult<()> {
-    let facts = SessionFacts { root: id.clone() };
-    let owned = local
-        .owner_lease(id, &facts)
-        .await
-        .map_err(execution_failure)?
-        .ok_or_else(lease_required)?;
-    local
-        .abandon_initialization(
-            id,
-            lease,
-            Box::pin(async move {
-                if !owned.is_active() {
-                    return match data.load_meta(id).await {
-                        Ok(_) => Err(lease_required()),
-                        Err(error)
-                            if matches!(error.kind(), SessionResourceErrorKind::NotFound) =>
-                        {
-                            Ok(())
-                        }
-                        Err(error) => Err(error),
-                    };
-                }
-                revoke.await
-            }),
-        )
-        .await
-}
+use owner::abandon_with_canonical_guard;
 
 /// 会话数据的存放位置 — 由组合层在装配时确定，门面不做后端推断。
 ///
@@ -340,7 +309,7 @@ impl SessionResourcesImpl {
             return Err(SessionResourceError::saved_but_not_admitted(id.clone()));
         }
         match local.admit_existing(id, &input.binding).await {
-            Ok(lease) => Ok(lease),
+            Ok(lease) => self.install_execution_claim(id, lease, false, None).await,
             Err(error) if error.is_persistence_uncertain() => Err(error),
             Err(_) => Err(SessionResourceError::saved_but_not_admitted(id.clone())),
         }
@@ -438,27 +407,54 @@ impl SessionResources for SessionResourcesImpl {
         id: &ThreadId,
         workspace: &ResolvedWorkspace,
     ) -> SessionResourceResult<Arc<dyn SessionExecutionLease>> {
-        self.gate.ensure_session_write()?;
-        let facts = self.gate.session_facts(id).await?;
-        self.validate_session(id, workspace).await?;
-        if let Some(machine_id) = self.gate.data().machine_id_of(id).await? {
-            if machine_id
-                != crate::sessions::machine::current().map_err(|_| {
-                    crate::sessions::sqlite_store::unavailable(
-                        "machine identity is not initialized",
-                    )
-                })?
-            {
-                return Err(SessionResourceError::new(
-                    SessionResourceErrorKind::Workspace(WorkspaceError::Unavailable),
-                ));
-            }
+        self.acquire_execution_owner(id, workspace).await
+    }
+
+    async fn claim_closing_execution(
+        &self,
+        root: &ThreadId,
+        expected_current_epoch: i64,
+    ) -> SessionResourceResult<Arc<dyn SessionExecutionLease>> {
+        self.claim_closing_execution_owner(root, expected_current_epoch).await
+    }
+
+    async fn renew_execution_owner(&self, token: &ExecutionOwnerToken) -> SessionResourceResult<()> {
+        self.gate.data().renew_execution_owner(token).await
+    }
+
+    async fn release_execution_owner(&self, token: &ExecutionOwnerToken) -> SessionResourceResult<()> {
+        self.gate.data().release_execution_owner(token).await
+    }
+
+    async fn finish_close(&self, token: &ExecutionOwnerToken) -> SessionResourceResult<()> {
+        self.gate.ensure_recovery_permitted()?;
+        self.gate.data().finish_close(token).await
+    }
+
+    async fn close_settlement(&self, token: &ExecutionOwnerToken) -> SessionResourceResult<CloseSettlement> {
+        self.gate.data().close_settlement(token).await
+    }
+
+    async fn bind_execution_workspace_owner(
+        &self,
+        token: &ExecutionOwnerToken,
+        descriptor: &WorkspaceExecutionDescriptor,
+    ) -> SessionResourceResult<()> {
+        if !descriptor.valid_for_store() {
+            return Err(SessionResourceError::conflict("workspace owner descriptor is invalid"));
         }
-        self.gate
-            .local()
-            .acquire_lease(id, &facts)
-            .await
-            .map_err(execution_failure)
+        self.gate.data().bind_execution_workspace_owner(token, descriptor).await
+    }
+
+    async fn read_execution_workspace_owner(
+        &self,
+        root: &ThreadId,
+    ) -> SessionResourceResult<Option<ExecutionWorkspaceOwnerRecord>> {
+        self.gate.data().read_execution_workspace_owner(root).await
+    }
+
+    async fn mark_unsupported_async_owner(&self, token: &ExecutionOwnerToken) -> SessionResourceResult<()> {
+        self.gate.data().mark_unsupported_async_owner(token).await
     }
 
     // ── 创建与接纳 ──
@@ -473,7 +469,10 @@ impl SessionResources for SessionResourcesImpl {
             return self.admit_saved_creation(input).await;
         }
         match self.home {
-            SessionDataHome::LocalLibrary => local.create_session(input).await,
+            SessionDataHome::LocalLibrary => {
+                let lease = local.create_session(input).await?;
+                self.install_execution_claim(&input.thread_id, lease, false, None).await
+            }
             SessionDataHome::RemoteStore => {
                 let workspace = self.recheck_binding(Some(&input.binding), false).await?;
                 self.gate
@@ -522,11 +521,12 @@ impl SessionResources for SessionResourcesImpl {
                     Err(_) => {
                         return Err(SessionResourceError::saved_but_not_admitted(
                             draft.thread_id.clone(),
-                        ))
+                        ));
                     }
                 }
             }
         };
+        let lease = self.install_execution_claim(&draft.thread_id, lease, false, None).await?;
         Ok(Arc::new(DraftInitialization {
             id: draft.thread_id.clone(),
             lease,
@@ -679,6 +679,31 @@ impl SessionResources for SessionResourcesImpl {
         self.gate
             .with_mutation(id, || self.gate.data().append_history(id, payloads))
             .await
+    }
+
+    async fn append_reminder_if_absent(
+        &self,
+        id: &ThreadId,
+        message_id: MessageId,
+        reminder: &peri_acp_types::system_reminder::TrustedSystemReminder,
+    ) -> SessionResourceResult<bool> {
+        self.gate
+            .with_mutation(id, || {
+                self.gate
+                    .data()
+                    .append_reminder_if_absent(id, message_id, reminder)
+            })
+            .await
+    }
+
+    async fn mark_session_closing(&self, id: &ThreadId) -> SessionResourceResult<()> {
+        self.gate
+            .with_mutation(id, || self.gate.data().mark_session_closing(id))
+            .await
+    }
+
+    async fn is_session_closing(&self, id: &ThreadId) -> SessionResourceResult<bool> {
+        self.gate.data().is_session_closing(id).await
     }
 
     async fn save_fork(

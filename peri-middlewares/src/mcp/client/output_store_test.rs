@@ -14,6 +14,7 @@ use rmcp::{
     ServerHandler, ServiceExt,
 };
 use tokio::sync::Notify;
+use peri_acp_types::tasks::{TaskManager as TaskManagerPort, TaskShutdownReport};
 
 pub(crate) fn large_output() -> String {
     (0..2200)
@@ -29,6 +30,55 @@ fn test_tool() -> Tool {
 }
 
 struct Source;
+
+struct LostTaskReceipt {
+    created: Arc<Notify>,
+    release: Arc<Notify>,
+}
+
+impl ServerHandler for LostTaskReceipt {
+    async fn call_tool(
+        &self,
+        _: CallToolRequestParams,
+        _: RequestContext<RoleServer>,
+    ) -> Result<CallToolResponse, rmcp::ErrorData> {
+        // The remote task exists before the client receives its Task receipt.
+        let _created = rmcp::model::Task::new(
+            "remote-task", rmcp::model::TaskStatus::Working,
+            "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z",
+        );
+        self.created.notify_one();
+        self.release.notified().await;
+        Ok(CallToolResponse::Task(rmcp::model::CreateTaskResult::new(_created)))
+    }
+}
+
+#[tokio::test]
+async fn lost_mcp_task_receipt_keeps_session_shutdown_incomplete() {
+    let created = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let wire = Wire::connect(LostTaskReceipt {
+        created: Arc::clone(&created), release: Arc::clone(&release),
+    }).await;
+    let pool = Arc::new(McpClientPool::new_empty());
+    wire.install(&pool, "remote", false);
+    let manager: Arc<dyn TaskManagerPort> =
+        Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
+    pool.bind_session_task_manager("receipt-session", &manager);
+    let bridge = McpToolBridge::new("remote", &test_tool(), pool.get_client("remote").unwrap())
+        .with_output_store(&pool, Some("receipt-session"));
+    let call = tokio::spawn(async move {
+        bridge.invoke(serde_json::json!({}), ToolContext::new(&[], ".")).await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(2), created.notified())
+        .await.expect("remote task created before receipt");
+    call.abort();
+    let _ = call.await;
+    assert_eq!(manager.shutdown().await, TaskShutdownReport::Incomplete);
+    release.notify_waiters();
+    pool.clients.write().clear();
+    wire.close().await;
+}
 
 impl ServerHandler for Source {
     async fn call_tool(
@@ -176,6 +226,9 @@ async fn host_bridge_success_error_and_resource_use_workspace_wire_readback() {
     let source = Wire::connect(Source).await;
     let pool = Arc::new(McpClientPool::new_empty());
     pool.bind_execution_cwd(host.path()).unwrap();
+    let manager: Arc<dyn TaskManagerPort> =
+        Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
+    pool.bind_session_task_manager("session", &manager);
     workspace.install(&pool, "workspace", true);
     source.install(&pool, "source", false);
     let bridge = McpToolBridge::new("source", &test_tool(), pool.get_client("source").unwrap())

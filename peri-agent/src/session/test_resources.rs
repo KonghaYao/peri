@@ -71,6 +71,10 @@ impl TestSession {
         Arc::clone(&self.resources)
     }
 
+    pub(crate) fn thread_id(&self) -> ThreadId {
+        self.thread_id.clone()
+    }
+
     pub(crate) async fn read_only_resources(&self) -> Arc<dyn SessionResources> {
         Arc::new(
             SessionResourcesImpl::open_existing_read_only(self._db.path().join("threads.db"))
