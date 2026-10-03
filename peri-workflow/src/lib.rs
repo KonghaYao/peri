@@ -6,8 +6,8 @@
 pub mod cli;
 pub mod error;
 pub mod journal;
-pub mod progress;
 mod process;
+pub mod progress;
 pub mod protocol;
 pub mod registry;
 pub mod rpc;

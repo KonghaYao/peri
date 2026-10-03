@@ -15,7 +15,7 @@ use super::schema::CURRENT_SCHEMA_VERSION;
 use super::*;
 use crate::sessions::canonical::{OAUTH_CREDENTIALS_TABLE, SESSION_ENVIRONMENTS_TABLE};
 use peri_acp_types::workspace::WorkspaceError;
-use sqlx::{Connection, SqliteConnection, sqlite::SqliteConnectOptions};
+use sqlx::{sqlite::SqliteConnectOptions, Connection, SqliteConnection};
 use std::path::Path;
 
 /// v10 回退删掉的本机表。

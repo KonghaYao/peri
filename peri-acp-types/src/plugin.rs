@@ -60,7 +60,11 @@ pub struct McpServerConfig {
     /// Streamable HTTP 传输的 URL
     pub url: Option<String>,
     /// Trusted Workspace MCP task-scope signing key file (path, never key bytes).
-    #[serde(default, rename = "taskScopeSecretFile", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        rename = "taskScopeSecretFile",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub task_scope_secret_file: Option<String>,
     /// HTTP 请求的自定义头
     #[serde(default)]

@@ -24,7 +24,9 @@ struct ClaimedSessionData(SqliteSessionData);
 impl std::ops::Deref for ClaimedSessionData {
     type Target = SqliteSessionData;
 
-    fn deref(&self) -> &Self::Target { &self.0 }
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }
 
 impl ClaimedSessionData {
@@ -46,17 +48,26 @@ impl ClaimedSessionData {
         Ok(())
     }
 
-    async fn append_history(&self, id: &ThreadId, payloads: &[PersistedPayload]) -> SessionResourceResult<()> {
+    async fn append_history(
+        &self,
+        id: &ThreadId,
+        payloads: &[PersistedPayload],
+    ) -> SessionResourceResult<()> {
         self.ensure_owner(id).await?;
         self.0.append_history(id, payloads).await
     }
 
     async fn adopt_legacy_session(
-        &self, id: &ThreadId, cwd: &str, workspace: &ResolvedWorkspace,
+        &self,
+        id: &ThreadId,
+        cwd: &str,
+        workspace: &ResolvedWorkspace,
         frozen: &FrozenSnapshotBytes,
     ) -> SessionResourceResult<()> {
         self.ensure_owner(id).await?;
-        self.0.adopt_legacy_session(id, cwd, workspace, frozen).await
+        self.0
+            .adopt_legacy_session(id, cwd, workspace, frozen)
+            .await
     }
 }
 
@@ -123,30 +134,64 @@ async fn workspace_descriptor_preserves_unsettled_external_owner_across_takeover
     let (store, data, directory) = database().await;
     let workspace = workspace(&store, directory.path()).await;
     let id = "descriptor-root".to_owned();
-    data.save_new_session(&session(&id, workspace.cwd.to_str().unwrap(), &workspace, frozen("owner")))
-        .await.unwrap();
+    data.save_new_session(&session(
+        &id,
+        workspace.cwd.to_str().unwrap(),
+        &workspace,
+        frozen("owner"),
+    ))
+    .await
+    .unwrap();
     let first = data.execution_owner_token(&id).unwrap();
-    data.bind_execution_workspace_owner(&first, &WorkspaceExecutionDescriptor {
-        endpoint: "http://127.0.0.1:10001".into(),
-        key_identity: "a".repeat(64),
-        agent_generation_id: "agent-a".into(),
-        unsupported_async_owners: false,
-    }).await.unwrap();
+    data.bind_execution_workspace_owner(
+        &first,
+        &WorkspaceExecutionDescriptor {
+            endpoint: "http://127.0.0.1:10001".into(),
+            key_identity: "a".repeat(64),
+            agent_generation_id: "agent-a".into(),
+            unsupported_async_owners: false,
+        },
+    )
+    .await
+    .unwrap();
     data.mark_unsupported_async_owner(&first).await.unwrap();
     sqlx::query("UPDATE session_execution_owners SET expires_at_unix = 0 WHERE root_id = ?1")
-        .bind(&id).execute(&store.database.pool).await.unwrap();
+        .bind(&id)
+        .execute(&store.database.pool)
+        .await
+        .unwrap();
 
     let successor = SqliteSessionData::new(Arc::clone(&store.database));
-    let claim = successor.claim_execution_owner(&id, false, Some(first.epoch)).await.unwrap();
-    assert_eq!(claim.prior_unreleased.unwrap().agent_generation_id.as_deref(), Some("agent-a"));
+    let claim = successor
+        .claim_execution_owner(&id, false, Some(first.epoch))
+        .await
+        .unwrap();
+    assert_eq!(
+        claim
+            .prior_unreleased
+            .unwrap()
+            .agent_generation_id
+            .as_deref(),
+        Some("agent-a")
+    );
     successor.install_execution_owner_token(claim.token.clone());
-    successor.bind_execution_workspace_owner(&claim.token, &WorkspaceExecutionDescriptor {
-        endpoint: "http://127.0.0.1:10002".into(),
-        key_identity: "b".repeat(64),
-        agent_generation_id: "agent-b".into(),
-        unsupported_async_owners: false,
-    }).await.unwrap();
-    let record = successor.read_execution_workspace_owner(&id).await.unwrap().unwrap();
+    successor
+        .bind_execution_workspace_owner(
+            &claim.token,
+            &WorkspaceExecutionDescriptor {
+                endpoint: "http://127.0.0.1:10002".into(),
+                key_identity: "b".repeat(64),
+                agent_generation_id: "agent-b".into(),
+                unsupported_async_owners: false,
+            },
+        )
+        .await
+        .unwrap();
+    let record = successor
+        .read_execution_workspace_owner(&id)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(record.descriptor_epoch, claim.token.epoch);
     assert!(record.descriptor.unsupported_async_owners);
     assert!(data.mark_unsupported_async_owner(&first).await.is_err());
@@ -814,13 +859,19 @@ async fn test_adopt_legacy_session_keeps_the_first_winner_bytes() {
     data.adopt_legacy_session(&id, &cwd, &workspace, &frozen("winner"))
         .await
         .unwrap();
-    assert!(second
-        .adopt_legacy_session(&id, &cwd, &workspace, &frozen("candidate"))
-        .await
-        .is_err(), "a second handle cannot write under the first owner's generation");
+    assert!(
+        second
+            .adopt_legacy_session(&id, &cwd, &workspace, &frozen("candidate"))
+            .await
+            .is_err(),
+        "a second handle cannot write under the first owner's generation"
+    );
     let first_token = data.execution_owner_token(&id).unwrap();
     data.release_execution_owner(&first_token).await.unwrap();
-    let second_claim = second.claim_execution_owner(&id, false, None).await.unwrap();
+    let second_claim = second
+        .claim_execution_owner(&id, false, None)
+        .await
+        .unwrap();
     second.install_execution_owner_token(second_claim.token);
     second
         .adopt_legacy_session(&id, &cwd, &workspace, &frozen("candidate"))

@@ -288,19 +288,35 @@ impl BaseTool for McpToolBridge {
         }
 
         let peer = self.client.peer.as_ref().unwrap();
-        let session_id = ctx.session_id.as_deref().or(self.output_session_id.as_deref());
+        let session_id = ctx
+            .session_id
+            .as_deref()
+            .or(self.output_session_id.as_deref());
         let mut execution_guard = if let Some(session_id) = session_id {
-            let pool = self.output_pool.as_ref().and_then(std::sync::Weak::upgrade)
-                .ok_or_else(|| Box::new(ToolCallError::CallFailed {
-                    server: self.server_name.clone(), tool: self.tool_name.clone(),
-                    reason: "session MCP task owner unavailable".into(),
-                }) as Box<dyn std::error::Error + Send + Sync>)?;
-            Some(pool.begin_external_task_execution(session_id).map_err(|reason| {
-                Box::new(ToolCallError::CallFailed {
-                    server: self.server_name.clone(), tool: self.tool_name.clone(), reason,
-                }) as Box<dyn std::error::Error + Send + Sync>
-            })?)
-        } else { None };
+            let pool = self
+                .output_pool
+                .as_ref()
+                .and_then(std::sync::Weak::upgrade)
+                .ok_or_else(|| {
+                    Box::new(ToolCallError::CallFailed {
+                        server: self.server_name.clone(),
+                        tool: self.tool_name.clone(),
+                        reason: "session MCP task owner unavailable".into(),
+                    }) as Box<dyn std::error::Error + Send + Sync>
+                })?;
+            Some(
+                pool.begin_external_task_execution(session_id)
+                    .map_err(|reason| {
+                        Box::new(ToolCallError::CallFailed {
+                            server: self.server_name.clone(),
+                            tool: self.tool_name.clone(),
+                            reason,
+                        }) as Box<dyn std::error::Error + Send + Sync>
+                    })?,
+            )
+        } else {
+            None
+        };
 
         // 2. 构建 rmcp 请求参数
         let arguments = input.as_object().cloned().unwrap_or_default();
@@ -349,9 +365,11 @@ impl BaseTool for McpToolBridge {
             })?;
         let result = match response {
             rmcp::model::CallToolResponse::Complete(result) => {
-                if let Some(guard) = execution_guard.as_mut() { guard.confirm_stopped(); }
+                if let Some(guard) = execution_guard.as_mut() {
+                    guard.confirm_stopped();
+                }
                 result
-            },
+            }
             rmcp::model::CallToolResponse::Task(created) => {
                 let task_created_at = created.task.created_at;
                 let task_id = created.task.task_id;
@@ -393,15 +411,23 @@ impl BaseTool for McpToolBridge {
                             &task_created_at,
                         ) {
                             Ok(task_id) => {
-                                if let Some(guard) = execution_guard.as_mut() { guard.confirm_stopped(); }
-                                task_id
-                            },
-                            Err(reason) => {
-                                let settled = cancel_and_confirm_mcp_task(peer, &task_id, task_meta.clone()).await;
-                                if settled {
-                                    if let Some(guard) = execution_guard.as_mut() { guard.confirm_stopped(); }
+                                if let Some(guard) = execution_guard.as_mut() {
+                                    guard.confirm_stopped();
                                 }
-                                let reason = if settled { reason } else {
+                                task_id
+                            }
+                            Err(reason) => {
+                                let settled =
+                                    cancel_and_confirm_mcp_task(peer, &task_id, task_meta.clone())
+                                        .await;
+                                if settled {
+                                    if let Some(guard) = execution_guard.as_mut() {
+                                        guard.confirm_stopped();
+                                    }
+                                }
+                                let reason = if settled {
+                                    reason
+                                } else {
                                     format!("{reason}; MCP task {task_id} cleanup could not be confirmed")
                                 };
                                 return Err(Box::new(ToolCallError::CallFailed {
@@ -426,7 +452,9 @@ impl BaseTool for McpToolBridge {
                 }
                 let settled = cancel_and_confirm_mcp_task(peer, &task_id, task_meta).await;
                 if settled {
-                    if let Some(guard) = execution_guard.as_mut() { guard.confirm_stopped(); }
+                    if let Some(guard) = execution_guard.as_mut() {
+                        guard.confirm_stopped();
+                    }
                 }
                 let reason = if settled {
                     "background task requires a live session task manager".to_owned()
@@ -549,10 +577,13 @@ async fn cancel_and_confirm_mcp_task(
         let mut query = rmcp::model::GetTaskParams::new(task_id);
         query.meta = meta.clone();
         if matches!(tokio::time::timeout(std::time::Duration::from_secs(1), peer.get_task(query)).await,
-            Ok(Ok(snapshot)) if snapshot.task.status().is_terminal()) {
+            Ok(Ok(snapshot)) if snapshot.task.status().is_terminal())
+        {
             return true;
         }
-        if tokio::time::Instant::now() >= until { return false; }
+        if tokio::time::Instant::now() >= until {
+            return false;
+        }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
 }

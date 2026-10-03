@@ -12,12 +12,21 @@ impl SqliteSessionData {
     ) -> SessionResourceResult<()> {
         self.writable()?;
         if !descriptor.valid_for_store() {
-            return Err(invalid_input("workspace execution descriptor is incomplete"));
+            return Err(invalid_input(
+                "workspace execution descriptor is incomplete",
+            ));
         }
-        let mut tx = self.database.pool.begin_with("BEGIN IMMEDIATE").await.map_err(|e| map_sqlx(&e))?;
+        let mut tx = self
+            .database
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(|e| map_sqlx(&e))?;
         self.assert_owner(&mut tx, &token.root_id).await?;
         if self.execution_owner_token(&token.root_id).as_ref() != Some(token) {
-            return Err(SessionResourceError::conflict("workspace descriptor owner token is stale"));
+            return Err(SessionResourceError::conflict(
+                "workspace descriptor owner token is stale",
+            ));
         }
         let old: Option<(i64, String, String, String, i64)> = sqlx::query_as(
             "SELECT owner_epoch, endpoint, key_identity, agent_generation_id, unsupported_async_owners
@@ -29,9 +38,13 @@ impl SqliteSessionData {
         .map_err(|e| map_sqlx(&e))?;
         if let Some((epoch, endpoint, key, generation, _unsupported)) = old.as_ref() {
             if *epoch == token.epoch {
-                if endpoint != &descriptor.endpoint || key != &descriptor.key_identity
-                    || generation != &descriptor.agent_generation_id {
-                    return Err(SessionResourceError::conflict("workspace execution descriptor changed"));
+                if endpoint != &descriptor.endpoint
+                    || key != &descriptor.key_identity
+                    || generation != &descriptor.agent_generation_id
+                {
+                    return Err(SessionResourceError::conflict(
+                        "workspace execution descriptor changed",
+                    ));
                 }
             }
         }
@@ -54,7 +67,9 @@ impl SqliteSessionData {
         .execute(&mut *tx)
         .await
         .map_err(|e| map_sqlx(&e))?;
-        tx.commit().await.map_err(|_| commit_failure(Some(token.root_id.clone())))
+        tx.commit()
+            .await
+            .map_err(|_| commit_failure(Some(token.root_id.clone())))
     }
 
     pub(super) async fn read_workspace_owner(
@@ -72,15 +87,25 @@ impl SqliteSessionData {
         .fetch_optional(&self.database.pool)
         .await
         .map_err(|e| map_sqlx(&e))?;
-        Ok(row.map(|(current_epoch, descriptor_epoch, endpoint, key_identity,
-                     agent_generation_id, unsupported)| ExecutionWorkspaceOwnerRecord {
-            current_epoch,
-            descriptor_epoch,
-            descriptor: WorkspaceExecutionDescriptor {
-                endpoint, key_identity, agent_generation_id,
-                unsupported_async_owners: unsupported != 0,
+        Ok(row.map(
+            |(
+                current_epoch,
+                descriptor_epoch,
+                endpoint,
+                key_identity,
+                agent_generation_id,
+                unsupported,
+            )| ExecutionWorkspaceOwnerRecord {
+                current_epoch,
+                descriptor_epoch,
+                descriptor: WorkspaceExecutionDescriptor {
+                    endpoint,
+                    key_identity,
+                    agent_generation_id,
+                    unsupported_async_owners: unsupported != 0,
+                },
             },
-        }))
+        ))
     }
 
     pub(super) async fn mark_unsupported_workspace_owner(
@@ -88,10 +113,17 @@ impl SqliteSessionData {
         token: &ExecutionOwnerToken,
     ) -> SessionResourceResult<()> {
         self.writable()?;
-        let mut tx = self.database.pool.begin_with("BEGIN IMMEDIATE").await.map_err(|e| map_sqlx(&e))?;
+        let mut tx = self
+            .database
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(|e| map_sqlx(&e))?;
         self.assert_owner(&mut tx, &token.root_id).await?;
         if self.execution_owner_token(&token.root_id).as_ref() != Some(token) {
-            return Err(SessionResourceError::conflict("workspace descriptor owner token is stale"));
+            return Err(SessionResourceError::conflict(
+                "workspace descriptor owner token is stale",
+            ));
         }
         let changed = sqlx::query(
             "UPDATE session_execution_workspace_descriptors SET unsupported_async_owners = 1
@@ -103,9 +135,13 @@ impl SqliteSessionData {
         .await
         .map_err(|e| map_sqlx(&e))?;
         if changed.rows_affected() != 1 {
-            return Err(SessionResourceError::conflict("workspace execution descriptor is missing"));
+            return Err(SessionResourceError::conflict(
+                "workspace execution descriptor is missing",
+            ));
         }
-        tx.commit().await.map_err(|_| commit_failure(Some(token.root_id.clone())))
+        tx.commit()
+            .await
+            .map_err(|_| commit_failure(Some(token.root_id.clone())))
     }
 
     pub(super) async fn claim_owner(
@@ -115,20 +151,26 @@ impl SqliteSessionData {
         expected_previous_epoch: Option<i64>,
     ) -> SessionResourceResult<ExecutionOwnerClaim> {
         self.writable()?;
-        let mut tx = self.database.pool.begin_with("BEGIN IMMEDIATE").await.map_err(|e| map_sqlx(&e))?;
+        let mut tx = self
+            .database
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(|e| map_sqlx(&e))?;
         let actual_root = thread_root_on(&mut tx, root).await.map_err(read_failure)?;
         if actual_root != *root {
             return Err(invalid_input("execution owner must claim a root session"));
         }
-        let close: Option<(i64,)> = sqlx::query_as(
-            "SELECT 1 FROM session_close_intents WHERE thread_id = ?1",
-        )
-        .bind(root.as_str())
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(|e| map_sqlx(&e))?;
+        let close: Option<(i64,)> =
+            sqlx::query_as("SELECT 1 FROM session_close_intents WHERE thread_id = ?1")
+                .bind(root.as_str())
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|e| map_sqlx(&e))?;
         if require_closing && close.is_none() {
-            return Err(SessionResourceError::conflict("session has no close intent"));
+            return Err(SessionResourceError::conflict(
+                "session has no close intent",
+            ));
         }
         if !require_closing && close.is_some() {
             return Err(SessionResourceError::conflict("session is closing"));
@@ -142,7 +184,9 @@ impl SqliteSessionData {
         .map_err(|e| map_sqlx(&e))?;
         if let Some(expected) = expected_previous_epoch {
             if previous.as_ref().map(|row| row.0) != Some(expected) {
-                return Err(SessionResourceError::conflict("execution owner epoch changed"));
+                return Err(SessionResourceError::conflict(
+                    "execution owner epoch changed",
+                ));
             }
         }
         let prior_unreleased = if previous.as_ref().is_some_and(|row| row.1 == 0) {
@@ -155,8 +199,12 @@ impl SqliteSessionData {
             .fetch_optional(&mut *tx)
             .await
             .map_err(|e| map_sqlx(&e))?;
-            Some(PriorExecutionOwner { agent_generation_id: generation.map(|row| row.0) })
-        } else { None };
+            Some(PriorExecutionOwner {
+                agent_generation_id: generation.map(|row| row.0),
+            })
+        } else {
+            None
+        };
         let nonce = uuid::Uuid::new_v4().to_string();
         let changed = sqlx::query(
             "INSERT INTO session_execution_owners(root_id, epoch, nonce, expires_at_unix, released)
@@ -176,23 +224,33 @@ impl SqliteSessionData {
         .await
         .map_err(|e| map_sqlx(&e))?;
         if changed.rows_affected() != 1 {
-            return Err(SessionResourceError::conflict("session execution owner is still active"));
+            return Err(SessionResourceError::conflict(
+                "session execution owner is still active",
+            ));
         }
-        let (epoch,): (i64,) = sqlx::query_as(
-            "SELECT epoch FROM session_execution_owners WHERE root_id = ?1",
-        )
-        .bind(root.as_str())
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(|e| map_sqlx(&e))?;
-        tx.commit().await.map_err(|_| commit_failure(Some(root.clone())))?;
+        let (epoch,): (i64,) =
+            sqlx::query_as("SELECT epoch FROM session_execution_owners WHERE root_id = ?1")
+                .bind(root.as_str())
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(|e| map_sqlx(&e))?;
+        tx.commit()
+            .await
+            .map_err(|_| commit_failure(Some(root.clone())))?;
         Ok(ExecutionOwnerClaim {
-            token: ExecutionOwnerToken { root_id: root.clone(), epoch, nonce },
+            token: ExecutionOwnerToken {
+                root_id: root.clone(),
+                epoch,
+                nonce,
+            },
             prior_unreleased,
         })
     }
 
-    pub(super) async fn renew_owner(&self, token: &ExecutionOwnerToken) -> SessionResourceResult<()> {
+    pub(super) async fn renew_owner(
+        &self,
+        token: &ExecutionOwnerToken,
+    ) -> SessionResourceResult<()> {
         self.writable()?;
         let updated = sqlx::query(
             "UPDATE session_execution_owners
@@ -208,12 +266,17 @@ impl SqliteSessionData {
         .await
         .map_err(|e| map_sqlx(&e))?;
         if updated.rows_affected() != 1 {
-            return Err(SessionResourceError::conflict("execution owner token is stale"));
+            return Err(SessionResourceError::conflict(
+                "execution owner token is stale",
+            ));
         }
         Ok(())
     }
 
-    pub(super) async fn release_owner(&self, token: &ExecutionOwnerToken) -> SessionResourceResult<()> {
+    pub(super) async fn release_owner(
+        &self,
+        token: &ExecutionOwnerToken,
+    ) -> SessionResourceResult<()> {
         self.writable()?;
         let updated = sqlx::query(
             "UPDATE session_execution_owners SET released = 1
@@ -226,9 +289,14 @@ impl SqliteSessionData {
         .await
         .map_err(|e| map_sqlx(&e))?;
         if updated.rows_affected() != 1 {
-            return Err(SessionResourceError::conflict("execution owner token is stale"));
+            return Err(SessionResourceError::conflict(
+                "execution owner token is stale",
+            ));
         }
-        let mut tokens = self.owner_tokens.lock().expect("owner token mutex poisoned");
+        let mut tokens = self
+            .owner_tokens
+            .lock()
+            .expect("owner token mutex poisoned");
         if tokens.get(&token.root_id) == Some(token) {
             tokens.remove(&token.root_id);
         }
@@ -237,9 +305,17 @@ impl SqliteSessionData {
 
     /// The close intent remains recoverable until release and intent removal
     /// commit together. A delayed old generation cannot finish a new one.
-    pub(super) async fn finish_close_owner(&self, token: &ExecutionOwnerToken) -> SessionResourceResult<()> {
+    pub(super) async fn finish_close_owner(
+        &self,
+        token: &ExecutionOwnerToken,
+    ) -> SessionResourceResult<()> {
         self.writable()?;
-        let mut tx = self.database.pool.begin_with("BEGIN IMMEDIATE").await.map_err(|e| map_sqlx(&e))?;
+        let mut tx = self
+            .database
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(|e| map_sqlx(&e))?;
         let valid: Option<(i64,)> = sqlx::query_as(
             "SELECT 1 FROM session_execution_owners WHERE root_id = ?1 AND epoch = ?2
              AND nonce = ?3 AND released = 0
@@ -252,7 +328,9 @@ impl SqliteSessionData {
         .await
         .map_err(|e| map_sqlx(&e))?;
         if valid.is_none() {
-            return Err(SessionResourceError::conflict("execution owner token is stale"));
+            return Err(SessionResourceError::conflict(
+                "execution owner token is stale",
+            ));
         }
         let intent = sqlx::query("DELETE FROM session_close_intents WHERE thread_id = ?1")
             .bind(token.root_id.as_str())
@@ -260,7 +338,9 @@ impl SqliteSessionData {
             .await
             .map_err(|e| map_sqlx(&e))?;
         if intent.rows_affected() != 1 {
-            return Err(SessionResourceError::conflict("session close intent is missing"));
+            return Err(SessionResourceError::conflict(
+                "session close intent is missing",
+            ));
         }
         let released = sqlx::query(
             "UPDATE session_execution_owners SET released = 1
@@ -273,15 +353,22 @@ impl SqliteSessionData {
         .await
         .map_err(|e| map_sqlx(&e))?;
         if released.rows_affected() != 1 {
-            return Err(SessionResourceError::conflict("execution owner token is stale"));
+            return Err(SessionResourceError::conflict(
+                "execution owner token is stale",
+            ));
         }
         sqlx::query("DELETE FROM session_execution_workspace_descriptors WHERE root_id = ?1")
             .bind(token.root_id.as_str())
             .execute(&mut *tx)
             .await
             .map_err(|e| map_sqlx(&e))?;
-        tx.commit().await.map_err(|_| commit_failure(Some(token.root_id.clone())))?;
-        let mut tokens = self.owner_tokens.lock().expect("owner token mutex poisoned");
+        tx.commit()
+            .await
+            .map_err(|_| commit_failure(Some(token.root_id.clone())))?;
+        let mut tokens = self
+            .owner_tokens
+            .lock()
+            .expect("owner token mutex poisoned");
         if tokens.get(&token.root_id) == Some(token) {
             tokens.remove(&token.root_id);
         }
@@ -300,13 +387,12 @@ impl SqliteSessionData {
         .fetch_optional(&mut *tx)
         .await
         .map_err(|e| map_sqlx(&e))?;
-        let intent: Option<(i64,)> = sqlx::query_as(
-            "SELECT 1 FROM session_close_intents WHERE thread_id = ?1",
-        )
-        .bind(token.root_id.as_str())
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(|e| map_sqlx(&e))?;
+        let intent: Option<(i64,)> =
+            sqlx::query_as("SELECT 1 FROM session_close_intents WHERE thread_id = ?1")
+                .bind(token.root_id.as_str())
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|e| map_sqlx(&e))?;
         let settlement = match owner {
             Some((epoch, nonce, released)) if epoch == token.epoch && nonce == token.nonce => {
                 match (released, intent.is_some()) {
@@ -331,7 +417,8 @@ impl SqliteSessionData {
             return Err(not_found());
         }
         let root = thread_root_on(&mut *tx, id).await.map_err(read_failure)?;
-        let token = self.execution_owner_token(&root)
+        let token = self
+            .execution_owner_token(&root)
             .ok_or_else(|| SessionResourceError::conflict("session execution owner is absent"))?;
         let valid: Option<(i64,)> = sqlx::query_as(
             "SELECT 1 FROM session_execution_owners
@@ -345,7 +432,9 @@ impl SqliteSessionData {
         .await
         .map_err(|e| map_sqlx(&e))?;
         if valid.is_none() {
-            return Err(SessionResourceError::conflict("session execution owner is stale"));
+            return Err(SessionResourceError::conflict(
+                "session execution owner is stale",
+            ));
         }
         Ok(())
     }

@@ -47,7 +47,13 @@ pub async fn install_plugin(
                         move || {
                             let _ = std::fs::create_dir_all(&cache_dir);
                             let mut command = std::process::Command::new("git");
-                            command.args(["clone", "--depth", "1", &url, cache_dir.to_str().unwrap()]);
+                            command.args([
+                                "clone",
+                                "--depth",
+                                "1",
+                                &url,
+                                cache_dir.to_str().unwrap(),
+                            ]);
                             #[cfg(unix)]
                             let output = peri_process::run_output_blocking(command);
                             #[cfg(not(unix))]

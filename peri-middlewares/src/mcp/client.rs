@@ -37,11 +37,7 @@ use peri_acp_types::{
 };
 use readiness::SystemReadinessTracker;
 use rmcp::model::{Resource, ResourceContents, Tool};
-use std::{
-    any::Any,
-    collections::HashMap,
-    sync::Arc,
-};
+use std::{any::Any, collections::HashMap, sync::Arc};
 
 pub(crate) use cache::cache_scope_allows_persistence;
 pub use oauth::OAuthStartDisposition;
@@ -145,11 +141,15 @@ pub struct McpClientPool {
     /// 时向全部注册 inbox 推送 Defer 消息并唤醒 idle agent。
     pub(crate) session_inboxes: parking_lot::RwLock<HashMap<String, InboxHandle>>,
     /// One session runtime handle per session; task records remain owned by Agent.
-    pub(crate) session_tasks: parking_lot::RwLock<HashMap<String, std::sync::Weak<dyn peri_acp_types::tasks::TaskManager>>>,
+    pub(crate) session_tasks: parking_lot::RwLock<
+        HashMap<String, std::sync::Weak<dyn peri_acp_types::tasks::TaskManager>>,
+    >,
     pub(crate) task_scope_authority: peri_mcp_workspace::TaskScopeAuthority,
     pub(crate) task_scope_tokens: parking_lot::RwLock<HashMap<String, String>>,
-    pub(crate) session_execution_tokens: parking_lot::RwLock<HashMap<String, peri_acp_types::workspace::ExecutionOwnerToken>>,
-    pub(crate) remote_task_scope_authorities: parking_lot::RwLock<HashMap<String, peri_mcp_workspace::TaskScopeAuthority>>,
+    pub(crate) session_execution_tokens:
+        parking_lot::RwLock<HashMap<String, peri_acp_types::workspace::ExecutionOwnerToken>>,
+    pub(crate) remote_task_scope_authorities:
+        parking_lot::RwLock<HashMap<String, peri_mcp_workspace::TaskScopeAuthority>>,
     /// 跨进程的 MCP Resource Cache；是否写入由响应 scope 与安全上下文共同决定。
     pub(crate) resource_cache: super::resource_cache::McpResourceCache,
     /// 进程启动时冻结的 deployment capability profile；初始连接和重连复用。
@@ -372,13 +372,16 @@ impl McpClientPool {
         }
         let configs = self.configs.read();
         Ok(configs.values().any(|config| {
-            if config.disabled == Some(true) { return false; }
+            if config.disabled == Some(true) {
+                return false;
+            }
             match config.source.as_ref() {
                 Some(peri_acp_types::plugin::ConfigSource::Builtin { .. }) => false,
-                Some(peri_acp_types::plugin::ConfigSource::WorkspaceRemote) =>
-                    config.task_scope_secret_file.is_none() ||
-                    config.oauth.is_some() ||
-                    config.url.as_deref() != trusted_workspace_endpoint,
+                Some(peri_acp_types::plugin::ConfigSource::WorkspaceRemote) => {
+                    config.task_scope_secret_file.is_none()
+                        || config.oauth.is_some()
+                        || config.url.as_deref() != trusted_workspace_endpoint
+                }
                 _ => true,
             }
         }))
@@ -391,9 +394,15 @@ impl McpClientPool {
         session_id: &str,
         resources: &dyn peri_acp_types::session_resources::SessionResources,
     ) -> Result<(), String> {
-        let token = self.session_execution_tokens.read().get(session_id).cloned()
+        let token = self
+            .session_execution_tokens
+            .read()
+            .get(session_id)
+            .cloned()
             .ok_or_else(|| "Store execution owner token is unavailable".to_owned())?;
-        resources.mark_unsupported_async_owner(&token).await
+        resources
+            .mark_unsupported_async_owner(&token)
+            .await
             .map_err(|error| format!("async owner catalog update failed: {error}"))
     }
 
@@ -429,7 +438,9 @@ impl McpClientPool {
         if slot.context.is_some() {
             return Err(BuiltinContextError::AlreadyInjected);
         }
-        let _ = context.task_scope_authority.set(self.task_scope_authority.clone());
+        let _ = context
+            .task_scope_authority
+            .set(self.task_scope_authority.clone());
         slot.context = Some(context);
         Ok(())
     }
@@ -810,7 +821,9 @@ impl peri_acp_types::ports::McpPoolPort for McpClientPool {
     }
 
     fn has_active_tasks(&self, session_id: &str) -> bool {
-        self.session_tasks.read().get(session_id)
+        self.session_tasks
+            .read()
+            .get(session_id)
             .and_then(std::sync::Weak::upgrade)
             .is_some_and(|manager| manager.has_unsettled_external())
     }

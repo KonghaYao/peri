@@ -1,7 +1,11 @@
 //! Remote store opening verdict and legacy-shape probe.
 
-use super::{StoreInitialization, unsupported_behavior};
-use super::super::{mutation::{RemoteStore, StoreAccess, incomplete_reply}, schema::{self, StoreId, StoreIdentityOutcome, StoreIdentityRead}, sql::{StatementSpec, int_at}};
+use super::super::{
+    mutation::{incomplete_reply, RemoteStore, StoreAccess},
+    schema::{self, StoreId, StoreIdentityOutcome, StoreIdentityRead},
+    sql::{int_at, StatementSpec},
+};
+use super::{unsupported_behavior, StoreInitialization};
 use peri_acp_types::session_resources::SessionResourceResult;
 use turso_serverless::Value;
 
@@ -50,7 +54,9 @@ pub(in crate::sessions::remote) fn open_step(
 ///
 /// `CreatedByThisOpen` 只能由 `Created` 产生：竞败方读回的胜者身份也是 `Existing`，
 /// 所以败方没有首次登记资格，但它用的仍是同一个权威身份。
-pub(in crate::sessions::remote) fn open_verdict(outcome: StoreIdentityOutcome) -> (StoreId, StoreInitialization) {
+pub(in crate::sessions::remote) fn open_verdict(
+    outcome: StoreIdentityOutcome,
+) -> (StoreId, StoreInitialization) {
     match outcome {
         StoreIdentityOutcome::Created(store_id) => {
             (store_id, StoreInitialization::CreatedByThisOpen)

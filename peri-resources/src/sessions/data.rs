@@ -54,13 +54,30 @@ pub(crate) trait SessionDataPort: Send + Sync {
         require_closing: bool,
         expected_previous_epoch: Option<i64>,
     ) -> SessionResourceResult<peri_acp_types::workspace::ExecutionOwnerClaim>;
-    async fn renew_execution_owner(&self, token: &ExecutionOwnerToken) -> SessionResourceResult<()>;
-    async fn release_execution_owner(&self, token: &ExecutionOwnerToken) -> SessionResourceResult<()>;
+    async fn renew_execution_owner(&self, token: &ExecutionOwnerToken)
+        -> SessionResourceResult<()>;
+    async fn release_execution_owner(
+        &self,
+        token: &ExecutionOwnerToken,
+    ) -> SessionResourceResult<()>;
     async fn finish_close(&self, token: &ExecutionOwnerToken) -> SessionResourceResult<()>;
-    async fn close_settlement(&self, token: &ExecutionOwnerToken) -> SessionResourceResult<peri_acp_types::session_resources::CloseSettlement>;
-    async fn bind_execution_workspace_owner(&self, token: &ExecutionOwnerToken, descriptor: &peri_acp_types::workspace::WorkspaceExecutionDescriptor) -> SessionResourceResult<()>;
-    async fn read_execution_workspace_owner(&self, root: &ThreadId) -> SessionResourceResult<Option<peri_acp_types::workspace::ExecutionWorkspaceOwnerRecord>>;
-    async fn mark_unsupported_async_owner(&self, token: &ExecutionOwnerToken) -> SessionResourceResult<()>;
+    async fn close_settlement(
+        &self,
+        token: &ExecutionOwnerToken,
+    ) -> SessionResourceResult<peri_acp_types::session_resources::CloseSettlement>;
+    async fn bind_execution_workspace_owner(
+        &self,
+        token: &ExecutionOwnerToken,
+        descriptor: &peri_acp_types::workspace::WorkspaceExecutionDescriptor,
+    ) -> SessionResourceResult<()>;
+    async fn read_execution_workspace_owner(
+        &self,
+        root: &ThreadId,
+    ) -> SessionResourceResult<Option<peri_acp_types::workspace::ExecutionWorkspaceOwnerRecord>>;
+    async fn mark_unsupported_async_owner(
+        &self,
+        token: &ExecutionOwnerToken,
+    ) -> SessionResourceResult<()>;
     fn install_execution_owner_token(&self, token: ExecutionOwnerToken);
     fn execution_owner_token(&self, root: &ThreadId) -> Option<ExecutionOwnerToken>;
 

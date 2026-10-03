@@ -11,7 +11,8 @@ use peri_agent::middleware::r#trait::Middleware;
 use serde_json::{json, Value};
 
 pub const DYNAMIC_MCP_TOOL_NAME: &str = "DynamicMCP";
-pub type AsyncOwnerAdmission = Arc<dyn Fn(&str) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>> + Send + Sync>;
+pub type AsyncOwnerAdmission =
+    Arc<dyn Fn(&str) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>> + Send + Sync>;
 
 #[derive(Debug, thiserror::Error)]
 #[error("Dynamic MCP operation failed: {0}")]
@@ -52,7 +53,8 @@ impl DynamicMcpMiddleware {
     }
 
     pub fn with_async_owner_admission(mut self, admission: AsyncOwnerAdmission) -> Self {
-        Arc::get_mut(&mut self.tool).expect("new middleware tool has one owner")
+        Arc::get_mut(&mut self.tool)
+            .expect("new middleware tool has one owner")
             .async_owner_admission = Some(admission);
         self
     }
@@ -103,8 +105,9 @@ impl BaseTool for BoundDynamicMcpTool {
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         if matches!(self.action, CanonicalDynamicMcpAction::Load(_)) {
             if let Some(admit) = &self.async_owner_admission {
-                admit(&self.session_id).await.map_err(|error|
-                    Box::new(DynamicMcpToolError(error)) as Box<dyn std::error::Error + Send + Sync>)?;
+                admit(&self.session_id).await.map_err(|error| {
+                    Box::new(DynamicMcpToolError(error)) as Box<dyn std::error::Error + Send + Sync>
+                })?;
             }
         }
         self.deployment

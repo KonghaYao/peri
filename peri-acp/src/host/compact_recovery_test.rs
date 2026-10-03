@@ -219,31 +219,39 @@ impl SessionResources for RecoveryStore {
     }
 
     async fn claim_closing_execution(
-        &self, id: &ThreadId, expected_current_epoch: i64,
+        &self,
+        id: &ThreadId,
+        expected_current_epoch: i64,
     ) -> SessionResourceResult<Arc<dyn SessionExecutionLease>> {
-        self.inner.claim_closing_execution(id, expected_current_epoch).await
+        self.inner
+            .claim_closing_execution(id, expected_current_epoch)
+            .await
     }
 
     async fn renew_execution_owner(
-        &self, token: &peri_acp_types::workspace::ExecutionOwnerToken,
+        &self,
+        token: &peri_acp_types::workspace::ExecutionOwnerToken,
     ) -> SessionResourceResult<()> {
         self.inner.renew_execution_owner(token).await
     }
 
     async fn release_execution_owner(
-        &self, token: &peri_acp_types::workspace::ExecutionOwnerToken,
+        &self,
+        token: &peri_acp_types::workspace::ExecutionOwnerToken,
     ) -> SessionResourceResult<()> {
         self.inner.release_execution_owner(token).await
     }
 
     async fn finish_close(
-        &self, token: &peri_acp_types::workspace::ExecutionOwnerToken,
+        &self,
+        token: &peri_acp_types::workspace::ExecutionOwnerToken,
     ) -> SessionResourceResult<()> {
         self.inner.finish_close(token).await
     }
 
     async fn close_settlement(
-        &self, token: &peri_acp_types::workspace::ExecutionOwnerToken,
+        &self,
+        token: &peri_acp_types::workspace::ExecutionOwnerToken,
     ) -> SessionResourceResult<peri_acp_types::session_resources::CloseSettlement> {
         self.inner.close_settlement(token).await
     }

@@ -22,7 +22,10 @@ use super::schema_v12_upgrade;
 use super::session_data::{open_step, OpenStep};
 use super::sql::StatementSpec;
 use crate::sessions::{
-    canonical::{CREATE_SESSION_CLOSE_INTENTS_TABLE_SQL, CREATE_SESSION_EXECUTION_OWNERS_TABLE_SQL, CREATE_TABLES},
+    canonical::{
+        CREATE_SESSION_CLOSE_INTENTS_TABLE_SQL, CREATE_SESSION_EXECUTION_OWNERS_TABLE_SQL,
+        CREATE_TABLES,
+    },
     schema_cleanup::{LEGACY_EXECUTION_SQL, LEGACY_GOALS_SQL},
 };
 
@@ -719,69 +722,152 @@ mod full_remote_tests {
 async fn delayed_remote_mutation_cannot_commit_after_owner_takeover() {
     let fixture = Fixture::new().await;
     let pool = &fixture.transport.pool;
-    sqlx::query(CREATE_OP_LEDGER_SQL).execute(pool).await.unwrap();
-    sqlx::query(CREATE_SESSION_EXECUTION_OWNERS_TABLE_SQL).execute(pool).await.unwrap();
-    sqlx::query("CREATE TABLE observed(value TEXT NOT NULL)").execute(pool).await.unwrap();
-    sqlx::query("INSERT INTO observed VALUES ('original')").execute(pool).await.unwrap();
+    sqlx::query(CREATE_OP_LEDGER_SQL)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query(CREATE_SESSION_EXECUTION_OWNERS_TABLE_SQL)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("CREATE TABLE observed(value TEXT NOT NULL)")
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO observed VALUES ('original')")
+        .execute(pool)
+        .await
+        .unwrap();
     let ledger_before = sqlx::query_scalar::<_, i64>("SELECT count(*) FROM peri_op_ledger")
-        .fetch_one(pool).await.unwrap();
+        .fetch_one(pool)
+        .await
+        .unwrap();
     let root = "session".to_owned();
-    let stale = ExecutionOwnerToken { root_id: root.clone(), epoch: 1, nonce: "old".into() };
+    let stale = ExecutionOwnerToken {
+        root_id: root.clone(),
+        epoch: 1,
+        nonce: "old".into(),
+    };
     sqlx::query("INSERT INTO session_execution_owners VALUES (?1, 1, 'old', CAST(strftime('%s','now') AS INTEGER) + 30, 0)")
         .bind(&root).execute(pool).await.unwrap();
     // The old HTTP request was prepared while epoch 1 was live, but arrives
     // only after the new owner has committed its CAS claim.
     sqlx::query("UPDATE session_execution_owners SET epoch = 2, nonce = 'new' WHERE root_id = ?1")
-        .bind(&root).execute(pool).await.unwrap();
+        .bind(&root)
+        .execute(pool)
+        .await
+        .unwrap();
     let old_write = QualifiedMutation {
         identity: OperationIdentity::new(OperationId::mint(&root), "write", &["old"]),
-        effects: vec![StatementSpec::new("UPDATE observed SET value = 'old'", vec![])],
+        effects: vec![StatementSpec::new(
+            "UPDATE observed SET value = 'old'",
+            vec![],
+        )],
     };
     let store = fixture.store(StoreAccess::ReadWrite);
-    let (outcome, counts) = store.apply_qualified_reporting_with_owner(
-        &old_write, Some((&root, Some(&stale))),
-    ).await.unwrap();
-    assert!(matches!(outcome, MutationOutcome::NotApplied { rejected_statement: Some(1), .. }));
+    let (outcome, counts) = store
+        .apply_qualified_reporting_with_owner(&old_write, Some((&root, Some(&stale))))
+        .await
+        .unwrap();
+    assert!(matches!(
+        outcome,
+        MutationOutcome::NotApplied {
+            rejected_statement: Some(1),
+            ..
+        }
+    ));
     assert!(counts.is_empty());
-    assert_eq!(sqlx::query_scalar::<_, String>("SELECT value FROM observed")
-        .fetch_one(pool).await.unwrap(), "original");
-    assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM peri_op_ledger")
-        .fetch_one(pool).await.unwrap(), ledger_before);
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT value FROM observed")
+            .fetch_one(pool)
+            .await
+            .unwrap(),
+        "original"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM peri_op_ledger")
+            .fetch_one(pool)
+            .await
+            .unwrap(),
+        ledger_before
+    );
 
-    let current = ExecutionOwnerToken { root_id: root.clone(), epoch: 2, nonce: "new".into() };
+    let current = ExecutionOwnerToken {
+        root_id: root.clone(),
+        epoch: 2,
+        nonce: "new".into(),
+    };
     let new_write = QualifiedMutation {
         identity: OperationIdentity::new(OperationId::mint(&root), "write", &["new"]),
-        effects: vec![StatementSpec::new("UPDATE observed SET value = 'new'", vec![])],
+        effects: vec![StatementSpec::new(
+            "UPDATE observed SET value = 'new'",
+            vec![],
+        )],
     };
-    let (outcome, counts) = store.apply_qualified_reporting_with_owner(
-        &new_write, Some((&root, Some(&current))),
-    ).await.unwrap();
+    let (outcome, counts) = store
+        .apply_qualified_reporting_with_owner(&new_write, Some((&root, Some(&current))))
+        .await
+        .unwrap();
     assert!(matches!(outcome, MutationOutcome::Applied { .. }));
     assert_eq!(counts, vec![1]);
-    assert_eq!(sqlx::query_scalar::<_, String>("SELECT value FROM observed")
-        .fetch_one(pool).await.unwrap(), "new");
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT value FROM observed")
+            .fetch_one(pool)
+            .await
+            .unwrap(),
+        "new"
+    );
 }
 
 #[tokio::test]
 async fn remote_close_settlement_distinguishes_exact_finish_from_takeover() {
     let fixture = Fixture::new().await;
     let pool = &fixture.transport.pool;
-    sqlx::query(CREATE_OP_LEDGER_SQL).execute(pool).await.unwrap();
-    sqlx::query(CREATE_SESSION_EXECUTION_OWNERS_TABLE_SQL).execute(pool).await.unwrap();
-    sqlx::query(CREATE_SESSION_CLOSE_INTENTS_TABLE_SQL).execute(pool).await.unwrap();
-    let token = ExecutionOwnerToken { root_id: "session".into(), epoch: 1, nonce: "owner".into() };
+    sqlx::query(CREATE_OP_LEDGER_SQL)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query(CREATE_SESSION_EXECUTION_OWNERS_TABLE_SQL)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query(CREATE_SESSION_CLOSE_INTENTS_TABLE_SQL)
+        .execute(pool)
+        .await
+        .unwrap();
+    let token = ExecutionOwnerToken {
+        root_id: "session".into(),
+        epoch: 1,
+        nonce: "owner".into(),
+    };
     sqlx::query("INSERT INTO session_execution_owners VALUES ('session', 1, 'owner', CAST(strftime('%s','now') AS INTEGER) + 30, 0)")
         .execute(pool).await.unwrap();
     sqlx::query("INSERT INTO session_close_intents VALUES ('session', 'now')")
-        .execute(pool).await.unwrap();
+        .execute(pool)
+        .await
+        .unwrap();
     let store = fixture.store(StoreAccess::ReadWrite);
-    assert_eq!(store.close_settlement(&token).await.unwrap(), CloseSettlement::Pending);
-    store.apply_owner_batch(vec![
-        StatementSpec::bare("UPDATE session_execution_owners SET released = 1 WHERE root_id = 'session'"),
-        StatementSpec::bare("DELETE FROM session_close_intents WHERE thread_id = 'session'"),
-    ]).await.unwrap();
-    assert_eq!(store.close_settlement(&token).await.unwrap(), CloseSettlement::Finished);
+    assert_eq!(
+        store.close_settlement(&token).await.unwrap(),
+        CloseSettlement::Pending
+    );
+    store
+        .apply_owner_batch(vec![
+            StatementSpec::bare(
+                "UPDATE session_execution_owners SET released = 1 WHERE root_id = 'session'",
+            ),
+            StatementSpec::bare("DELETE FROM session_close_intents WHERE thread_id = 'session'"),
+        ])
+        .await
+        .unwrap();
+    assert_eq!(
+        store.close_settlement(&token).await.unwrap(),
+        CloseSettlement::Finished
+    );
     sqlx::query("UPDATE session_execution_owners SET epoch = 2, nonce = 'next', released = 0 WHERE root_id = 'session'")
         .execute(pool).await.unwrap();
-    assert_eq!(store.close_settlement(&token).await.unwrap(), CloseSettlement::ChangedOwner);
+    assert_eq!(
+        store.close_settlement(&token).await.unwrap(),
+        CloseSettlement::ChangedOwner
+    );
 }

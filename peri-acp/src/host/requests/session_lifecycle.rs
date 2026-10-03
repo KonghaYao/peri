@@ -9,7 +9,6 @@ use agent_client_protocol::schema::v1::{
     CloseSessionResponse, DeleteSessionResponse, ForkSessionResponse, ListSessionsResponse,
     NewSessionResponse, SessionId,
 };
-use peri_acp_types::PeriCaps;
 use peri_acp_types::ports::WorkflowMiddlewarePort;
 use peri_acp_types::session_resources::{
     FrozenSnapshotBytes, FrozenState, NewSessionDraft, NewSessionMeta, SessionInitialization,
@@ -17,11 +16,12 @@ use peri_acp_types::session_resources::{
 };
 use peri_acp_types::thread::CancelPolicy;
 use peri_acp_types::workspace::{ResolvedWorkspace, SessionBinding};
+use peri_acp_types::PeriCaps;
 use serde_json::Value;
 use tracing::{info, warn};
 
 use super::super::notify::send_available_commands_update;
-use super::super::{AcpServerConfig, SessionState, build_mode_state};
+use super::super::{build_mode_state, AcpServerConfig, SessionState};
 use crate::dispatch::config_update::make_config_options;
 use crate::{dispatch, transport::types::AcpError};
 

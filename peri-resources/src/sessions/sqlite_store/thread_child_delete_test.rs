@@ -18,8 +18,8 @@
 use peri_acp_types::session_resources::{FrozenSnapshotBytes, NewSession, NewSessionMeta};
 use peri_acp_types::store::PersistedPayload;
 use peri_acp_types::workspace::{ResolvedWorkspace, SessionBinding, WorkspaceExecutionDescriptor};
-use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use sqlx::SqlitePool;
 use tempfile::TempDir;
 
 use super::session_rows::THREAD_CHILD_DELETES;
@@ -99,14 +99,27 @@ async fn seed(fixture: &NoCascade, id: &str, parent: Option<&str>) {
     };
     fixture.data.save_new_session(&input).await.unwrap();
     if parent.is_none() {
-        let claim = fixture.data.claim_execution_owner(&input.thread_id, false, None).await.unwrap();
-        fixture.data.install_execution_owner_token(claim.token.clone());
-        fixture.data.bind_execution_workspace_owner(&claim.token, &WorkspaceExecutionDescriptor {
-            endpoint: "http://127.0.0.1:10101".into(),
-            key_identity: "a".repeat(64),
-            agent_generation_id: format!("agent-{id}"),
-            unsupported_async_owners: false,
-        }).await.unwrap();
+        let claim = fixture
+            .data
+            .claim_execution_owner(&input.thread_id, false, None)
+            .await
+            .unwrap();
+        fixture
+            .data
+            .install_execution_owner_token(claim.token.clone());
+        fixture
+            .data
+            .bind_execution_workspace_owner(
+                &claim.token,
+                &WorkspaceExecutionDescriptor {
+                    endpoint: "http://127.0.0.1:10101".into(),
+                    key_identity: "a".repeat(64),
+                    agent_generation_id: format!("agent-{id}"),
+                    unsupported_async_owners: false,
+                },
+            )
+            .await
+            .unwrap();
     }
     fixture
         .data
@@ -174,7 +187,11 @@ async fn assert_child_rows_present(pool: &SqlitePool, tables: &[(String, String)
     for (table, column) in tables {
         for (index, id) in ids.iter().enumerate() {
             // Execution ownership belongs to the root; children share its row.
-            if matches!(table.as_str(), "session_execution_owners" | "session_execution_workspace_descriptors") && index > 0 {
+            if matches!(
+                table.as_str(),
+                "session_execution_owners" | "session_execution_workspace_descriptors"
+            ) && index > 0
+            {
                 continue;
             }
             assert!(

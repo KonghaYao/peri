@@ -1,7 +1,7 @@
 use super::*;
-use peri_acp_types::PeriCaps;
 use peri_acp_types::messages::BaseMessage;
 use peri_acp_types::workspace::ReadOnlyAdmission;
+use peri_acp_types::PeriCaps;
 
 async fn binding_state(cfg: &AcpServerConfig, id: &str) -> BindingState {
     cfg.session_resources
@@ -131,14 +131,12 @@ async fn test_unloaded_close_preserves_intent_until_former_owner_is_fenced() {
         .await
         .unwrap_err();
     assert_eq!(error.code, -32010);
-    assert!(
-        fixture
-            .cfg
-            .session_resources
-            .is_session_closing(&id)
-            .await
-            .unwrap()
-    );
+    assert!(fixture
+        .cfg
+        .session_resources
+        .is_session_closing(&id)
+        .await
+        .unwrap());
 }
 
 #[tokio::test]
@@ -152,14 +150,12 @@ async fn test_unloaded_close_cannot_initiate_close_of_active_session() {
         .await
         .unwrap_err();
     assert!(error.message.contains("execution owner"));
-    assert!(
-        !fixture
-            .cfg
-            .session_resources
-            .is_session_closing(&id)
-            .await
-            .unwrap()
-    );
+    assert!(!fixture
+        .cfg
+        .session_resources
+        .is_session_closing(&id)
+        .await
+        .unwrap());
 }
 
 #[tokio::test]
@@ -409,14 +405,12 @@ async fn test_foreign_machine_history_is_read_only_without_legacy_adoption_or_to
         .set_pending_caps(PeriCaps::all_enabled());
     let binding = binding_state(&fixture.cfg, &id).await;
     let frozen = frozen_state(&fixture.cfg, &id).await;
-    assert!(
-        fixture
-            .bridge
-            .load_session_binding(&id)
-            .await
-            .unwrap()
-            .is_none()
-    );
+    assert!(fixture
+        .bridge
+        .load_session_binding(&id)
+        .await
+        .unwrap()
+        .is_none());
     for method in ["session/load", "session/resume"] {
         let response = fixture
             .request(method, &json!({"sessionId":id}))
@@ -435,14 +429,12 @@ async fn test_foreign_machine_history_is_read_only_without_legacy_adoption_or_to
         assert!(state.workflow_middleware.is_none());
         assert_eq!(binding_state(&fixture.cfg, &id).await, binding);
         assert_eq!(frozen_state(&fixture.cfg, &id).await, frozen);
-        assert!(
-            fixture
-                .bridge
-                .load_session_binding(&id)
-                .await
-                .unwrap()
-                .is_none()
-        );
+        assert!(fixture
+            .bridge
+            .load_session_binding(&id)
+            .await
+            .unwrap()
+            .is_none());
     }
     fixture.close(&id).await;
     let original_id = fixture.id.clone();

@@ -41,7 +41,9 @@ impl Registration {
         stream.write_all(&hello)?;
         let mut ack = [0_u8; 1];
         stream.read_exact(&mut ack)?;
-        if ack[0] != ACK { return Err(io::Error::other("process broker rejected registration")); }
+        if ack[0] != ACK {
+            return Err(io::Error::other("process broker rejected registration"));
+        }
         Ok(Self { stream })
     }
 
@@ -54,7 +56,9 @@ impl Registration {
         let fd = self.stream.as_raw_fd();
         // The child cannot execute a command until the SDK has registered its
         // process group. Only async-signal-safe syscalls run after fork.
-        unsafe { command.pre_exec(move || register_child(fd)); }
+        unsafe {
+            command.pre_exec(move || register_child(fd));
+        }
     }
 }
 
@@ -83,8 +87,11 @@ mod tests {
             let mut settled = [0_u8; 1];
             stream.read_exact(&mut settled).unwrap();
             assert_eq!(settled[0], b'E');
-            assert_eq!(unsafe { libc::kill(-(pid as i32), 0) }, 0,
-                "anchor must reserve PGID until broker releases it");
+            assert_eq!(
+                unsafe { libc::kill(-(pid as i32), 0) },
+                0,
+                "anchor must reserve PGID until broker releases it"
+            );
             stream.write_all(&[ACK]).unwrap();
             pid
         });
@@ -107,10 +114,16 @@ fn register_child(fd: libc::c_int) -> io::Result<()> {
     write_all_fd(fd, &message)?;
     let mut ack = [0_u8; 1];
     read_exact_fd(fd, &mut ack)?;
-    if ack[0] != ACK { return Err(io::Error::from_raw_os_error(libc::EPERM)); }
+    if ack[0] != ACK {
+        return Err(io::Error::from_raw_os_error(libc::EPERM));
+    }
     let command_pid = unsafe { libc::fork() };
-    if command_pid < 0 { return Err(io::Error::last_os_error()); }
-    if command_pid == 0 { return Ok(()); }
+    if command_pid < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if command_pid == 0 {
+        return Ok(());
+    }
 
     // This process stays the group leader and keeps its numeric PGID reserved
     // until the SDK confirms all command descendants have left the group.
@@ -120,38 +133,81 @@ fn register_child(fd: libc::c_int) -> io::Result<()> {
     let mut status = 0;
     loop {
         let waited = unsafe { libc::waitpid(command_pid, &mut status, 0) };
-        if waited == command_pid { break; }
-        if waited < 0 && io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) { continue; }
-        unsafe { libc::_exit(127); }
+        if waited == command_pid {
+            break;
+        }
+        if waited < 0 && io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+            continue;
+        }
+        unsafe {
+            libc::_exit(127);
+        }
     }
-    if write_all_fd(fd, b"E").is_err() { unsafe { libc::_exit(127); } }
+    if write_all_fd(fd, b"E").is_err() {
+        unsafe {
+            libc::_exit(127);
+        }
+    }
     let mut release = [0_u8; 1];
     if read_exact_fd(fd, &mut release).is_err() || release[0] != ACK {
-        unsafe { libc::_exit(127); }
+        unsafe {
+            libc::_exit(127);
+        }
     }
-    let code = if libc::WIFEXITED(status) { libc::WEXITSTATUS(status) }
-        else if libc::WIFSIGNALED(status) { 128 + libc::WTERMSIG(status) }
-        else { 127 };
-    unsafe { libc::_exit(code); }
+    let code = if libc::WIFEXITED(status) {
+        libc::WEXITSTATUS(status)
+    } else if libc::WIFSIGNALED(status) {
+        128 + libc::WTERMSIG(status)
+    } else {
+        127
+    };
+    unsafe {
+        libc::_exit(code);
+    }
 }
 
 fn close_anchor_descriptors(fd: libc::c_int) -> libc::c_int {
     // The broker stream is the only descriptor the anchor retains. Closing
     // stdio permits wait_with_output to see EOF after the command exits.
-    let retained = if fd == 3 { 3 } else { unsafe { libc::dup2(fd, 3) } };
-    if retained < 0 { unsafe { libc::_exit(127); } }
-    for descriptor in 0..3 { unsafe { libc::close(descriptor); } }
+    let retained = if fd == 3 {
+        3
+    } else {
+        unsafe { libc::dup2(fd, 3) }
+    };
+    if retained < 0 {
+        unsafe {
+            libc::_exit(127);
+        }
+    }
+    for descriptor in 0..3 {
+        unsafe {
+            libc::close(descriptor);
+        }
+    }
     let limit = unsafe { libc::sysconf(libc::_SC_OPEN_MAX) };
-    let limit = if limit > 0 { limit.min(65_536) as libc::c_int } else { 4096 };
-    for descriptor in 4..limit { unsafe { libc::close(descriptor); } }
+    let limit = if limit > 0 {
+        limit.min(65_536) as libc::c_int
+    } else {
+        4096
+    };
+    for descriptor in 4..limit {
+        unsafe {
+            libc::close(descriptor);
+        }
+    }
     retained
 }
 
 fn write_all_fd(fd: libc::c_int, mut bytes: &[u8]) -> io::Result<()> {
     while !bytes.is_empty() {
         let count = unsafe { libc::write(fd, bytes.as_ptr().cast(), bytes.len()) };
-        if count > 0 { bytes = &bytes[count as usize..]; continue; }
-        if count == -1 && io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) { continue; }
+        if count > 0 {
+            bytes = &bytes[count as usize..];
+            continue;
+        }
+        if count == -1 && io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+            continue;
+        }
         return Err(io::Error::from_raw_os_error(libc::EIO));
     }
     Ok(())
@@ -160,8 +216,13 @@ fn write_all_fd(fd: libc::c_int, mut bytes: &[u8]) -> io::Result<()> {
 fn read_exact_fd(fd: libc::c_int, mut bytes: &mut [u8]) -> io::Result<()> {
     while !bytes.is_empty() {
         let count = unsafe { libc::read(fd, bytes.as_mut_ptr().cast(), bytes.len()) };
-        if count > 0 { bytes = &mut bytes[count as usize..]; continue; }
-        if count == -1 && io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) { continue; }
+        if count > 0 {
+            bytes = &mut bytes[count as usize..];
+            continue;
+        }
+        if count == -1 && io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+            continue;
+        }
         return Err(io::Error::from_raw_os_error(libc::EIO));
     }
     Ok(())

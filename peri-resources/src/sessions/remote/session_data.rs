@@ -64,9 +64,9 @@ use super::credentials::SessionStoreCredential;
 use super::endpoint::RemoteEndpoint;
 use super::generation::{ConnectionFactory, ConnectionGate, RemoteConnectionFactory};
 use super::mutation::{RemoteStore, StoreAccess};
-use super::schema::{StoreId, StoreIdentityRead};
 #[cfg(test)]
 use super::schema;
+use super::schema::{StoreId, StoreIdentityRead};
 use super::schema_upgrade;
 use super::session_schema;
 use super::sql::StatementSpec;
@@ -89,8 +89,8 @@ pub(super) enum StoreInitialization {
 
 #[path = "session_open.rs"]
 mod session_open;
-pub(super) use session_open::{OpenStep, open_step, open_verdict};
 use session_open::refuse_legacy_shape;
+pub(super) use session_open::{open_step, open_verdict, OpenStep};
 
 /// 远端会话数据 adapter：一个已初始化（或已读回身份）的远程 store 上的会话行为。
 ///
@@ -535,14 +535,21 @@ impl SessionDataPort for RemoteSessionData {
         require_closing: bool,
         expected_previous_epoch: Option<i64>,
     ) -> SessionResourceResult<peri_acp_types::workspace::ExecutionOwnerClaim> {
-        self.claim_owner(root, require_closing, expected_previous_epoch).await
+        self.claim_owner(root, require_closing, expected_previous_epoch)
+            .await
     }
 
-    async fn renew_execution_owner(&self, token: &ExecutionOwnerToken) -> SessionResourceResult<()> {
+    async fn renew_execution_owner(
+        &self,
+        token: &ExecutionOwnerToken,
+    ) -> SessionResourceResult<()> {
         self.renew_owner(token).await
     }
 
-    async fn release_execution_owner(&self, token: &ExecutionOwnerToken) -> SessionResourceResult<()> {
+    async fn release_execution_owner(
+        &self,
+        token: &ExecutionOwnerToken,
+    ) -> SessionResourceResult<()> {
         self.release_owner(token).await
     }
 
@@ -550,24 +557,41 @@ impl SessionDataPort for RemoteSessionData {
         self.finish_owned_close(token).await
     }
 
-    async fn close_settlement(&self, token: &ExecutionOwnerToken) -> SessionResourceResult<peri_acp_types::session_resources::CloseSettlement> {
+    async fn close_settlement(
+        &self,
+        token: &ExecutionOwnerToken,
+    ) -> SessionResourceResult<peri_acp_types::session_resources::CloseSettlement> {
         self.read_close_settlement(token).await
     }
 
-    async fn bind_execution_workspace_owner(&self, token: &ExecutionOwnerToken, descriptor: &peri_acp_types::workspace::WorkspaceExecutionDescriptor) -> SessionResourceResult<()> {
+    async fn bind_execution_workspace_owner(
+        &self,
+        token: &ExecutionOwnerToken,
+        descriptor: &peri_acp_types::workspace::WorkspaceExecutionDescriptor,
+    ) -> SessionResourceResult<()> {
         self.bind_workspace_owner(token, descriptor).await
     }
 
-    async fn read_execution_workspace_owner(&self, root: &ThreadId) -> SessionResourceResult<Option<peri_acp_types::workspace::ExecutionWorkspaceOwnerRecord>> {
+    async fn read_execution_workspace_owner(
+        &self,
+        root: &ThreadId,
+    ) -> SessionResourceResult<Option<peri_acp_types::workspace::ExecutionWorkspaceOwnerRecord>>
+    {
         self.read_workspace_owner(root).await
     }
 
-    async fn mark_unsupported_async_owner(&self, token: &ExecutionOwnerToken) -> SessionResourceResult<()> {
+    async fn mark_unsupported_async_owner(
+        &self,
+        token: &ExecutionOwnerToken,
+    ) -> SessionResourceResult<()> {
         self.mark_workspace_owner_unsupported(token).await
     }
 
     fn install_execution_owner_token(&self, token: ExecutionOwnerToken) {
-        self.owner_tokens.lock().unwrap().insert(token.root_id.clone(), token);
+        self.owner_tokens
+            .lock()
+            .unwrap()
+            .insert(token.root_id.clone(), token);
     }
 
     fn execution_owner_token(&self, root: &ThreadId) -> Option<ExecutionOwnerToken> {

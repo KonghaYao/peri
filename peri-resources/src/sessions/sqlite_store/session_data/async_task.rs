@@ -105,5 +105,4 @@ impl SqliteSessionData {
                 .map_err(|e| map_sqlx(&e))?;
         Ok(row.is_some())
     }
-
 }

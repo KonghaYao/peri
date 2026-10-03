@@ -6,10 +6,10 @@ use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::process::{Child, Command};
 
-#[cfg(windows)]
-mod windows;
 #[cfg(unix)]
 mod broker;
+#[cfg(windows)]
+mod windows;
 
 /// One dedicated Unix process group or Windows Job, prepared before child execution.
 /// Keep this owner until `wait_for_exit` completes; Drop only requests termination.
@@ -41,7 +41,8 @@ impl ProcessTree {
 
     pub fn prepare(&self, command: &mut Command) {
         command.kill_on_drop(true);
-        command.env_remove("PERI_SUPERVISOR_SOCKET")
+        command
+            .env_remove("PERI_SUPERVISOR_SOCKET")
             .env_remove("PERI_SUPERVISOR_TOKEN")
             .env_remove("PERI_TRUSTED_WORKSPACE_URL")
             .env_remove("PERI_TRUSTED_WORKSPACE_SCOPE_SECRET_FILE");
@@ -59,21 +60,29 @@ impl ProcessTree {
     #[cfg(unix)]
     pub fn prepare_std(&self, command: &mut std::process::Command) {
         use std::os::unix::process::CommandExt;
-        command.env_remove("PERI_SUPERVISOR_SOCKET")
+        command
+            .env_remove("PERI_SUPERVISOR_SOCKET")
             .env_remove("PERI_SUPERVISOR_TOKEN")
             .env_remove("PERI_TRUSTED_WORKSPACE_URL")
             .env_remove("PERI_TRUSTED_WORKSPACE_SCOPE_SECRET_FILE");
         command.process_group(0);
-        if let Some(broker) = &self.broker { broker.prepare_std(command); }
+        if let Some(broker) = &self.broker {
+            broker.prepare_std(command);
+        }
     }
 
     #[cfg(unix)]
     pub fn attach_pid(&mut self, pid: u32) -> io::Result<()> {
-        if self.attempted { return Err(io::Error::other("process tree already attached")); }
+        if self.attempted {
+            return Err(io::Error::other("process tree already attached"));
+        }
         self.attempted = true;
         self.pid = Some(pid);
-        if pid > 0 && i32::try_from(pid).is_ok() { Ok(()) }
-        else { Err(io::Error::other("child process group unavailable")) }
+        if pid > 0 && i32::try_from(pid).is_ok() {
+            Ok(())
+        } else {
+            Err(io::Error::other("child process group unavailable"))
+        }
     }
 
     #[cfg(unix)]
@@ -163,7 +172,8 @@ impl Drop for ProcessTree {
 
 /// Run a short-lived command under the same process-group ownership as tools.
 pub async fn run_output(mut command: Command) -> io::Result<std::process::Output> {
-    command.stdout(std::process::Stdio::piped())
+    command
+        .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     let mut tree = ProcessTree::new()?;
     tree.prepare(&mut command);
@@ -174,7 +184,9 @@ pub async fn run_output(mut command: Command) -> io::Result<std::process::Output
         return Err(error);
     }
     let output = child.wait_with_output().await;
-    if output.is_err() { tree.terminate(); }
+    if output.is_err() {
+        tree.terminate();
+    }
     tree.wait_for_exit().await;
     output
 }
@@ -189,7 +201,9 @@ pub fn run_output_blocking(mut command: std::process::Command) -> io::Result<std
     let child = command.spawn()?;
     tree.attach_pid(child.id())?;
     let output = child.wait_with_output();
-    if output.is_err() { tree.terminate(); }
+    if output.is_err() {
+        tree.terminate();
+    }
     tree.wait_for_exit_blocking();
     output
 }

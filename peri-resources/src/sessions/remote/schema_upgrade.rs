@@ -25,7 +25,8 @@ pub(super) async fn upgrade(
     }
     if snapshot.schema_version == 11 && snapshot.contract == "peri.session.store/v2" {
         super::schema_v12_upgrade::upgrade(store, snapshot).await?;
-        let super::schema::StoreIdentityRead::Present(upgraded) = store.read_identity().await? else {
+        let super::schema::StoreIdentityRead::Present(upgraded) = store.read_identity().await?
+        else {
             return Err(invalid_schema());
         };
         return super::schema_v13_upgrade::upgrade(store, &upgraded).await;

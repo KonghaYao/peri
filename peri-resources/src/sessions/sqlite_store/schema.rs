@@ -1,8 +1,8 @@
 //! 单库 schema 升级：保留历史与会话身份，事务内清理退役状态。
 
+use super::database::SqliteSessionDatabase;
 #[cfg(test)]
 use super::SqliteThreadStore;
-use super::database::SqliteSessionDatabase;
 use crate::sessions::canonical::{self, CREATE_INDEXES, CREATE_TABLES};
 use anyhow::Result;
 use peri_acp_types::workspace::WorkspaceError;

@@ -266,8 +266,9 @@ impl RemoteStore {
         match self.run_managed_batch(statements).await {
             Ok(counts) => Ok(counts),
             Err(BatchFailure::NotApplied { class, .. }) => Err(class.into_session_resource_error()),
-            Err(BatchFailure::QualificationConflict) =>
-                Err(RemoteFailureClass::Constraint.into_session_resource_error()),
+            Err(BatchFailure::QualificationConflict) => {
+                Err(RemoteFailureClass::Constraint.into_session_resource_error())
+            }
             Err(BatchFailure::Unknown { .. }) => Err(SessionResourceError::new(
                 SessionResourceErrorKind::PersistenceUncertain { thread_id: None },
             )),
@@ -468,13 +469,17 @@ impl RemoteStore {
         &self,
         mutation: &QualifiedMutation,
     ) -> SessionResourceResult<(MutationOutcome, Vec<u64>)> {
-        self.apply_qualified_reporting_with_owner(mutation, None).await
+        self.apply_qualified_reporting_with_owner(mutation, None)
+            .await
     }
 
     pub(super) async fn apply_qualified_reporting_with_owner(
         &self,
         mutation: &QualifiedMutation,
-        owner: Option<(&ThreadId, Option<&peri_acp_types::workspace::ExecutionOwnerToken>)>,
+        owner: Option<(
+            &ThreadId,
+            Option<&peri_acp_types::workspace::ExecutionOwnerToken>,
+        )>,
     ) -> SessionResourceResult<(MutationOutcome, Vec<u64>)> {
         self.access.ensure_writable()?;
         self.ensure_autocommit()?;
@@ -493,7 +498,11 @@ impl RemoteStore {
         let mut statements = Vec::with_capacity(mutation.effects.len() + 2);
         statements.push(ledger::qualify_statement(&mutation.identity, &now));
         if let Some((root, token)) = owner {
-            statements.push(ledger::owner_guard_statement(&mutation.identity, root, token));
+            statements.push(ledger::owner_guard_statement(
+                &mutation.identity,
+                root,
+                token,
+            ));
         }
         statements.extend(mutation.effects.iter().cloned());
         Ok(match self.run_managed_batch(statements).await {
@@ -515,7 +524,10 @@ impl RemoteStore {
                         receipt: mutation.identity.receipt.clone(),
                         replayed: false,
                     },
-                    counts.into_iter().skip(if owner.is_some() { 2 } else { 1 }).collect(),
+                    counts
+                        .into_iter()
+                        .skip(if owner.is_some() { 2 } else { 1 })
+                        .collect(),
                 )
             }
             Err(BatchFailure::QualificationConflict) => (

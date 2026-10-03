@@ -4,8 +4,8 @@ use peri_acp_types::plugin::McpSubscriptionsConfig;
 use peri_acp_types::session::{InboxHandle, MessageKind, MessageSource};
 use peri_acp_types::system_reminder::{
     ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
-    ReminderSource as CanonicalReminderSource, SYSTEM_REMINDER_VERSION, SystemReminder,
-    TrustedSystemReminder, TrustedSystemReminderFactory,
+    ReminderSource as CanonicalReminderSource, SystemReminder, TrustedSystemReminder,
+    TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
 };
 use rmcp::{
     model::{ServerNotification, SubscriptionFilter},
@@ -18,7 +18,8 @@ use super::{McpClientPool, McpServiceWrapper};
 #[path = "subscription_tasks.rs"]
 mod tasks;
 
-impl McpClientPool {    // ── subscriptions/listen（2026-07-28 协议）──────────────────────────────
+impl McpClientPool {
+    // ── subscriptions/listen（2026-07-28 协议）──────────────────────────────
 
     /// 广播一条订阅通知到所有已注册的会话 inbox。
     ///

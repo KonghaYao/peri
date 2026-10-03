@@ -26,9 +26,9 @@ use turso_serverless::Value;
 
 use super::mutation::incomplete_reply;
 use super::session_codec as codec;
-use super::session_data::{RemoteSessionData, invalid_input, not_found};
+use super::session_data::{invalid_input, not_found, RemoteSessionData};
 use super::session_sql::{self, DELETE_SESSION_SQL};
-use super::sql::{StatementSpec, int_at, text_at};
+use super::sql::{int_at, text_at, StatementSpec};
 use crate::sessions::data::ChildResumeRecord;
 
 // ─── 批内守卫 ─────────────────────────────────────────────────────────────────
@@ -342,11 +342,9 @@ mod tests {
     fn tree_scope_is_the_whole_subtree() {
         assert!(SELECT_TREE_IDS_SQL.starts_with("WITH RECURSIVE tree(id) AS ("));
         assert!(SELECT_TREE_IDS_SQL.contains("UNION ALL"));
-        assert!(
-            SELECT_TREE_IDS_SQL
-                .trim_end()
-                .ends_with("SELECT id FROM tree")
-        );
+        assert!(SELECT_TREE_IDS_SQL
+            .trim_end()
+            .ends_with("SELECT id FROM tree"));
         assert_eq!(DELETE_SESSION_SQL, "DELETE FROM threads WHERE id = ?1");
         assert_eq!(
             DELETE_SESSION_MESSAGES_SQL,

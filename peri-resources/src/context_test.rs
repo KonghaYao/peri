@@ -241,9 +241,15 @@ async fn test_bridge_lease_is_visible_to_shared_facade() {
         .unwrap();
     let lease = store.acquire_execution_lease(&thread).await.unwrap();
 
-    assert!(facade.append_history(&thread, &[PersistedPayload::Message(
-        BaseMessage::human("before Store claim"),
-    )]).await.is_err());
+    assert!(facade
+        .append_history(
+            &thread,
+            &[PersistedPayload::Message(BaseMessage::human(
+                "before Store claim"
+            ),)]
+        )
+        .await
+        .is_err());
     let claimed = facade.acquire_execution(&thread, &workspace).await.unwrap();
     assert_eq!(claimed.owner_token(), lease.owner_token());
 

@@ -23,7 +23,8 @@ pub(super) fn add_mcp(
             Arc::clone(deployment),
         );
         if let (Some(pool), Some(resources)) =
-            (mcp_pool_concrete.as_ref(), ctx.session_resources.as_ref()) {
+            (mcp_pool_concrete.as_ref(), ctx.session_resources.as_ref())
+        {
             let pool = Arc::clone(pool);
             let resources = Arc::clone(resources);
             let admission: crate::mcp::dynamic::tool::AsyncOwnerAdmission = Arc::new(move |id| {
@@ -31,7 +32,8 @@ pub(super) fn add_mcp(
                 let resources = Arc::clone(&resources);
                 let id = id.to_owned();
                 Box::pin(async move {
-                    pool.mark_unsupported_async_task_owner(&id, resources.as_ref()).await
+                    pool.mark_unsupported_async_task_owner(&id, resources.as_ref())
+                        .await
                 })
             });
             middleware = middleware.with_async_owner_admission(admission);

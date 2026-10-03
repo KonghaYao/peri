@@ -106,12 +106,10 @@ mod acp_setup_tests {
     #[test]
     fn invalid_session_server_list_is_rejected() {
         assert!(session_mcp_servers(&serde_json::json!({"mcpServers": {}})).is_err());
-        assert!(
-            session_mcp_servers(&serde_json::json!({"mcpServers": [
-                {"type":"http", "name":"workspace", "url":"https://a.test", "headers":[]},
-                {"type":"http", "name":"workspace", "url":"https://b.test", "headers":[]}
-            ]}))
-            .is_err()
-        );
+        assert!(session_mcp_servers(&serde_json::json!({"mcpServers": [
+            {"type":"http", "name":"workspace", "url":"https://a.test", "headers":[]},
+            {"type":"http", "name":"workspace", "url":"https://b.test", "headers":[]}
+        ]}))
+        .is_err());
     }
 }

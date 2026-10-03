@@ -1,6 +1,6 @@
 //! SQLite schema 11 → 12 的数据搬运。接入写打开前由夹具验证完整形状与回滚。
 
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 use sqlx::{Connection, SqliteConnection};
 
 use super::storage_v2_plan::read_local_plan;
@@ -28,9 +28,7 @@ pub(super) async fn migrate_local_v2(connection: &mut SqliteConnection) -> Resul
 }
 
 /// Install the durable root execution generation before accepting schema 13 writes.
-pub(super) async fn migrate_local_execution_owner(
-    connection: &mut SqliteConnection,
-) -> Result<()> {
+pub(super) async fn migrate_local_execution_owner(connection: &mut SqliteConnection) -> Result<()> {
     let (version,): (i64,) = sqlx::query_as("PRAGMA user_version")
         .fetch_one(&mut *connection)
         .await?;

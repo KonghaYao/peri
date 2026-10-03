@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
-use tokio::process::{Child, Command};
 use peri_process::ProcessTree;
+use tokio::process::{Child, Command};
 use tracing::{debug, info, warn};
 
 use crate::error::WorkflowError;
@@ -131,7 +131,11 @@ async fn stop_install_child(child: &mut Child, tree: &ProcessTree) {
     tree.wait_for_exit().await;
 }
 
-async fn run_install_with_timeout(child: &mut Child, tree: &ProcessTree, timeout: Duration) -> std::io::Result<bool> {
+async fn run_install_with_timeout(
+    child: &mut Child,
+    tree: &ProcessTree,
+    timeout: Duration,
+) -> std::io::Result<bool> {
     match tokio::time::timeout(timeout, child.wait()).await {
         Ok(status) => {
             let status = status?;

@@ -581,7 +581,9 @@ pub trait SessionResources: Send + Sync {
         _root: &ThreadId,
         _expected_current_epoch: i64,
     ) -> SessionResourceResult<Arc<dyn SessionExecutionLease>> {
-        Err(SessionResourceError::new(SessionResourceErrorKind::Unsupported))
+        Err(SessionResourceError::new(
+            SessionResourceErrorKind::Unsupported,
+        ))
     }
 
     /// Renew the exact Store generation while the session is running.
@@ -589,7 +591,9 @@ pub trait SessionResources: Send + Sync {
         &self,
         _token: &crate::workspace::ExecutionOwnerToken,
     ) -> SessionResourceResult<()> {
-        Err(SessionResourceError::new(SessionResourceErrorKind::Unsupported))
+        Err(SessionResourceError::new(
+            SessionResourceErrorKind::Unsupported,
+        ))
     }
 
     /// Release only after all local work and persistence have settled.
@@ -597,7 +601,9 @@ pub trait SessionResources: Send + Sync {
         &self,
         _token: &crate::workspace::ExecutionOwnerToken,
     ) -> SessionResourceResult<()> {
-        Err(SessionResourceError::new(SessionResourceErrorKind::Unsupported))
+        Err(SessionResourceError::new(
+            SessionResourceErrorKind::Unsupported,
+        ))
     }
 
     /// Final close commit: keep the intent until the exact owner generation
@@ -606,14 +612,18 @@ pub trait SessionResources: Send + Sync {
         &self,
         _token: &crate::workspace::ExecutionOwnerToken,
     ) -> SessionResourceResult<()> {
-        Err(SessionResourceError::new(SessionResourceErrorKind::Unsupported))
+        Err(SessionResourceError::new(
+            SessionResourceErrorKind::Unsupported,
+        ))
     }
 
     async fn close_settlement(
         &self,
         _token: &crate::workspace::ExecutionOwnerToken,
     ) -> SessionResourceResult<CloseSettlement> {
-        Err(SessionResourceError::new(SessionResourceErrorKind::Unsupported))
+        Err(SessionResourceError::new(
+            SessionResourceErrorKind::Unsupported,
+        ))
     }
 
     /// Bind a trusted external owner to this exact live Store generation before tools run.
@@ -622,7 +632,9 @@ pub trait SessionResources: Send + Sync {
         _token: &crate::workspace::ExecutionOwnerToken,
         _descriptor: &crate::workspace::WorkspaceExecutionDescriptor,
     ) -> SessionResourceResult<()> {
-        Err(SessionResourceError::new(SessionResourceErrorKind::Unsupported))
+        Err(SessionResourceError::new(
+            SessionResourceErrorKind::Unsupported,
+        ))
     }
 
     /// Read nonsecret identity evidence without exposing the Store nonce.
@@ -630,7 +642,9 @@ pub trait SessionResources: Send + Sync {
         &self,
         _root: &ThreadId,
     ) -> SessionResourceResult<Option<crate::workspace::ExecutionWorkspaceOwnerRecord>> {
-        Err(SessionResourceError::new(SessionResourceErrorKind::Unsupported))
+        Err(SessionResourceError::new(
+            SessionResourceErrorKind::Unsupported,
+        ))
     }
 
     /// Monotonically record an async owner that cannot be recovered by Workspace scope.
@@ -638,7 +652,9 @@ pub trait SessionResources: Send + Sync {
         &self,
         _token: &crate::workspace::ExecutionOwnerToken,
     ) -> SessionResourceResult<()> {
-        Err(SessionResourceError::new(SessionResourceErrorKind::Unsupported))
+        Err(SessionResourceError::new(
+            SessionResourceErrorKind::Unsupported,
+        ))
     }
 
     // ── 创建与接纳 ──

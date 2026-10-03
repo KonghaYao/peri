@@ -43,12 +43,16 @@ fn external_task_id(request: &ExternalTaskRegistration) -> String {
     format!("mcp-{:x}", hasher.finalize())
 }
 
-fn external_started_at(request: &ExternalTaskRegistration) -> Result<chrono::DateTime<chrono::Utc>, BackgroundRegistryError> {
+fn external_started_at(
+    request: &ExternalTaskRegistration,
+) -> Result<chrono::DateTime<chrono::Utc>, BackgroundRegistryError> {
     request.started_at.as_deref().map_or_else(
         || Ok(chrono::Utc::now()),
-        |timestamp| chrono::DateTime::parse_from_rfc3339(timestamp)
-            .map(|parsed| parsed.with_timezone(&chrono::Utc))
-            .map_err(|_| BackgroundRegistryError::InvalidStartedAt),
+        |timestamp| {
+            chrono::DateTime::parse_from_rfc3339(timestamp)
+                .map(|parsed| parsed.with_timezone(&chrono::Utc))
+                .map_err(|_| BackgroundRegistryError::InvalidStartedAt)
+        },
     )
 }
 

@@ -359,8 +359,10 @@ fn revert_files(changes: &[FileChange], cwd: &str, warnings: &mut Vec<String>) {
                 }
                 // 尝试 git restore 恢复原始版本
                 let mut command = std::process::Command::new("git");
-                command.args(["checkout", "HEAD", "--"])
-                    .arg(&full_path).current_dir(cwd);
+                command
+                    .args(["checkout", "HEAD", "--"])
+                    .arg(&full_path)
+                    .current_dir(cwd);
                 #[cfg(unix)]
                 let result = peri_process::run_output_blocking(command);
                 #[cfg(not(unix))]

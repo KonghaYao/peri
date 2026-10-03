@@ -86,7 +86,10 @@ async fn id_recovery_ignores_missing_paths_and_fences_competing_instances() {
         .unwrap();
     assert!(!directory.path().join("threads.db.execution-locks").exists());
     first_run.mark_clean().await.unwrap();
-    first.release_execution_owner(&first_run.owner_token().unwrap()).await.unwrap();
+    first
+        .release_execution_owner(&first_run.owner_token().unwrap())
+        .await
+        .unwrap();
     let second_run = second.acquire_execution(&id, &workspace).await.unwrap();
     assert!(first
         .append_history(
@@ -107,7 +110,10 @@ async fn id_recovery_ignores_missing_paths_and_fences_competing_instances() {
         .await
         .unwrap();
     second_run.mark_clean().await.unwrap();
-    second.release_execution_owner(&second_run.owner_token().unwrap()).await.unwrap();
+    second
+        .release_execution_owner(&second_run.owner_token().unwrap())
+        .await
+        .unwrap();
     assert_eq!(store.load_messages(&id).await.unwrap().len(), 2);
     assert_eq!(
         store.load_meta(&id).await.unwrap().cwd,

@@ -194,7 +194,10 @@ async fn cold_terminal_restore_has_no_running_projection_or_started_event() {
         .unwrap();
     assert_eq!(manager.snapshot().tasks[0].task_id, id);
     assert_eq!(manager.snapshot().tasks[0].status, "completed");
-    assert_eq!(manager.snapshot().tasks[0].started_at, "2026-10-03T00:00:00+00:00");
+    assert_eq!(
+        manager.snapshot().tasks[0].started_at,
+        "2026-10-03T00:00:00+00:00"
+    );
     assert_eq!(manager.active_count(), 0);
     assert!(matches!(
         changes.try_recv().unwrap().event,

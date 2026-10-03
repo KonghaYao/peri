@@ -16,8 +16,8 @@ pub mod receive;
 pub mod tool_dispatch;
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::Arc;
 
 use parking_lot::RwLock;
 use peri_acp_types::identity::AgentId;

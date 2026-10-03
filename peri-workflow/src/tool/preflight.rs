@@ -21,9 +21,7 @@ pub(super) async fn preflight_validate_script(script: &str) -> Result<(), String
         .arg("validate")
         .arg(&source)
         .arg("--json");
-    let output = crate::process::output(command)
-        .await
-        .map_err(unavailable)?;
+    let output = crate::process::output(command).await.map_err(unavailable)?;
     if output.status.success() {
         return Ok(());
     }

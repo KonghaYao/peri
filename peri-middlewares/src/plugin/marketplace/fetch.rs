@@ -27,7 +27,13 @@ pub(crate) async fn fetch_git(
 
     if !cache_dir.exists() {
         let mut command = tokio::process::Command::new("git");
-        command.args(["clone", "--depth", "1", url, &cache_dir.display().to_string()]);
+        command.args([
+            "clone",
+            "--depth",
+            "1",
+            url,
+            &cache_dir.display().to_string(),
+        ]);
         let output = tokio::time::timeout(
             std::time::Duration::from_secs(30),
             peri_process::run_output(command),
@@ -146,7 +152,12 @@ pub(crate) async fn fetch_npm(
     let tmp_dir = std::env::temp_dir().join(format!("npm-pack-{package}-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&tmp_dir)?;
     let mut command = tokio::process::Command::new("npm");
-    command.args(["pack", package, "--pack-destination", &tmp_dir.display().to_string()]);
+    command.args([
+        "pack",
+        package,
+        "--pack-destination",
+        &tmp_dir.display().to_string(),
+    ]);
     let output = tokio::time::timeout(
         std::time::Duration::from_secs(60),
         peri_process::run_output(command),

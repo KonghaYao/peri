@@ -58,7 +58,11 @@ async fn explicit_close_intent_survives_resource_reopen() {
     assert!(fixture.facade.is_session_closing(&id).await.unwrap());
     let token = lease.owner_token().unwrap();
     lease.mark_clean().await.unwrap();
-    fixture.facade.release_execution_owner(&token).await.unwrap();
+    fixture
+        .facade
+        .release_execution_owner(&token)
+        .await
+        .unwrap();
     let reopened_local = LocalExecution::open(fixture._dirs.1.path().join("threads.db"))
         .await
         .unwrap();
@@ -68,10 +72,23 @@ async fn explicit_close_intent_survives_resource_reopen() {
         SessionDataHome::RemoteStore,
     );
     assert!(reopened.is_session_closing(&id).await.unwrap());
-    let takeover = reopened.claim_closing_execution(&id, token.epoch).await.unwrap();
-    let retry = reopened.claim_closing_execution(&id, takeover.owner_token().unwrap().epoch).await.unwrap();
-    assert_eq!(retry.owner_token(), takeover.owner_token(), "an incomplete close reuses its exact Store generation");
-    reopened.finish_close(&takeover.owner_token().unwrap()).await.unwrap();
+    let takeover = reopened
+        .claim_closing_execution(&id, token.epoch)
+        .await
+        .unwrap();
+    let retry = reopened
+        .claim_closing_execution(&id, takeover.owner_token().unwrap().epoch)
+        .await
+        .unwrap();
+    assert_eq!(
+        retry.owner_token(),
+        takeover.owner_token(),
+        "an incomplete close reuses its exact Store generation"
+    );
+    reopened
+        .finish_close(&takeover.owner_token().unwrap())
+        .await
+        .unwrap();
     assert!(!reopened.is_session_closing(&id).await.unwrap());
     assert!(!fixture.facade.is_session_closing(&id).await.unwrap());
 }

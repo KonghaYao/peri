@@ -119,29 +119,54 @@ pub(super) async fn prepare_existing(
             (None, Some(reason))
         }
     };
-    if let Some(prior) = owner.as_ref().and_then(|lease| lease.prior_unreleased_generation()) {
-        let generation_id = prior.agent_generation_id.as_deref().ok_or_else(||
-            AcpError::new(-32010,
-                "Session restore incomplete: former Agent generation is unknown"))?;
-        let record = cfg.session_resources.read_execution_workspace_owner(&id.to_owned())
-            .await.map_err(crate::host::workspace::resource_error)?
-            .ok_or_else(|| AcpError::new(-32010,
-                "Session restore incomplete: former async owner catalog unavailable"))?;
+    if let Some(prior) = owner
+        .as_ref()
+        .and_then(|lease| lease.prior_unreleased_generation())
+    {
+        let generation_id = prior.agent_generation_id.as_deref().ok_or_else(|| {
+            AcpError::new(
+                -32010,
+                "Session restore incomplete: former Agent generation is unknown",
+            )
+        })?;
+        let record = cfg
+            .session_resources
+            .read_execution_workspace_owner(&id.to_owned())
+            .await
+            .map_err(crate::host::workspace::resource_error)?
+            .ok_or_else(|| {
+                AcpError::new(
+                    -32010,
+                    "Session restore incomplete: former async owner catalog unavailable",
+                )
+            })?;
         let trusted = super::super::owner_catalog::trusted_workspace_identity()
-            .map_err(|error| AcpError::new(-32010,
-                format!("Session restore incomplete: {error}")))?
-            .ok_or_else(|| AcpError::new(-32010,
-                "Session restore incomplete: trusted Workspace owner unavailable"))?;
-        if record.current_epoch != owner.as_ref().and_then(|lease| lease.owner_token())
-            .map(|token| token.epoch).unwrap_or_default() ||
-            record.descriptor.agent_generation_id != generation_id ||
-            super::super::owner_catalog::verify_recoverable_owner(&record, &trusted).is_err() {
-            return Err(AcpError::new(-32010,
-                "Session restore incomplete: former async task owners cannot be recovered"));
+            .map_err(|error| AcpError::new(-32010, format!("Session restore incomplete: {error}")))?
+            .ok_or_else(|| {
+                AcpError::new(
+                    -32010,
+                    "Session restore incomplete: trusted Workspace owner unavailable",
+                )
+            })?;
+        if record.current_epoch
+            != owner
+                .as_ref()
+                .and_then(|lease| lease.owner_token())
+                .map(|token| token.epoch)
+                .unwrap_or_default()
+            || record.descriptor.agent_generation_id != generation_id
+            || super::super::owner_catalog::verify_recoverable_owner(&record, &trusted).is_err()
+        {
+            return Err(AcpError::new(
+                -32010,
+                "Session restore incomplete: former async task owners cannot be recovered",
+            ));
         }
         super::super::super::supervisor::previous_generation_stopped(id, generation_id)
-            .await.map_err(|error| AcpError::new(-32010,
-                format!("Session restore incomplete: {error}")))?;
+            .await
+            .map_err(|error| {
+                AcpError::new(-32010, format!("Session restore incomplete: {error}"))
+            })?;
     }
     let identity = match response_identity(cfg, id).await {
         Ok(identity) => identity,
@@ -643,21 +668,28 @@ async fn reopen_workspace_scope_after_restore(
             .ok()
     });
     let scope_result = async {
-        let token = owner.as_ref().and_then(|lease| lease.owner_token())
+        let token = owner
+            .as_ref()
+            .and_then(|lease| lease.owner_token())
             .ok_or_else(|| "Store execution owner token unavailable".to_owned())?;
         let descriptor = super::super::owner_catalog::execution_descriptor(pool.as_ref(), params)
-            .await.map_err(|error| error.to_string())?;
-        local.session_resources.bind_execution_workspace_owner(&token, &descriptor)
-            .await.map_err(|error| error.to_string())?;
+            .await
+            .map_err(|error| error.to_string())?;
+        local
+            .session_resources
+            .bind_execution_workspace_owner(&token, &descriptor)
+            .await
+            .map_err(|error| error.to_string())?;
         if let Some(pool) = pool {
             pool.bind_session_execution_owner(id, token.clone())?;
-            super::super::fence_workspace_with_renewal(
-                &pool, &local.session_resources, &token, id,
-            ).await.map_err(|error| error.to_string())?;
+            super::super::fence_workspace_with_renewal(&pool, &local.session_resources, &token, id)
+                .await
+                .map_err(|error| error.to_string())?;
             pool.open_workspace_task_scope(id).await?;
         }
         Ok::<(), String>(())
-    }.await;
+    }
+    .await;
     if let Err(error) = scope_result {
         // The restored runtime has not been reported to the client. Keep it
         // inaccessible while disposing its admission and execution lease.

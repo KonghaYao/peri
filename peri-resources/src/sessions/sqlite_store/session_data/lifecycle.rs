@@ -94,7 +94,12 @@ impl SqliteSessionData {
             // 没有字段要改：不写、也不假装写入了新时间戳。
             return Ok(());
         }
-        let mut tx = self.database.pool.begin_with("BEGIN IMMEDIATE").await.map_err(|e| map_sqlx(&e))?;
+        let mut tx = self
+            .database
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(|e| map_sqlx(&e))?;
         self.assert_owner(&mut tx, id).await?;
         let now = Utc::now().to_rfc3339();
         let mut builder: sqlx::QueryBuilder<sqlx::Sqlite> =
@@ -123,7 +128,9 @@ impl SqliteSessionData {
         if updated.rows_affected() != 1 {
             return Err(not_found());
         }
-        tx.commit().await.map_err(|_| commit_failure(Some(id.clone())))?;
+        tx.commit()
+            .await
+            .map_err(|_| commit_failure(Some(id.clone())))?;
         Ok(())
     }
 

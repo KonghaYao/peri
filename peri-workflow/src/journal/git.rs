@@ -238,15 +238,18 @@ fn path_is_allowed(path: &str, allowed: &str) -> bool {
 
 fn git_output(cwd: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
     let mut command = Command::new("git");
-    command.env("GIT_OPTIONAL_LOCKS", "0")
-        .args(args).current_dir(cwd)
+    command
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .args(args)
+        .current_dir(cwd)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     #[cfg(unix)]
     let output = peri_process::run_output_blocking(command)
         .map_err(|error| format!("failed to execute git: {error}"))?;
     #[cfg(not(unix))]
-    let output = command.output()
+    let output = command
+        .output()
         .map_err(|error| format!("failed to execute git: {error}"))?;
     if !output.status.success() {
         return Err("git pre/postcondition command failed".to_string());

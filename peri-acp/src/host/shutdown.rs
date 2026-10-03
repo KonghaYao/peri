@@ -171,7 +171,8 @@ pub(super) async fn shutdown_host(
                     );
                 }
                 if let Some(token) = owner.owner_token() {
-                    if let Err(error) = cfg.session_resources.release_execution_owner(&token).await {
+                    if let Err(error) = cfg.session_resources.release_execution_owner(&token).await
+                    {
                         tracing::warn!(%error, "execution owner release could not be confirmed");
                         return task_scope::HostTerminalShutdownReport::aggregate(
                             host_report,

@@ -23,11 +23,17 @@ pub(in crate::sessions) struct ExecutionLease {
 
 impl ExecutionLease {
     pub(in crate::sessions) fn install_owner_token(&self, token: ExecutionOwnerToken) {
-        *self.owner_token.write().expect("execution owner token lock poisoned") = Some(token);
+        *self
+            .owner_token
+            .write()
+            .expect("execution owner token lock poisoned") = Some(token);
     }
 
     pub(in crate::sessions) fn install_prior_unreleased(&self, prior: Option<PriorExecutionOwner>) {
-        *self.prior_unreleased.write().expect("execution prior owner lock poisoned") = prior;
+        *self
+            .prior_unreleased
+            .write()
+            .expect("execution prior owner lock poisoned") = prior;
     }
 
     pub(in crate::sessions) fn new(thread_id: ThreadId) -> Self {
@@ -198,7 +204,10 @@ impl SessionExecutionLease for ExecutionLease {
     }
 
     fn prior_unreleased_generation(&self) -> Option<PriorExecutionOwner> {
-        self.prior_unreleased.read().expect("execution prior owner lock poisoned").clone()
+        self.prior_unreleased
+            .read()
+            .expect("execution prior owner lock poisoned")
+            .clone()
     }
 
     async fn mark_clean(&self) -> Result<()> {

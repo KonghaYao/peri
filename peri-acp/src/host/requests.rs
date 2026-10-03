@@ -4,11 +4,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use serde_json::Value;
-use serde_json::json;
-use std::sync::atomic::Ordering;
-use peri_acp_types::tasks::BgRegistryEvent;
 use crate::session::event_sink::TransportEventSink;
+use peri_acp_types::tasks::BgRegistryEvent;
+use serde_json::json;
+use serde_json::Value;
+use std::sync::atomic::Ordering;
 
 use crate::transport::types::AcpError;
 #[cfg(test)]
@@ -135,15 +135,24 @@ pub(crate) async fn handle_request(
         "mcp/oauth_cancel" => mcp_oauth::handle_oauth_cancel(params, cfg),
         _ => Err(AcpError::new(-32601, format!("Method not found: {method}"))),
     };
-    if matches!(method, "session/new" | "session/load" | "session/resume" | "session/fork") {
+    if matches!(
+        method,
+        "session/new" | "session/load" | "session/resume" | "session/fork"
+    ) {
         if let Ok(value) = &result {
-            let id = value.get("sessionId").and_then(Value::as_str)
-                .or_else(|| matches!(method, "session/load" | "session/resume")
-                    .then(|| params.get("sessionId").and_then(Value::as_str)).flatten());
+            let id = value.get("sessionId").and_then(Value::as_str).or_else(|| {
+                matches!(method, "session/load" | "session/resume")
+                    .then(|| params.get("sessionId").and_then(Value::as_str))
+                    .flatten()
+            });
             if let Some(id) = id {
                 if let Some(state) = sessions.get(id) {
                     if let Some(owner) = state.execution_owner.as_ref() {
-                        let local = state.environment.as_ref().map(|env| &env.cfg).unwrap_or(cfg);
+                        let local = state
+                            .environment
+                            .as_ref()
+                            .map(|env| &env.cfg)
+                            .unwrap_or(cfg);
                         let admission = async {
                             let pool = local.mcp_pool.clone().and_then(|port|
                                 port.downcast_arc::<peri_middlewares::mcp::McpClientPool>().ok());
@@ -163,15 +172,22 @@ pub(crate) async fn handle_request(
                         }.await;
                         if let Err(error) = admission {
                             local.session_manager.pre_close_session(id);
-                            if let Some(state) = sessions.get_mut(id) { state.closing = true; }
+                            if let Some(state) = sessions.get_mut(id) {
+                                state.closing = true;
+                            }
                             return Err(error);
                         }
                     }
                 }
-                let owner_token = sessions.get(id).and_then(|state| state.execution_owner.as_ref())
+                let owner_token = sessions
+                    .get(id)
+                    .and_then(|state| state.execution_owner.as_ref())
                     .and_then(|owner| owner.owner_token());
-                let local = sessions.get(id).and_then(|state| state.environment.as_ref())
-                    .map(|environment| &environment.cfg).unwrap_or(cfg);
+                let local = sessions
+                    .get(id)
+                    .and_then(|state| state.environment.as_ref())
+                    .map(|environment| &environment.cfg)
+                    .unwrap_or(cfg);
                 bind_session_tasks(id, local, transport, owner_token);
             }
         }
@@ -185,7 +201,9 @@ async fn fence_workspace_with_renewal(
     token: &peri_acp_types::workspace::ExecutionOwnerToken,
     session_id: &str,
 ) -> Result<(), AcpError> {
-    resources.renew_execution_owner(token).await
+    resources
+        .renew_execution_owner(token)
+        .await
         .map_err(super::workspace::resource_error)?;
     let fence = pool.fence_workspace_task_scope(session_id);
     tokio::pin!(fence);
@@ -202,18 +220,25 @@ async fn fence_workspace_with_renewal(
 }
 
 fn bind_session_tasks(
-    session_id: &str, cfg: &AcpServerConfig,
+    session_id: &str,
+    cfg: &AcpServerConfig,
     transport: &Arc<dyn crate::transport::AcpTransport>,
     owner_token: Option<peri_acp_types::workspace::ExecutionOwnerToken>,
 ) {
-    let Some(session) = cfg.session_manager.get_session(session_id) else { return };
+    let Some(session) = cfg.session_manager.get_session(session_id) else {
+        return;
+    };
     let manager = Arc::clone(&session.task_manager);
-    let pool = cfg.mcp_pool.clone().and_then(|port|
-        port.downcast_arc::<peri_middlewares::mcp::McpClientPool>().ok());
+    let pool = cfg.mcp_pool.clone().and_then(|port| {
+        port.downcast_arc::<peri_middlewares::mcp::McpClientPool>()
+            .ok()
+    });
     if let Some(pool) = &pool {
         pool.bind_session_task_manager(session_id, &manager);
     }
-    if session.task_events_started.swap(true, Ordering::AcqRel) { return }
+    if session.task_events_started.swap(true, Ordering::AcqRel) {
+        return;
+    }
     let cancel = session.task_events_cancel.clone();
     if let Some(token) = owner_token {
         let resources = Arc::clone(&cfg.session_resources);
@@ -226,7 +251,9 @@ fn bind_session_tasks(
                     _ = renewal_cancel.cancelled() => break,
                     _ = tokio::time::sleep(std::time::Duration::from_secs(10)) => {}
                 }
-                if renewal_cancel.is_cancelled() { break; }
+                if renewal_cancel.is_cancelled() {
+                    break;
+                }
                 if let Err(error) = resources.renew_execution_owner(&token).await {
                     tracing::error!(session_id = %id, %error, "Store execution owner renewal failed; stopping session work");
                     manager.pre_close_session(&id);
@@ -244,7 +271,8 @@ fn bind_session_tasks(
             let _ = tokio::time::timeout(
                 std::time::Duration::from_millis(500),
                 pool.recover_workspace_tasks(&id),
-            ).await;
+            )
+            .await;
         }
         let snapshot = manager.snapshot();
         let mut revision = snapshot.revision;
@@ -253,8 +281,13 @@ fn bind_session_tasks(
             let cancel = cancel.clone();
             tokio::spawn(async move { pool.watch_workspace_tasks(&id, cancel).await })
         });
-        let _ = sink.push_unstable_event(&id, "bg-task-snapshot".into(),
-            task_snapshot_value(snapshot)).await;
+        let _ = sink
+            .push_unstable_event(
+                &id,
+                "bg-task-snapshot".into(),
+                task_snapshot_value(snapshot),
+            )
+            .await;
         loop {
             let change = tokio::select! {
                 _ = cancel.cancelled() => break,
@@ -262,37 +295,71 @@ fn bind_session_tasks(
             };
             match change {
                 Ok(change) => {
-                    if change.revision <= revision { continue; }
+                    if change.revision <= revision {
+                        continue;
+                    }
                     if change.revision != revision.saturating_add(1) {
                         let snapshot = manager.snapshot();
                         revision = snapshot.revision;
-                        let _ = sink.push_unstable_event(&id, "bg-task-snapshot".into(),
-                            task_snapshot_value(snapshot)).await;
+                        let _ = sink
+                            .push_unstable_event(
+                                &id,
+                                "bg-task-snapshot".into(),
+                                task_snapshot_value(snapshot),
+                            )
+                            .await;
                         continue;
                     }
                     revision = change.revision;
                     let (event, data) = match change.event {
-                        BgRegistryEvent::Started { task_id, kind, summary, started_at } =>
-                            ("bg-task-started", json!({"task_id":task_id,"kind":kind,"summary":summary,"started_at":started_at,"revision":change.revision})),
-                        BgRegistryEvent::Completed { task_id, kind, success, output_preview, duration_ms, .. } =>
-                            ("bg-task-completed", json!({"task_id":task_id,"kind":kind,"success":success,"output_preview":output_preview,"duration_ms":duration_ms,"revision":change.revision})),
-                        BgRegistryEvent::Cancelled { task_id, reason } =>
-                            ("bg-task-cancelled", json!({"task_id":task_id,"reason":reason,"revision":change.revision})),
-                        BgRegistryEvent::Updated { task_id, status } =>
-                            ("bg-task-updated", json!({"task_id":task_id,"status":status,"revision":change.revision})),
+                        BgRegistryEvent::Started {
+                            task_id,
+                            kind,
+                            summary,
+                            started_at,
+                        } => (
+                            "bg-task-started",
+                            json!({"task_id":task_id,"kind":kind,"summary":summary,"started_at":started_at,"revision":change.revision}),
+                        ),
+                        BgRegistryEvent::Completed {
+                            task_id,
+                            kind,
+                            success,
+                            output_preview,
+                            duration_ms,
+                            ..
+                        } => (
+                            "bg-task-completed",
+                            json!({"task_id":task_id,"kind":kind,"success":success,"output_preview":output_preview,"duration_ms":duration_ms,"revision":change.revision}),
+                        ),
+                        BgRegistryEvent::Cancelled { task_id, reason } => (
+                            "bg-task-cancelled",
+                            json!({"task_id":task_id,"reason":reason,"revision":change.revision}),
+                        ),
+                        BgRegistryEvent::Updated { task_id, status } => (
+                            "bg-task-updated",
+                            json!({"task_id":task_id,"status":status,"revision":change.revision}),
+                        ),
                     };
                     let _ = sink.push_unstable_event(&id, event.into(), data).await;
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                     let snapshot = manager.snapshot();
                     revision = snapshot.revision;
-                    let _ = sink.push_unstable_event(&id, "bg-task-snapshot".into(),
-                        task_snapshot_value(snapshot)).await;
+                    let _ = sink
+                        .push_unstable_event(
+                            &id,
+                            "bg-task-snapshot".into(),
+                            task_snapshot_value(snapshot),
+                        )
+                        .await;
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }
-        if let Some(watcher) = watcher { watcher.abort(); }
+        if let Some(watcher) = watcher {
+            watcher.abort();
+        }
     });
 }
 

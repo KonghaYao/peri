@@ -4,8 +4,8 @@ use peri_acp_types::event::BackgroundTaskResult;
 use peri_acp_types::session::{MessageKind, MessageSource};
 use peri_acp_types::system_reminder::{
     ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
-    ReminderSource as CanonicalReminderSource, SYSTEM_REMINDER_VERSION, SystemReminder,
-    TrustedSystemReminderFactory,
+    ReminderSource as CanonicalReminderSource, SystemReminder, TrustedSystemReminderFactory,
+    SYSTEM_REMINDER_VERSION,
 };
 use peri_acp_types::tasks::{BgTaskKind, ExternalTaskRegistration, TaskManager};
 use peri_acp_types::workspace::ExecutionOwnerToken;
@@ -66,11 +66,14 @@ impl McpClientPool {
     /// Endpoint and key path must come from the stdio host environment, never
     /// from a close request or the model's MCP server declaration.
     pub async fn connect_trusted_workspace_for_close(
-        cwd: &std::path::Path, url: &str, secret_file: &str,
+        cwd: &std::path::Path,
+        url: &str,
+        secret_file: &str,
     ) -> Result<Arc<Self>, String> {
         let mut workspace: peri_acp_types::plugin::McpServerConfig = serde_json::from_value(
             json!({"url":url,"taskScopeSecretFile":secret_file,"systemMcp":true}),
-        ).map_err(|error| format!("trusted Workspace config invalid: {error}"))?;
+        )
+        .map_err(|error| format!("trusted Workspace config invalid: {error}"))?;
         workspace.source = Some(crate::mcp::config::ConfigSource::WorkspaceRemote);
         let pool = Arc::new(Self::new_pending());
         pool.set_session_servers(HashMap::from([("workspace".to_owned(), workspace)]))
@@ -78,19 +81,34 @@ impl McpClientPool {
         let (status, received) = tokio::sync::watch::channel(McpInitStatus::Pending);
         Self::run_initialize_bare(pool.clone(), cwd, status).await;
         if !matches!(&*received.borrow(), McpInitStatus::Ready { .. }) {
-            return Err(format!("trusted Workspace reconnect failed: {:?}", *received.borrow()));
+            return Err(format!(
+                "trusted Workspace reconnect failed: {:?}",
+                *received.borrow()
+            ));
         }
-        if pool.clients.read().get("workspace").and_then(|client| client.peer.as_ref()).is_none() {
+        if pool
+            .clients
+            .read()
+            .get("workspace")
+            .and_then(|client| client.peer.as_ref())
+            .is_none()
+        {
             return Err("trusted Workspace owner disconnected".into());
         }
         Ok(pool)
     }
     /// Bind a Store-issued owner generation before admitting Workspace tools.
-    pub fn bind_session_execution_owner(&self, session_id: &str, token: ExecutionOwnerToken) -> Result<(), String> {
+    pub fn bind_session_execution_owner(
+        &self,
+        session_id: &str,
+        token: ExecutionOwnerToken,
+    ) -> Result<(), String> {
         if token.root_id.to_string() != session_id {
             return Err("Store owner token belongs to another session".into());
         }
-        self.session_execution_tokens.write().insert(session_id.to_owned(), token);
+        self.session_execution_tokens
+            .write()
+            .insert(session_id.to_owned(), token);
         self.task_scope_tokens.write().remove(session_id);
         Ok(())
     }
@@ -98,27 +116,50 @@ impl McpClientPool {
     /// Advance every trusted Workspace owner to the Store generation and wait
     /// for its prior in-flight creation barrier before any tool admission.
     pub async fn fence_workspace_task_scope(&self, session_id: &str) -> Result<(), String> {
-        if !self.session_execution_tokens.read().contains_key(session_id) {
+        if !self
+            .session_execution_tokens
+            .read()
+            .contains_key(session_id)
+        {
             return Err("Store execution owner token unavailable".into());
         }
         self.wait_for_task_owner_catalog().await?;
         for server in self.configured_workspace_task_owners() {
             let peer = self.wait_for_workspace_peer(&server).await?;
-            let meta = self.task_scope_meta_for(&server, session_id)
+            let meta = self
+                .task_scope_meta_for(&server, session_id)
                 .ok_or_else(|| format!("trusted scope for {server} unavailable"))?;
-            let result = tokio::time::timeout(Duration::from_secs(10),
+            let result = tokio::time::timeout(
+                Duration::from_secs(10),
                 peer.send_request(ClientRequest::CustomRequest(CustomRequest::new(
-                    "workspace/taskFence", Some(json!({"_meta":meta})),
-                ))))
-                .await.map_err(|_| format!("workspace task owner {server} fence timed out"))?
-                .map_err(|error| format!("workspace task owner {server} fence rejected: {error}"))?;
+                    "workspace/taskFence",
+                    Some(json!({"_meta":meta})),
+                ))),
+            )
+            .await
+            .map_err(|_| format!("workspace task owner {server} fence timed out"))?
+            .map_err(|error| format!("workspace task owner {server} fence rejected: {error}"))?;
             let ServerResult::CustomResult(result) = result else {
-                return Err(format!("workspace task owner {server} fence returned unexpected response"));
+                return Err(format!(
+                    "workspace task owner {server} fence returned unexpected response"
+                ));
             };
-            let epoch = self.session_execution_tokens.read().get(session_id).expect("bound token").epoch;
+            let epoch = self
+                .session_execution_tokens
+                .read()
+                .get(session_id)
+                .expect("bound token")
+                .epoch;
             if result.0.get("epoch").and_then(serde_json::Value::as_i64) != Some(epoch)
-                || result.0.get("barrierCursor").and_then(serde_json::Value::as_u64).is_none() {
-                return Err(format!("workspace task owner {server} fence evidence invalid"));
+                || result
+                    .0
+                    .get("barrierCursor")
+                    .and_then(serde_json::Value::as_u64)
+                    .is_none()
+            {
+                return Err(format!(
+                    "workspace task owner {server} fence evidence invalid"
+                ));
             }
         }
         Ok(())
@@ -139,7 +180,12 @@ impl McpClientPool {
     async fn wait_for_workspace_peer(&self, server: &str) -> Result<Peer<RoleClient>, String> {
         let until = tokio::time::Instant::now() + Duration::from_secs(10);
         loop {
-            if let Some(peer) = self.clients.read().get(server).and_then(|client| client.peer.clone()) {
+            if let Some(peer) = self
+                .clients
+                .read()
+                .get(server)
+                .and_then(|client| client.peer.clone())
+            {
                 return Ok(peer);
             }
             if tokio::time::Instant::now() >= until {
@@ -776,7 +822,11 @@ impl McpClientPool {
         server: &str,
         session_id: &str,
     ) -> Option<RequestMetaObject> {
-        let owner = self.session_execution_tokens.read().get(session_id).cloned();
+        let owner = self
+            .session_execution_tokens
+            .read()
+            .get(session_id)
+            .cloned();
         let token = if self.clients.read().get(server).is_some_and(|client| {
             matches!(
                 client.source.as_ref(),
@@ -791,14 +841,21 @@ impl McpClientPool {
             }
         } else {
             match owner.as_ref() {
-                Some(owner) => self.task_scope_authority.issue_execution(session_id, owner.epoch, &owner.nonce),
-                None => self.task_scope_tokens.write().entry(session_id.to_owned())
-                    .or_insert_with(|| self.task_scope_authority.issue(session_id)).clone(),
+                Some(owner) => {
+                    self.task_scope_authority
+                        .issue_execution(session_id, owner.epoch, &owner.nonce)
+                }
+                None => self
+                    .task_scope_tokens
+                    .write()
+                    .entry(session_id.to_owned())
+                    .or_insert_with(|| self.task_scope_authority.issue(session_id))
+                    .clone(),
             }
         };
         let mut meta = RequestMetaObject::new();
         meta.0
-            .0
+             .0
             .insert(peri_mcp_workspace::TASK_SCOPE_META_KEY.into(), token.into());
         Some(meta)
     }
@@ -824,7 +881,6 @@ impl McpClientPool {
         )?;
         manager.register_external(request)
     }
-
 
     fn external_task_registration(
         self: &Arc<Self>,
@@ -906,84 +962,5 @@ impl McpClientPool {
 }
 
 #[cfg(test)]
-mod task_projection_tests {
-    use super::{McpClientPool, ScopeTaskRow, ScopeTaskSnapshot, pending_tasks_for_closed_epoch};
-    use peri_acp_types::{
-        event::{BackgroundTaskResult, ShellOutput},
-        mcp::McpSubscriptionPort,
-        session::{MessageQueue, MessageSource, QueuedPayload, SessionInbox},
-        tasks::BgTaskKind,
-    };
-    use std::sync::Arc;
-
-    #[test]
-    fn close_reconciliation_rejects_reopened_epoch_before_selecting_cancel_targets() {
-        use rmcp::model::{DetailedTask, Task, TaskPayload, TaskStatus};
-        let snapshot = |epoch, closing| ScopeTaskSnapshot {
-            cursor: 2,
-            epoch,
-            closing,
-            tasks: vec![ScopeTaskRow {
-                task: DetailedTask::new(
-                    Task::new(
-                        "new-epoch-task",
-                        TaskStatus::Working,
-                        "2026-01-01T00:00:00Z",
-                        "2026-01-01T00:00:00Z",
-                    ),
-                    TaskPayload::Working,
-                ),
-                summary: "new execution".into(),
-                terminal_transition_id: None,
-            }],
-        };
-        assert!(pending_tasks_for_closed_epoch("workspace", 0, snapshot(1, false)).is_err());
-        assert!(pending_tasks_for_closed_epoch("workspace", 0, snapshot(1, true)).is_err());
-        assert_eq!(
-            pending_tasks_for_closed_epoch("workspace", 0, snapshot(0, true)).unwrap(),
-            vec!["new-epoch-task"]
-        );
-    }
-
-    #[test]
-    fn workspace_shell_reminder_uses_file_references() {
-        let pool = McpClientPool::new_pending();
-        let inbox = SessionInbox::new(Arc::new(MessageQueue::new()));
-        pool.register_inbox("session", inbox.handle());
-        let result = BackgroundTaskResult {
-            task_id: "mcp-opaque".into(),
-            agent_name: "bg-shell".into(),
-            prompt_summary: "sleep 1".into(),
-            success: true,
-            output: "Shell command completed; read output files.".into(),
-            tool_calls_count: 0,
-            duration_ms: 1000,
-            timed_out: false,
-            child_thread_id: None,
-            subagent_failure: None,
-            shell_output: Some(Box::new(ShellOutput {
-                stdout_path: Some("/tmp/stdout.log".into()),
-                stderr_path: None,
-                complete: true,
-                error: None,
-                exit_code: Some(0),
-            })),
-        };
-        pool.deliver_task_reminder(
-            "session",
-            "workspace",
-            &result,
-            BgTaskKind::Shell,
-            peri_acp_types::messages::MessageId::new(),
-        )
-        .unwrap();
-        let messages = inbox.queue().drain_all();
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].source, MessageSource::ShellComplete);
-        let QueuedPayload::SystemReminder(reminder) = &messages[0].payload else {
-            panic!("reminder")
-        };
-        assert!(reminder.as_reminder().body.contains("/tmp/stdout.log"));
-        assert!(!reminder.as_reminder().body.contains("structuredContent"));
-    }
-}
+#[path = "subscription_tasks_test.rs"]
+mod task_projection_tests;

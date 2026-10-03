@@ -26,16 +26,16 @@ use std::collections::HashSet;
 use peri_acp_types::messages::{BaseMessage, MessageId};
 use peri_acp_types::session_resources::{RewindBoundary, SessionResourceResult};
 use peri_acp_types::store::{
-    CompactionChange, MessageFlags, PersistedPayload, deserialize_persisted_payload,
-    serialize_persisted_payload,
+    deserialize_persisted_payload, serialize_persisted_payload, CompactionChange, MessageFlags,
+    PersistedPayload,
 };
 use peri_acp_types::system_reminder::TrustedSystemReminder;
 use peri_acp_types::thread::ThreadId;
 use turso_serverless::Value;
 
 use super::session_codec as codec;
-use super::session_data::{RemoteSessionData, invalid_input, not_found};
-use super::sql::{StatementSpec, int_at};
+use super::session_data::{invalid_input, not_found, RemoteSessionData};
+use super::sql::{int_at, StatementSpec};
 use crate::sessions::canonical;
 use crate::sessions::sqlite_store::role_of_message;
 

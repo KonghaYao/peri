@@ -62,11 +62,18 @@ async fn test_begin_initialization_writes_draft_without_frozen() {
     let first = initialization.execution_lease();
     let token = first.owner_token().unwrap();
     first.mark_clean().await.unwrap();
-    fixture.facade.release_execution_owner(&token).await.unwrap();
+    fixture
+        .facade
+        .release_execution_owner(&token)
+        .await
+        .unwrap();
     let second_run = second.acquire_execution(&id, &workspace).await.unwrap();
     assert_eq!(second_run.thread_id(), &id);
     second_run.mark_clean().await.unwrap();
-    second.release_execution_owner(&second_run.owner_token().unwrap()).await.unwrap();
+    second
+        .release_execution_owner(&second_run.owner_token().unwrap())
+        .await
+        .unwrap();
     assert_eq!(fixture.frozen_of(&id).await, None);
 }
 

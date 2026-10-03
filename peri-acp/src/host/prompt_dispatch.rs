@@ -70,9 +70,15 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
             .get(&prompt_session_id)
             .ok_or_else(|| AcpError::new(-32602, "session not found"))?;
         super::workspace::require_owner(state)?;
-        if cfg.session_manager.get_session(&prompt_session_id)
-            .is_some_and(|session| session.cancel_token.is_cancelled()) {
-            return Err(AcpError::new(-32010, "Session execution owner is no longer active"));
+        if cfg
+            .session_manager
+            .get_session(&prompt_session_id)
+            .is_some_and(|session| session.cancel_token.is_cancelled())
+        {
+            return Err(AcpError::new(
+                -32010,
+                "Session execution owner is no longer active",
+            ));
         }
     }
     // 等待 session 锁之前的先行检查：只复核已记录证据，让绑定已失效的提交立刻失败，
@@ -152,9 +158,15 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
             .get(&prompt_session_id)
             .ok_or_else(|| AcpError::new(-32602, "session not found"))?;
         super::workspace::require_owner(state)?;
-        if cfg.session_manager.get_session(&prompt_session_id)
-            .is_some_and(|session| session.cancel_token.is_cancelled()) {
-            return Err(AcpError::new(-32010, "Session execution owner is no longer active"));
+        if cfg
+            .session_manager
+            .get_session(&prompt_session_id)
+            .is_some_and(|session| session.cancel_token.is_cancelled())
+        {
+            return Err(AcpError::new(
+                -32010,
+                "Session execution owner is no longer active",
+            ));
         }
     }
     super::workspace::validate_expected(cfg, &prompt_session_id, None).await?;
