@@ -57,22 +57,47 @@ fn memory_client() -> crate::mcp::auth_store::OAuthCredentialClient {
 }
 
 #[tokio::test]
-async fn initialization_without_credentials_reports_failure_and_seals_injection() {
+async fn initialization_without_credentials_attempts_unauthenticated_http() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+    let requests = Arc::new(AtomicUsize::new(0));
+    let seen = Arc::clone(&requests);
+    let server = tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            let mut buffer = [0; 4096];
+            let _ = stream.read(&mut buffer).await;
+            seen.fetch_add(1, Ordering::SeqCst);
+            let _ = stream
+                .write_all(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .await;
+        }
+    });
     let pool = Arc::new(McpClientPool::new_pending());
     let (status_tx, status_rx) = tokio::sync::watch::channel(McpInitStatus::Pending);
-    McpClientPool::initialize_config(
-        pool.clone(),
-        Path::new("."),
-        http_config(None),
-        Default::default(),
-        status_tx,
-        None,
+    let config = serde_json::from_value(serde_json::json!({
+        "mcpServers": { "server": { "url": url } }
+    }))
+    .unwrap();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        McpClientPool::initialize_config(
+            pool.clone(),
+            Path::new("."),
+            config,
+            Default::default(),
+            status_tx,
+            None,
+        ),
     )
-    .await;
+    .await
+    .unwrap();
+    server.abort();
+    assert!(requests.load(Ordering::SeqCst) > 0);
     let handle = pool.get_client("server").unwrap();
-    assert!(
-        matches!(&handle.status, ClientStatus::Failed(reason) if reason.contains("not injected"))
-    );
+    assert!(matches!(&handle.status, ClientStatus::Failed(_)));
     assert!(matches!(&*status_rx.borrow(), McpInitStatus::Failed(_)));
     assert!(pool.inject_oauth_credentials(memory_client()).is_err());
 }

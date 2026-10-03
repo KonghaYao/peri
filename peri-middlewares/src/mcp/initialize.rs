@@ -431,17 +431,9 @@ impl McpClientPool {
                     ref headers,
                     ref oauth,
                 } => {
-                    let token_store = match pool.oauth_credentials() {
-                        Ok(client) => client,
-                        Err(error) => {
-                            Self::insert_failed(&pool, name, error.to_string());
-                            commit_discovery_failure(&pool, name, false);
-                            continue;
-                        }
-                    };
                     let oauth_cfg = if let Some(config) = oauth.as_ref() {
                         Some(config.clone())
-                    } else {
+                    } else if let Ok(token_store) = pool.oauth_credentials() {
                         let default_oauth = OAuthConfig::default();
                         let key = static_credential_key(name, url, &default_oauth);
                         match token_store.load_server(&key).await {
@@ -453,6 +445,10 @@ impl McpClientPool {
                                 continue;
                             }
                         }
+                    } else {
+                        // WASM has no OAuth credential store; unauthenticated HTTP MCP
+                        // must still be able to connect.
+                        None
                     };
                     if oauth_cfg.is_some() {
                         if pool.oauth_event_callback().is_some() {
