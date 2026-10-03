@@ -233,6 +233,15 @@ impl McpClientPool {
         status_tx: tokio::sync::watch::Sender<McpInitStatus>,
         oauth_event_callback: Option<Box<dyn Fn(OAuthFlowEvent) + Send + Sync>>,
     ) {
+        #[cfg(target_os = "emscripten")]
+        let mut config = config;
+        #[cfg(target_os = "emscripten")]
+        config.mcp_servers.retain(|name, server| {
+            // The registry identifies local builtin instances. A remote
+            // Workspace is a separate MCP deployment and remains available.
+            peri_acp_types::builtin_mcp::find(name).is_none()
+                || (name == "workspace" && server.url.is_some())
+        });
         // 封口（A33 晚注入拒绝）②：`initialize_config` 也接受直接调用（不经
         // `run_initialize`），配置校验与目录绑定都已越过「注入窗口」的边界；两处封口都是
         // 幂等的，任一路径进入都会让此后的首次注入被 typed 拒绝。
@@ -394,6 +403,7 @@ impl McpClientPool {
                     }
                     connected
                 }
+                #[cfg(not(target_os = "emscripten"))]
                 TransportConfig::Stdio {
                     ref command,
                     ref args,
@@ -410,6 +420,12 @@ impl McpClientPool {
                         continue;
                     }
                 },
+                #[cfg(target_os = "emscripten")]
+                TransportConfig::Stdio { .. } => {
+                    Self::insert_failed(&pool, name, "MCP stdio transport is unavailable".into());
+                    commit_discovery_failure(&pool, name, false);
+                    continue;
+                }
                 TransportConfig::StreamableHttp {
                     ref url,
                     ref headers,

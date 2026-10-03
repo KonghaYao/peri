@@ -29,9 +29,17 @@ pub(crate) mod runtime;
 // 宿主落点，D-5）。默认层注入只在本模块的 `builtin_default_entry` / 规则 2 消费它；
 // 客户端消费侧（`mcp::client::subscription`）经下面的再导出判定「哪些实例的哪些 URI
 // 有宿主内置提醒映射」，避免第二份实例名字面量。
+#[cfg(not(target_os = "emscripten"))]
 mod workspace_subscription;
 
+#[cfg(not(target_os = "emscripten"))]
 pub(crate) use workspace_subscription::default_subscriptions_for;
+#[cfg(target_os = "emscripten")]
+pub(crate) fn default_subscriptions_for(
+    _instance: &str,
+) -> Option<peri_acp_types::plugin::McpSubscriptionsConfig> {
+    None
+}
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::LazyLock;
@@ -80,12 +88,21 @@ impl BuiltinInjectionPolicy {
     /// 从 env 解析：`off` / `0` → [`Self::none`]；缺失 / 其它值 → [`Self::all`]
     /// （未知值 warn + `all`，不引入第三种未知状态）。
     pub(crate) fn from_env() -> Self {
-        let environment =
-            peri_config::source::read_environment(&[BUILTIN_INJECTION_ENV]).unwrap_or_default();
-        if peri_config::mcp::builtin_enabled(&environment) {
-            Self::all()
-        } else {
-            Self::none()
+        #[cfg(target_os = "emscripten")]
+        {
+            // Browser workers cannot host any in-process builtin MCP instance.
+            // A configured remote workspace remains eligible for the overlay below.
+            return Self::none();
+        }
+        #[cfg(not(target_os = "emscripten"))]
+        {
+            let environment =
+                peri_config::source::read_environment(&[BUILTIN_INJECTION_ENV]).unwrap_or_default();
+            if peri_config::mcp::builtin_enabled(&environment) {
+                Self::all()
+            } else {
+                Self::none()
+            }
         }
     }
 
@@ -308,7 +325,7 @@ pub(crate) fn apply_builtin_overlay(
         });
         // 规则 7：默认订阅（用户显式配置优先；空配置也是显式配置 ⇒ 不订阅）。
         if entry.subscriptions.is_none() {
-            entry.subscriptions = workspace_subscription::default_subscriptions_for(instance.name);
+            entry.subscriptions = default_subscriptions_for(instance.name);
         }
         if disabled != Some(true) {
             entry.system_mcp = Some(true);
@@ -372,7 +389,7 @@ fn builtin_default_entry(instance: &BuiltinMcpInstance) -> McpServerConfig {
         disabled: None,
         // 必须为 None：显式版本会跳过 Auto 的 `server/discover` 探测。
         // 规则 7：`workspace` 的默认订阅（其余实例为 None）。
-        subscriptions: workspace_subscription::default_subscriptions_for(instance.name),
+        subscriptions: default_subscriptions_for(instance.name),
         system_mcp: Some(true),
         system_mcp_tools: Some(direct_tool_name_strings(instance)),
         system_mcp_timeout: None,
@@ -419,4 +436,5 @@ fn direct_tools_table() -> &'static HashMap<&'static str, Box<[&'static str]>> {
 mod tests;
 
 // 实例名 → 独立插件 handler 的工厂；runtime 是宿主 task 的唯一入口。
+#[cfg(not(target_os = "emscripten"))]
 mod dispatch;

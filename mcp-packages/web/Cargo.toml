@@ -20,3 +20,6 @@ peri-acp-types = { path = "../../peri-acp-types" }
 rmcp = { workspace = true, features = ["client"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
+
+[target.'cfg(not(target_os = "emscripten"))'.dependencies]
+tokio = { workspace = true, features = ["full"] }

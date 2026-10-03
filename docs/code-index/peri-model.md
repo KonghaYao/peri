@@ -3,6 +3,8 @@
 > 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-29（SSE 完成判定与中断断点保留）
 > 依据：docs/standards/architecture-contracts.md、源码（无 crate 级 CLAUDE.md）
 
+Emscripten 路径：`src/transport/http.rs` 复用 reqwest native/Hyper HTTP/SSE 实现；`src/runtime/retry.rs` 使用 Cloudflare Tokio 分支的任务运行时。WASM 导出需要 `wasm-bindgen` 的 `experimental_tokio` 事件循环；运行入口与验收见 [`peri-wasm`](peri-wasm.md)。
+
 ## 架构速览
 
 - 定位：与 provider 无关的协议 DTO + 流式优先模型接口（lib.rs:1）；只产消标准 `peri-model` 协议，不引用 Agent 事件/类型（anthropic/mod.rs:3）

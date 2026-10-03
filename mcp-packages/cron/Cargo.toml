@@ -24,3 +24,6 @@ uuid.workspace = true
 [dev-dependencies]
 rmcp = { workspace = true, features = ["client"] }
 tokio = { workspace = true, features = ["test-util"] }
+
+[target.'cfg(not(target_os = "emscripten"))'.dependencies]
+tokio = { workspace = true, features = ["full"] }

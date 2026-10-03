@@ -3,6 +3,8 @@
 > 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-10-02（schema 12：Machine → Workspace → Session 归属、归档与 Workspace 级 OAuth；本机/远端版本化升级）。
 > 依据：peri-resources/src 源码、lib.rs 模块注释（伞形 PRD 决策 20）
 
+Emscripten 当前状态：SQLx、workflow 与 `sqlite_store` 源码均排除；`sessions::execution`、`sessions::failure` 与 `canonical` 提供共用领域规则。Turso 会话数据及执行证据均存于远端；WASM 使用 `WasmExecution` 提供虚拟工作区观测和进程内 lease。Node/Bun 的可写会话、ACP、模型调用与恢复验收见 [`WASM 接入验收`](../../spec/issues/2026-10-02-wasm-feasibility-plan.md)。
+
 ## 架构速览
 
 - 定位：外部系统数据访问通道（§0），以 context 形式提供给 Agent / Middleware / Controller；LSP 已不属于 Resources，直接由 `peri-mcp-lsp` 持有客户端与 pool
@@ -49,7 +51,7 @@
 | 改远程组合与进程内执行面（远端数据/本机运行） | `src/sessions/remote/{composition,execution}.rs` + `src/sessions/{local_port,execution,discovery}.rs` + `src/sessions/resources/gate.rs` | `open_remote`；`SessionResourcesImpl::from_ports`；`SessionDataPort` / `LocalExecutionPort`；`SessionFacts { root }` | 数据/env/父链事实由数据端口提供，运行句柄及未结清门禁只在当前实例内。Turso 模式不打开、创建、升级或查询本机 SQLite，Workspace 归属和发现快照只存远端；env 不匹配阻止执行但不阻止 ID 历史查询。远端保存与运行接纳分开，失败按效果报告；远端操作账本保留，重开不是前次未知请求已结清的证明 |
 | 改写入准入与效果结清 | `src/sessions/resources/gate.rs` + `src/sessions/sqlite_store/execution.rs` | `MutationGate` / `WriteScope::settle`；`ExecutionWriteGuard` / `ExclusiveExecutionGuard` / `TransactionEffect`；`require_execution_lease` / `exclusive_execution_guard` | 能力、可写性与生命周期检查保留；有活跃 lease 时持其 mutation gate，无 lease 不再仅因未认领 root 而拒绝。Unknown / 未结清 Drop 将活跃 lease 标记 mutation_uncertain，之后写入/clean 拒绝；这是进程内效果管理，不是全局并发控制或跨机副作用去重 |
 | 改 child resume 认领 handle | `src/sessions/resources/claim.rs` | `ChildResumeClaimHandle`（`mark_running` / `hand_off_to_background` / `mark_failed` / `mark_terminated`） | child 状态认领/后台移交与终态恢复维持；写入复用门面 capability、生命周期与效果结清，不把 task claim 等同于 session 文件锁或 root 恢复持有权 |
-| 改失败分类映射 | `src/sessions/sqlite_store/failure.rs` | `read_failure` / `write_failure` / `execution_failure` / `binding_relation_failure` / `map_sqlx` / `not_found` / `read_only_store` / `lease_required` | 数据面、执行面与门面共用同一套映射：会话行缺失是 `NotFound`，本机 workspace 语义原样保留变体，唯一键冲突是「identity 已存在」，外键/未登记是 `InvalidBinding`，解码失败是「记录读不懂」，其余 SQL 失败是「后端暂不可用」 |
+| 改失败分类映射 | `src/sessions/failure.rs` + `sqlite_store/failure.rs` | `read_failure` / `write_failure` / `execution_failure` / `binding_relation_failure` / `map_sqlx` / `not_found` / `read_only_store` / `lease_required` | 数据面、执行面与门面共用同一套映射：会话行缺失是 `NotFound`，本机 workspace 语义原样保留变体，唯一键冲突是「identity 已存在」，外键/未登记是 `InvalidBinding`，解码失败是「记录读不懂」，其余 SQL 失败是「后端暂不可用」 |
 | 改 SQLite 库的所有权/连接 | `src/sessions/sqlite_store/database.rs` + `connection.rs` | `SqliteSessionDatabase`（pool / read_only / db_path / execution_leases）；`open`、`open_existing_read_only`、`close`、`require_writable`、`probe_load_meta_shape`、`default_database_path`；`lock_schema_open` | 同一库只有一条连接真相：数据面与执行面各自持有同一 `Arc<SqliteSessionDatabase>`，不重建第二份 pool 或第二个库文件；`SqliteThreadStore` 仅为消费侧迁移桥（转发到共享句柄），E 阶段随 `ThreadStore` 一起退出 |
 | 改全局配置路径 | `src/config/mod.rs` | `peri_dir`（:9，`~/.peri`）；`settings_path`（:14，`~/.peri/settings.json`） | 仅路径入口，配置读取语义之外的逻辑不迁入本 crate |
 | 引用 LSP 能力 | `mcp-packages/lsp/src/{client,pool,config}.rs` | 由 `peri-mcp-lsp` 直接提供；Resources 不再 re-export LSP 类型或能力 |
@@ -63,8 +65,8 @@
 | 全局配置路径 | src/config/mod.rs | `peri_dir` / `settings_path` |
 | SQLite 会话存储 | src/sessions/sqlite_store.rs | `SqliteThreadStore`（:60，迁移桥，持共享库句柄）；`ThreadStore` impl 处理 metadata/payload/frozen，context/compaction 委托私有模块；`delete_thread` 与数据面删除同语义（递归删整棵树：每节点显式删子表行 → `threads` 行，不借外键级联；v10 起不再写删除墓碑） |
 | 会话资源门面（生产入口） | src/sessions/resources.rs + resources/{gate,claim,lifecycle}.rs | `SessionResourcesImpl`（公开 API，`Arc<dyn SessionResources>` 的构造点）；`Lifecycle::{state,begin_closing,confirm_closed}`（关闭生命周期事实） |
-| 本机执行面 | src/sessions/sqlite_store/local.rs + execution.rs | `LocalExecution` / `ExecutionLease`：发现、登记、活跃句柄、创建准入和撤销；无 session 文件锁，不提供跨实例独占 |
-| SQLite 连接与解码 | src/sessions/sqlite_store/{database,connection,schema,row_mapping}.rs | `database.rs` 持共享 pool 与实例内强引用句柄登记；`connection.rs` 持有有界 canonical 路径初始化锁（预检/WAL/DDL，不做会话锁），只读 shape probe 无写入；`schema.rs` 与共享 `schema_cleanup` 原子迁移至 11 并清理退役状态，未知版本/结构 fail-closed，2–5 来源登记重建保留 identity/binding，env 回填与版本推进同事务；`row_mapping.rs` 共用 metadata 解码 |
+| 执行端口 | src/sessions/sqlite_store/local.rs + sessions/remote/execution.rs + sessions/wasm_execution.rs + sessions/execution.rs | 本机 SQLite、原生 Turso、WASM 虚拟工作区分别提供观测与进程内 lease；Turso 持久执行证据存于远端，无本地 SQLite 连接 |
+| SQLite 连接与解码 | src/sessions/sqlite_store/{database,connection,schema,row_mapping}.rs | `database.rs` 持共享 pool 与实例内强引用句柄登记；`connection.rs` 持有有界 canonical 路径初始化锁（预检/WAL/DDL，不做会话锁），只读 shape probe 无写入；`schema.rs` 原子迁移至 12，未知版本/结构 fail-closed；`row_mapping.rs` 共用 metadata 解码 |
 | SQLite 上下文与事务 | src/sessions/sqlite_store/{context,compaction}.rs | context.rs（`*_on` 连接作用域读原语与取连接的包装：ancestor payload、child/session tree；读历史不写 `updated_at`）；compaction.rs（flags、事务提交、回滚删除；`load_flags_on` 对损坏 ID/projection 失败而不是跳过） |
 | 测试文件存储 | src/sessions/filesystem.rs | `FilesystemThreadStore`（:25） |
 | SQLite 行写入原语 | src/sessions/sqlite_store/session_rows.rs + canonical.rs | `ThreadRowInsert` / `insert_thread_row` / `insert_binding_row`；共用列形状与 env 插入规则，child 从父 env 继承 |

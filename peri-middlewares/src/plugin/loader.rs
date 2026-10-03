@@ -11,8 +11,10 @@ use peri_acp_types::command::command_route::{
     RouteEntry,
 };
 use peri_acp_types::command::{CommandContext, CommandHandler, CommandOutcome};
+use peri_acp_types::lsp::LspServerConfig;
 use peri_acp_types::plugin::McpServerConfigValidationError;
-use peri_mcp_lsp::config::{lsp_config_from_plugin, LspServerConfig};
+#[cfg(not(target_os = "emscripten"))]
+use peri_mcp_lsp::config::lsp_config_from_plugin;
 use serde::Deserialize;
 use thiserror::Error;
 use tracing::{debug, warn};
@@ -937,6 +939,9 @@ fn aggregate_plugin_data(plugins: Vec<LoadedPlugin>) -> PluginLoadResult {
         .flatten()
         .collect();
 
+    #[cfg(target_os = "emscripten")]
+    let all_lsp_servers: Vec<LspServerConfig> = Vec::new();
+    #[cfg(not(target_os = "emscripten"))]
     let all_lsp_servers: Vec<LspServerConfig> = plugins
         .iter()
         .filter_map(|plugin| {

@@ -36,13 +36,10 @@ peri-agent = { path = "../peri-agent" }
 peri-controller = { path = "../peri-controller" }
 peri-model = { path = "../peri-model" }
 peri-middlewares = { path = "../peri-middlewares" }
-peri-mcp-lsp.workspace = true
 peri-mcp-common.workspace = true
 peri-mcp-config.workspace = true
 peri-mcp-credentials.workspace = true
 peri-resources = { path = "../peri-resources" }
-peri-mcp-cron.workspace = true
-peri-mcp-workspace.workspace = true
 agent-client-protocol = { version = "2", features = ["unstable"] }
 # `unstable_mcp_over_acp`：MCP over ACP 的类型（`McpCapabilities` / `McpServer::Acp`
 # / `ConnectMcpRequest`）与 ACP `mcp/*` 方法名。当前由 `agent-client-protocol` 的
@@ -77,3 +74,9 @@ tracing-subscriber.workspace = true
 # 测试面虚拟时钟（`tokio::time::pause`）：R29/F02 的桥层 120s 期限不真等 120 秒。
 # 与 peri-agent / peri-tui 的既有写法同形（dev-dependencies，resolver = "2" 下不进入生产构建）。
 tokio = { workspace = true, features = ["test-util"] }
+
+[target.'cfg(not(target_os = "emscripten"))'.dependencies]
+tokio = { workspace = true, features = ["full"] }
+peri-mcp-lsp.workspace = true
+peri-mcp-cron.workspace = true
+peri-mcp-workspace.workspace = true

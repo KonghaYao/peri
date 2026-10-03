@@ -255,11 +255,13 @@ impl SessionEnvironment {
         // - `disable_bundled`：从准备配置 snapshot 投影的全局资源关闭位。
         // - 缺根（目录不存在）交给 provider 既有语义处理（缺失目录 = 空批）。
         // - Agent 项目/插件根与指令面（`peri-instruction://`）由同一 provider 装配。
+        #[cfg(not(target_os = "emscripten"))]
         let disable_bundled = configuration
             .config_source
             .snapshot()
             .map(|snapshot| snapshot.resources().disable_bundled_skills)
             .unwrap_or_else(peri_middlewares::skills::load_disable_bundled_skills);
+        #[cfg(not(target_os = "emscripten"))]
         let workspace_resources = super::workspace_resources::workspace_resources_input(
             &cwd,
             plugins,
@@ -310,7 +312,9 @@ impl SessionEnvironment {
             cwd: cwd.clone(),
             bare: source.bare,
             drive_cron_tick: source.drive_cron_tick,
+            #[cfg(not(target_os = "emscripten"))]
             workspace_input: None,
+            #[cfg(not(target_os = "emscripten"))]
             workspace_resources: Some(workspace_resources),
             builtin_closed,
             skills_face_closed,

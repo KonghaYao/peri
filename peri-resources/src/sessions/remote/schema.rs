@@ -31,7 +31,7 @@ use super::sql::{int_at, text_at, StatementSpec};
 /// 本构建写入并接受的远端 schema 版本：**与本机 `CURRENT_SCHEMA_VERSION` 同一个常量**。
 ///
 /// 两端形状相同，版本就不该各自一份；任何一侧推进版本，另一侧跟着走。
-pub(super) const REMOTE_SCHEMA_VERSION: i64 = crate::sessions::sqlite_store::CURRENT_SCHEMA_VERSION;
+pub(super) const REMOTE_SCHEMA_VERSION: i64 = crate::sessions::canonical::CURRENT_SCHEMA_VERSION;
 
 /// 远程存储契约标签：形状 + 语义代数，和版本一起决定「这是不是我们认识的那个库」。
 ///

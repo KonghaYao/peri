@@ -1,3 +1,4 @@
+export { loadPeriWasm } from "../wasm/loader";
 export { Agent } from "../agent/agent";
 export { SendReceipt } from "../agent/send-receipt";
 export { BareHarnessConfig } from "../config/bare-harness-config";
@@ -24,3 +25,6 @@ export type {
   StdioTransportOptions,
   Transport,
 } from "../transport/types";
+
+export { WasmAcpTransport } from "../transport/wasm-transport";
+export type { WasmAcpTransportOptions } from "../transport/wasm-transport";

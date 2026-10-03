@@ -17,6 +17,7 @@ pub use peri_controller::langfuse::LangfuseSessionLike;
 pub use peri_agent::telemetry;
 // Workflow CLI is exposed through the ACP host boundary so TUI does not reach
 // the resource layer directly while dispatching before configuration loading.
+#[cfg(not(target_os = "emscripten"))]
 pub use peri_resources::workflow::cli as workflow_cli;
 
 pub mod agent;

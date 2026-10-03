@@ -231,9 +231,7 @@ impl RemoteSessionData {
         // 跑——身份早于会话表建立的 store（例如只做过机制实测的库）同样需要补齐。
         if access == StoreAccess::ReadWrite {
             crate::sessions::machine::initialize().await.map_err(|_| {
-                SessionResourceError::new(SessionResourceErrorKind::Unavailable {
-                    detail: "machine identity initialization failed".to_owned(),
-                })
+                crate::sessions::failure::unavailable("machine identity initialization failed")
             })?;
             // 父行检查先归位：canonical 形状里的外键在远端没有可满足的父行（见方法文档）。
             store.force_parent_checks_off().await?;
@@ -244,12 +242,6 @@ impl RemoteSessionData {
                 .apply_schema(vec![StatementSpec::new(
                     "INSERT OR IGNORE INTO machines(id, name, identity_kind) VALUES (?1, '我的电脑', 'known')",
                     vec![Value::Text(crate::sessions::machine::current().map_err(|_| unsupported_behavior("machine identity is not initialized"))?.to_owned())],
-                )])
-                .await?;
-            store
-                .apply_schema(vec![StatementSpec::new(
-                    crate::sessions::canonical::BACKFILL_ENVIRONMENTS_SQL,
-                    vec![Value::Text(format!("legacy:{}", store_id.as_str()))],
                 )])
                 .await?;
         }

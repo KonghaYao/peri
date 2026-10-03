@@ -125,6 +125,7 @@ impl McpClientPool {
                 }
                 connected
             }
+            #[cfg(not(target_os = "emscripten"))]
             TransportConfig::Stdio { command, args, env } => {
                 let cwd =
                     self.execution_cwd
@@ -144,6 +145,13 @@ impl McpClientPool {
                         });
                     }
                 }
+            }
+            #[cfg(target_os = "emscripten")]
+            TransportConfig::Stdio { .. } => {
+                return Err(McpPoolError::ConnectionFailed {
+                    server: server_name.to_owned(),
+                    reason: "MCP stdio transport is unavailable".into(),
+                });
             }
             TransportConfig::StreamableHttp {
                 url,

@@ -301,19 +301,26 @@ impl PreparedSessionInputs {
     /// （缺失/非法清单定位到具体插件，不生成合成清单、不写插件缓存）；
     /// host 级与 bare 沿用既有形状（无插件聚合）。
     fn discover_plugins(host: &AcpServerConfig, cwd: &str) -> Result<DiscoveredPlugins, AcpError> {
-        match host.workspace_assembly.as_ref() {
-            None => Ok((None, host.plugin_skill_roots.clone())),
-            Some(source) if source.bare => Ok((None, Vec::new())),
-            Some(_) => {
-                // 严格只读发现：用户级 `.claude` 由装配面解析（HOME 优先的唯一
-                // 权威在 `plugin::claude_home`，见 `assemble` 函数 doc），
-                // 准备面只提供执行目录。
-                let data =
-                    super::assemble::discover_enabled_plugins_readonly(cwd).map_err(|error| {
-                        AcpError::new(-32603, format!("Plugin discovery failed: {error}"))
-                    })?;
-                let skill_roots = data.all_skill_roots.clone();
-                Ok((Some(data), skill_roots))
+        #[cfg(target_os = "emscripten")]
+        {
+            let _ = (host, cwd);
+            return Ok((None, Vec::new()));
+        }
+        #[cfg(not(target_os = "emscripten"))]
+        {
+            match host.workspace_assembly.as_ref() {
+                None => Ok((None, host.plugin_skill_roots.clone())),
+                Some(source) if source.bare => Ok((None, Vec::new())),
+                Some(_) => {
+                    // 严格只读发现：用户级 `.claude` 由装配面解析（HOME 优先的唯一
+                    // 权威在 `plugin::claude_home`，见 `assemble` 函数 doc），
+                    // 准备面只提供执行目录。
+                    let data = super::assemble::discover_enabled_plugins_readonly(cwd).map_err(
+                        |error| AcpError::new(-32603, format!("Plugin discovery failed: {error}")),
+                    )?;
+                    let skill_roots = data.all_skill_roots.clone();
+                    Ok((Some(data), skill_roots))
+                }
             }
         }
     }

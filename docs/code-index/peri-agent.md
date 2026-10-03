@@ -3,6 +3,8 @@
 > 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-30（metrics 出口改为宿主装配注入的 `MetricsSink`（生产为 Langfuse event），本地 `~/.peri/metrics/*.jsonl` 落盘删除；未安装出口时指标丢弃）。此前：2026-09-29（W5：`ChainSlot::AgentDefine` 删除、蓝本槽位 21→20，agent 定义改由 `McpAgentRegistry` 的 `agent://` 资源提供、`{{available_agents}}` 经 `AgentCatalogPort`）。此前：2026-09-28（system MCP 选中工具使用原始模型名；工具来源绑定与 first-wins 冲突准入，见 ARC-TOOLS-001 / ARC-HITL-001）。此前：2026-09-27（v4-part-4 wave 3：`ChainSlot::Filesystem` / `ChainSlot::Terminal` 删除、`ChainSlot` 变体 22 个（7 个文件/终端工具改由 builtin `workspace` 实例提供，模型面为 workspace 原始工具名）；剔除面再覆盖 7 个裸名（`Read` / `Write` / `Edit` / `Glob` / `Grep` / `folder_operations` / `Bash`）——未选中 system 工具仍沿原 deferred 路径；新增模块 `session/bg_complete.rs`（AW3-11 的 session 级 `on_bg_complete` 构造器）；`agent/compact_v2/full.rs` 的最近文件 / 技能路径提取按 effective name 归一）。此前：2026-09-26（v4-part-3 wave 2：`ChainSlot::Cron` 删除、`ChainSlot::Lsp` 改挂 `LspSyncMiddleware`（只做文档同步、无工具），`ChainSlot` 变体 24 个；链内裸名剔除面覆盖四个已迁移工具名。此前：builtin 一等工具的生效名归一：`TOOL_PARAM_ALIASES` 与 `ToolFilterPolicy::canonical` 改「原样优先、未命中再用原始名」；`stage_builder/tools.rs` 谓词覆盖边界更新；链内删去 Web / Artifact 槽位。此前：启动闸门 hook `before_react_start` 与 System MCP 工具 static base 提交；Bash 同步执行有界化）
 > 依据：peri-agent/CLAUDE.md、docs/standards/architecture-contracts.md、源码
 
+Emscripten 最小入口见 [`peri-wasm`](peri-wasm.md)：复用本 crate 的 `run_react_loop` 和 `AgentModelBridge`；`resources` 模块及其 Native 存储依赖在目标平台不编入。
+
 ## 架构速览
 
 - 数据流：`MessageQueue → Receive → Compact → Reason → Act → MessageQueue`

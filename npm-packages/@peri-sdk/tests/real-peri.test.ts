@@ -253,7 +253,7 @@ test("ManagedAgents starts one real Peri session and rejects a second owner", as
   const database = new Database(f.database, { readonly: true });
   try {
     const row = database
-      .query("SELECT machine_id FROM session_environments WHERE thread_id = ?")
+      .query("SELECT w.machine_id FROM threads t JOIN workspaces w ON w.id = t.workspace_id WHERE t.id = ?")
       .get(sessionId) as { machine_id: string } | null;
     // Current Peri creates its own machine UUID; ACP has no Sandbox identity input.
     expect(row?.machine_id).toMatch(/^[0-9a-f-]{36}$/);

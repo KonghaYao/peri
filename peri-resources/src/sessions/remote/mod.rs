@@ -110,6 +110,7 @@ mod composition;
 mod connection;
 mod credentials;
 mod endpoint;
+#[cfg(not(target_os = "emscripten"))]
 mod execution;
 mod failure;
 mod generation;
@@ -138,7 +139,7 @@ mod sql;
 pub(crate) use composition::open_remote;
 #[cfg(test)]
 pub(crate) use connection::RemoteConnection;
-#[cfg(test)]
+#[cfg(any(test, target_os = "emscripten"))]
 pub(crate) use credentials::SessionStoreCredential;
 pub(crate) use credentials::{CredentialError, CredentialSource};
 pub(crate) use endpoint::{EndpointError, RemoteEndpoint, RemoteEngine};

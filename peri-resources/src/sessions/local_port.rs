@@ -203,7 +203,7 @@ pub(in crate::sessions) trait LocalExecutionPort: Send + Sync {
     async fn dispose_execution(&self, id: &ThreadId) -> SessionResourceResult<()>;
 
     /// 测试用：本机 SQLite 连接池。
-    #[cfg(test)]
+    #[cfg(all(test, not(target_os = "emscripten")))]
     fn sqlite_pool(&self) -> Option<&sqlx::SqlitePool> {
         None
     }

@@ -6,8 +6,10 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Result};
 use peri_acp_types::thread::ThreadId;
 use peri_acp_types::workspace::{WorkspaceId, WorkspacePathSource};
+#[cfg(not(target_os = "emscripten"))]
 use sqlx::SqliteConnection;
 
+#[cfg(not(target_os = "emscripten"))]
 use super::discovery::Discovery;
 
 #[derive(Clone, Debug)]
@@ -45,6 +47,7 @@ pub(crate) struct StorageV2Plan {
 
 /// 在旧表仍完整时读取迁移输入。执行登记的 `discovery` 只是最后观测值，
 /// 这里仅用它判断路径来源，绝不把它标成创建时的执行快照。
+#[cfg(not(target_os = "emscripten"))]
 pub(crate) async fn read_local_plan(connection: &mut SqliteConnection) -> Result<StorageV2Plan> {
     let registration_rows: Vec<(String, String, String)> =
         sqlx::query_as("SELECT id, root, discovery FROM workspaces")

@@ -30,3 +30,6 @@ libc = "0.2"
 tempfile = { workspace = true }
 tokio-tungstenite = { workspace = true }
 serial_test = { workspace = true }
+
+[target.'cfg(not(target_os = "emscripten"))'.dependencies]
+tokio = { workspace = true, features = ["full"] }

@@ -404,11 +404,7 @@ pub(crate) fn load_merged_config_from_snapshot(
         .map_err(|source| McpConfigError::PluginLoadError { source })?;
     let plugin_servers = collect_plugin_mcp_servers(&plugins, &mut plugin_sources);
     let merged = snapshot.mcp_with_plugins(&plugin_servers)?;
-    let policy = if snapshot.builtin_mcp_enabled() {
-        super::builtin::BuiltinInjectionPolicy::all()
-    } else {
-        super::builtin::BuiltinInjectionPolicy::none()
-    };
+    let policy = snapshot_builtin_policy(snapshot);
     let merged = finalize_merged_config(merged, &policy)?;
     Ok((merged, plugin_sources))
 }
@@ -417,16 +413,32 @@ pub(crate) fn load_bare_config_from_snapshot(
     snapshot: &peri_config::ConfigurationSnapshot,
 ) -> Result<McpConfigFile, McpConfigError> {
     let mut config = snapshot.bare_mcp()?;
-    let policy = if snapshot.builtin_mcp_enabled() {
-        super::builtin::BuiltinInjectionPolicy::all()
-    } else {
-        super::builtin::BuiltinInjectionPolicy::none()
-    };
+    let policy = snapshot_builtin_policy(snapshot);
     super::builtin::apply_builtin_overlay(&mut config.mcp_servers, &policy)
         .map_err(builtin_overlay_error)?;
     config.mcp_servers.retain(|name, _| name == "workspace");
     validate_config(&config)?;
     Ok(config)
+}
+
+fn snapshot_builtin_policy(
+    snapshot: &peri_config::ConfigurationSnapshot,
+) -> super::builtin::BuiltinInjectionPolicy {
+    #[cfg(target_os = "emscripten")]
+    {
+        let _ = snapshot;
+        // A snapshot captures the native builtin default. WASM has no builtin
+        // handlers, so the platform policy must also apply to snapshot loads.
+        super::builtin::BuiltinInjectionPolicy::none()
+    }
+    #[cfg(not(target_os = "emscripten"))]
+    {
+        if snapshot.builtin_mcp_enabled() {
+            super::builtin::BuiltinInjectionPolicy::all()
+        } else {
+            super::builtin::BuiltinInjectionPolicy::none()
+        }
+    }
 }
 
 fn collect_plugin_mcp_servers(

@@ -22,8 +22,6 @@ mod session_data;
 mod session_rows;
 #[path = "storage_v2_migration.rs"]
 mod storage_v2_migration;
-#[path = "storage_v2_plan.rs"]
-pub(super) mod storage_v2_plan;
 mod workspace;
 mod workspace_identity;
 
@@ -39,29 +37,23 @@ use peri_acp_types::{
     },
     thread::{AgentStatus, ThreadId, ThreadListEntry, ThreadMeta},
 };
-/// `messages.role` 的领域派生：canonical schema 的写入原语两端共用同一份
-/// （见 `sessions::canonical::payload_role`）。
-pub(in crate::sessions) use row_mapping::role_of as role_of_message;
 use row_mapping::{extract_title, meta_from_row, role_of, ThreadRow, THREAD_META_COLUMNS};
 use sqlx::AssertSqlSafe;
 use std::{collections::HashMap, path::PathBuf, str::FromStr, sync::Arc};
 
-pub(in crate::sessions) use super::execution::same_lease;
-pub(in crate::sessions) use super::execution::ExecutionWriteGuard;
-use super::execution::TransactionEffect;
+use super::execution::{ExecutionWriteGuard, TransactionEffect};
 use super::resources::SessionResourcesImpl;
 use database::SqliteSessionDatabase;
+use failure::is_persistence_uncertain;
+
+pub(in crate::sessions) use failure::execution_failure;
 /// 提交阶段/领域失败映射：由门面测试驱动真实写入准入，生产路径在 `session_data`
 /// 与 `compaction` 内部直接引用。
 #[cfg(test)]
 pub(in crate::sessions) use failure::{commit_failure, write_failure};
-pub(in crate::sessions) use failure::{
-    execution_failure, invalid_input, is_persistence_uncertain, lease_required, not_found,
-    read_only_store, unavailable,
-};
 pub(in crate::sessions) use local::LocalExecution;
-/// 本机 schema 版本：canonical 形状的版本号，远端 `peri_store_meta.schema_version` 与它同源。
-pub(in crate::sessions) use schema::CURRENT_SCHEMA_VERSION;
+#[cfg(test)]
+use schema::CURRENT_SCHEMA_VERSION;
 /// 数据面实现：生产组合从 [`LocalExecution::data_port`] 取得它，本重导出供测试夹具直接命名。
 #[cfg(test)]
 pub(crate) use session_data::SqliteSessionData;

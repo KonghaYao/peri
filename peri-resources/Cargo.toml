@@ -12,7 +12,6 @@ dirs-next.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-sqlx = { workspace = true }
 # 远程会话存储（Turso Database 引擎，over-the-wire）。选定依据、精确版本与已知限制见
 # src/sessions/remote/mod.rs 的模块文档（C-01 只读探测 + 官方引擎/驱动对应关系）。
 turso_serverless = "0.1.3"
@@ -22,7 +21,6 @@ tracing.workspace = true
 uuid.workspace = true
 peri-acp-types = { path = "../peri-acp-types" }
 # workflow 作为 resource 实现接入；LSP 已下沉至 peri-mcp-lsp，不再由 Resources 持有。
-peri-workflow = { path = "../peri-workflow" }
 
 [dev-dependencies]
 tempfile.workspace = true
@@ -33,3 +31,13 @@ url.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+
+[target.'cfg(not(target_os = "emscripten"))'.dependencies]
+tokio = { workspace = true, features = ["full"] }
+sqlx = { workspace = true }
+peri-workflow = { path = "../peri-workflow" }
+
+[target.'cfg(target_os = "emscripten")'.dependencies]
+wasm-bindgen-futures = "0.4"
+wasm-bindgen = "0.2"
+js-sys = "0.3"

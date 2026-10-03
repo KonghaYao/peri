@@ -227,6 +227,7 @@ pub(crate) struct BuiltinInstanceSupervisor {
     instance: String,
     tick: Option<TickGuard>,
     server_task: BuiltinServerTask,
+    #[cfg(not(target_os = "emscripten"))]
     workspace_tasks: Option<peri_mcp_workspace::WorkspaceMcpServer>,
 }
 
@@ -241,6 +242,7 @@ impl BuiltinInstanceSupervisor {
             instance,
             tick,
             server_task,
+            #[cfg(not(target_os = "emscripten"))]
             workspace_tasks: None,
         }
     }
@@ -267,6 +269,7 @@ impl BuiltinInstanceSupervisor {
             None => TickCloseOutcome::NotSpawned,
         };
         let server = self.server_task.converge(timeout).await;
+        #[cfg(not(target_os = "emscripten"))]
         if let Some(workspace) = self.workspace_tasks.take() {
             if tokio::time::timeout(timeout, workspace.shutdown_shell_tasks())
                 .await
@@ -325,6 +328,7 @@ pub(crate) struct BuiltinTransport {
     /// server 侧 task。**必须**经 [`Self::into_parts`] 的监督者登记进 pool 的 builtin 表，
     /// 否则关闭/重连留 orphan。
     pub(crate) server_task: BuiltinServerTask,
+    #[cfg(not(target_os = "emscripten"))]
     workspace_tasks: Option<peri_mcp_workspace::WorkspaceMcpServer>,
 }
 
@@ -336,7 +340,10 @@ impl BuiltinTransport {
     pub(crate) fn into_parts(self) -> (TransportIo, BuiltinInstanceSupervisor) {
         let instance = self.server_task.instance().to_string();
         let mut supervisor = BuiltinInstanceSupervisor::new(instance, self.server_task, self.tick);
-        supervisor.workspace_tasks = self.workspace_tasks;
+        #[cfg(not(target_os = "emscripten"))]
+        {
+            supervisor.workspace_tasks = self.workspace_tasks;
+        }
         (self.io, supervisor)
     }
 }
@@ -395,6 +402,7 @@ where
             instance: task_instance,
             handle,
         },
+        #[cfg(not(target_os = "emscripten"))]
         workspace_tasks: None,
     }
 }
@@ -413,6 +421,7 @@ where
 /// 3. handler 未接线 → [`BuiltinSpawnError::HandlerNotWired`]：**不** panic、**不**静默降级
 ///    成 stdio / http、**不**伪造 ready 证据。`ctx.cwd` 是 artifact 实例的文件解析根
 ///    （web 忽略；cron / lsp 不经它取状态）。
+#[cfg(not(target_os = "emscripten"))]
 pub(crate) fn spawn_builtin_transport_with_context(
     instance: &str,
     ctx: &BuiltinInstanceContext,
@@ -441,6 +450,17 @@ pub(crate) fn spawn_builtin_transport_with_context(
     let mut transport = spawn_builtin_transport_with_handler(instance, handler);
     transport.workspace_tasks = workspace_tasks;
     Ok(transport)
+}
+
+#[cfg(target_os = "emscripten")]
+pub(crate) fn spawn_builtin_transport_with_context(
+    instance: &str,
+    _ctx: &BuiltinInstanceContext,
+    _env: &std::collections::HashMap<String, String>,
+) -> Result<BuiltinTransport, BuiltinSpawnError> {
+    Err(BuiltinSpawnError::HandlerNotWired {
+        instance: instance.to_owned(),
+    })
 }
 
 /// 测试专用：把「本代的 tick + server task」组装成监督者。**仅测试用**，生产构造路径不变

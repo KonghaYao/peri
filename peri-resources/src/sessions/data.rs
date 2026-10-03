@@ -26,7 +26,7 @@ use peri_acp_types::workspace::{
     ResolvedWorkspace, ScopedThreadPage, ScopedThreadQuery, SessionBinding,
 };
 
-use super::sqlite_store::invalid_input;
+use super::failure::invalid_input;
 
 // 本机执行事实（运行句柄、未结清门禁、工作区登记）不属于本端口：它们在
 // `super::local_port::LocalExecutionPort`。这里只保留两个 adapter 共同承担的会话数据行为。

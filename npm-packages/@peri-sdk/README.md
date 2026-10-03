@@ -1,5 +1,7 @@
 # @peri-code/sdk
 
+SDK 的 `Sandbox` 可通过 `transportFactory` 使用 Emscripten WASM 中的现有 ACP Host；`ManagedAgents`、`Agent` 和 `Session` 接口与 stdio 模式共用。`bun run build` 构建 `peri-wasm` release 产物，并将 `peri-wasm.js` 与 `peri_wasm.wasm` 放入包内 `dist/wasm/`。模型请求仍由 Rust `peri-model` 发出，Agent 运行现有 RCRA loop。
+
 Bun SDK for Peri's existing ACP stdio endpoint. `ManagedAgents.createAgent()` synchronously declares an Agent with one Session. `Session.start()` asynchronously claims their identities in the configured atomic KV, starts Peri, initializes ACP, and creates or loads the Session. Peri owns model execution and Session persistence.
 
 ```ts
@@ -33,7 +35,7 @@ try {
 
 A Sandbox receives a `SessionStorage` interface, owns transport startup, and supplies the Store deployment when the Session starts. An Agent receives the Sandbox. Use `SqliteFileStorage({ path })` for a local SQLite file, or `TursoStorage({ url: "turso://your-database.turso.io", authToken })` for Turso Cloud. For a `libsql://` URL, set `engine: "libsql"` explicitly. `agent.getSessions()` delegates to `Sandbox.getSessions()` and reads Session metadata directly from the Store for the Sandbox path; it does not call ACP `session/list`. Remote reads use the official `@tursodatabase/serverless` driver. Workspace-ID lookup is deferred until the Workspace persistence contract is settled.
 
-`PeriConfig` types the settings document passed through `Sandbox.stdio.settings`. This document replaces Peri's global settings at startup. `BareHarnessConfig` is a frozen SDK preset that disables every known MetaHarness key; spread it into `meta_harness` and enable only the capabilities needed. The runnable demo defines a complete Anthropic provider and Sonnet profile in [demo.ts](examples/demo/demo.ts), enables `McpMiddleware` and `ToolSearch`, and starts a local Workspace HTTP MCP process. The Sandbox waits for MCP initialization and a real `tools/list` before the Agent Session starts. Closing the Agent does not stop Workspace; the Sandbox closes it when the demo exits.
+`PeriConfig` types the settings document passed through `Sandbox.stdio.settings` or the WASM ACP startup object. This document replaces Peri's global settings at startup. `BareHarnessConfig` is a frozen SDK preset that disables every known MetaHarness key; spread it into `meta_harness` and enable only the capabilities needed. The runnable demo defines a complete Anthropic provider and Sonnet profile in [demo.ts](examples/demo/demo.ts), enables `McpMiddleware` and `ToolSearch`, and starts a local Workspace HTTP MCP process. The Sandbox waits for MCP initialization and a real `tools/list` before the Agent Session starts. Closing the Agent does not stop Workspace; the Sandbox closes it when the demo exits.
 
 `Sandbox.id` scopes SDK ownership claims. The SDK does not pass it to Peri as `machine_id`; Peri resolves that identity itself. Do not assume `Sandbox.id` equals the Store's machine identity. Cross-instance execution admission across this boundary remains an open contract.
 
@@ -49,8 +51,20 @@ bun install --frozen-lockfile
 bun run db:dev # Keep this running in a separate terminal.
 bun run dev
 bun run typecheck
-bun test
+bun run test
 bun run build
 ```
 
 Open `http://127.0.0.1:3000` while `bun run dev` is running. `PORT` changes the demo HTTP port; `PERI_WORKSPACE_BIND` changes the Workspace MCP listener (default `127.0.0.1:8765`); `PERI_BIN` selects another Peri binary, with `peri-mcp-workspace` beside it. The demo uses the local libSQL HTTP listener at `127.0.0.1:8081`; `PERI_DEMO_TURSO_URL` can select another loopback HTTP listener for isolated runs. Existing remote `PERI_TURSO_URL` and `PERI_TURSO_AUTH_TOKEN` values do not affect the demo. The workspace files and local Session Store persist when the demo stops. The server starts via `sqld` directly because `turso dev` binds its HTTP listener to all interfaces. Peri currently requires a nonempty remote credential source, so the demo supplies a harmless placeholder for this unauthenticated loopback server.
+
+## WASM ACP transport demo
+
+[demo-wasm.ts](examples/demo/demo-wasm.ts) uses the same `Sandbox`, `ManagedAgents`, `Agent`, `Session`, API routes, and [demo.html](examples/demo/demo.html) as the native demo. Its only client change is `Sandbox.transportFactory: () => WasmAcpTransport.start(...)`. The adapter sends and receives complete JSON-RPC frames through `PeriWasmAcp`; the shared `JsonRpcTransport` handles IDs, notifications and reverse requests for both stdio and WASM. The startup object contains `{ cwd, settings, storage: { url, authToken }, machineId }`. `session/new` still supplies instructions and MCP servers through ACP.
+
+```bash
+cd npm-packages/@peri-sdk
+bun run db:dev # Separate terminal, or set PERI_DEMO_TURSO_URL.
+PERI_WORKSPACE=/absolute/workspace ANTHROPIC_API_KEY=... ANTHROPIC_BASE_URL=... bun run demo:wasm
+```
+
+The server checks for the `PeriWasmAcp` export before listening and reports a missing ACP Host explicitly. `PERI_WASM_MODULE_URL` selects another WASM glue module; `PERI_WASM_MACHINE_ID` sets a persistent UUID execution identity (the demo defaults to `00000000-0000-4000-8000-000000000001`). `PERI_WORKSPACE_MCP_URL` can supply an external HTTP Workspace MCP endpoint. Builtin MCP servers are not started in WASM.

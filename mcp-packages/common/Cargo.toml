@@ -8,9 +8,7 @@ license = "Apache-2.0"
 [dependencies]
 peri-agent = { path = "../../peri-agent" }
 peri-acp-types = { path = "../../peri-acp-types" }
-peri-process = { path = "../../peri-process" }
 chrono.workspace = true
-fs2 = "0.4"
 futures.workspace = true
 libc = "0.2"
 rmcp.workspace = true
@@ -25,3 +23,8 @@ uuid.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+
+[target.'cfg(not(target_os = "emscripten"))'.dependencies]
+tokio = { workspace = true, features = ["full"] }
+fs2 = "0.4"
+peri-process = { path = "../../peri-process" }

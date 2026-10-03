@@ -15,6 +15,7 @@ use rmcp::{
     ServiceExt,
 };
 
+#[cfg(not(target_os = "emscripten"))]
 use crate::ConfigurationMcpServer;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -63,19 +64,31 @@ impl ConfigurationClient {
                 runtime.block_on(async move {
                     let client = match connection {
                         Connection::Local => {
-                            let (client_io, server_io) = tokio::io::duplex(65536);
-                            tokio::spawn(async move {
-                                if let Ok(server) =
-                                    ConfigurationMcpServer::new().serve(server_io).await
+                            #[cfg(target_os = "emscripten")]
+                            {
+                                Err(io::Error::new(
+                                    io::ErrorKind::Unsupported,
+                                    "local configuration MCP server is unavailable on Emscripten",
+                                ))
+                            }
+                            #[cfg(not(target_os = "emscripten"))]
+                            {
+                                let (client_io, server_io) = tokio::io::duplex(65536);
+                                tokio::spawn(async move {
+                                    if let Ok(server) =
+                                        ConfigurationMcpServer::new().serve(server_io).await
+                                    {
+                                        let _ = server.waiting().await;
+                                    }
+                                });
+                                match tokio::time::timeout(REQUEST_TIMEOUT, ().serve(client_io))
+                                    .await
                                 {
-                                    let _ = server.waiting().await;
+                                    Ok(result) => {
+                                        result.map_err(|error| io::Error::other(error.to_string()))
+                                    }
+                                    Err(_) => Err(timeout_error()),
                                 }
-                            });
-                            match tokio::time::timeout(REQUEST_TIMEOUT, ().serve(client_io)).await {
-                                Ok(result) => {
-                                    result.map_err(|error| io::Error::other(error.to_string()))
-                                }
-                                Err(_) => Err(timeout_error()),
                             }
                         }
                         Connection::Tcp(address) => {

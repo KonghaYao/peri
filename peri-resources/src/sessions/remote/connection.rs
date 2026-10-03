@@ -35,7 +35,7 @@ pub(super) async fn within_budget<T>(
     future: impl Future<Output = turso_serverless::Result<T>>,
     budget: Duration,
 ) -> Budgeted<T> {
-    match tokio::time::timeout(budget, future).await {
+    match crate::sessions::timeout::timeout(budget, future).await {
         Ok(Ok(value)) => Budgeted::Done(value),
         Ok(Err(error)) => Budgeted::Failed(error),
         Err(_) => Budgeted::Exceeded,
@@ -182,6 +182,8 @@ pub(super) trait RemoteTransport: Send + Sync {
 }
 
 /// 生产传输：一条已确认的 SDK 连接。
+/// Emscripten 上的 HTTP Future 也必须在调用方的 Tokio reactor 中被 poll；
+/// 脱离它另用 JS event loop 驱动会在 socket 建连时因缺少 reactor 而 panic。
 pub(super) struct SdkTransport {
     connection: Connection,
 }
@@ -195,48 +197,21 @@ impl SdkTransport {
 #[async_trait]
 impl RemoteTransport for SdkTransport {
     async fn sql_values(&self, spec: &StatementSpec) -> turso_serverless::Result<Vec<Vec<Value>>> {
-        let mut rows = self.connection.query(spec.sql, spec.params.clone()).await?;
-        let mut collected = Vec::new();
-        while let Some(row) = rows.next().await? {
-            collected.push(columns_of(&row)?);
-        }
-        Ok(collected)
+        collect_values(&self.connection, spec).await
     }
 
     async fn managed_batch(
         &self,
         statements: Vec<StatementSpec>,
     ) -> turso_serverless::Result<Vec<u64>> {
-        let batch = build_batch(statements)?;
-        let results = self
-            .connection
-            .transactional_batch(batch, TransactionBehavior::Immediate)
-            .await?;
-        Ok(results
-            .iter()
-            .map(|result| result.rows_affected())
-            .collect())
+        execute_batch(&self.connection, statements, TransactionBehavior::Immediate).await
     }
 
     async fn consistent_read(
         &self,
         statements: Vec<StatementSpec>,
     ) -> turso_serverless::Result<Vec<Vec<Vec<Value>>>> {
-        let batch = build_batch(statements)?;
-        let results = self
-            .connection
-            .transactional_batch(batch, TransactionBehavior::Deferred)
-            .await?;
-        results
-            .iter()
-            .map(|result| {
-                result
-                    .rows()
-                    .iter()
-                    .map(columns_of)
-                    .collect::<turso_serverless::Result<Vec<_>>>()
-            })
-            .collect()
+        read_batch(&self.connection, statements).await
     }
 
     fn is_autocommit(&self) -> turso_serverless::Result<bool> {
@@ -246,6 +221,51 @@ impl RemoteTransport for SdkTransport {
     async fn close(&self) -> turso_serverless::Result<()> {
         self.connection.close().await
     }
+}
+
+async fn collect_values(
+    connection: &Connection,
+    spec: &StatementSpec,
+) -> turso_serverless::Result<Vec<Vec<Value>>> {
+    let mut rows = connection.query(spec.sql, spec.params.clone()).await?;
+    let mut collected = Vec::new();
+    while let Some(row) = rows.next().await? {
+        collected.push(columns_of(&row)?);
+    }
+    Ok(collected)
+}
+
+async fn execute_batch(
+    connection: &Connection,
+    statements: Vec<StatementSpec>,
+    behavior: TransactionBehavior,
+) -> turso_serverless::Result<Vec<u64>> {
+    let results = connection
+        .transactional_batch(build_batch(statements)?, behavior)
+        .await?;
+    Ok(results
+        .iter()
+        .map(|result| result.rows_affected())
+        .collect())
+}
+
+async fn read_batch(
+    connection: &Connection,
+    statements: Vec<StatementSpec>,
+) -> turso_serverless::Result<Vec<Vec<Vec<Value>>>> {
+    let results = connection
+        .transactional_batch(build_batch(statements)?, TransactionBehavior::Deferred)
+        .await?;
+    results
+        .iter()
+        .map(|result| {
+            result
+                .rows()
+                .iter()
+                .map(columns_of)
+                .collect::<turso_serverless::Result<Vec<_>>>()
+        })
+        .collect()
 }
 
 /// 静态 SQL + 位置绑定参数 → SDK 批语句。

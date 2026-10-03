@@ -13,10 +13,10 @@ use std::sync::{
 };
 
 pub(in crate::sessions) struct ExecutionLease {
-    thread_id: ThreadId,
-    active: AtomicBool,
-    mutation_gate: Arc<tokio::sync::RwLock<()>>,
-    mutation_uncertain: AtomicBool,
+    pub(in crate::sessions) thread_id: ThreadId,
+    pub(in crate::sessions) active: AtomicBool,
+    pub(in crate::sessions) mutation_gate: Arc<tokio::sync::RwLock<()>>,
+    pub(in crate::sessions) mutation_uncertain: AtomicBool,
 }
 
 impl ExecutionLease {
@@ -92,9 +92,9 @@ impl ExecutionLease {
 /// The guard retains the lease and admission lock until a mutation settles.
 /// Dropping an unsettled mutation records an uncertain effect.
 pub(in crate::sessions) struct ExecutionWriteGuard {
-    lease: Arc<ExecutionLease>,
-    _gate: tokio::sync::OwnedRwLockReadGuard<()>,
-    completed: bool,
+    pub(in crate::sessions) lease: Arc<ExecutionLease>,
+    pub(in crate::sessions) _gate: tokio::sync::OwnedRwLockReadGuard<()>,
+    pub(in crate::sessions) completed: bool,
 }
 
 impl ExecutionWriteGuard {
@@ -117,9 +117,9 @@ impl Drop for ExecutionWriteGuard {
 /// 并发（存储 adapter 负责自己的并发控制），写侧门禁用来把「检查 + 写入」做成一段不可插入的
 /// 区间（child resume 认领的状态检查与写入、未发布创建的撤销）。
 pub(in crate::sessions) struct ExclusiveExecutionGuard {
-    lease: Arc<ExecutionLease>,
-    _gate: tokio::sync::OwnedRwLockWriteGuard<()>,
-    completed: bool,
+    pub(in crate::sessions) lease: Arc<ExecutionLease>,
+    pub(in crate::sessions) _gate: tokio::sync::OwnedRwLockWriteGuard<()>,
+    pub(in crate::sessions) completed: bool,
 }
 
 impl ExclusiveExecutionGuard {

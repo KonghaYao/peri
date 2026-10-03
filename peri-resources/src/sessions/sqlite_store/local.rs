@@ -28,7 +28,6 @@ use super::failure::{
 };
 use super::session_data::SqliteSessionData;
 use super::session_rows::{delete_thread_child_rows, insert_binding_row, insert_thread_row};
-use crate::sessions::execution::same_lease;
 use crate::sessions::local_port::{LocalExecutionPort, RevokeEffect, SessionFacts};
 
 /// 本机执行面的句柄：与数据面共用同一个库（同一条连接真相）。
@@ -135,7 +134,7 @@ impl LocalExecution {
             .registered_lease(id)
             .map_err(execution_failure)?
             .ok_or_else(lease_required)?;
-        if !same_lease(&owned, lease) {
+        if !crate::sessions::execution::same_lease(&owned, lease) {
             return Err(lease_required());
         }
         owned
@@ -145,7 +144,7 @@ impl LocalExecution {
                     .registered_lease(id)
                     .map_err(execution_failure)?
                     .ok_or_else(lease_required)?;
-                if !same_lease(&current, lease) {
+                if !crate::sessions::execution::same_lease(&current, lease) {
                     return Err(lease_required());
                 }
                 revoke().await
@@ -440,7 +439,7 @@ impl LocalExecution {
             .map_err(execution_failure)?
             .filter(|owned| owned.is_active())
             .ok_or_else(lease_required)?;
-        if !same_lease(&owned, lease) {
+        if !crate::sessions::execution::same_lease(&owned, lease) {
             return Err(lease_required());
         }
         if owned.is_uncertain() {

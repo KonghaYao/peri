@@ -41,6 +41,7 @@ pub(crate) mod compact_config;
 mod connection;
 mod lifecycle;
 mod workspace;
+#[cfg(not(target_os = "emscripten"))]
 mod workspace_resources;
 pub use lifecycle::{spawn_acp_server, AcpHostHandle, AcpHostShutdownReport};
 mod continuation;
@@ -90,6 +91,7 @@ mod requests;
 mod server_loop;
 mod shutdown;
 pub mod stage_builder;
+#[cfg(not(target_os = "emscripten"))]
 pub mod stdio;
 mod task_scope;
 #[cfg(test)]

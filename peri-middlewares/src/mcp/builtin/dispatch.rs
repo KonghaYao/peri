@@ -30,6 +30,7 @@ use rmcp::{
 use super::context::BuiltinInstanceContext;
 use peri_mcp_artifact::ArtifactMcpServer;
 use peri_mcp_cron::CronMcpServer;
+#[cfg(not(target_os = "emscripten"))]
 use peri_mcp_lsp::LspMcpServer;
 use peri_mcp_web::WebMcpServer;
 use peri_mcp_workspace::WorkspaceMcpServer;
@@ -45,6 +46,7 @@ pub(crate) enum BuiltinServerHandler {
     Web(WebMcpServer),
     Artifact(ArtifactMcpServer),
     Cron(CronMcpServer),
+    #[cfg(not(target_os = "emscripten"))]
     Lsp(LspMcpServer),
     Workspace(WorkspaceMcpServer),
 }
@@ -57,6 +59,7 @@ impl ServerHandler for BuiltinServerHandler {
             Self::Web(server) => server.get_info(),
             Self::Artifact(server) => server.get_info(),
             Self::Cron(server) => server.get_info(),
+            #[cfg(not(target_os = "emscripten"))]
             Self::Lsp(server) => server.get_info(),
             Self::Workspace(server) => server.get_info(),
         }
@@ -71,6 +74,7 @@ impl ServerHandler for BuiltinServerHandler {
             Self::Web(server) => server.list_tools(request, context).await,
             Self::Artifact(server) => server.list_tools(request, context).await,
             Self::Cron(server) => server.list_tools(request, context).await,
+            #[cfg(not(target_os = "emscripten"))]
             Self::Lsp(server) => server.list_tools(request, context).await,
             Self::Workspace(server) => server.list_tools(request, context).await,
         }
@@ -85,6 +89,7 @@ impl ServerHandler for BuiltinServerHandler {
             Self::Web(server) => server.call_tool(request, context).await,
             Self::Artifact(server) => server.call_tool(request, context).await,
             Self::Cron(server) => server.call_tool(request, context).await,
+            #[cfg(not(target_os = "emscripten"))]
             Self::Lsp(server) => server.call_tool(request, context).await,
             Self::Workspace(server) => server.call_tool(request, context).await,
         }
@@ -260,10 +265,13 @@ pub(crate) fn builtin_server_handler_with_env(
         "cron" => ctx.cron.as_ref().map(|cron| {
             BuiltinServerHandler::Cron(CronMcpServer::new(Arc::clone(&cron.scheduler)))
         }),
+        #[cfg(not(target_os = "emscripten"))]
         "lsp" => ctx
             .lsp
             .as_ref()
             .map(|lsp| BuiltinServerHandler::Lsp(LspMcpServer::new(Arc::clone(&lsp.pool)))),
+        #[cfg(target_os = "emscripten")]
+        "lsp" => None,
         "workspace" => {
             // The MCP instance owns its Bash tasks. Session state is never
             // injected into the capability server.

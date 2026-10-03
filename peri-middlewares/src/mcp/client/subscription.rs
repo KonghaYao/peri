@@ -432,10 +432,16 @@ pub(crate) fn build_subscription_filter(sub: &McpSubscriptionsConfig) -> Subscri
 ///
 /// 判定不写第二份实例名字面量：以「实例有默认订阅且默认订阅覆盖该 URI」为准
 /// （默认订阅的唯一声明在 `mcp::builtin::workspace_subscription`）。
+#[cfg(not(target_os = "emscripten"))]
 pub(crate) fn is_git_watch_resource(server: &str, uri: &str) -> bool {
     uri == peri_mcp_workspace::GIT_REF_RESOURCE_URI
         && crate::mcp::builtin::default_subscriptions_for(server)
             .is_some_and(|sub| sub.resources.iter().any(|resource| resource == uri))
+}
+
+#[cfg(target_os = "emscripten")]
+pub(crate) fn is_git_watch_resource(_server: &str, _uri: &str) -> bool {
+    false
 }
 
 /// 读回正文的信任边界（§6 风险 6：读回的 payload 不可信，限长、不进控制状态）。
@@ -453,11 +459,14 @@ pub(crate) fn git_watch_reminder_from_resource(
     uri: &str,
     body: &str,
 ) -> (MessageKind, TrustedSystemReminder) {
+    #[cfg(not(target_os = "emscripten"))]
     debug_assert_eq!(
         uri,
         peri_mcp_workspace::GIT_REF_RESOURCE_URI,
         "git_watch 映射只对 git ref 资源生效"
     );
+    #[cfg(target_os = "emscripten")]
+    let _ = uri;
     let reminder = TrustedSystemReminderFactory::for_producer()
         .construct(SystemReminder {
             version: SYSTEM_REMINDER_VERSION,

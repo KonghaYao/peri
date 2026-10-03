@@ -26,7 +26,9 @@ mod gate;
 mod lifecycle;
 mod oauth_credentials;
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(not(target_os = "emscripten"))]
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -47,11 +49,15 @@ use peri_acp_types::workspace::{
 };
 
 use super::data::{ensure_child_relation, ChildResumeRecord, SessionDataPort};
+use super::execution::same_lease;
+#[cfg(target_os = "emscripten")]
+use super::failure::execution_failure;
+use super::failure::{invalid_input, lease_required, not_found};
 use super::local_port::{LocalExecutionPort, RevokeEffect, SessionFacts};
-use super::sqlite_store::{
-    execution_failure, invalid_input, lease_required, not_found, same_lease, LocalExecution,
-    ReadOnlyThreadStoreError,
-};
+#[cfg(not(target_os = "emscripten"))]
+use super::sqlite_store::execution_failure;
+#[cfg(not(target_os = "emscripten"))]
+use super::sqlite_store::{LocalExecution, ReadOnlyThreadStoreError};
 
 use claim::ChildResumeClaimHandle;
 use gate::{MutationGate, WriteScope};
@@ -205,11 +211,13 @@ pub struct SessionResourcesImpl {
 
 impl SessionResourcesImpl {
     /// 打开或创建会话库，原地升级已知旧 schema 并保留历史数据。
+    #[cfg(not(target_os = "emscripten"))]
     pub async fn open(db_path: impl Into<PathBuf>) -> anyhow::Result<Self> {
         Ok(Self::from_local(LocalExecution::open(db_path).await?))
     }
 
     /// 以只读方式打开已存在的会话库；不创建目录、库、schema 或锁文件。
+    #[cfg(not(target_os = "emscripten"))]
     pub async fn open_existing_read_only(
         db_path: impl AsRef<Path>,
     ) -> Result<Self, ReadOnlyThreadStoreError> {
@@ -219,6 +227,7 @@ impl SessionResourcesImpl {
     }
 
     /// 默认数据库位置 `~/.peri/threads/threads.db`；不创建目录、数据库或连接。
+    #[cfg(not(target_os = "emscripten"))]
     pub fn default_database_path() -> anyhow::Result<PathBuf> {
         LocalExecution::default_database_path()
     }
@@ -227,6 +236,7 @@ impl SessionResourcesImpl {
     ///
     /// 本机组合：数据面与执行面由同一个库句柄回答（同一条连接真相），两个端口因此只是
     /// 同一实现的两张面孔。
+    #[cfg(not(target_os = "emscripten"))]
     pub(in crate::sessions) fn from_local(local: LocalExecution) -> Self {
         let data = Arc::new(local.data_port());
         Self::from_ports(data, Arc::new(local), SessionDataHome::LocalLibrary)
@@ -266,9 +276,7 @@ impl SessionResourcesImpl {
         if let Some(machine_id) = self.gate.data().machine_id_of(id).await? {
             if machine_id
                 != crate::sessions::machine::current().map_err(|_| {
-                    crate::sessions::sqlite_store::unavailable(
-                        "machine identity is not initialized",
-                    )
+                    crate::sessions::failure::unavailable("machine identity is not initialized")
                 })?
             {
                 return Ok(ExecutionAvailability::WorkspaceUnavailable);
@@ -285,11 +293,16 @@ impl SessionResourcesImpl {
         {
             return Ok(ExecutionAvailability::WorkspaceUnavailable);
         }
-        if !tokio::fs::metadata(&meta.cwd)
+        #[cfg(not(target_os = "emscripten"))]
+        let cwd_exists = tokio::fs::metadata(&meta.cwd)
             .await
             .map(|metadata| metadata.is_dir())
-            .unwrap_or(false)
-        {
+            .unwrap_or(false);
+        #[cfg(target_os = "emscripten")]
+        let cwd_exists = std::fs::metadata(&meta.cwd)
+            .map(|metadata| metadata.is_dir())
+            .unwrap_or(false);
+        if !cwd_exists {
             return Ok(ExecutionAvailability::WorkspaceUnavailable);
         }
         if matches!(self.home, SessionDataHome::RemoteStore) {
@@ -353,7 +366,7 @@ impl SessionResourcesImpl {
     }
 
     /// 测试用：本机组合背后的 SQLite 连接池（逐条构造事实的夹具使用）。
-    #[cfg(test)]
+    #[cfg(all(test, not(target_os = "emscripten")))]
     pub(super) fn local_pool(&self) -> &sqlx::SqlitePool {
         self.gate
             .local()
@@ -444,9 +457,7 @@ impl SessionResources for SessionResourcesImpl {
         if let Some(machine_id) = self.gate.data().machine_id_of(id).await? {
             if machine_id
                 != crate::sessions::machine::current().map_err(|_| {
-                    crate::sessions::sqlite_store::unavailable(
-                        "machine identity is not initialized",
-                    )
+                    crate::sessions::failure::unavailable("machine identity is not initialized")
                 })?
             {
                 return Err(SessionResourceError::new(
@@ -546,15 +557,18 @@ impl SessionResources for SessionResourcesImpl {
                     .await
             }
             SessionDataHome::RemoteStore => {
+                let facts = self.gate.session_facts(id).await?;
                 if self
                     .gate
                     .local()
-                    .live_owner(id, &SessionFacts { root: id.clone() })
+                    .live_owner(id, &facts)
                     .await
                     .map_err(execution_failure)?
-                    .is_some()
+                    .is_some_and(|lease| lease.is_active() || lease.is_uncertain())
                 {
-                    return Err(lease_required());
+                    return Err(SessionResourceError::conflict(
+                        "session initialization still has an active owner",
+                    ));
                 }
                 self.gate.data().revoke_unpublished_draft(id).await
             }
@@ -868,7 +882,7 @@ impl SessionResources for SessionResourcesImpl {
             .flatten();
         if let Some(lease) = owner {
             if lease.is_active() {
-                tokio::time::timeout(SETTLE_WAIT, lease.wait_for_in_flight())
+                crate::sessions::timeout::timeout(SETTLE_WAIT, lease.wait_for_in_flight())
                     .await
                     .map_err(|_| SessionResourceError::new(SessionResourceErrorKind::Timeout))?;
             }
@@ -890,7 +904,7 @@ impl SessionResources for SessionResourcesImpl {
         {
             if lease.is_active() {
                 // 有界等待已准入写入结清；超时说明有写入卡住，报告未结清而不是无限等。
-                tokio::time::timeout(SETTLE_WAIT, lease.wait_for_in_flight())
+                crate::sessions::timeout::timeout(SETTLE_WAIT, lease.wait_for_in_flight())
                     .await
                     .map_err(|_| SessionResourceError::new(SessionResourceErrorKind::Timeout))?;
             }
@@ -929,14 +943,15 @@ impl SessionResourcesImpl {
         // 停止新写入不可逆；`Closing` 不是 `Closed`：未结清事实仍可收敛（恢复/排空在
         // `Closing` 下继续可用，见 `gate::ensure_recovery_permitted`）。
         self.lifecycle.begin_closing();
-        let _credentials = tokio::time::timeout(SETTLE_WAIT, self.credential_operations.write())
-            .await
-            .map_err(|_| SessionResourceError::new(SessionResourceErrorKind::Timeout))?;
+        let _credentials =
+            crate::sessions::timeout::timeout(SETTLE_WAIT, self.credential_operations.write())
+                .await
+                .map_err(|_| SessionResourceError::new(SessionResourceErrorKind::Timeout))?;
 
         // 每次调用都重新做真实检查，不复用上一次的失败结论。
         //
         for lease in self.gate.local().live_leases() {
-            if tokio::time::timeout(SETTLE_WAIT, lease.wait_for_in_flight())
+            if crate::sessions::timeout::timeout(SETTLE_WAIT, lease.wait_for_in_flight())
                 .await
                 .is_err()
             {

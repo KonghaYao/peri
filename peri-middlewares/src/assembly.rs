@@ -16,6 +16,10 @@ mod lsp;
 mod mcp;
 mod preparation;
 mod prompt;
+#[cfg(not(target_os = "emscripten"))]
+mod workflow;
+#[cfg(target_os = "emscripten")]
+#[path = "assembly/workflow_wasm.rs"]
 mod workflow;
 
 // builtin 实例上下文（IF-P3-04 / A33）：宿主装配（`peri-acp`）经这里拿到宿主构造的上下文
@@ -29,13 +33,14 @@ pub use workflow::{
     WorkflowAgentMiddlewareFactory,
 };
 
+#[cfg(not(target_os = "emscripten"))]
+use crate::ptc::PtcMiddleware;
 use crate::{
     default_system_prompt::{DefaultSystemPromptMiddleware, LangMiddleware},
     hitl::HumanInTheLoopMiddleware,
     middleware::TodoMiddleware,
     permission::{default_requires_approval, PermissionMiddleware},
     plugin::PluginMiddleware,
-    ptc::PtcMiddleware,
     subagent::SubAgentMiddleware,
     tool_search::ToolSearchMiddleware,
     workflow::{WorkflowMiddleware, WorkflowMiddlewareAdaptor},
@@ -336,6 +341,9 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
                 }
                 // Programmatic Tool Calling：注册 deferred RunPtcCode，由 ToolSearch 发现/执行。
                 ChainSlot::Ptc if disabled.contains("PtcMiddleware") => {}
+                #[cfg(target_os = "emscripten")]
+                ChainSlot::Ptc => {}
+                #[cfg(not(target_os = "emscripten"))]
                 ChainSlot::Ptc => {
                     let middleware =
                         PtcMiddleware::new().with_task_manager(ctx.task_manager.clone());

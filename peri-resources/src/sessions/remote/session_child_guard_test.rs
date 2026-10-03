@@ -125,6 +125,7 @@ async fn test_remote_child_entry_rejects_a_disagreeing_relation_before_any_io() 
 /// 继承全都没走）。这条判定原先挂在已撤销的远程执行面上，v10 撤销时连同文件一起被删掉了。
 #[tokio::test]
 async fn test_remote_root_entry_rejects_a_parent_before_any_io() {
+    crate::sessions::machine::initialize().await.unwrap();
     let remote = ClosedRemote::open().await;
 
     let mut with_parent = root_session("root-with-parent");

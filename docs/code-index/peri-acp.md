@@ -5,6 +5,12 @@
 
 ## 架构速览
 
+Emscripten 的 ACP 部署入口在 `src/host/assemble.rs::assemble_wasm_server_config`：
+注入 provider、配置 source、session resources 与 shutdown，复用 `AcpServerConfig`
+和 `host/requests.rs` 的单一方法分发；`transport/wire_bridge.rs` 将宿主字节流接入
+同一 ACP Host。`host/stdio` 与 `transport/stdio` 仅在原生目标编译，WASM 不装配
+builtin MCP、LSP、cron 或本地 workspace 资源。远端 MCP 仍经现有 pool 初始化。
+
 配置规则与来源权威见 [`peri-config`](peri-config.md)。ACP `provider/{config,store}.rs`
 仅 re-export core 类型与 `settings::ConfigSource`；正常 source 持有 `ConfigurationSystem`，
 提供同 scope 的 snapshot、revision 与 CAS 保存。host 装配在 MCP 初始化前注入同一

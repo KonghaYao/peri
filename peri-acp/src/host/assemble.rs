@@ -133,6 +133,7 @@ pub struct HostAssemblyInput {
     /// 保持现状无 tick——行为零变化，L2 遗留登记 M-TUI issue）。
     pub drive_cron_tick: bool,
     /// 遗留测试输入槽；生产传 `None`，Workspace Bash 在 MCP 侧自持任务。
+    #[cfg(not(target_os = "emscripten"))]
     pub workspace_input: Option<peri_mcp_workspace::WorkspaceInstanceInput>,
     /// builtin `workspace` 实例的**资源面**输入（资源根 / builtin 关闭位 / 预算），
     /// 随 builtin 实例上下文一次注入 pool，早于
@@ -141,6 +142,7 @@ pub struct HostAssemblyInput {
     /// `None` = 资源面未接线（`resources/list` 只有 git ref）：顶层三路径保持 `None`
     /// ——它们不产生会话，资源面没有消费者；会话环境装配传 `Some`，其内容由装配期
     /// 已有事实源构造（本层不第二次读配置）。
+    #[cfg(not(target_os = "emscripten"))]
     pub workspace_resources: Option<peri_mcp_workspace::WorkspaceResourcesInput>,
     /// 准备路径一次加载的插件聚合：`Some` 时装配面不再重读插件目录
     /// （`None` = 既有语义，由装配面自行加载；仅 host 级/非准备调用点如此）。
@@ -168,6 +170,44 @@ pub struct HostAssemblyInput {
     /// 判据不同）。随 builtin 实例上下文注入 pool（发现管线的唯一消费点）。
     /// 顶层三路径（无会话上下文）恒为 `false`；会话装配从 frozen snapshot 派生。
     pub skills_face_closed: bool,
+}
+
+/// Emscripten deployment inputs. The ACP Host and request dispatch remain the
+/// same as the native deployment; only local capabilities are omitted.
+#[cfg(target_os = "emscripten")]
+pub struct WasmHostAssemblyInput {
+    pub provider: LlmProvider,
+    pub peri_config: Arc<RwLock<PeriConfig>>,
+    pub config_source: Arc<crate::provider::ConfigSource>,
+    pub permission_mode: Arc<SharedPermissionMode>,
+    pub session_resources: Arc<dyn SessionResources>,
+    pub session_store_shutdown: Option<Box<dyn SessionStoreShutdownPort>>,
+    pub cwd: String,
+}
+
+#[cfg(target_os = "emscripten")]
+pub async fn assemble_wasm_server_config(input: WasmHostAssemblyInput) -> AcpServerConfig {
+    assemble_server_config(HostAssemblyInput {
+        provider: input.provider,
+        peri_config: input.peri_config,
+        config_source: input.config_source,
+        permission_mode: input.permission_mode,
+        session_resources: input.session_resources,
+        workspace_id: None,
+        session_store_shutdown: input.session_store_shutdown,
+        cwd: input.cwd,
+        bare: false,
+        drive_cron_tick: false,
+        // Browser deployments do not discover plugins from a local home directory.
+        prepared_plugins: Some(PreparedPlugins {
+            data: None,
+            skill_roots: Vec::new(),
+        }),
+        session_mcp_servers: None,
+        builtin_closed: Default::default(),
+        skills_face_closed: false,
+    })
+    .await
 }
 
 /// Construct terminal hook execution; the session environment owns admission and joining.
@@ -321,7 +361,9 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         cwd,
         bare,
         drive_cron_tick,
+        #[cfg(not(target_os = "emscripten"))]
         workspace_input,
+        #[cfg(not(target_os = "emscripten"))]
         workspace_resources,
         prepared_plugins,
         session_mcp_servers,
@@ -360,12 +402,16 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
     // `cron.tick_enabled` 决定）；宿主不再 spawn `HostTaskKind::CronTick`
     // ——同一 scheduler 任一时刻至多一个驱动，tick 随该代 supervisor 关闭。
     // 部署层不建 MCP 池；其 tick 策略经 WorkspaceAssembly 原样传入会话。
+    #[cfg(not(target_os = "emscripten"))]
     let cron_scheduler_concrete = Arc::new(parking_lot::Mutex::new(
         peri_mcp_cron::CronScheduler::new(tokio::sync::mpsc::unbounded_channel().0),
     ));
+    #[cfg(not(target_os = "emscripten"))]
     let cron_scheduler: Option<Arc<dyn CronSchedulerPort>> = Some(Arc::new(
         peri_mcp_cron::CronSchedulerPortHandle(Arc::clone(&cron_scheduler_concrete)),
     ));
+    #[cfg(target_os = "emscripten")]
+    let cron_scheduler: Option<Arc<dyn CronSchedulerPort>> = None;
 
     // ── LSP：配置合并 + host 级唯一 pool（A11/A21/A22，顺序冻结见 sub-plan H §5.1）──
     //
@@ -384,6 +430,7 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
     // H5：全局 settings.json（config.lspServers）与插件 LSP 服务器合并
     //（优先级对齐 MCP：global < plugin；无插件时全局配置单独生效）。
     // 读取路径跟随宿主全局配置加载机制（config_path，支持测试重定向）。
+    #[cfg(not(target_os = "emscripten"))]
     let plugin_lsp_servers = if bare {
         Default::default()
     } else {
@@ -395,10 +442,14 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
                 .unwrap_or_default(),
         )
     };
+    #[cfg(not(target_os = "emscripten"))]
     let host_lsp_pool_concrete = peri_mcp_lsp::create_host_lsp_pool(&cwd, &plugin_lsp_servers);
     // 宿主侧投影：端口即消费面（A23/A30），链上同步中间件与 host shutdown 都只经它。
+    #[cfg(not(target_os = "emscripten"))]
     let lsp_pool: Arc<dyn LspPoolPort> =
         Arc::clone(&host_lsp_pool_concrete) as Arc<dyn LspPoolPort>;
+    #[cfg(target_os = "emscripten")]
+    let plugin_lsp_servers = Vec::new();
 
     // ── 会话 MCP 池（bare 仅装配 workspace；后台初始化不阻塞）──
     // OAuth 授权事件通道：MCP 授权回调（AuthorizationNeeded/Completed/Failed）
@@ -441,6 +492,7 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         // `TaskManager` + session 级 `on_bg_complete`），由会话环境装配原样转交，
         // 本层不包装、不派生；`None` = 可见但退化（handler 照常构造，只是 `Bash`
         // 失去后台任务那一路），不是「实例不可装配」——无 `instance_input_ready` arm。
+        #[cfg(not(target_os = "emscripten"))]
         let mut builtin_context =
             peri_middlewares::assembly::BuiltinInstanceContext::new(cwd.clone())
                 .with_cron(peri_middlewares::assembly::CronInstanceInput {
@@ -450,11 +502,16 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
                 .with_lsp(peri_middlewares::assembly::LspInstanceInput {
                     pool: Arc::clone(&host_lsp_pool_concrete),
                 });
+        #[cfg(target_os = "emscripten")]
+        let mut builtin_context =
+            peri_middlewares::assembly::BuiltinInstanceContext::new(cwd.clone());
+        #[cfg(not(target_os = "emscripten"))]
         if let Some(workspace_input) = workspace_input {
             builtin_context = builtin_context.with_workspace(workspace_input);
         }
         // 资源面输入与 session 级输入同批（同一上下文、同一次注入）：`None` 保持
         // 「资源面未接线」的既有行为。
+        #[cfg(not(target_os = "emscripten"))]
         if let Some(workspace_resources) = workspace_resources {
             builtin_context = builtin_context.with_workspace_resources(workspace_resources);
         }
@@ -667,7 +724,7 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         );
 
     // E2：启动时清理孤儿插件文件（迁移前 TUI launch 行为；bare 时跳过）
-    if !bare && !session_scoped {
+    if !bare && !session_scoped && !cfg!(target_os = "emscripten") {
         let claude_dir_clone = claude_dir.clone();
         let _ = host_task_spawner.spawn(
             HostTaskOwnerKind::Startup,
@@ -716,7 +773,7 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         &plugin_hooks,
         settings_hooks.as_ref(),
         &cwd,
-        bare || !session_scoped,
+        bare || !session_scoped || cfg!(target_os = "emscripten"),
     );
     let flat_hooks: Vec<RegisteredHook> = hook_groups.iter().flatten().cloned().collect();
     tracing::info!(
@@ -799,7 +856,10 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         plugin_loaded,
         hook_groups,
         plugin_lsp_servers,
+        #[cfg(not(target_os = "emscripten"))]
         lsp_pool: Some(lsp_pool),
+        #[cfg(target_os = "emscripten")]
+        lsp_pool: None,
         tool_search_index,
         agent_catalog,
         plugin_manager,

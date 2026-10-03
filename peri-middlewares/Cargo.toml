@@ -12,15 +12,13 @@ peri-config = { path = "../peri-config" }
 peri-mcp-config.workspace = true
 peri-mcp-credentials.workspace = true
 peri-model = { path = "../peri-model" }
-peri-js-runtime = { path = "../peri-js-runtime" }
-peri-process = { path = "../peri-process" }
 anyhow.workspace = true
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 futures.workspace = true
-tokio = { workspace = true, features = ["process"] }
+tokio.workspace = true
 # P5.1: SubAgent stub 需要 tokio_util::sync::CancellationToken（原 v1 AgentCancellationToken 别名）。
 # 与 peri-agent 共享同一 tokio-util 依赖（feature unification 自动合并 sync feature）。
 tokio-util = { workspace = true }
@@ -32,12 +30,10 @@ chrono.workspace = true
 uuid.workspace = true
 tracing.workspace = true
 parking_lot.workspace = true
-fs2 = "0.4"
 fuzzy-matcher = "0.3"
 tempfile.workspace = true
 rmcp = { workspace = true, features = [
     "client",
-    "transport-child-process",
     "transport-streamable-http-client-reqwest",
     "auth",
 ] }
@@ -54,11 +50,6 @@ base64 = { version = "0.23.1", features = ["alloc"] }
 ipnet = "2.10"
 peri-resources = { path = "../peri-resources" }
 peri-mcp-common.workspace = true
-peri-mcp-web.workspace = true
-peri-mcp-artifact.workspace = true
-peri-mcp-cron.workspace = true
-peri-mcp-lsp.workspace = true
-peri-mcp-workspace.workspace = true
 lsp-types.workspace = true
 cacache = { version = "13.1.0", default-features = false, features = ["tokio-runtime"] }
 
@@ -70,3 +61,14 @@ serial_test.workspace = true
 # 测试面虚拟时钟（`tokio::time::pause`）：R29 的桥层 120s 期限不真等 120 秒。
 # 与 peri-agent / peri-tui 的既有写法同形（dev-dependencies，resolver = "2" 下不进入生产构建）。
 tokio = { workspace = true, features = ["test-util"] }
+
+[target.'cfg(not(target_os = "emscripten"))'.dependencies]
+tokio = { workspace = true, features = ["full"] }
+peri-js-runtime = { path = "../peri-js-runtime" }
+peri-process = { path = "../peri-process" }
+peri-mcp-lsp.workspace = true
+peri-mcp-web.workspace = true
+peri-mcp-artifact.workspace = true
+peri-mcp-cron.workspace = true
+peri-mcp-workspace.workspace = true
+rmcp = { workspace = true, features = ["transport-child-process"] }
