@@ -30,6 +30,7 @@ fn workspace_json(cwd: &str) -> Value {
     json!({
         "project_id":"00000000-0000-0000-0000-000000000001",
         "workspace_id":"00000000-0000-0000-0000-000000000002",
+        "execution_registration_id":"00000000-0000-0000-0000-000000000002",
         "cwd":cwd,"root":cwd,"relative_cwd":""
     })
 }
@@ -95,8 +96,13 @@ async fn project_history_uses_host_scope_and_actual_execution_path() {
     src.cwd = cwd.into();
     let mut slow = isolated_refresh();
     tick_once(&src, &mut slow).await.unwrap();
+    assert_eq!(*THREAD_LIST_ERROR.state().read(), None);
+    let project_query = tokio::time::timeout(Duration::from_secs(3), queries.recv())
+        .await
+        .expect("project scope query must be sent")
+        .unwrap();
     assert_eq!(
-        queries.recv().await.unwrap()["_meta"]["peri.sessionWorkspaceV1"]["scope"]["kind"],
+        project_query["_meta"]["peri.sessionWorkspaceV1"]["scope"]["kind"],
         "project"
     );
     let threads = THREAD_LIST.state().read().clone();
@@ -105,8 +111,12 @@ async fn project_history_uses_host_scope_and_actual_execution_path() {
     assert_eq!(threads[0].message_count, 3);
     THREAD_BROWSER_SCOPE.set(ThreadBrowserScope::Workspace);
     tick_once(&src, &mut slow).await.unwrap();
+    let workspace_query = tokio::time::timeout(Duration::from_secs(3), queries.recv())
+        .await
+        .expect("workspace scope query must be sent")
+        .unwrap();
     assert_eq!(
-        queries.recv().await.unwrap()["_meta"]["peri.sessionWorkspaceV1"]["scope"]["kind"],
+        workspace_query["_meta"]["peri.sessionWorkspaceV1"]["scope"]["kind"],
         "workspace"
     );
 }
