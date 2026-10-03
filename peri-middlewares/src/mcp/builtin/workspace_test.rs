@@ -440,15 +440,13 @@ async fn bridge_accepts_workspace_owned_task_handle() {
     let notifications = queue.drain_all();
     assert_eq!(notifications.len(), 1);
     assert_eq!(notifications[0].kind, MessageKind::Defer);
-    assert_eq!(
-        notifications[0].source,
-        MessageSource::DynamicMcpNotification
-    );
+    assert_eq!(notifications[0].source, MessageSource::ShellComplete);
     let QueuedPayload::SystemReminder(reminder) = &notifications[0].payload else {
         panic!("expected task reminder")
     };
-    assert!(reminder.as_reminder().body.contains(task_id));
-    assert!(reminder.as_reminder().body.contains("Task details:"));
+    assert!(reminder.as_reminder().body.contains(&task_id[..8]));
+    assert!(reminder.as_reminder().body.contains("stdout 输出文件"));
+    assert!(!reminder.as_reminder().body.contains("Task details:"));
     pair.shutdown().await;
     let _ = owner.shutdown().await;
 }

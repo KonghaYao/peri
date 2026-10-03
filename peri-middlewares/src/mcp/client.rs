@@ -140,6 +140,10 @@ pub struct McpClientPool {
     /// SessionManager（peri-acp）经 `McpSubscriptionPort` 注册；订阅通知到达
     /// 时向全部注册 inbox 推送 Defer 消息并唤醒 idle agent。
     pub(crate) session_inboxes: parking_lot::RwLock<HashMap<String, InboxHandle>>,
+    /// Session-scoped ACP projection for MCP Tasks. Replaced on each turn so
+    /// completions after the turn can still update the task area.
+    pub(crate) task_event_sinks:
+        parking_lot::RwLock<HashMap<String, Arc<dyn peri_acp_types::event::EventSink>>>,
     /// 跨进程的 MCP Resource Cache；是否写入由响应 scope 与安全上下文共同决定。
     pub(crate) resource_cache: super::resource_cache::McpResourceCache,
     /// 进程启动时冻结的 deployment capability profile；初始连接和重连复用。
@@ -222,6 +226,7 @@ impl McpClientPool {
             pending_oauth_callbacks: parking_lot::Mutex::new(HashMap::new()),
             active_oauth_flows: parking_lot::Mutex::new(HashMap::new()),
             session_inboxes: parking_lot::RwLock::new(HashMap::new()),
+            task_event_sinks: parking_lot::RwLock::new(HashMap::new()),
             resource_cache: super::resource_cache::McpResourceCache::new(),
             capability_profile,
             app_binding_leases: Arc::new(super::apps::McpAppBindingLeaseRegistry::default()),
@@ -777,6 +782,7 @@ impl McpSubscriptionPort for McpClientPool {
 
     fn unregister_inbox(&self, session_id: &str) {
         self.session_inboxes.write().remove(session_id);
+        self.task_event_sinks.write().remove(session_id);
     }
 
     fn as_any(&self) -> &dyn Any {

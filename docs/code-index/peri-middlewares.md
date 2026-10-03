@@ -24,6 +24,13 @@ snapshot；`initialize.rs` 的普通/bare 路径消费冻结输入，middleware 
 
 ## 速查表
 
+MCP Tasks 的 UI 与模型投影：`src/mcp/tool_bridge.rs` 在 task receipt 返回时通过
+`McpClientPool::emit_task_started` 发出既有 `bg-task-started`；
+`src/mcp/client/subscription.rs` 订阅终态并发出 `bg-task-completed`，同时向会话
+inbox 投递提醒。Builtin workspace Bash 的 `structuredContent` 解析为
+`BackgroundTaskResult`，提醒只包含退出信息与持久输出文件引用，不展开原始 JSON。
+ACP `host/prompt.rs` 按 session 注册事件 sink，session 注销时 pool 清理该 sink。
+
 ### OAuth 凭证接入（实现完成）
 
 - `src/mcp/auth_store.rs` 已接入 `peri_mcp_credentials::OAuthCredentialClient`；独立服务与客户端入口为 `mcp-packages/credentials/src/{lib,server,client}.rs`，host 装配入口为 `peri-acp/src/host/assemble.rs`，pool 注入端口为 `src/mcp/client/oauth.rs`。bootstrap 集成及 auth_store、OAuth、dynamic 定向回归通过，证据统一见 active assessment，不等同于真实部署或网络授权验收。

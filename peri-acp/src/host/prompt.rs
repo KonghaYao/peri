@@ -325,6 +325,12 @@ pub(crate) async fn run_prompt(
         Arc::clone(transport),
         session_manager.caps_registry(),
     ));
+    if let Some(pool) = deployment.mcp_pool.as_ref().and_then(|pool| {
+        pool.as_any()
+            .downcast_ref::<peri_middlewares::mcp::McpClientPool>()
+    }) {
+        pool.register_task_event_sink(&session_id, event_sink.clone());
+    }
 
     let provider_snapshot = provider.read().clone();
     let peri_config_snapshot = Arc::new(peri_config.read().clone());

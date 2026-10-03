@@ -328,10 +328,32 @@ impl BaseTool for McpToolBridge {
                         .as_deref()
                         .or(self.output_session_id.as_deref())
                     {
+                        let is_shell = self.tool_name == "Bash"
+                            && matches!(
+                                self.client.source.as_ref(),
+                                Some(super::config::ConfigSource::Builtin { instance })
+                                    if instance == "workspace"
+                            );
+                        let summary = if is_shell {
+                            input
+                                .get("command")
+                                .and_then(serde_json::Value::as_str)
+                                .unwrap_or("Bash")
+                        } else {
+                            self.tool_name.as_str()
+                        };
+                        pool.emit_task_started(
+                            session_id,
+                            &task_id,
+                            if is_shell { "shell" } else { "mcp" },
+                            summary,
+                        )
+                        .await;
                         pool.spawn_task_subscription(
                             self.server_name.clone(),
                             session_id.to_owned(),
                             task_id.clone(),
+                            is_shell,
                             peer.clone(),
                         );
                     }

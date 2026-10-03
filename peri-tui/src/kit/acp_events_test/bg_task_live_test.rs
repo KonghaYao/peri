@@ -7,6 +7,44 @@ use serial_test::serial;
 
 #[test]
 #[serial]
+fn test_mcp_shell_task_events_update_bottom_task_area() {
+    crate::kit::atoms::init_atoms();
+    BG_DISPLAY.state().write().clear();
+    let mut state = make_state();
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::BgTaskStarted(crate::kit::acp_types::BgTaskEntry {
+            task_id: "shell-mcp".into(),
+            kind: "shell".into(),
+            summary: "sleep 1".into(),
+            started_at: "2026-10-03T00:00:00Z".into(),
+            pid: None,
+        }),
+    );
+    let entries = BG_DISPLAY.state();
+    let running = entries.read();
+    assert_eq!(running.len(), 1);
+    assert_eq!(running[0].agent_type, "shell");
+    assert!(running[0].is_active);
+    drop(running);
+
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::BgTaskCompleted {
+            task_id: "shell-mcp".into(),
+            kind: Some("shell".into()),
+            success: true,
+            duration_ms: 1000,
+            output_preview: None,
+        },
+    );
+    let done = entries.read();
+    assert!(!done[0].is_active);
+    assert!(!done[0].is_error);
+}
+
+#[test]
+#[serial]
 fn test_bg_task_cancelled_persists_reason_on_live_detail() {
     crate::kit::atoms::init_atoms();
     BG_LIVE_DETAIL.state().write().clear();

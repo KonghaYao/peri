@@ -1,5 +1,6 @@
 use std::{sync::Arc, time::Duration};
 
+use peri_acp_types::event::{BackgroundTaskResult, EventSink};
 use peri_acp_types::plugin::McpSubscriptionsConfig;
 use peri_acp_types::session::{InboxHandle, MessageKind, MessageSource};
 use peri_acp_types::system_reminder::{
@@ -16,11 +17,39 @@ use serde_json::json;
 use super::{McpClientPool, McpServiceWrapper};
 
 impl McpClientPool {
+    pub fn register_task_event_sink(&self, session_id: &str, sink: Arc<dyn EventSink>) {
+        self.task_event_sinks
+            .write()
+            .insert(session_id.to_owned(), sink);
+    }
+
+    pub(crate) async fn emit_task_started(
+        &self,
+        session_id: &str,
+        task_id: &str,
+        kind: &str,
+        summary: &str,
+    ) {
+        let sink = self.task_event_sinks.read().get(session_id).cloned();
+        if let Some(sink) = sink {
+            sink.push_unstable_event(
+                session_id,
+                "bg-task-started".into(),
+                json!({
+                    "task_id": task_id, "kind": kind, "summary": summary,
+                    "started_at": chrono::Utc::now().to_rfc3339(),
+                }),
+            )
+            .await;
+        }
+    }
+
     pub(crate) fn spawn_task_subscription(
         self: &Arc<Self>,
         server: String,
         session_id: String,
         task_id: String,
+        is_workspace_shell: bool,
         peer: Peer<RoleClient>,
     ) {
         let pool = Arc::clone(self);
@@ -39,7 +68,7 @@ impl McpClientPool {
             // once after subscribing; subsequent changes arrive on the stream.
             if let Ok(snapshot) = peer.get_task(GetTaskParams::new(&task_id)).await {
                 if snapshot.task.status().is_terminal() {
-                    pool.deliver_task_status(&server, &session_id, &snapshot.task);
+                    pool.deliver_task_status(&server, &session_id, &snapshot.task, is_workspace_shell).await;
                     return;
                 }
             }
@@ -48,7 +77,7 @@ impl McpClientPool {
                     Ok(Some(ServerNotification::TaskStatusNotification(update))) => {
                         let task = &update.params.task;
                         if task.task.task_id == task_id && task.status().is_terminal() {
-                            pool.deliver_task_status(&server, &session_id, task);
+                            pool.deliver_task_status(&server, &session_id, task, is_workspace_shell).await;
                             break;
                         }
                     }
@@ -61,7 +90,13 @@ impl McpClientPool {
         }
     }
 
-    fn deliver_task_status(&self, server: &str, session_id: &str, task: &DetailedTask) {
+    async fn deliver_task_status(
+        &self,
+        server: &str,
+        session_id: &str,
+        task: &DetailedTask,
+        is_workspace_shell: bool,
+    ) {
         let Some(inbox) = self.session_inboxes.read().get(session_id).cloned() else {
             return;
         };
@@ -70,6 +105,22 @@ impl McpClientPool {
             .ok()
             .and_then(|value| value.as_str().map(str::to_owned))
             .unwrap_or_else(|| "unknown".into());
+        let shell_result = match &task.payload {
+            _ if !is_workspace_shell => None,
+            TaskPayload::Completed { result } => {
+                result.get("structuredContent").and_then(|value| {
+                    serde_json::from_value::<BackgroundTaskResult>(value.clone()).ok()
+                })
+            }
+            _ => None,
+        };
+        let success = shell_result
+            .as_ref()
+            .map(|result| result.success)
+            .unwrap_or_else(|| {
+                matches!(&task.payload, TaskPayload::Completed { result }
+                if result.get("isError").and_then(serde_json::Value::as_bool) != Some(true))
+            });
         let output = match &task.payload {
             TaskPayload::Completed { result } => {
                 let mut text = result
@@ -80,9 +131,11 @@ impl McpClientPool {
                     .filter_map(|content| content.get("text").and_then(serde_json::Value::as_str))
                     .collect::<Vec<_>>()
                     .join("\n");
-                if let Some(details) = result.get("structuredContent") {
-                    text.push_str("\nTask details: ");
-                    text.push_str(&details.to_string());
+                if !is_workspace_shell {
+                    if let Some(details) = result.get("structuredContent") {
+                        text.push_str("\nTask details: ");
+                        text.push_str(&details.to_string());
+                    }
                 }
                 text
             }
@@ -93,18 +146,45 @@ impl McpClientPool {
                 .to_owned(),
             _ => task.task.status_message.clone().unwrap_or_default(),
         };
-        let body = format!(
-            "MCP task {task_id} on {server} finished with status {status}.\n{}",
-            output.chars().take(16_000).collect::<String>()
-        );
+        let body = shell_result
+            .as_ref()
+            .map(BackgroundTaskResult::to_notification)
+            .unwrap_or_else(|| {
+                format!(
+                    "MCP task {task_id} on {server} finished with status {status}.\n{}",
+                    output.chars().take(16_000).collect::<String>()
+                )
+            });
+        let is_shell = is_workspace_shell;
+        let sink = self.task_event_sinks.read().get(session_id).cloned();
+        if let Some(sink) = sink {
+            let duration_ms = shell_result.as_ref().map_or(0, |result| result.duration_ms);
+            sink.push_unstable_event(session_id, "bg-task-completed".into(), json!({
+                "task_id": task_id, "kind": if is_shell { "shell" } else { "mcp" },
+                "success": success, "output_preview": output.chars().take(512).collect::<String>(),
+                "duration_ms": duration_ms,
+            })).await;
+        }
         let reminder = TrustedSystemReminderFactory::for_producer()
             .construct(SystemReminder {
                 version: SYSTEM_REMINDER_VERSION,
-                category: ReminderCategory::ExternalEvent,
-                source: CanonicalReminderSource("mcp".into()),
-                kind: "task_status".into(),
-                severity: ReminderSeverity::Info,
-                delivery: ReminderDelivery::Required,
+                category: if is_shell {
+                    ReminderCategory::Task
+                } else {
+                    ReminderCategory::ExternalEvent
+                },
+                source: CanonicalReminderSource(if is_shell { "shell" } else { "mcp" }.into()),
+                kind: if success { "completed" } else { "failed" }.into(),
+                severity: if success {
+                    ReminderSeverity::Info
+                } else {
+                    ReminderSeverity::Error
+                },
+                delivery: if is_shell {
+                    ReminderDelivery::Configurable
+                } else {
+                    ReminderDelivery::Required
+                },
                 audiences: ReminderAudiences(vec![
                     ReminderAudience::Model,
                     ReminderAudience::Tui,
@@ -117,7 +197,11 @@ impl McpClientPool {
             .expect("MCP task reminder mapping must be valid");
         inbox.push_system_reminder(
             MessageKind::Defer,
-            MessageSource::DynamicMcpNotification,
+            if is_shell {
+                MessageSource::ShellComplete
+            } else {
+                MessageSource::DynamicMcpNotification
+            },
             reminder,
         );
     }
@@ -407,6 +491,110 @@ impl McpClientPool {
                 None
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod task_projection_tests {
+    use std::sync::Arc;
+
+    use peri_acp_types::{
+        event::{BackgroundTaskResult, EventSink, ExecutorEvent, ShellOutput},
+        mcp::McpSubscriptionPort,
+        session::{MessageQueue, MessageSource, QueuedPayload, SessionInbox},
+    };
+    use rmcp::model::{DetailedTask, Task, TaskPayload, TaskStatus};
+    use serde_json::{json, Value};
+
+    use super::McpClientPool;
+
+    #[derive(Default)]
+    struct CapturingSink(parking_lot::Mutex<Vec<(String, Value)>>);
+
+    #[async_trait::async_trait]
+    impl EventSink for CapturingSink {
+        async fn push_event(&self, _: &str, _: &ExecutorEvent, _: u32) {}
+        async fn push_done(&self, _: &str, _: &str, _: Option<&str>) {}
+        async fn push_unstable_event(&self, _: &str, event: String, data: Value) {
+            self.0.lock().push((event, data));
+        }
+    }
+
+    #[tokio::test]
+    async fn workspace_shell_task_has_task_events_and_file_reference_reminder() {
+        let pool = McpClientPool::new_pending();
+        let queue = Arc::new(MessageQueue::new());
+        let inbox = SessionInbox::new(queue);
+        pool.register_inbox("session", inbox.handle());
+        let sink = Arc::new(CapturingSink::default());
+        pool.register_task_event_sink("session", sink.clone());
+        pool.emit_task_started("session", "shell-1", "shell", "sleep 1")
+            .await;
+
+        let result = BackgroundTaskResult {
+            task_id: "shell-1".into(),
+            agent_name: "bg-shell".into(),
+            prompt_summary: "sleep 1".into(),
+            success: true,
+            output: "Shell command completed; read the output files as needed.".into(),
+            tool_calls_count: 0,
+            duration_ms: 1000,
+            child_thread_id: None,
+            timed_out: false,
+            subagent_failure: None,
+            shell_output: Some(Box::new(ShellOutput {
+                stdout_path: Some("/tmp/stdout.log".into()),
+                stderr_path: Some("/tmp/stderr.log".into()),
+                complete: true,
+                error: None,
+                exit_code: Some(0),
+            })),
+        };
+        let content = json!({
+            "content": [{"type": "text", "text": "Background shell command completed.\nShell command completed; read the output files as needed."}],
+            "isError": false, "structuredContent": result,
+        }).as_object().unwrap().clone();
+        let task = DetailedTask::new(
+            Task::new(
+                "shell-1",
+                TaskStatus::Completed,
+                "2026-10-03T00:00:00Z",
+                "2026-10-03T00:00:01Z",
+            ),
+            TaskPayload::Completed { result: content },
+        );
+        pool.deliver_task_status("workspace", "session", &task, true)
+            .await;
+
+        let events = sink.0.lock();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].0, "bg-task-started");
+        assert_eq!(events[0].1["kind"], "shell");
+        assert_eq!(events[1].0, "bg-task-completed");
+        assert_eq!(events[1].1["success"], true);
+        let messages = inbox.queue().drain_all();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].source, MessageSource::ShellComplete);
+        let QueuedPayload::SystemReminder(reminder) = &messages[0].payload else {
+            panic!("reminder")
+        };
+        let body = &reminder.as_reminder().body;
+        assert!(body.contains("/tmp/stdout.log"));
+        assert!(!body.contains("Task details:"));
+        assert!(!body.contains("structuredContent"));
+
+        // An external server may return the same JSON shape, but it cannot
+        // acquire builtin shell reminder semantics from that payload.
+        drop(events);
+        pool.deliver_task_status("external", "session", &task, false)
+            .await;
+        let messages = inbox.queue().drain_all();
+        assert_eq!(messages[0].source, MessageSource::DynamicMcpNotification);
+        let QueuedPayload::SystemReminder(reminder) = &messages[0].payload else {
+            panic!("reminder")
+        };
+        assert!(reminder.as_reminder().body.contains("MCP task shell-1"));
+        assert!(reminder.as_reminder().body.contains("Task details:"));
     }
 }
 
