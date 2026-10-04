@@ -66,7 +66,7 @@ fn parse_hooks_value_tolerant(
 pub(crate) fn extract_hooks(manifest: &PluginManifest, install_path: &Path) -> Option<HooksConfig> {
     // Priority 1: hooks/hooks.json file
     let hooks_file = install_path.join("hooks").join("hooks.json");
-    let content = match peri_mcp_config::read_text(&hooks_file) {
+    let content = match peri_config::io::read_text(&hooks_file) {
         Ok(content) => content,
         Err(error) => {
             if error.kind() != std::io::ErrorKind::NotFound {
@@ -110,10 +110,10 @@ pub(crate) fn extract_hooks(manifest: &PluginManifest, install_path: &Path) -> O
 ///
 /// Returns a list of `RegisteredHook` with `plugin_name = "settings.json"`.
 ///
-/// 目录经配置数据面的 [`peri_mcp_config::home_dir`] 解析，与
+/// 目录经配置数据面的 [`peri_config::io::home_dir`] 解析，与
 /// [`is_user_settings_path`] 的排除判定同源。
 pub fn load_global_settings_hooks() -> Vec<RegisteredHook> {
-    let Some(home) = peri_mcp_config::home_dir() else {
+    let Some(home) = peri_config::io::home_dir() else {
         tracing::warn!("Cannot resolve user home for global hooks");
         return Vec::new();
     };
@@ -122,7 +122,7 @@ pub fn load_global_settings_hooks() -> Vec<RegisteredHook> {
 
     tracing::info!("Reading hooks from {}", settings_path.display());
 
-    let content = match peri_mcp_config::read_text(&settings_path) {
+    let content = match peri_config::io::read_text(&settings_path) {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!("Failed to read {}: {}", settings_path.display(), e);
@@ -200,7 +200,7 @@ pub fn load_global_settings_hooks() -> Vec<RegisteredHook> {
 /// Returns a list of `RegisteredHook` with `plugin_name = "settings.local.json"`.
 pub fn load_settings_local_hooks(cwd: &str) -> Vec<RegisteredHook> {
     let settings_path = Path::new(cwd).join(".claude").join("settings.local.json");
-    let content = match peri_mcp_config::read_text(&settings_path) {
+    let content = match peri_config::io::read_text(&settings_path) {
         Ok(c) => c,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             tracing::debug!("No settings.local.json at {}", settings_path.display());
@@ -275,7 +275,7 @@ pub fn load_settings_project_hooks(cwd: &str) -> Vec<RegisteredHook> {
         );
         return Vec::new();
     }
-    let content = match peri_mcp_config::read_text(&settings_path) {
+    let content = match peri_config::io::read_text(&settings_path) {
         Ok(c) => c,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             tracing::debug!("No settings.json at {}", settings_path.display());
@@ -339,7 +339,7 @@ pub fn load_settings_project_hooks(cwd: &str) -> Vec<RegisteredHook> {
 /// 主目录解析须与 `load_global_settings_hooks` 同源（配置数据面），
 /// 否则排除会认错文件。
 fn is_user_settings_path(path: &Path) -> bool {
-    peri_mcp_config::home_dir().is_some_and(|home| is_user_settings_path_under(path, &home))
+    peri_config::io::home_dir().is_some_and(|home| is_user_settings_path_under(path, &home))
 }
 
 /// P3 配置来源身份判定（不是工具执行环境文件读取）：字面相同，或经符号链接指向同一文件
@@ -352,7 +352,7 @@ fn is_user_settings_path_under(path: &Path, home: &Path) -> bool {
     if path == user_path {
         return true;
     }
-    match peri_mcp_config::same_file(path, &user_path) {
+    match peri_config::io::same_file(path, &user_path) {
         Ok(same_file) => same_file,
         Err(error) => {
             tracing::warn!(

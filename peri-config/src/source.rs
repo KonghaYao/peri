@@ -5,7 +5,7 @@ use crate::{ConfigurationInputs, ConfigurationScope};
 pub fn read_environment(names: &[&str]) -> io::Result<BTreeMap<String, String>> {
     let mut values = BTreeMap::new();
     for name in names {
-        if let Some(value) = peri_mcp_config::read_environment(name)? {
+        if let Some(value) = crate::io::read_environment(name)? {
             values.insert((*name).to_owned(), value);
         }
     }
@@ -29,7 +29,7 @@ pub struct McpConfigurationSource;
 impl ConfigurationSource for McpConfigurationSource {
     fn collect(&self, scope: &ConfigurationScope) -> io::Result<ConfigurationInputs> {
         let workspace_path = crate::assembly::workspace_settings_path(&scope.cwd);
-        let workspace = if peri_mcp_config::same_file(&workspace_path, &scope.global_settings)? {
+        let workspace = if crate::io::same_file(&workspace_path, &scope.global_settings)? {
             None
         } else {
             Some(workspace_path)
@@ -47,7 +47,7 @@ impl ConfigurationSource for McpConfigurationSource {
         expected: Option<&str>,
         content: &str,
     ) -> io::Result<bool> {
-        peri_mcp_config::write_text_if_unchanged(path, &expected.map(str::to_owned), content)
+        crate::io::write_text_if_unchanged(path, &expected.map(str::to_owned), content)
     }
 }
 
@@ -81,7 +81,7 @@ pub(crate) fn collect_with_layout_and_global(
 }
 
 pub(crate) fn read_optional(path: &Path) -> io::Result<Option<String>> {
-    match peri_mcp_config::read_text(path) {
+    match crate::io::read_text(path) {
         Ok(content) => Ok(Some(content)),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error),

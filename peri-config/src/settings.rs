@@ -61,23 +61,23 @@ impl ConfigurationSource for FixedLayoutSource {
 }
 
 pub fn config_path() -> PathBuf {
-    peri_mcp_config::global_config_path()
+    crate::io::global_config_path()
 }
 
 pub fn set_global_config_path(path: Option<PathBuf>) {
-    peri_mcp_config::set_global_config_path(path);
+    crate::io::set_global_config_path(path);
 }
 
 fn workspace_config_path_at(cwd: &Path, global_path: &Path) -> Result<Option<PathBuf>> {
     let path = crate::assembly::workspace_settings_path(cwd);
-    if !peri_mcp_config::exists(&path)? || peri_mcp_config::same_file(&path, global_path)? {
+    if !crate::io::exists(&path)? || crate::io::same_file(&path, global_path)? {
         return Ok(None);
     }
     Ok(Some(path))
 }
 
 pub fn workspace_config_path() -> Option<PathBuf> {
-    let cwd = peri_mcp_config::current_dir().ok()?;
+    let cwd = crate::io::current_dir().ok()?;
     workspace_config_path_at(&cwd, &config_path()).unwrap_or_else(|error| {
         tracing::warn!(error = %error, "工作区配置路径探测失败");
         None
@@ -150,12 +150,12 @@ impl ConfigSource {
     }
 
     pub fn load() -> Result<Self> {
-        let cwd = peri_mcp_config::current_dir()?;
+        let cwd = crate::io::current_dir()?;
         Self::load_at(&cwd, config_path())
     }
 
     pub fn load_lenient() -> Self {
-        match peri_mcp_config::current_dir() {
+        match crate::io::current_dir() {
             Ok(cwd) => Self::load_at_lenient(&cwd, config_path()),
             Err(error) => {
                 tracing::warn!(error = %error, "无法获取当前工作目录，配置不可写");
@@ -184,9 +184,9 @@ impl ConfigSource {
         let path = if path.is_absolute() {
             path
         } else {
-            peri_mcp_config::current_dir()?.join(path)
+            crate::io::current_dir()?.join(path)
         };
-        let cwd = peri_mcp_config::current_dir()?;
+        let cwd = crate::io::current_dir()?;
         Self::load_layout(&cwd, path, None, None, None)
     }
 
@@ -332,10 +332,10 @@ pub fn load_from(path: &Path) -> Result<PeriConfig> {
 }
 
 fn load_with_raw(path: &Path) -> Result<(PeriConfig, Option<String>)> {
-    if !peri_mcp_config::exists(path)? {
+    if !crate::io::exists(path)? {
         return Ok((PeriConfig::default(), None));
     }
-    let content = peri_mcp_config::read_text(path)?;
+    let content = crate::io::read_text(path)?;
     let document: Value = serde_json::from_str(&content).map_err(|_| SettingsError::InvalidJson)?;
     if !document.is_object() {
         return Err(SettingsError::InvalidJson);
@@ -347,7 +347,7 @@ fn load_with_raw(path: &Path) -> Result<(PeriConfig, Option<String>)> {
 }
 
 pub fn save_to(config: &PeriConfig, path: &Path) -> Result<()> {
-    let raw = match peri_mcp_config::read_text(path) {
+    let raw = match crate::io::read_text(path) {
         Ok(content) => Some(content),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(error.into()),
@@ -370,7 +370,7 @@ fn save_preserving_siblings(config: &PeriConfig, path: &Path, raw: Option<&str>)
     }
     let content =
         serde_json::to_string_pretty(&serialized).map_err(|_| SettingsError::InvalidJson)?;
-    if !peri_mcp_config::write_text_if_unchanged(path, &raw.map(str::to_owned), &content)? {
+    if !crate::io::write_text_if_unchanged(path, &raw.map(str::to_owned), &content)? {
         return Err(SettingsError::Conflict);
     }
     Ok(())

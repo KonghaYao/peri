@@ -76,3 +76,7 @@ fallback。纯 resolver 只使用输入值；system 管发布和更新。模块�
 实际验收记录及独立 pool 接线、跨进程/远端矩阵见
 [active issue](../../spec/issues/2026-10-01-configuration-authority.md)。输入读取非跨文件
 事务，CAS 不保护不合作编辑器；旧 pool 与 session prefix 不会自动热更新。
+
+## 配置 I/O 适配
+
+`peri-config::io` 是配置读取与写入的部署边界。原生目标转发给 `peri-mcp-config` 的 MCP 数据面；Emscripten 目标在虚拟文件系统中读写文件，因此 WASM 依赖图不引入 `mcp-packages/config`。

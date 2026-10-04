@@ -119,7 +119,7 @@ pub(crate) fn load_from_path(path: &Path) -> Result<McpConfigFile, McpConfigErro
 }
 
 fn config_exists(path: &Path) -> Result<bool, McpConfigError> {
-    peri_mcp_config::exists(path).map_err(|source| McpConfigError::ReadError {
+    peri_config::io::exists(path).map_err(|source| McpConfigError::ReadError {
         path: path.display().to_string(),
         source,
     })
@@ -129,7 +129,7 @@ fn read_json_value(path: &Path) -> Result<Option<serde_json::Value>, McpConfigEr
     if !config_exists(path)? {
         return Ok(None);
     }
-    let content = peri_mcp_config::read_text(path).map_err(|source| McpConfigError::ReadError {
+    let content = peri_config::io::read_text(path).map_err(|source| McpConfigError::ReadError {
         path: path.display().to_string(),
         source,
     })?;
@@ -299,7 +299,7 @@ pub(crate) fn load_merged_config_full_with_capabilities(
     builtin_available: bool,
     plugin_discovery_available: bool,
 ) -> Result<(McpConfigFile, HashMap<String, String>), McpConfigError> {
-    let global_path = peri_mcp_config::global_config_path();
+    let global_path = peri_config::io::global_config_path();
     let policy = if builtin_available {
         super::builtin::builtin_injection_policy_from_env()
     } else {
@@ -368,7 +368,7 @@ pub(crate) fn load_merged_config_full_with_paths(
 }
 
 fn cache_environment_input() -> Result<BTreeMap<String, String>, McpConfigError> {
-    peri_mcp_config::read_environment(MCP_CACHE_ENV)
+    peri_config::io::read_environment(MCP_CACHE_ENV)
         .map_err(|source| McpConfigError::CacheEnvironmentRead { source })
         .map(|value| {
             value
@@ -565,7 +565,7 @@ fn atomic_write_json(path: &Path, value: &serde_json::Value) -> Result<(), McpCo
         source: e.into(),
     })?;
 
-    peri_mcp_config::write_text_atomic(path, &content).map_err(|e| McpConfigError::WriteError {
+    peri_config::io::write_text_atomic(path, &content).map_err(|e| McpConfigError::WriteError {
         path: path.display().to_string(),
         source: e,
     })
@@ -574,7 +574,7 @@ fn atomic_write_json(path: &Path, value: &serde_json::Value) -> Result<(), McpCo
 /// 从配置文件中删除指定的 MCP 服务器
 /// 优先尝试项目级 .mcp.json，未找到则尝试全局 settings.json
 pub fn remove_server_from_config(cwd: &Path, server_name: &str) -> Result<(), McpConfigError> {
-    let global_path = peri_mcp_config::global_config_path();
+    let global_path = peri_config::io::global_config_path();
     remove_server_from_config_with_paths(cwd, &global_path, server_name)
 }
 
@@ -592,7 +592,7 @@ pub(crate) fn remove_server_from_config_with_paths(
     let project_path = cwd.join(".mcp.json");
     if config_exists(&project_path)? {
         let content =
-            peri_mcp_config::read_text(&project_path).map_err(|e| McpConfigError::ReadError {
+            peri_config::io::read_text(&project_path).map_err(|e| McpConfigError::ReadError {
                 path: project_path.display().to_string(),
                 source: e,
             })?;
@@ -618,7 +618,7 @@ pub(crate) fn remove_server_from_config_with_paths(
     // 2. 尝试全局删除
     if config_exists(global_path)? {
         let content =
-            peri_mcp_config::read_text(global_path).map_err(|e| McpConfigError::ReadError {
+            peri_config::io::read_text(global_path).map_err(|e| McpConfigError::ReadError {
                 path: global_path.display().to_string(),
                 source: e,
             })?;
@@ -680,7 +680,7 @@ pub fn set_server_disabled(
     server_name: &str,
     disabled: bool,
 ) -> Result<(), McpConfigError> {
-    let global_path = peri_mcp_config::global_config_path();
+    let global_path = peri_config::io::global_config_path();
     set_server_disabled_with_paths(cwd, &global_path, server_name, disabled)
 }
 
@@ -695,7 +695,7 @@ pub(crate) fn set_server_disabled_with_paths(
     let project_path = cwd.join(".mcp.json");
     if config_exists(&project_path)? {
         let content =
-            peri_mcp_config::read_text(&project_path).map_err(|e| McpConfigError::ReadError {
+            peri_config::io::read_text(&project_path).map_err(|e| McpConfigError::ReadError {
                 path: project_path.display().to_string(),
                 source: e,
             })?;
@@ -729,7 +729,7 @@ pub(crate) fn set_server_disabled_with_paths(
     // 2. 尝试全局
     if config_exists(global_path)? {
         let content =
-            peri_mcp_config::read_text(global_path).map_err(|e| McpConfigError::ReadError {
+            peri_config::io::read_text(global_path).map_err(|e| McpConfigError::ReadError {
                 path: global_path.display().to_string(),
                 source: e,
             })?;

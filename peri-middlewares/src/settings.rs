@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 /// 配置数据面的全局配置文件路径，默认 `~/.peri/settings.json`。
 pub fn global_config_path() -> PathBuf {
-    peri_mcp_config::global_config_path()
+    peri_config::io::global_config_path()
 }
 
 /// 从全局配置权威路径读取 `disableBundledSkills` 配置（默认 false）。
@@ -24,7 +24,7 @@ pub fn load_disable_bundled_skills() -> bool {
 
 /// 测试注入入口：从指定 settings 文件读取 disableBundledSkills。
 pub fn load_disable_bundled_skills_from_path(path: &std::path::Path) -> bool {
-    let global = peri_mcp_config::read_text(path)
+    let global = peri_config::io::read_text(path)
         .ok()
         .and_then(|content| serde_json::from_str(&content).ok())
         .unwrap_or(serde_json::Value::Null);

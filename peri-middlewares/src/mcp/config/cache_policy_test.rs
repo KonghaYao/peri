@@ -169,7 +169,7 @@ fn cache_environment_process_probe() {
         .unwrap();
     std::fs::write(&path, serde_json::json!({"mcpCache": global}).to_string()).unwrap();
     std::fs::write(directory.path().join(".mcp.json"), r#"{"mcpCache":true}"#).unwrap();
-    peri_mcp_config::set_global_config_path(Some(path));
+    peri_config::io::set_global_config_path(Some(path));
     let environment = std::env::var("PERI_MCP_CACHE").unwrap();
     let config = load_merged_config_full(directory.path(), &directory.path().join("claude"));
     let bare = load_bare_config();

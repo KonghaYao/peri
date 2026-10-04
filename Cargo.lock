@@ -3481,6 +3481,7 @@ dependencies = [
 name = "peri-config"
 version = "0.2.0"
 dependencies = [
+ "dirs-next",
  "peri-acp-types",
  "peri-mcp-config",
  "serde",
@@ -3490,6 +3491,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.20",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
