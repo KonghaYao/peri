@@ -87,7 +87,7 @@ pub struct BuiltinInstanceContext {
     /// 关闭位）的事实源是装配期输入（F11 插件 manifest / F12 配置读取已在该层完成）。
     pub workspace_resources: Option<WorkspaceResourcesInput>,
     /// Host-issued capabilities shared by all sessions using this builtin instance.
-    pub task_scope_authority: std::sync::OnceLock<peri_mcp_workspace::TaskScopeAuthority>,
+    pub task_scope_authority: std::sync::OnceLock<peri_mcp_core::task_scope::TaskScopeAuthority>,
     /// A24 关闭集：`policy_key ∈ disabled_middlewares` 的实例名（唯一实现
     /// `mcp::builtin::closed_instances`，宿主经 `peri_middlewares::assembly` 的薄委托派生）。
     ///

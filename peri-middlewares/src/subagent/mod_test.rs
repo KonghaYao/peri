@@ -10,7 +10,7 @@ use peri_agent::{
 };
 
 use super::*;
-use peri_mcp_common::agent_definition::parse_agent_file;
+use peri_mcp_core::agent_definition::parse_agent_file;
 
 struct EchoLLM;
 

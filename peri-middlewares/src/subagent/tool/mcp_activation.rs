@@ -1,5 +1,5 @@
 //! Explicit remote activation and content/effective-tool-bound approval.
-use peri_mcp_common::agent_definition::ClaudeAgent;
+use peri_mcp_core::agent_definition::ClaudeAgent;
 
 use crate::mcp::McpAgentRegistry;
 

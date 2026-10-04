@@ -12,7 +12,7 @@ use peri_agent::{
 };
 
 use super::super::fork::allows_injected_tools;
-use peri_mcp_common::agent_definition::ClaudeAgent;
+use peri_mcp_core::agent_definition::ClaudeAgent;
 
 /// Agent 工具 `model` 参数可用档位（契约层单一事实源 `peri_acp_types::agents::MODEL_TIERS`；
 /// `inherit` 单独处理，不在档位集合内）

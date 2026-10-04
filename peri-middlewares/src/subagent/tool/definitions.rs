@@ -14,7 +14,7 @@
 use fuzzy_matcher::{skim::SkimMatcherV2, FuzzyMatcher};
 use peri_acp_types::agents::AgentOverrides;
 use peri_agent::tools::BaseTool;
-use peri_mcp_common::agent_definition::{ClaudeAgent, ToolsValue};
+use peri_mcp_core::agent_definition::{ClaudeAgent, ToolsValue};
 use std::collections::BTreeSet;
 
 impl super::SubAgentTool {

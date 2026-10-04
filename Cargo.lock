@@ -3562,6 +3562,7 @@ dependencies = [
  "parking_lot",
  "peri-acp-types",
  "peri-agent",
+ "peri-mcp-core",
  "peri-process",
  "peri-time",
  "rmcp",
@@ -3588,6 +3589,20 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "peri-mcp-core"
+version = "0.2.0"
+dependencies = [
+ "base64 0.22.1",
+ "parking_lot",
+ "rmcp",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tracing",
  "uuid",
 ]
 
@@ -3730,6 +3745,7 @@ dependencies = [
  "peri-mcp-artifact",
  "peri-mcp-common",
  "peri-mcp-config",
+ "peri-mcp-core",
  "peri-mcp-credentials",
  "peri-mcp-cron",
  "peri-mcp-lsp",

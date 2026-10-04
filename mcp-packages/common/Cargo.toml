@@ -6,6 +6,7 @@ description = "Shared behavior for Peri builtin MCP instances"
 license = "Apache-2.0"
 
 [dependencies]
+peri-mcp-core.workspace = true
 peri-time = { path = "../../peri-time" }
 peri-agent = { path = "../../peri-agent" }
 peri-acp-types = { path = "../../peri-acp-types" }

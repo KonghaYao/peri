@@ -7,6 +7,7 @@ members = [
     "peri-controller",
     "peri-middlewares",
     "mcp-packages/common",
+    "peri-mcp-core",
     "mcp-packages/config",
     "mcp-packages/credentials",
     "mcp-packages/web",
@@ -96,6 +97,7 @@ lru = "0.18"
 
 # --- MCP capability packages ---
 peri-mcp-common = { path = "mcp-packages/common" }
+peri-mcp-core = { path = "peri-mcp-core" }
 peri-mcp-config = { path = "mcp-packages/config" }
 peri-mcp-credentials = { path = "mcp-packages/credentials" }
 peri-mcp-web = { path = "mcp-packages/web" }

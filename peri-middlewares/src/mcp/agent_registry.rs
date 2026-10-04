@@ -38,7 +38,7 @@ use rmcp::model::ResourceContents;
 use sha2::{Digest, Sha256};
 
 use super::client::{ClientStatus, McpClientHandle, McpClientPool};
-use peri_mcp_common::agent_definition::{parse_agent_file, ClaudeAgent, ClaudeAgentFrontmatter};
+use peri_mcp_core::agent_definition::{parse_agent_file, ClaudeAgent, ClaudeAgentFrontmatter};
 
 const MAX_AGENT_BYTES: usize = 256 * 1024;
 const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);

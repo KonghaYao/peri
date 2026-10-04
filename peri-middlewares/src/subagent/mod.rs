@@ -18,7 +18,7 @@ use peri_acp_types::builtin_mcp::original_tool_name_of_effective;
 
 use crate::tools::BoxToolWrapper;
 use peri_acp_types::agents::AgentOverrides;
-use peri_mcp_common::agent_definition::{ClaudeAgentFrontmatter, ToolsValue};
+use peri_mcp_core::agent_definition::{ClaudeAgentFrontmatter, ToolsValue};
 
 mod agent_result;
 mod fork;
@@ -438,7 +438,7 @@ fn core_mutation_tools_fully_disallowed(disallowed: &[String]) -> bool {
 
 /// 从 Agent frontmatter 推断运行时能力画像（D5：保守 readonly）。
 ///
-/// 区分三种 tools 语义（`peri_mcp_common::agent_definition::ToolsValue`）：
+/// 区分三种 tools 语义（`peri_mcp_core::agent_definition::ToolsValue`）：
 /// - `Empty`（字段省略）= 继承父工具（含 Bash）→ 默认 writes；
 /// - `NoTools`（显式 `tools: []`）= 零工具 → readonly；
 /// - `List` = 白名单，含 `*` 等价继承全部。

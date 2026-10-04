@@ -51,7 +51,7 @@ fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
-/// 剥离 YAML frontmatter（语义与 `peri_mcp_common::agent_definition::parse_agent_file` 一致：开闭各一行 `---`，
+/// 剥离 YAML frontmatter（语义与 `peri_mcp_core::agent_definition::parse_agent_file` 一致：开闭各一行 `---`，
 /// 闭合行按 `trim() == "---"` 判定）。
 fn prompt_body(text: &str) -> &str {
     if !text.starts_with("---") {
