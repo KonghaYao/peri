@@ -1,6 +1,6 @@
 # [P0] bg 回执信息投递缺陷批次（subagent 断裂为其中一例）
 
-**状态**：实施中，批次 1 核心、2.1、2.3、3.1、§7.3 有界等待（含 parked-idle 定时器修复）、§7.4 身份条目已落地主工作区（未提交）；4.2（workflow agent MCP 调用）由并行 owner 落地。批次 5 余项（e2e 实跑）与 ACP 响应层 `pending:n` 未完成。已完成：终态提醒按**投递归属**（直接发起会话）经 `TaskTerminalDelivery` 原子提交到其 canonical transcript（幂等、可重投，MQ 只唤醒；子会话不再断裂），冷恢复降级 root 投递并在 metadata 标 `root-fallback`；回执按可达性诚实承诺；lost 有界重试后 `abandon_external` 产出终态并标注远端副作用未知；`scope.uncertain` 改为按执行 scope 记录、仅由该 scope 的对账证据清除。§7.3 上限 120s，到点把 `pending: N`+任务身份+scope owner 原子写入归属会话 transcript（ACP 响应层的 pending 标记未接线）。批次 5 仅剩 e2e 实跑。架构裁决仍为方案 A（三维分离）+ D1–D4；权威设计为 `docs/design/session-async-tasks.md` §7，H1 证据见[设计提案](2026-10-04-async-task-ownership-design.md) §10。
+**状态**：实施中，批次 1 核心、2.1、2.3、3.1、§7.3 有界等待（含 parked-idle 定时器修复）、§7.4 身份条目已于 `59e69a2b` 入库；4.2（workflow agent MCP 调用）由并行 owner 落地。批次 5 余项（e2e 实跑）与 ACP 响应层 `pending:n` 未完成。已完成：终态提醒按**投递归属**（直接发起会话）经 `TaskTerminalDelivery` 原子提交到其 canonical transcript（幂等、可重投，MQ 只唤醒；子会话不再断裂），冷恢复降级 root 投递并在 metadata 标 `root-fallback`；回执按可达性诚实承诺；lost 有界重试后 `abandon_external` 产出终态并标注远端副作用未知；`scope.uncertain` 改为按执行 scope 记录、仅由该 scope 的对账证据清除。§7.3 上限 120s，到点把 `pending: N`+任务身份+scope owner 原子写入归属会话 transcript。批次 5 仅剩 e2e 实跑。架构裁决仍为方案 A（三维分离）+ D1–D4；权威设计为 `docs/design/session-async-tasks.md` §7，H1 证据见[设计提案](2026-10-04-async-task-ownership-design.md) §10。
 **优先级**：P0（最高）。**权重提升**：3.1（scope.uncertain 无清除，会话锁死）与 2.1/2.3（结算静默丢弃）由 P1 提升为 P0；4.2 待实验，若成立即 P0
 **类型**：任务回执语义 / 投递路由 / 任务闭环（结算-取消-销毁）
 **创建日期**：2026-10-04
@@ -127,7 +127,7 @@ bg（后台任务）回执信息投递错误是一类缺陷，不是单点：
 
 ## 四、修复批次建议（架构裁决已出）
 
-> 实施进度（P0 owner，未完成整批，未提交）。已落地并测试锁定：
+> 实施进度（P0 owner；主体已于 `59e69a2b` 入库，收尾小项与 ACP `pending:n` 后续提交）。已落地并测试锁定：
 > 1. **批次 1 核心（D1）**：`ToolContext.task_terminal_delivery` 由执行会话的 transcript 持久化句柄构造（可信 binding，不接受模型参数）；`ExternalTaskRegistration.initiator_session_id` 记录发起者；投递先做 `append_reminder_if_absent` 原子提交（稳定 delivery ID、幂等、崩溃可重投），再做 MQ/收件箱唤醒；冷恢复无发起者时降级 root 并标 `delivery: root-fallback`；回执按路由可达性区分「持久送达」与「活跃期送达」，不再声称订阅必达。
 > 2. **1.6**：monitor 准入失败向调用方返回诚实错误（任务已存在、通知不保证、禁止盲目重跑）；`DuplicateKey` 复用已有 monitor。
 > 3. **2.1**：`LOST_ABANDON_ATTEMPTS`（300 次 2s 轮询 ≈10 分钟）后 `abandon_external` 产出 failed 终态，提醒明确「远端副作用未知，需直接核对 owner」。
@@ -137,7 +137,7 @@ bg（后台任务）回执信息投递错误是一类缺陷，不是单点：
 > 6. **§7.3 有界等待（含验收修复）**：`HANDOFF_MAX_WAIT = 120s`，`BoundedWait` 自本会话首次出现未结算任务起算（tokio 时钟域）；idle 挂起 `select!` 增加 `sleep_until(deadline)` 定时器分支——**界自身唤醒 loop**，不再依赖偶发唤醒（验收发现的 parked-idle 缺陷：原先界只在恰好被唤醒时重新求值，`sleep 100000` 实测无界）。到点回退出判断，`write_pending_handoff` 把 `pending: N`、任务身份与 scope owner 原子写入归属会话 canonical transcript（稳定投递 ID、幂等；刻意不唤醒队列，供下一轮/resume 消费），覆盖 print/close 的无限等待。 回归 `stages::bounded_wait_exit_tests`（paused 时间；禁用定时器分支即失败）；行为复跑（重建二进制 + replay 假模型）：`sleep 100000` + 200s 上限 → **123.5s exit 0**（修复前 200s SIGKILL），`sleep 300` + 360s 上限 → **120.8s exit 0**（修复前 301.23s）。
 > 7. **§7.4**：`TaskRecord.initiator_session_id`（serde 可选，快照/增量透传，root 面板据此归属子会话发起的任务）；`BackgroundTask` 记录 initiator/owner_session/owner_identity 供交接与展示。
 >
-> 验证（冷构建，target 曾被用户清空）：`check --workspace --all-targets` 通过、`lefthook run pre-commit --all-files` 全绿（fmt/check/clippy/typos/layer-imports）；Agent `agent::async_tasks` 64 passed；`peri-agent` 全量 877 passed / 1 failed；`peri-mcp-workspace` 422 passed；`peri-acp` 715 passed / 10 failed。失败集合与干净基线 a40e2607（715/10）**逐条一致**——10 个 ACP 失败（`-32010` owner/admission 家族与 provider 配置持久化）+ 1 个 agent provenance 失败均为既有缺陷，非本轮引入；首次全量中多出的 `test_update_config_切换provider后cfg_provider更新` 是磁盘满窗口的临时写失败（健康磁盘下单独复跑 3/3 通过，且此后全量与基线同集合）。**仍未完成**：ACP `PromptResponse` 层的 `pending:n` 标记（`pending:n` 现落在交接记录与 tracing）、批次 5 的 e2e 实跑、§7.2 中「不可达不得承诺」在无 store 会话下的完整覆盖。H2 未做运行时验证——静态确认 scope 与 reminder route 分别位于 `ExecutionScope` 与 `SessionTerminalDelivery`/`write_pending_handoff`。
+> 验证（冷构建，target 曾被用户清空）：`check --workspace --all-targets` 通过、`lefthook run pre-commit --all-files` 全绿（fmt/check/clippy/typos/layer-imports）；Agent `agent::async_tasks` 64 passed；`peri-agent` 全量 880 total / 879 passed / 1 failed（复验口径）；`peri-mcp-workspace` 422 passed；`peri-acp` 715 passed / 10 failed。失败集合与干净基线 a40e2607（715/10）**逐条一致**——10 个 ACP 失败（`-32010` owner/admission 家族与 provider 配置持久化）+ 1 个 agent provenance 失败均为既有缺陷，非本轮引入；首次全量中多出的 `test_update_config_切换provider后cfg_provider更新` 是磁盘满窗口的临时写失败（健康磁盘下单独复跑 3/3 通过，且此后全量与基线同集合）。**仍未完成**：ACP `PromptResponse` 层的 `pending:n` 标记（`pending:n` 现落在交接记录与 tracing）、批次 5 的 e2e 实跑、§7.2 中「不可达不得承诺」在无 store 会话下的完整覆盖。H2 未做运行时验证——静态确认 scope 与 reminder route 分别位于 `ExecutionScope` 与 `SessionTerminalDelivery`/`write_pending_handoff`。
 
 - **批次 1 为核心**：先定义 bg 任务对"发起者"的投递语义（投递到发起者，或明确拒绝并诚实回执），回执/通知/身份三位一体改；随后测试锁定。
 - **3.1 与批次 1 并列为最高优先（P0）**：独立确定性缺陷，不依赖产品裁决，可立即修复（补 `scope.uncertain` 的清除/恢复路径）。

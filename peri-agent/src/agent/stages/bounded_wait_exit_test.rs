@@ -10,7 +10,6 @@ use super::*;
 use crate::agent::async_tasks::handoff::BoundedWait;
 use peri_acp_types::session::SessionInbox;
 use peri_acp_types::tasks::{BgTaskKind, BgTaskRegistration, TaskManager as TaskManagerPort};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 /// 构造一个「parked idle 且有一个永不结算任务」的 loop。
