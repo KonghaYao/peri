@@ -107,7 +107,8 @@ impl TaskScopeAuthority {
         Ok(self.resolve_capability(meta)?.session_id)
     }
 
-    pub(crate) fn resolve_capability(
+    /// Verify a request capability before a Workspace handler uses its session and generation.
+    pub fn resolve_capability(
         &self,
         meta: &RequestMetaObject,
     ) -> Result<TaskScopeCapability, McpError> {

@@ -840,7 +840,7 @@ impl McpClientPool {
                 Some(crate::mcp::config::ConfigSource::WorkspaceRemote)
             )
         }) {
-            let authority = peri_mcp_workspace::TaskScopeAuthority::trusted_connection();
+            let authority = peri_mcp_common::task_scope::TaskScopeAuthority::trusted_connection();
             match owner.as_ref() {
                 Some(owner) => authority.issue_execution(session_id, owner.epoch, &owner.nonce),
                 None => authority.issue(session_id),
@@ -860,9 +860,10 @@ impl McpClientPool {
             }
         };
         let mut meta = RequestMetaObject::new();
-        meta.0
-             .0
-            .insert(peri_mcp_workspace::TASK_SCOPE_META_KEY.into(), token.into());
+        meta.0 .0.insert(
+            peri_mcp_common::task_scope::TASK_SCOPE_META_KEY.into(),
+            token.into(),
+        );
         Some(meta)
     }
 

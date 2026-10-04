@@ -148,7 +148,7 @@ pub struct McpClientPool {
     pub(crate) session_tasks: parking_lot::RwLock<
         HashMap<String, std::sync::Weak<dyn peri_acp_types::tasks::TaskManager>>,
     >,
-    pub(crate) task_scope_authority: peri_mcp_workspace::TaskScopeAuthority,
+    pub(crate) task_scope_authority: peri_mcp_common::task_scope::TaskScopeAuthority,
     pub(crate) task_scope_tokens: parking_lot::RwLock<HashMap<String, String>>,
     pub(crate) session_execution_tokens:
         parking_lot::RwLock<HashMap<String, peri_acp_types::workspace::ExecutionOwnerToken>>,
@@ -238,7 +238,7 @@ impl McpClientPool {
             active_oauth_flows: parking_lot::Mutex::new(HashMap::new()),
             session_inboxes: parking_lot::RwLock::new(HashMap::new()),
             session_tasks: parking_lot::RwLock::new(HashMap::new()),
-            task_scope_authority: peri_mcp_workspace::TaskScopeAuthority::new(),
+            task_scope_authority: peri_mcp_common::task_scope::TaskScopeAuthority::new(),
             task_scope_tokens: parking_lot::RwLock::new(HashMap::new()),
             session_execution_tokens: parking_lot::RwLock::new(HashMap::new()),
             resource_cache: super::resource_cache::McpResourceCache::new(),

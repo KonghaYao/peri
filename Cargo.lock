@@ -3550,10 +3550,12 @@ dependencies = [
 name = "peri-mcp-common"
 version = "0.2.0"
 dependencies = [
+ "base64 0.22.1",
  "chrono",
  "fs2",
  "futures",
  "libc",
+ "parking_lot",
  "peri-acp-types",
  "peri-agent",
  "peri-process",

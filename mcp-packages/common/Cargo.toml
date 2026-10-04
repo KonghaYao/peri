@@ -10,9 +10,11 @@ peri-agent = { path = "../../peri-agent" }
 peri-acp-types = { path = "../../peri-acp-types" }
 peri-process = { path = "../../peri-process" }
 chrono.workspace = true
+base64 = { version = "0.22", features = ["alloc"] }
 fs2 = "0.4"
 futures.workspace = true
 libc = "0.2"
+parking_lot.workspace = true
 rmcp.workspace = true
 serde.workspace = true
 serde_json.workspace = true
