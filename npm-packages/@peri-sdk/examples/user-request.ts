@@ -16,7 +16,6 @@ const storage = new TursoStorage({ url: "turso://<database>.turso.io", authToken
 const workspaceId = "workspaceId";
 const sandbox = new Sandbox({
     id: workspaceId,
-    path: "/tmp/peri-workspace",
     storage,
     stdio: {
         command: "peri",
@@ -31,7 +30,7 @@ const workspace = sandbox.getWorkspace()
 // 现有 Peri 不接受 workspaceId 作为 machineId；此 id 目前只用于 SDK 的 KV 占位作用域。
 // Sandbox 在 Session.start 时启动 Transport，并使用构造时传入的 Storage。
 // ACP 顺序：启动进程 → initialize → session/new 或 session/load。
-// session/new: { cwd: sandbox.path, mcpServers: [{ type: "http", name: "workspace",
+// session/new: { cwd: agent.path, mcpServers: [{ type: "http", name: "workspace",
 //   url: workspace.url, headers: [] }], _meta: { "peri.instructions": instructions } }。
 // 其他 mcpServers 也在会话 setup 数组中传递；加载已有会话时会重传同一声明。
 // initialize 只协商能力。
@@ -45,6 +44,7 @@ const requestedSessionId: string | null = null; // 业务请求传已有 ID 时�
 const agent = managedAgents.createAgent({
     id: "test-agent",
     sandbox,
+    path: "/tmp/peri-workspace", // 新建会话需要；加载已有会话时从 Store 按 Session ID 取 cwd。
     // ACP 无标准 instructions 字段；Peri 用 session/new._meta["peri.instructions"] 传递并冻结。
     instructions: "你是一个有趣的 AI 助手，能回答用户的问题",
     // 这里是额外 MCP；Workspace 自动合入 session/new.mcpServers 数组。

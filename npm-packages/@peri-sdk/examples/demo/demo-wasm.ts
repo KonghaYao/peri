@@ -1,4 +1,4 @@
-/** Bun HTTP demo with one Peri Agent per Session. */
+/** Bun HTTP demo with one Peri Agent per Session over the WASM ACP port. */
 import { readFile, realpath } from "node:fs/promises";
 import { resolve } from "node:path";
 import { Hono } from "hono";
@@ -12,6 +12,8 @@ import {
     parseInteractionAnswer,
     Sandbox,
     TursoStorage,
+    WasmAcpTransport,
+    loadPeriWasm,
     type Agent,
     type PeriConfig,
     type AgentOptions,
@@ -23,6 +25,7 @@ import { SessionEventLog } from "./session-event-log";
 
 const workspace = await realpath(Bun.env.PERI_WORKSPACE!);
 const html = await readFile(resolve(import.meta.dir, "demo.html"), "utf8");
+const wasmModuleUrl = Bun.env.PERI_WASM_MODULE_URL ?? resolve(import.meta.dir, "../../dist/wasm/peri-wasm.js");
 const databaseUrl = Bun.env.PERI_DEMO_TURSO_URL ?? "http://127.0.0.1:8081";
 const databaseEndpoint = new URL(databaseUrl);
 if (databaseEndpoint.protocol !== "http:" || !["127.0.0.1", "localhost", "[::1]"].includes(databaseEndpoint.hostname))
@@ -95,11 +98,18 @@ const config = {
 const sandbox = new Sandbox({
     id: "demo-workspace",
     storage,
-    stdio: { command: Bun.env.PERI_BIN ?? "peri", settings: config },
-    workspaceProcess: {
-        command: Bun.env.PERI_BIN ?? "peri",
-        bind: Bun.env.PERI_WORKSPACE_BIND ?? "127.0.0.1:8765",
-    },
+    ...(Bun.env.PERI_WORKSPACE_MCP_URL
+        ? { workspace: { url: Bun.env.PERI_WORKSPACE_MCP_URL } }
+        : {}),
+    transportFactory: (path) => WasmAcpTransport.start({
+        moduleUrl: wasmModuleUrl,
+        configJson: JSON.stringify({
+            cwd: path,
+            settings: config,
+            storage: { url: databaseUrl, authToken: "local-dev" },
+            machineId: Bun.env.PERI_WASM_MACHINE_ID ?? "00000000-0000-4000-8000-000000000001",
+        }),
+    }),
 });
 const manager = new ManagedAgents({ kv: new MemoryKV() });
 const agentOptions: Pick<AgentOptions, "instructions" | "mcpServers"> = {
@@ -155,12 +165,14 @@ function openSession(sessionId: string | null): Promise<OpenSession> {
 
 let server: ReturnType<typeof Bun.serve> | undefined;
 try {
+    const wasm = await loadPeriWasm(wasmModuleUrl);
+    if (!wasm.PeriWasmAcp?.start)
+        throw new Error("Bundled peri-wasm lacks ACP Host; rebuild peri-wasm before running demo-wasm");
     try {
         await sandbox.getSessions(workspace);
     } catch {
         throw new Error("Local Session Store is unavailable; run `bun run db:dev` or check PERI_DEMO_TURSO_URL");
     }
-    const workspaceMcp = await sandbox.startWorkspace(workspace);
     const app = new Hono();
     app.use("*", logger());
     app.onError((error, c) => {
@@ -210,7 +222,7 @@ try {
                     agentId: selected.agent.id,
                     sessionId: selected.agent.session.id,
                     workspace,
-                    workspaceMcp: workspaceMcp.url,
+                    workspaceMcp: sandbox.optionalWorkspace?.url ?? "",
                 }),
             });
             let writes = Promise.resolve();
@@ -261,12 +273,8 @@ try {
     });
 
     const port = Number(Bun.env.PORT ?? "3000");
-    server = Bun.serve({
-        hostname: "127.0.0.1",
-        port,
-        fetch: app.fetch,
-    });
-    console.log(`Peri SDK demo: http://127.0.0.1:${server.port}`);
+    server = Bun.serve({ hostname: "127.0.0.1", port, fetch: app.fetch });
+    console.log(`Peri SDK WASM demo: http://127.0.0.1:${server.port}`);
     await new Promise<void>((done) => {
         process.once("SIGINT", done);
         process.once("SIGTERM", done);
@@ -279,5 +287,4 @@ try {
         result.value.docs.close();
     }
     await manager.closeAll();
-    await sandbox.closeWorkspace();
 }

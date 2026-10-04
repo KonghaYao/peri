@@ -28,6 +28,14 @@
         <div id="session-list" class="mt-3 min-h-0 flex-1 space-y-1 overflow-y-auto" aria-label="会话列表">
           <div class="px-3 py-2 text-xs text-slate-500">读取会话中…</div>
         </div>
+        <div class="mt-4 border-t border-slate-200 pt-3">
+          <div class="px-2 text-xs font-semibold uppercase tracking-widest text-slate-400">任务</div>
+          <div id="task-list" class="mt-2 max-h-44 space-y-1 overflow-y-auto px-2 text-xs text-slate-500">暂无任务</div>
+        </div>
+        <div class="mt-4 border-t border-slate-200 pt-3">
+          <div class="px-2 text-xs font-semibold uppercase tracking-widest text-slate-400">计划</div>
+          <div id="plan-list" class="mt-2 max-h-36 space-y-1 overflow-y-auto px-2 text-xs text-slate-500">暂无计划</div>
+        </div>
         <div
           class="mt-auto rounded-xl border border-slate-200 bg-white p-3 text-xs leading-relaxed text-slate-500"
         >
@@ -96,6 +104,8 @@
             </div>
           </div>
         </div>
+
+        <div id="interactions" class="mx-auto hidden w-full max-w-3xl shrink-0 px-4 pb-2 sm:px-8"></div>
 
         <div
           class="shrink-0 bg-gradient-to-t from-white via-white to-white/90 px-4 pb-4 pt-2 sm:px-8 sm:pb-6"
@@ -211,14 +221,18 @@
 
     <script type="module">
       import { EventStreamContentType, fetchEventSource } from "/vendor/fetch-event-source.js";
+      import { Y, SessionViewStore } from "/vendor/peri-session-view.js";
       const $ = (id) => document.getElementById(id);
       let cursor = 0;
       let session = null;
       let selected = "field:sessionId";
       const entries = [];
-      const userMessages = new Map();
-      const assistantMessages = new Map();
-      const toolCalls = new Map();
+      let chatDoc = new Y.Doc();
+      let sessionDoc = new Y.Doc();
+      const viewStore = new SessionViewStore(chatDoc, sessionDoc);
+      let docGeneration = null;
+      let docSequence = -1;
+      const interactionCards = new Map();
       let sessionRefresh;
       const fieldLabels = {
         agentId: "Agent",
@@ -264,7 +278,6 @@
         }
         content.textContent = text;
         $("messages").append(row);
-        scrollToLatest();
         return content;
       }
 
@@ -288,83 +301,211 @@
         return JSON.stringify(value, null, 2);
       }
 
-      function showToolEvent(payload) {
-        const id = payload.toolCallId;
-        if (!id) return;
-        let tool = toolCalls.get(id);
-        if (!tool) {
-          $("welcome")?.remove();
-          const row = document.createElement("details");
-          row.className = "ml-11 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-xs text-slate-700";
-          const summary = document.createElement("summary");
-          summary.className = "cursor-pointer font-medium";
-          const body = document.createElement("pre");
-          body.className = "mt-3 max-h-64 overflow-auto whitespace-pre-wrap break-words text-xs leading-5";
-          row.append(summary, body);
-          $("messages").append(row);
-          tool = { summary, body, title: "工具调用", input: "", output: "", status: "进行中" };
-          toolCalls.set(id, tool);
-        }
-        if (payload.title) tool.title = payload.title;
-        if (payload.rawInput !== undefined)
-          tool.input = formatToolValue(payload.rawInput);
-        if (payload.content !== undefined)
-          tool.output = formatToolValue(payload.content);
-        if (payload.status)
-          tool.status = { in_progress: "进行中", completed: "已完成", failed: "失败" }[payload.status] ?? payload.status;
-        tool.summary.textContent = `${tool.title} · ${tool.status}`;
-        tool.body.textContent = [
-          tool.input && `输入\n${tool.input}`,
-          tool.output && `结果\n${tool.output}`,
+      function addTool(block) {
+        const tool = block.tool;
+        const row = document.createElement("details");
+        row.className = "ml-11 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-xs text-slate-700";
+        const summary = document.createElement("summary");
+        summary.className = "cursor-pointer font-medium";
+        summary.textContent = `${tool?.name ?? block.toolCallId ?? "工具调用"} · ${tool?.status ?? "进行中"}`;
+        const body = document.createElement("pre");
+        body.className = "mt-3 max-h-64 overflow-auto whitespace-pre-wrap break-words text-xs leading-5";
+        body.textContent = [
+          tool?.arguments !== undefined && `输入\n${formatToolValue(tool.arguments)}`,
+          tool?.result !== undefined && `结果\n${formatToolValue(tool.result)}`,
         ].filter(Boolean).join("\n\n") || "等待工具结果…";
-        scrollToLatest();
+        row.append(summary, body);
+        $("messages").append(row);
       }
 
-      function showChatEvent(entry) {
-        const payload = eventPayload(entry);
-        switch (payload?.type ?? payload?.sessionUpdate) {
-          case "user_input_delivered":
-            if (typeof payload.value?.content === "string" && payload.value.input_id) {
-              const key = `input:${payload.value.input_id}`;
-              if (!userMessages.has(key))
-                userMessages.set(key, addMessage("user", payload.value.content));
-            }
-            scheduleSessionRefresh();
-            break;
-          case "user_message_chunk": {
-            if (payload.content?.type !== "text") break;
-            const key = payload.messageId ?? `event:${entry.id}`;
-            let message = userMessages.get(key);
-            if (!message) {
-              message = addMessage("user", "");
-              userMessages.set(key, message);
-            }
-            message.textContent += payload.content.text;
-            scheduleSessionRefresh();
-            scrollToLatest();
-            break;
+      function renderView() {
+        const view = viewStore.getSnapshot();
+        const scroller = $("chat-scroll");
+        const wasAtBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 80;
+        $("messages").replaceChildren();
+        let visible = false;
+        for (const entry of view.entries ?? []) {
+          if (entry.role === "user") {
+            const text = (entry.blocks ?? []).filter((block) => block.type === "text")
+              .map((block) => block.text ?? "").join("\n");
+            if (text) { addMessage("user", text); visible = true; }
+            continue;
           }
-          case "agent_message_chunk": {
-            if (payload.content?.type !== "text") break;
-            const key = payload.messageId ?? `event:${entry.id}`;
-            let message = assistantMessages.get(key);
-            if (!message) {
-              message = addMessage("assistant", "");
-              assistantMessages.set(key, message);
+          if (entry.role !== "assistant") continue;
+          let text = "";
+          const flush = () => {
+            if (!text) return;
+            addMessage("assistant", text);
+            visible = true;
+            text = "";
+          };
+          for (const block of entry.blocks ?? []) {
+            if (block.type === "tool_call") {
+              flush();
+              addTool(block);
+              visible = true;
+            } else if (block.type === "text" || block.type === "reasoning") {
+              const next = block.text ?? "";
+              if (next) text += `${text ? "\n" : ""}${block.type === "reasoning" ? "思考：" : ""}${next}`;
             }
-            message.textContent += payload.content.text;
-            scrollToLatest();
-            break;
           }
-          case "tool_call":
-          case "tool_call_update":
-            showToolEvent(payload);
-            break;
-          case "usage_update":
-            scheduleSessionRefresh();
-            break;
+          flush();
+        }
+        if (!visible) {
+          const welcome = document.createElement("div");
+          welcome.id = "welcome";
+          welcome.className = "mx-auto flex max-w-md flex-col items-center py-16 text-center text-slate-500 sm:py-24";
+          welcome.textContent = "输入一条消息，开始与 Peri 对话。";
+          $("messages").append(welcome);
+        }
+        if (wasAtBottom) scrollToLatest();
+
+        const status = view.session?.activeTurnInteractionStatus ?? view.activeTurnStatus ?? "空闲";
+        const queued = view.inputQueue?.items?.filter((item) =>
+          ["queued", "dispatching", "claimed"].includes(item.state)).length ?? 0;
+        if (session) $("status").textContent = `已连接 · ${status}${queued ? ` · ${queued} 条待处理输入` : ""}`;
+        const tasks = view.tasks ?? [];
+        $("task-list").replaceChildren(...tasks.map((task) => {
+          const row = document.createElement("div");
+          row.className = "rounded-lg bg-white px-2 py-2 text-slate-600";
+          row.textContent = `${task.title || task.summary || task.taskId} · ${task.status}`;
+          row.title = task.summary ?? "";
+          return row;
+        }));
+        if (!tasks.length) $("task-list").textContent = "暂无任务";
+        const plan = view.plan ?? [];
+        $("plan-list").replaceChildren(...plan.map((step) => {
+          const row = document.createElement("div");
+          row.className = "rounded-lg bg-white px-2 py-2 text-slate-600";
+          row.textContent = `${step.status === "completed" ? "✓" : step.status === "in_progress" ? "●" : "○"} ${step.activeForm || step.content}`;
+          row.title = step.content;
+          return row;
+        }));
+        if (!plan.length) $("plan-list").textContent = "暂无计划";
+        renderInteractions(view.pendingInteractions ?? []);
+      }
+
+      function decodeUpdate(encoded) {
+        const binary = atob(encoded);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+        return bytes;
+      }
+
+      function acceptDocSnapshot(payload) {
+        if (!payload?.generation || !Number.isSafeInteger(payload.sequence)
+          || typeof payload.chat !== "string" || typeof payload.session !== "string") return;
+        const nextChat = new Y.Doc();
+        const nextSession = new Y.Doc();
+        try {
+          Y.applyUpdate(nextChat, decodeUpdate(payload.chat));
+          Y.applyUpdate(nextSession, decodeUpdate(payload.session));
+        } catch (error) {
+          nextChat.destroy();
+          nextSession.destroy();
+          throw error;
+        }
+        const previousChat = chatDoc;
+        const previousSession = sessionDoc;
+        if (docGeneration !== payload.generation) interactionCards.clear();
+        chatDoc = nextChat;
+        sessionDoc = nextSession;
+        docGeneration = payload.generation;
+        docSequence = payload.sequence;
+        viewStore.replaceDocs(chatDoc, sessionDoc);
+        previousChat.destroy();
+        previousSession.destroy();
+        renderView();
+      }
+
+      function acceptDocUpdate(payload) {
+        if (payload?.generation !== docGeneration || !Number.isSafeInteger(payload.sequence)
+          || payload.sequence <= docSequence || typeof payload.update !== "string") return;
+        if (payload.doc !== "chat" && payload.doc !== "session") return;
+        if (payload.sequence !== docSequence + 1)
+          throw new Error(`Yjs update sequence gap: expected ${docSequence + 1}, received ${payload.sequence}`);
+        Y.applyUpdate(payload.doc === "chat" ? chatDoc : sessionDoc, decodeUpdate(payload.update));
+        docSequence = payload.sequence;
+      }
+
+      async function respondToInteraction(interaction, decision, card) {
+        const buttons = card.querySelectorAll("button");
+        buttons.forEach((button) => { button.disabled = true; });
+        try {
+          await postJson("/api/session/interaction/respond", {
+            sessionId: interaction.sessionId,
+            interactionId: interaction.id,
+            kind: interaction.kind,
+            decision,
+          });
+        } catch (error) {
+          $("error").textContent = error.message;
+          buttons.forEach((button) => { button.disabled = false; });
         }
       }
+
+      function interactionButton(label, onClick) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-40";
+        button.textContent = label;
+        button.addEventListener("click", onClick);
+        return button;
+      }
+
+      function renderInteractions(interactions) {
+        const host = $("interactions");
+        host.classList.toggle("hidden", interactions.length === 0);
+        const activeIds = new Set(interactions.map((interaction) => interaction.id));
+        for (const id of interactionCards.keys()) {
+          if (!activeIds.has(id)) interactionCards.delete(id);
+        }
+        const cards = [];
+        for (const interaction of interactions) {
+          const existing = interactionCards.get(interaction.id);
+          if (existing) { cards.push(existing); continue; }
+          const card = document.createElement("div");
+          card.className = "mb-2 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-slate-800";
+          const title = document.createElement("div");
+          title.className = "mb-2 font-medium";
+          title.textContent = interaction.kind === "permission"
+            ? `授权工具：${interaction.title ?? interaction.toolCallId ?? "工具"}`
+            : interaction.message ?? "Agent 需要输入";
+          card.append(title);
+          const actions = document.createElement("div");
+          actions.className = "flex flex-wrap gap-2";
+          if (interaction.kind === "permission") {
+            if (interaction.options?.some((option) => option.optionId === "allow_once"))
+              actions.append(interactionButton("允许一次", () => void respondToInteraction(interaction, "allow_once", card)));
+            actions.append(interactionButton("拒绝", () => void respondToInteraction(interaction, "reject_once", card)));
+          } else {
+            const fields = new Map();
+            for (const field of interaction.fields ?? []) {
+              const label = document.createElement("label");
+              label.className = "mb-2 block text-xs text-slate-600";
+              label.textContent = field.title || field.key;
+              const input = document.createElement("input");
+              input.type = "text";
+              input.className = "mt-1 block w-full rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-sm";
+              if (field.description) input.placeholder = field.description;
+              label.append(input);
+              card.append(label);
+              fields.set(field.key, input);
+            }
+            actions.append(interactionButton("提交", () => {
+              const content = Object.fromEntries([...fields].map(([key, input]) => [key, input.value]));
+              void respondToInteraction(interaction, { action: "accept", content }, card);
+            }));
+            actions.append(interactionButton("取消", () => void respondToInteraction(interaction, { action: "decline" }, card)));
+          }
+          card.append(actions);
+          interactionCards.set(interaction.id, card);
+          cards.push(card);
+        }
+        host.replaceChildren(...cards);
+      }
+
+      viewStore.subscribe(renderView);
 
       async function refreshSessions() {
         try {
@@ -454,7 +595,12 @@
       }
 
       const eventController = new AbortController();
-      addEventListener("beforeunload", () => eventController.abort(), { once: true });
+      addEventListener("beforeunload", () => {
+        eventController.abort();
+        viewStore.destroy();
+        chatDoc.destroy();
+        sessionDoc.destroy();
+      }, { once: true });
 
       function connectSession(requestedSessionId) {
         let resolveReady;
@@ -489,12 +635,23 @@
                     resolveReady();
                     return;
                   }
+                  if (message.event === "docs:snapshot") {
+                    acceptDocSnapshot(JSON.parse(message.data));
+                    return;
+                  }
+                  if (message.event === "docs:update") {
+                    acceptDocUpdate(JSON.parse(message.data));
+                    return;
+                  }
                   if (message.event !== "notification") return;
                   const entry = JSON.parse(message.data);
                   if (entry.id <= cursor) return;
                   cursor = entry.id;
                   entries.push(entry);
-                  showChatEvent(entry);
+                  // ACP notifications remain available in the information panel for debugging.
+                  const payload = eventPayload(entry);
+                  if (["user_input_delivered", "user_message_chunk", "usage_update"].includes(payload?.type ?? payload?.sessionUpdate))
+                    scheduleSessionRefresh();
                   if (!$("info-overlay").classList.contains("hidden")) renderInfo();
                 },
                 onclose() { throw new Error("Session event stream closed"); },

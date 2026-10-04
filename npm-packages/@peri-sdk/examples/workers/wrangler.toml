@@ -1,0 +1,11 @@
+name = "peri-wasm-local-probe"
+main = "dist/worker.js"
+compatibility_date = "2026-10-03"
+compatibility_flags = ["nodejs_compat"]
+no_bundle = true
+base_dir = "dist"
+
+[[rules]]
+type = "ESModule"
+globs = ["peri-wasm.js"]
+fallthrough = true
