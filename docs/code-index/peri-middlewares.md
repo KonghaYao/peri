@@ -59,7 +59,7 @@ scope 快照携 epoch；`taskClose`/`taskOpen` 按该 epoch 做 owner 端 CAS，
 ### OAuth 凭证接入（实现完成）
 
 - `src/mcp/auth_store.rs` 已接入 `peri_mcp_credentials::OAuthCredentialClient`；独立服务与客户端入口为 `mcp-packages/credentials/src/{lib,server,client}.rs`，host 装配入口为 `peri-acp/src/host/assemble.rs`，pool 注入端口为 `src/mcp/client/oauth.rs`。bootstrap 集成及 auth_store、OAuth、dynamic 定向回归通过，证据统一见 active assessment，不等同于真实部署或网络授权验收。
-- SDK 原始凭据载荷日志隔离位于 `mcp-packages/credentials/src/client.rs`：credentials 独立 worker runtime 在 `NoSubscriber` 的 `with_default` 作用域内执行，避免 rmcp service debug 打印 `CustomRequest`/Result；production main runtime 日志不受影响。
+- SDK 原始凭据载荷日志隔离位于 `mcp-packages/credentials/src/client.rs`：原生 credentials 独立 worker runtime、WASM 事件循环 worker 的每次 poll 均在 `NoSubscriber` 作用域内执行，避免 rmcp service debug 打印 `CustomRequest`/Result；production main runtime 日志不受影响。
 - 已落地数据流由部署注入 Resources provider，经 `mcp-packages/credentials/` 受信 bootstrap MCP `CustomRequest` 消费；host assembly 把 `credentialsClient` 注入 OAuth pool，独立于尚未授权的 tool pool。契约归 `peri-acp-types/src/oauth_credentials.rs`，数据库 provider 与 scope 规则见 [Resources 索引](peri-resources.md)。
 - 删除 `FileCredentialStore`，用户重新授权；不保留旧 JSON/文件 fallback、兼容层或迁移，不新增私有 DB、HOME 路径、额外开库或锁；复用已配置 DB 与缓存 machine ID，`mcp_oauth_credentials` 不增加 schema version。MCP cache/plugins 不变，日志文件豁免仍须遵守 secret 脱敏要求。
 - principal `local` + machine ID 是逻辑 scope，不是用户认证；server key 须绑定 endpoint/授权配置，动态连接还绑定 incarnation。bootstrap 授权、共享库暴露与 refresh 风险仍需验收，不宣称安全多租户或 CAS refresh。验收状态见 [active assessment](../../spec/issues/2026-09-30-p2-filesystem-implementation-assessment.md)。

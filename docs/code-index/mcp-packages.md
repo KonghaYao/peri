@@ -6,7 +6,7 @@ Builtin MCP 的工具、server handler 与 LSP 客户端/pool 由独立 crate �
 
 ## Package 路由
 
-Emscripten 目标仅引入 MCP 通用映射与配置数据面；builtin MCP package 不进入
+Emscripten 目标引入 MCP 通用映射、配置数据面与凭证 bootstrap MCP；builtin 工具 package 不进入
 `peri-wasm` 依赖图。`peri-mcp-config/src/wasm.rs` 在宿主映射的 MEMFS 和进程环境上
 执行同步读写、路径查询与字节 CAS，避免启动本地配置 server 或 TCP client。
 原生目标继续使用 `ConfigurationClient`、跨进程锁及现有 server。

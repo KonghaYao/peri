@@ -3619,6 +3619,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "wasm-bindgen-futures",
 ]
 
 [[package]]
