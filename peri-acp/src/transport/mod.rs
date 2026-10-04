@@ -15,6 +15,7 @@
 
 pub mod mpsc;
 pub mod router;
+#[cfg(not(target_os = "emscripten"))]
 pub mod stdio;
 pub mod types;
 pub mod wire_bridge;
