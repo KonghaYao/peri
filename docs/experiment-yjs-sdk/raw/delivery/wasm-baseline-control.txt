@@ -1,0 +1,10 @@
+bun test v1.4.2 (744846f84)
+
+../../../../../../../private/tmp/peri-yjs-baseline-runtime/wasm-acp-integration.test.ts:
+error: store is unavailable: remote session store server_error
+store is unavailable: remote session store server_error
+(fail) Agent start, send, list and load work through WASM ACP [346.32ms]
+
+ 0 pass
+ 1 fail
+Ran 1 test across 1 file. [358.00ms]

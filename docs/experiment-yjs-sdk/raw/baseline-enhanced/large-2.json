@@ -1,0 +1,81 @@
+{
+  "scenario": "large",
+  "sample": 2,
+  "root": "/tmp/peri-yjs-sdk-baseline-567640f1837771442628970a56ce68c5a8f8e256",
+  "api": "legacy",
+  "workload": {
+    "version": 1,
+    "tools": 12000,
+    "toolsPerAssistant": 10,
+    "inputDataBytes": 960,
+    "resultTextBytes": 4096,
+    "resultDataBytes": 4096,
+    "asyncUpdates": 128,
+    "streamChunks": 16384,
+    "chunkBytes": 1024,
+    "largeResultBytes": 1048576
+  },
+  "startedAt": "2026-10-04T16:41:11.665Z",
+  "status": "passed",
+  "budget": {
+    "timeoutMs": 120000,
+    "maxRssBytes": 2147483648
+  },
+  "environment": {
+    "bun": "1.4.2",
+    "yjs": "13.6.33",
+    "platform": "darwin",
+    "release": "25.5.0",
+    "arch": "arm64",
+    "cpu": "Apple M5 Pro",
+    "totalMemoryBytes": 51539607552
+  },
+  "sourceSha256": "ce4e0419196957af166a48c333e53cbaff2db5d50b733258b07436ed3a6cfbd1",
+  "dependencyLockSha256": "acf7c28963e8fbb65317a543683d400cec43ece64de3603777f6ef1510e0e367",
+  "generatorSha256": "5fe3c36d10ea9b148deb605559b4bb5724d78bfd9fb672ef134291cd01856a66",
+  "harnessVersion": 2,
+  "projection": {
+    "completedTools": 1,
+    "rawPayloadBytes": 1049635,
+    "projectionMs": 0.5857089999999978,
+    "batch1000Ms": [
+      0.5857089999999978
+    ]
+  },
+  "progress": {
+    "stage": "complete",
+    "elapsedMs": 18.563457999999997
+  },
+  "memory": {
+    "rssBytes": 59392000,
+    "peakRssBytes": 59392000,
+    "heapUsedBytes": 12319218,
+    "finalRssBytes": 59392000,
+    "processPeakRssBytes": 59392000
+  },
+  "completeMs": 0.08133399999999824,
+  "snapshot": {
+    "encoding": "v1",
+    "chatBytes": 1050799,
+    "sessionBytes": 296,
+    "totalBytes": 1051095,
+    "encodeMs": 1.570916999999998,
+    "applyMs": 0.7842920000000007
+  },
+  "validation": {
+    "exact": true,
+    "verifiedTools": 1,
+    "verifiedAssistantMessages": 1,
+    "onDemandReads": 0,
+    "onDemandReadBytes": 0,
+    "referencedPayloadBytes": 0,
+    "activeTurnStatus": "completed"
+  },
+  "elapsedMs": 18.566249999999997,
+  "process": {
+    "exitCode": 0,
+    "reason": null,
+    "externalPeakRssBytes": 0,
+    "stderr": ""
+  }
+}

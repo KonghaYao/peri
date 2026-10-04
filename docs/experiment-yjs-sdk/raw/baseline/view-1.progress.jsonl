@@ -1,0 +1,13 @@
+{"progress":{"stage":"project_tools","completed":1000,"elapsedMs":37.377333},"memory":{"rssBytes":93437952,"peakRssBytes":93437952,"heapUsedBytes":13487642}}
+{"progress":{"stage":"project_tools","completed":2000,"elapsedMs":79.03366600000001},"memory":{"rssBytes":145948672,"peakRssBytes":145948672,"heapUsedBytes":28299395}}
+{"progress":{"stage":"project_tools","completed":3000,"elapsedMs":137.550833},"memory":{"rssBytes":170786816,"peakRssBytes":170786816,"heapUsedBytes":39697780}}
+{"progress":{"stage":"project_tools","completed":4000,"elapsedMs":221.367625},"memory":{"rssBytes":191741952,"peakRssBytes":191741952,"heapUsedBytes":52507468}}
+{"progress":{"stage":"project_tools","completed":5000,"elapsedMs":327.141208},"memory":{"rssBytes":211058688,"peakRssBytes":211058688,"heapUsedBytes":63587750}}
+{"progress":{"stage":"project_tools","completed":6000,"elapsedMs":462.085125},"memory":{"rssBytes":232423424,"peakRssBytes":232423424,"heapUsedBytes":75063489}}
+{"progress":{"stage":"project_tools","completed":7000,"elapsedMs":627.049291},"memory":{"rssBytes":402423808,"peakRssBytes":402423808,"heapUsedBytes":106351376}}
+{"progress":{"stage":"project_tools","completed":8000,"elapsedMs":811.619208},"memory":{"rssBytes":465207296,"peakRssBytes":465207296,"heapUsedBytes":118197846}}
+{"progress":{"stage":"project_tools","completed":9000,"elapsedMs":1016.4880830000001},"memory":{"rssBytes":486162432,"peakRssBytes":486162432,"heapUsedBytes":128864808}}
+{"progress":{"stage":"project_tools","completed":10000,"elapsedMs":1267.591041},"memory":{"rssBytes":511016960,"peakRssBytes":511016960,"heapUsedBytes":143336368}}
+{"progress":{"stage":"project_tools","completed":11000,"elapsedMs":1561.9367909999999},"memory":{"rssBytes":538968064,"peakRssBytes":538968064,"heapUsedBytes":152044659}}
+{"progress":{"stage":"project_tools","completed":12000,"elapsedMs":1893.4352079999999},"memory":{"rssBytes":549404672,"peakRssBytes":549404672,"heapUsedBytes":163864030}}
+{"resultFile":"/Users/konghayao/code/ai/docs/experiment-yjs-sdk/raw/baseline/view-1.json","status":"passed","elapsedMs":4963.937958}

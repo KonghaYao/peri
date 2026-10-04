@@ -1,0 +1,40 @@
+import * as Y from '/Users/konghayao/code/ai/peri-v4p3/npm-packages/@peri-sdk/node_modules/yjs/dist/yjs.mjs';
+import { SessionDocSync } from '/Users/konghayao/code/ai/peri-v4p3/npm-packages/@peri-sdk/src/sync/session-doc-sync';
+import { SessionDocReplica } from '/Users/konghayao/code/ai/peri-v4p3/npm-packages/@peri-sdk/src/sync/session-doc-replica';
+const findings: unknown[] = [];
+{
+ const chat = new Y.Doc(), session = new Y.Doc(), sync = new SessionDocSync(chat,session);
+ sync.subscribe(() => { void sync.close(); });
+ chat.getText('text').insert(0,'pending');
+ let admitted=false, error='';
+ try { const next=sync.subscribe(()=>{}); admitted=true; next.unsubscribe(); } catch(e) { error=String(e); }
+ await sync.close();
+ findings.push({attack:'subscribe during close in admission flush',admitted,error,chatListeners:(chat as any)._observers?.get('update')?.size??0});
+ chat.destroy();session.destroy();
+}
+{
+ const errors:string[]=[];
+ const unhandled = (error:unknown) => { errors.push(String(error)); };
+ process.on('unhandledRejection', unhandled);
+ const chat=new Y.Doc(), session=new Y.Doc(), sync=new SessionDocSync(chat,session);
+ const next=sync.subscribe(()=>{next.unsubscribe();return Promise.reject(new Error('transport already aborted'));});
+ chat.getText('text').insert(0,'x');sync.flush();await sync.close();
+ await new Promise(resolve=>setTimeout(resolve,5));
+ findings.push({attack:'unsubscribe inside rejecting async sender',unhandledRejections:errors});
+ process.off('unhandledRejection',unhandled); chat.destroy();session.destroy();
+}
+{
+ const chat=new Y.Doc(), session=new Y.Doc(), sync=new SessionDocSync(chat,session), replica=new SessionDocReplica();
+ let joined=false;
+ sync.subscribe(frame=>{
+   if(joined)return; joined=true;
+   chat.getText('text').insert(1,'B');
+   const connection=sync.subscribe(frame=>replica.applyUpdate(frame));
+   replica.applySnapshot(connection.snapshot);
+   session.getMap('root').set('version',2); sync.flush();
+ });
+ chat.getText('text').insert(0,'A');sync.flush();await sync.close();
+ findings.push({attack:'reentrant subscribe while pending both docs',replicaText:replica.chat.getText('text').toString(),sessionVersion:replica.session.getMap('root').get('version')});
+ replica.destroy();chat.destroy();session.destroy();
+}
+console.log(JSON.stringify(findings,null,2));

@@ -69,10 +69,12 @@ export function decodeMessagesJson(raw: unknown): SnapshotMessage[] | null {
             }
         } else return null;
         if (role === "assistant" && Array.isArray(message.tool_calls)) {
+            const toolIds = new Set(blocks.flatMap((block) => block.type === "tool" ? [block.id] : []));
             for (const rawCall of message.tool_calls) {
                 const call = object(rawCall);
                 const callId = string(call?.id);
-                if (callId && !blocks.some((block) => block.type === "tool" && block.id === callId)) {
+                if (callId && !toolIds.has(callId)) {
+                    toolIds.add(callId);
                     blocks.push({ type: "tool", id: callId, name: string(call?.name) ?? "Tool",
                         ...(call?.arguments !== undefined ? { arguments: call.arguments } : {}) });
                 }

@@ -2,6 +2,7 @@ import type { Agent } from "./agent";
 import { SendReceipt } from "./send-receipt";
 import type { JsonRpcNotification, Transport } from "../transport/types";
 import type { SessionDocs } from "../state/session-docs";
+import { EventQueue } from "../transport/event-queue";
 
 type QueueSnapshot = {
     generation: string;
@@ -27,10 +28,7 @@ export class Session {
     private currentPath?: string;
     private generation?: string;
     private startPromise?: Promise<Session>;
-    private readonly notifications: JsonRpcNotification[] = [];
-    private readonly notificationWaiters: Array<
-        (event: JsonRpcNotification | null) => void
-    > = [];
+    private notifications = new EventQueue(() => {});
     private unsubscribe?: () => void;
     private streamOpen = false;
     private streamEnded = false;
@@ -122,9 +120,7 @@ export class Session {
                 }
                 if (!rawEvent) return;
                 this.acceptDeliveryEvent(event);
-                const waiter = this.notificationWaiters.shift();
-                if (waiter) waiter(event);
-                else this.notifications.push(event);
+                this.notifications.push(event);
             });
             await transport.request("initialize", {
                 protocolVersion: 1,
@@ -199,6 +195,8 @@ export class Session {
         } catch (error) {
             this.unsubscribe?.();
             this.unsubscribe = undefined;
+            await this.notifications.return();
+            this.notifications = new EventQueue(() => {});
             if (transport) await transport.close().catch(() => {});
             this.agent.discardFailedSessionDocs();
             await claims.release();
@@ -360,13 +358,9 @@ export class Session {
         this.streamOpen = true;
         try {
             while (!this.streamEnded) {
-                const event =
-                    this.notifications.shift() ??
-                    (await new Promise<JsonRpcNotification | null>(
-                        (resolve) => {
-                            this.notificationWaiters.push(resolve);
-                        },
-                    ));
+                const next = await this.notifications.next();
+                if (next.done) break;
+                const event = next.value;
                 if (
                     event &&
                     (event.params as { sessionId?: string } | undefined)
@@ -376,6 +370,8 @@ export class Session {
             }
         } finally {
             this.streamOpen = false;
+            await this.notifications.return();
+            if (!this.streamEnded) this.notifications = new EventQueue(() => {});
         }
     }
 
@@ -407,7 +403,7 @@ export class Session {
                 new Error("Session closed before user input was delivered"),
             );
         }
-        for (const waiter of this.notificationWaiters.splice(0)) waiter(null);
+        await this.notifications.return();
         this.state = "closed";
     }
 }

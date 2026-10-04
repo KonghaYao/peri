@@ -24,6 +24,7 @@ const result = await Bun.build({
   outdir: output,
   target: "bun",
   format: "esm",
+  external: ["yjs"],
 });
 if (!result.success) throw new Error(`SDK bundle failed: ${result.logs.join("; ")}`);
 const browser = await Bun.build({
@@ -38,6 +39,7 @@ const view = await Bun.build({
   outdir: resolve(output, "view"),
   target: "browser",
   format: "esm",
+  external: ["yjs"],
 });
 if (!view.success) throw new Error(`Session view bundle failed: ${view.logs.join("; ")}`);
 await run(resolve(packageRoot, "node_modules/.bin/tsc"), ["--noEmit", "false", "--emitDeclarationOnly", "--declaration", "--outDir", "dist"], packageRoot);

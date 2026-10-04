@@ -1,0 +1,16 @@
+{
+  "source_root": "/Users/konghayao/code/ai/peri-v4p3/npm-packages/@peri-sdk",
+  "baseline_commit": "567640f1837771442628970a56ce68c5a8f8e256",
+  "frozen_at": "2026-10-04T15:42:28.519583+00:00",
+  "source_sha256": "ce4e0419196957af166a48c333e53cbaff2db5d50b733258b07436ed3a6cfbd1",
+  "demo_bridge_sha256": "3cda6ef7fe0391d414dd4578652f892219dbf0398542db0a3e6f4f8af65769c8",
+  "benchmark_files_sha256": {
+    "npm-packages/@peri-sdk/benchmarks/harness.ts": "d4f4c394b0dc03470ede50c13722253cf1df45daedb6687d3529679c6cf07090",
+    "npm-packages/@peri-sdk/benchmarks/run.ts": "f7466988fb439c39a5f5f11ec3046d998fa3b4743fc168b38bc3468f74ac1687",
+    "npm-packages/@peri-sdk/benchmarks/scenarios.ts": "cae882eaa0143403d599f2ae20e4ef08e950a144b47264d59c91a586b2050a63",
+    "npm-packages/@peri-sdk/benchmarks/workloads.ts": "5fe3c36d10ea9b148deb605559b4bb5724d78bfd9fb672ef134291cd01856a66"
+  },
+  "sampling_command": "/Users/konghayao/.bun/bin/bun benchmarks/run.ts --root /tmp/peri-yjs-sdk-baseline-567640f1837771442628970a56ce68c5a8f8e256 --output ../../../docs/experiment-yjs-sdk/raw/baseline --scenarios tools,view,stream,large --samples 3",
+  "sampling_cwd": "/Users/konghayao/code/ai/peri-v4p3/npm-packages/@peri-sdk",
+  "output_move": "Raw files moved unchanged from /Users/konghayao/code/ai/docs/experiment-yjs-sdk/raw/baseline into this directory after all processes completed."
+}

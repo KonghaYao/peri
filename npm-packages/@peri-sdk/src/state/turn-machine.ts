@@ -55,11 +55,13 @@ export class TurnMachine {
         if (!turnId || (!this.writable() && this.docs.info().get("activeTurnStatus") !== "cancelling")) return false;
         this.docs.transactBoth(() => {
             this.docs.info().set("activeTurnStatus", status);
-            for (const entry of this.docs.entries().values()) {
-                if (entry.get("turnId") === turnId && entry.get("role") === "assistant") entry.set("status", status);
+            for (const id of this.docs.turnEntries(turnId)) {
+                const entry = this.docs.entries().get(id)!;
+                if (entry.get("role") === "assistant" && entry.get("status") !== status) entry.set("status", status);
             }
-            for (const tool of this.docs.tools().values()) {
-                if (tool.get("turnId") === turnId && ["running", "pending", "awaiting_permission"].includes(String(tool.get("status")))) tool.set("status", "cancelled");
+            for (const id of this.docs.turnTools(turnId)) {
+                const tool = this.docs.tools().get(id)!;
+                if (["running", "pending", "awaiting_permission"].includes(String(tool.get("status")))) tool.set("status", "cancelled");
             }
         });
         return true;

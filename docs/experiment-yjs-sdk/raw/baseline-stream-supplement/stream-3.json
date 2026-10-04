@@ -1,0 +1,86 @@
+{
+  "scenario": "stream",
+  "sample": 3,
+  "root": "/tmp/peri-yjs-sdk-baseline-567640f1837771442628970a56ce68c5a8f8e256",
+  "api": "legacy",
+  "workload": {
+    "version": 1,
+    "tools": 12000,
+    "toolsPerAssistant": 10,
+    "inputDataBytes": 960,
+    "resultTextBytes": 4096,
+    "resultDataBytes": 4096,
+    "asyncUpdates": 128,
+    "streamChunks": 16384,
+    "chunkBytes": 1024,
+    "largeResultBytes": 1048576
+  },
+  "startedAt": "2026-10-04T16:31:59.581Z",
+  "status": "passed",
+  "budget": {
+    "timeoutMs": 120000,
+    "maxRssBytes": 2147483648
+  },
+  "environment": {
+    "bun": "1.4.2",
+    "yjs": "13.6.33",
+    "platform": "darwin",
+    "release": "25.5.0",
+    "arch": "arm64",
+    "cpu": "Apple M5 Pro",
+    "totalMemoryBytes": 51539607552
+  },
+  "sourceSha256": "ce4e0419196957af166a48c333e53cbaff2db5d50b733258b07436ed3a6cfbd1",
+  "dependencyLockSha256": "acf7c28963e8fbb65317a543683d400cec43ece64de3603777f6ef1510e0e367",
+  "generatorSha256": "5fe3c36d10ea9b148deb605559b4bb5724d78bfd9fb672ef134291cd01856a66",
+  "harnessVersion": 2,
+  "initialSnapshot": {
+    "jsonBytes": 341,
+    "applyMs": 0.5820830000000008
+  },
+  "progress": {
+    "stage": "complete",
+    "elapsedMs": 246.33487499999998
+  },
+  "memory": {
+    "rssBytes": 256475136,
+    "peakRssBytes": 256475136,
+    "heapUsedBytes": 138324911,
+    "finalRssBytes": 256475136,
+    "processPeakRssBytes": 256475136
+  },
+  "stream": {
+    "completedChunks": 16384,
+    "frames": 16389,
+    "jsonBytes": 25189286,
+    "updateBytes": 17703875,
+    "applyMs": 54.79629099999934,
+    "projectionMs": 192.37665799999914,
+    "endToEndMs": 206.6885,
+    "completionFlushFrames": 0,
+    "timing": "endToEndMs includes input generation, user, all accepts, completion and synchronous replication; excludes initial snapshot and final validation",
+    "framing": "JSON event bodies; excludes SSE/HTTP/TCP overhead",
+    "projectionIncludesSynchronousTransportAndApply": true
+  },
+  "completeMs": 0.3104579999999828,
+  "validation": {
+    "bytes": 16777216,
+    "sha256": "732dd2b3f284d2273326b8acf57f014a895f513bfc79770eb963226aeaef8cb6",
+    "expectedSha256": "732dd2b3f284d2273326b8acf57f014a895f513bfc79770eb963226aeaef8cb6",
+    "exact": true,
+    "activeTurnStatus": "completed"
+  },
+  "capabilities": {
+    "resume": "not supported by baseline demo bridge",
+    "slowConsumer": "not supported",
+    "versionedPayloadRead": "not supported",
+    "duplicateOutOfOrder": "not evaluated through bridge; Yjs primitive support is separate"
+  },
+  "elapsedMs": 246.33837499999998,
+  "process": {
+    "exitCode": 0,
+    "reason": null,
+    "externalPeakRssBytes": 256475136,
+    "stderr": ""
+  }
+}

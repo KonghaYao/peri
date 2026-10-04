@@ -1,0 +1,74 @@
+{
+  "scenario": "large",
+  "sample": 2,
+  "root": "/tmp/peri-yjs-sdk-baseline-567640f1837771442628970a56ce68c5a8f8e256",
+  "api": "legacy",
+  "workload": {
+    "version": 1,
+    "tools": 12000,
+    "toolsPerAssistant": 10,
+    "inputDataBytes": 960,
+    "resultTextBytes": 4096,
+    "resultDataBytes": 4096,
+    "asyncUpdates": 128,
+    "streamChunks": 16384,
+    "chunkBytes": 1024,
+    "largeResultBytes": 1048576
+  },
+  "startedAt": "2026-10-04T15:50:02.666Z",
+  "status": "passed",
+  "budget": {
+    "timeoutMs": 120000,
+    "maxRssBytes": 2147483648
+  },
+  "environment": {
+    "bun": "1.4.2",
+    "yjs": "13.6.33",
+    "platform": "darwin",
+    "release": "25.5.0",
+    "arch": "arm64",
+    "cpu": "Apple M5 Pro",
+    "totalMemoryBytes": 51539607552
+  },
+  "sourceSha256": "ce4e0419196957af166a48c333e53cbaff2db5d50b733258b07436ed3a6cfbd1",
+  "projection": {
+    "completedTools": 1,
+    "rawPayloadBytes": 1049635,
+    "projectionMs": 0.6179580000000016,
+    "batch1000Ms": [
+      0.6179580000000016
+    ]
+  },
+  "progress": {
+    "stage": "complete",
+    "elapsedMs": 11.412958000000001
+  },
+  "memory": {
+    "rssBytes": 57655296,
+    "peakRssBytes": 57655296,
+    "heapUsedBytes": 12236636,
+    "finalRssBytes": 57655296,
+    "processPeakRssBytes": 57655296
+  },
+  "completeMs": 0.09179100000000062,
+  "snapshot": {
+    "encoding": "v1",
+    "chatBytes": 1050799,
+    "sessionBytes": 296,
+    "totalBytes": 1051095,
+    "encodeMs": 1.4990839999999999,
+    "applyMs": 0.9842909999999989
+  },
+  "validation": {
+    "exact": true,
+    "verifiedTools": 1,
+    "activeTurnStatus": "completed"
+  },
+  "elapsedMs": 11.415166000000001,
+  "process": {
+    "exitCode": 0,
+    "reason": null,
+    "externalPeakRssBytes": 0,
+    "stderr": ""
+  }
+}

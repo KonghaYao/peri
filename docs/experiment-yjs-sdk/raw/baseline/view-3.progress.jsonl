@@ -1,0 +1,13 @@
+{"progress":{"stage":"project_tools","completed":1000,"elapsedMs":41.733333},"memory":{"rssBytes":96239616,"peakRssBytes":96256000,"heapUsedBytes":13495769}}
+{"progress":{"stage":"project_tools","completed":2000,"elapsedMs":83.375292},"memory":{"rssBytes":150437888,"peakRssBytes":150437888,"heapUsedBytes":28365281}}
+{"progress":{"stage":"project_tools","completed":3000,"elapsedMs":141.436},"memory":{"rssBytes":173604864,"peakRssBytes":173604864,"heapUsedBytes":39785232}}
+{"progress":{"stage":"project_tools","completed":4000,"elapsedMs":221.371917},"memory":{"rssBytes":193429504,"peakRssBytes":193429504,"heapUsedBytes":52600695}}
+{"progress":{"stage":"project_tools","completed":5000,"elapsedMs":326.957958},"memory":{"rssBytes":213811200,"peakRssBytes":213811200,"heapUsedBytes":63733012}}
+{"progress":{"stage":"project_tools","completed":6000,"elapsedMs":460.038583},"memory":{"rssBytes":234635264,"peakRssBytes":234635264,"heapUsedBytes":75223110}}
+{"progress":{"stage":"project_tools","completed":7000,"elapsedMs":620.634875},"memory":{"rssBytes":396541952,"peakRssBytes":396541952,"heapUsedBytes":106608529}}
+{"progress":{"stage":"project_tools","completed":8000,"elapsedMs":802.728917},"memory":{"rssBytes":468615168,"peakRssBytes":468615168,"heapUsedBytes":118467195}}
+{"progress":{"stage":"project_tools","completed":9000,"elapsedMs":1011.5695},"memory":{"rssBytes":488456192,"peakRssBytes":488456192,"heapUsedBytes":129139224}}
+{"progress":{"stage":"project_tools","completed":10000,"elapsedMs":1277.162875},"memory":{"rssBytes":513556480,"peakRssBytes":513556480,"heapUsedBytes":143628990}}
+{"progress":{"stage":"project_tools","completed":11000,"elapsedMs":1567.6071670000001},"memory":{"rssBytes":541245440,"peakRssBytes":541245440,"heapUsedBytes":152327650}}
+{"progress":{"stage":"project_tools","completed":12000,"elapsedMs":1888.1197499999998},"memory":{"rssBytes":551649280,"peakRssBytes":551649280,"heapUsedBytes":164180353}}
+{"resultFile":"/Users/konghayao/code/ai/docs/experiment-yjs-sdk/raw/baseline/view-3.json","status":"passed","elapsedMs":4936.805249999999}

@@ -1,0 +1,13 @@
+{"progress":{"stage":"project_tools","completed":1000,"elapsedMs":50.702708},"memory":{"rssBytes":91357184,"peakRssBytes":91357184,"heapUsedBytes":13525062}}
+{"progress":{"stage":"project_tools","completed":2000,"elapsedMs":93.272333},"memory":{"rssBytes":144015360,"peakRssBytes":144015360,"heapUsedBytes":28305112}}
+{"progress":{"stage":"project_tools","completed":3000,"elapsedMs":151.752792},"memory":{"rssBytes":168427520,"peakRssBytes":168427520,"heapUsedBytes":39713724}}
+{"progress":{"stage":"project_tools","completed":4000,"elapsedMs":234.764583},"memory":{"rssBytes":189284352,"peakRssBytes":189284352,"heapUsedBytes":52489039}}
+{"progress":{"stage":"project_tools","completed":5000,"elapsedMs":337.944458},"memory":{"rssBytes":212074496,"peakRssBytes":212074496,"heapUsedBytes":63573973}}
+{"progress":{"stage":"project_tools","completed":6000,"elapsedMs":470.858458},"memory":{"rssBytes":232882176,"peakRssBytes":232882176,"heapUsedBytes":75036866}}
+{"progress":{"stage":"project_tools","completed":7000,"elapsedMs":626.645667},"memory":{"rssBytes":400621568,"peakRssBytes":400621568,"heapUsedBytes":106417903}}
+{"progress":{"stage":"project_tools","completed":8000,"elapsedMs":819.4340420000001},"memory":{"rssBytes":466796544,"peakRssBytes":466796544,"heapUsedBytes":118280197}}
+{"progress":{"stage":"project_tools","completed":9000,"elapsedMs":1017.8150000000002},"memory":{"rssBytes":487309312,"peakRssBytes":487309312,"heapUsedBytes":128976602}}
+{"progress":{"stage":"project_tools","completed":10000,"elapsedMs":1247.0256669999999},"memory":{"rssBytes":511377408,"peakRssBytes":511377408,"heapUsedBytes":143454499}}
+{"progress":{"stage":"project_tools","completed":11000,"elapsedMs":1508.664083},"memory":{"rssBytes":538607616,"peakRssBytes":538607616,"heapUsedBytes":152138295}}
+{"progress":{"stage":"project_tools","completed":12000,"elapsedMs":1797.460625},"memory":{"rssBytes":550043648,"peakRssBytes":550043648,"heapUsedBytes":163999191}}
+{"resultFile":"/Users/konghayao/code/ai/peri-v4p3/docs/experiment-yjs-sdk/raw/baseline-enhanced/view-1.json","status":"passed","elapsedMs":4879.829542}

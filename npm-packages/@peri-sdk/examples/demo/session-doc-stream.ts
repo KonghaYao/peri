@@ -1,63 +1,48 @@
 import * as Y from "yjs";
-
-export type DocName = "chat" | "session";
+import { SessionDocSync, type DocStateVector, type DocUpdate as BinaryUpdate } from "../../src/sync/index";
 
 export type DocSnapshot = {
-  generation: string;
-  sequence: number;
-  chat: string;
-  session: string;
+  protocol: 2; generation: string; sequence: number; mode: "snapshot" | "delta";
+  chat: string; session: string;
 };
+export type DocUpdate = { protocol: 2; generation: string; sequence: number; chat?: string; session?: string };
+export type DocResume = { protocol: 2; generation: string; chat: string; session: string };
+const base64 = (bytes: Uint8Array): string => Buffer.from(bytes).toString("base64");
 
-export type DocUpdate = {
-  generation: string;
-  sequence: number;
-  doc: DocName;
-  update: string;
-};
-
-function base64(bytes: Uint8Array): string {
-  return Buffer.from(bytes).toString("base64");
+export function decodeResume(value: unknown): DocStateVector | undefined {
+  if (value === undefined || value === null) return undefined;
+  const resume = value as DocResume;
+  if (resume.protocol !== 2 || typeof resume.generation !== "string" || !resume.generation ||
+    typeof resume.chat !== "string" || typeof resume.session !== "string" ||
+    resume.chat.length > 90_000 || resume.session.length > 90_000) throw new Error("Invalid document resume state");
+  return { protocol: 2, generation: resume.generation,
+    chat: Uint8Array.from(Buffer.from(resume.chat, "base64")), session: Uint8Array.from(Buffer.from(resume.session, "base64")) };
 }
 
-/** Process-local bridge for the loopback demo. Every connection starts with current Y.Doc state. */
+/** SSE text adapter over the SDK's binary, bounded Yjs sync protocol. */
 export class SessionDocStream {
-  readonly generation = crypto.randomUUID();
-  private sequence = 0;
-  private readonly listeners = new Set<(event: DocUpdate) => void>();
-  private readonly onChatUpdate = (update: Uint8Array) => this.publish("chat", update);
-  private readonly onSessionUpdate = (update: Uint8Array) => this.publish("session", update);
+  private readonly sync: SessionDocSync;
+  private readonly encoded = new WeakMap<BinaryUpdate, DocUpdate>();
+  constructor(chat: Y.Doc, session: Y.Doc) { this.sync = new SessionDocSync(chat, session); }
 
-  constructor(private readonly chat: Y.Doc, private readonly session: Y.Doc) {
-    chat.on("update", this.onChatUpdate);
-    session.on("update", this.onSessionUpdate);
+  subscribe(listener: (event: DocUpdate) => void | Promise<void>, options: {
+    resume?: DocStateVector; onError?: (error: Error) => void;
+  } = {}): { snapshot: DocSnapshot; unsubscribe: () => void } {
+    const connection = this.sync.subscribe((frame) => {
+      let event = this.encoded.get(frame);
+      if (!event) {
+        event = { protocol: 2, generation: frame.generation, sequence: frame.sequence,
+          ...(frame.chat ? { chat: base64(frame.chat) } : {}),
+          ...(frame.session ? { session: base64(frame.session) } : {}) };
+        this.encoded.set(frame, event);
+      }
+      return listener(event);
+    }, options);
+    return { snapshot: { ...connection.snapshot,
+      chat: base64(connection.snapshot.chat), session: base64(connection.snapshot.session) },
+      unsubscribe: connection.unsubscribe };
   }
 
-  /** Capture both docs and register the listener in one synchronous step. */
-  subscribe(listener: (event: DocUpdate) => void): { snapshot: DocSnapshot; unsubscribe: () => void } {
-    const snapshot: DocSnapshot = {
-      generation: this.generation,
-      sequence: this.sequence,
-      chat: base64(Y.encodeStateAsUpdate(this.chat)),
-      session: base64(Y.encodeStateAsUpdate(this.session)),
-    };
-    this.listeners.add(listener);
-    return { snapshot, unsubscribe: () => this.listeners.delete(listener) };
-  }
-
-  close(): void {
-    this.chat.off("update", this.onChatUpdate);
-    this.session.off("update", this.onSessionUpdate);
-    this.listeners.clear();
-  }
-
-  private publish(doc: DocName, update: Uint8Array): void {
-    const event: DocUpdate = {
-      generation: this.generation,
-      sequence: ++this.sequence,
-      doc,
-      update: base64(update),
-    };
-    for (const listener of this.listeners) listener(event);
-  }
+  flush(): void { this.sync.flush(); }
+  close(): Promise<void> { return this.sync.close(); }
 }

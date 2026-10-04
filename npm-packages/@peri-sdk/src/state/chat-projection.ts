@@ -84,7 +84,7 @@ export class ChatProjection {
             if (messageId && entry.get("messageId") !== messageId) entry.set("messageId", messageId);
             if (replay && messageId) entry.set("replayMessageId", messageId);
             if (replay) entry.set("replayEpoch", this.replayEpoch);
-            entry.set("status", "streaming");
+            if (entry.get("status") !== "streaming") entry.set("status", "streaming");
             if (info.get("activeTurnStatus") !== "running") info.set("activeTurnStatus", "running");
         });
         return true;
@@ -104,17 +104,19 @@ export class ChatProjection {
         if ((oldStatus === "completed" || oldStatus === "error" || oldStatus === "cancelled") && oldStatus !== status) return false;
         this.docs.chat.transact(() => {
             const tool = this.docs.ensureTool(id, turnId, string(update.title) ?? string(update.name) ?? "Tool");
-            const alreadyAttached = [...this.docs.entries().values()].some((entry) =>
-                entry.get("turnId") === turnId && (entry.get("blocks") as Y.Map<unknown>).has(`tool:${id}`));
+            const ownerId = string(tool.get("entryId"));
+            const owner = ownerId ? this.docs.entries().get(ownerId) : undefined;
+            const alreadyAttached = owner?.get("turnId") === turnId &&
+                (owner.get("blocks") as Y.Map<unknown>).has(`tool:${id}`);
             if (!alreadyAttached) {
                 const entryId = string(this.docs.info().get("activeAssistantEntryId")) ?? `${turnId}:assistant`;
                 this.docs.addToolBlock(this.docs.ensureEntry(entryId, turnId, "assistant"), id);
             }
             const name = string(update.title) ?? string(update.name);
-            if (name) tool.set("name", name);
+            if (name && tool.get("name") !== name) tool.set("name", name);
             const kind = string(update.kind);
-            if (kind) tool.set("kind", kind);
-            if (update.rawInput !== undefined) tool.set("arguments", update.rawInput);
+            if (kind && tool.get("kind") !== kind) tool.set("kind", kind);
+            if (update.rawInput !== undefined) this.docs.payloads.set(tool, "arguments", update.rawInput);
             if (status === "completed" || status === "error") {
                 const contentText = toolContentText(update.content);
                 const result: RecordValue = {};
@@ -122,9 +124,9 @@ export class ChatProjection {
                     ? "Tool execution failed" : contentText;
                 else if (status === "error") result.contentText = "Tool execution failed";
                 if (update.rawOutput !== undefined) result.rawOutput = update.rawOutput;
-                if (Object.keys(result).length) tool.set("result", result);
+                if (Object.keys(result).length) this.docs.payloads.set(tool, "result", result);
             }
-            tool.set("status", status);
+            if (tool.get("status") !== status) tool.set("status", status);
         });
         return true;
     }
@@ -156,7 +158,7 @@ export class ChatProjection {
                         if (block.text) this.docs.appendText(entry, block.type, block.text);
                     } else if (block.type === "tool") {
                         const tool = this.docs.ensureTool(block.id, turnId, block.name);
-                        if (block.arguments !== undefined) tool.set("arguments", block.arguments);
+                        if (block.arguments !== undefined) this.docs.payloads.set(tool, "arguments", block.arguments);
                         this.docs.addToolBlock(entry, block.id);
                     }
                 }
@@ -165,7 +167,7 @@ export class ChatProjection {
                 const outcome = completedTools.get(id);
                 // A tool_use without its matching tool result is incomplete, even in a canonical snapshot.
                 tool.set("status", outcome === undefined ? keepTurnOpen ? "running" : "cancelled" : outcome.failed ? "error" : "completed");
-                if (outcome) tool.set("result", { contentText: outcome.failed && !outcome.resultText.trim()
+                if (outcome) this.docs.payloads.set(tool, "result", { contentText: outcome.failed && !outcome.resultText.trim()
                     ? "Tool execution failed" : outcome.resultText });
             }
             this.turns.resetAfterHistory(turnId, lastAssistantEntryId, keepTurnOpen);

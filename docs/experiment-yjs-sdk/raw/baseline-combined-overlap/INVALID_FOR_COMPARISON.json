@@ -1,0 +1,5 @@
+{
+  "validForPerformanceComparison": false,
+  "reason": "Sampling overlapped the parent agent SDK build/test session 51736. Raw measurements preserved, excluded from conclusions.",
+  "markedAt": "2026-10-04T16:59:34.027022+00:00"
+}

@@ -20,7 +20,8 @@ import {
     type SessionStorage,
 } from "../../src/sdk/index";
 import { DemoSessionNotFoundError } from "./demo-session-not-found-error";
-import { SessionDocStream } from "./session-doc-stream";
+import { SessionDocStream, decodeResume } from "./session-doc-stream";
+import { streamSessionDocuments } from "./session-sse";
 import { SessionEventLog } from "./session-event-log";
 
 const workspace = await realpath(Bun.env.PERI_WORKSPACE!);
@@ -211,11 +212,8 @@ try {
             opening = openSession(sessionId);
         }
         const selected = await opening;
+        const resume = decodeResume(body.resume);
         return streamSSE(c, async (stream) => {
-            let stop!: () => void;
-            const closed = new Promise<void>((resolve) => { stop = resolve; });
-            stream.onAbort(stop);
-            c.req.raw.signal.addEventListener("abort", stop, { once: true });
             await stream.writeSSE({
                 event: "session",
                 data: JSON.stringify({
@@ -225,25 +223,20 @@ try {
                     workspaceMcp: sandbox.optionalWorkspace?.url ?? "",
                 }),
             });
-            let writes = Promise.resolve();
-            const write = (event: string, data: string, id?: string) => {
-                writes = writes.then(() => stream.writeSSE({ event, data, id })).catch(stop);
-            };
-            const { snapshot, unsubscribe } = selected.docs.subscribe((entry) =>
-                write("docs:update", JSON.stringify(entry), String(entry.sequence)));
-            write("docs:snapshot", JSON.stringify(snapshot), String(snapshot.sequence));
-            const unsubscribeEvents = selected.events.subscribe(after, (entry) =>
-                write("notification", JSON.stringify(entry), String(entry.id)));
-            const heartbeat = setInterval(() => write("ping", "{}"), 15_000);
-            try {
-                await closed;
-            } finally {
-                clearInterval(heartbeat);
-                unsubscribe();
-                unsubscribeEvents();
-                await writes;
-            }
+            await streamSessionDocuments(stream, c.req.raw.signal, selected, {
+                after, resume, diagnostics: body.diagnostics === true,
+            });
         });
+    });
+    app.post("/api/session/payload", async (c) => {
+        const body = await c.req.json<Record<string, unknown>>().catch(() => null);
+        if (!body || typeof body.sessionId !== "string" || typeof body.id !== "string")
+            return c.json({ error: "sessionId and payload id are required" }, 400);
+        const selected = await sessions.get(body.sessionId);
+        const payload = selected?.agent.docs.readPayload(body.id);
+        if (payload === undefined) return c.json({ error: "Payload version is unavailable; refresh the tool card" }, 404);
+        c.header("Cache-Control", "no-store");
+        return c.body(payload, 200, { "Content-Type": "application/json; charset=utf-8" });
     });
     app.post("/api/session/send", async (c) => {
         const body = await c.req.json<Record<string, unknown>>().catch(() => null);
@@ -284,7 +277,7 @@ try {
     const opened = await Promise.allSettled(sessions.values());
     for (const result of opened) if (result.status === "fulfilled") {
         result.value.interactions.close();
-        result.value.docs.close();
+        await result.value.docs.close();
     }
     await manager.closeAll();
 }

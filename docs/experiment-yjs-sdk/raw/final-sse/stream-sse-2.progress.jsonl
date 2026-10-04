@@ -1,0 +1,10 @@
+{"progress":{"stage":"stream","completed":2048,"elapsedMs":48.421625},"memory":{"rssBytes":80953344,"peakRssBytes":80953344,"heapUsedBytes":18433346}}
+{"progress":{"stage":"stream","completed":4096,"elapsedMs":74.31025},"memory":{"rssBytes":91799552,"peakRssBytes":91799552,"heapUsedBytes":13173472}}
+{"progress":{"stage":"stream","completed":6144,"elapsedMs":96.966792},"memory":{"rssBytes":114524160,"peakRssBytes":114524160,"heapUsedBytes":17980229}}
+{"progress":{"stage":"stream","completed":8192,"elapsedMs":115.909542},"memory":{"rssBytes":126484480,"peakRssBytes":126484480,"heapUsedBytes":47906737}}
+{"progress":{"stage":"stream","completed":10240,"elapsedMs":138.220834},"memory":{"rssBytes":145866752,"peakRssBytes":145866752,"heapUsedBytes":38196680}}
+{"progress":{"stage":"stream","completed":12288,"elapsedMs":156.48624999999998},"memory":{"rssBytes":153026560,"peakRssBytes":153026560,"heapUsedBytes":78901542}}
+{"progress":{"stage":"stream","completed":14336,"elapsedMs":176.90825},"memory":{"rssBytes":172343296,"peakRssBytes":172343296,"heapUsedBytes":53274439}}
+{"progress":{"stage":"stream","completed":16384,"elapsedMs":193.47495899999998},"memory":{"rssBytes":179470336,"peakRssBytes":179470336,"heapUsedBytes":71964921}}
+{"progress":{"stage":"stream_verified","completed":16384,"elapsedMs":215.12225},"memory":{"rssBytes":251314176,"peakRssBytes":251314176,"heapUsedBytes":141296529}}
+{"resultFile":"/Users/konghayao/code/ai/peri-v4p3/docs/experiment-yjs-sdk/raw/final-sse/stream-sse-2.json","status":"passed","elapsedMs":215.182292}

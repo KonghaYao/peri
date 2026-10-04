@@ -221,17 +221,19 @@
 
     <script type="module">
       import { EventStreamContentType, fetchEventSource } from "/vendor/fetch-event-source.js";
-      import { Y, SessionViewStore } from "/vendor/peri-session-view.js";
+      import { Y, SessionViewStore, SessionDocReplica } from "/vendor/peri-session-view.js";
       const $ = (id) => document.getElementById(id);
       let cursor = 0;
       let session = null;
       let selected = "field:sessionId";
       const entries = [];
-      let chatDoc = new Y.Doc();
-      let sessionDoc = new Y.Doc();
+      const replica = new SessionDocReplica();
+      let chatDoc = replica.chat;
+      let sessionDoc = replica.session;
       const viewStore = new SessionViewStore(chatDoc, sessionDoc);
       let docGeneration = null;
-      let docSequence = -1;
+      let visibleBlockLimit = 200;
+      const renderedBlocks = new Map();
       const interactionCards = new Map();
       let sessionRefresh;
       const fieldLabels = {
@@ -310,54 +312,104 @@
         summary.textContent = `${tool?.name ?? block.toolCallId ?? "工具调用"} · ${tool?.status ?? "进行中"}`;
         const body = document.createElement("pre");
         body.className = "mt-3 max-h-64 overflow-auto whitespace-pre-wrap break-words text-xs leading-5";
-        body.textContent = [
-          tool?.arguments !== undefined && `输入\n${formatToolValue(tool.arguments)}`,
-          tool?.result !== undefined && `结果\n${formatToolValue(tool.result)}`,
-        ].filter(Boolean).join("\n\n") || "等待工具结果…";
+        const preview = (field) => tool?.[`${field}Ref`]
+          ? `${tool[`${field}Ref`].preview}…\n（${tool[`${field}Ref`].bytes} 字节，展开后读取全文）`
+          : formatToolValue(tool?.[field]);
+        body.textContent = [`输入\n${preview("arguments")}`, `结果\n${preview("result")}`].join("\n\n");
+        let loaded = false;
+        row.addEventListener("toggle", async () => {
+          if (!row.open || loaded) return;
+          loaded = true;
+          try {
+            const values = await Promise.all(["arguments", "result"].map(async (field) => {
+              const ref = tool?.[`${field}Ref`];
+              const value = ref ? await postJson("/api/session/payload", { sessionId: session.sessionId, id: ref.id }) : tool?.[field];
+              return `${field === "arguments" ? "输入" : "结果"}\n${formatToolValue(value)}`;
+            }));
+            body.textContent = values.join("\n\n");
+          } catch (error) {
+            body.textContent = error.message;
+            loaded = false;
+          }
+        });
         row.append(summary, body);
         $("messages").append(row);
+        return row;
+      }
+
+      function renderMessages(view) {
+        const selected = [];
+        let remaining = visibleBlockLimit;
+        let total = 0;
+        for (let i = view.entries.length - 1; i >= 0; i--) {
+          const entry = view.entries[i];
+          total += entry.blocks.length;
+          for (let j = entry.blocks.length - 1; j >= 0 && remaining > 0; j--, remaining--)
+            selected.push({ entry, block: entry.blocks[j] });
+        }
+        selected.reverse();
+        const host = $("messages");
+        const keep = new Set();
+        const nodes = [];
+        if (total > visibleBlockLimit) {
+          const earlier = document.createElement("button");
+          earlier.className = "text-xs text-slate-500 underline";
+          earlier.textContent = `加载更早内容（还有 ${total - visibleBlockLimit} 块）`;
+          earlier.onclick = () => { visibleBlockLimit += 200; renderView(); };
+          nodes.push(earlier);
+        }
+        for (const { entry, block } of selected) {
+          const key = JSON.stringify([entry.entryId, block.blockId]);
+          keep.add(key);
+          let cached = renderedBlocks.get(key);
+          if (cached?.block !== block) {
+            if (block.type === "tool_call") {
+              const wasOpen = cached?.node.open ?? false;
+              const node = addTool(block);
+              node.open = wasOpen;
+              cached = { node, block };
+            } else {
+              const text = `${block.type === "reasoning" ? "思考：" : ""}${block.text ?? ""}`;
+              const content = cached?.content ?? addMessage(entry.role, "");
+              // Keep long output readable without a multi-megabyte DOM text node on every delta.
+              content.textContent = text.length > 65536 ? `…（显示最后 65,536 字符）\n${text.slice(-65536)}` : text;
+              const oldDownload = cached?.node.querySelector("button[data-download]");
+              oldDownload?.remove();
+              if (text.length > 65536) {
+                const download = document.createElement("button");
+                download.dataset.download = "true";
+                download.className = "block text-xs text-slate-500 underline";
+                download.textContent = "保存完整输出";
+                download.onclick = () => {
+                  const url = URL.createObjectURL(new Blob([block.text], { type: "text/plain;charset=utf-8" }));
+                  const link = document.createElement("a");
+                  link.href = url; link.download = "peri-output.txt"; link.click();
+                  setTimeout(() => URL.revokeObjectURL(url), 1000);
+                };
+                content.parentElement.append(download);
+              }
+              cached = { node: content.parentElement, content, block };
+            }
+            renderedBlocks.set(key, cached);
+          }
+          nodes.push(cached.node);
+        }
+        for (const key of renderedBlocks.keys()) if (!keep.has(key)) renderedBlocks.delete(key);
+        const desired = new Set(nodes);
+        for (const node of [...host.childNodes]) if (!desired.has(node)) node.remove();
+        let cursor = host.firstChild;
+        for (const node of nodes) {
+          if (node === cursor) cursor = cursor.nextSibling;
+          else host.insertBefore(node, cursor);
+        }
+        if (!nodes.length) host.textContent = "输入一条消息，开始与 Peri 对话。";
       }
 
       function renderView() {
         const view = viewStore.getSnapshot();
         const scroller = $("chat-scroll");
         const wasAtBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 80;
-        $("messages").replaceChildren();
-        let visible = false;
-        for (const entry of view.entries ?? []) {
-          if (entry.role === "user") {
-            const text = (entry.blocks ?? []).filter((block) => block.type === "text")
-              .map((block) => block.text ?? "").join("\n");
-            if (text) { addMessage("user", text); visible = true; }
-            continue;
-          }
-          if (entry.role !== "assistant") continue;
-          let text = "";
-          const flush = () => {
-            if (!text) return;
-            addMessage("assistant", text);
-            visible = true;
-            text = "";
-          };
-          for (const block of entry.blocks ?? []) {
-            if (block.type === "tool_call") {
-              flush();
-              addTool(block);
-              visible = true;
-            } else if (block.type === "text" || block.type === "reasoning") {
-              const next = block.text ?? "";
-              if (next) text += `${text ? "\n" : ""}${block.type === "reasoning" ? "思考：" : ""}${next}`;
-            }
-          }
-          flush();
-        }
-        if (!visible) {
-          const welcome = document.createElement("div");
-          welcome.id = "welcome";
-          welcome.className = "mx-auto flex max-w-md flex-col items-center py-16 text-center text-slate-500 sm:py-24";
-          welcome.textContent = "输入一条消息，开始与 Peri 对话。";
-          $("messages").append(welcome);
-        }
+        renderMessages(view);
         if (wasAtBottom) scrollToLatest();
 
         const status = view.session?.activeTurnInteractionStatus ?? view.activeTurnStatus ?? "空闲";
@@ -392,40 +444,30 @@
         return bytes;
       }
 
+      function encodeUpdate(bytes) {
+        let binary = "";
+        for (const byte of bytes) binary += String.fromCharCode(byte);
+        return btoa(binary);
+      }
+
+      function resumeState() {
+        const vector = replica.stateVector();
+        return vector ? { ...vector, chat: encodeUpdate(vector.chat), session: encodeUpdate(vector.session) } : undefined;
+      }
+
       function acceptDocSnapshot(payload) {
-        if (!payload?.generation || !Number.isSafeInteger(payload.sequence)
-          || typeof payload.chat !== "string" || typeof payload.session !== "string") return;
-        const nextChat = new Y.Doc();
-        const nextSession = new Y.Doc();
-        try {
-          Y.applyUpdate(nextChat, decodeUpdate(payload.chat));
-          Y.applyUpdate(nextSession, decodeUpdate(payload.session));
-        } catch (error) {
-          nextChat.destroy();
-          nextSession.destroy();
-          throw error;
-        }
-        const previousChat = chatDoc;
-        const previousSession = sessionDoc;
+        const change = replica.applySnapshot({ ...payload, chat: decodeUpdate(payload.chat), session: decodeUpdate(payload.session) });
         if (docGeneration !== payload.generation) interactionCards.clear();
-        chatDoc = nextChat;
-        sessionDoc = nextSession;
         docGeneration = payload.generation;
-        docSequence = payload.sequence;
-        viewStore.replaceDocs(chatDoc, sessionDoc);
-        previousChat.destroy();
-        previousSession.destroy();
-        renderView();
+        chatDoc = replica.chat;
+        sessionDoc = replica.session;
+        if (change === "replaced") viewStore.replaceDocs(chatDoc, sessionDoc);
       }
 
       function acceptDocUpdate(payload) {
-        if (payload?.generation !== docGeneration || !Number.isSafeInteger(payload.sequence)
-          || payload.sequence <= docSequence || typeof payload.update !== "string") return;
-        if (payload.doc !== "chat" && payload.doc !== "session") return;
-        if (payload.sequence !== docSequence + 1)
-          throw new Error(`Yjs update sequence gap: expected ${docSequence + 1}, received ${payload.sequence}`);
-        Y.applyUpdate(payload.doc === "chat" ? chatDoc : sessionDoc, decodeUpdate(payload.update));
-        docSequence = payload.sequence;
+        replica.applyUpdate({ ...payload,
+          ...(payload.chat ? { chat: decodeUpdate(payload.chat) } : {}),
+          ...(payload.session ? { session: decodeUpdate(payload.session) } : {}) });
       }
 
       async function respondToInteraction(interaction, decision, card) {
@@ -505,7 +547,12 @@
         host.replaceChildren(...cards);
       }
 
-      viewStore.subscribe(renderView);
+      let renderScheduled = false;
+      viewStore.subscribe(() => {
+        if (renderScheduled) return;
+        renderScheduled = true;
+        requestAnimationFrame(() => { renderScheduled = false; renderView(); });
+      });
 
       async function refreshSessions() {
         try {
@@ -598,8 +645,7 @@
       addEventListener("beforeunload", () => {
         eventController.abort();
         viewStore.destroy();
-        chatDoc.destroy();
-        sessionDoc.destroy();
+        replica.destroy();
       }, { once: true });
 
       function connectSession(requestedSessionId) {
@@ -616,7 +662,8 @@
               await fetchEventSource("/api/session/create", {
                 method: "POST",
                 headers: { "content-type": "application/json" },
-                body: JSON.stringify({ sessionId: session?.sessionId ?? requestedSessionId, after: cursor, requestId }),
+                body: JSON.stringify({ sessionId: session?.sessionId ?? requestedSessionId, after: cursor, requestId,
+                  resume: resumeState(), diagnostics: new URLSearchParams(location.search).get("diagnostics") === "1" }),
                 signal: eventController.signal,
                 openWhenHidden: true,
                 async onopen(response) {
@@ -648,6 +695,7 @@
                   if (entry.id <= cursor) return;
                   cursor = entry.id;
                   entries.push(entry);
+                  if (entries.length > 256) entries.shift();
                   // ACP notifications remain available in the information panel for debugging.
                   const payload = eventPayload(entry);
                   if (["user_input_delivered", "user_message_chunk", "usage_update"].includes(payload?.type ?? payload?.sessionUpdate))

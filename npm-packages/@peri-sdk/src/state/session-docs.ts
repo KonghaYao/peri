@@ -25,7 +25,17 @@ export class SessionDocs {
     readonly chat = this.model.chat;
     readonly session = this.model.session;
 
+    /** Exact immutable JSON for a current ToolPayloadRef; stale or unknown versions are absent. */
+    readPayload(id: string): string | undefined { return this.model.payloads.read(id); }
+
+    /** Ingest a received batch without publishing a Yjs transaction per ACP notification. */
+    acceptBatch(notifications: Iterable<JsonRpcNotification>): void {
+        if (this.destroyed) return;
+        this.model.transactBoth(() => { for (const notification of notifications) this.accept(notification); });
+    }
+
     destroy(): void {
+        if (this.destroyed) return;
         this.destroyed = true;
         this.interaction.abortAll();
         this.taskProjection.setSnapshotRequester(null);
@@ -33,26 +43,33 @@ export class SessionDocs {
         this.model.destroy();
     }
     completeTurn(status: TurnExitStatus = "completed"): boolean {
+        if (this.destroyed) return false;
         const exited = this.turns.exit(status);
         this.interaction.abortAll();
         return exited;
     }
     requestCancel(): { turnId: string; previous: "accepting" | "running" } | null {
+        if (this.destroyed) return null;
         const token = this.turns.requestCancel();
         if (token) this.interaction.abortAll();
         return token;
     }
-    restoreCancel(token: { turnId: string; previous: "accepting" | "running" }): void { this.turns.restoreCancel(token); }
+    restoreCancel(token: { turnId: string; previous: "accepting" | "running" }): void {
+        if (!this.destroyed) this.turns.restoreCancel(token);
+    }
     acceptDeliveredUserInput(inputId: string, text: string): boolean {
+        if (this.destroyed) return false;
         this.interaction.abortAll();
         return this.chatProjection.acceptDeliveredUserInput(inputId, text);
     }
     handleRequest(method: string, params: unknown, expectedSessionId: string | undefined, options: AgentOptions): Promise<unknown> {
+        if (this.destroyed) return Promise.reject(new Error("SessionDocs is destroyed"));
         return this.interaction.handle(method, params, expectedSessionId, options);
     }
 
     /** Repair missing background-task revisions through Peri's session/bg-tasks snapshot. */
     setTaskSnapshotRequester(requester: (() => Promise<unknown>) | null): void {
+        if (this.destroyed) return;
         this.taskProjection.setSnapshotRequester(requester ? () => {
             if (this.taskSnapshotInFlight || this.destroyed) return;
             this.taskSnapshotInFlight = true;
@@ -68,10 +85,11 @@ export class SessionDocs {
     }
 
     /** Seed queue state from session/input/snapshot, even when no queue notification has arrived. */
-    seedInputQueue(snapshot: unknown): void { this.inputQueue.seed(snapshot); }
-    seedConfig(response: unknown): void { this.sessionProjection.seedConfig(response); }
+    seedInputQueue(snapshot: unknown): void { if (!this.destroyed) this.inputQueue.seed(snapshot); }
+    seedConfig(response: unknown): void { if (!this.destroyed) this.sessionProjection.seedConfig(response); }
 
     accept(notification: JsonRpcNotification): void {
+        if (this.destroyed) return;
         if (!notification || typeof notification !== "object") return;
         const params = object(notification.params);
         if (!params) return;

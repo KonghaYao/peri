@@ -1,0 +1,4 @@
+{"progress":{"stage":"project_tools","completed":1,"elapsedMs":6.674166000000001},"memory":{"rssBytes":49512448,"peakRssBytes":49528832,"heapUsedBytes":2831360}}
+{"progress":{"stage":"snapshot_encode","elapsedMs":8.127708},"memory":{"rssBytes":50053120,"peakRssBytes":50053120,"heapUsedBytes":2982912}}
+{"progress":{"stage":"snapshot_apply","elapsedMs":9.993},"memory":{"rssBytes":54951936,"peakRssBytes":54951936,"heapUsedBytes":5204199}}
+{"resultFile":"/Users/konghayao/code/ai/docs/experiment-yjs-sdk/raw/baseline/large-1.json","status":"passed","elapsedMs":11.816374999999999}

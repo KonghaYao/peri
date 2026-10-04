@@ -1,4 +1,6 @@
 import * as Y from "yjs";
+import { ReadCache } from "./read-cache";
+import type { ToolPayloadRef } from "../state/tool-payloads";
 
 export type ToolView = {
     toolCallId: string;
@@ -8,6 +10,8 @@ export type ToolView = {
     kind?: string;
     arguments?: unknown;
     result?: unknown;
+    argumentsRef?: ToolPayloadRef;
+    resultRef?: ToolPayloadRef;
 };
 export type EntryBlockView =
     | { blockId: string; type: "text" | "reasoning"; text: string; visibility?: string }
@@ -105,56 +109,72 @@ function list<T>(value: unknown, read: (item: unknown) => T | null): T[] {
     return values.flatMap((item) => { const parsed = read(item); return parsed === null ? [] : [parsed]; });
 }
 
-function toolView(value: unknown): ToolView | null {
+function toolView(value: unknown, cache: ReadCache): ToolView | null {
     const tool = map(value);
     const toolCallId = str(tool?.get("toolCallId"));
     if (!tool || !toolCallId) return null;
-    const result: ToolView = {
-        toolCallId, turnId: str(tool.get("turnId")), name: str(tool.get("name")) ?? "Tool",
-        status: str(tool.get("status")) ?? "pending",
-    };
-    const kind = str(tool.get("kind"));
-    if (kind) result.kind = kind;
-    if (tool.has("arguments")) result.arguments = copy(tool.get("arguments"));
-    if (tool.has("result")) result.result = copy(tool.get("result"));
-    return result;
+    return cache.read(tool, () => {
+        const result: ToolView = {
+            toolCallId, turnId: str(tool.get("turnId")), name: str(tool.get("name")) ?? "Tool",
+            status: str(tool.get("status")) ?? "pending",
+        };
+        const kind = str(tool.get("kind"));
+        if (kind) result.kind = kind;
+        if (tool.has("arguments")) result.arguments = copy(tool.get("arguments"));
+        if (tool.has("result")) result.result = copy(tool.get("result"));
+        for (const key of ["argumentsRef", "resultRef"] as const) {
+            const ref = obj(tool.get(key));
+            if (ref && typeof ref.id === "string" && typeof ref.bytes === "number" && typeof ref.preview === "string") {
+                result[key] = { id: ref.id, bytes: ref.bytes, preview: ref.preview };
+            }
+        }
+        return result;
+    });
 }
 
-function blockView(value: unknown, tools: Y.Map<unknown> | null): EntryBlockView | null {
+function blockView(value: unknown, tools: Y.Map<unknown> | null, cache: ReadCache): EntryBlockView | null {
     const block = map(value);
     const blockId = str(block?.get("blockId"));
     const type = str(block?.get("type"));
     if (!block || !blockId) return null;
-    if (type === "text" || type === "reasoning") {
-        const text = block.get("text");
-        const result: EntryBlockView = { blockId, type, text: text instanceof Y.Text ? text.toString() : str(text) ?? "" };
-        const visibility = str(block.get("visibility"));
-        if (visibility && type === "reasoning") result.visibility = visibility;
-        return result;
-    }
-    if (type === "tool_call") {
-        const toolCallId = str(block.get("toolCallId"));
-        if (toolCallId) return { blockId, type, toolCallId, tool: toolView(tools?.get(toolCallId)) };
-    }
-    return null;
+    return cache.read(block, () => {
+        if (type === "text" || type === "reasoning") {
+            const text = block.get("text");
+            const result: EntryBlockView = { blockId, type, text: text instanceof Y.Text ? text.toString() : str(text) ?? "" };
+            const visibility = str(block.get("visibility"));
+            if (visibility && type === "reasoning") result.visibility = visibility;
+            return result;
+        }
+        if (type === "tool_call") {
+            const toolCallId = str(block.get("toolCallId"));
+            if (toolCallId) {
+                const tool = map(tools?.get(toolCallId));
+                cache.depend(tool ?? tools, block);
+                return { blockId, type, toolCallId, tool: toolView(tool, cache) };
+            }
+        }
+        return null;
+    });
 }
 
-function entryView(value: unknown, tools: Y.Map<unknown> | null): EntryView | null {
+function entryView(value: unknown, tools: Y.Map<unknown> | null, cache: ReadCache): EntryView | null {
     const entry = map(value);
     const entryId = str(entry?.get("entryId"));
     const turnId = str(entry?.get("turnId"));
     const role = str(entry?.get("role"));
     if (!entry || !entryId || !turnId || (role !== "user" && role !== "assistant")) return null;
-    const blocks = map(entry.get("blocks"));
-    const result: EntryView = {
-        entryId, turnId, role, status: str(entry.get("status")) ?? "pending",
-        blocks: list(entry.get("blockOrder"), (id) => blockView(blocks?.get(String(id)), tools)),
-    };
-    const messageId = str(entry.get("messageId"));
-    if (messageId) result.messageId = messageId;
-    const usage = record(entry.get("tokenUsage"));
-    if (usage) result.tokenUsage = usage;
-    return result;
+    return cache.read(entry, () => {
+        const blocks = map(entry.get("blocks"));
+        const result: EntryView = {
+            entryId, turnId, role, status: str(entry.get("status")) ?? "pending",
+            blocks: list(entry.get("blockOrder"), (id) => blockView(blocks?.get(String(id)), tools, cache)),
+        };
+        const messageId = str(entry.get("messageId"));
+        if (messageId) result.messageId = messageId;
+        const usage = record(entry.get("tokenUsage"));
+        if (usage) result.tokenUsage = usage;
+        return result;
+    });
 }
 
 function plan(value: unknown): PlanEntryView[] {
@@ -246,6 +266,10 @@ function sessionInfo(value: Y.Map<unknown> | null): SessionInfoView {
 
 /** One read-only, transport-neutral view over an authorized pair of Y.Doc replicas. */
 export function readSessionView(chat: Y.Doc, session: Y.Doc): SessionView {
+    return readView(chat, session, new ReadCache());
+}
+
+function readView(chat: Y.Doc, session: Y.Doc, cache: ReadCache): SessionView {
     // A browser replica starts empty. Reading it must not create competing root keys.
     const chatRoot = root(chat);
     const sessionRoot = root(session);
@@ -254,16 +278,20 @@ export function readSessionView(chat: Y.Doc, session: Y.Doc): SessionView {
     const tasks = map(sessionRoot?.get("tasks"));
     const info = map(sessionRoot?.get("session"));
     const plans = map(sessionRoot?.get("plansByTurn"));
-    const plansByTurn: Record<string, PlanEntryView[]> = Object.create(null);
-    if (plans) for (const [turnId, value] of plans) plansByTurn[turnId] = plan(value);
+    const plansByTurn = cache.read(plans, () => {
+        const result: Record<string, PlanEntryView[]> = Object.create(null);
+        if (plans) for (const [turnId, value] of plans) result[turnId] = plan(value);
+        return result;
+    });
     const pending = map(info?.get("pendingInteractions"));
+    if (tasks) cache.depend(array(sessionRoot?.get("taskOrder")), tasks);
     return {
         schemaVersion: num(chatRoot?.get("schemaVersion")) ?? 0,
-        entries: list(chatRoot?.get("entryOrder"), (id) => entryView(entries?.get(String(id)), tools)),
+        entries: cache.read(chatRoot, () => list(chatRoot?.get("entryOrder"), (id) => entryView(entries?.get(String(id)), tools, cache))),
         activeTurnId: str(info?.get("activeTurnId")),
         activeTurnStatus: str(info?.get("activeTurnStatus")),
-        session: sessionInfo(info),
-        tasks: list(sessionRoot?.get("taskOrder"), (id) => taskView(tasks?.get(String(id)))),
+        session: cache.read(info, () => sessionInfo(info)),
+        tasks: cache.read(tasks, () => list(sessionRoot?.get("taskOrder"), (id) => taskView(tasks?.get(String(id))))),
         plan: plan(info?.get("plan")),
         plansByTurn,
         pendingInteractions: pending ? Array.from(pending.values()).flatMap((item) => {
@@ -280,10 +308,17 @@ export class SessionViewStore {
     private generation = 0;
     private pending = false;
     private closed = false;
-    private readonly onUpdate = () => this.schedule();
+    private cache = new ReadCache();
+    private readonly onTransaction = (transaction: Y.Transaction) => {
+        if (!transaction.changed.size) return;
+        // Replacing a root collection also replaces reference targets beneath that collection.
+        if ([...transaction.changed.keys()].some((type) => type.parent === null)) this.cache = new ReadCache();
+        else this.cache.invalidate(transaction);
+        this.schedule();
+    };
 
     constructor(private chat: Y.Doc, private session: Y.Doc) {
-        this.snapshot = readSessionView(chat, session);
+        this.snapshot = readView(chat, session, this.cache);
         this.attach();
     }
 
@@ -300,7 +335,8 @@ export class SessionViewStore {
         this.pending = false;
         this.chat = chat;
         this.session = session;
-        this.snapshot = readSessionView(chat, session);
+        this.cache = new ReadCache();
+        this.snapshot = readView(chat, session, this.cache);
         this.attach();
         this.emit();
     }
@@ -311,8 +347,8 @@ export class SessionViewStore {
         this.detach();
         this.listeners.clear();
     }
-    private attach(): void { this.chat.on("update", this.onUpdate); this.session.on("update", this.onUpdate); }
-    private detach(): void { this.chat.off("update", this.onUpdate); this.session.off("update", this.onUpdate); }
+    private attach(): void { this.chat.on("afterTransaction", this.onTransaction); this.session.on("afterTransaction", this.onTransaction); }
+    private detach(): void { this.chat.off("afterTransaction", this.onTransaction); this.session.off("afterTransaction", this.onTransaction); }
     private emit(): void { for (const listener of this.listeners) listener(); }
     private schedule(): void {
         if (this.pending || this.closed) return;
@@ -321,7 +357,7 @@ export class SessionViewStore {
         queueMicrotask(() => {
             if (this.closed || generation !== this.generation) return;
             this.pending = false;
-            this.snapshot = readSessionView(this.chat, this.session);
+            this.snapshot = readView(this.chat, this.session, this.cache);
             this.emit();
         });
     }

@@ -6,6 +6,8 @@ import { ManagedAgents } from "../src/managed/managed-agents";
 import { Sandbox } from "../src/sandbox/sandbox";
 import type { JsonRpcNotification, Transport } from "../src/transport/types";
 import type { SessionStorage } from "../src/storage/types";
+import { readSessionView } from "../src/view/session-view";
+import { EventStreamOverflowError } from "../src/transport/notification-budget";
 
 const storedSession = (cwd: string, id = "existing") => ({
   id, title: null, cwd, messageCount: 0, createdAt: "now", updatedAt: "now",
@@ -320,6 +322,23 @@ describe("ManagedAgents lifecycle", () => {
     expect(second.value.method).toBe("peri/agent_event");
     await iterator.return?.();
     await manager.closeAgent("agent-1");
+  });
+
+  test("raw stream overflow leaves projection current and allows a new live diagnostic stream", async () => {
+    const manager = new ManagedAgents({ kv: new MemoryClaims() });
+    const { agent, transport } = declaration(manager);
+    const session = await agent.session.start(null);
+    const emit = (sessionUpdate: string, text: string) => transport.emit({ jsonrpc: "2.0", method: "session/update",
+      params: { sessionId: "session-1", update: { sessionUpdate, content: { text } } } });
+    emit("user_message_chunk", "go");
+    for (let i = 0; i < 1050; i++) emit("agent_message_chunk", ".");
+    const previous = session.stream()[Symbol.asyncIterator]();
+    await expect(previous.next()).rejects.toBeInstanceOf(EventStreamOverflowError);
+    expect(readSessionView(session.docs.chat, session.docs.session).entries[1]?.blocks[0]).toMatchObject({ text: ".".repeat(1050) });
+    const current = session.stream()[Symbol.asyncIterator]();
+    const next = current.next(); emit("agent_message_chunk", "tail");
+    expect((await next).value.params.update.content.text).toBe("tail");
+    await current.return?.(); await manager.closeAgent(agent.id);
   });
 
   test("ACP setup serializes HTTP headers and stdio env as named entries", async () => {

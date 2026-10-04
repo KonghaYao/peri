@@ -1,0 +1,43 @@
+# Captured hook output; CRLF and trailing display padding normalized.
+╭───────────────────────────────────╮
+│ lefthook v2.1.4  hook: pre-commit │
+╰───────────────────────────────────╯
+│  check (skip) no matching staged files
+│  clippy (skip) no matching staged files
+│  fmt (skip) no matching staged files
+┃  layer-imports ❯
+
+✅ [TUI-use]
+✅ [TUI-fullpath]
+✅ [ACP-biz-use]
+✅ [ACP-biz-fullpath]
+✅ [ACP-model-use]
+✅ [ACP-model-fullpath]
+✅ [Controller-use]
+✅ [Controller-fullpath]
+✅ [Runtime-use]
+✅ [Runtime-fullpath]
+✅ [Resources-use]
+✅ [Resources-fullpath]
+✅ [Middlewares-use]
+✅ [Middlewares-fullpath]
+✅ [Agent-use]
+✅ [Agent-fullpath]
+✅ [Process-use]
+✅ [Process-fullpath]
+✅ [MCP-packages-use]
+✅ [MCP-packages-fullpath]
+✅ [Config-use]
+✅ [Config-fullpath]
+
+§0 依赖门：共 22 条规则，违规边 0
+✅ 全边依赖门通过（Seam 3 完整版）
+
+┃  typos ❯
+
+
+
+  ────────────────────────────────────
+summary: (done in 1.09 seconds)
+✓ layer-imports (0.88 seconds)
+✓ typos (0.12 seconds)

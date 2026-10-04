@@ -1,0 +1,21 @@
+bun test v1.4.2 (744846f84)
+
+tests/session-sync.test.ts:
+(pass) bounded binary batches preserve Unicode streaming, tool payload refs, and the terminal tail [18.95ms]
+(pass) resume includes offline deletions even when the Yjs state vector did not advance [0.42ms]
+(pass) a missing batch is detected and repaired from state vectors; duplicate frames are harmless [0.29ms]
+(pass) Yjs V2 updates converge when a binary transport reorders and duplicates batches [0.34ms]
+(pass) replacing a producer generation requires a fresh pair and detaches an existing view store [0.59ms]
+(pass) slow subscribers exceed a bounded queue while fast subscribers remain current and resume works [0.46ms]
+(pass) close waits for an asynchronous transport to send queued tail updates [0.15ms]
+(pass) malformed snapshots and invalid budgets fail without replacing a usable replica [0.13ms]
+(pass) a reentrant subscriber cannot send a later batch ahead of the current broadcast [0.13ms]
+(pass) closing from a send callback still delivers the current batch to every admitted peer [0.11ms]
+(pass) each subscriber can transfer its binary buffers to a Worker without corrupting another peer [0.23ms]
+(pass) subscription admission fails if flushing an existing peer closes the producer [0.08ms]
+(pass) a sender that unsubscribes before returning a rejected promise is still observed [0.11ms]
+
+ 13 pass
+ 0 fail
+ 34 expect() calls
+Ran 13 tests across 1 file. [43.00ms]
