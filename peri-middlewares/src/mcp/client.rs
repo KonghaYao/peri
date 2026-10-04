@@ -869,7 +869,9 @@ impl McpSubscriptionPort for McpClientPool {
         self.session_inboxes.write().remove(session_id);
         self.session_tasks.write().remove(session_id);
         self.task_scope_tokens.write().remove(session_id);
-        self.session_execution_tokens.write().remove(session_id);
+        // The host may still be draining SessionEnd hooks and retrying
+        // Workspace close after the Agent inbox has been detached. The host
+        // releases the Store owner token after close settlement completes.
     }
 
     fn as_any(&self) -> &dyn Any {

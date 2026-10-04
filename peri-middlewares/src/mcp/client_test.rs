@@ -40,6 +40,41 @@ fn connected_test_handle(name: &str) -> Arc<McpClientHandle> {
     })
 }
 
+#[test]
+fn detaching_inbox_keeps_close_owner_until_settled() {
+    let pool = McpClientPool::new_pending();
+    let first = peri_acp_types::workspace::ExecutionOwnerToken {
+        root_id: "closing-session".into(),
+        epoch: 1,
+        nonce: "first".into(),
+    };
+    pool.bind_session_execution_owner("closing-session", first.clone())
+        .unwrap();
+    pool.unregister_inbox("closing-session");
+    assert_eq!(
+        pool.session_execution_tokens.read().get("closing-session"),
+        Some(&first)
+    );
+
+    let next = peri_acp_types::workspace::ExecutionOwnerToken {
+        epoch: 2,
+        nonce: "next".into(),
+        ..first.clone()
+    };
+    pool.bind_session_execution_owner("closing-session", next.clone())
+        .unwrap();
+    pool.release_session_execution_owner(&first);
+    assert_eq!(
+        pool.session_execution_tokens.read().get("closing-session"),
+        Some(&next)
+    );
+    pool.release_session_execution_owner(&next);
+    assert!(!pool
+        .session_execution_tokens
+        .read()
+        .contains_key("closing-session"));
+}
+
 struct TestDropSignal(Option<tokio::sync::oneshot::Sender<()>>);
 
 impl Drop for TestDropSignal {

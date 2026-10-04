@@ -113,6 +113,15 @@ impl McpClientPool {
         Ok(())
     }
 
+    /// Drop a closed session's Store capability after its Workspace and
+    /// persistence settlement has completed. A newer owner must be retained.
+    pub fn release_session_execution_owner(&self, token: &ExecutionOwnerToken) {
+        let mut owners = self.session_execution_tokens.write();
+        if owners.get(token.root_id.as_str()) == Some(token) {
+            owners.remove(token.root_id.as_str());
+        }
+    }
+
     /// Advance every trusted Workspace owner to the Store generation and wait
     /// for its prior in-flight creation barrier before any tool admission.
     pub async fn fence_workspace_task_scope(&self, session_id: &str) -> Result<(), String> {

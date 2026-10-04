@@ -59,6 +59,28 @@ impl Drop for CloseOwnerHeartbeat {
     }
 }
 
+fn release_close_owner_scope(cfg: &AcpServerConfig, state: &SessionState, session_id: &str) {
+    let Some(token) = state
+        .execution_owner
+        .as_ref()
+        .and_then(|owner| owner.owner_token())
+    else {
+        return;
+    };
+    debug_assert_eq!(token.root_id.as_str(), session_id);
+    let local = state
+        .environment
+        .as_ref()
+        .map(|env| &env.cfg)
+        .unwrap_or(cfg);
+    if let Some(pool) = local.mcp_pool.clone().and_then(|port| {
+        port.downcast_arc::<peri_middlewares::mcp::McpClientPool>()
+            .ok()
+    }) {
+        pool.release_session_execution_owner(&token);
+    }
+}
+
 pub(super) async fn close_owned_session(
     cfg: &AcpServerConfig,
     sessions: &mut HashMap<String, SessionState>,
@@ -75,6 +97,9 @@ pub(super) async fn close_owned_session(
                         peri_acp_types::session_resources::SessionResourceErrorKind::NotFound
                     ) =>
                 {
+                    if let Some(state) = sessions.get(session_id) {
+                        release_close_owner_scope(cfg, state, session_id);
+                    }
                     sessions.remove(session_id);
                     return Ok(());
                 }
@@ -99,6 +124,9 @@ pub(super) async fn close_owned_session(
                     .map_err(super::super::super::workspace::resource_error)?
                 {
                     peri_acp_types::session_resources::CloseSettlement::Finished => {
+                        if let Some(state) = sessions.get(session_id) {
+                            release_close_owner_scope(cfg, state, session_id);
+                        }
                         sessions.remove(session_id);
                         return Ok(());
                     }
@@ -261,6 +289,7 @@ pub(super) async fn close_owned_session(
                 }
             }
         }
+        release_close_owner_scope(cfg, state, session_id);
         sessions.remove(session_id);
     } else {
         // 仅恢复已经持久接纳的关闭。无本地 SessionState 时没有执行所有权，
