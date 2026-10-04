@@ -246,7 +246,7 @@ impl AgentExecutor for WorkflowAgentExecutor {
             "Workflow agent: starting execution"
         );
 
-        let started_at = std::time::Instant::now();
+        let started_at = peri_time::monotonic_now();
 
         let agent_definition = match params.agent_type.as_deref() {
             Some(agent_type) => match self

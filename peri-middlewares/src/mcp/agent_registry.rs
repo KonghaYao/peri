@@ -398,7 +398,7 @@ impl McpAgentRegistry {
             .as_ref()
             .ok_or_else(|| format!("MCP server '{}' has no active peer", metadata.origin))?;
 
-        let (result, ticket) = tokio::time::timeout(
+        let (result, ticket) = peri_time::timeout(
             READ_TIMEOUT,
             self.pool
                 .read_resource_cached(&metadata.origin, &metadata.uri, peer),

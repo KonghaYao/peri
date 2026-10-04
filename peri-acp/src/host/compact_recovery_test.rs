@@ -423,7 +423,7 @@ async fn make_recovery_context(
         after_commit: Mutex::new(None),
     });
     let cwd = dir.path().to_str().unwrap();
-    let meta = ThreadMeta::new(cwd);
+    let meta = ThreadMeta::new_at(cwd, peri_time::now_wall());
     let thread_id = meta.id.clone();
     let workspace = store.resolve_workspace(dir.path()).await.unwrap();
     let frozen = make_sentinel_frozen();

@@ -122,7 +122,7 @@ pub(crate) async fn collect_skill_entries(
                     None => None,
                 };
                 let request = ReadResourceRequestParams::new(uri.clone());
-                let result = match tokio::time::timeout(
+                let result = match peri_time::timeout(
                     RESOURCE_READ_TIMEOUT,
                     task_peer.read_resource(request),
                 )

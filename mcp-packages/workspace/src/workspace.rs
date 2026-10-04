@@ -353,21 +353,21 @@ impl WorkspaceMcpServer {
         let sinks = Arc::clone(&self.sinks);
         let cwd = self.cwd.clone();
         tokio::spawn(async move {
-            let outcome =
-                match tokio::time::timeout(git.sample_timeout(), run_git_sample(&cwd)).await {
-                    Ok(outcome) => outcome,
-                    Err(_) => {
-                        tracing::warn!(
-                            target: "git_watch",
-                            cwd = %cwd,
-                            timeout_ms = git.sample_timeout().as_millis(),
-                            "git sample timed out"
-                        );
-                        // 超时按失败收口：不推进节流、不通知（旧实现同口径）。
-                        git.finish_sample(SampleOutcome::Failed);
-                        return;
-                    }
-                };
+            let outcome = match peri_time::timeout(git.sample_timeout(), run_git_sample(&cwd)).await
+            {
+                Ok(outcome) => outcome,
+                Err(_) => {
+                    tracing::warn!(
+                        target: "git_watch",
+                        cwd = %cwd,
+                        timeout_ms = git.sample_timeout().as_millis(),
+                        "git sample timed out"
+                    );
+                    // 超时按失败收口：不推进节流、不通知（旧实现同口径）。
+                    git.finish_sample(SampleOutcome::Failed);
+                    return;
+                }
+            };
 
             let Some(notice) = git.finish_sample(outcome) else {
                 return;

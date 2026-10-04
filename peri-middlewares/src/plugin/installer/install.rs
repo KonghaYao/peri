@@ -111,7 +111,9 @@ pub async fn install_plugin(
         .unwrap_or_else(|| {
             let v = marketplace_plugin.version.clone();
             if v.is_empty() {
-                chrono::Utc::now().format("%Y%m%d%H%M%S").to_string()
+                chrono::DateTime::<chrono::Utc>::from(peri_time::now_wall())
+                    .format("%Y%m%d%H%M%S")
+                    .to_string()
             } else {
                 v
             }

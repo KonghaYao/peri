@@ -28,7 +28,7 @@ use peri_acp_types::event_data::{
     Prediction, PredictionAction, RewindMessage, RewindPreview, SystemNotification,
 };
 use serde_json::Value;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 pub(super) fn handle_budget_warning(state: &mut BridgeState, bw: &BudgetWarning) {
     // 上下文使用率超过阈值警告——注入 TuiSystemNote 到 current_turn 内部。
@@ -205,7 +205,7 @@ pub(super) fn handle_prediction(p: &Prediction) {
     let mut state = crate::kit::atoms::PredictionState {
         text,
         summary,
-        received_at: Some(Instant::now()),
+        received_at: Some(peri_time::monotonic_now()),
     };
     if state.text.is_empty() {
         // 仅元数据动作（SetTitle/AddTag）的 prediction 不带占位文本——
@@ -666,8 +666,8 @@ pub(crate) fn apply_bg_task_snapshot(tasks: &[BgTaskEntry], revision: Option<u64
                 is_error: matches!(t.status.as_deref(), Some("failed" | "cancelled")),
                 current_tool: None,
                 tool_count: 0,
-                created_at: Instant::now(),
-                completed_at: terminal.then(Instant::now),
+                created_at: peri_time::monotonic_now(),
+                completed_at: terminal.then(peri_time::monotonic_now),
             }
         })
         .collect();
@@ -801,7 +801,7 @@ pub(super) fn handle_bg_task_started(_state: &mut BridgeState, entry: &BgTaskEnt
         is_error: false,
         current_tool: None,
         tool_count: 0,
-        created_at: Instant::now(),
+        created_at: peri_time::monotonic_now(),
         completed_at: None,
     };
     let display = BG_DISPLAY.state();
@@ -827,7 +827,7 @@ pub(super) fn handle_bg_task_completed(
     BG_TASKS.state().write().retain(|t| t.task_id != *task_id);
     mark_task_completed(task_id, success, duration_ms, output_preview);
     // 标记后台显示条目为完成（保留 3s 后自动清除）
-    let now = Instant::now();
+    let now = peri_time::monotonic_now();
     if let Some(entry) = BG_DISPLAY
         .state()
         .write()
@@ -860,7 +860,7 @@ pub(super) fn handle_bg_task_completed(
         .write()
         .replace(crate::kit::atoms::Notification {
             message: msg,
-            until: Instant::now() + Duration::from_millis(1500),
+            until: peri_time::monotonic_now() + Duration::from_millis(1500),
         });
 }
 
@@ -871,7 +871,7 @@ pub(super) fn handle_bg_task_cancelled(task_id: &str, reason: &str, revision: Op
     BG_TASKS.state().write().retain(|t| t.task_id != *task_id);
     mark_task_cancelled(task_id, reason);
     // 标记后台显示条目为失败（3s 倒计时）
-    let now = Instant::now();
+    let now = peri_time::monotonic_now();
     if let Some(entry) = BG_DISPLAY
         .state()
         .write()
@@ -949,7 +949,7 @@ pub(super) fn handle_plugin_action_result(result: &PluginActionResult) {
         .write()
         .replace(crate::kit::atoms::Notification {
             message: msg,
-            until: Instant::now() + Duration::from_secs(3),
+            until: peri_time::monotonic_now() + Duration::from_secs(3),
         });
     // 触发 PluginPanel 重渲染以清除 operation_loading
     RENDER_HEARTBEAT.set(RENDER_HEARTBEAT.get().wrapping_add(1));

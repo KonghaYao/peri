@@ -78,7 +78,8 @@ impl CronScheduler {
         }
 
         let id = Uuid::now_v7().to_string();
-        let next_fire = Self::calculate_next_fire(expression, Utc::now());
+        let next_fire =
+            Self::calculate_next_fire(expression, DateTime::<Utc>::from(peri_time::now_wall()));
 
         let task = CronTask {
             id: id.clone(),
@@ -102,7 +103,10 @@ impl CronScheduler {
         if let Some(task) = self.tasks.get_mut(id) {
             task.enabled = !task.enabled;
             if task.enabled {
-                task.next_fire = Self::calculate_next_fire(&task.expression, Utc::now());
+                task.next_fire = Self::calculate_next_fire(
+                    &task.expression,
+                    DateTime::<Utc>::from(peri_time::now_wall()),
+                );
             }
             true
         } else {
@@ -112,7 +116,7 @@ impl CronScheduler {
 
     /// 每秒调用：检查是否有任务到时触发
     pub fn tick(&mut self) {
-        let now = Utc::now();
+        let now = DateTime::<Utc>::from(peri_time::now_wall());
         for task in self.tasks.values_mut() {
             if !task.enabled {
                 continue;
@@ -156,7 +160,8 @@ impl CronScheduler {
         let Some(task) = self.tasks.get_mut(task_id) else {
             return false;
         };
-        task.next_fire = Some(Utc::now() - chrono::Duration::seconds(10));
+        task.next_fire =
+            Some(DateTime::<Utc>::from(peri_time::now_wall()) - chrono::Duration::seconds(10));
         true
     }
 

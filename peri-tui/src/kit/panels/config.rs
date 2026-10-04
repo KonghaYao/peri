@@ -27,7 +27,7 @@ use ratatui_kit::{
         widgets::Paragraph,
     },
 };
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 // ---------------------------------------------------------------------------
 // Row type
@@ -415,7 +415,7 @@ fn activate_row(row: usize, forward: bool) {
                         Ok(()) => {
                             *NOTIFICATION.state().write() = Some(Notification {
                                 message: i18n::tr("config-saved").to_string(),
-                                until: Instant::now() + Duration::from_secs(1),
+                                until: peri_time::monotonic_now() + Duration::from_secs(1),
                             });
                         }
                         Err(e) => {
@@ -427,7 +427,7 @@ fn activate_row(row: usize, forward: bool) {
                                         FluentValue::from(e.to_string().as_str()),
                                     )],
                                 ),
-                                until: Instant::now() + Duration::from_secs(2),
+                                until: peri_time::monotonic_now() + Duration::from_secs(2),
                             });
                         }
                     }
@@ -452,7 +452,7 @@ fn activate_row(row: usize, forward: bool) {
                 Ok(()) => {
                     *NOTIFICATION.state().write() = Some(Notification {
                         message: i18n::tr("config-saved").to_string(),
-                        until: Instant::now() + Duration::from_secs(1),
+                        until: peri_time::monotonic_now() + Duration::from_secs(1),
                     });
                 }
                 Err(e) => {
@@ -464,7 +464,7 @@ fn activate_row(row: usize, forward: bool) {
                                 FluentValue::from(e.to_string().as_str()),
                             )],
                         ),
-                        until: Instant::now() + Duration::from_secs(2),
+                        until: peri_time::monotonic_now() + Duration::from_secs(2),
                     });
                 }
             }
@@ -496,7 +496,7 @@ fn activate_row(row: usize, forward: bool) {
                         Ok(()) => {
                             *NOTIFICATION.state().write() = Some(Notification {
                                 message: i18n::tr("config-saved").to_string(),
-                                until: Instant::now() + Duration::from_secs(1),
+                                until: peri_time::monotonic_now() + Duration::from_secs(1),
                             });
                         }
                         Err(e) => {
@@ -508,7 +508,7 @@ fn activate_row(row: usize, forward: bool) {
                                         FluentValue::from(e.to_string().as_str()),
                                     )],
                                 ),
-                                until: Instant::now() + Duration::from_secs(2),
+                                until: peri_time::monotonic_now() + Duration::from_secs(2),
                             });
                         }
                     }
@@ -522,7 +522,7 @@ fn activate_row(row: usize, forward: bool) {
                         Ok(()) => {
                             *NOTIFICATION.state().write() = Some(Notification {
                                 message: i18n::tr("config-saved").to_string(),
-                                until: Instant::now() + Duration::from_secs(1),
+                                until: peri_time::monotonic_now() + Duration::from_secs(1),
                             });
                         }
                         Err(e) => {
@@ -534,7 +534,7 @@ fn activate_row(row: usize, forward: bool) {
                                         FluentValue::from(e.to_string().as_str()),
                                     )],
                                 ),
-                                until: Instant::now() + Duration::from_secs(2),
+                                until: peri_time::monotonic_now() + Duration::from_secs(2),
                             });
                         }
                     }
@@ -550,7 +550,7 @@ fn activate_row(row: usize, forward: bool) {
                         Ok(()) => {
                             *NOTIFICATION.state().write() = Some(Notification {
                                 message: i18n::tr("config-saved").to_string(),
-                                until: Instant::now() + Duration::from_secs(1),
+                                until: peri_time::monotonic_now() + Duration::from_secs(1),
                             });
                         }
                         Err(e) => {
@@ -562,7 +562,7 @@ fn activate_row(row: usize, forward: bool) {
                                         FluentValue::from(e.to_string().as_str()),
                                     )],
                                 ),
-                                until: Instant::now() + Duration::from_secs(2),
+                                until: peri_time::monotonic_now() + Duration::from_secs(2),
                             });
                         }
                     }
@@ -590,7 +590,7 @@ fn activate_row(row: usize, forward: bool) {
                         Ok(()) => {
                             *NOTIFICATION.state().write() = Some(Notification {
                                 message: i18n::tr("config-saved").to_string(),
-                                until: Instant::now() + Duration::from_secs(1),
+                                until: peri_time::monotonic_now() + Duration::from_secs(1),
                             });
                         }
                         Err(e) => {
@@ -602,7 +602,7 @@ fn activate_row(row: usize, forward: bool) {
                                         FluentValue::from(e.to_string().as_str()),
                                     )],
                                 ),
-                                until: Instant::now() + Duration::from_secs(2),
+                                until: peri_time::monotonic_now() + Duration::from_secs(2),
                             });
                         }
                     }

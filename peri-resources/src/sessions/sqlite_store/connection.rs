@@ -270,7 +270,7 @@ async fn lock_schema_open(path: &Path, budget: Duration) -> Result<std::fs::File
             .open(lock_path)
     })
     .await??;
-    let deadline = tokio::time::Instant::now() + budget;
+    let deadline = peri_time::monotonic_now() + budget;
     loop {
         let (attempted_file, result) = tokio::task::spawn_blocking(move || {
             let result = file.try_lock();
@@ -281,7 +281,7 @@ async fn lock_schema_open(path: &Path, budget: Duration) -> Result<std::fs::File
         match result {
             Ok(()) => return Ok(file),
             Err(std::fs::TryLockError::WouldBlock) => {
-                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                let remaining = deadline.saturating_duration_since(peri_time::monotonic_now());
                 if remaining.is_zero() {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::TimedOut,
@@ -289,7 +289,7 @@ async fn lock_schema_open(path: &Path, budget: Duration) -> Result<std::fs::File
                     )
                     .into());
                 }
-                tokio::time::sleep(remaining.min(Duration::from_millis(10))).await;
+                peri_time::sleep(remaining.min(Duration::from_millis(10))).await;
             }
             Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
         }

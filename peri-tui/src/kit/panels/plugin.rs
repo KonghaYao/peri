@@ -142,7 +142,7 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let action_index = hooks.use_state(|| 0usize);
     let confirm_action = hooks.use_state(|| Option::<String>::None);
     let cursor_visible = hooks.use_state(|| true);
-    let cursor_last_toggle = hooks.use_state(std::time::Instant::now);
+    let cursor_last_toggle = hooks.use_state(peri_time::monotonic_now);
     let operation_loading = hooks.use_state(|| Option::<String>::None);
     let add_marketplace_input = hooks.use_state(TextAreaState::default);
     let add_marketplace_active = hooks.use_state(|| false);
@@ -229,7 +229,7 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     // cursor blink toggle for Discover search box
     let show_cursor = {
-        let now = std::time::Instant::now();
+        let now = peri_time::monotonic_now();
         let mut last = cursor_last_toggle.write_no_update();
         if now.duration_since(*last).as_millis() >= 500 {
             let mut v = cursor_visible.write_no_update();

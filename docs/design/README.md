@@ -50,6 +50,7 @@ draft、proposal、可行性探查、审计报告和未采纳方案不进入本�
 
 | 主题 | 文档 | 进度事实源 |
 | --- | --- | --- |
+| 时间能力边界 | [time-runtime.md](time-runtime.md) | [时间模块边界实施](../../spec/issues/2026-10-04-time-runtime-boundary.md)；原生边界已落地，WASM 完整验收与既有公开 Chrono 契约范围仍待核实 |
 | Session 异步任务统一入口 | [session-async-tasks.md](session-async-tasks.md) | 任务投影、Store 执行代际、Workspace fencing 与可信关闭接管边界见设计第 5–6 节 |
 | 存储 v2：Machine → Workspace → Session | [storage-v2-machine-workspace-session.md](storage-v2-machine-workspace-session.md) | `spec/issues/2026-10-02-storage-v2-machine-workspace-session.md`；schema 版本以代码索引为准，Git 使用 worktree 根、非 Git 使用启动 cwd；验收状态见 active issue |
 | Command 系统 | [command-system.md](command-system.md) | 对应 command active issue 与代码 |

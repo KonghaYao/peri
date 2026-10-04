@@ -9,6 +9,7 @@ name = "peri_acp"
 path = "src/lib.rs"
 
 [dependencies]
+peri-time = { path = "../peri-time" }
 peri-process = { path = "../peri-process" }
 peri-acp-types = { path = "../peri-acp-types" }
 peri-config = { path = "../peri-config" }

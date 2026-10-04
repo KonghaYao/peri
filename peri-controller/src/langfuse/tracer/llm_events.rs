@@ -74,7 +74,7 @@ impl LangfuseTracer {
                 self.generation
                     .on_llm_start(agent_id, step, messages, tools);
                 self.subagent
-                    .touch_content_time(agent_id, &chrono::Utc::now().to_rfc3339());
+                    .touch_content_time(agent_id, &peri_time::now_utc_rfc3339());
                 true
             }
             Ownership::Unknown => {

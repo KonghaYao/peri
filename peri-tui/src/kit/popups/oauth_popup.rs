@@ -165,7 +165,7 @@ pub fn OAuthPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 let h_copy = hint;
                 let s_copy = hint_seq;
                 tokio::spawn(async move {
-                    tokio::time::sleep(Duration::from_secs(3)).await;
+                    peri_time::sleep(Duration::from_secs(3)).await;
                     if *s_copy.read() == seq {
                         *h_copy.write() = None;
                     }

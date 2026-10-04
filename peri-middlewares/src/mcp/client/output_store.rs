@@ -22,7 +22,7 @@ impl Drop for PendingOutput {
             let peer = self.peer.clone();
             if let Ok(runtime) = tokio::runtime::Handle::try_current() {
                 runtime.spawn(async move {
-                    let _ = tokio::time::timeout(
+                    let _ = peri_time::timeout(
                         Duration::from_secs(1),
                         peer.notify_cancelled(CancelledNotificationParam::new(
                             Some(id),
@@ -77,8 +77,8 @@ impl McpClientPool {
             content: content.to_string(),
         })
         .map_err(|_| "invalid output store request")?;
-        let deadline = tokio::time::Instant::now() + timeout;
-        let request = tokio::time::timeout_at(
+        let deadline = peri_time::monotonic_now() + timeout;
+        let request = peri_time::timeout_at(
             deadline,
             peer.send_request_with_option(
                 ClientRequest::CustomRequest(CustomRequest::new(STORE_OUTPUT_METHOD, Some(params))),
@@ -92,7 +92,7 @@ impl McpClientPool {
             peer: peer.clone(),
             id: Some(request.id.clone()),
         };
-        let result = tokio::time::timeout_at(deadline, request.await_response())
+        let result = peri_time::timeout_at(deadline, request.await_response())
             .await
             .map_err(|_| "output store timed out")?
             .map_err(|_| "output store RPC failed")?;

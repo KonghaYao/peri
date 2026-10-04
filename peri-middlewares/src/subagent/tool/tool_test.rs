@@ -716,7 +716,7 @@ pub(crate) async fn install_parent_session(
     // （project agent 根 = 会话 cwd 的 `.claude/agents`）接到工具上。
     let tool = with_agent_face(tool, std::path::Path::new(&cwd)).await;
     let parent_id = fixture
-        .create_thread(ThreadMeta::new(cwd.clone()))
+        .create_thread(ThreadMeta::new_at(cwd.clone(), peri_time::now_wall()))
         .await
         .expect("建立父会话失败");
     let tool = tool
@@ -766,7 +766,7 @@ async fn preset_resumable_thread(
     msgs: Vec<BaseMessage>,
 ) {
     let id = id.to_string();
-    let mut meta = peri_agent::thread::ThreadMeta::new("/tmp/work");
+    let mut meta = peri_agent::thread::ThreadMeta::new_at("/tmp/work", peri_time::now_wall());
     meta.id = id.clone();
     meta.title = Some(title.to_string());
     meta.parent_thread_id = parent_thread_id.map(|s| s.to_string());

@@ -69,7 +69,7 @@ async fn install_parent_session(dir: &std::path::Path) -> (SessionFixture, Strin
     let fixture = SessionFixture::open_in(dir).await;
     let cwd = fixture.workspace_cwd();
     let parent_id = fixture
-        .create_thread(ThreadMeta::new(cwd.clone()))
+        .create_thread(ThreadMeta::new_at(cwd.clone(), peri_time::now_wall()))
         .await
         .expect("建立父会话失败");
     (fixture, parent_id, cwd)

@@ -31,7 +31,7 @@ fn send(client: AcpTuiClient, mode: String) {
                     "permission-mode-update-failed",
                     &[("error".into(), error.to_string().into())],
                 ),
-                until: std::time::Instant::now() + std::time::Duration::from_secs(10),
+                until: peri_time::monotonic_now() + std::time::Duration::from_secs(10),
             }));
         }
     });

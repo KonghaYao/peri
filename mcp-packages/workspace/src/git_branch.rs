@@ -33,7 +33,7 @@ async fn current_branch_from_child(
 ) -> Option<String> {
     let mut stdout = guard.child_mut().stdout.take()?;
     let mut bytes = Vec::new();
-    let status = tokio::time::timeout(timeout, async {
+    let status = peri_time::timeout(timeout, async {
         let (status, _) =
             tokio::try_join!(guard.child_mut().wait(), stdout.read_to_end(&mut bytes),)?;
         Ok::<_, std::io::Error>(status)

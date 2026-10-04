@@ -234,7 +234,7 @@ mod tests {
         job.retain_process(&child).unwrap();
         assert!(!job.is_stopped());
         job.terminate();
-        tokio::time::timeout(std::time::Duration::from_secs(10), child.wait())
+        peri_time::timeout(std::time::Duration::from_secs(10), child.wait())
             .await
             .unwrap()
             .unwrap();
@@ -253,7 +253,7 @@ mod tests {
         job.attach_and_resume(&child).unwrap();
         assert!(!job.is_stopped());
         job.terminate();
-        tokio::time::timeout(std::time::Duration::from_secs(10), child.wait())
+        peri_time::timeout(std::time::Duration::from_secs(10), child.wait())
             .await
             .unwrap()
             .unwrap();

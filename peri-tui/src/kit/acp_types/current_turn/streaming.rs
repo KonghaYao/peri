@@ -1,7 +1,6 @@
 use super::super::tool_card::ToolCardAccumulator;
 use super::{CurrentTurn, TurnSegment};
 use crate::kit::tui_render_unit::{TuiNoteLevel, tui_hash_roll_update};
-use std::time::Instant;
 
 impl CurrentTurn {
     /// If text has grown since the last `AssistantText` segment, push a new
@@ -16,7 +15,7 @@ impl CurrentTurn {
         if current_text > self.last_text_flush || current_reasoning > self.last_reasoning_flush {
             let reasoning_duration_ms = self
                 .reasoning_started_at
-                .map(|t| t.elapsed().as_millis() as u64);
+                .map(|t| peri_time::elapsed_since(t).as_millis() as u64);
             // [Fix think-end] flush 把旧 trailing 变成新段：缓存尾部残留的是
             // flush 前的 trailing bubble（推理块 Running 形态），索引错位后
             // sync_cache 的 `len() <= i` 守卫会复用陈旧缓存——推理段恒 Running，
@@ -72,12 +71,13 @@ impl CurrentTurn {
             // 的换算不依赖本字段被清除，两套机制互不干扰）。
             self.trailing_reasoning_frozen_ms = self
                 .reasoning_started_at
-                .map(|t| t.elapsed().as_millis() as u64);
+                .map(|t| peri_time::elapsed_since(t).as_millis() as u64);
         }
         self.last_message_id = message_id.map(|s| s.to_string());
         self.text.push_str(t);
         self.open_text_hash = tui_hash_roll_update(self.open_text_hash, t);
-        self.text_started_at.get_or_insert_with(Instant::now);
+        self.text_started_at
+            .get_or_insert_with(peri_time::monotonic_now);
         self.active = true;
         self.invalidate_cache();
     }
@@ -97,7 +97,8 @@ impl CurrentTurn {
         self.last_message_id = message_id.map(|s| s.to_string());
         self.reasoning.push_str(t);
         self.open_reasoning_hash = tui_hash_roll_update(self.open_reasoning_hash, t);
-        self.reasoning_started_at.get_or_insert_with(Instant::now);
+        self.reasoning_started_at
+            .get_or_insert_with(peri_time::monotonic_now);
         self.active = true;
         self.invalidate_cache();
     }
@@ -155,7 +156,7 @@ impl CurrentTurn {
         t.is_error = is_error;
         // [G-started_at] 完成时刻冻结时长——running→completed 不重建 accumulator，
         // completed 显示用同源 started_at 的冻结差值（不再增长）。
-        t.completed_duration_ms = Some(t.started_at.elapsed().as_millis() as u64);
+        t.completed_duration_ms = Some(peri_time::elapsed_since(t.started_at).as_millis() as u64);
         self.invalidate_cache();
         true
     }

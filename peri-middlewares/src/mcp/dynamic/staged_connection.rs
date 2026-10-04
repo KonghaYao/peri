@@ -279,7 +279,7 @@ async fn close_service(
     let Some(active) = service.as_mut() else {
         return Ok(());
     };
-    match tokio::time::timeout(
+    match peri_time::timeout(
         SHUTDOWN_TIMEOUT + Duration::from_secs(1),
         active.close_with_timeout(SHUTDOWN_TIMEOUT),
     )
@@ -304,7 +304,7 @@ async fn close_process(
         return Ok(());
     };
     if matches!(
-        tokio::time::timeout(SHUTDOWN_TIMEOUT, process.close()).await,
+        peri_time::timeout(SHUTDOWN_TIMEOUT, process.close()).await,
         Ok(Ok(()))
     ) {
         return Ok(());
@@ -592,7 +592,7 @@ pub async fn prepare_single_server(
         cleanup_spawner,
         oauth: oauth_lease,
     };
-    let discovery = tokio::time::timeout(timeout, async {
+    let discovery = peri_time::timeout(timeout, async {
         let tools = peer.list_all_tools().await?;
         let resources = list_all_resources(&peer).await?;
         Ok::<_, rmcp::service::ServiceError>((tools, resources))

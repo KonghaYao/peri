@@ -82,7 +82,7 @@ impl LlmAutoClassifier {
     fn lookup_cache(&self, key: &(String, u64)) -> Option<Classification> {
         let cache = self.cache.lock();
         cache.get(key).and_then(|entry| {
-            if entry.expires_at > Instant::now() {
+            if entry.expires_at > peri_time::monotonic_now() {
                 Some(entry.classification)
             } else {
                 None
@@ -93,7 +93,7 @@ impl LlmAutoClassifier {
     /// 写入缓存，同时淘汰过期条目
     fn insert_cache(&self, key: (String, u64), classification: Classification) {
         let mut cache = self.cache.lock();
-        let now = Instant::now();
+        let now = peri_time::monotonic_now();
         cache.retain(|_, entry| entry.expires_at > now);
         cache.insert(
             key,

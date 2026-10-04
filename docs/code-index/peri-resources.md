@@ -5,6 +5,8 @@
 
 ## 架构速览
 
+- 时间入口：生产路径经 `peri-time` 读取 UTC 墙钟、单调时钟并执行 sleep/timeout。`src/sessions/remote/connection.rs` 保留远端请求超时的 `Exceeded` 分类；`src/sessions/resources/{deployment,owner}.rs` 与 `resources.rs` 保留关闭结清超时分类；`src/sessions/sqlite_store/connection.rs` 用单调时钟限制 schema 开库锁等待。持久字段继续使用既有 RFC 3339 形状，`ThreadMeta` 的 Chrono 类型在本 crate 边界由 `SystemTime` 转换。
+
 - 定位：外部系统数据访问通道（§0），以 context 形式提供给 Agent / Middleware / Controller；LSP 已不属于 Resources，直接由 `peri-mcp-lsp` 持有客户端与 pool
 - 结构：`config`（配置文件）、`sessions`（sqlite）、`workflow`（workflow 资源实现门面）、`context`（`Resources` 唯一实例化入口）；不再提供 `lsp` 门面
 - 稳定不变量：`ThreadStore` trait / `ThreadMeta` / `BaseMessage` / `MessageFlags` 事实源在 `peri-acp-types`（sessions/mod.rs 注释）；本 crate 只实现、不解释业务语义

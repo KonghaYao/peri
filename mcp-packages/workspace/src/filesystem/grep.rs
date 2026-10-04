@@ -14,8 +14,9 @@ use grep::{
 };
 use ignore::WalkBuilder;
 use peri_agent::tools::BaseTool;
+use peri_time::timeout;
 use serde_json::Value;
-use tokio::time::{timeout, Duration};
+use std::time::Duration;
 
 /// Grep tool - 与 Claude Code Grep 工具对齐
 pub struct GrepTool {

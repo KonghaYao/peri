@@ -98,7 +98,7 @@ impl TuiAssistantBubble {
     /// 同语义。
     pub fn duration_secs(&self) -> u64 {
         if let Some(started) = self.started_at {
-            started.elapsed().as_secs()
+            peri_time::elapsed_since(started).as_secs()
         } else {
             self.duration_ms.unwrap_or(0) / 1000
         }
@@ -182,7 +182,7 @@ impl TuiReasoningBlock {
         if self.is_running {
             let ms = self
                 .started_at
-                .map(|t| t.elapsed().as_millis() as u64)
+                .map(|t| peri_time::elapsed_since(t).as_millis() as u64)
                 .unwrap_or(0);
             ms / 1000
         } else {
@@ -193,7 +193,9 @@ impl TuiReasoningBlock {
     /// 展示用时长（秒数）：Running 取当前已耗时，Completed 取冻结值。
     pub fn duration_secs(&self) -> u64 {
         if self.is_running {
-            self.started_at.map(|t| t.elapsed().as_secs()).unwrap_or(0)
+            self.started_at
+                .map(|t| peri_time::elapsed_since(t).as_secs())
+                .unwrap_or(0)
         } else {
             self.duration_ms.unwrap_or(0) / 1000
         }

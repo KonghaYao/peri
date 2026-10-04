@@ -296,7 +296,7 @@ impl BaseTool for McpResourceTool {
         }
 
         // 5. 调用 rmcp read_resource
-        let result = tokio::time::timeout(
+        let result = peri_time::timeout(
             RESOURCE_READ_TIMEOUT,
             self.client_pool
                 .read_resource_cached(server_name, uri, peer),

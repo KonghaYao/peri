@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+peri-time = { path = "../peri-time" }
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true

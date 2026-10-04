@@ -1,5 +1,8 @@
 # peri-model 代码索引
 
+模型重试的异步等待由 [peri-time](peri-time.md) 提供；可见增量、重试资格和
+取消结果仍由模型 runtime 判定。
+
 > 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-29（SSE 完成判定与中断断点保留）
 > 依据：docs/standards/architecture-contracts.md、源码（无 crate 级 CLAUDE.md）
 

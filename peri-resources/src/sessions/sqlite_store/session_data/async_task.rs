@@ -54,7 +54,7 @@ impl SqliteSessionData {
         .await
         .map_err(|e| map_sqlx(&e))?;
         sqlx::query("UPDATE threads SET updated_at = ?1, message_count = (SELECT COUNT(*) FROM messages WHERE thread_id = ?2) WHERE id = ?2")
-            .bind(Utc::now().to_rfc3339())
+            .bind(peri_time::now_utc_rfc3339())
             .bind(id.as_str())
             .execute(&mut *tx)
             .await
@@ -81,7 +81,7 @@ impl SqliteSessionData {
             "INSERT OR IGNORE INTO session_close_intents(thread_id, requested_at) VALUES (?1, ?2)",
         )
         .bind(id.as_str())
-        .bind(Utc::now().to_rfc3339())
+        .bind(peri_time::now_utc_rfc3339())
         .execute(&mut *tx)
         .await
         .map_err(|e| map_sqlx(&e))?;

@@ -10,7 +10,7 @@
 //! - shutdown 信号触发时干净退出，不发残留请求
 
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use chrono::Local;
 use fluent_bundle::FluentValue;
@@ -294,7 +294,7 @@ fn execute_view_action(action: ViewActionRequest, acp_client: &AcpTuiClient, cwd
             };
             *NOTIFICATION.state().write() = Some(crate::kit::atoms::Notification {
                 message,
-                until: Instant::now() + Duration::from_secs(5),
+                until: peri_time::monotonic_now() + Duration::from_secs(5),
             });
             RENDER_HEARTBEAT.set(RENDER_HEARTBEAT.get().wrapping_add(1));
         }
@@ -378,7 +378,7 @@ fn lines_to_plain_text(lines: &[Line<'static>]) -> String {
 fn debug_export_path(cwd: &str) -> PathBuf {
     Path::new(cwd).join(format!(
         "peri-debug-export-{}.txt",
-        Local::now().format("%Y%m%d-%H%M%S")
+        chrono::DateTime::<Local>::from(peri_time::now_wall()).format("%Y%m%d-%H%M%S")
     ))
 }
 
@@ -443,7 +443,7 @@ pub fn spawn_cancel_consumer(
                             // （兜底路径：transport 死 / prompt task panic 时
                             // TurnInterrupted 永不到达，复位使 Ctrl+C 双击退出
                             // 路径恢复可用，与服务端 TurnInterrupted 幂等）。
-                            let cancel_result = tokio::time::timeout(
+                            let cancel_result = peri_time::timeout(
                                 Duration::from_secs(CANCEL_RPC_TIMEOUT_SECS),
                                 acp_client.cancel(),
                             )

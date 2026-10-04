@@ -55,7 +55,7 @@ async fn test_resume_thread_id_ignores_fork_field() {
     let store = SessionFixture::open_in(dir.path()).await;
     let cwd = store.workspace_cwd();
     let parent_id = store
-        .create_thread(ThreadMeta::new(cwd.clone()))
+        .create_thread(ThreadMeta::new_at(cwd.clone(), peri_time::now_wall()))
         .await
         .expect("建立父会话失败");
     // 父会话句柄：resume 路径经它校验「owning parent session」
@@ -107,7 +107,7 @@ async fn test_resume_thread_id_ignores_subagent_type_field() {
     let store = SessionFixture::open_in(dir.path()).await;
     let cwd = store.workspace_cwd();
     let parent_id = store
-        .create_thread(ThreadMeta::new(cwd.clone()))
+        .create_thread(ThreadMeta::new_at(cwd.clone(), peri_time::now_wall()))
         .await
         .expect("建立父会话失败");
     // 父会话句柄：resume 路径经它校验「owning parent session」
@@ -157,7 +157,7 @@ async fn test_resume_thread_id_not_found() {
     let fixture = SessionFixture::open_in(dir.path()).await;
     let cwd = fixture.workspace_cwd();
     let parent_id = fixture
-        .create_thread(ThreadMeta::new(cwd.clone()))
+        .create_thread(ThreadMeta::new_at(cwd.clone(), peri_time::now_wall()))
         .await
         .expect("建立父会话失败");
     // 父会话句柄：resume 路径经它校验「owning parent session」
@@ -195,7 +195,7 @@ async fn test_resume_thread_id_active_rejected() {
     let store = SessionFixture::open_in(dir.path()).await;
     let cwd = store.workspace_cwd();
     let parent_id = store
-        .create_thread(ThreadMeta::new(cwd.clone()))
+        .create_thread(ThreadMeta::new_at(cwd.clone(), peri_time::now_wall()))
         .await
         .expect("建立父会话失败");
     // 父会话句柄：resume 路径经它校验「owning parent session」
@@ -205,7 +205,7 @@ async fn test_resume_thread_id_active_rejected() {
         Some(parent_id.clone()),
     );
     let id = uuid::Uuid::now_v7().to_string();
-    let mut meta = peri_agent::thread::ThreadMeta::new("/tmp");
+    let mut meta = peri_agent::thread::ThreadMeta::new_at("/tmp", peri_time::now_wall());
     meta.id = id.clone();
     meta.title = Some("fork".to_string());
     store.create_thread(meta).await.unwrap(); // ThreadMeta 默认 agent_status = Active
@@ -248,7 +248,7 @@ async fn test_resume_thread_id_parent_mismatch_is_rejected_by_root_ownership() {
     let cwd = store.workspace_cwd();
     // 另一个真实根会话：child 挂在它下面，祖先链可解析但执行根不同。
     let other_root = store
-        .create_thread(ThreadMeta::new(cwd.clone()))
+        .create_thread(ThreadMeta::new_at(cwd.clone(), peri_time::now_wall()))
         .await
         .expect("建立另一根会话失败");
     let id = uuid::Uuid::now_v7().to_string();
@@ -263,7 +263,7 @@ async fn test_resume_thread_id_parent_mismatch_is_rejected_by_root_ownership() {
 
     // 调用方自己的父会话（最后一个建，夹具执行所有权就是它的）
     let parent_id = store
-        .create_thread(ThreadMeta::new(cwd.clone()))
+        .create_thread(ThreadMeta::new_at(cwd.clone(), peri_time::now_wall()))
         .await
         .expect("建立父会话失败");
     let parent = peri_agent::session::Session::new(
@@ -312,7 +312,7 @@ async fn test_resume_thread_id_background_combination() {
     let store = SessionFixture::open_in(dir.path()).await;
     let cwd = store.workspace_cwd();
     let parent_id = store
-        .create_thread(ThreadMeta::new(cwd.clone()))
+        .create_thread(ThreadMeta::new_at(cwd.clone(), peri_time::now_wall()))
         .await
         .expect("建立父会话失败");
     // 父会话句柄：resume 路径经它校验「owning parent session」
@@ -389,7 +389,7 @@ async fn test_resume_thread_id_success_replays_and_completes() {
     let store = SessionFixture::open_in(dir.path()).await;
     let cwd = store.workspace_cwd();
     let parent_id = store
-        .create_thread(ThreadMeta::new(cwd.clone()))
+        .create_thread(ThreadMeta::new_at(cwd.clone(), peri_time::now_wall()))
         .await
         .expect("建立父会话失败");
     // 父会话句柄：resume 路径经它校验「owning parent session」
@@ -442,7 +442,7 @@ async fn test_resume_thread_id_fork_title_uses_parent_tools_and_200_iterations()
     let store = SessionFixture::open_in(dir.path()).await;
     let cwd = store.workspace_cwd();
     let parent_id = store
-        .create_thread(ThreadMeta::new(cwd.clone()))
+        .create_thread(ThreadMeta::new_at(cwd.clone(), peri_time::now_wall()))
         .await
         .expect("建立父会话失败");
     // 父会话句柄：resume 路径经它校验「owning parent session」
@@ -555,7 +555,7 @@ async fn test_resume_thread_id_agent_def_refilters_tools() {
     let store = SessionFixture::open_in(dir.path()).await;
     let cwd = store.workspace_cwd();
     let parent_id = store
-        .create_thread(ThreadMeta::new(cwd.clone()))
+        .create_thread(ThreadMeta::new_at(cwd.clone(), peri_time::now_wall()))
         .await
         .expect("建立父会话失败");
     // 父会话句柄：resume 路径经它校验「owning parent session」
@@ -647,7 +647,7 @@ async fn test_resume_trimmed_id_wins_over_mcp_fork_and_invalid_model() {
     let store = SessionFixture::open_in(dir.path()).await;
     let cwd = store.workspace_cwd();
     let parent_id = store
-        .create_thread(ThreadMeta::new(cwd.clone()))
+        .create_thread(ThreadMeta::new_at(cwd.clone(), peri_time::now_wall()))
         .await
         .expect("建立父会话失败");
     // 父会话句柄：resume 路径经它校验「owning parent session」

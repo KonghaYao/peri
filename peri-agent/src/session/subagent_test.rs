@@ -247,7 +247,7 @@ async fn test_mock_store_append_load_roundtrip() {
 async fn test_mock_store_update_status_reads_back() {
     let store = MockSessionResources::new();
     let id = "thread-1".to_string();
-    let mut meta = ThreadMeta::new("/tmp");
+    let mut meta = ThreadMeta::new_at("/tmp", peri_time::now_wall());
     meta.id = id.clone();
     store.create_thread(meta).await.unwrap();
 
@@ -821,7 +821,7 @@ async fn preset_resumable_thread(
     thread_id: &str,
     parent_thread_id: Option<&str>,
 ) {
-    let mut meta = ThreadMeta::new("/tmp/work");
+    let mut meta = ThreadMeta::new_at("/tmp/work", peri_time::now_wall());
     meta.id = thread_id.to_string();
     meta.parent_thread_id = parent_thread_id.map(|s| s.to_string());
     store.create_thread(meta).await.unwrap();

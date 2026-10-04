@@ -58,11 +58,15 @@ pub struct PromptEnv {
 impl PromptEnv {
     pub fn detect(cwd: &str) -> Self {
         let runtime = PromptRuntimeEnv::detect(cwd);
-        let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let date = peri_time::calendar_date(
+            peri_time::now_wall(),
+            peri_time::CalendarConvention::deployment_default(),
+        )
+        .to_string();
         Self::frozen(cwd, &date, &runtime)
     }
 
-    /// 使用冻结日期与冻结运行环境构造（跳过 `chrono::Local::now()` 与实时探测）。
+    /// 使用冻结日期与冻结运行环境构造（跳过实时日期读取与运行环境探测）。
     ///
     /// 会话准备路径经 [`PromptRuntimeEnv`] 一次性定格；`with_frozen_date`
     /// 保留给既有调用点（其内部等价于对同一 cwd 探测一次）。
@@ -76,7 +80,7 @@ impl PromptEnv {
         }
     }
 
-    /// 使用冻结日期构造（跳过 `chrono::Local::now()` 调用）。
+    /// 使用冻结日期构造（跳过实时日期读取）。
     /// `is_git_repo` / `platform` / `os_version` 仍在调用时探测一次；
     /// 需要与冻结输入同源的调用方应改用 [`PromptEnv::frozen`]。
     pub fn with_frozen_date(cwd: &str, frozen_date: &str) -> Self {

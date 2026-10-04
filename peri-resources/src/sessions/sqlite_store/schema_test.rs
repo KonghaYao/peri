@@ -89,7 +89,10 @@ async fn test_legacy_with_goals_upgrades_removing_goals_and_preserving_extension
     connection.close().await.unwrap();
     let workspace = store.resolve_workspace(dir.path()).await.unwrap();
     let id = store
-        .create_bound_thread(ThreadMeta::new(dir.path().to_str().unwrap()), &workspace)
+        .create_bound_thread(
+            ThreadMeta::new_at(dir.path().to_str().unwrap(), peri_time::now_wall()),
+            &workspace,
+        )
         .await
         .unwrap();
     let lease = store.acquire_execution_lease(&id).await.unwrap();
@@ -212,7 +215,10 @@ async fn test_single_database_upgrade_preserves_history_and_binds_only_new_sessi
         .is_active());
     let workspace = store.resolve_workspace(dir.path()).await.unwrap();
     let id = store
-        .create_bound_thread(ThreadMeta::new(dir.path().to_str().unwrap()), &workspace)
+        .create_bound_thread(
+            ThreadMeta::new_at(dir.path().to_str().unwrap(), peri_time::now_wall()),
+            &workspace,
+        )
         .await
         .unwrap();
     let lease = store.acquire_execution_lease(&id).await.unwrap();
@@ -777,7 +783,10 @@ async fn test_version2_upgrade_removes_required_revision_and_preserves_identity(
     assert!(old.cwd_relative_to_workspace.as_os_str().is_empty());
     let workspace = store.resolve_workspace(dir.path()).await.unwrap();
     let id = store
-        .create_bound_thread(ThreadMeta::new(dir.path().to_str().unwrap()), &workspace)
+        .create_bound_thread(
+            ThreadMeta::new_at(dir.path().to_str().unwrap(), peri_time::now_wall()),
+            &workspace,
+        )
         .await
         .unwrap();
     let owner = store.acquire_execution_lease(&id).await.unwrap();

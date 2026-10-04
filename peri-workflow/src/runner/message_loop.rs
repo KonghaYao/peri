@@ -90,7 +90,7 @@ impl MessageLoop {
                     final_result.error = Some(error);
                     break;
                 }
-                match tokio::time::timeout(Duration::from_millis(remaining), msg_rx.recv()).await {
+                match peri_time::timeout(Duration::from_millis(remaining), msg_rx.recv()).await {
                     Ok(message) => message,
                     Err(_) => {
                         let error = format!("workflow exceeded maxElapsedMs ({maximum})");

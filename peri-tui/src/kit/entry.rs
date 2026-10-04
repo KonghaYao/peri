@@ -111,7 +111,11 @@ pub async fn run_kit_fullscreen(
             .map(|h| h.read().daily_color)
             .unwrap_or(false);
         if daily_enabled {
-            let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+            let today = peri_time::calendar_date(
+                peri_time::now_wall(),
+                peri_time::CalendarConvention::HostLocal,
+            )
+            .to_string();
             let needs_switch = atoms::TUI_CONFIG_HANDLE
                 .get()
                 .map(|h| {
@@ -214,7 +218,7 @@ pub async fn run_kit_fullscreen(
                         };
                         *atoms::NOTIFICATION.state().write() = Some(atoms::Notification {
                             message: format!("⚠️ 内部错误：{}（详见日志）", summary),
-                            until: std::time::Instant::now() + std::time::Duration::from_secs(30),
+                            until: peri_time::monotonic_now() + std::time::Duration::from_secs(30),
                         });
                         atoms::RENDER_HEARTBEAT.set(atoms::RENDER_HEARTBEAT.get().wrapping_add(1));
                     }
@@ -232,7 +236,7 @@ pub async fn run_kit_fullscreen(
             loop {
                 tokio::select! {
                     _ = shutdown.cancelled() => break,
-                    _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {
+                    _ = peri_time::sleep(std::time::Duration::from_secs(5)) => {
                         atoms::RENDER_HEARTBEAT.set(
                             atoms::RENDER_HEARTBEAT.get().wrapping_add(1)
                         );
@@ -260,10 +264,10 @@ pub async fn run_kit_fullscreen(
             loop {
                 tokio::select! {
                     _ = shutdown.cancelled() => break,
-                    _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
+                    _ = peri_time::sleep(std::time::Duration::from_millis(100)) => {
                         if atoms::ACP_STATE.state().read().is_loading {
-                            let since = *loading_since.get_or_insert_with(Instant::now);
-                            let frame = since.elapsed().as_millis() as u64 / 100;
+                            let since = *loading_since.get_or_insert_with(peri_time::monotonic_now);
+                            let frame = peri_time::elapsed_since(since).as_millis() as u64 / 100;
                             if last_frame != Some(frame) {
                                 last_frame = Some(frame);
                                 atoms::RENDER_HEARTBEAT.set(
@@ -461,7 +465,7 @@ pub async fn run_kit_fullscreen(
                                 "session-creation-failed",
                                 &[("error".into(), e.to_string().into())],
                             ),
-                            until: Instant::now() + std::time::Duration::from_secs(15),
+                            until: peri_time::monotonic_now() + std::time::Duration::from_secs(15),
                         });
                     }
                 }

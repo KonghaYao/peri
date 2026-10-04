@@ -159,6 +159,12 @@ core `ConfigSource::save(expected_revision, &PeriConfig)` 返回 accepted snapsh
 
 ## 跨模块契约（指向 architecture-contracts.md，不复制正文）
 
+TUI 生产时间入口统一经 `peri-time`：`kit/entry.rs` 的每日主题以显式 `HostLocal`
+日历日期判定；`kit/acp_bridge.rs` 的发布 deadline 与 `kit/service_snapshot.rs`、
+`kit/workflow_snapshot.rs`、`kit/steer_consumer.rs` 的周期等待使用单调时间与
+`MissedTickBehavior`。插件旧字段和调试导出文件名保留原有本地日期格式，先从
+`peri_time::now_wall()` 取得时间值再按现有格式转换。测试防挂死 guard 仍可用 Tokio。
+
 - ARC-BOUNDARY-001：TUI 交互主路径经 ACP transport；不得从 TUI 直驱 Agent/Middleware 运行时
 - ARC-EVENT-001：事件链路单事实源 Agent →(ACP 映射) → TUI；新增事件须覆盖发射、映射与消费；终止事件必须使客户端离开 loading
 - Cache coverage 用户现场验收仍在进行（对应用户报告的 GitHub #114；历史记录见 [2026-09 月志](../../spec/history/2026-09.md)）；当前 wire 与逐样本提示契约见 ARC-EVENT-001。

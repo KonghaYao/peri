@@ -481,7 +481,7 @@ impl McpMiddleware {
     ) -> Result<SystemReadySnapshot, SystemReadinessError> {
         // 1R 入场即计时：initialize / list / 必需工具校验之间不重置 deadline，
         // 多台 server 并发计时，不串行相加。
-        let started_at = tokio::time::Instant::now();
+        let started_at = peri_time::monotonic_now();
         let negotiated = self
             .tool_pool
             .await_system_connections(&self.cancel, started_at)
@@ -540,7 +540,7 @@ impl McpMiddleware {
     fn recheck_system_snapshot(
         &self,
         negotiated: &[NegotiatedSystemMcp],
-        started_at: tokio::time::Instant,
+        started_at: peri_time::Instant,
     ) -> Result<(), SystemReadinessError> {
         if self.cancel.is_cancelled() {
             return Err(SystemReadinessError::Cancelled);
@@ -548,7 +548,7 @@ impl McpMiddleware {
         if !self.tool_pool.is_open() {
             return Err(SystemReadinessError::PoolClosed);
         }
-        let now = tokio::time::Instant::now();
+        let now = peri_time::monotonic_now();
         for item in negotiated {
             let server = item.requirement.server.as_str();
             let current = self

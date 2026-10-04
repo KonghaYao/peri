@@ -232,7 +232,7 @@ pub(crate) fn run_synthetic_scheduler_burst(
     reset_perf_counters();
     let mut state = synthetic_scheduler_state();
     let mut scheduler = PublicationScheduler::default();
-    let now = tokio::time::Instant::now();
+    let now = peri_time::monotonic_now();
     let mut remaining = bytes;
     let mut first = true;
     while remaining > 0 {
@@ -258,7 +258,7 @@ const PUBLICATION_INTERVAL: std::time::Duration = std::time::Duration::from_mill
 
 #[derive(Debug, Default)]
 struct PublicationScheduler {
-    pending_deadline: Option<tokio::time::Instant>,
+    pending_deadline: Option<peri_time::Instant>,
     token: u64,
     /// 与 projection cache 无关，记录已接收但尚未发布的 canonical 更新。
     unpublished: bool,
@@ -276,14 +276,14 @@ impl PublicationScheduler {
     }
 
     fn accept(&mut self, intent: PublicationIntent, state: &mut BridgeState) {
-        self.accept_at(intent, state, tokio::time::Instant::now());
+        self.accept_at(intent, state, peri_time::monotonic_now());
     }
 
     fn accept_at(
         &mut self,
         intent: PublicationIntent,
         state: &mut BridgeState,
-        now: tokio::time::Instant,
+        now: peri_time::Instant,
     ) {
         let mode = current_streaming_mode();
         if self.pending_mode.is_some_and(|scheduled| scheduled != mode) {
@@ -323,7 +323,7 @@ impl PublicationScheduler {
         }
     }
 
-    fn fire_at(&mut self, state: &mut BridgeState, now: tokio::time::Instant) -> bool {
+    fn fire_at(&mut self, state: &mut BridgeState, now: peri_time::Instant) -> bool {
         let Some(deadline) = self.pending_deadline else {
             return false;
         };
@@ -500,25 +500,25 @@ fn spawn_acp_bridge_inner(
         let mut scheduler = PublicationScheduler::default();
 
         // 每秒检测 BRIDGE_RESET_COUNTER + 刷新 running Bash 计时
-        let mut tick_interval = tokio::time::interval(std::time::Duration::from_secs(1));
-        tick_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut tick_interval = peri_time::interval(std::time::Duration::from_secs(1));
+        tick_interval.set_missed_tick_behavior(peri_time::MissedTickBehavior::Skip);
 
         loop {
             let deadline = scheduler.pending_deadline.unwrap_or_else(|| {
-                tokio::time::Instant::now() + std::time::Duration::from_secs(86_400)
+                peri_time::monotonic_now() + std::time::Duration::from_secs(86_400)
             });
             tokio::select! {
                 _ = shutdown.cancelled() => {
                     scheduler.invalidate();
                     break;
                 },
-                _ = tokio::time::sleep_until(deadline), if scheduler.pending_deadline.is_some() => {
+                _ = peri_time::sleep_until(deadline), if scheduler.pending_deadline.is_some() => {
                     let counter = atoms::BRIDGE_RESET_COUNTER.get();
                     if counter != last_reset_counter {
                         scheduler.invalidate();
                         apply_bridge_reset(&mut state, &mut last_reset_counter, counter);
                     } else {
-                        scheduler.fire_at(&mut state, tokio::time::Instant::now());
+                        scheduler.fire_at(&mut state, peri_time::monotonic_now());
                     }
                 },
                 _ = tick_interval.tick() => {

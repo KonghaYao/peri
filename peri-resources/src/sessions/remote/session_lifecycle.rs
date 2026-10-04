@@ -64,7 +64,7 @@ impl RemoteSessionData {
             &[id.as_str().to_owned()],
             vec![StatementSpec::new(
                 "INSERT OR IGNORE INTO session_close_intents(thread_id, requested_at) VALUES (?1, ?2)",
-                vec![Value::Text(id.as_str().to_owned()), Value::Text(chrono::Utc::now().to_rfc3339())],
+                vec![Value::Text(id.as_str().to_owned()), Value::Text(peri_time::now_utc_rfc3339())],
             )],
             id,
         ).await.map(|_| ())
@@ -275,7 +275,7 @@ fn guard_session_statement(id: &ThreadId) -> StatementSpec {
 }
 
 fn timestamp() -> String {
-    chrono::Utc::now().to_rfc3339()
+    peri_time::now_utc_rfc3339()
 }
 
 /// 子树读取 → 会话 id 列表。

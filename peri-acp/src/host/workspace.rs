@@ -66,7 +66,7 @@ impl SessionEnvironment {
         else {
             return Ok(Vec::new());
         };
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        let deadline = peri_time::monotonic_now() + std::time::Duration::from_secs(10);
         loop {
             if let Some(handle) = pool.get_client("workspace") {
                 if !matches!(
@@ -87,10 +87,10 @@ impl SessionEnvironment {
             if !matches!(phase.as_str(), "pending" | "initializing") {
                 return Ok(Vec::new());
             }
-            if tokio::time::Instant::now() >= deadline {
+            if peri_time::monotonic_now() >= deadline {
                 return Ok(Vec::new());
             }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            peri_time::sleep(std::time::Duration::from_millis(10)).await;
         }
     }
 
@@ -120,7 +120,7 @@ impl SessionEnvironment {
         else {
             return Ok(Default::default());
         };
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        let deadline = peri_time::monotonic_now() + std::time::Duration::from_secs(10);
         loop {
             if let Some(handle) = pool.get_client("workspace") {
                 if !matches!(
@@ -142,10 +142,10 @@ impl SessionEnvironment {
             if !matches!(phase.as_str(), "pending" | "initializing") {
                 return Ok(Default::default());
             }
-            if tokio::time::Instant::now() >= deadline {
+            if peri_time::monotonic_now() >= deadline {
                 return Ok(Default::default());
             }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            peri_time::sleep(std::time::Duration::from_millis(10)).await;
         }
     }
 
@@ -392,7 +392,7 @@ impl SessionEnvironment {
         else {
             return Ok(Default::default());
         };
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        let deadline = peri_time::monotonic_now() + std::time::Duration::from_secs(10);
         loop {
             if let Some(handle) = pool.get_client("workspace") {
                 if !matches!(
@@ -415,10 +415,10 @@ impl SessionEnvironment {
             if !matches!(phase.as_str(), "pending" | "initializing") {
                 return Ok(Default::default());
             }
-            if tokio::time::Instant::now() >= deadline {
+            if peri_time::monotonic_now() >= deadline {
                 return Ok(Default::default());
             }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            peri_time::sleep(std::time::Duration::from_millis(10)).await;
         }
     }
 
@@ -518,7 +518,7 @@ impl SessionEnvironment {
         if let SessionEndState::Running(handle) = &mut *state {
             // Timeout leaves the task and its process ownership in this environment;
             // the next close/EOF attempt joins the same invocation.
-            match tokio::time::timeout(std::time::Duration::from_secs(5), handle).await {
+            match peri_time::timeout(std::time::Duration::from_secs(5), handle).await {
                 Ok(Ok(())) => *state = SessionEndState::Finished,
                 Ok(Err(error)) => {
                     tracing::warn!(%error, "SessionEnd hook task failed");

@@ -40,7 +40,7 @@ impl ProcessResourceMonitor {
         Self {
             sys,
             pid,
-            last_sample: std::time::Instant::now() - std::time::Duration::from_secs(3), // 确保首次调用立即采样
+            last_sample: peri_time::monotonic_now() - std::time::Duration::from_secs(3), // 确保首次调用立即采样
             memory_mb: 0,
             cpu_percent: 0.0,
         }
@@ -48,14 +48,14 @@ impl ProcessResourceMonitor {
 
     /// 刷新缓存（仅当距上次采样 ≥ 2 秒时才执行系统调用）
     pub fn refresh_if_needed(&mut self) {
-        if self.last_sample.elapsed() >= std::time::Duration::from_secs(2) {
+        if peri_time::elapsed_since(self.last_sample) >= std::time::Duration::from_secs(2) {
             self.sys
                 .refresh_processes(sysinfo::ProcessesToUpdate::Some(&[self.pid]), true);
             if let Some(proc) = self.sys.process(self.pid) {
                 self.memory_mb = proc.memory() / 1024 / 1024;
                 self.cpu_percent = proc.cpu_usage();
             }
-            self.last_sample = std::time::Instant::now();
+            self.last_sample = peri_time::monotonic_now();
         }
     }
 

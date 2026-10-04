@@ -20,7 +20,7 @@ impl CloseOwnerHeartbeat {
             loop {
                 tokio::select! {
                     _ = stop_for_task.cancelled() => break,
-                    _ = tokio::time::sleep(std::time::Duration::from_secs(10)) => {}
+                    _ = peri_time::sleep(std::time::Duration::from_secs(10)) => {}
                 }
                 if stop_for_task.is_cancelled() {
                     break;

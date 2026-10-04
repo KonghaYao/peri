@@ -146,7 +146,7 @@ impl ProcessTree {
 
     pub async fn wait_for_exit(&self) {
         while !self.is_stopped() {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            peri_time::sleep(std::time::Duration::from_millis(20)).await;
         }
     }
 
@@ -229,12 +229,12 @@ mod tests {
         assert!(cwd.path().join("descendant").is_file());
         assert!(!tree.is_stopped());
         assert!(
-            tokio::time::timeout(Duration::from_millis(20), tree.wait_for_exit())
+            peri_time::timeout(Duration::from_millis(20), tree.wait_for_exit())
                 .await
                 .is_err()
         );
         tree.terminate();
-        tokio::time::timeout(Duration::from_secs(5), tree.wait_for_exit())
+        peri_time::timeout(Duration::from_secs(5), tree.wait_for_exit())
             .await
             .unwrap();
         assert!(tree.is_stopped());
@@ -251,14 +251,14 @@ mod tests {
         let mut child = command.spawn().unwrap();
         tree.attach(&child).unwrap();
         assert!(
-            tokio::time::timeout(Duration::from_millis(20), tree.wait_for_exit())
+            peri_time::timeout(Duration::from_millis(20), tree.wait_for_exit())
                 .await
                 .is_err()
         );
         assert!(!tree.is_stopped());
         tree.terminate();
         child.wait().await.unwrap();
-        tokio::time::timeout(Duration::from_secs(5), tree.wait_for_exit())
+        peri_time::timeout(Duration::from_secs(5), tree.wait_for_exit())
             .await
             .unwrap();
     }

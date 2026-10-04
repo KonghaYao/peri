@@ -29,7 +29,7 @@ impl Drop for PendingImageRead {
             let peer = self.peer.clone();
             if let Ok(runtime) = tokio::runtime::Handle::try_current() {
                 runtime.spawn(async move {
-                    let _ = tokio::time::timeout(
+                    let _ = peri_time::timeout(
                         Duration::from_secs(1),
                         peer.notify_cancelled(CancelledNotificationParam::new(
                             Some(id),
@@ -70,9 +70,9 @@ pub(super) async fn read_image(
         max_size,
     })
     .map_err(|_| "Invalid image request".to_owned())?;
-    let deadline = tokio::time::Instant::now() + READ_TIMEOUT;
+    let deadline = peri_time::monotonic_now() + READ_TIMEOUT;
     let request = ClientRequest::CustomRequest(CustomRequest::new(READ_IMAGE_METHOD, Some(params)));
-    let handle = tokio::time::timeout_at(
+    let handle = peri_time::timeout_at(
         deadline,
         peer.send_request_with_option(request, PeerRequestOptions::no_options()),
     )
@@ -83,7 +83,7 @@ pub(super) async fn read_image(
         peer: peer.clone(),
         id: Some(handle.id.clone()),
     };
-    let response = tokio::time::timeout_at(deadline, handle.await_response())
+    let response = peri_time::timeout_at(deadline, handle.await_response())
         .await
         .map_err(|_| "Workspace image read timed out".to_owned())?
         .map_err(|_| "Workspace image read failed".to_owned())?;

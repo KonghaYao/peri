@@ -106,7 +106,7 @@ pub(super) fn apply_fold_pass(
                         let frozen =
                             (status == EntryStatus::Completed && r.is_running).then(|| {
                                 r.started_at
-                                    .map(|t| t.elapsed().as_millis() as u64)
+                                    .map(|t| peri_time::elapsed_since(t).as_millis() as u64)
                                     .unwrap_or(0)
                             });
                         reasoning_update =
@@ -131,7 +131,7 @@ pub(super) fn apply_fold_pass(
                     if text_freeze {
                         updated.duration_ms = Some(
                             b.started_at
-                                .map(|t| t.elapsed().as_millis() as u64)
+                                .map(|t| peri_time::elapsed_since(t).as_millis() as u64)
                                 .unwrap_or(0),
                         );
                         updated.started_at = None;

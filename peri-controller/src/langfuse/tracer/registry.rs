@@ -178,7 +178,7 @@ impl SubagentRegistry {
         } else {
             // 未知 agent(Start 从未到达):插入占位记录(orphan 标记,不产生 obs,
             // 后续内容事件归属 Unknown 继续走闸门/丢弃)
-            let now = chrono::Utc::now().to_rfc3339();
+            let now = peri_time::now_utc_rfc3339();
             self.by_agent_id.insert(
                 child_agent_id.to_string(),
                 ActiveSubagent {

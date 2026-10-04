@@ -52,7 +52,7 @@ pub fn close_channel(
 }
 
 pub async fn wait_for_pump(pump_done_rx: oneshot::Receiver<()>, session_id: &str) {
-    match tokio::time::timeout(std::time::Duration::from_secs(10), pump_done_rx).await {
+    match peri_time::timeout(std::time::Duration::from_secs(10), pump_done_rx).await {
         Ok(Ok(())) => debug!(session_id, "Event pump done"),
         Ok(Err(_)) => error!(session_id, "Event pump done channel closed unexpectedly"),
         Err(_) => error!(

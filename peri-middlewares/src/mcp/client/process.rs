@@ -185,7 +185,7 @@ impl super::McpClientPool {
         let mut unfinished = 0;
         for process in processes {
             if !matches!(
-                tokio::time::timeout(super::SHUTDOWN_TIMEOUT, process.close()).await,
+                peri_time::timeout(super::SHUTDOWN_TIMEOUT, process.close()).await,
                 Ok(Ok(()))
             ) {
                 unfinished += 1;

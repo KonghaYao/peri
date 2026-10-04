@@ -80,7 +80,7 @@ impl ExecutionScope {
     }
 
     pub(super) async fn wait(&self) -> bool {
-        if tokio::time::timeout(std::time::Duration::from_secs(5), self.tracker.wait())
+        if peri_time::timeout(std::time::Duration::from_secs(5), self.tracker.wait())
             .await
             .is_err()
         {

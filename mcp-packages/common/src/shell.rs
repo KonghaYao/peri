@@ -87,13 +87,13 @@ impl ShellExecutionGuard {
                         return;
                     }
                     kill_process_group(pid, "TERM");
-                    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+                    let deadline = peri_time::monotonic_now() + std::time::Duration::from_secs(2);
                     while !tree.is_stopped() {
-                        if tokio::time::Instant::now() >= deadline {
+                        if peri_time::monotonic_now() >= deadline {
                             tree.terminate();
                             return;
                         }
-                        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                        peri_time::sleep(std::time::Duration::from_millis(20)).await;
                     }
                 });
             }))
@@ -121,7 +121,7 @@ impl ShellExecutionGuard {
     /// A reaped command leader can leave a live, registered background process group.
     pub async fn wait_for_exit(&mut self) {
         while !self.is_stopped() {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            peri_time::sleep(std::time::Duration::from_millis(20)).await;
         }
     }
 
@@ -177,7 +177,7 @@ impl Drop for ShellExecutionGuard {
                     Ok::<(), std::io::Error>(())
                 };
                 if matches!(
-                    tokio::time::timeout(std::time::Duration::from_secs(3), cleanup).await,
+                    peri_time::timeout(std::time::Duration::from_secs(3), cleanup).await,
                     Ok(Ok(()))
                 ) {
                     if let Some(owner) = &mut ownership {
@@ -395,13 +395,13 @@ pub fn persist_truncated_output_with_ref(full_content: &str) -> (String, Option<
 /// The caller owns this future until the TERM/KILL sequence has completed.
 pub async fn terminate_process_group(pid: u32) {
     kill_process_group(pid, "TERM");
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    let deadline = peri_time::monotonic_now() + std::time::Duration::from_secs(2);
     while !process_group_stopped(pid) {
-        if tokio::time::Instant::now() >= deadline {
+        if peri_time::monotonic_now() >= deadline {
             kill_process_group(pid, "KILL");
             return;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        peri_time::sleep(std::time::Duration::from_millis(20)).await;
     }
 }
 

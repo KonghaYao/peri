@@ -179,7 +179,7 @@ impl McpClientPool {
 
             // 使用认证传输层重新连接
             let headers = cfg.headers.clone().unwrap_or_default();
-            let result = tokio::time::timeout(
+            let result = peri_time::timeout(
                 HTTP_CONNECT_TIMEOUT,
                 rmcp::service::serve_client(
                     super::client::mcpp_client_info_for_profile(&self.capability_profile),

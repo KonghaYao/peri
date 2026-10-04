@@ -566,20 +566,20 @@ async fn cancel_and_confirm_mcp_task(
 ) -> bool {
     let mut cancel = rmcp::model::CancelTaskParams::new(task_id);
     cancel.meta = meta.clone();
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), peer.cancel_task(cancel)).await;
-    let until = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    let _ = peri_time::timeout(std::time::Duration::from_secs(2), peer.cancel_task(cancel)).await;
+    let until = peri_time::monotonic_now() + std::time::Duration::from_secs(5);
     loop {
         let mut query = rmcp::model::GetTaskParams::new(task_id);
         query.meta = meta.clone();
-        if matches!(tokio::time::timeout(std::time::Duration::from_secs(1), peer.get_task(query)).await,
+        if matches!(peri_time::timeout(std::time::Duration::from_secs(1), peer.get_task(query)).await,
             Ok(Ok(snapshot)) if snapshot.task.status().is_terminal())
         {
             return true;
         }
-        if tokio::time::Instant::now() >= until {
+        if peri_time::monotonic_now() >= until {
             return false;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        peri_time::sleep(std::time::Duration::from_millis(100)).await;
     }
 }
 

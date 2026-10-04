@@ -27,7 +27,7 @@ impl MockSessionResources {
         if self.regions.lock().unwrap().contains_key(&parent) {
             return;
         }
-        let mut meta = ThreadMeta::new(cwd);
+        let mut meta = ThreadMeta::new_at(cwd, peri_time::now_wall());
         meta.id = parent.clone();
         self.with_region(&parent, |region| region.meta = Some(meta));
     }

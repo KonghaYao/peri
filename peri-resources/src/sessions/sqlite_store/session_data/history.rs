@@ -45,7 +45,7 @@ impl SqliteSessionData {
             .await
             .map_err(|error| map_sqlx(&error))?;
         }
-        let now = Utc::now().to_rfc3339();
+        let now = peri_time::now_utc_rfc3339();
         let updated = sqlx::query(
             "UPDATE threads SET updated_at = ?1,
                 message_count = (SELECT COUNT(*) FROM messages WHERE thread_id = ?2)

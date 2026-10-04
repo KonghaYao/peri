@@ -1,5 +1,8 @@
 # peri-controller 代码索引
 
+Langfuse tracer 的墙钟时间由 [peri-time](peri-time.md) 读取；毫秒精度等遥测
+字段格式由 `src/langfuse/tracer/event_builder.rs` 保留。
+
 > 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-11。
 > 依据：`docs/standards/architecture-contracts.md`、manifest、源码与契约测试；无 crate 级 CLAUDE.md。
 

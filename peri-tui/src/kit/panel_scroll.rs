@@ -24,7 +24,7 @@
 //! - 命中槽位 → 节流累积 + 按 `SCROLL_LINES` 驱动对应 `ScrollViewState` → Consumed
 //! - 面板内容区内但未命中具体槽位（border/divider 列）→ Consumed（防双滚）
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use ratatui_kit::components::scroll_view::ScrollViewState;
 use ratatui_kit::crossterm::event::{Event, MouseEventKind};
@@ -158,7 +158,9 @@ pub fn handle_panel_scroll(event: &Event) -> EventResult {
 pub fn flush_panel_scroll_due() {
     let throttle = PANEL_SCROLL_THROTTLE.state();
     let mut st = throttle.write_no_update();
-    if Instant::now().duration_since(st.last_flush) < Duration::from_millis(scroll_frame_ms()) {
+    if peri_time::monotonic_now().duration_since(st.last_flush)
+        < Duration::from_millis(scroll_frame_ms())
+    {
         return;
     }
     let target = PANEL_SCROLL_PENDING_TARGET.state().read().as_ref().copied();
@@ -168,7 +170,7 @@ pub fn flush_panel_scroll_due() {
     };
     let pending = st.pending_delta;
     st.pending_delta = 0;
-    st.last_flush = Instant::now();
+    st.last_flush = peri_time::monotonic_now();
     drop(st);
     if let Some(owner) = PANEL_SCROLL_OWNER.state().read().clone()
         && *ACTIVE_PANEL.state().read() == Some(owner.kind)
@@ -200,7 +202,7 @@ fn accumulate_and_flush(state: &State<ScrollViewState>, delta: i32, target: Pane
         *PANEL_SCROLL_PENDING_TARGET.state().write_no_update() = Some(target);
     }
     st.pending_delta += delta;
-    let now = Instant::now();
+    let now = peri_time::monotonic_now();
     if now.duration_since(st.last_flush) < Duration::from_millis(scroll_frame_ms()) {
         return;
     }

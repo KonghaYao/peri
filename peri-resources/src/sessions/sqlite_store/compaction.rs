@@ -3,7 +3,6 @@
 use super::failure::commit_failure;
 use super::{database::SqliteSessionDatabase, row_mapping::role_of};
 use anyhow::Result;
-use chrono::Utc;
 use peri_acp_types::{
     store::{CompactionChange, MessageFlags},
     thread::ThreadId,
@@ -28,7 +27,7 @@ pub(super) async fn delete_messages(
             .execute(&mut *tx)
             .await?;
     }
-    let now = Utc::now().to_rfc3339();
+    let now = peri_time::now_utc_rfc3339();
     sqlx::query(
         "UPDATE threads SET updated_at = ?1,
                 message_count = (SELECT COUNT(*) FROM messages WHERE thread_id = ?2)
@@ -127,7 +126,7 @@ pub(super) async fn commit_compaction_lifecycle_on(
         .await?;
     }
 
-    let now = Utc::now().to_rfc3339();
+    let now = peri_time::now_utc_rfc3339();
     sqlx::query(
         "UPDATE threads
              SET updated_at = ?1,
@@ -206,7 +205,7 @@ pub(super) async fn delete_messages_since(
             .bind(rowid)
             .execute(&mut *tx)
             .await?;
-        let now = Utc::now().to_rfc3339();
+        let now = peri_time::now_utc_rfc3339();
         sqlx::query(
             "UPDATE threads SET updated_at = ?1,
                     message_count = (SELECT COUNT(*) FROM messages WHERE thread_id = ?2)

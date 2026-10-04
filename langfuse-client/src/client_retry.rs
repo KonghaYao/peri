@@ -12,7 +12,7 @@ pub(super) fn budget_error() -> LangfuseError {
 }
 
 pub(super) fn parse_retry_after(value: &str) -> Option<Duration> {
-    parse_retry_after_at(value, chrono::Utc::now())
+    parse_retry_after_at(value, peri_time::now_wall().into())
 }
 
 pub(super) fn parse_retry_after_at(

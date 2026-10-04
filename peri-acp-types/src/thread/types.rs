@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
+use std::time::SystemTime;
 use thiserror::Error;
 
 /// Thread 唯一标识符（UUID v7，按时间排序）
@@ -178,8 +179,10 @@ pub struct ThreadMeta {
 }
 
 impl ThreadMeta {
-    pub fn new(cwd: impl Into<String>) -> Self {
-        let now = Utc::now();
+    /// Set creation/update fields from the supplied wall-clock value.
+    /// The UUID v7 identity keeps its own monotonic generation sequence.
+    pub fn new_at(cwd: impl Into<String>, at: SystemTime) -> Self {
+        let now = at.into();
         Self {
             id: uuid::Uuid::now_v7().to_string(),
             title: None,
@@ -203,13 +206,14 @@ impl ThreadMeta {
     }
 
     /// 用于从 DB 行构建 ThreadMeta 时填充新字段的默认值
-    pub fn default_for_db() -> Self {
+    pub fn default_for_db_at(at: SystemTime) -> Self {
+        let now = at.into();
         Self {
             id: String::new(),
             title: None,
             cwd: String::new(),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: now,
+            updated_at: now,
             message_count: 0,
             content_size: 0,
             parent_thread_id: None,

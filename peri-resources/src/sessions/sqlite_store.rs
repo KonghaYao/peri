@@ -290,7 +290,7 @@ impl ThreadStore for SqliteThreadStore {
                 message_count = (SELECT COUNT(*) FROM messages WHERE thread_id = ?2)
              WHERE id = ?2",
             )
-            .bind(Utc::now().to_rfc3339())
+            .bind(peri_time::now_utc_rfc3339())
             .bind(id.as_str())
             .execute(&mut *tx)
             .await?;
@@ -531,7 +531,7 @@ impl ThreadStore for SqliteThreadStore {
     async fn update_title(&self, id: &ThreadId, title: &str) -> Result<()> {
         let write_guard = self.write_guard(id).await?;
         let result = async {
-            let now = Utc::now().to_rfc3339();
+            let now = peri_time::now_utc_rfc3339();
             sqlx::query("UPDATE threads SET title = ?1, updated_at = ?2 WHERE id = ?3")
                 .bind(title)
                 .bind(&now)
@@ -591,7 +591,7 @@ impl ThreadStore for SqliteThreadStore {
             // 关键约束：参数字符串必须经 FromStr 解析，非法值直接返回错误，不静默 fallback
             let status = AgentStatus::from_str(status)
                 .with_context(|| format!("非法 agent_status 值: {status:?}"))?;
-            let now = Utc::now().to_rfc3339();
+            let now = peri_time::now_utc_rfc3339();
             sqlx::query("UPDATE threads SET agent_status = ?1, updated_at = ?2 WHERE id = ?3")
                 .bind(status.as_str())
                 .bind(&now)

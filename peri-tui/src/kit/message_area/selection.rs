@@ -2,7 +2,7 @@
 
 use std::cmp::Ordering;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::kit::atoms::{COPY_CHAR_COUNT, COPY_MESSAGE_UNTIL};
 use crate::kit::message_area::grid::GridSpec;
@@ -632,7 +632,7 @@ pub(super) fn copy_to_clipboard(text: String) {
 
 pub(super) fn mark_copy_message(char_count: usize) {
     COPY_CHAR_COUNT.set(char_count);
-    COPY_MESSAGE_UNTIL.set(Some(Instant::now() + Duration::from_secs(2)));
+    COPY_MESSAGE_UNTIL.set(Some(peri_time::monotonic_now() + Duration::from_secs(2)));
 }
 
 /// 从逻辑行中按视觉坐标精确提取选中文本（字符级精度）。

@@ -69,7 +69,7 @@ impl SessionResourcesImpl {
                 Err(error) if matches!(error.kind(), SessionResourceErrorKind::Conflict { .. }) => {
                     // An expired generation may still have local writes holding this lease.
                     // Drain them before installing a new token that they could otherwise use.
-                    tokio::time::timeout(SETTLE_WAIT, local.wait_for_in_flight())
+                    peri_time::timeout(SETTLE_WAIT, local.wait_for_in_flight())
                         .await
                         .map_err(|_| {
                             SessionResourceError::conflict("execution writes did not drain")

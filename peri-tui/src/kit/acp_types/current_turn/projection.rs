@@ -81,7 +81,9 @@ impl CurrentTurn {
         // 冻结段取 duration_ms/1000，均秒取整；None→0）与冻结判别位
         // （`text_started_at.is_none()`，镜像 recompute_hash 的 started_at 口径），
         // 保证增量路径与 recompute_hash 产出相同 hash。
-        let text_duration_secs = text_started_at.map(|t| t.elapsed().as_secs()).unwrap_or(0);
+        let text_duration_secs = text_started_at
+            .map(|t| peri_time::elapsed_since(t).as_secs())
+            .unwrap_or(0);
         let text_frozen = u64::from(text_started_at.is_none());
         let content_hash = match block.as_ref() {
             Some(r) => {

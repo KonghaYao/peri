@@ -6,6 +6,7 @@ description = "Builtin LSP MCP instance for Peri"
 license = "Apache-2.0"
 
 [dependencies]
+peri-time = { path = "../../peri-time" }
 async-trait.workspace = true
 parking_lot.workspace = true
 serde.workspace = true

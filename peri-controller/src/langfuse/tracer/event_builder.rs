@@ -14,10 +14,11 @@ pub(crate) const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// 生成 RFC3339 时间戳（毫秒精度，UTC）。
 ///
-/// 统一原文件中 `chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)`
+/// 统一原文件中的 UTC 墙钟时间戳格式（毫秒精度）
 /// 的 15+ 处重复调用。
 pub(crate) fn now_rfc3339() -> String {
-    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    chrono::DateTime::<chrono::Utc>::from(peri_time::now_wall())
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
 /// 生成 UUID v7 字符串。

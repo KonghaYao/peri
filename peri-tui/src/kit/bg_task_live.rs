@@ -72,7 +72,7 @@ fn finalize_nested_reasoning(detail: &mut BgLiveDetail) {
             reasoning.duration_ms = reasoning.duration_ms.or_else(|| {
                 reasoning
                     .started_at
-                    .map(|started| started.elapsed().as_millis() as u64)
+                    .map(|started| peri_time::elapsed_since(started).as_millis() as u64)
             });
             reasoning.started_at = None;
             reasoning.is_running = false;
@@ -164,7 +164,7 @@ pub fn handle_bg_tool_ended(agent_id: &str, te: &TuiToolEnded) {
         };
         t.output_summary = Some(te.output_summary.clone());
         t.is_error = te.is_error;
-        t.completed_duration_ms = Some(t.started_at.elapsed().as_millis() as u64);
+        t.completed_duration_ms = Some(peri_time::elapsed_since(t.started_at).as_millis() as u64);
         sync_tool_units(detail);
     });
 }
@@ -187,7 +187,7 @@ pub fn append_bg_text_chunk(agent_id: &str, tc: &TuiTextChunk) {
                 text: tc.text.clone(),
                 reasoning: None,
                 message_id: tc.message_id.clone(),
-                started_at: Some(std::time::Instant::now()),
+                started_at: Some(peri_time::monotonic_now()),
                 duration_ms: None,
                 content_hash: 0,
             };
@@ -211,7 +211,7 @@ pub fn append_bg_reasoning_chunk(agent_id: &str, rc: &TuiReasoningChunk) {
                 fold: FoldState::Preview,
                 status: EntryStatus::Running,
                 is_running: true,
-                started_at: Some(std::time::Instant::now()),
+                started_at: Some(peri_time::monotonic_now()),
                 duration_ms: None,
             });
             reasoning.text.push_str(&rc.text);
@@ -229,7 +229,7 @@ pub fn append_bg_reasoning_chunk(agent_id: &str, rc: &TuiReasoningChunk) {
                 fold: FoldState::Preview,
                 status: EntryStatus::Running,
                 is_running: true,
-                started_at: Some(std::time::Instant::now()),
+                started_at: Some(peri_time::monotonic_now()),
                 duration_ms: None,
             }),
             message_id: rc.message_id.clone(),

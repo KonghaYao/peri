@@ -267,7 +267,7 @@ impl MarketplaceManager {
         if let Some(entry) = self.entries.get_mut(index) {
             entry.manifest = Some(manifest);
             entry.status = status;
-            entry.last_updated = Some(Utc::now());
+            entry.last_updated = Some(peri_time::now_wall().into());
         }
     }
 

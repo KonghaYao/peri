@@ -317,7 +317,7 @@ async fn test_resume_thread_id_ignores_model_field() {
     let store = SessionFixture::open_in(dir.path()).await;
     let cwd = store.workspace_cwd();
     let parent_id = store
-        .create_thread(ThreadMeta::new(cwd.clone()))
+        .create_thread(ThreadMeta::new_at(cwd.clone(), peri_time::now_wall()))
         .await
         .expect("建立父会话失败");
     // 父会话句柄：resume 路径经它校验「owning parent session」

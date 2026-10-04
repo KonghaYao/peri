@@ -136,7 +136,7 @@ impl McpClientPool {
             let meta = self
                 .task_scope_meta_for(&server, session_id)
                 .ok_or_else(|| format!("trusted scope for {server} unavailable"))?;
-            let result = tokio::time::timeout(
+            let result = peri_time::timeout(
                 Duration::from_secs(10),
                 peer.send_request(ClientRequest::CustomRequest(CustomRequest::new(
                     "workspace/taskFence",
@@ -172,20 +172,20 @@ impl McpClientPool {
         Ok(())
     }
     async fn wait_for_task_owner_catalog(&self) -> Result<(), String> {
-        let until = tokio::time::Instant::now() + Duration::from_secs(10);
+        let until = peri_time::monotonic_now() + Duration::from_secs(10);
         while self.configs.read().is_empty()
             && !self.initialized.load(std::sync::atomic::Ordering::Acquire)
         {
-            if tokio::time::Instant::now() >= until {
+            if peri_time::monotonic_now() >= until {
                 return Err("workspace task owner catalog unavailable".into());
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            peri_time::sleep(Duration::from_millis(50)).await;
         }
         Ok(())
     }
 
     async fn wait_for_workspace_peer(&self, server: &str) -> Result<Peer<RoleClient>, String> {
-        let until = tokio::time::Instant::now() + Duration::from_secs(10);
+        let until = peri_time::monotonic_now() + Duration::from_secs(10);
         loop {
             if let Some(peer) = self
                 .clients
@@ -195,10 +195,10 @@ impl McpClientPool {
             {
                 return Ok(peer);
             }
-            if tokio::time::Instant::now() >= until {
+            if peri_time::monotonic_now() >= until {
                 return Err(format!("workspace task owner {server} disconnected"));
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            peri_time::sleep(Duration::from_millis(50)).await;
         }
     }
 
@@ -298,7 +298,7 @@ impl McpClientPool {
                     continue;
                 };
                 if let Some(cursor) = cursors.get(&client.name).copied() {
-                    let response = tokio::time::timeout(
+                    let response = peri_time::timeout(
                         Duration::from_secs(5),
                         peer.send_request(ClientRequest::CustomRequest(CustomRequest::new(
                             "workspace/taskChanges",
@@ -361,7 +361,7 @@ impl McpClientPool {
             }
             tokio::select! {
                 _ = cancel.cancelled() => break,
-                _ = tokio::time::sleep(Duration::from_secs(2)) => {},
+                _ = peri_time::sleep(Duration::from_secs(2)) => {},
             }
         }
     }
@@ -390,12 +390,12 @@ impl McpClientPool {
         for task_id in manager.external_task_ids() {
             manager.cancel_async(&task_id).await?;
         }
-        let until = tokio::time::Instant::now() + Duration::from_secs(20);
+        let until = peri_time::monotonic_now() + Duration::from_secs(20);
         while manager.has_unsettled_external() {
-            if tokio::time::Instant::now() >= until {
+            if peri_time::monotonic_now() >= until {
                 return Err("external task close incomplete".into());
             }
-            tokio::time::sleep(Duration::from_millis(200)).await;
+            peri_time::sleep(Duration::from_millis(200)).await;
         }
         Ok(())
     }
@@ -414,7 +414,7 @@ impl McpClientPool {
             let initial: ScopeTaskSnapshot =
                 serde_json::from_value(Self::workspace_scope_snapshot(&peer, meta.clone()).await?)
                     .map_err(|error| format!("invalid workspace task snapshot: {error}"))?;
-            let response = tokio::time::timeout(
+            let response = peri_time::timeout(
                 Duration::from_secs(10),
                 peer.send_request(ClientRequest::CustomRequest(CustomRequest::new(
                     "workspace/taskClose",
@@ -449,7 +449,7 @@ impl McpClientPool {
             {
                 return Err("workspace task close barrier missing".into());
             }
-            let until = tokio::time::Instant::now() + Duration::from_secs(20);
+            let until = peri_time::monotonic_now() + Duration::from_secs(20);
             loop {
                 let snapshot: ScopeTaskSnapshot = serde_json::from_value(
                     Self::workspace_scope_snapshot(&peer, meta.clone()).await?,
@@ -464,8 +464,7 @@ impl McpClientPool {
                     params.meta = Some(meta.clone());
                     // A concurrent terminal transition can race cancellation.
                     // The next snapshot is the authoritative completion check.
-                    match tokio::time::timeout(Duration::from_secs(5), peer.cancel_task(params))
-                        .await
+                    match peri_time::timeout(Duration::from_secs(5), peer.cancel_task(params)).await
                     {
                         Ok(Ok(())) => {}
                         Ok(Err(error)) => tracing::debug!(server = %server, %error,
@@ -474,10 +473,10 @@ impl McpClientPool {
                             "Workspace close cancel timed out; reconciling"),
                     }
                 }
-                if tokio::time::Instant::now() >= until {
+                if peri_time::monotonic_now() >= until {
                     return Err(format!("workspace task owner {server} close incomplete"));
                 }
-                tokio::time::sleep(Duration::from_millis(200)).await;
+                peri_time::sleep(Duration::from_millis(200)).await;
             }
         }
         Ok(())
@@ -498,7 +497,7 @@ impl McpClientPool {
             if !snapshot.closing {
                 continue;
             }
-            let response = tokio::time::timeout(
+            let response = peri_time::timeout(
                 Duration::from_secs(10),
                 peer.send_request(ClientRequest::CustomRequest(CustomRequest::new(
                     "workspace/taskOpen",
@@ -527,7 +526,7 @@ impl McpClientPool {
         peer: &Peer<RoleClient>,
         meta: RequestMetaObject,
     ) -> Result<serde_json::Value, String> {
-        let result = tokio::time::timeout(
+        let result = peri_time::timeout(
             Duration::from_secs(10),
             peer.send_request(ClientRequest::CustomRequest(CustomRequest::new(
                 "workspace/taskSnapshot",
@@ -658,7 +657,7 @@ impl McpClientPool {
                 }
                 drop(manager);
                 drop(pool);
-                tokio::time::sleep(Duration::from_secs(2)).await;
+                peri_time::sleep(Duration::from_secs(2)).await;
                 if let Some(pool) = weak_pool.upgrade() {
                     if let Some(next) = pool
                         .clients

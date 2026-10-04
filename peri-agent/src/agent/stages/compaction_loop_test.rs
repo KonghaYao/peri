@@ -219,7 +219,10 @@ async fn test_run_react_loop_successful_full_replaces_history_without_file_re_re
 
     let store = MockSessionResources::new();
     let thread_id = store
-        .create_thread(ThreadMeta::new(dir.path().to_string_lossy()))
+        .create_thread(ThreadMeta::new_at(
+            dir.path().to_string_lossy(),
+            peri_time::now_wall(),
+        ))
         .await
         .unwrap();
     let store_dyn: Arc<dyn peri_acp_types::session_resources::SessionResources> = store.clone();
@@ -528,7 +531,10 @@ async fn test_run_react_loop_successful_full_does_not_recompact_excluded_history
     use crate::agent::compact_v2::{planner::plan_micro, projection, CompactOutcome};
     use crate::thread::ThreadMeta;
     let store = MockSessionResources::new();
-    let thread_id = store.create_thread(ThreadMeta::new("/tmp")).await.unwrap();
+    let thread_id = store
+        .create_thread(ThreadMeta::new_at("/tmp", peri_time::now_wall()))
+        .await
+        .unwrap();
     let session = Session::new(
         Arc::from("/tmp"),
         FrozenContext::builder().build(),

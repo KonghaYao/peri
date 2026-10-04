@@ -47,7 +47,7 @@ fn external_started_at(
     request: &ExternalTaskRegistration,
 ) -> Result<chrono::DateTime<chrono::Utc>, BackgroundRegistryError> {
     request.started_at.as_deref().map_or_else(
-        || Ok(chrono::Utc::now()),
+        || Ok(peri_time::now_wall().into()),
         |timestamp| {
             chrono::DateTime::parse_from_rfc3339(timestamp)
                 .map(|parsed| parsed.with_timezone(&chrono::Utc))
@@ -189,8 +189,8 @@ impl peri_acp_types::tasks::TaskManager for TaskManager {
             .to_string(),
             prompt_summary: request.summary,
             status: BackgroundTaskStatus::Running,
-            started_at: std::time::Instant::now(),
-            chrono_started_at: chrono::Utc::now(),
+            started_at: peri_time::monotonic_now(),
+            chrono_started_at: peri_time::now_wall().into(),
             kind: request.kind,
             cancel_handle,
             cancel_token: None,
@@ -314,7 +314,7 @@ impl TaskManager {
             agent_name: "mcp".into(),
             prompt_summary: request.summary,
             status: BackgroundTaskStatus::Running,
-            started_at: std::time::Instant::now(),
+            started_at: peri_time::monotonic_now(),
             chrono_started_at: started_at,
             kind: request.kind,
             cancel_handle: BgCancelHandle::External {

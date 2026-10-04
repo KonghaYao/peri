@@ -575,8 +575,8 @@ fn running_indicator() -> String {
     const FRAMES: &[char] = &[
         '✳', '✴', '✵', '✶', '✷', '✸', '✹', '✺', '✻', '✼', '❃', '❊', '✼', '✻', '✺', '✸',
     ];
-    let start = START.get_or_init(Instant::now);
-    let tick = (start.elapsed().as_millis() / 100) as usize;
+    let start = START.get_or_init(peri_time::monotonic_now);
+    let tick = (peri_time::elapsed_since(*start).as_millis() / 100) as usize;
     let frame = FRAMES[tick % FRAMES.len()];
     format!("{frame}")
 }

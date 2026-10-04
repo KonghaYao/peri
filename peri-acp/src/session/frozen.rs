@@ -87,7 +87,11 @@ impl SessionManager {
         instructions: &crate::session::executor::FrozenInstructions,
         deployment_closed: &std::collections::HashSet<String>,
     ) -> crate::session::executor::FrozenSessionData {
-        let frozen_date = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let frozen_date = peri_time::calendar_date(
+            peri_time::now_wall(),
+            peri_time::CalendarConvention::deployment_default(),
+        )
+        .to_string();
         let frozen_language = config.config.language.clone();
         // W5（E15/J5）：项目指令正文来自内容准入期读取的 MCP 资源快照
         // （`peri-instruction://workspace/{main|local}`）——宿主本地读盘点与

@@ -805,7 +805,7 @@ async fn test_adopt_legacy_session_publishes_binding_and_frozen_once() {
     let cwd = workspace.cwd.to_string_lossy().into_owned();
     // legacy 会话：有历史但无绑定、无 frozen（由旧版本写入）。
     let id = store
-        .create_thread(ThreadMeta::new(cwd.as_str()))
+        .create_thread(ThreadMeta::new_at(cwd.as_str(), peri_time::now_wall()))
         .await
         .unwrap();
 
@@ -850,7 +850,7 @@ async fn test_adopt_legacy_session_keeps_the_first_winner_bytes() {
     let workspace = workspace(&store, directory.path()).await;
     let cwd = workspace.cwd.to_string_lossy().into_owned();
     let id = store
-        .create_thread(ThreadMeta::new(cwd.as_str()))
+        .create_thread(ThreadMeta::new_at(cwd.as_str(), peri_time::now_wall()))
         .await
         .unwrap();
     // 第二个句柄：同一份库事实上的另一次接纳（两宿主共享同一个 store 的等价形态）。
@@ -890,7 +890,7 @@ async fn test_adopt_legacy_session_preserves_canonical_metadata_and_history() {
     let (store, data, directory) = database().await;
     let workspace = workspace(&store, directory.path()).await;
     let cwd = workspace.cwd.to_string_lossy().into_owned();
-    let mut meta = ThreadMeta::new(cwd.as_str());
+    let mut meta = ThreadMeta::new_at(cwd.as_str(), peri_time::now_wall());
     meta.config = Some(r#"{"model":"legacy"}"#.to_owned());
     let id = store.create_thread(meta).await.unwrap();
     let history = payloads(2);

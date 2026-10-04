@@ -181,7 +181,7 @@ pub(crate) async fn new_session_from_prepared(
     let initialization = resources
         .begin_initialization(&NewSessionDraft {
             thread_id: session_id.clone(),
-            created_at: chrono::Utc::now().to_rfc3339(),
+            created_at: peri_time::now_utc_rfc3339(),
             meta: NewSessionMeta {
                 title: None,
                 cwd: cwd.clone(),
@@ -699,7 +699,7 @@ pub(crate) async fn handle_fork(
         &cfg.session_resources,
         &fork_source,
         &workspace,
-        chrono::Utc::now().to_rfc3339(),
+        peri_time::now_utc_rfc3339(),
     )
     .await
     .map_err(fork_source_error)?;

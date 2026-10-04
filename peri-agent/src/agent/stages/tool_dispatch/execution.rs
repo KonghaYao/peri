@@ -344,7 +344,7 @@ async fn dispatch_concurrent(
                     }
                     result = async {
                         if let Some(d) = timeout_opt {
-                            tokio::time::timeout(d, invoke_fut).await
+                            peri_time::timeout(d, invoke_fut).await
                         } else {
                             Ok(invoke_fut.await)
                         }

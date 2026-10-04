@@ -38,7 +38,7 @@ impl TestSession {
         let thread_id = uuid::Uuid::now_v7().to_string();
         let session = NewSession {
             thread_id: thread_id.clone(),
-            created_at: chrono::Utc::now().to_rfc3339(),
+            created_at: peri_time::now_utc_rfc3339(),
             meta: NewSessionMeta {
                 title: Some("test session".to_owned()),
                 cwd: workspace.cwd.to_string_lossy().into_owned(),

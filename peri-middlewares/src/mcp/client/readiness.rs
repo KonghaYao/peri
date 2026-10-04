@@ -368,7 +368,7 @@ impl McpClientPool {
     /// pub(crate) async fn await_system_connections(
     ///     self: &Arc<Self>,
     ///     cancel: &peri_agent::agent::AgentCancellationToken,
-    ///     started_at: tokio::time::Instant,
+    ///     started_at: peri_time::Instant,
     /// ) -> Result<Vec<NegotiatedSystemMcp>, SystemReadinessError>;
     /// ```
     ///
@@ -385,8 +385,8 @@ impl McpClientPool {
     pub(crate) async fn await_system_connections(
         self: &Arc<Self>,
         cancel: &AgentCancellationToken,
-        // 冻结签名：`started_at` 为 `tokio::time::Instant`（本模块 `Instant` 即该类型）。
-        started_at: tokio::time::Instant,
+        // 冻结签名：`started_at` 为 `peri_time::Instant`（本模块 `Instant` 即该类型）。
+        started_at: peri_time::Instant,
     ) -> Result<Vec<NegotiatedSystemMcp>, SystemReadinessError> {
         // 先订阅再读事实：订阅之后的任何变化都不会丢。
         let mut waiter = self.system_readiness.subscribe();
@@ -404,7 +404,7 @@ impl McpClientPool {
                 }
                 SystemMcpManifest::Pending => {
                     let deadline = started_at + system_bootstrap_timeout();
-                    if tokio::time::Instant::now() >= deadline {
+                    if peri_time::monotonic_now() >= deadline {
                         return Err(SystemReadinessError::ConfigurationUnavailable);
                     }
                     wait_for_readiness_change(&mut waiter, cancel, deadline).await?;
@@ -419,9 +419,9 @@ impl McpClientPool {
                 return Ok(Vec::new());
             }
 
-            let now = tokio::time::Instant::now();
+            let now = peri_time::monotonic_now();
             let mut negotiated = Vec::with_capacity(requirements.len());
-            let mut next_deadline: Option<tokio::time::Instant> = None;
+            let mut next_deadline: Option<peri_time::Instant> = None;
             for requirement in &requirements {
                 let deadline = started_at + requirement.timeout;
                 match self.evaluate_system_requirement(requirement)? {
@@ -614,13 +614,13 @@ fn system_timeout(config: &McpServerConfig) -> Duration {
 async fn wait_for_readiness_change(
     waiter: &mut tokio::sync::watch::Receiver<u64>,
     cancel: &AgentCancellationToken,
-    deadline: tokio::time::Instant,
+    deadline: peri_time::Instant,
 ) -> Result<(), SystemReadinessError> {
     tokio::select! {
         _ = cancel.cancelled() => Err(SystemReadinessError::Cancelled),
         // 发送端随 pool 一起销毁：不再有可观察变化，按连接池关闭收口。
         changed = waiter.changed() => changed.map_err(|_| SystemReadinessError::PoolClosed),
-        _ = tokio::time::sleep_until(deadline) => Ok(()),
+        _ = peri_time::sleep_until(deadline) => Ok(()),
     }
 }
 

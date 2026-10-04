@@ -77,7 +77,7 @@ pub(super) async fn spawn_background_subagent(
             _ => return,
         }
 
-        let started_at = std::time::Instant::now();
+        let started_at = peri_time::monotonic_now();
         // context 将被 move 进 run_react_loop，turn_id 提前提取（Start/Stop emit 用）
         let subagent_turn_id = v2_ctx.context.turn_id();
         let context = v2_ctx.context;
@@ -310,8 +310,8 @@ pub(super) async fn spawn_background_subagent(
         agent_name: agent_name.clone(),
         prompt_summary,
         status: BackgroundTaskStatus::Running,
-        started_at: std::time::Instant::now(),
-        chrono_started_at: chrono::Utc::now(),
+        started_at: peri_time::monotonic_now(),
+        chrono_started_at: peri_time::now_wall().into(),
         kind: BgTaskKind::Agent,
         cancel_handle: BgCancelHandle::Abort(join_handle),
         cancel_token: Some(cancel_token.clone()),

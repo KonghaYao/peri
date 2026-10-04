@@ -156,7 +156,7 @@ impl McpServiceWrapper {
             }));
         }
         match self {
-            Self::Closing(handle) => match tokio::time::timeout(timeout, handle).await {
+            Self::Closing(handle) => match peri_time::timeout(timeout, handle).await {
                 Ok(result) => {
                     *self = Self::Closed;
                     match result {

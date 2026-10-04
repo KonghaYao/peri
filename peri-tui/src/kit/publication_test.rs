@@ -75,7 +75,7 @@ fn deliver(
     state: &mut BridgeState,
     scheduler: &mut PublicationScheduler,
     event: AcpEventData,
-    now: tokio::time::Instant,
+    now: peri_time::Instant,
 ) {
     let intent = acp_events::dispatch_for_bridge(state, &event);
     scheduler.accept_at(intent, state, now);
@@ -89,7 +89,7 @@ fn test_publication_main_stream_survives_projection_read() {
     for reasoning in [false, true] {
         let mut state = state();
         let mut scheduler = PublicationScheduler::default();
-        let now = tokio::time::Instant::now();
+        let now = peri_time::Instant::now();
         reset_perf_counters();
         for _ in 0..100 {
             deliver(
@@ -136,7 +136,7 @@ fn test_publication_subagent_stream_and_block_coalesce() {
                 .current_turn
                 .start_subagent("child".into(), "child".into());
             let mut scheduler = PublicationScheduler::default();
-            let now = tokio::time::Instant::now();
+            let now = peri_time::Instant::now();
             reset_perf_counters();
             for _ in 0..100 {
                 deliver(
@@ -176,7 +176,7 @@ fn test_publication_none_switch_cancels_stream_deadline_but_terminal_flushes() {
     let _mode = ModeGuard::new("streaming");
     let mut state = state();
     let mut scheduler = PublicationScheduler::default();
-    let now = tokio::time::Instant::now();
+    let now = peri_time::Instant::now();
     deliver(&mut state, &mut scheduler, chunk("a", None, false), now);
     deliver(&mut state, &mut scheduler, chunk("b", None, false), now);
     ModeGuard::set("none");
@@ -204,7 +204,7 @@ fn test_publication_none_resume_and_replay_are_not_lost() {
     let _mode = ModeGuard::new("none");
     let mut state = state();
     let mut scheduler = PublicationScheduler::default();
-    let now = tokio::time::Instant::now();
+    let now = peri_time::Instant::now();
     deliver(&mut state, &mut scheduler, chunk("a", None, false), now);
     assert_eq!(state.generation, 0);
     assert_eq!(state.current_turn.view_models().len(), 1);
@@ -238,7 +238,7 @@ fn test_publication_receiver_close_flushes_even_after_explicit_projection() {
         &mut state,
         &mut scheduler,
         chunk("pending", None, false),
-        tokio::time::Instant::now(),
+        peri_time::Instant::now(),
     );
     state.current_turn.view_models();
     let mut reset = atoms::BRIDGE_RESET_COUNTER.get();
@@ -253,7 +253,7 @@ fn test_publication_loading_reset_flushes_and_cancels_deadline() {
     let _mode = ModeGuard::new("streaming");
     let mut state = state();
     let mut scheduler = PublicationScheduler::default();
-    let now = tokio::time::Instant::now();
+    let now = peri_time::Instant::now();
     deliver(&mut state, &mut scheduler, chunk("a", None, true), now);
     deliver(&mut state, &mut scheduler, chunk("b", None, true), now);
     deliver(
@@ -289,7 +289,7 @@ fn test_publication_block_and_empty_chunks_respect_boundaries() {
     let _mode = ModeGuard::new("block");
     let mut state = state();
     let mut scheduler = PublicationScheduler::default();
-    let now = tokio::time::Instant::now();
+    let now = peri_time::Instant::now();
     deliver(&mut state, &mut scheduler, chunk("", None, false), now);
     assert_eq!(state.generation, 0);
     deliver(&mut state, &mut scheduler, chunk("first", None, false), now);
@@ -329,7 +329,7 @@ fn test_publication_two_children_resume_and_bg_without_group() {
     let _mode = ModeGuard::new("streaming");
     let mut state = state();
     let mut scheduler = PublicationScheduler::default();
-    let now = tokio::time::Instant::now();
+    let now = peri_time::Instant::now();
     for id in ["a", "b"] {
         state.current_turn.start_subagent(id.into(), id.into());
     }
@@ -497,7 +497,7 @@ fn test_publication_archived_duration_is_stable_across_phase_and_override() {
     ] {
         let mut state = state();
         let mut scheduler = PublicationScheduler::default();
-        let now = tokio::time::Instant::now();
+        let now = peri_time::Instant::now();
         deliver(
             &mut state,
             &mut scheduler,

@@ -127,8 +127,7 @@ pub(crate) async fn run_discovery(
 /// 因此不注册候选；显式 URI 仍走 `skills/get` 与读取面的完整性校验路径。
 /// 失败/超时按无模板处理（发现不因此失败）。
 async fn probe_skill_templates(peer: &rmcp::service::Peer<rmcp::RoleClient>, server: &str) {
-    let result =
-        tokio::time::timeout(SKILLS_LIST_TIMEOUT, peer.list_resource_templates(None)).await;
+    let result = peri_time::timeout(SKILLS_LIST_TIMEOUT, peer.list_resource_templates(None)).await;
     let Ok(Ok(templates)) = result else {
         tracing::debug!(
             server,

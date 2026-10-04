@@ -585,7 +585,7 @@ where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = crate::error::AgentResult<T>>,
 {
-    let start = std::time::Instant::now();
+    let start = peri_time::monotonic_now();
     context
         .runtime
         .event_bus

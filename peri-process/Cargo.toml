@@ -5,6 +5,7 @@ edition.workspace = true
 description = "Local subprocess tree ownership and cleanup evidence"
 
 [dependencies]
+peri-time = { path = "../peri-time" }
 tokio.workspace = true
 
 [target.'cfg(unix)'.dependencies]

@@ -52,7 +52,7 @@ impl MessageFixture {
         // 会话 cwd 与父子链：child 保存要求父会话存在且 cwd 与调用 cwd 一致。
         let cwd = store.workspace_cwd();
         let parent_id = store
-            .create_thread(ThreadMeta::new(cwd.clone()))
+            .create_thread(ThreadMeta::new_at(cwd.clone(), peri_time::now_wall()))
             .await
             .expect("建立父会话失败");
         let parent = peri_agent::session::Session::new(

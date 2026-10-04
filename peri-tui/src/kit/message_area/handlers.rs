@@ -1,5 +1,5 @@
 use std::sync::{Arc, Weak};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use parking_lot::Mutex;
 
@@ -92,7 +92,7 @@ pub(super) fn register_keepgoing_click(
             return EventResult::Ignored;
         }
         // 防抖：防抖期内按钮渲染为禁用样式，点击被吞掉但不触发提交
-        let now = Instant::now();
+        let now = peri_time::monotonic_now();
         let blocked = KEEPGOING_BLOCKED_UNTIL
             .state()
             .read()
@@ -108,7 +108,7 @@ pub(super) fn register_keepgoing_click(
         *KEEPGOING_BLOCKED_UNTIL.state().write() = Some(now + KEEPGOING_DEBOUNCE);
         // 防抖到期后清除阻塞并 bump 心跳触发重渲染，恢复可点击样式
         tokio::spawn(async move {
-            tokio::time::sleep(KEEPGOING_DEBOUNCE).await;
+            peri_time::sleep(KEEPGOING_DEBOUNCE).await;
             *KEEPGOING_BLOCKED_UNTIL.state().write() = None;
             RENDER_HEARTBEAT.set(RENDER_HEARTBEAT.get().wrapping_add(1));
         });
@@ -375,7 +375,7 @@ pub(super) fn schedule_image_preview_hover(
     };
     let gate = Arc::downgrade(&gate);
     tokio::spawn(async move {
-        tokio::time::sleep(delay).await;
+        peri_time::sleep(delay).await;
         let Some(gate) = Weak::upgrade(&gate) else {
             return;
         };

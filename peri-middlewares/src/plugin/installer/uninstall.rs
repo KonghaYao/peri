@@ -76,7 +76,7 @@ async fn mark_orphaned(install_path: &Path) -> Result<(), InstallerError> {
         let path = install_path.to_path_buf();
         move || {
             let orphaned_file = path.join(".orphaned_at");
-            let _ = std::fs::write(&orphaned_file, chrono::Utc::now().to_rfc3339());
+            let _ = std::fs::write(&orphaned_file, peri_time::now_utc_rfc3339());
             Ok::<(), InstallerError>(())
         }
     })
@@ -164,7 +164,7 @@ pub async fn cleanup_orphaned_plugins(claude_dir: &Path) -> Result<usize, Instal
         .map(|p| p.install_path.clone())
         .collect();
 
-    let now = chrono::Utc::now().timestamp_millis();
+    let now = chrono::DateTime::<chrono::Utc>::from(peri_time::now_wall()).timestamp_millis();
     let mut deleted_count = 0;
 
     let mut entries = tokio::fs::read_dir(&cache_dir)

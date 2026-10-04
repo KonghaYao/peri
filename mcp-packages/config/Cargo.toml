@@ -6,6 +6,7 @@ description = "Configuration data plane and bootstrap MCP client"
 license = "Apache-2.0"
 
 [dependencies]
+peri-time = { path = "../../peri-time" }
 peri-acp-types = { path = "../../peri-acp-types" }
 dirs-next.workspace = true
 fs2 = "0.4"

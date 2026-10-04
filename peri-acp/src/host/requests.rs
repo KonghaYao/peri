@@ -207,7 +207,7 @@ async fn fence_workspace_with_renewal(
         .map_err(super::workspace::resource_error)?;
     let fence = pool.fence_workspace_task_scope(session_id);
     tokio::pin!(fence);
-    let mut renew = tokio::time::interval(std::time::Duration::from_secs(10));
+    let mut renew = peri_time::interval(std::time::Duration::from_secs(10));
     renew.tick().await;
     loop {
         tokio::select! {
@@ -249,7 +249,7 @@ fn bind_session_tasks(
             loop {
                 tokio::select! {
                     _ = renewal_cancel.cancelled() => break,
-                    _ = tokio::time::sleep(std::time::Duration::from_secs(10)) => {}
+                    _ = peri_time::sleep(std::time::Duration::from_secs(10)) => {}
                 }
                 if renewal_cancel.is_cancelled() {
                     break;
@@ -268,7 +268,7 @@ fn bind_session_tasks(
     drop(session);
     tokio::spawn(async move {
         if let Some(pool) = pool.as_ref() {
-            let _ = tokio::time::timeout(
+            let _ = peri_time::timeout(
                 std::time::Duration::from_millis(500),
                 pool.recover_workspace_tasks(&id),
             )

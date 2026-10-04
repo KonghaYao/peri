@@ -9,7 +9,6 @@
 #![allow(clippy::needless_update)]
 
 use std::sync::Arc;
-use std::time::Instant;
 
 #[cfg(test)]
 use crate::kit::atoms::FocusedEntry;
@@ -139,7 +138,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
 
     // [PERI_RENDER_TIMING] 帧计时起点
     let frame_t0 = if render_timing_enabled() {
-        Some(Instant::now())
+        Some(peri_time::monotonic_now())
     } else {
         None
     };
@@ -157,7 +156,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     let keepgoing_blocked = crate::kit::atoms::KEEPGOING_BLOCKED_UNTIL
         .state()
         .read()
-        .is_some_and(|until| Instant::now() < until);
+        .is_some_and(|until| peri_time::monotonic_now() < until);
     // 消息区位置追踪 + 视宽：build_footer_lines 需要 vis_width 判断按钮是否
     // 超宽换行（m4：换行后点击区域与实际渲染位置错位，超宽时跳过按钮渲染）。
     let area_hook = hooks.use_hook(MsgAreaTracker::new);
@@ -248,7 +247,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     let mut anchor_slot: Option<usize> = None;
     // §8.2 动画帧：100ms 粒度壁钟 tick——running 类 VM 每帧重建以推进
     // braille 动画（与 render.rs anim_tick 同公式同源）。
-    let anim_frame = std::time::SystemTime::now()
+    let anim_frame = peri_time::now_wall()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64 / 100)
         .unwrap_or(0);
@@ -308,7 +307,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
             .collect()
     };
     // [PERI_RENDER_TIMING] hash 比对耗时
-    let t_hash = Instant::now();
+    let t_hash = peri_time::monotonic_now();
     trace_phase(
         "hash+detect",
         frame_t0.unwrap_or(t_hash),
@@ -362,7 +361,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         }
     }
     // [PERI_RENDER_TIMING] rebuild 耗时（仅 rebuild_indices 非空时有意义）
-    let t_rebuild = Instant::now();
+    let t_rebuild = peri_time::monotonic_now();
     if !rebuild_indices.is_empty() {
         trace_phase(
             "rebuild",
@@ -407,7 +406,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     let anchor_visual_range: Option<(usize, usize)> = anchor_slot_state
         .read()
         .and_then(|slot| slot_index.slot_visual_range(slot));
-    let t_concat = Instant::now();
+    let t_concat = peri_time::monotonic_now();
     trace_phase(
         "concat",
         t_rebuild,
@@ -869,7 +868,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         }
     }
     // [PERI_RENDER_TIMING] 视口裁剪耗时
-    let t_viewport = Instant::now();
+    let t_viewport = peri_time::monotonic_now();
     trace_phase(
         "viewport",
         t_concat,

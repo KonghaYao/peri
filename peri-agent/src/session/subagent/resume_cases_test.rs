@@ -28,7 +28,7 @@ async fn test_resume_subagent_thread_not_found() {
 async fn test_resume_subagent_active_thread_rejected() {
     let store = MockSessionResources::new();
     let id = uuid::Uuid::now_v7().to_string();
-    let mut meta = ThreadMeta::new("/tmp");
+    let mut meta = ThreadMeta::new_at("/tmp", peri_time::now_wall());
     meta.id = id.clone();
     meta.parent_thread_id = Some("parent-thread-1".to_string());
     store.create_thread(meta).await.unwrap();
@@ -73,7 +73,7 @@ async fn test_resume_subagent_active_thread_rejected() {
 async fn test_resume_subagent_parent_mismatch_not_rejected() {
     let store = MockSessionResources::new();
     let id = uuid::Uuid::now_v7().to_string();
-    let mut meta = ThreadMeta::new("/tmp");
+    let mut meta = ThreadMeta::new_at("/tmp", peri_time::now_wall());
     meta.id = id.clone();
     meta.parent_thread_id = Some("other-parent".to_string()); // 与父 session 不一致
     store.create_thread(meta).await.unwrap();
@@ -135,7 +135,7 @@ async fn test_resume_subagent_main_agent_via_host_parent_id() {
 async fn test_resume_subagent_validation_passes_and_runs() {
     let store = MockSessionResources::new();
     let id = uuid::Uuid::now_v7().to_string();
-    let mut meta = ThreadMeta::new("/tmp");
+    let mut meta = ThreadMeta::new_at("/tmp", peri_time::now_wall());
     meta.id = id.clone();
     meta.parent_thread_id = Some("parent-thread-3".to_string());
     store.create_thread(meta).await.unwrap();

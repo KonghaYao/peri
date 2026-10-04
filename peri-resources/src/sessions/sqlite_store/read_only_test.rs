@@ -240,7 +240,7 @@ async fn test_readonly_store_loads_exact_meta_and_distinguishes_missing_session(
     let dir = tempdir().unwrap();
     let db_path = dir.path().join("threads.db");
     let writer = SqliteThreadStore::new(&db_path).await.unwrap();
-    let mut expected = ThreadMeta::new("/workspace");
+    let mut expected = ThreadMeta::new_at("/workspace", peri_time::now_wall());
     expected.title = Some("title".into());
     expected.agent_status = AgentStatus::Done;
     let id = writer.create_thread(expected.clone()).await.unwrap();
@@ -308,7 +308,10 @@ async fn test_readonly_store_rejects_corrupt_enum_time_type_and_negative_counts_
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("threads.db");
         let writer = SqliteThreadStore::new(&db_path).await.unwrap();
-        let id = writer.create_thread(ThreadMeta::new("/tmp")).await.unwrap();
+        let id = writer
+            .create_thread(ThreadMeta::new_at("/tmp", peri_time::now_wall()))
+            .await
+            .unwrap();
         sqlx::query(AssertSqlSafe(format!(
             "UPDATE threads SET {column} = {value} WHERE id = ?1"
         )))
@@ -346,7 +349,7 @@ async fn test_readonly_backed_trait_rejects_mutation_and_preserves_row() {
     let dir = tempdir().unwrap();
     let db_path = dir.path().join("threads.db");
     let writer = SqliteThreadStore::new(&db_path).await.unwrap();
-    let expected = ThreadMeta::new("/before");
+    let expected = ThreadMeta::new_at("/before", peri_time::now_wall());
     let id = writer.create_thread(expected.clone()).await.unwrap();
     writer.database.pool.close().await;
     let database_before = database_snapshot(&db_path).await;
@@ -380,7 +383,7 @@ async fn test_readonly_store_observes_wal_commit_but_not_uncommitted_update() {
     let db_path = dir.path().join("threads.db");
     let writer = SqliteThreadStore::new(&db_path).await.unwrap();
     let id = writer
-        .create_thread(ThreadMeta::new("/baseline"))
+        .create_thread(ThreadMeta::new_at("/baseline", peri_time::now_wall()))
         .await
         .unwrap();
     let mut transaction = writer.database.pool.begin().await.unwrap();

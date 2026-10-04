@@ -244,11 +244,17 @@ async fn legacy_adoption_rejects_changed_cwd_and_child_without_losing_history() 
         .unwrap();
     let workspace = store.resolve_workspace(&cwd).await.unwrap();
     let id = store
-        .create_thread(ThreadMeta::new(cwd.to_str().unwrap()))
+        .create_thread(ThreadMeta::new_at(
+            cwd.to_str().unwrap(),
+            peri_time::now_wall(),
+        ))
         .await
         .unwrap();
     let parent = store
-        .create_thread(ThreadMeta::new(cwd.to_str().unwrap()))
+        .create_thread(ThreadMeta::new_at(
+            cwd.to_str().unwrap(),
+            peri_time::now_wall(),
+        ))
         .await
         .unwrap();
     store
@@ -316,7 +322,10 @@ async fn legacy_adoption_rejects_unbound_frozen_session_without_losing_canonical
         .unwrap();
     let workspace = store.resolve_workspace(&cwd).await.unwrap();
     let id = store
-        .create_bound_thread(ThreadMeta::new(cwd.to_str().unwrap()), &workspace)
+        .create_bound_thread(
+            ThreadMeta::new_at(cwd.to_str().unwrap(), peri_time::now_wall()),
+            &workspace,
+        )
         .await
         .unwrap();
     assert!(store
@@ -376,10 +385,13 @@ async fn legacy_children_use_root_execution_gate_without_data_ownership_requirem
         .unwrap();
     let workspace = store.resolve_workspace(&cwd).await.unwrap();
     let root = store
-        .create_thread(ThreadMeta::new(cwd.to_str().unwrap()))
+        .create_thread(ThreadMeta::new_at(
+            cwd.to_str().unwrap(),
+            peri_time::now_wall(),
+        ))
         .await
         .unwrap();
-    let mut child = ThreadMeta::new(cwd.to_str().unwrap());
+    let mut child = ThreadMeta::new_at(cwd.to_str().unwrap(), peri_time::now_wall());
     child.parent_thread_id = Some(root.clone());
     child.hidden = true;
     let child = store.create_thread(child).await.unwrap();
@@ -480,7 +492,10 @@ async fn legacy_history_scopes_keep_path_boundaries_and_mixed_pagination() {
         .unwrap();
     let ws = store.resolve_workspace(&cwd).await.unwrap();
     let native = store
-        .create_bound_thread(ThreadMeta::new(cwd.to_str().unwrap()), &ws)
+        .create_bound_thread(
+            ThreadMeta::new_at(cwd.to_str().unwrap(), peri_time::now_wall()),
+            &ws,
+        )
         .await
         .unwrap();
     let lease = store.acquire_execution_lease(&native).await.unwrap();
@@ -497,7 +512,10 @@ async fn legacy_history_scopes_keep_path_boundaries_and_mixed_pagination() {
         cwd.with_file_name("project_AB"),
     ] {
         let id = store
-            .create_thread(ThreadMeta::new(path.to_str().unwrap()))
+            .create_thread(ThreadMeta::new_at(
+                path.to_str().unwrap(),
+                peri_time::now_wall(),
+            ))
             .await
             .unwrap();
         store

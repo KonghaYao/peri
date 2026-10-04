@@ -37,7 +37,6 @@ use peri_theme::atoms::{PALETTE_ATOM, PERI_COLORS_ATOM, THEME_ATOM};
 use peri_theme::bridge::ThemeDefinitionExt;
 use peri_theme::loader::list_available_themes;
 use peri_theme::theme::ThemeMode;
-use std::time::Instant;
 
 mod download;
 
@@ -136,7 +135,7 @@ fn persist_theme(name: &str) {
         Ok(()) => {
             *NOTIFICATION.state().write() = Some(Notification {
                 message: i18n::tr("config-saved").to_string(),
-                until: Instant::now() + Duration::from_secs(1),
+                until: peri_time::monotonic_now() + Duration::from_secs(1),
             });
         }
         Err(e) => {
@@ -149,7 +148,7 @@ fn persist_theme(name: &str) {
                         FluentValue::from(e.to_string().as_str()),
                     )],
                 ),
-                until: Instant::now() + Duration::from_secs(2),
+                until: peri_time::monotonic_now() + Duration::from_secs(2),
             });
         }
     }
@@ -187,7 +186,7 @@ fn toggle_daily_color() {
         Ok(()) => {
             *NOTIFICATION.state().write() = Some(Notification {
                 message: i18n::tr("config-saved").to_string(),
-                until: Instant::now() + Duration::from_secs(1),
+                until: peri_time::monotonic_now() + Duration::from_secs(1),
             });
         }
         Err(e) => {
@@ -200,7 +199,7 @@ fn toggle_daily_color() {
                         FluentValue::from(e.to_string().as_str()),
                     )],
                 ),
-                until: Instant::now() + Duration::from_secs(2),
+                until: peri_time::monotonic_now() + Duration::from_secs(2),
             });
         }
     }

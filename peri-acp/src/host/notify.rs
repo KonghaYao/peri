@@ -336,7 +336,7 @@ pub(crate) async fn send_session_info_update_with_title(
     title: Option<&str>,
 ) {
     use agent_client_protocol::schema::v1::SessionInfoUpdate;
-    let mut info = SessionInfoUpdate::new().updated_at(chrono::Utc::now().to_rfc3339());
+    let mut info = SessionInfoUpdate::new().updated_at(peri_time::now_utc_rfc3339());
     if let Some(t) = title {
         info = info.title(t.to_string());
     }

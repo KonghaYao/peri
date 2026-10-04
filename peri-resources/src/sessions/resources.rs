@@ -910,7 +910,7 @@ impl SessionResources for SessionResourcesImpl {
             .flatten();
         if let Some(lease) = owner {
             if lease.is_active() {
-                tokio::time::timeout(SETTLE_WAIT, lease.wait_for_in_flight())
+                peri_time::timeout(SETTLE_WAIT, lease.wait_for_in_flight())
                     .await
                     .map_err(|_| SessionResourceError::new(SessionResourceErrorKind::Timeout))?;
             }
@@ -932,7 +932,7 @@ impl SessionResources for SessionResourcesImpl {
         {
             if lease.is_active() {
                 // 有界等待已准入写入结清；超时说明有写入卡住，报告未结清而不是无限等。
-                tokio::time::timeout(SETTLE_WAIT, lease.wait_for_in_flight())
+                peri_time::timeout(SETTLE_WAIT, lease.wait_for_in_flight())
                     .await
                     .map_err(|_| SessionResourceError::new(SessionResourceErrorKind::Timeout))?;
             }

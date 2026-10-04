@@ -50,8 +50,7 @@ fn save_statement(principal: &str, workspace_id: &str, key: &str, payload: &str)
         Some(key),
     );
     spec.params.push(Value::Text(payload.into()));
-    spec.params
-        .push(Value::Text(chrono::Utc::now().to_rfc3339()));
+    spec.params.push(Value::Text(peri_time::now_utc_rfc3339()));
     spec
 }
 

@@ -36,7 +36,7 @@ pub(crate) const BUILTIN_CONVERGE_TIMEOUT: std::time::Duration =
     std::time::Duration::from_millis(1000);
 
 /// tick 驱动的固定周期：1s，语义搬运自既有宿主 `HostTaskKind::CronTick` 的
-/// `tokio::time::interval(1s)`（该宿主 task 在 W2 装配收口时删除，见 sub-plan H §5.1）。
+/// `peri_time::interval(1s)`（该宿主 task 在 W2 装配收口时删除，见 sub-plan H §5.1）。
 ///
 /// **唯一 spawn 点**是 [`crate::mcp::client::McpClientPool::spawn_builtin_transport`]：本
 /// 常量只描述周期，不描述「谁该起 tick」——tick 是否挂载由实例名与
@@ -111,7 +111,7 @@ impl BuiltinServerTask {
     /// 返回退出事实。`AbortedAfterTimeout` 表示等待上界内没有靠 EOF 自然收敛，
     /// 是异常信号（正常关闭必须落在 `Quit`），调用方据此告警。
     pub(crate) async fn converge(&mut self, timeout: std::time::Duration) -> BuiltinServerExit {
-        match tokio::time::timeout(timeout, &mut self.handle).await {
+        match peri_time::timeout(timeout, &mut self.handle).await {
             Ok(Ok(exit)) => exit,
             Ok(Err(error)) => BuiltinServerExit::TaskFailed(error.to_string()),
             Err(_) => {
@@ -167,7 +167,7 @@ impl TickGuard {
         let task_cancel = cancel.clone();
         let task_stopped = Arc::clone(&stopped);
         let join = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(interval);
+            let mut interval = peri_time::interval(interval);
             loop {
                 tokio::select! {
                     _ = task_cancel.cancelled() => break,
@@ -189,7 +189,7 @@ impl TickGuard {
     /// 协作式的，所以「已 cancel」不等于「已退出」——只有本方法的返回值能作为证据。
     pub(crate) async fn shutdown(mut self, timeout: std::time::Duration) -> TickCloseOutcome {
         self.cancel.cancel();
-        match tokio::time::timeout(timeout, &mut self.join).await {
+        match peri_time::timeout(timeout, &mut self.join).await {
             Ok(Ok(())) => TickCloseOutcome::Joined,
             Ok(Err(error)) => TickCloseOutcome::TaskFailed(error.to_string()),
             Err(_) => {
@@ -268,7 +268,7 @@ impl BuiltinInstanceSupervisor {
         };
         let server = self.server_task.converge(timeout).await;
         if let Some(workspace) = self.workspace_tasks.take() {
-            if tokio::time::timeout(timeout, workspace.shutdown_shell_tasks())
+            if peri_time::timeout(timeout, workspace.shutdown_shell_tasks())
                 .await
                 .is_err()
             {

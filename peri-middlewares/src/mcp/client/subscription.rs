@@ -106,7 +106,7 @@ impl McpClientPool {
         let peer = self
             .get_client(server)
             .and_then(|handle| handle.peer.clone())?;
-        match tokio::time::timeout(
+        match peri_time::timeout(
             Self::GIT_REF_READ_TIMEOUT,
             self.read_resource_cached(server, uri, &peer),
         )
@@ -269,7 +269,7 @@ impl McpClientPool {
             delay_secs = %delay_secs,
             "订阅流异常中断，退避后重新 listen"
         );
-        tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
+        peri_time::sleep(std::time::Duration::from_secs(delay_secs)).await;
         // 连接可能已被移除/重连：取 services 表中的当前 peer
         let peer = {
             let services = self.services.lock();

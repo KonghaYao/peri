@@ -6,6 +6,7 @@ description = "Rust Agent framework with middleware system, aligned with @langgr
 license = "Apache-2.0"
 
 [dependencies]
+peri-time = { path = "../peri-time" }
 anyhow.workspace = true
 async-trait.workspace = true
 chrono.workspace = true

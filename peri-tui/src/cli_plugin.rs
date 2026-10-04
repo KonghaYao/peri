@@ -154,7 +154,8 @@ pub async fn run_marketplace_add(source: &str) -> Result<()> {
     // 用 manifest 里的 name 覆盖从 source 提取的名称
     let actual_name = manifest.name;
 
-    let now = Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+    let now: chrono::DateTime<Local> = peri_time::now_wall().into();
+    let now = now.format("%Y-%m-%dT%H:%M:%S").to_string();
     marketplaces.push(peri_middlewares::plugin::KnownMarketplace {
         source: marketplace_source,
         install_location,
@@ -261,7 +262,8 @@ pub async fn run_marketplace_update(name: &str) -> Result<()> {
             .map_err(|e| anyhow::anyhow!("无法刷新 marketplace: {e}"))?;
 
     let mut updated = marketplaces;
-    let now = Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+    let now: chrono::DateTime<Local> = peri_time::now_wall().into();
+    let now = now.format("%Y-%m-%dT%H:%M:%S").to_string();
     updated[entry_index].install_location = install_location;
     updated[entry_index].last_updated = now;
 

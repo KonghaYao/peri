@@ -5,7 +5,7 @@ use crate::kit::atoms::{
 };
 use fluent_bundle::FluentValue;
 use peri_acp::provider::config::{ProviderConfig, ProviderModels};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use super::LoginEditState;
 
@@ -28,7 +28,7 @@ pub(super) fn save_login_edit(es: &LoginEditState) -> bool {
             if es.provider_id.trim().is_empty() {
                 *NOTIFICATION.state().write() = Some(Notification {
                     message: i18n::tr("app-provider-name-empty"),
-                    until: Instant::now() + Duration::from_secs(2),
+                    until: peri_time::monotonic_now() + Duration::from_secs(2),
                 });
                 return false;
             }
@@ -99,7 +99,7 @@ pub(super) fn save_login_edit(es: &LoginEditState) -> bool {
                     FluentValue::from(e.to_string().as_str()),
                 )],
             ),
-            until: Instant::now() + Duration::from_secs(2),
+            until: peri_time::monotonic_now() + Duration::from_secs(2),
         });
         return false;
     }
@@ -118,7 +118,7 @@ pub(super) fn save_login_edit(es: &LoginEditState) -> bool {
 
     *NOTIFICATION.state().write() = Some(Notification {
         message: i18n::tr("config-saved").to_string(),
-        until: Instant::now() + Duration::from_secs(1),
+        until: peri_time::monotonic_now() + Duration::from_secs(1),
     });
 
     if is_new {
@@ -176,7 +176,7 @@ fn persist_and_notify(snap: &crate::config::PeriConfig) {
         Ok(()) => {
             *NOTIFICATION.state().write() = Some(Notification {
                 message: i18n::tr("config-saved").to_string(),
-                until: Instant::now() + Duration::from_secs(1),
+                until: peri_time::monotonic_now() + Duration::from_secs(1),
             });
         }
         Err(e) => {
@@ -188,7 +188,7 @@ fn persist_and_notify(snap: &crate::config::PeriConfig) {
                         FluentValue::from(e.to_string().as_str()),
                     )],
                 ),
-                until: Instant::now() + Duration::from_secs(2),
+                until: peri_time::monotonic_now() + Duration::from_secs(2),
             });
         }
     }

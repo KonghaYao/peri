@@ -92,8 +92,8 @@ pub fn spawn_workflow_poll(
     shutdown: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(2));
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut interval = peri_time::interval(Duration::from_secs(2));
+        interval.set_missed_tick_behavior(peri_time::MissedTickBehavior::Delay);
 
         loop {
             tokio::select! {

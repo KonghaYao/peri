@@ -70,8 +70,8 @@ impl ShellExecutor for LocalShellExecutor {
                     agent_name: "bg-shell".to_string(),
                     prompt_summary: command_owned.chars().take(80).collect(),
                     status: BackgroundTaskStatus::Running,
-                    started_at: std::time::Instant::now(),
-                    chrono_started_at: chrono::Utc::now(),
+                    started_at: peri_time::monotonic_now(),
+                    chrono_started_at: chrono::DateTime::<chrono::Utc>::from(peri_time::now_wall()),
                     kind: BgTaskKind::Shell,
                     cancel_handle: BgCancelHandle::Kill(None),
                     cancel_token: None,
@@ -127,8 +127,8 @@ impl ShellExecutor for LocalShellExecutor {
             agent_name: "bg-shell".to_string(),
             prompt_summary: command_owned.chars().take(80).collect(),
             status: BackgroundTaskStatus::Running,
-            started_at: std::time::Instant::now(),
-            chrono_started_at: chrono::Utc::now(),
+            started_at: peri_time::monotonic_now(),
+            chrono_started_at: chrono::DateTime::<chrono::Utc>::from(peri_time::now_wall()),
             kind: BgTaskKind::Shell,
             cancel_handle: BgCancelHandle::Kill(
                 execution.scoped_cancel_callback(Arc::clone(&registry)),
@@ -158,7 +158,7 @@ impl ShellExecutor for LocalShellExecutor {
         Arc::clone(&registry).spawn_execution_cleanup(async move {
             // 外層 catch_unwind 保護：確保任何意外 panic 也會調用 registry.complete()，
             // 防止 bg shell 任務殘留在狀態欄。
-            let started = std::time::Instant::now();
+            let started = peri_time::monotonic_now();
             let result = std::panic::AssertUnwindSafe(async {
                 // 流式读取 stdout/stderr：tee 到日志文件（运行期 agent 可读）+ 内存缓冲
                 // （wait_with_output 内部消费管道无法 tee，故显式 take pipe 自行读取）
@@ -189,7 +189,7 @@ impl ShellExecutor for LocalShellExecutor {
                 let wait_result = match timeout_ms {
                     None => child.wait().await.map(Some),
                     Some(ms) => {
-                        match tokio::time::timeout(
+                        match peri_time::timeout(
                             std::time::Duration::from_millis(ms),
                             child.wait(),
                         )

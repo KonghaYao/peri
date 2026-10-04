@@ -1,5 +1,8 @@
 # peri-workflow 代码索引
 
+Workflow 的运行耗时、RPC 有界等待和终态时间戳使用 [peri-time](peri-time.md)；
+预算与持久化字段语义仍由 Workflow 自身定义。
+
 > 速查表：把「我想做什么」映射到稳定符号；细节以代码为准。更新：2026-09-13（ADLC 检查与恢复）
 > 依据：`docs/design/workflow.md`、`docs/standards/architecture-contracts.md`、源码（无 crate 级 CLAUDE.md）
 

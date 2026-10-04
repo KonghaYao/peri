@@ -2,7 +2,6 @@ use std::time::Duration;
 
 use base64::Engine;
 use reqwest::Client;
-use tokio::time::Instant;
 use tracing::warn;
 
 use crate::{
@@ -84,7 +83,7 @@ impl LangfuseClient {
             return Ok(());
         }
 
-        let deadline = Instant::now()
+        let deadline = peri_time::monotonic_now()
             .checked_add(self.export_config.retry_budget)
             .ok_or_else(retry::budget_error)?;
         let limit = max_bytes.min(self.export_config.max_request_bytes);
@@ -105,13 +104,13 @@ impl LangfuseClient {
 
         let mut attempt = 0;
         loop {
-            if Instant::now() >= deadline {
+            if peri_time::monotonic_now() >= deadline {
                 return Err(retry::budget_error());
             }
             let reusable = request.try_clone().ok_or_else(|| {
                 LangfuseError::IngestionApi("OTLP encoded request cannot be reused".into())
             })?;
-            let outcome = tokio::time::timeout_at(deadline, self.send_once(reusable, attempt))
+            let outcome = peri_time::timeout_at(deadline, self.send_once(reusable, attempt))
                 .await
                 .map_err(|_| retry::budget_error())?;
             let (error, retry_after) = match outcome {
@@ -122,7 +121,7 @@ impl LangfuseClient {
                 return Err(error);
             }
             let delay = retry::delay(&self.export_config, attempt, retry_after);
-            let remaining = deadline.saturating_duration_since(Instant::now());
+            let remaining = deadline.saturating_duration_since(peri_time::monotonic_now());
             if delay >= remaining {
                 return Err(retry::budget_error());
             }
@@ -133,7 +132,7 @@ impl LangfuseClient {
                 delay_ms = delay.as_millis(),
                 "OTLP export transient failure; retrying"
             );
-            tokio::time::sleep(delay).await;
+            peri_time::sleep(delay).await;
         }
     }
 

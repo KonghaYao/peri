@@ -11,8 +11,9 @@ use peri_mcp_common::shell::{
     kill_process_group, shell_command, tee_pipe_with_output, ShellExecutionGuard,
 };
 use peri_mcp_common::shell_output::ShellOutputCapture;
+use peri_time::timeout;
 use serde_json::Value;
-use tokio::time::{timeout, Duration};
+use std::time::Duration;
 use tracing::warn;
 
 use peri_mcp_common::shell::persist_truncated_output_with_ref;
@@ -601,7 +602,7 @@ impl BashTool {
                             // 续跑任务：继续读 pipe 至 EOF → wait → finalize → 通知 Agent
                             let task_owner = task_manager.clone();
                             task_owner.spawn_owned(Box::pin(async move {
-                                let started = std::time::Instant::now();
+                                let started = peri_time::monotonic_now();
                                 drain_output.await;
                                 // 已在前台回收的 leader 不能提供仍持管道的后代退出码。
                                 let (success, exit_code) = if let Some(status) = leader_status {
@@ -767,7 +768,7 @@ impl BashTool {
                     let task_id_for_wait = task_id.clone();
                     let background_output = Arc::clone(&output_capture);
                     manager.spawn_owned(Box::pin(async move {
-                        let started = std::time::Instant::now();
+                        let started = peri_time::monotonic_now();
                         execution.wait_for_exit().await;
                         execution.confirm_stopped();
                         task_manager.finalize_bg_shell(&on_complete, task_id_for_wait, summary, status.success(),

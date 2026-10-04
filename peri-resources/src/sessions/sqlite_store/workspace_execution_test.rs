@@ -282,7 +282,7 @@ async fn test_worktree_lease_supports_arbitrary_opaque_thread_ids() {
     let repo = repository();
     let (store, db) = store().await;
     let workspace = store.resolve_workspace(repo.path()).await.unwrap();
-    let mut meta = ThreadMeta::new(workspace.cwd.to_str().unwrap());
+    let mut meta = ThreadMeta::new_at(workspace.cwd.to_str().unwrap(), peri_time::now_wall());
     meta.id = format!("../arbitrary/会话-{}", "x".repeat(512));
     let id = store.create_bound_thread(meta, &workspace).await.unwrap();
     let lease = store.acquire_execution_lease(&id).await.unwrap();
@@ -314,7 +314,10 @@ async fn test_worktree_concurrent_creation_exceeds_pool_capacity_without_nested_
         tasks.spawn(async move {
             barrier.wait().await;
             store
-                .create_bound_thread(ThreadMeta::new(workspace.cwd.to_str().unwrap()), &workspace)
+                .create_bound_thread(
+                    ThreadMeta::new_at(workspace.cwd.to_str().unwrap(), peri_time::now_wall()),
+                    &workspace,
+                )
                 .await
         });
     }
@@ -343,7 +346,10 @@ async fn test_worktree_concurrent_leases_exceed_pool_capacity_without_nested_acq
     for _ in 0..CONCURRENCY {
         ids.push(
             store
-                .create_bound_thread(ThreadMeta::new(workspace.cwd.to_str().unwrap()), &workspace)
+                .create_bound_thread(
+                    ThreadMeta::new_at(workspace.cwd.to_str().unwrap(), peri_time::now_wall()),
+                    &workspace,
+                )
                 .await
                 .unwrap(),
         );

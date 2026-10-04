@@ -412,7 +412,7 @@ async fn disconnect(gateway: &Arc<dyn AcpMcpGatewayPort>, connection_id: &str) {
         "connectionId".to_string(),
         Value::String(connection_id.to_string()),
     );
-    let outcome = tokio::time::timeout(
+    let outcome = peri_time::timeout(
         SHUTDOWN_TIMEOUT,
         gateway.request(MCP_DISCONNECT_METHOD, Value::Object(params)),
     )

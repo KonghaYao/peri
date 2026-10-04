@@ -68,7 +68,7 @@ impl Drop for PendingWorkspaceRequest {
             let peer = self.peer.clone();
             if let Ok(runtime) = tokio::runtime::Handle::try_current() {
                 runtime.spawn(async move {
-                    let _ = tokio::time::timeout(
+                    let _ = peri_time::timeout(
                         Duration::from_secs(1),
                         peer.notify_cancelled(CancelledNotificationParam::new(
                             Some(id),
@@ -121,8 +121,8 @@ impl McpWorkspaceFileReader {
         let generation = pool.handle_generation(&handle);
         let owner = pool.acp_owners.read().get("workspace").cloned();
         let request = CustomRequest::new(method, params);
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-        let request = tokio::time::timeout_at(
+        let deadline = peri_time::monotonic_now() + Duration::from_secs(10);
+        let request = peri_time::timeout_at(
             deadline,
             peer.send_request_with_option(
                 ClientRequest::CustomRequest(request),
@@ -136,7 +136,7 @@ impl McpWorkspaceFileReader {
             peer: peer.clone(),
             id: Some(request.id.clone()),
         };
-        let result = tokio::time::timeout_at(deadline, request.await_response())
+        let result = peri_time::timeout_at(deadline, request.await_response())
             .await
             .map_err(|_| WorkspaceReadError::Timeout)?
             .map_err(|_| WorkspaceReadError::ReadFailed)?;

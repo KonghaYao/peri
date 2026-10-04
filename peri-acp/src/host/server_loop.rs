@@ -362,8 +362,7 @@ impl ServerLoop<'_> {
                 .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
                 .clone();
             if matches!(method.as_str(), "session/close" | "session/delete") {
-                match tokio::time::timeout(std::time::Duration::from_secs(5), lock.lock_owned())
-                    .await
+                match peri_time::timeout(std::time::Duration::from_secs(5), lock.lock_owned()).await
                 {
                     Ok(guard) => Some(guard),
                     Err(_) => {

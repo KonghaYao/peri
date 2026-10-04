@@ -80,7 +80,7 @@ impl McpClientPool {
     async fn close_shared_services(&self) -> usize {
         let services = self.shared_services.lock().clone();
         for service in services {
-            let _ = tokio::time::timeout(
+            let _ = peri_time::timeout(
                 SHUTDOWN_TIMEOUT,
                 service.close_with_timeout(SHUTDOWN_TIMEOUT),
             )

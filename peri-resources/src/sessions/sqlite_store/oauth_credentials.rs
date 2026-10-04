@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use chrono::Utc;
 use peri_acp_types::oauth_credentials::{
     validate_credentials, validate_server_key, OAuthCredentialError, OAuthCredentialPort,
     OAuthCredentialResult,
@@ -84,7 +83,7 @@ impl OAuthCredentialPort for SqliteOAuthCredentialStore {
             .bind(workspace_id)
             .bind(server_key)
             .bind(credentials)
-            .bind(Utc::now().to_rfc3339())
+            .bind(peri_time::now_utc_rfc3339())
             .execute(&self.database.pool)
             .await
             .map_err(|_| OAuthCredentialError::Unavailable)?;

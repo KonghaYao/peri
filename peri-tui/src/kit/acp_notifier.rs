@@ -97,7 +97,7 @@ fn spawn_kit_notifier_inner(
                             INPUT_BUFFER.state().write().clear();
                             *NOTIFICATION.state().write() = Some(crate::kit::atoms::Notification {
                                 message: i18n::tr("app-agent-disconnected"),
-                                until: std::time::Instant::now() + std::time::Duration::from_secs(5),
+                                until: peri_time::monotonic_now() + std::time::Duration::from_secs(5),
                             });
                             RENDER_HEARTBEAT.set(RENDER_HEARTBEAT.get().wrapping_add(1));
                             break;

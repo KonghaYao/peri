@@ -97,7 +97,7 @@ fn load_marketplace_data() -> Vec<MsEntry> {
                 && let Some(ref path) = manifest_path
                 && let Ok(meta) = std::fs::metadata(path)
                 && let Ok(mtime) = meta.modified()
-                && let Ok(elapsed) = mtime.elapsed()
+                && let Ok(elapsed) = peri_time::now_wall().duration_since(mtime)
                 && elapsed.as_secs() > 24 * 3600
             {
                 status = MsStatus::Stale;

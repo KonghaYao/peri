@@ -273,7 +273,7 @@ impl ShellTasks {
                 .records
                 .entry(result.task_id.clone())
                 .or_insert_with(|| {
-                    let now = chrono::Utc::now().to_rfc3339();
+                    let now = peri_time::now_utc_rfc3339();
                     DetailedTask::new(
                         Task::new(&result.task_id, TaskStatus::Working, &now, &now),
                         TaskPayload::Working,
@@ -282,7 +282,7 @@ impl ShellTasks {
             if record.task.status.is_terminal() {
                 return;
             }
-            record.task.last_updated_at = chrono::Utc::now().to_rfc3339();
+            record.task.last_updated_at = peri_time::now_utc_rfc3339();
             let text = if cancelled {
                 "Background shell cancellation completed."
             } else if result.success {
@@ -405,7 +405,7 @@ impl ShellTasks {
         .await
         .map_err(|_| McpError::internal_error("shell task launch failed", None))?
         .map_err(|_| McpError::internal_error("shell task launch failed", None))?;
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = peri_time::now_utc_rfc3339();
         let mut record = DetailedTask::new(
             Task::new(&handle.task_id, TaskStatus::Working, &now, &now)
                 .with_status_message("Background shell command is running.")
@@ -442,7 +442,7 @@ impl ShellTasks {
         scope: Option<&str>,
         command: Option<&str>,
     ) -> Task {
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = peri_time::now_utc_rfc3339();
         let record = DetailedTask::new(
             Task::new(task_id, TaskStatus::Working, &now, &now)
                 .with_status_message("Foreground timeout promoted to background execution.")
@@ -535,7 +535,7 @@ impl ShellTasks {
                 record.task.status_message = Some(
                     "Background shell cancellation requested; waiting for process cleanup.".into(),
                 );
-                record.task.last_updated_at = chrono::Utc::now().to_rfc3339();
+                record.task.last_updated_at = peri_time::now_utc_rfc3339();
             }
             if let Some(task) = state.publish(task_id) {
                 let _ = self.updates.send(task);
@@ -615,7 +615,7 @@ impl ShellTasks {
         cursor: u64,
         wait_ms: u64,
     ) -> Result<ScopeChanges, McpError> {
-        let deadline = tokio::time::Instant::now() + Duration::from_millis(wait_ms.min(30_000));
+        let deadline = peri_time::monotonic_now() + Duration::from_millis(wait_ms.min(30_000));
         loop {
             let notified = self.changed.notified();
             tokio::pin!(notified);
@@ -636,14 +636,14 @@ impl ShellTasks {
                     .filter(|(seq, s, _)| *seq > cursor && s == scope)
                     .map(|(_, _, change)| change.clone())
                     .collect();
-                if !changes.is_empty() || wait_ms == 0 || tokio::time::Instant::now() >= deadline {
+                if !changes.is_empty() || wait_ms == 0 || peri_time::monotonic_now() >= deadline {
                     return Ok(ScopeChanges {
                         cursor: state.cursor,
                         changes,
                     });
                 }
             }
-            let _ = tokio::time::timeout_at(deadline, notified).await;
+            let _ = peri_time::timeout_at(deadline, notified).await;
         }
     }
 

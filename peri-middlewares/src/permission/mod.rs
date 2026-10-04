@@ -475,7 +475,7 @@ impl PermissionMiddleware {
                 tool_input: tool_call.input.clone(),
             }],
         };
-        let response = match tokio::time::timeout(self.broker_timeout, broker.request(ctx)).await {
+        let response = match peri_time::timeout(self.broker_timeout, broker.request(ctx)).await {
             Ok(resp) => resp,
             Err(_elapsed) => {
                 return Err(AgentError::ToolRejected {
@@ -588,7 +588,7 @@ impl PermissionMiddleware {
             .collect();
 
         let ctx = InteractionContext::Approval { items };
-        let response = match tokio::time::timeout(self.broker_timeout, broker.request(ctx)).await {
+        let response = match peri_time::timeout(self.broker_timeout, broker.request(ctx)).await {
             Ok(resp) => resp,
             Err(_elapsed) => {
                 // 批量结果必须与输入等长：`MiddlewareChain::run_before_tools_batch`

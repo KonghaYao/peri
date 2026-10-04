@@ -3,7 +3,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use chrono::Utc;
 use peri_acp_types::messages::MessageId;
 use peri_acp_types::session_resources::{
     BindingState, ChildSnapshot, CloseSettlement, ForkSnapshot, FrozenSnapshotBytes, FrozenState,
@@ -750,7 +749,7 @@ impl SessionDataPort for SqliteSessionData {
         record: &ChildResumeRecord,
     ) -> SessionResourceResult<()> {
         self.writable()?;
-        let now = Utc::now().to_rfc3339();
+        let now = peri_time::now_utc_rfc3339();
         let mut tx = self
             .database
             .pool
@@ -834,7 +833,7 @@ impl SessionDataPort for SqliteSessionData {
             }
         }
         sqlx::query("UPDATE threads SET updated_at = ?1 WHERE id = ?2")
-            .bind(Utc::now().to_rfc3339())
+            .bind(peri_time::now_utc_rfc3339())
             .bind(id.as_str())
             .execute(&mut *tx)
             .await

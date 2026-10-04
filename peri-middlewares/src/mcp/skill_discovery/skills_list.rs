@@ -212,7 +212,7 @@ async fn fetch_skill_list_page_inner(
     params: Option<serde_json::Value>,
 ) -> Result<SkillListResponse, String> {
     let request = ClientRequest::CustomRequest(CustomRequest::new("skills/list", params));
-    let response = tokio::time::timeout(SKILLS_LIST_TIMEOUT, peer.send_request(request)).await;
+    let response = peri_time::timeout(SKILLS_LIST_TIMEOUT, peer.send_request(request)).await;
     match response {
         Ok(Ok(ServerResult::CustomResult(custom))) => custom.result_as().map_err(|err| {
             tracing::warn!(server, error = %err, "MCP skill 发现：skills/list 响应解析失败");
@@ -433,23 +433,23 @@ pub(crate) async fn read_skill_resource_text(
     uri: &str,
 ) -> SkillResourceRead {
     let request = ReadResourceRequestParams::new(uri.to_string());
-    let result =
-        match tokio::time::timeout(RESOURCE_READ_TIMEOUT, peer.read_resource(request)).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(err)) => {
-                tracing::debug!(server, %uri, "MCP skill 资源读取失败: {err}");
-                return SkillResourceRead::Failed;
-            }
-            Err(_) => {
-                tracing::debug!(
-                    server,
-                    %uri,
-                    "MCP skill 资源读取超时 ({}s)",
-                    RESOURCE_READ_TIMEOUT.as_secs()
-                );
-                return SkillResourceRead::Failed;
-            }
-        };
+    let result = match peri_time::timeout(RESOURCE_READ_TIMEOUT, peer.read_resource(request)).await
+    {
+        Ok(Ok(result)) => result,
+        Ok(Err(err)) => {
+            tracing::debug!(server, %uri, "MCP skill 资源读取失败: {err}");
+            return SkillResourceRead::Failed;
+        }
+        Err(_) => {
+            tracing::debug!(
+                server,
+                %uri,
+                "MCP skill 资源读取超时 ({}s)",
+                RESOURCE_READ_TIMEOUT.as_secs()
+            );
+            return SkillResourceRead::Failed;
+        }
+    };
     result
         .contents
         .iter()
@@ -473,7 +473,7 @@ pub(crate) async fn read_skill_resource_text(
 async fn fetch_skill_entry(peer: &Peer<RoleClient>, uri: &str) -> Option<SkillListEntry> {
     let params = serde_json::json!({ "uri": uri });
     let request = ClientRequest::CustomRequest(CustomRequest::new("skills/get", Some(params)));
-    let response = tokio::time::timeout(SKILLS_LIST_TIMEOUT, peer.send_request(request)).await;
+    let response = peri_time::timeout(SKILLS_LIST_TIMEOUT, peer.send_request(request)).await;
     let parsed: SkillGetResponse = match response {
         Ok(Ok(ServerResult::CustomResult(custom))) => match custom.result_as() {
             Ok(parsed) => parsed,

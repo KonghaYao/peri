@@ -197,7 +197,7 @@ async fn spawn_git(command: &mut Command) -> Result<Option<tokio::process::Child
             Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
             Err(_) if attempt < GIT_SPAWN_ATTEMPTS => {
                 attempt += 1;
-                tokio::time::sleep(Duration::from_millis(10 * u64::from(attempt))).await;
+                peri_time::sleep(Duration::from_millis(10 * u64::from(attempt))).await;
             }
             Err(_) => {
                 return Err(
@@ -236,7 +236,7 @@ async fn git(program: &OsStr, cwd: &Path, args: &[&str]) -> Result<Option<std::p
     }
     let stdout = child.stdout.take().context("Git stdout unavailable")?;
     let stderr = child.stderr.take().context("Git stderr unavailable")?;
-    let result = tokio::time::timeout(Duration::from_secs(5), async {
+    let result = peri_time::timeout(Duration::from_secs(5), async {
         let (stdout, stderr, status) =
             tokio::try_join!(bounded_output(stdout), bounded_output(stderr), async {
                 child.wait().await.map_err(anyhow::Error::from)

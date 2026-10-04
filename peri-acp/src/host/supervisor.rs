@@ -41,7 +41,7 @@ pub(super) async fn previous_generation_stopped(
             Err("former Agent process tree has not been proven stopped".into())
         }
     };
-    tokio::time::timeout(std::time::Duration::from_secs(25), query)
+    peri_time::timeout(std::time::Duration::from_secs(25), query)
         .await
         .map_err(|_| "SDK supervisor proof timed out".to_owned())?
 }

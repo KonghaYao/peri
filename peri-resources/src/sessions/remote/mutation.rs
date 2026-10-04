@@ -786,7 +786,7 @@ impl RemoteStore {
 
 /// 时间戳只作诊断（记录空间与封闭时间），不作任何判据。
 fn now_stamp() -> String {
-    chrono::Utc::now().to_rfc3339()
+    peri_time::now_utc_rfc3339()
 }
 
 /// 只读批失败 → 领域失败：直接按分类上报（读没有副作用，不存在「不确定生效」）。

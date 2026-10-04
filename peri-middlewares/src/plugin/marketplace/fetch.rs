@@ -34,7 +34,7 @@ pub(crate) async fn fetch_git(
             url,
             &cache_dir.display().to_string(),
         ]);
-        let output = tokio::time::timeout(
+        let output = peri_time::timeout(
             std::time::Duration::from_secs(30),
             peri_process::run_output(command),
         )
@@ -49,7 +49,7 @@ pub(crate) async fn fetch_git(
     } else if auto_update {
         let mut command = tokio::process::Command::new("git");
         command.args(["-C", &cache_dir.display().to_string(), "pull", "--ff-only"]);
-        let output = tokio::time::timeout(
+        let output = peri_time::timeout(
             std::time::Duration::from_secs(30),
             peri_process::run_output(command),
         )
@@ -158,7 +158,7 @@ pub(crate) async fn fetch_npm(
         "--pack-destination",
         &tmp_dir.display().to_string(),
     ]);
-    let output = tokio::time::timeout(
+    let output = peri_time::timeout(
         std::time::Duration::from_secs(60),
         peri_process::run_output(command),
     )

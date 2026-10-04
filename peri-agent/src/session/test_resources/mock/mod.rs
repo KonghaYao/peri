@@ -94,14 +94,14 @@ fn fixture_frozen() -> String {
 
 /// 只有数据、没有 meta 记录的 id 的默认 meta（写入即登记的替身里不会出现「无 meta」）。
 fn default_meta_for(id: &ThreadId) -> ThreadMeta {
-    let mut meta = ThreadMeta::new("/test");
+    let mut meta = ThreadMeta::new_at("/test", peri_time::now_wall());
     meta.id = id.clone();
     meta
 }
 
 /// 由 `NewSessionMeta` 构造替身登记的 `ThreadMeta`（隐藏标记保留调用方意图）。
 fn child_meta(id: &ThreadId, meta: &NewSessionMeta, hidden: bool) -> ThreadMeta {
-    let mut thread = ThreadMeta::new(&meta.cwd);
+    let mut thread = ThreadMeta::new_at(&meta.cwd, peri_time::now_wall());
     thread.id = id.clone();
     thread.title = meta.title.clone();
     thread.parent_thread_id = meta.parent_thread_id.clone();
@@ -275,7 +275,7 @@ impl MockSessionResources {
         id: &str,
         cwd: &str,
     ) -> Arc<dyn peri_acp_types::workspace::SessionExecutionLease> {
-        let mut meta = ThreadMeta::new(cwd);
+        let mut meta = ThreadMeta::new_at(cwd, peri_time::now_wall());
         meta.id = id.to_owned();
         self.with_region(&id.to_owned(), |region| {
             region.binding = Some(fixture_binding(cwd));
@@ -359,7 +359,7 @@ fn write_status_shared(
         let mut meta = region
             .meta
             .clone()
-            .unwrap_or_else(|| ThreadMeta::new("/test"));
+            .unwrap_or_else(|| ThreadMeta::new_at("/test", peri_time::now_wall()));
         meta.id = id.clone();
         meta.agent_status = status;
         region.meta = Some(meta);

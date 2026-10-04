@@ -3,7 +3,6 @@
 use std::collections::HashMap;
 use std::sync::{atomic::AtomicBool, Arc};
 
-use chrono::Utc;
 use peri_acp_types::command_registry::CommandRegistry;
 use peri_acp_types::mcp_skills::McpSkillRegistry;
 use peri_acp_types::permission::{PermissionMode, SharedPermissionMode};
@@ -83,7 +82,7 @@ impl SessionManager {
             cwd: cwd.to_string(),
             cancel_token: CancellationToken::new(),
             state_messages: Vec::new(),
-            created_at: Utc::now(),
+            created_at: peri_time::now_wall().into(),
             provider_id: self
                 .inner
                 .peri_config

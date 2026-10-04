@@ -6,6 +6,7 @@ description = "Builtin cron MCP instance for Peri"
 license = "Apache-2.0"
 
 [dependencies]
+peri-time = { path = "../../peri-time" }
 async-trait.workspace = true
 chrono.workspace = true
 croner = "3"

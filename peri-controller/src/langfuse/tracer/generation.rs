@@ -103,7 +103,7 @@ impl GenerationTracker {
     ) -> GenerationStart {
         // 新 generation 的 retry 记录按 key 隔离，天然为空，无需清空全局 vec
         let gen_id = format!("gen_{}", uuid::Uuid::now_v7());
-        let start_time = chrono::Utc::now().to_rfc3339();
+        let start_time = peri_time::now_utc_rfc3339();
         let cached = GenerationCached {
             gen_id: gen_id.clone(),
             start_time: start_time.clone(),

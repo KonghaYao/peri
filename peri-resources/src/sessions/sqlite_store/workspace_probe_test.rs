@@ -109,7 +109,10 @@ async fn test_worktree_registration_admission_child() {
     let store = SqliteThreadStore::new(Path::new(&database)).await.unwrap();
     let workspace = store.resolve_workspace(Path::new(&cwd)).await.unwrap();
     let thread = store
-        .create_bound_thread(ThreadMeta::new(cwd.as_str()), &workspace)
+        .create_bound_thread(
+            ThreadMeta::new_at(cwd.as_str(), peri_time::now_wall()),
+            &workspace,
+        )
         .await
         .unwrap();
     let lease = store.acquire_execution_lease(&thread).await.unwrap();

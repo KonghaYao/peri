@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::kit::focus_router;
 use crate::kit::message_area::props::{ScrollbarFields, mouse_in_area};
@@ -151,7 +151,7 @@ pub(in crate::kit::message_area) fn handle_event(
                                 let mut s = scrollbar_drag.write_no_update();
                                 s.active = true;
                                 s.thumb_offset = thumb_offset;
-                                s.last_flush = Instant::now();
+                                s.last_flush = peri_time::monotonic_now();
                             }
                             // 清除手势按下记录，防止 fallthrough 冲突
                             *gesture.write_no_update() = None;
@@ -159,7 +159,7 @@ pub(in crate::kit::message_area) fn handle_event(
                         }
                         MouseEventKind::Drag(MouseButton::Left) if drag_active => {
                             // 16ms 节流——和滚轮 / 文本 Drag 保持一致
-                            let now = Instant::now();
+                            let now = peri_time::monotonic_now();
                             {
                                 let d = scrollbar_drag.read();
                                 if now.duration_since(d.last_flush)
@@ -255,7 +255,7 @@ pub(in crate::kit::message_area) fn handle_event(
                         // [TRAP] 先 copy 出 gesture 值 drop guard 再 write——
                         // parking_lot 同 thread read+write 冲突会 panic。
                         let pending = *gesture.read();
-                        let now = Instant::now();
+                        let now = peri_time::monotonic_now();
                         let within_throttle_window = {
                             let dt = drag_throttle.read();
                             now.duration_since(dt.last_flush)

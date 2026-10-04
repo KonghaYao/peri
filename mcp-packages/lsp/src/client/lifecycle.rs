@@ -230,7 +230,7 @@ impl LspClient {
             let _ = self
                 .request_on(&shutdown.dispatcher, "shutdown", Some(Value::Null), 5_000)
                 .await;
-            let _ = tokio::time::timeout(
+            let _ = peri_time::timeout(
                 std::time::Duration::from_secs(1),
                 shutdown
                     .dispatcher
@@ -250,7 +250,7 @@ impl LspClient {
     fn check_and_increment_restart(&self) -> Result<(), LspError> {
         let mut count = self.restart_count.lock();
         let mut window_start = self.restart_window_start.lock();
-        let now = std::time::Instant::now();
+        let now = peri_time::monotonic_now();
 
         // 窗口已过期：清零计数并开启新窗口；首次重启同样开启窗口
         if let Some(start) = *window_start {

@@ -6,6 +6,7 @@ description = "Model-neutral protocol types and stream-first model interface for
 license = "Apache-2.0"
 
 [dependencies]
+peri-time = { path = "../peri-time" }
 async-trait.workspace = true
 futures.workspace = true
 serde.workspace = true

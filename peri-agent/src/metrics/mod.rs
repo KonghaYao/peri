@@ -8,7 +8,6 @@
 
 use std::sync::Arc;
 
-use chrono::Utc;
 use parking_lot::RwLock;
 
 /// 字符串截断上限（字符级，CJK 安全）
@@ -54,7 +53,8 @@ pub fn emit(event: &str, data: serde_json::Value, sid: Option<&str>, rid: Option
         return;
     };
     sink.record(MetricEvent {
-        ts: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        ts: chrono::DateTime::<chrono::Utc>::from(peri_time::now_wall())
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
         sid: sid.map(str::to_owned),
         rid: rid.map(str::to_owned),
         event: event.to_owned(),

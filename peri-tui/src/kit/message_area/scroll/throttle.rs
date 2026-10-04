@@ -65,7 +65,7 @@ pub(crate) struct ScrollThrottle {
 impl Default for ScrollThrottle {
     fn default() -> Self {
         Self {
-            last_flush: Instant::now(),
+            last_flush: peri_time::monotonic_now(),
             pending_delta: 0,
         }
     }
@@ -81,7 +81,7 @@ pub(in crate::kit::message_area) struct DragThrottle {
 impl Default for DragThrottle {
     fn default() -> Self {
         Self {
-            last_flush: Instant::now(),
+            last_flush: peri_time::monotonic_now(),
         }
     }
 }
@@ -138,7 +138,7 @@ pub(in crate::kit::message_area) fn flush_scroll_if_due(
     follow_bottom: &State<bool>,
 ) -> bool {
     let mut st = scroll_throttle.write_no_update();
-    let now = Instant::now();
+    let now = peri_time::monotonic_now();
     if now.duration_since(st.last_flush) < Duration::from_millis(scroll_frame_ms()) {
         return false;
     }
@@ -166,7 +166,7 @@ pub(super) fn apply_scroll(
         if is_reverse_direction(st.pending_delta, delta) {
             let old = st.pending_delta;
             st.pending_delta = 0;
-            st.last_flush = Instant::now();
+            st.last_flush = peri_time::monotonic_now();
             drop(st);
             apply_pending(old, scroll_state, scrollbar_fields, follow_bottom);
         } else {

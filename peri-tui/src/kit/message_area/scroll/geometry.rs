@@ -20,7 +20,7 @@ impl Default for ScrollbarDragState {
         Self {
             active: false,
             thumb_offset: 0,
-            last_flush: Instant::now(),
+            last_flush: peri_time::monotonic_now(),
         }
     }
 }

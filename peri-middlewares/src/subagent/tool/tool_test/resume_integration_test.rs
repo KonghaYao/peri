@@ -144,7 +144,7 @@ async fn test_resume_interrupted_then_resumed_across_instances() {
     let store = SessionFixture::open_in(dir.path()).await;
     let cwd = store.workspace_cwd();
     let parent_id = store
-        .create_thread(ThreadMeta::new(cwd.clone()))
+        .create_thread(ThreadMeta::new_at(cwd.clone(), peri_time::now_wall()))
         .await
         .expect("建立父会话失败");
     // 父会话句柄：resume 路径经它校验「owning parent session」
@@ -230,7 +230,7 @@ async fn test_resume_across_instances_replays_transcript_in_order() {
     let store = SessionFixture::open_in(dir.path()).await;
     let cwd = store.workspace_cwd();
     let parent_id = store
-        .create_thread(ThreadMeta::new(cwd.clone()))
+        .create_thread(ThreadMeta::new_at(cwd.clone(), peri_time::now_wall()))
         .await
         .expect("建立父会话失败");
     // 父会话句柄：resume 路径经它校验「owning parent session」
@@ -318,7 +318,7 @@ async fn test_resume_multiple_times_keeps_thread_id_and_completes() {
     let store = SessionFixture::open_in(dir.path()).await;
     let cwd = store.workspace_cwd();
     let parent_id = store
-        .create_thread(ThreadMeta::new(cwd.clone()))
+        .create_thread(ThreadMeta::new_at(cwd.clone(), peri_time::now_wall()))
         .await
         .expect("建立父会话失败");
     // 构造「父会话已取 cancel」的实例：Cascade 策略下子 token 由父 token 派生
@@ -430,7 +430,7 @@ async fn test_resume_emits_new_start_stop_pair_per_execution() {
     let store = SessionFixture::open_in(dir.path()).await;
     let cwd = store.workspace_cwd();
     let parent_id = store
-        .create_thread(ThreadMeta::new(cwd.clone()))
+        .create_thread(ThreadMeta::new_at(cwd.clone(), peri_time::now_wall()))
         .await
         .expect("建立父会话失败");
     // 父会话句柄：resume 路径经它校验「owning parent session」
@@ -571,7 +571,7 @@ async fn test_resume_skill_preload_not_duplicated() {
     let store = SessionFixture::open_in(dir.path()).await;
     let cwd = store.workspace_cwd();
     let parent_id = store
-        .create_thread(ThreadMeta::new(cwd.clone()))
+        .create_thread(ThreadMeta::new_at(cwd.clone(), peri_time::now_wall()))
         .await
         .expect("建立父会话失败");
     // 父会话句柄：resume 路径经它校验「owning parent session」
@@ -646,7 +646,7 @@ async fn test_resume_keeps_completed_tool_round_no_duplicate_execution() {
     let store = SessionFixture::open_in(dir.path()).await;
     let cwd = store.workspace_cwd();
     let parent_id = store
-        .create_thread(ThreadMeta::new(cwd.clone()))
+        .create_thread(ThreadMeta::new_at(cwd.clone(), peri_time::now_wall()))
         .await
         .expect("建立父会话失败");
     // 父会话句柄：resume 路径经它校验「owning parent session」
@@ -778,7 +778,7 @@ async fn test_resume_skill_token_in_prompt_reinjects_once() {
     let store = SessionFixture::open_in(dir.path()).await;
     let cwd = store.workspace_cwd();
     let parent_id = store
-        .create_thread(ThreadMeta::new(cwd.clone()))
+        .create_thread(ThreadMeta::new_at(cwd.clone(), peri_time::now_wall()))
         .await
         .expect("建立父会话失败");
     // 父会话句柄：resume 路径经它校验「owning parent session」

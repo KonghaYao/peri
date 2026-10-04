@@ -77,7 +77,7 @@ impl ToolBatch {
         input: serde_json::Value,
         parent_observation_id: &str,
     ) -> ToolStartRecord {
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = peri_time::now_utc_rfc3339();
         // lazy 创建 batch span，同时记录当前 stage 的 parent span_id
         if self.batch_span_id.is_none() {
             self.batch_span_id = Some(format!("batch_{}", uuid::Uuid::now_v7()));
@@ -127,7 +127,7 @@ impl ToolBatch {
         is_error: bool,
     ) -> Option<CompletedTool> {
         self.pending_tools.remove(tool_call_id).map(|pt| {
-            let now = chrono::Utc::now().to_rfc3339();
+            let now = peri_time::now_utc_rfc3339();
             self.batch_end_time = Some(now.clone());
             let ct = CompletedTool {
                 name: pt.name,
@@ -153,11 +153,11 @@ impl ToolBatch {
             let start = self
                 .batch_start_time
                 .take()
-                .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+                .unwrap_or_else(peri_time::now_utc_rfc3339);
             let end = self
                 .batch_end_time
                 .take()
-                .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+                .unwrap_or_else(peri_time::now_utc_rfc3339);
             ToolsBatchRecord {
                 batch_span_id: id,
                 batch_start_time: start,

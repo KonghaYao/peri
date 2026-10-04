@@ -43,15 +43,15 @@ pub(crate) fn push_view_models(state: &mut BridgeState) {
     // [PERF] 阶段计时（仅测试构建）——见 `PerfCounters::stage_*_ns`；每段末尾
     // 记一次 elapsed 并重置 `__t`，供定向测量按阶段定位成本归属。
     #[cfg(test)]
-    let mut __t = std::time::Instant::now();
+    let mut __t = peri_time::monotonic_now();
     let mut active = state.current_turn.view_models().clone();
     #[cfg(test)]
     {
         crate::kit::acp_bridge::observe_perf(
             crate::kit::acp_bridge::PerfCounter::StageAssembleNs,
-            __t.elapsed().as_nanos() as u64,
+            peri_time::elapsed_since(__t).as_nanos() as u64,
         );
-        __t = std::time::Instant::now();
+        __t = peri_time::monotonic_now();
     }
 
     let overrides_state = FOLD_OVERRIDES.state();
@@ -69,9 +69,9 @@ pub(crate) fn push_view_models(state: &mut BridgeState) {
     {
         crate::kit::acp_bridge::observe_perf(
             crate::kit::acp_bridge::PerfCounter::StageFoldNs,
-            __t.elapsed().as_nanos() as u64,
+            peri_time::elapsed_since(__t).as_nanos() as u64,
         );
-        __t = std::time::Instant::now();
+        __t = peri_time::monotonic_now();
     }
 
     // [§6.6] turn 边界 divider：committed 末尾是**新 turn 的用户 prompt**（≥2 项，
@@ -99,9 +99,9 @@ pub(crate) fn push_view_models(state: &mut BridgeState) {
     {
         crate::kit::acp_bridge::observe_perf(
             crate::kit::acp_bridge::PerfCounter::StageAssembleNs,
-            __t.elapsed().as_nanos() as u64,
+            peri_time::elapsed_since(__t).as_nanos() as u64,
         );
-        __t = std::time::Instant::now();
+        __t = peri_time::monotonic_now();
     }
 
     // [§6.9] todo 进度摘要：活动 turn（current_turn 非空）且 TODO_ITEMS 非空时，
@@ -111,9 +111,9 @@ pub(crate) fn push_view_models(state: &mut BridgeState) {
     {
         crate::kit::acp_bridge::observe_perf(
             crate::kit::acp_bridge::PerfCounter::StageTodoNs,
-            __t.elapsed().as_nanos() as u64,
+            peri_time::elapsed_since(__t).as_nanos() as u64,
         );
-        __t = std::time::Instant::now();
+        __t = peri_time::monotonic_now();
     }
 
     // [§7] 相邻成功工具分组——作用于完整 snapshot。TurnDone 会先把 current_turn
@@ -125,9 +125,9 @@ pub(crate) fn push_view_models(state: &mut BridgeState) {
     {
         crate::kit::acp_bridge::observe_perf(
             crate::kit::acp_bridge::PerfCounter::StageGroupNs,
-            __t.elapsed().as_nanos() as u64,
+            peri_time::elapsed_since(__t).as_nanos() as u64,
         );
-        __t = std::time::Instant::now();
+        __t = peri_time::monotonic_now();
     }
 
     state.generation = state.generation.wrapping_add(1);
@@ -154,7 +154,7 @@ pub(crate) fn push_view_models(state: &mut BridgeState) {
     #[cfg(test)]
     crate::kit::acp_bridge::observe_perf(
         crate::kit::acp_bridge::PerfCounter::StageWriteNs,
-        __t.elapsed().as_nanos() as u64,
+        peri_time::elapsed_since(__t).as_nanos() as u64,
     );
     tracing::trace!(target: "frozen_diag", "bridge: wrote VIEW_MODELS");
 }

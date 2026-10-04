@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -92,8 +93,10 @@ pub struct ThreadGoal {
 }
 
 impl ThreadGoal {
-    pub fn new(objective: String, token_budget: Option<u64>) -> Self {
-        let now = Utc::now();
+    /// Set creation/update fields from the supplied wall-clock value.
+    /// The UUID v7 identity keeps its own monotonic generation sequence.
+    pub fn new_at(objective: String, token_budget: Option<u64>, at: SystemTime) -> Self {
+        let now = at.into();
         Self {
             goal_id: uuid::Uuid::now_v7().to_string(),
             objective,

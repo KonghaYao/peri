@@ -261,10 +261,11 @@ impl CurrentTurn {
             && (self.text_started_at.is_some() || self.reasoning_started_at.is_some())
         {
             self.trailing_frozen = Some((
-                self.text_started_at.map(|t| t.elapsed().as_millis() as u64),
+                self.text_started_at
+                    .map(|t| peri_time::elapsed_since(t).as_millis() as u64),
                 self.trailing_reasoning_frozen_ms.or_else(|| {
                     self.reasoning_started_at
-                        .map(|t| t.elapsed().as_millis() as u64)
+                        .map(|t| peri_time::elapsed_since(t).as_millis() as u64)
                 }),
             ));
         }

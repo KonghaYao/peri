@@ -218,7 +218,7 @@ impl ThreadStore for FilesystemThreadStore {
         file.flush().await?;
         let mut meta = self.load_meta(id).await?;
         meta.message_count = existing.len() + payloads.len();
-        meta.updated_at = Utc::now();
+        meta.updated_at = chrono::DateTime::<Utc>::from(peri_time::now_wall());
         if meta.title.is_none() {
             let messages = payloads
                 .iter()
@@ -405,7 +405,7 @@ impl ThreadStore for FilesystemThreadStore {
         let _guard = META_UPDATE_LOCK.lock().await;
         let mut meta = self.load_meta(id).await?;
         meta.agent_status = status;
-        meta.updated_at = Utc::now();
+        meta.updated_at = chrono::DateTime::<Utc>::from(peri_time::now_wall());
         self.update_meta(id, meta).await
     }
 
@@ -437,7 +437,7 @@ impl ThreadStore for FilesystemThreadStore {
         file.flush().await?;
         let mut meta = self.load_meta(thread_id).await?;
         meta.message_count = kept.len();
-        meta.updated_at = Utc::now();
+        meta.updated_at = chrono::DateTime::<Utc>::from(peri_time::now_wall());
         self.update_meta(thread_id, meta).await
     }
 
@@ -505,7 +505,7 @@ impl ThreadStore for FilesystemThreadStore {
         // 同步 meta 的 message_count
         let mut meta = self.load_meta(thread_id).await?;
         meta.message_count = kept.len();
-        meta.updated_at = Utc::now();
+        meta.updated_at = chrono::DateTime::<Utc>::from(peri_time::now_wall());
         self.update_meta(thread_id, meta).await
     }
 }

@@ -21,7 +21,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 struct Job {
     request: ConfigurationRequest,
-    deadline: tokio::time::Instant,
+    deadline: std::time::Instant,
     reply: mpsc::Sender<io::Result<ConfigurationValue>>,
 }
 
@@ -71,7 +71,7 @@ impl ConfigurationClient {
                                     let _ = server.waiting().await;
                                 }
                             });
-                            match tokio::time::timeout(REQUEST_TIMEOUT, ().serve(client_io)).await {
+                            match peri_time::timeout(REQUEST_TIMEOUT, ().serve(client_io)).await {
                                 Ok(result) => {
                                     result.map_err(|error| io::Error::other(error.to_string()))
                                 }
@@ -79,14 +79,14 @@ impl ConfigurationClient {
                             }
                         }
                         Connection::Tcp(address) => {
-                            match tokio::time::timeout(
+                            match peri_time::timeout(
                                 REQUEST_TIMEOUT,
                                 tokio::net::TcpStream::connect(address),
                             )
                             .await
                             {
                                 Ok(Ok(transport)) => {
-                                    match tokio::time::timeout(REQUEST_TIMEOUT, ().serve(transport))
+                                    match peri_time::timeout(REQUEST_TIMEOUT, ().serve(transport))
                                         .await
                                     {
                                         Ok(result) => result
@@ -114,13 +114,13 @@ impl ConfigurationClient {
                     }
                     while let Some(job) = receiver.recv().await {
                         let response = async {
-                            if job.deadline <= tokio::time::Instant::now() {
+                            if job.deadline <= peri_time::monotonic_now() {
                                 return Err(timeout_error());
                             }
                             let params = serde_json::to_value(job.request).map_err(|error| {
                                 io::Error::new(io::ErrorKind::InvalidInput, error)
                             })?;
-                            let request = tokio::time::timeout_at(
+                            let request = peri_time::timeout_at(
                                 job.deadline,
                                 client.peer().send_request_with_option(
                                     ClientRequest::CustomRequest(CustomRequest::new(
@@ -134,29 +134,26 @@ impl ConfigurationClient {
                             .map_err(|_| timeout_error())?
                             .map_err(|error| io::Error::other(error.to_string()))?;
                             let id = request.id.clone();
-                            let response = match tokio::time::timeout_at(
-                                job.deadline,
-                                request.await_response(),
-                            )
-                            .await
-                            {
-                                Ok(result) => {
-                                    result.map_err(|error| io::Error::other(error.to_string()))?
-                                }
-                                Err(_) => {
-                                    let _ = tokio::time::timeout(
-                                        Duration::from_secs(1),
-                                        client.peer().notify_cancelled(
-                                            rmcp::model::CancelledNotificationParam::new(
-                                                Some(id),
-                                                Some("configuration request timed out".into()),
+                            let response =
+                                match peri_time::timeout_at(job.deadline, request.await_response())
+                                    .await
+                                {
+                                    Ok(result) => result
+                                        .map_err(|error| io::Error::other(error.to_string()))?,
+                                    Err(_) => {
+                                        let _ = peri_time::timeout(
+                                            Duration::from_secs(1),
+                                            client.peer().notify_cancelled(
+                                                rmcp::model::CancelledNotificationParam::new(
+                                                    Some(id),
+                                                    Some("configuration request timed out".into()),
+                                                ),
                                             ),
-                                        ),
-                                    )
-                                    .await;
-                                    return Err(timeout_error());
-                                }
-                            };
+                                        )
+                                        .await;
+                                        return Err(timeout_error());
+                                    }
+                                };
                             let ServerResult::CustomResult(response) = response else {
                                 return Err(io::Error::new(
                                     io::ErrorKind::InvalidData,
@@ -205,7 +202,7 @@ impl ConfigurationClient {
         self.sender
             .send(Job {
                 request,
-                deadline: tokio::time::Instant::now() + REQUEST_TIMEOUT,
+                deadline: peri_time::monotonic_now() + REQUEST_TIMEOUT,
                 reply,
             })
             .map_err(|_| {

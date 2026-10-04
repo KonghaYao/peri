@@ -1,5 +1,8 @@
 # langfuse-client 代码索引
 
+导出重试的单调 deadline 与等待由 [peri-time](peri-time.md) 提供；HTTP 重试预算
+和响应分类仍由本 crate 管理。
+
 > 依据：源码、契约测试与 Langfuse OTLP v4。现行入口以代码为准。
 
 ## 数据流与边界

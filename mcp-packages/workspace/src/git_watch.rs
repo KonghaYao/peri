@@ -213,7 +213,7 @@ impl GitWatchState {
         }
     }
 
-    /// 采样超时（调用方的 `tokio::time::timeout` 取它，保持「超时不推进节流」在同一处收敛）。
+    /// 采样超时（调用方的 `peri_time::timeout` 取它，保持「超时不推进节流」在同一处收敛）。
     pub fn sample_timeout(&self) -> Duration {
         self.sample_timeout
     }
@@ -271,7 +271,7 @@ impl GitWatchState {
                     notice.clone().unwrap_or_else(|| snapshot_text(&current));
 
                 // 节流按**完成**时刻计时（仅成功采样推进）。
-                *self.last_sample_completed_at.lock() = Some(Instant::now());
+                *self.last_sample_completed_at.lock() = Some(peri_time::monotonic_now());
                 notice
             }
         };

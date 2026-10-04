@@ -17,6 +17,7 @@ members = [
     "peri-model",
     "peri-process",
     "peri-resources",
+    "peri-time",
     "peri-runtime",
     "peri-tui",
     "langfuse-client",
@@ -44,6 +45,7 @@ codegen-units = 1
 
 [workspace.dependencies]
 peri-config = { path = "peri-config" }
+peri-time = { path = "peri-time" }
 # --- Async runtime ---
 # Shared runtime baseline; native crates opt into full features at their target boundary.
 tokio = { version = "1", default-features = false, features = ["rt", "macros", "sync", "time", "io-util"] }

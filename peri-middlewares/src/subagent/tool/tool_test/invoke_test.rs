@@ -519,7 +519,7 @@ async fn test_agent_invoke_parent_host_masks_fallback_runtime_and_store() {
     // 父 host 必须带完整父事实：门面 + root owner + 父 thread id（child 保存的前置条件）。
     let cwd = store.workspace_cwd();
     let parent_id = store
-        .create_thread(ThreadMeta::new(cwd.clone()))
+        .create_thread(ThreadMeta::new_at(cwd.clone(), peri_time::now_wall()))
         .await
         .expect("建立父会话失败");
     let parent = peri_agent::session::Session::new(

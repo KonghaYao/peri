@@ -136,7 +136,10 @@ async fn test_replay_persisted_history_publishes_final_assistant_in_order() {
             .collect();
         let store = SqliteThreadStore::new(&path).await.unwrap();
         let id = store
-            .create_thread(ThreadMeta::new(dir.path().to_str().unwrap()))
+            .create_thread(ThreadMeta::new_at(
+                dir.path().to_str().unwrap(),
+                peri_time::now_wall(),
+            ))
             .await
             .unwrap();
         store.append_messages(&id, &messages).await.unwrap();
@@ -165,7 +168,7 @@ async fn test_replay_persisted_history_publishes_final_assistant_in_order() {
         state.active_session_id = id;
         *VIEW_MODELS.state().write() = Default::default();
         let mut scheduler = PublicationScheduler::default();
-        let now = tokio::time::Instant::now();
+        let now = peri_time::Instant::now();
         for _ in &expected {
             let event = tokio::time::timeout(std::time::Duration::from_secs(5), bridge_rx.recv())
                 .await
@@ -235,7 +238,7 @@ fn test_replay_tool_completion_publishes_same_length_update() {
     use crate::kit::tui_render_unit::TuiRenderUnit;
     let mut state = scheduler_state();
     let mut scheduler = PublicationScheduler::default();
-    let now = tokio::time::Instant::now();
+    let now = peri_time::Instant::now();
     let intent = acp_events::dispatch_for_bridge(
         &mut state,
         &AcpEventData::ReplayToolStarted {
@@ -280,7 +283,7 @@ fn test_production_scheduler_uses_fixed_deadline_and_terminal_invalidates_it() {
     scheduler.accept(PublicationIntent::Immediate, &mut state);
     assert_eq!(state.generation, 1);
 
-    let now = tokio::time::Instant::now();
+    let now = peri_time::Instant::now();
     state.current_turn.append_text(" second", Some("m1"));
     scheduler.accept_at(PublicationIntent::Deferred, &mut state, now);
     let fixed_deadline = scheduler.pending_deadline.expect("deadline scheduled");
@@ -316,7 +319,7 @@ fn test_production_scheduler_lifecycle_invalidation_matrix_is_stale_noop() {
         let mut state = scheduler_state();
         state.current_turn.append_text("pending", Some("m1"));
         let mut scheduler = PublicationScheduler::default();
-        let now = tokio::time::Instant::now();
+        let now = peri_time::Instant::now();
         scheduler.accept_at(PublicationIntent::Deferred, &mut state, now);
         let stale_deadline = scheduler.pending_deadline.unwrap();
 
@@ -349,7 +352,7 @@ fn test_receiver_close_reset_wins_over_dirty_final_publication() {
     scheduler.accept_at(
         PublicationIntent::Deferred,
         &mut state,
-        tokio::time::Instant::now(),
+        peri_time::Instant::now(),
     );
     flush_on_receiver_close(&mut state, &mut scheduler, &mut last_reset);
 

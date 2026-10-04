@@ -38,7 +38,7 @@ impl McpClientPool {
             "workspace/rewindFiles",
             Some(serde_json::json!({"changes": changes, "_meta": scope})),
         );
-        let result = tokio::time::timeout(Duration::from_secs(30), async {
+        let result = peri_time::timeout(Duration::from_secs(30), async {
             let pending = peer
                 .send_request_with_option(
                     ClientRequest::CustomRequest(request),

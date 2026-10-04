@@ -28,7 +28,7 @@ async fn test_worktree_writes_do_not_claim_ownership_and_metadata_cannot_rebind(
             .downcast_ref::<WorkspaceError>(),
         Some(WorkspaceError::ExecutionBindingMismatch)
     ));
-    let mut child = ThreadMeta::new(resolved.cwd.to_str().unwrap());
+    let mut child = ThreadMeta::new_at(resolved.cwd.to_str().unwrap(), peri_time::now_wall());
     child.parent_thread_id = Some(id.clone());
     child.hidden = true;
     let child = store.create_bound_thread(child, &resolved).await.unwrap();
@@ -230,7 +230,7 @@ async fn test_worktree_read_only_resolves_registered_workspace_and_refuses_regis
     ));
     let error = read
         .create_bound_thread(
-            ThreadMeta::new(registered.cwd.to_str().unwrap()),
+            ThreadMeta::new_at(registered.cwd.to_str().unwrap(), peri_time::now_wall()),
             &registered,
         )
         .await

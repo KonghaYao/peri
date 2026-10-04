@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+peri-time = { path = "../peri-time" }
 peri-acp-types = { path = "../peri-acp-types" }
 peri-js-runtime = { path = "../peri-js-runtime" }
 peri-process = { path = "../peri-process" }

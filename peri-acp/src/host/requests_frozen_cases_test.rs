@@ -232,7 +232,10 @@ async fn test_session_load_future_frozen_snapshot_fails_without_overwrite() {
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let workspace = bridge.resolve_workspace(tmp.path()).await.unwrap();
     let session_id = bridge
-        .create_bound_thread(ThreadMeta::new(tmp.path().to_str().unwrap()), &workspace)
+        .create_bound_thread(
+            ThreadMeta::new_at(tmp.path().to_str().unwrap(), peri_time::now_wall()),
+            &workspace,
+        )
         .await
         .unwrap();
     let owner = bridge.acquire_execution_lease(&session_id).await.unwrap();

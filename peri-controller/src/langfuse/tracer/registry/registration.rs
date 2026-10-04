@@ -65,7 +65,7 @@ impl SubagentRegistry {
             return SubagentStartOutcome::Duplicate;
         }
         // 占位登记:防 Stop/重复 Start 竞态;join 成功后补 obs 字段
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = peri_time::now_utc_rfc3339();
         self.by_agent_id.insert(
             child_agent_id.to_string(),
             ActiveSubagent {
@@ -160,7 +160,7 @@ impl SubagentRegistry {
                 .get(&key)
                 .map(|i| i.parent_stage_span_id.clone())
                 .unwrap_or_default(),
-            start_time: chrono::Utc::now().to_rfc3339(),
+            start_time: peri_time::now_utc_rfc3339(),
             agent_name: sp.agent_name.clone(),
             input: input.clone(),
         };

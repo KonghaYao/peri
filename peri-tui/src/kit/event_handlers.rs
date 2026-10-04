@@ -92,7 +92,7 @@ pub fn register_global_handlers(hooks: &mut Hooks, mut exit: Handler<'static, ()
                 // ratatui-kit 在事件处理中写 atom 后可能触发重渲染并二次分发同一事件，
                 // 导致 FirstQuit 写入 QUIT_PENDING_SINCE 后第二次进入立即命中 Quit 分支。
                 // 200ms 远小于人类双击间隔（~500ms），仅屏蔽框架级重放。
-                let now = std::time::Instant::now();
+                let now = peri_time::monotonic_now();
                 let last_processed = *LAST_CTRL_C_PROCESSED.state().read();
                 const REENTRY_GUARD_MS: u64 = 200;
                 if let Some(last) = last_processed
@@ -132,12 +132,12 @@ pub fn register_global_handlers(hooks: &mut Hooks, mut exit: Handler<'static, ()
             }
             Some(GlobalShortcut::CycleModel) => {
                 *MODEL_HIGHLIGHT_UNTIL.state().write() =
-                    Some(std::time::Instant::now() + std::time::Duration::from_secs(2));
+                    Some(peri_time::monotonic_now() + std::time::Duration::from_secs(2));
                 EventResult::Consumed
             }
             Some(GlobalShortcut::CycleProvider) => {
                 *PROVIDER_HIGHLIGHT_UNTIL.state().write() =
-                    Some(std::time::Instant::now() + std::time::Duration::from_secs(2));
+                    Some(peri_time::monotonic_now() + std::time::Duration::from_secs(2));
                 EventResult::Consumed
             }
             _ => EventResult::Ignored,
@@ -162,7 +162,7 @@ pub fn register_root_handlers(hooks: &mut Hooks) {
         match classify_global_shortcut(&key) {
             Some(GlobalShortcut::CyclePermissionMode) => {
                 *MODE_HIGHLIGHT_UNTIL.state().write() =
-                    Some(std::time::Instant::now() + std::time::Duration::from_secs(2));
+                    Some(peri_time::monotonic_now() + std::time::Duration::from_secs(2));
                 if let Some(client) = crate::kit::atoms::ACP_CLIENT_HANDLE.get() {
                     crate::kit::permission_mode::cycle(client.as_ref().clone());
                 }
@@ -206,7 +206,7 @@ pub fn register_root_handlers(hooks: &mut Hooks) {
                         FocusLayer::Input | FocusLayer::Message => {}
                     }
 
-                    let now = std::time::Instant::now();
+                    let now = peri_time::monotonic_now();
                     let last_esc = *LAST_ESC_TIME.state().read();
                     let is_double_esc = last_esc
                         .map(|t| now.duration_since(t) < std::time::Duration::from_millis(500))

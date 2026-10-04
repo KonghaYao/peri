@@ -353,7 +353,7 @@ impl BaseTool for WriteSandboxTool {
         let tmp_ext = format!("tmp.{}", uuid::Uuid::now_v7());
         let tmp_path = target.with_extension(tmp_ext);
 
-        let result = tokio::time::timeout(std::time::Duration::from_secs(120), async {
+        let result = peri_time::timeout(std::time::Duration::from_secs(120), async {
             if let Err(e) = std::fs::write(&tmp_path, &content) {
                 let hint = self
                     .save_draft(&target_str, &content, false)

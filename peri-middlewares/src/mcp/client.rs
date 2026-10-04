@@ -367,12 +367,12 @@ impl McpClientPool {
         &self,
         trusted_workspace_endpoint: Option<&str>,
     ) -> Result<bool, String> {
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        let deadline = peri_time::monotonic_now() + std::time::Duration::from_secs(10);
         while !self.initialized.load(std::sync::atomic::Ordering::Acquire) {
-            if tokio::time::Instant::now() >= deadline {
+            if peri_time::monotonic_now() >= deadline {
                 return Err("MCP owner catalog did not initialize".into());
             }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            peri_time::sleep(std::time::Duration::from_millis(50)).await;
         }
         let configs = self.configs.read();
         Ok(configs.values().any(|config| {

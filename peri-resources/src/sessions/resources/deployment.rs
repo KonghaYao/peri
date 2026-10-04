@@ -25,14 +25,14 @@ impl SessionResourcesImpl {
         // 停止新写入不可逆；`Closing` 不是 `Closed`：未结清事实仍可收敛（恢复/排空在
         // `Closing` 下继续可用，见 `gate::ensure_recovery_permitted`）。
         self.lifecycle.begin_closing();
-        let _credentials = tokio::time::timeout(SETTLE_WAIT, self.credential_operations.write())
+        let _credentials = peri_time::timeout(SETTLE_WAIT, self.credential_operations.write())
             .await
             .map_err(|_| SessionResourceError::new(SessionResourceErrorKind::Timeout))?;
 
         // 每次调用都重新做真实检查，不复用上一次的失败结论。
         //
         for lease in self.gate.local().live_leases() {
-            if tokio::time::timeout(SETTLE_WAIT, lease.wait_for_in_flight())
+            if peri_time::timeout(SETTLE_WAIT, lease.wait_for_in_flight())
                 .await
                 .is_err()
             {

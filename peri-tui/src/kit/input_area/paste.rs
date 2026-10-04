@@ -50,7 +50,7 @@ impl Drop for PastePermit {
 fn notify(message: String, secs: u64) {
     *NOTIFICATION.state().write() = Some(Notification {
         message,
-        until: std::time::Instant::now() + std::time::Duration::from_secs(secs),
+        until: peri_time::monotonic_now() + std::time::Duration::from_secs(secs),
     });
 }
 

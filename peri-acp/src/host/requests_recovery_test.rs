@@ -362,7 +362,10 @@ async fn foreign_machine_history_fixture() {
         .await
         .unwrap();
     let id = store
-        .create_thread(ThreadMeta::new(root.join("saved").to_str().unwrap()))
+        .create_thread(ThreadMeta::new_at(
+            root.join("saved").to_str().unwrap(),
+            peri_time::now_wall(),
+        ))
         .await
         .unwrap();
     store

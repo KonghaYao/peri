@@ -101,7 +101,7 @@ impl SqliteSessionData {
             .await
             .map_err(|e| map_sqlx(&e))?;
         self.assert_owner(&mut tx, id).await?;
-        let now = Utc::now().to_rfc3339();
+        let now = peri_time::now_utc_rfc3339();
         let mut builder: sqlx::QueryBuilder<sqlx::Sqlite> =
             sqlx::QueryBuilder::new("UPDATE threads SET updated_at = ");
         builder.push_bind(&now);

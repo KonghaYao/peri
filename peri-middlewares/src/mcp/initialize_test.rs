@@ -470,7 +470,7 @@ async fn system_gate_concludes_tools_list_failure_without_waiting_for_timeout() 
     )
     .await;
 
-    let started_at = tokio::time::Instant::now();
+    let started_at = peri_time::monotonic_now();
     let outcome = pool
         .await_system_connections(
             &peri_agent::agent::AgentCancellationToken::new(),

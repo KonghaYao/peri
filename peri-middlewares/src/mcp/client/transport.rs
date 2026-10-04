@@ -17,7 +17,7 @@ pub(crate) async fn serve_client_auto<T, E, A>(
     transport: T,
     capability_profile: &crate::mcp::apps::McpCapabilityProfile,
     timeout: std::time::Duration,
-) -> Result<Result<McpServiceWrapper, ClientInitializeError>, tokio::time::error::Elapsed>
+) -> Result<Result<McpServiceWrapper, ClientInitializeError>, peri_time::Elapsed>
 where
     T: IntoTransport<RoleClient, E, A>,
     E: std::error::Error + Send + Sync + 'static,
@@ -27,7 +27,7 @@ where
         preferred_versions,
         legacy_version: None,
     };
-    tokio::time::timeout(timeout, async {
+    peri_time::timeout(timeout, async {
         rmcp::service::serve_client_with_lifecycle(
             super::mcpp_client_info_for_profile(capability_profile),
             transport,

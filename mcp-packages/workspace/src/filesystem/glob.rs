@@ -5,8 +5,9 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use peri_agent::tools::BaseTool;
+use peri_time::timeout;
 use serde_json::Value;
-use tokio::time::{timeout, Duration};
+use std::time::Duration;
 
 use super::resolve_path;
 use super::should_skip_dir;

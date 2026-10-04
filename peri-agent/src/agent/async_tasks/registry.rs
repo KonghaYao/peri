@@ -499,7 +499,7 @@ impl BackgroundTaskRegistry {
                 task_id,
                 kind,
                 summary,
-                started_at: chrono::Utc::now().to_rfc3339(),
+                started_at: peri_time::now_utc_rfc3339(),
             },
         );
         drop(projection);
@@ -676,7 +676,7 @@ impl BackgroundTaskRegistry {
                         Ok(_) => {
                             let task_id_owned = task_id.to_string();
                             self.scope.spawn_admitted(async move {
-                                if tokio::time::timeout(
+                                if peri_time::timeout(
                                     std::time::Duration::from_secs(CANCEL_GRACE_SECS),
                                     &mut handle,
                                 )

@@ -234,7 +234,7 @@ pub(super) async fn spawn_subagent_impl(
         let child = peri_acp_types::session_resources::ChildSnapshot {
             target: peri_acp_types::session_resources::NewSession {
                 thread_id: child_thread_id.clone(),
-                created_at: chrono::Utc::now().to_rfc3339(),
+                created_at: peri_time::now_utc_rfc3339(),
                 meta: peri_acp_types::session_resources::NewSessionMeta {
                     title: Some(agent_name.clone()),
                     cwd: cwd.clone(),

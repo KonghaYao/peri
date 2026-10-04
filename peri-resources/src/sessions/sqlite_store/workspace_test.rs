@@ -58,7 +58,10 @@ async fn store() -> (SqliteThreadStore, TempDir) {
 async fn bound(store: &SqliteThreadStore, cwd: &Path) -> (ThreadId, ResolvedWorkspace) {
     let workspace = store.resolve_workspace(cwd).await.unwrap();
     let id = store
-        .create_bound_thread(ThreadMeta::new(cwd.to_str().unwrap()), &workspace)
+        .create_bound_thread(
+            ThreadMeta::new_at(cwd.to_str().unwrap(), peri_time::now_wall()),
+            &workspace,
+        )
         .await
         .unwrap();
     (id, workspace)

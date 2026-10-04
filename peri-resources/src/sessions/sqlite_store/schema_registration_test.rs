@@ -214,7 +214,10 @@ async fn assert_registration_upgrade_allows_directory_changes(version: i64) {
     std::fs::create_dir(&original).unwrap();
     let workspace = store.resolve_workspace(&original).await.unwrap();
     let thread = store
-        .create_bound_thread(ThreadMeta::new(original.to_str().unwrap()), &workspace)
+        .create_bound_thread(
+            ThreadMeta::new_at(original.to_str().unwrap(), peri_time::now_wall()),
+            &workspace,
+        )
         .await
         .unwrap();
     let binding = store.load_session_binding(&thread).await.unwrap();
@@ -238,7 +241,10 @@ async fn assert_registration_upgrade_allows_directory_changes(version: i64) {
         );
         assert_ne!(resolved.project_id, workspace.project_id);
         let new_thread = store
-            .create_bound_thread(ThreadMeta::new(cwd.to_str().unwrap()), &resolved)
+            .create_bound_thread(
+                ThreadMeta::new_at(cwd.to_str().unwrap(), peri_time::now_wall()),
+                &resolved,
+            )
             .await
             .unwrap();
         let owner = store.acquire_execution_lease(&new_thread).await.unwrap();

@@ -26,7 +26,7 @@ use ratatui_kit::{
         widgets::{Paragraph, Wrap},
     },
 };
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// 状态栏第 1 行：权限模式 · cwd · provider/model · bg tasks
 ///（CPU%/MEM/ctx 已迁移 composer footer 资源线，见 input_area.rs）
@@ -44,7 +44,7 @@ fn StatusBarRow1(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     let snap = snap.read().clone();
     let goal = goal_store.read().clone();
-    let now = Instant::now();
+    let now = peri_time::monotonic_now();
     // provider 不单独显示；provider 或 model 任一变化都让模型段闪烁提醒
     let model_highlighted = model_hl.read().as_ref().is_some_and(|t| *t > now)
         || provider_hl.read().as_ref().is_some_and(|t| *t > now);
@@ -263,7 +263,7 @@ fn StatusBarRow2(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let is_popup = popup_kind.read().is_some();
     let is_at = *at_active.read();
     let is_slash = *slash_active.read();
-    let now = Instant::now();
+    let now = peri_time::monotonic_now();
 
     // 复制提示优先于其他 hints。
     // [TRAP] 只读 atom 判断过期——禁止在 render body 中写 atom（render→write→render 自激）。
@@ -340,7 +340,7 @@ fn NotifRow(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let show_notif = notif_store
         .read()
         .as_ref()
-        .is_some_and(|n| Instant::now() < n.until);
+        .is_some_and(|n| peri_time::monotonic_now() < n.until);
     let notif_text = if show_notif {
         notif_store
             .read()

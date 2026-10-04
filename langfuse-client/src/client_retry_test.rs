@@ -69,7 +69,7 @@ async fn retry_after_seconds_enforces_a_minimum_wait() {
         .expect(1)
         .create_async()
         .await;
-    let started = Instant::now();
+    let started = peri_time::monotonic_now();
     client(&server.url(), 1)
         .ingest(vec![event()])
         .await

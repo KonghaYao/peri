@@ -58,7 +58,7 @@ pub(super) fn render_timing_enabled() -> bool {
 #[track_caller]
 pub(super) fn trace_phase(phase: &str, start: Instant, detail: Option<&str>) {
     if render_timing_enabled() {
-        let elapsed_us = start.elapsed().as_micros();
+        let elapsed_us = peri_time::elapsed_since(start).as_micros();
         let extra = detail.map(|d| format!(" | {d}")).unwrap_or_default();
         tracing::info!(target: "perf.render", "[{phase}] {elapsed_us}μs{extra}");
     }

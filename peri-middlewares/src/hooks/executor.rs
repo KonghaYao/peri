@@ -83,7 +83,7 @@ pub async fn execute_command_hook_owned(
             None => std::future::pending::<()>().await,
         }
     };
-    let run = tokio::time::timeout(Duration::from_secs(timeout_secs), async {
+    let run = peri_time::timeout(Duration::from_secs(timeout_secs), async {
         let mut cmd = peri_mcp_common::shell::shell_command(&command, &[]);
         cmd.current_dir(&input.cwd)
             .stdin(Stdio::piped())
@@ -223,7 +223,7 @@ pub async fn execute_prompt_hook(
     let prompt = prompt_template.replace("$ARGUMENTS", &input_json);
     let prompt = prompt.replace("${ARGUMENTS}", &input_json);
 
-    let result = tokio::time::timeout(Duration::from_secs(timeout_secs), async {
+    let result = peri_time::timeout(Duration::from_secs(timeout_secs), async {
         let llm = llm_factory();
         // Build a minimal message list with just the prompt as a system message
         let messages = vec![BaseMessage::system(prompt.clone())];
@@ -403,7 +403,7 @@ pub async fn execute_agent_hook(
     );
 
     // 外层 timeout 包装（与 v1 一致）
-    let result = tokio::time::timeout(
+    let result = peri_time::timeout(
         Duration::from_secs(timeout_secs),
         llm.generate_reasoning(&messages, &[], None),
     )

@@ -8,6 +8,7 @@ license = "Apache-2.0"
 [dependencies]
 peri-agent = { path = "../peri-agent" }
 peri-acp-types = { path = "../peri-acp-types" }
+peri-time = { path = "../peri-time" }
 peri-config = { path = "../peri-config" }
 peri-mcp-config.workspace = true
 peri-mcp-credentials.workspace = true

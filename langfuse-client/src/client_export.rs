@@ -41,7 +41,7 @@ impl ExportConfig {
         if self.retry_budget.is_zero()
             || self.initial_retry_delay.is_zero()
             || self.max_retry_delay < self.initial_retry_delay
-            || tokio::time::Instant::now()
+            || peri_time::monotonic_now()
                 .checked_add(self.retry_budget)
                 .is_none()
         {

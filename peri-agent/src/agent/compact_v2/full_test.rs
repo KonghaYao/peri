@@ -111,7 +111,10 @@ impl Model for FullLifecycleModel {
 async fn make_audit_full_history() -> (tempfile::TempDir, MessageTranscript) {
     let dir = tempfile::tempdir().unwrap();
     let store = MockSessionResources::new();
-    let thread_id = store.create_thread(ThreadMeta::new("/tmp")).await.unwrap();
+    let thread_id = store
+        .create_thread(ThreadMeta::new_at("/tmp", peri_time::now_wall()))
+        .await
+        .unwrap();
     let mut transcript = MessageTranscript::new().with_persistence(store, thread_id);
     for turn in 0..4 {
         let call_id = format!("audit-bash-{turn}");
@@ -248,7 +251,10 @@ async fn test_full_compact_summarizes_and_excludes_canonical_report() {
         ReminderSource, SystemReminder, TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
     };
     let store = MockSessionResources::new();
-    let thread_id = store.create_thread(ThreadMeta::new("/tmp")).await.unwrap();
+    let thread_id = store
+        .create_thread(ThreadMeta::new_at("/tmp", peri_time::now_wall()))
+        .await
+        .unwrap();
     let mut transcript = MessageTranscript::new().with_persistence(store, thread_id);
     transcript.append(make_human("question"));
     let reminder_id = transcript.append_system_reminder(
@@ -300,7 +306,10 @@ async fn test_full_compact_summarizes_and_excludes_canonical_report() {
 #[tokio::test]
 async fn full_excludes_loaded_root_history() {
     let store = MockSessionResources::new();
-    let thread_id = store.create_thread(ThreadMeta::new("/tmp")).await.unwrap();
+    let thread_id = store
+        .create_thread(ThreadMeta::new_at("/tmp", peri_time::now_wall()))
+        .await
+        .unwrap();
     let question = make_human("previous turn question");
     let answer = make_ai("previous turn answer");
     store
@@ -347,7 +356,10 @@ async fn full_excludes_loaded_root_history() {
 #[tokio::test]
 async fn full_affected_count_tracks_only_false_to_true_transitions() {
     let store = MockSessionResources::new();
-    let thread_id = store.create_thread(ThreadMeta::new("/tmp")).await.unwrap();
+    let thread_id = store
+        .create_thread(ThreadMeta::new_at("/tmp", peri_time::now_wall()))
+        .await
+        .unwrap();
     let mut transcript = MessageTranscript::new().with_persistence(store, thread_id);
     transcript.append(BaseMessage::system("system"));
     transcript.append(make_human("question"));
@@ -385,7 +397,10 @@ async fn full_compact_uses_historical_tool_results_without_local_file_re_read() 
     std::fs::write(&skill_path, "LOCAL_SKILL_MARKER").unwrap();
     let store = MockSessionResources::new();
     let thread_id = store
-        .create_thread(ThreadMeta::new(dir.path().to_string_lossy().to_string()))
+        .create_thread(ThreadMeta::new_at(
+            dir.path().to_string_lossy().to_string(),
+            peri_time::now_wall(),
+        ))
         .await
         .unwrap();
     let mut transcript = MessageTranscript::new().with_persistence(store, thread_id);
@@ -552,7 +567,10 @@ async fn test_full_compact_history_read_only_backend_leaves_memory_and_store_unc
     // 再切换到只读能力面——历史本身必须由可写句柄产生，只读句柄不接受写入。
     let store = MockSessionResources::new();
     let thread_id = store
-        .create_thread(ThreadMeta::new(dir.path().to_string_lossy().to_string()))
+        .create_thread(ThreadMeta::new_at(
+            dir.path().to_string_lossy().to_string(),
+            peri_time::now_wall(),
+        ))
         .await
         .expect("创建 thread 失败");
 

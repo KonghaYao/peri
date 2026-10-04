@@ -585,7 +585,7 @@ fn entry_inputs(entries: &[(MessageId, String)]) -> Vec<String> {
 }
 
 fn timestamp() -> String {
-    chrono::Utc::now().to_rfc3339()
+    peri_time::now_utc_rfc3339()
 }
 
 #[cfg(test)]

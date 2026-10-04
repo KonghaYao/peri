@@ -101,7 +101,7 @@ impl HostWaitDriver for TokioWaitDriver {
         drain: DrainFuture<'a>,
     ) -> WaitFuture<'a> {
         Box::pin(async move {
-            match tokio::time::timeout(duration, drain).await {
+            match peri_time::timeout(duration, drain).await {
                 Ok(()) => WaitOutcome::Drained,
                 Err(_) => WaitOutcome::Expired,
             }

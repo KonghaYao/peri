@@ -11,7 +11,7 @@ use std::{
     fs::{self, OpenOptions},
     path::PathBuf,
     sync::{Arc, OnceLock, Weak},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, UNIX_EPOCH},
 };
 
 use peri_acp_types::plugin::McpServerConfig;
@@ -525,7 +525,7 @@ fn digest(input: &str) -> String {
 }
 
 fn now_ms() -> u128 {
-    SystemTime::now()
+    peri_time::now_wall()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis()

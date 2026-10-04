@@ -154,7 +154,10 @@ async fn make_scenario(cancel_on_third: bool) -> BudgetScenario {
     let dir = tempfile::tempdir().unwrap();
     let store = MockSessionResources::new();
     let thread_id = store
-        .create_thread(ThreadMeta::new(dir.path().to_string_lossy()))
+        .create_thread(ThreadMeta::new_at(
+            dir.path().to_string_lossy(),
+            peri_time::now_wall(),
+        ))
         .await
         .unwrap();
     let session = Session::new(

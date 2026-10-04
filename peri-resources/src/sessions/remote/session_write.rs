@@ -338,7 +338,7 @@ impl RemoteSessionData {
         {
             return Ok(());
         }
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = peri_time::now_utc_rfc3339();
         let title_input = patch_input(&patch.title);
         let status_input = patch
             .status

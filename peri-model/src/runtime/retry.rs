@@ -463,7 +463,7 @@ async fn retry_or_finish(
     tokio::select! {
         biased;
         _ = cancellation.cancelled() => false,
-        _ = tokio::time::sleep(delay) => true,
+        _ = peri_time::sleep(delay) => true,
     }
 }
 

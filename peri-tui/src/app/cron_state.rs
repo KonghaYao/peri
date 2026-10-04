@@ -24,7 +24,7 @@ impl CronState {
     /// Spawn CronManager tick task
     pub fn spawn_tick_task(scheduler: Arc<Mutex<peri_mcp_cron::CronScheduler>>) {
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(1));
+            let mut interval = peri_time::interval(Duration::from_secs(1));
             loop {
                 interval.tick().await;
                 scheduler.lock().tick();

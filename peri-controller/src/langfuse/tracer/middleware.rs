@@ -43,7 +43,7 @@ impl MiddlewareTracer {
 
     pub(crate) fn on_start(&mut self, name: &str, hook: MiddlewareHook) -> MiddlewareSpanHandle {
         let span_id = format!("span_{}", uuid::Uuid::now_v7());
-        let start_time = chrono::Utc::now().to_rfc3339();
+        let start_time = peri_time::now_utc_rfc3339();
         self.active.insert(
             span_id.clone(),
             ActiveMiddleware {

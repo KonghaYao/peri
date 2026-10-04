@@ -6,7 +6,10 @@ use super::*;
 /// 的门面出自同一次打开（同一库句柄），后续经协议/门面读到的是同一份事实。
 async fn old_thread(bridge: &SqliteThreadStore, cwd: &Path) -> String {
     let id = bridge
-        .create_thread(ThreadMeta::new(cwd.to_str().unwrap()))
+        .create_thread(ThreadMeta::new_at(
+            cwd.to_str().unwrap(),
+            peri_time::now_wall(),
+        ))
         .await
         .unwrap();
     bridge
@@ -301,7 +304,10 @@ async fn legacy_history_fix_does_not_rebuild_missing_native_snapshot() {
     // 已绑定但**缺 frozen**：门面创建要求 frozen 成立，因此夹具按原表构造。
     let workspace = bridge.resolve_workspace(tmp.path()).await.unwrap();
     let id = bridge
-        .create_bound_thread(ThreadMeta::new(workspace.cwd.to_str().unwrap()), &workspace)
+        .create_bound_thread(
+            ThreadMeta::new_at(workspace.cwd.to_str().unwrap(), peri_time::now_wall()),
+            &workspace,
+        )
         .await
         .unwrap();
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());

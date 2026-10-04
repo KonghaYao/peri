@@ -45,7 +45,7 @@ impl LspClient {
         };
         let request = JsonRpcRequest::new(id, method, params);
         let (_registration, receiver) = dispatcher.register_owned_request(id);
-        tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), async {
+        peri_time::timeout(std::time::Duration::from_millis(timeout_ms), async {
             dispatcher.send_request(&request).await?;
             receiver.await.map_err(|_| LspError::RequestFailed {
                 method: method.to_string(),

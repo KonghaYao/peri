@@ -136,7 +136,7 @@ async fn run_install_with_timeout(
     tree: &ProcessTree,
     timeout: Duration,
 ) -> std::io::Result<bool> {
-    match tokio::time::timeout(timeout, child.wait()).await {
+    match peri_time::timeout(timeout, child.wait()).await {
         Ok(status) => {
             let status = status?;
             tree.wait_for_exit().await;

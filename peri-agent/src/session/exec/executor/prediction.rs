@@ -61,7 +61,7 @@ pub async fn execute_prediction(
 
     debug!("Prediction facade: calling LLM directly");
     // 30 秒超时（首次冷启动可能较慢）
-    let result = tokio::time::timeout(
+    let result = peri_time::timeout(
         std::time::Duration::from_secs(30),
         llm.generate_reasoning(&messages, &[], None),
     )

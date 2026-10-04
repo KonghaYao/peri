@@ -83,7 +83,7 @@ impl StageSpans {
     ) -> (StageHandle, Option<StageHandle>) {
         let replaced = self.active.remove(agent_id).map(|a| a.handle);
         let span_id = format!("span_{}", uuid::Uuid::now_v7());
-        let start_time = chrono::Utc::now().to_rfc3339();
+        let start_time = peri_time::now_utc_rfc3339();
         let handle = StageHandle {
             span_id: span_id.clone(),
             stage,

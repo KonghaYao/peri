@@ -1,5 +1,8 @@
 # peri-process 代码索引
 
+进程退出等待的计时底层见 [peri-time](peri-time.md)；进程终止与退出证据仍由
+`ProcessTree` 持有。
+
 > OS 子进程所有权基础能力；会话生命周期与 lease 仍由上层持有。
 
 | 我想做什么 | 主文件 | 稳定入口与契约 |

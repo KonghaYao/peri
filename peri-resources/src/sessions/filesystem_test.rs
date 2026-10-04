@@ -6,7 +6,7 @@ use super::*;
 use tempfile::tempdir;
 
 fn make_meta(cwd: &str) -> ThreadMeta {
-    ThreadMeta::new(cwd)
+    ThreadMeta::new_at(cwd, peri_time::now_wall())
 }
 
 #[tokio::test]

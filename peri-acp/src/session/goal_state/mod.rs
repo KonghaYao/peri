@@ -84,7 +84,7 @@ impl GoalState {
         objective: String,
         token_budget: Option<u64>,
     ) -> Result<(), peri_acp_types::goal::GoalStoreError> {
-        let new_goal = ThreadGoal::new(objective, token_budget);
+        let new_goal = ThreadGoal::new_at(objective, token_budget, peri_time::now_wall());
         let (thread_id, store) = {
             let mut guard = self.inner.write();
             guard.goal = Some(new_goal.clone());
@@ -148,7 +148,7 @@ impl GoalState {
             }
 
             goal.status = target;
-            goal.updated_at = chrono::Utc::now();
+            goal.updated_at = peri_time::now_wall().into();
             if matches!(target, GoalStatus::Blocked) {
                 goal.blocked_reason = Some(reason.clone());
             }
@@ -229,7 +229,7 @@ impl GoalState {
 
             goal.accounting.tokens_used += token_delta;
             goal.accounting.time_used_seconds += time_delta;
-            goal.updated_at = chrono::Utc::now();
+            goal.updated_at = peri_time::now_wall().into();
 
             let goal_clone = goal.clone();
             (guard.thread_id.clone(), guard.store.clone(), goal_clone)
@@ -265,7 +265,7 @@ impl peri_acp_types::goal::GoalStateView for GoalState {
 impl peri_acp_types::goal::GoalController for GoalState {
     async fn create_goal(&self, objective: String) -> Result<(), String> {
         // 原子化：检查 + 插入在同一写锁内，消除 TOCTOU 竞态窗口
-        let new_goal = ThreadGoal::new(objective, None);
+        let new_goal = ThreadGoal::new_at(objective, None, peri_time::now_wall());
         let (thread_id, store) = {
             let mut guard = self.inner.write();
             if guard.goal.is_some() {
@@ -305,7 +305,7 @@ impl peri_acp_types::goal::GoalController for GoalState {
                 .ok_or_else(|| "无 goal，无法记录主动接续".to_string())?;
             goal.accounting.continuation_count =
                 goal.accounting.continuation_count.saturating_add(1);
-            goal.updated_at = chrono::Utc::now();
+            goal.updated_at = peri_time::now_wall().into();
             let goal_clone = goal.clone();
             (guard.thread_id.clone(), guard.store.clone(), goal_clone)
         };

@@ -4,7 +4,7 @@
 //! 以及 C §5.1 的 P1–P7 前置条件未实测前不在这里出现——没有半成品 mutation，
 //! 也没有「先连上再假装能写」的中间态。
 //!
-//! 请求有界：SDK 0.1.3 公开面不提供客户端超时配置，因此本层用 `tokio::time::timeout`
+//! 请求有界：SDK 0.1.3 公开面不提供客户端超时配置，因此本层用 `peri_time::timeout`
 //! 兜住上界；超时返回 `Timeout`，不改变远端结果的分类（§7）。
 
 use std::future::Future;
@@ -35,7 +35,7 @@ pub(super) async fn within_budget<T>(
     future: impl Future<Output = turso_serverless::Result<T>>,
     budget: Duration,
 ) -> Budgeted<T> {
-    match tokio::time::timeout(budget, future).await {
+    match peri_time::timeout(budget, future).await {
         Ok(Ok(value)) => Budgeted::Done(value),
         Ok(Err(error)) => Budgeted::Failed(error),
         Err(_) => Budgeted::Exceeded,

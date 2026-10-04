@@ -26,7 +26,7 @@ impl PendingRequest {
 }
 
 async fn send_cancel(peer: Peer<RoleClient>, id: RequestId) {
-    let _ = tokio::time::timeout(
+    let _ = peri_time::timeout(
         CANCEL_SEND_TIMEOUT,
         peer.notify_cancelled(CancelledNotificationParam::new(
             Some(id),
@@ -55,19 +55,20 @@ pub(super) async fn call_tool(
     timeout: Option<Duration>,
 ) -> Result<CallToolResponse, ServiceError> {
     // One deadline covers transport backpressure and response latency together.
-    let deadline = timeout.map(|duration| tokio::time::Instant::now() + duration);
+    let deadline = timeout.map(|duration| peri_time::monotonic_now() + duration);
     let send = peer.send_request_with_option(
         ClientRequest::CallToolRequest(CallToolRequest::new(params)),
         PeerRequestOptions::no_options(),
     );
-    let handle = match deadline {
-        Some(deadline) => tokio::time::timeout_at(deadline, send)
-            .await
-            .map_err(|_| ServiceError::Timeout {
-                timeout: timeout.expect("deadline has a duration"),
+    let handle =
+        match deadline {
+            Some(deadline) => peri_time::timeout_at(deadline, send).await.map_err(|_| {
+                ServiceError::Timeout {
+                    timeout: timeout.expect("deadline has a duration"),
+                }
             })??,
-        None => send.await?,
-    };
+            None => send.await?,
+        };
     let mut pending = PendingRequest {
         peer: peer.clone(),
         id: Some(handle.id.clone()),
@@ -75,7 +76,7 @@ pub(super) async fn call_tool(
     let response = handle.await_response();
     let result = match timeout {
         Some(duration) => {
-            match tokio::time::timeout_at(deadline.expect("bounded request"), response).await {
+            match peri_time::timeout_at(deadline.expect("bounded request"), response).await {
                 Ok(result) => result,
                 Err(_) => {
                     pending.cancel().await;

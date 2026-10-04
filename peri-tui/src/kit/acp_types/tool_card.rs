@@ -19,7 +19,8 @@ static NEXT_SUBAGENT_INSTANCE_ID: AtomicU64 = AtomicU64::new(1);
 /// 按秒取整避免每毫秒 hash 抖动）。
 pub(crate) fn build_tool_card(t: &ToolCardAccumulator, turn_active: bool) -> TuiToolCard {
     let is_running = turn_active && t.output_summary.is_none();
-    let running_duration_ms = is_running.then(|| t.started_at.elapsed().as_millis() as u64);
+    let running_duration_ms =
+        is_running.then(|| peri_time::elapsed_since(t.started_at).as_millis() as u64);
     let status = if is_running {
         EntryStatus::Running
     } else if t.is_error {
@@ -149,7 +150,7 @@ impl ToolCardAccumulator {
             presentation,
             output_summary: None,
             is_error: false,
-            started_at: Instant::now(),
+            started_at: peri_time::monotonic_now(),
             completed_duration_ms: None,
             claimed_by_subagent: false,
         }

@@ -44,7 +44,7 @@ fn persist_failed_state(
         return_value: None,
         script: input.script.clone(),
         started_at: started_at.to_string(),
-        finished_at: Some(chrono::Utc::now().to_rfc3339()),
+        finished_at: Some(peri_time::now_utc_rfc3339()),
         error: Some(public_workflow_error(&format!("{error:#}"))),
     };
     if let Err(write_error) = journal_store.write_state(run_id, &state) {
@@ -166,7 +166,7 @@ pub(super) fn finalize_workflow(
         return_value: final_result.return_value.clone(),
         script: input.script.clone(),
         started_at: started_at_iso,
-        finished_at: Some(chrono::Utc::now().to_rfc3339()),
+        finished_at: Some(peri_time::now_utc_rfc3339()),
         error: final_result.error.clone(),
     };
     tracing::debug!(
@@ -245,7 +245,7 @@ pub(super) fn send_killed(
         return_value: None,
         script: input.script.clone(),
         started_at: started_at.into(),
-        finished_at: Some(chrono::Utc::now().to_rfc3339()),
+        finished_at: Some(peri_time::now_utc_rfc3339()),
         error: error.clone(),
     };
     let _ = journal.write_state(run_id, &state);

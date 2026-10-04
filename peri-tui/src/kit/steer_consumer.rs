@@ -56,8 +56,8 @@ pub(crate) fn spawn_steer_consumer(
     tokio::spawn(async move {
         let mut retries: VecDeque<SteerCommand> = VecDeque::new();
         let mut warned = HashSet::new();
-        let mut retry_tick = tokio::time::interval(RECONCILE_INTERVAL);
-        retry_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut retry_tick = peri_time::interval(RECONCILE_INTERVAL);
+        retry_tick.set_missed_tick_behavior(peri_time::MissedTickBehavior::Delay);
         loop {
             let mut command = tokio::select! {
                 _ = shutdown.cancelled() => break,
@@ -101,7 +101,7 @@ pub(crate) fn spawn_steer_consumer(
                     };
                     atoms::NOTIFICATION.set(Some(atoms::Notification {
                         message,
-                        until: std::time::Instant::now() + FAILURE_NOTICE_DURATION,
+                        until: peri_time::monotonic_now() + FAILURE_NOTICE_DURATION,
                     }));
                 }
                 if !rejected && atoms::BRIDGE_RESET_COUNTER.get() == command.epoch {
@@ -182,7 +182,7 @@ async fn execute(
     cwd: &str,
 ) -> Result<(), SteerFailure> {
     prepare(client, command, cwd).await?;
-    tokio::time::timeout(RECEIPT_TIMEOUT, admit(client, command))
+    peri_time::timeout(RECEIPT_TIMEOUT, admit(client, command))
         .await
         .unwrap_or_else(|_| Err(AcpError::new(-32603, "user input receipt timed out")))?;
     Ok(())
@@ -201,7 +201,7 @@ async fn prepare(
         return Ok(());
     }
     let session_id =
-        match tokio::time::timeout(PREPARE_TIMEOUT, client.ensure_session(cwd, None)).await {
+        match peri_time::timeout(PREPARE_TIMEOUT, client.ensure_session(cwd, None)).await {
             Ok(Ok(session_id)) => session_id,
             Ok(Err(error)) => {
                 return Err(SteerFailure {

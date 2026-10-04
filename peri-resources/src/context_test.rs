@@ -135,7 +135,10 @@ async fn test_open_with_busy_schema_lock_degrades_to_read_only() {
     let db_path = dir.path().join("threads.db");
     let writable = SqliteThreadStore::new(db_path.clone()).await.unwrap();
     let thread = writable
-        .create_thread(ThreadMeta::new("/tmp/read-only-degradation"))
+        .create_thread(ThreadMeta::new_at(
+            "/tmp/read-only-degradation",
+            peri_time::now_wall(),
+        ))
         .await
         .unwrap();
     // 门面列表语义只收已有历史的会话（`message_count > 0`）：裸建的空 thread 不在
@@ -234,7 +237,10 @@ async fn test_bridge_lease_is_visible_to_shared_facade() {
     let workspace = store.resolve_workspace(repo.path()).await.unwrap();
     let thread = store
         .create_bound_thread(
-            ThreadMeta::new(workspace.cwd.to_string_lossy().into_owned()),
+            ThreadMeta::new_at(
+                workspace.cwd.to_string_lossy().into_owned(),
+                peri_time::now_wall(),
+            ),
             &workspace,
         )
         .await

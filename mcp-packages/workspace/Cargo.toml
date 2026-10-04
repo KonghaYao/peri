@@ -6,6 +6,7 @@ description = "Workspace filesystem and terminal builtin MCP instance"
 license = "Apache-2.0"
 
 [dependencies]
+peri-time = { path = "../../peri-time" }
 anyhow.workspace = true
 axum.workspace = true
 clap = { version = "4", features = ["derive"] }

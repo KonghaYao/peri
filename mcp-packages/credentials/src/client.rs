@@ -39,7 +39,7 @@ impl Reply {
 
 struct Job {
     request: OAuthCredentialRequest,
-    deadline: tokio::time::Instant,
+    deadline: std::time::Instant,
     reply: Reply,
 }
 
@@ -77,17 +77,19 @@ impl OAuthCredentialClient {
                                     let _ = service.waiting().await;
                                 }
                             });
-                            let mut client =
-                                match tokio::time::timeout(REQUEST_TIMEOUT, ().serve(client_io))
-                                    .await
-                                {
-                                    Ok(Ok(client)) => client,
-                                    _ => {
-                                        let _ = ready.send(Err(unavailable()));
-                                        server.abort();
-                                        return;
-                                    }
-                                };
+                            let mut client = match peri_time::timeout(
+                                REQUEST_TIMEOUT,
+                                ().serve(client_io),
+                            )
+                            .await
+                            {
+                                Ok(Ok(client)) => client,
+                                _ => {
+                                    let _ = ready.send(Err(unavailable()));
+                                    server.abort();
+                                    return;
+                                }
+                            };
                             if ready.send(Ok(())).is_err() {
                                 let _ = client.close_with_timeout(Duration::from_secs(1)).await;
                                 server.abort();
@@ -97,7 +99,7 @@ impl OAuthCredentialClient {
                                 let result = async {
                                     let params = serde_json::to_value(job.request)
                                         .map_err(|_| invalid_data())?;
-                                    let handle = tokio::time::timeout_at(
+                                    let handle = peri_time::timeout_at(
                                         job.deadline,
                                         client.peer().send_request_with_option(
                                             ClientRequest::CustomRequest(CustomRequest::new(
@@ -111,7 +113,7 @@ impl OAuthCredentialClient {
                                     .map_err(|_| timed_out())?
                                     .map_err(|_| unavailable())?;
                                     let request_id = handle.id.clone();
-                                    let response = match tokio::time::timeout_at(
+                                    let response = match peri_time::timeout_at(
                                         job.deadline,
                                         handle.await_response(),
                                     )
@@ -119,7 +121,7 @@ impl OAuthCredentialClient {
                                     {
                                         Ok(response) => response.map_err(|_| unavailable())?,
                                         Err(_) => {
-                                            let _ = tokio::time::timeout(
+                                            let _ = peri_time::timeout(
                                                 Duration::from_secs(1),
                                                 client.peer().notify_cancelled(
                                                     rmcp::model::CancelledNotificationParam::new(
@@ -144,7 +146,7 @@ impl OAuthCredentialClient {
                                 job.reply.send(result);
                             }
                             let _ = client.close_with_timeout(Duration::from_secs(1)).await;
-                            if tokio::time::timeout(Duration::from_secs(1), &mut server)
+                            if peri_time::timeout(Duration::from_secs(1), &mut server)
                                 .await
                                 .is_err()
                             {
@@ -163,7 +165,7 @@ impl OAuthCredentialClient {
 
     async fn request(&self, request: OAuthCredentialRequest) -> io::Result<OAuthCredentialValue> {
         let (reply, response) = tokio::sync::oneshot::channel();
-        let deadline = tokio::time::Instant::now() + REQUEST_TIMEOUT;
+        let deadline = peri_time::monotonic_now() + REQUEST_TIMEOUT;
         self.sender
             .send(Job {
                 request,
@@ -171,7 +173,7 @@ impl OAuthCredentialClient {
                 reply: Reply::Async(reply),
             })
             .map_err(|_| unavailable())?;
-        tokio::time::timeout_at(deadline, response)
+        peri_time::timeout_at(deadline, response)
             .await
             .map_err(|_| timed_out())?
             .map_err(|_| unavailable())?
@@ -231,7 +233,7 @@ impl OAuthCredentialClient {
                 request: OAuthCredentialRequest::Clear {
                     server_key: server_key.to_owned(),
                 },
-                deadline: tokio::time::Instant::now() + REQUEST_TIMEOUT,
+                deadline: peri_time::monotonic_now() + REQUEST_TIMEOUT,
                 reply: Reply::Blocking(reply),
             })
             .map_err(|_| unavailable())?;

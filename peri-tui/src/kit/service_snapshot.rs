@@ -91,10 +91,10 @@ async fn run_service_snapshot(
         .client
         .as_ref()
         .map(AcpTuiClient::subscribe_execution_cwd);
-    let mut interval = tokio::time::interval(Duration::from_secs(2));
+    let mut interval = peri_time::interval(Duration::from_secs(2));
     // 起始 tick 立即触发一次（首次 interval.tick() 立即返回）——让 UI 启动后
     // 立即拿到首帧服务快照，而非 2s 后才出现数据。
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    interval.set_missed_tick_behavior(peri_time::MissedTickBehavior::Delay);
 
     loop {
         tokio::select! {
@@ -149,15 +149,15 @@ struct SlowSnapshotRefresh {
 impl Default for SlowSnapshotRefresh {
     fn default() -> Self {
         Self {
-            next_file_scan: Instant::now(),
+            next_file_scan: peri_time::monotonic_now(),
             file_cwd: String::new(),
             list_cwd: String::new(),
             list_workspace: None,
             list_scope: ThreadBrowserScope::default(),
             list_archived: false,
             list_page_count: 1,
-            next_thread_scan: Instant::now(),
-            next_memory_scan: Instant::now(),
+            next_thread_scan: peri_time::monotonic_now(),
+            next_memory_scan: peri_time::monotonic_now(),
             files: Vec::new(),
             threads: Vec::new(),
             memory_entries: Vec::new(),
@@ -208,7 +208,7 @@ async fn tick_once(
         (total, enabled, jobs)
     };
 
-    let now = Instant::now();
+    let now = peri_time::monotonic_now();
     let active_cwd = ACTIVE_EXECUTION_CWD.state().read().clone();
     let cwd = active_cwd.clone().unwrap_or_else(|| src.cwd.clone());
     let scope = THREAD_BROWSER_SCOPE.get();

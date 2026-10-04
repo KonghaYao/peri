@@ -1,7 +1,5 @@
 use std::sync::Arc;
 
-use chrono::Local;
-
 use peri_acp_types::{
     event::{AgentEventHandler, BackgroundTaskResult, ExecutorEvent},
     frozen::ThreadPersistence,
@@ -62,7 +60,13 @@ pub(super) async fn build_and_execute_agent(
                         system_prompt: Arc::from(""),
                         claude_md: Arc::from(""),
                         skill_summary: Arc::from(""),
-                        date: Arc::from(Local::now().format("%Y-%m-%d").to_string()),
+                        date: Arc::from(
+                            peri_time::calendar_date(
+                                peri_time::now_wall(),
+                                peri_time::CalendarConvention::deployment_default(),
+                            )
+                            .to_string(),
+                        ),
                         language: turn.language.clone().map(Arc::from),
                         // 防御性回退：无冻结数据时 MetaHarness 状态为空（无覆盖、无关闭）
                         meta_harness: peri_acp_types::meta_harness::MetaHarnessState::default(),

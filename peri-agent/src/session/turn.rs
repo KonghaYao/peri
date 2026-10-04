@@ -51,7 +51,7 @@ impl TurnContext {
             step: AtomicUsize::new(0),
             cwd,
             cancel_token,
-            started_at: Instant::now(),
+            started_at: peri_time::monotonic_now(),
         }
     }
 
