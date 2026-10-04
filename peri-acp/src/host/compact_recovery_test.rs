@@ -6,13 +6,16 @@ use peri_acp_types::{
     messages::MessageId,
     session_resources::{
         ChildResumeClaim, ChildSnapshot, ForkSnapshot, FrozenSnapshotBytes, NewSession,
-        PersistenceRecovery, RewindBoundary, SessionAvailability, SessionMetaPatch,
+        NewSessionMeta, PersistenceRecovery, RewindBoundary, SessionAvailability, SessionMetaPatch,
         SessionResourceError, SessionResourceErrorKind, SessionResourceResult, SessionResources,
         SessionSnapshot,
     },
     store::{CompactionChange, MessageFlags, PersistedPayload, ThreadStore},
     thread::{ThreadId, ThreadMeta},
-    workspace::{ResolvedWorkspace, ScopedThreadPage, ScopedThreadQuery, SessionExecutionLease},
+    workspace::{
+        ResolvedWorkspace, ScopedThreadPage, ScopedThreadQuery, SessionBinding,
+        SessionExecutionLease,
+    },
 };
 use std::{collections::HashMap, sync::atomic::AtomicBool};
 
@@ -373,7 +376,7 @@ fn make_host_sessions(ctx: &SessionContext, payloads: Vec<PersistedPayload>) -> 
         session_id: ctx.session_id.clone(),
         thread_id: ctx.thread_id.clone().unwrap(),
         cwd: ctx.cwd.clone(),
-        execution_owner: None,
+        execution_owner: ctx.execution_owner.clone(),
         environment: None,
         closing: false,
         history: payloads
@@ -406,13 +409,11 @@ async fn make_recovery_context(
     model: Arc<dyn Model>,
     fail_after_full: bool,
 ) -> (SessionContext, Arc<RecoveryStore>, SharedSessions) {
-    // 夹具与生产同构：迁移桥与门面来自**同一次打开**（同一 pool、同一 owner 登记表）。
-    // 桥只用于夹具侧的建会话与直接读断言，生产路径一律走注入的门面包装。
-    let (bridge, facade) =
+    // 夹具与生产同构：门面来自同一次打开，并经公共会话创建入口取得 owner。
+    let (_bridge, facade) =
         peri_resources::sessions::open_store_and_facade_for_tests(dir.path().join("recovery.db"))
             .await
             .unwrap();
-    let bridge = Arc::new(bridge);
     let store = Arc::new(RecoveryStore {
         inner: Arc::new(facade),
         compact_commits: AtomicUsize::new(0),
@@ -422,13 +423,46 @@ async fn make_recovery_context(
         after_commit: Mutex::new(None),
     });
     let cwd = dir.path().to_str().unwrap();
-    let thread_id = bridge.create_thread(ThreadMeta::new(cwd)).await.unwrap();
+    let meta = ThreadMeta::new(cwd);
+    let thread_id = meta.id.clone();
+    let workspace = store.resolve_workspace(dir.path()).await.unwrap();
+    let frozen = make_sentinel_frozen();
+    let lease = store
+        .create_session(&NewSession {
+            thread_id: thread_id.clone(),
+            created_at: meta.created_at.to_rfc3339(),
+            meta: NewSessionMeta {
+                title: None,
+                cwd: cwd.into(),
+                parent_thread_id: None,
+                hidden: false,
+                cancel_policy: Default::default(),
+                snapshot_at_message_id: None,
+            },
+            binding: SessionBinding::from_workspace(&workspace),
+            frozen: FrozenSnapshotBytes::new(
+                crate::session::frozen_snapshot::encode_frozen_snapshot(&frozen).unwrap(),
+            ),
+        })
+        .await
+        .unwrap();
     let history = vec![BaseMessage::human(OLD), BaseMessage::ai("old answer")];
-    bridge.append_messages(&thread_id, &history).await.unwrap();
+    store
+        .append_history(
+            &thread_id,
+            &history
+                .iter()
+                .cloned()
+                .map(PersistedPayload::Message)
+                .collect::<Vec<_>>(),
+        )
+        .await
+        .unwrap();
     let mut ctx = make_session_context(&thread_id).await;
     ctx.cwd = cwd.into();
-    ctx.thread_id = Some(thread_id);
+    ctx.thread_id = Some(thread_id.clone());
     ctx.session_resources = Some(store.clone());
+    ctx.execution_owner = Some(lease);
     ctx.primary_llm_factory = Some(Arc::new(move || model.clone()));
     let sessions = make_host_sessions(
         &ctx,
@@ -608,6 +642,11 @@ async fn test_full_compact_writer_error_evicts_host_and_cold_reload_recovers_sum
         "不得删除已提交 lifecycle 的消息"
     );
     // 释放原执行与持久化 owner，再打开全新的 SQLite store（桥与门面重新配对）。
+    store
+        .release_execution_owner(&ctx.execution_owner.as_ref().unwrap().owner_token().unwrap())
+        .await
+        .unwrap();
+    ctx.execution_owner = None;
     ctx.session_resources = None;
     drop(store);
     let (recovered, recovered_facade) =
@@ -630,6 +669,16 @@ async fn test_full_compact_writer_error_evicts_host_and_cold_reload_recovers_sum
                 .is_some_and(|m| m.content().contains(SUMMARY)))
             .count(),
         1
+    );
+    let workspace = recovered_facade
+        .resolve_workspace(dir.path())
+        .await
+        .unwrap();
+    ctx.execution_owner = Some(
+        recovered_facade
+            .acquire_execution(thread_id, &workspace)
+            .await
+            .unwrap(),
     );
     ctx.session_resources = Some(Arc::new(recovered_facade));
     let cold_sessions = make_host_sessions(&ctx, payloads);
@@ -753,7 +802,8 @@ async fn assert_unconfirmed_commit_requires_cold_recovery(cancel_after_commit: b
     assert_eq!(
         store.compact_commits.load(Ordering::SeqCst),
         1,
-        "故障必须发生在真实COMMIT之后"
+        "故障必须发生在真实COMMIT之后: {:?}",
+        result.failure
     );
     assert!(
         requests.lock().unwrap().is_empty(),
@@ -780,6 +830,13 @@ async fn assert_unconfirmed_commit_requires_cold_recovery(cancel_after_commit: b
     assert!(wire.message.contains("reload"));
     assert!(!sessions.lock().await.contains_key(&ctx.session_id));
     assert_eq!(store.deletes.load(Ordering::SeqCst), 0);
+    // Simulate the old host's confirmed exit before a different store facade
+    // acquires execution. Cold recovery must not bypass an active Store owner.
+    store
+        .release_execution_owner(&ctx.execution_owner.as_ref().unwrap().owner_token().unwrap())
+        .await
+        .unwrap();
+    ctx.execution_owner = None;
     ctx.session_resources = None;
     drop(store);
     let (recovered, recovered_facade) =
@@ -802,6 +859,16 @@ async fn assert_unconfirmed_commit_requires_cold_recovery(cancel_after_commit: b
                 .is_some_and(|m| m.content().contains(SUMMARY)))
             .count(),
         1
+    );
+    let workspace = recovered_facade
+        .resolve_workspace(dir.path())
+        .await
+        .unwrap();
+    ctx.execution_owner = Some(
+        recovered_facade
+            .acquire_execution(thread_id, &workspace)
+            .await
+            .unwrap(),
     );
     ctx.session_resources = Some(Arc::new(recovered_facade));
     let cold_sessions = make_host_sessions(&ctx, payloads);
