@@ -473,6 +473,42 @@ async fn worktree_scheduled_approval_uses_session_permission_and_rejects_closed_
 
 #[cfg(unix)]
 #[tokio::test]
+async fn close_premarked_for_admission_persists_intent_before_settlement() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config =
+        make_peri_config_with_provider(make_provider_config("test", "openai", "key", "model"));
+    let provider = LlmProvider::from_config(&config).unwrap();
+    let cfg = make_server_config(config, provider, &tmp).await;
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
+    let mut sessions = HashMap::new();
+    let created = handle_request(
+        "session/new",
+        &json!({"cwd": tmp.path()}),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+    let id = created["sessionId"].as_str().unwrap().to_owned();
+    sessions.get_mut(&id).unwrap().closing = true;
+    assert!(!cfg.session_resources.is_session_closing(&id).await.unwrap());
+
+    handle_request(
+        "session/close",
+        &json!({"sessionId": id}),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+    assert!(!sessions.contains_key(&id));
+    assert!(!cfg.session_resources.is_session_closing(&id).await.unwrap());
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn worktree_session_end_retains_owner_and_joins_same_hook_on_retry() {
     use peri_acp_types::hooks::{HookEvent, RegisteredHook};
 

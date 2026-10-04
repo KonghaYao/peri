@@ -86,22 +86,30 @@ pub(super) async fn close_owned_session(
             .and_then(|state| state.execution_owner.as_ref())
             .and_then(|lease| lease.owner_token())
         {
-            match resources
-                .close_settlement(&token)
+            // The request dispatcher closes admission before this handler runs.
+            // Only a persisted close intent makes this a settlement retry.
+            if resources
+                .is_session_closing(&session_id.to_owned())
                 .await
                 .map_err(super::super::super::workspace::resource_error)?
             {
-                peri_acp_types::session_resources::CloseSettlement::Finished => {
-                    sessions.remove(session_id);
-                    return Ok(());
+                match resources
+                    .close_settlement(&token)
+                    .await
+                    .map_err(super::super::super::workspace::resource_error)?
+                {
+                    peri_acp_types::session_resources::CloseSettlement::Finished => {
+                        sessions.remove(session_id);
+                        return Ok(());
+                    }
+                    peri_acp_types::session_resources::CloseSettlement::ChangedOwner => {
+                        return Err(AcpError::new(
+                            -32010,
+                            "Session close incomplete: execution owner changed during settlement",
+                        ));
+                    }
+                    peri_acp_types::session_resources::CloseSettlement::Pending => {}
                 }
-                peri_acp_types::session_resources::CloseSettlement::ChangedOwner => {
-                    return Err(AcpError::new(
-                        -32010,
-                        "Session close incomplete: execution owner changed during settlement",
-                    ))
-                }
-                peri_acp_types::session_resources::CloseSettlement::Pending => {}
             }
         }
     }

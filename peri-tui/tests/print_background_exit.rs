@@ -158,7 +158,7 @@ async fn assert_background_output_exits(explicit_background: bool, bare: bool) {
                             "超时提升必须返回可订阅的 MCP Task 回执: {tool_result}"
                         );
                         assert!(
-                            rendered.contains("Background task started: shell-")
+                            rendered.contains("Background task started: mcp-")
                                 && rendered.contains("MCP Tasks subscription"),
                             "超时必须保留可恢复的后台回执: {tool_result}"
                         );
