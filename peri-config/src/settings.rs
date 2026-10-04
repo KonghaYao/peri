@@ -190,6 +190,16 @@ impl ConfigSource {
         Self::load_layout(&cwd, path, None, None, None)
     }
 
+    /// Resolve one inline settings document without reading settings or project files.
+    /// The path only identifies the configuration scope; this source is read-only.
+    pub fn load_standalone_inline_at(
+        cwd: &Path,
+        global_path: PathBuf,
+        settings: String,
+    ) -> Result<Self> {
+        Self::load_layout(cwd, global_path, None, None, Some(settings))
+    }
+
     pub fn load_at_lenient(cwd: &Path, global_path: PathBuf) -> Self {
         let authority_error = match Self::load_at(cwd, global_path.clone()) {
             Ok(source) => return source,

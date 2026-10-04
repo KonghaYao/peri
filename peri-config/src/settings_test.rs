@@ -108,6 +108,66 @@ fn injected_settings_replace_file_inputs_and_cannot_be_saved() {
 }
 
 #[test]
+fn standalone_inline_settings_are_isolated_across_concurrent_loads() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cwd = tmp.path().to_path_buf();
+    let global = cwd.join("global.json");
+    let project = cwd.join(".mcp.json");
+    std::fs::write(&global, "invalid global JSON").unwrap();
+    write_settings(&cwd, "invalid workspace JSON");
+    std::fs::write(&project, "invalid project JSON").unwrap();
+
+    std::thread::scope(|scope| {
+        for (alias, provider_id) in [("sonnet", "first"), ("haiku", "second")] {
+            let cwd = &cwd;
+            let global = &global;
+            scope.spawn(move || {
+                let settings = format!(
+                    r#"{{"config":{{"active_alias":"{alias}","providers":[{{"id":"{provider_id}","type":"openai","apiKey":"test"}}]}}}}"#
+                );
+                let source = ConfigSource::load_standalone_inline_at(
+                    cwd,
+                    global.clone(),
+                    settings,
+                )
+                .unwrap();
+                assert_eq!(source.loaded_merged().config.active_alias, alias);
+                assert_eq!(source.loaded_merged().config.providers[0].id, provider_id);
+                assert!(source.snapshot().unwrap().inputs().project.is_none());
+                assert!(source
+                    .save(revision(&source), &source.loaded_merged())
+                    .is_err());
+            });
+        }
+    });
+
+    assert_eq!(
+        std::fs::read_to_string(global).unwrap(),
+        "invalid global JSON"
+    );
+    assert_eq!(
+        std::fs::read_to_string(project).unwrap(),
+        "invalid project JSON"
+    );
+    assert_eq!(
+        std::fs::read_to_string(cwd.join(".peri/settings.json")).unwrap(),
+        "invalid workspace JSON"
+    );
+    assert_eq!(std::fs::read_dir(&cwd).unwrap().count(), 3);
+}
+
+#[test]
+fn standalone_inline_invalid_settings_do_not_write_files() {
+    let tmp = tempfile::tempdir().unwrap();
+    let global = tmp.path().join("global.json");
+    assert!(
+        ConfigSource::load_standalone_inline_at(tmp.path(), global, "not JSON".to_owned(),)
+            .is_err()
+    );
+    assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 0);
+}
+
+#[test]
 fn test_workspace_config_path_does_not_panic() {
     // workspace_config_path 依赖进程 cwd，仅验证不 panic（只读探测场景）
     let _ = super::workspace_config_path();

@@ -24,6 +24,30 @@ use peri_tui::acp_client::{
 };
 use serde_json::{Value, json};
 
+fn load_print_config_source(
+    settings_path: Option<&str>,
+) -> Result<Arc<peri_tui::config::ConfigSource>> {
+    let source = match settings_path {
+        Some(path) => {
+            let p = std::path::Path::new(path);
+            if p.exists() {
+                peri_tui::config::ConfigSource::load_standalone(p.to_path_buf())?
+            } else {
+                let _: serde_json::Value = serde_json::from_str(path)
+                    .map_err(|e| anyhow::anyhow!("--settings 不是有效文件路径或 JSON: {e}"))?;
+                let cwd = std::env::current_dir()?;
+                peri_tui::config::ConfigSource::load_standalone_inline_at(
+                    &cwd,
+                    peri_tui::config::config_path(),
+                    path.to_owned(),
+                )?
+            }
+        }
+        None => peri_tui::config::ConfigSource::load_lenient(),
+    };
+    Ok(Arc::new(source))
+}
+
 /// -p 模式执行入口
 #[allow(clippy::too_many_arguments)]
 pub async fn run_print(
@@ -67,23 +91,7 @@ pub async fn run_print(
     // - --settings：指定文件整体生效（单文件来源，不合并全局/工作区）
     // - 默认：全局 + 工作区分层合并（load_lenient 保持迁移前
     //   `load().unwrap_or_default()` 的容错语义）
-    let config_source = match &settings_path {
-        Some(path) => {
-            let p = std::path::Path::new(path);
-            if p.exists() {
-                Arc::new(peri_tui::config::ConfigSource::load_standalone(
-                    p.to_path_buf(),
-                )?)
-            } else {
-                let v: serde_json::Value = serde_json::from_str(path)
-                    .map_err(|e| anyhow::anyhow!("--settings 不是有效文件路径或 JSON: {e}"))?;
-                let tmp = std::env::temp_dir().join("peri-settings-override.json");
-                std::fs::write(&tmp, serde_json::to_string_pretty(&v)?)?;
-                Arc::new(peri_tui::config::ConfigSource::load_standalone(tmp)?)
-            }
-        }
-        None => Arc::new(peri_tui::config::ConfigSource::load_lenient()),
-    };
+    let config_source = load_print_config_source(settings_path.as_deref())?;
     let peri_config = config_source.loaded_merged();
 
     // 构建 provider
