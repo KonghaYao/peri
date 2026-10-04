@@ -14,6 +14,3 @@ tokio.workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true
-
-[target.'cfg(not(target_os = "emscripten"))'.dependencies]
-tokio = { workspace = true, features = ["full"] }

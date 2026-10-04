@@ -18,6 +18,3 @@ rand = "0.10"
 url = { workspace = true, features = ["serde"] }
 
 [dev-dependencies]
-
-[target.'cfg(not(target_os = "emscripten"))'.dependencies]
-tokio = { workspace = true, features = ["full"] }

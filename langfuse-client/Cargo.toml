@@ -18,5 +18,5 @@ sha2.workspace = true
 temp-env = "0.3"
 mockito = "1"
 
-[target.'cfg(not(target_os = "emscripten"))'.dependencies]
-tokio = { workspace = true, features = ["full"] }
+[target.'cfg(not(target_os = "emscripten"))'.dev-dependencies]
+tokio = { workspace = true, features = ["net"] }

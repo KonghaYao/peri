@@ -22,5 +22,5 @@ rmcp = { workspace = true, features = ["client"] }
 tempfile.workspace = true
 tokio.workspace = true
 
-[target.'cfg(not(target_os = "emscripten"))'.dependencies]
-tokio = { workspace = true, features = ["full"] }
+[target.'cfg(not(target_os = "emscripten"))'.dev-dependencies]
+tokio = { workspace = true, features = ["net"] }
