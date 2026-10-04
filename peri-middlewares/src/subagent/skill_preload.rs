@@ -241,6 +241,26 @@ impl Middleware for SkillPreloadMiddleware {
                         },
                         other => other,
                     };
+                    // 用户文本的旧 /server:skill 形态不再是系统 skill 命令。
+                    // 仅自动提取路径限制；子代理/workflow 的显式名单保持原语义。
+                    let lookup = if !explicit_list_path && name.contains(':') {
+                        match lookup {
+                            SkillLookup::Found(ref meta)
+                                if meta.origin.as_ref().is_some_and(
+                                    |peri_acp_types::skills::SkillOrigin::Mcp {
+                                         server, ..
+                                     }| {
+                                        lookup_registry.is_system_origin(server)
+                                    },
+                                ) =>
+                            {
+                                SkillLookup::Missing
+                            }
+                            other => other,
+                        }
+                    } else {
+                        lookup
+                    };
                     let outcome = match lookup {
                         SkillLookup::Found(meta) => RegistryLookup::Found(meta),
                         SkillLookup::Ambiguous(candidates) => RegistryLookup::Ambiguous(candidates),

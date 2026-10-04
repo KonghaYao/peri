@@ -9,8 +9,8 @@
 //! 1. [`core_projection_registers_builtin_system_skills_with_aliases`]：位为假 ⇒
 //!    系统来源（`ConfigSource::Builtin` 经 `mark_system_origins` 标注）的技能注册为
 //!    `core:{bare}`（含 frontmatter `aliases` 派生别名）；
-//! 2. [`core_projection_withdraws_when_skills_face_closed_and_keeps_mcp_face`]：位为真 ⇒
-//!    既有 `core:` 条目整体撤下，且 `{server}:{skill}` MCP 发现面不受该位影响；
+//! 2. [`core_projection_withdraws_when_skills_face_closed`]：位为真 ⇒
+//!    既有 `core:` 条目整体撤下，系统来源无带前缀路由；
 //! 3. [`before_agent_core_projection_follows_pool_context_skills_face_bit`]：管道级
 //!    （`McpMiddleware::before_agent` → `run_ensure_discovery`）从 pool 注入的上下文
 //!    一次读出该位并驱动同一差分（正例：路由随发现出现在面板；关闭：同批撤下）。
@@ -34,7 +34,7 @@ use crate::mcp::builtin::context::BuiltinInstanceContext;
 use crate::mcp::client::{ClientStatus, McpClientHandle, McpClientPool, OAuthStatus};
 use crate::mcp::middleware::McpMiddleware;
 
-use super::{mark_system_origins, mcp_route_entries, project_core_skill_commands};
+use super::{finish_command_source, mark_system_origins, project_core_skill_commands};
 
 /// builtin 来源（`ConfigSource::Builtin`）的连接句柄：`mark_system_origins` 的
 /// 判定事实是「连接事实」而不是名字自称，因此夹具必须以真实标记构造。
@@ -116,26 +116,49 @@ fn core_projection_registers_builtin_system_skills_with_aliases() {
     );
 }
 
-/// 投影函数级关闭差分：位为真 ⇒ 既有 `core:` 条目同批撤下（`reconcile` 撤旧），
-/// 而 `{server}:{skill}` MCP 发现面（不归该位）逐条保留。
 #[test]
-fn core_projection_withdraws_when_skills_face_closed_and_keeps_mcp_face() {
+fn system_origin_uses_connection_identity_even_for_workspace_name() {
+    let registry = Arc::new(McpSkillRegistry::new());
+    let builtin = builtin_handle("workspace");
+    let mut external = (*builtin).clone();
+    external.source = Some(ConfigSource::Project("/tmp/.mcp.json".into()));
+    mark_system_origins(&registry, &[Arc::new(external)], &BTreeSet::new());
+    assert!(!registry.is_system_origin("workspace"));
+
+    let mut trusted = (*builtin).clone();
+    trusted.source = Some(ConfigSource::WorkspaceRemote);
+    mark_system_origins(&registry, &[Arc::new(trusted)], &BTreeSet::new());
+    assert!(registry.is_system_origin("workspace"));
+}
+
+/// 投影函数级关闭差分：位为真 ⇒ 既有 `core:` 条目同批撤下（`reconcile` 撤旧），
+/// 系统来源的带前缀旧路由在发现完成时撤下。
+#[test]
+fn core_projection_withdraws_when_skills_face_closed() {
     let registry = Arc::new(McpSkillRegistry::new());
     let command_registry = Arc::new(CommandRegistry::new());
     let handle = builtin_handle("workspace");
     let token = seed_system_skills(&registry, &handle);
 
-    // MCP 发现面（`{server}:{skill}`）经同一完成回写注册：与本位无关。
+    // 模拟升级前遗留的带前缀路由，再经发现完成回写撤下。
     command_registry.mark_source_started("workspace", token.clone());
     assert_eq!(
         command_registry.mark_source_completed(
             "workspace",
-            token,
-            mcp_route_entries(&registry, "workspace", &registry.skills_of("workspace")),
+            token.clone(),
+            super::mcp_route_entries(&registry, "workspace", &registry.skills_of("workspace")),
         ),
         1,
-        "mcp 面完成回写注册 1 条"
+        "模拟旧版本路由"
     );
+    finish_command_source(
+        &Some(Arc::clone(&command_registry)),
+        &registry,
+        "workspace",
+        token,
+        &registry.skills_of("workspace"),
+    );
+    assert!(command_registry.resolve("/workspace:hello").is_none());
 
     // 位为假：core 面注册。
     project_core_skill_commands(&Some(Arc::clone(&command_registry)), &registry, false);
@@ -162,10 +185,7 @@ fn core_projection_withdraws_when_skills_face_closed_and_keeps_mcp_face() {
                 && matches!(entry.provenance.source, CommandSource::Core))),
         "位为真：不得残留任何 core 域技能条目"
     );
-    assert!(
-        command_registry.resolve("/workspace:hello").is_some(),
-        "`{{server}}:{{skill}}` MCP 发现面不归该位治理，必须保留"
-    );
+    assert!(command_registry.resolve("/workspace:hello").is_none());
 }
 
 /// 管道级差分（生产挂点）：`before_agent` → `run_ensure_discovery` 从 pool 注入

@@ -404,15 +404,15 @@ async fn wait_command(
 /// `SkillsMiddleware` 不构造 ⇒ 13_skills 段落 + SkillTool/DiscoverSkillsTool
 /// 消失，命令面不得留下幽灵路由）；默认配置 ⇒ 有。
 ///
-/// 同批锁定「不是实例关闭」的边界：`{server}:{skill}` MCP 发现面与冻结技能
-/// 摘要数据照常（`SkillsMiddleware` 关闭不改变 workspace 实例与 MCP 发现），
+/// 同批锁定「不是实例关闭」的边界：MCP 发现与冻结技能
+/// 摘要数据照常（`SkillsMiddleware` 关闭不改变 workspace 实例），
 /// 且摘要不得经旁路进入冻结 system prompt（13_skills 段随 disabled 集不收集）。
 ///
 /// 驱动形态 = 生产 `server_loop` 的等价路径：`session/new` → 环境 cfg 上
 /// `after_new_response`（命令首发 + MCP 发现预热）→ 轮询会话命令注册表。
 #[tokio::test]
 #[serial]
-async fn skills_middleware_disabled_hides_core_commands_but_keeps_mcp_face() {
+async fn skills_middleware_disabled_hides_all_system_skill_commands() {
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
 
     // ── 正例：默认配置（SkillsMiddleware 在链上）──
@@ -455,6 +455,12 @@ async fn skills_middleware_disabled_hides_core_commands_but_keeps_mcp_face() {
             .collect::<Vec<_>>()
     );
     assert!(
+        registry_enabled
+            .resolve("/workspace:e2e-project-skill")
+            .is_none(),
+        "系统来源不得同时暴露带前缀版本"
+    );
+    assert!(
         sessions_enabled[&id]
             .frozen
             .as_ref()
@@ -489,19 +495,16 @@ async fn skills_middleware_disabled_hides_core_commands_but_keeps_mcp_face() {
         .session_manager
         .command_registry_for(&id)
         .expect("会话命令注册表");
-    // 发现落定信号 = `{server}:{skill}` MCP 面出现（与 core 投影同一批同步回写）。
-    assert!(
-        wait_command(
-            &registry,
-            "/workspace:e2e-project-skill",
-            std::time::Duration::from_secs(15)
-        )
-        .await,
-        "SkillsMiddleware 关闭不改变 MCP 发现面：workspace:{{skill}} 必须注册"
-    );
-    // core 条目一旦写入即持久（只能被下一次投影撤下），因此有界宽限后仍缺席
-    // 即「从未写入」，不存在观察竞态。
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    // 等发现完成，避免以固定 sleep 断言后台任务尚未执行时的空命令面。
+    let skill_registry = cfg
+        .session_manager
+        .mcp_skill_registry_for(&id)
+        .expect("会话技能注册表");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while skill_registry.skills_of("workspace").is_empty() {
+        assert!(std::time::Instant::now() < deadline, "系统 skill 发现超时");
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
     assert!(
         registry.resolve("/core:e2e-project-skill").is_none(),
         "SkillsMiddleware 关闭 ⇒ /core:{{skill}} 不得注册（链槽关闭的配套半边）；snapshot={:?}",
@@ -510,6 +513,10 @@ async fn skills_middleware_disabled_hides_core_commands_but_keeps_mcp_face() {
             .iter()
             .map(|e| e.fullname.clone())
             .collect::<Vec<_>>()
+    );
+    assert!(
+        registry.resolve("/workspace:e2e-project-skill").is_none(),
+        "关闭时系统来源也不得留下带前缀命令"
     );
 
     // 关闭位不泄漏技能摘要进冻结 prompt：摘要数据仍非空（技能经 MCP 可得），

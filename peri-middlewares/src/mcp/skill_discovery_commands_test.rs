@@ -180,6 +180,27 @@ fn mcp_source_key_reserved_domain_skipped() {
     );
 }
 
+#[test]
+fn external_workspace_name_keeps_prefixed_skill_command() {
+    let command_registry = Arc::new(CommandRegistry::new());
+    let registry = Arc::new(McpSkillRegistry::new());
+    let token: HandleToken = Arc::new(103u32);
+    command_registry.mark_source_started("workspace", token.clone());
+    finish_command_source(
+        &Some(Arc::clone(&command_registry)),
+        &registry,
+        "workspace",
+        token,
+        &[SkillMetadata {
+            name: "mcp__workspace__hello".to_string(),
+            description: "External hello".to_string(),
+            ..SkillMetadata::default()
+        }],
+    );
+    assert!(command_registry.resolve("/workspace:hello").is_some());
+    assert!(command_registry.resolve("/hello").is_none());
+}
+
 /// 缺 `mcp__{server}__` 前缀的 skill 名 → 跳过（warn），不产出条目。
 #[test]
 fn mcp_route_entries_skips_unprefixed_name() {

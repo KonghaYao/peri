@@ -267,11 +267,14 @@ fn finish_command_source(
             );
             return;
         }
-        reg.mark_source_completed(
-            &mcp_source_key(server),
-            handle_token,
-            mcp_route_entries(registry, server, skills),
-        );
+        // 系统来源只经 core 域发布裸名命令。空集合仍完成该来源，清理此前
+        // 版本留下的带前缀路由，并保留重连/断连的来源生命周期。
+        let entries = if registry.is_system_origin(server) {
+            Vec::new()
+        } else {
+            mcp_route_entries(registry, server, skills)
+        };
+        reg.mark_source_completed(&mcp_source_key(server), handle_token, entries);
     }
 }
 
@@ -616,8 +619,7 @@ fn registered_core_skill_commands(command_registry: &CommandRegistry) -> Vec<Str
 /// - 来源集合 = `registry.system_skills()`（由 [`run_ensure_discovery`] 按连接事实
 ///   标注；实例关闭/断连 ⇒ 集合自然为空 ⇒ 命令同批撤下，X4）；
 /// - `skills_face_closed`（宿主技能面关闭位，与 A24 关闭集同源）= 真 ⇒ 目标集合为
-///   空：**仍执行** `reconcile` 以撤下既有条目（链槽关闭不留幽灵路由），但不再
-///   注册；`{server}:{skill}` MCP 发现面不归本位治理（见 [`mcp_route_entries`]）；
+///   空：**仍执行** `reconcile` 以撤下既有条目（链槽关闭不留幽灵路由）；
 /// - 冲突（同名内置命令 / 已存在的 core 条目）按注册表既有纯拒绝语义跳过并告警。
 pub(crate) fn project_core_skill_commands(
     command_registry: &Option<Arc<CommandRegistry>>,

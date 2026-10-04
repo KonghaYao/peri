@@ -290,8 +290,8 @@ pub(crate) fn run_ensure_discovery(
     //
     // W4b 收口：同一份上下文对象一次读出「宿主技能面关闭位」
     //（`skills_face_closed`，与关闭集同源 = `"SkillsMiddleware" ∈ disabled`）——
-    // 真 ⇒ `core:{skill}` 裸名投影整体撤下（链槽关闭的配套半边），而
-    // `{server}:{skill}` 发现面与实例本身（`closed` 判定）不受影响。
+    // 真 ⇒ `core:{skill}` 裸名投影整体撤下；系统来源不再注册
+    // `{server}:{skill}`，实例本身仍由独立的 `closed` 集判定。
     let builtin_context = pool.builtin_instance_context();
     let closed = builtin_context
         .as_ref()

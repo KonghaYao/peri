@@ -189,9 +189,9 @@ pub struct HostAssemblyInput {
     ///
     /// 语义 = 关闭宿主技能面（`core:{skill}` 裸名命令投影）：链槽关闭
     /// （`SkillsMiddleware` 不构造 ⇒ 13_skills 段落 + SkillTool/DiscoverSkillsTool
-    /// 消失）时命令面不得留下幽灵路由。**不是**实例关闭——workspace 实例、7 个
-    /// 工具与 `{server}:{skill}` MCP 发现面均不受影响（两个位的派生事实源相同，
-    /// 判据不同）。随 builtin 实例上下文注入 pool（发现管线的唯一消费点）。
+    /// 消失）时命令面不得留下幽灵路由。**不是**实例关闭——workspace 实例、
+    /// 工具与资源面仍可用；系统来源技能不注册 `{server}:{skill}` 路由。
+    /// 随 builtin 实例上下文注入 pool（发现管线的唯一消费点）。
     /// 顶层三路径（无会话上下文）恒为 `false`；会话装配从 frozen snapshot 派生。
     pub skills_face_closed: bool,
 }

@@ -112,9 +112,9 @@ pub struct BuiltinInstanceContext {
     /// 的投影（`"SkillsMiddleware" ∈ disabled`，宿主装配一次派生、两处承载），
     /// 语义 = 宿主技能面（`core:{skill}` 裸名命令投影）关闭。
     ///
-    /// **不是**实例关闭：workspace 实例照常装配，7 个工具、资源面与
-    /// `{server}:{skill}` MCP 发现面均不受影响（链槽关闭 = `SkillsMiddleware`
-    /// 不构造，13_skills 段落与两个技能工具随槽位消失；命令面不得留下幽灵路由）。
+    /// **不是**实例关闭：workspace 实例照常装配，工具与资源面照常可用；
+    /// 但系统来源技能只发布裸名命令，关闭此位须撤下命令，并禁用主 Agent
+    /// 自动预载（`SkillsMiddleware` 槽位与两个技能工具也随之消失）。
     /// 唯一消费点是发现管线的 core 投影（`skill_discovery::project_core_skill_commands`）。
     pub skills_face_closed: bool,
 }

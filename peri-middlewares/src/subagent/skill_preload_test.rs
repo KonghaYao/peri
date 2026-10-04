@@ -167,6 +167,35 @@ async fn test_preload_bare_name_hits_registry() {
 }
 
 #[tokio::test]
+async fn test_system_skill_old_prefixed_token_is_not_auto_preloaded() {
+    let dir = tempdir().unwrap();
+    let reg = seed_registry_with_skill("workspace", "brainstorming");
+    reg.mark_system_origins(&["workspace".to_string()]);
+    let mw = middleware(Arc::clone(&reg));
+    let mut state = AgentState::new(dir.path().to_str().unwrap());
+    state.add_message(BaseMessage::human("/workspace:brainstorming"));
+
+    mw.before_agent(&mut state).await.unwrap();
+
+    assert_eq!(state.messages().len(), 1, "旧前缀 token 不得激活系统 skill");
+}
+
+#[tokio::test]
+async fn test_explicit_system_skill_name_keeps_preload_semantics() {
+    let dir = tempdir().unwrap();
+    let reg = seed_registry_with_skill("workspace", "brainstorming");
+    reg.mark_system_origins(&["workspace".to_string()]);
+    let mw = SkillPreloadMiddleware::new(vec!["workspace:brainstorming".to_string()])
+        .with_mcp_registry(Some(reg));
+    let mut state = AgentState::new(dir.path().to_str().unwrap());
+    state.add_message(BaseMessage::human("run task"));
+
+    mw.before_agent(&mut state).await.unwrap();
+
+    assert_eq!(state.messages().len(), 3, "显式名单维持旧解析语义");
+}
+
+#[tokio::test]
 async fn test_preload_injects_multiple_skills_in_input_order() {
     let dir = tempdir().unwrap();
     let reg = Arc::new(McpSkillRegistry::new());

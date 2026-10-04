@@ -279,7 +279,7 @@ impl SessionEnvironment {
         //（`"SkillsMiddleware" ∈ disabled`，与链槽装配的跳过判据同一字面量，见
         // `peri_middlewares/src/assembly.rs` 的 `ChainSlot::Skills` 分支）——链槽关闭
         // 时发现管线的 `core:{skill}` 裸名投影同批撤下（不得留幽灵路由）；workspace
-        // 实例本身与 `{server}:{skill}` 面不受影响。两个位一次派生、随 builtin 实例
+        // 实例本身不受影响；系统来源不注册 `{server}:{skill}` 路由。两个位一次派生、随 builtin 实例
         // 上下文注入 pool，不在别处第三次读配置。
         let disabled_middlewares: std::collections::HashSet<String> = match frozen {
             Some(frozen) => frozen.meta_harness().disabled_middlewares.clone(),

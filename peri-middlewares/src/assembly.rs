@@ -244,6 +244,10 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
                     prompt::add_skills(ctx, &mut chain);
                 }
                 ChainSlot::SkillPreload if disabled.contains("SkillPreloadMiddleware") => {}
+                // 主 Agent 的 slash token 自动预载属于宿主技能面；关闭该面时
+                // 不装配自动预载，显式声明的子任务名单仍按原契约处理。
+                ChainSlot::SkillPreload
+                    if disabled.contains("SkillsMiddleware") && ctx.preload_skills.is_empty() => {}
                 ChainSlot::SkillPreload => {
                     prompt::add_skill_preload(ctx, &mut chain);
                 }

@@ -348,6 +348,19 @@ fn assemble_names(ctx: &AssemblyContext) -> Vec<String> {
     out.chain.names().into_iter().map(String::from).collect()
 }
 
+#[test]
+fn skills_face_closed_suppresses_automatic_preload_but_keeps_explicit_list() {
+    let mut ctx = base_context();
+    ctx.meta_harness_disabled
+        .insert("SkillsMiddleware".to_string());
+    let names = assemble_names(&ctx);
+    assert!(!names.iter().any(|name| name == "SkillPreloadMiddleware"));
+
+    ctx.preload_skills.push("declared-skill".to_string());
+    let names = assemble_names(&ctx);
+    assert!(names.iter().any(|name| name == "SkillPreloadMiddleware"));
+}
+
 fn make_hook() -> RegisteredHook {
     RegisteredHook {
         hook: HookType::Command {
