@@ -7,14 +7,23 @@
 **项目（Project）**：用户查看和组织相关会话的归属单位。一个本地 Git 仓库及其关联 worktree 属于同一项目；独立 clone 默认是不同项目。
 _Avoid_: 用当前目录、分支名或远端地址代指项目身份。
 
-**执行工作区（Workspace）**：会话实际使用的一份文件树。Git 主工作树、每个 linked worktree，以及非 Git 项目的目录，分别构成执行工作区。
-_Avoid_: 与项目、Cargo workspace 或整个编辑器窗口混用。
+**工作区（Workspace；存储 v2 目标）**：某台 Machine 上的一份 Git worktree，或一个非 Git 启动目录；Git worktree 内的不同启动子目录属于同一工作区。
+_Avoid_: 与多个 worktree 共享的项目、Git common directory、Cargo workspace 或整个编辑器窗口混用。
 
 **执行目录（Execution directory）**：会话解析相对路径、启动工具与发现局部项目指引的目录，可以是执行工作区的子目录。
 _Avoid_: 用项目根目录替代会话原本的执行目录。
 
-**会话（Session / Thread）**：具有独立身份与连续历史的工作记录；打开它的终端位置不决定它的归属。
+**会话（Session = Thread）**：具有独立身份与连续历史的工作记录；Session 与代码中的 thread 是同一个持久实体，共用 `ThreadId`；打开它的终端位置不决定它的归属。
 _Avoid_: 将一个文件系统路径或一个进程等同于一个会话。
+
+**机器（Machine；存储 v2 目标）**：由本机持久 UUID 标识的机器环境及其用户可修改的展示名称；一台机器可拥有多个工作区。
+_Avoid_: 用机器名称、硬件指纹、当前进程或用户身份代替机器 ID。
+
+**归档（Archived；存储 v2 目标）**：用户对会话列表位置的选择，可撤销，不改变会话历史或运行资格。
+_Avoid_: 与子 Agent 的 `hidden`、删除或运行终止混用。
+
+**工作区鉴权范围（Workspace authorization scope；存储 v2 目标）**：同一 Workspace 的会话共享持久 MCP 鉴权，不同 Workspace 的凭证和私有 MCP 数据相互隔离。
+_Avoid_: 用机器 ID、MCP server 名、当前进程或单条 Session ID 代替 Workspace ID。
 
 **根会话（Root session）**：父子会话树的根，以 Session ID 标识。获批目标中，持有 ID 可在可访问的数据库内恢复，不以目录、持锁机器或运行实例判定持有权。
 _Avoid_: 将根会话的数据库身份等同于某次执行的 owner。

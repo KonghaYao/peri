@@ -9,5 +9,6 @@
 - [tui-manual-verification.md](tui-manual-verification.md)：可重复执行的 TUI 手工验证清单。
 - [i386-static-build.md](i386-static-build.md)：cargo-zigbuild 32 位 x86 Linux 静态构建与容器验证。
 - [loongarch64-build.md](loongarch64-build.md)：cargo-zigbuild 64 位 LoongArch Linux 静态构建与模拟器验证。
+- [oxidizer-fetch-upstream-research.md](oxidizer-fetch-upstream-research.md)：Oxidizer `fetch` 的 HTTP 抽象与 Wasm 适配约束，以及 Peri 请求边界评估。
 
 参考资料不记录某次执行的勾选状态、临时日志或 active issue 进度。
