@@ -1,6 +1,6 @@
 # WASM 接入的主线边界收敛
 
-状态：主线边界已实现并通过本地验收；WASM 分支接线与目标运行时回环待验收。来源为 `refactor/wasm` 工作树的同名反馈；该分支的 Node/Bun 与本地 `workerd` 结果仅是分支证据，主线合入后重新验证。托管 Workers 不在本轮验收范围。
+状态：主线边界已合入 WASM 分支；Node 与本地 `workerd` 的 ACP、模型、持久会话和重启恢复回环已重新通过。受信远端 Workspace 的部署接线仍待验证；托管 Workers 不在本轮验收范围。
 
 ## 目标与边界
 
@@ -36,7 +36,7 @@
 
 ## 实施顺序与待裁决项
 
-帧桥可独立落地；Host、Session、MCP 按模块分别实现并在主线集成验收。具体 WASM 调用方与部署脚本在分支随后适配和合并。SDK Yjs 投影单独评审。
+帧桥可独立落地；Host、Session、MCP 按模块分别实现并在主线集成验收。具体 WASM 调用方与部署脚本已在分支适配并合并。SDK Yjs 投影单独评审。
 
 - **跨部署恢复**：本轮保证相同虚拟工作区身份的 WASM Host 重启恢复；Native 已创建会话是否可由 WASM 接管尚无批准契约。本轮不声称跨部署接管，实施时不得意外改变 Native ID 或快照规则。
 - **远端 Workspace 来源**：受信配置的具体入口须按现行 Host/全局配置权威复核；项目或插件配置不得冒充保留实例名。若主线缺少可证明受信的入口，保留为后续部署接线条件，不降级来源限制。
@@ -49,4 +49,4 @@
 - `RemoteWorkspaceEnvironment::virtual_workspace` 将稳定 machine UUID 与 root 传入远端数据和执行端口；虚拟发现快照使用 `virtual-v1`，身份或快照不匹配时保留历史并拒绝执行。SQLite wire 的远端冷恢复及只读退化测试通过；本机 SQLite 公共门面跨进程契约测试通过。
 - MCP 准入覆盖匿名 HTTP 实际握手、显式 OAuth 缺凭证、builtin、插件与 stdio 缺席；远端 Workspace 的**受信配置来源和目标部署接线仍待验证**，本轮不将其记为已验收。
 - `WireBridge` 复用 MPSC transport；56 项 transport 测试覆盖帧桥正反向请求、ID、错误、通知、取消期间转发及 pending 结算。
-- `build --locked --workspace`、`fmt --all --check`、层级导入检查通过。目标 crate 的 Clippy 完成且这次改动无新增提示；仓库既有提示使 `-D warnings` 未通过。文件尺寸检查仅剩 13 个既有超限测试文件。实际 Turso 服务、WASM 编译、Node/Bun 与 `workerd` 回环尚未在此工作树执行。
+- `build --locked --workspace`、`fmt --all --check`、层级导入检查通过。目标 crate 的 Clippy 完成且这次改动无新增提示；仓库既有提示使 `-D warnings` 未通过。文件尺寸检查仅剩 13 个既有超限测试文件。合并后 `peri-wasm` Emscripten release 构建、Node ACP/远端 MCP/生命周期回环及 Wrangler 本地 `workerd` 回环通过；均使用真实本地 sqld 与模拟模型服务。合并时补齐远端草稿创建的 owner 准入，并将共用 schema 版本推进至 13；Resources 库测试验证远端升级。本轮未验证托管 Workers。

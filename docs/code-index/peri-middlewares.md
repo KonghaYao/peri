@@ -10,6 +10,15 @@
 
 ## 架构速览
 
+Emscripten 构建保留 `McpClientPool` 的远端 HTTP MCP 通路和 ACP 会话级 MCP 声明；
+`mcp/builtin` 在该目标的注入策略固定为空，本地 handler、stdio 子进程、LSP、
+cron 与 workflow 存储装配均按目标移出依赖图；PTC 已在主线删除。`assembly/workflow_wasm.rs`
+提供空的 workflow 端口，使 Agent 链保持同一装配接口；该目标不提供 workflow 执行。
+插件 marketplace 的 git/npm 安装在该目标返回显式错误。
+配置快照加载经 `mcp/config.rs::snapshot_builtin_policy` 遵守同一目标策略；
+`mcp/initialize.rs::initialize_config` 再按 builtin 注册表过滤本地实例，保留远端
+Workspace URL 和其他远端 MCP。
+
 MCP 解析、基础来源合并、typed 校验、插件去重与 cache 关闭规则归
 [`peri-config`](peri-config.md)，`config.rs` re-export core policy，`config/cache_policy.rs` 仅保留测试解析适配。
 宿主装配通过 `McpClientPool::set_configuration_snapshot` 在初始化前绑定 scoped

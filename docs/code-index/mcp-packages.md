@@ -6,6 +6,11 @@ Builtin MCP 的工具、server handler 与 LSP 客户端/pool 由独立 crate �
 
 ## Package 路由
 
+Emscripten 目标仅引入 MCP 通用映射与配置数据面；builtin MCP package 不进入
+`peri-wasm` 依赖图。`peri-mcp-config/src/wasm.rs` 在宿主映射的 MEMFS 和进程环境上
+执行同步读写、路径查询与字节 CAS，避免启动本地配置 server 或 TCP client。
+原生目标继续使用 `ConfigurationClient`、跨进程锁及现有 server。
+
 配置数据面还提供 `ConfigurationClient::read_environment`（`ReadEnvironment`）：
 只按名称读取 provider 环境，缺省与非法名称/编码区分，不回落计算宿主。
 该数据面还提供 `write_text_if_unchanged`：expected 正文字节 CAS，进程与按目标路径

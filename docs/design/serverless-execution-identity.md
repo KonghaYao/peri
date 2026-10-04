@@ -18,7 +18,7 @@ flowchart LR
     subgraph Alpha["可替换计算实例 A<br/>peri-wasm 模块实例 · machineId α"]
         BridgeA["PeriWasmAcp / WireBridge<br/>原始 JSON-RPC 帧"]
         AcpA["现有 ACP Host（peri-acp · peri-agent）"]
-        AuthorityA["会话资源：虚拟工作区与执行准入<br/>WasmExecution · 进程内 lease"]
+        AuthorityA["会话资源：虚拟工作区与执行准入<br/>RemoteExecution · 进程内 lease"]
         BridgeA <-->|"内存传输"| AcpA
         AcpA --> AuthorityA
     end
@@ -26,7 +26,7 @@ flowchart LR
     subgraph Beta["可替换计算实例 B<br/>peri-wasm 模块实例 · machineId β"]
         BridgeB["PeriWasmAcp / WireBridge<br/>原始 JSON-RPC 帧"]
         AcpB["现有 ACP Host（peri-acp · peri-agent）"]
-        AuthorityB["会话资源：虚拟工作区与执行准入<br/>WasmExecution · 进程内 lease"]
+        AuthorityB["会话资源：虚拟工作区与执行准入<br/>RemoteExecution · 进程内 lease"]
         BridgeB <-->|"内存传输"| AcpB
         AcpB --> AuthorityB
     end
@@ -108,6 +108,9 @@ workspace root，不要求也不校验真实文件系统事实：项目与工作
 执行观测快照（根路径）随会话持久在远端 Store。宿主提供的 `path` 必须是工具环境中的
 稳定绝对路径，计算实例上的临时挂载目录、部署包目录和 SDK 进程的 `cwd` 不得充当
 该根。
+
+新会话使用共用 `RemoteExecution` 的虚拟 Workspace ID 与 `virtual-v1` 快照。
+旧 WASM 格式的会话仍可按 Session ID 读取历史，但不能恢复执行；重新执行须创建新会话。
 
 执行准入按已保存绑定复核：
 
