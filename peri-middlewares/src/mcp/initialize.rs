@@ -307,6 +307,7 @@ impl McpClientPool {
             publish_config_failure(&pool, &status_tx, &error.to_string());
             return;
         }
+        #[allow(unused_variables)] // Emscripten cannot spawn stdio transports.
         let cwd = match pool.bind_execution_cwd(cwd) {
             Ok(cwd) => cwd,
             Err(error) => {
@@ -465,6 +466,7 @@ impl McpClientPool {
                     }
                     connected
                 }
+                #[allow(unused_variables)]
                 TransportConfig::Stdio {
                     ref command,
                     ref args,
@@ -474,14 +476,17 @@ impl McpClientPool {
                     .load(std::sync::atomic::Ordering::Acquire)
                 {
                     false => {
-                        Self::insert_failed(
-                            &pool,
-                            name,
-                            "stdio subprocesses are unavailable in this deployment".into(),
-                        );
+                        Self::insert_failed(&pool, name, crate::platform::STDIO_UNAVAILABLE.into());
                         commit_discovery_failure(&pool, name, false);
                         continue;
                     }
+                    #[cfg(target_os = "emscripten")]
+                    true => {
+                        Self::insert_failed(&pool, name, crate::platform::STDIO_UNAVAILABLE.into());
+                        commit_discovery_failure(&pool, name, false);
+                        continue;
+                    }
+                    #[cfg(not(target_os = "emscripten"))]
                     true => match pool.spawn_stdio_transport(command, args, env, cwd) {
                         Ok(transport) => {
                             serve_client_auto(transport, &pool.capability_profile, timeout).await

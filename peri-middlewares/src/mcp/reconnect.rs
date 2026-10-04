@@ -138,10 +138,10 @@ impl McpClientPool {
                 }
                 connected
             }
+            #[cfg(not(target_os = "emscripten"))]
             TransportConfig::Stdio { command, args, env } => {
                 if !self.stdio_available.load(Ordering::Acquire) {
-                    let reason =
-                        "stdio subprocesses are unavailable in this deployment".to_string();
+                    let reason = crate::platform::STDIO_UNAVAILABLE.to_string();
                     McpClientPool::insert_failed(self, server_name, reason.clone());
                     commit_discovery_failure(self, server_name, false);
                     return Err(McpPoolError::ConnectionFailed {
@@ -167,6 +167,13 @@ impl McpClientPool {
                         });
                     }
                 }
+            }
+            #[cfg(target_os = "emscripten")]
+            TransportConfig::Stdio { .. } => {
+                return Err(McpPoolError::ConnectionFailed {
+                    server: server_name.to_owned(),
+                    reason: crate::platform::STDIO_UNAVAILABLE.into(),
+                });
             }
             TransportConfig::StreamableHttp {
                 url,

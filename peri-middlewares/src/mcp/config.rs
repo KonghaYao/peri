@@ -451,8 +451,8 @@ pub(crate) fn load_merged_config_from_snapshot_with_capabilities(
         HashMap::new()
     };
     let merged = snapshot.mcp_with_plugins(&plugin_servers)?;
-    let policy = if builtin_available && snapshot.builtin_mcp_enabled() {
-        super::builtin::BuiltinInjectionPolicy::all()
+    let policy = if builtin_available {
+        crate::platform::builtin_policy(snapshot.builtin_mcp_enabled())
     } else {
         super::builtin::BuiltinInjectionPolicy::none()
     };
@@ -464,11 +464,7 @@ pub(crate) fn load_bare_config_from_snapshot(
     snapshot: &peri_config::ConfigurationSnapshot,
 ) -> Result<McpConfigFile, McpConfigError> {
     let mut config = snapshot.bare_mcp()?;
-    let policy = if snapshot.builtin_mcp_enabled() {
-        super::builtin::BuiltinInjectionPolicy::all()
-    } else {
-        super::builtin::BuiltinInjectionPolicy::none()
-    };
+    let policy = crate::platform::builtin_policy(snapshot.builtin_mcp_enabled());
     super::builtin::apply_builtin_overlay(&mut config.mcp_servers, &policy)
         .map_err(builtin_overlay_error)?;
     config.mcp_servers.retain(|name, _| name == "workspace");

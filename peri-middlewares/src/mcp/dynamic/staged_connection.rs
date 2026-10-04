@@ -361,6 +361,7 @@ async fn resolve_headers(
     Ok(resolved)
 }
 
+#[cfg(not(target_os = "emscripten"))]
 fn dynamic_stdio_command(
     program: &str,
     args: &[String],
@@ -414,6 +415,7 @@ fn dynamic_stdio_default_path() -> &'static str {
     "/usr/local/bin:/usr/bin:/bin"
 }
 
+#[cfg(not(target_os = "emscripten"))]
 fn spawn_dynamic_stdio_transport(
     pool: &McpClientPool,
     command: &str,
@@ -445,6 +447,7 @@ pub async fn prepare_single_server(
     let mut oauth_lease = None;
     let mut process = None;
     let connect_result = match &config.transport {
+        #[cfg(not(target_os = "emscripten"))]
         CanonicalDynamicMcpTransport::Stdio {
             command,
             args,
@@ -463,6 +466,14 @@ pub async fn prepare_single_server(
                     })?;
             process = Some(transport.process_owner());
             serve_client_auto(transport, &oauth_pool.capability_profile, timeout).await
+        }
+        #[cfg(target_os = "emscripten")]
+        CanonicalDynamicMcpTransport::Stdio { .. } => {
+            return Err(DynamicMcpFailure::new(
+                DynamicMcpErrorCode::StartRejected,
+                DynamicMcpOperationState::Starting,
+                crate::platform::STDIO_UNAVAILABLE,
+            ));
         }
         CanonicalDynamicMcpTransport::StreamableHttp { url, headers } => {
             let headers = resolve_headers(headers, resolver).await?;

@@ -1,15 +1,20 @@
-use std::{collections::HashSet, process::Stdio, sync::Arc, time::Duration};
+#[cfg(not(target_os = "emscripten"))]
+use std::process::Stdio;
+use std::{collections::HashSet, sync::Arc, time::Duration};
 
 use peri_acp_types::tasks::TaskManager;
 use peri_agent::{agent::react::ReactLLM, messages::BaseMessage};
+#[cfg(not(target_os = "emscripten"))]
 use peri_mcp_common::shell::ShellExecutionGuard;
+#[cfg(not(target_os = "emscripten"))]
 use tokio::io::AsyncWriteExt;
 
+#[cfg(not(target_os = "emscripten"))]
+use crate::hooks::variables::resolve_hook_variables;
 use crate::hooks::{
     output_parser::{parse_command_hook_output, parse_http_hook_response},
     ssrf_guard::check_url,
     types::{HookAction, HookInput, HookType, RegisteredHook},
-    variables::resolve_hook_variables,
 };
 
 /// Execute a command hook (shell script).
@@ -27,6 +32,7 @@ pub async fn execute_command_hook(
 }
 
 /// Execute in the session directory and retain process-tree cleanup ownership.
+#[cfg(not(target_os = "emscripten"))]
 pub async fn execute_command_hook_owned(
     hook: &HookType,
     input: &HookInput,
@@ -190,6 +196,16 @@ pub async fn execute_command_hook_owned(
             HookAction::Allow
         }
     }
+}
+
+#[cfg(target_os = "emscripten")]
+pub async fn execute_command_hook_owned(
+    _hook: &HookType,
+    _input: &HookInput,
+    _registered: &RegisteredHook,
+    _task_manager: Option<&dyn TaskManager>,
+) -> HookAction {
+    HookAction::Allow
 }
 
 /// Execute a prompt hook (LLM evaluation).

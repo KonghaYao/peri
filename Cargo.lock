@@ -3401,8 +3401,6 @@ dependencies = [
  "peri-config",
  "peri-controller",
  "peri-mcp-common",
- "peri-mcp-config",
- "peri-mcp-credentials",
  "peri-mcp-cron",
  "peri-mcp-lsp",
  "peri-mcp-workspace",
@@ -3732,7 +3730,6 @@ dependencies = [
  "dirs-next",
  "filetime",
  "flate2",
- "fs2",
  "futures",
  "fuzzy-matcher",
  "glob",
@@ -3744,9 +3741,9 @@ dependencies = [
  "peri-acp-types",
  "peri-agent",
  "peri-config",
+ "peri-js-runtime",
  "peri-mcp-artifact",
  "peri-mcp-common",
- "peri-mcp-config",
  "peri-mcp-core",
  "peri-mcp-credentials",
  "peri-mcp-cron",
@@ -3782,6 +3779,7 @@ version = "0.2.0"
 dependencies = [
  "async-trait",
  "futures",
+ "js-sys",
  "peri-time",
  "rand 0.10.2",
  "reqwest",
@@ -3791,6 +3789,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "url",
+ "wasm-bindgen",
 ]
 
 [[package]]

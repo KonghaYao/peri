@@ -109,7 +109,7 @@ fn pending_mcp_pool(
     if let Some(credentials) = workspace_id
         .and_then(|workspace_id| resources.oauth_credentials_for_workspace(workspace_id))
     {
-        match peri_mcp_credentials::OAuthCredentialClient::new(credentials)
+        match peri_middlewares::mcp::OAuthCredentialClient::new(credentials)
             .and_then(|client| pool.inject_oauth_credentials(client))
         {
             Ok(()) => {}
@@ -283,8 +283,11 @@ pub fn build_session_manager(
         // 装配注入面：Agent 管理 session registry，工具环境提供本地 shell 执行。
         // ACP 协议面只持有契约 `peri_acp_types::tasks::TaskManager`。
         Some(Arc::new(|| {
-            Arc::new(peri_mcp_common::create_local_task_manager())
-                as Arc<dyn peri_acp_types::tasks::TaskManager>
+            #[cfg(not(target_os = "emscripten"))]
+            let manager = peri_mcp_common::create_local_task_manager();
+            #[cfg(target_os = "emscripten")]
+            let manager = peri_agent::agent::async_tasks::TaskManager::new();
+            Arc::new(manager) as Arc<dyn peri_acp_types::tasks::TaskManager>
         })),
         agent_catalog,
         plugin_command_entries,

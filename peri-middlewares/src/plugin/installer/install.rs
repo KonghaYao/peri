@@ -54,9 +54,9 @@ pub async fn install_plugin(
                                 &url,
                                 cache_dir.to_str().unwrap(),
                             ]);
-                            #[cfg(unix)]
+                            #[cfg(all(unix, not(target_os = "emscripten")))]
                             let output = peri_process::run_output_blocking(command);
-                            #[cfg(not(unix))]
+                            #[cfg(any(not(unix), target_os = "emscripten"))]
                             let output = command.output();
                             match output {
                                 Ok(o) if o.status.success() => Ok(()),

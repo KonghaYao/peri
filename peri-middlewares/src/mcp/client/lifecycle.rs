@@ -291,6 +291,7 @@ impl McpClientPool {
         self.oauth_event_callback.write().take();
         self.pending_oauth_callbacks.lock().clear();
         self.active_oauth_flows.lock().clear();
+        #[cfg(not(target_os = "emscripten"))]
         for process in self.processes.lock().iter() {
             process.begin_close();
         }
@@ -415,7 +416,10 @@ impl McpClientPool {
         // 随之按「有界等待 → 未收敛才 abort」收口。非 builtin pool 这里是空操作。
         self.close_builtin_tasks().await;
         let unfinished_shared = self.close_shared_services().await;
+        #[cfg(not(target_os = "emscripten"))]
         let unfinished_processes = self.close_processes().await + unfinished_shared;
+        #[cfg(target_os = "emscripten")]
+        let unfinished_processes = unfinished_shared;
         let report = match (report, unfinished_processes) {
             (report, 0) => report,
             (

@@ -8,6 +8,10 @@ mod cache_policy_tests;
 mod lifecycle;
 mod oauth;
 pub(crate) mod output_store;
+#[cfg(not(target_os = "emscripten"))]
+pub(crate) mod process;
+#[cfg(target_os = "emscripten")]
+#[path = "client/process_wasm.rs"]
 pub(crate) mod process;
 // System MCP 启动准入 seam：清单发布与闸门已接线（`initialize` / `middleware`），
 // 仍有三处冻结但尚无生产读取方的成员——`DiscoveryEvidence::is_complete`（只有测试在问）、
@@ -82,6 +86,7 @@ pub struct McpClientPool {
     pub(super) plugin_discovery_available: std::sync::atomic::AtomicBool,
     shared_services: parking_lot::Mutex<Vec<Arc<McpServiceOwner>>>,
     /// Includes failed handshakes until their actual process tree and stderr have drained.
+    #[cfg(not(target_os = "emscripten"))]
     processes: parking_lot::Mutex<Vec<Arc<process::McpProcessOwner>>>,
     /// Static transports reconnect in the same session directory used for initial discovery.
     pub(crate) execution_cwd: std::sync::OnceLock<std::path::PathBuf>,
@@ -208,9 +213,10 @@ impl McpClientPool {
             session_servers: std::sync::OnceLock::new(),
             credential_client: std::sync::OnceLock::new(),
             builtin_available: std::sync::atomic::AtomicBool::new(true),
-            stdio_available: std::sync::atomic::AtomicBool::new(true),
+            stdio_available: std::sync::atomic::AtomicBool::new(crate::platform::STDIO_TRANSPORT),
             plugin_discovery_available: std::sync::atomic::AtomicBool::new(true),
             shared_services: parking_lot::Mutex::new(Vec::new()),
+            #[cfg(not(target_os = "emscripten"))]
             processes: parking_lot::Mutex::new(Vec::new()),
             execution_cwd: std::sync::OnceLock::new(),
             lifecycle: std::sync::atomic::AtomicU8::new(0),
@@ -529,6 +535,7 @@ impl McpClientPool {
         let mut transport =
             super::builtin::runtime::spawn_builtin_transport_with_context(instance, &context, env)?;
         // 注册表名判定（不写第二张实例名字表）：只有 `cron` 有 tick 驱动语义。
+        #[cfg(not(target_os = "emscripten"))]
         if find(instance).is_some_and(|registered| registered.name == "cron") {
             if let Some(cron) = context.cron.as_ref().filter(|cron| cron.tick_enabled) {
                 let scheduler = Arc::clone(&cron.scheduler);

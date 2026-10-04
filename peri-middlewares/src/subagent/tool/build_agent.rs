@@ -61,7 +61,9 @@ impl super::SubAgentTool {
         );
 
         // 显式 `tools: []` 是严格的零工具边界，禁止 WriteSandbox 等后注入工具。
+        #[cfg(not(target_os = "emscripten"))]
         let allowed_write_dirs = &agent_def.frontmatter.allowed_write_dirs;
+        #[cfg(not(target_os = "emscripten"))]
         if allows_injected_tools(&agent_def.frontmatter.tools) && !allowed_write_dirs.is_empty() {
             let disallowed_list = agent_def.frontmatter.disallowed_tools.to_vec();
             let is_disallowed = disallowed_list.iter().any(|n| {

@@ -10,10 +10,7 @@ peri-agent = { path = "../peri-agent" }
 peri-acp-types = { path = "../peri-acp-types" }
 peri-time = { path = "../peri-time" }
 peri-config = { path = "../peri-config" }
-peri-mcp-config.workspace = true
-peri-mcp-credentials.workspace = true
 peri-model = { path = "../peri-model" }
-peri-process = { path = "../peri-process" }
 anyhow.workspace = true
 async-trait.workspace = true
 serde.workspace = true
@@ -32,12 +29,10 @@ chrono.workspace = true
 uuid.workspace = true
 tracing.workspace = true
 parking_lot.workspace = true
-fs2 = "0.4"
 fuzzy-matcher = "0.3"
 tempfile.workspace = true
 rmcp = { workspace = true, features = [
     "client",
-    "transport-child-process",
     "transport-streamable-http-client-reqwest",
     "auth",
 ] }
@@ -54,12 +49,7 @@ base64 = { version = "0.23.1", features = ["alloc"] }
 ipnet = "2.10"
 peri-resources = { path = "../peri-resources" }
 peri-mcp-core.workspace = true
-peri-mcp-common.workspace = true
-peri-mcp-web.workspace = true
-peri-mcp-artifact.workspace = true
-peri-mcp-cron.workspace = true
-peri-mcp-lsp.workspace = true
-peri-mcp-workspace.workspace = true
+peri-mcp-credentials.workspace = true
 lsp-types.workspace = true
 cacache = { version = "13.1.0", default-features = false, features = ["tokio-runtime"] }
 
@@ -73,4 +63,13 @@ serial_test.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 
 [target.'cfg(not(target_os = "emscripten"))'.dependencies]
+peri-mcp-common.workspace = true
 tokio = { workspace = true, features = ["full"] }
+peri-js-runtime = { path = "../peri-js-runtime" }
+peri-process = { path = "../peri-process" }
+peri-mcp-lsp.workspace = true
+peri-mcp-web.workspace = true
+peri-mcp-artifact.workspace = true
+peri-mcp-cron.workspace = true
+peri-mcp-workspace.workspace = true
+rmcp = { workspace = true, features = ["transport-child-process"] }
