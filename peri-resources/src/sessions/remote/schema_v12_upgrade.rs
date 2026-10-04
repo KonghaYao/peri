@@ -16,7 +16,7 @@ use super::{
 };
 use crate::sessions::{
     canonical,
-    sqlite_store::storage_v2_plan::{
+    storage_v2_plan::{
         derive_remote_root, plan_local_workspaces, LegacyRegistration, LegacySession,
     },
 };

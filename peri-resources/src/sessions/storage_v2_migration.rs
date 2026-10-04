@@ -3,8 +3,8 @@
 use anyhow::{bail, Result};
 use sqlx::{Connection, SqliteConnection};
 
-use super::storage_v2_plan::read_local_plan;
 use crate::sessions::canonical;
+use crate::sessions::storage_v2_plan::read_local_plan;
 
 /// 仅在 schema 11 的写打开中调用；调用方持有初始化锁。迁移前禁用 FK，
 /// 完成前检查全部引用，再恢复原设置。任何失败都不推进版本或清理旧凭证。

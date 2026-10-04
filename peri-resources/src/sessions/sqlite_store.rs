@@ -22,8 +22,6 @@ mod session_data;
 mod session_rows;
 #[path = "storage_v2_migration.rs"]
 mod storage_v2_migration;
-#[path = "storage_v2_plan.rs"]
-pub(super) mod storage_v2_plan;
 mod workspace;
 mod workspace_identity;
 
