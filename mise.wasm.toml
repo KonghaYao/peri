@@ -1,0 +1,5 @@
+[tools]
+rust = { version = "stable", targets = ["wasm32-unknown-emscripten"] }
+emsdk = "6.0.10"
+python = "3.12"
+"cargo:wasm-bindgen-cli" = { version = "0.2.129", depends = ["rust"] }

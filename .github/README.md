@@ -8,7 +8,7 @@
 
 `workflows/ci.yml` 验证 `main`、`pre-release/main` 的 push，以及以这两个分支为
 目标的 pull request。两个分支复用相同的分层检查、workspace 构建、测试和 Clippy。
-`main` 保留 Linux、macOS、Windows 验证；`pre-release/main` 仅验证 Linux 和 macOS。
+`main` 与 `pre-release/main` 均验证 Linux、macOS、Windows；Windows 使用 Git Bash 调用补丁脚本，并以原生 Cargo 构建。
 
 ## 下一个大版本的构建产物
 
@@ -20,18 +20,26 @@
 | --- | --- | --- |
 | Linux x86_64 | `x86_64-unknown-linux-gnu` | `ubuntu-24.04` |
 | macOS Apple Silicon | `aarch64-apple-darwin` | `macos-14` |
+| WASM ACP Host | `wasm32-unknown-emscripten` | `ubuntu-24.04` |
 
-仅构建上述 macOS/Linux 目标，不构建 Windows、i386、LoongArch 或 RISC-V。
-各目标在原生 runner 上构建 `peri-tui` 的 `peri` release 二进制，将
+原生目标在各自 runner 上构建 `peri-tui` 的 `peri` release 二进制，将
 产物重命名为 `peri-beta`，并运行 `peri-beta --version` 冒烟检查。
+WASM 在 Linux runner 上构建 `peri-wasm` release 模块，打包 `peri-wasm.js` 和
+`peri_wasm.wasm`；不将其当作原生 CLI 安装包。预发布不构建 Windows、i386、
+LoongArch 或 RISC-V 的原生 CLI 产物。
 Cargo 的构建目标与 CLI 内部名称仍为 `peri`；正式版二进制不改名。
 Linux 产物使用 GNU libc，不是静态 musl 二进制。
+所有构建 job 由仓库级 `mise.toml` 安装 Rust；WASM job 额外以
+`MISE_ENV=wasm` 加载 `mise.wasm.toml` 中的 Emscripten、Python、
+`wasm-bindgen-cli` 与 Rust 目标，并用 `mise exec` 运行构建脚本。
 
 在 Actions 的 **Build Next Major** 运行页面下载 `peri-beta-<platform>-<sha>`
 artifact；每个 artifact 含 `peri-beta-<platform>.tar.gz`（解压得到 `peri-beta`）、
 对应的 `.sha256` 和 `build-info-<platform>.txt`，保留 14 天。
+WASM artifact 名为 `peri-beta-wasm32-unknown-emscripten-<sha>`，包含
+`peri-beta-wasm32-unknown-emscripten.tar.gz`、SHA-256 和构建信息。
 构建使用仓库版本和锁文件，不修改版本号；提交与运行身份写入构建信息。
-两个平台均成功后，更新独立的 `peri-beta` prerelease（不标记为 Latest），
+原生与 WASM 构建均成功后，更新独立的 `peri-beta` prerelease（不标记为 Latest），
 其 tag 指向本次构建提交。该渠道滚动替换资产，不保留每次构建的永久 Release。
 资产更新并非原子操作；发布中安装可能校验失败，此时重新运行安装脚本。
 此滚动渠道要求仓库允许修改 Release 资产和 tag；若启用 immutable releases，

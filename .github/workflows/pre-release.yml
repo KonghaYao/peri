@@ -41,10 +41,10 @@ jobs:
               with:
                   persist-credentials: false
 
-            - name: Install Rust toolchain
-              uses: dtolnay/rust-toolchain@stable
+            - name: Install build tools
+              uses: jdx/mise-action@v4
               with:
-                  targets: ${{ matrix.target }}
+                  cache: false
 
             - name: Cache Rust build
               uses: Swatinem/rust-cache@v2
@@ -52,13 +52,13 @@ jobs:
                   key: next-major-${{ matrix.target }}
 
             - name: Build peri
-              run: ./scripts/cargo-rmcp-patched.sh build --locked -p peri-tui --bin peri --release --target ${{ matrix.target }}
+              run: mise exec -- ./scripts/cargo-rmcp-patched.sh build --locked -p peri-tui --bin peri --release --target ${{ matrix.target }}
 
             - name: Smoke test binary
               run: |
                   mkdir -p dist/package
                   cp target/${{ matrix.target }}/release/peri dist/package/peri-beta
-                  dist/package/peri-beta --version
+                  mise exec -- dist/package/peri-beta --version
 
             - name: Package binary
               env:
@@ -75,8 +75,8 @@ jobs:
                       echo "Commit: $GITHUB_SHA"
                       echo "Run: $GITHUB_RUN_ID (attempt $GITHUB_RUN_ATTEMPT)"
                       echo "Target: $TARGET"
-                      dist/package/peri-beta --version
-                      rustc --version
+                      mise exec -- dist/package/peri-beta --version
+                      mise exec -- rustc --version
                   } > "dist/build-info-${PLATFORM}.txt"
                   rm -rf dist/package
 
@@ -92,9 +92,67 @@ jobs:
                   compression-level: 0
                   retention-days: 14
 
+    wasm:
+        name: Build (wasm32-unknown-emscripten)
+        if: github.ref == 'refs/heads/pre-release/main'
+        runs-on: ubuntu-24.04
+        timeout-minutes: 90
+        env:
+            MISE_ENV: wasm
+        defaults:
+            run:
+                shell: bash
+        steps:
+            - name: Checkout repository
+              uses: actions/checkout@v7
+              with:
+                  persist-credentials: false
+
+            - name: Install WASM build tools
+              uses: jdx/mise-action@v4
+              with:
+                  cache: false
+
+            - name: Cache Rust build
+              uses: Swatinem/rust-cache@v2
+              with:
+                  key: next-major-wasm32-unknown-emscripten
+
+            - name: Build peri-wasm
+              run: mise exec -- ./scripts/cargo-wasm.sh build --locked --release -p peri-wasm --target wasm32-unknown-emscripten
+
+            - name: Package WASM module
+              run: |
+                  output=target/wasm32-unknown-emscripten/release
+                  test -s "$output/peri-wasm.js"
+                  test -s "$output/peri_wasm.wasm"
+                  mkdir -p dist
+                  tar -czf dist/peri-beta-wasm32-unknown-emscripten.tar.gz -C "$output" peri-wasm.js peri_wasm.wasm
+                  (cd dist && sha256sum peri-beta-wasm32-unknown-emscripten.tar.gz > peri-beta-wasm32-unknown-emscripten.tar.gz.sha256)
+                  {
+                      echo "Branch: $GITHUB_REF_NAME"
+                      echo "Commit: $GITHUB_SHA"
+                      echo "Run: $GITHUB_RUN_ID (attempt $GITHUB_RUN_ATTEMPT)"
+                      echo "Target: wasm32-unknown-emscripten"
+                      mise exec -- rustc --version
+                      mise exec -- emcc --version | head -n 1
+                  } > dist/build-info-wasm32-unknown-emscripten.txt
+
+            - name: Upload WASM artifact
+              uses: actions/upload-artifact@v4
+              with:
+                  name: peri-beta-wasm32-unknown-emscripten-${{ github.sha }}
+                  path: |
+                      dist/peri-beta-wasm32-unknown-emscripten.tar.gz
+                      dist/peri-beta-wasm32-unknown-emscripten.tar.gz.sha256
+                      dist/build-info-wasm32-unknown-emscripten.txt
+                  if-no-files-found: error
+                  compression-level: 0
+                  retention-days: 14
+
     publish:
         name: Publish peri-beta
-        needs: build
+        needs: [build, wasm]
         runs-on: ubuntu-24.04
         permissions:
             contents: write
@@ -115,6 +173,8 @@ jobs:
                       (cd dist && sha256sum --check "peri-beta-${platform}.tar.gz.sha256")
                       test "$(tar -tzf "dist/peri-beta-${platform}.tar.gz")" = peri-beta
                   done
+                  (cd dist && sha256sum --check peri-beta-wasm32-unknown-emscripten.tar.gz.sha256)
+                  test "$(tar -tzf dist/peri-beta-wasm32-unknown-emscripten.tar.gz)" = "$(printf 'peri-wasm.js\nperi_wasm.wasm')"
 
             - name: Publish rolling beta prerelease
               env:

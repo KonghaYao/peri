@@ -122,9 +122,13 @@ if ! command -v "$python_bin" >/dev/null 2>&1; then
 fi
 cargo_crate_dir="$crate_dir"
 hyper_cargo_crate_dir="$hyper_crate_dir"
+cargo_config_file="$config_file"
 if command -v cygpath >/dev/null 2>&1; then
     cargo_crate_dir="$(cygpath -w "$crate_dir")"
     hyper_cargo_crate_dir="$(cygpath -w "$hyper_crate_dir")"
+    # Git Bash launches a native cargo.exe, which needs the config path in the
+    # same Windows form as the patched crate paths inside that config.
+    cargo_config_file="$(cygpath -w "$config_file")"
 fi
 "$python_bin" - "$cargo_crate_dir" "$hyper_cargo_crate_dir" "$config_file" <<'PY'
 import json
@@ -143,12 +147,12 @@ PY
 # Keep the caller's directory: dev.sh uses it as the TUI workspace.
 if [[ "$1" == "--cross" ]]; then
     shift
-    exec cross --config "$config_file" "$@"
+    exec cross --config "$cargo_config_file" "$@"
 fi
 if [[ "$1" == "clippy" ]]; then
     shift
     # cargo-clippy is an external subcommand: it does not inherit Cargo's
     # leading --config flag, so pass the patch config to clippy itself.
-    exec cargo clippy --config "$config_file" "$@"
+    exec cargo clippy --config "$cargo_config_file" "$@"
 fi
-exec cargo --config "$config_file" "$@"
+exec cargo --config "$cargo_config_file" "$@"

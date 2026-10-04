@@ -9,7 +9,7 @@
 ./scripts/cargo-rmcp-patched.sh test --locked -p peri-mcp-workspace --lib
 ```
 
-脚本下载 crates.io 的固定发布包，核验 SHA-256，用 `patch`（缺少时以独立临时 Git 仓库执行 `git apply`）应用补丁并反向校验缓存，再以 Cargo `[patch.crates-io]` 配置运行所给命令。生成的源码位于 gitignored 的 `target/peri-*-patches/`，按补丁哈希隔离；第二次运行复用缓存。`Cargo.lock` 记录本地 patched crate，因此直接运行 `cargo --locked` 不会偷偷回退到未打补丁的 registry 版本。CI、pre-release、release、Lefthook 和 `./dev.sh` 的编译命令也使用该脚本；脚本保留调用者的工作目录，让 `./dev.sh --cwd=...` 仍以指定目录启动 TUI。Linux 的 cross 构建使用 `./scripts/cargo-rmcp-patched.sh --cross build …`。更新补丁后，使用脚本执行 `update -p <crate>` 并提交更新后的 lockfile。
+脚本下载 crates.io 的固定发布包，核验 SHA-256，用 `patch`（缺少时以独立临时 Git 仓库执行 `git apply`）应用补丁并反向校验缓存，再以 Cargo `[patch.crates-io]` 配置运行所给命令。生成的源码位于 gitignored 的 `target/peri-*-patches/`，按补丁哈希隔离；第二次运行复用缓存。`Cargo.lock` 记录本地 patched crate，因此直接运行 `cargo --locked` 不会偷偷回退到未打补丁的 registry 版本。CI、pre-release、release、Lefthook 和 `./dev.sh` 的编译命令也使用该脚本；Windows CI 用 Git Bash 运行脚本，脚本将 crate 和 Cargo 配置路径统一转换给原生 `cargo.exe`。脚本保留调用者的工作目录，让 `./dev.sh --cwd=...` 仍以指定目录启动 TUI。Linux 的 cross 构建使用 `./scripts/cargo-rmcp-patched.sh --cross build …`。更新补丁后，使用脚本执行 `update -p <crate>` 并提交更新后的 lockfile。
 
 Emscripten 目标固定 Cloudflare 的 Mio 与 Tokio 分支。`reqwest 0.13.4` 与 `turso_serverless 0.1.3` 使用官方发布版，经 native/Hyper HTTP 后端保持远程 MCP、模型和存储的 `Send` 契约。WASM 构建用 `scripts/cargo-wasm.sh` 加上 linker 和 Tokio 事件循环参数；用法与已验证范围见 [`peri-wasm/README.md`](../peri-wasm/README.md)。
 

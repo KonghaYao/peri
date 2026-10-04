@@ -8,8 +8,9 @@ handling, sessions, prompts, and model calls remain in `peri-acp` and
 
 ## Build
 
-Install the `wasm32-unknown-emscripten` Rust target, stock Emscripten
-6.0.10, Node or Bun, Python 3.10 or newer, and `wasm-bindgen-cli 0.2.129`.
+Use the repository's mise environment to install Rust with the
+`wasm32-unknown-emscripten` target, stock Emscripten 6.0.10, Python 3.12,
+and `wasm-bindgen-cli 0.2.129`. Node or Bun is needed for the runtime probes.
 `scripts/cargo-wasm.sh` applies the repository's Cloudflare epoll listener
 and asynchronous DNS backports, plus Bun socket and Workers module URL
 patches, to Emscripten 6.0.10 when needed. It then selects the pinned Mio and
@@ -22,7 +23,8 @@ targets keep local date formatting. The generated JS and WASM are copied
 without modification.
 
 ```bash
-./scripts/cargo-wasm.sh build --locked -p peri-wasm --target wasm32-unknown-emscripten
+MISE_ENV=wasm mise install
+MISE_ENV=wasm mise exec -- ./scripts/cargo-wasm.sh build --locked -p peri-wasm --target wasm32-unknown-emscripten
 ```
 
 The output is `target/wasm32-unknown-emscripten/debug/peri-wasm.js` with

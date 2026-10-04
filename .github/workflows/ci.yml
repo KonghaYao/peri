@@ -25,11 +25,7 @@ jobs:
             fail-fast: false
             matrix:
                 include: >-
-                    ${{ fromJSON(
-                    (github.ref == 'refs/heads/pre-release/main' || github.base_ref == 'pre-release/main')
-                    && '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"},{"os":"macos-latest","target":"aarch64-apple-darwin"}]'
-                    || '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"},{"os":"macos-latest","target":"aarch64-apple-darwin"},{"os":"windows-latest","target":"x86_64-pc-windows-msvc"}]'
-                    ) }}
+                    ${{ fromJSON('[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"},{"os":"macos-latest","target":"aarch64-apple-darwin"},{"os":"windows-latest","target":"x86_64-pc-windows-msvc"}]') }}
 
         steps:
             - name: Checkout repository
