@@ -132,7 +132,7 @@ pub(super) async fn resume_subagent_impl(
     let (meta, claim) = ResumeClaim::acquire(
         Arc::clone(&session_resources),
         thread_id.clone(),
-        cluster_root,
+        cluster_root.clone(),
         ownership,
     )
     .await?;
@@ -230,6 +230,7 @@ pub(super) async fn resume_subagent_impl(
         frozen,
         cancel_token.clone(),
         thread_id.clone(),
+        Some(cluster_root),
         Some(Arc::clone(&session_resources)),
         inherited,
         loaded,

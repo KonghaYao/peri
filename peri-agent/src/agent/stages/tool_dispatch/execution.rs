@@ -297,7 +297,7 @@ async fn dispatch_concurrent(
             async move {
                 let timeout_opt = tool.as_ref().and_then(|t| t.timeout());
                 let invoke_fut = async {
-                    let ctx_param = crate::tools::ToolContext::new(&messages, &cwd)
+                    let mut ctx_param = crate::tools::ToolContext::new(&messages, &cwd)
                         .with_effective_tool_dispatcher(
                             Arc::new(StageEffectiveToolDispatcher::new(
                                 dispatch_context.clone(),
@@ -316,6 +316,14 @@ async fn dispatch_concurrent(
                                 .unwrap_or_else(|| dispatch_context.session.agent_id.to_string()),
                             dispatch_context.session.turn.turn_id.to_string(),
                         );
+                    if let Some(root_id) = dispatch_context
+                        .session
+                        .session_context
+                        .read()
+                        .get("mcp_task_owner_session_id")
+                    {
+                        ctx_param = ctx_param.with_mcp_task_owner_session_id(root_id.clone());
+                    }
                     match tool {
                         Some(t) => t
                             .invoke_output(input, ctx_param)

@@ -289,8 +289,9 @@ impl BaseTool for McpToolBridge {
 
         let peer = self.client.peer.as_ref().unwrap();
         let session_id = ctx
-            .session_id
+            .mcp_task_owner_session_id
             .as_deref()
+            .or(ctx.session_id.as_deref())
             .or(self.output_session_id.as_deref());
         let mut execution_guard = if let Some(session_id) = session_id {
             let pool = self
@@ -330,9 +331,7 @@ impl BaseTool for McpToolBridge {
         {
             if let (Some(pool), Some(session_id)) = (
                 self.output_pool.as_ref().and_then(std::sync::Weak::upgrade),
-                ctx.session_id
-                    .as_deref()
-                    .or(self.output_session_id.as_deref()),
+                session_id,
             ) {
                 request.meta = pool.task_scope_meta_for(&self.server_name, session_id);
             }
@@ -374,11 +373,7 @@ impl BaseTool for McpToolBridge {
                 let task_created_at = created.task.created_at;
                 let task_id = created.task.task_id;
                 if let Some(pool) = self.output_pool.as_ref().and_then(std::sync::Weak::upgrade) {
-                    if let Some(session_id) = ctx
-                        .session_id
-                        .as_deref()
-                        .or(self.output_session_id.as_deref())
-                    {
+                    if let Some(session_id) = session_id {
                         let is_shell = self.tool_name == "Bash"
                             && (matches!(
                                 self.client.source.as_ref(),

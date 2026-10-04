@@ -31,6 +31,25 @@ fn test_tool() -> Tool {
 
 struct Source;
 
+struct StartedTask;
+
+impl ServerHandler for StartedTask {
+    async fn call_tool(
+        &self,
+        _: CallToolRequestParams,
+        _: RequestContext<RoleServer>,
+    ) -> Result<CallToolResponse, rmcp::ErrorData> {
+        Ok(CallToolResponse::Task(rmcp::model::CreateTaskResult::new(
+            rmcp::model::Task::new(
+                "remote-child-task",
+                rmcp::model::TaskStatus::Working,
+                "2026-01-01T00:00:00Z",
+                "2026-01-01T00:00:00Z",
+            ),
+        )))
+    }
+}
+
 struct LostTaskReceipt {
     created: Arc<Notify>,
     release: Arc<Notify>,
@@ -123,7 +142,7 @@ impl ServerHandler for Source {
 }
 
 pub(crate) struct Wire {
-    pub(crate) client: RunningService<RoleClient, ()>,
+    pub(crate) client: RunningService<RoleClient, rmcp::model::InitializeRequestParams>,
     server: tokio::task::JoinHandle<()>,
 }
 
@@ -139,10 +158,16 @@ impl Wire {
                 .await
                 .unwrap();
         });
-        let client = tokio::time::timeout(Duration::from_secs(2), ().serve(client_io))
-            .await
-            .unwrap()
-            .unwrap();
+        let client = tokio::time::timeout(
+            Duration::from_secs(2),
+            crate::mcp::client::mcpp_client_info_for_profile(
+                &crate::mcp::apps::McpCapabilityProfile::disabled(),
+            )
+            .serve(client_io),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         Self { client, server }
     }
 
@@ -176,6 +201,48 @@ impl Wire {
             .unwrap()
             .unwrap();
     }
+}
+
+/// [回归测试] 根 session 绑定 TaskManager 后，child 保留自身身份仍可调用继承的 MCP bridge。
+/// 历史故障是 bridge 用 child ID 查仅按 root ID 绑定的目录，发送 tools/call 前就失败。
+#[tokio::test]
+async fn child_mcp_bridge_uses_root_task_owner_for_real_call() {
+    let wire = Wire::connect(Source).await;
+    let pool = Arc::new(McpClientPool::new_empty());
+    wire.install(&pool, "source", false);
+    let manager: Arc<dyn TaskManagerPort> =
+        Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
+    pool.bind_session_task_manager("root-session", &manager);
+    let bridge = McpToolBridge::new("source", &test_tool(), pool.get_client("source").unwrap())
+        .with_output_store(&pool, Some("root-session"));
+    let context = ToolContext::new(&[], ".")
+        .with_session_identity("child-thread", "child-turn")
+        .with_mcp_task_owner_session_id("root-session");
+    assert_eq!(context.session_id.as_deref(), Some("child-thread"));
+    let result = bridge.invoke(serde_json::json!({}), context).await;
+    assert!(
+        result.is_ok(),
+        "child 经真实 MCP tools/call 应成功: {result:?}"
+    );
+}
+
+/// [回归测试] MCP Tasks 回执沿同一根 owner 登记，不能回落到 child ID。
+#[tokio::test]
+async fn child_mcp_task_receipt_registers_under_root_owner() {
+    let wire = Wire::connect(StartedTask).await;
+    let pool = Arc::new(McpClientPool::new_empty());
+    wire.install(&pool, "source", false);
+    let manager = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
+    let task_manager: Arc<dyn TaskManagerPort> = manager.clone();
+    pool.bind_session_task_manager("root-session", &task_manager);
+    let bridge = McpToolBridge::new("source", &test_tool(), pool.get_client("source").unwrap())
+        .with_output_store(&pool, Some("root-session"));
+    let context = ToolContext::new(&[], ".")
+        .with_session_identity("child-thread", "child-turn")
+        .with_mcp_task_owner_session_id("root-session");
+    let output = bridge.invoke(serde_json::json!({}), context).await.unwrap();
+    assert!(output.contains("Background task started:"), "{output}");
+    assert!(!manager.snapshot().tasks.is_empty());
 }
 
 fn reference(output: &str, key: &str) -> String {

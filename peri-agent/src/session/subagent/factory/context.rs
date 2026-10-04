@@ -34,6 +34,7 @@ pub(super) fn build_subagent_session_v2(
     frozen: FrozenContext,
     cancel_token: CancellationToken,
     child_thread_id: String,
+    mcp_task_owner_session_id: Option<String>,
     session_resources: Option<Arc<dyn SessionResources>>,
     inherited: InheritedContext,
     own: Vec<PersistedPayload>,
@@ -114,6 +115,15 @@ pub(super) fn build_subagent_session_v2(
         compact_llm,
         agent_id,
     );
+
+    if let Some(root_id) = mcp_task_owner_session_id {
+        v2_ctx
+            .context
+            .session
+            .session_context
+            .write()
+            .insert("mcp_task_owner_session_id".into(), root_id);
+    }
 
     (session, v2_ctx)
 }

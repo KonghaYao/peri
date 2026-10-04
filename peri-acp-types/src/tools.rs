@@ -470,6 +470,9 @@ pub struct ToolContext<'a> {
     pub cancellation: tokio_util::sync::CancellationToken,
     /// 当前 Agent session identity；仅 canonical dispatch 中存在。
     pub session_id: Option<String>,
+    /// Root session that owns MCP task admission and Workspace task scope.
+    /// A child keeps its own `session_id` for agent identity and App routing.
+    pub mcp_task_owner_session_id: Option<String>,
     /// 当前 turn generation；用于撤销跨 turn 的宿主调用租约。
     pub turn_generation: Option<String>,
 }
@@ -483,6 +486,7 @@ impl<'a> ToolContext<'a> {
             invocation_id: None,
             cancellation: tokio_util::sync::CancellationToken::new(),
             session_id: None,
+            mcp_task_owner_session_id: None,
             turn_generation: None,
         }
     }
@@ -506,6 +510,11 @@ impl<'a> ToolContext<'a> {
     ) -> Self {
         self.session_id = Some(session_id.into());
         self.turn_generation = Some(turn_generation.into());
+        self
+    }
+
+    pub fn with_mcp_task_owner_session_id(mut self, session_id: impl Into<String>) -> Self {
+        self.mcp_task_owner_session_id = Some(session_id.into());
         self
     }
 }
