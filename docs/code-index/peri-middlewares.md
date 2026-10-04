@@ -31,10 +31,9 @@ Workspace scope capability 和 owner 连接。`tasks/get` 轮询与 Workspace
 `workspace/taskSnapshot`/`workspace/taskChanges` cursor 对账将终态交给 Manager，
 Manager 先投递带稳定 delivery ID 的 Defer，再发布终态。Builtin Workspace Bash
 提醒只带退出信息与输出文件引用。`McpPoolPort::has_active_tasks` 查询 Manager
-未结清的外部任务供 Agent idle probe 使用。`taskScopeSecretFile` 仅允许全局可信的
-loopback Workspace HTTP 配置；builtin 使用同进程 scope authority。
+未结清的外部任务供 Agent idle probe 使用。外部 Workspace 的 scope 元数据经部署可信的 MCP 连接传递；builtin 使用同进程 scope authority。
 显式删除可调用 `reconcile_closing_workspace_scope`，在 Agent Manager 不存在时从可信
-session ID 重新签 scope，逐 owner 关闭创建、发现、取消并等待终态；缺少 owner 或
+session ID 重新构造 scope 元数据，逐 owner 关闭创建、发现、取消并等待终态；缺少 owner 或
 可信 scope 时返回未完成，不允许静默删除。
 scope 快照携 epoch；`taskClose`/`taskOpen` 按该 epoch 做 owner 端 CAS，旧关闭请求
 在重开后不能再次关掉同一 session 的新执行轮次。

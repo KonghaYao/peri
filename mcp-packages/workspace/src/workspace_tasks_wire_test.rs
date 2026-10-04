@@ -63,15 +63,8 @@ async fn scope_epoch_request(
 #[tokio::test]
 async fn old_store_owner_capability_is_rejected_after_cross_process_takeover() {
     let dir = tempfile::tempdir().expect("workspace");
-    let secret = dir.path().join("scope-secret");
-    std::fs::write(&secret, [9u8; 32]).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o600)).unwrap();
-    }
-    let server_authority = TaskScopeAuthority::from_secret_file(&secret).unwrap();
-    let old_issuer = TaskScopeAuthority::from_secret_file(&secret).unwrap();
+    let server_authority = TaskScopeAuthority::trusted_connection();
+    let old_issuer = TaskScopeAuthority::trusted_connection();
     let old = old_issuer.issue_execution("session-a", 1, "old-nonce");
     let legacy = old_issuer.issue("session-a");
     let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy())
@@ -105,9 +98,8 @@ async fn old_store_owner_capability_is_rejected_after_cross_process_takeover() {
     };
     let task_id = created.task.task_id;
 
-    // Simulates an Agent restart: a new process loads the shared secret and
-    // signs the Store's newly claimed execution epoch and nonce.
-    let next_issuer = TaskScopeAuthority::from_secret_file(&secret).unwrap();
+    // Simulates an Agent restart with a newly claimed Store execution generation.
+    let next_issuer = TaskScopeAuthority::trusted_connection();
     let next = next_issuer.issue_execution("session-a", 2, "new-nonce");
     let advanced = scope_request(&client, "workspace/taskFence", &next, None)
         .await

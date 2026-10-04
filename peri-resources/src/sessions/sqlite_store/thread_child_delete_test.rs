@@ -113,7 +113,7 @@ async fn seed(fixture: &NoCascade, id: &str, parent: Option<&str>) {
                 &claim.token,
                 &WorkspaceExecutionDescriptor {
                     endpoint: "http://127.0.0.1:10101".into(),
-                    key_identity: "a".repeat(64),
+                    owner_identity: "a".repeat(64),
                     agent_generation_id: format!("agent-{id}"),
                     unsupported_async_owners: false,
                 },

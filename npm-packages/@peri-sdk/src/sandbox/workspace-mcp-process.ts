@@ -35,7 +35,6 @@ export class WorkspaceMcpProcess {
   static async start(
     path: string,
     options: WorkspaceMcpProcessOptions,
-    taskScopeSecretFile: string,
   ): Promise<WorkspaceMcpProcess> {
     const address = new URL(`http://${options.bind}/mcp`);
     if (!address.port || address.pathname !== "/mcp")
@@ -49,7 +48,6 @@ export class WorkspaceMcpProcess {
     const child = Bun.spawn([
       options.command ?? "peri", "mcp-start", "workspace", "--http",
       "--workspace", path, "--bind", options.bind,
-      "--task-scope-secret-file", taskScopeSecretFile,
     ], {
       cwd: path,
       env,

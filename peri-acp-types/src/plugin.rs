@@ -59,13 +59,6 @@ pub struct McpServerConfig {
     pub env: Option<HashMap<String, String>>,
     /// Streamable HTTP 传输的 URL
     pub url: Option<String>,
-    /// Trusted Workspace MCP task-scope signing key file (path, never key bytes).
-    #[serde(
-        default,
-        rename = "taskScopeSecretFile",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub task_scope_secret_file: Option<String>,
     /// HTTP 请求的自定义头
     #[serde(default)]
     pub headers: Option<HashMap<String, String>>,
@@ -130,8 +123,6 @@ struct McpServerConfigWire {
     #[serde(default)]
     env: Option<HashMap<String, String>>,
     url: Option<String>,
-    #[serde(default, rename = "taskScopeSecretFile")]
-    task_scope_secret_file: Option<String>,
     #[serde(default)]
     headers: Option<HashMap<String, String>>,
     #[serde(default)]
@@ -192,7 +183,6 @@ impl<'de> Deserialize<'de> for McpServerConfig {
             args: wire.args,
             env: wire.env,
             url: wire.url,
-            task_scope_secret_file: wire.task_scope_secret_file,
             headers: wire.headers,
             oauth: wire.oauth,
             disabled: wire.disabled,

@@ -2,7 +2,6 @@ use super::*;
 
 fn test_config() -> McpServerConfig {
     McpServerConfig {
-        task_scope_secret_file: None,
         command: None,
         args: None,
         env: None,

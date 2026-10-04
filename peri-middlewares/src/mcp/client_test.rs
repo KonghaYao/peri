@@ -484,7 +484,6 @@ async fn test_oauth_preflight_failure_emits_one_exact_terminal_event() {
 #[test]
 fn test_persistent_cache_is_disabled_for_authenticated_servers() {
     let config = || McpServerConfig {
-        task_scope_secret_file: None,
         command: None,
         args: None,
         env: None,
@@ -566,7 +565,6 @@ fn test_persistent_cache_is_disabled_for_authenticated_servers() {
 #[test]
 fn test_tools_cache_eligible_requires_version_and_allowed_policy() {
     let config = || McpServerConfig {
-        task_scope_secret_file: None,
         command: None,
         args: None,
         env: None,

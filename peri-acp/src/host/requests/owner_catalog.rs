@@ -1,4 +1,4 @@
-//! Host-only identity for the Workspace task owner used by a session execution.
+//! Deployment-selected identity for the Workspace task owner used by a session execution.
 
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
@@ -8,23 +8,20 @@ use serde_json::Value;
 
 use crate::transport::types::AcpError;
 
-/// A descriptor contains identity evidence, never a scope bearer or key path.
+/// A descriptor contains identity evidence, never a scope bearer.
 pub(super) struct TrustedWorkspaceIdentity {
     pub endpoint: String,
-    pub key_identity: String,
+    pub owner_identity: String,
     pub agent_generation_id: String,
 }
 
 pub(super) fn trusted_workspace_identity() -> Result<Option<TrustedWorkspaceIdentity>, String> {
     let endpoint = std::env::var("PERI_TRUSTED_WORKSPACE_URL").ok();
-    let secret_file = std::env::var("PERI_TRUSTED_WORKSPACE_SCOPE_SECRET_FILE").ok();
     let agent_generation_id = std::env::var("PERI_AGENT_GENERATION_ID").ok();
-    let (Some(endpoint), Some(secret_file), Some(agent_generation_id)) = (
-        endpoint.as_ref(),
-        secret_file.as_ref(),
-        agent_generation_id.as_ref(),
-    ) else {
-        if endpoint.is_some() || secret_file.is_some() {
+    let (Some(endpoint), Some(agent_generation_id)) =
+        (endpoint.as_ref(), agent_generation_id.as_ref())
+    else {
+        if endpoint.is_some() {
             return Err("trusted Workspace owner identity is incomplete".into());
         }
         return Ok(None);
@@ -37,23 +34,15 @@ pub(super) fn trusted_workspace_identity() -> Result<Option<TrustedWorkspaceIden
         return Err("trusted Agent generation ID is invalid".into());
     }
     let url = url::Url::parse(endpoint).map_err(|_| "trusted Workspace endpoint is invalid")?;
-    if url.scheme() != "http"
-        || url
-            .host_str()
-            .is_none_or(|host| host != "127.0.0.1" && host != "localhost" && host != "[::1]")
-    {
-        return Err("trusted Workspace endpoint must be loopback HTTP".into());
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        return Err("trusted Workspace endpoint must be HTTP".into());
     }
-    let path = std::path::Path::new(&secret_file);
-    peri_mcp_workspace::TaskScopeAuthority::from_secret_file(path)
-        .map_err(|_| "trusted Workspace scope authority is invalid")?;
-    let key =
-        std::fs::read(path).map_err(|_| "trusted Workspace scope authority is unavailable")?;
-    let digest = Sha256::digest(&key);
-    let key_identity = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+    // A stable endpoint fingerprint identifies the deployment-selected owner.
+    let digest = Sha256::digest(url.as_str().as_bytes());
+    let owner_identity = digest.iter().map(|byte| format!("{byte:02x}")).collect();
     Ok(Some(TrustedWorkspaceIdentity {
         endpoint: url.to_string(),
-        key_identity,
+        owner_identity,
         agent_generation_id: agent_generation_id.clone(),
     }))
 }
@@ -85,12 +74,12 @@ pub(super) async fn execution_descriptor(
     };
     let identity = trusted.unwrap_or_else(|| TrustedWorkspaceIdentity {
         endpoint: String::new(),
-        key_identity: String::new(),
+        owner_identity: String::new(),
         agent_generation_id: std::env::var("PERI_AGENT_GENERATION_ID").unwrap_or_default(),
     });
     Ok(WorkspaceExecutionDescriptor {
         endpoint: identity.endpoint,
-        key_identity: identity.key_identity,
+        owner_identity: identity.owner_identity,
         agent_generation_id: identity.agent_generation_id,
         unsupported_async_owners: unsupported,
     })
@@ -102,7 +91,7 @@ pub(super) fn verify_recoverable_owner(
 ) -> Result<(), String> {
     if recorded.descriptor.unsupported_async_owners
         || recorded.descriptor.endpoint != trusted.endpoint
-        || recorded.descriptor.key_identity != trusted.key_identity
+        || recorded.descriptor.owner_identity != trusted.owner_identity
         || recorded.descriptor.agent_generation_id.is_empty()
     {
         return Err("execution-time task owner cannot be verified".into());
@@ -115,10 +104,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn unloaded_close_requires_the_original_endpoint_key_and_supported_catalog() {
+    fn unloaded_close_requires_the_original_owner_and_supported_catalog() {
         let trusted = TrustedWorkspaceIdentity {
             endpoint: "http://127.0.0.1:8080/mcp".into(),
-            key_identity: "key-a".into(),
+            owner_identity: "owner-a".into(),
             agent_generation_id: "b".repeat(32),
         };
         let mut record = ExecutionWorkspaceOwnerRecord {
@@ -126,7 +115,7 @@ mod tests {
             descriptor_epoch: 1,
             descriptor: WorkspaceExecutionDescriptor {
                 endpoint: trusted.endpoint.clone(),
-                key_identity: trusted.key_identity.clone(),
+                owner_identity: trusted.owner_identity.clone(),
                 agent_generation_id: "a".repeat(32),
                 unsupported_async_owners: false,
             },
@@ -135,9 +124,9 @@ mod tests {
         record.descriptor.endpoint = "http://127.0.0.1:9090/mcp".into();
         assert!(verify_recoverable_owner(&record, &trusted).is_err());
         record.descriptor.endpoint = trusted.endpoint.clone();
-        record.descriptor.key_identity = "key-b".into();
+        record.descriptor.owner_identity = "owner-b".into();
         assert!(verify_recoverable_owner(&record, &trusted).is_err());
-        record.descriptor.key_identity = trusted.key_identity.clone();
+        record.descriptor.owner_identity = trusted.owner_identity.clone();
         record.descriptor.unsupported_async_owners = true;
         assert!(verify_recoverable_owner(&record, &trusted).is_err());
     }

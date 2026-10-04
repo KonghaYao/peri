@@ -151,8 +151,6 @@ pub struct McpClientPool {
     pub(crate) task_scope_tokens: parking_lot::RwLock<HashMap<String, String>>,
     pub(crate) session_execution_tokens:
         parking_lot::RwLock<HashMap<String, peri_acp_types::workspace::ExecutionOwnerToken>>,
-    pub(crate) remote_task_scope_authorities:
-        parking_lot::RwLock<HashMap<String, peri_mcp_workspace::TaskScopeAuthority>>,
     /// 跨进程的 MCP Resource Cache；是否写入由响应 scope 与安全上下文共同决定。
     pub(crate) resource_cache: super::resource_cache::McpResourceCache,
     /// 进程启动时冻结的 deployment capability profile；初始连接和重连复用。
@@ -242,7 +240,6 @@ impl McpClientPool {
             task_scope_authority: peri_mcp_workspace::TaskScopeAuthority::new(),
             task_scope_tokens: parking_lot::RwLock::new(HashMap::new()),
             session_execution_tokens: parking_lot::RwLock::new(HashMap::new()),
-            remote_task_scope_authorities: parking_lot::RwLock::new(HashMap::new()),
             resource_cache: super::resource_cache::McpResourceCache::new(),
             capability_profile,
             app_binding_leases: Arc::new(super::apps::McpAppBindingLeaseRegistry::default()),
@@ -384,9 +381,7 @@ impl McpClientPool {
             match config.source.as_ref() {
                 Some(peri_acp_types::plugin::ConfigSource::Builtin { .. }) => false,
                 Some(peri_acp_types::plugin::ConfigSource::WorkspaceRemote) => {
-                    config.task_scope_secret_file.is_none()
-                        || config.oauth.is_some()
-                        || config.url.as_deref() != trusted_workspace_endpoint
+                    config.oauth.is_some() || config.url.as_deref() != trusted_workspace_endpoint
                 }
                 _ => true,
             }

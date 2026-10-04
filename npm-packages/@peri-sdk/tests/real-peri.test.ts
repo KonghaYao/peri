@@ -1,6 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
-import { createHmac } from "node:crypto";
+import { mkdtemp, mkdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { createServer, type Server } from "node:http";
@@ -111,9 +110,8 @@ async function unusedLoopbackPort(): Promise<number> {
   return address.port;
 }
 
-function taskScopeToken(key: Buffer, sessionId: string, epoch: number, nonce: string): string {
-  const signed = `v2.${Buffer.from(sessionId).toString("base64url")}.${epoch}.${Buffer.from(nonce).toString("base64url")}`;
-  return `${signed}.${createHmac("sha256", key).update(signed).digest("base64url")}`;
+function taskScopeToken(sessionId: string, epoch: number, nonce: string): string {
+  return `v2.${Buffer.from(sessionId).toString("base64url")}.${epoch}.${Buffer.from(nonce).toString("base64url")}`;
 }
 
 async function workspaceRpc(
@@ -429,8 +427,7 @@ test("a fresh ACP settles a Workspace shell task after the old ACP is killed dur
       .get(sessionId) as { epoch: number; nonce: string } | null;
     db.close();
     expect(owner).not.toBeNull();
-    const key = await readFile(workspace.taskScopeSecretFile!);
-    const capability = taskScopeToken(key, sessionId, owner!.epoch, owner!.nonce);
+    const capability = taskScopeToken(sessionId, owner!.epoch, owner!.nonce);
     const initialized = await workspaceRpc(workspace.url, "initialize", 1, {
       protocolVersion: "2025-11-25", capabilities: { extensions: { "io.modelcontextprotocol/tasks": {} } },
       clientInfo: { name: "crash-close-test", version: "1" },
@@ -486,7 +483,7 @@ test("a fresh ACP settles a Workspace shell task after the old ACP is killed dur
     expect(next!.released).toBe(1);
     expect(remainingIntent).toBeNull();
     const snapshot = await workspaceRpc(workspace.url, "workspace/taskSnapshot", 4, {
-      _meta: { "peri/taskScope": taskScopeToken(key, sessionId, next!.epoch, next!.nonce) },
+      _meta: { "peri/taskScope": taskScopeToken(sessionId, next!.epoch, next!.nonce) },
     }, peer);
     const task = (snapshot.value.result?.tasks as Array<{ task?: { taskId?: string; status?: string } }>)
       .find((row) => row.task?.taskId === rawTaskId);

@@ -39,7 +39,7 @@ impl SqliteSessionData {
         if let Some((epoch, endpoint, key, generation, _unsupported)) = old.as_ref() {
             if *epoch == token.epoch {
                 if endpoint != &descriptor.endpoint
-                    || key != &descriptor.key_identity
+                    || key != &descriptor.owner_identity
                     || generation != &descriptor.agent_generation_id
                 {
                     return Err(SessionResourceError::conflict(
@@ -61,7 +61,7 @@ impl SqliteSessionData {
         .bind(token.root_id.as_str())
         .bind(token.epoch)
         .bind(&descriptor.endpoint)
-        .bind(&descriptor.key_identity)
+        .bind(&descriptor.owner_identity)
         .bind(&descriptor.agent_generation_id)
         .bind(i64::from(descriptor.unsupported_async_owners))
         .execute(&mut *tx)
@@ -92,7 +92,7 @@ impl SqliteSessionData {
                 current_epoch,
                 descriptor_epoch,
                 endpoint,
-                key_identity,
+                owner_identity,
                 agent_generation_id,
                 unsupported,
             )| ExecutionWorkspaceOwnerRecord {
@@ -100,7 +100,7 @@ impl SqliteSessionData {
                 descriptor_epoch,
                 descriptor: WorkspaceExecutionDescriptor {
                     endpoint,
-                    key_identity,
+                    owner_identity,
                     agent_generation_id,
                     unsupported_async_owners: unsupported != 0,
                 },

@@ -63,10 +63,6 @@ async fn custom(
 #[tokio::test]
 async fn standalone_owner_rejects_late_old_agent_over_new_http_connection() {
     let dir = tempfile::tempdir().unwrap();
-    let secret = dir.path().join("task-secret");
-    std::fs::write(&secret, [12u8; 32]).unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o600)).unwrap();
     let bind = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = bind.local_addr().unwrap();
     drop(bind);
@@ -77,8 +73,6 @@ async fn standalone_owner_rejects_late_old_agent_over_new_http_connection() {
             dir.path().to_str().unwrap(),
             "--bind",
             &address.to_string(),
-            "--task-scope-secret-file",
-            secret.to_str().unwrap(),
             "--no-skill-roots",
             "--no-agent-roots",
         ])
@@ -88,7 +82,7 @@ async fn standalone_owner_rejects_late_old_agent_over_new_http_connection() {
         .spawn()
         .unwrap();
     let url = format!("http://{address}/mcp");
-    let old_issuer = TaskScopeAuthority::from_secret_file(&secret).unwrap();
+    let old_issuer = TaskScopeAuthority::trusted_connection();
     let old = old_issuer.issue_execution("session-a", 1, "agent-one");
     let first = connect(&url).await;
     custom(&first, "workspace/taskFence", &old)
@@ -96,7 +90,7 @@ async fn standalone_owner_rejects_late_old_agent_over_new_http_connection() {
         .expect("first Agent fence");
     first.cancel().await.expect("old Agent disconnect");
 
-    let new_issuer = TaskScopeAuthority::from_secret_file(&secret).unwrap();
+    let new_issuer = TaskScopeAuthority::trusted_connection();
     let new = new_issuer.issue_execution("session-a", 2, "agent-two");
     let second = connect(&url).await;
     custom(&second, "workspace/taskFence", &new)
@@ -132,8 +126,6 @@ async fn standalone_owner_rejects_late_old_agent_over_new_http_connection() {
             dir.path().to_str().unwrap(),
             "--bind",
             &address.to_string(),
-            "--task-scope-secret-file",
-            secret.to_str().unwrap(),
             "--no-skill-roots",
             "--no-agent-roots",
         ])
@@ -144,8 +136,25 @@ async fn standalone_owner_rejects_late_old_agent_over_new_http_connection() {
         !replacement.status.success(),
         "crashed owner must not restart with an empty registry"
     );
-    assert!(dir
-        .path()
-        .join("task-secret.workspace-owner-unclean")
-        .exists());
+    assert!(dir.path().join(".peri/workspace-owner-unclean").exists());
+    std::fs::rename(
+        dir.path().join(".peri/workspace-owner-unclean"),
+        dir.path().join(".peri/previous.workspace-owner-unclean"),
+    )
+    .unwrap();
+    let legacy_guard_restart =
+        tokio::process::Command::new(env!("CARGO_BIN_EXE_peri-mcp-workspace"))
+            .args([
+                "--http",
+                "--workspace",
+                dir.path().to_str().unwrap(),
+                "--bind",
+                &address.to_string(),
+                "--no-skill-roots",
+                "--no-agent-roots",
+            ])
+            .output()
+            .await
+            .unwrap();
+    assert!(!legacy_guard_restart.status.success());
 }

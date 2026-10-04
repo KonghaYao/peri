@@ -276,7 +276,7 @@ impl RemoteSessionData {
                     Value::Integer(token.epoch),
                     Value::Text(token.nonce.clone()),
                     Value::Text(descriptor.endpoint.clone()),
-                    Value::Text(descriptor.key_identity.clone()),
+                    Value::Text(descriptor.owner_identity.clone()),
                     Value::Text(descriptor.agent_generation_id.clone()),
                     Value::Integer(i64::from(descriptor.unsupported_async_owners)),
                 ],
@@ -334,7 +334,7 @@ impl RemoteStore {
         let current_epoch = int_at(&row, 0).ok_or_else(owner_conflict)?;
         let descriptor_epoch = int_at(&row, 1).ok_or_else(owner_conflict)?;
         let endpoint = text_at(&row, 2).ok_or_else(owner_conflict)?.to_owned();
-        let key_identity = text_at(&row, 3).ok_or_else(owner_conflict)?.to_owned();
+        let owner_identity = text_at(&row, 3).ok_or_else(owner_conflict)?.to_owned();
         let agent_generation_id = text_at(&row, 4).ok_or_else(owner_conflict)?.to_owned();
         let unsupported_async_owners = match int_at(&row, 5) {
             Some(0) => false,
@@ -346,7 +346,7 @@ impl RemoteStore {
             descriptor_epoch,
             descriptor: WorkspaceExecutionDescriptor {
                 endpoint,
-                key_identity,
+                owner_identity,
                 agent_generation_id,
                 unsupported_async_owners,
             },

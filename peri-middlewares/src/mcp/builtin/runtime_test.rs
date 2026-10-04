@@ -656,7 +656,6 @@ fn builtin_source(instance: &str) -> Option<ConfigSource> {
 /// builtin 默认层的条目形状：无 command / url，`source` 是身份的唯一来源。
 fn builtin_config(instance: &str) -> McpServerConfig {
     McpServerConfig {
-        task_scope_secret_file: None,
         command: None,
         args: None,
         env: None,

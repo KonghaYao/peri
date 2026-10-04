@@ -4,17 +4,12 @@ import type { Transport } from "../transport/types";
 import type { SessionStorage } from "../storage/types";
 import type { SessionSummary } from "../storage/session-summary";
 import { realpathSync } from "node:fs";
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, statSync, writeSync } from "node:fs";
-import { join } from "node:path";
-import { randomBytes } from "node:crypto";
 import { WorkspaceMcpProcess, type WorkspaceMcpProcessOptions } from "./workspace-mcp-process";
 import { ProcessSupervisor } from "./process-supervisor";
 
 export interface HttpWorkspace {
   url: string;
   headers?: Record<string, string>;
-  /** Trusted host configuration, shared with a separately deployed Workspace owner. */
-  taskScopeSecretFile?: string;
 }
 
 export interface SandboxOptions {
@@ -35,7 +30,6 @@ export class Sandbox {
   private readonly workspaceProcessOptions?: WorkspaceMcpProcessOptions;
   private workspaceProcess?: WorkspaceMcpProcess;
   private workspaceStart?: Promise<HttpWorkspace>;
-  private managedTaskScopeSecretFile?: string;
   private readonly storage?: SessionStorage;
   private readonly stdio?: SandboxOptions["stdio"];
   private readonly transportFactory?: SandboxOptions["transportFactory"];
@@ -73,10 +67,7 @@ export class Sandbox {
   }
 
   get optionalWorkspace(): HttpWorkspace | undefined {
-    return this.workspace ?? (this.workspaceProcess ? {
-      url: this.workspaceProcess.url,
-      taskScopeSecretFile: this.managedTaskScopeSecretFile,
-    } : undefined);
+    return this.workspace ?? (this.workspaceProcess ? { url: this.workspaceProcess.url } : undefined);
   }
 
   /** Start and discover the Sandbox-owned MCP process before ACP session setup. */
@@ -86,34 +77,14 @@ export class Sandbox {
       throw new Error("Sandbox has no Workspace process configured");
     if (this.workspaceProcess) return Promise.resolve(this.optionalWorkspace!);
     if (!this.workspaceStart) {
-      const secretFile = this.prepareTaskScopeSecret();
-      this.workspaceStart = WorkspaceMcpProcess.start(this.path, this.workspaceProcessOptions, secretFile)
+      this.workspaceStart = WorkspaceMcpProcess.start(this.path, this.workspaceProcessOptions)
         .then((process) => {
           this.workspaceProcess = process;
-          return { url: process.url, taskScopeSecretFile: secretFile };
+          return { url: process.url };
         })
         .finally(() => { this.workspaceStart = undefined; });
     }
     return this.workspaceStart;
-  }
-
-  private prepareTaskScopeSecret(): string {
-    if (this.managedTaskScopeSecretFile) return this.managedTaskScopeSecretFile;
-    const directory = join(this.path, ".peri");
-    mkdirSync(directory, { recursive: true, mode: 0o700 });
-    const file = join(directory, "task-scope.secret");
-    if (!existsSync(file)) {
-      const fd = openSync(file, "wx", 0o600);
-      try { writeSync(fd, randomBytes(32)); fsyncSync(fd); }
-      finally { closeSync(fd); }
-      const dirFd = openSync(directory, "r");
-      try { fsyncSync(dirFd); } finally { closeSync(dirFd); }
-    }
-    const stat = statSync(file);
-    if (!stat.isFile() || stat.size !== 32 || (stat.mode & 0o077) !== 0 || readFileSync(file).length !== 32)
-      throw new Error("Managed Workspace task scope secret is invalid");
-    this.managedTaskScopeSecretFile = file;
-    return file;
   }
 
   async closeWorkspace(): Promise<void> {
@@ -159,10 +130,7 @@ export class Sandbox {
           PERI_SUPERVISOR_SOCKET: supervisor.socketPath,
           PERI_SUPERVISOR_TOKEN: supervisor.token,
         } : {}),
-        ...(trustedWorkspace?.taskScopeSecretFile ? {
-          PERI_TRUSTED_WORKSPACE_URL: trustedWorkspace.url,
-          PERI_TRUSTED_WORKSPACE_SCOPE_SECRET_FILE: trustedWorkspace.taskScopeSecretFile,
-        } : {}),
+        ...(trustedWorkspace ? { PERI_TRUSTED_WORKSPACE_URL: trustedWorkspace.url } : {}),
       },
       settings: transport?.settings,
     });

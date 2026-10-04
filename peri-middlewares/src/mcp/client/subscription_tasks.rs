@@ -63,17 +63,15 @@ fn pending_tasks_for_closed_epoch(
 
 impl McpClientPool {
     /// Rebuild a trusted remote Workspace connection for an unloaded close.
-    /// Endpoint and key path must come from the stdio host environment, never
+    /// Endpoint must come from the deployment, never
     /// from a close request or the model's MCP server declaration.
     pub async fn connect_trusted_workspace_for_close(
         cwd: &std::path::Path,
         url: &str,
-        secret_file: &str,
     ) -> Result<Arc<Self>, String> {
-        let mut workspace: peri_acp_types::plugin::McpServerConfig = serde_json::from_value(
-            json!({"url":url,"taskScopeSecretFile":secret_file,"systemMcp":true}),
-        )
-        .map_err(|error| format!("trusted Workspace config invalid: {error}"))?;
+        let mut workspace: peri_acp_types::plugin::McpServerConfig =
+            serde_json::from_value(json!({"url":url,"systemMcp":true}))
+                .map_err(|error| format!("trusted Workspace config invalid: {error}"))?;
         workspace.source = Some(crate::mcp::config::ConfigSource::WorkspaceRemote);
         let pool = Arc::new(Self::new_pending());
         pool.set_session_servers(HashMap::from([("workspace".to_owned(), workspace)]))
@@ -842,8 +840,7 @@ impl McpClientPool {
                 Some(crate::mcp::config::ConfigSource::WorkspaceRemote)
             )
         }) {
-            let authorities = self.remote_task_scope_authorities.read();
-            let authority = authorities.get(server)?;
+            let authority = peri_mcp_workspace::TaskScopeAuthority::trusted_connection();
             match owner.as_ref() {
                 Some(owner) => authority.issue_execution(session_id, owner.epoch, &owner.nonce),
                 None => authority.issue(session_id),

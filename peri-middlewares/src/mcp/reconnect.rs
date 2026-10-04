@@ -173,19 +173,7 @@ impl McpClientPool {
                 headers,
                 oauth,
             } => {
-                // The trusted Workspace owner is authenticated by its
-                // host-only task-scope key. A close-recovery pool has no
-                // session OAuth store and must not require one to reconnect.
-                let scoped_workspace = matches!(
-                    server_config.source.as_ref(),
-                    Some(super::config::ConfigSource::WorkspaceRemote)
-                ) && server_config.task_scope_secret_file.is_some()
-                    && oauth.is_none();
-                let token_store = if scoped_workspace {
-                    None
-                } else {
-                    self.oauth_credentials().ok()
-                };
+                let token_store = self.oauth_credentials().ok();
                 if oauth.is_some() && token_store.is_none() {
                     let reason = "OAuth credentials were not injected".to_string();
                     McpClientPool::insert_failed(self, server_name, reason.clone());

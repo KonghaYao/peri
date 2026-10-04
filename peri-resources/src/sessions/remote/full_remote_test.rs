@@ -34,7 +34,7 @@ async fn remote_owner_descriptor_survives_takeover_and_unsupported_is_monotonic(
     let first = data.claim_execution_owner(&root, false, None).await.unwrap();
     assert!(first.prior_unreleased.is_none());
     let first_descriptor = WorkspaceExecutionDescriptor {
-        endpoint: "https://workspace.example/mcp".into(), key_identity: "a".repeat(64),
+        endpoint: "https://workspace.example/mcp".into(), owner_identity: "a".repeat(64),
         agent_generation_id: "agent-one".into(), unsupported_async_owners: false,
     };
     data.bind_execution_workspace_owner(&first.token, &first_descriptor).await.unwrap();

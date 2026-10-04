@@ -375,17 +375,11 @@ pub(super) async fn close_owned_session(
                     })
                     .await?;
                 let url = trusted.endpoint;
-                let secret =
-                    std::env::var("PERI_TRUSTED_WORKSPACE_SCOPE_SECRET_FILE").map_err(|_| {
-                        AcpError::new(-32010,
-                        "Session close incomplete: trusted Workspace scope authority unavailable")
-                    })?;
                 let pool = heartbeat
                     .guard(async {
                         peri_middlewares::mcp::McpClientPool::connect_trusted_workspace_for_close(
                             std::path::Path::new(&meta.cwd),
                             &url,
-                            &secret,
                         )
                         .await
                         .map_err(|error| {

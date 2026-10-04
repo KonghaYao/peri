@@ -301,54 +301,6 @@ impl McpClientPool {
             publish_config_failure(&pool, &status_tx, &error.to_string());
             return;
         }
-        for (name, server) in &config.mcp_servers {
-            let Some(path) = server.task_scope_secret_file.as_deref() else {
-                continue;
-            };
-            let trusted = matches!(server.source, Some(ConfigSource::WorkspaceRemote))
-                && name == "workspace"
-                && server
-                    .url
-                    .as_deref()
-                    .and_then(|value| url::Url::parse(value).ok())
-                    .is_some_and(|url| {
-                        matches!(url.scheme(), "http" | "https")
-                            && url.username().is_empty()
-                            && url.password().is_none()
-                            && url.host_str().is_some_and(|host| {
-                                host.eq_ignore_ascii_case("localhost")
-                                    || host
-                                        .parse::<std::net::IpAddr>()
-                                        .is_ok_and(|ip| ip.is_loopback())
-                            })
-                    });
-            if !trusted {
-                publish_config_failure(
-                    &pool,
-                    &status_tx,
-                    &super::config::McpConfigError::InvalidTaskScopeSource { name: name.clone() }
-                        .to_string(),
-                );
-                return;
-            }
-            let authority = match peri_mcp_workspace::TaskScopeAuthority::from_secret_file(path) {
-                Ok(authority) => authority,
-                Err(_) => {
-                    publish_config_failure(
-                        &pool,
-                        &status_tx,
-                        &super::config::McpConfigError::TaskScopeSecretUnavailable {
-                            name: name.clone(),
-                        }
-                        .to_string(),
-                    );
-                    return;
-                }
-            };
-            pool.remote_task_scope_authorities
-                .write()
-                .insert(name.clone(), authority);
-        }
         if let Err(error) = pool.bind_cache_policy(super::config::McpCachePolicy::from_setting(
             config.mcp_cache,
         )) {
@@ -548,16 +500,7 @@ impl McpClientPool {
                     ref headers,
                     ref oauth,
                 } => {
-                    let scoped_workspace = matches!(
-                        server_config.source.as_ref(),
-                        Some(ConfigSource::WorkspaceRemote)
-                    ) && server_config.task_scope_secret_file.is_some()
-                        && oauth.is_none();
-                    let token_store = if scoped_workspace {
-                        None
-                    } else {
-                        pool.oauth_credentials().ok()
-                    };
+                    let token_store = pool.oauth_credentials().ok();
                     if oauth.is_some() && token_store.is_none() {
                         Self::insert_failed(
                             &pool,

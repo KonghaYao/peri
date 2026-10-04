@@ -38,9 +38,6 @@ struct Args {
     /// Loopback listen address for HTTP mode.
     #[arg(long, requires = "http")]
     bind: Option<SocketAddr>,
-    /// Protected 32-byte shared key for session task scopes (mode 0600 or stricter on Unix).
-    #[arg(long)]
-    task_scope_secret_file: Option<PathBuf>,
     /// Project skill root. If supplied, replaces default skill roots.
     #[arg(long = "skill-root")]
     skill_roots: Vec<PathBuf>,
@@ -173,12 +170,24 @@ struct OwnerIncarnationGuard {
 }
 
 impl OwnerIncarnationGuard {
-    fn claim(secret_path: &Path) -> Result<Self> {
-        let canonical_secret = std::fs::canonicalize(secret_path)
-            .context("cannot resolve Workspace task scope secret")?;
-        let mut path = canonical_secret.as_os_str().to_os_string();
-        path.push(".workspace-owner-unclean");
-        let path = PathBuf::from(path);
+    fn claim(workspace: &Path) -> Result<Self> {
+        let guard_dir = workspace.join(".peri");
+        std::fs::create_dir_all(&guard_dir)
+            .context("cannot create Workspace owner guard directory")?;
+        let path = guard_dir.join("workspace-owner-unclean");
+        for entry in
+            std::fs::read_dir(&guard_dir).context("cannot inspect Workspace owner guards")?
+        {
+            let entry = entry.context("cannot inspect Workspace owner guard")?;
+            if entry.path() != path
+                && entry
+                    .file_name()
+                    .to_string_lossy()
+                    .ends_with("workspace-owner-unclean")
+            {
+                bail!("Workspace owner recovery is uncertain; inspect remaining shell processes before removing old owner guards");
+            }
+        }
         let mut options = OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
@@ -233,18 +242,10 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     let workspace = canonical_directory(&args.workspace, "workspace")?;
     let resources = resource_input(&args, &workspace)?;
-    let mut server = WorkspaceMcpServer::standalone(workspace.to_string_lossy().into_owned())
-        .with_resources(resources);
-    if let Some(path) = &args.task_scope_secret_file {
-        let authority =
-            TaskScopeAuthority::from_secret_file(path).context("cannot load task scope secret")?;
-        server = server.with_task_scope_authority(authority);
-    }
-    let guard = args
-        .task_scope_secret_file
-        .as_deref()
-        .map(OwnerIncarnationGuard::claim)
-        .transpose()?;
+    let server = WorkspaceMcpServer::standalone(workspace.to_string_lossy().into_owned())
+        .with_resources(resources)
+        .with_task_scope_authority(TaskScopeAuthority::trusted_connection());
+    let guard = Some(OwnerIncarnationGuard::claim(&workspace)?);
     let task_owner = server.clone();
     let result = if args.stdio {
         serve_stdio(server).await

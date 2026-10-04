@@ -65,16 +65,6 @@ pub(super) fn session_mcp_servers(
         if name == "workspace" {
             config.source = Some(ConfigSource::WorkspaceRemote);
             config.system_mcp = Some(true);
-            // A scope-signing key is host authority, never an ACP client's
-            // extension field. SDK stdio injects the exact trusted endpoint.
-            if let (Ok(url), Ok(secret)) = (
-                std::env::var("PERI_TRUSTED_WORKSPACE_URL"),
-                std::env::var("PERI_TRUSTED_WORKSPACE_SCOPE_SECRET_FILE"),
-            ) {
-                if config.url.as_deref() == Some(url.as_str()) {
-                    config.task_scope_secret_file = Some(secret);
-                }
-            }
         }
         if servers.insert(name.clone(), config).is_some() {
             return Err(AcpError::new(

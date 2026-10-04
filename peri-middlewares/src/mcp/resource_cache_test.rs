@@ -263,7 +263,6 @@ async fn test_list_invalidation_stales_all_cursors() {
 #[test]
 fn test_cache_origin_does_not_expose_endpoint() {
     let config = McpServerConfig {
-        task_scope_secret_file: None,
         command: None,
         args: None,
         env: None,
@@ -335,7 +334,6 @@ async fn test_method_invalidation_rejects_inflight_pagination_response() {
 #[test]
 fn test_stdio_cache_origin_changes_with_config_identity() {
     let first = McpServerConfig {
-        task_scope_secret_file: None,
         command: Some("first-server".to_string()),
         args: Some(vec!["--project-a".to_string()]),
         env: Some(HashMap::from([(String::from("MODE"), String::from("one"))])),

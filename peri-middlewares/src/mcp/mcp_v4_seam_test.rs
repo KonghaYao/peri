@@ -99,7 +99,6 @@ fn spawn_fake_peer(server: DuplexStream) -> tokio::task::JoinHandle<()> {
 
 fn system_config(required_tools: Option<Vec<String>>, timeout_ms: Option<u64>) -> McpServerConfig {
     McpServerConfig {
-        task_scope_secret_file: None,
         command: Some("mcp-seam-fixture".to_string()),
         args: None,
         env: None,

@@ -44,8 +44,7 @@ impl ProcessTree {
         command
             .env_remove("PERI_SUPERVISOR_SOCKET")
             .env_remove("PERI_SUPERVISOR_TOKEN")
-            .env_remove("PERI_TRUSTED_WORKSPACE_URL")
-            .env_remove("PERI_TRUSTED_WORKSPACE_SCOPE_SECRET_FILE");
+            .env_remove("PERI_TRUSTED_WORKSPACE_URL");
         #[cfg(unix)]
         command.process_group(0);
         #[cfg(unix)]
@@ -63,8 +62,7 @@ impl ProcessTree {
         command
             .env_remove("PERI_SUPERVISOR_SOCKET")
             .env_remove("PERI_SUPERVISOR_TOKEN")
-            .env_remove("PERI_TRUSTED_WORKSPACE_URL")
-            .env_remove("PERI_TRUSTED_WORKSPACE_SCOPE_SECRET_FILE");
+            .env_remove("PERI_TRUSTED_WORKSPACE_URL");
         command.process_group(0);
         if let Some(broker) = &self.broker {
             broker.prepare_std(command);

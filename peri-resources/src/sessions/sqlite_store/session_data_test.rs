@@ -147,7 +147,7 @@ async fn workspace_descriptor_preserves_unsettled_external_owner_across_takeover
         &first,
         &WorkspaceExecutionDescriptor {
             endpoint: "http://127.0.0.1:10001".into(),
-            key_identity: "a".repeat(64),
+            owner_identity: "a".repeat(64),
             agent_generation_id: "agent-a".into(),
             unsupported_async_owners: false,
         },
@@ -180,7 +180,7 @@ async fn workspace_descriptor_preserves_unsettled_external_owner_across_takeover
             &claim.token,
             &WorkspaceExecutionDescriptor {
                 endpoint: "http://127.0.0.1:10002".into(),
-                key_identity: "b".repeat(64),
+                owner_identity: "b".repeat(64),
                 agent_generation_id: "agent-b".into(),
                 unsupported_async_owners: false,
             },

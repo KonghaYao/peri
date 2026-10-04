@@ -323,7 +323,7 @@ pub struct ExecutionOwnerClaim {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorkspaceExecutionDescriptor {
     pub endpoint: String,
-    pub key_identity: String,
+    pub owner_identity: String,
     pub agent_generation_id: String,
     pub unsupported_async_owners: bool,
 }
@@ -332,13 +332,13 @@ impl WorkspaceExecutionDescriptor {
     /// The recoverable case must carry a complete, nonsecret authority identity.
     pub fn valid_for_store(&self) -> bool {
         self.endpoint.len() <= 4096
-            && self.key_identity.len() <= 256
+            && self.owner_identity.len() <= 256
             && self.agent_generation_id.len() <= 256
             && (self.unsupported_async_owners
                 || (!self.endpoint.is_empty()
-                    && self.key_identity.len() == 64
+                    && self.owner_identity.len() == 64
                     && self
-                        .key_identity
+                        .owner_identity
                         .bytes()
                         .all(|byte| byte.is_ascii_hexdigit())
                     && !self.agent_generation_id.is_empty()))

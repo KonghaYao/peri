@@ -363,7 +363,6 @@ fn disabled_with_system_mcp(
 /// 规则 1 的完整 builtin 条目。
 fn builtin_default_entry(instance: &BuiltinMcpInstance) -> McpServerConfig {
     McpServerConfig {
-        task_scope_secret_file: None,
         command: None,
         args: None,
         env: None,
