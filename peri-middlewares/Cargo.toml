@@ -12,7 +12,6 @@ peri-config = { path = "../peri-config" }
 peri-mcp-config.workspace = true
 peri-mcp-credentials.workspace = true
 peri-model = { path = "../peri-model" }
-peri-js-runtime = { path = "../peri-js-runtime" }
 peri-process = { path = "../peri-process" }
 anyhow.workspace = true
 async-trait.workspace = true

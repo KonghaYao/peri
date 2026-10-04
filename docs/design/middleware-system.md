@@ -38,7 +38,6 @@ graph TB
         C3b["git_attribution<br/>→ before_tool + after_tool + prompt"]
         C4["hitl<br/>→ before_tools_batch + before_tool"]
         C5["agent_tool<br/>→ tools + before_agent"]
-        C6["ptc<br/>→ tools + before_agent + prompt"]
         C7["tool_search<br/>→ tools + before_agent + prompt"]
     end
 
@@ -132,19 +131,17 @@ MCP / Workflow / LSP / Goal 等槽位还受运行时依赖约束。顺序事实�
 | 14 | subagent | before_agent | Agent（+AgentResultTool） | 11_subagent section | — |
 | 15 | mcp | before_agent, before_model | MCP 工具（动态）；builtin 实例的 direct 工具 | — | mcp_pool 非空 |
 | 16 | workflow | before_agent | Workflow 编排工具（deferred） | — | workflow executor/adaptor 非空 |
-| 17 | ptc | before_agent | RunPtcCode（deferred） | PTC 安全语义与 RPC catalog contribution | 默认装配 |
-| 18 | tool_search | before_agent | SearchExtraTools/ExecuteExtraTool | deferred inventory + direct declarations contribution | 默认装配 |
-| 19 | lsp | after_tool（文档同步） | —（LSP 工具面已迁 builtin 实例） | — | lsp_servers 非空且 host LSP pool 可用 |
-| 20 | goal | after_agent | Goal（deferred） | — | goal_controller 非空 |
+| 17 | tool_search | before_agent | SearchExtraTools/ExecuteExtraTool | deferred inventory + direct declarations contribution | 默认装配 |
+| 18 | lsp | after_tool（文档同步） | —（LSP 工具面已迁 builtin 实例） | — | lsp_servers 非空且 host LSP pool 可用 |
+| 19 | goal | after_agent | Goal（deferred） | — | goal_controller 非空 |
 
 **脚注**：
 - **#4 plugin**：`PluginMiddleware` 在 `before_agent` hook 中执行插件兼容性校验（name/version/manifest 字段完整性）。
 - **#9 git_attribution**：`before_tool` 暂存 Write/Edit 旧文件内容，`after_tool` 计算贡献字符数；`prompt_contribution()` 声明 Co-Authored-By 指令。
 - **#12/#13**：审批与提问是独立能力。`PermissionMiddleware` 负责审批；`HumanInTheLoopMiddleware::collect_tools()` 使用原始 broker 提供 `AskUserQuestion`。
 - **#14 subagent**：`SubAgentMiddleware` 提供 `Agent`，TaskManager 可用时额外提供 `AgentResultTool`；后台任务生命周期遵循 [Session 异步任务架构](session-async-tasks.md)。
-- **#17/#18**：PTC 必须先于 ToolSearch。两者都在 `before_agent` 基于当前 session-local 工具视图生成 contribution；ToolSearch 随后为包含 `RunPtcCode` 的 deferred 集合建索引。
-- **#20 goal**：`GoalTool` 是 deferred tool，仅通过 `SearchExtraTools` → `ExecuteExtraTool` 访问；`after_agent` 注入 steering 并触发自驱续跑。
-- **#19 lsp**：LSP 工具面已迁 builtin `lsp` 实例（`mcp__lsp__LSP`），槽位只挂薄同步中间件 `LspSyncMiddleware`；`collect_tools` 为空，`after_tool` 在 `Write` / `Edit` 落盘后经既有 `LspPoolPort` 发 `didChange` → `didSave`（顺序发送、失败 debug 降级且不改工具结果）。
+- **#19 goal**：`GoalTool` 是 deferred tool，仅通过 `SearchExtraTools` → `ExecuteExtraTool` 访问；`after_agent` 注入 steering 并触发自驱续跑。
+- **#18 lsp**：LSP 工具面已迁 builtin `lsp` 实例（`mcp__lsp__LSP`），槽位只挂薄同步中间件 `LspSyncMiddleware`；`collect_tools` 为空，`after_tool` 在 `Write` / `Edit` 落盘后经既有 `LspPoolPort` 发 `didChange` → `didSave`（顺序发送、失败 debug 降级且不改工具结果）。
 - **Web / Artifact / Cron / Filesystem / Terminal 不是链槽位**（v4-part-2 删前两者、v4-part-3 删 `ChainSlot::Cron`、v4-part-4 wave 3 删 `ChainSlot::Filesystem` / `ChainSlot::Terminal`）：Web 搜索 / 抓取与 artifact 上传由 `mcp` 槽位（#15）客户端侧的同进程 builtin MCP 实例（`web` / `artifact`）提供，cron 三工具同样由 `cron` 实例提供，7 个文件/终端工具（原始工具名）由 `workspace` 实例提供（7 项全部 direct，是 `parent_tools` 与 workflow agent 工具列表的真实过滤面）；关闭键为策略键 `WebMiddleware` / `ArtifactMiddleware` / `CronMiddleware` / `LspMiddleware` / `WorkspaceMiddleware`（`BUILTIN_INSTANCE_POLICY_KEYS`，与只含链槽位名的 `MIDDLEWARE_NAMES` 是两张表），机制见 [meta-harness.md](meta-harness.md)。
 
 ---
@@ -171,7 +168,7 @@ MCP / Workflow / LSP / Goal 等槽位还受运行时依赖约束。顺序事实�
 - 主 Agent 的 `AgentModelBridge` 在每个 `ModelRequest` 构造时，从与
   `StageContext` 共享的同一 `Arc<MiddlewareChain>` 同步收集一次当前贡献
 - 非空贡献按 `base + "\n\n" + contributions` 只追加到当次请求；空贡献不改变 base
-- `before_agent` 先于首个 Reason，因此 PTC 与 ToolSearch 的首轮 cache 已就绪；
+- `before_agent` 先于首个 Reason，因此 ToolSearch 的首轮 cache 已就绪；
   provider 返回 owned `String`，不会持有锁跨越模型 await
 - 不再进入 `state.messages`
 
@@ -181,11 +178,7 @@ MCP / Workflow / LSP / Goal 等槽位还受运行时依赖约束。顺序事实�
 | agents_md (#3) | CLAUDE.md 摘要 |
 | skills (#5) | Skills 摘要 |
 | git_attribution (#9) | Co-Authored-By 指令 |
-| ptc (#17) | RunPtcCode 安全语义与当前 RPC-callable tool catalog |
-| tool_search (#18) | 当前 deferred inventory 与 direct-tool declarations |
-
-> 实际拼接顺序按 §3 的生产链顺序，因此 PTC contribution 位于
-> ToolSearch contribution 之前。
+| tool_search (#17) | 当前 deferred inventory 与 direct-tool declarations |
 
 ---
 

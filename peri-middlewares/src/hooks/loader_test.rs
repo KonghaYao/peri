@@ -419,7 +419,7 @@ fn test_load_settings_project_hooks_with_matcher() {
 
 /// 改写 `HOME` 的 guard：持有进程环境锁，drop 时还原。
 ///
-/// 与 `ptc_test::HomeGuard` 同一模式——`std::env::set_var` 是进程级全局，
+/// `std::env::set_var` 是进程级全局，
 /// 不串行会与并行测试竞态。
 struct HomeGuard {
     _lock: peri_mcp_common::process_env::EnvLockFile,

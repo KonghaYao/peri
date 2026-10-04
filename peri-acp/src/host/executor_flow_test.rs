@@ -41,18 +41,11 @@ use crate::{
     provider::{LlmProvider, PeriConfig, ProfileConfig, Profiles, ProviderConfig, ProviderModels},
     session::{agent_pool::AgentPool, event_sink::EventSink, SessionManager},
 };
-#[cfg(not(windows))]
-use peri_acp_types::ports::McpPoolPort;
-#[cfg(not(windows))]
-use peri_middlewares::{
-    assembly::{BuiltinInstanceContext, CronInstanceInput, LspInstanceInput},
-    mcp::{McpClientPool, McpInitStatus, McpTaskOwner},
-};
 use peri_middlewares::{host_ports::AgentCatalogProvider, tool_search::ToolSearchIndex};
 #[cfg(not(windows))]
 use peri_model::{
-    JsonObject, Model, ModelCapabilities, ModelMessage, ModelRequest, ModelResponse, ModelResult,
-    ModelStream, ModelStreamEvent, StopReason, TokenUsage, ToolCall,
+    Model, ModelCapabilities, ModelMessage, ModelRequest, ModelResponse, ModelResult, ModelStream,
+    ModelStreamEvent, StopReason, TokenUsage,
 };
 
 #[cfg_attr(windows, allow(dead_code))]
@@ -769,9 +762,6 @@ mod frozen_tests;
 
 #[path = "executor_flow_parity_test.rs"]
 mod parity_tests;
-
-#[path = "executor_flow_ptc_test.rs"]
-mod ptc_tests;
 
 #[cfg(not(windows))]
 #[path = "compact_recovery_test.rs"]

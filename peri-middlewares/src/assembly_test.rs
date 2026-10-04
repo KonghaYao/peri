@@ -495,7 +495,6 @@ fn slot_middleware_name(slot: &ChainSlot) -> &'static str {
         ChainSlot::SubAgent => "SubAgentMiddleware",
         ChainSlot::Mcp => "McpMiddleware",
         ChainSlot::Workflow => "WorkflowMiddleware",
-        ChainSlot::Ptc => "PtcMiddleware",
         ChainSlot::ToolSearch => "ToolSearch",
         ChainSlot::Lsp => "LspSyncMiddleware",
         ChainSlot::Goal => "GoalMiddleware",

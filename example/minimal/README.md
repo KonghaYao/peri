@@ -66,7 +66,7 @@ deferred catalog and its search results.
 | `SkillPreloadMiddleware` | `false` | Disables automatic preloading of selected skills into the session. |
 | `AtMentionMiddleware` | `false` | Disables `@`-mention processing and related context injection. |
 | `ImageMiddleware` | `false` | Disables image attachment handling and image-related prompt contributions. |
-| `WorkspaceMiddleware` | `false` | Closes the built-in `workspace` instance's tool face (`mcp__workspace__Read` / `mcp__workspace__Write` / `mcp__workspace__Edit` / `mcp__workspace__Glob` / `mcp__workspace__Grep` / `mcp__workspace__folder_operations` / `mcp__workspace__Bash`, direct tools). These seven are the only filesystem and shell tools on the chain; PTC's direct Node API access, external MCP servers and the subagent `WriteSandbox` tool are not affected by this key. |
+| `WorkspaceMiddleware` | `false` | Closes the built-in `workspace` instance's tool face (`mcp__workspace__Read` / `mcp__workspace__Write` / `mcp__workspace__Edit` / `mcp__workspace__Glob` / `mcp__workspace__Grep` / `mcp__workspace__folder_operations` / `mcp__workspace__Bash`, direct tools). These seven are the only filesystem and shell tools on the chain; external MCP servers and the subagent `WriteSandbox` tool are not affected by this key. |
 | `GitAttributionMiddleware` | `false` | Disables automatic Git attribution instructions and behavior. |
 | `WebMiddleware` | `false` | Closes the built-in `web` instance's tool face (`mcp__web__WebSearch` / `mcp__web__WebFetch`, direct tools). |
 | `TodoMiddleware` | `false` | Disables the todo-list tool and its task-tracking behavior. |

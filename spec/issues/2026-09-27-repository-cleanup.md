@@ -28,7 +28,6 @@
 | WP-08 Other workspace crates | `peri-model/`、`peri-lsp/`、`peri-web-pty/` | 88 / 18.4k；中到高，provider、LSP、PTY platform lifecycle | 对应 `docs/code-index/`；各 crate 目标 lib/integration/doc tests；PTY 按平台边界做运行验收 |
 | WP-09 E2E | `e2e/`（含子仓路径 `e2e/tui-tester`，已初始化但内部未扫描） | 53 个父仓跟踪文件；中到高，真实 TUI/tmux、部分 Judge 使用外部 API | `e2e/CLAUDE.md`：目标文件 `npm run e2e -- --file ... --serial --retry 0`；日常 `e2e:l0`，合并 `e2e:l1`，发版 `e2e:release`。确认 tester 子仓是否需要初始化后再运行 |
 | WP-10 文档站 | `peri-cool/` 子仓 | 固定 gitlink；子仓 154 files | 子仓本地说明与 package scripts；父仓 gitlink 保持固定 commit |
-| WP-11 PTC npm package | `npm-packages/@peri-ptc/` | 14 files；中，独立 package | `package.json` 中的本地 scripts、类型/构建入口 |
 | WP-12 Example | `example/`（含 `minimal/`） | 22 files；低到中，独立 Bun example | `example/package.json` 和 `minimal/` 指引中的构建/运行命令 |
 | WP-13 Side projects | `side-projects/agent-defect-analyzer/`、`daytona/`、`git-stats/`、`image-spike/`、`llm-gateway/`、`mcp-apps/`、`md-scan-matrix/`、`peri-db-viewer/`、`peri-sync/` | 各项目分别有 3–100 个跟踪文件；中，互不构成根 workspace | 各项目 manifest/README 中的本地命令；Rust 项目用对应 manifest 运行目标测试。不得因不在 workspace 就标为无测试 |
 | WP-14 Scripts | `scripts/` | 11 files；中，安装、跨平台构建和验证入口 | 只运行与改动脚本对应的 shell/PowerShell、容器或平台验证；检查脚本目标与其文档一致 |

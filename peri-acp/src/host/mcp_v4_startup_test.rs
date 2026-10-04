@@ -193,17 +193,6 @@ impl CountingModel {
             .map(|request| request.tools.iter().map(|tool| tool.name.clone()).collect())
             .unwrap_or_default()
     }
-
-    /// 首个 LLM 请求的系统消息文本（deferred 摘要的断言面）。
-    fn first_request_system_text(&self) -> String {
-        self.requests
-            .lock()
-            .unwrap()
-            .first()
-            .and_then(|request| request.messages.first())
-            .map(|message| message.text_content().unwrap_or_default())
-            .unwrap_or_default()
-    }
 }
 
 #[async_trait]
@@ -676,10 +665,9 @@ async fn system_mcp_ready_exposes_required_tools_on_first_model_request() {
         "普通 MCP 工具必须保持 deferred: {tools:?}"
     );
 
-    let system = model.first_request_system_text();
     assert!(
-        system.contains("## Deferred Tools") && system.contains("mcp__ord__ping"),
-        "所有 deferred 工具（含普通 MCP）仍必须经 ToolSearch 摘要可见"
+        tools.iter().any(|name| name == "SearchExtraTools"),
+        "普通 MCP 工具通过 ToolSearch 发现"
     );
 }
 
@@ -716,14 +704,9 @@ async fn system_mcp_empty_required_tools_ready_without_injection() {
             .any(|name| name == "echo" || name == "mcp__sys__echo"),
         "空数组不得注入任何 direct 工具: {tools:?}"
     );
-    let system = model.first_request_system_text();
     assert!(
-        system.contains("mcp__sys__echo"),
-        "未提升的工具仍应在 deferred 摘要中可见"
-    );
-    assert!(
-        !system.contains("- echo:"),
-        "空数组保持 deferred 前缀命名，不产生原名 direct 提示"
+        tools.iter().any(|name| name == "SearchExtraTools"),
+        "未提升的工具通过 ToolSearch 发现"
     );
 }
 

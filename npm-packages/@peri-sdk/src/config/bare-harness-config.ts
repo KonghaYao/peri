@@ -31,7 +31,6 @@ export const BareHarnessConfig = Object.freeze({
   SubAgentMiddleware: false,
   McpMiddleware: false,
   WorkflowMiddleware: false,
-  PtcMiddleware: false,
   ToolSearch: false,
   LspSyncMiddleware: false,
   GoalMiddleware: false,

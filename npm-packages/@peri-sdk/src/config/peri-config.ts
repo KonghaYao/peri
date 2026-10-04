@@ -65,7 +65,6 @@ export type MetaHarnessKey =
   | "SubAgentMiddleware"
   | "McpMiddleware"
   | "WorkflowMiddleware"
-  | "PtcMiddleware"
   | "ToolSearch"
   | "LspSyncMiddleware"
   | "GoalMiddleware"

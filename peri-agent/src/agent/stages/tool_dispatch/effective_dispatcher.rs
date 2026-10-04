@@ -1,4 +1,4 @@
-//! PTC adapter over the same pinned catalog and invocation pipeline as Act.
+//! Effective tool dispatch over the same pinned catalog and invocation pipeline as Act.
 //! Nested calls project effective target identity but do not commit transcript
 //! messages or settle the outer batch's hooks/failure counter.
 
@@ -14,7 +14,7 @@ use crate::messages::{BaseMessage, ToolCallRequest};
 use crate::session::tool_catalog::SessionToolCatalogSnapshot;
 use crate::tools::{
     EffectiveToolCall, EffectiveToolDefinition, EffectiveToolDispatcher, EffectiveToolError,
-    EffectiveToolErrorCode, ToolOutput, RUN_PTC_CODE_TOOL_NAME,
+    EffectiveToolErrorCode, ToolOutput,
 };
 
 #[derive(Clone)]
@@ -33,12 +33,6 @@ impl StageEffectiveToolDispatcher {
         call: EffectiveToolCall,
         cancel: CancellationToken,
     ) -> Result<ToolResult, EffectiveToolError> {
-        if call.tool_name.eq_ignore_ascii_case(RUN_PTC_CODE_TOOL_NAME) {
-            return Err(EffectiveToolError::new(
-                EffectiveToolErrorCode::ToolFailed,
-                format!("{RUN_PTC_CODE_TOOL_NAME} cannot recursively invoke itself"),
-            ));
-        }
         let event_invocation_id = call
             .parent_invocation_id
             .as_deref()
@@ -151,7 +145,6 @@ impl EffectiveToolDispatcher for StageEffectiveToolDispatcher {
             .tools
             .values()
             .map(|entry| &entry.tool)
-            .filter(|tool| tool.name() != RUN_PTC_CODE_TOOL_NAME)
             .map(|tool| EffectiveToolDefinition {
                 name: tool.name().to_string(),
                 description: tool.description().to_string(),

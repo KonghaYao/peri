@@ -726,7 +726,7 @@ peri 自带的 Web / Artifact / Cron / LSP / Workspace 能力不是 middleware �
 | `CronMiddleware: false` | cron 三工具关闭 | 不适用 | 保持运行 | 保持 1R ready | 不销毁实例 / scheduler / supervisor |
 | `LspMiddleware: false` | LSP 工具关闭 | **关闭**（不再读文件、不发通知） | 不适用 | 保持 1R ready | 不销毁 host LSP pool |
 | `LspSyncMiddleware: false` | LSP 工具仍可见 | 仅同步关闭 | 不适用 | 不变 | 不关闭 host LSP pool |
-| `WorkspaceMiddleware: false` | 该实例的 7 个文件/终端工具从模型面消失（不覆盖 PTC 的 direct Node API、外部 MCP server 与 subagent 的 `WriteSandbox`） | 不适用 | 不适用 | 保持 1R ready | 不销毁实例 / handler |
+| `WorkspaceMiddleware: false` | 该实例的 7 个文件/终端工具从模型面消失（不覆盖 外部 MCP server 与 subagent 的 `WriteSandbox`） | 不适用 | 不适用 | 保持 1R ready | 不销毁实例 / handler |
 | `FilesystemMiddleware` / `TerminalMiddleware` | **无效**（wave 3 后不是已知键 ⇒ warn 后丢弃） | 不适用 | 不适用 | 不变 | 不变 |
 | MCP 配置 `{"<实例>": {"disabled": true}}` | 该实例不连接 | 不适用 | 不 spawn | 不参与 readiness | 注册为 `Disabled` |
 | `PERI_MCP_BUILTIN=off` | 五实例零注入 | 不适用 | 不 spawn | 无 builtin ready 要求 | 无 builtin 对象 |

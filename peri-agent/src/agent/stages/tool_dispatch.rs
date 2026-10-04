@@ -215,7 +215,7 @@ pub async fn dispatch_tools(
         tx.commit_staged();
     }
 
-    // 只计入已提交的最外层结果，包括错误结果；PTC 内部调用没有独立 transcript
+    // 只计入已提交的工具结果，包括错误结果。
     // 提交，不在这里重复计量。先记账再运行后置 hook，确保 hook 失败也不丢增长。
     {
         let mut tracker = ctx.compact.token_tracker.write();

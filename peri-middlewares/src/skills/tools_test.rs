@@ -185,7 +185,7 @@ async fn skill_tool_ambiguous_across_origins_lists_candidates() {
 async fn discover_tool_reports_all_entries_with_scope_labels() {
     let tool = DiscoverSkillsTool::new(cached(vec![
         fake_mcp_skill("workspace", "project", "brain"),
-        fake_mcp_skill("workspace", "builtin", "ptc"),
+        fake_mcp_skill("workspace", "builtin", "example"),
         fake_mcp_skill("workspace", "user", "guide"),
     ]));
     let output = tool.invoke(json!({}), ctx()).await.unwrap();

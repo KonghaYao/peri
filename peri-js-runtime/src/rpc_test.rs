@@ -93,6 +93,6 @@ async fn test_drain_pending_settles_waiting_request_with_reason() {
     channel.drain_pending("process exited");
 
     let error = request.await.unwrap().unwrap_err();
-    assert_eq!(error.code(), "PROTOCOL_ERROR");
+    assert!(matches!(error, crate::JsRuntimeError::RpcResponse(_)));
     assert!(channel.pending_requests.is_empty());
 }

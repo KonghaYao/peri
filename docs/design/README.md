@@ -30,7 +30,6 @@ draft、proposal、可行性探查、审计报告和未采纳方案不进入本�
 | MCP 响应缓存 | [mcp-cache.md](mcp-cache.md) | 文件/环境总开关、pool 策略与持久化/SDK 缓存关闭闭包 |
 | Middleware | [middleware-system.md](middleware-system.md) | 生产链、hook、工具与 prompt contribution |
 | 工具系统 | [tool-system.md](tool-system.md) | session-local 可见性、ToolSearch 与执行边界 |
-| PTC | [programmatic-tool-calling.md](programmatic-tool-calling.md) | JavaScript host、RPC 与 effective tool dispatch |
 | 交互 broker | [interaction-brokers.md](interaction-brokers.md) | Approval/Questions broker 与 transport 交互 |
 | 消息存储 | [message-transcript.md](message-transcript.md) | Transcript、MessageQueue、staging 与持久化 |
 | 会话身份、工作区归属与恢复 | [session-id-environment.md](session-id-environment.md) | Session ID 与机器归属、工作区发现与登记、执行绑定与恢复入口；进度与验收见 [核心改动清单](../../spec/issues/2026-09-30-session-id-environment-core-change.md) |

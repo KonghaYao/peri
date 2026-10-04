@@ -118,7 +118,7 @@ flowchart LR
     end
 
     subgraph DIRECT[不经 MCP 的宿主能力]
-        CONTROL[Permission / HITL / ToolSearch / PTC<br/>独立 Middleware]
+        CONTROL[Permission / HITL / ToolSearch<br/>独立 Middleware]
         HOOK[HookMiddleware<br/>Claude Plugin Hook 暂保留为独立 Middleware]
         RUNTIME[SubAgent / Workflow / Goal<br/>独立 Middleware / Runtime]
     end
@@ -199,14 +199,13 @@ flowchart LR
 | 14 | `WorkflowMiddlewareAdaptor` | `peri-middlewares/src/workflow/mod.rs` | 独立 Middleware | Workflow executor、progress、通知、kill/resume 和 session 生命周期属于 Runtime，不下放到 MCP。 |
 | 15 | `FilesystemMiddleware` | 现行文件工具：`mcp-packages/workspace/src/filesystem/`；历史 middleware 类型 `peri-middlewares/src/middleware/filesystem.rs` 已删除 | 目标：完全下放 → Workspace MCP | filesystem 工具、workspace path 解析、读写和目录操作统一由 Workspace MCP 提供，宿主保留 MCP 对接。 |
 | 16 | `TerminalMiddleware` | 现行 Bash 工具：`mcp-packages/workspace/src/terminal.rs`；历史 middleware 类型 `peri-middlewares/src/middleware/terminal.rs` 已删除 | 目标：完全下放 → Workspace MCP | terminal/Bash 工具、进程执行和任务输出统一由 Workspace MCP 提供，宿主保留 MCP 对接。 |
-| 17 | `PtcMiddleware` | `peri-middlewares/src/ptc/mod.rs` | 独立 Middleware | JS runtime、session-local tool bridge、权限和 effective tool dispatch 必须由 Agent/Runtime 持有，不下放到 MCP。 |
 | 18 | `HumanInTheLoopMiddleware` | `peri-middlewares/src/hitl/mod.rs` | 独立 Middleware | Question broker、工具注册、取消和 ACP/TUI 交互通道属于宿主交互生命周期，不下放到 MCP。 |
 | 19 | `PermissionMiddleware` | `peri-middlewares/src/permission/mod.rs` | 独立 Middleware | Permission mode、effective tool name、ToolSearch、Hook 和 broker 构成宿主安全边界，不下放到 MCP。 |
 | 20 | `HookMiddleware` | `peri-middlewares/src/hooks/middleware.rs` | 独立 Middleware | Claude Plugin Hook 暂时继续作为 Middleware 执行，不定义为 MCP；hook loader、executor、Permission、Plugin、Agent event/state 和 command 执行端口属于宿主。 |
 | 21 | `SkillsMiddleware` | `peri-middlewares/src/skills/mod.rs` | **已落地（2026-09-29，W4b）**：来源下放 Workspace MCP | 技能发现与正文读取全部归 provider（`resources/list\|read`、`skills/list\|get` + digest/frontmatter 校验）；宿主**零技能文件系统读取**（`skills/` 无 `std::fs`），宿主只 `resolve_skill_roots` 构造 provider 输入，`before_agent` 只做 `McpSkillRegistry` 投影；冻结摘要经 P4 内容准入的 `read_workspace_skill_catalog` 读取，`core:{skill}` 命令改由发现管线投影（F6）。 |
 | 22 | `SkillPreloadMiddleware` | `peri-middlewares/src/subagent/skill_preload.rs` | **已落地（2026-09-29，W4b/W6）**：来源下放 Workspace MCP | 只在会话级 `McpSkillRegistry` 中按名查找并注入已激活正文；未命中 ⇒ 缺口，**不回落磁盘**（J5）；**W6**：缺口按路径分流——宿主显式名单路径（子代理 / workflow agent 声明的 `skills`）注入假 `SkillTool` 调用 + `is_error` 回执（文案与 SkillTool 失败串同源，单一派生点 `skills/mod.rs`），主 Agent 路径（启发式 `/token` 提取）缺口零注入；SubAgent 输入、预加载顺序和取消生命周期仍由宿主持有。 |
 | 23 | `PluginMiddleware` | `peri-middlewares/src/plugin/middleware.rs` | 部分下放 | Plugin manifest 文件可由 Workspace MCP 读取，但来源合并、命名空间、hooks、agents、commands 和生命周期仍由宿主持有。 |
-| 24 | `ToolSearchMiddleware` | `peri-middlewares/src/tool_search/middleware.rs` | 独立 Middleware | deferred tool、MCP、Permission、PTC 和 SubAgent 的工具目录属于 Agent 工具编排，不下放到 MCP。 |
+| 24 | `ToolSearchMiddleware` | `peri-middlewares/src/tool_search/middleware.rs` | 独立 Middleware | deferred tool、MCP、Permission 和 SubAgent 的工具目录属于 Agent 工具编排，不下放到 MCP。 |
 | 25 | `McpMiddleware` | `peri-middlewares/src/mcp/middleware.rs` | 独立 Middleware | 它是统一 MCP 对接核心，并在 1R 阶段等待 `system_mcp` 完成 ready；超时必须报错并阻止 react loop 启动。 |
 | 26 | `DynamicMcpMiddleware` | `peri-middlewares/src/mcp/dynamic/tool.rs` | 独立 Middleware | session-scoped registry、动态工具目录、取消、权限和 projection lease 属于 MCP 对接宿主。 |
 | 27 | `SubAgentMiddleware` | `peri-middlewares/src/subagent/mod.rs` | 独立 Middleware | parent/child session、fork/resume、取消、事件、frozen context、hooks、skills、tools 和 MCP activation 属于 Runtime，不下放到 MCP。 |
@@ -232,7 +231,7 @@ flowchart LR
 3. `system_mcp_tools` 的每个工具都经过所属 MCP namespace 解析，工具 schema 可构造为 bridge，并直接出现在 RCRA 工具列表；普通 deferred tool 仍走既有 `ToolSearchMiddleware` 路径。
 4. 必需工具为空数组时只验证 System MCP ready，不注入额外工具。
 5. 五个目标 MCP 的 transport、状态、凭据、capability root 和 client pool 不共享；MCP 之间不得通过隐式调用建立依赖。
-6. 对宿主保留的 Permission、HITL、Hook、SubAgent、Workflow、Goal 和 PTC 能力，迁移设计不得绕过既有 cancel、审批、事件、session 或 effective tool name 契约。
+6. 对宿主保留的 Permission、HITL、Hook、SubAgent、Workflow、Goal  能力，迁移设计不得绕过既有 cancel、审批、事件、session 或 effective tool name 契约。
 7. v4 目标归属未完成迁移前，当前实现和文档必须能区分“目标归属”与“已落地能力”，不得以绿色的局部单测宣告整体迁移完成。
 
 验证范围由对应实现 issue 记录；本文件只定义必须满足的行为契约，不保存某一次执行的勾选状态、耗时或提交号。

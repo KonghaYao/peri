@@ -35,7 +35,6 @@ use crate::{
     middleware::TodoMiddleware,
     permission::{default_requires_approval, PermissionMiddleware},
     plugin::PluginMiddleware,
-    ptc::PtcMiddleware,
     subagent::SubAgentMiddleware,
     tool_search::ToolSearchMiddleware,
     workflow::{WorkflowMiddleware, WorkflowMiddlewareAdaptor},
@@ -341,13 +340,6 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
                     if let Some(adaptor) = wf_adaptor.take() {
                         chain.add(Box::new(adaptor));
                     }
-                }
-                // Programmatic Tool Calling：注册 deferred RunPtcCode，由 ToolSearch 发现/执行。
-                ChainSlot::Ptc if disabled.contains("PtcMiddleware") => {}
-                ChainSlot::Ptc => {
-                    let middleware =
-                        PtcMiddleware::new().with_task_manager(ctx.task_manager.clone());
-                    chain.add(Box::new(middleware));
                 }
                 // ToolSearch 中间件
                 ChainSlot::ToolSearch if disabled.contains("ToolSearch") => {}

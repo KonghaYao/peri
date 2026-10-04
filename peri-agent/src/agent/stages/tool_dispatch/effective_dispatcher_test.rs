@@ -116,7 +116,7 @@ async fn nested_dispatch_keeps_pinned_target_and_does_not_commit_outer_batch() {
                 invocation_id: "inner".into(),
                 tool_name: "Target".into(),
                 input: json!({}),
-                parent_invocation_id: Some("outer-ptc".into()),
+                parent_invocation_id: Some("outer".into()),
             },
             CancellationToken::new(),
         )
@@ -148,5 +148,5 @@ async fn nested_dispatch_keeps_pinned_target_and_does_not_commit_outer_batch() {
             ids.push(tool_call_id);
         }
     }
-    assert_eq!(ids, vec!["outer-ptc/inner", "outer-ptc/inner"]);
+    assert_eq!(ids, vec!["outer/inner", "outer/inner"]);
 }

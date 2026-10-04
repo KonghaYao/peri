@@ -53,7 +53,7 @@ fn registry_with(server: &str, skills: Vec<SkillMetadata>) -> Arc<McpSkillRegist
 fn build_summary_exposes_names_and_scope_labels() {
     let skills = vec![
         fake_skill("workspace", "project", "brainstorming"),
-        fake_skill("workspace", "builtin", "ptc"),
+        fake_skill("workspace", "builtin", "example"),
     ];
     let summary = SkillsMiddleware::build_summary(&skills);
     assert!(summary.contains("mcp__workspace__brainstorming"));

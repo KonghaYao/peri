@@ -291,7 +291,7 @@ main() {
     if command -v node &>/dev/null; then
         info "node found — bundled workflow runner is ready"
     else
-        warn "node not found. Install Node.js for workflow and PTC support:"
+        warn "node not found. Install Node.js for workflow support:"
         echo "    https://nodejs.org/"
         echo ""
     fi

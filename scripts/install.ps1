@@ -261,7 +261,7 @@ function Main {
         info "node found - bundled workflow runner is ready"
     } else {
         Write-Host ""
-        warn "node not found. Install Node.js for workflow and PTC support:"
+        warn "node not found. Install Node.js for workflow support:"
         Write-Host "    https://nodejs.org/"
         Write-Host ""
     }

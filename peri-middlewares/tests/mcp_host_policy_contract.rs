@@ -35,7 +35,7 @@
 //!    （`ProductionChainAssembler` 槽位）**：需要 `peri-acp` host 装配层。
 //!    本层只断言 `StageContext` 的 render 事件属于同一 turn，不代替 host seam。
 //!    归 **B-07**（`peri-acp/src/host/mcp_v4_startup_test.rs`）。
-//! 4. **Hook / SubAgent / Workflow / Goal / PTC 的具体实现**未在本层重测；本层只证明
+//! 4. **Hook / SubAgent / Workflow / Goal 的具体实现**未在本层重测；本层只证明
 //!    工具调用仍然完整经过 middleware chain（`before_tools_batch` 对 MCP bridge 可见），
 //!    即 direct 注入没有短路链上既有 hook 位。
 //!
@@ -524,7 +524,7 @@ async fn hitl_approval_gates_mcp_bridge_by_effective_name_and_calls_server_once(
         "HITL 必须看到 effective tool name，而不是裸 MCP 工具名"
     );
 
-    // 链未被绕过：before_tools_batch 观察到同一次调用（Hook/Workflow/PTC 等
+    // 链未被绕过：before_tools_batch 观察到同一次调用（Hook/Workflow 等
     // 链上能力的接入点）。具体实现不在本层重测。
     assert_policy_saw(&chain_seen, &effective);
 

@@ -38,7 +38,6 @@ pub mod mcp;
 pub mod middleware;
 pub mod permission;
 pub mod plugin;
-pub mod ptc;
 pub mod workspace_io;
 pub use plugin::{
     AvailablePlugin, ClaudeSettings, CommandEntry, CommandProvider, CommandSource, InstallScope,

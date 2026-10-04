@@ -200,7 +200,7 @@ fn test_hitl_section_rendered_by_holder() {
 /// ① 渲染结果逐字包含清单（条目表确实进入模型面，同源不漂移）；
 /// ② 两个 Web 原名在清单内；
 /// ③ `artifact` 不在敏感清单（parity：与原始名 `artifact` 的判定一致）；
-/// ④ 条目数 / 前缀条目数不变（14 / 3），与 `permission/mod_test.rs` 的计数断言
+/// ④ 条目数 / 前缀条目数（13 / 3），与 `permission/mod_test.rs` 的计数断言
 ///    互为双锁。
 #[test]
 fn test_hitl_sensitive_list_uses_system_mcp_raw_names() {
@@ -238,11 +238,11 @@ fn test_hitl_sensitive_list_uses_system_mcp_raw_names() {
     );
 
     let entries = sensitive_tool_entries();
-    assert_eq!(entries.len(), 14, "条目数不变（A19 只改条目名）");
+    assert_eq!(entries.len(), 13, "敏感工具条目数");
     assert_eq!(
         entries.iter().filter(|e| e.prefix_match).count(),
         3,
-        "前缀条目数不变（A19 只改条目名）"
+        "前缀敏感工具条目数"
     );
     assert_eq!(
         list.lines().count(),

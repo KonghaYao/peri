@@ -189,7 +189,7 @@ session 执行 sidecar 文件锁及 TUI dirty/owner 恢复确认已移除；不�
 
 ## 5. 执行环境装配
 
-会话的 shell、Read/Edit/Write、@mention、PTC、hooks、skills、项目指引、MCP、LSP、Workflow 和 SubAgent 都从同一个已解析的 session environment 取得执行目录。宿主启动目录只用于创建默认新会话及初始列表选择。
+会话的 shell、Read/Edit/Write、@mention、hooks、skills、项目指引、MCP、LSP、Workflow 和 SubAgent 都从同一个已解析的 session environment 取得执行目录。宿主启动目录只用于创建默认新会话及初始列表选择。
 
 Host 可以共享 transport、全局配置来源与确定可共享的服务；项目相关配置、插件发现结果、hook groups、命令目录和资源句柄必须按会话执行环境装配。缓存的 key 必须包含真实环境与配置身份，不能只包含 `ProjectId`。同项目工作区之间不合并 `.mcp.json`、局部 settings、权限或可写目录。
 

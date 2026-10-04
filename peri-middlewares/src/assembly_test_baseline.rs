@@ -45,21 +45,16 @@ fn blueprint_sequence_is_canonical() {
             "Permission",
             "AskUser",
             "SubAgent",
-            // 第六组：MCP / Workflow / PTC / ToolSearch
+            // 第六组：MCP / Workflow / ToolSearch
             "Mcp",
             "Workflow",
-            "Ptc",
             "ToolSearch",
             // 第七组：LSP / Goal（Goal 在链最后）
             "Lsp",
             "Goal",
         ]
     );
-    assert_eq!(
-        slots.len(),
-        20,
-        "W5 后蓝本槽位恰 20 个（GitWatch 删除 + AgentDefine 摘除，plan §6.3；改动槽位数量必须同时改本断言与文档）"
-    );
+    assert_eq!(slots.len(), 19, "蓝本槽位恰 19 个");
 }
 
 fn slot_name(slot: &ChainSlot) -> &'static str {
@@ -80,7 +75,6 @@ fn slot_name(slot: &ChainSlot) -> &'static str {
         ChainSlot::SubAgent => "SubAgent",
         ChainSlot::Mcp => "Mcp",
         ChainSlot::Workflow => "Workflow",
-        ChainSlot::Ptc => "Ptc",
         ChainSlot::ToolSearch => "ToolSearch",
         ChainSlot::Lsp => "Lsp",
         ChainSlot::Goal => "Goal",
@@ -107,7 +101,6 @@ fn default_config_produces_canonical_chain() {
             "PermissionMiddleware",
             "HumanInTheLoopMiddleware",
             "SubAgentMiddleware",
-            "PtcMiddleware",
             "ToolSearch",
         ]
     );
@@ -553,7 +546,6 @@ fn full_config_chain_order() {
             "SubAgentMiddleware",
             "McpMiddleware",
             "WorkflowMiddleware",
-            "PtcMiddleware",
             "ToolSearch",
             "LspSyncMiddleware",
             "GoalMiddleware",

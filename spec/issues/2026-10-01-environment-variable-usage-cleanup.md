@@ -71,4 +71,4 @@ Artifact 与 builtin 的结论来自当前构造/注入调用链的静态检查�
 
 - [配置权威面任务](2026-10-01-configuration-authority.md)仍负责 scoped snapshot、consumer 接线和配置来源；本 issue 只处理环境变量使用及其交界，避免重复实现完整配置系统。
 - [Session ID / 机器环境任务](2026-09-30-session-id-environment-core-change.md)负责机器 ID 与会话环境分区；本 issue 只验证 `PERI_MACHINE_ID` 的读取及文档语义，不重开恢复契约。
-- 安全与进程环境边界遵循 [ARC-SECRET-001 与 ARC-PTC-ARTIFACT-001](../../docs/standards/architecture-contracts.md)，测试隔离遵循 [testing.md](../../docs/standards/testing.md)。
+- 安全与进程环境边界遵循 [ARC-SECRET-001](../../docs/standards/architecture-contracts.md)，测试隔离遵循 [testing.md](../../docs/standards/testing.md)。

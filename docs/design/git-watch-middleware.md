@@ -82,7 +82,7 @@
 | `WorkspaceMcpServer::call_tool` | 成功返回（`is_error != Some(true)`）后 `spawn` 采样；**不阻塞响应** |
 | 订阅 sink 表为空 | **直接返回**（无订阅者 ⇒ 零 git 调用） |
 
-**语义收窄（唯一且已知）**：非 workspace 工具（SubAgent / PTC / Workflow / 外部 MCP）改动 git 时，延迟到下一次 workspace 工具调用才被发现。若需闭合该延迟，须另立「仅订阅活跃时的 60s tick」并同步改本文非目标与 e2e「git 安静」前提（计划 §6 风险 2）。
+**语义收窄（唯一且已知）**：非 workspace 工具（SubAgent / Workflow / 外部 MCP）改动 git 时，延迟到下一次 workspace 工具调用才被发现。若需闭合该延迟，须另立「仅订阅活跃时的 60s tick」并同步改本文非目标与 e2e「git 安静」前提（计划 §6 风险 2）。
 
 **旧实现的 hook 漂移（已按代码事实更正）**：本文历史版本 §6 声称 `before_agent + after_tool` 两个 hook，实际实现只有 `after_tool`（`before_agent` 从未落地）；下放后二者都不存在，触发点唯一 = 服务端 `call_tool`。
 

@@ -16,9 +16,8 @@
 //! 2. [`WireFixtureHarness`]：真实 `.mcp.json` + 真实 `run_initialize` + 真实
 //!    `McpClientPool` + HOME 重定向；server 名是**异名** `wire_fixture`（A3 禁止占用
 //!    `web` / `artifact` 等保留实例名）。
-//! 3. [`WireScriptedModel`]：**复刻** `PtcScriptedModel`（`executor_flow_test.rs:2153`
-//!    的私有 struct，不得 `use`、也不得改动其宿主文件）的「能返回工具调用」的 model
-//!    替身；同时记录每次 `stream` 调用时模型**实际看到**的工具名。
+//! 3. [`WireScriptedModel`]：可按脚本返回工具调用的 model 替身，同时记录每次
+//!    `stream` 调用时模型**实际看到**的工具名。
 //!
 //! ## 迁移前基线（A12）
 //!
@@ -468,7 +467,7 @@ impl ScriptedToolCall {
     }
 }
 
-/// 「能返回工具调用」的 model 替身（复刻 `PtcScriptedModel` 的形态；见模块文档第 3 条）。
+/// 「能返回工具调用」的 model 替身（见模块文档第 3 条）。
 ///
 /// 行为：第 `i` 次 `stream` 返回 `script[i]` 的工具调用（`StopReason::ToolUse`）；
 /// 脚本耗尽后返回 [`WireScriptedModel::end_text`] + `StopReason::EndTurn`。

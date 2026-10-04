@@ -4024,12 +4024,8 @@ dependencies = [
 name = "peri-js-runtime"
 version = "0.2.0"
 dependencies = [
- "async-trait",
  "dashmap",
- "dirs-next",
- "fs2",
  "libc",
- "parking_lot",
  "peri-process",
  "serde",
  "serde_json",
@@ -4226,7 +4222,6 @@ dependencies = [
  "peri-acp-types",
  "peri-agent",
  "peri-config",
- "peri-js-runtime",
  "peri-mcp-artifact",
  "peri-mcp-common",
  "peri-mcp-config",

@@ -16,7 +16,6 @@ use peri_agent::{
 };
 
 use peri_acp_types::builtin_mcp::original_tool_name_of_effective;
-use peri_agent::tools::RUN_PTC_CODE_TOOL_NAME;
 
 use crate::tool_search::core_tools::{
     TOOL_AGENT, TOOL_BASH, TOOL_EDIT, TOOL_FOLDER_OPS, TOOL_WEBFETCH, TOOL_WEBSEARCH, TOOL_WRITE,
@@ -66,7 +65,6 @@ fn default_requires_approval_without_builtin(tool_name: &str) -> bool {
     tool_name == TOOL_BASH
         || tool_name == TOOL_FOLDER_OPS
         || tool_name == TOOL_AGENT
-        || tool_name == RUN_PTC_CODE_TOOL_NAME
         || tool_name == TOOL_WRITE
         || tool_name == TOOL_EDIT
         || tool_name.starts_with("delete_")
@@ -160,7 +158,7 @@ fn builtin_tool_effective_name(instance: &str, original_name: &str) -> &'static 
 /// 已不存在的工具）。只列需审批的 workspace 条目：`Read` / `Glob` / `Grep`
 /// 归一后走免审批分支（[`default_requires_approval`] 为假），进清单即与
 /// 「每条目必须判定为敏感」的一致性断言冲突。
-pub fn sensitive_tool_entries() -> [SensitiveToolEntry; 14] {
+pub fn sensitive_tool_entries() -> [SensitiveToolEntry; 13] {
     [
         SensitiveToolEntry {
             name: builtin_tool_effective_name("workspace", TOOL_BASH),
@@ -175,11 +173,6 @@ pub fn sensitive_tool_entries() -> [SensitiveToolEntry; 14] {
         SensitiveToolEntry {
             name: TOOL_AGENT,
             description: "sub-agent delegation (see 11_subagent for the authorization boundary)",
-            prefix_match: false,
-        },
-        SensitiveToolEntry {
-            name: RUN_PTC_CODE_TOOL_NAME,
-            description: "programmatic arbitrary JavaScript execution with direct Node.js API access",
             prefix_match: false,
         },
         SensitiveToolEntry {
