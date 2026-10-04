@@ -37,7 +37,7 @@ use super::session_codec as codec;
 use super::session_data::{invalid_input, not_found, RemoteSessionData};
 use super::sql::{int_at, StatementSpec};
 use crate::sessions::canonical;
-use crate::sessions::sqlite_store::role_of_message;
+use crate::sessions::canonical::role_of as role_of_message;
 
 // ─── 批内守卫 ─────────────────────────────────────────────────────────────────
 
@@ -523,7 +523,7 @@ fn title_statement(id: &ThreadId, payloads: &[PersistedPayload]) -> Option<State
         .cloned()
         .collect::<Vec<_>>();
     // 领域纯规则：直接调用本机 adapter 用的同一份 `extract_title`，不复制一份到远端。
-    let title = crate::sessions::sqlite_store::row_mapping::extract_title(&messages)?;
+    let title = crate::sessions::canonical::extract_title(&messages)?;
     Some(StatementSpec::new(
         SET_TITLE_IF_ABSENT_SQL,
         vec![Value::Text(title), Value::Text(id.as_str().to_owned())],

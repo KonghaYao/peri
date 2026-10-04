@@ -1,9 +1,37 @@
 use anyhow::{Context, Result};
-use std::{fs, path::Path, sync::OnceLock};
+use std::sync::OnceLock;
+#[cfg(not(target_os = "emscripten"))]
+use std::{fs, path::Path};
 use uuid::Uuid;
 
 static MACHINE_ID: OnceLock<String> = OnceLock::new();
 
+#[cfg(target_os = "emscripten")]
+pub(crate) fn set_explicit(value: &str) -> Result<()> {
+    let identity = Uuid::parse_str(value)
+        .context("WASM machine identity must be a UUID")?
+        .to_string();
+    if let Some(current) = MACHINE_ID.get() {
+        anyhow::ensure!(
+            current == &identity,
+            "WASM machine identity changed within one instance"
+        );
+    } else {
+        let _ = MACHINE_ID.set(identity.clone());
+        anyhow::ensure!(
+            MACHINE_ID.get() == Some(&identity),
+            "WASM machine identity changed within one instance"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "emscripten")]
+pub(crate) async fn initialize() -> Result<&'static str> {
+    current()
+}
+
+#[cfg(not(target_os = "emscripten"))]
 pub(crate) async fn initialize() -> Result<&'static str> {
     if let Some(identity) = MACHINE_ID.get() {
         return Ok(identity);
@@ -29,6 +57,7 @@ pub fn current() -> Result<&'static str> {
         .context("machine identity is not initialized")
 }
 
+#[cfg(not(target_os = "emscripten"))]
 fn read_identity(path: &Path) -> Result<String> {
     let identity = fs::read_to_string(path).context("cannot read machine identity")?;
     Ok(Uuid::parse_str(identity.trim())
@@ -36,6 +65,7 @@ fn read_identity(path: &Path) -> Result<String> {
         .to_string())
 }
 
+#[cfg(not(target_os = "emscripten"))]
 fn load_or_create(path: &Path) -> Result<String> {
     match fs::metadata(path) {
         Ok(_) => return read_identity(path),
@@ -71,6 +101,7 @@ fn load_or_create(path: &Path) -> Result<String> {
 /// Explicitly adopt a known Machine identity after the caller has reviewed the
 /// target catalog and stopped active executions. The current process keeps its
 /// cached identity; the new value takes effect only after restart.
+#[cfg(not(target_os = "emscripten"))]
 pub fn adopt_file_identity(expected: &str, target: &str) -> Result<()> {
     anyhow::ensure!(
         std::env::var_os("PERI_MACHINE_ID").is_none(),
@@ -87,6 +118,7 @@ pub fn adopt_file_identity(expected: &str, target: &str) -> Result<()> {
     adopt_identity_at(&path, &expected, &target)
 }
 
+#[cfg(not(target_os = "emscripten"))]
 fn adopt_identity_at(path: &Path, expected: &str, target: &str) -> Result<()> {
     let parent = path.parent().context("machine identity has no parent")?;
     let lock = fs::OpenOptions::new()

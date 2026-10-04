@@ -3794,6 +3794,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "dirs-next",
+ "js-sys",
  "peri-acp-types",
  "peri-process",
  "peri-time",
@@ -3809,6 +3810,8 @@ dependencies = [
  "turso_serverless",
  "url",
  "uuid",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
  "windows-sys 0.61.2",
 ]
 

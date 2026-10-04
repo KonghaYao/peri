@@ -19,6 +19,7 @@ use peri_acp_types::workspace::{
 use sha2::{Digest, Sha256};
 
 use crate::sessions::data::SessionDataPort;
+#[cfg(not(target_os = "emscripten"))]
 use crate::sessions::discovery::{self, Discovery};
 use crate::sessions::execution::{
     same_lease, ExclusiveExecutionGuard, ExecutionLease, ExecutionWriteGuard,
@@ -213,37 +214,45 @@ impl RemoteExecution {
                 discovery_snapshot: Some(snapshot.to_owned()),
             });
         }
-        let saved: Discovery =
-            serde_json::from_str(snapshot).map_err(|_| WorkspaceError::InvalidBinding)?;
-        let cwd = if binding.cwd_relative_to_workspace.as_os_str().is_empty() {
-            saved.root.clone()
-        } else {
-            saved.root.join(&binding.cwd_relative_to_workspace)
-        };
-        let (canonical_cwd, observed) = discovery::observe(&cwd).await?;
-        if canonical_cwd != cwd || observed.discovery != saved {
-            return Err(WorkspaceError::NeedsRelink.into());
-        }
-        let machine = crate::sessions::machine::current()?;
-        let path = saved.root.to_str().ok_or(WorkspaceError::InvalidBinding)?;
-        let recorded = self.data.workspace_for_path(machine, path).await?;
-        if recorded != Some(owner)
-            && (require_record
-                || recorded.is_some()
-                || Self::stable_id("workspace", machine, &saved.root)?.parse::<WorkspaceId>()?
-                    != owner)
+        #[cfg(not(target_os = "emscripten"))]
         {
-            return Err(WorkspaceError::ExecutionBindingMismatch.into());
+            let saved: Discovery =
+                serde_json::from_str(snapshot).map_err(|_| WorkspaceError::InvalidBinding)?;
+            let cwd = if binding.cwd_relative_to_workspace.as_os_str().is_empty() {
+                saved.root.clone()
+            } else {
+                saved.root.join(&binding.cwd_relative_to_workspace)
+            };
+            let (canonical_cwd, observed) = discovery::observe(&cwd).await?;
+            if canonical_cwd != cwd || observed.discovery != saved {
+                return Err(WorkspaceError::NeedsRelink.into());
+            }
+            let machine = crate::sessions::machine::current()?;
+            let path = saved.root.to_str().ok_or(WorkspaceError::InvalidBinding)?;
+            let recorded = self.data.workspace_for_path(machine, path).await?;
+            if recorded != Some(owner)
+                && (require_record
+                    || recorded.is_some()
+                    || Self::stable_id("workspace", machine, &saved.root)?
+                        .parse::<WorkspaceId>()?
+                        != owner)
+            {
+                return Err(WorkspaceError::ExecutionBindingMismatch.into());
+            }
+            Ok(ResolvedWorkspace {
+                project_id: binding.project_id,
+                workspace_id: owner,
+                execution_registration_id: binding.workspace_id,
+                cwd: canonical_cwd,
+                root: saved.root,
+                relative_cwd: binding.cwd_relative_to_workspace.clone(),
+                discovery_snapshot: Some(snapshot.to_owned()),
+            })
         }
-        Ok(ResolvedWorkspace {
-            project_id: binding.project_id,
-            workspace_id: owner,
-            execution_registration_id: binding.workspace_id,
-            cwd: canonical_cwd,
-            root: saved.root,
-            relative_cwd: binding.cwd_relative_to_workspace.clone(),
-            discovery_snapshot: Some(snapshot.to_owned()),
-        })
+        #[cfg(target_os = "emscripten")]
+        {
+            Err(WorkspaceError::Unavailable.into())
+        }
     }
 }
 
@@ -259,10 +268,19 @@ impl LocalExecutionPort for RemoteExecution {
 
     async fn directory_available(&self, cwd: &Path) -> bool {
         match &self.environment {
-            RemoteWorkspaceEnvironment::Native => tokio::fs::metadata(cwd)
-                .await
-                .map(|meta| meta.is_dir())
-                .unwrap_or(false),
+            RemoteWorkspaceEnvironment::Native => {
+                #[cfg(not(target_os = "emscripten"))]
+                {
+                    tokio::fs::metadata(cwd)
+                        .await
+                        .map(|meta| meta.is_dir())
+                        .unwrap_or(false)
+                }
+                #[cfg(target_os = "emscripten")]
+                {
+                    false
+                }
+            }
             RemoteWorkspaceEnvironment::Virtual { .. } => self.environment.contains(cwd),
         }
     }
@@ -304,39 +322,46 @@ impl LocalExecutionPort for RemoteExecution {
                 );
             return Ok(resolved);
         }
-        let (cwd, observation) = discovery::observe(cwd).await?;
-        let discovery = observation.discovery;
-        let machine = crate::sessions::machine::current()?;
-        let path = discovery
-            .root
-            .to_str()
-            .ok_or(WorkspaceError::InvalidBinding)?;
-        let workspace_id = match self.data.workspace_for_path(machine, path).await? {
-            Some(id) => id,
-            None => Self::stable_id("workspace", machine, &discovery.root)?.parse()?,
-        };
-        let project_id: ProjectId =
-            Self::stable_id("project", machine, discovery.project_locator())?.parse()?;
-        let snapshot = serde_json::to_string(&discovery)?;
-        discovery.reassert_key_objects(&cwd).await?;
-        let relative_cwd = cwd.strip_prefix(&discovery.root)?.to_path_buf();
-        let resolved = ResolvedWorkspace {
-            project_id,
-            workspace_id,
-            execution_registration_id: workspace_id,
-            cwd,
-            root: discovery.root,
-            relative_cwd,
-            discovery_snapshot: Some(snapshot),
-        };
-        self.observations
-            .lock()
-            .map_err(|_| WorkspaceError::Unavailable)?
-            .insert(
-                (workspace_id, resolved.relative_cwd.clone()),
-                resolved.clone(),
-            );
-        Ok(resolved)
+        #[cfg(not(target_os = "emscripten"))]
+        {
+            let (cwd, observation) = discovery::observe(cwd).await?;
+            let discovery = observation.discovery;
+            let machine = crate::sessions::machine::current()?;
+            let path = discovery
+                .root
+                .to_str()
+                .ok_or(WorkspaceError::InvalidBinding)?;
+            let workspace_id = match self.data.workspace_for_path(machine, path).await? {
+                Some(id) => id,
+                None => Self::stable_id("workspace", machine, &discovery.root)?.parse()?,
+            };
+            let project_id: ProjectId =
+                Self::stable_id("project", machine, discovery.project_locator())?.parse()?;
+            let snapshot = serde_json::to_string(&discovery)?;
+            discovery.reassert_key_objects(&cwd).await?;
+            let relative_cwd = cwd.strip_prefix(&discovery.root)?.to_path_buf();
+            let resolved = ResolvedWorkspace {
+                project_id,
+                workspace_id,
+                execution_registration_id: workspace_id,
+                cwd,
+                root: discovery.root,
+                relative_cwd,
+                discovery_snapshot: Some(snapshot),
+            };
+            self.observations
+                .lock()
+                .map_err(|_| WorkspaceError::Unavailable)?
+                .insert(
+                    (workspace_id, resolved.relative_cwd.clone()),
+                    resolved.clone(),
+                );
+            Ok(resolved)
+        }
+        #[cfg(target_os = "emscripten")]
+        {
+            Err(WorkspaceError::Unavailable.into())
+        }
     }
 
     async fn validate_binding_value(

@@ -18,7 +18,8 @@
 //! 远端零行 + 远端零 child 行）。
 
 use peri_acp_types::session_resources::{
-    ChildSnapshot, FrozenSnapshotBytes, NewSession, NewSessionMeta, SessionResourceErrorKind,
+    ChildSnapshot, FrozenSnapshotBytes, NewSession, NewSessionDraft, NewSessionMeta,
+    SessionResourceErrorKind,
 };
 use peri_acp_types::store::InheritedContext;
 
@@ -149,5 +150,29 @@ async fn test_remote_root_entry_rejects_a_parent_before_any_io() {
     assert!(
         matches!(error.kind(), SessionResourceErrorKind::Internal { .. }),
         "a root input must reach the store path, got {error:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_remote_draft_reaches_store_without_an_owner_token() {
+    let remote = ClosedRemote::open().await;
+    let root = root_session("draft-without-owner");
+    let draft = NewSessionDraft {
+        thread_id: root.thread_id,
+        created_at: root.created_at,
+        meta: root.meta,
+        binding: root.binding,
+    };
+
+    // A draft precedes owner acquisition. The closed connection proves that the
+    // request passed admission and reached the store path without a token.
+    let error = remote
+        .adapter
+        .save_new_session_draft(&draft)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error.kind(), SessionResourceErrorKind::Internal { .. }),
+        "draft creation should reach the store before owner acquisition, got {error:?}"
     );
 }

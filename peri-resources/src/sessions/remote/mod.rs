@@ -137,10 +137,11 @@ mod session_sql;
 mod session_write;
 mod sql;
 
-pub(crate) use composition::{open_remote, open_remote_in_environment};
+pub(crate) use composition::open_remote;
+pub(crate) use composition::open_remote_in_environment;
 #[cfg(test)]
 pub(crate) use connection::RemoteConnection;
-#[cfg(test)]
+#[cfg(any(test, target_os = "emscripten"))]
 pub(crate) use credentials::SessionStoreCredential;
 pub(crate) use credentials::{CredentialError, CredentialSource};
 pub(crate) use endpoint::{EndpointError, RemoteEndpoint, RemoteEngine};

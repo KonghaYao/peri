@@ -4,7 +4,7 @@
 //! Controller/Runtime 建成后消费方随 L2/L3/L5 跟进接入（属预期过渡态，
 //! 接口按目标态设计，避免二次返工）。
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -13,7 +13,10 @@ use peri_acp_types::session_resources::{
     SessionStoreShutdownPort,
 };
 use peri_acp_types::session_store::SessionStoreDeployment;
-use peri_acp_types::workspace::WorkspaceError;
+
+#[cfg(not(target_os = "emscripten"))]
+#[path = "context/sqlite.rs"]
+mod sqlite;
 
 use crate::sessions::{
     AccessIntent, CredentialError, LocatorError, ResolvedLocator, SessionStoreOpenRequest,
@@ -65,6 +68,7 @@ impl SessionStoreShutdownPort for SessionStoreShutdownOwner {
 impl Resources {
     /// Open a remote Session store with a deployment supplied virtual workspace
     /// identity. Local locators are rejected before any I/O.
+    #[cfg(not(target_os = "emscripten"))]
     pub async fn open_deployment_in_remote_environment(
         deployment: &SessionStoreDeployment,
         environment: crate::sessions::RemoteWorkspaceEnvironment,
@@ -90,8 +94,8 @@ impl Resources {
 
     /// 打开全部资源（当前为会话存储）。
     ///
-    /// 默认路径 `~/.peri/threads/threads.db` 写打开失败时会降级为只读打开，
-    /// 见 [`Resources::open_with`]。
+    /// 原生目标的默认路径 `~/.peri/threads/threads.db` 写打开失败时会降级为只读打开，
+    /// 见 [`Resources::open_with`]。Emscripten 不提供本机库。
     pub async fn open() -> Result<Self> {
         Self::open_request(SessionStoreOpenRequest::local(
             None,
@@ -126,9 +130,9 @@ impl Resources {
     /// （见 [`classify_open_failure`]）。访问意图不是权限：能不能写由打开结果回答；
     /// 只读意图绝不做写探测，也不退回写打开再降级。
     ///
-    /// 后端选择只发生在这里：本机 locator 走既有 SQLite 装配，远程 locator 走
-    /// `sessions::open_remote`（远端数据 adapter + 进程内执行端口），
-    /// 不打开本地 SQLite，也不静默回落到本机库。
+    /// 后端选择只发生在这里：原生本机 locator 走 SQLite 装配，远程 locator 走
+    /// Turso adapter。Emscripten 不提供本机库；其可写远端部署须显式提供稳定的
+    /// 虚拟工作区身份，见 `Resources::open_turso_writable`。
     ///
     /// 环境变量只在两处被读取：`--session-store env:` 形式的 locator，以及远程 adapter
     /// 打开时按凭证来源取凭证值。**仅仅存在某个云 URL/token 变量不会切换后端**，
@@ -137,20 +141,64 @@ impl Resources {
         Self::open_request(SessionStoreOpenRequest::from_deployment(deployment)?).await
     }
 
+    /// Open a writable Turso store for a WASM host with a virtual workspace.
+    /// The host must persist this machine UUID and root across module restarts so
+    /// that existing sessions can regain execution eligibility.
+    #[cfg(target_os = "emscripten")]
+    pub async fn open_turso_writable(
+        locator: &str,
+        token: String,
+        workspace_root: PathBuf,
+        machine_id: &str,
+    ) -> Result<Self> {
+        let environment = crate::sessions::RemoteWorkspaceEnvironment::virtual_workspace(
+            machine_id,
+            workspace_root,
+        )?;
+        crate::sessions::set_explicit_machine_id(machine_id)?;
+        let endpoint = crate::sessions::RemoteEndpoint::parse(
+            locator,
+            Some(crate::sessions::remote_engine_turso()),
+        )?;
+        let credential = crate::sessions::credential_from_value(token)?;
+        crate::sessions::open_remote_in_environment(
+            &endpoint,
+            &credential,
+            peri_acp_types::session_resources::AccessMode::ReadWrite,
+            environment,
+        )
+        .await
+        .map(Self::from_facade)
+    }
+
     /// 唯一的后端选择点（typed 请求版本，供 crate 内装配调用）。
     ///
-    /// 只读意图走独立只读 seam：不创建目录、库、锁或迁移 schema；写意图保留既有的
-    /// 「写打开失败且历史仍可读时降级只读」。
+    /// 原生本机只读意图走独立只读 seam：不创建目录、库、锁或迁移 schema；
+    /// 原生本机写打开失败且历史仍可读时降级只读。
     pub(crate) async fn open_request(request: SessionStoreOpenRequest) -> Result<Self> {
+        #[cfg(not(target_os = "emscripten"))]
         let read_only = request.intent().is_read_only();
         match request.resolve_locator()? {
+            #[cfg(not(target_os = "emscripten"))]
             ResolvedLocator::Default if read_only => Self::open_local_read_only(None).await,
+            #[cfg(not(target_os = "emscripten"))]
             ResolvedLocator::Default => Self::open_local(None).await,
+            #[cfg(not(target_os = "emscripten"))]
             ResolvedLocator::Local(path) if read_only => {
                 Self::open_local_read_only(Some(path)).await
             }
+            #[cfg(not(target_os = "emscripten"))]
             ResolvedLocator::Local(path) => Self::open_local(Some(path)).await,
-            // 不降级：远程 locator 拿不到本机库作为替代。
+            #[cfg(target_os = "emscripten")]
+            ResolvedLocator::Default | ResolvedLocator::Local(_) => {
+                Err(LocatorError::LocalStoreUnsupported.into())
+            }
+            #[cfg(target_os = "emscripten")]
+            ResolvedLocator::Remote(_)
+                if request.access() != peri_acp_types::session_resources::AccessMode::ReadOnly =>
+            {
+                Err(LocatorError::ExecutionUnsupported.into())
+            }
             ResolvedLocator::Remote(endpoint) => Self::open_remote(&request, &endpoint).await,
         }
     }
@@ -170,68 +218,6 @@ impl Resources {
             .await
             .map(Self::from_facade)
             .map_err(|error| error.context("无法打开远程会话存储"))
-    }
-
-    /// 本机 locator 的既有装配：写打开失败且历史仍可读时降级为只读打开。
-    async fn open_local(db_path: Option<PathBuf>) -> Result<Self> {
-        Self::open_with_default(
-            db_path,
-            crate::sessions::SessionResourcesImpl::default_database_path,
-        )
-        .await
-    }
-
-    /// 显式只读 locator：复用既有只读 seam，不开库、不建目录、不迁移 schema。
-    async fn open_local_read_only(db_path: Option<PathBuf>) -> Result<Self> {
-        let describe = match &db_path {
-            Some(path) => format!("指定 SQLite 数据库 {}", path.display()),
-            None => "默认 SQLite 数据库 ~/.peri/threads/threads.db".to_owned(),
-        };
-        // 只读 seam 的错误分类（库不存在/不可读/schema 不兼容/数据损坏）在这里仍是
-        // 类型化事实：路径只加在 context 上，`ReadOnlyThreadStoreError` 留在 source chain 里
-        // 可按 kind 判别；元数据命令的九字段 DTO 与退出码映射保留在消费侧（D-04）。
-        crate::sessions::open_session_resources_read_only(db_path)
-            .await
-            .map(Self::from_facade)
-            .map_err(|error| anyhow::Error::new(error).context(format!("无法只读打开{describe}")))
-    }
-
-    /// 打开资源：写打开失败且历史仍可读时降级为只读打开。
-    ///
-    /// 「写打开失败」不等于「历史不可读」：schema 锁被其他实例占住、库文件不可写时，
-    /// 只读打开仍能列出与读取历史。这种失败不再挡住进入——降级只记 warning，不向用户
-    /// 报错。降级不假装可写：只读 store 自身拒绝写入（执行所有权与 SQLite 只读连接
-    /// 双重把关），调用方据此得到真实失败而不是看似成功的写入。
-    ///
-    /// 只读打开也失败时返回写打开的原错误：那才是真的读不了，不能被降级掩盖。
-    async fn open_with_default(
-        db_path: Option<PathBuf>,
-        default_database_path: impl FnOnce() -> Result<PathBuf>,
-    ) -> Result<Self> {
-        let (path, describe) = match db_path {
-            Some(path) => {
-                let describe = format!("指定 SQLite 数据库 {}", path.display());
-                (path, describe)
-            }
-            None => (
-                default_database_path()?,
-                "默认 SQLite 数据库 ~/.peri/threads/threads.db".to_owned(),
-            ),
-        };
-        match crate::sessions::open_facade(path.clone()).await {
-            Ok(facade) => Ok(Self::new(facade)),
-            Err(error) => {
-                let message = format!("无法打开{describe}: {error}");
-                match Self::open_read_only(&path, &error).await {
-                    Some(resources) => Ok(resources),
-                    None => Err(anyhow::anyhow!(message)),
-                }
-            }
-        }
-    }
-
-    fn new(facade: crate::sessions::SessionResourcesImpl) -> Self {
-        Self::from_facade(Arc::new(facade))
     }
 
     /// 同一个具体实例的两个所有权面：业务句柄 + 部署关闭权。
@@ -270,37 +256,6 @@ impl Resources {
     pub(crate) fn into_concrete_for_test(self) -> Arc<crate::sessions::SessionResourcesImpl> {
         self.shutdown.facade
     }
-
-    /// 迁移期只读打开的降级：只读打开成功即返回只读资源，否则返回 `None` 让调用方上报
-    /// 写打开的原错误。
-    async fn open_read_only(path: &Path, error: &anyhow::Error) -> Option<Self> {
-        if !degradable_open_failure(error) {
-            return None;
-        }
-        let facade = crate::sessions::open_facade_read_only(path).await.ok()?;
-        tracing::warn!(
-            path = %path.display(),
-            error = %error,
-            "session store opened read-only: writable open failed"
-        );
-        Some(Self::new(facade))
-    }
-}
-
-/// 写打开失败是否允许降级为只读打开。
-///
-/// 这个过滤只在写打开走到版本判定（`schema::inspect`）时生效：不认识的 schema 不是
-/// 可恢复的占用，按类型化错误保持原样失败。写打开在版本判定之前就失败时（schema 锁
-/// 被占、库文件或 WAL 侧车文件不可写），只读打开仅按读取兼容的列形状把关
-/// （`probe_load_meta_shape`），不再复查 `user_version`——由更新构建写入、列形状兼容
-/// 的库因此可能被只读读取；该读取不迁移也不写入，写入仍按 `ReadOnlyStore` 拒绝。
-/// 其余失败都只影响写入，历史仍可读。
-fn degradable_open_failure(error: &anyhow::Error) -> bool {
-    !matches!(
-        error.downcast_ref::<WorkspaceError>(),
-        Some(WorkspaceError::UnsupportedSchemaVersion { .. })
-            | Some(WorkspaceError::UnsupportedDatabaseSchema)
-    )
 }
 
 /// 打开会话存储失败的稳定分类。
@@ -351,6 +306,7 @@ pub fn classify_open_failure(error: &anyhow::Error) -> StoreOpenFailure {
                 _ => {}
             }
         }
+        #[cfg(not(target_os = "emscripten"))]
         if let Some(read_only) = current.downcast_ref::<crate::sessions::ReadOnlyThreadStoreError>()
         {
             return match read_only {

@@ -409,7 +409,10 @@ impl RemoteSessionData {
         if token.is_none()
             && !matches!(
                 behavior,
-                "create_session" | "revoke_unpublished_session" | "revoke_unpublished_draft"
+                "create_session"
+                    | "begin_initialization"
+                    | "revoke_unpublished_session"
+                    | "revoke_unpublished_draft"
             )
         {
             return Err(SessionResourceError::conflict(

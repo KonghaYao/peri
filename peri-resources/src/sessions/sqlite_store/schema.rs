@@ -9,9 +9,8 @@ use peri_acp_types::workspace::WorkspaceError;
 use sqlx::{AssertSqlSafe, Connection, SqliteConnection};
 use std::collections::HashSet;
 
-/// 本构建写入并接受的 schema 版本；2..10 经升级路径收敛到此值，0 视为待建库。
-/// 版本接受判定、迁移收尾写入与拒绝时的「本构建上限」都由它派生，避免三处各写一份。
-pub(in crate::sessions) const CURRENT_SCHEMA_VERSION: i64 = 13;
+/// 本机与远端使用同一会话 schema 版本。
+pub(in crate::sessions) use crate::sessions::canonical::CURRENT_SCHEMA_VERSION;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum SchemaState {

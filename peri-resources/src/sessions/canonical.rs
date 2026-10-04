@@ -21,7 +21,10 @@
 //! 真引擎上 `rowid` 可投影、按插入序、跨连接稳定（探测项 3a/3b/3c），因此统一到本机
 //! 形状后该列与它的索引一并删除，两种执行器的语句文本才可能逐字一致。
 //!
-use peri_acp_types::store::PersistedPayload;
+use peri_acp_types::{messages::BaseMessage, store::PersistedPayload};
+
+/// 两种会话数据 adapter 的同一 schema 版本。
+pub(super) const CURRENT_SCHEMA_VERSION: i64 = 13;
 
 /// 会话事实表。
 pub(super) const THREADS_TABLE: &str = "threads";
@@ -290,7 +293,44 @@ pub(super) const DELETE_THREAD_ROW_SQL: &str = "DELETE FROM threads WHERE id = ?
 /// 规则本身属于领域（`BaseMessage` → 角色名），放在这里只为了不让两个 adapter 各写一份。
 pub(super) fn payload_role(payload: &PersistedPayload) -> &'static str {
     match payload {
-        PersistedPayload::Message(message) => super::sqlite_store::role_of_message(message),
+        PersistedPayload::Message(message) => role_of(message),
         PersistedPayload::SystemReminder { .. } => "system_reminder",
     }
+}
+
+pub(in crate::sessions) fn role_of(msg: &BaseMessage) -> &'static str {
+    match msg {
+        BaseMessage::Human { .. } => "user",
+        BaseMessage::Ai { .. } => "assistant",
+        BaseMessage::System { .. } => "system",
+        BaseMessage::Tool { .. } => "tool",
+    }
+}
+
+pub(crate) fn extract_title(msgs: &[BaseMessage]) -> Option<String> {
+    use peri_acp_types::messages::{ContentBlock, MessageContent};
+    for msg in msgs {
+        if let BaseMessage::Human { content, .. } = msg {
+            let text = match content {
+                MessageContent::Text(t) => t.clone(),
+                MessageContent::Blocks(blocks) => blocks
+                    .iter()
+                    .filter_map(|b| {
+                        if let ContentBlock::Text { text } = b {
+                            Some(text.as_str())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                MessageContent::Raw(_) => continue,
+            };
+            let title: String = text.chars().take(50).collect();
+            if !title.is_empty() {
+                return Some(title);
+            }
+        }
+    }
+    None
 }

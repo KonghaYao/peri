@@ -17,14 +17,14 @@
 ### ARC-TURSO-STORAGE-001
 
 - **Scope**：`peri-resources` 远端 locator、Session 执行准入、MCP OAuth。
-- **Rule**：选择 Turso locator 后持久化全量使用远端 SQLite：Machine、Workspace、Session、消息、绑定、不可变发现快照和 Workspace 级 OAuth 均只读写 Turso；不得打开、创建、升级或查询本地 SQLite，包括默认 `threads.db`。本机可读取机器 ID 文件和工作目录、运行 Git 发现，并在进程内持有 lease 与未决写入状态。Workspace ID 由远端 `(machine_id, canonical root path)` 归属查询确定；新键并发创建使用稳定 UUID 收敛，创建 Session 的托管批确认归属和快照。重启后从远端绑定和快照复核机器、目录对象与 Git；缺快照、异机或对象变化只读历史，不凭同名目录或旧本地登记补造执行资格。`session_bindings.workspace_id` 可保留不同于 `threads.workspace_id` 的旧执行登记 UUID。
-- **Verify**：检查 `context.rs::open_remote`、`remote/composition.rs` 没有本地 SQLite 打开，`remote/execution.rs` 只持进程内 lease，`resources/evidence.rs` 从远端快照准入；运行 `peri-resources` 远端模拟传输冷恢复测试和本地迁移测试。真实 Turso 网络回环在配置凭证后单独验收。
+- **Rule**：选择 Turso locator 后持久化全量使用远端 SQLite：Machine、Workspace、Session、消息、绑定、不可变发现快照和 Workspace 级 OAuth 均只读写 Turso；不得打开、创建、升级或查询本地 SQLite，包括默认 `threads.db`。Native 执行环境可读取机器 ID 文件和工作目录、运行 Git 发现；Virtual 执行环境由部署提供机器 ID/root，不要求本机目录或 Git。两者均在进程内持有 lease 与未决写入状态。Workspace ID 由远端 `(machine_id, canonical root path)` 归属查询确定；新键并发创建使用稳定 UUID 收敛，创建 Session 的托管批确认归属和快照。重启后按部署执行环境复核远端绑定和快照；Native 复核目录对象与 Git，Virtual 复核其虚拟身份和快照。缺快照、异机或环境事实变化只读历史，不凭同名目录或旧本地登记补造执行资格。`session_bindings.workspace_id` 可保留不同于 `threads.workspace_id` 的旧执行登记 UUID。
+- **Verify**：检查 `context.rs` 的 locator 分派、仅 Native 编译的 `context/sqlite.rs`、`remote/composition.rs` 的 Turso 装配均无远端路径的本地 SQLite 打开；`remote/execution.rs` 只持进程内 lease，`resources/evidence.rs` 从远端快照准入。运行 `peri-resources` 远端模拟传输冷恢复测试和本地迁移测试；WASM 目标编译及依赖图须排除 SQLx。真实 Turso 网络回环在配置凭证后单独验收。
 
 ### ARC-REMOTE-ENV-001
 
 - **Scope**：远端会话存储的部署执行环境。
 - **Rule**：远端数据登记、创建写入、工作区发现快照和会话执行准入必须消费同一部署环境身份。默认 Native 环境沿用持久机器 ID 与真实目录发现；虚拟环境由部署输入稳定 UUID 和规范化绝对 root，使用版本化虚拟快照，不要求本地目录存在。两种快照互斥，不因相同机器 ID/root 自动接管对方会话；身份/root 不匹配或快照缺失时保留历史读取并拒绝执行。运行 lease 仅属当前实例，仍受 Store CAS 与外部工具 fencing 约束。部署关闭权仍只由资源工厂交付。
-- **Verify**：`cargo test -p peri-resources --lib -- sessions::remote::schema_upgrade_tests::full_remote_tests::virtual_remote_cold_recovery_and_read_only_fallbacks`、`cargo test -p peri-resources --lib -- sessions::remote::`、`cargo test -p peri-resources --lib -- sessions::sqlite_store::session_id_environment_tests`；检查 `Resources::open_deployment_in_remote_environment`、`RemoteWorkspaceEnvironment`、`remote/{composition,session_data,session_write,execution}.rs` 与 `resources/evidence.rs` 的机器身份来源一致。真实 Turso 和托管 WASM 仍需单独运行时验收。
+- **Verify**：`./scripts/cargo-rmcp-patched.sh test --locked -p peri-resources --lib -- sessions::remote::schema_upgrade_tests::full_remote_tests::virtual_remote_cold_recovery_and_read_only_fallbacks`、`./scripts/cargo-rmcp-patched.sh test --locked -p peri-resources --lib -- sessions::remote::`、`./scripts/cargo-rmcp-patched.sh test --locked -p peri-resources --lib -- sessions::sqlite_store::session_id_environment_tests`；检查 `Resources::open_deployment_in_remote_environment`、`RemoteWorkspaceEnvironment`、`remote/{composition,session_data,session_write,execution}.rs` 与 `resources/evidence.rs` 的机器身份来源一致。WASM 目标构建和依赖图须验证 Turso-only 编译闭包；真实 Turso 和托管 WASM 仍需单独运行时验收。
 
 ### ARC-CANCEL-001
 

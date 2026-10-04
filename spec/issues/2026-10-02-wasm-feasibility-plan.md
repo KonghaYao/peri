@@ -6,12 +6,14 @@
 
 - `@peri-code/sdk` 保留 `Sandbox`、`ManagedAgents`、`Agent`、`Session` 的公共接口。`Sandbox.transportFactory` 在原生 stdio transport 与 `WasmAcpTransport` 之间替换底层，前端继续复用 `examples/demo/demo.html`。
 - `peri-wasm::PeriWasmAcp` 只承载原始 JSON-RPC 帧。现有 `peri-acp` Host 处理 ACP 方法、事件、会话、取消和 MCP 反向请求；Rust 和 TypeScript 均不复制 ACP dispatcher。
-- `peri-resources` 以同一 `SessionResources` 契约接入可写 Turso adapter。合并存储 v2 后，Machine、Workspace、Session 归属及执行快照保存在 Turso schema 12；WASM 虚拟工作区只承载宿主观测和进程内 lease。固定 machine UUID 使跨 Host 重启的会话定位保持一致。
+- `peri-resources` 以同一 `SessionResources` 契约接入可写 Turso adapter。Machine、Workspace、Session 归属及执行快照保存在 Turso schema 13；WASM 虚拟工作区只承载宿主观测和进程内 lease。固定 machine UUID 使跨 Host 重启的会话定位保持一致。Native 同时编译 SQLite/Turso 并按 locator 装配；WASM 仅编译 Turso，SQLite/SQLx 不进入目标依赖图。
 - Emscripten 目标编译闭包排除 SQLx、`peri-process`、stdio transport、本地 LSP 和全部 builtin MCP。远程 HTTP MCP client 与 ACP 承载的 MCP server 保留。文件工具需由外部 MCP 提供。
 - Workers 模块 URL 从 Emscripten 源码补丁接入 `Module.mainScriptUrlOrBlob`；禁用动态执行，Emscripten 日期使用 UTC。构建产物不做文本改写。
 - 模型、远程 MCP 与 Turso 复用 reqwest native/Hyper HTTP。Cloudflare Mio/Tokio 分支提供 hosted Tokio I/O；Emscripten 6.0.10 的 epoll/异步 DNS 补丁、Hyper 异步 DNS 补丁和 Bun socket 补丁由仓库脚本固定。
 
-## 当前可复现证据
+## 已有运行证据与本次重构复验
+
+下表记录 WASM 分支已有的运行结果；SQLite/Turso 装配边界重构后须重跑目标编译、依赖图及原生 Resources 回归，不能把旧结果视为本次变更已验收。
 
 | 验收面 | 命令或脚本 | 结果 |
 | --- | --- | --- |

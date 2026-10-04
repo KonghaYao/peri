@@ -58,10 +58,18 @@ pub(in crate::sessions) trait LocalExecutionPort: Send + Sync {
 
     /// 保存的 cwd 在当前执行环境中是否仍可作为目录使用。
     async fn directory_available(&self, cwd: &Path) -> bool {
-        tokio::fs::metadata(cwd)
-            .await
-            .map(|metadata| metadata.is_dir())
-            .unwrap_or(false)
+        #[cfg(target_os = "emscripten")]
+        {
+            let _ = cwd;
+            false
+        }
+        #[cfg(not(target_os = "emscripten"))]
+        {
+            tokio::fs::metadata(cwd)
+                .await
+                .map(|metadata| metadata.is_dir())
+                .unwrap_or(false)
+        }
     }
 
     // ── 发现与登记 ──
@@ -216,7 +224,7 @@ pub(in crate::sessions) trait LocalExecutionPort: Send + Sync {
     async fn dispose_execution(&self, id: &ThreadId) -> SessionResourceResult<()>;
 
     /// 测试用：本机 SQLite 连接池。
-    #[cfg(test)]
+    #[cfg(all(test, not(target_os = "emscripten")))]
     fn sqlite_pool(&self) -> Option<&sqlx::SqlitePool> {
         None
     }

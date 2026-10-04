@@ -1,11 +1,10 @@
 //! Thread 列投影、强类型元数据解码和消息展示字段。
 
+pub(crate) use crate::sessions::canonical::extract_title;
+pub(in crate::sessions) use crate::sessions::canonical::role_of;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use peri_acp_types::{
-    messages::BaseMessage,
-    thread::{AgentStatus, CancelPolicy, ThreadMeta},
-};
+use peri_acp_types::thread::{AgentStatus, CancelPolicy, ThreadMeta};
 use std::str::FromStr;
 
 pub(super) const THREAD_META_COLUMNS: &str = "t.id, t.title, t.cwd, t.created_at, t.updated_at, t.message_count,
@@ -30,15 +29,6 @@ pub(super) type ThreadRow = (
 );
 
 // ── 辅助函数 ──────────────────────────────────────────────────────────────────
-
-pub(in crate::sessions) fn role_of(msg: &BaseMessage) -> &'static str {
-    match msg {
-        BaseMessage::Human { .. } => "user",
-        BaseMessage::Ai { .. } => "assistant",
-        BaseMessage::System { .. } => "system",
-        BaseMessage::Tool { .. } => "tool",
-    }
-}
 
 // meta_from_row 从行列提取 8+ 字段；拆分参数列表不具可读性优势，此处抑制 `too_many_arguments`
 #[allow(clippy::too_many_arguments)]
@@ -79,35 +69,4 @@ pub(super) fn meta_from_row(
         config,
         agent_status,
     })
-}
-
-/// 从消息列表中提取标题（取第一条 Human 消息的前 50 字符）。
-///
-/// 这是**领域纯规则**：两个 adapter 共用同一份实现，不在远端复制一遍。
-pub(crate) fn extract_title(msgs: &[BaseMessage]) -> Option<String> {
-    use peri_acp_types::messages::{ContentBlock, MessageContent};
-    for msg in msgs {
-        if let BaseMessage::Human { content, .. } = msg {
-            let text = match content {
-                MessageContent::Text(t) => t.clone(),
-                MessageContent::Blocks(blocks) => blocks
-                    .iter()
-                    .filter_map(|b| {
-                        if let ContentBlock::Text { text } = b {
-                            Some(text.as_str())
-                        } else {
-                            None
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" "),
-                MessageContent::Raw(_) => continue,
-            };
-            let title: String = text.chars().take(50).collect();
-            if !title.is_empty() {
-                return Some(title);
-            }
-        }
-    }
-    None
 }

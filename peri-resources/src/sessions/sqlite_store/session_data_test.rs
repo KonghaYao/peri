@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::sessions::data::SessionDataPort;
+use crate::sessions::sqlite_store::failure::not_found;
 use peri_acp_types::messages::BaseMessage;
 use peri_acp_types::session_resources::{
     BindingState, ChildSnapshot, ForkSnapshot, FrozenSnapshotBytes, FrozenState, NewSession,

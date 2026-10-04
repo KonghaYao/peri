@@ -271,6 +271,25 @@ async fn virtual_remote_cold_recovery_and_read_only_fallbacks() {
         );
     }
 
+    // The former WASM adapter persisted an unversioned {root} snapshot. It
+    // remains readable, but cannot acquire execution under the shared format.
+    sqlx::query("UPDATE session_bindings SET discovery_snapshot = ?1 WHERE thread_id = ?2")
+        .bind(serde_json::json!({ "root": root }).to_string())
+        .bind(&session_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let legacy = virtual_remote_facade(transport.clone(), environment.clone());
+    assert!(legacy.load_session_history(&session_id).await.is_ok());
+    assert_eq!(
+        legacy
+            .inspect_availability(Some(&session_id))
+            .await
+            .unwrap()
+            .execution,
+        Some(ExecutionAvailability::WorkspaceUnavailable)
+    );
+
     sqlx::query("UPDATE session_bindings SET discovery_snapshot = NULL WHERE thread_id = ?1")
         .bind(&session_id)
         .execute(&pool)

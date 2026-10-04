@@ -1,7 +1,7 @@
 //! 会话资源门面实现：把本机执行面与数据面组合成消费侧唯一入口。
 //!
-//! 职责分工（B §2）：门面持有**两类事实**——数据面（`SessionDataPort` 的 SQLite 实现）
-//! 与本机执行面（[`LocalExecution`]：发现、登记、owner、准入）；业务侧只看到本
+//! 职责分工（B §2）：门面持有**两类事实**——数据面（`SessionDataPort`）
+//! 与执行面（`LocalExecutionPort`：发现、登记、owner、准入）；业务侧只看到本
 //! 门面。数据端口是 `crate::sessions` 内的可见类型，其他 crate 与资源层其他模块都拿
 //! 不到裸写句柄，本门面也不导出任何无 guard 的写入路径。
 //!
@@ -27,7 +27,9 @@ mod lifecycle;
 mod oauth_credentials;
 mod owner;
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(not(target_os = "emscripten"))]
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -49,11 +51,15 @@ use peri_acp_types::workspace::{
 };
 
 use super::data::{ensure_child_relation, ChildResumeRecord, SessionDataPort};
+use super::execution::same_lease;
+#[cfg(target_os = "emscripten")]
+use super::failure::execution_failure;
+use super::failure::{invalid_input, lease_required, not_found};
 use super::local_port::{LocalExecutionPort, RevokeEffect, SessionFacts};
-use super::sqlite_store::{
-    execution_failure, invalid_input, lease_required, not_found, same_lease, LocalExecution,
-    ReadOnlyThreadStoreError,
-};
+#[cfg(not(target_os = "emscripten"))]
+use super::sqlite_store::execution_failure;
+#[cfg(not(target_os = "emscripten"))]
+use super::sqlite_store::{LocalExecution, ReadOnlyThreadStoreError};
 
 use claim::ChildResumeClaimHandle;
 use gate::{MutationGate, WriteScope};
@@ -174,11 +180,13 @@ pub struct SessionResourcesImpl {
 
 impl SessionResourcesImpl {
     /// 打开或创建会话库，原地升级已知旧 schema 并保留历史数据。
+    #[cfg(not(target_os = "emscripten"))]
     pub async fn open(db_path: impl Into<PathBuf>) -> anyhow::Result<Self> {
         Ok(Self::from_local(LocalExecution::open(db_path).await?))
     }
 
     /// 以只读方式打开已存在的会话库；不创建目录、库、schema 或锁文件。
+    #[cfg(not(target_os = "emscripten"))]
     pub async fn open_existing_read_only(
         db_path: impl AsRef<Path>,
     ) -> Result<Self, ReadOnlyThreadStoreError> {
@@ -188,6 +196,7 @@ impl SessionResourcesImpl {
     }
 
     /// 默认数据库位置 `~/.peri/threads/threads.db`；不创建目录、数据库或连接。
+    #[cfg(not(target_os = "emscripten"))]
     pub fn default_database_path() -> anyhow::Result<PathBuf> {
         LocalExecution::default_database_path()
     }
@@ -196,6 +205,7 @@ impl SessionResourcesImpl {
     ///
     /// 本机组合：数据面与执行面由同一个库句柄回答（同一条连接真相），两个端口因此只是
     /// 同一实现的两张面孔。
+    #[cfg(not(target_os = "emscripten"))]
     pub(in crate::sessions) fn from_local(local: LocalExecution) -> Self {
         let data = Arc::new(local.data_port());
         Self::from_ports(data, Arc::new(local), SessionDataHome::LocalLibrary)
@@ -235,9 +245,7 @@ impl SessionResourcesImpl {
         if let Some(machine_id) = self.gate.data().machine_id_of(id).await? {
             if machine_id
                 != local.machine_id().map_err(|_| {
-                    crate::sessions::sqlite_store::unavailable(
-                        "machine identity is not initialized",
-                    )
+                    crate::sessions::failure::unavailable("machine identity is not initialized")
                 })?
             {
                 return Ok(ExecutionAvailability::WorkspaceUnavailable);
@@ -318,7 +326,7 @@ impl SessionResourcesImpl {
     }
 
     /// 测试用：本机组合背后的 SQLite 连接池（逐条构造事实的夹具使用）。
-    #[cfg(test)]
+    #[cfg(all(test, not(target_os = "emscripten")))]
     pub(super) fn local_pool(&self) -> &sqlx::SqlitePool {
         self.gate
             .local()
