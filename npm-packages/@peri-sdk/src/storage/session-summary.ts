@@ -14,6 +14,12 @@ export const SESSION_LIST_SQL = `
   ORDER BY updated_at DESC, id DESC
 `;
 
+export const SESSION_BY_ID_SQL = `
+  SELECT id, title, cwd, message_count, created_at, updated_at
+  FROM threads
+  WHERE id = ?
+`;
+
 export type SessionRow = {
   id: string;
   title: string | null;

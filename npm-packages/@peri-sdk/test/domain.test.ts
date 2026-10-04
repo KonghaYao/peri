@@ -5,6 +5,16 @@ import type { AtomicManagedAgentKv } from "../src/kv/types";
 import { ManagedAgents } from "../src/managed/managed-agents";
 import { Sandbox } from "../src/sandbox/sandbox";
 import type { JsonRpcNotification, Transport } from "../src/transport/types";
+import type { SessionStorage } from "../src/storage/types";
+
+const storedSession = (cwd: string, id = "existing") => ({
+  id, title: null, cwd, messageCount: 0, createdAt: "now", updatedAt: "now",
+});
+const storage = (cwd: string): SessionStorage => ({
+  deployment: () => ({ args: [], env: {} }),
+  getSessions: async () => [storedSession(cwd)],
+  getSession: async (id) => storedSession(cwd, id),
+});
 
 class MemoryClaims implements AtomicManagedAgentKv {
   readonly owners = new Map<string, string>();
@@ -38,19 +48,19 @@ test("Agent lists Sessions from Sandbox storage without starting ACP", async () 
   let queriedCwd = "";
   const sandbox = new Sandbox({
     id: "workspace-1",
-    path: "/tmp/workspace",
     storage: {
       deployment: () => ({ args: [], env: {} }),
       getSessions: async (cwd) => {
         queriedCwd = cwd;
         return [{ id: "session-1", title: null, cwd, messageCount: 0, createdAt: "now", updatedAt: "now" }];
       },
+      getSession: async () => null,
     },
     transportFactory: () => { transportStarted = true; throw new Error("ACP must not start"); },
   });
-  const agent = new ManagedAgents({ kv: new MemoryKV() }).createAgent({ id: "agent-1", sandbox });
+  const agent = new ManagedAgents({ kv: new MemoryKV() }).createAgent({ path: "/tmp/workspace", id: "agent-1", sandbox });
   expect((await agent.getSessions()).map((entry) => entry.id)).toEqual(["session-1"]);
-  expect(queriedCwd).toBe(sandbox.path);
+  expect(queriedCwd).toBe(agent.path);
   expect(transportStarted).toBe(false);
 });
 
@@ -95,10 +105,11 @@ class FakeTransport implements Transport {
 function declaration(manager: ManagedAgents, id = "agent-1", transport = new FakeTransport()) {
   let created = 0;
   const agent = manager.createAgent({
+    path: "/tmp/workspace",
     id,
     sandbox: new Sandbox({
       id: "workspace-1",
-      path: "/tmp/workspace",
+      storage: storage("/tmp/workspace"),
       transportFactory: () => { created++; return transport; },
     }),
     instructions: "Be helpful",
@@ -143,10 +154,10 @@ describe("ManagedAgents lifecycle", () => {
     const first = declaration(new ManagedAgents({ kv }));
     const secondTransport = new FakeTransport();
     const second = new ManagedAgents({ kv }).createAgent({
+    path: "/tmp/workspace",
       id: "agent-1",
       sandbox: new Sandbox({
         id: "workspace-2",
-        path: "/tmp/workspace",
         transportFactory: () => secondTransport,
       }),
     });
@@ -316,11 +327,12 @@ describe("ManagedAgents lifecycle", () => {
     const transport = new FakeTransport();
     const sandbox = new Sandbox({
       id: "workspace-1",
-      path: "/tmp/workspace",
+      storage: storage("/tmp/workspace"),
       workspace: { url: "https://workspace.test/mcp", headers: { Authorization: "Bearer fixture" } },
       transportFactory: () => transport,
     });
     const agent = new ManagedAgents({ kv }).createAgent({
+    path: "/tmp/workspace",
       id: "agent-1",
       sandbox,
       instructions: "test instructions",
@@ -341,7 +353,42 @@ describe("ManagedAgents lifecycle", () => {
     const session = await agent.session.start("existing");
     expect(session.id).toBe("existing");
     const load = transport.calls.find((call) => call.method === "session/load")?.params as any;
-    expect(load).toEqual({ cwd: agent.options.sandbox.path, mcpServers: [], sessionId: "existing" });
+    expect(load).toEqual({ cwd: agent.path, mcpServers: [], sessionId: "existing" });
+  });
+
+  test("loading uses the stored path without an Agent path", async () => {
+    const transport = new FakeTransport();
+    const sandbox = new Sandbox({
+      id: "workspace-1",
+      storage: storage("/persisted/workspace"),
+      transportFactory: () => transport,
+    });
+    const agent = new ManagedAgents({ kv: new MemoryClaims() }).createAgent({ id: "loaded", sandbox });
+    await agent.session.start("existing");
+    expect(transport.calls.find((call) => call.method === "session/load")?.params)
+      .toEqual({ cwd: "/persisted/workspace", mcpServers: [], sessionId: "existing" });
+    expect(agent.session.path).toBe("/persisted/workspace");
+    expect((await agent.getSessions())[0]?.cwd).toBe("/persisted/workspace");
+  });
+
+  test("creating a Session requires an Agent path before starting ACP", async () => {
+    let started = false;
+    const sandbox = new Sandbox({ id: "workspace-1", transportFactory: () => { started = true; return new FakeTransport(); } });
+    const agent = new ManagedAgents({ kv: new MemoryClaims() }).createAgent({ id: "new", sandbox });
+    await expect(agent.session.start(null)).rejects.toThrow("Agent path is required");
+    expect(started).toBe(false);
+  });
+
+  test("unknown Session ID fails before starting ACP", async () => {
+    let started = false;
+    const sandbox = new Sandbox({
+      id: "workspace-1",
+      storage: { ...storage("/tmp/workspace"), getSession: async () => null },
+      transportFactory: () => { started = true; return new FakeTransport(); },
+    });
+    const agent = new ManagedAgents({ kv: new MemoryClaims() }).createAgent({ id: "missing", sandbox });
+    await expect(agent.session.start("unknown")).rejects.toThrow("Session not found: unknown");
+    expect(started).toBe(false);
   });
 });
 

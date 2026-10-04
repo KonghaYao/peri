@@ -171,11 +171,10 @@ test("omitting settings lets Peri load its global model configuration", async ()
   );
   const sandbox = new Sandbox({
     id: "global-settings",
-    path: f.workspace,
     storage: new SqliteFileStorage({ path: f.database }),
     stdio: { command: periBinary, env: { HOME: f.home } },
   });
-  const transport = await sandbox.createTransport();
+  const transport = await sandbox.createTransport(f.workspace);
   try {
     const result = await initialize(transport);
     expect(result.protocolVersion).toBe(1);
@@ -245,7 +244,6 @@ test("ManagedAgents starts one real Peri session and rejects a second owner", as
   const f = await fixture();
   const sandbox = new Sandbox({
     id: "sandbox-workspace-identity",
-    path: f.workspace,
     storage: new SqliteFileStorage({ path: f.database }),
     stdio: { command: periBinary, env: { HOME: f.home }, settings: f.settings },
   });
@@ -253,19 +251,20 @@ test("ManagedAgents starts one real Peri session and rejects a second owner", as
   const firstManager = new ManagedAgents({ kv });
   const secondManager = new ManagedAgents({ kv });
   const first = firstManager.createAgent({
+    path: f.workspace,
     id: "one-agent",
     sandbox,
   });
   let secondTransportStarted = false;
   const secondSandbox = new Sandbox({
     id: sandbox.id,
-    path: f.workspace,
-    transportFactory: () => {
+    transportFactory: (path) => {
       secondTransportStarted = true;
-      return sandbox.createTransport();
+      return sandbox.createTransport(path);
     },
   });
   const second = secondManager.createAgent({
+    path: f.workspace,
     id: "one-agent",
     sandbox: secondSandbox,
   });
@@ -299,12 +298,12 @@ test("one Session delivers multiple inputs through real Peri without a turn wait
   const f = await fixture();
   const sandbox = new Sandbox({
     id: "workspace-continuous",
-    path: f.workspace,
     storage: new SqliteFileStorage({ path: f.database }),
     stdio: { command: periBinary, env: { HOME: f.home }, settings: f.settings },
   });
   const manager = new ManagedAgents({ kv: new MemoryKV() });
   const agent = manager.createAgent({
+    path: f.workspace,
     id: "continuous-agent",
     sandbox,
   });
@@ -327,26 +326,25 @@ test("ManagedAgents directly creates Agents and loads a historical Session", asy
   const f = await fixture();
   const sandbox = new Sandbox({
     id: "demo-history",
-    path: f.workspace,
     storage: new SqliteFileStorage({ path: f.database }),
     stdio: { command: periBinary, env: { HOME: f.home }, settings: f.settings },
   });
   const kv = new MemoryKV();
   const firstManager = new ManagedAgents({ kv });
-  const firstAgent = firstManager.createAgent({ id: "first-agent", sandbox });
+  const firstAgent = firstManager.createAgent({ path: f.workspace, id: "first-agent", sandbox });
   const created = await firstAgent.session.start(null);
   const sessionId = created.id;
   const delivery = created.send("Hello through the Agent");
   await delivery;
   expect(delivery.isSent).toBe(true);
   expect(delivery.inputId).toBeTruthy();
-  const anotherAgent = firstManager.createAgent({ id: "another-agent", sandbox });
+  const anotherAgent = firstManager.createAgent({ path: f.workspace, id: "another-agent", sandbox });
   const another = await anotherAgent.session.start(null);
   expect(another.id).not.toBe(sessionId);
-  expect((await sandbox.getSessions()).some((entry) => entry.id === sessionId)).toBe(true);
+  expect((await sandbox.getSessions(f.workspace)).some((entry) => entry.id === sessionId)).toBe(true);
   const conflictingManager = new ManagedAgents({ kv });
   try {
-    const conflictingAgent = conflictingManager.createAgent({ id: "conflicting-agent", sandbox });
+    const conflictingAgent = conflictingManager.createAgent({ path: f.workspace, id: "conflicting-agent", sandbox });
     await expect(conflictingAgent.session.start(sessionId)).rejects.toBeInstanceOf(AgentClaimConflictError);
     expect(firstAgent.session.id).toBe(sessionId);
   } finally {
@@ -370,13 +368,12 @@ test("Sandbox Workspace MCP is discovered before the real ACP Session and outliv
   const bind = `127.0.0.1:${await unusedLoopbackPort()}`;
   const sandbox = new Sandbox({
     id: "managed-workspace",
-    path: f.workspace,
     storage: new SqliteFileStorage({ path: f.database }),
     stdio: { command: periBinary, env: { HOME: f.home }, settings: f.settings },
     workspaceProcess: { command: periBinary, bind, env: { HOME: f.home } },
   });
   const manager = new ManagedAgents({ kv: new MemoryKV() });
-  const agent = manager.createAgent({ id: "workspace-agent", sandbox });
+  const agent = manager.createAgent({ path: f.workspace, id: "workspace-agent", sandbox });
   try {
     const session = await agent.session.start(null);
     expect(session.id).toBeTruthy();
@@ -404,13 +401,12 @@ test("a fresh ACP settles a Workspace shell task after the old ACP is killed dur
   const bind = `127.0.0.1:${await unusedLoopbackPort()}`;
   const sandbox = new Sandbox({
     id: "crash-close-workspace",
-    path: f.workspace,
     storage: new SqliteFileStorage({ path: f.database }),
     stdio: { command: periBinary, env: { HOME: f.home }, settings: f.settings },
     workspaceProcess: { command: periBinary, bind, env: { HOME: f.home } },
   });
-  const workspace = await sandbox.startWorkspace();
-  const first = await sandbox.createTransport() as StdioTransport;
+  const workspace = await sandbox.startWorkspace(f.workspace);
+  const first = await sandbox.createTransport(f.workspace) as StdioTransport;
   let second: StdioTransport | undefined;
   try {
     await first.request("initialize", {
@@ -470,7 +466,7 @@ test("a fresh ACP settles a Workspace shell task after the old ACP is killed dur
     expired.query("UPDATE session_execution_owners SET expires_at_unix = 0 WHERE root_id = ? AND epoch = ?")
       .run(sessionId, owner!.epoch);
     expired.close();
-    second = await sandbox.createTransport() as StdioTransport;
+    second = await sandbox.createTransport(f.workspace) as StdioTransport;
     await initialize(second);
     await second.request("session/close", { sessionId });
     const settled = new Database(f.database, { readonly: true });

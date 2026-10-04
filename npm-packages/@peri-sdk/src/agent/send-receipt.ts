@@ -11,6 +11,7 @@ export class SendReceipt implements PromiseLike<void> {
         private readonly session: Session,
         text: string,
     ) {
+        session.trackInput(this.inputId, text);
         this.delivery = session.waitForDelivery(this.inputId, () =>
             this.queued.then(() => session.dispatch(this.inputId)),
         ).then(() => {

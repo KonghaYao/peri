@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { SESSION_LIST_SQL, sessionSummary, type SessionRow, type SessionSummary } from "./session-summary";
+import { SESSION_BY_ID_SQL, SESSION_LIST_SQL, sessionSummary, type SessionRow, type SessionSummary } from "./session-summary";
 import type { SessionStorage } from "./types";
 
 /** Configure Peri's SQLite Session Store at a local file path. */
@@ -14,6 +14,16 @@ export class SqliteFileStorage implements SessionStorage {
     const database = new Database(this.options.path, { readonly: true });
     try {
       return database.query<SessionRow, [string]>(SESSION_LIST_SQL).all(cwd).map(sessionSummary);
+    } finally {
+      database.close();
+    }
+  }
+
+  async getSession(id: string): Promise<SessionSummary | null> {
+    const database = new Database(this.options.path, { readonly: true });
+    try {
+      const row = database.query<SessionRow, [string]>(SESSION_BY_ID_SQL).get(id);
+      return row ? sessionSummary(row) : null;
     } finally {
       database.close();
     }

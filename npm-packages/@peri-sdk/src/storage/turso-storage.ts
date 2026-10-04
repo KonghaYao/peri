@@ -1,5 +1,5 @@
 import { connect } from "@tursodatabase/serverless";
-import { SESSION_LIST_SQL, sessionSummary, type SessionRow, type SessionSummary } from "./session-summary";
+import { SESSION_BY_ID_SQL, SESSION_LIST_SQL, sessionSummary, type SessionRow, type SessionSummary } from "./session-summary";
 import type { SessionStorage } from "./types";
 
 export class TursoStorage implements SessionStorage {
@@ -37,6 +37,26 @@ export class TursoStorage implements SessionStorage {
         throw error;
       }
       return rows.map(sessionSummary);
+    } finally {
+      await connection.close();
+    }
+  }
+
+  async getSession(id: string): Promise<SessionSummary | null> {
+    const token = this.options.authToken ??
+      (this.options.tokenEnv ? Bun.env[this.options.tokenEnv] : undefined);
+    if (this.options.tokenEnv && !token)
+      throw new Error("Session Storage credential is missing");
+    const connection = connect({ url: this.options.url, authToken: token });
+    try {
+      let rows: SessionRow[];
+      try {
+        rows = await connection.all(SESSION_BY_ID_SQL, id) as SessionRow[];
+      } catch (error) {
+        if (error instanceof Error && error.message.includes("no such table: threads")) return null;
+        throw error;
+      }
+      return rows[0] ? sessionSummary(rows[0]) : null;
     } finally {
       await connection.close();
     }

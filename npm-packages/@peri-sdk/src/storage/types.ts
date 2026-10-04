@@ -7,4 +7,5 @@ export interface SessionStorage {
     env: Record<string, string>;
   };
   getSessions(cwd: string): Promise<SessionSummary[]>;
+  getSession(id: string): Promise<SessionSummary | null>;
 }

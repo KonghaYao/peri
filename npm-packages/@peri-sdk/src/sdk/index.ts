@@ -1,9 +1,15 @@
+export { loadPeriWasm } from "../wasm/loader";
 export { Agent } from "../agent/agent";
 export { SendReceipt } from "../agent/send-receipt";
 export { BareHarnessConfig } from "../config/bare-harness-config";
 export type { MetaHarnessKey, PeriConfig } from "../config/peri-config";
 export { Session } from "../agent/session";
-export type { AcpMcpServer, AgentOptions } from "../agent/types";
+export { InteractionResponder, parseInteractionAnswer } from "../agent/interaction-responder";
+export type { InteractionAnswer } from "../agent/interaction-responder";
+export { SessionDocs } from "../state/session-docs";
+export { readSessionView, SessionViewStore } from "../view/session-view";
+export type { SessionView, EntryView, EntryBlockView, ToolView, PlanEntryView, TaskView, InteractionView, InputQueueView, SessionInfoView } from "../view/session-view";
+export type { AcpMcpServer, AgentOptions, PermissionRequest, ElicitationRequest, ElicitationDecision } from "../agent/types";
 export { AgentClaimConflictError } from "../kv/agent-claim-conflict-error";
 export { MemoryKV } from "../kv/memory-kv";
 export type { AtomicManagedAgentKv } from "../kv/types";
@@ -24,3 +30,6 @@ export type {
   StdioTransportOptions,
   Transport,
 } from "../transport/types";
+
+export { WasmAcpTransport } from "../transport/wasm-transport";
+export type { WasmAcpTransportOptions } from "../transport/wasm-transport";

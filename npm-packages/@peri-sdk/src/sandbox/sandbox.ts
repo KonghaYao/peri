@@ -14,21 +14,23 @@ export interface HttpWorkspace {
 
 export interface SandboxOptions {
   id: string;
-  path: string;
+  /** Optional default path; Agent sessions may supply their own path. */
+  path?: string;
   workspace?: HttpWorkspace;
   workspaceProcess?: WorkspaceMcpProcessOptions;
   storage?: SessionStorage;
   stdio?: Omit<StdioTransportOptions, "command"> & { command?: string };
-  transportFactory?: () => Transport | Promise<Transport>;
+  transportFactory?: (path: string) => Transport | Promise<Transport>;
 }
 
 /** Host-side workspace identity and local Peri process policy. */
 export class Sandbox {
   readonly id: string;
-  readonly path: string;
+  readonly path?: string;
   private readonly workspace?: HttpWorkspace;
   private readonly workspaceProcessOptions?: WorkspaceMcpProcessOptions;
   private workspaceProcess?: WorkspaceMcpProcess;
+  private workspacePath?: string;
   private workspaceStart?: Promise<HttpWorkspace>;
   private readonly storage?: SessionStorage;
   private readonly stdio?: SandboxOptions["stdio"];
@@ -36,19 +38,17 @@ export class Sandbox {
   private supervisorStart?: Promise<ProcessSupervisor>;
 
   constructor(options: SandboxOptions) {
-    if (!options.id || !options.path)
-      throw new TypeError("Sandbox id and path are required");
+    if (!options.id)
+      throw new TypeError("Sandbox id is required");
     if (options.workspace && options.workspaceProcess)
       throw new TypeError("Choose an external Workspace or a managed Workspace process");
     this.id = options.id;
-    // An external Workspace owns its path identity; local symlinks must not rewrite it.
-    if (options.workspace) {
-      this.path = options.path;
-    } else {
-      try {
-        this.path = realpathSync(options.path);
-      } catch {
-        this.path = options.path;
+    if (options.path) {
+      // External Workspace paths belong to the remote environment.
+      if (options.workspace) this.path = options.path;
+      else {
+        try { this.path = realpathSync(options.path); }
+        catch { this.path = options.path; }
       }
     }
     this.workspace = options.workspace;
@@ -65,9 +65,15 @@ export class Sandbox {
     return workspace;
   }
 
-  getSessions(): Promise<SessionSummary[]> {
+  getSessions(path = this.path): Promise<SessionSummary[]> {
     if (!this.storage) throw new Error("Sandbox has no Session Storage configured");
-    return this.storage.getSessions(this.path);
+    if (!path) throw new Error("Sandbox session path is required");
+    return this.storage.getSessions(path);
+  }
+
+  getSession(id: string): Promise<SessionSummary | null> {
+    if (!this.storage) throw new Error("Sandbox has no Session Storage configured");
+    return this.storage.getSession(id);
   }
 
   get optionalWorkspace(): HttpWorkspace | undefined {
@@ -75,16 +81,23 @@ export class Sandbox {
   }
 
   /** Start and discover the Sandbox-owned MCP process before ACP session setup. */
-  startWorkspace(): Promise<HttpWorkspace> {
+  startWorkspace(path: string): Promise<HttpWorkspace> {
     if (this.workspace) return Promise.resolve(this.workspace);
     if (!this.workspaceProcessOptions)
       throw new Error("Sandbox has no Workspace process configured");
+    if (this.workspacePath && this.workspacePath !== path)
+      throw new Error("Managed Workspace is already bound to another path");
     if (this.workspaceProcess) return Promise.resolve(this.optionalWorkspace!);
     if (!this.workspaceStart) {
-      this.workspaceStart = WorkspaceMcpProcess.start(this.path, this.workspaceProcessOptions)
+      this.workspacePath = path;
+      this.workspaceStart = WorkspaceMcpProcess.start(path, this.workspaceProcessOptions)
         .then((process) => {
           this.workspaceProcess = process;
           return { url: process.url };
+        })
+        .catch((error) => {
+          this.workspacePath = undefined;
+          throw error;
         })
         .finally(() => { this.workspaceStart = undefined; });
     }
@@ -96,12 +109,13 @@ export class Sandbox {
     const process = this.workspaceProcess;
     this.workspaceProcess = undefined;
     await process?.close();
+    this.workspacePath = undefined;
   }
 
-  async createTransport(): Promise<Transport> {
-    if (this.workspaceProcessOptions) await this.startWorkspace();
-    if (this.transportFactory) return Promise.resolve(this.transportFactory());
-    return this.createStdioTransport();
+  async createTransport(path: string): Promise<Transport> {
+    if (this.workspaceProcessOptions) await this.startWorkspace(path);
+    if (this.transportFactory) return Promise.resolve(this.transportFactory(path));
+    return this.createStdioTransport(path);
   }
 
   /** Bind an ACP child generation after session setup has returned its identity. */
@@ -115,7 +129,7 @@ export class Sandbox {
     return this.supervisorStart ??= ProcessSupervisor.start();
   }
 
-  private async createStdioTransport(): Promise<StdioTransport> {
+  private async createStdioTransport(path: string): Promise<StdioTransport> {
     const supervisor = process.platform === "win32" ? undefined : await this.processSupervisor();
     const trustedWorkspace = this.optionalWorkspace;
     const transport = this.stdio;
@@ -123,11 +137,11 @@ export class Sandbox {
     const args = [...(deployment?.args ?? []), ...(transport?.args ?? [])];
     args.push("acp");
     if (transport?.settings !== undefined) args.push("--settings-stdin");
-    args.push("--cwd", this.path);
+    args.push("--cwd", path);
     const child = await StdioTransport.start({
       command: transport?.command ?? "peri",
       args,
-      cwd: transport?.cwd ?? (this.workspace ? undefined : this.path),
+      cwd: transport?.cwd ?? (this.workspace ? undefined : path),
       env: {
         ...transport?.env, ...deployment?.env,
         ...(supervisor ? {
