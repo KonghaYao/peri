@@ -116,5 +116,4 @@ semver = "1"
 sha2 = "0.10"
 
 axum = { version = "0.8.9", features = ["ws"] }
-tokio-tungstenite = "0.30"
 serial_test = { version = "4.0.1", features = ["async"] }

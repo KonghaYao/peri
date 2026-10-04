@@ -19,7 +19,7 @@ core `ConfigSource::save(expected_revision, &PeriConfig)` 返回 accepted snapsh
 
 - 数据流：`ACP transport → acp_client pump（interaction_lifecycle 在 forward 前分配 semantic owner；ordinary notification 按 Stable/Transitioning/NoSession 路由）→ acp_notifier（owner + RequestId debug JSON + payload；同步发布 commands/plan/spinner/context 后转发）→ acp_bridge（publish_if_owned 持 operation gate 完成 final owner/projection check；bridge-local 50 ms single-pending scheduler 合并主/子 Agent Streaming publication，发布状态独立于 projection dirty，reset/terminal/receiver-close/shutdown 失效 pending）→ dispatch_for_bridge（canonical ingest + PublicationIntent）→ VIEW_MODELS/ACP_STATE → components；CurrentTurn mutation lazy projection，response action 只能按 owner first-claim，terminal cleanup compare-and-clear 同 owner surface`
 - 提交链路：`InputArea → SubmitRequest → SUBMIT_TX → submit_consumer → AcpTuiClient::ensure_session（acp_client/client/session.rs）/ prompt（acp_client/client/requests.rs）→ ACP transport`；取消经 `CANCEL_TX → spawn_cancel_consumer → AcpTuiClient::cancel`
-- 入口：`main.rs:613 main` → `run_tui`（:847）→ `kit/entry.rs:52 run_kit_fullscreen`（spawn kit 各链路）→ `launch.rs:41 build_app_and_acp`（App + AcpTuiClient + consumer 装配）
+- 入口：`main.rs:670 main` → `run_tui`（main.rs:767 调用，定义 cli_tui.rs:31）→ `kit/entry.rs:52 run_kit_fullscreen`（spawn kit 各链路）→ `launch.rs:41 build_app_and_acp`（App + AcpTuiClient + consumer 装配）
 - 稳定不变量：ACP 是交互与 Agent 执行边界（ARC-BOUNDARY-001）；`BridgeState` 是事件 → 状态边界（切换会话/重置须过滤陈旧事件，BRIDGE_RESET_COUNTER 清理）；render body 不写 atom；hooks 稳定顺序；交互事件按焦点/优先级分发；用户可见文本走 i18n 双 FTL（i18n/mod.rs:35 `tr`）；文本按 Unicode 字符边界/显示宽度处理
 
 ## 速查表
@@ -148,13 +148,12 @@ core `ConfigSource::save(expected_revision, &PeriConfig)` 返回 accepted snapsh
 | ACP 请求封装 | src/acp_client/client/requests.rs | `register_ui_commands` / `prompt` / `prompt_with_bg_results` / `cancel` / `set_config_option` / `send_raw_request`；prompt 持 lease，返回后在 gate 内结算 |
 | Interaction response 与 UI publication | src/acp_client/client/interaction.rs | `respond_interaction` / `publish_if_owned` / `reject_interaction` / `settle_claims_owned`；owner first-claim 与同步 UI publication 共用 gate，通知仅升级 weak sender |
 | ACP client 契约测试 | src/acp_client/client_test.rs + client_reverse_test.rs + client/recovery_test.rs | `client::tests` 验证 done identity / 删除过滤，`client::reverse_tests` 覆盖 interaction owner、gate、startup/load reservation 与 Drop；`client::recovery_tests` 的 `load_by_id_has_no_recovery_popup_or_reset_request`、`unavailable_environment_restores_history_without_confirmation`、`dirty_session_restores_history_without_recovery_popup_or_reset_request` 覆盖无确认/无 reset 与只读投影。全局 atom 用局部 RAII 快照恢复；验证结果与来源见 active spec |
-| 启动/CLI | src/main.rs、launch.rs、cli_args.rs、cli_plugin.rs、update.rs | `main`（main.rs:613）/`run_tui`（:847）；`build_app_and_acp`（launch.rs:41）/`teardown_app`（:199）；`run_kit_fullscreen`（kit/entry.rs:52）；插件/更新 CLI 子命令 |
+| 启动/CLI | src/main.rs、launch.rs、cli_args.rs、cli_plugin.rs、update.rs | `main`（main.rs:670）/`run_tui`（main.rs:767 调用，定义 cli_tui.rs:31）；`build_app_and_acp`（launch.rs:41）/`teardown_app`（:199）；`run_kit_fullscreen`（kit/entry.rs:52）；插件/更新 CLI 子命令 |
 
-### 设备同步与线程存储（src/sync/ src/thread/ src/components/）
+### 线程存储与通用组件（src/thread/ src/components/）
 
 | 功能 | 文件 | 入口/关键点 |
 | --- | --- | --- |
-| 设备间同步 CLI | src/sync/ | re-export：`run_sync_receiver`/`run_sync_sender`/`run_receive_cli`/`run_send_cli`/`run_device_command`（mod.rs；main.rs:523-530 调用）；子模块 protocol/noise_session/crypto/packer 等 |
 | 线程存储 | src/thread/mod.rs | 仅 re-export `ThreadStore`/`ThreadMeta`/`SqliteThreadStore`（事实源 peri-acp-types / 实现在 peri-resources） |
 | 通用组件 | src/components/textarea/、spinner/ | 文本编辑 widget（widget.rs/state.rs/word.rs/history.rs）；动画 spinner（animation.rs/verb.rs） |
 

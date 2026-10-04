@@ -5,6 +5,18 @@
 - 范围：整个仓库的 Rust crates（`peri-agent` 即原 `peri-core`，已于 2026-09 更名）；**排除 `mcp-packages`**——它们本身就是文件系统工具环境，是未来文件系统耦合的落点，不是本清单的对象
 - 关联：`2026-09-27-v4-cloud-architecture-audit.md`（存算分离方向）、`peri-agent/src/lib.rs`（计划引入 feature gates）
 
+## 2026-10-04 增量扫描（基于本清单，未改变既有豁免裁决）
+
+本节只保留尚未完成的增量发现；已整改链路各以一句话记在 5.3，扫描证据和未完成的跨机验收见[增量 issue](2026-10-04-filesystem-boundary-residual-scan.md)。下文等级不覆盖已批准的阶段范围；旧表中的点数是 2026-09-30 快照，不代表现状。
+
+| 优先级 | 位置与当前行为 | 边界影响 / 处置方向 |
+| --- | --- | --- |
+| P1，执行环境特例待迁移 | `peri-workflow/src/tool.rs:288-298` 直接 canonicalize/read `scriptPath`；`journal.rs:83-273` 按 cwd 写脚本、journal、state、outputs；`journal/git.rs` 在本机 Git 探测和验证 | 旧清单 §3.5 已将本地 JS 执行环境列为特例，故此处不改变豁免；但跨机执行/重启恢复仍绑定同一文件视图。随 Workflow 执行环境迁移时，将脚本读取、Git 与 journal 所有权一起移动，不能只换 artifact 安装方式。 |
+| P2，插件体系已暂缓 | `peri-acp/src/host/requests/plugin.rs:505-526` 搜索时直扫插件缓存；`peri-middlewares/src/plugin/loader.rs:74,167-194,498-501` 直读本机插件清单/MCP 配置 | 属旧清单 §3.2 的 P3 Plugin MCP 与缓存暂缓范围；远端工作区发现语义需要独立资源端口，不应把 ACP 本机缓存当作远端工作区状态。 |
+| 待核对 | `peri-acp/src/prompt/mod.rs:16-26,40-45` 用本机 cwd 父链 `.git` 冻结 Git 标记；`peri-acp/src/host/prepared.rs:290-335` 以本机 canonicalize 判断目录并为新 cwd 本机加载配置、发现插件 | Git 标记可能反映错误机器；配置需区分宿主部署配置与工作区配置，再核查独立 Config MCP bootstrap 是否覆盖这些分支。没有远端场景复现前不宣称所有配置请求均绕过 MCP。 |
+
+`mcp-packages/workspace` 内执行的文件 I/O 是能力落点，不列为违规；本地 SQLite/远端 Store、TUI 本地状态、落盘日志及本地 JS artifact 管理继续遵守原有裁决。`peri-controller` 与 `peri-runtime` 生产源码未发现直接文件 I/O。
+
 ## 一、用户裁决（本文方向锚点）
 
 1. **范围与落点**：文件系统耦合的清单覆盖全仓库；`mcp-packages` 除外，且**是未来耦合的移动目标**（工具执行环境）。
@@ -16,9 +28,9 @@
 7. **工具 fs（P1）**：本清单中的工具执行依赖已下沉；OAuth 凭据另已完成数据库实现，MCP 缓存及 P3 插件体系仍暂缓。
 8. **TUI 免除**：TUI 相关（客户端本地状态、主题、web-pty 等）**免除定级**。
 9. **遥测**：落盘日志**免除，不整改**；Langfuse 服务端上报效果仍需端到端验证。
-10. **compact**：不应读取 skill 文件——保留历史工具调用记录即可；同机制的文件回读（recent files）一并评估。`compact_v2/full.rs` 的文件读取应移除。
-11. **OAuth 与缓存分开**：OAuth 已完成独立受信 credentials MCP → Resources 既有数据库新表实现，完成项仅在 5.3 保留一行，契约与证据见 [实施评估](2026-09-30-p2-filesystem-implementation-assessment.md)；无私有库/HOME/新锁/schema 升版/迁移/兼容/文件回退，旧凭据需重授权。response cache 与插件缓存保持落盘、不改生命周期；实现完成不等于真实部署、网络授权或多实例 refresh 已验证。
-12. **恢复机制（核心改动，已实施）**：移除 session 文件锁及前端 dirty 恢复弹窗；root session 以 ID 恢复，不按目录或 owner 认领，父子关系保持。不用分布式锁替代。
+10. **compact**：Full Compact 只保留历史工具记录，文件回读已按裁决移除。
+11. **OAuth 与缓存分开**：OAuth 凭据迁移已完成，response cache 与插件缓存继续落盘，部署验收见 [实施评估](2026-09-30-p2-filesystem-implementation-assessment.md)。
+12. **恢复机制（核心改动，已实施）**：session 文件锁与 dirty 弹窗已删除，root session 按 ID 恢复，不引入分布式锁。
 
 ## 二、全仓库总览
 
@@ -26,9 +38,9 @@
 
 | crate | 点数 | 主要用途 | 处置方向 |
 | --- | --- | --- | --- |
-| `peri-acp` | 未重统计 | rewind 文件回退、工作区 canonicalize、插件缓存（P2）、`/etc/os-release` | 配置 I/O 已下沉；ID 恢复/env 分区已实施；统一地址需求废弃 |
+| `peri-acp` | 未重统计 | rewind 历史编排、工作区 canonicalize、插件缓存（P2）、`/etc/os-release` | 工作区文件回退已下沉；其余按对应分类处置 |
 | `peri-acp-types` | 0 | 仅 `PathBuf` 类型（契约数据） | 保持；路径类型不是 feature 边界 |
-| `peri-agent` | 未重统计 | 存储桥、compact 文件回读、日志 | compact 回读待移除；存储无需整改；落盘日志免除 |
+| `peri-agent` | 未重统计 | 存储桥、日志 | 存储无需整改；落盘日志免除 |
 | `peri-controller` | 0 | — | — |
 | `peri-middlewares` | 未重统计 | 插件/MCP 管理、MCP 执行环境适配 | P2 缓存 + P3 Plugin MCP |
 | `peri-model` | 0 | — | — |
@@ -36,7 +48,7 @@
 | `peri-resources` | 32 | SQLite 存储、Filesystem 测试后端、`~/.peri` 配置路径、turso 远端 | 存储安全依赖无需整改；目录定位不等于配置正文 I/O |
 | `peri-runtime` | 0 | — | — |
 | `peri-theme` | 2 | 主题文件读取 | TUI 相关，**免除** |
-| `peri-tui` | 85 | 设备间同步、keystore、输入历史、插件 CLI、更新、主题下载 | TUI 相关，**免除**；同步协议不纳入本轮改造 |
+| `peri-tui` | 未重统计 | 输入历史、插件 CLI、更新、主题下载 | TUI 相关，**免除**；设备间同步与 keystore 已随 `src/sync` 整体移除 |
 | `peri-web-pty` | 2 | 终端 cwd、pty I/O | **标记**：TUI 的包，未来可能删除（TUI 相关免除） |
 | `peri-workflow` | 24 | workflow engine artifact 安装/发布、journal、脚本 | **特例**（第 3.5 节） |
 | `peri-js-runtime` | 23 | PTC（`@peri-code/ptc`）artifact 安装与隔离 | **特例**（第 3.5 节） |
@@ -44,13 +56,11 @@
 
 ## 三、分类清单
 
-### 3.1 剩余执行依赖 / compact 移除 / 日志
+### 3.1 剩余执行环境与日志
 
 | 位置 | 用途 | 具体行为 | 处置 |
 | --- | --- | --- | --- |
 | `mcp-packages/common/src/shell_executor.rs` | 后台 shell 执行目录 | 执行环境仍用本地 cwd 字符串 | 保留执行环境本地路径；统一地址需求废弃 |
-| `peri-agent/src/agent/compact_v2/full.rs` `read_file_with_budget` / `collect_reinject_v2` | Full compact 时把 skills 与 recent files 内容读回上下文 | `spawn_blocking` 内调用 `std::fs::read_to_string`，仍在主路径使用 | **未完成、待移除**（用户裁决）：保留历史工具调用记录，不应改成 MCP 回读 |
-| `peri-agent/src/agent/compact_v2/full.rs` `resolve_path` | 相对路径按 cwd 转绝对 | `Path::join` | 随回读移除 |
 | `peri-agent/src/telemetry/subscriber.rs` | 运行日志滚动落盘 `~/.peri/logs` | `dirs_next`、滚动文件 | **免除，不整改** |
 
 ### 3.2 剩余宿主控制面（Plugin MCP P3 / 缓存 P2）
@@ -61,7 +71,6 @@
 | --- | --- | --- |
 | `peri-middlewares/src/plugin/{config,loader,install_counts}.rs`、`installer/*`、`marketplace/fetch.rs`、`host_ports.rs`（插件端口） | 插件安装 / 卸载 / marketplace / 计数（当前重型依赖） | **P3** Plugin MCP 方向：单独设计（可能落 Workspace 内） |
 | `peri-acp/src/host/requests/plugin.rs:512-526` | 插件缓存目录扫描（`read_dir` + manifest 读取） | **P2**：暂不在考虑范围 |
-| `peri-middlewares/src/mcp/auth_store.rs` | OAuth credential adapter 与动态清理 | 实现完成，定向回归通过；真实部署/授权/refresh 风险见实施评估；`local + machineID` 是逻辑 scope，不是安全多租户 |
 | `peri-middlewares/src/mcp/resource_cache.rs` | 跨进程资源缓存（advisory file lock） | **P2 / 推迟**：继续落盘，本轮不处理 |
 | `peri-tui/src/cli_plugin.rs`、`kit/panels/plugin/data.rs` | 插件 CLI 与面板 | **免除**（TUI 相关） |
 | `peri-agent/src/resources.rs` | 存储装配桥（`Option<PathBuf>` → `peri-resources`）；默认 `~/.peri/threads/threads.db` | 安全依赖，无需整改 |
@@ -76,12 +85,9 @@
 
 | 位置 | 用途 |
 | --- | --- |
-| `sync/{scanner,packer,sender,receiver,writer}.rs` | 设备间加密同步（r2-encrypted-transfer v1）：扫描配置类文件（`~/.peri/settings.json`、`~/.claude/settings.json`、`~/.claude/skills/`、`~/.claude/plugins/cache/`、`~/.mcp.json` 与 **`{cwd}/.mcp.json`**）打包传输 |
-| `sync/channel_flow/staging.rs` | 同步暂存目录 `~/.peri/staging-<channel_hash>`（同卷 rename 提交） |
-| `sync/{keystore,device,device_cli}.rs` | 私钥存储（OS keyring → 0600 加密文件）、设备管理 |
 | `kit/input_history.rs`、`update.rs`、`kit/panels/theme/download.rs`、`kit/image_safety.rs`、`app/setup_wizard/mod.rs` | 输入历史、版本自更新、主题下载、图片安全、设置向导 |
 
-方向：**TUI 相关免除定级**（用户裁决）；TUI 是本地客户端，本地状态用本地文件合理。但**同步协议当前以文件路径布局为中心**（协议要求 `/` 分隔符，Windows 分隔符陷阱记录在 `sync/scanner.rs` 源码注释），统一地址需求废弃，同步不作为后续地址改造待办。扫描清单中的 `~/.claude/plugins/cache/` 属 **P2** 插件缓存范围（暂不处理）。
+方向：**TUI 相关免除定级**（用户裁决）；TUI 是本地客户端，本地状态用本地文件合理。设备间同步与 keystore（原 `src/sync`）已整体移除，相关协议与 staging 触点不再是待办。扫描清单中的 `~/.claude/plugins/cache/` 属 **P2** 插件缓存范围（暂不处理）。
 
 ### 3.5 特例：workflow 与 PTC（本地 JS 执行环境）
 
@@ -131,26 +137,31 @@ P2 已落地实现、主代理反馈的编译/测试证据与待验收风险见 
 | 免除 | TUI 相关（`peri-tui` 本地状态与插件 CLI / 面板、`peri-theme`、`peri-web-pty` 已标记可能删除） | 本地客户端，**免除定级**；同步协议不纳入本轮改造 |
 | 特例 | workflow / PTC artifact 管理 | 本地 JS 执行环境自管理，另行处置（宜随工具执行环境整体迁移） |
 | 免除 | 落盘日志（`~/.peri/logs` 滚动日志） | 不整改、不纳入迁移范围（`peri-agent/src/telemetry/subscriber.rs`） |
-| 待移除 | compact 文件回读（skills / recent files） | 尚未移除；删除文件回读，保留历史工具调用记录（`peri-agent/src/agent/compact_v2/full.rs`） |
 
-### 5.3 已处理（每项一行）
+### 5.3 已处理（每项一句）
 
-- **OAuth 凭据**：公共契约、Resources local/remote 既有数据库 `mcp_oauth_credentials` provider、独立受信 credentials MCP 与 host→OAuth pool 注入已完成，复用缓存 machineID、不升 schema，删除 `FileCredentialStore`、用户重授权，无迁移/兼容/文件回退；bootstrap 编译/集成、remote 与 middleware 定向验证通过，SDK 载荷日志隔离及未验收风险见实施评估。
-- **配置数据面**：ACP settings、MCP 配置、hooks 与 builtin 开关统一经独立 `peri-mcp-config` MCP 通道读写/探测，共享全局路径与原子保存，无宿主文件回落，保留类型校验、分层与来源优先级。
-- **MCP 截断输出**：bridge/resource 成功、错误及恢复输出均经 Workspace `output/store` 持久化，返回实例绑定 `peri-output://` 资源 URI 与工具环境 Read 路径，不可得时明确未保存且不回落宿主。
-- **归因分支探测**：`before_agent` 改走 Workspace `workspace/gitBranch`，git 执行、超时与进程树清理下沉工具环境，宿主仅消费分支值。
-- **Shell 本地执行边界**：进程、tee 与输出持久化移至 `mcp-packages/common`，Agent 仅保留生命周期和 `ShellExecutor` 注入端口，移除其 `peri-process` 依赖并将 `libc` 留在测试。
-- **图片附件**：读取、大小与 MIME 签名校验下沉 Workspace MCP `image/read`，宿主不读盘，关闭/断连/换代不回落本机。
-- **归因文件快照**：写前/写后正文改走 Workspace MCP `workspace/readText`，按 tool-call 身份隔离暂存。
-- **LSP 正文同步**：正文改走 Workspace MCP，保留 ready gate、didChange → didSave 顺序及 change 失败后仍尝试 save。
-- **`skillsDir`**：配置字段、别名、loader、自定义全局根和宿主插件目录预过滤已删除，其他来源及 builtin 开关保留，旧键仅可能作为不被消费的未知 JSON 透传。
-- **metrics 出口**：删除本地 JSONL 落盘，改用 Langfuse event 上报；无 Langfuse 时丢弃指标。
-- **metrics trace 归属**：按 sid 关联活跃 turn trace，无活跃 trace 时回退独立 root trace。
-- **`peri-agent` → `sqlx`**：删除未使用的直接依赖，存储层传递依赖保持不动。
+- **OAuth 凭据**：已从文件存储迁至受信 credentials MCP 与既有数据库，部署授权和多实例 refresh 仍见 5.1。
+- **配置数据面**：ACP settings、MCP 配置、hooks 与 builtin 开关已统一经配置 MCP 读写。
+- **MCP 截断输出**：截断结果已交 Workspace `output/store` 持久化，不回落宿主文件。
+- **归因分支探测**：Git 分支值已由 Workspace `workspace/gitBranch` 提供。
+- **Shell 本地执行边界**：进程执行及输出持久化已移至 MCP 工具环境。
+- **图片附件**：文件读取和签名校验已移至 Workspace `image/read`。
+- **归因文件快照**：写前及写后正文已改由 Workspace `workspace/readText` 提供。
+- **LSP 正文同步**：同步正文已改由 Workspace MCP 提供。
+- **`skillsDir`**：该宿主目录配置和消费链已删除。
+- **metrics 出口**：本地 JSONL 指标已改为 Langfuse event。
+- **metrics trace 归属**：指标已关联活跃 turn trace，缺失时使用独立 root trace。
+- **`peri-agent` → `sqlx`**：未使用的直接依赖已删除。
+- **`@path`**：正文及目录列表已改由会话绑定的 Workspace `workspace/readMention` 读取。
+- **rewind 文件回退**：文件操作已移至受信 Workspace `workspace/rewindFiles`，ACP 只编排历史。
+- **Full Compact 文件回读**：Read/Skill 路径回读已删除，只保留历史工具记录。
+- **Workspace 共享密钥文件**：SDK 与 ACP 的 `task-scope.secret` 文件交互已删除。
+- **外部 Workspace 路径**：SDK 已保留外部 Workspace 的会话路径身份，不再以本机 realpath 改写。
+- **资源关闭位**：快照缺失时只使用已选配置来源的资源投影，不再重读默认全局配置。
+- **print 内联设置**：`--settings` JSON 已改为内存装配，不再写固定临时文件。
 
 ### 5.4 未完成边界
 
-- compact 的 `full_compact_inner → collect_reinject_v2 → read_file_with_budget` 仍执行宿主文件回读；本轮仅核对状态，未修改 compact 代码。
 - 配置 MCP 的远端部署认证/TLS 与跨设备 locator 属部署/P2 后续工作；插件 manifest、安装与 marketplace 生命周期仍在 Plugin MCP P3，未扩为本轮范围。
 - 输出资源 URI 绑定当前 Workspace 实例，实例关闭/重建后不保证旧 URI 可读；输出文件保留于工具环境，跨实例恢复不在本轮范围；统一地址需求废弃。
 - Workspace 仍使用本地路径，不构成 cwd 沙箱；统一地址需求废弃；绝对路径/symlink 行为保持现状。
@@ -168,7 +179,6 @@ P2 已落地实现、主代理反馈的编译/测试证据与待验收风险见 
 ## 七、未验证
 
 - 未做编译期 feature 拆分实验
-- 未核对 `peri-tui/src/sync` 协议全量字段（仅扫描 fs 触点与 staging 语义）
 - 未跑全库/E2E、Windows 原生执行或 120 秒 ignored 用例
 - OAuth 实际云端、真实网络授权与多实例 refresh 未验证，共享库授权风险保留；expanded remote 的无关故障 `session_child_guard_test`（未初始化 machine）与 ignored 用例仍未闭环，不将定向通过写成全套件通过，验证明细见实施评估
 - Session ID / env 核心实现与定向契约测试已迁移；未做远端多机器端到端部署验证

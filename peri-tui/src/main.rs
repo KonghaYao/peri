@@ -156,21 +156,6 @@ enum Commands {
     },
     /// 更新：从 GitHub 下载并安装最新版本
     Update,
-    /// 配置同步：在设备间同步 settings/skills/mcp/plugins
-    Sync {
-        #[command(subcommand)]
-        action: SyncAction,
-        /// Server URL（仅 HTTPS；http/ws/wss 一律拒绝）
-        #[arg(
-            long,
-            default_value = "https://peri-sync.claude-code-best.win",
-            global = true
-        )]
-        server: String,
-        /// 显式加密 keystore 文件路径（仅打开已存在的加密 keystore）
-        #[arg(long, global = true)]
-        keystore_path: Option<String>,
-    },
     /// 插件管理
     Plugin {
         #[command(subcommand)]
@@ -212,27 +197,6 @@ enum MachineAction {
         #[arg(long)]
         confirm_no_active_executions: bool,
     },
-}
-
-#[derive(Subcommand)]
-enum SyncAction {
-    /// 设备身份与信任管理
-    Device {
-        #[command(subcommand)]
-        action: peri_tui::sync::device_cli::DeviceAction,
-    },
-    /// 发送本地配置到已信任远端设备
-    Send {
-        /// 目标设备 ID（trusted peers 中）
-        #[arg(long)]
-        to: String,
-    },
-    /// 从已信任远端设备接收配置（掩码输入同步码）
-    Receive,
-    /// 旧 WebSocket 发送模式（Slice 4 移除）
-    Sender,
-    /// 旧 WebSocket 接收模式（Slice 4 移除）
-    Receiver,
 }
 
 #[derive(Subcommand)]
@@ -857,36 +821,6 @@ fn main() -> Result<()> {
                     }
                 }
                 Ok(())
-            })
-        }
-        Some(Commands::Sync {
-            action,
-            server,
-            keystore_path,
-        }) => {
-            // 限制 worker 数（默认=CPU 核数，18 核=72MB 栈空间浪费），4 MB stack
-            let rt = build_runtime()?;
-            let keystore_path = keystore_path.as_deref().map(std::path::Path::new);
-            rt.block_on(async {
-                match action {
-                    SyncAction::Device { action } => {
-                        peri_tui::sync::device_cli::dispatch(action, keystore_path)
-                    }
-                    SyncAction::Send { to } => {
-                        peri_tui::sync::channel_flow::run_send_cli(&server, keystore_path, &to)
-                            .await
-                    }
-                    SyncAction::Receive => {
-                        peri_tui::sync::channel_flow::run_receive_cli(&server, keystore_path).await
-                    }
-                    SyncAction::Sender => peri_tui::sync::run_sync_sender(&server).await,
-                    SyncAction::Receiver => peri_tui::sync::run_sync_receiver(&server).await,
-                }
-            })
-            .map(|_| println!("Sync complete"))
-            .map_err(|e| {
-                eprintln!("Sync failed: {e:#}");
-                std::process::exit(1);
             })
         }
         Some(Commands::Plugin { action }) => {
