@@ -52,6 +52,7 @@ async fn worktree_failed_assembly_retains_resources_and_lease_until_cleanup_retr
         bare: true,
         drive_cron_tick: false,
         mcp_profile: peri_middlewares::mcp::apps::McpCapabilityProfile::disabled(),
+        capabilities: Default::default(),
     });
     let id = create_bound_fixture(&cfg, cwd.to_str().unwrap(), None).await;
     let owner = acquire_bound_owner(&cfg, &id).await;

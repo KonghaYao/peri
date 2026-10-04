@@ -296,12 +296,15 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
                 // 不进链 → 每 turn 本地视图不含（"关闭不掉"修复）。
                 ChainSlot::Permission if disabled.contains("PermissionMiddleware") => {}
                 ChainSlot::Permission => {
-                    chain.add(Box::new(PermissionMiddleware::with_shared_mode(
-                        broker.clone(),
-                        default_requires_approval,
-                        permission_mode.clone(),
-                        auto_classifier.clone(),
-                    )));
+                    chain.add(Box::new(
+                        PermissionMiddleware::with_shared_mode(
+                            broker.clone(),
+                            default_requires_approval,
+                            permission_mode.clone(),
+                            auto_classifier.clone(),
+                        )
+                        .with_prompt_disabled_builtin((*disabled).clone()),
+                    ));
                 }
                 ChainSlot::AskUser if disabled.contains("HumanInTheLoopMiddleware") => {}
                 ChainSlot::AskUser => {

@@ -139,6 +139,16 @@ async fn worktree_binding_hot_cold_resume_ignore_caller_cwd_and_keep_saved_facts
     )
     .await
     .unwrap();
+    // 冷宿主接管执行前，原宿主须释放同一 Session 的持久 owner。
+    handle_request(
+        "session/close",
+        &json!({"sessionId": id}),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
     let mut cold = HashMap::new();
     let loaded = handle_request(
         "session/load",
@@ -152,15 +162,6 @@ async fn worktree_binding_hot_cold_resume_ignore_caller_cwd_and_keep_saved_facts
     assert!(loaded["_meta"]["peri.sessionWorkspaceV1"]["read_only"].is_null());
     assert!(cold[&id].execution_owner.is_some());
     assert_eq!(cold[&id].cwd, original_cwd.to_str().unwrap());
-    handle_request(
-        "session/close",
-        &json!({"sessionId": id}),
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await
-    .unwrap();
     std::fs::write(sub.join("CLAUDE.md"), "MUTATED_AFTER_CLOSE").unwrap();
     handle_request(
         "session/resume",
@@ -296,6 +297,7 @@ async fn worktree_new_resources_use_the_target_directory() {
         bare: true,
         drive_cron_tick: false,
         mcp_profile: peri_middlewares::mcp::apps::McpCapabilityProfile::disabled(),
+        capabilities: Default::default(),
     });
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let mut sessions = HashMap::new();
@@ -419,6 +421,7 @@ async fn worktree_scheduled_approval_uses_session_permission_and_rejects_closed_
         bare: true,
         drive_cron_tick: false,
         mcp_profile: peri_middlewares::mcp::apps::McpCapabilityProfile::disabled(),
+        capabilities: Default::default(),
     });
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let mut sessions = HashMap::new();
@@ -525,6 +528,7 @@ async fn worktree_session_end_retains_owner_and_joins_same_hook_on_retry() {
         bare: true,
         drive_cron_tick: false,
         mcp_profile: peri_middlewares::mcp::apps::McpCapabilityProfile::disabled(),
+        capabilities: Default::default(),
     });
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let mut sessions = HashMap::new();
@@ -610,6 +614,7 @@ async fn worktree_session_end_uses_saved_directory_and_drains_resources() {
             bare: true,
             drive_cron_tick: false,
             mcp_profile: peri_middlewares::mcp::apps::McpCapabilityProfile::disabled(),
+            capabilities: Default::default(),
         });
         let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
         let mut sessions = HashMap::new();
@@ -713,6 +718,7 @@ async fn cold_load_derives_builtin_closed_set_from_persisted_frozen() {
         bare: true,
         drive_cron_tick: false,
         mcp_profile: peri_middlewares::mcp::apps::McpCapabilityProfile::disabled(),
+        capabilities: Default::default(),
     });
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let mut sessions = HashMap::new();
@@ -768,6 +774,7 @@ async fn cold_load_derives_builtin_closed_set_from_persisted_frozen() {
         bare: true,
         drive_cron_tick: false,
         mcp_profile: peri_middlewares::mcp::apps::McpCapabilityProfile::disabled(),
+        capabilities: Default::default(),
     });
     let mut restored = HashMap::new();
     handle_request(
@@ -815,6 +822,7 @@ async fn unpublished_draft_is_abandoned_only_after_confirmed_drain() {
         bare: true,
         drive_cron_tick: false,
         mcp_profile: peri_middlewares::mcp::apps::McpCapabilityProfile::disabled(),
+        capabilities: Default::default(),
     });
     // 草稿：身份/绑定/执行代际成立，frozen 未提交。
     let workspace = cfg.session_resources.resolve_workspace(&cwd).await.unwrap();

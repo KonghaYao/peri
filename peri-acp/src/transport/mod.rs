@@ -17,6 +17,7 @@ pub mod mpsc;
 pub mod router;
 pub mod stdio;
 pub mod types;
+pub mod wire_bridge;
 
 use async_trait::async_trait;
 use serde_json::Value;

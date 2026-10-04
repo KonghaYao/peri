@@ -237,8 +237,24 @@ pub fn sensitive_tool_entries() -> [SensitiveToolEntry; 14] {
 
 /// 渲染敏感工具 markdown 列表（10_hitl 段落动态部分）。
 pub fn format_sensitive_tools() -> String {
+    format_sensitive_tools_for_disabled(&std::collections::HashSet::new())
+}
+
+/// Deployment closure only changes the prompt inventory; approval remains conservative.
+pub fn format_sensitive_tools_for_disabled(disabled: &std::collections::HashSet<String>) -> String {
     sensitive_tool_entries()
         .iter()
+        .filter(|entry| {
+            !peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES
+                .iter()
+                .any(|instance| {
+                    disabled.contains(instance.policy_key)
+                        && instance
+                            .tools
+                            .iter()
+                            .any(|tool| tool.effective_name == entry.name)
+                })
+        })
         .map(|e| {
             if e.prefix_match {
                 format!("- `{}*` — {}", e.name, e.description)
@@ -276,6 +292,7 @@ pub struct PermissionMiddleware {
     auto_classifier: Option<Arc<dyn AutoClassifier>>,
     /// broker.request 超时，默认 300s；测试可设为短值
     broker_timeout: std::time::Duration,
+    prompt_disabled_builtin: std::collections::HashSet<String>,
 }
 
 impl PermissionMiddleware {
@@ -302,13 +319,19 @@ impl PermissionMiddleware {
     /// （收集即装配）——Bypass 模式下本 middleware 仍在链（装配只按
     /// disabled 集合过滤），10_hitl 照常渲染（决策记录 C3 D5）。
     pub fn sections() -> Vec<PromptSection> {
+        Self::sections_for_disabled(&std::collections::HashSet::new())
+    }
+
+    pub fn sections_for_disabled(
+        disabled: &std::collections::HashSet<String>,
+    ) -> Vec<PromptSection> {
         let mut content = String::with_capacity(2048);
         content.push_str(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../peri-acp/prompts/sections/10_hitl.md"
         )));
         content.push_str("\n\n");
-        content.push_str(&format_sensitive_tools());
+        content.push_str(&format_sensitive_tools_for_disabled(disabled));
         content.push_str(
             "\n\nWhether a sensitive tool actually requires approval is decided by the current `PermissionMode`, not by this list alone.",
         );
@@ -331,6 +354,7 @@ impl PermissionMiddleware {
             mode: None,
             auto_classifier: None,
             broker_timeout: BROKER_TIMEOUT,
+            prompt_disabled_builtin: Default::default(),
         }
     }
 
@@ -342,6 +366,7 @@ impl PermissionMiddleware {
             mode: None,
             auto_classifier: None,
             broker_timeout: BROKER_TIMEOUT,
+            prompt_disabled_builtin: Default::default(),
         }
     }
 
@@ -358,7 +383,16 @@ impl PermissionMiddleware {
             mode: Some(mode),
             auto_classifier,
             broker_timeout: BROKER_TIMEOUT,
+            prompt_disabled_builtin: Default::default(),
         }
+    }
+
+    pub fn with_prompt_disabled_builtin(
+        mut self,
+        disabled: std::collections::HashSet<String>,
+    ) -> Self {
+        self.prompt_disabled_builtin = disabled;
+        self
     }
 
     /// 设置 broker 审批超时（测试用）
@@ -614,7 +648,7 @@ impl Middleware for PermissionMiddleware {
 
     /// 声明持有的系统提示词段落（10_hitl，内容载体；装配期收集，契约 2）。
     fn prompt_sections(&self) -> Vec<PromptSection> {
-        Self::sections()
+        Self::sections_for_disabled(&self.prompt_disabled_builtin)
     }
 
     /// 批量工具调用前处理：对一批工具调用一次性收集所有需审批的项，

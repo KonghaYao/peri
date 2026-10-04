@@ -76,6 +76,9 @@ pub struct McpClientPool {
     pub(super) configuration_snapshot: std::sync::OnceLock<Arc<peri_config::ConfigurationSnapshot>>,
     pub(super) session_servers: std::sync::OnceLock<HashMap<String, McpServerConfig>>,
     credential_client: std::sync::OnceLock<super::auth_store::OAuthCredentialClient>,
+    pub(super) builtin_available: std::sync::atomic::AtomicBool,
+    pub(super) stdio_available: std::sync::atomic::AtomicBool,
+    pub(super) plugin_discovery_available: std::sync::atomic::AtomicBool,
     shared_services: parking_lot::Mutex<Vec<Arc<McpServiceOwner>>>,
     /// Includes failed handshakes until their actual process tree and stderr have drained.
     processes: parking_lot::Mutex<Vec<Arc<process::McpProcessOwner>>>,
@@ -176,7 +179,7 @@ pub(crate) struct BuiltinContextSlot {
     context: Option<Arc<BuiltinInstanceContext>>,
     /// `initialize` 是否已开始（seal 点见 `initialize::run_initialize` /
     /// `initialize::initialize_config` 的函数体首行）。
-    initialize_started: bool,
+    pub(super) initialize_started: bool,
 }
 
 pub(crate) const STDIO_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
@@ -205,6 +208,9 @@ impl McpClientPool {
             configuration_snapshot: std::sync::OnceLock::new(),
             session_servers: std::sync::OnceLock::new(),
             credential_client: std::sync::OnceLock::new(),
+            builtin_available: std::sync::atomic::AtomicBool::new(true),
+            stdio_available: std::sync::atomic::AtomicBool::new(true),
+            plugin_discovery_available: std::sync::atomic::AtomicBool::new(true),
             shared_services: parking_lot::Mutex::new(Vec::new()),
             processes: parking_lot::Mutex::new(Vec::new()),
             execution_cwd: std::sync::OnceLock::new(),

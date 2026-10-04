@@ -63,6 +63,30 @@ impl SessionManager {
         skill_catalog: &[peri_acp_types::skills::SkillMetadata],
         instructions: &crate::session::executor::FrozenInstructions,
     ) -> crate::session::executor::FrozenSessionData {
+        self.build_frozen_data_with_deployment_closure(
+            config,
+            cwd,
+            runtime_env,
+            docs,
+            skill_catalog,
+            instructions,
+            &Default::default(),
+        )
+    }
+
+    /// Freeze deployment absence alongside MetaHarness policy so cold restore cannot
+    /// resurrect a capability that was missing when this session was created.
+    #[allow(clippy::too_many_arguments)] // Mirrors the existing freeze inputs plus one immutable deployment fact.
+    pub(crate) fn build_frozen_data_with_deployment_closure(
+        &self,
+        config: &crate::provider::PeriConfig,
+        cwd: &str,
+        runtime_env: &crate::prompt::PromptRuntimeEnv,
+        docs: HashMap<String, String>,
+        skill_catalog: &[peri_acp_types::skills::SkillMetadata],
+        instructions: &crate::session::executor::FrozenInstructions,
+        deployment_closed: &std::collections::HashSet<String>,
+    ) -> crate::session::executor::FrozenSessionData {
         let frozen_date = chrono::Local::now().format("%Y-%m-%d").to_string();
         let frozen_language = config.config.language.clone();
         // W5（E15/J5）：项目指令正文来自内容准入期读取的 MCP 资源快照
@@ -78,8 +102,11 @@ impl SessionManager {
         let skill_summary =
             peri_middlewares::SkillsMiddleware::render_frozen_summary(skill_catalog);
 
-        let meta_harness_state =
+        let mut meta_harness_state =
             build_meta_harness_state(config.config.meta_harness.as_ref(), docs);
+        meta_harness_state
+            .disabled_middlewares
+            .extend(deployment_closed.iter().cloned());
 
         // 波 4 演进（C2）：收集结果 = 渲染面静态声明（冻结 disabled 集合 +
         // overrides + 冻结语言驱动，`build_collected_sections`）——基础段
@@ -152,7 +179,11 @@ pub(crate) fn build_collected_sections(
             .extend(peri_middlewares::default_system_prompt::LangMiddleware::sections(language));
     }
     if !state.disabled_middlewares.contains("PermissionMiddleware") {
-        collected.extend(peri_middlewares::permission::PermissionMiddleware::sections());
+        collected.extend(
+            peri_middlewares::permission::PermissionMiddleware::sections_for_disabled(
+                &state.disabled_middlewares,
+            ),
+        );
     }
     if !state
         .disabled_middlewares

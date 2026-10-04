@@ -42,6 +42,7 @@ fn workspace_assembly(cwd: &str) -> WorkspaceAssembly {
         bare: true,
         drive_cron_tick: false,
         mcp_profile: peri_middlewares::mcp::apps::McpCapabilityProfile::disabled(),
+        capabilities: Default::default(),
     }
 }
 
@@ -239,6 +240,7 @@ async fn prepare_new_reuses_host_configuration_for_startup_directory() {
             bare: true,
             drive_cron_tick: false,
             mcp_profile: peri_middlewares::mcp::apps::McpCapabilityProfile::disabled(),
+            capabilities: Default::default(),
         }),
     )
     .await;

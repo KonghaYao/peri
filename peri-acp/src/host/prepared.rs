@@ -20,7 +20,7 @@ use crate::session::executor::FrozenSessionData;
 use crate::session::frozen_snapshot::{decode_frozen_snapshot, encode_frozen_snapshot};
 use crate::transport::types::AcpError;
 
-use super::assemble::PreparedPlugins;
+use super::assemble::{HostCapabilities, PreparedPlugins};
 use super::workspace::workspace_error;
 use super::AcpServerConfig;
 
@@ -50,6 +50,8 @@ pub(crate) struct PreparedConfiguration {
 pub(crate) struct PreparedSessionInputs {
     /// 规范化后的执行目录。
     pub(crate) cwd: String,
+    /// Frozen from the deployment host before P4 switches to the session-local cfg.
+    deployment_capabilities: HostCapabilities,
     /// 从同一 `ConfigSource` 读出并合并一次的配置视图。
     pub(crate) configuration: PreparedConfiguration,
     /// 一次加载的插件聚合（roots/commands/hooks/lsp/mcp）。
@@ -194,15 +196,26 @@ impl PreparedSessionInputs {
         if self.frozen.is_some() {
             return Ok(());
         }
+        let mut deployment_closed = std::collections::HashSet::new();
+        let capabilities = self.deployment_capabilities;
+        for instance in peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES {
+            if !capabilities.builtin_mcp
+                || (instance.name == "cron" && !capabilities.cron)
+                || (instance.name == "lsp" && !capabilities.lsp)
+            {
+                deployment_closed.insert(instance.policy_key.to_owned());
+            }
+        }
         let mut frozen = host
             .session_manager
-            .build_frozen_data_with_config_and_runtime_and_docs(
+            .build_frozen_data_with_deployment_closure(
                 &self.configuration.config,
                 &self.cwd,
                 runtime_env,
                 docs,
                 skill_catalog,
                 instructions,
+                &deployment_closed,
             );
         if let Some(agent_instructions) = self.agent_instructions.as_deref() {
             let mut context = frozen.v2_frozen().clone();
@@ -247,6 +260,11 @@ impl PreparedSessionInputs {
         };
         Ok(Self {
             cwd: cwd.to_owned(),
+            deployment_capabilities: host
+                .workspace_assembly
+                .as_ref()
+                .map(|source| source.capabilities)
+                .unwrap_or_default(),
             configuration,
             plugin_data,
             skill_roots,
@@ -303,7 +321,7 @@ impl PreparedSessionInputs {
     fn discover_plugins(host: &AcpServerConfig, cwd: &str) -> Result<DiscoveredPlugins, AcpError> {
         match host.workspace_assembly.as_ref() {
             None => Ok((None, host.plugin_skill_roots.clone())),
-            Some(source) if source.bare => Ok((None, Vec::new())),
+            Some(source) if source.bare || !source.capabilities.plugins => Ok((None, Vec::new())),
             Some(_) => {
                 // 严格只读发现：用户级 `.claude` 由装配面解析（HOME 优先的唯一
                 // 权威在 `plugin::claude_home`，见 `assemble` 函数 doc），

@@ -16,6 +16,7 @@ async fn session_local_workspace_tasks_reach_acp_snapshot_and_live_events() {
         bare: true,
         drive_cron_tick: false,
         mcp_profile: peri_middlewares::mcp::apps::McpCapabilityProfile::disabled(),
+        capabilities: Default::default(),
     });
     assert!(
         cfg.mcp_pool.is_none(),

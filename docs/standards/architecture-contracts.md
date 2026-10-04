@@ -20,6 +20,12 @@
 - **Rule**：选择 Turso locator 后持久化全量使用远端 SQLite：Machine、Workspace、Session、消息、绑定、不可变发现快照和 Workspace 级 OAuth 均只读写 Turso；不得打开、创建、升级或查询本地 SQLite，包括默认 `threads.db`。本机可读取机器 ID 文件和工作目录、运行 Git 发现，并在进程内持有 lease 与未决写入状态。Workspace ID 由远端 `(machine_id, canonical root path)` 归属查询确定；新键并发创建使用稳定 UUID 收敛，创建 Session 的托管批确认归属和快照。重启后从远端绑定和快照复核机器、目录对象与 Git；缺快照、异机或对象变化只读历史，不凭同名目录或旧本地登记补造执行资格。`session_bindings.workspace_id` 可保留不同于 `threads.workspace_id` 的旧执行登记 UUID。
 - **Verify**：检查 `context.rs::open_remote`、`remote/composition.rs` 没有本地 SQLite 打开，`remote/execution.rs` 只持进程内 lease，`resources/evidence.rs` 从远端快照准入；运行 `peri-resources` 远端模拟传输冷恢复测试和本地迁移测试。真实 Turso 网络回环在配置凭证后单独验收。
 
+### ARC-REMOTE-ENV-001
+
+- **Scope**：远端会话存储的部署执行环境。
+- **Rule**：远端数据登记、创建写入、工作区发现快照和会话执行准入必须消费同一部署环境身份。默认 Native 环境沿用持久机器 ID 与真实目录发现；虚拟环境由部署输入稳定 UUID 和规范化绝对 root，使用版本化虚拟快照，不要求本地目录存在。两种快照互斥，不因相同机器 ID/root 自动接管对方会话；身份/root 不匹配或快照缺失时保留历史读取并拒绝执行。运行 lease 仅属当前实例，仍受 Store CAS 与外部工具 fencing 约束。部署关闭权仍只由资源工厂交付。
+- **Verify**：`cargo test -p peri-resources --lib -- sessions::remote::schema_upgrade_tests::full_remote_tests::virtual_remote_cold_recovery_and_read_only_fallbacks`、`cargo test -p peri-resources --lib -- sessions::remote::`、`cargo test -p peri-resources --lib -- sessions::sqlite_store::session_id_environment_tests`；检查 `Resources::open_deployment_in_remote_environment`、`RemoteWorkspaceEnvironment`、`remote/{composition,session_data,session_write,execution}.rs` 与 `resources/evidence.rs` 的机器身份来源一致。真实 Turso 和托管 WASM 仍需单独运行时验收。
+
 ### ARC-CANCEL-001
 
 - **Scope**：`peri-controller`、`peri-runtime`、`peri-agent`（cancel 链路）。
@@ -65,7 +71,7 @@
 ### ARC-CAPABILITY-CLOSURE-001
 
 - **Scope**：middleware、provider、built-in capability 与 MetaHarness 开关。
-- **Rule**：关闭能力必须在同一 frozen/session-local policy 下同时关闭 direct tools、deferred index/resolver、slash routes、ACP updates、TUI completion、静态 prompt/examples、subagent/workflow 继承与 runtime authorization。只隐藏 catalog/UI 或只移除 middleware 实例不算关闭；依赖其他 middleware 的能力必须显式验证依赖闭包。builtin MCP 实例（`web` / `artifact` / `cron` / `lsp` / `workspace`，声明表 `peri-acp-types/src/builtin_mcp.rs` 的 `BUILTIN_MCP_INSTANCES`）的关闭有且只有三条路径——MetaHarness 策略键（`"WebMiddleware": false` / `"ArtifactMiddleware": false` / `"CronMiddleware": false` / `"LspMiddleware": false` / `"WorkspaceMiddleware": false`）、实例配置片段 `{"<实例>": {"disabled": true}}`、进程级环境开关——且都必须同时关闭 direct tools、deferred 目录与检索结果、subagent 继承面（`parent_tools`）与 workflow agent 工具列表（workflow 的继承面仍为 direct-only；subagent 从父 Reason 的会话目录继承 MCP 工具，deferred 工具由子链 ToolSearch 发现和执行，并受同一关闭策略及子 Agent 工具过滤约束）。关闭键的合法集合事实源是链槽位名表 `MIDDLEWARE_NAMES` 与 builtin 策略键表 `BUILTIN_INSTANCE_POLICY_KEYS` 的**并集**：策略键必须仍被识别为已知键，禁止出现「键仍存在但不再生效」的中间态；策略键的唯一映射是注册表的 `policy_key`，不得按 `mcp__` 前缀或实例名字面量硬编码过滤。关闭是 turn 级注入策略，不改变 pool 级就绪判定与实例在 MCP 面板上的连接状态。关闭集按 builtin 来源身份生效，不得仅按同名 server 关闭显式远端 Workspace；远端 Workspace 的指令、Skill、Agent 定义与 MetaHarness 资源由该受信连接提供。关闭 builtin `workspace` 实例还须同时关闭其资源面：技能、Agent 定义（`agent://`）、项目指令（`peri-instruction://`）与 MetaHarness 段落覆盖（`peri-meta://`）一并不可发现、不可读取，宿主不得回落磁盘读取本地技能或 `.peri/meta`（段落覆盖按可选降级：warn 并保持内置段落，不阻塞创建）；资源读取不等于激活授权，也不等于授予工具执行权。
+- **Rule**：关闭能力必须在同一 frozen/session-local policy 下同时关闭 direct tools、deferred index/resolver、slash routes、ACP updates、TUI completion、静态 prompt/examples、subagent/workflow 继承与 runtime authorization。只隐藏 catalog/UI 或只移除 middleware 实例不算关闭；依赖其他 middleware 的能力必须显式验证依赖闭包。builtin MCP 实例（`web` / `artifact` / `cron` / `lsp` / `workspace`，声明表 `peri-acp-types/src/builtin_mcp.rs` 的 `BUILTIN_MCP_INSTANCES`）的会话关闭由四类事实触发——部署能力缺席、MetaHarness 策略键（`"WebMiddleware": false` / `"ArtifactMiddleware": false` / `"CronMiddleware": false` / `"LspMiddleware": false` / `"WorkspaceMiddleware": false`）、实例配置片段 `{"<实例>": {"disabled": true}}`、进程级环境开关——且都必须同时关闭 direct tools、deferred 目录与检索结果、subagent 继承面（`parent_tools`）与 workflow agent 工具列表（workflow 的继承面仍为 direct-only；subagent 从父 Reason 的会话目录继承 MCP 工具，deferred 工具由子链 ToolSearch 发现和执行，并受同一关闭策略及子 Agent 工具过滤约束）。关闭键的合法集合事实源是链槽位名表 `MIDDLEWARE_NAMES` 与 builtin 策略键表 `BUILTIN_INSTANCE_POLICY_KEYS` 的**并集**：策略键必须仍被识别为已知键，禁止出现「键仍存在但不再生效」的中间态；策略键的唯一映射是注册表的 `policy_key`，不得按 `mcp__` 前缀或实例名字面量硬编码过滤。部署能力缺席须在会话准备期写入 frozen disabled 集合，冷恢复复用该集合；10_hitl 等静态提示清单按冻结能力过滤，工具审批判定仍保持保守。配置关闭是 turn 级注入策略，不改变 pool 级就绪判定与实例在 MCP 面板上的连接状态。关闭集按 builtin 来源身份生效，不得仅按同名 server 关闭显式远端 Workspace；远端 Workspace 的指令、Skill、Agent 定义与 MetaHarness 资源由该受信连接提供。关闭 builtin `workspace` 实例还须同时关闭其资源面：技能、Agent 定义（`agent://`）、项目指令（`peri-instruction://`）与 MetaHarness 段落覆盖（`peri-meta://`）一并不可发现、不可读取，宿主不得回落磁盘读取本地技能或 `.peri/meta`（段落覆盖按可选降级：warn 并保持内置段落，不阻塞创建）；资源读取不等于激活授权，也不等于授予工具执行权。
 - **Verify**：为每个可关闭能力运行 presence/absence 矩阵，覆盖注册、描述、发现、执行和客户端投影；检查 `build_session_tool_view`、middleware 装配、command registry、prompt section 与 ACP/TUI 投影都使用同一 session-local policy，禁止用静态全局名单替代；依赖能力关闭时必须验证 dependent 能力安全失败或同步消失。builtin 实例关闭使用精确过滤器运行 `cargo test -p peri-middlewares --lib -- mcp::builtin_apply`（默认层与覆盖语义、保留名、非法关闭片段）、`cargo test -p peri-middlewares --lib -- mcp::builtin_runtime`（关闭矩阵四面、遗留键仍生效、审批与 wire 计数）、`cargo test -p peri-middlewares --lib -- assembly::tests`（两表不变式与链工具集合）与 `cargo test -p peri-acp --lib -- host::mcp_v4_builtin`（首个模型请求能力面）；断言必须落在可观察能力面（首个模型请求 tools / agent 工具列表 / 链工具集合），不得只断言中间量。
 
 ### ARC-HITL-001
@@ -84,9 +90,9 @@
 
 ### ARC-TRANSPORT-001
 
-- **Scope**：ACP stdio 与 MPSC transport 的 request 生命周期。
-- **Rule**：transport 终止必须以稳定的 `AcpError(-32603, "Transport closed")` 结算当前及后续 request；匹配 response、caller cancellation 与 terminal close 对同一 pending request 至多生效一次。连接仍存活但对端静默不等于终止，不得为 `send_request` 隐式增加通用 timeout；发起 I/O 失败的调用保留其具体 write/flush 错误，同时使同一逻辑连接进入 terminal 状态。
-- **Verify**：`cargo test -p peri-acp --lib -- transport::router`、`cargo test -p peri-acp --lib -- transport::mpsc`、`cargo test -p peri-acp --lib -- transport::stdio`；人工检查 stdio EOF/read/write/flush 与任一 MPSC pump/channel 关闭均汇入同一 terminal 生命周期。
+- **Scope**：ACP stdio、MPSC transport 与原始帧桥的 request 生命周期。
+- **Rule**：transport 终止必须以稳定的 `AcpError(-32603, "Transport closed")` 结算当前及后续 request；匹配 response、caller cancellation 与 terminal close 对同一 pending request 至多生效一次。连接仍存活但对端静默不等于终止，不得为 `send_request` 隐式增加通用 timeout；发起 I/O 失败的调用保留其具体 write/flush 错误，同时使同一逻辑连接进入 terminal 状态。原始帧桥只映射 JSON-RPC 帧并复用现有 MPSC request router，不实现第二份 ACP 方法分发。
+- **Verify**：`cargo test -p peri-acp --lib -- transport::router`、`cargo test -p peri-acp --lib -- transport::mpsc`、`cargo test -p peri-acp --lib -- transport::stdio`、`cargo test -p peri-acp --lib -- transport::wire_bridge`；人工检查 stdio EOF/read/write/flush 与任一 MPSC pump/channel 关闭均汇入同一 terminal 生命周期，以及帧桥正反向请求、错误码、取消和关闭时 pending 结算。
 
 ### ARC-HOST-SHUTDOWN-001
 

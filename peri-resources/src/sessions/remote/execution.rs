@@ -25,7 +25,15 @@ use crate::sessions::execution::{
 };
 use crate::sessions::local_port::{LocalExecutionPort, RevokeEffect, SessionFacts};
 
+use super::environment::RemoteWorkspaceEnvironment;
 use super::session_data::RemoteSessionData;
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VirtualSnapshot {
+    kind: String,
+    root: PathBuf,
+}
 
 fn lease_required() -> SessionResourceError {
     SessionResourceError::new(SessionResourceErrorKind::Workspace(
@@ -48,15 +56,25 @@ pub(super) struct RemoteExecution {
     read_only: bool,
     leases: Mutex<HashMap<ThreadId, Arc<ExecutionLease>>>,
     observations: Mutex<HashMap<(WorkspaceId, PathBuf), ResolvedWorkspace>>,
+    environment: RemoteWorkspaceEnvironment,
 }
 
 impl RemoteExecution {
     pub(super) fn new(data: Arc<RemoteSessionData>, read_only: bool) -> Self {
+        Self::new_in_environment(data, read_only, RemoteWorkspaceEnvironment::Native)
+    }
+
+    pub(super) fn new_in_environment(
+        data: Arc<RemoteSessionData>,
+        read_only: bool,
+        environment: RemoteWorkspaceEnvironment,
+    ) -> Self {
         Self {
             data,
             read_only,
             leases: Mutex::new(HashMap::new()),
             observations: Mutex::new(HashMap::new()),
+            environment,
         }
     }
 
@@ -163,6 +181,38 @@ impl RemoteExecution {
         {
             return Err(WorkspaceError::InvalidBinding.into());
         }
+        if let RemoteWorkspaceEnvironment::Virtual { machine_id, root } = &self.environment {
+            let saved: VirtualSnapshot =
+                serde_json::from_str(snapshot).map_err(|_| WorkspaceError::InvalidBinding)?;
+            if saved.kind != "virtual-v1" || saved.root != *root {
+                return Err(WorkspaceError::NeedsRelink.into());
+            }
+            let cwd = root.join(&binding.cwd_relative_to_workspace);
+            let path = root.to_str().ok_or(WorkspaceError::InvalidBinding)?;
+            let recorded = self.data.workspace_for_path(machine_id, path).await?;
+            if recorded != Some(owner)
+                && (require_record
+                    || recorded.is_some()
+                    || Self::stable_id("workspace", machine_id, root)?.parse::<WorkspaceId>()?
+                        != owner)
+            {
+                return Err(WorkspaceError::ExecutionBindingMismatch.into());
+            }
+            let expected_project: ProjectId =
+                Self::stable_id("project", machine_id, root)?.parse()?;
+            if binding.project_id != expected_project {
+                return Err(WorkspaceError::ExecutionBindingMismatch.into());
+            }
+            return Ok(ResolvedWorkspace {
+                project_id: expected_project,
+                workspace_id: owner,
+                execution_registration_id: binding.workspace_id,
+                cwd,
+                root: root.clone(),
+                relative_cwd: binding.cwd_relative_to_workspace.clone(),
+                discovery_snapshot: Some(snapshot.to_owned()),
+            });
+        }
         let saved: Discovery =
             serde_json::from_str(snapshot).map_err(|_| WorkspaceError::InvalidBinding)?;
         let cwd = if binding.cwd_relative_to_workspace.as_os_str().is_empty() {
@@ -203,9 +253,56 @@ impl LocalExecutionPort for RemoteExecution {
         self.read_only
     }
 
+    fn machine_id(&self) -> Result<String> {
+        self.environment.machine_id()
+    }
+
+    async fn directory_available(&self, cwd: &Path) -> bool {
+        match &self.environment {
+            RemoteWorkspaceEnvironment::Native => tokio::fs::metadata(cwd)
+                .await
+                .map(|meta| meta.is_dir())
+                .unwrap_or(false),
+            RemoteWorkspaceEnvironment::Virtual { .. } => self.environment.contains(cwd),
+        }
+    }
+
     async fn resolve_workspace(&self, cwd: &Path) -> Result<ResolvedWorkspace> {
         if self.read_only {
             return Err(WorkspaceError::ReadOnlyStore.into());
+        }
+        if let RemoteWorkspaceEnvironment::Virtual { machine_id, root } = &self.environment {
+            if !self.environment.contains(cwd) {
+                return Err(WorkspaceError::Unavailable.into());
+            }
+            let relative_cwd = cwd.strip_prefix(root)?.to_path_buf();
+            let path = root.to_str().ok_or(WorkspaceError::InvalidBinding)?;
+            let workspace_id = match self.data.workspace_for_path(machine_id, path).await? {
+                Some(id) => id,
+                None => Self::stable_id("workspace", machine_id, root)?.parse()?,
+            };
+            let project_id = Self::stable_id("project", machine_id, root)?.parse()?;
+            let snapshot = serde_json::to_string(&VirtualSnapshot {
+                kind: "virtual-v1".to_owned(),
+                root: root.clone(),
+            })?;
+            let resolved = ResolvedWorkspace {
+                project_id,
+                workspace_id,
+                execution_registration_id: workspace_id,
+                cwd: cwd.to_path_buf(),
+                root: root.clone(),
+                relative_cwd,
+                discovery_snapshot: Some(snapshot),
+            };
+            self.observations
+                .lock()
+                .map_err(|_| WorkspaceError::Unavailable)?
+                .insert(
+                    (workspace_id, resolved.relative_cwd.clone()),
+                    resolved.clone(),
+                );
+            return Ok(resolved);
         }
         let (cwd, observation) = discovery::observe(cwd).await?;
         let discovery = observation.discovery;

@@ -127,6 +127,11 @@ impl super::McpClientPool {
         if !self.is_open() {
             return Err(io::Error::other("MCP pool is closing"));
         }
+        if !self.stdio_available.load(Ordering::Acquire) {
+            return Err(io::Error::other(
+                "stdio subprocesses are unavailable in this deployment",
+            ));
+        }
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(if stderr_label.is_some() {

@@ -366,6 +366,7 @@ async fn legacy_history_freezes_saved_workspace_configuration_and_plugins() {
         bare: false,
         drive_cron_tick: false,
         mcp_profile: peri_middlewares::mcp::apps::McpCapabilityProfile::disabled(),
+        capabilities: Default::default(),
     });
     assert!(cfg.plugin_skill_roots.is_empty());
     let id = old_thread(&bridge, &target).await;

@@ -126,6 +126,168 @@ fn full_remote_facade(
     ))
 }
 
+fn virtual_remote_facade(
+    transport: Arc<SqliteTransport>,
+    environment: super::super::environment::RemoteWorkspaceEnvironment,
+) -> Arc<crate::sessions::SessionResourcesImpl> {
+    use crate::sessions::data::SessionDataPort;
+    use crate::sessions::local_port::LocalExecutionPort;
+    let gate = Arc::new(ConnectionGate::default());
+    let store = RemoteStore::new(
+        transport.clone(),
+        StoreAccess::ReadWrite,
+        gate.mint(),
+        gate.clone(),
+    );
+    let mut data = super::super::session_data::RemoteSessionData::with_connection_for_test(
+        schema::StoreId::mint(),
+        store,
+        Arc::new(FullRemoteFactory {
+            transport,
+            gate: gate.clone(),
+        }),
+        gate,
+    );
+    data.machine_id = environment.machine_id().unwrap();
+    let data = Arc::new(data);
+    let local: Arc<dyn LocalExecutionPort> = Arc::new(
+        super::super::execution::RemoteExecution::new_in_environment(
+            data.clone(),
+            false,
+            environment,
+        ),
+    );
+    let data: Arc<dyn SessionDataPort> = data;
+    Arc::new(crate::sessions::SessionResourcesImpl::from_ports(
+        data,
+        local,
+        crate::sessions::resources::SessionDataHome::RemoteStore,
+    ))
+}
+
+#[tokio::test]
+async fn virtual_remote_cold_recovery_and_read_only_fallbacks() {
+    use super::super::environment::RemoteWorkspaceEnvironment;
+    use peri_acp_types::session_resources::{
+        BindingRecheck, ExecutionAvailability, FrozenSnapshotBytes, NewSession, NewSessionMeta,
+        SessionResources,
+    };
+    use peri_acp_types::thread::CancelPolicy;
+    use peri_acp_types::workspace::SessionBinding;
+
+    let directory = tempfile::tempdir().unwrap();
+    let pool = SqlitePoolOptions::new()
+        .max_connections(4)
+        .connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(directory.path().join("virtual-wire.db"))
+                .create_if_missing(true)
+                .foreign_keys(false),
+        )
+        .await
+        .unwrap();
+    for statement in crate::sessions::canonical::CREATE_V2_TABLES
+        .iter()
+        .chain(crate::sessions::canonical::CREATE_V2_INDEXES)
+    {
+        sqlx::query(*statement).execute(&pool).await.unwrap();
+    }
+    sqlx::query(schema::CREATE_STORE_META_SQL)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(super::super::ledger::CREATE_OP_LEDGER_SQL)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO peri_store_meta VALUES (0, 13, 'virtual-test', 'peri.session.store/v3', 'now')")
+        .execute(&pool).await.unwrap();
+    let transport = Arc::new(SqliteTransport {
+        pool: pool.clone(),
+        writes: AtomicUsize::new(0),
+        fail_column_drop: AtomicBool::new(false),
+        change_schema: AtomicBool::new(false),
+        drop_reply: AtomicBool::new(false),
+        truncate_reply: AtomicBool::new(false),
+    });
+    let machine = uuid::Uuid::new_v4().to_string();
+    let root = std::path::PathBuf::from("/virtual/peri-workspace");
+    let environment =
+        RemoteWorkspaceEnvironment::virtual_workspace(&machine, root.clone()).unwrap();
+    let first = virtual_remote_facade(transport.clone(), environment.clone());
+    let workspace = first.resolve_workspace(&root).await.unwrap();
+    let session_id = "virtual-cold-recovery".to_owned();
+    let input = NewSession {
+        thread_id: session_id.clone(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+        meta: NewSessionMeta {
+            title: None,
+            cwd: root.to_str().unwrap().to_owned(),
+            parent_thread_id: None,
+            hidden: false,
+            cancel_policy: CancelPolicy::Cascade,
+            snapshot_at_message_id: None,
+        },
+        binding: SessionBinding::from_workspace(&workspace),
+        frozen: FrozenSnapshotBytes::new("{}"),
+    };
+    let lease = first.create_session(&input).await.unwrap();
+    let token = lease.owner_token().unwrap();
+    lease.mark_clean().await.unwrap();
+    first.release_execution_owner(&token).await.unwrap();
+    drop(first);
+
+    let cold = virtual_remote_facade(transport.clone(), environment.clone());
+    let restored = cold
+        .validate_bound_workspace(&session_id, BindingRecheck::Full)
+        .await
+        .unwrap();
+    assert_eq!(restored.workspace_id, workspace.workspace_id);
+    let lease = cold
+        .acquire_execution(&session_id, &restored)
+        .await
+        .unwrap();
+    let token = lease.owner_token().unwrap();
+    lease.mark_clean().await.unwrap();
+    cold.release_execution_owner(&token).await.unwrap();
+    drop(cold);
+
+    for changed in [
+        RemoteWorkspaceEnvironment::virtual_workspace(
+            &uuid::Uuid::new_v4().to_string(),
+            root.clone(),
+        )
+        .unwrap(),
+        RemoteWorkspaceEnvironment::virtual_workspace(&machine, root.join("other")).unwrap(),
+    ] {
+        let host = virtual_remote_facade(transport.clone(), changed);
+        assert!(host.load_session_history(&session_id).await.is_ok());
+        assert_eq!(
+            host.inspect_availability(Some(&session_id))
+                .await
+                .unwrap()
+                .execution,
+            Some(ExecutionAvailability::WorkspaceUnavailable)
+        );
+    }
+
+    sqlx::query("UPDATE session_bindings SET discovery_snapshot = NULL WHERE thread_id = ?1")
+        .bind(&session_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let no_snapshot = virtual_remote_facade(transport, environment);
+    assert!(no_snapshot.load_session_history(&session_id).await.is_ok());
+    assert_eq!(
+        no_snapshot
+            .inspect_availability(Some(&session_id))
+            .await
+            .unwrap()
+            .execution,
+        Some(ExecutionAvailability::WorkspaceUnavailable)
+    );
+}
+
 #[tokio::test]
 async fn remote_only_cold_recovery_uses_saved_evidence_and_old_distinct_registration() {
     use peri_acp_types::session_resources::{

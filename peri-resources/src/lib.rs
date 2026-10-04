@@ -14,3 +14,4 @@ pub mod sessions;
 pub mod workflow;
 
 pub use context::{classify_open_failure, Resources, SessionStoreShutdownOwner, StoreOpenFailure};
+pub use sessions::RemoteWorkspaceEnvironment;

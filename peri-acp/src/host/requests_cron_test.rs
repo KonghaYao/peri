@@ -10,7 +10,11 @@ use peri_model::{
 use std::time::Duration;
 
 #[derive(Default)]
-struct CronModel(parking_lot::Mutex<Vec<String>>);
+struct CronModel {
+    prompts: parking_lot::Mutex<Vec<String>>,
+    first_request_tools: parking_lot::Mutex<Vec<String>>,
+    first_request_system: parking_lot::Mutex<Option<String>>,
+}
 
 #[async_trait]
 impl Model for CronModel {
@@ -26,7 +30,15 @@ impl Model for CronModel {
         request: ModelRequest,
         cancellation: tokio_util::sync::CancellationToken,
     ) -> ModelResult<ModelStream> {
-        self.0.lock().push(
+        if self.first_request_system.lock().is_none() {
+            *self.first_request_tools.lock() =
+                request.tools.iter().map(|tool| tool.name.clone()).collect();
+            *self.first_request_system.lock() = request
+                .messages
+                .first()
+                .map(|message| message.text_content().unwrap_or_default());
+        }
+        self.prompts.lock().push(
             request
                 .messages
                 .iter()
@@ -48,6 +60,14 @@ impl Model for CronModel {
 }
 
 async fn deployment(tmp: &tempfile::TempDir, drive_cron_tick: bool) -> AcpServerConfig {
+    deployment_with_capabilities(tmp, drive_cron_tick, Default::default()).await
+}
+
+async fn deployment_with_capabilities(
+    tmp: &tempfile::TempDir,
+    drive_cron_tick: bool,
+    capabilities: crate::host::assemble::HostCapabilities,
+) -> AcpServerConfig {
     let config = make_peri_config_with_provider(make_provider_config(
         "test",
         "openai",
@@ -56,34 +76,154 @@ async fn deployment(tmp: &tempfile::TempDir, drive_cron_tick: bool) -> AcpServer
     ));
     let provider = LlmProvider::from_config(&config).unwrap();
     let cwd = tmp.path().canonicalize().unwrap();
-    crate::host::assemble::assemble_server_config(crate::host::assemble::HostAssemblyInput {
-        provider,
-        peri_config: Arc::new(parking_lot::RwLock::new(config)),
-        config_source: Arc::new(
-            crate::provider::ConfigSource::load_at(&cwd, tmp.path().join("settings.json")).unwrap(),
-        ),
-        permission_mode: SharedPermissionMode::new(PermissionMode::Bypass),
-        session_resources: peri_agent::resources::open_session_resources_with(Some(
-            tmp.path().join("threads.db"),
-        ))
-        .await
-        .unwrap(),
-        session_store_shutdown: None,
-        workspace_id: None,
-        cwd: cwd.to_string_lossy().into_owned(),
-        bare: false,
-        drive_cron_tick,
-        workspace_input: None,
-        // 本夹具构造顶层装配：资源面输入保持未接线（会话路径才装载）。
-        workspace_resources: None,
-        // 无会话上下文（测试夹具）：A24 关闭集为空集。
-        builtin_closed: Default::default(),
-        // 宿主技能面关闭位与关闭集同源：本夹具无会话上下文，恒为假。
-        skills_face_closed: false,
-        prepared_plugins: None,
-        session_mcp_servers: None,
-    })
+    crate::host::assemble::assemble_server_config_with_capabilities(
+        crate::host::assemble::HostAssemblyInput {
+            provider,
+            peri_config: Arc::new(parking_lot::RwLock::new(config)),
+            config_source: Arc::new(
+                crate::provider::ConfigSource::load_at(&cwd, tmp.path().join("settings.json"))
+                    .unwrap(),
+            ),
+            permission_mode: SharedPermissionMode::new(PermissionMode::Bypass),
+            session_resources: peri_agent::resources::open_session_resources_with(Some(
+                tmp.path().join("threads.db"),
+            ))
+            .await
+            .unwrap(),
+            session_store_shutdown: None,
+            workspace_id: None,
+            cwd: cwd.to_string_lossy().into_owned(),
+            bare: false,
+            drive_cron_tick,
+            workspace_input: None,
+            // 本夹具构造顶层装配：资源面输入保持未接线（会话路径才装载）。
+            workspace_resources: None,
+            // 无会话上下文（测试夹具）：A24 关闭集为空集。
+            builtin_closed: Default::default(),
+            // 宿主技能面关闭位与关闭集同源：本夹具无会话上下文，恒为假。
+            skills_face_closed: false,
+            prepared_plugins: None,
+            session_mcp_servers: None,
+        },
+        capabilities,
+    )
     .await
+}
+
+#[tokio::test]
+#[serial]
+async fn restricted_deployment_omits_local_optional_capabilities_in_session() {
+    let tmp = tempfile::tempdir().unwrap();
+    let _home = HomeDirGuard::set(tmp.path());
+    let capabilities = crate::host::assemble::HostCapabilities {
+        builtin_mcp: false,
+        stdio_mcp: false,
+        cron: false,
+        lsp: false,
+        plugins: false,
+        settings_hooks: false,
+    };
+    let cfg = deployment_with_capabilities(&tmp, true, capabilities).await;
+    assert!(cfg.cron_scheduler.is_none());
+    assert!(cfg.lsp_pool.is_none());
+    assert!(cfg.hook_groups.is_empty());
+    assert_eq!(
+        cfg.workspace_assembly.as_ref().unwrap().capabilities,
+        capabilities
+    );
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
+    let cwd = tmp
+        .path()
+        .canonicalize()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let mut sessions = HashMap::new();
+    let id = new_session(&cfg, &mut sessions, &transport, &cwd).await;
+    let env = sessions[&id].environment.clone().unwrap();
+    assert!(env.cfg.cron_scheduler.is_none());
+    assert!(env.cfg.lsp_pool.is_none());
+    assert!(env.cfg.hook_groups.is_empty());
+    assert!(env.cfg.plugin_loaded.is_empty());
+
+    // Exercise the production prompt path and inspect what the model actually receives.
+    let model = Arc::new(CronModel::default());
+    let pool = Arc::new(parking_lot::Mutex::new(
+        crate::session::agent_pool::AgentPool::new(),
+    ));
+    let fingerprint = crate::session::agent_pool::fingerprint(&env.cfg.provider.read().clone());
+    pool.lock()
+        .subagent_llm_cache
+        .insert(fingerprint, model.clone());
+    let shared = Arc::new(tokio::sync::Mutex::new(sessions));
+    let response = tokio::time::timeout(
+        Duration::from_secs(15),
+        crate::host::prompt::run_prompt(
+            json!({"sessionId": id, "prompt": [{"type": "text", "text": "hello"}]}),
+            &shared,
+            &env.cfg,
+            &transport,
+            pool,
+            None,
+            false,
+            None,
+        ),
+    )
+    .await
+    .expect("restricted prompt finishes")
+    .expect("restricted prompt succeeds");
+    assert_eq!(response["stopReason"], "end_turn");
+    assert_eq!(model.prompts.lock().len(), 1);
+    assert!(model
+        .first_request_tools
+        .lock()
+        .iter()
+        .all(|tool| !tool.starts_with("mcp__")));
+    let system = model.first_request_system.lock().clone().unwrap();
+    for unavailable in ["mcp__workspace__", "mcp__cron__", "mcp__lsp__"] {
+        assert!(
+            !system.contains(unavailable),
+            "unavailable tool in system prompt: {unavailable}; context: {:?}",
+            system.lines().find(|line| line.contains(unavailable))
+        );
+    }
+
+    handle_request(
+        "session/close",
+        &json!({"sessionId": id}),
+        &cfg,
+        &mut *shared.lock().await,
+        &transport,
+    )
+    .await
+    .expect("restricted session closes");
+    assert!(!shared.lock().await.contains_key(&id));
+    handle_request(
+        "session/load",
+        &json!({"sessionId": id}),
+        &cfg,
+        &mut *shared.lock().await,
+        &transport,
+    )
+    .await
+    .expect("restricted session reloads");
+    assert!(shared.lock().await.contains_key(&id));
+    assert!(shared.lock().await[&id]
+        .frozen
+        .as_ref()
+        .unwrap()
+        .meta_harness()
+        .disabled_middlewares
+        .contains("CronMiddleware"));
+    handle_request(
+        "session/close",
+        &json!({"sessionId": id}),
+        &cfg,
+        &mut *shared.lock().await,
+        &transport,
+    )
+    .await
+    .expect("reloaded restricted session closes");
 }
 
 async fn cron_tool(
@@ -254,8 +394,8 @@ async fn cron_deployment_registration_and_tick_are_session_scoped() {
     })
     .await
     .expect("scheduled continuation must finish and commit history");
-    assert_eq!(model.0.lock().len(), 1);
-    assert!(model.0.lock()[0].contains("session-a-marker"));
+    assert_eq!(model.prompts.lock().len(), 1);
+    assert!(model.prompts.lock()[0].contains("session-a-marker"));
     assert!(shared.lock().await[&b].history.is_empty());
 
     // Deleting a registered task prevents later ticks; closing A stops its generation.
@@ -295,7 +435,7 @@ async fn cron_deployment_registration_and_tick_are_session_scoped() {
             .is_err(),
         "closed session must stop its only tick driver"
     );
-    assert_eq!(model.0.lock().len(), 1);
+    assert_eq!(model.prompts.lock().len(), 1);
     // B remains usable after A closes.
     cron_tool(
         &env_b,

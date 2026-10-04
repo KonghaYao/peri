@@ -41,6 +41,32 @@ pub(crate) struct WorkspaceAssembly {
     pub(crate) bare: bool,
     pub(crate) drive_cron_tick: bool,
     pub(crate) mcp_profile: peri_middlewares::mcp::apps::McpCapabilityProfile,
+    pub(crate) capabilities: HostCapabilities,
+}
+
+/// Capabilities supplied by the deployment to every session environment.
+/// A missing capability never acquires a session resource or shutdown right.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HostCapabilities {
+    pub builtin_mcp: bool,
+    pub stdio_mcp: bool,
+    pub cron: bool,
+    pub lsp: bool,
+    pub plugins: bool,
+    pub settings_hooks: bool,
+}
+
+impl Default for HostCapabilities {
+    fn default() -> Self {
+        Self {
+            builtin_mcp: true,
+            stdio_mcp: true,
+            cron: true,
+            lsp: true,
+            plugins: true,
+            settings_hooks: true,
+        }
+    }
 }
 
 /// 准备阶段的严格只读插件发现（无合成清单、无插件缓存写）。
@@ -276,11 +302,20 @@ pub fn build_session_manager(
 /// 边 2 assemble 路径）；行为与迁移前三路径（launch / cli_print / stdio）
 /// 各自装配一致（cron tick 驱动、MCP 初始化、孤儿插件清理时机均复刻）。
 pub async fn assemble_server_config(input: HostAssemblyInput) -> AcpServerConfig {
+    assemble_server_config_with_capabilities(input, HostCapabilities::default()).await
+}
+
+/// Deployment entry for environments without local optional resources.
+pub async fn assemble_server_config_with_capabilities(
+    input: HostAssemblyInput,
+    capabilities: HostCapabilities,
+) -> AcpServerConfig {
     assemble_server_config_with_mcp_profile(
         input,
         peri_middlewares::mcp::apps::McpCapabilityProfile::disabled(),
         false,
         None,
+        capabilities,
     )
     .await
 }
@@ -296,6 +331,7 @@ pub async fn assemble_server_config_with_mcp_apps(
         peri_middlewares::mcp::apps::deployment_profile(apps_enabled),
         false,
         None,
+        HostCapabilities::default(),
     )
     .await
 }
@@ -307,6 +343,7 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
     // 装配。与会话资源门面字段 `session_resources` 不同义，故另名 `session_scoped`。
     session_scoped: bool,
     activation: Option<tokio_util::sync::CancellationToken>,
+    capabilities: HostCapabilities,
 ) -> AcpServerConfig {
     let (host_task_owner, host_task_spawner) = HostTaskOwner::new();
     let (mcp_task_owner, mcp_task_spawner) = peri_middlewares::mcp::McpTaskOwner::new();
@@ -331,7 +368,9 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
 
     // 用户级 `.claude` 与准备面、插件 RPC 共用同一权威（HOME 优先）：
     // 见 `peri_middlewares::plugin::claude_home`。
-    let claude_dir = peri_middlewares::plugin::claude_home();
+    let claude_dir = capabilities
+        .plugins
+        .then(peri_middlewares::plugin::claude_home);
 
     // ── 插件聚合数据（bare 时跳过；准备路径消费同一聚合，不重读插件目录）──
     let (prepared_data, prepared_skill_roots) = match prepared_plugins {
@@ -339,14 +378,15 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         None => (None, None),
     };
     let prepared_supplied = prepared_skill_roots.is_some();
-    let plugin_data: Option<PluginLoadResult> = if bare || !session_scoped {
+    let plugin_data: Option<PluginLoadResult> = if bare || !session_scoped || !capabilities.plugins
+    {
         None
     } else if prepared_supplied {
         // 准备路径已严格只读加载一次：装配面消费同一聚合，不重读插件目录。
         prepared_data.flatten()
     } else {
         Some(peri_middlewares::plugin::load_enabled_plugins_aggregated(
-            &claude_dir,
+            claude_dir.as_ref().expect("plugins enabled"),
             Some(std::path::Path::new(&cwd)),
         ))
     };
@@ -360,12 +400,17 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
     // `cron.tick_enabled` 决定）；宿主不再 spawn `HostTaskKind::CronTick`
     // ——同一 scheduler 任一时刻至多一个驱动，tick 随该代 supervisor 关闭。
     // 部署层不建 MCP 池；其 tick 策略经 WorkspaceAssembly 原样传入会话。
-    let cron_scheduler_concrete = Arc::new(parking_lot::Mutex::new(
-        peri_mcp_cron::CronScheduler::new(tokio::sync::mpsc::unbounded_channel().0),
-    ));
-    let cron_scheduler: Option<Arc<dyn CronSchedulerPort>> = Some(Arc::new(
-        peri_mcp_cron::CronSchedulerPortHandle(Arc::clone(&cron_scheduler_concrete)),
-    ));
+    let cron_scheduler_concrete = capabilities.cron.then(|| {
+        Arc::new(parking_lot::Mutex::new(peri_mcp_cron::CronScheduler::new(
+            tokio::sync::mpsc::unbounded_channel().0,
+        )))
+    });
+    let cron_scheduler: Option<Arc<dyn CronSchedulerPort>> =
+        cron_scheduler_concrete.as_ref().map(|scheduler| {
+            Arc::new(peri_mcp_cron::CronSchedulerPortHandle(Arc::clone(
+                scheduler,
+            ))) as Arc<dyn CronSchedulerPort>
+        });
 
     // ── LSP：配置合并 + host 级唯一 pool（A11/A21/A22，顺序冻结见 sub-plan H §5.1）──
     //
@@ -384,7 +429,7 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
     // H5：全局 settings.json（config.lspServers）与插件 LSP 服务器合并
     //（优先级对齐 MCP：global < plugin；无插件时全局配置单独生效）。
     // 读取路径跟随宿主全局配置加载机制（config_path，支持测试重定向）。
-    let plugin_lsp_servers = if bare {
+    let plugin_lsp_servers = if bare || !capabilities.lsp {
         Default::default()
     } else {
         peri_mcp_lsp::load_merged_lsp_servers(
@@ -395,10 +440,13 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
                 .unwrap_or_default(),
         )
     };
-    let host_lsp_pool_concrete = peri_mcp_lsp::create_host_lsp_pool(&cwd, &plugin_lsp_servers);
+    let host_lsp_pool_concrete = capabilities
+        .lsp
+        .then(|| peri_mcp_lsp::create_host_lsp_pool(&cwd, &plugin_lsp_servers));
     // 宿主侧投影：端口即消费面（A23/A30），链上同步中间件与 host shutdown 都只经它。
-    let lsp_pool: Arc<dyn LspPoolPort> =
-        Arc::clone(&host_lsp_pool_concrete) as Arc<dyn LspPoolPort>;
+    let lsp_pool: Option<Arc<dyn LspPoolPort>> = host_lsp_pool_concrete
+        .as_ref()
+        .map(|pool| Arc::clone(pool) as Arc<dyn LspPoolPort>);
 
     // ── 会话 MCP 池（bare 仅装配 workspace；后台初始化不阻塞）──
     // OAuth 授权事件通道：MCP 授权回调（AuthorizationNeeded/Completed/Failed）
@@ -415,6 +463,15 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
             workspace_id,
             &session_resources,
         );
+        if let Err(error) = pool.set_builtin_available(capabilities.builtin_mcp) {
+            tracing::error!(%error, "MCP builtin availability binding failed");
+        }
+        if let Err(error) = pool.set_plugin_discovery_available(capabilities.plugins) {
+            tracing::error!(%error, "MCP plugin availability binding failed");
+        }
+        if let Err(error) = pool.set_stdio_available(capabilities.stdio_mcp) {
+            tracing::error!(%error, "MCP stdio availability binding failed");
+        }
         if let Some(snapshot) = config_source.snapshot() {
             if let Err(error) = pool.set_configuration_snapshot(snapshot) {
                 tracing::error!(error = %error, "MCP configuration snapshot binding failed");
@@ -442,14 +499,20 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         // 本层不包装、不派生；`None` = 可见但退化（handler 照常构造，只是 `Bash`
         // 失去后台任务那一路），不是「实例不可装配」——无 `instance_input_ready` arm。
         let mut builtin_context =
-            peri_middlewares::assembly::BuiltinInstanceContext::new(cwd.clone())
-                .with_cron(peri_middlewares::assembly::CronInstanceInput {
-                    scheduler: Arc::clone(&cron_scheduler_concrete),
+            peri_middlewares::assembly::BuiltinInstanceContext::new(cwd.clone());
+        if let Some(scheduler) = &cron_scheduler_concrete {
+            builtin_context =
+                builtin_context.with_cron(peri_middlewares::assembly::CronInstanceInput {
+                    scheduler: Arc::clone(scheduler),
                     tick_enabled: drive_cron_tick,
-                })
-                .with_lsp(peri_middlewares::assembly::LspInstanceInput {
-                    pool: Arc::clone(&host_lsp_pool_concrete),
                 });
+        }
+        if let Some(pool) = &host_lsp_pool_concrete {
+            builtin_context =
+                builtin_context.with_lsp(peri_middlewares::assembly::LspInstanceInput {
+                    pool: Arc::clone(pool),
+                });
+        }
         if let Some(workspace_input) = workspace_input {
             builtin_context = builtin_context.with_workspace(workspace_input);
         }
@@ -595,7 +658,9 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
                 peri_middlewares::mcp::McpClientPool::run_initialize(
                     pool_clone,
                     std::path::Path::new(&cwd_clone),
-                    &claude_home_clone,
+                    claude_home_clone
+                        .as_deref()
+                        .unwrap_or_else(|| std::path::Path::new("")),
                     init_tx,
                     oauth_event_callback,
                 )
@@ -610,13 +675,17 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
             peri_middlewares::mcp::dynamic::ProductionDynamicMcpConnector::from_environment(
                 mcp_task_spawner.clone(),
                 mcp_pool_concrete.clone().unwrap_or_else(|| {
-                    pending_mcp_pool(
+                    let pool = pending_mcp_pool(
                         mcp_task_spawner.clone(),
                         mcp_profile.clone(),
                         session_scoped.then_some(std::path::Path::new(&cwd)),
                         workspace_id,
                         &session_resources,
-                    )
+                    );
+                    if let Err(error) = pool.set_stdio_available(capabilities.stdio_mcp) {
+                        tracing::error!(%error, "Dynamic MCP stdio availability binding failed");
+                    }
+                    pool
                 }),
             ),
         ),
@@ -667,8 +736,8 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         );
 
     // E2：启动时清理孤儿插件文件（迁移前 TUI launch 行为；bare 时跳过）
-    if !bare && !session_scoped {
-        let claude_dir_clone = claude_dir.clone();
+    if !bare && !session_scoped && capabilities.plugins {
+        let claude_dir_clone = claude_dir.clone().expect("plugins enabled");
         let _ = host_task_spawner.spawn(
             HostTaskOwnerKind::Startup,
             HostTaskKind::PluginCleanup,
@@ -716,7 +785,7 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         &plugin_hooks,
         settings_hooks.as_ref(),
         &cwd,
-        bare || !session_scoped,
+        bare || !session_scoped || !capabilities.settings_hooks,
     );
     let flat_hooks: Vec<RegisteredHook> = hook_groups.iter().flatten().cloned().collect();
     tracing::info!(
@@ -776,6 +845,7 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
             bare,
             drive_cron_tick,
             mcp_profile,
+            capabilities,
         }),
         host_task_owner: Some(host_task_owner),
         host_task_spawner,
@@ -799,7 +869,7 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         plugin_loaded,
         hook_groups,
         plugin_lsp_servers,
-        lsp_pool: Some(lsp_pool),
+        lsp_pool,
         tool_search_index,
         agent_catalog,
         plugin_manager,

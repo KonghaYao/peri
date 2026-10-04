@@ -135,6 +135,7 @@ async fn acp_declared_server_reaches_the_session_tool_face_and_disconnects_on_cl
         bare: true,
         drive_cron_tick: false,
         mcp_profile: McpCapabilityProfile::disabled(),
+        capabilities: Default::default(),
     });
 
     let peer = Arc::new(FakeClientHost::default());

@@ -89,8 +89,8 @@ pub(super) enum StoreInitialization {
 
 #[path = "session_open.rs"]
 mod session_open;
-use session_open::refuse_legacy_shape;
 pub(super) use session_open::{open_step, open_verdict, OpenStep};
+use session_open::{refuse_legacy_shape, resolve_open_machine_id};
 
 /// 远端会话数据 adapter：一个已初始化（或已读回身份）的远程 store 上的会话行为。
 ///
@@ -104,6 +104,7 @@ pub(super) use session_open::{open_step, open_verdict, OpenStep};
 /// （`peri_op_ledger`）仍按「资格先于效果」写，但它是**远端**事实，本机不复制。跨进程重启
 /// 后没有「按原 id 求证终态」这条路径，未结清只在本进程的租约上表达。
 pub(super) struct RemoteSessionData {
+    pub(super) machine_id: String,
     /// 连接的生命周期槽位：服务中，或关闭中（含已确认关闭）。
     slot: RwLock<ConnectionSlot>,
     /// 建立连接的地方（本 crate 唯一持有凭证处）；重建不改变打开事实。
@@ -133,6 +134,15 @@ impl RemoteSessionData {
         credential: &SessionStoreCredential,
         access: StoreAccess,
     ) -> SessionResourceResult<(Self, StoreInitialization)> {
+        Self::open_with_machine(endpoint, credential, access, None).await
+    }
+
+    pub(super) async fn open_with_machine(
+        endpoint: &RemoteEndpoint,
+        credential: &SessionStoreCredential,
+        access: StoreAccess,
+        supplied_machine_id: Option<String>,
+    ) -> SessionResourceResult<(Self, StoreInitialization)> {
         let gate = Arc::new(ConnectionGate::default());
         let factory: Arc<dyn ConnectionFactory> = Arc::new(RemoteConnectionFactory::new(
             endpoint.clone(),
@@ -155,15 +165,11 @@ impl RemoteSessionData {
                 open_verdict(store.initialize_store().await?)
             }
         };
+        let machine_id = resolve_open_machine_id(supplied_machine_id, access).await?;
         // 可写打开时补齐本构建的会话表形状：DDL 全部 `IF NOT EXISTS`，既有对象不改写、
         // 不覆盖，已初始化的 store 上是一次幂等的空操作。这一步不能只在「身份刚建立」时
         // 跑——身份早于会话表建立的 store（例如只做过机制实测的库）同样需要补齐。
         if access == StoreAccess::ReadWrite {
-            crate::sessions::machine::initialize().await.map_err(|_| {
-                SessionResourceError::new(SessionResourceErrorKind::Unavailable {
-                    detail: "machine identity initialization failed".to_owned(),
-                })
-            })?;
             // 父行检查先归位：canonical 形状里的外键在远端没有可满足的父行（见方法文档）。
             store.force_parent_checks_off().await?;
             store
@@ -172,7 +178,7 @@ impl RemoteSessionData {
             store
                 .apply_schema(vec![StatementSpec::new(
                     "INSERT OR IGNORE INTO machines(id, name, identity_kind) VALUES (?1, '我的电脑', 'known')",
-                    vec![Value::Text(crate::sessions::machine::current().map_err(|_| unsupported_behavior("machine identity is not initialized"))?.to_owned())],
+                    vec![Value::Text(machine_id.clone())],
                 )])
                 .await?;
             store
@@ -192,6 +198,7 @@ impl RemoteSessionData {
         };
         Ok((
             Self {
+                machine_id,
                 slot: RwLock::new(ConnectionSlot::serving(store)),
                 factory,
                 gate,
@@ -340,6 +347,9 @@ impl RemoteSessionData {
     #[cfg(test)]
     pub(super) fn closed_for_test(store_id: StoreId) -> Self {
         Self {
+            machine_id: crate::sessions::machine::current()
+                .unwrap_or_default()
+                .to_owned(),
             slot: RwLock::new(ConnectionSlot::default()),
             factory: Arc::new(NoConnectionFactory),
             gate: Arc::new(ConnectionGate::default()),
@@ -362,6 +372,9 @@ impl RemoteSessionData {
         gate: Arc<ConnectionGate>,
     ) -> Self {
         Self {
+            machine_id: crate::sessions::machine::current()
+                .unwrap_or_default()
+                .to_owned(),
             slot: RwLock::new(ConnectionSlot::serving(connection)),
             factory,
             gate,

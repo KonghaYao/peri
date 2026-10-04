@@ -45,6 +45,29 @@ fn builtin_config_file(
 /// 任何 `find` 不命中的良构名字都走 `UnknownBuiltinInstance`。
 const UNREGISTERED_INSTANCE: &str = "not-a-builtin";
 
+#[tokio::test]
+async fn unavailable_builtin_is_rejected_on_initialize_and_reconnect() {
+    let fixture = tempfile::tempdir().unwrap();
+    let pool = Arc::new(McpClientPool::new_pending());
+    pool.set_builtin_available(false).unwrap();
+    let (status_tx, _) = tokio::sync::watch::channel(McpInitStatus::Pending);
+    McpClientPool::initialize_config(
+        pool.clone(),
+        fixture.path(),
+        builtin_config_file(vec![("workspace", builtin_server_config("workspace"))]),
+        Default::default(),
+        status_tx,
+        None,
+    )
+    .await;
+    assert!(
+        matches!(&pool.get_client("workspace").unwrap().status, ClientStatus::Failed(reason) if reason.contains("unavailable"))
+    );
+    assert_eq!(pool.builtin_task_count(), 0);
+    let error = pool.reconnect("workspace", None).await.unwrap_err();
+    assert!(error.to_string().contains("unavailable"));
+}
+
 /// 未注册的 builtin 实例名：typed 失败 + 本代失败证据，**不**发布 ready。
 ///
 /// 实例解析的唯一事实源是注册表（`builtin_mcp::find` 只命中已实现实例）：名字不在

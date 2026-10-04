@@ -152,6 +152,43 @@ fn publish_config_failure(
 }
 
 impl McpClientPool {
+    /// Deployment capabilities must be fixed before configuration loading starts.
+    pub fn set_builtin_available(&self, available: bool) -> std::io::Result<()> {
+        let context = self.builtin_context.lock();
+        if context.initialize_started || !self.is_open() {
+            return Err(std::io::Error::other(
+                "MCP capability injection window is closed",
+            ));
+        }
+        self.builtin_available
+            .store(available, std::sync::atomic::Ordering::Release);
+        Ok(())
+    }
+
+    pub fn set_stdio_available(&self, available: bool) -> std::io::Result<()> {
+        let context = self.builtin_context.lock();
+        if context.initialize_started || !self.is_open() {
+            return Err(std::io::Error::other(
+                "MCP capability injection window is closed",
+            ));
+        }
+        self.stdio_available
+            .store(available, std::sync::atomic::Ordering::Release);
+        Ok(())
+    }
+
+    pub fn set_plugin_discovery_available(&self, available: bool) -> std::io::Result<()> {
+        let context = self.builtin_context.lock();
+        if context.initialize_started || !self.is_open() {
+            return Err(std::io::Error::other(
+                "MCP capability injection window is closed",
+            ));
+        }
+        self.plugin_discovery_available
+            .store(available, std::sync::atomic::Ordering::Release);
+        Ok(())
+    }
+
     /// Initialize only builtin workspace tools, without loading user integrations.
     /// Uses the normal discovery, readiness and owned shutdown lifecycle.
     pub async fn run_initialize_bare(
@@ -171,6 +208,14 @@ impl McpClientPool {
                 return;
             }
         };
+        if !pool
+            .builtin_available
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            config
+                .mcp_servers
+                .retain(|_, server| !matches!(server.source, Some(ConfigSource::Builtin { .. })));
+        }
         // Bare keeps only Workspace, but an explicit session Workspace must still
         // replace the builtin before discovery and readiness are published.
         if let Some(workspace) = pool
@@ -199,10 +244,23 @@ impl McpClientPool {
         // 配置加载失败必须是可见的 Failed：不发布 Ready、不标记 initialized、
         // 不注册任何 server（因而也不会开始 transport）。B 在 1R 消费该失败。
         let loaded = match pool.configuration_snapshot.get() {
-            Some(snapshot) => {
-                super::config::load_merged_config_from_snapshot(cwd, claude_home, snapshot)
-            }
-            None => super::load_merged_config_full(cwd, claude_home),
+            Some(snapshot) => super::config::load_merged_config_from_snapshot_with_capabilities(
+                cwd,
+                claude_home,
+                snapshot,
+                pool.builtin_available
+                    .load(std::sync::atomic::Ordering::Acquire),
+                pool.plugin_discovery_available
+                    .load(std::sync::atomic::Ordering::Acquire),
+            ),
+            None => super::config::load_merged_config_full_with_capabilities(
+                cwd,
+                claude_home,
+                pool.builtin_available
+                    .load(std::sync::atomic::Ordering::Acquire),
+                pool.plugin_discovery_available
+                    .load(std::sync::atomic::Ordering::Acquire),
+            ),
         };
         let (mut config, plugin_sources) = match loaded {
             Ok(loaded) => loaded,
@@ -384,6 +442,19 @@ impl McpClientPool {
                 );
                 continue;
             }
+            if matches!(server_config.source, Some(ConfigSource::Builtin { .. }))
+                && !pool
+                    .builtin_available
+                    .load(std::sync::atomic::Ordering::Acquire)
+            {
+                Self::insert_failed(
+                    &pool,
+                    name,
+                    "builtin handler is unavailable in this deployment".into(),
+                );
+                commit_discovery_failure(&pool, name, false);
+                continue;
+            }
             // 本次发现尝试开始：旧代证据立即作废，等待方按「仍在进行」重新判定，
             // 不会把上一次尝试的成功当成这一次的证据。
             pool.clear_discovery_evidence(name);
@@ -446,17 +517,31 @@ impl McpClientPool {
                     ref command,
                     ref args,
                     ref env,
-                } => match pool.spawn_stdio_transport(command, args, env, cwd) {
-                    Ok(transport) => {
-                        serve_client_auto(transport, &pool.capability_profile, timeout).await
-                    }
-                    Err(e) => {
-                        let err_str = super::client::redact_mcp_error(&e.to_string());
-                        tracing::warn!(server = %name, error = %err_str, "MCP stdio 启动失败");
-                        Self::insert_failed(&pool, name, format!("stdio 启动失败: {err_str}"));
+                } => match pool
+                    .stdio_available
+                    .load(std::sync::atomic::Ordering::Acquire)
+                {
+                    false => {
+                        Self::insert_failed(
+                            &pool,
+                            name,
+                            "stdio subprocesses are unavailable in this deployment".into(),
+                        );
                         commit_discovery_failure(&pool, name, false);
                         continue;
                     }
+                    true => match pool.spawn_stdio_transport(command, args, env, cwd) {
+                        Ok(transport) => {
+                            serve_client_auto(transport, &pool.capability_profile, timeout).await
+                        }
+                        Err(e) => {
+                            let err_str = super::client::redact_mcp_error(&e.to_string());
+                            tracing::warn!(server = %name, error = %err_str, "MCP stdio 启动失败");
+                            Self::insert_failed(&pool, name, format!("stdio 启动失败: {err_str}"));
+                            commit_discovery_failure(&pool, name, false);
+                            continue;
+                        }
+                    },
                 },
                 TransportConfig::StreamableHttp {
                     ref url,
@@ -471,15 +556,17 @@ impl McpClientPool {
                     let token_store = if scoped_workspace {
                         None
                     } else {
-                        match pool.oauth_credentials() {
-                            Ok(client) => Some(client),
-                            Err(error) => {
-                                Self::insert_failed(&pool, name, error.to_string());
-                                commit_discovery_failure(&pool, name, false);
-                                continue;
-                            }
-                        }
+                        pool.oauth_credentials().ok()
                     };
+                    if oauth.is_some() && token_store.is_none() {
+                        Self::insert_failed(
+                            &pool,
+                            name,
+                            "OAuth credentials were not injected".into(),
+                        );
+                        commit_discovery_failure(&pool, name, false);
+                        continue;
+                    }
                     let oauth_cfg = if let Some(config) = oauth.as_ref() {
                         Some(config.clone())
                     } else if let Some(token_store) = token_store.as_ref() {
@@ -700,13 +787,14 @@ impl McpClientPool {
         oauth_event_callback: Option<Box<dyn Fn(OAuthFlowEvent) + Send + Sync>>,
     ) -> Arc<Self> {
         let pool = Arc::new(Self::new_pending());
-        let (config, plugin_sources) = match super::load_merged_config_full(cwd, claude_home) {
-            Ok(loaded) => loaded,
-            Err(error) => {
-                *pool.init_status.write() = McpInitStatus::Failed(error.to_string());
-                return pool;
-            }
-        };
+        let (config, plugin_sources) =
+            match super::config::load_merged_config_full(cwd, claude_home) {
+                Ok(loaded) => loaded,
+                Err(error) => {
+                    *pool.init_status.write() = McpInitStatus::Failed(error.to_string());
+                    return pool;
+                }
+            };
         let (status_tx, _status_rx) = tokio::sync::watch::channel(McpInitStatus::Pending);
         Self::initialize_config(
             pool.clone(),

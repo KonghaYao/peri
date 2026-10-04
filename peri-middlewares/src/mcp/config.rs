@@ -295,10 +295,30 @@ pub(crate) fn load_merged_config_full(
     cwd: &Path,
     claude_home: &Path,
 ) -> Result<(McpConfigFile, HashMap<String, String>), McpConfigError> {
+    load_merged_config_full_with_capabilities(cwd, claude_home, true, true)
+}
+
+pub(crate) fn load_merged_config_full_with_capabilities(
+    cwd: &Path,
+    claude_home: &Path,
+    builtin_available: bool,
+    plugin_discovery_available: bool,
+) -> Result<(McpConfigFile, HashMap<String, String>), McpConfigError> {
     let global_path = peri_mcp_config::global_config_path();
-    let policy = super::builtin::builtin_injection_policy_from_env();
+    let policy = if builtin_available {
+        super::builtin::builtin_injection_policy_from_env()
+    } else {
+        super::builtin::BuiltinInjectionPolicy::none()
+    };
     let environment = cache_environment_input()?;
-    load_merged_config_with_environment(cwd, claude_home, &global_path, &policy, &environment)
+    load_merged_config_with_environment(
+        cwd,
+        claude_home,
+        &global_path,
+        &policy,
+        &environment,
+        plugin_discovery_available,
+    )
 }
 
 /// Bare 保留本地文件/终端能力，不读取用户、插件或项目 MCP 配置。
@@ -342,7 +362,14 @@ pub(crate) fn load_merged_config_full_with_paths(
     global_path: &Path,
     policy: &super::builtin::BuiltinInjectionPolicy,
 ) -> Result<(McpConfigFile, HashMap<String, String>), McpConfigError> {
-    load_merged_config_with_environment(cwd, claude_home, global_path, policy, &BTreeMap::new())
+    load_merged_config_with_environment(
+        cwd,
+        claude_home,
+        global_path,
+        policy,
+        &BTreeMap::new(),
+        true,
+    )
 }
 
 fn cache_environment_input() -> Result<BTreeMap<String, String>, McpConfigError> {
@@ -361,6 +388,7 @@ fn load_merged_config_with_environment(
     global_path: &Path,
     policy: &super::builtin::BuiltinInjectionPolicy,
     environment: &BTreeMap<String, String>,
+    plugin_discovery_available: bool,
 ) -> Result<(McpConfigFile, HashMap<String, String>), McpConfigError> {
     let mut plugin_sources: HashMap<String, String> = HashMap::new();
 
@@ -372,9 +400,13 @@ fn load_merged_config_with_environment(
 
     // 2. 加载插件 MCP 配置（claude_home 目录下的已启用插件）
     // 每插件独立上下文展开 env 变量，同时构建 plugin_sources（marketplace 追踪）
-    let plugins = crate::plugin::loader::load_enabled_plugins_for_mcp(claude_home, None)
-        .map_err(|source| McpConfigError::PluginLoadError { source })?;
-    let plugin_servers = collect_plugin_mcp_servers(&plugins, &mut plugin_sources);
+    let plugin_servers = if plugin_discovery_available {
+        let plugins = crate::plugin::loader::load_enabled_plugins_for_mcp(claude_home, None)
+            .map_err(|source| McpConfigError::PluginLoadError { source })?;
+        collect_plugin_mcp_servers(&plugins, &mut plugin_sources)
+    } else {
+        HashMap::new()
+    };
 
     // 3. 加载项目级配置（{cwd}/.mcp.json）
     let project_path = cwd.join(".mcp.json");
@@ -391,10 +423,21 @@ fn load_merged_config_with_environment(
     finalize_merged_config(merged, policy).map(|merged| (merged, plugin_sources))
 }
 
+#[cfg(test)]
 pub(crate) fn load_merged_config_from_snapshot(
     cwd: &Path,
     claude_home: &Path,
     snapshot: &peri_config::ConfigurationSnapshot,
+) -> Result<(McpConfigFile, HashMap<String, String>), McpConfigError> {
+    load_merged_config_from_snapshot_with_capabilities(cwd, claude_home, snapshot, true, true)
+}
+
+pub(crate) fn load_merged_config_from_snapshot_with_capabilities(
+    cwd: &Path,
+    claude_home: &Path,
+    snapshot: &peri_config::ConfigurationSnapshot,
+    builtin_available: bool,
+    plugin_discovery_available: bool,
 ) -> Result<(McpConfigFile, HashMap<String, String>), McpConfigError> {
     let snapshot_cwd = &snapshot.scope().cwd;
     if snapshot_cwd != cwd {
@@ -405,11 +448,15 @@ pub(crate) fn load_merged_config_from_snapshot(
     }
 
     let mut plugin_sources = HashMap::new();
-    let plugins = crate::plugin::loader::load_enabled_plugins_for_mcp(claude_home, None)
-        .map_err(|source| McpConfigError::PluginLoadError { source })?;
-    let plugin_servers = collect_plugin_mcp_servers(&plugins, &mut plugin_sources);
+    let plugin_servers = if plugin_discovery_available {
+        let plugins = crate::plugin::loader::load_enabled_plugins_for_mcp(claude_home, None)
+            .map_err(|source| McpConfigError::PluginLoadError { source })?;
+        collect_plugin_mcp_servers(&plugins, &mut plugin_sources)
+    } else {
+        HashMap::new()
+    };
     let merged = snapshot.mcp_with_plugins(&plugin_servers)?;
-    let policy = if snapshot.builtin_mcp_enabled() {
+    let policy = if builtin_available && snapshot.builtin_mcp_enabled() {
         super::builtin::BuiltinInjectionPolicy::all()
     } else {
         super::builtin::BuiltinInjectionPolicy::none()

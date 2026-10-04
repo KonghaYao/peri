@@ -10,17 +10,17 @@ impl SessionResourcesImpl {
     ) -> SessionResourceResult<ResolvedWorkspace> {
         let meta = self.gate.data().load_meta(id).await?;
         let binding = self.gate.data().binding_of(id).await?;
-        let missing_directory = !tokio::fs::metadata(&meta.cwd)
-            .await
-            .map(|metadata| metadata.is_dir())
-            .unwrap_or(false);
+        let local = self.gate.local();
+        let missing_directory = !local.directory_available(Path::new(&meta.cwd)).await;
         let foreign_machine = self
             .gate
             .data()
             .machine_id_of(id)
             .await?
             .is_some_and(|machine| {
-                crate::sessions::machine::current().map_or(true, |current| machine != current)
+                local
+                    .machine_id()
+                    .map_or(true, |current| machine != current)
             });
         let missing_remote_evidence = matches!(self.home, SessionDataHome::RemoteStore)
             && self
@@ -29,7 +29,11 @@ impl SessionResourcesImpl {
                 .binding_discovery_snapshot(id)
                 .await?
                 .is_none();
-        if binding.is_none() && !missing_directory && !foreign_machine {
+        if binding.is_none()
+            && matches!(self.home, SessionDataHome::LocalLibrary)
+            && !missing_directory
+            && !foreign_machine
+        {
             if let Ok(resolved) = self
                 .gate
                 .local()

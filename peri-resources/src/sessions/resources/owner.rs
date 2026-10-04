@@ -103,7 +103,7 @@ impl SessionResourcesImpl {
         self.validate_session(id, workspace).await?;
         if let Some(machine_id) = self.gate.data().machine_id_of(id).await? {
             if machine_id
-                != crate::sessions::machine::current().map_err(|_| {
+                != self.gate.local().machine_id().map_err(|_| {
                     crate::sessions::sqlite_store::unavailable(
                         "machine identity is not initialized",
                     )

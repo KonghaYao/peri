@@ -323,6 +323,7 @@ impl SessionEnvironment {
             source.mcp_profile.clone(),
             true,
             Some(activation.clone()),
+            source.capabilities,
         )
         .await;
         cfg.session_manager

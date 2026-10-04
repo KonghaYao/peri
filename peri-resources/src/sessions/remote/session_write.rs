@@ -33,10 +33,10 @@ use super::sql::StatementSpec;
 
 impl RemoteSessionData {
     fn workspace_registration_statements(
+        &self,
         workspace: &ResolvedWorkspace,
     ) -> SessionResourceResult<Vec<StatementSpec>> {
-        let machine_id = crate::sessions::machine::current()
-            .map_err(|_| invalid_input("machine identity is not initialized"))?;
+        let machine_id = self.machine_id.as_str();
         let path = workspace
             .root
             .to_str()
@@ -83,7 +83,7 @@ impl RemoteSessionData {
         let mut row = session_sql::session_insert(input, 0, None);
         row.owner_workspace_id = Some(workspace.workspace_id);
         row.discovery_snapshot = workspace.discovery_snapshot.as_deref();
-        let mut statements = Self::workspace_registration_statements(workspace)?;
+        let mut statements = self.workspace_registration_statements(workspace)?;
         statements.extend(session_sql::insert_session_statements(&row)?);
         let inputs = session_inputs(input);
         self.commit_effects("create_session", &inputs, statements, &input.thread_id)
@@ -101,7 +101,7 @@ impl RemoteSessionData {
                 "child sessions must be saved through the child path",
             ));
         }
-        let mut statements = Self::workspace_registration_statements(workspace)?;
+        let mut statements = self.workspace_registration_statements(workspace)?;
         statements.extend(session_sql::insert_session_draft_statements(
             draft,
             Some(workspace.workspace_id),
@@ -243,7 +243,7 @@ impl RemoteSessionData {
             insert.discovery_snapshot = workspace.discovery_snapshot.as_deref();
         }
         let mut statements = workspace
-            .map(Self::workspace_registration_statements)
+            .map(|workspace| self.workspace_registration_statements(workspace))
             .transpose()?
             .unwrap_or_default();
         statements.extend(session_sql::insert_session_statements(&insert)?);

@@ -280,13 +280,13 @@ async fn test_load_without_lsp_config_projects_empty_host_pool() {
     await_server_exit(server_task, input_write).await;
 }
 
-/// session/new 预热 MCP skill 发现 smoke：pool 存在但无已连接 server（pending）
+/// session/new 预热 MCP skill 发现 smoke：pool 已初始化但无已连接 server
 /// 时 prewarm 空跑不 panic、响应正常（已连接 server 的发现行为由 middleware
 /// 层单测覆盖）。
 #[tokio::test]
 async fn test_new_prewarms_mcp_discovery_smoke() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let cfg = test_config_with_pending_mcp_pool(&tmp).await;
+    let cfg = test_config_with_empty_mcp_pool(&tmp).await;
     let (transport, mut input_write, mut output_read) = duplex_transport();
     let transport: Arc<dyn AcpTransport> = Arc::new(transport);
     let sessions = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
@@ -309,7 +309,7 @@ async fn test_new_prewarms_mcp_discovery_smoke() {
         result["sessionId"].as_str().is_some_and(|s| !s.is_empty()),
         "session/new 应返回 sessionId: {result}"
     );
-    // prewarm 空跑路径（pending pool 无已连接 server）不 panic
+    // prewarm 空跑路径（已初始化空 pool）不 panic
 
     await_server_exit(server_task, input_write).await;
 }

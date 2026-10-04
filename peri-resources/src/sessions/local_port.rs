@@ -51,6 +51,19 @@ pub(in crate::sessions) trait LocalExecutionPort: Send + Sync {
     /// 本机是否只读打开（只读时任何执行资格都不可得，历史仍可读）。
     fn is_read_only(&self) -> bool;
 
+    /// 当前执行环境的稳定机器身份；门面只比较持久归属，不读取进程全局身份。
+    fn machine_id(&self) -> Result<String> {
+        Ok(super::machine::current()?.to_owned())
+    }
+
+    /// 保存的 cwd 在当前执行环境中是否仍可作为目录使用。
+    async fn directory_available(&self, cwd: &Path) -> bool {
+        tokio::fs::metadata(cwd)
+            .await
+            .map(|metadata| metadata.is_dir())
+            .unwrap_or(false)
+    }
+
     // ── 发现与登记 ──
 
     /// 解析并登记本机执行目录。

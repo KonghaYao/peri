@@ -49,7 +49,7 @@ impl RemoteSessionData {
                 "SELECT id, name, identity_kind FROM machines ORDER BY name, id",
             ))
             .await?;
-        let current = crate::sessions::machine::current().ok();
+        let current = (!self.machine_id.is_empty()).then_some(self.machine_id.as_str());
         rows.into_iter()
             .map(|row| {
                 let id = super::sql::text_at(&row, 0)

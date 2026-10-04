@@ -62,6 +62,32 @@ fn install_enabled_plugin(claude_home: &Path) {
 }
 
 #[test]
+fn deployment_can_skip_plugin_discovery_and_builtin_overlay() {
+    let temp = tempfile::tempdir().unwrap();
+    let cwd = temp.path().join("project");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let claude_home = temp.path().join("claude");
+    install_enabled_plugin(&claude_home);
+    let snapshot = snapshot_for(
+        &cwd,
+        &temp.path().join("settings.json"),
+        "{}",
+        "{}",
+        HashMap::new(),
+    );
+    let (config, plugin_sources) = load_merged_config_from_snapshot_with_capabilities(
+        &cwd,
+        &claude_home,
+        &snapshot,
+        false,
+        false,
+    )
+    .unwrap();
+    assert!(config.mcp_servers.is_empty());
+    assert!(plugin_sources.is_empty());
+}
+
+#[test]
 fn snapshot_loader_rejects_a_mismatched_workspace_before_loading_plugins() {
     let temp = tempfile::tempdir().unwrap();
     let cwd = temp.path().join("project");

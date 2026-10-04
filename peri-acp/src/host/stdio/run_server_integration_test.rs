@@ -295,9 +295,9 @@ async fn test_config_with_lsp(
     make_server_config_with(peri_config, provider, tmp, lsp_servers, None, None).await
 }
 
-/// 带 pending `mcp_pool` 注入的测试配置（MCP 发现预热 smoke：pool 存在但
+/// 带已初始化空 `mcp_pool` 的测试配置（MCP 发现预热 smoke：pool 存在但
 /// 无已连接 server）。
-async fn test_config_with_pending_mcp_pool(tmp: &tempfile::TempDir) -> AcpServerConfig {
+async fn test_config_with_empty_mcp_pool(tmp: &tempfile::TempDir) -> AcpServerConfig {
     let peri_config = make_peri_config_with_provider(make_provider_config(
         "a",
         "openai",
@@ -305,8 +305,12 @@ async fn test_config_with_pending_mcp_pool(tmp: &tempfile::TempDir) -> AcpServer
         "gpt-4o",
     ));
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let pool: Arc<dyn peri_acp_types::ports::McpPoolPort> =
-        Arc::new(peri_middlewares::mcp::McpClientPool::new_pending());
+    let pool = Arc::new(peri_middlewares::mcp::McpClientPool::new_pending());
+    pool.set_builtin_available(false).unwrap();
+    let (status_tx, _) = tokio::sync::watch::channel(peri_middlewares::mcp::McpInitStatus::Pending);
+    peri_middlewares::mcp::McpClientPool::run_initialize_bare(pool.clone(), tmp.path(), status_tx)
+        .await;
+    let pool: Arc<dyn peri_acp_types::ports::McpPoolPort> = pool;
     make_server_config_with(peri_config, provider, tmp, Vec::new(), Some(pool), None).await
 }
 
@@ -868,98 +872,8 @@ async fn test_prompt_wire_shape_unknown_session_returns_error() {
     await_server_exit(server_task, input_write).await;
 }
 
-/// `session/rename` 经 stdio wire 完整链路：initialize → session/new →
-/// session/rename。通知先于响应（`handle_rename` 中
-/// `send_session_info_update_with_title` 在响应返回前推送），通知携带
-/// `SessionInfoUpdate.title`，响应往返 `{sessionId, title}`，thread store
-/// 持久化标题——证明 stdio 与 TUI 共用统一 host 后 rename RPC 对 stdio 生效
-/// （请求注册于 `host/requests.rs`）。
-#[tokio::test]
-async fn test_rename_over_stdio_transport() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let cfg = test_config(&tmp).await;
-    let session_resources = Arc::clone(&cfg.session_resources);
-    let (transport, mut input_write, mut output_read) = duplex_transport();
-    let transport: Arc<dyn AcpTransport> = Arc::new(transport);
-    let server_task = tokio::spawn(host::run_acp_server(transport, cfg));
-
-    send_initialize(&mut input_write, &mut output_read).await;
-
-    // ── session/new ──
-    let cwd = tmp.path().to_str().unwrap();
-    write_line(
-        &mut input_write,
-        &json!({
-            "jsonrpc": "2.0",
-            "id": 2,
-            "method": "session/new",
-            "params": { "cwd": cwd }
-        })
-        .to_string(),
-    )
-    .await;
-    let line = read_line(&mut output_read).await;
-    let resp: Value = serde_json::from_str(&line).unwrap();
-    assert_eq!(resp["id"], 2, "session/new RequestId 往返: {resp}");
-    assert!(resp.get("error").is_none(), "session/new 不应报错: {resp}");
-    let session_id = resp["result"]["sessionId"]
-        .as_str()
-        .expect("session/new 返回非空 sessionId")
-        .to_string();
-    // 消费 session/new 后的 available_commands_update 通知
-    let line = read_line(&mut output_read).await;
-    let notif: Value = serde_json::from_str(&line).unwrap();
-    assert_eq!(notif["method"], "session/update", "通知 method: {notif}");
-
-    // ── session/rename ──
-    write_line(
-        &mut input_write,
-        &json!({
-            "jsonrpc": "2.0",
-            "id": 3,
-            "method": "session/rename",
-            "params": { "sessionId": session_id, "title": "stdio 命名会话" }
-        })
-        .to_string(),
-    )
-    .await;
-
-    // 通知先于响应（handle_rename 在返回前推送 SessionInfoUpdate）
-    let line = read_line(&mut output_read).await;
-    let notif: Value = serde_json::from_str(&line).unwrap();
-    assert_eq!(
-        notif["method"], "session/update",
-        "rename 通知 method: {notif}"
-    );
-    assert_eq!(notif["params"]["sessionId"], session_id);
-    assert_eq!(
-        notif["params"]["update"]["sessionUpdate"], "session_info_update",
-        "SessionInfoUpdate 判别字符串: {notif}"
-    );
-    assert_eq!(notif["params"]["update"]["title"], "stdio 命名会话");
-
-    // 响应往返 {sessionId, title}
-    let line = read_line(&mut output_read).await;
-    let resp: Value = serde_json::from_str(&line).unwrap();
-    assert_eq!(resp["id"], 3, "rename RequestId 往返: {resp}");
-    assert!(resp.get("error").is_none(), "rename 不应报错: {resp}");
-    assert_eq!(resp["result"]["sessionId"], session_id, "响应: {resp}");
-    assert_eq!(resp["result"]["title"], "stdio 命名会话", "响应: {resp}");
-
-    // 持久化：thread store 标题已更新
-    let meta = session_resources
-        .load_session_meta(&session_id)
-        .await
-        .unwrap();
-    assert_eq!(meta.title.as_deref(), Some("stdio 命名会话"));
-
-    // ── EOF → 宿主优雅退出 ──
-    drop(input_write);
-    tokio::time::timeout(std::time::Duration::from_secs(10), server_task)
-        .await
-        .expect("run_acp_server 应在 stdin EOF 后退出")
-        .expect("server task 不应 panic");
-}
+#[path = "run_server_rename_test.rs"]
+mod rename_tests;
 
 #[path = "langfuse_shutdown_test.rs"]
 mod langfuse_shutdown_tests;

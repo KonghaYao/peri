@@ -234,7 +234,7 @@ impl SessionResourcesImpl {
         }
         if let Some(machine_id) = self.gate.data().machine_id_of(id).await? {
             if machine_id
-                != crate::sessions::machine::current().map_err(|_| {
+                != local.machine_id().map_err(|_| {
                     crate::sessions::sqlite_store::unavailable(
                         "machine identity is not initialized",
                     )
@@ -254,11 +254,7 @@ impl SessionResourcesImpl {
         {
             return Ok(ExecutionAvailability::WorkspaceUnavailable);
         }
-        if !tokio::fs::metadata(&meta.cwd)
-            .await
-            .map(|metadata| metadata.is_dir())
-            .unwrap_or(false)
-        {
+        if !local.directory_available(Path::new(&meta.cwd)).await {
             return Ok(ExecutionAvailability::WorkspaceUnavailable);
         }
         if matches!(self.home, SessionDataHome::RemoteStore) {

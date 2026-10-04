@@ -456,6 +456,7 @@ async fn assemble_host_with_workspace_input(
         peri_middlewares::mcp::apps::McpCapabilityProfile::disabled(),
         true,
         None,
+        Default::default(),
     )
     .await
 }

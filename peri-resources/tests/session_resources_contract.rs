@@ -309,7 +309,7 @@ async fn test_contract_delete_removes_the_session_and_its_execution_facts() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_contract_process_owners_are_independent_and_crash_preserves_canonical_facts() {
+async fn test_contract_process_owner_is_exclusive_and_crash_preserves_canonical_facts() {
     let repo = repository();
     let db = tempfile::tempdir().unwrap();
     let path = db.path().join("threads.db");
@@ -322,6 +322,17 @@ async fn test_contract_process_owners_are_independent_and_crash_preserves_canoni
         .unwrap();
 
     let before = facade.load_session_snapshot(&id).await.unwrap();
+    facade
+        .append_history(&id, &[message("original instance still active")])
+        .await
+        .unwrap();
+    // Store ownership is exclusive across processes. Release this process's
+    // claim before the child acquires its own execution lease.
+    lease.mark_clean().await.unwrap();
+    facade
+        .release_execution_owner(&lease.owner_token().unwrap())
+        .await
+        .unwrap();
     let output = child(&path, repo.path(), &id, "clean");
     assert!(
         output.status.success(),
@@ -330,26 +341,23 @@ async fn test_contract_process_owners_are_independent_and_crash_preserves_canoni
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("running 1 test"));
-    facade
-        .append_history(&id, &[message("original instance still active")])
-        .await
-        .unwrap();
-    lease.mark_clean().await.unwrap();
     let output = child(&path, repo.path(), &id, "crash");
     assert!(output.status.success());
-    let next = facade.acquire_execution(&id, &workspace).await.unwrap();
-    lease.mark_clean().await.unwrap();
-    facade
-        .append_history(&id, &[message("continued after process crash")])
+    let error = facade
+        .acquire_execution(&id, &workspace)
         .await
+        .err()
         .unwrap();
+    assert!(matches!(
+        error.kind(),
+        SessionResourceErrorKind::Conflict { .. }
+    ));
     let after = facade.load_session_snapshot(&id).await.unwrap();
     assert_eq!(after.binding, before.binding);
     assert_eq!(after.frozen, before.frozen);
-    assert_eq!(after.payloads.len(), 2);
+    assert_eq!(after.payloads.len(), 1);
     assert_eq!(after.meta.cwd, before.meta.cwd);
     assert_eq!(after.meta.parent_thread_id, before.meta.parent_thread_id);
-    next.mark_clean().await.unwrap();
 }
 
 /// 子进程入口：同一测试二进制的另一进程，经公共门面动作验证跨进程所有权。
@@ -367,6 +375,10 @@ async fn test_contract_child_process() {
         "clean" => {
             let lease = facade.acquire_execution(&id, &workspace).await.unwrap();
             lease.mark_clean().await.unwrap();
+            facade
+                .release_execution_owner(&lease.owner_token().unwrap())
+                .await
+                .unwrap();
         }
         "crash" => {
             let _lease = facade.acquire_execution(&id, &workspace).await.unwrap();

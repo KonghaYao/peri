@@ -927,3 +927,17 @@ fn cron_sensitive_markdown_uses_registry_effective_name() {
         }
     }
 }
+
+#[test]
+fn deployment_closed_builtin_is_omitted_from_prompt_without_weakening_approval() {
+    let disabled = std::collections::HashSet::from([
+        "CronMiddleware".to_owned(),
+        "WorkspaceMiddleware".to_owned(),
+    ]);
+    let visible = format_sensitive_tools_for_disabled(&disabled);
+    assert!(!visible.contains("mcp__cron__cron_register"));
+    assert!(!visible.lines().any(|line| line.starts_with("- `Bash`")));
+    assert!(visible.lines().any(|line| line.starts_with("- `WebFetch`")));
+    assert!(default_requires_approval("cron_register"));
+    assert_eq!(format_sensitive_tools().lines().count(), 14);
+}

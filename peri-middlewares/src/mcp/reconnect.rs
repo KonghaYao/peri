@@ -1,3 +1,4 @@
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use super::{
@@ -45,7 +46,6 @@ impl McpClientPool {
                 server: server_name.to_string(),
                 status: ClientStatus::Disconnected,
             })?;
-
         // 重新发现开始：旧代证据立即作废，等待方按「仍在进行」重新判定
         // （旧代证据即使保留也不会被接受，但显式清除让等待方立刻重读事实）。
         self.clear_discovery_evidence(server_name);
@@ -71,6 +71,19 @@ impl McpClientPool {
             .get(server_name)
             .map(|c| c.status.clone());
         self.clients.write().remove(server_name);
+        if matches!(
+            server_config.source,
+            Some(super::config::ConfigSource::Builtin { .. })
+        ) && !self.builtin_available.load(Ordering::Acquire)
+        {
+            let reason = "builtin handler is unavailable in this deployment".to_string();
+            McpClientPool::insert_failed(self, server_name, reason.clone());
+            commit_discovery_failure(self, server_name, false);
+            return Err(McpPoolError::ConnectionFailed {
+                server: server_name.to_string(),
+                reason,
+            });
+        }
 
         let tc = TransportConfig::try_from(&server_config).map_err(|e| {
             McpPoolError::ConnectionFailed {
@@ -126,6 +139,16 @@ impl McpClientPool {
                 connected
             }
             TransportConfig::Stdio { command, args, env } => {
+                if !self.stdio_available.load(Ordering::Acquire) {
+                    let reason =
+                        "stdio subprocesses are unavailable in this deployment".to_string();
+                    McpClientPool::insert_failed(self, server_name, reason.clone());
+                    commit_discovery_failure(self, server_name, false);
+                    return Err(McpPoolError::ConnectionFailed {
+                        server: server_name.to_string(),
+                        reason,
+                    });
+                }
                 let cwd =
                     self.execution_cwd
                         .get()
@@ -161,13 +184,17 @@ impl McpClientPool {
                 let token_store = if scoped_workspace {
                     None
                 } else {
-                    Some(self.oauth_credentials().map_err(|error| {
-                        McpPoolError::ConnectionFailed {
-                            server: server_name.to_string(),
-                            reason: error.to_string(),
-                        }
-                    })?)
+                    self.oauth_credentials().ok()
                 };
+                if oauth.is_some() && token_store.is_none() {
+                    let reason = "OAuth credentials were not injected".to_string();
+                    McpClientPool::insert_failed(self, server_name, reason.clone());
+                    commit_discovery_failure(self, server_name, false);
+                    return Err(McpPoolError::ConnectionFailed {
+                        server: server_name.to_string(),
+                        reason,
+                    });
+                }
                 let oauth_cfg = if let Some(config) = oauth.as_ref() {
                     Some(config.clone())
                 } else if let Some(token_store) = token_store.as_ref() {
@@ -219,22 +246,44 @@ impl McpClientPool {
                                 )
                                 .await
                             } else {
+                                if oauth.is_none() {
+                                    serve_client_auto(
+                                        build_http_transport(url, headers),
+                                        &self.capability_profile,
+                                        timeout,
+                                    )
+                                    .await
+                                } else {
+                                    let reason =
+                                        "OAuth authorization produced no credential manager"
+                                            .to_string();
+                                    McpClientPool::insert_failed(self, server_name, reason.clone());
+                                    commit_discovery_failure(self, server_name, false);
+                                    return Err(McpPoolError::ConnectionFailed {
+                                        server: server_name.to_string(),
+                                        reason,
+                                    });
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            if oauth.is_none() {
+                                tracing::warn!(server = %server_name, error = %e, "OAuth 恢复失败，尝试裸连接");
                                 serve_client_auto(
                                     build_http_transport(url, headers),
                                     &self.capability_profile,
                                     timeout,
                                 )
                                 .await
+                            } else {
+                                let reason = format!("OAuth 恢复失败: {e}");
+                                McpClientPool::insert_failed(self, server_name, reason.clone());
+                                commit_discovery_failure(self, server_name, false);
+                                return Err(McpPoolError::ConnectionFailed {
+                                    server: server_name.to_string(),
+                                    reason,
+                                });
                             }
-                        }
-                        Err(e) => {
-                            tracing::warn!(server = %server_name, error = %e, "OAuth 恢复失败，尝试裸连接");
-                            serve_client_auto(
-                                build_http_transport(url, headers),
-                                &self.capability_profile,
-                                timeout,
-                            )
-                            .await
                         }
                     }
                 } else {

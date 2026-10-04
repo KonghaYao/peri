@@ -20,6 +20,7 @@ async fn frozen_case_config(
         bare: true,
         drive_cron_tick: false,
         mcp_profile: peri_middlewares::mcp::apps::McpCapabilityProfile::disabled(),
+        capabilities: Default::default(),
     });
     cfg
 }

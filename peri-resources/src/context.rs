@@ -63,6 +63,31 @@ impl SessionStoreShutdownPort for SessionStoreShutdownOwner {
 }
 
 impl Resources {
+    /// Open a remote Session store with a deployment supplied virtual workspace
+    /// identity. Local locators are rejected before any I/O.
+    pub async fn open_deployment_in_remote_environment(
+        deployment: &SessionStoreDeployment,
+        environment: crate::sessions::RemoteWorkspaceEnvironment,
+    ) -> Result<Self> {
+        let request = SessionStoreOpenRequest::from_deployment(deployment)?;
+        let ResolvedLocator::Remote(endpoint) = request.resolve_locator()? else {
+            anyhow::bail!("remote workspace environment requires a remote session store");
+        };
+        let Some(source) = request.credential_source() else {
+            return Err(LocatorError::MissingCredentialSource.into());
+        };
+        let credential = source.resolve()?;
+        crate::sessions::open_remote_in_environment(
+            &endpoint,
+            &credential,
+            request.access(),
+            environment,
+        )
+        .await
+        .map(Self::from_facade)
+        .map_err(|error| error.context("无法打开远程会话存储"))
+    }
+
     /// 打开全部资源（当前为会话存储）。
     ///
     /// 默认路径 `~/.peri/threads/threads.db` 写打开失败时会降级为只读打开，

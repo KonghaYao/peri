@@ -6,8 +6,31 @@ use super::super::{
     sql::{int_at, StatementSpec},
 };
 use super::{unsupported_behavior, StoreInitialization};
-use peri_acp_types::session_resources::SessionResourceResult;
+use peri_acp_types::session_resources::{
+    SessionResourceError, SessionResourceErrorKind, SessionResourceResult,
+};
 use turso_serverless::Value;
+
+/// Resolve the execution machine only after the remote store's identity has
+/// been read. A read-only Native open must not create a local machine ID.
+pub(super) async fn resolve_open_machine_id(
+    supplied: Option<String>,
+    access: StoreAccess,
+) -> SessionResourceResult<String> {
+    if let Some(machine_id) = supplied {
+        return Ok(machine_id);
+    }
+    if access == StoreAccess::ReadWrite {
+        crate::sessions::machine::initialize().await.map_err(|_| {
+            SessionResourceError::new(SessionResourceErrorKind::Unavailable {
+                detail: "machine identity initialization failed".to_owned(),
+            })
+        })?;
+    }
+    Ok(crate::sessions::machine::current()
+        .unwrap_or_default()
+        .to_owned())
+}
 
 /// 只读身份读取之后的下一步（纯函数结论）。
 #[derive(Clone, Debug, PartialEq, Eq)]

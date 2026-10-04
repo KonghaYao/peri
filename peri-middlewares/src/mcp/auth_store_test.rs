@@ -242,9 +242,10 @@ async fn oauth_start_without_injection_fails_without_fallback() {
 #[tokio::test]
 async fn reconnect_without_oauth_injection_reports_error() {
     let pool = Arc::new(McpClientPool::new_pending());
-    pool.configs
-        .write()
-        .insert("server".into(), http_config("https://example/mcp", None));
+    pool.configs.write().insert(
+        "server".into(),
+        http_config("https://example/mcp", Some(OAuthConfig::default())),
+    );
     let error = pool.reconnect("server", None).await.unwrap_err();
     assert!(error.to_string().contains("not injected"));
     assert!(pool.oauth_credentials().is_err());
