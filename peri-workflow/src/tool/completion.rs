@@ -24,7 +24,7 @@ impl ExecutionOwner {
     pub(super) fn admit(manager: Option<&dyn TaskManager>) -> Result<Self, String> {
         Ok(Self {
             guard: manager
-                .map(TaskManager::begin_external_execution)
+                .map(|manager| TaskManager::begin_external_execution(manager, "workflow"))
                 .transpose()?,
             started: false,
         })

@@ -125,7 +125,10 @@ pub(super) async fn resume_subagent_impl(
     let ownership = task_manager
         .as_ref()
         .map(|manager| {
-            peri_acp_types::tasks::TaskManager::begin_external_execution(manager.as_ref())
+            peri_acp_types::tasks::TaskManager::begin_external_execution(
+                manager.as_ref(),
+                "subagent",
+            )
         })
         .transpose()?;
     let cluster_root = super::execution_root(session_resources.as_ref(), &thread_id).await?;

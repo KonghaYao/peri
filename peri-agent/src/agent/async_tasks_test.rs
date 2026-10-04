@@ -32,6 +32,9 @@ fn make_task(id: &str) -> BackgroundTask {
         pid: None,
         output_preview: None,
         agent_inbox: None,
+        initiator_session_id: None,
+        owner_session_id: None,
+        owner_identity: None,
     }
 }
 
@@ -43,6 +46,7 @@ async fn external_completion_notifies_before_terminal_and_retries_failed_deliver
     let task_id = manager
         .register_external(ExternalTaskRegistration {
             session_id: "session-a".into(),
+            initiator_session_id: Some("session-a".into()),
             owner_identity: "workspace-a".into(),
             owner_task_id: "same-raw-id".into(),
             kind: BgTaskKind::Shell,
@@ -51,11 +55,13 @@ async fn external_completion_notifies_before_terminal_and_retries_failed_deliver
             cancel: std::sync::Arc::new(|| Box::pin(async { Ok(()) })),
             on_terminal: std::sync::Arc::new(move |_, _| {
                 let attempt = notify_attempts.fetch_add(1, Ordering::SeqCst);
-                if attempt == 0 {
-                    Err("inbox unavailable".into())
-                } else {
-                    Ok(())
-                }
+                Box::pin(async move {
+                    if attempt == 0 {
+                        Err("inbox unavailable".into())
+                    } else {
+                        Ok(())
+                    }
+                })
             }),
         })
         .unwrap();
@@ -82,6 +88,7 @@ async fn external_completion_notifies_before_terminal_and_retries_failed_deliver
                 shell_output: None,
             }
         )
+        .await
         .is_err());
     assert_eq!(manager.active_count(), 1);
     assert_eq!(manager.snapshot().tasks[0].status, "running");
@@ -101,6 +108,7 @@ async fn external_completion_notifies_before_terminal_and_retries_failed_deliver
     assert_eq!(
         manager
             .settle_external(&task_id, "terminal-1", result.clone())
+            .await
             .unwrap(),
         true
     );
@@ -109,6 +117,7 @@ async fn external_completion_notifies_before_terminal_and_retries_failed_deliver
     assert_eq!(
         manager
             .settle_external(&task_id, "terminal-1", result)
+            .await
             .unwrap(),
         false
     );
@@ -121,13 +130,14 @@ async fn external_cancel_request_keeps_task_active_until_owner_settles() {
     let task_id = manager
         .register_external(ExternalTaskRegistration {
             session_id: "session-a".into(),
+            initiator_session_id: Some("session-a".into()),
             owner_identity: "workspace-a".into(),
             owner_task_id: "cancel-raw-id".into(),
             kind: BgTaskKind::Mcp,
             summary: "remote task".into(),
             started_at: None,
             cancel: std::sync::Arc::new(|| Box::pin(async { Ok(()) })),
-            on_terminal: std::sync::Arc::new(|_, _| Ok(())),
+            on_terminal: std::sync::Arc::new(|_, _| Box::pin(async { Ok(()) })),
         })
         .unwrap();
     manager.cancel_async(&task_id).await.unwrap();
@@ -151,6 +161,7 @@ async fn external_cancel_request_keeps_task_active_until_owner_settles() {
                 shell_output: None,
             }
         )
+        .await
         .unwrap());
     assert_eq!(manager.active_count(), 0);
 }
@@ -164,6 +175,7 @@ async fn cold_terminal_restore_has_no_running_projection_or_started_event() {
         let deliveries = deliveries.clone();
         ExternalTaskRegistration {
             session_id: "session-a".into(),
+            initiator_session_id: Some("session-a".into()),
             owner_identity: "workspace-a".into(),
             owner_task_id: "finished-raw-id".into(),
             kind: BgTaskKind::Shell,
@@ -172,7 +184,7 @@ async fn cold_terminal_restore_has_no_running_projection_or_started_event() {
             cancel: std::sync::Arc::new(|| Box::pin(async { Ok(()) })),
             on_terminal: std::sync::Arc::new(move |_, _| {
                 deliveries.fetch_add(1, Ordering::SeqCst);
-                Ok(())
+                Box::pin(async { Ok(()) })
             }),
         }
     };
@@ -191,6 +203,7 @@ async fn cold_terminal_restore_has_no_running_projection_or_started_event() {
     };
     let id = manager
         .restore_external_terminal(make_request(), "transition-1", result.clone())
+        .await
         .unwrap();
     assert_eq!(manager.snapshot().tasks[0].task_id, id);
     assert_eq!(manager.snapshot().tasks[0].status, "completed");
@@ -207,6 +220,7 @@ async fn cold_terminal_restore_has_no_running_projection_or_started_event() {
     assert_eq!(
         manager
             .restore_external_terminal(make_request(), "transition-1", result)
+            .await
             .unwrap(),
         id
     );
@@ -229,6 +243,7 @@ async fn cold_terminal_restore_has_no_running_projection_or_started_event() {
     };
     assert_eq!(
         live.restore_external_terminal(make_request(), "transition-1", live_result)
+            .await
             .unwrap(),
         live_id
     );
@@ -342,6 +357,9 @@ async fn test_cancel_propagates_to_running_task() {
         pid: None,
         output_preview: None,
         agent_inbox: None,
+        initiator_session_id: None,
+        owner_session_id: None,
+        owner_identity: None,
     };
 
     registry.register_with_kind(task).unwrap();
@@ -385,6 +403,9 @@ async fn test_cancel_workflow_invokes_kill_closure() {
         pid: None,
         output_preview: None,
         agent_inbox: None,
+        initiator_session_id: None,
+        owner_session_id: None,
+        owner_identity: None,
     };
     registry.register_with_kind(task).unwrap();
     assert_eq!(registry.active_count(), 1);
@@ -425,6 +446,9 @@ async fn test_cancel_with_unavailable_handle_returns_error_and_keeps_entry() {
         pid: None,
         output_preview: None,
         agent_inbox: None,
+        initiator_session_id: None,
+        owner_session_id: None,
+        owner_identity: None,
     };
     registry.register_with_kind(task).unwrap();
     assert_eq!(registry.active_count(), 1);
@@ -642,6 +666,9 @@ async fn test_cancel_abort_token_cancels_task_first() {
         pid: None,
         output_preview: None,
         agent_inbox: None,
+        initiator_session_id: None,
+        owner_session_id: None,
+        owner_identity: None,
     };
     registry.register_with_kind(task).unwrap();
     assert_eq!(registry.active_count(), 1);
@@ -688,6 +715,9 @@ async fn test_cancel_abort_grace_timeout_fallback() {
         pid: None,
         output_preview: None,
         agent_inbox: None,
+        initiator_session_id: None,
+        owner_session_id: None,
+        owner_identity: None,
     };
     registry.register_with_kind(task).unwrap();
     assert_eq!(registry.active_count(), 1);
@@ -773,6 +803,9 @@ async fn test_task_manager_cancel_all_keeps_unavailable_entries() {
         pid: None,
         output_preview: None,
         agent_inbox: None,
+        initiator_session_id: None,
+        owner_session_id: None,
+        owner_identity: None,
     };
     tm.register_with_kind(task).unwrap();
 

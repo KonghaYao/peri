@@ -345,15 +345,45 @@ pub fn build_stage_context(
 
     // 无 session manager 时只在此创建一次回退实例，工具、host 与后台 probe 必须同源。
     let task_manager = task_manager.unwrap_or_else(|| Arc::new(TaskManager::new()));
+    // 有界等待：从本会话首次出现未结算任务起算，超过 HANDOFF_MAX_WAIT 后
+    // 不再无限等待，改由 loop 退出路径写可观测交接（§7.3）。
+    let bounded_wait = crate::agent::async_tasks::handoff::BoundedWait::new(
+        crate::agent::async_tasks::handoff::HANDOFF_MAX_WAIT,
+    );
     let idle_should_wait: Option<Arc<dyn Fn() -> bool + Send + Sync>> = {
         let manager = task_manager.clone();
         let mcp_pool = input.mcp_pool.clone();
         let session_id = session_id.clone();
+        let bounded_wait = Arc::clone(&bounded_wait);
         Some(Arc::new(move || {
-            manager.active_count() > 0
+            let busy = manager.active_count() > 0
                 || mcp_pool
                     .as_ref()
-                    .is_some_and(|pool| pool.has_active_tasks(&session_id))
+                    .is_some_and(|pool| pool.has_active_tasks(&session_id));
+            bounded_wait.should_wait(busy)
+        }))
+    };
+    let handoff_deadline: Option<Arc<dyn Fn() -> Option<tokio::time::Instant> + Send + Sync>> = {
+        let bounded_wait = Arc::clone(&bounded_wait);
+        Some(Arc::new(move || bounded_wait.deadline()))
+    };
+    let pending_handoff: Option<
+        Arc<dyn Fn() -> Option<crate::agent::async_tasks::handoff::PendingHandoff> + Send + Sync>,
+    > = {
+        let manager = task_manager.clone();
+        let bounded_wait = Arc::clone(&bounded_wait);
+        Some(Arc::new(move || {
+            if !bounded_wait.take_due() {
+                return None;
+            }
+            let tasks = manager.pending_handoff_tasks();
+            if tasks.is_empty() {
+                return None;
+            }
+            Some(crate::agent::async_tasks::handoff::PendingHandoff {
+                tasks,
+                waited: bounded_wait.waited(),
+            })
         }))
     };
     // Subscribe before the Receive loop can probe active_count. The watch
@@ -485,6 +515,16 @@ pub fn build_stage_context(
     );
 
     let builder = builder.with_idle_registry(idle_registry);
+    let builder = if let Some(probe) = pending_handoff {
+        builder.with_pending_handoff(probe)
+    } else {
+        builder
+    };
+    let builder = if let Some(probe) = handoff_deadline {
+        builder.with_handoff_deadline(probe)
+    } else {
+        builder
+    };
 
     let context = builder.build();
 

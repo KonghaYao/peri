@@ -167,6 +167,9 @@ mod tests {
                 pid: None,
                 output_preview: None,
                 agent_inbox: None,
+                initiator_session_id: None,
+                owner_session_id: None,
+                owner_identity: None,
             })
             .expect("register test shell");
         registry

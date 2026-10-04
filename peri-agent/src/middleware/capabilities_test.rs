@@ -77,6 +77,9 @@ async fn test_after_agent_background_capability_keeps_completing_active() {
             pid: None,
             output_preview: None,
             agent_inbox: None,
+            initiator_session_id: None,
+            owner_session_id: None,
+            owner_identity: None,
         })
         .unwrap();
     let seen = Arc::new(AtomicBool::new(false));

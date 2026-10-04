@@ -102,6 +102,14 @@ pub struct CompactContext {
 pub struct AsyncContext {
     pub idle_inbox: Option<Arc<crate::agent::session::SessionInbox>>,
     pub idle_should_wait: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+    /// 有界等待到期且仍有未结算任务时返回交接快照（只返回一次）。
+    /// `idle_should_wait` 返回 false 后由 loop 退出路径消费。
+    pub pending_handoff: Option<
+        Arc<dyn Fn() -> Option<crate::agent::async_tasks::handoff::PendingHandoff> + Send + Sync>,
+    >,
+    /// 当前有界等待窗口的绝对截止时刻；idle 挂起据此设置定时器，保证
+    /// 「无外部唤醒时到点退出」（`None` = 当前未在等待）。
+    pub handoff_deadline: Option<Arc<dyn Fn() -> Option<tokio::time::Instant> + Send + Sync>>,
     /// Registry lifecycle signal. This is only a wake source; Receive re-checks
     /// the registry's active count after every notification.
     pub idle_registry: Option<tokio::sync::watch::Receiver<u64>>,
@@ -192,6 +200,8 @@ impl StageContext {
             async_ctx: AsyncContext {
                 idle_inbox: None,
                 idle_should_wait: None,
+                pending_handoff: None,
+                handoff_deadline: None,
                 idle_registry: None,
                 idle_suspended_flag: None,
                 inbox_handle: None,
@@ -241,6 +251,8 @@ impl StageContext {
             async_ctx: AsyncContext {
                 idle_inbox: None,
                 idle_should_wait: None,
+                pending_handoff: None,
+                handoff_deadline: None,
                 idle_registry: None,
                 idle_suspended_flag: None,
                 inbox_handle: None,
@@ -411,6 +423,26 @@ impl StageContextBuilder {
     /// 返回 false → 直接退出 loop，避免正常对话 loading 卡死。
     pub fn with_idle_should_wait(mut self, probe: Arc<dyn Fn() -> bool + Send + Sync>) -> Self {
         self.async_ctx.idle_should_wait = Some(probe);
+        self
+    }
+
+    /// 有界等待到期时的交接快照探针（见 [`AsyncContext::pending_handoff`]）。
+    pub fn with_pending_handoff(
+        mut self,
+        probe: Arc<
+            dyn Fn() -> Option<crate::agent::async_tasks::handoff::PendingHandoff> + Send + Sync,
+        >,
+    ) -> Self {
+        self.async_ctx.pending_handoff = Some(probe);
+        self
+    }
+
+    /// 有界等待窗口的截止时刻探针（idle 挂起据此设置定时器）。
+    pub fn with_handoff_deadline(
+        mut self,
+        probe: Arc<dyn Fn() -> Option<tokio::time::Instant> + Send + Sync>,
+    ) -> Self {
+        self.async_ctx.handoff_deadline = Some(probe);
         self
     }
 
@@ -726,6 +758,21 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                         );
                         let cancel_fut = context.session.turn.cancel_token.cancelled();
                         tokio::pin!(cancel_fut);
+                        // 有界等待：界本身必须能唤醒挂起的 loop，否则只有偶发
+                        // 唤醒（任务注册/终态/取消）才会重新求值，界形同虚设。
+                        // 到点走 continue → Receive 退出求值 → 写交接。
+                        let handoff_deadline = context
+                            .async_ctx
+                            .handoff_deadline
+                            .as_ref()
+                            .and_then(|probe| probe());
+                        let deadline_tick = async move {
+                            match handoff_deadline {
+                                Some(deadline) => tokio::time::sleep_until(deadline).await,
+                                None => std::future::pending::<()>().await,
+                            }
+                        };
+                        tokio::pin!(deadline_tick);
                         let registry_wait = async {
                             if let Some(receiver) = idle_registry.as_mut() {
                                 if receiver.changed().await.is_err() {
@@ -774,6 +821,20 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                                 // 统一处理所有消息（Prompt + Info + Defer），不再需要 post-wake drain_for_end
                                 continue;
                             }
+                            _ = &mut deadline_tick => {
+                                if let Some(flag) = &context.async_ctx.idle_suspended_flag {
+                                    flag.store(false, Ordering::Release);
+                                }
+                                if let Some(mailbox) = &context.session.user_input_mailbox {
+                                    mailbox.leave_idle();
+                                }
+                                tracing::debug!(
+                                    turn_id = %context.session.turn.turn_id,
+                                    "run_react_loop: bounded wait deadline reached, re-evaluate exit"
+                                );
+                                // 到点必须回到退出判断，由 pending_handoff 写交接记录。
+                                continue;
+                            }
                             _ = &mut registry_wait => {
                                 if let Some(flag) = &context.async_ctx.idle_suspended_flag {
                                     flag.store(false, Ordering::Release);
@@ -815,6 +876,20 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                     queue_len = context.session.queue.len(),
                     "run_react_loop: exit (queue empty, no idle wait)"
                 );
+                // 有界等待到期：仍有未结算任务时写可观测交接后结束本轮，
+                // 不再无限等待（结果由 scope owner 对账后在 resume/下一轮可见）。
+                if let Some(handoff) = context
+                    .async_ctx
+                    .pending_handoff
+                    .as_ref()
+                    .and_then(|probe| probe())
+                {
+                    crate::agent::async_tasks::handoff::write_pending_handoff(
+                        &context.session,
+                        &handoff,
+                    )
+                    .await;
+                }
                 break 'rcra;
             }
 
@@ -988,3 +1063,7 @@ mod budget_recovery_integration_tests;
 #[cfg(test)]
 #[path = "terminal_wake_test.rs"]
 mod terminal_wake_tests;
+
+#[cfg(test)]
+#[path = "bounded_wait_exit_test.rs"]
+mod bounded_wait_exit_tests;

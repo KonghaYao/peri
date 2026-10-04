@@ -97,6 +97,12 @@ pub struct BackgroundTask {
     pub output_preview: Option<String>,
     /// Present only for live background sub-agents; revoked before terminal events.
     pub agent_inbox: Option<Arc<BackgroundAgentInbox>>,
+    /// 投递归属（直接发起会话）。`None` = 本地 owner 任务或测试构造。
+    pub initiator_session_id: Option<String>,
+    /// 执行 scope owner（root 会话）：有界等待到期时交接记录里的 scope owner。
+    pub owner_session_id: Option<String>,
+    /// Owner 身份（MCP 实例身份等），交接记录用。
+    pub owner_identity: Option<String>,
 }
 
 /// 后台任务状态
@@ -220,6 +226,7 @@ impl BackgroundTaskRegistry {
         summary: String,
         started_at: chrono::DateTime<chrono::Utc>,
         result: BackgroundTaskResult,
+        initiator_session_id: Option<String>,
     ) -> bool {
         let mut projection = self.projection.lock();
         if projection.records.contains_key(&task_id) {
@@ -238,6 +245,7 @@ impl BackgroundTaskRegistry {
                 status: if success { "completed" } else { "failed" }.into(),
                 duration_ms,
                 output_preview: Some(output_preview.clone()),
+                initiator_session_id,
             },
         );
         self.push_event(
@@ -347,6 +355,24 @@ impl BackgroundTaskRegistry {
     /// wait and pipe drain. It must never publish a second registry terminal.
     pub(super) fn claim_cancelled_shell_cleanup(&self, task_id: &str) -> bool {
         self.cancelled_shells_waiting_cleanup.lock().remove(task_id)
+    }
+
+    /// Unsettled tasks for the bounded-wait handoff record: public identity plus
+    /// the scope owner that will reconcile them. Empty = nothing pending.
+    pub(super) fn pending_handoff_tasks(&self) -> Vec<super::handoff::PendingHandoffTask> {
+        let tasks = self.tasks.lock();
+        let mut pending: Vec<_> = tasks
+            .values()
+            .filter(|task| is_active_status(&task.status))
+            .map(|task| super::handoff::PendingHandoffTask {
+                task_id: task.id.clone(),
+                kind: task.kind,
+                owner_session_id: task.owner_session_id.clone(),
+                owner_identity: task.owner_identity.clone(),
+            })
+            .collect();
+        pending.sort_by(|a, b| a.task_id.cmp(&b.task_id));
+        pending
     }
 
     pub(super) fn external_cancel(&self, task_id: &str) -> Option<ExternalCancelFn> {
@@ -489,6 +515,7 @@ impl BackgroundTaskRegistry {
                 status: "running".into(),
                 duration_ms: 0,
                 output_preview: None,
+                initiator_session_id: task.initiator_session_id.clone(),
             },
         );
         tasks.insert(task.id.clone(), task);

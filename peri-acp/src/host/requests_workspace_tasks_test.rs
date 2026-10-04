@@ -67,13 +67,14 @@ async fn session_local_workspace_tasks_reach_acp_snapshot_and_live_events() {
         .task_manager
         .register_external(ExternalTaskRegistration {
             session_id: id.to_owned(),
+            initiator_session_id: Some(id.to_owned()),
             owner_identity: "workspace-test".into(),
             owner_task_id: "shell-1".into(),
             kind: BgTaskKind::Shell,
             summary: "sleep 10".into(),
             started_at: None,
             cancel: Arc::new(|| Box::pin(async { Ok(()) })),
-            on_terminal: Arc::new(|_, _| Ok(())),
+            on_terminal: Arc::new(|_, _| Box::pin(async { Ok(()) })),
         })
         .unwrap();
     assert!(

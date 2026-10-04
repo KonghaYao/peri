@@ -107,16 +107,53 @@ async fn test_shutdown_waits_for_owned_completion_and_closes_admission() {
 #[tokio::test]
 async fn test_shutdown_cannot_report_clean_after_abandoned_external_execution() {
     let manager = TaskManager::new();
-    let owner = manager.begin_external_execution().unwrap();
+    let owner = manager.begin_external_execution("workspace").unwrap();
     drop(owner);
     assert_eq!(manager.shutdown().await, TaskShutdownReport::Incomplete);
     assert_eq!(manager.shutdown().await, TaskShutdownReport::Incomplete);
 }
 
+// [回归测试] 取消/超时的 MCP 调用只污染它自己的执行 scope；按 scope 的对账证据
+// 可以恢复，其他 owner 的未结清证据不得被顺带清除（历史故障：单一 uncertain
+// 布尔永久置位，会话无法 close / fork 永久被拒）。
+#[tokio::test]
+async fn test_external_uncertainty_clears_only_with_scope_evidence() {
+    let manager = TaskManager::new();
+    drop(TaskManagerPort::begin_external_execution(&manager, "workspace").unwrap());
+    drop(TaskManagerPort::begin_external_execution(&manager, "web").unwrap());
+    assert!(!TaskManagerPort::is_execution_idle(&manager));
+    assert_eq!(
+        TaskManagerPort::resolve_external_execution_evidence(&manager, "workspace"),
+        1
+    );
+    assert!(
+        !TaskManagerPort::is_execution_idle(&manager),
+        "非 workspace 的证据不能清除其他 owner 的不确定"
+    );
+    assert_eq!(
+        TaskManagerPort::resolve_external_execution_evidence(&manager, "web"),
+        1
+    );
+    assert!(TaskManagerPort::is_execution_idle(&manager));
+}
+
+// 证据清除后，关闭必须能重新走到 Complete（不能永久 Incomplete）。
+#[tokio::test]
+async fn test_evidenced_reconciliation_restores_clean_shutdown() {
+    let manager = TaskManager::new();
+    drop(TaskManagerPort::begin_external_execution(&manager, "workspace").unwrap());
+    assert_eq!(manager.shutdown().await, TaskShutdownReport::Incomplete);
+    assert_eq!(
+        TaskManagerPort::resolve_external_execution_evidence(&manager, "workspace"),
+        1
+    );
+    assert_eq!(manager.shutdown().await, TaskShutdownReport::Complete);
+}
+
 #[tokio::test]
 async fn test_shutdown_accepts_confirmed_external_cleanup() {
     let manager = TaskManager::new();
-    let mut owner = manager.begin_external_execution().unwrap();
+    let mut owner = manager.begin_external_execution("workspace").unwrap();
     owner.confirm_stopped();
     drop(owner);
     assert_eq!(manager.shutdown().await, TaskShutdownReport::Complete);

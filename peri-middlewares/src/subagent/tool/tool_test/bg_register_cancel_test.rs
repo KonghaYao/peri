@@ -22,6 +22,9 @@ fn make_registered_bg_task(id: &str) -> peri_agent::agent::async_tasks::Backgrou
         pid: None,
         output_preview: None,
         agent_inbox: None,
+        initiator_session_id: None,
+        owner_session_id: None,
+        owner_identity: None,
     }
 }
 

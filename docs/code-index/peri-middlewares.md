@@ -39,10 +39,16 @@ snapshot；`initialize.rs` 的普通/bare 路径消费冻结输入，middleware 
 MCP Tasks 的执行适配在 `src/mcp/tool_bridge.rs` 与
 `src/mcp/client/subscription_tasks.rs`（由 `subscription.rs` 装配）：task receipt 登记到 Agent session 的
 `TaskManager`，其 opaque ID 供 ACP 显示与取消；Pool 只保留 session manager 弱引用、
-Workspace scope capability 和 owner 连接。`tasks/get` 轮询与 Workspace
+Workspace scope capability 和 owner 连接。登记同时记录**投递归属**（直接发起会话，来自可信
+`ToolContext`）与执行 scope（root）：终态提醒经发起会话的 `TaskTerminalDelivery` 原子提交到其
+canonical transcript（稳定投递 ID，幂等、可重投），MQ/收件箱只做唤醒；冷恢复无法重建发起者时
+降级 root 投递并在提醒 metadata 标 `delivery: root-fallback`。订阅在 owner 连续不可观测超过
+`LOST_ABANDON_ATTEMPTS` 次轮询后调用 `abandon_external` 产出终态并明确标注远端副作用未知；
+Workspace scope 快照完整应用即视为该 owner 的对账证据，清除对应执行 scope 的不确定记录。
+`tasks/get` 轮询与 Workspace
 `workspace/taskSnapshot`/`workspace/taskChanges` cursor 对账将终态交给 Manager，
-Manager 先投递带稳定 delivery ID 的 Defer，再发布终态。Builtin Workspace Bash
-提醒只带退出信息与输出文件引用。`McpPoolPort::has_active_tasks` 查询 Manager
+Manager 先投递带稳定 delivery ID 的 Defer，再发布终态。订阅只有在结算成功，或 `false` 同时有同任务的终态快照证据时才结束；缺失条目与竞争中的结算必须重试。monitor 准入失败沿工具错误返回已存在的 opaque ID，并明确不保证通知、禁止盲目重跑；同键已有 monitor 可复用。回归入口为 `client/subscription_tasks_test.rs` 与 `client/output_store_test.rs`。
+Builtin Workspace Bash 提醒只带退出信息与输出文件引用。`McpPoolPort::has_active_tasks` 查询 Manager
 未结清的外部任务供 Agent idle probe 使用。外部 Workspace 的 scope 元数据经部署可信的 MCP 连接传递；builtin 使用同进程 scope authority。
 显式删除可调用 `reconcile_closing_workspace_scope`，在 Agent Manager 不存在时从可信
 session ID 重新构造 scope 元数据，逐 owner 关闭创建、发现、取消并等待终态；缺少 owner 或

@@ -230,7 +230,8 @@ async fn child_mcp_bridge_uses_root_task_owner_for_real_call() {
 #[tokio::test]
 async fn child_mcp_task_receipt_registers_under_root_owner() {
     let wire = Wire::connect(StartedTask).await;
-    let pool = Arc::new(McpClientPool::new_empty());
+    let (mut owner, spawner) = crate::mcp::task_scope::McpTaskOwner::new();
+    let pool = Arc::new(McpClientPool::new_pending_with_spawner(spawner));
     wire.install(&pool, "source", false);
     let manager = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
     let task_manager: Arc<dyn TaskManagerPort> = manager.clone();
@@ -243,6 +244,135 @@ async fn child_mcp_task_receipt_registers_under_root_owner() {
     let output = bridge.invoke(serde_json::json!({}), context).await.unwrap();
     assert!(output.contains("Background task started:"), "{output}");
     assert!(!manager.snapshot().tasks.is_empty());
+    let duplicate = bridge
+        .invoke(
+            serde_json::json!({}),
+            ToolContext::new(&[], ".")
+                .with_session_identity("child-thread", "child-turn")
+                .with_mcp_task_owner_session_id("root-session"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(duplicate, output);
+    assert_eq!(owner.active_count(), 1, "同键回执复用已准入 monitor");
+    owner.shutdown().await;
+    wire.close().await;
+}
+
+// 回归：任务已存在但 monitor 准入失败，不再承诺完成通知必达。
+#[tokio::test]
+async fn test_closed_monitor_owner_returns_honest_task_receipt_error() {
+    let wire = Wire::connect(StartedTask).await;
+    let pool = Arc::new(McpClientPool::new_empty());
+    wire.install(&pool, "source", false);
+    let manager: Arc<dyn TaskManagerPort> =
+        Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
+    pool.bind_session_task_manager("session", &manager);
+    let bridge = McpToolBridge::new("source", &test_tool(), pool.get_client("source").unwrap())
+        .with_output_store(&pool, Some("session"));
+    let error = bridge
+        .invoke(serde_json::json!({}), ToolContext::new(&[], "."))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("monitor was not admitted"), "{error}");
+    assert!(
+        error.contains("completion delivery is not guaranteed"),
+        "{error}"
+    );
+    assert!(error.contains("do not repeat the command"), "{error}");
+    assert_eq!(manager.active_count(), 1);
+    assert_eq!(manager.snapshot().tasks[0].status, "running");
+    assert!(!manager.is_execution_idle());
+    wire.close().await;
+}
+
+// [回归测试] 子会话发起的后台任务：回执承诺的投递必须真的落到发起者，
+// 而不是 root。历史故障是回执向发起者承诺、实际按 owner(root) 投递。
+#[tokio::test]
+async fn child_initiated_task_receipt_delivers_to_the_child_not_root() {
+    use peri_acp_types::messages::MessageId;
+    use peri_acp_types::session::{MessageQueue, SessionInbox};
+    use peri_acp_types::system_reminder::TrustedSystemReminder;
+    use peri_acp_types::tasks::TaskTerminalDelivery;
+
+    struct RecordingDelivery {
+        delivered: parking_lot::Mutex<Vec<(MessageId, TrustedSystemReminder)>>,
+    }
+    impl TaskTerminalDelivery for RecordingDelivery {
+        fn deliver<'a>(
+            &'a self,
+            delivery_id: MessageId,
+            reminder: &'a TrustedSystemReminder,
+            _source: peri_acp_types::session::MessageSource,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>>
+        {
+            Box::pin(async move {
+                self.delivered.lock().push((delivery_id, reminder.clone()));
+                Ok(())
+            })
+        }
+    }
+
+    let wire = Wire::connect(StartedTask).await;
+    let (mut owner, spawner) = crate::mcp::task_scope::McpTaskOwner::new();
+    let pool = Arc::new(McpClientPool::new_pending_with_spawner(spawner));
+    wire.install(&pool, "source", false);
+    let manager = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
+    let task_manager: Arc<dyn TaskManagerPort> = manager.clone();
+    pool.bind_session_task_manager("root-session", &task_manager);
+    let root_inbox = SessionInbox::new(Arc::new(MessageQueue::new()));
+    peri_acp_types::mcp::McpSubscriptionPort::register_inbox(
+        pool.as_ref(),
+        "root-session",
+        root_inbox.handle(),
+    );
+    let delivery = Arc::new(RecordingDelivery {
+        delivered: parking_lot::Mutex::new(Vec::new()),
+    });
+    let bridge = McpToolBridge::new("source", &test_tool(), pool.get_client("source").unwrap())
+        .with_output_store(&pool, Some("root-session"));
+    let context = ToolContext::new(&[], ".")
+        .with_session_identity("child-thread", "child-turn")
+        .with_mcp_task_owner_session_id("root-session")
+        .with_task_terminal_delivery(delivery.clone());
+    let output = bridge.invoke(serde_json::json!({}), context).await.unwrap();
+    assert!(
+        output.contains("committed to the initiating session's transcript"),
+        "回执必须只承诺可达的持久投递: {output}"
+    );
+    let task_id = manager.snapshot().tasks[0].task_id.clone();
+    let mut result = peri_acp_types::event::BackgroundTaskResult {
+        task_id: task_id.clone(),
+        agent_name: "mcp".into(),
+        prompt_summary: "source".into(),
+        success: true,
+        output: "done".into(),
+        tool_calls_count: 0,
+        duration_ms: 1,
+        timed_out: false,
+        child_thread_id: None,
+        subagent_failure: None,
+        shell_output: None,
+    };
+    result.task_id = task_id.clone();
+    assert!(manager
+        .settle_external(&task_id, "terminal-1", result)
+        .await
+        .unwrap());
+    let delivered = delivery.delivered.lock();
+    assert_eq!(delivered.len(), 1, "终态提醒必须投给发起者");
+    assert_eq!(
+        delivered[0].1.as_reminder().metadata["initiator"],
+        "child-thread"
+    );
+    assert_eq!(
+        delivered[0].1.as_reminder().metadata["task_owner"],
+        "root-session"
+    );
+    assert!(root_inbox.queue().drain_all().is_empty());
+    owner.shutdown().await;
+    wire.close().await;
 }
 
 fn reference(output: &str, key: &str) -> String {

@@ -324,6 +324,16 @@ async fn dispatch_concurrent(
                     {
                         ctx_param = ctx_param.with_mcp_task_owner_session_id(root_id.clone());
                     }
+                    // 投递归属 = 直接发起会话（本 session）；路由取自该会话的
+                    // canonical 持久化句柄，不接受模型参数。
+                    if let Some(delivery) =
+                        crate::agent::async_tasks::delivery::SessionTerminalDelivery::new(
+                            &dispatch_context.session.transcript,
+                            &dispatch_context.session.queue,
+                        )
+                    {
+                        ctx_param = ctx_param.with_task_terminal_delivery(delivery);
+                    }
                     match tool {
                         Some(t) => t
                             .invoke_output(input, ctx_param)

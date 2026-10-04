@@ -84,7 +84,8 @@ pub struct WorkflowAgentContext {
     /// 不回落磁盘，J5）。
     pub mcp_skill_registry: Option<Arc<peri_acp_types::mcp_skills::McpSkillRegistry>>,
 
-    /// Session ID（用于 compact 事件和日志）
+    /// 宿主绑定的执行树 root session ID（MCP 执行 scope、compact 事件和日志）。
+    /// 仅由会话装配注入，不得取自 workflow 参数或模型工具输入。
     pub session_id: Option<String>,
     /// Compact 配置（None = 不启用自动 compact）
     pub compact_config: Option<CompactConfig>,
@@ -461,6 +462,17 @@ impl AgentExecutor for WorkflowAgentExecutor {
             compact_llm,
             None, // workflow 无 child_thread_id，内部 AgentId::new() 兜底（C1）
         );
+
+        // 与 subagent 同构：保留 agent 自身身份，仅把 MCP 执行 scope 绑定到
+        // 宿主注入的 root；不能用 params.agent_id 或工具输入自称的 session ID。
+        if let Some(root_id) = &self.ctx.session_id {
+            v2_ctx
+                .context
+                .session
+                .session_context
+                .write()
+                .insert("mcp_task_owner_session_id".into(), root_id.clone());
+        }
 
         // EventBus forwarder（v2 → v1 ExecutorEvent，转发给 event_handler）。
         // 经注入的 ForwarderLauncherFn 启动——biased select 顺序不变量单点

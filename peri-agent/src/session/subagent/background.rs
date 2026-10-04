@@ -318,6 +318,11 @@ pub(super) async fn spawn_background_subagent(
         pid: None,
         output_preview: None,
         agent_inbox: Some(agent_inbox),
+        // 本地 Agent owner 任务：投递归属是父会话，但该身份不在本函数作用域内，
+        // 记录为 None（MCP 外部任务的投递归属在 tool dispatch 侧记录）。
+        initiator_session_id: None,
+        owner_session_id: None,
+        owner_identity: None,
     };
     if let Err(e) = task_manager.register_with_kind(bg_task) {
         // S3.1：注册失败（Agent 类无并发上限，失败仅剩 session execution scope

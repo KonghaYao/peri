@@ -84,7 +84,7 @@ describe("subagent: bg task area (merged)", () => {
       // ── 阶段 2：bg shell（run_in_background sleep 20）──
       await sendPrompt(
         tester,
-        '这是 E2E 测试。请直接调用 Bash 工具，参数必须为 {"command":"sleep 20 && printf E2E_BG_SHELL_DONE","run_in_background":true}；不得改为前台运行或只解释。调用后回复返回的 shell- 开头 task_id。',
+        '这是 E2E 测试。请直接调用 Bash 工具，参数必须为 {"command":"sleep 20 && printf E2E_BG_SHELL_DONE","run_in_background":true}；不得改为前台运行或只解释。调用后回复回执里的任务 id（mcp- 开头）。',
       );
       try {
         await tester.waitFor(

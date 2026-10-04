@@ -351,13 +351,14 @@ impl McpClientPool {
     pub(crate) fn begin_external_task_execution(
         &self,
         session_id: &str,
+        scope: &str,
     ) -> Result<Box<dyn peri_acp_types::tasks::ExternalExecutionGuard>, String> {
         self.session_tasks
             .read()
             .get(session_id)
             .and_then(std::sync::Weak::upgrade)
             .ok_or_else(|| "session task manager unavailable".to_owned())?
-            .begin_external_execution()
+            .begin_external_execution(scope)
     }
 
     /// Report whether this session can have asynchronous work owned outside

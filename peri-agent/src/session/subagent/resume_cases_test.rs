@@ -811,6 +811,9 @@ async fn test_resume_subagent_bg_beyond_previous_agent_cap() {
                 pid: None,
                 output_preview: None,
                 agent_inbox: None,
+                initiator_session_id: None,
+                owner_session_id: None,
+                owner_identity: None,
             })
             .expect("占位任务注册应成功（Agent 类不限额）");
     }

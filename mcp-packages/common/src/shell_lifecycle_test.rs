@@ -179,7 +179,8 @@ async fn test_timed_out_shell_can_close_cleanly() {
 #[tokio::test]
 async fn test_shutdown_reaps_child_owned_by_dropped_shell_guard() {
     let manager = crate::create_local_task_manager();
-    let mut execution = ShellExecutionGuard::new(Some(manager.begin_external_execution().unwrap()));
+    let mut execution =
+        ShellExecutionGuard::new(Some(manager.begin_external_execution("workspace").unwrap()));
     let mut command = shell_command("exec sleep 60", &[]);
     execution.prepare(&mut command).unwrap();
     let child = command.spawn().unwrap();
@@ -210,7 +211,8 @@ async fn test_shutdown_reaps_child_owned_by_dropped_shell_guard() {
 #[tokio::test]
 async fn test_rejected_promoted_task_settles_registered_process_after_cleanup() {
     let manager = Arc::new(crate::create_local_task_manager());
-    let mut execution = ShellExecutionGuard::new(Some(manager.begin_external_execution().unwrap()));
+    let mut execution =
+        ShellExecutionGuard::new(Some(manager.begin_external_execution("workspace").unwrap()));
     let mut command = shell_command("sleep 60", &[]);
     command.process_group(0).kill_on_drop(true);
     execution.prepare(&mut command).unwrap();

@@ -306,7 +306,7 @@ impl BaseTool for McpToolBridge {
                     }) as Box<dyn std::error::Error + Send + Sync>
                 })?;
             Some(
-                pool.begin_external_task_execution(session_id)
+                pool.begin_external_task_execution(session_id, &self.server_name)
                     .map_err(|reason| {
                         Box::new(ToolCallError::CallFailed {
                             server: self.server_name.clone(),
@@ -318,6 +318,14 @@ impl BaseTool for McpToolBridge {
         } else {
             None
         };
+
+        // 投递归属 = 直接发起会话（本 ToolContext 的会话）；scope/投影仍归
+        // owner（root）。两者正交，来自可信 session binding。
+        let initiator_session_id = ctx
+            .session_id
+            .as_deref()
+            .or(self.output_session_id.as_deref());
+        let delivery = ctx.task_terminal_delivery.clone();
 
         // 2. 构建 rmcp 请求参数
         let arguments = input.as_object().cloned().unwrap_or_default();
@@ -398,6 +406,8 @@ impl BaseTool for McpToolBridge {
                         };
                         let public_id = match pool.register_external_task(
                             session_id,
+                            initiator_session_id,
+                            delivery.clone(),
                             &self.server_name,
                             &task_id,
                             kind,
@@ -432,16 +442,35 @@ impl BaseTool for McpToolBridge {
                                 }));
                             }
                         };
-                        pool.spawn_managed_task_subscription(
+                        if let Err(error) = pool.spawn_managed_task_subscription(
                             self.server_name.clone(),
                             session_id.to_owned(),
                             task_id.clone(),
                             public_id.clone(),
                             is_shell,
                             peer.clone(),
-                        );
+                        ) {
+                            if error != super::task_scope::TaskAdmissionError::DuplicateKey {
+                                return Err(Box::new(ToolCallError::CallFailed {
+                                    server: self.server_name.clone(),
+                                    tool: self.tool_name.clone(),
+                                    reason: format!(
+                                        "background task {public_id} exists, but its monitor was not admitted: {error}; completion delivery is not guaranteed; do not repeat the command"
+                                    ),
+                                }));
+                            }
+                        }
+                        // 回执只承诺可达的投递：有 canonical 路由 = 持久送达
+                        // （resume 后仍可见）；否则只声称活跃期送达。
+                        let delivery_note = if delivery.is_some() {
+                            "Its completion reminder is committed to the initiating session's \
+                             transcript and stays visible after resume."
+                        } else {
+                            "Its completion reminder is delivered to the initiating session \
+                             while that session is live."
+                        };
                         return Ok(format!(
-                            "Background task started: {public_id}. Completion is delivered by MCP Tasks subscription."
+                            "Background task started: {public_id}. {delivery_note}"
                         ));
                     }
                 }

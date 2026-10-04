@@ -25,6 +25,9 @@ fn make_task(inbox: Arc<BackgroundAgentInbox>) -> BackgroundTask {
         pid: None,
         output_preview: None,
         agent_inbox: Some(inbox),
+        initiator_session_id: None,
+        owner_session_id: None,
+        owner_identity: None,
     }
 }
 

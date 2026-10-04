@@ -42,6 +42,9 @@ async fn test_cancel_kills_process_group() {
         pid: Some(pid),
         output_preview: None,
         agent_inbox: None,
+        initiator_session_id: None,
+        owner_session_id: None,
+        owner_identity: None,
     };
     registry.register_with_kind(task).unwrap();
     assert_eq!(registry.active_count(), 1);

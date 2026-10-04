@@ -157,9 +157,13 @@ async fn assert_background_output_exits(explicit_background: bool, bare: bool) {
                             tool_result["is_error"], false,
                             "超时提升必须返回可订阅的 MCP Task 回执: {tool_result}"
                         );
+                        // 回执按可达性承诺投递：有 canonical 路由 = 持久送达，
+                        // 否则只声称活跃期送达（两种文案都必须给出 task id）。
                         assert!(
                             rendered.contains("Background task started: mcp-")
-                                && rendered.contains("MCP Tasks subscription"),
+                                && (rendered
+                                    .contains("committed to the initiating session's transcript",)
+                                    || rendered.contains("delivered to the initiating session")),
                             "超时必须保留可恢复的后台回执: {tool_result}"
                         );
                         assert!(

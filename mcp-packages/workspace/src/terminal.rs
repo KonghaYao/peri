@@ -321,7 +321,7 @@ impl BaseTool for BashTool {
                 "timeout": {
                     "type": "number",
                     "description": format!(
-                        "Optional timeout in milliseconds. The synchronous path is always bounded: it defaults to 15000ms and is capped at {FOREGROUND_MAX_TIMEOUT_MS}ms (2 minutes) — `timeout: 0` is treated as that maximum instead of disabling the timeout, so no request can produce an unbounded synchronous wait. Foreground timeout returns an error: if background task registration succeeds, the process continues in the background with a task_id, pid and log file paths, without a new timeout; otherwise termination is requested. Background tasks (run_in_background: true) run until completion: omitting `timeout` or setting `0` leaves that background command without a timeout, and a positive `timeout` (up to 600000ms) requests termination when reached. Check the returned process status before retrying; do not duplicate a task that is still running. For builds, installs, or tests, set a longer `timeout` up to the foreground maximum, or use run_in_background: true for work that needs longer."
+                        "Optional timeout in milliseconds. The synchronous path is always bounded: it defaults to 15000ms and is capped at {FOREGROUND_MAX_TIMEOUT_MS}ms (2 minutes) — `timeout: 0` is treated as that maximum instead of disabling the timeout, so no request can produce an unbounded synchronous wait. Foreground timeout returns an error: if background task registration succeeds, the process is promoted and the tool returns a background task receipt carrying its task id (no pid or log paths), without a new timeout; otherwise termination is requested. Background tasks (run_in_background: true) run until completion: omitting `timeout` or setting `0` leaves that background command without a timeout, and a positive `timeout` (up to 600000ms) requests termination when reached. Check the returned process status before retrying; do not duplicate a task that is still running. For builds, installs, or tests, set a longer `timeout` up to the foreground maximum, or use run_in_background: true for work that needs longer."
                     )
                 },
                 "run_in_background": {
@@ -471,7 +471,7 @@ impl BashTool {
         let ownership = self
             .task_manager
             .as_ref()
-            .map(|manager| manager.begin_external_execution())
+            .map(|manager| manager.begin_external_execution("workspace"))
             .transpose()?;
         let mut execution = ShellExecutionGuard::new(ownership);
 

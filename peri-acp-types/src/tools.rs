@@ -473,6 +473,9 @@ pub struct ToolContext<'a> {
     /// Root session that owns MCP task admission and Workspace task scope.
     /// A child keeps its own `session_id` for agent identity and App routing.
     pub mcp_task_owner_session_id: Option<String>,
+    /// Trusted terminal-reminder route into this (initiating) session's
+    /// canonical transcript. `None` = no durable route available.
+    pub task_terminal_delivery: Option<std::sync::Arc<dyn crate::tasks::TaskTerminalDelivery>>,
     /// 当前 turn generation；用于撤销跨 turn 的宿主调用租约。
     pub turn_generation: Option<String>,
 }
@@ -487,6 +490,7 @@ impl<'a> ToolContext<'a> {
             cancellation: tokio_util::sync::CancellationToken::new(),
             session_id: None,
             mcp_task_owner_session_id: None,
+            task_terminal_delivery: None,
             turn_generation: None,
         }
     }
@@ -515,6 +519,15 @@ impl<'a> ToolContext<'a> {
 
     pub fn with_mcp_task_owner_session_id(mut self, session_id: impl Into<String>) -> Self {
         self.mcp_task_owner_session_id = Some(session_id.into());
+        self
+    }
+
+    /// Attach the trusted terminal-reminder route of the executing session.
+    pub fn with_task_terminal_delivery(
+        mut self,
+        delivery: std::sync::Arc<dyn crate::tasks::TaskTerminalDelivery>,
+    ) -> Self {
+        self.task_terminal_delivery = Some(delivery);
         self
     }
 }

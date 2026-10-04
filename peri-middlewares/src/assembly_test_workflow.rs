@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "assembly_workflow_mcp_test.rs"]
+mod mcp_owner;
+
 // ── Workflow agent 链过滤（设计 §2.5 第 3 装配入口）───────────────────────────
 
 /// Workflow agent 工具列表按 disabled 集合连坐过滤。

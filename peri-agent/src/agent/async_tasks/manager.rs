@@ -73,6 +73,10 @@ fn external_delivery_id(
     peri_acp_types::messages::MessageId::from(uuid::Uuid::from_bytes(bytes))
 }
 
+#[cfg(test)]
+#[path = "external_settlement_test.rs"]
+mod external_settlement_tests;
+
 impl Default for TaskManager {
     fn default() -> Self {
         Self::new()
@@ -85,8 +89,13 @@ impl peri_acp_types::tasks::TaskManager for TaskManager {
         request: ExternalTaskRegistration,
         terminal_transition_id: &str,
         result: BackgroundTaskResult,
-    ) -> Result<String, String> {
-        self.restore_external_terminal(request, terminal_transition_id, result)
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send + '_>>
+    {
+        let terminal_transition_id = terminal_transition_id.to_owned();
+        Box::pin(async move {
+            self.restore_external_terminal(request, &terminal_transition_id, result)
+                .await
+        })
     }
     fn external_task_ids(&self) -> Vec<String> {
         self.registry.external_task_ids()
@@ -118,8 +127,25 @@ impl peri_acp_types::tasks::TaskManager for TaskManager {
         task_id: &str,
         terminal_transition_id: &str,
         result: BackgroundTaskResult,
-    ) -> Result<bool, String> {
-        self.settle_external(task_id, terminal_transition_id, result)
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool, String>> + Send + '_>>
+    {
+        let task_id = task_id.to_owned();
+        let terminal_transition_id = terminal_transition_id.to_owned();
+        Box::pin(async move {
+            self.settle_external(&task_id, &terminal_transition_id, result)
+                .await
+        })
+    }
+
+    fn abandon_external(
+        &self,
+        task_id: &str,
+        reason: &str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool, String>> + Send + '_>>
+    {
+        let task_id = task_id.to_owned();
+        let reason = reason.to_owned();
+        Box::pin(async move { self.abandon_external(&task_id, &reason).await })
     }
 
     fn cancel_async(
@@ -197,6 +223,9 @@ impl peri_acp_types::tasks::TaskManager for TaskManager {
             pid: request.pid,
             output_preview: None,
             agent_inbox: None,
+            initiator_session_id: None,
+            owner_session_id: None,
+            owner_identity: None,
         };
         self.register_with_kind(task).map_err(|e| e.to_string())
     }
@@ -226,8 +255,13 @@ impl peri_acp_types::tasks::TaskManager for TaskManager {
 
     fn begin_external_execution(
         &self,
+        scope: &str,
     ) -> Result<Box<dyn peri_acp_types::tasks::ExternalExecutionGuard>, String> {
-        self.registry.scope.begin_external()
+        self.registry.scope.begin_external(scope)
+    }
+
+    fn resolve_external_execution_evidence(&self, scope: &str) -> usize {
+        self.registry.scope.resolve_external_evidence(scope)
     }
 
     fn shutdown(
@@ -296,6 +330,11 @@ impl TaskManager {
         self.registry.snapshot()
     }
 
+    /// Unsettled tasks used by the bounded-wait handoff record.
+    pub fn pending_handoff_tasks(&self) -> Vec<super::handoff::PendingHandoffTask> {
+        self.registry.pending_handoff_tasks()
+    }
+
     pub fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<TaskChange> {
         self.registry.subscribe_events()
     }
@@ -325,6 +364,9 @@ impl TaskManager {
             pid: None,
             output_preview: None,
             agent_inbox: None,
+            initiator_session_id: request.initiator_session_id.clone(),
+            owner_session_id: Some(request.session_id.clone()),
+            owner_identity: Some(request.owner_identity.clone()),
         };
         match self.registry.register_with_kind(task) {
             Ok(()) => {}
@@ -337,7 +379,7 @@ impl TaskManager {
         Ok(task_id)
     }
 
-    pub fn restore_external_terminal(
+    pub async fn restore_external_terminal(
         &self,
         request: ExternalTaskRegistration,
         terminal_transition_id: &str,
@@ -346,34 +388,90 @@ impl TaskManager {
         if terminal_transition_id.is_empty() {
             return Err("terminal transition ID is required".into());
         }
-        let _registration = self.external_registration.lock();
         let task_id = external_task_id(&request);
         let started_at = external_started_at(&request).map_err(|error| error.to_string())?;
-        if let Some(status) = self.registry.projection_status(&task_id) {
-            if status == "running" || status == "lost" {
-                self.registry.refresh_external_callbacks(
-                    &task_id,
-                    Arc::clone(&request.cancel),
-                    Arc::clone(&request.on_terminal),
-                );
-                self.settle_external(&task_id, terminal_transition_id, result)?;
+        // Registration lock only guards registry mutation; the delivery await
+        // must not run under a non-Send parking_lot guard.
+        let live_settlement = {
+            let _registration = self.external_registration.lock();
+            match self.registry.projection_status(&task_id) {
+                Some(status) if status == "running" || status == "lost" => {
+                    self.registry.refresh_external_callbacks(
+                        &task_id,
+                        Arc::clone(&request.cancel),
+                        Arc::clone(&request.on_terminal),
+                    );
+                    true
+                }
+                Some(_) => return Ok(task_id),
+                None => false,
             }
+        };
+        if live_settlement {
+            self.settle_external(&task_id, terminal_transition_id, result)
+                .await?;
             return Ok(task_id);
         }
         result.task_id = task_id.clone();
         let delivery_id = external_delivery_id(&task_id, terminal_transition_id);
-        (request.on_terminal)(&result, delivery_id)?;
+        (request.on_terminal)(&result, delivery_id).await?;
         self.registry.restore_external_terminal(
             task_id.clone(),
             request.kind,
             request.summary,
             started_at,
             result,
+            request.initiator_session_id.clone(),
         );
         Ok(task_id)
     }
 
-    pub fn settle_external(
+    /// Bounded give-up for a task whose owner stayed unobservable: one final,
+    /// explicitly marked reminder plus a terminal projection, so the task can
+    /// neither stay active forever nor disappear silently.
+    pub async fn abandon_external(&self, task_id: &str, reason: &str) -> Result<bool, String> {
+        let Some(notify) = self.registry.external_notify(task_id) else {
+            return Err(format!(
+                "external task {task_id} has no terminal delivery route"
+            ));
+        };
+        if !self.registry.claim_completion(task_id) {
+            return Ok(false);
+        }
+        tracing::warn!(task_id, reason, "abandoning unobservable external task");
+        let mut result = BackgroundTaskResult {
+            task_id: task_id.to_owned(),
+            agent_name: "mcp".into(),
+            prompt_summary: "unobservable task owner".into(),
+            success: false,
+            output: "The task owner stayed unobservable for the whole bounded retry window and \
+                     the task was abandoned as unresolved. Its remote side effects are unknown; \
+                     check the owner directly before assuming it stopped."
+                .into(),
+            tool_calls_count: 0,
+            duration_ms: 0,
+            timed_out: true,
+            child_thread_id: None,
+            subagent_failure: None,
+            shell_output: None,
+        };
+        result.task_id = task_id.to_owned();
+        // Stable delivery ID: retries of the give-up converge on one reminder.
+        let delivery_id = external_delivery_id(task_id, "abandoned-unresolved");
+        if let Err(error) = notify(&result, delivery_id).await {
+            self.registry.reset_completion_claim(task_id);
+            return Err(error);
+        }
+        if self.registry.complete(task_id, result) {
+            Ok(true)
+        } else {
+            Err(format!(
+                "external task {task_id} terminal projection was not committed"
+            ))
+        }
+    }
+
+    pub async fn settle_external(
         &self,
         task_id: &str,
         terminal_transition_id: &str,
@@ -382,19 +480,43 @@ impl TaskManager {
         if terminal_transition_id.is_empty() {
             return Err("terminal transition ID is required".into());
         }
+        let already_settled = || {
+            matches!(
+                self.registry.projection_status(task_id).as_deref(),
+                Some("completed" | "failed" | "cancelled")
+            )
+        };
         let Some(notify) = self.registry.external_notify(task_id) else {
-            return Ok(false);
+            return if already_settled() {
+                Ok(false)
+            } else {
+                Err(format!(
+                    "external task {task_id} has no terminal delivery route"
+                ))
+            };
         };
         if !self.registry.claim_completion(task_id) {
-            return Ok(false);
+            return if already_settled() {
+                Ok(false)
+            } else {
+                Err(format!(
+                    "external task {task_id} settlement is still pending"
+                ))
+            };
         }
         result.task_id = task_id.to_owned();
         let delivery_id = external_delivery_id(task_id, terminal_transition_id);
-        if let Err(error) = notify(&result, delivery_id) {
+        if let Err(error) = notify(&result, delivery_id).await {
             self.registry.reset_completion_claim(task_id);
             return Err(error);
         }
-        Ok(self.registry.complete(task_id, result))
+        if self.registry.complete(task_id, result) {
+            Ok(true)
+        } else {
+            Err(format!(
+                "external task {task_id} terminal projection was not committed"
+            ))
+        }
     }
 
     pub async fn cancel_async(&self, task_id: &str) -> Result<(), BackgroundRegistryError> {
@@ -512,7 +634,7 @@ impl TaskManager {
             .shell_executor
             .as_ref()
             .ok_or("shell execution environment is not configured")?;
-        let ownership = self.registry.scope.begin_external()?;
+        let ownership = self.registry.scope.begin_external("workspace")?;
         let _admission = self.registry.scope.admit()?;
         executor.spawn(
             Arc::clone(&self.registry),

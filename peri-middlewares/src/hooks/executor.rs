@@ -66,7 +66,7 @@ pub async fn execute_command_hook_owned(
     let hook_event_str = format!("{:?}", input.hook_event_name);
 
     let ownership = match task_manager
-        .map(TaskManager::begin_external_execution)
+        .map(|manager| TaskManager::begin_external_execution(manager, "hook"))
         .transpose()
     {
         Ok(ownership) => ownership,

@@ -78,6 +78,9 @@ impl ShellExecutor for LocalShellExecutor {
                     pid: None,
                     output_preview: None,
                     agent_inbox: None,
+                    initiator_session_id: None,
+                    owner_session_id: None,
+                    owner_identity: None,
                 };
                 if let Err(registration_error) = registry.register_external_admitted(bg_task) {
                     // No registered task can publish a completion. Return the
@@ -137,6 +140,9 @@ impl ShellExecutor for LocalShellExecutor {
             pid: Some(pid),
             output_preview: None,
             agent_inbox: None,
+            initiator_session_id: None,
+            owner_session_id: None,
+            owner_identity: None,
         };
         if let Err(error) = registry.register_external_admitted(bg_task) {
             kill_process_group(pid, "KILL");

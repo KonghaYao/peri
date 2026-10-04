@@ -12,7 +12,7 @@
 
 **MCP task record** 是外部任务的权威状态。Agent 中的 MCP 条目只是可重建的投影；MessageQueue 仍是易失收件箱，任务目录也不写入 Session Store。Workflow journal、Subagent transcript 等已有成果存储各守自己的语义，不成为这个目录的持久化副本。
 
-任务身份至少包含 `session_id + owner identity + owner task_id`。`owner identity` 是经过连接配置确认且重连后仍能定位到同一任务空间的 MCP 实例身份，或 Agent 本地 owner；不能只用工具名、服务端自报名称、临时连接 ID 或模型传入字符串。Manager 从复合身份确定性生成一个会话内唯一的 opaque `taskId`，让快照、增量事件和 ACP 取消请求都使用同一个值；原 owner task ID 只留在内部路由。这样同名服务、同一会话的重复原始 ID、实例重连和跨 session 均不会串线。
+任务身份至少包含 `session_id + owner identity + owner task_id`。`owner identity` 是经过连接配置确认且重连后仍能定位到同一任务空间的 MCP 实例身份，或 Agent 本地 owner；不能只用工具名、服务端自报名称、临时连接 ID 或模型传入字符串。Manager 从复合身份确定性生成一个会话内唯一的 opaque `taskId`，让快照、增量事件和 ACP 取消请求都使用同一个值；原 owner task ID 只留在内部路由。这样同名服务、同一会话的重复原始 ID、实例重连和跨 session 均不会串线。任务记录同时携带**投递归属**（直接发起会话，来源与规则见 §7）；执行 scope 与投递归属正交，本节 owner 规则与 opaque `taskId` 派生键不因投递归属改变。
 
 ```mermaid
 flowchart LR
@@ -35,13 +35,13 @@ Manager 给 ACP/TUI 提供**会话完整快照**和后续变更流。建立订�
 
 ## 3. 完成结果与消息
 
-任务终态同时影响 TUI 状态与 Agent 下一轮输入。对需要通知 Agent 的终态，Manager 先把可信 `Defer` 放入本会话 MessageQueue 并唤醒 Receive，再减少 active count 和发布完成事件；这保证 idle loop 不会在结果入队前退出等待。展示事件的发送失败不能丢弃 Agent 结果，Agent 消息投递失败也不能被展示成功掩盖。取消终态是否通知模型按任务语义决定，但必须明确记录，不借“删除条目”暗示已投递。
+任务终态同时影响 TUI 状态与 Agent 下一轮输入。对需要通知 Agent 的终态，Manager 先把可信 `Defer` 放入本会话 MessageQueue 并唤醒 Receive，再减少 active count 和发布完成事件；这保证 idle loop 不会在结果入队前退出等待。展示事件的发送失败不能丢弃 Agent 结果，Agent 消息投递失败也不能被展示成功掩盖。取消终态是否通知模型按任务语义决定，但必须明确记录，不借“删除条目”暗示已投递。投递目标为任务的**归属会话**（直接发起会话）；子会话发起的外部任务不因执行 scope owner 不同而改道，规则见 §7。
 
 外部结果在 MCP owner 处保留原始状态和结果；Agent 将其转换为类型化的任务提醒和有界摘要。Workspace Bash 使用 shell 结果的文件引用，不把完整 `structuredContent` JSON 作为模型正文。通用 MCP task 可保留外部来源语义。Owner 对 running→terminal 的唯一跃迁赋予不可变的 terminal transition ID；其后 status message、清理证据等 revision 变化不产生第二次终态提醒。提醒携带由复合任务身份与 terminal transition ID 导出的稳定投递 ID；Receive 将该 ID 与 canonical transcript 中的提醒在同一持久化提交路径去重，已 compact/excluded 的历史仍参与判重。MQ 入队或内存标记不算送达：崩溃在 transcript 提交前可重投，提交后重投被拒绝。持久化失败时保留待对账状态，不能先标记成功。TUI 的单次终态显示由 Manager 的会话投影去重，重连时以快照替换。
 
 ## 4. 外部任务发现与恢复
 
-MCP Tasks 的按 ID `tasks/get`、`tasks/cancel` 和订阅不足以在 Agent 丢失内存后找回未知 ID。Workspace MCP 必须补充**按可信 session scope 发现任务**的扩展能力，返回该 session 的任务身份、状态、revision、terminal transition ID 和足以重建摘要/结果的字段。scope 在可信部署的会话绑定处建立，且必须在后台 `tools/call` 创建任务前到达 MCP owner；响应丢失时也能按 scope 找回已创建任务。不能接受模型工具参数自行声称的 session ID；调用者认证/授权与 session scope 隔离分别校验，scope 本身不是凭证。共享 MCP 实例按 scope 限定创建、查询、取消及订阅。记录至少保留到该 session 的结果完成对账，或按明确的保留上限与过期状态报告；静默删除会造成“恢复成功但任务消失”。不具备发现能力的外部 MCP server 只能提供已知 ID 的 best-effort 观察，不能声称支持冷恢复。
+MCP Tasks 的按 ID `tasks/get`、`tasks/cancel` 和订阅不足以在 Agent 丢失内存后找回未知 ID。Workspace MCP 必须补充**按可信 session scope 发现任务**的扩展能力，返回该 session 的任务身份、状态、revision、terminal transition ID 和足以重建摘要/结果的字段（含投递归属，供冷恢复重建投递目标，见 §7）。scope 在可信部署的会话绑定处建立，且必须在后台 `tools/call` 创建任务前到达 MCP owner；响应丢失时也能按 scope 找回已创建任务。不能接受模型工具参数自行声称的 session ID；调用者认证/授权与 session scope 隔离分别校验，scope 本身不是凭证。共享 MCP 实例按 scope 限定创建、查询、取消及订阅。记录至少保留到该 session 的结果完成对账，或按明确的保留上限与过期状态报告；静默删除会造成“恢复成功但任务消失”。不具备发现能力的外部 MCP server 只能提供已知 ID 的 best-effort 观察，不能声称支持冷恢复。
 
 Workspace 扩展同时提供 scope 快照和可从快照 cursor 续接的 scope 变更流。Agent session runtime 重建时，先读取 scope 快照及 cursor，再从该 cursor 订阅变更；对发现的任务按需 `tasks/get` 核实终态，按 owner revision 合并事件，最后发布完整会话快照。若 cursor 已过期或变更流出现空洞，则重新取快照，不把缺口视作无变化。现有仅按已知 task ID 过滤的 `subscriptions/listen` 不承担冷恢复。订阅断开、lag 或查询失败进入可见的失联/待对账状态并重试；不得把本地条目直接判完成或永久保留 running。重连对账可重新投递遗漏的终态提醒，遵守上一节去重规则。Manager 的本地记录可以整体重建；MCP owner 的记录不会被 Agent 重建操作改写。
 
@@ -51,7 +51,7 @@ Subagent 与 Workflow 的执行 owner 仍在 Agent 部署内。该部署退出�
 
 ## 5. 关闭与清理
 
-用户**显式关闭或删除 session** 时，Session runtime 在 admission 锁下进入 `PreparingClose`，阻止新任务并记录已接纳的在途发起，然后向 Session Store 提交关闭意图。**持久提交是关闭请求的接纳点**：明确写入失败时撤销 `PreparingClose`、恢复准入并返回失败；提交结果不确定时先回读确认，在确认前保持 `PreparingClose` 且不得返回成功。若提交前进程退出，客户端未收到接纳结果，需重试；恢复时以 Store 中有无关闭意图为准。已提交意图禁止新 runtime 任务准入。Workspace MCP 的 session scope 也须有与任务创建线性化的 closing gate：关闭 gate 返回 barrier cursor，拒绝之后的新建；先前已接纳的在途创建必须纳入 barrier 后的发现快照。Manager 等待在途调用结算，按 barrier 及后续变更发现并取消本 session 的所有外部任务，同时取消 Agent owned 任务；取得终态/清理证据后才结算关闭。只取消该 session 的任务，不关闭共享 MCP 实例。
+用户**显式关闭或删除 session** 时，Session runtime 在 admission 锁下进入 `PreparingClose`，阻止新任务并记录已接纳的在途发起，然后向 Session Store 提交关闭意图。**持久提交是关闭请求的接纳点**：明确写入失败时撤销 `PreparingClose`、恢复准入并返回失败；提交结果不确定时先回读确认，在确认前保持 `PreparingClose` 且不得返回成功。若提交前进程退出，客户端未收到接纳结果，需重试；恢复时以 Store 中有无关闭意图为准。已提交意图禁止新 runtime 任务准入。Workspace MCP 的 session scope 也须有与任务创建线性化的 closing gate：关闭 gate 返回 barrier cursor，拒绝之后的新建；先前已接纳的在途创建必须纳入 barrier 后的发现快照。Manager 等待在途调用结算，按 barrier 及后续变更发现并取消本 session 的所有外部任务，同时取消 Agent owned 任务；取得终态/清理证据后才结算关闭。只取消该 session 的任务，不关闭共享 MCP 实例。子会话（subagent 等）结束不是其 root 的显式关闭：不得取消 root scope 任务；发起会话结束前的有界收敛与交接见 §7。
 
 关闭意图属于 session 生命周期元数据，不是任务目录或结果副本。取消或清理超时报告 `Incomplete`：进程内由 deployment owner 保留可重试的关闭上下文；Agent 更换后先读关闭意图并禁止新任务准入，再用 MCP closing gate 和 scope 快照继续结算。外部 MCP 工具调用须在发送请求前登记执行准入，覆盖服务端创建任务到本地登记或确认取消的整个窗口；创建响应丢失、超时或取消未确认时保留未结清证据，不能把空任务目录当作成功。**关闭意图仅证明关闭请求已接纳，不证明原 Agent 的 prompt、Subagent、Workflow 或 transcript 已排空。**更换 Agent 必须由可信 SDK supervisor 证明对应旧 Agent 进程代际已经退出，且其本地子进程组已收敛；证明缺失即 `Incomplete`。新的 Agent 用 Store 时钟下的 CAS 取得 root 执行 owner `epoch + nonce`；旧 owner 仍有效时不得接管。Store 的每次会话写入必须在同一业务事务内校验精确 owner 和有效期，迟到写入与接管 CAS 按 Store 写锁线性化。运行中每 10 秒续约；续约失败立即关闭该 session 的 Agent 与工具准入。
 
@@ -69,4 +69,41 @@ Agent 意外消失、连接断开、宿主更换或部署重启不等同于用�
 
 跨进程关闭接管按 §5 的证据链实现：Store 的 root owner 代际与同事务写入栅栏、Workspace 的执行代际 floor 与 task barrier、SDK 对精确旧 Agent 进程代际的子进程收敛证明、ACP 的关闭续约和可重试结算。Store 只持久化执行 owner 代际、关闭意图及执行期外部 owner 身份与能力证据；Task Manager 和任务投影继续只在内存。无法取到可信 SDK 证明、可信 Workspace owner 目录或 Store 的精确结算读回时保持 `Incomplete`，不会把失去观察误判为完成。独立 Workspace MCP 自身异常退出后的孤儿 shell 仍需外部进程监督或人工清理证明，当前 owner incarnation guard 会阻止空目录恢复。
 
-完整验收仍须覆盖：三类任务的 started/terminal/取消在同一 TUI 区域可见；任务在结果入队前保持 active；快完成与取消竞争；session 切换及重连快照；订阅丢失后的对账；Agent runtime 重建后从仍存活的独立 MCP 找回任务；显式关闭只取消本 session，Agent 意外退出不取消 MCP；同名 MCP 实例及跨 session task ID 不串线。部署进程退出、MCP owner 退出与不支持发现的第三方 server 应分别报告能力边界。
+完整验收仍须覆盖：三类任务的 started/terminal/取消在同一 TUI 区域可见；任务在结果入队前保持 active；快完成与取消竞争；session 切换及重连快照；订阅丢失后的对账；Agent runtime 重建后从仍存活的独立 MCP 找回任务；显式关闭只取消本 session，Agent 意外退出不取消 MCP；同名 MCP 实例及跨 session task ID 不串线。部署进程退出、MCP owner 退出与不支持发现的第三方 server 应分别报告能力边界。子会话发起任务的发起者可达（回执承诺可兑现）、祖先链聚合可归属且不重复产生终态、跨进程重建后投递目标正确（降级路径显式可观测），同样纳入验收（§7）。
+
+## 7. 归属、投递与可见性
+
+本节定义**子会话发起的外部任务**（subagent、嵌套 subagent、workflow 内 agent、print 等）的归属规则，与 §1–§6 同等效力。
+
+### 7.1 三个正交维度
+
+同一任务的三种关系分别取值，不得合并为单一字段：
+
+| 维度 | 取值 | 用途 |
+| --- | --- | --- |
+| 投递归属 | **直接发起会话** | 终态提醒的 canonical 提交与唤醒 |
+| 执行 scope | **执行树根** | MCP task scope、发现/恢复对账、关闭级联、取消授权 |
+| 可见性 | **祖先链聚合，至少 root** | TUI 面板与 ACP 快照的只读投影 |
+
+任务记录携带投递归属（发起会话与调用上下文）；投递归属取自可信 session binding 或执行上下文，不得接受模型工具参数或字符串自称的 session ID。
+
+### 7.2 投递规则
+
+- 终态提醒以稳定投递 ID 原子提交到**归属会话**的 canonical transcript；活跃会话可经其 Receive 提交，投递路径也可直接提交，两条路径按同一去重规则收敛。MQ 入队只用于活跃唤醒，不算送达。
+- 投递不因 scope owner 不同而改道；回执向发起者承诺的投递必须在其归属会话可达，不可达不得承诺。
+- 归属会话不活跃或已结束时，canonical 提交即持久送达：resume/load 后按稳定投递 ID 去重可见，并进入模型投影。
+- 持久化失败保留待对账状态；崩溃可重投，提交后重投被拒绝（§3 机制不变）。
+
+### 7.3 生命周期与收敛
+
+- 发起者活跃：Defer 入归属会话 MQ 并唤醒 Receive。
+- 发起会话结束前对其已发起且未结算的任务执行**有界等待**；超时按**可观测交接**结束：在归属会话及其调用方可见处记录未结算任务身份与 scope owner，不得无限等待、不得静默丢弃。
+- 发起会话（含子会话）结束不得取消 root scope 任务；任务继续由 root scope 的关闭与对账结算。发起者永久不恢复时，scope owner 流程负责结算并报告（丢失可观测）。
+- 跨进程：scope 发现（§4）携带投递归属并据此重建投递目标；无法重建时降级为 root 投递，并在通知与视图中显式标注。
+
+### 7.4 可见性
+
+- 聚合视图是只读投影：不夺回投递权、不产生第二结果权威源；root 视图不生成新终态。
+- 条目携带发起者身份（thread / 调用上下文 / kind），去重键为稳定任务身份 + terminal transition ID。
+- 展示事件失败不丢结果，投递失败不被展示成功掩盖（§3 不变）。
+- 取消授权：发起者可取消其发起的任务，scope owner 可取消整树（§1/§5 不变）。

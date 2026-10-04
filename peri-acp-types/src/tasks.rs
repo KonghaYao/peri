@@ -69,6 +69,10 @@ pub struct TaskRecord {
     pub status: String,
     pub duration_ms: u64,
     pub output_preview: Option<String>,
+    /// 投递归属（直接发起会话）；`None` = 未记录（本地 owner 任务或测试投影）。
+    /// 快照/增量事件携带它，root 面板据此归属子会话发起的任务（只读投影）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initiator_session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -79,13 +83,42 @@ pub struct TaskSnapshot {
 
 pub type ExternalCancelFn =
     Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>> + Send + Sync>;
+/// Terminal delivery hook. Delivery is durable and confirmed before the task
+/// projection publishes a terminal state, so it cannot be a synchronous
+/// fire-and-forget call: callers await the returned future and keep the task
+/// unsettled when it fails.
 pub type ExternalNotifyFn = Arc<
-    dyn Fn(&BackgroundTaskResult, crate::messages::MessageId) -> Result<(), String> + Send + Sync,
+    dyn Fn(
+            &BackgroundTaskResult,
+            crate::messages::MessageId,
+        ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>>
+        + Send
+        + Sync,
 >;
+
+/// Durable terminal-reminder route into the session that initiated a task.
+///
+/// The route commits the reminder into the initiator's canonical transcript
+/// (idempotent by delivery ID, so a crash before commit can retry) and
+/// best-effort wakes a live initiator through its own queue. MQ enqueue alone
+/// is not delivery.
+pub trait TaskTerminalDelivery: Send + Sync {
+    fn deliver<'a>(
+        &'a self,
+        delivery_id: crate::messages::MessageId,
+        reminder: &'a crate::system_reminder::TrustedSystemReminder,
+        source: crate::session::MessageSource,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>>;
+}
 
 /// Identity is supplied by the trusted connection adapter, never tool input.
 pub struct ExternalTaskRegistration {
+    /// Session that owns the task projection, scope and recovery reconciliation.
     pub session_id: String,
+    /// Session that initiated the tool call. Terminal reminders are delivered
+    /// here; `None` only when a cold recovery cannot rebuild the initiator and
+    /// must fall back to root delivery (explicitly marked in the reminder).
+    pub initiator_session_id: Option<String>,
     pub owner_identity: String,
     pub owner_task_id: String,
     pub kind: BgTaskKind,
@@ -132,9 +165,9 @@ pub trait ExternalExecutionGuard: Send {
 
 /// 后台 shell 启动结果（`TaskManager::spawn_shell` 返回值）。
 ///
-/// 工具层将 task_id / pid / 日志路径回显给 LLM：LLM 可通过另一个 shell
-/// 执行 `kill <pid>` 终止任务，凭 task_id 在 Tasks 面板监控状态与输出预览，
-/// 或经 Read 工具实时读取输出日志文件。
+/// 这是执行环境侧的产品：pid 与输出日志路径供宿主/面板与本地执行环境使用。
+/// 经 MCP Tasks 暴露给模型时，模型面回执只携带 opaque task id（`mcp-` 前缀，
+/// 见 `McpToolBridge`）；完成提醒携带退出信息与输出文件引用，不承诺 pid。
 #[derive(Debug, Clone)]
 pub struct BgShellHandle {
     /// 任务标识（`shell-{uuid v7}`）。
@@ -162,8 +195,8 @@ pub trait TaskManager: std::any::Any + Send + Sync {
         _request: ExternalTaskRegistration,
         _terminal_transition_id: &str,
         _result: BackgroundTaskResult,
-    ) -> Result<String, String> {
-        Err("external terminal restoration is unavailable".into())
+    ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + '_>> {
+        Box::pin(async { Err("external terminal restoration is unavailable".into()) })
     }
     fn external_task_ids(&self) -> Vec<String> {
         Vec::new()
@@ -196,8 +229,22 @@ pub trait TaskManager: std::any::Any + Send + Sync {
         task_id: &str,
         _terminal_transition_id: &str,
         result: BackgroundTaskResult,
-    ) -> Result<bool, String> {
-        Ok(self.complete(task_id, result))
+    ) -> Pin<Box<dyn Future<Output = Result<bool, String>> + Send + '_>> {
+        let task_id = task_id.to_owned();
+        Box::pin(async move { Ok(self.complete(&task_id, result)) })
+    }
+
+    /// Terminal give-up for an external task whose owner stays unobservable for
+    /// the whole bounded retry window. Delivers one final, explicitly marked
+    /// reminder and settles the projection, so a lost task can neither stay
+    /// active forever nor disappear silently. Returns whether a terminal record
+    /// was published.
+    fn abandon_external(
+        &self,
+        _task_id: &str,
+        _reason: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<bool, String>> + Send + '_>> {
+        Box::pin(async { Ok(false) })
     }
     fn cancel_async(
         &self,
@@ -259,8 +306,24 @@ pub trait TaskManager: std::any::Any + Send + Sync {
         Err("task manager does not support owned execution".into())
     }
 
-    fn begin_external_execution(&self) -> Result<Box<dyn ExternalExecutionGuard>, String> {
+    /// Keep an external call inside this session's execution evidence until the
+    /// caller proves cleanup. `scope` identifies the external owner (for
+    /// example the MCP server name, or `workspace` for injected shell
+    /// execution) so a conclusive reconciliation of that owner can clear only
+    /// its own uncertainty.
+    fn begin_external_execution(
+        &self,
+        _scope: &str,
+    ) -> Result<Box<dyn ExternalExecutionGuard>, String> {
         Err("task manager does not support external execution ownership".into())
+    }
+
+    /// Clear uncertainty recorded for `scope` after a conclusive reconciliation
+    /// (for example a fully applied task snapshot for that owner). Returns how
+    /// many records were cleared. Callers must hold real evidence; without it
+    /// the scope must stay non-idle.
+    fn resolve_external_execution_evidence(&self, _scope: &str) -> usize {
+        0
     }
 
     /// Stop admission and await actual cleanup. A cancellation request is not completion.

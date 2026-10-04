@@ -7,6 +7,8 @@
 //! Task 保持易失投影语义：不持久化，重启不复活。
 
 mod agent_inbox;
+pub(crate) mod delivery;
+pub(crate) mod handoff;
 mod manager;
 mod registry;
 mod scope;

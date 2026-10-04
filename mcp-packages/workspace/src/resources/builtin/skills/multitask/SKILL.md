@@ -47,7 +47,7 @@ Background hand-offs give you nothing to await, so the todo tool (`TodoWrite`) i
 
 - Write the deliverable and the owner's `child_thread_id` into the item. That is what makes a later follow-up a resume rather than a re-briefing.
 - Items are hand-offs and coordination steps, never a mirror of an owner's plan — the owner keeps its own list, and a duplicate is not a record.
-- An item closes on the owner's returned report or a completion notification. Nothing weaker — not the launch, not a queued prompt, not an assumed success.
+- An item closes on the owner's returned report or a completion notification. Nothing weaker — not the launch, not a queued prompt, not an assumed success. A missing notification is not a completed item and never closes one: keep the item open and re-check the owner (`resume_thread_id`) or the host's task interface.
 - Blocked, interrupted, and cancelled work keeps its item, carrying the blocker. Deleting it loses both the thread and the reason; clear the blocker with `resume_thread_id`.
 - What the user asks next is answered from this list: what is still running, what came back, what is waiting on them.
 

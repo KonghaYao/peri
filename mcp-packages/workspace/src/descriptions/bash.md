@@ -16,10 +16,10 @@ Usage:
 Timeout behavior:
 - The synchronous path is always bounded: the effective timeout is clamped to at most 120000ms, and `timeout: 0` is treated as that maximum rather than disabling the timeout. There is no way to disable the timeout on the synchronous path.
 - The same foreground deadline covers both shell exit and stdout/stderr draining. `nohup ... &` can leave descendants holding the output pipes after the shell exits; that wait also times out and follows the background-promotion behavior below.
-- Foreground timeout returns a timeout error, but does not terminate the process: when background task registration is available and succeeds, the process continues as a background task; the result includes its `task_id`, `pid` and live log file paths. The foreground timeout is not a new deadline for that continued task.
+- Foreground timeout returns a timeout error, but does not terminate the process: when background task registration is available and succeeds, the command is promoted to a background task and the tool returns a background receipt. The command has already run for at least the foreground deadline, so the receipt is not evidence that it just started, and output produced before promotion is not included in the receipt.
 - If background task registration is unavailable or fails, foreground timeout requests process termination.
 - For commands explicitly started with `run_in_background: true`, a positive `timeout` requests process termination when reached. Omitting `timeout` or setting it to `0` leaves that background command without a timeout.
-- Read the returned process status before retrying. If it says the process is still running, track that task or explicitly stop it before starting a replacement.
+- Read the returned process status before retrying. If it says the process is still running, do not start a replacement for the same work; wait for the completion reminder or use the host's task cancellation interface to stop it.
 
 Platform behavior:
 - Windows: uses powershell -NoProfile -NoLogo -NonInteractive -Command to execute commands
@@ -36,10 +36,8 @@ Output handling:
 - Both stdout and stderr are captured
 
 Background mode (run_in_background: true):
-- Returns immediately with a `task_id`, the process `pid` of the background shell, and log file paths for live output
+- Returns a task receipt carrying the task id. The receipt is the only handle it carries: it does not include a pid or live log paths.
+- The completion reminder is delivered to the session that started the task and carries the exit status plus output file references; use Read on those files to inspect the captured output. Reminders for the same terminal transition are delivered once.
 - Run the service in the foreground inside this already-backgrounded shell: do not add `&`, use `Start-Job`, or detach it with `Start-Process` without `-Wait`.
-- Linux/macOS: the returned `pgid` identifies this task's independent process group. Use `kill -TERM -- -<pgid>`, then `kill -KILL -- -<pgid>` only if it remains after a grace period. Killing only the shell PID can leave the service and its output pipes alive.
-- Windows: use `taskkill /PID <pid> /T` to target the process tree; add `/F` if needed. If the parent PID has already exited, this cannot reliably find its descendants: use existing task cancellation or identify the remaining child processes. Never apply Unix negative-PID commands on Windows.
-- Preserve cleanup errors and verify actual process exit and the background completion notification. Do not hide a failed kill with `2>/dev/null` or report success merely because a trailing `echo cleaned` succeeded.
-- Read the stdout/stderr log files at any time (they append while the command runs); monitor status and output preview in the Tasks panel
-- Completion notifications provide output file paths; use Read to inspect the captured output
+- Stop a running task through the host's task cancellation interface; killing only a shell PID can leave the service and its output pipes alive. If cancellation is unavailable, the process may keep running until it exits on its own.
+- Preserve cleanup errors and verify actual process exit. Do not hide a failed kill with `2>/dev/null` or report success merely because a trailing `echo cleaned` succeeded.
