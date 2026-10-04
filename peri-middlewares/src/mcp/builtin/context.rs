@@ -199,6 +199,10 @@ impl BuiltinInstanceContext {
     /// `HandlerNotWired` 诚实收口，不伪装成「输入缺失」。
     #[cfg(not(target_os = "emscripten"))]
     pub(crate) fn instance_input_ready(&self, instance: &str) -> bool {
+        // 平台能力平面先行：非注册实例一律不可装配（native 侧等价于注册表查询）。
+        if !crate::platform::builtin_instance_supported(instance) {
+            return false;
+        }
         match find(instance).map(|registered| registered.name) {
             Some("cron") => self.cron.is_some(),
             Some("lsp") => self.lsp.is_some(),
