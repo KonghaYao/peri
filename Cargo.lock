@@ -3845,6 +3845,7 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
 ]
 
 [[package]]

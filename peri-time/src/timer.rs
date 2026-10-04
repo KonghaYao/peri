@@ -194,36 +194,36 @@ mod js {
 
     pub(super) struct Delay {
         receiver: tokio::sync::oneshot::Receiver<()>,
-        timer: i32,
-        _callback: Closure<dyn FnMut()>,
+        cancel: Option<tokio::sync::oneshot::Sender<()>>,
     }
 
     impl Delay {
         pub(super) fn new(duration: Duration) -> Self {
             let (sender, receiver) = tokio::sync::oneshot::channel();
-            let mut sender = std::panic::AssertUnwindSafe(Some(sender));
-            let callback = Closure::<dyn FnMut()>::new(move || {
-                send_once(&mut sender);
-            });
+            let (cancel, cancelled) = tokio::sync::oneshot::channel();
             // A positive sub-millisecond budget must not expire early.
             let ms = duration.as_millis() + u128::from(duration.subsec_nanos() % 1_000_000 != 0);
-            let timer = set_timeout(
-                callback.as_ref().unchecked_ref(),
-                ms.min(i32::MAX as u128) as u32,
-            );
+            wasm_bindgen_futures::spawn_local(async move {
+                let (done_sender, done) = tokio::sync::oneshot::channel();
+                let callback = Closure::once(move || {
+                    let _ = sender.send(());
+                    let _ = done_sender.send(());
+                });
+                let timer = set_timeout(
+                    callback.as_ref().unchecked_ref(),
+                    ms.min(i32::MAX as u128) as u32,
+                );
+                tokio::select! {
+                    _ = cancelled => {},
+                    _ = done => {},
+                }
+                clear_timeout(timer);
+                drop(callback);
+            });
             Self {
                 receiver,
-                timer,
-                _callback: callback,
+                cancel: Some(cancel),
             }
-        }
-    }
-
-    fn send_once(
-        sender: &mut std::panic::AssertUnwindSafe<Option<tokio::sync::oneshot::Sender<()>>>,
-    ) {
-        if let Some(sender) = sender.0.take() {
-            let _ = sender.send(());
         }
     }
 
@@ -236,7 +236,9 @@ mod js {
 
     impl Drop for Delay {
         fn drop(&mut self) {
-            clear_timeout(self.timer);
+            if let Some(cancel) = self.cancel.take() {
+                let _ = cancel.send(());
+            }
         }
     }
 }
