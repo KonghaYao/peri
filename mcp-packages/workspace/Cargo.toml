@@ -27,7 +27,7 @@ serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["process"] }
+tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
 uuid.workspace = true
@@ -43,3 +43,6 @@ serial_test.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 tokio-util.workspace = true
+
+[target.'cfg(not(target_os = "emscripten"))'.dependencies]
+tokio = { workspace = true, features = ["full"] }

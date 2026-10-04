@@ -25,3 +25,6 @@ dirs-next.workspace = true
 
 [dev-dependencies]
 tokio-test = "0.4"
+
+[target.'cfg(not(target_os = "emscripten"))'.dependencies]
+tokio = { workspace = true, features = ["full"] }

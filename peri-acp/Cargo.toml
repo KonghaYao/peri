@@ -78,3 +78,6 @@ tracing-subscriber.workspace = true
 # 测试面虚拟时钟（`tokio::time::pause`）：R29/F02 的桥层 120s 期限不真等 120 秒。
 # 与 peri-agent / peri-tui 的既有写法同形（dev-dependencies，resolver = "2" 下不进入生产构建）。
 tokio = { workspace = true, features = ["test-util"] }
+
+[target.'cfg(not(target_os = "emscripten"))'.dependencies]
+tokio = { workspace = true, features = ["full"] }

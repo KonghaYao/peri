@@ -45,7 +45,8 @@ codegen-units = 1
 [workspace.dependencies]
 peri-config = { path = "peri-config" }
 # --- Async runtime ---
-tokio = { version = "1", features = ["full"] }
+# Shared runtime baseline; native crates opt into full features at their target boundary.
+tokio = { version = "1", default-features = false, features = ["rt", "macros", "sync", "time", "io-util"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 futures = "0.3"
 async-trait = "0.1"

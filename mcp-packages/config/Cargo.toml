@@ -16,3 +16,6 @@ uuid.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+
+[target.'cfg(not(target_os = "emscripten"))'.dependencies]
+tokio = { workspace = true, features = ["full"] }

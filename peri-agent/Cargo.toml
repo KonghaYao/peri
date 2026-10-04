@@ -32,3 +32,6 @@ libc = "0.2"
 tokio = { workspace = true, features = ["test-util"] }
 tempfile.workspace = true
 url.workspace = true
+
+[target.'cfg(not(target_os = "emscripten"))'.dependencies]
+tokio = { workspace = true, features = ["full"] }

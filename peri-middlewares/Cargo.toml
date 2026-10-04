@@ -19,7 +19,7 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 futures.workspace = true
-tokio = { workspace = true, features = ["process"] }
+tokio.workspace = true
 # P5.1: SubAgent stub 需要 tokio_util::sync::CancellationToken（原 v1 AgentCancellationToken 别名）。
 # 与 peri-agent 共享同一 tokio-util 依赖（feature unification 自动合并 sync feature）。
 tokio-util = { workspace = true }
@@ -69,3 +69,6 @@ serial_test.workspace = true
 # 测试面虚拟时钟（`tokio::time::pause`）：R29 的桥层 120s 期限不真等 120 秒。
 # 与 peri-agent / peri-tui 的既有写法同形（dev-dependencies，resolver = "2" 下不进入生产构建）。
 tokio = { workspace = true, features = ["test-util"] }
+
+[target.'cfg(not(target_os = "emscripten"))'.dependencies]
+tokio = { workspace = true, features = ["full"] }
