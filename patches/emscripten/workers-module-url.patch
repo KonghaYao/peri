@@ -1,0 +1,20 @@
+diff --git a/src/shell.js b/src/shell.js
+--- a/src/shell.js
++++ b/src/shell.js
+@@ -104,7 +104,7 @@ if (ENVIRONMENT_IS_NODE) {
+   // We need to use `createRequire()` to construct the require()` function.
+   const { createRequire } = await import('node:module');
+   /** @suppress{duplicate} */
+-  var require = createRequire(import.meta.url);
++  var require = createRequire(import.meta.url ?? Module['mainScriptUrlOrBlob']);
+ #endif
+ 
+ #if PTHREADS || WASM_WORKERS
+@@ -134,6 +134,6 @@ var quit_ = (status, toThrow) => {
+ };
+ 
+ #if EXPORT_ES6
+-var _scriptName = import.meta.url;
++var _scriptName = import.meta.url ?? Module['mainScriptUrlOrBlob'];
+ #else
+ #if ENVIRONMENT_MAY_BE_WEB
