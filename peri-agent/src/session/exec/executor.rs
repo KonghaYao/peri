@@ -235,6 +235,7 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
             history_replaced_by_compaction: false,
             persistence_inconsistent: false,
             recall_items: Vec::new(),
+            pending_tasks: 0,
             failure: None,
         };
     }
@@ -328,10 +329,14 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
     let effective_context_window = ctx.effective_context_window;
 
     // session 级 TaskManager（跨 prompt 存活，由 executor 从 session 获取）
-    let task_manager_for_cmd = ctx
+    // 有界等待摘要需要 loop 结束后的未结算计数；TaskManager 随后被 move 进
+    // 执行路径，这里先保留一个 Arc 句柄。
+    let pending_task_probe = ctx
         .session_access
         .as_ref()
-        .and_then(|sa| sa.task_manager(&ctx.session_id))
+        .and_then(|sa| sa.task_manager(&ctx.session_id));
+    let task_manager_for_cmd = pending_task_probe
+        .clone()
         .unwrap_or_else(|| Arc::new(peri_acp_types::tasks::NoopTaskManager));
 
     // ── L5 命令拦截注入面（注册表 / compact 配置）──
@@ -476,11 +481,14 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
     );
     let _ = stop_reason_tx.send((exec_outcome.stop_reason, telemetry_outcome));
 
+    let pending_tasks =
+        crate::session::exec::executor_helpers::pending_task_count(pending_task_probe.as_ref());
     let result = collect_result(CollectRequest {
         event_tx: &event_tx,
         pump_handle,
         session_id: &ctx.session_id,
         exec_outcome,
+        pending_tasks,
     })
     .await;
 

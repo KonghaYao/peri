@@ -83,6 +83,18 @@ pub struct ExecOutcome {
     pub agent_state: AgentState,
 }
 
+/// turn 退出时仍未结算的后台任务数（§7.3 有界等待摘要）。
+///
+/// 与 `idle_should_wait` 的 busy 判据同源（`active_count`）：任务终态结算后
+/// 即不再计入；`0` 表示无未结算任务，ACP 响应不附加 pending 标记。
+pub(crate) fn pending_task_count(
+    manager: Option<&std::sync::Arc<dyn peri_acp_types::tasks::TaskManager>>,
+) -> u32 {
+    manager
+        .map(|manager| manager.active_count() as u32)
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 #[path = "executor_helpers_test.rs"]
 mod tests;

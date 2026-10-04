@@ -405,6 +405,9 @@ pub struct PromptResult {
     pub history_replaced_by_compaction: bool,
     /// 执行期间收集的 recall 项（供下一轮注入）。
     pub recall_items: Vec<String>,
+    /// turn 退出时仍未结算的后台任务数（§7.3 有界等待摘要）。
+    /// `0` = 无未结算任务，宿主不在 ACP 响应上附加 pending 标记。
+    pub pending_tasks: u32,
 }
 
 impl Default for PromptResult {
@@ -421,6 +424,7 @@ impl Default for PromptResult {
             history_replaced_by_compaction: false,
             persistence_inconsistent: true,
             recall_items: Vec::new(),
+            pending_tasks: 0,
             failure: Some(ExecutionFailure::missing_result()),
         }
     }

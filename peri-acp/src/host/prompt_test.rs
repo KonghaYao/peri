@@ -237,6 +237,7 @@ mod wire_projection {
         let err = prompt_wire_response(
             Some(&failure),
             crate::session::executor::PromptStopReason::EndTurn,
+            0,
         )
         .expect_err("fatal failure 必须映射为 Err，不得返回成功 PromptResponse");
         assert_eq!(err.code, ACP_TURN_EXECUTION_FAILED_CODE);
@@ -252,9 +253,12 @@ mod wire_projection {
     /// 用户 cancel → 成功 `PromptResponse(Cancelled)`，不升级为请求错误。
     #[test]
     fn prompt_wire_response_cancel_is_success_prompt_response() {
-        let value =
-            prompt_wire_response(None, crate::session::executor::PromptStopReason::Cancelled)
-                .expect("cancel 必须返回成功 PromptResponse");
+        let value = prompt_wire_response(
+            None,
+            crate::session::executor::PromptStopReason::Cancelled,
+            0,
+        )
+        .expect("cancel 必须返回成功 PromptResponse");
         assert_eq!(value["stopReason"], "cancelled", "{value}");
         assert!(value.get("error").is_none(), "成功响应不应携带 error 字段");
     }
@@ -265,6 +269,7 @@ mod wire_projection {
         let value = prompt_wire_response(
             None,
             crate::session::executor::PromptStopReason::MaxTurnRequests,
+            0,
         )
         .expect("max-iterations 必须返回成功 PromptResponse");
         assert_eq!(value["stopReason"], "max_turn_requests", "{value}");
@@ -273,9 +278,12 @@ mod wire_projection {
 
     #[test]
     fn prompt_wire_response_max_tokens_preserves_incomplete_stop_reason() {
-        let value =
-            prompt_wire_response(None, crate::session::executor::PromptStopReason::MaxTokens)
-                .expect("输出截断是标准停止状态，不是 JSON-RPC 错误");
+        let value = prompt_wire_response(
+            None,
+            crate::session::executor::PromptStopReason::MaxTokens,
+            0,
+        )
+        .expect("输出截断是标准停止状态，不是 JSON-RPC 错误");
         assert_eq!(value["stopReason"], "max_tokens");
         assert!(value.get("error").is_none());
     }
@@ -283,8 +291,9 @@ mod wire_projection {
     /// 正常完成 → 成功 `PromptResponse(EndTurn)`。
     #[test]
     fn prompt_wire_response_end_turn_is_success_prompt_response() {
-        let value = prompt_wire_response(None, crate::session::executor::PromptStopReason::EndTurn)
-            .expect("正常完成必须返回成功 PromptResponse");
+        let value =
+            prompt_wire_response(None, crate::session::executor::PromptStopReason::EndTurn, 0)
+                .expect("正常完成必须返回成功 PromptResponse");
         assert_eq!(value["stopReason"], "end_turn", "{value}");
         assert!(value.get("error").is_none());
     }
@@ -309,6 +318,7 @@ mod wire_projection {
         let err = prompt_wire_response(
             Some(&failure),
             crate::session::executor::PromptStopReason::EndTurn,
+            0,
         )
         .expect_err("启动准入失败必须映射为协议错误，不得返回成功 PromptResponse");
         assert_eq!(err.code, ACP_TURN_EXECUTION_FAILED_CODE);
@@ -322,4 +332,22 @@ mod wire_projection {
         assert_eq!(wire["code"], ACP_TURN_EXECUTION_FAILED_CODE);
         assert_eq!(wire["data"], serde_json::json!({"kind": "internal"}));
     }
+}
+
+// [回归测试] §7.3 有界等待摘要：无未结算任务时响应保持原形；有则携带 pending:n。
+#[test]
+fn test_prompt_wire_response_carries_pending_tasks_only_when_unsettled() {
+    let settled =
+        prompt_wire_response(None, crate::session::executor::PromptStopReason::EndTurn, 0).unwrap();
+    assert!(
+        settled
+            .get("_meta")
+            .map_or(true, serde_json::Value::is_null),
+        "无未结算任务不得附加 pending 标记: {settled}"
+    );
+
+    let pending =
+        prompt_wire_response(None, crate::session::executor::PromptStopReason::EndTurn, 3).unwrap();
+    assert_eq!(pending["_meta"]["peri"]["pendingTasks"], 3, "{pending}");
+    assert_eq!(pending["stopReason"], "end_turn", "{pending}");
 }

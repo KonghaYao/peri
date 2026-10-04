@@ -184,6 +184,7 @@ pub async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Intercept
                     history_replaced_by_compaction: false,
                     persistence_inconsistent: false,
                     recall_items: Vec::new(),
+                    pending_tasks: 0,
                     failure: None,
                 });
             }
@@ -323,6 +324,7 @@ pub async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Intercept
                 history_replaced_by_compaction,
                 persistence_inconsistent,
                 recall_items: Vec::new(),
+                pending_tasks: 0,
                 failure,
             })
         }

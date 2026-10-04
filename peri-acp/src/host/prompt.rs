@@ -8,7 +8,7 @@ use crate::{
     session::{event_sink::TransportEventSink, executor},
     transport::types::AcpError,
 };
-use agent_client_protocol::schema::v1::{PromptResponse, StopReason};
+use agent_client_protocol::schema::v1::{Meta, PromptResponse, StopReason};
 use peri_acp_types::interaction::{
     ApprovalDecision, ApprovalItem, InteractionContext, InteractionResponse, UserInteractionBroker,
 };
@@ -122,6 +122,7 @@ pub(crate) fn execution_failure_to_acp_error(failure: &ExecutionFailure) -> AcpE
 fn prompt_wire_response(
     failure: Option<&ExecutionFailure>,
     stop_reason: executor::PromptStopReason,
+    pending_tasks: u32,
 ) -> Result<Value, AcpError> {
     if let Some(failure) = failure {
         return Err(execution_failure_to_acp_error(failure));
@@ -132,7 +133,17 @@ fn prompt_wire_response(
         executor::PromptStopReason::MaxTokens => StopReason::MaxTokens,
         executor::PromptStopReason::EndTurn => StopReason::EndTurn,
     };
-    let resp = PromptResponse::new(acp_stop_reason);
+    let mut resp = PromptResponse::new(acp_stop_reason);
+    // §7.3 有界等待摘要：turn 退出时仍有未结算任务才附加标记，
+    // 无未结算任务时响应保持原形（不产生 `_meta`）。
+    if pending_tasks > 0 {
+        let mut meta = Meta::new();
+        meta.insert(
+            "peri".to_owned(),
+            serde_json::json!({ "pendingTasks": pending_tasks }),
+        );
+        resp.meta = Some(meta);
+    }
     serde_json::to_value(resp).map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
 }
 
@@ -646,7 +657,11 @@ pub(super) async fn finish_prompt_turn(
     }
     // Fatal failures still use the standard JSON-RPC error; cancellation/max-iterations
     // retain their existing PromptResponse stop reasons after state cleanup.
-    prompt_wire_response(result.failure.as_ref(), result.stop_reason)
+    prompt_wire_response(
+        result.failure.as_ref(),
+        result.stop_reason,
+        result.pending_tasks,
+    )
 }
 
 /// [AsyncContinuation] 读取本轮 recall 的策略：
