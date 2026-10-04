@@ -105,22 +105,16 @@ async fn external_completion_notifies_before_terminal_and_retries_failed_deliver
         subagent_failure: None,
         shell_output: None,
     };
-    assert_eq!(
-        manager
-            .settle_external(&task_id, "terminal-1", result.clone())
-            .await
-            .unwrap(),
-        true
-    );
+    assert!(manager
+        .settle_external(&task_id, "terminal-1", result.clone())
+        .await
+        .unwrap());
     assert_eq!(manager.active_count(), 0);
     assert_eq!(manager.snapshot().tasks[0].status, "completed");
-    assert_eq!(
-        manager
-            .settle_external(&task_id, "terminal-1", result)
-            .await
-            .unwrap(),
-        false
-    );
+    assert!(!manager
+        .settle_external(&task_id, "terminal-1", result)
+        .await
+        .unwrap());
     assert_eq!(attempts.load(Ordering::SeqCst), 2);
 }
 

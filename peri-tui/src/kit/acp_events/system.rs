@@ -639,10 +639,10 @@ pub(super) fn handle_oauth_restored(state: &mut BridgeState, server_name: &str) 
 // ── §4.7 Background Tasks ──
 
 pub(crate) fn apply_bg_task_snapshot(tasks: &[BgTaskEntry], revision: Option<u64>) -> bool {
-    if let (Some(incoming), Some(current)) = (revision, *BG_TASK_REVISION.state().read()) {
-        if incoming < current {
-            return false;
-        }
+    if let (Some(incoming), Some(current)) = (revision, *BG_TASK_REVISION.state().read())
+        && incoming < current
+    {
+        return false;
     }
     *BG_TASK_REVISION.state().write() = revision;
     let tasks_vec: Vec<BgTaskEntry> = tasks.to_vec();

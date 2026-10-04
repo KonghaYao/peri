@@ -71,6 +71,10 @@ fn foreground_log_hint(capture: &ShellOutputCapture) -> String {
 
 /// BashTool - 终端命令执行工具，与 TypeScript TerminalMiddleware 对齐
 const BASH_DESCRIPTION: &str = include_str!("descriptions/bash.md");
+
+/// 后台任务启动回调：参数为任务 id；在返回 MCP 响应前同步登记。
+pub type OnBgStartedFn = Arc<dyn Fn(&str) + Send + Sync>;
+
 pub struct BashTool {
     pub cwd: String,
     /// 后台任务管理器（Agent 层 per-session TaskManager；用于 run_in_background 模式）
@@ -80,7 +84,7 @@ pub struct BashTool {
     pub on_bg_complete: Option<OnBgCompleteFn>,
     /// Owned foreground timeout promotion is registered synchronously before
     /// returning to the MCP request, so request cancellation cannot hide it.
-    pub on_bg_started: Option<Arc<dyn Fn(&str) + Send + Sync>>,
+    pub on_bg_started: Option<OnBgStartedFn>,
 }
 
 impl BashTool {
@@ -103,7 +107,7 @@ impl BashTool {
         self
     }
 
-    pub fn with_on_bg_started(mut self, cb: Arc<dyn Fn(&str) + Send + Sync>) -> Self {
+    pub fn with_on_bg_started(mut self, cb: OnBgStartedFn) -> Self {
         self.on_bg_started = Some(cb);
         self
     }

@@ -118,13 +118,6 @@ impl ExecutionScope {
         uncertain.retain(|_, recorded| recorded != scope);
         before - uncertain.len()
     }
-
-    #[cfg(test)]
-    pub(super) fn uncertain_scopes(&self) -> Vec<String> {
-        let mut scopes: Vec<String> = self.uncertain.lock().values().cloned().collect();
-        scopes.sort();
-        scopes
-    }
 }
 
 struct ExternalGuard {

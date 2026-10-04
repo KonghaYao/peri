@@ -43,7 +43,7 @@ pub(in crate::sessions) fn lease_required() -> SessionResourceError {
 
 /// 与驱动无关的执行失败映射：保留领域和 workspace 失败，其余映射为后端暂不可用。
 /// SQLite 的 SQLx 失败仍由其 adapter 按具体原因分类。
-#[cfg(any(test, target_os = "emscripten"))]
+#[cfg(target_os = "emscripten")]
 pub(in crate::sessions) fn execution_failure(error: anyhow::Error) -> SessionResourceError {
     match error.downcast::<SessionResourceError>() {
         Ok(domain) => domain,

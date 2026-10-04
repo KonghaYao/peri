@@ -84,10 +84,11 @@ async fn stable_terminal_delivery_id_is_recorded_once_across_receive_runs() {
         .await
         .unwrap();
     }
-    let transcript = context.session.transcript.read();
-    assert_eq!(transcript.persisted_payloads().len(), 1);
-    assert!(transcript.get(delivery_id).is_some());
-    drop(transcript);
+    {
+        let transcript = context.session.transcript.read();
+        assert_eq!(transcript.persisted_payloads().len(), 1);
+        assert!(transcript.get(delivery_id).is_some());
+    }
     let mut conflicting = reminder.into_inner();
     conflicting.body = "different terminal".into();
     let conflicting = TrustedSystemReminderFactory::for_producer()

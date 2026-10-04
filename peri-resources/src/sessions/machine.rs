@@ -124,11 +124,13 @@ fn adopt_identity_at(path: &Path, expected: &str, target: &str) -> Result<()> {
     let lock = fs::OpenOptions::new()
         .write(true)
         .create(true)
+        // 锁文件内容不参与判定，只借它的 inode 做互斥。
+        .truncate(false)
         .open(parent.join("machine-id.adopt.lock"))?;
     lock.lock()
         .context("cannot lock machine identity adoption")?;
     anyhow::ensure!(
-        read_identity(&path)? == expected,
+        read_identity(path)? == expected,
         "current Machine ID changed"
     );
     if expected == target {
@@ -148,10 +150,10 @@ fn adopt_identity_at(path: &Path, expected: &str, target: &str) -> Result<()> {
         file.write_all(target.as_bytes())?;
         file.sync_all()?;
         anyhow::ensure!(
-            read_identity(&path)? == expected,
+            read_identity(path)? == expected,
             "current Machine ID changed"
         );
-        fs::rename(&staging, &path).context("cannot replace machine identity")?;
+        fs::rename(&staging, path).context("cannot replace machine identity")?;
         fs::File::open(parent)?.sync_all()?;
         Ok(())
     })();

@@ -107,7 +107,7 @@ impl McpClientPool {
         session_id: &str,
         token: ExecutionOwnerToken,
     ) -> Result<(), String> {
-        if token.root_id.to_string() != session_id {
+        if token.root_id.as_str() != session_id {
             return Err("Store owner token belongs to another session".into());
         }
         self.session_execution_tokens
@@ -974,6 +974,9 @@ impl McpClientPool {
         Some(meta)
     }
 
+    // 外部任务登记事实来自跨层调用，字段固定且按调用顺序直传；与下面的
+    // external_task_registration 共用同一组参数，不为此再拆一层结构。
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn register_external_task(
         self: &Arc<Self>,
         session_id: &str,

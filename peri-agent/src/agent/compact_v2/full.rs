@@ -6,6 +6,7 @@
 //! 3. 后处理摘要
 //! 4. 快照内自有的普通历史和 reminder 标 excluded（保留 System / ancestor）
 //! 5. 追加 Human 摘要消息（带 CONTINUATION_HINT，wrap 在 system-reminder 标签中）
+//!
 //! 历史工具调用及结果留存在 transcript 中；不会从计算实例本机重新读取 Workspace 文件。
 
 use peri_model::{ModelMessage, ModelRequest, StopReason};

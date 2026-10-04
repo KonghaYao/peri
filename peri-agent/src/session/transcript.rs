@@ -233,6 +233,13 @@ impl Default for MessageTranscript {
     }
 }
 
+/// 持久化提醒的交接端口：资源门面、会话 id、可选的持久化写队列。
+pub type IdempotentReminderPort = (
+    Arc<dyn SessionResources>,
+    ThreadId,
+    Option<Arc<tokio::sync::mpsc::UnboundedSender<PersistOp>>>,
+);
+
 impl MessageTranscript {
     /// 创建空 Transcript
     pub fn new() -> Self {
@@ -424,13 +431,7 @@ impl MessageTranscript {
         true
     }
 
-    pub fn idempotent_reminder_port(
-        &self,
-    ) -> Option<(
-        Arc<dyn SessionResources>,
-        ThreadId,
-        Option<Arc<tokio::sync::mpsc::UnboundedSender<PersistOp>>>,
-    )> {
+    pub fn idempotent_reminder_port(&self) -> Option<IdempotentReminderPort> {
         Some((
             Arc::clone(self.session_resources.as_ref()?),
             self.thread_id.as_ref()?.clone(),

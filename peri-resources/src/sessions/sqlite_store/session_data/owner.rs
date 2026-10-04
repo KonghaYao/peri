@@ -37,15 +37,14 @@ impl SqliteSessionData {
         .await
         .map_err(|e| map_sqlx(&e))?;
         if let Some((epoch, endpoint, key, generation, _unsupported)) = old.as_ref() {
-            if *epoch == token.epoch {
-                if endpoint != &descriptor.endpoint
+            if *epoch == token.epoch
+                && (endpoint != &descriptor.endpoint
                     || key != &descriptor.owner_identity
-                    || generation != &descriptor.agent_generation_id
-                {
-                    return Err(SessionResourceError::conflict(
-                        "workspace execution descriptor changed",
-                    ));
-                }
+                    || generation != &descriptor.agent_generation_id)
+            {
+                return Err(SessionResourceError::conflict(
+                    "workspace execution descriptor changed",
+                ));
             }
         }
         sqlx::query(

@@ -153,7 +153,7 @@ pub(super) async fn upgrade(
         // Group by the saved cwd as unverified; the execution binding remains
         // unchanged and still requires validation before use.
         let derived_root = registration
-            .and_then(|_| relative.as_deref())
+            .and(relative.as_deref())
             .and_then(|relative| derive_remote_root(&cwd, relative).ok());
         let plan_registration = if registration.is_some() && derived_root.is_none() {
             None

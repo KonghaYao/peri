@@ -569,7 +569,7 @@ impl ServerHandler for WorkspaceMcpServer {
                     let barrier = tasks.fence_execution(scope, generation).await?;
                     serde_json::to_value(serde_json::json!({"epoch": generation.epoch, "barrierCursor": barrier}))
                 }
-                "workspace/taskSnapshot" => serde_json::to_value(tasks.snapshot(&scope)),
+                "workspace/taskSnapshot" => serde_json::to_value(tasks.snapshot(scope)),
                 "workspace/taskChanges" => {
                     let cursor = params
                         .get("cursor")
@@ -584,7 +584,7 @@ impl ServerHandler for WorkspaceMcpServer {
                     let changes = tokio::select! {
                         biased;
                         _ = _context.ct.cancelled() => return Err(McpError::internal_error("task change wait cancelled", None)),
-                        changes = tasks.changes(&scope, cursor, wait_ms) => changes?,
+                        changes = tasks.changes(scope, cursor, wait_ms) => changes?,
                     };
                     tasks.check_execution(scope, capability.execution.as_ref())?;
                     serde_json::to_value(changes)

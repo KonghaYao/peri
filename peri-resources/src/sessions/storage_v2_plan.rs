@@ -45,6 +45,10 @@ pub(crate) struct StorageV2Plan {
     pub session_workspace_ids: HashMap<ThreadId, WorkspaceId>,
 }
 
+/// 旧表会话行：`(thread id, parent id, cwd, machine id, workspace id)`。
+#[cfg(not(target_os = "emscripten"))]
+type LegacySessionRow = (String, Option<String>, String, String, Option<String>);
+
 /// 在旧表仍完整时读取迁移输入。执行登记的 `discovery` 只是最后观测值，
 /// 这里仅用它判断路径来源，绝不把它标成创建时的执行快照。
 #[cfg(not(target_os = "emscripten"))]
@@ -69,7 +73,7 @@ pub(crate) async fn read_local_plan(connection: &mut SqliteConnection) -> Result
             },
         });
     }
-    let rows: Vec<(String, Option<String>, String, String, Option<String>)> = sqlx::query_as(
+    let rows: Vec<LegacySessionRow> = sqlx::query_as(
         "SELECT t.id, t.parent_thread_id, t.cwd, e.machine_id, b.workspace_id
          FROM threads t
          JOIN session_environments e ON e.thread_id = t.id

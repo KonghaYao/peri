@@ -360,16 +360,18 @@ async fn child_initiated_task_receipt_delivers_to_the_child_not_root() {
         .settle_external(&task_id, "terminal-1", result)
         .await
         .unwrap());
-    let delivered = delivery.delivered.lock();
-    assert_eq!(delivered.len(), 1, "终态提醒必须投给发起者");
-    assert_eq!(
-        delivered[0].1.as_reminder().metadata["initiator"],
-        "child-thread"
-    );
-    assert_eq!(
-        delivered[0].1.as_reminder().metadata["task_owner"],
-        "root-session"
-    );
+    {
+        let delivered = delivery.delivered.lock();
+        assert_eq!(delivered.len(), 1, "终态提醒必须投给发起者");
+        assert_eq!(
+            delivered[0].1.as_reminder().metadata["initiator"],
+            "child-thread"
+        );
+        assert_eq!(
+            delivered[0].1.as_reminder().metadata["task_owner"],
+            "root-session"
+        );
+    }
     assert!(root_inbox.queue().drain_all().is_empty());
     owner.shutdown().await;
     wire.close().await;

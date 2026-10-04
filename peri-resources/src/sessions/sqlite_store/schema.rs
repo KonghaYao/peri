@@ -292,7 +292,7 @@ impl SqliteSessionDatabase {
             .bind(crate::sessions::machine::current()?)
             .execute(&mut *tx)
             .await?;
-        sqlx::query(AssertSqlSafe(format!("PRAGMA user_version = 11")))
+        sqlx::query("PRAGMA user_version = 11")
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;

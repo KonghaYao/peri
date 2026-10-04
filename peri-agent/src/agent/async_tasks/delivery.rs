@@ -27,7 +27,7 @@ pub(crate) struct SessionTerminalDelivery {
 impl SessionTerminalDelivery {
     /// Build the route when the session's transcript is persisted; sessions
     /// without a store keep the previous queue-only behavior.
-    pub(crate) fn new(
+    pub(crate) fn for_transcript(
         transcript: &Arc<parking_lot::RwLock<MessageTranscript>>,
         queue: &MessageQueue,
     ) -> Option<Arc<dyn TaskTerminalDelivery>> {
