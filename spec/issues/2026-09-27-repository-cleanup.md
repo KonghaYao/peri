@@ -25,7 +25,7 @@
 | WP-05 Controller / runtime / Langfuse | `peri-controller/`、`peri-runtime/`、`langfuse-client/` | 86 / 18.4k；高，取消身份、执行路由、观测旁路 | 相关 code-index + architecture contracts；目标 crate lib tests；Langfuse 改动按 Controller 指引验证 bridge/e2e |
 | WP-06 Workflow / JS runtime | `peri-workflow/`、`peri-js-runtime/`、`npm-packages/@peri-workflow/` | 75 tracked files，约 10.9k Rust lines；高，跨进程 RPC、取消/收敛与 wire DTO | `docs/code-index/peri-workflow.md`、`peri-js-runtime` 索引、`docs/design/workflow.md`；Rust 目标测试和 npm package scripts；必要时 middleware workflow lifecycle test |
 | WP-07 Session support | `peri-resources/`、`peri-process/` | 30 / 11.0k；高，持久身份、OS owner 和进程回收 | `ARC-WORKSPACE-001`；crate 目标测试；OS 承诺需在声称支持的平台运行，交叉编译不替代运行验收 |
-| WP-08 Other workspace crates | `peri-model/`、`peri-lsp/`、`peri-web-pty/` | 88 / 18.4k；中到高，provider、LSP、PTY platform lifecycle | 对应 `docs/code-index/`；各 crate 目标 lib/integration/doc tests；PTY 按平台边界做运行验收 |
+| WP-08 Other workspace crates | `peri-model/`、`peri-lsp/` | 中到高，provider、LSP lifecycle | 对应 `docs/code-index/`；各 crate 目标 lib/integration/doc tests |
 | WP-09 E2E | `e2e/`（含子仓路径 `e2e/tui-tester`，已初始化但内部未扫描） | 53 个父仓跟踪文件；中到高，真实 TUI/tmux、部分 Judge 使用外部 API | `e2e/CLAUDE.md`：目标文件 `npm run e2e -- --file ... --serial --retry 0`；日常 `e2e:l0`，合并 `e2e:l1`，发版 `e2e:release`。确认 tester 子仓是否需要初始化后再运行 |
 | WP-10 文档站 | `peri-cool/` 子仓 | 固定 gitlink；子仓 154 files | 子仓本地说明与 package scripts；父仓 gitlink 保持固定 commit |
 | WP-12 Example | `example/`（含 `minimal/`） | 22 files；低到中，独立 Bun example | `example/package.json` 和 `minimal/` 指引中的构建/运行命令 |

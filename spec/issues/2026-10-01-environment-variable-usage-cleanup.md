@@ -7,9 +7,9 @@
 - 模型配置不再使用 `ANTHROPIC_*` / `OPENAI_*` fallback；`MODEL_PROVIDER` 与 `MODEL_TYPE` 成对选择已配置 provider ID 与档位，显式会话模型选择仍可覆盖初始选择。
 - Compact 在 Workflow 路径加载用户 `config.compact`；Agent loop 不再重复读取禁用环境变量。
 - `PERI_MCP_BUILTIN` 保留；`PERI_MCP_APPS` 的客户端启动方式进入权威表；`PERI_WRITE_DRAFT` 生产开关移除，草稿默认开启。
-- Artifact MCP 接收实例 `env`，由实例解释 URL/token；宿主启动和重连只透传配置。TUI 变量独立成表，Web PTY 变量标记为随产品退役移除。
+- Artifact MCP 接收实例 `env`，由实例解释 URL/token；宿主启动和重连只透传配置。TUI 变量独立成表；Web PTY 已退役，相关变量入口已移除。
 
-后续仍需完成全量环境来源/隔离审计及 Web PTY 退役；下方未勾选的验收项继续跟踪。
+后续仍需完成全量环境来源/隔离审计；下方未勾选的验收项继续跟踪。
 
 ## 背景与目标
 
@@ -29,7 +29,7 @@
 | `PERI_WRITE_DRAFT` | Workspace Write/SandboxWrite 构造时直接读取，默认开启草稿，`0`/`false` 可关闭。 | **删除此环境开关**及相关解析/测试/文档；草稿功能保持默认开启，除非另有产品配置裁决。 |
 | `PERI_ARTIFACTS_URL`、`PERI_ARTIFACTS_TOKEN` | 当前由**进程内 Artifact MCP** 的 `ArtifactTool::new` 直接读取宿主进程环境；尚无显式 MCP 透传边界。 | 改为经 MCP 实例环境/配置**透传**给 Artifact MCP，由 MCP 自行解释 URL 与 token；Peri 宿主和统一配置面不特殊解析、保存或记录值。进程内实例须有显式实例输入，不能把共享进程环境直读称为透传。 |
 | TUI 专属变量 | 终端能力、渲染/交互诊断等多项读环境。 | 权威明细独立放在[TUI 表](../../docs/standards/tui-environment-variables.md)，主表只保留入口；TUI 后续清理在自身边界验收。 |
-| Web PTY 的 `HOST`、`PORT`、`SHELL`、`CWD`、`CMD` | `peri web` / `peri-web-pty` 仍读取并使用。 | **标记为随 Web PTY 退役移除**；当前仅记录目标，后续删除 `peri web` / Web PTY 时一并清除变量、代码、文档和测试。通用 OS `SHELL` 等若仍被其他组件使用，不按名字全局清除。 |
+| Web PTY 的 `HOST`、`PORT`、`SHELL`、`CWD`、`CMD` | 建单时由 Web PTY 消费；现已随产品退役删除。 | 通用 OS `SHELL` 等若仍被其他组件使用，不按名字全局清除。 |
 
 Artifact 与 builtin 的结论来自当前构造/注入调用链的静态检查；尚未运行隔离部署实验。Compact 专项由 subagent 静态检查，未运行测试。`MODEL_PROVIDER` 与 `MODEL_TYPE` 的新语义由用户确认，不能把上表目标写成当前已实现行为。
 
@@ -40,7 +40,7 @@ Artifact 与 builtin 的结论来自当前构造/注入调用链的静态检查�
 | Provider / Langfuse / MCP 配置 | `peri-config/src/{provider,observability,mcp,source}.rs` 经 configuration MCP 采集具名环境；settings、环境 fallback 与 MCP cache 的优先级各不同。 |
 | Agent compact | `peri-config/src/app.rs` 已持有 `config.compact`；`peri-acp-types/src/compact.rs` 仍解释三个环境变量，`peri-agent/src/agent/stages/compact.rs` 与 `session/exec/executor.rs` 再直读关闭开关；`peri-acp/src/host/workflow_agent.rs` 一条路径只用默认值。 |
 | ACP / 会话 | `peri-acp/src/broker/transport_broker.rs` 读取 AskUser 超时；`peri-acp/src/host/stdio/mod.rs` 按变量存在性启用 Apps；`peri-resources/src/sessions/machine.rs` 初始化机器 ID。核对读取时点和生命周期归属。 |
-| TUI / Web PTY | `peri-tui/src/main.rs` 从 settings 注入未设置的环境值；TUI 专属明细已独立列出，Web PTY 变量随产品退役清除。核对启动冻结、运行时读取和 CLI 覆盖关系。 |
+| TUI | `peri-tui/src/main.rs` 从 settings 注入未设置的环境值；TUI 专属明细已独立列出。核对启动冻结、运行时读取和 CLI 覆盖关系。 |
 | MCP / 工具 / 子进程 | `peri-middlewares/src/mcp/`、`mcp-packages/`、`peri-js-runtime/src/artifact.rs`、`peri-workflow/src/runner/artifact.rs` 读取凭据、占位符、PATH 与后备开关；区分来源数据面和执行环境，并复核传给子进程的 allowlist。 |
 | 文档与测试 | `docs/standards/environment-variables.md` 已建立；其他文档可能保留局部说明。环境变量是进程全局状态，测试读写侧须隔离，不能只给写侧加锁。 |
 
@@ -52,7 +52,7 @@ Artifact 与 builtin 的结论来自当前构造/注入调用链的静态检查�
 2. **Compact 单项修复**：主 prompt、手动 `/compact`、Workflow、恢复与 Agent loop 共用已装配 `CompactConfig`；修复 Workflow 的默认值旁路与 Agent 层重复环境读取。现有 env 覆盖如需保留，只在装配边界应用一次。
 3. **MCP 专属环境**：保留 `PERI_MCP_BUILTIN` 与 `PERI_MCP_APPS` 的现行开关语义，补 Apps 客户端启动说明；移除 `PERI_WRITE_DRAFT`；通过 MCP 实例环境/配置透传 Artifact URL/token，由 Artifact MCP 消费，覆盖本地进程内与外部 MCP 装配边界。
 4. **逐项审计与隔离**：以主表和 TUI 表为基线，扫描具名、常量间接及动态按名称读取；记录来源、生效时点和子进程传播。检查 `config.env` / Claude settings 注入、配置 MCP 与计算宿主环境隔离、会话冻结及并发隔离。保留 OS 目录、PATH、终端能力与按名称指定的执行凭据专属入口。
-5. **文档及退役跟踪**：TUI 变量在专属表维护；Web PTY 变量保持“计划移除”直到 Web PTY 实际退役，再同代码和测试一起删。其他文档只解释相关功能并链接权威表，目标落地后同步 code-index、模块指引和表项。
+5. **文档同步**：TUI 变量在专属表维护；其他文档只解释相关功能并链接权威表，目标落地后同步 code-index、模块指引和表项。
 
 ## 验收标准
 
@@ -60,7 +60,7 @@ Artifact 与 builtin 的结论来自当前构造/注入调用链的静态检查�
 - [ ] Compact 单项修复完成：自动、手动、Workflow 和恢复路径消费已装配的 `CompactConfig`，Agent 不再重复读取环境；用户配置与现有环境覆盖的优先级有定向测试。
 - [ ] `PERI_MCP_BUILTIN` 保留且现行开/关能力不退化；支持 Apps 的客户端启动示例携带 `PERI_MCP_APPS`，relay 开/关与客户端能力边界有验证。
 - [ ] `PERI_WRITE_DRAFT` 的读取/解析/文档已删除，默认草稿行为仍验证；Artifact URL/token 经 MCP 实例环境/配置透传后由 Artifact MCP 消费，Peri 宿主不解释、不记录凭据，进程内和外部实例都覆盖。
-- [ ] 生产代码中每个仍有效的具名控制变量均在主表或 TUI 表有单独条目，现行行为与表一致；Web PTY 变量清楚标注计划移除，真正退役后清除条目。
+- [ ] 生产代码中每个仍有效的具名控制变量均在主表或 TUI 表有单独条目，现行行为与表一致。
 - [ ] 同一控制规则没有跨模块的相互矛盾实现；需要重复读取的地方说明生命周期原因，并由测试证明结果一致。
 - [ ] 配置来源环境与计算宿主环境的差异有针对性验证；MCP cache、Langfuse 的既有优先级保持符合契约。
 - [ ] 具名开关的缺失、空值、合法/非法值及优先级有定向测试；进程级环境测试隔离读写双方，不依赖开发者的真实 HOME、密钥或外部网络。

@@ -380,4 +380,3 @@ npm run e2e:release:strict  # 发版且不容忍首轮 flake
 | peri-workflow | runner、protocol、registry |
 | peri-js-runtime | JS host、RPC、artifact 安装与 invocation 生命周期 |
 | peri-mcp-lsp | LSP 客户端、诊断、池、编解码与 MCP 工具 |
-| peri-web-pty | PTY session、WebSocket、HTTP |

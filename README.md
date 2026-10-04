@@ -87,7 +87,7 @@ Plan delivery. Coordinate agents. Delegate tasks.
 Streaming Markdown · Compaction · LSP · Langfuse<br>
 Skills & hooks · Plugins · Model profiles<br>
 Rewind · Fork · Resume<br>
-**Terminal · Headless · ACP · Web PTY**
+**Terminal · Headless · ACP**
 
 </div>
 
@@ -142,7 +142,7 @@ See [beta installation notes](.github/README.md#安装与更新-beta) for detail
 
 - `/login`: providers · `/model`: model profiles · `/threads`: saved sessions.
 - Settings: `~/.peri/settings.json` (`--config-file`). Sessions: `~/.peri/threads/threads.db` (`--db-path`).
-- ACP client: `peri acp --cwd /path/to/project`. Browser terminal: `peri web --host 127.0.0.1`.
+- ACP client: `peri acp --cwd /path/to/project`.
 - Workflows require Node.js. Extensions may need other dependencies.
 - Claude Code compatibility varies by feature. Caching depends on your provider and workload.
 - Coordination uses skills and a shared runtime. MetaHarness changes apply to new sessions; MCP Apps needs a compatible host.

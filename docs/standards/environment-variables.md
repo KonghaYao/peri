@@ -4,7 +4,7 @@
 
 ### ENV-CATALOG-001
 
-- **Scope**：Peri 主程序、运行时 crate 和随附的 Web PTY / MCP 组件中读取的具名环境变量。
+- **Scope**：Peri 主程序、运行时 crate 和随附 MCP 组件中读取的具名环境变量。
 - **Rule**：新增、删除或改变环境变量控制行为时，同步更新本表或 TUI 专属表中的作用、有效值、默认/优先级及消费入口；其他文档只保留任务相关说明并链接相应表，不维护第二份完整清单。名称由部署方动态指定的变量按“动态入口”说明，不逐个登记具体名称。
 - **Verify**：检索生产代码的 `std::env::var`、`var_os`、`get("...")`、Clap `env =`、`ENVIRONMENT_KEYS` 及相关常量，对照本表；`git diff --check`。
 
@@ -63,18 +63,6 @@ Langfuse 只有 public key 和 secret key **都存在**时才启用。以下环�
 | `RUST_LOG` | tracing filter 指令；缺省 `info`，并将 MCP/plugin/rmcp 模块设为 `warn`。 | `peri-agent/src/telemetry/subscriber.rs` |
 | `RUST_LOG_FORMAT` | 恰为 `json` 时输出 JSON 日志；其他值使用普通格式。 | 同上 |
 | `RUST_LOG_FILE` | 日志文件路径/名前缀；缺省 `~/.peri/logs/<service>`，按天轮转。 | 同上 |
-
-## Web PTY（计划移除）
-
-Web PTY 及本节变量的消费路径仍是当前实现；[清理 issue](../../spec/issues/2026-10-01-environment-variable-usage-cleanup.md)要求后续随 Web PTY 退役一起移除。TUI 专属变量见[TUI 表](tui-environment-variables.md)。
-
-| 变量 | 控制什么；有效值与缺省行为 | 消费入口 |
-| --- | --- | --- |
-| `HOST` | `peri web` / `peri-web-pty` 的监听地址；缺省 `0.0.0.0`，显式 CLI 参数优先。 | `peri-tui/src/main.rs`、`peri-web-pty/src/config.rs` |
-| `PORT` | Web PTY 监听端口；缺省 `0`（随机端口），显式 CLI 参数优先。 | 同上 |
-| `SHELL` | Web PTY 子 shell；Unix 缺省 `/bin/bash`，Windows 缺省 `powershell.exe`。 | `peri-web-pty/src/config.rs` |
-| `CWD` | Web PTY 子 shell 的工作目录；缺省为服务进程当前目录。 | 同上 |
-| `CMD` | Web PTY 首次启动命令；`peri web` 缺省 `peri`，独立 Web PTY 缺省无命令。 | 同上 |
 
 ## 操作系统与进程输入
 
