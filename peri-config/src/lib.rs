@@ -1,4 +1,5 @@
 pub mod app;
+mod assembly;
 pub mod mcp;
 pub mod observability;
 pub mod provider;

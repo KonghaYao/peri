@@ -41,7 +41,11 @@ flowchart LR
 
 scope 是绝对 cwd 与选中全局 settings 路径；来源包括 global settings、固定
 workspace settings、project `.mcp.json` 与具名环境。adapter 负责同文件不拆层。
-`ConfigurationSnapshot::resolve(scope, inputs)` 不进行 I/O，校验输入后提供只读投影：
+`assembly::DOMAINS` 在一个代码结构中声明各领域的参与来源、规则说明与敏感性；
+具名环境采集键和 `explain` 的来源列表从该声明生成。`assembly::resolve` 负责
+实际跨来源装配，领域模块保留各自的 typed 合并算法，避免把不同规则压成通用
+JSON merge。`ConfigurationSnapshot::resolve(scope, inputs)` 不进行 I/O，校验输入后
+提供只读投影：
 
 | 领域 | 核心规则 |
 | --- | --- |

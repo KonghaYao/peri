@@ -6,12 +6,12 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::{
     app::PeriConfig,
+    assembly::{self, parse_document},
     mcp::{McpCachePolicy, McpConfigFile},
     observability::LangfuseConfig,
     provider::ResolvedProvider,
@@ -156,61 +156,19 @@ impl ConfigurationSnapshot {
         inputs: ConfigurationInputs,
     ) -> Result<Self, ConfigurationError> {
         scope.validate()?;
-        let global = parse_document(inputs.global.as_deref(), SourceIdentity::GlobalFile)?;
-        let workspace = parse_document(inputs.workspace.as_deref(), SourceIdentity::WorkspaceFile)?;
-        let project = parse_document(inputs.project.as_deref(), SourceIdentity::ProjectMcpFile)?;
-        let global_settings = parse_settings(&global, SourceIdentity::GlobalFile)?;
-        let mut settings = global_settings.clone();
-        if inputs.workspace.is_some() {
-            let overrides = parse_settings(&workspace, SourceIdentity::WorkspaceFile)?;
-            settings.config.merge_overrides(overrides.config);
-        }
-        let mut global_mcp =
-            crate::mcp::parse_global(&global).map_err(|_| ConfigurationError::InvalidInput {
-                source_identity: SourceIdentity::GlobalFile,
-                domain: "MCP",
-            })?;
-        for server in global_mcp.mcp_servers.values_mut() {
-            server.source = Some(peri_acp_types::plugin::ConfigSource::Global(
-                scope.global_settings.clone(),
-            ));
-        }
-        let mut project_mcp =
-            crate::mcp::parse_project(&project).map_err(|_| ConfigurationError::InvalidInput {
-                source_identity: SourceIdentity::ProjectMcpFile,
-                domain: "MCP",
-            })?;
-        for server in project_mcp.mcp_servers.values_mut() {
-            server.source = Some(peri_acp_types::plugin::ConfigSource::Project(
-                scope.cwd.join(".mcp.json"),
-            ));
-        }
-        let mcp = crate::mcp::resolve_from_files(
-            &global_mcp,
-            &project_mcp,
-            &HashMap::new(),
-            &inputs.environment,
-        )
-        .map_err(|_| ConfigurationError::InvalidInput {
-            source_identity: SourceIdentity::Environment(crate::mcp::MCP_CACHE_ENV.to_owned()),
-            domain: "MCP cache",
-        })?;
-        let effective_provider = crate::provider::resolve(&settings, &inputs.environment);
-        let observability = crate::observability::resolve(&global, &inputs.environment);
-        let ui = TuiConfig::from_extra(&settings.config.extra);
-        let resources = crate::resources::resolve(&global);
+        let resolved = assembly::resolve(&scope, &inputs)?;
         let revision = revision_of(&scope, &inputs)?;
         Ok(Self {
             scope,
             revision,
             inputs,
-            settings,
-            global_settings,
-            mcp,
-            effective_provider,
-            observability,
-            ui,
-            resources,
+            settings: resolved.settings,
+            global_settings: resolved.global_settings,
+            mcp: resolved.mcp,
+            effective_provider: resolved.provider,
+            observability: resolved.observability,
+            ui: resolved.ui,
+            resources: resolved.resources,
         })
     }
 
@@ -242,36 +200,7 @@ impl ConfigurationSnapshot {
         &self,
         plugins: &HashMap<String, peri_acp_types::plugin::McpServerConfig>,
     ) -> Result<McpConfigFile, ConfigurationError> {
-        let global = parse_document(self.inputs.global.as_deref(), SourceIdentity::GlobalFile)?;
-        let project = parse_document(
-            self.inputs.project.as_deref(),
-            SourceIdentity::ProjectMcpFile,
-        )?;
-        let mut global =
-            crate::mcp::parse_global(&global).map_err(|_| ConfigurationError::InvalidInput {
-                source_identity: SourceIdentity::GlobalFile,
-                domain: "MCP",
-            })?;
-        let mut project =
-            crate::mcp::parse_project(&project).map_err(|_| ConfigurationError::InvalidInput {
-                source_identity: SourceIdentity::ProjectMcpFile,
-                domain: "MCP",
-            })?;
-        for server in global.mcp_servers.values_mut() {
-            server.source = Some(peri_acp_types::plugin::ConfigSource::Global(
-                self.scope.global_settings.clone(),
-            ));
-        }
-        for server in project.mcp_servers.values_mut() {
-            server.source = Some(peri_acp_types::plugin::ConfigSource::Project(
-                self.scope.cwd.join(".mcp.json"),
-            ));
-        }
-        crate::mcp::resolve_from_files(&global, &project, plugins, &self.inputs.environment)
-            .map_err(|_| ConfigurationError::InvalidInput {
-                source_identity: SourceIdentity::Defaults,
-                domain: "MCP plugin inputs",
-            })
+        assembly::resolve_mcp(&self.scope, &self.inputs, plugins)
     }
 
     pub fn bare_mcp(&self) -> Result<McpConfigFile, ConfigurationError> {
@@ -312,73 +241,7 @@ impl ConfigurationSnapshot {
     }
 
     pub fn explain(&self, field: ConfigurationField) -> FieldExplanation {
-        let mut contributors = vec![SourceIdentity::Defaults];
-        if self.inputs.global.is_some() && field != ConfigurationField::BuiltinMcp {
-            contributors.push(SourceIdentity::GlobalFile);
-        }
-        match field {
-            ConfigurationField::Settings
-            | ConfigurationField::Ui
-            | ConfigurationField::Provider => {
-                if self.inputs.workspace.is_some() {
-                    contributors.push(SourceIdentity::WorkspaceFile);
-                }
-            }
-            ConfigurationField::McpServers | ConfigurationField::McpCache => {
-                if self.inputs.project.is_some() {
-                    contributors.push(SourceIdentity::ProjectMcpFile);
-                }
-            }
-            ConfigurationField::Observability
-            | ConfigurationField::Resources
-            | ConfigurationField::BuiltinMcp => {}
-        }
-        let environment_keys: &[&str] = match field {
-            ConfigurationField::McpCache => &[crate::mcp::MCP_CACHE_ENV],
-            ConfigurationField::BuiltinMcp => &[crate::mcp::MCP_BUILTIN_ENV],
-            ConfigurationField::Provider => crate::provider::ENVIRONMENT_KEYS,
-            ConfigurationField::Observability => crate::observability::ENVIRONMENT_KEYS,
-            _ => &[],
-        };
-        contributors.extend(
-            environment_keys
-                .iter()
-                .filter(|key| self.inputs.environment.contains_key(**key))
-                .map(|key| SourceIdentity::Environment((*key).to_owned())),
-        );
-        FieldExplanation {
-            field,
-            revision: self.revision,
-            contributors,
-            rule: match field {
-                ConfigurationField::McpCache => {
-                    "any false disables; true never relaxes another source"
-                }
-                ConfigurationField::McpServers => {
-                    "global < plugin < project; manual namespaces deduplicate plugins"
-                }
-                ConfigurationField::Provider => {
-                    "settings profiles first; environment provider is fallback only"
-                }
-                ConfigurationField::Observability => {
-                    "global settings then named environment overrides"
-                }
-                ConfigurationField::BuiltinMcp => {
-                    "off/0 disables runtime builtin injection; absent or unknown enables"
-                }
-                ConfigurationField::Resources => {
-                    "global nested disableBundledSkills precedes top-level; default false"
-                }
-                _ => "workspace overrides by domain rules; profiles replace as a unit",
-            },
-            contains_sensitive_values: matches!(
-                field,
-                ConfigurationField::Settings
-                    | ConfigurationField::McpServers
-                    | ConfigurationField::Provider
-                    | ConfigurationField::Observability
-            ),
-        }
+        assembly::explain(field, self.revision, &self.inputs)
     }
 }
 
@@ -490,7 +353,7 @@ impl ConfigurationSystem {
                     .map_err(|_| ConfigurationError::Serialization)?,
             );
             let path = if workspace {
-                scope.cwd.join(".peri/settings.json")
+                assembly::workspace_settings_path(&scope.cwd)
             } else {
                 scope.global_settings.clone()
             };
@@ -505,7 +368,7 @@ impl ConfigurationSystem {
         config: &McpConfigFile,
     ) -> Result<Arc<ConfigurationSnapshot>, ConfigurationError> {
         self.update_document(scope, expected_revision, |_, inputs| {
-            let project_path = scope.cwd.join(".mcp.json");
+            let project_path = assembly::project_mcp_path(&scope.cwd);
             for server in config.mcp_servers.values() {
                 match &server.source {
                     None => {}
@@ -533,7 +396,7 @@ impl ConfigurationSystem {
             let content = serde_json::to_string_pretty(&document)
                 .map_err(|_| ConfigurationError::Serialization)?;
             inputs.project = Some(content.clone());
-            Ok((scope.cwd.join(".mcp.json"), expected, content))
+            Ok((assembly::project_mcp_path(&scope.cwd), expected, content))
         })
     }
 
@@ -578,42 +441,6 @@ impl ConfigurationSystem {
         snapshots.insert(scope.clone(), next.clone());
         Ok(next)
     }
-}
-
-fn parse_document(
-    content: Option<&str>,
-    source_identity: SourceIdentity,
-) -> Result<Value, ConfigurationError> {
-    match content {
-        None => Ok(serde_json::json!({})),
-        Some(content) => {
-            let document: Value =
-                serde_json::from_str(content).map_err(|_| ConfigurationError::InvalidInput {
-                    source_identity: source_identity.clone(),
-                    domain: "JSON",
-                })?;
-            if !document.is_object() {
-                return Err(ConfigurationError::InvalidInput {
-                    source_identity,
-                    domain: "JSON object",
-                });
-            }
-            Ok(document)
-        }
-    }
-}
-
-fn parse_settings(
-    document: &Value,
-    source_identity: SourceIdentity,
-) -> Result<PeriConfig, ConfigurationError> {
-    let mut config: PeriConfig =
-        serde_json::from_value(document.clone()).map_err(|_| ConfigurationError::InvalidInput {
-            source_identity,
-            domain: "settings",
-        })?;
-    config.config.validate_meta_harness();
-    Ok(config)
 }
 
 fn revision_of(

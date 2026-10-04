@@ -28,7 +28,7 @@ pub struct McpConfigurationSource;
 
 impl ConfigurationSource for McpConfigurationSource {
     fn collect(&self, scope: &ConfigurationScope) -> io::Result<ConfigurationInputs> {
-        let workspace_path = scope.cwd.join(".peri/settings.json");
+        let workspace_path = crate::assembly::workspace_settings_path(&scope.cwd);
         let workspace = if peri_mcp_config::same_file(&workspace_path, &scope.global_settings)? {
             None
         } else {
@@ -37,7 +37,7 @@ impl ConfigurationSource for McpConfigurationSource {
         collect_with_layout(
             scope,
             workspace.as_deref(),
-            Some(&scope.cwd.join(".mcp.json")),
+            Some(&crate::assembly::project_mcp_path(&scope.cwd)),
         )
     }
 
@@ -71,11 +71,7 @@ pub(crate) fn collect_with_layout_and_global(
     };
     let workspace = workspace.map(read_optional).transpose()?.flatten();
     let project = project.map(read_optional).transpose()?.flatten();
-    let mut keys = crate::provider::ENVIRONMENT_KEYS.to_vec();
-    keys.extend_from_slice(crate::observability::ENVIRONMENT_KEYS);
-    keys.extend(["PERI_MCP_CACHE", "PERI_MCP_BUILTIN"]);
-    keys.sort_unstable();
-    keys.dedup();
+    let keys = crate::assembly::environment_keys();
     Ok(ConfigurationInputs {
         global,
         workspace,

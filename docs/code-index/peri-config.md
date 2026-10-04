@@ -5,7 +5,7 @@
 
 ## 数据流与职责
 
-`ConfigurationSource → ConfigurationInputs → ConfigurationSnapshot::resolve →
+`ConfigurationSource → ConfigurationInputs → assembly::resolve → ConfigurationSnapshot::resolve →
 ConfigurationSystem → scoped immutable typed projections`。
 
 source adapter 经选中的配置 MCP provider 读文件正文与具名环境，不读取计算宿主
@@ -17,6 +17,7 @@ fallback。纯 resolver 只使用输入值；system 管发布和更新。模块�
 | 要修改的行为 | 文件与符号 | 边界 |
 | --- | --- | --- |
 | 配置 scope 与稳定 revision | `peri-config/src/system.rs`：`ConfigurationScope`、`ConfigurationInputs`、`ConfigurationRevision` | scope 为绝对 cwd + 全局 settings 路径，revision 覆盖 scope 与输入正文/具名环境 |
+| 统一配置实体装配 | `peri-config/src/assembly.rs`：`DOMAINS`、`resolve`、`resolve_mcp`、`environment_keys`、`explain` | 一处声明领域参与来源、合并规则与敏感性，并装配 settings/MCP/provider/观测/UI/资源投影；具名环境采集和来源解释由同一声明驱动，具体合并算法仍由各领域模块持有 |
 | 纯 typed 快照 | `system.rs`：`ConfigurationSnapshot::resolve`、`settings`、`mcp`、`provider`、`observability`、`ui` | 多项目隔离，字段只读；Langfuse 使用 global settings，UI 使用合并后的 settings extra |
 | 发布、解释与更新 | `system.rs`：`ConfigurationSystem::{resolve,current,explain,update,update_mcp}` | 校验、来源 revision 与目标文件字节 CAS 成功才 publish；失败保留 current |
 | 来源输入 | `source.rs`：`ConfigurationSource`、`McpConfigurationSource`、`read_environment`、`collect_with_layout` | 独立 bootstrap；可注入其他 adapter，不委托 provider 决定领域规则 |

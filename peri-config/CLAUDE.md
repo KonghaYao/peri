@@ -16,7 +16,8 @@ Langfuse、UI 与资源开关的类型、默认值、解析、领域合并及有
 ```text
 选中的 ConfigurationSource / source adapters
   → ConfigurationInputs（文件正文 + 具名环境输入）
-  → ConfigurationSnapshot::resolve（纯 typed 解析与领域规则）
+  → assembly（来源形状、领域装配与 typed 投影）
+  → ConfigurationSnapshot::resolve（冻结结果）
   → ConfigurationSystem（按 scope 发布 Arc 快照、revision、explain、update）
   → ACP / MCP pool / Controller / TUI
 ```
@@ -30,6 +31,7 @@ session 工具池，不新增 daemon 或模型工具。环境来自选中的配�
 | 任务 | 入口 |
 | --- | --- |
 | scope、revision、快照、发布、解释与 CAS 更新 | `src/system.rs`、`src/system_test.rs` |
+| 领域来源形状、具名环境采集键、装配与来源解释 | `src/assembly.rs`、`src/assembly_test.rs` |
 | 来源采集、具名环境、bootstrap I/O | `src/source.rs`、`../mcp-packages/config/` |
 | settings 类型、profiles、MetaHarness 规则 | `src/app.rs`、`src/app_test.rs` |
 | 固定配置布局、差异保存、显式 reload | `src/settings.rs`、`src/settings_test.rs` |

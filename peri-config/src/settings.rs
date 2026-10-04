@@ -69,7 +69,7 @@ pub fn set_global_config_path(path: Option<PathBuf>) {
 }
 
 fn workspace_config_path_at(cwd: &Path, global_path: &Path) -> Result<Option<PathBuf>> {
-    let path = cwd.join(".peri").join("settings.json");
+    let path = crate::assembly::workspace_settings_path(cwd);
     if !peri_mcp_config::exists(&path)? || peri_mcp_config::same_file(&path, global_path)? {
         return Ok(None);
     }
@@ -104,7 +104,7 @@ impl ConfigSource {
             cwd,
             global_path,
             workspace_path,
-            Some(cwd.join(".mcp.json")),
+            Some(crate::assembly::project_mcp_path(cwd)),
             None,
         )
     }
@@ -116,7 +116,7 @@ impl ConfigSource {
             cwd,
             global_path,
             None,
-            Some(cwd.join(".mcp.json")),
+            Some(crate::assembly::project_mcp_path(cwd)),
             Some(settings),
         )
     }

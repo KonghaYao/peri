@@ -15,6 +15,7 @@
 | 核心能力 | 当前代码事实 |
 | --- | --- |
 | source adapters | `ConfigurationSource` / `McpConfigurationSource` 采集固定 layout 的文件正文与具名环境；独立 bootstrap，不依赖待配置工具池、不增加 daemon/model 工具 |
+| 统一实体装配 | `peri-config/src/assembly.rs` 一处声明已迁移领域的参与来源、规则说明与敏感性，驱动具名环境采集及来源解释，并装配 settings/MCP/provider/观测/UI/资源投影；各领域仍由专属 typed 函数实施合并 |
 | 纯 typed 权威 | core app/settings/provider/MCP/observability/UI/resources 持有 schema/defaults/validation/domain merge，`ConfigurationSnapshot::resolve` 不做 I/O |
 | scope 与版本 | 绝对 cwd + 选中 global settings 路径；revision 由 scope 与输入内容确定，多个项目隔离 |
 | 发布 | `ConfigurationSystem` 管 scoped immutable `Arc` snapshots，resolve/update 成功才 publish，失败保留 current |
@@ -128,5 +129,6 @@ cargo test -p peri-acp --lib
 - [ ] 两项目并发、文件/环境变更、shared global 失效、reload/save 与既有 pool/session
   生命周期验证；失败不 publish，global credentials 不复制到 workspace。
 
-核心权威面已经落地。本 issue 保持 active，是因为这些部署接线、验收与专属领域
-扩展仍未全部闭环；不再以“只有统一文件 I/O、尚无配置权威”描述现状。
+已迁移领域的核心权威面与统一装配入口已经落地。本 issue 保持 active，是因为
+这些部署接线、验收与专属领域扩展仍未全部闭环；当前 `assembly::DOMAINS` 不覆盖
+LSP、Hook、插件生命周期及存储 locator，不能宣称整个配置资源平面已统一。
