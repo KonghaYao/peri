@@ -78,6 +78,16 @@ pub trait McpPoolPort: Send + Sync {
     /// 还原具体实现（downcast 还原点，供 middlewares 装配面与装配面宿主使用）。
     fn as_any(&self) -> &dyn Any;
 
+    /// Revert recorded file changes in the session's trusted Workspace owner.
+    /// Implementations must reject unavailable owners and report every failed change.
+    async fn rewind_files(
+        &self,
+        _session_id: &str,
+        _changes: serde_json::Value,
+    ) -> Result<(), String> {
+        Err("trusted Workspace rewind capability unavailable".into())
+    }
+
     /// Whether this session has MCP Tasks whose terminal notification is pending.
     fn has_active_tasks(&self, _session_id: &str) -> bool {
         false

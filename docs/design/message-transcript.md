@@ -9,7 +9,7 @@
 ## 1. 设计原则
 
 1. **永远 id 寻址**：每条消息拥有唯一 `MessageId`（UUID v7，时间有序）。所有外部操作——rewind、compact、持久化恢复——一律按 id 定位消息。禁止使用 Vec 下标定位——下标可因消息标记漂移而引入隐性错误。
-2. **只追加优先**：正常 ReAct 循环中消息仅尾部追加，禁止 prepend 或中间插入。Compact 保留消息本体，通过标记改变模型视图，Full 另行追加摘要与 re-inject 消息。
+2. **只追加优先**：正常 ReAct 循环中消息仅尾部追加，禁止 prepend 或中间插入。Compact 保留消息本体，通过标记改变模型视图，Full 另行追加摘要。
 3. **修改即新消息**：消息内容不可原地修改。需要变更时，正常路径产生新消息（新 id）。Micro 持久化 projection directive，Full 标 `excluded`；标记不改变消息内容本身。（Smart Compact 为 planner 兼容入口，见 §2.6）
 4. **Transcript 为运行时事实源**：运行时从 Transcript 构造消息视图；冷恢复从持久化 payload 与 flags 重建。已提交的 compact 结果跨 turn 保留，包括随后取消或失败的 turn。不持久化 MessageQueue——Queue 是临时收件箱。
 5. **追加异步、提交有确认**：普通追加经异步 writer，compact lifecycle 与 turn 收尾必须检查持久化结果。writer 失败后停止使用热会话，保留已落盘内容，重新加载后才能继续；不以删除新增 ID 模拟事务回滚。
@@ -138,7 +138,7 @@ Compact 保留消息本体，通过标记改变可见性或模型投影；Micro 
 
 - Micro 和 Full 两种已实现模式通过标记实现——Micro 标 `truncated`，Full 标 `excluded`。消息不删，标记可撤销。rewind 清标记恢复原状
 - Smart Compact 已实现为 planner 兼容入口（`peri-agent/src/agent/compact_v2/smart.rs`）：不再走独立 LLM 筛选分支，而是通过 `plan_micro` 生成计划再应用（`set_flags_projection` 统一持久化 directive），并带 deprecation warning（"will be removed, converging to Micro"）；`compact_v2` 已目录化（原 `compact_v2.rs:57` stub 位置不复存在）
-- Full 从完整可见模型历史（含 canonical reminder，恢复已提交 Micro 投影）生成摘要，将新摘要、re-inject 消息和本次快照内 own region 的非 System 历史 excluded transitions 作为同一 lifecycle 提交。报告/通知不因 reminder 类型而豁免；原文留存，成功后退出活跃模型视图；未纳入快照的新结果继续等待 Receive。后续取消或失败不撤销已提交事务；恢复须保持摘要与 flags 配对。提交前置 pending 状态，只有存储确认成功并应用内存后才标记 committed；取消或错误留下的不确定状态由自动 executor 与手动命令 interceptor 传播给 host，不能仅以普通 writer barrier 成功确认一致性。
+- Full 从完整可见模型历史（含 canonical reminder，恢复已提交 Micro 投影和历史工具结果）生成摘要，将新摘要和本次快照内 own region 的非 System 历史 excluded transitions 作为同一 lifecycle 提交。历史工具调用及结果留存在 transcript，不从计算实例本机回读 Workspace 文件。报告/通知不因 reminder 类型而豁免；原文留存，成功后退出活跃模型视图；未纳入快照的新结果继续等待 Receive。后续取消或失败不撤销已提交事务；恢复须保持摘要与 flags 配对。提交前置 pending 状态，只有存储确认成功并应用内存后才标记 committed；取消或错误留下的不确定状态由自动 executor 与手动命令 interceptor 传播给 host，不能仅以普通 writer barrier 成功确认一致性。
 
 ### 2.7 与 v2 其他模块的关系
 

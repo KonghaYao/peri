@@ -49,6 +49,7 @@ async fn test_cancelled_compact_done_agrees_with_prompt_result() {
         Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
     let content = MessageContent::text("/compact");
     let result = intercept_immediate_command(InterceptRequest {
+        mcp_pool: None,
         content: &content,
         history: &history,
         history_payloads: history

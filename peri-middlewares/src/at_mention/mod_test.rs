@@ -1,5 +1,5 @@
-//! Tests for at_mention
-use std::{fs, sync::Arc};
+//! @path reads through the session Workspace reader, never through the host cwd.
+use std::{collections::HashMap, path::Path, sync::Arc};
 
 use peri_agent::agent::state::AgentState;
 use peri_agent::{
@@ -12,56 +12,104 @@ use peri_agent::{
 use tempfile::tempdir;
 
 use super::*;
+use crate::workspace_io::{WorkspaceMentionContent, WorkspaceReadError};
 
-#[tokio::test]
-async fn test_no_mentions_no_injection() {
-    // 无 @ 提及时不注入任何消息
-    let dir = tempdir().unwrap();
-    let mw = AtMentionMiddleware::new(dir.path().to_path_buf());
-    let mut state = AgentState::default();
-    state.cwd = dir.path().to_string_lossy().to_string();
-    state.add_message(BaseMessage::human("你好世界"));
+struct Reader(HashMap<String, String>);
 
-    let before_len = state.messages().len();
-    mw.before_agent(&mut state).await.unwrap();
-    // 没有注入，消息数不变
-    assert_eq!(state.messages().len(), before_len);
+#[async_trait]
+impl WorkspaceFileReader for Reader {
+    async fn read_text(&self, _path: &Path) -> Result<String, WorkspaceReadError> {
+        Err(WorkspaceReadError::Unavailable)
+    }
+
+    async fn read_mention(
+        &self,
+        path: &str,
+        line_start: Option<usize>,
+        line_end: Option<usize>,
+    ) -> Result<WorkspaceMentionContent, WorkspaceReadError> {
+        let content = self.0.get(path).ok_or(WorkspaceReadError::ReadFailed)?;
+        Ok(WorkspaceMentionContent {
+            path: path.to_string(),
+            content: content.clone(),
+            line_start,
+            line_end,
+            truncated: false,
+            is_dir: false,
+        })
+    }
+}
+
+fn reader(entries: &[(&str, &str)]) -> Arc<dyn WorkspaceFileReader> {
+    Arc::new(Reader(
+        entries
+            .iter()
+            .map(|(path, content)| (path.to_string(), content.to_string()))
+            .collect(),
+    ))
 }
 
 #[tokio::test]
-async fn test_mention_injects_read_tool() {
-    // @test.rs 注入 Ai[ToolUse] + Tool[ToolResult] 共 2 条消息
-    let dir = tempdir().unwrap();
-    fs::write(dir.path().join("test.rs"), "fn main() {}\n").unwrap();
-    let mw = AtMentionMiddleware::new(dir.path().to_path_buf());
+async fn no_mentions_no_injection() {
+    let mw = AtMentionMiddleware::new(reader(&[]));
     let mut state = AgentState::default();
-    state.cwd = dir.path().to_string_lossy().to_string();
+    state.add_message(BaseMessage::human("你好世界"));
+    mw.before_agent(&mut state).await.unwrap();
+    assert_eq!(state.messages().len(), 1);
+}
+
+#[tokio::test]
+async fn mention_uses_workspace_content_even_with_different_host_file() {
+    let dir = tempdir().unwrap();
+    std::fs::write(dir.path().join("test.rs"), "host secret").unwrap();
+    let mw = AtMentionMiddleware::new(reader(&[("test.rs", "remote content")]));
+    let mut state = AgentState::default();
+    state.cwd = dir.path().to_string_lossy().into_owned();
     state.add_message(BaseMessage::human("看看 @test.rs"));
 
     mw.before_agent(&mut state).await.unwrap();
-
-    // 1 Human + 1 Ai + 1 Tool = 3
     assert_eq!(state.messages().len(), 3);
-
-    // 第二条是 Ai，包含 ToolUse
-    let ai_msg = &state.messages()[1];
-    assert!(matches!(ai_msg, BaseMessage::Ai { .. }));
-    assert!(ai_msg.has_tool_calls());
-
-    // 第三条是 Tool 结果
-    let tool_msg = &state.messages()[2];
-    assert!(matches!(tool_msg, BaseMessage::Tool { .. }));
-    let tool_content = tool_msg.content();
-    assert!(tool_content.starts_with("→ test.rs"));
-    assert!(tool_content.contains("fn main() {}"));
+    assert!(state.messages()[1].has_tool_calls());
+    let tool_use = serde_json::to_value(&state.messages()[1]).unwrap();
+    assert_eq!(tool_use["content"][0]["name"], "workspace/readMention");
+    let output = state.messages()[2].content();
+    assert!(output.contains("remote content"));
+    assert!(!output.contains("host secret"));
 }
 
-/// [回归测试] 批次前面的 @path 仍应读取，历史引用不应随新批次重复注入。
 #[tokio::test]
-async fn test_mention_batch_reads_first_input_without_replaying_history() {
+async fn unavailable_workspace_never_reads_host_file() {
     let dir = tempdir().unwrap();
-    fs::write(dir.path().join("old.txt"), "不得重新读取的旧内容").unwrap();
-    fs::write(dir.path().join("fresh.txt"), "本批需要读取的内容").unwrap();
+    std::fs::write(dir.path().join("test.rs"), "host secret").unwrap();
+    let mw = AtMentionMiddleware::new(reader(&[]));
+    let mut state = AgentState::default();
+    state.cwd = dir.path().to_string_lossy().into_owned();
+    state.add_message(BaseMessage::human("看看 @test.rs"));
+
+    mw.before_agent(&mut state).await.unwrap();
+    assert_eq!(state.messages().len(), 1);
+}
+
+#[tokio::test]
+async fn range_mention_records_actual_workspace_request_and_line_prefix() {
+    let mw = AtMentionMiddleware::new(reader(&[("sample.txt", "second\nthird")]));
+    let mut state = AgentState::default();
+    state.add_message(BaseMessage::human("看 @sample.txt#L2-3"));
+    mw.before_agent(&mut state).await.unwrap();
+    let tool_use = serde_json::to_value(&state.messages()[1]).unwrap();
+    assert_eq!(tool_use["content"][0]["name"], "workspace/readMention");
+    assert_eq!(tool_use["content"][0]["input"]["lineStart"], 2);
+    assert_eq!(tool_use["content"][0]["input"]["lineEnd"], 3);
+    assert_eq!(
+        state.messages()[2].content(),
+        "→ sample.txt (L2-L3)\nsecond\nthird"
+    );
+}
+
+/// Batch input is read once; historic @path text is not replayed.
+#[tokio::test]
+async fn mention_batch_reads_first_input_without_replaying_history() {
+    let dir = tempdir().unwrap();
     let old = BaseMessage::human("旧输入 @old.txt");
     let first = BaseMessage::human("请查看 @fresh.txt 和 @missing.txt");
     let last = BaseMessage::human("普通文本");
@@ -87,7 +135,10 @@ async fn test_mention_batch_reads_first_input_without_replaying_history() {
         session.queue().clone(),
     );
     let mut chain = MiddlewareChain::new();
-    chain.add(Box::new(AtMentionMiddleware::new(dir.path().to_path_buf())));
+    chain.add(Box::new(AtMentionMiddleware::new(reader(&[(
+        "fresh.txt",
+        "本批需要读取的内容",
+    )]))));
     ctx.runtime.middleware_chain = Arc::new(chain);
     let received = run_receive(ReceiveInput {
         context: ctx.clone(),
@@ -99,25 +150,20 @@ async fn test_mention_batch_reads_first_input_without_replaying_history() {
         .unwrap();
     let transcript = ctx.session.transcript.read();
     let messages = transcript.visible_messages();
-    assert_eq!(messages.len(), 6, "只为可读的新引用注入一对工具消息");
-    assert!(matches!(messages[4], BaseMessage::Ai { .. }));
+    assert_eq!(messages.len(), 6);
     assert!(messages[4].has_tool_calls());
-    assert!(matches!(messages[5], BaseMessage::Tool { .. }));
     assert!(messages[5].content().contains("本批需要读取的内容"));
-    assert!(!messages[5].content().contains("不得重新读取的旧内容"));
     for original in [&old, &first, &last] {
         assert_eq!(
             serde_json::to_value(transcript.get(original.id()).unwrap().message()).unwrap(),
             serde_json::to_value(original).unwrap(),
-            "每条用户消息保留原内容和身份"
         );
     }
 }
 
 #[tokio::test]
-async fn test_mention_explicit_empty_batch_does_not_read_history() {
+async fn explicit_empty_batch_does_not_read_history() {
     let dir = tempdir().unwrap();
-    fs::write(dir.path().join("old.txt"), "不应注入的旧内容").unwrap();
     let original = BaseMessage::human("旧输入 @old.txt");
     let session = Session::new(
         Arc::from(dir.path().to_str().unwrap()),
@@ -131,11 +177,13 @@ async fn test_mention_explicit_empty_batch_does_not_read_history() {
         session.queue().clone(),
     );
     let mut chain = MiddlewareChain::new();
-    chain.add(Box::new(AtMentionMiddleware::new(dir.path().to_path_buf())));
+    chain.add(Box::new(AtMentionMiddleware::new(reader(&[(
+        "old.txt", "not read",
+    )]))));
     ctx.runtime.middleware_chain = Arc::new(chain);
     run_before_agent(&ctx, &[]).await.unwrap();
     let transcript = ctx.session.transcript.read();
-    assert_eq!(transcript.len(), 1, "空批次不回退读取旧消息中的引用");
+    assert_eq!(transcript.len(), 1);
     assert_eq!(
         serde_json::to_value(transcript.get(original.id()).unwrap().message()).unwrap(),
         serde_json::to_value(&original).unwrap()

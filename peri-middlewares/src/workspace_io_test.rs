@@ -26,7 +26,7 @@ impl ServerHandler for DelayedReader {
     ) -> Result<CustomResult, rmcp::ErrorData> {
         assert!(matches!(
             request.method.as_str(),
-            "workspace/readText" | "workspace/gitBranch"
+            "workspace/readText" | "workspace/readMention" | "workspace/gitBranch"
         ));
         let result = if request.method == "workspace/gitBranch" {
             assert!(request
@@ -40,6 +40,16 @@ impl ServerHandler for DelayedReader {
                 .and_then(|params| params.get("cwd"))
                 .is_none());
             self.branch_response.clone()
+        } else if request.method == "workspace/readMention" {
+            let params = request.params.as_ref().unwrap();
+            serde_json::json!({
+                "path": params["path"],
+                "content": "remote mention",
+                "lineStart": params.get("lineStart"),
+                "lineEnd": params.get("lineEnd"),
+                "truncated": false,
+                "isDir": false,
+            })
         } else {
             serde_json::json!({"text": "remote"})
         };
@@ -139,6 +149,17 @@ impl Fixture {
         tokio::spawn(async move { reader.current_branch().await })
     }
 
+    fn mention(
+        &self,
+    ) -> tokio::task::JoinHandle<Result<WorkspaceMentionContent, WorkspaceReadError>> {
+        let reader = McpWorkspaceFileReader::new(
+            Some(self.pool.clone()),
+            Some("session".to_string()),
+            &Default::default(),
+        );
+        tokio::spawn(async move { reader.read_mention("remote.txt", Some(2), Some(4)).await })
+    }
+
     async fn shutdown(mut self) {
         self.pool.clients.write().clear();
         self.client
@@ -159,6 +180,40 @@ async fn missing_workspace_never_falls_back_to_host_file() {
     std::fs::write(&path, "host").unwrap();
     let reader = McpWorkspaceFileReader::new(None, None, &Default::default());
     assert!(reader.read_text(&path).await.is_err());
+    assert_eq!(
+        reader
+            .read_mention("host.txt", None, None)
+            .await
+            .unwrap_err(),
+        WorkspaceReadError::Unavailable
+    );
+}
+
+#[tokio::test]
+async fn mention_reads_session_workspace_over_wire() {
+    let fixture = Fixture::new().await;
+    let mention = fixture.mention();
+    fixture.entered.notified().await;
+    fixture.release.notify_one();
+    let content = mention.await.unwrap().unwrap();
+    assert_eq!(content.content, "remote mention");
+    assert_eq!(content.line_start, Some(2));
+    assert_eq!(content.line_end, Some(4));
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn disconnected_workspace_rejects_mention_response() {
+    let fixture = Fixture::new().await;
+    let mention = fixture.mention();
+    fixture.entered.notified().await;
+    fixture.pool.clients.write().clear();
+    fixture.release.notify_one();
+    assert_eq!(
+        mention.await.unwrap().unwrap_err(),
+        WorkspaceReadError::Unavailable
+    );
+    fixture.shutdown().await;
 }
 
 #[tokio::test]

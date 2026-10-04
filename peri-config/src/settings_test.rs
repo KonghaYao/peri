@@ -622,17 +622,38 @@ fn workspace_probe_failure_prevents_lenient_source_from_writing_global() {
     let peri_dir = cwd.join(".peri");
     std::os::unix::fs::symlink(&peri_dir, &peri_dir).unwrap();
     let global_path = tmp.path().join("global.json");
-    let original = r#"{"config":{"active_alias":"sonnet"}}"#;
+    let original = r#"{"config":{"active_alias":"sonnet","disableBundledSkills":true}}"#;
     std::fs::write(&global_path, original).unwrap();
 
     assert!(ConfigSource::load_at(&cwd, global_path.clone()).is_err());
     let source = ConfigSource::load_at_lenient(&cwd, global_path.clone());
     assert_eq!(source.loaded_merged().config.active_alias, "sonnet");
+    assert!(source.snapshot().is_none());
+    assert!(
+        source
+            .resource_configuration()
+            .unwrap()
+            .disable_bundled_skills
+    );
     assert!(source.reload_merged().is_err());
     assert!(source
         .save(revision(&source), &PeriConfig::default())
         .is_err());
     assert_eq!(std::fs::read_to_string(global_path).unwrap(), original);
+}
+
+#[cfg(unix)]
+#[test]
+fn lenient_source_without_selected_policy_does_not_use_default_global_config() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cwd = tmp.path().join("workspace");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let peri_dir = cwd.join(".peri");
+    std::os::unix::fs::symlink(&peri_dir, &peri_dir).unwrap();
+
+    let source = ConfigSource::load_at_lenient(&cwd, tmp.path().join("missing.json"));
+    assert!(source.snapshot().is_none());
+    assert!(source.resource_configuration().is_none());
 }
 
 #[cfg(unix)]

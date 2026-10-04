@@ -374,65 +374,63 @@ async fn full_affected_count_tracks_only_false_to_true_transitions() {
     assert_eq!(second.affected_count, 1, "第二轮只应排除首轮 summary");
 }
 
+/// [回归测试] 历史 Read/Skill 路径只属于工具环境；Full 不能从计算实例同名路径回读。
 #[tokio::test]
-async fn consecutive_full_requires_new_visible_read_to_reinject_file() {
+async fn full_compact_uses_historical_tool_results_without_local_file_re_read() {
     let dir = tempfile::tempdir().unwrap();
-    let file_path = dir.path().join("current.txt");
-    std::fs::write(&file_path, "version one").unwrap();
+    let file_path = dir.path().join("remote.txt");
+    let skill_path = dir.path().join("skills/demo/SKILL.md");
+    std::fs::create_dir_all(skill_path.parent().unwrap()).unwrap();
+    std::fs::write(&file_path, "LOCAL_FILE_MARKER").unwrap();
+    std::fs::write(&skill_path, "LOCAL_SKILL_MARKER").unwrap();
     let store = MockSessionResources::new();
     let thread_id = store
         .create_thread(ThreadMeta::new(dir.path().to_string_lossy().to_string()))
         .await
         .unwrap();
     let mut transcript = MessageTranscript::new().with_persistence(store, thread_id);
-    transcript.append(make_human("read it"));
-    transcript.append(make_ai_with_read_tool(&file_path.to_string_lossy()));
-
+    transcript.append(make_human("read the remote workspace"));
+    let read = transcript.append(make_ai_with_read_tool(&file_path.to_string_lossy()));
+    let result = transcript.append(BaseMessage::tool_result(
+        "full-lifecycle-read",
+        "REMOTE_FILE_MARKER",
+    ));
+    transcript.append(BaseMessage::ai_with_tool_calls(
+        "activate skill",
+        vec![crate::messages::ToolCallRequest::new(
+            "remote-skill-read",
+            "Read",
+            serde_json::json!({ "file_path": skill_path }),
+        )],
+    ));
+    transcript.append(BaseMessage::tool_result(
+        "remote-skill-read",
+        "REMOTE_SKILL_MARKER",
+    ));
+    let model = CapturingFullModel {
+        requests: std::sync::Mutex::new(Vec::new()),
+    };
     full_compact_inner(
         &mut transcript,
-        Some(&FullLifecycleModel),
+        Some(&model),
         &CompactConfig::default(),
         &dir.path().to_string_lossy(),
     )
     .await
     .unwrap();
-    let first_reinject_count = transcript
-        .entries()
-        .iter()
-        .filter(|entry| entry.message().content().contains("version one"))
-        .count();
-
-    full_compact_inner(
-        &mut transcript,
-        Some(&FullLifecycleModel),
-        &CompactConfig::default(),
-        &dir.path().to_string_lossy(),
-    )
-    .await
-    .unwrap();
-    let second_reinject_count = transcript
-        .entries()
-        .iter()
-        .filter(|entry| entry.message().content().contains("version one"))
-        .count();
-
-    std::fs::write(&file_path, "version two").unwrap();
-    transcript.append(make_ai_with_read_tool(&file_path.to_string_lossy()));
-    full_compact_inner(
-        &mut transcript,
-        Some(&FullLifecycleModel),
-        &CompactConfig::default(),
-        &dir.path().to_string_lossy(),
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(first_reinject_count, 1);
-    assert_eq!(second_reinject_count, 1, "无新 Read 不得重复注入旧文件");
+    let model_input = serde_json::to_string(&model.requests.lock().unwrap()[0]).unwrap();
+    assert!(model_input.contains("REMOTE_FILE_MARKER"));
+    assert!(model_input.contains("REMOTE_SKILL_MARKER"));
+    assert!(!model_input.contains("LOCAL_FILE_MARKER"));
+    assert!(!model_input.contains("LOCAL_SKILL_MARKER"));
+    assert!(transcript.flags(read).excluded);
+    assert!(transcript.flags(result).excluded);
+    assert!(transcript.entries().iter().any(|entry| entry.id() == read));
     assert!(transcript
         .entries()
         .iter()
-        .any(|entry| entry.message().content().contains("version two")));
+        .any(|entry| entry.id() == result));
+    assert_eq!(transcript.visible_messages().len(), 1, "Full 仅追加摘要");
 }
 
 #[tokio::test]
@@ -508,13 +506,6 @@ async fn test_full_compact_sqlite_persists_lifecycle_and_preserves_ancestor_and_
         .expect("应追加 summary")
         .message()
         .clone();
-    let reinject = transcript
-        .entries()
-        .iter()
-        .find(|entry| entry.message().content().contains("[最近读取的文件:"))
-        .expect("应追加重新注入的文件")
-        .message()
-        .clone();
 
     // 一次一致快照：payload 与 flags 同一次读取，不拼跨时刻结果。
     let stored = store
@@ -538,10 +529,11 @@ async fn test_full_compact_sqlite_persists_lifecycle_and_preserves_ancestor_and_
         .entries()
         .iter()
         .any(|entry| entry.id() == summary.id()));
-    assert!(transcript
-        .entries()
-        .iter()
-        .any(|entry| entry.id() == reinject.id()));
+    assert_eq!(
+        transcript.visible_messages().len(),
+        3,
+        "ancestor、System 与摘要可见"
+    );
     assert!(!stored.flags.contains_key(&ancestor.id()));
     assert!(!stored.flags.contains_key(&own_system));
     assert!(stored.flags[&own_human].excluded);
@@ -792,94 +784,4 @@ fn test_excluded_not_visible() {
     let visible = t.visible_messages();
     assert_eq!(visible.len(), 1);
     assert_eq!(visible[0].id(), id1);
-}
-
-// ── N10：re-inject 路径提取的 builtin effective name 归一 ───────────────────
-
-/// 构造携带指定工具名 Read 调用的 AI 消息（`file_path` 参数）。
-fn make_ai_with_named_read_tool(tool_name: &str, file_path: &str) -> BaseMessage {
-    BaseMessage::ai_with_tool_calls(
-        MessageContent::text("read the file"),
-        vec![crate::messages::ToolCallRequest::new(
-            "named-read-id",
-            tool_name,
-            serde_json::json!({ "file_path": file_path }),
-        )],
-    )
-}
-
-/// 正向：历史名字 `mcp__workspace__Read` 经归一后必须命中，与当前原名 `Read`
-/// 共用同一「逆序扫描（最新优先）+ 去重」语义。
-#[test]
-fn extract_recent_files_matches_workspace_effective_read() {
-    // 消息顺序：旧 → 新（extract_recent_files 逆序遍历）
-    let msgs = vec![
-        make_human("请读取文件"),
-        make_ai_with_named_read_tool("mcp__workspace__Read", "/tmp/ws-older.rs"),
-        make_ai_with_named_read_tool("Read", "/tmp/ws-newest.rs"),
-        make_ai_with_named_read_tool("mcp__workspace__Read", "/tmp/ws-newest.rs"),
-    ];
-
-    let paths = extract_recent_files(&msgs, 10);
-
-    assert_eq!(
-        paths,
-        vec![
-            "/tmp/ws-newest.rs".to_string(),
-            "/tmp/ws-older.rs".to_string()
-        ],
-        "effective name 与裸名都必须命中，且保持「逆序扫描（最新优先）+ 去重」语义"
-    );
-}
-
-/// 反例：未注册实例的 `mcp__foo__Read` 不得被归一命中 ⇒ 不提取（保守语义：
-/// 未知 / 外部 `mcp__*` 不按 Read 处理）。
-#[test]
-fn extract_recent_files_ignores_unknown_effective_names() {
-    for name in ["mcp__foo__Read", "mcp__workspace__read"] {
-        let msgs = vec![make_ai_with_named_read_tool(
-            name,
-            "/tmp/should-not-appear.rs",
-        )];
-        let paths = extract_recent_files(&msgs, 10);
-        assert!(
-            paths.is_empty(),
-            "`{name}` 未命中归一表（纯查表 + 区分大小写），不得被当作 Read 提取"
-        );
-    }
-}
-
-/// 正向：`extract_skills_paths` 同样要识别 effective name 读取的 SKILL.md。
-#[test]
-fn extract_skills_paths_matches_workspace_effective_read() {
-    let skill = "/home/u/.claude/skills/demo/SKILL.md";
-    let msgs = vec![
-        make_ai_with_named_read_tool("mcp__workspace__Read", skill),
-        make_ai_with_named_read_tool("Read", skill),
-        make_human("普通消息"),
-    ];
-
-    let paths = extract_skills_paths(&msgs);
-
-    assert_eq!(
-        paths,
-        vec![skill.to_string()],
-        "当前原名与历史 builtin 名读取的同一 SKILL.md 必须去重后进入 Skills 路径"
-    );
-}
-
-/// 反例：`extract_skills_paths` 对未注册实例名保守不提取。
-#[test]
-fn extract_skills_paths_ignores_unknown_effective_names() {
-    for name in ["mcp__foo__Read", "mcp__workspace__read"] {
-        let msgs = vec![make_ai_with_named_read_tool(
-            name,
-            "/home/u/.claude/skills/demo/SKILL.md",
-        )];
-        let paths = extract_skills_paths(&msgs);
-        assert!(
-            paths.is_empty(),
-            "`{name}` 未命中归一表，不得被当作 Read 提取 Skills 路径"
-        );
-    }
 }

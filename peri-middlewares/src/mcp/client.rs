@@ -16,6 +16,7 @@ pub(crate) mod process;
 // crate 内测试覆盖，接线波次落地后连同本豁免一起删除。
 #[allow(dead_code)]
 mod readiness;
+mod rewind;
 mod service;
 mod status;
 mod subscription;
@@ -819,6 +820,14 @@ impl McpClientPool {
 impl peri_acp_types::ports::McpPoolPort for McpClientPool {
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+
+    async fn rewind_files(
+        &self,
+        session_id: &str,
+        changes: serde_json::Value,
+    ) -> Result<(), String> {
+        self.rewind_workspace_files(session_id, changes).await
     }
 
     fn has_active_tasks(&self, session_id: &str) -> bool {

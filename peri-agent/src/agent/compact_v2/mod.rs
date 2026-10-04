@@ -29,7 +29,7 @@ pub mod smart;
 // ─── 公共重导出：保持外部调用路径不变 ─────────────────────────────────────────────
 
 pub use config::{CompactConfig, CONTINUATION_HINT};
-pub use full::{extract_file_info, extract_skill_names, re_inject_v2, ReInjectResult};
+pub use full::{extract_file_info, extract_skill_names};
 pub use micro::micro_compact;
 pub use planner::{plan_micro, ApplyReport, CompactPolicy, ContextPressure, FullEscalationReason};
 pub use projection::{

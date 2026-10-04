@@ -16,8 +16,6 @@
 
 mod events;
 
-use std::path::Path;
-
 use peri_acp_types::builtin_mcp::original_tool_name_of_effective;
 use peri_acp_types::command::{ArgKind, ArgSpec, ArgsSchema, FlagSpec};
 use peri_acp_types::messages::{BaseMessage, ContentBlock, MessageId};
@@ -62,11 +60,13 @@ impl RewindCommand {
 
 /// 提取到的文件变更操作。
 ///
-/// `Write` 变体的原 `content` 字段已删除：rewind 的文件恢复依赖 `git checkout HEAD`
-/// （见 `revert_files`），从未读取 `Write.content`。保留字段只会徒增内存 + 编译器静音。
+/// History records are sent to the session's Workspace owner for checked reversal.
+#[derive(serde::Serialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
 pub(crate) enum FileChange {
     Write {
         path: String,
+        content: Option<String>,
     },
     Edit {
         path: String,
@@ -162,23 +162,30 @@ pub(crate) async fn execute_rewind(
     let removed_count = removed_messages.len();
 
     // Step 3: 提取文件变更并逆向恢复
-    let mut revert_warnings = Vec::new();
     if revert_files {
         let changes = extract_file_changes(removed_messages);
-        // P1 修复：revert_files 内含同步 git checkout 子进程，直接调用会
-        // 阻塞 tokio worker（tokio worker_threads=4）——移出 async 上下文。
-        // [shadow] 参数名 revert_files 遮蔽同名函数，经 self:: 显式路径调用。
-        let cwd_owned = ctx.cwd.clone();
-        revert_warnings = tokio::task::spawn_blocking(move || {
-            let mut warnings = Vec::new();
-            self::revert_files(&changes, &cwd_owned, &mut warnings);
-            warnings
-        })
-        .await
-        .unwrap_or_else(|e| {
-            warn!("rewind: spawn_blocking join 失败: {e}");
-            Vec::new()
-        });
+        if !changes.is_empty() {
+            let result = match ctx.dep::<std::sync::Arc<dyn peri_acp_types::ports::McpPoolPort>>() {
+                Some(pool) => match serde_json::to_value(changes) {
+                    Ok(changes) => pool.rewind_files(&ctx.session_id, changes).await,
+                    Err(error) => Err(format!("rewind changes encode failed: {error}")),
+                },
+                None => Err("trusted Workspace rewind capability unavailable".into()),
+            };
+            if let Err(error) = result {
+                let msg = format!("rewind: 文件回退失败，历史保持不变: {error}");
+                warn!(msg);
+                return CommandResult {
+                    messages: ctx.history,
+                    stop_reason: PromptStopReason::EndTurn,
+                    feedback: Some(CommandFeedback {
+                        level: FeedbackLevel::Error,
+                        message: msg,
+                        channel: FeedbackChannel::UiOnly,
+                    }),
+                };
+            }
+        }
     }
 
     // Step 4: 验证 ToolUse/ToolResult 配对完整性
@@ -210,10 +217,7 @@ pub(crate) async fn execute_rewind(
     }
 
     // Step 6: 发送 RewindCompleted 事件（重建信号，保留原样）
-    let mut summary = format!("已回滚 {removed_count} 条消息");
-    if !revert_warnings.is_empty() {
-        summary.push_str(&format!("（警告: {}）", revert_warnings.join("; ")));
-    }
+    let summary = format!("已回滚 {removed_count} 条消息");
     events::emit_rewind_completed(
         &ctx.event_sink,
         &ctx.session_id,
@@ -294,8 +298,11 @@ pub(crate) fn parse_tool_call(name: &str, args: &serde_json::Value) -> Option<Fi
     let path = args.get("file_path")?.as_str()?.to_string();
     match name {
         "Write" => {
-            // content 字段不再保留：rewind 不读取它（依赖 git checkout 恢复原始内容）
-            Some(FileChange::Write { path })
+            let content = args
+                .get("content")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string);
+            Some(FileChange::Write { path, content })
         }
         "Edit" => {
             let old_string = args
@@ -315,73 +322,6 @@ pub(crate) fn parse_tool_call(name: &str, args: &serde_json::Value) -> Option<Fi
             })
         }
         _ => None,
-    }
-}
-
-/// 逆向恢复文件变更（最佳努力，失败仅记录警告）。
-fn revert_files(changes: &[FileChange], cwd: &str, warnings: &mut Vec<String>) {
-    // 逆序遍历，先恢复最近的变更
-    for change in changes.iter().rev() {
-        match change {
-            FileChange::Edit {
-                path,
-                old_string,
-                new_string,
-            } => {
-                let full_path = Path::new(cwd).join(path);
-                match std::fs::read_to_string(&full_path) {
-                    Ok(content) => {
-                        // 只替换第一次出现（与 Edit 工具行为一致）
-                        // 字符级操作：用 replacen 避免字节切片的 UTF-8 边界 panic。
-                        // new_string 可能跨多字节 CJK 字符，content.find() 返回字节索引，
-                        // &content[..idx] 虽在 char boundary 上技术上安全，但 replacen
-                        // 是更稳健且与 filesystem/edit.rs 同构的写法。
-                        if content.contains(new_string) {
-                            let reverted = content.replacen(new_string, old_string, 1);
-                            if let Err(e) = std::fs::write(&full_path, reverted) {
-                                warnings.push(format!("Edit 恢复写入失败 {path}: {e}"));
-                            }
-                        } else {
-                            warnings.push(format!("Edit 恢复跳过 {path}: 未找到 new_string"));
-                        }
-                    }
-                    Err(e) => {
-                        warnings.push(format!("Edit 恢复读取失败 {path}: {e}"));
-                    }
-                }
-            }
-            FileChange::Write { path, .. } => {
-                let full_path = Path::new(cwd).join(path);
-                // 删除文件
-                if let Err(e) = std::fs::remove_file(&full_path) {
-                    // 文件可能已不存在，仅 debug
-                    debug!("Write 恢复删除文件失败 {path}: {e}");
-                }
-                // 尝试 git restore 恢复原始版本
-                let mut command = std::process::Command::new("git");
-                command
-                    .args(["checkout", "HEAD", "--"])
-                    .arg(&full_path)
-                    .current_dir(cwd);
-                #[cfg(unix)]
-                let result = peri_process::run_output_blocking(command);
-                #[cfg(not(unix))]
-                let result = command.output();
-                match result {
-                    Ok(output) if output.status.success() => {
-                        debug!("Write 恢复 git checkout 成功: {path}");
-                    }
-                    Ok(output) => {
-                        let stderr = String::from_utf8_lossy(&output.stderr);
-                        // git checkout 失败可能是文件不在 git 中（新文件被删除即可），仅 debug
-                        debug!("Write 恢复 git checkout 失败 {path}: {stderr}");
-                    }
-                    Err(e) => {
-                        debug!("Write 恢复 git 执行失败 {path}: {e}");
-                    }
-                }
-            }
-        }
     }
 }
 

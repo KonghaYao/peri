@@ -641,6 +641,29 @@ impl ServerHandler for WorkspaceMcpServer {
                 result = crate::file_observation::read_text(&self.cwd, request) => result,
             };
         }
+        if method == "workspace/rewindFiles" {
+            let authority = self.task_scope_authority.get().ok_or_else(|| {
+                McpError::invalid_params("rewind scope authority unavailable", None)
+            })?;
+            let scope = authority.resolve_capability(&_context.meta)?;
+            let tasks = self
+                .shell_tasks
+                .as_ref()
+                .ok_or_else(|| McpError::invalid_params("Workspace owner unavailable", None))?;
+            let _admission = tasks.admit_fenced(&scope.session_id, scope.execution.as_ref())?;
+            return tokio::select! {
+                biased;
+                _ = _context.ct.cancelled() => Err(McpError::internal_error("workspace rewind cancelled", None)),
+                result = crate::file_rewind::rewind_files(&self.cwd, request) => result,
+            };
+        }
+        if method == "workspace/readMention" {
+            return tokio::select! {
+                biased;
+                _ = _context.ct.cancelled() => Err(McpError::internal_error("workspace mention read cancelled", None)),
+                result = crate::file_observation::read_mention(&self.cwd, request) => result,
+            };
+        }
         let supported = matches!(method.as_str(), "skills/list" | "skills/get");
         let provider = if supported {
             self.resource_provider()

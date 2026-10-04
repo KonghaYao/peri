@@ -144,18 +144,6 @@ fn default_excluded_tools() -> Vec<String> {
 fn default_summary_max_tokens() -> u32 {
     16000
 }
-fn default_re_inject_max_files() -> usize {
-    5
-}
-fn default_re_inject_max_tokens_per_file() -> u32 {
-    5000
-}
-fn default_re_inject_file_budget() -> u32 {
-    25000
-}
-fn default_re_inject_skills_budget() -> u32 {
-    25000
-}
 fn default_max_consecutive_failures() -> u32 {
     3
 }
@@ -230,14 +218,6 @@ pub struct CompactConfig {
     pub micro_excluded_tools: Vec<String>,
     #[serde(default = "default_summary_max_tokens")]
     pub summary_max_tokens: u32,
-    #[serde(default = "default_re_inject_max_files")]
-    pub re_inject_max_files: usize,
-    #[serde(default = "default_re_inject_max_tokens_per_file")]
-    pub re_inject_max_tokens_per_file: u32,
-    #[serde(default = "default_re_inject_file_budget")]
-    pub re_inject_file_budget: u32,
-    #[serde(default = "default_re_inject_skills_budget")]
-    pub re_inject_skills_budget: u32,
     #[serde(default = "default_max_consecutive_failures")]
     pub max_consecutive_failures: u32,
     #[serde(default = "default_ptl_max_retries")]
@@ -295,10 +275,6 @@ impl Default for CompactConfig {
             micro_compact_stale_steps: default_stale_steps(),
             micro_excluded_tools: default_excluded_tools(),
             summary_max_tokens: default_summary_max_tokens(),
-            re_inject_max_files: default_re_inject_max_files(),
-            re_inject_max_tokens_per_file: default_re_inject_max_tokens_per_file(),
-            re_inject_file_budget: default_re_inject_file_budget(),
-            re_inject_skills_budget: default_re_inject_skills_budget(),
             max_consecutive_failures: default_max_consecutive_failures(),
             ptl_max_retries: default_ptl_max_retries(),
             smart_compact_enabled: default_false(),

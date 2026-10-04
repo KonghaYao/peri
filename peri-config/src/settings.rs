@@ -250,6 +250,17 @@ impl ConfigSource {
         self.raw_global.as_deref()
     }
 
+    /// Resource policy from this selected source, including a lenient source
+    /// without a published snapshot. Missing or invalid source data has no
+    /// trustworthy policy and must be handled by the caller explicitly.
+    pub fn resource_configuration(&self) -> Option<crate::resources::ResourceConfiguration> {
+        if let Some(snapshot) = self.snapshot() {
+            return Some(*snapshot.resources());
+        }
+        let document: Value = serde_json::from_str(self.raw_global.as_deref()?).ok()?;
+        Some(crate::resources::resolve(&document))
+    }
+
     pub fn raw_workspace(&self) -> Option<&str> {
         self.raw_workspace.as_deref()
     }

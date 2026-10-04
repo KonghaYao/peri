@@ -130,6 +130,7 @@ fn make_intercept_request<'a>(
     let compact_config_loader: Arc<dyn Fn() -> CompactConfig + Send + Sync> =
         Arc::new(CompactConfig::default);
     InterceptRequest {
+        mcp_pool: None,
         content,
         history,
         history_payloads: history

@@ -208,13 +208,13 @@ impl crate::tools::BaseTool for SuccessfulFullReadTool {
 /// Characterization：scripted provider usage 驱动一次真实持久化 Full lifecycle，随后 tracker
 /// 接受 Full 后 Reason 返回的新低 usage 样本。
 #[tokio::test]
-async fn test_run_react_loop_successful_full_replaces_history_reinjects_read_file_and_resets_usage()
-{
+async fn test_run_react_loop_successful_full_replaces_history_without_file_re_read_and_resets_usage(
+) {
     use crate::thread::ThreadMeta;
 
     let dir = tempfile::tempdir().unwrap();
-    let file_path = dir.path().join("full-reinject-marker.txt");
-    let file_marker = "successful full reinjected file marker";
+    let file_path = dir.path().join("full-read-marker.txt");
+    let file_marker = "successful full historical file marker";
     std::fs::write(&file_path, file_marker).unwrap();
 
     let store = MockSessionResources::new();
@@ -290,7 +290,7 @@ async fn test_run_react_loop_successful_full_replaces_history_reinjects_read_fil
         assert!(post_full
             .iter()
             .any(|content| content.contains("compact generation 0")));
-        assert!(post_full
+        assert!(!post_full
             .iter()
             .any(|content| content.contains(file_marker)));
         assert!(!post_full
@@ -336,7 +336,7 @@ async fn test_run_react_loop_successful_full_replaces_history_reinjects_read_fil
         .iter()
         .filter(|message| message.content().contains("compact generation 0"))
         .count();
-    let reinject_count = persisted
+    let visible_file_count = persisted
         .iter()
         .filter(|message| {
             message.content().contains(file_marker)
@@ -344,7 +344,10 @@ async fn test_run_react_loop_successful_full_replaces_history_reinjects_read_fil
         })
         .count();
     assert_eq!(summary_count, 1);
-    assert_eq!(reinject_count, 1);
+    assert_eq!(visible_file_count, 0, "Full 不应重新注入本机文件内容");
+    assert!(persisted
+        .iter()
+        .any(|message| message.content() == file_marker));
     assert!(persisted
         .iter()
         .filter(|message| {

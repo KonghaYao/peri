@@ -9,8 +9,7 @@
 仅 re-export core 类型与 `settings::ConfigSource`；正常 source 持有 `ConfigurationSystem`，
 提供同 scope 的 snapshot、revision 与 CAS 保存。host 装配在 MCP 初始化前注入同一
 快照，并取其 provider/Langfuse 投影；Model adapter 构造仍由 ACP 完成。
-workspace 资源输入从 `snapshot.resources().disable_bundled_skills` 取关闭位，不重读
-全局值；技能 fixture 使用选中的 global 配置路径。新值须显式 reload 并重取 snapshot，
+workspace 资源输入从本次选中 `ConfigSource` 的资源投影取关闭位；lenient 无 snapshot 时只解析该来源已读取的全局正文，缺少可信投影则关闭 bundled skills，不重读默认全局配置；技能 fixture 使用选中的 global 配置路径。新值须显式 reload 并重取 snapshot，
 旧 pool 固定旧 Arc，没有 hot watcher。lenient 无 authority 仅临时可读、不可写。
 
 - 数据流：`ACP request → transport(mpsc/stdio) → host 部署单元 → dispatch 纯函数 → SessionManager(frozen/caps) → run_prompt → peri-agent run_session_loop → ExecutorEvent → event/forwarder+mapper → SessionUpdate / AcpEvent → client`
@@ -51,7 +50,7 @@ Session ID 恢复与生命周期回归：`src/host/requests_workspace_cases_test
 | 改 caps 门控 | `src/session/caps.rs` | `set_pending_caps`（initialize 暂存）/`consume_pending_caps`（session/new 消费）/`ensure_session_caps`/`effective_host_caps` | 发送扩展事件前按该 session 的 caps 门控；cap 未双向协商不得投影；事件改动必须覆盖 caps 门控层 |
 | 改装配/中间件链/部署 | `src/host/assemble.rs` + `src/host/prepared.rs` + `src/host/stage_builder.rs` | `assemble_server_config(HostAssemblyInput)`；`HostCapabilities` 随部署输入传至会话并在准备期冻结 builtin 关闭键；`HostAssemblyInput::workspace_input`；`assemble_hook_groups`；`build_stage_context`；`build_session_manager` | ACP stage bridge 只转发 `FrozenSessionData`，language/MetaHarness/date/prompt projection 均从该 snapshot 派生；部署能力缺席时不构造 Cron、LSP、插件、settings hooks、builtin 或 stdio MCP 相应能力，冻结关闭键同时过滤 10_hitl 静态提示清单；链序仍以 `production_blueprint` 为准；builtin 上下文在 `run_initialize` 前注入；非 Clone 会话存储关闭权仍由部署输入持有 |
 | 改 bare 文件/终端能力 | `src/host/assemble.rs` + `peri-middlewares/src/mcp/{config,initialize}.rs` | `run_initialize_bare` → `load_bare_config` → 常规 `initialize_config` | 仅 builtin workspace；不读取用户 MCP、插件或 LSP 配置，保留同一 session TaskManager；`PERI_MCP_BUILTIN=off` / `0` 仍生效。真实 CLI 验证：`cargo test -p peri-tui --test print_bare --test print_background_exit -- --test-threads=1` |
-| 改 rewind | `src/dispatch/rewind.rs` + `src/session/command/rewind.rs` + `src/host/prompt.rs` | `rewind_preview`（:52）；`rewind_execute`（:215）；`rewind_candidates`（rewind_candidates.rs）；`stdio_filters_command` | `session/rewind*` RPC 仅在双向协商 `peri.rewind` 后可用：preview 返回有界 project-relative 文件影响 + 一次性指纹，execute 前重算历史，指纹缺失/过期拒绝；统一宿主注册使 stdio/TUI 都可调用 RPC（cap 未协商时 -32601）。另有部署差异：stdio 的 slash `/rewind`（及 alias）从命令投影隐藏并 fall-through 进 agent，TUI/print 仍执行内置命令 |
+| 改 rewind | `src/dispatch/rewind.rs` + `src/session/command/rewind.rs` + `src/host/prompt.rs` | `rewind_preview`（:52）；`rewind_execute`（:215）；`rewind_candidates`（rewind_candidates.rs）；`stdio_filters_command` | `session/rewind*` RPC 仅在双向协商 `peri.rewind` 后可用：preview 返回有界 project-relative 文件影响 + 一次性指纹，execute 前重算历史，指纹缺失/过期拒绝；文件回退经会话绑定的 MCP pool 调 Workspace `workspace/rewindFiles`，Workspace 以 task scope/fence 准入并预检，失败时 ACP 保持历史不裁剪。统一宿主注册使 stdio/TUI 都可调用 RPC（cap 未协商时 -32601）；stdio 的 slash `/rewind`（及 alias）从命令投影隐藏并 fall-through 进 agent，TUI/print 仍执行内置命令 |
 
 ## 子系统
 

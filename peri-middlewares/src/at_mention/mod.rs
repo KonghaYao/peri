@@ -1,38 +1,38 @@
-mod file_reader;
 mod parser;
 
 use peri_agent::middleware::capabilities as hook_state;
-use std::path::PathBuf;
+use std::sync::Arc;
 
+use crate::workspace_io::WorkspaceFileReader;
 use async_trait::async_trait;
-pub use file_reader::FileContent;
 use peri_agent::{
     error::AgentResult,
     messages::{BaseMessage, ContentBlock},
     middleware::r#trait::Middleware,
 };
 
-use crate::tool_search::core_tools::TOOL_READ;
+const WORKSPACE_MENTION_REQUEST: &str = "workspace/readMention";
 
-/// AtMentionMiddleware — 解析用户消息中的 @path 提及，注入 Read 工具调用结果
+/// AtMentionMiddleware — 解析用户消息中的 @path 提及，注入 Workspace 读取结果
 ///
 /// 在 `before_agent` 时从本批 Human 消息中提取 @ 提及，
-/// 读取对应文件内容，以 Ai[ToolUse{Read}] → Tool[ToolResult] 消息序列追加到 state。
+/// 从会话 Workspace 读取对应内容，以 Ai[ToolUse{workspace/readMention}] →
+/// Tool[ToolResult] 消息序列追加到 state。
 ///
 /// 消息结构（与 SkillPreloadMiddleware 一致）：
 /// ```text
 /// [Human "用户消息（含 @path）"]
-/// [Ai]    [ToolUse{Read, call_{hex}}, ...]
+/// [Ai]    [ToolUse{workspace/readMention, call_{hex}}, ...]
 /// [Tool]  ToolResult{call_{hex}, file_content}
 /// ...
 /// ```
 pub struct AtMentionMiddleware {
-    cwd: PathBuf,
+    reader: Arc<dyn WorkspaceFileReader>,
 }
 
 impl AtMentionMiddleware {
-    pub fn new(cwd: PathBuf) -> Self {
-        Self { cwd }
+    pub fn new(reader: Arc<dyn WorkspaceFileReader>) -> Self {
+        Self { reader }
     }
 }
 
@@ -79,24 +79,17 @@ impl AtMentionMiddleware {
             return Ok(());
         }
 
-        // 在 blocking 线程中读取文件
-        let cwd = self.cwd.clone();
-        let file_contents: Vec<(parser::AtMention, Option<FileContent>)> =
-            tokio::task::spawn_blocking(move || {
-                mentions
-                    .into_iter()
-                    .map(|m| {
-                        let content =
-                            file_reader::read_file_content(&cwd, &m.path, m.line_start, m.line_end);
-                        (m, content)
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .await
-            .map_err(|e| peri_agent::error::AgentError::MiddlewareError {
-                middleware: "AtMentionMiddleware".to_string(),
-                reason: format!("spawn_blocking 失败: {e}"),
-            })?;
+        let mut file_contents = Vec::with_capacity(mentions.len());
+        for mention in mentions {
+            let result = self
+                .reader
+                .read_mention(&mention.path, mention.line_start, mention.line_end)
+                .await;
+            if let Err(error) = &result {
+                tracing::debug!(path = %mention.path, %error, "workspace mention read skipped");
+            }
+            file_contents.push((mention, result.ok()));
+        }
 
         // 过滤掉读取失败的
         let valid: Vec<_> = file_contents
@@ -118,13 +111,14 @@ impl AtMentionMiddleware {
             .iter()
             .zip(call_ids.iter())
             .map(|((mention, _), id)| {
-                let mut input = serde_json::json!({
-                    "file_path": mention.path,
-                });
-                if let Some(offset) = mention.line_start {
-                    input["offset"] = serde_json::json!(offset);
+                let mut input = serde_json::json!({ "path": mention.path });
+                if let Some(line_start) = mention.line_start {
+                    input["lineStart"] = serde_json::json!(line_start);
                 }
-                ContentBlock::tool_use(id.clone(), TOOL_READ, input)
+                if let Some(line_end) = mention.line_end {
+                    input["lineEnd"] = serde_json::json!(line_end);
+                }
+                ContentBlock::tool_use(id.clone(), WORKSPACE_MENTION_REQUEST, input)
             })
             .collect();
 

@@ -252,14 +252,14 @@ impl SessionEnvironment {
         //   适配器的产物，只产出「路径 + scope/标签」，**不读技能
         //   内容**；Builtin 占位根不映射为资源根（资产是 provider 的内置静态面，
         //   由 `disable_bundled` 位控制）。
-        // - `disable_bundled`：从准备配置 snapshot 投影的全局资源关闭位。
+        // - `disable_bundled`：只从本次选中的配置来源投影；无可信配置时关闭。
         // - 缺根（目录不存在）交给 provider 既有语义处理（缺失目录 = 空批）。
         // - Agent 项目/插件根与指令面（`peri-instruction://`）由同一 provider 装配。
         let disable_bundled = configuration
             .config_source
-            .snapshot()
-            .map(|snapshot| snapshot.resources().disable_bundled_skills)
-            .unwrap_or_else(peri_middlewares::skills::load_disable_bundled_skills);
+            .resource_configuration()
+            .map(|resources| resources.disable_bundled_skills)
+            .unwrap_or(true);
         let workspace_resources = super::workspace_resources::workspace_resources_input(
             &cwd,
             plugins,

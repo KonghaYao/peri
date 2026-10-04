@@ -369,6 +369,7 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
         event_sink: &event_sink,
         auxiliary_model: &auxiliary_model,
         task_manager: &task_manager_for_cmd,
+        mcp_pool: ctx.mcp_pool.clone(),
         command_lookup,
         compact_config_loader,
     })

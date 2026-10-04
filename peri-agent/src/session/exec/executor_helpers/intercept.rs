@@ -55,6 +55,7 @@ pub struct InterceptRequest<'a> {
     pub auxiliary_model: &'a Option<Arc<dyn peri_model::Model>>,
     // ── 异步服务 ──
     pub task_manager: &'a Arc<dyn TaskManager>,
+    pub mcp_pool: Option<Arc<dyn peri_acp_types::ports::McpPoolPort>>,
     // ── 注入面（L5 依赖反转）──
     /// 命令注册表查找（ACP 协议面注册表；`None` = 未注册，fall-through）。
     pub command_lookup: CommandLookupFn,
@@ -196,6 +197,12 @@ pub async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Intercept
         std::any::TypeId::of::<CompactionCommitState>(),
         Arc::new(commit_state.clone()),
     );
+    if let Some(pool) = req.mcp_pool.clone() {
+        deps.insert(
+            std::any::TypeId::of::<Arc<dyn peri_acp_types::ports::McpPoolPort>>(),
+            Arc::new(pool),
+        );
+    }
     let mut ctx = CommandContext::new(
         req.session_id.to_string(),
         req.history.to_vec(),

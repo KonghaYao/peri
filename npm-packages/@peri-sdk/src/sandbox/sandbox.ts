@@ -18,7 +18,7 @@ export interface SandboxOptions {
   workspace?: HttpWorkspace;
   workspaceProcess?: WorkspaceMcpProcessOptions;
   storage?: SessionStorage;
-  stdio?: Omit<StdioTransportOptions, "cwd" | "command"> & { command?: string };
+  stdio?: Omit<StdioTransportOptions, "command"> & { command?: string };
   transportFactory?: () => Transport | Promise<Transport>;
 }
 
@@ -38,16 +38,20 @@ export class Sandbox {
   constructor(options: SandboxOptions) {
     if (!options.id || !options.path)
       throw new TypeError("Sandbox id and path are required");
-    this.id = options.id;
-    // ACP session/list filters by canonical cwd; use the same cwd at setup and listing.
-    try {
-      this.path = realpathSync(options.path);
-    } catch {
-      this.path = options.path;
-    } // A remote Sandbox path need not exist on this host.
-    this.workspace = options.workspace;
     if (options.workspace && options.workspaceProcess)
       throw new TypeError("Choose an external Workspace or a managed Workspace process");
+    this.id = options.id;
+    // An external Workspace owns its path identity; local symlinks must not rewrite it.
+    if (options.workspace) {
+      this.path = options.path;
+    } else {
+      try {
+        this.path = realpathSync(options.path);
+      } catch {
+        this.path = options.path;
+      }
+    }
+    this.workspace = options.workspace;
     this.workspaceProcessOptions = options.workspaceProcess;
     this.storage = options.storage;
     this.stdio = options.stdio;
@@ -123,7 +127,7 @@ export class Sandbox {
     const child = await StdioTransport.start({
       command: transport?.command ?? "peri",
       args,
-      cwd: this.path,
+      cwd: transport?.cwd ?? (this.workspace ? undefined : this.path),
       env: {
         ...transport?.env, ...deployment?.env,
         ...(supervisor ? {

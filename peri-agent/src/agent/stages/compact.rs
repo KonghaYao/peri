@@ -383,9 +383,7 @@ async fn compact_core(input: CompactInput) -> (crate::error::AgentResult<Compact
                 let guard = ctx.session.transcript.read();
                 let visible: Vec<crate::messages::BaseMessage> =
                     guard.visible_messages().into_iter().cloned().collect();
-                // 从最后几条消息提取 re_inject 元信息（CompactFileInfo / Skills 名称）
-                // 注：run_compact 内 re_inject_v2 已把 [最近读取的文件: ...] / [激活的 Skill 指令: ...]
-                // 追加到 transcript 末尾，可直接用 extract_file_info / extract_skill_names 解析
+                // Full 只追加摘要；已有消息中的元信息仍由类型层提取。
                 let combined_files = crate::agent::compact_v2::extract_file_info(&visible);
                 let combined_skills = crate::agent::compact_v2::extract_skill_names(&visible);
                 (visible, combined_files, combined_skills)

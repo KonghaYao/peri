@@ -5,9 +5,9 @@
 //! `compact_v2::run_compact`）的 `/compact` 命令执行体；ACP 协议面
 //! `session::command::compact::pipeline` 保留 re-export 薄壳。
 //!
-//! [v2] 从 v1 `full_compact + re_inject` 迁移到 `compact_v2::run_compact(force=true)`：
+//! [v2] 从 v1 压缩路径迁移到 `compact_v2::run_compact(force=true)`：
 //! - 把 history 加载进临时 `MessageTranscript`
-//! - 调用 `run_compact` 触发 Full Compact + re-inject
+//! - 调用 `run_compact` 触发 Full Compact
 //! - 从 transcript 拿 compact 后的 visible_messages 组装事件载荷
 //!
 //! 编排层（`compact.rs::execute`）只做组合。
@@ -45,7 +45,7 @@ use super::events::{emit_compact_completed, emit_compact_started};
 
 /// Pipeline 终态。编排层据此决定返回值与是否中途 short-circuit。
 pub enum PipelineOutcome {
-    /// 正常完成：组装后的消息（首条 Human + re-inject 消息...）。
+    /// 正常完成：组装后的消息（首条 Human 为摘要）。
     Completed {
         messages: Vec<BaseMessage>,
         /// v2 compact 操作计数（feedback 文案「已压缩 N 条消息」的 N）。
@@ -350,7 +350,7 @@ async fn run_v2_compact_with_cancel(
     Ok(result)
 }
 
-/// 组装最终消息：从 transcript visible_messages 提取首条 Human + re-inject 消息。
+/// 组装最终消息：从 transcript visible_messages 提取摘要及保留的可见消息。
 ///
 /// [TRAP] compact 后消息结构必须以 `BaseMessage::human(summary + continuation)` 开头。
 /// 但 v2 的 run_compact 已经在 transcript 内部追加了符合不变量的消息，

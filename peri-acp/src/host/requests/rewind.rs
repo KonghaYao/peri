@@ -81,11 +81,27 @@ pub(super) async fn handle_rewind(
         .ok_or_else(|| AcpError::new(-32602, "missing sessionId"))?
         .to_string();
     require_rewind_cap(&cfg.session_manager.get_caps(&session_id))?;
-    let (cwd, history) = {
+    let (cwd, history, workspace_pool) = {
         let s = sessions
-            .get_mut(&session_id)
+            .get(&session_id)
             .ok_or_else(|| AcpError::new(-32602, "session not found"))?;
-        (s.cwd.clone(), s.history.clone())
+        if s.closing
+            || s.execution_owner
+                .as_ref()
+                .and_then(|owner| owner.owner_token())
+                .is_none()
+        {
+            return Err(AcpError::new(
+                -32010,
+                "rewind requires an active session execution owner",
+            ));
+        }
+        let local = s
+            .environment
+            .as_ref()
+            .map(|environment| &environment.cfg)
+            .unwrap_or(cfg);
+        (s.cwd.clone(), s.history.clone(), local.mcp_pool.clone())
     };
     let target_message_id = params
         .get("target_message_id")
@@ -118,6 +134,7 @@ pub(super) async fn handle_rewind(
         None,
         None,
         None, // frozen_*：RewindCommand 不使用
+        workspace_pool,
     )
     .await?;
     // Canonical payloads are authoritative. Locate the target by MessageId there, truncate them,

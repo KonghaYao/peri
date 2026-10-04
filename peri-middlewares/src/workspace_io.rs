@@ -12,9 +12,30 @@ use crate::mcp::{ClientStatus, McpClientPool};
 pub trait WorkspaceFileReader: Send + Sync {
     async fn read_text(&self, path: &Path) -> Result<String, WorkspaceReadError>;
 
+    async fn read_mention(
+        &self,
+        path: &str,
+        line_start: Option<usize>,
+        line_end: Option<usize>,
+    ) -> Result<WorkspaceMentionContent, WorkspaceReadError> {
+        let _ = (path, line_start, line_end);
+        Err(WorkspaceReadError::Unavailable)
+    }
+
     async fn current_branch(&self) -> Result<Option<String>, WorkspaceReadError> {
         Err(WorkspaceReadError::Unavailable)
     }
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceMentionContent {
+    pub path: String,
+    pub content: String,
+    pub line_start: Option<usize>,
+    pub line_end: Option<usize>,
+    pub truncated: bool,
+    pub is_dir: bool,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -81,7 +102,7 @@ impl McpWorkspaceFileReader {
     async fn request(
         &self,
         method: &str,
-        path: Option<&Path>,
+        params: Option<serde_json::Value>,
     ) -> Result<serde_json::Value, WorkspaceReadError> {
         let pool = self
             .pool
@@ -99,13 +120,6 @@ impl McpWorkspaceFileReader {
             .ok_or(WorkspaceReadError::Unavailable)?;
         let generation = pool.handle_generation(&handle);
         let owner = pool.acp_owners.read().get("workspace").cloned();
-        let params = path
-            .map(|path| {
-                path.to_str()
-                    .map(|path| serde_json::json!({ "path": path }))
-                    .ok_or(WorkspaceReadError::InvalidPath)
-            })
-            .transpose()?;
         let request = CustomRequest::new(method, params);
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         let request = tokio::time::timeout_at(
@@ -149,12 +163,39 @@ impl McpWorkspaceFileReader {
 #[async_trait]
 impl WorkspaceFileReader for McpWorkspaceFileReader {
     async fn read_text(&self, path: &Path) -> Result<String, WorkspaceReadError> {
-        self.request("workspace/readText", Some(path))
-            .await?
-            .get("text")
-            .and_then(|text| text.as_str())
-            .map(str::to_string)
-            .ok_or(WorkspaceReadError::InvalidResponse)
+        let path = path.to_str().ok_or(WorkspaceReadError::InvalidPath)?;
+        self.request(
+            "workspace/readText",
+            Some(serde_json::json!({"path": path})),
+        )
+        .await?
+        .get("text")
+        .and_then(|text| text.as_str())
+        .map(str::to_string)
+        .ok_or(WorkspaceReadError::InvalidResponse)
+    }
+
+    async fn read_mention(
+        &self,
+        path: &str,
+        line_start: Option<usize>,
+        line_end: Option<usize>,
+    ) -> Result<WorkspaceMentionContent, WorkspaceReadError> {
+        let mut params = serde_json::json!({ "path": path });
+        if let Some(line_start) = line_start {
+            params["lineStart"] = serde_json::json!(line_start);
+        }
+        if let Some(line_end) = line_end {
+            params["lineEnd"] = serde_json::json!(line_end);
+        }
+        let response = self.request("workspace/readMention", Some(params)).await?;
+        let content: WorkspaceMentionContent =
+            serde_json::from_value(response).map_err(|_| WorkspaceReadError::InvalidResponse)?;
+        if content.path != path || content.line_start != line_start || content.line_end != line_end
+        {
+            return Err(WorkspaceReadError::InvalidResponse);
+        }
+        Ok(content)
     }
 
     async fn current_branch(&self) -> Result<Option<String>, WorkspaceReadError> {

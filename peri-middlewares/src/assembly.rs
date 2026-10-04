@@ -246,7 +246,12 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
                 }
                 ChainSlot::AtMention if disabled.contains("AtMentionMiddleware") => {}
                 ChainSlot::AtMention => {
-                    chain.add(Box::new(AtMentionMiddleware::new(cwd.clone().into())));
+                    let reader = Arc::new(crate::workspace_io::McpWorkspaceFileReader::new(
+                        mcp_pool_concrete.clone(),
+                        Some(ctx.session_id.clone()),
+                        disabled,
+                    ));
+                    chain.add(Box::new(AtMentionMiddleware::new(reader)));
                 }
                 // 新增：图片附件处理（在 @mention 之后，将 @image <path> 转换为 ContentBlock::Image）
                 ChainSlot::Image if disabled.contains("ImageMiddleware") => {}

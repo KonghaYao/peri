@@ -129,7 +129,7 @@ fn preview_material(
     let mut changes = Vec::with_capacity(all_changes.len());
     for change in all_changes.iter().rev() {
         let (raw_path, kind) = match change {
-            crate::session::command::FileChange::Write { path } => (path, "write"),
+            crate::session::command::FileChange::Write { path, .. } => (path, "write"),
             crate::session::command::FileChange::Edit { path, .. } => (path, "edit"),
         };
         let path = safe_project_relative(&cwd, raw_path)?;
@@ -228,6 +228,7 @@ pub async fn rewind_execute(
     frozen_claude_local_md: Option<Arc<String>>,
     frozen_skill_summary: Option<Arc<String>>,
     frozen_system_prompt: Option<Arc<String>>,
+    mcp_pool: Option<Arc<dyn peri_acp_types::ports::McpPoolPort>>,
 ) -> Result<Value, AcpError> {
     // P0 修复：参数预验证。参数错误直接以 RPC 错误形式返回（TUI 才能感知
     // 并展示失败）；执行失败经共享执行体 feedback(Error, UiOnly) 收敛
@@ -282,7 +283,16 @@ pub async fn rewind_execute(
         cancel_token.clone(),
         // 扩展依赖接口注册表（本步空表；旧字段迁移归消费方适配任务，
         // 迁移前以 deps/dep::<T>() 形态按接口注入）。
-        peri_acp_types::command::DependencyBag::new(),
+        {
+            let mut deps = peri_acp_types::command::DependencyBag::new();
+            if let Some(pool) = mcp_pool {
+                deps.insert(
+                    std::any::TypeId::of::<Arc<dyn peri_acp_types::ports::McpPoolPort>>(),
+                    Arc::new(pool),
+                );
+            }
+            deps
+        },
     );
     // L5：compact 配置由装配点预填（env overrides 每轮重新应用）
     ctx.compact_config = crate::host::compact_config::load_compact_config(peri_config);
@@ -302,6 +312,11 @@ pub async fn rewind_execute(
 
     // Phase 5 Step 5：共享执行体（slash 与 RPC 双入口复用）。
     let mut result = execute_rewind(ctx, args.target_message_id, args.revert_files).await;
+    let rewind_error = result
+        .feedback
+        .as_ref()
+        .filter(|feedback| feedback.level == crate::session::command::FeedbackLevel::Error)
+        .map(|feedback| feedback.message.clone());
 
     // 编排层反馈接线（plan Step 1 第三处接线点）：handler.execute 之后、
     // push_done 之前发射 CommandFeedback（channel=Session 额外追加系统消息）。
@@ -314,6 +329,9 @@ pub async fn rewind_execute(
 
     if result.stop_reason == PromptStopReason::Cancelled {
         return Err(AcpError::new(-32603, "rewind cancelled"));
+    }
+    if let Some(error) = rewind_error {
+        return Err(AcpError::new(-32603, error));
     }
 
     let history = result.messages;
