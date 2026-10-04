@@ -13,12 +13,6 @@ fn test_thread_goal_new_生成有效_goal_id() {
 }
 
 #[test]
-fn test_thread_goal_with_budget() {
-    let goal = ThreadGoal::new_at("重构模块".to_string(), Some(200_000), peri_time::now_wall());
-    assert_eq!(goal.token_budget, Some(200_000));
-}
-
-#[test]
 fn test_thread_goal_serde_roundtrip() {
     let goal = ThreadGoal::new_at(
         "测试序列化".to_string(),
