@@ -208,7 +208,13 @@ pub(crate) async fn send_config_option_update(
         "sessionId": session_id,
         "update": update_value,
     });
-    let _ = transport.send_notification("session/update", payload).await;
+    super::diagnostics::send_session_update(
+        transport,
+        session_id,
+        "config_options_update",
+        payload,
+    )
+    .await;
 }
 
 /// Push an `AvailableCommandsUpdate` notification for the given session.
@@ -299,7 +305,13 @@ pub(crate) async fn send_available_commands_update(
                 "sessionId": sid,
                 "update": update_value,
             });
-            let _ = tx.send_notification("session/update", payload).await;
+            super::diagnostics::send_session_update(
+                tx.as_ref(),
+                &sid,
+                "available_commands_update",
+                payload,
+            )
+            .await;
         });
     })));
 
@@ -316,7 +328,13 @@ pub(crate) async fn send_available_commands_update(
         "sessionId": session_id,
         "update": update_value,
     });
-    let _ = transport.send_notification("session/update", payload).await;
+    super::diagnostics::send_session_update(
+        transport.as_ref(),
+        session_id,
+        "available_commands_update",
+        payload,
+    )
+    .await;
 }
 
 /// Push a `SessionInfoUpdate` notification after prompt/compact completes,
@@ -352,6 +370,7 @@ pub(crate) async fn send_session_info_update_with_title(
         "sessionId": session_id,
         "update": update_value,
     });
-    let _ = transport.send_notification("session/update", payload).await;
+    super::diagnostics::send_session_update(transport, session_id, "session_info_update", payload)
+        .await;
 }
 // test

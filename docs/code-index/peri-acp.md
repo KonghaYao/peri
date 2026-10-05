@@ -24,6 +24,8 @@ workspace 资源输入从本次选中 `ConfigSource` 的资源投影取关闭位
 
 ## 速查表
 
+ACP 出站错误诊断统一位于 `src/host/diagnostics.rs`：`ServerLoop` 的普通请求、prompt、MCP Apps、MCP over ACP、准入拒绝及生命周期锁失败均经 `ResponseDiagnostics::send` 记录方法、RPC ID、可用会话 ID、错误码与错误消息，再原样发送响应；内部错误为 ERROR，其余拒绝为 WARN，正常取消为 DEBUG。`notify.rs` 的会话信息、配置项和命令列表通知共用 `send_session_update` 记录投递失败，不记录请求参数、响应数据或通知内容。针对性回归：`./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp --lib -- host::diagnostics`。
+
 Session ID 恢复与生命周期回归：`src/host/requests_workspace_cases_test.rs` 验证
 忽略调用方 cwd、跨实例恢复、缺目录只读历史与 SessionEnd 排空；
 `src/host/requests_workspace_assembly_test.rs` 验证装配失败时保留本实例运行句柄，

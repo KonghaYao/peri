@@ -46,6 +46,7 @@ mod workspace_resources;
 pub use lifecycle::{spawn_acp_server, AcpHostHandle, AcpHostShutdownReport};
 mod continuation;
 pub mod controller_ports;
+mod diagnostics;
 #[cfg(test)]
 #[path = "executor_flow_test.rs"]
 mod executor_flow_tests;

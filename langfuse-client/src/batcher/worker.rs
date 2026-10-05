@@ -193,7 +193,7 @@ impl BatchWorker {
                     |count| Some(count.saturating_add(rejected_spans)),
                 );
             }
-            error!("Batcher ingestion submission failed");
+            error!(error = %error, "Batcher ingestion submission failed");
         }
     }
 

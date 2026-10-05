@@ -27,6 +27,8 @@ peri-model 和 langfuse-client 是现行 Langfuse 适配依赖，不能由索引
 
 ## 速查表
 
+Langfuse HTTP 重试与批次失败日志由 `langfuse-client/src/client.rs` 和 `langfuse-client/src/batcher/worker.rs` 记录经过客户端归一化的错误原因（HTTP 状态、重试次数等），不输出认证头、事件内容或服务端响应体；日志回归位于独立集成测试 `langfuse-client/tests/logging.rs`，避免并行单测初始化 tracing callsite 时干扰日志捕获。
+
 | 我想做什么 | 主文件 | 入口/关键函数 | 关键逻辑 |
 | --- | --- | --- | --- |
 | 转发取消三元组 | `peri-controller/src/controller.rs` | `Controller::cancel`:339 | 原样交给 Runtime；未知 session 包装为 CancelFailed，策略和幂等判定归句柄实现（ARC-CANCEL-001） |

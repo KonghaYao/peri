@@ -127,6 +127,7 @@ impl LangfuseClient {
             }
             attempt = attempt.saturating_add(1);
             warn!(
+                error = %error,
                 attempt,
                 max_retries = self.max_retries,
                 delay_ms = delay.as_millis(),
