@@ -5,13 +5,45 @@
 //! severity=Info / delivery=Configurable / audiences=[Model,Tui,Diagnostics] /
 //! summary / metadata={} / **Info 不唤醒**；正文 = 资源正文（超长按 UTF-8 边界截断）。
 
-use super::{git_watch_reminder_from_resource, is_git_watch_resource};
-use peri_acp_types::session::MessageKind;
+use super::{
+    git_watch_reminder_from_resource, is_git_watch_resource, notification_message_kind,
+    McpClientPool,
+};
+use peri_acp_types::mcp::McpSubscriptionPort;
+use peri_acp_types::mcp::{McpNotificationMessageKind, MCP_MESSAGE_KIND_META_KEY};
+use peri_acp_types::session::{MessageKind, MessageQueue, SessionInbox};
 use peri_acp_types::system_reminder::{
     ReminderAudience, ReminderCategory, ReminderDelivery, ReminderSeverity,
 };
+use rmcp::model::NotificationMetaObject;
+use std::sync::Arc;
 
 const GIT_URI: &str = "workspace://git/ref";
+
+#[tokio::test]
+async fn server_notification_kind_controls_resource_update_wake() {
+    let pool = McpClientPool::new_pending();
+    let inbox = SessionInbox::new(Arc::new(MessageQueue::new()));
+    pool.register_inbox("session", inbox.handle());
+    for (wire, expected) in [("info", MessageKind::Info), ("defer", MessageKind::Defer)] {
+        let mut meta = NotificationMetaObject::new();
+        meta.insert(MCP_MESSAGE_KIND_META_KEY.into(), wire.into());
+        let declared = notification_message_kind("server", Some(&meta)).unwrap();
+        assert_eq!(MessageKind::from(declared), expected);
+        pool.dispatch_resource_updated("server", "resource://x", "subscription", Some(declared))
+            .await;
+        assert_eq!(inbox.queue().has_wake_up(), expected == MessageKind::Defer);
+        assert_eq!(inbox.queue().drain_all()[0].kind, expected);
+    }
+    assert_eq!(notification_message_kind("server", None), None);
+    let mut invalid = NotificationMetaObject::new();
+    invalid.insert(MCP_MESSAGE_KIND_META_KEY.into(), "prompt".into());
+    assert_eq!(notification_message_kind("server", Some(&invalid)), None);
+    pool.dispatch_resource_updated("server", "resource://x", "subscription", None)
+        .await;
+    assert_eq!(inbox.queue().drain_all()[0].kind, MessageKind::Defer);
+    assert_eq!(McpNotificationMessageKind::Info.as_str(), "info");
+}
 
 #[test]
 fn reminder_matches_old_contract_field_by_field() {

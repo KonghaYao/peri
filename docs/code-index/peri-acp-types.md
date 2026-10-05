@@ -132,6 +132,10 @@ typed schema、默认值、领域合并、scope/revision/explain/update 归
 
 ### builtin MCP 与 MetaHarness 两张名单（src/builtin_mcp.rs + src/meta_harness.rs）
 
+MCP 通知逐条调度扩展见 `src/mcp.rs`：`MCP_MESSAGE_KIND_META_KEY` 与
+`McpNotificationMessageKind` 是 server、消费侧共用的 `_meta` 字段契约，
+其值 `info` / `defer` 独立于 `ReminderSeverity`。
+
 channel 已退役：`SECTION_IDS` 不再包含 `15_channel`，`interaction.rs` 不再提供 channel
 消息/权限通知及共享状态；`plugin.rs` 不再声明 `PluginChannel` 或 `PluginManifest.channels`。
 普通用户交互、MCP 资源与实例策略键保留。

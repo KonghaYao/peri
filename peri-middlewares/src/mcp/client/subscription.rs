@@ -1,5 +1,6 @@
 use std::{sync::Arc, time::Duration};
 
+use peri_acp_types::mcp::{McpNotificationMessageKind, MCP_MESSAGE_KIND_META_KEY};
 use peri_acp_types::plugin::McpSubscriptionsConfig;
 use peri_acp_types::session::{InboxHandle, MessageKind, MessageSource};
 use peri_acp_types::system_reminder::{
@@ -8,7 +9,7 @@ use peri_acp_types::system_reminder::{
     TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
 };
 use rmcp::{
-    model::{ServerNotification, SubscriptionFilter},
+    model::{GetMeta, NotificationMetaObject, ServerNotification, SubscriptionFilter},
     service::{Subscription, SubscriptionEnd},
 };
 use serde_json::json;
@@ -23,9 +24,15 @@ impl McpClientPool {
 
     /// 广播一条订阅通知到所有已注册的会话 inbox。
     ///
-    /// 通知以 canonical `Defer + ExternalEvent` reminder 注入，唤醒 idle executor
-    ///（agent 随即读资源 / 调工具回复外部消息）。
-    fn broadcast_subscription_notification(&self, server: &str, uri: &str, subscription_id: &str) {
+    /// 通知以 canonical ExternalEvent reminder 注入；Defer 唤醒 idle executor，
+    /// Info 留待下一次主动执行消费。
+    fn broadcast_subscription_notification(
+        &self,
+        server: &str,
+        uri: &str,
+        subscription_id: &str,
+        kind: MessageKind,
+    ) {
         let handles: Vec<InboxHandle> = self.session_inboxes.read().values().cloned().collect();
         if handles.is_empty() {
             tracing::debug!(server = %server, uri = %uri, "订阅通知到达但无注册会话 inbox");
@@ -58,7 +65,7 @@ impl McpClientPool {
             .expect("MCP subscription reminder mapping must be valid");
         for handle in handles {
             handle.push_system_reminder(
-                MessageKind::Defer,
+                kind,
                 MessageSource::DynamicMcpNotification,
                 reminder.clone(),
             );
@@ -83,20 +90,36 @@ impl McpClientPool {
     ///   canonical `git_watch` 提醒（D-5：元数据不从 server 取），`Info` 不唤醒；
     /// - 回读失败 / 超时 ⇒ 回退既有通用订阅提醒（事件不丢，只是语义降级）；
     /// - 其余资源 ⇒ 既有路径逐位不变。
-    async fn dispatch_resource_updated(&self, server: &str, uri: &str, subscription_id: &str) {
+    async fn dispatch_resource_updated(
+        &self,
+        server: &str,
+        uri: &str,
+        subscription_id: &str,
+        declared_kind: Option<McpNotificationMessageKind>,
+    ) {
         if !is_git_watch_resource(server, uri) {
-            self.broadcast_subscription_notification(server, uri, subscription_id);
+            self.broadcast_subscription_notification(
+                server,
+                uri,
+                subscription_id,
+                declared_kind.map(Into::into).unwrap_or(MessageKind::Defer),
+            );
             return;
         }
         match self.read_git_ref_body(server, uri).await {
-            Some(body) => self.broadcast_git_watch_notification(server, uri, &body),
+            Some(body) => self.broadcast_git_watch_notification(server, uri, &body, declared_kind),
             None => {
                 tracing::warn!(
                     server = %server,
                     uri = %uri,
                     "git ref 资源回读失败/超时，回退通用订阅提醒"
                 );
-                self.broadcast_subscription_notification(server, uri, subscription_id);
+                self.broadcast_subscription_notification(
+                    server,
+                    uri,
+                    subscription_id,
+                    declared_kind.map(Into::into).unwrap_or(MessageKind::Defer),
+                );
             }
         }
     }
@@ -125,13 +148,20 @@ impl McpClientPool {
     }
 
     /// 把宿主内置的 `git_watch` 提醒推到所有注册会话 inbox（`Info`，不唤醒）。
-    fn broadcast_git_watch_notification(&self, server: &str, uri: &str, body: &str) {
+    fn broadcast_git_watch_notification(
+        &self,
+        server: &str,
+        uri: &str,
+        body: &str,
+        declared_kind: Option<McpNotificationMessageKind>,
+    ) {
         let handles: Vec<InboxHandle> = self.session_inboxes.read().values().cloned().collect();
         if handles.is_empty() {
             tracing::debug!(server = %server, uri = %uri, "git ref 变化到达但无注册会话 inbox");
             return;
         }
-        let (kind, reminder) = git_watch_reminder_from_resource(uri, body);
+        let (default_kind, reminder) = git_watch_reminder_from_resource(uri, body);
+        let kind = declared_kind.map(Into::into).unwrap_or(default_kind);
         for handle in handles {
             handle.push_system_reminder(
                 kind,
@@ -168,19 +198,29 @@ impl McpClientPool {
             let mut retries_left = Self::SUBSCRIPTION_RETRY_LIMIT;
             loop {
                 match subscription.next().await {
-                    Ok(Some(ServerNotification::ResourceUpdatedNotification(notif))) => {
+                    Ok(Some(notification @ ServerNotification::ResourceUpdatedNotification(_))) => {
                         retries_left = Self::SUBSCRIPTION_RETRY_LIMIT;
-                        let sid = notif
-                            .params
-                            .meta
-                            .as_ref()
-                            .and_then(|m| m.subscription_id())
+                        let ServerNotification::ResourceUpdatedNotification(ref notif) =
+                            notification
+                        else {
+                            unreachable!()
+                        };
+                        let sid = notification
+                            .get_meta()
+                            .subscription_id()
                             .map(|id| id.to_string())
                             .unwrap_or_default();
                         pool.invalidate_resource_cache(&task_server, Some(&notif.params.uri))
                             .await;
-                        pool.dispatch_resource_updated(&task_server, &notif.params.uri, &sid)
-                            .await;
+                        let declared_kind =
+                            notification_message_kind(&task_server, Some(notification.get_meta()));
+                        pool.dispatch_resource_updated(
+                            &task_server,
+                            &notif.params.uri,
+                            &sid,
+                            declared_kind,
+                        )
+                        .await;
                     }
                     Ok(Some(ServerNotification::ResourceListChangedNotification(_))) => {
                         retries_left = Self::SUBSCRIPTION_RETRY_LIMIT;
@@ -306,6 +346,20 @@ impl McpClientPool {
             }
         }
     }
+}
+
+/// Server-selected queue scheduling for a single resource notification.
+/// Unknown values do not change the existing per-resource default.
+fn notification_message_kind(
+    server: &str,
+    meta: Option<&NotificationMetaObject>,
+) -> Option<McpNotificationMessageKind> {
+    let value = meta?.get(MCP_MESSAGE_KIND_META_KEY)?;
+    let parsed = value.as_str().and_then(McpNotificationMessageKind::parse);
+    if parsed.is_none() {
+        tracing::warn!(server = %server, value = ?value, "invalid MCP notification message kind");
+    }
+    parsed
 }
 
 /// 由 `McpSubscriptionsConfig` 构建 `subscriptions/listen` 过滤器。

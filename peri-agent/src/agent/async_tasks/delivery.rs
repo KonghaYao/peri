@@ -8,7 +8,9 @@
 
 use std::sync::Arc;
 
-use peri_acp_types::session::{MessageKind, MessageQueue, MessageSource, QueuedMessage};
+use peri_acp_types::session::{
+    InboxHandle, MessageKind, MessageQueue, MessageSource, QueuedMessage,
+};
 use peri_acp_types::session_resources::SessionResources;
 use peri_acp_types::system_reminder::TrustedSystemReminder;
 use peri_acp_types::tasks::TaskTerminalDelivery;
@@ -22,6 +24,7 @@ pub(crate) struct SessionTerminalDelivery {
     thread_id: ThreadId,
     writer: Option<Arc<tokio::sync::mpsc::UnboundedSender<PersistOp>>>,
     queue: MessageQueue,
+    inbox: Option<InboxHandle>,
 }
 
 impl SessionTerminalDelivery {
@@ -30,6 +33,7 @@ impl SessionTerminalDelivery {
     pub(crate) fn for_transcript(
         transcript: &Arc<parking_lot::RwLock<MessageTranscript>>,
         queue: &MessageQueue,
+        inbox: Option<&InboxHandle>,
     ) -> Option<Arc<dyn TaskTerminalDelivery>> {
         let (resources, thread_id, writer) = transcript.read().idempotent_reminder_port()?;
         Some(Arc::new(Self {
@@ -37,6 +41,7 @@ impl SessionTerminalDelivery {
             thread_id,
             writer,
             queue: queue.clone(),
+            inbox: inbox.cloned(),
         }))
     }
 }
@@ -60,15 +65,23 @@ impl TaskTerminalDelivery for SessionTerminalDelivery {
                 .append_reminder_if_absent(&self.thread_id, delivery_id, reminder)
                 .await
                 .map_err(|error| format!("terminal reminder commit failed: {error}"))?;
-            self.queue
-                .push(QueuedMessage::system_reminder_with_delivery_id(
-                    MessageKind::Defer,
-                    source,
-                    reminder.clone(),
-                    delivery_id,
-                ));
+            let queued = QueuedMessage::system_reminder_with_delivery_id(
+                MessageKind::Defer,
+                source,
+                reminder.clone(),
+                delivery_id,
+            );
+            if let Some(inbox) = &self.inbox {
+                inbox.push(queued);
+            } else {
+                self.queue.push(queued);
+            }
             tracing::debug!(?delivery_id, "terminal reminder committed to initiator");
             Ok(())
         })
     }
 }
+
+#[cfg(test)]
+#[path = "delivery_test.rs"]
+mod tests;

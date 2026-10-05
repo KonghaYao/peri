@@ -160,6 +160,12 @@ scope 快照携 epoch；`taskClose`/`taskOpen` 按该 epoch 做 owner 端 CAS，
 
 ### MCP（src/mcp/）
 
+`client/subscription.rs` 从资源更新通知的 `_meta["peri/messageKind"]` 解析逐条调度类型：
+`info` 入队但不唤醒，`defer` 入队并唤醒；缺失或非法值沿用资源默认值。
+通用资源更新默认 `Defer`，builtin git ref 默认 `Info`。字段契约在
+`peri-acp-types/src/mcp.rs`，Workspace server 的发送点在
+`mcp-packages/workspace/src/workspace.rs`。
+
 | 功能 | 入口/关键点 |
 | --- | --- |
 | 连接 / pool / task owner | client.rs（McpClientPool 状态所有权与稳定 re-export）；client/lifecycle.rs（begin_shutdown/shutdown、try_commit_connection）；client/service.rs（McpServiceWrapper 与 capability 声明）；client/types.rs（句柄、状态、connection key）；task_scope.rs（McpTaskOwner / weak McpTaskSpawner / keyed completion）；client/transport.rs（serve_client_auto、spawn_stdio_transport、build_http_transport）；client/subscription.rs（资源订阅循环；**宿主内置提醒映射**：内置 `workspace` 的 `workspace://git/ref` 通知 ⇒ 回读资源正文 ⇒ canonical `git_watch` `Info` 提醒经 `InboxHandle` 注入会话，回读失败回退通用订阅提醒；纯函数单测见 `client/subscription_test.rs`）；initialize.rs（run_initialize；commit_discovery_success :47 / commit_discovery_failure :61 提交本代 `DiscoveryEvidence`，`Err` 不产生 ready 证据）；reconnect.rs（spawn_reconnect/reconnect） |

@@ -330,6 +330,7 @@ async fn dispatch_concurrent(
                         crate::agent::async_tasks::delivery::SessionTerminalDelivery::for_transcript(
                             &dispatch_context.session.transcript,
                             &dispatch_context.session.queue,
+                            dispatch_context.async_ctx.inbox_handle.as_ref(),
                         )
                     {
                         ctx_param = ctx_param.with_task_terminal_delivery(delivery);

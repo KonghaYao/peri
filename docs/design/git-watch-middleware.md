@@ -21,7 +21,7 @@
 | 触发点 | 服务端 `tools/call` **成功**返回后（`is_error != Some(true)`）；无 `before_agent` 等价入口 |
 | 传输 | `notifications/resources/updated`（`subscriptions/listen` 长流，同进程 duplex） |
 | 订阅建立 | 宿主默认注入 `subscriptions.resources = ["workspace://git/ref"]`；用户显式配置优先 |
-| 会话送达 | 宿主消费侧回读资源正文 → canonical SystemReminder（`MessageKind::Info`，不唤醒） |
+| 会话送达 | Workspace server 在资源更新通知 `_meta["peri/messageKind"]` 声明 `info`；宿主回读资源正文 → canonical SystemReminder（`MessageKind::Info`，不唤醒）。缺字段时仍保持此资源的旧默认。 |
 | 关闭 | `WorkspaceMiddleware: false`（关实例 ⇒ 不建立订阅，零 git 调用）或实例
 `subscriptions` 覆盖（含空配置 ⇒ 不订阅） |
 | 测试落点 | `cargo test -p peri-mcp-workspace --lib -- git_watch`；

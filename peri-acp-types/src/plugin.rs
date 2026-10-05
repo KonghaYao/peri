@@ -248,8 +248,8 @@ pub enum McpServerConfigValidationError {
 /// `subscriptions/listen` 订阅配置（2026-07-28 协议）
 ///
 /// 任一字段非空即启用订阅：连接后建立对应过滤器的
-/// `subscriptions/listen` 长流；收到通知时
-/// 唤醒 agent 会话（注入 `<system-reminder>` Defer 消息）。
+/// `subscriptions/listen` 长流；资源更新按通知 `_meta` 的 Peri 消息类型声明
+/// 投递，未声明时沿用消费侧默认调度语义。
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct McpSubscriptionsConfig {

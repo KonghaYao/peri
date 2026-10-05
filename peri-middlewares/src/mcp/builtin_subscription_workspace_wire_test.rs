@@ -296,6 +296,13 @@ async fn t5_commit_after_tool_call_pushes_update_and_read_returns_notice() {
             assert_eq!(
                 notification
                     .get_meta()
+                    .get(peri_acp_types::mcp::MCP_MESSAGE_KIND_META_KEY)
+                    .and_then(serde_json::Value::as_str),
+                Some("info"),
+            );
+            assert_eq!(
+                notification
+                    .get_meta()
                     .subscription_id()
                     .map(|id| id.to_string()),
                 Some(subscription.id().to_string()),

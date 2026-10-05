@@ -32,15 +32,17 @@ use std::{
 };
 
 use base64::Engine as _;
+use peri_acp_types::mcp::{McpNotificationMessageKind, MCP_MESSAGE_KIND_META_KEY};
 use peri_agent::tools::{BaseTool, ToolContext, ToolExecutionStatus};
 use rmcp::{
     model::{
         CallToolRequestParams, CallToolResponse, CancelTaskParams, CreateTaskResult, CustomRequest,
-        CustomResult, ErrorCode, ExtensionCapabilities, GetTaskParams, GetTaskResult,
+        CustomResult, ErrorCode, ExtensionCapabilities, GetMeta, GetTaskParams, GetTaskResult,
         Implementation, JsonObject, ListResourceTemplatesResult, ListResourcesResult,
         ListToolsResult, MetaObject, PaginatedRequestParams, ReadResourceRequestParams,
         ReadResourceResponse, RequestId, Resource, ResourceContents, ResourceTemplate,
-        ServerCapabilities, ServerConfig, SubscriptionFilter, UpdateTaskParams, TASKS_EXTENSION_ID,
+        ResourceUpdatedNotification, ResourceUpdatedNotificationParam, ServerCapabilities,
+        ServerConfig, ServerNotification, SubscriptionFilter, UpdateTaskParams, TASKS_EXTENSION_ID,
     },
     service::{RequestContext, RoleServer, SubscriptionContext, SubscriptionSink},
     ErrorData as McpError, ServerHandler,
@@ -382,7 +384,16 @@ impl WorkspaceMcpServer {
                 .map(|(id, sink)| (id.clone(), sink.clone()))
                 .collect();
             for (id, sink) in targets {
-                if let Err(error) = sink.notify_resource_updated(GIT_REF_RESOURCE_URI).await {
+                let mut update = ServerNotification::ResourceUpdatedNotification(
+                    ResourceUpdatedNotification::new(ResourceUpdatedNotificationParam::new(
+                        GIT_REF_RESOURCE_URI,
+                    )),
+                );
+                update.get_meta_mut().insert(
+                    MCP_MESSAGE_KIND_META_KEY.into(),
+                    McpNotificationMessageKind::Info.as_str().into(),
+                );
+                if let Err(error) = sink.send(update).await {
                     match error {
                         // 客户端已 drop 订阅：就地移除，避免表无限增长。
                         rmcp::service::SubscriptionSendError::SubscriptionClosed => {

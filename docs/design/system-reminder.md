@@ -105,6 +105,9 @@ pub struct SystemReminder {
 （`peri-middlewares/src/mcp/client/subscription.rs`）：builtin `workspace` 实例推送
 `notifications/resources/updated`（`workspace://git/ref`）→ 宿主回读资源正文 →
 组装 canonical reminder；原来产出它的链上 middleware 已删除（来源名与 `kind` 逐字不变）。
+资源更新通知可由 MCP server 在 `_meta["peri/messageKind"]` 逐条声明 `info` 或
+`defer`；该字段只决定会话队列是否唤醒 loop，不改变提醒的 `severity`。
+缺字段或非法值沿用消费侧默认：通用资源更新为 `Defer`，git ref 为 `Info`。
 
 `kind` 在来源命名空间内定义精确事件，例如：
 

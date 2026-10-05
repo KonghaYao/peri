@@ -4,6 +4,10 @@ Builtin MCP 的工具、server handler 与 LSP 客户端/pool 由独立 crate �
 
 宿主侧入口见 [`peri-middlewares` 代码索引](peri-middlewares.md)。本文是插件包的当前路径索引；设计契约见 [`architecture-contracts.md`](../standards/architecture-contracts.md) 与 [`MCP 适配设计`](../design/mcp-adaptation-v4-part-1.md)。
 
+Workspace git ref 更新由 `workspace/src/workspace.rs` 在 MCP 通知
+`_meta["peri/messageKind"]` 中逐条声明 `info`；其他 MCP server 可按同一字段声明
+`info` 或 `defer`。类型字面量与键在 `peri-acp-types/src/mcp.rs` 统一定义。
+
 ## Package 路由
 
 Emscripten 目标引入 MCP 通用映射、配置数据面与凭证 bootstrap MCP；builtin 工具 package 不进入
