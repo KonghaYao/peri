@@ -602,6 +602,9 @@ fn read_only_label(reason: &peri_acp_types::workspace::ReadOnlyAdmission) -> Str
         peri_acp_types::workspace::ReadOnlyAdmission::ExecutionLeaseRequired => {
             i18n::tr("statusbar-read-only-store")
         }
+        peri_acp_types::workspace::ReadOnlyAdmission::FormerOwnerUnverified => {
+            i18n::tr("statusbar-read-only-former-owner")
+        }
     }
 }
 

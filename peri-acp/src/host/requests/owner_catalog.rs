@@ -9,13 +9,14 @@ use serde_json::Value;
 use crate::transport::types::AcpError;
 
 /// A descriptor contains identity evidence, never a scope bearer.
-pub(super) struct TrustedWorkspaceIdentity {
+pub(in crate::host) struct TrustedWorkspaceIdentity {
     pub endpoint: String,
     pub owner_identity: String,
     pub agent_generation_id: String,
 }
 
-pub(super) fn trusted_workspace_identity() -> Result<Option<TrustedWorkspaceIdentity>, String> {
+pub(in crate::host) fn trusted_workspace_identity(
+) -> Result<Option<TrustedWorkspaceIdentity>, String> {
     let endpoint = std::env::var("PERI_TRUSTED_WORKSPACE_URL").ok();
     let agent_generation_id = std::env::var("PERI_AGENT_GENERATION_ID").ok();
     let (Some(endpoint), Some(agent_generation_id)) =
@@ -85,7 +86,7 @@ pub(super) async fn execution_descriptor(
     })
 }
 
-pub(super) fn verify_recoverable_owner(
+pub(in crate::host) fn verify_recoverable_owner(
     recorded: &ExecutionWorkspaceOwnerRecord,
     trusted: &TrustedWorkspaceIdentity,
 ) -> Result<(), String> {

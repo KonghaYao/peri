@@ -156,6 +156,15 @@ async fn workspace_descriptor_preserves_unsettled_external_owner_across_takeover
     .await
     .unwrap();
     data.mark_unsupported_async_owner(&first).await.unwrap();
+    assert_eq!(
+        data.unreleased_execution_owner(&id)
+            .await
+            .unwrap()
+            .unwrap()
+            .agent_generation_id
+            .as_deref(),
+        Some("agent-a")
+    );
     sqlx::query("UPDATE session_execution_owners SET expires_at_unix = 0 WHERE root_id = ?1")
         .bind(&id)
         .execute(&store.database.pool)
@@ -167,6 +176,16 @@ async fn workspace_descriptor_preserves_unsettled_external_owner_across_takeover
         .claim_execution_owner(&id, false, Some(first.epoch))
         .await
         .unwrap();
+    assert_eq!(
+        successor
+            .unreleased_execution_owner(&id)
+            .await
+            .unwrap()
+            .unwrap()
+            .agent_generation_id
+            .as_deref(),
+        Some("agent-a")
+    );
     assert_eq!(
         claim
             .prior_unreleased

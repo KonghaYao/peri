@@ -46,6 +46,11 @@ pub struct ChildResumeRecord {
 /// 「未生效」报告成成功，也不得在失败后遗留部分写入。
 #[async_trait]
 pub(crate) trait SessionDataPort: Send + Sync {
+    /// Read the current unreleased owner without changing its Store epoch.
+    async fn unreleased_execution_owner(
+        &self,
+        root: &ThreadId,
+    ) -> SessionResourceResult<Option<peri_acp_types::workspace::PriorExecutionOwner>>;
     /// Claim a root generation in the canonical Store. Closing recovery requires
     /// a persisted close intent; a live, unexpired generation cannot be stolen.
     async fn claim_execution_owner(

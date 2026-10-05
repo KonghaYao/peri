@@ -377,10 +377,15 @@ impl SessionResources for SessionResourcesImpl {
             None => None,
             Some(id) => Some(self.execution_availability(id).await?),
         };
+        let unreleased_owner = match session {
+            None => None,
+            Some(id) => self.gate.data().unreleased_execution_owner(id).await?,
+        };
         Ok(SessionAvailability {
             access,
             capabilities,
             execution,
+            unreleased_owner,
         })
     }
 

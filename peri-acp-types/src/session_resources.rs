@@ -80,6 +80,8 @@ pub struct SessionAvailability {
     pub capabilities: DataCapabilities,
     /// `None` 表示未指定会话，本次没有查询会话级执行事实。
     pub execution: Option<ExecutionAvailability>,
+    /// A Store owner that has not been released; reading this never claims a new epoch.
+    pub unreleased_owner: Option<crate::workspace::PriorExecutionOwner>,
 }
 
 /// 未决持久化的收敛结果：可重载，或仍阻塞。

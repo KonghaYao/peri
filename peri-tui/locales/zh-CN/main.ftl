@@ -81,6 +81,7 @@ statusbar-preparing = 正在准备会话…
 statusbar-read-only-busy = 只读 · 由其他实例执行
 statusbar-read-only-recovery = 只读 · 上次执行未干净收尾
 statusbar-read-only-store = 只读 · 会话库不可写
+statusbar-read-only-former-owner = 只读 · 无法确认上次执行已停止
 statusbar-permission-accept-edit = Accept Edit
 statusbar-permission-auto = Auto Mode
 statusbar-permission-bypass = Bypass

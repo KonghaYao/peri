@@ -542,6 +542,13 @@ pub(super) fn unsupported_behavior(behavior: &'static str) -> SessionResourceErr
 
 #[async_trait]
 impl SessionDataPort for RemoteSessionData {
+    async fn unreleased_execution_owner(
+        &self,
+        root: &ThreadId,
+    ) -> SessionResourceResult<Option<peri_acp_types::workspace::PriorExecutionOwner>> {
+        self.read_unreleased_owner(root).await
+    }
+
     async fn claim_execution_owner(
         &self,
         root: &ThreadId,

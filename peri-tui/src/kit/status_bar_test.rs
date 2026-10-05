@@ -145,6 +145,10 @@ fn test_read_only_label_maps_each_reason_in_both_locales() {
             ReadOnlyAdmission::ExecutionLeaseRequired,
             "statusbar-read-only-store",
         ),
+        (
+            ReadOnlyAdmission::FormerOwnerUnverified,
+            "statusbar-read-only-former-owner",
+        ),
     ];
     for lang in ["en", "zh-CN"] {
         let registry = crate::i18n::LcRegistry::new(Some(lang));

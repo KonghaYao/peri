@@ -38,6 +38,7 @@ async fn remote_owner_descriptor_survives_takeover_and_unsupported_is_monotonic(
         agent_generation_id: "agent-one".into(), unsupported_async_owners: false,
     };
     data.bind_execution_workspace_owner(&first.token, &first_descriptor).await.unwrap();
+    assert_eq!(data.unreleased_execution_owner(&root).await.unwrap().unwrap().agent_generation_id.as_deref(), Some("agent-one"));
     data.mark_unsupported_async_owner(&first.token).await.unwrap();
     sqlx::query("UPDATE session_execution_owners SET expires_at_unix = 0 WHERE root_id = ?1")
         .bind(&root).execute(&pool).await.unwrap();
@@ -45,6 +46,7 @@ async fn remote_owner_descriptor_survives_takeover_and_unsupported_is_monotonic(
     let second = data.claim_execution_owner(&root, false, None).await.unwrap();
     assert_eq!(second.prior_unreleased.unwrap().agent_generation_id.as_deref(), Some("agent-one"));
     let old = data.read_execution_workspace_owner(&root).await.unwrap().unwrap();
+    assert_eq!(data.unreleased_execution_owner(&root).await.unwrap().unwrap().agent_generation_id.as_deref(), Some("agent-one"));
     assert_eq!(old.current_epoch, second.token.epoch);
     assert_eq!(old.descriptor_epoch, first.token.epoch);
     assert!(old.descriptor.unsupported_async_owners);
@@ -69,6 +71,7 @@ async fn remote_owner_descriptor_survives_takeover_and_unsupported_is_monotonic(
     assert_eq!(data.read_execution_workspace_owner(&root).await.unwrap().unwrap().descriptor_epoch,
         second.token.epoch);
     data.finish_close(&closing.token).await.unwrap();
+    assert!(data.unreleased_execution_owner(&root).await.unwrap().is_none());
     assert!(data.read_execution_workspace_owner(&root).await.unwrap().is_none());
 }
 

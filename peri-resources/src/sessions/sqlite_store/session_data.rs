@@ -79,6 +79,13 @@ pub(super) use helpers::{new_session_draft_row, new_session_row, validate_unboun
 
 #[async_trait]
 impl SessionDataPort for SqliteSessionData {
+    async fn unreleased_execution_owner(
+        &self,
+        root: &ThreadId,
+    ) -> SessionResourceResult<Option<PriorExecutionOwner>> {
+        self.read_unreleased_owner(root).await
+    }
+
     async fn claim_execution_owner(
         &self,
         root: &ThreadId,

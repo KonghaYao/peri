@@ -239,7 +239,12 @@ async fn create_bound_fixture(cfg: &AcpServerConfig, cwd: &str, id: Option<&str>
         .create_session(&bound_input(&thread_id, &workspace, encoded))
         .await
         .unwrap();
+    let token = lease.owner_token().unwrap();
     lease.mark_clean().await.unwrap();
+    cfg.session_resources
+        .release_execution_owner(&token)
+        .await
+        .unwrap();
     thread_id
 }
 

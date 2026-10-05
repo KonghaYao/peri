@@ -117,6 +117,10 @@ typed schema、默认值、领域合并、scope/revision/explain/update 归
 
 ### 其余契约模块（src/）
 
+`session_resources.rs` 的 `SessionAvailability::unreleased_owner` 提供不改变 Store 的
+旧执行 owner 事实；`workspace.rs` 的 `ReadOnlyAdmission::FormerOwnerUnverified`
+在 `session/load` / `session/resume` 响应中标记只读历史，工具执行不获准。
+
 | 功能 | 入口/关键点 |
 | --- | --- |
 | MCP server 配置契约 | `plugin.rs`（`McpServerConfig` :46，`system_mcp` / `system_mcp_tools` / `system_mcp_timeout` 三字段与 camelCase 别名；`validate` :220；`McpServerConfigValidationError` :241；`DEFAULT_SYSTEM_MCP_TIMEOUT_MS` :209 / `MIN` :211 / `MAX` :213）——`Deserialize` 为手写实现（`McpServerConfigWire`），解析期即拒绝非法组合与显式 `null`；消费方（`peri-middlewares/src/mcp/config.rs` 的 direct/global/merged 入口、`plugin/loader.rs` 的 MCP 严格路径、`mcp/transport.rs`）各自复检 `validate`；`None` 与 `Some([])` 必须可区分并无损写回 |

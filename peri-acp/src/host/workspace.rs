@@ -655,8 +655,17 @@ pub(crate) async fn acquire_for_load(
     sessions: &std::collections::HashMap<String, SessionState>,
     session_id: &str,
     expected: Option<&str>,
+    former_unverified: bool,
 ) -> Result<LoadAdmission, AcpError> {
-    acquire_for_load_with(cfg, sessions, session_id, expected, BindingCheck::Full).await
+    acquire_for_load_with(
+        cfg,
+        sessions,
+        session_id,
+        expected,
+        BindingCheck::Full,
+        former_unverified,
+    )
+    .await
 }
 
 /// 同一次准入内再次取得执行目录与所有权：只复核已记录证据。
@@ -668,8 +677,15 @@ pub(crate) async fn reacquire_for_load(
     session_id: &str,
     expected: Option<&str>,
 ) -> Result<(ResolvedWorkspace, Arc<dyn SessionExecutionLease>), AcpError> {
-    let admission =
-        acquire_for_load_with(cfg, sessions, session_id, expected, BindingCheck::Recorded).await?;
+    let admission = acquire_for_load_with(
+        cfg,
+        sessions,
+        session_id,
+        expected,
+        BindingCheck::Recorded,
+        false,
+    )
+    .await?;
     match admission.execution {
         ExecutionAdmission::Owned(owner) => Ok((admission.workspace, owner)),
         ExecutionAdmission::Unavailable(reason) => Err(read_only_error(reason)),
@@ -685,6 +701,7 @@ pub(crate) fn read_only_error(reason: ReadOnlyAdmission) -> AcpError {
         ReadOnlyAdmission::ExecutionBusy => WorkspaceError::ExecutionBusy,
         ReadOnlyAdmission::RecoveryRequired(details) => WorkspaceError::RecoveryRequired(details),
         ReadOnlyAdmission::ExecutionLeaseRequired => WorkspaceError::ExecutionLeaseRequired,
+        ReadOnlyAdmission::FormerOwnerUnverified => WorkspaceError::ExecutionLeaseRequired,
     };
     workspace_error(error)
 }
@@ -695,8 +712,15 @@ async fn acquire_for_load_with(
     session_id: &str,
     expected: Option<&str>,
     check: BindingCheck,
+    former_unverified: bool,
 ) -> Result<LoadAdmission, AcpError> {
     let workspace = check_expected(cfg, session_id, expected, check).await?;
+    if former_unverified {
+        return Ok(LoadAdmission {
+            workspace,
+            execution: ExecutionAdmission::Unavailable(ReadOnlyAdmission::FormerOwnerUnverified),
+        });
+    }
     let held = match sessions.get(session_id) {
         Some(state) if state.closing => return Err(AcpError::new(-32010, "Session is closing")),
         Some(state) => state.execution_owner.clone(),
@@ -749,4 +773,38 @@ async fn try_acquire_lease(
             None => Err(resource_error(error)),
         },
     }
+}
+
+/// Preflight only: a failed proof must not claim another Store epoch. The
+/// post-claim check in `prepare_existing` remains authoritative for races.
+pub(crate) async fn former_owner_recoverable(
+    cfg: &AcpServerConfig,
+    session_id: &str,
+    prior: &peri_acp_types::workspace::PriorExecutionOwner,
+) -> Result<bool, AcpError> {
+    let Some(generation) = prior.agent_generation_id.as_deref() else {
+        return Ok(false);
+    };
+    let Ok(Some(trusted)) = super::requests::owner_catalog::trusted_workspace_identity() else {
+        return Ok(false);
+    };
+    let record = cfg
+        .session_resources
+        .read_execution_workspace_owner(&session_id.to_owned())
+        .await
+        .map_err(resource_error)?;
+    let Some(record) = record else {
+        return Ok(false);
+    };
+    if record.current_epoch != record.descriptor_epoch
+        || record.descriptor.agent_generation_id != generation
+        || super::requests::owner_catalog::verify_recoverable_owner(&record, &trusted).is_err()
+    {
+        return Ok(false);
+    }
+    Ok(
+        super::supervisor::previous_generation_stopped(session_id, generation)
+            .await
+            .is_ok(),
+    )
 }

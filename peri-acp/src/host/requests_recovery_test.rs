@@ -114,6 +114,51 @@ impl Fixture {
     }
 }
 
+/// [回归测试] 本地宿主缺少旧进程停止证明时，恢复历史不得抢占 Store owner。
+#[tokio::test]
+#[serial]
+async fn test_unverified_former_owner_loads_history_without_advancing_epoch() {
+    let mut fixture = Fixture::new().await;
+    let id = fixture.id.clone();
+    let before = fixture
+        .cfg
+        .session_resources
+        .read_execution_workspace_owner(&id)
+        .await
+        .unwrap()
+        .unwrap();
+    fixture.sessions.clear();
+    fixture
+        .cfg
+        .session_manager
+        .set_pending_caps(PeriCaps::all_enabled());
+    for method in ["session/load", "session/resume"] {
+        let response = fixture
+            .request(method, &json!({"sessionId":id}))
+            .await
+            .unwrap();
+        assert_eq!(
+            read_only(&response),
+            Some(ReadOnlyAdmission::FormerOwnerUnverified)
+        );
+        fixture.assert_read_only_history(&id);
+        let after = fixture
+            .cfg
+            .session_resources
+            .read_execution_workspace_owner(&id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.current_epoch, before.current_epoch);
+        assert_eq!(after.descriptor_epoch, before.descriptor_epoch);
+    }
+    let error = fixture
+        .request("session/rename", &json!({"sessionId":id,"title":"blocked"}))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, -32010);
+}
+
 #[tokio::test]
 #[serial]
 async fn test_unloaded_close_preserves_intent_until_former_owner_is_fenced() {
@@ -160,13 +205,14 @@ async fn test_unloaded_close_cannot_initiate_close_of_active_session() {
 
 #[tokio::test]
 #[serial]
-async fn test_dirty_load_resume_and_fork_ignore_caller_cwd_and_keep_saved_facts() {
+async fn test_clean_load_resume_and_fork_ignore_caller_cwd_and_keep_saved_facts() {
     for caps in [PeriCaps::default(), PeriCaps::all_enabled()] {
         for method in ["session/load", "session/resume", "session/fork"] {
             let mut fixture = Fixture::new().await;
             let binding = binding_state(&fixture.cfg, &fixture.id).await;
             let frozen = frozen_state(&fixture.cfg, &fixture.id).await;
-            fixture.sessions.clear();
+            let id = fixture.id.clone();
+            fixture.close(&id).await;
             fixture.cfg.session_manager.set_pending_caps(caps.clone());
             let other = tempfile::tempdir().unwrap();
             let params = json!({"sessionId":fixture.id,"cwd":other.path()});
@@ -214,7 +260,7 @@ async fn test_load_with_another_instance_handle_rejects_a_second_execution_owner
         .set_pending_caps(PeriCaps::all_enabled());
     let mut other_sessions = HashMap::new();
     let other_cwd = tempfile::tempdir().unwrap();
-    let error = handle_request(
+    let response = handle_request(
         "session/load",
         &json!({"sessionId":fixture.id,"cwd":other_cwd.path()}),
         &other_cfg,
@@ -222,10 +268,12 @@ async fn test_load_with_another_instance_handle_rejects_a_second_execution_owner
         &fixture.transport,
     )
     .await
-    .unwrap_err();
-    assert_eq!(error.code, -32010);
-    assert!(error.message.contains("execution owner is still active"));
-    assert!(!other_sessions.contains_key(&fixture.id));
+    .unwrap();
+    assert_eq!(
+        read_only(&response),
+        Some(ReadOnlyAdmission::FormerOwnerUnverified)
+    );
+    assert!(other_sessions[&fixture.id].execution_owner.is_none());
     assert!(Arc::ptr_eq(
         fixture.sessions[&fixture.id]
             .execution_owner
@@ -344,12 +392,15 @@ async fn test_recovery_capability_is_false_and_reset_dirty_rpc_is_removed() {
     assert!(fixture.sessions.is_empty());
     assert_eq!(binding_state(&fixture.cfg, &id).await, binding);
     assert_eq!(frozen_state(&fixture.cfg, &id).await, frozen);
-    fixture
+    let response = fixture
         .request("session/load", &json!({"sessionId":id}))
         .await
         .unwrap();
-    fixture.assert_owned_history(&id);
-    fixture.close(&id).await;
+    assert_eq!(
+        read_only(&response),
+        Some(ReadOnlyAdmission::FormerOwnerUnverified)
+    );
+    fixture.assert_read_only_history(&id);
 }
 
 #[tokio::test]

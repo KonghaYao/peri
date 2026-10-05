@@ -82,6 +82,7 @@ statusbar-preparing = Preparing session…
 statusbar-read-only-busy = Read-only · executed by another instance
 statusbar-read-only-recovery = Read-only · previous run did not close cleanly
 statusbar-read-only-store = Read-only · session store is not writable
+statusbar-read-only-former-owner = Read-only · previous execution could not be verified stopped
 statusbar-permission-accept-edit = Accept Edit
 statusbar-permission-auto = Auto Mode
 statusbar-permission-bypass = Bypass

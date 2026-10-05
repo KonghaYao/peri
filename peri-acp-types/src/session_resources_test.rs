@@ -14,6 +14,7 @@ fn access_mode_capabilities_and_execution_are_independent_facts() {
         access: AccessMode::ReadOnly,
         capabilities: DataCapabilities::Complete,
         execution: Some(ExecutionAvailability::ReadOnlyStore),
+        unreleased_owner: None,
     };
     assert_eq!(read_only_remote.access, AccessMode::ReadOnly);
     assert_eq!(read_only_remote.capabilities, DataCapabilities::Complete);
@@ -30,6 +31,7 @@ fn access_mode_capabilities_and_execution_are_independent_facts() {
             thread_id: thread_id(),
             generation: 3,
         })),
+        unreleased_owner: None,
     };
     assert_ne!(
         writable_but_dirty.execution,
@@ -41,8 +43,20 @@ fn access_mode_capabilities_and_execution_are_independent_facts() {
         access: AccessMode::ReadWrite,
         capabilities: DataCapabilities::HistoryReadOnly,
         execution: None,
+        unreleased_owner: None,
     };
     assert_eq!(history_read_only.execution, None);
+}
+
+#[test]
+fn former_owner_unverified_read_only_reason_roundtrips() {
+    let reason = crate::workspace::ReadOnlyAdmission::FormerOwnerUnverified;
+    let wire = serde_json::to_value(&reason).unwrap();
+    assert_eq!(wire["kind"], "peri.formerOwnerUnverifiedV1");
+    assert_eq!(
+        serde_json::from_value::<crate::workspace::ReadOnlyAdmission>(wire).unwrap(),
+        reason
+    );
 }
 
 #[test]

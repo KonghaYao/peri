@@ -79,6 +79,28 @@ fn owner_conflict() -> SessionResourceError {
 }
 
 impl RemoteSessionData {
+    pub(super) async fn read_unreleased_owner(
+        &self,
+        root: &ThreadId,
+    ) -> SessionResourceResult<Option<PriorExecutionOwner>> {
+        let store = self.store().await?;
+        let row = store
+            .fetch_row(&StatementSpec::new(
+                "SELECT o.released, d.agent_generation_id FROM session_execution_owners o
+                 LEFT JOIN session_execution_workspace_descriptors d ON d.root_id = o.root_id
+                 WHERE o.root_id = ?1",
+                vec![Value::Text(root.clone())],
+            ))
+            .await?;
+        Ok(row.and_then(|row| {
+            (int_at(&row, 0) == Some(0)).then(|| PriorExecutionOwner {
+                agent_generation_id: text_at(&row, 1)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned),
+            })
+        }))
+    }
+
     pub(super) async fn claim_owner(
         &self,
         root: &ThreadId,

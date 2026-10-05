@@ -19,7 +19,7 @@ use super::{AcpServerConfig, SessionState};
 pub(crate) mod acp_mcp;
 pub(crate) mod config_options;
 mod mcp_oauth;
-mod owner_catalog;
+pub(super) mod owner_catalog;
 mod plugin;
 mod rewind;
 pub(crate) mod session_lifecycle;

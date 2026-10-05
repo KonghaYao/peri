@@ -89,13 +89,24 @@ pub(super) async fn prepare_existing(
         .inspect_availability(Some(&id.to_owned()))
         .await
         .map_err(crate::host::workspace::resource_error)?;
+    let former_unverified = if sessions
+        .get(id)
+        .is_some_and(|state| state.execution_owner.is_some())
+    {
+        false
+    } else if let Some(prior) = availability.unreleased_owner.as_ref() {
+        !crate::host::workspace::former_owner_recoverable(cfg, id, prior).await?
+    } else {
+        false
+    };
     let legacy_prepared = if matches!(
         availability.execution,
         Some(peri_acp_types::session_resources::ExecutionAvailability::Available)
     ) && matches!(
         availability.access,
         peri_acp_types::session_resources::AccessMode::ReadWrite
-    ) {
+    ) && !former_unverified
+    {
         legacy_session::prepare_for_restore(cfg, id, None).await?
     } else {
         None
@@ -105,6 +116,7 @@ pub(super) async fn prepare_existing(
         sessions,
         id,
         params.get("cwd").and_then(Value::as_str),
+        former_unverified,
     )
     .await?;
     let workspace = admission.workspace;

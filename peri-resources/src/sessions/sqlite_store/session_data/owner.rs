@@ -5,6 +5,24 @@ use super::*;
 const OWNER_TTL_SECONDS: i64 = 30;
 
 impl SqliteSessionData {
+    pub(super) async fn read_unreleased_owner(
+        &self,
+        root: &ThreadId,
+    ) -> SessionResourceResult<Option<PriorExecutionOwner>> {
+        let row: Option<(Option<String>,)> = sqlx::query_as(
+            "SELECT d.agent_generation_id FROM session_execution_owners o
+             LEFT JOIN session_execution_workspace_descriptors d ON d.root_id = o.root_id
+             WHERE o.root_id = ?1 AND o.released = 0",
+        )
+        .bind(root.as_str())
+        .fetch_optional(&self.database.pool)
+        .await
+        .map_err(|e| map_sqlx(&e))?;
+        Ok(row.map(|(generation,)| PriorExecutionOwner {
+            agent_generation_id: generation.filter(|value| !value.is_empty()),
+        }))
+    }
+
     pub(super) async fn bind_workspace_owner(
         &self,
         token: &ExecutionOwnerToken,

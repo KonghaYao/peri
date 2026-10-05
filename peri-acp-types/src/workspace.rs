@@ -210,6 +210,9 @@ pub enum ReadOnlyAdmission {
     /// 当前节点不提供执行所有权（例如会话存储只读）。
     #[serde(rename = "peri.executionLeaseRequiredV1")]
     ExecutionLeaseRequired,
+    /// The former execution owner cannot be proven stopped; history remains readable.
+    #[serde(rename = "peri.formerOwnerUnverifiedV1")]
+    FormerOwnerUnverified,
 }
 
 impl ReadOnlyAdmission {

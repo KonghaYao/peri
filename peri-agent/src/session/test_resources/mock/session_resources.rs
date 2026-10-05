@@ -40,6 +40,7 @@ impl SessionResources for MockSessionResources {
                 DataCapabilities::Complete
             },
             execution: Some(ExecutionAvailability::Available),
+            unreleased_owner: None,
         })
     }
 
