@@ -290,7 +290,11 @@ impl SessionDataPort for SqliteSessionData {
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(|error| map_sqlx(&error))?;
-        self.assert_owner(&mut tx, id).await?;
+        // 迁移期会话（无 owner 行）在接纳事务内取得第一代执行所有权；已被接管过的
+        // 会话仍要求本进程持有当前代际（recovered 会话不得被无主改写）。
+        let adopted_owner = self
+            .claim_or_assert_legacy_adoption_owner_on(&mut tx, id)
+            .await?;
         let row: Option<(String, Option<String>, String)> =
             sqlx::query_as("SELECT cwd, parent_thread_id, workspace_id FROM threads WHERE id = ?1")
                 .bind(id.as_str())
@@ -365,6 +369,10 @@ impl SessionDataPort for SqliteSessionData {
         tx.commit()
             .await
             .map_err(|_| commit_failure(Some(id.clone())))?;
+        // 代际的进程内可见性晚于提交：失败回滚不留下无主登记。
+        if let Some(token) = adopted_owner {
+            self.install_execution_owner_token(token);
+        }
         Ok(())
     }
 

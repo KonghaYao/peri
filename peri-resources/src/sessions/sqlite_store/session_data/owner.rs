@@ -156,7 +156,28 @@ impl SqliteSessionData {
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(|e| map_sqlx(&e))?;
-        let actual_root = thread_root_on(&mut tx, root).await.map_err(read_failure)?;
+        let claim = self
+            .claim_owner_on(&mut tx, root, require_closing, expected_previous_epoch)
+            .await?;
+        tx.commit()
+            .await
+            .map_err(|_| commit_failure(Some(root.clone())))?;
+        Ok(claim)
+    }
+
+    /// [`Self::claim_owner`] 的事务内核心：调用方持有 `BEGIN IMMEDIATE` 并负责提交，
+    /// 提交被回滚时数据库不会留下任何代际。
+    ///
+    /// 代际的进程内可见性（`owner_tokens`）由调用方在**提交之后**安装：提交前的失败
+    /// 不会留下无主登记。
+    pub(super) async fn claim_owner_on(
+        &self,
+        tx: &mut SqliteConnection,
+        root: &ThreadId,
+        require_closing: bool,
+        expected_previous_epoch: Option<i64>,
+    ) -> SessionResourceResult<ExecutionOwnerClaim> {
+        let actual_root = thread_root_on(&mut *tx, root).await.map_err(read_failure)?;
         if actual_root != *root {
             return Err(invalid_input("execution owner must claim a root session"));
         }
@@ -233,9 +254,6 @@ impl SqliteSessionData {
                 .fetch_one(&mut *tx)
                 .await
                 .map_err(|e| map_sqlx(&e))?;
-        tx.commit()
-            .await
-            .map_err(|_| commit_failure(Some(root.clone())))?;
         Ok(ExecutionOwnerClaim {
             token: ExecutionOwnerToken {
                 root_id: root.clone(),
@@ -436,5 +454,37 @@ impl SqliteSessionData {
             ));
         }
         Ok(())
+    }
+
+    /// 迁移期会话接纳的所有权前置，必须在接纳事务内调用。
+    ///
+    /// 判据是**有无 owner 行**，不是有无绑定：schema 13 不给既有会话补行，因此「无行」
+    /// 精确等价于「从未被新语义的执行面接管过」——首次接纳由本次事务建立第一代所有权，
+    /// 与 binding / frozen 同一次提交（并发的第二个接纳者被 [`Self::claim_owner_on`] 的
+    /// CAS 挡下）。存在 owner 行（含已 released）说明该会话被接管过：接纳必须持有当前
+    /// 代际，无主改写仍按 [`Self::assert_owner`] 拒绝——recovered 会话不得被自动接纳。
+    ///
+    /// 返回 `Some` 时调用方必须在**提交之后**把它安装进 `owner_tokens`。
+    pub(super) async fn claim_or_assert_legacy_adoption_owner_on(
+        &self,
+        tx: &mut SqliteConnection,
+        id: &ThreadId,
+    ) -> SessionResourceResult<Option<ExecutionOwnerToken>> {
+        if !thread_exists_on(&mut *tx, id).await.map_err(read_failure)? {
+            return Err(not_found());
+        }
+        let root = thread_root_on(&mut *tx, id).await.map_err(read_failure)?;
+        let existing: Option<(i64,)> =
+            sqlx::query_as("SELECT 1 FROM session_execution_owners WHERE root_id = ?1")
+                .bind(root.as_str())
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|e| map_sqlx(&e))?;
+        if existing.is_some() {
+            self.assert_owner(&mut *tx, id).await?;
+            return Ok(None);
+        }
+        let claim = self.claim_owner_on(&mut *tx, &root, false, None).await?;
+        Ok(Some(claim.token))
     }
 }
