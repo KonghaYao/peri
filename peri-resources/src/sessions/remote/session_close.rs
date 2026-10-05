@@ -22,7 +22,7 @@ impl RemoteSessionData {
         }
         self.commit_effects(
             "finish_close",
-            &[id.clone()],
+            std::slice::from_ref(id),
             vec![StatementSpec::new(
                 "INSERT INTO peri_store_meta(singleton) SELECT 0 WHERE NOT EXISTS
                     (SELECT 1 FROM threads t JOIN session_close_intents c ON c.thread_id = t.id WHERE t.id = ?1)",

@@ -651,129 +651,125 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                     .as_ref()
                     .map(|probe| probe())
                     .unwrap_or(false);
-                if should_wait {
-                    if context.async_ctx.idle_wait_enabled {
+                if should_wait && context.async_ctx.idle_wait_enabled {
+                    if let Some(mailbox) = &context.session.user_input_mailbox {
+                        mailbox.enter_idle();
+                    }
+                    // loading 期间的队首输入在 idle 边界交接，直接回 Receive，
+                    // 不先发布一个并未真正等待的 TurnSuspended。
+                    if context.session.queue.has_wake_up() {
                         if let Some(mailbox) = &context.session.user_input_mailbox {
-                            mailbox.enter_idle();
+                            mailbox.leave_idle();
                         }
-                        // loading 期间的队首输入在 idle 边界交接，直接回 Receive，
-                        // 不先发布一个并未真正等待的 TurnSuspended。
-                        if context.session.queue.has_wake_up() {
+                        continue;
+                    }
+                    tracing::debug!("Receive: queue empty, awaiting wake (idle_should_wait=true)");
+                    // 置 idle-suspended 标志：宿主 dispatch_prompt_turn 据此把
+                    // 挂起期间到达的用户 prompt 注入 inbox（而非在 prompt lock
+                    // 上阻塞至当前 turn 完成——bg 任务活跃时可能长达数分钟）。
+                    if let Some(flag) = &context.async_ctx.idle_suspended_flag {
+                        flag.store(true, Ordering::Release);
+                    }
+                    context.runtime.event_bus.emit_state(
+                        crate::agent::events_v2::StateEvent::TurnSuspended {
+                            turn_id: context.turn_id(),
+                            agent_id: context.session.agent_id,
+                        },
+                    );
+                    let cancel_fut = context.session.turn.cancel_token.cancelled();
+                    tokio::pin!(cancel_fut);
+                    // 有界等待：界本身必须能唤醒挂起的 loop，否则只有偶发
+                    // 唤醒（任务注册/终态/取消）才会重新求值，界形同虚设。
+                    // 到点走 continue → Receive 退出求值 → 写交接。
+                    let handoff_deadline = context
+                        .async_ctx
+                        .handoff_deadline
+                        .as_ref()
+                        .and_then(|probe| probe());
+                    let deadline_tick = async move {
+                        match handoff_deadline {
+                            Some(deadline) => tokio::time::sleep_until(deadline).await,
+                            None => std::future::pending::<()>().await,
+                        }
+                    };
+                    tokio::pin!(deadline_tick);
+                    let registry_wait = async {
+                        if let Some(receiver) = idle_registry.as_mut() {
+                            if receiver.changed().await.is_err() {
+                                // The TaskManager is normally retained by
+                                // idle_should_wait. If it is dropped, do
+                                // not turn a closed watch channel into a
+                                // busy loop.
+                                std::future::pending::<()>().await;
+                            }
+                        } else {
+                            std::future::pending::<()>().await;
+                        }
+                    };
+                    tokio::pin!(registry_wait);
+                    tokio::select! {
+                        biased;
+                        _ = &mut cancel_fut => {
+                            // 醒来：无论由注入 prompt 还是 bg Defer 触发，先复位
+                            // 标志——后续 Receive 会 drain 队列并继续本 turn。
+                            if let Some(flag) = &context.async_ctx.idle_suspended_flag {
+                                flag.store(false, Ordering::Release);
+                            }
                             if let Some(mailbox) = &context.session.user_input_mailbox {
                                 mailbox.leave_idle();
                             }
-                            continue;
+                            return LoopResult::Interrupted;
                         }
-                        tracing::debug!(
-                            "Receive: queue empty, awaiting wake (idle_should_wait=true)"
-                        );
-                        // 置 idle-suspended 标志：宿主 dispatch_prompt_turn 据此把
-                        // 挂起期间到达的用户 prompt 注入 inbox（而非在 prompt lock
-                        // 上阻塞至当前 turn 完成——bg 任务活跃时可能长达数分钟）。
-                        if let Some(flag) = &context.async_ctx.idle_suspended_flag {
-                            flag.store(true, Ordering::Release);
-                        }
-                        context.runtime.event_bus.emit_state(
-                            crate::agent::events_v2::StateEvent::TurnSuspended {
-                                turn_id: context.turn_id(),
-                                agent_id: context.session.agent_id,
-                            },
-                        );
-                        let cancel_fut = context.session.turn.cancel_token.cancelled();
-                        tokio::pin!(cancel_fut);
-                        // 有界等待：界本身必须能唤醒挂起的 loop，否则只有偶发
-                        // 唤醒（任务注册/终态/取消）才会重新求值，界形同虚设。
-                        // 到点走 continue → Receive 退出求值 → 写交接。
-                        let handoff_deadline = context
-                            .async_ctx
-                            .handoff_deadline
-                            .as_ref()
-                            .and_then(|probe| probe());
-                        let deadline_tick = async move {
-                            match handoff_deadline {
-                                Some(deadline) => tokio::time::sleep_until(deadline).await,
-                                None => std::future::pending::<()>().await,
+                        _ = context.session.queue.await_wake() => {
+                            // 醒来：无论由注入 prompt 还是 bg Defer 触发，先复位
+                            // 标志——后续 Receive 会 drain 队列并继续本 turn。
+                            if let Some(flag) = &context.async_ctx.idle_suspended_flag {
+                                flag.store(false, Ordering::Release);
                             }
-                        };
-                        tokio::pin!(deadline_tick);
-                        let registry_wait = async {
-                            if let Some(receiver) = idle_registry.as_mut() {
-                                if receiver.changed().await.is_err() {
-                                    // The TaskManager is normally retained by
-                                    // idle_should_wait. If it is dropped, do
-                                    // not turn a closed watch channel into a
-                                    // busy loop.
-                                    std::future::pending::<()>().await;
-                                }
-                            } else {
-                                std::future::pending::<()>().await;
+                            if let Some(mailbox) = &context.session.user_input_mailbox {
+                                mailbox.leave_idle();
                             }
-                        };
-                        tokio::pin!(registry_wait);
-                        tokio::select! {
-                            biased;
-                            _ = &mut cancel_fut => {
-                                // 醒来：无论由注入 prompt 还是 bg Defer 触发，先复位
-                                // 标志——后续 Receive 会 drain 队列并继续本 turn。
-                                if let Some(flag) = &context.async_ctx.idle_suspended_flag {
-                                    flag.store(false, Ordering::Release);
-                                }
-                                if let Some(mailbox) = &context.session.user_input_mailbox {
-                                    mailbox.leave_idle();
-                                }
+                            if context.session.turn.is_cancelled() {
                                 return LoopResult::Interrupted;
                             }
-                            _ = context.session.queue.await_wake() => {
-                                // 醒来：无论由注入 prompt 还是 bg Defer 触发，先复位
-                                // 标志——后续 Receive 会 drain 队列并继续本 turn。
-                                if let Some(flag) = &context.async_ctx.idle_suspended_flag {
-                                    flag.store(false, Ordering::Release);
-                                }
-                                if let Some(mailbox) = &context.session.user_input_mailbox {
-                                    mailbox.leave_idle();
-                                }
-                                if context.session.turn.is_cancelled() {
-                                    return LoopResult::Interrupted;
-                                }
-                                tracing::debug!(
-                                    turn_id = %context.session.turn.turn_id,
-                                    queue_len_after_wake = context.session.queue.len(),
-                                    "run_react_loop: idle inbox woken, continue to Receive"
-                                );
-                                // 醒来直接 continue 回 Receive——下一轮 Receive 用 drain_all()
-                                // 统一处理所有消息（Prompt + Info + Defer），不再需要 post-wake drain_for_end
-                                continue;
+                            tracing::debug!(
+                                turn_id = %context.session.turn.turn_id,
+                                queue_len_after_wake = context.session.queue.len(),
+                                "run_react_loop: idle inbox woken, continue to Receive"
+                            );
+                            // 醒来直接 continue 回 Receive——下一轮 Receive 用 drain_all()
+                            // 统一处理所有消息（Prompt + Info + Defer），不再需要 post-wake drain_for_end
+                            continue;
+                        }
+                        _ = &mut deadline_tick => {
+                            if let Some(flag) = &context.async_ctx.idle_suspended_flag {
+                                flag.store(false, Ordering::Release);
                             }
-                            _ = &mut deadline_tick => {
-                                if let Some(flag) = &context.async_ctx.idle_suspended_flag {
-                                    flag.store(false, Ordering::Release);
-                                }
-                                if let Some(mailbox) = &context.session.user_input_mailbox {
-                                    mailbox.leave_idle();
-                                }
-                                tracing::debug!(
-                                    turn_id = %context.session.turn.turn_id,
-                                    "run_react_loop: bounded wait deadline reached, re-evaluate exit"
-                                );
-                                // 到点必须回到退出判断，由 pending_handoff 写交接记录。
-                                continue;
+                            if let Some(mailbox) = &context.session.user_input_mailbox {
+                                mailbox.leave_idle();
                             }
-                            _ = &mut registry_wait => {
-                                if let Some(flag) = &context.async_ctx.idle_suspended_flag {
-                                    flag.store(false, Ordering::Release);
-                                }
-                                if let Some(mailbox) = &context.session.user_input_mailbox {
-                                    mailbox.leave_idle();
-                                }
-                                tracing::debug!(
-                                    turn_id = %context.session.turn.turn_id,
-                                    queue_len_after_wake = context.session.queue.len(),
-                                    "run_react_loop: registry activity changed, continue to Receive"
-                                );
-                                // The signal carries no task result. Receive must
-                                // re-check the queue and registry state itself.
-                                continue;
+                            tracing::debug!(
+                                turn_id = %context.session.turn.turn_id,
+                                "run_react_loop: bounded wait deadline reached, re-evaluate exit"
+                            );
+                            // 到点必须回到退出判断，由 pending_handoff 写交接记录。
+                            continue;
+                        }
+                        _ = &mut registry_wait => {
+                            if let Some(flag) = &context.async_ctx.idle_suspended_flag {
+                                flag.store(false, Ordering::Release);
                             }
+                            if let Some(mailbox) = &context.session.user_input_mailbox {
+                                mailbox.leave_idle();
+                            }
+                            tracing::debug!(
+                                turn_id = %context.session.turn.turn_id,
+                                queue_len_after_wake = context.session.queue.len(),
+                                "run_react_loop: registry activity changed, continue to Receive"
+                            );
+                            // The signal carries no task result. Receive must
+                            // re-check the queue and registry state itself.
+                            continue;
                         }
                     }
                 }
