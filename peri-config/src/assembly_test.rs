@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, path::PathBuf};
+use std::collections::BTreeMap;
 
 use super::*;
 
@@ -48,9 +48,10 @@ fn provenance_uses_declared_sources_for_each_domain() {
             (mcp::MCP_BUILTIN_ENV.into(), "off".into()),
         ]),
     };
+    let directory = tempfile::tempdir().unwrap();
     let scope = ConfigurationScope::new(
-        PathBuf::from("/project"),
-        PathBuf::from("/home/settings.json"),
+        directory.path().join("project"),
+        directory.path().join("home/settings.json"),
     )
     .unwrap();
     let snapshot = crate::ConfigurationSnapshot::resolve(scope, inputs).unwrap();
