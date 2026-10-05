@@ -9,7 +9,7 @@ impl McpClientPool {
     pub fn bind_session_task_manager(&self, session_id: &str, manager: &Arc<dyn TaskManager>) {
         self.session_tasks
             .write()
-            .insert(session_id.to_owned(), Arc::downgrade(manager));
+            .insert(session_id.to_owned(), Arc::clone(manager));
         self.task_scope_tokens
             .write()
             .entry(session_id.to_owned())

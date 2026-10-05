@@ -6,7 +6,7 @@ use peri_acp_types::store::{InheritedContext, PersistedPayload};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
-use super::super::types::{SubagentChainAssembler, SubagentChainContext};
+use super::super::types::{SubagentChainAssembler, SubagentChainContext, SubagentHost};
 use super::super::v2_bridge::{build_v2_subagent_context, V2SubagentContext};
 use crate::agent::react::ReactLLM;
 use crate::agent::{CompactConfig, ContextBudget};
@@ -34,7 +34,7 @@ pub(super) fn build_subagent_session_v2(
     frozen: FrozenContext,
     cancel_token: CancellationToken,
     child_thread_id: String,
-    mcp_task_owner_session_id: Option<String>,
+    parent_host: Option<Arc<SubagentHost>>,
     session_resources: Option<Arc<dyn SessionResources>>,
     inherited: InheritedContext,
     own: Vec<PersistedPayload>,
@@ -52,10 +52,17 @@ pub(super) fn build_subagent_session_v2(
     context_budget: Option<ContextBudget>,
     compact_llm: Option<Arc<dyn peri_model::Model>>,
     agent_id: Option<AgentId>,
-) -> (Arc<Session>, V2SubagentContext) {
+) -> Result<(Arc<Session>, V2SubagentContext), Box<dyn std::error::Error + Send + Sync>> {
     let cancel_arc: Arc<CancellationToken> = Arc::new(cancel_token.clone());
-    // SubAgent 独立 MessageQueue（不与 main agent 共享）
-    let queue = MessageQueue::new();
+    let mut host = parent_host.as_deref().cloned().unwrap_or_default();
+    let binding = host
+        .mcp_pool
+        .as_ref()
+        .and_then(|pool| pool.agent_session_binding(&child_thread_id));
+    let queue = binding
+        .as_ref()
+        .map(|(inbox, _)| inbox.queue().clone())
+        .unwrap_or_else(MessageQueue::new);
     let session = Session::new_with_cancel_and_queue(
         Arc::from(cwd.as_str()),
         frozen,
@@ -63,6 +70,22 @@ pub(super) fn build_subagent_session_v2(
         cancel_arc,
         queue,
     );
+    host.session_resources = session_resources.clone();
+    host.task_manager = Some(match binding {
+        Some((_, manager)) => {
+            let manager: Arc<dyn std::any::Any + Send + Sync> = manager;
+            Arc::downcast::<crate::agent::async_tasks::TaskManager>(manager)
+                .map_err(|_| "subagent session task directory has incompatible manager")?
+        }
+        None => Arc::new(crate::agent::async_tasks::TaskManager::new()),
+    });
+    host.parent_thread_id = Some(child_thread_id.clone());
+    let router = crate::session::async_router::AsyncRouter::for_queue(session.queue());
+    host.on_bg_complete = Some(Arc::new(move |result, kind| {
+        router.route_bg_result(result, kind);
+        Ok(())
+    }));
+    session.set_subagent_host(host);
 
     // transcript 绑定（ancestor 先于 with_persistence，顺序不可反）
     {
@@ -100,11 +123,15 @@ pub(super) fn build_subagent_session_v2(
 
     // StageContext 构造（v2_bridge 迁移；tool_invocation_resolver 参数化；
     // 复用上面预创建的 session——transcript 已装载 ancestor 并绑定持久化）
+    let tools = tools
+        .into_iter()
+        .filter(|tool| tool_filter(tool.as_ref()))
+        .collect();
     let v2_ctx = build_v2_subagent_context(
         Some(session.clone()),
         llm,
         chain,
-        tools,
+        chain_assembler.bind_tools(&session, tools, Arc::clone(&tool_filter)),
         tool_filter,
         session_mcp_capability,
         &cwd,
@@ -116,16 +143,7 @@ pub(super) fn build_subagent_session_v2(
         agent_id,
     );
 
-    if let Some(root_id) = mcp_task_owner_session_id {
-        v2_ctx
-            .context
-            .session
-            .session_context
-            .write()
-            .insert("mcp_task_owner_session_id".into(), root_id);
-    }
-
-    (session, v2_ctx)
+    Ok((session, v2_ctx))
 }
 
 /// Build the immutable child snapshot from already-resolved parent/fallback values.

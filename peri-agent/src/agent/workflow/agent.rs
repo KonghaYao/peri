@@ -84,7 +84,7 @@ pub struct WorkflowAgentContext {
     /// 不回落磁盘，J5）。
     pub mcp_skill_registry: Option<Arc<peri_acp_types::mcp_skills::McpSkillRegistry>>,
 
-    /// 宿主绑定的执行树 root session ID（MCP 执行 scope、compact 事件和日志）。
+    /// 宿主绑定的调用方会话 ID（compact 事件和日志关联）。
     /// 仅由会话装配注入，不得取自 workflow 参数或模型工具输入。
     pub session_id: Option<String>,
     /// Compact 配置（None = 不启用自动 compact）
@@ -330,10 +330,11 @@ impl AgentExecutor for WorkflowAgentExecutor {
         // skills——workflow agent 无 plugin_skill_roots）。
         // MetaHarness：disabled 集合源自父会话冻结状态（WorkflowAgentContext
         // 字段，装配实现据此连坐过滤——设计 §2.5）。
+        let task_manager = Arc::new(crate::agent::async_tasks::TaskManager::new());
         let mut tools = self.ctx.middleware_factory.build_tools(
             &self.ctx.cwd,
             &self.ctx.meta_harness_disabled,
-            self.execution_manager.get().cloned(),
+            Some(task_manager.clone()),
             self.ctx.mcp_skill_registry.clone(),
         );
 
@@ -407,7 +408,7 @@ impl AgentExecutor for WorkflowAgentExecutor {
                 .as_ref()
                 .map(|definition| definition.skill_names.as_slice())
                 .unwrap_or_default(),
-            self.execution_manager.get().cloned(),
+            Some(task_manager.clone()),
         ) {
             chain.add(mw);
         }
@@ -449,8 +450,21 @@ impl AgentExecutor for WorkflowAgentExecutor {
             .subagent_ctx_builder
             .clone()
             .unwrap_or_else(|| Arc::new(DefaultSubagentV2ContextBuilder));
+        let session_id = uuid::Uuid::now_v7().to_string();
+        let session = crate::session::Session::new_with_cancel_and_queue(
+            Arc::from(self.ctx.cwd.as_str()),
+            crate::session::FrozenContext::builder().build(),
+            Some(session_id.clone()),
+            Arc::new(cancel_token.clone()),
+            crate::session::MessageQueue::new(),
+        );
+        session.set_subagent_host(crate::session::subagent::SubagentHost {
+            task_manager: Some(task_manager),
+            mcp_pool: self.ctx.middleware_factory.mcp_pool(),
+            ..Default::default()
+        });
         let v2_ctx = ctx_builder.build(
-            None, // workflow agent 无预创建 session（内部自建）
+            Some(session),
             llm,
             chain,
             tools_arc,
@@ -460,19 +474,10 @@ impl AgentExecutor for WorkflowAgentExecutor {
             compact_config,
             context_budget,
             compact_llm,
-            None, // workflow 无 child_thread_id，内部 AgentId::new() 兜底（C1）
+            Some(crate::session::subagent::agent_id_from_child_thread(
+                &session_id,
+            )),
         );
-
-        // 与 subagent 同构：保留 agent 自身身份，仅把 MCP 执行 scope 绑定到
-        // 宿主注入的 root；不能用 params.agent_id 或工具输入自称的 session ID。
-        if let Some(root_id) = &self.ctx.session_id {
-            v2_ctx
-                .context
-                .session
-                .session_context
-                .write()
-                .insert("mcp_task_owner_session_id".into(), root_id.clone());
-        }
 
         // EventBus forwarder（v2 → v1 ExecutorEvent，转发给 event_handler）。
         // 经注入的 ForwarderLauncherFn 启动——biased select 顺序不变量单点

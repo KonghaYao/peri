@@ -1,14 +1,5 @@
-//! [回归测试] 4.2：真实 workflow executor 经 MCP wire 同步调用，执行 scope 必须来自宿主 root。
-//!
-//! 历史缺陷（2026-10-04 运行时实证）：workflow agent 的 v2 `SessionContext` 未写入
-//! MCP task owner，工具调度回退到内部 `AgentId`（任务池中无注册），
-//! `begin_external_task_execution` 失败，**所有** MCP 工具（含前台同步 Bash/Read/
-//! WebSearch）在发送 tools/call 前就返回
-//! `MCP 服务器 "<server>" 工具 "<tool>" 调用失败: session task manager unavailable`。
-//!
-//! 本模块锁定修复后的两层语义：
-//! 1. 调用真正进入发送阶段（不再被预检拒绝），前台同步调用拿到远端结果；
-//! 2. 归属 id 指向宿主注入的执行树 root（取自可信装配，不是模型参数/提示词自称）。
+//! [回归测试] Workflow agent 先登记独立 Inbox/TaskManager，再经真实 MCP wire 调用。
+//! scope 来自其可信会话绑定，不归 root，也不接受模型参数/提示词自称的地址。
 //!
 //! 断言取数口径（关键）：wire 上的 `_meta` 由 rmcp 拆进请求 extensions，服务端
 //! 经 `RequestContext.meta` 读取（`CallToolRequestParams.meta` 在收包侧恒为空）；
@@ -133,13 +124,14 @@ struct Scenario<'a> {
     tool: &'a str,
     /// true = 远端 Workspace owner（可信连接能力，可解码）；false = 本进程 builtin 实例。
     workspace_remote: bool,
-    /// 写入 `WorkflowAgentContext.session_id` 的宿主绑定（None = 未注入，模拟装配缺口）。
+    /// 写入 `WorkflowAgentContext.session_id` 的调用方关联，不拥有 Agent 的工具任务。
     ctx_root: Option<&'a str>,
     /// 任务池中注册 TaskManager 的 session（可信绑定；含诱饵时模型自称也「有效」）。
     bound_sessions: &'a [&'a str],
 }
 
 struct Outcome {
+    agent_session_id: String,
     /// 模型可见的 workflow 输出（工具结果回显或错误文本）。
     output: String,
     /// 真实到达 MCP wire 的 tools/call。
@@ -203,14 +195,11 @@ async fn run_workflow_mcp(scenario: Scenario<'_>) -> Outcome {
         }
     }
     pool.clients.write().insert(server.into(), handle);
-    // manager 必须存活到调用结束（池内只持有 Weak）。
-    let mut managers = Vec::new();
     for session in bound_sessions {
         let manager: Arc<dyn TaskManagerPort> = Arc::new(TaskManager::new());
         pool.bind_session_task_manager(session, &manager);
-        managers.push(manager);
     }
-    let session_tokens = bound_sessions
+    let mut session_tokens: Vec<_> = bound_sessions
         .iter()
         .filter_map(|session| {
             pool.task_scope_meta_for(server, session)
@@ -262,7 +251,21 @@ async fn run_workflow_mcp(scenario: Scenario<'_>) -> Outcome {
             .unwrap(),
         )
         .await;
-    drop(managers);
+    let agent_session_id = {
+        let inboxes = pool.session_inboxes.read();
+        assert_eq!(inboxes.len(), 1);
+        inboxes.keys().next().unwrap().clone()
+    };
+    assert!(pool.session_tasks.read().contains_key(&agent_session_id));
+    assert_ne!(agent_session_id, SPOOFED);
+    assert_ne!(agent_session_id, ROOT);
+    if let Some(token) = pool
+        .task_scope_meta_for(server, &agent_session_id)
+        .as_ref()
+        .and_then(scope_token_of)
+    {
+        session_tokens.push((agent_session_id.clone(), token));
+    }
     pool.clients.write().clear();
     client
         .close_with_timeout(Duration::from_secs(1))
@@ -276,6 +279,7 @@ async fn run_workflow_mcp(scenario: Scenario<'_>) -> Outcome {
         panic!("workflow 应返回模型可见结果，而非提前退出: {result:?}");
     };
     let outcome = Outcome {
+        agent_session_id,
         output: output.as_str().unwrap().to_owned(),
         calls: calls.lock().clone(),
         session_tokens,
@@ -286,9 +290,9 @@ async fn run_workflow_mcp(scenario: Scenario<'_>) -> Outcome {
 /// [回归测试] 4.2 的前台 Bash 曾在发送前因内部 AgentId 未注册而失败。
 ///
 /// 池内同时绑定 root 与模型自称的诱饵：成功本身不足以证明归属，wire 上的
-/// scope token 必须等于 root 的能力，且不得是诱饵的能力。
+/// scope token 必须等于当前 Agent 的能力，且不得是 root 或诱饵的能力。
 #[tokio::test]
-async fn test_workflow_mcp_sync_bash_uses_root_owner() {
+async fn test_workflow_mcp_sync_bash_uses_agent_session_owner() {
     let outcome = run_workflow_mcp(Scenario {
         server: "workspace",
         tool: "Bash",
@@ -308,9 +312,10 @@ async fn test_workflow_mcp_sync_bash_uses_root_owner() {
         scope_token_of(&outcome.calls[0].meta).expect("workspace 调用必须携带 task scope 能力");
     assert_eq!(
         Some(wire_token.as_str()),
-        outcome.token_for(ROOT),
-        "wire 上的 task scope 能力必须属于宿主 root session"
+        outcome.token_for(&outcome.agent_session_id),
+        "wire 上的 task scope 能力必须属于当前 Agent session"
     );
+    assert_ne!(Some(wire_token.as_str()), outcome.token_for(ROOT));
     assert_ne!(
         Some(wire_token.as_str()),
         outcome.token_for(SPOOFED),
@@ -318,12 +323,12 @@ async fn test_workflow_mcp_sync_bash_uses_root_owner() {
     );
 }
 
-/// [回归测试] 只读工具同样归属 root；远端 Workspace 能力可直接解码 session 身份。
+/// [回归测试] 只读工具同样归属当前 Agent；远端 Workspace 能力可直接解码会话身份。
 ///
 /// 工具名用不碰撞 builtin 声明的探针名：显式 allowlist 下，远端 MCP 工具不得
 /// 以裸名冒用 builtin 名字（`ToolFilterPolicy::canonical` 的反抢名规则）。
 #[tokio::test]
-async fn test_workflow_mcp_remote_read_wire_scope_decodes_to_root() {
+async fn test_workflow_mcp_remote_read_wire_scope_decodes_to_agent_session() {
     let outcome = run_workflow_mcp(Scenario {
         server: "workspace",
         tool: "ProbeRead",
@@ -339,14 +344,14 @@ async fn test_workflow_mcp_remote_read_wire_scope_decodes_to_root() {
         .resolve_capability(&outcome.calls[0].meta)
         .expect("wire 上的 task scope 能力必须可解析");
     assert_eq!(
-        capability.session_id, ROOT,
-        "MCP 执行 scope 必须归属宿主 root，模型自称的 {SPOOFED} 不得生效"
+        capability.session_id, outcome.agent_session_id,
+        "MCP 执行 scope 必须归属当前 Agent，模型自称的 {SPOOFED} 不得生效"
     );
 }
 
 /// [回归测试] web 来源的工具走同一条 owner 预检，不因 server 名不同而回退。
 #[tokio::test]
-async fn test_workflow_mcp_sync_web_search_uses_root_owner() {
+async fn test_workflow_mcp_sync_web_search_uses_agent_session_owner() {
     let outcome = run_workflow_mcp(Scenario {
         server: "web",
         tool: "WebSearch",
@@ -364,9 +369,9 @@ async fn test_workflow_mcp_sync_web_search_uses_root_owner() {
     );
 }
 
-/// [回归测试] 无宿主绑定时，模型参数/提示词/runId 不得冒充已注册的 owner。
+/// [回归测试] 无父会话绑定时仍登记独立子绑定，模型参数/提示词/runId 不得冒充 owner。
 #[tokio::test]
-async fn test_workflow_mcp_missing_binding_rejects_model_claimed_owner() {
+async fn test_workflow_mcp_missing_parent_binding_uses_checked_agent_binding() {
     let outcome = run_workflow_mcp(Scenario {
         server: "workspace",
         tool: "Bash",
@@ -375,17 +380,19 @@ async fn test_workflow_mcp_missing_binding_rejects_model_claimed_owner() {
         bound_sessions: &[SPOOFED],
     })
     .await;
-    assert!(
-        outcome.output.contains("session task manager unavailable"),
-        "实际错误: {}",
-        outcome.output
+    assert_eq!(outcome.output, SYNC_OUTPUT);
+    assert_eq!(outcome.calls.len(), 1);
+    let token = scope_token_of(&outcome.calls[0].meta).unwrap();
+    assert_eq!(
+        Some(token.as_str()),
+        outcome.token_for(&outcome.agent_session_id)
     );
-    assert!(outcome.calls.is_empty(), "无可信绑定时不得发送 MCP 请求");
+    assert_ne!(Some(token.as_str()), outcome.token_for(SPOOFED));
 }
 
-/// [回归测试] 宿主绑定已失效时不得回落到模型自称的其他有效 session。
+/// [回归测试] 父目录不可达不影响子会话准入，也不得回落到模型自称的 session。
 #[tokio::test]
-async fn test_workflow_mcp_unregistered_root_rejects_before_send() {
+async fn test_workflow_mcp_unregistered_root_does_not_own_agent_admission() {
     let outcome = run_workflow_mcp(Scenario {
         server: "workspace",
         tool: "Read",
@@ -394,10 +401,12 @@ async fn test_workflow_mcp_unregistered_root_rejects_before_send() {
         bound_sessions: &[SPOOFED],
     })
     .await;
-    assert!(
-        outcome.output.contains("session task manager unavailable"),
-        "实际错误: {}",
-        outcome.output
+    assert_eq!(outcome.output, SYNC_OUTPUT);
+    assert_eq!(outcome.calls.len(), 1);
+    let token = scope_token_of(&outcome.calls[0].meta).unwrap();
+    assert_eq!(
+        Some(token.as_str()),
+        outcome.token_for(&outcome.agent_session_id)
     );
-    assert!(outcome.calls.is_empty(), "错误 root 不得绕过 manager 准入");
+    assert_ne!(Some(token.as_str()), outcome.token_for(SPOOFED));
 }

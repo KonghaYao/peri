@@ -82,6 +82,9 @@ impl super::SubAgentTool {
     ) -> SubagentSpawnConfig {
         let host = self.host();
         let (on_subagent_start, on_subagent_stop) = self.lifecycle_closures();
+        let inherited_filter = Arc::clone(&self.inherited_tool_filter);
+        let tool_filter =
+            Arc::new(move |tool: &dyn BaseTool| inherited_filter(tool) && tool_filter(tool));
         SubagentSpawnConfig {
             agent_name,
             prompt,
@@ -92,7 +95,7 @@ impl super::SubAgentTool {
             run_mode,
             skill_names,
             llm,
-            chain_assembler: Arc::clone(&self.chain_assembler),
+            chain_assembler: Arc::new(super::session_binding::SessionBoundAssembler::new(self)),
             tools,
             tool_filter,
             system_prompt,
@@ -157,6 +160,9 @@ impl super::SubAgentTool {
     ) -> SubagentResumeConfig {
         let host = self.host();
         let (on_subagent_start, on_subagent_stop) = self.lifecycle_closures();
+        let inherited_filter = Arc::clone(&self.inherited_tool_filter);
+        let tool_filter =
+            Arc::new(move |tool: &dyn BaseTool| inherited_filter(tool) && tool_filter(tool));
         SubagentResumeConfig {
             thread_id,
             prompt,
@@ -164,7 +170,7 @@ impl super::SubAgentTool {
             run_mode,
             max_iterations,
             llm,
-            chain_assembler: Arc::clone(&self.chain_assembler),
+            chain_assembler: Arc::new(super::session_binding::SessionBoundAssembler::new(self)),
             tools,
             tool_filter,
             tool_invocation_resolver: Some(Arc::new(ExecuteExtraToolResolver::default())),

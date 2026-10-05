@@ -160,12 +160,7 @@ impl McpClientPool {
     /// cancelled or timed-out calls to that same owner, so a single interruption
     /// cannot lock the session permanently. Without evidence nothing is cleared.
     fn resolve_execution_evidence(&self, session_id: &str, scope: &str) {
-        let Some(manager) = self
-            .session_tasks
-            .read()
-            .get(session_id)
-            .and_then(std::sync::Weak::upgrade)
-        else {
+        let Some(manager) = self.session_tasks.read().get(session_id).cloned() else {
             return;
         };
         let cleared = manager.resolve_external_execution_evidence(scope);
@@ -337,11 +332,7 @@ impl McpClientPool {
         for server in self.configured_workspace_task_owners() {
             self.resolve_execution_evidence(session_id, &server);
         }
-        let manager = self
-            .session_tasks
-            .read()
-            .get(session_id)
-            .and_then(std::sync::Weak::upgrade);
+        let manager = self.session_tasks.read().get(session_id).cloned();
         let Some(manager) = manager else {
             // A session may have no Agent task projection (for example a
             // disabled Workspace profile). The owner scope was already
@@ -558,7 +549,7 @@ impl McpClientPool {
                     .session_tasks
                     .read()
                     .get(&session_id)
-                    .and_then(std::sync::Weak::upgrade)
+                    .cloned()
                 else {
                     break;
                 };
@@ -890,7 +881,7 @@ impl McpClientPool {
             .session_tasks
             .read()
             .get(session_id)
-            .and_then(std::sync::Weak::upgrade)
+            .cloned()
             .ok_or_else(|| "session task manager unavailable".to_owned())?;
         let raw_id_for_cancel = raw_task_id.to_owned();
         let meta = scoped_workspace

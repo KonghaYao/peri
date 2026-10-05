@@ -151,9 +151,8 @@ pub struct McpClientPool {
     /// 时向全部注册 inbox 推送 Defer 消息并唤醒 idle agent。
     pub(crate) session_inboxes: parking_lot::RwLock<HashMap<String, InboxHandle>>,
     /// One session runtime handle per session; task records remain owned by Agent.
-    pub(crate) session_tasks: parking_lot::RwLock<
-        HashMap<String, std::sync::Weak<dyn peri_acp_types::tasks::TaskManager>>,
-    >,
+    pub(crate) session_tasks:
+        parking_lot::RwLock<HashMap<String, Arc<dyn peri_acp_types::tasks::TaskManager>>>,
     pub(crate) task_scope_authority: peri_mcp_core::task_scope::TaskScopeAuthority,
     pub(crate) task_scope_tokens: parking_lot::RwLock<HashMap<String, String>>,
     /// 跨进程的 MCP Resource Cache；是否写入由响应 scope 与安全上下文共同决定。
@@ -360,7 +359,7 @@ impl McpClientPool {
         self.session_tasks
             .read()
             .get(session_id)
-            .and_then(std::sync::Weak::upgrade)
+            .cloned()
             .ok_or_else(|| "session task manager unavailable".to_owned())?
             .begin_external_execution(scope)
     }
@@ -821,8 +820,27 @@ impl peri_acp_types::ports::McpPoolPort for McpClientPool {
         self.session_tasks
             .read()
             .get(session_id)
-            .and_then(std::sync::Weak::upgrade)
+            .cloned()
             .is_some_and(|manager| manager.has_unsettled_external())
+    }
+
+    fn bind_agent_session(
+        &self,
+        session_id: &str,
+        inbox: InboxHandle,
+        manager: Arc<dyn peri_acp_types::tasks::TaskManager>,
+    ) {
+        self.bind_session_task_manager(session_id, &manager);
+        self.register_inbox(session_id, inbox);
+    }
+
+    fn agent_session_binding(
+        &self,
+        session_id: &str,
+    ) -> Option<(InboxHandle, Arc<dyn peri_acp_types::tasks::TaskManager>)> {
+        let inbox = self.session_inboxes.read().get(session_id).cloned()?;
+        let manager = self.session_tasks.read().get(session_id).cloned()?;
+        Some((inbox, manager))
     }
 
     fn begin_shutdown(&self) {

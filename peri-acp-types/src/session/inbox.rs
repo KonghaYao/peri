@@ -84,6 +84,10 @@ pub struct InboxHandle {
 }
 
 impl InboxHandle {
+    pub fn queue(&self) -> &MessageQueue {
+        &self.queue
+    }
+
     /// Push a Prompt message (user input or external request) and wake the executor.
     ///
     /// Prompt messages are consumed by `drain_all` during the Receive stage

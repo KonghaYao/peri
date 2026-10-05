@@ -200,6 +200,12 @@ impl BuiltinWorkflowAgentFactory {
 
 #[async_trait::async_trait]
 impl WorkflowMiddlewareFactory for BuiltinWorkflowAgentFactory {
+    fn mcp_pool(&self) -> Option<Arc<dyn peri_acp_types::ports::McpPoolPort>> {
+        self.builtin
+            .as_ref()
+            .map(|pool| Arc::clone(pool) as Arc<dyn peri_acp_types::ports::McpPoolPort>)
+    }
+
     async fn resolve_agent_definition(
         &self,
         agent_type: &str,

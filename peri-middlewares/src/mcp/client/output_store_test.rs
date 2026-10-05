@@ -259,6 +259,44 @@ async fn child_mcp_task_receipt_registers_under_root_owner() {
     wire.close().await;
 }
 
+#[tokio::test]
+async fn bound_child_mcp_task_receipt_uses_its_own_catalog_without_root_override() {
+    use peri_acp_types::ports::McpPoolPort;
+    use peri_acp_types::session::{MessageQueue, SessionInbox};
+
+    let wire = Wire::connect(StartedTask).await;
+    let (mut owner, spawner) = crate::mcp::task_scope::McpTaskOwner::new();
+    let pool = Arc::new(McpClientPool::new_pending_with_spawner(spawner));
+    wire.install(&pool, "source", false);
+    let root = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
+    let child = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
+    pool.bind_agent_session(
+        "root-session",
+        SessionInbox::new(Arc::new(MessageQueue::new())).handle(),
+        root.clone(),
+    );
+    pool.bind_agent_session(
+        "child-thread",
+        SessionInbox::new(Arc::new(MessageQueue::new())).handle(),
+        child.clone(),
+    );
+    let bridge = McpToolBridge::new("source", &test_tool(), pool.get_client("source").unwrap())
+        .with_output_store(&pool, Some("root-session"));
+    let output = bridge
+        .invoke(
+            serde_json::json!({}),
+            ToolContext::new(&[], ".").with_session_identity("child-thread", "child-turn"),
+        )
+        .await
+        .unwrap();
+    assert!(output.contains("Background task started:"), "{output}");
+    assert!(root.snapshot().tasks.is_empty());
+    assert_eq!(child.snapshot().tasks.len(), 1);
+    assert_eq!(owner.active_count(), 1);
+    owner.shutdown().await;
+    wire.close().await;
+}
+
 // 回归：任务已存在但 monitor 准入失败，不再承诺完成通知必达。
 #[tokio::test]
 async fn test_closed_monitor_owner_returns_honest_task_receipt_error() {

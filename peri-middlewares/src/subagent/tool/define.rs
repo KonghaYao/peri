@@ -26,7 +26,9 @@ const AGENT_DESCRIPTION: &str = include_str!("descriptions/agent.md");
 /// 回退值）聚合在 [`SubagentHost`]；生产路径经 `parent_session` 的 host 读取
 /// （builder 在主 session 创建后注入），测试/遗留路径经 `with_*` 直接注入
 /// tool 的 host 回退。
+#[derive(Clone)]
 pub struct SubAgentTool {
+    pub(crate) inherited_tool_filter: peri_agent::session::tool_catalog::ToolFilter,
     /// Parent agent tool set (Arc shared, read-only)
     pub(crate) parent_tools: Arc<Vec<Arc<dyn BaseTool>>>,
     /// Parent agent event handler (transparent forwarding of sub-agent events)

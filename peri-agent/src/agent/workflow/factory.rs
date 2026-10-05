@@ -54,6 +54,10 @@ pub struct WorkflowAgentDefinition {
 /// 读取是异步 I/O，不允许 `block_on`（ARC-MIDDLEWARE-CAPABILITY-001）。
 #[async_trait::async_trait]
 pub trait WorkflowMiddlewareFactory: Send + Sync {
+    fn mcp_pool(&self) -> Option<Arc<dyn peri_acp_types::ports::McpPoolPort>> {
+        None
+    }
+
     /// 按普通 subagent 的同一优先级（E13 project → builtin → plugin）解析
     /// `agentType`（本地来源经 builtin `workspace` 实例的资源面读取）。
     async fn resolve_agent_definition(

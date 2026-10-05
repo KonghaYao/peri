@@ -85,6 +85,15 @@ pub struct SubagentChainContext {
 /// 顺序（ARC-MIDDLEWARE-001）。
 pub trait SubagentChainAssembler: Send + Sync {
     fn assemble(&self, ctx: &SubagentChainContext) -> MiddlewareChain;
+
+    fn bind_tools(
+        &self,
+        _session: &Arc<Session>,
+        tools: Vec<Arc<dyn BaseTool>>,
+        _tool_filter: crate::session::tool_catalog::ToolFilter,
+    ) -> Vec<Arc<dyn BaseTool>> {
+        tools
+    }
 }
 
 // ─── 父侧运行时宿主 ──────────────────────────────────────────────────────────
@@ -95,13 +104,14 @@ pub trait SubagentChainAssembler: Send + Sync {
 #[derive(Clone, Default)]
 #[allow(clippy::type_complexity)]
 pub struct SubagentHost {
+    pub mcp_pool: Option<Arc<dyn peri_acp_types::ports::McpPoolPort>>,
     /// 会话资源门面（生产路径非 None；None 仅测试/遗留路径，跳过落库）
     pub session_resources: Option<Arc<dyn SessionResources>>,
     /// 后台任务管理器（per-session 聚合）
     pub task_manager: Option<Arc<TaskManager>>,
     /// 后台任务完成事件通道（bg pump，独立于主 event pump）
     pub bg_event_sender: Option<tokio::sync::mpsc::UnboundedSender<ExecutorEvent>>,
-    /// bg 完成同步回调（registry.complete 之前调用，推送 Defer 到主 agent MQ）
+    /// bg 完成同步回调（registry.complete 之前调用，推送 Defer 到本会话 MQ）
     pub on_bg_complete: Option<peri_acp_types::tasks::OnBgCompleteFn>,
     /// 子 agent 启动注册回调（active_agents）
     pub register_runtime: Option<RegisterRuntimeFn>,

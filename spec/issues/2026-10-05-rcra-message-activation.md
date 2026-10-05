@@ -1,6 +1,6 @@
 # RCRA 一等公民会话消息与激活实施
 
-状态：**待重构**——设计已收敛，按"重构顺序"推进代码重构；生产运行时发布门槛均未完成，不得宣称已解决。
+状态：**重构中**——第 1 步已完成并验证；第 2–5 步未实施。生产运行时发布门槛均未完成，不得宣称整体已解决。
 
 ## P0 验证计划
 
@@ -23,11 +23,21 @@
 
 ## 重构顺序
 
-1. 会话级 MQ 同构：子会话收件登记、唤醒绑定与独立任务目录；嵌套委托登记到直接父，消除跳层。
+1. [x] 会话级 MQ 同构：子会话收件登记、唤醒绑定与独立任务目录；嵌套委托登记到直接父，消除跳层。
 2. 投递归属：入站绑定发起者、冷恢复重建；删除 root fallback，保留并扩展已暂存的 initiator 守卫。
 3. MQ 消费语义：类型属性与消费矩阵进 Receive；收敛 continuation/idle/async_router 特例，唤醒降级为通知。
 4. 关闭与控制：关闭子会话级联终止 bg shell、资源终止并结算后返回消息；Stop/Pause/Resume/Close 幂等与 attempt 精确定位。
 5. 可靠连接下的幂等与持久：事件身份去重、required 不降级、mutation Unknown 冻结、投递义务可恢复；随后按 §7 矩阵与发布门槛验收。
+
+### 第 1 步实施（2026-10-05）
+
+- 子会话构造自身 `SubagentHost`，按稳定 child session ID 登记 Inbox 与 TaskManager；MCP 池保留会话运行时目录至显式注销，同进程 resume 复用原 MQ/任务目录，不依赖原父 runtime。
+- spawn/resume 不再给子执行注入 root task owner；Workflow Agent 同样先登记自己的会话、MQ 与任务目录，再调用 MCP 工具。执行树 root 只保留原有持久化/委托关联用途。
+- 继承的 Agent 工具通过 `SubagentChainAssembler::bind_tools` 重新绑定直接父会话、AgentId、取消令牌与工具授权上限；嵌套后台委托登记在直接父目录，回执进入直接父 MQ，不跳到祖父。
+- 子 loop 接入已有 bounded idle、registry activity、deadline 与未结算交接探针；只是补齐会话装配，不修改 Receive 分级规则或另设任务类型唤醒路径。
+- 回归入口：`session::subagent::v2_bridge::session_wait_tests`、`subagent::tool::tests::session_isolation_test`、`mcp::client::output_store::tests::bound_child_mcp_task_receipt_uses_its_own_catalog_without_root_override`、`assembly::tests::workflow::mcp_owner`。覆盖隔离收件、自然 idle 后消费终态、直接父登记/回执、父 runtime 替换后的 MQ/目录复用、嵌套工具授权不扩张及真实 MCP wire scope。
+- 验证：`./scripts/cargo-rmcp-patched.sh test --locked -p peri-middlewares -p peri-agent --lib`：Agent 899 passed；Middlewares 1560 passed / 2 ignored。相关三 crate doc tests、ACP 编译、相关三 crate all-targets clippy（`-D warnings`）、fmt、层依赖与 diff 检查通过。本次修改源码/测试均不超过 1000 行；全库大小扫描仍有 14 个未触碰的存量超限测试文件。
+- 边界：没有实现进程重启后的目录/Inbox 恢复、退出后的统一自动激活、required 接纳/持久处理义务或关闭协议；冷恢复 root fallback 留给第 2 步，消费/调度收敛留给第 3 步，关闭与持久保证分别留给第 4、5 步。不得把内存目录保留或一次唤醒等同于可靠接纳或 P0 发布验收。
 
 ## 实施工作
 
@@ -40,7 +50,7 @@
 - [ ] ACP/TUI 暴露 Accepted/Projected/处理及阻塞状态，保留用户待发区契约。
 - [ ] 按权威 §7 完成主/子、崩溃、乱序、Stop、关闭、容量和投影恢复矩阵。
 
-## 验证边界
+## 设计审计阶段验证边界（实施前）
 
 本轮仅文档工作；没有运行消息故障复现或 Rust 行为测试。代码可能有并行修改，早先静态调查仅解释设计动机，不作为当前代码缺陷已经复现的结论。文档链接、差异检查和对抗评审结果在下节记录。
 
@@ -109,7 +119,7 @@
 
 两项原"未决阻断"关闭，实施准入由 BLOCKED 调整为"按下方审计缺口继续修正后实施"；裁决 3 已并入权威 §4（消息类型与 MQ 消费语义），裁决 4 并入 §5.1、§6.3 与 session-async-tasks §5。
 
-### 关键目标审计：循环数据分离与分级投递准确性（2026-10-05）
+### 实施前关键目标审计：循环数据分离与分级投递准确性（2026-10-05）
 
 审计对象为目标本身"被解决没有"，覆盖工作区当前代码（含已暂存改动 `manager.rs`/`registry.rs`）。用户确认场景：主→resume sub 正常；重点是每个 loop 的数据分离与投递准确。
 
@@ -139,7 +149,7 @@
 - [ ] 按实际部署提供故障域/RPO 和恢复证据，不以抽象探针或文档审查代替。
 - [ ] MQ 消费矩阵验收：类型 × 到达时机（运行/空闲/退出/重启）× 会话状态；含 required 不降级、Passive 不阻塞 required 接纳、子会话与主会话同构。
 
-### 本轮结论
+### 设计审计阶段结论（实施前）
 
 文档静态检查：`git diff --check` 通过；本轮涉及的四份设计/任务文档共 17 个本地链接目标全部存在（未检查 anchor 或外部 URL）。探针 179 行。未修改生产实现、未执行 Rust/TUI E2E、未提交；已有其他工作区改动未纳入本轮结果。
 

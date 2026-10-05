@@ -78,6 +78,24 @@ pub trait McpPoolPort: Send + Sync {
     /// 还原具体实现（downcast 还原点，供 middlewares 装配面与装配面宿主使用）。
     fn as_any(&self) -> &dyn Any;
 
+    fn bind_agent_session(
+        &self,
+        _session_id: &str,
+        _inbox: crate::session::InboxHandle,
+        _manager: Arc<dyn crate::tasks::TaskManager>,
+    ) {
+    }
+
+    fn agent_session_binding(
+        &self,
+        _session_id: &str,
+    ) -> Option<(
+        crate::session::InboxHandle,
+        Arc<dyn crate::tasks::TaskManager>,
+    )> {
+        None
+    }
+
     /// Revert recorded file changes in the session's trusted Workspace owner.
     /// Implementations must reject unavailable owners and report every failed change.
     async fn rewind_files(

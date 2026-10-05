@@ -22,6 +22,7 @@ impl super::SubAgentTool {
         parent_cwd: String,
     ) -> Self {
         Self {
+            inherited_tool_filter: Arc::new(|_| true),
             parent_tools,
             event_handler,
             llm_factory,

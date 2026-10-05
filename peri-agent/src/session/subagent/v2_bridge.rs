@@ -17,6 +17,10 @@ use crate::session::turn::TurnId;
 use crate::session::{FrozenContext, MessageQueue, Session};
 use crate::tools::{BaseTool, DirectToolInvocationResolver, ToolInvocationResolver};
 
+#[cfg(test)]
+#[path = "session_wait_test.rs"]
+mod session_wait_tests;
+
 // ─── v2 桥接（自 peri-middlewares/src/subagent/v2_bridge.rs 迁移） ──────────
 
 /// SubAgent v2 上下文产物
@@ -258,6 +262,18 @@ pub fn build_v2_subagent_context(
         }
     };
 
+    let host = session.subagent_host();
+    if let Some(host) = &host {
+        if let (Some(pool), Some(manager), Some(session_id)) = (
+            &host.mcp_pool,
+            &host.task_manager,
+            session.store().thread_id.as_deref(),
+        ) {
+            let inbox =
+                peri_acp_types::session::SessionInbox::new(Arc::new(session.queue().clone()));
+            pool.bind_agent_session(session_id, inbox.handle(), manager.clone());
+        }
+    }
     let turn = session.start_turn();
     let transcript = session.transcript();
     let queue_clone = session.queue().clone();
@@ -291,7 +307,11 @@ pub fn build_v2_subagent_context(
     // 身份键统一（C1）：child_thread_id → AgentId；None（测试路径）内部生成。
     let resolved_agent_id = agent_id.unwrap_or_default();
 
-    let session_context = Arc::new(RwLock::new(std::collections::HashMap::new()));
+    let mut session_values = std::collections::HashMap::new();
+    if let Some(session_id) = &session.store().thread_id {
+        session_values.insert("session_id".into(), session_id.clone());
+    }
+    let session_context = Arc::new(RwLock::new(session_values));
     let v2_llm: Arc<dyn ReactLLM + Send + Sync> = Arc::from(llm);
 
     let mut builder = StageContext::builder(turn, transcript, queue_clone)
@@ -305,6 +325,34 @@ pub fn build_v2_subagent_context(
         .with_middleware_chain(Arc::new(chain))
         .with_event_bus(Arc::clone(&event_bus_arc))
         .with_session_context(session_context);
+
+    if let Some(manager) = host.and_then(|host| host.task_manager.clone()) {
+        let wait = crate::agent::async_tasks::handoff::BoundedWait::new(
+            crate::agent::async_tasks::handoff::HANDOFF_MAX_WAIT,
+        );
+        builder = builder
+            .with_idle_waiting()
+            .with_idle_registry(manager.registry().subscribe_activity())
+            .with_idle_should_wait({
+                let manager = Arc::clone(&manager);
+                let wait = Arc::clone(&wait);
+                Arc::new(move || wait.should_wait(manager.active_count() > 0))
+            })
+            .with_handoff_deadline({
+                let wait = Arc::clone(&wait);
+                Arc::new(move || wait.deadline())
+            })
+            .with_pending_handoff(Arc::new(move || {
+                if !wait.take_due() {
+                    return None;
+                }
+                let tasks = manager.pending_handoff_tasks();
+                (!tasks.is_empty()).then(|| crate::agent::async_tasks::handoff::PendingHandoff {
+                    tasks,
+                    waited: wait.waited(),
+                })
+            }));
+    }
 
     if let Some(budget) = context_budget {
         builder = builder.with_context_budget(budget);

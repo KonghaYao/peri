@@ -196,7 +196,6 @@ pub(super) async fn spawn_subagent_impl(
     // 4. 保存 child：一次 `save_child` 落父子关系、绑定继承、frozen 原字节与继承区。
     //    失败即整体失败——不再有 create + store_inherited + delete_thread 的手工补偿链
     //    （那正是「部分成功被当成已保存」的来源）。
-    let mut mcp_task_owner_session_id = None;
     if let Some(ref store) = session_resources {
         let parent_id = parent_thread_id
             .clone()
@@ -226,7 +225,6 @@ pub(super) async fn spawn_subagent_impl(
             return Err(peri_acp_types::workspace::WorkspaceError::ExecutionBindingMismatch.into());
         }
         let root_id = super::execution_root(store.as_ref(), &parent_id).await?;
-        mcp_task_owner_session_id = Some(root_id.clone());
         let snapshot_id = parent_messages.last().map(|m| m.id());
         let child = peri_acp_types::session_resources::ChildSnapshot {
             target: peri_acp_types::session_resources::NewSession {
@@ -265,7 +263,7 @@ pub(super) async fn spawn_subagent_impl(
         frozen,
         cancel_token.clone(),
         child_thread_id.clone(),
-        mcp_task_owner_session_id,
+        parent.and_then(|session| session.subagent_host()),
         session_resources.clone(),
         inherited,
         Vec::new(), // 新 child 没有 own history
@@ -285,7 +283,7 @@ pub(super) async fn spawn_subagent_impl(
         context_budget,
         compact_llm,
         Some(agent_id_from_child_thread(&child_thread_id)),
-    );
+    )?;
 
     let transcript = session.transcript();
 

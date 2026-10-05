@@ -234,7 +234,7 @@ pub(super) async fn resume_subagent_impl(
         frozen,
         cancel_token.clone(),
         thread_id.clone(),
-        Some(cluster_root),
+        parent.and_then(|session| session.subagent_host()),
         Some(Arc::clone(&session_resources)),
         inherited,
         loaded,
@@ -254,7 +254,7 @@ pub(super) async fn resume_subagent_impl(
         context_budget,
         compact_llm,
         Some(agent_id_from_child_thread(&thread_id)),
-    );
+    )?;
 
     // Assembly is synchronous but can observe cancellation from another task
     // (or a callback). Sync callers still receive the established interrupted

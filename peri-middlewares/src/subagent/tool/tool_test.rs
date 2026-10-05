@@ -762,6 +762,7 @@ async fn preset_resumable_thread(
 // rustc 不会为聚合根派生 `tool_test/` 子目录，子模块需显式 `#[path]` 指向。
 #[path = "tool_test/active_message_test.rs"]
 mod active_message_test;
+
 #[path = "tool_test/bg_register_cancel_test.rs"]
 mod bg_register_cancel_test;
 #[path = "tool_test/dynamic_mcp_subagent_test.rs"]
@@ -782,6 +783,8 @@ mod model_tier_test;
 mod resume_integration_test;
 #[path = "tool_test/resume_test.rs"]
 mod resume_test;
+#[path = "tool_test/session_isolation_test.rs"]
+mod session_isolation_test;
 
 /// W5 关闭矩阵 E2E（生产链路）：agent 面关闭（`SubAgentMiddleware` 链槽关闭位 =
 /// `SUB_AGENT_FACE_CLOSED_KEY`）⇒ 本地来源**不可发现、不可激活**，且**零磁盘兜底**
