@@ -423,7 +423,8 @@ fn missing_instance_input_is_typed_error_before_dispatch() {
     let cwd = std::env::temp_dir();
     let pool = pool_with_context(&cwd);
 
-    for instance in ["cron"] {
+    {
+        let instance = "cron";
         let error = pool
             .spawn_builtin_transport(instance)
             .err()

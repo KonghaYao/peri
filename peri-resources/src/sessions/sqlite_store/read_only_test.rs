@@ -273,7 +273,7 @@ fn test_meta_decoder_rejects_negative_derived_content_size() {
     let error = meta_from_row(
         "550e8400-e29b-41d4-a716-446655440000".into(),
         None,
-        absolute_test_path("tmp").into(),
+        absolute_test_path("tmp"),
         "2026-09-04T00:00:00Z".into(),
         "2026-09-04T00:00:00Z".into(),
         0,

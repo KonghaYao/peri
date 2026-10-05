@@ -24,7 +24,7 @@ fn test_session_boundary_clears_read_only_marker() {
 
     let old_active = atoms::ACTIVE_SESSION_ID.state().read().clone();
     let old_read_only = atoms::SESSION_READ_ONLY.state().read().clone();
-    let old_warning = atoms::SESSION_RESTORE_WARNING.state().read().clone();
+    let old_warning = *atoms::SESSION_RESTORE_WARNING.state().read();
     let old_reset = atoms::BRIDGE_RESET_COUNTER.get();
     atoms::SESSION_READ_ONLY.set(Some(ReadOnlyAdmission::ExecutionBusy));
     atoms::SESSION_RESTORE_WARNING.set(Some(
