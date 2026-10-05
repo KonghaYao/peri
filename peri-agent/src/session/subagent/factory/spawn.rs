@@ -353,7 +353,7 @@ pub(super) async fn spawn_subagent_impl(
                 max_iterations,
                 bg_event_sender,
                 task_manager,
-                on_bg_complete,
+                super::completion_delivery(parent, on_bg_complete),
                 langfuse_bridge,
                 session_resources,
                 deregister_runtime,

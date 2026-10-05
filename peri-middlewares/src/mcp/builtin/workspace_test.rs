@@ -129,6 +129,7 @@ async fn workspace_handler_bash_run_in_background_uses_injected_task_manager_ove
         let completions = Arc::clone(&completions);
         Arc::new(move |_: &BackgroundTaskResult, _: BgTaskKind| {
             completions.fetch_add(1, Ordering::SeqCst);
+            Ok(())
         })
     };
     let pair = connect(

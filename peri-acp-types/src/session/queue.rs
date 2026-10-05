@@ -79,7 +79,7 @@ pub struct QueuedMessage {
     pub source: MessageSource,
     /// 实际消息内容
     pub payload: QueuedPayload,
-    /// Stable canonical ID for an owner-confirmed external terminal reminder.
+    /// Stable canonical ID for an owner-confirmed terminal reminder.
     pub delivery_id: Option<MessageId>,
 }
 
@@ -146,14 +146,19 @@ impl QueuedMessage {
 
 /// 会话级临时收件箱（v2）
 ///
-/// 内部用 `Arc<Mutex<VecDeque>>` 保证线程安全。`Notify` 用于异步等待新消息。
+/// 消息与唤醒状态由同一个共享 owner 持有，所有发布入口使用同一信号。
 ///
 /// RCRA 循环中 Receive 阶段通过 [`Self::drain_all`] 一次性消费全部三类消息；
 /// 循环退出后通过 [`Self::has_wake_up`] 检测是否需重新激活。
 #[derive(Debug, Clone)]
 pub struct MessageQueue {
-    inner: Arc<Mutex<VecDeque<QueuedMessage>>>,
-    notify: Arc<tokio::sync::Notify>,
+    state: Arc<MailboxState>,
+}
+
+#[derive(Debug)]
+struct MailboxState {
+    messages: Mutex<VecDeque<QueuedMessage>>,
+    wake: tokio::sync::Notify,
 }
 
 impl Default for MessageQueue {
@@ -166,18 +171,23 @@ impl MessageQueue {
     /// 创建空队列
     pub fn new() -> Self {
         Self {
-            inner: Arc::new(Mutex::new(VecDeque::new())),
-            notify: Arc::new(tokio::sync::Notify::new()),
+            state: Arc::new(MailboxState {
+                messages: Mutex::new(VecDeque::new()),
+                wake: tokio::sync::Notify::new(),
+            }),
         }
     }
 
-    /// 推入一条消息，唤醒等待者
+    /// 发布消息；Prompt/Defer 唤醒等待者，Info 只保留到下次消费。
     pub fn push(&self, msg: QueuedMessage) {
+        let should_wake = msg.kind.wakes_up();
         {
-            let mut inner = self.inner.lock();
+            let mut inner = self.state.messages.lock();
             inner.push_back(msg);
         }
-        self.notify.notify_one();
+        if should_wake {
+            self.state.wake.notify_waiters();
+        }
     }
 
     /// 批量推入消息；空列表为 no-op
@@ -185,27 +195,40 @@ impl MessageQueue {
         if msgs.is_empty() {
             return;
         }
+        let should_wake = msgs.iter().any(|message| message.kind.wakes_up());
         {
-            let mut inner = self.inner.lock();
+            let mut inner = self.state.messages.lock();
             inner.extend(msgs);
         }
-        self.notify.notify_one();
+        if should_wake {
+            self.state.wake.notify_waiters();
+        }
+    }
+
+    /// 非破坏性等待可执行消息，注册通知后再检查状态以避免丢唤醒。
+    pub async fn await_wake(&self) {
+        loop {
+            let notified = self.state.wake.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.has_wake_up() {
+                return;
+            }
+            notified.await;
+        }
     }
 
     /// 排空队列中的全部消息（Prompt + Info + Defer）
     ///
     /// RCRA 循环的 Receive 阶段调用，一次性消费全部类型。
     pub fn drain_all(&self) -> Vec<QueuedMessage> {
-        let mut inner = self.inner.lock();
-        let drained: Vec<_> = std::mem::take(&mut *inner).into();
-        drop(inner);
-        self.notify.notify_one();
-        drained
+        let mut inner = self.state.messages.lock();
+        std::mem::take(&mut *inner).into()
     }
 
     /// 与 Receive 领取共享同一锁，仅撤出尚未被领取的指定用户输入。
     pub fn withdraw_user_inputs(&self, ids: &[crate::messages::MessageId]) -> Vec<QueuedMessage> {
-        let mut inner = self.inner.lock();
+        let mut inner = self.state.messages.lock();
         let mut withdrawn = Vec::new();
         let mut kept = VecDeque::with_capacity(inner.len());
         for message in inner.drain(..) {
@@ -223,7 +246,7 @@ impl MessageQueue {
 
     /// 是否有能唤醒循环的消息（Prompt 或 Defer）
     pub fn has_wake_up(&self) -> bool {
-        self.inner.lock().iter().any(|m| m.kind.wakes_up())
+        self.state.messages.lock().iter().any(|m| m.kind.wakes_up())
     }
 
     /// 队列中是否存在指定来源的 pending Defer（wake-able 延迟结果）。
@@ -233,7 +256,8 @@ impl MessageQueue {
     /// continuation scheduler 在真正 dispatch 前确认 Defer 尚未被消费（跳过空跑）。
     /// 仅匹配 `MessageKind::Defer`：Prompt/Info 均不计入。
     pub fn has_pending_defer(&self, source: &MessageSource) -> bool {
-        self.inner
+        self.state
+            .messages
             .lock()
             .iter()
             .any(|m| m.kind == MessageKind::Defer && &m.source == source)
@@ -246,16 +270,20 @@ impl MessageQueue {
 
     /// 队列是否为空
     pub fn is_empty(&self) -> bool {
-        self.inner.lock().is_empty()
+        self.state.messages.lock().is_empty()
     }
 
     /// 队列长度
     pub fn len(&self) -> usize {
-        self.inner.lock().len()
+        self.state.messages.lock().len()
     }
 
     /// 清空队列（rewind 操作时调用）
     pub fn clear(&self) {
-        self.inner.lock().clear();
+        self.state.messages.lock().clear();
     }
 }
+
+#[cfg(test)]
+#[path = "queue_wake_test.rs"]
+mod wake_tests;

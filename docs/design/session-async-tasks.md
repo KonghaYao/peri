@@ -35,6 +35,18 @@ Manager 给 ACP/TUI 提供**会话完整快照**和后续变更流。建立订�
 
 ## 3. 完成结果与消息
 
+### 3.1 Mailbox 发布与 owned 结算
+
+`MessageQueue` 是 mailbox 的单一 owner：消息数据与 wake 同在一份共享状态中。queue clone、`SessionInbox` 与 `InboxHandle` 都从这份状态派生；直接 push、批量 push 与 handle 发布具有相同语义。Prompt/Defer 发布后唤醒已注册的等待者；Info 保留到下一次 Receive，不单独唤醒。等待先注册通知再检查可执行消息，避免检查与挂起之间丢唤醒。Agent idle 只等待自己的 session queue；装配者只能启用等待，不能另传一个 receiver 身份。
+
+需要通知接收方的本地 Subagent、Shell 与 Workflow 使用 `TaskManager::settle_completed`：owner 认领结算、调用返回确认的交付入口，确认成功后才减少 active count 并发布终态。拒绝或 panic 时原结果和投递入口留在 owner，任务保持 `Completing`，快照为 `delivery_pending`；重试不重跑任务。取消与结算认领互斥；已取消 Shell 的清理结果可以交付，但不发布第二个完成终态。关闭在投递待处理或正在交付时不得报告 `Complete`。
+
+`OnBgCompleteFn` 的成功只确认接收方接纳，不代表 Receive 或模型已处理。生产 executor 必备 AsyncRouter；有 parent 的后台 Subagent 在未注入回调时使用 parent 的 mailbox。session 级 lazy 回调找不到 inbox 返回失败，不再静默吞结果。无 parent 且明确未配置通知的 execution-only 调用可以只结算执行，不声称已通知模型。重试入口由 owner 提供，当前在新 prompt 与关闭排空时调用，也可显式调用；没有独立的自动重试调度器。
+
+本地终态使用任务身份派生的稳定 delivery ID，重投经现有 Receive/canonical 提交路径去重。当前本地 pending 结果保存在进程内，不能据此声称支持进程崩溃后的结果恢复。外部终态继续使用 `TaskTerminalDelivery` 的持久提交确认，不能把本地 mailbox 接纳替代其送达证明。Mailbox wake 也不负责启动已退出的 loop；宿主 continuation、取消不链式和 epoch 失效政策保持不变。
+
+### 3.2 交付证据与外部结果
+
 任务终态同时影响 TUI 状态与 Agent 下一轮输入。对需要通知 Agent 的终态，Manager 先把可信 `Defer` 放入本会话 MessageQueue 并唤醒 Receive，再减少 active count 和发布完成事件；这保证 idle loop 不会在结果入队前退出等待。展示事件的发送失败不能丢弃 Agent 结果，Agent 消息投递失败也不能被展示成功掩盖。取消终态是否通知模型按任务语义决定，但必须明确记录，不借“删除条目”暗示已投递。投递目标为任务的**归属会话**（直接发起会话）；子会话发起的外部任务不因执行 scope owner 不同而改道，规则见 §7。
 
 外部结果在 MCP owner 处保留原始状态和结果；Agent 将其转换为类型化的任务提醒和有界摘要。Workspace Bash 使用 shell 结果的文件引用，不把完整 `structuredContent` JSON 作为模型正文。通用 MCP task 可保留外部来源语义。Owner 对 running→terminal 的唯一跃迁赋予不可变的 terminal transition ID；其后 status message、清理证据等 revision 变化不产生第二次终态提醒。提醒携带由复合任务身份与 terminal transition ID 导出的稳定投递 ID；Receive 将该 ID 与 canonical transcript 中的提醒在同一持久化提交路径去重，已 compact/excluded 的历史仍参与判重。MQ 入队或内存标记不算送达：崩溃在 transcript 提交前可重投，提交后重投被拒绝。持久化失败时保留待对账状态，不能先标记成功。TUI 的单次终态显示由 Manager 的会话投影去重，重连时以快照替换。
@@ -63,7 +75,7 @@ Agent 意外消失、连接断开、宿主更换或部署重启不等同于用�
 
 Session runtime 的 TaskManager 汇合 Subagent、Workflow 与 Workspace MCP 任务投影；ACP 提供快照、增量与统一取消；TUI 在会话切换及重连时按 revision 对账；Workspace MCP 提供 session scope 的发现、变更、关闭和重开。终态提醒以稳定 ID 原子落入 canonical transcript。各入口和验证见 `docs/code-index/`。
 
-完整验收仍须覆盖：三类任务的 started/terminal/取消在同一 TUI 区域可见；任务在结果入队前保持 active；快完成与取消竞争；session 切换及重连快照；订阅丢失后的对账；Agent runtime 重建后从仍存活的独立 MCP 找回任务；显式关闭只取消本 session，Agent 意外退出不取消 MCP；同名 MCP 实例及跨 session task ID 不串线。部署进程退出、MCP owner 退出与不支持发现的第三方 server 应分别报告能力边界。子会话发起任务的发起者可达（回执承诺可兑现）、祖先链聚合可归属且不重复产生终态、跨进程重建后投递目标正确（降级路径显式可观测），同样纳入验收（§7）。
+验收覆盖：新库不创建执行 owner 表、旧库迁移删除旧表；多个 Peri 资源实例可加载同一会话，不因执行权拒绝写入；SDK 的唯一执行者管理独立成立；关闭先结算任务再清除意图，未决持久化可重试；scope close/open 的迟到请求不串代；任务 started/terminal/取消、会话切换和重连对账保持正确。独立 Workspace MCP 存活时，新 Agent 可按 scope 找回任务；MCP 自身退出后的孤儿进程由部署平台负责，不由 Peri 内存目录保证停止。
 
 ## 7. 归属、投递与可见性
 

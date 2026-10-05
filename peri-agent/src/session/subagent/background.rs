@@ -36,9 +36,7 @@ pub(super) async fn spawn_background_subagent(
     max_iterations: usize,
     bg_event_sender: Option<tokio::sync::mpsc::UnboundedSender<ExecutorEvent>>,
     task_manager: Option<Arc<TaskManager>>,
-    on_bg_complete: Option<
-        Arc<dyn Fn(&crate::agent::events::BackgroundTaskResult, BgTaskKind) + Send + Sync>,
-    >,
+    on_bg_complete: Option<peri_acp_types::tasks::OnBgCompleteFn>,
     langfuse_bridge: Option<Arc<dyn LangfuseBridgeLike>>,
     session_resources: Option<Arc<dyn SessionResources>>,
     deregister_runtime: Option<DeregisterRuntimeFn>,
@@ -291,12 +289,15 @@ pub(super) async fn spawn_background_subagent(
                 );
             }
         }
-        // 同步推送 Defer 到 MQ——必须在 registry.complete() 之前
-        // 确保 active_count 归零时 Defer 已在 MQ 中
-        if let Some(ref on_complete) = on_bg_complete {
-            on_complete(&result, BgTaskKind::Agent);
+        if let Some(on_complete) = on_bg_complete {
+            if let Err(error) =
+                task_manager_spawn.settle_completed(&task_id_for_task, result, on_complete)
+            {
+                tracing::error!(task_id = %task_id_for_task, %error, "subagent terminal delivery is pending");
+            }
+        } else {
+            task_manager_spawn.complete(&task_id_for_task, result);
         }
-        task_manager_spawn.complete(&task_id_for_task, result);
         // deregister 由 cleanup_guard drop 统一执行（正常/abort/panic 三路）
     };
     let join_handle = peri_acp_types::tasks::TaskManager::spawn_owned(

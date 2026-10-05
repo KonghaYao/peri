@@ -45,7 +45,6 @@ pub trait MessageReplace: Send + Sync {
 /// 显式队列能力；保留原消息类型的唤醒语义。
 pub trait QueueState: Send + Sync {
     fn v2_queue(&self) -> &MessageQueue;
-    fn inbox_handle(&self) -> Option<&peri_acp_types::session::InboxHandle>;
     fn enqueue_v2_message(&self, msg: QueuedMessage);
 }
 
@@ -198,9 +197,6 @@ impl<T: MiddlewareState + ?Sized> MessageReplace for T {
 impl<T: MiddlewareState + ?Sized> QueueState for T {
     fn v2_queue(&self) -> &MessageQueue {
         MiddlewareState::v2_queue(self)
-    }
-    fn inbox_handle(&self) -> Option<&peri_acp_types::session::InboxHandle> {
-        MiddlewareState::inbox_handle(self)
     }
     fn enqueue_v2_message(&self, msg: QueuedMessage) {
         MiddlewareState::enqueue_v2_message(self, msg)

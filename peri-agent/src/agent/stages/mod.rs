@@ -7,6 +7,7 @@
 //! Receive 是循环入口，也是退出判断点：队列空 + 无 idle 等待时退出。
 
 pub mod act;
+mod async_context;
 pub mod compact;
 mod compact_progress;
 pub mod middleware_runner;
@@ -16,7 +17,7 @@ pub mod receive;
 pub mod tool_dispatch;
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use parking_lot::RwLock;
@@ -33,6 +34,8 @@ use crate::session::tool_catalog::{SessionToolCatalog, SessionToolCatalogSnapsho
 use crate::session::turn::TurnContext;
 use crate::session::{MessageQueue, MessageTranscript, QueuedMessage};
 use crate::tools::{BaseTool, DirectToolInvocationResolver, ToolInvocationResolver};
+
+pub use async_context::AsyncContext;
 
 /// 共享工具注册表类型别名（避免 clippy::type_complexity）
 pub type SharedToolMap = Arc<RwLock<BTreeMap<String, Arc<dyn BaseTool>>>>;
@@ -95,33 +98,6 @@ pub struct CompactContext {
     /// Compact 连续失败计数（run_compact 内部递增/重置，仅用于 Compact 降级跳过决策）
     pub compact_consecutive_failures: Arc<AtomicU32>,
     pub(crate) budget_recovery: Arc<parking_lot::Mutex<compact_progress::CompactBudgetRecovery>>,
-}
-
-/// 异步传输控制（run_react_loop idle 等待及完成提醒的只读后台活动判断）
-#[derive(Clone)]
-pub struct AsyncContext {
-    pub idle_inbox: Option<Arc<crate::agent::session::SessionInbox>>,
-    pub idle_should_wait: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
-    /// 有界等待到期且仍有未结算任务时返回交接快照（只返回一次）。
-    /// `idle_should_wait` 返回 false 后由 loop 退出路径消费。
-    pub pending_handoff: Option<
-        Arc<dyn Fn() -> Option<crate::agent::async_tasks::handoff::PendingHandoff> + Send + Sync>,
-    >,
-    /// 当前有界等待窗口的绝对截止时刻；idle 挂起据此设置定时器，保证
-    /// 「无外部唤醒时到点退出」（`None` = 当前未在等待）。
-    pub handoff_deadline: Option<Arc<dyn Fn() -> Option<tokio::time::Instant> + Send + Sync>>,
-    /// Registry lifecycle signal. This is only a wake source; Receive re-checks
-    /// the registry's active count after every notification.
-    pub idle_registry: Option<tokio::sync::watch::Receiver<u64>>,
-    /// 会话级 idle-suspended 标志（宿主 SessionAccessPort 注入的共享 Arc）。
-    ///
-    /// run_react_loop 在 await_wake 挂起期间置 true、醒来/取消时复位。
-    /// 宿主 `dispatch_prompt_turn` 读取此标志把挂起期间到达的用户 prompt
-    /// 注入 inbox（Prompt + wake），让挂起的 loop 立即醒来消费，而不是在
-    /// per-session prompt lock 上阻塞至当前 turn 完成。
-    pub idle_suspended_flag: Option<Arc<AtomicBool>>,
-    /// 与 session inbox 同源的 push 句柄；middleware 经此入队以唤醒 `await_wake`。
-    pub inbox_handle: Option<crate::agent::session::InboxHandle>,
 }
 
 // ─── 阶段间共享上下文 ───────────────────────────────────────────────────────
@@ -198,13 +174,12 @@ impl StageContext {
                 budget_recovery: Arc::new(parking_lot::Mutex::new(Default::default())),
             },
             async_ctx: AsyncContext {
-                idle_inbox: None,
+                idle_wait_enabled: false,
                 idle_should_wait: None,
                 pending_handoff: None,
                 handoff_deadline: None,
                 idle_registry: None,
                 idle_suspended_flag: None,
-                inbox_handle: None,
             },
             goal_controller: None,
             recall_buffer: rbuf,
@@ -249,13 +224,12 @@ impl StageContext {
                 budget_recovery: Arc::new(parking_lot::Mutex::new(Default::default())),
             },
             async_ctx: AsyncContext {
-                idle_inbox: None,
+                idle_wait_enabled: false,
                 idle_should_wait: None,
                 pending_handoff: None,
                 handoff_deadline: None,
                 idle_registry: None,
                 idle_suspended_flag: None,
-                inbox_handle: None,
             },
             goal_controller: None,
         }
@@ -400,56 +374,6 @@ impl StageContextBuilder {
 
     pub fn with_compact_post_hook(mut self, hook: Arc<dyn Fn(bool, usize) + Send + Sync>) -> Self {
         self.compact.compact_post_hook = Some(hook);
-        self
-    }
-
-    pub fn with_idle_inbox(mut self, inbox: Arc<crate::agent::session::SessionInbox>) -> Self {
-        self.async_ctx.idle_inbox = Some(inbox);
-        self
-    }
-
-    pub fn with_idle_registry(mut self, receiver: tokio::sync::watch::Receiver<u64>) -> Self {
-        self.async_ctx.idle_registry = Some(receiver);
-        self
-    }
-
-    pub fn with_inbox_handle(mut self, handle: crate::agent::session::InboxHandle) -> Self {
-        self.async_ctx.inbox_handle = Some(handle);
-        self
-    }
-
-    /// 设置 idle 时是否应该 await_wake 的判断 closure。
-    /// 返回 true → 主 agent 有未完成异步任务，需要 await_wake 等结果续跑。
-    /// 返回 false → 直接退出 loop，避免正常对话 loading 卡死。
-    pub fn with_idle_should_wait(mut self, probe: Arc<dyn Fn() -> bool + Send + Sync>) -> Self {
-        self.async_ctx.idle_should_wait = Some(probe);
-        self
-    }
-
-    /// 有界等待到期时的交接快照探针（见 [`AsyncContext::pending_handoff`]）。
-    pub fn with_pending_handoff(
-        mut self,
-        probe: Arc<
-            dyn Fn() -> Option<crate::agent::async_tasks::handoff::PendingHandoff> + Send + Sync,
-        >,
-    ) -> Self {
-        self.async_ctx.pending_handoff = Some(probe);
-        self
-    }
-
-    /// 有界等待窗口的截止时刻探针（idle 挂起据此设置定时器）。
-    pub fn with_handoff_deadline(
-        mut self,
-        probe: Arc<dyn Fn() -> Option<tokio::time::Instant> + Send + Sync>,
-    ) -> Self {
-        self.async_ctx.handoff_deadline = Some(probe);
-        self
-    }
-
-    /// 设置会话级 idle-suspended 标志（await_wake 挂起期间置 true；宿主
-    /// `dispatch_prompt_turn` 据此把挂起期间到达的用户 prompt 注入 inbox）。
-    pub fn with_idle_suspended_flag(mut self, flag: Arc<AtomicBool>) -> Self {
-        self.async_ctx.idle_suspended_flag = Some(flag);
         self
     }
 
@@ -721,7 +645,6 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                     }
                 }
 
-                // idle_should_wait 逻辑：队列空 → 如有 idle_inbox 且有未完成异步任务，等异步事件续跑。
                 let should_wait = context
                     .async_ctx
                     .idle_should_wait
@@ -729,7 +652,7 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                     .map(|probe| probe())
                     .unwrap_or(false);
                 if should_wait {
-                    if let Some(inbox) = &context.async_ctx.idle_inbox {
+                    if context.async_ctx.idle_wait_enabled {
                         if let Some(mailbox) = &context.session.user_input_mailbox {
                             mailbox.enter_idle();
                         }
@@ -800,7 +723,7 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                                 }
                                 return LoopResult::Interrupted;
                             }
-                            _ = inbox.await_wake() => {
+                            _ = context.session.queue.await_wake() => {
                                 // 醒来：无论由注入 prompt 还是 bg Defer 触发，先复位
                                 // 标志——后续 Receive 会 drain 队列并继续本 turn。
                                 if let Some(flag) = &context.async_ctx.idle_suspended_flag {

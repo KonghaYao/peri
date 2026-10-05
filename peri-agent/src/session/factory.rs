@@ -167,8 +167,7 @@ use peri_acp_types::tools::TodoItem;
 use peri_acp_types::workflow::AgentExecutor;
 use peri_acp_types::{identity::AgentId, permission::SharedPermissionMode};
 
-use crate::agent::async_tasks::{BgTaskKind, TaskManager};
-use crate::agent::events::BackgroundTaskResult;
+use crate::agent::async_tasks::TaskManager;
 use crate::agent::react::ReactLLM;
 use crate::agent::LangfuseBridgeLike;
 use crate::agent::{AgentCancellationToken, ExecutorEvent};
@@ -177,7 +176,7 @@ use crate::session::Session;
 use crate::tools::BaseTool;
 
 /// 后台任务完成回调类型（第二参为任务 kind，供 continuation scheduler 过滤）。
-pub type OnBgCompleteFn = Arc<dyn Fn(&BackgroundTaskResult, BgTaskKind) + Send + Sync>;
+pub use peri_acp_types::tasks::OnBgCompleteFn;
 /// System prompt 构建器类型。
 pub type SystemPromptBuilder = Arc<dyn Fn(Option<&AgentOverrides>, &str) -> String + Send + Sync>;
 

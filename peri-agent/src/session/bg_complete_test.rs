@@ -119,15 +119,63 @@ fn queue_with_inbox() -> (Arc<MessageQueue>, Arc<SessionInbox>) {
     (queue, inbox)
 }
 
+#[tokio::test]
+async fn owner_retains_result_until_late_inbox_registration_then_wakes_it() {
+    use crate::agent::async_tasks::{BackgroundTask, BackgroundTaskStatus, BgCancelHandle};
+    let manager = crate::agent::async_tasks::TaskManager::new();
+    manager
+        .register_with_kind(BackgroundTask {
+            id: "shell-lazy".into(),
+            agent_name: "Bash".into(),
+            prompt_summary: "task".into(),
+            status: BackgroundTaskStatus::Running,
+            started_at: std::time::Instant::now(),
+            chrono_started_at: chrono::Utc::now(),
+            kind: BgTaskKind::Shell,
+            cancel_handle: BgCancelHandle::Kill(Some(Box::new(|| {}))),
+            cancel_token: None,
+            pid: None,
+            output_preview: None,
+            agent_inbox: None,
+            initiator_session_id: None,
+            owner_session_id: None,
+            owner_identity: None,
+        })
+        .unwrap();
+    let port = FakeAccessPort::new();
+    let delivery = session_bg_complete_callback(port.clone(), SESSION_ID.into());
+    assert!(manager
+        .settle_completed("shell-lazy", shell_result("shell-lazy"), delivery)
+        .is_err());
+    assert_eq!(manager.active_count(), 1);
+    let (queue, inbox) = queue_with_inbox();
+    port.set_inbox(Arc::clone(&inbox));
+    let waiting = inbox.await_wake();
+    tokio::pin!(waiting);
+    futures::future::poll_fn(|context| {
+        use std::future::Future;
+        assert!(waiting.as_mut().poll(context).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    assert_eq!(manager.retry_pending_deliveries(), 1);
+    tokio::time::timeout(std::time::Duration::from_secs(1), waiting)
+        .await
+        .unwrap();
+    assert_eq!(manager.active_count(), 0);
+    assert_eq!(queue.len(), 1);
+    assert_eq!(manager.retry_pending_deliveries(), 0);
+}
+
 #[test]
-fn test_missing_inbox_is_silent_noop() {
+fn test_missing_inbox_reports_delivery_failure() {
     // 装配点形态：session 尚未注册（`session_inbox` 恒 None）。
     let port = FakeAccessPort::new();
     let callback = session_bg_complete_callback(port.clone(), SESSION_ID.to_string());
     let result = shell_result("shell-noop");
 
-    callback(&result, BgTaskKind::Shell);
-    callback(&result, BgTaskKind::Shell);
+    assert!(callback(&result, BgTaskKind::Shell).is_err());
+    assert!(callback(&result, BgTaskKind::Shell).is_err());
 
     assert_eq!(
         port.inbox_calls(),
@@ -143,13 +191,12 @@ fn test_inbox_is_resolved_lazily_at_call_time() {
     let callback = session_bg_complete_callback(port.clone(), SESSION_ID.to_string());
     let result = shell_result("shell-lazy");
 
-    // 注册前调用：静默 no-op，不得 panic、不得投递。
-    callback(&result, BgTaskKind::Shell);
+    assert!(callback(&result, BgTaskKind::Shell).is_err());
 
     // session 注册之后：同一闭包（无需重建）必须能投递。
     let (queue, inbox) = queue_with_inbox();
     port.set_inbox(inbox);
-    callback(&result, BgTaskKind::Shell);
+    callback(&result, BgTaskKind::Shell).unwrap();
 
     assert_eq!(
         queue.len(),
@@ -167,7 +214,7 @@ fn test_shell_completion_is_delivered_as_defer_with_shell_source() {
     // task_id 恰好 8 字符，`to_notification` 的 short_id 截断对其为恒等。
     let result = shell_result("shell-ab");
 
-    callback(&result, BgTaskKind::Shell);
+    callback(&result, BgTaskKind::Shell).unwrap();
 
     assert_eq!(queue.len(), 1, "exactly one message per completion");
     assert!(queue.has_wake_up(), "Defer must wake the idle session loop");
@@ -206,7 +253,7 @@ fn test_callback_result_is_assignable_to_acp_types_alias() {
         session_bg_complete_callback(port, SESSION_ID.to_string());
     let result = shell_result("shell-alias");
 
-    callback(&result, BgTaskKind::Shell);
+    callback(&result, BgTaskKind::Shell).unwrap();
 
     assert_eq!(queue.len(), 1);
     assert_eq!(queue.drain_all()[0].source, MessageSource::ShellComplete);

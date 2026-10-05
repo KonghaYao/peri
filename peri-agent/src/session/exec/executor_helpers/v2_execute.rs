@@ -3,10 +3,7 @@ use std::sync::Arc;
 use peri_acp_types::{
     command::PromptStopReason,
     error::AgentError,
-    event::{
-        AgentEventHandler, BackgroundTaskResult, EventPublisher, ExecutorEvent, TurnErrorKind,
-        TurnStatus,
-    },
+    event::{AgentEventHandler, EventPublisher, ExecutorEvent, TurnErrorKind, TurnStatus},
     event_v2::EventHandles,
     frozen::{ChildHandlerFactory, ThreadPersistence},
     goal::GoalController,
@@ -64,7 +61,7 @@ pub struct StageBuildRequest {
     pub thread_persistence: ThreadPersistence,
     pub goal_controller: Option<Arc<dyn GoalController>>,
     pub task_manager: Option<Arc<AgentTaskManager>>,
-    pub on_bg_complete: Option<Arc<dyn Fn(&BackgroundTaskResult, BgTaskKind) + Send + Sync>>,
+    pub on_bg_complete: Option<peri_acp_types::tasks::OnBgCompleteFn>,
 }
 
 /// stage 装配注入面（ACP 侧从 `SessionContext` 投影 `StageBuildInput` 并补齐
@@ -105,7 +102,7 @@ pub struct V2ExecuteRequest {
     pub auxiliary_model: Option<Arc<dyn peri_model::Model>>,
     pub thread_persistence: ThreadPersistence,
     pub goal_controller: Option<Arc<dyn GoalController>>,
-    pub on_bg_complete: Option<Arc<dyn Fn(&BackgroundTaskResult, BgTaskKind) + Send + Sync>>,
+    pub on_bg_complete: Option<peri_acp_types::tasks::OnBgCompleteFn>,
     // ── 注入面（L5 依赖反转）──
     /// 事件发射端口（ACP/Controller 适配层；Phase 2/3/4/7/9 统一发射点）。
     pub publisher: Arc<dyn EventPublisher>,

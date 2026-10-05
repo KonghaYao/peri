@@ -686,6 +686,7 @@ async fn test_resume_subagent_background_mode_cancelled() {
         if let Some(completed) = completed_tx.lock().unwrap().take() {
             let _ = completed.send(result.clone());
         }
+        Ok(())
     }));
     let spawned = SessionFactory::resume_subagent(None, config)
         .await

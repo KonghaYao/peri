@@ -8,7 +8,6 @@
 
 use super::*;
 use crate::agent::async_tasks::handoff::BoundedWait;
-use peri_acp_types::session::SessionInbox;
 use peri_acp_types::tasks::{BgTaskKind, BgTaskRegistration, TaskManager as TaskManagerPort};
 use std::time::Duration;
 
@@ -22,7 +21,6 @@ fn parked_context(
         crate::session::FrozenContext::builder().build(),
         None,
     );
-    let queue = session.queue().clone();
     let wait = std::sync::Arc::clone(&bounded);
     let handoff = std::sync::Arc::clone(&bounded);
     let deadline = std::sync::Arc::clone(&bounded);
@@ -33,9 +31,7 @@ fn parked_context(
         session.transcript(),
         session.queue().clone(),
     )
-    .with_idle_inbox(std::sync::Arc::new(SessionInbox::new(std::sync::Arc::new(
-        queue,
-    ))))
+    .with_idle_waiting()
     .with_idle_registry(manager.registry().subscribe_activity())
     .with_idle_should_wait(std::sync::Arc::new(move || {
         wait.should_wait(busy.active_count() > 0)

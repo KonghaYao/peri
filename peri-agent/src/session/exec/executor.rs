@@ -56,7 +56,6 @@ use peri_acp_types::{
     event::ExecutorEvent,
     interaction::UserInteractionBroker,
     messages::{ContentBlock, MessageContent},
-    session::QueuedMessage,
 };
 use tokio_util::sync::CancellationToken as AgentCancellationToken;
 
@@ -259,52 +258,14 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
         incoming_recalls.clear();
     }
 
-    // 解析 session-level SessionInbox（await-wake wrapper）。
-    // 用于：(1) executor idle 期间 await_wake 阻塞等待异步事件，
-    // (2) AsyncRouter 推送 bg_results/workflow 事件时触发 wake。
-    // None 表示不支持 async wake（如 print mode），保持向后兼容。
-    let session_inbox = ctx
-        .session_access
-        .as_ref()
-        .and_then(|sa| sa.session_inbox(&ctx.session_id));
-
-    // 构建 AsyncRouter（统一异步事件路由到 inbox）。
-    // 通过 InboxHandle 推送 Defer 消息并触发 wake Notify，
-    // 替代 executor 的直接 v2_message_queue.push（raw，无 wake）。
-    let async_router = session_inbox
-        .as_ref()
-        .map(|inbox| AsyncRouter::new(inbox.handle()));
-
-    // bg_results 通过 AsyncRouter（或回退到 v2 MessageQueue）push（Defer kind）。
-    //
-    // Defer 是异步延迟结果的正确语义：本轮 Receive 跳过保留，End 阶段 drain
-    // 唤醒新 turn，并由 `mod.rs::run_react_loop` 写入 transcript（包裹
-    // `<system-reminder>`）。与 WorkflowComplete / cron 等其他异步唤醒路径
-    // 走同一套机制——见 `append_messages_to_transcript`。
+    let async_router = AsyncRouter::for_queue(&v2_message_queue);
     if !bg_results.is_empty() {
         tracing::info!(
             count = bg_results.len(),
             "[bg-diag] ctx.bg_results is non-empty, will inject each via AsyncRouter"
         );
-        if let Some(ref router) = async_router {
-            // v2 路径：通过 AsyncRouter → InboxHandle → push_defer（触发 wake）
-            for result in &bg_results {
-                router.route_bg_result(result, BgTaskKind::Agent);
-            }
-        } else {
-            // 回退路径：直接 push（无 wake，兼容 print mode / 无 SessionAccess）
-            use peri_acp_types::session::{MessageKind as V2Kind, MessageSource as V2Src};
-            for result in &bg_results {
-                let reminder = crate::session::async_router::background_result_reminder(
-                    result,
-                    BgTaskKind::Agent,
-                );
-                v2_message_queue.push(QueuedMessage::system_reminder(
-                    V2Kind::Defer,
-                    V2Src::SubAgentComplete,
-                    reminder,
-                ));
-            }
+        for result in &bg_results {
+            async_router.route_bg_result(result, BgTaskKind::Agent);
         }
     }
 
@@ -338,6 +299,7 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
     let task_manager_for_cmd = pending_task_probe
         .clone()
         .unwrap_or_else(|| Arc::new(peri_acp_types::tasks::NoopTaskManager));
+    task_manager_for_cmd.retry_pending_deliveries();
 
     // ── L5 命令拦截注入面（注册表 / compact 配置）──
     let command_lookup = Arc::clone(&ctx.command_lookup);
@@ -465,7 +427,6 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
         history_payloads,
         &ctx.session_id,
         cached_llm.as_ref(),
-        &v2_message_queue,
         async_router.clone(),
         task_manager_for_cmd,
         continuation,

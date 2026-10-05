@@ -4,6 +4,7 @@ use crate::middleware::capabilities as hook_state;
 use crate::session::queue::MessageSource;
 use crate::session::store::FrozenContext;
 use crate::session::Session;
+use std::sync::atomic::AtomicBool;
 
 struct CountingFinalAnswerLLM {
     calls: Arc<std::sync::atomic::AtomicUsize>,
@@ -447,7 +448,7 @@ async fn test_run_react_loop_idle_wake_does_not_consume_iteration_budget() {
         }))
         .with_middleware_chain(Arc::new(chain))
         .with_event_bus(Arc::new(bus))
-        .with_idle_inbox(inbox)
+        .with_idle_waiting()
         .with_idle_should_wait({
             let should_wait = Arc::clone(&should_wait);
             Arc::new(move || should_wait.load(Ordering::Acquire))

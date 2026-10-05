@@ -7,8 +7,8 @@
 //!
 //! 语义依据（主计划 §2.1）：[`AsyncRouter::route_bg_result`] 的全部动作只依赖
 //! session inbox —— 构造 `background_result_reminder` →
-//! `InboxHandle::push_system_reminder(MessageKind::Defer, source, reminder)` →
-//! 入队 + `wake.notify_one()`；**不看 agent / turn**。`BgTaskKind::Shell` 的
+//! `InboxHandle::push_system_reminder_with_delivery_id` →
+//! 同一 mailbox 内入队 + wake；**不看 agent / turn**。`BgTaskKind::Shell` 的
 //! continuation 请求在宿主侧本就因 kind 门槛被丢弃
 //! （`peri-acp/src/host/continuation.rs`），因此本 helper 产出的闭包对 Shell 与
 //! per-turn 闭包**逐位等价**。
@@ -21,7 +21,6 @@ use std::sync::Arc;
 
 use peri_acp_types::session::SessionAccessPort;
 use peri_acp_types::tasks::BgTaskKind;
-use tracing::debug;
 
 use crate::agent::events::BackgroundTaskResult;
 use crate::session::async_router::AsyncRouter;
@@ -33,7 +32,7 @@ use crate::session::factory::OnBgCompleteFn;
 /// 1. 用 `session_id` lazy resolve 会话 inbox；
 /// 2. 命中则经 [`AsyncRouter::route_bg_result`] 把 bg 结果作为 `Defer` 投递并唤醒
 ///    idle 中的会话循环；
-/// 3. 未命中（session 尚未注册 / 已销毁）为静默 no-op —— 不 panic、不阻塞。
+/// 3. 未命中（session 尚未注册 / 已销毁）返回 Err，由 owner 保留结果等待重试。
 ///
 /// 除 inbox 外不读取任何会话状态，也不发起 continuation（依据见模块文档）。
 pub fn session_bg_complete_callback(
@@ -42,13 +41,13 @@ pub fn session_bg_complete_callback(
 ) -> OnBgCompleteFn {
     Arc::new(move |result: &BackgroundTaskResult, kind: BgTaskKind| {
         match session_access.session_inbox(&session_id) {
-            Some(inbox) => AsyncRouter::new(inbox.handle()).route_bg_result(result, kind),
-            None => debug!(
-                session_id = %session_id,
-                task_id = %result.task_id,
-                kind = ?kind,
-                "session bg complete callback: inbox unavailable, result not routed"
-            ),
+            Some(inbox) => {
+                AsyncRouter::new(inbox.handle()).route_bg_result(result, kind);
+                Ok(())
+            }
+            None => Err(format!(
+                "completion inbox unavailable for session {session_id}"
+            )),
         }
     })
 }

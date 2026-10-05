@@ -4,7 +4,6 @@ use peri_acp_types::{
     event::{AgentEventHandler, BackgroundTaskResult, ExecutorEvent},
     frozen::ThreadPersistence,
     messages::BaseMessage,
-    session::MessageQueue,
     tasks::{BgTaskKind, TaskManager},
 };
 
@@ -37,8 +36,7 @@ pub(super) async fn build_and_execute_agent(
     history_payloads: Vec<peri_acp_types::store::PersistedPayload>,
     session_id: &str,
     cached_llm: Option<&CachedLlmInstances>,
-    v2_message_queue: &MessageQueue,
-    async_router: Option<AsyncRouter>,
+    async_router: AsyncRouter,
     task_manager: Arc<dyn TaskManager>,
     continuation: bool,
     stage_build: StageBuildFn,
@@ -123,26 +121,22 @@ pub(super) async fn build_and_execute_agent(
         // 因此每个 session 的消费者只 spawn 一次，无跨 session 污染。
         if wf_mw.init_notification_buffer() {
             let mut rx = wf_mw.subscribe_notifications();
-            // AsyncRouter（v2 路径：push_defer + wake Notify）
-            // 或回退 v2 queue clone（无 inbox 时直接 push，无 wake）
             let wf_router = async_router.clone();
-            let fallback_queue = v2_message_queue.clone();
             // task_manager 用于在 Defer 入队后递减 active_count，消除竞态窗口
             let notify_bg = task_manager.clone();
             tokio::spawn(async move {
                 loop {
                     match rx.recv().await {
                         Ok(task_result) => {
-                            crate::session::workflow_completion::apply_workflow_task_result(
-                                &task_result,
-                                wf_router.as_ref(),
-                                if wf_router.is_none() {
-                                    Some(&fallback_queue)
-                                } else {
-                                    None
-                                },
-                                notify_bg.as_ref(),
-                            );
+                            if let Err(error) =
+                                crate::session::workflow_completion::apply_workflow_task_result(
+                                    &task_result,
+                                    &wf_router,
+                                    notify_bg.as_ref(),
+                                )
+                            {
+                                tracing::error!(run_id = %task_result.run_id, %error, "workflow terminal delivery is pending");
+                            }
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                             tracing::warn!("WF notification consumer lagged by {} messages", n);
@@ -180,8 +174,8 @@ pub(super) async fn build_and_execute_agent(
     // scheduler。回调可能在主 prompt 结束后才发生（bg 独立运行），此时
     // callback queue 已先写入；scheduler 原子 take session/cancel 标记后
     // 通过同一 session execution path 发起内部 AsyncContinuation。
-    let on_bg_complete = async_router.as_ref().map(|router| {
-        let router = router.clone();
+    let on_bg_complete = Some({
+        let router = async_router.clone();
         let notify = ctx.continuation_notify.clone();
         let sid = ctx.session_id.clone();
         Arc::new(move |result: &BackgroundTaskResult, kind: BgTaskKind| {
@@ -193,7 +187,8 @@ pub(super) async fn build_and_execute_agent(
                     mq_steering: false,
                 });
             }
-        }) as Arc<dyn Fn(&BackgroundTaskResult, BgTaskKind) + Send + Sync>
+            Ok(())
+        }) as peri_acp_types::tasks::OnBgCompleteFn
     });
 
     // ── L5 执行体注入面（stage 构建 / 事件发射 / LLM 缓存 / cancel cascade / forwarder）──

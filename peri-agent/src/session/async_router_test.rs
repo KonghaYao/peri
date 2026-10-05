@@ -41,6 +41,23 @@ fn test_route_bg_result_pushes_defer() {
 }
 
 #[test]
+fn retried_terminal_publication_preserves_delivery_identity() {
+    let (inbox, handle) = make_inbox();
+    let router = AsyncRouter::new(handle);
+    let result = make_bg_result("task", "test-agent", "done");
+    router.route_bg_result(&result, BgTaskKind::Agent);
+    router.route_bg_result(&result, BgTaskKind::Agent);
+    router.route_bg_result(
+        &make_bg_result("other", "test-agent", "done"),
+        BgTaskKind::Agent,
+    );
+    let messages = inbox.queue().drain_all();
+    assert!(messages[0].delivery_id.is_some());
+    assert_eq!(messages[0].delivery_id, messages[1].delivery_id);
+    assert_ne!(messages[0].delivery_id, messages[2].delivery_id);
+}
+
+#[test]
 fn test_route_bg_result_uses_subagent_complete_source() {
     let (inbox, handle) = make_inbox();
     let router = AsyncRouter::new(handle);

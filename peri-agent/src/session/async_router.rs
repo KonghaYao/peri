@@ -3,9 +3,8 @@
 //! L5：自 `peri-acp/src/session/async_router.rs` 物理迁入（仅依赖 peri-acp-types，
 //! 干净迁入；ACP 侧保留 re-export 桥）。
 //!
-//! Replaces the executor's direct push to the raw `v2_message_queue` with a
-//! unified path through [`InboxHandle`], so that [`SessionInbox::await_wake`] is
-//! properly triggered when the agent is idle.
+//! Projects terminal results into the queue-owned mailbox. All publication
+//! paths share its wake signal; reminder severity does not decide scheduling.
 //!
 //! Two routing targets:
 //! - **Background task results** (`route_bg_result`): completion notifications
@@ -14,11 +13,12 @@
 //! - **Workflow events** (`route_workflow_event`): completion notifications from
 //!   the workflow middleware subscriber, pushed as `Defer` + `MessageSource::WorkflowComplete`.
 //!
-//! Both use `Defer` semantics: consumed by `drain_all` during the Receive stage
-//! (RCRA), or detectable by `drain_for_end` for external callers.
+//! Both use `Defer` semantics and stable delivery identities for Receive deduplication.
 
 use peri_acp_types::event::BackgroundTaskResult;
-use peri_acp_types::session::{InboxHandle, MessageKind, MessageSource};
+use peri_acp_types::session::{
+    InboxHandle, MessageKind, MessageQueue, MessageSource, SessionInbox,
+};
 use peri_acp_types::system_reminder::{
     ReminderCategory, ReminderDelivery, ReminderSeverity, TrustedSystemReminder,
 };
@@ -102,6 +102,10 @@ pub struct AsyncRouter {
 }
 
 impl AsyncRouter {
+    pub fn for_queue(queue: &MessageQueue) -> Self {
+        Self::new(SessionInbox::new(std::sync::Arc::new(queue.clone())).handle())
+    }
+
     /// Create a new AsyncRouter from the given inbox handle.
     ///
     /// The handle is typically obtained from `SessionInbox::handle()` during
@@ -136,8 +140,12 @@ impl AsyncRouter {
             BgTaskKind::Mcp => MessageSource::DynamicMcpNotification,
         };
         let reminder = background_result_reminder(result, kind);
-        self.inbox
-            .push_system_reminder(MessageKind::Defer, source, reminder);
+        self.inbox.push_system_reminder_with_delivery_id(
+            MessageKind::Defer,
+            source,
+            reminder,
+            crate::agent::async_tasks::delivery::terminal_delivery_id(&result.task_id, "terminal"),
+        );
         debug!(
             task_id = %result.task_id,
             agent_name = %result.agent_name,
@@ -271,10 +279,11 @@ impl AsyncRouter {
                 "tool_calls_count": tool_calls_count,
             }),
         );
-        self.inbox.push_system_reminder(
+        self.inbox.push_system_reminder_with_delivery_id(
             MessageKind::Defer,
             MessageSource::WorkflowComplete,
             reminder,
+            crate::agent::async_tasks::delivery::terminal_delivery_id(run_id, "terminal"),
         );
     }
 }

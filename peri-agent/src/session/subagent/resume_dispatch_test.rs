@@ -379,6 +379,7 @@ async fn test_resume_precancelled_background_still_registers_and_completes() {
         if let Some(completed) = completed_tx.lock().unwrap().take() {
             let _ = completed.send(result.clone());
         }
+        Ok(())
     }));
     let spawned = SessionFactory::resume_subagent(None, config)
         .await

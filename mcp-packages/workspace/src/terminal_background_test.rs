@@ -21,7 +21,7 @@ async fn test_bg_explicit_timeout_kills_process_group() {
     let tool = BashTool::new(std::env::temp_dir().to_str().unwrap())
         .with_task_manager(registry)
         .with_on_bg_complete(Arc::new(move |r, _kind| {
-            let _ = tx.send(r.clone());
+            tx.send(r.clone()).map_err(|error| error.to_string())
         }));
 
     let result = tool
@@ -70,7 +70,7 @@ async fn test_bg_shell_registered_while_running() {
     let tool = BashTool::new(std::env::temp_dir().to_str().unwrap())
         .with_task_manager(registry.clone())
         .with_on_bg_complete(Arc::new(move |r, _kind| {
-            let _ = tx.send(r.clone());
+            tx.send(r.clone()).map_err(|error| error.to_string())
         }));
 
     let result = tool
@@ -123,7 +123,7 @@ async fn test_bg_shell_log_file_tee() {
     let tool = BashTool::new(std::env::temp_dir().to_str().unwrap())
         .with_task_manager(registry.clone())
         .with_on_bg_complete(Arc::new(move |r, _kind| {
-            let _ = tx.send(r.clone());
+            tx.send(r.clone()).map_err(|error| error.to_string())
         }));
 
     let result = tool
@@ -209,7 +209,7 @@ async fn test_sync_timeout_promotes_to_background() {
     let tool = BashTool::new(std::env::temp_dir().to_str().unwrap())
         .with_task_manager(registry.clone())
         .with_on_bg_complete(Arc::new(move |r, _kind| {
-            let _ = tx.send(r.clone());
+            tx.send(r.clone()).map_err(|error| error.to_string())
         }));
 
     let err = tool

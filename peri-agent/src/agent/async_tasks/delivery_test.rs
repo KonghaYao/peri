@@ -33,9 +33,7 @@ async fn assert_terminal_receipt_wakes(source: MessageSource, severity: Reminder
     ));
     let queue = MessageQueue::new();
     let inbox = Arc::new(SessionInbox::new(Arc::new(queue.clone())));
-    let delivery =
-        SessionTerminalDelivery::for_transcript(&transcript, &queue, Some(&inbox.handle()))
-            .unwrap();
+    let delivery = SessionTerminalDelivery::for_transcript(&transcript, &queue).unwrap();
     let reminder = TrustedSystemReminderFactory::for_producer()
         .construct(SystemReminder {
             version: SYSTEM_REMINDER_VERSION,

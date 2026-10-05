@@ -1,4 +1,4 @@
-//! Session inbox 与生产者 handle 共享的队列和 wake 通道。
+//! Session inbox 与生产者 handle 是同一 mailbox 的消费与发布能力。
 
 use super::{MessageKind, MessageQueue, MessageSource, QueuedMessage};
 use crate::{messages::BaseMessage, system_reminder::TrustedSystemReminder};
@@ -15,9 +15,6 @@ use std::sync::Arc;
 /// which blocks until a new Prompt/Defer is enqueued, then the loop resumes.
 pub struct SessionInbox {
     queue: Arc<MessageQueue>,
-    /// Dedicated notify for await_wake — separate from queue's internal notify
-    /// to avoid spurious wakeups when Info messages are pushed.
-    wake: Arc<tokio::sync::Notify>,
 }
 
 impl SessionInbox {
@@ -26,10 +23,7 @@ impl SessionInbox {
     /// The queue is typically the session-level shared instance passed through
     /// `Session::new_with_cancel_and_queue`.
     pub fn new(queue: Arc<MessageQueue>) -> Self {
-        Self {
-            queue,
-            wake: Arc::new(tokio::sync::Notify::new()),
-        }
+        Self { queue }
     }
 
     /// Block until the inbox has at least one wake-able message (Prompt or Defer).
@@ -40,8 +34,7 @@ impl SessionInbox {
     /// ## Non-destructive
     ///
     /// This method does NOT drain any messages. The actual consumption happens in
-    /// `stages/receive.rs` via `drain_all`; `drain_for_receive` and `drain_for_end`
-    /// remain available for external flush callers.
+    /// `stages/receive.rs` via `drain_all`.
     ///
     /// ## Spurious wakeup guard
     ///
@@ -49,17 +42,7 @@ impl SessionInbox {
     /// (which don't wake the loop), we go back to waiting. This prevents the executor
     /// from spinning on Info-only notifications.
     pub async fn await_wake(&self) {
-        // Fast path: if already pending, return immediately
-        if self.queue.has_wake_up() {
-            return;
-        }
-        loop {
-            self.wake.notified().await;
-            // Guard against spurious wakeups: only wake on Prompt/Defer
-            if self.queue.has_wake_up() {
-                return;
-            }
-        }
+        self.queue.await_wake().await;
     }
 
     /// Get a cloneable handle for producers.
@@ -69,7 +52,6 @@ impl SessionInbox {
     pub fn handle(&self) -> InboxHandle {
         InboxHandle {
             queue: Arc::clone(&self.queue),
-            wake: Arc::clone(&self.wake),
         }
     }
 
@@ -99,7 +81,6 @@ impl std::fmt::Debug for SessionInbox {
 #[derive(Clone)]
 pub struct InboxHandle {
     queue: Arc<MessageQueue>,
-    wake: Arc<tokio::sync::Notify>,
 }
 
 impl InboxHandle {
@@ -109,25 +90,20 @@ impl InboxHandle {
     /// and wake the loop.
     pub fn push_prompt(&self, source: MessageSource, message: BaseMessage) {
         self.queue.push(QueuedMessage::prompt(source, message));
-        self.wake.notify_one();
     }
 
     /// Push a Defer message (SubAgent complete, Cron trigger, bg result) and wake.
     ///
     /// In RCRA, Defer messages are consumed by `drain_all` during the Receive stage.
-    /// They are also detectable via `drain_for_end` for external callers.
     pub fn push_defer(&self, source: MessageSource, message: BaseMessage) {
         self.queue.push(QueuedMessage::defer(source, message));
-        self.wake.notify_one();
     }
 
     /// Push an Info message (system reminder, hook injection) — does NOT wake.
     ///
-    /// Info messages are consumed by `drain_all` (in the loop) or `drain_for_receive`
-    /// (external flush paths), but never wake the loop.
+    /// Info messages are consumed by `drain_all`, but never wake the loop.
     /// They must be carried out by a Prompt message arriving later.
     pub fn push_info(&self, source: MessageSource, message: BaseMessage) {
-        // Intentionally no wake.notify_one() — Info does not wake the loop
         self.queue.push(QueuedMessage::info(source, message));
     }
 
@@ -160,23 +136,12 @@ impl InboxHandle {
     ///
     /// Wakes only if the message kind is Prompt or Defer (i.e., `kind.wakes_up()`).
     pub fn push(&self, msg: QueuedMessage) {
-        let should_wake = msg.kind.wakes_up();
         self.queue.push(msg);
-        if should_wake {
-            self.wake.notify_one();
-        }
     }
 
     /// Batch push messages; wakes once if any message is wake-able.
     pub fn push_batch(&self, msgs: Vec<QueuedMessage>) {
-        if msgs.is_empty() {
-            return;
-        }
-        let should_wake = msgs.iter().any(|m| m.kind.wakes_up());
         self.queue.push_batch(msgs);
-        if should_wake {
-            self.wake.notify_one();
-        }
     }
 }
 

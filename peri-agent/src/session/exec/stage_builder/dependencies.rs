@@ -1,9 +1,6 @@
 //! StageContext 的可选运行依赖；按原 builder 顺序逐项注入。
 use super::StageBuildInput;
-use crate::{
-    agent::{stages::StageContextBuilder, token::ContextBudget},
-    session::Session,
-};
+use crate::agent::{stages::StageContextBuilder, token::ContextBudget};
 use peri_acp_types::{compact::CompactConfig, goal::GoalController, session::SessionInbox};
 use std::sync::Arc;
 
@@ -19,7 +16,6 @@ pub(super) struct StageDependencies {
 pub(super) fn configure_stage(
     mut builder: StageContextBuilder,
     input: &StageBuildInput,
-    session: &Arc<Session>,
     dependencies: StageDependencies,
 ) -> StageContextBuilder {
     let StageDependencies {
@@ -42,20 +38,8 @@ pub(super) fn configure_stage(
     if let Some(llm) = compact_llm_for_v2 {
         builder = builder.with_compact_llm(llm);
     }
-    if let Some(inbox) = idle_inbox {
-        builder = builder.with_idle_inbox(inbox);
-    }
-    if let Some(handle) = input
-        .idle_inbox
-        .as_ref()
-        .map(|inbox| inbox.handle())
-        .or_else(|| {
-            session
-                .async_owners_guard()
-                .and_then(|guard| guard.as_ref().map(|owners| owners.inbox.handle()))
-        })
-    {
-        builder = builder.with_inbox_handle(handle);
+    if idle_inbox.is_some() {
+        builder = builder.with_idle_waiting();
     }
     if let Some(probe) = idle_should_wait {
         builder = builder.with_idle_should_wait(probe);

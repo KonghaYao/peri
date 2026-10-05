@@ -143,7 +143,7 @@ async fn test_bash_group_cleanup_settles_descendant_after_parent_exit() {
     let tool = BashTool::new(fixture.path().to_str().unwrap())
         .with_task_manager(manager.clone())
         .with_on_bg_complete(Arc::new(move |result, _| {
-            let _ = tx.send(result.clone());
+            tx.send(result.clone()).map_err(|error| error.to_string())
         }));
     let started = tool
         .invoke(

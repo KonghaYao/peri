@@ -324,7 +324,7 @@ pub(super) async fn resume_subagent_impl(
                 max_iterations,
                 bg_event_sender,
                 task_manager,
-                on_bg_complete,
+                super::completion_delivery(parent, on_bg_complete),
                 langfuse_bridge,
                 Some(Arc::clone(&session_resources)),
                 deregister_runtime,

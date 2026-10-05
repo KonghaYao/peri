@@ -13,6 +13,9 @@ use crate::agent::events::BackgroundTaskResult;
 
 use super::agent_inbox::{BackgroundAgentInbox, QueuedSubagentMessage, SubagentMessageError};
 
+#[path = "settlement.rs"]
+mod settlement;
+
 /// bg agent 取消的优雅退出窗口（秒）：cancel() 先 `token.cancel()` 让任务响应
 /// 取消链走完整收尾；超过该窗口任务仍未结束才 abort 兜底。
 const CANCEL_GRACE_SECS: u64 = 3;
@@ -35,6 +38,8 @@ pub enum BackgroundRegistryError {
     KillUnavailable(String),
     #[error("Task {0} already exists")]
     DuplicateTask(String),
+    #[error("Task {task_id} completion delivery failed: {reason}")]
+    DeliveryFailed { task_id: String, reason: String },
     #[error("Task {0} requires asynchronous cancellation")]
     ExternalCancelRequiresAsync(String),
     #[error("External owner rejected cancellation for task {0}")]
@@ -150,6 +155,8 @@ pub struct BackgroundTaskRegistry {
     pub(super) scope: Arc<super::scope::ExecutionScope>,
     unsettled_external: parking_lot::Mutex<HashSet<String>>,
     cancelled_shells_waiting_cleanup: parking_lot::Mutex<HashSet<String>>,
+    pending_deliveries: parking_lot::Mutex<HashMap<String, settlement::PendingTaskDelivery>>,
+    settlements_in_flight: std::sync::atomic::AtomicUsize,
 }
 
 #[derive(Default)]
@@ -194,6 +201,8 @@ impl BackgroundTaskRegistry {
             scope: super::scope::ExecutionScope::new(),
             unsettled_external: parking_lot::Mutex::new(HashSet::new()),
             cancelled_shells_waiting_cleanup: parking_lot::Mutex::new(HashSet::new()),
+            pending_deliveries: parking_lot::Mutex::new(HashMap::new()),
+            settlements_in_flight: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -772,6 +781,11 @@ impl BackgroundTaskRegistry {
 
     pub(super) fn external_settled(&self) -> bool {
         self.unsettled_external.lock().is_empty()
+            && self.pending_deliveries.lock().is_empty()
+            && self
+                .settlements_in_flight
+                .load(std::sync::atomic::Ordering::SeqCst)
+                == 0
     }
 
     pub(super) fn has_unsettled_mcp(&self) -> bool {

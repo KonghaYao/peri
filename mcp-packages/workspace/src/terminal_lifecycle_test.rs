@@ -70,7 +70,7 @@ async fn test_redirected_background_process_reports_unknown_exit_code() {
     let tool = BashTool::new(fixture.path().to_str().unwrap())
         .with_task_manager(manager.clone())
         .with_on_bg_complete(Arc::new(move |result, _| {
-            let _ = tx.send(result.clone());
+            tx.send(result.clone()).map_err(|error| error.to_string())
         }));
     let output = tool.invoke(serde_json::json!({
         "command": "(while [ ! -f release ]; do sleep 0.01; done; exit 7) >/dev/null 2>&1 &",
@@ -108,7 +108,7 @@ async fn assert_nohup_pipe_timeout_promotes(redirect: &str) {
     let tool = BashTool::new(fixture.path().to_str().unwrap())
         .with_task_manager(manager.clone())
         .with_on_bg_complete(Arc::new(move |result, _| {
-            let _ = tx.send(result.clone());
+            tx.send(result.clone()).map_err(|error| error.to_string())
         }));
     // nohup 的输出不是 TTY，不会自动脱离工具的管道；release 保证子进程活过前台期限。
     let command = format!(

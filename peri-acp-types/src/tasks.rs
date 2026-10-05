@@ -145,8 +145,10 @@ pub struct BgTaskRegistration {
     pub kill: Option<Box<dyn FnOnce() + Send + Sync>>,
 }
 
-/// bg 完成回调（TaskManager 完成收尾时通知调用方）。
-pub type OnBgCompleteFn = Arc<dyn Fn(&BackgroundTaskResult, BgTaskKind) + Send + Sync>;
+/// 确认终态已发布到接收方；失败或 panic 时 owner 保留原结果，不能提前完成任务。
+/// `Ok(())` 确认接纳，不表示 Receive 或模型已经处理。
+pub type OnBgCompleteFn =
+    Arc<dyn Fn(&BackgroundTaskResult, BgTaskKind) -> Result<(), String> + Send + Sync>;
 
 /// Cleanup evidence for a session's background execution scope.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -226,12 +228,11 @@ pub trait TaskManager: std::any::Any + Send + Sync {
     }
     fn settle_external(
         &self,
-        task_id: &str,
+        _task_id: &str,
         _terminal_transition_id: &str,
-        result: BackgroundTaskResult,
+        _result: BackgroundTaskResult,
     ) -> Pin<Box<dyn Future<Output = Result<bool, String>> + Send + '_>> {
-        let task_id = task_id.to_owned();
-        Box::pin(async move { Ok(self.complete(&task_id, result)) })
+        Box::pin(async { Err("external terminal delivery is unavailable".into()) })
     }
 
     /// Terminal give-up for an external task whose owner stays unobservable for
@@ -285,8 +286,21 @@ pub trait TaskManager: std::any::Any + Send + Sync {
     /// middleware 发起面调用，错误语义经 String 表达——并发上限 / 注册失败）。
     fn register(&self, request: BgTaskRegistration) -> Result<(), String>;
 
-    /// 标记任务完成（result 注入事件载荷）。
+    /// 仅结算无需通知接收方的 execution-only 任务，或已确认交付的外部任务。
+    /// 需要通知接收方的 owned 任务必须使用 settle_completed。
     fn complete(&self, task_id: &str, result: BackgroundTaskResult) -> bool;
+
+    /// 需要通知接收方的 owned 任务统一由 owner 执行交付后结算。
+    /// 交付失败保持 delivery_pending；重复已完成结算返回 false。
+    fn settle_completed(
+        &self,
+        task_id: &str,
+        result: BackgroundTaskResult,
+        delivery: OnBgCompleteFn,
+    ) -> Result<bool, String>;
+
+    /// 重试保留的结果，返回已成功交付的数量，不重跑任务执行。
+    fn retry_pending_deliveries(&self) -> usize;
 
     /// 取消任务（ACP session/cancel_task 定位转发；错误语义经 String 表达，
     /// ACP 侧包 context 为协议错误）。
@@ -390,6 +404,19 @@ impl TaskManager for NoopTaskManager {
         false
     }
 
+    fn settle_completed(
+        &self,
+        _task_id: &str,
+        _result: BackgroundTaskResult,
+        _delivery: OnBgCompleteFn,
+    ) -> Result<bool, String> {
+        Err("task completion delivery is unavailable".into())
+    }
+
+    fn retry_pending_deliveries(&self) -> usize {
+        0
+    }
+
     fn cancel(&self, _task_id: &str) -> Result<(), String> {
         Err("no task manager configured".to_string())
     }
@@ -405,14 +432,14 @@ impl TaskManager for NoopTaskManager {
         _command: String,
         _cwd: String,
         _timeout_ms: Option<u64>,
-        _on_bg_complete: Option<Arc<dyn Fn(&BackgroundTaskResult, BgTaskKind) + Send + Sync>>,
+        _on_bg_complete: Option<OnBgCompleteFn>,
     ) -> Result<BgShellHandle, Box<dyn std::error::Error + Send + Sync>> {
         Err("no task manager configured".into())
     }
 
     fn finalize_bg_shell(
         &self,
-        _on_bg_complete: &Option<Arc<dyn Fn(&BackgroundTaskResult, BgTaskKind) + Send + Sync>>,
+        _on_bg_complete: &Option<OnBgCompleteFn>,
         _task_id: String,
         _prompt_summary: String,
         _success: bool,

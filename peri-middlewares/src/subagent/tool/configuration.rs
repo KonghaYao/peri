@@ -173,16 +173,7 @@ impl super::SubAgentTool {
     }
 
     /// 设置 bg 完成时的同步回调（测试/遗留回退；生产路径经 parent_session 的 host）。
-    pub fn with_on_bg_complete(
-        mut self,
-        cb: Arc<
-            dyn Fn(
-                    &peri_agent::agent::events::BackgroundTaskResult,
-                    peri_agent::agent::async_tasks::BgTaskKind,
-                ) + Send
-                + Sync,
-        >,
-    ) -> Self {
+    pub fn with_on_bg_complete(mut self, cb: peri_acp_types::tasks::OnBgCompleteFn) -> Self {
         self.host.on_bg_complete = Some(cb);
         self
     }

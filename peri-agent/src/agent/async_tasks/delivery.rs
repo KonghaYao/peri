@@ -6,11 +6,10 @@
 //! retry. The queue push is only a wake-up for a live initiator; it is not
 //! treated as delivery.
 
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
-use peri_acp_types::session::{
-    InboxHandle, MessageKind, MessageQueue, MessageSource, QueuedMessage,
-};
+use peri_acp_types::session::{MessageKind, MessageQueue, MessageSource, QueuedMessage};
 use peri_acp_types::session_resources::SessionResources;
 use peri_acp_types::system_reminder::TrustedSystemReminder;
 use peri_acp_types::tasks::TaskTerminalDelivery;
@@ -18,13 +17,29 @@ use peri_acp_types::tasks::TaskTerminalDelivery;
 use crate::session::transcript::{MessageTranscript, PersistOp};
 use crate::thread::ThreadId;
 
+pub(crate) fn terminal_delivery_id(
+    task_id: &str,
+    terminal_transition_id: &str,
+) -> peri_acp_types::messages::MessageId {
+    let mut hasher = Sha256::new();
+    hasher.update((task_id.len() as u64).to_be_bytes());
+    hasher.update(task_id.as_bytes());
+    hasher.update((terminal_transition_id.len() as u64).to_be_bytes());
+    hasher.update(terminal_transition_id.as_bytes());
+    let digest = hasher.finalize();
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    peri_acp_types::messages::MessageId::from(uuid::Uuid::from_bytes(bytes))
+}
+
 /// Delivery route for one initiating session.
 pub(crate) struct SessionTerminalDelivery {
     resources: Arc<dyn SessionResources>,
     thread_id: ThreadId,
     writer: Option<Arc<tokio::sync::mpsc::UnboundedSender<PersistOp>>>,
     queue: MessageQueue,
-    inbox: Option<InboxHandle>,
 }
 
 impl SessionTerminalDelivery {
@@ -33,7 +48,6 @@ impl SessionTerminalDelivery {
     pub(crate) fn for_transcript(
         transcript: &Arc<parking_lot::RwLock<MessageTranscript>>,
         queue: &MessageQueue,
-        inbox: Option<&InboxHandle>,
     ) -> Option<Arc<dyn TaskTerminalDelivery>> {
         let (resources, thread_id, writer) = transcript.read().idempotent_reminder_port()?;
         Some(Arc::new(Self {
@@ -41,7 +55,6 @@ impl SessionTerminalDelivery {
             thread_id,
             writer,
             queue: queue.clone(),
-            inbox: inbox.cloned(),
         }))
     }
 }
@@ -71,11 +84,7 @@ impl TaskTerminalDelivery for SessionTerminalDelivery {
                 reminder.clone(),
                 delivery_id,
             );
-            if let Some(inbox) = &self.inbox {
-                inbox.push(queued);
-            } else {
-                self.queue.push(queued);
-            }
+            self.queue.push(queued);
             tracing::debug!(?delivery_id, "terminal reminder committed to initiator");
             Ok(())
         })

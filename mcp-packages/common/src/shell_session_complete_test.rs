@@ -84,7 +84,7 @@ async fn test_cancelled_background_shell_delivers_cleanup_once_without_second_te
                 "Shell command cancelled; read the output files as needed."
             );
             calls.fetch_add(1, Ordering::SeqCst);
-            delivered(result, kind);
+            delivered(result, kind)
         })
     };
 
@@ -160,7 +160,7 @@ async fn test_natural_background_shell_completion_delivers_defer_through_the_man
         let delivered = Arc::clone(&delivered);
         Arc::new(move |result: &BackgroundTaskResult, kind: BgTaskKind| {
             calls.fetch_add(1, Ordering::SeqCst);
-            delivered(result, kind);
+            delivered(result, kind)
         })
     };
 

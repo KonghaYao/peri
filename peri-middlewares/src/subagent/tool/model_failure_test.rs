@@ -526,6 +526,7 @@ async fn background_http_429_consumes_typed_result_and_safe_notification() {
         if let Some(sender) = completed_tx_for_callback.lock().unwrap().take() {
             let _ = sender.send(result.clone());
         }
+        Ok(())
     }));
 
     let launch = tool

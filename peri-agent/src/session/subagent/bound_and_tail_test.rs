@@ -153,6 +153,7 @@ async fn assert_background_tail_completion(outcome: TailOutcome, panic_forwarder
             .unwrap()
             .send((result.clone(), events, callback_manager.active_count()))
             .unwrap();
+        Ok(())
     }));
     let spawned = SessionFactory::spawn_subagent(None, config)
         .await

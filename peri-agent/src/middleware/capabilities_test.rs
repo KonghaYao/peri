@@ -229,7 +229,6 @@ async fn catalog_capability_rebinds_the_working_map_and_drains_recall() {
 struct QueueProbe;
 
 fn enqueue(state: &dyn hook_state::QueueState, text: &str) {
-    assert!(state.inbox_handle().is_some());
     crate::middleware::enqueue_v2_message(
         state,
         QueuedMessage::new(
@@ -279,9 +278,8 @@ impl Middleware for QueueProbe {
 
 #[tokio::test]
 async fn tool_and_agent_feedback_use_queue_capability_without_writing_history() {
-    let mut ctx = context_with(QueueProbe);
+    let ctx = context_with(QueueProbe);
     let inbox = SessionInbox::new(Arc::new(ctx.session.queue.clone()));
-    ctx.async_ctx.inbox_handle = Some(inbox.handle());
     let call = ToolCall::new("call", "probe", serde_json::json!({}));
     let mut approved = middleware_runner::run_before_tools_batch(&ctx, &[call]).await;
     let approved = approved.remove(0).unwrap();
@@ -295,6 +293,7 @@ async fn tool_and_agent_feedback_use_queue_capability_without_writing_history() 
         .unwrap();
     assert_eq!(output.block_continue.as_deref(), Some("queued feedback"));
     assert!(ctx.session.queue.has_wake_up());
+    inbox.await_wake().await;
     assert_eq!(ctx.session.queue.len(), 2);
     assert!(ctx.session.transcript.read().is_empty());
 }

@@ -226,7 +226,7 @@ scope 快照携 epoch；`taskClose`/`taskOpen` 按该 epoch 做 owner 端 CAS，
 | --- | --- |
 | Workflow | workflow/mod.rs（WorkflowMiddleware :36 / WorkflowMiddlewareAdaptor :332 / resume_workflow :135） |
 | Cron | scheduler、scheduler port handle、三种工具与 `CronMcpServer` 均在 `peri-mcp-cron`；宿主 `TickGuard` / spawn / join / reconnect 仍在 `src/mcp/builtin/runtime.rs`。入口、测试命令见 [MCP packages 代码索引](mcp-packages.md) |
-| Workspace（文件 / 终端工具面） | `WorkspaceMcpServer`、文件工具、`BashTool` 与描述位于 `peri-mcp-workspace`；`WorkspaceInstanceInput`、session 级 task manager 注入与 `BuiltinInstanceContext`（A24 关闭集 `closed` + 宿主技能面关闭位 `skills_face_closed`，后者由发现管线消费）位于 `src/mcp/builtin/context.rs`。实现路径见 [MCP packages 代码索引](mcp-packages.md) |
+| Workspace bg 交付确认 | `peri-acp-types/src/tasks.rs::OnBgCompleteFn` + `peri-agent/src/session/bg_complete.rs` | session 级 lazy resolve；缺 inbox 返回 Err，结果由 task owner 保留并重试；workspace shell callback 确认接纳事件后返回 Ok，不自行发布 Agent registry 终态 |\n| Workspace（文件 / 终端工具面） | `WorkspaceMcpServer`、文件工具、`BashTool` 与描述位于 `peri-mcp-workspace`；`WorkspaceInstanceInput`、session 级 task manager 注入与 `BuiltinInstanceContext`（A24 关闭集 `closed` + 宿主技能面关闭位 `skills_face_closed`，后者由发现管线消费）位于 `src/mcp/builtin/context.rs`。实现路径见 [MCP packages 代码索引](mcp-packages.md) |
 | Workspace 搜索与输出契约 | 描述在 `mcp-packages/workspace/src/filesystem/descriptions/` 与 `mcp-packages/workspace/src/descriptions/bash.md`；行为与工具测试在 `mcp-packages/workspace/src/filesystem/` 和 `mcp-packages/workspace/src/terminal_test.rs`。Grep 与 Glob 的 ignore / 隐藏文件 / symlink 策略分别说明；提前停止收集不声称完整总数，目录展示计数与实际条目一致。Write/Edit 无预先 Read 准入条件；Edit 片段未匹配不触发路径纠错，真实路径缺失仍可建议 |
 
 ### 上下文注入器与辅助（src/ 各单模块）

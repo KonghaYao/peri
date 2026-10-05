@@ -145,7 +145,7 @@ async fn test_run_react_loop_idle_dispatches_queued_prompts_one_at_a_time() {
         seen: seen.clone(),
     });
     context.session.user_input_mailbox = Some(mailbox.clone());
-    context.async_ctx.idle_inbox = Some(inbox.clone());
+    context.async_ctx.idle_wait_enabled = true;
     context.async_ctx.idle_should_wait = Some({
         let seen = seen.clone();
         Arc::new(move || seen.lock().len() < 3)

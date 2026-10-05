@@ -49,18 +49,9 @@ pub trait MiddlewareState: Send + Sync {
         false
     }
 
-    /// 会话级 inbox 句柄（middleware 注入 Defer/Prompt 时应经此 wake `await_wake`）。
-    fn inbox_handle(&self) -> Option<&peri_acp_types::session::InboxHandle> {
-        None
-    }
-
-    /// 写入会话队列；有 inbox 时经 `InboxHandle::push` 唤醒 idle loop。
+    /// 发布到同一会话 mailbox，由消息类型统一决定唤醒。
     fn enqueue_v2_message(&self, msg: crate::session::QueuedMessage) {
-        if let Some(inbox) = self.inbox_handle() {
-            inbox.push(msg);
-        } else {
-            self.v2_queue().push(msg);
-        }
+        self.v2_queue().push(msg);
     }
 
     /// 返回当前 turn 的本地工具视图（stage_builder 每 turn 构建，含当前链

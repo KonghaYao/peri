@@ -151,6 +151,11 @@ System Reminder 的业务语义不能并入队列调度类型。队列继续独�
 - `Info`：随正常循环消费，不主动唤醒；
 - `Defer`：异步到达并可唤醒后续执行。
 
+消息数据和 wake 信号必须由同一个 mailbox owner 持有；queue、inbox 与 producer handle
+只是该 owner 的视图，不能各自创建唤醒身份。所有发布入口都按 `MessageKind` 决定通知，
+不要求 producer 在入队后另行唤醒。标题中的 `severity=Info` 不是 `MessageKind::Info`：
+正常级别的 Task 终态仍使用 Defer，不能从展示标题推断执行交付或模型处理状态。
+
 同一类别可使用不同调度语义。例如，MCP 首轮能力概览是 `Info + Capability`，MCP
 subscription 是 `Defer + ExternalEvent`，Goal steering 是 `Defer + Guidance`。
 

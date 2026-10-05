@@ -156,7 +156,7 @@ impl ShellTasks {
         let changed = Arc::clone(&self.changed);
         Arc::new(move |result: &BackgroundTaskResult, kind: BgTaskKind| {
             if kind != BgTaskKind::Shell {
-                return;
+                return Err("shell task owner received a non-shell result".into());
             }
             let mut state = state.lock();
             if let Some(scope) = &scope {
@@ -175,7 +175,7 @@ impl ShellTasks {
                 state
                     .pending_results
                     .insert(result.task_id.clone(), result.clone());
-                return;
+                return Ok(());
             }
             let cancelled = state.cancel_accepted.remove(&result.task_id);
             let record = state
@@ -189,7 +189,7 @@ impl ShellTasks {
                     )
                 });
             if record.task.status.is_terminal() {
-                return;
+                return Ok(());
             }
             record.task.last_updated_at = peri_time::now_utc_rfc3339();
             let text = if cancelled {
@@ -228,6 +228,7 @@ impl ShellTasks {
             });
             let _ = updates.send(task);
             changed.notify_waiters();
+            Ok(())
         })
     }
 
@@ -434,7 +435,8 @@ impl ShellTasks {
         }
         drop(state);
         if let Some(result) = pending {
-            self.completion_callback()(&result, BgTaskKind::Shell);
+            self.completion_callback()(&result, BgTaskKind::Shell)
+                .map_err(|reason| McpError::internal_error(reason, None))?;
         }
         cancelled.map_err(|_| McpError::internal_error("shell task cancellation failed", None))
     }

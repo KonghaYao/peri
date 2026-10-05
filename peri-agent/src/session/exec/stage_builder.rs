@@ -495,7 +495,6 @@ pub fn build_stage_context(
     let builder = dependencies::configure_stage(
         builder,
         input,
-        &session,
         dependencies::StageDependencies {
             goal_controller,
             context_budget,

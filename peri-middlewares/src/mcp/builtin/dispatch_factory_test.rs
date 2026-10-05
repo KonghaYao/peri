@@ -7,7 +7,7 @@ use super::*;
 fn workspace_input() -> WorkspaceInstanceInput {
     WorkspaceInstanceInput {
         task_manager: Some(Arc::new(ConcreteTaskManager::new()) as Arc<dyn TaskManager>),
-        on_bg_complete: Some(Arc::new(|_: &BackgroundTaskResult, _: BgTaskKind| {})),
+        on_bg_complete: Some(Arc::new(|_: &BackgroundTaskResult, _: BgTaskKind| Ok(()))),
     }
 }
 

@@ -84,6 +84,7 @@ async fn test_failed_shell_spawn_with_full_registry_returns_error() {
         None,
         Some(std::sync::Arc::new(move |result, _| {
             tx.send(result.clone()).unwrap();
+            Ok(())
         })),
     );
     assert_eq!(manager.active_count(), BackgroundTaskRegistry::SHELL_LIMIT);
@@ -165,6 +166,7 @@ async fn test_timed_out_shell_can_close_cleanly() {
                 if let Some(tx) = complete.lock().unwrap().take() {
                     let _ = tx.send(());
                 }
+                Ok(())
             })),
         )
         .unwrap();

@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use super::registry::BackgroundTaskRegistry;
 use crate::agent::events::BackgroundTaskResult;
-use peri_acp_types::tasks::BgTaskKind;
 
 pub fn truncate_bytes(s: &str, max_bytes: usize) -> String {
     if s.len() <= max_bytes {
@@ -80,7 +79,7 @@ pub fn parse_background_timeout(input: &serde_json::Value) -> Option<u64> {
 #[allow(clippy::type_complexity)]
 pub fn finalize_bg_shell(
     registry: &BackgroundTaskRegistry,
-    on_bg_complete: &Option<Arc<dyn Fn(&BackgroundTaskResult, BgTaskKind) + Send + Sync>>,
+    on_bg_complete: &Option<peri_acp_types::tasks::OnBgCompleteFn>,
     task_id: String,
     prompt_summary: String,
     success: bool,
@@ -89,7 +88,7 @@ pub fn finalize_bg_shell(
     timed_out: bool,
     shell_output: Option<peri_acp_types::event::ShellOutput>,
 ) {
-    let mut result = BackgroundTaskResult {
+    let result = BackgroundTaskResult {
         task_id: task_id.clone(),
         agent_name: "bg-shell".to_string(),
         prompt_summary,
@@ -113,32 +112,16 @@ pub fn finalize_bg_shell(
         subagent_failure: None,
         shell_output: shell_output.map(Box::new),
     };
-    // Linearize completion against cancel before publishing anything. A
-    // claimed task remains active until the callback and terminal commit
-    // finish, so the idle loop cannot exit before its result is enqueued.
-    let claimed_completion = registry.claim_completion(&task_id);
-    if !claimed_completion && !registry.claim_cancelled_shell_cleanup(&task_id) {
+    if let Some(delivery) = on_bg_complete {
+        if let Err(error) = registry.settle_completed(&task_id, result, Arc::clone(delivery)) {
+            tracing::error!(%task_id, %error, "shell terminal delivery is pending");
+        }
         return;
     }
-    if !claimed_completion {
-        result.success = false;
-        result.output = "Shell command cancelled; read the output files as needed.".into();
-    }
-    // 回调通知 Agent inbox（在 registry.complete() 之前，与 execute_bg.rs 对齐）
-    if let Some(ref cb) = on_bg_complete {
-        let callback = std::panic::AssertUnwindSafe(|| cb(&result, BgTaskKind::Shell));
-        if let Err(panic) = std::panic::catch_unwind(callback) {
-            let detail = panic
-                .downcast_ref::<String>()
-                .cloned()
-                .or_else(|| panic.downcast_ref::<&str>().map(ToString::to_string))
-                .unwrap_or_else(|| "unknown panic".to_string());
-            tracing::error!(task_id = %result.task_id, error = %detail, "background shell completion callback panicked");
-        }
-    }
-    // 任务已在启动时注册（run_in_background / promote 路径），此处只收尾推送 Completed。
-    if claimed_completion {
+    if registry.claim_completion(&task_id) {
         registry.complete(&result.task_id.clone(), result);
+    } else {
+        registry.claim_cancelled_shell_cleanup(&task_id);
     }
 }
 
@@ -176,18 +159,23 @@ mod tests {
     }
 
     #[test]
-    fn callback_panic_still_completes_registered_shell() {
+    fn callback_panic_retains_registered_shell_until_delivery_retry() {
         let registry = registered_shell();
         let (sender, mut events) = tokio::sync::mpsc::unbounded_channel();
         registry.set_event_sender(sender, "fixture".into());
         let callback_registry = Arc::clone(&registry);
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let called = Arc::clone(&attempts);
         let callback: peri_acp_types::tasks::OnBgCompleteFn = Arc::new(move |_, _| {
             assert_eq!(callback_registry.active_count(), 1);
             assert!(matches!(
                 callback_registry.cancel("shell-panic"),
                 Err(crate::agent::async_tasks::BackgroundRegistryError::TaskCompleting(_))
             ));
-            panic!("callback failure");
+            if called.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                panic!("callback failure");
+            }
+            Ok(())
         });
         finalize_bg_shell(
             &registry,
@@ -200,7 +188,14 @@ mod tests {
             false,
             None,
         );
+        assert_eq!(registry.active_count(), 1);
+        assert!(matches!(
+            events.try_recv().unwrap(),
+            peri_acp_types::tasks::BgRegistryEvent::Updated { .. }
+        ));
+        assert_eq!(registry.retry_pending_deliveries(), 1);
         assert_eq!(registry.active_count(), 0);
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
         let peri_acp_types::tasks::BgRegistryEvent::Completed { result, .. } =
             events.try_recv().expect("one terminal event")
         else {
@@ -223,6 +218,7 @@ mod tests {
         let callback: peri_acp_types::tasks::OnBgCompleteFn = Arc::new(move |result, _| {
             assert!(!result.success);
             callback_called.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
         });
         finalize_bg_shell(
             &registry,

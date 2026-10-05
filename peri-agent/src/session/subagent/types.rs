@@ -5,7 +5,7 @@ use peri_acp_types::identity::AgentId;
 use peri_acp_types::thread::CancelPolicy;
 use tokio_util::sync::CancellationToken;
 
-use crate::agent::async_tasks::{BgTaskKind, TaskManager};
+use crate::agent::async_tasks::TaskManager;
 use crate::agent::events::{AgentEventHandler, ExecutorEvent};
 use crate::agent::react::ReactLLM;
 use crate::agent::{CompactConfig, ContextBudget, LangfuseBridgeLike};
@@ -102,8 +102,7 @@ pub struct SubagentHost {
     /// 后台任务完成事件通道（bg pump，独立于主 event pump）
     pub bg_event_sender: Option<tokio::sync::mpsc::UnboundedSender<ExecutorEvent>>,
     /// bg 完成同步回调（registry.complete 之前调用，推送 Defer 到主 agent MQ）
-    pub on_bg_complete:
-        Option<Arc<dyn Fn(&crate::agent::events::BackgroundTaskResult, BgTaskKind) + Send + Sync>>,
+    pub on_bg_complete: Option<peri_acp_types::tasks::OnBgCompleteFn>,
     /// 子 agent 启动注册回调（active_agents）
     pub register_runtime: Option<RegisterRuntimeFn>,
     /// 子 agent 结束注销回调
@@ -183,8 +182,7 @@ pub struct SubagentSpawnConfig {
     /// 后台任务管理器（Background 模式必填）
     pub task_manager: Option<Arc<TaskManager>>,
     /// bg 完成同步回调
-    pub on_bg_complete:
-        Option<Arc<dyn Fn(&crate::agent::events::BackgroundTaskResult, BgTaskKind) + Send + Sync>>,
+    pub on_bg_complete: Option<peri_acp_types::tasks::OnBgCompleteFn>,
     /// Langfuse bridge
     pub langfuse_bridge: Option<Arc<dyn LangfuseBridgeLike>>,
     /// 生命周期 hook 触发闭包（middlewares 构造）
@@ -387,8 +385,7 @@ pub struct SubagentResumeConfig {
     /// 后台任务管理器（Background 模式必填）
     pub task_manager: Option<Arc<TaskManager>>,
     /// bg 完成同步回调
-    pub on_bg_complete:
-        Option<Arc<dyn Fn(&crate::agent::events::BackgroundTaskResult, BgTaskKind) + Send + Sync>>,
+    pub on_bg_complete: Option<peri_acp_types::tasks::OnBgCompleteFn>,
     /// Langfuse bridge
     pub langfuse_bridge: Option<Arc<dyn LangfuseBridgeLike>>,
     /// 生命周期 hook 触发闭包（middlewares 构造）

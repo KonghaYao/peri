@@ -56,22 +56,7 @@ fn external_started_at(
     )
 }
 
-fn external_delivery_id(
-    task_id: &str,
-    terminal_transition_id: &str,
-) -> peri_acp_types::messages::MessageId {
-    let mut hasher = Sha256::new();
-    hasher.update((task_id.len() as u64).to_be_bytes());
-    hasher.update(task_id.as_bytes());
-    hasher.update((terminal_transition_id.len() as u64).to_be_bytes());
-    hasher.update(terminal_transition_id.as_bytes());
-    let digest = hasher.finalize();
-    let mut bytes = [0_u8; 16];
-    bytes.copy_from_slice(&digest[..16]);
-    bytes[6] = (bytes[6] & 0x0f) | 0x40;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    peri_acp_types::messages::MessageId::from(uuid::Uuid::from_bytes(bytes))
-}
+use super::delivery::terminal_delivery_id as external_delivery_id;
 
 #[cfg(test)]
 #[path = "external_settlement_test.rs"]
@@ -234,6 +219,20 @@ impl peri_acp_types::tasks::TaskManager for TaskManager {
         self.complete(task_id, result)
     }
 
+    fn settle_completed(
+        &self,
+        task_id: &str,
+        result: BackgroundTaskResult,
+        delivery: peri_acp_types::tasks::OnBgCompleteFn,
+    ) -> Result<bool, String> {
+        self.settle_completed(task_id, result, delivery)
+            .map_err(|error| error.to_string())
+    }
+
+    fn retry_pending_deliveries(&self) -> usize {
+        self.retry_pending_deliveries()
+    }
+
     fn cancel(&self, task_id: &str) -> Result<(), String> {
         self.cancel(task_id).map_err(|e| e.to_string())
     }
@@ -275,7 +274,9 @@ impl peri_acp_types::tasks::TaskManager for TaskManager {
             self.registry.scope.close();
             // Deployment/transport release must never cancel remote MCP tasks.
             self.cancel_all();
-            if self.registry.scope.wait().await && self.registry.external_settled() {
+            let execution_stopped = self.registry.scope.wait().await;
+            self.registry.retry_pending_deliveries();
+            if execution_stopped && self.registry.external_settled() {
                 peri_acp_types::tasks::TaskShutdownReport::Complete
             } else {
                 peri_acp_types::tasks::TaskShutdownReport::Incomplete
@@ -288,14 +289,14 @@ impl peri_acp_types::tasks::TaskManager for TaskManager {
         command: String,
         cwd: String,
         timeout_ms: Option<u64>,
-        on_bg_complete: Option<Arc<dyn Fn(&BackgroundTaskResult, BgTaskKind) + Send + Sync>>,
+        on_bg_complete: Option<peri_acp_types::tasks::OnBgCompleteFn>,
     ) -> Result<BgShellHandle, Box<dyn std::error::Error + Send + Sync>> {
         self.spawn_shell(command, cwd, timeout_ms, on_bg_complete)
     }
 
     fn finalize_bg_shell(
         &self,
-        on_bg_complete: &Option<Arc<dyn Fn(&BackgroundTaskResult, BgTaskKind) + Send + Sync>>,
+        on_bg_complete: &Option<peri_acp_types::tasks::OnBgCompleteFn>,
         task_id: String,
         prompt_summary: String,
         success: bool,
@@ -576,7 +577,7 @@ impl TaskManager {
         self.registry.register_with_kind(task)
     }
 
-    /// Send Info to a live child in this session. `None` means no registered
+    /// Send Defer to a live child in this session. `None` means no registered
     /// receiver; an error must not fall through to resume or create an execution.
     pub fn send_subagent_message(
         &self,
@@ -588,6 +589,19 @@ impl TaskManager {
 
     pub fn complete(&self, task_id: &str, result: BackgroundTaskResult) -> bool {
         self.registry.complete(task_id, result)
+    }
+
+    pub fn settle_completed(
+        &self,
+        task_id: &str,
+        result: BackgroundTaskResult,
+        delivery: peri_acp_types::tasks::OnBgCompleteFn,
+    ) -> Result<bool, BackgroundRegistryError> {
+        self.registry.settle_completed(task_id, result, delivery)
+    }
+
+    pub fn retry_pending_deliveries(&self) -> usize {
+        self.registry.retry_pending_deliveries()
     }
 
     pub fn cancel(&self, task_id: &str) -> Result<(), BackgroundRegistryError> {
