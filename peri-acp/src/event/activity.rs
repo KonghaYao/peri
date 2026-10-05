@@ -98,6 +98,8 @@ pub fn map_agent_activity(event: &ExecutorEvent) -> Option<AgentActivityWire> {
             agent_name,
             instance_id,
             is_background,
+            // 父工具调用 id 是 TUI 配对身份，privacy-safe activity 面不外泄
+            parent_tool_call_id: _,
         } => {
             let mut item = AgentActivityWire::new(K::Subagent, S::Running)
                 .correlated("subagent", instance_id)
@@ -416,6 +418,7 @@ mod tests {
             agent_name: " Research\nAgent ".into(),
             instance_id: "private-instance-id".into(),
             is_background: true,
+            parent_tool_call_id: None,
         })
         .unwrap();
         let stopped = map_agent_activity(&ExecutorEvent::SubagentStopped {

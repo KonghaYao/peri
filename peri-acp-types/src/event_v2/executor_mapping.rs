@@ -238,11 +238,13 @@ pub fn observe_event_to_executor(event: ObserveEvent) -> Option<ExecutorEvent> {
             agent_name,
             child_agent_id,
             is_background,
+            parent_tool_call_id,
             ..
         } => Some(ExecutorEvent::SubagentStarted {
             agent_name,
             instance_id: child_agent_id.to_string(),
             is_background,
+            parent_tool_call_id,
         }),
         ObserveEvent::SubagentStop {
             agent_name,

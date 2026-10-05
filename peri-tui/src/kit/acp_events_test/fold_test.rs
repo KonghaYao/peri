@@ -212,6 +212,7 @@ fn test_fold_pass_subagent_running_and_completed_collapsed() {
             agent_id: "sa-1".into(),
             agent_name: "explorer".into(),
             is_background: false,
+            parent_tool_call_id: None,
         },
     );
     let snap = VIEW_MODELS.state().read().clone();
@@ -259,6 +260,7 @@ fn test_fold_pass_subagent_error_expanded() {
             agent_id: "sa-1".into(),
             agent_name: "explorer".into(),
             is_background: false,
+            parent_tool_call_id: None,
         },
     );
     dispatch_and_notify(
@@ -298,6 +300,7 @@ fn test_subagent_error_whitespace_result_no_reason_line() {
             agent_id: "sa-1".into(),
             agent_name: "explorer".into(),
             is_background: false,
+            parent_tool_call_id: None,
         },
     );
     dispatch_and_notify(
@@ -340,6 +343,7 @@ fn test_subagent_completed_with_failed_child_tool_not_error() {
             agent_id: "sa-1".into(),
             agent_name: "explorer".into(),
             is_background: false,
+            parent_tool_call_id: None,
         },
     );
     // 子工具启动（agent_id 路由到子 turn）

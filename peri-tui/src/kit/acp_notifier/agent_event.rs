@@ -31,10 +31,12 @@ pub(super) fn decode_agent_event(event: AcpEvent) -> Option<AcpEventData> {
             agent_name,
             instance_id,
             is_background,
+            parent_tool_call_id,
         } => Some(AcpEventData::SubagentStarted {
             agent_id: instance_id,
             agent_name,
             is_background,
+            parent_tool_call_id,
         }),
         AcpEvent::SubagentStopped {
             instance_id,

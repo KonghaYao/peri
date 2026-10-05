@@ -282,6 +282,7 @@ fn test_observe_event_subagent_start_id_extraction() {
         child_agent_id: child_id,
         agent_name: "researcher".to_string(),
         is_background: true,
+        parent_tool_call_id: None,
     };
     assert_eq!(event.turn_id(), turn_id);
     assert_eq!(event.agent_id(), agent_id);
@@ -429,6 +430,7 @@ fn test_observe_event_subagent_start_serde_roundtrip() {
         child_agent_id,
         agent_name: "code-reviewer".to_string(),
         is_background: true,
+        parent_tool_call_id: None,
     };
     let json = serde_json::to_string(&event).unwrap();
     let back: ObserveEvent = serde_json::from_str(&json).unwrap();
@@ -439,7 +441,9 @@ fn test_observe_event_subagent_start_serde_roundtrip() {
             child_agent_id: c,
             agent_name,
             is_background,
+            parent_tool_call_id,
         } => {
+            assert_eq!(parent_tool_call_id, None);
             assert_eq!(t, turn_id);
             assert_eq!(a, agent_id);
             assert_eq!(c, child_agent_id);

@@ -78,6 +78,7 @@ impl Harness {
             child_agent_id: child,
             agent_name: name.to_string(),
             is_background,
+            parent_tool_call_id: None,
         });
     }
 

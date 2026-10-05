@@ -93,6 +93,7 @@ fn tail_spawn_config(
         register_runtime: None,
         deregister_runtime: None,
         parent_agent_id: Some(AgentId::new()),
+        parent_tool_call_id: None,
         cancel_token: None,
         cwd: Some("/tmp/tail-fixture".into()),
         parent_thread_id: Some("tail-parent".into()),

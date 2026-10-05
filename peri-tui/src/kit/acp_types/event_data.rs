@@ -244,6 +244,12 @@ pub enum AcpEventData {
         agent_id: String,
         agent_name: String,
         is_background: bool,
+        /// 发起本次子 agent 的父 Agent 工具调用 id（tool_call_id）。
+        ///
+        /// 有值时消息区按身份把子分组配到该 Agent 工具卡片（并发批次下顺序
+        /// 不可判定，不能按到达顺序猜）；None = 旧生产端/无工具上下文，退化为
+        /// 到达顺序兜底。
+        parent_tool_call_id: Option<String>,
     },
 
     /// `"subagent-stopped"` -- sub-agent exited, TUI closes the group.
@@ -463,10 +469,16 @@ impl AcpEventData {
                 let agent_id = data["agent_id"].as_str().unwrap_or("").to_string();
                 let agent_name = data["agent_name"].as_str().unwrap_or("").to_string();
                 let is_background = data["is_background"].as_bool().unwrap_or(false);
+                // legacy 通道无父身份字段 → None（到达顺序兜底）
+                let parent_tool_call_id = data["parent_tool_call_id"]
+                    .as_str()
+                    .filter(|id| !id.is_empty())
+                    .map(ToOwned::to_owned);
                 AcpEventData::SubagentStarted {
                     agent_id,
                     agent_name,
                     is_background,
+                    parent_tool_call_id,
                 }
             }
             "subagent-stopped" => {

@@ -313,6 +313,7 @@ async fn test_agent_event_forwards_subagent_started() {
                 agent_name: "explore".into(),
                 instance_id: "abc-123".into(),
                 is_background: false,
+                parent_tool_call_id: Some("tool-7".into()),
             },
         })
         .unwrap();
@@ -325,10 +326,16 @@ async fn test_agent_event_forwards_subagent_started() {
         AcpEventData::SubagentStarted {
             agent_id,
             agent_name,
+            parent_tool_call_id,
             ..
         } => {
             assert_eq!(agent_id, "abc-123", "agent_id 应从 instance_id 映射");
             assert_eq!(agent_name, "explore");
+            assert_eq!(
+                parent_tool_call_id.as_deref(),
+                Some("tool-7"),
+                "父工具调用 id 必须透传到 TUI 事件（配对身份）"
+            );
         }
         other => panic!("expected SubagentStarted, got {other:?}"),
     }

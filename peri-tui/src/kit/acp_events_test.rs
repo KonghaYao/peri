@@ -150,6 +150,7 @@ fn test_subagent_stopped_removes_only_matching_active_agent() {
                 agent_id: agent_id.into(),
                 agent_name: "coder".into(),
                 is_background: true,
+                parent_tool_call_id: None,
             },
         );
     }
@@ -196,6 +197,7 @@ fn test_unknown_subagent_stopped_keeps_running_agents() {
             agent_id: "agent-running".into(),
             agent_name: "coder".into(),
             is_background: true,
+            parent_tool_call_id: None,
         },
     );
 

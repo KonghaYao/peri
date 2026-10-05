@@ -127,7 +127,7 @@ fn test_end_tool_unknown_id_is_noop() {
 #[test]
 fn test_stopped_subagent_late_tool_start_keeps_children_terminal() {
     let mut turn = CurrentTurn::new();
-    turn.start_subagent("child".into(), "coder".into());
+    turn.start_subagent("child".into(), "coder".into(), None);
     turn.start_subagent_tool(
         "child",
         ToolCardAccumulator::with_input(
@@ -261,7 +261,7 @@ fn test_deactivate() {
 #[test]
 fn test_current_turn_subagent_streaming_builds_nested_group() {
     let mut ct = CurrentTurn::new();
-    ct.start_subagent("agent-1".into(), "researcher".into());
+    ct.start_subagent("agent-1".into(), "researcher".into(), None);
     assert!(ct.append_subagent_text("agent-1", "hello"));
     assert!(ct.start_subagent_tool(
         "agent-1",
@@ -292,7 +292,7 @@ fn test_current_turn_resumed_subagent_routes_to_new_agent_group() {
         "Agent".into(),
         "start coder".into(),
     ));
-    ct.start_subagent("child-1".into(), "coder".into());
+    ct.start_subagent("child-1".into(), "coder".into(), None);
     assert!(ct.append_subagent_text("child-1", "before interruption"));
     assert!(ct.start_subagent_tool(
         "child-1",
@@ -307,7 +307,7 @@ fn test_current_turn_resumed_subagent_routes_to_new_agent_group() {
         "Agent".into(),
         "continue child-1".into(),
     ));
-    ct.start_subagent("child-1".into(), "coder".into());
+    ct.start_subagent("child-1".into(), "coder".into(), None);
     assert!(ct.append_subagent_text("child-1", "after resume"));
     assert!(ct.append_subagent_reasoning("child-1", "resumed reasoning"));
     assert!(ct.start_subagent_tool(
@@ -368,7 +368,7 @@ fn test_late_agent_card_adopts_early_subagent_group() {
         "Agent".into(),
         "start coder".into(),
     ));
-    ct.start_subagent("child-1".into(), "coder".into());
+    ct.start_subagent("child-1".into(), "coder".into(), None);
     assert!(ct.start_subagent_tool(
         "child-1",
         ToolCardAccumulator::new("child-tool-1".into(), "Read".into(), "a.rs".into()),
@@ -376,7 +376,7 @@ fn test_late_agent_card_adopts_early_subagent_group() {
 
     // 第二个 Agent 的子 Agent 先启动（SubagentStarted 抢在父卡片之前到达），
     // 此时主 turn 里没有未认领的 Agent 卡片。
-    ct.start_subagent("child-2".into(), "reviewer".into());
+    ct.start_subagent("child-2".into(), "reviewer".into(), None);
     assert!(ct.start_subagent_tool(
         "child-2",
         ToolCardAccumulator::new("child-tool-2".into(), "Grep".into(), "foo".into()),
@@ -417,6 +417,174 @@ fn test_late_agent_card_adopts_early_subagent_group() {
     );
 }
 
+/// [回归测试] `SubagentStarted.parent_tool_call_id` 是配对的权威依据：并发批次里
+/// 子 Agent 的启动顺序与工具卡片顺序无关，身份配对必须不看到达顺序。
+#[test]
+fn test_subagent_group_pairs_by_parent_tool_call_id_not_arrival_order() {
+    let mut ct = CurrentTurn::new();
+    // 并行批次：两张 Agent 卡片都已就位（ToolStarted 先到）。
+    ct.start_tool(ToolCardAccumulator::new(
+        "agent-call-a".into(),
+        "Agent".into(),
+        "start coder".into(),
+    ));
+    ct.start_tool(ToolCardAccumulator::new(
+        "agent-call-b".into(),
+        "Agent".into(),
+        "start reviewer".into(),
+    ));
+
+    // 子 Agent 启动顺序与卡片顺序相反（并发竞态）：B 先到，A 后到。
+    ct.start_subagent(
+        "child-b".into(),
+        "reviewer".into(),
+        Some("agent-call-b".into()),
+    );
+    assert!(ct.start_subagent_tool(
+        "child-b",
+        ToolCardAccumulator::new("child-tool-b".into(), "Grep".into(), "b.rs".into()),
+    ));
+    ct.start_subagent(
+        "child-a".into(),
+        "coder".into(),
+        Some("agent-call-a".into()),
+    );
+    assert!(ct.start_subagent_tool(
+        "child-a",
+        ToolCardAccumulator::new("child-tool-a".into(), "Read".into(), "a.rs".into()),
+    ));
+
+    let vms: Vec<_> = ct.view_models().iter().cloned().collect();
+    match (&vms[0], &vms[1], &vms[2], &vms[3]) {
+        (
+            TuiRenderUnit::TuiToolCard(card_a),
+            TuiRenderUnit::TuiSubAgentGroup(group_a),
+            TuiRenderUnit::TuiToolCard(card_b),
+            TuiRenderUnit::TuiSubAgentGroup(group_b),
+        ) => {
+            assert_eq!(card_a.tool_id, "agent-call-a");
+            assert_eq!(card_b.tool_id, "agent-call-b");
+            assert_eq!(
+                group_a.agent_id, "child-a",
+                "身份配对：A 卡片下必须是 A 的子分组，不能因 B 先到而互换"
+            );
+            assert_eq!(
+                group_b.agent_id, "child-b",
+                "身份配对：B 卡片下必须是 B 的子分组"
+            );
+        }
+        other => panic!("expected Agent/group/Agent/group interleaving, got {other:?}"),
+    }
+}
+
+/// [回归测试] 分组先到 + 有父身份：迟到的 Agent 卡片按身份认领自己的分组，
+/// 即使时间线上还存在另一张未认领的 Agent 卡片（顺序兜底会配错）。
+#[test]
+fn test_late_agent_card_claims_group_by_parent_tool_call_id() {
+    let mut ct = CurrentTurn::new();
+    // 卡片 A 先到并已认领自己的分组。
+    ct.start_tool(ToolCardAccumulator::new(
+        "agent-call-a".into(),
+        "Agent".into(),
+        "start coder".into(),
+    ));
+    ct.start_subagent(
+        "child-a".into(),
+        "coder".into(),
+        Some("agent-call-a".into()),
+    );
+
+    // B 的分组先到（父卡片尚未到达）：此时 A 已认领，顺序兜底会把它挂到 A 之下。
+    ct.start_subagent(
+        "child-b".into(),
+        "reviewer".into(),
+        Some("agent-call-b".into()),
+    );
+    assert!(ct.start_subagent_tool(
+        "child-b",
+        ToolCardAccumulator::new("child-tool-b".into(), "Grep".into(), "b.rs".into()),
+    ));
+
+    // 迟到的卡片 B。
+    ct.start_tool(ToolCardAccumulator::new(
+        "agent-call-b".into(),
+        "Agent".into(),
+        "start reviewer".into(),
+    ));
+
+    let vms: Vec<_> = ct.view_models().iter().cloned().collect();
+    match (&vms[0], &vms[1], &vms[2], &vms[3]) {
+        (
+            TuiRenderUnit::TuiToolCard(card_a),
+            TuiRenderUnit::TuiSubAgentGroup(group_a),
+            TuiRenderUnit::TuiToolCard(card_b),
+            TuiRenderUnit::TuiSubAgentGroup(group_b),
+        ) => {
+            assert_eq!(card_a.tool_id, "agent-call-a");
+            assert_eq!(group_a.agent_id, "child-a");
+            assert_eq!(card_b.tool_id, "agent-call-b");
+            assert_eq!(
+                group_b.agent_id, "child-b",
+                "迟到的卡片必须按身份认领，而不是认领更早的待配对分组"
+            );
+        }
+        other => panic!("expected Agent/group/Agent/group interleaving, got {other:?}"),
+    }
+}
+
+/// [回归测试] 有父身份的分组绝不按到达顺序猜：身份不匹配的 Agent 卡片出现时
+/// 不得认领它；只有身份匹配的卡片才能把该分组段落位。
+#[test]
+fn test_identified_group_never_adopted_by_unrelated_agent_card() {
+    let mut ct = CurrentTurn::new();
+    // 分组先到且带身份（父卡片尚未到达）。
+    ct.start_subagent(
+        "child-late".into(),
+        "coder".into(),
+        Some("agent-call-late".into()),
+    );
+    // 另一张无关的 Agent 卡片到达：身份不匹配，不能认领该分组。
+    ct.start_tool(ToolCardAccumulator::new(
+        "agent-call-other".into(),
+        "Agent".into(),
+        "start unrelated".into(),
+    ));
+
+    let vms: Vec<_> = ct.view_models().iter().cloned().collect();
+    match (vms.first(), vms.get(1)) {
+        (Some(TuiRenderUnit::TuiSubAgentGroup(_)), Some(TuiRenderUnit::TuiToolCard(card))) => {
+            assert_eq!(
+                card.tool_id, "agent-call-other",
+                "身份不匹配的卡片不得把分组段落位到自己之后"
+            );
+        }
+        other => panic!("expected group then unrelated card, got {other:?}"),
+    }
+
+    // 身份匹配的卡片到达：此时才把分组段落位到它之后。
+    ct.start_tool(ToolCardAccumulator::new(
+        "agent-call-late".into(),
+        "Agent".into(),
+        "start coder".into(),
+    ));
+    let vms: Vec<_> = ct.view_models().iter().cloned().collect();
+    match (vms.first(), vms.get(1), vms.get(2)) {
+        (
+            Some(TuiRenderUnit::TuiToolCard(other_card)),
+            Some(TuiRenderUnit::TuiToolCard(late_card)),
+            Some(TuiRenderUnit::TuiSubAgentGroup(group)),
+        ) => {
+            assert_eq!(other_card.tool_id, "agent-call-other");
+            assert_eq!(late_card.tool_id, "agent-call-late");
+            assert_eq!(
+                group.agent_id, "child-late",
+                "身份匹配后分组落到自己的卡片之后"
+            );
+        }
+        other => panic!("expected card/card/group, got {other:?}"),
+    }
+}
+
 #[test]
 fn test_current_turn_subagent_unknown_route_returns_false() {
     let mut ct = CurrentTurn::new();
@@ -430,7 +598,7 @@ fn test_current_turn_subagent_unknown_route_returns_false() {
 #[test]
 fn test_stop_subagent_without_tool_ended_deactivates_child_turn() {
     let mut ct = CurrentTurn::new();
-    ct.start_subagent("agent-1".into(), "researcher".into());
+    ct.start_subagent("agent-1".into(), "researcher".into(), None);
     assert!(ct.start_subagent_tool(
         "agent-1",
         ToolCardAccumulator::new("tc-1".into(), "Read".into(), "path: foo.rs".into()),
@@ -959,7 +1127,7 @@ fn has_running_bash_tool_matches_workspace_effective_name() {
 
     // 子 turn 递归分支：嵌套的 workspace Bash 同样命中。
     let mut ct = CurrentTurn::new();
-    ct.start_subagent("agent-1".into(), "coder".into());
+    ct.start_subagent("agent-1".into(), "coder".into(), None);
     assert!(ct.start_subagent_tool(
         "agent-1",
         ToolCardAccumulator::new(

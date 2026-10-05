@@ -37,6 +37,7 @@ pub(super) async fn run_sync_subagent(
     deregister_runtime: Option<DeregisterRuntimeFn>,
     langfuse_bridge: Option<Arc<dyn LangfuseBridgeLike>>,
     parent_agent_id: Option<AgentId>,
+    parent_tool_call_id: Option<String>,
     v2_ctx: V2SubagentContext,
     session: Arc<Session>,
     mut resume_claim: Option<ResumeClaim>,
@@ -81,12 +82,14 @@ pub(super) async fn run_sync_subagent(
         v2_ctx.agent_id,
         &agent_name,
         false,
+        parent_tool_call_id.clone(),
     );
     // v1 协议化载体直发（SubagentStarted）：发射语义单一事实源为 v2 事件构造
-    // （ObserveEvent 身份透传：child_agent_id → instance_id），经
-    // `observe_event_to_executor` 同步映射后直发父 handler——同步保证 Started
-    // 恒先于本 turn 后续事件到达父协议化链路（v1 ExecutorEvent 中间态已退役，
-    // 仅保留 ACP 协议序列化面映射，`2026-07-18-executor-event-retirement.md`）。
+    // （ObserveEvent 身份透传：child_agent_id → instance_id / parent_tool_call_id →
+    // 父工具卡片配对键），经 `observe_event_to_executor` 同步映射后直发父
+    // handler——同步保证 Started 恒先于本 turn 后续事件到达父协议化链路
+    // （v1 ExecutorEvent 中间态已退役，仅保留 ACP 协议序列化面映射，
+    // `2026-07-18-executor-event-retirement.md`）。
     forward_subagent_start_v1(
         event_handler.as_ref(),
         build_subagent_start_v2(
@@ -95,6 +98,7 @@ pub(super) async fn run_sync_subagent(
             v2_ctx.agent_id,
             &agent_name,
             false,
+            parent_tool_call_id,
         ),
     );
 

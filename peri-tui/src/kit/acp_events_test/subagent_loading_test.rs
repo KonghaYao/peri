@@ -35,6 +35,7 @@ fn test_dispatch_subagent_streaming_updates_current_turn_group() {
             agent_id: "agent-1".into(),
             agent_name: "researcher".into(),
             is_background: false,
+            parent_tool_call_id: None,
         },
     );
     dispatch_and_notify(
@@ -96,6 +97,7 @@ fn test_subagent_stopped_freezes_child_trailing_bubble() {
             agent_id: "agent-1".into(),
             agent_name: "researcher".into(),
             is_background: false,
+            parent_tool_call_id: None,
         },
     );
     dispatch_and_notify(
@@ -309,6 +311,7 @@ fn test_bg_subagent_chunk_after_turn_suspended_does_not_leak_to_main() {
             agent_id: "bg-agent-1".into(),
             agent_name: "researcher".into(),
             is_background: true,
+            parent_tool_call_id: None,
         },
     );
     assert!(
@@ -410,6 +413,7 @@ fn test_bg_events_after_turn_suspended_keep_idle_loading() {
             agent_id: "bg-agent-1".into(),
             agent_name: "researcher".into(),
             is_background: true,
+            parent_tool_call_id: None,
         },
     );
     dispatch_and_notify(&mut state, &AcpEventData::TurnSuspended);
@@ -510,6 +514,7 @@ fn test_bg_events_after_turn_suspended_keep_idle_loading() {
             agent_id: "sync-1".into(),
             agent_name: "coder".into(),
             is_background: false,
+            parent_tool_call_id: None,
         },
     );
     dispatch_and_notify(
@@ -567,6 +572,7 @@ fn test_subagent_stopped_after_subagent_started_keeps_loading() {
             agent_id: "sync-agent-1".into(),
             agent_name: "researcher".into(),
             is_background: false,
+            parent_tool_call_id: None,
         },
     );
     assert_eq!(
@@ -679,6 +685,7 @@ fn test_dispatch_sync_subagent_tool_routed_to_group() {
             agent_id: "sync-1".into(),
             agent_name: "coder".into(),
             is_background: false,
+            parent_tool_call_id: None,
         },
     );
     // 工具开始
@@ -919,6 +926,7 @@ fn test_late_agent_tool_card_adopts_early_subagent_group() {
             agent_id: "child-1".into(),
             agent_name: "coder".into(),
             is_background: false,
+            parent_tool_call_id: None,
         },
     );
     dispatch_and_notify(&mut state, &child_tool("child-1", "child-tool-1", "Read"));
@@ -930,6 +938,7 @@ fn test_late_agent_tool_card_adopts_early_subagent_group() {
             agent_id: "child-2".into(),
             agent_name: "reviewer".into(),
             is_background: false,
+            parent_tool_call_id: None,
         },
     );
     dispatch_and_notify(&mut state, &child_tool("child-2", "child-tool-2", "Grep"));
@@ -968,4 +977,101 @@ fn test_late_agent_tool_card_adopts_early_subagent_group() {
         })
         .collect();
     assert_eq!(published_layout, layout, "发布快照应保持增量投影的段顺序");
+}
+
+/// [回归测试] 并发批次下的身份配对：`SubagentStarted.parent_tool_call_id` 是
+/// 配对权威依据。子 Agent 启动顺序与工具卡片顺序相反时，两个分组不得互换
+/// （到达顺序兜底无法判定并发批次的真实归属）。
+#[test]
+#[serial]
+fn test_concurrent_agent_calls_pair_by_parent_tool_call_id() {
+    crate::kit::atoms::init_atoms();
+    *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
+    let mut state = BridgeState {
+        variant: 0,
+        committed: im::Vector::new(),
+        current_turn: CurrentTurn::new(),
+        phase: SessionPhase::Idle,
+        popup_kind: None,
+        generation: 0,
+        active_session_id: String::new(),
+        compact_just_completed: false,
+        last_submitted_text: None,
+        last_pushed_text_len: 0,
+        last_pushed_reasoning_len: 0,
+        last_successful_todos: None,
+        last_successful_todo_sequence: None,
+        next_todo_sequence: 0,
+        todo_call_inputs: std::collections::HashMap::new(),
+        turn_generation: 0,
+        last_prompt_generation: 0,
+        current_request_id: None,
+        pending_cache_usage: None,
+        publication_intent: Default::default(),
+        folded_history: Default::default(),
+    };
+
+    // 并行批次：两张 Agent 卡片都先到（ToolStarted 阶段）。
+    for (tool_id, summary) in [
+        ("agent-call-1", "start coder"),
+        ("agent-call-2", "start reviewer"),
+    ] {
+        dispatch_and_notify(
+            &mut state,
+            &AcpEventData::ToolStarted(crate::kit::stream_data::TuiToolStarted {
+                agent_id: None,
+                tool_name: "Agent".into(),
+                tool_id: tool_id.into(),
+                input_summary: summary.into(),
+                raw_input: serde_json::json!({ "prompt": summary }),
+            }),
+        );
+    }
+
+    // 子 Agent 启动顺序与卡片顺序相反：第二个调用先启动。
+    for (agent_id, agent_name, parent) in [
+        ("child-2", "reviewer", "agent-call-2"),
+        ("child-1", "coder", "agent-call-1"),
+    ] {
+        dispatch_and_notify(
+            &mut state,
+            &AcpEventData::SubagentStarted {
+                agent_id: agent_id.into(),
+                agent_name: agent_name.into(),
+                is_background: false,
+                parent_tool_call_id: Some(parent.into()),
+            },
+        );
+        dispatch_and_notify(
+            &mut state,
+            &AcpEventData::ToolStarted(crate::kit::stream_data::TuiToolStarted {
+                agent_id: Some(agent_id.into()),
+                tool_name: "Read".into(),
+                tool_id: format!("{agent_id}-tool"),
+                input_summary: "file.rs".into(),
+                raw_input: serde_json::Value::Null,
+            }),
+        );
+    }
+
+    let layout: Vec<String> = state
+        .current_turn
+        .view_models()
+        .iter()
+        .map(|vm| match vm {
+            TuiRenderUnit::TuiToolCard(card) => format!("card:{}", card.tool_id),
+            TuiRenderUnit::TuiSubAgentGroup(group) => format!("group:{}", group.agent_id),
+            other => format!("other:{other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        layout,
+        vec![
+            "card:agent-call-1",
+            "group:child-1",
+            "card:agent-call-2",
+            "group:child-2",
+        ],
+        "身份配对：并发批次里子分组必须落在自己的 Agent 调用之下，不得按到达顺序互换"
+    );
 }

@@ -49,12 +49,16 @@ pub fn agent_id_from_child_thread(child_thread_id: &str) -> AgentId {
 /// `agent_id` 为父视角归属身份：`parent_agent_id` 未注入（/bg、测试路径）时以
 /// `child_agent_id` 占位——v1 协议化映射（`observe_event_to_executor`）不消费
 /// 该字段，仅 v2 emit（Langfuse tracer 归属）需要真实父身份。
+///
+/// `parent_tool_call_id` 为发起本次子 agent 的父 Agent 工具调用 id（父侧
+/// `ToolContext.invocation_id`）；`/bg` 等无工具调用上下文的路径传 None。
 pub(crate) fn build_subagent_start_v2(
     turn_id: TurnId,
     parent_agent_id: Option<AgentId>,
     child_agent_id: AgentId,
     agent_name: &str,
     is_background: bool,
+    parent_tool_call_id: Option<String>,
 ) -> ObserveEvent {
     ObserveEvent::SubagentStart {
         turn_id,
@@ -62,6 +66,7 @@ pub(crate) fn build_subagent_start_v2(
         child_agent_id,
         agent_name: agent_name.to_string(),
         is_background,
+        parent_tool_call_id,
     }
 }
 
@@ -70,6 +75,7 @@ pub(crate) fn build_subagent_start_v2(
 /// `parent_agent_id` 为 None（未注入/测试路径）时不 emit，仅 tracing warn——
 /// 防脏数据：缺父身份的事件会让 tracer 无法归属，宁可走 incomplete 分支。
 /// （v1 协议化直发不依赖本函数：`forward_subagent_start_v1` 独立于父身份。）
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn emit_subagent_start_v2(
     event_bus: &Arc<EventBus>,
     turn_id: TurnId,
@@ -77,6 +83,7 @@ pub(crate) fn emit_subagent_start_v2(
     child_agent_id: AgentId,
     agent_name: &str,
     is_background: bool,
+    parent_tool_call_id: Option<String>,
 ) {
     if parent_agent_id.is_none() {
         tracing::warn!(
@@ -93,6 +100,7 @@ pub(crate) fn emit_subagent_start_v2(
         child_agent_id,
         agent_name,
         is_background,
+        parent_tool_call_id,
     ));
 }
 

@@ -313,6 +313,7 @@ async fn test_forwarder_handles_observe_lagged() {
             child_agent_id: AgentId::new(),
             agent_name: "test".to_string(),
             is_background: false,
+            parent_tool_call_id: None,
         });
     }
 
@@ -637,6 +638,7 @@ async fn test_forwarder_filters_v2_subagent_start_stop() {
         child_agent_id,
         agent_name: "explore".to_string(),
         is_background: false,
+        parent_tool_call_id: None,
     });
     bus.emit_observe(ObserveEvent::SubagentStop {
         turn_id,

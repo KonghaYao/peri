@@ -16,6 +16,7 @@ use peri_agent::session::subagent::{ForkDirectiveKind, SubagentCancelPolicy, Sub
 use peri_agent::tools::BaseTool;
 
 impl super::SubAgentTool {
+    #[allow(clippy::too_many_arguments)] // 通道参数逐项显式传递，与 spawn_config_base 同口径
     pub(crate) async fn invoke_background(
         &self,
         prompt: String,
@@ -24,6 +25,7 @@ impl super::SubAgentTool {
         is_fork: bool,
         parent_messages: Vec<BaseMessage>,
         model: Option<&str>,
+        parent_tool_call_id: Option<String>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         // task_manager 必填（后台任务注册）；来自 parent_session 的 host 或 tool host 回退。
         // 后台 sub-agent 不设并发上限：无入口预检，注册阶段（register_with_kind）
@@ -58,6 +60,7 @@ impl super::SubAgentTool {
                 system_prompt,
                 Vec::new(),
                 cwd.clone(),
+                parent_tool_call_id.clone(),
             );
             self.spawn(config).await?
         } else {
@@ -112,6 +115,7 @@ impl super::SubAgentTool {
                 build_result.system_prompt,
                 build_result.skill_names,
                 cwd.clone(),
+                parent_tool_call_id,
             );
             self.spawn(config).await?
         };

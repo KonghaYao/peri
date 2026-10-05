@@ -134,7 +134,7 @@ fn test_publication_subagent_stream_and_block_coalesce() {
             let mut state = state();
             state
                 .current_turn
-                .start_subagent("child".into(), "child".into());
+                .start_subagent("child".into(), "child".into(), None);
             let mut scheduler = PublicationScheduler::default();
             let now = peri_time::Instant::now();
             reset_perf_counters();
@@ -331,7 +331,9 @@ fn test_publication_two_children_resume_and_bg_without_group() {
     let mut scheduler = PublicationScheduler::default();
     let now = peri_time::Instant::now();
     for id in ["a", "b"] {
-        state.current_turn.start_subagent(id.into(), id.into());
+        state
+            .current_turn
+            .start_subagent(id.into(), id.into(), None);
     }
     for id in ["a", "b"] {
         deliver(
@@ -351,7 +353,7 @@ fn test_publication_two_children_resume_and_bg_without_group() {
     state.current_turn.stop_subagent("a", false, "");
     state
         .current_turn
-        .start_subagent("a".into(), "resumed".into());
+        .start_subagent("a".into(), "resumed".into(), None);
     deliver(
         &mut state,
         &mut scheduler,

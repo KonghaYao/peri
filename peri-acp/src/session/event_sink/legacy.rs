@@ -45,10 +45,12 @@ impl TransportEventSink {
                 agent_name,
                 instance_id,
                 is_background,
+                parent_tool_call_id,
             } => Some(AcpEvent::SubagentStarted {
                 agent_name: agent_name.clone(),
                 instance_id: instance_id.clone(),
                 is_background: *is_background,
+                parent_tool_call_id: parent_tool_call_id.clone(),
             }),
             ExecutorEvent::SubagentStopped {
                 agent_name,

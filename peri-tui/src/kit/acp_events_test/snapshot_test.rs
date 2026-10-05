@@ -159,6 +159,7 @@ fn test_snapshot_cache_tracks_subagent_before_todo_summary() {
             agent_id: "cache-agent".into(),
             agent_name: "researcher".into(),
             is_background: false,
+            parent_tool_call_id: None,
         },
     );
     dispatch_and_notify(

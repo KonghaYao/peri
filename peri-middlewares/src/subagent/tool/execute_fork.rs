@@ -22,6 +22,7 @@ impl super::SubAgentTool {
         prompt: &str,
         cwd: &str,
         parent_messages: Vec<BaseMessage>,
+        parent_tool_call_id: Option<String>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let host = self.host();
 
@@ -54,6 +55,7 @@ impl super::SubAgentTool {
             system_prompt,
             Vec::new(),
             cwd.to_string(),
+            parent_tool_call_id,
         );
 
         let spawned = self.spawn(config).await?;

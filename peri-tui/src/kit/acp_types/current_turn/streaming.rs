@@ -109,8 +109,8 @@ impl CurrentTurn {
     /// so text spoken before the tool call appears in its own bubble.
     ///
     /// Agent 卡片晚于自己的子分组到达时（事件乱序，见
-    /// `adopt_orphan_subagent_group`），在此接管孤儿分组段——分组不得挂在
-    /// 上一个仍在 loading 的 Agent 调用之下。
+    /// `adopt_pending_subagent_group`），在此认领待配对分组段——分组不得挂在
+    /// 别的（仍在 loading 的）Agent 调用之下。
     pub fn start_tool(&mut self, tool: ToolCardAccumulator) {
         // 防御：相同 tool_id 不应重复 start（同一轮内 tool_id 唯一）。
         // [Fix think-end] agent 侧提前 ToolStarted（工具块开始即发，参数尚未
@@ -134,7 +134,7 @@ impl CurrentTurn {
         let is_agent_launcher = super::subagents::is_agent_launcher_tool(&tool.tool_name);
         self.tool_cards.push(tool);
         if is_agent_launcher {
-            self.adopt_orphan_subagent_group(idx, self.segments.len() - 1);
+            self.adopt_pending_subagent_group(idx, self.segments.len() - 1);
         }
         self.active = true;
         self.invalidate_cache();

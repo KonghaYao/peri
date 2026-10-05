@@ -164,6 +164,7 @@ mod tests {
             child_agent_id: child_id,
             agent_name: "fork".to_string(),
             is_background: false,
+            parent_tool_call_id: None,
         });
 
         // 子 agent 内部执行
@@ -321,6 +322,7 @@ mod tests {
             child_agent_id: child_id,
             agent_name: "bg".to_string(),
             is_background: true,
+            parent_tool_call_id: None,
         });
         // 父 ToolEnded:只结束父工具记录,不关闭 AGENT obs
         bridge.process_render_event(&RenderEvent::ToolEnded {
@@ -454,6 +456,7 @@ mod tests {
             child_agent_id: child_id,
             agent_name: "child".to_string(),
             is_background: false,
+            parent_tool_call_id: None,
         });
         // 子 agent 内部
         bridge.process_observe_event(&ObserveEvent::StageStarted {

@@ -266,6 +266,7 @@ fn test_bg_text_chunk_appends_live_detail_not_view_models() {
             agent_id: "bg-agent".into(),
             agent_name: "coder".into(),
             is_background: true,
+            parent_tool_call_id: None,
         },
     );
     dispatch_and_notify(&mut state, &AcpEventData::TurnSuspended);
@@ -385,6 +386,7 @@ fn test_bg_group_frozen_in_view_models_after_turn_suspended() {
             agent_id: "bg-agent".into(),
             agent_name: "coder".into(),
             is_background: true,
+            parent_tool_call_id: None,
         },
     );
     dispatch_and_notify(

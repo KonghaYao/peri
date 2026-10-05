@@ -78,6 +78,7 @@ impl super::SubAgentTool {
         system_prompt: Option<String>,
         skill_names: Vec<String>,
         cwd: String,
+        parent_tool_call_id: Option<String>,
     ) -> SubagentSpawnConfig {
         let host = self.host();
         let (on_subagent_start, on_subagent_stop) = self.lifecycle_closures();
@@ -110,6 +111,7 @@ impl super::SubAgentTool {
             register_runtime: host.register_runtime.clone(),
             deregister_runtime: host.deregister_runtime.clone(),
             parent_agent_id: *self.parent_agent_id.read(),
+            parent_tool_call_id,
             // 父侧数据回退（parent session 存在时由 spawn_subagent 覆盖）
             cancel_token: self.cancel.clone(),
             cwd: Some(cwd),
@@ -151,6 +153,7 @@ impl super::SubAgentTool {
         tool_filter: peri_agent::session::tool_catalog::ToolFilter,
         session_resources: Arc<dyn SessionResources>,
         cwd: String,
+        parent_tool_call_id: Option<String>,
     ) -> SubagentResumeConfig {
         let host = self.host();
         let (on_subagent_start, on_subagent_stop) = self.lifecycle_closures();
@@ -179,6 +182,7 @@ impl super::SubAgentTool {
             register_runtime: host.register_runtime.clone(),
             deregister_runtime: host.deregister_runtime.clone(),
             parent_agent_id: *self.parent_agent_id.read(),
+            parent_tool_call_id,
             // 父侧数据回退（parent session 存在时由 resume_subagent 覆盖）
             cancel_token: self.cancel.clone(),
             cwd: Some(cwd),

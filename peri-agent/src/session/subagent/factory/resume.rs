@@ -75,6 +75,7 @@ pub(super) async fn resume_subagent_impl(
         register_runtime,
         deregister_runtime,
         parent_agent_id,
+        parent_tool_call_id,
         cancel_token: cancel_token_cfg,
         cwd: _,
         frozen_claude_md: frozen_claude_md_cfg,
@@ -297,6 +298,7 @@ pub(super) async fn resume_subagent_impl(
                 deregister_runtime,
                 langfuse_bridge,
                 parent_agent_id,
+                parent_tool_call_id,
                 v2_ctx,
                 session.clone(),
                 Some(claim),
@@ -332,6 +334,7 @@ pub(super) async fn resume_subagent_impl(
                 on_subagent_stop,
                 register_runtime,
                 parent_agent_id,
+                parent_tool_call_id,
                 cancel_token.clone(),
                 v2_ctx,
             )

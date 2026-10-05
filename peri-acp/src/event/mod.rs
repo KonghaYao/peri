@@ -113,6 +113,12 @@ pub enum AcpEvent {
         agent_name: String,
         instance_id: String,
         is_background: bool,
+        /// 发起本次子 agent 的父 Agent 工具调用 id（tool_call_id）。
+        ///
+        /// 由父侧 `ToolContext.invocation_id` 透传；TUI 按它把子分组配到父
+        /// Agent 工具卡片，不依赖事件到达顺序。None = 无工具调用上下文的路径。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_tool_call_id: Option<String>,
     },
     /// SubAgent execution completed
     SubagentStopped {

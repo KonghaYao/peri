@@ -160,7 +160,7 @@ impl BaseTool for SubAgentTool {
     async fn invoke(
         &self,
         input: serde_json::Value,
-        _ctx: peri_agent::tools::ToolContext<'_>,
+        ctx: peri_agent::tools::ToolContext<'_>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let InvocationArgs {
             resume_thread_id,
@@ -183,7 +183,13 @@ impl BaseTool for SubAgentTool {
         // invoke_resume 先尝试当前会话的 live Defer 投递；只有恢复路径才需要磁盘。
         if let Some(thread_id) = resume_thread_id.as_ref() {
             return self
-                .invoke_resume(thread_id.clone(), prompt, cwd, run_in_background)
+                .invoke_resume(
+                    thread_id.clone(),
+                    prompt,
+                    cwd,
+                    run_in_background,
+                    ctx.invocation_id.clone(),
+                )
                 .await;
         }
 
@@ -192,7 +198,7 @@ impl BaseTool for SubAgentTool {
             return Err("Error: missing required parameter prompt".into());
         };
 
-        let current_messages = self.current_messages(_ctx.messages);
+        let current_messages = self.current_messages(ctx.messages);
 
         let is_mcp_agent = subagent_type
             .as_deref()
@@ -213,12 +219,15 @@ impl BaseTool for SubAgentTool {
                     is_fork,
                     current_messages,
                     model.as_deref(),
+                    ctx.invocation_id.clone(),
                 )
                 .await;
         }
 
         if is_fork {
-            return self.invoke_fork(&prompt, &cwd, current_messages).await;
+            return self
+                .invoke_fork(&prompt, &cwd, current_messages, ctx.invocation_id.clone())
+                .await;
         }
 
         let agent_id = match &subagent_type {
@@ -274,6 +283,7 @@ impl BaseTool for SubAgentTool {
             build_result.system_prompt,
             build_result.skill_names,
             cwd,
+            ctx.invocation_id.clone(),
         );
 
         let spawned = self.spawn(config).await?;

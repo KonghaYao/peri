@@ -91,6 +91,7 @@ fn spawn_config(
         register_runtime: None,
         deregister_runtime: None,
         parent_agent_id: None,
+        parent_tool_call_id: None,
         cancel_token: None,
         cwd: Some(cwd.into()),
         parent_thread_id: None,

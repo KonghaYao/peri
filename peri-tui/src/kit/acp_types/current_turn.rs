@@ -49,12 +49,13 @@ pub struct CurrentTurn {
     /// occurrences with the same ID may coexist in one parent turn.
     pub subagents: Vec<SubAgentAccumulator>,
 
-    /// 早于父 Agent ToolCard 到达的子分组（按创建顺序）。
+    /// 早于父 Agent ToolCard 到达、尚未配对的子分组（按创建顺序）。
     ///
-    /// 事件乱序时 `start_subagent` 找不到可认领的 Agent 卡片，只能先把段
-    /// 记在尾部；迟到的卡片由 `start_tool` 认领这里最早的 `subagent_idx`
-    /// （见 `adopt_orphan_subagent_group`）。空表示所有分组都已配对。
-    orphan_subagent_groups: Vec<usize>,
+    /// 事件乱序时 `start_subagent` 找不到可认领的 Agent 卡片，只能先把段记在
+    /// 尾部；迟到的卡片由 `start_tool` 认领（见 `adopt_pending_subagent_group`）：
+    /// 先按 `parent_tool_call_id` 身份匹配，无身份的分组才按到达顺序兜底。
+    /// 空表示所有分组都已配对。
+    pending_subagent_groups: Vec<PendingSubagentGroup>,
 
     /// Chronological order of text flushes, tool starts, and sub-agent starts
     /// within this turn. Drive `sync_cache` to produce interleaved output.
@@ -131,7 +132,7 @@ impl Default for CurrentTurn {
             committed: false,
             active: false,
             subagents: Vec::new(),
-            orphan_subagent_groups: Vec::new(),
+            pending_subagent_groups: Vec::new(),
             segments: Vec::new(),
             last_text_flush: 0,
             last_reasoning_flush: 0,
@@ -146,6 +147,16 @@ impl Default for CurrentTurn {
             cache_dirty: false,
         }
     }
+}
+
+/// 尚未与父 Agent 工具卡片配对的子分组。
+#[derive(Debug, Clone)]
+pub(super) struct PendingSubagentGroup {
+    /// 指向 `CurrentTurn.subagents` 的分组下标。
+    pub subagent_idx: usize,
+    /// 父 Agent 工具调用 id（`SubagentStarted.parent_tool_call_id`）。
+    /// None = 生产端未提供身份，只能按到达顺序兜底配对。
+    pub parent_tool_call_id: Option<String>,
 }
 
 /// A single entry in the chronological ordering of a turn's streaming events.
@@ -237,7 +248,7 @@ impl CurrentTurn {
         self.reasoning.clear();
         self.tool_cards.clear();
         self.subagents.clear();
-        self.orphan_subagent_groups.clear();
+        self.pending_subagent_groups.clear();
         self.segments.clear();
         self.last_text_flush = 0;
         self.last_reasoning_flush = 0;

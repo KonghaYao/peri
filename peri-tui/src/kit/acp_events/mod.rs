@@ -432,7 +432,14 @@ pub(crate) fn dispatch_for_bridge(
             agent_id,
             agent_name,
             is_background,
-        } => subagent::handle_subagent_started(state, agent_id, agent_name, *is_background),
+            parent_tool_call_id,
+        } => subagent::handle_subagent_started(
+            state,
+            agent_id,
+            agent_name,
+            *is_background,
+            parent_tool_call_id.clone(),
+        ),
         SubagentStopped {
             agent_id,
             result,

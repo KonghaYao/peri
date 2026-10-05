@@ -811,6 +811,7 @@ fn test_subagent_started_no_session_update() {
             agent_name: "sub-agent".to_string(),
             instance_id: "inst-001".to_string(),
             is_background: false,
+            parent_tool_call_id: None,
         },
         "SubagentStarted",
     );

@@ -44,6 +44,7 @@ pub(super) async fn spawn_background_subagent(
     on_subagent_stop: Option<SubagentLifecycleStop>,
     register_runtime: Option<RegisterRuntimeFn>,
     parent_agent_id: Option<AgentId>,
+    parent_tool_call_id: Option<String>,
     cancel_token: CancellationToken,
     v2_ctx: V2SubagentContext,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -129,9 +130,11 @@ pub(super) async fn spawn_background_subagent(
             subagent_agent_id,
             &agent_name_for_task,
             true,
+            parent_tool_call_id.clone(),
         );
         // v1 协议化载体直发（SubagentStarted）：发射语义单一事实源为 v2 事件构造
-        // （ObserveEvent 身份透传：child_agent_id → instance_id），经
+        // （ObserveEvent 身份透传：child_agent_id → instance_id /
+        // parent_tool_call_id → 父工具卡片配对键），经
         // `observe_event_to_executor` 同步映射后直发 bg_event_sender——同步保证
         // Started 恒先于任何 SubagentStopped / BackgroundTaskCompleted
         // （正常/取消/abort 三路，P2 顺序契约）。
@@ -144,6 +147,7 @@ pub(super) async fn spawn_background_subagent(
                     subagent_agent_id,
                     &agent_name_for_task,
                     true,
+                    parent_tool_call_id.clone(),
                 ),
             );
         } else {
