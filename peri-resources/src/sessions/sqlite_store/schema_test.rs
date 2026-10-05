@@ -20,7 +20,10 @@ async fn v13_upgrade_drops_execution_owner_tables_and_preserves_close_intent() {
     let path = directory.path().join("threads.db");
     let store = SqliteThreadStore::new(&path).await.unwrap();
     let id = store
-        .create_thread(ThreadMeta::new_at("/legacy", peri_time::now_wall()))
+        .create_thread(ThreadMeta::new_at(
+            directory.path().to_string_lossy().into_owned(),
+            peri_time::now_wall(),
+        ))
         .await
         .unwrap();
     store
