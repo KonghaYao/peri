@@ -18,6 +18,7 @@ WASM 依赖图按平台排除 SQLx、进程执行、stdio 和本地工具 MCP pa
 | Emscripten 日期格式 | `peri-time/src/calendar.rs` |
 | 不依赖 package 的 MCP 共用规则 | `peri-mcp-core/src/{agent_definition,task_scope.rs}` |
 | 配置与 OAuth 浏览器适配 | `peri-config/src/io/wasm.rs`、`mcp-packages/credentials/src/client.rs` |
+| 部署环境注入与 Langfuse | `npm-packages/@peri-sdk/src/wasm/loader.ts`、`src/transport/wasm-transport.ts`（同包）；`scripts/cargo-wasm.sh` 导出 `ENV` |
 
 `@peri-code/sdk` 的 `scripts/build.ts` 构建本产物并复制到 npm 包的 `dist/wasm/`，`WasmAcpTransport` 使现有 Agent/Session 接口复用 ACP。示例服务器是 `npm-packages/@peri-sdk/examples/demo/demo-wasm.ts`，复用 `demo.html`。
 

@@ -52,6 +52,10 @@ const storage: SessionStorage = new TursoStorage({
     // Peri currently requires a nonempty remote credential even for local sqld without auth.
     authToken: "local-dev",
 });
+const wasmEnv = Object.fromEntries(
+    Object.entries(Bun.env).filter((entry): entry is [string, string] =>
+        entry[0].startsWith("LANGFUSE_") && entry[1] !== undefined),
+);
 const config = {
     config: {
         active_alias: "sonnet",
@@ -104,6 +108,7 @@ const sandbox = new Sandbox({
         : {}),
     transportFactory: (path) => WasmAcpTransport.start({
         moduleUrl: wasmModuleUrl,
+        env: wasmEnv,
         configJson: JSON.stringify({
             cwd: path,
             settings: config,
@@ -166,7 +171,7 @@ function openSession(sessionId: string | null): Promise<OpenSession> {
 
 let server: ReturnType<typeof Bun.serve> | undefined;
 try {
-    const wasm = await loadPeriWasm(wasmModuleUrl);
+    const wasm = await loadPeriWasm(wasmModuleUrl, wasmEnv);
     if (!wasm.PeriWasmAcp?.start)
         throw new Error("Bundled peri-wasm lacks ACP Host; rebuild peri-wasm before running demo-wasm");
     try {

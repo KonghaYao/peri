@@ -117,6 +117,33 @@ PERI_WORKSPACE=/absolute/workspace ANTHROPIC_API_KEY=... ANTHROPIC_BASE_URL=... 
 
 The server checks for the `PeriWasmAcp` export before listening and reports a missing ACP Host explicitly. `PERI_WASM_MODULE_URL` selects another WASM glue module; `PERI_WASM_MACHINE_ID` sets a persistent UUID execution identity (the demo defaults to `00000000-0000-4000-8000-000000000001`). `PERI_WORKSPACE_MCP_URL` can supply an external HTTP Workspace MCP endpoint. Builtin MCP servers are not started in WASM.
 
+### WASM Langfuse 上报
+
+通过 `WasmAcpTransport.start({ env })` 在 Emscripten 模块初始化时注入环境变量。SDK 使用 `preRun` 写入构建时导出的 `ENV`，Rust 继续复用现有配置解析、Controller 观测旁路和 Langfuse HTTP exporter，不需要 JS Langfuse SDK，也不修改 Rust 配置规则。
+
+```ts
+const transport = await WasmAcpTransport.start({
+  env: {
+    LANGFUSE_PUBLIC_KEY: "pk-lf-...",
+    LANGFUSE_SECRET_KEY: "sk-lf-...",
+    LANGFUSE_BASE_URL: "https://cloud.langfuse.com",
+    LANGFUSE_USER_ID: "sdk-service",
+    LANGFUSE_TRACE_SAMPLING: "1",
+  },
+  configJson: JSON.stringify({ cwd, settings, storage, machineId }),
+});
+```
+
+`env` 的值必须为字符串，两把 key 都配置后才启用。`LANGFUSE_BASE_URL` 是服务根地址，不是完整 OTLP 路径；Rust exporter 上报到 `/api/public/otel/v1/traces`。采样、批次、容量和刷新周期的配置仍以[环境变量规范](../../docs/standards/environment-variables.md)为准。JavaScript 宿主的环境不会自动传播到 Rust，`settings.config.env` 也不是此注入入口。
+
+Bun demo 自动显式传入宿主的 `LANGFUSE_*` 变量：在包内未跟踪的 `.env` 中配置凭证和可选服务地址，然后执行 `bun run demo:wasm`。首次使用新入口需要 `bun run build` 重建导出 `ENV` 的产物；旧的自定义 `PERI_WASM_MODULE_URL` 也需要重建。
+
+环境属于 **WASM 模块实例**，不是 ACP Session。同一模块 URL 缓存并共享一个实例，重复加载只能传相同环境；显式传入不同环境会报错，不会静默覆盖其他 Agent 的凭证。先调用 `loadPeriWasm(moduleUrl, env)` 预加载时必须使用相同环境；省略 `env` 则复用已初始化环境。需要不同环境的部署应使用独立模块 URL 或独立 Worker/进程，初始化后不修改环境。
+
+凭证只应由受信的 Bun 服务或 Workers secret binding 注入，不能把 Langfuse secret 放入浏览器前端或日志。浏览器直接运行 WASM 时应改为服务端执行或受鉴权的遥测代理，把凭证留在服务端。上报可能包含模型输入、输出及工具数据，启用前确认数据策略和网络可达性。
+
+正常退出调用 `managed.closeAgent()` / `managed.closeAll()`（直接使用 transport 时调用 `transport.close()`），由 Host 排空并关闭遥测；不要依赖强杀进程或页面卸载。遥测失败保持旁路诊断，不能把业务成功当成上报成功。`tests/wasm-acp-integration.test.ts` 使用本地模拟 OTLP 服务检查实际 WASM 上报，无需真实 Langfuse 凭证。
+
 ## Local Cloudflare Workers probe
 
 The [Workers example](examples/workers/worker.js) uses the same SDK package and

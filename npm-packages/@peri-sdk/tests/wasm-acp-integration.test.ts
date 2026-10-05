@@ -42,6 +42,14 @@ test("Agent start, send, list and load work through WASM ACP", async () => {
     `127.0.0.1:${sqlPort}`, "--db-path", resolve(root, "sessions"),
   ], { cwd: resolve(import.meta.dir, ".."), stdin: "ignore", stdout: "ignore", stderr: "pipe" });
   let modelCalls = 0;
+  const telemetry: unknown[] = [];
+  const langfuse = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
+    expect(new URL(request.url).pathname).toBe("/api/public/otel/v1/traces");
+    expect(request.headers.get("authorization")).toBe(`Basic ${btoa("pk-test:sk-test")}`);
+    expect(request.headers.get("x-langfuse-ingestion-version")).toBe("4");
+    telemetry.push(await request.json());
+    return Response.json({});
+  } });
   const model = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
     const body = await request.json() as { messages?: unknown };
     expect(request.headers.get("authorization")).toBe("Bearer fixture-key");
@@ -67,7 +75,12 @@ test("Agent start, send, list and load work through WASM ACP", async () => {
   const sandbox = new Sandbox({
     id: "wasm-acp-integration",
     storage: new TursoStorage({ url: databaseUrl, engine: "libsql", authToken: "local-dev" }),
-    transportFactory: (path) => WasmAcpTransport.start({ configJson: JSON.stringify({
+    transportFactory: (path) => WasmAcpTransport.start({ env: {
+      LANGFUSE_PUBLIC_KEY: "pk-test",
+      LANGFUSE_SECRET_KEY: "sk-test",
+      LANGFUSE_BASE_URL: `http://127.0.0.1:${langfuse.port}`,
+      LANGFUSE_USER_ID: "wasm-test-user",
+    }, configJson: JSON.stringify({
       cwd: path, settings, storage: { url: databaseUrl, authToken: "local-dev" },
       machineId: "00000000-0000-4000-8000-000000000003",
     }) }),
@@ -85,6 +98,8 @@ test("Agent start, send, list and load work through WASM ACP", async () => {
     expect(modelCalls).toBe(1);
     expect((await sandbox.getSessions(workspace)).some((entry) => entry.id === sessionId)).toBe(true);
     await manager.closeAgent(createdAgent.id);
+    expect(telemetry.length).toBeGreaterThan(0);
+    expect(JSON.stringify(telemetry)).toContain("resourceSpans");
 
     const loadedAgent = manager.createAgent({ id: "loaded", sandbox });
     const loaded = await loadedAgent.session.start(sessionId);
@@ -92,6 +107,7 @@ test("Agent start, send, list and load work through WASM ACP", async () => {
   } finally {
     await manager.closeAll();
     model.stop(true);
+    langfuse.stop(true);
     sqld.kill("SIGTERM");
     await sqld.exited;
     await rm(root, { recursive: true, force: true });

@@ -13,4 +13,5 @@ if [[ -n "${EMSDK_PYTHON:-}" ]] && ! "$EMSDK_PYTHON" -c 'import sys; assert sys.
 fi
 "$repo_root/scripts/prepare-emscripten.sh"
 export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }--cfg wasm_bindgen_unstable_tokio --cfg tokio_unstable -Cpanic=abort -Cllvm-args=-enable-emscripten-cxx-exceptions=0 -Crelocation-model=static -Clink-arg=-sWASM_BINDGEN -Clink-arg=-Wno-experimental -Clink-arg=-sMODULARIZE -Clink-arg=-sEXPORT_ES6 -Clink-arg=-sNODERAWSOCKETS -Clink-arg=-sDYNAMIC_EXECUTION=0 -Clink-arg=-sSTACK_SIZE=8MB -Clink-arg=-sALLOW_MEMORY_GROWTH"
+export RUSTFLAGS="$RUSTFLAGS -Clink-arg=-sEXPORTED_RUNTIME_METHODS=ENV"
 exec "$repo_root/scripts/cargo-rmcp-patched.sh" "$@"
