@@ -5,17 +5,16 @@ use super::{resource_input, Args, OwnerIncarnationGuard};
 #[test]
 fn crashed_owner_marker_blocks_new_incarnation_until_cleanup_proven() {
     let dir = tempfile::tempdir().unwrap();
-    let secret = dir.path().join("secret");
-    std::fs::write(&secret, [3u8; 32]).unwrap();
-    let guard = OwnerIncarnationGuard::claim(&secret).unwrap();
-    assert!(OwnerIncarnationGuard::claim(&secret).is_err());
+    let workspace = dir.path();
+    let guard = OwnerIncarnationGuard::claim(workspace).unwrap();
+    assert!(OwnerIncarnationGuard::claim(workspace).is_err());
     drop(guard); // Simulates an abrupt process exit: Drop cannot claim cleanup.
-    assert!(OwnerIncarnationGuard::claim(&secret).is_err());
-    let marker = dir.path().join("secret.workspace-owner-unclean");
+    assert!(OwnerIncarnationGuard::claim(workspace).is_err());
+    let marker = workspace.join(".peri/workspace-owner-unclean");
     std::fs::remove_file(&marker).unwrap(); // External cleanup proof is required.
-    let guard = OwnerIncarnationGuard::claim(&secret).unwrap();
+    let guard = OwnerIncarnationGuard::claim(workspace).unwrap();
     guard.clear_after_cleanup().unwrap();
-    assert!(OwnerIncarnationGuard::claim(&secret).is_ok());
+    assert!(OwnerIncarnationGuard::claim(workspace).is_ok());
 }
 
 #[test]
