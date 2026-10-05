@@ -56,17 +56,6 @@ jobs:
               shell: bash
               run: ./scripts/cargo-rmcp-patched.sh build --locked --workspace --all-targets
 
-            - name: Install Bun
-              uses: oven-sh/setup-bun@v2
-
-            - name: Install PTC dependencies
-              working-directory: npm-packages/@peri-ptc
-              run: bun install --frozen-lockfile
-
-            - name: Build PTC fixture
-              working-directory: npm-packages/@peri-ptc
-              run: bun run build
-
             # 分步记录耗时，也确保 Windows 下第一组失败不会被后续成功覆盖。
             - name: Run workspace tests (excluding middleware and MCP capabilities)
               shell: bash

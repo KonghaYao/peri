@@ -47,7 +47,11 @@ if [[ ! -f "$crate_dir/.peri-patch-sha256" ]]; then
         git -C "$staging_dir/rmcp-3.5.0" apply "$patch_file"
     fi
     printf '%s\n' "$patch_sha256" > "$staging_dir/rmcp-3.5.0/.peri-patch-sha256"
-    if [[ ! -e "$crate_dir" ]]; then
+    if [[ -f "$crate_dir/.peri-patch-sha256" ]]; then
+        : # Another invocation finished first; reuse its cache.
+    else
+        # Replace interrupted or partial caches instead of leaving them in place.
+        rm -rf "$crate_dir"
         mv "$staging_dir/rmcp-3.5.0" "$crate_dir"
     fi
     rm -rf "$staging_dir"
@@ -96,7 +100,11 @@ if [[ ! -f "$hyper_crate_dir/.peri-patch-sha256" ]]; then
         git -C "$staging_dir/hyper-util-0.1.21" apply "$hyper_patch_file"
     fi
     printf '%s\n' "$hyper_patch_sha256" > "$staging_dir/hyper-util-0.1.21/.peri-patch-sha256"
-    if [[ ! -e "$hyper_crate_dir" ]]; then
+    if [[ -f "$hyper_crate_dir/.peri-patch-sha256" ]]; then
+        : # Another invocation finished first; reuse its cache.
+    else
+        # Replace interrupted or partial caches instead of leaving them in place.
+        rm -rf "$hyper_crate_dir"
         mv "$staging_dir/hyper-util-0.1.21" "$hyper_crate_dir"
     fi
     rm -rf "$staging_dir"

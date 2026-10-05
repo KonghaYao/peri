@@ -340,9 +340,7 @@ fn test_prompt_wire_response_carries_pending_tasks_only_when_unsettled() {
     let settled =
         prompt_wire_response(None, crate::session::executor::PromptStopReason::EndTurn, 0).unwrap();
     assert!(
-        settled
-            .get("_meta")
-            .map_or(true, serde_json::Value::is_null),
+        settled.get("_meta").is_none_or(serde_json::Value::is_null),
         "无未结算任务不得附加 pending 标记: {settled}"
     );
 
