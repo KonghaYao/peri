@@ -361,7 +361,8 @@ async fn test_missing_saved_directory_loads_history_without_tools_then_can_upgra
     let binding = binding_state(&fixture.cfg, &id).await;
     let frozen = frozen_state(&fixture.cfg, &id).await;
     fixture.close(&id).await;
-    std::fs::remove_dir(&fixture.cwd).unwrap();
+    let saved_directory = fixture.tmp.path().join("saved-directory");
+    std::fs::rename(&fixture.cwd, &saved_directory).unwrap();
     fixture
         .cfg
         .session_manager
@@ -404,6 +405,16 @@ async fn test_missing_saved_directory_loads_history_without_tools_then_can_upgra
         .unwrap_err();
     assert_eq!(error.code, -32010);
     fixture.assert_read_only_history(&id);
+    assert_eq!(binding_state(&fixture.cfg, &id).await, binding);
+    assert_eq!(frozen_state(&fixture.cfg, &id).await, frozen);
+    std::fs::remove_dir(&fixture.cwd).unwrap();
+    std::fs::rename(&saved_directory, &fixture.cwd).unwrap();
+    let response = fixture
+        .request("session/load", &json!({"sessionId":id}))
+        .await
+        .unwrap();
+    assert!(read_only(&response).is_none());
+    fixture.assert_owned_history(&id);
     assert_eq!(binding_state(&fixture.cfg, &id).await, binding);
     assert_eq!(frozen_state(&fixture.cfg, &id).await, frozen);
     fixture.close(&id).await;

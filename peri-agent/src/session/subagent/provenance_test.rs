@@ -260,7 +260,11 @@ async fn test_sqlite_subagent_spawn_full_micro_cold_resume_preserves_provenance(
     );
     parent.transcript().read().shutdown_persistence();
     drop(spawned);
-    // 冷重开：先放弃本进程的 owner（模拟进程退出），再由新句柄按代际确认取回。
+    parent_lease.mark_clean().await.unwrap();
+    store
+        .release_execution_owner(&parent_lease.owner_token().unwrap())
+        .await
+        .unwrap();
     drop(parent_lease);
     // 关闭走部署关闭权（业务句柄没有全局关闭；这里与部署装配同形）。
     shutdown.shutdown().await.unwrap();
@@ -269,7 +273,7 @@ async fn test_sqlite_subagent_spawn_full_micro_cold_resume_preserves_provenance(
         .unwrap();
     let (reopened, reopened_shutdown) = reopened_resources.into_parts();
     let reopened_workspace = reopened.resolve_workspace(repo.path()).await.unwrap();
-    let _reopened_lease = reacquire_execution(&reopened, &reopened_workspace, &parent_id).await;
+    let reopened_lease = reacquire_execution(&reopened, &reopened_workspace, &parent_id).await;
     let recording = RecordingLLM::new();
     let received = recording.received.clone();
     let config = resume_config_with(
@@ -325,5 +329,10 @@ async fn test_sqlite_subagent_spawn_full_micro_cold_resume_preserves_provenance(
     flush_session(&resumed.session).await;
     resumed.session.transcript().read().shutdown_persistence();
     drop(resumed);
+    reopened_lease.mark_clean().await.unwrap();
+    reopened
+        .release_execution_owner(&reopened_lease.owner_token().unwrap())
+        .await
+        .unwrap();
     reopened_shutdown.shutdown().await.unwrap();
 }
