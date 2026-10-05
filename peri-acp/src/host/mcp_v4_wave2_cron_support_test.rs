@@ -144,6 +144,9 @@ pub(super) struct AssembledHostFixture {
     pub(super) cfg: AcpServerConfig,
     pub(super) pool: Arc<McpClientPool>,
     pub(super) _owner: Box<dyn McpTaskOwnerPort>,
+    /// 会话任务管理器登记（`session_context` 按生产语义绑定；必须活到用例结束，
+    /// pool 只持 `Weak`）。
+    pub(super) session_tasks: SessionTaskBindings,
 }
 
 impl AssembledHostFixture {
@@ -208,6 +211,7 @@ impl AssembledHostFixture {
             cfg,
             pool,
             _owner: owner,
+            session_tasks: SessionTaskBindings::default(),
         }
     }
 
@@ -241,11 +245,13 @@ impl AssembledHostFixture {
         }
     }
 
-    /// 注入本夹具 pool 的 prompt 装配面（与 [`BuiltinHostFixture::session_context`] 同形）。
+    /// 注入本夹具 pool 的 prompt 装配面（与 [`BuiltinHostFixture::session_context`] 同形），
+    /// 并按生产语义绑定本会话的任务管理器（`bind_session_tasks` 的会话侧一半）。
     pub(super) async fn session_context(&self, session_id: &str) -> SessionContext {
         let mut ctx = crate::host::executor_flow_tests::make_session_context(session_id).await;
         ctx.cwd = self.dirs.workspace_str();
         ctx.mcp_pool = Some(Arc::clone(&self.pool) as Arc<dyn McpPoolPort>);
+        self.session_tasks.bind(&self.pool, session_id);
         ctx
     }
 }

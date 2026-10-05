@@ -79,7 +79,7 @@ use serial_test::serial;
 use super::{
     assemble::HostAssemblyInput,
     connection::ConnectionContext,
-    executor_flow_tests::MockEventSink,
+    executor_flow_tests::{MockEventSink, SessionTaskBindings},
     mcp_v4_wire_fixture::{run_wire_prompt, ScriptedToolCall, WireScriptedModel},
     AcpServerConfig, PromptLocks, SharedSessions,
 };
@@ -257,6 +257,8 @@ struct BuiltinHostFixture {
     dirs: FixtureDirs,
     pool: Arc<McpClientPool>,
     _owner: McpTaskOwner,
+    /// 会话任务管理器登记（`session_context` 按生产语义绑定）。
+    session_tasks: SessionTaskBindings,
 }
 
 impl BuiltinHostFixture {
@@ -337,6 +339,7 @@ impl BuiltinHostFixture {
             dirs,
             pool,
             _owner: owner,
+            session_tasks: SessionTaskBindings::default(),
         }
     }
 
@@ -354,11 +357,13 @@ impl BuiltinHostFixture {
     }
 
     /// 注入该 pool 的 session 装配面（与
-    /// `host::mcp_v4_wire_fixture::WireFixtureHarness::session_context` 同形）。
+    /// `host::mcp_v4_wire_fixture::WireFixtureHarness::session_context` 同形），
+    /// 并按生产语义绑定本会话的任务管理器（`bind_session_tasks` 的会话侧一半）。
     async fn session_context(&self, session_id: &str) -> SessionContext {
         let mut ctx = super::executor_flow_tests::make_session_context(session_id).await;
         ctx.cwd = self.dirs.workspace_str();
         ctx.mcp_pool = Some(Arc::clone(&self.pool) as Arc<dyn McpPoolPort>);
+        self.session_tasks.bind(&self.pool, session_id);
         ctx
     }
 }

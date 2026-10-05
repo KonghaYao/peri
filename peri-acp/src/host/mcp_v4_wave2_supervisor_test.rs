@@ -165,6 +165,7 @@ async fn lifecycle_state_matrix() {
         mut cfg,
         pool,
         _owner: mut mcp_owner,
+        session_tasks: _session_tasks,
     } = fixture;
     // 观察点替换：宿主唯一 LSP pool 换成 recording 替身（`shutdown_host` 的消费路径不变）。
     let recorder = Arc::new(RecordingHostPool::new());

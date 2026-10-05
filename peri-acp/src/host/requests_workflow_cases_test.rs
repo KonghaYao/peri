@@ -69,6 +69,24 @@ async fn session_new_and_load_publish_task_snapshots_and_revisioned_changes() {
     assert_eq!(started["revision"], 1);
     assert_eq!(started["task_id"], "wf-revision-1");
 
+    // 冷宿主接管执行前，原宿主须释放同一 Session 的持久 owner（与
+    // `requests_workspace_cases_test` 的接管前置同款）：同一 session 不允许被
+    // 两个活宿主同时持有，先 close（delete=false，不删数据）再 load。
+    // close 要求会话任务终态且无未确认的外部执行：先取消上面注册的演示任务
+    // （kill 为空操作 ⇒ 无真实执行），并确认该作用域确已排空（Kill 句柄无法
+    // 自证清空，生产由工具层调用点在执行真停止后确认）。
+    manager.cancel("wf-revision-1").unwrap();
+    manager.confirm_external_execution_stopped("wf-revision-1");
+    handle_request(
+        "session/close",
+        &json!({"sessionId": sid}),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+
     let second_cfg = make_server_config(
         config.clone(),
         LlmProvider::from_config(&config).unwrap(),

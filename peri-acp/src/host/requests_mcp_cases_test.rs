@@ -34,11 +34,25 @@ async fn test_available_commands_update_mcp_callback_resend() {
     let sid = result["sessionId"].as_str().unwrap().to_string();
     super::session_lifecycle::after_new_response(&cfg, &transport_dyn, &sid).await;
 
+    // 命令面投影的观测口径：**只数** `session/update` 里的 available_commands_update。
+    // 同一会话另有 `peri/unstable_event` 通道（如会话任务投影的 bg-task-snapshot），
+    // 与本用例的「投影重发恰一次」断言无关。
+    let command_updates = || -> Vec<Value> {
+        transport
+            .notifications()
+            .into_iter()
+            .filter_map(|(method, payload)| {
+                (method == "session/update"
+                    && payload["update"]["sessionUpdate"] == "available_commands_update")
+                    .then_some(payload)
+            })
+            .collect()
+    };
+
     // 首发：registry 尚未发现 → availableCommands 无 mcp 条目
-    let notifications = transport.notifications();
-    assert_eq!(notifications.len(), 1, "首发仅一条 session/update 通知");
-    assert_eq!(notifications[0].0, "session/update");
-    let update0 = &notifications[0].1["update"];
+    let notifications = command_updates();
+    assert_eq!(notifications.len(), 1, "首发仅一条命令面通知");
+    let update0 = &notifications[0]["update"];
     assert_eq!(update0["sessionUpdate"], "available_commands_update");
     let commands0 = update0["availableCommands"].as_array().unwrap();
     assert!(
@@ -84,7 +98,7 @@ async fn test_available_commands_update_mcp_callback_resend() {
 
     // 回调经 tokio::spawn 异步发送 → 轮询短等待
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while transport.notifications().len() < 2 {
+    while command_updates().len() < 2 {
         assert!(std::time::Instant::now() < deadline, "等待重发通知超时");
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
@@ -92,26 +106,33 @@ async fn test_available_commands_update_mcp_callback_resend() {
     // on_change 只触发一次，不得重复重发——A5「重发恰一次断言不变」）
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     assert_eq!(
-        transport.notifications().len(),
+        command_updates().len(),
         2,
-        "mark_source_completed 应触发重发恰一次（首发 + 重发）"
+        "mark_source_completed 应触发重发恰一次（首发 + 重发），实际: {:?}",
+        transport
+            .notifications()
+            .iter()
+            .map(|(m, p)| (m.as_str(), p["update"]["sessionUpdate"].clone()))
+            .collect::<Vec<_>>()
     );
 
-    // 静默断言（验收 13 ACP 半边）：除 available_commands_update 外无其它
-    // 通知类型
+    // 静默断言（验收 13 ACP 半边）：命令面除 available_commands_update 外无其它
+    // `session/update` 类型（`peri/unstable_event` 走独立通道，不属本断言面）。
     let notifications = transport.notifications();
     assert!(
-        notifications.iter().all(|(m, p)| {
-            m == "session/update" && p["update"]["sessionUpdate"] == "available_commands_update"
-        }),
-        "不得出现其它通知类型，实际: {:?}",
+        notifications
+            .iter()
+            .filter(|(m, _)| m == "session/update")
+            .all(|(_, p)| p["update"]["sessionUpdate"] == "available_commands_update"),
+        "命令面不得出现其它 session/update 类型，实际: {:?}",
         notifications
             .iter()
             .map(|(m, p)| (m.as_str(), p["update"]["sessionUpdate"].clone()))
             .collect::<Vec<_>>()
     );
 
-    let update1 = &notifications[1].1["update"];
+    let updates = command_updates();
+    let update1 = &updates[1]["update"];
     let commands1 = update1["availableCommands"].as_array().unwrap();
     let hello = commands1
         .iter()
@@ -164,7 +185,15 @@ async fn test_session_load_prewarms_mcp_discovery_smoke() {
     let provider = LlmProvider::from_config(&peri_config).unwrap();
     let mut cfg = make_server_config(peri_config, provider, &tmp).await;
     cfg.session_manager.set_pending_caps(PeriCaps::default());
-    cfg.mcp_pool = Some(Arc::new(peri_middlewares::mcp::McpClientPool::new_pending()));
+    let pool = Arc::new(peri_middlewares::mcp::McpClientPool::new_pending());
+    // 夹具补生产步骤：生产装配给每个池 spawn `run_initialize`
+    // （`peri-acp/src/host/assemble.rs`），初始化收口即发布「零 server」的目录事实；
+    // 手工造的 pending 池没有这一代，session/load 的 workspace task scope 对账
+    // （`wait_for_task_owner_catalog`）会一直等到超时。`mark_initialized` 正是生产
+    // 「空配置」终态（`peri-middlewares/src/mcp/initialize.rs` 的空集合分支），
+    // 池本身仍无任何已连接 server（本用例的 prewarm 空跑面不变）。
+    pool.mark_initialized();
+    cfg.mcp_pool = Some(pool);
     create_bound_fixture(&cfg, tmp.path().to_str().unwrap(), Some("s1")).await;
     let mut sessions = HashMap::new();
     let transport: Arc<MockTransport> = Arc::new(MockTransport::default());

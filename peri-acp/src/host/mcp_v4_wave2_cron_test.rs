@@ -42,6 +42,8 @@ async fn cron_register_tick_approval_continuation() {
         pool: _pool,
         // MCP task owner 必须活到用例结束：builtin 实例的 task 归属在它手上。
         _owner: mcp_owner,
+        // 会话任务管理器同上：pool 只持 Weak，registration 期间必须在世。
+        session_tasks: _session_tasks,
     } = fixture;
     let cfg = Arc::new(cfg);
     // 调度触发审批只在非 Bypass 模式下发生（Bypass 在 `approve_scheduled_trigger` 早退）。

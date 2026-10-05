@@ -68,7 +68,7 @@ use serial_test::serial;
 use tokio_util::sync::CancellationToken as AgentCancellationToken;
 
 use super::executor_flow_tests::{
-    make_session_context, make_stage_build, make_turn_input, MockEventSink,
+    make_session_context, make_stage_build, make_turn_input, MockEventSink, SessionTaskBindings,
 };
 use crate::session::executor::{run_session_loop, FrozenSessionData, PromptResult, SessionContext};
 
@@ -213,6 +213,9 @@ pub(super) struct WireFixtureHarness {
     _tmp: tempfile::TempDir,
     pool: Arc<McpClientPool>,
     _owner: McpTaskOwner,
+    /// 会话任务管理器（`session_context` 按生产语义绑定，见
+    /// [`SessionTaskBindings`]）。
+    session_tasks: SessionTaskBindings,
     init_task: Option<tokio::task::JoinHandle<()>>,
     wire_log: PathBuf,
 }
@@ -320,6 +323,7 @@ impl WireFixtureHarness {
             _tmp: tmp,
             pool,
             _owner: owner,
+            session_tasks: SessionTaskBindings::default(),
             init_task: Some(init_task),
             wire_log,
         }
@@ -393,9 +397,13 @@ impl WireFixtureHarness {
     }
 
     /// 注入夹具 pool 的 session 装配面（真实 assembler 会据此构造 McpMiddleware）。
+    ///
+    /// 同时按生产语义绑定本会话的任务管理器（`bind_session_tasks` 的会话侧一半）：
+    /// 本节用例经 `run_wire_prompt` 直连 `run_session_loop`，未经 host 请求路径。
     pub(super) async fn session_context(&self, session_id: &str) -> SessionContext {
         let mut ctx = make_session_context(session_id).await;
         ctx.mcp_pool = Some(Arc::clone(&self.pool) as Arc<dyn McpPoolPort>);
+        self.session_tasks.bind(&self.pool, session_id);
         ctx
     }
 

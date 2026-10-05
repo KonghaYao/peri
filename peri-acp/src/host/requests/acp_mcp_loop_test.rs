@@ -156,6 +156,12 @@ async fn acp_declared_server_reaches_the_session_tool_face_and_disconnects_on_cl
         mcp_spawner,
         McpCapabilityProfile::disabled(),
     ));
+    // 夹具补生产步骤：生产装配给每个会话池 spawn `run_initialize`
+    // （`peri-acp/src/host/assemble.rs`），初始化收口即发布「零 server」的目录事实；
+    // 本夹具手工造的池没有这一代，会话关闭前的 workspace task scope 对账
+    // （`wait_for_task_owner_catalog`）会一直等到超时。`mark_initialized` 正是
+    // 生产「空配置」终态（`peri-middlewares/src/mcp/initialize.rs` 的空集合分支）。
+    pool.mark_initialized();
     {
         let environment = Arc::get_mut(
             sessions

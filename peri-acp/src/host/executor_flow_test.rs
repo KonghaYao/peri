@@ -466,6 +466,32 @@ pub(super) async fn make_session_context(session_id: &str) -> SessionContext {
     }
 }
 
+/// 夹具的会话任务管理器登记：生产由 host 请求路径（`bind_session_tasks`，
+/// `peri-acp/src/host/requests.rs`）在 `session/new` 等入口把会话 `TaskManager`
+/// 绑到 pool；直连 `run_session_loop` 的夹具绕过了该入口，必须在此复刻同一步——
+/// 否则每个 MCP 工具调用都会被 `begin_external_task_execution` 以
+/// "session task manager unavailable" 拒绝（调用必须先进入会话任务范围）。
+///
+/// pool 只存 `Weak`，因此强引用由夹具持有到用例结束（随夹具析构释放）；
+/// 未绑定时 `begin_external_execution` 的守卫语义不变。
+#[derive(Default)]
+pub(super) struct SessionTaskBindings {
+    managers: Mutex<Vec<Arc<dyn peri_acp_types::tasks::TaskManager>>>,
+}
+
+impl SessionTaskBindings {
+    /// 生成真实 `TaskManager` 并绑定到 `pool` 的 `session_id`。
+    pub(super) fn bind(&self, pool: &peri_middlewares::mcp::McpClientPool, session_id: &str) {
+        let manager: Arc<dyn peri_acp_types::tasks::TaskManager> =
+            Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
+        pool.bind_session_task_manager(session_id, &manager);
+        self.managers
+            .lock()
+            .expect("夹具任务管理器登记不得中毒")
+            .push(manager);
+    }
+}
+
 /// 构造带真实 SessionManager + 已登记 session 的 SessionContext
 ///（可观察 v2 MessageQueue；stage 装配桥 + forwarder 真实注入）。
 async fn make_session_context_with_manager(
