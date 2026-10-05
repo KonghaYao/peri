@@ -72,13 +72,14 @@ class FakeTransport implements Transport {
   closed = false;
   failOn?: string;
   enqueueGate?: Promise<void>;
+  newSessionId = "session-1";
 
   async request<T>(method: string, params?: unknown): Promise<T> {
     this.calls.push({ method, params });
     if (method === this.failOn) throw new Error(`failed: ${method}`);
     switch (method) {
       case "initialize": return { protocolVersion: 1 } as T;
-      case "session/new": return { sessionId: "session-1" } as T;
+      case "session/new": return { sessionId: this.newSessionId } as T;
       case "session/load": return {} as T;
       case "session/input/snapshot": return { generation: "generation-1" } as T;
       case "session/input/enqueue":
@@ -155,6 +156,7 @@ describe("ManagedAgents lifecycle", () => {
     const kv = new MemoryClaims();
     const first = declaration(new ManagedAgents({ kv }));
     const secondTransport = new FakeTransport();
+    secondTransport.newSessionId = "session-2";
     const second = new ManagedAgents({ kv }).createAgent({
     path: "/tmp/workspace",
       id: "agent-1",

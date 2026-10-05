@@ -257,7 +257,7 @@ pub async fn fire_standalone_lifecycle_hooks(
     .await;
 }
 
-/// Run lifecycle hooks using their session's execution owner.
+/// Run lifecycle hooks using their session's task manager.
 /// SessionEnd awaits even asynchronous hooks in the environment's cleanup scope;
 /// all other events preserve normal asynchronous dispatch.
 #[allow(clippy::too_many_arguments)]

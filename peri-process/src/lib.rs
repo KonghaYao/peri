@@ -41,10 +41,6 @@ impl ProcessTree {
 
     pub fn prepare(&self, command: &mut Command) {
         command.kill_on_drop(true);
-        command
-            .env_remove("PERI_SUPERVISOR_SOCKET")
-            .env_remove("PERI_SUPERVISOR_TOKEN")
-            .env_remove("PERI_TRUSTED_WORKSPACE_URL");
         #[cfg(unix)]
         command.process_group(0);
         #[cfg(unix)]
@@ -59,10 +55,6 @@ impl ProcessTree {
     #[cfg(unix)]
     pub fn prepare_std(&self, command: &mut std::process::Command) {
         use std::os::unix::process::CommandExt;
-        command
-            .env_remove("PERI_SUPERVISOR_SOCKET")
-            .env_remove("PERI_SUPERVISOR_TOKEN")
-            .env_remove("PERI_TRUSTED_WORKSPACE_URL");
         command.process_group(0);
         if let Some(broker) = &self.broker {
             broker.prepare_std(command);

@@ -4,8 +4,8 @@
 >
 > Scope：会话身份、机器环境分区、工作区发现与登记、执行绑定与恢复入口。
 > 进度与验收见 [核心改动清单](../../spec/issues/2026-09-30-session-id-environment-core-change.md)。
-> Machine → Workspace → Session 归属与 schema 12/13 迁移见 [存储 v2 设计](storage-v2-machine-workspace-session.md)；
-> 执行所有权与 Workspace fencing 目标见 [Session 异步任务统一入口](session-async-tasks.md)。
+> Machine → Workspace → Session 归属与 schema 14 迁移见 [存储 v2 设计](storage-v2-machine-workspace-session.md)；
+> SDK 执行所有权与任务恢复边界见 [Session 异步任务统一入口](session-async-tasks.md)。
 > 术语见 [领域语言](../../CONTEXT.md)；冻结与生命周期约束遵循 [架构契约](../standards/architecture-contracts.md)（ARC-WORKSPACE-001）。
 > 本设计取代旧工作区设计中以目录绑定、文件锁和根执行 owner 限制恢复的规则；父子关系与运行资源生命周期保持。
 
@@ -23,7 +23,7 @@ Session ID 是唯一会话身份，不改为路径、机器地址或 env + path 
 - 显式身份接纳在锁内复核原 ID，将新值写入并同步临时文件，关闭文件后原子替换；Unix 另同步父目录。Windows 不尝试用普通文件句柄打开目录执行 `sync_all`，因此不承诺目录项在断电后的持久化保证。
 - 身份稳定性依赖保留该文件或一致的 override。复制 HOME/身份文件或复用 override 会共享 env；删除文件会产生新 env。它表达配置的机器环境身份，不证明硬件唯一性。
 
-旧库与远端的来源未知归属使用占位 Machine 身份（`identity_kind=legacy_unknown`），不得与真实机器 ID 混同，也不因打开而迁移归属；写打开执行 schema 12/13 迁移，来源假设、失败回滚与只读行为见 [存储 v2 设计](storage-v2-machine-workspace-session.md)。只读打开不做回填；归属行缺失时不能据此声称机器归属完整。
+旧库与远端的来源未知归属使用占位 Machine 身份（`identity_kind=legacy_unknown`），不得与真实机器 ID 混同，也不因打开而迁移归属；写打开迁移到 schema 14，来源假设、失败回滚与只读行为见 [存储 v2 设计](storage-v2-machine-workspace-session.md)。只读打开不做回填；归属行缺失时不能据此声称机器归属完整。
 
 ## 2. 项目、工作区与执行绑定
 
@@ -37,7 +37,7 @@ Session ID 是唯一会话身份，不改为路径、机器地址或 env + path 
 | 执行工作区 | `WorkspaceId`，opaque ID | 一份主工作树、linked worktree 或非 Git 文件树；归属键为 Machine + path |
 | 会话 | 现有 `ThreadId` | 历史、消息、目标与运行归属继续使用原 ID |
 | 执行绑定 | `SessionBinding` | 项目、工作区、工作区内相对目录与绑定版本 |
-| 执行所有者 | Store 的 `epoch + nonce`；进程内 lease | 跨进程写 fence 与本地活跃执行、关闭收尾分离 |
+| 执行所有者 | `peri-sdk` 的共享 `AtomicManagedAgentKv` claim | SDK 唯一管理执行权；Peri 仅校验 binding/path 并管理任务资源生命周期 |
 
 不再增加与 `ProjectId` 重叠的 RepositoryId。身份范围限于同一台主机的同一 Peri 存储；跨主机、跨数据库合并和仓库克隆身份传播不在本设计范围。`WorkspaceInfo` 携带 machine ID、路径与路径来源（discovered / derived_legacy / unverified），`ResolvedWorkspace` 区分归属身份与本机发现登记；存储侧约束见 [存储 v2 设计](storage-v2-machine-workspace-session.md)。
 
@@ -50,9 +50,9 @@ workspace_id
 cwd_relative_to_workspace
 ```
 
-binding 不可变，协议中的 `revision` 保持常量 `1` 以兼容已有客户端，不作为数据库字段或并发控制依据。执行代次由 Store 的执行 owner 记录管理；进程内 `SessionExecutionLease` 管理本实例的活跃执行、写入效果结清与关闭收尾，不提供跨进程互斥。
+binding 不可变，协议中的 `revision` 保持常量 `1` 以兼容已有客户端，不作为数据库字段或并发控制依据。schema 14 已删除 Store 的 `epoch + nonce` 执行所有权；Peri 不维护执行 lease 或 Workspace fencing。执行唯一性与计算实例替换由 SDK 协调，任务资源关闭与未决持久化仍由各自生命周期约束。
 
-`ThreadMeta.cwd` 保留为创建时目录和 legacy 证据，禁止通过普通 metadata 更新改写绑定。有效执行目录由绑定与已验证位置派生；兼容协议中的 `cwd` 是这个结果的投影。项目/工作区登记、位置更新和 binding 写入由同一个持久化 owner 管理，通过专用事务接口维护项目与工作区的关系，不能散落在 metadata JSON 中各自解释。
+`ThreadMeta.cwd` 保留为创建时目录和 legacy 证据，禁止通过普通 metadata 更新改写绑定。有效执行目录由绑定与已验证位置派生；兼容协议中的 `cwd` 是这个结果的投影。项目/工作区登记、位置更新和 binding 写入由存储模块统一管理，通过专用事务接口维护项目与工作区的关系，不能散落在 metadata JSON 中各自解释。
 
 消息、compact flags、frozen snapshot 与列表摘要继续各守现有边界。列表允许投影小型身份字段，但不得加载消息正文、冻结 blob 或重新计算内容大小。
 
@@ -188,6 +188,8 @@ ACP `requests/session_restore.rs::prepare_existing` 按 ID 读取会话，检查
 
 Peri 不维护 session 执行锁、租约、owner token、续租或接管证明；跨实例执行唯一性由 `peri-sdk` 负责。同 ID 创建重试仍校验不可变的绑定、冻结快照及父链，不覆盖已有内容。未决持久化不能因重开被视为结清；取消、子任务关系、MCP 关闭与事务仍遵守自身生命周期。
 
+SDK 占位契约已实现：共享 `AtomicManagedAgentKv` keyspace 是协调域，Session key 仅含 Session ID，不含 `Sandbox.id`；Agent key 保持 Sandbox + Agent。部署必须让可能执行同一 Session 的全部实例共享该 KV；不同数据库的相同 ID 共用 KV 时保守拒绝，可按业务隔离 KV，不能换 Sandbox 绕过同 Session 的占位。启动失败且 transport 清理未确认时进入 `cleanup-pending`，保留 claim 与 transport，以含原错误和清理错误的 `AggregateError` 报告；`close` 共享可重试的清理事务，确认清理后按 owner 释放，避免旧执行未停就放行新实例。验证路由与接管边界见 [SDK 代码索引](../code-index/peri-ts-sdk.md)。
+
 ## 5. 执行环境装配
 
 会话的 shell、Read/Edit/Write、@mention、hooks、skills、项目指引、MCP、Workflow 和 SubAgent 都从同一个已解析的 session environment 取得执行目录。宿主启动目录只用于创建默认新会话及初始列表选择。
@@ -206,7 +208,7 @@ Host 可以共享 transport、全局配置来源与确定可共享的服务；�
 
 ### 6.2 fork 与跨工作区续作
 
-普通 fork 仅在 source 的已提交历史达到完整工具往返边界、且没有未完成执行时复制；由源 owner 在生命周期 gate 下给出一致性快照，不能边执行边复制当前 Vec。它保持 source binding，产生新 `ThreadId`，并精确继承 source frozen snapshot，继续满足 `ARC-FROZEN-001`。请求不同 cwd 不得偷偷创建“旧前缀、新目录”的会话；返回 binding mismatch。
+普通 fork 仅在 source 的已提交历史达到完整工具往返边界、且没有未完成执行时复制；SDK 负责排除并发执行，Peri 在会话生命周期 gate 下给出一致性快照，不能边执行边复制当前 Vec。它保持 source binding，产生新 `ThreadId`，并精确继承 source frozen snapshot，继续满足 `ARC-FROZEN-001`。请求不同 cwd 不得偷偷创建“旧前缀、新目录”的会话；返回 binding mismatch。
 
 跨工作区续作定义为独立、显式的新环境操作：新 `ThreadId`、新 binding、目标环境重新冻结，历史以带来源和截止点的快照复制；不得改写旧消息中的绝对路径，亦不得把旧工具结果当作目标工作区已执行的事实。跨环境的说明持久化为可信上下文。它不继承进行中的工具、审批、队列、cron、Workflow、子 Agent 或旧运行句柄。
 

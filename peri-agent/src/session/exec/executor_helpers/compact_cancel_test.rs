@@ -326,7 +326,7 @@ impl CommandHandler for PipelineHandler {
 struct Case {
     _dir: tempfile::TempDir,
     _repo: tempfile::TempDir,
-    /// 持有执行所有权：门面上的写入要求本 root 有活 owner。
+    /// 初始化会话资源，供 compact 的持久化与取消路径使用。
     store: Arc<ControlledStore>,
     thread_id: ThreadId,
     history: Vec<BaseMessage>,

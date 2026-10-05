@@ -119,7 +119,7 @@ pub(super) async fn resume_subagent_impl(
         if super::execution_root(session_resources.as_ref(), &thread_id).await?
             != super::execution_root(session_resources.as_ref(), &parent_id).await?
         {
-            return Err("bound subagent belongs to another root session execution owner".into());
+            return Err("bound subagent belongs to another root session".into());
         }
     }
     let ownership = task_manager

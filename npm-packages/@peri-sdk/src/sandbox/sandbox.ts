@@ -131,7 +131,6 @@ export class Sandbox {
 
   private async createStdioTransport(path: string): Promise<StdioTransport> {
     const supervisor = process.platform === "win32" ? undefined : await this.processSupervisor();
-    const trustedWorkspace = this.optionalWorkspace;
     const transport = this.stdio;
     const deployment = this.storage?.deployment();
     const args = [...(deployment?.args ?? []), ...(transport?.args ?? [])];
@@ -142,14 +141,7 @@ export class Sandbox {
       command: transport?.command ?? "peri",
       args,
       cwd: transport?.cwd ?? (this.workspace ? undefined : path),
-      env: {
-        ...transport?.env, ...deployment?.env,
-        ...(supervisor ? {
-          PERI_SUPERVISOR_SOCKET: supervisor.socketPath,
-          PERI_SUPERVISOR_TOKEN: supervisor.token,
-        } : {}),
-        ...(trustedWorkspace ? { PERI_TRUSTED_WORKSPACE_URL: trustedWorkspace.url } : {}),
-      },
+      env: { ...transport?.env, ...deployment?.env },
       settings: transport?.settings,
     });
     supervisor?.registerGeneration(child);

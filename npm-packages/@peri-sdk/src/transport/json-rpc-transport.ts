@@ -73,7 +73,10 @@ export class JsonRpcTransport implements Transport {
   close(): Promise<void> {
     if (this.closePromise) return this.closePromise;
     this.fail(new Error("ACP transport closed"));
-    this.closePromise = Promise.resolve().then(() => this.closeWire());
+    this.closePromise = Promise.resolve().then(() => this.closeWire()).catch((error) => {
+      this.closePromise = undefined;
+      throw error;
+    });
     return this.closePromise;
   }
 

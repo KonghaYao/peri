@@ -11,7 +11,7 @@ type QueueSnapshot = {
     items?: Array<{ inputId: string; state: string }>;
 };
 type QueueReceipt = { results: Array<{ inputId: string; state: string }> };
-type SessionState = "declared" | "starting" | "active" | "closed";
+type SessionState = "declared" | "starting" | "active" | "cleanup-pending" | "closed";
 type PendingDelivery = {
     resolve: () => void;
     reject: (error: Error) => void;
@@ -28,6 +28,7 @@ export class Session {
     private currentPath?: string;
     private generation?: string;
     private startPromise?: Promise<Session>;
+    private closePromise?: Promise<void>;
     private notifications = new EventQueue(() => {});
     private unsubscribe?: () => void;
     private streamOpen = false;
@@ -49,23 +50,20 @@ export class Session {
     get path(): string | undefined { return this.currentPath; }
 
     start(requestedSessionId: string | null): Promise<Session> {
+        if (this.closePromise)
+            throw new Error("Session cannot start while closing");
         if (this.state !== "declared")
             throw new Error(`Session cannot start from ${this.state}`);
+        if (requestedSessionId === "")
+            return Promise.reject(new TypeError("Session id must be nonempty or null"));
         this.state = "starting";
-        this.startPromise = this.startOnce(requestedSessionId).catch(
-            (error) => {
-                this.state = "declared";
-                throw error;
-            },
-        );
+        this.startPromise = this.startOnce(requestedSessionId);
         return this.startPromise;
     }
 
     private async startOnce(
         requestedSessionId: string | null,
     ): Promise<Session> {
-        if (requestedSessionId === "")
-            throw new TypeError("Session id must be nonempty or null");
         const claims = this.agent.claims;
         let transport: Transport | undefined;
         try {
@@ -79,6 +77,7 @@ export class Session {
                 ? "Agent path is required for a new Session"
                 : `Session not found: ${requestedSessionId}`);
             transport = await this.agent.options.sandbox.createTransport(path);
+            this.transport = transport;
             transport.setRequestHandler((method, params) =>
                 this.docs.handleRequest(method, params, this.sessionId, this.agent.options),
             );
@@ -143,7 +142,6 @@ export class Session {
                 mcpServers,
             };
             let id: string;
-            let ownsExecution = true;
             if (requestedSessionId === null) {
                 const response = await transport.request<{ sessionId: string; modes?: unknown; configOptions?: unknown[] }>(
                     "session/new",
@@ -164,20 +162,17 @@ export class Session {
                 this.docs.seedConfig(response);
                 await claims.claimSession(id);
             } else {
-                const loaded = await transport.request<{ modes?: unknown; configOptions?: unknown[]; _meta?: { "peri.sessionWorkspaceV1"?: { read_only?: unknown } } }>("session/load", {
+                const loaded = await transport.request<{ modes?: unknown; configOptions?: unknown[] }>("session/load", {
                     ...params,
                     sessionId: requestedSessionId,
                 });
-                const identity = loaded._meta?.["peri.sessionWorkspaceV1"];
                 this.docs.seedConfig(loaded);
-                ownsExecution = identity !== undefined && identity.read_only === undefined;
                 // ACP completes history replay before the load response. It has no
                 // replay turn-done notification, so close only a replay-only turn.
                 if (replayTurnPending) this.docs.completeTurn();
                 id = requestedSessionId;
             }
-            if (ownsExecution)
-                await this.agent.options.sandbox.registerSessionTransport(id, transport);
+            await this.agent.options.sandbox.registerSessionTransport(id, transport);
             const snapshot = await transport.request<QueueSnapshot>(
                 "session/input/snapshot",
                 { sessionId: id },
@@ -193,19 +188,36 @@ export class Session {
             this.state = "active";
             return this;
         } catch (error) {
+            this.state = "cleanup-pending";
             this.unsubscribe?.();
             this.unsubscribe = undefined;
             await this.notifications.return();
             this.notifications = new EventQueue(() => {});
-            if (transport) await transport.close().catch(() => {});
             this.agent.discardFailedSessionDocs();
-            await claims.release();
+            try {
+                await this.cleanupExecution();
+            } catch (cleanupError) {
+                throw new AggregateError(
+                    [error, cleanupError],
+                    `Session startup failed: ${String(error)}; cleanup failed: ${String(cleanupError)}. Retry close before starting another Session.`,
+                    { cause: error },
+                );
+            }
+            this.state = "declared";
             throw error;
         }
     }
 
+    private async cleanupExecution(): Promise<void> {
+        if (this.transport) {
+            await this.transport.close();
+            this.transport = undefined;
+        }
+        await this.agent.claims.release();
+    }
+
     private activeTransport(): Transport {
-        if (this.state !== "active" || !this.transport)
+        if (this.closePromise || this.state !== "active" || !this.transport)
             throw new Error("Session is not active");
         return this.transport;
     }
@@ -386,14 +398,21 @@ export class Session {
         }
     }
 
-    async close(): Promise<void> {
+    close(): Promise<void> {
+        if (!this.closePromise) {
+            this.closePromise = this.closeOnce().finally(() => {
+                this.closePromise = undefined;
+            });
+        }
+        return this.closePromise;
+    }
+
+    private async closeOnce(): Promise<void> {
         if (this.state === "closed") return;
         if (this.state === "starting") await this.startPromise?.catch(() => {});
-        if (this.state === "active" && this.transport) {
-            this.docs.setTaskSnapshotRequester(null);
-            await this.transport.close();
-            await this.agent.claims.release();
-        }
+        this.state = "cleanup-pending";
+        this.docs.setTaskSnapshotRequester(null);
+        await this.cleanupExecution();
         this.docs.completeTurn("cancelled");
         this.unsubscribe?.();
         this.streamEnded = true;

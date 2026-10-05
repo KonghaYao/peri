@@ -43,7 +43,6 @@ export class StdioTransport extends JsonRpcTransport {
       await process.stdin.flush();
     }, async () => {
       process.stdin.end();
-      // Allow ACP to drain and release its Store owner before forcing exit.
       const exited = await Promise.race([
         process.exited.then(() => true),
         Bun.sleep(5_000).then(() => false),
@@ -73,7 +72,6 @@ export class StdioTransport extends JsonRpcTransport {
       options.settings === undefined ? undefined : bootstrapFrame(options);
     const env = { ...process.env, ...options.env };
     const generationId = randomBytes(16).toString("hex");
-    env.PERI_AGENT_GENERATION_ID = generationId;
     const broker = process.platform === "win32" ? undefined : await ProcessBroker.start();
     if (broker) {
       env.PERI_PROCESS_BROKER_SOCKET = broker.socketPath;

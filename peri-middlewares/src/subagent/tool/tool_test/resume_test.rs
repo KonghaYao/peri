@@ -228,10 +228,10 @@ async fn test_resume_thread_id_active_rejected() {
 
 /// parent 链归属：child 的 `parent_thread_id` 指向**另一个真实根会话**时，即使持有
 /// child_thread_id 且绑定同一工作区，恢复仍被拒绝
-/// （`bound subagent belongs to another root session execution owner`）。
+/// （`bound subagent belongs to another root session`）。
 ///
 /// 本用例的前身断言「parent 链不匹配不再拒绝」，那是在存储替身下成立的行为：
-/// 替身没有执行归属，也允许 `parent_thread_id` 指向不存在的 thread。换成真门面后
+/// 替身不校验父链，也允许 `parent_thread_id` 指向不存在的 thread。换成真门面后
 /// 两个方向都必须给出一致结论——指向不存在的父会让祖先链读不出快照
 /// （`load_inherited_context_on` 对链上成员 `fetch_one`），指向另一个真实根则被
 /// 归属校验拒绝。要保护的契约是后者：child_thread_id 不是执行权凭证
@@ -284,7 +284,7 @@ async fn test_resume_thread_id_parent_mismatch_is_rejected_by_root_ownership() {
         .expect_err("跨根恢复必须被拒绝");
     assert_eq!(
         error.to_string(),
-        "bound subagent belongs to another root session execution owner",
+        "bound subagent belongs to another root session",
         "拒绝原因应为执行根归属，而不是「不存在」或「仍处于运行态」"
     );
     // 拒绝发生在任何写入之前：thread 保持原收尾状态，不留 active 残留。
