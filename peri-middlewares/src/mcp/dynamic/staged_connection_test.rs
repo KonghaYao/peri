@@ -196,7 +196,6 @@ async fn relative_fixture_starts_via_parent_path_after_environment_clear() {
     run_env_test(NAME, "PATH", Some(dir.path().as_os_str()));
 }
 
-#[cfg(unix)]
 #[derive(Default)]
 struct MemoryOAuthCredentialPort {
     records: parking_lot::Mutex<std::collections::HashMap<String, String>>,
@@ -251,6 +250,7 @@ fn failing_clear_client() -> crate::mcp::auth_store::OAuthCredentialClient {
     .unwrap()
 }
 
+#[cfg(unix)]
 #[test]
 fn missing_or_empty_parent_path_uses_fixed_fallback() {
     const NAME: &str = "missing_or_empty_parent_path_uses_fixed_fallback";
