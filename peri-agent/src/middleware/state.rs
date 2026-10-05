@@ -17,6 +17,10 @@ use crate::{
 /// object-safe：无 `Clone`/`'static` 约束、无泛型方法（`impl Into<String>` 改为 `String`）。
 /// 各生命周期的公开能力由 `capabilities` 组合，适配器不持有新的 owner。
 pub trait MiddlewareState: Send + Sync {
+    fn execution_binding(&self) -> Option<peri_acp_types::session::ExecutionBinding> {
+        None
+    }
+
     fn cwd(&self) -> &str;
 
     fn messages(&self) -> &[BaseMessage];

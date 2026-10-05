@@ -40,6 +40,9 @@ struct BoundState {
 }
 
 impl StateView for BoundState {
+    fn execution_binding(&self) -> Option<peri_acp_types::session::ExecutionBinding> {
+        None
+    }
     fn cwd(&self) -> &str {
         "/tmp"
     }

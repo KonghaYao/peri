@@ -26,6 +26,7 @@ use crate::{
 /// }
 /// ```
 pub trait StateView: Send + Sync {
+    fn execution_binding(&self) -> Option<peri_acp_types::session::ExecutionBinding>;
     fn cwd(&self) -> &str;
     fn messages(&self) -> &[BaseMessage];
     fn current_step(&self) -> usize;
@@ -171,6 +172,9 @@ pub trait StartupState: Send + Sync {
 }
 
 impl<T: MiddlewareState + ?Sized> StateView for T {
+    fn execution_binding(&self) -> Option<peri_acp_types::session::ExecutionBinding> {
+        MiddlewareState::execution_binding(self)
+    }
     fn cwd(&self) -> &str {
         MiddlewareState::cwd(self)
     }

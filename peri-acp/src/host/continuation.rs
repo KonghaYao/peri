@@ -1,36 +1,8 @@
-//! ACP server — 内部 AsyncContinuation scheduler（session-scoped, per-session coalesce）。
+//! MQ continuation hints与扫描；以required EnsureProcessing事实决定执行。
 //!
-//! # 背景
-//!
-//! bg subagent 独立运行时，主 session/prompt 被 `session/cancel` 取消后，
-//! executor 的 `on_bg_complete` 闭包仍会把 bg 结果**先** route 到 SessionInbox
-//! （Defer + wake），**再**通过 [`ContinuationRequest`] 通知本 scheduler。
-//! 此时主 agent 已不在 loop 中，必须由本 scheduler 自动发起一次内部续跑，
-//! 让父 agent 消费 deferred callback。
-//!
-//! # 语义约束
-//!
-//! - **每 session coalesce**：`SessionState::continuation_armed` 由 `session/cancel`
-//!   置位（只影响当前 prompt）；bg agent（`BgTaskKind::Agent`）完成通知到达后
-//!   原子 take，只运行一次。Shell/Workflow 完成不触发。
-//! - **cancel ↔ bg callback race 兜底**：bg 完成通知可能在 cancel 置位前被
-//!   scheduler 跳过（armed=false），但其结果已 route 为 Defer/SubAgentComplete。
-//!   `session/cancel` 检查队列确有 pending SubAgentComplete Defer 时，在锁外
-//!   经 continuation sender 补发 `BgTaskKind::Agent` 请求（`notify.rs`），
-//!   保证 Defer 不会永久滞留。Shell/Workflow 不产生 SubAgentComplete Defer，
-//!   不会误触发。
-//! - **取消续跑不链式**：取消正在执行的 continuation（`continuation_in_flight`）
-//!   不置位 armed——否则形成"取消续跑 → 再续跑"的自动链式续跑。
-//! - **dispatch 前确认 Defer 仍在**：scheduler 拿锁并校验代际后，再确认队列
-//!   仍有 SubAgentComplete Defer；没有则跳过空跑（不触发无意义 LLM 调用）。
-//! - **同一执行路径**：续跑通过与用户 prompt 完全相同的 [`dispatch_prompt_turn`]
-//!   （pool 取出/归还、per-session prompt lock、run_prompt 后处理），不复制
-//!   agent execution。
-//! - **用户显式新 prompt 清除未运行的续跑**：prompt dispatch 置位前清除
-//!   `continuation_armed` 并递增 `continuation_epoch`；scheduler 在**获取
-//!   prompt lock 之后**校验代际，代际变化（新 prompt 已排队/已执行）则放弃。
-//! - **严禁**由 TUI kit bridge / `SubmitRequest::KeepGoing` 触发 agent loop：
-//!   KeepGoing 仍只能是用户按钮；本 scheduler 是唯一的内部触发方。
+//! Kind/source不是准入条件，Passive与过期ContinueCurrentRun不启动新执行。
+//! prompt lock之后重验代际和队列事实；扫描兜底通知丢失。
+//! 持久控制及SDK唯一attempt准入由后续重构阶段接入。
 
 use std::sync::Arc;
 
@@ -42,7 +14,6 @@ use peri_acp_types::system_reminder::{
     ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
     ReminderSource, SystemReminder, TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
 };
-use peri_acp_types::tasks::BgTaskKind;
 use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -54,38 +25,19 @@ use super::{
     AcpServerConfig, PromptLocks, SessionState, SharedSessions,
 };
 
-/// 判定并**原子 take** session 的 continuation 标记（每 session coalesce）。
-///
-/// 仅当请求 kind 为 bg agent（`BgTaskKind::Agent`）且标记已置位时返回
-/// `Some(epoch)`（调用方随后运行一次续跑）；其余情况返回 `None`（跳过）。
-/// take 后标记立即清除——同一取消轮次的后续 bg 完成不会重复续跑。
-pub(crate) fn take_continuation_if_armed(
-    state: &mut SessionState,
-    kind: BgTaskKind,
-) -> Option<u64> {
-    if kind != BgTaskKind::Agent || !state.continuation_armed {
-        return None;
-    }
-    state.continuation_armed = false;
-    Some(state.continuation_epoch)
-}
-
-/// 消费 [`ContinuationRequest`]：bg cancel 续跑或 loop 后 MQ steering 续跑。
+/// 合并通知；实际执行前仍须查询 MQ 中 required 工作。
 pub(crate) fn take_continuation_for_request(
     state: &mut SessionState,
-    req: &ContinuationRequest,
+    _req: &ContinuationRequest,
 ) -> Option<u64> {
-    if req.mq_steering {
-        if state.continuation_in_flight {
-            // 续跑执行中：不立即调度，但保留 pending，待 in_flight 清除后由
-            // dispatch_prompt_turn 尾端补发 ContinuationRequest。
-            state.continuation_mq_steering_pending = true;
-            return None;
-        }
-        state.continuation_mq_steering_pending = true;
-        return Some(state.continuation_epoch);
+    if state.closing {
+        return None;
     }
-    take_continuation_if_armed(state, req.kind)
+    state.continuation_mq_steering_pending = true;
+    if state.continuation_in_flight {
+        return None;
+    }
+    Some(state.continuation_epoch)
 }
 
 /// `session/cancel` 是否应置位 continuation 标记。
@@ -109,9 +61,9 @@ pub(crate) fn cancel_arms_continuation(state: &SessionState) -> bool {
 /// SubAgentComplete Defer。若取消的是续跑本身（in_flight），不补发。
 pub(crate) fn cancel_should_schedule_continuation(
     state: &SessionState,
-    has_pending_subagent_defer: bool,
+    has_required: bool,
 ) -> bool {
-    cancel_arms_continuation(state) && has_pending_subagent_defer
+    cancel_arms_continuation(state) && has_required
 }
 
 /// 续跑仍有效：用户显式新 prompt 递增 `continuation_epoch` 后，已排队但
@@ -120,23 +72,13 @@ pub(crate) fn continuation_still_valid(state: &SessionState, epoch: u64) -> bool
     state.continuation_epoch == epoch
 }
 
-/// 续跑是否真正可 dispatch：代际未变 **且** 队列中仍有待消费的
-/// SubAgentComplete Defer。两者缺一即跳过空跑——
-/// - 代际变化：用户新 prompt 已排队/已执行（Defer 由新 prompt 消费）；
-/// - 队列无 Defer：Defer 已被其他路径消费，续跑空转一次 LLM 无意义。
+/// 在执行入口重验代际、关闭状态与 required 工作。
 pub(crate) fn continuation_dispatchable(
     state: &SessionState,
     epoch: u64,
-    has_pending_subagent_defer: bool,
-    has_pending_mq: bool,
+    has_required: bool,
 ) -> bool {
-    if !continuation_still_valid(state, epoch) {
-        return false;
-    }
-    if state.continuation_mq_steering_pending {
-        return has_pending_mq;
-    }
-    has_pending_subagent_defer
+    !state.closing && continuation_still_valid(state, epoch) && has_required
 }
 
 pub(crate) struct CronContinuationContext {
@@ -300,9 +242,22 @@ pub(crate) async fn run_continuation_scheduler(
     task_spawner: HostTaskSpawner,
     shutdown: CancellationToken,
 ) {
+    let mut scan = tokio::time::interval(std::time::Duration::from_millis(100));
+    scan.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
-        let Some(req) = recv_until_shutdown(&mut rx, &shutdown).await else {
-            break;
+        let req = tokio::select! {
+            _ = shutdown.cancelled() => break,
+            request = rx.recv() => match request { Some(request) => request, None => break },
+            _ = scan.tick() => {
+                let states = sessions.lock().await;
+                let runnable = states.iter().find(|(session_id, state)| {
+                    !state.closing && !state.continuation_in_flight
+                        && cfg.session_manager.v2_queue_for(session_id)
+                            .is_some_and(|queue| queue.has_ensure_processing())
+                }).map(|(session_id, _)| session_id.clone());
+                let Some(session_id) = runnable else { continue };
+                ContinuationRequest { session_id, kind: peri_acp_types::tasks::BgTaskKind::Agent, mq_steering: true }
+            }
         };
         // eligibility + 原子 take（每 session 只运行一次）
         let epoch = {

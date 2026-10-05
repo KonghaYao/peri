@@ -1,6 +1,6 @@
 # RCRA 一等公民会话消息与激活实施
 
-状态：**重构中**——第 1、2 步已完成并验证；第 3–5 步未实施。生产运行时发布门槛均未完成，不得宣称整体已解决。
+状态：**重构中**——第 1–3 步已完成并验证；第 4、5 步实施中。生产运行时发布门槛均未完成，不得宣称整体已解决。
 
 ## P0 验证计划
 
@@ -25,7 +25,7 @@
 
 1. [x] 会话级 MQ 同构：子会话收件登记、唤醒绑定与独立任务目录；嵌套委托登记到直接父，消除跳层。
 2. [x] 投递归属：入站绑定发起者、冷恢复重建；删除 root fallback，保留并扩展已暂存的 initiator 守卫。
-3. MQ 消费语义：类型属性与消费矩阵进 Receive；收敛 continuation/idle/async_router 特例，唤醒降级为通知。
+3. [x] MQ 消费语义：类型属性与消费矩阵进 Receive；收敛 continuation/idle/async_router 特例，唤醒降级为通知。
 4. 关闭与控制：关闭子会话级联终止 bg shell、资源终止并结算后返回消息；Stop/Pause/Resume/Close 幂等与 attempt 精确定位。
 5. 可靠连接下的幂等与持久：事件身份去重、required 不降级、mutation Unknown 冻结、投递义务可恢复；随后按 §7 矩阵与发布门槛验收。
 
@@ -48,6 +48,15 @@
 - 验证：四 crate 全量 lib：ACP types 521 passed；Agent 919 passed；Workspace 422 passed / 2 ignored；Middlewares 1566 passed / 2 ignored（两个真实 120 秒期限/取消用例均通过）。相关四 crate doc tests 11 passed / 5 ignored；包含 ACP 的五 crate all-targets clippy（`-D warnings`）、fmt、22 条层依赖规则及 diff 检查通过；相关文档 33 个本地链接目标存在。修改的 29 个 Rust 文件最大 934 行；全库大小扫描仍有 13 个未触碰的存量超限测试文件。
 - 集成首轮发现冷恢复误报 Started，以及旧 MCP 测试夹具没有可信会话绑定；等待工具启动的旧夹具套件被中止，修正为真实绑定后完整复跑通过。没有放宽期限、单次调用、无重放或进程收尾断言；冷恢复待投递状态保留独立验证。
 - 边界：本步验证新客户端/目录从仍运行的可信 owner 重建直接归属；owner 的 scope/结果记录仍在内存，不承诺 owner 或全服务进程重启恢复，也未实现持久 InvocationBinding/Inbox、授权材料重建、epoch 投递接纳和统一自动激活。未知旧 owner 记录阻塞对账而非兼容 root。第 3–5 步和 P0 发布门槛保持未完成。
+
+### 第 3 步实施（2026-10-05）
+
+- `MessagePolicy` 分离 required/optional、Passive/ContinueCurrentRun/EnsureProcessing 与模型可见性；Prompt/Defer/Info 保留展示标签与构造默认值，不再决定运行调度。ContinueCurrentRun 绑定 turn 和 attempt，错代消息明确进入 Suppressed 集合，不启动新执行。
+- Receive 单批最多领取 64 条，按会话接纳序号排序，失败重排保留原序号；Transcript 已存在仅去重投影，不能据此消除处理责任。用户输入、工具结果及 Required 通知共用入口；Passive/UI-only 不独自调用 Reason。
+- idle、尾部续跑、截断恢复、Todo/StopHook 使用同一策略；当前执行指导必须有可信 execution binding，无绑定不退化为 EnsureProcessing。AsyncRouter 与 bg callback 仅发布事实，不按任务种类另造调度。
+- ACP continuation 在执行入口重验队列 required EnsureProcessing，通用队列扫描补偿通知丢失；Shell/Workflow/Agent 的 kind/source 均不拥有调度权。
+- 验证：独立暂存快照运行 ACP types 525、Agent 926、Middlewares 1568、ACP 717 个库测试全部通过（2 ignored）；doc tests、workspace check、四 crate all-targets clippy `-D warnings`、fmt、layer imports、typos 通过。修正 ACP MCP 调用夹具缺可信 session/pool；stdio 验收不再把合法后台任务快照与 commands 通知的相对顺序当协议保证。此前完整跑暴露的这些失败已修复并重跑，不把首次失败隐藏为 PASS。
+- 边界：本步队列和 Suppressed 集合仍是内存投影，接纳序号不是持久收据；控制代际、SDK 唯一 attempt 准入、durable Inbox/义务/检查点及 Unknown 对账属于第 4、5 步。不得把当前扫描或 Transcript 去重称为 Durable Accepted。
 
 ## 实施工作
 

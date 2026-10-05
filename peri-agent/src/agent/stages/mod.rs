@@ -503,11 +503,14 @@ fn enqueue_stream_interruption_continuation(context: &StageContext) {
         Some("模型流中断，正在继续。".into()),
         serde_json::json!({"reason": "stream_interrupted"}),
     );
-    context.session.queue.push(QueuedMessage::system_reminder(
-        MessageKind::Defer,
-        MessageSource::SystemInjected,
-        reminder,
-    ));
+    context.session.queue.push(
+        QueuedMessage::system_reminder(MessageKind::Defer, MessageSource::SystemInjected, reminder)
+            .with_policy(
+                peri_acp_types::session::MessagePolicy::continue_current_run(
+                    context.session.turn.execution_binding(),
+                ),
+            ),
+    );
 }
 
 fn enqueue_truncation_continuation(context: &StageContext) {
@@ -524,11 +527,14 @@ fn enqueue_truncation_continuation(context: &StageContext) {
         Some("Model response was truncated; continuing.".into()),
         serde_json::json!({"stop_reason": "max_tokens"}),
     );
-    context.session.queue.push(QueuedMessage::system_reminder(
-        MessageKind::Defer,
-        MessageSource::SystemInjected,
-        reminder,
-    ));
+    context.session.queue.push(
+        QueuedMessage::system_reminder(MessageKind::Defer, MessageSource::SystemInjected, reminder)
+            .with_policy(
+                peri_acp_types::session::MessagePolicy::continue_current_run(
+                    context.session.turn.execution_binding(),
+                ),
+            ),
+    );
 }
 
 /// 执行单个 ReAct 阶段：emit StageStarted → 调用阶段函数 → emit StageEnded → Ok/Err 分发。
@@ -596,15 +602,14 @@ where
 pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> LoopResult {
     let mut loop_state = LoopState::default();
     let mut semantic_iterations = 0usize;
-    let mut mq_steering_tail_passes = 0usize;
+    let execution = context.session.turn.execution_binding();
     // Keep one receiver for the lifetime of this loop so its observed version
     // advances across idle retries. StageContext clones are short-lived stage
     // inputs and must not own the receive cursor.
     let mut idle_registry = context.async_ctx.idle_registry.clone();
-    const MAX_MQ_STEERING_TAIL_PASSES: usize = 8;
     const MAX_TRUNCATION_CONTINUATIONS: usize = 2;
 
-    'steering_tail: loop {
+    'receive_retry: loop {
         'rcra: loop {
             // 检查 cancel
             if context.session.turn.is_cancelled() {
@@ -630,7 +635,7 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
             // wake_up_count=0 是正常状态——继续循环让 LLM 处理工具结果。
             if receive_out.wake_up_count == 0 && !loop_state.has_tool_calls {
                 // 竞态保护：退出前再检查一次队列是否有新消息到达
-                if context.session.queue.has_wake_up() {
+                if context.session.queue.has_required_for_run(&execution) {
                     tracing::debug!("Receive: consumed=0 but queue has wake-up, continue");
                     continue;
                 }
@@ -657,7 +662,7 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                     }
                     // loading 期间的队首输入在 idle 边界交接，直接回 Receive，
                     // 不先发布一个并未真正等待的 TurnSuspended。
-                    if context.session.queue.has_wake_up() {
+                    if context.session.queue.has_required_for_run(&execution) {
                         if let Some(mailbox) = &context.session.user_input_mailbox {
                             mailbox.leave_idle();
                         }
@@ -720,7 +725,7 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                             }
                             return LoopResult::Interrupted;
                         }
-                        _ = context.session.queue.await_wake() => {
+                        _ = context.session.queue.await_wake_for_run(&execution) => {
                             // 醒来：无论由注入 prompt 还是 bg Defer 触发，先复位
                             // 标志——后续 Receive 会 drain 队列并继续本 turn。
                             if let Some(flag) = &context.async_ctx.idle_suspended_flag {
@@ -773,7 +778,7 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                         }
                     }
                 }
-                if !context.session.queue.is_empty() {
+                if context.session.queue.has_required_for_run(&execution) {
                     tracing::debug!(
                         queue_len = context.session.queue.len(),
                         "run_react_loop: queue has pending messages, continue Receive"
@@ -949,23 +954,19 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
             continue;
         }
 
-        if mq_steering_tail_passes < MAX_MQ_STEERING_TAIL_PASSES
-            && context.session.queue.needs_mq_continuation()
-        {
-            mq_steering_tail_passes += 1;
+        if context.session.queue.has_required_for_run(&execution) {
             loop_state.has_tool_calls = false;
-            tracing::debug!(
-                pass = mq_steering_tail_passes,
-                queue_len = context.session.queue.len(),
-                "run_react_loop: MQ steering tail re-entry"
-            );
-            continue 'steering_tail;
+            continue 'receive_retry;
         }
         return LoopResult::Completed;
     }
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+#[path = "execution_policy_test.rs"]
+mod execution_policy_tests;
 
 #[cfg(test)]
 #[path = "stages_test.rs"]

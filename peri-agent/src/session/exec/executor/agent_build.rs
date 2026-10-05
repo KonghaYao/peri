@@ -14,7 +14,7 @@ use crate::session::exec::executor_helpers::{
 };
 use crate::session::exec::stage_builder::CachedLlmInstances;
 
-use super::{ContinuationRequest, FrozenSessionData, SessionContext, TurnConfig};
+use super::{FrozenSessionData, SessionContext, TurnConfig};
 
 /// Agent 执行后的最终输出（state + 停止原因）。
 ///
@@ -169,24 +169,10 @@ pub(super) async fn build_and_execute_agent(
         .as_ref()
         .and_then(|sa| sa.task_manager(session_id));
 
-    // on_bg_complete：bg 完成时**先**把结果同步 route 到 SessionInbox
-    // （Defer + wake），**再**通知 ACP server 的 per-session continuation
-    // scheduler。回调可能在主 prompt 结束后才发生（bg 独立运行），此时
-    // callback queue 已先写入；scheduler 原子 take session/cancel 标记后
-    // 通过同一 session execution path 发起内部 AsyncContinuation。
     let on_bg_complete = Some({
         let router = async_router.clone();
-        let notify = ctx.continuation_notify.clone();
-        let sid = ctx.session_id.clone();
         Arc::new(move |result: &BackgroundTaskResult, kind: BgTaskKind| {
             router.route_bg_result(result, kind);
-            if let Some(ref tx) = notify {
-                let _ = tx.send(ContinuationRequest {
-                    session_id: sid.clone(),
-                    kind,
-                    mq_steering: false,
-                });
-            }
             Ok(())
         }) as peri_acp_types::tasks::OnBgCompleteFn
     });

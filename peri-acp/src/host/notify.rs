@@ -10,7 +10,6 @@ use crate::session::executor::ContinuationRequest;
 use agent_client_protocol::schema::v1::SessionUpdate;
 use peri_acp_types::command::command_route::RouteEntry;
 use peri_acp_types::command_registry::CommandRegistry;
-use peri_acp_types::session::MessageSource;
 use peri_acp_types::tasks::BgTaskKind;
 use peri_acp_types::PeriCaps;
 use serde_json::Value;
@@ -82,10 +81,7 @@ pub(crate) fn handle_notification(
                 let has_pending = cfg
                     .session_manager
                     .get_session(session_id)
-                    .map(|s| {
-                        s.v2_message_queue
-                            .has_pending_defer(&MessageSource::SubAgentComplete)
-                    })
+                    .map(|s| s.v2_message_queue.has_ensure_processing())
                     .unwrap_or(false);
                 if cancel_should_schedule_continuation(state, has_pending) {
                     return Some(ContinuationRequest {

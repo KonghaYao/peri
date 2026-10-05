@@ -7,7 +7,10 @@ use peri_acp_types::system_reminder::{
     ReminderSource, SystemReminder, SYSTEM_REMINDER_VERSION,
 };
 use peri_agent::{
-    error::AgentResult, middleware::r#trait::Middleware, session::MessageSource, tools::BaseTool,
+    error::{AgentError, AgentResult},
+    middleware::r#trait::Middleware,
+    session::MessageSource,
+    tools::BaseTool,
 };
 use serde_json::json;
 use tokio::sync::{mpsc, Mutex};
@@ -88,6 +91,12 @@ impl Middleware for TodoMiddleware {
             .count();
         let template = Self::render_steering(&snap.items);
         drop(snap); // 模板渲染完成，释放状态锁（注入路径不依赖 todo 状态）
+        let execution = state
+            .execution_binding()
+            .ok_or_else(|| AgentError::MiddlewareError {
+                middleware: self.name().to_string(),
+                reason: "Todo steering requires a current execution binding".into(),
+            })?;
         let reminder = SystemReminder {
             version: SYSTEM_REMINDER_VERSION,
             category: ReminderCategory::Guidance,
@@ -113,6 +122,7 @@ impl Middleware for TodoMiddleware {
             self.name(),
             reminder,
             MessageSource::TodoSteering,
+            peri_acp_types::session::MessagePolicy::continue_current_run(execution),
             "todo_require_completion",
         )
     }

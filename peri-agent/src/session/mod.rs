@@ -46,7 +46,10 @@ pub mod workflow_completion;
 pub use config::{PermissionMode, SessionConfig, ThinkingConfig};
 /// MessageFlags 已下沉 peri-acp-types（store 契约），此处 re-export 保持兼容。
 pub use peri_acp_types::store::MessageFlags;
-pub use queue::{MessageKind, MessageQueue, MessageSource, QueuedMessage, QueuedPayload};
+pub use queue::{
+    ExecutionBinding, MessageActivation, MessageDisposition, MessageKind, MessagePolicy,
+    MessageQueue, MessageRequirement, MessageSource, QueuedMessage, QueuedPayload,
+};
 pub use store::{FrozenContext, FrozenContextBuilder, SessionId, SessionStore};
 pub use transcript::{MessageTranscript, StagedData, TranscriptEntry};
 pub use turn::{TurnContext, TurnId};

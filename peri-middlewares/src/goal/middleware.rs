@@ -137,6 +137,7 @@ impl Middleware for GoalMiddleware {
             self.name(),
             reminder,
             MessageSource::GoalSteering,
+            peri_agent::session::MessagePolicy::ensure_processing(),
             "goal_active",
         )
     }

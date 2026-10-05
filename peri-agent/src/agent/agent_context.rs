@@ -82,6 +82,10 @@ impl<'a> AgentContext<'a> {
 }
 
 impl MiddlewareState for AgentContext<'_> {
+    fn execution_binding(&self) -> Option<peri_acp_types::session::ExecutionBinding> {
+        Some(self.ctx.session.turn.execution_binding())
+    }
+
     fn cwd(&self) -> &str {
         &self.ctx.session.turn.cwd
     }

@@ -17,7 +17,8 @@
 
 use peri_acp_types::event::BackgroundTaskResult;
 use peri_acp_types::session::{
-    InboxHandle, MessageKind, MessageQueue, MessageSource, SessionInbox,
+    InboxHandle, MessageKind, MessagePolicy, MessageQueue, MessageSource, QueuedMessage,
+    SessionInbox,
 };
 use peri_acp_types::system_reminder::{
     ReminderCategory, ReminderDelivery, ReminderSeverity, TrustedSystemReminder,
@@ -140,11 +141,17 @@ impl AsyncRouter {
             BgTaskKind::Mcp => MessageSource::DynamicMcpNotification,
         };
         let reminder = background_result_reminder(result, kind);
-        self.inbox.push_system_reminder_with_delivery_id(
-            MessageKind::Defer,
-            source,
-            reminder,
-            crate::agent::async_tasks::delivery::terminal_delivery_id(&result.task_id, "terminal"),
+        self.inbox.push(
+            QueuedMessage::system_reminder_with_delivery_id(
+                MessageKind::Defer,
+                source,
+                reminder,
+                crate::agent::async_tasks::delivery::terminal_delivery_id(
+                    &result.task_id,
+                    "terminal",
+                ),
+            )
+            .with_policy(MessagePolicy::ensure_processing()),
         );
         debug!(
             task_id = %result.task_id,
@@ -279,11 +286,14 @@ impl AsyncRouter {
                 "tool_calls_count": tool_calls_count,
             }),
         );
-        self.inbox.push_system_reminder_with_delivery_id(
-            MessageKind::Defer,
-            MessageSource::WorkflowComplete,
-            reminder,
-            crate::agent::async_tasks::delivery::terminal_delivery_id(run_id, "terminal"),
+        self.inbox.push(
+            QueuedMessage::system_reminder_with_delivery_id(
+                MessageKind::Defer,
+                MessageSource::WorkflowComplete,
+                reminder,
+                crate::agent::async_tasks::delivery::terminal_delivery_id(run_id, "terminal"),
+            )
+            .with_policy(MessagePolicy::ensure_processing()),
         );
     }
 }

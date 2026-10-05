@@ -419,7 +419,7 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
 
     if matches!(&loop_result, LoopResult::Completed) {
         let queue = v2_out.session.queue();
-        if queue.needs_mq_continuation() {
+        if queue.has_ensure_processing() {
             if let Some(ref tx) = req.continuation_notify {
                 let _ = tx.send(crate::session::exec::executor::ContinuationRequest {
                     session_id: req.session_id.clone(),

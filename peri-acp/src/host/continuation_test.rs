@@ -16,8 +16,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
     cancel_arms_continuation, cancel_should_schedule_continuation, continuation_dispatchable,
-    continuation_still_valid, recv_until_shutdown, take_continuation_for_request,
-    take_continuation_if_armed, SessionState,
+    continuation_still_valid, recv_until_shutdown, take_continuation_for_request, SessionState,
 };
 use crate::session::executor::ContinuationRequest;
 
@@ -111,34 +110,29 @@ fn test_mq_steering_during_in_flight_sets_pending() {
 /// 只有 bg agent（kind=Agent）完成才触发：Shell 完成不得消费标记。
 #[test]
 fn test_take_only_agent_kind_runs_continuation() {
-    let mut state = make_session_state(true, 0);
-
-    // shell 完成：即使标记已置位也不触发，标记保持
-    assert!(
-        take_continuation_if_armed(&mut state, BgTaskKind::Shell).is_none(),
-        "bg shell 完成不得触发续跑"
-    );
-    assert!(state.continuation_armed, "shell 完成不应消费取消标记");
-
-    // agent 完成：原子 take，返回 epoch
-    assert_eq!(
-        take_continuation_if_armed(&mut state, BgTaskKind::Agent),
-        Some(0)
-    );
-    assert!(!state.continuation_armed, "take 后标记必须清除");
-
-    // 同轮次后续 agent 完成：标记已清除，不再重复续跑（每 session coalesce）
-    assert!(
-        take_continuation_if_armed(&mut state, BgTaskKind::Agent).is_none(),
-        "同一取消轮次只运行一次续跑"
-    );
+    for kind in [BgTaskKind::Shell, BgTaskKind::Agent, BgTaskKind::Workflow] {
+        let mut state = make_session_state(false, 0);
+        let request = ContinuationRequest {
+            session_id: state.session_id.clone(),
+            kind,
+            mq_steering: false,
+        };
+        assert_eq!(take_continuation_for_request(&mut state, &request), Some(0));
+        assert!(state.continuation_mq_steering_pending);
+    }
 }
 
 /// 未置位（prompt 未被取消 / 新 prompt 已清除）→ 不触发。
 #[test]
 fn test_take_skips_when_not_armed() {
     let mut state = make_session_state(false, 3);
-    assert!(take_continuation_if_armed(&mut state, BgTaskKind::Agent).is_none());
+    state.closing = true;
+    let request = ContinuationRequest {
+        session_id: state.session_id.clone(),
+        kind: BgTaskKind::Agent,
+        mq_steering: true,
+    };
+    assert!(take_continuation_for_request(&mut state, &request).is_none());
     assert!(!state.continuation_armed);
 }
 
@@ -151,7 +145,13 @@ fn test_epoch_invalidation_clears_queued_continuation() {
     let mut state = make_session_state(true, 0);
 
     // scheduler 原子 take（记录 epoch=0）
-    let epoch = take_continuation_if_armed(&mut state, BgTaskKind::Agent).expect("armed 应可 take");
+    let request = ContinuationRequest {
+        session_id: state.session_id.clone(),
+        kind: BgTaskKind::Agent,
+        mq_steering: false,
+    };
+    let epoch =
+        take_continuation_for_request(&mut state, &request).expect("open session accepts hint");
 
     // 用户显式新 prompt：清除标记 + 递增代际（dispatch_prompt_turn 的行为）
     state.continuation_armed = false;
@@ -165,7 +165,7 @@ fn test_epoch_invalidation_clears_queued_continuation() {
 
     // 未变化（无新 prompt）：仍有效
     let mut state2 = make_session_state(true, 5);
-    let epoch2 = take_continuation_if_armed(&mut state2, BgTaskKind::Agent).unwrap();
+    let epoch2 = take_continuation_for_request(&mut state2, &request).unwrap();
     assert!(continuation_still_valid(&state2, epoch2));
 }
 
@@ -235,12 +235,12 @@ fn test_cancel_schedule_race_eligibility() {
 fn test_continuation_dispatchable_requires_pending_defer() {
     let state = make_session_state(false, 3);
     // 代际有效 + Defer 在队 → 可 dispatch
-    assert!(continuation_dispatchable(&state, 3, true, false));
+    assert!(continuation_dispatchable(&state, 3, true));
     // 代际有效但 Defer 已被消费 → 跳过（空跑无意义）
-    assert!(!continuation_dispatchable(&state, 3, false, false));
+    assert!(!continuation_dispatchable(&state, 3, false));
     // 代际失效（用户新 prompt）→ 跳过
-    assert!(!continuation_dispatchable(&state, 3 + 1, true, false));
-    assert!(!continuation_dispatchable(&state, 3 + 1, false, false));
+    assert!(!continuation_dispatchable(&state, 3 + 1, true));
+    assert!(!continuation_dispatchable(&state, 3 + 1, false));
 }
 
 #[tokio::test]

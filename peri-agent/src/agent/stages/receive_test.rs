@@ -190,7 +190,7 @@ async fn durable_terminal_delivery_preserves_order_and_dedups_after_exclusion() 
     })
     .await
     .unwrap();
-    assert_eq!(output.wake_up_count, 0);
+    assert_eq!(output.wake_up_count, 1);
     assert_eq!(
         context.session.transcript.read().persisted_payloads().len(),
         2

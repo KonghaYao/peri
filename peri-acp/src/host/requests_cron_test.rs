@@ -225,6 +225,7 @@ async fn restricted_deployment_omits_local_optional_capabilities_in_session() {
 
 async fn cron_tool(
     env: &crate::host::workspace::SessionEnvironment,
+    session_id: &str,
     cwd: &str,
     name: &str,
     args: Value,
@@ -250,7 +251,11 @@ async fn cron_tool(
     .expect("cron tools ready");
     let tool = client.tools.iter().find(|t| t.name == name).unwrap();
     peri_middlewares::mcp::tool_bridge::McpToolBridge::new("cron", tool, client.clone())
-        .invoke(args, ToolContext::new(&[], cwd))
+        .with_output_store(&pool, Some(session_id))
+        .invoke(
+            args,
+            ToolContext::new(&[], cwd).with_session_identity(session_id, "test-turn"),
+        )
         .await
         .unwrap()
 }
@@ -314,15 +319,16 @@ async fn cron_deployment_registration_and_tick_are_session_scoped() {
     let env_b = sessions[&b].environment.clone().unwrap();
     let registered = cron_tool(
         &env_a,
+        &a,
         &cwd,
         "cron_register",
         json!({"expression":"0 0 1 1 *", "prompt":"session-a-marker"}),
     )
     .await;
-    assert!(cron_tool(&env_a, &cwd, "cron_list", json!({}))
+    assert!(cron_tool(&env_a, &a, &cwd, "cron_list", json!({}))
         .await
         .contains("session-a-marker"));
-    assert!(!cron_tool(&env_b, &cwd, "cron_list", json!({}))
+    assert!(!cron_tool(&env_b, &b, &cwd, "cron_list", json!({}))
         .await
         .contains("session-a-marker"));
     let visible = env_a.cfg.cron_scheduler.as_ref().unwrap().list_tasks();
@@ -396,7 +402,7 @@ async fn cron_deployment_registration_and_tick_are_session_scoped() {
     assert!(shared.lock().await[&b].history.is_empty());
 
     // Deleting a registered task prevents later ticks; closing A stops its generation.
-    cron_tool(&env_a, &cwd, "cron_remove", json!({"id": task_a})).await;
+    cron_tool(&env_a, &a, &cwd, "cron_remove", json!({"id": task_a})).await;
     assert!(env_a
         .cfg
         .cron_scheduler
@@ -407,6 +413,7 @@ async fn cron_deployment_registration_and_tick_are_session_scoped() {
     assert!(!sched_a.lock().force_next_fire_to_past(&task_a));
     cron_tool(
         &env_a,
+        &a,
         &cwd,
         "cron_register",
         json!({"expression":"0 0 1 1 *", "prompt":"closed-marker"}),
@@ -436,6 +443,7 @@ async fn cron_deployment_registration_and_tick_are_session_scoped() {
     // B remains usable after A closes.
     cron_tool(
         &env_b,
+        &b,
         &cwd,
         "cron_register",
         json!({"expression":"0 0 1 1 *", "prompt":"session-b-marker"}),
@@ -484,6 +492,7 @@ async fn cron_deployment_without_tick_retains_manual_schedule_policy() {
     let env = sessions[&id].environment.clone().unwrap();
     cron_tool(
         &env,
+        &id,
         &cwd,
         "cron_register",
         json!({"expression":"0 0 1 1 *", "prompt":"manual-marker"}),

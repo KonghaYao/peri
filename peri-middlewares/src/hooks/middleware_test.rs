@@ -802,7 +802,8 @@ async fn test_post_tool_batch_block_stops() {
 
 #[tokio::test]
 async fn test_stop_block_continue_sets_block_continue_field() {
-    use peri_agent::agent::state::AgentState;
+    use peri_agent::agent::{agent_context::AgentContext, stages::StageContext};
+    use peri_agent::session::{FrozenContext, Session};
 
     // Hook that returns Block via exit code 2
     let hook = make_registered(
@@ -822,48 +823,78 @@ async fn test_stop_block_continue_sets_block_continue_field() {
     );
     let mw = make_middleware(vec![hook]);
 
-    let mut state = AgentState::new(std::env::temp_dir().to_str().unwrap());
-    state.add_message(peri_agent::messages::BaseMessage::human("test"));
+    let session = Session::new(
+        std::sync::Arc::from(std::env::temp_dir().to_str().unwrap()),
+        FrozenContext::builder().build(),
+        None,
+    );
+    let context = StageContext::builder(
+        session.start_turn(),
+        session.transcript(),
+        session.queue().clone(),
+    )
+    .build();
+    let execution = context.session.turn.execution_binding();
+    let mut state = AgentContext::from_stage(&context);
 
     let output = peri_agent::agent::react::AgentOutput::new("done", 3);
 
-    let result = mw.after_agent(&mut state, &output).await;
-    match result {
-        Ok(o) => {
-            // If command exits with 2, block_continue should be set
-            // If command exits 0 (Allow), block_continue should be None
-            // Either outcome is valid depending on the hook executor behavior
-            if o.block_continue.is_some() {
-                // Stop hook block → 应通过 v2 queue push 1 条 Defer（StopHookFeedback）
-                let drained = state.v2_queue().drain_all();
-                assert_eq!(
-                    drained.len(),
-                    1,
-                    "stop block 应 push 1 条 StopHookFeedback Defer 消息"
-                );
-                assert_eq!(drained[0].kind, peri_agent::session::MessageKind::Defer);
-                let reminder = match &drained[0].payload {
-                    peri_agent::session::QueuedPayload::SystemReminder(reminder) => {
-                        reminder.as_reminder()
-                    }
-                    other => panic!("expected canonical reminder, got {other:?}"),
-                };
-                assert_eq!(
-                    reminder.category,
-                    peri_acp_types::system_reminder::ReminderCategory::Guidance
-                );
-                assert_eq!(reminder.source.0, "hook");
-                assert_eq!(reminder.kind, "stop_blocked");
-                assert_eq!(
-                    reminder.delivery,
-                    peri_acp_types::system_reminder::ReminderDelivery::Required
-                );
-            }
-        }
-        Err(_) => {
-            // PreventContinuation is also valid
-        }
-    }
+    let result = mw.after_agent(&mut state, &output).await.unwrap();
+    assert!(result.block_continue.is_some());
+    assert!(session.queue().has_required_for_run(&execution));
+    assert!(!session.queue().has_ensure_processing());
+    let drained = session.queue().drain_all();
+    assert_eq!(drained.len(), 1);
+    assert_eq!(drained[0].kind, peri_agent::session::MessageKind::Defer);
+    assert_eq!(
+        drained[0].policy,
+        peri_acp_types::session::MessagePolicy::continue_current_run(execution)
+    );
+    let reminder = match &drained[0].payload {
+        peri_agent::session::QueuedPayload::SystemReminder(reminder) => reminder.as_reminder(),
+        other => panic!("expected canonical reminder, got {other:?}"),
+    };
+    assert_eq!(
+        reminder.category,
+        peri_acp_types::system_reminder::ReminderCategory::Guidance
+    );
+    assert_eq!(reminder.source.0, "hook");
+    assert_eq!(reminder.kind, "stop_blocked");
+    assert_eq!(
+        reminder.delivery,
+        peri_acp_types::system_reminder::ReminderDelivery::Required
+    );
+}
+
+#[tokio::test]
+async fn stop_block_without_execution_identity_is_rejected() {
+    let hook = make_registered(
+        HookEvent::Stop,
+        HookType::Command {
+            command: "echo '{\"action\": \"block\", \"reason\": \"needs more work\"}' && exit 2"
+                .into(),
+            shell: None,
+            timeout: Some(1000),
+            status_message: None,
+            once: false,
+            async_run: false,
+            async_rewake: false,
+            matcher: None,
+            condition: None,
+        },
+    );
+    let mw = make_middleware(vec![hook]);
+    let mut state = peri_agent::agent::state::AgentState::new("/tmp");
+    let result = mw
+        .after_agent(
+            &mut state,
+            &peri_agent::agent::react::AgentOutput::new("done", 1),
+        )
+        .await;
+    assert!(
+        matches!(result, Err(AgentError::MiddlewareError { reason, .. }) if reason.contains("execution binding"))
+    );
+    assert!(state.v2_queue().is_empty());
 }
 
 #[tokio::test]

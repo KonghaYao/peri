@@ -9,6 +9,9 @@ mod cron_owner;
 mod execution;
 mod inbox;
 mod queue;
+mod queue_policy;
+#[cfg(test)]
+mod queue_policy_test;
 mod runtime;
 mod user_input;
 
@@ -23,6 +26,9 @@ pub use execution::{
 };
 pub use inbox::{InboxHandle, SessionInbox};
 pub use queue::{MessageKind, MessageQueue, MessageSource, QueuedMessage, QueuedPayload};
+pub use queue_policy::{
+    ExecutionBinding, MessageActivation, MessageDisposition, MessagePolicy, MessageRequirement,
+};
 pub use runtime::{
     cancel_all_agents, cancel_all_in, cancel_cascade_agents, cancel_cascade_in, AgentRuntime,
 };

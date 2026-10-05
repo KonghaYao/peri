@@ -176,10 +176,17 @@ fn test_stream_interruption_reminder_contract() {
     let (ctx, _, _) = make_context(vec![], None);
     ctx.session.queue.drain_all();
     enqueue_stream_interruption_continuation(&ctx);
+    let execution = ctx.session.turn.execution_binding();
+    assert!(ctx.session.queue.has_required_for_run(&execution));
+    assert!(!ctx.session.queue.has_ensure_processing());
     let queued = ctx.session.queue.drain_all();
     assert_eq!(queued.len(), 1);
     assert_eq!(queued[0].kind, MessageKind::Defer);
     assert_eq!(queued[0].source, MessageSource::SystemInjected);
+    assert_eq!(
+        queued[0].policy,
+        peri_acp_types::session::MessagePolicy::continue_current_run(execution)
+    );
     let QueuedPayload::SystemReminder(trusted) = &queued[0].payload else {
         panic!("必须保留可信来源")
     };

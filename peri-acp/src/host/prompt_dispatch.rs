@@ -161,19 +161,12 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
         let dispatchable = {
             let sessions = sessions.lock().await;
             sessions.get(&prompt_session_id).is_some_and(|state| {
-                let (has_subagent, has_mq) = cfg
+                let has_required = cfg
                     .session_manager
                     .get_session(&prompt_session_id)
-                    .map(|session| {
-                        (
-                            session.v2_message_queue.has_pending_defer(
-                                &peri_acp_types::session::MessageSource::SubAgentComplete,
-                            ),
-                            session.v2_message_queue.needs_mq_continuation(),
-                        )
-                    })
-                    .unwrap_or((false, false));
-                continuation::continuation_dispatchable(state, epoch, has_subagent, has_mq)
+                    .map(|session| session.v2_message_queue.has_ensure_processing())
+                    .unwrap_or(false);
+                continuation::continuation_dispatchable(state, epoch, has_required)
             })
         };
         if !dispatchable {

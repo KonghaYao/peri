@@ -300,11 +300,10 @@ async fn worktree_new_resources_use_the_target_directory() {
     let pool = environment
         .cfg
         .mcp_pool
-        .as_ref()
+        .clone()
         .expect("bare 会话仍提供 builtin workspace")
-        .as_any()
-        .downcast_ref::<peri_middlewares::mcp::McpClientPool>()
-        .unwrap();
+        .downcast_arc::<peri_middlewares::mcp::McpClientPool>()
+        .unwrap_or_else(|_| panic!("workspace MCP pool"));
     let workspace = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
             if let Some(client) = pool.get_client("workspace") {
@@ -328,9 +327,10 @@ async fn worktree_new_resources_use_the_target_directory() {
         read_tool,
         workspace.clone(),
     )
+    .with_output_store(&pool, Some(id))
     .invoke(
         json!({"file_path": "CLAUDE.md"}),
-        ToolContext::new(&[], &state.cwd),
+        ToolContext::new(&[], &state.cwd).with_session_identity(id, "test-turn"),
     )
     .await
     .unwrap();

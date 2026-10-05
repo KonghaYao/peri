@@ -7,6 +7,7 @@ use crate::agent::events_v2::{ObserveEvent, RenderEvent, StateEvent};
 use crate::agent::stages::{append_messages_to_transcript, ReceiveInput, ReceiveOutput};
 use crate::session::{MessageKind, MessageSource, QueuedMessage, QueuedPayload};
 use peri_acp_types::event::ExecutorEvent;
+use peri_acp_types::session::MessageDisposition;
 
 fn synthetic_defer_text(message: &QueuedMessage) -> Option<String> {
     match (&message.kind, &message.payload) {
@@ -23,7 +24,8 @@ fn synthetic_defer_text(message: &QueuedMessage) -> Option<String> {
 /// 对 Defer 消息 emit `SyntheticUserMessage` 事件（TUI bridge 刷新 committed 视图用）。
 /// 消费后通过共享 helper `append_messages_to_transcript` 写入 Transcript。
 pub async fn run_receive(input: ReceiveInput) -> crate::error::AgentResult<ReceiveOutput> {
-    let consumed = input.context.session.queue.drain_all();
+    let execution = input.context.session.turn.execution_binding();
+    let consumed = input.context.session.queue.drain_batch(64);
     let user_inputs: Vec<_> = consumed
         .iter()
         .filter(|message| message.source == MessageSource::UserInput)
@@ -39,9 +41,9 @@ pub async fn run_receive(input: ReceiveInput) -> crate::error::AgentResult<Recei
         mailbox.mark_claimed(&user_ids);
     }
     let count = consumed.len();
-    let mut wake_up_count = consumed
+    let wake_up_count = consumed
         .iter()
-        .filter(|message| message.kind.wakes_up())
+        .filter(|message| message.policy.disposition(&execution) == MessageDisposition::Process)
         .count();
 
     // emit MessageQueueDrained（langfuse v2 遥测）
@@ -71,6 +73,10 @@ pub async fn run_receive(input: ReceiveInput) -> crate::error::AgentResult<Recei
 
     if count > 0 {
         for (index, msg) in consumed.iter().enumerate() {
+            if msg.policy.disposition(&execution) == MessageDisposition::Suppressed {
+                input.context.session.queue.suppress(msg.clone());
+                continue;
+            }
             let mut newly_committed = true;
             if let Some(delivery_id) = msg.delivery_id {
                 let QueuedPayload::SystemReminder(reminder) = &msg.payload else {
@@ -90,6 +96,11 @@ pub async fn run_receive(input: ReceiveInput) -> crate::error::AgentResult<Recei
                             ..
                         }) if stored.as_reminder() == reminder.as_reminder() => true,
                         Some(_) => {
+                            input
+                                .context
+                                .session
+                                .queue
+                                .push_batch(consumed[index..].to_vec());
                             return Err(anyhow::anyhow!(
                                 "conflicting canonical terminal delivery ID"
                             )
@@ -133,9 +144,6 @@ pub async fn run_receive(input: ReceiveInput) -> crate::error::AgentResult<Recei
                 append_messages_to_transcript(&mut transcript, vec![msg.clone()]);
             }
             if !newly_committed {
-                if msg.kind.wakes_up() {
-                    wake_up_count -= 1;
-                }
                 continue;
             }
             if let QueuedPayload::SystemReminder(reminder) = &msg.payload {

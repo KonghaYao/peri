@@ -147,6 +147,8 @@ fn test_render_steering_包含当前todo状态() {
 
 #[tokio::test]
 async fn test_after_agent_未完成_注入_steering_并设_block_continue() {
+    use peri_agent::agent::{agent_context::AgentContext, stages::StageContext};
+    use peri_agent::session::{FrozenContext, Session};
     let (mw, _state) = make_mw_with_items(
         vec![TodoItem {
             content: "A".into(),
@@ -156,7 +158,15 @@ async fn test_after_agent_未完成_注入_steering_并设_block_continue() {
         true,
     )
     .await;
-    let mut state = AgentState::new("/tmp");
+    let session = Session::new(Arc::from("/tmp"), FrozenContext::builder().build(), None);
+    let context = StageContext::builder(
+        session.start_turn(),
+        session.transcript(),
+        session.queue().clone(),
+    )
+    .build();
+    let execution = context.session.turn.execution_binding();
+    let mut state = AgentContext::from_stage(&context);
     let output = AgentOutput::new("我完成了", 1);
 
     let result = Middleware::after_agent(&mw, &mut state, &output)
@@ -170,9 +180,15 @@ async fn test_after_agent_未完成_注入_steering_并设_block_continue() {
     );
 
     // 注入路径：v2 MessageQueue 应收到 1 条 Defer（TodoSteering），内容含 todo 状态
-    let drained = state.v2_queue().drain_all();
+    assert!(session.queue().has_required_for_run(&execution));
+    assert!(!session.queue().has_ensure_processing());
+    let drained = session.queue().drain_all();
     assert_eq!(drained.len(), 1, "应 push 1 条 todo steering Defer 消息");
     assert_eq!(drained[0].kind, MessageKind::Defer);
+    assert_eq!(
+        drained[0].policy,
+        peri_acp_types::session::MessagePolicy::continue_current_run(execution)
+    );
     assert_eq!(
         drained[0].source,
         MessageSource::TodoSteering,
@@ -287,10 +303,19 @@ async fn test_after_agent_已有block_continue_不干预() {
 
 #[tokio::test]
 async fn test_after_agent_steering_解除后_不再拦截() {
+    use peri_agent::agent::{agent_context::AgentContext, stages::StageContext};
+    use peri_agent::session::{FrozenContext, Session};
     // 模拟完整生命周期：创建（标记开启）→ 全部标记完成 → 停止轮放行
     let (tx, _rx) = mpsc::channel(8);
     let mw = TodoMiddleware::new(tx);
-    let mut state = AgentState::new("/tmp");
+    let session = Session::new(Arc::from("/tmp"), FrozenContext::builder().build(), None);
+    let context = StageContext::builder(
+        session.start_turn(),
+        session.transcript(),
+        session.queue().clone(),
+    )
+    .build();
+    let mut state = AgentContext::from_stage(&context);
 
     // 经 TodoWrite 创建并开启标记（按名取工具，不依赖链序）
     let tool = mw
@@ -321,7 +346,7 @@ async fn test_after_agent_steering_解除后_不再拦截() {
         Some("todo_require_completion"),
         "未完成时应拦截续跑"
     );
-    state.v2_queue().drain_all();
+    session.queue().drain_all();
 
     // 全部标记 completed → 停止轮放行
     tool.invoke(
@@ -340,6 +365,25 @@ async fn test_after_agent_steering_解除后_不再拦截() {
         .await
         .unwrap();
     assert!(result.block_continue.is_none(), "全部完成应放行");
-    let drained = state.v2_queue().drain_all();
+    let drained = session.queue().drain_all();
     assert!(drained.is_empty(), "不应再注入");
+}
+
+#[tokio::test]
+async fn todo_steering_without_execution_identity_is_rejected() {
+    let (mw, _) = make_mw_with_items(
+        vec![TodoItem {
+            content: "A".into(),
+            active_form: None,
+            status: TodoStatus::Pending,
+        }],
+        true,
+    )
+    .await;
+    let mut state = AgentState::new("/tmp");
+    let result = Middleware::after_agent(&mw, &mut state, &AgentOutput::new("done", 1)).await;
+    assert!(
+        matches!(result, Err(AgentError::MiddlewareError { reason, .. }) if reason.contains("execution binding"))
+    );
+    assert!(state.v2_queue().is_empty());
 }

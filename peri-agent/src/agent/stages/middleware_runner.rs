@@ -252,6 +252,9 @@ struct BoundApprovalState<'a, 'b> {
 }
 
 impl hook_state::StateView for BoundApprovalState<'_, '_> {
+    fn execution_binding(&self) -> Option<peri_acp_types::session::ExecutionBinding> {
+        MiddlewareState::execution_binding(self.context)
+    }
     fn cwd(&self) -> &str {
         MiddlewareState::cwd(self.context)
     }

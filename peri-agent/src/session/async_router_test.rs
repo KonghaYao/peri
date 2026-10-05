@@ -103,6 +103,31 @@ fn test_route_bg_result_workflow_uses_workflow_complete_source() {
 }
 
 #[test]
+fn terminal_results_share_ensure_processing_policy_across_task_kinds() {
+    for kind in [
+        BgTaskKind::Agent,
+        BgTaskKind::Shell,
+        BgTaskKind::Workflow,
+        BgTaskKind::Mcp,
+    ] {
+        for success in [true, false] {
+            let (inbox, handle) = make_inbox();
+            let router = AsyncRouter::new(handle);
+            let mut result = make_bg_result("typed-terminal", "worker", "done");
+            result.success = success;
+            router.route_bg_result(&result, kind);
+            assert!(inbox.queue().has_ensure_processing());
+            let messages = inbox.queue().drain_all();
+            assert_eq!(messages.len(), 1);
+            assert_eq!(
+                messages[0].policy,
+                peri_acp_types::session::MessagePolicy::ensure_processing()
+            );
+        }
+    }
+}
+
+#[test]
 fn test_route_bg_result_notification_text_contains_task_info() {
     let (inbox, handle) = make_inbox();
     let router = AsyncRouter::new(handle);

@@ -476,8 +476,16 @@ async fn test_initialize_and_session_new_over_stdio_transport() {
         "configOptions 存在: {resp}"
     );
 
-    let line = read_line(&mut output_read).await;
-    let notif: Value = serde_json::from_str(&line).unwrap();
+    let notif: Value = loop {
+        let line = read_line(&mut output_read).await;
+        let notification: Value = serde_json::from_str(&line).unwrap();
+        if notification["method"] == "session/update" {
+            break notification;
+        }
+        assert_eq!(notification["method"], "peri/unstable_event");
+        assert_eq!(notification["params"]["event"], "bg-task-snapshot");
+        assert_eq!(notification["params"]["sessionId"], session_id);
+    };
     assert_eq!(notif["method"], "session/update", "通知 method: {notif}");
     assert_eq!(
         notif["params"]["sessionId"], session_id,

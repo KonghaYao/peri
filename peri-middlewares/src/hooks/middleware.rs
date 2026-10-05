@@ -459,6 +459,14 @@ impl Middleware for HookMiddleware {
                     return Ok(output.clone());
                 }
                 GuardDecision::Block { count, reason } => {
+                    let execution =
+                        state
+                            .execution_binding()
+                            .ok_or_else(|| AgentError::MiddlewareError {
+                                middleware: self.name().to_string(),
+                                reason: "Stop hook steering requires a current execution binding"
+                                    .into(),
+                            })?;
                     let feedback = format_stop_block_feedback_no_wrapper(&reason, count);
                     let reminder = TrustedSystemReminderFactory::for_producer()
                         .construct(SystemReminder {
@@ -480,11 +488,16 @@ impl Middleware for HookMiddleware {
                             middleware: self.name().to_string(),
                             reason: error.to_string(),
                         })?;
-                    state.enqueue_v2_message(QueuedMessage::system_reminder(
-                        MessageKind::Defer,
-                        MessageSource::StopHookFeedback,
-                        reminder,
-                    ));
+                    state.enqueue_v2_message(
+                        QueuedMessage::system_reminder(
+                            MessageKind::Defer,
+                            MessageSource::StopHookFeedback,
+                            reminder,
+                        )
+                        .with_policy(
+                            peri_acp_types::session::MessagePolicy::continue_current_run(execution),
+                        ),
+                    );
                     let mut output = output.clone();
                     output.block_continue = Some(reason);
                     return Ok(output);
