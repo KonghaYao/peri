@@ -150,7 +150,6 @@ impl App {
         }
         self.services.mcp_pool = Some(pool.clone());
         self.services.mcp_task_owner = Some(owner);
-        let _ = crate::kit::atoms::MCP_PANEL_POOL.set(pool.clone());
 
         let (init_tx, init_rx) =
             tokio::sync::watch::channel(peri_middlewares::mcp::McpInitStatus::Pending);

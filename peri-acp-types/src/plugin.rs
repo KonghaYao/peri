@@ -13,6 +13,7 @@ use std::{
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+use crate::command::command_route::RouteEntry;
 use crate::hooks::{HooksConfig, RegisteredHook};
 use crate::skills::SkillRoot;
 
@@ -625,6 +626,28 @@ pub trait PluginManagerPort: Send + Sync {
 
     /// 聚合快照：已启用插件 × 已安装记录 → 协议快照条目（plugin-snapshot 事件）。
     fn snapshot(&self, claude_dir: &Path) -> Vec<crate::event_data::PluginSnapshotEntry>;
+
+    /// `~/.claude` 根目录（插件布局的用户级根，由实现方给出部署默认）。
+    ///
+    /// 替代 ACP 侧对 middlewares `plugin::claude_home` 的静态直调
+    /// （W3 端口补全）。
+    fn claude_home(&self) -> PathBuf;
+
+    /// 已启用插件的命令清单（`claude_dir` 下 enabledPlugins；`cwd` 提供项目级
+    /// 覆盖，`None` 仅用户级）。失败以 `String` 呈现（调用方按需降级）。
+    fn enabled_plugin_commands(
+        &self,
+        claude_dir: &Path,
+        cwd: Option<&Path>,
+    ) -> Result<Vec<CommandEntry>, String>;
+
+    /// `CommandEntry` → plugin 域 `RouteEntry` 投影（词法校验与异常跳过规则
+    /// 由实现方保证，语义同 middlewares `plugin_route_entries`）。
+    fn plugin_route_entries(&self, entries: &[CommandEntry]) -> Vec<RouteEntry>;
+
+    /// marketplace 缓存目录内的 manifest 定位（`marketplace.json` 或
+    /// `.claude-plugin/marketplace.json` 两形态），未找到返回 `None`。
+    fn find_marketplace_json(&self, dir: &Path) -> Option<PathBuf>;
 }
 
 #[cfg(test)]

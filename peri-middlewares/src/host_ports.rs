@@ -11,10 +11,10 @@ use peri_acp_types::hooks::SettingsHooksPort;
 use peri_acp_types::plugin::{InstallScope, InstalledPlugin, PluginManagerPort};
 
 use crate::plugin::{
-    cleanup_orphaned_plugins, install_plugin, load_installed_plugins, load_known_marketplaces,
-    parse_marketplace_input, remove_from_enabled_plugins, save_known_marketplaces,
-    uninstall_plugin, update_enabled_plugins, update_plugin, KnownMarketplace, MarketplaceManager,
-    MarketplaceSource,
+    cleanup_orphaned_plugins, install_plugin, load_enabled_plugins, load_installed_plugins,
+    load_known_marketplaces, parse_marketplace_input, remove_from_enabled_plugins,
+    save_known_marketplaces, uninstall_plugin, update_enabled_plugins, update_plugin,
+    KnownMarketplace, MarketplaceManager, MarketplaceSource,
 };
 
 /// 插件管理端口实现：包装 `install_plugin` / `uninstall_plugin` /
@@ -396,6 +396,31 @@ impl PluginManagerPort for PluginManager {
             "marketplaces": marketplaces,
             "discover": discover,
         })
+    }
+
+    fn claude_home(&self) -> PathBuf {
+        crate::plugin::claude_home()
+    }
+
+    fn enabled_plugin_commands(
+        &self,
+        claude_dir: &Path,
+        cwd: Option<&Path>,
+    ) -> Result<Vec<peri_acp_types::plugin::CommandEntry>, String> {
+        load_enabled_plugins(claude_dir, cwd)
+            .map(|plugins| plugins.into_iter().flat_map(|p| p.commands).collect())
+            .map_err(|error| error.to_string())
+    }
+
+    fn plugin_route_entries(
+        &self,
+        entries: &[peri_acp_types::plugin::CommandEntry],
+    ) -> Vec<peri_acp_types::command::command_route::RouteEntry> {
+        crate::plugin::plugin_route_entries(entries)
+    }
+
+    fn find_marketplace_json(&self, dir: &Path) -> Option<PathBuf> {
+        crate::plugin::marketplace::find_marketplace_json(dir)
     }
 }
 

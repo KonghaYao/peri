@@ -86,12 +86,11 @@ pub(super) async fn close_session(
             ));
         }
     }
-    if let Some(pool) = local.mcp_pool.clone().and_then(|port| {
-        port.downcast_arc::<peri_middlewares::mcp::McpClientPool>()
-            .ok()
-    }) {
+    if let Some(pool) = local.mcp_pool.as_ref() {
         if sessions.contains_key(session_id) {
-            pool.close_workspace_task_scope(session_id).await
+            Arc::clone(pool)
+                .close_workspace_task_scope(session_id)
+                .await
         } else {
             pool.reconcile_closing_workspace_scope(session_id).await
         }

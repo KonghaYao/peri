@@ -91,7 +91,12 @@ objc2-app-kit = { version = "0.3", default-features = false, features = ["std", 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSData"] }
 
-[target.'cfg(not(target_os = "windows"))'.dependencies]
+# 分配器条件化：macOS 用系统分配器，避免 tikv-jemalloc-sys 的 C 编译
+# （本机 clean 构建实测 60.6s 编译单元）；Linux / 其他非 macOS Unix 目标
+# （含 i686-unknown-linux-musl、loongarch64-unknown-linux-musl）保留 jemalloc；
+# Windows 本就没有 allocator crate。此门必须与 src/main.rs 的
+# `#[global_allocator]` 及 src/alloc_config.rs 的 cfg 同步修改。
+[target.'cfg(not(any(target_os = "windows", target_os = "macos")))'.dependencies]
 tikv-jemallocator.workspace = true
 tikv-jemalloc-ctl.workspace = true
 tikv-jemalloc-sys.workspace = true

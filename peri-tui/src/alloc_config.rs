@@ -1,23 +1,33 @@
 //! Allocator tuning for high-churn workloads.
 //!
-//! Using jemalloc with aggressive decay for better fragmentation handling on macOS.
+//! jemalloc is linked only on Linux / other non-macOS Unix targets (target gate
+//! in `peri-tui/Cargo.toml` + `#[global_allocator]` in `src/main.rs`). macOS and
+//! Windows use the system allocator, so every jemalloc-specific entry point
+//! degrades there:
 //!
 //! Public API:
-//! - `init_alloc_conf()` — set env vars before allocator init
-//! - `alloc_collect()` — force aggressive memory reclamation
-//! - `query_stats()` — get allocator stats (RSS + jemalloc allocated)
-//! - `query_breakdown()` — jemalloc allocated/active/resident/metadata/mapped/retained
-//! - `dump_stats()` — print detailed allocator stats to stderr
+//! - `init_alloc_conf()` — jemalloc: set env vars before allocator init;
+//!   system allocator (macOS / Windows): no-op
+//! - `alloc_collect()` — jemalloc: force aggressive memory reclamation;
+//!   system allocator: no-op
+//! - `query_stats()` — get allocator stats (RSS + allocated); on macOS the
+//!   system allocator exposes no allocated counter, so it mirrors RSS
+//! - `query_breakdown()` — jemalloc allocated/active/resident/metadata/mapped/
+//!   retained; `None` without jemalloc
+//! - `dump_stats()` — print detailed allocator stats to stderr (jemalloc only)
 //! - `os_rss_mb()` — OS-level RSS via sysinfo (MiB)
 
 // jemalloc caches global counters at each epoch. Every refresh, including the
 // implicit one in stats_print, must share the snapshot reader's lock.
-#[cfg(not(target_os = "windows"))]
+// Keep this predicate in sync with the target-gated deps in peri-tui/Cargo.toml
+// and the `#[global_allocator]` declaration in src/main.rs.
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 static STATS_SNAPSHOT: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
-/// Allocator stats (RSS from sysinfo + jemalloc allocated).
+/// Allocator stats (RSS from sysinfo + allocator-reported allocated bytes).
 /// The sources are sampled separately. Allocated bytes may be nonresident, so
-/// RSS and allocated do not have a guaranteed ordering.
+/// RSS and allocated do not have a guaranteed ordering. Without jemalloc
+/// (macOS) there is no allocated-bytes counter and the field mirrors RSS.
 #[derive(Debug, Clone, Copy)]
 pub struct AllocStats {
     /// OS 级 RSS（sysinfo 报告，含所有内存，字节）
@@ -28,6 +38,7 @@ pub struct AllocStats {
 
 /// jemalloc 缓存统计（advance epoch 刷新）。
 /// 并发分配/释放时，各内部计数不构成同一时刻的原子快照，不能断言字段间的大小关系。
+/// 仅 jemalloc 后端可读；macOS / Windows 的 `query_breakdown()` 返回 `None`。
 #[derive(Debug, Clone, Copy)]
 pub struct JemallocBreakdown {
     /// 应用实际分配的字节
@@ -45,7 +56,7 @@ pub struct JemallocBreakdown {
 }
 
 /// Set allocator environment variables before initialization.
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub fn init_alloc_conf() {
     if std::env::var("MALLOC_CONF").is_err() {
         unsafe {
@@ -57,11 +68,11 @@ pub fn init_alloc_conf() {
     }
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 pub fn init_alloc_conf() {}
 
 /// Force jemalloc to aggressively reclaim freed memory.
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub fn alloc_collect() {
     let _snapshot = STATS_SNAPSHOT.lock();
     let _ = tikv_jemalloc_ctl::epoch::advance();
@@ -85,35 +96,43 @@ pub fn alloc_collect() {
     let _ = tikv_jemalloc_ctl::epoch::advance();
 }
 
-#[cfg(target_os = "windows")]
+/// System allocator (macOS / Windows): there is no jemalloc arena to purge.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 pub fn alloc_collect() {}
 
 /// Advance jemalloc epoch to refresh cached stats.
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 fn advance_epoch() {
     let _ = tikv_jemalloc_ctl::epoch::advance();
 }
 
-/// Query RSS + jemalloc allocated bytes.
+/// Query RSS + allocator allocated bytes.
 #[cfg(not(target_os = "windows"))]
 pub fn query_stats() -> Option<AllocStats> {
     let current_rss = usize::try_from(process_rss_bytes()?).ok()?;
     Some(stats_with_rss(current_rss))
 }
 
+/// Combine OS RSS with the allocator's allocated-bytes counter. The system
+/// allocator (macOS) exposes no such counter, so the field mirrors RSS there.
 #[cfg(not(target_os = "windows"))]
 fn stats_with_rss(current_rss: usize) -> AllocStats {
-    let _snapshot = STATS_SNAPSHOT.lock();
-    advance_epoch();
-    let current_allocated = tikv_jemalloc_ctl::stats::allocated::read().unwrap_or(current_rss);
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    let current_allocated = {
+        let _snapshot = STATS_SNAPSHOT.lock();
+        advance_epoch();
+        tikv_jemalloc_ctl::stats::allocated::read().unwrap_or(current_rss)
+    };
+    #[cfg(target_os = "macos")]
+    let current_allocated = current_rss;
     AllocStats {
         current_rss,
         current_allocated,
     }
 }
 
-/// Query jemalloc detailed breakdown.
-#[cfg(not(target_os = "windows"))]
+/// Query jemalloc detailed breakdown (jemalloc backend only).
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub fn query_breakdown() -> Option<JemallocBreakdown> {
     let _snapshot = STATS_SNAPSHOT.lock();
     advance_epoch();
@@ -128,7 +147,7 @@ pub fn query_breakdown() -> Option<JemallocBreakdown> {
 }
 
 /// Print jemalloc full stats to stderr via tracing.
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub fn dump_stats() {
     let mut buf = Vec::new();
     {
@@ -163,18 +182,24 @@ fn process_rss_bytes() -> Option<u64> {
     sys.process(pid).map(sysinfo::Process::memory)
 }
 
+// ── System-allocator stubs (macOS / Windows) ───────────────────────────────
+
+/// System allocator (macOS / Windows): no jemalloc breakdown to read.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+pub fn query_breakdown() -> Option<JemallocBreakdown> {
+    None
+}
+
+/// System allocator (macOS / Windows): no jemalloc stats to dump.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+pub fn dump_stats() {}
+
 // ── Windows stubs ──────────────────────────────────────────────────────────
 
 #[cfg(target_os = "windows")]
 pub fn query_stats() -> Option<AllocStats> {
     None
 }
-#[cfg(target_os = "windows")]
-pub fn query_breakdown() -> Option<JemallocBreakdown> {
-    None
-}
-#[cfg(target_os = "windows")]
-pub fn dump_stats() {}
 #[cfg(target_os = "windows")]
 pub fn os_rss_mb() -> Option<u64> {
     None

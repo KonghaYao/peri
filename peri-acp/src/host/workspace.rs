@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use super::{assemble, task_scope, AcpServerConfig};
 use crate::transport::types::AcpError;
+use peri_acp_types::ports::McpBuiltinWorkspaceState;
 use peri_acp_types::session_resources::{BindingRecheck, SessionResourceError};
 use peri_acp_types::thread::ThreadId;
 use peri_acp_types::workspace::ResolvedWorkspace;
@@ -54,29 +55,22 @@ impl SessionEnvironment {
     pub(crate) async fn read_workspace_skill_catalog(
         &self,
     ) -> Result<Vec<peri_acp_types::skills::SkillMetadata>, AcpError> {
-        use peri_acp_types::ports::McpPoolPort as _;
         let Some(pool) = self.cfg.mcp_pool.as_ref() else {
-            return Ok(Vec::new());
-        };
-        let Some(pool) = pool
-            .as_any()
-            .downcast_ref::<peri_middlewares::mcp::McpClientPool>()
-        else {
             return Ok(Vec::new());
         };
         let deadline = peri_time::monotonic_now() + std::time::Duration::from_secs(10);
         loop {
-            if let Some(handle) = pool.get_client("workspace") {
-                if !matches!(
-                    handle.status,
-                    peri_middlewares::mcp::ClientStatus::Connected
-                ) {
+            match pool.builtin_workspace_state() {
+                McpBuiltinWorkspaceState::Connected => {
+                    return pool
+                        .read_builtin_workspace_skills()
+                        .await
+                        .map_err(|error| AcpError::new(-32603, error));
+                }
+                McpBuiltinWorkspaceState::Unavailable | McpBuiltinWorkspaceState::NotConnected => {
                     return Ok(Vec::new());
                 }
-                return pool
-                    .read_builtin_workspace_skills()
-                    .await
-                    .map_err(|error| AcpError::new(-32603, error));
+                McpBuiltinWorkspaceState::Absent => {}
             }
             let phase = pool.snapshot()["initPhase"]
                 .as_str()
@@ -108,30 +102,23 @@ impl SessionEnvironment {
     pub(crate) async fn read_workspace_instructions(
         &self,
     ) -> Result<crate::session::executor::FrozenInstructions, AcpError> {
-        use peri_acp_types::ports::McpPoolPort as _;
         let Some(pool) = self.cfg.mcp_pool.as_ref() else {
-            return Ok(Default::default());
-        };
-        let Some(pool) = pool
-            .as_any()
-            .downcast_ref::<peri_middlewares::mcp::McpClientPool>()
-        else {
             return Ok(Default::default());
         };
         let deadline = peri_time::monotonic_now() + std::time::Duration::from_secs(10);
         loop {
-            if let Some(handle) = pool.get_client("workspace") {
-                if !matches!(
-                    handle.status,
-                    peri_middlewares::mcp::ClientStatus::Connected
-                ) {
+            match pool.builtin_workspace_state() {
+                McpBuiltinWorkspaceState::Connected => {
+                    let (main, local) = pool
+                        .read_builtin_workspace_instructions()
+                        .await
+                        .map_err(|error| AcpError::new(-32603, error))?;
+                    return Ok(crate::session::executor::FrozenInstructions { main, local });
+                }
+                McpBuiltinWorkspaceState::Unavailable | McpBuiltinWorkspaceState::NotConnected => {
                     return Ok(Default::default());
                 }
-                let (main, local) = pool
-                    .read_builtin_workspace_instructions()
-                    .await
-                    .map_err(|error| AcpError::new(-32603, error))?;
-                return Ok(crate::session::executor::FrozenInstructions { main, local });
+                McpBuiltinWorkspaceState::Absent => {}
             }
             let phase = pool.snapshot()["initPhase"]
                 .as_str()
@@ -384,29 +371,22 @@ impl SessionEnvironment {
         &self,
         enabled_sections: &std::collections::HashSet<String>,
     ) -> Result<std::collections::HashMap<String, String>, AcpError> {
-        use peri_acp_types::ports::McpPoolPort as _;
         let Some(pool) = self.cfg.mcp_pool.as_ref() else {
-            return Ok(Default::default());
-        };
-        let Some(pool) = pool
-            .as_any()
-            .downcast_ref::<peri_middlewares::mcp::McpClientPool>()
-        else {
             return Ok(Default::default());
         };
         let deadline = peri_time::monotonic_now() + std::time::Duration::from_secs(10);
         loop {
-            if let Some(handle) = pool.get_client("workspace") {
-                if !matches!(
-                    handle.status,
-                    peri_middlewares::mcp::ClientStatus::Connected
-                ) {
+            match pool.builtin_workspace_state() {
+                McpBuiltinWorkspaceState::Connected => {
+                    return pool
+                        .read_builtin_workspace_meta(enabled_sections)
+                        .await
+                        .map_err(|error| AcpError::new(-32603, error));
+                }
+                McpBuiltinWorkspaceState::Unavailable | McpBuiltinWorkspaceState::NotConnected => {
                     return Ok(Default::default());
                 }
-                return pool
-                    .read_builtin_workspace_meta(enabled_sections)
-                    .await
-                    .map_err(|error| AcpError::new(-32603, error));
+                McpBuiltinWorkspaceState::Absent => {}
             }
             // 池初始化已收口而 workspace 句柄仍不存在（实例未装配 / 被关闭 / 非 bare
             // 配置类另有故障）：不再等待，按覆盖不可得处理。

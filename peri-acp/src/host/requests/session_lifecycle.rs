@@ -831,9 +831,6 @@ pub(super) fn prewarm_session_mcp_discovery(cfg: &AcpServerConfig, session_id: &
     let Some(pool) = cfg.mcp_pool.clone() else {
         return;
     };
-    let Ok(pool) = pool.downcast_arc::<peri_middlewares::mcp::McpClientPool>() else {
-        return;
-    };
     let Some(registry) = cfg.session_manager.mcp_skill_registry_for(session_id) else {
         return;
     };
@@ -848,18 +845,7 @@ pub(super) fn prewarm_session_mcp_discovery(cfg: &AcpServerConfig, session_id: &
     else {
         return;
     };
-    peri_middlewares::mcp::middleware::attach_connection_notifier(
-        &pool,
-        Some(&registry),
-        Some(&command_registry),
-        &cancel,
-        None,
-    );
-    peri_middlewares::mcp::middleware::prewarm_discovery(
-        &pool,
-        &registry,
-        &command_registry,
-        session_id,
-        &cancel,
-    );
+    pool.clone()
+        .attach_connection_notifier(Some(&registry), Some(&command_registry), &cancel);
+    pool.prewarm_discovery(&registry, &command_registry, session_id, &cancel);
 }

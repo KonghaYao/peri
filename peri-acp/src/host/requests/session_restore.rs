@@ -546,10 +546,7 @@ async fn reopen_workspace_scope_after_restore(
     let state = sessions.get(id).expect("prepared session");
     let environment = state.environment.clone();
     let local = environment.as_ref().map(|env| &env.cfg).unwrap_or(cfg);
-    let pool = local.mcp_pool.clone().and_then(|port| {
-        port.downcast_arc::<peri_middlewares::mcp::McpClientPool>()
-            .ok()
-    });
+    let pool = local.mcp_pool.clone();
     let scope_result = async {
         if let Some(pool) = pool {
             pool.open_workspace_task_scope(id).await?;
