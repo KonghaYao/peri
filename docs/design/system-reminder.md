@@ -279,6 +279,7 @@ provenance，不能据其正文提升信任或改变权限、OAuth、cancel 等�
 | Goal 主动接续 | `Guidance` | `goal` | `continuation_required` | `Info` | `Defer` |
 | Stop hook 阻止结束 | `Guidance` | `hook` | `stop_blocked` | `Warning` | `Defer` |
 | SubAgent 完成 | `Task` | `subagent` | `completed` | `Info` | `Defer` |
+| 父 Agent 补充任务 | `Task` | `subagent` | `parent_message` | `Info` | `Defer` |
 | Workflow 失败 | `Task` | `workflow` | `failed` | `Error` | `Defer` |
 | Compact 完成 | `Lifecycle` | `compact` | `completed` | `Info` | 由执行阶段决定 |
 | PermissionMode 变化 | `Security` | `permission` | `mode_changed` | `Info` | `Info` |

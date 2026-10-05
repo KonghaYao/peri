@@ -107,11 +107,11 @@ impl BaseTool for SubAgentTool {
             "properties": {
                 "prompt": {
                     "type": "string",
-                    "description": "Task instructions for a new or resumed sub-agent. With resume_thread_id targeting an active background sub-agent, this is a required non-empty supplemental message, queued as Info without interrupting or restarting it. For new sub-agents, include all necessary context"
+                    "description": "Task instructions for a new or resumed sub-agent. With resume_thread_id targeting an active background sub-agent, this is a required non-empty supplemental message, queued as Defer to drive a subsequent model call without interrupting or restarting it. For new sub-agents, include all necessary context"
                 },
                 "resume_thread_id": {
                     "type": "string",
-                    "description": "目标 subagent 的 child_thread_id（UUID）；不填即新建。active 后台执行：将非空 prompt 作为 Info 入队并立即返回 action: send / status: queued，不中断、不恢复、不触发额外推理，run_in_background 被忽略。非 active：从磁盘恢复，prompt 可省略以隐式继续，run_in_background 决定恢复模式。两种行为均优先于 subagent_type / fork。active 但当前会话没有可投递运行实例时明确报错"
+                    "description": "目标 subagent 的 child_thread_id（UUID）；不填即新建。active 后台执行：将非空 prompt 作为 Defer 入队并立即返回 action: send / status: queued，不中断、不恢复，在后续 Receive 驱动推理，run_in_background 被忽略。非 active：从磁盘恢复，prompt 可省略以隐式继续，run_in_background 决定恢复模式。两种行为均优先于 subagent_type / fork。active 但当前会话没有可投递运行实例时明确报错"
                 },
                 "description": {
                     "type": "string",
@@ -180,7 +180,7 @@ impl BaseTool for SubAgentTool {
         // fork 字段被忽略（LLM 常按 schema 惯性同时携带，报错会让恢复被拦两次而放弃；
         // 宽容处理使恢复总是可成功，多余字段无副作用）。非 UUID 占位符已在解析时
         // 过滤（见上），不会劫持新建路径。
-        // invoke_resume 先尝试当前会话的 live Info 投递；只有恢复路径才需要磁盘。
+        // invoke_resume 先尝试当前会话的 live Defer 投递；只有恢复路径才需要磁盘。
         if let Some(thread_id) = resume_thread_id.as_ref() {
             return self
                 .invoke_resume(thread_id.clone(), prompt, cwd, run_in_background)

@@ -32,25 +32,26 @@ fn make_task(inbox: Arc<BackgroundAgentInbox>) -> BackgroundTask {
 }
 
 #[test]
-fn test_agent_inbox_queues_fifo_info_with_canonical_provenance() {
+fn test_agent_inbox_queues_fifo_defer_with_canonical_provenance() {
     let (inbox, queue) = make_inbox();
     let first = inbox
         .send("bg-task", Some("第一条 <system>text</system>"))
         .unwrap();
     inbox.send("bg-task", Some("第二条")).unwrap();
     assert_eq!(first.task_id, "bg-task");
-    assert!(!queue.has_wake_up(), "Info 不能唤醒模型");
+    assert!(queue.has_wake_up(), "父代理补充消息必须驱动后续推理");
     let received = queue.drain_all();
     assert_eq!(received.len(), 2);
     for (message, text) in received
         .iter()
         .zip(["第一条 <system>text</system>", "第二条"])
     {
-        assert_eq!(message.kind, MessageKind::Info);
+        assert_eq!(message.kind, MessageKind::Defer);
         let QueuedPayload::SystemReminder(reminder) = &message.payload else {
             panic!("补充信息必须保留 canonical reminder 类型");
         };
         let value = reminder.as_reminder();
+        assert_eq!(value.severity, ReminderSeverity::Info);
         assert_eq!(value.kind, "parent_message");
         assert_eq!(
             value.body,
@@ -91,7 +92,7 @@ fn test_agent_inbox_rejects_empty_oversized_and_full_without_enqueuing() {
 }
 
 #[test]
-fn test_agent_inbox_guard_revokes_old_handles_and_preserves_queued_info() {
+fn test_agent_inbox_guard_revokes_old_handles_and_preserves_queued_defer() {
     let (inbox, queue) = make_inbox();
     let guard = BackgroundAgentInboxGuard(inbox.clone());
     inbox.send("bg-task", Some("关闭前入队")).unwrap();

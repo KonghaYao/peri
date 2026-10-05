@@ -8,6 +8,25 @@ use peri_acp_types::system_reminder::{
 
 #[tokio::test]
 async fn terminal_shell_receipt_wakes_idle_inbox_as_defer() {
+    assert_terminal_receipt_wakes(MessageSource::ShellComplete, ReminderSeverity::Info).await;
+}
+
+#[tokio::test]
+async fn terminal_shell_error_wakes_idle_inbox_as_defer() {
+    assert_terminal_receipt_wakes(MessageSource::ShellComplete, ReminderSeverity::Error).await;
+}
+
+#[tokio::test]
+async fn terminal_subagent_receipt_wakes_idle_inbox_as_defer() {
+    assert_terminal_receipt_wakes(MessageSource::SubAgentComplete, ReminderSeverity::Info).await;
+}
+
+#[tokio::test]
+async fn terminal_subagent_error_wakes_idle_inbox_as_defer() {
+    assert_terminal_receipt_wakes(MessageSource::SubAgentComplete, ReminderSeverity::Error).await;
+}
+
+async fn assert_terminal_receipt_wakes(source: MessageSource, severity: ReminderSeverity) {
     let bound = TestSession::open().await;
     let transcript = Arc::new(parking_lot::RwLock::new(
         MessageTranscript::new().with_persistence(bound.resources(), bound.thread_id()),
@@ -21,12 +40,20 @@ async fn terminal_shell_receipt_wakes_idle_inbox_as_defer() {
         .construct(SystemReminder {
             version: SYSTEM_REMINDER_VERSION,
             category: ReminderCategory::Task,
-            source: ReminderSource("shell".into()),
-            kind: "completed".into(),
-            severity: ReminderSeverity::Info,
+            source: ReminderSource(if source == MessageSource::ShellComplete {
+                "shell".into()
+            } else {
+                "subagent".into()
+            }),
+            kind: if severity == ReminderSeverity::Error {
+                "failed".into()
+            } else {
+                "completed".into()
+            },
+            severity,
             delivery: ReminderDelivery::Configurable,
             audiences: ReminderAudiences(vec![ReminderAudience::Model]),
-            body: "shell done".into(),
+            body: "task finished".into(),
             summary: None,
             metadata: serde_json::json!({}),
         })
@@ -43,7 +70,7 @@ async fn terminal_shell_receipt_wakes_idle_inbox_as_defer() {
 
     let delivery_id = peri_acp_types::messages::MessageId::new();
     delivery
-        .deliver(delivery_id, &reminder, MessageSource::ShellComplete)
+        .deliver(delivery_id, &reminder, source.clone())
         .await
         .unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(1), waiting)
@@ -53,11 +80,11 @@ async fn terminal_shell_receipt_wakes_idle_inbox_as_defer() {
     let messages = queue.drain_all();
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0].kind, MessageKind::Defer);
-    assert_eq!(messages[0].source, MessageSource::ShellComplete);
+    assert_eq!(messages[0].source, source);
     assert_eq!(messages[0].delivery_id, Some(delivery_id));
     assert!(matches!(
         messages[0].payload,
         QueuedPayload::SystemReminder(_)
     ));
-    assert_eq!(reminder.as_reminder().severity, ReminderSeverity::Info);
+    assert_eq!(reminder.as_reminder().severity, severity);
 }

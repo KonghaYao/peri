@@ -236,8 +236,9 @@ async fn test_active_message_reaches_next_model_request_without_resume() {
     );
 }
 
+/// [回归测试] 父代理在末轮推理期间发送的补充任务不能因 Info 调度被静默跳过。
 #[tokio::test]
-async fn test_active_message_background_fork_info_does_not_extend_final_answer() {
+async fn test_active_message_background_fork_defer_extends_final_answer() {
     let mut fixture = MessageFixture::new(Reasoning::with_answer("", "finished")).await;
     let id = fixture.start(serde_json::json!({"fork": true})).await;
     let receipt = fixture
@@ -248,9 +249,14 @@ async fn test_active_message_background_fork_info_does_not_extend_final_answer()
     fixture.finish().await;
     assert_eq!(
         fixture.calls.load(Ordering::SeqCst),
-        1,
-        "末轮 Info 不能额外触发模型"
+        2,
+        "末轮收到 Defer 必须再次推理消费补充任务"
     );
+    let next = fixture.snapshots.recv().await.unwrap();
+    assert!(next
+        .iter()
+        .any(|message| message.content().contains("supplement-one")));
+    assert_eq!(fixture.factories.load(Ordering::SeqCst), 1);
     assert!(fixture
         .manager
         .send_subagent_message(&id, Some("late"))
@@ -259,7 +265,7 @@ async fn test_active_message_background_fork_info_does_not_extend_final_answer()
 }
 
 #[tokio::test]
-async fn test_active_message_resumed_background_execution_accepts_info() {
+async fn test_active_message_resumed_background_execution_accepts_defer() {
     let mut fixture = MessageFixture::new(Reasoning::with_tools(
         "",
         vec![ToolCall::new("probe", "Probe", serde_json::json!({}))],

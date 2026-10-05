@@ -1,4 +1,4 @@
-//! SubAgent 继续交互（`resume_thread_id`）：active 发 Info，非 active 恢复执行。
+//! SubAgent 继续交互（`resume_thread_id`）：active 发 Defer，非 active 恢复执行。
 //!
 //! 语义（issue 决策）：主 agent 凭中断/错误/bg 通知文本携带的 `child_thread_id`
 //! 恢复被中断 subagent——从磁盘 thread 恢复现场继续执行，不创建新 subagent。
@@ -23,7 +23,7 @@ use peri_agent::session::subagent::{
 use peri_agent::tools::BaseTool;
 
 impl super::SubAgentTool {
-    /// 向本会话 active 后台 subagent 发 Info，或恢复非 active thread。
+    /// 向本会话 active 后台 subagent 发 Defer，或恢复非 active thread。
     ///
     /// 前置校验（define.rs 已做）：有效 resume_thread_id 优先于 fork / subagent_type，
     /// 本方法先经 TaskManager 投递 live 消息；恢复时 load_meta 取 title 决定工具集，
@@ -48,9 +48,9 @@ impl super::SubAgentTool {
             if let Some(receipt) = manager.send_subagent_message(&thread_id, prompt.as_deref())? {
                 return Ok(format!(
                     "action: send\nstatus: queued\nchild_thread_id: {thread_id}\ntask_id: {}\n\
-                     Supplemental prompt queued as Info for the active background sub-agent. \
+                     Supplemental prompt queued as Defer for the active background sub-agent. \
                      No execution was started or resumed. This does not interrupt the current \
-                     model/tool call or trigger another model call. Queued does not mean read: \
+                     model/tool call; it drives a subsequent model call at Receive. Queued does not mean read: \
                      the agent may finish before the model sees this message.",
                     receipt.task_id,
                 ));
