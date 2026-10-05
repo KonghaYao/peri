@@ -1,5 +1,16 @@
 use super::*;
 
+#[test]
+fn powershell_missing_command_requires_its_specific_error_id_and_nonzero_exit() {
+    let output = "gti : The term 'gti' is not recognized as the name of a cmdlet\n    + FullyQualifiedErrorId : CommandNotFoundException\n";
+    let hint = command_not_found_hint("& gti status", output, Some(1)).unwrap();
+    assert!(hint.contains("Command `gti` not found in PATH"), "{hint}");
+    assert!(command_not_found_hint("gti", output, Some(0)).is_none());
+    assert!(command_not_found_hint("gti", output, None).is_none());
+    let ordinary_error = output.replace("CommandNotFoundException", "ItemNotFoundException");
+    assert!(command_not_found_hint("gti", &ordinary_error, Some(1)).is_none());
+}
+
 /// [触发] exit 127 + `command not found`：有相似候选时给出 Did you mean。
 #[test]
 fn test_hint_suggests_similar_candidate() {

@@ -96,7 +96,7 @@ Skills 不是工具——它们通过 System Prompt 注入行为指令，不走�
 - **并发执行**：全部工具同时启动，互不等待。
 - **AskUserQuestion**：阻断自身等待用户输入，其他工具照常并发。用户回答作为 ToolResult 一同提交。
 - **失败诊断归属工具**：工具失败时的恢复指引（recovery）由工具在失败点自行生成，`ToolFailure { recovery, detail }` 经投影后成为模型可见文本；宿主不再对任意错误文本事后匹配建议（MCP 迁移范式：能力随工具走）。
-  - **可行动指引**：工具理解自身失败原因，直接产出可行动文本——路径不存在时给出同目录 did-you-mean 候选（`mcp-packages/workspace` 的 `path_hints`）、命令未找到（exit 127）时给出 PATH 候选或环境类兜底（`shell_hints`）、Glob/正则语法错误时给出模式写法教学、SubAgent 名称拼错时给出模糊匹配候选。
+  - **可行动指引**：工具理解自身失败原因，直接产出可行动文本——路径不存在时给出同目录 did-you-mean 候选（`mcp-packages/workspace` 的 `path_hints`）、命令未找到（POSIX exit 127 + 缺失命令文案，或 PowerShell exit 1 + `CommandNotFoundException` 错误 ID）时给出 PATH 候选或环境类兜底（`shell_hints`）、Glob/正则语法错误时给出模式写法教学、SubAgent 名称拼错时给出模糊匹配候选。
   - **安全边界**：无法归类的失败只暴露受限的通用 recovery 文本，不泄露路径、环境变量或凭据（`mcp-packages/common/src/result_mapping.rs`）。
 - **原子提交**：一轮工具调用的提交是不可分割的整体。
   - **事务范围**：本轮 AI 消息 + 全部 ToolResult。

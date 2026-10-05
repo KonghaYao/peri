@@ -1,4 +1,4 @@
-//! `command not found`（exit 127）的模型诊断：工具在执行点选择恢复文本，
+//! `command not found` 的模型诊断：工具在执行点选择恢复文本，
 //! 从 PATH 扫描条目名做模糊匹配给出 did-you-mean 候选；
 //! 无合适候选时不硬凑候选，给出环境类兜底诊断。
 
@@ -16,12 +16,18 @@ pub(crate) fn command_not_found_hint(
     output: &str,
     exit_code: Option<i32>,
 ) -> Option<String> {
-    // 识别信号：退出码 127 + 输出含 shell 的缺失命令消息
-    if exit_code != Some(127) {
-        return None;
-    }
     let lower = output.to_lowercase();
-    if !lower.contains("command not found") && !lower.contains("not found in path") {
+    let missing_command = match exit_code {
+        Some(127) => lower.contains("command not found") || lower.contains("not found in path"),
+        Some(1) => output.lines().any(|line| {
+            line.split_once(':').is_some_and(|(label, value)| {
+                label.trim().trim_start_matches('+').trim() == "FullyQualifiedErrorId"
+                    && value.trim() == "CommandNotFoundException"
+            })
+        }),
+        _ => false,
+    };
+    if !missing_command {
         return None;
     }
     let name = extract_missing_command(output, command);
@@ -65,6 +71,11 @@ fn build_hint(name: &str, candidates: &[String]) -> String {
 fn extract_missing_command(output: &str, command: &str) -> String {
     for line in output.lines() {
         let lower = line.to_lowercase();
+        if lower.contains("not recognized") {
+            if let Some((name, _)) = line.split_once(" : ") {
+                return trim_quotes(name.trim()).to_string();
+            }
+        }
         // zsh 形态：`<...>command not found: NAME`
         const AFTER: &str = "command not found:";
         if let Some(idx) = lower.find(AFTER) {

@@ -204,7 +204,7 @@ async fn test_bash_group_cleanup_settles_descendant_after_parent_exit() {
 
 // ── command not found 诊断（issue: bash 错误原因定位）────────────────────────
 
-/// 命令不存在（exit 127）：输出尾部附带 PATH 候选或环境类兜底诊断，
+/// 命令不存在：输出尾部附带 PATH 候选或环境类兜底诊断，
 /// 供模型直接采取行动（换命令名 / 检查 PATH 与虚拟环境）。
 #[tokio::test]
 async fn test_bash_command_not_found_appends_hint() {
@@ -216,7 +216,11 @@ async fn test_bash_command_not_found_appends_hint() {
         )
         .await
         .unwrap();
-    assert!(result.contains("[Exit code: 127]"), "{result}");
+    let expected_exit = if cfg!(windows) { 1 } else { 127 };
+    assert!(
+        result.contains(&format!("[Exit code: {expected_exit}]")),
+        "{result}"
+    );
     assert!(result.contains("not found in PATH"), "{result}");
     assert!(
         result.contains("xx_q1w2e3_not_a_real_cmd_xx"),

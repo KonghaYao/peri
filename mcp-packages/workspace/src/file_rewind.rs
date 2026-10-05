@@ -150,12 +150,18 @@ async fn head_content(root: &Path, relative: &Path) -> Result<Option<String>, Mc
     if !repo.status.success() {
         return Ok(None);
     }
-    let repo_root = PathBuf::from(String::from_utf8_lossy(&repo.stdout).trim());
+    let repo_root =
+        tokio::fs::canonicalize(PathBuf::from(String::from_utf8_lossy(&repo.stdout).trim()))
+            .await
+            .map_err(|_| invalid("Git repository root unavailable"))?;
     let repo_path = root
         .join(relative)
         .strip_prefix(&repo_root)
         .map_err(|_| invalid("Workspace outside Git repository"))?
-        .to_path_buf();
+        .iter()
+        .map(|part| part.to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/");
     let tracked = tokio::process::Command::new("git")
         .args(["ls-files", "--error-unmatch", "--"])
         .arg(&repo_path)
@@ -166,7 +172,7 @@ async fn head_content(root: &Path, relative: &Path) -> Result<Option<String>, Mc
     if !tracked.status.success() {
         return Ok(None);
     }
-    let spec = format!("HEAD:{}", repo_path.to_string_lossy());
+    let spec = format!("HEAD:{repo_path}");
     let output = tokio::process::Command::new("git")
         .args(["show", &spec])
         .current_dir(repo_root)

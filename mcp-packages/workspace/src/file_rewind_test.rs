@@ -112,9 +112,10 @@ async fn test_rewind_write_missing_history_content_refuses_without_mutation() {
 async fn test_rewind_tracked_write_restores_workspace_head() {
     let remote = tempfile::tempdir().unwrap();
     let root = remote.path();
-    for args in [vec!["init", "--quiet"], vec!["add", "tracked.txt"]] {
+    tokio::fs::create_dir(root.join("nested")).await.unwrap();
+    for args in [vec!["init", "--quiet"], vec!["add", "nested/tracked.txt"]] {
         if args[0] == "add" {
-            tokio::fs::write(root.join("tracked.txt"), "original")
+            tokio::fs::write(root.join("nested/tracked.txt"), "original")
                 .await
                 .unwrap();
         }
@@ -146,16 +147,16 @@ async fn test_rewind_tracked_write_restores_workspace_head() {
         .await
         .unwrap();
     assert!(status.success());
-    tokio::fs::write(root.join("tracked.txt"), "replacement")
+    tokio::fs::write(root.join("nested/tracked.txt"), "replacement")
         .await
         .unwrap();
     let changes =
-        serde_json::json!([{"kind":"write","path":"tracked.txt","content":"replacement"}]);
+        serde_json::json!([{"kind":"write","path":"nested/tracked.txt","content":"replacement"}]);
     rewind_files(root.to_str().unwrap(), request(changes))
         .await
         .unwrap();
     assert_eq!(
-        tokio::fs::read_to_string(root.join("tracked.txt"))
+        tokio::fs::read_to_string(root.join("nested/tracked.txt"))
             .await
             .unwrap(),
         "original"
