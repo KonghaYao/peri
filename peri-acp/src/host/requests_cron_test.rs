@@ -119,13 +119,11 @@ async fn restricted_deployment_omits_local_optional_capabilities_in_session() {
         builtin_mcp: false,
         stdio_mcp: false,
         cron: false,
-        lsp: false,
         plugins: false,
         settings_hooks: false,
     };
     let cfg = deployment_with_capabilities(&tmp, true, capabilities).await;
     assert!(cfg.cron_scheduler.is_none());
-    assert!(cfg.lsp_pool.is_none());
     assert!(cfg.hook_groups.is_empty());
     assert_eq!(
         cfg.workspace_assembly.as_ref().unwrap().capabilities,
@@ -142,7 +140,6 @@ async fn restricted_deployment_omits_local_optional_capabilities_in_session() {
     let id = new_session(&cfg, &mut sessions, &transport, &cwd).await;
     let env = sessions[&id].environment.clone().unwrap();
     assert!(env.cfg.cron_scheduler.is_none());
-    assert!(env.cfg.lsp_pool.is_none());
     assert!(env.cfg.hook_groups.is_empty());
     assert!(env.cfg.plugin_loaded.is_empty());
 
@@ -180,7 +177,7 @@ async fn restricted_deployment_omits_local_optional_capabilities_in_session() {
         .iter()
         .all(|tool| !tool.starts_with("mcp__")));
     let system = model.first_request_system.lock().clone().unwrap();
-    for unavailable in ["mcp__workspace__", "mcp__cron__", "mcp__lsp__"] {
+    for unavailable in ["mcp__workspace__", "mcp__cron__"] {
         assert!(
             !system.contains(unavailable),
             "unavailable tool in system prompt: {unavailable}; context: {:?}",

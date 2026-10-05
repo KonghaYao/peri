@@ -2626,7 +2626,7 @@
                   ThreadStore → SQLite
                 </text>
                 <text class="node-sub" x="56" y="575">
-                  配置 / LSP / Workflow 门面
+                  配置 / Workflow 门面
                 </text>
                 <text class="node-code" x="56" y="596">peri-resources</text>
               </g>
@@ -3162,7 +3162,7 @@
           <article class="card">
             <h3>Resources 提供访问门面</h3>
             <p>
-              配置与 ThreadStore 等资源经统一入口打开，LSP / Workflow
+              配置与 ThreadStore 等资源经统一入口打开，Workflow
               暴露资源能力。资源通道归属、实际实例持有与业务决策不是同一件事。
             </p>
             <a href="../peri-resources/src/context.rs">context.rs ↗</a>
@@ -3751,7 +3751,7 @@
           code: "peri-resources",
           summary: "资源访问入口与存储实现，不等于所有外部能力都在此实现。",
           owns: "SqliteThreadStore 生产 pool，配置和资源门面；由部署装配注入。",
-          does: "打开资源，提供 ThreadStore 和配置、LSP、Workflow 的访问出口。",
+          does: "打开资源，提供 ThreadStore 和配置、Workflow 的访问出口。",
           not: "不裁决 RCRA；MCP pool 实际实现仍在 middlewares，不能把它移到理想框图里。",
           link: "Agent Transcript 及 ACP 会话生命周期使用 ThreadStore；trait 在 peri-acp-types。",
           source: "../peri-resources/src/context.rs",

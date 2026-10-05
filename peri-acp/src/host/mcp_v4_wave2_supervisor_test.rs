@@ -128,22 +128,15 @@ async fn reconnect_has_single_tick_driver() {
 // ── 用例 10：生命周期矩阵（§8 第 15 行 / H09 / V 子计划 `[W2 ... lifecycle]`）─────
 
 /// 主 plan §8 第 15 行（H09 / V-04 / R23 / R25 / A11 / A22 / A24）的收口断言：
-/// 五实例 × {reconnect, close} + host shutdown 的**对象与计数矩阵**，逐格记录。
+/// 四实例 × {reconnect, close} + host shutdown 的**对象与计数矩阵**，逐格记录。
 ///
 /// 每格判据（互不依赖，缺一即红）：
 /// - **reconnect**：句柄换成新代对象（旧对象在比较时仍被本用例持有 ⇒ `Arc::ptr_eq` 为假
-///   不是地址复用）、实例重新 ready、组合根状态不变（cron 任务表条数、宿主 LSP pool 的
-///   `shutdown` 调用计数仍为 0）；
+///   不是地址复用）、实例重新 ready、组合根状态不变（cron 任务表条数仍为 1）；
 /// - **close**（`remove_server`）：该实例句柄消失、工具面空、面板不再有该行，而**组合根
-///   状态保留**（cron 任务表仍在、共享 LSP pool 未被关闭、尚未处理的同 pool 实例仍 ready）；
+///   状态保留**（cron 任务表仍在、尚未处理的同 pool 实例仍 ready）；
 ///   cron 行额外取「到期任务在 >2× interval 内零触发」（代监督者已 cancel + join）；
-/// - **host shutdown**：`shutdown_host` 收敛为 `Complete`，且**只有它**关共享 LSP pool
-///   （观察点恰一次 + 终态），session 表清空。
-///
-/// 边界（报告登记）：`cfg.lsp_pool` 的观察点是**替身**（与用例 1 同款「只换被观察对象，
-/// 不换消费方代码路径」）。真实 `LspServerPool` 在「从未有 client 启动」时没有可读的关闭
-/// 状态（`has_servers()` 由配置派生；`ready_for` 对未启动的 server 恒假），因此
-/// 「instance close 不关真实 host pool」以端口调用计数取证，不以真实池内部状态取证。
+/// - **host shutdown**：`shutdown_host` 收敛为 `Complete`，session 表清空。
 #[cfg(not(windows))]
 #[tokio::test]
 #[serial]
@@ -167,9 +160,6 @@ async fn lifecycle_state_matrix() {
         _owner: mut mcp_owner,
         session_tasks: _session_tasks,
     } = fixture;
-    // 观察点替换：宿主唯一 LSP pool 换成 recording 替身（`shutdown_host` 的消费路径不变）。
-    let recorder = Arc::new(RecordingHostPool::new());
-    cfg.lsp_pool = Some(Arc::clone(&recorder) as Arc<dyn LspPoolPort>);
 
     let transport = idle_transport();
     let mut sessions = HashMap::new();
@@ -182,22 +172,9 @@ async fn lifecycle_state_matrix() {
     )
     .await
     .expect("session/new 必须成功");
-    let session_id = created["sessionId"]
-        .as_str()
-        .expect("sessionId")
-        .to_string();
-    // 前置：矩阵开始前投影面完整（五个实例都 ready、都投影宿主唯一 LSP pool）。
     assert!(
-        sessions
-            .get(&session_id)
-            .expect("session state")
-            .lsp_pool
-            .as_ref()
-            .is_some_and(|pool| Arc::ptr_eq(
-                pool,
-                &(Arc::clone(&recorder) as Arc<dyn LspPoolPort>)
-            )),
-        "session 必须投影宿主唯一 pool（矩阵的 lsp 行前提）"
+        created["sessionId"].is_string(),
+        "session/new 必须回 sessionId: {created}"
     );
 
     for (index, (instance, expected)) in WAVE2_INSTANCES.iter().enumerate() {
@@ -218,11 +195,6 @@ async fn lifecycle_state_matrix() {
             "{instance} reconnect 必须换新代对象（旧对象仍被本用例持有 ⇒ 不是地址复用）"
         );
         assert_instance_ready(&pool, instance, expected);
-        assert_eq!(
-            recorder.shutdown_calls(),
-            0,
-            "reconnect（{instance}）不得关闭宿主共享 LSP pool"
-        );
         assert_eq!(
             scheduler.lock().list_tasks().len(),
             1,
@@ -250,11 +222,6 @@ async fn lifecycle_state_matrix() {
                 .iter()
                 .any(|row| row.name == *instance),
             "{instance} close 后面板不得再有该行（含 config-only 行）"
-        );
-        assert_eq!(
-            recorder.shutdown_calls(),
-            0,
-            "instance close（{instance}）不得关闭宿主共享 LSP pool（共享池只在 host shutdown 关闭）"
         );
         assert_eq!(
             scheduler.lock().list_tasks().len(),
@@ -298,13 +265,12 @@ async fn lifecycle_state_matrix() {
         };
 
         println!(
-            "[W2 isolation/lifecycle/off] instance={instance} link=connected→absent generation={generation} task={task_cell} state=kept(scheduler_tasks={},lsp_pool_shutdown={}) count=同 pool 未处理实例仍 ready={siblings_ready:?}",
-            scheduler.lock().list_tasks().len(),
-            recorder.shutdown_calls()
+            "[W2 isolation/lifecycle/off] instance={instance} link=connected→absent generation={generation} task={task_cell} state=kept(scheduler_tasks={}) count=同 pool 未处理实例仍 ready={siblings_ready:?}",
+            scheduler.lock().list_tasks().len()
         );
     }
 
-    // ── 列 3：host shutdown（唯一关共享 LSP pool 的点）────────────────────────
+    // ── 列 3：host shutdown ──────────────────────────────────────────────────
     let mut task_owner = cfg.host_task_owner.take().expect("宿主 task owner");
     let shared: SharedSessions = Arc::new(tokio::sync::Mutex::new(sessions));
     let prompt_locks: PromptLocks = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
@@ -335,27 +301,12 @@ async fn lifecycle_state_matrix() {
         ),
         "host shutdown 必须收敛（session/pool/task 全部结算）: {report:?}"
     );
-    assert_eq!(
-        recorder.shutdown_calls(),
-        1,
-        "host shutdown 必须对唯一 host pool 恰调用一次 shutdown（实例 close/reconnect 各列均为 0）"
-    );
-    assert!(
-        recorder.is_closed(),
-        "host shutdown 后共享 LSP pool 必须处于终态（language server 全部关闭）"
-    );
-    assert!(
-        !recorder.ready_for(Path::new("w2-lifecycle.w2probe")),
-        "关闭后的 pool 不得再报 ready"
-    );
     assert!(
         shared.lock().await.is_empty(),
         "host shutdown 后 session 表必须清空"
     );
     println!(
-        "[W2 isolation/lifecycle/off] host_shutdown={report:?} lsp_pool_shutdown={} closed={} sessions=0；五实例 close 后组合根 cron 任务表 = {} 条（实例生命周期不销毁组合根状态）",
-        recorder.shutdown_calls(),
-        recorder.is_closed(),
+        "[W2 isolation/lifecycle/off] host_shutdown={report:?} sessions=0；四实例 close 后组合根 cron 任务表 = {} 条（实例生命周期不销毁组合根状态）",
         scheduler.lock().list_tasks().len()
     );
 }

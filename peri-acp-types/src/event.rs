@@ -714,12 +714,6 @@ pub enum ExecutorEvent {
     },
     /// Todo 列表更新
     TodoUpdate(Vec<TodoEntry>),
-    /// LSP 诊断更新
-    LspDiagnostics {
-        errors: usize,
-        warnings: usize,
-        files_with_errors: usize,
-    },
 
     /// 后台 agent 工具调用进度通知（轻量级，仅用于 TUI bg_agent_bar 实时计数）
     BgToolStep {

@@ -1,6 +1,9 @@
 # LSP 能力下沉至 LSP MCP 裁决
 
 > 日期：2026-09-29。状态：已裁决并实施；不 commit。
+>
+> 2026-10-05 更新：LSP 功能已完全删除（crate `peri-mcp-lsp`、`LspSyncMiddleware`、
+> `LspPoolPort`、LSP 工具面与配置键全部移除），本裁决及其实现随之失效，仅作历史记录保留。
 
 ## 裁决
 

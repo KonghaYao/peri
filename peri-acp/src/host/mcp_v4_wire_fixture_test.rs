@@ -58,7 +58,7 @@ use std::{
 use async_trait::async_trait;
 use futures::{stream, StreamExt};
 use peri_acp_types::{messages::MessageContent, ports::McpPoolPort};
-use peri_middlewares::assembly::{BuiltinInstanceContext, CronInstanceInput, LspInstanceInput};
+use peri_middlewares::assembly::{BuiltinInstanceContext, CronInstanceInput};
 use peri_middlewares::mcp::{ClientStatus, McpClientPool, McpInitStatus, McpTaskOwner};
 use peri_model::{
     JsonObject, Model, ModelCapabilities, ModelMessage, ModelRequest, ModelResponse, ModelResult,
@@ -72,7 +72,7 @@ use super::executor_flow_tests::{
 };
 use crate::session::executor::{run_session_loop, FrozenSessionData, PromptResult, SessionContext};
 
-/// 夹具 server 名。**异名**：A3 规定 `web` / `artifact`（及预留 `cron` / `lsp` /
+/// 夹具 server 名。**异名**：A3 规定 `web` / `artifact`（及预留 `cron` /
 /// `workspace`）是保留实例名，夹具不得占用。
 pub(super) const WIRE_FIXTURE_SERVER_NAME: &str = "wire_fixture";
 
@@ -225,19 +225,7 @@ impl WireFixtureHarness {
     /// 并在临时 HOME 下启动真实初始化。
     ///
     /// `extra` 为空时与迁移前基线（A12）的夹具**逐位相同**。
-    ///
-    /// `home_settings_json` 非空时，在**池构造之前**把它写进夹具临时 HOME 的
-    /// `~/.peri/settings.json`，并用生产加载函数
-    /// （`peri_mcp_lsp::load_merged_lsp_servers`）从该文件解析 LSP 配置，
-    /// 喂给 builtin `lsp` 实例的 host pool —— 即生产装配的同一条链
-    /// （`peri-acp/src/host/assemble.rs`：settings → `load_merged_lsp_servers` →
-    /// `create_host_lsp_pool` → 注入 → `run_initialize`）。`None` ⇒ 空配置 host pool
-    /// （`has_servers()` 为假 ⇒ `lsp` 实例工具面空表但仍 ready，A6）。
-    ///
-    /// 之所以由夹具（而不是调用方）写 settings：A33 要求上下文注入早于
-    /// `run_initialize`，而临时 HOME 的路径只在 `WireHomeRedirect::set`（本函数内）
-    /// 之后才由 `config_path()` 解析出来。
-    fn new_with_servers(extra: &[ExtraServer], home_settings_json: Option<&str>) -> Self {
+    fn new_with_servers(extra: &[ExtraServer]) -> Self {
         let tmp = tempfile::TempDir::new().expect("临时目录");
         let home = tmp.path().join("home");
         let workspace = tmp.path().join("workspace");
@@ -291,26 +279,9 @@ impl WireFixtureHarness {
         .expect("写入项目级 MCP 配置");
 
         let home_guard = WireHomeRedirect::set(&home);
-        // 生产链：settings.json → `load_merged_lsp_servers` → host pool → 注入（A33 顺序）。
-        let lsp_servers = match home_settings_json {
-            Some(json) => {
-                let settings_path = crate::provider::config_path();
-                assert!(
-                    settings_path.starts_with(&home),
-                    "LSP 配置必须落在夹具临时 HOME 内（否则写的是开发者本机配置）: {}（HOME={}）",
-                    settings_path.display(),
-                    home.display()
-                );
-                std::fs::create_dir_all(settings_path.parent().expect("settings.json 必有父目录"))
-                    .expect("创建临时 HOME 下的 ~/.peri");
-                std::fs::write(&settings_path, json).expect("写入 LSP settings.json");
-                peri_mcp_lsp::load_merged_lsp_servers(&settings_path, Vec::new())
-            }
-            None => Vec::new(),
-        };
         let (owner, spawner) = McpTaskOwner::new();
         let pool = Arc::new(McpClientPool::new_pending_with_spawner(spawner));
-        Self::inject_builtin_context(&pool, &workspace, &lsp_servers);
+        Self::inject_builtin_context(&pool, &workspace);
         let (status_tx, _status_rx) = tokio::sync::watch::channel(McpInitStatus::Pending);
         let init_pool = Arc::clone(&pool);
         let init_task = tokio::spawn(async move {
@@ -331,26 +302,12 @@ impl WireFixtureHarness {
 
     /// 等待真实初始化收口（所有 server 都已得出连接结论）。
     pub(super) async fn initialized() -> Self {
-        Self::initialized_with_servers_and_settings(&[], None).await
+        Self::initialized_with_servers(&[]).await
     }
 
     /// 同上，但额外写入 `extra` 声明的**异名**用户 server（V-02 的 fatal 路径使用）。
     pub(super) async fn initialized_with_servers(extra: &[ExtraServer]) -> Self {
-        Self::initialized_with_servers_and_settings(extra, None).await
-    }
-
-    /// 同上，但在池构造之前把 `home_settings_json` 写进夹具临时 HOME 的
-    /// `~/.peri/settings.json`，并**经生产加载函数**解析出 `lsp` 实例的 host pool 配置
-    /// （见 [`Self::new_with_servers`]）。
-    ///
-    /// wave 2 起 `lsp` 实例的工具面由**注入 pool** 的 `has_servers()` 在 handler 构造时快照
-    /// （A21，不支持热更新），session 级 `lsp_servers` / `lsp_pool` 只门控链上同步中间件：
-    /// 因此「配置了 LSP server ⇒ LSP 工具可发现」必须经本入口表达。
-    pub(super) async fn initialized_with_servers_and_settings(
-        extra: &[ExtraServer],
-        home_settings_json: Option<&str>,
-    ) -> Self {
-        let mut harness = Self::new_with_servers(extra, home_settings_json);
+        let mut harness = Self::new_with_servers(extra);
         if let Some(task) = harness.init_task.take() {
             tokio::time::timeout(Duration::from_secs(30), task)
                 .await
@@ -369,24 +326,16 @@ impl WireFixtureHarness {
     /// `peri-acp/src/host/assemble.rs` 的 `pending_mcp_pool` → 注入 → `run_initialize`
     /// 与 `mcp_v4_wave2_test.rs` 的 `BuiltinHostFixture::start`）。被注入的 `cron` 调度器
     /// 是夹具私有实例且 `tick_enabled = false`：本夹具只观察工具面 / 归一，不驱动 tick。
-    fn inject_builtin_context(
-        pool: &McpClientPool,
-        workspace: &Path,
-        lsp_servers: &[peri_acp_types::lsp::LspServerConfig],
-    ) {
+    fn inject_builtin_context(pool: &McpClientPool, workspace: &Path) {
         let cwd = workspace.to_string_lossy().to_string();
         let (cron_trigger_tx, _cron_triggers) = tokio::sync::mpsc::unbounded_channel();
         pool.set_builtin_instance_context(Arc::new(
-            BuiltinInstanceContext::new(cwd.clone())
-                .with_cron(CronInstanceInput {
-                    scheduler: Arc::new(parking_lot::Mutex::new(
-                        peri_mcp_cron::CronScheduler::new(cron_trigger_tx),
-                    )),
-                    tick_enabled: false,
-                })
-                .with_lsp(LspInstanceInput {
-                    pool: peri_mcp_lsp::create_host_lsp_pool(&cwd, lsp_servers),
-                }),
+            BuiltinInstanceContext::new(cwd.clone()).with_cron(CronInstanceInput {
+                scheduler: Arc::new(parking_lot::Mutex::new(peri_mcp_cron::CronScheduler::new(
+                    cron_trigger_tx,
+                ))),
+                tick_enabled: false,
+            }),
         ))
         .expect("夹具池首次注入必须成功（不存在二次注入）");
     }

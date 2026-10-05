@@ -1,7 +1,5 @@
 use tempfile::tempdir;
 
-use peri_mcp_lsp::config::LspConfigSource;
-
 use super::*;
 use crate::plugin::types::{
     InstallScope, InstalledPlugin, PluginAgent, PluginCommand, PluginCommandEntry, PluginOrigin,
@@ -24,7 +22,6 @@ pub(crate) fn make_manifest_with_commands(commands: Vec<PluginCommand>) -> Plugi
         skills: None,
         hooks: None,
         mcp_servers: None,
-        lsp_servers: None,
         output_styles: None,
         options: None,
         settings: None,
@@ -737,7 +734,7 @@ fn test_load_plugins_synthetic_manifest_fallback() {
         .path()
         .join("cache")
         .join("test-mkt")
-        .join("lsp-plugin")
+        .join("some-plugin")
         .join("1.0.0");
     std::fs::create_dir_all(&plugin_install_path).unwrap();
 
@@ -745,7 +742,7 @@ fn test_load_plugins_synthetic_manifest_fallback() {
     // 测试中无法覆盖。直接测试 try_generate_synthetic_manifest_fallback 函数，
     // 验证当 marketplace 缓存不在默认路径时返回 false。
     let result =
-        try_generate_synthetic_manifest_fallback(&plugin_install_path, "lsp-plugin", "test-mkt");
+        try_generate_synthetic_manifest_fallback(&plugin_install_path, "some-plugin", "test-mkt");
 
     // 由于 marketplace 缓存不在默认路径，fallback 应该返回 false
     assert!(!result);

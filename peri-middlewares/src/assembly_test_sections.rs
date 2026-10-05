@@ -294,8 +294,6 @@ async fn test_stage_completion_reminders_share_assembled_task_manager() {
                 dynamic_mcp_projection: Arc::new(parking_lot::Mutex::new(None)),
                 tool_search_index: Arc::new(ToolSearchIndex::new()),
                 shared_tools: Arc::new(RwLock::new(BTreeMap::new())),
-                lsp_servers: vec![],
-                lsp_pool: None,
                 workflow_executor: None,
                 workflow_middleware: None,
                 session_resources: None,

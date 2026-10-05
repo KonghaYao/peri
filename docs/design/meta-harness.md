@@ -14,7 +14,7 @@ MetaHarness 一个 kv 字段承载三项能力，key 类型决定动作：
 | key 类型 | value | 动作 |
 | --- | --- | --- |
 | 段落 ID | `true` | **覆盖系统提示词**（第一能力） |
-| middleware 名 / builtin 实例策略键 | `false` | **关闭能力**（第二能力）：链槽位名 ⇒ 该 middleware 不进链；builtin 实例策略键（`WebMiddleware` / `ArtifactMiddleware` / `CronMiddleware` / `LspMiddleware` / `WorkspaceMiddleware`）⇒ 该实例的工具面关闭 |
+| middleware 名 / builtin 实例策略键 | `false` | **关闭能力**（第二能力）：链槽位名 ⇒ 该 middleware 不进链；builtin 实例策略键（`WebMiddleware` / `ArtifactMiddleware` / `CronMiddleware` / `WorkspaceMiddleware`）⇒ 该实例的工具面关闭 |
 | `BuiltInSubagents` | `true` / `false` | 启用 / 屏蔽 compile-time built-in subagent definitions（默认启用） |
 
 `BuiltInSubagents` 只控制 built-in definition provider，不关闭 `SubAgentMiddleware`；
@@ -186,7 +186,7 @@ if !disabled.contains("TodoMiddleware") {
 }
 
 // builtin MCP 实例（`WebMiddleware` / `ArtifactMiddleware` / `CronMiddleware` /
-// `LspMiddleware` / `WorkspaceMiddleware`）不走链构造：它们由关闭集映射为实例关闭集，
+// `WorkspaceMiddleware`）不走链构造：它们由关闭集映射为实例关闭集，
 // 再交给工具面过滤（`assembly.rs`）。
 let closed_instances = crate::mcp::builtin::closed_instances(&disabled);
 ```
@@ -217,11 +217,10 @@ subagent_mw 槽位）联动置空，禁止半开状态。
 - Artifact 上传由 builtin `artifact` MCP 实例承载（`mcp-packages/artifact/src/{server,tool}.rs`；宿主实例注册与 dispatch 仍在 `peri-middlewares/src/mcp/builtin/`）；
   策略键 `ArtifactMiddleware: false` 关闭该实例的工具面，仅移除 `artifact`（模型面
   `artifact`），不影响 `ToolSearch` 的 `SearchExtraTools` / `ExecuteExtraTool`。
-- `CronMiddleware` / `LspMiddleware` 是 `cron` / `lsp` 实例的策略键，语义与
-  `ArtifactMiddleware` 同构，但两个实例的工具都是 deferred：关闭只收缩 deferred 目录与
-  检索结果（`parent_tools` 与 workflow 工具列表本来就不含 deferred 工具）。LSP 另有一个
-  **链槽位名** `LspSyncMiddleware`：关它只停文档同步，`mcp__lsp__LSP` 仍可见；`LspMiddleware`
-  关闭则同时关工具面与同步目标。两者都保留实例、handler、pool 与 readiness。
+- `CronMiddleware` 是 `cron` 实例的策略键，语义与
+  `ArtifactMiddleware` 同构，但该实例的工具是 deferred：关闭只收缩 deferred 目录与
+  检索结果（`parent_tools` 与 workflow 工具列表本来就不含 deferred 工具），实例、handler
+  与 readiness 仍保留。
 - `WorkspaceMiddleware` 是 `workspace` 实例的策略键（v4-part-4 wave 3）：7 个文件/终端
   工具（`Read` / `Write` / `Edit` / `Glob` / `Grep` / `folder_operations` /
   `Bash`）在声明表中**全部**标为 direct，因此关闭必须在同一 turn 同时收缩三个真实面——

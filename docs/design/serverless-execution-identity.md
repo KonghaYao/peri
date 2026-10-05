@@ -75,7 +75,7 @@ WASM 是兼容性目标，不是第二套 Peri：`wasm32-unknown-emscripten` 模
 | `machineId` | 宿主持久化的 UUID 执行身份，供跨模块重启的会话恢复 |
 
 虚拟目录只承载路径身份，不代表真实文件系统事实。Emscripten 编译闭包排除 SQLx、
-进程执行、stdio transport、本地 LSP 与全部 builtin MCP；模型、远程 MCP 与 Turso
+进程执行、stdio transport 与全部 builtin MCP；模型、远程 MCP 与 Turso
 复用 HTTP 路径。工作区文件工具必须由外部 MCP 提供。
 
 ## 2. 身份与所有权

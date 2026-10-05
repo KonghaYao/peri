@@ -93,17 +93,12 @@ pub const SECTION_IDS: &[&str] = &[
 /// [`BUILTIN_INSTANCE_POLICY_KEYS`] 承载——两表并集才是「已知 MetaHarness 键
 /// 全集」（`assembly_test.rs` 与 `provider/config.rs` 都按该并集判定）。
 ///
-/// **v4-part-3（A8）：`LspMiddleware` → `LspSyncMiddleware`**。LSP 工具面迁到
-/// builtin 实例后，原槽位名改由薄同步中间件占用（本表条目随之改名）；
-/// `LspMiddleware` 本身成为 builtin 实例的关闭键，落
-/// [`BUILTIN_INSTANCE_POLICY_KEYS`]。
-///
 /// **v4-part-4（W3-C1）：`FilesystemMiddleware` / `TerminalMiddleware` 摘除**。7 个
 /// 文件/终端工具（Read / Write / Edit / Glob / Grep / folder_operations / Bash）迁为
 /// builtin `workspace` 实例后，两者的链槽位（`ChainSlot::Filesystem` /
 /// `ChainSlot::Terminal`）与其 middleware 类型一并删除，关闭键改由
 /// `"WorkspaceMiddleware"`（落 [`BUILTIN_INSTANCE_POLICY_KEYS`]）承载——与
-/// Web / Artifact / cron / lsp 的既有形态一致。
+/// Web / Artifact / cron 的既有形态一致。
 ///
 /// **v4 wave 4（Git Watch 下沉）：`GitWatchMiddleware` 摘除**。git ref 变化改由
 /// builtin `workspace` 实例的 `workspace://git/ref` 资源 + MCP 2026-07-28 订阅回传
@@ -128,7 +123,6 @@ pub const MIDDLEWARE_NAMES: &[&str] = &[
     "McpMiddleware",
     "WorkflowMiddleware",
     "ToolSearch",
-    "LspSyncMiddleware",
     "GoalMiddleware",
 ];
 
@@ -156,7 +150,6 @@ pub const BUILTIN_INSTANCE_POLICY_KEYS: &[&str] = &[
     "WebMiddleware",
     "ArtifactMiddleware",
     "CronMiddleware",
-    "LspMiddleware",
     "WorkspaceMiddleware",
 ];
 
@@ -210,11 +203,6 @@ pub const SECTION_HOLDER_MIDDLEWARE: &[(&str, &str)] = &[
 /// **不再**剔除它们——这正是「剔除面只覆盖 middleware 静态工具」的应有语义。
 /// builtin 能力的关闭由 builtin 关闭集（`BUILTIN_INSTANCE_POLICY_KEYS`）在装配期
 /// 过滤，与本清单无关。
-///
-/// **v4-part-3（A8/IF-P3-10）：已删除 `LSP` 裸名。** 工具面迁到 builtin 实例
-/// （模型面名字 `mcp__lsp__LSP`，见 [`crate::builtin_mcp::BUILTIN_MCP_INSTANCES`]），
-/// `ChainSlot::Lsp` 上的 `LspSyncMiddleware` 只做文档同步、`collect_tools` 为空，
-/// 因此 LSP 不再是任何 middleware 的静态工具（语义与上一段三个裸名相同）。
 ///
 /// **v4-part-4（W3-C1）：已删除 7 个 workspace 裸名**（`Read` / `Write` / `Edit` /
 /// `Glob` / `Grep` / `folder_operations` / `Bash`）。7 个工具迁为 builtin `workspace`
@@ -367,8 +355,8 @@ mod tests {
     ///   `build_session_tool_view` 的剔除结果：遍历 `BUILTIN_MCP_INSTANCES`，断言每个
     ///   工具的 **`original_name`** 不在本表内，并用 `NamedTool` 桩证明裸名不再被剔除
     ///   ——回答「剔除谓词是否按裸名放行」。
-    /// - 本用例在**契约常量级**断言 **`effective_name`**（`mcp__cron__*` 三枚 +
-    ///   `mcp__lsp__LSP`）不在本表内。谓词按 `name.as_str()` 精确匹配，而模型面看到
+    /// - 本用例在**契约常量级**断言 **`effective_name`**（`mcp__cron__*` 三枚）
+    ///   不在本表内。谓词按 `name.as_str()` 精确匹配，而模型面看到
     ///   的是 effective name：effective name 一旦混进本表，迁移后的
     ///   `mcp__cron__cron_register` 会被当作 middleware 静态工具剔除（「裸名 XOR
     ///   effective name」的重命名映射随之破坏）。
@@ -410,8 +398,7 @@ mod tests {
                 tool.effective_name
             );
         }
-        // effective name 面：全注册表扫描（含 `mcp__lsp__LSP`），任一实例的模型面
-        // 名字都不得落进剔除面。
+        // effective name 面：全注册表扫描，任一实例的模型面名字都不得落进剔除面。
         for instance in crate::builtin_mcp::BUILTIN_MCP_INSTANCES {
             for tool in instance.tools {
                 assert!(

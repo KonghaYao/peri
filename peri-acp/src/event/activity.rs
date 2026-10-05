@@ -24,7 +24,6 @@ pub enum AgentActivityKind {
     LlmRetry,
     Workflow,
     Rewind,
-    Diagnostics,
     Turn,
     Agent,
     System,
@@ -227,27 +226,6 @@ pub fn map_agent_activity(event: &ExecutorEvent) -> Option<AgentActivityWire> {
             item
         }
         ExecutorEvent::RewindCompleted { .. } => AgentActivityWire::new(K::Rewind, S::Completed),
-        ExecutorEvent::LspDiagnostics {
-            errors,
-            warnings,
-            files_with_errors,
-        } => {
-            let status = if *errors > 0 {
-                S::Failed
-            } else if *warnings > 0 {
-                S::Warning
-            } else {
-                S::Completed
-            };
-            let mut item =
-                AgentActivityWire::new(K::Diagnostics, status).correlated("diagnostics", "current");
-            item.metrics.insert("error_count".into(), *errors as u64);
-            item.metrics
-                .insert("warning_count".into(), *warnings as u64);
-            item.metrics
-                .insert("files_with_errors".into(), *files_with_errors as u64);
-            item
-        }
         ExecutorEvent::TurnSuspended { turn_id, .. } => {
             AgentActivityWire::new(K::Turn, S::Suspended).correlated("turn", turn_id)
         }

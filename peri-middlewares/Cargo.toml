@@ -50,7 +50,6 @@ ipnet = "2.10"
 peri-resources = { path = "../peri-resources" }
 peri-mcp-core.workspace = true
 peri-mcp-credentials.workspace = true
-lsp-types.workspace = true
 cacache = { version = "13.1.0", default-features = false, features = ["tokio-runtime"] }
 
 
@@ -67,7 +66,6 @@ peri-mcp-common.workspace = true
 tokio = { workspace = true, features = ["full"] }
 peri-js-runtime = { path = "../peri-js-runtime" }
 peri-process = { path = "../peri-process" }
-peri-mcp-lsp.workspace = true
 peri-mcp-web.workspace = true
 peri-mcp-artifact.workspace = true
 peri-mcp-cron.workspace = true

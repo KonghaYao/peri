@@ -118,12 +118,6 @@ fn format_tool_args_by_name(tool_name: &str, args: &serde_json::Value) -> Option
                 .unwrap_or("")
                 .to_string(),
         ),
-        "LSP" => Some(
-            args.get("operation")
-                .and_then(|v| v.as_str())
-                .map(|s| truncate(s, 40))
-                .unwrap_or_default(),
-        ),
         _ => None,
     }
 }

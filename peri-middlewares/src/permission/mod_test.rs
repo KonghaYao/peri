@@ -617,13 +617,12 @@ fn builtin_effective_names_match_original_name_policy() {
     }
 
     // wave 2 冻结结果表（A19 / §8 第 11 行）：cron 三工具里只有 `cron_register`
-    // 需审批（可定时触发任意 prompt，等价委派执行权），`LSP` 不审批、非编辑工具；
+    // 需审批（可定时触发任意 prompt，等价委派执行权），其余不审批、非编辑工具；
     // 两种名字形态逐项相等。
-    let frozen: [(&str, &str, bool); 4] = [
+    let frozen: [(&str, &str, bool); 3] = [
         ("cron", "cron_register", true),
         ("cron", "cron_list", false),
         ("cron", "cron_remove", false),
-        ("lsp", "LSP", false),
     ];
     for (instance, original, requires_approval) in frozen {
         let declared = peri_acp_types::builtin_mcp::find(instance).expect("实例应有声明");
@@ -730,7 +729,7 @@ fn builtin_reserved_name_is_not_parity_hijackable() {
             instance.name
         );
     }
-    for reserved in ["web", "artifact", "cron", "lsp", "workspace"] {
+    for reserved in ["web", "artifact", "cron", "workspace"] {
         assert!(
             is_reserved_instance_name(reserved),
             "{reserved} 应为保留实例名"
@@ -913,8 +912,8 @@ fn cron_sensitive_markdown_uses_registry_effective_name() {
         "渲染输出不得残留已失效的裸名条目：\n{rendered}"
     );
 
-    // 未进敏感清单的 builtin 实例（artifact / lsp）不得因改名被误加进来
-    for instance in ["artifact", "lsp"] {
+    // 未进敏感清单的 builtin 实例（artifact）不得因改名被误加进来
+    for instance in ["artifact"] {
         let declared = peri_acp_types::builtin_mcp::find(instance).expect("实例应有声明");
         for tool in declared.tools {
             assert!(

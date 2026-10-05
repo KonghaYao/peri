@@ -34,5 +34,5 @@ pub use middleware::PluginMiddleware;
 pub use types::{
     InstallScope, InstalledPlugin, InstalledPlugins, KnownMarketplace, MarketplaceManifest,
     MarketplacePlugin, MarketplaceSource, McpServerEntry, PluginAgent, PluginAuthor, PluginCommand,
-    PluginCommandEntry, PluginLspServer, PluginManifest, PluginOption, PluginOrigin,
+    PluginCommandEntry, PluginManifest, PluginOption, PluginOrigin,
 };

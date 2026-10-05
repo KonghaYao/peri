@@ -235,8 +235,6 @@ fn make_session_context(session_id: &str) -> SessionContext {
         dynamic_mcp_projection: Arc::new(parking_lot::Mutex::new(None)),
         tool_search_index: Arc::new(NoopToolSearch),
         shared_tools: Arc::new(parking_lot::RwLock::new(Default::default())),
-        lsp_servers: vec![],
-        lsp_pool: None,
         workflow_executor: None,
         agent_catalog: Arc::new(NoopSkills),
         workflow_middleware: None,

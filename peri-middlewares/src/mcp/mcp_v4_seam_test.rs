@@ -16,7 +16,7 @@
 //!   同一字段）；配置清单与本代 `DiscoveryEvidence` 由测试按 B-02 的提交契约
 //!   显式发布，替代需要真实子进程 / HTTP 端点的 `initialize.rs` 路径。
 //! - 因此本文件证明「闸门 → 候选 → 收集视图」这条 crate 内链路的分类与
-//!   namespace 解析，不证明 transport 端到端，也不构成五个 MCP 迁移完成的证据。
+//!   namespace 解析，不证明 transport 端到端，也不构成全部 builtin MCP 迁移完成的证据。
 
 use std::sync::Arc;
 use std::time::Duration;

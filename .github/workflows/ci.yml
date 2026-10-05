@@ -62,14 +62,14 @@ jobs:
               run: >-
                   ./scripts/cargo-rmcp-patched.sh test --locked --workspace --exclude peri-middlewares
                   --exclude peri-mcp-common --exclude peri-mcp-web --exclude peri-mcp-artifact
-                  --exclude peri-mcp-cron --exclude peri-mcp-lsp --exclude peri-mcp-workspace
+                  --exclude peri-mcp-cron --exclude peri-mcp-workspace
 
             # 涉及进程级全局状态的测试仍须串行执行。
             - name: Run middleware and MCP capability tests (serial)
               shell: bash
               run: >-
                   ./scripts/cargo-rmcp-patched.sh test --locked -p peri-middlewares -p peri-mcp-common -p peri-mcp-web
-                  -p peri-mcp-artifact -p peri-mcp-cron -p peri-mcp-lsp -p peri-mcp-workspace
+                  -p peri-mcp-artifact -p peri-mcp-cron -p peri-mcp-workspace
                   -- --test-threads=1
 
             - name: Clippy

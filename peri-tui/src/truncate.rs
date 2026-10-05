@@ -253,8 +253,6 @@ fn summarize_input_by_name(
         }
         // ── file_path 不截断但精简 cwd 前缀 ──
         "artifact" => Some(shorten_path(&str_val("file_path"))),
-        // ── operation 截断 40 ──
-        "LSP" => Some(truncate_text(&str_val("operation"), 40)),
         // ── tool_name 截断 40 ──
         "ExecuteExtraTool" => Some(truncate_text(&str_val("tool_name"), 40)),
         // ── query 截断 40 ──

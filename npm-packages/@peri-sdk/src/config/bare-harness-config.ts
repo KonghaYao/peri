@@ -32,12 +32,10 @@ export const BareHarnessConfig = Object.freeze({
   McpMiddleware: false,
   WorkflowMiddleware: false,
   ToolSearch: false,
-  LspSyncMiddleware: false,
   GoalMiddleware: false,
   WebMiddleware: false,
   ArtifactMiddleware: false,
   CronMiddleware: false,
-  LspMiddleware: false,
   WorkspaceMiddleware: false,
   BuiltInSubagents: false,
 } satisfies Record<MetaHarnessKey, false>);

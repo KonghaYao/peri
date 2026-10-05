@@ -33,7 +33,6 @@ pub mod attribution;
 pub mod default_system_prompt;
 pub mod hitl;
 pub mod hooks;
-pub mod lsp;
 pub mod mcp;
 pub mod middleware;
 pub mod permission;
@@ -46,8 +45,8 @@ pub use plugin::{
     InstalledPlugin, InstalledPlugins, KnownMarketplace, LoadedPlugin, LoaderError,
     MarketplaceEntry, MarketplaceError, MarketplaceManager, MarketplaceManifest, MarketplacePlugin,
     MarketplaceRefreshEvent, MarketplaceSource, PluginAgent, PluginAuthor, PluginCommand,
-    PluginCommandEntry, PluginCommandProvider, PluginConfigError, PluginLspServer, PluginManifest,
-    PluginMiddleware, PluginOption,
+    PluginCommandEntry, PluginCommandProvider, PluginConfigError, PluginManifest, PluginMiddleware,
+    PluginOption,
 };
 pub mod at_mention;
 pub mod skills;
@@ -74,7 +73,6 @@ pub use attribution::GitAttributionMiddleware;
 pub use default_system_prompt::{DefaultSystemPromptMiddleware, LangMiddleware};
 pub use goal::GoalMiddleware;
 pub use hitl::HumanInTheLoopMiddleware;
-pub use lsp::LspSyncMiddleware;
 pub use middleware::image::ImageMiddleware;
 pub use peri_acp_types::agents::AgentOverrides;
 pub use permission::{
@@ -121,7 +119,7 @@ pub mod prelude {
             LoaderError, MarketplaceEntry, MarketplaceError, MarketplaceManager,
             MarketplaceManifest, MarketplacePlugin, MarketplaceRefreshEvent, MarketplaceSource,
             PluginAgent, PluginAuthor, PluginCommand, PluginCommandProvider, PluginConfigError,
-            PluginLspServer, PluginManifest, PluginMiddleware, PluginOption,
+            PluginManifest, PluginMiddleware, PluginOption,
         },
         skills::{SkillMetadata, SkillsMiddleware},
         subagent::{SkillPreloadMiddleware, SubAgentMiddleware, SubAgentTool},

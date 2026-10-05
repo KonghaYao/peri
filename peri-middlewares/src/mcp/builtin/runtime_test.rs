@@ -411,11 +411,11 @@ fn spawn_rejects_unregistered_instance_with_typed_error() {
     }
 }
 
-/// 已注册实例缺该类输入（`cron` 无 scheduler / `lsp` 无 pool）：必须在 dispatch **之前**
+/// 已注册实例缺该类输入（`cron` 无 scheduler）：必须在 dispatch **之前**
 /// 落成 typed `InstanceInputMissing`。
 ///
 /// 「输入缺失」与「handler 未接线」是两件需要不同修复动作的事：`builtin_server_handler`
-/// 的 `Option` 签名区分不了二者，若先跑 dispatch，`cron` / `lsp` 会被误报成
+/// 的 `Option` 签名区分不了二者，若先跑 dispatch，`cron` 会被误报成
 /// `HandlerNotWired`（把宿主装配缺陷写成代码缺陷），H-05 接线后更会变成「缺输入却照样
 /// 建链路」。本用例是那条顺序的可证伪点。
 #[test]
@@ -423,7 +423,7 @@ fn missing_instance_input_is_typed_error_before_dispatch() {
     let cwd = std::env::temp_dir();
     let pool = pool_with_context(&cwd);
 
-    for instance in ["cron", "lsp"] {
+    for instance in ["cron"] {
         let error = pool
             .spawn_builtin_transport(instance)
             .err()

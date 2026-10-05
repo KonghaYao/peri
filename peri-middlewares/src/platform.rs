@@ -7,7 +7,7 @@
 //! 模块级替身）。新增平台差异时先在此登记能力位，再由装配点查询；不得在装配点
 //! 各自写 `target_os` 业务判断。
 
-/// 本部署是否托管进程内 builtin MCP 实例（web / artifact / cron / lsp / workspace）。
+/// 本部署是否托管进程内 builtin MCP 实例（web / artifact / cron / workspace）。
 pub(crate) const IN_PROCESS_BUILTINS: bool = cfg!(not(target_os = "emscripten"));
 
 /// 本部署是否支持 stdio 子进程传输。

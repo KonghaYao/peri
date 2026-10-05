@@ -34,7 +34,7 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage
 
 [target.'cfg(not(target_os = "emscripten"))'.dependencies]
 peri-process = { path = "../peri-process" }
-# workflow 作为原生 resource 实现接入；LSP 已下沉至 peri-mcp-lsp。
+# workflow 作为原生 resource 实现接入。
 peri-workflow = { path = "../peri-workflow" }
 sqlx = { workspace = true }
 tokio = { workspace = true, features = ["full"] }

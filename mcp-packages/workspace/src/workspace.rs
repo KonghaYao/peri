@@ -805,7 +805,7 @@ impl ServerHandler for WorkspaceMcpServer {
         let client_supports_tasks = context
             .client_capabilities()
             .is_some_and(|caps| caps.supports_tasks());
-        // 传实例冻结的 host cwd（不走 `web` / `cron` / `lsp` 的空串形态）。**注意**：本参
+        // 传实例冻结的 host cwd（不走 `web` / `cron` 的空串形态）。**注意**：本参
         // 只落进 `ToolContext`，而本波 7 个工具都忽略 `ToolContext`（`invoke` 的 `_ctx`），
         // 真正生效的 cwd 绑定点是 [`Self::new`] 注入各工具的 `cwd` 字段——不得据本行推断
         // 「cwd 由 `tools/call` 决定」（反例实验证据见 `workspace_test.rs` 模块头）。

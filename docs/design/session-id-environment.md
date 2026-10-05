@@ -173,7 +173,7 @@ Git 探测一旦开始成功，后续失败不能降级为目录模式。
 
 ## 4. 恢复与执行分开
 
-ACP `requests/session_restore.rs::prepare_existing` 按 ID 读取保存的会话，先经 `session_resources.inspect_availability` 判定 env 与执行可用性；仅可执行时才做 legacy 冻结/接纳并读取持久 frozen，避免准备阶段读取异机路径。请求 cwd 不再是准入条件，目录不存在、旧 dirty 代际或另一实例恢复不构成文件锁/owner 认领门槛。只读恢复不要求 frozen 存在，也不启动 workflow/LSP；只读标记经 `sessionWorkspaceV1` 身份载荷下发，未协商的连接同样按只读准入但拿不到标记，`require_owner` 在写入/执行时仍是确定拒绝。可执行路径的缺失、损坏或未知 frozen 与存储错误仍按既有契约报告，legacy 使用保存 cwd 而非当前终端 cwd。
+ACP `requests/session_restore.rs::prepare_existing` 按 ID 读取保存的会话，先经 `session_resources.inspect_availability` 判定 env 与执行可用性；仅可执行时才做 legacy 冻结/接纳并读取持久 frozen，避免准备阶段读取异机路径。请求 cwd 不再是准入条件，目录不存在、旧 dirty 代际或另一实例恢复不构成文件锁/owner 认领门槛。只读恢复不要求 frozen 存在，也不启动 workflow；只读标记经 `sessionWorkspaceV1` 身份载荷下发，未协商的连接同样按只读准入但拿不到标记，`require_owner` 在写入/执行时仍是确定拒绝。可执行路径的缺失、损坏或未知 frozen 与存储错误仍按既有契约报告，legacy 使用保存 cwd 而非当前终端 cwd。
 
 执行准入复核保存的执行目录，而不是以请求或期望 cwd 重新决定归属：一次准入执行一次完整发现复核（`validate_expected`），准入内后续检查只复核已记录证据（`reassert_expected`）。相对目录重新 canonicalize 后必须仍属于原工作区，并复核最近 Git 仓库；目录组件变为 symlink 或新嵌套仓库时不能只凭字符串前缀通过。请求环境与保存绑定的环境不匹配时返回 `ExecutionBindingMismatch`，不因项目相同就放行。
 
@@ -181,15 +181,15 @@ ACP `requests/session_restore.rs::prepare_existing` 按 ID 读取保存的会话
 
 实际执行由 `SessionResourcesImpl::execution_availability` / `acquire_execution` 与 ACP `require_owner` 控制：`execution_availability` 在执行/工具准入时检查保存 cwd 是否为实际目录，不把目录探测作为历史读取的条件；env 不匹配或保存 cwd 缺失/不可用时，ACP 以只读方式恢复历史，不装配可执行的会话环境。`sessionWorkspaceV1` 响应可携带 `read_only`，执行请求由宿主拒绝；不悄悄在当前机器同名绝对路径执行，也不自动把 session 迁入当前 env。这是执行准入，不是 Session ID 的访问授权。
 
-取得执行准入后，重读 binding、重新验证位置与运行恢复状态，再恢复 frozen、构建有效环境和资源，最后提交 live state。装配失败必须收回本次新建资源，不能泄漏 LSP/MCP 或后台任务。热态复用必须校验同一 binding 和环境；冷态不从请求重新决定 cwd。metadata、Git 定位、资源装配或 frozen 恢复失败，都不能提交新的 active session。已有 `ARC-SESSION-LOAD-001` 的同步 reservation 和 operation gate 保留；新旧 session 切换只有在目标提交时才公布有效目录和 active identity，失败必须恢复真实可用的原状态或明确 NoSession。
+取得执行准入后，重读 binding、重新验证位置与运行恢复状态，再恢复 frozen、构建有效环境和资源，最后提交 live state。装配失败必须收回本次新建资源，不能泄漏 MCP 或后台任务。热态复用必须校验同一 binding 和环境；冷态不从请求重新决定 cwd。metadata、Git 定位、资源装配或 frozen 恢复失败，都不能提交新的 active session。已有 `ARC-SESSION-LOAD-001` 的同步 reservation 和 operation gate 保留；新旧 session 切换只有在目标提交时才公布有效目录和 active identity，失败必须恢复真实可用的原状态或明确 NoSession。
 
 目录缺失时，历史通过只读查询/回放路径仍可访问。这条路径不得创建执行资源、回填 frozen、启动 continuation 或取得写 lease；标准可执行 load 则明确失败。
 
-session 执行 sidecar 文件锁及 TUI dirty/owner 恢复确认已移除；不再启用 `peri.sessionRecoveryV1` 协商或发出 `peri/session_reset_dirty`；caps 字段/序列化键仍保留为 false，不表示恢复机制仍存在。普通工具授权、删除等确认弹窗保留。`SessionExecutionLease` 与进程内 mutation gate 管理当前实例的活跃执行、写入效果结清及关闭收尾；跨进程单执行 owner 由 Store 的 `epoch + nonce` CAS 提供，并在业务写入事务内校验（ARC-WORKSPACE-001）。不把重开当成前次未知写入已结清的证明。同 ID 创建重试只在绑定、冻结快照及父链等不可变事实一致时接纳，不覆盖已有内容；无绑定但已有冻结快照的记录拒绝自动 legacy 接纳，避免掩盖绑定损坏。取消、子任务关系、MCP/LSP 关闭与事务仍需遵守自身生命周期。
+session 执行 sidecar 文件锁及 TUI dirty/owner 恢复确认已移除；不再启用 `peri.sessionRecoveryV1` 协商或发出 `peri/session_reset_dirty`；caps 字段/序列化键仍保留为 false，不表示恢复机制仍存在。普通工具授权、删除等确认弹窗保留。`SessionExecutionLease` 与进程内 mutation gate 管理当前实例的活跃执行、写入效果结清及关闭收尾；跨进程单执行 owner 由 Store 的 `epoch + nonce` CAS 提供，并在业务写入事务内校验（ARC-WORKSPACE-001）。不把重开当成前次未知写入已结清的证明。同 ID 创建重试只在绑定、冻结快照及父链等不可变事实一致时接纳，不覆盖已有内容；无绑定但已有冻结快照的记录拒绝自动 legacy 接纳，避免掩盖绑定损坏。取消、子任务关系、MCP 关闭与事务仍需遵守自身生命周期。
 
 ## 5. 执行环境装配
 
-会话的 shell、Read/Edit/Write、@mention、hooks、skills、项目指引、MCP、LSP、Workflow 和 SubAgent 都从同一个已解析的 session environment 取得执行目录。宿主启动目录只用于创建默认新会话及初始列表选择。
+会话的 shell、Read/Edit/Write、@mention、hooks、skills、项目指引、MCP、Workflow 和 SubAgent 都从同一个已解析的 session environment 取得执行目录。宿主启动目录只用于创建默认新会话及初始列表选择。
 
 Host 可以共享 transport、全局配置来源与确定可共享的服务；项目相关配置、插件发现结果、hook groups、命令目录和资源句柄必须按会话执行环境装配。缓存的 key 必须包含真实环境与配置身份，不能只包含 `ProjectId`。同项目工作区之间不合并 `.mcp.json`、局部 settings、权限或可写目录。
 

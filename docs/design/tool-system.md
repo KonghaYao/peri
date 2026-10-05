@@ -86,7 +86,7 @@ Skills 不是工具——它们通过 System Prompt 注入行为指令，不走�
 
 工具集合先由 middleware 收集，再应用 disabled middleware 与 agent allowlist/disallowlist 过滤，形成每 turn 的 session-local 工具视图。ToolSearch 的 direct 能力说明、deferred 索引和最终 LLM tools 都必须从该视图派生，不能从静态名称清单推断。
 
-**Deferred 工具来源**：builtin `cron` 实例（`mcp__cron__cron_register` / `mcp__cron__cron_list` / `mcp__cron__cron_remove`）、MCP 外部服务（`mcp__{server}__{tool}`）、builtin `lsp` 实例（`mcp__lsp__LSP`）、Plugin 插件（`plugin:{name}:{server}` 前缀命名空间）、Workflow 工具等；是否进入 Deferred 最终仍由各工具的 `is_direct()` 决定，但 builtin 一等工具例外——其 Direct / Deferred 身份由声明表 `peri-acp-types/src/builtin_mcp.rs` 的逐工具 `direct` 声明（`builtin_mcp.rs:34`）决定，生效点为 `mcp/tool_bridge.rs::is_declared_direct`。
+**Deferred 工具来源**：builtin `cron` 实例（`mcp__cron__cron_register` / `mcp__cron__cron_list` / `mcp__cron__cron_remove`）、MCP 外部服务（`mcp__{server}__{tool}`）、Plugin 插件（`plugin:{name}:{server}` 前缀命名空间）、Workflow 工具等；是否进入 Deferred 最终仍由各工具的 `is_direct()` 决定，但 builtin 一等工具例外——其 Direct / Deferred 身份由声明表 `peri-acp-types/src/builtin_mcp.rs` 的逐工具 `direct` 声明（`builtin_mcp.rs:34`）决定，生效点为 `mcp/tool_bridge.rs::is_declared_direct`。
 
 ### 2.3 工具执行生命周期
 
@@ -109,7 +109,7 @@ Meta 工具（SearchExtraTools / ExecuteExtraTool）是 LLM 发现和调用 Defe
 
 - **SearchExtraTools**：按关键词搜索可用 Deferred 工具，返回匹配列表。LLM 据此判断是否有合适工具再决定调用。
 - **ExecuteExtraTool**：按工具名和参数直接执行 Deferred 工具。LLM 先搜索、再执行——两步走而非一步到位。
-- **搜索范围**：Deferred 工具来自多个来源——builtin `cron` / `lsp` 实例（`mcp__cron__*` / `mcp__lsp__LSP`）、MCP 外部服务、Plugin 插件、Workflow 工具。它们都经每 turn 重建的 session-local 工具视图进入搜索面：middleware 工具由 `chain.collect_tools()` 提供，MCP 与 builtin 工具是其中的 `McpToolBridge`，搜索时合并结果。
+- **搜索范围**：Deferred 工具来自多个来源——builtin `cron` 实例（`mcp__cron__*`）、MCP 外部服务、Plugin 插件、Workflow 工具。它们都经每 turn 重建的 session-local 工具视图进入搜索面：middleware 工具由 `chain.collect_tools()` 提供，MCP 与 builtin 工具是其中的 `McpToolBridge`，搜索时合并结果。
 
 #### 2.4.1 搜索算法
 

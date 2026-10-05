@@ -77,4 +77,4 @@ _Avoid_: 提交时读取最新 revision 代替旧草稿基线，或把 public co
 **字节 CAS（Byte compare-and-swap）**：目标正文与预期字节相同才替换；区分文件不存在与空文件，合作写者在比较与替换间共用文件锁。
 _Avoid_: 将它等同于多来源原子事务、对不合作编辑器的写隔离或全系统热更新。
 
-配置术语的现行设计见 [configuration-authority.md](docs/design/configuration-authority.md)；LSP、插件生命周期、hook、OS 执行环境及存储 locator/credentials 仍遵守专属能力边界。
+配置术语的现行设计见 [configuration-authority.md](docs/design/configuration-authority.md)；插件生命周期、hook、OS 执行环境及存储 locator/credentials 仍遵守专属能力边界。

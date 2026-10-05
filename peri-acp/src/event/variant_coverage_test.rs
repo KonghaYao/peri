@@ -47,7 +47,6 @@ fn test_all_executor_event_variants_mapped() {
         "CompactCompleted",
         "RewindCompleted",
         "AgentExecutionFailed",
-        "LspDiagnostics",
         "BgToolStep",
         "WorkflowProgress",
         "SessionStarted",

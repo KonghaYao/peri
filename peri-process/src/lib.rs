@@ -1,4 +1,4 @@
-//! OS subprocess ownership shared by shell, MCP, LSP and JavaScript transports.
+//! OS subprocess ownership shared by shell, MCP and JavaScript transports.
 //! A termination request is not completion; owners must wait for actual group/job exit.
 //! Unix descendants that deliberately leave the group are outside this ownership boundary.
 

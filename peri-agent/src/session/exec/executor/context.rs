@@ -219,10 +219,6 @@ pub struct SessionContext {
     pub shared_tools: Arc<
         parking_lot::RwLock<std::collections::BTreeMap<String, Arc<dyn crate::tools::BaseTool>>>,
     >,
-    pub lsp_servers: Vec<peri_acp_types::lsp::LspServerConfig>,
-    /// **host 共享** LSP pool 句柄（宿主装配单次构造，不按 session / turn 重建）；
-    /// None = 无 host pool ⇒ 链上不装 `LspSyncMiddleware`。
-    pub lsp_pool: Option<Arc<dyn peri_acp_types::ports::LspPoolPort>>,
 
     // ── workflow: workflow agents ──────────────────────────────────────────
     pub workflow_executor: Option<Arc<dyn peri_acp_types::workflow::AgentExecutor>>,

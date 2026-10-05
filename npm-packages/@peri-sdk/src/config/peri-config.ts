@@ -66,11 +66,9 @@ export type MetaHarnessKey =
   | "McpMiddleware"
   | "WorkflowMiddleware"
   | "ToolSearch"
-  | "LspSyncMiddleware"
   | "GoalMiddleware"
   | "WebMiddleware"
   | "ArtifactMiddleware"
   | "CronMiddleware"
-  | "LspMiddleware"
   | "WorkspaceMiddleware"
   | "BuiltInSubagents";

@@ -31,7 +31,7 @@ Compact 的三项环境变量在宿主装配时覆盖 `config.compact`；Agent �
 | 变量 | 控制什么；有效值与缺省行为 | 消费入口 |
 | --- | --- | --- |
 | `PERI_MCP_CACHE` | MCP 响应缓存开关；`true/false`、`1/0`、`on/off`，忽略首尾空白和大小写；非法值报配置错误。环境值不强制覆盖文件中的 false；全部缺省时启用。 | `peri-config/src/mcp.rs` |
-| `PERI_MCP_BUILTIN` | 全局禁止默认注入内建 `web`、`artifact`、`cron`、`lsp`、`workspace` MCP 实例；`off` 或 `0` 关闭注入，缺省开启，其他值告警后仍开启。关闭 `workspace` 还会移除内建文件/终端/资源能力；`--bare` 也受此开关影响。 | `peri-config/src/mcp.rs`、`peri-middlewares/src/mcp/builtin/mod.rs` |
+| `PERI_MCP_BUILTIN` | 全局禁止默认注入内建 `web`、`artifact`、`cron`、`workspace` MCP 实例；`off` 或 `0` 关闭注入，缺省开启，其他值告警后仍开启。关闭 `workspace` 还会移除内建文件/终端/资源能力；`--bare` 也受此开关影响。 | `peri-config/src/mcp.rs`、`peri-middlewares/src/mcp/builtin/mod.rs` |
 | `PERI_MCP_APPS` | stdio ACP 的 MCP Apps deployment profile；支持 MCP Apps 的客户端启动 Peri 时携带此变量，**存在即启用**，空串或 `0` 也启用；缺省关闭。Peri 提供 ACP relay，客户端负责 Apps UI。 | `peri-acp/src/host/stdio/mod.rs` |
 | `PERI_ASK_USER_TIMEOUT_SECS` | AskUser 等待 ACP 客户端回答的超时秒数；无效或缺省为 300 秒，`0` 为无限等待。适用于 TUI 和 stdio 共用 broker。 | `peri-acp/src/broker/transport_broker.rs` |
 | `PERI_MACHINE_ID` | 当前机器的 session environment 身份覆盖；必须为 UUID，解析后规范化，首次初始化后进程内缓存；缺省使用本机 `~/.peri/machine-id`。 | `peri-resources/src/sessions/machine.rs` |
@@ -82,8 +82,8 @@ Langfuse 只有 public key 和 secret key **都存在**时才启用。以下环�
 | 入口 | 语义与边界 | 代码入口 |
 | --- | --- | --- |
 | Peri `config.env`、Claude settings `env` | TUI 启动时注入字符串值，已存在的进程变量优先。注入后是否控制 Peri 取决于本表中的消费方或外部子进程。 | `peri-tui/src/main.rs` |
-| MCP / LSP 配置的 `${VAR}`、hook 的 `allowed_env_vars` | 按配置引用或白名单读取变量，用于命令、参数、HTTP header 等；这不会为每个 `VAR` 新增 Peri 全局开关。 | `peri-middlewares/src/mcp/config.rs`、`mcp-packages/lsp/src/config.rs`、`peri-middlewares/src/hooks/variables.rs` |
+| MCP 配置的 `${VAR}`、hook 的 `allowed_env_vars` | 按配置引用或白名单读取变量，用于命令、参数、HTTP header 等；这不会为每个 `VAR` 新增 Peri 全局开关。 | `peri-middlewares/src/mcp/config.rs`、`peri-middlewares/src/hooks/variables.rs` |
 | `--session-store-token-env=<NAME>` | 按 CLI 给定名称读取远端 Session Store 凭据；文档只传名称，不登记 secret 值。 | `peri-resources/src/sessions/remote/credentials.rs` |
-| 子进程运行环境 | MCP、LSP、hook、Workflow 和工具进程各自按配置或 allowlist 接收环境；Peri 注入的 `CLAUDE_*`、`GIT_OPTIONAL_LOCKS`、`TERM` 等是子进程输入，不是启动 Peri 的用户开关。 | 对应进程构造器 |
+| 子进程运行环境 | MCP、hook、Workflow 和工具进程各自按配置或 allowlist 接收环境；Peri 注入的 `CLAUDE_*`、`GIT_OPTIONAL_LOCKS`、`TERM` 等是子进程输入，不是启动 Peri 的用户开关。 | 对应进程构造器 |
 
 密钥值不得写入本表、日志或示例；见 [ARC-SECRET-001](architecture-contracts.md#arc-secret-001)。

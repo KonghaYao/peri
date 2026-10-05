@@ -41,9 +41,6 @@ MetaHarness 是 Peri 的一项配置能力：一个 `settings.json` kv 字段（
 - `"CronMiddleware": false`：关闭 builtin `cron` 实例。该实例的三个工具是
   deferred，因此关闭面是 deferred 目录与 `SearchExtraTools` 检索结果（后两个面
   本来就不含 deferred 工具），实例、handler 与 1s tick 保留；
-- `"LspMiddleware": false`：关闭 builtin `lsp` 实例的 `mcp__lsp__LSP` 工具面
-  **并同时关闭文档同步目标**（不再读文件、不发 `didChange` / `didSave`）。只想关
-  同步、保留工具时用链槽位名 `"LspSyncMiddleware": false`；
 - `"WorkspaceMiddleware": false`：关闭 builtin `workspace` 实例的工具面
   （`Read` / `Write` / `Edit` / `Glob` / `Grep` /
   `folder_operations` / `Bash`）。这 7 个工具全部是 direct，因此关闭面是三个真实面
@@ -80,8 +77,7 @@ MetaHarness 是 Peri 的一项配置能力：一个 `settings.json` kv 字段（
 `GitAttributionMiddleware`、
 `TodoMiddleware`、`HookMiddleware`、
 `PermissionMiddleware`、`HumanInTheLoopMiddleware`、`SubAgentMiddleware`、
-`McpMiddleware`、`WorkflowMiddleware`、`ToolSearch`、
-`LspSyncMiddleware`、`GoalMiddleware`
+`McpMiddleware`、`WorkflowMiddleware`、`ToolSearch`、`GoalMiddleware`
 
 > `FilesystemMiddleware` / `TerminalMiddleware` 已不是链槽位名（v4-part-4 wave 3）：
 > 7 个文件/终端工具迁为由 builtin `workspace` 实例提供，这两个键不再是**已知键**，
@@ -95,30 +91,25 @@ MetaHarness 是 Peri 的一项配置能力：一个 `settings.json` kv 字段（
 > [design/git-watch-middleware.md](design/git-watch-middleware.md) §0.1。
 
 2. **builtin MCP 实例策略键**：`WebMiddleware` / `ArtifactMiddleware` /
-   `CronMiddleware` / `LspMiddleware` / `WorkspaceMiddleware`
+   `CronMiddleware` / `WorkspaceMiddleware`
    （`BUILTIN_INSTANCE_POLICY_KEYS`）。v4-part-2 起 Web / Artifact、v4-part-3 起
-   Cron / LSP、v4-part-4 起 `workspace`（7 个文件/终端工具：`Read` / `Write` /
+   Cron、v4-part-4 起 `workspace`（7 个文件/终端工具：`Read` / `Write` /
    `Edit` / `Glob` / `Grep` / `folder_operations` / `Bash`，模型面名字
    原始名）不再是链槽位——能力由同进程 builtin 实例（`web` /
-   `artifact` / `cron` / `lsp` / `workspace`）提供，这五个键是该实例的关闭键；映射唯一来源是声明表
+   `artifact` / `cron` / `workspace`）提供，这四个键是该实例的关闭键；映射唯一来源是声明表
    `peri-acp-types/src/builtin_mcp.rs` 的 `policy_key`，**不按 `mcp__` 前缀或实例名
    硬编码过滤**。实例的另外两条关闭路径是配置片段
    `{"<实例>": {"disabled": true}}` 与进程级环境开关（`PERI_MCP_BUILTIN=off`），
    详见 [MCP 生态参考](reference/mcp-ecosystem.md)。
-
-**LSP 的两个键不要混用**：`LspSyncMiddleware` 是**链槽位名**（`after_tool` 文档
-同步中间件），`LspMiddleware` 是**实例策略键**。前者只关同步，后者关工具面**且**
-关同步目标；两者都不是物理销毁（host LSP pool、实例与 readiness 都保留）。
 
 关闭语义：
 
 - 关闭 = 该能力提供者退出注入面：链槽位 middleware 不进链（工具、钩子、提示词
   贡献一并消失）；builtin MCP 实例的策略键关闭实例工具面（实例仍在 MCP 面板可见，
   按配置路径另见上文第 2 条）；
-- **策略关闭不是物理销毁**：五个维度分开看——工具可见性、LSP 文档同步、cron tick、
-  readiness 与物理生命周期互不连坐。关闭 `cron` 实例后 1s tick 由该代 builtin
-  监督者继续运行、实例保持 1R ready；关闭 `lsp` 实例或 `LspSyncMiddleware` 不关闭
-  host LSP pool；两者都不停 handler；
+- **策略关闭不是物理销毁**：四个维度分开看——工具可见性、cron tick、readiness 与
+  物理生命周期互不连坐。关闭 `cron` 实例后 1s tick 由该代 builtin 监督者继续运行、
+  实例保持 1R ready，也不停 handler；
 - **审批与提问独立**：关闭 `PermissionMiddleware` 会移除审批钩子与
   `10_hitl`；关闭 `HumanInTheLoopMiddleware` 会移除 `AskUserQuestion` 与
   `12_ask_user`；两者互不替代；

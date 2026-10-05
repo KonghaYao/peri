@@ -15,9 +15,9 @@
 
 #![allow(dead_code)]
 
-// context：宿主装配注入的实例上下文载体（`BuiltinInstanceContext` / 两份输入 /
+// context：宿主装配注入的实例上下文载体（`BuiltinInstanceContext` / 实例输入 /
 // 一次性注入的 typed 错误，owner H-02，W2）。它是「实例构造所需状态」的**唯一**载体：
-// spawn 点只从它取 cron scheduler / LSP pool / cwd，不再逐参数透传；公开可见性只经
+// spawn 点只从它取 cron scheduler / cwd，不再逐参数透传；公开可见性只经
 // `crate::assembly` 再导出（本模块自身仍是 `pub(crate)`）。
 pub(crate) mod context;
 

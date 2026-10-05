@@ -19,7 +19,7 @@
 //!
 //! 最后一条用例（`instances_have_independent_transport_task_and_state`，I01 / §8 第 15 行）
 //! 走**另一条路径**：不做 `PERI_MCP_BUILTIN=off`，而是按生产装配步骤注入上下文后让真实
-//! builtin `cron` / `lsp` 连上，断言两者的 transport / server task / 状态对象互不共享，
+//! builtin `cron` 连上，断言其 transport / server task / 状态对象与 stdio server 互不共享，
 //! 以及 close / reconnect / pool shutdown 的收敛面（与上面四条 stdio 用例**不同**，见其
 //! 函数文档）。
 //!
@@ -32,9 +32,9 @@
 //! - **capability root 隔离：未验证（UNVERIFIED）**。`McpClientPool::capability_profile`
 //!   是 pool-wide 字段且非 public，`McpConnectionKey` 亦非 public，本文件无法读取或比较
 //!   它们（因此也**未**断言 capability root 不共享）。
-//! - **注册表内实例已实迁**。`web` / `artifact` / `cron` / `lsp` / `workspace` 均已
+//! - **注册表内实例已实迁**。`web` / `artifact` / `cron` / `workspace` 均已
 //!   落地为真实 builtin 实例。本文件的
-//!   `instances_have_independent_transport_task_and_state` 走**真实 builtin cron / lsp**；
+//!   `instances_have_independent_transport_task_and_state` 走**真实 builtin cron**；
 //!   其余四条仍只覆盖两台 stdio fixture 的「已落地连接局部隔离」。两者都不代表契约 5
 //!   全文，也不代表契约 2/3/4（ready gate、direct 注入、空数组语义分别由 B-07 / D-02 负责）。
 //!
@@ -47,8 +47,8 @@
 //! `pub(crate) mod`，`mcp::client::transport` 是私有 `mod`）。
 //!
 //! 这**不构成缺口**：生产装配面本来就只经公开面注入 builtin 状态，因此真实 builtin
-//! cron / lsp 在本文件里可完整驱动 —— `peri_middlewares::assembly::{BuiltinInstanceContext,
-//! CronInstanceInput, LspInstanceInput}` +
+//! cron 在本文件里可完整驱动 —— `peri_middlewares::assembly::{BuiltinInstanceContext,
+//! CronInstanceInput}` +
 //! `McpClientPool::{set_builtin_instance_context, run_initialize, reconnect, set_disabled,
 //! remove_server, shutdown}` 全部是 `pub`。本文件**未**为测试放宽任何生产符号可见性。
 

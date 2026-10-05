@@ -45,7 +45,7 @@ v4 分阶段推进存算分离。阶段状态以代码、契约测试及 active 
 | Agent loop、Compact、provider、session                       | `peri-agent/CLAUDE.md` + architecture/rust                  |
 | ACP host、stdio、prompt、event、caps                         | `peri-acp/CLAUDE.md` + architecture/rust                    |
 | Controller/Runtime、cancel、Langfuse                         | architecture/rust + 对应 code-index                         |
-| MCP（含内置实例）、plugin、skills、subagent、HITL、工具、LSP | middlewares 与 `mcp-packages/CLAUDE.md` + architecture/rust |
+| MCP（含内置实例）、plugin、skills、subagent、HITL、工具 | middlewares 与 `mcp-packages/CLAUDE.md` + architecture/rust |
 | Workflow                                                     | middleware guide + `docs/code-index/peri-workflow.md`       |
 | TUI                                                          | `peri-tui/CLAUDE.md` + tui/rust                             |
 | E2E                                                          | `e2e/CLAUDE.md` + testing                                   |

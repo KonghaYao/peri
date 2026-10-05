@@ -16,7 +16,7 @@ use peri_acp_types::hooks::{RegisteredHook, SettingsHooksPort};
 use peri_acp_types::mcp::McpSubscriptionPort;
 use peri_acp_types::permission::SharedPermissionMode;
 use peri_acp_types::plugin::{PluginLoadResult, PluginManagerPort};
-use peri_acp_types::ports::{AgentCatalogPort, LspPoolPort, McpPoolPort, ToolSearchPort};
+use peri_acp_types::ports::{AgentCatalogPort, McpPoolPort, ToolSearchPort};
 use peri_acp_types::session_resources::{SessionResources, SessionStoreShutdownPort};
 use peri_acp_types::skills::SkillRoot;
 
@@ -51,7 +51,6 @@ pub struct HostCapabilities {
     pub builtin_mcp: bool,
     pub stdio_mcp: bool,
     pub cron: bool,
-    pub lsp: bool,
     pub plugins: bool,
     pub settings_hooks: bool,
 }
@@ -62,7 +61,6 @@ impl Default for HostCapabilities {
             builtin_mcp: true,
             stdio_mcp: true,
             cron: true,
-            lsp: true,
             plugins: true,
             settings_hooks: true,
         }
@@ -153,7 +151,7 @@ pub struct HostAssemblyInput {
     pub session_store_shutdown: Option<Box<dyn SessionStoreShutdownPort>>,
     /// 工作目录（用于加载 project/local settings hooks）
     pub cwd: String,
-    /// 跳过 settings hooks / LSP / 插件（print --bare 语义）
+    /// 跳过 settings hooks / 插件（print --bare 语义）
     pub bare: bool,
     /// 驱动 cron tick（TUI=true，复刻迁移前 TUI 每秒 tick 行为；print/stdio
     /// 保持现状无 tick——行为零变化，L2 遗留登记 M-TUI issue）。
@@ -238,7 +236,6 @@ pub async fn assemble_wasm_server_config(input: WasmHostAssemblyInput) -> AcpSer
             builtin_mcp: false,
             stdio_mcp: false,
             cron: false,
-            lsp: false,
             plugins: false,
             settings_hooks: false,
         },
@@ -471,47 +468,6 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
     #[cfg(target_os = "emscripten")]
     let cron_scheduler: Option<Arc<dyn CronSchedulerPort>> = None;
 
-    // ── LSP：配置合并 + host 级唯一 pool（A11/A21/A22，顺序冻结见 sub-plan H §5.1）──
-    //
-    // 构造归属（2026-09-29 裁决）：配置合并与 pool 工厂归 `peri_mcp_lsp`，本层只调用
-    // `peri_mcp_lsp::{load_merged_lsp_servers, create_host_lsp_pool}` 并注入同一 `Arc`；
-    // A11/A21/A22 的单 pool / 空配置 / root_uri 行为约束不变。
-    //
-    // ① 配置合并必须**早于** builtin `lsp` handler 构造：handler 在
-    //    `run_initialize` 内按生效配置非空（`has_servers()`）快照工具面，
-    //    不支持热更新（A21）；
-    // ② host pool 必须**早于** MCP 池的 `run_initialize` 构造，才能随
-    //    `BuiltinInstanceContext` 一次注入（A33）；
-    // ③ 空配置也构造 pool（`has_servers()` 假 ⇒ 工具面空表但仍 ready，A6）——
-    //    不得用「不构造」表达「无配置」。
-    //
-    // H5：全局 settings.json（config.lspServers）与插件 LSP 服务器合并
-    //（优先级对齐 MCP：global < plugin；无插件时全局配置单独生效）。
-    // 读取路径跟随宿主全局配置加载机制（config_path，支持测试重定向）。
-    #[cfg(not(target_os = "emscripten"))]
-    let plugin_lsp_servers = if bare || !capabilities.lsp {
-        Default::default()
-    } else {
-        peri_mcp_lsp::load_merged_lsp_servers(
-            &crate::provider::config_path(),
-            plugin_data
-                .as_ref()
-                .map(|pd| pd.all_lsp_servers.clone())
-                .unwrap_or_default(),
-        )
-    };
-    #[cfg(not(target_os = "emscripten"))]
-    let host_lsp_pool_concrete = capabilities
-        .lsp
-        .then(|| peri_mcp_lsp::create_host_lsp_pool(&cwd, &plugin_lsp_servers));
-    // 宿主侧投影：端口即消费面（A23/A30），链上同步中间件与 host shutdown 都只经它。
-    #[cfg(not(target_os = "emscripten"))]
-    let lsp_pool: Option<Arc<dyn LspPoolPort>> = host_lsp_pool_concrete
-        .as_ref()
-        .map(|pool| Arc::clone(pool) as Arc<dyn LspPoolPort>);
-    #[cfg(target_os = "emscripten")]
-    let (plugin_lsp_servers, lsp_pool): (Vec<_>, Option<Arc<dyn LspPoolPort>>) = (Vec::new(), None);
-
     // ── 会话 MCP 池（bare 仅装配 workspace；后台初始化不阻塞）──
     // OAuth 授权事件通道：MCP 授权回调（AuthorizationNeeded/Completed/Failed）
     // 经 tx 转发 AcpEvent，run_acp_server 侧消费者以 peri/agent_event 送达 TUI。
@@ -549,8 +505,7 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         // ── A33：builtin 实例上下文由**宿主装配**构造并注入，必须早于下面的
         //    `run_initialize` 及其后台 spawn ──
         //
-        // 同一批 `Arc`（A1）：cron 用组合根唯一 scheduler，lsp 用上面那份 host
-        // pool（同一 `Arc` 同时喂端口投影）。`closed` 的**来源**分两处：
+        // 同一批 `Arc`（A1）：cron 用组合根唯一 scheduler。`closed` 的**来源**分两处：
         // `HostAssemblyInput::builtin_closed`（会话装配从 frozen 派生）随本上下文注入
         // pool，只被订阅建立门消费；链装配（`McpMiddleware` / `open_builtin_bridges`）
         // 仍从同一 frozen policy 派生本 turn 的工具投影关闭集。
@@ -571,13 +526,6 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
                 builtin_context.with_cron(peri_middlewares::assembly::CronInstanceInput {
                     scheduler: Arc::clone(scheduler),
                     tick_enabled: drive_cron_tick,
-                });
-        }
-        #[cfg(not(target_os = "emscripten"))]
-        if let Some(pool) = &host_lsp_pool_concrete {
-            builtin_context =
-                builtin_context.with_lsp(peri_middlewares::assembly::LspInstanceInput {
-                    pool: Arc::clone(pool),
                 });
         }
         #[cfg(not(target_os = "emscripten"))]
@@ -838,9 +786,6 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         .as_ref()
         .map(|pd| peri_middlewares::plugin::plugin_route_entries(&pd.all_commands))
         .unwrap_or_default();
-    // `plugin_lsp_servers` / host pool 已在 MCP 池初始化之前构造（见上方
-    // 「LSP：配置合并 + host 级唯一 pool」块）：配置合并必须在 builtin `lsp`
-    // handler 构造之前完成（A21）。
     let plugin_hooks = plugin_data
         .as_ref()
         .map(|pd| pd.all_hooks.clone())
@@ -938,8 +883,6 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         plugin_hooks_only: plugin_hooks,
         plugin_loaded,
         hook_groups,
-        plugin_lsp_servers,
-        lsp_pool,
         tool_search_index,
         agent_catalog,
         plugin_manager,

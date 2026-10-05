@@ -93,7 +93,7 @@ pub(crate) fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> 
     Ok(())
 }
 
-/// 从 marketplace 条目生成合成 plugin.json（用于无原生 manifest 的 LSP/MCP 插件）
+/// 从 marketplace 条目生成合成 plugin.json（用于无原生 manifest 的 MCP 插件）
 pub(crate) fn generate_synthetic_manifest(
     target_dir: &Path,
     marketplace_plugin: &crate::plugin::types::MarketplacePlugin,
@@ -115,24 +115,6 @@ pub(crate) fn generate_synthetic_manifest(
     if let Some(ref author) = marketplace_plugin.author {
         if let Ok(val) = serde_json::to_value(author) {
             manifest.insert("author".into(), val);
-        }
-    }
-
-    if let Some(lsp_servers) = marketplace_plugin.extra.get("lspServers") {
-        if let Some(map) = lsp_servers.as_object() {
-            let entries: Vec<serde_json::Value> = map
-                .iter()
-                .map(|(server_name, config)| {
-                    let mut entry = config.clone();
-                    if let Some(obj) = entry.as_object_mut() {
-                        obj.insert("name".into(), serde_json::json!(server_name));
-                    }
-                    entry
-                })
-                .collect();
-            if !entries.is_empty() {
-                manifest.insert("lspServers".into(), serde_json::json!(entries));
-            }
         }
     }
 

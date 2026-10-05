@@ -49,12 +49,11 @@ fn blueprint_sequence_is_canonical() {
             "Mcp",
             "Workflow",
             "ToolSearch",
-            // 第七组：LSP / Goal（Goal 在链最后）
-            "Lsp",
+            // 第七组：Goal（Goal 在链最后）
             "Goal",
         ]
     );
-    assert_eq!(slots.len(), 19, "蓝本槽位恰 19 个");
+    assert_eq!(slots.len(), 18, "蓝本槽位恰 18 个");
 }
 
 fn slot_name(slot: &ChainSlot) -> &'static str {
@@ -76,7 +75,6 @@ fn slot_name(slot: &ChainSlot) -> &'static str {
         ChainSlot::Mcp => "Mcp",
         ChainSlot::Workflow => "Workflow",
         ChainSlot::ToolSearch => "ToolSearch",
-        ChainSlot::Lsp => "Lsp",
         ChainSlot::Goal => "Goal",
     }
 }
@@ -168,12 +166,11 @@ fn permission_mode_keeps_chain_shape() {
             Some(10),
             "mode {mode:?}: Permission 位置漂移"
         );
-        // 条件中间件（Hook/MCP/Workflow/LSP/Goal）不应出现
+        // 条件中间件（Hook/MCP/Workflow/Goal）不应出现
         for cond in [
             "HookMiddleware",
             "McpMiddleware",
             "WorkflowMiddleware",
-            "LspSyncMiddleware",
             "GoalMiddleware",
         ] {
             assert!(
@@ -242,7 +239,7 @@ fn dynamic_mcp_projection_is_bound_without_optional_registries() {
     assert!(projection.lock().is_some());
 }
 
-/// 条件注册矩阵：MCP / Workflow / LSP / Goal 开关组合。
+/// 条件注册矩阵：MCP / Workflow / Goal 开关组合。
 #[test]
 fn conditional_registration_matrix() {
     // 单独开启
@@ -277,22 +274,6 @@ fn conditional_registration_matrix() {
         "Workflow 位置错误: {names_wf:?}"
     );
 
-    // LSP：配置非空 + host pool 注入 → 同步槽位在链上（H-03 单 pool 门控：
-    // 只有配置没有 pool 不再装中间件）。
-    let mut with_lsp = base_context();
-    with_lsp.lsp_servers = vec![make_lsp_config()];
-    with_lsp.lsp_pool = Some(peri_mcp_lsp::create_host_lsp_pool(
-        "/tmp/contract-test",
-        &with_lsp.lsp_servers,
-    ));
-    let names_lsp = assemble_names(&with_lsp);
-    let pos_lsp = names_lsp
-        .iter()
-        .position(|n| n == "LspSyncMiddleware")
-        .unwrap();
-    let pos_ts_lsp = names_lsp.iter().position(|n| n == "ToolSearch").unwrap();
-    assert!(pos_ts_lsp < pos_lsp, "LSP 位置错误: {names_lsp:?}");
-
     let mut with_goal = base_context();
     with_goal.goal_controller = Some(Arc::new(FakeGoalController));
     let names_goal = assemble_names(&with_goal);
@@ -302,227 +283,13 @@ fn conditional_registration_matrix() {
     );
 }
 
-/// host pool 端口注入 → 装配直接消费同一端口（A23：端口即消费面，不再 downcast），
-/// LspSyncMiddleware 照常注册且位置不变。
-#[test]
-fn lsp_pool_port_injected_registers_middleware() {
-    let mut ctx = base_context();
-    ctx.lsp_servers = vec![make_lsp_config()];
-    ctx.lsp_pool = Some(peri_mcp_lsp::create_host_lsp_pool(
-        "/tmp/contract-test",
-        &ctx.lsp_servers,
-    ));
-
-    let names = assemble_names(&ctx);
-    let pos_lsp = names.iter().position(|n| n == "LspSyncMiddleware").unwrap();
-    let pos_ts_lsp = names.iter().position(|n| n == "ToolSearch").unwrap();
-    assert!(pos_ts_lsp < pos_lsp, "LSP 位置错误: {names:?}");
-}
-
-/// H-03 装配面：生产链上的 LSP 槽位只剩**同步**语义。
-///
-/// 三条断言：
-/// 1. 蓝本内恰有一个 `LSP` 槽位，且没有任何槽位映射回旧名 `CronMiddleware`
-///    （`ChainSlot::Cron` 已随 A8 删除，cron 能力只在 builtin 实例侧；槽位名与
-///    builtin 策略键不重叠由 `middleware_names_match_production_blueprint` 另锁）；
-/// 2. 配置非空 + 注入 host pool ⇒ 链上出现 `LspSyncMiddleware`，且链上**不出现**
-///    中间件名 `LspMiddleware`（槽位名已迁移，旧名回流即红）；
-/// 3. 无 LSP 配置 ⇒ 不出现 `LspSyncMiddleware`（配置非空仍是前置条件）。
-#[test]
-fn production_chain_has_only_lsp_sync_slot() {
-    let blueprint = production_blueprint();
-    let lsp_slots = blueprint
-        .iter()
-        .filter(|slot| matches!(slot, ChainSlot::Lsp))
-        .count();
-    assert_eq!(lsp_slots, 1, "蓝本必须恰有一个 Lsp 槽位: {blueprint:?}");
-    let slot_names: Vec<&str> = blueprint.iter().map(slot_middleware_name).collect();
-    assert!(
-        !slot_names.contains(&"CronMiddleware"),
-        "蓝本不得再出现 cron 链槽位（`ChainSlot::Cron` 已删除，cron 能力只在 builtin 实例侧）: {slot_names:?}"
-    );
-
-    // 有配置 + host pool：槽位装同步中间件，旧名不回流。
-    let mut ctx = base_context();
-    ctx.lsp_servers = vec![make_lsp_config()];
-    ctx.lsp_pool = Some(peri_mcp_lsp::create_host_lsp_pool(
-        "/tmp/contract-test",
-        &ctx.lsp_servers,
-    ));
-    let names = assemble_names(&ctx);
-    assert!(
-        names.iter().any(|n| n == "LspSyncMiddleware"),
-        "配置非空 + host pool 注入时链上应有 LspSyncMiddleware: {names:?}"
-    );
-    assert!(
-        !names.iter().any(|n| n == "LspMiddleware"),
-        "槽位名已迁移到 LspSyncMiddleware，旧名不得回流到链上: {names:?}"
-    );
-
-    // 无配置：即使 pool 存在也不装（配置非空前置条件保留）。
-    let mut no_config = base_context();
-    no_config.lsp_pool = Some(peri_mcp_lsp::create_host_lsp_pool(
-        "/tmp/contract-test",
-        &[],
-    ));
-    let names_no_config = assemble_names(&no_config);
-    assert!(
-        !names_no_config.iter().any(|n| n == "LspSyncMiddleware"),
-        "无 LSP 配置时不得装同步中间件: {names_no_config:?}"
-    );
-}
-
-/// H-03 / S1：两个 LSP 关闭键的交叉矩阵（`LspMiddleware` / `LspSyncMiddleware`）。
-///
-/// | `LspMiddleware` | `LspSyncMiddleware` | 同步槽位 |
-/// |---|---|---|
-/// | 开 | 开 | 装 |
-/// | 关 | 开 | 不装（实例键同时关同步目标） |
-/// | 开 | 关 | 不装 |
-/// | 关 | 关 | 不装 |
-///
-/// 任何组合下链上都不出现 `LspMiddleware`——它是 builtin 实例的 policy key，
-/// 不是链上中间件名（槽位名已迁移，旧名回流即红）。
-#[test]
-fn lsp_slot_omitted_when_instance_or_sync_closed() {
-    for (instance_closed, sync_closed) in
-        [(false, false), (true, false), (false, true), (true, true)]
-    {
-        let mut ctx = base_context();
-        ctx.lsp_servers = vec![make_lsp_config()];
-        ctx.lsp_pool = Some(peri_mcp_lsp::create_host_lsp_pool(
-            "/tmp/contract-test",
-            &ctx.lsp_servers,
-        ));
-        if instance_closed {
-            ctx.meta_harness_disabled
-                .insert("LspMiddleware".to_string());
-        }
-        if sync_closed {
-            ctx.meta_harness_disabled
-                .insert("LspSyncMiddleware".to_string());
-        }
-
-        let names = assemble_names(&ctx);
-        let expected = !instance_closed && !sync_closed;
-        assert_eq!(
-            names.iter().any(|n| n == "LspSyncMiddleware"),
-            expected,
-            "LspMiddleware={instance_closed} / LspSyncMiddleware={sync_closed} 的装/不装不符（A7/A8 交叉矩阵）: {names:?}"
-        );
-        assert!(
-            !names.iter().any(|n| n == "LspMiddleware"),
-            "LspMiddleware 是 builtin 实例 policy key、不是链上中间件名，任何组合都不得出现: {names:?}"
-        );
-    }
-}
-
-/// H-03 / S3：host 级 pool 工厂**无条件返回**（空配置也返回），且保持惰性。
-///
-/// 空配置 ⇒ `has_servers()` 为假 ⇒ `lsp` 实例工具面为空表但仍 ready（A6/A21）：
-/// 不得用「返回 None / 不构造」表达「无配置」。惰性证据：本用例的配置命令是
-/// 假命令（`make_lsp_config` 的 `test-lsp-bin`），若工厂在此拉起 language server
-/// 进程，构造/断言就会失败。
-#[test]
-fn host_lsp_pool_factory_allows_empty_config() {
-    let empty = peri_mcp_lsp::create_host_lsp_pool("/tmp/contract-test", &[]);
-    assert!(
-        !empty.has_servers(),
-        "空配置的 host pool 不得声称有可用 server"
-    );
-
-    let with_server =
-        peri_mcp_lsp::create_host_lsp_pool("/tmp/contract-test", &[make_lsp_config()]);
-    assert!(
-        with_server.has_servers(),
-        "有配置时 host pool 应登记 server（只登记配置表，不拉进程）"
-    );
-}
-
-/// H5：无插件但全局 settings.json 存在 `config.lspServers` 时，合并结果
-/// 非空且 source 标记为 Global；装配级验证——会话级 pool 非空、
-/// 链上注册 LspSyncMiddleware（此前无插件时 LSP 产品线静默不可用）。
-#[test]
-fn merged_lsp_servers_global_without_plugins_registers_middleware() {
-    let temp = tempfile::tempdir().unwrap();
-    let settings = temp.path().join("settings.json");
-    std::fs::write(
-        &settings,
-        r#"{"config":{"lspServers":{"rust-analyzer":{"command":"rust-analyzer"}}}}"#,
-    )
-    .unwrap();
-
-    let merged = peri_mcp_lsp::load_merged_lsp_servers(&settings, Vec::new());
-    assert_eq!(merged.len(), 1, "全局配置应单独生效");
-    let server = &merged[0];
-    assert_eq!(server.name, "rust-analyzer");
-    assert!(
-        matches!(server.source, Some(LspConfigSource::Global(ref p)) if p == &settings),
-        "全局来源应标记 Global: {:?}",
-        server.source
-    );
-
-    // 装配级：合并结果 → host 级 pool → 链上注册 LspSyncMiddleware
-    let mut ctx = base_context();
-    ctx.lsp_servers = merged.clone();
-    ctx.lsp_pool = Some(peri_mcp_lsp::create_host_lsp_pool(
-        "/tmp/contract-test",
-        &ctx.lsp_servers,
-    ));
-    let names = assemble_names(&ctx);
-    assert!(
-        names.iter().any(|n| n == "LspSyncMiddleware"),
-        "无插件但全局配置存在时 LspSyncMiddleware 应注册: {names:?}"
-    );
-}
-
-/// H5：合并方向对齐 MCP（global < plugin）——同名 key 插件覆盖全局。
-#[test]
-fn merged_lsp_servers_plugin_overrides_global() {
-    let temp = tempfile::tempdir().unwrap();
-    let settings = temp.path().join("settings.json");
-    std::fs::write(
-        &settings,
-        r#"{"config":{"lspServers":{"same":{"command":"global-bin"}}}}"#,
-    )
-    .unwrap();
-
-    let plugin = LspServerConfig {
-        name: "same".to_string(),
-        command: "plugin-bin".to_string(),
-        ..make_lsp_config()
-    };
-    let merged = peri_mcp_lsp::load_merged_lsp_servers(&settings, vec![plugin]);
-    assert_eq!(merged.len(), 1, "同名 key 应合并为一条");
-    assert_eq!(merged[0].command, "plugin-bin", "插件应覆盖全局");
-}
-
-/// H5：settings.json 不存在或无 `lspServers` 字段时返回空 Vec
-/// （装配处 `lsp_servers.is_empty()` 条件注册语义不变）。
-#[test]
-fn merged_lsp_servers_empty_without_global_config() {
-    let temp = tempfile::tempdir().unwrap();
-    let missing = temp.path().join("missing.json");
-    assert!(peri_mcp_lsp::load_merged_lsp_servers(&missing, Vec::new()).is_empty());
-
-    let no_lsp = temp.path().join("settings.json");
-    std::fs::write(&no_lsp, r#"{"config":{"mcpServers":{}}}"#).unwrap();
-    assert!(peri_mcp_lsp::load_merged_lsp_servers(&no_lsp, Vec::new()).is_empty());
-}
-
-/// 全开组合：完整序列精确断言（Hook 2 组 + MCP + Workflow + LSP + Goal）。
+/// 全开组合：完整序列精确断言（Hook 2 组 + MCP + Workflow + Goal）。
 #[test]
 fn full_config_chain_order() {
     let mut ctx = base_context();
     ctx.hook_groups = vec![vec![make_hook()], vec![make_hook()]];
     ctx.mcp_pool = Some(Arc::new(McpClientPool::new_empty()));
     ctx.workflow_executor = Some(Arc::new(FakeAgentExecutor));
-    ctx.lsp_servers = vec![make_lsp_config()];
-    // H-03 单 pool 门控：同步槽位需要 host pool（只有配置不够）。
-    ctx.lsp_pool = Some(peri_mcp_lsp::create_host_lsp_pool(
-        "/tmp/contract-test",
-        &ctx.lsp_servers,
-    ));
     ctx.goal_controller = Some(Arc::new(FakeGoalController));
 
     let names = assemble_names(&ctx);
@@ -547,7 +314,6 @@ fn full_config_chain_order() {
             "McpMiddleware",
             "WorkflowMiddleware",
             "ToolSearch",
-            "LspSyncMiddleware",
             "GoalMiddleware",
         ]
     );

@@ -132,7 +132,7 @@ pub(super) const W2_EVERY_SECOND_CRON: &str = "* * * * * *";
 /// 生产装配 + 真实 `run_initialize` 的宿主夹具（`drive_cron_tick` 可控）。
 ///
 /// 与 [`BuiltinHostFixture`] 的差别只有一处，但这一处是本组用例的前提：pool / cron
-/// scheduler / host LSP pool / `SessionManager` 全部来自**同一次**生产装配
+/// scheduler / `SessionManager` 全部来自**同一次**生产装配
 /// （`peri-acp/src/host/assemble.rs`），所以「cron 工具面、1s tick 驱动、宿主端口
 /// `cfg.cron_scheduler`、session 级 cron bridge 订阅的是同一份 scheduler」是**构造事实**，
 /// 不是用例的假设：用例再用一次 `downcast_arc::<CronSchedulerPortHandle>()`
@@ -151,18 +151,6 @@ pub(super) struct AssembledHostFixture {
 
 impl AssembledHostFixture {
     pub(super) async fn start(dirs: FixtureDirs, drive_cron_tick: bool) -> Self {
-        // A6/A21：`lsp` 的工具面按**生效配置**（`has_servers()`）构造 ⇒ 夹具写入一份全局
-        // LSP 配置（命令指向不存在的可执行文件，池是惰性构造，不 spawn 任何进程），
-        // 否则 `lsp` 实例虽然 ready 但工具面是空表，生命周期矩阵的 lsp 行就失去了工具面。
-        dirs.write_lsp_settings("w2_assembled");
-        Self::start_with_settings_written(dirs, drive_cron_tick).await
-    }
-
-    /// 同 [`Self::start`]，但 LSP 配置由调用方预先写入。
-    pub(super) async fn start_with_settings_written(
-        dirs: FixtureDirs,
-        drive_cron_tick: bool,
-    ) -> Self {
         let mut cfg = assemble_host_with_tick(&dirs, drive_cron_tick).await;
         // 装配产出的唯一 MCP task owner：夹具必须持有到用例结束（task 归属在它手上）。
         let owner = cfg
@@ -203,7 +191,7 @@ impl AssembledHostFixture {
             .expect("初始化任务不得 panic");
         let status = status_rx.borrow().clone();
         assert!(
-            matches!(status, McpInitStatus::Ready { total: 5 }),
+            matches!(status, McpInitStatus::Ready { total: 4 }),
             "装配池必须 4/4 ready（否则 tick / 工具面 / 生命周期断言面全是空的）: {status:?}"
         );
         Self {

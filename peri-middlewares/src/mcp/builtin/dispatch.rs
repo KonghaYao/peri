@@ -4,7 +4,7 @@
 //! 具体的 `ServerHandler`，并以枚举擦除类型差异交给 `mcp::builtin::runtime` 装配。
 //! 本模块**只**做分派与转发，不持有实例语义：
 //! - 实例的业务面（工具清单、`tools/call` 的结果映射）在独立的 `peri-mcp-*` crates；
-//! - 实例所需状态（cron scheduler / LSP pool / cwd / workspace 的 session 级输入）统一经
+//! - 实例所需状态（cron scheduler / cwd / workspace 的 session 级输入）统一经
 //!   [`BuiltinInstanceContext`] 传入——`cwd` 不再是独立参数，输入是否齐备由
 //!   `context::instance_input_ready` 在 dispatch **之前**判定，因此本工厂的 `None` 只
 //!   表示「handler 未接线」，不表示「输入没给全」（`workspace` 例外：它的输入缺失是
@@ -30,8 +30,6 @@ use rmcp::{
 use super::context::BuiltinInstanceContext;
 use peri_mcp_artifact::ArtifactMcpServer;
 use peri_mcp_cron::CronMcpServer;
-#[cfg(not(target_os = "emscripten"))]
-use peri_mcp_lsp::LspMcpServer;
 use peri_mcp_web::WebMcpServer;
 use peri_mcp_workspace::WorkspaceMcpServer;
 
@@ -46,8 +44,6 @@ pub(crate) enum BuiltinServerHandler {
     Web(WebMcpServer),
     Artifact(ArtifactMcpServer),
     Cron(CronMcpServer),
-    #[cfg(not(target_os = "emscripten"))]
-    Lsp(LspMcpServer),
     Workspace(WorkspaceMcpServer),
 }
 
@@ -59,8 +55,6 @@ impl ServerHandler for BuiltinServerHandler {
             Self::Web(server) => server.get_info(),
             Self::Artifact(server) => server.get_info(),
             Self::Cron(server) => server.get_info(),
-            #[cfg(not(target_os = "emscripten"))]
-            Self::Lsp(server) => server.get_info(),
             Self::Workspace(server) => server.get_info(),
         }
     }
@@ -74,8 +68,6 @@ impl ServerHandler for BuiltinServerHandler {
             Self::Web(server) => server.list_tools(request, context).await,
             Self::Artifact(server) => server.list_tools(request, context).await,
             Self::Cron(server) => server.list_tools(request, context).await,
-            #[cfg(not(target_os = "emscripten"))]
-            Self::Lsp(server) => server.list_tools(request, context).await,
             Self::Workspace(server) => server.list_tools(request, context).await,
         }
     }
@@ -89,8 +81,6 @@ impl ServerHandler for BuiltinServerHandler {
             Self::Web(server) => server.call_tool(request, context).await,
             Self::Artifact(server) => server.call_tool(request, context).await,
             Self::Cron(server) => server.call_tool(request, context).await,
-            #[cfg(not(target_os = "emscripten"))]
-            Self::Lsp(server) => server.call_tool(request, context).await,
             Self::Workspace(server) => server.call_tool(request, context).await,
         }
     }
@@ -230,8 +220,6 @@ impl ServerHandler for BuiltinServerHandler {
 /// - `artifact`：`ctx.cwd` 是相对路径解析根（不是安全沙箱）；
 /// - `cron`：`ctx.cron` 的 scheduler 以 `Arc` 克隆进 handler（A1：组合根同一份，
 ///   本工厂不新建第二份，也不挂 tick——tick 归 pool 的唯一 spawn 点 A32）；
-/// - `lsp`：`ctx.lsp` 的 pool 以 `Arc` 克隆进 handler（工具面在 handler 构造时按
-///   `has_servers()` 快照，本工厂不做任何配置读取）；
 /// - `workspace`：`ctx.cwd` 是 7 个工具共享的 host cwd（相对路径解析根 + `Bash` 的
 ///   `current_dir`），`ctx.workspace` 的 session 级输入以 `Clone` 克隆进 handler
 ///   （`Arc` 克隆，不复制状态：`task_manager` / `on_bg_complete` 各只被搬进 `BashTool`
@@ -239,12 +227,12 @@ impl ServerHandler for BuiltinServerHandler {
 ///   `WorkspaceMcpServer::with_resources`（`None` = 资源面未接线）。两个槽位各自独立：
 ///   资源面不因 session 级输入缺失而消失，反之亦然。
 ///
-/// **与 `cron` / `lsp` 的差别（AW3-11）**：`workspace` 的 arm 是**无条件**构造的——
+/// **与 `cron` 的差别（AW3-11）**：`workspace` 的 arm 是**无条件**构造的——
 /// `ctx.workspace` 为 `None` 时同样返回 `Some`（「可见但退化」：实例照常装配，只有 `Bash`
 /// 失去后台任务那一路），因此 `None` 在这一支上**不是** `HandlerNotWired`。
 ///
-/// **`None` 的诚实口径**：对 `cron` / `lsp`，缺对应输入的上下文同样返回 `None`
-/// （`ctx.cron` / `ctx.lsp` 为 `None` 时无状态可注入）。但这条路径经冻结 seam
+/// **`None` 的诚实口径**：对 `cron`，缺对应输入的上下文同样返回 `None`
+/// （`ctx.cron` 为 `None` 时无状态可注入）。但这条路径经冻结 seam
 /// **不可达**：`runtime::spawn_builtin_transport_with_context` 在调本工厂**之前**已用
 /// `BuiltinInstanceContext::instance_input_ready` 给出 typed
 /// `BuiltinSpawnError::InstanceInputMissing`，因此本工厂的 `None` 只在
@@ -265,13 +253,6 @@ pub(crate) fn builtin_server_handler_with_env(
         "cron" => ctx.cron.as_ref().map(|cron| {
             BuiltinServerHandler::Cron(CronMcpServer::new(Arc::clone(&cron.scheduler)))
         }),
-        #[cfg(not(target_os = "emscripten"))]
-        "lsp" => ctx
-            .lsp
-            .as_ref()
-            .map(|lsp| BuiltinServerHandler::Lsp(LspMcpServer::new(Arc::clone(&lsp.pool)))),
-        #[cfg(target_os = "emscripten")]
-        "lsp" => None,
         "workspace" => {
             // The MCP instance owns its Bash tasks. Session state is never
             // injected into the capability server.

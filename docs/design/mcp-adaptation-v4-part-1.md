@@ -19,7 +19,7 @@
 - MCP 配置与协议行为：`peri-middlewares/src/mcp/config.rs`、`peri-middlewares/src/mcp/client/transport.rs` 及其契约测试。
 - 当前实现验证优先级：代码与契约测试 > `docs/standards/` > 本设计文档 > 对应 active issue。本文作为 v4 目标架构文档，不替代当前实现的事实记录。
 
-当前路径导航（2026-09-29）：Builtin MCP 的 handler 与工具已拆为 `mcp-packages/{common,web,artifact,cron,lsp,workspace}` 独立 crate；`peri-middlewares` 继续持有实例装配、context、dispatch、transport 与生命周期。具体入口、边界及测试命令见 [MCP packages 代码索引](../code-index/mcp-packages.md) 与 [`peri-middlewares` 代码索引](../code-index/peri-middlewares.md)。下文保留批准时的目标语义和历史类型分类，不将旧 middleware 路径当作现行源码路径。
+当前路径导航（2026-09-29）：Builtin MCP 的 handler 与工具已拆为 `mcp-packages/{common,web,artifact,cron,workspace}` 独立 crate；`peri-middlewares` 继续持有实例装配、context、dispatch、transport 与生命周期。具体入口、边界及测试命令见 [MCP packages 代码索引](../code-index/mcp-packages.md) 与 [`peri-middlewares` 代码索引](../code-index/peri-middlewares.md)。下文保留批准时的目标语义和历史类型分类，不将旧 middleware 路径当作现行源码路径。
 
 ## MCP 运行形态
 
@@ -70,15 +70,14 @@ v4 MCP 配置定义 `system_mcp` 标识，用于声明该 MCP 是 react loop 的
 
 ## 最小 MCP 隔离设计
 
-**最小合理数量：5 个相互隔离的 MCP 实例**，而不是让每个 middleware 各自实现一套 MCP 协议：
+**最小合理数量：4 个相互隔离的 MCP 实例**，而不是让每个 middleware 各自实现一套 MCP 协议：
 
 1. **Workspace MCP**：现由 `peri-mcp-workspace` 提供 handler、文件与进程工具实现（`mcp-packages/workspace/src/`）；宿主在 `peri-middlewares/src/mcp/builtin/` 持有实例 context 与 runtime。schema 与描述从工具实现生成，不维护独立服务器或第二份工具实现。
 2. **Artifact MCP**：单独提供 HTML/Markdown 内容发布、转换、TTL 和公开 URL 能力。
 3. **Web MCP**：将 `WebSearch` 与 `WebFetch` 合并，提供外部网页搜索和抓取能力。
 4. **Cron MCP**：提供定时任务注册、查询、删除和触发事件能力。
-5. **LSP MCP**：提供代码智能、诊断、符号、引用和调用关系能力。
 
-MCP 是最小隔离单位：这 5 个 MCP 可以复用 Rust library、schema、错误类型和测试工具，但不能复用运行时实例、进程、状态、凭据、capability root 或 client pool。不同 MCP 之间不互相调用；如果需要传递内容、文件变更或触发事件，由 Agent/Runtime 分别调用 MCP，并通过宿主端口接收结果。
+MCP 是最小隔离单位：这 4 个 MCP 可以复用 Rust library、schema、错误类型和测试工具，但不能复用运行时实例、进程、状态、凭据、capability root 或 client pool。不同 MCP 之间不互相调用；如果需要传递内容、文件变更或触发事件，由 Agent/Runtime 分别调用 MCP，并通过宿主端口接收结果。
 ```mermaid
 flowchart LR
     subgraph HOST[Agent / Runtime 宿主语义]
@@ -96,7 +95,7 @@ flowchart LR
         SYSTEM_TOOLS[system_mcp_tools<br/>required tools<br/>direct injection / no ToolSearch]
     end
 
-    subgraph MCP[5 个彼此隔离的 MCP 实例]
+    subgraph MCP[4 个彼此隔离的 MCP 实例]
         WS[Workspace MCP<br/>独立实例 / 独立状态]
         WSCAP[Workspace MCP tools<br/>Read / Write / Edit / Glob / Grep<br/>folder_operations / Bash<br/>Filesystem / Terminal / GitWatch / Skill tools<br/>v4 目标能力集合]
 
@@ -108,9 +107,6 @@ flowchart LR
 
         CRON[Cron MCP<br/>独立实例 / 独立状态]
         CRONCAP[Cron MCP 目标能力<br/>register / list / remove<br/>trigger events]
-
-        LSP[LSP MCP<br/>独立实例 / 独立状态]
-        LSPCAP[LSP MCP 目标能力<br/>diagnostics / symbols / references<br/>call hierarchy / implementations]
     end
 
     subgraph LIBS[可复用代码，不是共享实例]
@@ -138,7 +134,6 @@ flowchart LR
     MCP_MW --> ART
     MCP_MW --> WEB_MCP
     MCP_MW --> CRON
-    MCP_MW --> LSP
     MCP_MW --> SYSTEM_TOOLS
     SYSTEM_TOOLS --> RCRA
 
@@ -146,13 +141,11 @@ flowchart LR
     ART --> ARTCAP
     WEB_MCP --> WEBCAP
     CRON --> CRONCAP
-    LSP --> LSPCAP
 
     WS -. "复用代码，不共享实例" .- COMMON
     ART -. "复用代码，不共享实例" .- COMMON
     WEB_MCP -. "复用代码，不共享实例" .- COMMON
     CRON -. "复用代码，不共享实例" .- COMMON
-    LSP -. "复用代码，不共享实例" .- COMMON
 
     AGENT --> CONTROL
     PORTS --> CONTROL
@@ -171,11 +164,10 @@ flowchart LR
 | Artifact 发布 | Artifact MCP | Agent/Runtime 显式准备内容后调用 Artifact MCP；Artifact MCP 只处理显式传入的内容，不能访问 Workspace MCP 的文件系统，也不能共享 Workspace MCP 的 capability root。 |
 | Web 搜索与抓取 | Web MCP | `WebSearch` 与 `WebFetch` 可以共享代码和协议面，但运行时使用独立的 Web MCP 进程、网络策略和凭据。 |
 | Cron 调度 | Cron MCP | `CronMiddleware` 可迁移为独立 Cron MCP；注册表和触发器留在 Cron MCP 内，Agent 只通过工具请求和宿主事件端口接入。 |
-| LSP 代码智能 | LSP MCP | `LspMiddleware` 可迁移为独立 LSP MCP；LSP server pool 和诊断状态留在 LSP MCP 内，文件变更同步由 Agent/Runtime 显式发送。 |
 | Plugin MCP/Skills 配置 | Workspace MCP + 宿主语义 | 可以调用 Workspace MCP 读取 manifest 和配置文件，但来源合并、命名空间、去重和插件生命周期仍属于 Plugin/MCP adapter。 |
-| Approval、Question、Hook、SubAgent、Workflow、Goal | 不经这 5 个 MCP | 这些需要交互 broker、Agent state、外部 runtime 或宿主生命周期，强行映射为 MCP 会损失契约并扩大权限。 |
+| Approval、Question、Hook、SubAgent、Workflow、Goal | 不经这 4 个 MCP | 这些需要交互 broker、Agent state、外部 runtime 或宿主生命周期，强行映射为 MCP 会损失契约并扩大权限。 |
 
-因此“最小合理数量”是**5 个彼此隔离、互不调用的 MCP 实例**，不是 28 个 middleware 对应 28 个 MCP server；代码可以复用，MCP 运行时不能复用：Workspace MCP 负责本地能力，Artifact MCP 负责发布，Web MCP 负责外部信息读取，Cron MCP 负责调度，LSP MCP 负责代码智能，其余 middleware 通过 `peri-agent` / `peri-acp-types` 的宿主 seam 直接实现。
+因此“最小合理数量”是**4 个彼此隔离、互不调用的 MCP 实例**，不是 28 个 middleware 对应 28 个 MCP server；代码可以复用，MCP 运行时不能复用：Workspace MCP 负责本地能力，Artifact MCP 负责发布，Web MCP 负责外部信息读取，Cron MCP 负责调度，其余 middleware 通过 `peri-agent` / `peri-acp-types` 的宿主 seam 直接实现。
 
 ## 完整列表
 
@@ -195,7 +187,7 @@ flowchart LR
 | 10 | `WebMiddleware` | 现行工具与 handler：`mcp-packages/web/src/`；历史 middleware 类型 `peri-middlewares/src/middleware/web.rs` 已删除 | 目标：完全下放 → Web MCP | `WebSearch` 与 `WebFetch` 统一进入 Web MCP，Agent 侧只保留 MCP 对接。 |
 | 11 | `TodoMiddleware` | `peri-middlewares/src/middleware/todo.rs` | 部分下放 | Todo 文件/工具操作可由 Workspace MCP 执行，但 todo channel 与 session/UI 状态回写仍由宿主注入。 |
 | 12 | `CronMiddleware` | 现行 scheduler、工具与 handler：`mcp-packages/cron/src/`；宿主 tick supervision：`peri-middlewares/src/mcp/builtin/runtime.rs`；历史 middleware 类型 `peri-middlewares/src/cron/middleware.rs` 已删除 | 目标：完全下放 → Cron MCP | scheduler、注册/查询/删除和触发事件进入 Cron MCP；当前 tick task 的 spawn、reconnect 与 join 由宿主 runtime 监督。Agent 侧通过 MCP 对接和宿主事件端口接收触发。 |
-| 13 | `LspMiddleware` | LSP 客户端、pool、配置加载、工具与 handler：`mcp-packages/lsp/src/`；文档同步中间件：`peri-middlewares/src/lsp/middleware.rs`（`LspSyncMiddleware`） | 已完成：完全下放 → LSP MCP | LSP MCP 拥有客户端与 host 级唯一 pool；host 装配经 `peri_mcp_lsp::create_host_lsp_pool` 注入同一 `Arc`，`LspSyncMiddleware` 只消费端口，host shutdown 保留有界关闭。 |
+| 13 | `LspMiddleware` | 已删除（原 `mcp-packages/lsp/src/`、`peri-middlewares/src/lsp/` 与 `LspSyncMiddleware`） | **已删除** | LSP 客户端、pool、文档同步与 builtin `lsp` 实例已整体移除，不再属于现行 middleware、链槽位或 MCP 实例清单。 |
 | 14 | `WorkflowMiddlewareAdaptor` | `peri-middlewares/src/workflow/mod.rs` | 独立 Middleware | Workflow executor、progress、通知、kill/resume 和 session 生命周期属于 Runtime，不下放到 MCP。 |
 | 15 | `FilesystemMiddleware` | 现行文件工具：`mcp-packages/workspace/src/filesystem/`；历史 middleware 类型 `peri-middlewares/src/middleware/filesystem.rs` 已删除 | 目标：完全下放 → Workspace MCP | filesystem 工具、workspace path 解析、读写和目录操作统一由 Workspace MCP 提供，宿主保留 MCP 对接。 |
 | 16 | `TerminalMiddleware` | 现行 Bash 工具：`mcp-packages/workspace/src/terminal.rs`；历史 middleware 类型 `peri-middlewares/src/middleware/terminal.rs` 已删除 | 目标：完全下放 → Workspace MCP | terminal/Bash 工具、进程执行和任务输出统一由 Workspace MCP 提供，宿主保留 MCP 对接。 |
@@ -217,7 +209,6 @@ flowchart LR
 
 - `WorkflowMiddleware`：`peri-middlewares/src/workflow/mod.rs`，由 `WorkflowMiddlewareAdaptor` 接入链。
 - `CronScheduler`：现位于 `mcp-packages/cron/src/scheduler.rs`；宿主消费 `CronSchedulerPort` 并负责该代 tick task 的监督。
-- `LspServerPool`：由 `peri-mcp-lsp` 提供，已成为 LSP MCP 内部实现；host 装配通过公开 seam 注入同一 `Arc`，Agent/Runtime 只经 MCP 请求与文件变更同步端口接入。
 - `McpClientPool`、`McpTaskOwner`、`DynamicMcpRegistry`：`peri-middlewares/src/mcp/`，由 `McpMiddleware` 和 `DynamicMcpMiddleware` 使用。
 - `SkillTool`、`DiscoverSkillsTool`、`SubAgentTool`、各类 filesystem/web/terminal 工具：由对应 middleware 的 `collect_tools` 提供，不是单独的 middleware。**两个技能工具保留在宿主**（J3，workspace 不注册同名工具）；W4b 起只消费 MCP 来源（`resources/read` + digest/frontmatter 校验，本地技能同规则），宿主不再有本地技能读取通路。
 - `ProductionChainAssembler`：`peri-middlewares/src/assembly.rs`，是所有 middleware 的组合根，不是 middleware；迁移时应保留为装配层。
@@ -230,7 +221,7 @@ flowchart LR
 2. System MCP 在 transport、协议初始化、能力协商和必需工具检查完成前，不得进入可启动的 react loop；任一失败或 timeout 都返回错误，不发布 ready。
 3. `system_mcp_tools` 的每个工具都经过所属 MCP namespace 解析，工具 schema 可构造为 bridge，并直接出现在 RCRA 工具列表；普通 deferred tool 仍走既有 `ToolSearchMiddleware` 路径。
 4. 必需工具为空数组时只验证 System MCP ready，不注入额外工具。
-5. 五个目标 MCP 的 transport、状态、凭据、capability root 和 client pool 不共享；MCP 之间不得通过隐式调用建立依赖。
+5. 四个目标 MCP 的 transport、状态、凭据、capability root 和 client pool 不共享；MCP 之间不得通过隐式调用建立依赖。
 6. 对宿主保留的 Permission、HITL、Hook、SubAgent、Workflow、Goal  能力，迁移设计不得绕过既有 cancel、审批、事件、session 或 effective tool name 契约。
 7. v4 目标归属未完成迁移前，当前实现和文档必须能区分“目标归属”与“已落地能力”，不得以绿色的局部单测宣告整体迁移完成。
 

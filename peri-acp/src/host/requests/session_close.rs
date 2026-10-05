@@ -221,9 +221,6 @@ pub(super) async fn close_owned_session(
             .close_session(session_id)
             .await
             .map_err(super::super::super::workspace::workspace_error)?;
-        // A11/A22：`session/delete` **不**关闭 LSP pool——pool 归 host（同一 `Arc`
-        // 被多 session 共享），关闭只发生在 host shutdown。此处若关闭，会把其它
-        // 仍活跃 session 的 language server 一起掐掉。
         if let Some(environment) = environment.as_ref() {
             let shutdown = async { Ok::<_, AcpError>(environment.shutdown().await) };
             let drained = if let Some(heartbeat) = &close_heartbeat {

@@ -46,21 +46,6 @@ fn meta_harness_disables_conditional_middleware_despite_conditions() {
         "{names:?}"
     );
 
-    // LSP：配置存在 + host pool 注入（运行条件满足）+ 关闭键 disabled → 不注册同步槽位。
-    // 两个关闭键都会让槽位不装（A7/A8 交叉矩阵）：`LspMiddleware` = builtin 实例工具面
-    // **且**同步目标；`LspSyncMiddleware` = 只关同步。四组合矩阵见
-    // `lsp_slot_omitted_when_instance_or_sync_closed`，此处只锁「条件满足但关闭后不装」。
-    let mut ctx = base_context();
-    ctx.lsp_servers = vec![make_lsp_config()];
-    ctx.lsp_pool = Some(peri_mcp_lsp::create_host_lsp_pool(
-        "/tmp/contract-test",
-        &ctx.lsp_servers,
-    ));
-    ctx.meta_harness_disabled
-        .insert("LspMiddleware".to_string());
-    let names = assemble_names(&ctx);
-    assert!(!names.iter().any(|n| n == "LspSyncMiddleware"), "{names:?}");
-
     // Goal：controller 存在 + disabled → 不注册
     let mut ctx = base_context();
     ctx.goal_controller = Some(Arc::new(FakeGoalController));
@@ -465,7 +450,7 @@ fn meta_harness_disabled_parent_tools_filtered() {
 
     // 面③（parent_tools）：**direct-only** 面（`open_builtin_bridges` 只保留 direct）。
     // 未关闭时声明 `direct: true` 的 builtin 工具必须在场且直连性等于声明；
-    // 声明 `direct: false` 的（cron 三工具 + lsp 单工具）必须缺席——deferred 工具在
+    // 声明 `direct: false` 的（cron 三工具）必须缺席——deferred 工具在
     // 这条链上没有 ToolSearch 可发现，注入即模型看不见的注册项。
     let mut ctx = base_context();
     ctx.mcp_pool = Some(pool_with_builtin_instances());
@@ -634,7 +619,6 @@ fn middleware_tool_names_match_static_tool_sets() {
             "ToolSearch",
             "SearchExtraTools",
             "ExecuteExtraTool",
-            // （LSP 已迁 builtin 实例 `mcp__lsp__LSP`，不再是 middleware 静态工具）
             // GoalMiddleware
             "goal",
             // McpMiddleware（静态部分）

@@ -3,7 +3,7 @@ use super::*;
 // A. 真实启动路径（生产 loader + 生产 transport + 生产 handler）
 // ══════════════════════════════════════════════════════════════════════════════════
 
-/// 生产启动路径：**四个**已实现 builtin 实例（web / artifact / cron / lsp）经真实 loader
+/// 生产启动路径：**四个**已实现 builtin 实例（web / artifact / cron / workspace）经真实 loader
 /// （step 6.5 默认层）落地为 **Connected** 句柄，live `tools/list` 的工具清单等于注册表声明，
 /// 且配置侧声明与注册表一致。
 ///
@@ -309,7 +309,7 @@ async fn closure_matrix_four_faces_on_real_builtin_pool() {
             .iter()
             .filter(|instance| !closed.contains(instance.name))
             .collect();
-        // 面①/③的 direct 面 = 未关闭实例**声明为 direct** 的工具（cron / lsp 声明
+        // 面①/③的 direct 面 = 未关闭实例**声明为 direct** 的工具（cron 声明
         // `direct: false`，因此不在其中——`direct_names_of` 与 `open_builtin_bridges`
         // 都只保留 direct）。
         let expected_open_direct: Vec<String> = sorted(
@@ -320,7 +320,7 @@ async fn closure_matrix_four_faces_on_real_builtin_pool() {
         );
         // 面①的 required 只由「有必需工具的实例」产出（`required` 来自
         // `SystemMcpConfig::system_mcp_tools`，空集合 = 只要求 ready、不做工具校验，见
-        // `mcp/system_tools.rs` 的 `prepare_system_tools` 文档）：cron / lsp 的
+        // `mcp/system_tools.rs` 的 `prepare_system_tools` 文档）：cron 的
         // `system_mcp_tools` 是空集，因此不出现在 required 里。
         let mut expected_servers: Vec<String> = open_instances
             .iter()

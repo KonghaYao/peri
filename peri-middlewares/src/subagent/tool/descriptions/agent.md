@@ -2,7 +2,7 @@ Launch a sub-agent with an independent context to handle a specialized sub-task.
 
 Fork mode (fork: true):
 - Inherits the parent's frozen system prompt, a full history snapshot at launch time, and the parent's core tool set (Filesystem, Bash, Web, MCP)
-- Does NOT inherit the Agent tool (prevents recursion) nor Cron / Workflow / LSP / Plugin extension tools; parent agent_overrides blocks do not enter the forked prompt
+- Does NOT inherit the Agent tool (prevents recursion) nor Cron / Workflow / Plugin extension tools; parent agent_overrides blocks do not enter the forked prompt
 - The prompt is treated as a directive within the existing context, not a standalone briefing
 - Do NOT re-explain background that is already in the conversation history
 - Use for tasks that require context from the ongoing conversation (e.g., continuing a multi-file refactor)

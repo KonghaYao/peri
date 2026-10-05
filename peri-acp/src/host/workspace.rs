@@ -187,7 +187,7 @@ impl SessionEnvironment {
 
     /// 装配期不第二次 `ConfigSource::load_at`、不第二次加载插件、不构建第二份 frozen。
     ///
-    /// MCP / LSP / hooks 与 OAuth 消费者仍在本函数内创建（顺序不变）；调用方
+    /// MCP / hooks 与 OAuth 消费者仍在本函数内创建（顺序不变）；调用方
     /// 必须已取得执行所有权，准备阶段本身不启动这些资源。
     pub(crate) async fn assemble_prepared(
         host: &AcpServerConfig,
@@ -212,7 +212,7 @@ impl SessionEnvironment {
     ///
     /// `frozen` 是唯一事实源：new/legacy 是本次准备产物，恢复路径是持久 blob 的解码视图
     /// （winner）；`plugins` 是同一份准备输入的插件聚合；`configuration` 是同一份配置
-    /// 视图。MCP / LSP / hooks 与 OAuth 消费者仍在本函数内创建（顺序不变）；调用方必须
+    /// 视图。MCP / hooks 与 OAuth 消费者仍在本函数内创建（顺序不变）；调用方必须
     /// 已取得执行所有权，准备阶段本身不启动这些资源。
     pub(crate) async fn assemble_with_frozen(
         host: &AcpServerConfig,

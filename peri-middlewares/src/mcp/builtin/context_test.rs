@@ -1,17 +1,17 @@
 //! `mcp::builtin::context` 的 crate 内证据（owner H-02）。
 //!
 //! 覆盖口径（主 plan §3 IF-P3-04 / A31① / A33）：
-//! - **构造保真**：便利构造器不复制、不重排、不改写输入——`scheduler` / `pool` 仍是注入
+//! - **构造保真**：便利构造器不复制、不重排、不改写输入——`scheduler` 仍是注入
 //!   时**同一份** `Arc`（`Arc::ptr_eq`），`cwd` / `tick_enabled` / 关闭集逐字保真；
 //!   关闭集用 A24 的真实派生入口 `mcp::builtin::closed_instances` 生成（不硬编码第三份
 //!   映射）。
 //! - **输入齐备判定的真值表**：判定按注册表名派生——`web` / `artifact` 不需要额外输入；
-//!   `cron` / `lsp` 各由对应输入的有无决定；`workspace` **恒**齐备（AW3-11：它的输入是
+//!   `cron` 由对应输入的有无决定；`workspace` **恒**齐备（AW3-11：它的输入是
 //!   session 级，缺输入 = 可见但退化而非不可装配，判定不为它增加 arm）；未注册名字
 //!   （表外名）一律不齐备（实例解析由 `runtime` 先行收口 `UnknownInstance`）。
 
 use std::{
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{BTreeSet, HashSet},
     sync::Arc,
 };
 
@@ -21,9 +21,8 @@ use peri_acp_types::{
     tasks::{BgTaskKind, TaskManager},
 };
 use peri_agent::agent::async_tasks::TaskManager as ConcreteTaskManager;
-use peri_mcp_lsp::{config::LspConfigFile, pool::LspServerPool};
 
-use super::{BuiltinInstanceContext, CronInstanceInput, LspInstanceInput};
+use super::{BuiltinInstanceContext, CronInstanceInput};
 use crate::mcp::builtin::closed_instances;
 use peri_mcp_cron::{CronScheduler, CronTrigger};
 use peri_mcp_workspace::WorkspaceInstanceInput;
@@ -35,18 +34,6 @@ fn cron_input(tick_enabled: bool) -> CronInstanceInput {
     CronInstanceInput {
         scheduler: Arc::new(Mutex::new(CronScheduler::new(trigger_tx))),
         tick_enabled,
-    }
-}
-
-/// `lsp` 输入夹具：空配置 pool（`LspServerPool::new` 惰性，不启动任何 language server）。
-fn lsp_input() -> LspInstanceInput {
-    LspInstanceInput {
-        pool: Arc::new(LspServerPool::new(
-            ".",
-            LspConfigFile {
-                lsp_servers: HashMap::new(),
-            },
-        )),
     }
 }
 
@@ -67,7 +54,6 @@ fn constructors_keep_inputs_and_closed_set_verbatim() {
     let bare = BuiltinInstanceContext::new("ctx-cwd");
     assert_eq!(bare.cwd, "ctx-cwd");
     assert!(bare.cron.is_none(), "最小构造不得携带 cron 输入");
-    assert!(bare.lsp.is_none(), "最小构造不得携带 lsp 输入");
     assert!(
         bare.workspace.is_none(),
         "最小构造不得携带 workspace 输入（缺输入 = 可见但退化，不是默认注入）"
@@ -75,10 +61,8 @@ fn constructors_keep_inputs_and_closed_set_verbatim() {
     assert!(bare.closed.is_empty(), "最小构造的关闭集必须为空");
 
     let cron = cron_input(true);
-    let lsp = lsp_input();
     let workspace = workspace_input();
     let scheduler = Arc::clone(&cron.scheduler);
-    let pool = Arc::clone(&lsp.pool);
     let task_manager = Arc::clone(workspace.task_manager.as_ref().expect("夹具必须带 manager"));
     let on_bg_complete = Arc::clone(
         workspace
@@ -87,19 +71,15 @@ fn constructors_keep_inputs_and_closed_set_verbatim() {
             .expect("夹具必须带 bg 完成回调"),
     );
     // 关闭集用 A24 唯一派生入口生成：`policy_key ∈ disabled_middlewares` → 实例名。
-    let closed = closed_instances(&HashSet::from([
-        "CronMiddleware".to_string(),
-        "LspMiddleware".to_string(),
-    ]));
+    let closed = closed_instances(&HashSet::from(["CronMiddleware".to_string()]));
     assert_eq!(
         closed,
-        BTreeSet::from(["cron".to_string(), "lsp".to_string()]),
+        BTreeSet::from(["cron".to_string()]),
         "前置：关闭集必须由 policy_key 派生实例名"
     );
 
     let ctx = BuiltinInstanceContext::new("ctx-cwd")
         .with_cron(cron)
-        .with_lsp(lsp)
         .with_workspace(workspace)
         .with_closed(closed.clone());
 
@@ -110,11 +90,6 @@ fn constructors_keep_inputs_and_closed_set_verbatim() {
         "必须是组合根那一份 scheduler（不复制、不另建）"
     );
     assert!(ctx_cron.tick_enabled, "tick_enabled 必须逐字保真");
-    let ctx_lsp = ctx.lsp.expect("lsp 输入必须保真");
-    assert!(
-        Arc::ptr_eq(&ctx_lsp.pool, &pool),
-        "必须是 host 那一个 LSP pool（不复制、不另建）"
-    );
     let ctx_workspace = ctx.workspace.expect("workspace 输入必须保真");
     assert!(
         Arc::ptr_eq(
@@ -156,7 +131,6 @@ fn instance_input_ready_truth_table() {
         "artifact 不需要额外输入（解析根是 cwd）"
     );
     assert!(!bare.instance_input_ready("cron"), "缺 scheduler ⇒ 不齐备");
-    assert!(!bare.instance_input_ready("lsp"), "缺 pool ⇒ 不齐备");
     assert!(
         bare.instance_input_ready("workspace"),
         "workspace 无 session 级输入也必须齐备（AW3-11：缺输入 = 可见但退化，不是不可装配）"
@@ -168,29 +142,20 @@ fn instance_input_ready_truth_table() {
 
     let cron_only = BuiltinInstanceContext::new("ctx-cwd").with_cron(cron_input(false));
     assert!(cron_only.instance_input_ready("cron"));
-    assert!(!cron_only.instance_input_ready("lsp"));
     assert!(cron_only.instance_input_ready("web"));
     assert!(cron_only.instance_input_ready("artifact"));
     assert!(cron_only.instance_input_ready("workspace"));
-
-    let lsp_only = BuiltinInstanceContext::new("ctx-cwd").with_lsp(lsp_input());
-    assert!(lsp_only.instance_input_ready("lsp"));
-    assert!(!lsp_only.instance_input_ready("cron"));
-    assert!(lsp_only.instance_input_ready("workspace"));
 
     // 带齐 workspace 输入（session 级）同样齐备：判定对它恒真，输入的有无不改变结果。
     let workspace_only = BuiltinInstanceContext::new("ctx-cwd").with_workspace(workspace_input());
     assert!(workspace_only.instance_input_ready("workspace"));
     assert!(!workspace_only.instance_input_ready("cron"));
-    assert!(!workspace_only.instance_input_ready("lsp"));
 
     let both = BuiltinInstanceContext::new("ctx-cwd")
         .with_cron(cron_input(true))
-        .with_lsp(lsp_input())
         .with_workspace(workspace_input())
         .with_closed(BTreeSet::from(["web".to_string()]));
     assert!(both.instance_input_ready("cron"));
-    assert!(both.instance_input_ready("lsp"));
     assert!(both.instance_input_ready("workspace"));
     assert!(
         both.instance_input_ready("web"),

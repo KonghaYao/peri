@@ -929,7 +929,6 @@ async fn prompt_without_frozen_snapshot_fails_closed() {
             recall_items: Vec::new(),
             agent_pool: crate::session::agent_pool::AgentPool::new(),
             workflow_middleware: None,
-            lsp_pool: None,
             title: None,
             tags: Vec::new(),
             continuation_armed: false,

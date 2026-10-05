@@ -13,7 +13,7 @@
 //! - **AgentEvent DTO 已接入**：`peri/agent_event` 携带的 AcpEvent 变体
 //!   （SubagentStarted/SubagentStopped/TurnSuspended/RewindCompleted/...）
 //!   通过 `convert_agent_event` 转换为 AcpEventData 推入双 bridge channel。
-//!   未映射变体（StateSnapshot/BgToolStep/LspDiagnostics/ContextWarning/...）
+//!   未映射变体（StateSnapshot/BgToolStep/ContextWarning/...）
 //!   保持静默丢弃，S5+ 迭代扩展。
 //!
 //! 私有模块解码 DTO；本任务顺序发布 commands/plan/spinner 状态后推入 bridge，

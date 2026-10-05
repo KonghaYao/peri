@@ -1,5 +1,4 @@
 use super::*;
-use peri_acp_types::builtin_mcp::{find, original_tool_name_of_effective};
 
 #[test]
 fn test_truncate_text_short() {
@@ -395,85 +394,6 @@ fn tui_web_tools_still_summarize_after_migration() {
         "专用折叠必须保留正文（URL）: {folded:?}"
     );
     assert!(folded.contains("bytes"), "字节数折叠: {folded:?}");
-}
-
-// ── wave 2（cron / lsp）注册表新增：新 effective name 必须复用**既有**摘要分支 ──────
-
-/// wave 2 新增的 builtin 实例在注册表中的**实例键**（不是 effective name 副本）。
-const WAVE2_INSTANCE_KEYS: [&str; 2] = ["cron", "lsp"];
-
-/// 按原始工具名给出代表性参数：键名取自 `peri-middlewares` 各自 `BaseTool::parameters()`。
-/// 未登记的名字直接 panic —— 注册表条目变动时必须回来复核本回归。
-fn wave2_args_by_original_name(original_name: &str) -> serde_json::Value {
-    match original_name {
-        "cron_register" => {
-            serde_json::json!({ "expression": "*/5 * * * *", "prompt": "check status" })
-        }
-        "cron_list" => serde_json::json!({}),
-        "cron_remove" => serde_json::json!({ "id": "task-1" }),
-        // 只用 operation（不带 file_path）：通用兜底对 file_path 会回显 path，而 path
-        // 会被全局 DISPLAY_CWD 精简，掺入与本回归无关的进程级状态。
-        "LSP" => serde_json::json!({ "operation": "documentSymbol" }),
-        other => panic!("wave 2 有未登记的工具，需复核本回归: {other}"),
-    }
-}
-
-#[test]
-fn cron_lsp_effective_names_reuse_existing_summaries() {
-    // S-03：summarize_input / summarize_output 的既有归一入口（原样优先 → IF-D15
-    // 归一后重试）对新注册表条目必须同样生效，**不新增第二份归一实现**；
-    // 等价值用可观察输出（返回值）比较。
-    let mut pairs: Vec<(&str, &str)> = Vec::new();
-    for key in WAVE2_INSTANCE_KEYS {
-        let instance = find(key).unwrap_or_else(|| panic!("wave 2 实例必须在注册表中: {key}"));
-        for tool in instance.tools {
-            pairs.push((tool.effective_name, tool.original_name));
-        }
-    }
-    // 从注册表取数（不在此复制 effective name 字面量）：cron 三项 + lsp 一项。
-    assert_eq!(pairs.len(), 4, "wave 2 新增条目数: {pairs:?}");
-
-    for (effective, original) in pairs {
-        // 归一入口的前置条件：新 effective name 必须能被 IF-D15 反查命中；命中不了
-        // ⇒ 重试分支拿不到原始名，归一入口对新名字失效。
-        assert_eq!(
-            original_tool_name_of_effective(effective),
-            Some(original),
-            "IF-D15 必须命中 wave 2 新条目: {effective}"
-        );
-        let input = wave2_args_by_original_name(original);
-        assert_eq!(
-            summarize_input(effective, &input),
-            summarize_input(original, &input),
-            "effective name 必须复用 {original} 的既有输入摘要分支: {effective}"
-        );
-        // 输出摘要同分支：4 个新条目都没有专有输出分支，两侧都走通用 200 字符截断。
-        let output = "line1\nline2\nhttps://example.com/page";
-        assert_eq!(
-            summarize_output(effective, output),
-            summarize_output(original, output),
-            "effective name 必须复用 {original} 的既有输出摘要分支: {effective}"
-        );
-    }
-
-    // 判别点：LSP 是 4 个新条目中唯一命中**专有输入摘要分支**的（operation 截断 40）。
-    // 归一入口失效 ⇒ 落到通用兜底（首个 KV 回显 `operation: documentSymbol`），
-    // 下面两条断言随之变红。
-    let lsp_effective = find("lsp")
-        .expect("lsp 实例必须在注册表中")
-        .tools
-        .iter()
-        .find(|tool| tool.original_name == "LSP")
-        .expect("lsp 实例必须声明 LSP 工具")
-        .effective_name;
-    let lsp_args = wave2_args_by_original_name("LSP");
-    let lsp = summarize_input(lsp_effective, &lsp_args);
-    assert_eq!(lsp, "documentSymbol", "LSP 专有分支未被复用: {lsp:?}");
-    assert_ne!(
-        lsp,
-        summarize_input("mcp__unknown__LSP", &lsp_args),
-        "专有分支必须与通用兜底在输出上可区分"
-    );
 }
 
 #[test]

@@ -775,48 +775,6 @@ async fn test_cleanup_orphaned_no_marker_not_deleted() {
 }
 
 #[test]
-fn test_generate_synthetic_manifest_lsp() {
-    let dir = tempdir().unwrap();
-    let plugin = crate::plugin::types::MarketplacePlugin {
-        name: "rust-analyzer-lsp".into(),
-        description: "Rust language server".into(),
-        source: serde_json::json!("./plugins/rust-analyzer-lsp"),
-        version: "1.0.0".into(),
-        sha: None,
-        author: None,
-        category: None,
-        homepage: None,
-        tags: None,
-        extra: serde_json::json!({
-            "lspServers": {
-                "rust-analyzer": {
-                    "command": "rust-analyzer",
-                    "extensionToLanguage": { ".rs": "rust" }
-                }
-            }
-        }),
-    };
-
-    generate_synthetic_manifest(dir.path(), &plugin).unwrap();
-
-    let manifest_path = dir.path().join(".claude-plugin").join("plugin.json");
-    assert!(manifest_path.exists());
-
-    let content = std::fs::read_to_string(&manifest_path).unwrap();
-    let manifest: serde_json::Value = serde_json::from_str(&content).unwrap();
-
-    assert_eq!(manifest["name"], "rust-analyzer-lsp");
-    assert_eq!(manifest["version"], "1.0.0");
-    assert_eq!(manifest["description"], "Rust language server");
-
-    let lsp_servers = manifest["lspServers"].as_array().unwrap();
-    assert_eq!(lsp_servers.len(), 1);
-    assert_eq!(lsp_servers[0]["name"], "rust-analyzer");
-    assert_eq!(lsp_servers[0]["command"], "rust-analyzer");
-    assert_eq!(lsp_servers[0]["extensionToLanguage"][".rs"], "rust");
-}
-
-#[test]
 fn test_generate_synthetic_manifest_with_author() {
     let dir = tempdir().unwrap();
     let plugin = crate::plugin::types::MarketplacePlugin {
@@ -841,7 +799,6 @@ fn test_generate_synthetic_manifest_with_author() {
         std::fs::read_to_string(dir.path().join(".claude-plugin").join("plugin.json")).unwrap();
     let manifest: serde_json::Value = serde_json::from_str(&content).unwrap();
     assert_eq!(manifest["author"]["name"], "Test");
-    assert!(manifest.get("lspServers").is_none());
 }
 
 #[test]

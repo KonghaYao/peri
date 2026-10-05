@@ -30,12 +30,9 @@ use peri_acp_types::{
     hooks::RegisteredHook,
     identity::AgentId,
     interaction::UserInteractionBroker,
-    lsp::LspServerConfig,
     mcp_skills::McpSkillRegistry,
     plugin::LoadedPlugin,
-    ports::{
-        LspPoolPort, McpPoolPort, SessionMcpCapabilityPort, ToolSearchPort, WorkflowMiddlewarePort,
-    },
+    ports::{McpPoolPort, SessionMcpCapabilityPort, ToolSearchPort, WorkflowMiddlewarePort},
     session::{MessageQueue, SessionInbox},
     session_resources::SessionResources,
     skills::SkillRoot,
@@ -117,11 +114,6 @@ pub struct StageBuildInput {
     pub tool_search_index: Arc<dyn ToolSearchPort>,
     /// 共享工具注册表（deferred tools）
     pub shared_tools: Arc<RwLock<BTreeMap<String, Arc<dyn BaseTool>>>>,
-    /// LSP 服务器配置
-    pub lsp_servers: Vec<LspServerConfig>,
-    /// **host 共享** LSP pool 句柄（由宿主装配单次构造并注入，session 不创建也不
-    /// 销毁）；None = 无 host pool ⇒ 链上不装 `LspSyncMiddleware`。
-    pub lsp_pool: Option<Arc<dyn LspPoolPort>>,
     /// Workflow executor（Some 时注册 Workflow 中间件）
     pub workflow_executor: Option<Arc<dyn AgentExecutor>>,
     /// 会话级 WorkflowMiddleware 端口

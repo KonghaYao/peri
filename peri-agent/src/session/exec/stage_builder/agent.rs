@@ -266,8 +266,6 @@ fn project_assembly(input: &StageBuildInput, turn: TurnAssembly) -> AssemblyCont
         // LangMiddleware 的语言内容源 = 冻结语言，保证链收集与渲染一致）。
         agent_overrides,
         language: input.language.clone(),
-        lsp_servers: input.lsp_servers.clone(),
-        lsp_pool: input.lsp_pool.clone(),
         workflow_executor: input.workflow_executor.clone(),
         workflow_middleware: input.workflow_middleware.clone(),
         event_handler,

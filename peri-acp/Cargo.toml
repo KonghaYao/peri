@@ -78,6 +78,5 @@ tokio = { workspace = true, features = ["test-util"] }
 peri-mcp-common.workspace = true
 peri-process = { path = "../peri-process" }
 tokio = { workspace = true, features = ["full"] }
-peri-mcp-lsp.workspace = true
 peri-mcp-cron.workspace = true
 peri-mcp-workspace.workspace = true

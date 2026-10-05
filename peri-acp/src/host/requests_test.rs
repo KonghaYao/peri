@@ -189,10 +189,6 @@ async fn build_server_config(
         plugin_hooks_only: Vec::new(),
         plugin_loaded: Vec::new(),
         hook_groups: Vec::new(),
-        plugin_lsp_servers: Vec::new(),
-        // 测试配置无 LSP server：不构造 pool（生产装配则恒构造，空配置也在）。
-        // 需要断言 pool 生命周期的用例自行注入（见 delete 用例）。
-        lsp_pool: None,
         tool_search_index: Arc::new(peri_middlewares::tool_search::ToolSearchIndex::new()),
         agent_catalog: Arc::new(peri_middlewares::host_ports::AgentCatalogProvider::new()),
         plugin_manager: Arc::new(peri_middlewares::host_ports::PluginManager),
@@ -384,7 +380,6 @@ async fn register_session_with_history(
             recall_items: Vec::new(),
             agent_pool: crate::session::agent_pool::AgentPool::new(),
             workflow_middleware: None,
-            lsp_pool: None,
             title: None,
             tags: Vec::new(),
             continuation_armed: false,
@@ -691,7 +686,6 @@ async fn register_session_with_workflow(
             recall_items: Vec::new(),
             agent_pool: crate::session::agent_pool::AgentPool::new(),
             workflow_middleware: Some(Arc::clone(&mw) as Arc<dyn WorkflowMiddlewarePort>),
-            lsp_pool: None,
             title: None,
             tags: Vec::new(),
             continuation_armed: false,

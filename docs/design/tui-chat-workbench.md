@@ -113,7 +113,6 @@ Presenter 管线固定为：
 | `Agent` / `AgentResult` | 委派身份、模式与终态 | nested activity、thread/task provenance |
 | `SearchExtraTools` / `ExecuteExtraTool` | discovery 或 requested target | wrapper、resolved/effective target、审批 provenance |
 | Cron / `Workflow` | schedule/run 身份与状态 | phase、agent、log、result、可用操作 |
-| `LSP` | operation、path/query、count | locations、diagnostics、server、完整性 |
 | MCP resource / 动态 MCP tool | 外部 server/tool/resource 边界 | 调用时冻结 descriptor、content type 与结果 |
 | 未知工具 | 友好名称、参数数量、明确状态 | 有界脱敏 metadata；不推断 effect 或安全性 |
 

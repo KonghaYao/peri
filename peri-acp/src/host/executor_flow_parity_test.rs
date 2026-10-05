@@ -90,8 +90,6 @@ fn make_parity_context(
         session_id: "session-parity-test".to_string(),
         tool_search_index: Arc::new(ToolSearchIndex::new()),
         shared_tools,
-        lsp_servers: Vec::new(),
-        lsp_pool: None,
         workflow_executor: None,
         workflow_middleware: None,
         event_handler: Arc::new(ParityFakeEventHandler),

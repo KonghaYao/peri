@@ -11,10 +11,7 @@ use peri_acp_types::command::command_route::{
     RouteEntry,
 };
 use peri_acp_types::command::{CommandContext, CommandHandler, CommandOutcome};
-use peri_acp_types::lsp::LspServerConfig;
 use peri_acp_types::plugin::McpServerConfigValidationError;
-#[cfg(not(target_os = "emscripten"))]
-use peri_mcp_lsp::config::lsp_config_from_plugin;
 use serde::Deserialize;
 use thiserror::Error;
 use tracing::{debug, warn};
@@ -648,7 +645,7 @@ fn load_plugins_with_policies(
                 }
                 // 清单文件缺失：只读准备路径以可定位的具体错误失败（不写缓存、不静默
                 // 跳过）；既有路径允许从 marketplace manifest 生成合成清单
-                // （兼容修复前安装的 LSP 插件），生成结果同样按严格语义解析。
+                // （兼容修复前安装的插件），生成结果同样按严格语义解析。
                 if manifest_policy == ManifestPolicy::Readonly {
                     return Err(LoaderError::ManifestLoadFailed(format!(
                         "{}: plugin manifest missing at {}",
@@ -866,7 +863,6 @@ pub fn load_enabled_plugins_aggregated(claude_dir: &Path, cwd: Option<&Path>) ->
                 all_agent_dirs: vec![],
                 all_commands: vec![],
                 all_hooks: vec![],
-                all_lsp_servers: vec![],
             };
         }
     };
@@ -887,7 +883,7 @@ pub fn load_enabled_plugins_aggregated_readonly(
     )?))
 }
 
-/// 插件聚合（skills / MCP / agent / 命令 / hooks / LSP）单一实现：
+/// 插件聚合（skills / MCP / agent / 命令 / hooks）单一实现：
 /// 宽容聚合与只读聚合共用，避免两条路径各自漂移。
 fn aggregate_plugin_data(plugins: Vec<LoadedPlugin>) -> PluginLoadResult {
     let all_skill_roots: Vec<SkillRoot> = plugins
@@ -939,35 +935,6 @@ fn aggregate_plugin_data(plugins: Vec<LoadedPlugin>) -> PluginLoadResult {
         .flatten()
         .collect();
 
-    #[cfg(target_os = "emscripten")]
-    let all_lsp_servers: Vec<LspServerConfig> = Vec::new();
-    #[cfg(not(target_os = "emscripten"))]
-    let all_lsp_servers: Vec<LspServerConfig> = plugins
-        .iter()
-        .filter_map(|plugin| {
-            let servers = plugin.manifest.lsp_servers.as_ref()?;
-            if servers.is_empty() {
-                return None;
-            }
-            Some(
-                servers
-                    .iter()
-                    .map(|s| {
-                        lsp_config_from_plugin(
-                            &plugin.name,
-                            &s.name,
-                            &s.command,
-                            &s.args,
-                            &plugin.install_path,
-                            s.extension_to_language.clone(),
-                        )
-                    })
-                    .collect::<Vec<_>>(),
-            )
-        })
-        .flatten()
-        .collect();
-
     PluginLoadResult {
         plugins,
         all_skill_roots,
@@ -975,7 +942,6 @@ fn aggregate_plugin_data(plugins: Vec<LoadedPlugin>) -> PluginLoadResult {
         all_agent_dirs,
         all_commands,
         all_hooks,
-        all_lsp_servers,
     }
 }
 

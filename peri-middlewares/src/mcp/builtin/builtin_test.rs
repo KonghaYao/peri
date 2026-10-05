@@ -118,8 +118,8 @@ fn declared_direct_tools_is_derived_from_registry() {
                 7,
                 "workspace 的 7 个本地工具必须全部 declared direct（AW3-03）"
             ),
-            // wave 2：cron / lsp 零 direct —— `system_mcp_tools` 恒为空集（A5）。
-            "cron" | "lsp" => assert!(
+            // wave 2：cron 零 direct —— `system_mcp_tools` 恒为空集（A5）。
+            "cron" => assert!(
                 declared.is_empty(),
                 "实例 {} 的声明 direct 必须为空（A4：deferred）",
                 instance.name
@@ -144,7 +144,7 @@ fn declared_direct_tools_is_derived_from_registry() {
 /// 直连性判定的两半：已实现实例的声明内工具恒 `true`，未知/未声明组合恒 `false`。
 ///
 /// （原用例名 `is_declared_direct_false_for_unimplemented_and_unknown` 的前提是「存在保留
-/// 但未实现的实例（workspace）」；W3-B 后五个保留名全部已实现，该前提消失，故按新语义改名并
+/// 但未实现的实例（workspace）」；W3-B 后保留名全部已实现，该前提消失，故按新语义改名并
 /// 补上「已实现的 workspace 7 项恒 true」这一半。）
 #[test]
 fn is_declared_direct_true_for_implemented_false_for_unknown() {
@@ -185,8 +185,8 @@ fn builtin_prompt_declaration_matches_registry() {
                         "模板必须含占位符: {template}"
                     );
                 }
-                // wave 2：cron / lsp 冻结 `None`（A4：声明段零变化）。
-                "cron" | "lsp" => {
+                // wave 2：cron 冻结 `None`（A4：声明段零变化）。
+                "cron" => {
                     assert_eq!(
                         template, None,
                         "实例 {} 的工具 {} 必须无声明模板（A4）",
@@ -226,9 +226,6 @@ fn closed_instances_maps_policy_keys_only() {
         closed_instances(&cron),
         BTreeSet::from(["cron".to_string()])
     );
-
-    let lsp: HashSet<String> = HashSet::from(["LspMiddleware".to_string()]);
-    assert_eq!(closed_instances(&lsp), BTreeSet::from(["lsp".to_string()]));
 
     let both: HashSet<String> = HashSet::from([
         "WebMiddleware".to_string(),
@@ -297,11 +294,11 @@ fn injection_policy_all_and_none_shapes() {
     let all = BuiltinInjectionPolicy::all();
     assert_eq!(
         all.enabled_instances().to_vec(),
-        vec!["web", "artifact", "cron", "lsp", "workspace"],
+        vec!["web", "artifact", "cron", "workspace"],
         "默认注入全部已实现实例（注册表顺序）"
     );
     assert!(all.enables("web") && all.enables("artifact"));
-    assert!(all.enables("cron") && all.enables("lsp"));
+    assert!(all.enables("cron"));
     assert!(
         all.enables("workspace"),
         "workspace 已实现（W3-A 注册表 T1）⇒ 默认策略必须注入它"
@@ -314,7 +311,6 @@ fn injection_policy_all_and_none_shapes() {
         !none.enables("web")
             && !none.enables("artifact")
             && !none.enables("cron")
-            && !none.enables("lsp")
             && !none.enables("workspace")
     );
 }

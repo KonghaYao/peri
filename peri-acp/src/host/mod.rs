@@ -29,8 +29,7 @@ use peri_acp_types::messages::BaseMessage;
 use peri_acp_types::permission::SharedPermissionMode;
 use peri_acp_types::plugin::PluginManagerPort;
 use peri_acp_types::ports::{
-    AgentCatalogPort, LspPoolPort, McpPoolPort, McpTaskOwnerPort, ToolSearchPort,
-    WorkflowMiddlewarePort,
+    AgentCatalogPort, McpPoolPort, McpTaskOwnerPort, ToolSearchPort, WorkflowMiddlewarePort,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -72,8 +71,8 @@ mod mcp_v4_startup_tests;
 mod mcp_v4_wire_fixture;
 // wave 2 的**终态**用例（H-04 / V-03）：自带「生产同构的 builtin host」夹具 —— pool →
 // `BuiltinInstanceContext` 注入 → `run_initialize`（A33 的顺序），并驱动真实装配面
-// （`assemble_server_config`）验证配置合并早于 handler 构造、host 级唯一 LSP pool、
-// 多 cwd 退化登记与 host shutdown 有界关闭。
+// （`assemble_server_config`）验证配置合并早于 handler 构造、多 cwd 退化登记与
+// host shutdown 有界关闭。
 #[cfg(test)]
 #[path = "mcp_v4_wave2_test.rs"]
 mod mcp_v4_wave2;
@@ -141,8 +140,6 @@ pub(crate) struct SessionState {
     pub(crate) agent_pool: crate::session::agent_pool::AgentPool,
     /// Session 级 WorkflowMiddleware（session/new 时创建，跨 turn 复用）。
     pub(crate) workflow_middleware: Option<Arc<dyn WorkflowMiddlewarePort>>,
-    /// Session 级 LSP 服务器池（session/new 时创建，跨 turn 复用；H1）。
-    pub(crate) lsp_pool: Option<Arc<dyn LspPoolPort>>,
     // ── Prediction 写入的会话元数据（MVP：仅存储，不展示）──
     /// 预测生成的会话标题（未来 /rename 与标题栏显示使用）。
     pub(crate) title: Option<String>,
@@ -214,19 +211,6 @@ pub struct AcpServerConfig {
     pub plugin_hooks_only: Vec<peri_acp_types::hooks::RegisteredHook>,
     pub plugin_loaded: Vec<peri_acp_types::plugin::LoadedPlugin>,
     pub hook_groups: Vec<Vec<peri_acp_types::hooks::RegisteredHook>>,
-    /// 生效的 LSP 服务器配置快照（global < plugin 合并结果；装配点单次快照，
-    /// 不支持热更新）。仍是链上 `add_lsp` 的门控输入：为空即不装同步中间件。
-    pub plugin_lsp_servers: Vec<peri_acp_types::lsp::LspServerConfig>,
-    /// **host 级唯一** LSP pool 句柄（A11/A21/A22）：
-    /// - 与喂给 builtin `lsp` 实例的 `LspInstanceInput` 同一份 `Arc`（A33：宿主装配
-    ///   在 `run_initialize` 之前一次注入）；空配置也构造（`has_servers()` 为假 ⇒
-    ///   handler 工具面空表但仍 ready），不用 `None` 表达「无配置」；
-    /// - session 只投影它的 `Arc`（`SessionState::lsp_pool`），`session/delete`
-    ///   **不**关闭它；唯一关闭点是 host shutdown（`shutdown.rs`，有界一次）。
-    ///
-    /// 空配置路径（`bare` / 无 LSP server）只表示「无 server 可路由」，不改变
-    /// 上述生命周期：pool 存在但无子进程。
-    pub lsp_pool: Option<Arc<dyn LspPoolPort>>,
     pub tool_search_index: Arc<dyn ToolSearchPort>,
     /// Skills 扫描端口（available-commands / agents 扫描经此访问）。
     pub agent_catalog: Arc<dyn AgentCatalogPort>,

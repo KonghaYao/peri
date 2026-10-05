@@ -17,7 +17,7 @@ The Boolean value has different meanings depending on the field category:
 
 - **Prompt section:** `true` replaces the built-in section with `.peri/meta/<field>.md`; `false` keeps the built-in section.
 - **Middleware:** `true` keeps the middleware enabled; `false` removes the middleware, including its tools, hooks, and prompt contributions. Keys here are chain slot names (the value returned by the middleware's `name()`) — except the builtin instance policy keys listed below.
-- **Builtin instance policy key:** `false` closes that built-in MCP instance's tool face for this session only. The instance, its handler, its state (host LSP pool / cron scheduler and its 1s tick) and its readiness are **kept** — a policy close is not a physical shutdown.
+- **Builtin instance policy key:** `false` closes that built-in MCP instance's tool face for this session only. The instance, its handler, its state (cron scheduler and its 1s tick) and its readiness are **kept** — a policy close is not a physical shutdown.
 - **Policy:** the value directly enables or disables the named policy.
 
 ### Prompt section overrides
@@ -37,22 +37,17 @@ The Boolean value has different meanings depending on the field category:
 
 ### Middleware and builtin instance controls
 
-**Note**: `WebMiddleware` / `ArtifactMiddleware` / `CronMiddleware` / `LspMiddleware` are no
-longer middleware slots, and `WorkspaceMiddleware` is the fifth key of the same kind (it
-replaces the removed `FilesystemMiddleware` / `TerminalMiddleware` slot names). Web, artifact,
-cron, LSP and file/shell capabilities are provided by the built-in in-process MCP instances
-(`web` / `artifact` / `cron` / `lsp` / `workspace`); these five keys are their close keys
-(`BUILTIN_INSTANCE_POLICY_KEYS`), so the rows below stay valid, and old configs using the four
+**Note**: `WebMiddleware` / `ArtifactMiddleware` / `CronMiddleware` are no longer middleware
+slots, and `WorkspaceMiddleware` is the fourth key of the same kind (it replaces the removed
+`FilesystemMiddleware` / `TerminalMiddleware` slot names). Web, artifact, cron and file/shell
+capabilities are provided by the built-in in-process MCP instances
+(`web` / `artifact` / `cron` / `workspace`); these four keys are their close keys
+(`BUILTIN_INSTANCE_POLICY_KEYS`), so the rows below stay valid, and old configs using the three
 former slot names are still recognized.
 
-The one name that looks similar but is **not** an instance key is `LspSyncMiddleware`: it is the
-chain slot name of the document-sync middleware. `LspMiddleware: false` (builtin `lsp` instance
-key) closes the `mcp__lsp__LSP` tool face **and** the document-sync target; `LspSyncMiddleware:
-false` stops the sync only and leaves `mcp__lsp__LSP` visible. Neither destroys the host LSP pool.
-
-`cron` and `lsp` tools are always **deferred** (`mcp__cron__cron_register` /
-`mcp__cron__cron_list` / `mcp__cron__cron_remove` / `mcp__lsp__LSP`): the model reaches them
-through `SearchExtraTools` → `ExecuteExtraTool`, so closing these two instances only shrinks the
+`cron` tools are always **deferred** (`mcp__cron__cron_register` /
+`mcp__cron__cron_list` / `mcp__cron__cron_remove`): the model reaches them
+through `SearchExtraTools` → `ExecuteExtraTool`, so closing that instance only shrinks the
 deferred catalog and its search results.
 
 | Field | Current value | Meaning |
@@ -79,7 +74,6 @@ deferred catalog and its search results.
 | `WorkflowMiddleware` | `false` | Disables workflow registration and workflow execution tools. |
 | `ToolSearch` | `true` | Enables `SearchExtraTools` and `ExecuteExtraTool`, allowing deferred tools such as MCP tools to be discovered and invoked on demand. |
 | `ArtifactMiddleware` | `false` | Closes the built-in `artifact` instance's tool face (`mcp__artifact__artifact`, a direct tool). |
-| `LspMiddleware` | `false` | Closes the built-in `lsp` instance's tool face (`mcp__lsp__LSP`, deferred) **and** the document-sync target: no file is read and no `didChange` / `didSave` is sent. The host LSP pool, the instance and readiness are kept. Use the middleware slot name `LspSyncMiddleware: false` instead if you only want to stop the sync. |
 | `GoalMiddleware` | `false` | Disables goal-management prompt content and tools. |
 
 ### Policy controls

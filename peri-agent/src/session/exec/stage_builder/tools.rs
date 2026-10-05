@@ -26,7 +26,7 @@ use std::{
 /// 影响。动态 MCP bridge 工具（`mcp__{server}__{tool}`）不进入共享
 /// registry，无需剔除。
 ///
-/// 已迁移的 web、artifact、cron、LSP 和 workspace 能力由 MCP 链收集，
+/// 已迁移的 web、artifact、cron 和 workspace 能力由 MCP 链收集，
 /// 不属于 `MIDDLEWARE_TOOL_NAMES`。system direct 工具使用原名，deferred
 /// 工具保留 MCP 前缀；关闭能力由 builtin 关闭集过滤（IF-D10）。
 /// 非 middleware 路径注册的同名工具不能因 builtin 关闭而被误删。
@@ -48,7 +48,7 @@ pub(super) fn build_session_tool_view(
             // `live_names` 保护当前链注册的同名工具。
             //
             // 剔除面只认「当前仍在 `MIDDLEWARE_TOOL_NAMES` 内」的名字：已迁移裸名
-            // （web / artifact / cron / LSP / workspace 共 14 枚）不在表内 ⇒ 非 middleware
+            // （web / artifact / cron / workspace 共 13 枚）不在表内 ⇒ 非 middleware
             // 路径注册的同名工具不再被剔除（见函数文档的覆盖边界说明）。
             !peri_acp_types::meta_harness::MIDDLEWARE_TOOL_NAMES.contains(&name.as_str())
                 || live_names.contains(name.as_str())

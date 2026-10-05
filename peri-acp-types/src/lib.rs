@@ -25,7 +25,6 @@
 //! - `agents` — agent 定义契约（AgentOverrides/AgentCapability）
 //! - `command` — slash 命令契约（PromptStopReason/CommandHandler/CommandContext）
 //! - `skills` — skill 契约（SkillSource/SkillRoot/SkillMetadata）
-//! - `lsp` — LSP 服务器配置契约（LspServerConfig/LspConfigSource）
 //! - `meta_harness` — MetaHarness 契约（MetaHarnessState + SECTION_IDS/MIDDLEWARE_NAMES）
 //! - `cron` — cron 契约（CronTrigger + CronSchedulerPort）
 //! - `workflow` — workflow 协议契约（AgentRunParams/ProgressEvent/AgentExecutor/...）
@@ -55,7 +54,6 @@ pub mod goal;
 pub mod hooks;
 pub mod identity;
 pub mod interaction;
-pub mod lsp;
 pub mod mcp;
 pub mod mcp_apps;
 pub mod mcp_skills;

@@ -83,7 +83,7 @@ pub struct SystemReminder {
 
 | 类别 | 语义 | 典型内容 |
 | --- | --- | --- |
-| `Capability` | 当前可发现或可调用的能力 | MCP 概览、工具或 LSP 可用性 |
+| `Capability` | 当前可发现或可调用的能力 | MCP 概览、工具可用性 |
 | `Task` | 工作项的状态或结果 | SubAgent、Shell、Workflow、Todo 结果 |
 | `Lifecycle` | 运行实体的状态变化 | 连接、会话、provider、compact 生命周期 |
 | `Guidance` | 要求模型调整后续行为 | Goal steering、Stop hook feedback、continuation |

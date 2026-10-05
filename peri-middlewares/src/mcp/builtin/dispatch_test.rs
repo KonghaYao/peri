@@ -10,13 +10,13 @@
 //!
 //! 工厂选择与输入装配测试位于 `dispatch_factory_tests`；这里保留跨 handler 的 wire 行为。
 //! 两条用例的分工：`dispatch_factory_covers_implemented_instances_only` 从注册表派生断言
-//! 「未接线集合为空 + 表外名字恒 `None`」；`dispatch_covers_cron_and_lsp_variants` 用带实例
+//! 「未接线集合为空 + 表外名字恒 `None`」；`dispatch_covers_cron_variant` 用带实例
 //! 输入的上下文断言各实例拿到**自己的**变体（含「注入的同一份状态对象进了 handler」）以及
 //! `workspace` 在**无**输入时的可见但退化。
 //!
 //! V 矩阵（v4-part-3 sub-plan V §8）第 20/22 行的具名用例在同文件末尾：
 //! - [`all_registered_instances_have_handler`]：注册表 → 工厂的一一映射（遍历注册表派生）；
-//! - [`builtin_source_propagates`]：cron / lsp 的 `ConfigSource::Builtin` 经 overlay →
+//! - [`builtin_source_propagates`]：cron 的 `ConfigSource::Builtin` 经 overlay →
 //!   建传输（三分类）→ status 快照 → `DiscoverMCP` 只读投影保留，transport 分类 = builtin；
 //! - [`call_tool_smoke_and_effective_bridge_round_trip`]（原第 22 行 `call_tool_uses_shared_result_mapping`，
 //!   改名以匹配精炼后的观测面）：跨实例烟测 + effective 桥一致性。第 23 行
@@ -24,7 +24,6 @@
 //!   已由各 package 的 `server_test.rs` 覆盖，宿主侧重复证据删除（宿主无映射实现）。
 
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -37,8 +36,6 @@ use peri_acp_types::plugin::{ConfigSource, McpServerConfig};
 use peri_acp_types::tasks::{BgTaskKind, TaskManager};
 use peri_agent::agent::async_tasks::TaskManager as ConcreteTaskManager;
 use peri_agent::tools::{BaseTool, ToolContext};
-use peri_mcp_lsp::config::{LspConfigFile, LspServerConfig};
-use peri_mcp_lsp::pool::LspServerPool;
 use rmcp::{
     model::{
         CallToolRequestParams, CallToolResponse, CallToolResult, ClientRequest, CustomRequest,
@@ -52,7 +49,7 @@ use tokio::sync::mpsc;
 
 use super::{builtin_server_handler, BuiltinServerHandler};
 use crate::mcp::apps::McpCapabilityProfile;
-use crate::mcp::builtin::context::{BuiltinInstanceContext, CronInstanceInput, LspInstanceInput};
+use crate::mcp::builtin::context::{BuiltinInstanceContext, CronInstanceInput};
 use crate::mcp::builtin::runtime::{
     spawn_builtin_transport_with_handler, BuiltinInstanceSupervisor, BuiltinServerExit,
     TickCloseOutcome, BUILTIN_CONVERGE_TIMEOUT,
@@ -79,7 +76,7 @@ use peri_mcp_workspace::{
 ///
 /// 只固定实例身份；工具名、键、数量、effective name 一律读注册表（`find` / `tools`），
 /// 不出现第二份清单——注册表增删工具时本文件的循环自动跟随。
-const WAVE2_INSTANCES: [&str; 2] = ["cron", "lsp"];
+const WAVE2_INSTANCES: [&str; 1] = ["cron"];
 
 // ══════════════════════════════════════════════════════════════════════════════
 // V 矩阵第 22/23 行：IF-D14 结果映射（真 handler + effective 桥 + 固定脱敏文本）
@@ -101,47 +98,17 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 /// client 侧关闭上界（收尾共用）。
 const CLOSE_TIMEOUT: Duration = Duration::from_millis(500);
 
-/// perl 编写的极简 LSP 服务器（与 `lsp_test.rs` 同源，按本文件需要重抄一份：那个常量是
-/// 对方文件的私有项，无跨 owner 复用面）：
-/// - 每次 spawn 向 `$PERI_LSP_TEST_COUNT` 追加一行（本文件据此证明「服务器真的起来了」）；
-/// - 对任何带 id 的请求回 `{"result":null}`（满足 initialize 握手；也用来逼出
-///   `LspToolError::RequestFailed`——`incomingCalls` 要把 `null` 反序列化成调用层级数组）。
-const FAKE_LSP_SCRIPT: &str = r#"open my $c, '>>', $ENV{PERI_LSP_TEST_COUNT} or exit 1;
-print $c "spawned\n";
-close $c;
-binmode STDIN;
-select STDOUT;
-$| = 1;
-while (1) {
-    my $h = '';
-    while (1) {
-        my $l = <STDIN>;
-        last unless defined $l;
-        last if $l =~ /^\r?\n$/;
-        $h .= $l;
-    }
-    my ($len) = $h =~ /Content-Length:\s*(\d+)/i;
-    last unless defined $len;
-    my $b = '';
-    read(STDIN, $b, $len) == $len or last;
-    if ($b =~ /"id"\s*:\s*(\d+)/) {
-        my $r = '{"jsonrpc":"2.0","id":' . $1 . ',"result":null}';
-        print "Content-Length: " . length($r) . "\r\n\r\n" . $r;
-    }
-}"#;
-
-/// 交叉面夹具：一份齐备的实例上下文（cron 真实 scheduler + lsp 真实惰性 pool）+ 观察端。
+/// 交叉面夹具：一份齐备的实例上下文（cron 真实 scheduler）+ 观察端。
 ///
 /// `web` / `artifact` 不需要额外输入（artifact 的解析根是 `ctx.cwd`），因此同一份上下文可
-/// 喂给四个已实现实例的工厂。lsp pool 路由 `.rs` → perl fake server；`LspServerPool::new`
-/// 惰性，不调用 LSP 工具时**不拉任何进程**。
+/// 喂给四个已实现实例的工厂。
 struct CrossFixture {
     ctx: BuiltinInstanceContext,
     scheduler: Arc<Mutex<CronScheduler>>,
-    pool: Arc<LspServerPool>,
     /// cron 触发通道接收端（保持存活，使发送端始终有对端；本文件不驱动 tick）。
     _cron_triggers: mpsc::UnboundedReceiver<CronTrigger>,
-    dir: tempfile::TempDir,
+    /// 夹具临时目录（仅靠 `Drop` 持有生命周期）。
+    _dir: tempfile::TempDir,
 }
 
 impl CrossFixture {
@@ -150,66 +117,16 @@ impl CrossFixture {
         let (trigger_tx, cron_triggers) = mpsc::unbounded_channel();
         let scheduler = Arc::new(Mutex::new(CronScheduler::new(trigger_tx)));
         let cwd = dir.path().to_string_lossy().to_string();
-        let mut env = HashMap::new();
-        env.insert(
-            "PERI_LSP_TEST_COUNT".to_string(),
-            dir.path()
-                .join("spawn_count.txt")
-                .to_string_lossy()
-                .into_owned(),
-        );
-        let pool = Arc::new(LspServerPool::new(
-            &cwd,
-            LspConfigFile {
-                lsp_servers: HashMap::from([(
-                    "fixture-lsp".to_string(),
-                    LspServerConfig {
-                        name: "fixture-lsp".to_string(),
-                        command: "perl".to_string(),
-                        args: vec!["-e".to_string(), FAKE_LSP_SCRIPT.to_string()],
-                        env: Some(env),
-                        extension_to_language: HashMap::from([(
-                            ".rs".to_string(),
-                            "rust".to_string(),
-                        )]),
-                        initialization_options: None,
-                        disabled: None,
-                        max_restarts: Some(3),
-                        startup_timeout: None,
-                        source: None,
-                    },
-                )]),
-            },
-        ));
-        let ctx = BuiltinInstanceContext::new(cwd)
-            .with_cron(CronInstanceInput {
-                scheduler: Arc::clone(&scheduler),
-                tick_enabled: false,
-            })
-            .with_lsp(LspInstanceInput {
-                pool: Arc::clone(&pool),
-            });
+        let ctx = BuiltinInstanceContext::new(cwd).with_cron(CronInstanceInput {
+            scheduler: Arc::clone(&scheduler),
+            tick_enabled: false,
+        });
         Self {
             ctx,
             scheduler,
-            pool,
             _cron_triggers: cron_triggers,
-            dir,
+            _dir: dir,
         }
-    }
-
-    fn dir(&self) -> &Path {
-        self.dir.path()
-    }
-
-    /// 夹具目录里写一个真实文件，返回绝对路径（LSP 成功路径 / 无路由扩展名路径用）。
-    fn write_file(&self, rel: &str, body: &str) -> String {
-        let path = self.dir().join(rel);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).expect("夹具目录可创建");
-        }
-        std::fs::write(&path, body).expect("夹具文件可写");
-        path.to_string_lossy().to_string()
     }
 }
 
@@ -287,8 +204,8 @@ fn complete(response: CallToolResponse) -> CallToolResult {
     }
 }
 
-/// V 矩阵第 22 行（**宿主面**，原具名用例 `call_tool_uses_shared_result_mapping`）：cron / lsp
-/// 两实例经 dispatch 工厂 + 真实 wire 的**跨实例烟测**（成功 / 业务失败两形态的协议外观），
+/// V 矩阵第 22 行（**宿主面**，原具名用例 `call_tool_uses_shared_result_mapping`）：cron
+/// 实例经 dispatch 工厂 + 真实 wire 的**烟测**（成功 / 业务失败两形态的协议外观），
 /// 以及 effective 名字（模型面）经生产 `McpToolBridge` 打回同一条真实链路的**桥接一致性**
 /// （成功文本 == 线路文本；失败转 `ToolCallError::CallFailed`，reason == 线路失败文本）。
 ///
@@ -299,24 +216,13 @@ fn complete(response: CallToolResponse) -> CallToolResult {
 #[tokio::test]
 async fn call_tool_smoke_and_effective_bridge_round_trip() {
     let fixture = CrossFixture::new();
-    let src = fixture.write_file("main.rs", "fn main() {}\n");
-    let cases = [
-        Wave2CallCase {
-            instance: "cron",
-            success_tool: "cron_list",
-            success_input: json!({}),
-            fail_tool: "cron_register",
-            fail_input: json!({ "expression": INVALID_EXPRESSION, "prompt": LEAK_PROMPT }),
-        },
-        Wave2CallCase {
-            instance: "lsp",
-            success_tool: "LSP",
-            success_input: json!({ "operation": "documentSymbol", "file_path": src }),
-            fail_tool: "LSP",
-            // 缺 `file_path` ⇒ `LspToolError::MissingParam`：不依赖任何 language server 进程。
-            fail_input: json!({ "operation": "documentSymbol" }),
-        },
-    ];
+    let cases = [Wave2CallCase {
+        instance: "cron",
+        success_tool: "cron_list",
+        success_input: json!({}),
+        fail_tool: "cron_register",
+        fail_input: json!({ "expression": INVALID_EXPRESSION, "prompt": LEAK_PROMPT }),
+    }];
 
     for case in cases {
         // 注册表前置：两个工具名必须是本实例声明的原始名（名字不凭空写）。

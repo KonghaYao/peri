@@ -43,7 +43,7 @@ struct Cli {
     /// 最大 agentic 轮数（需 -p）
     #[arg(long = "max-turns", visible_alias = "maxTurns")]
     max_turns: Option<u32>,
-    /// 极简模式：跳过 hooks/LSP/插件等初始化（需 -p）
+    /// 极简模式：跳过 hooks/插件等初始化（需 -p）
     #[arg(long = "bare")]
     bare: bool,
 

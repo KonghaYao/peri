@@ -94,7 +94,6 @@ statusbar-retrying = Retry { $attempt }/{ $max } ({ $delay }s): { $error }
 statusbar-mcp-connecting =  MCP ({ $connected }/{ $total })...
 statusbar-mcp-ready =  MCP ready ({ $total } servers)
 statusbar-mcp-failed =  MCP failed: { $msg }
-statusbar-lsp-diag = diag: { $errors }E/{ $warnings }W
 
 # ---- Status Bar Shortcut Hints ----
 

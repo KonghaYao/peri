@@ -2,7 +2,7 @@
 //!
 //! 与 `PreparedSession`（恢复准入结果：id/identity/read_only）不同——本结构是
 //! **输入**定格：配置、插件聚合、运行环境、frozen 字节一次产出。准备阶段不启动
-//! MCP/LSP/hook/cron，不创建 thread、不占 lease、不做 cache repair，也不写会话
+//! MCP/hook/cron，不创建 thread、不占 lease、不做 cache repair，也不写会话
 //! 数据或本机登记；装配期不再重读配置/插件，也不再各取一份日期与环境探测。
 
 use std::{
@@ -54,7 +54,7 @@ pub(crate) struct PreparedSessionInputs {
     deployment_capabilities: HostCapabilities,
     /// 从同一 `ConfigSource` 读出并合并一次的配置视图。
     pub(crate) configuration: PreparedConfiguration,
-    /// 一次加载的插件聚合（roots/commands/hooks/lsp/mcp）。
+    /// 一次加载的插件聚合（roots/commands/hooks/mcp）。
     pub(crate) plugin_data: Option<PluginLoadResult>,
     pub(crate) skill_roots: Vec<SkillRoot>,
     /// ACP session/new 扩展指令；只在新建时加入冻结 system prompt。
@@ -199,10 +199,7 @@ impl PreparedSessionInputs {
         let mut deployment_closed = std::collections::HashSet::new();
         let capabilities = self.deployment_capabilities;
         for instance in peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES {
-            if !capabilities.builtin_mcp
-                || (instance.name == "cron" && !capabilities.cron)
-                || (instance.name == "lsp" && !capabilities.lsp)
-            {
+            if !capabilities.builtin_mcp || (instance.name == "cron" && !capabilities.cron) {
                 deployment_closed.insert(instance.policy_key.to_owned());
             }
         }

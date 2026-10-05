@@ -460,7 +460,7 @@ fn longest_literal_fragment(template: &str) -> &str {
 ///
 /// 只固定被验实例身份，工具清单/名字/数量一律由注册表条目派生——注册表增删工具时本用例
 /// 自动跟随，不出现第二份清单。
-const WAVE2_INSTANCES: [&str; 2] = ["cron", "lsp"];
+const WAVE2_INSTANCES: [&str; 1] = ["cron"];
 
 /// wave 1（web / artifact）三工具的模板**逐字快照**：任何字节漂移都必须在这里变红。
 ///
@@ -510,7 +510,7 @@ fn wave2_declared_tools() -> Vec<(
         .collect()
 }
 
-/// wave 2 四工具在**生产桥形态**下的工具对象（`McpToolBridge`，`name()` = effective name）。
+/// wave 2 三工具在**生产桥形态**下的工具对象（`McpToolBridge`，`name()` = effective name）。
 ///
 /// 夹具复用 [`builtin_direct_bridges`]（同一假 pool：注册表全部实例的已连接 client +
 /// 生产 `build_typed_tool_bridges`），再按注册表冻结的 effective name 过滤——不重写
@@ -528,7 +528,7 @@ fn wave2_bridged_tools() -> Vec<Arc<dyn BaseTool>> {
     bridges
 }
 
-/// [v4-part-3 A4 / V 矩阵第 12 行] wave 2 四工具**不得**对声明段有任何贡献：
+/// [v4-part-3 A4 / V 矩阵第 12 行] wave 2 三工具**不得**对声明段有任何贡献：
 /// 注册表 `prompt_declaration` 全 `None`、声明表的渲染查表全 `None`、真实 deferred 桥
 /// 经 `collect_declarations` 渲染贡献为 0；同时 wave 1（web / artifact）模板与渲染段
 /// **逐字不变**。
@@ -536,11 +536,11 @@ fn wave2_bridged_tools() -> Vec<Arc<dyn BaseTool>> {
 fn wave2_has_no_prompt_declaration() {
     let wave2_declared = wave2_declared_tools();
 
-    // ① 四个 None：计数由注册表派生（计划冻结值 = cron 三 + LSP 一 = 4）。
+    // ① 三个 None：计数由注册表派生（计划冻结值 = cron 三 = 3）。
     assert_eq!(
         wave2_declared.len(),
-        4,
-        "计划冻结：wave 2 恰四工具（cron 三 + LSP 一）；实际 {}",
+        3,
+        "计划冻结：wave 2 恰三工具（cron 三）；实际 {}",
         wave2_declared.len()
     );
     let none_count = wave2_declared
@@ -576,7 +576,7 @@ fn wave2_has_no_prompt_declaration() {
     declared_names.sort_unstable();
     assert_eq!(
         bridged_names, declared_names,
-        "桥名字必须就是注册表冻结的四条 effective name（否则 ③ 的 None 是空转）"
+        "桥名字必须就是注册表冻结的三条 effective name（否则 ③ 的 None 是空转）"
     );
     assert!(
         wave2.iter().all(|bridge| !bridge.is_direct()),
@@ -585,7 +585,7 @@ fn wave2_has_no_prompt_declaration() {
     let added = collect_declarations(&wave2);
     assert!(
         added.is_none(),
-        "wave 2 四工具对声明段的新增贡献必须为 0；实际: {added:?}"
+        "wave 2 三工具对声明段的新增贡献必须为 0；实际: {added:?}"
     );
 
     // ③ 加法形态：把真实 wave 2 桥追加到真实 direct 工具面，声明段逐字节不变。
@@ -596,7 +596,7 @@ fn wave2_has_no_prompt_declaration() {
     let extended_rendered = collect_declarations(&extended).expect("追加 wave 2 后声明段仍非空");
     assert_eq!(
         extended_rendered, wave1_rendered,
-        "追加 wave 2 四工具不得改变声明段任何字节"
+        "追加 wave 2 三工具不得改变声明段任何字节"
     );
 
     // ④ wave 1 模板 + 渲染段逐字不变（快照比对）。

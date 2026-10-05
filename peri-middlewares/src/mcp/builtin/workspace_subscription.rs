@@ -54,7 +54,7 @@ mod tests {
             "默认订阅必须非空（空配置会退化为不订阅）"
         );
 
-        for other in ["web", "artifact", "cron", "lsp", "unknown"] {
+        for other in ["web", "artifact", "cron", "unknown"] {
             assert!(
                 default_subscriptions_for(other).is_none(),
                 "{other} 不应有默认订阅"

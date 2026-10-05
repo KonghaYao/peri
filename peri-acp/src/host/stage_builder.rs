@@ -215,8 +215,6 @@ pub(crate) fn build_stage_context(
         dynamic_mcp_projection: Arc::clone(&ctx.dynamic_mcp_projection),
         tool_search_index: Arc::clone(&ctx.tool_search_index),
         shared_tools: Arc::clone(&ctx.shared_tools),
-        lsp_servers: ctx.lsp_servers.clone(),
-        lsp_pool: ctx.lsp_pool.clone(),
         workflow_executor: ctx.workflow_executor.clone(),
         workflow_middleware: ctx.workflow_middleware.clone(),
         session_resources: ctx.session_resources.clone(),

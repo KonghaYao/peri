@@ -1,7 +1,7 @@
 //! 生产链序契约测试（ARC-MIDDLEWARE-001 + 2026-07-25 技术债 issue）。
 //!
 //! 锁定「蓝本（`production_blueprint`）↔ 装配实现（`ProductionChainAssembler`）」
-//! 的一一对应：完整序列精确断言 + 条件注册（Hook/MCP/Workflow/LSP/Goal）
+//! 的一一对应：完整序列精确断言 + 条件注册（Hook/MCP/Workflow/Goal）
 //! 组合矩阵 + 权限模式不变性。任意中间件被重排、遗漏、重复注册或插入
 //! 错误位置时，至少一条测试失败。
 //!
@@ -26,7 +26,6 @@ use peri_agent::{
     session::factory::{build_middleware_chain, production_blueprint, ChainSlot},
     tools::BaseTool,
 };
-use peri_mcp_lsp::config::{LspConfigSource, LspServerConfig};
 use peri_model::{
     Model, ModelCapabilities, ModelMessage, ModelRequest, ModelResponse, ModelResult, ModelStream,
     ModelStreamEvent, StopReason,
@@ -314,8 +313,6 @@ fn base_context() -> AssemblyContext {
         session_id: "session-contract-test".to_string(),
         tool_search_index: Arc::new(ToolSearchIndex::new()),
         shared_tools,
-        lsp_servers: Vec::new(),
-        lsp_pool: None,
         workflow_executor: None,
         workflow_middleware: None,
         event_handler: Arc::new(FakeEventHandler),
@@ -381,21 +378,6 @@ fn make_hook() -> RegisteredHook {
         plugin_root: PathBuf::from("/tmp/test-plugin"),
         plugin_data_dir: PathBuf::from("/tmp/test-plugin-data"),
         plugin_options: Default::default(),
-    }
-}
-
-fn make_lsp_config() -> LspServerConfig {
-    LspServerConfig {
-        name: "test-lsp".to_string(),
-        command: "test-lsp-bin".to_string(),
-        args: Vec::new(),
-        env: None,
-        extension_to_language: Default::default(),
-        initialization_options: None,
-        disabled: None,
-        max_restarts: None,
-        startup_timeout: None,
-        source: None,
     }
 }
 
@@ -509,7 +491,6 @@ fn slot_middleware_name(slot: &ChainSlot) -> &'static str {
         ChainSlot::Mcp => "McpMiddleware",
         ChainSlot::Workflow => "WorkflowMiddleware",
         ChainSlot::ToolSearch => "ToolSearch",
-        ChainSlot::Lsp => "LspSyncMiddleware",
         ChainSlot::Goal => "GoalMiddleware",
     }
 }

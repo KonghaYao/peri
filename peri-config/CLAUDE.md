@@ -82,7 +82,7 @@ session 工具池，不新增 daemon 或模型工具。环境来自选中的配�
   在检查与替换之间写入。底层 atomic API 不等于带 revision 的权威更新。
 - `save_to` 的显式单文件路径也使用字节 CAS 并保留 siblings；它不发布 scoped
   system snapshot。必须显式 reload 并重新取得快照，不存在 hot watcher。
-- LSP、插件生命周期、hook 格式、OS 执行环境、存储 locator 与 credentials
+- 插件生命周期、hook 格式、OS 执行环境、存储 locator 与 credentials
   仍有专属能力边界；禁止重复解释已迁移领域不等于禁止业务使用所有 `std::env`。
 
 ## 目标命令

@@ -12,7 +12,6 @@
 //! `CronSchedulerPort`）接入，本模块装配时 downcast 还原具体实例。
 
 mod hooks;
-mod lsp;
 mod mcp;
 mod preparation;
 mod prompt;
@@ -23,10 +22,10 @@ mod workflow;
 mod workflow;
 
 // builtin 实例上下文（IF-P3-04 / A33）：宿主装配（`peri-acp`）经这里拿到宿主构造的上下文
-// 和 cron/LSP 输入；`WorkspaceInstanceInput` 由 `peri-mcp-workspace` 直接公开，宿主直接依赖
+// 和 cron 输入；`WorkspaceInstanceInput` 由 `peri-mcp-workspace` 直接公开，宿主直接依赖
 // 该能力包，并在 `McpClientPool::run_initialize` 之前经 `with_workspace` 注入。
 pub use crate::mcp::builtin::context::{
-    BuiltinContextError, BuiltinInstanceContext, CronInstanceInput, LspInstanceInput,
+    BuiltinContextError, BuiltinInstanceContext, CronInstanceInput,
 };
 pub use workflow::{
     default_workflow_middleware_factory, default_workflow_middleware_factory_with_pool,
@@ -97,7 +96,7 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
     /// 按 Agent 层 `production_blueprint` 的槽位顺序构造中间件链。
     ///
     /// 链序由蓝本保证（ARC-MIDDLEWARE-001 事实源在 Agent 层工厂）；
-    /// 本实现只负责逐槽位构造实例，条件注册（MCP/Workflow/LSP/Goal）
+    /// 本实现只负责逐槽位构造实例，条件注册（MCP/Workflow/Goal）
     /// 与 Hook 组展开按上下文判断，行为与迁移前
     /// `peri-acp/src/agent/builder.rs` 完全一致。
     fn assemble(&self, blueprint: &[ChainSlot], ctx: &Self::Context) -> Self::Output {
@@ -357,22 +356,8 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
                         Arc::clone(shared_tools),
                     )));
                 }
-                // ── 第七组：LSP / Goal（辅助诊断；Goal 链最后） ──
-                // MetaHarness：Lsp / Goal 关闭 → 即使运行条件满足也不构造。
-                //
-                // LSP 两个关闭键语义不重叠（A7/A8/A24）：
-                // - `LspMiddleware`（builtin `lsp` 实例的 policy key）= 关闭实例
-                //   **工具面**（`mcp__lsp__LSP` 不可见/不可调用）**且**关闭同步目标
-                //   （不再读文件、不发通知）；
-                // - `LspSyncMiddleware`（本链槽位的 middleware 名）= 只关同步。
-                // 交叉矩阵：任一键命中 ⇒ 不装同步中间件（都不装即无同步发起方）。
-                // 两者都是**非物理**关闭：pool / handler / readiness 保留。
-                ChainSlot::Lsp
-                    if disabled.contains("LspMiddleware")
-                        || disabled.contains("LspSyncMiddleware") => {}
-                ChainSlot::Lsp => {
-                    lsp::add_lsp(ctx, &mut chain);
-                }
+                // ── 第七组：Goal（辅助诊断；Goal 链最后） ──
+                // MetaHarness：Goal 关闭 → 即使运行条件满足也不构造。
                 ChainSlot::Goal if disabled.contains("GoalMiddleware") => {}
                 ChainSlot::Goal => {
                     // goal active 时注入递增紧迫感 steering + 设 block_continue 让 agent 自驱续跑

@@ -134,8 +134,7 @@ fn workflow_build_tools_filters_disabled() {
     }
 
     // **全部** builtin 实例都关闭：workflow 面 builtin 工具一个不剩。
-    // 关闭键从注册表派生（W3-C1 后实例增至五个，硬编码两键的写法会漏掉
-    // workspace / cron / lsp 三个实例）。
+    // 关闭键从注册表派生（硬编码少量键的写法会漏掉 workspace / cron 实例）。
     let all_keys: std::collections::HashSet<String> =
         peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES
             .iter()

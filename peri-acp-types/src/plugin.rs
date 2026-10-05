@@ -14,7 +14,6 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::hooks::{HooksConfig, RegisteredHook};
-use crate::lsp::LspServerConfig;
 use crate::skills::SkillRoot;
 
 // ─── MCP 服务器配置（mcp/config.rs 迁入）────────────────────
@@ -398,17 +397,6 @@ pub struct PluginAgent {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PluginLspServer {
-    pub name: String,
-    pub command: String,
-    #[serde(default)]
-    pub args: Vec<String>,
-    /// 文件扩展名到语言 ID 的映射（如 {".rs": "rust"}）
-    #[serde(default, rename = "extensionToLanguage")]
-    pub extension_to_language: HashMap<String, String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginOption {
     pub name: String,
     pub description: String,
@@ -459,8 +447,6 @@ pub struct PluginManifest {
     pub hooks: Option<HooksConfig>,
     #[serde(rename = "mcpServers")]
     pub mcp_servers: Option<HashMap<String, McpServerEntry>>,
-    #[serde(rename = "lspServers")]
-    pub lsp_servers: Option<Vec<PluginLspServer>>,
     #[serde(rename = "outputStyles")]
     pub output_styles: Option<Vec<String>>,
     pub options: Option<Vec<PluginOption>>,
@@ -570,8 +556,6 @@ pub struct PluginLoadResult {
     pub all_agent_dirs: Vec<PathBuf>,
     pub all_commands: Vec<CommandEntry>,
     pub all_hooks: Vec<RegisteredHook>,
-    /// 聚合所有插件的 LSP 服务器配置
-    pub all_lsp_servers: Vec<LspServerConfig>,
 }
 
 // ─── 插件管理端口（波 2 装配注入）────────────────────────────

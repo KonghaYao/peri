@@ -28,7 +28,7 @@ struct CloseSignature {
 ///
 /// 1. 四份签名**两两不同**（互不等价）；
 /// 2. `policy_key=false` 是唯一保留 handler / tick / readiness 的关闭来源（策略关闭专属），
-///    且只作用在本 turn 投影上——投影归零时 raw typed bridge 仍能调用成功（cron 与 lsp 各一）；
+///    且只作用在本 turn 投影上——投影归零时 raw typed bridge 仍能调用成功（cron）；
 /// 3. `PERI_MCP_BUILTIN=off` 是**零注入**（配置层就不存在 builtin 条目），因此不得与
 ///    `disabled: true`（配置条目保留、注册为 `Disabled`）混为一谈；
 /// 4. 非法关闭片段（`disabled + system_mcp`）在**加载期**即失败，且不留下任何连接/task；
@@ -47,14 +47,14 @@ async fn four_close_sources_are_distinct() {
     // ── ① MCP 配置 `disabled: true`：跳过连接、无 handler/tick、不宣称 ready ──────
     let fixture = Wave3Fixture::start(Wave3Spec {
         tick_enabled: true,
-        project_mcp_json: Some(r#"{"mcpServers":{"lsp":{"disabled":true}}}"#),
+        project_mcp_json: Some(r#"{"mcpServers":{"artifact":{"disabled":true}}}"#),
         builtin_env: None,
     })
     .await;
     {
         let pool = Arc::clone(&fixture.pool);
         let handle = pool
-            .get_client("lsp")
+            .get_client("artifact")
             .expect("disabled 实例仍必须留下句柄记录（面板语义：注册为 Disabled，不是消失）");
         assert!(
             matches!(handle.status, ClientStatus::Disabled),
@@ -75,18 +75,18 @@ async fn four_close_sources_are_distinct() {
             "disabled 实例不得构造 handler/server task（task 表少一项）"
         );
         assert_eq!(
-            pool.builtin_tick_is_finished("lsp"),
+            pool.builtin_tick_is_finished("artifact"),
             None,
             "无条目必须是 None（不是 false）：关闭的实例连 tick 归属都不存在"
         );
         assert!(
-            pool.discovery_evidence("lsp").is_none(),
+            pool.discovery_evidence("artifact").is_none(),
             "disabled 实例不得宣称 ready（无发现证据）"
         );
         let config = pool
             .configs
             .read()
-            .get("lsp")
+            .get("artifact")
             .cloned()
             .expect("disabled 仍必须保留配置条目（overlay 规则 2 只填 source）");
         assert!(
@@ -102,7 +102,9 @@ async fn four_close_sources_are_distinct() {
             "system 依赖必须排除 disabled 实例: {:?}",
             requirements.iter().map(|r| &r.server).collect::<Vec<_>>()
         );
-        assert!(requirements.iter().all(|required| required.server != "lsp"));
+        assert!(requirements
+            .iter()
+            .all(|required| required.server != "artifact"));
         assert!(
             matches!(
                 *pool.init_status.read(),
@@ -112,14 +114,14 @@ async fn four_close_sources_are_distinct() {
             pool.init_status.read()
         );
 
-        // 不得把 disabled 当策略关闭：关闭集为空，lsp 缺席来自池（句柄无工具）。
+        // 不得把 disabled 当策略关闭：关闭集为空，artifact 缺席来自池（句柄无工具）。
         assert!(
             closed_instances(&HashSet::new()).is_empty(),
             "空 MetaHarness 关闭集必须映射到空关闭集"
         );
         let projection = fixture.projections(&[]);
         assert!(
-            mw_instance_tools(&projection, "lsp").is_empty(),
+            mw_instance_tools(&projection, "artifact").is_empty(),
             "disabled 实例的工具不得进入投影（原因在池，不在关闭集）"
         );
         assert_eq!(
@@ -160,7 +162,9 @@ async fn four_close_sources_are_distinct() {
     // ── ①b 非法关闭片段（`disabled + system_mcp`）必须加载期报错，且不留任何连接 ────
     let invalid = Wave3Fixture::start(Wave3Spec {
         tick_enabled: true,
-        project_mcp_json: Some(r#"{"mcpServers":{"lsp":{"disabled":true,"system_mcp":true}}}"#),
+        project_mcp_json: Some(
+            r#"{"mcpServers":{"artifact":{"disabled":true,"system_mcp":true}}}"#,
+        ),
         builtin_env: None,
     })
     .await;
@@ -170,7 +174,7 @@ async fn four_close_sources_are_distinct() {
         match status {
             McpInitStatus::Failed(message) => {
                 assert!(
-                    message.contains("lsp") && message.contains("关闭片段非法"),
+                    message.contains("artifact") && message.contains("关闭片段非法"),
                     "非法组合必须在加载期以固定文本报错（只含实例名），实际: {message}"
                 );
             }
@@ -182,7 +186,7 @@ async fn four_close_sources_are_distinct() {
             "加载期失败不得留下任何 builtin server task"
         );
         assert!(
-            pool.get_client("lsp").is_none() && pool.get_client("cron").is_none(),
+            pool.get_client("artifact").is_none() && pool.get_client("cron").is_none(),
             "加载期失败不得注册任何连接"
         );
         assert!(
@@ -201,24 +205,16 @@ async fn four_close_sources_are_distinct() {
         ..Wave3Spec::default()
     })
     .await;
-    fixture.open_lsp_release();
     let pool = Arc::clone(&fixture.pool);
     let cron_task = fixture.register_cron_task("0 3 * * *", "mw-four-sources");
-    let policy_disabled = ["CronMiddleware", "LspMiddleware"];
-    let lsp_call_cwd = fixture.project.to_string_lossy().to_string();
-    let lsp_source = fixture.project.join("mw_policy_callable.rs");
-    std::fs::write(&lsp_source, "fn mw_policy_callable() {}\n").expect("调用目标文件可写");
-    let lsp_call_input = json!({
-        "operation": "documentSymbol",
-        "file_path": lsp_source.to_string_lossy(),
-    });
+    let policy_disabled = ["CronMiddleware"];
+    let call_cwd = fixture.project.to_string_lossy().to_string();
     {
         // ② 投影归零，但 handler / pool / tick / readiness 全部保留。
         let projection = fixture.projections(&policy_disabled);
         assert!(
-            mw_instance_tools(&projection, "cron").is_empty()
-                && mw_instance_tools(&projection, "lsp").is_empty(),
-            "策略关闭必须让两个实例的工具从本 turn 投影中消失"
+            mw_instance_tools(&projection, "cron").is_empty(),
+            "策略关闭必须让 cron 实例的工具从本 turn 投影中消失"
         );
         assert_eq!(
             pool.builtin_task_count(),
@@ -238,18 +234,16 @@ async fn four_close_sources_are_distinct() {
             "策略关闭不得改变 readiness 收口，实际 {:?}",
             pool.init_status.read()
         );
-        for instance_name in ["cron", "lsp"] {
-            assert!(
-                pool.discovery_evidence(instance_name)
-                    .is_some_and(|evidence| evidence.is_complete()),
-                "策略关闭不得撤销 {instance_name} 的 ready 证据"
-            );
-            assert!(
-                pool.configs.read().contains_key(instance_name),
-                "策略关闭不得移除 {instance_name} 的配置条目"
-            );
-        }
-        // 投影归零 ≠ 物理销毁：两实例的 raw typed bridge 仍必须调用成功。
+        assert!(
+            pool.discovery_evidence("cron")
+                .is_some_and(|evidence| evidence.is_complete()),
+            "策略关闭不得撤销 cron 的 ready 证据"
+        );
+        assert!(
+            pool.configs.read().contains_key("cron"),
+            "策略关闭不得移除 cron 的配置条目"
+        );
+        // 投影归零 ≠ 物理销毁：raw typed bridge 仍必须调用成功。
         fixture
             .await_armed_trigger(&cron_task, "mw-four-sources")
             .await;
@@ -257,7 +251,7 @@ async fn four_close_sources_are_distinct() {
             MW_BOUND,
             fixture
                 .typed_bridge("mcp__cron__cron_list")
-                .invoke(json!({}), ToolContext::new(&[], &lsp_call_cwd)),
+                .invoke(json!({}), ToolContext::new(&[], &call_cwd)),
         )
         .await
         .expect("策略关闭后 cron 工具调用必须有界返回")
@@ -266,20 +260,10 @@ async fn four_close_sources_are_distinct() {
             cron_text.contains("mw-four-sources"),
             "cron handler 必须仍连着**同一份**组合根 scheduler（注册任务可见），实际: {cron_text}"
         );
-        let lsp_text = tokio::time::timeout(
-            MW_BOUND,
-            fixture
-                .typed_bridge("mcp__lsp__LSP")
-                .invoke(lsp_call_input.clone(), ToolContext::new(&[], &lsp_call_cwd)),
-        )
-        .await
-        .expect("策略关闭后 lsp 工具调用必须有界返回")
-        .expect("策略关闭不得物理销毁 lsp handler");
-        assert_eq!(lsp_text, MW_EMPTY_SYMBOLS_TEXT);
         println!(
             "[MW close-source] meta_harness_policy_key=false | connection=connected | task=true \
              | tick=Some(false) | ready=true | config=true | projected=false \
-             | raw_bridge(cron=ok,lsp=ok) | 策略关闭专属：handler/pool/readiness 保留"
+             | raw_bridge(cron=ok) | 策略关闭专属：handler/pool/readiness 保留"
         );
         signatures.push((
             "meta_harness_policy_key",
@@ -298,7 +282,7 @@ async fn four_close_sources_are_distinct() {
     //    半边（pool 的 `services` 表，`close_with_timeout`）→ 再 `close_builtin_task`
     //    （supervisor：先 tick cancel+join，再收敛 server task）。两个生产调用点
     //    （`lifecycle.rs` 的 `set_disabled` / `remove_server`、`reconnect.rs`）都是这个顺序。
-    let lsp_handle_before = pool.get_client("lsp").expect("lsp 必须仍已连接");
+    let artifact_handle_before = pool.get_client("artifact").expect("artifact 必须仍已连接");
     let web_handle_before = pool.get_client("web").expect("web 必须仍已连接");
     let cron_service = pool.services.lock().remove("cron");
     assert!(
@@ -334,13 +318,13 @@ async fn four_close_sources_are_distinct() {
     );
     // 已停的一代不再驱动 scheduler（窗口到期即证据）。
     fixture.assert_armed_trigger_absent(&cron_task).await;
-    // B 实例（lsp / web）不受影响：句柄同一份、链路仍可服务。
+    // B 实例（artifact / web）不受影响：句柄同一份、链路仍可服务。
     assert!(
         Arc::ptr_eq(
-            &lsp_handle_before,
-            &pool.get_client("lsp").expect("lsp 必须在池中")
+            &artifact_handle_before,
+            &pool.get_client("artifact").expect("artifact 必须在池中")
         ),
-        "物理关闭 cron 不得替换 lsp 句柄"
+        "物理关闭 cron 不得替换 artifact 句柄"
     );
     assert!(
         Arc::ptr_eq(
@@ -349,16 +333,17 @@ async fn four_close_sources_are_distinct() {
         ),
         "物理关闭 cron 不得替换 web 句柄"
     );
-    let lsp_text = tokio::time::timeout(
-        MW_BOUND,
-        fixture
-            .typed_bridge("mcp__lsp__LSP")
-            .invoke(lsp_call_input, ToolContext::new(&[], &lsp_call_cwd)),
-    )
-    .await
-    .expect("A 关闭后 B（lsp）调用必须有界返回")
-    .expect("A 关闭不得影响 B 的服务能力");
-    assert_eq!(lsp_text, MW_EMPTY_SYMBOLS_TEXT);
+    let projection = fixture.projections(&[]);
+    assert_eq!(
+        mw_instance_tools(&projection, "artifact").len(),
+        mw_declared_tool_count("artifact"),
+        "A 关闭后 B（artifact）的投影必须完整"
+    );
+    assert_eq!(
+        mw_instance_tools(&projection, "web").len(),
+        mw_declared_tool_count("web"),
+        "A 关闭后 B（web）的投影必须完整"
+    );
     // 组合根 scheduler / pool 不因 Arc 释放而关闭。
     let later_task = fixture.register_cron_task("0 4 * * *", "mw-after-physical-close");
     assert!(
@@ -413,7 +398,7 @@ async fn four_close_sources_are_distinct() {
         "[MW close-source] physical_close_builtin_task | connection=connected | task=false \
          | tick=None | ready=true(实测:证据不撤) | config=true | projected=true \
          | tick_close=Joined | server_exit=Quit | quiet_window=>{MW_TICK_WINDOW:?}无触发 \
-         | B(lsp)=ok | root_scheduler=alive | boundary(web,未先关client)=AbortedAfterTimeout"
+         | B(artifact)=ok | root_scheduler=alive | boundary(web,未先关client)=AbortedAfterTimeout"
     );
     signatures.push((
         "physical_close_builtin_task",

@@ -39,7 +39,6 @@ use crate::mcp::{ClientStatus, McpClientHandle, McpClientPool, McpMiddleware};
 // 同样未覆盖：真实网络调用（Web 两个工具与 artifact 真实上传都依赖外部服务）。
 // ══════════════════════════════════════════════════════════════════════════════════
 
-use std::collections::HashMap;
 use std::collections::HashSet;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -59,8 +58,6 @@ use peri_agent::interaction::{
 use peri_agent::middleware::capabilities as hook_state;
 use peri_agent::session::tool_catalog::{StartupRequiredTool, StartupToolUpdate};
 use peri_agent::tools::{BaseTool, EffectiveToolError, EffectiveToolErrorCode, ToolContext};
-use peri_mcp_lsp::config::{LspConfigFile, LspServerConfig};
-use peri_mcp_lsp::pool::LspServerPool;
 use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, ErrorCode,
     Implementation, ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerConfig,
@@ -72,7 +69,7 @@ use serde_json::{json, Value};
 use tokio::sync::Notify;
 
 use crate::assembly::{default_workflow_middleware_factory_with_pool, open_builtin_bridges};
-use crate::mcp::builtin::context::{CronInstanceInput, LspInstanceInput};
+use crate::mcp::builtin::context::CronInstanceInput;
 use crate::mcp::builtin::runtime::{
     spawn_builtin_transport_with_tap, BuiltinServerExit, BuiltinServerTask, BuiltinWireLog,
     TickCloseOutcome, BUILTIN_CONVERGE_TIMEOUT, BUILTIN_TICK_INTERVAL,
@@ -178,7 +175,7 @@ fn declared_effective_names(instance: &BuiltinMcpInstance) -> Vec<String> {
 
 /// 实例**声明为 direct** 的工具 effective name（顺序 = 声明顺序）。
 ///
-/// 与 [`declared_effective_names`] 严格区分：`cron` / `lsp` 的工具一律 `direct: false`
+/// 与 [`declared_effective_names`] 严格区分：`cron` 的工具一律 `direct: false`
 /// （A4/A5），因此它们的名字**不**出现在 direct 面（也不出现在 `required` 侧——`required`
 /// 由 `system_mcp_tools` 派生，等价于本函数的集合）。
 fn declared_direct_effective_names(instance: &BuiltinMcpInstance) -> Vec<String> {
@@ -574,7 +571,7 @@ impl hook_state::StartupState for StartupProbe {
 /// 生产启动路径夹具：`run_initialize`（生产 loader 含 step 6.5 默认层）+ 真实连接。
 ///
 /// `HOME` 被重定向到空临时目录，`PERI_MCP_BUILTIN` 置空 ⇒ 唯一注入的 server 是**四个**
-/// builtin 实例（web / artifact / cron / lsp）；断言不依赖运行者本机配置。
+/// builtin 实例（web / artifact / cron / workspace）；断言不依赖运行者本机配置。
 struct StartupFixture {
     _fixture: tempfile::TempDir,
     _env: LoaderEnvGuard,
@@ -583,34 +580,6 @@ struct StartupFixture {
     /// cron 触发通道的接收端：夹具持有它（与宿主同形），使 `CronScheduler` 的发送端
     /// 始终有对端。本夹具 `tick_enabled = false`，因此不会有 tick 真的送出触发。
     _cron_triggers: tokio::sync::mpsc::UnboundedReceiver<peri_acp_types::cron::CronTrigger>,
-}
-
-/// 夹具的 lsp 输入：**生效配置非空**（惰性池：`LspServerPool::new` 不拉任何 language
-/// server 进程），使 `lsp` 实例的工具面按 `has_servers()` 快照出注册表声明的 `LSP`。
-///
-/// 空配置（`LspConfigFile::default()`）会让 `lsp` 面为空表——那是 L-01 的「可见但空」
-/// 语义，由 `mcp::builtin::lsp` 的用例覆盖；本文件的启动路径断言是「live `tools/list`
-/// 等于注册表声明」（逐实例），因此夹具给的是有配置形态。
-fn fixture_lsp_pool(cwd: &str) -> Arc<LspServerPool> {
-    let config = LspConfigFile {
-        lsp_servers: std::collections::HashMap::from([(
-            "fixture-lsp".to_string(),
-            LspServerConfig {
-                name: "fixture-lsp".to_string(),
-                // 惰性池不会 spawn 该命令：本文件不调用任何 LSP 工具。
-                command: "fixture-lsp-unused".to_string(),
-                args: Vec::new(),
-                env: None,
-                extension_to_language: std::collections::HashMap::new(),
-                initialization_options: None,
-                disabled: None,
-                max_restarts: None,
-                startup_timeout: None,
-                source: None,
-            },
-        )]),
-    };
-    Arc::new(LspServerPool::new(cwd, config))
 }
 
 impl StartupFixture {
@@ -628,19 +597,14 @@ impl StartupFixture {
         // 四个已实现实例的输入一次给齐：`web` / `artifact` 不需要额外输入（后者的解析根是
         // `cwd`），`cron` 要 scheduler（`tick_enabled = false`：本夹具不起 tick，tick 归属
         // 由 `mcp::builtin::runtime` / `cron` 的驱动用例与
-        // `pool_spawn_point_drives_cron_tick_and_stops_on_generation_close` 覆盖），`lsp`
-        // 要 pool（见 `fixture_lsp_pool`）。
+        // `pool_spawn_point_drives_cron_tick_and_stops_on_generation_close` 覆盖）。
         let (cron_trigger_tx, cron_triggers) = tokio::sync::mpsc::unbounded_channel();
         let scheduler = Arc::new(parking_lot::Mutex::new(CronScheduler::new(cron_trigger_tx)));
         pool.set_builtin_instance_context(Arc::new(
-            BuiltinInstanceContext::new(cwd.clone())
-                .with_cron(CronInstanceInput {
-                    scheduler,
-                    tick_enabled: false,
-                })
-                .with_lsp(LspInstanceInput {
-                    pool: fixture_lsp_pool(&cwd),
-                }),
+            BuiltinInstanceContext::new(cwd.clone()).with_cron(CronInstanceInput {
+                scheduler,
+                tick_enabled: false,
+            }),
         ))
         .expect("夹具首次注入上下文必须成功");
         let (status_tx, _status_rx) = tokio::sync::watch::channel(McpInitStatus::Pending);

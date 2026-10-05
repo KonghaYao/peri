@@ -17,7 +17,6 @@ fn make_manifest_with_hooks(hooks: Option<HooksConfig>) -> PluginManifest {
         skills: None,
         hooks,
         mcp_servers: None,
-        lsp_servers: None,
         output_styles: None,
         options: None,
         settings: None,

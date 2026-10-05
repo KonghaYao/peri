@@ -224,7 +224,6 @@ pub(crate) async fn run_prompt(
     let tool_search_index = deployment.tool_search_index.clone();
     let agent_catalog = deployment.agent_catalog.clone();
     let shared_tools = deployment.shared_tools.clone();
-    let plugin_lsp_servers = deployment.plugin_lsp_servers.as_slice();
     let session_resources = deployment.session_resources.clone();
     let controller = &deployment.controller;
     let langfuse_session = deployment.langfuse_session.clone();
@@ -300,7 +299,6 @@ pub(crate) async fn run_prompt(
         frozen,
         incoming_recalls,
         workflow_middleware,
-        lsp_pool,
         execution_owner,
     ) = {
         let mut sessions = sessions.lock().await;
@@ -321,11 +319,6 @@ pub(crate) async fn run_prompt(
             // 后台 continuation 保留 recall；队列承载的新用户输入仍消费 recall。
             take_recall_for_turn(&mut state.recall_items, continuation && !managed_input),
             state.workflow_middleware.clone(),
-            // A11/A22：这是**所属部署单元** host pool 的投影（session 创建时从
-            // `local.lsp_pool` 取的同一 `Arc`，与 `deployment` 同源；session 不再
-            // 建池），每 turn 只 clone 该 `Arc` 传入 `AssemblyContext`，
-            // 不按 session cwd 重建。host pool 的唯一关闭点是 host shutdown。
-            state.lsp_pool.clone(),
             // 执行所有权投影：child 保存（save_child）需要调用方证明自己持有本会话
             // root 的活 owner；只读准入的会话为 None，那时不落任何 child。
             state.execution_owner.clone(),
@@ -534,8 +527,6 @@ pub(crate) async fn run_prompt(
         tool_search_index,
         agent_catalog,
         shared_tools,
-        lsp_servers: plugin_lsp_servers.to_vec(),
-        lsp_pool,
         workflow_executor: Some(workflow_executor),
         workflow_middleware,
         event_publisher,

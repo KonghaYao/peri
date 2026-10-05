@@ -34,7 +34,6 @@
       "WorkflowMiddleware": false,
       "ToolSearch": true,
       "ArtifactMiddleware": false,
-      "LspMiddleware": false,
       "GoalMiddleware": false
     }
   }

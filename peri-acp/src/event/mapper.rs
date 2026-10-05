@@ -250,7 +250,6 @@ pub fn map_event(event: &ExecutorEvent, context_window: u32, caps: &PeriCaps) ->
         | ExecutorEvent::CompactCompleted { .. }
         | ExecutorEvent::RewindCompleted { .. }
         | ExecutorEvent::AgentExecutionFailed { .. }
-        | ExecutorEvent::LspDiagnostics { .. }
         | ExecutorEvent::BgToolStep { .. }
         | ExecutorEvent::WorkflowProgress(_)
         | ExecutorEvent::SessionStarted { .. }

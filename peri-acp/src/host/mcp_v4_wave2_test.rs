@@ -1,27 +1,15 @@
-//! H-04 / V-03：wave 2（cron / lsp 实迁为 builtin MCP 实例）的**终态**宿主装配用例。
+//! H-04 / V-03：wave 2（cron 实迁为 builtin MCP 实例）的**终态**宿主装配用例。
 //!
 //! 模块名 `host::mcp_v4_wave2`（由 `peri-acp/src/host/mod.rs` 的 `#[path]` 挂载）：
 //! 终态断言只写在本文件（主 plan §8 表头「不能用 baseline 代替」）。
 //!
 //! ## 覆盖（每条都对应主计划 §8 的具名行）
 //!
-//! 1. [`multi_cwd_degradation_and_host_shutdown`]（§8 第 13 行 / R19 / A11 / A21 / A22）
-//!    - **配置合并前移**：`~/.peri/settings.json` 的 `config.lspServers` 必须在宿主装配
-//!      期合并（`plugin_lsp_servers` 非空），且该配置**在 pool 构造时即生效**
-//!      （`LspServerPool::has_servers()` 为真）——即 handler 构造（`run_initialize`）
-//!      晚于配置合并；
-//!    - **多 cwd 共享**：两个 cwd 不同的 session 的 `lsp_pool` 与宿主句柄**同一 `Arc`**
-//!      （`Arc::ptr_eq`），这是 A22 登记的功能退化本体（不再 per-session）；
-//!    - **host shutdown 收敛**：`shutdown_host` 对唯一 host pool 恰调用一次 `shutdown`
-//!      且池进入终态（`ready_for` 转 false ⇒ language server 全部关闭）；
-//!      `session/delete` 路径不关池（该断言在 `host::requests::tests`）。
-//! 2. [`wave2_final_first_request_and_deferred_summary`]（§8 第 3 行 / R7 / A4 / A20）
-//!    - **首个 LLM 请求**（直连面）：不含任何 `mcp__cron__*` / `mcp__lsp__*`
+//! 1. [`wave2_final_first_request_and_deferred_summary`]（§8 第 3 行 / R7 / A4 / A20）
+//!    - **首个 LLM 请求**（直连面）：不含任何 `mcp__cron__*`
 //!      （四工具 `direct: false`，`system_mcp_tools: []` 不提升 direct）；
 //!    - **deferred 目录**（= 搜索/执行面，A20 的唯一等价对照面）：按**有效配置**包含
-//!      `mcp__cron__cron_register` / `mcp__cron__cron_list` / `mcp__cron__cron_remove`，
-//!      含 `mcp__lsp__LSP` **当且仅当** LSP 生效配置非空；无 LSP 配置时**不含**
-//!      `mcp__lsp__*`（A6：实例仍 ready，但工具面为空表）。
+//!      `mcp__cron__cron_register` / `mcp__cron__cron_list` / `mcp__cron__cron_remove`。
 //!
 //! ## 为什么本文件自己起 pool（而不是复用 `host::mcp_v4_wire_fixture`）
 //!
@@ -30,7 +18,14 @@
 //! 的 host 装配里**没有**这一步（它起的 pool 从未注入上下文），因此它的 pool 里
 //! builtin 实例一律以 `ContextMissing` 收口——迁移前的 wave 1 用例只断言
 //! web/artifact 的**裸名/生效名存在性对照**，与该缺口无关；wave 2 的终态面必须
-//! 有真实连上的 cron / lsp 实例，否则断言面是空的。
+//! 有真实连上的 cron 实例，否则断言面是空的。
+//!
+//! 本文件因此复刻**生产装配的同一步骤序列**（`peri-acp/src/host/assemble.rs`）：
+//! 构造 pool → 构造 `BuiltinInstanceContext`（同一批 `Arc`）→ 注入 → `run_initialize`。
+//! 复用的是同属 `host` 树的 model 替身与 prompt 驱动
+//! （`host::mcp_v4_wire_fixture::{WireScriptedModel, run_wire_prompt}` 与
+//! `host::executor_flow_tests::{MockEventSink, make_session_context}`），
+//! 不复制它们一行实现。
 //!
 //! 本文件因此复刻**生产装配的同一步骤序列**（`peri-acp/src/host/assemble.rs`）：
 //! 构造 pool → 构造 `BuiltinInstanceContext`（同一批 `Arc`）→ 注入 → `run_initialize`。
@@ -66,11 +61,10 @@ use peri_acp_types::{
     builtin_mcp::find as find_builtin_instance,
     messages::BaseMessage,
     permission::{PermissionMode, SharedPermissionMode},
-    ports::{LspPoolPort, McpPoolPort},
+    ports::McpPoolPort,
 };
-use peri_mcp_lsp::pool::LspServerPool;
 use peri_middlewares::{
-    assembly::{BuiltinContextError, BuiltinInstanceContext, CronInstanceInput, LspInstanceInput},
+    assembly::{BuiltinContextError, BuiltinInstanceContext, CronInstanceInput},
     mcp::{ClientStatus, McpClientPool, McpInitStatus, McpTaskOwner},
     tool_search::{core_tools, SEARCH_EXTRA_TOOLS_NAME},
 };
@@ -122,7 +116,6 @@ impl Drop for HomeRedirect {
 struct FixtureDirs {
     tmp: tempfile::TempDir,
     _home_guard: HomeRedirect,
-    home: PathBuf,
     workspace: PathBuf,
     claude_home: PathBuf,
 }
@@ -140,7 +133,6 @@ impl FixtureDirs {
         Self {
             tmp,
             _home_guard: guard,
-            home,
             workspace,
             claude_home,
         }
@@ -156,100 +148,9 @@ impl FixtureDirs {
         std::fs::create_dir_all(&second).expect("第二个 cwd");
         second
     }
-
-    /// 写入全局 LSP 配置（生产解析器 `load_global_lsp_config` 的读入路径）。
-    ///
-    /// `command` 指向**不存在**的可执行文件：注册面只读配置表
-    /// （`LspServerPool::new` 是惰性构造，不 spawn），本文件不驱动任何 LSP 工具。
-    fn write_lsp_settings(&self, server: &str) {
-        let settings_path = crate::provider::config_path();
-        assert!(
-            settings_path.starts_with(&self.home),
-            "LSP 配置必须落在夹具临时 HOME 内（否则写的是开发者本机配置）: {}",
-            settings_path.display()
-        );
-        std::fs::create_dir_all(settings_path.parent().expect("settings.json 必有父目录"))
-            .expect("创建临时 HOME 下的 ~/.peri");
-        std::fs::write(
-            &settings_path,
-            format!(
-                r#"{{"config":{{"lspServers":{{"{server}":{{"command":"/nonexistent/peri-wave2-lsp","args":[],"extensionToLanguage":{{".w2probe":"plaintext"}}}}}}}}}}"#
-            ),
-        )
-        .expect("写入 LSP settings.json");
-    }
-}
-
-/// 最小 LSP server 配置（直接喂给 host pool 工厂的形态）。
-fn lsp_server_config(name: &str) -> peri_acp_types::lsp::LspServerConfig {
-    peri_acp_types::lsp::LspServerConfig {
-        name: name.to_string(),
-        command: "/nonexistent/peri-wave2-lsp".to_string(),
-        args: Vec::new(),
-        env: None,
-        extension_to_language: HashMap::new(),
-        initialization_options: None,
-        disabled: None,
-        max_restarts: None,
-        startup_timeout: None,
-        source: None,
-    }
 }
 
 // ── 夹具 2：生产同构的 builtin host（pool + 上下文注入 + run_initialize）───────
-
-/// 记录 shutdown 调用与终态的 host pool 替身（A30：四个端口方法全部显式实现）。
-///
-/// 只替换**观察点**：`AcpServerConfig::lsp_pool` 的消费方（session 投影、host
-/// shutdown）全部走生产代码路径，不因替身改变。
-struct RecordingHostPool {
-    shutdown_calls: std::sync::atomic::AtomicU32,
-    closed: std::sync::atomic::AtomicBool,
-}
-
-impl RecordingHostPool {
-    fn new() -> Self {
-        Self {
-            shutdown_calls: std::sync::atomic::AtomicU32::new(0),
-            closed: std::sync::atomic::AtomicBool::new(false),
-        }
-    }
-
-    fn shutdown_calls(&self) -> u32 {
-        self.shutdown_calls
-            .load(std::sync::atomic::Ordering::SeqCst)
-    }
-
-    /// 「language server 全部关闭」在此替身上的可观察投影：终态位为真。
-    fn is_closed(&self) -> bool {
-        self.closed.load(std::sync::atomic::Ordering::SeqCst)
-    }
-}
-
-#[async_trait::async_trait]
-impl LspPoolPort for RecordingHostPool {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    async fn shutdown(&self) {
-        self.shutdown_calls
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        self.closed.store(true, std::sync::atomic::Ordering::SeqCst);
-    }
-    fn ready_for(&self, _path: &Path) -> bool {
-        !self.is_closed()
-    }
-    async fn did_change(
-        &self,
-        _path: &Path,
-        _text: &str,
-    ) -> Result<(), peri_acp_types::ports::LspSyncError> {
-        Ok(())
-    }
-    async fn did_save(&self, _path: &Path) -> Result<(), peri_acp_types::ports::LspSyncError> {
-        Ok(())
-    }
-}
 
 /// 生产同构的 builtin 宿主：真实 pool + **注入过的** 实例上下文 + 真实
 /// `run_initialize`（A33 的顺序：pool → 上下文 → 注入 → initialize）。
@@ -262,25 +163,17 @@ struct BuiltinHostFixture {
 }
 
 impl BuiltinHostFixture {
-    /// `lsp_servers` 为空 ⇒ 注入**空配置** host pool（A6：仍注入，工具面空表）。
-    async fn start(
-        dirs: FixtureDirs,
-        lsp_servers: &[peri_acp_types::lsp::LspServerConfig],
-        tick_enabled: bool,
-    ) -> Self {
+    /// `tick_enabled = false` ⇒ 不挂 tick 驱动（工具面 / 归一用例不需要）。
+    async fn start(dirs: FixtureDirs, tick_enabled: bool) -> Self {
         let cwd = dirs.workspace_str();
         let (cron_trigger_tx, _cron_triggers) = tokio::sync::mpsc::unbounded_channel();
         let scheduler = Arc::new(parking_lot::Mutex::new(peri_mcp_cron::CronScheduler::new(
             cron_trigger_tx,
         )));
-        let context = BuiltinInstanceContext::new(cwd.clone())
-            .with_cron(CronInstanceInput {
-                scheduler,
-                tick_enabled,
-            })
-            .with_lsp(LspInstanceInput {
-                pool: peri_mcp_lsp::create_host_lsp_pool(&cwd, lsp_servers),
-            });
+        let context = BuiltinInstanceContext::new(cwd.clone()).with_cron(CronInstanceInput {
+            scheduler,
+            tick_enabled,
+        });
         Self::start_with_context(dirs, context).await
     }
 
@@ -392,15 +285,7 @@ fn peri_config_with_provider() -> PeriConfig {
 /// `session_resources = true`（与 `peri-acp/src/host/workspace.rs` 的会话环境装配
 /// 同源）⇒ `workspace_assembly` 为 `None` ⇒ session 不再各自分裂出「会话环境」
 /// （每个环境会自带一份部署配置与 pool），因此同一部署单元内的多个 session 共享
-/// 这一份 host pool。**这正是 A22 登记的退化形态**：多 cwd 共享宿主 root_uri；
-/// 另一形态（`session_resources = false`，TUI/print/stdio 顶层装配）里 session 的
-/// 部署单元是它自己的「会话环境」，pool 归该环境（仍是「部署单元唯一」，与本用例
-/// 的「多 session 共享一份」是不同的部署粒度，不在本用例断言面内）。
-async fn assemble_host(dirs: &FixtureDirs) -> AcpServerConfig {
-    assemble_host_with_tick(dirs, false).await
-}
-
-/// 同上，但 `drive_cron_tick` 由调用方给定。
+/// 这一份 host pool。
 ///
 /// `drive_cron_tick` 是**既有装配开关**（TUI 路径 true ⇒ builtin cron 实例那一代挂
 /// 1s tick 驱动；print/stdio false ⇒ 无 tick）。W3 的 cron 端到端与 tick 计数用例取
@@ -413,7 +298,7 @@ async fn assemble_host_with_tick(dirs: &FixtureDirs, drive_cron_tick: bool) -> A
 /// `WorkspaceInstanceInput`）由调用方给定。
 ///
 /// 夹具默认传 `None`（[`assemble_host_with_tick`] 的全部既有调用点）：`workspace`
-/// 实例可见但退化，本文件其余用例的断言面（cron / lsp）不含该输入。1:N root 形态的
+/// 实例可见但退化，本文件其余用例的断言面（cron）不含该输入。1:N root 形态的
 /// 补验用例 [`wave3_one_to_n_root_never_injects_per_session_workspace_input`] 传
 /// `Some`——该形态下这份输入只在 **root** 装配时进一次 builtin 上下文，session 侧
 /// 没有任何路径能再注入它或取回它（[`super::workspace::SessionEnvironment::assemble`]
@@ -447,7 +332,7 @@ async fn assemble_host_with_workspace_input(
             bare: false,
             drive_cron_tick,
             // session 级 `workspace` 输入（AW3-11）由调用方给定：默认 `None` ⇒
-            // 可见但退化，本文件断言面（cron / lsp）不含它。
+            // 可见但退化，本文件断言面（cron）不含它。
             workspace_input,
             // 资源面输入同为会话级（见上）：本文件断言面不含它，恒为 `None`。
             workspace_resources: None,
@@ -686,19 +571,18 @@ fn assert_no_ready_evidence(pool: &McpClientPool, instance: &str, expect_reason:
 ///
 /// 只从**调用方持有的**接收端读数：`CronScheduler::tick` 触发到期任务时向该通道发送
 /// `CronTrigger`，因此「窗口内收到几条」是 tick 是否被驱动的直接投影。
-/// 五个 builtin 实例与各自**注册表声明的原始工具名**（顺序即 `tools/list` 顺序）。
+/// 四个 builtin 实例与各自**注册表声明的原始工具名**（顺序即 `tools/list` 顺序）。
 ///
 /// 内联期望是刻意的：用例自己先断言「注册表声明 == 本表」，避免把用例的臆想当成契约。
 ///
-/// v4-part-4（wave 3）：`workspace` 随第 5 个实例加入本表——生产装配的 builtin 池由
-/// 四个变五个是本波的**目标事实**（注册表 `BUILTIN_MCP_INSTANCES` 五实例），因此
+/// v4-part-4（wave 3）：`workspace` 随第 4 个实例加入本表——生产装配的 builtin 池由
+/// 三个变四个是本波的**目标事实**（注册表 `BUILTIN_MCP_INSTANCES`），因此
 /// 「池内全部实例 ready / 裸名不得复活 / off 下零注入」等断言面必须同批覆盖它，
 /// 否则这些断言会在「少盯一个实例」的空洞下继续绿。
-const WAVE2_INSTANCES: [(&str, &[&str]); 5] = [
+const WAVE2_INSTANCES: [(&str, &[&str]); 4] = [
     ("web", &["WebSearch", "WebFetch"]),
     ("artifact", &["artifact"]),
     ("cron", &["cron_register", "cron_list", "cron_remove"]),
-    ("lsp", &["LSP"]),
     (
         "workspace",
         &[
@@ -749,15 +633,6 @@ fn wave2_tools(instance: &str) -> &'static [&'static str] {
         .unwrap_or_else(|| panic!("{instance} 必须在 WAVE2_INSTANCES 内"))
         .1
 }
-/// 进程是否存活（`kill -0`：与 `peri-mcp-lsp` 既有用例同款探针）。
-fn process_alive(pid: u32) -> bool {
-    std::process::Command::new("kill")
-        .arg("-0")
-        .arg(pid.to_string())
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
-}
 
 use self::mcp_v4_wave2_cron_support_test::*;
 
@@ -773,7 +648,5 @@ mod mcp_v4_wave2_host_lifecycle_test;
 mod mcp_v4_wave2_readiness_test;
 #[path = "mcp_v4_wave2_supervisor_test.rs"]
 mod mcp_v4_wave2_supervisor_test;
-#[path = "mcp_v4_wave2_timeout_test.rs"]
-mod mcp_v4_wave2_timeout_test;
 #[path = "mcp_v4_wave2_tool_surface_test.rs"]
 mod mcp_v4_wave2_tool_surface_test;

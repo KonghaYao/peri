@@ -10,10 +10,10 @@
 //!
 //! 三分类概念（不要混淆）：
 //! - **已实现实例**：[`BUILTIN_MCP_INSTANCES`]（wave 1 = `web` / `artifact`，
-//!   wave 2 增 `cron` / `lsp`，wave 3 增 `workspace`），可被
+//!   wave 2 增 `cron`，wave 3 增 `workspace`），可被
 //!   `TransportConfig::Builtin` 解析、可参与默认层注入。
 //! - **保留实例名**：[`BUILTIN_RESERVED_INSTANCE_NAMES`] = 已实现实例 +
-//!   后续波次预留。wave 3 后五个保留名全部已实现（当前无「预留但未实现」的名字）。
+//!   后续波次预留。当前四个保留名全部已实现（无「预留但未实现」的名字）。
 //!   用户配置不得用 `command`/`url` 接管任一保留名（加载期 typed error），
 //!   否则会按名字反查继承「按原始名判定」的审批结果，静默移除 `mcp__*` 审批门。
 //! - **归一表**：[`original_tool_name_of_effective`] 只索引本文件的冻结字面量，
@@ -109,17 +109,6 @@ const CRON_TOOLS: &[BuiltinMcpTool] = &[
     },
 ];
 
-/// `lsp` 实例的工具声明（单工具）。
-///
-/// `LSP` 同样是 deferred 且无声明模板（A4/A5）；`system_mcp_tools` 为空集，
-/// 工具列表的可用性由 handler 构造时的 `has_servers()` 快照决定（不在本表表达）。
-const LSP_TOOLS: &[BuiltinMcpTool] = &[BuiltinMcpTool {
-    original_name: "LSP",
-    effective_name: "mcp__lsp__LSP",
-    direct: false,
-    prompt_declaration: None,
-}];
-
 /// `workspace` 实例的工具声明（7 项；顺序即声明段顺序）。
 ///
 /// wave 3：7 个本地工具由 middleware 直供迁移为实例提供，实例内**包装**既有
@@ -188,7 +177,7 @@ const WORKSPACE_TOOLS: &[BuiltinMcpTool] = &[
     },
 ];
 
-/// 已实现的 builtin 实例（wave 1 = `web` / `artifact`；wave 2 增 `cron` / `lsp`；
+/// 已实现的 builtin 实例（wave 1 = `web` / `artifact`；wave 2 增 `cron`；
 /// wave 3 增 `workspace`）。
 ///
 /// 这是「实例 / 原始工具名 / effective name / 逐工具 `direct` / `prompt_declaration` /
@@ -214,12 +203,6 @@ pub const BUILTIN_MCP_INSTANCES: &[BuiltinMcpInstance] = &[
         tools: CRON_TOOLS,
     },
     BuiltinMcpInstance {
-        name: "lsp",
-        instance: "lsp",
-        policy_key: "LspMiddleware",
-        tools: LSP_TOOLS,
-    },
-    BuiltinMcpInstance {
         name: "workspace",
         instance: "workspace",
         policy_key: "WorkspaceMiddleware",
@@ -229,10 +212,9 @@ pub const BUILTIN_MCP_INSTANCES: &[BuiltinMcpInstance] = &[
 
 /// 保留实例名：已实现实例 + 后续波次预留。
 ///
-/// wave 3 后五个保留名全部已实现（当前无「预留但未实现」的名字）；用户配置为任一
+/// 当前四个保留名全部已实现（无「预留但未实现」的名字）；用户配置为任一
 /// 保留名声明 `command` 或 `url` 一律是加载期 typed error。
-pub const BUILTIN_RESERVED_INSTANCE_NAMES: &[&str] =
-    &["web", "artifact", "cron", "lsp", "workspace"];
+pub const BUILTIN_RESERVED_INSTANCE_NAMES: &[&str] = &["web", "artifact", "cron", "workspace"];
 
 /// 按实例身份解析**已实现**实例；未登记的名字（含后续波次的预留名）返回 `None`。
 pub fn find(instance: &str) -> Option<&'static BuiltinMcpInstance> {

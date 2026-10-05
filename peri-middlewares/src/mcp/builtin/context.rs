@@ -1,10 +1,10 @@
 //! builtin 实例上下文（IF-P3-04 / A33，owner H-02）：宿主装配注入的实例状态载体。
 //!
 //! 边界：
-//! - 宿主上下文类型与 cron/LSP 输入经 `peri_middlewares::assembly` 再导出；
+//! - 宿主上下文类型与 cron 输入经 `peri_middlewares::assembly` 再导出；
 //!   `WorkspaceInstanceInput` 由 `peri-mcp-workspace` 直接公开（仅保留旧构造测试）。`crate::mcp::builtin` 仍是
 //!   `pub(crate)`，宿主（`peri-acp`）不得 import 本模块路径（A33）。
-//! - 字段承载的是**实例构造所需状态**（cron scheduler / LSP pool / cwd / 关闭集 /
+//! - 字段承载的是**实例构造所需状态**（cron scheduler / cwd / 关闭集 /
 //!   workspace 的遗留输入槽），**不是**工具执行上下文：7 个 workspace 工具当前都不读
 //!   `ToolContext::cwd`（`invoke` 一律 `_ctx`），宿主 cwd / session 上下文到 builtin 工具
 //!   执行的贯通是 wave 3 的缺口（F1）。本类型不声称该缺口已贯通，也不把 `cwd` 当作工具
@@ -13,16 +13,14 @@
 //! - 同一个状态对象只注入一次（A33）：注入状态与一次性语义在
 //!   `McpClientPool::set_builtin_instance_context`（同一短锁保护上下文与
 //!   「initialize 已开始」标志）；本模块只提供类型与便利构造，自身不持有注入状态。
-//! - cron scheduler 与 LSP pool 由**组合根**构造并以 `Arc` 注入同一份（A1）：本类型不新建
-//!   第二份 scheduler / pool（`Arc::ptr_eq` 可观察）。
+//! - cron scheduler 由**组合根**构造并以 `Arc` 注入同一份（A1）：本类型不新建
+//!   第二份 scheduler（`Arc::ptr_eq` 可观察）。
 
 use std::{collections::BTreeSet, sync::Arc};
 
 #[cfg(not(target_os = "emscripten"))]
 use parking_lot::Mutex;
 use peri_acp_types::builtin_mcp::find;
-#[cfg(not(target_os = "emscripten"))]
-use peri_mcp_lsp::pool::LspServerPool;
 use thiserror::Error;
 
 #[cfg(not(target_os = "emscripten"))]
@@ -60,31 +58,14 @@ pub struct CronInstanceInput {
 #[cfg(target_os = "emscripten")]
 pub struct CronInstanceInput;
 
-/// `lsp` 实例的上下文输入。
-///
-/// `pool` 是 host 级**唯一** pool：无 LSP 配置时仍注入空配置 pool（`has_servers()` 为假
-/// ⇒ handler 工具面为空表），不得用「不注入」表达「无配置」——那会让实例退化成
-/// 「上下文缺失」而不是「可见但空」。
-#[cfg(not(target_os = "emscripten"))]
-pub struct LspInstanceInput {
-    /// host 级 LSP pool（经 `peri_mcp_lsp` 门面构造）。
-    pub pool: Arc<LspServerPool>,
-}
-
-#[cfg(target_os = "emscripten")]
-pub struct LspInstanceInput;
-
 /// 宿主装配构造并注入 pool 的 builtin 实例上下文（IF-P3-04）。
 ///
 /// 字段按冻结形状保持 `pub`：宿主可直接构造字面量，也可经 [`Self::new`] 系列便利构造。
 pub struct BuiltinInstanceContext {
-    /// host 单 cwd：`artifact` 实例的相对路径解析根，也是 `lsp` pool `root_uri` 的来源。
-    /// 与 pool 的 `execution_cwd` 同源（同一 host cwd），不支持多 cwd。
+    /// host 单 cwd：`artifact` 实例的相对路径解析根。不支持多 cwd。
     pub cwd: String,
     /// `cron` 实例输入；`None` = 未提供（`cron` 实例不可装配，见 [`Self::instance_input_ready`]）。
     pub cron: Option<CronInstanceInput>,
-    /// `lsp` 实例输入；`None` = 未提供（同上）。
-    pub lsp: Option<LspInstanceInput>,
     /// 遗留测试输入槽。生产 dispatcher 不读取它；Workspace 自己持有 Bash 任务。
     #[cfg(not(target_os = "emscripten"))]
     pub workspace: Option<WorkspaceInstanceInput>,
@@ -125,7 +106,6 @@ impl BuiltinInstanceContext {
         Self {
             cwd: cwd.into(),
             cron: None,
-            lsp: None,
             #[cfg(not(target_os = "emscripten"))]
             workspace: None,
             #[cfg(not(target_os = "emscripten"))]
@@ -140,13 +120,6 @@ impl BuiltinInstanceContext {
     #[cfg(not(target_os = "emscripten"))]
     pub fn with_cron(mut self, input: CronInstanceInput) -> Self {
         self.cron = Some(input);
-        self
-    }
-
-    /// 提供 `lsp` 实例输入。
-    #[cfg(not(target_os = "emscripten"))]
-    pub fn with_lsp(mut self, input: LspInstanceInput) -> Self {
-        self.lsp = Some(input);
         self
     }
 
@@ -185,7 +158,7 @@ impl BuiltinInstanceContext {
     /// 实例装配共同使用，避免各自硬编码实例名。
     ///
     /// 判定按注册表名（`peri_acp_types::builtin_mcp::find(instance)?.name`），不另立第二张
-    /// 实例名字表：`cron` 需要 [`Self::cron`]、`lsp` 需要 [`Self::lsp`]；`web` / `artifact`
+    /// 实例名字表：`cron` 需要 [`Self::cron`]；`web` / `artifact`
     /// 不需要额外输入（`artifact` 的解析根是 [`Self::cwd`]）。
     ///
     /// `workspace` **不在本判定内**（AW3-11 明文）：它落 `Some(_) => true` 分支——
@@ -205,7 +178,6 @@ impl BuiltinInstanceContext {
         }
         match find(instance).map(|registered| registered.name) {
             Some("cron") => self.cron.is_some(),
-            Some("lsp") => self.lsp.is_some(),
             Some(_) => true,
             None => false,
         }

@@ -103,10 +103,10 @@ for aspect in chain:
 
 ## 3. 切面注册表
 
-生产蓝本包含 20 个槽位（`ChainSlot` 20 个变体；原 `git_watch` 槽位已随 Git Watch 下沉到
+生产蓝本包含 18 个槽位（`ChainSlot` 18 个变体；原 `git_watch` 槽位已随 Git Watch 下沉到
 builtin `workspace` 实例删除，原 `agent_define` 槽位已随 agent 定义改由
 `McpAgentRegistry` 的 `agent://` 资源提供删除）；Hook 槽位可按非空 hook group 展开为多个实例，
-MCP / Workflow / LSP / Goal 等槽位还受运行时依赖约束。顺序事实源是
+MCP / Workflow / Goal 等槽位还受运行时依赖约束。顺序事实源是
 `peri-agent/src/session/factory.rs::production_blueprint`：
 
 > 注：Compact 已从中间件链移除，由 v2 stages/compact.rs 在 ReAct 循环每轮开头处理。详见 §6。
@@ -132,7 +132,7 @@ MCP / Workflow / LSP / Goal 等槽位还受运行时依赖约束。顺序事实�
 | 15 | mcp | before_agent, before_model | MCP 工具（动态）；builtin 实例的 direct 工具 | — | mcp_pool 非空 |
 | 16 | workflow | before_agent | Workflow 编排工具（deferred） | — | workflow executor/adaptor 非空 |
 | 17 | tool_search | before_agent | SearchExtraTools/ExecuteExtraTool | deferred inventory + direct declarations contribution | 默认装配 |
-| 18 | lsp | after_tool（文档同步） | —（LSP 工具面已迁 builtin 实例） | — | lsp_servers 非空且 host LSP pool 可用 |
+| — | ~~lsp~~ | — | — | — | **已删除**：LSP 客户端/pool、文档同步中间件 `LspSyncMiddleware` 与 builtin `lsp` 实例（`mcp__lsp__LSP`）已整体移除 |
 | 19 | goal | after_agent | Goal（deferred） | — | goal_controller 非空 |
 
 **脚注**：
@@ -141,8 +141,7 @@ MCP / Workflow / LSP / Goal 等槽位还受运行时依赖约束。顺序事实�
 - **#12/#13**：审批与提问是独立能力。`PermissionMiddleware` 负责审批；`HumanInTheLoopMiddleware::collect_tools()` 使用原始 broker 提供 `AskUserQuestion`。
 - **#14 subagent**：`SubAgentMiddleware` 提供 `Agent`，TaskManager 可用时额外提供 `AgentResultTool`；后台任务生命周期遵循 [Session 异步任务架构](session-async-tasks.md)。
 - **#19 goal**：`GoalTool` 是 deferred tool，仅通过 `SearchExtraTools` → `ExecuteExtraTool` 访问；`after_agent` 注入 steering 并触发自驱续跑。
-- **#18 lsp**：LSP 工具面已迁 builtin `lsp` 实例（`mcp__lsp__LSP`），槽位只挂薄同步中间件 `LspSyncMiddleware`；`collect_tools` 为空，`after_tool` 在 `Write` / `Edit` 落盘后经既有 `LspPoolPort` 发 `didChange` → `didSave`（顺序发送、失败 debug 降级且不改工具结果）。
-- **Web / Artifact / Cron / Filesystem / Terminal 不是链槽位**（v4-part-2 删前两者、v4-part-3 删 `ChainSlot::Cron`、v4-part-4 wave 3 删 `ChainSlot::Filesystem` / `ChainSlot::Terminal`）：Web 搜索 / 抓取与 artifact 上传由 `mcp` 槽位（#15）客户端侧的同进程 builtin MCP 实例（`web` / `artifact`）提供，cron 三工具同样由 `cron` 实例提供，7 个文件/终端工具（原始工具名）由 `workspace` 实例提供（7 项全部 direct，是 `parent_tools` 与 workflow agent 工具列表的真实过滤面）；关闭键为策略键 `WebMiddleware` / `ArtifactMiddleware` / `CronMiddleware` / `LspMiddleware` / `WorkspaceMiddleware`（`BUILTIN_INSTANCE_POLICY_KEYS`，与只含链槽位名的 `MIDDLEWARE_NAMES` 是两张表），机制见 [meta-harness.md](meta-harness.md)。
+- **Web / Artifact / Cron / Filesystem / Terminal 不是链槽位**（v4-part-2 删前两者、v4-part-3 删 `ChainSlot::Cron`、v4-part-4 wave 3 删 `ChainSlot::Filesystem` / `ChainSlot::Terminal`）：Web 搜索 / 抓取与 artifact 上传由 `mcp` 槽位（#15）客户端侧的同进程 builtin MCP 实例（`web` / `artifact`）提供，cron 三工具同样由 `cron` 实例提供，7 个文件/终端工具（原始工具名）由 `workspace` 实例提供（7 项全部 direct，是 `parent_tools` 与 workflow agent 工具列表的真实过滤面）；关闭键为策略键 `WebMiddleware` / `ArtifactMiddleware` / `CronMiddleware` / `WorkspaceMiddleware`（`BUILTIN_INSTANCE_POLICY_KEYS`，与只含链槽位名的 `MIDDLEWARE_NAMES` 是两张表），机制见 [meta-harness.md](meta-harness.md)。
 
 ---
 

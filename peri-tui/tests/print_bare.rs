@@ -118,10 +118,14 @@ fn install_integrations(root: &Path) {
             .to_string(),
     )
     .unwrap();
-    std::fs::write(root.join(".peri/settings.json"), json!({
-        "mcpServers":{"global":{"command":"sh", "args":["-c", "touch unexpected-global-mcp"]}},
-        "config":{"lspServers":{"fixture":{"command":"sh", "args":["-c", "touch unexpected-lsp"], "extensionToLanguage":{".txt":"text"}}}}
-    }).to_string()).unwrap();
+    std::fs::write(
+        root.join(".peri/settings.json"),
+        json!({
+            "mcpServers":{"global":{"command":"sh", "args":["-c", "touch unexpected-global-mcp"]}}
+        })
+        .to_string(),
+    )
+    .unwrap();
 }
 
 async fn run_bare(builtins_disabled: bool) {
@@ -131,7 +135,7 @@ async fn run_bare(builtins_disabled: bool) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let settings = root.join("settings.json");
-    std::fs::write(&settings, json!({"config":{"providers":[{"id":"fixture", "type":"anthropic", "apiKey":"test-only", "baseUrl":format!("http://{address}"), "models":{"opus":"fixture-model"}}], "lspServers":{"fixture":{"command":"sh", "args":["-c", "touch unexpected-lsp"], "extensionToLanguage":{".txt":"text"}}}}}).to_string()).unwrap();
+    std::fs::write(&settings, json!({"config":{"providers":[{"id":"fixture", "type":"anthropic", "apiKey":"test-only", "baseUrl":format!("http://{address}"), "models":{"opus":"fixture-model"}}]}}).to_string()).unwrap();
     let calls = Arc::new(AtomicUsize::new(0));
     let served = Arc::clone(&calls);
     let provider = tokio::spawn(async move {
@@ -283,12 +287,7 @@ async fn run_bare(builtins_disabled: bool) {
             MARKER
         );
     }
-    for marker in [
-        "unexpected-hook",
-        "unexpected-mcp",
-        "unexpected-global-mcp",
-        "unexpected-lsp",
-    ] {
+    for marker in ["unexpected-hook", "unexpected-mcp", "unexpected-global-mcp"] {
         assert!(
             !root.join(marker).exists(),
             "bare 不得启动用户集成: {marker}"

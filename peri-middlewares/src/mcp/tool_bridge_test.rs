@@ -473,10 +473,10 @@ impl ServerHandler for DelayedCallHandler {
     }
 }
 
-/// 延迟夹具声明的**原始**工具名 `LSP`（effective name 由 bridge 派生为 `mcp__lsp__LSP`）。
+/// 延迟夹具声明的**原始**工具名 `cron_list`（effective name 由 bridge 派生为 `mcp__cron__cron_list`）。
 fn delayed_tool() -> Tool {
     serde_json::from_value(serde_json::json!({
-        "name": "LSP",
+        "name": "cron_list",
         "description": "R29 延迟夹具工具（server 侧停在闸门上）",
         "inputSchema": { "type": "object", "properties": {} }
     }))
@@ -504,7 +504,7 @@ async fn builtin_tool_call_surfaces_timeout_error_after_bridge_deadline() {
     // 真实 builtin 链路（生产装配函数）：真实 duplex + 真实 `serve_server` + 真实 task 归属。
     let handler = DelayedCallHandler::new();
     let transport =
-        crate::mcp::builtin::runtime::spawn_builtin_transport_with_handler("lsp", handler.clone());
+        crate::mcp::builtin::runtime::spawn_builtin_transport_with_handler("cron", handler.clone());
     let crate::mcp::builtin::runtime::BuiltinTransport {
         io,
         mut server_task,
@@ -522,10 +522,10 @@ async fn builtin_tool_call_surfaces_timeout_error_after_bridge_deadline() {
 
     let tool = delayed_tool();
     let bridge = McpToolBridge::new(
-        "lsp",
+        "cron",
         &tool,
         Arc::new(McpClientHandle {
-            name: "lsp".to_string(),
+            name: "cron".to_string(),
             version: None,
             cache_version: None,
             peer: Some(peer),
@@ -538,14 +538,13 @@ async fn builtin_tool_call_surfaces_timeout_error_after_bridge_deadline() {
             skills_capable: false,
         }),
     );
-    assert_eq!(bridge.name(), "mcp__lsp__LSP");
+    assert_eq!(bridge.name(), "mcp__cron__cron_list");
 
     // 输入带「路径形态」与「凭据形态」标记：超时文案必须逐字只含 server / tool / 秒数。
     const PATH_MARKER: &str = "/tmp/peri-r29-delayed-fixture.w2stall";
     const CREDENTIAL_MARKER: &str = "fixture-placeholder-unused-not-a-credential";
     let input = serde_json::json!({
-        "operation": "goToDefinition",
-        "file_path": PATH_MARKER,
+        "prompt": PATH_MARKER,
         "token": CREDENTIAL_MARKER,
     });
 
@@ -579,13 +578,13 @@ async fn builtin_tool_call_surfaces_timeout_error_after_bridge_deadline() {
                 server,
                 tool,
                 timeout_secs,
-            } if server == "lsp" && tool == "LSP" && *timeout_secs == REGISTERED_TIMEOUT_SECS
+            } if server == "cron" && tool == "cron_list" && *timeout_secs == REGISTERED_TIMEOUT_SECS
         ),
-        "必须是 Timeout{{server: lsp, tool: LSP, timeout_secs: {REGISTERED_TIMEOUT_SECS}}}，实际: {typed:?}"
+        "必须是 Timeout{{server: cron, tool: cron_list, timeout_secs: {REGISTERED_TIMEOUT_SECS}}}，实际: {typed:?}"
     );
     assert_eq!(
         text,
-        format!("MCP 服务器 \"lsp\" 工具 \"LSP\" 调用超时 ({REGISTERED_TIMEOUT_SECS}s)"),
+        format!("MCP 服务器 \"cron\" 工具 \"cron_list\" 调用超时 ({REGISTERED_TIMEOUT_SECS}s)"),
         "超时文案必须与冻结模板逐字相等"
     );
     assert!(
@@ -631,7 +630,7 @@ async fn builtin_tool_call_surfaces_timeout_error_after_bridge_deadline() {
 
     let after = bridge
         .invoke(
-            serde_json::json!({ "operation": "hover" }),
+            serde_json::json!({ "expression": "*/5 * * * *" }),
             peri_agent::tools::ToolContext::new(&[], "."),
         )
         .await

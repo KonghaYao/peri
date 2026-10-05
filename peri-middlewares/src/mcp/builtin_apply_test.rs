@@ -5,7 +5,7 @@
 //! 1. 缺失 → 插入完整 builtin 条目（协议自动协商）；
 //! 2. 存在且无 `command`/`url` → 填 `source`，`disabled != Some(true)` 时**同时**填
 //!    `system_mcp` + `system_mcp_tools`（A17）；`disabled == Some(true)` 只填 `source`；
-//! 3. 保留名（`web`/`artifact`/`cron`/`lsp`/`workspace`）被 `command`/`url` 接管 →
+//! 3. 保留名（`web`/`artifact`/`cron`/`workspace`）被 `command`/`url` 接管 →
 //!    加载期 typed error（A3）；
 //! 5. 关闭片段形状（A18）：`{"web": {"disabled": true, "system_mcp": true}}` 必须被
 //!    加载期拒绝；唯一合法写法是只写 `disabled: true`；
@@ -166,9 +166,9 @@ fn empty_user_entry_still_becomes_system_direct_instance() {
     // system_mcp_tools，否则会从 direct 静默降级为 deferred（A17）。
     //
     // v4-part-3（IF-P3-01 / 主 plan §8 第 1 行）：同构断言覆盖四个已实现实例——
-    // `{"cron": {}}` / `{"lsp": {}}` 与 `{"web": {}}` 走同一条「规则 2：存在且无
-    // command/url」分支，差别只在 direct 集合（cron / lsp 为空集，两者都是零工具
-    // 提升）。夹具按名字逐一构造，因此每个实例都必须各自证明一次。
+    // `{"cron": {}}` 与 `{"web": {}}` 走同一条「规则 2：存在且无
+    // command/url」分支，差别只在 direct 集合（cron 为空集，零工具提升）。夹具按名字
+    // 逐一构造，因此每个实例都必须各自证明一次。
     for instance in BUILTIN_MCP_INSTANCES {
         let name = instance.name;
         let (_dir, cwd, claude_home, global_path) =
@@ -336,8 +336,8 @@ fn system_mcp_timeout_without_system_mcp_is_rejected_before_overlay() {
 fn every_reserved_instance_is_implemented_and_injected_with_builtin_identity() {
     // 前提变更（wave 3）：本用例原名
     // `reserved_instance_without_transport_is_not_injected_when_unimplemented`，断言
-    // 「**预留但未实现**的名字（cron/lsp/workspace）写了空条目也不注入」。wave 3 落地后
-    // `BUILTIN_RESERVED_INSTANCE_NAMES` 的五个名字**全部已实现**，注册表里不存在
+    // 「**预留但未实现**的名字（cron/workspace）写了空条目也不注入」。wave 3 落地后
+    // `BUILTIN_RESERVED_INSTANCE_NAMES` 的名字**全部已实现**，注册表里不存在
     // 「预留但未实现」这一类别，原断言的论域是空集——它对当前事实不再有可失败性。
     //
     // 因此改为**确定性的强断言**（不删除断言、不放宽为「只要不 panic」）：保留名表**逐项**
@@ -480,7 +480,7 @@ fn illegal_closure_fragment_is_rejected_even_when_injection_is_off() {
 
 #[test]
 fn reserved_instance_names_cannot_be_taken_over_by_command() {
-    for name in ["web", "artifact", "cron", "lsp", "workspace"] {
+    for name in ["web", "artifact", "cron", "workspace"] {
         let (_dir, cwd, claude_home, global_path) =
             project_with_servers(&format!(r#"{{"{name}":{{"command":"fake-command"}}}}"#));
         let error = load(
@@ -543,9 +543,9 @@ fn remote_workspace_requires_global_or_host_selection_and_no_tool_manifest() {
 
 #[test]
 fn reserved_instance_names_cannot_be_taken_over_by_url() {
-    // 其余四个保留名仍拒绝 URL 接管；workspace 的项目 URL 拒绝与全局 URL
+    // 其余三个保留名仍拒绝 URL 接管；workspace 的项目 URL 拒绝与全局 URL
     // 允许由 remote_workspace_requires_global_or_host_selection_and_no_tool_manifest 覆盖。
-    for name in ["web", "artifact", "cron", "lsp"] {
+    for name in ["web", "artifact", "cron"] {
         let (_dir, cwd, claude_home, global_path) = project_with_servers(&format!(
             r#"{{"{name}":{{"url":"https://fake.invalid/mcp"}}}}"#
         ));
@@ -738,7 +738,7 @@ fn system_mcp_tools_equals_declared_direct_set_for_every_instance() {
             "{} 的 system_mcp_tools 必须等于声明为 direct 的原始名集合（A5/A17）",
             instance.name
         );
-        // `system_mcp_tools == []` 是 wave 2 的**合法终态**（cron / lsp 零 direct、零工具
+        // `system_mcp_tools == []` 是 wave 2 的**合法终态**（cron 零 direct、零工具
         // 提升，A4/A5），语义是「保留 1R readiness 约束，但不做必需工具校验」，不是
         // 「实例注入后无人可用」。因此这里按实例分别断言非空 / 空，而不是一律非空。
         match instance.name {
@@ -747,9 +747,9 @@ fn system_mcp_tools_equals_declared_direct_set_for_every_instance() {
                 "{} 的 direct 集合为空 ⇒ 该实例注入后不产生任何 direct 工具",
                 instance.name
             ),
-            "cron" | "lsp" => assert!(
+            "cron" => assert!(
                 tools.is_empty(),
-                "{} 的 direct 集合必须为空（A4：四个工具一律 deferred）",
+                "{} 的 direct 集合必须为空（A4：cron 工具一律 deferred）",
                 instance.name
             ),
             // workspace（wave 3 落地，AW3-03：7 项一律 direct，且 7 项都来自 `BaseTool`

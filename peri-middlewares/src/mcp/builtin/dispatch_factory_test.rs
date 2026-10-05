@@ -13,7 +13,7 @@ fn workspace_input() -> WorkspaceInstanceInput {
 
 #[test]
 fn dispatch_factory_covers_implemented_instances_only() {
-    // 工厂只按实例名分派：上下文的 `cwd` 只被 artifact 用作解析根，实例输入（cron / lsp）
+    // 工厂只按实例名分派：上下文的 `cwd` 只被 artifact 用作解析根，实例输入（cron）
     // 是否齐备由 `runtime` 在调本工厂**之前**判定，因此这里用一个最小上下文即可。
     let ctx = BuiltinInstanceContext::new(".");
     assert!(
@@ -64,7 +64,7 @@ fn dispatch_factory_covers_implemented_instances_only() {
         "保留名表必须与已实现实例表一致（未接线集合为空），实际仍缺 handler 的保留名：{unwired:?}"
     );
     // 同一事实的正面表述（遍历注册表派生）：最小上下文里**只有**「需要实例输入」的实例
-    // 可以没有 handler——cron / lsp 的缺输入由 seam 在工厂之前收口 `InstanceInputMissing`，
+    // 可以没有 handler——cron 的缺输入由 seam 在工厂之前收口 `InstanceInputMissing`，
     // 其余每一个已实现实例（含无输入的 workspace）都必须拿到 handler。`workspace` 若被写成
     // 条件构造，本断言即红。
     let none_with_minimal_ctx: Vec<&str> = BUILTIN_MCP_INSTANCES
@@ -74,8 +74,8 @@ fn dispatch_factory_covers_implemented_instances_only() {
         .collect();
     assert_eq!(
         none_with_minimal_ctx,
-        vec!["cron", "lsp"],
-        "最小上下文里没有 handler 的已实现实例必须恰为「需要实例输入」的两个（缺输入归 seam 前置判定，\
+        vec!["cron"],
+        "最小上下文里没有 handler 的已实现实例必须恰为「需要实例输入」的 cron（缺输入归 seam 前置判定，\
          不是未接线）；workspace 属可见但退化，必须仍有 handler"
     );
 
@@ -95,28 +95,22 @@ fn dispatch_factory_covers_implemented_instances_only() {
     );
 }
 
-/// H-05 接线闸门：已实现实例各得**自己的**变体（cron ⇒ `Cron`、lsp ⇒ `Lsp`、
+/// H-05 接线闸门：已实现实例各得**自己的**变体（cron ⇒ `Cron`、
 /// workspace ⇒ `Workspace`），状态对象是注入的**同一份**（A1：组合根构造、同一份 `Arc`），
 /// 且表外名字恒 `None`。
 ///
 /// `workspace` 的具名用例是 AW3-11 的「可见但退化」：本用例的上下文**不带** workspace
 /// 输入（`ctx.workspace == None`），工厂仍必须返回 `Workspace` 变体而不是 `None`。
 #[test]
-fn dispatch_covers_cron_and_lsp_variants() {
+fn dispatch_covers_cron_variant() {
     // cron 输入：真实 scheduler（触发通道无人消费即可——本用例不驱动 tick）。
     let (trigger_tx, _trigger_rx) = mpsc::unbounded_channel();
     let scheduler = Arc::new(parking_lot::Mutex::new(CronScheduler::new(trigger_tx)));
-    // lsp 输入：真实 pool（`LspServerPool::new` 惰性，不拉任何 language server 进程）。
-    let pool = Arc::new(LspServerPool::new(".", LspConfigFile::default()));
 
-    let ctx = BuiltinInstanceContext::new(".")
-        .with_cron(CronInstanceInput {
-            scheduler: Arc::clone(&scheduler),
-            tick_enabled: false,
-        })
-        .with_lsp(LspInstanceInput {
-            pool: Arc::clone(&pool),
-        });
+    let ctx = BuiltinInstanceContext::new(".").with_cron(CronInstanceInput {
+        scheduler: Arc::clone(&scheduler),
+        tick_enabled: false,
+    });
 
     // web / artifact：原有断言保留（各自的变体，不因新增两条 arm 而改派）。
     assert!(
@@ -141,14 +135,6 @@ fn dispatch_covers_cron_and_lsp_variants() {
     assert!(
         matches!(cron_handler, BuiltinServerHandler::Cron(_)),
         "cron 必须得 cron 变体（不得回退到别的实例）"
-    );
-
-    // lsp：自己的变体。注入 pool 是否保留在 handler 内由 peri-mcp-lsp 的包内测试验证；
-    // 这里锁定工厂按实例名派发到 LSP handler。
-    let lsp_handler = builtin_server_handler("lsp", &ctx).expect("lsp 必须有 handler");
-    assert!(
-        matches!(lsp_handler, BuiltinServerHandler::Lsp(_)),
-        "lsp 必须得 lsp 变体（不得回退到别的实例）"
     );
 
     // `workspace`（AW3-11）：**可见但退化**——即使上下文**不带** session 级输入，工厂也必须
@@ -211,7 +197,7 @@ fn all_registered_instances_have_handler() {
     for instance in BUILTIN_MCP_INSTANCES {
         let handler = builtin_server_handler(instance.name, ctx).unwrap_or_else(|| {
             panic!(
-                "{}: 已实现实例必须有 handler（上下文已给齐 cron/lsp 输入）",
+                "{}: 已实现实例必须有 handler（上下文已给齐 cron 输入）",
                 instance.name
             )
         });
@@ -219,7 +205,6 @@ fn all_registered_instances_have_handler() {
             BuiltinServerHandler::Web(_) => "web",
             BuiltinServerHandler::Artifact(_) => "artifact",
             BuiltinServerHandler::Cron(_) => "cron",
-            BuiltinServerHandler::Lsp(_) => "lsp",
             BuiltinServerHandler::Workspace(_) => "workspace",
         };
         assert_eq!(
@@ -247,7 +232,7 @@ fn all_registered_instances_have_handler() {
         "每个实例的 `ServerInfo` 名字必须互不相同（否则是同一 handler 实现被多个名字静默复用）：{server_names:?}"
     );
 
-    // 「保留但未实现」的名字（从保留名表派生）：**当前为空**——五个保留名全部已实现
+    // 「保留但未实现」的名字（从保留名表派生）：**当前为空**——保留名全部已实现
     // （AW3-09）。这条强断言取代了原来的「集合非空」前置：接线完成后再出现空集才是事实，
     // 保留名若新增未实现项，本断言即红（而不是让下面的 None 循环静默退化成空转）。
     let unimplemented: Vec<&str> = BUILTIN_RESERVED_INSTANCE_NAMES
@@ -279,7 +264,7 @@ fn all_registered_instances_have_handler() {
     );
 }
 
-/// V 矩阵第 20 行：cron / lsp 的 `ConfigSource::Builtin { instance }` 在 overlay → 建传输
+/// V 矩阵第 20 行：cron 的 `ConfigSource::Builtin { instance }` 在 overlay → 建传输
 /// （三分类）→ status 快照 → `DiscoverMCP` 只读投影四跳上都保留，transport 分类 = builtin。
 ///
 /// 判定逻辑全部走既有真实函数：`apply_builtin_overlay`（注入点）、
@@ -366,7 +351,7 @@ async fn builtin_source_propagates() {
         assert_row(row, instance);
     }
 
-    // 已连接行：cron / lsp 各走一条**真实**链路（dispatch 工厂 → 真实 transport → 生产 client
+    // 已连接行：cron 走一条**真实**链路（dispatch 工厂 → 真实 transport → 生产 client
     // 握手），再按生产提交形状登记句柄。
     let mut pairs: Vec<(&str, Pair)> = Vec::new();
     for (instance, config) in &configs {

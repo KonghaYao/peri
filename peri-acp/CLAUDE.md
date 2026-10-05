@@ -34,10 +34,10 @@
 - 生产中间件顺序以 Agent 层 session 工厂的链序蓝本为事实源（`../peri-agent/src/session/factory.rs` 的 `production_blueprint`），未经完整验证不得重排。
 - Langfuse 事件只经 `peri-controller` 的 `LangfuseBridge` 统一映射进入 tracer（协议化前分支，不参与业务链路）；日志、错误和遥测不得泄露 secret。
 - stdio/MPSC transport 的 pending request 由 router 统一持有：response、caller cancellation 与 terminal close 至多结算一次；终止结算当前和后续请求，连接静默不引入隐式 timeout（ARC-TRANSPORT-001）。
-- `--bare` 会话仅装配 builtin `workspace` MCP 池，保留基础文件/终端及后台任务能力；跳过用户插件、外部 MCP、settings hooks 和 LSP 配置。`PERI_MCP_BUILTIN=off` / `0` 仍显式关闭注入。
+- `--bare` 会话仅装配 builtin `workspace` MCP 池，保留基础文件/终端及后台任务能力；跳过用户插件、外部 MCP 和 settings hooks。`PERI_MCP_BUILTIN=off` / `0` 仍显式关闭注入。
 - builtin MCP 实例上下文须在 `McpClientPool::run_initialize` 前装配，后置注入会被拒绝。生产 Workspace 的后台 Bash 由 MCP 自行持有；会话侧任务投影与取消路由的目标设计见 `../docs/design/session-async-tasks.md`。
 - Cron scheduler 属于会话环境：builtin 工具、宿主端口与 session bridge 使用同一份实例；共享会话注册表时只共享 continuation 入口，不覆盖 scheduler。部署的 tick 开关传入会话池，由 builtin supervisor 唯一驱动并随会话关闭。
-- Host 后台任务由 non-Clone `HostTaskOwner` 持有，config/task 只持 weak `HostTaskSpawner`；MCP concrete owner 属 middlewares，ACP config 只能持 `peri-acp-types::ports::McpTaskOwnerPort`，禁止直接依赖 concrete type。transport EOF 关闭准入后取消并 drain local/manager 会话 ID 并集，再在锁外关闭 LSP/MCP。Host drain 或 MCP service-close report 超时必须报告 `Incomplete` 并保持 Closing，不得当作已经 join/Closed（ARC-HOST-SHUTDOWN-001）。
+- Host 后台任务由 non-Clone `HostTaskOwner` 持有，config/task 只持 weak `HostTaskSpawner`；MCP concrete owner 属 middlewares，ACP config 只能持 `peri-acp-types::ports::McpTaskOwnerPort`，禁止直接依赖 concrete type。transport EOF 关闭准入后取消并 drain local/manager 会话 ID 并集，再在锁外关闭 MCP。Host drain 或 MCP service-close report 超时必须报告 `Incomplete` 并保持 Closing，不得当作已经 join/Closed（ARC-HOST-SHUTDOWN-001）。
 - 会话 setup（`session/new` / `load` / `resume` / `fork`）里的 `mcpServers` acp 型声明在响应写入后由 `host/requests/acp_mcp.rs` 受理（`attach_session_servers`）；`mcp/connect` 只带 client 声明的 `serverId`，因此受理顺序不能提前到响应之前。会话级服务持有连接（每个会话一个 MCP 池），入站 `mcp/message` 按 `connectionId` 定位承载会话、未知连接返回 `-32001`，内层 MCP 错误码原样透传；会话终结在 MCP 池关闭前调 `AcpMcpServerPort::close_session`（幂等）。建连是后台的：不阻塞会话建立，失败留在 MCP 池状态面（ARC-MCP-ACP-001）。
 
 ## 目标命令
@@ -57,7 +57,7 @@ cargo test -p peri-acp --doc
 - session/caps 改动：运行相关 crate 测试，并人工检查所有创建、加载、恢复、fork 入口均在 session 就绪后注册 caps。
 - 事件改动：运行 mapper 测试，并人工沿服务端发送点到 TUI/stdio 客户端检查新增事件覆盖；现有 mapper 测试不自动证明全链路完整。
 - Prompt、middleware 或 Langfuse 改动：按 `ARC-FROZEN-001`、`ARC-MIDDLEWARE-001`、`ARC-SECRET-001` 逐项核对。
-- 配置规则改动：先读 `../peri-config/CLAUDE.md` 与 `../docs/design/configuration-authority.md`；领域回归在 core，ACP 验证消费与装配接线。LSP、插件生命周期、hook 格式及存储/执行 credentials 仍遵守专属能力边界。
+- 配置规则改动：先读 `../peri-config/CLAUDE.md` 与 `../docs/design/configuration-authority.md`；领域回归在 core，ACP 验证消费与装配接线。插件生命周期、hook 格式及存储/执行 credentials 仍遵守专属能力边界。
 - 触碰 builtin `workspace` 资源面的测试（agent / 技能 / 指令 / meta 文档）：用例依赖 `PERI_MCP_BUILTIN` **默认态**，而该进程级 env 由开关组用例在 `#[serial]` 临界区内改写 ⇒ 读侧必须同键 `#[serial]`（`TEST-HERMETIC-001`「串行化」的读侧闭合；漏标时并行窗口内池无 `workspace` 句柄、资源面按 X4 静默缺席，症状是内容断言拿到 `None`/空）。
 
 ## W5（2026-09-29，提交 f66bd251）

@@ -23,7 +23,6 @@ flowchart BT
     Resources --> Controller
     Process[Peri Process] --> Agent
     Process --> Middleware
-    Process --> LSP[LSP transport]
     Process --> JS[JavaScript runtime]
     Config[Peri Config] --> ACP
     Config --> Middleware
@@ -45,8 +44,8 @@ typed 结果；消费者依赖 core。core 只消费共享契约与来源 I/O，
 
 `peri-process` 是不依赖业务层的 OS 子进程能力：在 spawn 前配置独立进程组或
 Windows 挂起进程，attach 后提供终止请求与实际退出证据。它不拥有 session、
-数据库 lease、协议或 UI；Bash、MCP、LSP 和 JavaScript 的各自 owner 持有它并
-负责等待清理。进程树实现不得因复用而让 LSP 反向依赖 Agent。
+数据库 lease、协议或 UI；Bash、MCP 和 JavaScript 的各自 owner 持有它并
+负责等待清理。进程树实现不得因复用而引入反向依赖。
 
 归层判据（三问定层）：
 

@@ -45,16 +45,15 @@ fn make_tool(name: &str) -> Tool {
     .unwrap()
 }
 
-/// 一个含**五个** builtin 实例（web / artifact / cron / lsp / workspace）+ 一个外部
+/// 一个含**四个** builtin 实例（web / artifact / cron / workspace）+ 一个外部
 /// server 的 deployment pool。
 ///
 /// 工具清单与 builtin 注册表一致：`web` 提供 WebSearch / WebFetch，`artifact` 提供
-/// artifact，`cron` 提供三个 cron 工具，`lsp` 提供 `LSP`（生效配置非空形态——空配置形态
-/// 的「可见但空表」由 `mcp::builtin::lsp` 的用例覆盖），`workspace` 提供其 7 项（wave 3
+/// artifact，`cron` 提供三个 cron 工具，`workspace` 提供其 7 项（wave 3
 /// 落地，AW3-03；名字从注册表派生，不在此处第二份硬编码），外部 server 提供一个 deferred
 /// 工具，用于验证关闭过滤**只**作用于 builtin 实例。
 ///
-/// 五处 builtin 条目都是**假 handle**（不经 transport）：本夹具服务于可观察能力面
+/// 四处 builtin 条目都是**假 handle**（不经 transport）：本夹具服务于可观察能力面
 /// （`collect_tools` / 关闭集），真实链路的落地事实由 [`StartupFixture`] 承担。
 fn pool_with_builtin_instances() -> Arc<McpClientPool> {
     let pool = Arc::new(McpClientPool::new_empty());
@@ -70,9 +69,6 @@ fn pool_with_builtin_instances() -> Arc<McpClientPool> {
         "cron".to_string(),
         connected_handle("cron", &["cron_register", "cron_list", "cron_remove"]),
     );
-    pool.clients
-        .write()
-        .insert("lsp".to_string(), connected_handle("lsp", &["LSP"]));
     let workspace_tools: Vec<&str> = peri_acp_types::builtin_mcp::find("workspace")
         .expect("workspace 已实现（wave 3）")
         .tools
@@ -105,7 +101,7 @@ fn collected_tool_names(pool: &Arc<McpClientPool>, disabled: &[&str]) -> Vec<Str
 }
 
 /// 未关闭任何实例：注册表声明的**全部** builtin 工具都在目录里（web 两个、artifact 一个、
-/// cron 三个、lsp 一个），且声明的 direct 逐项生效（IF-D13：cron / lsp 一律 deferred），
+/// cron 三个），且声明的 direct 逐项生效（IF-D13：cron 一律 deferred），
 /// 外部 server 的工具照旧 deferred 存在。
 #[test]
 fn builtin_tools_are_collected_with_declared_direct() {

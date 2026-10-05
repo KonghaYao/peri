@@ -13,7 +13,6 @@ members = [
     "mcp-packages/web",
     "mcp-packages/artifact",
     "mcp-packages/cron",
-    "mcp-packages/lsp",
     "mcp-packages/workspace",
     "peri-model",
     "peri-process",
@@ -93,7 +92,6 @@ dirs-next = "2"
 url = "2"
 sqlx = { version = "0.9.0", features = ["runtime-tokio", "sqlite"] }
 sysinfo = "0.39"
-lsp-types = "0.97"
 lru = "0.18"
 
 # --- MCP capability packages ---
@@ -104,7 +102,6 @@ peri-mcp-credentials = { path = "mcp-packages/credentials" }
 peri-mcp-web = { path = "mcp-packages/web" }
 peri-mcp-artifact = { path = "mcp-packages/artifact" }
 peri-mcp-cron = { path = "mcp-packages/cron" }
-peri-mcp-lsp = { path = "mcp-packages/lsp" }
 peri-mcp-workspace = { path = "mcp-packages/workspace" }
 # Apply patches/rmcp-3.5.0-task-subscriptions.patch via scripts/cargo-rmcp-patched.sh.
 rmcp = "3.5.0"

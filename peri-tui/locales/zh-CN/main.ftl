@@ -93,7 +93,6 @@ statusbar-retrying = 重试 { $attempt }/{ $max } ({ $delay }s): { $error }
 statusbar-mcp-connecting =  MCP ({ $connected }/{ $total })...
 statusbar-mcp-ready =  MCP 就绪 ({ $total } 个服务器)
 statusbar-mcp-failed =  MCP 失败: { $msg }
-statusbar-lsp-diag = 诊断: { $errors }E/{ $warnings }W
 
 # ---- Status Bar Shortcut Hints ----
 

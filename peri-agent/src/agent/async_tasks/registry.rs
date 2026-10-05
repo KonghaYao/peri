@@ -19,8 +19,8 @@ const CANCEL_GRACE_SECS: u64 = 3;
 
 /// 后台任务注册表错误（结构化，取代 String 错误）
 ///
-/// 参考已有 `lsp/tool.rs:LspToolError` 模式：实现 `std::error::Error`，
-/// 调用方可通过 `?` 自动转 `Box<dyn Error>` / `anyhow::Error`。
+/// 实现 `std::error::Error`，调用方可通过 `?` 自动转 `Box<dyn Error>` /
+/// `anyhow::Error`。
 #[derive(Debug, Error)]
 pub enum BackgroundRegistryError {
     #[error("Session execution scope is closing")]

@@ -2,6 +2,8 @@
 
 状态：2026-10-01 三个 subagent 快速静态扫描完成；用户随后批准 channel 整体退役及删除已确认废弃项。退役删除与文档收口已实施，定向回归及隔离 workspace 编译通过；MH-01～MH-04 的行为修复仍待实施。本 issue 不授权删除仍有效的 builtin 策略键。
 
+2026-10-05 更新：LSP 能力已完全删除（crate `peri-mcp-lsp`、`LspMiddleware` / `LspSyncMiddleware` 键、builtin `lsp` 实例与 LSP 链槽位全部移除）；本 issue 中涉及 LSP 的保留项与文档要求随之失效，其余 builtin 策略键不受影响。
+
 ## 范围与依据
 
 - 扫描按契约/配置键、运行时消费链、文档/测试三个方向并行进行；主 agent 复核关键调用链并去重。

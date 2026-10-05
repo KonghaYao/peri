@@ -65,7 +65,7 @@ pub enum AcpNotification {
         text: String,
         actions: Vec<PredictionAction>,
     },
-    /// A `notifications/peri/*` custom notification (SubAgent, Compact, LSP, etc.)
+    /// A `notifications/peri/*` custom notification (SubAgent, Compact, etc.)
     Peri {
         session_id: String,
         method: String,

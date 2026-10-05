@@ -883,18 +883,6 @@ fn test_background_task_completed_no_session_update() {
 }
 
 #[test]
-fn test_lsp_diagnostics_no_session_update() {
-    assert_no_session_update(
-        &ExecutorEvent::LspDiagnostics {
-            errors: 2,
-            warnings: 5,
-            files_with_errors: 3,
-        },
-        "LspDiagnostics",
-    );
-}
-
-#[test]
 fn test_command_feedback_no_session_update() {
     assert_no_session_update(
         &ExecutorEvent::CommandFeedback(CommandFeedback {

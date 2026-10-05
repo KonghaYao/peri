@@ -162,12 +162,6 @@ pub enum AcpEvent {
     },
     /// Background agent tool call progress
     BgToolStep { child_thread_id: String },
-    /// LSP diagnostics update
-    LspDiagnostics {
-        errors: usize,
-        warnings: usize,
-        files_with_errors: usize,
-    },
     /// Agent execution failed
     AgentExecutionFailed { message: String },
     /// Context window usage warning

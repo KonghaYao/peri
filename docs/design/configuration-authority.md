@@ -138,7 +138,7 @@ workspace 资源 consumer 从 `snapshot.resources().disable_bundled_skills` 取�
 
 ## 专属领域边界
 
-LSP 配置、插件安装/启用/市场生命周期、hook 格式与来源、OS 工具执行环境、
+插件安装/启用/市场生命周期、hook 格式与来源、OS 工具执行环境、
 存储 locator 与 credentials 不因新增核心而自动迁入。后续扩展须明确 typed
 规则、来源 ownership、scope 与生效生命周期，不能把它们统一成任意 JSON merge。
 本设计描述核心权威面，完整扩展与验证状态仅由 active issue 维护。

@@ -284,7 +284,6 @@ fn closed_instance_and_closed_chain_slot_drop_local_entries() {
             crate::mcp::builtin::context::BuiltinInstanceContext {
                 cwd: "/tmp".to_string(),
                 cron: None,
-                lsp: None,
                 closed: {
                     let mut set = std::collections::BTreeSet::new();
                     set.insert("workspace".to_string());

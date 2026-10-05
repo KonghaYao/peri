@@ -177,7 +177,6 @@ impl UnifiedLangfuseEvent {
             | ExecutorEvent::ContextWarning { .. }
             | ExecutorEvent::RewindCompleted { .. }
             | ExecutorEvent::TodoUpdate(_)
-            | ExecutorEvent::LspDiagnostics { .. }
             | ExecutorEvent::BgToolStep { .. }
             | ExecutorEvent::WorkflowProgress(_)
             | ExecutorEvent::AgentExecutionFailed { .. }

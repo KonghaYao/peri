@@ -21,7 +21,7 @@ pub use peri_acp_types::frozen::{
 /// 生产链槽位（顺序 = 行为契约，ARC-MIDDLEWARE-001，禁止重排）。
 ///
 /// 顺序与迁移前 `peri-acp/src/agent/builder.rs` 的 `MiddlewareChain`
-/// 构造顺序完全一致，按功能分组；条件注册（MCP/Workflow/LSP/Goal）与
+/// 构造顺序完全一致，按功能分组；条件注册（MCP/Workflow/Goal）与
 /// Hook 组展开由装配实现按上下文判断。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChainSlot {
@@ -71,11 +71,7 @@ pub enum ChainSlot {
     Workflow,
     /// ToolSearch（deferred 工具搜索/执行代理）
     ToolSearch,
-    // ── 第七组：LSP / Goal（辅助诊断，条件注册；Goal 在链最后） ──
-    /// Lsp（LSP **文档同步**槽位，装载 `LspSyncMiddleware`；servers 配置非空
-    /// 且 host pool 可用时注册）。LSP 工具面已迁 `lsp` builtin MCP 实例
-    /// （`mcp__lsp__LSP`），本槽位不再提供任何工具。
-    Lsp,
+    // ── 第七组：Goal（steering，条件注册；在链最后） ──
     /// Goal（goal 紧迫感 steering，controller 可用时注册）
     Goal,
 }
@@ -110,8 +106,7 @@ pub fn production_blueprint() -> Vec<ChainSlot> {
         ChainSlot::Mcp,
         ChainSlot::Workflow,
         ChainSlot::ToolSearch,
-        // 第七组：LSP / Goal
-        ChainSlot::Lsp,
+        // 第七组：Goal
         ChainSlot::Goal,
     ]
 }
@@ -163,10 +158,9 @@ use peri_acp_types::event::AgentEventHandler;
 use peri_acp_types::goal::GoalController;
 use peri_acp_types::hooks::RegisteredHook;
 use peri_acp_types::interaction::UserInteractionBroker;
-use peri_acp_types::lsp::LspServerConfig;
 use peri_acp_types::mcp_skills::McpSkillRegistry;
 use peri_acp_types::plugin::LoadedPlugin;
-use peri_acp_types::ports::{LspPoolPort, McpPoolPort, ToolSearchPort, WorkflowMiddlewarePort};
+use peri_acp_types::ports::{McpPoolPort, ToolSearchPort, WorkflowMiddlewarePort};
 use peri_acp_types::session_resources::SessionResources;
 use peri_acp_types::skills::SkillRoot;
 use peri_acp_types::tools::TodoItem;
@@ -286,12 +280,6 @@ pub struct AssemblyContext {
     pub tool_search_index: Arc<dyn ToolSearchPort>,
     /// 共享工具注册表（deferred tools；AskUserTool 插入、snapshot 构造）
     pub shared_tools: Arc<RwLock<BTreeMap<String, Arc<dyn BaseTool>>>>,
-    pub lsp_servers: Vec<LspServerConfig>,
-    /// **host 共享** LSP pool 句柄：由宿主装配单次构造（不按 session / turn 重建，
-    /// session 不创建也不销毁），同时喂给 builtin `lsp` 实例与链上的
-    /// `LspSyncMiddleware`。None = 无 host pool ⇒ 不装同步中间件（配置非空
-    /// 仍是前置条件）。
-    pub lsp_pool: Option<Arc<dyn LspPoolPort>>,
     /// Workflow executor（Some 时注册 Workflow 中间件）
     pub workflow_executor: Option<Arc<dyn AgentExecutor>>,
     /// 会话级 WorkflowMiddleware 端口（复用，None = 构造临时实例）

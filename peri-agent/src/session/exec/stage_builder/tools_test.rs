@@ -167,7 +167,7 @@ impl BaseTool for NamedTool {
 }
 
 /// v4-part-2（A7/IF-D7 B 节）+ v4-part-4（W3-C1）反向断言：**全部**已迁移裸名
-/// （web / artifact 三枚、cron 三枚、`LSP` 一枚、workspace 七枚）**不再**被防御谓词剔除。
+/// （web / artifact 三枚、cron 三枚、workspace 七枚）**不再**被防御谓词剔除。
 ///
 /// 迁移后这些裸名不再是 middleware 静态工具（`MIDDLEWARE_TOOL_NAMES` 已删除），
 /// 因此共享表里出现的同名工具只能是**非 middleware 路径**注册的合法工具；
@@ -205,8 +205,8 @@ fn migrated_naked_names_are_no_longer_excluded() {
         .flat_map(|instance| instance.tools.iter().map(|tool| tool.original_name))
         .collect();
     assert!(
-        declared.len() >= 14,
-        "注册表应至少含 5 个实例的 14 项工具（含 workspace 7 项）: {declared:?}"
+        declared.len() >= 13,
+        "注册表应至少含 4 个实例的 13 项工具（含 workspace 7 项）: {declared:?}"
     );
     for original in &declared {
         assert!(

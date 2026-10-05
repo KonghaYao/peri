@@ -237,7 +237,7 @@ pub(super) async fn prepare_existing(
             .to_str()
             .ok_or_else(|| AcpError::new(-32602, "Execution directory is not UTF-8"))?
             .to_owned();
-        // 只读准入不建执行环境：不要求 frozen 快照存在，也不启动 workflow / LSP。
+        // 只读准入不建执行环境：不要求 frozen 快照存在，也不启动 workflow。
         let (frozen, environment) = match owner.as_ref() {
             Some(_) => {
                 // 持久 blob 是唯一事实源：恢复路径不再按当前目录/配置构建第二份 frozen
@@ -267,10 +267,6 @@ pub(super) async fn prepare_existing(
             None => (None, None),
         };
         let local = environment.as_ref().map(|env| &env.cfg).unwrap_or(cfg);
-        // A11/A22：session **不再**建池，只投影所属部署单元（有环境时即该环境的
-        // 装配结果，否则宿主）的 host pool 同一 `Arc`；`prompt_dispatch` 用的
-        // 正是同一个 `local`，故投影与执行面同源。
-        let lsp_pool = local.lsp_pool.clone();
         // AW3-11：登记会话时交出**装配时已送进 builtin 上下文的那一份** manager
         // （`environment` 为 `None` 时传 `None`，走工厂 / Noop fallback）。
         local.session_manager.ensure_session_with_task_manager(
@@ -304,7 +300,6 @@ pub(super) async fn prepare_existing(
             recall_items: Vec::new(),
             agent_pool: crate::session::agent_pool::AgentPool::new(),
             workflow_middleware,
-            lsp_pool,
             title: None,
             tags: Vec::new(),
             continuation_armed: false,

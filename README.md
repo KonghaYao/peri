@@ -84,7 +84,7 @@ Plan delivery. Coordinate agents. Delegate tasks.
 
 **The essentials, included.**
 
-Streaming Markdown · Compaction · LSP · Langfuse<br>
+Streaming Markdown · Compaction · Langfuse<br>
 Skills & hooks · Plugins · Model profiles<br>
 Rewind · Fork · Resume<br>
 **Terminal · Headless · ACP**

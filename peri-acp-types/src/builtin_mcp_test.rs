@@ -81,7 +81,7 @@ fn tools_are_non_empty_and_unique_per_instance() {
             );
         }
         // 声明模板按实例收口（A4）：wave 1 的 web / artifact 必须携带模板（A9），
-        // wave 2 的 cron / lsp 冻结为 `None`（声明段零变化），wave 3 的 workspace
+        // wave 2 的 cron 冻结为 `None`（声明段零变化），wave 3 的 workspace
         // 逐字搬运 7 个工具实现的既有模板（迁移前它们本就在声明段内）。
         match instance.name {
             "web" | "artifact" => {
@@ -100,7 +100,7 @@ fn tools_are_non_empty_and_unique_per_instance() {
                     );
                 }
             }
-            "cron" | "lsp" => {
+            "cron" => {
                 for tool in instance.tools {
                     assert!(
                         tool.prompt_declaration.is_none(),
@@ -186,8 +186,8 @@ fn reserved_names_superset_of_implemented_instances() {
             instance.name
         );
     }
-    // 保留名表本身冻结：五个名字逐一覆盖（wave 3 后全部为已实现实例）。
-    for reserved in ["web", "artifact", "cron", "lsp", "workspace"] {
+    // 保留名表本身冻结：四个名字逐一覆盖（全部为已实现实例）。
+    for reserved in ["web", "artifact", "cron", "workspace"] {
         assert!(
             BUILTIN_RESERVED_INSTANCE_NAMES.contains(&reserved),
             "保留名表缺失: {reserved}"
@@ -212,7 +212,6 @@ fn policy_keys_are_unique_and_frozen() {
         "WebMiddleware",
         "ArtifactMiddleware",
         "CronMiddleware",
-        "LspMiddleware",
         "WorkspaceMiddleware",
     ]
     .into_iter()
@@ -238,9 +237,6 @@ fn find_hits_only_implemented_instances() {
         3,
         "cron_register / cron_list / cron_remove"
     );
-    let lsp = find("lsp").expect("lsp 是已实现实例");
-    assert_eq!(lsp.name, "lsp");
-    assert_eq!(lsp.tools.len(), 1, "单工具 LSP");
     let workspace = find("workspace").expect("workspace 是已实现实例（AW3-06）");
     assert_eq!(workspace.name, "workspace");
     // 工具面成员冻结为迁移前的 7 个本地工具（AW3-03：成员集合零变化）。
@@ -294,10 +290,6 @@ fn original_tool_name_of_effective_hits_frozen_literals() {
     assert_eq!(
         original_tool_name_of_effective("mcp__cron__cron_remove"),
         Some("cron_remove")
-    );
-    assert_eq!(
-        original_tool_name_of_effective("mcp__lsp__LSP"),
-        Some("LSP")
     );
     assert_eq!(original_tool_name_of_effective("Read"), Some("Read"));
     assert_eq!(original_tool_name_of_effective("Write"), Some("Write"));
@@ -384,7 +376,7 @@ fn effective_name_of_misses_unknown_instance_and_unknown_tool() {
 #[test]
 fn wave1_tools_are_all_declared_direct() {
     // wave 1 的三个工具迁移前均 `is_direct() == true`（web_fetch / web_search /
-    // artifact），声明表必须逐位保持；wave 2 的 cron 三工具与 LSP 单工具
+    // artifact），声明表必须逐位保持；wave 2 的 cron 三工具
     // 一律 `direct: false`（A4：主链 deferred，不进入首个请求的直连参数）；
     // wave 3 的 7 个 workspace 工具迁移前已在首个请求的直连工具表内，全 `direct: true`
     // （AW3-03：成员集合零变化）。
@@ -396,7 +388,7 @@ fn wave1_tools_are_all_declared_direct() {
                     "实例 {} 的工具 {} 在 wave 1 必须声明 direct",
                     instance.name, tool.original_name
                 ),
-                "cron" | "lsp" => assert!(
+                "cron" => assert!(
                     !tool.direct,
                     "实例 {} 的工具 {} 必须声明 direct: false（A4：deferred 工具）",
                     instance.name, tool.original_name

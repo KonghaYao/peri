@@ -60,7 +60,7 @@ pub(crate) enum BuiltinSpawnError {
     /// 也不产生任何 ready 证据。唯一修复路径是宿主装配在 `run_initialize` 之前注入。
     #[error("builtin 实例上下文未注入: {instance}")]
     ContextMissing { instance: String },
-    /// 上下文已注入，但缺该实例所需的输入（`cron` 缺 scheduler / `lsp` 缺 pool）。
+    /// 上下文已注入，但缺该实例所需的输入（`cron` 缺 scheduler）。
     ///
     /// 与 [`Self::HandlerNotWired`] **分开**：两者的修复动作不同（补上下文 vs 接 handler），
     /// 合并会让「输入没给全」看起来像「代码没写完」。
@@ -417,10 +417,10 @@ where
 /// 2. 注册表在册但上下文缺该实例所需输入 → [`BuiltinSpawnError::InstanceInputMissing`]。
 ///    本步必须在 dispatch **之前**：`builtin_server_handler` 的签名是
 ///    `Option<...>`，「输入缺失」与「handler 未接线」在那里无法区分，若让 dispatch 先跑，
-///    缺输入的 cron / lsp 会被误报成 `HandlerNotWired`（把宿主的装配缺陷写成代码缺陷）；
+///    缺输入的 cron 会被误报成 `HandlerNotWired`（把宿主的装配缺陷写成代码缺陷）；
 /// 3. handler 未接线 → [`BuiltinSpawnError::HandlerNotWired`]：**不** panic、**不**静默降级
 ///    成 stdio / http、**不**伪造 ready 证据。`ctx.cwd` 是 artifact 实例的文件解析根
-///    （web 忽略；cron / lsp 不经它取状态）。
+///    （web 忽略；cron 不经它取状态）。
 #[cfg(not(target_os = "emscripten"))]
 pub(crate) fn spawn_builtin_transport_with_context(
     instance: &str,

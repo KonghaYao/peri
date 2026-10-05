@@ -149,7 +149,7 @@ pub(crate) async fn handle_new(
         .ok_or_else(|| AcpError::new(-32602, "Execution directory is not UTF-8"))?
         .to_owned();
     // 只读准备（lease 之前）：定格配置/插件/frozen，不创建 thread、不占 lease、
-    // 不启动 MCP/LSP/hooks，也不写任何会话数据或本机登记。new 路径只在这里准备
+    // 不启动 MCP/hooks，也不写任何会话数据或本机登记。new 路径只在这里准备
     // 一次，发布段消费同一个准备对象。
     let mut prepared =
         super::super::prepared::PreparedSessionInputs::prepare_new_deferred(cfg, &cwd)?;
@@ -357,14 +357,6 @@ pub(crate) async fn new_session_from_prepared(
     // Create session-scoped WorkflowMiddleware at session/new (GAP-05: inject frozen data)
     let workflow_middleware =
         create_session_workflow_middleware(cfg, &cwd, &session_id, &frozen_data);
-    // A11/A22：session 只投影部署单元（有环境时即该环境）的 host pool，不再按
-    // session cwd 建池；`prompt` 每 turn 只 clone 同一 `Arc`。
-    let lsp_pool = environment
-        .as_ref()
-        .map(|env| &env.cfg)
-        .unwrap_or(cfg)
-        .lsp_pool
-        .clone();
 
     // ── P6：发布（`sessions.insert` 是唯一对外可见点）──
     // 发布之后才可能有 prompt/执行（`require_owner` 只查这张表）；activate 已在 P3
@@ -385,7 +377,6 @@ pub(crate) async fn new_session_from_prepared(
             recall_items: Vec::new(),
             agent_pool: crate::session::agent_pool::AgentPool::new(),
             workflow_middleware,
-            lsp_pool,
             title: None,
             tags: Vec::new(),
             continuation_armed: false,
@@ -743,9 +734,6 @@ pub(crate) async fn handle_fork(
     let caps = cfg.session_manager.ensure_session_caps(&new_session_id);
     let workflow_middleware =
         create_session_workflow_middleware(cfg, cwd, &new_session_id, &frozen_data);
-    // 同上：fork 出的 session 也只投影所属部署单元的 host pool（此处 `cfg` 已
-    // 收敛为 environment-or-host）。
-    let lsp_pool = cfg.lsp_pool.clone();
 
     sessions.insert(
         new_session_id.clone(),
@@ -766,7 +754,6 @@ pub(crate) async fn handle_fork(
             recall_items: Vec::new(),
             agent_pool: crate::session::agent_pool::AgentPool::new(),
             workflow_middleware,
-            lsp_pool,
             title: None,
             tags: Vec::new(),
             continuation_armed: false,

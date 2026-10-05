@@ -413,14 +413,13 @@ fn mutation_tool_matches_original_name_policy_for_builtin_names() {
     assert!(!is_mutation_tool("mcp__artifact__artifact"));
 
     // wave 2 冻结结果（IF-P3-11）：`cron_register` 两种名字形态都必须判 mutation
-    // （可定时触发任意 prompt，等价委派执行权）；`cron_list` / `cron_remove` / `LSP`
-    // 两种形态都必须判非 mutation（`mcp__lsp__LSP` 不再因 `mcp__` 前缀算写能力）。
+    // （可定时触发任意 prompt，等价委派执行权）；`cron_list` / `cron_remove`
+    // 两种形态都必须判非 mutation（不再因 `mcp__` 前缀算写能力）。
     // 期望值逐项写死，等价断言不能替代：归一与集合同时改错时等价仍成立。
-    let frozen: [(&str, &str, bool); 4] = [
+    let frozen: [(&str, &str, bool); 3] = [
         ("cron", "cron_register", true),
         ("cron", "cron_list", false),
         ("cron", "cron_remove", false),
-        ("lsp", "LSP", false),
     ];
     for (instance, original, mutation) in frozen {
         let declared = peri_acp_types::builtin_mcp::find(instance).expect("实例应有声明");

@@ -118,12 +118,6 @@ pub(super) async fn shutdown_host(
             environment_failures += 1;
         }
     }
-    // A11/A22：host 级**唯一** pool（空配置也在）在此有界关闭——不再从 session
-    // 收集去重（session 只投影同一 `Arc`，`session/delete` 不关）。`shutdown()`
-    // 必须被 await（幂等）；它收敛全部 language server，不靠 `Arc` drop。
-    if let Some(pool) = cfg.lsp_pool.as_ref() {
-        pool.shutdown().await;
-    }
     let pool_report = if let Some(pool) = cfg.mcp_pool.as_ref() {
         let report = pool.shutdown().await;
         if let peri_acp_types::ports::McpPoolShutdownReport::Incomplete {
