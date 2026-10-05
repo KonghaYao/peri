@@ -65,7 +65,7 @@ use peri_agent::{
     tools::{BaseTool, ToolContext},
 };
 use peri_middlewares::{
-    mcp::{ClientStatus, McpClientHandle, McpToolBridge, OAuthStatus},
+    mcp::{ClientStatus, McpClientHandle, McpClientPool, McpToolBridge, OAuthStatus},
     permission::{
         default_requires_approval, PermissionMiddleware, PermissionMode, SharedPermissionMode,
     },
@@ -87,6 +87,7 @@ use tokio_util::sync::CancellationToken;
 // ─── 真实 MCP wire fixture（duplex + rmcp 官方 client service）─────────────────
 
 const FIXTURE_SERVER: &str = "host-fixture";
+const FIXTURE_SESSION: &str = "host-policy-session";
 const REQUIRED_TOOL: &str = "write_note";
 const DEFERRED_TOOL: &str = "read_note";
 
@@ -130,6 +131,8 @@ impl WireLog {
 struct Fixture {
     handle: Arc<McpClientHandle>,
     log: Arc<WireLog>,
+    pool: Arc<McpClientPool>,
+    _task_manager: Arc<dyn peri_acp_types::tasks::TaskManager>,
     _service: RunningService<RoleClient, InitializeRequestParams>,
 }
 
@@ -142,12 +145,17 @@ impl Fixture {
             .find(|candidate| candidate.name.as_ref() == tool)
             .expect("fixture must expose the requested tool on the wire");
         McpToolBridge::new(FIXTURE_SERVER, declaration, Arc::clone(&self.handle))
+            .with_output_store(&self.pool, Some(FIXTURE_SESSION))
     }
 }
 
 /// 启动一个最小 MCP server（initialize / tools/list / tools/call），
 /// 让真实 rmcp client service 完成握手并返回由 wire 声明的工具。
 async fn spawn_fixture(blocking_call: bool) -> Fixture {
+    let pool = Arc::new(McpClientPool::new_pending());
+    let task_manager: Arc<dyn peri_acp_types::tasks::TaskManager> =
+        Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
+    pool.bind_session_task_manager(FIXTURE_SESSION, &task_manager);
     let declarations = vec![
         tool_declaration(
             REQUIRED_TOOL,
@@ -213,6 +221,8 @@ async fn spawn_fixture(blocking_call: bool) -> Fixture {
     Fixture {
         handle,
         log,
+        pool,
+        _task_manager: task_manager,
         _service: service,
     }
 }
@@ -388,6 +398,11 @@ fn make_context(
         .with_middleware_chain(Arc::new(chain))
         .with_event_bus(Arc::new(event_bus))
         .build();
+    context
+        .session
+        .session_context
+        .write()
+        .insert("session_id".into(), FIXTURE_SESSION.into());
     (context, handles, catalog)
 }
 
@@ -672,7 +687,12 @@ async fn in_flight_cancellation_ends_the_call_without_a_second_wire_request() {
 
     // 等到 server 真的收到 tools/call（显式信号，不用睡眠）后再取消：
     // 取消必须打在**已批准且已在飞**的调用上，不是启动前拦截。
-    wire_log.call_reached.notified().await;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        wire_log.call_reached.notified(),
+    )
+    .await
+    .expect("approved MCP call must reach the fixture before cancellation");
     cancel.cancel();
 
     let outcome = dispatch.await.expect("dispatch task must not panic");
