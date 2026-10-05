@@ -924,3 +924,132 @@ fn test_bg_shell_task_id_uniqueness() {
     assert_eq!(ids.len(), 64, "同一毫秒内生成的 bg shell task_id 必须唯一");
     assert!(ids.iter().all(|id| id.starts_with("shell-")));
 }
+
+// ── 投递归属 vs scope 对账（issue：subagent 触发的后台 shell 结果投递到 root）─────
+//
+// 同一物理任务会被两条路径注册到同一个 Manager，且公共 id 相同
+// （session_id + owner_identity + owner_task_id → sha256）：
+//   1. 工具调用现场：initiator = 发起它的会话（子会话），投递到该会话 transcript；
+//   2. scope 对账（apply_scope_row / watch_workspace_tasks）：记录里没有发起者，
+//      initiator = None → 降级 root 投递（metadata 标 delivery=root-fallback）。
+// 重复注册会走 DuplicateTask → refresh_external_callbacks 覆盖 on_terminal，
+// 若不加守卫，第 2 条会把「投递给发起者」改道为 root——子会话永远收不到结果，
+// 而 root 收到本不属于它的 root-fallback 提醒（实测 5/5 例）。
+
+fn external_request(
+    initiator: Option<&str>,
+    owner_task_id: &str,
+    calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+) -> ExternalTaskRegistration {
+    ExternalTaskRegistration {
+        session_id: "root-session".into(),
+        initiator_session_id: initiator.map(str::to_owned),
+        owner_identity: "mcp:workspace:Some(Builtin { instance: \"workspace\" })".into(),
+        owner_task_id: owner_task_id.into(),
+        kind: BgTaskKind::Shell,
+        summary: "bg shell".into(),
+        started_at: None,
+        cancel: std::sync::Arc::new(|| Box::pin(async { Ok(()) })),
+        on_terminal: std::sync::Arc::new(move |_, _| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Ok(()) })
+        }),
+    }
+}
+
+/// [回归测试] 已记录发起会话的条目，不得被无 initiator 的 scope 对账改道为 root。
+#[tokio::test]
+async fn scope_reconciliation_keeps_recorded_initiator_route() {
+    let manager = TaskManager::new();
+    let child_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let root_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    // 1) 工具调用现场注册：发起者 = 子会话。
+    let task_id = manager
+        .register_external(external_request(
+            Some("child-session"),
+            "shell-raw-1",
+            child_calls.clone(),
+        ))
+        .unwrap();
+    // 2) scope 对账二次注册：同一公共 id，initiator = None（root 兜底语义）。
+    let reconciled = manager
+        .register_external(external_request(None, "shell-raw-1", root_calls.clone()))
+        .unwrap();
+    assert_eq!(reconciled, task_id, "两条路径必须落在同一公共任务 id");
+    assert_eq!(
+        manager.snapshot().tasks[0].initiator_session_id.as_deref(),
+        Some("child-session"),
+        "对账注册不得抹掉已记录的投递归属"
+    );
+    assert!(manager
+        .settle_external(&task_id, "terminal-1", make_result(&task_id, true))
+        .await
+        .unwrap());
+    assert_eq!(
+        child_calls.load(Ordering::SeqCst),
+        1,
+        "终态提醒必须投递给直接发起会话"
+    );
+    assert_eq!(
+        root_calls.load(Ordering::SeqCst),
+        0,
+        "root 兜底路由不得被安装到已记录发起者的任务上"
+    );
+}
+
+/// [回归测试] 终态对账（restore_external_terminal）同守则：不得改道 root 兜底。
+#[tokio::test]
+async fn terminal_reconciliation_keeps_recorded_initiator_route() {
+    let manager = TaskManager::new();
+    let child_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let root_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let task_id = manager
+        .register_external(external_request(
+            Some("child-session"),
+            "shell-raw-2",
+            child_calls.clone(),
+        ))
+        .unwrap();
+    let restored = manager
+        .restore_external_terminal(
+            external_request(None, "shell-raw-2", root_calls.clone()),
+            "transition-1",
+            make_result(&task_id, true),
+        )
+        .await
+        .unwrap();
+    assert_eq!(restored, task_id);
+    assert_eq!(manager.snapshot().tasks[0].status, "completed");
+    assert_eq!(child_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(root_calls.load(Ordering::SeqCst), 0);
+}
+
+/// [回归测试] 携带重建 initiator 的对账注册仍可刷新路由（恢复能力不被守卫削弱）；
+/// 无 initiator 的条目（冷恢复首次注册）照旧降级 root。
+#[tokio::test]
+async fn reconciliation_with_rebuilt_initiator_may_take_over_route() {
+    let manager = TaskManager::new();
+    let cold_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let rebuilt_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    // 冷恢复先建条目：无发起者 → root 兜底路由。
+    let task_id = manager
+        .register_external(external_request(None, "shell-raw-3", cold_calls.clone()))
+        .unwrap();
+    // 后续对账重建出发起者 → 允许接管路由。
+    assert_eq!(
+        manager
+            .register_external(external_request(
+                Some("child-session"),
+                "shell-raw-3",
+                rebuilt_calls.clone(),
+            ))
+            .unwrap(),
+        task_id
+    );
+    assert!(manager
+        .settle_external(&task_id, "terminal-1", make_result(&task_id, true))
+        .await
+        .unwrap());
+    assert_eq!(rebuilt_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(cold_calls.load(Ordering::SeqCst), 0);
+}

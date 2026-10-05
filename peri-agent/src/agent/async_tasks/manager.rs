@@ -372,8 +372,17 @@ impl TaskManager {
         match self.registry.register_with_kind(task) {
             Ok(()) => {}
             Err(BackgroundRegistryError::DuplicateTask(_)) => {
-                self.registry
-                    .refresh_external_callbacks(&task_id, cancel, on_terminal);
+                // 对账注册（scope 发现/冷恢复）不得改道已记录的投递归属：
+                // 不带 initiator 的注册会降级为 root 投递，若既有条目已记录
+                // 发起会话，必须保留原回调路由（design §7：投递归属 =
+                // 直接发起会话，不因执行 scope owner 不同而改道）；重复投递
+                // 的重放（快照/变更重叠、恢复重建出发起者）仍走刷新。
+                if request.initiator_session_id.is_some()
+                    || self.registry.external_initiator(&task_id).is_none()
+                {
+                    self.registry
+                        .refresh_external_callbacks(&task_id, cancel, on_terminal);
+                }
             }
             Err(error) => return Err(error),
         }
@@ -397,11 +406,17 @@ impl TaskManager {
             let _registration = self.external_registration.lock();
             match self.registry.projection_status(&task_id) {
                 Some(status) if status == "running" || status == "lost" => {
-                    self.registry.refresh_external_callbacks(
-                        &task_id,
-                        Arc::clone(&request.cancel),
-                        Arc::clone(&request.on_terminal),
-                    );
+                    // 与 register_external 同一守卫：终态对账不得把已记录的
+                    // 发起会话投递改道为 root 兜底。
+                    if request.initiator_session_id.is_some()
+                        || self.registry.external_initiator(&task_id).is_none()
+                    {
+                        self.registry.refresh_external_callbacks(
+                            &task_id,
+                            Arc::clone(&request.cancel),
+                            Arc::clone(&request.on_terminal),
+                        );
+                    }
                     true
                 }
                 Some(_) => return Ok(task_id),

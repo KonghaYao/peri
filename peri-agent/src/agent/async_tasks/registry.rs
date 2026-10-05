@@ -341,6 +341,16 @@ impl BackgroundTaskRegistry {
         }
     }
 
+    /// 既有外部条目记录的投递归属（`None` = 未记录：本地任务或未重建出
+    /// 发起者的对账注册）。对账注册据此决定能否改道回调路由。
+    pub(super) fn external_initiator(&self, task_id: &str) -> Option<String> {
+        self.projection
+            .lock()
+            .records
+            .get(task_id)
+            .and_then(|record| record.initiator_session_id.clone())
+    }
+
     pub(super) fn refresh_external_callbacks(
         &self,
         task_id: &str,
