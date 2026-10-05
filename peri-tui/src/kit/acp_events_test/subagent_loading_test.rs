@@ -858,3 +858,114 @@ fn test_loading_reset_then_turn_interrupted_keeps_idle() {
         "取消后 loading 不得闪回"
     );
 }
+
+/// [回归测试] 并行多 Agent 批次（multitask）里，非首个工具调用的 `ToolStarted`
+/// 只在 dispatch 阶段发出（经 forwarder hop），会与子 Agent invoke 内直发的
+/// `SubagentStarted` 竞争而晚到 TUI。晚到的 Agent 卡片必须接管早到的子分组：
+/// 否则第二个 subagent 的工具行会挂在上一个仍在 loading 的 Agent 调用之下。
+#[test]
+#[serial]
+fn test_late_agent_tool_card_adopts_early_subagent_group() {
+    crate::kit::atoms::init_atoms();
+    *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
+    let mut state = BridgeState {
+        variant: 0,
+        committed: im::Vector::new(),
+        current_turn: CurrentTurn::new(),
+        phase: SessionPhase::Idle,
+        popup_kind: None,
+        generation: 0,
+        active_session_id: String::new(),
+        compact_just_completed: false,
+        last_submitted_text: None,
+        last_pushed_text_len: 0,
+        last_pushed_reasoning_len: 0,
+        last_successful_todos: None,
+        last_successful_todo_sequence: None,
+        next_todo_sequence: 0,
+        todo_call_inputs: std::collections::HashMap::new(),
+        turn_generation: 0,
+        last_prompt_generation: 0,
+        current_request_id: None,
+        pending_cache_usage: None,
+        publication_intent: Default::default(),
+        folded_history: Default::default(),
+    };
+
+    let agent_tool = |tool_id: &str, summary: &str| {
+        AcpEventData::ToolStarted(crate::kit::stream_data::TuiToolStarted {
+            agent_id: None,
+            tool_name: "Agent".into(),
+            tool_id: tool_id.into(),
+            input_summary: summary.into(),
+            raw_input: serde_json::json!({ "prompt": summary }),
+        })
+    };
+    let child_tool = |agent_id: &str, tool_id: &str, name: &str| {
+        AcpEventData::ToolStarted(crate::kit::stream_data::TuiToolStarted {
+            agent_id: Some(agent_id.into()),
+            tool_name: name.into(),
+            tool_id: tool_id.into(),
+            input_summary: format!("{name} input"),
+            raw_input: serde_json::Value::Null,
+        })
+    };
+
+    // 第一个 Agent 调用：卡片先到（流式提前 ToolStarted），子分组紧随其后。
+    dispatch_and_notify(&mut state, &agent_tool("agent-call-1", "start coder"));
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::SubagentStarted {
+            agent_id: "child-1".into(),
+            agent_name: "coder".into(),
+            is_background: false,
+        },
+    );
+    dispatch_and_notify(&mut state, &child_tool("child-1", "child-tool-1", "Read"));
+
+    // 第二个 Agent 调用的子 Agent 先启动（SubagentStarted 抢在父卡片之前到达）。
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::SubagentStarted {
+            agent_id: "child-2".into(),
+            agent_name: "reviewer".into(),
+            is_background: false,
+        },
+    );
+    dispatch_and_notify(&mut state, &child_tool("child-2", "child-tool-2", "Grep"));
+    // 迟到的第二个 Agent 卡片
+    dispatch_and_notify(&mut state, &agent_tool("agent-call-2", "start reviewer"));
+
+    let vms: Vec<_> = state.current_turn.view_models().iter().cloned().collect();
+    let layout: Vec<String> = vms
+        .iter()
+        .map(|vm| match vm {
+            TuiRenderUnit::TuiToolCard(card) => format!("card:{}", card.tool_id),
+            TuiRenderUnit::TuiSubAgentGroup(group) => format!("group:{}", group.agent_id),
+            other => format!("other:{other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        layout,
+        vec![
+            "card:agent-call-1",
+            "group:child-1",
+            "card:agent-call-2",
+            "group:child-2",
+        ],
+        "每个 Agent 调用必须紧跟自己的子分组，不得挂到上一个 loading 的 Agent 调用之下"
+    );
+
+    // 已发布快照同样保持该顺序（用户可见的消息区投影）。
+    let published = VIEW_MODELS.state().read().clone();
+    let published_layout: Vec<String> = published
+        .items
+        .iter()
+        .map(|vm| match vm {
+            TuiRenderUnit::TuiToolCard(card) => format!("card:{}", card.tool_id),
+            TuiRenderUnit::TuiSubAgentGroup(group) => format!("group:{}", group.agent_id),
+            other => format!("other:{other:?}"),
+        })
+        .collect();
+    assert_eq!(published_layout, layout, "发布快照应保持增量投影的段顺序");
+}

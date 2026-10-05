@@ -355,6 +355,68 @@ fn test_current_turn_resumed_subagent_routes_to_new_agent_group() {
     assert!(matches!(vms[3], TuiRenderUnit::TuiSubAgentGroup(_)));
 }
 
+/// [回归测试] Agent ToolCard 晚于 SubagentStarted 到达 TUI（并行多 Agent 批次里
+/// 非首个工具调用的 ToolStarted 只在 dispatch 阶段发出，经 forwarder 两个 hop，
+/// 与子 Agent invoke 内直发的 SubagentStarted 竞争）时，子分组段不得滞留在上一个
+/// 仍在 loading 的 Agent 调用之下：迟到的 Agent 卡片必须认领早到的子分组段。
+#[test]
+fn test_late_agent_card_adopts_early_subagent_group() {
+    let mut ct = CurrentTurn::new();
+    // 第一个 Agent 调用：卡片先到（流式提前 ToolStarted），子分组紧随其后。
+    ct.start_tool(ToolCardAccumulator::new(
+        "agent-call-1".into(),
+        "Agent".into(),
+        "start coder".into(),
+    ));
+    ct.start_subagent("child-1".into(), "coder".into());
+    assert!(ct.start_subagent_tool(
+        "child-1",
+        ToolCardAccumulator::new("child-tool-1".into(), "Read".into(), "a.rs".into()),
+    ));
+
+    // 第二个 Agent 的子 Agent 先启动（SubagentStarted 抢在父卡片之前到达），
+    // 此时主 turn 里没有未认领的 Agent 卡片。
+    ct.start_subagent("child-2".into(), "reviewer".into());
+    assert!(ct.start_subagent_tool(
+        "child-2",
+        ToolCardAccumulator::new("child-tool-2".into(), "Grep".into(), "foo".into()),
+    ));
+
+    // 迟到的第二个 Agent 卡片。
+    ct.start_tool(ToolCardAccumulator::new(
+        "agent-call-2".into(),
+        "Agent".into(),
+        "start reviewer".into(),
+    ));
+
+    let vms: Vec<_> = ct.view_models().iter().cloned().collect();
+    assert_eq!(vms.len(), 4, "应按 Agent/分组/Agent/分组交错显示");
+    match (&vms[0], &vms[1], &vms[2], &vms[3]) {
+        (
+            TuiRenderUnit::TuiToolCard(first),
+            TuiRenderUnit::TuiSubAgentGroup(first_group),
+            TuiRenderUnit::TuiToolCard(second),
+            TuiRenderUnit::TuiSubAgentGroup(second_group),
+        ) => {
+            assert_eq!(first.tool_id, "agent-call-1");
+            assert_eq!(second.tool_id, "agent-call-2");
+            assert_eq!(
+                first_group.agent_id, "child-1",
+                "仍在 loading 的第一个 Agent 调用之下只能是它自己的子分组"
+            );
+            assert_eq!(
+                second_group.agent_id, "child-2",
+                "迟到的 Agent 卡片必须紧跟它自己的子分组"
+            );
+        }
+        other => panic!("expected Agent/group/Agent/group interleaving, got {other:?}"),
+    }
+    assert!(
+        ct.tool_cards.iter().all(|tool| tool.claimed_by_subagent),
+        "两张 Agent 卡片都应认领分组"
+    );
+}
+
 #[test]
 fn test_current_turn_subagent_unknown_route_returns_false() {
     let mut ct = CurrentTurn::new();

@@ -1,6 +1,14 @@
 use super::super::tool_card::{SubAgentAccumulator, ToolCardAccumulator};
 use super::{CurrentTurn, TurnSegment};
 
+/// 工具名是否为子 Agent 启动调用（Agent 工具卡片与 Subagent 分组配对的唯一判据）。
+///
+/// 配对有两个方向：卡片先到（`start_subagent` 前向扫描认领）与分组先到
+/// （`start_tool` 用新卡片接管孤儿分组）——两处必须用同一判据。
+pub(super) fn is_agent_launcher_tool(tool_name: &str) -> bool {
+    tool_name == "Agent"
+}
+
 impl CurrentTurn {
     /// Begin a new sub-agent group from `"subagent-started"`.
     ///
@@ -26,7 +34,7 @@ impl CurrentTurn {
         for (i, seg) in self.segments.iter().enumerate() {
             if let TurnSegment::Tool { tool_idx } = seg
                 && let Some(tc) = self.tool_cards.get(*tool_idx)
-                && tc.tool_name == "Agent"
+                && is_agent_launcher_tool(&tc.tool_name)
                 && !tc.claimed_by_subagent
             {
                 insert_at = Some((i + 1, *tool_idx));
@@ -42,6 +50,12 @@ impl CurrentTurn {
             // 该操作低频（每 subagent 一次），O(total) 成本可接受。
             self.cached_view_models = im::Vector::new();
         } else {
+            // 分组先于父 Agent 卡片到达（并行多 Agent 批次里非首个工具调用的
+            // ToolStarted 只在 dispatch 阶段发出，与子 Agent 直发的
+            // SubagentStarted 竞争）：不能就此 append 到末尾——那样分组会挂在
+            // 上一个仍在 loading 的 Agent 调用之下。先记账，等迟到的 Agent
+            // 卡片出现时由 `start_tool` 接管（见 adopt_orphan_subagent_group）。
+            self.orphan_subagent_groups.push(idx);
             self.segments
                 .push(TurnSegment::SubAgent { subagent_idx: idx });
         }
@@ -50,6 +64,37 @@ impl CurrentTurn {
             .push(SubAgentAccumulator::new(agent_id, agent_name));
         self.active = true;
         self.invalidate_cache();
+    }
+
+    /// Agent ToolCard 晚于子分组到达时的接管：把最早创建的孤儿分组段移动到
+    /// 该卡片之后，恢复 "Agent 调用紧接自己的子工具行" 的时序。
+    ///
+    /// 按到达顺序 FIFO 配对（第 k 张卡片 ↔ 第 k 个分组），与 `start_subagent`
+    /// 前向扫描（最早未 claim 卡片）保持同一配对口径——事件乱序到达时无法恢复
+    /// 真实身份配对，只能保证段位置不再挂到别的 Agent 调用之下。
+    pub(super) fn adopt_orphan_subagent_group(&mut self, tool_idx: usize, tool_seg_pos: usize) {
+        let Some(subagent_idx) = self.orphan_subagent_groups.first().copied() else {
+            return;
+        };
+        self.orphan_subagent_groups.remove(0);
+        let Some(seg_pos) = self.segments.iter().position(
+            |seg| matches!(seg, TurnSegment::SubAgent { subagent_idx: si } if *si == subagent_idx),
+        ) else {
+            // 段已不存在（turn 重置/提交）：丢弃记账，保持不变量。
+            return;
+        };
+        self.segments.remove(seg_pos);
+        // 被移动的段在卡片之前时，移除后卡片位置左移一格，目标槽位随之左移。
+        let insert_at = if seg_pos < tool_seg_pos {
+            tool_seg_pos
+        } else {
+            tool_seg_pos + 1
+        };
+        self.segments
+            .insert(insert_at, TurnSegment::SubAgent { subagent_idx });
+        self.tool_cards[tool_idx].claimed_by_subagent = true;
+        // 段列表重排会破坏 segment↔cache 的索引对齐——清空缓存整体重建。
+        self.cached_view_models = im::Vector::new();
     }
 
     /// [诊断] 返回当前所有 SubAgentAccumulator 的 agent_id 列表。
