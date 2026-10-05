@@ -573,7 +573,7 @@ async fn builtin_close_cleans_up_workspace_owned_bash() {
         .peer()
         .call_tool_once(call(
             "Bash",
-            json!({"command":"echo $$ > running.pid; sleep 30", "run_in_background":true}),
+            json!({"command":"echo $$ > running.pid; exec sleep 30", "run_in_background":true}),
         ))
         .await
         .expect("start background Bash");
@@ -594,7 +594,7 @@ async fn builtin_close_cleans_up_workspace_owned_bash() {
     pair.shutdown().await;
     tokio::time::timeout(Duration::from_secs(5), async {
         while std::process::Command::new("kill")
-            .args(["-0", &format!("-{pid}")])
+            .args(["-0", "--", &format!("-{pid}")])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()

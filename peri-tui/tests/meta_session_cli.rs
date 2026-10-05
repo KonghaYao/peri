@@ -64,11 +64,18 @@ fn assert_human_error(output: &Output, exit_code: i32, kind: &str, message: &str
     assert_eq!(text(&output.stderr), format!("{kind}: {message}\n"));
 }
 
+fn fixture_cwd(relative: &str) -> String {
+    std::env::temp_dir()
+        .join(relative.trim_start_matches('/'))
+        .to_string_lossy()
+        .into_owned()
+}
+
 fn fixture_meta(id: &str, title: &str, cwd: &str) -> ThreadMeta {
     ThreadMeta {
         id: id.to_owned(),
         title: Some(title.to_owned()),
-        cwd: cwd.to_owned(),
+        cwd: fixture_cwd(cwd),
         created_at: Utc.with_ymd_and_hms(2026, 9, 4, 1, 2, 3).unwrap(),
         updated_at: Utc.with_ymd_and_hms(2026, 9, 4, 4, 5, 6).unwrap(),
         message_count: 7,
@@ -149,9 +156,13 @@ fn human_success_is_stdout_only_and_escapes_persisted_controls() {
     );
 
     assert_success(&output);
+    let cwd = fixture_cwd("/tmp/project\rnext");
+    let escaped_cwd = cwd.escape_debug();
     assert_eq!(
         text(&output.stdout),
-        "Schema version: 1\nID: 550e8400-e29b-41d4-a716-446655440000\nTitle: safe\\n\\t\\u{1b}[31m\nCWD: /tmp/project\\rnext\nCreated at: 2026-09-04T01:02:03+00:00\nUpdated at: 2026-09-04T04:05:06+00:00\nMessage count: 7\nParent thread ID: null\nPersisted agent status: done\n"
+        format!(
+            "Schema version: 1\nID: 550e8400-e29b-41d4-a716-446655440000\nTitle: safe\\n\\t\\u{{1b}}[31m\nCWD: {escaped_cwd}\nCreated at: 2026-09-04T01:02:03+00:00\nUpdated at: 2026-09-04T04:05:06+00:00\nMessage count: 7\nParent thread ID: null\nPersisted agent status: done\n"
+        )
     );
     assert_forbidden_output(&output);
 }
@@ -187,7 +198,7 @@ fn json_success_is_one_exact_allowlisted_object() {
             "schemaVersion": 1,
             "id": SESSION_ID,
             "title": "database-a",
-            "cwd": "/project/a",
+            "cwd": fixture_cwd("/project/a"),
             "createdAt": "2026-09-04T01:02:03+00:00",
             "updatedAt": "2026-09-04T04:05:06+00:00",
             "messageCount": 7,
@@ -292,7 +303,7 @@ fn explicit_database_selection_never_falls_back_to_another_database() {
     assert_success(&selected);
     let value: serde_json::Value = serde_json::from_slice(&selected.stdout).unwrap();
     assert_eq!(value["title"], "only-b");
-    assert_eq!(value["cwd"], "/b");
+    assert_eq!(value["cwd"], fixture_cwd("/b"));
 }
 
 // 默认库位置由 `dirs_next::home_dir()` 派生，而 Windows 上它读 Profile known-folder、
@@ -315,7 +326,7 @@ fn default_database_reads_existing_single_store_without_modifying_history() {
     assert_success(&output);
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(value["title"], "old-history");
-    assert_eq!(value["cwd"], "/old");
+    assert_eq!(value["cwd"], fixture_cwd("/old"));
     assert_eq!(std::fs::read(&db).unwrap(), before);
     assert!(!home.join(".peri/threads/threads-v2.db").exists());
     assert_forbidden_output(&output);

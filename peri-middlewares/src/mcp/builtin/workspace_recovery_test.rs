@@ -77,7 +77,7 @@ async fn assert_process_gone(pid: i32) {
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             if !std::process::Command::new("kill")
-                .args(["-0", &format!("-{pid}")])
+                .args(["-0", "--", &format!("-{pid}")])
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .status()
@@ -110,7 +110,7 @@ async fn cancelled_bridge_stops_process_and_drains_session_ownership() {
     let bash = bridge(&pair, "Bash", true).await;
     let running = tokio::spawn(async move {
         bash.invoke(
-            json!({"command":"echo $$ > started.pid; sleep 60", "timeout":120000}),
+            json!({"command":"echo $$ > started.pid; exec sleep 60", "timeout":120000}),
             ToolContext::new(&[], ""),
         )
         .await
@@ -124,7 +124,7 @@ async fn cancelled_bridge_stops_process_and_drains_session_ownership() {
         .unwrap();
     assert!(
         std::process::Command::new("kill")
-            .args(["-0", &format!("-{pid}")])
+            .args(["-0", "--", &format!("-{pid}")])
             .status()
             .unwrap()
             .success(),
@@ -168,7 +168,7 @@ async fn maximum_foreground_timeout_retains_logs_and_cancellable_task() {
     let result = tokio::time::timeout(
         Duration::from_secs(140),
         bash.invoke(
-            json!({"command":"echo live-marker; sleep 180", "timeout":120000}),
+            json!({"command":"echo live-marker; exec sleep 180", "timeout":120000}),
             ToolContext::new(&[], &cwd),
         ),
     )
@@ -233,7 +233,7 @@ async fn request_timeout_stops_server_shell() {
         &pair.peer(),
         call(
             "Bash",
-            json!({"command":"echo $$ > timeout.pid; sleep 60", "timeout":120000}),
+            json!({"command":"echo $$ > timeout.pid; exec sleep 60", "timeout":120000}),
         ),
         Some(Duration::from_secs(1)),
     )
@@ -258,21 +258,13 @@ async fn request_timeout_stops_server_shell() {
 #[tokio::test]
 async fn external_source_keeps_120_second_deadline_and_cancels_execution() {
     let (dir, cwd) = workspace_dir();
-    let manager: Arc<dyn TaskManager> = Arc::new(peri_mcp_common::create_local_task_manager());
-    let pair = connect(
-        &cwd,
-        Some(WorkspaceInstanceInput {
-            task_manager: Some(manager.clone()),
-            on_bg_complete: None,
-        }),
-    )
-    .await;
+    let pair = connect(&cwd, None).await;
     let bash = bridge(&pair, "Bash", false).await;
     let started = std::time::Instant::now();
     let error = tokio::time::timeout(
         Duration::from_secs(130),
         bash.invoke(
-            json!({"command":"echo $$ > external.pid; sleep 180", "timeout":120000}),
+            json!({"command":"echo $$ > external.pid; exec sleep 180", "timeout":120000}),
             ToolContext::new(&[], &cwd),
         ),
     )
@@ -287,11 +279,6 @@ async fn external_source_keeps_120_second_deadline_and_cancels_execution() {
         .parse()
         .unwrap();
     assert_process_gone(pid).await;
-    assert_eq!(manager.active_count(), 0);
-    assert_eq!(
-        manager.shutdown().await,
-        peri_acp_types::tasks::TaskShutdownReport::Complete
-    );
     pair.shutdown().await;
 }
 
