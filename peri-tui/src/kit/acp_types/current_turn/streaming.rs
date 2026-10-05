@@ -119,15 +119,7 @@ impl CurrentTurn {
             .iter_mut()
             .find(|t| t.tool_id == tool.tool_id)
         {
-            if !tool.raw_input.is_null() && existing.raw_input.is_null() {
-                tracing::debug!(
-                    tool_id = %tool.tool_id,
-                    tool_name = %tool.tool_name,
-                    "CurrentTurn::start_tool: 提前 ToolStarted 升级 input"
-                );
-                existing.raw_input = tool.raw_input;
-                existing.input_summary = tool.input_summary;
-                existing.presentation = tool.presentation;
+            if existing.upgrade_input(tool) {
                 self.invalidate_cache();
             }
             return;

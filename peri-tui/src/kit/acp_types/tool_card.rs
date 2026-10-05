@@ -128,6 +128,17 @@ pub struct ToolCardAccumulator {
 }
 
 impl ToolCardAccumulator {
+    pub(crate) fn upgrade_input(&mut self, tool: Self) -> bool {
+        if tool.raw_input.is_null() || !self.raw_input.is_null() {
+            return false;
+        }
+        self.tool_name = tool.tool_name;
+        self.raw_input = tool.raw_input;
+        self.input_summary = tool.input_summary;
+        self.presentation = tool.presentation;
+        true
+    }
+
     /// Create a generic in-progress tool card from a replay or legacy event.
     pub fn new(tool_id: String, tool_name: String, input_summary: String) -> Self {
         Self::with_input(tool_id, tool_name, input_summary, Value::Null, None)
@@ -206,6 +217,9 @@ impl SubAgentAccumulator {
 
     pub(super) fn start_tool(&mut self, tool: ToolCardAccumulator) {
         self.child_turn.start_tool(tool);
+        if !self.is_running {
+            self.child_turn.deactivate();
+        }
         self.cached_view_model.replace(None);
     }
 

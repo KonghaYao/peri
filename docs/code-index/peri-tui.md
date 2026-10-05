@@ -159,6 +159,8 @@ core `ConfigSource::save(expected_revision, &PeriConfig)` 返回 accepted snapsh
 
 ## 跨模块契约（指向 architecture-contracts.md，不复制正文）
 
+工具卡的提前 start（空参数）与正式 start 按 `tool_id` 合并；主 turn 与后台 live detail 共用 `ToolCardAccumulator::upgrade_input`，升级输入不重置计时或终态。已停止的子 Agent 接收迟到工具 start 时仍可补全卡片，但不会重新激活子 turn；回归入口为 `acp_types_test.rs::test_stopped_subagent_late_tool_start_keeps_children_terminal` 与 `bg_task_live_test.rs::bg_tool_duplicate_start_upgrades_input_without_restarting`。
+
 TUI 生产时间入口统一经 `peri-time`：`kit/entry.rs` 的每日主题以显式 `HostLocal`
 日历日期判定；`kit/acp_bridge.rs` 的发布 deadline 与 `kit/service_snapshot.rs`、
 `kit/workflow_snapshot.rs`、`kit/steer_consumer.rs` 的周期等待使用单调时间与

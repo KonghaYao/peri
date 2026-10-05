@@ -135,20 +135,24 @@ pub(crate) fn handle_bg_tool_started(
     previous_todos: Option<&crate::kit::tool_semantics::TodoSnapshot>,
 ) {
     with_live_detail_for_agent(agent_id, |_, detail| {
-        if detail
-            .tool_cards
-            .iter()
-            .any(|t| t.tool_id == ts.tool_id && t.output_summary.is_none())
-        {
-            return;
-        }
-        detail.tool_cards.push(ToolCardAccumulator::with_input(
+        let tool = ToolCardAccumulator::with_input(
             ts.tool_id.clone(),
             ts.tool_name.clone(),
             ts.input_summary.clone(),
             ts.raw_input.clone(),
             previous_todos,
-        ));
+        );
+        if let Some(existing) = detail
+            .tool_cards
+            .iter_mut()
+            .find(|existing| existing.tool_id == ts.tool_id)
+        {
+            if existing.upgrade_input(tool) {
+                sync_tool_units(detail);
+            }
+            return;
+        }
+        detail.tool_cards.push(tool);
         sync_tool_units(detail);
     });
 }

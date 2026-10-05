@@ -125,6 +125,55 @@ fn test_end_tool_unknown_id_is_noop() {
 }
 
 #[test]
+fn test_stopped_subagent_late_tool_start_keeps_children_terminal() {
+    let mut turn = CurrentTurn::new();
+    turn.start_subagent("child".into(), "coder".into());
+    turn.start_subagent_tool(
+        "child",
+        ToolCardAccumulator::with_input(
+            "early".into(),
+            "Shell".into(),
+            "null".into(),
+            serde_json::Value::Null,
+            None,
+        ),
+    );
+    turn.stop_subagent("child", false, "done");
+    turn.start_subagent_tool(
+        "child",
+        ToolCardAccumulator::with_input(
+            "early".into(),
+            "Shell".into(),
+            "echo done".into(),
+            serde_json::json!({"command": "echo done"}),
+            None,
+        ),
+    );
+    turn.start_subagent_tool(
+        "child",
+        ToolCardAccumulator::with_input(
+            "late".into(),
+            "Shell".into(),
+            "pwd".into(),
+            serde_json::json!({"command": "pwd"}),
+            None,
+        ),
+    );
+    let TuiRenderUnit::TuiSubAgentGroup(group) = &turn.view_models()[0] else {
+        panic!("expected subagent group");
+    };
+    assert!(!group.is_running);
+    assert_eq!(group.view_models.len(), 2);
+    let TuiRenderUnit::TuiToolCard(early) = &group.view_models[0] else {
+        panic!("expected tool card");
+    };
+    assert_eq!(early.input_summary, "echo done");
+    assert!(group.view_models.iter().all(|unit| matches!(unit,
+        TuiRenderUnit::TuiToolCard(card) if !card.is_running
+    )));
+}
+
+#[test]
 fn test_bash_timer_hash_changes_over_time() {
     // [设计变更] ToolCard content_hash 现在纳入 duration（按秒向下取整）——
     // 这是为了让按 hash 分片的渲染缓存每秒刷新一次 duration 文本。

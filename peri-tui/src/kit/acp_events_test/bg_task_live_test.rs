@@ -7,6 +7,80 @@ use serial_test::serial;
 
 #[test]
 #[serial]
+fn bg_tool_duplicate_start_upgrades_input_without_restarting() {
+    crate::kit::atoms::init_atoms();
+    struct RestoreAtoms {
+        display: Vec<crate::kit::atoms::BgDisplayEntry>,
+        live: std::collections::HashMap<String, crate::kit::atoms::BgLiveDetail>,
+    }
+    impl Drop for RestoreAtoms {
+        fn drop(&mut self) {
+            *BG_DISPLAY.state().write() = self.display.clone();
+            *BG_LIVE_DETAIL.state().write() = self.live.clone();
+        }
+    }
+    let _restore = RestoreAtoms {
+        display: BG_DISPLAY.state().read().clone(),
+        live: BG_LIVE_DETAIL.state().read().clone(),
+    };
+    BG_DISPLAY
+        .state()
+        .write()
+        .push(crate::kit::atoms::BgDisplayEntry {
+            id: "task-upgrade".into(),
+            linked_agent_id: Some("child-upgrade".into()),
+            agent_type: "agent".into(),
+            desc: "coder".into(),
+            current_tool: None,
+            tool_count: 0,
+            is_active: true,
+            is_error: false,
+            created_at: std::time::Instant::now(),
+            completed_at: None,
+        });
+    crate::kit::bg_task_live::init_agent_live_detail(
+        "task-upgrade",
+        "child-upgrade",
+        "coder",
+        None,
+    );
+    let mut started = TuiToolStarted {
+        tool_id: "call-upgrade".into(),
+        tool_name: "Shell".into(),
+        input_summary: "null".into(),
+        raw_input: serde_json::Value::Null,
+        agent_id: Some("child-upgrade".into()),
+    };
+    crate::kit::bg_task_live::handle_bg_tool_started("child-upgrade", &started, None);
+    let started_at = BG_LIVE_DETAIL.state().read()["task-upgrade"].tool_cards[0].started_at;
+    started.raw_input = serde_json::json!({"command": "pwd"});
+    started.input_summary = "pwd".into();
+    crate::kit::bg_task_live::handle_bg_tool_started("child-upgrade", &started, None);
+    crate::kit::bg_task_live::handle_bg_tool_ended(
+        "child-upgrade",
+        &TuiToolEnded {
+            tool_id: started.tool_id.clone(),
+            output_summary: "workspace".into(),
+            is_error: false,
+            agent_id: started.agent_id.clone(),
+        },
+    );
+    crate::kit::bg_task_live::handle_bg_tool_started("child-upgrade", &started, None);
+    let live = BG_LIVE_DETAIL.state();
+    let guard = live.read();
+    let detail = &guard["task-upgrade"];
+    assert_eq!(detail.tool_cards.len(), 1);
+    assert_eq!(detail.tool_cards[0].started_at, started_at);
+    let TuiRenderUnit::TuiToolCard(card) = &detail.nested_units[0] else {
+        panic!("expected tool");
+    };
+    assert_eq!(card.input_summary, "pwd");
+    assert!(!card.is_running);
+    assert_eq!(card.output_summary, "workspace");
+}
+
+#[test]
+#[serial]
 fn terminal_snapshot_does_not_resurrect_a_running_task() {
     crate::kit::atoms::init_atoms();
     BG_TASK_REVISION.set(None);
