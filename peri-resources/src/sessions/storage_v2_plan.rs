@@ -252,6 +252,7 @@ pub(crate) fn validate_saved_cwd(path: &Path) -> Result<()> {
     let text = path
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("legacy session path is not UTF-8"))?;
+    let posix_absolute = text.starts_with('/');
     let windows_drive = text.as_bytes().get(1) == Some(&b':')
         && text
             .as_bytes()
@@ -264,7 +265,7 @@ pub(crate) fn validate_saved_cwd(path: &Path) -> Result<()> {
             .filter(|part| !part.is_empty())
             .count()
             >= 2;
-    if !path.is_absolute() && !windows_drive && !windows_unc {
+    if !posix_absolute && !windows_drive && !windows_unc {
         bail!("legacy session path is not absolute");
     }
     Ok(())

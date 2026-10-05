@@ -165,11 +165,11 @@ async fn initialization_lock_has_a_budget_and_preserves_the_sidecar() {
     let retried = lock_schema_open(&path, Duration::from_secs(1))
         .await
         .unwrap();
+    drop(retried);
     assert_eq!(
         tokio::fs::read(&lock_path).await.unwrap(),
         b"stable sidecar"
     );
-    drop(retried);
     assert!(lock_path.exists());
 }
 

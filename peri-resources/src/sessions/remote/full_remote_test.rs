@@ -214,7 +214,7 @@ async fn virtual_remote_cold_recovery_and_read_only_fallbacks() {
         truncate_reply: AtomicBool::new(false),
     });
     let machine = uuid::Uuid::new_v4().to_string();
-    let root = std::path::PathBuf::from("/virtual/peri-workspace");
+    let root = std::env::temp_dir().join("virtual-peri-workspace");
     let environment =
         RemoteWorkspaceEnvironment::virtual_workspace(&machine, root.clone()).unwrap();
     let first = virtual_remote_facade(transport.clone(), environment.clone());

@@ -105,6 +105,27 @@ fn remote_root_inversion_preserves_posix_and_windows_saved_paths() {
     assert!(derive_remote_root("/repo/src", "../src").is_err());
 }
 
+#[test]
+fn saved_paths_accept_foreign_absolute_formats_but_reject_relative_paths() {
+    for saved in [
+        "/",
+        "/repo/src",
+        "C:/repo",
+        r"C:\repo",
+        r"\\server\share\repo",
+    ] {
+        validate_saved_cwd(Path::new(saved)).unwrap();
+    }
+    for saved in ["", "repo/src", "C:repo", r"\repo", r"\\server"] {
+        assert_eq!(
+            validate_saved_cwd(Path::new(saved))
+                .unwrap_err()
+                .to_string(),
+            "legacy session path is not absolute"
+        );
+    }
+}
+
 #[tokio::test]
 async fn reads_existing_local_registration_and_environment_without_git_probe() {
     use sqlx::{sqlite::SqliteConnectOptions, Connection};

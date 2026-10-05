@@ -335,6 +335,8 @@ SQLite 的表重建须按已有 schema migration 方式在事务外处理外键�
 | 无绑定但有可信本机登记（仅本地模式） | 保存 cwd 可证实的所属 root | 保存的 environment | 不伪造过去的快照；按本地 legacy 接纳规则执行；远端不接纳 legacy |
 | 无法证实 Git 根的旧记录 | 保存 cwd，`path_source=unverified` | 已知原 env；未知来源为 legacy_unknown | 历史可读；不因归组获得执行资格 |
 
+历史路径校验与当前宿主平台无关：接受 POSIX 绝对路径、Windows 盘符绝对路径和 UNC 路径，拒绝相对路径；不读取当前文件系统，也不由历史路径推导执行资格。
+
 同一旧 Workspace UUID 跨 Machine 使用时按 Machine 拆分，同一 Machine/path 的
 多个旧对象登记按路径合并；合并或拆分都不改 Session ID。先保存每个旧 UUID 的
 只读执行证据映射，再迁移读取旧

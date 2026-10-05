@@ -149,11 +149,13 @@ fn adopt_identity_at(path: &Path, expected: &str, target: &str) -> Result<()> {
         let mut file = options.open(&staging)?;
         file.write_all(target.as_bytes())?;
         file.sync_all()?;
+        drop(file);
         anyhow::ensure!(
             read_identity(path)? == expected,
             "current Machine ID changed"
         );
         fs::rename(&staging, path).context("cannot replace machine identity")?;
+        #[cfg(unix)]
         fs::File::open(parent)?.sync_all()?;
         Ok(())
     })();

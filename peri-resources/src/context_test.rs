@@ -136,7 +136,7 @@ async fn test_open_with_busy_schema_lock_degrades_to_read_only() {
     let writable = SqliteThreadStore::new(db_path.clone()).await.unwrap();
     let thread = writable
         .create_thread(ThreadMeta::new_at(
-            "/tmp/read-only-degradation",
+            dir.path().join("read-only-degradation").to_str().unwrap(),
             peri_time::now_wall(),
         ))
         .await
