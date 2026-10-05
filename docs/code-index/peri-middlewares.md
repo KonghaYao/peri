@@ -38,12 +38,18 @@ snapshot；`initialize.rs` 的普通/bare 路径消费冻结输入，middleware 
 
 MCP Tasks 的执行适配在 `src/mcp/tool_bridge.rs` 与
 `src/mcp/client/subscription_tasks.rs`（由 `subscription.rs` 装配）：task receipt 登记到 Agent session 的
-`TaskManager`，其 opaque ID 供 ACP 显示与取消；Pool 只保留 session manager 弱引用、
-Workspace scope capability 和 owner 连接。登记同时记录**投递归属**（直接发起会话，来自可信
-`ToolContext`）与执行 scope（root）：终态提醒经发起会话的 `TaskTerminalDelivery` 原子提交到其
-canonical transcript（稳定投递 ID，幂等、可重投），MQ/收件箱只做唤醒；冷恢复无法重建发起者时
-降级 root 投递并在提醒 metadata 标 `delivery: root-fallback`。订阅在 owner 连续不可观测超过
+`TaskManager`，其 opaque ID 供 ACP 显示与取消；Pool 保留会话 manager 至显式注销、
+Workspace scope capability 和 owner 连接。可信 `ToolContext.session_id` 是在线 admission、
+直接任务目录与发现 scope 的唯一地址；模型参数或 bridge 捕获的输出地址不能替换发起者。
+`client/subscription_task_binding.rs` 封装任务登记、取消及终态投递：提醒经发起会话的
+`TaskTerminalDelivery` 原子提交到其 canonical transcript（稳定投递 ID，幂等、可重投），
+MQ/收件箱只做唤醒；冷恢复从可信 Workspace snapshot/changes 的 `initiatorSessionId`
+重建直接归属。缺失或与发现 scope 冲突即 `Unroutable`，保持重试，不投父/root；收件箱
+未加载时也不改道。wire 回归见 `client/subscription_task_recovery_test.rs`，持久 Inbox 和
+owner 重启恢复仍属 RCRA 第 5 步。订阅在 owner 连续不可观测超过
 `LOST_ABANDON_ATTEMPTS` 次轮询后调用 `abandon_external` 产出终态并明确标注远端副作用未知；
+host-issued MCP Apps lease 的续调用由 `src/mcp/apps_invoke.rs::PoolAppToolDispatcher`
+保留该 lease 的发起会话/turn，按会话过滤工具并通过同一 MCP 准入，不能退回无身份调用。
 Workspace scope 快照完整应用即视为该 owner 的对账证据，清除对应执行 scope 的不确定记录。
 `tasks/get` 轮询与 Workspace
 `workspace/taskSnapshot`/`workspace/taskChanges` cursor 对账将终态交给 Manager，

@@ -32,7 +32,7 @@ async fn builtin_handler_in_flight_cancel_has_no_replay_and_keeps_pool_serving()
             )),
             result = bridge.invoke(
                 json!({ "payload": "in-flight" }),
-                ToolContext::new(&[], "/tmp"),
+                fixture_tool_context("/tmp"),
             ) => result.map_err(|error| {
                 EffectiveToolError::new(EffectiveToolErrorCode::ToolFailed, error.to_string())
             }),
@@ -83,7 +83,7 @@ async fn builtin_handler_in_flight_cancel_has_no_replay_and_keeps_pool_serving()
     let text = bridge
         .invoke(
             json!({ "payload": "after-cancel" }),
-            ToolContext::new(&[], "/tmp"),
+            fixture_tool_context("/tmp"),
         )
         .await
         .expect("取消后同一条 wire / 同一 client service 必须仍可服务");

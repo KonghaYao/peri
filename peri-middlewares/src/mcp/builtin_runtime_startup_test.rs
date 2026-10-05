@@ -604,7 +604,7 @@ async fn closing_web_keeps_artifact_capability_and_real_call() {
     let error = bridge
         .invoke(
             json!({ "file_path": "missing-artifact-fixture.html" }),
-            ToolContext::new(&[], &cwd),
+            fixture_tool_context(&cwd),
         )
         .await
         .expect_err("不存在的文件必须在建立网络请求之前失败");

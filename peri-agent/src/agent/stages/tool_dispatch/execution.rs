@@ -316,14 +316,6 @@ async fn dispatch_concurrent(
                                 .unwrap_or_else(|| dispatch_context.session.agent_id.to_string()),
                             dispatch_context.session.turn.turn_id.to_string(),
                         );
-                    if let Some(root_id) = dispatch_context
-                        .session
-                        .session_context
-                        .read()
-                        .get("mcp_task_owner_session_id")
-                    {
-                        ctx_param = ctx_param.with_mcp_task_owner_session_id(root_id.clone());
-                    }
                     // 投递归属 = 直接发起会话（本 session）；路由取自该会话的
                     // canonical 持久化句柄，不接受模型参数。
                     if let Some(delivery) =

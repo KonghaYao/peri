@@ -102,7 +102,7 @@ async fn direct_builtin_tool_call_passes_approval_then_touches_wire_once() {
     );
 
     let text = bridge
-        .invoke(approved.input.clone(), ToolContext::new(&[], "/tmp"))
+        .invoke(approved.input.clone(), fixture_tool_context("/tmp"))
         .await
         .expect("批准后的调用必须成功");
     assert_eq!(text, "builtin-runtime-ok", "工具结果内容必须可辨认");
@@ -251,7 +251,7 @@ async fn large_payload_crosses_builtin_instance_intact() {
     let echo = bridge
         .invoke(
             json!({ "payload": payload.clone() }),
-            ToolContext::new(&[], "/tmp"),
+            fixture_tool_context("/tmp"),
         )
         .await
         .expect("大请求帧必须完整到达 server");
@@ -290,7 +290,7 @@ async fn per_instance_wire_does_not_cross_between_instances() {
     assert_eq!(artifact_bridge.mcp_server_name(), Some("artifact"));
 
     let text = web_bridge
-        .invoke(json!({}), ToolContext::new(&[], "/tmp"))
+        .invoke(json!({}), fixture_tool_context("/tmp"))
         .await
         .expect("web 调用必须成功");
     assert_eq!(text, "web-reply");
@@ -305,7 +305,7 @@ async fn per_instance_wire_does_not_cross_between_instances() {
     assert_eq!(artifact_stub.call_count(), 0);
 
     let text = artifact_bridge
-        .invoke(json!({}), ToolContext::new(&[], "/tmp"))
+        .invoke(json!({}), fixture_tool_context("/tmp"))
         .await
         .expect("artifact 调用必须成功");
     assert_eq!(text, "artifact-reply");
@@ -435,7 +435,7 @@ async fn same_pool_instances_never_cross_wires_and_reconnect_touches_one_link() 
 
     // ── 动作 1：只碰 web ────────────────────────────────────────────────────────
     let text = web_bridge
-        .invoke(json!({}), ToolContext::new(&[], "/tmp"))
+        .invoke(json!({}), fixture_tool_context("/tmp"))
         .await
         .expect("web 调用必须成功");
     assert_eq!(text, "web-reply");
@@ -488,7 +488,7 @@ async fn same_pool_instances_never_cross_wires_and_reconnect_touches_one_link() 
 
     // ── 动作 2：artifact 侧对称（快照 A = `artifact_log_1`）─────────────────────
     let text = artifact_bridge
-        .invoke(json!({}), ToolContext::new(&[], "/tmp"))
+        .invoke(json!({}), fixture_tool_context("/tmp"))
         .await
         .expect("artifact 调用必须成功");
     assert_eq!(text, "artifact-reply");
@@ -645,7 +645,7 @@ async fn same_pool_instances_never_cross_wires_and_reconnect_touches_one_link() 
     let text = artifact_bridge
         .invoke(
             json!({ "after": "reconnect" }),
-            ToolContext::new(&[], "/tmp"),
+            fixture_tool_context("/tmp"),
         )
         .await
         .expect("重连 web 后 artifact 必须仍可调用");

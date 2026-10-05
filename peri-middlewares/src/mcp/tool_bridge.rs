@@ -288,43 +288,34 @@ impl BaseTool for McpToolBridge {
         }
 
         let peer = self.client.peer.as_ref().unwrap();
-        let session_id = ctx
-            .mcp_task_owner_session_id
-            .as_deref()
-            .or(ctx.session_id.as_deref())
-            .or(self.output_session_id.as_deref());
-        let mut execution_guard = if let Some(session_id) = session_id {
-            let pool = self
-                .output_pool
-                .as_ref()
-                .and_then(std::sync::Weak::upgrade)
-                .ok_or_else(|| {
-                    Box::new(ToolCallError::CallFailed {
-                        server: self.server_name.clone(),
-                        tool: self.tool_name.clone(),
-                        reason: "session MCP task owner unavailable".into(),
-                    }) as Box<dyn std::error::Error + Send + Sync>
-                })?;
-            Some(
-                pool.begin_external_task_execution(session_id, &self.server_name)
-                    .map_err(|reason| {
-                        Box::new(ToolCallError::CallFailed {
-                            server: self.server_name.clone(),
-                            tool: self.tool_name.clone(),
-                            reason,
-                        }) as Box<dyn std::error::Error + Send + Sync>
-                    })?,
-            )
-        } else {
-            None
-        };
+        let session_id = ctx.session_id.as_deref().ok_or_else(|| {
+            Box::new(ToolCallError::CallFailed {
+                server: self.server_name.clone(),
+                tool: self.tool_name.clone(),
+                reason: "MCP tool call requires a trusted session binding".into(),
+            }) as Box<dyn std::error::Error + Send + Sync>
+        })?;
+        let pool = self
+            .output_pool
+            .as_ref()
+            .and_then(std::sync::Weak::upgrade)
+            .ok_or_else(|| {
+                Box::new(ToolCallError::CallFailed {
+                    server: self.server_name.clone(),
+                    tool: self.tool_name.clone(),
+                    reason: "session MCP task owner unavailable".into(),
+                }) as Box<dyn std::error::Error + Send + Sync>
+            })?;
+        let mut execution_guard = pool
+            .begin_external_task_execution(session_id, &self.server_name)
+            .map_err(|reason| {
+                Box::new(ToolCallError::CallFailed {
+                    server: self.server_name.clone(),
+                    tool: self.tool_name.clone(),
+                    reason,
+                }) as Box<dyn std::error::Error + Send + Sync>
+            })?;
 
-        // 投递归属 = 直接发起会话（本 ToolContext 的会话）；scope/投影仍归
-        // owner（root）。两者正交，来自可信 session binding。
-        let initiator_session_id = ctx
-            .session_id
-            .as_deref()
-            .or(self.output_session_id.as_deref());
         let delivery = ctx.task_terminal_delivery.clone();
 
         // 2. 构建 rmcp 请求参数
@@ -337,12 +328,7 @@ impl BaseTool for McpToolBridge {
                 Some(super::config::ConfigSource::WorkspaceRemote)
             )
         {
-            if let (Some(pool), Some(session_id)) = (
-                self.output_pool.as_ref().and_then(std::sync::Weak::upgrade),
-                session_id,
-            ) {
-                request.meta = pool.task_scope_meta_for(&self.server_name, session_id);
-            }
+            request.meta = pool.task_scope_meta_for(&self.server_name, session_id);
         }
 
         // Workspace tools retain their own deadlines (Bash promotes at <=120s).
@@ -372,124 +358,97 @@ impl BaseTool for McpToolBridge {
             })?;
         let result = match response {
             rmcp::model::CallToolResponse::Complete(result) => {
-                if let Some(guard) = execution_guard.as_mut() {
-                    guard.confirm_stopped();
-                }
+                execution_guard.confirm_stopped();
                 result
             }
             rmcp::model::CallToolResponse::Task(created) => {
                 let task_created_at = created.task.created_at;
                 let task_id = created.task.task_id;
-                if let Some(pool) = self.output_pool.as_ref().and_then(std::sync::Weak::upgrade) {
-                    if let Some(session_id) = session_id {
-                        let is_shell = self.tool_name == "Bash"
-                            && (matches!(
-                                self.client.source.as_ref(),
-                                Some(super::config::ConfigSource::Builtin { instance })
-                                    if instance == "workspace"
-                            ) || matches!(
-                                self.client.source.as_ref(),
-                                Some(super::config::ConfigSource::WorkspaceRemote)
-                            ));
-                        let summary = if is_shell {
-                            input
-                                .get("command")
-                                .and_then(serde_json::Value::as_str)
-                                .unwrap_or("Bash")
+                let is_shell = self.tool_name == "Bash"
+                    && (matches!(
+                        self.client.source.as_ref(),
+                        Some(super::config::ConfigSource::Builtin { instance })
+                            if instance == "workspace"
+                    ) || matches!(
+                        self.client.source.as_ref(),
+                        Some(super::config::ConfigSource::WorkspaceRemote)
+                    ));
+                let summary = if is_shell {
+                    input
+                        .get("command")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("Bash")
+                } else {
+                    self.tool_name.as_str()
+                };
+                let kind = if is_shell {
+                    peri_acp_types::tasks::BgTaskKind::Shell
+                } else {
+                    peri_acp_types::tasks::BgTaskKind::Mcp
+                };
+                let public_id = match pool.register_external_task(
+                    session_id,
+                    Some(session_id),
+                    delivery.clone(),
+                    &self.server_name,
+                    &task_id,
+                    kind,
+                    summary,
+                    is_shell,
+                    &task_created_at,
+                ) {
+                    Ok(task_id) => {
+                        execution_guard.confirm_stopped();
+                        task_id
+                    }
+                    Err(reason) => {
+                        let settled =
+                            cancel_and_confirm_mcp_task(peer, &task_id, task_meta.clone()).await;
+                        if settled {
+                            execution_guard.confirm_stopped();
+                        }
+                        let reason = if settled {
+                            reason
                         } else {
-                            self.tool_name.as_str()
+                            format!("{reason}; MCP task {task_id} cleanup could not be confirmed")
                         };
-                        let kind = if is_shell {
-                            peri_acp_types::tasks::BgTaskKind::Shell
-                        } else {
-                            peri_acp_types::tasks::BgTaskKind::Mcp
-                        };
-                        let public_id = match pool.register_external_task(
-                            session_id,
-                            initiator_session_id,
-                            delivery.clone(),
-                            &self.server_name,
-                            &task_id,
-                            kind,
-                            summary,
-                            is_shell,
-                            &task_created_at,
-                        ) {
-                            Ok(task_id) => {
-                                if let Some(guard) = execution_guard.as_mut() {
-                                    guard.confirm_stopped();
-                                }
-                                task_id
-                            }
-                            Err(reason) => {
-                                let settled =
-                                    cancel_and_confirm_mcp_task(peer, &task_id, task_meta.clone())
-                                        .await;
-                                if settled {
-                                    if let Some(guard) = execution_guard.as_mut() {
-                                        guard.confirm_stopped();
-                                    }
-                                }
-                                let reason = if settled {
-                                    reason
-                                } else {
-                                    format!("{reason}; MCP task {task_id} cleanup could not be confirmed")
-                                };
-                                return Err(Box::new(ToolCallError::CallFailed {
-                                    server: self.server_name.clone(),
-                                    tool: self.tool_name.clone(),
-                                    reason,
-                                }));
-                            }
-                        };
-                        if let Err(error) = pool.spawn_managed_task_subscription(
-                            self.server_name.clone(),
-                            session_id.to_owned(),
-                            task_id.clone(),
-                            public_id.clone(),
-                            is_shell,
-                            peer.clone(),
-                        ) {
-                            if error != super::task_scope::TaskAdmissionError::DuplicateKey {
-                                return Err(Box::new(ToolCallError::CallFailed {
+                        return Err(Box::new(ToolCallError::CallFailed {
+                            server: self.server_name.clone(),
+                            tool: self.tool_name.clone(),
+                            reason,
+                        }));
+                    }
+                };
+                if let Err(error) = pool.spawn_managed_task_subscription(
+                    self.server_name.clone(),
+                    session_id.to_owned(),
+                    task_id.clone(),
+                    public_id.clone(),
+                    is_shell,
+                    peer.clone(),
+                ) {
+                    if error != super::task_scope::TaskAdmissionError::DuplicateKey {
+                        return Err(Box::new(ToolCallError::CallFailed {
                                     server: self.server_name.clone(),
                                     tool: self.tool_name.clone(),
                                     reason: format!(
                                         "background task {public_id} exists, but its monitor was not admitted: {error}; completion delivery is not guaranteed; do not repeat the command"
                                     ),
                                 }));
-                            }
-                        }
-                        // 回执只承诺可达的投递：有 canonical 路由 = 持久送达
-                        // （resume 后仍可见）；否则只声称活跃期送达。
-                        let delivery_note = if delivery.is_some() {
-                            "Its completion reminder is committed to the initiating session's \
+                    }
+                }
+                // 回执只承诺可达的投递：有 canonical 路由 = 持久送达
+                // （resume 后仍可见）；否则只声称活跃期送达。
+                let delivery_note = if delivery.is_some() {
+                    "Its completion reminder is committed to the initiating session's \
                              transcript and stays visible after resume."
-                        } else {
-                            "Its completion reminder is delivered to the initiating session \
-                             while that session is live."
-                        };
-                        return Ok(format!(
-                            "Background task started: {public_id}. {delivery_note}"
-                        ));
-                    }
-                }
-                let settled = cancel_and_confirm_mcp_task(peer, &task_id, task_meta).await;
-                if settled {
-                    if let Some(guard) = execution_guard.as_mut() {
-                        guard.confirm_stopped();
-                    }
-                }
-                let reason = if settled {
-                    "background task requires a live session task manager".to_owned()
                 } else {
-                    format!("background task {task_id} was not registered and MCP cleanup could not be confirmed")
+                    "Its completion reminder is delivered to the initiating session \
+                             while that session is live."
                 };
-                return Err(Box::new(ToolCallError::CallFailed {
-                    server: self.server_name.clone(),
-                    tool: self.tool_name.clone(),
-                    reason,
-                }));
+                return Ok(format!(
+                    "Background task started: {public_id}. {delivery_note}"
+                ));
             }
             _ => {
                 return Err(Box::new(ToolCallError::CallFailed {

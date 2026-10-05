@@ -294,7 +294,8 @@ async fn call_tool_smoke_and_effective_bridge_round_trip() {
         let bridged_success = success_bridge
             .invoke(
                 case.success_input.clone(),
-                ToolContext::new(&[], &fixture.ctx.cwd),
+                ToolContext::new(&[], &fixture.ctx.cwd)
+                    .with_session_identity("dispatch-session", "dispatch-turn"),
             )
             .await
             .unwrap_or_else(|error| {
@@ -310,7 +311,8 @@ async fn call_tool_smoke_and_effective_bridge_round_trip() {
         let bridged_error = failure_bridge
             .invoke(
                 case.fail_input.clone(),
-                ToolContext::new(&[], &fixture.ctx.cwd),
+                ToolContext::new(&[], &fixture.ctx.cwd)
+                    .with_session_identity("dispatch-session", "dispatch-turn"),
             )
             .await
             .expect_err("工具级失败经桥必须 Err（桥把 error 结果转成 CallFailed）");
@@ -356,6 +358,8 @@ struct Wave2CallCase {
 /// 一致。
 async fn bridge_pool(instance: &str, peer: &Peer<RoleClient>) -> Arc<McpClientPool> {
     let pool = Arc::new(McpClientPool::new_empty());
+    let manager: Arc<dyn TaskManager> = Arc::new(ConcreteTaskManager::new());
+    pool.bind_session_task_manager("dispatch-session", &manager);
     let tools = peer
         .list_all_tools()
         .await

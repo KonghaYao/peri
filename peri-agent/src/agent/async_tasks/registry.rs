@@ -46,6 +46,16 @@ pub enum BackgroundRegistryError {
     ExternalCancelFailed(String),
     #[error("External task has an invalid creation timestamp")]
     InvalidStartedAt,
+    #[error(
+        "External task {task_id} initiator conflict: recorded {recorded}, requested {requested}"
+    )]
+    ExternalInitiatorConflict {
+        task_id: String,
+        recorded: String,
+        requested: String,
+    },
+    #[error("External task {0} is Unroutable: initiator is unknown")]
+    ExternalUnroutable(String),
     #[error("Kind concurrent limit reached: {kind} ({current}/{limit})")]
     KindConcurrentLimit {
         kind: String,
@@ -159,6 +169,11 @@ pub struct BackgroundTaskRegistry {
     settlements_in_flight: std::sync::atomic::AtomicUsize,
 }
 
+enum TaskRegistration {
+    Created,
+    TerminalRecovery,
+}
+
 #[derive(Default)]
 struct TaskProjection {
     revision: u64,
@@ -226,49 +241,6 @@ impl BackgroundTaskRegistry {
             .records
             .get(task_id)
             .map(|record| record.status.clone())
-    }
-
-    pub(super) fn restore_external_terminal(
-        &self,
-        task_id: String,
-        kind: BgTaskKind,
-        summary: String,
-        started_at: chrono::DateTime<chrono::Utc>,
-        result: BackgroundTaskResult,
-        initiator_session_id: Option<String>,
-    ) -> bool {
-        let mut projection = self.projection.lock();
-        if projection.records.contains_key(&task_id) {
-            return false;
-        }
-        let output_preview: String = result.output.chars().take(500).collect();
-        let success = result.success;
-        let duration_ms = result.duration_ms;
-        projection.records.insert(
-            task_id.clone(),
-            TaskRecord {
-                task_id: task_id.clone(),
-                kind,
-                summary,
-                started_at: started_at.to_rfc3339(),
-                status: if success { "completed" } else { "failed" }.into(),
-                duration_ms,
-                output_preview: Some(output_preview.clone()),
-                initiator_session_id,
-            },
-        );
-        self.push_event(
-            &mut projection,
-            BgRegistryEvent::Completed {
-                task_id,
-                kind: Some(kind),
-                success,
-                output_preview,
-                duration_ms,
-                result,
-            },
-        );
-        true
     }
 
     pub fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<TaskChange> {
@@ -341,14 +313,52 @@ impl BackgroundTaskRegistry {
         }
     }
 
-    /// 既有外部条目记录的投递归属（`None` = 未记录：本地任务或未重建出
-    /// 发起者的对账注册）。对账注册据此决定能否改道回调路由。
-    pub(super) fn external_initiator(&self, task_id: &str) -> Option<String> {
-        self.projection
+    pub(super) fn external_callback_refresh_allowed(
+        &self,
+        task_id: &str,
+        requested: Option<&str>,
+    ) -> Result<bool, BackgroundRegistryError> {
+        let tasks = self.tasks.lock();
+        let projection = self.projection.lock();
+        let recorded = projection
+            .records
+            .get(task_id)
+            .and_then(|record| record.initiator_session_id.as_deref());
+        match (recorded, requested) {
+            (Some(recorded), Some(requested)) if recorded != requested => {
+                Err(BackgroundRegistryError::ExternalInitiatorConflict {
+                    task_id: task_id.into(),
+                    recorded: recorded.into(),
+                    requested: requested.into(),
+                })
+            }
+            (Some(_), None) => Ok(false),
+            (None, Some(_))
+                if tasks.get(task_id).is_some_and(|task| {
+                    matches!(task.status, BackgroundTaskStatus::Completing)
+                }) =>
+            {
+                Err(BackgroundRegistryError::TaskCompleting(task_id.into()))
+            }
+            _ => Ok(true),
+        }
+    }
+
+    pub(super) fn ensure_external_routable(
+        &self,
+        task_id: &str,
+    ) -> Result<(), BackgroundRegistryError> {
+        if self
+            .projection
             .lock()
             .records
             .get(task_id)
-            .and_then(|record| record.initiator_session_id.clone())
+            .and_then(|record| record.initiator_session_id.as_ref())
+            .is_none()
+        {
+            return Err(BackgroundRegistryError::ExternalUnroutable(task_id.into()));
+        }
+        Ok(())
     }
 
     pub(super) fn refresh_external_callbacks(
@@ -356,6 +366,7 @@ impl BackgroundTaskRegistry {
         task_id: &str,
         cancel: ExternalCancelFn,
         on_terminal: ExternalNotifyFn,
+        initiator_session_id: Option<String>,
     ) {
         let mut tasks = self.tasks.lock();
         if let Some(task) = tasks.get_mut(task_id) {
@@ -366,6 +377,21 @@ impl BackgroundTaskRegistry {
                     cancel,
                     on_terminal,
                 };
+                if task.initiator_session_id.is_none() && initiator_session_id.is_some() {
+                    task.initiator_session_id = initiator_session_id.clone();
+                    let mut projection = self.projection.lock();
+                    if let Some(record) = projection.records.get_mut(task_id) {
+                        record.initiator_session_id = initiator_session_id;
+                        let status = record.status.clone();
+                        self.push_event(
+                            &mut projection,
+                            BgRegistryEvent::Updated {
+                                task_id: task_id.into(),
+                                status,
+                            },
+                        );
+                    }
+                }
             }
         }
     }
@@ -491,10 +517,29 @@ impl BackgroundTaskRegistry {
         task: BackgroundTask,
     ) -> Result<(), BackgroundRegistryError> {
         let limit = Self::kind_limit(task.kind);
+        self.register_task(task, limit, TaskRegistration::Created)
+    }
 
+    pub(super) fn register_restored_external(
+        &self,
+        task: BackgroundTask,
+    ) -> Result<(), BackgroundRegistryError> {
+        self.register_task(task, None, TaskRegistration::TerminalRecovery)
+    }
+
+    fn register_task(
+        &self,
+        task: BackgroundTask,
+        limit: Option<usize>,
+        registration: TaskRegistration,
+    ) -> Result<(), BackgroundRegistryError> {
         let kind = task.kind;
         let task_id = task.id.clone();
         let summary = task.prompt_summary.clone();
+        let status = match registration {
+            TaskRegistration::Created => "running",
+            TaskRegistration::TerminalRecovery => "pending_delivery",
+        };
 
         let mut tasks = self.tasks.lock();
         if let Some(limit) = limit {
@@ -531,23 +576,26 @@ impl BackgroundTaskRegistry {
                 kind,
                 summary: summary.clone(),
                 started_at: task.chrono_started_at.to_rfc3339(),
-                status: "running".into(),
+                status: status.into(),
                 duration_ms: 0,
                 output_preview: None,
                 initiator_session_id: task.initiator_session_id.clone(),
             },
         );
         tasks.insert(task.id.clone(), task);
-        // 推送 BgTaskStarted 事件
-        self.push_event(
-            &mut projection,
-            BgRegistryEvent::Started {
+        let event = match registration {
+            TaskRegistration::Created => BgRegistryEvent::Started {
                 task_id,
                 kind,
                 summary,
                 started_at: peri_time::now_utc_rfc3339(),
             },
-        );
+            TaskRegistration::TerminalRecovery => BgRegistryEvent::Updated {
+                task_id,
+                status: status.into(),
+            },
+        };
+        self.push_event(&mut projection, event);
         drop(projection);
         drop(tasks);
         self.notify_activity_change();

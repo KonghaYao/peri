@@ -30,6 +30,7 @@ const CHANGE_LIMIT: usize = 512;
 pub(crate) struct ScopedTask {
     pub task: DetailedTask,
     pub summary: String,
+    pub initiator_session_id: String,
     pub revision: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub terminal_transition_id: Option<String>,
@@ -88,10 +89,11 @@ impl ShellState {
         self.cursor += 1;
         self.changes.push_back((
             self.cursor,
-            scope,
+            scope.clone(),
             ScopedTask {
                 task: task.clone(),
                 summary: self.summaries.get(task_id).cloned().unwrap_or_default(),
+                initiator_session_id: scope,
                 revision: *revision,
                 terminal_transition_id: self.terminal_ids.get(task_id).cloned(),
             },
@@ -482,6 +484,7 @@ impl ShellTasks {
                 Some(ScopedTask {
                     task: state.records.get(id)?.clone(),
                     summary: state.summaries.get(id).cloned().unwrap_or_default(),
+                    initiator_session_id: scope.to_owned(),
                     revision: *state.revisions.get(id).unwrap_or(&0),
                     terminal_transition_id: state.terminal_ids.get(id).cloned(),
                 })

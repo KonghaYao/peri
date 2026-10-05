@@ -160,3 +160,68 @@ async fn invoke_disconnected_app_tool_fails_closed() {
         McpAppsErrorKind::ServerDisconnected
     );
 }
+
+struct AppTaskOwner {
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl rmcp::ServerHandler for AppTaskOwner {
+    async fn call_tool(
+        &self,
+        _: rmcp::model::CallToolRequestParams,
+        _: rmcp::service::RequestContext<rmcp::service::RoleServer>,
+    ) -> Result<rmcp::model::CallToolResponse, rmcp::ErrorData> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(rmcp::model::CallToolResponse::Task(
+            rmcp::model::CreateTaskResult::new(rmcp::model::Task::new(
+                "app-task",
+                rmcp::model::TaskStatus::Working,
+                "2026-10-05T00:00:00Z",
+                "2026-10-05T00:00:00Z",
+            )),
+        ))
+    }
+}
+
+#[tokio::test]
+async fn host_app_dispatcher_binds_followup_task_to_its_authorized_session() {
+    use peri_acp_types::tasks::TaskManager as TaskManagerPort;
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let wire = crate::mcp::client::output_store::tests::Wire::connect(AppTaskOwner {
+        calls: calls.clone(),
+    })
+    .await;
+    let (mut owner, spawner) = crate::mcp::task_scope::McpTaskOwner::new();
+    let pool = Arc::new(McpClientPool::new_pending_with_spawner(spawner));
+    wire.install(&pool, "app-owner", false);
+    let root: Arc<dyn TaskManagerPort> =
+        Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
+    let child: Arc<dyn TaskManagerPort> =
+        Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
+    pool.bind_session_task_manager("root", &root);
+    pool.bind_session_task_manager("child", &child);
+    let dispatcher = PoolAppToolDispatcher::new(pool.clone(), "child".into(), "host-turn".into());
+    let output = dispatcher
+        .dispatch(
+            EffectiveToolCall {
+                invocation_id: "followup".into(),
+                tool_name: effective_mcp_tool_name("app-owner", "large"),
+                input: json!({"session_id":"root", "mcp_task_owner_session_id":"root"}),
+                parent_invocation_id: None,
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert!(output.contains("Background task started"), "{output}");
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(root.snapshot().tasks.is_empty());
+    assert_eq!(child.snapshot().tasks.len(), 1);
+    assert_eq!(
+        child.snapshot().tasks[0].initiator_session_id.as_deref(),
+        Some("child")
+    );
+    owner.shutdown().await;
+    pool.clients.write().clear();
+    wire.close().await;
+}

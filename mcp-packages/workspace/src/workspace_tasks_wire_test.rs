@@ -110,6 +110,7 @@ async fn session_capabilities_work_across_connections_without_execution_fencing(
             .await
             .expect("same session remains accessible");
         assert_eq!(snapshot["tasks"][0]["task"]["taskId"], task_id);
+        assert_eq!(snapshot["tasks"][0]["initiatorSessionId"], "session-a");
     }
     let other = TaskScopeAuthority::trusted_connection().issue("session-b");
     let mut cancel = CancelTaskParams::new(&task_id);
@@ -195,6 +196,11 @@ async fn shared_peer_scopes_discovery_access_and_close() {
         .as_array()
         .unwrap()
         .iter()
+        .all(|change| change["initiatorSessionId"] == "first-session"));
+    assert!(changes["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
         .any(|change| change["terminalTransitionId"].is_string()));
     let epoch = first_snapshot["epoch"].as_u64().unwrap();
     let closed = scope_epoch_request(&client, "workspace/taskClose", &first, epoch)
@@ -275,6 +281,10 @@ async fn scoped_foreground_promotion_is_discoverable() {
         .await
         .expect("snapshot");
     assert_eq!(snapshot["tasks"][0]["task"]["taskId"], created.task.task_id);
+    assert_eq!(
+        snapshot["tasks"][0]["initiatorSessionId"],
+        "promoted-session"
+    );
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let snapshot = scope_request(&client, "workspace/taskSnapshot", &token, None)

@@ -115,9 +115,9 @@ pub trait TaskTerminalDelivery: Send + Sync {
 pub struct ExternalTaskRegistration {
     /// Session that owns the task projection, scope and recovery reconciliation.
     pub session_id: String,
-    /// Session that initiated the tool call. Terminal reminders are delivered
-    /// here; `None` only when a cold recovery cannot rebuild the initiator and
-    /// must fall back to root delivery (explicitly marked in the reminder).
+    /// Session that initiated the tool call. A known initiator is immutable;
+    /// discovery without one cannot replace its route. An unknown initiator
+    /// is unroutable and never implies delivery to a parent or root session.
     pub initiator_session_id: Option<String>,
     pub owner_identity: String,
     pub owner_task_id: String,

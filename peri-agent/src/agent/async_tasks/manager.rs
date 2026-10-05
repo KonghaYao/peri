@@ -56,6 +56,44 @@ fn external_started_at(
     )
 }
 
+fn external_background_task(
+    request: &ExternalTaskRegistration,
+    task_id: String,
+    started_at: chrono::DateTime<chrono::Utc>,
+) -> BackgroundTask {
+    BackgroundTask {
+        id: task_id,
+        agent_name: "mcp".into(),
+        prompt_summary: request.summary.clone(),
+        status: BackgroundTaskStatus::Running,
+        started_at: peri_time::monotonic_now(),
+        chrono_started_at: started_at,
+        kind: request.kind,
+        cancel_handle: BgCancelHandle::External {
+            cancel: Arc::clone(&request.cancel),
+            on_terminal: Arc::clone(&request.on_terminal),
+        },
+        cancel_token: None,
+        pid: None,
+        output_preview: None,
+        agent_inbox: None,
+        initiator_session_id: request.initiator_session_id.clone(),
+        owner_session_id: Some(request.session_id.clone()),
+        owner_identity: Some(request.owner_identity.clone()),
+    }
+}
+
+struct ExternalCompletionClaim<'manager> {
+    registry: &'manager BackgroundTaskRegistry,
+    task_id: &'manager str,
+}
+
+impl Drop for ExternalCompletionClaim<'_> {
+    fn drop(&mut self) {
+        self.registry.reset_completion_claim(self.task_id);
+    }
+}
+
 use super::delivery::terminal_delivery_id as external_delivery_id;
 
 #[cfg(test)]
@@ -346,42 +384,23 @@ impl TaskManager {
     ) -> Result<String, BackgroundRegistryError> {
         let _registration = self.external_registration.lock();
         let task_id = external_task_id(&request);
+        let refresh_callbacks = self
+            .registry
+            .external_callback_refresh_allowed(&task_id, request.initiator_session_id.as_deref())?;
         let started_at = external_started_at(&request)?;
         let cancel = Arc::clone(&request.cancel);
         let on_terminal = Arc::clone(&request.on_terminal);
-        let task = BackgroundTask {
-            id: task_id.clone(),
-            agent_name: "mcp".into(),
-            prompt_summary: request.summary,
-            status: BackgroundTaskStatus::Running,
-            started_at: peri_time::monotonic_now(),
-            chrono_started_at: started_at,
-            kind: request.kind,
-            cancel_handle: BgCancelHandle::External {
-                cancel: request.cancel,
-                on_terminal: request.on_terminal,
-            },
-            cancel_token: None,
-            pid: None,
-            output_preview: None,
-            agent_inbox: None,
-            initiator_session_id: request.initiator_session_id.clone(),
-            owner_session_id: Some(request.session_id.clone()),
-            owner_identity: Some(request.owner_identity.clone()),
-        };
+        let task = external_background_task(&request, task_id.clone(), started_at);
         match self.registry.register_with_kind(task) {
             Ok(()) => {}
             Err(BackgroundRegistryError::DuplicateTask(_)) => {
-                // 对账注册（scope 发现/冷恢复）不得改道已记录的投递归属：
-                // 不带 initiator 的注册会降级为 root 投递，若既有条目已记录
-                // 发起会话，必须保留原回调路由（design §7：投递归属 =
-                // 直接发起会话，不因执行 scope owner 不同而改道）；重复投递
-                // 的重放（快照/变更重叠、恢复重建出发起者）仍走刷新。
-                if request.initiator_session_id.is_some()
-                    || self.registry.external_initiator(&task_id).is_none()
-                {
-                    self.registry
-                        .refresh_external_callbacks(&task_id, cancel, on_terminal);
+                if refresh_callbacks {
+                    self.registry.refresh_external_callbacks(
+                        &task_id,
+                        cancel,
+                        on_terminal,
+                        request.initiator_session_id.clone(),
+                    );
                 }
             }
             Err(error) => return Err(error),
@@ -393,7 +412,7 @@ impl TaskManager {
         &self,
         request: ExternalTaskRegistration,
         terminal_transition_id: &str,
-        mut result: BackgroundTaskResult,
+        result: BackgroundTaskResult,
     ) -> Result<String, String> {
         if terminal_transition_id.is_empty() {
             return Err("terminal transition ID is required".into());
@@ -402,43 +421,42 @@ impl TaskManager {
         let started_at = external_started_at(&request).map_err(|error| error.to_string())?;
         // Registration lock only guards registry mutation; the delivery await
         // must not run under a non-Send parking_lot guard.
-        let live_settlement = {
+        {
             let _registration = self.external_registration.lock();
+            let refresh_callbacks = self
+                .registry
+                .external_callback_refresh_allowed(
+                    &task_id,
+                    request.initiator_session_id.as_deref(),
+                )
+                .map_err(|error| error.to_string())?;
             match self.registry.projection_status(&task_id) {
-                Some(status) if status == "running" || status == "lost" => {
-                    // 与 register_external 同一守卫：终态对账不得把已记录的
-                    // 发起会话投递改道为 root 兜底。
-                    if request.initiator_session_id.is_some()
-                        || self.registry.external_initiator(&task_id).is_none()
-                    {
+                Some(status)
+                    if matches!(status.as_str(), "running" | "lost" | "pending_delivery") =>
+                {
+                    if refresh_callbacks {
                         self.registry.refresh_external_callbacks(
                             &task_id,
                             Arc::clone(&request.cancel),
                             Arc::clone(&request.on_terminal),
+                            request.initiator_session_id.clone(),
                         );
                     }
-                    true
                 }
                 Some(_) => return Ok(task_id),
-                None => false,
+                None => {
+                    self.registry
+                        .register_restored_external(external_background_task(
+                            &request,
+                            task_id.clone(),
+                            started_at,
+                        ))
+                        .map_err(|error| error.to_string())?;
+                }
             }
-        };
-        if live_settlement {
-            self.settle_external(&task_id, terminal_transition_id, result)
-                .await?;
-            return Ok(task_id);
         }
-        result.task_id = task_id.clone();
-        let delivery_id = external_delivery_id(&task_id, terminal_transition_id);
-        (request.on_terminal)(&result, delivery_id).await?;
-        self.registry.restore_external_terminal(
-            task_id.clone(),
-            request.kind,
-            request.summary,
-            started_at,
-            result,
-            request.initiator_session_id.clone(),
-        );
+        self.settle_external(&task_id, terminal_transition_id, result)
+            .await?;
         Ok(task_id)
     }
 
@@ -446,14 +464,25 @@ impl TaskManager {
     /// explicitly marked reminder plus a terminal projection, so the task can
     /// neither stay active forever nor disappear silently.
     pub async fn abandon_external(&self, task_id: &str, reason: &str) -> Result<bool, String> {
-        let Some(notify) = self.registry.external_notify(task_id) else {
-            return Err(format!(
-                "external task {task_id} has no terminal delivery route"
-            ));
+        let notify = {
+            let _registration = self.external_registration.lock();
+            let Some(notify) = self.registry.external_notify(task_id) else {
+                return Err(format!(
+                    "external task {task_id} has no terminal delivery route"
+                ));
+            };
+            self.registry
+                .ensure_external_routable(task_id)
+                .map_err(|error| error.to_string())?;
+            if !self.registry.claim_completion(task_id) {
+                return Ok(false);
+            }
+            notify
         };
-        if !self.registry.claim_completion(task_id) {
-            return Ok(false);
-        }
+        let _claim = ExternalCompletionClaim {
+            registry: &self.registry,
+            task_id,
+        };
         tracing::warn!(task_id, reason, "abandoning unobservable external task");
         let mut result = BackgroundTaskResult {
             task_id: task_id.to_owned(),
@@ -474,10 +503,7 @@ impl TaskManager {
         result.task_id = task_id.to_owned();
         // Stable delivery ID: retries of the give-up converge on one reminder.
         let delivery_id = external_delivery_id(task_id, "abandoned-unresolved");
-        if let Err(error) = notify(&result, delivery_id).await {
-            self.registry.reset_completion_claim(task_id);
-            return Err(error);
-        }
+        notify(&result, delivery_id).await?;
         if self.registry.complete(task_id, result) {
             Ok(true)
         } else {
@@ -502,30 +528,38 @@ impl TaskManager {
                 Some("completed" | "failed" | "cancelled")
             )
         };
-        let Some(notify) = self.registry.external_notify(task_id) else {
-            return if already_settled() {
-                Ok(false)
-            } else {
-                Err(format!(
-                    "external task {task_id} has no terminal delivery route"
-                ))
+        let notify = {
+            let _registration = self.external_registration.lock();
+            let Some(notify) = self.registry.external_notify(task_id) else {
+                return if already_settled() {
+                    Ok(false)
+                } else {
+                    Err(format!(
+                        "external task {task_id} has no terminal delivery route"
+                    ))
+                };
             };
+            self.registry
+                .ensure_external_routable(task_id)
+                .map_err(|error| error.to_string())?;
+            if !self.registry.claim_completion(task_id) {
+                return if already_settled() {
+                    Ok(false)
+                } else {
+                    Err(format!(
+                        "external task {task_id} settlement is still pending"
+                    ))
+                };
+            }
+            notify
         };
-        if !self.registry.claim_completion(task_id) {
-            return if already_settled() {
-                Ok(false)
-            } else {
-                Err(format!(
-                    "external task {task_id} settlement is still pending"
-                ))
-            };
-        }
+        let _claim = ExternalCompletionClaim {
+            registry: &self.registry,
+            task_id,
+        };
         result.task_id = task_id.to_owned();
         let delivery_id = external_delivery_id(task_id, terminal_transition_id);
-        if let Err(error) = notify(&result, delivery_id).await {
-            self.registry.reset_completion_claim(task_id);
-            return Err(error);
-        }
+        notify(&result, delivery_id).await?;
         if self.registry.complete(task_id, result) {
             Ok(true)
         } else {

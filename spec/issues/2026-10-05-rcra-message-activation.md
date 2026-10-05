@@ -1,6 +1,6 @@
 # RCRA 一等公民会话消息与激活实施
 
-状态：**重构中**——第 1 步已完成并验证；第 2–5 步未实施。生产运行时发布门槛均未完成，不得宣称整体已解决。
+状态：**重构中**——第 1、2 步已完成并验证；第 3–5 步未实施。生产运行时发布门槛均未完成，不得宣称整体已解决。
 
 ## P0 验证计划
 
@@ -24,7 +24,7 @@
 ## 重构顺序
 
 1. [x] 会话级 MQ 同构：子会话收件登记、唤醒绑定与独立任务目录；嵌套委托登记到直接父，消除跳层。
-2. 投递归属：入站绑定发起者、冷恢复重建；删除 root fallback，保留并扩展已暂存的 initiator 守卫。
+2. [x] 投递归属：入站绑定发起者、冷恢复重建；删除 root fallback，保留并扩展已暂存的 initiator 守卫。
 3. MQ 消费语义：类型属性与消费矩阵进 Receive；收敛 continuation/idle/async_router 特例，唤醒降级为通知。
 4. 关闭与控制：关闭子会话级联终止 bg shell、资源终止并结算后返回消息；Stop/Pause/Resume/Close 幂等与 attempt 精确定位。
 5. 可靠连接下的幂等与持久：事件身份去重、required 不降级、mutation Unknown 冻结、投递义务可恢复；随后按 §7 矩阵与发布门槛验收。
@@ -39,11 +39,21 @@
 - 验证：`./scripts/cargo-rmcp-patched.sh test --locked -p peri-middlewares -p peri-agent --lib`：Agent 899 passed；Middlewares 1560 passed / 2 ignored。相关三 crate doc tests、ACP 编译、相关三 crate all-targets clippy（`-D warnings`）、fmt、层依赖与 diff 检查通过。本次修改源码/测试均不超过 1000 行；全库大小扫描仍有 14 个未触碰的存量超限测试文件。
 - 边界：没有实现进程重启后的目录/Inbox 恢复、退出后的统一自动激活、required 接纳/持久处理义务或关闭协议；冷恢复 root fallback 留给第 2 步，消费/调度收敛留给第 3 步，关闭与持久保证分别留给第 4、5 步。不得把内存目录保留或一次唤醒等同于可靠接纳或 P0 发布验收。
 
+### 第 2 步实施（2026-10-05）
+
+- 删除 `ToolContext.mcp_task_owner_session_id` 及 dispatch override；在线 MCP 调用在发送前按可信当前会话准入，scope、任务目录和投递归属一致。共享 bridge 捕获的输出地址仍仅用于输出存储，不能作为调用身份；缺失/未知绑定不发送请求，模型同名参数无效。MCP Apps host lease 的续调用显式保留自身会话/turn 与可见工具面，使用同一准入而非无身份旁路。
+- Workspace owner 的 snapshot/changes 显式返回可信 scope 接纳的 `initiatorSessionId`。冷客户端从该字段重建独立目录；未知、空值或与发现 scope 冲突报 `Unroutable` 并保持对账重试，不生成 root 提醒。删除登记和 metadata 的 root fallback 分支；收件目标未加载时保持失败并在原目标重试。
+- 登记与终态恢复共用不可变 initiator 守卫：相同身份允许重放、未知发现不覆盖已知路由，冲突已知身份在修改回调或终态前拒绝。冷恢复先保留 `pending_delivery` 绑定再等待投递，不伪造 Started/执行中事件，避免投递等待期间被并发登记改道；失败或 Future 丢弃仍可重试，已知身份补全同时更新投影与路由。
+- 回归入口：`mcp::client::output_store::tests`、`mcp::client::subscription::tasks::{task_projection_tests,task_recovery_tests}`、`agent::async_tasks::{external_settlement_tests,tests::external_initiator_tests}`、Workspace `workspace::tasks_wire_tests`。覆盖捕获 root 的桥接器、伪造参数零效力、无父 runtime 的终态/运行中发现、未知/冲突隔离、目标不可达与同 ID 重试、登记/恢复冲突竞态。
+- 验证：四 crate 全量 lib：ACP types 521 passed；Agent 919 passed；Workspace 422 passed / 2 ignored；Middlewares 1566 passed / 2 ignored（两个真实 120 秒期限/取消用例均通过）。相关四 crate doc tests 11 passed / 5 ignored；包含 ACP 的五 crate all-targets clippy（`-D warnings`）、fmt、22 条层依赖规则及 diff 检查通过；相关文档 33 个本地链接目标存在。修改的 29 个 Rust 文件最大 934 行；全库大小扫描仍有 13 个未触碰的存量超限测试文件。
+- 集成首轮发现冷恢复误报 Started，以及旧 MCP 测试夹具没有可信会话绑定；等待工具启动的旧夹具套件被中止，修正为真实绑定后完整复跑通过。没有放宽期限、单次调用、无重放或进程收尾断言；冷恢复待投递状态保留独立验证。
+- 边界：本步验证新客户端/目录从仍运行的可信 owner 重建直接归属；owner 的 scope/结果记录仍在内存，不承诺 owner 或全服务进程重启恢复，也未实现持久 InvocationBinding/Inbox、授权材料重建、epoch 投递接纳和统一自动激活。未知旧 owner 记录阻塞对账而非兼容 root。第 3–5 步和 P0 发布门槛保持未完成。
+
 ## 实施工作
 
 - [ ] 定义稳定调用/任务/事件/投递/批次契约与可信会话能力，统一主子调用绑定。
 - [ ] 增加调用意图、可靠 Inbox、处理义务、关闭/暂停状态与 outbox/inbox 存储契约；覆盖本地/远端后端。
-- [ ] 任务按发起会话独立登记和发现；树级聚合不参与路由，删除 root fallback。
+- [x] 任务按发起会话独立登记和发现；树级聚合不参与路由，删除 root fallback（第 1、2 步；跨进程持久恢复仍列于第 5 步）。
 - [ ] Receive 幂等领取/投影；批次与执行检查点对接，避免非幂等工具重放。
 - [ ] SDK 调度消费统一准入与 pending 查询；有界恢复扫描、退出原子交接及暂停协议。
 - [ ] 各生产者切换统一发布，删除内部旧分支，不新增兼容 shim 或双权威。

@@ -6,6 +6,20 @@ use peri_agent::middleware::r#trait::Middleware;
 use crate::mcp::builtin::closed_instances;
 use crate::mcp::builtin::context::BuiltinInstanceContext;
 use crate::mcp::{ClientStatus, McpClientHandle, McpClientPool, McpMiddleware};
+
+const FIXTURE_SESSION_ID: &str = "builtin-runtime-session";
+
+fn bind_fixture_session(pool: &McpClientPool) {
+    if !pool.session_tasks.read().contains_key(FIXTURE_SESSION_ID) {
+        let manager: Arc<dyn peri_acp_types::tasks::TaskManager> =
+            Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
+        pool.bind_session_task_manager(FIXTURE_SESSION_ID, &manager);
+    }
+}
+
+fn fixture_tool_context(cwd: &str) -> ToolContext<'_> {
+    ToolContext::new(&[], cwd).with_session_identity(FIXTURE_SESSION_ID, "fixture-turn")
+}
 // V-01（W4）：真实启动路径 / 审批 approve+reject + wire 计数 / 关闭矩阵四面 /
 // 无 orphan / 大 payload（A16）/ 实例隔离可观察断言（A13）
 //
@@ -593,6 +607,7 @@ impl StartupFixture {
         let cwd = project.to_string_lossy().to_string();
 
         let pool = Arc::new(McpClientPool::new_pending());
+        bind_fixture_session(&pool);
         // A33：实例上下文必须由宿主装配在 `run_initialize` **之前**注入（本夹具扮演宿主）。
         // 四个已实现实例的输入一次给齐：`web` / `artifact` 不需要额外输入（后者的解析根是
         // `cwd`），`cron` 要 scheduler（`tick_enabled = false`：本夹具不起 tick，tick 归属
@@ -685,6 +700,7 @@ impl TappedLink {
         info_name: &'static str,
         tools: Vec<Arc<dyn BaseTool>>,
     ) -> Self {
+        bind_fixture_session(&pool);
         let handler = FixtureBuiltinHandler::new(info_name, tools);
         let (transport, wire) =
             spawn_builtin_transport_with_tap(instance.instance, handler.clone());

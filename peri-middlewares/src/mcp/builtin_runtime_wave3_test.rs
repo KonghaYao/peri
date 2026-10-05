@@ -61,6 +61,7 @@ impl Wave3Fixture {
         let cwd = project.to_string_lossy().to_string();
 
         let pool = Arc::new(McpClientPool::new_pending());
+        bind_fixture_session(&pool);
         let (cron_trigger_tx, triggers) = tokio::sync::mpsc::unbounded_channel();
         let scheduler = Arc::new(parking_lot::Mutex::new(CronScheduler::new(cron_trigger_tx)));
         // A33：实例上下文由宿主装配在 `run_initialize` **之前**注入（本夹具扮演宿主）。

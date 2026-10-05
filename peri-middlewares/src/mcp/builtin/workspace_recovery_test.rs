@@ -13,6 +13,7 @@ use crate::mcp::client::{serve_client_auto, McpServiceWrapper};
 use crate::mcp::client::{ClientStatus, McpClientHandle};
 use crate::mcp::config::ConfigSource;
 use crate::mcp::tool_bridge::McpToolBridge;
+use crate::mcp::McpClientPool;
 use peri_acp_types::tasks::TaskManager;
 use peri_agent::tools::{BaseTool, ToolContext};
 use peri_mcp_workspace::{WorkspaceInstanceInput, WorkspaceMcpServer};
@@ -23,6 +24,8 @@ use rmcp::{
 };
 use serde_json::{json, Value};
 use std::{sync::Arc, time::Duration};
+
+const SESSION_ID: &str = "workspace-recovery-session";
 
 async fn bridge(pair: &Pair, name: &str, builtin: bool) -> McpToolBridge {
     let tools = pair.peer().list_tools(None).await.unwrap().tools;
@@ -42,7 +45,11 @@ async fn bridge(pair: &Pair, name: &str, builtin: bool) -> McpToolBridge {
         url: None,
         skills_capable: false,
     });
-    McpToolBridge::new("workspace", &tool, handle)
+    pair.pool
+        .clients
+        .write()
+        .insert("workspace".into(), handle.clone());
+    McpToolBridge::new("workspace", &tool, handle).with_output_store(&pair.pool, Some(SESSION_ID))
 }
 
 async fn wait_file(path: &std::path::Path) {
@@ -111,7 +118,7 @@ async fn cancelled_bridge_stops_process_and_drains_session_ownership() {
     let running = tokio::spawn(async move {
         bash.invoke(
             json!({"command":"echo $$ > started.pid; exec sleep 60", "timeout":120000}),
-            ToolContext::new(&[], ""),
+            ToolContext::new(&[], "").with_session_identity(SESSION_ID, "recovery-turn"),
         )
         .await
     });
@@ -142,7 +149,7 @@ async fn cancelled_bridge_stops_process_and_drains_session_ownership() {
     assert!(read
         .invoke(
             json!({"file_path":"started.pid"}),
-            ToolContext::new(&[], &cwd)
+            ToolContext::new(&[], &cwd).with_session_identity(SESSION_ID, "recovery-turn")
         )
         .await
         .is_ok());
@@ -169,7 +176,7 @@ async fn maximum_foreground_timeout_retains_logs_and_cancellable_task() {
         Duration::from_secs(140),
         bash.invoke(
             json!({"command":"echo live-marker; exec sleep 180", "timeout":120000}),
-            ToolContext::new(&[], &cwd),
+            ToolContext::new(&[], &cwd).with_session_identity(SESSION_ID, "recovery-turn"),
         ),
     )
     .await
@@ -201,7 +208,10 @@ async fn maximum_foreground_timeout_retains_logs_and_cancellable_task() {
         .unwrap();
     let read = bridge(&pair, "Read", true).await;
     assert!(read
-        .invoke(json!({"file_path":stdout}), ToolContext::new(&[], &cwd))
+        .invoke(
+            json!({"file_path":stdout}),
+            ToolContext::new(&[], &cwd).with_session_identity(SESSION_ID, "recovery-turn"),
+        )
         .await
         .unwrap()
         .contains("live-marker"));
@@ -265,7 +275,7 @@ async fn external_source_keeps_120_second_deadline_and_cancels_execution() {
         Duration::from_secs(130),
         bash.invoke(
             json!({"command":"echo $$ > external.pid; exec sleep 180", "timeout":120000}),
-            ToolContext::new(&[], &cwd),
+            ToolContext::new(&[], &cwd).with_session_identity(SESSION_ID, "recovery-turn"),
         ),
     )
     .await
@@ -291,6 +301,7 @@ const CLOSE_TIMEOUT: Duration = Duration::from_millis(500);
 struct Pair {
     service: McpServiceWrapper,
     supervisor: BuiltinInstanceSupervisor,
+    pool: Arc<McpClientPool>,
 }
 
 impl Pair {
@@ -310,6 +321,10 @@ impl Pair {
 /// `input` 即 AW3-11 的 session 级输入：`None` 是顶层三路径 / 1:N 形态的形态（可见但退化），
 /// 既有五条线路用例都走该形态；后台任务两条用例显式传 `Some` / `None` 各一遍。
 async fn connect(cwd: &str, input: Option<WorkspaceInstanceInput>) -> Pair {
+    let pool = Arc::new(McpClientPool::new_empty());
+    let manager: Arc<dyn TaskManager> =
+        Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
+    pool.bind_session_task_manager(SESSION_ID, &manager);
     let transport =
         spawn_builtin_transport_with_handler("workspace", WorkspaceMcpServer::new(cwd, input));
     let (io, supervisor) = transport.into_parts();
@@ -320,6 +335,7 @@ async fn connect(cwd: &str, input: Option<WorkspaceInstanceInput>) -> Pair {
     Pair {
         service,
         supervisor,
+        pool,
     }
 }
 

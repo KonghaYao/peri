@@ -21,6 +21,11 @@ Emscripten 目标引入 MCP 通用映射、配置数据面与凭证 bootstrap MC
 协调的跨进程锁覆盖比较和 atomic replacement；不合作编辑器与跨文件事务不在保证内。
 [`peri-config`](peri-config.md) 已持有核心 settings/provider/MCP/Langfuse/UI 的纯 typed
 规则与资源开关 projection、scoped snapshot/revision/explain/updateCAS；输入 provider 不获得组装权威。
+
+Workspace Shell Tasks 的直接发起会话由可信 task scope capability 绑定；
+`mcp-packages/workspace/src/shell_tasks.rs` 的 snapshot/changes 显式携带 `initiatorSessionId`，
+支持客户端连接重建后恢复归属，不从模型参数、父会话或 transcript 猜测。wire 契约见
+`mcp-packages/workspace/src/workspace_tasks_wire_test.rs`；owner 记录仍驻内存，不承诺 owner 进程重启恢复。
 插件生命周期、hook 格式、OS 执行环境与存储 locator/credentials 仍按专属边界维护。
 
 | 能力 | crate 与入口 | 主要实现 | 说明 |

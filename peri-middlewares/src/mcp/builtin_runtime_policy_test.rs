@@ -228,7 +228,7 @@ async fn policy_close_dimensions() {
         MW_BOUND,
         fixture
             .typed_bridge("mcp__cron__cron_list")
-            .invoke(json!({}), ToolContext::new(&[], &call_cwd)),
+            .invoke(json!({}), fixture_tool_context(&call_cwd)),
     )
     .await
     .expect("策略关闭后 raw bridge 调用仍必须在有界等待内返回")

@@ -420,7 +420,7 @@ async fn bridge_accepts_workspace_owned_task_handle() {
     let receipt = bridge
         .invoke(
             json!({"command":"sleep 0.2; printf bridge-ok", "run_in_background":true}),
-            ToolContext::new(&[], &cwd),
+            ToolContext::new(&[], &cwd).with_session_identity("task-session", "task-turn"),
         )
         .await
         .expect("bridge accepts Tasks response");

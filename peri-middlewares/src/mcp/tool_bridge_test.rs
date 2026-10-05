@@ -520,6 +520,10 @@ async fn builtin_tool_call_surfaces_timeout_error_after_bridge_deadline() {
     .expect("夹具握手不得失败");
     let peer = service.peer().clone();
 
+    let pool = Arc::new(McpClientPool::new_empty());
+    let manager: Arc<dyn peri_acp_types::tasks::TaskManager> =
+        Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
+    pool.bind_session_task_manager("deadline-session", &manager);
     let tool = delayed_tool();
     let bridge = McpToolBridge::new(
         "cron",
@@ -537,7 +541,8 @@ async fn builtin_tool_call_surfaces_timeout_error_after_bridge_deadline() {
             url: None,
             skills_capable: false,
         }),
-    );
+    )
+    .with_output_store(&pool, Some("deadline-session"));
     assert_eq!(bridge.name(), "mcp__cron__cron_list");
 
     // 输入带「路径形态」与「凭据形态」标记：超时文案必须逐字只含 server / tool / 秒数。
@@ -552,7 +557,11 @@ async fn builtin_tool_call_surfaces_timeout_error_after_bridge_deadline() {
     tokio::time::pause();
     let started = tokio::time::Instant::now();
     let outcome = bridge
-        .invoke(input.clone(), peri_agent::tools::ToolContext::new(&[], "."))
+        .invoke(
+            input.clone(),
+            peri_agent::tools::ToolContext::new(&[], ".")
+                .with_session_identity("deadline-session", "deadline-turn"),
+        )
         .await;
     let elapsed = started.elapsed();
     tokio::time::resume();
@@ -631,7 +640,8 @@ async fn builtin_tool_call_surfaces_timeout_error_after_bridge_deadline() {
     let after = bridge
         .invoke(
             serde_json::json!({ "expression": "*/5 * * * *" }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            peri_agent::tools::ToolContext::new(&[], ".")
+                .with_session_identity("deadline-session", "deadline-turn"),
         )
         .await
         .expect("deadline 到期后同一条链路（client service / bridge）必须仍可服务");

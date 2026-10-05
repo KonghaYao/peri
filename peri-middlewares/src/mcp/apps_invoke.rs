@@ -27,16 +27,24 @@ use super::{
 #[derive(Clone)]
 struct PoolAppToolDispatcher {
     pool: Arc<McpClientPool>,
+    session_id: String,
+    turn_id: String,
 }
 
 impl PoolAppToolDispatcher {
-    fn new(pool: Arc<McpClientPool>) -> Self {
-        Self { pool }
+    fn new(pool: Arc<McpClientPool>, session_id: String, turn_id: String) -> Self {
+        Self {
+            pool,
+            session_id,
+            turn_id,
+        }
     }
 
     fn lookup_bridge(&self, effective_name: &str) -> Option<McpToolBridge> {
-        for client in self.pool.get_all_clients() {
-            if let Some(bridge) = bridge_for_effective(&self.pool, &client, effective_name) {
+        for client in self.pool.get_all_clients_visible_to(Some(&self.session_id)) {
+            if let Some(bridge) =
+                bridge_for_effective(&self.pool, &client, effective_name, &self.session_id)
+            {
                 return Some(bridge);
             }
         }
@@ -58,11 +66,9 @@ impl EffectiveToolDispatcher for PoolAppToolDispatcher {
             ));
         };
         let messages: [peri_acp_types::messages::BaseMessage; 0] = [];
-        let ctx = ToolContext::new(&messages, ".").with_effective_tool_dispatcher(
-            Arc::new(self.clone()),
-            call.invocation_id,
-            cancel,
-        );
+        let ctx = ToolContext::new(&messages, ".")
+            .with_effective_tool_dispatcher(Arc::new(self.clone()), call.invocation_id, cancel)
+            .with_session_identity(self.session_id.clone(), self.turn_id.clone());
         bridge.invoke(call.input, ctx).await.map_err(|error| {
             EffectiveToolError::new(EffectiveToolErrorCode::ToolFailed, error.to_string())
         })
@@ -70,7 +76,7 @@ impl EffectiveToolDispatcher for PoolAppToolDispatcher {
 
     fn tools(&self) -> Vec<EffectiveToolDefinition> {
         let mut tools = Vec::new();
-        for client in self.pool.get_all_clients() {
+        for client in self.pool.get_all_clients_visible_to(Some(&self.session_id)) {
             for tool in &client.tools {
                 tools.push(EffectiveToolDefinition {
                     name: effective_mcp_tool_name(&client.name, tool.name.as_ref()),
@@ -125,12 +131,16 @@ impl PoolMcpAppsRelay {
             .and_then(|peer| peer.peer_info())
             .map(|info| info.protocol_version.to_string())
             .unwrap_or_else(|| "unknown".to_string());
-        let dispatcher = Arc::new(PoolAppToolDispatcher::new(Arc::clone(&self.pool)));
         let turn_generation = self
             .pool
             .app_binding_leases
             .current_turn(&request.owner_session_id)
             .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
+        let dispatcher = Arc::new(PoolAppToolDispatcher::new(
+            Arc::clone(&self.pool),
+            request.owner_session_id.clone(),
+            turn_generation.clone(),
+        ));
         let tool_call_id = uuid::Uuid::now_v7().to_string();
         let bridge = McpToolBridge::new(&request.server_id, tool, Arc::clone(&handle))
             .with_server_generation(generation)
@@ -173,15 +183,17 @@ fn invoke_handle(
 }
 
 fn bridge_for_effective(
-    pool: &McpClientPool,
+    pool: &Arc<McpClientPool>,
     client: &Arc<McpClientHandle>,
     effective_name: &str,
+    session_id: &str,
 ) -> Option<McpToolBridge> {
     let generation = pool.handle_generation(client);
     for tool in &client.tools {
         let bridge = McpToolBridge::new(&client.name, tool, Arc::clone(client))
             .with_server_generation(generation)
-            .with_binding_leases(Arc::clone(&pool.app_binding_leases));
+            .with_binding_leases(Arc::clone(&pool.app_binding_leases))
+            .with_output_store(pool, Some(session_id));
         if bridge.name() == effective_name {
             return Some(bridge);
         }

@@ -251,7 +251,7 @@ async fn four_close_sources_are_distinct() {
             MW_BOUND,
             fixture
                 .typed_bridge("mcp__cron__cron_list")
-                .invoke(json!({}), ToolContext::new(&[], &call_cwd)),
+                .invoke(json!({}), fixture_tool_context(&call_cwd)),
         )
         .await
         .expect("策略关闭后 cron 工具调用必须有界返回")

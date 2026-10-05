@@ -27,6 +27,7 @@ fn close_reconciliation_rejects_reopened_epoch_before_selecting_cancel_targets()
                 TaskPayload::Working,
             ),
             summary: "new execution".into(),
+            initiator_session_id: Some("session".into()),
             terminal_transition_id: None,
         }],
     };
@@ -126,7 +127,6 @@ async fn workspace_shell_reminder_uses_file_references() {
     pool.deliver_task_reminder(
         "session",
         "session",
-        false,
         "workspace",
         &shell_result(),
         BgTaskKind::Shell,
@@ -156,7 +156,6 @@ async fn terminal_reminder_is_delivered_to_the_initiator_not_the_task_owner() {
     pool.deliver_task_reminder(
         "child",
         "root",
-        false,
         "workspace",
         &shell_result(),
         BgTaskKind::Shell,
@@ -174,31 +173,26 @@ async fn terminal_reminder_is_delivered_to_the_initiator_not_the_task_owner() {
     assert!(owner_inbox.queue().drain_all().is_empty());
 }
 
-// [回归测试] 冷恢复无法重建发起者时降级 root 投递，且必须在提醒里显式标注，
-// 不能让 root 误以为这是自己发起的任务。
 #[tokio::test]
-async fn recovered_terminal_reminder_marks_explicit_root_fallback() {
-    let pool = McpClientPool::new_pending();
+async fn unknown_initiator_cannot_register_or_deliver_to_root() {
+    let pool = Arc::new(McpClientPool::new_pending());
     let owner_inbox = SessionInbox::new(Arc::new(MessageQueue::new()));
     pool.register_inbox("root", owner_inbox.handle());
-    pool.deliver_task_reminder(
-        "root",
-        "root",
-        true,
-        "workspace",
-        &shell_result(),
-        BgTaskKind::Shell,
-        MessageId::new(),
-        None,
-    )
-    .await
-    .unwrap();
-    let messages = owner_inbox.queue().drain_all();
-    assert_eq!(messages.len(), 1);
-    let QueuedPayload::SystemReminder(reminder) = &messages[0].payload else {
-        panic!("reminder")
-    };
-    assert_eq!(reminder.as_reminder().metadata["delivery"], "root-fallback");
+    let error = pool
+        .register_external_task(
+            "root",
+            None,
+            None,
+            "workspace",
+            "task",
+            BgTaskKind::Shell,
+            "summary",
+            false,
+            "2026-10-05T00:00:00Z",
+        )
+        .unwrap_err();
+    assert!(error.contains("Unroutable"), "{error}");
+    assert!(owner_inbox.queue().is_empty());
 }
 
 // 回归：投递失败必须报错（任务保持未结清），不能静默当成功。
@@ -209,7 +203,6 @@ async fn undeliverable_terminal_reminder_reports_failure() {
         .deliver_task_reminder(
             "child",
             "root",
-            false,
             "workspace",
             &shell_result(),
             BgTaskKind::Shell,
@@ -245,7 +238,6 @@ async fn failed_canonical_commit_does_not_enqueue_the_reminder() {
         .deliver_task_reminder(
             "root",
             "root",
-            false,
             "workspace",
             &shell_result(),
             BgTaskKind::Shell,
