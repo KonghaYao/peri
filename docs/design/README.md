@@ -3,15 +3,17 @@
 `docs/design/` 只保存已批准的架构与产品设计。它回答“系统应当如何工作”，不记录
 某次调查、迁移批次、实施日志、完成清单或个人复盘。
 
-优先级仍是：代码与契约测试 > `docs/standards/` > 模块 `CLAUDE.md` >
-`docs/design/` > active spec > history。设计与更高优先级事实冲突时，在同一变更中
-修正文档；不能用设计覆盖已验证行为。
+现行行为由代码、契约测试和复现证明；工程规则由 `docs/standards/` 维护，已批准的
+目标由权威设计约束。按 `STD-INDEX-002` 区分实现缺陷、文档过时和获批契约变更，
+不能以旧实现或旧测试降低已批准目标，也不能把目标描述成已经实现。
 
 ## 状态含义
 
 - **现行设计**：描述已落地的稳定结构；具体符号和文件入口以代码索引与源码为准。
 - **已批准目标设计**：描述已经裁决但尚未完全落地的目标；实现进度、临时风险和
   验收勾选只写对应 `spec/issues/`。
+- **待重构**：已批准目标设计中设计已收敛、实现差距已审计的部分；作为代码重构基线，
+  范围与顺序见对应 active issue。
 
 draft、proposal、可行性探查、审计报告和未采纳方案不进入本目录。需要长期保留的
 外部生态或操作资料放 `docs/reference/`；过程由 active issue 承载，完整历史由 Git
@@ -51,7 +53,8 @@ draft、proposal、可行性探查、审计报告和未采纳方案不进入本�
 | 主题 | 文档 | 进度事实源 |
 | --- | --- | --- |
 | 时间能力边界 | [time-runtime.md](time-runtime.md) | [时间模块边界实施](../../spec/issues/2026-10-04-time-runtime-boundary.md)；原生边界已落地，WASM 完整验收与既有公开 Chrono 契约范围仍待核实 |
-| Session 异步任务统一入口 | [session-async-tasks.md](session-async-tasks.md) | 任务投影、Store 执行代际、Workspace fencing 与可信关闭接管边界见设计第 5–6 节；子会话发起任务的归属、投递与可见性见第 7 节 |
+| RCRA 消息、任务归属与激活 | [rcra-message-activation.md](rcra-message-activation.md) | 一等公民 Agent 独立 Task/MQ、类型驱动的 MQ 消费语义、可靠接纳与处理义务；**待重构**，范围与顺序见 [active issue](../../spec/issues/2026-10-05-rcra-message-activation.md) |
+| Session 异步任务统一入口 | [session-async-tasks.md](session-async-tasks.md) | 每会话独立任务领域、执行 owner、发现/取消/关闭；消息与激活服从 RCRA 权威，执行唯一性归 SDK；**待重构** |
 | 存储 v2：Machine → Workspace → Session | [storage-v2-machine-workspace-session.md](storage-v2-machine-workspace-session.md) | `spec/issues/2026-10-02-storage-v2-machine-workspace-session.md`；schema 版本以代码索引为准，Git 使用 worktree 根、非 Git 使用启动 cwd；验收状态见 active issue |
 | Command 系统 | [command-system.md](command-system.md) | 对应 command active issue 与代码 |
 | TUI Chat Workbench | [tui-chat-workbench.md](tui-chat-workbench.md) | `spec/history/2026-08.md`（2026-08-10 条目） |

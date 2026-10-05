@@ -6,6 +6,8 @@
 
 ## 状态归属
 
+本文描述现行内存协调；可靠 Inbox 目标中的撤回、Receive 领取及重新发布统一见 [RCRA 消息权威 §8.5](rcra-message-activation.md#85-用户输入撤回与重发)。目标须以持久原子裁决替代单纯 MQ 锁，稳定 input ID 与发布代际分离，不因旧代际重试恢复已撤回义务。
+
 Agent 会话的 `UserInputMailbox` 是投递生命周期的唯一 owner，宿主持有跨 turn 的共享实例。
 它保留待发送内容、稳定输入身份、命令回执及运行 ticket；ACP 定位会话、检查能力和写权限，
 执行 Agent 给出的准入决定；TUI 只保存编辑器草稿、未确认请求及服务端投影。

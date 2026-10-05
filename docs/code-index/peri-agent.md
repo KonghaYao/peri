@@ -7,6 +7,8 @@
 
 Emscripten 最小入口见 [`peri-wasm`](peri-wasm.md)：复用本 crate 的 `run_react_loop` 和 `AgentModelBridge`；`resources` 模块及其 Native 存储依赖在目标平台不编入。
 
+消息与激活的已批准目标（**待重构**基线）见 [RCRA 消息权威](../design/rcra-message-activation.md)，重构顺序见 [active issue](../../spec/issues/2026-10-05-rcra-message-activation.md)。下表仍为现行代码入口，不表示可靠 Inbox 或统一激活已经落地。
+
 ## 架构速览
 
 - 数据流：`MessageQueue → Receive → Compact → Reason → Act → MessageQueue`

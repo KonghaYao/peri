@@ -14,7 +14,8 @@
 
 | 任务 | 优先读取 |
 | --- | --- |
-| RCRA、Prompt frozen、工具 direct/deferred | `../docs/standards/architecture-contracts.md` |
+| RCRA、消息归属、Task/MQ、loop 激活 | `../docs/standards/architecture-contracts.md` + `../docs/design/rcra-message-activation.md`（已批准目标/待重构；主/子 Agent 同构，勿与现状混淆） |
+| Prompt frozen、工具 direct/deferred | `../docs/standards/architecture-contracts.md` |
 | 中间件链装配入口与链序蓝本（ARC-MIDDLEWARE-001） | `src/session/factory.rs`；装配实现在 `../peri-middlewares/src/assembly.rs` |
 | hook 状态能力与回写（ARC-MIDDLEWARE-CAPABILITY-001） | `../docs/standards/architecture-contracts.md`；`src/middleware/capabilities.rs` 与 `src/agent/stages/middleware_runner.rs` |
 | Rust、async、文本宽度、doc tests | `../docs/standards/rust.md` |

@@ -2,7 +2,7 @@
 
 > BaseMessage、ContentBlock 枚举、MessageTranscript 与 staging 事务写
 >
-> 状态：现行设计
+> 状态：现行设计。本文的易失 MessageQueue 与 Prompt/Defer/Info 描述现状；已批准的可靠 Inbox、处理义务、会话隔离、类型驱动的 MQ 消费语义与激活目标由 [RCRA 消息权威](rcra-message-activation.md) 定义，本文不覆盖其目标契约。
 >
 > 运行时事实源为 `peri-agent/src/session/transcript.rs`、消息契约类型与相邻测试。
 
@@ -80,7 +80,7 @@ graph TB
 
 消息按 Kind 分为三类，控制循环唤醒和消费行为：
 
-| Kind | 来源示例 | `drain_all` 行为 | 唤醒新 turn |
+| Kind | 来源示例 | `drain_all` 行为 | 通知活跃等待者（不保证启动新 turn） |
 |------|---------|----------------|------------|
 | `Prompt` | 用户输入、外部主动请求 | 消费（写入 Transcript） | ✅ |
 | `Defer` | SubAgent 完成、Cron 触发、延迟结果 | 消费（写入 Transcript，emit `SyntheticUserMessage`） | ✅ |

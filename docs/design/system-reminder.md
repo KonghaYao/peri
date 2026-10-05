@@ -23,6 +23,8 @@ System Reminder 是系统在用户输入之外产生、但需要交给模型、�
 本文不规定具体配置 UI、迁移批次或当前 producer inventory。这些内容分别属于 TUI
 设计、active spec 和代码索引。
 
+消息内容的分类与 `ReminderDelivery` 不等于执行激活策略。可靠接纳、类型驱动的 MQ 消费语义、处理义务以及主/子 Agent 的隔离与唤醒目标统一见 [RCRA 消息权威](rcra-message-activation.md)；严重程度、受众和 UI 筛选不得替代调度判定。
+
 ## 2. 设计原则
 
 1. **结构化事实优先**：分类和路由依据结构化字段，不依据 `body` 关键词。

@@ -1,5 +1,7 @@
 # [设计提案] 异步任务归属、投递与可见性
 
+> 后续裁决：下文为旧方案背景；涉及 root scope 归属、root fallback、投递即处理及子会话生命周期的目标已由 [RCRA 消息权威](../../docs/design/rcra-message-activation.md) 替代，统一实施入口为 [新 active issue](2026-10-05-rcra-message-activation.md)。不能按下文旧 fallback 继续实施。
+
 **状态**：已裁决（advisor-consultation → controller 决定：方案 A 采纳、D1–D4 按推荐选项采纳、H1 验证通过，见 §10）。已写回 [docs/design/session-async-tasks.md](../../docs/design/session-async-tasks.md)（该文档是异步任务控制面的权威设计；本提案补充其未定义的"子会话发起任务"归属，并修正实现的维度合并）；本提案保留为实施跟踪入口，实施待启动。
 **关联**：[bg 回执信息投递缺陷批次](2026-10-04-mcp-task-receipt-delivery-defects.md)——本提案是该批次 1、4.x 的架构解法；批次 2、3 为独立健壮性/收敛修复，不在本提案范围。
 **创建日期**：2026-10-04
