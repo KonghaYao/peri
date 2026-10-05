@@ -24,6 +24,12 @@ fn read_only(response: &Value) -> Option<ReadOnlyAdmission> {
         .map(|value| serde_json::from_value(value.clone()).unwrap())
 }
 
+fn restore_warning(response: &Value) -> Option<peri_acp_types::workspace::SessionRestoreWarning> {
+    response
+        .pointer("/_meta/peri.sessionWorkspaceV1/restore_warning")
+        .map(|value| serde_json::from_value(value.clone()).unwrap())
+}
+
 struct Fixture {
     cfg: AcpServerConfig,
     bridge: Arc<SqliteThreadStore>,
@@ -157,6 +163,59 @@ async fn test_unverified_former_owner_loads_history_without_advancing_epoch() {
         .await
         .unwrap_err();
     assert_eq!(error.code, -32010);
+}
+
+/// [回归测试] 本地交互宿主在 Store 租约到期后可继续使用同一会话，旧任务不恢复。
+#[tokio::test]
+#[serial]
+async fn test_local_tui_takeover_restores_writable_session_with_warning() {
+    let mut fixture = Fixture::new().await;
+    let id = fixture.id.clone();
+    fixture.cfg.allow_local_unverified_takeover = true;
+    fixture.sessions.clear();
+    fixture
+        .cfg
+        .session_manager
+        .set_pending_caps(PeriCaps::all_enabled());
+    let pool = sqlx::SqlitePool::connect_with(
+        sqlx::sqlite::SqliteConnectOptions::new().filename(fixture.tmp.path().join("threads.db")),
+    )
+    .await
+    .unwrap();
+    sqlx::query("UPDATE session_execution_owners SET expires_at_unix = 0 WHERE root_id = ?1")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let before = fixture
+        .cfg
+        .session_resources
+        .read_execution_workspace_owner(&id)
+        .await
+        .unwrap()
+        .unwrap();
+    let response = fixture
+        .request("session/load", &json!({"sessionId":id}))
+        .await
+        .unwrap();
+    assert_eq!(read_only(&response), None);
+    assert_eq!(
+        restore_warning(&response),
+        Some(peri_acp_types::workspace::SessionRestoreWarning::FormerOwnerUnverified)
+    );
+    fixture.assert_owned_history(&id);
+    let after = fixture
+        .cfg
+        .session_resources
+        .read_execution_workspace_owner(&id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(after.current_epoch, before.current_epoch + 1);
+    fixture
+        .request("session/rename", &json!({"sessionId":id,"title":"usable"}))
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

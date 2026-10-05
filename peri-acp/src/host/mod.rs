@@ -174,6 +174,8 @@ pub(crate) struct SessionState {
 
 /// All cross-session configuration needed by the ACP server.
 pub struct AcpServerConfig {
+    /// Only the in-process TUI may accept an expired, unverified local owner.
+    pub(crate) allow_local_unverified_takeover: bool,
     pub(crate) workspace_assembly: Option<assemble::WorkspaceAssembly>,
     pub(crate) host_task_owner: Option<task_scope::HostTaskOwner>,
     pub(crate) host_task_spawner: task_scope::HostTaskSpawner,
@@ -273,6 +275,15 @@ pub struct AcpServerConfig {
     /// 管线（当作普通文本消息发给模型）——IDE 客户端自管理这两个命令，服务端
     /// 不应执行清会话/回退操作。其余命令不受影响。
     pub stdio_command_filter: bool,
+}
+
+impl AcpServerConfig {
+    /// Let the interactive local owner resume after an expired local generation.
+    /// The caller must own the in-process TUI transport, not an external ACP endpoint.
+    pub fn with_local_unverified_takeover(mut self) -> Self {
+        self.allow_local_unverified_takeover = true;
+        self
+    }
 }
 
 // ── Main server loop ────────────────────────────────────────────────────────

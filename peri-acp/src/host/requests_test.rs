@@ -168,6 +168,7 @@ async fn build_server_config(
     let (host_task_owner, host_task_spawner) = crate::host::task_scope::HostTaskOwner::new();
     let (mcp_task_owner, _mcp_task_spawner) = peri_middlewares::mcp::McpTaskOwner::new();
     AcpServerConfig {
+        allow_local_unverified_takeover: false,
         workspace_assembly: None,
         host_task_owner: Some(host_task_owner),
         host_task_spawner,

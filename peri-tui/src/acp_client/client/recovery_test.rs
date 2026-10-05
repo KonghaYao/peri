@@ -5,7 +5,9 @@ use peri_acp::transport::{
     mpsc::{MpscServerTransport, mpsc_transport_pair},
     types::{IncomingMessage, RequestId},
 };
-use peri_acp_types::workspace::{ReadOnlyAdmission, RecoveryRequiredDetails};
+use peri_acp_types::workspace::{
+    ReadOnlyAdmission, RecoveryRequiredDetails, SessionRestoreWarning,
+};
 use serde_json::Value;
 use std::time::Duration;
 
@@ -30,6 +32,7 @@ impl UiAtomsGuard {
         save_atom!(atoms::ACTIVE_SESSION_ID);
         save_atom!(atoms::ACTIVE_EXECUTION_CWD);
         save_atom!(atoms::SESSION_READ_ONLY);
+        save_atom!(atoms::SESSION_RESTORE_WARNING);
         save_atom!(atoms::SERVICE_SNAPSHOT);
         save_atom!(atoms::FILE_LIST);
         save_atom!(atoms::HOOK_LIST);
@@ -133,6 +136,32 @@ async fn reach_load(server: &MpscServerTransport, response: Result<Value, AcpErr
 /// `session/load` 的只读准入响应：历史可读，但本次准入没有执行所有权。
 fn read_only_response(admission: &ReadOnlyAdmission) -> Value {
     json!({"_meta": {"peri.sessionWorkspaceV1": {"read_only": admission}}})
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn local_takeover_shows_warning_without_read_only_input_gate() {
+    let _guard = UiAtomsGuard::capture();
+    let (client, server) = interactive_client();
+    let (load, _) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(
+            client.load_session(TARGET, "/startup", None),
+            reach_load(
+                &server,
+                Ok(json!({"_meta": {"peri.sessionWorkspaceV1": {
+                    "restore_warning": SessionRestoreWarning::FormerOwnerUnverified
+                }}}))
+            )
+        )
+    })
+    .await
+    .unwrap();
+    assert_eq!(load.unwrap(), TARGET);
+    assert!(atoms::SESSION_READ_ONLY.state().read().is_none());
+    assert_eq!(
+        *atoms::SESSION_RESTORE_WARNING.state().read(),
+        Some(SessionRestoreWarning::FormerOwnerUnverified)
+    );
 }
 
 #[tokio::test]

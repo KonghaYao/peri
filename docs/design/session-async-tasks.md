@@ -61,8 +61,8 @@ Subagent 与 Workflow 的执行 owner 仍在 Agent 部署内。该部署退出�
 
 Agent 意外消失、连接断开、宿主更换或部署重启不等同于用户显式关闭，不得因此向独立 MCP owner 发送取消。当前 transport EOF 的资源清理仍可停止本地 owner；目标实现需在该路径区分 session 显式关闭和部署释放，EOF 只断开远端观察连接，不把进程级释放解释为远端 task cancel。
 
-普通可执行 `session/load` 也不能只凭 Store 租约到期接管未释放的旧 owner：旧 Agent 在续租失败被观察到之前仍可能执行不经 Store 栅栏的外部工具。Store 需区分已释放 owner 与过期但未释放 owner；后一种接管须证明对应旧 Agent 及其子进程组已退出，并将证明所指的执行代际与 Store 的待接管代际精确匹配。无法证明时仅允许只读观察或返回恢复未完成，不能开放工具准入。
-`session/load` / `session/resume` 在抢占 Store owner 前只读检查这份证据；证明不可得时返回带 `peri.formerOwnerUnverifiedV1` 原因的只读历史，不创建新执行代际。已取得 owner 后仍须复核，防止检查与抢占间的竞争。正常释放的 owner 仍允许重新取得执行权。
+普通可执行 `session/load` 不能仅凭 Store 租约到期接管有可信外部执行身份、Agent 代际或远端 endpoint 的未释放 owner：旧 Agent 在续租失败被观察到之前仍可能执行不经 Store 栅栏的外部工具。Store 需区分已释放 owner 与过期但未释放 owner；后一种接管须证明对应旧 Agent 及其子进程组已退出，并将证明所指的执行代际与 Store 的待接管代际精确匹配。无法证明时仅允许只读观察或返回恢复未完成。
+`session/load` / `session/resume` 在抢占 Store owner 前只读检查这份证据；证明不可得时默认返回带 `peri.formerOwnerUnverifiedV1` 原因的只读历史，不创建新执行代际。已取得 owner 后仍须复核，防止检查与抢占间的竞争。正常释放的 owner 仍允许重新取得执行权。**本地 TUI 例外**：仅当该宿主显式启用本地接管、会话有已记录的本机绑定、旧 owner descriptor 的 endpoint、owner identity 与 Agent generation 均为空，且 Store 租约已过期并成功 CAS 取得新 epoch 时，允许恢复可写会话；ACP 返回 `restore_warning=formerOwnerUnverified`，TUI 显示警告。此路径不声称旧后台任务已停止，也不恢复旧任务；含远端/代际证据的部署仍须遵守上述证明规则。
 
 ## 6. 落地边界与验收
 

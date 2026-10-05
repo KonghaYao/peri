@@ -438,6 +438,7 @@ impl AcpTuiClient {
         // 准入可能是只读的：历史已可读，但执行所有权不在本节点。它不是失败（不再用
         // 错误挡住进入），只把「本次准入只读」与原因带走。
         let read_only = first.as_ref().ok().and_then(read_only_admission);
+        let restore_warning = first.as_ref().ok().and_then(restore_warning);
         let result = first;
         if let Err(error) = result {
             *self.restore_error.lock().unwrap() = Some(error.to_string());
@@ -459,6 +460,7 @@ impl AcpTuiClient {
         // 全局标记，并污染并行的 UI 测试。
         if self.projection_mode == ClientProjectionMode::Interactive {
             crate::kit::atoms::SESSION_READ_ONLY.set(read_only);
+            crate::kit::atoms::SESSION_RESTORE_WARNING.set(restore_warning);
         }
         projection.committed = true;
         transition.disarm();
@@ -559,6 +561,15 @@ fn read_only_admission(response: &Value) -> Option<ReadOnlyAdmission> {
     serde_json::from_value(
         response
             .pointer("/_meta/peri.sessionWorkspaceV1/read_only")?
+            .clone(),
+    )
+    .ok()
+}
+
+fn restore_warning(response: &Value) -> Option<peri_acp_types::workspace::SessionRestoreWarning> {
+    serde_json::from_value(
+        response
+            .pointer("/_meta/peri.sessionWorkspaceV1/restore_warning")?
             .clone(),
     )
     .ok()

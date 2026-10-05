@@ -320,6 +320,9 @@ pub static SESSION_PREPARING: AtomStatic<bool> = AtomStatic::new(|| false);
 /// 的原因——用户在提交时收到的拒绝来自 host 的同一道闸门。
 pub static SESSION_READ_ONLY: AtomStatic<Option<peri_acp_types::workspace::ReadOnlyAdmission>> =
     AtomStatic::new(|| None);
+pub static SESSION_RESTORE_WARNING: AtomStatic<
+    Option<peri_acp_types::workspace::SessionRestoreWarning>,
+> = AtomStatic::new(|| None);
 pub static VIEW_MODELS: AtomStatic<ViewModelsSnapshot> =
     AtomStatic::new(ViewModelsSnapshot::default);
 pub static MODEL_HIGHLIGHT_UNTIL: AtomStatic<Option<Instant>> = AtomStatic::new(|| None);

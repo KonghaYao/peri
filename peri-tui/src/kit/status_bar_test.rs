@@ -173,6 +173,15 @@ fn test_read_only_label_maps_each_reason_in_both_locales() {
 }
 
 #[test]
+fn test_local_takeover_warning_is_translated_in_both_locales() {
+    for lang in ["en", "zh-CN"] {
+        let label =
+            crate::i18n::LcRegistry::new(Some(lang)).tr("statusbar-restore-warning-former-owner");
+        assert!(!label.is_empty() && !label.contains("statusbar-restore-warning"));
+    }
+}
+
+#[test]
 #[serial]
 fn test_status_bar_handles_empty_provider_model() {
     crate::kit::atoms::init_atoms();

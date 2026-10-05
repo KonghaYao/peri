@@ -163,6 +163,7 @@ async fn make_server_config_with(
     let lsp_pool: Arc<dyn peri_acp_types::ports::LspPoolPort> =
         peri_mcp_lsp::create_host_lsp_pool(tmp.path().to_str().unwrap(), &lsp_servers);
     AcpServerConfig {
+        allow_local_unverified_takeover: false,
         workspace_assembly: None,
         host_task_owner: Some(host_task_owner),
         host_task_spawner,

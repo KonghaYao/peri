@@ -31,6 +31,11 @@ Session ID 恢复与生命周期回归：`src/host/requests_workspace_cases_test
 `src/host/requests_workspace_assembly_test.rs` 验证装配失败时保留本实例运行句柄，
 排空成功后关闭写入准入。统一运行 `cargo test -p peri-acp --lib -- host::requests::tests::workspace_cases`。
 重命名持久化及通知回归见 `src/host/requests_lifecycle_cases_test.rs`。
+本地 TUI 经 `AcpServerConfig::with_local_unverified_takeover` 显式启用旧 owner 接管；
+`host/workspace.rs::local_unverified_takeover_allowed` 仅接受无远端/代际身份的已绑定会话，
+Store 租约过期后的 CAS 仍是取得执行权的条件。`session/load` / `resume` 经
+`identity_response` 的 `restore_warning` 将未验证停止提示给 TUI；回归入口为
+`host/requests_recovery_test.rs::test_local_tui_takeover_restores_writable_session_with_warning`。
 
 | 我想做什么 | 主文件 | 入口/关键函数 | 关键逻辑 |
 | --- | --- | --- | --- |

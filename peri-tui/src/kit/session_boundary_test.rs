@@ -24,8 +24,12 @@ fn test_session_boundary_clears_read_only_marker() {
 
     let old_active = atoms::ACTIVE_SESSION_ID.state().read().clone();
     let old_read_only = atoms::SESSION_READ_ONLY.state().read().clone();
+    let old_warning = atoms::SESSION_RESTORE_WARNING.state().read().clone();
     let old_reset = atoms::BRIDGE_RESET_COUNTER.get();
     atoms::SESSION_READ_ONLY.set(Some(ReadOnlyAdmission::ExecutionBusy));
+    atoms::SESSION_RESTORE_WARNING.set(Some(
+        peri_acp_types::workspace::SessionRestoreWarning::FormerOwnerUnverified,
+    ));
 
     project_session_boundary(Some("next"));
 
@@ -33,9 +37,11 @@ fn test_session_boundary_clears_read_only_marker() {
         atoms::SESSION_READ_ONLY.state().read().is_none(),
         "会话边界必须清空上一条会话的只读原因，否则新会话会带着别人的只读标记"
     );
+    assert!(atoms::SESSION_RESTORE_WARNING.state().read().is_none());
 
     *atoms::ACTIVE_SESSION_ID.state().write() = old_active;
     atoms::SESSION_READ_ONLY.set(old_read_only);
+    atoms::SESSION_RESTORE_WARNING.set(old_warning);
     atoms::BRIDGE_RESET_COUNTER.set(old_reset);
 }
 

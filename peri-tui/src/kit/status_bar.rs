@@ -40,6 +40,7 @@ fn StatusBarRow1(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let bg_tasks = hooks.use_atom(&atoms::BG_TASKS);
     let preparing = hooks.use_atom(&atoms::SESSION_PREPARING);
     let read_only = hooks.use_atom(&atoms::SESSION_READ_ONLY);
+    let restore_warning = hooks.use_atom(&atoms::SESSION_RESTORE_WARNING);
     let goal_store = hooks.use_atom(&atoms::GOAL_SNAPSHOT);
 
     let snap = snap.read().clone();
@@ -160,6 +161,16 @@ fn StatusBarRow1(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         spans.push(separator());
         spans.push(Span::styled(
             read_only_label(reason),
+            Style::default().fg(THEME_ATOM.state().read().semantic.status.warning),
+        ));
+    }
+    if matches!(
+        *restore_warning.read(),
+        Some(peri_acp_types::workspace::SessionRestoreWarning::FormerOwnerUnverified)
+    ) {
+        spans.push(separator());
+        spans.push(Span::styled(
+            i18n::tr("statusbar-restore-warning-former-owner"),
             Style::default().fg(THEME_ATOM.state().read().semantic.status.warning),
         ));
     }

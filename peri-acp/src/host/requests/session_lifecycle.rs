@@ -417,6 +417,7 @@ pub(crate) async fn new_session_from_prepared(
         serde_json::to_value(resp).map_err(|e| AcpError::new(-32603, e.to_string()))?,
         identity,
         None,
+        None,
     )
 }
 
@@ -796,6 +797,7 @@ pub(crate) async fn handle_fork(
     identity_response(
         serde_json::to_value(resp).map_err(super::super::workspace::workspace_error)?,
         identity,
+        None,
         None,
     )
 }

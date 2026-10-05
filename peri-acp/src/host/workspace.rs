@@ -808,3 +808,40 @@ pub(crate) async fn former_owner_recoverable(
             .is_ok(),
     )
 }
+
+/// The local TUI may take over its own expired in-process Workspace owner.
+/// A recorded remote endpoint or Agent generation keeps the proof requirement.
+pub(crate) async fn local_unverified_takeover_allowed(
+    cfg: &AcpServerConfig,
+    session_id: &str,
+) -> Result<bool, AcpError> {
+    if !cfg.allow_local_unverified_takeover
+        || !matches!(
+            super::requests::owner_catalog::trusted_workspace_identity(),
+            Ok(None)
+        )
+    {
+        return Ok(false);
+    }
+    let binding = cfg
+        .session_resources
+        .load_session_binding(&session_id.to_owned())
+        .await
+        .map_err(resource_error)?;
+    if !matches!(
+        binding,
+        peri_acp_types::session_resources::BindingState::Bound(_)
+    ) {
+        return Ok(false);
+    }
+    let record = cfg
+        .session_resources
+        .read_execution_workspace_owner(&session_id.to_owned())
+        .await
+        .map_err(resource_error)?;
+    Ok(record.is_some_and(|record| {
+        record.descriptor.endpoint.is_empty()
+            && record.descriptor.owner_identity.is_empty()
+            && record.descriptor.agent_generation_id.is_empty()
+    }))
+}

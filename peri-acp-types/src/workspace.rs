@@ -215,6 +215,13 @@ pub enum ReadOnlyAdmission {
     FormerOwnerUnverified,
 }
 
+/// A restored session may be executable while prior local work remains unverified.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SessionRestoreWarning {
+    FormerOwnerUnverified,
+}
+
 impl ReadOnlyAdmission {
     /// 按存储层给出的不可用原因构造；不在本集合内的原因不降级（调用方原样上报）。
     pub fn from_workspace_error(error: &WorkspaceError) -> Option<Self> {

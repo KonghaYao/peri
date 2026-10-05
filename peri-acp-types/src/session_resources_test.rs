@@ -60,6 +60,17 @@ fn former_owner_unverified_read_only_reason_roundtrips() {
 }
 
 #[test]
+fn local_takeover_warning_roundtrips() {
+    let warning = crate::workspace::SessionRestoreWarning::FormerOwnerUnverified;
+    let wire = serde_json::to_value(warning).unwrap();
+    assert_eq!(wire, "formerOwnerUnverified");
+    assert_eq!(
+        serde_json::from_value::<crate::workspace::SessionRestoreWarning>(wire).unwrap(),
+        warning
+    );
+}
+
+#[test]
 fn persistence_uncertain_is_the_only_unknown_effect() {
     let id = thread_id();
     let uncertain = SessionResourceError::persistence_uncertain(Some(id.clone()));

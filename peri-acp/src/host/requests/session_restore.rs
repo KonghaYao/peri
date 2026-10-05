@@ -6,7 +6,7 @@ use agent_client_protocol::schema::v1::{
 };
 use peri_acp_types::session_resources::{BindingRecheck, BindingState, FrozenState};
 use peri_acp_types::thread::ThreadId;
-use peri_acp_types::workspace::ReadOnlyAdmission;
+use peri_acp_types::workspace::{ReadOnlyAdmission, SessionRestoreWarning};
 use serde_json::Value;
 use tracing::warn;
 
@@ -70,6 +70,7 @@ async fn load_frozen_bytes(cfg: &AcpServerConfig, session_id: &str) -> Result<St
 pub(super) struct PreparedSession {
     pub(super) id: String,
     pub(super) identity: Option<Value>,
+    pub(super) warning: Option<SessionRestoreWarning>,
     /// 只读准入原因：`Some` 表示本次没有取得执行所有权，历史可读、执行与写入仍被
     /// `require_owner` 挡住。
     pub(super) read_only: Option<ReadOnlyAdmission>,
@@ -99,6 +100,8 @@ pub(super) async fn prepare_existing(
     } else {
         false
     };
+    let local_takeover = former_unverified
+        && crate::host::workspace::local_unverified_takeover_allowed(cfg, id).await?;
     let legacy_prepared = if matches!(
         availability.execution,
         Some(peri_acp_types::session_resources::ExecutionAvailability::Available)
@@ -116,7 +119,7 @@ pub(super) async fn prepare_existing(
         sessions,
         id,
         params.get("cwd").and_then(Value::as_str),
-        former_unverified,
+        former_unverified && !local_takeover,
     )
     .await?;
     let workspace = admission.workspace;
@@ -131,54 +134,66 @@ pub(super) async fn prepare_existing(
             (None, Some(reason))
         }
     };
+    let warning =
+        (local_takeover && owner.is_some()).then_some(SessionRestoreWarning::FormerOwnerUnverified);
     if let Some(prior) = owner
         .as_ref()
         .and_then(|lease| lease.prior_unreleased_generation())
     {
-        let generation_id = prior.agent_generation_id.as_deref().ok_or_else(|| {
-            AcpError::new(
-                -32010,
-                "Session restore incomplete: former Agent generation is unknown",
-            )
-        })?;
-        let record = cfg
-            .session_resources
-            .read_execution_workspace_owner(&id.to_owned())
-            .await
-            .map_err(crate::host::workspace::resource_error)?
-            .ok_or_else(|| {
-                AcpError::new(
-                    -32010,
-                    "Session restore incomplete: former async owner catalog unavailable",
-                )
-            })?;
-        let trusted = super::super::owner_catalog::trusted_workspace_identity()
-            .map_err(|error| AcpError::new(-32010, format!("Session restore incomplete: {error}")))?
-            .ok_or_else(|| {
-                AcpError::new(
-                    -32010,
-                    "Session restore incomplete: trusted Workspace owner unavailable",
-                )
-            })?;
-        if record.current_epoch
-            != owner
-                .as_ref()
-                .and_then(|lease| lease.owner_token())
-                .map(|token| token.epoch)
-                .unwrap_or_default()
-            || record.descriptor.agent_generation_id != generation_id
-            || super::super::owner_catalog::verify_recoverable_owner(&record, &trusted).is_err()
+        if !(local_takeover
+            && prior
+                .agent_generation_id
+                .as_deref()
+                .is_none_or(str::is_empty)
+            && crate::host::workspace::local_unverified_takeover_allowed(cfg, id).await?)
         {
-            return Err(AcpError::new(
-                -32010,
-                "Session restore incomplete: former async task owners cannot be recovered",
-            ));
-        }
-        super::super::super::supervisor::previous_generation_stopped(id, generation_id)
-            .await
-            .map_err(|error| {
-                AcpError::new(-32010, format!("Session restore incomplete: {error}"))
+            let generation_id = prior.agent_generation_id.as_deref().ok_or_else(|| {
+                AcpError::new(
+                    -32010,
+                    "Session restore incomplete: former Agent generation is unknown",
+                )
             })?;
+            let record = cfg
+                .session_resources
+                .read_execution_workspace_owner(&id.to_owned())
+                .await
+                .map_err(crate::host::workspace::resource_error)?
+                .ok_or_else(|| {
+                    AcpError::new(
+                        -32010,
+                        "Session restore incomplete: former async owner catalog unavailable",
+                    )
+                })?;
+            let trusted = super::super::owner_catalog::trusted_workspace_identity()
+                .map_err(|error| {
+                    AcpError::new(-32010, format!("Session restore incomplete: {error}"))
+                })?
+                .ok_or_else(|| {
+                    AcpError::new(
+                        -32010,
+                        "Session restore incomplete: trusted Workspace owner unavailable",
+                    )
+                })?;
+            if record.current_epoch
+                != owner
+                    .as_ref()
+                    .and_then(|lease| lease.owner_token())
+                    .map(|token| token.epoch)
+                    .unwrap_or_default()
+                || record.descriptor.agent_generation_id != generation_id
+                || super::super::owner_catalog::verify_recoverable_owner(&record, &trusted).is_err()
+            {
+                return Err(AcpError::new(
+                    -32010,
+                    "Session restore incomplete: former async task owners cannot be recovered",
+                ));
+            }
+            super::super::super::supervisor::previous_generation_stopped(id, generation_id)
+                .await
+                .map_err(|error| {
+                    AcpError::new(-32010, format!("Session restore incomplete: {error}"))
+                })?;
+        }
     }
     let identity = match response_identity(cfg, id).await {
         Ok(identity) => identity,
@@ -210,6 +225,7 @@ pub(super) async fn prepare_existing(
                 id: id.to_owned(),
                 identity,
                 read_only,
+                warning,
             });
         }
         sessions.remove(id);
@@ -320,6 +336,7 @@ pub(super) async fn prepare_existing(
         id: id.to_owned(),
         identity,
         read_only,
+        warning,
     })
 }
 
@@ -332,12 +349,17 @@ pub(super) fn identity_response(
     mut response: Value,
     identity: Option<Value>,
     read_only: Option<ReadOnlyAdmission>,
+    warning: Option<SessionRestoreWarning>,
 ) -> Result<Value, AcpError> {
     if let Some(identity) = identity {
         response["_meta"]["peri.sessionWorkspaceV1"] = identity;
         if let Some(reason) = read_only {
             response["_meta"]["peri.sessionWorkspaceV1"]["read_only"] =
                 serde_json::to_value(reason).map_err(|e| AcpError::new(-32603, e.to_string()))?;
+        }
+        if let Some(warning) = warning {
+            response["_meta"]["peri.sessionWorkspaceV1"]["restore_warning"] =
+                serde_json::to_value(warning).map_err(|e| AcpError::new(-32603, e.to_string()))?;
         }
     }
     Ok(response)
@@ -539,6 +561,7 @@ pub(crate) async fn handle_load(
         id,
         identity,
         read_only,
+        warning,
     } = prepared;
     let req_session_id = id.as_str();
     let state = sessions.get(req_session_id).expect("prepared session");
@@ -595,6 +618,7 @@ pub(crate) async fn handle_load(
         serde_json::to_value(resp).map_err(|e| AcpError::new(-32603, e.to_string()))?,
         identity,
         read_only,
+        warning,
     )
 }
 
@@ -639,6 +663,7 @@ pub(crate) async fn handle_resume(
         serde_json::to_value(resp).map_err(|e| AcpError::new(-32603, e.to_string()))?,
         prepared.identity,
         prepared.read_only,
+        prepared.warning,
     )
 }
 
