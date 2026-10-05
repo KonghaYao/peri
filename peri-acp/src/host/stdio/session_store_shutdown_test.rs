@@ -69,7 +69,7 @@ async fn config_with_gated_task(
     cfg.host_task_spawner
         .spawn(
             crate::host::task_scope::HostTaskOwnerKind::Host,
-            crate::host::task_scope::HostTaskKind::LegacyCancelHook,
+            crate::host::task_scope::HostTaskKind::UserInputEvents,
             async move {
                 started_tx.send(()).unwrap();
                 cancellation.cancelled().await;

@@ -76,6 +76,7 @@ pub async fn dispatch_tools(
     catalog: &Arc<SessionToolCatalogSnapshot>,
     cancel: &CancellationToken,
 ) -> AgentResult<DispatchOutcome> {
+    super::execution_control::validate(ctx).await?;
     let turn_id = ctx.turn_id();
     let agent_id = ctx.session.agent_id;
 
@@ -191,6 +192,8 @@ pub async fn dispatch_tools(
         &ai_msg,
     )
     .await?;
+
+    super::execution_control::validate(ctx).await?;
 
     // 阶段 B：原子写入 transcript（staging 模式）
     {

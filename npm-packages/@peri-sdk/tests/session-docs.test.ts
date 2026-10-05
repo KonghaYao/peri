@@ -1,3 +1,4 @@
+import { closeCommand, controlResponse } from "../test/control-fixture";
 import { describe, expect, test } from "bun:test";
 import * as Y from "yjs";
 import { SessionDocs } from "../src/state/session-docs";
@@ -488,6 +489,7 @@ class ReplayTransport implements Transport {
   failLoad = false;
 
   async request<T>(method: string, params?: unknown): Promise<T> {
+    if (method.startsWith("session/control")) return controlResponse(method, params) as T;
     this.calls.push({ method, params });
     if (method === "initialize") return { protocolVersion: 1 } as T;
     if (method === "session/new") return { sessionId: "s1" } as T;
@@ -570,7 +572,7 @@ test("Session projects load replay and later live ACP events without a stream co
     clientCapabilities?: { _meta?: Record<string, unknown> };
   };
   expect(initialize.clientCapabilities?._meta?.["peri.replay"]).toBe(true);
-  await agent.close();
+  await agent.close(closeCommand);
   expect(textOf(entries(agent.docs)[3]!, "text")).toBe("New answer");
   expect(entries(agent.docs)[3]!.get("status")).toBe("cancelled");
   expect(info.get("activeTurnStatus")).toBe("cancelled");
@@ -591,7 +593,7 @@ test("failed session/load discards replay from the rejected attempt", async () =
   await expect(agent.session.start("s1")).rejects.toThrow("session/load failed");
   expect(agent.docs).not.toBe(attemptedDocs);
   expect(entries(agent.docs)).toHaveLength(0);
-  await agent.close();
+  await agent.session.cleanupStartup();
 });
 
 test("real mailbox delivery creates the user entry before assistant output", async () => {
@@ -607,5 +609,5 @@ test("real mailbox delivery creates the user entry before assistant output", asy
   expect(entries(agent.docs).map((entry) => entry.get("role"))).toEqual(["user", "assistant"]);
   expect(textOf(entries(agent.docs)[0]!, "text")).toBe("Implement the feature");
   expect(textOf(entries(agent.docs)[1]!, "text")).toBe("Done");
-  await agent.close();
+  await agent.close(closeCommand);
 });

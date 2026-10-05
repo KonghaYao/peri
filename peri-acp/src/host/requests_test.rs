@@ -32,6 +32,8 @@ use crate::provider::LlmProvider;
 
 #[path = "requests_recovery_test.rs"]
 mod recovery_tests;
+#[path = "requests/session_control_test.rs"]
+mod session_control_tests;
 
 #[path = "requests_legacy_test.rs"]
 mod legacy_tests;
@@ -351,7 +353,7 @@ async fn register_session_with_history(
             workflow_middleware: None,
             title: None,
             tags: Vec::new(),
-            continuation_armed: false,
+
             continuation_epoch: 0,
             continuation_in_flight: false,
             continuation_mq_steering_pending: false,
@@ -681,7 +683,7 @@ async fn register_session_with_workflow(
             workflow_middleware: Some(Arc::clone(&mw) as Arc<dyn WorkflowMiddlewarePort>),
             title: None,
             tags: Vec::new(),
-            continuation_armed: false,
+
             continuation_epoch: 0,
             continuation_in_flight: false,
             continuation_mq_steering_pending: false,

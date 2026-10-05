@@ -46,6 +46,7 @@ pub(super) fn attach_subagent_host(
     // SubAgentMiddleware 不再逐字段透传（管理权移出）。
     {
         let host = SubagentHost {
+            close_state: Arc::default(),
             mcp_pool: input.mcp_pool.clone(),
             session_resources: thread_persistence.session_resources.clone(),
             task_manager: Some(task_manager.clone()),

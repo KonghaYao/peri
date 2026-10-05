@@ -5,6 +5,7 @@ import type { AgentOptions } from "./types";
 import type { SessionSummary } from "../storage/session-summary";
 import { SessionDocs } from "../state/session-docs";
 import { realpathSync } from "node:fs";
+import type { CommandExpectation, ControlReceipt, CloseOptions } from "./session-control";
 
 export class Agent {
     readonly id: string;
@@ -85,7 +86,7 @@ export class Agent {
         return this.options.sandbox.getSessions(path);
     }
 
-    close(): Promise<void> {
-        return this.session.close();
+    close(command: CommandExpectation, options?: CloseOptions): Promise<ControlReceipt> {
+        return this.session.close(command, options);
     }
 }

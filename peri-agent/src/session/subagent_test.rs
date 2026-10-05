@@ -850,6 +850,9 @@ mod resume_cases;
 #[path = "subagent/resume_dispatch_test.rs"]
 mod resume_dispatch_cases;
 
+#[path = "subagent/close_lifecycle_test.rs"]
+mod close_lifecycle_cases;
+
 #[path = "subagent/provenance_test.rs"]
 mod provenance_tests;
 async fn create_bound_root(

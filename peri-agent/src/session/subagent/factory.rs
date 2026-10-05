@@ -11,7 +11,7 @@ mod completion_delivery_tests;
 
 use super::types::{SubagentResumeConfig, SubagentSpawnConfig, SubagentSpawned};
 use crate::session::Session;
-pub(super) use claim::ResumeClaim;
+pub(super) use claim::{clear_stopped_attempt, ResumeClaim};
 use resume::resume_subagent_impl;
 use spawn::spawn_subagent_impl;
 

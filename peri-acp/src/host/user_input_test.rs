@@ -258,12 +258,24 @@ async fn test_user_input_stop_revokes_ticket_before_cancel_token_registration() 
     .unwrap();
     let mailbox = cfg.session_manager.user_input_mailbox_for(&sid).unwrap();
     let ticket = mailbox.reserve_run().unwrap();
-    crate::host::notify::handle_notification(
-        "session/cancel",
-        &json!({"sessionId":sid}),
-        &mut sessions,
+    let control = cfg
+        .session_resources
+        .load_session_control(&sid)
+        .await
+        .unwrap();
+    handle_request(
+        "session/control",
+        &json!({
+            "sessionId":sid,"commandId":"pause-queued",
+            "expectedLifecycle":control.lifecycle,"expectedRevision":control.revision,
+            "expectedControlGeneration":control.control_generation,"action":{"kind":"pause"}
+        }),
         &cfg,
-    );
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
     assert!(
         !mailbox.attach_attempt(&ticket, tokio_util::sync::CancellationToken::new()),
         "Stop 后旧 ticket 不能进入执行"
@@ -561,22 +573,58 @@ async fn test_user_input_cancel_rejects_stale_ticket_without_cancelling_current_
     let current_cancel = CancellationToken::new();
     assert!(mailbox.attach_attempt(&current, current_cancel.clone()));
     sessions.get_mut(&sid).unwrap().cancel_token = Some(current_cancel.clone());
-    crate::host::notify::handle_notification(
-        "session/cancel",
-        &json!({"sessionId":sid,"generation":generation,"requestId":old.id}),
-        &mut sessions,
+    let old_target = peri_acp_types::session_resources::ControlAttempt {
+        turn_id: peri_acp_types::session::TurnId::new(),
+        attempt_id: peri_acp_types::identity::AttemptId::new(),
+    };
+    let new_target = peri_acp_types::session_resources::ControlAttempt {
+        turn_id: peri_acp_types::session::TurnId::new(),
+        attempt_id: peri_acp_types::identity::AttemptId::new(),
+    };
+    let control = cfg
+        .session_resources
+        .load_session_control(&sid)
+        .await
+        .unwrap();
+    let old_stop = json!({"sessionId":sid,"commandId":"old-stop", "expectedLifecycle":control.lifecycle,
+        "expectedRevision":control.revision,"expectedControlGeneration":control.control_generation,
+        "action":{"kind":"stop","target":old_target}});
+    cfg.session_resources
+        .apply_session_control(&peri_acp_types::session_resources::ControlCommand {
+            session_id: sid.clone(),
+            command_id: "current-execution".into(),
+            expected_lifecycle: control.lifecycle,
+            expected_revision: control.revision,
+            expected_control_generation: control.control_generation,
+            action: peri_acp_types::session_resources::ControlAction::ObserveAttempt {
+                target: Some(new_target.clone()),
+            },
+        })
+        .await
+        .unwrap();
+    let receipt = handle_request(
+        "session/control",
+        &old_stop,
         &cfg,
-    );
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+    assert_eq!(receipt["decision"]["kind"], "rejected");
     assert!(
         !current_cancel.is_cancelled(),
         "旧 ticket 的迟到 Stop 不得取消新执行"
     );
-    crate::host::notify::handle_notification(
-        "session/cancel",
-        &json!({"sessionId":sid,"generation":generation,"requestId":current.id}),
-        &mut sessions,
-        &cfg,
-    );
+    let control = cfg
+        .session_resources
+        .load_session_control(&sid)
+        .await
+        .unwrap();
+    handle_request("session/control", &json!({"sessionId":sid,"commandId":"current-stop",
+        "expectedLifecycle":control.lifecycle,"expectedRevision":control.revision,
+        "expectedControlGeneration":control.control_generation,"action":{"kind":"stop","target":new_target}
+    }), &cfg, &mut sessions, &transport).await.unwrap();
     assert!(
         current_cancel.is_cancelled(),
         "当前 ticket 的 Stop 必须传到真实执行 token"

@@ -252,11 +252,15 @@ async fn run_workflow_mcp(scenario: Scenario<'_>) -> Outcome {
         )
         .await;
     let agent_session_id = {
-        let inboxes = pool.session_inboxes.read();
-        assert_eq!(inboxes.len(), 1);
-        inboxes.keys().next().unwrap().clone()
+        let sessions = pool.session_bindings.read().registered_sessions();
+        assert_eq!(sessions.len(), 1);
+        sessions[0].clone()
     };
-    assert!(pool.session_tasks.read().contains_key(&agent_session_id));
+    assert!(pool
+        .session_bindings
+        .read()
+        .manager(&agent_session_id)
+        .is_some());
     assert_ne!(agent_session_id, SPOOFED);
     assert_ne!(agent_session_id, ROOT);
     if let Some(token) = pool

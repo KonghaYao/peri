@@ -446,13 +446,29 @@ async fn test_resume_subagent_interrupted_then_resumed_completes() {
         );
     }
 
-    // 第二次恢复（换正常 token）：完成 → done
+    super::close_lifecycle_cases::reopen_closed_child_fixture(&store, &thread_id).await;
     let config = resume_config(store.clone(), thread_id.clone());
     let spawned2 = SessionFactory::resume_subagent(None, config)
         .await
         .expect("resume 2 ok");
     assert!(!spawned2.interrupted);
     assert_eq!(spawned2.child_thread_id, thread_id, "thread_id 不变");
+    assert!(!Arc::ptr_eq(
+        spawned1
+            .session
+            .subagent_host()
+            .unwrap()
+            .task_manager
+            .as_ref()
+            .unwrap(),
+        spawned2
+            .session
+            .subagent_host()
+            .unwrap()
+            .task_manager
+            .as_ref()
+            .unwrap(),
+    ));
     let statuses = store.statuses();
     assert_eq!(
         statuses.last().map(|(_, s)| s.as_str()),

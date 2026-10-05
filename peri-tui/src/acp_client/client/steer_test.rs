@@ -263,17 +263,38 @@ async fn test_user_input_stop_preserves_managed_run_identity_on_wire() {
             .is_some(),
         "应打开实际执行标记"
     );
-    client.cancel().await.unwrap();
-    let IncomingMessage::Notification { method, params } = server_transport.recv().await.unwrap()
-    else {
-        panic!("应收到 cancel 通知");
+    let stop_client = client.clone();
+    let stopping = tokio::spawn(async move { stop_client.cancel().await });
+    let IncomingMessage::Request { id, method, .. } = server_transport.recv().await.unwrap() else {
+        panic!("应收到 control state 请求");
     };
-    assert_eq!(method, "session/cancel", "沿现有取消协议发送");
-    assert_eq!(
-        params,
-        json!({"sessionId":"s","generation":"g","requestId":"run"}),
-        "Stop 必须在退役本地 marker 之前保存目标身份，避免取消后续 run"
+    assert_eq!(method, "session/control/state");
+    let target = json!({"turnId":peri_acp_types::session::TurnId::new(),
+        "attemptId":peri_acp_types::identity::AttemptId::new()});
+    let state = json!({"lifecycle":1,"revision":4,"controlGeneration":2,"status":"active",
+        "attempt":target});
+    server_transport
+        .send_response(id, Ok(json!({"state":state,"settlement":null})))
+        .await
+        .unwrap();
+    let IncomingMessage::Request { id, method, params } = server_transport.recv().await.unwrap()
+    else {
+        panic!("应收到 typed stop 请求");
+    };
+    assert_eq!(method, "session/control");
+    assert_eq!(params["action"], json!({"kind":"stop","target":target}));
+    assert!(params.get("requestId").is_none());
+    assert!(params.get("generation").is_none());
+    assert!(client.lifecycle.active_user_input_run().is_some());
+    let receipt = peri_acp_types::session_resources::control::decide_control(
+        &serde_json::from_value(params).unwrap(),
+        &serde_json::from_value(state).unwrap(),
     );
+    server_transport
+        .send_response(id, Ok(serde_json::to_value(receipt).unwrap()))
+        .await
+        .unwrap();
+    stopping.await.unwrap().unwrap();
     assert!(
         client.lifecycle.active_user_input_run().is_none(),
         "Stop 后本地 owner 应退役"

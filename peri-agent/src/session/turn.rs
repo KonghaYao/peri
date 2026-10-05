@@ -8,6 +8,7 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::time::Instant;
 
 use tokio_util::sync::CancellationToken;
@@ -34,6 +35,7 @@ pub struct TurnContext {
     /// Turn 唯一 ID（事件流纽带）
     pub turn_id: TurnId,
     pub attempt_id: peri_acp_types::identity::AttemptId,
+    control_generation: OnceLock<u64>,
     /// 当前 ReAct step（turn 内的循环迭代次数，AtomicUsize 支持 &self 自增）
     step: AtomicUsize,
     /// 工作目录（只读）
@@ -50,6 +52,7 @@ impl TurnContext {
         Self {
             turn_id: TurnId::new(),
             attempt_id: peri_acp_types::identity::AttemptId::new(),
+            control_generation: OnceLock::new(),
             step: AtomicUsize::new(0),
             cwd,
             cancel_token,
@@ -67,6 +70,15 @@ impl TurnContext {
             turn_id: self.turn_id,
             attempt_id: self.attempt_id.clone(),
         }
+    }
+
+    pub fn bind_control_generation(&self, generation: u64) -> bool {
+        self.control_generation.set(generation).is_ok()
+            || self.control_generation.get() == Some(&generation)
+    }
+
+    pub fn control_generation(&self) -> Option<u64> {
+        self.control_generation.get().copied()
     }
 
     /// 推进 step，返回推进后的值

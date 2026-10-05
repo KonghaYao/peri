@@ -5,6 +5,7 @@
 | 职责 | 入口 | 行为 |
 | --- | --- | --- |
 | 公开 API | `npm-packages/@peri-sdk/src/sdk/index.ts` | 导出 Agent、Session、ManagedAgents、Sandbox 和 `WasmAcpTransport` |
+| 领域控制与关闭 | `src/agent/{session-control,session}.ts` + `src/managed/managed-agents.ts` | `session/control` / `resolve` / `state` 透传稳定命令、预期生命周期/revision/control generation 与精确 Stop target；未知效果冻结，按原命令对账。Close 仅同生命周期 Closed+settled 才关闭 transport/释放 claim，Pending/Incomplete 保留持有人；启动失败清理使用独立 `cleanupStartup`，不冒充领域 Close。回归 `test/session-control.test.ts` 与 `tests/real-peri.test.ts`；此控制序列化不是持久 attempt 准入 |
 | WASM 产物装配 | `src/wasm/loader.ts` + `scripts/build.ts` | 从根 workspace 编译 Emscripten release，打包 JS/WASM；懒加载并复用 `PeriWasmAcp` 模块 |
 | Peri 配置类型 | `src/config/` | `PeriConfig` 描述受信 settings 启动帧，`MetaHarnessKey` 限定能力键；`BareHarnessConfig` 是冻结的全关闭预设，demo 按需重新开启 MCP 与 ToolSearch |
 | 会话与输入 | `src/agent/{agent,session,send-receipt,types}.ts` | `session/new|load`、连续输入队列、交付事件、取消与事件流；未领取的输入若从 `dispatching` 退回 `queued`，按队列事件重派发一次，再失败则取回并报告错误；Agent 按自身或已加载 Session 的 path 经 Sandbox 向 SessionStorage 列举会话，不走 ACP `session/list`；每个类单独成文件 |

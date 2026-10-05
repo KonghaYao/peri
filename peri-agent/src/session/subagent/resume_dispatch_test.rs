@@ -348,6 +348,7 @@ async fn test_resume_running_cancelled_by_dispatch_finalizes_claim() {
         0,
         "claim cleanup must not invent or duplicate the normal Stop hook"
     );
+    super::close_lifecycle_cases::reopen_closed_child_fixture(&store, &thread_id).await;
     let resumed =
         SessionFactory::resume_subagent(None, resume_config(store.clone(), thread_id.clone()))
             .await
@@ -407,6 +408,7 @@ async fn test_resume_precancelled_background_still_registers_and_completes() {
         store.load_meta(&thread_id).await.unwrap().agent_status,
         AgentStatus::Cancelled
     );
+    super::close_lifecycle_cases::reopen_closed_child_fixture(&store, &thread_id).await;
     let resumed =
         SessionFactory::resume_subagent(None, resume_config(store.clone(), thread_id.clone()))
             .await

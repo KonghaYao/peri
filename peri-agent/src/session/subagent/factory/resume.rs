@@ -254,7 +254,8 @@ pub(super) async fn resume_subagent_impl(
         context_budget,
         compact_llm,
         Some(agent_id_from_child_thread(&thread_id)),
-    )?;
+    )
+    .await?;
 
     // Assembly is synchronous but can observe cancellation from another task
     // (or a callback). Sync callers still receive the established interrupted

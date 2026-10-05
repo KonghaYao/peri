@@ -72,12 +72,28 @@ console.log("is sent", command.isSent);
 command.forceSend(); // 请求立即派发；是否执行及何时执行由 Peri 裁决。
 await command;
 
-// 场景 4：请求中断当前执行，不关闭 Session；仍能插入新输入。
-await session.cancel();
+// 场景 4：显式 Stop 精确执行并持久暂停；Resume 后才允许执行新输入。
+const stopState = (await session.controlState()).state;
+if (!stopState.attempt) throw new Error("Session has no exact execution to stop");
+await session.stop({
+    commandId: crypto.randomUUID(), expectedLifecycle: stopState.lifecycle,
+    expectedRevision: stopState.revision, expectedControlGeneration: stopState.controlGeneration,
+    target: stopState.attempt,
+});
+const resumeState = (await session.controlState()).state;
+await session.resume({
+    commandId: crypto.randomUUID(), expectedLifecycle: resumeState.lifecycle,
+    expectedRevision: resumeState.revision, expectedControlGeneration: resumeState.controlGeneration,
+});
 await session.send("换一个更小的问题");
 
 // 场景 5：另一实例同时 start 同一 Agent/Session 时，KV 占位失败并明确报冲突。
 // 场景 6：服务不再需要此 Agent 时显式关闭；当前 Session 随 Agent 关闭，Store 中的会话数据仍保留，Sandbox 独立管理 Workspace 生命周期。
 async function releaseAgent() {
-    await managedAgents.closeAgent(agent.id); // 关闭 ACP Transport 并释放自己持有的 KV 占位。
+    const { state } = await session.controlState();
+    const closeCommand = {
+        commandId: crypto.randomUUID(), expectedLifecycle: state.lifecycle,
+        expectedRevision: state.revision, expectedControlGeneration: state.controlGeneration,
+    };
+    await managedAgents.closeAgent(agent.id, closeCommand);
 }

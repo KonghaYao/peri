@@ -1,6 +1,6 @@
 # peri-resources 代码索引
 
-> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-10-05（schema 14 删除会话执行 owner 表；schema 12 的 Machine → Workspace → Session 归属仍保留）。
+> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-10-05（schema 15 增加领域控制与命令回执；schema 14 删除会话执行 owner 表；schema 12 的 Machine → Workspace → Session 归属仍保留）。
 > 依据：peri-resources/src 源码、lib.rs 模块注释（伞形 PRD 决策 20）
 
 Emscripten target 只编译 Turso adapter，排除 SQLx、workflow 与 `sqlite_store` 源码；Native target 同时编译 SQLite 与 Turso adapter，由 `context` 按 locator 选择。`sessions::failure` 与 `canonical` 提供共用领域规则。Turso 会话数据存于远端；WASM 复用 `RemoteExecution` 的虚拟工作区观测，通过远端组合工厂接入主线。会话执行唯一性、进程代际协调与接管由 `peri-sdk` 负责，Resources 不持有执行 registry、租约或 Store owner CAS。旧 WASM 身份与快照格式的会话只读历史，不能继续执行。Node/Bun 的可写会话、ACP、模型调用与恢复验收见 [`WASM 接入验收`](../../spec/issues/2026-10-02-wasm-feasibility-plan.md)。
@@ -8,6 +8,8 @@ Emscripten target 只编译 Turso adapter，排除 SQLx、workflow 与 `sqlite_s
 `SessionResourcesImpl::inspect_availability` 检查存储访问模式、持久化状态及保存的执行环境，不查询或签发会话执行 owner；恢复不依赖旧进程停止 proof。关闭意图、持久化排空与任务资源生命周期仍独立保留。
 
 ## 架构速览
+
+- 领域控制：`sessions/control.rs` 维护共用 SQL/回执编码，规则由 `peri-acp-types::session_resources::control::decide_control` 单一权威裁决；`sqlite_store/session_data/control.rs` 与 `remote/session_control.rs` 同事务提交状态、命令摘要/原回执与 closing 投影。`resources/gate_control.rs` 在 Unknown 时冻结并只对账原命令；内部 ObserveAttempt 仅定位当前执行，不签发执行资格/lease。schema 14→15 保留 store ID、历史和旧 closing 意图；契约 `tests/session_control_contract.rs` 与 `remote/session_control_test.rs`。
 
 - 时间入口：生产路径经 `peri-time` 读取 UTC 墙钟、单调时钟并执行 sleep/timeout。`src/sessions/remote/connection.rs` 保留远端请求超时的 `Exceeded` 分类；`src/sessions/resources/deployment.rs` 与 `resources.rs` 保留关闭结清超时分类；`src/sessions/sqlite_store/connection.rs` 用单调时钟限制 schema 开库锁等待。持久字段继续使用既有 RFC 3339 形状，`ThreadMeta` 的 Chrono 类型在本 crate 边界由 `SystemTime` 转换。
 

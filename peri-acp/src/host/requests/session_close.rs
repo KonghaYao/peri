@@ -4,7 +4,7 @@ use super::*;
 use crate::host::workspace::{resource_error, workspace_error};
 use peri_acp_types::session_resources::{CloseSettlement, SessionResourceErrorKind};
 
-pub(super) async fn close_session(
+pub(in crate::host::requests) async fn close_session(
     cfg: &AcpServerConfig,
     sessions: &mut HashMap<String, SessionState>,
     session_id: &str,
@@ -52,6 +52,12 @@ pub(super) async fn close_session(
         .get(session_id)
         .and_then(|state| state.environment.clone());
     let local = environment.as_ref().map(|env| &env.cfg).unwrap_or(cfg);
+    if environment.is_none() && local.workspace_assembly.is_some() && local.mcp_pool.is_none() {
+        return Err(AcpError::new(
+            -32010,
+            "Session close incomplete: persisted resource owner connections are unavailable",
+        ));
+    }
     let was_closing = sessions.get(session_id).is_some_and(|state| state.closing);
     if let Some(state) = sessions.get_mut(session_id) {
         state.closing = true;
@@ -74,7 +80,20 @@ pub(super) async fn close_session(
         }
     }
     if let Some(state) = sessions.get_mut(session_id) {
-        state.continuation_armed = false;
+        if local
+            .session_manager
+            .get_session(session_id)
+            .is_some_and(|session| {
+                session.active_agents.values().any(|agent| {
+                    agent.cancel_policy == peri_acp_types::thread::CancelPolicy::Independent
+                })
+            })
+        {
+            return Err(AcpError::new(
+                -32010,
+                "Session close incomplete: Independent child needs an explicit handoff",
+            ));
+        }
         if let Some(token) = state.cancel_token.as_ref() {
             token.cancel();
         }
@@ -102,6 +121,12 @@ pub(super) async fn close_session(
         .await
         .map_err(workspace_error)?;
     if let Some(environment) = environment.as_ref() {
+        if let Some(pool) = environment.cfg.mcp_pool.as_ref() {
+            pool.verify_shared_environment_close(session_id)
+                .map_err(|error| {
+                    AcpError::new(-32010, format!("Session close incomplete: {error}"))
+                })?;
+        }
         if !environment.shutdown().await {
             return Err(AcpError::new(
                 -32010,

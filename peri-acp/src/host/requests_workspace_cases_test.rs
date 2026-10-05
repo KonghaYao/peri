@@ -360,6 +360,10 @@ impl peri_acp_types::ports::McpPoolPort for RetryShutdownPool {
         self
     }
 
+    fn verify_shared_environment_close(&self, _session_id: &str) -> Result<(), String> {
+        Ok(())
+    }
+
     async fn shutdown(&self) -> peri_acp_types::ports::McpPoolShutdownReport {
         self.called.store(true, Ordering::Release);
         if self.settled.load(Ordering::Acquire) {
@@ -896,7 +900,7 @@ async fn prompt_without_frozen_snapshot_fails_closed() {
             workflow_middleware: None,
             title: None,
             tags: Vec::new(),
-            continuation_armed: false,
+
             continuation_epoch: 0,
             continuation_in_flight: false,
             continuation_mq_steering_pending: false,

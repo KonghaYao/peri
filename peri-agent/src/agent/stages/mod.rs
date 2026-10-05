@@ -10,6 +10,8 @@ pub mod act;
 mod async_context;
 pub mod compact;
 mod compact_progress;
+mod execution_control;
+pub use execution_control::run_react_loop;
 pub mod middleware_runner;
 mod queue_to_transcript;
 pub mod reason;
@@ -599,7 +601,7 @@ where
 /// 控制流：Receive → Compact → Reason → Act → (回 Receive)。
 /// Receive 是循环入口，也是退出判断点。
 /// 返回循环最终结果（Completed / Interrupted / Error）。
-pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> LoopResult {
+async fn run_react_loop_inner(context: StageContext, max_iterations: usize) -> LoopResult {
     let mut loop_state = LoopState::default();
     let mut semantic_iterations = 0usize;
     let execution = context.session.turn.execution_binding();

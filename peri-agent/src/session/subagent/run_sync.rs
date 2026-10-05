@@ -53,7 +53,7 @@ pub(super) async fn run_sync_subagent(
             "cascade".into(),
         );
     }
-    let _deregister_guard = DeregisterGuard {
+    let mut deregister_guard = DeregisterGuard {
         thread_id: child_thread_id.to_string(),
         deregister: deregister_runtime,
     };
@@ -61,7 +61,14 @@ pub(super) async fn run_sync_subagent(
     // The resumed claim crosses the first execution await with us. Its Drop
     // records cancellation without duplicating lifecycle Stop/hook delivery.
     if let Some(claim) = &mut resume_claim {
-        claim.mark_running();
+        let binding = v2_ctx.context.session.turn.execution_binding();
+        claim.mark_running(
+            peri_acp_types::session_resources::ControlAttempt {
+                turn_id: binding.turn_id,
+                attempt_id: binding.attempt_id,
+            },
+            session.clone(),
+        );
     }
     let stop_resources = if resume_claim.is_some() {
         None // 认领持有终态写入（finish 内定向写状态），此处不重复写。
@@ -115,6 +122,18 @@ pub(super) async fn run_sync_subagent(
     // 运行 v2 ReAct 循环
     let subagent_turn_id = v2_ctx.context.turn_id();
     let mut loop_result = run_react_loop(v2_ctx.context, max_iterations).await;
+    if let Err(error) = super::close::settle_explicit_close(
+        &session,
+        matches!(&loop_result, LoopResult::Interrupted),
+    )
+    .await
+    {
+        deregister_guard.deregister = None;
+        if let Some(claim) = resume_claim.take() {
+            claim.release().await;
+        }
+        return Err(error.into());
+    }
 
     // v2 SubagentStop（C3）：一个 emit 点覆盖 Completed / Interrupted / Error 三路
     let mut stop_failure = match &loop_result {

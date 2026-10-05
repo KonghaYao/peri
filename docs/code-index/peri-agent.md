@@ -2,6 +2,8 @@
 
 会话执行唯一性与接管由 `peri-sdk` 负责；Agent 不申请会话执行 lease、不继承 owner token、不执行 Store owner CAS 或 fencing。以下 task/cron/MCP owner 与 projection lease 均属资源或 capability 生命周期，不是会话执行所有权。
 
+RCRA 控制入口见 `agent/stages/execution_control.rs`：持久登记精确 turn/attempt 观察，固定本次控制代际，并在 Receive、Reason、Act 及每次工具发送前验证；Pause 后旧模型响应不能借 Resume 新代际提交。观察不是 attempt 调度准入。子会话显式关闭见 `session/subagent/close.rs`：关闭任务独立持有，调用者 Future 丢弃不撤销关闭；资源屏障未确认保留 Closing/Incomplete，不投递伪造的完成结果。`session/subagent/factory/claim.rs` 只在证明自身执行退出后清除对应观察；旧生命周期的 Inbox/任务事实保留，新生命周期采用新目录绑定。
+
 > 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-30（metrics 出口改为宿主装配注入的 `MetricsSink`（生产为 Langfuse event），本地 `~/.peri/metrics/*.jsonl` 落盘删除；未安装出口时指标丢弃）。此前：2026-09-29（W5：`ChainSlot::AgentDefine` 删除、蓝本槽位 21→20，agent 定义改由 `McpAgentRegistry` 的 `agent://` 资源提供、`{{available_agents}}` 经 `AgentCatalogPort`）。此前：2026-09-28（system MCP 选中工具使用原始模型名；工具来源绑定与 first-wins 冲突准入，见 ARC-TOOLS-001 / ARC-HITL-001）。此前：2026-09-27（v4-part-4 wave 3：`ChainSlot::Filesystem` / `ChainSlot::Terminal` 删除、`ChainSlot` 变体 22 个（7 个文件/终端工具改由 builtin `workspace` 实例提供，模型面为 workspace 原始工具名）；剔除面再覆盖 7 个裸名（`Read` / `Write` / `Edit` / `Glob` / `Grep` / `folder_operations` / `Bash`）——未选中 system 工具仍沿原 deferred 路径；新增模块 `session/bg_complete.rs`（AW3-11 的 session 级 `on_bg_complete` 构造器）；`agent/compact_v2/full.rs` 的最近文件 / 技能路径提取按 effective name 归一）。此前：2026-09-26（v4-part-3 wave 2：`ChainSlot::Cron` 删除，`ChainSlot` 变体 24 个；链内裸名剔除面覆盖四个已迁移工具名。此前：builtin 一等工具的生效名归一：`TOOL_PARAM_ALIASES` 与 `ToolFilterPolicy::canonical` 改「原样优先、未命中再用原始名」；`stage_builder/tools.rs` 谓词覆盖边界更新；链内删去 Web / Artifact 槽位。此前：启动闸门 hook `before_react_start` 与 System MCP 工具 static base 提交；Bash 同步执行有界化）
 > 依据：peri-agent/CLAUDE.md、docs/standards/architecture-contracts.md、源码
 

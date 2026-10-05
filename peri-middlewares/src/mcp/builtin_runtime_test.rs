@@ -10,7 +10,12 @@ use crate::mcp::{ClientStatus, McpClientHandle, McpClientPool, McpMiddleware};
 const FIXTURE_SESSION_ID: &str = "builtin-runtime-session";
 
 fn bind_fixture_session(pool: &McpClientPool) {
-    if !pool.session_tasks.read().contains_key(FIXTURE_SESSION_ID) {
+    if pool
+        .session_bindings
+        .read()
+        .manager(FIXTURE_SESSION_ID)
+        .is_none()
+    {
         let manager: Arc<dyn peri_acp_types::tasks::TaskManager> =
             Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
         pool.bind_session_task_manager(FIXTURE_SESSION_ID, &manager);

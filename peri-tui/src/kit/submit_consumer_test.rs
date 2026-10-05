@@ -93,14 +93,9 @@ async fn test_dropped_tx_exits_loop() {
     let _ = tokio::time::timeout(std::time::Duration::from_millis(500), handle).await;
 }
 
-/// Issue 2026-08-05 S4.2: cancel 收到信号时先发 cancel RPC（带超时）再本地
-/// 兜底复位 is_loading——transport 死亡 / prompt task panic 时 TurnInterrupted
-/// 永不到达，loading 无事件驱动复位路径；本地复位后 Ctrl+C 双击退出路径恢复
-/// 可用（与服务端 TurnInterrupted 幂等：事件到达后再次复位无害）。本测试的
-/// client 无 active session → cancel() 立即失败 → 走兜底复位分支。
 #[tokio::test]
 #[serial]
-async fn test_cancel_consumer_resets_loading_locally() {
+async fn test_cancel_consumer_failure_does_not_claim_execution_stopped() {
     crate::kit::atoms::init_atoms();
     // 模拟卡死状态：is_loading=true（事件流已中断，无法靠事件复位）
     {
@@ -114,14 +109,63 @@ async fn test_cancel_consumer_resets_loading_locally() {
     let _handle = spawn_cancel_consumer(client, rx, shutdown.clone());
 
     tx.send(()).unwrap();
-    // 复位发生在 cancel RPC 完成/失败之后——即使 cancel RPC 无响应（transport
-    // 已死）超时，复位也必定执行。
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     assert!(
-        !ACP_STATE.state().read().is_loading,
-        "cancel 信号后 is_loading 应本地复位为 false"
+        ACP_STATE.state().read().is_loading,
+        "控制失败不得伪造执行已停止"
     );
     shutdown.cancel();
+}
+
+#[tokio::test]
+#[serial]
+async fn test_cancel_consumer_rejection_preserves_loading() {
+    use peri_acp::transport::{AcpTransport, types::IncomingMessage};
+    use serde_json::json;
+
+    crate::kit::atoms::init_atoms();
+    ACP_STATE.state().write().is_loading = true;
+    let (client, server) = make_client_without_pump();
+    client.force_stable_for_test("s", false);
+    let (tx, rx) = mpsc::unbounded_channel();
+    let handle = spawn_cancel_consumer(client, rx, CancellationToken::new());
+    tx.send(()).unwrap();
+    let IncomingMessage::Request { id, method, .. } = server.recv().await.unwrap() else {
+        panic!("expected state RPC");
+    };
+    assert_eq!(method, "session/control/state");
+    let mut state = json!({"lifecycle":1,"revision":0,"controlGeneration":0,"status":"active",
+        "attempt":{"turnId":peri_acp_types::session::TurnId::new(),
+        "attemptId":peri_acp_types::identity::AttemptId::new()}});
+    server
+        .send_response(id, Ok(json!({"state":state,"settlement":null})))
+        .await
+        .unwrap();
+    let IncomingMessage::Request { id, method, params } = server.recv().await.unwrap() else {
+        panic!("expected stop RPC");
+    };
+    assert_eq!(method, "session/control");
+    state["attempt"]["turnId"] = json!(peri_acp_types::session::TurnId::new());
+    let receipt = peri_acp_types::session_resources::control::decide_control(
+        &serde_json::from_value(params).unwrap(),
+        &serde_json::from_value(state).unwrap(),
+    );
+    assert!(matches!(
+        receipt.decision,
+        peri_acp_types::session_resources::ControlDecision::Rejected {
+            reason: peri_acp_types::session_resources::ControlRejection::StaleAttempt
+        }
+    ));
+    server
+        .send_response(id, Ok(serde_json::to_value(receipt).unwrap()))
+        .await
+        .unwrap();
+    drop(tx);
+    tokio::time::timeout(std::time::Duration::from_secs(2), handle)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(ACP_STATE.state().read().is_loading);
 }
 
 /// S4.2: clear_loading_state 双保险——直接写 ACP_STATE（bridge 已退出的

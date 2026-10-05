@@ -33,7 +33,7 @@ impl McpClientPool {
         subscription_id: &str,
         kind: MessageKind,
     ) {
-        let handles: Vec<InboxHandle> = self.session_inboxes.read().values().cloned().collect();
+        let handles: Vec<InboxHandle> = self.session_bindings.read().inboxes();
         if handles.is_empty() {
             tracing::debug!(server = %server, uri = %uri, "订阅通知到达但无注册会话 inbox");
             return;
@@ -70,7 +70,7 @@ impl McpClientPool {
                 reminder.clone(),
             );
         }
-        tracing::info!(server = %server, uri = %uri, sessions = %self.session_inboxes.read().len(), "订阅通知已广播到会话 inbox");
+        tracing::info!(server = %server, uri = %uri, sessions = %self.session_bindings.read().inboxes().len(), "订阅通知已广播到会话 inbox");
     }
 
     /// 订阅流异常中断后的最大重试次数（每次中断独立计算，收到通知即重置）。
@@ -155,7 +155,7 @@ impl McpClientPool {
         body: &str,
         declared_kind: Option<McpNotificationMessageKind>,
     ) {
-        let handles: Vec<InboxHandle> = self.session_inboxes.read().values().cloned().collect();
+        let handles: Vec<InboxHandle> = self.session_bindings.read().inboxes();
         if handles.is_empty() {
             tracing::debug!(server = %server, uri = %uri, "git ref 变化到达但无注册会话 inbox");
             return;
@@ -169,7 +169,7 @@ impl McpClientPool {
                 reminder.clone(),
             );
         }
-        tracing::info!(server = %server, uri = %uri, sessions = %self.session_inboxes.read().len(), "git ref 变化已注入会话");
+        tracing::info!(server = %server, uri = %uri, sessions = %self.session_bindings.read().inboxes().len(), "git ref 变化已注入会话");
     }
 
     /// 启动订阅消费循环：读取 `subscriptions/listen` 流上的通知并广播。

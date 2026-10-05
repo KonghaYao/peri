@@ -170,6 +170,17 @@ pub(super) async fn spawn_background_subagent(
         );
 
         let loop_result = run_react_loop(context, max_iterations).await;
+        if let Err(error) = super::close::settle_explicit_close(
+            &session,
+            matches!(&loop_result, LoopResult::Interrupted),
+        )
+        .await
+        {
+            tracing::error!(thread_id = %child_thread_id_for_task, %error, "child close incomplete; delegation terminal withheld");
+            cleanup_guard.deregister = None;
+            cleanup_guard.disarm_stop();
+            return;
+        }
         // Stop accepting messages before any async terminal work or notifications.
         drop(inbox_guard);
 

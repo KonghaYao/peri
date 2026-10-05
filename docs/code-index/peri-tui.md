@@ -1,5 +1,7 @@
 # peri-tui 代码索引
 
+显式停止入口 `src/acp_client/client/requests.rs::cancel` 先读取持久控制状态，有当前 attempt 时提交精确 Stop，无 attempt 时提交 Pause；稳定 command ID 的 Unknown 按原命令对账，不改投后来的 attempt。接纳控制意图不等于已静止，loading/交互终结仍等待执行结束通知；回归见 `src/acp_client/client/cancel_test.rs`。
+
 > 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-30（Session ID/environment：删除 dirty 恢复风险弹窗、RecoverDirty 和 reset 交互；保留 load reservation、只读准入投影与普通确认）。
 > 依据：peri-tui/CLAUDE.md、docs/standards/architecture-contracts.md、docs/design/tui-acp-data-flow.md、源码
 

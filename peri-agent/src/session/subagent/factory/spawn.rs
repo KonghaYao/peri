@@ -283,7 +283,8 @@ pub(super) async fn spawn_subagent_impl(
         context_budget,
         compact_llm,
         Some(agent_id_from_child_thread(&child_thread_id)),
-    )?;
+    )
+    .await?;
 
     let transcript = session.transcript();
 

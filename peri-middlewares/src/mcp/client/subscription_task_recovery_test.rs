@@ -165,7 +165,7 @@ async fn unloaded_child_terminal_retries_same_delivery_without_root_fallback() {
     wire.install(&pool, "workspace", true);
     let (_, root_inbox) = bind_session(&pool, "root");
     let (manager, child_inbox) = bind_session(&pool, "child");
-    pool.session_inboxes.write().remove("child");
+    pool.session_bindings.write().unregister("child");
     assert_eq!(
         pool.recover_workspace_tasks("child").await.unwrap_err(),
         "session inbox unavailable"

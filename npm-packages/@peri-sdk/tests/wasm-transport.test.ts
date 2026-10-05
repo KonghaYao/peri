@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { closeCommand, controlResponse } from "../test/control-fixture";
 import { WasmAcpTransport } from "../src/transport/wasm-transport";
 import type { NativeWasmAcp } from "../src/wasm/loader";
 
@@ -77,6 +78,8 @@ test("existing Agent and Session APIs run over an injected WASM frame port", asy
       case "session/new": result = { sessionId: "s1" }; break;
       case "session/input/snapshot": result = { generation: "g1" }; break;
       case "session/input/enqueue": result = { results: [{ inputId: request.params?.inputId, state: "delivered" }] }; break;
+      case "session/control":
+      case "session/control/state": result = controlResponse(request.method, request.params); break;
       default: throw new Error(`Unexpected ACP request ${request.method}`);
     }
     wire.push({ jsonrpc: "2.0", id: request.id, result });
@@ -91,7 +94,7 @@ test("existing Agent and Session APIs run over an injected WASM frame port", asy
     await receipt;
     expect(receipt.isSent).toBe(true);
     expect(methods).toEqual(["initialize", "session/new", "session/input/snapshot", "session/input/enqueue"]);
-  } finally { await manager.closeAll(); }
+  } finally { await manager.closeAll(new Map([[agent.id, closeCommand]])); }
 });
 
 test("WASM receive failure settles pending requests and closes native port once", async () => {

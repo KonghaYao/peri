@@ -22,10 +22,14 @@ use crate::sessions::failure::{read_only_store, unavailable};
 use crate::sessions::local_port::LocalExecutionPort;
 use crate::sessions::resources::lifecycle::{Lifecycle, LifecycleState};
 
+#[path = "gate_control.rs"]
+mod control;
+
 #[derive(Default)]
 struct PendingWrites {
     barrier: Arc<RwLock<()>>,
     uncertain: AtomicBool,
+    control: Mutex<Option<peri_acp_types::session_resources::ControlCommand>>,
 }
 
 pub(super) struct WriteScope {
@@ -130,7 +134,13 @@ impl MutationGate {
     }
 
     fn check_pending(pending: &PendingWrites, root: &ThreadId) -> SessionResourceResult<()> {
-        if pending.uncertain.load(Ordering::Acquire) {
+        if pending.uncertain.load(Ordering::Acquire)
+            || pending
+                .control
+                .lock()
+                .expect("pending control lock poisoned")
+                .is_some()
+        {
             return Err(SessionResourceError::persistence_uncertain(Some(
                 root.clone(),
             )));
@@ -229,6 +239,14 @@ impl MutationGate {
                     peri_acp_types::session_resources::SessionResourceErrorKind::Timeout,
                 )
             })?;
+        if pending
+            .control
+            .lock()
+            .expect("pending control lock poisoned")
+            .is_some()
+        {
+            return Ok(PersistenceRecovery::StillBlocked);
+        }
         let result = self.data.recover_persistence(id).await?;
         if matches!(result, PersistenceRecovery::Recovered) && !self.local.is_read_only() {
             pending.uncertain.store(false, Ordering::Release);

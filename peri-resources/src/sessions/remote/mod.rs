@@ -125,6 +125,7 @@ mod schema_v14_upgrade;
 mod schema_upgrade_tests;
 mod session_catalog;
 mod session_codec;
+mod session_control;
 mod session_data;
 mod session_evidence;
 mod session_history;

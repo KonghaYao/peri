@@ -63,7 +63,7 @@ async fn test_owned_host_shutdown_includes_final_producer_event_and_joins() {
     cfg.host_task_spawner
         .spawn(
             crate::host::task_scope::HostTaskOwnerKind::Host,
-            crate::host::task_scope::HostTaskKind::LegacyCancelHook,
+            crate::host::task_scope::HostTaskKind::UserInputEvents,
             async move {
                 started_tx.send(()).unwrap();
                 cancellation.cancelled().await;

@@ -140,10 +140,6 @@ pub(crate) struct SessionState {
     /// 预测生成的会话标签（未来按标签检索使用）。
     pub(crate) tags: Vec<String>,
     // ── 内部 AsyncContinuation 调度状态（private，仅 scheduler/notify 访问）──
-    /// 被取消 prompt 的续跑标记：`session/cancel` 置位（只影响当前 prompt，
-    /// 即 cancel 时正在运行的那一轮）；bg agent 完成通知到达 scheduler 后
-    /// 原子 take，只运行一次。用户显式新 prompt 清除未运行的标记。
-    continuation_armed: bool,
     /// prompt 代际计数：每次用户显式 prompt 递增。continuation 在 take 之后、
     /// 获取 prompt lock 之后校验代际未变——用户新 prompt 可清掉已排队但
     /// 尚未运行的 continuation。
@@ -263,7 +259,7 @@ pub(crate) type PromptLocks = Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::
 /// **内部 AsyncContinuation**：spawn 一个 per-session coalesce 的 continuation
 /// scheduler（见 [`run_continuation_scheduler`]）。被取消的 prompt 若有独立 bg
 /// agent 结果完成（executor `on_bg_complete` 闭包已先 route 到 SessionInbox），
-/// scheduler 原子 take `SessionState::continuation_armed` 后通过与用户 prompt
+/// scheduler 合并 MQ 通知并重验持久控制状态后通过与用户 prompt
 /// 相同的执行路径（pool / prompt lock / run_prompt 后处理）发起一次内部续跑。
 pub async fn run_acp_server(
     transport: Arc<dyn crate::transport::AcpTransport>,

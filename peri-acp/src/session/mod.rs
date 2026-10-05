@@ -318,7 +318,7 @@ impl SessionManager {
                 mailbox.invalidate();
             }
             session.user_input_events_cancel.cancel();
-            peri_acp_types::session::cancel_all_agents(session.active_agents.values());
+            peri_acp_types::session::cancel_cascade_agents(session.active_agents.values());
             session.cancel_token.cancel();
             session.task_manager.cancel_all();
         }

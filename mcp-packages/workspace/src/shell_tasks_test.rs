@@ -3,6 +3,125 @@ use std::{sync::Arc, time::Duration};
 use rmcp::model::{TaskPayload, TaskStatus};
 
 use super::ShellTasks;
+
+struct FailedCreationExecutor {
+    panics: bool,
+}
+
+impl peri_agent::agent::async_tasks::ShellExecutor for FailedCreationExecutor {
+    fn cancel_callback(
+        &self,
+        _: u32,
+        _: Arc<peri_agent::agent::async_tasks::BackgroundTaskRegistry>,
+    ) -> Option<Box<dyn FnOnce() + Send + Sync>> {
+        None
+    }
+
+    fn spawn(
+        &self,
+        _: Arc<peri_agent::agent::async_tasks::BackgroundTaskRegistry>,
+        _: Box<dyn peri_acp_types::tasks::ExternalExecutionGuard>,
+        _: String,
+        _: String,
+        _: Option<u64>,
+        _: Option<peri_acp_types::tasks::OnBgCompleteFn>,
+    ) -> Result<peri_acp_types::tasks::BgShellHandle, Box<dyn std::error::Error + Send + Sync>>
+    {
+        if self.panics {
+            panic!("fixture: accepted shell creation panicked before registration");
+        }
+        Err("fixture: accepted shell creation failed before registration".into())
+    }
+}
+
+async fn assert_failed_creation_keeps_scope_unconfirmed(panics: bool) {
+    let mut owner = ShellTasks::new();
+    owner.manager = Arc::new(
+        peri_agent::agent::async_tasks::TaskManager::with_shell_executor(Arc::new(
+            FailedCreationExecutor { panics },
+        )),
+    );
+    assert!(owner
+        .spawn_scoped("command".into(), "/tmp".into(), None, Some("child"))
+        .await
+        .is_err());
+    let cursor = owner.close_scope("child", 0).await.unwrap();
+    let snapshot = owner.snapshot("child");
+    assert!(snapshot.closing);
+    assert_eq!(snapshot.epoch, 0);
+    assert!(snapshot.cursor >= cursor);
+    assert!(snapshot.tasks.is_empty());
+    assert!(!snapshot.resources_settled);
+    assert!(owner
+        .open_scope("child", 0)
+        .err()
+        .unwrap()
+        .message
+        .contains("Incomplete"));
+    assert!(owner.snapshot("other-child").resources_settled);
+    assert!(!owner.snapshot("other-child").closing);
+}
+
+#[tokio::test]
+async fn failed_creation_without_task_row_cannot_report_scope_settled() {
+    assert_failed_creation_keeps_scope_unconfirmed(false).await;
+}
+
+#[tokio::test]
+async fn panicked_creation_without_task_row_cannot_report_scope_settled() {
+    assert_failed_creation_keeps_scope_unconfirmed(true).await;
+}
+
+#[tokio::test]
+async fn scoped_resource_settlement_waits_for_shell_cleanup_not_cancel_acceptance() {
+    let owner = ShellTasks::new();
+    let directory = tempfile::tempdir().unwrap();
+    let task = owner
+        .spawn_scoped(
+            "sleep 30".into(),
+            directory.path().to_string_lossy().into_owned(),
+            None,
+            Some("closing-child"),
+        )
+        .await
+        .unwrap();
+    let other = owner
+        .spawn_scoped(
+            "sleep 30".into(),
+            directory.path().to_string_lossy().into_owned(),
+            None,
+            Some("independent-child"),
+        )
+        .await
+        .unwrap();
+    let cursor = owner.close_scope("closing-child", 0).await.unwrap();
+    assert!(!owner.snapshot("closing-child").resources_settled);
+    owner.cancel_scoped(&task.task_id, "closing-child").unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let snapshot = owner.snapshot("closing-child");
+            assert!(snapshot.closing);
+            assert_eq!(snapshot.epoch, 0);
+            assert!(snapshot.cursor >= cursor);
+            if snapshot.resources_settled {
+                assert!(snapshot
+                    .tasks
+                    .iter()
+                    .all(|task| task.task.status().is_terminal()));
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("shell cleanup must settle before close succeeds");
+    assert!(!owner.snapshot("independent-child").resources_settled);
+    assert!(!owner.snapshot("independent-child").closing);
+    owner
+        .cancel_scoped(&other.task_id, "independent-child")
+        .unwrap();
+    owner.manager().shutdown().await;
+}
 #[test]
 fn session_admissions_do_not_require_an_execution_owner() {
     let owner = ShellTasks::new();

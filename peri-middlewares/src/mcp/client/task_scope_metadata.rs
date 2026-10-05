@@ -7,9 +7,9 @@ use super::McpClientPool;
 
 impl McpClientPool {
     pub fn bind_session_task_manager(&self, session_id: &str, manager: &Arc<dyn TaskManager>) {
-        self.session_tasks
+        self.session_bindings
             .write()
-            .insert(session_id.to_owned(), Arc::clone(manager));
+            .bind_initial_manager(session_id, Arc::clone(manager));
         self.task_scope_tokens
             .write()
             .entry(session_id.to_owned())

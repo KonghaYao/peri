@@ -538,6 +538,24 @@ pub(super) fn unsupported_behavior(behavior: &'static str) -> SessionResourceErr
 
 #[async_trait]
 impl SessionDataPort for RemoteSessionData {
+    async fn load_session_control(
+        &self,
+        id: &ThreadId,
+    ) -> SessionResourceResult<peri_acp_types::session_resources::ControlState> {
+        self.read_control(id).await
+    }
+    async fn apply_session_control(
+        &self,
+        command: &peri_acp_types::session_resources::ControlCommand,
+    ) -> SessionResourceResult<peri_acp_types::session_resources::ControlReceipt> {
+        self.write_control(command).await
+    }
+    async fn resolve_session_control(
+        &self,
+        command: &peri_acp_types::session_resources::ControlCommand,
+    ) -> SessionResourceResult<peri_acp_types::session_resources::ControlResolution> {
+        self.resolve_control(command).await
+    }
     async fn finish_close(&self, id: &ThreadId) -> SessionResourceResult<()> {
         self.finish_session_close(id).await
     }

@@ -20,7 +20,7 @@ pub(super) async fn upgrade(
     store: &RemoteStore,
     snapshot: &StoreSnapshot,
 ) -> SessionResourceResult<()> {
-    if matches!(snapshot.schema_version, 12 | 13) && snapshot.contract == schema::STORE_CONTRACT {
+    if matches!(snapshot.schema_version, 12..=14) && snapshot.contract == schema::STORE_CONTRACT {
         return super::schema_v14_upgrade::upgrade(store, snapshot).await;
     }
     if snapshot.schema_version == 11 && snapshot.contract == "peri.session.store/v2" {

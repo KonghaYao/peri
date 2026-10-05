@@ -29,7 +29,7 @@ use peri_acp_types::session_resources::SessionResources;
 /// 父身份解析与消息注入（parent_messages / system_prompt / prompt）差异
 /// 留在调用方；冻结快照与取消 token 的共享派生由本模块集中实现。
 #[allow(clippy::too_many_arguments)]
-pub(super) fn build_subagent_session_v2(
+pub(super) async fn build_subagent_session_v2(
     cwd: String,
     frozen: FrozenContext,
     cancel_token: CancellationToken,
@@ -55,10 +55,27 @@ pub(super) fn build_subagent_session_v2(
 ) -> Result<(Arc<Session>, V2SubagentContext), Box<dyn std::error::Error + Send + Sync>> {
     let cancel_arc: Arc<CancellationToken> = Arc::new(cancel_token.clone());
     let mut host = parent_host.as_deref().cloned().unwrap_or_default();
-    let binding = host
-        .mcp_pool
-        .as_ref()
-        .and_then(|pool| pool.agent_session_binding(&child_thread_id));
+    let lifecycle = match &session_resources {
+        Some(resources) => {
+            let control = resources.load_session_control(&child_thread_id).await?;
+            if control.status != peri_acp_types::session_resources::ControlStatus::Active {
+                return Err(
+                    "Incomplete: child control is not Active; explicit Reopen required".into(),
+                );
+            }
+            Some(control.lifecycle)
+        }
+        None => None,
+    };
+    let binding = match (&host.mcp_pool, lifecycle) {
+        (Some(pool), Some(lifecycle)) => {
+            pool.clone()
+                .agent_session_binding_for_lifecycle(&child_thread_id, lifecycle)
+                .await?
+        }
+        (Some(_), None) => return Err("Incomplete: child lifecycle identity unavailable".into()),
+        (None, _) => None,
+    };
     let queue = binding
         .as_ref()
         .map(|(inbox, _)| inbox.queue().clone())
@@ -71,6 +88,7 @@ pub(super) fn build_subagent_session_v2(
         queue,
     );
     host.session_resources = session_resources.clone();
+    host.close_state = Arc::default();
     host.task_manager = Some(match binding {
         Some((_, manager)) => {
             let manager: Arc<dyn std::any::Any + Send + Sync> = manager;
@@ -85,6 +103,17 @@ pub(super) fn build_subagent_session_v2(
         router.route_bg_result(result, kind);
         Ok(())
     }));
+    if let (Some(pool), Some(lifecycle), Some(manager)) =
+        (&host.mcp_pool, lifecycle, &host.task_manager)
+    {
+        let inbox = peri_acp_types::session::SessionInbox::new(Arc::new(session.queue().clone()));
+        pool.bind_agent_session_for_lifecycle(
+            &child_thread_id,
+            lifecycle,
+            inbox.handle(),
+            manager.clone(),
+        )?;
+    }
     session.set_subagent_host(host);
 
     // transcript 绑定（ancestor 先于 with_persistence，顺序不可反）

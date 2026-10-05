@@ -35,6 +35,18 @@ pub struct ChildResumeRecord {
 /// 「未生效」报告成成功，也不得在失败后遗留部分写入。
 #[async_trait]
 pub(crate) trait SessionDataPort: Send + Sync {
+    async fn load_session_control(
+        &self,
+        id: &ThreadId,
+    ) -> SessionResourceResult<peri_acp_types::session_resources::ControlState>;
+    async fn apply_session_control(
+        &self,
+        command: &peri_acp_types::session_resources::ControlCommand,
+    ) -> SessionResourceResult<peri_acp_types::session_resources::ControlReceipt>;
+    async fn resolve_session_control(
+        &self,
+        command: &peri_acp_types::session_resources::ControlCommand,
+    ) -> SessionResourceResult<peri_acp_types::session_resources::ControlResolution>;
     async fn finish_close(&self, id: &ThreadId) -> SessionResourceResult<()>;
     async fn close_settlement(
         &self,

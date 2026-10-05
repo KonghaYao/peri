@@ -39,6 +39,8 @@ use crate::sessions::data::SessionDataPort;
 mod async_task;
 #[path = "session_data/catalog.rs"]
 mod catalog;
+#[path = "session_data/control.rs"]
+mod control;
 #[path = "session_data/history.rs"]
 mod history;
 #[path = "session_data/lifecycle.rs"]
@@ -73,6 +75,24 @@ pub(super) use helpers::{new_session_draft_row, new_session_row, validate_unboun
 
 #[async_trait]
 impl SessionDataPort for SqliteSessionData {
+    async fn load_session_control(
+        &self,
+        id: &ThreadId,
+    ) -> SessionResourceResult<peri_acp_types::session_resources::ControlState> {
+        self.read_control(id).await
+    }
+    async fn apply_session_control(
+        &self,
+        command: &peri_acp_types::session_resources::ControlCommand,
+    ) -> SessionResourceResult<peri_acp_types::session_resources::ControlReceipt> {
+        self.write_control(command).await
+    }
+    async fn resolve_session_control(
+        &self,
+        command: &peri_acp_types::session_resources::ControlCommand,
+    ) -> SessionResourceResult<peri_acp_types::session_resources::ControlResolution> {
+        self.resolve_control(command).await
+    }
     fn oauth_credentials_for_workspace(
         self: Arc<Self>,
         workspace_id: peri_acp_types::workspace::WorkspaceId,

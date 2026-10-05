@@ -207,6 +207,8 @@ async fn shared_peer_scopes_discovery_access_and_close() {
         .await
         .expect("close gate");
     assert!(closed["barrierCursor"].as_u64().is_some());
+    assert_eq!(closed["epoch"].as_u64(), Some(epoch));
+    assert_eq!(closed["resourcesSettled"], true);
     assert!(client.peer().call_tool_once(request).await.is_err());
     let reopened = scope_epoch_request(&client, "workspace/taskOpen", &first, epoch)
         .await

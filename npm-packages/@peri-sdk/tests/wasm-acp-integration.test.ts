@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { createServer, connect } from "node:net";
 import { once } from "node:events";
+import { closeExpectation } from "../test/control-fixture";
 import {
   ManagedAgents, MemoryKV, Sandbox, TursoStorage, WasmAcpTransport,
 } from "../dist/index.js";
@@ -86,9 +87,11 @@ test("Agent start, send, list and load work through WASM ACP", async () => {
     }) }),
   });
   const manager = new ManagedAgents({ kv: new MemoryKV() });
+  const agents: ReturnType<typeof manager.createAgent>[] = [];
   try {
     await waitForSqld(sqlPort, sqld);
     const createdAgent = manager.createAgent({ path: workspace, id: "created", sandbox });
+    agents.push(createdAgent);
     const created = await createdAgent.session.start(null);
     const sessionId = created.id;
     const receipt = created.send("Reply once");
@@ -97,15 +100,22 @@ test("Agent start, send, list and load work through WASM ACP", async () => {
     for (let attempt = 0; attempt < 200 && modelCalls === 0; attempt++) await Bun.sleep(50);
     expect(modelCalls).toBe(1);
     expect((await sandbox.getSessions(workspace)).some((entry) => entry.id === sessionId)).toBe(true);
-    await manager.closeAgent(createdAgent.id);
+    await manager.closeAgent(createdAgent.id, await closeExpectation(createdAgent.session));
     expect(telemetry.length).toBeGreaterThan(0);
     expect(JSON.stringify(telemetry)).toContain("resourceSpans");
 
     const loadedAgent = manager.createAgent({ id: "loaded", sandbox });
+    agents.push(loadedAgent);
     const loaded = await loadedAgent.session.start(sessionId);
     expect(loaded.id).toBe(sessionId);
+    const { state } = await loaded.controlState();
+    expect((await loaded.reopen({ commandId: crypto.randomUUID(), expectedLifecycle: state.lifecycle,
+      expectedRevision: state.revision, expectedControlGeneration: state.controlGeneration })).decision.kind).toBe("accepted");
   } finally {
-    await manager.closeAll();
+    for (const agent of agents) {
+      if (agent.session.isClosed) continue;
+      await manager.closeAgent(agent.id, await closeExpectation(agent.session));
+    }
     model.stop(true);
     langfuse.stop(true);
     sqld.kill("SIGTERM");

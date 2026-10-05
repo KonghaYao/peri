@@ -1,3 +1,4 @@
+import { closeCommand, controlResponse } from "./control-fixture";
 import { describe, expect, test } from "bun:test";
 import { AgentClaimConflictError } from "../src/kv/agent-claim-conflict-error";
 import { MemoryKV } from "../src/kv/memory-kv";
@@ -75,6 +76,7 @@ class FakeTransport implements Transport {
   newSessionId = "session-1";
 
   async request<T>(method: string, params?: unknown): Promise<T> {
+    if (method.startsWith("session/control")) return controlResponse(method, params) as T;
     this.calls.push({ method, params });
     if (method === this.failOn) throw new Error(`failed: ${method}`);
     switch (method) {
@@ -201,7 +203,7 @@ describe("ManagedAgents lifecycle", () => {
     const first = declaration(firstManager);
     await first.agent.session.start(null);
     expect(kv.owners.size).toBe(2);
-    await firstManager.closeAgent("agent-1");
+    await firstManager.closeAgent("agent-1", closeCommand);
     expect(first.transport.closed).toBe(true);
     expect(kv.owners.size).toBe(0);
     const second = declaration(new ManagedAgents({ kv }));
@@ -276,7 +278,7 @@ describe("ManagedAgents lifecycle", () => {
     const { agent } = declaration(manager);
     const session = await agent.session.start(null);
     const result = Promise.resolve(session.send("hello"));
-    await manager.closeAgent("agent-1");
+    await manager.closeAgent("agent-1", closeCommand);
     await expect(result).rejects.toThrow("closed before user input was delivered");
   });
 
@@ -323,7 +325,7 @@ describe("ManagedAgents lifecycle", () => {
     const second = await iterator.next();
     expect(second.value.method).toBe("peri/agent_event");
     await iterator.return?.();
-    await manager.closeAgent("agent-1");
+    await manager.closeAgent("agent-1", closeCommand);
   });
 
   test("raw stream overflow leaves projection current and allows a new live diagnostic stream", async () => {
@@ -340,7 +342,7 @@ describe("ManagedAgents lifecycle", () => {
     const current = session.stream()[Symbol.asyncIterator]();
     const next = current.next(); emit("agent_message_chunk", "tail");
     expect((await next).value.params.update.content.text).toBe("tail");
-    await current.return?.(); await manager.closeAgent(agent.id);
+    await current.return?.(); await manager.closeAgent(agent.id, closeCommand);
   });
 
   test("ACP setup serializes HTTP headers and stdio env as named entries", async () => {

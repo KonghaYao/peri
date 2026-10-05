@@ -20,9 +20,11 @@
 //! - agent_status 收尾语义与迁移前一致：done / cancelled / error。
 
 mod background;
+mod close;
 mod directives;
 mod factory;
 mod lifecycle;
+pub use close::{close_subagent_session_scope, SubagentCloseState};
 mod run_sync;
 mod types;
 mod util;

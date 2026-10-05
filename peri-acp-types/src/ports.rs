@@ -160,6 +160,34 @@ pub trait McpPoolPort: Send + Sync {
         None
     }
 
+    async fn agent_session_binding_for_lifecycle(
+        self: Arc<Self>,
+        _session_id: &str,
+        _lifecycle: u64,
+    ) -> Result<
+        Option<(
+            crate::session::InboxHandle,
+            Arc<dyn crate::tasks::TaskManager>,
+        )>,
+        String,
+    > {
+        Err("Incomplete: typed session lifecycle binding unavailable".into())
+    }
+
+    fn bind_agent_session_for_lifecycle(
+        &self,
+        _session_id: &str,
+        _lifecycle: u64,
+        _inbox: crate::session::InboxHandle,
+        _manager: Arc<dyn crate::tasks::TaskManager>,
+    ) -> Result<(), String> {
+        Err("Incomplete: typed session lifecycle binding unavailable".into())
+    }
+
+    fn verify_shared_environment_close(&self, _root_session_id: &str) -> Result<(), String> {
+        Err("Incomplete: shared environment child ownership unknown".into())
+    }
+
     /// Revert recorded file changes in the session's trusted Workspace owner.
     /// Implementations must reject unavailable owners and report every failed change.
     async fn rewind_files(
@@ -262,6 +290,10 @@ pub trait McpPoolPort: Send + Sync {
     }
 
     // ── Workspace task scope ─────────────────────────────────────────────
+
+    async fn close_agent_session_scope(self: Arc<Self>, _session_id: &str) -> Result<(), String> {
+        Err("Incomplete: agent session scope close capability unavailable".into())
+    }
     //
     // 默认实现同「替换前类型还原失败 ⇒ 跳过」：不参与 scope 生命周期。
 

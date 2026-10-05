@@ -42,6 +42,7 @@ pub(crate) struct ScopeSnapshot {
     pub cursor: u64,
     pub epoch: u64,
     pub closing: bool,
+    pub resources_settled: bool,
     pub tasks: Vec<ScopedTask>,
 }
 
@@ -60,6 +61,7 @@ pub(crate) struct ScopeOpened {
 
 #[derive(Default)]
 struct ShellState {
+    resources_settled: HashSet<String>,
     records: HashMap<String, DetailedTask>,
     scopes: HashMap<String, String>,
     summaries: HashMap<String, String>,
@@ -70,6 +72,7 @@ struct ShellState {
     closing: HashSet<String>,
     epochs: HashMap<String, u64>,
     inflight: HashMap<String, usize>,
+    failed_creation_unconfirmed: HashSet<String>,
     cancel_pending: HashSet<String>,
     cancel_accepted: HashSet<String>,
     pending_results: HashMap<String, BackgroundTaskResult>,
@@ -161,6 +164,7 @@ impl ShellTasks {
                 return Err("shell task owner received a non-shell result".into());
             }
             let mut state = state.lock();
+            state.resources_settled.insert(result.task_id.clone());
             if let Some(scope) = &scope {
                 state
                     .scopes
@@ -243,6 +247,7 @@ impl ShellTasks {
         Ok(ScopeAdmission {
             owner: self.clone(),
             scope: scope.into(),
+            creation_unconfirmed: false,
         })
     }
 
@@ -266,15 +271,23 @@ impl ShellTasks {
         // The MCP request may be cancelled while spawn_blocking is running.
         // Admission and registration must outlive that request future so a
         // closing barrier cannot miss a process already accepted by the owner.
-        let admission = scope.map(|scope| self.admit(scope)).transpose()?;
+        let mut admission = scope.map(|scope| self.admit(scope)).transpose()?;
+        if let Some(admission) = &mut admission {
+            admission.creation_unconfirmed = true;
+        }
         let owner = self.clone();
         let scope = scope.map(str::to_owned);
         let (reply, receive) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
-            let _admission = admission;
+            let mut admission = admission;
             let result = owner
                 .spawn_scoped_owned(command, cwd, timeout_ms, scope.as_deref())
                 .await;
+            if result.is_ok() {
+                if let Some(admission) = &mut admission {
+                    admission.creation_unconfirmed = false;
+                }
+            }
             let _ = reply.send(result);
         });
         receive.await.map_err(|_| {
@@ -495,6 +508,16 @@ impl ShellTasks {
             cursor: state.cursor,
             epoch: *state.epochs.get(scope).unwrap_or(&0),
             closing: state.closing.contains(scope),
+            resources_settled: state.inflight.get(scope).copied().unwrap_or(0) == 0
+                && !state.failed_creation_unconfirmed.contains(scope)
+                && state
+                    .scopes
+                    .iter()
+                    .filter(|(_, owner)| owner.as_str() == scope)
+                    .all(|(task_id, _)| {
+                        state.resources_settled.contains(task_id)
+                            && !state.cancel_pending.contains(task_id)
+                    }),
             tasks,
         }
     }
@@ -571,13 +594,20 @@ impl ShellTasks {
         if !state.closing.contains(scope) {
             return Err(McpError::invalid_params("task scope is not closing", None));
         }
+        if state.failed_creation_unconfirmed.contains(scope) {
+            return Err(McpError::invalid_params(
+                "Incomplete: failed shell creation resource settlement unconfirmed",
+                None,
+            ));
+        }
         if state.inflight.get(scope).copied().unwrap_or(0) != 0
             || state.scopes.iter().any(|(id, task_scope)| {
                 task_scope == scope
-                    && state
-                        .records
-                        .get(id)
-                        .is_some_and(|task| !task.task.status.is_terminal())
+                    && (!state.resources_settled.contains(id)
+                        || state
+                            .records
+                            .get(id)
+                            .is_none_or(|task| !task.task.status.is_terminal()))
             })
         {
             return Err(McpError::invalid_params(
@@ -604,11 +634,15 @@ impl ShellTasks {
 pub(crate) struct ScopeAdmission {
     owner: ShellTasks,
     scope: String,
+    creation_unconfirmed: bool,
 }
 
 impl Drop for ScopeAdmission {
     fn drop(&mut self) {
         let mut state = self.owner.state.lock();
+        if self.creation_unconfirmed {
+            state.failed_creation_unconfirmed.insert(self.scope.clone());
+        }
         if let Some(count) = state.inflight.get_mut(&self.scope) {
             *count -= 1;
             if *count == 0 {

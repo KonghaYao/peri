@@ -3,6 +3,12 @@ import { SendReceipt } from "./send-receipt";
 import type { JsonRpcNotification, Transport } from "../transport/types";
 import type { SessionDocs } from "../state/session-docs";
 import { EventQueue } from "../transport/event-queue";
+import {
+    SessionControl, controlCommandIdentity,
+    type CommandExpectation, type StopCommand, type ControlAction,
+    type ControlCommand, type ControlReceipt, type ControlResolution, type ControlSnapshot, type CloseOptions,
+} from "./session-control";
+import { drainClose, closeDrainBudget } from "./close-drain";
 
 type QueueSnapshot = {
     generation: string;
@@ -28,7 +34,10 @@ export class Session {
     private currentPath?: string;
     private generation?: string;
     private startPromise?: Promise<Session>;
-    private closePromise?: Promise<void>;
+    private closePromise?: Promise<ControlReceipt>;
+    private startupCleanupPromise?: Promise<void>;
+    private readonly controls = new SessionControl();
+    private settledClose?: { command: ControlCommand; receipt: ControlReceipt };
     private notifications = new EventQueue(() => {});
     private unsubscribe?: () => void;
     private streamOpen = false;
@@ -48,9 +57,10 @@ export class Session {
     }
 
     get path(): string | undefined { return this.currentPath; }
+    get isClosed(): boolean { return this.state === "closed"; }
 
     start(requestedSessionId: string | null): Promise<Session> {
-        if (this.closePromise)
+        if (this.closePromise || this.startupCleanupPromise)
             throw new Error("Session cannot start while closing");
         if (this.state !== "declared")
             throw new Error(`Session cannot start from ${this.state}`);
@@ -199,7 +209,7 @@ export class Session {
             } catch (cleanupError) {
                 throw new AggregateError(
                     [error, cleanupError],
-                    `Session startup failed: ${String(error)}; cleanup failed: ${String(cleanupError)}. Retry close before starting another Session.`,
+                    `Session startup failed: ${String(error)}; cleanup failed: ${String(cleanupError)}. Retry cleanupStartup before starting another Session.`,
                     { cause: error },
                 );
             }
@@ -219,6 +229,8 @@ export class Session {
     private activeTransport(): Transport {
         if (this.closePromise || this.state !== "active" || !this.transport)
             throw new Error("Session is not active");
+        if (this.controls.executionBlocked)
+            throw new Error("Session execution is blocked by domain control");
         return this.transport;
     }
 
@@ -295,6 +307,7 @@ export class Session {
                 if (state === "dispatching") pending.wasDispatching = true;
                 else if (state === "claimed") pending.wasClaimed = true;
                 else if (state === "queued" && pending.wasDispatching) {
+                    if (this.controls.executionBlocked || this.closePromise) continue;
                     pending.wasDispatching = false;
                     if (!pending.wasClaimed && pending.retries++ === 0) {
                         void pending.retry().catch((error) => this.rejectDelivery(inputId, error));
@@ -387,29 +400,82 @@ export class Session {
         }
     }
 
-    async cancel(): Promise<void> {
-        const transport = this.activeTransport();
-        const token = this.docs.requestCancel();
-        try {
-            await transport.notify("session/cancel", { sessionId: this.id });
-        } catch (error) {
-            if (token) this.docs.restoreCancel(token);
-            throw error;
-        }
+    private controlTransport(): Transport {
+        if (this.state !== "active" || !this.transport)
+            throw new Error("Session has no active domain transport");
+        return this.transport;
     }
 
-    close(): Promise<void> {
+    private command(expectation: CommandExpectation, action: ControlAction): ControlCommand {
+        return { ...expectation, sessionId: this.id, action };
+    }
+
+    control(command: ControlCommand): Promise<ControlReceipt> {
+        if (this.closePromise) throw new Error("Session domain Close is in progress");
+        if (command.sessionId !== this.id)
+            throw new Error("Control command targets a different Session");
+        return this.controls.apply(this.controlTransport(), command);
+    }
+
+    stop({ target, ...expectation }: StopCommand): Promise<ControlReceipt> {
+        return this.control(this.command(expectation, { kind: "stop", target }));
+    }
+
+    pause(expectation: CommandExpectation): Promise<ControlReceipt> {
+        return this.control(this.command(expectation, { kind: "pause" }));
+    }
+
+    resume(expectation: CommandExpectation): Promise<ControlReceipt> {
+        return this.control(this.command(expectation, { kind: "resume" }));
+    }
+
+    reopen(expectation: CommandExpectation): Promise<ControlReceipt> {
+        return this.control(this.command(expectation, { kind: "reopen" }));
+    }
+
+    resolveControl(command: ControlCommand): Promise<ControlResolution> {
+        if (command.sessionId !== this.id)
+            throw new Error("Control command targets a different Session");
+        return this.controls.resolve(this.controlTransport(), command);
+    }
+
+    controlState(): Promise<ControlSnapshot> {
+        return this.controls.snapshot(this.controlTransport(), this.id);
+    }
+
+    close(expectation: CommandExpectation, options: CloseOptions = {}): Promise<ControlReceipt> {
+        if (!expectation) throw new TypeError("Domain Close requires a stable command");
+        const drainOptions = { ...options };
+        closeDrainBudget(drainOptions);
+        const command = this.command(expectation, { kind: "close" });
+        if (this.settledClose) {
+            if (controlCommandIdentity(command) !== controlCommandIdentity(this.settledClose.command))
+                throw new Error("Transport shutdown can only retry the settled Close command");
+            if (this.state === "closed") return Promise.resolve(this.settledClose.receipt);
+        }
         if (!this.closePromise) {
-            this.closePromise = this.closeOnce().finally(() => {
+            this.closingCommand = controlCommandIdentity(command);
+            this.closePromise = Promise.resolve().then(() => this.closeOnce(command, drainOptions)).finally(() => {
                 this.closePromise = undefined;
             });
+        } else if (this.closingCommand !== controlCommandIdentity(command)) {
+            throw new Error("A different Close command is already in progress");
         }
         return this.closePromise;
     }
 
-    private async closeOnce(): Promise<void> {
-        if (this.state === "closed") return;
-        if (this.state === "starting") await this.startPromise?.catch(() => {});
+    private closingCommand?: string;
+
+    private async closeOnce(command: ControlCommand, options: CloseOptions): Promise<ControlReceipt> {
+        const receipt = this.settledClose?.receipt ?? await drainClose(command, {
+            apply: () => this.controls.apply(this.controlTransport(), command),
+            resolve: () => this.controls.resolve(this.controlTransport(), command),
+            snapshot: () => this.controlState(),
+            isUnresolved: () => this.controls.isUnresolved(command.commandId),
+        }, options);
+        if (!this.settledClose) {
+            this.settledClose = { command, receipt };
+        }
         this.state = "cleanup-pending";
         this.docs.setTaskSnapshotRequester(null);
         await this.cleanupExecution();
@@ -424,5 +490,19 @@ export class Session {
         }
         await this.notifications.return();
         this.state = "closed";
+        return receipt;
+    }
+
+    cleanupStartup(): Promise<void> {
+        if (this.sessionId || this.state === "active" || this.state === "closed")
+            throw new Error("Startup cleanup cannot shut down an established Session");
+        if (this.state === "starting")
+            throw new Error("Wait for Session startup to finish before cleanupStartup");
+        if (!this.startupCleanupPromise) {
+            this.startupCleanupPromise = this.cleanupExecution().then(() => {
+                this.state = "declared";
+            }).finally(() => { this.startupCleanupPromise = undefined; });
+        }
+        return this.startupCleanupPromise;
     }
 }

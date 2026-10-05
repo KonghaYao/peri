@@ -378,7 +378,7 @@ pub(crate) async fn new_session_from_prepared(
             workflow_middleware,
             title: None,
             tags: Vec::new(),
-            continuation_armed: false,
+
             continuation_epoch: 0,
             continuation_in_flight: false,
             continuation_mq_steering_pending: false,
@@ -592,7 +592,7 @@ pub(super) fn handle_bg_tasks(params: &Value, cfg: &AcpServerConfig) -> Result<V
 
 #[path = "session_close.rs"]
 mod close;
-use close::close_session;
+pub(super) use close::close_session;
 
 pub(crate) async fn handle_close(
     params: &Value,
@@ -750,7 +750,7 @@ pub(crate) async fn handle_fork(
             workflow_middleware,
             title: None,
             tags: Vec::new(),
-            continuation_armed: false,
+
             continuation_epoch: 0,
             continuation_in_flight: false,
             continuation_mq_steering_pending: false,

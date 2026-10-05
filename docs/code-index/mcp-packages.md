@@ -2,6 +2,8 @@
 
 Builtin MCP 的工具与 server handler 由独立 crate 持有；配置来源 I/O 由独立 `peri-mcp-config` 数据面持有，session MCP 实例注册、配置投影、transport、宿主 context、policy 与生命周期仍由 `peri-middlewares` 装配。每个 crate 的依赖方向面向 `peri-mcp-common`、`peri-agent` / `peri-acp-types` / `peri-resources` 等稳定能力接口，不依赖 `peri-middlewares`。
 
+Workspace scope 关闭的真实资源证明见 `workspace/src/shell_tasks.rs`：任务 owner 在进程退出、管道回收和终态通知完成后登记 `resources_settled`，scope barrier 不以客户端取消意图或模型任务状态替代资源结算。主会话共享环境不能绕过历史子会话资源/required 工作检查；冷关闭缺失可信 owner 连接时保留 Incomplete，不提前删除关闭意图。
+
 宿主侧入口见 [`peri-middlewares` 代码索引](peri-middlewares.md)。本文是插件包的当前路径索引；设计契约见 [`architecture-contracts.md`](../standards/architecture-contracts.md) 与 [`MCP 适配设计`](../design/mcp-adaptation-v4-part-1.md)。
 
 Workspace git ref 更新由 `workspace/src/workspace.rs` 在 MCP 通知

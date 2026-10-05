@@ -1,3 +1,4 @@
+import { closeCommand, controlResponse } from "./control-fixture";
 import { expect, test } from "bun:test";
 import { Agent } from "../src/agent/agent";
 import { AgentClaimConflictError } from "../src/kv/agent-claim-conflict-error";
@@ -25,6 +26,7 @@ class FakeTransport implements Transport {
 
   async request<Response>(method: string, params?: unknown): Promise<Response> {
     this.calls.push({ method, params });
+    if (method.startsWith("session/control")) return controlResponse(method, params) as Response;
     if (method === "initialize") await this.startupGate;
     if (method === "session/input/snapshot") {
       if (this.failStartup) throw this.startupError;
@@ -94,16 +96,15 @@ test("startup cleanup failure retains both claims and reports both causes until 
   expect(() => agent.session.start("existing")).toThrow("cleanup-pending");
   await expect(create().session.start(null)).rejects.toBeInstanceOf(AgentClaimConflictError);
   await expect(create("other-agent").session.start("existing")).rejects.toBeInstanceOf(AgentClaimConflictError);
-  await expect(agent.close()).rejects.toBe(transport.cleanupError);
+  await expect(agent.session.cleanupStartup()).rejects.toBe(transport.cleanupError);
   await expect(create("other-agent").session.start("existing")).rejects.toBeInstanceOf(AgentClaimConflictError);
   transport.failClose = false;
-  await agent.close();
+  await agent.session.cleanupStartup();
   expect(transport.closeCalls).toBe(3);
-  expect(() => agent.session.start(null)).toThrow("closed");
   transport.failStartup = false;
   const replacement = create();
   await replacement.session.start("existing");
-  await replacement.close();
+  await replacement.close(closeCommand);
 });
 
 test("successful startup cleanup preserves the original error and allows retry", async () => {
@@ -115,7 +116,7 @@ test("successful startup cleanup preserves the original error and allows retry",
   expect(transport.closeCalls).toBe(1);
   transport.failStartup = false;
   await agent.session.start(null);
-  await agent.close();
+  await agent.close(closeCommand);
 });
 
 test("transport creation failure releases claims without a transport and allows retry", async () => {
@@ -127,9 +128,9 @@ test("transport creation failure releases claims without a transport and allows 
   sandbox.createTransport = async () => transport;
   const replacement = create();
   await replacement.session.start("existing");
-  await replacement.close();
+  await replacement.close(closeCommand);
   await agent.session.start("existing");
-  await agent.close();
+  await agent.close(closeCommand);
 });
 
 test("concurrent close shares cleanup, retains claims on rejection and retries once", async () => {
@@ -138,54 +139,44 @@ test("concurrent close shares cleanup, retains claims on rejection and retries o
   const closing = gate();
   transport.closeGate = closing.promise;
   transport.failClose = true;
-  const first = agent.close();
-  const second = agent.close();
+  const first = agent.close(closeCommand);
+  const second = agent.close(closeCommand);
   expect(second).toBe(first);
+  await Bun.sleep(0);
   expect(transport.closeCalls).toBe(1);
   expect(() => agent.session.send("blocked")).toThrow("not active");
   await expect(create("other-agent").session.start("existing")).rejects.toBeInstanceOf(AgentClaimConflictError);
   closing.resolve();
   await expect(first).rejects.toBe(transport.cleanupError);
   transport.failClose = false;
-  const retry = agent.close();
-  expect(agent.close()).toBe(retry);
+  const retry = agent.close(closeCommand);
+  expect(agent.close(closeCommand)).toBe(retry);
   await retry;
   expect(transport.closeCalls).toBe(2);
-  await agent.close();
+  await agent.close(closeCommand);
   expect(transport.closeCalls).toBe(2);
   const replacement = create();
   await replacement.session.start("existing");
-  await replacement.close();
+  await replacement.close(closeCommand);
 });
 
 for (const failStartup of [false, true]) {
-  test(`close during starting settles without leaking claims (startup failure: ${failStartup})`, async () => {
-    const { agent, transport, create } = setup();
+  test(`startup cleanup cannot race an active startup (failure: ${failStartup})`, async () => {
+    const { agent, transport } = setup();
     const starting = gate();
-    const reachedInitialize = gate();
     transport.startupGate = starting.promise;
     transport.failStartup = failStartup;
-    const request = transport.request.bind(transport);
-    transport.request = async (method, params) => {
-      if (method === "initialize") reachedInitialize.resolve();
-      return request(method, params);
-    };
-    const started = agent.session.start("existing");
-    const outcome = started.catch((error) => error);
-    await reachedInitialize.promise;
-    const first = agent.close();
-    expect(agent.close()).toBe(first);
-    expect(() => agent.session.start(null)).toThrow("closing");
+    const started = agent.session.start("existing").catch((error) => error);
+    expect(() => agent.session.cleanupStartup()).toThrow("Wait for Session startup");
     starting.resolve();
-    await outcome;
-    await first;
+    await started;
+    if (failStartup) await agent.session.cleanupStartup();
+    else {
+      expect(() => agent.session.cleanupStartup()).toThrow("established Session");
+      await agent.close(closeCommand);
+    }
     expect(transport.closeCalls).toBe(1);
     expect(transport.listeners.size).toBe(0);
-    expect(() => agent.session.start(null)).toThrow("closed");
-    transport.failStartup = false;
-    const replacement = create();
-    await replacement.session.start("existing");
-    await replacement.close();
   });
 }
 
@@ -199,32 +190,29 @@ for (const loadResponse of [{}, { _meta: { "peri.sessionWorkspaceV1": { read_onl
     expect(transport.calls.find((call) => call.method === "session/load")?.params).toEqual({
       cwd: "/persisted/workspace", mcpServers: [], sessionId: "existing",
     });
-    await agent.close();
+    await agent.close(closeCommand);
   });
 }
 
-test("close during failed startup shares retries and retains claims until cleanup is confirmed", async () => {
+test("failed startup cleanup shares retries and retains claims until confirmed", async () => {
   const { agent, transport, create } = setup();
-  const starting = gate();
-  transport.startupGate = starting.promise;
   transport.failStartup = true;
   transport.failClose = true;
-  const started = agent.session.start("existing").catch((error) => error);
-  const closing = agent.close();
-  expect(agent.close()).toBe(closing);
-  starting.resolve();
-  expect(await started).toBeInstanceOf(AggregateError);
+  expect(await agent.session.start("existing").catch((error) => error)).toBeInstanceOf(AggregateError);
+  const closingGate = gate();
+  transport.closeGate = closingGate.promise;
+  const closing = agent.session.cleanupStartup();
+  expect(agent.session.cleanupStartup()).toBe(closing);
+  closingGate.resolve();
   await expect(closing).rejects.toBe(transport.cleanupError);
   expect(transport.closeCalls).toBe(2);
-  expect(() => agent.session.start(null)).toThrow("cleanup-pending");
   await expect(create().session.start(null)).rejects.toBeInstanceOf(AgentClaimConflictError);
-  await expect(create("other-agent").session.start("existing")).rejects.toBeInstanceOf(AgentClaimConflictError);
   transport.failClose = false;
-  await agent.close();
+  await agent.session.cleanupStartup();
   transport.failStartup = false;
   const replacement = create();
   await replacement.session.start("existing");
-  await replacement.close();
+  await replacement.close(closeCommand);
 });
 
 test("claim release failure remains cleanup-pending without closing a confirmed transport twice", async () => {
@@ -242,21 +230,21 @@ test("claim release failure remains cleanup-pending without closing a confirmed 
   const failure = await agent.session.start("existing").catch((error) => error);
   expect(failure.errors).toEqual([transport.startupError, releaseError]);
   expect(() => agent.session.start(null)).toThrow("cleanup-pending");
-  await expect(agent.close()).rejects.toBe(releaseError);
+  await expect(agent.session.cleanupStartup()).rejects.toBe(releaseError);
   expect(transport.closeCalls).toBe(1);
   kv.failRelease = false;
   await expect(create().session.start(null)).rejects.toBeInstanceOf(AgentClaimConflictError);
-  await agent.close();
+  await agent.session.cleanupStartup();
   expect(transport.closeCalls).toBe(1);
   transport.failStartup = false;
   const replacement = create();
   await replacement.session.start("existing");
-  await replacement.close();
+  await replacement.close(closeCommand);
 });
 
 test("invalid session id leaves the session retryable", async () => {
   const { agent } = setup();
   await expect(agent.session.start("")).rejects.toThrow("nonempty");
   await agent.session.start(null);
-  await agent.close();
+  await agent.close(closeCommand);
 });

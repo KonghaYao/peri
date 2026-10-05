@@ -28,6 +28,24 @@ fn unsupported(behavior: &str) -> SessionResourceError {
 
 #[async_trait]
 impl SessionResources for MockSessionResources {
+    async fn load_session_control(
+        &self,
+        id: &ThreadId,
+    ) -> SessionResourceResult<peri_acp_types::session_resources::ControlState> {
+        Ok(self.read_control(id))
+    }
+    async fn apply_session_control(
+        &self,
+        command: &peri_acp_types::session_resources::ControlCommand,
+    ) -> SessionResourceResult<peri_acp_types::session_resources::ControlReceipt> {
+        self.write_control(command)
+    }
+    async fn resolve_session_control(
+        &self,
+        command: &peri_acp_types::session_resources::ControlCommand,
+    ) -> SessionResourceResult<peri_acp_types::session_resources::ControlResolution> {
+        self.resolve_control(command)
+    }
     async fn inspect_availability(
         &self,
         _session: Option<&ThreadId>,

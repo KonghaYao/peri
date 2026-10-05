@@ -164,10 +164,8 @@ pub struct McpClientPool {
     /// subscriptions/listen 会话 inbox 注册表（session_id → InboxHandle）。
     /// SessionManager（peri-acp）经 `McpSubscriptionPort` 注册；订阅通知到达
     /// 时向全部注册 inbox 推送 Defer 消息并唤醒 idle agent。
-    pub(crate) session_inboxes: parking_lot::RwLock<HashMap<String, InboxHandle>>,
+    pub(crate) session_bindings: parking_lot::RwLock<session_bindings::SessionBindings>,
     /// One session runtime handle per session; task records remain owned by Agent.
-    pub(crate) session_tasks:
-        parking_lot::RwLock<HashMap<String, Arc<dyn peri_acp_types::tasks::TaskManager>>>,
     pub(crate) task_scope_authority: peri_mcp_core::task_scope::TaskScopeAuthority,
     pub(crate) task_scope_tokens: parking_lot::RwLock<HashMap<String, String>>,
     /// 跨进程的 MCP Resource Cache；是否写入由响应 scope 与安全上下文共同决定。
@@ -255,8 +253,7 @@ impl McpClientPool {
             oauth_event_callback: parking_lot::RwLock::new(None),
             pending_oauth_callbacks: parking_lot::Mutex::new(HashMap::new()),
             active_oauth_flows: parking_lot::Mutex::new(HashMap::new()),
-            session_inboxes: parking_lot::RwLock::new(HashMap::new()),
-            session_tasks: parking_lot::RwLock::new(HashMap::new()),
+            session_bindings: parking_lot::RwLock::new(session_bindings::SessionBindings::default()),
             task_scope_authority: peri_mcp_core::task_scope::TaskScopeAuthority::new(),
             task_scope_tokens: parking_lot::RwLock::new(HashMap::new()),
             resource_cache: super::resource_cache::McpResourceCache::new(),
@@ -371,10 +368,9 @@ impl McpClientPool {
         session_id: &str,
         scope: &str,
     ) -> Result<Box<dyn peri_acp_types::tasks::ExternalExecutionGuard>, String> {
-        self.session_tasks
+        self.session_bindings
             .read()
-            .get(session_id)
-            .cloned()
+            .manager(session_id)
             .ok_or_else(|| "session task manager unavailable".to_owned())?
             .begin_external_execution(scope)
     }
@@ -814,262 +810,8 @@ impl McpClientPool {
     }
 }
 
-// 3.0 批 2 波 2：装配注入端口实现（ACP 侧只持 `Arc<dyn McpPoolPort>`）。
-// M-TUI 收口：`shutdown`（host/shutdown 命令面）与 `snapshot`（mcp/list
-// 命令面）为新增数据端口；TUI 不再直持池句柄与 watch channel。
-#[async_trait::async_trait]
-impl peri_acp_types::ports::McpPoolPort for McpClientPool {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
-    async fn rewind_files(
-        &self,
-        session_id: &str,
-        changes: serde_json::Value,
-    ) -> Result<(), String> {
-        self.rewind_workspace_files(session_id, changes).await
-    }
-
-    fn has_active_tasks(&self, session_id: &str) -> bool {
-        self.session_tasks
-            .read()
-            .get(session_id)
-            .cloned()
-            .is_some_and(|manager| manager.has_unsettled_external())
-    }
-
-    fn bind_agent_session(
-        &self,
-        session_id: &str,
-        inbox: InboxHandle,
-        manager: Arc<dyn peri_acp_types::tasks::TaskManager>,
-    ) {
-        self.bind_session_task_manager(session_id, &manager);
-        self.register_inbox(session_id, inbox);
-    }
-
-    fn agent_session_binding(
-        &self,
-        session_id: &str,
-    ) -> Option<(InboxHandle, Arc<dyn peri_acp_types::tasks::TaskManager>)> {
-        let inbox = self.session_inboxes.read().get(session_id).cloned()?;
-        let manager = self.session_tasks.read().get(session_id).cloned()?;
-        Some((inbox, manager))
-    }
-
-    fn begin_shutdown(&self) {
-        McpClientPool::begin_shutdown(self);
-    }
-
-    async fn shutdown(&self) -> McpPoolShutdownReport {
-        McpClientPool::shutdown(self).await
-    }
-
-    fn snapshot(&self) -> serde_json::Value {
-        let init_phase = match &*self.init_status.read() {
-            McpInitStatus::Pending => "pending",
-            McpInitStatus::Initializing { .. } => "initializing",
-            McpInitStatus::Ready { .. } => "ready",
-            McpInitStatus::Failed(_) => "failed",
-        };
-        let infos = self.all_server_infos();
-        serde_json::json!({
-            "initPhase": init_phase,
-            "servers": infos.iter().map(|info| serde_json::json!({
-                "name": info.name.clone(),
-                "status": format!("{:?}", info.status).to_lowercase(),
-                "transport": info.transport_type.clone(),
-                "toolsCount": info.tool_count,
-            })).collect::<Vec<_>>(),
-        })
-    }
-
-    // ── W3 端口补全：委托既有固有方法，语义逐项对齐（见 ports.rs 契约文档）──
-
-    fn server_infos(&self) -> Result<Vec<McpServerInfo>, String> {
-        Ok(McpClientPool::all_server_infos(self)
-            .into_iter()
-            .map(mcp_server_info_projection)
-            .collect())
-    }
-
-    fn active_oauth_flow(&self, server_name: &str) -> Option<String> {
-        McpClientPool::active_oauth_flow(self, server_name)
-    }
-
-    fn spawn_oauth_flow_with_id(
-        self: Arc<Self>,
-        server_name: &str,
-        flow_id: &str,
-    ) -> Result<McpOAuthStartDisposition, String> {
-        Ok(
-            match McpClientPool::spawn_oauth_flow_with_id(&self, server_name, flow_id) {
-                OAuthStartDisposition::Started => McpOAuthStartDisposition::Started,
-                OAuthStartDisposition::AlreadyActive => McpOAuthStartDisposition::AlreadyActive,
-                OAuthStartDisposition::Conflict { active_flow_id } => {
-                    McpOAuthStartDisposition::Conflict { active_flow_id }
-                }
-            },
-        )
-    }
-
-    fn deliver_oauth_callback(
-        &self,
-        server_name: &str,
-        code: String,
-        state: String,
-    ) -> Result<(), String> {
-        McpClientPool::deliver_oauth_callback(self, server_name, code, state)
-    }
-
-    fn deliver_dynamic_oauth_callback(
-        &self,
-        instance: DynamicMcpInstanceKey,
-        flow_id: &str,
-        code: String,
-        state: String,
-    ) -> Result<(), String> {
-        McpClientPool::deliver_dynamic_oauth_callback(self, instance, flow_id, code, state)
-    }
-
-    fn cancel_oauth_callback(&self, server_name: &str) -> Result<bool, String> {
-        Ok(McpClientPool::cancel_oauth_callback(self, server_name))
-    }
-
-    fn cancel_dynamic_oauth_flow(
-        &self,
-        instance: DynamicMcpInstanceKey,
-        flow_id: &str,
-    ) -> Result<bool, String> {
-        Ok(McpClientPool::cancel_dynamic_oauth_flow(
-            self, instance, flow_id,
-        ))
-    }
-
-    async fn open_workspace_task_scope(&self, session_id: &str) -> Result<(), String> {
-        McpClientPool::open_workspace_task_scope(self, session_id).await
-    }
-
-    async fn close_workspace_task_scope(self: Arc<Self>, session_id: &str) -> Result<(), String> {
-        McpClientPool::close_workspace_task_scope(&self, session_id).await
-    }
-
-    async fn reconcile_closing_workspace_scope(&self, session_id: &str) -> Result<(), String> {
-        McpClientPool::reconcile_closing_workspace_scope(self, session_id).await
-    }
-
-    fn bind_session_task_manager(&self, session_id: &str, manager: &Arc<dyn TaskManager>) {
-        McpClientPool::bind_session_task_manager(self, session_id, manager);
-    }
-
-    async fn recover_workspace_tasks(self: Arc<Self>, session_id: &str) -> Result<(), String> {
-        McpClientPool::recover_workspace_tasks(&self, session_id).await
-    }
-
-    async fn watch_workspace_tasks(
-        self: Arc<Self>,
-        session_id: &str,
-        cancel: tokio_util::sync::CancellationToken,
-    ) {
-        McpClientPool::watch_workspace_tasks(&self, session_id, cancel).await
-    }
-
-    fn attach_connection_notifier(
-        self: Arc<Self>,
-        registry: Option<&Arc<McpSkillRegistry>>,
-        command_registry: Option<&Arc<CommandRegistry>>,
-        cancel: &tokio_util::sync::CancellationToken,
-    ) {
-        super::middleware::attach_connection_notifier(
-            &self,
-            registry,
-            command_registry,
-            cancel,
-            None,
-        );
-    }
-
-    fn prewarm_discovery(
-        self: Arc<Self>,
-        registry: &Arc<McpSkillRegistry>,
-        command_registry: &Arc<CommandRegistry>,
-        session_id: &str,
-        cancel: &tokio_util::sync::CancellationToken,
-    ) {
-        super::middleware::prewarm_discovery(&self, registry, command_registry, session_id, cancel);
-    }
-
-    fn builtin_workspace_state(&self) -> McpBuiltinWorkspaceState {
-        match McpClientPool::get_client(self, "workspace") {
-            None => McpBuiltinWorkspaceState::Absent,
-            Some(handle) if matches!(handle.status, ClientStatus::Connected) => {
-                McpBuiltinWorkspaceState::Connected
-            }
-            Some(_) => McpBuiltinWorkspaceState::NotConnected,
-        }
-    }
-
-    async fn read_builtin_workspace_skills(&self) -> Result<Vec<SkillMetadata>, String> {
-        McpClientPool::read_builtin_workspace_skills(self).await
-    }
-
-    async fn read_builtin_workspace_instructions(
-        &self,
-    ) -> Result<(Option<String>, Option<String>), String> {
-        McpClientPool::read_builtin_workspace_instructions(self).await
-    }
-
-    async fn read_builtin_workspace_meta(
-        &self,
-        enabled_sections: &HashSet<String>,
-    ) -> Result<HashMap<String, String>, String> {
-        McpClientPool::read_builtin_workspace_meta(self, enabled_sections).await
-    }
-}
-
-/// `mcp/list` 契约投影：只暴露面板需要的状态分类，屏蔽 `Failed` 的错误正文
-/// 与其余内部字段（与 `peri-acp` 原 downcast 后逐字段映射一致）。
-fn mcp_server_info_projection(info: ServerInfo) -> McpServerInfo {
-    McpServerInfo {
-        name: info.name,
-        transport: info.transport_type,
-        status: match info.status {
-            ClientStatus::Connected => McpServerConnectionStatus::Connected,
-            ClientStatus::Failed(_) => McpServerConnectionStatus::Failed,
-            ClientStatus::Disconnected => McpServerConnectionStatus::Disconnected,
-            ClientStatus::Disabled => McpServerConnectionStatus::Disabled,
-            ClientStatus::Uninitialized => McpServerConnectionStatus::Uninitialized,
-        },
-        oauth_status: match info.oauth_status {
-            OAuthStatus::None => McpServerOAuthStatus::None,
-            OAuthStatus::Authorized => McpServerOAuthStatus::Authorized,
-            OAuthStatus::NeedsAuthorization => McpServerOAuthStatus::NeedsAuthorization,
-        },
-        tool_count: info.tool_count,
-        resource_count: info.resource_count,
-    }
-}
-
-/// `McpSubscriptionPort` 实现：SessionManager（peri-acp）在 session 创建 /
-/// 销毁时注册 / 注销 inbox；订阅通知到达时经 inbox 唤醒 agent。
-impl McpSubscriptionPort for McpClientPool {
-    fn register_inbox(&self, session_id: &str, handle: InboxHandle) {
-        self.session_inboxes
-            .write()
-            .insert(session_id.to_string(), handle);
-    }
-
-    fn unregister_inbox(&self, session_id: &str) {
-        self.session_inboxes.write().remove(session_id);
-        self.session_tasks.write().remove(session_id);
-        self.task_scope_tokens.write().remove(session_id);
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-}
+mod ports;
+mod session_bindings;
 
 #[cfg(test)]
 #[path = "client_test.rs"]

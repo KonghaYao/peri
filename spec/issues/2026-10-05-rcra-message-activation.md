@@ -1,6 +1,6 @@
 # RCRA 一等公民会话消息与激活实施
 
-状态：**重构中**——第 1–3 步已完成并验证；第 4、5 步实施中。生产运行时发布门槛均未完成，不得宣称整体已解决。
+状态：**重构中**——第 1–4 步已完成分步验证；第 5 步实施中。生产运行时发布门槛尚未完成，不得宣称整体已解决。
 
 ## P0 验证计划
 
@@ -26,7 +26,7 @@
 1. [x] 会话级 MQ 同构：子会话收件登记、唤醒绑定与独立任务目录；嵌套委托登记到直接父，消除跳层。
 2. [x] 投递归属：入站绑定发起者、冷恢复重建；删除 root fallback，保留并扩展已暂存的 initiator 守卫。
 3. [x] MQ 消费语义：类型属性与消费矩阵进 Receive；收敛 continuation/idle/async_router 特例，唤醒降级为通知。
-4. 关闭与控制：关闭子会话级联终止 bg shell、资源终止并结算后返回消息；Stop/Pause/Resume/Close 幂等与 attempt 精确定位。
+4. [x] 关闭与控制：关闭子会话级联终止 bg shell、资源终止并结算后返回消息；Stop/Pause/Resume/Close 幂等与 attempt 精确定位。
 5. 可靠连接下的幂等与持久：事件身份去重、required 不降级、mutation Unknown 冻结、投递义务可恢复；随后按 §7 矩阵与发布门槛验收。
 
 ### 第 1 步实施（2026-10-05）
@@ -57,6 +57,15 @@
 - ACP continuation 在执行入口重验队列 required EnsureProcessing，通用队列扫描补偿通知丢失；Shell/Workflow/Agent 的 kind/source 均不拥有调度权。
 - 验证：独立暂存快照运行 ACP types 525、Agent 926、Middlewares 1568、ACP 717 个库测试全部通过（2 ignored）；doc tests、workspace check、四 crate all-targets clippy `-D warnings`、fmt、layer imports、typos 通过。修正 ACP MCP 调用夹具缺可信 session/pool；stdio 验收不再把合法后台任务快照与 commands 通知的相对顺序当协议保证。此前完整跑暴露的这些失败已修复并重跑，不把首次失败隐藏为 PASS。
 - 边界：本步队列和 Suppressed 集合仍是内存投影，接纳序号不是持久收据；控制代际、SDK 唯一 attempt 准入、durable Inbox/义务/检查点及 Unknown 对账属于第 4、5 步。不得把当前扫描或 Transcript 去重称为 Durable Accepted。
+
+### 第 4 步实施
+
+- 统一控制 command/state/receipt/resolve，本地及远端后端共享裁决，状态与回执原子持久化。稳定命令重复返回原结果，冲突身份拒绝；Unknown 冻结并按原命令对账，不能先取消再补写回执。
+- ACP/SDK/TUI typed Stop 精确定位 turn/attempt；Pause/Resume/Close/Reopen 校验生命周期、revision、control generation。RCRA 固定代际，各阶段和工具发送前重验；Pause 后旧 Reason 响应不能借后来的 Resume 提交。删除无身份 legacy cancel 的执行权限。
+- 子 Close 独立持有清理任务，调用者 Drop 不撤销关闭；bg shell 进程、管道和终态通知收敛后确认资源屏障。创建失败、Panic 或未确认 Drop 保留 scope 级未知事实，空任务目录不能伪造 clean close。Independent 子不能被共享环境 shutdown 隐式终止。
+- 生命周期目录仅有一份 current/history 权威，显式 Reopen 建立新 Inbox/TaskManager，旧 required 工作和资源事实保留；不从已关闭目录隐式恢复。
+- 验证：六 crate 全量 lib 5711 passed / 10 ignored；补充 owner 10 passed、stdio 18 passed；七 crate all-targets clippy（`-D warnings`）、workspace check、doc tests（11 passed / 5 ignored）、层依赖和格式检查通过。控制存储本地契约 12 passed、远端生产 adapter + SQLite 故障传输 10 passed；不是远端部署或整体发布证据。
+- 边界：SDK 唯一 attempt 准入、持久处理检查点、所有生产者可靠发布及原协议切换属于第 5 步。冷关闭缺少可信资源 owner 连接时返回 Incomplete 并保留意图；不能把连接缺失当作已关闭。全部真实 E2E 在完成第 5 步生产接线后执行。
 
 ## 实施工作
 

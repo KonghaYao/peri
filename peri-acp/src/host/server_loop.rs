@@ -342,7 +342,7 @@ impl ServerLoop<'_> {
             if matches!(method.as_str(), "session/close" | "session/delete") {
                 if let Some(state) = sessions.lock().await.get_mut(&lifecycle_session_id) {
                     state.closing = true;
-                    state.continuation_armed = false;
+
                     if let Some(token) = &state.cancel_token {
                         token.cancel();
                     }

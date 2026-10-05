@@ -85,7 +85,7 @@ impl McpClientPool {
                 .deliver(delivery_id, &reminder, source.clone())
                 .await?;
         }
-        if let Some(inbox) = self.session_inboxes.read().get(target_session).cloned() {
+        if let Some(inbox) = self.session_bindings.read().inbox(target_session) {
             inbox.push_system_reminder_with_delivery_id(
                 MessageKind::Defer,
                 source,
@@ -149,10 +149,9 @@ impl McpClientPool {
             return Err("Unroutable: task catalog must belong to the initiator".into());
         }
         let manager = self
-            .session_tasks
+            .session_bindings
             .read()
-            .get(session_id)
-            .cloned()
+            .manager(session_id)
             .ok_or_else(|| "session task manager unavailable".to_owned())?;
         let raw_id_for_cancel = raw_task_id.to_owned();
         let meta = scoped_workspace

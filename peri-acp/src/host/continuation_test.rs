@@ -15,8 +15,8 @@ use peri_acp_types::tasks::BgTaskKind;
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    cancel_arms_continuation, cancel_should_schedule_continuation, continuation_dispatchable,
-    continuation_still_valid, recv_until_shutdown, take_continuation_for_request, SessionState,
+    continuation_dispatchable, continuation_still_valid, recv_until_shutdown,
+    take_continuation_for_request, SessionState,
 };
 use crate::session::executor::ContinuationRequest;
 
@@ -64,7 +64,7 @@ async fn test_scheduled_trigger_permission_contract() {
 }
 
 /// 构造最小 SessionState（仅续跑相关字段有值）。
-fn make_session_state(armed: bool, epoch: u64) -> SessionState {
+fn make_session_state(_armed: bool, epoch: u64) -> SessionState {
     SessionState {
         session_id: "session-1".to_string(),
         thread_id: "thread-1".to_string(),
@@ -80,7 +80,7 @@ fn make_session_state(armed: bool, epoch: u64) -> SessionState {
         workflow_middleware: None,
         title: None,
         tags: vec![],
-        continuation_armed: armed,
+
         continuation_epoch: epoch,
         continuation_in_flight: false,
         continuation_mq_steering_pending: false,
@@ -133,7 +133,6 @@ fn test_take_skips_when_not_armed() {
         mq_steering: true,
     };
     assert!(take_continuation_for_request(&mut state, &request).is_none());
-    assert!(!state.continuation_armed);
 }
 
 /// epoch 代际：用户显式新 prompt 递增 epoch 后，已排队未运行的续跑失效。
@@ -154,7 +153,7 @@ fn test_epoch_invalidation_clears_queued_continuation() {
         take_continuation_for_request(&mut state, &request).expect("open session accepts hint");
 
     // 用户显式新 prompt：清除标记 + 递增代际（dispatch_prompt_turn 的行为）
-    state.continuation_armed = false;
+
     state.continuation_epoch += 1;
 
     // 续跑执行前校验：代际已变 → 放弃
@@ -175,58 +174,6 @@ fn test_stale_epoch_never_valid() {
     let state = make_session_state(false, 7);
     assert!(!continuation_still_valid(&state, 6));
     assert!(continuation_still_valid(&state, 7));
-}
-
-/// 取消正在执行的 continuation 不置位 armed（防自动链式续跑）。
-#[test]
-fn test_cancel_does_not_arm_in_flight_continuation() {
-    // 续跑执行中（in_flight）：cancel 不 arm
-    let mut state = make_session_state(false, 1);
-    state.continuation_in_flight = true;
-    assert!(
-        !cancel_arms_continuation(&state),
-        "取消续跑本身不得 arm 自动链式续跑"
-    );
-    // 模拟 notify cancel 分支：in_flight 时不写 armed
-    if cancel_arms_continuation(&state) {
-        state.continuation_armed = true;
-    }
-    assert!(
-        !state.continuation_armed,
-        "in_flight 时 cancel 不得置位 armed"
-    );
-
-    // 普通 prompt 运行中（非续跑）：cancel 正常 arm
-    let state2 = make_session_state(false, 1);
-    assert!(cancel_arms_continuation(&state2), "普通 prompt 取消应 arm");
-}
-
-/// cancel ↔ bg callback race 兜底的 eligibility（纯逻辑）：
-/// 仅当"会置位 armed（非 in_flight）且队列有 pending SubAgentComplete Defer"
-/// 时，cancel 才补发一次 continuation 请求。
-#[test]
-fn test_cancel_schedule_race_eligibility() {
-    // 典型 race：bg 结果已 route（Defer 在队列），cancel 需补发
-    let state = make_session_state(false, 1);
-    assert!(
-        cancel_should_schedule_continuation(&state, true),
-        "cancel 置位前 bg 已完成且 Defer 已入队 → 必须补发"
-    );
-
-    // 无 pending Defer：bg 尚未完成，等其完成通知即可，不补发
-    assert!(
-        !cancel_should_schedule_continuation(&state, false),
-        "队列无 Defer 时补发会导致空跑续跑"
-    );
-
-    // 取消的是续跑本身（in_flight）：即使有 Defer 也不补发（不链式）
-    let mut in_flight = make_session_state(false, 1);
-    in_flight.continuation_in_flight = true;
-    assert!(
-        !cancel_should_schedule_continuation(&in_flight, true),
-        "取消续跑不得触发补发"
-    );
-    assert!(!cancel_should_schedule_continuation(&in_flight, false));
 }
 
 /// dispatch 前确认：代际有效 **且** 队列仍有 SubAgentComplete Defer 才续跑；

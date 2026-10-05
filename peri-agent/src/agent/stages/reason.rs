@@ -12,6 +12,7 @@ use crate::agent::react::{Reasoning, StreamingContext};
 use crate::error::{AgentError, AgentResult};
 
 pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
+    super::execution_control::validate(&input.context).await?;
     let ctx = &input.context;
     let step = ctx.session.turn.current_step();
     let turn_id = ctx.turn_id();

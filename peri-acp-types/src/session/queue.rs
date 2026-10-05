@@ -313,6 +313,14 @@ impl MessageQueue {
             .any(|message| message.policy.ensures_processing())
     }
 
+    pub fn has_required(&self) -> bool {
+        self.state
+            .messages
+            .lock()
+            .iter()
+            .any(|message| message.policy.requirement == super::MessageRequirement::Required)
+    }
+
     /// 与 Receive 领取共享同一锁，仅撤出尚未被领取的指定用户输入。
     pub fn withdraw_user_inputs(&self, ids: &[crate::messages::MessageId]) -> Vec<QueuedMessage> {
         let mut inner = self.state.messages.lock();

@@ -18,6 +18,11 @@
 //! 旧 `ThreadStore`（[`crate::store::ThreadStore`]）是迁移桥，见其模块文档。
 
 use std::collections::HashMap;
+pub mod control;
+pub use control::{
+    ControlAction, ControlAttempt, ControlCommand, ControlDecision, ControlReceipt,
+    ControlRejection, ControlResolution, ControlState, ControlStatus,
+};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -500,6 +505,29 @@ pub trait ChildResumeClaim: Send + Sync {
 /// - 结果不确定时返回 [`SessionResourceError::persistence_uncertain`]，不得重试后伪装成功。
 #[async_trait]
 pub trait SessionResources: Send + Sync {
+    async fn load_session_control(&self, _id: &ThreadId) -> SessionResourceResult<ControlState> {
+        Err(SessionResourceError::new(
+            SessionResourceErrorKind::Unsupported,
+        ))
+    }
+
+    async fn apply_session_control(
+        &self,
+        _command: &ControlCommand,
+    ) -> SessionResourceResult<ControlReceipt> {
+        Err(SessionResourceError::new(
+            SessionResourceErrorKind::Unsupported,
+        ))
+    }
+
+    async fn resolve_session_control(
+        &self,
+        _command: &ControlCommand,
+    ) -> SessionResourceResult<ControlResolution> {
+        Err(SessionResourceError::new(
+            SessionResourceErrorKind::Unsupported,
+        ))
+    }
     fn oauth_credentials(
         &self,
     ) -> Option<std::sync::Arc<dyn crate::oauth_credentials::OAuthCredentialPort>> {

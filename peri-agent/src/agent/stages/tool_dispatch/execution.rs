@@ -297,6 +297,7 @@ async fn dispatch_concurrent(
             async move {
                 let timeout_opt = tool.as_ref().and_then(|t| t.timeout());
                 let invoke_fut = async {
+                    super::super::execution_control::validate(&dispatch_context).await.map_err(effective_tool_error)?;
                     let mut ctx_param = crate::tools::ToolContext::new(&messages, &cwd)
                         .with_effective_tool_dispatcher(
                             Arc::new(StageEffectiveToolDispatcher::new(

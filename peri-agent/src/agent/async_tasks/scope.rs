@@ -107,6 +107,10 @@ impl ExecutionScope {
         self.tracker.is_empty() && self.uncertain.lock().is_empty()
     }
 
+    pub(super) fn is_closed(&self) -> bool {
+        !*self.open.lock()
+    }
+
     /// Conclusive reconciliation for one external scope clears its uncertainty.
     ///
     /// Callers must hold evidence that the scope has no live execution (for

@@ -18,7 +18,7 @@ use crate::transport::types::AcpError;
 /// 不发送 ACP response（无 request id），且不触发 prediction。
 ///
 /// 用户显式新 prompt 会清除未运行的 continuation：置位前先
-/// `continuation_armed = false` 并递增 `continuation_epoch`（scheduler 在
+/// 递增 `continuation_epoch`（scheduler 在
 /// 获取 prompt lock 后校验代际，见 continuation.rs）。
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn dispatch_prompt_turn(
@@ -91,7 +91,6 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
     if !is_continuation {
         let mut sessions = sessions.lock().await;
         if let Some(state) = sessions.get_mut(&prompt_session_id) {
-            state.continuation_armed = false;
             state.continuation_epoch += 1;
         }
     }
@@ -153,6 +152,17 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
         }
     }
     super::workspace::validate_expected(cfg, &prompt_session_id, None).await?;
+    let control = cfg
+        .session_resources
+        .load_session_control(&prompt_session_id)
+        .await
+        .map_err(super::workspace::resource_error)?;
+    if control.status != peri_acp_types::session_resources::ControlStatus::Active {
+        return Err(AcpError::new(
+            -32010,
+            "Session activation is paused or closed",
+        ));
+    }
 
     // AsyncContinuation 与用户 prompt 竞争时，必须在持有同一 prompt lock 后
     // 校验代际与 pending callback：此时不会与 Receive 的 drain_all 并发，确认

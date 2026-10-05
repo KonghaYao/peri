@@ -2,6 +2,7 @@
 //! 执行所有权由 peri-sdk 维护，本模块不登记或认领执行者。
 
 mod claim;
+mod control;
 mod evidence;
 mod gate;
 mod lifecycle;
@@ -255,6 +256,27 @@ impl SessionResourcesImpl {
 
 #[async_trait]
 impl SessionResources for SessionResourcesImpl {
+    async fn load_session_control(
+        &self,
+        id: &ThreadId,
+    ) -> SessionResourceResult<peri_acp_types::session_resources::ControlState> {
+        self.read_session_control(id).await
+    }
+
+    async fn apply_session_control(
+        &self,
+        command: &peri_acp_types::session_resources::ControlCommand,
+    ) -> SessionResourceResult<peri_acp_types::session_resources::ControlReceipt> {
+        self.write_session_control(command).await
+    }
+
+    async fn resolve_session_control(
+        &self,
+        command: &peri_acp_types::session_resources::ControlCommand,
+    ) -> SessionResourceResult<peri_acp_types::session_resources::ControlResolution> {
+        self.reconcile_session_control(command).await
+    }
+
     fn oauth_credentials_for_workspace(
         &self,
         workspace_id: peri_acp_types::workspace::WorkspaceId,

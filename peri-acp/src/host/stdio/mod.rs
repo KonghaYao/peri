@@ -5,7 +5,7 @@
 //! `StdioContext`，[`StdioTransport`] 作为 [`AcpTransport`] 多态实现接入。
 //! 装配（`assemble_server_config`，与 TUI/print 同源）收拢在
 //! [`super::assemble`]，本模块只做部署装配点职责：协议面输入 → 装配 →
-//! transport 挂载（含 legacy `type:cancel` 全 session 兜底中断钩子）。
+//! transport 挂载；无身份的 legacy cancel 不具有控制权限。
 //!
 //! stdio host 位于 ACP 层（部署装配点，`docs/top-level.md` §7/§19）；外部
 //! 系统通道（会话资源门面）由部署单元（cli）打开后经 `session_resources` 注入，
@@ -69,33 +69,10 @@ pub async fn run_acp_stdio(input: StdioInput) -> anyhow::Result<()> {
         None
     };
     let cfg = assemble_stdio_config(input, injected_settings.as_deref()).await?;
-    let cancel_task_spawner = cfg.host_task_spawner.clone();
-
-    // 共享 session 集合：legacy `type:cancel` 全 session 兜底中断回调与宿主
-    // `run_acp_server` 遍历**同一 map**（回调在构造 transport 时注入，因此
-    // session map 必须由本装配点创建并经 `run_acp_server_with_sessions` 注入）。
     let sessions: super::SharedSessions = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
-    let cancel_sessions = sessions.clone();
     let transport = StdioTransport::from_reader_writer(stdin, tokio::io::stdout())
-        .with_cancel_hook(Some(Arc::new(move |_line| {
-            // 全 session 兜底中断（无 sessionId）：遍历全部 SessionState 对
-            // `cancel_token.cancel()`。与标准 `session/cancel`（按 sessionId +
-            // continuation 武装，`host/notify.rs`）并存——type:cancel
-            // 无客户端身份、无续跑语义，仅作 IDE 强停兜底（批 3 §7 #10）。
-            let sessions = cancel_sessions.clone();
-            let _ = cancel_task_spawner.spawn(
-                super::task_scope::HostTaskOwnerKind::Host,
-                super::task_scope::HostTaskKind::LegacyCancelHook,
-                async move {
-                    let sessions = sessions.lock().await;
-                    for (sid, state) in sessions.iter() {
-                        if let Some(ref token) = state.cancel_token {
-                            token.cancel();
-                            tracing::info!(session_id = %sid, "Cancelled via type:cancel");
-                        }
-                    }
-                },
-            );
+        .with_cancel_hook(Some(Arc::new(|_line| {
+            tracing::warn!("identity-free cancel ignored; use a stable session/control command");
         })));
     super::run_acp_server_with_sessions(
         Arc::new(transport) as Arc<dyn AcpTransport>,

@@ -1,5 +1,34 @@
 use super::*;
 
+async fn reopen_closed_child(store: &SessionFixture, session_id: &str) {
+    use peri_acp_types::session_resources::{
+        ControlAction, ControlCommand, ControlDecision, ControlStatus,
+    };
+    let session_id = session_id.to_owned();
+    let control = store
+        .resources
+        .load_session_control(&session_id)
+        .await
+        .unwrap();
+    assert_eq!(control.status, ControlStatus::Closed);
+    assert!(control.attempt.is_none());
+    let receipt = store
+        .resources
+        .apply_session_control(&ControlCommand {
+            session_id: session_id.clone(),
+            command_id: format!("fixture-explicit-reopen:{session_id}:{}", control.lifecycle),
+            expected_lifecycle: control.lifecycle,
+            expected_revision: control.revision,
+            expected_control_generation: control.control_generation,
+            action: ControlAction::Reopen,
+        })
+        .await
+        .unwrap();
+    assert_eq!(receipt.decision, ControlDecision::Accepted);
+    assert_eq!(receipt.state.status, ControlStatus::Active);
+    assert_eq!(receipt.state.lifecycle, control.lifecycle + 1);
+}
+
 // ─── Slice 7:集成测试(中断 → 恢复 → 完成 / 跨实例 / 多次恢复 / 事件配对) ─────
 
 /// 前 `interrupt_rounds` 次 LLM 调用返回 `AgentError::Interrupted`（模拟中断），
@@ -182,6 +211,7 @@ async fn test_resume_interrupted_then_resumed_across_instances() {
     let id = extract_child_thread_id(&interrupted);
 
     // 实例 B（同 store dir、同父 session thread_id）：resume → 完成
+    reopen_closed_child(&store, &id).await;
     let t_b = make_interrupt_tool(Arc::clone(&calls), 1)
         .with_session_resources(store.facade())
         .with_parent_thread_id(parent_id.clone())
@@ -268,6 +298,7 @@ async fn test_resume_across_instances_replays_transcript_in_order() {
     }; // 丢弃实例 A（模拟进程重启，仅剩磁盘现场）
 
     // 实例 B：同 store dir → resume（缺省 prompt → 隐式 continue）→ 完成
+    reopen_closed_child(&store, &id).await;
     let t_b = make_interrupt_tool(Arc::clone(&calls), 1)
         .with_session_resources(store.facade())
         .with_parent_thread_id(parent_id.clone())
@@ -304,7 +335,7 @@ async fn test_resume_across_instances_replays_transcript_in_order() {
     );
 }
 
-/// 多次恢复：中断 → 恢复 → 再中断 → 再恢复（cancel 前置 → Ok 中断文本，
+/// 多次恢复：中断 → 显式 Reopen → 再中断 → 显式 Reopen（执行中 Interrupted），
 /// 含 `resume with Agent(resume_thread_id:)` 提示）；断言 thread_id 不变、
 /// 最终完成、磁盘 status 收尾 done。
 #[tokio::test]
@@ -317,10 +348,7 @@ async fn test_resume_multiple_times_keeps_thread_id_and_completes() {
         .create_thread(ThreadMeta::new_at(cwd.clone(), peri_time::now_wall()))
         .await
         .expect("建立父会话失败");
-    // 构造「父会话已取 cancel」的实例：Cascade 策略下子 token 由父 token 派生
-    // （`derive_cancel_token`：parent 优先、config 注入仅作 parent 缺席的回退），
-    // 因此父 session 取消才会让 run_react_loop 返回 LoopResult::Interrupted
-    // → Ok 中断文本。同时父会话句柄是 resume 归属校验的前置。
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let mk_parent = |cancelled: bool| {
         let token = Arc::new(AgentCancellationToken::new());
         if cancelled {
@@ -333,19 +361,19 @@ async fn test_resume_multiple_times_keeps_thread_id_and_completes() {
             token,
         )
     };
-    let mk_cancelled = || async {
+    let mk_interrupted = || async {
         with_agent_face(
-            make_subagent_tool(vec![])
+            make_interrupt_tool(calls.clone(), 2)
                 .with_session_resources(store.facade())
                 .with_parent_thread_id(parent_id.clone())
-                .with_parent_session(mk_parent(true)),
+                .with_parent_session(mk_parent(false)),
             dir.path(),
         )
         .await
     };
 
     // 1) spawn → 中断 #1（文本含 child_thread_id + resume 提示）
-    let t1 = mk_cancelled().await;
+    let t1 = mk_interrupted().await;
     let r1 = t1
         .invoke(
             serde_json::json!({
@@ -365,7 +393,8 @@ async fn test_resume_multiple_times_keeps_thread_id_and_completes() {
     let id1 = extract_child_thread_id(&r1);
 
     // 2) resume → 中断 #2（同一 thread_id）
-    let t2 = mk_cancelled().await;
+    reopen_closed_child(&store, &id1).await;
+    let t2 = mk_interrupted().await;
     let r2 = t2
         .invoke(
             serde_json::json!({
@@ -385,6 +414,7 @@ async fn test_resume_multiple_times_keeps_thread_id_and_completes() {
     assert_eq!(id1, id2, "多次恢复 thread_id 必须不变");
 
     // 3) resume → 完成（新实例：父会话换回未取消的 token，归属不变）
+    reopen_closed_child(&store, &id1).await;
     let t3 = make_subagent_tool(vec![])
         .with_session_resources(store.facade())
         .with_parent_thread_id(parent_id.clone())
@@ -481,6 +511,7 @@ async fn test_resume_emits_new_start_stop_pair_per_execution() {
     assert_start_stop_pair(&evs, "test-agent", false);
 
     // 恢复 → 完成（第 2 对 Start/Stop）
+    reopen_closed_child(&store, &id).await;
     let result = t
         .invoke(
             serde_json::json!({
@@ -606,6 +637,7 @@ async fn test_resume_skill_preload_not_duplicated() {
     let id = extract_child_thread_id(&interrupted);
 
     // resume（隐式 continue，无 /skill token → 自动检测分支不触发）→ 完成
+    reopen_closed_child(&store, &id).await;
     let result = t
         .invoke(
             serde_json::json!({
@@ -811,6 +843,7 @@ async fn test_resume_skill_token_in_prompt_reinjects_once() {
     let id = extract_child_thread_id(&interrupted);
 
     // resume prompt 含 /test-skill token → 自动检测分支不存在（链未挂 SkillPreload）
+    reopen_closed_child(&store, &id).await;
     let result = t
         .invoke(
             serde_json::json!({

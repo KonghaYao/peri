@@ -46,6 +46,8 @@ struct ScopeTaskSnapshot {
     cursor: u64,
     epoch: u64,
     closing: bool,
+    #[serde(default, rename = "resourcesSettled")]
+    resources_settled: Option<bool>,
     tasks: Vec<ScopeTaskRow>,
 }
 
@@ -63,6 +65,11 @@ fn pending_tasks_for_closed_epoch(
     if snapshot.epoch != expected_epoch || !snapshot.closing {
         return Err(format!(
             "workspace task owner {server} close epoch changed during reconciliation"
+        ));
+    }
+    if snapshot.resources_settled.is_none() {
+        return Err(format!(
+            "Incomplete: workspace task owner {server} resource settlement evidence missing"
         ));
     }
     Ok(snapshot
@@ -167,7 +174,7 @@ impl McpClientPool {
     /// cancelled or timed-out calls to that same owner, so a single interruption
     /// cannot lock the session permanently. Without evidence nothing is cleared.
     fn resolve_execution_evidence(&self, session_id: &str, scope: &str) {
-        let Some(manager) = self.session_tasks.read().get(session_id).cloned() else {
+        let Some(manager) = self.session_bindings.read().manager(session_id) else {
             return;
         };
         let cleared = manager.resolve_external_execution_evidence(scope);
@@ -337,7 +344,7 @@ impl McpClientPool {
         for server in self.configured_workspace_task_owners() {
             self.resolve_execution_evidence(session_id, &server);
         }
-        let manager = self.session_tasks.read().get(session_id).cloned();
+        let manager = self.session_bindings.read().manager(session_id);
         let Some(manager) = manager else {
             // A session may have no Agent task projection (for example a
             // disabled Workspace profile). The owner scope was already
@@ -401,13 +408,13 @@ impl McpClientPool {
             let ServerResult::CustomResult(response) = response else {
                 return Err("workspace task close returned unexpected response".into());
             };
-            if response
+            let barrier_cursor = response
                 .0
                 .get("barrierCursor")
                 .and_then(serde_json::Value::as_u64)
-                .is_none()
-            {
-                return Err("workspace task close barrier missing".into());
+                .ok_or("Incomplete: workspace task close barrier missing")?;
+            if response.0.get("epoch").and_then(serde_json::Value::as_u64) != Some(initial.epoch) {
+                return Err("Incomplete: workspace task close response epoch mismatch".into());
             }
             let until = peri_time::monotonic_now() + Duration::from_secs(20);
             loop {
@@ -415,8 +422,12 @@ impl McpClientPool {
                     Self::workspace_scope_snapshot(&peer, meta.clone()).await?,
                 )
                 .map_err(|error| format!("invalid workspace task snapshot: {error}"))?;
+                if snapshot.cursor < barrier_cursor {
+                    return Err("Incomplete: workspace task snapshot precedes close barrier".into());
+                }
+                let resources_settled = snapshot.resources_settled == Some(true);
                 let pending = pending_tasks_for_closed_epoch(&server, initial.epoch, snapshot)?;
-                if pending.is_empty() {
+                if pending.is_empty() && resources_settled {
                     break;
                 }
                 for raw_id in pending {
@@ -456,6 +467,14 @@ impl McpClientPool {
                     .map_err(|error| format!("invalid workspace task snapshot: {error}"))?;
             if !snapshot.closing {
                 continue;
+            }
+            if snapshot.resources_settled != Some(true)
+                || snapshot
+                    .tasks
+                    .iter()
+                    .any(|row| !row.task.task.status.is_terminal())
+            {
+                return Err("Incomplete: previous Workspace scope resources unsettled".into());
             }
             let response = peri_time::timeout(
                 Duration::from_secs(10),
@@ -537,6 +556,7 @@ impl McpClientPool {
         initial_peer: Peer<RoleClient>,
     ) -> Result<(), crate::mcp::task_scope::TaskAdmissionError> {
         let weak_pool = Arc::downgrade(self);
+        let manager = self.session_bindings.read().manager(&session_id);
         let key = crate::mcp::McpTaskKey::TaskStatus {
             server: server.clone(),
             task_id: task_id.clone(),
@@ -550,12 +570,7 @@ impl McpClientPool {
                 let Some(pool) = weak_pool.upgrade() else {
                     break;
                 };
-                let Some(manager) = pool
-                    .session_tasks
-                    .read()
-                    .get(&session_id)
-                    .cloned()
-                else {
+                let Some(manager) = manager.as_ref() else {
                     break;
                 };
                 let mut params = GetTaskParams::new(&raw_task_id);
@@ -654,7 +669,6 @@ impl McpClientPool {
                             "MCP task status unavailable; retrying");
                     }
                 }
-                drop(manager);
                 drop(pool);
                 peri_time::sleep(Duration::from_secs(2)).await;
                 if let Some(pool) = weak_pool.upgrade() {

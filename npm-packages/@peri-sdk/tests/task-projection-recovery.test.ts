@@ -1,3 +1,4 @@
+import { closeCommand, controlResponse } from "../test/control-fixture";
 import { expect, test } from "bun:test";
 import * as Y from "yjs";
 import { SessionDocs } from "../src/state/session-docs";
@@ -59,6 +60,7 @@ test("Session asks Peri for a task snapshot after a missed notification", async 
     private listeners = new Set<(event: JsonRpcNotification) => void>();
     snapshotCalls = 0;
     async request<T>(method: string, _params?: unknown): Promise<T> {
+    if (method.startsWith("session/control")) return controlResponse(method, _params) as T;
       if (method === "initialize") return { protocolVersion: 1 } as T;
       if (method === "session/load") return {} as T;
       if (method === "session/input/snapshot") return { generation: "g1" } as T;
@@ -99,5 +101,5 @@ test("Session asks Peri for a task snapshot after a missed notification", async 
   await Promise.resolve();
   expect(transport.snapshotCalls).toBe(1);
   expect(tasks(agent.docs).get("shell-1")?.get("status")).toBe("completed");
-  await agent.close();
+  await agent.close(closeCommand);
 });

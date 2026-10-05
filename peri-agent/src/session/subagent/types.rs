@@ -104,6 +104,7 @@ pub trait SubagentChainAssembler: Send + Sync {
 #[derive(Clone, Default)]
 #[allow(clippy::type_complexity)]
 pub struct SubagentHost {
+    pub close_state: Arc<super::close::SubagentCloseState>,
     pub mcp_pool: Option<Arc<dyn peri_acp_types::ports::McpPoolPort>>,
     /// 会话资源门面（生产路径非 None；None 仅测试/遗留路径，跳过落库）
     pub session_resources: Option<Arc<dyn SessionResources>>,

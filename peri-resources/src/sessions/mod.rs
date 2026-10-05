@@ -6,6 +6,7 @@
 //! peri-acp-types（接口契约归 peri-acp-types），本模块仅实现，不解释业务语义。
 
 mod canonical;
+mod control;
 mod data;
 #[cfg(not(target_os = "emscripten"))]
 mod discovery;

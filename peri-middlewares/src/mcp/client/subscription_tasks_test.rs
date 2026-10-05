@@ -16,6 +16,7 @@ fn close_reconciliation_rejects_reopened_epoch_before_selecting_cancel_targets()
         cursor: 2,
         epoch,
         closing,
+        resources_settled: Some(false),
         tasks: vec![ScopeTaskRow {
             task: DetailedTask::new(
                 Task::new(
@@ -37,6 +38,20 @@ fn close_reconciliation_rejects_reopened_epoch_before_selecting_cancel_targets()
         pending_tasks_for_closed_epoch("workspace", 0, snapshot(0, true)).unwrap(),
         vec!["new-epoch-task"]
     );
+}
+
+#[test]
+fn missing_resource_settlement_cannot_be_inferred_from_empty_directory() {
+    let snapshot = ScopeTaskSnapshot {
+        cursor: 2,
+        epoch: 0,
+        closing: true,
+        resources_settled: None,
+        tasks: vec![],
+    };
+    assert!(pending_tasks_for_closed_epoch("workspace", 0, snapshot)
+        .unwrap_err()
+        .contains("Incomplete"));
 }
 
 #[tokio::test]

@@ -46,6 +46,7 @@ fn emit_goal_snapshot(ctx: &StageContext) {
 
 /// 运行 Act 阶段
 pub async fn run_act(input: ActInput) -> AgentResult<ActOutput> {
+    super::execution_control::validate(&input.context).await?;
     let ctx = &input.context;
     let has_tool_calls = input.reasoning.needs_tool_call();
 

@@ -57,7 +57,7 @@ async fn remote_v13_upgrade_drops_owner_tables_and_preserves_session_facts() {
     let before: (String, String, String) = sqlx::query_as("SELECT t.frozen_context,m.content,m.projection FROM threads t JOIN messages m ON m.thread_id=t.id WHERE t.id=?1")
         .bind("session").fetch_one(pool).await.unwrap();
     schema_upgrade::upgrade(&store, &snapshot).await.unwrap();
-    assert_eq!(fixture.version().await, 14);
+    assert_eq!(fixture.version().await, schema::REMOTE_SCHEMA_VERSION);
     assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM sqlite_master WHERE name IN ('session_execution_owners','session_execution_workspace_descriptors')")
         .fetch_one(pool).await.unwrap(), 0);
     assert_eq!(
@@ -106,7 +106,7 @@ async fn remote_v13_owner_removal_respects_read_only_and_reports_lost_commit() {
         .await
         .unwrap_err()
         .is_persistence_uncertain());
-    assert_eq!(fixture.version().await, 14);
+    assert_eq!(fixture.version().await, schema::REMOTE_SCHEMA_VERSION);
     assert!(matches!(
         open_step(
             writable.read_identity().await.unwrap(),
@@ -517,7 +517,7 @@ async fn remote_schema_upgrade_preserves_identity_ledger_config_and_rowid_histor
     schema_upgrade::upgrade(&store, &fixture.snapshot)
         .await
         .unwrap();
-    assert_eq!(fixture.version().await, 14);
+    assert_eq!(fixture.version().await, schema::REMOTE_SCHEMA_VERSION);
     let after: Vec<(String, String)> = sqlx::query_as(retained_sql)
         .fetch_all(&fixture.transport.pool)
         .await
@@ -606,7 +606,7 @@ async fn remote_schema_upgrade_completes_an_identity_only_initialization_without
     schema_upgrade::upgrade(&fixture.store(StoreAccess::ReadWrite), &fixture.snapshot)
         .await
         .unwrap();
-    assert_eq!(fixture.version().await, 14);
+    assert_eq!(fixture.version().await, schema::REMOTE_SCHEMA_VERSION);
     let (identity,): (String,) = sqlx::query_as("SELECT store_id FROM peri_store_meta")
         .fetch_one(&fixture.transport.pool)
         .await
@@ -633,7 +633,7 @@ async fn remote_schema_upgrade_failed_drop_rolls_back_goals_columns_and_version(
     schema_upgrade::upgrade(&fixture.store(StoreAccess::ReadWrite), &fixture.snapshot)
         .await
         .unwrap();
-    assert_eq!(fixture.version().await, 14);
+    assert_eq!(fixture.version().await, schema::REMOTE_SCHEMA_VERSION);
 }
 
 #[tokio::test]
@@ -740,7 +740,7 @@ async fn remote_schema_upgrade_removes_recognized_execution_table_but_keeps_ledg
     schema_upgrade::upgrade(&fixture.store(StoreAccess::ReadWrite), &fixture.snapshot)
         .await
         .unwrap();
-    assert_eq!(fixture.version().await, 14);
+    assert_eq!(fixture.version().await, schema::REMOTE_SCHEMA_VERSION);
     let (retired,): (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM sqlite_schema WHERE name IN ('execution_runs', 'thread_goals')",
     )

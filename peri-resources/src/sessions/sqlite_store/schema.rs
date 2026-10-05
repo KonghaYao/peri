@@ -28,6 +28,7 @@ pub(super) enum SchemaState {
     Version11,
     Version12,
     Version13,
+    Version14,
     Current,
 }
 
@@ -47,6 +48,7 @@ pub(super) async fn inspect(connection: &mut SqliteConnection) -> Result<SchemaS
         .await?;
     match version {
         v if v == CURRENT_SCHEMA_VERSION => return Ok(SchemaState::Current),
+        14 => return Ok(SchemaState::Version14),
         13 => return Ok(SchemaState::Version13),
         12 => return Ok(SchemaState::Version12),
         11 => return Ok(SchemaState::Version11),
@@ -155,7 +157,10 @@ impl SqliteSessionDatabase {
                 .await?;
             return Ok(());
         }
-        if matches!(state, SchemaState::Version12 | SchemaState::Version13) {
+        if matches!(
+            state,
+            SchemaState::Version12 | SchemaState::Version13 | SchemaState::Version14
+        ) {
             return Self::remove_execution_owner_schema(&mut connection).await;
         }
         if state == SchemaState::Version11 {
@@ -197,7 +202,16 @@ impl SqliteSessionDatabase {
         sqlx::query("DROP TABLE IF EXISTS session_execution_owners")
             .execute(&mut *tx)
             .await?;
-        sqlx::query("PRAGMA user_version = 14")
+        sqlx::query(crate::sessions::control::CREATE_STATE)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(crate::sessions::control::CREATE_RECEIPTS)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(crate::sessions::control::SEED_STATE)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("PRAGMA user_version = 15")
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;

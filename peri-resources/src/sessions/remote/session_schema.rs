@@ -29,5 +29,9 @@ pub(super) fn initialization_plan() -> Vec<StatementSpec> {
         .iter()
         .chain(CREATE_V2_INDEXES)
         .map(|sql| StatementSpec::bare(sql))
+        .chain([
+            StatementSpec::bare(crate::sessions::control::CREATE_STATE),
+            StatementSpec::bare(crate::sessions::control::CREATE_RECEIPTS),
+        ])
         .collect()
 }

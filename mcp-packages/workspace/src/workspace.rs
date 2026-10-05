@@ -588,7 +588,8 @@ impl ServerHandler for WorkspaceMcpServer {
                     let epoch = params.get("epoch").and_then(serde_json::Value::as_u64)
                         .ok_or_else(|| McpError::invalid_params("task close requires epoch", None))?;
                     let barrier = tasks.close_scope(scope, epoch).await?;
-                    serde_json::to_value(serde_json::json!({"barrierCursor": barrier, "epoch": epoch}))
+                    let snapshot = tasks.snapshot(scope);
+                    serde_json::to_value(serde_json::json!({"barrierCursor": barrier, "epoch": epoch, "resourcesSettled": snapshot.resources_settled}))
                 }
                 _ => {
                     let epoch = params.get("epoch").and_then(serde_json::Value::as_u64)

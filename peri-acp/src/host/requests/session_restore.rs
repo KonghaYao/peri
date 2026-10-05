@@ -192,7 +192,7 @@ pub(super) async fn prepare_existing(
             workflow_middleware,
             title: None,
             tags: Vec::new(),
-            continuation_armed: false,
+
             continuation_epoch: 0,
             continuation_in_flight: false,
             continuation_mq_steering_pending: false,

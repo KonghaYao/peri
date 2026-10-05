@@ -4,6 +4,11 @@ export { SendReceipt } from "../agent/send-receipt";
 export { BareHarnessConfig } from "../config/bare-harness-config";
 export type { MetaHarnessKey, PeriConfig } from "../config/peri-config";
 export { Session } from "../agent/session";
+export { SessionCloseIncompleteError, SessionCloseUnknownError, SessionControlNotAppliedError } from "../agent/session-control";
+export type {
+    ExecutionBinding, ControlAction, ControlCommand, ControlState, ControlReceipt, ControlRejection,
+    ControlResolution, ControlSnapshot, CommandExpectation, StopCommand, CloseOptions,
+} from "../agent/session-control";
 export { InteractionResponder, parseInteractionAnswer } from "../agent/interaction-responder";
 export type { InteractionAnswer } from "../agent/interaction-responder";
 export { SessionDocs } from "../state/session-docs";

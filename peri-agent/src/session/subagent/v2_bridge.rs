@@ -269,9 +269,11 @@ pub fn build_v2_subagent_context(
             &host.task_manager,
             session.store().thread_id.as_deref(),
         ) {
-            let inbox =
-                peri_acp_types::session::SessionInbox::new(Arc::new(session.queue().clone()));
-            pool.bind_agent_session(session_id, inbox.handle(), manager.clone());
+            if pool.agent_session_binding(session_id).is_none() {
+                let inbox =
+                    peri_acp_types::session::SessionInbox::new(Arc::new(session.queue().clone()));
+                pool.bind_agent_session(session_id, inbox.handle(), manager.clone());
+            }
         }
     }
     let turn = session.start_turn();

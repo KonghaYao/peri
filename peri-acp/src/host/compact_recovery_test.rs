@@ -72,6 +72,24 @@ struct RecoveryStore {
 
 #[async_trait]
 impl SessionResources for RecoveryStore {
+    async fn load_session_control(
+        &self,
+        id: &ThreadId,
+    ) -> SessionResourceResult<peri_acp_types::session_resources::ControlState> {
+        self.inner.load_session_control(id).await
+    }
+    async fn apply_session_control(
+        &self,
+        command: &peri_acp_types::session_resources::ControlCommand,
+    ) -> SessionResourceResult<peri_acp_types::session_resources::ControlReceipt> {
+        self.inner.apply_session_control(command).await
+    }
+    async fn resolve_session_control(
+        &self,
+        command: &peri_acp_types::session_resources::ControlCommand,
+    ) -> SessionResourceResult<peri_acp_types::session_resources::ControlResolution> {
+        self.inner.resolve_session_control(command).await
+    }
     async fn inspect_availability(
         &self,
         session: Option<&ThreadId>,
@@ -338,7 +356,7 @@ fn make_host_sessions(ctx: &SessionContext, payloads: Vec<PersistedPayload>) -> 
         workflow_middleware: None,
         title: None,
         tags: vec![],
-        continuation_armed: false,
+
         continuation_epoch: 0,
         continuation_in_flight: false,
         continuation_mq_steering_pending: false,

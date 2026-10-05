@@ -23,6 +23,7 @@ import { DemoSessionNotFoundError } from "./demo-session-not-found-error";
 import { SessionDocStream, decodeResume } from "./session-doc-stream";
 import { streamSessionDocuments } from "./session-sse";
 import { SessionEventLog } from "./session-event-log";
+import { shutdownCommands } from "./session-control-command";
 
 const workspace = await realpath(Bun.env.PERI_WORKSPACE!);
 const html = await readFile(resolve(import.meta.dir, "demo.html"), "utf8");
@@ -157,7 +158,7 @@ function openSession(sessionId: string | null): Promise<OpenSession> {
             return { agent, docs: new SessionDocStream(session.docs.chat, session.docs.session), events, interactions };
         } catch (error) {
             interactions.close();
-            await manager.closeAgent(agent.id);
+            await manager.cleanupStartupAgent(agent.id);
             throw error;
         }
     })();
@@ -284,5 +285,6 @@ try {
         result.value.interactions.close();
         await result.value.docs.close();
     }
-    await manager.closeAll();
+    const agents = opened.flatMap((result) => result.status === "fulfilled" ? [result.value.agent] : []);
+    await manager.closeAll(await shutdownCommands(agents));
 }

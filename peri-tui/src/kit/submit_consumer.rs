@@ -31,8 +31,7 @@ use crate::kit::submit_request::{
     ExportMode, SessionControlRequest, SubmitRequest, ViewActionRequest,
 };
 
-/// cancel_consumer 中 cancel RPC 的超时上限。transport 死亡时 cancel 可能
-/// 挂起——超时后仍执行本地复位（兜底路径，Issue 2026-08-05 S4.2）。
+/// 控制回执的等待上限；超时后请求仍继续结算，不把未知结果当作已停止。
 const CANCEL_RPC_TIMEOUT_SECS: u64 = 2;
 
 /// 启动提交消费者后台任务。
@@ -435,27 +434,26 @@ pub fn spawn_cancel_consumer(
                             break;
                         }
                         Some(()) => {
-                            // Issue 2026-08-05 S4.2: 顺序——先 cancel RPC（带
-                            // 超时）再复位。cancel 完成前服务端仍在推流（流尾巴），
-                            // 若先复位，这些事件会把 bridge phase 拉回 PromptRunning
-                            // （loading 闪回）；cancel 完成后流已停止，复位才稳定。
-                            // timeout 防止 transport 死亡时 cancel 挂起阻塞复位
-                            // （兜底路径：transport 死 / prompt task panic 时
-                            // TurnInterrupted 永不到达，复位使 Ctrl+C 双击退出
-                            // 路径恢复可用，与服务端 TurnInterrupted 幂等）。
+                            let pending = acp_client.cancel();
+                            tokio::pin!(pending);
                             let cancel_result = peri_time::timeout(
                                 Duration::from_secs(CANCEL_RPC_TIMEOUT_SECS),
-                                acp_client.cancel(),
+                                pending.as_mut(),
                             )
                             .await;
-                            match cancel_result {
-                                Ok(Ok(())) => {}
-                                Ok(Err(e)) => tracing::warn!(%e, "cancel_consumer: cancel 失败"),
+                            let receipt = match cancel_result {
+                                Ok(result) => result,
                                 Err(_) => {
-                                    tracing::warn!("cancel_consumer: cancel RPC 超时，继续本地复位")
+                                    tracing::warn!("cancel_consumer: control receipt pending");
+                                    pending.await
                                 }
+                            };
+                            match receipt {
+                                Ok(receipt) => tracing::info!(command_id = %receipt.command_id,
+                                    decision = ?receipt.decision, "cancel_consumer: control receipt"),
+                                Err(error) => tracing::warn!(%error, data = ?error.data,
+                                    "cancel_consumer: stop outcome unresolved"),
                             }
-                            clear_loading_state();
                         }
                     }
                 }

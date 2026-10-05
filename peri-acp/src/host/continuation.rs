@@ -40,32 +40,6 @@ pub(crate) fn take_continuation_for_request(
     Some(state.continuation_epoch)
 }
 
-/// `session/cancel` 是否应置位 continuation 标记。
-///
-/// 取消**正在执行的 continuation**（`continuation_in_flight`）时不置位：
-/// 否则用户取消续跑后 bg Defer 再次触发 scheduler，形成"取消续跑 → 再续跑"
-/// 的自动链式续跑。被取消续跑遗留的 Defer 由后续用户 prompt 消费。
-pub(crate) fn cancel_arms_continuation(state: &SessionState) -> bool {
-    !state.continuation_in_flight
-}
-
-/// `session/cancel` 是否需要**立即**补发一次 continuation 请求（race 兜底）。
-///
-/// Race 场景：bg callback 已 route 为 Defer/SubAgentComplete（队列可见），但其
-/// continuation 通知恰在 cancel 置位前被 scheduler 跳过（armed=false 时 take
-/// 失败）。此后不会有新的 bg 完成通知，Defer 将永久滞留。cancel 检查队列确有
-/// pending SubAgentComplete Defer 时补发 `BgTaskKind::Agent` 请求（Shell/Workflow
-/// 完成不产生 SubAgentComplete Defer，不会误触发）。
-///
-/// 需要同时满足：cancel 会置位 armed（非 in_flight）且队列存在待消费的
-/// SubAgentComplete Defer。若取消的是续跑本身（in_flight），不补发。
-pub(crate) fn cancel_should_schedule_continuation(
-    state: &SessionState,
-    has_required: bool,
-) -> bool {
-    cancel_arms_continuation(state) && has_required
-}
-
 /// 续跑仍有效：用户显式新 prompt 递增 `continuation_epoch` 后，已排队但
 /// 尚未运行的续跑应中止（新 prompt 会消费已 route 的 Defer 消息）。
 pub(crate) fn continuation_still_valid(state: &SessionState, epoch: u64) -> bool {
@@ -250,15 +224,33 @@ pub(crate) async fn run_continuation_scheduler(
             request = rx.recv() => match request { Some(request) => request, None => break },
             _ = scan.tick() => {
                 let states = sessions.lock().await;
-                let runnable = states.iter().find(|(session_id, state)| {
+                let candidates = states.iter().filter(|(session_id, state)| {
                     !state.closing && !state.continuation_in_flight
                         && cfg.session_manager.v2_queue_for(session_id)
                             .is_some_and(|queue| queue.has_ensure_processing())
-                }).map(|(session_id, _)| session_id.clone());
+                }).map(|(session_id, _)| session_id.clone()).collect::<Vec<_>>();
+                drop(states);
+                let mut runnable = None;
+                for session_id in candidates {
+                    let control = cfg.session_resources.load_session_control(&session_id).await;
+                    if control.is_ok_and(|state| state.status == peri_acp_types::session_resources::ControlStatus::Active) {
+                        runnable = Some(session_id);
+                        break;
+                    }
+                }
                 let Some(session_id) = runnable else { continue };
                 ContinuationRequest { session_id, kind: peri_acp_types::tasks::BgTaskKind::Agent, mq_steering: true }
             }
         };
+        let control = cfg
+            .session_resources
+            .load_session_control(&req.session_id)
+            .await;
+        if !control.is_ok_and(|state| {
+            state.status == peri_acp_types::session_resources::ControlStatus::Active
+        }) {
+            continue;
+        }
         // eligibility + 原子 take（每 session 只运行一次）
         let epoch = {
             let mut sessions = sessions.lock().await;

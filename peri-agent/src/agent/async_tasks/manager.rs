@@ -358,6 +358,19 @@ impl peri_acp_types::tasks::TaskManager for TaskManager {
 }
 
 impl TaskManager {
+    pub(crate) fn begin_session_close(&self) {
+        self.registry.scope.close();
+    }
+
+    pub fn session_close_settled(&self) -> bool {
+        self.registry.scope.is_closed()
+            && self.registry.scope.is_idle()
+            && self.registry.external_settled()
+    }
+
+    pub(crate) async fn wait_session_close(&self) -> bool {
+        self.registry.scope.wait().await && self.registry.external_settled()
+    }
     pub fn mark_external_lost(&self, task_id: &str) -> bool {
         self.registry.mark_external_status(task_id, "lost")
     }

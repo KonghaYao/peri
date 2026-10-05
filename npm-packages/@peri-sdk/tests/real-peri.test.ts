@@ -1,3 +1,4 @@
+import { closeExpectation } from "../test/control-fixture";
 import { afterEach, expect, test } from "bun:test";
 import { mkdtemp, mkdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -278,8 +279,8 @@ test("ManagedAgents starts one real Peri session and rejects a second owner", as
     );
     expect(secondTransportStarted).toBe(false);
   } finally {
-    await firstManager.closeAgent(first.id);
-    await secondManager.closeAgent(second.id);
+    await firstManager.closeAgent(first.id, await closeExpectation(first.session));
+    await secondManager.cleanupStartupAgent(second.id);
   }
   const database = new Database(f.database, { readonly: true });
   try {
@@ -318,7 +319,9 @@ test("one Session delivers multiple inputs through real Peri without a turn wait
     const sessions = await agent.getSessions();
     expect(sessions.some((entry) => entry.id === session.id)).toBe(true);
   } finally {
-    await manager.closeAgent(agent.id);
+    const command = await closeExpectation(agent.session);
+    await manager.closeAgent(agent.id, command, { drainTimeoutMs: 3_000 });
+    expect(agent.session.isClosed).toBe(true);
   }
 }, 30_000);
 
@@ -343,23 +346,28 @@ test("ManagedAgents directly creates Agents and loads a historical Session", asy
   expect(another.id).not.toBe(sessionId);
   expect((await sandbox.getSessions(f.workspace)).some((entry) => entry.id === sessionId)).toBe(true);
   const conflictingManager = new ManagedAgents({ kv });
+  const conflictingAgent = conflictingManager.createAgent({ path: f.workspace, id: "conflicting-agent", sandbox });
   try {
-    const conflictingAgent = conflictingManager.createAgent({ path: f.workspace, id: "conflicting-agent", sandbox });
     await expect(conflictingAgent.session.start(sessionId)).rejects.toBeInstanceOf(AgentClaimConflictError);
     expect(firstAgent.session.id).toBe(sessionId);
   } finally {
-    await conflictingManager.closeAll();
+    await conflictingManager.cleanupStartupAgent(conflictingAgent.id);
   }
-  await firstManager.closeAll();
+  await firstManager.closeAll(new Map([
+    [firstAgent.id, await closeExpectation(firstAgent.session)],
+    [anotherAgent.id, await closeExpectation(anotherAgent.session)],
+  ]));
 
   const secondManager = new ManagedAgents({ kv });
+  const loadedAgent = secondManager.createAgent({ id: "loaded-agent", sandbox });
   try {
-    const loadedAgent = secondManager.createAgent({ id: "loaded-agent", sandbox });
     const loaded = await loadedAgent.session.start(sessionId);
     expect(loaded.id).toBe(sessionId);
+    const { state } = await loaded.controlState();
+    expect((await loaded.reopen({ commandId: crypto.randomUUID(), expectedLifecycle: state.lifecycle, expectedRevision: state.revision, expectedControlGeneration: state.controlGeneration })).decision.kind).toBe("accepted");
     expect(loadedAgent.id).not.toBe(firstAgent.id);
   } finally {
-    await secondManager.closeAll();
+    await secondManager.closeAgent(loadedAgent.id, await closeExpectation(loadedAgent.session));
   }
 }, 20_000);
 
@@ -381,7 +389,7 @@ test("Sandbox Workspace MCP is discovered before the real ACP Session and outliv
     expect(agent.mcpServers()).toEqual([
       { name: "workspace", type: "http", url: `http://${bind}/mcp`, headers: [] },
     ]);
-    await manager.closeAgent(agent.id);
+    await manager.closeAgent(agent.id, await closeExpectation(agent.session));
     const response = await fetch(sandbox.getWorkspace().url, {
       method: "POST",
       headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
@@ -391,12 +399,12 @@ test("Sandbox Workspace MCP is discovered before the real ACP Session and outliv
     });
     expect(response.status).toBe(200);
   } finally {
-    await manager.closeAgent(agent.id);
+    await manager.closeAgent(agent.id, await closeExpectation(agent.session));
     await sandbox.closeWorkspace();
   }
 }, 30_000);
 
-test("a fresh ACP settles a Workspace shell task after the old ACP is killed during close", async () => {
+test("fresh ACP close remains incomplete without trusted owner recovery and retains intent", async () => {
   const f = await fixture();
   const bind = `127.0.0.1:${await unusedLoopbackPort()}`;
   const sandbox = new Sandbox({
@@ -450,19 +458,19 @@ test("a fresh ACP settles a Workspace shell task after the old ACP is killed dur
 
     second = await sandbox.createTransport(f.workspace) as StdioTransport;
     await initialize(second);
-    await second.request("session/close", { sessionId });
+    await expect(second.request("session/close", { sessionId })).rejects.toMatchObject({ code: -32010 });
     const settled = new Database(f.database, { readonly: true });
     const remainingIntent = settled.query("SELECT 1 FROM session_close_intents WHERE thread_id = ?")
       .get(sessionId);
     settled.close();
-    expect(remainingIntent).toBeNull();
+    expect(remainingIntent).not.toBeNull();
     const snapshot = await workspaceRpc(workspace.url, "workspace/taskSnapshot", 4, {
       _meta: { "peri/taskScope": taskScopeToken(sessionId) },
     }, peer);
     const task = (snapshot.value.result?.tasks as Array<{ task?: { taskId?: string; status?: string } }>)
       .find((row) => row.task?.taskId === rawTaskId);
     expect(task).toBeDefined();
-    expect(["completed", "failed", "cancelled"]).toContain(task?.task?.status);
+    expect(task?.task?.status).toBe("working");
   } finally {
     await second?.close().catch(() => {});
     await first.close().catch(() => {});

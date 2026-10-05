@@ -45,6 +45,24 @@ struct ControlledStore {
 
 #[async_trait]
 impl SessionResources for ControlledStore {
+    async fn load_session_control(
+        &self,
+        id: &ThreadId,
+    ) -> SessionResourceResult<peri_acp_types::session_resources::ControlState> {
+        self.inner.load_session_control(id).await
+    }
+    async fn apply_session_control(
+        &self,
+        command: &peri_acp_types::session_resources::ControlCommand,
+    ) -> SessionResourceResult<peri_acp_types::session_resources::ControlReceipt> {
+        self.inner.apply_session_control(command).await
+    }
+    async fn resolve_session_control(
+        &self,
+        command: &peri_acp_types::session_resources::ControlCommand,
+    ) -> SessionResourceResult<peri_acp_types::session_resources::ControlResolution> {
+        self.inner.resolve_session_control(command).await
+    }
     async fn inspect_availability(
         &self,
         session: Option<&ThreadId>,

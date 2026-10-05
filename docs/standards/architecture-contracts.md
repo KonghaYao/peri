@@ -93,7 +93,7 @@
 ### ARC-STDIO-001
 
 - **Scope**：ACP stdio/IDE transport 与统一 host。
-- **Rule**：stdio 请求必须经 `run_acp_stdio → run_acp_server_with_sessions → handle_request` 进入统一 ACP host，禁止恢复独立 typed-handler 业务路径。`session/new` response 必须先于首次 commands notification；stdio 的 rewind/clear 类输入不由命令层拦截，而是落入模型 prompt。legacy `type:cancel` 仅是全 session 强停兜底，不得被解释为标准 `session/cancel` 的身份、continuation 或队列语义。
+- **Rule**：stdio 请求必须经 `run_acp_stdio → run_acp_server_with_sessions → handle_request` 进入统一 ACP host，禁止恢复独立 typed-handler 业务路径。`session/new` response 必须先于首次 commands notification；stdio 的 rewind/clear 类输入不由命令层拦截，而是落入模型 prompt。按已批准 RCRA 控制契约，legacy `type:cancel` 与无回执 `session/cancel` 不再具有控制权限；停止必须提交稳定 `session/control` 命令，精确定位生命周期、控制代际和 attempt，Unknown 按原命令对账。
 - **Verify**：`cargo test -p peri-acp --lib host::stdio`；人工检查 `peri-acp/src/host/stdio/mod.rs` 与 `run_server_integration_test.rs` 的 initialize/new、response ordering、rename、prompt error、command filter 和 cancel 用例。
 
 ### ARC-TRANSPORT-001

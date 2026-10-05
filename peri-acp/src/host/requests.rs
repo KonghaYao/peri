@@ -21,6 +21,7 @@ pub(crate) mod config_options;
 mod mcp_oauth;
 mod plugin;
 mod rewind;
+mod session_control;
 pub(crate) mod session_lifecycle;
 mod storage_v2;
 mod user_input;
@@ -86,6 +87,9 @@ pub(crate) async fn handle_request(
     let result = match method {
         "initialize" => session_lifecycle::handle_initialize(params, cfg),
         "session/new" => session_lifecycle::handle_new(params, cfg, sessions).await,
+        "session/control" | "session/control/resolve" | "session/control/state" => {
+            session_control::handle(method, params, cfg, sessions).await
+        }
         "session/set_mode" => config_options::handle_set_mode(params, cfg, transport).await,
         "session/set_config_option" => {
             config_options::handle_set_config_option(params, cfg, sessions, transport).await
