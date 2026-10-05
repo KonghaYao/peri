@@ -56,7 +56,8 @@ fallback。纯 resolver 只使用输入值；system 管发布和更新。模块�
 - `peri-middlewares/src/mcp/client.rs::set_configuration_snapshot` 在初始化前只写一次，
   `configuration_revision` 可核对绑定版本；`initialize.rs` 选择 snapshot loader。
 - `peri-middlewares/src/mcp/config.rs` 只做插件采集/执行参数展开/builtin overlay；
-  基础合并与校验委托 core。未注入 snapshot 的 adapter 仍调用 core 规则。
+  基础合并与校验委托 core。snapshot 目录写法不同时，经 `io::same_file` 核对同目录，
+  不重读冻结配置；回归见 `mcp/config/snapshot_test.rs`。未注入 snapshot 的 adapter 仍调用 core 规则。
 - Controller `langfuse/config.rs` re-export `LangfuseConfig`；TUI
   `config/tui_config.rs` re-export `TuiConfig`，`kit/entry.rs` 优先从 snapshot 初始化。
 - ACP `host/workspace.rs` 用 `snapshot.resources().disable_bundled_skills` 构造

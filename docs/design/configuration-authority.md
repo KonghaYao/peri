@@ -127,6 +127,9 @@ TUI `save_effective` 当前为串行当前视图便利入口，仍在提交时�
 ACP 宿主装配将同一 `ConfigSource` snapshot 注入其新建 MCP pool，并从该快照
 取 provider/观测投影。pool 初始化前一次绑定 revision；middleware 消费冻结的
 基础配置，再附加插件与运行 overlay。TUI 使用 core UI 投影并通过共享配置源保存。
+MCP snapshot 的执行目录准入先比较路径；写法不同时，经配置 MCP 数据面核对是否
+解析为同一目录，接受 Windows 普通路径与 canonical verbatim 路径等别名。目录
+不可核对或不同仍拒绝，核对不重读 settings，也不重解析冻结输入或改变 revision。
 workspace 资源 consumer 从 `snapshot.resources().disable_bundled_skills` 取开关，
 正常 snapshot 路径已停止重新读取全局值；这不意味着存储或全部资源配置已迁入。
 

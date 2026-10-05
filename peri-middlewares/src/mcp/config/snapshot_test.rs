@@ -88,6 +88,48 @@ fn deployment_can_skip_plugin_discovery_and_builtin_overlay() {
 }
 
 #[test]
+fn snapshot_loader_accepts_the_same_directory_with_canonical_or_alternate_spelling() {
+    let temp = tempfile::tempdir().unwrap();
+    let cwd = temp.path().join("project");
+    std::fs::create_dir_all(cwd.join("nested")).unwrap();
+    let global_path = temp.path().join("settings.json");
+    let snapshot = snapshot_for(
+        &cwd,
+        &global_path,
+        r#"{"mcpServers":{"frozen":{"command":"frozen-command"}}}"#,
+        "{}",
+        HashMap::new(),
+    );
+    std::fs::write(&global_path, "invalid replacement settings").unwrap();
+    for spelling in [cwd.canonicalize().unwrap(), cwd.join("nested/..")] {
+        let (config, _) = load_merged_config_from_snapshot_with_capabilities(
+            &spelling,
+            &temp.path().join("claude"),
+            &snapshot,
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            config.mcp_servers["frozen"].command.as_deref(),
+            Some("frozen-command")
+        );
+    }
+    let other_cwd = temp.path().join("other");
+    std::fs::create_dir_all(&other_cwd).unwrap();
+    assert!(matches!(
+        load_merged_config_from_snapshot_with_capabilities(
+            &other_cwd,
+            &temp.path().join("claude"),
+            &snapshot,
+            false,
+            false,
+        ),
+        Err(McpConfigError::SnapshotScopeMismatch { .. })
+    ));
+}
+
+#[test]
 fn snapshot_loader_rejects_a_mismatched_workspace_before_loading_plugins() {
     let temp = tempfile::tempdir().unwrap();
     let cwd = temp.path().join("project");

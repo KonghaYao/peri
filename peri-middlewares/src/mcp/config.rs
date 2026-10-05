@@ -22,6 +22,8 @@ pub enum McpConfigError {
     Authority(#[from] peri_config::ConfigurationError),
     #[error("MCP snapshot scope mismatch: requested {cwd}, snapshot {snapshot_cwd}")]
     SnapshotScopeMismatch { cwd: String, snapshot_cwd: String },
+    #[error("MCP snapshot scope identity unavailable: {source}")]
+    SnapshotScopeIdentityRead { source: std::io::Error },
     #[error("PERI_MCP_CACHE must be true/false, 1/0, or on/off")]
     InvalidCacheEnvironment,
     #[error("MCP cache environment configuration unavailable: {source}")]
@@ -435,7 +437,10 @@ pub(crate) fn load_merged_config_from_snapshot_with_capabilities(
     plugin_discovery_available: bool,
 ) -> Result<(McpConfigFile, HashMap<String, String>), McpConfigError> {
     let snapshot_cwd = &snapshot.scope().cwd;
-    if snapshot_cwd != cwd {
+    if snapshot_cwd != cwd
+        && !peri_config::io::same_file(snapshot_cwd, cwd)
+            .map_err(|source| McpConfigError::SnapshotScopeIdentityRead { source })?
+    {
         return Err(McpConfigError::SnapshotScopeMismatch {
             cwd: cwd.display().to_string(),
             snapshot_cwd: snapshot_cwd.display().to_string(),
