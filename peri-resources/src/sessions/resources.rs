@@ -1,31 +1,11 @@
-//! 会话资源门面实现：把本机执行面与数据面组合成消费侧唯一入口。
-//!
-//! 职责分工（B §2）：门面持有**两类事实**——数据面（`SessionDataPort`）
-//! 与执行面（`LocalExecutionPort`：发现、登记、owner、准入）；业务侧只看到本
-//! 门面。数据端口是 `crate::sessions` 内的可见类型，其他 crate 与资源层其他模块都拿
-//! 不到裸写句柄，本门面也不导出任何无 guard 的写入路径。
-//!
-//! 四条贯穿全部 mutation 的规则：
-//!
-//! 1. **统一准入**：能力/权限 → 未决持久化 → 当前实例的运行屏障，检查在门面内部完成
-//!    （[`MutationGate`]），不靠调用方先查。
-//! 2. **效果结清**：只有 `Applied | NotApplied` 才释放写入准入；`Unknown`（取消、
-//!    提交未确认）把范围交给 `Drop`，在租约上留下未决证据。
-//! 3. **只读不退化**：已有会话上的写入在只读打开时返回 `ReadOnlyStore`（历史可读、
-//!    执行权不可得，与既有只读降级路径一致）；需要登记新身份/新绑定的写入返回
-//!    `Workspace(ReadOnlyStore)`（连会话都还没有，没有可降级的对象）。
-//! 4. **诚实失败**：数据已完整保存但准入未成立时返回 `saved_but_not_admitted`，
-//!    不谎称「确定未创建」，也不让调用方据此删数据。
-//!
-//! SQLite 创建在同一事务保存 canonical 数据，执行准入只在本实例登记；
-//! 远程是「durable 数据 + 本机准入」两步，不是分布式事务。
+//! 会话数据资源门面：工作区校验、读写权限与持久化结清。
+//! 执行所有权由 peri-sdk 维护，本模块不登记或认领执行者。
 
 mod claim;
 mod evidence;
 mod gate;
 mod lifecycle;
 mod oauth_credentials;
-mod owner;
 
 use std::path::Path;
 #[cfg(not(target_os = "emscripten"))]
@@ -45,24 +25,21 @@ use peri_acp_types::session_resources::{
 use peri_acp_types::store::{CompactionChange, MessageFlags, PersistedPayload};
 use peri_acp_types::thread::{AgentStatus, ThreadId, ThreadMeta};
 use peri_acp_types::workspace::{
-    ExecutionOwnerToken, ExecutionWorkspaceOwnerRecord, ResolvedWorkspace, ScopedThreadPage,
-    ScopedThreadQuery, SessionBinding, SessionExecutionLease, WorkspaceError,
-    WorkspaceExecutionDescriptor,
+    ResolvedWorkspace, ScopedThreadPage, ScopedThreadQuery, SessionBinding, WorkspaceError,
 };
 
 use super::data::{ensure_child_relation, ChildResumeRecord, SessionDataPort};
-use super::execution::same_lease;
 #[cfg(target_os = "emscripten")]
 use super::failure::execution_failure;
-use super::failure::{invalid_input, lease_required, not_found};
-use super::local_port::{LocalExecutionPort, RevokeEffect, SessionFacts};
+use super::failure::{invalid_input, not_found};
+use super::local_port::LocalExecutionPort;
 #[cfg(not(target_os = "emscripten"))]
 use super::sqlite_store::execution_failure;
 #[cfg(not(target_os = "emscripten"))]
 use super::sqlite_store::{LocalExecution, ReadOnlyThreadStoreError};
 
 use claim::ChildResumeClaimHandle;
-use gate::{MutationGate, WriteScope};
+use gate::MutationGate;
 use lifecycle::{Lifecycle, LifecycleState};
 
 /// 排空与关闭的有界等待。
@@ -71,36 +48,16 @@ use lifecycle::{Lifecycle, LifecycleState};
 /// 此时报告未结清，而不是无限期等待一个外部 future。
 const SETTLE_WAIT: Duration = Duration::from_secs(10);
 
-use owner::abandon_with_canonical_guard;
-
-/// 会话数据的存放位置 — 由组合层在装配时确定，门面不做后端推断。
-///
-/// 它决定 canonical 数据与运行资格的组合方式，不改变任何公开行为：
-///
-/// - 数据在**本机库**时由本机执行面协调 canonical 提交与运行句柄登记；
-/// - 数据在**远端**时是两步（先由数据端口保存 canonical 数据，再取本机执行准入）。
-///   两步之间没有分布式事务，因此保存成功而准入失败时只能如实报告
-///   `saved_but_not_admitted`（历史可读，执行资格不可得）。
+/// 会话数据存放位置，用于选择工作区证据校验规则。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::sessions) enum SessionDataHome {
     LocalLibrary,
     RemoteStore,
 }
 
-/// 未发布创建的句柄（两阶段的第二阶段）：提交 frozen 或撤销整条草稿。
-///
-/// 句柄持有本次创建的租约与两个端口，因此两个终局动作都不需要调用方再拼补偿：
-///
-/// - [`SessionInitialization::commit_frozen`]：本机组合在 canonical 事务中复核精确活 owner；
-///   远端组合先本机复核活跃且无未决写的同一租约，再走数据端口的 write-once 提交；
-/// - [`SessionInitialization::abandon`]：复用执行面的撤销顺序（关准入 → 补偿 → 放锁），
-///   补偿即数据端的「撤销未发布创建」，而它自己会拒绝删除**已提交 frozen** 的草稿。
 struct DraftInitialization {
     id: ThreadId,
-    lease: Arc<dyn SessionExecutionLease>,
-    local: Arc<dyn LocalExecutionPort>,
-    data: Arc<dyn SessionDataPort>,
-    home: SessionDataHome,
+    gate: MutationGate,
 }
 
 #[async_trait]
@@ -109,55 +66,21 @@ impl SessionInitialization for DraftInitialization {
         &self.id
     }
 
-    fn execution_lease(&self) -> Arc<dyn SessionExecutionLease> {
-        Arc::clone(&self.lease)
-    }
-
     async fn commit_frozen(&self, frozen: &FrozenSnapshotBytes) -> SessionResourceResult<()> {
-        match self.home {
-            SessionDataHome::LocalLibrary => {
-                self.local
-                    .commit_frozen(&self.id, &self.lease, frozen)
-                    .await
-            }
-            SessionDataHome::RemoteStore => {
-                let facts = SessionFacts {
-                    root: self.id.clone(),
-                };
-                let guard = self
-                    .local
-                    .exclusive_guard(&self.id, &facts)
-                    .await
-                    .map_err(execution_failure)?
-                    .ok_or_else(lease_required)?;
-                let scope = WriteScope::Exclusive(Some(guard));
-                let result = async {
-                    self.local
-                        .verify_initialization_owner(&self.id, &self.lease)
-                        .await?;
-                    self.data.commit_frozen(&self.id, frozen).await
-                }
-                .await;
-                scope.settle(&result);
-                result
-            }
-        }
+        self.gate
+            .with_exclusive(&self.id, || {
+                self.gate.data().commit_frozen(&self.id, frozen)
+            })
+            .await
     }
 
     async fn abandon(self: Arc<Self>) -> SessionResourceResult<()> {
-        let id = self.id.clone();
-        let data = Arc::clone(&self.data);
-        // 两阶段草稿的撤销判据（`frozen IS NULL`）只在这里生效：已提交的草稿必须被拒。
-        let revoke: RevokeEffect<'_> =
-            Box::pin(async move { data.revoke_unpublished_draft(&id).await });
-        abandon_with_canonical_guard(
-            self.local.as_ref(),
-            self.data.as_ref(),
-            &self.id,
-            &self.lease,
-            revoke,
-        )
-        .await
+        self.gate.ensure_session_write()?;
+        self.gate
+            .with_registration(&self.id, || {
+                self.gate.data().revoke_unpublished_draft(&self.id)
+            })
+            .await
     }
 }
 
@@ -221,7 +144,7 @@ impl SessionResourcesImpl {
         home: SessionDataHome,
     ) -> Self {
         let lifecycle = Lifecycle::new();
-        let gate = MutationGate::new(data, local, lifecycle.clone());
+        let gate = MutationGate::new(data, local, lifecycle.clone(), home);
         Self {
             gate,
             lifecycle,
@@ -281,12 +204,8 @@ impl SessionResourcesImpl {
     ///
     /// 前提（又是同一次创建、工作区证据仍然一致）成立时补上准入；否则保留 identity 并
     /// 如实报告「已保存、未准入」——既不重造 binding/frozen，也不谎称「确定未创建」。
-    async fn admit_saved_creation(
-        &self,
-        input: &NewSession,
-    ) -> SessionResourceResult<Arc<dyn SessionExecutionLease>> {
+    async fn admit_saved_creation(&self, input: &NewSession) -> SessionResourceResult<()> {
         let id = &input.thread_id;
-        let local = self.gate.local();
         let saved = self.gate.data().load_snapshot(id).await?;
         let created_at = chrono::DateTime::parse_from_rfc3339(&input.created_at)
             .map_err(|_| invalid_input("invalid session creation timestamp"))?;
@@ -312,11 +231,8 @@ impl SessionResourcesImpl {
         ) {
             return Err(SessionResourceError::saved_but_not_admitted(id.clone()));
         }
-        match local.admit_existing(id, &input.binding).await {
-            Ok(lease) => self.install_execution_claim(id, lease, false, None).await,
-            Err(error) if error.is_persistence_uncertain() => Err(error),
-            Err(_) => Err(SessionResourceError::saved_but_not_admitted(id.clone())),
-        }
+        self.recheck_binding(Some(&input.binding), false).await?;
+        Ok(())
     }
 
     fn workspace_mismatch() -> SessionResourceError {
@@ -377,15 +293,10 @@ impl SessionResources for SessionResourcesImpl {
             None => None,
             Some(id) => Some(self.execution_availability(id).await?),
         };
-        let unreleased_owner = match session {
-            None => None,
-            Some(id) => self.gate.data().unreleased_execution_owner(id).await?,
-        };
         Ok(SessionAvailability {
             access,
             capabilities,
             execution,
-            unreleased_owner,
         })
     }
 
@@ -411,122 +322,39 @@ impl SessionResources for SessionResourcesImpl {
         Ok(())
     }
 
-    async fn acquire_execution(
-        &self,
-        id: &ThreadId,
-        workspace: &ResolvedWorkspace,
-    ) -> SessionResourceResult<Arc<dyn SessionExecutionLease>> {
-        self.acquire_execution_owner(id, workspace).await
+    async fn finish_close(&self, id: &ThreadId) -> SessionResourceResult<()> {
+        self.gate.ensure_recovery_write()?;
+        self.gate.finish_close(id).await
     }
 
-    async fn claim_closing_execution(
-        &self,
-        root: &ThreadId,
-        expected_current_epoch: i64,
-    ) -> SessionResourceResult<Arc<dyn SessionExecutionLease>> {
-        self.claim_closing_execution_owner(root, expected_current_epoch)
-            .await
-    }
-
-    async fn renew_execution_owner(
-        &self,
-        token: &ExecutionOwnerToken,
-    ) -> SessionResourceResult<()> {
-        self.gate.data().renew_execution_owner(token).await
-    }
-
-    async fn release_execution_owner(
-        &self,
-        token: &ExecutionOwnerToken,
-    ) -> SessionResourceResult<()> {
-        self.gate.data().release_execution_owner(token).await
-    }
-
-    async fn finish_close(&self, token: &ExecutionOwnerToken) -> SessionResourceResult<()> {
+    async fn close_settlement(&self, id: &ThreadId) -> SessionResourceResult<CloseSettlement> {
         self.gate.ensure_recovery_permitted()?;
-        self.gate.data().finish_close(token).await
-    }
-
-    async fn close_settlement(
-        &self,
-        token: &ExecutionOwnerToken,
-    ) -> SessionResourceResult<CloseSettlement> {
-        self.gate.data().close_settlement(token).await
-    }
-
-    async fn bind_execution_workspace_owner(
-        &self,
-        token: &ExecutionOwnerToken,
-        descriptor: &WorkspaceExecutionDescriptor,
-    ) -> SessionResourceResult<()> {
-        if !descriptor.valid_for_store() {
-            return Err(SessionResourceError::conflict(
-                "workspace owner descriptor is invalid",
-            ));
-        }
-        self.gate
-            .data()
-            .bind_execution_workspace_owner(token, descriptor)
-            .await
-    }
-
-    async fn read_execution_workspace_owner(
-        &self,
-        root: &ThreadId,
-    ) -> SessionResourceResult<Option<ExecutionWorkspaceOwnerRecord>> {
-        self.gate.data().read_execution_workspace_owner(root).await
-    }
-
-    async fn mark_unsupported_async_owner(
-        &self,
-        token: &ExecutionOwnerToken,
-    ) -> SessionResourceResult<()> {
-        self.gate.data().mark_unsupported_async_owner(token).await
+        self.gate.data().close_settlement(id).await
     }
 
     // ── 创建与接纳 ──
 
-    async fn create_session(
-        &self,
-        input: &NewSession,
-    ) -> SessionResourceResult<Arc<dyn SessionExecutionLease>> {
+    async fn create_session(&self, input: &NewSession) -> SessionResourceResult<()> {
         self.gate.ensure_registration_write()?;
-        let local = self.gate.local();
         if self.gate.data().session_exists(&input.thread_id).await? {
             return self.admit_saved_creation(input).await;
         }
-        match self.home {
-            SessionDataHome::LocalLibrary => {
-                let lease = local.create_session(input).await?;
-                self.install_execution_claim(&input.thread_id, lease, false, None)
-                    .await
-            }
-            SessionDataHome::RemoteStore => {
-                let workspace = self.recheck_binding(Some(&input.binding), false).await?;
+        let workspace = self.recheck_binding(Some(&input.binding), false).await?;
+        self.gate
+            .with_registration(&input.thread_id, || {
                 self.gate
                     .data()
                     .save_new_session_in_workspace(input, &workspace)
-                    .await?;
-                self.admit_saved_creation(input).await
-            }
-        }
+            })
+            .await?;
+        self.admit_saved_creation(input).await
     }
 
-    async fn abandon_initialization(
-        &self,
-        id: &ThreadId,
-        lease: &Arc<dyn SessionExecutionLease>,
-    ) -> SessionResourceResult<()> {
+    async fn abandon_initialization(&self, id: &ThreadId) -> SessionResourceResult<()> {
         self.gate.ensure_session_write()?;
-        let data = self.gate.data().clone();
-        abandon_with_canonical_guard(
-            self.gate.local().as_ref(),
-            self.gate.data().as_ref(),
-            id,
-            lease,
-            Box::pin(async move { data.revoke_unpublished_session(id).await }),
-        )
-        .await
+        self.gate
+            .with_registration(id, || self.gate.data().revoke_unpublished_session(id))
+            .await
     }
 
     async fn begin_initialization(
@@ -534,61 +362,34 @@ impl SessionResources for SessionResourcesImpl {
         draft: &NewSessionDraft,
     ) -> SessionResourceResult<Arc<dyn SessionInitialization>> {
         self.gate.ensure_registration_write()?;
-        let local = self.gate.local();
-        let lease = match self.home {
-            SessionDataHome::LocalLibrary => local.begin_initialization(draft).await?,
-            SessionDataHome::RemoteStore => {
-                let workspace = self.recheck_binding(Some(&draft.binding), false).await?;
+        let workspace = self.recheck_binding(Some(&draft.binding), false).await?;
+        self.gate
+            .with_registration(&draft.thread_id, || {
                 self.gate
                     .data()
                     .save_new_session_draft_in_workspace(draft, &workspace)
-                    .await?;
-                match local.admit_existing(&draft.thread_id, &draft.binding).await {
-                    Ok(lease) => lease,
-                    Err(error) if error.is_persistence_uncertain() => return Err(error),
-                    Err(_) => {
-                        return Err(SessionResourceError::saved_but_not_admitted(
-                            draft.thread_id.clone(),
-                        ));
-                    }
-                }
-            }
-        };
-        let lease = self
-            .install_execution_claim(&draft.thread_id, lease, false, None)
+            })
             .await?;
         Ok(Arc::new(DraftInitialization {
             id: draft.thread_id.clone(),
-            lease,
-            local: Arc::clone(local),
-            data: Arc::clone(self.gate.data()),
-            home: self.home,
+            gate: self.gate.clone(),
         }))
     }
 
     async fn discard_incomplete_initialization(&self, id: &ThreadId) -> SessionResourceResult<()> {
-        self.gate.ensure_session_write()?;
-        match self.home {
-            SessionDataHome::LocalLibrary => {
-                self.gate
-                    .local()
-                    .discard_incomplete_initialization(id)
-                    .await
-            }
-            SessionDataHome::RemoteStore => {
-                if self
-                    .gate
-                    .local()
-                    .live_owner(id, &SessionFacts { root: id.clone() })
-                    .await
-                    .map_err(execution_failure)?
-                    .is_some()
-                {
-                    return Err(lease_required());
+        self.gate
+            .with_exclusive(id, || async {
+                if !matches!(
+                    self.gate.data().load_binding(id).await?,
+                    BindingState::Bound(_)
+                ) {
+                    return Err(SessionResourceError::conflict(
+                        "session is not a bound draft",
+                    ));
                 }
                 self.gate.data().revoke_unpublished_draft(id).await
-            }
-        }
+            })
+            .await
     }
 
     async fn adopt_legacy_session(
@@ -688,7 +489,9 @@ impl SessionResources for SessionResourcesImpl {
         id: &ThreadId,
         archived: bool,
     ) -> SessionResourceResult<()> {
-        self.gate.data().set_session_archived(id, archived).await
+        self.gate
+            .with_mutation(id, || self.gate.data().set_session_archived(id, archived))
+            .await
     }
 
     async fn list_children(&self, parent: &ThreadId) -> SessionResourceResult<Vec<ThreadMeta>> {
@@ -736,10 +539,7 @@ impl SessionResources for SessionResourcesImpl {
         self.gate.data().is_session_closing(id).await
     }
 
-    async fn save_fork(
-        &self,
-        fork: &ForkSnapshot,
-    ) -> SessionResourceResult<Arc<dyn SessionExecutionLease>> {
+    async fn save_fork(&self, fork: &ForkSnapshot) -> SessionResourceResult<()> {
         self.gate.ensure_registration_write()?;
         let data = self.gate.data();
         if !data.session_exists(&fork.source_id).await? {
@@ -748,45 +548,22 @@ impl SessionResources for SessionResourcesImpl {
         if data.session_exists(&fork.target.thread_id).await? {
             return self.admit_saved_creation(&fork.target).await;
         }
-        // 目标快照先完整落库（数据面一次事务），再建立执行准入；准入失败时数据已保存，
-        // 如实报告「已保存、未准入」，不重造目标快照。
-        if self.home == SessionDataHome::RemoteStore {
-            let workspace = self
-                .recheck_binding(Some(&fork.target.binding), false)
-                .await?;
-            self.gate
-                .data()
-                .save_fork_in_workspace(fork, &workspace)
-                .await?;
-        } else {
-            self.gate.data().save_fork(fork).await?;
-        }
+        let workspace = self
+            .recheck_binding(Some(&fork.target.binding), false)
+            .await?;
+        self.gate
+            .with_registration(&fork.target.thread_id, || {
+                self.gate.data().save_fork_in_workspace(fork, &workspace)
+            })
+            .await?;
         self.admit_saved_creation(&fork.target).await
     }
 
-    async fn save_child(
-        &self,
-        child: &ChildSnapshot,
-        lease: &Arc<dyn SessionExecutionLease>,
-    ) -> SessionResourceResult<()> {
-        // 输入自洽先于一切副作用：快照里的父子关系出现两次（`parent_id` 与 target meta），
-        // 落库用的是后者。不一致的快照必须先被拒绝——此时还什么都没写、也没有在 root 的
-        // 租约上留下未决证据；只靠调用点自觉会让直接调用门面的一方写出「独立 root」。
+    async fn save_child(&self, child: &ChildSnapshot) -> SessionResourceResult<()> {
         ensure_child_relation(child)?;
         self.gate.ensure_registration_write()?;
-        let local = self.gate.local();
-        // root 的事实由数据面回答（子会话在本机可能一行都没有）；root 自己也可能是别处的
-        // 子会话，因此按「root 的 root + root 有没有绑定」问一次。
-        let facts = self.gate.session_facts(&child.root_id).await?;
-        let owned = local
-            .owner_lease(&child.root_id, &facts)
-            .await
-            .map_err(execution_failure)?
-            .ok_or_else(lease_required)?;
-        // child 沿用 root owner：传入的必须是这条 root 的活 owner，不能借别人的所有权写。
-        if !owned.is_active() || !same_lease(&owned, lease) {
-            return Err(lease_required());
-        }
+        self.recheck_binding(Some(&child.target.binding), false)
+            .await?;
         self.gate
             .with_mutation(&child.root_id, || self.gate.data().save_child(child))
             .await
@@ -884,78 +661,20 @@ impl SessionResources for SessionResourcesImpl {
     }
 
     async fn delete_session_tree(&self, id: &ThreadId) -> SessionResourceResult<()> {
-        // 删除是显式生命周期行为：门面确认有效 owner 后才动数据；删除即删除——v10 之后
-        // 本机不再留删除锚点（用户裁决不做跨安装的终态判定），远端删除也不再需要先把
-        // 「正在删除」写回本机。
         self.gate
             .with_mutation(id, || self.gate.data().delete_tree(id))
-            .await?;
-        self.gate.local().dispose_execution(id).await
+            .await
     }
 
-    /// 未决持久化的收敛：不需要调用方提供任何令牌或操作 id。
-    ///
-    /// 收谁的口供由数据面决定（本机写入同事务完成，因此本机组合只需确认锚点已清；远程组合
-    /// 按本机日志里的**原操作 id** 逐条向远端账本求证终态）。门面在这里只做两件事：
-    ///
-    /// 1. **不与自己在途的请求抢判定权**：本进程还持有这条 root 的活 owner 时，先等已准入
-    ///    的写入结束（有界），再让数据面判定。取消/超时之后的真实写仍会留在日志里，因此
-    ///    等待只是把先后顺序摆正，不是判定依据；
-    /// 2. 把结论原样转达（`Recovered` 才代表本机已无可证明未结态的写入），失败不降级。
-    ///
-    /// 只读打开时本方法只读不写：回答的是「能否重载」，不是「已经收敛」。
-    ///
-    /// 关闭流程（`Closing`）下仍可调用：第一次关闭因未结清失败之后，收敛必须还有入口。
     async fn recover_session_persistence(
         &self,
         id: &ThreadId,
     ) -> SessionResourceResult<PersistenceRecovery> {
-        self.gate.ensure_recovery_permitted()?;
-        // 这是先后顺序而不是判定依据：等待失败（例如本机父链损坏导致诊断读取失败）不构成
-        // 「不能判定」，收敛结论仍只由数据面给出，不在这里用兜底把未知当已知。
-        let facts = self.gate.session_facts(id).await?;
-        let owner = self
-            .gate
-            .local()
-            .live_owner(id, &facts)
-            .await
-            .ok()
-            .flatten();
-        if let Some(lease) = owner {
-            if lease.is_active() {
-                peri_time::timeout(SETTLE_WAIT, lease.wait_for_in_flight())
-                    .await
-                    .map_err(|_| SessionResourceError::new(SessionResourceErrorKind::Timeout))?;
-            }
-        }
-        self.gate.data().recover_persistence(id).await
+        self.gate.recover(id).await
     }
 
     async fn drain_persistence(&self, id: &ThreadId) -> SessionResourceResult<()> {
-        // 与恢复同样在 `Closing` 下放行：关闭前的排空必须能重做。
-        self.gate.ensure_recovery_permitted()?;
-        let local = self.gate.local();
-        let facts = self.gate.session_facts(id).await?;
-        // 排空等待的是**本进程**已准入的写入：他处持有的所有权不归本次等待，
-        // 因此这里用诊断查询，不把「本进程没有 owner」当成错误。
-        if let Some(lease) = local
-            .live_owner(id, &facts)
-            .await
-            .map_err(execution_failure)?
-        {
-            if lease.is_active() {
-                // 有界等待已准入写入结清；超时说明有写入卡住，报告未结清而不是无限等。
-                peri_time::timeout(SETTLE_WAIT, lease.wait_for_in_flight())
-                    .await
-                    .map_err(|_| SessionResourceError::new(SessionResourceErrorKind::Timeout))?;
-            }
-            if lease.is_uncertain() {
-                return Err(SessionResourceError::persistence_uncertain(Some(
-                    id.clone(),
-                )));
-            }
-        }
-        self.gate.data().drain(id).await
+        self.gate.drain(id).await
     }
 }
 

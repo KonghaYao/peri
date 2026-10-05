@@ -4,7 +4,7 @@ use super::*;
 
 #[tokio::test]
 async fn test_bound_subagent_resume_requires_same_root_but_allows_siblings() {
-    // 真门面：绑定、父子链、执行所有权都由真实实现提供（不可用 mock 自证）。
+    // 真门面：绑定、父子链都由真实实现提供（不可用 mock 自证）。
     let repo = crate::session::test_resources::git_repository();
     let db = tempfile::tempdir().unwrap();
     let store: Arc<dyn peri_acp_types::session_resources::SessionResources> = Arc::new(
@@ -14,13 +14,12 @@ async fn test_bound_subagent_resume_requires_same_root_but_allows_siblings() {
     );
     let workspace = store.resolve_workspace(repo.path()).await.unwrap();
     let cwd = workspace.cwd.to_str().unwrap();
-    let root_a = workspace.cwd.to_string_lossy().into_owned();
-    let (root_a_id, owner_a) = create_bound_root(&store, &workspace, None).await;
-    let (root_b_id, owner_b) = create_bound_root(&store, &workspace, None).await;
+    let root_a_id = create_bound_root(&store, &workspace, None).await;
+    let root_b_id = create_bound_root(&store, &workspace, None).await;
     // child 的 frozen 必须是 root 已保存快照的逐字节副本（门面在 save_child 内校验）。
     let frozen = FrozenSnapshotBytes::new("{\"version\":1,\"root\":true}");
-    let child_id = save_bound_child(&store, &workspace, &root_a_id, &frozen, &owner_a).await;
-    let sibling_id = save_bound_child(&store, &workspace, &root_a_id, &frozen, &owner_a).await;
+    let child_id = save_bound_child(&store, &workspace, &root_a_id, &frozen).await;
+    let sibling_id = save_bound_child(&store, &workspace, &root_a_id, &frozen).await;
     let caller_b = Session::new(
         Arc::from(cwd),
         FrozenContext::builder().build(),
@@ -56,30 +55,15 @@ async fn test_bound_subagent_resume_requires_same_root_but_allows_siblings() {
             .agent_status,
         AgentStatus::Done
     );
-    // 同根兄弟会话位于同一 root 执行代际（本机只有一条 root owner 事实）。
-    let _ = root_a;
-    owner_a
-        .as_ref()
-        .expect("root A 仍持有执行权")
-        .mark_clean()
-        .await
-        .unwrap();
-    owner_b
-        .as_ref()
-        .expect("root B 仍持有执行权")
-        .mark_clean()
-        .await
-        .unwrap();
 }
 
-/// 真门面：创建一条已绑定的根会话（返回身份与执行所有权）。
+/// 构造已绑定父会话的后台子 agent 配置。
 fn tail_spawn_config(
     store: Arc<MockSessionResources>,
     outcome: TailOutcome,
 ) -> SubagentSpawnConfig {
-    // child 落库要求父会话已绑定（`save_child` 继承绑定与 frozen），并需要本会话 root 的
-    // 执行所有权；夹具显式构造这两项前置条件，不靠替身默认值。
-    let lease = store.register_bound_session("tail-parent", "/tmp/tail-fixture");
+    // child 落库继承已绑定父会话的 binding 与 frozen，夹具显式建立这些事实。
+    store.register_bound_session("tail-parent", "/tmp/tail-fixture");
     SubagentSpawnConfig {
         agent_name: "tail-agent".into(),
         prompt: "task".into(),
@@ -99,7 +83,6 @@ fn tail_spawn_config(
         context_budget: None,
         compact_llm: None,
         session_resources: Some(store),
-        execution_owner: Some(lease),
         event_handler: None,
         bg_event_sender: None,
         task_manager: None,

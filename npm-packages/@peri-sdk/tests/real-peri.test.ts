@@ -110,8 +110,8 @@ async function unusedLoopbackPort(): Promise<number> {
   return address.port;
 }
 
-function taskScopeToken(sessionId: string, epoch: number, nonce: string): string {
-  return `v2.${Buffer.from(sessionId).toString("base64url")}.${epoch}.${Buffer.from(nonce).toString("base64url")}`;
+function taskScopeToken(sessionId: string): string {
+  return `v1.${Buffer.from(sessionId).toString("base64url")}`;
 }
 
 async function workspaceRpc(
@@ -418,12 +418,7 @@ test("a fresh ACP settles a Workspace shell task after the old ACP is killed dur
       mcpServers: [{ type: "http", name: "workspace", url: workspace.url, headers: [] }],
     });
     await sandbox.registerSessionTransport(sessionId, first);
-    const db = new Database(f.database, { readonly: true });
-    const owner = db.query("SELECT epoch, nonce FROM session_execution_owners WHERE root_id = ?")
-      .get(sessionId) as { epoch: number; nonce: string } | null;
-    db.close();
-    expect(owner).not.toBeNull();
-    const capability = taskScopeToken(sessionId, owner!.epoch, owner!.nonce);
+    const capability = taskScopeToken(sessionId);
     const initialized = await workspaceRpc(workspace.url, "initialize", 1, {
       protocolVersion: "2025-11-25", capabilities: { extensions: { "io.modelcontextprotocol/tasks": {} } },
       clientInfo: { name: "crash-close-test", version: "1" },
@@ -437,17 +432,10 @@ test("a fresh ACP settles a Workspace shell task after the old ACP is killed dur
     const rawTaskId = started.value.result?.taskId as string | undefined;
     if (!rawTaskId) throw new Error(`Workspace Bash did not return Task: ${JSON.stringify(started.value)}`);
 
-    // Seed the exact owner-guarded close intent at the persistence seam. It
-    // creates a deterministic crash point after intent commit and before ACP
-    // has had a chance to cancel the still-running Workspace task.
     const intentDb = new Database(f.database);
-    const intent = intentDb.query(`
-      INSERT INTO session_close_intents(thread_id, requested_at)
-      SELECT ?, ? WHERE EXISTS (
-        SELECT 1 FROM session_execution_owners
-        WHERE root_id = ? AND epoch = ? AND nonce = ? AND released = 0
-      )
-    `).run(sessionId, new Date().toISOString(), sessionId, owner!.epoch, owner!.nonce);
+    const intent = intentDb.query(
+      "INSERT INTO session_close_intents(thread_id, requested_at) VALUES (?, ?)",
+    ).run(sessionId, new Date().toISOString());
     intentDb.close();
     expect(intent.changes).toBe(1);
     process.kill(first.pid, "SIGKILL");
@@ -460,26 +448,16 @@ test("a fresh ACP settles a Workspace shell task after the old ACP is killed dur
       .find((row) => row.task?.taskId === rawTaskId);
     expect(beforeTask?.task?.status).toBe("working");
 
-    // Advance the test fixture's Store clock boundary after exact process
-    // proof; the production takeover still uses the Store CAS claim.
-    const expired = new Database(f.database);
-    expired.query("UPDATE session_execution_owners SET expires_at_unix = 0 WHERE root_id = ? AND epoch = ?")
-      .run(sessionId, owner!.epoch);
-    expired.close();
     second = await sandbox.createTransport(f.workspace) as StdioTransport;
     await initialize(second);
     await second.request("session/close", { sessionId });
     const settled = new Database(f.database, { readonly: true });
-    const next = settled.query("SELECT epoch, nonce, released FROM session_execution_owners WHERE root_id = ?")
-      .get(sessionId) as { epoch: number; nonce: string; released: number } | null;
     const remainingIntent = settled.query("SELECT 1 FROM session_close_intents WHERE thread_id = ?")
       .get(sessionId);
     settled.close();
-    expect(next!.epoch).toBeGreaterThan(owner!.epoch);
-    expect(next!.released).toBe(1);
     expect(remainingIntent).toBeNull();
     const snapshot = await workspaceRpc(workspace.url, "workspace/taskSnapshot", 4, {
-      _meta: { "peri/taskScope": taskScopeToken(sessionId, next!.epoch, next!.nonce) },
+      _meta: { "peri/taskScope": taskScopeToken(sessionId) },
     }, peer);
     const task = (snapshot.value.result?.tasks as Array<{ task?: { taskId?: string; status?: string } }>)
       .find((row) => row.task?.taskId === rawTaskId);

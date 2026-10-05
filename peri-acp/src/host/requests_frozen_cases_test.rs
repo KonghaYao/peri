@@ -238,14 +238,11 @@ async fn test_session_load_future_frozen_snapshot_fails_without_overwrite() {
         )
         .await
         .unwrap();
-    let owner = bridge.acquire_execution_lease(&session_id).await.unwrap();
     let future_snapshot = r#"{"version":999,"data":{"must":"remain"}}"#;
     bridge
         .store_frozen_snapshot_if_absent(&session_id, future_snapshot)
         .await
         .unwrap();
-    owner.mark_clean().await.unwrap();
-    drop(owner);
     drop(cfg);
     drop(bridge);
 

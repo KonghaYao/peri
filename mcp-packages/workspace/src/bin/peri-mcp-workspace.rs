@@ -1,10 +1,6 @@
 //! A pure Workspace MCP process. Peri's CLI only dispatches to this binary.
 
-use std::{
-    fs::OpenOptions,
-    net::SocketAddr,
-    path::{Path, PathBuf},
-};
+use std::{net::SocketAddr, path::PathBuf};
 
 use anyhow::{bail, Context, Result};
 use clap::{ArgGroup, Parser};
@@ -162,65 +158,6 @@ async fn serve_http(server: WorkspaceMcpServer, bind: SocketAddr) -> Result<()> 
     result
 }
 
-/// A crashed owner may leave shell descendants running after losing its in-memory
-/// task registry. Refuse a new owner incarnation until external cleanup is
-/// proven; only a complete graceful shutdown removes this marker.
-struct OwnerIncarnationGuard {
-    path: PathBuf,
-}
-
-impl OwnerIncarnationGuard {
-    fn claim(workspace: &Path) -> Result<Self> {
-        let guard_dir = workspace.join(".peri");
-        std::fs::create_dir_all(&guard_dir)
-            .context("cannot create Workspace owner guard directory")?;
-        let path = guard_dir.join("workspace-owner-unclean");
-        for entry in
-            std::fs::read_dir(&guard_dir).context("cannot inspect Workspace owner guards")?
-        {
-            let entry = entry.context("cannot inspect Workspace owner guard")?;
-            if entry.path() != path
-                && entry
-                    .file_name()
-                    .to_string_lossy()
-                    .ends_with("workspace-owner-unclean")
-            {
-                bail!("Workspace owner recovery is uncertain; inspect remaining shell processes before removing old owner guards");
-            }
-        }
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let file = options.open(&path).with_context(|| format!(
-            "Workspace owner recovery is uncertain; inspect remaining shell processes before removing {}",
-            path.display()
-        ))?;
-        file.sync_all()
-            .context("cannot persist Workspace owner guard")?;
-        sync_parent(&path)?;
-        Ok(Self { path })
-    }
-
-    fn clear_after_cleanup(self) -> Result<()> {
-        std::fs::remove_file(&self.path).context("cannot clear Workspace owner guard")?;
-        sync_parent(&self.path)
-    }
-}
-
-fn sync_parent(path: &Path) -> Result<()> {
-    #[cfg(unix)]
-    if let Some(parent) = path.parent() {
-        std::fs::File::open(parent)?.sync_all()?;
-    }
-    #[cfg(not(unix))]
-    let _ = path;
-    Ok(())
-}
-
 async fn shutdown_signal() {
     #[cfg(unix)]
     {
@@ -245,7 +182,6 @@ async fn main() -> Result<()> {
     let server = WorkspaceMcpServer::standalone(workspace.to_string_lossy().into_owned())
         .with_resources(resources)
         .with_task_scope_authority(TaskScopeAuthority::trusted_connection());
-    let guard = Some(OwnerIncarnationGuard::claim(&workspace)?);
     let task_owner = server.clone();
     let result = if args.stdio {
         serve_stdio(server).await
@@ -258,11 +194,9 @@ async fn main() -> Result<()> {
         .await
     };
     if task_owner.shutdown_shell_tasks().await
-        == Some(peri_acp_types::tasks::TaskShutdownReport::Complete)
+        != Some(peri_acp_types::tasks::TaskShutdownReport::Complete)
     {
-        if let Some(guard) = guard {
-            guard.clear_after_cleanup()?;
-        }
+        bail!("Workspace shell task cleanup incomplete");
     }
     result
 }

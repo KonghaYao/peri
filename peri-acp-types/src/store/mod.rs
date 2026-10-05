@@ -284,13 +284,6 @@ pub trait ThreadStore: Send + Sync {
         Err(crate::workspace::WorkspaceError::Unsupported.into())
     }
 
-    async fn acquire_execution_lease(
-        &self,
-        _id: &ThreadId,
-    ) -> Result<std::sync::Arc<dyn crate::workspace::SessionExecutionLease>> {
-        Err(crate::workspace::WorkspaceError::Unsupported.into())
-    }
-
     /// 创建新 thread，返回分配的 ThreadId
     async fn create_thread(&self, meta: ThreadMeta) -> Result<ThreadId>;
 

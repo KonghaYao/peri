@@ -229,7 +229,6 @@ fn project_assembly(input: &StageBuildInput, turn: TurnAssembly) -> AssemblyCont
     } = turn;
     let ThreadPersistence {
         session_resources,
-        execution_owner: _,
         parent_thread_id,
         register_runtime,
         deregister_runtime,

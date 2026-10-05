@@ -78,11 +78,6 @@ lang-unsupported = 不支持的语言: { $lang }
 statusbar-permission-dont-ask = Don't Ask
 statusbar-initializing = 初始化中…
 statusbar-preparing = 正在准备会话…
-statusbar-read-only-busy = 只读 · 由其他实例执行
-statusbar-read-only-recovery = 只读 · 上次执行未干净收尾
-statusbar-read-only-store = 只读 · 会话库不可写
-statusbar-read-only-former-owner = 只读 · 无法确认上次执行已停止
-statusbar-restore-warning-former-owner = 警告 · 无法确认上次执行已停止
 statusbar-permission-accept-edit = Accept Edit
 statusbar-permission-auto = Auto Mode
 statusbar-permission-bypass = Bypass
@@ -1140,12 +1135,6 @@ popup-ask-user-title =  用户问答
 # ---- Confirm Popup (P2) ----
 # 风险选择的取消项：与具体风险种类无关，各风险说明共用。
 risk-choice-cancel = 取消（默认）
-dirty-recovery-title = 解除 dirty 状态并恢复原会话？
-dirty-recovery-risk = 旧子进程可能仍在运行。
-dirty-recovery-unknown = 之前的副作用未知。
-dirty-recovery-responsibility = 继续表示你接受风险，并承担后续结果。
-dirty-recovery-hint = 上/下：选择 · Enter：执行 · Esc：取消
-dirty-recovery-accept = 接受风险，解除 dirty 并加载
 
 popup-confirm-empty =   暂无待确认项。
 popup-confirm-action-hint =   Enter: 确认  Esc: 取消
@@ -1188,7 +1177,6 @@ steer-queue-title = 待发送 { $count }
 steer-input-rejected = 输入未被接收，原稿已保留。
 steer-input-uncertain = 暂未收到输入回执，正在核对并重试。
 steer-session-unavailable = 会话未能建立：{ $error }。原稿已保留。
-steer-session-read-only = 本会话以只读进入，无法提交输入，原稿已保留。
 
 thread-browser-project = 项目
 thread-browser-workspace = 工作区

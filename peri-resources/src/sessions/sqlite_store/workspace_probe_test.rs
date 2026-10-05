@@ -115,14 +115,12 @@ async fn test_worktree_registration_admission_child() {
         )
         .await
         .unwrap();
-    let lease = store.acquire_execution_lease(&thread).await.unwrap();
     // 准入内复核（host 的 validate_expected / acquire_for_load 第二道检查）：
     // 复核结果必须与本次准入解析出的工作区一致。
     let reasserted = store.reassert_session_binding(&thread).await.unwrap();
     assert_eq!(reasserted, workspace);
     let identity = store.reassert_session_binding(&thread).await.unwrap();
     assert_eq!(identity.cwd, workspace.cwd);
-    lease.mark_clean().await.unwrap();
 }
 
 /// 子进程模式：只读历史访问——列表、消息、frozen 与绑定读取，复核身份的动作不在其中。
@@ -208,12 +206,10 @@ async fn test_worktree_history_access_never_probes_git() {
     let thread = bound_thread_id(&database).await;
     // 写入一条历史供只读访问读取；这一步在测量之前完成。
     let store = SqliteThreadStore::new(&database).await.unwrap();
-    let lease = store.acquire_execution_lease(&thread).await.unwrap();
     store
         .append_message(&thread, BaseMessage::human("bound history"))
         .await
         .unwrap();
-    lease.mark_clean().await.unwrap();
     store.close().await;
     // 登记目录消失后历史仍必须可读：执行身份不可复核不等于历史不可访问。
     std::fs::remove_dir_all(&work).unwrap();

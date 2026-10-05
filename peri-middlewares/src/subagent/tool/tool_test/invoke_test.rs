@@ -529,7 +529,6 @@ async fn test_agent_invoke_parent_host_masks_fallback_runtime_and_store() {
     );
     parent.set_subagent_host(peri_agent::session::subagent::SubagentHost {
         session_resources: Some(store.facade()),
-        execution_owner: Some(store.execution_owner()),
         parent_thread_id: Some(parent_id.clone()),
         ..Default::default()
     });

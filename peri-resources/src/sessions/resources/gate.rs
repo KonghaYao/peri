@@ -1,70 +1,64 @@
-//! 写入准入闸门：门面与它发出的认领 handle 共用同一套 mutation 检查。
-//!
-//! 顺序固定为「能力/权限 → 本 root owner」，检查在门面内部完成，不靠调用方先查。
-//! 效果结清只认确定性：`Applied | NotApplied` 才释放准入，`Unknown`（含取消与提交
-//! 未确认）把范围留给 `Drop`，由租约留下未决证据。
-//!
-//! 未决持久化**只在进程内的租约上**表达：v10 移除了本机 durable 锚点（登记、未决写、
-//! 远端操作日志），因为用户裁决不做跨安装/跨 store 的能力。文件里因此没有「查表问未决」
-//! 这一步——`WriteScope::settle` 的 `Drop` 语义与 `is_uncertain` 读取仍覆盖在途写入；
-//! 不提供进程崩溃后的持久执行状态或恢复代际。
+//! 只保护存储 mutation 生命周期，不登记执行所有者。
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
-use peri_acp_types::session_resources::{
-    MutationOutcome, SessionResourceError, SessionResourceErrorKind, SessionResourceResult,
-};
-use peri_acp_types::thread::ThreadId;
-use peri_acp_types::workspace::WorkspaceError;
-
-use crate::sessions::data::SessionDataPort;
-use crate::sessions::execution::{ExclusiveExecutionGuard, ExecutionWriteGuard};
+use super::SessionDataHome;
 #[cfg(target_os = "emscripten")]
 use crate::sessions::failure::execution_failure;
-use crate::sessions::failure::{lease_required, read_only_store, unavailable};
-use crate::sessions::local_port::{LocalExecutionPort, SessionFacts};
-use crate::sessions::resources::lifecycle::{Lifecycle, LifecycleState};
 #[cfg(not(target_os = "emscripten"))]
 use crate::sessions::sqlite_store::execution_failure;
+use peri_acp_types::session_resources::{
+    MutationOutcome, PersistenceRecovery, SessionResourceError, SessionResourceErrorKind,
+    SessionResourceResult,
+};
+use peri_acp_types::thread::ThreadId;
+use peri_acp_types::workspace::{ResolvedWorkspace, WorkspaceError};
+use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 
-/// 一次写入准入持有的范围。
-pub(super) enum WriteScope {
-    /// 读侧门禁：允许同 root 的多个 mutation 并发。
-    Concurrent(Option<ExecutionWriteGuard>),
-    /// 写侧门禁：检查与写入之间不允许插入其他 mutation。
-    Exclusive(Option<ExclusiveExecutionGuard>),
+use crate::sessions::data::SessionDataPort;
+use crate::sessions::failure::{read_only_store, unavailable};
+use crate::sessions::local_port::LocalExecutionPort;
+use crate::sessions::resources::lifecycle::{Lifecycle, LifecycleState};
+
+#[derive(Default)]
+struct PendingWrites {
+    barrier: Arc<RwLock<()>>,
+    uncertain: AtomicBool,
+}
+
+pub(super) struct WriteScope {
+    pending: Arc<PendingWrites>,
+    _concurrent: Option<OwnedRwLockReadGuard<()>>,
+    _exclusive: Option<OwnedRwLockWriteGuard<()>>,
+    settled: bool,
 }
 
 impl WriteScope {
-    /// 按效果结清：只有证明「已生效」或「未生效」才 `finish`；`Unknown` 直接丢弃，
-    /// 由 `Drop` 在租约上留下未决证据（之后的写入与 clean 都会被拒绝）。
-    pub(super) fn settle<T>(self, result: &SessionResourceResult<T>) {
-        let determinate = match result {
-            Ok(_) => true,
-            Err(error) => error.effect() != MutationOutcome::Unknown,
-        };
-        if !determinate {
-            return;
-        }
-        match self {
-            Self::Concurrent(Some(guard)) => guard.finish(),
-            Self::Exclusive(Some(guard)) => guard.finish(),
-            Self::Concurrent(None) | Self::Exclusive(None) => {}
+    pub(super) fn settle<T>(mut self, result: &SessionResourceResult<T>) {
+        self.settled = result
+            .as_ref()
+            .err()
+            .is_none_or(|error| error.effect() != MutationOutcome::Unknown);
+    }
+}
+
+impl Drop for WriteScope {
+    fn drop(&mut self) {
+        if !self.settled {
+            self.pending.uncertain.store(true, Ordering::Release);
         }
     }
 }
 
-/// 写入准入闸门。
-///
-/// 两个端口各持一种事实：`data` 是 canonical 会话数据（本机 SQLite 或远端 adapter）、
-/// `local` 是本机执行面（发现、owner、运行屏障）。组合层决定两者指向哪个后端，
-/// 闸门自己不做后端判断，也不持有任何 store 身份——v10 之后没有「本次服务哪个 store」
-/// 这回事。
 #[derive(Clone)]
 pub(super) struct MutationGate {
     data: Arc<dyn SessionDataPort>,
     local: Arc<dyn LocalExecutionPort>,
     lifecycle: Lifecycle,
+    home: SessionDataHome,
+    pending: Arc<Mutex<HashMap<ThreadId, Arc<PendingWrites>>>>,
 }
 
 impl MutationGate {
@@ -72,11 +66,14 @@ impl MutationGate {
         data: Arc<dyn SessionDataPort>,
         local: Arc<dyn LocalExecutionPort>,
         lifecycle: Lifecycle,
+        home: SessionDataHome,
     ) -> Self {
         Self {
             data,
             local,
             lifecycle,
+            home,
+            pending: Arc::default(),
         }
     }
 
@@ -88,10 +85,6 @@ impl MutationGate {
         &self.local
     }
 
-    /// 新写入是否仍被接纳：只有 `Open` 放行。
-    ///
-    /// `Closing` 与 `Closed` 都拒绝——「停止新写入」从进入关闭流程起就不可逆；
-    /// 恢复与排空不走这里（见 [`Self::ensure_recovery_permitted`]）。
     pub(super) fn ensure_open(&self) -> SessionResourceResult<()> {
         if self.lifecycle.state() != LifecycleState::Open {
             return Err(unavailable("session resources are closed"));
@@ -99,11 +92,6 @@ impl MutationGate {
         Ok(())
     }
 
-    /// 恢复与排空的门禁：`Closing` 仍放行。
-    ///
-    /// 关闭过程本身要先收敛未结清事实（在途写入的屏障、租约上的未决标记），发起收敛的
-    /// owner 也必须能在第一次关闭失败后继续推进；只有确认关闭（`Closed`）之后资源才
-    /// 不再服务这些收敛行为。
     pub(super) fn ensure_recovery_permitted(&self) -> SessionResourceResult<()> {
         if self.lifecycle.state() == LifecycleState::Closed {
             return Err(unavailable("session resources are closed"));
@@ -111,42 +99,71 @@ impl MutationGate {
         Ok(())
     }
 
-    /// 已有会话上的写入：只读打开让执行权不可得（历史仍可读）。
-    pub(super) fn ensure_session_write(&self) -> SessionResourceResult<()> {
-        self.ensure_open()?;
+    pub(super) fn ensure_recovery_write(&self) -> SessionResourceResult<()> {
+        self.ensure_recovery_permitted()?;
         if self.local.is_read_only() {
             return Err(read_only_store());
         }
         Ok(())
     }
 
-    /// 需要登记新身份或新绑定的写入：只读打开连会话都还没有，没有可降级的对象。
+    pub(super) fn ensure_session_write(&self) -> SessionResourceResult<()> {
+        self.ensure_open()?;
+        self.ensure_recovery_write()
+    }
+
     pub(super) fn ensure_registration_write(&self) -> SessionResourceResult<()> {
         self.ensure_open()?;
         if self.local.is_read_only() {
-            return Err(SessionResourceError::new(
-                SessionResourceErrorKind::Workspace(WorkspaceError::ReadOnlyStore),
-            ));
+            return Err(WorkspaceError::ReadOnlyStore.into());
         }
         Ok(())
     }
 
-    /// 完整准入：能力/权限 → 本 root owner。
-    ///
-    /// 传给执行面的是**数据面事实**：调用方给的 `id` 可能是子会话，树根要在这里解析，
-    /// 「有没有绑定」也只能由数据面回答（远端组合里本机没有这条会话的任何行）。
-    pub(super) async fn admit(&self, id: &ThreadId) -> SessionResourceResult<WriteScope> {
-        self.ensure_session_write()?;
-        let facts = self.session_facts(id).await?;
-        let guard = self
-            .local
-            .write_guard(id, &facts)
-            .await
-            .map_err(execution_failure)?;
-        Ok(WriteScope::Concurrent(guard))
+    fn pending_for(&self, root: &ThreadId) -> Arc<PendingWrites> {
+        self.pending
+            .lock()
+            .expect("pending writes lock poisoned")
+            .entry(root.clone())
+            .or_default()
+            .clone()
     }
 
-    /// 统一写入：准入 → 执行 → 按效果结清。
+    fn check_pending(pending: &PendingWrites, root: &ThreadId) -> SessionResourceResult<()> {
+        if pending.uncertain.load(Ordering::Acquire) {
+            return Err(SessionResourceError::persistence_uncertain(Some(
+                root.clone(),
+            )));
+        }
+        Ok(())
+    }
+
+    async fn scope(&self, root: &ThreadId, exclusive: bool) -> SessionResourceResult<WriteScope> {
+        let pending = self.pending_for(root);
+        let (concurrent, exclusive) = if exclusive {
+            (None, Some(pending.barrier.clone().write_owned().await))
+        } else {
+            (Some(pending.barrier.clone().read_owned().await), None)
+        };
+        self.ensure_session_write()?;
+        Self::check_pending(&pending, root)?;
+        Ok(WriteScope {
+            pending,
+            _concurrent: concurrent,
+            _exclusive: exclusive,
+            settled: false,
+        })
+    }
+
+    pub(super) async fn admit(&self, id: &ThreadId) -> SessionResourceResult<WriteScope> {
+        self.ensure_session_write()?;
+        let root = self.data.session_root(id).await?;
+        if self.home == SessionDataHome::RemoteStore {
+            self.recheck_binding_of(id, false).await?;
+        }
+        self.scope(&root, false).await
+    }
+
     pub(super) async fn with_mutation<T, F, Fut>(
         &self,
         id: &ThreadId,
@@ -162,8 +179,22 @@ impl MutationGate {
         result
     }
 
-    /// 排他写入：与 [`Self::with_mutation`] 相同的准入判定，但「检查 + 写入」之间不允许
-    /// 插入其他 mutation；因此要求存在活 owner（没有 owner 时不能承诺串行）。
+    pub(super) async fn with_registration<T, F, Fut>(
+        &self,
+        id: &ThreadId,
+        work: F,
+    ) -> SessionResourceResult<T>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = SessionResourceResult<T>>,
+    {
+        self.ensure_registration_write()?;
+        let scope = self.scope(id, true).await?;
+        let result = work().await;
+        scope.settle(&result);
+        result
+    }
+
     pub(super) async fn with_exclusive<T, F, Fut>(
         &self,
         id: &ThreadId,
@@ -174,31 +205,175 @@ impl MutationGate {
         Fut: std::future::Future<Output = SessionResourceResult<T>>,
     {
         self.ensure_session_write()?;
-        let facts = self.session_facts(id).await?;
-        let guard = self
-            .local
-            .exclusive_guard(id, &facts)
-            .await
-            .map_err(execution_failure)?;
-        let Some(guard) = guard else {
-            return Err(lease_required());
-        };
-        let scope = WriteScope::Exclusive(Some(guard));
+        let root = self.data.session_root(id).await?;
+        if self.home == SessionDataHome::RemoteStore {
+            self.recheck_binding_of(id, false).await?;
+        }
+        let scope = self.scope(&root, true).await?;
         let result = work().await;
         scope.settle(&result);
         result
     }
 
-    /// 执行面判定要用的数据面事实（绑定字节、这棵树有没有绑定、树根）。
-    ///
-    /// 三件事都由数据端口回答：本机组合来自本机 `session_bindings` 与 `threads`，远端组合来自
-    /// 远端会话行自带的绑定列与远端父链。执行面**不**查本机会话表——远端会话在本机没有行。
-    ///
-    /// 绑定取**这条会话自己的**（取得所有权时要在本机复核它的字节）；「这棵树有没有绑定」在
-    /// 自身无绑定时再看 root 的——接纳过的 legacy root 可以有自己没有绑定行的子会话，那些子
-    /// 会话的写入同样落在 root 的执行域里，不能因为「自己没有绑定」就当成无主放行。
-    pub(super) async fn session_facts(&self, id: &ThreadId) -> SessionResourceResult<SessionFacts> {
+    pub(super) async fn recover(
+        &self,
+        id: &ThreadId,
+    ) -> SessionResourceResult<PersistenceRecovery> {
+        self.ensure_recovery_permitted()?;
         let root = self.data.session_root(id).await?;
-        Ok(SessionFacts { root })
+        let pending = self.pending_for(&root);
+        let _barrier = peri_time::timeout(super::SETTLE_WAIT, pending.barrier.write())
+            .await
+            .map_err(|_| {
+                SessionResourceError::new(
+                    peri_acp_types::session_resources::SessionResourceErrorKind::Timeout,
+                )
+            })?;
+        let result = self.data.recover_persistence(id).await?;
+        if matches!(result, PersistenceRecovery::Recovered) && !self.local.is_read_only() {
+            pending.uncertain.store(false, Ordering::Release);
+        }
+        Ok(result)
+    }
+
+    pub(super) async fn drain(&self, id: &ThreadId) -> SessionResourceResult<()> {
+        self.ensure_recovery_permitted()?;
+        let root = self.data.session_root(id).await?;
+        let pending = self.pending_for(&root);
+        let _barrier = peri_time::timeout(super::SETTLE_WAIT, pending.barrier.write())
+            .await
+            .map_err(|_| {
+                SessionResourceError::new(
+                    peri_acp_types::session_resources::SessionResourceErrorKind::Timeout,
+                )
+            })?;
+        Self::check_pending(&pending, &root)?;
+        self.data.drain(id).await
+    }
+
+    pub(super) async fn finish_close(&self, id: &ThreadId) -> SessionResourceResult<()> {
+        self.ensure_recovery_write()?;
+        let root = self.data.session_root(id).await?;
+        let pending = self.pending_for(&root);
+        let barrier = peri_time::timeout(super::SETTLE_WAIT, pending.barrier.clone().write_owned())
+            .await
+            .map_err(|_| {
+                SessionResourceError::new(
+                    peri_acp_types::session_resources::SessionResourceErrorKind::Timeout,
+                )
+            })?;
+        Self::check_pending(&pending, &root)?;
+        self.data.drain(id).await?;
+        let scope = WriteScope {
+            pending,
+            _concurrent: None,
+            _exclusive: Some(barrier),
+            settled: false,
+        };
+        let result = self.data.finish_close(id).await;
+        scope.settle(&result);
+        result
+    }
+
+    pub(super) async fn drain_all(&self) -> SessionResourceResult<()> {
+        let pending: Vec<_> = self
+            .pending
+            .lock()
+            .expect("pending writes lock poisoned")
+            .iter()
+            .map(|(root, pending)| (root.clone(), pending.clone()))
+            .collect();
+        for (root, pending) in pending {
+            let _barrier = peri_time::timeout(super::SETTLE_WAIT, pending.barrier.write())
+                .await
+                .map_err(|_| {
+                    SessionResourceError::new(
+                        peri_acp_types::session_resources::SessionResourceErrorKind::Timeout,
+                    )
+                })?;
+            Self::check_pending(&pending, &root)?;
+            self.data.drain(&root).await?;
+        }
+        Ok(())
+    }
+    pub(super) async fn recheck_binding_of(
+        &self,
+        id: &ThreadId,
+        full: bool,
+    ) -> SessionResourceResult<ResolvedWorkspace> {
+        let binding = self.data().binding_of(id).await?;
+        let binding = binding.as_ref().ok_or_else(|| {
+            SessionResourceError::new(SessionResourceErrorKind::Workspace(
+                WorkspaceError::BindingMissing,
+            ))
+        })?;
+        let owner = self
+            .data()
+            .workspace_id_of(id)
+            .await?
+            .ok_or_else(|| SessionResourceError::new(SessionResourceErrorKind::NotFound))?;
+        let saved = self.data().binding_discovery_snapshot(id).await?;
+        if matches!(self.home, SessionDataHome::RemoteStore) {
+            let saved = saved.ok_or_else(|| {
+                SessionResourceError::new(SessionResourceErrorKind::Workspace(
+                    WorkspaceError::InvalidBinding,
+                ))
+            })?;
+            let resolved = self
+                .local()
+                .validate_saved_binding(binding, &saved, owner, full)
+                .await
+                .map_err(execution_failure)?;
+            if owner != resolved.workspace_id {
+                return Err(SessionResourceError::new(
+                    SessionResourceErrorKind::Workspace(WorkspaceError::ExecutionBindingMismatch),
+                ));
+            }
+            return Ok(resolved);
+        }
+        let resolved = self
+            .local()
+            .validate_binding_value(binding, full)
+            .await
+            .map_err(execution_failure)?;
+        if owner != resolved.workspace_id {
+            return Err(SessionResourceError::new(
+                SessionResourceErrorKind::Workspace(WorkspaceError::ExecutionBindingMismatch),
+            ));
+        }
+        match saved {
+            Some(saved) => {
+                let recorded: serde_json::Value = serde_json::from_str(&saved).map_err(|_| {
+                    SessionResourceError::new(SessionResourceErrorKind::Workspace(
+                        WorkspaceError::InvalidBinding,
+                    ))
+                })?;
+                let observed: serde_json::Value = serde_json::from_str(
+                    resolved.discovery_snapshot.as_deref().ok_or_else(|| {
+                        SessionResourceError::new(SessionResourceErrorKind::Workspace(
+                            WorkspaceError::InvalidBinding,
+                        ))
+                    })?,
+                )
+                .map_err(|_| {
+                    SessionResourceError::new(SessionResourceErrorKind::Workspace(
+                        WorkspaceError::InvalidBinding,
+                    ))
+                })?;
+                if recorded != observed {
+                    return Err(SessionResourceError::new(
+                        SessionResourceErrorKind::Workspace(
+                            WorkspaceError::ExecutionBindingMismatch,
+                        ),
+                    ));
+                }
+            }
+            None => {
+                return Err(SessionResourceError::new(
+                    SessionResourceErrorKind::Workspace(WorkspaceError::InvalidBinding),
+                ))
+            }
+        }
+        Ok(resolved)
     }
 }

@@ -74,7 +74,7 @@ impl StdioTransport {
     /// 语义（批 3 §7 #10，与标准 `session/cancel` 并存）：type:cancel 是无
     /// sessionId 的全 session 兜底中断——host 侧回调负责遍历全部 SessionState
     /// 对所有 `cancel_token.cancel()`。标准 `session/cancel`（按 sessionId +
-    /// writer lease + continuation 武装）行为不受影响。
+    /// continuation 武装）行为不受影响。
     pub fn with_cancel_hook(self, hook: Option<CancelHook>) -> Self {
         *self.cancel_hook.lock().unwrap() = hook;
         self

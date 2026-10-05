@@ -1,6 +1,5 @@
 use super::*;
 use peri_acp_types::messages::BaseMessage;
-use peri_acp_types::workspace::ReadOnlyAdmission;
 use peri_acp_types::PeriCaps;
 
 async fn binding_state(cfg: &AcpServerConfig, id: &str) -> BindingState {
@@ -16,18 +15,6 @@ async fn frozen_state(cfg: &AcpServerConfig, id: &str) -> FrozenState {
         .await
         .unwrap()
         .frozen
-}
-
-fn read_only(response: &Value) -> Option<ReadOnlyAdmission> {
-    response
-        .pointer("/_meta/peri.sessionWorkspaceV1/read_only")
-        .map(|value| serde_json::from_value(value.clone()).unwrap())
-}
-
-fn restore_warning(response: &Value) -> Option<peri_acp_types::workspace::SessionRestoreWarning> {
-    response
-        .pointer("/_meta/peri.sessionWorkspaceV1/restore_warning")
-        .map(|value| serde_json::from_value(value.clone()).unwrap())
 }
 
 struct Fixture {
@@ -101,165 +88,12 @@ impl Fixture {
             .unwrap();
     }
 
-    fn assert_owned_history(&self, id: &str) {
+    fn assert_restored_history(&self, id: &str) {
         let state = &self.sessions[id];
         assert_eq!(Path::new(&state.cwd), self.cwd);
         assert_eq!(state.history[0].content(), "preserved recovery history");
-        assert!(state.execution_owner.is_some());
         assert!(state.frozen.is_some());
     }
-
-    fn assert_read_only_history(&self, id: &str) {
-        let state = &self.sessions[id];
-        assert_eq!(Path::new(&state.cwd), self.cwd);
-        assert_eq!(state.history[0].content(), "preserved recovery history");
-        assert!(state.execution_owner.is_none());
-        assert!(state.environment.is_none());
-        assert!(state.frozen.is_none());
-        assert!(state.workflow_middleware.is_none());
-    }
-}
-
-/// [回归测试] 本地宿主缺少旧进程停止证明时，恢复历史不得抢占 Store owner。
-#[tokio::test]
-#[serial]
-async fn test_unverified_former_owner_loads_history_without_advancing_epoch() {
-    let mut fixture = Fixture::new().await;
-    let id = fixture.id.clone();
-    let before = fixture
-        .cfg
-        .session_resources
-        .read_execution_workspace_owner(&id)
-        .await
-        .unwrap()
-        .unwrap();
-    fixture.sessions.clear();
-    fixture
-        .cfg
-        .session_manager
-        .set_pending_caps(PeriCaps::all_enabled());
-    for method in ["session/load", "session/resume"] {
-        let response = fixture
-            .request(method, &json!({"sessionId":id}))
-            .await
-            .unwrap();
-        assert_eq!(
-            read_only(&response),
-            Some(ReadOnlyAdmission::FormerOwnerUnverified)
-        );
-        fixture.assert_read_only_history(&id);
-        let after = fixture
-            .cfg
-            .session_resources
-            .read_execution_workspace_owner(&id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(after.current_epoch, before.current_epoch);
-        assert_eq!(after.descriptor_epoch, before.descriptor_epoch);
-    }
-    let error = fixture
-        .request("session/rename", &json!({"sessionId":id,"title":"blocked"}))
-        .await
-        .unwrap_err();
-    assert_eq!(error.code, -32010);
-}
-
-/// [回归测试] 本地交互宿主在 Store 租约到期后可继续使用同一会话，旧任务不恢复。
-#[tokio::test]
-#[serial]
-async fn test_local_tui_takeover_restores_writable_session_with_warning() {
-    let mut fixture = Fixture::new().await;
-    let id = fixture.id.clone();
-    fixture.cfg.allow_local_unverified_takeover = true;
-    fixture.sessions.clear();
-    fixture
-        .cfg
-        .session_manager
-        .set_pending_caps(PeriCaps::all_enabled());
-    let pool = sqlx::SqlitePool::connect_with(
-        sqlx::sqlite::SqliteConnectOptions::new().filename(fixture.tmp.path().join("threads.db")),
-    )
-    .await
-    .unwrap();
-    sqlx::query("UPDATE session_execution_owners SET expires_at_unix = 0 WHERE root_id = ?1")
-        .bind(&id)
-        .execute(&pool)
-        .await
-        .unwrap();
-    let before = fixture
-        .cfg
-        .session_resources
-        .read_execution_workspace_owner(&id)
-        .await
-        .unwrap()
-        .unwrap();
-    let response = fixture
-        .request("session/load", &json!({"sessionId":id}))
-        .await
-        .unwrap();
-    assert_eq!(read_only(&response), None);
-    assert_eq!(
-        restore_warning(&response),
-        Some(peri_acp_types::workspace::SessionRestoreWarning::FormerOwnerUnverified)
-    );
-    fixture.assert_owned_history(&id);
-    let after = fixture
-        .cfg
-        .session_resources
-        .read_execution_workspace_owner(&id)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(after.current_epoch, before.current_epoch + 1);
-    fixture
-        .request("session/rename", &json!({"sessionId":id,"title":"usable"}))
-        .await
-        .unwrap();
-}
-
-#[tokio::test]
-#[serial]
-async fn test_unloaded_close_preserves_intent_until_former_owner_is_fenced() {
-    let mut fixture = Fixture::new().await;
-    let id = fixture.id.clone();
-    fixture
-        .cfg
-        .session_resources
-        .mark_session_closing(&id)
-        .await
-        .unwrap();
-    fixture.sessions.clear();
-    let error = fixture
-        .request("session/close", &json!({"sessionId": id}))
-        .await
-        .unwrap_err();
-    assert_eq!(error.code, -32010);
-    assert!(fixture
-        .cfg
-        .session_resources
-        .is_session_closing(&id)
-        .await
-        .unwrap());
-}
-
-#[tokio::test]
-#[serial]
-async fn test_unloaded_close_cannot_initiate_close_of_active_session() {
-    let mut fixture = Fixture::new().await;
-    let id = fixture.id.clone();
-    fixture.sessions.clear();
-    let error = fixture
-        .request("session/close", &json!({"sessionId": id}))
-        .await
-        .unwrap_err();
-    assert!(error.message.contains("execution owner"));
-    assert!(!fixture
-        .cfg
-        .session_resources
-        .is_session_closing(&id)
-        .await
-        .unwrap());
 }
 
 #[tokio::test]
@@ -276,8 +110,10 @@ async fn test_clean_load_resume_and_fork_ignore_caller_cwd_and_keep_saved_facts(
             let other = tempfile::tempdir().unwrap();
             let params = json!({"sessionId":fixture.id,"cwd":other.path()});
             let response = fixture.request(method, &params).await.unwrap();
-            assert!(read_only(&response).is_none());
-            fixture.assert_owned_history(&fixture.id);
+            assert!(response
+                .pointer("/_meta/peri.sessionWorkspaceV1/read_only")
+                .is_none());
+            fixture.assert_restored_history(&fixture.id);
             assert_eq!(binding_state(&fixture.cfg, &fixture.id).await, binding);
             assert_eq!(frozen_state(&fixture.cfg, &fixture.id).await, frozen);
             assert_eq!(
@@ -287,7 +123,7 @@ async fn test_clean_load_resume_and_fork_ignore_caller_cwd_and_keep_saved_facts(
             if method == "session/fork" {
                 let fork_id = response["sessionId"].as_str().unwrap();
                 assert_ne!(fork_id, fixture.id);
-                fixture.assert_owned_history(fork_id);
+                fixture.assert_restored_history(fork_id);
                 assert_eq!(frozen_state(&fixture.cfg, fork_id).await, frozen);
                 fixture.close(fork_id).await;
             }
@@ -299,268 +135,233 @@ async fn test_clean_load_resume_and_fork_ignore_caller_cwd_and_keep_saved_facts(
 
 #[tokio::test]
 #[serial]
-async fn test_load_with_another_instance_handle_rejects_a_second_execution_owner() {
+async fn load_and_resume_after_runtime_loss_restore_without_owner_proof() {
+    for method in ["session/load", "session/resume"] {
+        let mut fixture = Fixture::new().await;
+        let id = fixture.id.clone();
+        let binding = binding_state(&fixture.cfg, &id).await;
+        let frozen = frozen_state(&fixture.cfg, &id).await;
+        fixture.sessions.clear();
+        let response = fixture
+            .request(method, &json!({"sessionId":id}))
+            .await
+            .unwrap();
+        fixture.assert_restored_history(&id);
+        assert!(response
+            .pointer("/_meta/peri.sessionWorkspaceV1/read_only")
+            .is_none());
+        assert!(response
+            .pointer("/_meta/peri.sessionWorkspaceV1/restore_warning")
+            .is_none());
+        assert_eq!(binding_state(&fixture.cfg, &id).await, binding);
+        assert_eq!(frozen_state(&fixture.cfg, &id).await, frozen);
+        fixture
+            .request(
+                "session/rename",
+                &json!({"sessionId":id,"title":"restored"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            fixture
+                .bridge
+                .load_meta(&id)
+                .await
+                .unwrap()
+                .title
+                .as_deref(),
+            Some("restored")
+        );
+        fixture.close(&id).await;
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn another_host_handle_can_restore_without_peri_execution_exclusion() {
     let mut fixture = Fixture::new().await;
-    let original_owner = fixture.sessions[&fixture.id]
-        .execution_owner
-        .clone()
-        .unwrap();
-    let binding = binding_state(&fixture.cfg, &fixture.id).await;
-    let frozen = frozen_state(&fixture.cfg, &fixture.id).await;
-    let config = fixture.cfg.peri_config.read().clone();
-    let other_cfg = make_server_config(
-        config.clone(),
-        LlmProvider::from_config(&config).unwrap(),
+    let id = fixture.id.clone();
+    let configuration = fixture.cfg.peri_config.read().clone();
+    let other = make_server_config(
+        configuration.clone(),
+        LlmProvider::from_config(&configuration).unwrap(),
         &fixture.tmp,
     )
     .await;
-    other_cfg
-        .session_manager
-        .set_pending_caps(PeriCaps::all_enabled());
     let mut other_sessions = HashMap::new();
-    let other_cwd = tempfile::tempdir().unwrap();
-    let response = handle_request(
+    handle_request(
         "session/load",
-        &json!({"sessionId":fixture.id,"cwd":other_cwd.path()}),
-        &other_cfg,
+        &json!({"sessionId":id}),
+        &other,
         &mut other_sessions,
         &fixture.transport,
     )
     .await
     .unwrap();
+    assert!(other_sessions[&id].frozen.is_some());
     assert_eq!(
-        read_only(&response),
-        Some(ReadOnlyAdmission::FormerOwnerUnverified)
+        other_sessions[&id].history[0].content(),
+        "preserved recovery history"
     );
-    assert!(other_sessions[&fixture.id].execution_owner.is_none());
-    assert!(Arc::ptr_eq(
-        fixture.sessions[&fixture.id]
-            .execution_owner
-            .as_ref()
-            .unwrap(),
-        &original_owner,
-    ));
-    fixture
-        .request(
-            "session/rename",
-            &json!({"sessionId":fixture.id,"title":"original instance"}),
-        )
-        .await
-        .unwrap();
-    assert_eq!(binding_state(&fixture.cfg, &fixture.id).await, binding);
-    assert_eq!(frozen_state(&fixture.cfg, &fixture.id).await, frozen);
-    let id = fixture.id.clone();
+    assert!(fixture.sessions.contains_key(&id));
+    handle_request(
+        "session/close",
+        &json!({"sessionId":id}),
+        &other,
+        &mut other_sessions,
+        &fixture.transport,
+    )
+    .await
+    .unwrap();
     fixture.close(&id).await;
 }
 
 #[tokio::test]
 #[serial]
-async fn test_missing_saved_directory_loads_history_without_tools_then_can_upgrade() {
-    let mut fixture = Fixture::new().await;
-    let id = fixture.id.clone();
-    let binding = binding_state(&fixture.cfg, &id).await;
-    let frozen = frozen_state(&fixture.cfg, &id).await;
-    fixture.close(&id).await;
-    let saved_directory = fixture.tmp.path().join("saved-directory");
-    std::fs::rename(&fixture.cwd, &saved_directory).unwrap();
-    fixture
-        .cfg
-        .session_manager
-        .set_pending_caps(PeriCaps::all_enabled());
-    for method in ["session/load", "session/resume"] {
-        let response = fixture
-            .request(method, &json!({"sessionId":id,"cwd":fixture.tmp.path()}))
+async fn unloaded_close_and_delete_settle_without_takeover_proof() {
+    for delete in [false, true] {
+        let mut fixture = Fixture::new().await;
+        let id = fixture.id.clone();
+        fixture.sessions.clear();
+        let method = if delete {
+            "session/delete"
+        } else {
+            "session/close"
+        };
+        fixture
+            .request(method, &json!({"sessionId":id}))
             .await
             .unwrap();
-        assert_eq!(
-            read_only(&response),
-            Some(ReadOnlyAdmission::ExecutionLeaseRequired)
-        );
-        fixture.assert_read_only_history(&id);
-        assert_eq!(binding_state(&fixture.cfg, &id).await, binding);
-        assert_eq!(frozen_state(&fixture.cfg, &id).await, frozen);
-    }
-    let error = fixture
-        .request(
-            "session/rename",
-            &json!({"sessionId":id,"title":"must not write"}),
-        )
-        .await
-        .unwrap_err();
-    assert_eq!(error.code, -32010);
-    assert_ne!(
         fixture
-            .bridge
-            .load_meta(&id)
+            .request(method, &json!({"sessionId":id}))
             .await
-            .unwrap()
-            .title
-            .as_deref(),
-        Some("must not write")
-    );
-    std::fs::create_dir(&fixture.cwd).unwrap();
-    let error = fixture
-        .request("session/load", &json!({"sessionId":id}))
+            .unwrap();
+        assert!(fixture.sessions.is_empty());
+        if delete {
+            assert!(fixture.bridge.load_meta(&id).await.is_err());
+        } else {
+            assert!(!fixture
+                .cfg
+                .session_resources
+                .is_session_closing(&id)
+                .await
+                .unwrap());
+            assert_eq!(
+                fixture
+                    .cfg
+                    .session_resources
+                    .close_settlement(&id)
+                    .await
+                    .unwrap(),
+                peri_acp_types::session_resources::CloseSettlement::Finished
+            );
+        }
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn persisted_closing_intent_blocks_restore_until_close_drains() {
+    let mut fixture = Fixture::new().await;
+    let id = fixture.id.clone();
+    fixture
+        .cfg
+        .session_resources
+        .mark_session_closing(&id)
         .await
-        .unwrap_err();
-    assert_eq!(error.code, -32010);
-    fixture.assert_read_only_history(&id);
-    assert_eq!(binding_state(&fixture.cfg, &id).await, binding);
-    assert_eq!(frozen_state(&fixture.cfg, &id).await, frozen);
-    std::fs::remove_dir(&fixture.cwd).unwrap();
-    std::fs::rename(&saved_directory, &fixture.cwd).unwrap();
-    let response = fixture
+        .unwrap();
+    fixture.sessions.clear();
+    for method in ["session/load", "session/resume", "session/fork"] {
+        let error = fixture
+            .request(method, &json!({"sessionId":id}))
+            .await
+            .unwrap_err();
+        assert!(error.message.contains("close incomplete"));
+        assert!(fixture.sessions.is_empty());
+    }
+    fixture.close(&id).await;
+    fixture
         .request("session/load", &json!({"sessionId":id}))
         .await
         .unwrap();
-    assert!(read_only(&response).is_none());
-    fixture.assert_owned_history(&id);
-    assert_eq!(binding_state(&fixture.cfg, &id).await, binding);
-    assert_eq!(frozen_state(&fixture.cfg, &id).await, frozen);
+    fixture.assert_restored_history(&id);
     fixture.close(&id).await;
 }
 
 #[tokio::test]
 #[serial]
-async fn test_recovery_capability_is_false_and_reset_dirty_rpc_is_removed() {
+async fn dirty_reset_rpc_stays_removed_and_does_not_change_session_facts() {
     let mut fixture = Fixture::new().await;
     let id = fixture.id.clone();
-    fixture.sessions.clear();
     let binding = binding_state(&fixture.cfg, &id).await;
     let frozen = frozen_state(&fixture.cfg, &id).await;
-    let response = fixture
-        .request(
-            "initialize",
-            &json!({
-                "protocolVersion":1,
-                "clientCapabilities":{"_meta":{
-                    "peri.sessionRecoveryV1":true,"peri.sessionWorkspaceV1":true
-                }}
-            }),
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        response["agentCapabilities"]["_meta"]["peri.sessionRecoveryV1"],
-        false
-    );
-    assert!(!PeriCaps::all_enabled().session_recovery_v1);
-    assert!(
-        !PeriCaps::from_client_meta(json!({"peri.sessionRecoveryV1":true}).as_object().unwrap())
-            .session_recovery_v1
-    );
     let error = fixture
         .request(
             "peri/session_reset_dirty",
-            &json!({
-                "target":{"thread_id":id,"generation":1},"accept_risk":true
-            }),
+            &json!({"target":{"thread_id":id,"generation":1},"accept_risk":true}),
         )
         .await
         .unwrap_err();
     assert_eq!(error.code, -32601);
-    assert!(fixture.sessions.is_empty());
     assert_eq!(binding_state(&fixture.cfg, &id).await, binding);
     assert_eq!(frozen_state(&fixture.cfg, &id).await, frozen);
-    let response = fixture
-        .request("session/load", &json!({"sessionId":id}))
-        .await
-        .unwrap();
-    assert_eq!(
-        read_only(&response),
-        Some(ReadOnlyAdmission::FormerOwnerUnverified)
-    );
-    fixture.assert_read_only_history(&id);
-}
-
-#[tokio::test]
-async fn foreign_machine_history_fixture() {
-    let Ok(directory) = std::env::var("PERI_ACP_FOREIGN_HISTORY_FIXTURE") else {
-        return;
-    };
-    let root = Path::new(&directory);
-    let store = SqliteThreadStore::new(root.join("threads.db"))
-        .await
-        .unwrap();
-    let id = store
-        .create_thread(ThreadMeta::new_at(
-            root.join("saved").to_str().unwrap(),
-            peri_time::now_wall(),
-        ))
-        .await
-        .unwrap();
-    store
-        .append_message(&id, BaseMessage::human("foreign machine history"))
-        .await
-        .unwrap();
-    store
-        .store_frozen_snapshot_if_absent(&id, "broken foreign frozen")
-        .await
-        .unwrap();
-    std::fs::write(root.join("foreign-session-id"), id).unwrap();
+    fixture.close(&id).await;
 }
 
 #[tokio::test]
 #[serial]
-async fn test_foreign_machine_history_is_read_only_without_legacy_adoption_or_tools() {
+async fn read_only_store_keeps_history_readable_but_rejects_load_and_close_mutations() {
     let mut fixture = Fixture::new().await;
-    let output = tokio::process::Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "host::requests::tests::recovery_tests::foreign_machine_history_fixture",
-        ])
-        .env("PERI_MACHINE_ID", uuid::Uuid::new_v4().to_string())
-        .env(
-            "PERI_ACP_FOREIGN_HISTORY_FIXTURE",
-            std::fs::canonicalize(fixture.tmp.path()).unwrap(),
-        )
-        .output()
-        .await
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let id = std::fs::read_to_string(fixture.tmp.path().join("foreign-session-id")).unwrap();
-    fixture
-        .cfg
-        .session_manager
-        .set_pending_caps(PeriCaps::all_enabled());
-    let binding = binding_state(&fixture.cfg, &id).await;
-    let frozen = frozen_state(&fixture.cfg, &id).await;
-    assert!(fixture
-        .bridge
-        .load_session_binding(&id)
-        .await
-        .unwrap()
-        .is_none());
-    for method in ["session/load", "session/resume"] {
-        let response = fixture
-            .request(method, &json!({"sessionId":id}))
-            .await
-            .unwrap();
-        assert_eq!(
-            read_only(&response),
-            Some(ReadOnlyAdmission::ExecutionLeaseRequired)
-        );
-        let state = &fixture.sessions[&id];
-        assert_eq!(Path::new(&state.cwd), fixture.cwd);
-        assert_eq!(state.history[0].content(), "foreign machine history");
-        assert!(state.execution_owner.is_none());
-        assert!(state.environment.is_none());
-        assert!(state.frozen.is_none());
-        assert!(state.workflow_middleware.is_none());
-        assert_eq!(binding_state(&fixture.cfg, &id).await, binding);
-        assert_eq!(frozen_state(&fixture.cfg, &id).await, frozen);
-        assert!(fixture
-            .bridge
-            .load_session_binding(&id)
-            .await
-            .unwrap()
-            .is_none());
-    }
+    let id = fixture.id.clone();
     fixture.close(&id).await;
-    let original_id = fixture.id.clone();
-    fixture.close(&original_id).await;
+    let config = fixture.cfg.peri_config.read().clone();
+    let resources = Arc::new(
+        peri_resources::sessions::SessionResourcesImpl::open_existing_read_only(
+            fixture.tmp.path().join("threads.db"),
+        )
+        .await
+        .unwrap(),
+    );
+    let readonly = build_server_config(
+        config.clone(),
+        LlmProvider::from_config(&config).unwrap(),
+        &fixture.tmp,
+        resources,
+    )
+    .await;
+    let mut sessions = HashMap::new();
+    let history = handle_request(
+        "peri/session_history",
+        &json!({"sessionId":id}),
+        &readonly,
+        &mut sessions,
+        &fixture.transport,
+    )
+    .await
+    .unwrap();
+    assert_eq!(history["payloads"].as_array().unwrap().len(), 1);
+    for method in [
+        "session/load",
+        "session/resume",
+        "session/close",
+        "session/delete",
+    ] {
+        assert!(handle_request(
+            method,
+            &json!({"sessionId":id}),
+            &readonly,
+            &mut sessions,
+            &fixture.transport
+        )
+        .await
+        .is_err());
+        assert!(sessions.is_empty());
+    }
+    assert!(!fixture
+        .cfg
+        .session_resources
+        .is_session_closing(&id)
+        .await
+        .unwrap());
+    assert!(fixture.bridge.load_meta(&id).await.is_ok());
 }

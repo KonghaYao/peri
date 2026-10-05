@@ -165,7 +165,6 @@ pub(super) async fn build_and_execute_agent(
 
     let thread_persistence = ThreadPersistence {
         session_resources: ctx.session_resources.clone(),
-        execution_owner: ctx.execution_owner.clone(),
         parent_thread_id: ctx.thread_id.clone(),
         register_runtime,
         deregister_runtime,

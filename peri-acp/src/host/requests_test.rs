@@ -12,13 +12,12 @@ use peri_acp_types::event_data::PluginSnapshotEntry;
 use peri_acp_types::plugin::{InstallScope, InstalledPlugin, PluginManagerPort, PluginOrigin};
 use peri_acp_types::ports::WorkflowMiddlewarePort;
 use peri_acp_types::session_resources::{
-    BindingRecheck, BindingState, FrozenSnapshotBytes, FrozenState, NewSession, NewSessionMeta,
-    SessionResources,
+    BindingState, FrozenSnapshotBytes, FrozenState, NewSession, NewSessionMeta, SessionResources,
 };
 use peri_acp_types::store::{PersistedPayload, ThreadStore};
 use peri_acp_types::tasks::BgTaskKind;
 use peri_acp_types::thread::ThreadMeta;
-use peri_acp_types::workspace::{SessionBinding, SessionExecutionLease};
+use peri_acp_types::workspace::SessionBinding;
 use peri_middlewares::permission::shared_mode::{PermissionMode, SharedPermissionMode};
 use peri_middlewares::workflow::WorkflowMiddleware;
 use peri_resources::sessions::SqliteThreadStore;
@@ -127,7 +126,7 @@ async fn make_server_config(
 
 /// 门面 + 裸桥配对打开：夹具需要按 legacy/损坏事实逐条构造时用。
 ///
-/// 二者出自**同一次打开**（同一库句柄、同一份 owner 登记）；裸句柄只用于建事实与
+/// 二者出自**同一次打开**（同一库句柄）；裸句柄只用于建事实与
 /// 直读断言，生产路径一律走注入的门面。
 async fn make_server_config_with_bridge(
     peri_config: PeriConfig,
@@ -168,7 +167,6 @@ async fn build_server_config(
     let (host_task_owner, host_task_spawner) = crate::host::task_scope::HostTaskOwner::new();
     let (mcp_task_owner, _mcp_task_spawner) = peri_middlewares::mcp::McpTaskOwner::new();
     AcpServerConfig {
-        allow_local_unverified_takeover: false,
         workspace_assembly: None,
         host_task_owner: Some(host_task_owner),
         host_task_spawner,
@@ -216,10 +214,7 @@ async fn build_server_config(
     }
 }
 
-/// 夹具建一条**已绑定**会话：门面一次保存 binding/frozen 并给出执行准入。
-///
-/// 建完即按正常收尾标 clean 并释放所有权；需要写入或执行的用例随后自行取得
-/// （[`acquire_bound_owner`]）。
+/// 夹具建一条**已绑定**会话：门面一次保存 binding/frozen。
 async fn create_bound_fixture(cfg: &AcpServerConfig, cwd: &str, id: Option<&str>) -> String {
     let workspace = cfg
         .session_resources
@@ -231,15 +226,8 @@ async fn create_bound_fixture(cfg: &AcpServerConfig, cwd: &str, id: Option<&str>
         .session_manager
         .build_frozen_data(workspace.cwd.to_str().unwrap());
     let encoded = crate::session::frozen_snapshot::encode_frozen_snapshot(&frozen).unwrap();
-    let lease = cfg
-        .session_resources
-        .create_session(&bound_input(&thread_id, &workspace, encoded))
-        .await
-        .unwrap();
-    let token = lease.owner_token().unwrap();
-    lease.mark_clean().await.unwrap();
     cfg.session_resources
-        .release_execution_owner(&token)
+        .create_session(&bound_input(&thread_id, &workspace, encoded))
         .await
         .unwrap();
     thread_id
@@ -272,21 +260,6 @@ fn bound_input(
     }
 }
 
-/// 门面取执行所有权：先按 identity 复核绑定，再准入（等价旧的
-/// `acquire_execution_lease`，但不再绕过绑定事实）。
-async fn acquire_bound_owner(cfg: &AcpServerConfig, id: &str) -> Arc<dyn SessionExecutionLease> {
-    let workspace = cfg
-        .session_resources
-        .validate_bound_workspace(&id.to_owned(), BindingRecheck::Recorded)
-        .await
-        .unwrap();
-    cfg.session_resources
-        .acquire_execution(&id.to_owned(), &workspace)
-        .await
-        .unwrap()
-}
-
-/// 门面追加一条 human 消息（夹具用语；写入仍受活 owner 门禁约束）。
 async fn append_human_message(cfg: &AcpServerConfig, id: &str, text: &str) {
     cfg.session_resources
         .append_history(
@@ -353,13 +326,10 @@ async fn register_session_with_history(
         .session_manager
         .build_frozen_data(workspace.cwd.to_str().unwrap());
     let encoded = crate::session::frozen_snapshot::encode_frozen_snapshot(&frozen).unwrap();
-    let lease = cfg
-        .session_resources
+    cfg.session_resources
         .create_session(&bound_input(&sid, &workspace, encoded))
         .await
         .unwrap();
-    lease.mark_clean().await.unwrap();
-    let owner = acquire_bound_owner(cfg, &sid).await;
     cfg.session_resources
         .append_history(&sid, &history_payloads)
         .await
@@ -370,7 +340,6 @@ async fn register_session_with_history(
             session_id: sid.clone(),
             thread_id: sid.clone(),
             cwd: workspace.cwd.to_str().unwrap().to_owned(),
-            execution_owner: Some(owner),
             environment: None,
             closing: false,
             history,
@@ -386,7 +355,6 @@ async fn register_session_with_history(
             continuation_epoch: 0,
             continuation_in_flight: false,
             continuation_mq_steering_pending: false,
-            lease: crate::host::lease::WriterLease::acquired("default"),
         },
     );
     sid
@@ -657,7 +625,6 @@ async fn register_session_with_workflow(
     if !bound {
         create_bound_fixture(cfg, cwd, Some(sid)).await;
     }
-    let owner = acquire_bound_owner(cfg, sid).await;
     let executor: Arc<dyn AgentExecutor> = Arc::new(MockWorkflowExecutor);
     let (notification_tx, _) = tokio::sync::broadcast::channel::<WorkflowTaskResult>(32);
     let mw = Arc::new(WorkflowMiddleware::new(
@@ -676,7 +643,6 @@ async fn register_session_with_workflow(
                 .to_str()
                 .unwrap()
                 .to_owned(),
-            execution_owner: Some(owner),
             environment: None,
             closing: false,
             history: Vec::new(),
@@ -692,7 +658,6 @@ async fn register_session_with_workflow(
             continuation_epoch: 0,
             continuation_in_flight: false,
             continuation_mq_steering_pending: false,
-            lease: crate::host::lease::WriterLease::acquired("default"),
         },
     );
     mw

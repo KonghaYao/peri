@@ -100,7 +100,6 @@ impl super::SubAgentTool {
             context_budget: None,
             compact_llm: None,
             session_resources: host.session_resources.clone(),
-            execution_owner: host.execution_owner.clone(),
             event_handler: self.event_handler.clone(),
             bg_event_sender: host.bg_event_sender.clone(),
             task_manager: host.task_manager.clone(),

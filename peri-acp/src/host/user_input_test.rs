@@ -184,10 +184,10 @@ async fn test_user_input_generation_invalidation_rejects_old_command() {
 }
 
 #[tokio::test]
-async fn test_user_input_observer_can_read_but_cannot_mutate() {
+async fn test_closing_user_input_session_can_read_but_cannot_mutate() {
     let tmp = tempfile::TempDir::new().unwrap();
     let (cfg, mut sessions, sid) = make_user_input_session(&tmp).await;
-    sessions[&sid].lease.release("default");
+    sessions.get_mut(&sid).unwrap().closing = true;
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let snapshot = handle_request(
         "session/input/snapshot",
@@ -212,10 +212,10 @@ async fn test_user_input_observer_can_read_but_cannot_mutate() {
     )
     .await
     .unwrap_err();
-    assert_eq!(error.code, -32602, "观察者只允许读取快照");
+    assert_eq!(error.code, -32010);
     assert!(
-        error.message.contains("read-only observer"),
-        "错误必须明确指出写权限"
+        error.message.contains("closing"),
+        "错误必须明确指出关闭状态"
     );
     assert!(
         cfg.session_manager

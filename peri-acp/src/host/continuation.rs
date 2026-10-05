@@ -35,6 +35,7 @@
 use std::sync::Arc;
 
 use crate::session::executor::ContinuationRequest;
+use crate::transport::types::AcpError;
 use peri_acp_types::cron::{CronContinuationRequest, CronTrigger};
 use peri_acp_types::session::{MessageKind, MessageSource, QueuedMessage};
 use peri_acp_types::system_reminder::{
@@ -189,7 +190,7 @@ pub(crate) async fn run_cron_continuation_scheduler(
                 let epoch = {
                     let mut sessions = sessions.lock().await;
                     let Some(state) = sessions.get_mut(&req.session_id) else { return };
-                    if super::workspace::require_owner(state).is_err()
+                    if state.closing
                         || !enqueue_cron_trigger(&cfg, &req.session_id, &req.trigger)
                     {
                         return;
@@ -232,7 +233,9 @@ pub(crate) async fn scheduled_permission_mode(
         let state = sessions
             .get(session_id)
             .ok_or_else(|| crate::transport::types::AcpError::new(-32602, "session not found"))?;
-        super::workspace::require_owner(state)?;
+        if state.closing {
+            return Err(AcpError::new(-32010, "Session is closing"));
+        }
         state
             .environment
             .as_ref()

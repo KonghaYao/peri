@@ -8,7 +8,6 @@ use peri_acp_types::system_reminder::{
     SYSTEM_REMINDER_VERSION,
 };
 use peri_acp_types::tasks::{BgTaskKind, ExternalTaskRegistration, TaskManager};
-use peri_acp_types::workspace::ExecutionOwnerToken;
 use rmcp::{
     model::{
         CancelTaskParams, ClientRequest, CustomRequest, DetailedTask, GetTaskParams,
@@ -100,82 +99,6 @@ impl McpClientPool {
             return Err("trusted Workspace owner disconnected".into());
         }
         Ok(pool)
-    }
-    /// Bind a Store-issued owner generation before admitting Workspace tools.
-    pub fn bind_session_execution_owner(
-        &self,
-        session_id: &str,
-        token: ExecutionOwnerToken,
-    ) -> Result<(), String> {
-        if token.root_id.as_str() != session_id {
-            return Err("Store owner token belongs to another session".into());
-        }
-        self.session_execution_tokens
-            .write()
-            .insert(session_id.to_owned(), token);
-        self.task_scope_tokens.write().remove(session_id);
-        Ok(())
-    }
-
-    /// Drop a closed session's Store capability after its Workspace and
-    /// persistence settlement has completed. A newer owner must be retained.
-    pub fn release_session_execution_owner(&self, token: &ExecutionOwnerToken) {
-        let mut owners = self.session_execution_tokens.write();
-        if owners.get(token.root_id.as_str()) == Some(token) {
-            owners.remove(token.root_id.as_str());
-        }
-    }
-
-    /// Advance every trusted Workspace owner to the Store generation and wait
-    /// for its prior in-flight creation barrier before any tool admission.
-    pub async fn fence_workspace_task_scope(&self, session_id: &str) -> Result<(), String> {
-        if !self
-            .session_execution_tokens
-            .read()
-            .contains_key(session_id)
-        {
-            return Err("Store execution owner token unavailable".into());
-        }
-        self.wait_for_task_owner_catalog().await?;
-        for server in self.configured_workspace_task_owners() {
-            let peer = self.wait_for_workspace_peer(&server).await?;
-            let meta = self
-                .task_scope_meta_for(&server, session_id)
-                .ok_or_else(|| format!("trusted scope for {server} unavailable"))?;
-            let result = peri_time::timeout(
-                Duration::from_secs(10),
-                peer.send_request(ClientRequest::CustomRequest(CustomRequest::new(
-                    "workspace/taskFence",
-                    Some(json!({"_meta":meta})),
-                ))),
-            )
-            .await
-            .map_err(|_| format!("workspace task owner {server} fence timed out"))?
-            .map_err(|error| format!("workspace task owner {server} fence rejected: {error}"))?;
-            let ServerResult::CustomResult(result) = result else {
-                return Err(format!(
-                    "workspace task owner {server} fence returned unexpected response"
-                ));
-            };
-            let epoch = self
-                .session_execution_tokens
-                .read()
-                .get(session_id)
-                .expect("bound token")
-                .epoch;
-            if result.0.get("epoch").and_then(serde_json::Value::as_i64) != Some(epoch)
-                || result
-                    .0
-                    .get("barrierCursor")
-                    .and_then(serde_json::Value::as_u64)
-                    .is_none()
-            {
-                return Err(format!(
-                    "workspace task owner {server} fence evidence invalid"
-                ));
-            }
-        }
-        Ok(())
     }
     async fn wait_for_task_owner_catalog(&self) -> Result<(), String> {
         let until = peri_time::monotonic_now() + Duration::from_secs(10);
@@ -921,59 +844,6 @@ impl McpClientPool {
         }
         Err("session inbox unavailable".to_owned())
     }
-    pub fn bind_session_task_manager(&self, session_id: &str, manager: &Arc<dyn TaskManager>) {
-        self.session_tasks
-            .write()
-            .insert(session_id.to_owned(), Arc::downgrade(manager));
-        self.task_scope_tokens
-            .write()
-            .entry(session_id.to_owned())
-            .or_insert_with(|| self.task_scope_authority.issue(session_id));
-    }
-
-    pub(crate) fn task_scope_meta_for(
-        &self,
-        server: &str,
-        session_id: &str,
-    ) -> Option<RequestMetaObject> {
-        let owner = self
-            .session_execution_tokens
-            .read()
-            .get(session_id)
-            .cloned();
-        let token = if self.clients.read().get(server).is_some_and(|client| {
-            matches!(
-                client.source.as_ref(),
-                Some(crate::mcp::config::ConfigSource::WorkspaceRemote)
-            )
-        }) {
-            let authority = peri_mcp_core::task_scope::TaskScopeAuthority::trusted_connection();
-            match owner.as_ref() {
-                Some(owner) => authority.issue_execution(session_id, owner.epoch, &owner.nonce),
-                None => authority.issue(session_id),
-            }
-        } else {
-            match owner.as_ref() {
-                Some(owner) => {
-                    self.task_scope_authority
-                        .issue_execution(session_id, owner.epoch, &owner.nonce)
-                }
-                None => self
-                    .task_scope_tokens
-                    .write()
-                    .entry(session_id.to_owned())
-                    .or_insert_with(|| self.task_scope_authority.issue(session_id))
-                    .clone(),
-            }
-        };
-        let mut meta = RequestMetaObject::new();
-        meta.0 .0.insert(
-            peri_mcp_core::task_scope::TASK_SCOPE_META_KEY.into(),
-            token.into(),
-        );
-        Some(meta)
-    }
-
     // 外部任务登记事实来自跨层调用，字段固定且按调用顺序直传；与下面的
     // external_task_registration 共用同一组参数，不为此再拆一层结构。
     #[allow(clippy::too_many_arguments)]

@@ -150,7 +150,7 @@ directory 证据及执行目录相对路径。旧本机绑定只能复制迁移�
 
 选择 Turso locator 是持久化后端的全量切换：Machine、Workspace、Session、消息、
 绑定、执行发现快照与 Workspace 级 OAuth 只读写远端库。运行时可以读取机器 ID
-文件、访问工作目录并在进程内持有 lease；写打开和只读打开均不得打开、创建、
+文件、访问工作目录并由 `peri-sdk` 管理执行唯一性；写打开和只读打开均不得打开、创建、
 升级或查询本地 SQLite（包括 `~/.peri/threads/threads.db`）。本地 locator 才使用
 本地 SQLite 及其迁移路径。
 
@@ -323,7 +323,7 @@ SQLite 的表重建须按已有 schema migration 方式在事务外处理外键�
 
 新根 Session 的持久化顺序是：取得 Machine → 发现 Workspace.path → 原子查找或
 创建 Workspace → 在创建 Session 的同一事务/托管批内确认 Workspace 归属并写入
-`threads.workspace_id`、执行快照和原有创建事实。远端保存后由进程内执行端口按远端快照复核并取得 lease；
+`threads.workspace_id`、执行快照和原有创建事实。远端保存后由进程内执行端口按远端快照复核绑定；执行所有权由 `peri-sdk` 管理；
 保存成功但准入失败继续如实报告，不能回滚已确认的远端数据或认作执行成功。
 
 ### 6.3 旧数据回填的判定表

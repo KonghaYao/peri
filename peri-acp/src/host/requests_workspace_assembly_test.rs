@@ -8,7 +8,6 @@ fn retain_failed_assembly(
     sessions: &mut HashMap<String, SessionState>,
     id: &str,
     cwd: &str,
-    owner: Arc<dyn peri_acp_types::workspace::SessionExecutionLease>,
     environment: Arc<crate::host::workspace::SessionEnvironment>,
 ) {
     sessions.insert(
@@ -17,7 +16,6 @@ fn retain_failed_assembly(
             session_id: id.to_owned(),
             thread_id: id.to_owned(),
             cwd: cwd.to_owned(),
-            execution_owner: Some(owner),
             environment: Some(environment),
             closing: true,
             history: Vec::new(),
@@ -33,13 +31,12 @@ fn retain_failed_assembly(
             continuation_epoch: 0,
             continuation_in_flight: false,
             continuation_mq_steering_pending: false,
-            lease: crate::host::lease::WriterLease::acquired("default"),
         },
     );
 }
 
 #[tokio::test]
-async fn worktree_failed_assembly_retains_resources_and_lease_until_cleanup_retry() {
+async fn worktree_failed_assembly_retains_resources_until_cleanup_retry() {
     let tmp = tempfile::TempDir::new().unwrap();
     let config =
         make_peri_config_with_provider(make_provider_config("test", "openai", "key", "model"));
@@ -54,8 +51,6 @@ async fn worktree_failed_assembly_retains_resources_and_lease_until_cleanup_retr
         capabilities: Default::default(),
     });
     let id = create_bound_fixture(&cfg, cwd.to_str().unwrap(), None).await;
-    let owner = acquire_bound_owner(&cfg, &id).await;
-    let retained_owner = owner.clone();
     let mut environment =
         crate::host::workspace::SessionEnvironment::assemble(&cfg, cwd.to_str().unwrap(), &id)
             .await
@@ -72,14 +67,13 @@ async fn worktree_failed_assembly_retains_resources_and_lease_until_cleanup_retr
         &mut sessions,
         &id,
         cwd.to_str().unwrap(),
-        owner,
-        environment,
+        environment.clone(),
     );
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     assert!(sessions[&id].closing);
     assert!(Arc::ptr_eq(
-        sessions[&id].execution_owner.as_ref().unwrap(),
-        &retained_owner,
+        sessions[&id].environment.as_ref().unwrap(),
+        &environment,
     ));
     let close = json!({"sessionId": id});
     assert!(
@@ -89,8 +83,8 @@ async fn worktree_failed_assembly_retains_resources_and_lease_until_cleanup_retr
     );
     assert!(sessions.contains_key(&id));
     assert!(Arc::ptr_eq(
-        sessions[&id].execution_owner.as_ref().unwrap(),
-        &retained_owner,
+        sessions[&id].environment.as_ref().unwrap(),
+        &environment,
     ));
     append_human_message(&cfg, &id, "retained runtime handle").await;
     // A closing owner cannot mutate session configuration or restart execution.
@@ -108,9 +102,5 @@ async fn worktree_failed_assembly_retains_resources_and_lease_until_cleanup_retr
         .await
         .unwrap();
     assert!(!sessions.contains_key(&id));
-    assert!(cfg
-        .session_resources
-        .append_history(&id, &[])
-        .await
-        .is_err());
+    assert!(!cfg.session_resources.is_session_closing(&id).await.unwrap());
 }

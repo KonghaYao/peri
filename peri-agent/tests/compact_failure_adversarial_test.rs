@@ -3,7 +3,7 @@
 use peri_acp_types::session_resources::{
     FrozenSnapshotBytes, NewSession, NewSessionMeta, SessionResources,
 };
-use peri_acp_types::workspace::{SessionBinding, SessionExecutionLease, SESSION_BINDING_VERSION};
+use peri_acp_types::workspace::{SessionBinding, SESSION_BINDING_VERSION};
 use peri_agent::agent::compact_v2::CompactConfig;
 use peri_agent::agent::events_v2::{EventBus, EventHandles, ObserveEvent};
 use peri_agent::agent::react::{ReactLLM, Reasoning, StreamingContext};
@@ -27,7 +27,6 @@ use tokio_util::sync::CancellationToken;
 struct BoundSession {
     resources: Arc<dyn SessionResources>,
     thread_id: String,
-    _lease: Arc<dyn SessionExecutionLease>,
     db: tempfile::TempDir,
     repo: tempfile::TempDir,
 }
@@ -70,7 +69,7 @@ impl BoundSession {
         );
         let workspace = resources.resolve_workspace(repo.path()).await.unwrap();
         let thread_id = uuid::Uuid::now_v7().to_string();
-        let lease = resources
+        resources
             .create_session(&NewSession {
                 thread_id: thread_id.clone(),
                 created_at: "2026-09-28T00:00:00Z".into(),
@@ -96,7 +95,6 @@ impl BoundSession {
         Self {
             resources,
             thread_id,
-            _lease: lease,
             db,
             repo,
         }

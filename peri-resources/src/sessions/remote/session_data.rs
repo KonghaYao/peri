@@ -22,7 +22,7 @@
 //! 与业务效果在同一个托管批里同生共死）。操作 id 不由内容派生，因此同内容的第二次、第三次
 //! 领域调用都是新操作（状态 A→B→A、标题 x→y→x 不再被当成重放丢弃）；输入摘要只用于一致性
 //! 校验。v10 撤销本机操作日志后，不再有「发送前本机落盘、确定终态才结清」这一步，未结清只
-//! 在活跃租约上表达（见 `recover_persistence` 的方法文档）。等价的公开行为仍只有门面暴露的
+//! 在当前实例的 persistence gate 上表达（见 `recover_persistence` 的方法文档）。等价的公开行为仍只有门面暴露的
 //! 那 33 条——adapter 不另立一套平行行为。
 //!
 //! Workspace 归属与执行快照保存在远端；文件系统发现和进程内运行句柄由
@@ -54,7 +54,7 @@ use peri_acp_types::store::{CompactionChange, MessageFlags, PersistedPayload};
 use peri_acp_types::system_reminder::TrustedSystemReminder;
 use peri_acp_types::thread::{ThreadId, ThreadMeta};
 use peri_acp_types::workspace::{
-    ExecutionOwnerToken, ResolvedWorkspace, ScopedThreadPage, ScopedThreadQuery, SessionBinding,
+    ResolvedWorkspace, ScopedThreadPage, ScopedThreadQuery, SessionBinding,
 };
 use tokio::sync::{RwLock, RwLockReadGuard};
 
@@ -72,8 +72,8 @@ use super::session_schema;
 use super::sql::StatementSpec;
 use turso_serverless::Value;
 
-#[path = "execution_owner.rs"]
-mod execution_owner;
+#[path = "session_close.rs"]
+mod session_close;
 
 /// 本次打开对远端 store 身份做了什么：首次登记资格的唯一证据。
 ///
@@ -102,7 +102,7 @@ use session_open::{refuse_legacy_shape, resolve_open_machine_id};
 ///
 /// 本机**不再**持有远端操作的日志（v10 删除了 `session_remote_operations`）：远端账本
 /// （`peri_op_ledger`）仍按「资格先于效果」写，但它是**远端**事实，本机不复制。跨进程重启
-/// 后没有「按原 id 求证终态」这条路径，未结清只在本进程的租约上表达。
+/// 后没有「按原 id 求证终态」这条路径，未结清只在本进程的 persistence gate 上表达。
 pub(super) struct RemoteSessionData {
     pub(super) machine_id: String,
     /// 连接的生命周期槽位：服务中，或关闭中（含已确认关闭）。
@@ -116,7 +116,6 @@ pub(super) struct RemoteSessionData {
     /// thread → root 解析缓存：父关系创建后不变（本 adapter 不提供改父行为），因此
     /// 同一条会话只需一次远端上溯；解析失败不缓存，避免把网络失败固化成事实。
     roots: RwLock<HashMap<ThreadId, ThreadId>>,
-    pub(super) owner_tokens: std::sync::Mutex<HashMap<ThreadId, ExecutionOwnerToken>>,
 }
 
 impl RemoteSessionData {
@@ -205,7 +204,6 @@ impl RemoteSessionData {
                 store_id,
                 schema_version,
                 roots: RwLock::new(HashMap::new()),
-                owner_tokens: std::sync::Mutex::new(HashMap::new()),
             },
             initialization,
         ))
@@ -356,7 +354,6 @@ impl RemoteSessionData {
             store_id,
             schema_version: schema::REMOTE_SCHEMA_VERSION,
             roots: RwLock::new(HashMap::new()),
-            owner_tokens: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -381,7 +378,6 @@ impl RemoteSessionData {
             store_id,
             schema_version: schema::REMOTE_SCHEMA_VERSION,
             roots: RwLock::new(HashMap::new()),
-            owner_tokens: std::sync::Mutex::new(HashMap::new()),
         }
     }
 }
@@ -542,80 +538,15 @@ pub(super) fn unsupported_behavior(behavior: &'static str) -> SessionResourceErr
 
 #[async_trait]
 impl SessionDataPort for RemoteSessionData {
-    async fn unreleased_execution_owner(
-        &self,
-        root: &ThreadId,
-    ) -> SessionResourceResult<Option<peri_acp_types::workspace::PriorExecutionOwner>> {
-        self.read_unreleased_owner(root).await
-    }
-
-    async fn claim_execution_owner(
-        &self,
-        root: &ThreadId,
-        require_closing: bool,
-        expected_previous_epoch: Option<i64>,
-    ) -> SessionResourceResult<peri_acp_types::workspace::ExecutionOwnerClaim> {
-        self.claim_owner(root, require_closing, expected_previous_epoch)
-            .await
-    }
-
-    async fn renew_execution_owner(
-        &self,
-        token: &ExecutionOwnerToken,
-    ) -> SessionResourceResult<()> {
-        self.renew_owner(token).await
-    }
-
-    async fn release_execution_owner(
-        &self,
-        token: &ExecutionOwnerToken,
-    ) -> SessionResourceResult<()> {
-        self.release_owner(token).await
-    }
-
-    async fn finish_close(&self, token: &ExecutionOwnerToken) -> SessionResourceResult<()> {
-        self.finish_owned_close(token).await
+    async fn finish_close(&self, id: &ThreadId) -> SessionResourceResult<()> {
+        self.finish_session_close(id).await
     }
 
     async fn close_settlement(
         &self,
-        token: &ExecutionOwnerToken,
+        id: &ThreadId,
     ) -> SessionResourceResult<peri_acp_types::session_resources::CloseSettlement> {
-        self.read_close_settlement(token).await
-    }
-
-    async fn bind_execution_workspace_owner(
-        &self,
-        token: &ExecutionOwnerToken,
-        descriptor: &peri_acp_types::workspace::WorkspaceExecutionDescriptor,
-    ) -> SessionResourceResult<()> {
-        self.bind_workspace_owner(token, descriptor).await
-    }
-
-    async fn read_execution_workspace_owner(
-        &self,
-        root: &ThreadId,
-    ) -> SessionResourceResult<Option<peri_acp_types::workspace::ExecutionWorkspaceOwnerRecord>>
-    {
-        self.read_workspace_owner(root).await
-    }
-
-    async fn mark_unsupported_async_owner(
-        &self,
-        token: &ExecutionOwnerToken,
-    ) -> SessionResourceResult<()> {
-        self.mark_workspace_owner_unsupported(token).await
-    }
-
-    fn install_execution_owner_token(&self, token: ExecutionOwnerToken) {
-        self.owner_tokens
-            .lock()
-            .unwrap()
-            .insert(token.root_id.clone(), token);
-    }
-
-    fn execution_owner_token(&self, root: &ThreadId) -> Option<ExecutionOwnerToken> {
-        self.owner_tokens.lock().unwrap().get(root).cloned()
+        self.store().await?.close_settlement(id).await
     }
 
     fn oauth_credentials_for_workspace(
@@ -952,7 +883,7 @@ impl SessionDataPort for RemoteSessionData {
     ///
     /// 本方法只回答本机能回答的那部分：本机已没有可证明未结态的 durable 记录，会话数据
     /// 仍可读即可重载。**影响面**：进程崩溃前发出的远端请求若结果未知，本机无法再判定它
-    /// 是否生效——这是被撤销的能力，不是遗漏；未结清只在活跃租约上表达，进程退出后
+    /// 是否生效——这是被撤销的能力，不是遗漏；未结清只在当前实例的 persistence gate 上表达，进程退出后
     /// 不由新的运行句柄宣称前次未知请求已结清。
     ///
     /// 若将来重新引入跨进程未决判定，移除条件是：本机重新持有「发送前登记、确定终态才
@@ -968,8 +899,7 @@ impl SessionDataPort for RemoteSessionData {
 
     /// 远端没有异步写入队列，本机也没有未结清记录可供等待，因此没有可排空的东西。
     ///
-    /// 在途请求的等待由门面按活跃租约完成（`drain_persistence` 先等 `wait_for_in_flight`
-    /// 并检查 `is_uncertain`），adapter 自己不做时序假设。
+    /// 在途请求的等待由门面通过当前实例的 persistence gate 完成，adapter 自己不做时序假设。
     async fn drain(&self, _id: &ThreadId) -> SessionResourceResult<()> {
         Ok(())
     }
@@ -983,7 +913,7 @@ impl SessionDataPort for RemoteSessionData {
     /// 「确认」的范围是**本机传输面关闭成功**（见 [`RemoteStore::close`] 与 `remote` 模块
     /// 文档的 shutdown 定义）：它不证明服务端连接已释放，也不证明任何未知的远端写没有生效——
     /// v10 撤销本机操作日志后，本机已没有可以向远端账本求证的 durable 锚点，这条判定只剩下
-    /// 活跃租约上的未结清标记；重开不构成对前次未知写入效果的证明。
+    /// 当前实例 persistence gate 的未结清标记；重开不构成对前次未知写入效果的证明。
     async fn close(&self) -> SessionResourceResult<()> {
         // 唯一的翻转点：取走服务中的连接（已经在关闭中时复用同一个句柄）。
         let closing = { self.slot.write().await.begin_close() };

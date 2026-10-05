@@ -47,7 +47,6 @@ pub(super) fn attach_subagent_host(
     {
         let host = SubagentHost {
             session_resources: thread_persistence.session_resources.clone(),
-            execution_owner: thread_persistence.execution_owner.clone(),
             task_manager: Some(task_manager.clone()),
             bg_event_sender: Some(bg_event_tx),
             on_bg_complete: on_bg_complete.clone(),

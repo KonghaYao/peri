@@ -27,6 +27,7 @@ pub(super) enum SchemaState {
     Version10,
     Version11,
     Version12,
+    Version13,
     Current,
 }
 
@@ -46,6 +47,7 @@ pub(super) async fn inspect(connection: &mut SqliteConnection) -> Result<SchemaS
         .await?;
     match version {
         v if v == CURRENT_SCHEMA_VERSION => return Ok(SchemaState::Current),
+        13 => return Ok(SchemaState::Version13),
         12 => return Ok(SchemaState::Version12),
         11 => return Ok(SchemaState::Version11),
         10 => return Ok(SchemaState::Version10),
@@ -147,23 +149,18 @@ impl SqliteSessionDatabase {
             sqlx::query(canonical::CREATE_SESSION_CLOSE_INTENTS_TABLE_SQL)
                 .execute(&mut *connection)
                 .await?;
-            sqlx::query(canonical::CREATE_SESSION_EXECUTION_WORKSPACE_DESCRIPTORS_TABLE_SQL)
-                .execute(&mut *connection)
-                .await?;
             sqlx::query("INSERT OR IGNORE INTO machines(id, name, identity_kind) VALUES (?1, '我的电脑', 'known')")
                 .bind(crate::sessions::machine::current()?)
                 .execute(&mut *connection)
                 .await?;
             return Ok(());
         }
-        if state == SchemaState::Version12 {
-            return super::storage_v2_migration::migrate_local_execution_owner(&mut connection)
-                .await;
+        if matches!(state, SchemaState::Version12 | SchemaState::Version13) {
+            return Self::remove_execution_owner_schema(&mut connection).await;
         }
         if state == SchemaState::Version11 {
             super::storage_v2_migration::migrate_local_v2(&mut connection).await?;
-            return super::storage_v2_migration::migrate_local_execution_owner(&mut connection)
-                .await;
+            return Self::remove_execution_owner_schema(&mut connection).await;
         }
         // 登记表重建要对被引用的父表执行 DROP TABLE：SQLite 对父表做隐式删除时会
         // 立即检查外键，`defer_foreign_keys` 也挡不住。该 PRAGMA 只在事务外生效，
@@ -186,7 +183,25 @@ impl SqliteSessionDatabase {
             migrated?;
         }
         super::storage_v2_migration::migrate_local_v2(&mut connection).await?;
-        super::storage_v2_migration::migrate_local_execution_owner(&mut connection).await
+        Self::remove_execution_owner_schema(&mut connection).await
+    }
+
+    async fn remove_execution_owner_schema(connection: &mut SqliteConnection) -> Result<()> {
+        let mut tx = connection.begin_with("BEGIN IMMEDIATE").await?;
+        sqlx::query(canonical::CREATE_SESSION_CLOSE_INTENTS_TABLE_SQL)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DROP TABLE IF EXISTS session_execution_workspace_descriptors")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DROP TABLE IF EXISTS session_execution_owners")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("PRAGMA user_version = 14")
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
     }
 
     async fn migrate_schema(connection: &mut SqliteConnection, state: SchemaState) -> Result<()> {

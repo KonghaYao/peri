@@ -25,7 +25,7 @@ use peri_acp_types::workspace::{ResolvedWorkspace, SessionBinding, WorkspaceErro
 use crate::sessions::data::ensure_child_relation;
 
 use super::ledger::{OperationId, OperationIdentity};
-use super::mutation::{MutationOutcome, QualifiedMutation};
+use super::mutation::QualifiedMutation;
 use super::session_codec::{self as codec, corrupt};
 use super::session_data::{invalid_input, not_found, RemoteSessionData};
 use super::session_sql::{self, SessionInsert};
@@ -120,7 +120,7 @@ impl RemoteSessionData {
     /// 保存新会话：meta + 不可变绑定 + frozen 完整落库（执行准入由本机执行面另行完成）。
     pub(super) async fn write_new_session(&self, input: &NewSession) -> SessionResourceResult<()> {
         // 远程新建只接受 **root**：带父的会话必须走 `save_child`，那里才有父子/根归属判定
-        // （`data::ensure_child_relation`）、root owner 门禁与 frozen 继承。
+        // （`data::ensure_child_relation`）、root 关系检查与 frozen 继承。
         //
         // 这条判定原先挂在已撤销的远程执行面（`remote/local_execution.rs`）上，v10 撤销把
         // 那个文件连同它一起删掉了（真云回归因此转红：`cloud_limit_test.rs` 的
@@ -146,7 +146,7 @@ impl RemoteSessionData {
     /// 保存未发布创建（J2 第一阶段）：身份/绑定落库，frozen 暂空。
     ///
     /// 与新会话同一条规则（远程只接受 root）；frozen 由
-    /// [`Self::write_commit_frozen`] 在取得本机执行所有权之后一次性提交。
+    /// [`Self::write_commit_frozen`] 以 write-once CAS 一次性提交。
     pub(super) async fn write_new_session_draft(
         &self,
         draft: &NewSessionDraft,
@@ -270,15 +270,9 @@ impl RemoteSessionData {
             .collect::<Vec<_>>()
             .join(",");
         inputs.push(flag_list);
-        self.commit_effects_for_owner(
-            "fork_session",
-            &inputs,
-            statements,
-            &fork.target.thread_id,
-            &fork.source_id,
-        )
-        .await
-        .map(|_| ())
+        self.commit_effects("fork_session", &inputs, statements, &fork.target.thread_id)
+            .await
+            .map(|_| ())
     }
 
     /// 保存 child：父子/根归属 + 继承区成立，frozen 逐字节取自 root 已保存的快照。
@@ -383,7 +377,7 @@ impl RemoteSessionData {
     ///
     /// 本机**不再**为这些操作留日志（v10 删除了 `session_remote_operations`，用户裁决不做
     /// 跨安装能力）：跨进程重启后没有「按原 id 向远端求证」这条路径，未结清只在本进程的
-    /// 租约上表达；进程重开不会自动证明前次未知写入的终态。
+    /// persistence gate 上表达；进程重开不会自动证明前次未知写入的终态。
     pub(super) async fn commit_effects(
         &self,
         behavior: &str,
@@ -391,54 +385,11 @@ impl RemoteSessionData {
         effects: Vec<StatementSpec>,
         thread: &ThreadId,
     ) -> SessionResourceResult<Vec<u64>> {
-        self.commit_effects_for_owner(behavior, inputs, effects, thread, thread)
-            .await
-    }
-
-    pub(super) async fn commit_effects_for_owner(
-        &self,
-        behavior: &str,
-        inputs: &[String],
-        effects: Vec<StatementSpec>,
-        thread: &ThreadId,
-        owner_id: &ThreadId,
-    ) -> SessionResourceResult<Vec<u64>> {
         let identity = mint_identity(behavior, thread, inputs);
-        let root = self.root_for(owner_id).await;
-        let token = self.owner_tokens.lock().unwrap().get(&root).cloned();
-        if token.is_none()
-            && !matches!(
-                behavior,
-                "create_session"
-                    | "begin_initialization"
-                    | "revoke_unpublished_session"
-                    | "revoke_unpublished_draft"
-            )
-        {
-            return Err(SessionResourceError::conflict(
-                "session execution owner token is absent",
-            ));
-        }
         let store = self.store().await?;
         let (outcome, counts) = store
-            .apply_qualified_reporting_with_owner(
-                &QualifiedMutation { identity, effects },
-                Some((&root, token.as_ref())),
-            )
+            .apply_qualified_reporting(&QualifiedMutation { identity, effects })
             .await?;
-        if matches!(
-            outcome,
-            MutationOutcome::NotApplied {
-                rejected_statement: Some(1),
-                ..
-            }
-        ) {
-            // Index 1 is exclusively the owner guard in this qualified batch.
-            // The managed transaction rolled back the qualification and all effects.
-            return Err(SessionResourceError::conflict(
-                "session execution owner is stale",
-            ));
-        }
         match outcome.failure_error(Some(thread)) {
             Some(error) => Err(error),
             None => Ok(counts),

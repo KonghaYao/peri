@@ -1,78 +1,94 @@
 use super::*;
 
 #[tokio::test]
-async fn remote_owner_descriptor_survives_takeover_and_unsupported_is_monotonic() {
+async fn remote_close_intent_finishes_without_execution_ownership() {
     use crate::sessions::data::SessionDataPort;
-    use peri_acp_types::workspace::WorkspaceExecutionDescriptor;
-
-    let directory = tempfile::tempdir().unwrap();
-    let pool = SqlitePoolOptions::new().max_connections(2)
-        .connect_with(sqlx::sqlite::SqliteConnectOptions::new()
-            .filename(directory.path().join("owner.db")).create_if_missing(true).foreign_keys(false))
-        .await.unwrap();
-    sqlx::query("CREATE TABLE threads(id TEXT PRIMARY KEY, parent_thread_id TEXT)")
-        .execute(&pool).await.unwrap();
-    for sql in [
-        crate::sessions::canonical::CREATE_SESSION_EXECUTION_OWNERS_TABLE_SQL,
-        crate::sessions::canonical::CREATE_SESSION_EXECUTION_WORKSPACE_DESCRIPTORS_TABLE_SQL,
-        crate::sessions::canonical::CREATE_SESSION_CLOSE_INTENTS_TABLE_SQL,
-        super::super::ledger::CREATE_OP_LEDGER_SQL,
-    ] {
-        sqlx::query(sql).execute(&pool).await.unwrap();
-    }
-    sqlx::query("INSERT INTO threads(id) VALUES ('owner-root')").execute(&pool).await.unwrap();
-    let transport = Arc::new(SqliteTransport { pool: pool.clone(),
-        writes: AtomicUsize::new(0), fail_column_drop: AtomicBool::new(false),
-        change_schema: AtomicBool::new(false), drop_reply: AtomicBool::new(false),
-        truncate_reply: AtomicBool::new(false) });
+    let fixture = Fixture::new().await;
+    let store = fixture.store(StoreAccess::ReadWrite);
+    schema_upgrade::upgrade(&store, &fixture.snapshot)
+        .await
+        .unwrap();
     let gate = Arc::new(ConnectionGate::default());
-    let store = RemoteStore::new(transport.clone(), StoreAccess::ReadWrite, gate.mint(), gate.clone());
+    let store = RemoteStore::new(
+        fixture.transport.clone(),
+        StoreAccess::ReadWrite,
+        gate.mint(),
+        gate.clone(),
+    );
     let data = super::super::session_data::RemoteSessionData::with_connection_for_test(
-        schema::StoreId::mint(), store,
-        Arc::new(FullRemoteFactory { transport, gate: gate.clone() }), gate);
-    let root = "owner-root".to_owned();
-    let first = data.claim_execution_owner(&root, false, None).await.unwrap();
-    assert!(first.prior_unreleased.is_none());
-    let first_descriptor = WorkspaceExecutionDescriptor {
-        endpoint: "https://workspace.example/mcp".into(), owner_identity: "a".repeat(64),
-        agent_generation_id: "agent-one".into(), unsupported_async_owners: false,
-    };
-    data.bind_execution_workspace_owner(&first.token, &first_descriptor).await.unwrap();
-    assert_eq!(data.unreleased_execution_owner(&root).await.unwrap().unwrap().agent_generation_id.as_deref(), Some("agent-one"));
-    data.mark_unsupported_async_owner(&first.token).await.unwrap();
-    sqlx::query("UPDATE session_execution_owners SET expires_at_unix = 0 WHERE root_id = ?1")
-        .bind(&root).execute(&pool).await.unwrap();
-
-    let second = data.claim_execution_owner(&root, false, None).await.unwrap();
-    assert_eq!(second.prior_unreleased.unwrap().agent_generation_id.as_deref(), Some("agent-one"));
-    let old = data.read_execution_workspace_owner(&root).await.unwrap().unwrap();
-    assert_eq!(data.unreleased_execution_owner(&root).await.unwrap().unwrap().agent_generation_id.as_deref(), Some("agent-one"));
-    assert_eq!(old.current_epoch, second.token.epoch);
-    assert_eq!(old.descriptor_epoch, first.token.epoch);
-    assert!(old.descriptor.unsupported_async_owners);
-    assert!(data.bind_execution_workspace_owner(&first.token, &first_descriptor).await.is_err());
-    let second_descriptor = WorkspaceExecutionDescriptor {
-        agent_generation_id: "agent-two".into(), unsupported_async_owners: false,
-        ..first_descriptor.clone()
-    };
-    data.bind_execution_workspace_owner(&second.token, &second_descriptor).await.unwrap();
-    let current = data.read_execution_workspace_owner(&root).await.unwrap().unwrap();
-    assert_eq!(current.descriptor_epoch, second.token.epoch);
-    assert_eq!(current.descriptor.agent_generation_id, "agent-two");
-    assert!(current.descriptor.unsupported_async_owners);
-
-    sqlx::query("INSERT INTO session_close_intents VALUES (?1, 'now')")
-        .bind(&root).execute(&pool).await.unwrap();
-    sqlx::query("UPDATE session_execution_owners SET expires_at_unix = 0 WHERE root_id = ?1")
-        .bind(&root).execute(&pool).await.unwrap();
-    assert!(data.claim_execution_owner(&root, true, Some(first.token.epoch)).await.is_err());
-    let closing = data.claim_execution_owner(&root, true, Some(second.token.epoch)).await.unwrap();
-    assert_eq!(closing.prior_unreleased.unwrap().agent_generation_id.as_deref(), Some("agent-two"));
-    assert_eq!(data.read_execution_workspace_owner(&root).await.unwrap().unwrap().descriptor_epoch,
-        second.token.epoch);
-    data.finish_close(&closing.token).await.unwrap();
-    assert!(data.unreleased_execution_owner(&root).await.unwrap().is_none());
-    assert!(data.read_execution_workspace_owner(&root).await.unwrap().is_none());
+        fixture.snapshot.store_id.clone(),
+        store,
+        Arc::new(FullRemoteFactory {
+            transport: fixture.transport.clone(),
+            gate: gate.clone(),
+        }),
+        gate,
+    );
+    let id = "session".to_owned();
+    assert_eq!(
+        data.close_settlement(&id).await.unwrap(),
+        CloseSettlement::Finished
+    );
+    data.mark_session_closing(&id).await.unwrap();
+    assert_eq!(
+        data.close_settlement(&id).await.unwrap(),
+        CloseSettlement::Pending
+    );
+    data.finish_close(&id).await.unwrap();
+    assert!(data.finish_close(&id).await.is_err());
+    assert_eq!(
+        data.close_settlement(&id).await.unwrap(),
+        CloseSettlement::Finished
+    );
+    data.mark_session_closing(&id).await.unwrap();
+    let read_only_gate = Arc::new(ConnectionGate::default());
+    let read_only = super::super::session_data::RemoteSessionData::with_connection_for_test(
+        fixture.snapshot.store_id.clone(),
+        RemoteStore::new(
+            fixture.transport.clone(),
+            StoreAccess::ReadOnly,
+            read_only_gate.mint(),
+            read_only_gate.clone(),
+        ),
+        Arc::new(FullRemoteFactory {
+            transport: fixture.transport.clone(),
+            gate: read_only_gate.clone(),
+        }),
+        read_only_gate,
+    );
+    assert!(matches!(
+        read_only.finish_close(&id).await.unwrap_err().kind(),
+        SessionResourceErrorKind::ReadOnlyStore
+    ));
+    assert_eq!(
+        read_only.close_settlement(&id).await.unwrap(),
+        CloseSettlement::Pending
+    );
+    data.inject_faults(super::super::mutation::FaultPlan {
+        drop_reply: Some("finish_close".to_owned()),
+        drop_before_send: None,
+    })
+    .await;
+    assert!(data
+        .finish_close(&id)
+        .await
+        .unwrap_err()
+        .is_persistence_uncertain());
+    assert_eq!(
+        data.close_settlement(&id).await.unwrap(),
+        CloseSettlement::Finished
+    );
+    assert_eq!(
+        data.close_settlement(&"missing".to_owned()).await.unwrap(),
+        CloseSettlement::Unknown
+    );
+    assert!(matches!(
+        data.finish_close(&"missing".to_owned())
+            .await
+            .unwrap_err()
+            .kind(),
+        SessionResourceErrorKind::NotFound
+    ));
 }
 
 // A SQLite-backed transport stands in for Turso's SQL wire protocol. The
@@ -119,8 +135,9 @@ fn full_remote_facade(
             gate,
         ),
     );
-    let local: Arc<dyn LocalExecutionPort> =
-        Arc::new(super::super::execution::RemoteExecution::new(data.clone(), false));
+    let local: Arc<dyn LocalExecutionPort> = Arc::new(
+        super::super::execution::RemoteExecution::new(data.clone(), false),
+    );
     let data: Arc<dyn SessionDataPort> = data;
     Arc::new(crate::sessions::SessionResourcesImpl::from_ports(
         data,
@@ -234,10 +251,7 @@ async fn virtual_remote_cold_recovery_and_read_only_fallbacks() {
         binding: SessionBinding::from_workspace(&workspace),
         frozen: FrozenSnapshotBytes::new("{}"),
     };
-    let lease = first.create_session(&input).await.unwrap();
-    let token = lease.owner_token().unwrap();
-    lease.mark_clean().await.unwrap();
-    first.release_execution_owner(&token).await.unwrap();
+    first.create_session(&input).await.unwrap();
     drop(first);
 
     let cold = virtual_remote_facade(transport.clone(), environment.clone());
@@ -246,13 +260,6 @@ async fn virtual_remote_cold_recovery_and_read_only_fallbacks() {
         .await
         .unwrap();
     assert_eq!(restored.workspace_id, workspace.workspace_id);
-    let lease = cold
-        .acquire_execution(&session_id, &restored)
-        .await
-        .unwrap();
-    let token = lease.owner_token().unwrap();
-    lease.mark_clean().await.unwrap();
-    cold.release_execution_owner(&token).await.unwrap();
     drop(cold);
 
     for changed in [
@@ -384,10 +391,7 @@ async fn remote_only_cold_recovery_uses_saved_evidence_and_old_distinct_registra
         binding: SessionBinding::from_workspace(&workspace),
         frozen: FrozenSnapshotBytes::new("{}"),
     };
-    let first_lease = first.create_session(&input).await.unwrap();
-    let first_token = first_lease.owner_token().unwrap();
-    first_lease.mark_clean().await.unwrap();
-    first.release_execution_owner(&first_token).await.unwrap();
+    first.create_session(&input).await.unwrap();
     assert_eq!(
         first
             .resolve_workspace(&workspace_dir)
@@ -421,19 +425,14 @@ async fn remote_only_cold_recovery_uses_saved_evidence_and_old_distinct_registra
         restored.execution_registration_id.to_string(),
         old_registration
     );
-    let cold_lease = cold.acquire_execution(&session_id, &restored).await.unwrap();
-    let cold_token = cold_lease.owner_token().unwrap();
-    cold_lease.mark_clean().await.unwrap();
-    cold.release_execution_owner(&cold_token).await.unwrap();
     assert_eq!(
         std::fs::read(&poisoned_local_file).unwrap(),
         b"broken local SQLite"
     );
     drop(cold);
 
-    // Existing metadata edits require a new Store owner generation.
+    // Saved binding evidence authorizes metadata edits without runtime ownership.
     let unleased = full_remote_facade(transport.clone());
-    let editing_lease = unleased.acquire_execution(&session_id, &restored).await.unwrap();
     unleased
         .update_session_meta(
             &session_id,
@@ -444,9 +443,6 @@ async fn remote_only_cold_recovery_uses_saved_evidence_and_old_distinct_registra
         )
         .await
         .unwrap();
-    let editing_token = editing_lease.owner_token().unwrap();
-    editing_lease.mark_clean().await.unwrap();
-    unleased.release_execution_owner(&editing_token).await.unwrap();
     drop(unleased);
 
     let displaced = directory.path().join("original-workspace");
@@ -511,10 +507,7 @@ async fn remote_only_cold_recovery_uses_saved_evidence_and_old_distinct_registra
         .validate_bound_workspace(&session_id, BindingRecheck::Full)
         .await
         .unwrap();
-    assert!(missing
-        .acquire_execution(&session_id, &projection)
-        .await
-        .is_err());
+    assert_eq!(projection.workspace_id, workspace.workspace_id);
     let rejected_append = missing.append_history(&session_id, &[]).await;
     assert!(
         rejected_append.is_err(),

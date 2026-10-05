@@ -6,14 +6,6 @@
 //!   重试令牌或补偿协议；「整体生效或整体不生效」是行为后置条件，由 adapter 自行
 //!   选择机制实现。
 //! - 业务侧拿不到本 trait：门面（`SessionResourcesImpl`）是唯一调用方，也是唯一注入点。
-//!   本机执行授权（owner、dirty、准入、排空）属于执行面，不在数据端口里：
-//!   `SessionExecutionLease`、`acquire_execution` 与落地登记由执行面持有。
-//! - 调用方（门面）负责在调用前完成本机授权与未决持久化检查；adapter 只负责数据事实，
-//!   不得把「没有权限」静默降级成「没有数据」。
-//!
-//! 会话本机身份（store id / 安装 id）只出现在资源层与持久化记录，不进业务 DTO、
-//! 不进 ACP wire。
-
 use async_trait::async_trait;
 use peri_acp_types::messages::MessageId;
 use peri_acp_types::session_resources::{
@@ -24,13 +16,10 @@ use peri_acp_types::store::{CompactionChange, MessageFlags, PersistedPayload};
 use peri_acp_types::system_reminder::TrustedSystemReminder;
 use peri_acp_types::thread::{ThreadId, ThreadMeta};
 use peri_acp_types::workspace::{
-    ExecutionOwnerToken, ResolvedWorkspace, ScopedThreadPage, ScopedThreadQuery, SessionBinding,
+    ResolvedWorkspace, ScopedThreadPage, ScopedThreadQuery, SessionBinding,
 };
 
 use super::failure::invalid_input;
-
-// 本机执行事实（运行句柄、未结清门禁、工作区登记）不属于本端口：它们在
-// `super::local_port::LocalExecutionPort`。这里只保留两个 adapter 共同承担的会话数据行为。
 
 /// child resume 认领的持久化事实：状态 + 是否处于认领中。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -46,45 +35,11 @@ pub struct ChildResumeRecord {
 /// 「未生效」报告成成功，也不得在失败后遗留部分写入。
 #[async_trait]
 pub(crate) trait SessionDataPort: Send + Sync {
-    /// Read the current unreleased owner without changing its Store epoch.
-    async fn unreleased_execution_owner(
-        &self,
-        root: &ThreadId,
-    ) -> SessionResourceResult<Option<peri_acp_types::workspace::PriorExecutionOwner>>;
-    /// Claim a root generation in the canonical Store. Closing recovery requires
-    /// a persisted close intent; a live, unexpired generation cannot be stolen.
-    async fn claim_execution_owner(
-        &self,
-        root: &ThreadId,
-        require_closing: bool,
-        expected_previous_epoch: Option<i64>,
-    ) -> SessionResourceResult<peri_acp_types::workspace::ExecutionOwnerClaim>;
-    async fn renew_execution_owner(&self, token: &ExecutionOwnerToken)
-        -> SessionResourceResult<()>;
-    async fn release_execution_owner(
-        &self,
-        token: &ExecutionOwnerToken,
-    ) -> SessionResourceResult<()>;
-    async fn finish_close(&self, token: &ExecutionOwnerToken) -> SessionResourceResult<()>;
+    async fn finish_close(&self, id: &ThreadId) -> SessionResourceResult<()>;
     async fn close_settlement(
         &self,
-        token: &ExecutionOwnerToken,
+        id: &ThreadId,
     ) -> SessionResourceResult<peri_acp_types::session_resources::CloseSettlement>;
-    async fn bind_execution_workspace_owner(
-        &self,
-        token: &ExecutionOwnerToken,
-        descriptor: &peri_acp_types::workspace::WorkspaceExecutionDescriptor,
-    ) -> SessionResourceResult<()>;
-    async fn read_execution_workspace_owner(
-        &self,
-        root: &ThreadId,
-    ) -> SessionResourceResult<Option<peri_acp_types::workspace::ExecutionWorkspaceOwnerRecord>>;
-    async fn mark_unsupported_async_owner(
-        &self,
-        token: &ExecutionOwnerToken,
-    ) -> SessionResourceResult<()>;
-    fn install_execution_owner_token(&self, token: ExecutionOwnerToken);
-    fn execution_owner_token(&self, root: &ThreadId) -> Option<ExecutionOwnerToken>;
 
     fn oauth_credentials_for_workspace(
         self: std::sync::Arc<Self>,
@@ -125,11 +80,7 @@ pub(crate) trait SessionDataPort: Send + Sync {
             ),
         )
     }
-    /// 保存新会话：meta/binding/frozen 完整落库（本机准入由执行面另行完成）。
-    ///
-    /// 本地创建把完整数据并成一次提交后接纳运行句柄，因此本机构建不经过本方法；
-    /// 它的生产调用方是远程组合（先 durable 保存、再本机准入），本地用它构造
-    /// 「数据已保存、运行句柄未接纳」的收敛状态。
+    /// 保存新会话：meta/binding/frozen 在同一事务完整落库。
     async fn save_new_session(&self, input: &NewSession) -> SessionResourceResult<()>;
     async fn save_new_session_in_workspace(
         &self,
@@ -140,9 +91,6 @@ pub(crate) trait SessionDataPort: Send + Sync {
     }
 
     /// 保存未发布创建（J2 第一阶段）：身份/绑定落库，frozen 暂空。
-    ///
-    /// 本地创建把草稿并成一次提交后接纳运行句柄（不经过本方法）；远程组合先由本方法
-    /// 保存草稿、再取本机执行准入，与 [`Self::save_new_session`] 同一节奏。
     async fn save_new_session_draft(
         &self,
         draft: &peri_acp_types::session_resources::NewSessionDraft,
@@ -157,8 +105,7 @@ pub(crate) trait SessionDataPort: Send + Sync {
 
     /// 一次性提交 frozen（write-once CAS）：仅当该 identity 从未提交过时生效。
     ///
-    /// 本地塌缩在 [`super::local_port::LocalExecutionPort`] 内完成（与 owner/代际校验同一
-    /// 事务）；远程组合经由本方法提交，重复提交返回 typed 冲突而不是覆盖。
+    /// 两种存储后端都在事务内提交；重复提交返回 typed 冲突而不是覆盖。
     async fn commit_frozen(
         &self,
         id: &ThreadId,
@@ -178,7 +125,7 @@ pub(crate) trait SessionDataPort: Send + Sync {
     ///
     /// 与 [`Self::revoke_unpublished_session`] 的差别是唯一的一条判据：`frozen IS NULL`。
     /// 已提交 frozen 的草稿是「已定稿、未发布」的合法中间态，删除它会销毁内容准入的成果
-    /// （它只该走既有 dirty 恢复），因此必须返回 typed 冲突且一条行都不删。
+    /// 因此必须返回 typed 冲突且一条行都不删。
     async fn revoke_unpublished_draft(&self, id: &ThreadId) -> SessionResourceResult<()>;
 
     /// 接纳 legacy 会话：binding 与缺失的 frozen 一次成立，已有值不变。
@@ -353,7 +300,7 @@ pub(crate) trait SessionDataPort: Send + Sync {
     ///
     /// 本机实现在同事务内完成写入，因此没有需要收敛的中间态；远程实现的收敛由远端
     /// adapter 内部完成（见其模块文档）。本机**没有**跨进程的未决记录：那类锚点已被
-    /// 移除（用户裁决不做跨安装能力），未决只在本进程的租约上表达。
+    /// 移除（用户裁决不做跨安装能力），进程内门禁保留未决写入效果。
     async fn recover_persistence(
         &self,
         id: &ThreadId,
@@ -373,7 +320,7 @@ pub(crate) trait SessionDataPort: Send + Sync {
 /// 落库的父子关系取自 `child.target.meta.parent_thread_id`，而调用方声明的关系在
 /// `child.parent_id` / `child.root_id`。两组字段必须指向同一次关系，否则会出现「准入按声明、
 /// 落库按另一套」的两种真相：声明了合法父/根、而目标 meta 里没有父的 child 会被写成一条
-/// 没有父的**独立 root**，此后它还能自己取得执行权。
+/// 没有父的**独立 root**，破坏任务树的数据归属。
 ///
 /// | 拒绝理由 | 为什么不能交给别处 |
 /// | --- | --- |

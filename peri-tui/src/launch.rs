@@ -207,8 +207,7 @@ pub async fn attach_acp(
                     session_mcp_servers: None,
                 },
             )
-            .await
-            .with_local_unverified_takeover();
+            .await;
 
             // (I17-D) app.services.acp_session_manager 字段已退役——
             // 该句柄此前仅由 ServiceRegistry 持有但无任何消费者读取。

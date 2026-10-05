@@ -9,7 +9,6 @@ use peri_acp_types::projection::{
 };
 use peri_acp_types::session_resources::{SessionResources, SessionStoreShutdownPort};
 use peri_acp_types::store::PersistedPayload;
-use peri_acp_types::workspace::{ResolvedWorkspace, SessionExecutionLease};
 
 struct SummaryModel;
 #[async_trait::async_trait]
@@ -82,7 +81,6 @@ fn spawn_config(
         context_budget: None,
         compact_llm: None,
         session_resources: Some(store),
-        execution_owner: None,
         event_handler: None,
         bg_event_sender: None,
         task_manager: None,
@@ -135,22 +133,13 @@ async fn flush_session(session: &Arc<Session>) {
     *arc.write() = transcript;
 }
 
-/// 冷重开按持久会话事实取得新 runtime owner，不重建上个实例的执行状态。
-async fn reacquire_execution(
-    store: &Arc<dyn SessionResources>,
-    workspace: &ResolvedWorkspace,
-    root: &ThreadId,
-) -> Arc<dyn SessionExecutionLease> {
-    store.acquire_execution(root, workspace).await.unwrap()
-}
-
 /// [回归测试] 原 parent ID 不得 append 成 child own；父 Full 之后冷恢复仍使用 spawn 时的父投影。
 #[tokio::test]
 async fn test_sqlite_subagent_spawn_full_micro_cold_resume_preserves_provenance() {
     let repo = crate::session::test_resources::git_repository();
     let db = tempfile::tempdir().unwrap();
     let db_path = db.path().join("provenance.db");
-    // 真门面（真 SQLite）：绑定、frozen 原字节、继承区与执行所有权都来自真实实现，
+    // 真门面（真 SQLite）：绑定、frozen 原字节与继承区都来自真实实现，
     // 冷重开是同一库文件的第二个句柄——不是另一个空替身。
     let resources = peri_resources::Resources::open_with(Some(db_path.clone()))
         .await
@@ -158,8 +147,7 @@ async fn test_sqlite_subagent_spawn_full_micro_cold_resume_preserves_provenance(
     let (store, shutdown) = resources.into_parts();
     let workspace = store.resolve_workspace(repo.path()).await.unwrap();
     let cwd = workspace.cwd.to_string_lossy().into_owned();
-    let (parent_id, parent_lease) = create_bound_root(&store, &workspace, None).await;
-    let parent_lease = parent_lease.expect("root 执行所有权");
+    let parent_id = create_bound_root(&store, &workspace, None).await;
     let parent = Session::new(
         Arc::from(cwd.as_str()),
         FrozenContext::builder().build(),
@@ -192,9 +180,7 @@ async fn test_sqlite_subagent_spawn_full_micro_cold_resume_preserves_provenance(
         transcript.flush_persistence().await.unwrap();
         *arc.write() = transcript;
     }
-    let mut config = spawn_config(store.clone(), parent_messages.clone(), &cwd);
-    // child 落库要求本会话 root 的执行所有权（save_child 不接受借来的所有权）。
-    config.execution_owner = Some(Arc::clone(&parent_lease));
+    let config = spawn_config(store.clone(), parent_messages.clone(), &cwd);
     let spawned = SessionFactory::spawn_subagent(Some(&parent), config)
         .await
         .unwrap();
@@ -260,20 +246,12 @@ async fn test_sqlite_subagent_spawn_full_micro_cold_resume_preserves_provenance(
     );
     parent.transcript().read().shutdown_persistence();
     drop(spawned);
-    parent_lease.mark_clean().await.unwrap();
-    store
-        .release_execution_owner(&parent_lease.owner_token().unwrap())
-        .await
-        .unwrap();
-    drop(parent_lease);
     // 关闭走部署关闭权（业务句柄没有全局关闭；这里与部署装配同形）。
     shutdown.shutdown().await.unwrap();
     let reopened_resources = peri_resources::Resources::open_with(Some(db_path.clone()))
         .await
         .unwrap();
     let (reopened, reopened_shutdown) = reopened_resources.into_parts();
-    let reopened_workspace = reopened.resolve_workspace(repo.path()).await.unwrap();
-    let reopened_lease = reacquire_execution(&reopened, &reopened_workspace, &parent_id).await;
     let recording = RecordingLLM::new();
     let received = recording.received.clone();
     let config = resume_config_with(
@@ -329,10 +307,5 @@ async fn test_sqlite_subagent_spawn_full_micro_cold_resume_preserves_provenance(
     flush_session(&resumed.session).await;
     resumed.session.transcript().read().shutdown_persistence();
     drop(resumed);
-    reopened_lease.mark_clean().await.unwrap();
-    reopened
-        .release_execution_owner(&reopened_lease.owner_token().unwrap())
-        .await
-        .unwrap();
     reopened_shutdown.shutdown().await.unwrap();
 }

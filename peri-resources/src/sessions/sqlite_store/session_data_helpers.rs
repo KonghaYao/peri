@@ -63,22 +63,6 @@ pub(in crate::sessions) async fn thread_root_on(
     }
 }
 
-/// 本机库自己的会话事实：数据与执行在**同一个库**时（迁移桥、本机组合的内部调用）的读法。
-///
-/// 判定与远端组合完全一致，差别只在事实来源：这里从本机 `session_bindings` 与 `threads`
-/// 父链读出调用方在远端组合里要从数据端口取的三件事（绑定字节、这棵树有没有绑定、树根）。
-/// 远端组合**不能**用它——那时本机没有这条会话的行，三件事只能由数据端口回答。
-impl SqliteSessionDatabase {
-    pub(in crate::sessions) async fn local_session_facts(
-        &self,
-        id: &ThreadId,
-    ) -> anyhow::Result<SessionFacts> {
-        let mut connection = self.pool.acquire().await?;
-        let root = thread_root_on(&mut connection, id).await?;
-        Ok(SessionFacts { root })
-    }
-}
-
 /// 绑定行的事实：绑定、指向已消失的登记、或没有绑定行。
 pub(in crate::sessions) enum BindingRowState {
     Bound(SessionBinding),

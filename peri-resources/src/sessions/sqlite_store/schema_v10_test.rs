@@ -253,8 +253,6 @@ async fn test_v7_v8_v9_all_converge_and_drop_only_the_remote_tables() {
             "legacy_execution_registrations".to_owned(),
             "machines".to_owned(),
             "session_close_intents".to_owned(),
-            "session_execution_owners".to_owned(),
-            "session_execution_workspace_descriptors".to_owned(),
         ]);
         expected.sort();
         assert_eq!(tables_after, expected, "来源版本 {source_version}");
@@ -340,8 +338,6 @@ async fn test_database_without_remote_tables_is_idempotent() {
         "legacy_execution_registrations".to_owned(),
         "machines".to_owned(),
         "session_close_intents".to_owned(),
-        "session_execution_owners".to_owned(),
-        "session_execution_workspace_descriptors".to_owned(),
     ]);
     expected.sort();
     assert_eq!(table_names(&mut connection).await, expected);

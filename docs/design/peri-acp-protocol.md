@@ -41,21 +41,7 @@ TUI 的所有主动行为通过标准 ACP JSON-RPC 方法调用。不定义自�
   和全局；普通 `cwd` 字段仍表示精确目录。
 - new/load/resume/fork 的响应扩展投影绑定；请求 cwd 与保存的 binding 不符时拒绝。
   能力未协商不改变旧标准字段解释，也不能允许错误目录执行。
-- `session/load` 的只读准入：执行所有权不可得（他处持有 / 待恢复的精确代际 / 本节点
-  不提供所有权）时仍返回成功，在 `_meta["peri.sessionWorkspaceV1"].read_only` 携带
-  `ReadOnlyAdmission`，进程日志记 warning；未协商该能力的客户端同样进入，只是拿不到这个标记。
-  待恢复的精确代际只在协商了 `peri.sessionRecoveryV1` 的连接上停住（客户端确认后调用
-  `peri/session_reset_dirty`），没有确认交互的连接由宿主直接解除该代际并取得所有权。
-  只读准入不改变独占：写入与执行仍要 owner，`session/fork` 不接受降级。
-- ~~会话存储准入由 initialize 的 `peri.sessionStoreRegistrationV1` 显式协商：
-  `peri/session_store_status` 返回本机对当前存储的接纳裁决，`peri/session_register_store`
-  在用户显式接受风险时登记。~~ **已撤销**（2026-09-27 用户裁决）：不再有本机登记、准入
-  裁决与跨安装来源判定，因此这两条方法与 `peri.sessionStoreRegistrationV1` 都不再存在
-  （原语义、`StoreNotRegistered` / `StoreRegisteredFromDifferentOrigin` 两条拒绝原因见
-  `spec/history/2026-09.md` 的 2026-09-26 session-store 条目）。**现行语义是
-  「配置即用」**：配置里指到哪个会话存储就直接用哪个，不要求先登记；远端库与本地库是
-  同一种存储模式，两者存储模式一致（schema/SQL 统一是后续工作）。
-- `session/metadata` 读取轻量标题与当前会话配置投影；不做逐 tick Git 发现。
+- `session/load` / `session/resume` 不取得或校验执行所有权，不返回所有权只读准入或前任 owner 警告。唯一执行者与跨实例协调由 `peri-sdk` 管理；Peri 保留环境、绑定、frozen 与持久化完整性检查，历史通过独立只读入口查询。
 
 类型事实源为 `peri-acp-types::workspace`；身份、恢复与执行准入约束见
 [会话身份与工作区设计](session-id-environment.md)。

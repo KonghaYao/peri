@@ -122,7 +122,6 @@ async fn test_compact_report_manual_full_and_cold_reload() {
     let thread_id = session.thread_id.clone();
     let _db = session._db;
     drop(session.resources);
-    drop(session._lease);
     let reopened =
         peri_resources::sessions::SessionResourcesImpl::open_existing_read_only(&db_path)
             .await
@@ -217,11 +216,7 @@ async fn test_compact_report_manual_child_preserves_parent_flags() {
             flags: HashMap::new(),
         },
     };
-    session
-        .resources
-        .save_child(&child, &session._lease)
-        .await
-        .unwrap();
+    session.resources.save_child(&child).await.unwrap();
     let own_report = report("CHILD_REPORT");
     session
         .resources

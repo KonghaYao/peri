@@ -13,7 +13,7 @@
 //! 能回答问题，「没生效」也不能由原因推出，因此固定上报未决持久化。
 
 pub(in crate::sessions) use crate::sessions::failure::{
-    conflict, corrupt, invalid_input, lease_required, not_found, read_only_store, unavailable,
+    corrupt, invalid_input, not_found, unavailable,
 };
 use peri_acp_types::session_resources::{SessionResourceError, SessionResourceErrorKind};
 use peri_acp_types::thread::ThreadId;
@@ -51,7 +51,7 @@ pub(in crate::sessions) fn map_sqlx(error: &sqlx::Error) -> SessionResourceError
 /// 长得像 [`SessionResourceErrorKind::Unavailable`]（IO、驱动未分类失败）时尤其不能冒充
 /// 「没写进去」。因此提交阶段不做原因分类，效果固定为
 /// [`MutationOutcome::Unknown`](peri_acp_types::session_resources::MutationOutcome)：
-/// 写入准入据此不结清范围，由 `Drop` 在租约上留下未决证据，阻断续写与 clean。
+/// 写入准入据此不结清范围，由门禁保留未决证据，阻断续写与关闭确认。
 ///
 /// 只用于**写事务**的 `commit()`：提交之前的失败（输入非法、约束冲突、可证明的回滚）
 /// 仍走 [`write_failure`] / [`map_sqlx`]，不得被判成 `Unknown`；只读事务没有写入效果，
@@ -75,14 +75,6 @@ pub(in crate::sessions) fn preserve_domain_failure(
     error: anyhow::Error,
 ) -> Result<SessionResourceError, anyhow::Error> {
     error.downcast::<SessionResourceError>()
-}
-
-/// `anyhow` 链上是否已存在「未决持久化」的领域失败：桥侧结清写入准入前询问，
-/// 避免把提交未决当成已确定效果。
-pub(in crate::sessions) fn is_persistence_uncertain(error: &anyhow::Error) -> bool {
-    error
-        .downcast_ref::<SessionResourceError>()
-        .is_some_and(SessionResourceError::is_persistence_uncertain)
 }
 
 /// 写入路径失败映射：领域失败（已带效果）原样保留，绑定形状/关系失败保持 workspace 语义。
@@ -160,9 +152,5 @@ mod tests {
             execution_failure(unknown()).effect(),
             MutationOutcome::Unknown
         );
-        assert!(is_persistence_uncertain(&unknown()));
-        assert!(!is_persistence_uncertain(&anyhow::Error::new(
-            sqlx::Error::RowNotFound
-        )));
     }
 }

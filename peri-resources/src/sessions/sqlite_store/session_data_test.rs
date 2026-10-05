@@ -4,11 +4,10 @@
 
 use super::*;
 use crate::sessions::data::SessionDataPort;
-use crate::sessions::sqlite_store::failure::not_found;
 use peri_acp_types::messages::BaseMessage;
 use peri_acp_types::session_resources::{
     BindingState, ChildSnapshot, ForkSnapshot, FrozenSnapshotBytes, FrozenState, NewSession,
-    NewSessionMeta, PersistenceRecovery, RewindBoundary, SessionMetaPatch, SessionResourceResult,
+    NewSessionMeta, PersistenceRecovery, RewindBoundary, SessionMetaPatch,
 };
 use peri_acp_types::store::{
     serialize_persisted_payload, CompactionChange, PersistedPayload, ThreadStore,
@@ -18,66 +17,12 @@ use sqlx::Connection;
 use std::collections::HashMap;
 use tempfile::TempDir;
 
-/// Direct adapter tests exercise data behavior under a Store-issued owner.
-/// The production facade performs these claims; the fixture does it explicitly.
-struct ClaimedSessionData(SqliteSessionData);
-
-impl std::ops::Deref for ClaimedSessionData {
-    type Target = SqliteSessionData;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl ClaimedSessionData {
-    async fn ensure_owner(&self, id: &ThreadId) -> SessionResourceResult<()> {
-        if !self.0.session_exists(id).await? {
-            return Err(not_found());
-        }
-        let root = self.0.session_root(id).await?;
-        if self.0.execution_owner_token(&root).is_none() {
-            let claim = self.0.claim_execution_owner(&root, false, None).await?;
-            self.0.install_execution_owner_token(claim.token);
-        }
-        Ok(())
-    }
-
-    async fn save_new_session(&self, input: &NewSession) -> SessionResourceResult<()> {
-        self.0.save_new_session(input).await?;
-        self.ensure_owner(&input.thread_id).await?;
-        Ok(())
-    }
-
-    async fn append_history(
-        &self,
-        id: &ThreadId,
-        payloads: &[PersistedPayload],
-    ) -> SessionResourceResult<()> {
-        self.ensure_owner(id).await?;
-        self.0.append_history(id, payloads).await
-    }
-
-    async fn adopt_legacy_session(
-        &self,
-        id: &ThreadId,
-        cwd: &str,
-        workspace: &ResolvedWorkspace,
-        frozen: &FrozenSnapshotBytes,
-    ) -> SessionResourceResult<()> {
-        self.ensure_owner(id).await?;
-        self.0
-            .adopt_legacy_session(id, cwd, workspace, frozen)
-            .await
-    }
-}
-
-async fn database() -> (SqliteThreadStore, ClaimedSessionData, TempDir) {
+async fn database() -> (SqliteThreadStore, SqliteSessionData, TempDir) {
     let directory = tempfile::tempdir().unwrap();
     let store = SqliteThreadStore::new(directory.path().join("threads.db"))
         .await
         .unwrap();
-    let data = ClaimedSessionData(SqliteSessionData::new(Arc::clone(&store.database)));
+    let data = SqliteSessionData::new(Arc::clone(&store.database));
     (store, data, directory)
 }
 
@@ -126,95 +71,6 @@ fn payload_bytes(payloads: &[PersistedPayload]) -> Vec<String> {
         .iter()
         .map(|payload| serialize_persisted_payload(payload).unwrap())
         .collect()
-}
-
-#[tokio::test]
-async fn workspace_descriptor_preserves_unsettled_external_owner_across_takeover() {
-    use peri_acp_types::workspace::WorkspaceExecutionDescriptor;
-
-    let (store, data, directory) = database().await;
-    let workspace = workspace(&store, directory.path()).await;
-    let id = "descriptor-root".to_owned();
-    data.save_new_session(&session(
-        &id,
-        workspace.cwd.to_str().unwrap(),
-        &workspace,
-        frozen("owner"),
-    ))
-    .await
-    .unwrap();
-    let first = data.execution_owner_token(&id).unwrap();
-    data.bind_execution_workspace_owner(
-        &first,
-        &WorkspaceExecutionDescriptor {
-            endpoint: "http://127.0.0.1:10001".into(),
-            owner_identity: "a".repeat(64),
-            agent_generation_id: "agent-a".into(),
-            unsupported_async_owners: false,
-        },
-    )
-    .await
-    .unwrap();
-    data.mark_unsupported_async_owner(&first).await.unwrap();
-    assert_eq!(
-        data.unreleased_execution_owner(&id)
-            .await
-            .unwrap()
-            .unwrap()
-            .agent_generation_id
-            .as_deref(),
-        Some("agent-a")
-    );
-    sqlx::query("UPDATE session_execution_owners SET expires_at_unix = 0 WHERE root_id = ?1")
-        .bind(&id)
-        .execute(&store.database.pool)
-        .await
-        .unwrap();
-
-    let successor = SqliteSessionData::new(Arc::clone(&store.database));
-    let claim = successor
-        .claim_execution_owner(&id, false, Some(first.epoch))
-        .await
-        .unwrap();
-    assert_eq!(
-        successor
-            .unreleased_execution_owner(&id)
-            .await
-            .unwrap()
-            .unwrap()
-            .agent_generation_id
-            .as_deref(),
-        Some("agent-a")
-    );
-    assert_eq!(
-        claim
-            .prior_unreleased
-            .unwrap()
-            .agent_generation_id
-            .as_deref(),
-        Some("agent-a")
-    );
-    successor.install_execution_owner_token(claim.token.clone());
-    successor
-        .bind_execution_workspace_owner(
-            &claim.token,
-            &WorkspaceExecutionDescriptor {
-                endpoint: "http://127.0.0.1:10002".into(),
-                owner_identity: "b".repeat(64),
-                agent_generation_id: "agent-b".into(),
-                unsupported_async_owners: false,
-            },
-        )
-        .await
-        .unwrap();
-    let record = successor
-        .read_execution_workspace_owner(&id)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(record.descriptor_epoch, claim.token.epoch);
-    assert!(record.descriptor.unsupported_async_owners);
-    assert!(data.mark_unsupported_async_owner(&first).await.is_err());
 }
 
 #[tokio::test]
@@ -879,20 +735,6 @@ async fn test_adopt_legacy_session_keeps_the_first_winner_bytes() {
     data.adopt_legacy_session(&id, &cwd, &workspace, &frozen("winner"))
         .await
         .unwrap();
-    assert!(
-        second
-            .adopt_legacy_session(&id, &cwd, &workspace, &frozen("candidate"))
-            .await
-            .is_err(),
-        "a second handle cannot write under the first owner's generation"
-    );
-    let first_token = data.execution_owner_token(&id).unwrap();
-    data.release_execution_owner(&first_token).await.unwrap();
-    let second_claim = second
-        .claim_execution_owner(&id, false, None)
-        .await
-        .unwrap();
-    second.install_execution_owner_token(second_claim.token);
     second
         .adopt_legacy_session(&id, &cwd, &workspace, &frozen("candidate"))
         .await
@@ -1012,3 +854,87 @@ async fn test_adopt_legacy_session_rejects_unbound_frozen_canonical_data() {
 
 #[path = "session_history_test.rs"]
 mod history_tests;
+
+#[tokio::test]
+async fn close_intent_survives_reopen_and_finishes_without_execution_owner() {
+    use peri_acp_types::session_resources::CloseSettlement;
+
+    let (store, data, directory) = database().await;
+    let workspace = workspace(&store, directory.path()).await;
+    let id = "close-reopen".to_owned();
+    data.save_new_session(&session(
+        &id,
+        workspace.cwd.to_str().unwrap(),
+        &workspace,
+        frozen("close"),
+    ))
+    .await
+    .unwrap();
+    data.mark_session_closing(&id).await.unwrap();
+    data.mark_session_closing(&id).await.unwrap();
+    assert_eq!(
+        data.close_settlement(&id).await.unwrap(),
+        CloseSettlement::Pending
+    );
+    store.close().await;
+
+    let reopened = SqliteThreadStore::new(directory.path().join("threads.db"))
+        .await
+        .unwrap();
+    let successor = SqliteSessionData::new(Arc::clone(&reopened.database));
+    assert_eq!(
+        successor.close_settlement(&id).await.unwrap(),
+        CloseSettlement::Pending
+    );
+    successor.finish_close(&id).await.unwrap();
+    assert_eq!(
+        successor.close_settlement(&id).await.unwrap(),
+        CloseSettlement::Finished
+    );
+    assert!(!successor.is_session_closing(&id).await.unwrap());
+    assert!(successor.finish_close(&id).await.is_err());
+    assert_eq!(
+        successor
+            .close_settlement(&"missing".to_owned())
+            .await
+            .unwrap(),
+        CloseSettlement::Unknown
+    );
+    assert!(successor.finish_close(&"missing".to_owned()).await.is_err());
+    assert!(successor.load_snapshot(&id).await.is_ok());
+}
+
+#[tokio::test]
+async fn frozen_commit_is_write_once_and_bound_draft_revocation_is_guarded() {
+    use peri_acp_types::session_resources::NewSessionDraft;
+
+    let (store, data, directory) = database().await;
+    let workspace = workspace(&store, directory.path()).await;
+    let target = session(
+        "bound-draft",
+        workspace.cwd.to_str().unwrap(),
+        &workspace,
+        frozen("ignored"),
+    );
+    let id = target.thread_id.clone();
+    data.save_new_session_draft(&NewSessionDraft {
+        thread_id: target.thread_id,
+        created_at: target.created_at,
+        meta: target.meta,
+        binding: target.binding,
+    })
+    .await
+    .unwrap();
+    data.commit_frozen(&id, &frozen("winner")).await.unwrap();
+    assert!(data
+        .commit_frozen(&id, &frozen("replacement"))
+        .await
+        .is_err());
+    assert!(data.revoke_unpublished_draft(&id).await.is_err());
+    assert_eq!(
+        data.load_snapshot(&id).await.unwrap().frozen,
+        FrozenState::Present(frozen("winner"))
+    );
+    data.revoke_unpublished_session(&id).await.unwrap();
+    assert!(!data.session_exists(&id).await.unwrap());
+}

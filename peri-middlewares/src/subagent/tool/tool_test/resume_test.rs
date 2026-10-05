@@ -78,7 +78,6 @@ async fn test_resume_thread_id_ignores_fork_field() {
         .await
         .with_session_resources(store.facade())
         .with_parent_thread_id(parent_id.clone())
-        .with_execution_owner(store.execution_owner())
         .with_parent_session(parent.clone());
     let result = t
         .invoke(
@@ -130,7 +129,6 @@ async fn test_resume_thread_id_ignores_subagent_type_field() {
         .await
         .with_session_resources(store.facade())
         .with_parent_thread_id(parent_id.clone())
-        .with_execution_owner(store.execution_owner())
         .with_parent_session(parent.clone());
     let result = t
         .invoke(
@@ -169,7 +167,6 @@ async fn test_resume_thread_id_not_found() {
     let t = make_subagent_tool(vec![])
         .with_session_resources(fixture.facade())
         .with_parent_thread_id(parent_id.clone())
-        .with_execution_owner(fixture.execution_owner())
         .with_parent_session(parent.clone());
     let result = t
         .invoke(
@@ -212,7 +209,6 @@ async fn test_resume_thread_id_active_rejected() {
     let t = make_subagent_tool(vec![])
         .with_session_resources(store.facade())
         .with_parent_thread_id(parent_id.clone())
-        .with_execution_owner(store.execution_owner())
         .with_parent_session(parent.clone());
     let result = t
         .invoke(
@@ -275,7 +271,6 @@ async fn test_resume_thread_id_parent_mismatch_is_rejected_by_root_ownership() {
         .await
         .with_session_resources(store.facade())
         .with_parent_thread_id(parent_id.clone())
-        .with_execution_owner(store.execution_owner())
         .with_parent_session(parent);
     let error = t
         .invoke(
@@ -329,7 +324,6 @@ async fn test_resume_thread_id_background_combination() {
     let t = make_subagent_tool(vec![])
         .with_session_resources(store.facade())
         .with_parent_thread_id(parent_id.clone())
-        .with_execution_owner(store.execution_owner())
         .with_parent_session(parent.clone())
         .with_task_manager(Arc::clone(&registry))
         .with_bg_event_sender(bg_tx);
@@ -412,7 +406,6 @@ async fn test_resume_thread_id_success_replays_and_completes() {
         .await
         .with_session_resources(store.facade())
         .with_parent_thread_id(parent_id.clone())
-        .with_execution_owner(store.execution_owner())
         .with_parent_session(parent.clone());
     let result = t
         .invoke(
@@ -506,7 +499,6 @@ async fn test_resume_thread_id_fork_title_uses_parent_tools_and_200_iterations()
     )
     .with_session_resources(store.facade())
     .with_parent_thread_id(parent_id.clone())
-    .with_execution_owner(store.execution_owner())
     .with_parent_session(parent.clone());
 
     let result = t
@@ -606,7 +598,6 @@ async fn test_resume_thread_id_agent_def_refilters_tools() {
     )
     .with_session_resources(store.facade())
     .with_parent_thread_id(parent_id.clone())
-    .with_execution_owner(store.execution_owner())
     .with_parent_session(parent.clone());
     let t = with_agent_face(t, dir.path()).await;
 
@@ -662,7 +653,6 @@ async fn test_resume_trimmed_id_wins_over_mcp_fork_and_invalid_model() {
         .await
         .with_session_resources(store.facade())
         .with_parent_thread_id(parent_id.clone())
-        .with_execution_owner(store.execution_owner())
         .with_parent_session(parent.clone());
     let result = tool
         .invoke(

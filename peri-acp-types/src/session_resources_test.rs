@@ -14,7 +14,6 @@ fn access_mode_capabilities_and_execution_are_independent_facts() {
         access: AccessMode::ReadOnly,
         capabilities: DataCapabilities::Complete,
         execution: Some(ExecutionAvailability::ReadOnlyStore),
-        unreleased_owner: None,
     };
     assert_eq!(read_only_remote.access, AccessMode::ReadOnly);
     assert_eq!(read_only_remote.capabilities, DataCapabilities::Complete);
@@ -23,18 +22,14 @@ fn access_mode_capabilities_and_execution_are_independent_facts() {
         Some(ExecutionAvailability::ReadOnlyStore)
     );
 
-    // 数据能力 Complete 不蕴含可执行：上次执行没有干净收尾时必须先按代际恢复。
-    let writable_but_dirty = SessionAvailability {
+    // 数据能力 Complete 不蕴含可执行：未决持久化必须先收敛。
+    let writable_but_pending = SessionAvailability {
         access: AccessMode::ReadWrite,
         capabilities: DataCapabilities::Complete,
-        execution: Some(ExecutionAvailability::Dirty(RecoveryRequiredDetails {
-            thread_id: thread_id(),
-            generation: 3,
-        })),
-        unreleased_owner: None,
+        execution: Some(ExecutionAvailability::PersistencePending),
     };
     assert_ne!(
-        writable_but_dirty.execution,
+        writable_but_pending.execution,
         Some(ExecutionAvailability::Available)
     );
 
@@ -43,31 +38,8 @@ fn access_mode_capabilities_and_execution_are_independent_facts() {
         access: AccessMode::ReadWrite,
         capabilities: DataCapabilities::HistoryReadOnly,
         execution: None,
-        unreleased_owner: None,
     };
     assert_eq!(history_read_only.execution, None);
-}
-
-#[test]
-fn former_owner_unverified_read_only_reason_roundtrips() {
-    let reason = crate::workspace::ReadOnlyAdmission::FormerOwnerUnverified;
-    let wire = serde_json::to_value(&reason).unwrap();
-    assert_eq!(wire["kind"], "peri.formerOwnerUnverifiedV1");
-    assert_eq!(
-        serde_json::from_value::<crate::workspace::ReadOnlyAdmission>(wire).unwrap(),
-        reason
-    );
-}
-
-#[test]
-fn local_takeover_warning_roundtrips() {
-    let warning = crate::workspace::SessionRestoreWarning::FormerOwnerUnverified;
-    let wire = serde_json::to_value(warning).unwrap();
-    assert_eq!(wire, "formerOwnerUnverified");
-    assert_eq!(
-        serde_json::from_value::<crate::workspace::SessionRestoreWarning>(wire).unwrap(),
-        warning
-    );
 }
 
 #[test]
@@ -122,19 +94,15 @@ fn error_display_keeps_effect_but_leaks_no_identity() {
 
 #[test]
 fn workspace_failure_keeps_local_semantics_and_source() {
-    let error: SessionResourceError = WorkspaceError::RecoveryRequired(RecoveryRequiredDetails {
-        thread_id: thread_id(),
-        generation: 7,
-    })
-    .into();
+    let error: SessionResourceError = WorkspaceError::NeedsRelink.into();
 
     assert_eq!(error.effect(), MutationOutcome::NotApplied);
     assert!(matches!(
         error.workspace_error(),
-        Some(WorkspaceError::RecoveryRequired(details)) if details.generation == 7
+        Some(WorkspaceError::NeedsRelink)
     ));
     assert!(std::error::Error::source(&error).is_some());
-    assert!(error.to_string().contains("recovery is required"));
+    assert!(error.to_string().contains("session directory changed"));
 }
 
 #[test]
@@ -175,42 +143,4 @@ fn rewind_boundary_reports_its_target() {
     let id = MessageId::new();
     assert_eq!(RewindBoundary::KeepThrough(id).message_id(), id);
     assert_eq!(RewindBoundary::RemoveFrom(id).message_id(), id);
-}
-
-#[test]
-fn read_only_admission_keeps_degradation_and_blocking_separate() {
-    use crate::workspace::{ReadOnlyAdmission, RecoveryRequiredDetails, WorkspaceError};
-
-    // 只读存储：历史可按只读会话进入，「本节点给不出执行所有权」与既有原因同类。
-    let read_only = SessionResourceError::new(SessionResourceErrorKind::ReadOnlyStore);
-    assert_eq!(
-        read_only.read_only_admission(),
-        Some(ReadOnlyAdmission::ExecutionLeaseRequired)
-    );
-
-    // 本机 workspace 原因原样保留。
-    let busy = SessionResourceError::from(WorkspaceError::ExecutionBusy);
-    assert_eq!(
-        busy.read_only_admission(),
-        Some(ReadOnlyAdmission::ExecutionBusy)
-    );
-    let dirty_details = RecoveryRequiredDetails {
-        thread_id: thread_id(),
-        generation: 7,
-    };
-    let dirty = SessionResourceError::from(WorkspaceError::RecoveryRequired(dirty_details.clone()));
-    assert_eq!(
-        dirty.read_only_admission(),
-        Some(ReadOnlyAdmission::RecoveryRequired(dirty_details))
-    );
-
-    // 连会话都没有的登记失败不降级。
-    let registration = SessionResourceError::from(WorkspaceError::ReadOnlyStore);
-    assert_eq!(registration.read_only_admission(), None);
-    assert!(registration.workspace_error().is_some());
-
-    // 未证明终态的写入不进入只读降级，也不能被自动 reset 分支吞掉。
-    let uncertain = SessionResourceError::persistence_uncertain(Some(thread_id()));
-    assert_eq!(uncertain.read_only_admission(), None);
-    assert!(uncertain.is_persistence_uncertain());
 }

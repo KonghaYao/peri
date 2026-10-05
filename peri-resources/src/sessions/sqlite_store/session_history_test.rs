@@ -440,7 +440,7 @@ async fn test_close_stops_writes_and_keeps_history_readable() {
 }
 
 #[tokio::test]
-async fn test_runtime_owner_restart_preserves_canonical_snapshot_and_history() {
+async fn test_restart_preserves_canonical_snapshot_and_history() {
     let (_store, data, directory) = database().await;
     let store = SqliteThreadStore::new(directory.path().join("threads.db"))
         .await
@@ -448,10 +448,6 @@ async fn test_runtime_owner_restart_preserves_canonical_snapshot_and_history() {
     let workspace = workspace(&store, directory.path()).await;
     let cwd = workspace.cwd.to_string_lossy().into_owned();
     data.save_new_session(&session("s-dirty", &cwd, &workspace, frozen("dirty")))
-        .await
-        .unwrap();
-    let lease = store
-        .acquire_execution_lease(&"s-dirty".to_owned())
         .await
         .unwrap();
     store
@@ -462,15 +458,10 @@ async fn test_runtime_owner_restart_preserves_canonical_snapshot_and_history() {
         .await
         .unwrap();
     let before = data.load_snapshot(&"s-dirty".to_owned()).await.unwrap();
-    drop(lease);
     drop(store);
     assert!(data.load_snapshot(&"s-dirty".to_owned()).await.is_ok());
 
     let reopened = SqliteThreadStore::new(directory.path().join("threads.db"))
-        .await
-        .unwrap();
-    let next = reopened
-        .acquire_execution_lease(&"s-dirty".to_owned())
         .await
         .unwrap();
     let after = data.load_snapshot(&"s-dirty".to_owned()).await.unwrap();
@@ -495,5 +486,4 @@ async fn test_runtime_owner_restart_preserves_canonical_snapshot_and_history() {
             .len(),
         2
     );
-    next.mark_clean().await.unwrap();
 }

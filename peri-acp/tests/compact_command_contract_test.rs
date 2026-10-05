@@ -137,7 +137,7 @@ async fn test_compact_again_using_host_canonical_history() {
     );
     let workspace = resources.resolve_workspace(directory.path()).await.unwrap();
     let thread_id = uuid::Uuid::now_v7().to_string();
-    let lease = resources
+    resources
         .create_session(&NewSession {
             thread_id: thread_id.clone(),
             created_at: "2026-09-27T00:00:00Z".into(),
@@ -209,7 +209,6 @@ async fn test_compact_again_using_host_canonical_history() {
         .iter()
         .filter(|event| event.contains("compact_completed"))
         .count();
-    lease.mark_clean().await.unwrap();
     assert_eq!(
         second.feedback.as_ref().unwrap().level,
         FeedbackLevel::Info,

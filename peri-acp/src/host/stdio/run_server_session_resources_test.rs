@@ -22,19 +22,6 @@ async fn test_fork_registers_session_and_copies_history() {
     let source_payload = peri_acp_types::store::PersistedPayload::Message(source_message.clone());
     let source_thread_id = "fork-source-session".to_string();
     create_bound_thread_fixture(&cfg, &source_thread_id, tmp.path().to_str().unwrap()).await;
-    let workspace = cfg
-        .session_resources
-        .validate_bound_workspace(
-            &source_thread_id,
-            peri_acp_types::session_resources::BindingRecheck::Recorded,
-        )
-        .await
-        .unwrap();
-    let owner = cfg
-        .session_resources
-        .acquire_execution(&source_thread_id, &workspace)
-        .await
-        .unwrap();
     cfg.session_manager.ensure_session(
         &source_thread_id,
         std::fs::canonicalize(tmp.path()).unwrap().to_str().unwrap(),
@@ -56,7 +43,6 @@ async fn test_fork_registers_session_and_copies_history() {
                 .to_str()
                 .unwrap()
                 .to_owned(),
-            execution_owner: Some(owner),
             environment: None,
             closing: false,
             history: vec![source_message],
@@ -72,8 +58,6 @@ async fn test_fork_registers_session_and_copies_history() {
             continuation_epoch: 0,
             continuation_in_flight: false,
             continuation_mq_steering_pending: false,
-            // 会话创建方即 writer（§6；测试源 session 同样建立 lease）
-            lease: crate::host::lease::WriterLease::acquired("default"),
         },
     );
     let server_task = tokio::spawn(host::run_acp_server_with_sessions(

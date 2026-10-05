@@ -32,7 +32,7 @@ use restore::{identity_response, prepare_existing, response_identity};
 
 /// fork source 读取/保存失败 → ACP 错误。
 ///
-/// 门面失败保留领域分类（含只读准入与未决持久化载荷）；领域与 IO 失败按
+/// 门面失败保留领域分类（含访问权限与未决持久化状态）；领域与 IO 失败按
 /// workspace 语义上报，不把门面错误降级成「存储不可用」。
 fn fork_source_error(error: anyhow::Error) -> AcpError {
     match error.downcast::<peri_acp_types::session_resources::SessionResourceError>() {
@@ -148,7 +148,7 @@ pub(crate) async fn handle_new(
         .to_str()
         .ok_or_else(|| AcpError::new(-32602, "Execution directory is not UTF-8"))?
         .to_owned();
-    // 只读准备（lease 之前）：定格配置/插件/frozen，不创建 thread、不占 lease、
+    // 只读准备：定格配置/插件/frozen，不创建 thread、
     // 不启动 MCP/hooks，也不写任何会话数据或本机登记。new 路径只在这里准备
     // 一次，发布段消费同一个准备对象。
     let mut prepared =
@@ -159,7 +159,7 @@ pub(crate) async fn handle_new(
 }
 
 /// `session/new` 的发布段：消费**已定格**的准备输入，一次写出 meta/binding/frozen
-/// 并取得执行 owner，随后复核准入、装配环境、发布 live 状态。
+/// 随后复核准入、装配环境、发布 live 状态。
 ///
 /// 本函数不读配置、不加载插件、不重建 frozen：保存字节与 live 状态都取自调用方
 /// 给定的 `prepared`。测试以自己定格的准备对象直接驱动本函数，因此「保存字节 ==
@@ -173,7 +173,7 @@ pub(crate) async fn new_session_from_prepared(
 ) -> Result<Value, AcpError> {
     let resources = cfg.session_resources.clone();
     let cwd = prepared.cwd.clone();
-    // ── P1：草稿 + lease（frozen 暂空）──
+    // ── P1：草稿（frozen 暂空）──
     // 身份一次生成；「未发布创建」的 frozen 由 P5 一次性提交，因此内容准入（本次的
     // 准备产物）与发布之间不存在「保存了半份」的中间态。数据已保存但准入失败
     // （saved_but_not_admitted）原样上报，不谎称「确定未创建」。
@@ -238,7 +238,7 @@ pub(crate) async fn new_session_from_prepared(
     // ── P3：activate（资源准入开始）──
     // B3 口径写死为「P0–P5 发布前」：发布点（P6 的 `sessions.insert`）之前可以发生
     // 准备、装配、activate 与资源读取，**不含**工具执行、模型请求与 hook；此处提前
-    // activate 后会话仍不在 `sessions` 表里，`require_owner` 因此挡住任何执行。
+    // activate 后会话仍不在 `sessions` 表里，尚不可提交执行。
     if let Some(environment) = &environment {
         environment.activate();
     }
@@ -310,7 +310,7 @@ pub(crate) async fn new_session_from_prepared(
     // ── P5：commit_frozen（一次性 CAS）──
 
     // 失败时按效果结清纪律处理：先重读单条判据，只有确证未生效才撤销；判据不可得
-    // 时保留草稿与 dirty 代际（由 `RecoveryRequired` 显式恢复），绝不删除。
+    // 时保留草稿及未决持久化事实，绝不删除。
     let frozen_bytes = FrozenSnapshotBytes::new(frozen_encoded);
     if let Err(error) = initialization.commit_frozen(&frozen_bytes).await {
         match committed_frozen_state(&resources, &session_id).await {
@@ -359,7 +359,7 @@ pub(crate) async fn new_session_from_prepared(
         create_session_workflow_middleware(cfg, &cwd, &session_id, &frozen_data);
 
     // ── P6：发布（`sessions.insert` 是唯一对外可见点）──
-    // 发布之后才可能有 prompt/执行（`require_owner` 只查这张表）；activate 已在 P3
+    // 发布之后才可能有 prompt/执行；activate 已在 P3
     // 完成，因此这里的两次动作之间没有 await，不存在「已可见但资源未起」的窗口。
     sessions.insert(
         session_id.clone(),
@@ -367,7 +367,6 @@ pub(crate) async fn new_session_from_prepared(
             session_id: session_id.clone(),
             thread_id: thread_id.clone(),
             cwd: cwd.clone(),
-            execution_owner: Some(initialization.execution_lease()),
             environment: environment.clone(),
             closing: false,
             history: Vec::new(),
@@ -383,7 +382,6 @@ pub(crate) async fn new_session_from_prepared(
             continuation_epoch: 0,
             continuation_in_flight: false,
             continuation_mq_steering_pending: false,
-            lease: super::super::lease::WriterLease::acquired("default"),
         },
     );
 
@@ -407,8 +405,6 @@ pub(crate) async fn new_session_from_prepared(
     identity_response(
         serde_json::to_value(resp).map_err(|e| AcpError::new(-32603, e.to_string()))?,
         identity,
-        None,
-        None,
     )
 }
 
@@ -439,7 +435,7 @@ async fn committed_frozen_state(
 /// 发布前失败的补偿：环境先排空，**排空确认之后**才撤销未发布的创建。
 ///
 /// 顺序不变量（§5.1）：`abandon` 必须在环境 drain 完成之后——否则资源持有的是已删除
-/// 会话的 lease/handle；排空未确认时不撤销（草稿与 dirty 代际保留，由显式恢复收敛）。
+/// 会话的资源句柄；排空未确认时不撤销（草稿与未决持久化保留）。
 pub(super) async fn drain_and_abandon(
     environment: Option<&Arc<super::super::workspace::SessionEnvironment>>,
     initialization: &Arc<dyn SessionInitialization>,
@@ -596,7 +592,7 @@ pub(super) fn handle_bg_tasks(params: &Value, cfg: &AcpServerConfig) -> Result<V
 
 #[path = "session_close.rs"]
 mod close;
-use close::close_owned_session;
+use close::close_session;
 
 pub(crate) async fn handle_close(
     params: &Value,
@@ -607,7 +603,7 @@ pub(crate) async fn handle_close(
         .get("sessionId")
         .and_then(Value::as_str)
         .ok_or_else(|| AcpError::new(-32602, "missing sessionId"))?;
-    close_owned_session(cfg, sessions, id, false).await?;
+    close_session(cfg, sessions, id, false).await?;
     serde_json::to_value(CloseSessionResponse::new())
         .map_err(super::super::workspace::workspace_error)
 }
@@ -621,7 +617,7 @@ pub(crate) async fn handle_delete(
         .get("sessionId")
         .and_then(Value::as_str)
         .ok_or_else(|| AcpError::new(-32602, "missing sessionId"))?;
-    close_owned_session(cfg, sessions, id, true).await?;
+    close_session(cfg, sessions, id, true).await?;
     serde_json::to_value(DeleteSessionResponse::new())
         .map_err(super::super::workspace::workspace_error)
 }
@@ -638,9 +634,8 @@ pub(crate) async fn handle_fork(
         .ok_or_else(|| AcpError::new(-32602, "missing sessionId"))?;
     // prepare_existing 已在本准入里完整复核过源会话，这里只复核已记录证据。
     prepare_existing(params, cfg, sessions).await?;
-    let (workspace, _source_owner) = super::super::workspace::reacquire_for_load(
+    let workspace = super::super::workspace::reassert_expected(
         cfg,
-        sessions,
         source_id,
         params.get("cwd").and_then(Value::as_str),
     )
@@ -687,7 +682,7 @@ pub(crate) async fn handle_fork(
         .frozen
         .clone()
         .ok_or_else(|| AcpError::new(-32603, "Fork frozen snapshot is missing"))?;
-    let (new_thread_id, copied_payloads, owner) = dispatch::fork_bound_session(
+    let (new_thread_id, copied_payloads) = dispatch::fork_bound_session(
         &cfg.session_resources,
         &fork_source,
         &workspace,
@@ -700,7 +695,7 @@ pub(crate) async fn handle_fork(
         Err(error) => {
             // identity 装配失败：环境尚未建立，撤销本次未发布的创建即可。
             cfg.session_resources
-                .abandon_initialization(&new_thread_id, &owner)
+                .abandon_initialization(&new_thread_id)
                 .await
                 .map_err(super::super::workspace::resource_error)?;
             return Err(error);
@@ -717,7 +712,7 @@ pub(crate) async fn handle_fork(
         Err(error) => {
             // 装配失败时环境尚未建立（没有对外资源需要排空）：撤销未发布的创建。
             cfg.session_resources
-                .abandon_initialization(&new_thread_id, &owner)
+                .abandon_initialization(&new_thread_id)
                 .await
                 .map_err(super::super::workspace::resource_error)?;
             return Err(error);
@@ -741,7 +736,6 @@ pub(crate) async fn handle_fork(
             session_id: new_session_id.clone(),
             thread_id: new_thread_id.clone(),
             cwd: cwd.to_string(),
-            execution_owner: Some(owner),
             environment: environment.clone(),
             closing: false,
             history: copied_payloads
@@ -760,7 +754,6 @@ pub(crate) async fn handle_fork(
             continuation_epoch: 0,
             continuation_in_flight: false,
             continuation_mq_steering_pending: false,
-            lease: super::super::lease::WriterLease::acquired("default"),
         },
     );
 
@@ -784,8 +777,6 @@ pub(crate) async fn handle_fork(
     identity_response(
         serde_json::to_value(resp).map_err(super::super::workspace::workspace_error)?,
         identity,
-        None,
-        None,
     )
 }
 

@@ -120,7 +120,7 @@ async fn schema_v11_upgrade_removes_only_retired_state_and_keeps_config_and_hist
         .fetch_one(&mut *connection)
         .await
         .unwrap();
-    assert_eq!(version, 13);
+    assert_eq!(version, super::schema::CURRENT_SCHEMA_VERSION);
     let (retired,): (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM sqlite_master WHERE name IN ('thread_goals', 'execution_runs')",
     )
@@ -434,16 +434,11 @@ async fn schema_v11_cleans_prior_development_eleven_and_reopens_without_runtime_
                 .fetch_one(&mut *connection)
                 .await
                 .unwrap();
-            assert_eq!(version, 13);
+            assert_eq!(version, super::schema::CURRENT_SCHEMA_VERSION);
             let (retired,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM sqlite_schema WHERE name IN ('execution_runs', 'idx_execution_generation')")
                 .fetch_one(&mut *connection).await.unwrap();
             assert_eq!(retired, 0);
             drop(connection);
-            let lease = store
-                .acquire_execution_lease(&"older".to_owned())
-                .await
-                .unwrap();
-            lease.mark_clean().await.unwrap();
             let (retired,): (i64,) =
                 sqlx::query_as("SELECT COUNT(*) FROM sqlite_schema WHERE name = 'execution_runs'")
                     .fetch_one(&store.database.pool)

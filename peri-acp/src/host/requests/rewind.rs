@@ -85,16 +85,8 @@ pub(super) async fn handle_rewind(
         let s = sessions
             .get(&session_id)
             .ok_or_else(|| AcpError::new(-32602, "session not found"))?;
-        if s.closing
-            || s.execution_owner
-                .as_ref()
-                .and_then(|owner| owner.owner_token())
-                .is_none()
-        {
-            return Err(AcpError::new(
-                -32010,
-                "rewind requires an active session execution owner",
-            ));
+        if s.closing {
+            return Err(AcpError::new(-32010, "Session is closing"));
         }
         let local = s
             .environment

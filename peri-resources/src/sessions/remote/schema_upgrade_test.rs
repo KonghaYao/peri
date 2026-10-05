@@ -5,7 +5,6 @@ use std::sync::{
 
 use async_trait::async_trait;
 use peri_acp_types::session_resources::{CloseSettlement, SessionResourceErrorKind};
-use peri_acp_types::workspace::ExecutionOwnerToken;
 use sqlx::{
     sqlite::{SqliteArguments, SqlitePoolOptions, SqliteRow},
     Connection, Row, Sqlite, SqlitePool, TypeInfo, ValueRef,
@@ -14,20 +13,109 @@ use turso_serverless::{Error as SdkError, Value};
 
 use super::connection::RemoteTransport;
 use super::generation::ConnectionGate;
-use super::ledger::{OperationId, OperationIdentity, CREATE_OP_LEDGER_SQL};
-use super::mutation::{MutationOutcome, QualifiedMutation, RemoteStore, StoreAccess};
+use super::mutation::{RemoteStore, StoreAccess};
 use super::schema::{self, StoreIdentityRead, StoreSnapshot};
 use super::schema_upgrade;
 use super::schema_v12_upgrade;
 use super::session_data::{open_step, OpenStep};
 use super::sql::StatementSpec;
 use crate::sessions::{
-    canonical::{
-        CREATE_SESSION_CLOSE_INTENTS_TABLE_SQL, CREATE_SESSION_EXECUTION_OWNERS_TABLE_SQL,
-        CREATE_TABLES,
-    },
+    canonical::CREATE_TABLES,
     schema_cleanup::{LEGACY_EXECUTION_SQL, LEGACY_GOALS_SQL},
 };
+
+#[tokio::test]
+async fn remote_v13_upgrade_drops_owner_tables_and_preserves_session_facts() {
+    let fixture = Fixture::new().await;
+    let store = fixture.store(StoreAccess::ReadWrite);
+    schema_upgrade::upgrade(&store, &fixture.snapshot)
+        .await
+        .unwrap();
+    let pool = &fixture.transport.pool;
+    sqlx::raw_sql(
+        "UPDATE peri_store_meta SET schema_version = 13;
+        CREATE TABLE session_execution_owners(root_id TEXT PRIMARY KEY REFERENCES threads(id), epoch INTEGER NOT NULL, nonce TEXT NOT NULL, expires_at_unix INTEGER NOT NULL, released INTEGER NOT NULL);
+        CREATE TABLE session_execution_workspace_descriptors(root_id TEXT PRIMARY KEY REFERENCES session_execution_owners(root_id), owner_epoch INTEGER NOT NULL, endpoint TEXT NOT NULL, key_identity TEXT NOT NULL, agent_generation_id TEXT NOT NULL, unsupported_async_owners INTEGER NOT NULL);
+        INSERT INTO session_execution_owners VALUES ('session', 7, 'retired', 0, 0);
+        INSERT INTO session_execution_workspace_descriptors VALUES ('session', 7, 'retired', 'retired', 'retired', 0);
+        INSERT INTO session_close_intents VALUES ('session', 'now')",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    let StoreIdentityRead::Present(snapshot) = store.read_identity().await.unwrap() else {
+        panic!("missing v13 identity")
+    };
+    assert!(matches!(
+        open_step(
+            StoreIdentityRead::Present(snapshot.clone()),
+            StoreAccess::ReadWrite
+        )
+        .unwrap(),
+        OpenStep::Upgrade(_)
+    ));
+    let before: (String, String, String) = sqlx::query_as("SELECT t.frozen_context,m.content,m.projection FROM threads t JOIN messages m ON m.thread_id=t.id WHERE t.id=?1")
+        .bind("session").fetch_one(pool).await.unwrap();
+    schema_upgrade::upgrade(&store, &snapshot).await.unwrap();
+    assert_eq!(fixture.version().await, 14);
+    assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM sqlite_master WHERE name IN ('session_execution_owners','session_execution_workspace_descriptors')")
+        .fetch_one(pool).await.unwrap(), 0);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM session_close_intents WHERE thread_id=?1"
+        )
+        .bind("session")
+        .fetch_one(pool)
+        .await
+        .unwrap(),
+        1
+    );
+    let after: (String, String, String) = sqlx::query_as("SELECT t.frozen_context,m.content,m.projection FROM threads t JOIN messages m ON m.thread_id=t.id WHERE t.id=?1")
+        .bind("session").fetch_one(pool).await.unwrap();
+    assert_eq!(before, after);
+}
+
+#[tokio::test]
+async fn remote_v13_owner_removal_respects_read_only_and_reports_lost_commit() {
+    let fixture = Fixture::new().await;
+    let writable = fixture.store(StoreAccess::ReadWrite);
+    schema_upgrade::upgrade(&writable, &fixture.snapshot)
+        .await
+        .unwrap();
+    sqlx::raw_sql(
+        "UPDATE peri_store_meta SET schema_version = 13;
+        CREATE TABLE session_execution_owners(root_id TEXT PRIMARY KEY)",
+    )
+    .execute(&fixture.transport.pool)
+    .await
+    .unwrap();
+    let StoreIdentityRead::Present(snapshot) = writable.read_identity().await.unwrap() else {
+        panic!("missing identity")
+    };
+    let read_only = fixture.store(StoreAccess::ReadOnly);
+    let error = schema_upgrade::upgrade(&read_only, &snapshot)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error.kind(),
+        SessionResourceErrorKind::ReadOnlyStore
+    ));
+    assert_eq!(fixture.version().await, 13);
+    fixture.transport.drop_reply.store(true, Ordering::SeqCst);
+    assert!(schema_upgrade::upgrade(&writable, &snapshot)
+        .await
+        .unwrap_err()
+        .is_persistence_uncertain());
+    assert_eq!(fixture.version().await, 14);
+    assert!(matches!(
+        open_step(
+            writable.read_identity().await.unwrap(),
+            StoreAccess::ReadWrite
+        )
+        .unwrap(),
+        OpenStep::Existing(_)
+    ));
+}
 
 struct SqliteTransport {
     pool: SqlitePool,
@@ -429,7 +517,7 @@ async fn remote_schema_upgrade_preserves_identity_ledger_config_and_rowid_histor
     schema_upgrade::upgrade(&store, &fixture.snapshot)
         .await
         .unwrap();
-    assert_eq!(fixture.version().await, 13);
+    assert_eq!(fixture.version().await, 14);
     let after: Vec<(String, String)> = sqlx::query_as(retained_sql)
         .fetch_all(&fixture.transport.pool)
         .await
@@ -518,7 +606,7 @@ async fn remote_schema_upgrade_completes_an_identity_only_initialization_without
     schema_upgrade::upgrade(&fixture.store(StoreAccess::ReadWrite), &fixture.snapshot)
         .await
         .unwrap();
-    assert_eq!(fixture.version().await, 13);
+    assert_eq!(fixture.version().await, 14);
     let (identity,): (String,) = sqlx::query_as("SELECT store_id FROM peri_store_meta")
         .fetch_one(&fixture.transport.pool)
         .await
@@ -545,7 +633,7 @@ async fn remote_schema_upgrade_failed_drop_rolls_back_goals_columns_and_version(
     schema_upgrade::upgrade(&fixture.store(StoreAccess::ReadWrite), &fixture.snapshot)
         .await
         .unwrap();
-    assert_eq!(fixture.version().await, 13);
+    assert_eq!(fixture.version().await, 14);
 }
 
 #[tokio::test]
@@ -652,7 +740,7 @@ async fn remote_schema_upgrade_removes_recognized_execution_table_but_keeps_ledg
     schema_upgrade::upgrade(&fixture.store(StoreAccess::ReadWrite), &fixture.snapshot)
         .await
         .unwrap();
-    assert_eq!(fixture.version().await, 13);
+    assert_eq!(fixture.version().await, 14);
     let (retired,): (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM sqlite_schema WHERE name IN ('execution_runs', 'thread_goals')",
     )
@@ -716,158 +804,4 @@ async fn remote_schema_upgrade_rollback_restores_execution_rows_and_version() {
 // Full remote application behavior is tested with the same SQL transport fixture.
 mod full_remote_tests {
     include!("full_remote_test.rs");
-}
-
-#[tokio::test]
-async fn delayed_remote_mutation_cannot_commit_after_owner_takeover() {
-    let fixture = Fixture::new().await;
-    let pool = &fixture.transport.pool;
-    sqlx::query(CREATE_OP_LEDGER_SQL)
-        .execute(pool)
-        .await
-        .unwrap();
-    sqlx::query(CREATE_SESSION_EXECUTION_OWNERS_TABLE_SQL)
-        .execute(pool)
-        .await
-        .unwrap();
-    sqlx::query("CREATE TABLE observed(value TEXT NOT NULL)")
-        .execute(pool)
-        .await
-        .unwrap();
-    sqlx::query("INSERT INTO observed VALUES ('original')")
-        .execute(pool)
-        .await
-        .unwrap();
-    let ledger_before = sqlx::query_scalar::<_, i64>("SELECT count(*) FROM peri_op_ledger")
-        .fetch_one(pool)
-        .await
-        .unwrap();
-    let root = "session".to_owned();
-    let stale = ExecutionOwnerToken {
-        root_id: root.clone(),
-        epoch: 1,
-        nonce: "old".into(),
-    };
-    sqlx::query("INSERT INTO session_execution_owners VALUES (?1, 1, 'old', CAST(strftime('%s','now') AS INTEGER) + 30, 0)")
-        .bind(&root).execute(pool).await.unwrap();
-    // The old HTTP request was prepared while epoch 1 was live, but arrives
-    // only after the new owner has committed its CAS claim.
-    sqlx::query("UPDATE session_execution_owners SET epoch = 2, nonce = 'new' WHERE root_id = ?1")
-        .bind(&root)
-        .execute(pool)
-        .await
-        .unwrap();
-    let old_write = QualifiedMutation {
-        identity: OperationIdentity::new(OperationId::mint(&root), "write", &["old"]),
-        effects: vec![StatementSpec::new(
-            "UPDATE observed SET value = 'old'",
-            vec![],
-        )],
-    };
-    let store = fixture.store(StoreAccess::ReadWrite);
-    let (outcome, counts) = store
-        .apply_qualified_reporting_with_owner(&old_write, Some((&root, Some(&stale))))
-        .await
-        .unwrap();
-    assert!(matches!(
-        outcome,
-        MutationOutcome::NotApplied {
-            rejected_statement: Some(1),
-            ..
-        }
-    ));
-    assert!(counts.is_empty());
-    assert_eq!(
-        sqlx::query_scalar::<_, String>("SELECT value FROM observed")
-            .fetch_one(pool)
-            .await
-            .unwrap(),
-        "original"
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM peri_op_ledger")
-            .fetch_one(pool)
-            .await
-            .unwrap(),
-        ledger_before
-    );
-
-    let current = ExecutionOwnerToken {
-        root_id: root.clone(),
-        epoch: 2,
-        nonce: "new".into(),
-    };
-    let new_write = QualifiedMutation {
-        identity: OperationIdentity::new(OperationId::mint(&root), "write", &["new"]),
-        effects: vec![StatementSpec::new(
-            "UPDATE observed SET value = 'new'",
-            vec![],
-        )],
-    };
-    let (outcome, counts) = store
-        .apply_qualified_reporting_with_owner(&new_write, Some((&root, Some(&current))))
-        .await
-        .unwrap();
-    assert!(matches!(outcome, MutationOutcome::Applied { .. }));
-    assert_eq!(counts, vec![1]);
-    assert_eq!(
-        sqlx::query_scalar::<_, String>("SELECT value FROM observed")
-            .fetch_one(pool)
-            .await
-            .unwrap(),
-        "new"
-    );
-}
-
-#[tokio::test]
-async fn remote_close_settlement_distinguishes_exact_finish_from_takeover() {
-    let fixture = Fixture::new().await;
-    let pool = &fixture.transport.pool;
-    sqlx::query(CREATE_OP_LEDGER_SQL)
-        .execute(pool)
-        .await
-        .unwrap();
-    sqlx::query(CREATE_SESSION_EXECUTION_OWNERS_TABLE_SQL)
-        .execute(pool)
-        .await
-        .unwrap();
-    sqlx::query(CREATE_SESSION_CLOSE_INTENTS_TABLE_SQL)
-        .execute(pool)
-        .await
-        .unwrap();
-    let token = ExecutionOwnerToken {
-        root_id: "session".into(),
-        epoch: 1,
-        nonce: "owner".into(),
-    };
-    sqlx::query("INSERT INTO session_execution_owners VALUES ('session', 1, 'owner', CAST(strftime('%s','now') AS INTEGER) + 30, 0)")
-        .execute(pool).await.unwrap();
-    sqlx::query("INSERT INTO session_close_intents VALUES ('session', 'now')")
-        .execute(pool)
-        .await
-        .unwrap();
-    let store = fixture.store(StoreAccess::ReadWrite);
-    assert_eq!(
-        store.close_settlement(&token).await.unwrap(),
-        CloseSettlement::Pending
-    );
-    store
-        .apply_owner_batch(vec![
-            StatementSpec::bare(
-                "UPDATE session_execution_owners SET released = 1 WHERE root_id = 'session'",
-            ),
-            StatementSpec::bare("DELETE FROM session_close_intents WHERE thread_id = 'session'"),
-        ])
-        .await
-        .unwrap();
-    assert_eq!(
-        store.close_settlement(&token).await.unwrap(),
-        CloseSettlement::Finished
-    );
-    sqlx::query("UPDATE session_execution_owners SET epoch = 2, nonce = 'next', released = 0 WHERE root_id = 'session'")
-        .execute(pool).await.unwrap();
-    assert_eq!(
-        store.close_settlement(&token).await.unwrap(),
-        CloseSettlement::ChangedOwner
-    );
 }

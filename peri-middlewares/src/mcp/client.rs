@@ -24,6 +24,7 @@ mod rewind;
 mod service;
 mod status;
 mod subscription;
+mod task_scope_metadata;
 mod transport;
 mod types;
 
@@ -155,8 +156,6 @@ pub struct McpClientPool {
     >,
     pub(crate) task_scope_authority: peri_mcp_core::task_scope::TaskScopeAuthority,
     pub(crate) task_scope_tokens: parking_lot::RwLock<HashMap<String, String>>,
-    pub(crate) session_execution_tokens:
-        parking_lot::RwLock<HashMap<String, peri_acp_types::workspace::ExecutionOwnerToken>>,
     /// 跨进程的 MCP Resource Cache；是否写入由响应 scope 与安全上下文共同决定。
     pub(crate) resource_cache: super::resource_cache::McpResourceCache,
     /// 进程启动时冻结的 deployment capability profile；初始连接和重连复用。
@@ -246,7 +245,6 @@ impl McpClientPool {
             session_tasks: parking_lot::RwLock::new(HashMap::new()),
             task_scope_authority: peri_mcp_core::task_scope::TaskScopeAuthority::new(),
             task_scope_tokens: parking_lot::RwLock::new(HashMap::new()),
-            session_execution_tokens: parking_lot::RwLock::new(HashMap::new()),
             resource_cache: super::resource_cache::McpResourceCache::new(),
             capability_profile,
             app_binding_leases: Arc::new(super::apps::McpAppBindingLeaseRegistry::default()),
@@ -394,25 +392,6 @@ impl McpClientPool {
                 _ => true,
             }
         }))
-    }
-
-    /// A dynamic third-party MCP can create remote Tasks. Persist that fact
-    /// before its load operation can connect or expose tools.
-    pub async fn mark_unsupported_async_task_owner(
-        &self,
-        session_id: &str,
-        resources: &dyn peri_acp_types::session_resources::SessionResources,
-    ) -> Result<(), String> {
-        let token = self
-            .session_execution_tokens
-            .read()
-            .get(session_id)
-            .cloned()
-            .ok_or_else(|| "Store execution owner token is unavailable".to_owned())?;
-        resources
-            .mark_unsupported_async_owner(&token)
-            .await
-            .map_err(|error| format!("async owner catalog update failed: {error}"))
     }
 
     pub(super) fn bind_cache_policy(&self, policy: McpCachePolicy) -> std::io::Result<()> {

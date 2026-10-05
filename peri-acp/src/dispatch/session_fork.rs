@@ -2,7 +2,7 @@
 //!
 //! 存储访问经会话资源门面（ARC-BOUNDARY-001 方向）：ACP 不逐条写 flags、不拼
 //! create/append/flags 分步序列，也没有「复制失败再删除新 thread」的存储补偿——
-//! 目标快照由 [`SessionResources::save_fork`] 一次保存并返回目标 root owner。
+//! 目标快照由 [`SessionResources::save_fork`] 一次保存。
 //! 未发布创建的撤销由调用方经 `abandon_initialization` 承担。
 
 use std::collections::{HashMap, HashSet};
@@ -17,7 +17,7 @@ use peri_acp_types::session_resources::{
 use peri_acp_types::store::history::remap_fork_history;
 use peri_acp_types::store::{MessageFlags, PersistedPayload};
 use peri_acp_types::thread::{CancelPolicy, ThreadId};
-use peri_acp_types::workspace::{ResolvedWorkspace, SessionBinding, SessionExecutionLease};
+use peri_acp_types::workspace::{ResolvedWorkspace, SessionBinding};
 
 /// fork source 的一致快照：payload/flags/binding/frozen 同一时刻读出。
 ///
@@ -54,8 +54,7 @@ pub(crate) async fn load_fork_source(
     })
 }
 
-/// 一次保存 fork 目标：纯 ID 映射在前，门面保存 meta/binding/frozen/payload/flags
-/// 并返回目标 root owner。
+/// 一次保存 fork 目标：纯 ID 映射在前，门面保存 meta/binding/frozen/payload/flags。
 ///
 /// 目标复用 source 的 binding 与冻结字节；`created_at` 与目标 identity 由构建层
 /// 生成一次（重试不重建）。
@@ -64,11 +63,7 @@ pub(crate) async fn fork_bound_session(
     source: &ForkSource,
     workspace: &ResolvedWorkspace,
     created_at: String,
-) -> Result<(
-    String,
-    Vec<PersistedPayload>,
-    Arc<dyn SessionExecutionLease>,
-)> {
+) -> Result<(String, Vec<PersistedPayload>)> {
     let cwd = workspace
         .cwd
         .to_str()
@@ -78,7 +73,7 @@ pub(crate) async fn fork_bound_session(
     // 先做纯 ID 重映射（adapter 不重复执行 fork 算法）。
     let forked = remap_fork_history(&source.payloads, &source.flags, MessageId::new);
     let target_id = uuid::Uuid::now_v7().to_string();
-    let owner = resources
+    resources
         .save_fork(&ForkSnapshot {
             target: NewSession {
                 thread_id: target_id.clone(),
@@ -105,7 +100,7 @@ pub(crate) async fn fork_bound_session(
         msg_count = forked.payloads.len(),
         "Session forked"
     );
-    Ok((target_id, forked.payloads, owner))
+    Ok((target_id, forked.payloads))
 }
 
 /// 已绑定 source 才可 fork：legacy/外来/缺绑定都不是「可复制的执行身份」。

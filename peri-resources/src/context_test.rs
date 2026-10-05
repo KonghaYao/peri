@@ -222,18 +222,14 @@ fn git_repository() -> tempfile::TempDir {
     directory
 }
 
-/// [P0] 迁移桥与门面共享本地租约，但 Store 代际只由门面认领。
-///
-/// 裸桥只登记进程内句柄；会话写入还需要持久 Store owner token。
 #[tokio::test]
-async fn test_bridge_lease_is_visible_to_shared_facade() {
+async fn shared_facade_writes_without_execution_claim() {
     let repo = git_repository();
     let db_dir = tempdir().unwrap();
     let (store, facade) =
         crate::sessions::open_store_and_facade_for_tests(db_dir.path().join("threads.db"))
             .await
             .unwrap();
-
     let workspace = store.resolve_workspace(repo.path()).await.unwrap();
     let thread = store
         .create_bound_thread(
@@ -245,20 +241,6 @@ async fn test_bridge_lease_is_visible_to_shared_facade() {
         )
         .await
         .unwrap();
-    let lease = store.acquire_execution_lease(&thread).await.unwrap();
-
-    assert!(facade
-        .append_history(
-            &thread,
-            &[PersistedPayload::Message(BaseMessage::human(
-                "before Store claim"
-            ),)]
-        )
-        .await
-        .is_err());
-    let claimed = facade.acquire_execution(&thread, &workspace).await.unwrap();
-    assert_eq!(claimed.owner_token(), lease.owner_token());
-
     facade
         .append_history(
             &thread,
@@ -267,12 +249,10 @@ async fn test_bridge_lease_is_visible_to_shared_facade() {
             ))],
         )
         .await
-        .expect("门面取得 Store 代际后才能写入");
-
+        .unwrap();
     let snapshot = facade.load_session_snapshot(&thread).await.unwrap();
     assert_eq!(snapshot.payloads.len(), 1);
     assert_eq!(snapshot.meta.id, thread);
-    drop(lease);
 }
 
 /// 部署所有权交付：工厂只在这里交出「业务句柄 + 部署关闭权」。

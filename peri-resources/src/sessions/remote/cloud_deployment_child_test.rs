@@ -4,7 +4,7 @@
 //! 它们直接返回，因此只有被父测试拉起时才工作；断言与安全规则见父模块文档。
 //!
 //! - 写入：真实部署入口 → 创建 → 追加/排空 → compact → fork → child → 标题 A→B→A → close；
-//! - 冷恢复：同一 HOME 的**新进程** → 未决收敛 → 新 runtime owner → rewind → 删除；
+//! - 冷恢复：同一 HOME 的**新进程** → 未决收敛 → workspace 证据复核 → rewind → 删除；
 //! - 只读：`fresh`（全新 HOME，本机无库）与 `registered`（沿用写入期 HOME）两种本机状态。
 
 use std::collections::BTreeMap;
@@ -119,8 +119,8 @@ async fn write_flow(context: &ChildContext, target: &CloudTarget) -> Result<Vec<
         .map_err(failure)?;
     let root = context.thread(ROOT_SUFFIX);
 
-    // ① 远端 durable 保存 + 本机执行准入。
-    let lease = facade
+    // ① 远端 durable 保存 + workspace 绑定检查。
+    facade
         .create_session(&session_input(context, &root, &workspace, None))
         .await
         .map_err(failure)?;
@@ -185,7 +185,7 @@ async fn write_flow(context: &ChildContext, target: &CloudTarget) -> Result<Vec<
         ),
         "reusing source message ids in a fork must be refused, not silently dropped",
     )?;
-    let fork_lease = facade
+    facade
         .save_fork(&ForkSnapshot {
             target: session_input(context, &fork, &workspace, None),
             source_id: root.clone(),
@@ -195,7 +195,7 @@ async fn write_flow(context: &ChildContext, target: &CloudTarget) -> Result<Vec<
         .await
         .map_err(failure)?;
 
-    // ⑤ child：继承区 + 父子关系，沿用 root owner 与 root 的 frozen 原文。
+    // ⑤ child：继承区 + 父子关系，沿用 root 关系与 root 的 frozen 原文。
     let child = context.thread(CHILD_SUFFIX);
     let root_frozen = frozen_of(&facade, &root).await?;
     check(
@@ -203,18 +203,15 @@ async fn write_flow(context: &ChildContext, target: &CloudTarget) -> Result<Vec<
         "the frozen snapshot must round-trip through the remote store",
     )?;
     facade
-        .save_child(
-            &peri_acp_types::session_resources::ChildSnapshot {
-                target: child_input(context, &child, &workspace, &root, root_frozen),
-                parent_id: root.clone(),
-                root_id: root.clone(),
-                inherited: InheritedContext {
-                    payloads: compacted,
-                    flags: std::collections::HashMap::new(),
-                },
+        .save_child(&peri_acp_types::session_resources::ChildSnapshot {
+            target: child_input(context, &child, &workspace, &root, root_frozen),
+            parent_id: root.clone(),
+            root_id: root.clone(),
+            inherited: InheritedContext {
+                payloads: compacted,
+                flags: std::collections::HashMap::new(),
             },
-            &lease,
-        )
+        })
         .await
         .map_err(failure)?;
     lines.push(format!(
@@ -252,7 +249,6 @@ async fn write_flow(context: &ChildContext, target: &CloudTarget) -> Result<Vec<
     )?;
 
     facade.close().await.map_err(failure)?;
-    drop((lease, fork_lease));
     Ok(lines)
 }
 
@@ -296,24 +292,23 @@ async fn recover_flow(context: &ChildContext, target: &CloudTarget) -> Result<Ve
         .map_err(failure)?;
     check(
         availability.execution == Some(ExecutionAvailability::Available),
-        "runtime ownership must be available in a newly opened process",
+        "workspace execution must be available in a newly opened process",
     )?;
     let before = facade.load_session_snapshot(&root).await.map_err(failure)?;
 
-    let workspace = facade
-        .resolve_workspace(&context.workspace)
-        .await
-        .map_err(failure)?;
-    let lease = facade
-        .acquire_execution(&root, &workspace)
+    facade
+        .validate_bound_workspace(
+            &root,
+            peri_acp_types::session_resources::BindingRecheck::Full,
+        )
         .await
         .map_err(failure)?;
     let after = facade.load_session_snapshot(&root).await.map_err(failure)?;
     check(
         after.binding == before.binding && after.frozen == before.frozen,
-        "acquiring runtime ownership must not change canonical binding or frozen bytes",
+        "validating workspace evidence must not change canonical binding or frozen bytes",
     )?;
-    lines.push("runtime_owner=acquired".to_owned());
+    lines.push("workspace_evidence=validated".to_owned());
 
     // ③ rewind：保留到第一条消息（显式边界），派生计数随之更新。
     let history = facade.load_session_history(&root).await.map_err(failure)?;
@@ -359,10 +354,6 @@ async fn recover_flow(context: &ChildContext, target: &CloudTarget) -> Result<Ve
     )?;
     lines.push("delete=applied".to_owned());
 
-    lease
-        .mark_clean()
-        .await
-        .map_err(|error| error.to_string())?;
     facade.close().await.map_err(failure)?;
     Ok(lines)
 }

@@ -20,8 +20,8 @@ pub(super) async fn upgrade(
     store: &RemoteStore,
     snapshot: &StoreSnapshot,
 ) -> SessionResourceResult<()> {
-    if snapshot.schema_version == 12 && snapshot.contract == schema::STORE_CONTRACT {
-        return super::schema_v13_upgrade::upgrade(store, snapshot).await;
+    if matches!(snapshot.schema_version, 12 | 13) && snapshot.contract == schema::STORE_CONTRACT {
+        return super::schema_v14_upgrade::upgrade(store, snapshot).await;
     }
     if snapshot.schema_version == 11 && snapshot.contract == "peri.session.store/v2" {
         super::schema_v12_upgrade::upgrade(store, snapshot).await?;
@@ -29,7 +29,7 @@ pub(super) async fn upgrade(
         else {
             return Err(invalid_schema());
         };
-        return super::schema_v13_upgrade::upgrade(store, &upgraded).await;
+        return super::schema_v14_upgrade::upgrade(store, &upgraded).await;
     }
     let results = store
         .read_batch(vec![
@@ -68,7 +68,7 @@ pub(super) async fn upgrade(
     let super::schema::StoreIdentityRead::Present(upgraded) = store.read_identity().await? else {
         return Err(invalid_schema());
     };
-    super::schema_v13_upgrade::upgrade(store, &upgraded).await
+    super::schema_v14_upgrade::upgrade(store, &upgraded).await
 }
 
 fn decode_columns(rows: &[Vec<Value>]) -> SessionResourceResult<Vec<ColumnShape>> {

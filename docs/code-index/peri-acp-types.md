@@ -21,10 +21,9 @@ typed schema、默认值、领域合并、scope/revision/explain/update 归
 
 | 我想做什么 | 主文件 | 入口/关键函数 | 关键逻辑 |
 | --- | --- | --- | --- |
-| 改项目、工作区与执行绑定协议 | `src/workspace.rs` + `src/store/mod.rs` + `src/peri_caps.rs` | `ProjectId`、`WorkspaceId`、`SessionBinding`、`ResolvedWorkspace`、`ThreadScope`、`ScopedThreadQuery`、`SessionExecutionLease`、`RecoveryRequiredDetails`、`WorkspaceErrorData`、`ReadOnlyAdmission`、`ResetDirtyRequest`、`ThreadStore::reset_dirty_execution`、`ThreadStore::{validate_session_binding,reassert_session_binding}`、`PeriCaps::session_recovery_v1` | 身份独立于路径；ThreadStore封装发现/验证/lease与SQL scope；`validate_session_binding` 是准入级复核（关系 + 关键文件对象 + 一次完整发现，一次准入只调用一次），`reassert_session_binding` 供准入内后续检查使用（同上但不启动外部进程）；Peri扩展经sessionWorkspaceV1显式协商，错误不得当空列表或legacy绑定；dirty 详情只携带精确 `(thread_id, generation)`，`WorkspaceErrorData`/`ResetDirtyRequest` 用 `deny_unknown_fields` 严格解析（缺字段即拒绝），显式解除路径（`peri/session_reset_dirty`）由 `peri.sessionRecoveryV1` 门控，默认关闭；宿主在准入时替未协商该能力的连接解除 dirty 不经这条 RPC，见 `peri-acp` 索引；`ReadOnlyAdmission` 是准入降级的原因（他处持有 / 精确 dirty 代际 / 本节点不提供所有权），与 `WorkspaceErrorData` 同为 adjacently tagged，置于 `_meta.peri.sessionWorkspaceV1.read_only`，只覆盖可从错误降级的三种原因（`from_workspace_error`），其余失败原样上报；`WorkspaceError::ReadOnlyStore` 不属于可降级原因——只读存储连会话都还没有；`WorkspaceErrorData` 只含 `peri.recoveryRequiredV1`（可由客户端分派的具体修复动作），与本集合之外的失败区分 |
+| 改项目、工作区与执行绑定协议 | `src/workspace.rs` + `src/store/mod.rs` + `src/session_resources.rs` + `src/peri_caps.rs` | `ProjectId`、`WorkspaceId`、`SessionBinding`、`ResolvedWorkspace`、`ThreadScope`、`ScopedThreadQuery`、`WorkspaceErrorData`、`ThreadStore::{validate_session_binding,reassert_session_binding}`、`PeriCaps::session_recovery_v1` | 身份独立于路径；存储接口封装发现、binding 校验与 SQL scope，不提供会话执行租约或只读 ownership 准入。`validate_session_binding` 完整复核，`reassert_session_binding` 不启动外部进程；扩展经 sessionWorkspaceV1 协商，错误不得当空列表或 legacy 绑定。`peri.sessionRecoveryV1` 保留 caps/wire 键但置 false，已无 dirty reset RPC。 |
 | 存储 v2 的 Machine / Workspace 归属类型 | `src/workspace.rs` | `MachineId`、`MachineInfo`、`MachineIdentityKind`、`WorkspaceInfo`、`WorkspacePathSource` | 已加入纯契约类型；schema、迁移、资源接口和 ACP/TUI 消费仍按 active issue 实施，不能把这些类型当作已生效的存储隔离 |
-| 改会话执行 owner 与关闭读回契约 | `src/workspace.rs` + `src/session_resources.rs` | `ExecutionOwnerToken`、`ExecutionOwnerClaim`、`PriorExecutionOwner`、`WorkspaceExecutionDescriptor`、`ExecutionWorkspaceOwnerRecord`、`SessionExecutionLease::{owner_token,prior_unreleased_generation}`、`SessionResources::{claim_closing_execution,renew_execution_owner,release_execution_owner,finish_close,close_settlement}`、`CloseSettlement` | Store 为 root 签发 epoch+nonce；同事务 fence 校验由 Resources adapter 承担。`close_settlement` 只对同一 token 的已释放 owner 且关闭意图已清除报告 `Finished`；owner 改变或证据不一致报告 `ChangedOwner`。独立清除 close intent 的接口已删除。 |
-| 改本地恢复警告协议 | `src/workspace.rs` + `src/session_resources_test.rs` | `SessionRestoreWarning::FormerOwnerUnverified` | ACP 成功取得本地执行权但无法证明旧执行停止时，将 warning 放入 `_meta.peri.sessionWorkspaceV1.restore_warning`；与会阻止输入的 `read_only` 原因分离，wire 值为 `formerOwnerUnverified`。 |
+| 改会话关闭读回契约 | `src/session_resources.rs` | `SessionResources::{finish_close,close_settlement}`、`CloseSettlement` | `Finished` / `Pending` / `Unknown` 表达关闭持久化事实，不携带或比较执行 owner token；执行唯一性与接管由 `peri-sdk` 负责，types 不再提供 `ExecutionOwnerToken`、`SessionExecutionLease` 或 `ReadOnlyAdmission`。 |
 | 改后台任务与外部执行排空契约 | `src/tasks.rs` | `TaskManager::{spawn_owned,begin_external_execution,execution_cancel_token,shutdown}`、`ExternalExecutionGuard`、`TaskShutdownReport` | 请求取消与实际停止分开；UI活跃数不是执行证据；确认外部停止不抢先改变Defer/完成事件顺序 |
 | 改后台 Shell 输出引用 | `src/event.rs` + `src/tasks.rs` | `BackgroundTaskResult::shell_output`、`ShellOutput`、`TaskManager::finalize_bg_shell` | 可选 DTO 保持旧数据可读；stdout/stderr 路径、完整性、落盘错误和已知退出码由采集端提供；通知不携带输出正文，DTO 不执行文件 I/O |
 | 改用户待发送 wire 契约 | `src/session/user_input.rs` + `src/session/queue.rs` + `src/event_v2/{types,executor_mapping}.rs` | 四类 `UserInput*Request`；`UserInputQueueSnapshot` / `UserInputQueueReceipt`；`withdraw_user_inputs` | generation/revision、稳定输入及命令身份、实际运行 request ID；只精确撤出 UserInput，不影响后台消息；三个 canonical 事件经既有 ACP 链路投影，能力为 `peri.userInputQueue`（ARC-EVENT-001） |
@@ -118,9 +117,7 @@ typed schema、默认值、领域合并、scope/revision/explain/update 归
 
 ### 其余契约模块（src/）
 
-`session_resources.rs` 的 `SessionAvailability::unreleased_owner` 提供不改变 Store 的
-旧执行 owner 事实；`workspace.rs` 的 `ReadOnlyAdmission::FormerOwnerUnverified`
-在 `session/load` / `session/resume` 响应中标记只读历史，工具执行不获准。
+`session_resources.rs` 的 `SessionAvailability` 只提供存储访问、持久化与执行环境事实，不提供 unreleased owner。`session/load` / `session/resume` 不返回 ownership 只读准入；执行唯一性与接管由 `peri-sdk` 负责。
 
 | 功能 | 入口/关键点 |
 | --- | --- |

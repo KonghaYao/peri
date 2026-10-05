@@ -138,18 +138,6 @@ impl super::SubAgentTool {
         self
     }
 
-    /// 注入本会话 root 的执行所有权（child 保存的前置证明）。
-    ///
-    /// 生产路径经 `parent_session` 的 host 携带；工具自身 host 只在测试/遗留回退里
-    /// 显式注入，且必须与 `session_resources`、`parent_thread_id` 出自同一条会话。
-    pub fn with_execution_owner(
-        mut self,
-        lease: Arc<dyn peri_acp_types::workspace::SessionExecutionLease>,
-    ) -> Self {
-        self.host.execution_owner = Some(lease);
-        self
-    }
-
     #[allow(clippy::type_complexity)]
     pub fn with_register_runtime(
         mut self,

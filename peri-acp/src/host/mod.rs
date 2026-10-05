@@ -10,9 +10,6 @@
 //! `session/cancel` notifications. Sessions are shared via
 //! `Arc<tokio::sync::Mutex<HashMap>>`.
 //!
-//! **多读者 + 单 writer lease**（[`lease`]）：每个 session 的 writer 唯一
-//! （可提交输入/取消），观察者只读。策略先行，协议级扩展另立 issue。
-
 use std::{
     collections::{BTreeMap, HashMap},
     sync::Arc,
@@ -49,7 +46,6 @@ mod diagnostics;
 #[cfg(test)]
 #[path = "executor_flow_test.rs"]
 mod executor_flow_tests;
-pub mod lease;
 mod mcp_apps;
 // V-02（W4）的 host seam 断言：首个 LLM 请求的三个冻结 effective name、能力关闭的
 // 首个请求面、`PERI_MCP_BUILTIN=off` 语义、启动 fatal 投影、BLOCKED 缺口复证。
@@ -93,7 +89,6 @@ mod shutdown;
 pub mod stage_builder;
 #[cfg(not(target_os = "emscripten"))]
 pub mod stdio;
-mod supervisor;
 mod task_scope;
 #[cfg(test)]
 #[path = "unify_wire_baseline_test.rs"]
@@ -125,7 +120,6 @@ pub(crate) struct SessionState {
     pub(crate) session_id: String,
     pub(crate) thread_id: String,
     pub(crate) cwd: String,
-    pub(crate) execution_owner: Option<Arc<dyn peri_acp_types::workspace::SessionExecutionLease>>,
     pub(crate) environment: Option<Arc<workspace::SessionEnvironment>>,
     pub(crate) closing: bool,
     pub(crate) history: Vec<BaseMessage>,
@@ -160,19 +154,12 @@ pub(crate) struct SessionState {
     continuation_in_flight: bool,
     /// 下一次 continuation dispatch 按 MQ steering 校验（非 SubAgentComplete）。
     continuation_mq_steering_pending: bool,
-    /// 多读者 + 单 writer lease：session 创建方（writer）唯一可提交输入/取消。
-    ///
-    /// 协议无客户端身份字段（`clientId` 属协议级扩展，另立 issue），writer 恒为
-    /// `"default"`；prompt/cancel 入口经 [`lease::WriterLease::is_writer`] 校验。
-    pub(crate) lease: lease::WriterLease,
 }
 
 // ── Server config ────────────────────────────────────────────────────────────
 
 /// All cross-session configuration needed by the ACP server.
 pub struct AcpServerConfig {
-    /// Only the in-process TUI may accept an expired, unverified local owner.
-    pub(crate) allow_local_unverified_takeover: bool,
     pub(crate) workspace_assembly: Option<assemble::WorkspaceAssembly>,
     pub(crate) host_task_owner: Option<task_scope::HostTaskOwner>,
     pub(crate) host_task_spawner: task_scope::HostTaskSpawner,
@@ -259,15 +246,6 @@ pub struct AcpServerConfig {
     /// 管线（当作普通文本消息发给模型）——IDE 客户端自管理这两个命令，服务端
     /// 不应执行清会话/回退操作。其余命令不受影响。
     pub stdio_command_filter: bool,
-}
-
-impl AcpServerConfig {
-    /// Let the interactive local owner resume after an expired local generation.
-    /// The caller must own the in-process TUI transport, not an external ACP endpoint.
-    pub fn with_local_unverified_takeover(mut self) -> Self {
-        self.allow_local_unverified_takeover = true;
-        self
-    }
 }
 
 // ── Main server loop ────────────────────────────────────────────────────────

@@ -3,6 +3,20 @@
 use super::*;
 
 impl SqliteSessionData {
+    pub(super) async fn require_session(
+        &self,
+        connection: &mut SqliteConnection,
+        id: &ThreadId,
+    ) -> SessionResourceResult<()> {
+        if !thread_exists_on(connection, id)
+            .await
+            .map_err(read_failure)?
+        {
+            return Err(not_found());
+        }
+        Ok(())
+    }
+
     /// Admission guard shared by lifecycle and mutation paths.
     pub(super) fn writable(&self) -> SessionResourceResult<()> {
         if self.closed.load(Ordering::Acquire) {
@@ -37,7 +51,9 @@ impl SqliteSessionData {
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(|error| map_sqlx(&error))?;
-        self.assert_owner(&mut tx, id).await?;
+        if !thread_exists_on(&mut tx, id).await.map_err(read_failure)? {
+            return Ok(());
+        }
         // 撤销只针对「本次未发布的创建」：已经派生过子会话的 identity 不能被补偿掉，
         // 否则子会话会指向一个不存在的父节点。
         let children: (i64,) =
@@ -100,7 +116,7 @@ impl SqliteSessionData {
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(|e| map_sqlx(&e))?;
-        self.assert_owner(&mut tx, id).await?;
+        self.require_session(&mut tx, id).await?;
         let now = peri_time::now_utc_rfc3339();
         let mut builder: sqlx::QueryBuilder<sqlx::Sqlite> =
             sqlx::QueryBuilder::new("UPDATE threads SET updated_at = ");
@@ -142,7 +158,7 @@ impl SqliteSessionData {
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(|error| map_sqlx(&error))?;
-        self.assert_owner(&mut tx, id).await?;
+        self.require_session(&mut tx, id).await?;
         if !thread_exists_on(&mut tx, id).await.map_err(read_failure)? {
             return Err(not_found());
         }

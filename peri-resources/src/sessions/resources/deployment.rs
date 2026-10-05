@@ -29,28 +29,10 @@ impl SessionResourcesImpl {
             .await
             .map_err(|_| SessionResourceError::new(SessionResourceErrorKind::Timeout))?;
 
-        // 每次调用都重新做真实检查，不复用上一次的失败结论。
-        //
-        for lease in self.gate.local().live_leases() {
-            if peri_time::timeout(SETTLE_WAIT, lease.wait_for_in_flight())
-                .await
-                .is_err()
-            {
-                return Err(SessionResourceError::new(SessionResourceErrorKind::Timeout));
-            }
-            if lease.is_uncertain() {
-                return Err(SessionResourceError::persistence_uncertain(Some(
-                    lease.thread_id().clone(),
-                )));
-            }
-        }
+        self.gate.drain_all().await?;
         // 恢复所需的证据已确认结清之后才关闭数据面：提前取走连接（远程 adapter 的唯一
         // 连接句柄）会让「未确认」的未决事实失去收敛路径，而重复关闭恰恰要能重做检查。
         self.gate.data().close().await?;
-        // 只有到这里才是确认关闭（并发调用由串行化保证只有一个走到这里；即便迁移已由
-        // 别处完成，结论也相同）。本机数据面的 `close` 只停止它自己的写入入口（连接池由
-        // 共享库句柄所有）；clean 由各 owner 自己写（`SessionExecutionLease::mark_clean`），
-        // 门面不代写、也不替它们宣告会话已结清。
         self.lifecycle.confirm_closed();
         Ok(())
     }

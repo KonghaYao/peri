@@ -7,9 +7,7 @@ use peri_acp_types::session_resources::{
 };
 use peri_acp_types::store::PersistedPayload;
 use peri_acp_types::thread::AgentStatus;
-use peri_acp_types::workspace::{
-    ResolvedWorkspace, SessionBinding, SessionExecutionLease, SESSION_BINDING_VERSION,
-};
+use peri_acp_types::workspace::{ResolvedWorkspace, SessionBinding, SESSION_BINDING_VERSION};
 use peri_agent::{
     agent::{
         events::ExecutorEvent,
@@ -545,15 +543,13 @@ async fn mcp_agent_suggestions_require_activation_and_connection() {
     assert!(!disconnected.contains("Available agent types"));
 }
 
-/// 真门面 fixture：临时 git 工作区 + 临时 SQLite + 会话执行所有权。
+/// 真门面 fixture：临时 git 工作区 + 临时 SQLite + 已绑定会话。
 ///
-/// 子 agent 的 resume/spawn 路径要求「根会话有活 owner」这一真实前置条件，因此夹具
+/// 子 agent 的 resume/spawn 路径要求父会话与绑定真实存在，因此夹具
 /// 不使用存储替身：会话、消息、状态都落在真实门面上，断言读回的是真实事实。
 pub(crate) struct SessionFixture {
     pub(crate) resources: Arc<dyn SessionResources>,
     workspace: ResolvedWorkspace,
-    /// 执行所有权必须存活到会话生命周期结束（drop 即释放 owner）。
-    leases: parking_lot::Mutex<Vec<Arc<dyn SessionExecutionLease>>>,
 }
 
 impl SessionFixture {
@@ -570,7 +566,6 @@ impl SessionFixture {
         Self {
             resources,
             workspace,
-            leases: parking_lot::Mutex::new(Vec::new()),
         }
     }
 
@@ -579,24 +574,12 @@ impl SessionFixture {
         Arc::clone(&self.resources)
     }
 
-    /// 最近一次建会话的执行所有权（child 保存的前置证明）。
-    ///
-    /// 夹具自己持有 lease 让 owner 保持活跃；调用方拿到的是同一份所有权句柄，
-    /// 用于 `.with_execution_owner(...)`，不产生第二个 owner。
-    pub(crate) fn execution_owner(&self) -> Arc<dyn SessionExecutionLease> {
-        self.leases
-            .lock()
-            .last()
-            .cloned()
-            .expect("夹具尚未建立会话：先 create_thread")
-    }
-
     /// 夹具工作区的 canonical cwd（会话 cwd 与调用 cwd 必须一致）。
     pub(crate) fn workspace_cwd(&self) -> String {
         self.workspace.cwd.to_string_lossy().into_owned()
     }
 
-    /// 建会话（真门面）：绑定 + frozen + 执行代际一次落盘，owner 由夹具持有。
+    /// 建会话（真门面）：绑定与 frozen 一次落盘。
     pub(crate) async fn create_thread(
         &self,
         meta: peri_agent::thread::ThreadMeta,
@@ -621,12 +604,10 @@ impl SessionFixture {
             },
             frozen: FrozenSnapshotBytes::new("{\"version\":1,\"fixture\":true}"),
         };
-        let lease = self
-            .resources
+        self.resources
             .create_session(&session)
             .await
             .map_err(|error| anyhow::anyhow!("{error}"))?;
-        self.leases.lock().push(lease);
         Ok(meta.id)
     }
 
@@ -702,10 +683,10 @@ impl SessionFixture {
     }
 }
 
-/// 把「门面 + 父会话 id + root owner」一次装到工具上。
+/// 把门面与父会话 id 一次装到工具上。
 ///
-/// child 保存/认领要求父会话真实存在、root owner 存活、调用 cwd 与父会话 cwd 一致；
-/// 三者出自同一夹具。返回 canonical cwd——调用参数必须用它，否则 spawn 会按
+/// child 保存/认领要求父会话真实存在、调用 cwd 与父会话 cwd 一致；
+/// 两者出自同一夹具。返回 canonical cwd——调用参数必须用它，否则 spawn 会按
 /// 绑定不匹配拒绝（`/var` 与 `/private/var` 之类符号链接差异也算不匹配）。
 pub(crate) async fn install_parent_session(
     tool: SubAgentTool,
@@ -721,8 +702,7 @@ pub(crate) async fn install_parent_session(
         .expect("建立父会话失败");
     let tool = tool
         .with_session_resources(fixture.facade())
-        .with_parent_thread_id(parent_id)
-        .with_execution_owner(fixture.execution_owner());
+        .with_parent_thread_id(parent_id);
     (tool, cwd)
 }
 

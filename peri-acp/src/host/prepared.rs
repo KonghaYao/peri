@@ -1,8 +1,8 @@
-//! 会话准备输入：lease 之前的只读定格，装配与持久化消费同一对象。
+//! 会话准备输入：准入之前的只读定格，装配与持久化消费同一对象。
 //!
-//! 与 `PreparedSession`（恢复准入结果：id/identity/read_only）不同——本结构是
+//! 与 `PreparedSession`（恢复准入结果：id/identity）不同——本结构是
 //! **输入**定格：配置、插件聚合、运行环境、frozen 字节一次产出。准备阶段不启动
-//! MCP/hook/cron，不创建 thread、不占 lease、不做 cache repair，也不写会话
+//! MCP/hook/cron，不创建 thread、不做 cache repair，也不写会话
 //! 数据或本机登记；装配期不再重读配置/插件，也不再各取一份日期与环境探测。
 
 use std::{

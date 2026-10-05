@@ -148,35 +148,6 @@ pub(super) async fn shutdown_host(
     );
     match terminal_report {
         task_scope::HostTerminalShutdownReport::Complete { .. } => {
-            let owners = sessions
-                .lock()
-                .await
-                .values()
-                .filter_map(|state| state.execution_owner.clone())
-                .collect::<Vec<_>>();
-            for owner in owners {
-                if let Err(error) = owner.mark_clean().await {
-                    tracing::warn!(%error, "execution owner cleanup could not be persisted");
-                    return task_scope::HostTerminalShutdownReport::aggregate(
-                        host_report,
-                        dynamic_report,
-                        pool_report,
-                        1,
-                    );
-                }
-                if let Some(token) = owner.owner_token() {
-                    if let Err(error) = cfg.session_resources.release_execution_owner(&token).await
-                    {
-                        tracing::warn!(%error, "execution owner release could not be confirmed");
-                        return task_scope::HostTerminalShutdownReport::aggregate(
-                            host_report,
-                            dynamic_report,
-                            pool_report,
-                            1,
-                        );
-                    }
-                }
-            }
             sessions.lock().await.clear();
             prompt_locks.lock().await.clear();
             tracing::info!(?terminal_report, "ACP host terminal shutdown complete");

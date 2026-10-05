@@ -41,38 +41,42 @@ fn connected_test_handle(name: &str) -> Arc<McpClientHandle> {
 }
 
 #[test]
-fn detaching_inbox_keeps_close_owner_until_settled() {
+fn task_scope_metadata_is_session_scoped_without_store_ownership() {
     let pool = McpClientPool::new_pending();
-    let first = peri_acp_types::workspace::ExecutionOwnerToken {
-        root_id: "closing-session".into(),
-        epoch: 1,
-        nonce: "first".into(),
-    };
-    pool.bind_session_execution_owner("closing-session", first.clone())
-        .unwrap();
-    pool.unregister_inbox("closing-session");
+    let first = pool.task_scope_meta_for("workspace", "session-a").unwrap();
+    let repeated = pool.task_scope_meta_for("workspace", "session-a").unwrap();
+    let other = pool.task_scope_meta_for("workspace", "session-b").unwrap();
+    assert_eq!(first, repeated);
+    assert_ne!(first, other);
     assert_eq!(
-        pool.session_execution_tokens.read().get("closing-session"),
-        Some(&first)
+        pool.task_scope_authority
+            .resolve_capability(&first)
+            .unwrap()
+            .session_id,
+        "session-a"
     );
+    assert_eq!(
+        pool.task_scope_authority
+            .resolve_capability(&other)
+            .unwrap()
+            .session_id,
+        "session-b"
+    );
+}
 
-    let next = peri_acp_types::workspace::ExecutionOwnerToken {
-        epoch: 2,
-        nonce: "next".into(),
-        ..first.clone()
-    };
-    pool.bind_session_execution_owner("closing-session", next.clone())
-        .unwrap();
-    pool.release_session_execution_owner(&first);
+#[test]
+fn remote_task_scope_metadata_survives_pool_recreation_without_store_ownership() {
+    let pool = McpClientPool::new_pending();
+    let mut client = connected_test_handle("workspace");
+    Arc::get_mut(&mut client).unwrap().source =
+        Some(crate::mcp::config::ConfigSource::WorkspaceRemote);
+    pool.clients.write().insert("workspace".into(), client);
+    let meta = pool.task_scope_meta_for("workspace", "session-a").unwrap();
+    let authority = peri_mcp_core::task_scope::TaskScopeAuthority::trusted_connection();
     assert_eq!(
-        pool.session_execution_tokens.read().get("closing-session"),
-        Some(&next)
+        authority.resolve_capability(&meta).unwrap().session_id,
+        "session-a"
     );
-    pool.release_session_execution_owner(&next);
-    assert!(!pool
-        .session_execution_tokens
-        .read()
-        .contains_key("closing-session"));
 }
 
 struct TestDropSignal(Option<tokio::sync::oneshot::Sender<()>>);

@@ -9,7 +9,6 @@ async fn test_worktree_writes_do_not_claim_ownership_and_metadata_cannot_rebind(
         .append_message(&id, BaseMessage::human("without live run"))
         .await
         .unwrap();
-    let lease = store.acquire_execution_lease(&id).await.unwrap();
     let other = SqliteThreadStore::new(db.path().join("threads.db"))
         .await
         .unwrap();
@@ -36,15 +35,11 @@ async fn test_worktree_writes_do_not_claim_ownership_and_metadata_cannot_rebind(
         .append_message(&child, BaseMessage::human("owned child"))
         .await
         .unwrap();
-    lease.mark_clean().await.unwrap();
-    assert!(matches!(
-        store
-            .append_message(&child, BaseMessage::human("closed"))
-            .await
-            .unwrap_err()
-            .downcast_ref::<WorkspaceError>(),
-        Some(WorkspaceError::ExecutionLeaseRequired)
-    ));
+    store
+        .append_message(&child, BaseMessage::human("continued"))
+        .await
+        .unwrap();
+    assert_eq!(store.load_messages(&child).await.unwrap().len(), 2);
 }
 
 #[tokio::test]
@@ -62,12 +57,10 @@ async fn test_worktree_binding_keeps_wire_revision_without_persisted_column() {
     assert_eq!(revision_columns, 0);
 
     let (id, workspace) = bound(&store, &cwd).await;
-    let lease = store.acquire_execution_lease(&id).await.unwrap();
     store
         .append_message(&id, BaseMessage::human("bound history"))
         .await
         .unwrap();
-    lease.mark_clean().await.unwrap();
     let expected = SessionBinding::from_workspace(&workspace);
     let loaded = store.load_session_binding(&id).await.unwrap().unwrap();
     assert_eq!(loaded, expected);
@@ -132,9 +125,6 @@ async fn test_worktree_binding_survives_clean_reopen_and_unknown_versions_fail_c
     let repo = repository();
     let (store, db) = store().await;
     let (id, expected) = bound(&store, repo.path()).await;
-    let lease = store.acquire_execution_lease(&id).await.unwrap();
-    lease.mark_clean().await.unwrap();
-    drop(lease);
     store.close().await;
     let reopened = SqliteThreadStore::new(db.path().join("threads.db"))
         .await

@@ -19,15 +19,8 @@ enum AuthorityKind {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ExecutionGeneration {
-    pub epoch: i64,
-    pub nonce: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TaskScopeCapability {
     pub session_id: String,
-    pub execution: Option<ExecutionGeneration>,
 }
 
 impl Default for TaskScopeAuthority {
@@ -61,7 +54,6 @@ impl TaskScopeAuthority {
                     token.clone(),
                     TaskScopeCapability {
                         session_id: session_id.into(),
-                        execution: None,
                     },
                 );
                 token
@@ -72,42 +64,12 @@ impl TaskScopeAuthority {
         }
     }
 
-    /// Encode only values obtained by the trusted host from a Store-issued execution lease.
-    pub fn issue_execution(&self, session_id: &str, epoch: i64, nonce: &str) -> String {
-        assert!(
-            epoch > 0 && !nonce.is_empty(),
-            "invalid Store execution generation"
-        );
-        let capability = TaskScopeCapability {
-            session_id: session_id.into(),
-            execution: Some(ExecutionGeneration {
-                epoch,
-                nonce: nonce.into(),
-            }),
-        };
-        match self.inner.as_ref() {
-            AuthorityKind::Local(tokens) => {
-                let token = uuid::Uuid::new_v4().to_string();
-                tokens.lock().insert(token.clone(), capability);
-                token
-            }
-            AuthorityKind::TrustedConnection => {
-                format!(
-                    "v2.{}.{}.{}",
-                    URL_SAFE_NO_PAD.encode(session_id),
-                    epoch,
-                    URL_SAFE_NO_PAD.encode(nonce)
-                )
-            }
-        }
-    }
-
     #[cfg(test)]
     pub(crate) fn resolve(&self, meta: &RequestMetaObject) -> Result<String, McpError> {
         Ok(self.resolve_capability(meta)?.session_id)
     }
 
-    /// Verify a request capability before a Workspace handler uses its session and generation.
+    /// Verify a request capability before a Workspace handler uses its session.
     pub fn resolve_capability(
         &self,
         meta: &RequestMetaObject,
@@ -130,20 +92,7 @@ fn decode_scope(token: &str) -> Option<TaskScopeCapability> {
     if token.len() > 512 {
         return None;
     }
-    let (encoded, execution) = if let Some(encoded) = token.strip_prefix("v1.") {
-        (encoded, None)
-    } else {
-        let fields = token.strip_prefix("v2.")?;
-        let mut parts = fields.split('.');
-        let encoded = parts.next()?;
-        let epoch = parts.next()?.parse::<i64>().ok()?;
-        let nonce = URL_SAFE_NO_PAD.decode(parts.next()?).ok()?;
-        if parts.next().is_some() || epoch <= 0 || nonce.is_empty() {
-            return None;
-        }
-        let nonce = String::from_utf8(nonce).ok()?;
-        (encoded, Some(ExecutionGeneration { epoch, nonce }))
-    };
+    let encoded = token.strip_prefix("v1.")?;
     let session = URL_SAFE_NO_PAD.decode(encoded).ok()?;
     let session = String::from_utf8(session).ok()?;
     if session.is_empty() {
@@ -151,7 +100,6 @@ fn decode_scope(token: &str) -> Option<TaskScopeCapability> {
     }
     Some(TaskScopeCapability {
         session_id: session,
-        execution,
     })
 }
 
@@ -171,17 +119,35 @@ mod tests {
              .0
             .insert(TASK_SCOPE_META_KEY.into(), "invalid-scope".into());
         assert!(verifier.resolve(&meta).is_err());
-        let execution = issuer.issue_execution("session-a", 3, "claim-nonce");
-        meta.0
-             .0
-            .insert(TASK_SCOPE_META_KEY.into(), execution.clone().into());
-        assert_eq!(
-            verifier.resolve_capability(&meta).unwrap().execution,
-            Some(ExecutionGeneration {
-                epoch: 3,
-                nonce: "claim-nonce".into()
-            })
-        );
-        assert!(verifier.resolve_capability(&meta).is_ok());
+    }
+
+    #[test]
+    fn local_capabilities_are_bound_to_the_issuing_authority() {
+        let issuer = TaskScopeAuthority::new();
+        let verifier = TaskScopeAuthority::new();
+        let first = issuer.issue("session-a");
+        let second = issuer.issue("session-a");
+        assert_ne!(first, second);
+        for token in [first, second] {
+            let mut meta = RequestMetaObject::new();
+            meta.0 .0.insert(TASK_SCOPE_META_KEY.into(), token.into());
+            assert_eq!(issuer.resolve(&meta).unwrap(), "session-a");
+            assert!(verifier.resolve(&meta).is_err());
+        }
+        assert!(issuer.resolve(&RequestMetaObject::new()).is_err());
+    }
+
+    #[test]
+    fn trusted_connection_rejects_invalid_and_execution_metadata() {
+        for token in [
+            "v1.",
+            "v1.%%%",
+            "v1._w",
+            "v2.c2Vzc2lvbi1h.3.Y2xhaW0",
+            "v1.c2Vzc2lvbi1h.extra",
+        ] {
+            assert!(decode_scope(token).is_none(), "{token}");
+        }
+        assert!(decode_scope(&format!("v1.{}", "a".repeat(513))).is_none());
     }
 }

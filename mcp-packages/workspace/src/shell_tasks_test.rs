@@ -3,75 +3,15 @@ use std::{sync::Arc, time::Duration};
 use rmcp::model::{TaskPayload, TaskStatus};
 
 use super::ShellTasks;
-use crate::task_scope::ExecutionGeneration;
-
-#[tokio::test]
-async fn execution_fence_waits_for_old_admission_and_rejects_it_afterward() {
+#[test]
+fn session_admissions_do_not_require_an_execution_owner() {
     let owner = ShellTasks::new();
-    let admitted = owner.admit("session-a").unwrap();
-    let generation = ExecutionGeneration {
-        epoch: 2,
-        nonce: "claim-b".into(),
-    };
-    let fencing_owner = owner.clone();
-    let fencing_generation = generation.clone();
-    let fence = tokio::spawn(async move {
-        fencing_owner
-            .fence_execution("session-a", &fencing_generation)
-            .await
-    });
-    tokio::time::timeout(Duration::from_secs(1), async {
-        while owner.state.lock().execution_floor.get("session-a") != Some(&generation) {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("floor advanced");
-    assert!(!fence.is_finished());
-    assert!(owner.admit("session-a").is_err());
-    assert!(owner.admit_fenced("session-a", Some(&generation)).is_err());
-    drop(admitted);
-    tokio::time::timeout(Duration::from_secs(1), fence)
-        .await
-        .expect("fence barrier")
-        .expect("join")
-        .expect("fence");
-    assert!(owner.admit("session-a").is_err());
-    assert!(owner.admit_fenced("session-a", Some(&generation)).is_ok());
-}
-
-#[tokio::test]
-async fn cancelled_fence_request_still_finishes_owner_barrier() {
-    let owner = ShellTasks::new();
-    let admitted = owner.admit("session-a").unwrap();
-    let generation = ExecutionGeneration {
-        epoch: 3,
-        nonce: "claim-c".into(),
-    };
-    let fencing_owner = owner.clone();
-    let fencing_generation = generation.clone();
-    let request = tokio::spawn(async move {
-        fencing_owner
-            .fence_execution("session-a", &fencing_generation)
-            .await
-    });
-    tokio::time::timeout(Duration::from_secs(1), async {
-        while owner.state.lock().execution_floor.get("session-a") != Some(&generation) {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("floor advanced");
-    request.abort();
-    drop(admitted);
-    tokio::time::timeout(Duration::from_secs(1), async {
-        while owner.state.lock().fencing.contains("session-a") {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("owner fence settles after request drops");
-    assert!(owner.admit_fenced("session-a", Some(&generation)).is_ok());
+    let first = owner.admit("session-a").expect("first request");
+    let second = owner.admit("session-a").expect("second request");
+    assert_eq!(owner.state.lock().inflight["session-a"], 2);
+    drop(first);
+    drop(second);
+    assert!(!owner.state.lock().inflight.contains_key("session-a"));
 }
 
 #[tokio::test]
@@ -79,7 +19,7 @@ async fn close_gate_waits_for_admitted_creation_and_rejects_later_work() {
     let owner = ShellTasks::new();
     let admitted = owner.admit("session-a").expect("admission");
     let closing_owner = owner.clone();
-    let close = tokio::spawn(async move { closing_owner.close_scope("session-a", 0, None).await });
+    let close = tokio::spawn(async move { closing_owner.close_scope("session-a", 0).await });
     tokio::time::timeout(Duration::from_secs(1), async {
         while !owner.state.lock().closing.contains("session-a") {
             tokio::task::yield_now().await;
@@ -104,7 +44,7 @@ async fn delayed_close_cannot_report_success_after_scope_reopens() {
     let owner = ShellTasks::new();
     let admitted = owner.admit("session-a").expect("admission");
     let closing_owner = owner.clone();
-    let close = tokio::spawn(async move { closing_owner.close_scope("session-a", 0, None).await });
+    let close = tokio::spawn(async move { closing_owner.close_scope("session-a", 0).await });
     tokio::time::timeout(Duration::from_secs(1), async {
         while !owner.snapshot("session-a").closing {
             tokio::task::yield_now().await;
@@ -114,7 +54,7 @@ async fn delayed_close_cannot_report_success_after_scope_reopens() {
     .expect("close gate activated");
     drop(admitted);
     let reopened = owner
-        .open_scope("session-a", 0, None)
+        .open_scope("session-a", 0)
         .expect("settled scope reopens");
     assert_eq!(reopened.epoch, 1);
     assert!(
@@ -134,7 +74,7 @@ async fn cancelled_request_cannot_escape_scope_close_barrier() {
     let cwd = directory.path().to_string_lossy().into_owned();
     let caller = tokio::spawn(async move {
         launch_owner
-            .spawn_scoped("sleep 30".into(), cwd, None, Some("session-a"), None)
+            .spawn_scoped("sleep 30".into(), cwd, None, Some("session-a"))
             .await
     });
     tokio::time::timeout(Duration::from_secs(1), async {
@@ -154,7 +94,7 @@ async fn cancelled_request_cannot_escape_scope_close_barrier() {
     .expect("owner admitted spawn");
     caller.abort();
     let closing_owner = owner.clone();
-    let close = tokio::spawn(async move { closing_owner.close_scope("session-a", 0, None).await });
+    let close = tokio::spawn(async move { closing_owner.close_scope("session-a", 0).await });
     tokio::task::yield_now().await;
     assert!(
         !close.is_finished(),
@@ -229,7 +169,6 @@ async fn cancellation_is_scoped_to_known_task_id() {
             dir.path().to_string_lossy().into_owned(),
             None,
             Some("session-a"),
-            None,
         )
         .await
         .expect("start shell task");

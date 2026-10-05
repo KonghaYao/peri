@@ -44,7 +44,7 @@ impl ChildResumeClaimHandle {
         }
     }
 
-    /// 认领期间的写入走同一套准入检查（能力/未决持久化/root owner）。
+    /// 认领期间的写入走同一套准入检查（权限/未决持久化/同树 mutation 屏障）。
     async fn write(&self, record: &ChildResumeRecord) -> SessionResourceResult<()> {
         self.gate
             .with_mutation(&self.child, || {

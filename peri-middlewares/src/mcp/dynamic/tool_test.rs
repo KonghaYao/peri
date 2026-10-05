@@ -109,22 +109,16 @@ fn load_input() -> serde_json::Value {
 }
 
 #[tokio::test]
-async fn dynamic_load_requires_the_store_owner_catalog_update_before_connecting() {
+async fn dynamic_load_does_not_require_store_execution_ownership() {
     let deployment = Arc::new(FakeDeployment::default());
-    let mut tool = DynamicMcpTool::new("session-a", deployment.clone());
-    tool.async_owner_admission = Some(Arc::new(|_| {
-        Box::pin(async { Err("Store owner catalog unavailable".to_owned()) })
-    }));
+    let tool = DynamicMcpTool::new("session-a", deployment.clone());
     let invocation = tool.bind_invocation(load_input()).unwrap().unwrap();
-    let error = invocation
+    invocation
         .target
         .invoke(json!({}), ToolContext::new(&[], "/tmp"))
         .await
-        .unwrap_err();
-    assert!(error
-        .to_string()
-        .contains("Store owner catalog unavailable"));
-    assert!(deployment.actions.lock().unwrap().is_empty());
+        .unwrap();
+    assert_eq!(deployment.actions.lock().unwrap().len(), 1);
 }
 
 #[test]

@@ -5,9 +5,6 @@ use peri_acp::transport::{
     mpsc::{MpscServerTransport, mpsc_transport_pair},
     types::{IncomingMessage, RequestId},
 };
-use peri_acp_types::workspace::{
-    ReadOnlyAdmission, RecoveryRequiredDetails, SessionRestoreWarning,
-};
 use serde_json::Value;
 use std::time::Duration;
 
@@ -31,8 +28,6 @@ impl UiAtomsGuard {
         }
         save_atom!(atoms::ACTIVE_SESSION_ID);
         save_atom!(atoms::ACTIVE_EXECUTION_CWD);
-        save_atom!(atoms::SESSION_READ_ONLY);
-        save_atom!(atoms::SESSION_RESTORE_WARNING);
         save_atom!(atoms::SERVICE_SNAPSHOT);
         save_atom!(atoms::FILE_LIST);
         save_atom!(atoms::HOOK_LIST);
@@ -133,37 +128,6 @@ async fn reach_load(server: &MpscServerTransport, response: Result<Value, AcpErr
     params
 }
 
-/// `session/load` 的只读准入响应：历史可读，但本次准入没有执行所有权。
-fn read_only_response(admission: &ReadOnlyAdmission) -> Value {
-    json!({"_meta": {"peri.sessionWorkspaceV1": {"read_only": admission}}})
-}
-
-#[tokio::test]
-#[serial_test::serial]
-async fn local_takeover_shows_warning_without_read_only_input_gate() {
-    let _guard = UiAtomsGuard::capture();
-    let (client, server) = interactive_client();
-    let (load, _) = tokio::time::timeout(Duration::from_secs(5), async {
-        tokio::join!(
-            client.load_session(TARGET, "/startup", None),
-            reach_load(
-                &server,
-                Ok(json!({"_meta": {"peri.sessionWorkspaceV1": {
-                    "restore_warning": SessionRestoreWarning::FormerOwnerUnverified
-                }}}))
-            )
-        )
-    })
-    .await
-    .unwrap();
-    assert_eq!(load.unwrap(), TARGET);
-    assert!(atoms::SESSION_READ_ONLY.state().read().is_none());
-    assert_eq!(
-        *atoms::SESSION_RESTORE_WARNING.state().read(),
-        Some(SessionRestoreWarning::FormerOwnerUnverified)
-    );
-}
-
 #[tokio::test]
 #[serial_test::serial]
 async fn load_by_id_has_no_recovery_popup_or_reset_request() {
@@ -190,59 +154,27 @@ async fn load_by_id_has_no_recovery_popup_or_reset_request() {
 
 #[tokio::test]
 #[serial_test::serial]
-async fn unavailable_environment_restores_history_without_confirmation() {
+async fn load_ignores_legacy_execution_admission_metadata() {
     let _guard = UiAtomsGuard::capture();
     let (client, server) = interactive_client();
-    let admission = ReadOnlyAdmission::ExecutionLeaseRequired;
-    let (load, _) = tokio::time::timeout(Duration::from_secs(5), async {
-        tokio::join!(
-            client.load_session(TARGET, "/startup", None),
-            reach_load(&server, Ok(read_only_response(&admission)))
-        )
-    })
-    .await
-    .expect("read-only session load must complete without confirmation");
-    assert_eq!(load.unwrap(), TARGET);
-    assert!(client.check_restore_error().is_ok());
-    assert!(CONFIRM_PAYLOAD.state().read().is_none());
-    assert_eq!(
-        atoms::SESSION_READ_ONLY.state().read().clone(),
-        Some(admission)
-    );
-    assert_no_request(&server, Duration::from_millis(50)).await;
-}
-
-#[tokio::test]
-#[serial_test::serial]
-async fn dirty_session_restores_history_without_recovery_popup_or_reset_request() {
-    let _guard = UiAtomsGuard::capture();
-    let (client, server) = interactive_client();
-    let admission = ReadOnlyAdmission::RecoveryRequired(RecoveryRequiredDetails {
-        thread_id: TARGET.into(),
-        generation: 7,
-    });
     let (load, params) = tokio::time::timeout(Duration::from_secs(5), async {
         tokio::join!(
-            client.load_session(TARGET, "/another-machine", None),
-            reach_load(&server, Ok(read_only_response(&admission)))
+            client.load_session(TARGET, "/startup", None),
+            reach_load(
+                &server,
+                Ok(json!({"_meta": {"peri.sessionWorkspaceV1": {
+                    "read_only": {"reason": "execution_busy"},
+                    "restore_warning": "former_owner_unverified"
+                }}}))
+            )
         )
     })
     .await
-    .expect("dirty session load must complete without a recovery decision");
-    assert_eq!(params["sessionId"], TARGET);
-    assert_eq!(params["cwd"], EFFECTIVE_CWD);
+    .expect("legacy metadata must not affect session loading");
     assert_eq!(load.unwrap(), TARGET);
+    assert_eq!(params["cwd"], EFFECTIVE_CWD);
     assert!(client.check_restore_error().is_ok());
-    assert_eq!(
-        client.current_execution_cwd().as_deref(),
-        Some(EFFECTIVE_CWD)
-    );
     assert_eq!(atoms::ACTIVE_SESSION_ID.state().read().as_str(), TARGET);
-    assert_eq!(
-        atoms::SESSION_READ_ONLY.state().read().clone(),
-        Some(admission)
-    );
     assert!(CONFIRM_PAYLOAD.state().read().is_none());
-    assert!(atoms::POPUP_KIND.state().read().is_none());
     assert_no_request(&server, Duration::from_millis(50)).await;
 }

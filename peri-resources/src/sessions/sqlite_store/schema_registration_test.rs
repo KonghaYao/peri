@@ -247,12 +247,10 @@ async fn assert_registration_upgrade_allows_directory_changes(version: i64) {
             )
             .await
             .unwrap();
-        let owner = store.acquire_execution_lease(&new_thread).await.unwrap();
         assert_eq!(
             store.validate_session_binding(&new_thread).await.unwrap(),
             resolved
         );
-        owner.mark_clean().await.unwrap();
     }
     assert_eq!(store.load_session_binding(&thread).await.unwrap(), binding);
     let error = store.validate_session_binding(&thread).await.unwrap_err();

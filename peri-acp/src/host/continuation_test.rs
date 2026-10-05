@@ -70,7 +70,6 @@ fn make_session_state(armed: bool, epoch: u64) -> SessionState {
         session_id: "session-1".to_string(),
         thread_id: "thread-1".to_string(),
         cwd: "/tmp".to_string(),
-        execution_owner: None,
         environment: None,
         closing: false,
         history: vec![],
@@ -86,7 +85,6 @@ fn make_session_state(armed: bool, epoch: u64) -> SessionState {
         continuation_epoch: epoch,
         continuation_in_flight: false,
         continuation_mq_steering_pending: false,
-        lease: crate::host::lease::WriterLease::acquired("default"),
     }
 }
 

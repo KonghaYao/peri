@@ -8,7 +8,7 @@ use rmcp::{
 use crate::{TaskScopeAuthority, WorkspaceMcpServer, TASK_SCOPE_META_KEY};
 
 #[tokio::test]
-async fn rewind_wire_requires_fenced_session_scope() {
+async fn rewind_wire_requires_session_scope_without_execution_fencing() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("target.txt");
     tokio::fs::write(&file, "new").await.unwrap();
@@ -37,17 +37,8 @@ async fn rewind_wire_requires_fenced_session_scope() {
         .is_err());
     assert_eq!(tokio::fs::read_to_string(&file).await.unwrap(), "new");
     let authority = TaskScopeAuthority::trusted_connection();
-    let token = authority.issue_execution("session-a", 1, "owner-a");
+    let token = authority.issue("session-a");
     let meta = serde_json::json!({(TASK_SCOPE_META_KEY): token});
-    let fence = CustomRequest::new(
-        "workspace/taskFence",
-        Some(serde_json::json!({"_meta": meta})),
-    );
-    client
-        .peer()
-        .send_request(ClientRequest::CustomRequest(fence))
-        .await
-        .unwrap();
     let request = CustomRequest::new(
         "workspace/rewindFiles",
         Some(serde_json::json!({"changes": changes,"_meta": meta})),
@@ -63,29 +54,20 @@ async fn rewind_wire_requires_fenced_session_scope() {
     assert_eq!(result.0["ok"], true);
     assert!(!file.exists());
     tokio::fs::write(&file, "new").await.unwrap();
-    let next = authority.issue_execution("session-a", 2, "owner-b");
-    let next_meta = serde_json::json!({(TASK_SCOPE_META_KEY): next});
-    let fence = CustomRequest::new(
-        "workspace/taskFence",
-        Some(serde_json::json!({"_meta": next_meta})),
+    let second_token = authority.issue("session-a");
+    let second_meta = serde_json::json!({(TASK_SCOPE_META_KEY): second_token});
+    let second = CustomRequest::new(
+        "workspace/rewindFiles",
+        Some(serde_json::json!({
+            "changes": [{"kind":"write","path":"target.txt","content":"new"}], "_meta": second_meta
+        })),
     );
     client
         .peer()
-        .send_request(ClientRequest::CustomRequest(fence))
+        .send_request(ClientRequest::CustomRequest(second))
         .await
         .unwrap();
-    let stale = CustomRequest::new(
-        "workspace/rewindFiles",
-        Some(serde_json::json!({
-            "changes": [{"kind":"write","path":"target.txt","content":"new"}], "_meta": meta
-        })),
-    );
-    assert!(client
-        .peer()
-        .send_request(ClientRequest::CustomRequest(stale))
-        .await
-        .is_err());
-    assert_eq!(tokio::fs::read_to_string(&file).await.unwrap(), "new");
+    assert!(!file.exists());
     client
         .close_with_timeout(Duration::from_secs(1))
         .await

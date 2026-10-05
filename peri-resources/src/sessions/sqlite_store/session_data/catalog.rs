@@ -96,7 +96,7 @@ impl SqliteSessionData {
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(|error| map_sqlx(&error))?;
-        self.assert_owner(&mut tx, id).await?;
+        self.require_session(&mut tx, id).await?;
         let row: Option<(Option<String>, Option<String>)> =
             sqlx::query_as("SELECT parent_thread_id, frozen_context FROM threads WHERE id = ?1")
                 .bind(id)

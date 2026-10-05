@@ -69,36 +69,20 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
         let state = sessions
             .get(&prompt_session_id)
             .ok_or_else(|| AcpError::new(-32602, "session not found"))?;
-        super::workspace::require_owner(state)?;
+        if state.closing {
+            return Err(AcpError::new(-32010, "Session is closing"));
+        }
         if cfg
             .session_manager
             .get_session(&prompt_session_id)
             .is_some_and(|session| session.cancel_token.is_cancelled())
         {
-            return Err(AcpError::new(
-                -32010,
-                "Session execution owner is no longer active",
-            ));
+            return Err(AcpError::new(-32010, "Session runtime is no longer active"));
         }
     }
     // 等待 session 锁之前的先行检查：只复核已记录证据，让绑定已失效的提交立刻失败，
     // 而不是先排队等锁。本次准入的权威复核在取得锁之后（见下方 validate_expected）。
     super::workspace::reassert_expected(cfg, &prompt_session_id, None).await?;
-
-    // 多读者 + 单 writer lease：prompt 是写入操作，仅 writer 可提交。
-    // 协议无客户端身份字段，writer 恒为 session 创建方（"default"）——
-    // 未来引入 clientId 后此处按请求方判定即可（见 lease 模块文档）。
-    {
-        let sessions = sessions.lock().await;
-        if let Some(state) = sessions.get(&prompt_session_id) {
-            if !state.lease.is_writer("default") {
-                return Err(AcpError::new(
-                    -32603,
-                    "read-only observer cannot submit prompt",
-                ));
-            }
-        }
-    }
 
     // 用户显式新 prompt 清掉未运行的 continuation（scheduler 的原子 take 与
     // epoch 校验保证不会重复/过期执行）。必须在等待 prompt lock 前递增代际，
@@ -157,16 +141,15 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
         let state = sessions
             .get(&prompt_session_id)
             .ok_or_else(|| AcpError::new(-32602, "session not found"))?;
-        super::workspace::require_owner(state)?;
+        if state.closing {
+            return Err(AcpError::new(-32010, "Session is closing"));
+        }
         if cfg
             .session_manager
             .get_session(&prompt_session_id)
             .is_some_and(|session| session.cancel_token.is_cancelled())
         {
-            return Err(AcpError::new(
-                -32010,
-                "Session execution owner is no longer active",
-            ));
+            return Err(AcpError::new(-32010, "Session runtime is no longer active"));
         }
     }
     super::workspace::validate_expected(cfg, &prompt_session_id, None).await?;

@@ -67,7 +67,6 @@ async fn legacy_history_context_then_load_restores_saved_cwd_and_frozen_snapshot
     .unwrap();
     assert_eq!(Path::new(&sessions[&id].cwd), cwd);
     assert_eq!(sessions[&id].history[0].content(), "legacy user message");
-    assert!(sessions[&id].execution_owner.is_some());
     // W5（J2 §3.1）：legacy 首次接纳发生在内容准入之前，没有执行环境 ⇒ 没有
     // workspace 资源面 ⇒ 项目指令不可得（`claude_md` 为空），且**不回落磁盘**
     // （同样的 X4/J5 口径见 W4b 的 legacy 空技能摘要先例）。后半段
@@ -167,22 +166,19 @@ async fn legacy_history_missing_directory_is_readable_without_adoption() {
     .unwrap();
     assert_eq!(response["payloads"].as_array().unwrap().len(), 1);
     assert!(response["binding"].is_null());
-    handle_request(
-        "session/load",
-        &json!({"sessionId":id,"cwd":tmp.path()}),
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await
-    .unwrap();
-    let state = &sessions[&id];
-    assert_eq!(Path::new(&state.cwd), saved);
-    assert_eq!(state.history[0].content(), "legacy user message");
-    assert!(state.execution_owner.is_none());
-    assert!(state.environment.is_none());
-    assert!(state.frozen.is_none());
-    assert!(state.workflow_middleware.is_none());
+    for method in ["session/load", "session/resume"] {
+        assert!(handle_request(
+            method,
+            &json!({"sessionId":id,"cwd":tmp.path()}),
+            &cfg,
+            &mut sessions,
+            &transport
+        )
+        .await
+        .is_err());
+        assert!(sessions.is_empty());
+        assert!(cfg.session_manager.get_session(&id).is_none());
+    }
     assert!(bridge.load_session_binding(&id).await.unwrap().is_none());
     assert!(bridge.load_frozen_snapshot(&id).await.unwrap().is_none());
 }
@@ -219,7 +215,6 @@ async fn legacy_history_load_ignores_wrong_directory_and_preserves_saved_cwd() {
     .unwrap();
     assert_eq!(Path::new(&sessions[&id].cwd), saved);
     assert_eq!(sessions[&id].history[0].content(), "legacy user message");
-    assert!(sessions[&id].execution_owner.is_some());
     assert_eq!(Path::new(&bridge.load_meta(&id).await.unwrap().cwd), saved);
     assert!(bridge.load_session_binding(&id).await.unwrap().is_some());
     assert!(bridge.load_frozen_snapshot(&id).await.unwrap().is_some());
@@ -276,14 +271,6 @@ async fn legacy_history_rejects_bad_frozen_without_adoption() {
             Some(snapshot)
         );
         assert!(cfg.session_manager.get_session(&id).is_none());
-        assert_eq!(
-            cfg.session_resources
-                .inspect_availability(Some(&id))
-                .await
-                .unwrap()
-                .execution,
-            Some(peri_acp_types::session_resources::ExecutionAvailability::Available)
-        );
     }
     assert!(sessions.is_empty());
 }
@@ -324,13 +311,6 @@ async fn legacy_history_fix_does_not_rebuild_missing_native_snapshot() {
     assert_eq!(error.message, "Bound session has no frozen snapshot");
     assert!(bridge.load_frozen_snapshot(&id).await.unwrap().is_none());
     assert!(sessions.is_empty());
-    bridge
-        .acquire_execution_lease(&id)
-        .await
-        .unwrap()
-        .mark_clean()
-        .await
-        .unwrap();
 }
 
 #[tokio::test]

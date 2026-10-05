@@ -19,7 +19,6 @@ use super::{AcpServerConfig, SessionState};
 pub(crate) mod acp_mcp;
 pub(crate) mod config_options;
 mod mcp_oauth;
-pub(super) mod owner_catalog;
 mod plugin;
 mod rewind;
 pub(crate) mod session_lifecycle;
@@ -71,7 +70,9 @@ pub(crate) async fn handle_request(
     ) {
         let id = session_id.ok_or_else(|| AcpError::new(-32602, "missing sessionId"))?;
         if let Some(state) = sessions.get(id) {
-            super::workspace::require_owner(state)?;
+            if state.closing {
+                return Err(AcpError::new(-32010, "Session is closing"));
+            }
         } else if method != "session/rename" {
             return Err(AcpError::new(-32602, "session not found"));
         }
@@ -146,84 +147,22 @@ pub(crate) async fn handle_request(
                     .flatten()
             });
             if let Some(id) = id {
-                if let Some(state) = sessions.get(id) {
-                    if let Some(owner) = state.execution_owner.as_ref() {
-                        let local = state
-                            .environment
-                            .as_ref()
-                            .map(|env| &env.cfg)
-                            .unwrap_or(cfg);
-                        let admission = async {
-                            let pool = local.mcp_pool.clone().and_then(|port|
-                                port.downcast_arc::<peri_middlewares::mcp::McpClientPool>().ok());
-                            let token = owner.owner_token().ok_or_else(|| AcpError::new(-32010,
-                                "Session admission incomplete: Store execution owner token unavailable"))?;
-                            let descriptor = owner_catalog::execution_descriptor(pool.as_ref(), params).await?;
-                            cfg.session_resources.bind_execution_workspace_owner(&token, &descriptor)
-                                .await.map_err(super::workspace::resource_error)?;
-                            if let Some(pool) = pool {
-                                pool.bind_session_execution_owner(id, token.clone()).map_err(|error|
-                                    AcpError::new(-32010, format!("Session admission incomplete: {error}")))?;
-                                fence_workspace_with_renewal(
-                                    &pool, &cfg.session_resources, &token, id,
-                                ).await?;
-                            }
-                            Ok::<_, AcpError>(())
-                        }.await;
-                        if let Err(error) = admission {
-                            local.session_manager.pre_close_session(id);
-                            if let Some(state) = sessions.get_mut(id) {
-                                state.closing = true;
-                            }
-                            return Err(error);
-                        }
-                    }
-                }
-                let owner_token = sessions
-                    .get(id)
-                    .and_then(|state| state.execution_owner.as_ref())
-                    .and_then(|owner| owner.owner_token());
                 let local = sessions
                     .get(id)
                     .and_then(|state| state.environment.as_ref())
                     .map(|environment| &environment.cfg)
                     .unwrap_or(cfg);
-                bind_session_tasks(id, local, transport, owner_token);
+                bind_session_tasks(id, local, transport);
             }
         }
     }
     result
 }
 
-async fn fence_workspace_with_renewal(
-    pool: &Arc<peri_middlewares::mcp::McpClientPool>,
-    resources: &Arc<dyn peri_acp_types::session_resources::SessionResources>,
-    token: &peri_acp_types::workspace::ExecutionOwnerToken,
-    session_id: &str,
-) -> Result<(), AcpError> {
-    resources
-        .renew_execution_owner(token)
-        .await
-        .map_err(super::workspace::resource_error)?;
-    let fence = pool.fence_workspace_task_scope(session_id);
-    tokio::pin!(fence);
-    let mut renew = peri_time::interval(std::time::Duration::from_secs(10));
-    renew.tick().await;
-    loop {
-        tokio::select! {
-            result = &mut fence => return result.map_err(|error|
-                AcpError::new(-32010, format!("Session admission incomplete: {error}"))),
-            _ = renew.tick() => resources.renew_execution_owner(token).await
-                .map_err(super::workspace::resource_error)?,
-        }
-    }
-}
-
 fn bind_session_tasks(
     session_id: &str,
     cfg: &AcpServerConfig,
     transport: &Arc<dyn crate::transport::AcpTransport>,
-    owner_token: Option<peri_acp_types::workspace::ExecutionOwnerToken>,
 ) {
     let Some(session) = cfg.session_manager.get_session(session_id) else {
         return;
@@ -240,28 +179,6 @@ fn bind_session_tasks(
         return;
     }
     let cancel = session.task_events_cancel.clone();
-    if let Some(token) = owner_token {
-        let resources = Arc::clone(&cfg.session_resources);
-        let manager = cfg.session_manager.clone();
-        let id = session_id.to_owned();
-        let renewal_cancel = cancel.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = renewal_cancel.cancelled() => break,
-                    _ = peri_time::sleep(std::time::Duration::from_secs(10)) => {}
-                }
-                if renewal_cancel.is_cancelled() {
-                    break;
-                }
-                if let Err(error) = resources.renew_execution_owner(&token).await {
-                    tracing::error!(session_id = %id, %error, "Store execution owner renewal failed; stopping session work");
-                    manager.pre_close_session(&id);
-                    break;
-                }
-            }
-        });
-    }
     let mut changes = manager.subscribe_events();
     let sink = TransportEventSink::new(Arc::clone(transport), cfg.session_manager.caps_registry());
     let id = session_id.to_owned();

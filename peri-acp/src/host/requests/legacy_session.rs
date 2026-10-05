@@ -46,7 +46,7 @@ pub(super) async fn prepare_for_restore(
     let _ = expected_cwd;
     let workspace = resolve_saved_workspace(cfg, &meta).await?;
     // frozen 呈现两条事实源：持久字节（Present）当场接纳；LegacyAbsent 在接纳事务前
-    // 构建一次候选（J2 §3.1：legacy 不走两阶段——存储要求绑定先于执行所有权，接纳
+    // 构建一次候选（J2 §3.1：legacy 不走两阶段，接纳
     // 之前无法取得执行环境，因此这里没有 MCP 资源面可用；覆盖不可得按 X8 保持内置）。
     let (frozen, prepared) = match snapshot.frozen {
         FrozenState::Present(bytes) => {

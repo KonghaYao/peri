@@ -27,28 +27,6 @@ pub(super) async fn migrate_local_v2(connection: &mut SqliteConnection) -> Resul
     Ok(())
 }
 
-/// Install the durable root execution generation before accepting schema 13 writes.
-pub(super) async fn migrate_local_execution_owner(connection: &mut SqliteConnection) -> Result<()> {
-    let (version,): (i64,) = sqlx::query_as("PRAGMA user_version")
-        .fetch_one(&mut *connection)
-        .await?;
-    if version != 12 {
-        bail!("execution owner migration requires schema 12");
-    }
-    let mut tx = connection.begin_with("BEGIN IMMEDIATE").await?;
-    sqlx::query(canonical::CREATE_SESSION_EXECUTION_OWNERS_TABLE_SQL)
-        .execute(&mut *tx)
-        .await?;
-    sqlx::query(canonical::CREATE_SESSION_EXECUTION_WORKSPACE_DESCRIPTORS_TABLE_SQL)
-        .execute(&mut *tx)
-        .await?;
-    sqlx::query("PRAGMA user_version = 13")
-        .execute(&mut *tx)
-        .await?;
-    tx.commit().await?;
-    Ok(())
-}
-
 async fn migrate_transaction(connection: &mut SqliteConnection) -> Result<()> {
     let mut tx = connection.begin_with("BEGIN IMMEDIATE").await?;
     let removals = super::schema_cleanup::removal_plan(&mut tx).await?;

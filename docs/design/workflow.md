@@ -382,7 +382,7 @@ fn parameters() -> JSON Schema { script, scriptPath, name, args, maxConcurrency,
 **invoke() 执行流程**：
 
 1. 解析和校验参数、脚本路径、cwd、预算与 Git write intent；构建 `WorkflowInput`。
-2. run 与 resume 共用 `WorkflowTool::start_run`：取得 session execution owner，生成
+2. run 与 resume 共用 `WorkflowTool::start_run`：使用 session 执行上下文，生成
    `run_id`，原子 reserve 并发槽，再登记统一后台任务及其取消通道。
 3. `RunCompletion::spawn` 经 `TaskManager::spawn_owned` 启动唯一执行任务，并将句柄
    attach 到 run。会话已进入 Closing 时拒绝执行，撤销本次登记。

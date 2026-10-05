@@ -58,9 +58,9 @@ use crate::resources::{
     ResourceBody, ResourceError, WorkspaceResourceProvider, WorkspaceResourcesInput,
 };
 use crate::shell_tasks::ShellTasks;
-use crate::task_scope::{ExecutionGeneration, TaskScopeAuthority, TaskScopeCapability};
 use crate::terminal::BashTool;
 use crate::WorkspaceInstanceInput;
+use peri_mcp_common::task_scope::{TaskScopeAuthority, TaskScopeCapability};
 
 /// `workspace` 实例的 `ServerConfig` 名字（`Implementation::name`）；实例名仍是注册表里的
 /// `"workspace"`（`Implementation::name` 与注册表 key 是两件事，不要合并）。
@@ -188,9 +188,6 @@ impl WorkspaceMcpServer {
             .get()
             .map(|authority| authority.resolve_capability(&context.meta))
             .transpose()?;
-        if let (Some(capability), Some(tasks)) = (&capability, &self.shell_tasks) {
-            tasks.check_execution(&capability.session_id, capability.execution.as_ref())?;
-        }
         Ok(capability)
     }
 
@@ -207,15 +204,12 @@ impl WorkspaceMcpServer {
         request: &CallToolRequestParams,
         client_supports_tasks: bool,
         scope: Option<&str>,
-        generation: Option<&ExecutionGeneration>,
     ) -> Result<CallToolResponse, McpError> {
         let tasks = self
             .shell_tasks
             .as_ref()
             .expect("owned Bash requires task owner");
-        let _admission = scope
-            .map(|scope| tasks.admit_fenced(scope, generation))
-            .transpose()?;
+        let _admission = scope.map(|scope| tasks.admit(scope)).transpose()?;
         let arguments = request.arguments.as_ref();
         let background = arguments
             .and_then(|args| args.get("run_in_background"))
@@ -232,7 +226,7 @@ impl WorkspaceMcpServer {
                 .filter(|timeout| *timeout > 0)
                 .map(|timeout| timeout.min(600_000));
             let task = tasks
-                .spawn_scoped(command.into(), self.cwd.clone(), timeout, scope, generation)
+                .spawn_scoped(command.into(), self.cwd.clone(), timeout, scope)
                 .await?;
             if client_supports_tasks {
                 return Ok(CallToolResponse::Task(CreateTaskResult::new(task)));
@@ -560,7 +554,6 @@ impl ServerHandler for WorkspaceMcpServer {
                 | "workspace/taskChanges"
                 | "workspace/taskClose"
                 | "workspace/taskOpen"
-                | "workspace/taskFence"
         ) {
             let tasks = self.shell_tasks.as_ref().ok_or_else(|| {
                 McpError::new(ErrorCode::METHOD_NOT_FOUND, request.method.clone(), None)
@@ -571,15 +564,7 @@ impl ServerHandler for WorkspaceMcpServer {
             let params = request.params.unwrap_or_default();
             let capability = authority.resolve_capability(&_context.meta)?;
             let scope = capability.session_id.as_str();
-            if request.method != "workspace/taskFence" {
-                tasks.check_execution(scope, capability.execution.as_ref())?;
-            }
             let value = match request.method.as_str() {
-                "workspace/taskFence" => {
-                    let generation = capability.execution.as_ref().ok_or_else(|| McpError::invalid_params("task fence requires Store execution capability", None))?;
-                    let barrier = tasks.fence_execution(scope, generation).await?;
-                    serde_json::to_value(serde_json::json!({"epoch": generation.epoch, "barrierCursor": barrier}))
-                }
                 "workspace/taskSnapshot" => serde_json::to_value(tasks.snapshot(scope)),
                 "workspace/taskChanges" => {
                     let cursor = params
@@ -597,19 +582,18 @@ impl ServerHandler for WorkspaceMcpServer {
                         _ = _context.ct.cancelled() => return Err(McpError::internal_error("task change wait cancelled", None)),
                         changes = tasks.changes(scope, cursor, wait_ms) => changes?,
                     };
-                    tasks.check_execution(scope, capability.execution.as_ref())?;
                     serde_json::to_value(changes)
                 }
                 "workspace/taskClose" => {
                     let epoch = params.get("epoch").and_then(serde_json::Value::as_u64)
                         .ok_or_else(|| McpError::invalid_params("task close requires epoch", None))?;
-                    let barrier = tasks.close_scope(scope, epoch, capability.execution.as_ref()).await?;
+                    let barrier = tasks.close_scope(scope, epoch).await?;
                     serde_json::to_value(serde_json::json!({"barrierCursor": barrier, "epoch": epoch}))
                 }
                 _ => {
                     let epoch = params.get("epoch").and_then(serde_json::Value::as_u64)
                         .ok_or_else(|| McpError::invalid_params("task open requires epoch", None))?;
-                    serde_json::to_value(tasks.open_scope(scope, epoch, capability.execution.as_ref())?)
+                    serde_json::to_value(tasks.open_scope(scope, epoch)?)
                 }
             }
             .map_err(|_| McpError::internal_error("task scope response encoding failed", None))?;
@@ -661,7 +645,7 @@ impl ServerHandler for WorkspaceMcpServer {
                 .shell_tasks
                 .as_ref()
                 .ok_or_else(|| McpError::invalid_params("Workspace owner unavailable", None))?;
-            let _admission = tasks.admit_fenced(&scope.session_id, scope.execution.as_ref())?;
+            let _admission = tasks.admit(&scope.session_id)?;
             return tokio::select! {
                 biased;
                 _ = _context.ct.cancelled() => Err(McpError::internal_error("workspace rewind cancelled", None)),
@@ -760,9 +744,6 @@ impl ServerHandler for WorkspaceMcpServer {
                 update = async { updates.as_mut().expect("task receiver").recv().await }, if updates.is_some() => {
                     match update {
                         Ok(task) => {
-                            if capability.as_ref().is_some_and(|capability| self.shell_tasks.as_ref().is_some_and(|tasks| tasks.check_execution(&capability.session_id, capability.execution.as_ref()).is_err())) {
-                                break;
-                            }
                             if scope.is_none_or(|scope| self.shell_tasks.as_ref().is_some_and(|tasks| tasks.belongs_to(&task.task.task_id, scope)))
                                 && context.sink().accepted().task_ids.as_ref()
                                 .is_some_and(|ids| ids.contains(&task.task.task_id))
@@ -778,7 +759,6 @@ impl ServerHandler for WorkspaceMcpServer {
                             if let Some(tasks) = self.shell_tasks.as_ref() {
                                 if let Some(ids) = context.sink().accepted().task_ids.as_ref() {
                                     for task_id in ids {
-                                        if capability.as_ref().is_some_and(|capability| tasks.check_execution(&capability.session_id, capability.execution.as_ref()).is_err()) { break 'listen; }
                                         if let Ok(state) = match scope { Some(scope) => tasks.get_scoped(task_id, scope), None => tasks.get(task_id) } {
                                             if context.sink().notify_task_status(state.task).await.is_err() {
                                                 break 'listen;
@@ -816,8 +796,7 @@ impl ServerHandler for WorkspaceMcpServer {
                 if request.name.as_ref() == "Bash" && self.shell_tasks.is_some() {
                     let capability = self.task_capability(&context)?;
                     self.call_owned_bash(&request, client_supports_tasks,
-                        capability.as_ref().map(|capability| capability.session_id.as_str()),
-                        capability.as_ref().and_then(|capability| capability.execution.as_ref())).await
+                        capability.as_ref().map(|capability| capability.session_id.as_str())).await
                 } else {
                     invoke_tool_call(self.tools(), &self.cwd, &request).await
                 }
@@ -872,11 +851,7 @@ impl ServerHandler for WorkspaceMcpServer {
             .as_ref()
             .ok_or_else(|| McpError::invalid_params("unknown task", None))?;
         match self.task_capability(&context)? {
-            Some(capability) => tasks.cancel_scoped(
-                &request.task_id,
-                &capability.session_id,
-                capability.execution.as_ref(),
-            ),
+            Some(capability) => tasks.cancel_scoped(&request.task_id, &capability.session_id),
             None => tasks.cancel(&request.task_id),
         }
     }

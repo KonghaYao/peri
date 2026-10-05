@@ -15,7 +15,6 @@ use crate::session::factory::{DeregisterRuntimeFn, RegisterRuntimeFn};
 use crate::session::Session;
 use crate::tools::{BaseTool, ToolInvocationResolver};
 use peri_acp_types::session_resources::SessionResources;
-use peri_acp_types::workspace::SessionExecutionLease;
 
 // ─── 意图类型 ────────────────────────────────────────────────────────────────
 
@@ -98,9 +97,6 @@ pub trait SubagentChainAssembler: Send + Sync {
 pub struct SubagentHost {
     /// 会话资源门面（生产路径非 None；None 仅测试/遗留路径，跳过落库）
     pub session_resources: Option<Arc<dyn SessionResources>>,
-    /// 本会话 root 的执行所有权：`save_child` 需要调用方证明自己持有这条 owner
-    /// （门面据此拒绝「借别人的所有权写」）。None = 无执行权，子会话不落库。
-    pub execution_owner: Option<Arc<dyn SessionExecutionLease>>,
     /// 后台任务管理器（per-session 聚合）
     pub task_manager: Option<Arc<TaskManager>>,
     /// 后台任务完成事件通道（bg pump，独立于主 event pump）
@@ -180,8 +176,6 @@ pub struct SubagentSpawnConfig {
     // ── 运行时通道 ──
     /// 会话资源门面（None = 不落库，仅测试/遗留路径）
     pub session_resources: Option<Arc<dyn SessionResources>>,
-    /// 本会话 root 的执行所有权（`save_child` 的前置证明；None = 不落库）
-    pub execution_owner: Option<Arc<dyn SessionExecutionLease>>,
     /// 父 agent 事件 handler（同步路径事件转发 / 重试事件追踪）
     pub event_handler: Option<Arc<dyn AgentEventHandler>>,
     /// bg 任务完成事件发送通道（bg pump）

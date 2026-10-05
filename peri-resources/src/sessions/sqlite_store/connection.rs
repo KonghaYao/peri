@@ -168,9 +168,6 @@ impl SqliteSessionDatabase {
 
     /// 只读打开的 store 不能写入：给出可诊断的原因，而不是让 SQL 层在写入时才报
     /// 「attempt to write a readonly database」。
-    ///
-    /// 与 `ExecutionLeaseRequired` 的分工：那个说的是「某条会话的执行所有权不在本
-    /// 节点」（历史仍可按只读会话进入）；这里连会话都还没有，没有可降级的对象。
     pub(super) fn require_writable(&self) -> Result<()> {
         if self.read_only {
             return Err(WorkspaceError::ReadOnlyStore.into());

@@ -61,91 +61,69 @@ async fn scope_epoch_request(
 }
 
 #[tokio::test]
-async fn old_store_owner_capability_is_rejected_after_cross_process_takeover() {
+async fn session_capabilities_work_across_connections_without_execution_fencing() {
     let dir = tempfile::tempdir().expect("workspace");
-    let server_authority = TaskScopeAuthority::trusted_connection();
-    let old_issuer = TaskScopeAuthority::trusted_connection();
-    let old = old_issuer.issue_execution("session-a", 1, "old-nonce");
-    let legacy = old_issuer.issue("session-a");
     let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy())
-        .with_task_scope_authority(server_authority);
+        .with_task_scope_authority(TaskScopeAuthority::trusted_connection());
+    let token = TaskScopeAuthority::trusted_connection().issue("session-a");
     let (client, server_task) = connect(
         server.clone(),
         ClientCapabilities::builder().enable_tasks().build(),
     )
     .await;
-    assert!(scope_request(&client, "workspace/taskSnapshot", &old, None)
+    let snapshot = scope_request(&client, "workspace/taskSnapshot", &token, None)
         .await
-        .is_err());
-    let first = scope_request(&client, "workspace/taskFence", &old, None)
+        .expect("session capability needs no execution claim");
+    assert_eq!(snapshot["tasks"], serde_json::json!([]));
+    let error = scope_request(&client, "workspace/taskFence", &token, None)
         .await
-        .expect("first Store owner fence");
-    assert_eq!(first["epoch"], 1);
+        .expect_err("removed method");
+    assert!(matches!(error, rmcp::ServiceError::McpError(error)
+        if error.code == rmcp::model::ErrorCode::METHOD_NOT_FOUND));
     let mut request = CallToolRequestParams::new("Bash").with_arguments(
         serde_json::json!({"command":"sleep 30", "run_in_background":true})
             .as_object()
             .unwrap()
             .clone(),
     );
-    request.meta = Some(scope_meta(&old));
+    request.meta = Some(scope_meta(&token));
     let CallToolResponse::Task(created) = client
         .peer()
-        .call_tool_once(request.clone())
+        .call_tool_once(request)
         .await
-        .expect("old owner task")
+        .expect("session task")
     else {
         panic!("task handle")
     };
     let task_id = created.task.task_id;
+    drop(client);
+    server_task.await.expect("first connection closed");
 
-    // Simulates an Agent restart with a newly claimed Store execution generation.
-    let next_issuer = TaskScopeAuthority::trusted_connection();
-    let next = next_issuer.issue_execution("session-a", 2, "new-nonce");
-    let advanced = scope_request(&client, "workspace/taskFence", &next, None)
-        .await
-        .expect("takeover fence");
-    assert_eq!(advanced["epoch"], 2);
-    assert!(scope_request(&client, "workspace/taskFence", &old, None)
-        .await
-        .is_err());
-    assert!(scope_request(&client, "workspace/taskSnapshot", &old, None)
-        .await
-        .is_err());
-    assert!(
-        scope_request(&client, "workspace/taskSnapshot", &legacy, None)
+    let (client, server_task) = connect(
+        server.clone(),
+        ClientCapabilities::builder().enable_tasks().build(),
+    )
+    .await;
+    let next_token = TaskScopeAuthority::trusted_connection().issue("session-a");
+    for capability in [&token, &next_token] {
+        let snapshot = scope_request(&client, "workspace/taskSnapshot", capability, None)
             .await
-            .is_err()
-    );
-    assert!(scope_epoch_request(&client, "workspace/taskClose", &old, 0)
-        .await
-        .is_err());
-    assert!(scope_epoch_request(&client, "workspace/taskOpen", &old, 0)
-        .await
-        .is_err());
-    assert!(client.peer().call_tool_once(request).await.is_err());
-    let wrong_nonce = next_issuer.issue_execution("session-a", 2, "other-nonce");
-    assert!(
-        scope_request(&client, "workspace/taskFence", &wrong_nonce, None)
-            .await
-            .is_err()
-    );
-    let mut stale_cancel = CancelTaskParams::new(&task_id);
-    stale_cancel.meta = Some(scope_meta(&old));
-    assert!(client.peer().cancel_task(stale_cancel).await.is_err());
-
-    let current = scope_request(&client, "workspace/taskSnapshot", &next, None)
-        .await
-        .expect("new owner recovery snapshot");
-    assert_eq!(current["tasks"][0]["task"]["taskId"], task_id);
-    let mut current_cancel = CancelTaskParams::new(&task_id);
-    current_cancel.meta = Some(scope_meta(&next));
+            .expect("same session remains accessible");
+        assert_eq!(snapshot["tasks"][0]["task"]["taskId"], task_id);
+    }
+    let other = TaskScopeAuthority::trusted_connection().issue("session-b");
+    let mut cancel = CancelTaskParams::new(&task_id);
+    cancel.meta = Some(scope_meta(&other));
+    assert!(client.peer().cancel_task(cancel).await.is_err());
+    let mut cancel = CancelTaskParams::new(&task_id);
+    cancel.meta = Some(scope_meta(&token));
     client
         .peer()
-        .cancel_task(current_cancel)
+        .cancel_task(cancel)
         .await
-        .expect("new owner may cancel old task");
+        .expect("original session may cancel");
     drop(client);
-    server_task.await.expect("join server");
+    server_task.await.expect("second connection closed");
     assert!(server.shutdown_shell_tasks().await.is_some());
 }
 

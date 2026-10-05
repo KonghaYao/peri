@@ -1,5 +1,5 @@
 //! Turso composition: canonical data and immutable execution evidence live in
-//! the remote store. Workspace observations and live leases stay in process.
+//! the remote store. Workspace observations stay in process; execution ownership belongs to peri-sdk.
 //! No local SQLite connection is opened in either access mode.
 
 use std::sync::Arc;

@@ -1,4 +1,6 @@
 use super::*;
+use crate::sessions::data::SessionDataPort;
+use crate::sessions::sqlite_store::SqliteSessionData;
 // `SessionResources` 的方法只在 unix 子进程用例里调用（Windows 的 home_dir 不读 HOME）。
 #[cfg(unix)]
 use peri_acp_types::session_resources::SessionResources;
@@ -10,6 +12,65 @@ use peri_acp_types::{
 };
 use sqlx::{sqlite::SqliteConnectOptions, AssertSqlSafe, Connection};
 use std::path::Path;
+use std::sync::Arc;
+
+#[tokio::test]
+async fn v13_upgrade_drops_execution_owner_tables_and_preserves_close_intent() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("threads.db");
+    let store = SqliteThreadStore::new(&path).await.unwrap();
+    let id = store
+        .create_thread(ThreadMeta::new_at("/legacy", peri_time::now_wall()))
+        .await
+        .unwrap();
+    store
+        .append_message(&id, BaseMessage::human("preserved"))
+        .await
+        .unwrap();
+    sqlx::raw_sql(
+        "CREATE TABLE session_execution_owners(root_id TEXT PRIMARY KEY REFERENCES threads(id), epoch INTEGER, nonce TEXT, released INTEGER);
+         CREATE TABLE session_execution_workspace_descriptors(root_id TEXT PRIMARY KEY REFERENCES session_execution_owners(root_id), endpoint TEXT);
+         PRAGMA user_version = 13;",
+    ).execute(&store.database.pool).await.unwrap();
+    sqlx::query("INSERT INTO session_execution_owners VALUES (?1, 7, 'retired', 0)")
+        .bind(&id)
+        .execute(&store.database.pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO session_execution_workspace_descriptors VALUES (?1, 'retired')")
+        .bind(&id)
+        .execute(&store.database.pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO session_close_intents VALUES (?1, '2026-10-05T00:00:00Z')")
+        .bind(&id)
+        .execute(&store.database.pool)
+        .await
+        .unwrap();
+    store.close().await;
+
+    let reopened = SqliteThreadStore::new(&path).await.unwrap();
+    let (retired,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM sqlite_schema WHERE name IN ('session_execution_owners', 'session_execution_workspace_descriptors')")
+        .fetch_one(&reopened.database.pool).await.unwrap();
+    assert_eq!(retired, 0);
+    let (version,): (i64,) = sqlx::query_as("PRAGMA user_version")
+        .fetch_one(&reopened.database.pool)
+        .await
+        .unwrap();
+    assert_eq!(version, CURRENT_SCHEMA_VERSION);
+    let data = SqliteSessionData::new(Arc::clone(&reopened.database));
+    assert!(data.is_session_closing(&id).await.unwrap());
+    assert_eq!(
+        reopened.load_messages(&id).await.unwrap()[0].content(),
+        "preserved"
+    );
+    data.finish_close(&id).await.unwrap();
+    reopened.close().await;
+    let reopened = SqliteThreadStore::new(&path).await.unwrap();
+    let (retired,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM sqlite_schema WHERE name IN ('session_execution_owners', 'session_execution_workspace_descriptors')")
+        .fetch_one(&reopened.database.pool).await.unwrap();
+    assert_eq!(retired, 0);
+}
 
 /// [回归测试] 实际旧库包含 thread_goals，不能因额外业务表而拒绝启动。
 #[tokio::test]
@@ -95,12 +156,10 @@ async fn test_legacy_with_goals_upgrades_removing_goals_and_preserving_extension
         )
         .await
         .unwrap();
-    let lease = store.acquire_execution_lease(&id).await.unwrap();
     store
         .append_messages(&id, &[BaseMessage::human("新会话")])
         .await
         .unwrap();
-    lease.mark_clean().await.unwrap();
 }
 
 #[tokio::test]
@@ -197,22 +256,8 @@ async fn test_single_database_upgrade_preserves_history_and_binds_only_new_sessi
         "保留的历史消息"
     );
     assert_eq!(store.load_session_binding(&old_id).await.unwrap(), None);
-    let old_lease = store.acquire_execution_lease(&old_id).await.unwrap();
-    assert!(store
-        .database
-        .registered_lease(&old_id)
-        .unwrap()
-        .unwrap()
-        .is_active());
     assert_eq!(store.load_session_binding(&old_id).await.unwrap(), None);
     assert_eq!(store.load_frozen_snapshot(&old_id).await.unwrap(), None);
-    old_lease.mark_clean().await.unwrap();
-    assert!(!store
-        .database
-        .registered_lease(&old_id)
-        .unwrap()
-        .unwrap()
-        .is_active());
     let workspace = store.resolve_workspace(dir.path()).await.unwrap();
     let id = store
         .create_bound_thread(
@@ -221,12 +266,10 @@ async fn test_single_database_upgrade_preserves_history_and_binds_only_new_sessi
         )
         .await
         .unwrap();
-    let lease = store.acquire_execution_lease(&id).await.unwrap();
     store
         .append_messages(&id, &[BaseMessage::human("新会话")])
         .await
         .unwrap();
-    lease.mark_clean().await.unwrap();
     store.close().await;
     let reopened = SqliteThreadStore::new(&path).await.unwrap();
     let page = reopened
@@ -262,12 +305,6 @@ async fn test_single_database_upgrade_preserves_history_and_binds_only_new_sessi
     .await
     .unwrap();
     assert_eq!(persisted_history, history);
-    assert!(reopened
-        .database
-        .registered_lease(&old_id)
-        .unwrap()
-        .is_none());
-    assert!(reopened.database.registered_lease(&id).unwrap().is_none());
     assert_eq!(reopened.load_session_binding(&old_id).await.unwrap(), None);
     assert_eq!(reopened.load_frozen_snapshot(&old_id).await.unwrap(), None);
     let (version,): (i64,) = sqlx::query_as("PRAGMA user_version")
@@ -280,12 +317,6 @@ async fn test_single_database_upgrade_preserves_history_and_binds_only_new_sessi
         .await
         .unwrap();
     assert_eq!(reader.load_meta(&old_id).await.unwrap().title, old.title);
-    let error = reader.acquire_execution_lease(&old_id).await.err().unwrap();
-    assert!(matches!(
-        error.downcast_ref::<WorkspaceError>(),
-        Some(WorkspaceError::ExecutionLeaseRequired)
-    ));
-    assert!(reader.database.registered_lease(&old_id).unwrap().is_none());
     reader.close().await;
     assert!(!dir.path().join("threads-v2.db").exists());
 }
@@ -789,7 +820,6 @@ async fn test_version2_upgrade_removes_required_revision_and_preserves_identity(
         )
         .await
         .unwrap();
-    let owner = store.acquire_execution_lease(&id).await.unwrap();
     assert_eq!(
         store.validate_session_binding(&id).await.unwrap(),
         workspace
@@ -803,7 +833,6 @@ async fn test_version2_upgrade_removes_required_revision_and_preserves_identity(
             .revision,
         1
     );
-    owner.mark_clean().await.unwrap();
     store.close().await;
 }
 

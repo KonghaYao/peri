@@ -38,8 +38,6 @@ pub struct FrozenData {
 pub struct ThreadPersistence {
     /// 会话资源门面：child 保存/状态/历史写入的唯一入口（None = 不持久化）
     pub session_resources: Option<Arc<dyn crate::session_resources::SessionResources>>,
-    /// 本会话 root 的执行所有权（child 保存的前置证明；None = 不落库）
-    pub execution_owner: Option<Arc<dyn crate::workspace::SessionExecutionLease>>,
     /// Parent thread ID for child thread hierarchy (None = top-level agent)
     pub parent_thread_id: Option<String>,
     /// Register callback: called when a child agent starts executing.

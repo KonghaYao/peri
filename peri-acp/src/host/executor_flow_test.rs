@@ -419,7 +419,6 @@ pub(super) async fn make_session_context(session_id: &str) -> SessionContext {
         permission_mode: SharedPermissionMode::new(PermissionMode::Bypass),
         session_access: None,
         session_resources: None,
-        execution_owner: None,
         thread_id: None,
         plugin_skill_roots: vec![],
         plugin_loaded: vec![],

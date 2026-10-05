@@ -93,7 +93,6 @@ async fn prepared_test_host(
     let (host_task_owner, host_task_spawner) = crate::host::task_scope::HostTaskOwner::new();
     let (mcp_task_owner, _mcp_task_spawner) = peri_middlewares::mcp::McpTaskOwner::new();
     AcpServerConfig {
-        allow_local_unverified_takeover: false,
         workspace_assembly,
         host_task_owner: Some(host_task_owner),
         host_task_spawner,
@@ -315,7 +314,7 @@ async fn prepare_legacy_records_saved_cwd_and_builds_from_workspace() {
 }
 
 /// new 路径的持久化属性：frozen 字节与发布到 live state 的冻结状态同源（一次写入），
-/// binding 与 owner 同时成立。
+/// binding 与 frozen 同时成立。
 ///
 /// 端到端只走生产入口（resolve → 准备一次 → 发布段），不拿第二次准备比字节：断言
 /// 的是同一次创建内部的自洽——持久化字节、live frozen 与本次工作区输入同源。
@@ -352,10 +351,7 @@ async fn new_session_persists_frozen_bytes_from_its_single_preparation() {
         .as_str()
         .expect("response carries sessionId")
         .to_owned();
-    assert!(
-        sessions[&id].execution_owner.is_some(),
-        "创建必须给出执行 owner"
-    );
+    assert!(sessions[&id].frozen.is_some(), "创建必须发布冻结输入");
     let snapshot = host
         .session_resources
         .load_session_snapshot(&id)
@@ -457,10 +453,7 @@ async fn new_session_from_prepared_does_not_reread_external_frozen_inputs() {
         .as_str()
         .expect("response carries sessionId")
         .to_owned();
-    assert!(
-        sessions[&id].execution_owner.is_some(),
-        "创建必须给出执行 owner"
-    );
+    assert!(sessions[&id].frozen.is_some(), "创建必须发布冻结输入");
     let snapshot = host
         .session_resources
         .load_session_snapshot(&id)

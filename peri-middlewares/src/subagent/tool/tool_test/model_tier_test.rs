@@ -340,7 +340,6 @@ async fn test_resume_thread_id_ignores_model_field() {
     let t = make_recording_subagent_tool(vec![], Arc::clone(&aliases))
         .with_session_resources(store.facade())
         .with_parent_thread_id(parent_id.clone())
-        .with_execution_owner(store.execution_owner())
         .with_parent_session(parent.clone());
     let t = with_agent_face(t, dir.path()).await;
     let result = t

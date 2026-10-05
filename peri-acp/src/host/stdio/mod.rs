@@ -80,7 +80,7 @@ pub async fn run_acp_stdio(input: StdioInput) -> anyhow::Result<()> {
         .with_cancel_hook(Some(Arc::new(move |_line| {
             // 全 session 兜底中断（无 sessionId）：遍历全部 SessionState 对
             // `cancel_token.cancel()`。与标准 `session/cancel`（按 sessionId +
-            // writer lease + continuation 武装，`host/notify.rs`）并存——type:cancel
+            // continuation 武装，`host/notify.rs`）并存——type:cancel
             // 无客户端身份、无续跑语义，仅作 IDE 强停兜底（批 3 §7 #10）。
             let sessions = cancel_sessions.clone();
             let _ = cancel_task_spawner.spawn(

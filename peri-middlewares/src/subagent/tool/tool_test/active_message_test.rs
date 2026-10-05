@@ -85,7 +85,6 @@ impl MessageFixture {
         )
         .with_session_resources(store.facade())
         .with_parent_thread_id(parent_id.clone())
-        .with_execution_owner(store.execution_owner())
         .with_parent_session(parent.clone())
         .with_task_manager(manager.clone())
         .with_bg_event_sender(events_tx)
@@ -332,7 +331,6 @@ async fn test_active_message_cross_session_is_rejected_without_spawning() {
     let stranger = make_subagent_tool(Vec::new())
         .with_session_resources(fixture.store.facade())
         .with_parent_thread_id(fixture.parent_id.clone())
-        .with_execution_owner(fixture.store.execution_owner())
         .with_parent_session(Arc::clone(&fixture.parent))
         .with_task_manager(Arc::new(TaskManager::new()));
     let error = stranger

@@ -1,17 +1,15 @@
 //! 会话资源门面的公共行为契约（本机 SQLite）。
 //!
 //! 这是 crate 外视角的验证：只经 `SessionResources` 的公共行为，不碰内部句柄。
-//! 覆盖访问模式与数据能力的独立性、只读路径的零副作用、以及「保存完整 → 执行准入 →
-//! 删除结束整条会话」的端到端后置条件。
 
 use std::path::Path;
 use std::sync::Arc;
 
 use peri_acp_types::session_resources::SessionStoreShutdownPort;
 use peri_acp_types::session_resources::{
-    AccessMode, BindingState, DataCapabilities, ExecutionAvailability, FrozenSnapshotBytes,
-    FrozenState, NewSession, NewSessionMeta, RewindBoundary, SessionResourceErrorKind,
-    SessionResources,
+    AccessMode, BindingState, CloseSettlement, DataCapabilities, ExecutionAvailability,
+    FrozenSnapshotBytes, FrozenState, NewSession, NewSessionMeta, RewindBoundary,
+    SessionResourceErrorKind, SessionResources,
 };
 use peri_acp_types::store::PersistedPayload;
 use peri_acp_types::workspace::{
@@ -116,7 +114,7 @@ async fn test_contract_create_append_rewind_and_reopen() {
     let workspace = facade.resolve_workspace(repo.path()).await.unwrap();
     let id = "c-lifecycle".to_owned();
 
-    let lease = facade
+    facade
         .create_session(&session(&id, &workspace))
         .await
         .unwrap();
@@ -142,12 +140,9 @@ async fn test_contract_create_append_rewind_and_reopen() {
     assert_eq!(snapshot.meta.message_count, 1);
     assert_eq!(snapshot.payloads.len(), 1);
 
-    lease.mark_clean().await.unwrap();
-    drop(lease);
     drop(facade);
     shutdown.shutdown().await.unwrap();
 
-    // 重新打开：历史、绑定、frozen 与干净代际都还在。
     let facade = SessionResourcesImpl::open(&path).await.unwrap();
     let snapshot = facade.load_session_snapshot(&id).await.unwrap();
     assert_eq!(snapshot.meta.message_count, 1);
@@ -181,12 +176,10 @@ async fn test_contract_read_only_open_reports_independent_facts_and_writes_nothi
     let (facade, shutdown) = deployment(&path).await;
     let workspace = facade.resolve_workspace(repo.path()).await.unwrap();
     let id = "c-readonly".to_owned();
-    let lease = facade
+    facade
         .create_session(&session(&id, &workspace))
         .await
         .unwrap();
-    lease.mark_clean().await.unwrap();
-    drop(lease);
     drop(facade);
     shutdown.shutdown().await.unwrap();
     let before = files(db.path());
@@ -195,7 +188,6 @@ async fn test_contract_read_only_open_reports_independent_facts_and_writes_nothi
         .await
         .unwrap();
     let availability = facade.inspect_availability(Some(&id)).await.unwrap();
-    // 三个事实互不推导：只读授权、只读能力面、以及本条会话不能取得执行权。
     assert_eq!(availability.access, AccessMode::ReadOnly);
     assert_eq!(availability.capabilities, DataCapabilities::HistoryReadOnly);
     assert_eq!(
@@ -204,7 +196,6 @@ async fn test_contract_read_only_open_reports_independent_facts_and_writes_nothi
     );
     // 历史仍可读。
     assert!(facade.load_session_meta(&id).await.is_ok());
-    // 写入在副作用之前失败：登记新身份、会话写入、取得所有权三条路径都明确拒绝。
     let error = facade.resolve_workspace(repo.path()).await.unwrap_err();
     assert!(matches!(
         error.kind(),
@@ -233,14 +224,6 @@ async fn test_contract_read_only_open_reports_independent_facts_and_writes_nothi
         error.kind(),
         SessionResourceErrorKind::ReadOnlyStore
     ));
-    let error = match facade.acquire_execution(&id, &workspace).await {
-        Ok(_) => panic!("expected acquire_execution to fail on a read-only store"),
-        Err(error) => error,
-    };
-    assert!(matches!(
-        error.kind(),
-        SessionResourceErrorKind::ReadOnlyStore
-    ));
     // 只读路径不创建、不改写任何文件（含锁文件与 schema）。
     assert_eq!(before, files(db.path()));
     drop(facade);
@@ -259,14 +242,14 @@ async fn test_contract_read_only_open_of_missing_database_creates_nothing() {
 }
 
 #[tokio::test]
-async fn test_contract_delete_removes_the_session_and_its_execution_facts() {
+async fn test_contract_delete_removes_canonical_data_and_allows_identity_reuse() {
     let repo = repository();
     let db = tempfile::tempdir().unwrap();
     let path = db.path().join("threads.db");
     let (facade, shutdown) = deployment(&path).await;
     let workspace = facade.resolve_workspace(repo.path()).await.unwrap();
     let id = "c-delete".to_owned();
-    let lease = facade
+    facade
         .create_session(&session(&id, &workspace))
         .await
         .unwrap();
@@ -276,15 +259,12 @@ async fn test_contract_delete_removes_the_session_and_its_execution_facts() {
         .unwrap();
 
     facade.delete_session_tree(&id).await.unwrap();
-    // 删除即删除：数据与执行事实一起消失，本机不留第二份「它被删过」的痕迹。
     assert!(facade.load_session_meta(&id).await.is_err());
     let error = facade
         .inspect_availability(Some(&id))
         .await
         .expect_err("删除之后这条 identity 连执行事实都不该剩下");
     assert!(matches!(error.kind(), SessionResourceErrorKind::NotFound));
-    // 删除也结束了本次所有权：owner 的收尾是幂等成功（它已经不再持有任何东西）。
-    lease.mark_clean().await.unwrap();
     // 收敛读取没有对象：会话不存在，就没有「可重载」这回事。
     let error = facade.recover_session_persistence(&id).await.unwrap_err();
     assert!(matches!(error.kind(), SessionResourceErrorKind::NotFound));
@@ -294,12 +274,10 @@ async fn test_contract_delete_removes_the_session_and_its_execution_facts() {
         error.kind(),
         SessionResourceErrorKind::Workspace(_) | SessionResourceErrorKind::NotFound
     ));
-    drop(lease);
     drop(facade);
     shutdown.shutdown().await.unwrap();
 
     // 重开仍读到同一事实：删除不被回滚，同一 identity 也可以重新创建（没有 durable 的
-    // 「不许再用」封印——删除的对象是数据与执行事实，不是这个名字）。
     let facade = SessionResourcesImpl::open(&path).await.unwrap();
     assert!(facade.load_session_meta(&id).await.is_err());
     facade
@@ -308,93 +286,73 @@ async fn test_contract_delete_removes_the_session_and_its_execution_facts() {
         .expect("删除之后同名 identity 应当可以重新创建");
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_contract_process_owner_is_exclusive_and_crash_preserves_canonical_facts() {
+#[tokio::test]
+async fn test_contract_independent_instances_preserve_canonical_facts() {
     let repo = repository();
     let db = tempfile::tempdir().unwrap();
     let path = db.path().join("threads.db");
-    let facade = SessionResourcesImpl::open(&path).await.unwrap();
-    let workspace = facade.resolve_workspace(repo.path()).await.unwrap();
-    let id = "c-exclusive".to_owned();
-    let lease = facade
+    let first = SessionResourcesImpl::open(&path).await.unwrap();
+    let workspace = first.resolve_workspace(repo.path()).await.unwrap();
+    let id = "c-independent".to_owned();
+    first
         .create_session(&session(&id, &workspace))
         .await
         .unwrap();
-
-    let before = facade.load_session_snapshot(&id).await.unwrap();
-    facade
-        .append_history(&id, &[message("original instance still active")])
+    first
+        .append_history(&id, &[message("first instance")])
         .await
         .unwrap();
-    // Store ownership is exclusive across processes. Release this process's
-    // claim before the child acquires its own execution lease.
-    lease.mark_clean().await.unwrap();
-    facade
-        .release_execution_owner(&lease.owner_token().unwrap())
+    let before = first.load_session_snapshot(&id).await.unwrap();
+    let second = SessionResourcesImpl::open(&path).await.unwrap();
+    second
+        .create_session(&session(&id, &workspace))
         .await
         .unwrap();
-    let output = child(&path, repo.path(), &id, "clean");
-    assert!(
-        output.status.success(),
-        "child failed: {} {}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(String::from_utf8_lossy(&output.stdout).contains("running 1 test"));
-    let output = child(&path, repo.path(), &id, "crash");
-    assert!(output.status.success());
-    let error = facade
-        .acquire_execution(&id, &workspace)
+    second
+        .append_history(&id, &[message("second instance")])
         .await
-        .err()
         .unwrap();
-    assert!(matches!(
-        error.kind(),
-        SessionResourceErrorKind::Conflict { .. }
-    ));
-    let after = facade.load_session_snapshot(&id).await.unwrap();
+    first
+        .append_history(&id, &[message("first instance remains usable")])
+        .await
+        .unwrap();
+    let after = second.load_session_snapshot(&id).await.unwrap();
     assert_eq!(after.binding, before.binding);
     assert_eq!(after.frozen, before.frozen);
-    assert_eq!(after.payloads.len(), 1);
+    assert_eq!(after.payloads.len(), 3);
+    assert_eq!(after.meta.message_count, 3);
     assert_eq!(after.meta.cwd, before.meta.cwd);
     assert_eq!(after.meta.parent_thread_id, before.meta.parent_thread_id);
 }
 
-/// 子进程入口：同一测试二进制的另一进程，经公共门面动作验证跨进程所有权。
 #[tokio::test]
-async fn test_contract_child_process() {
-    let Ok(db) = std::env::var("PERI_TEST_CONTRACT_DB") else {
-        return;
-    };
-    let id = std::env::var("PERI_TEST_CONTRACT_ID").unwrap();
-    let repo = std::env::var("PERI_TEST_CONTRACT_REPO").unwrap();
-    let expected = std::env::var("PERI_TEST_CONTRACT_EXPECT").unwrap();
-    let facade = SessionResourcesImpl::open(db).await.unwrap();
-    let workspace = facade.resolve_workspace(Path::new(&repo)).await.unwrap();
-    match expected.as_str() {
-        "clean" => {
-            let lease = facade.acquire_execution(&id, &workspace).await.unwrap();
-            lease.mark_clean().await.unwrap();
-            facade
-                .release_execution_owner(&lease.owner_token().unwrap())
-                .await
-                .unwrap();
-        }
-        "crash" => {
-            let _lease = facade.acquire_execution(&id, &workspace).await.unwrap();
-            std::process::exit(0);
-        }
-        other => panic!("unknown expected child result: {other}"),
-    }
-}
-
-fn child(db: &Path, repo: &Path, id: &str, expected: &str) -> std::process::Output {
-    std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "test_contract_child_process", "--nocapture"])
-        .env("PERI_TEST_CONTRACT_DB", db)
-        .env("PERI_TEST_CONTRACT_REPO", repo)
-        .env("PERI_TEST_CONTRACT_ID", id)
-        .env("PERI_TEST_CONTRACT_EXPECT", expected)
-        .output()
-        .unwrap()
+async fn test_contract_close_intent_survives_reopen_and_finishes_by_id() {
+    let repo = repository();
+    let db = tempfile::tempdir().unwrap();
+    let path = db.path().join("threads.db");
+    let (facade, shutdown) = deployment(&path).await;
+    let workspace = facade.resolve_workspace(repo.path()).await.unwrap();
+    let id = "c-close".to_owned();
+    facade
+        .create_session(&session(&id, &workspace))
+        .await
+        .unwrap();
+    facade.mark_session_closing(&id).await.unwrap();
+    facade.mark_session_closing(&id).await.unwrap();
+    assert_eq!(
+        facade.close_settlement(&id).await.unwrap(),
+        CloseSettlement::Pending
+    );
+    drop(facade);
+    shutdown.shutdown().await.unwrap();
+    let reopened = SessionResourcesImpl::open(&path).await.unwrap();
+    assert!(reopened.is_session_closing(&id).await.unwrap());
+    reopened.drain_persistence(&id).await.unwrap();
+    reopened.finish_close(&id).await.unwrap();
+    assert!(!reopened.is_session_closing(&id).await.unwrap());
+    assert_eq!(
+        reopened.close_settlement(&id).await.unwrap(),
+        CloseSettlement::Finished
+    );
+    assert!(reopened.load_session_snapshot(&id).await.is_ok());
 }

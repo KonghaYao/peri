@@ -75,7 +75,6 @@ pub(super) async fn spawn_subagent_impl(
         context_budget,
         compact_llm,
         session_resources,
-        execution_owner,
         event_handler,
         bg_event_sender,
         task_manager,
@@ -227,9 +226,6 @@ pub(super) async fn spawn_subagent_impl(
         }
         let root_id = super::execution_root(store.as_ref(), &parent_id).await?;
         mcp_task_owner_session_id = Some(root_id.clone());
-        let lease = execution_owner.as_ref().ok_or(
-            "spawn_subagent: child 保存需要本会话 root 的执行所有权（save_child 不接受借来的所有权）",
-        )?;
         let snapshot_id = parent_messages.last().map(|m| m.id());
         let child = peri_acp_types::session_resources::ChildSnapshot {
             target: peri_acp_types::session_resources::NewSession {
@@ -250,7 +246,7 @@ pub(super) async fn spawn_subagent_impl(
             root_id,
             inherited: inherited.clone(),
         };
-        store.save_child(&child, lease).await?;
+        store.save_child(&child).await?;
     }
 
     // 5. 构造子 session + 链装配 + v2_ctx（共享 helper [build_subagent_session_v2]：

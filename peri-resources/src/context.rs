@@ -24,7 +24,7 @@ use crate::sessions::{
 
 /// 外部系统资源门面
 ///
-/// 存储的构造、owner 登记与关闭都由门面内部完成，「谁持有执行权」因此只有一个真相。
+/// 存储的构造与关闭由门面内部完成，执行所有权由 peri-sdk 维护。
 /// 本结构同时持有两类所有权，且**不可克隆**：业务句柄
 /// （[`Resources::session_resources`]）可以克隆任意份交给 Agent/Controller/middleware，
 /// 但部署关闭权（[`SessionStoreShutdownOwner`]）只有一份，只能经

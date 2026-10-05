@@ -246,28 +246,12 @@ impl SqliteSessionDatabase {
         // 提交前的复核在写事务内进行（`validate_resolved_on`：关系加关键文件对象）。
         // 同一次准入已在解析阶段观测过完整发现，这里再跑一轮 Git 只是把同一次观测
         // 重复一遍，代价是每个创建方都要等 Git（含慢 Git 的固定等待）。
-        let write_guard = if let Some(parent) = &meta.parent_thread_id {
-            // 桥与本机数据面共用同一个库：父线程的事实（含它是谁的子会话）按本机读法取。
-            let facts = self.local_session_facts(parent).await?;
-            let guard = self.require_execution_lease(parent, &facts).await?;
-            // 子线程继承父线程的同一工作区：比对的是已记录的绑定身份，不需要重新发现。
-            let parent_workspace = self.reassert_session_binding_impl(parent).await;
-            match parent_workspace {
-                Ok(parent_workspace) if &parent_workspace == workspace => guard,
-                other => {
-                    if let Some(guard) = guard {
-                        guard.finish();
-                    }
-                    return match other {
-                        Err(error) => Err(error),
-                        Ok(_) => Err(WorkspaceError::ExecutionBindingMismatch.into()),
-                    };
-                }
+        if let Some(parent) = &meta.parent_thread_id {
+            let parent_workspace = self.reassert_session_binding_impl(parent).await?;
+            if &parent_workspace != workspace {
+                return Err(WorkspaceError::ExecutionBindingMismatch.into());
             }
-        } else {
-            None
-        };
-        let result = async {
+        }
         meta.cwd = discovery::path_text(&workspace.cwd)?.to_owned();
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         Self::validate_resolved_on(&mut tx, workspace).await?;
@@ -288,11 +272,6 @@ impl SqliteSessionDatabase {
             .execute(&mut *tx).await?;
         tx.commit().await?;
         Ok(meta.id)
-        }.await;
-        if let Some(guard) = write_guard {
-            guard.finish();
-        }
-        result
     }
 
     pub(super) async fn load_session_binding_impl(
@@ -312,7 +291,7 @@ impl SqliteSessionDatabase {
         frozen_snapshot: &str,
     ) -> Result<()> {
         if self.read_only {
-            return Err(WorkspaceError::ExecutionLeaseRequired.into());
+            return Err(WorkspaceError::ReadOnlyStore.into());
         }
         if !Path::new(saved_cwd).is_absolute() {
             return Err(WorkspaceError::Unavailable.into());

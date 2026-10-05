@@ -24,7 +24,7 @@
 use peri_acp_types::{messages::BaseMessage, store::PersistedPayload};
 
 /// 两种会话数据 adapter 的同一 schema 版本。
-pub(super) const CURRENT_SCHEMA_VERSION: i64 = 13;
+pub(super) const CURRENT_SCHEMA_VERSION: i64 = 14;
 
 /// 会话事实表。
 pub(super) const THREADS_TABLE: &str = "threads";
@@ -211,30 +211,7 @@ pub(super) const CREATE_V2_TABLES: &[&str] = &[
     CREATE_V2_BINDINGS_TABLE_SQL,
     CREATE_V2_OAUTH_CREDENTIALS_TABLE_SQL,
     CREATE_SESSION_CLOSE_INTENTS_TABLE_SQL,
-    CREATE_SESSION_EXECUTION_OWNERS_TABLE_SQL,
-    CREATE_SESSION_EXECUTION_WORKSPACE_DESCRIPTORS_TABLE_SQL,
 ];
-/// The only durable execution generation for a root session.
-pub(super) const CREATE_SESSION_EXECUTION_OWNERS_TABLE_SQL: &str =
-    "CREATE TABLE IF NOT EXISTS session_execution_owners (
-    root_id TEXT PRIMARY KEY NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
-    epoch INTEGER NOT NULL CHECK(epoch > 0),
-    nonce TEXT NOT NULL,
-    expires_at_unix INTEGER NOT NULL,
-    released INTEGER NOT NULL CHECK(released IN (0, 1))
-)";
-/// Nonsecret identity of the external task authority used by an execution.
-/// A closing takeover preserves the previous descriptor until the new Agent
-/// proves the former generation stopped and binds its own descriptor.
-pub(super) const CREATE_SESSION_EXECUTION_WORKSPACE_DESCRIPTORS_TABLE_SQL: &str =
-    "CREATE TABLE IF NOT EXISTS session_execution_workspace_descriptors (
-    root_id TEXT PRIMARY KEY NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
-    owner_epoch INTEGER NOT NULL CHECK(owner_epoch > 0),
-    endpoint TEXT NOT NULL,
-    key_identity TEXT NOT NULL,
-    agent_generation_id TEXT NOT NULL,
-    unsupported_async_owners INTEGER NOT NULL CHECK(unsupported_async_owners IN (0, 1))
-)";
 /// 显式关闭已接纳的持久事实；不保存异步任务目录。
 pub(super) const CREATE_SESSION_CLOSE_INTENTS_TABLE_SQL: &str =
     "CREATE TABLE IF NOT EXISTS session_close_intents (
@@ -267,14 +244,6 @@ pub(super) const THREAD_CHILD_DELETES: &[(&str, &str)] = &[
     (
         "session_close_intents",
         "DELETE FROM session_close_intents WHERE thread_id = ?1",
-    ),
-    (
-        "session_execution_workspace_descriptors",
-        "DELETE FROM session_execution_workspace_descriptors WHERE root_id = ?1",
-    ),
-    (
-        "session_execution_owners",
-        "DELETE FROM session_execution_owners WHERE root_id = ?1",
     ),
 ];
 

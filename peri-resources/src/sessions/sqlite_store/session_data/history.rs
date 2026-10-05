@@ -24,7 +24,7 @@ impl SqliteSessionData {
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(|error| map_sqlx(&error))?;
-        self.assert_owner(&mut tx, id).await?;
+        self.require_session(&mut tx, id).await?;
         if !thread_exists_on(&mut tx, id).await.map_err(read_failure)? {
             // 目标会话不存在与「外键拒绝」是两个不同的原因，前者更可诊断。
             return Err(not_found());

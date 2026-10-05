@@ -1,5 +1,4 @@
-//! In-process execution admission for a remote-only session store.
-//! Filesystem observations are local; ownership and immutable evidence are remote.
+//! Workspace discovery and saved-binding validation for a remote session store.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -7,24 +6,16 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use async_trait::async_trait;
-use peri_acp_types::session_resources::{
-    NewSession, NewSessionDraft, SessionResourceError, SessionResourceErrorKind,
-    SessionResourceResult,
-};
 use peri_acp_types::thread::ThreadId;
 use peri_acp_types::workspace::{
-    ProjectId, ResolvedWorkspace, SessionBinding, SessionExecutionLease, WorkspaceError,
-    WorkspaceId, SESSION_BINDING_VERSION,
+    ProjectId, ResolvedWorkspace, SessionBinding, WorkspaceError, WorkspaceId,
+    SESSION_BINDING_VERSION,
 };
 use sha2::{Digest, Sha256};
 
-use crate::sessions::data::SessionDataPort;
 #[cfg(not(target_os = "emscripten"))]
 use crate::sessions::discovery::{self, Discovery};
-use crate::sessions::execution::{
-    same_lease, ExclusiveExecutionGuard, ExecutionLease, ExecutionWriteGuard,
-};
-use crate::sessions::local_port::{LocalExecutionPort, RevokeEffect, SessionFacts};
+use crate::sessions::local_port::LocalExecutionPort;
 
 use super::environment::RemoteWorkspaceEnvironment;
 use super::session_data::RemoteSessionData;
@@ -36,26 +27,9 @@ struct VirtualSnapshot {
     root: PathBuf,
 }
 
-fn lease_required() -> SessionResourceError {
-    SessionResourceError::new(SessionResourceErrorKind::Workspace(
-        WorkspaceError::ExecutionLeaseRequired,
-    ))
-}
-
-fn execution_failure(error: anyhow::Error) -> SessionResourceError {
-    if let Some(workspace) = error.downcast_ref::<WorkspaceError>() {
-        SessionResourceError::new(SessionResourceErrorKind::Workspace(workspace.clone()))
-    } else {
-        SessionResourceError::new(SessionResourceErrorKind::Unavailable {
-            detail: "remote execution state is unavailable".to_owned(),
-        })
-    }
-}
-
 pub(super) struct RemoteExecution {
     data: Arc<RemoteSessionData>,
     read_only: bool,
-    leases: Mutex<HashMap<ThreadId, Arc<ExecutionLease>>>,
     observations: Mutex<HashMap<(WorkspaceId, PathBuf), ResolvedWorkspace>>,
     environment: RemoteWorkspaceEnvironment,
 }
@@ -73,7 +47,6 @@ impl RemoteExecution {
         Self {
             data,
             read_only,
-            leases: Mutex::new(HashMap::new()),
             observations: Mutex::new(HashMap::new()),
             environment,
         }
@@ -92,77 +65,6 @@ impl RemoteExecution {
         bytes[6] = (bytes[6] & 0x0f) | 0x80; // RFC 9562 UUIDv8 (custom SHA-256 namespace).
         bytes[8] = (bytes[8] & 0x3f) | 0x80;
         Ok(uuid::Uuid::from_bytes(bytes).to_string())
-    }
-
-    fn registered(&self, id: &ThreadId) -> Result<Option<Arc<ExecutionLease>>> {
-        Ok(self
-            .leases
-            .lock()
-            .map_err(|_| WorkspaceError::ExecutionLeaseRequired)?
-            .get(id)
-            .cloned())
-    }
-
-    fn owner(&self, id: &ThreadId, facts: &SessionFacts) -> Result<Option<Arc<ExecutionLease>>> {
-        match self.registered(id)? {
-            Some(lease) => Ok(Some(lease)),
-            None if facts.root != *id => self.registered(&facts.root),
-            None => Ok(None),
-        }
-    }
-
-    fn register(&self, id: &ThreadId) -> Result<Arc<ExecutionLease>> {
-        if self.read_only {
-            return Err(WorkspaceError::ReadOnlyStore.into());
-        }
-        let mut leases = self
-            .leases
-            .lock()
-            .map_err(|_| WorkspaceError::ExecutionLeaseRequired)?;
-        if let Some(lease) = leases.get(id) {
-            if lease.is_uncertain() {
-                anyhow::bail!("session persistence outcome is uncertain");
-            }
-            if lease.is_active() {
-                return Ok(Arc::clone(lease));
-            }
-            if !lease.can_replace() {
-                return Err(WorkspaceError::ExecutionLeaseRequired.into());
-            }
-        }
-        let lease = Arc::new(ExecutionLease::new(id.clone()));
-        leases.insert(id.clone(), Arc::clone(&lease));
-        Ok(lease)
-    }
-
-    async fn check_saved_write_evidence(&self, id: &ThreadId, facts: &SessionFacts) -> Result<()> {
-        let own_binding = self.data.binding_of(id).await?;
-        let evidence_id = if own_binding.is_some() {
-            id
-        } else {
-            &facts.root
-        };
-        let binding = match own_binding {
-            Some(binding) => binding,
-            None => self
-                .data
-                .binding_of(&facts.root)
-                .await?
-                .ok_or(WorkspaceError::BindingMissing)?,
-        };
-        let snapshot = self
-            .data
-            .binding_discovery_snapshot(evidence_id)
-            .await?
-            .ok_or(WorkspaceError::BindingMissing)?;
-        let owner = self
-            .data
-            .workspace_id_of(evidence_id)
-            .await?
-            .ok_or(WorkspaceError::InvalidBinding)?;
-        self.observe_binding(&binding, &snapshot, owner, true)
-            .await?;
-        Ok(())
     }
 
     async fn observe_binding(
@@ -415,134 +317,5 @@ impl LocalExecutionPort for RemoteExecution {
 
     async fn legacy_confirmed(&self, _id: &ThreadId) -> Result<bool> {
         Ok(false)
-    }
-    async fn owner_lease(
-        &self,
-        id: &ThreadId,
-        facts: &SessionFacts,
-    ) -> Result<Option<Arc<ExecutionLease>>> {
-        self.owner(id, facts)
-    }
-    async fn live_owner(
-        &self,
-        id: &ThreadId,
-        facts: &SessionFacts,
-    ) -> Result<Option<Arc<ExecutionLease>>> {
-        self.owner(id, facts)
-    }
-    fn live_leases(&self) -> Vec<Arc<ExecutionLease>> {
-        self.leases
-            .lock()
-            .map(|map| map.values().cloned().collect())
-            .unwrap_or_default()
-    }
-    async fn write_guard(
-        &self,
-        id: &ThreadId,
-        facts: &SessionFacts,
-    ) -> Result<Option<ExecutionWriteGuard>> {
-        if self.read_only {
-            return Err(WorkspaceError::ReadOnlyStore.into());
-        }
-        match self.owner(id, facts)? {
-            Some(lease) => Ok(Some(lease.write_guard().await?)),
-            None => {
-                self.check_saved_write_evidence(id, facts).await?;
-                Ok(None)
-            }
-        }
-    }
-    async fn exclusive_guard(
-        &self,
-        id: &ThreadId,
-        facts: &SessionFacts,
-    ) -> Result<Option<ExclusiveExecutionGuard>> {
-        if self.read_only {
-            return Err(WorkspaceError::ReadOnlyStore.into());
-        }
-        match self.owner(id, facts)? {
-            Some(lease) => Ok(Some(lease.exclusive_guard().await?)),
-            None => Ok(None),
-        }
-    }
-    async fn acquire_lease(
-        &self,
-        id: &ThreadId,
-        _facts: &SessionFacts,
-    ) -> Result<Arc<dyn SessionExecutionLease>> {
-        Ok(self.register(id)?)
-    }
-    async fn create_session(
-        &self,
-        _input: &NewSession,
-    ) -> SessionResourceResult<Arc<dyn SessionExecutionLease>> {
-        Err(SessionResourceError::new(
-            SessionResourceErrorKind::Workspace(WorkspaceError::Unavailable),
-        ))
-    }
-    async fn begin_initialization(
-        &self,
-        _draft: &NewSessionDraft,
-    ) -> SessionResourceResult<Arc<dyn SessionExecutionLease>> {
-        Err(SessionResourceError::new(
-            SessionResourceErrorKind::Workspace(WorkspaceError::Unavailable),
-        ))
-    }
-    async fn commit_frozen(
-        &self,
-        _id: &ThreadId,
-        _lease: &Arc<dyn SessionExecutionLease>,
-        _frozen: &peri_acp_types::session_resources::FrozenSnapshotBytes,
-    ) -> SessionResourceResult<()> {
-        Err(SessionResourceError::new(
-            SessionResourceErrorKind::Workspace(WorkspaceError::Unavailable),
-        ))
-    }
-    async fn verify_initialization_owner(
-        &self,
-        id: &ThreadId,
-        lease: &Arc<dyn SessionExecutionLease>,
-    ) -> SessionResourceResult<()> {
-        let owned = self
-            .registered(id)
-            .map_err(execution_failure)?
-            .ok_or_else(lease_required)?;
-        if !same_lease(&owned, lease) || !owned.is_active() || owned.is_uncertain() {
-            return Err(lease_required());
-        }
-        Ok(())
-    }
-    async fn discard_incomplete_initialization(&self, _id: &ThreadId) -> SessionResourceResult<()> {
-        Err(SessionResourceError::new(
-            SessionResourceErrorKind::Workspace(WorkspaceError::Unavailable),
-        ))
-    }
-    async fn admit_existing(
-        &self,
-        id: &ThreadId,
-        _binding: &SessionBinding,
-    ) -> SessionResourceResult<Arc<dyn SessionExecutionLease>> {
-        self.register(id)
-            .map(|lease| lease as Arc<dyn SessionExecutionLease>)
-            .map_err(execution_failure)
-    }
-    async fn abandon_initialization(
-        &self,
-        id: &ThreadId,
-        lease: &Arc<dyn SessionExecutionLease>,
-        revoke: RevokeEffect<'_>,
-    ) -> SessionResourceResult<()> {
-        self.verify_initialization_owner(id, lease).await?;
-        let owned = self
-            .registered(id)
-            .map_err(execution_failure)?
-            .ok_or_else(lease_required)?;
-        owned.abandon_ownership(|| revoke).await
-    }
-    async fn dispose_execution(&self, id: &ThreadId) -> SessionResourceResult<()> {
-        if let Some(lease) = self.registered(id).map_err(execution_failure)? {
-            lease.dispose_ownership().await;
-        }
-        Ok(())
     }
 }

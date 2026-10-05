@@ -12,10 +12,7 @@ use peri_acp_types::{
     },
     store::{CompactionChange, MessageFlags, PersistedPayload, ThreadStore},
     thread::{ThreadId, ThreadMeta},
-    workspace::{
-        ResolvedWorkspace, ScopedThreadPage, ScopedThreadQuery, SessionBinding,
-        SessionExecutionLease,
-    },
+    workspace::{ResolvedWorkspace, ScopedThreadPage, ScopedThreadQuery, SessionBinding},
 };
 use std::{collections::HashMap, sync::atomic::AtomicBool};
 
@@ -97,18 +94,7 @@ impl SessionResources for RecoveryStore {
         self.inner.validate_session(id, workspace).await
     }
 
-    async fn acquire_execution(
-        &self,
-        id: &ThreadId,
-        workspace: &ResolvedWorkspace,
-    ) -> SessionResourceResult<Arc<dyn SessionExecutionLease>> {
-        self.inner.acquire_execution(id, workspace).await
-    }
-
-    async fn create_session(
-        &self,
-        input: &NewSession,
-    ) -> SessionResourceResult<Arc<dyn SessionExecutionLease>> {
+    async fn create_session(&self, input: &NewSession) -> SessionResourceResult<()> {
         self.inner.create_session(input).await
     }
 
@@ -124,12 +110,8 @@ impl SessionResources for RecoveryStore {
         self.inner.discard_incomplete_initialization(id).await
     }
 
-    async fn abandon_initialization(
-        &self,
-        id: &ThreadId,
-        lease: &Arc<dyn SessionExecutionLease>,
-    ) -> SessionResourceResult<()> {
-        self.inner.abandon_initialization(id, lease).await
+    async fn abandon_initialization(&self, id: &ThreadId) -> SessionResourceResult<()> {
+        self.inner.abandon_initialization(id).await
     }
 
     async fn adopt_legacy_session(
@@ -221,40 +203,13 @@ impl SessionResources for RecoveryStore {
         self.inner.mark_session_closing(id).await
     }
 
-    async fn claim_closing_execution(
-        &self,
-        id: &ThreadId,
-        expected_current_epoch: i64,
-    ) -> SessionResourceResult<Arc<dyn SessionExecutionLease>> {
-        self.inner
-            .claim_closing_execution(id, expected_current_epoch)
-            .await
-    }
-
-    async fn renew_execution_owner(
-        &self,
-        token: &peri_acp_types::workspace::ExecutionOwnerToken,
-    ) -> SessionResourceResult<()> {
-        self.inner.renew_execution_owner(token).await
-    }
-
-    async fn release_execution_owner(
-        &self,
-        token: &peri_acp_types::workspace::ExecutionOwnerToken,
-    ) -> SessionResourceResult<()> {
-        self.inner.release_execution_owner(token).await
-    }
-
-    async fn finish_close(
-        &self,
-        token: &peri_acp_types::workspace::ExecutionOwnerToken,
-    ) -> SessionResourceResult<()> {
+    async fn finish_close(&self, token: &ThreadId) -> SessionResourceResult<()> {
         self.inner.finish_close(token).await
     }
 
     async fn close_settlement(
         &self,
-        token: &peri_acp_types::workspace::ExecutionOwnerToken,
+        token: &ThreadId,
     ) -> SessionResourceResult<peri_acp_types::session_resources::CloseSettlement> {
         self.inner.close_settlement(token).await
     }
@@ -263,19 +218,12 @@ impl SessionResources for RecoveryStore {
         self.inner.is_session_closing(id).await
     }
 
-    async fn save_fork(
-        &self,
-        fork: &ForkSnapshot,
-    ) -> SessionResourceResult<Arc<dyn SessionExecutionLease>> {
+    async fn save_fork(&self, fork: &ForkSnapshot) -> SessionResourceResult<()> {
         self.inner.save_fork(fork).await
     }
 
-    async fn save_child(
-        &self,
-        child: &ChildSnapshot,
-        lease: &Arc<dyn SessionExecutionLease>,
-    ) -> SessionResourceResult<()> {
-        self.inner.save_child(child, lease).await
+    async fn save_child(&self, child: &ChildSnapshot) -> SessionResourceResult<()> {
+        self.inner.save_child(child).await
     }
 
     async fn claim_child_resume(
@@ -376,7 +324,6 @@ fn make_host_sessions(ctx: &SessionContext, payloads: Vec<PersistedPayload>) -> 
         session_id: ctx.session_id.clone(),
         thread_id: ctx.thread_id.clone().unwrap(),
         cwd: ctx.cwd.clone(),
-        execution_owner: ctx.execution_owner.clone(),
         environment: None,
         closing: false,
         history: payloads
@@ -395,7 +342,6 @@ fn make_host_sessions(ctx: &SessionContext, payloads: Vec<PersistedPayload>) -> 
         continuation_epoch: 0,
         continuation_in_flight: false,
         continuation_mq_steering_pending: false,
-        lease: crate::host::lease::WriterLease::acquired("default"),
     };
     Arc::new(tokio::sync::Mutex::new(HashMap::from([(
         ctx.session_id.clone(),
@@ -408,7 +354,7 @@ async fn make_recovery_context(
     model: Arc<dyn Model>,
     fail_after_full: bool,
 ) -> (SessionContext, Arc<RecoveryStore>, SharedSessions) {
-    // 夹具与生产同构：门面来自同一次打开，并经公共会话创建入口取得 owner。
+    // 夹具与生产同构：门面来自同一次打开，并经公共会话创建入口保存完整身份。
     let (_bridge, facade) =
         peri_resources::sessions::open_store_and_facade_for_tests(dir.path().join("recovery.db"))
             .await
@@ -425,8 +371,9 @@ async fn make_recovery_context(
     let meta = ThreadMeta::new_at(cwd, peri_time::now_wall());
     let thread_id = meta.id.clone();
     let workspace = store.resolve_workspace(dir.path()).await.unwrap();
+    let cwd = workspace.cwd.to_str().unwrap();
     let frozen = make_sentinel_frozen();
-    let lease = store
+    store
         .create_session(&NewSession {
             thread_id: thread_id.clone(),
             created_at: meta.created_at.to_rfc3339(),
@@ -461,7 +408,6 @@ async fn make_recovery_context(
     ctx.cwd = cwd.into();
     ctx.thread_id = Some(thread_id.clone());
     ctx.session_resources = Some(store.clone());
-    ctx.execution_owner = Some(lease);
     ctx.primary_llm_factory = Some(Arc::new(move || model.clone()));
     let sessions = make_host_sessions(
         &ctx,
@@ -640,12 +586,7 @@ async fn test_full_compact_writer_error_evicts_host_and_cold_reload_recovers_sum
         0,
         "不得删除已提交 lifecycle 的消息"
     );
-    // 释放原执行与持久化 owner，再打开全新的 SQLite store（桥与门面重新配对）。
-    store
-        .release_execution_owner(&ctx.execution_owner.as_ref().unwrap().owner_token().unwrap())
-        .await
-        .unwrap();
-    ctx.execution_owner = None;
+    // 释放原持久化句柄，再打开全新的 SQLite store（桥与门面重新配对）。
     ctx.session_resources = None;
     drop(store);
     let (recovered, recovered_facade) =
@@ -668,16 +609,6 @@ async fn test_full_compact_writer_error_evicts_host_and_cold_reload_recovers_sum
                 .is_some_and(|m| m.content().contains(SUMMARY)))
             .count(),
         1
-    );
-    let workspace = recovered_facade
-        .resolve_workspace(dir.path())
-        .await
-        .unwrap();
-    ctx.execution_owner = Some(
-        recovered_facade
-            .acquire_execution(thread_id, &workspace)
-            .await
-            .unwrap(),
     );
     ctx.session_resources = Some(Arc::new(recovered_facade));
     let cold_sessions = make_host_sessions(&ctx, payloads);
@@ -829,13 +760,7 @@ async fn assert_unconfirmed_commit_requires_cold_recovery(cancel_after_commit: b
     assert!(wire.message.contains("reload"));
     assert!(!sessions.lock().await.contains_key(&ctx.session_id));
     assert_eq!(store.deletes.load(Ordering::SeqCst), 0);
-    // Simulate the old host's confirmed exit before a different store facade
-    // acquires execution. Cold recovery must not bypass an active Store owner.
-    store
-        .release_execution_owner(&ctx.execution_owner.as_ref().unwrap().owner_token().unwrap())
-        .await
-        .unwrap();
-    ctx.execution_owner = None;
+    // Reopen the persisted history through a fresh store facade.
     ctx.session_resources = None;
     drop(store);
     let (recovered, recovered_facade) =
@@ -858,16 +783,6 @@ async fn assert_unconfirmed_commit_requires_cold_recovery(cancel_after_commit: b
                 .is_some_and(|m| m.content().contains(SUMMARY)))
             .count(),
         1
-    );
-    let workspace = recovered_facade
-        .resolve_workspace(dir.path())
-        .await
-        .unwrap();
-    ctx.execution_owner = Some(
-        recovered_facade
-            .acquire_execution(thread_id, &workspace)
-            .await
-            .unwrap(),
     );
     ctx.session_resources = Some(Arc::new(recovered_facade));
     let cold_sessions = make_host_sessions(&ctx, payloads);

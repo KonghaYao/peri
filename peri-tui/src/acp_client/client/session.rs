@@ -3,8 +3,7 @@
 use std::sync::{Arc, Mutex};
 
 use peri_acp::transport::{AcpTransport, types::AcpError};
-use peri_acp_types::workspace::ReadOnlyAdmission;
-use serde_json::{Value, json};
+use serde_json::json;
 #[cfg(test)]
 use tokio::sync::mpsc;
 use tokio::sync::watch;
@@ -431,15 +430,10 @@ impl AcpTuiClient {
         }
 
         let params = json!({ "sessionId": session_id, "cwd": effective_cwd, "model": model });
-        let first = self
+        let result = self
             .transport
             .send_request("session/load", params.clone())
             .await;
-        // 准入可能是只读的：历史已可读，但执行所有权不在本节点。它不是失败（不再用
-        // 错误挡住进入），只把「本次准入只读」与原因带走。
-        let read_only = first.as_ref().ok().and_then(read_only_admission);
-        let restore_warning = first.as_ref().ok().and_then(restore_warning);
-        let result = first;
         if let Err(error) = result {
             *self.restore_error.lock().unwrap() = Some(error.to_string());
             self.lifecycle.fail_transition(start.generation);
@@ -455,13 +449,6 @@ impl AcpTuiClient {
             .await?;
         self.project_execution_cwd(Some(effective_cwd));
         *self.restore_error.lock().unwrap() = None;
-        // 只读标记是交互投影：唯一的清空点是 `project_session_boundary`（交互路径）。
-        // 非交互客户端没有状态栏、不跑 steer consumer，写进去只会留下一个永不清空的
-        // 全局标记，并污染并行的 UI 测试。
-        if self.projection_mode == ClientProjectionMode::Interactive {
-            crate::kit::atoms::SESSION_READ_ONLY.set(read_only);
-            crate::kit::atoms::SESSION_RESTORE_WARNING.set(restore_warning);
-        }
         projection.committed = true;
         transition.disarm();
         if self.projection_mode == ClientProjectionMode::Interactive {
@@ -551,26 +538,4 @@ impl AcpTuiClient {
         }
         result.map(|_| ())
     }
-}
-
-/// 本次准入的只读标记；`None` 表示准入持有执行所有权（或响应没有该字段）。
-///
-/// host 把只读标记装配在 `sessionWorkspaceV1` 身份载荷里，所以只有协商过该能力的
-/// 客户端看得到它；未协商的连接同样按只读准入进入，标记缺失不等于本次持有所有权。
-fn read_only_admission(response: &Value) -> Option<ReadOnlyAdmission> {
-    serde_json::from_value(
-        response
-            .pointer("/_meta/peri.sessionWorkspaceV1/read_only")?
-            .clone(),
-    )
-    .ok()
-}
-
-fn restore_warning(response: &Value) -> Option<peri_acp_types::workspace::SessionRestoreWarning> {
-    serde_json::from_value(
-        response
-            .pointer("/_meta/peri.sessionWorkspaceV1/restore_warning")?
-            .clone(),
-    )
-    .ok()
 }

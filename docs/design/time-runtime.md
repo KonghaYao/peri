@@ -5,7 +5,7 @@
 > 编译与宿主测试为准。
 >
 > Scope：Peri 自身的时钟读取、日历解释、进程内计时和有界等待。时间值的持久化
-> schema、cron 业务规则、远端 Store 的租约权威和各协议字段仍由所属领域定义。
+> schema、cron 业务规则、上层 SDK 的执行所有权和各协议字段仍由所属领域定义。
 > 外部库与平台能力依据见[时间平台参考](../reference/time-platform-research.md)。
 
 ## 目标与边界
@@ -26,7 +26,7 @@ flowchart LR
     Business[Agent / ACP / Middleware / Resources] --> API[peri-time 公共能力]
     API --> Native[原生实现：系统时钟 + Tokio timer]
     API --> Emscripten[Emscripten 实现：系统 UTC 时钟 + JS event loop timer]
-    Business --> Policy[领域规则：日期冻结 / 租约 / 错误分类]
+    Business --> Policy[领域规则：日期冻结 / 超时 / 错误分类]
 ```
 
 编译目标选择实现是当前需要的替换粒度；同一进程中运行时切换 timer 库没有用例。
@@ -41,8 +41,8 @@ flowchart LR
 | 日历日期 | 展示和会话 prompt 的日期；由已选时区约定从墙钟解释 | 原生部署沿用本机日历日期，Emscripten 沿用已验证的 UTC 日期；会话创建时冻结，恢复读取快照 |
 | 单调时间 | 进程内耗时、deadline、sleep 与 timeout | 不序列化，不跨实例比较；到期取消等待本身不证明外部副作用未发生 |
 
-时间戳、日期与 deadline 不互相替代。跨进程租约、恢复和接管以 Store 中的权威字段
-及事务条件判定；本机 `Instant` 或客户端当前墙钟不能代替远端权威。定时任务的计划
+时间戳、日期与 deadline 不互相替代。跨实例执行所有权、恢复与接管由 `peri-sdk` 管理，Peri 不维护执行租约；本机
+`Instant` 不能代替跨实例协调。定时任务的计划
 时间由 cron 领域解释，timer 只负责等待下一次检查，宿主冷启动后重新从持久事实计算。
 
 ## 对外能力与实现归属

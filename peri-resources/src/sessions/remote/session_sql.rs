@@ -301,7 +301,7 @@ const INSERT_THREAD_SQL: &str =
 
 /// 未发布创建（J2 第一阶段）：与整份创建同一列形状，只有 `frozen_context` 写 NULL。
 ///
-/// 远端写的是**草稿**，内容准入在取得本机执行所有权之后由
+/// 远端写的是**草稿**，内容由
 /// [`super::session_write::RemoteSessionData::write_commit_frozen`] 一次性补上。
 const INSERT_THREAD_DRAFT_SQL: &str =
     "INSERT INTO threads (id, title, cwd, created_at, updated_at, message_count,

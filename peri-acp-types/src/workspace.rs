@@ -1,7 +1,6 @@
-//! Local project identity, immutable session execution binding and ownership ports.
+//! Local project identity and immutable session execution binding.
 
 use crate::thread::{ThreadId, ThreadListEntry};
-use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, str::FromStr};
@@ -164,86 +163,7 @@ pub struct ScopedThreadPage {
     pub next_cursor: Option<ThreadListCursor>,
 }
 
-/// 精确标识待解除的 dirty 代际；不是旧执行已结束的证明。
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RecoveryRequiredDetails {
-    pub thread_id: ThreadId,
-    pub generation: i64,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", content = "details")]
-pub enum WorkspaceErrorData {
-    #[serde(rename = "peri.recoveryRequiredV1")]
-    RecoveryRequired(RecoveryRequiredDetails),
-}
-
-impl WorkspaceErrorData {
-    /// 按 workspace 失败构造类型化数据；本集合之外的失败不带数据（调用方只看消息）。
-    ///
-    /// 这里是「哪些失败可以被客户端分派到具体修复动作」的唯一清单：加一条就在
-    /// [`WorkspaceError`] 上多一个可编程分支，因此只收需要客户端采取不同动作的变体。
-    pub fn from_workspace_error(error: &WorkspaceError) -> Option<Self> {
-        match error {
-            WorkspaceError::RecoveryRequired(details) => {
-                Some(Self::RecoveryRequired(details.clone()))
-            }
-            _ => None,
-        }
-    }
-}
-
-/// 只读准入的原因：会话历史可读，但本次准入没有取得执行所有权。
-///
-/// 客户端据此区分「等待他处释放」与「需要用户显式接受风险解除 dirty」：后者必须
-/// 携带精确代际，才能走与 load 失败时相同的确认流程重新取得执行权。
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", content = "details")]
-pub enum ReadOnlyAdmission {
-    /// 执行所有权由其他执行宿主持有。
-    #[serde(rename = "peri.executionBusyV1")]
-    ExecutionBusy,
-    /// 上次执行未干净收尾：需要用户显式接受风险解除该代际。
-    #[serde(rename = "peri.recoveryRequiredV1")]
-    RecoveryRequired(RecoveryRequiredDetails),
-    /// 当前节点不提供执行所有权（例如会话存储只读）。
-    #[serde(rename = "peri.executionLeaseRequiredV1")]
-    ExecutionLeaseRequired,
-    /// The former execution owner cannot be proven stopped; history remains readable.
-    #[serde(rename = "peri.formerOwnerUnverifiedV1")]
-    FormerOwnerUnverified,
-}
-
-/// A restored session may be executable while prior local work remains unverified.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum SessionRestoreWarning {
-    FormerOwnerUnverified,
-}
-
-impl ReadOnlyAdmission {
-    /// 按存储层给出的不可用原因构造；不在本集合内的原因不降级（调用方原样上报）。
-    pub fn from_workspace_error(error: &WorkspaceError) -> Option<Self> {
-        match error {
-            WorkspaceError::ExecutionBusy => Some(Self::ExecutionBusy),
-            WorkspaceError::RecoveryRequired(details) => {
-                Some(Self::RecoveryRequired(details.clone()))
-            }
-            WorkspaceError::ExecutionLeaseRequired => Some(Self::ExecutionLeaseRequired),
-            _ => None,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ResetDirtyRequest {
-    pub target: RecoveryRequiredDetails,
-    pub accept_risk: bool,
-}
-
-/// 本机 workspace/binding/owner 语义的失败分类。
+/// 本机 workspace/binding 语义的失败分类。
 ///
 /// `Clone`：错误在落到 `SessionResourceError` 之前会经过 `anyhow` 链，资源层需要按
 /// 原分类重建同一个错误值（不重新解释、不丢变体）。
@@ -263,18 +183,7 @@ pub enum WorkspaceError {
     BindingMissing,
     #[error("session binding version or data is unsupported")]
     InvalidBinding,
-    #[error("session is owned by another execution host")]
-    ExecutionBusy,
-    #[error("previous session execution did not close cleanly; recovery is required")]
-    RecoveryRequired(RecoveryRequiredDetails),
-    #[error("dirty generation changed; load again before confirming recovery")]
-    RecoveryGenerationMismatch,
-    #[error("session mutation requires a live execution lease")]
-    ExecutionLeaseRequired,
     /// 会话存储以只读方式打开：历史可读，登记新工作区与新会话不可用。
-    ///
-    /// 与 `ExecutionLeaseRequired` 的区别在降级空间：那个是「这条会话的执行所有权不在
-    /// 本节点」，历史仍可按只读会话进入；这个连「会话」都还没有，没有可降级的对象。
     #[error(
         "session store is read-only; history is readable, but sessions cannot be created or registered here"
     )]
@@ -289,77 +198,6 @@ pub enum WorkspaceError {
     UnsupportedSchemaVersion { found: i64, supported: i64 },
     #[error("workspace execution is unsupported by this store")]
     Unsupported,
-}
-
-/// Local runtime lifecycle handle, retained until its resources have stopped.
-/// This handle does not provide exclusive session ownership or an OS lock.
-#[async_trait]
-pub trait SessionExecutionLease: Send + Sync {
-    fn thread_id(&self) -> &ThreadId;
-    /// Store-issued execution generation. A missing token has no cross-process write authority.
-    fn owner_token(&self) -> Option<ExecutionOwnerToken> {
-        None
-    }
-    fn prior_unreleased_generation(&self) -> Option<PriorExecutionOwner> {
-        None
-    }
-    /// Drain admitted writes and close this runtime handle only after its resources have stopped.
-    /// An unknown persistence outcome prevents successful completion; no execution state is persisted.
-    async fn mark_clean(&self) -> anyhow::Result<()>;
-}
-
-/// A Store-issued root execution claim. Both values are required for a write fence.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ExecutionOwnerToken {
-    pub root_id: ThreadId,
-    pub epoch: i64,
-    pub nonce: String,
-}
-
-/// Previous owner evidence returned by the Store CAS. A missing generation ID
-/// still requires proof and must fail closed at executable admission.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PriorExecutionOwner {
-    pub agent_generation_id: Option<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ExecutionOwnerClaim {
-    pub token: ExecutionOwnerToken,
-    pub prior_unreleased: Option<PriorExecutionOwner>,
-}
-
-/// Nonsecret identity of the only external async owner that supports takeover.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct WorkspaceExecutionDescriptor {
-    pub endpoint: String,
-    pub owner_identity: String,
-    pub agent_generation_id: String,
-    pub unsupported_async_owners: bool,
-}
-
-impl WorkspaceExecutionDescriptor {
-    /// The recoverable case must carry a complete, nonsecret authority identity.
-    pub fn valid_for_store(&self) -> bool {
-        self.endpoint.len() <= 4096
-            && self.owner_identity.len() <= 256
-            && self.agent_generation_id.len() <= 256
-            && (self.unsupported_async_owners
-                || (!self.endpoint.is_empty()
-                    && self.owner_identity.len() == 64
-                    && self
-                        .owner_identity
-                        .bytes()
-                        .all(|byte| byte.is_ascii_hexdigit())
-                    && !self.agent_generation_id.is_empty()))
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ExecutionWorkspaceOwnerRecord {
-    pub current_epoch: i64,
-    pub descriptor_epoch: i64,
-    pub descriptor: WorkspaceExecutionDescriptor,
 }
 
 #[cfg(test)]

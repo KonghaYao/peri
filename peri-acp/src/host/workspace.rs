@@ -2,13 +2,11 @@
 
 use std::sync::Arc;
 
-use super::{assemble, task_scope, AcpServerConfig, SessionState};
+use super::{assemble, task_scope, AcpServerConfig};
 use crate::transport::types::AcpError;
 use peri_acp_types::session_resources::{BindingRecheck, SessionResourceError};
 use peri_acp_types::thread::ThreadId;
-use peri_acp_types::workspace::{
-    ReadOnlyAdmission, ResolvedWorkspace, SessionExecutionLease, WorkspaceError, WorkspaceErrorData,
-};
+use peri_acp_types::workspace::ResolvedWorkspace;
 
 enum SessionEndState {
     Pending,
@@ -188,7 +186,7 @@ impl SessionEnvironment {
     /// 装配期不第二次 `ConfigSource::load_at`、不第二次加载插件、不构建第二份 frozen。
     ///
     /// MCP / hooks 与 OAuth 消费者仍在本函数内创建（顺序不变）；调用方
-    /// 必须已取得执行所有权，准备阶段本身不启动这些资源。
+    /// 已完成会话准入校验，准备阶段本身不启动这些资源。
     pub(crate) async fn assemble_prepared(
         host: &AcpServerConfig,
         inputs: &super::prepared::PreparedSessionInputs,
@@ -213,7 +211,7 @@ impl SessionEnvironment {
     /// `frozen` 是唯一事实源：new/legacy 是本次准备产物，恢复路径是持久 blob 的解码视图
     /// （winner）；`plugins` 是同一份准备输入的插件聚合；`configuration` 是同一份配置
     /// 视图。MCP / hooks 与 OAuth 消费者仍在本函数内创建（顺序不变）；调用方必须
-    /// 已取得执行所有权，准备阶段本身不启动这些资源。
+    /// 已完成会话准入校验，准备阶段本身不启动这些资源。
     pub(crate) async fn assemble_with_frozen(
         host: &AcpServerConfig,
         cwd: &str,
@@ -539,33 +537,16 @@ impl SessionEnvironment {
 
 pub(crate) fn workspace_error(error: impl Into<anyhow::Error>) -> AcpError {
     let error = error.into();
-    let mut response = AcpError::new(-32010, error.to_string());
-    if let Some(data) = error
-        .downcast_ref::<WorkspaceError>()
-        .and_then(WorkspaceErrorData::from_workspace_error)
-    {
-        response.data = Some(serde_json::to_value(data).expect("workspace error data serializes"));
-    }
-    response
+    AcpError::new(-32010, error.to_string())
 }
 
-/// 门面行为失败 → ACP 错误：本机 workspace 语义保留既有载荷（含恢复确认数据），
+/// 门面行为失败 → ACP 错误：本机 workspace 语义保留领域分类，
 /// 其余按行为失败上报，不把失败伪装成 workspace 问题。
 pub(crate) fn resource_error(error: SessionResourceError) -> AcpError {
     match error.workspace_error() {
         Some(workspace) => workspace_error(workspace.clone()),
         None => AcpError::new(-32010, error.to_string()),
     }
-}
-
-pub(crate) fn require_owner(state: &SessionState) -> Result<(), AcpError> {
-    if state.closing {
-        return Err(AcpError::new(-32010, "Session is closing"));
-    }
-    if state.execution_owner.is_none() {
-        return Err(workspace_error(WorkspaceError::ExecutionLeaseRequired));
-    }
-    Ok(())
 }
 
 /// 绑定复核强度。
@@ -622,226 +603,4 @@ async fn check_expected(
         .await
         .map_err(resource_error)?;
     Ok(workspace)
-}
-
-/// 一次加载准入的结果：绑定与执行目录已复核，执行所有权可能不可得。
-///
-/// 所有权不可得（`ExecutionBusy` / `RecoveryRequired` / `ExecutionLeaseRequired`）时
-/// 仍返回已复核的 `workspace`，由调用方决定是降级为只读会话还是原样上报——绑定复核
-/// 已经跑过一次完整发现，降级路径不能为了拿到同一个 `workspace` 再跑一轮。
-pub(crate) struct LoadAdmission {
-    pub(crate) workspace: ResolvedWorkspace,
-    pub(crate) execution: ExecutionAdmission,
-}
-
-/// 执行所有权判定结果：取得所有权，或确认所有权不可得但仍可只读准入。
-pub(crate) enum ExecutionAdmission {
-    /// 本次准入持有执行所有权。
-    Owned(Arc<dyn SessionExecutionLease>),
-    /// 执行所有权不可得，但会话历史仍可只读访问；携带原因供调用方上报与降级。
-    Unavailable(ReadOnlyAdmission),
-}
-
-/// 加载/恢复/克隆准入的第一步：复核执行目录并取得执行所有权。
-///
-/// 这是准入入口，因此做完整复核；同一次准入内再取一次（如 `session/fork` 在
-/// `prepare_existing` 之后）用 [`reacquire_for_load`]，不重复跑 Git 发现。
-///
-/// 未协商 `peri.sessionRecoveryV1` 的连接遇到 dirty 代际时不用停在只读：它没有确认
-/// 交互（`peri/session_reset_dirty` 只对协商过该能力的连接开放），在这里由 host
-/// 直接解除该精确代际后取得所有权。
-pub(crate) async fn acquire_for_load(
-    cfg: &AcpServerConfig,
-    sessions: &std::collections::HashMap<String, SessionState>,
-    session_id: &str,
-    expected: Option<&str>,
-    former_unverified: bool,
-) -> Result<LoadAdmission, AcpError> {
-    acquire_for_load_with(
-        cfg,
-        sessions,
-        session_id,
-        expected,
-        BindingCheck::Full,
-        former_unverified,
-    )
-    .await
-}
-
-/// 同一次准入内再次取得执行目录与所有权：只复核已记录证据。
-///
-/// 这里不接受只读降级：调用方（`session/fork`）必须有执行所有权才能继续。
-pub(crate) async fn reacquire_for_load(
-    cfg: &AcpServerConfig,
-    sessions: &std::collections::HashMap<String, SessionState>,
-    session_id: &str,
-    expected: Option<&str>,
-) -> Result<(ResolvedWorkspace, Arc<dyn SessionExecutionLease>), AcpError> {
-    let admission = acquire_for_load_with(
-        cfg,
-        sessions,
-        session_id,
-        expected,
-        BindingCheck::Recorded,
-        false,
-    )
-    .await?;
-    match admission.execution {
-        ExecutionAdmission::Owned(owner) => Ok((admission.workspace, owner)),
-        ExecutionAdmission::Unavailable(reason) => Err(read_only_error(reason)),
-    }
-}
-
-/// 只读降级原因还原为错误：不接受降级的调用方（如 `session/fork`）按原语义上报。
-///
-/// 只有门面明确给出的「所有权不可得」原因才进入这里；其他失败（IO、绑定复核、
-/// schema 不支持）本来就不降级，避免把「读不了」伪装成「可以只读进入」。
-pub(crate) fn read_only_error(reason: ReadOnlyAdmission) -> AcpError {
-    let error = match reason {
-        ReadOnlyAdmission::ExecutionBusy => WorkspaceError::ExecutionBusy,
-        ReadOnlyAdmission::RecoveryRequired(details) => WorkspaceError::RecoveryRequired(details),
-        ReadOnlyAdmission::ExecutionLeaseRequired => WorkspaceError::ExecutionLeaseRequired,
-        ReadOnlyAdmission::FormerOwnerUnverified => WorkspaceError::ExecutionLeaseRequired,
-    };
-    workspace_error(error)
-}
-
-async fn acquire_for_load_with(
-    cfg: &AcpServerConfig,
-    sessions: &std::collections::HashMap<String, SessionState>,
-    session_id: &str,
-    expected: Option<&str>,
-    check: BindingCheck,
-    former_unverified: bool,
-) -> Result<LoadAdmission, AcpError> {
-    let workspace = check_expected(cfg, session_id, expected, check).await?;
-    if former_unverified {
-        return Ok(LoadAdmission {
-            workspace,
-            execution: ExecutionAdmission::Unavailable(ReadOnlyAdmission::FormerOwnerUnverified),
-        });
-    }
-    let held = match sessions.get(session_id) {
-        Some(state) if state.closing => return Err(AcpError::new(-32010, "Session is closing")),
-        Some(state) => state.execution_owner.clone(),
-        None => None,
-    };
-    let owner = match held {
-        Some(owner) => owner,
-        None => match try_acquire_lease(cfg, session_id, &workspace).await? {
-            ExecutionAdmission::Owned(owner) => owner,
-            ExecutionAdmission::Unavailable(reason) => {
-                return Ok(LoadAdmission {
-                    workspace,
-                    execution: ExecutionAdmission::Unavailable(reason),
-                });
-            }
-        },
-    };
-    Ok(LoadAdmission {
-        workspace,
-        execution: ExecutionAdmission::Owned(owner),
-    })
-}
-
-async fn try_acquire_lease(
-    cfg: &AcpServerConfig,
-    session_id: &str,
-    workspace: &ResolvedWorkspace,
-) -> Result<ExecutionAdmission, AcpError> {
-    let availability = cfg
-        .session_resources
-        .inspect_availability(Some(&session_id.to_owned()))
-        .await
-        .map_err(resource_error)?;
-    if matches!(
-        availability.execution,
-        Some(peri_acp_types::session_resources::ExecutionAvailability::WorkspaceUnavailable)
-    ) {
-        return Ok(ExecutionAdmission::Unavailable(
-            ReadOnlyAdmission::ExecutionLeaseRequired,
-        ));
-    }
-    match cfg
-        .session_resources
-        .acquire_execution(&session_id.to_owned(), workspace)
-        .await
-    {
-        Ok(owner) => Ok(ExecutionAdmission::Owned(owner)),
-        Err(error) => match error.read_only_admission() {
-            Some(reason) => Ok(ExecutionAdmission::Unavailable(reason)),
-            None => Err(resource_error(error)),
-        },
-    }
-}
-
-/// Preflight only: a failed proof must not claim another Store epoch. The
-/// post-claim check in `prepare_existing` remains authoritative for races.
-pub(crate) async fn former_owner_recoverable(
-    cfg: &AcpServerConfig,
-    session_id: &str,
-    prior: &peri_acp_types::workspace::PriorExecutionOwner,
-) -> Result<bool, AcpError> {
-    let Some(generation) = prior.agent_generation_id.as_deref() else {
-        return Ok(false);
-    };
-    let Ok(Some(trusted)) = super::requests::owner_catalog::trusted_workspace_identity() else {
-        return Ok(false);
-    };
-    let record = cfg
-        .session_resources
-        .read_execution_workspace_owner(&session_id.to_owned())
-        .await
-        .map_err(resource_error)?;
-    let Some(record) = record else {
-        return Ok(false);
-    };
-    if record.current_epoch != record.descriptor_epoch
-        || record.descriptor.agent_generation_id != generation
-        || super::requests::owner_catalog::verify_recoverable_owner(&record, &trusted).is_err()
-    {
-        return Ok(false);
-    }
-    Ok(
-        super::supervisor::previous_generation_stopped(session_id, generation)
-            .await
-            .is_ok(),
-    )
-}
-
-/// The local TUI may take over its own expired in-process Workspace owner.
-/// A recorded remote endpoint or Agent generation keeps the proof requirement.
-pub(crate) async fn local_unverified_takeover_allowed(
-    cfg: &AcpServerConfig,
-    session_id: &str,
-) -> Result<bool, AcpError> {
-    if !cfg.allow_local_unverified_takeover
-        || !matches!(
-            super::requests::owner_catalog::trusted_workspace_identity(),
-            Ok(None)
-        )
-    {
-        return Ok(false);
-    }
-    let binding = cfg
-        .session_resources
-        .load_session_binding(&session_id.to_owned())
-        .await
-        .map_err(resource_error)?;
-    if !matches!(
-        binding,
-        peri_acp_types::session_resources::BindingState::Bound(_)
-    ) {
-        return Ok(false);
-    }
-    let record = cfg
-        .session_resources
-        .read_execution_workspace_owner(&session_id.to_owned())
-        .await
-        .map_err(resource_error)?;
-    Ok(record.is_some_and(|record| {
-        record.descriptor.endpoint.is_empty()
-            && record.descriptor.owner_identity.is_empty()
-            && record.descriptor.agent_generation_id.is_empty()
-    }))
 }

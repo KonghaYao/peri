@@ -133,70 +133,7 @@ impl SessionResourcesImpl {
         id: &ThreadId,
         full: bool,
     ) -> SessionResourceResult<ResolvedWorkspace> {
-        let binding = self.gate.data().binding_of(id).await?;
-        let binding = binding.as_ref().ok_or_else(|| {
-            SessionResourceError::new(SessionResourceErrorKind::Workspace(
-                WorkspaceError::BindingMissing,
-            ))
-        })?;
-        let owner = self
-            .gate
-            .data()
-            .workspace_id_of(id)
-            .await?
-            .ok_or_else(|| SessionResourceError::new(SessionResourceErrorKind::NotFound))?;
-        let saved = self.gate.data().binding_discovery_snapshot(id).await?;
-        if matches!(self.home, SessionDataHome::RemoteStore) {
-            let saved = saved.ok_or_else(|| {
-                SessionResourceError::new(SessionResourceErrorKind::Workspace(
-                    WorkspaceError::InvalidBinding,
-                ))
-            })?;
-            let resolved = self
-                .gate
-                .local()
-                .validate_saved_binding(binding, &saved, owner, full)
-                .await
-                .map_err(execution_failure)?;
-            if owner != resolved.workspace_id {
-                return Err(Self::workspace_mismatch());
-            }
-            return Ok(resolved);
-        }
-        let resolved = self.recheck_binding(Some(binding), full).await?;
-        if owner != resolved.workspace_id {
-            return Err(Self::workspace_mismatch());
-        }
-        match saved {
-            Some(saved) => {
-                let recorded: serde_json::Value = serde_json::from_str(&saved).map_err(|_| {
-                    SessionResourceError::new(SessionResourceErrorKind::Workspace(
-                        WorkspaceError::InvalidBinding,
-                    ))
-                })?;
-                let observed: serde_json::Value = serde_json::from_str(
-                    resolved.discovery_snapshot.as_deref().ok_or_else(|| {
-                        SessionResourceError::new(SessionResourceErrorKind::Workspace(
-                            WorkspaceError::InvalidBinding,
-                        ))
-                    })?,
-                )
-                .map_err(|_| {
-                    SessionResourceError::new(SessionResourceErrorKind::Workspace(
-                        WorkspaceError::InvalidBinding,
-                    ))
-                })?;
-                if recorded != observed {
-                    return Err(Self::workspace_mismatch());
-                }
-            }
-            None => {
-                return Err(SessionResourceError::new(
-                    SessionResourceErrorKind::Workspace(WorkspaceError::InvalidBinding),
-                ))
-            }
-        }
-        Ok(resolved)
+        self.gate.recheck_binding_of(id, full).await
     }
 
     /// `Missing` 与 `LegacyConfirmed` 的差别是本机来源证据：无绑定、无父会话、无 frozen，

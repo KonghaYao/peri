@@ -159,7 +159,6 @@ async fn test_resume_interrupted_then_resumed_across_instances() {
     let t_a = make_interrupt_tool(Arc::clone(&calls), 1)
         .with_session_resources(store.facade())
         .with_parent_thread_id(parent_id.clone())
-        .with_execution_owner(store.execution_owner())
         .with_parent_session(parent.clone());
     let t_a = with_agent_face(t_a, dir.path()).await;
     let interrupted = t_a
@@ -186,7 +185,6 @@ async fn test_resume_interrupted_then_resumed_across_instances() {
     let t_b = make_interrupt_tool(Arc::clone(&calls), 1)
         .with_session_resources(store.facade())
         .with_parent_thread_id(parent_id.clone())
-        .with_execution_owner(store.execution_owner())
         .with_parent_session(parent);
     let t_b = with_agent_face(t_b, dir.path()).await;
     let result = t_b
@@ -246,7 +244,6 @@ async fn test_resume_across_instances_replays_transcript_in_order() {
         let t_a = make_interrupt_tool(Arc::clone(&calls), 1)
             .with_session_resources(store.facade())
             .with_parent_thread_id(parent_id.clone())
-            .with_execution_owner(store.execution_owner())
             .with_parent_session(parent.clone());
         let t_a = with_agent_face(t_a, dir.path()).await;
         let interrupted = t_a
@@ -274,7 +271,6 @@ async fn test_resume_across_instances_replays_transcript_in_order() {
     let t_b = make_interrupt_tool(Arc::clone(&calls), 1)
         .with_session_resources(store.facade())
         .with_parent_thread_id(parent_id.clone())
-        .with_execution_owner(store.execution_owner())
         .with_parent_session(parent.clone());
     let t_b = with_agent_face(t_b, dir.path()).await;
     let result = t_b
@@ -342,7 +338,6 @@ async fn test_resume_multiple_times_keeps_thread_id_and_completes() {
             make_subagent_tool(vec![])
                 .with_session_resources(store.facade())
                 .with_parent_thread_id(parent_id.clone())
-                .with_execution_owner(store.execution_owner())
                 .with_parent_session(mk_parent(true)),
             dir.path(),
         )
@@ -393,7 +388,6 @@ async fn test_resume_multiple_times_keeps_thread_id_and_completes() {
     let t3 = make_subagent_tool(vec![])
         .with_session_resources(store.facade())
         .with_parent_thread_id(parent_id.clone())
-        .with_execution_owner(store.execution_owner())
         .with_parent_session(mk_parent(false));
     let t3 = with_agent_face(t3, dir.path()).await;
     let r3 = t3
@@ -459,7 +453,6 @@ async fn test_resume_emits_new_start_stop_pair_per_execution() {
     .with_langfuse_bridge(Arc::clone(&bridge) as Arc<dyn peri_agent::agent::LangfuseBridgeLike>)
     .with_session_resources(store.facade())
     .with_parent_thread_id(parent_id.clone())
-    .with_execution_owner(store.execution_owner())
     .with_parent_session(parent.clone());
     let t = with_agent_face(t, dir.path()).await;
     let t = with_agent_face(t, dir.path()).await;
@@ -585,7 +578,6 @@ async fn test_resume_skill_preload_not_duplicated() {
         make_interrupt_tool(Arc::clone(&calls), 1)
             .with_session_resources(store.facade())
             .with_parent_thread_id(parent_id.clone())
-            .with_execution_owner(store.execution_owner())
             .with_parent_session(parent.clone()),
         "workspace",
         &[("test-skill", "This is the test skill content.\n")],
@@ -707,7 +699,6 @@ async fn test_resume_keeps_completed_tool_round_no_duplicate_execution() {
     )
     .with_session_resources(store.facade())
     .with_parent_thread_id(parent_id.clone())
-    .with_execution_owner(store.execution_owner())
     .with_parent_session(parent.clone());
     let t = with_agent_face(t, dir.path()).await;
 
@@ -792,7 +783,6 @@ async fn test_resume_skill_token_in_prompt_reinjects_once() {
         make_interrupt_tool(Arc::clone(&calls), 1)
             .with_session_resources(store.facade())
             .with_parent_thread_id(parent_id.clone())
-            .with_execution_owner(store.execution_owner())
             .with_parent_session(parent.clone()),
         "workspace",
         &[("test-skill", "This is the test skill content.\n")],

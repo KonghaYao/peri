@@ -5,7 +5,7 @@ use super::*;
 #[tokio::test]
 async fn test_save_fork_converges_when_the_target_was_saved_without_admission() {
     let fixture = Fixture::new().await;
-    let source_lease = fixture.create("s-fork-source").await;
+    fixture.create("s-fork-source").await;
     let workspace = fixture.workspace().await;
     let fork = ForkSnapshot {
         target: fixture.session(
@@ -17,24 +17,20 @@ async fn test_save_fork_converges_when_the_target_was_saved_without_admission() 
         payloads: vec![payload("forked turn")],
         flags: std::collections::HashMap::new(),
     };
-    // 数据先落库、准入未成立（远程保存或上次进程在准入前结束），再重试同一次 fork：
-    // 收敛准入，不重复写历史，也不把「已保存」报成「已存在」。
     fixture.facade.gate.data().save_fork(&fork).await.unwrap();
-    let lease = fixture.facade.save_fork(&fork).await.unwrap();
-    assert_eq!(lease.thread_id(), &"s-fork-target".to_owned());
+    fixture.facade.save_fork(&fork).await.unwrap();
     assert_eq!(fixture.count_messages("s-fork-target").await, 1);
     fixture
         .facade
         .append_history(&"s-fork-target".to_owned(), &[payload("continued fork")])
         .await
         .unwrap();
-    lease.mark_clean().await.unwrap();
     let before = fixture
         .facade
         .load_session_snapshot(&"s-fork-target".to_owned())
         .await
         .unwrap();
-    let retry = fixture.facade.save_fork(&fork).await.unwrap();
+    fixture.facade.save_fork(&fork).await.unwrap();
     let after = fixture
         .facade
         .load_session_snapshot(&"s-fork-target".to_owned())
@@ -47,7 +43,6 @@ async fn test_save_fork_converges_when_the_target_was_saved_without_admission() 
         serde_json::to_value(&after.meta).unwrap(),
         serde_json::to_value(&before.meta).unwrap()
     );
-    // 数据已保存但前提变化时才报「已保存、未准入」。
     let mut changed = fork.clone();
     changed.target.binding.workspace_id = peri_acp_types::workspace::WorkspaceId::new();
     let error = match fixture.facade.save_fork(&changed).await {
@@ -58,9 +53,6 @@ async fn test_save_fork_converges_when_the_target_was_saved_without_admission() 
         error_kind(&error),
         SessionResourceErrorKind::Conflict { .. }
     ));
-    retry.mark_clean().await.unwrap();
-    drop(lease);
-    drop(source_lease);
 }
 
 /// fork 目标的失败补偿是 write-once 语义：目标创建即带 frozen，撤销仍必须把它整条删掉
@@ -69,7 +61,7 @@ async fn test_save_fork_converges_when_the_target_was_saved_without_admission() 
 #[tokio::test]
 async fn test_abandon_initialization_deletes_a_fork_target_with_frozen() {
     let fixture = Fixture::new().await;
-    let _source_lease = fixture.create("s-fork-source").await;
+    fixture.create("s-fork-source").await;
     let workspace = fixture.workspace().await;
     let fork = ForkSnapshot {
         target: fixture.session(
@@ -81,13 +73,13 @@ async fn test_abandon_initialization_deletes_a_fork_target_with_frozen() {
         payloads: vec![payload("forked turn")],
         flags: std::collections::HashMap::new(),
     };
-    let target_lease = fixture.facade.save_fork(&fork).await.unwrap();
+    fixture.facade.save_fork(&fork).await.unwrap();
     assert_eq!(fixture.count_messages("s-fork-target").await, 1);
 
     // 与 `handle_fork` 的失败补偿同一条调用：装配/身份失败后撤销未发布目标。
     fixture
         .facade
-        .abandon_initialization(&"s-fork-target".to_owned(), &target_lease)
+        .abandon_initialization(&"s-fork-target".to_owned())
         .await
         .unwrap();
 
@@ -111,7 +103,7 @@ async fn test_abandon_initialization_deletes_a_fork_target_with_frozen() {
 #[tokio::test]
 async fn test_revoke_entry_points_differ_only_by_the_frozen_criterion() {
     let fixture = Fixture::new().await;
-    let committed = fixture.create("s-write-once").await;
+    fixture.create("s-write-once").await;
     let draft = fixture.begin("s-draft-only").await;
 
     // 两阶段草稿：已提交 ⇒ 拒绝；未提交 ⇒ 删除。
@@ -145,46 +137,19 @@ async fn test_revoke_entry_points_differ_only_by_the_frozen_criterion() {
         .await
         .unwrap();
     assert_eq!(fixture.count_threads("s-write-once").await, 0);
-    drop(committed);
     drop(draft);
-}
-
-#[tokio::test]
-async fn test_closed_draft_owner_cannot_abandon_existing_canonical_draft() {
-    let fixture = Fixture::new().await;
-    let id = "s-closed-draft".to_owned();
-    let initialization = fixture.begin(&id).await;
-    let owner = initialization.execution_lease();
-    owner.mark_clean().await.unwrap();
-    let before = fixture.facade.load_session_snapshot(&id).await.unwrap();
-    let error = initialization.clone().abandon().await.unwrap_err();
-    assert!(matches!(
-        error_kind(&error),
-        SessionResourceErrorKind::Workspace(WorkspaceError::ExecutionLeaseRequired)
-    ));
-    let after = fixture.facade.load_session_snapshot(&id).await.unwrap();
-    assert_eq!(after.binding, before.binding);
-    assert_eq!(after.frozen, FrozenState::LegacyAbsent);
-    assert_eq!(
-        serde_json::to_value(&after.meta).unwrap(),
-        serde_json::to_value(&before.meta).unwrap()
-    );
-    assert_eq!(fixture.count_threads(&id).await, 1);
-    assert_eq!(fixture.count_bindings(&id).await, 1);
 }
 
 #[tokio::test]
 async fn test_revoke_refuses_a_session_that_already_has_children() {
     let fixture = Fixture::new().await;
-    let root_lease = fixture.create("s-revoke-root").await;
-    let _child = fixture
-        .child("s-revoke-child", "s-revoke-root", &root_lease)
-        .await;
+    fixture.create("s-revoke-root").await;
+    let _child = fixture.child("s-revoke-child", "s-revoke-root").await;
 
     // 已派生过子会话的 identity 不能被补偿掉：否则子会话会指向不存在的父节点。
     let error = fixture
         .facade
-        .abandon_initialization(&"s-revoke-root".to_owned(), &root_lease)
+        .abandon_initialization(&"s-revoke-root".to_owned())
         .await
         .unwrap_err();
     assert!(matches!(
@@ -193,11 +158,9 @@ async fn test_revoke_refuses_a_session_that_already_has_children() {
     ));
     assert_eq!(fixture.count_threads("s-revoke-root").await, 1);
     assert_eq!(fixture.count_threads("s-revoke-child").await, 1);
-    // 失败不留半撤销状态：owner 与两条会话都仍然可用。
     fixture
         .facade
         .append_history(&"s-revoke-child".to_owned(), &[payload("still usable")])
         .await
         .unwrap();
-    root_lease.mark_clean().await.unwrap();
 }

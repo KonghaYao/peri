@@ -189,13 +189,12 @@ impl ServerLoop<'_> {
                                     match sessions.get(owner_session_id) {
                                         Some(state) => mcp_apps::InvokeSessionGate {
                                             known: true,
-                                            owned: state.execution_owner.is_some()
-                                                && !state.closing,
+                                            open: !state.closing,
                                             prompt_in_flight: state.cancel_token.is_some(),
                                         },
                                         None => mcp_apps::InvokeSessionGate {
                                             known: false,
-                                            owned: false,
+                                            open: false,
                                             prompt_in_flight: false,
                                         },
                                     }

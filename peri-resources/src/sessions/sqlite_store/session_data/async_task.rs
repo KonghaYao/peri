@@ -22,7 +22,7 @@ impl SqliteSessionData {
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(|e| map_sqlx(&e))?;
-        self.assert_owner(&mut tx, id).await?;
+        self.require_session(&mut tx, id).await?;
         if !thread_exists_on(&mut tx, id).await.map_err(read_failure)? {
             return Err(not_found());
         }
@@ -73,7 +73,7 @@ impl SqliteSessionData {
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(|e| map_sqlx(&e))?;
-        self.assert_owner(&mut tx, id).await?;
+        self.require_session(&mut tx, id).await?;
         if !thread_exists_on(&mut tx, id).await.map_err(read_failure)? {
             return Err(not_found());
         }

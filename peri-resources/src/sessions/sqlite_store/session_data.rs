@@ -1,6 +1,6 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use peri_acp_types::messages::MessageId;
@@ -15,9 +15,8 @@ use peri_acp_types::store::{
 use peri_acp_types::system_reminder::TrustedSystemReminder;
 use peri_acp_types::thread::{AgentStatus, ThreadId, ThreadMeta};
 use peri_acp_types::workspace::{
-    ExecutionOwnerClaim, ExecutionOwnerToken, ExecutionWorkspaceOwnerRecord, PriorExecutionOwner,
     ResolvedWorkspace, ScopedThreadPage, ScopedThreadQuery, SessionBinding, WorkspaceError,
-    WorkspaceExecutionDescriptor, SESSION_BINDING_VERSION,
+    SESSION_BINDING_VERSION,
 };
 use sqlx::SqliteConnection;
 
@@ -35,7 +34,6 @@ use crate::sessions::canonical::payload_role;
 use crate::sessions::data::ensure_child_relation;
 use crate::sessions::data::ChildResumeRecord;
 use crate::sessions::data::SessionDataPort;
-use crate::sessions::local_port::SessionFacts;
 
 #[path = "session_data/async_task.rs"]
 mod async_task;
@@ -45,8 +43,6 @@ mod catalog;
 mod history;
 #[path = "session_data/lifecycle.rs"]
 mod lifecycle;
-#[path = "session_data/owner.rs"]
-mod owner;
 
 /// 同一份 [`SqliteSessionDatabase`] 的数据面句柄。
 ///
@@ -57,7 +53,6 @@ pub(crate) struct SqliteSessionData {
     database: Arc<SqliteSessionDatabase>,
     /// 端口关闭后不再接受新写入；读取不受影响（历史仍可解释）。
     closed: Arc<AtomicBool>,
-    owner_tokens: Arc<Mutex<HashMap<ThreadId, ExecutionOwnerToken>>>,
 }
 
 impl SqliteSessionData {
@@ -65,7 +60,6 @@ impl SqliteSessionData {
         Self {
             database,
             closed: Arc::new(AtomicBool::new(false)),
-            owner_tokens: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -79,85 +73,6 @@ pub(super) use helpers::{new_session_draft_row, new_session_row, validate_unboun
 
 #[async_trait]
 impl SessionDataPort for SqliteSessionData {
-    async fn unreleased_execution_owner(
-        &self,
-        root: &ThreadId,
-    ) -> SessionResourceResult<Option<PriorExecutionOwner>> {
-        self.read_unreleased_owner(root).await
-    }
-
-    async fn claim_execution_owner(
-        &self,
-        root: &ThreadId,
-        require_closing: bool,
-        expected_previous_epoch: Option<i64>,
-    ) -> SessionResourceResult<ExecutionOwnerClaim> {
-        self.claim_owner(root, require_closing, expected_previous_epoch)
-            .await
-    }
-
-    async fn renew_execution_owner(
-        &self,
-        token: &ExecutionOwnerToken,
-    ) -> SessionResourceResult<()> {
-        self.renew_owner(token).await
-    }
-
-    async fn release_execution_owner(
-        &self,
-        token: &ExecutionOwnerToken,
-    ) -> SessionResourceResult<()> {
-        self.release_owner(token).await
-    }
-
-    async fn finish_close(&self, token: &ExecutionOwnerToken) -> SessionResourceResult<()> {
-        self.finish_close_owner(token).await
-    }
-
-    async fn close_settlement(
-        &self,
-        token: &ExecutionOwnerToken,
-    ) -> SessionResourceResult<CloseSettlement> {
-        self.read_close_settlement(token).await
-    }
-
-    async fn bind_execution_workspace_owner(
-        &self,
-        token: &ExecutionOwnerToken,
-        descriptor: &WorkspaceExecutionDescriptor,
-    ) -> SessionResourceResult<()> {
-        self.bind_workspace_owner(token, descriptor).await
-    }
-
-    async fn read_execution_workspace_owner(
-        &self,
-        root: &ThreadId,
-    ) -> SessionResourceResult<Option<ExecutionWorkspaceOwnerRecord>> {
-        self.read_workspace_owner(root).await
-    }
-
-    async fn mark_unsupported_async_owner(
-        &self,
-        token: &ExecutionOwnerToken,
-    ) -> SessionResourceResult<()> {
-        self.mark_unsupported_workspace_owner(token).await
-    }
-
-    fn install_execution_owner_token(&self, token: ExecutionOwnerToken) {
-        self.owner_tokens
-            .lock()
-            .expect("owner token mutex poisoned")
-            .insert(token.root_id.clone(), token);
-    }
-
-    fn execution_owner_token(&self, root: &ThreadId) -> Option<ExecutionOwnerToken> {
-        self.owner_tokens
-            .lock()
-            .expect("owner token mutex poisoned")
-            .get(root)
-            .cloned()
-    }
-
     fn oauth_credentials_for_workspace(
         self: Arc<Self>,
         workspace_id: peri_acp_types::workspace::WorkspaceId,
@@ -168,6 +83,58 @@ impl SessionDataPort for SqliteSessionData {
                 workspace_id,
             ),
         ))
+    }
+
+    async fn finish_close(&self, root: &ThreadId) -> SessionResourceResult<()> {
+        self.writable()?;
+        let mut tx = self
+            .database
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(|error| map_sqlx(&error))?;
+        self.require_session(&mut tx, root).await?;
+        let deleted = sqlx::query("DELETE FROM session_close_intents WHERE thread_id = ?1")
+            .bind(root.as_str())
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| map_sqlx(&error))?;
+        if deleted.rows_affected() != 1 {
+            return Err(SessionResourceError::conflict(
+                "session close intent is missing",
+            ));
+        }
+        tx.commit()
+            .await
+            .map_err(|_| commit_failure(Some(root.clone())))?;
+        Ok(())
+    }
+
+    async fn close_settlement(&self, root: &ThreadId) -> SessionResourceResult<CloseSettlement> {
+        let mut tx = self
+            .database
+            .pool
+            .begin()
+            .await
+            .map_err(|error| map_sqlx(&error))?;
+        let exists = thread_exists_on(&mut tx, root)
+            .await
+            .map_err(read_failure)?;
+        let pending: Option<(i64,)> =
+            sqlx::query_as("SELECT 1 FROM session_close_intents WHERE thread_id = ?1")
+                .bind(root.as_str())
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|error| map_sqlx(&error))?;
+        let state = if !exists {
+            CloseSettlement::Unknown
+        } else if pending.is_some() {
+            CloseSettlement::Pending
+        } else {
+            CloseSettlement::Finished
+        };
+        tx.commit().await.map_err(|error| map_sqlx(&error))?;
+        Ok(state)
     }
 
     async fn machine_id_of(&self, id: &ThreadId) -> SessionResourceResult<Option<String>> {
@@ -215,17 +182,19 @@ impl SessionDataPort for SqliteSessionData {
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(|error| map_sqlx(&error))?;
-        insert_thread_row(
-            &mut tx,
-            &new_session_row(
-                input,
-                snapshot_at.as_deref(),
-                Some(input.frozen.as_str()),
-                0,
-            ),
-        )
-        .await
-        .map_err(write_failure)?;
+        let resolved = SqliteSessionDatabase::validate_binding_relation_on(&mut tx, &input.binding)
+            .await
+            .map_err(super::failure::binding_relation_failure)?;
+        let mut row = new_session_row(
+            input,
+            snapshot_at.as_deref(),
+            Some(input.frozen.as_str()),
+            0,
+        );
+        row.cwd = super::discovery::path_text(&resolved.cwd).map_err(write_failure)?;
+        insert_thread_row(&mut tx, &row)
+            .await
+            .map_err(write_failure)?;
         insert_binding_row(&mut tx, &input.thread_id, &input.binding)
             .await
             .map_err(write_failure)?;
@@ -247,12 +216,14 @@ impl SessionDataPort for SqliteSessionData {
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(|error| map_sqlx(&error))?;
-        insert_thread_row(
-            &mut tx,
-            &new_session_draft_row(draft, snapshot_at.as_deref(), 0),
-        )
-        .await
-        .map_err(write_failure)?;
+        let resolved = SqliteSessionDatabase::validate_binding_relation_on(&mut tx, &draft.binding)
+            .await
+            .map_err(super::failure::binding_relation_failure)?;
+        let mut row = new_session_draft_row(draft, snapshot_at.as_deref(), 0);
+        row.cwd = super::discovery::path_text(&resolved.cwd).map_err(write_failure)?;
+        insert_thread_row(&mut tx, &row)
+            .await
+            .map_err(write_failure)?;
         insert_binding_row(&mut tx, &draft.thread_id, &draft.binding)
             .await
             .map_err(write_failure)?;
@@ -262,17 +233,37 @@ impl SessionDataPort for SqliteSessionData {
         Ok(())
     }
 
-    /// 本机组合不经过这条路径：frozen 的提交必须与「本进程仍是精确活 owner、无未决写」
-    /// 在同一事务内成立（[`super::local::LocalExecution::commit_frozen`]）。这里如实报告
-    /// 不支持，而不是提供一个缺少 owner 校验的第二条写入路径。
     async fn commit_frozen(
         &self,
-        _id: &ThreadId,
-        _frozen: &FrozenSnapshotBytes,
+        id: &ThreadId,
+        frozen: &FrozenSnapshotBytes,
     ) -> SessionResourceResult<()> {
-        Err(SessionResourceError::new(
-            SessionResourceErrorKind::Unsupported,
-        ))
+        self.writable()?;
+        let mut tx = self
+            .database
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(|error| map_sqlx(&error))?;
+        self.require_session(&mut tx, id).await?;
+        let updated = sqlx::query(
+            "UPDATE threads SET frozen_context = ?1 WHERE id = ?2 AND frozen_context IS NULL
+             AND EXISTS (SELECT 1 FROM session_bindings WHERE thread_id = ?2)",
+        )
+        .bind(frozen.as_str())
+        .bind(id.as_str())
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| map_sqlx(&error))?;
+        if updated.rows_affected() != 1 {
+            return Err(SessionResourceError::conflict(
+                "session is not a bound draft with an uncommitted frozen snapshot",
+            ));
+        }
+        tx.commit()
+            .await
+            .map_err(|_| commit_failure(Some(id.clone())))?;
+        Ok(())
     }
 
     async fn revoke_unpublished_session(&self, id: &ThreadId) -> SessionResourceResult<()> {
@@ -297,11 +288,7 @@ impl SessionDataPort for SqliteSessionData {
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(|error| map_sqlx(&error))?;
-        // 迁移期会话（无 owner 行）在接纳事务内取得第一代执行所有权；已被接管过的
-        // 会话仍要求本进程持有当前代际（recovered 会话不得被无主改写）。
-        let adopted_owner = self
-            .claim_or_assert_legacy_adoption_owner_on(&mut tx, id)
-            .await?;
+        self.require_session(&mut tx, id).await?;
         let row: Option<(String, Option<String>, String)> =
             sqlx::query_as("SELECT cwd, parent_thread_id, workspace_id FROM threads WHERE id = ?1")
                 .bind(id.as_str())
@@ -376,10 +363,6 @@ impl SessionDataPort for SqliteSessionData {
         tx.commit()
             .await
             .map_err(|_| commit_failure(Some(id.clone())))?;
-        // 代际的进程内可见性晚于提交：失败回滚不留下无主登记。
-        if let Some(token) = adopted_owner {
-            self.install_execution_owner_token(token);
-        }
         Ok(())
     }
 
@@ -604,7 +587,7 @@ impl SessionDataPort for SqliteSessionData {
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(|error| map_sqlx(&error))?;
-        self.assert_owner(&mut tx, &fork.source_id).await?;
+        self.require_session(&mut tx, &fork.source_id).await?;
         if !thread_exists_on(&mut tx, &fork.source_id)
             .await
             .map_err(read_failure)?
@@ -677,7 +660,7 @@ impl SessionDataPort for SqliteSessionData {
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(|error| map_sqlx(&error))?;
-        self.assert_owner(&mut tx, &child.parent_id).await?;
+        self.require_session(&mut tx, &child.parent_id).await?;
         if !thread_exists_on(&mut tx, &child.parent_id)
             .await
             .map_err(read_failure)?
@@ -771,7 +754,7 @@ impl SessionDataPort for SqliteSessionData {
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(|e| map_sqlx(&e))?;
-        self.assert_owner(&mut tx, child).await?;
+        self.require_session(&mut tx, child).await?;
         let updated =
             sqlx::query("UPDATE threads SET agent_status = ?1, updated_at = ?2 WHERE id = ?3")
                 .bind(record.status.as_str())
@@ -801,7 +784,7 @@ impl SessionDataPort for SqliteSessionData {
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(|e| map_sqlx(&e))?;
-        self.assert_owner(&mut tx, id).await?;
+        self.require_session(&mut tx, id).await?;
         compaction::commit_compaction_lifecycle_on(&mut tx, id, change)
             .await
             .map_err(write_failure)?;
@@ -826,7 +809,7 @@ impl SessionDataPort for SqliteSessionData {
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(|error| map_sqlx(&error))?;
-        self.assert_owner(&mut tx, id).await?;
+        self.require_session(&mut tx, id).await?;
         for (message_id, flags) in updates {
             let updated = sqlx::query(
                 "UPDATE messages SET truncated = ?1, excluded = ?2, projection = ?3
@@ -872,7 +855,7 @@ impl SessionDataPort for SqliteSessionData {
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(|error| map_sqlx(&error))?;
-        self.assert_owner(&mut tx, id).await?;
+        self.require_session(&mut tx, id).await?;
         let rowid: Option<(i64,)> =
             sqlx::query_as("SELECT rowid FROM messages WHERE thread_id = ?1 AND message_id = ?2")
                 .bind(id.as_str())
@@ -923,7 +906,7 @@ impl SessionDataPort for SqliteSessionData {
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(|error| map_sqlx(&error))?;
-        self.assert_owner(&mut tx, id).await?;
+        self.require_session(&mut tx, id).await?;
         for message_id in &unique {
             // 别会话的条目不允许被「精确移除」静默命中或静默跳过。
             let owner: Option<(String,)> =
@@ -974,8 +957,6 @@ impl SessionDataPort for SqliteSessionData {
     }
 
     async fn drain(&self, _id: &ThreadId) -> SessionResourceResult<()> {
-        // 本机写入是同事务完成的，没有排队中的持久化，也没有本机未决记录可等：本方法
-        // 因此不阻塞。在途写入的等待由门面按活跃租约完成（见 `drain_persistence`）。
         Ok(())
     }
 

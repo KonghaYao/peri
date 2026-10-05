@@ -1,6 +1,6 @@
 # peri-agent
 
-> 工作区绑定与执行所有权遵循 `ARC-WORKSPACE-001`。Session 异步任务的执行 owner、内存目录与恢复目标见 `../docs/design/session-async-tasks.md`；代码入口见 `../docs/code-index/peri-agent.md`。
+> 工作区绑定与执行环境遵循 `ARC-WORKSPACE-001`。会话执行唯一性与接管由 `peri-sdk` 负责，Agent 不申请执行 owner/lease、不做 Store owner CAS 或 fencing。Session 异步任务的资源生命周期 owner、内存目录与恢复目标见 `../docs/design/session-async-tasks.md`；代码入口见 `../docs/code-index/peri-agent.md`。
 
 ## Scope
 

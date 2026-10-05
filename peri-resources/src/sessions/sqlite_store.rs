@@ -11,7 +11,6 @@ mod connection;
 mod context;
 mod database;
 pub(in crate::sessions) use super::discovery;
-mod execution;
 mod failure;
 mod local;
 mod oauth_credentials;
@@ -41,10 +40,8 @@ use row_mapping::{extract_title, meta_from_row, role_of, ThreadRow, THREAD_META_
 use sqlx::AssertSqlSafe;
 use std::{collections::HashMap, path::PathBuf, str::FromStr, sync::Arc};
 
-use super::execution::{ExecutionWriteGuard, TransactionEffect};
 use super::resources::SessionResourcesImpl;
 use database::SqliteSessionDatabase;
-use failure::is_persistence_uncertain;
 
 pub(in crate::sessions) use failure::execution_failure;
 /// 提交阶段/领域失败映射：由门面测试驱动真实写入准入，生产路径在 `session_data`
@@ -66,7 +63,7 @@ use sqlx::sqlite::SqliteConnectOptions;
 /// 基于 SQLite 的 ThreadStore 实现（迁移桥）
 ///
 /// 使用 WAL 模式提升并发读性能，sqlx SqlitePool 连接池管理并发。连接池、canonical
-/// 路径与执行租约登记都归共享库句柄所有：数据面与执行面不会各自持有一条连接真相。
+/// 路径与连接池归共享库句柄所有：数据面与工作区校验共享连接真相。
 pub struct SqliteThreadStore {
     database: Arc<SqliteSessionDatabase>,
 }
@@ -104,11 +101,7 @@ impl SqliteThreadStore {
     }
 
     /// 夹具装配（唯一调用点 `open_store_and_facade_for_tests`）：迁移桥与门面共用
-    /// **同一个库句柄**（同一 pool、同一 owner 登记表）。
-    ///
-    /// 两面对同一个库既有两种句柄，又不能各开一条连接真相：桥侧的
-    /// `acquire_execution_lease` 与门面的 owner 校验必须落在同一份登记表上，否则同一个
-    /// 进程里会互相判成「无主」。E 阶段桥退出后，本函数一并删除，只留门面构造。
+    /// **同一个库句柄**（同一 pool）。
     pub(in crate::sessions) async fn open_shared(
         db_path: impl Into<PathBuf>,
     ) -> Result<(Self, SessionResourcesImpl)> {
@@ -119,17 +112,6 @@ impl SqliteThreadStore {
             },
             SessionResourcesImpl::from_local(LocalExecution::from_shared_database(database)),
         ))
-    }
-
-    /// 本桥的写入准入：先按**本机库自己的**读法取执行面要用的会话事实（绑定字节、这棵树
-    /// 有没有绑定、树根），再按同一套 root-only 判定取门禁。
-    ///
-    /// 桥与本机数据面共用同一个库句柄（同一份连接真相），因此这里用本机数据面的读法
-    /// （[`SqliteSessionDatabase::local_session_facts`]）构造事实，而不是再写一份读法。
-    /// 远端组合不经过本桥：那时本机没有会话行，事实只能由门面从数据端口取。
-    async fn write_guard(&self, id: &ThreadId) -> Result<Option<ExecutionWriteGuard>> {
-        let facts = self.database.local_session_facts(id).await?;
-        self.database.require_execution_lease(id, &facts).await
     }
 }
 
@@ -187,14 +169,6 @@ impl ThreadStore for SqliteThreadStore {
     ) -> Result<peri_acp_types::workspace::ScopedThreadPage> {
         self.database.list_scoped_threads_impl(query).await
     }
-    async fn acquire_execution_lease(
-        &self,
-        id: &ThreadId,
-    ) -> Result<std::sync::Arc<dyn peri_acp_types::workspace::SessionExecutionLease>> {
-        let facts = self.database.local_session_facts(id).await?;
-        self.database.acquire_execution_lease_impl(id, &facts).await
-    }
-
     async fn create_thread(&self, meta: ThreadMeta) -> Result<ThreadId> {
         let id = meta.id.clone();
         let mut transaction = self.database.pool.begin_with("BEGIN IMMEDIATE").await?;
@@ -255,7 +229,6 @@ impl ThreadStore for SqliteThreadStore {
     }
 
     async fn append_payloads(&self, id: &ThreadId, payloads: &[PersistedPayload]) -> Result<()> {
-        let write_guard = self.write_guard(id).await?;
         let result = async {
             if payloads.is_empty() {
                 return Ok(());
@@ -304,9 +277,6 @@ impl ThreadStore for SqliteThreadStore {
             Ok(())
         }
         .await;
-        if let Some(guard) = write_guard {
-            guard.finish();
-        }
         result
     }
 
@@ -354,7 +324,6 @@ impl ThreadStore for SqliteThreadStore {
     }
 
     async fn update_meta(&self, id: &ThreadId, meta: ThreadMeta) -> Result<()> {
-        let write_guard = self.write_guard(id).await?;
         let result = async {
             if self.database.load_session_binding_impl(id).await?.is_some() {
                 let original: (String, Option<String>) =
@@ -390,9 +359,6 @@ impl ThreadStore for SqliteThreadStore {
             Ok(())
         }
         .await;
-        if let Some(guard) = write_guard {
-            guard.finish();
-        }
         result
     }
 
@@ -406,7 +372,6 @@ impl ThreadStore for SqliteThreadStore {
     }
 
     async fn store_frozen_snapshot_if_absent(&self, id: &ThreadId, snapshot: &str) -> Result<bool> {
-        let write_guard = self.write_guard(id).await?;
         let result = async {
             let result = sqlx::query(
                 "UPDATE threads SET frozen_context = ?1 WHERE id = ?2 AND frozen_context IS NULL",
@@ -432,9 +397,6 @@ impl ThreadStore for SqliteThreadStore {
             }
         }
         .await;
-        if let Some(guard) = write_guard {
-            guard.finish();
-        }
         result
     }
 
@@ -480,8 +442,6 @@ impl ThreadStore for SqliteThreadStore {
     }
 
     async fn delete_thread(&self, id: &ThreadId) -> Result<()> {
-        let write_guard = self.write_guard(id).await?;
-        let mut effect = TransactionEffect::new();
         let mut deleted: Vec<String> = Vec::new();
         let result = async {
             let mut tx = self.database.pool.begin().await?;
@@ -509,21 +469,17 @@ impl ThreadStore for SqliteThreadStore {
                     .execute(&mut *tx)
                     .await?;
             }
-            effect.enter_commit();
             tx.commit().await?;
-            effect.commit_succeeded();
             deleted = to_delete;
             Ok(())
         }
         .await;
         // 只有效果确定才结清写入准入：提交自身的失败落在证明之外，交给 Drop 留下未决证据。
-        effect.settle(write_guard);
         let _ = deleted;
         result
     }
 
     async fn update_title(&self, id: &ThreadId, title: &str) -> Result<()> {
-        let write_guard = self.write_guard(id).await?;
         let result = async {
             let now = peri_time::now_utc_rfc3339();
             sqlx::query("UPDATE threads SET title = ?1, updated_at = ?2 WHERE id = ?3")
@@ -535,9 +491,6 @@ impl ThreadStore for SqliteThreadStore {
             Ok(())
         }
         .await;
-        if let Some(guard) = write_guard {
-            guard.finish();
-        }
         result
     }
 
@@ -546,16 +499,12 @@ impl ThreadStore for SqliteThreadStore {
         thread_id: &ThreadId,
         inherited: &InheritedContext,
     ) -> Result<()> {
-        let write_guard = self.write_guard(thread_id).await?;
         let result = async {
             self.database
                 .store_inherited_context(thread_id, inherited)
                 .await
         }
         .await;
-        if let Some(guard) = write_guard {
-            guard.finish();
-        }
         result
     }
 
@@ -580,7 +529,6 @@ impl ThreadStore for SqliteThreadStore {
     }
 
     async fn update_thread_status(&self, id: &ThreadId, status: &str) -> Result<()> {
-        let write_guard = self.write_guard(id).await?;
         let result = async {
             // 关键约束：参数字符串必须经 FromStr 解析，非法值直接返回错误，不静默 fallback
             let status = AgentStatus::from_str(status)
@@ -595,9 +543,6 @@ impl ThreadStore for SqliteThreadStore {
             Ok(())
         }
         .await;
-        if let Some(guard) = write_guard {
-            guard.finish();
-        }
         result
     }
 
@@ -606,16 +551,9 @@ impl ThreadStore for SqliteThreadStore {
         thread_id: &ThreadId,
         message_ids: &[peri_acp_types::messages::MessageId],
     ) -> Result<()> {
-        let write_guard = self.write_guard(thread_id).await?;
         let result =
             async { compaction::delete_messages(&self.database, thread_id, message_ids).await }
                 .await;
-        if let Some(guard) = write_guard {
-            // 提交阶段的失败是未决持久化：范围留给 `Drop`，不在这里结清。
-            if !result.as_ref().err().is_some_and(is_persistence_uncertain) {
-                guard.finish();
-            }
-        }
         result
     }
 
@@ -624,22 +562,9 @@ impl ThreadStore for SqliteThreadStore {
         message_id: &peri_acp_types::messages::MessageId,
         flags: &MessageFlags,
     ) -> Result<()> {
-        let owner: Option<(String,)> =
-            sqlx::query_as("SELECT thread_id FROM messages WHERE message_id = ?")
-                .bind(message_id.as_uuid().to_string())
-                .fetch_optional(&self.database.pool)
-                .await?;
-        let write_guard = match owner {
-            Some((id,)) => self.write_guard(&id).await?,
-            None => None,
-        };
-
         let result =
             async { compaction::update_message_flags(&self.database, message_id, flags).await }
                 .await;
-        if let Some(guard) = write_guard {
-            guard.finish();
-        }
         result
     }
 
@@ -652,17 +577,10 @@ impl ThreadStore for SqliteThreadStore {
         thread_id: &ThreadId,
         lifecycle: &CompactionChange,
     ) -> Result<()> {
-        let write_guard = self.write_guard(thread_id).await?;
         let result = async {
             compaction::commit_compaction_lifecycle(&self.database, thread_id, lifecycle).await
         }
         .await;
-        if let Some(guard) = write_guard {
-            // 提交阶段的失败是未决持久化：范围留给 `Drop`，不在这里结清。
-            if !result.as_ref().err().is_some_and(is_persistence_uncertain) {
-                guard.finish();
-            }
-        }
         result
     }
 
@@ -678,17 +596,10 @@ impl ThreadStore for SqliteThreadStore {
         thread_id: &ThreadId,
         message_id: &peri_acp_types::messages::MessageId,
     ) -> Result<()> {
-        let write_guard = self.write_guard(thread_id).await?;
         let result = async {
             compaction::delete_messages_since(&self.database, thread_id, message_id).await
         }
         .await;
-        if let Some(guard) = write_guard {
-            // 提交阶段的失败是未决持久化：范围留给 `Drop`，不在这里结清。
-            if !result.as_ref().err().is_some_and(is_persistence_uncertain) {
-                guard.finish();
-            }
-        }
         result
     }
 }

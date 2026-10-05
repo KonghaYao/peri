@@ -159,8 +159,6 @@ async fn legacy_adoption_commits_snapshot_once_across_concurrent_restorers() {
         right.load_frozen_snapshot(&id).await.unwrap().unwrap(),
         winner
     );
-    let left_lease = left.acquire_execution_lease(&id).await.unwrap();
-    let right_lease = right.acquire_execution_lease(&id).await.unwrap();
     left.append_message(&id, BaseMessage::human("continued by left"))
         .await
         .unwrap();
@@ -168,8 +166,6 @@ async fn legacy_adoption_commits_snapshot_once_across_concurrent_restorers() {
         .append_message(&id, BaseMessage::human("continued by right"))
         .await
         .unwrap();
-    left_lease.mark_clean().await.unwrap();
-    right_lease.mark_clean().await.unwrap();
     let messages = right.load_messages(&id).await.unwrap();
     assert_eq!(
         messages
@@ -197,8 +193,6 @@ async fn legacy_adoption_commits_snapshot_once_across_concurrent_restorers() {
         serde_json::to_value(reopened.load_messages(&id).await.unwrap()).unwrap(),
         serde_json::to_value(messages).unwrap()
     );
-    let reopened_lease = reopened.acquire_execution_lease(&id).await.unwrap();
-    reopened_lease.mark_clean().await.unwrap();
     reopened.close().await;
 }
 
@@ -338,14 +332,12 @@ async fn legacy_adoption_rejects_unbound_frozen_session_without_losing_canonical
         .unwrap();
     let meta = serde_json::to_value(store.load_meta(&id).await.unwrap()).unwrap();
     let messages = serde_json::to_value(store.load_messages(&id).await.unwrap()).unwrap();
-    let lease = store.acquire_execution_lease(&id).await.unwrap();
     let deleted = sqlx::query("DELETE FROM session_bindings WHERE thread_id = ?")
         .bind(&id)
         .execute(&store.database.pool)
         .await
         .unwrap();
     assert_eq!(deleted.rows_affected(), 1);
-    lease.mark_clean().await.unwrap();
     store.close().await;
     let store = SqliteThreadStore::new(dir.path().join("threads.db"))
         .await
@@ -371,114 +363,6 @@ async fn legacy_adoption_rejects_unbound_frozen_session_without_losing_canonical
         serde_json::to_value(store.load_messages(&id).await.unwrap()).unwrap(),
         messages
     );
-    lease.mark_clean().await.unwrap();
-    store.close().await;
-}
-
-#[tokio::test]
-async fn legacy_children_use_root_execution_gate_without_data_ownership_requirement() {
-    use peri_acp_types::workspace::WorkspaceError;
-    let dir = tempfile::tempdir().unwrap();
-    let cwd = std::fs::canonicalize(dir.path()).unwrap();
-    let store = SqliteThreadStore::new(dir.path().join("threads.db"))
-        .await
-        .unwrap();
-    let workspace = store.resolve_workspace(&cwd).await.unwrap();
-    let root = store
-        .create_thread(ThreadMeta::new_at(
-            cwd.to_str().unwrap(),
-            peri_time::now_wall(),
-        ))
-        .await
-        .unwrap();
-    let mut child = ThreadMeta::new_at(cwd.to_str().unwrap(), peri_time::now_wall());
-    child.parent_thread_id = Some(root.clone());
-    child.hidden = true;
-    let child = store.create_thread(child).await.unwrap();
-    store
-        .adopt_legacy_thread(&root, cwd.to_str().unwrap(), &workspace, "snapshot")
-        .await
-        .unwrap();
-    let child_facts = store.database.local_session_facts(&child).await.unwrap();
-    assert_eq!(child_facts.root, root);
-    assert!(store
-        .database
-        .owner_lease(&child, &child_facts)
-        .await
-        .unwrap()
-        .is_none());
-    store
-        .append_message(&child, BaseMessage::human("without owner"))
-        .await
-        .unwrap();
-    let lease = store.acquire_execution_lease(&root).await.unwrap();
-    let root_owner = store.database.registered_lease(&root).unwrap().unwrap();
-    let child_owner = store
-        .database
-        .owner_lease(&child, &child_facts)
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(Arc::ptr_eq(&root_owner, &child_owner));
-    assert!(child_owner.is_active());
-    store
-        .append_message(&child, BaseMessage::human("with root owner"))
-        .await
-        .unwrap();
-    let messages = store.load_messages(&child).await.unwrap();
-    assert_eq!(
-        messages
-            .iter()
-            .map(BaseMessage::content)
-            .collect::<Vec<_>>(),
-        ["without owner", "with root owner"]
-    );
-    assert!(store.load_session_binding(&child).await.unwrap().is_none());
-    lease.mark_clean().await.unwrap();
-    assert!(!child_owner.is_active());
-    let error = store
-        .append_message(&child, BaseMessage::human("after close"))
-        .await
-        .unwrap_err();
-    assert!(matches!(
-        error.downcast_ref::<WorkspaceError>(),
-        Some(WorkspaceError::ExecutionLeaseRequired)
-    ));
-    assert_eq!(
-        serde_json::to_value(store.load_messages(&child).await.unwrap()).unwrap(),
-        serde_json::to_value(messages).unwrap()
-    );
-    drop(child_owner);
-    drop(root_owner);
-    drop(lease);
-    assert!(store
-        .append_message(&child, BaseMessage::human("dropped closed owner"))
-        .await
-        .is_err());
-    let next = store.acquire_execution_lease(&root).await.unwrap();
-    store
-        .append_message(&child, BaseMessage::human("after releasing closed handle"))
-        .await
-        .unwrap();
-    let messages = store.load_messages(&child).await.unwrap();
-    assert_eq!(
-        messages
-            .iter()
-            .map(BaseMessage::content)
-            .collect::<Vec<_>>(),
-        [
-            "without owner",
-            "with root owner",
-            "after releasing closed handle"
-        ]
-    );
-    assert_eq!(store.load_meta(&child).await.unwrap().message_count, 3);
-    assert!(store.load_messages(&root).await.unwrap().is_empty());
-    assert_eq!(
-        store.load_frozen_snapshot(&root).await.unwrap().as_deref(),
-        Some("snapshot")
-    );
-    next.mark_clean().await.unwrap();
     store.close().await;
 }
 
@@ -498,12 +382,10 @@ async fn legacy_history_scopes_keep_path_boundaries_and_mixed_pagination() {
         )
         .await
         .unwrap();
-    let lease = store.acquire_execution_lease(&native).await.unwrap();
     store
         .append_message(&native, BaseMessage::human("new"))
         .await
         .unwrap();
-    lease.mark_clean().await.unwrap();
     let mut expected = vec![native];
     for path in [
         cwd.clone(),

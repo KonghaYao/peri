@@ -197,9 +197,7 @@ pub struct SessionContext {
     pub session_access: Option<Arc<dyn SessionAccessPort>>,
     /// 会话资源门面：transcript/subagent 的唯一会话行为入口（会话存储不再有第二个句柄）。
     pub session_resources: Option<Arc<dyn peri_acp_types::session_resources::SessionResources>>,
-    /// 本会话 root 的执行所有权（ACP SessionState 投影）：child 保存/认领的前置证明。
     /// 只读准入或无执行权的会话为 None——那时不得落任何 child。
-    pub execution_owner: Option<Arc<dyn peri_acp_types::workspace::SessionExecutionLease>>,
     pub thread_id: Option<String>,
 
     // ── middleware: middleware chain resources ─────────────────────────────

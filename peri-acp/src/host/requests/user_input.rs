@@ -30,15 +30,9 @@ pub(super) fn handle_user_input(
             "user input queue capability not negotiated",
         ));
     }
-    let state = sessions
+    sessions
         .get(session_id)
         .ok_or_else(|| AcpError::new(-32602, "session not found"))?;
-    if method != "session/input/snapshot" && !state.lease.is_writer("default") {
-        return Err(AcpError::new(
-            -32602,
-            "read-only observer cannot change user input queue",
-        ));
-    }
     let mailbox = super::super::user_input::ensure_mailbox(session_id, cfg, transport)?;
     let rejected = |error: String| {
         AcpError::new(-32602, error).with_data(serde_json::json!({

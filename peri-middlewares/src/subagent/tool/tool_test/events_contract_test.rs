@@ -86,8 +86,7 @@ async fn test_fork_path_emits_v2_start_stop_exactly_once() {
     let t = with_agent_face(t, dir.path()).await;
     let t = t
         .with_session_resources(fixture.facade())
-        .with_parent_thread_id(parent_id)
-        .with_execution_owner(fixture.execution_owner());
+        .with_parent_thread_id(parent_id);
     let result = t
         .invoke(
             serde_json::json!({
@@ -127,8 +126,7 @@ async fn test_define_path_emits_v2_start_stop_exactly_once() {
     let t = with_agent_face(t, dir.path()).await;
     let t = t
         .with_session_resources(fixture.facade())
-        .with_parent_thread_id(parent_id)
-        .with_execution_owner(fixture.execution_owner());
+        .with_parent_thread_id(parent_id);
     let result = t
         .invoke(
             serde_json::json!({

@@ -53,22 +53,15 @@ Subagent 与 Workflow 的执行 owner 仍在 Agent 部署内。该部署退出�
 
 用户**显式关闭或删除 session** 时，Session runtime 在 admission 锁下进入 `PreparingClose`，阻止新任务并记录已接纳的在途发起，然后向 Session Store 提交关闭意图。**持久提交是关闭请求的接纳点**：明确写入失败时撤销 `PreparingClose`、恢复准入并返回失败；提交结果不确定时先回读确认，在确认前保持 `PreparingClose` 且不得返回成功。若提交前进程退出，客户端未收到接纳结果，需重试；恢复时以 Store 中有无关闭意图为准。已提交意图禁止新 runtime 任务准入。Workspace MCP 的 session scope 也须有与任务创建线性化的 closing gate：关闭 gate 返回 barrier cursor，拒绝之后的新建；先前已接纳的在途创建必须纳入 barrier 后的发现快照。Manager 等待在途调用结算，按 barrier 及后续变更发现并取消本 session 的所有外部任务，同时取消 Agent owned 任务；取得终态/清理证据后才结算关闭。只取消该 session 的任务，不关闭共享 MCP 实例。子会话（subagent 等）结束不是其 root 的显式关闭：不得取消 root scope 任务；发起会话结束前的有界收敛与交接见 §7。
 
-关闭意图属于 session 生命周期元数据，不是任务目录或结果副本。取消或清理超时报告 `Incomplete`：进程内由 deployment owner 保留可重试的关闭上下文；Agent 更换后先读关闭意图并禁止新任务准入，再用 MCP closing gate 和 scope 快照继续结算。外部 MCP 工具调用须在发送请求前登记执行准入，覆盖服务端创建任务到本地登记或确认取消的整个窗口；创建响应丢失、超时或取消未确认时保留未结清证据，不能把空任务目录当作成功。**关闭意图仅证明关闭请求已接纳，不证明原 Agent 的 prompt、Subagent、Workflow 或 transcript 已排空。**更换 Agent 必须由可信 SDK supervisor 证明对应旧 Agent 进程代际已经退出，且其本地子进程组已收敛；证明缺失即 `Incomplete`。新的 Agent 用 Store 时钟下的 CAS 取得 root 执行 owner `epoch + nonce`；旧 owner 仍有效时不得接管。Store 的每次会话写入必须在同一业务事务内校验精确 owner 和有效期，迟到写入与接管 CAS 按 Store 写锁线性化。运行中每 10 秒续约；续约失败立即关闭该 session 的 Agent 与工具准入。
+关闭意图属于 session 生命周期元数据，不是任务目录或执行所有权。取消或清理超时报告 `Incomplete`，deployment 保留可重试关闭上下文。新的 Agent 读取已接纳意图并继续资源排空，任务创建响应丢失或取消未确认时不能把空目录当成成功。删除会话记录必须等待本地与外部任务结算；保留记录的关闭在排空后清除意图。Store 提交响应不确定时按 Session ID 回读意图或根记录，不把命令发送当成完成。
 
-取得 Store owner 后，Agent 用 Store 执行代际推进 Workspace MCP 的 owner floor，再关闭该 session 的 task scope。`taskFence` 必须阻断旧代际新工具准入、等待已准入的任务创建登记，并返回可对账的 barrier；仅检查任务快照为空不构成证明。执行期在 Store 绑定可信 Workspace endpoint 的身份，以及是否存在缺少恢复发现能力的其他外部任务 owner；动态接入此类 owner 前必须先持久置位，写入失败即拒绝接入。标记跨代单调保留，直到完整关闭结算。接管时必须对照原绑定，不能用新进程恰好连接的空 Workspace 目录代替旧 owner 的目录。存在其他无法发现的任务 owner、绑定缺失或身份不符时保持 `Incomplete`。独立 Workspace MCP 的内存目录只在其 owner 进程连续存活时可信：自身异常退出后，新进程不得以空目录宣称旧任务完成；缺乏外部清理证明时拒绝恢复并报告 `Incomplete`。内置同进程 MCP 随 Agent 退出，不能获得独立执行高可用。
+会话的唯一执行者、Agent 替换和跨实例接管由 `peri-sdk` 管理。SDK 负责在开放新执行者前停止或隔离旧实例；Peri 不保存或续约执行租约，不认领 Store owner，不验证接管 supervisor 证明，不对工具调用执行 Store token fencing。Workspace scope 的 close/open 仍按 scope epoch 保护任务生命周期，防止迟到关闭请求影响已重开的 scope；该 epoch 不是会话执行所有权。
 
-删除 session 记录只能在本地与外部任务均结算后完成，不能先删掉恢复关闭所需的 scope。显式关闭先完成远端取消/对账，再断开该 session 的 MCP 连接。保留 session 记录的成功关闭在**一个 Store 事务**里校验当前 owner、清除关闭意图并释放该代际；删除则在同一受 owner 保护的事务中删除 session 树、关闭意图和 owner。若 Store 提交响应丢失，按相同 `epoch + nonce` 回读 `Pending / Finished / ChangedOwner`，只有精确 `Finished` 可确认保留记录的关闭；删除回读根记录确实不存在才确认删除。任何未知结果保持关闭准入，不撤销已接纳的关闭。后续重新加载该 session 须在新任务准入前重新打开 Workspace scope。Workspace scope 的 close/open 使用 owner 的 epoch 条件更新：请求携带先前快照的 epoch，打开成功推进 epoch，过期关闭请求不得再次关闭新一代 scope。
-
-Agent 意外消失、连接断开、宿主更换或部署重启不等同于用户显式关闭，不得因此向独立 MCP owner 发送取消。当前 transport EOF 的资源清理仍可停止本地 owner；目标实现需在该路径区分 session 显式关闭和部署释放，EOF 只断开远端观察连接，不把进程级释放解释为远端 task cancel。
-
-普通可执行 `session/load` 不能仅凭 Store 租约到期接管有可信外部执行身份、Agent 代际或远端 endpoint 的未释放 owner：旧 Agent 在续租失败被观察到之前仍可能执行不经 Store 栅栏的外部工具。Store 需区分已释放 owner 与过期但未释放 owner；后一种接管须证明对应旧 Agent 及其子进程组已退出，并将证明所指的执行代际与 Store 的待接管代际精确匹配。无法证明时仅允许只读观察或返回恢复未完成。
-`session/load` / `session/resume` 在抢占 Store owner 前只读检查这份证据；证明不可得时默认返回带 `peri.formerOwnerUnverifiedV1` 原因的只读历史，不创建新执行代际。已取得 owner 后仍须复核，防止检查与抢占间的竞争。正常释放的 owner 仍允许重新取得执行权。**本地 TUI 例外**：仅当该宿主显式启用本地接管、会话有已记录的本机绑定、旧 owner descriptor 的 endpoint、owner identity 与 Agent generation 均为空，且 Store 租约已过期并成功 CAS 取得新 epoch 时，允许恢复可写会话；ACP 返回 `restore_warning=formerOwnerUnverified`，TUI 显示警告。此路径不声称旧后台任务已停止，也不恢复旧任务；含远端/代际证据的部署仍须遵守上述证明规则。
+Agent 意外消失、连接断开、宿主更换或部署重启不等同于用户显式关闭。独立 MCP 任务的发现、取消和终态对账仍归任务 owner；部署释放不应被解释为远端 task cancel。Workspace MCP 不用本地 owner marker 阻止新实例启动；旧任务或孤儿进程的停止与实例替换由 SDK 和部署平台负责，Peri 不声称重启即证明旧任务停止。
 
 ## 6. 落地边界与验收
 
-已落地：session runtime 的 TaskManager 汇合 Subagent、Workflow 与 Workspace MCP 任务投影；ACP 提供快照、增量与统一取消；TUI 在会话切换及重连时按 revision 对账；Workspace MCP 提供可信 scope 的发现、变更、关闭和重开。终态提醒以稳定 ID 原子落入 canonical transcript，独立存活的 Workspace MCP 可供新 Agent 按 scope 找回任务。各入口和验证见 `docs/code-index/`。
-
-跨进程关闭接管按 §5 的证据链实现：Store 的 root owner 代际与同事务写入栅栏、Workspace 的执行代际 floor 与 task barrier、SDK 对精确旧 Agent 进程代际的子进程收敛证明、ACP 的关闭续约和可重试结算。Store 只持久化执行 owner 代际、关闭意图及执行期外部 owner 身份与能力证据；Task Manager 和任务投影继续只在内存。无法取到可信 SDK 证明、可信 Workspace owner 目录或 Store 的精确结算读回时保持 `Incomplete`，不会把失去观察误判为完成。独立 Workspace MCP 自身异常退出后的孤儿 shell 仍需外部进程监督或人工清理证明，当前 owner incarnation guard 会阻止空目录恢复。
+Session runtime 的 TaskManager 汇合 Subagent、Workflow 与 Workspace MCP 任务投影；ACP 提供快照、增量与统一取消；TUI 在会话切换及重连时按 revision 对账；Workspace MCP 提供 session scope 的发现、变更、关闭和重开。终态提醒以稳定 ID 原子落入 canonical transcript。各入口和验证见 `docs/code-index/`。
 
 完整验收仍须覆盖：三类任务的 started/terminal/取消在同一 TUI 区域可见；任务在结果入队前保持 active；快完成与取消竞争；session 切换及重连快照；订阅丢失后的对账；Agent runtime 重建后从仍存活的独立 MCP 找回任务；显式关闭只取消本 session，Agent 意外退出不取消 MCP；同名 MCP 实例及跨 session task ID 不串线。部署进程退出、MCP owner 退出与不支持发现的第三方 server 应分别报告能力边界。子会话发起任务的发起者可达（回执承诺可兑现）、祖先链聚合可归属且不重复产生终态、跨进程重建后投递目标正确（降级路径显式可观测），同样纳入验收（§7）。
 

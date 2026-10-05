@@ -12,7 +12,7 @@ use peri_acp_types::{
     session_resources::{FrozenSnapshotBytes, NewSession, NewSessionMeta, SessionResources},
     store::PersistedPayload,
     thread::CancelPolicy,
-    workspace::{SessionBinding, SessionExecutionLease},
+    workspace::SessionBinding,
 };
 use peri_agent::{
     agent::{
@@ -40,7 +40,6 @@ struct BoundSession {
     thread_id: String,
     cwd: String,
     db_path: std::path::PathBuf,
-    _lease: Arc<dyn SessionExecutionLease>,
     _directory: tempfile::TempDir,
 }
 
@@ -56,7 +55,7 @@ impl BoundSession {
         let workspace = resources.resolve_workspace(directory.path()).await.unwrap();
         let thread_id = uuid::Uuid::now_v7().to_string();
         let cwd = workspace.cwd.to_string_lossy().into_owned();
-        let lease = resources
+        resources
             .create_session(&NewSession {
                 thread_id: thread_id.clone(),
                 created_at: "2026-09-28T00:00:00Z".into(),
@@ -78,7 +77,6 @@ impl BoundSession {
             thread_id,
             cwd,
             db_path,
-            _lease: lease,
             _directory: directory,
         }
     }

@@ -79,11 +79,6 @@ lang-unsupported = Unsupported language: { $lang }
 statusbar-permission-dont-ask = Don't Ask
 statusbar-initializing = Initializing…
 statusbar-preparing = Preparing session…
-statusbar-read-only-busy = Read-only · executed by another instance
-statusbar-read-only-recovery = Read-only · previous run did not close cleanly
-statusbar-read-only-store = Read-only · session store is not writable
-statusbar-read-only-former-owner = Read-only · previous execution could not be verified stopped
-statusbar-restore-warning-former-owner = Warning · previous execution could not be verified stopped
 statusbar-permission-accept-edit = Accept Edit
 statusbar-permission-auto = Auto Mode
 statusbar-permission-bypass = Bypass
@@ -1142,12 +1137,6 @@ popup-ask-user-title =  Ask User
 # ---- Confirm Popup (P2) ----
 # 风险选择的取消项：与具体风险种类无关，各风险说明共用。
 risk-choice-cancel = Cancel (default)
-dirty-recovery-title = Clear dirty state and restore this session?
-dirty-recovery-risk = Old child processes may still be running.
-dirty-recovery-unknown = Previous side effects are unknown.
-dirty-recovery-responsibility = You accept the risk and responsibility for what follows.
-dirty-recovery-hint = Up/Down: select · Enter: apply · Esc: cancel
-dirty-recovery-accept = Accept risk, clear dirty state and load
 
 popup-confirm-empty =   No pending confirmation.
 popup-confirm-action-hint =   Enter: confirm  Esc: cancel
@@ -1190,7 +1179,6 @@ steer-queue-title = Pending { $count }
 steer-input-rejected = Input was not accepted. Your draft has been kept.
 steer-input-uncertain = Waiting for the input receipt. Retrying with the same input ID.
 steer-session-unavailable = Session could not be established: { $error }. Your draft has been kept.
-steer-session-read-only = This session was entered read-only, so input cannot be submitted. Your draft has been kept.
 
 thread-browser-project = Project
 thread-browser-workspace = Workspace

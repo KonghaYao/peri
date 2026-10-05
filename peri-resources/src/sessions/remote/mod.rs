@@ -59,9 +59,8 @@
 //! `Arc<dyn LocalExecutionPort>`），远程组合装配在 [`composition::open_remote`]，并由
 //! `Resources::open_deployment` 在远程 locator 上真实接通（见 `context.rs`）。配了哪个 store
 //! 就直接用哪个，不再有本机 store 登记、准入裁决与启动探测；Turso 模式不打开本机 SQLite，
-//! 执行句柄只在当前实例内。没有本机锚点之后
-//! `recover_persistence` 收敛为「会话数据可读即已收敛」，未结清由门面按活跃租约的
-//! `is_uncertain` 判定。
+//! 工作区发现由执行端口完成。没有本机锚点之后
+//! `recover_persistence` 收敛为「会话数据可读即已收敛」，未结清由门面的 persistence gate 判定。
 //!
 //! 已实现（C-05 第二批，边界实验）：P5/P6/P7 边界实验（`cloud_limit_test.rs`：取消在途调用、
 //! 超大单批、收据保留与空间成本）。**删除不写墓碑**：v10 撤销本机生命周期锚点后，
@@ -85,9 +84,8 @@
 //! 因此一条已经不可证明的连接不会被交给调用方。
 //!
 //! **关闭（shutdown）的定义**：① 本机传输面的关闭走完（连接被保留在关闭句柄里直到成功，
-//! 失败或取消都可重试、不新建连接）；② 门面侧的未结清检查通过——先按活跃租约等待在途写入
-//! 结束（`wait_for_in_flight`，有界），再拒绝仍为 `is_uncertain` 的租约（见 `resources.rs`
-//! 的 `close`）。
+//! 失败或取消都可重试、不新建连接）；② 门面侧的未结清检查通过——先通过 persistence gate 等待在途写入
+//! 结束，再拒绝仍未结清的会话（见 `resources.rs` 的 `close`）。
 //! 两件都成立才算确认关闭。SDK 的 `Connection::close` 恒返回 `Ok(())` 并显式吞掉远端关闭
 //! 错误，因此 ① **不能**证明服务端连接已释放，也**不能**拿它证明任何未知的远端写没有执行。
 //!
@@ -120,7 +118,7 @@ mod oauth_credentials;
 mod schema;
 mod schema_upgrade;
 mod schema_v12_upgrade;
-mod schema_v13_upgrade;
+mod schema_v14_upgrade;
 
 #[cfg(test)]
 #[path = "schema_upgrade_test.rs"]

@@ -23,8 +23,6 @@ use rmcp::{
 };
 use serde::Serialize;
 
-use crate::task_scope::ExecutionGeneration;
-
 const CHANGE_LIMIT: usize = 512;
 
 #[derive(Clone, Serialize)]
@@ -70,8 +68,6 @@ struct ShellState {
     cursor: u64,
     closing: HashSet<String>,
     epochs: HashMap<String, u64>,
-    execution_floor: HashMap<String, ExecutionGeneration>,
-    fencing: HashSet<String>,
     inflight: HashMap<String, usize>,
     cancel_pending: HashSet<String>,
     cancel_accepted: HashSet<String>,
@@ -79,22 +75,6 @@ struct ShellState {
 }
 
 impl ShellState {
-    fn check_execution(
-        &self,
-        scope: &str,
-        generation: Option<&ExecutionGeneration>,
-    ) -> Result<(), McpError> {
-        match self.execution_floor.get(scope) {
-            Some(floor) if generation == Some(floor) => Ok(()),
-            None if generation.is_none() => Ok(()),
-            None => Err(McpError::invalid_params(
-                "task execution owner is not fenced",
-                None,
-            )),
-            Some(_) => Err(McpError::invalid_params("stale task execution owner", None)),
-        }
-    }
-
     fn publish(&mut self, task_id: &str) -> Option<DetailedTask> {
         let task = self.records.get(task_id)?.clone();
         let scope = self.scopes.get(task_id)?.clone();
@@ -160,77 +140,6 @@ impl ShellTasks {
 
     pub(crate) fn manager(&self) -> Arc<dyn TaskManager> {
         Arc::clone(&self.manager)
-    }
-
-    pub(crate) fn check_execution(
-        &self,
-        scope: &str,
-        generation: Option<&ExecutionGeneration>,
-    ) -> Result<(), McpError> {
-        self.state.lock().check_execution(scope, generation)
-    }
-
-    /// Advance the Store execution owner floor before admitting its tool work.
-    /// Earlier admitted creations remain counted until their records exist.
-    pub(crate) async fn fence_execution(
-        &self,
-        scope: &str,
-        generation: &ExecutionGeneration,
-    ) -> Result<u64, McpError> {
-        // The caller may disconnect while earlier launches are still being
-        // registered. Keep the floor transition and barrier with the owner.
-        let owner = self.clone();
-        let scope = scope.to_owned();
-        let generation = generation.clone();
-        let (reply, receive) = tokio::sync::oneshot::channel();
-        tokio::spawn(async move {
-            let result = owner.fence_execution_owned(&scope, &generation).await;
-            let _ = reply.send(result);
-        });
-        receive
-            .await
-            .map_err(|_| McpError::internal_error("task fence owner stopped", None))?
-    }
-
-    async fn fence_execution_owned(
-        &self,
-        scope: &str,
-        generation: &ExecutionGeneration,
-    ) -> Result<u64, McpError> {
-        {
-            let mut state = self.state.lock();
-            if let Some(current) = state.execution_floor.get(scope) {
-                if generation.epoch < current.epoch
-                    || (generation.epoch == current.epoch && generation.nonce != current.nonce)
-                {
-                    return Err(McpError::invalid_params("stale task execution owner", None));
-                }
-            }
-            if state.execution_floor.get(scope) != Some(generation) {
-                state
-                    .execution_floor
-                    .insert(scope.into(), generation.clone());
-                state.fencing.insert(scope.into());
-            }
-        }
-        loop {
-            let notified = self.changed.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
-            {
-                let mut state = self.state.lock();
-                state.check_execution(scope, Some(generation))?;
-                if !state.fencing.contains(scope) {
-                    return Ok(state.cursor);
-                }
-                if state.inflight.get(scope).copied().unwrap_or(0) == 0 {
-                    state.fencing.remove(scope);
-                    self.changed.notify_waiters();
-                    return Ok(state.cursor);
-                }
-            }
-            notified.await;
-        }
     }
 
     pub(crate) fn completion_callback(&self) -> OnBgCompleteFn {
@@ -322,19 +231,9 @@ impl ShellTasks {
         })
     }
 
-    #[cfg(test)]
     pub(crate) fn admit(&self, scope: &str) -> Result<ScopeAdmission, McpError> {
-        self.admit_fenced(scope, None)
-    }
-
-    pub(crate) fn admit_fenced(
-        &self,
-        scope: &str,
-        generation: Option<&ExecutionGeneration>,
-    ) -> Result<ScopeAdmission, McpError> {
         let mut state = self.state.lock();
-        state.check_execution(scope, generation)?;
-        if state.closing.contains(scope) || state.fencing.contains(scope) {
+        if state.closing.contains(scope) {
             return Err(McpError::invalid_params("task scope is closing", None));
         }
         *state.inflight.entry(scope.into()).or_default() += 1;
@@ -351,8 +250,7 @@ impl ShellTasks {
         cwd: String,
         timeout_ms: Option<u64>,
     ) -> Result<Task, McpError> {
-        self.spawn_scoped(command, cwd, timeout_ms, None, None)
-            .await
+        self.spawn_scoped(command, cwd, timeout_ms, None).await
     }
 
     pub(crate) async fn spawn_scoped(
@@ -361,14 +259,11 @@ impl ShellTasks {
         cwd: String,
         timeout_ms: Option<u64>,
         scope: Option<&str>,
-        generation: Option<&ExecutionGeneration>,
     ) -> Result<Task, McpError> {
         // The MCP request may be cancelled while spawn_blocking is running.
         // Admission and registration must outlive that request future so a
         // closing barrier cannot miss a process already accepted by the owner.
-        let admission = scope
-            .map(|scope| self.admit_fenced(scope, generation))
-            .transpose()?;
+        let admission = scope.map(|scope| self.admit(scope)).transpose()?;
         let owner = self.clone();
         let scope = scope.map(str::to_owned);
         let (reply, receive) = tokio::sync::oneshot::channel();
@@ -491,15 +386,10 @@ impl ShellTasks {
         self.cancel_inner(task_id, None)
     }
 
-    fn cancel_inner(
-        &self,
-        task_id: &str,
-        scoped: Option<(&str, Option<&ExecutionGeneration>)>,
-    ) -> Result<(), McpError> {
+    fn cancel_inner(&self, task_id: &str, scoped: Option<&str>) -> Result<(), McpError> {
         {
             let mut state = self.state.lock();
-            if let Some((scope, generation)) = scoped {
-                state.check_execution(scope, generation)?;
+            if let Some(scope) = scoped {
                 if !state.scoped(task_id, scope) {
                     return Err(McpError::invalid_params("unknown task", None));
                 }
@@ -569,13 +459,8 @@ impl ShellTasks {
         self.state.lock().scoped(id, scope)
     }
 
-    pub(crate) fn cancel_scoped(
-        &self,
-        id: &str,
-        scope: &str,
-        generation: Option<&ExecutionGeneration>,
-    ) -> Result<(), McpError> {
-        self.cancel_inner(id, Some((scope, generation)))
+    pub(crate) fn cancel_scoped(&self, id: &str, scope: &str) -> Result<(), McpError> {
+        self.cancel_inner(id, Some(scope))
     }
 
     pub(crate) fn update_scoped(&self, id: &str, scope: &str) -> Result<(), McpError> {
@@ -647,15 +532,9 @@ impl ShellTasks {
         }
     }
 
-    pub(crate) async fn close_scope(
-        &self,
-        scope: &str,
-        epoch: u64,
-        generation: Option<&ExecutionGeneration>,
-    ) -> Result<u64, McpError> {
+    pub(crate) async fn close_scope(&self, scope: &str, epoch: u64) -> Result<u64, McpError> {
         {
             let mut state = self.state.lock();
-            state.check_execution(scope, generation)?;
             if *state.epochs.get(scope).unwrap_or(&0) != epoch {
                 return Err(McpError::invalid_params("stale task scope epoch", None));
             }
@@ -667,7 +546,6 @@ impl ShellTasks {
             notified.as_mut().enable();
             {
                 let state = self.state.lock();
-                state.check_execution(scope, generation)?;
                 if *state.epochs.get(scope).unwrap_or(&0) != epoch || !state.closing.contains(scope)
                 {
                     return Err(McpError::invalid_params("stale task scope epoch", None));
@@ -680,14 +558,8 @@ impl ShellTasks {
         }
     }
 
-    pub(crate) fn open_scope(
-        &self,
-        scope: &str,
-        epoch: u64,
-        generation: Option<&ExecutionGeneration>,
-    ) -> Result<ScopeOpened, McpError> {
+    pub(crate) fn open_scope(&self, scope: &str, epoch: u64) -> Result<ScopeOpened, McpError> {
         let mut state = self.state.lock();
-        state.check_execution(scope, generation)?;
         if *state.epochs.get(scope).unwrap_or(&0) != epoch {
             return Err(McpError::invalid_params("stale task scope epoch", None));
         }

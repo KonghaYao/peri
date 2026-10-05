@@ -1,121 +1,60 @@
 use super::*;
 
-// ─── child：沿用 root owner ───────────────────────────────────────────────────
-
 #[tokio::test]
-async fn test_save_child_requires_the_root_owner_and_shares_its_gate() {
+async fn test_save_child_preserves_parent_snapshot_and_tree() {
     let fixture = Fixture::new().await;
-    let root_lease = fixture.create("s-child-root").await;
-    let foreign = fixture.create("s-child-foreign").await;
-    let workspace = fixture.workspace().await;
-    let root_frozen = match fixture
+    fixture.create("s-child-root").await;
+    let child = fixture.child("s-child", "s-child-root").await;
+    let snapshot = fixture
         .facade
-        .load_session_snapshot(&"s-child-root".to_owned())
-        .await
-        .unwrap()
-        .frozen
-    {
-        FrozenState::Present(frozen) => frozen,
-        other => panic!("root frozen snapshot is missing: {other:?}"),
-    };
-    let snapshot = ChildSnapshot {
-        target: NewSession {
-            thread_id: "s-child".to_owned(),
-            created_at: "2026-09-26T00:00:01Z".to_owned(),
-            meta: NewSessionMeta {
-                title: Some("child".to_owned()),
-                cwd: workspace.cwd.to_string_lossy().into_owned(),
-                parent_thread_id: Some("s-child-root".to_owned()),
-                hidden: true,
-                cancel_policy: Default::default(),
-                snapshot_at_message_id: None,
-            },
-            binding: Fixture::binding(&workspace),
-            frozen: root_frozen,
-        },
-        parent_id: "s-child-root".to_owned(),
-        root_id: "s-child-root".to_owned(),
-        inherited: peri_acp_types::store::InheritedContext {
-            payloads: Vec::new(),
-            flags: std::collections::HashMap::new(),
-        },
-    };
-    // 别的 root 的 owner 不能借来写这条 child。
-    let error = fixture
-        .facade
-        .save_child(&snapshot, &foreign)
-        .await
-        .unwrap_err();
-    assert!(matches!(
-        error_kind(&error),
-        SessionResourceErrorKind::Workspace(WorkspaceError::ExecutionLeaseRequired)
-    ));
-    assert_eq!(fixture.count_threads("s-child").await, 0);
-
-    fixture
-        .facade
-        .save_child(&snapshot, &root_lease)
+        .load_session_snapshot(&child.target.thread_id)
         .await
         .unwrap();
+    assert_eq!(
+        snapshot.meta.parent_thread_id.as_deref(),
+        Some("s-child-root")
+    );
+    assert_eq!(snapshot.frozen, FrozenState::Present(child.target.frozen));
+    assert_eq!(
+        fixture
+            .facade
+            .list_session_tree(&"s-child-root".to_owned())
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
     fixture
         .facade
         .append_history(&"s-child".to_owned(), &[payload("child turn")])
         .await
         .unwrap();
-    // root owner 关闭后，child 的写入同样被拒绝。
-    root_lease.mark_clean().await.unwrap();
-    let error = fixture
-        .facade
-        .append_history(&"s-child".to_owned(), &[payload("after clean")])
-        .await
-        .unwrap_err();
-    assert!(matches!(
-        error_kind(&error),
-        SessionResourceErrorKind::Workspace(WorkspaceError::ExecutionLeaseRequired)
-    ));
-    drop(root_lease);
-    assert!(fixture
-        .facade
-        .append_history(&"s-child".to_owned(), &[payload("dropped closed owner")])
-        .await
-        .is_err());
-    let next = fixture
-        .facade
-        .acquire_execution(&"s-child-root".to_owned(), &workspace)
-        .await
-        .unwrap();
-    fixture
-        .facade
-        .append_history(&"s-child".to_owned(), &[payload("after run disposal")])
-        .await
-        .unwrap();
-    assert_eq!(fixture.count_messages("s-child").await, 2);
-    next.mark_clean().await.unwrap();
-    drop(foreign);
+    assert_eq!(fixture.count_messages("s-child").await, 1);
 }
 
-/// child 的写入归属 root 执行域：它必须与 root 的写入共享同一条门禁，而不是因为
-/// 「child 自己还没有 identity/owner」就免于门禁（B §4.1.3）。
 #[tokio::test]
 async fn test_save_child_write_waits_for_the_root_gate() {
     let fixture = Fixture::new().await;
-    let root_lease = fixture.create("s-gate-root").await;
+    fixture.create("s-gate-root").await;
     let snapshot = fixture.child_snapshot("s-gate-child", "s-gate-root").await;
-
-    // 占住 root 的写侧门禁（等价于该 owner 上另一次 mutation 正在检查+写入之间）。
-    let facts = facts_of(&fixture.facade, "s-gate-root").await;
-    let held = fixture
-        .facade
-        .gate
-        .local()
-        .exclusive_guard(&"s-gate-root".to_owned(), &facts)
-        .await
-        .unwrap()
-        .expect("the root owner is alive");
+    let (started_sender, started_receiver) = tokio::sync::oneshot::channel();
+    let (release_sender, release_receiver) = tokio::sync::oneshot::channel();
+    let facade = fixture.facade.clone();
+    let held = tokio::spawn(async move {
+        facade
+            .gate
+            .with_exclusive(&"s-gate-root".to_owned(), || async move {
+                started_sender.send(()).unwrap();
+                release_receiver.await.unwrap();
+                Ok(())
+            })
+            .await
+    });
+    started_receiver.await.unwrap();
     assert!(
         tokio::time::timeout(
             std::time::Duration::from_millis(200),
-            fixture.facade.save_child(&snapshot, &root_lease),
+            fixture.facade.save_child(&snapshot),
         )
         .await
         .is_err(),
@@ -126,27 +65,20 @@ async fn test_save_child_write_waits_for_the_root_gate() {
         0,
         "no child data may be written while the root gate is held"
     );
-    held.finish();
+    release_sender.send(()).unwrap();
+    held.await.unwrap().unwrap();
 
     // 门禁释放后同一次保存成立，且没有把 root 标成未决（结清只认确定性）。
-    fixture
-        .facade
-        .save_child(&snapshot, &root_lease)
-        .await
-        .unwrap();
+    fixture.facade.save_child(&snapshot).await.unwrap();
     assert_eq!(fixture.count_threads("s-gate-child").await, 1);
-    root_lease.mark_clean().await.unwrap();
-    drop(root_lease);
 }
 
 /// 父子关系在 child 快照里出现两次：`parent_id`（声明）与 `target.meta.parent_thread_id`
 /// （落库用的那一份）。只校验前者、照后者落库，会把「声明了合法父/根」的 child 写成一条
-/// **没有父的独立 root**——此后它还能自己取得执行权。门面必须在任何副作用之前拒绝，
-/// 并且拒绝不留痕（零行、无 lease、root 原样）。
 #[tokio::test]
 async fn test_save_child_refuses_a_snapshot_that_disagrees_with_its_parent_relation() {
     let fixture = Fixture::new().await;
-    let root_lease = fixture.create("s-rel-root").await;
+    fixture.create("s-rel-root").await;
     let legal = fixture.child_snapshot("s-rel-child", "s-rel-root").await;
 
     // 目标 meta 里没有父；父与声明不同；自指父关系；把自己当根。
@@ -166,11 +98,7 @@ async fn test_save_child_refuses_a_snapshot_that_disagrees_with_its_parent_relat
         ("self parent", &self_parent),
         ("own root", &own_root),
     ] {
-        let error = fixture
-            .facade
-            .save_child(snapshot, &root_lease)
-            .await
-            .unwrap_err();
+        let error = fixture.facade.save_child(snapshot).await.unwrap_err();
         assert!(
             matches!(
                 error_kind(&error),
@@ -180,21 +108,7 @@ async fn test_save_child_refuses_a_snapshot_that_disagrees_with_its_parent_relat
         );
         assert_eq!(fixture.count_threads("s-rel-child").await, 0, "{label}");
         assert_eq!(fixture.count_bindings("s-rel-child").await, 0, "{label}");
-        // 无 lease：这条 identity 不存在，也就没有独立 root 可取得执行权。
-        let facts = facts_of(&fixture.facade, "s-rel-child").await;
-        assert!(
-            fixture
-                .facade
-                .gate
-                .local()
-                .owner_lease(&"s-rel-child".to_owned(), &facts)
-                .await
-                .unwrap()
-                .is_none(),
-            "{label}"
-        );
     }
-    // 原 root 不变：仍是独立 root、树里只有自己、children 为空，且它的 owner 照常可写。
     let root_meta = fixture
         .facade
         .load_session_meta(&"s-rel-root".to_owned())
@@ -222,11 +136,7 @@ async fn test_save_child_refuses_a_snapshot_that_disagrees_with_its_parent_relat
         .await
         .unwrap();
 
-    fixture
-        .facade
-        .save_child(&legal, &root_lease)
-        .await
-        .unwrap();
+    fixture.facade.save_child(&legal).await.unwrap();
     assert_eq!(fixture.count_threads("s-rel-child").await, 1);
     assert_eq!(
         fixture
@@ -247,28 +157,13 @@ async fn test_save_child_refuses_a_snapshot_that_disagrees_with_its_parent_relat
             .len(),
         1
     );
-    let facts = facts_of(&fixture.facade, "s-rel-child").await;
-    let owned = fixture
-        .facade
-        .gate
-        .local()
-        .owner_lease(&"s-rel-child".to_owned(), &facts)
-        .await
-        .unwrap()
-        .expect("the child belongs to the root's execution domain");
-    assert!(owned.is_active());
-    assert_eq!(owned.thread_id(), &"s-rel-root".to_owned());
-    root_lease.mark_clean().await.unwrap();
-    drop(root_lease);
 }
 
 #[tokio::test]
 async fn test_claim_child_resume_serializes_and_restores_previous_state() {
     let fixture = Fixture::new().await;
-    let root_lease = fixture.create("s-claim-root").await;
-    let child = fixture
-        .child("s-claim-child", "s-claim-root", &root_lease)
-        .await;
+    fixture.create("s-claim-root").await;
+    let child = fixture.child("s-claim-child", "s-claim-root").await;
     let child_id = child.target.thread_id.clone();
     let root_id = child.root_id.clone();
     // 认领前的状态：Done（非 active），用于观察恢复是否真的发生了。
@@ -330,16 +225,5 @@ async fn test_claim_child_resume_serializes_and_restores_previous_state() {
     assert!(matches!(
         error_kind(&error),
         SessionResourceErrorKind::InvalidInput { .. }
-    ));
-
-    root_lease.mark_clean().await.unwrap();
-    drop(root_lease);
-    let error = match fixture.facade.claim_child_resume(&child_id, &root_id).await {
-        Ok(_) => panic!("expected claim without a live root owner to fail"),
-        Err(error) => error,
-    };
-    assert!(matches!(
-        error_kind(&error),
-        SessionResourceErrorKind::Workspace(WorkspaceError::ExecutionLeaseRequired)
     ));
 }

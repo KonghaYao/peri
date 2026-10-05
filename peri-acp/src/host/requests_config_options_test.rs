@@ -34,7 +34,6 @@ fn seeded_sessions(provider: &LlmProvider) -> HashMap<String, SessionState> {
             session_id: "session".into(),
             thread_id: "session".into(),
             cwd: String::new(),
-            execution_owner: None,
             environment: None,
             closing: false,
             history: Vec::new(),
@@ -50,7 +49,6 @@ fn seeded_sessions(provider: &LlmProvider) -> HashMap<String, SessionState> {
             continuation_epoch: 0,
             continuation_in_flight: false,
             continuation_mq_steering_pending: false,
-            lease: crate::host::lease::WriterLease::acquired("default"),
         },
     )])
 }

@@ -274,8 +274,8 @@ async fn test_mock_store_update_status_reads_back() {
 #[tokio::test]
 async fn test_spawn_subagent_creates_child_thread_with_parent_link() {
     let store = MockSessionResources::new();
-    // child 落库的前置条件：父会话已绑定（有 binding 与 frozen）+ 本会话 root 的执行所有权。
-    let lease = store.register_bound_session("parent-thread-1", "/tmp/work");
+    // child 落库的前置条件：父会话已绑定（有 binding 与 frozen）。
+    store.register_bound_session("parent-thread-1", "/tmp/work");
     let parent = Session::new(
         Arc::from("/tmp/work"),
         FrozenContext::builder()
@@ -307,7 +307,6 @@ async fn test_spawn_subagent_creates_child_thread_with_parent_link() {
         session_resources: Some(
             Arc::clone(&store) as Arc<dyn peri_acp_types::session_resources::SessionResources>
         ),
-        execution_owner: Some(lease),
         event_handler: None,
         bg_event_sender: None,
         task_manager: None,
@@ -379,7 +378,7 @@ async fn test_spawn_subagent_creates_child_thread_with_parent_link() {
 #[tokio::test]
 async fn test_spawn_subagent_main_agent_via_host_writes_parent_link() {
     let store = MockSessionResources::new();
-    let lease = store.register_bound_session("main-context-thread", "/tmp/work");
+    store.register_bound_session("main-context-thread", "/tmp/work");
     // 主 agent 样子：store().thread_id = None + host.parent_thread_id = ctx.thread_id
     let parent = Session::new(
         Arc::from("/tmp/work"),
@@ -412,7 +411,6 @@ async fn test_spawn_subagent_main_agent_via_host_writes_parent_link() {
         session_resources: Some(
             Arc::clone(&store) as Arc<dyn peri_acp_types::session_resources::SessionResources>
         ),
-        execution_owner: Some(lease),
         event_handler: None,
         bg_event_sender: None,
         task_manager: None,
@@ -460,7 +458,7 @@ async fn test_spawn_subagent_main_agent_via_host_writes_parent_link() {
 #[tokio::test]
 async fn test_spawn_subagent_copies_frozen_from_parent() {
     let store = MockSessionResources::new();
-    let lease = store.register_bound_session("parent-thread-2", "/tmp/work");
+    store.register_bound_session("parent-thread-2", "/tmp/work");
     let parent = Session::new(
         Arc::from("/tmp/work"),
         FrozenContext::builder()
@@ -492,7 +490,6 @@ async fn test_spawn_subagent_copies_frozen_from_parent() {
         session_resources: Some(
             Arc::clone(&store) as Arc<dyn peri_acp_types::session_resources::SessionResources>
         ),
-        execution_owner: Some(lease),
         event_handler: None,
         bg_event_sender: None,
         task_manager: None,
@@ -546,7 +543,7 @@ async fn test_spawn_subagent_copies_frozen_from_parent() {
 #[tokio::test]
 async fn test_spawn_subagent_without_parent_uses_config_fallback() {
     let store = MockSessionResources::new();
-    let lease = store.register_bound_session("bg-parent", "/tmp/bg");
+    store.register_bound_session("bg-parent", "/tmp/bg");
     let config = SubagentSpawnConfig {
         agent_name: "fork".to_string(),
         prompt: "bg task".to_string(),
@@ -568,7 +565,6 @@ async fn test_spawn_subagent_without_parent_uses_config_fallback() {
         session_resources: Some(
             Arc::clone(&store) as Arc<dyn peri_acp_types::session_resources::SessionResources>
         ),
-        execution_owner: Some(lease),
         event_handler: None,
         bg_event_sender: None,
         task_manager: None,
@@ -855,36 +851,29 @@ async fn create_bound_root(
     store: &Arc<dyn peri_acp_types::session_resources::SessionResources>,
     workspace: &peri_acp_types::workspace::ResolvedWorkspace,
     frozen: Option<FrozenSnapshotBytes>,
-) -> (
-    ThreadId,
-    Option<Arc<dyn peri_acp_types::workspace::SessionExecutionLease>>,
-) {
+) -> ThreadId {
     let session = bound_session(store, workspace, frozen, None);
     let thread_id = session.thread_id.clone();
-    let lease = store.create_session(&session).await.unwrap();
-    (thread_id, Some(lease))
+    store.create_session(&session).await.unwrap();
+    thread_id
 }
 
-/// 真门面：在 root 的执行所有权下保存一条 child 会话（继承区为空）。
+/// 真门面：保存一条已绑定的 child 会话（继承区为空）。
 async fn save_bound_child(
     store: &Arc<dyn peri_acp_types::session_resources::SessionResources>,
     workspace: &peri_acp_types::workspace::ResolvedWorkspace,
     root: &ThreadId,
     frozen: &FrozenSnapshotBytes,
-    lease: &Option<Arc<dyn peri_acp_types::workspace::SessionExecutionLease>>,
 ) -> ThreadId {
     let target = bound_session(store, workspace, Some(frozen.clone()), Some(root.clone()));
     let child_id = target.thread_id.clone();
     store
-        .save_child(
-            &ChildSnapshot {
-                target,
-                parent_id: root.clone(),
-                root_id: root.clone(),
-                inherited: Default::default(),
-            },
-            lease.as_ref().expect("root 执行所有权"),
-        )
+        .save_child(&ChildSnapshot {
+            target,
+            parent_id: root.clone(),
+            root_id: root.clone(),
+            inherited: Default::default(),
+        })
         .await
         .unwrap();
     store

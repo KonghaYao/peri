@@ -139,7 +139,7 @@ async fn worktree_binding_hot_cold_resume_ignore_caller_cwd_and_keep_saved_facts
     )
     .await
     .unwrap();
-    // 冷宿主接管执行前，原宿主须释放同一 Session 的持久 owner。
+    // 先排空原宿主的任务，再在冷宿主恢复同一会话。
     handle_request(
         "session/close",
         &json!({"sessionId": id}),
@@ -160,7 +160,6 @@ async fn worktree_binding_hot_cold_resume_ignore_caller_cwd_and_keep_saved_facts
     .await
     .unwrap();
     assert!(loaded["_meta"]["peri.sessionWorkspaceV1"]["read_only"].is_null());
-    assert!(cold[&id].execution_owner.is_some());
     assert_eq!(cold[&id].cwd, original_cwd.to_str().unwrap());
     std::fs::write(sub.join("CLAUDE.md"), "MUTATED_AFTER_CLOSE").unwrap();
     handle_request(
@@ -192,7 +191,7 @@ async fn worktree_binding_hot_cold_resume_ignore_caller_cwd_and_keep_saved_facts
 }
 
 #[tokio::test]
-async fn worktree_missing_directory_load_restores_history_read_only() {
+async fn worktree_missing_directory_keeps_history_but_rejects_execution() {
     let tmp = tempfile::TempDir::new().unwrap();
     let cwd = tmp.path().join("project");
     std::fs::create_dir(&cwd).unwrap();
@@ -235,44 +234,18 @@ async fn worktree_missing_directory_load_restores_history_read_only() {
     assert_eq!(history["payloads"].as_array().unwrap().len(), 1);
     assert!(sessions.is_empty());
     for method in ["session/load", "session/resume"] {
-        let response = handle_request(
+        assert!(handle_request(
             method,
             &json!({"sessionId": id}),
             &cfg,
             &mut sessions,
-            &transport,
+            &transport
         )
         .await
-        .unwrap();
-        assert_eq!(
-            response["_meta"]["peri.sessionWorkspaceV1"]["read_only"]["kind"],
-            "peri.executionLeaseRequiredV1"
-        );
-        let state = &sessions[id];
-        assert_eq!(state.history[0].content(), "saved history");
-        assert!(state.execution_owner.is_none());
-        assert!(state.environment.is_none());
-        assert!(state.frozen.is_none());
+        .is_err());
+        assert!(sessions.is_empty());
+        assert!(cfg.session_manager.get_session(id).is_none());
     }
-    assert!(handle_request(
-        "session/rename",
-        &json!({"sessionId": id, "title": "unavailable"}),
-        &cfg,
-        &mut sessions,
-        &transport
-    )
-    .await
-    .is_err());
-    handle_request(
-        "session/close",
-        &json!({"sessionId": id}),
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await
-    .unwrap();
-    assert!(sessions.is_empty());
 }
 
 /// 断言「资源取自 linked worktree 目标目录」⇒ 读的是 builtin `workspace` 资源面，
@@ -558,7 +531,7 @@ async fn worktree_session_end_retains_owner_and_joins_same_hook_on_retry() {
         plugin_data_dir: target.clone(),
         plugin_options: HashMap::new(),
     }]];
-    let retained_owner = sessions[id].execution_owner.as_ref().unwrap().clone();
+    let retained_environment = sessions[id].environment.as_ref().unwrap().clone();
     let close = json!({"sessionId": id});
     let error = handle_request("session/close", &close, &cfg, &mut sessions, &transport)
         .await
@@ -575,8 +548,8 @@ async fn worktree_session_end_retains_owner_and_joins_same_hook_on_retry() {
         target.to_str().unwrap()
     );
     assert!(Arc::ptr_eq(
-        sessions[id].execution_owner.as_ref().unwrap(),
-        &retained_owner,
+        sessions[id].environment.as_ref().unwrap(),
+        &retained_environment,
     ));
     append_human_message(&cfg, id, "waiting for session end").await;
     std::fs::write(target.join("release"), "ready").unwrap();
@@ -588,11 +561,11 @@ async fn worktree_session_end_retains_owner_and_joins_same_hook_on_retry() {
         std::fs::read_to_string(target.join("ended.count")).unwrap(),
         "end\n"
     );
-    assert!(cfg
+    assert!(!cfg
         .session_resources
-        .append_history(&id.to_owned(), &[])
+        .is_session_closing(&id.to_owned())
         .await
-        .is_err());
+        .unwrap());
 }
 
 #[tokio::test]
@@ -683,16 +656,10 @@ async fn worktree_session_end_uses_saved_directory_and_drains_resources() {
             std::fs::remove_dir_all(&target).unwrap();
         }
         std::fs::rename(&moved, &target).unwrap();
-        let competing = SqliteThreadStore::new(tmp.path().join("threads.db"))
+        let reopened = SqliteThreadStore::new(tmp.path().join("threads.db"))
             .await
             .unwrap();
-        competing
-            .acquire_execution_lease(&id.to_owned())
-            .await
-            .unwrap()
-            .mark_clean()
-            .await
-            .unwrap();
+        assert!(reopened.load_meta(&id.to_owned()).await.is_ok());
     }
 }
 
@@ -899,7 +866,7 @@ fn bound_draft(
 
 /// 同源收口（J2 §6.4）：无 frozen 的可执行会话 **fail-closed**，不按当前目录重冻。
 ///
-/// 构造态：会话有执行所有权（`require_owner` 放行）但没有冻结快照。宿主必须拒绝本轮
+/// 构造态：已发布会话没有冻结快照。宿主必须拒绝本轮
 /// 执行并报内部错误——任何「用当前状态补一份 frozen」的实现都会让本用例失败。
 #[tokio::test]
 async fn prompt_without_frozen_snapshot_fails_closed() {
@@ -910,7 +877,6 @@ async fn prompt_without_frozen_snapshot_fails_closed() {
     let cfg = make_server_config(config, provider, &tmp).await;
     let cwd = tmp.path().canonicalize().unwrap();
     let id = create_bound_fixture(&cfg, cwd.to_str().unwrap(), None).await;
-    let owner = acquire_bound_owner(&cfg, &id).await;
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let mut sessions = HashMap::new();
     sessions.insert(
@@ -919,7 +885,6 @@ async fn prompt_without_frozen_snapshot_fails_closed() {
             session_id: id.clone(),
             thread_id: id.clone(),
             cwd: cwd.to_str().unwrap().to_owned(),
-            execution_owner: Some(owner),
             environment: None,
             closing: false,
             history: Vec::new(),
@@ -935,7 +900,6 @@ async fn prompt_without_frozen_snapshot_fails_closed() {
             continuation_epoch: 0,
             continuation_in_flight: false,
             continuation_mq_steering_pending: false,
-            lease: crate::host::lease::WriterLease::acquired("default"),
         },
     );
 

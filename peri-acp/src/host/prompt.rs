@@ -299,7 +299,6 @@ pub(crate) async fn run_prompt(
         frozen,
         incoming_recalls,
         workflow_middleware,
-        execution_owner,
     ) = {
         let mut sessions = sessions.lock().await;
         let state = sessions
@@ -319,9 +318,6 @@ pub(crate) async fn run_prompt(
             // 后台 continuation 保留 recall；队列承载的新用户输入仍消费 recall。
             take_recall_for_turn(&mut state.recall_items, continuation && !managed_input),
             state.workflow_middleware.clone(),
-            // 执行所有权投影：child 保存（save_child）需要调用方证明自己持有本会话
-            // root 的活 owner；只读准入的会话为 None，那时不落任何 child。
-            state.execution_owner.clone(),
         )
     };
     let broker = build_transport_broker(transport, &session_id);
@@ -333,7 +329,7 @@ pub(crate) async fn run_prompt(
     let provider_snapshot = provider.read().clone();
     let peri_config_snapshot = Arc::new(peri_config.read().clone());
 
-    // 同源收口（ARC-FROZEN-001）：可执行会话（`require_owner` 已保证有执行所有权）必然
+    // 同源收口（ARC-FROZEN-001）：可执行会话必然
     // 带有创建/恢复时定格的 frozen。缺失时 **fail-closed** —— 既不按当前配置/目录重冻
     // （那会把本轮的目录状态冒充成历史冻结输入），也不带着空冻结继续跑；宿主必须显式
     // 修复这条会话（重新 load 或删除），而不是让一次静默降级改掉系统提示词。
@@ -514,7 +510,6 @@ pub(crate) async fn run_prompt(
             Arc::new(session_manager) as Arc<dyn peri_acp_types::session::SessionAccessPort>
         ),
         session_resources: Some(session_resources.clone()),
-        execution_owner,
         thread_id: Some(thread_id.clone()),
         plugin_skill_roots: plugin_skill_roots.to_vec(),
         plugin_loaded: plugin_loaded.to_vec(),

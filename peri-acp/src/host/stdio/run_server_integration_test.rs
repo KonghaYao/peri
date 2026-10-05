@@ -156,7 +156,6 @@ async fn make_server_config_with(
     let (host_task_owner, host_task_spawner) = crate::host::task_scope::HostTaskOwner::new();
     let (mcp_task_owner, _mcp_task_spawner) = peri_middlewares::mcp::McpTaskOwner::new();
     AcpServerConfig {
-        allow_local_unverified_takeover: false,
         workspace_assembly: None,
         host_task_owner: Some(host_task_owner),
         host_task_spawner,
@@ -352,8 +351,7 @@ async fn create_bound_thread_fixture(cfg: &AcpServerConfig, session_id: &str, cw
         .build_frozen_data(workspace.cwd.to_str().unwrap());
     let encoded = crate::session::frozen_snapshot::encode_frozen_snapshot(&frozen).unwrap();
     // 门面一次完成 binding/frozen 保存与执行准入，再按正常收尾标 clean。
-    let lease = cfg
-        .session_resources
+    cfg.session_resources
         .create_session(&peri_acp_types::session_resources::NewSession {
             thread_id: session_id.to_owned(),
             created_at: chrono::Utc::now().to_rfc3339(),
@@ -370,7 +368,6 @@ async fn create_bound_thread_fixture(cfg: &AcpServerConfig, session_id: &str, cw
         })
         .await
         .unwrap();
-    lease.mark_clean().await.unwrap();
 }
 
 // ── 测试 ──────────────────────────────────────────────────────────────────

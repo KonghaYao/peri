@@ -30,13 +30,8 @@ async fn open_facade(tmp: &tempfile::TempDir) -> Arc<dyn SessionResources> {
 
 /// 建立一条已绑定、已持久化 frozen 的 source 会话（与生产 new 同一条路径）。
 ///
-/// 返回的 owner 必须由调用方持有：会话上的写入按「本 root 有活 owner」准入，
-/// 与生产把 owner 存进 `SessionState` 是同一条规则。
-async fn create_source(
-    resources: &Arc<dyn SessionResources>,
-    id: &str,
-    cwd: &str,
-) -> Arc<dyn peri_acp_types::workspace::SessionExecutionLease> {
+/// 保存源会话的完整不可变事实，供 fork 回归使用。
+async fn create_source(resources: &Arc<dyn SessionResources>, id: &str, cwd: &str) {
     let workspace = resources
         .resolve_workspace(std::path::Path::new(cwd))
         .await
@@ -57,7 +52,7 @@ async fn create_source(
             frozen: FrozenSnapshotBytes::new(format!(r#"{{"v":1,"id":"{id}"}}"#)),
         })
         .await
-        .unwrap()
+        .unwrap();
 }
 
 async fn session_ids(resources: &Arc<dyn SessionResources>) -> Vec<String> {
@@ -80,7 +75,7 @@ async fn forked_payloads_have_independent_ids_flags_and_compaction_lifecycle() {
     let temp = tempfile::tempdir().unwrap();
     let resources = open_facade(&temp).await;
     let cwd = temp.path().to_string_lossy().into_owned();
-    let _source_owner = create_source(&resources, SOURCE, &cwd).await;
+    create_source(&resources, SOURCE, &cwd).await;
     let workspace = resources.resolve_workspace(temp.path()).await.unwrap();
     let source_id = SOURCE.to_owned();
 
@@ -125,7 +120,7 @@ async fn forked_payloads_have_independent_ids_flags_and_compaction_lifecycle() {
         .unwrap();
 
     let source = load_fork_source(&resources, SOURCE).await.unwrap();
-    let (fork_id, copied_payloads, _owner) = fork_bound_session(
+    let (fork_id, copied_payloads) = fork_bound_session(
         &resources,
         &source,
         &workspace,
@@ -204,7 +199,7 @@ async fn fork_rejects_source_with_incomplete_tool_calls() {
     let temp = tempfile::tempdir().unwrap();
     let resources = open_facade(&temp).await;
     let cwd = temp.path().to_string_lossy().into_owned();
-    let _source_owner = create_source(&resources, SOURCE, &cwd).await;
+    create_source(&resources, SOURCE, &cwd).await;
     let source_id = SOURCE.to_owned();
 
     // 未闭合的工具调用：没有配对的 ToolResult，不能复制进独立可执行的历史。

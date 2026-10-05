@@ -12,8 +12,7 @@ use peri_acp_types::session_resources::{
 };
 use peri_acp_types::store::{CompactionChange, PersistedPayload};
 use peri_acp_types::workspace::{
-    ResolvedWorkspace, ScopedThreadPage, ScopedThreadQuery, SessionBinding, SessionExecutionLease,
-    SESSION_BINDING_VERSION,
+    ResolvedWorkspace, ScopedThreadPage, ScopedThreadQuery, SessionBinding, SESSION_BINDING_VERSION,
 };
 use peri_resources::sessions::SessionResourcesImpl;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -68,27 +67,23 @@ impl SessionResources for ControlledStore {
         self.inner.validate_session(id, workspace).await
     }
 
-    async fn acquire_execution(
-        &self,
-        id: &ThreadId,
-        workspace: &ResolvedWorkspace,
-    ) -> SessionResourceResult<Arc<dyn SessionExecutionLease>> {
-        self.inner.acquire_execution(id, workspace).await
+    async fn finish_close(&self, id: &ThreadId) -> SessionResourceResult<()> {
+        self.inner.finish_close(id).await
     }
 
-    async fn create_session(
+    async fn close_settlement(
         &self,
-        input: &NewSession,
-    ) -> SessionResourceResult<Arc<dyn SessionExecutionLease>> {
+        id: &ThreadId,
+    ) -> SessionResourceResult<peri_acp_types::session_resources::CloseSettlement> {
+        self.inner.close_settlement(id).await
+    }
+
+    async fn create_session(&self, input: &NewSession) -> SessionResourceResult<()> {
         self.inner.create_session(input).await
     }
 
-    async fn abandon_initialization(
-        &self,
-        id: &ThreadId,
-        lease: &Arc<dyn SessionExecutionLease>,
-    ) -> SessionResourceResult<()> {
-        self.inner.abandon_initialization(id, lease).await
+    async fn abandon_initialization(&self, id: &ThreadId) -> SessionResourceResult<()> {
+        self.inner.abandon_initialization(id).await
     }
 
     async fn begin_initialization(
@@ -191,19 +186,12 @@ impl SessionResources for ControlledStore {
         self.inner.is_session_closing(id).await
     }
 
-    async fn save_fork(
-        &self,
-        fork: &ForkSnapshot,
-    ) -> SessionResourceResult<Arc<dyn SessionExecutionLease>> {
+    async fn save_fork(&self, fork: &ForkSnapshot) -> SessionResourceResult<()> {
         self.inner.save_fork(fork).await
     }
 
-    async fn save_child(
-        &self,
-        child: &ChildSnapshot,
-        lease: &Arc<dyn SessionExecutionLease>,
-    ) -> SessionResourceResult<()> {
-        self.inner.save_child(child, lease).await
+    async fn save_child(&self, child: &ChildSnapshot) -> SessionResourceResult<()> {
+        self.inner.save_child(child).await
     }
 
     async fn claim_child_resume(
@@ -339,7 +327,6 @@ struct Case {
     _dir: tempfile::TempDir,
     _repo: tempfile::TempDir,
     /// 持有执行所有权：门面上的写入要求本 root 有活 owner。
-    _lease: Arc<dyn SessionExecutionLease>,
     store: Arc<ControlledStore>,
     thread_id: ThreadId,
     history: Vec<BaseMessage>,
@@ -387,7 +374,7 @@ async fn run_case(mode: CommitMode, pause: HandlerPause, pre_cancel: bool) -> Ca
         },
         frozen: FrozenSnapshotBytes::new("{\"version\":1,\"manual\":true}"),
     };
-    let lease = inner.create_session(&session).await.unwrap();
+    inner.create_session(&session).await.unwrap();
     let history = vec![
         BaseMessage::human("old manual question"),
         BaseMessage::ai("old manual answer"),
@@ -468,7 +455,6 @@ async fn run_case(mode: CommitMode, pause: HandlerPause, pre_cancel: bool) -> Ca
     Case {
         _dir: dir,
         _repo: repo,
-        _lease: lease,
         store,
         thread_id,
         history,

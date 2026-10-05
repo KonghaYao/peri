@@ -18,26 +18,10 @@ pub(super) fn add_mcp(
         ..
     } = ctx;
     if let Some(deployment) = dynamic_mcp.as_ref() {
-        let mut middleware = crate::mcp::dynamic::DynamicMcpMiddleware::new(
+        let middleware = crate::mcp::dynamic::DynamicMcpMiddleware::new(
             session_id.clone(),
             Arc::clone(deployment),
         );
-        if let (Some(pool), Some(resources)) =
-            (mcp_pool_concrete.as_ref(), ctx.session_resources.as_ref())
-        {
-            let pool = Arc::clone(pool);
-            let resources = Arc::clone(resources);
-            let admission: crate::mcp::dynamic::tool::AsyncOwnerAdmission = Arc::new(move |id| {
-                let pool = Arc::clone(&pool);
-                let resources = Arc::clone(&resources);
-                let id = id.to_owned();
-                Box::pin(async move {
-                    pool.mark_unsupported_async_task_owner(&id, resources.as_ref())
-                        .await
-                })
-            });
-            middleware = middleware.with_async_owner_admission(admission);
-        }
         chain.add(Box::new(middleware));
     }
     if let Some(pool) = mcp_pool_concrete.as_ref() {

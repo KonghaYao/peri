@@ -854,7 +854,6 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
     }
 
     AcpServerConfig {
-        allow_local_unverified_takeover: false,
         workspace_assembly: (!session_scoped).then(|| WorkspaceAssembly {
             startup_cwd: cwd.clone(),
             bare,

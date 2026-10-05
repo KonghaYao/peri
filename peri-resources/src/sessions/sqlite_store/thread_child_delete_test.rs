@@ -17,7 +17,7 @@
 
 use peri_acp_types::session_resources::{FrozenSnapshotBytes, NewSession, NewSessionMeta};
 use peri_acp_types::store::PersistedPayload;
-use peri_acp_types::workspace::{ResolvedWorkspace, SessionBinding, WorkspaceExecutionDescriptor};
+use peri_acp_types::workspace::{ResolvedWorkspace, SessionBinding};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::SqlitePool;
 use tempfile::TempDir;
@@ -98,29 +98,6 @@ async fn seed(fixture: &NoCascade, id: &str, parent: Option<&str>) {
         frozen: FrozenSnapshotBytes::new(format!(r#"{{"v":1,"id":"{id}"}}"#)),
     };
     fixture.data.save_new_session(&input).await.unwrap();
-    if parent.is_none() {
-        let claim = fixture
-            .data
-            .claim_execution_owner(&input.thread_id, false, None)
-            .await
-            .unwrap();
-        fixture
-            .data
-            .install_execution_owner_token(claim.token.clone());
-        fixture
-            .data
-            .bind_execution_workspace_owner(
-                &claim.token,
-                &WorkspaceExecutionDescriptor {
-                    endpoint: "http://127.0.0.1:10101".into(),
-                    owner_identity: "a".repeat(64),
-                    agent_generation_id: format!("agent-{id}"),
-                    unsupported_async_owners: false,
-                },
-            )
-            .await
-            .unwrap();
-    }
     fixture
         .data
         .mark_session_closing(&id.to_owned())
@@ -185,15 +162,7 @@ async fn rows_for(pool: &SqlitePool, table: &str, column: &str, id: &str) -> i64
 /// 删除前：每一张派生子表都必须有这些 thread 的行，否则「删完没有孤儿」是句空话。
 async fn assert_child_rows_present(pool: &SqlitePool, tables: &[(String, String)], ids: &[&str]) {
     for (table, column) in tables {
-        for (index, id) in ids.iter().enumerate() {
-            // Execution ownership belongs to the root; children share its row.
-            if matches!(
-                table.as_str(),
-                "session_execution_owners" | "session_execution_workspace_descriptors"
-            ) && index > 0
-            {
-                continue;
-            }
+        for id in ids {
             assert!(
                 rows_for(pool, table, column, id).await > 0,
                 "夹具必须让子表 {table} 有 {id} 的行：新增指向 threads 的子表后请在这里补种子数据"
@@ -314,20 +283,6 @@ async fn test_bridge_delete_thread_leaves_no_orphans_without_cascade() {
     let pool = fixture.store.database.pool.clone();
     let tables = schema_child_tables(&pool).await;
     assert_child_rows_present(&pool, &tables, &[id]).await;
-
-    // 桥的删除走执行准入：有绑定行的会话是「有主」的，按生产语义先取得所有权。
-    let facts = fixture
-        .store
-        .database
-        .local_session_facts(&id.to_owned())
-        .await
-        .unwrap();
-    let _lease = fixture
-        .store
-        .database
-        .acquire_execution_lease_impl(&id.to_owned(), &facts)
-        .await
-        .unwrap();
 
     fixture.store.delete_thread(&id.to_owned()).await.unwrap();
 

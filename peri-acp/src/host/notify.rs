@@ -36,13 +36,6 @@ pub(crate) fn handle_notification(
         "session/cancel" => {
             let session_id = extract_session_id(params, "");
             if let Some(state) = sessions.get_mut(session_id) {
-                // 多读者 + 单 writer lease：cancel 是写入操作，仅 writer 可发起。
-                // 协议无客户端身份字段，writer 恒为 session 创建方（"default"）——
-                // 观察者（非 writer）的 cancel 请求被忽略（只读）。
-                if !state.lease.is_writer("default") {
-                    debug!(session_id = %session_id, "Cancel ignored: read-only observer");
-                    return None;
-                }
                 let targeted =
                     params.get("requestId").is_some() || params.get("generation").is_some();
                 if targeted {

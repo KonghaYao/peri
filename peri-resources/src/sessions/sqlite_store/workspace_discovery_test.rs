@@ -74,12 +74,10 @@ async fn bound_with_history(
     cwd: &Path,
 ) -> (ThreadId, ResolvedWorkspace) {
     let (id, workspace) = bound(store, cwd).await;
-    let lease = store.acquire_execution_lease(&id).await.unwrap();
     store
         .append_message(&id, BaseMessage::human("bound history"))
         .await
         .unwrap();
-    lease.mark_clean().await.unwrap();
     (id, workspace)
 }
 
@@ -415,8 +413,6 @@ async fn test_worktree_scoped_pages_and_exact_directory_are_lightweight() {
     let (store, _db) = store().await;
     let (root_id, root) = bound(&store, repo.path()).await;
     let (sub_id, sub) = bound(&store, &sub).await;
-    let root_lease = store.acquire_execution_lease(&root_id).await.unwrap();
-    let sub_lease = store.acquire_execution_lease(&sub_id).await.unwrap();
     store
         .append_message(&root_id, BaseMessage::human("root history"))
         .await
@@ -463,6 +459,4 @@ async fn test_worktree_scoped_pages_and_exact_directory_are_lightweight() {
         .unwrap();
     assert_eq!(exact.entries.len(), 1);
     assert_eq!(exact.entries[0].thread.id, sub_id);
-    root_lease.mark_clean().await.unwrap();
-    sub_lease.mark_clean().await.unwrap();
 }

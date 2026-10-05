@@ -9,7 +9,6 @@ mod canonical;
 mod data;
 #[cfg(not(target_os = "emscripten"))]
 mod discovery;
-mod execution;
 mod failure;
 #[cfg(not(target_os = "emscripten"))]
 mod filesystem;
@@ -99,7 +98,7 @@ pub(crate) async fn open_facade_read_only(
 ///
 /// 夹具需要「逐条构造事实（create_thread / append …）+ 用门面消费」时配对打开；
 /// 生产装配一律走 `open_facade`，不通过本函数取裸句柄——两个入口各自打开同一库
-/// 文件会得到两份 owner 登记，本函数的存在正是为了不出现那种「第二个真相」。
+/// 文件会得到不同的连接池，本函数保持测试装配与生产组合一致。
 #[cfg(not(target_os = "emscripten"))]
 pub async fn open_store_and_facade_for_tests(
     db_path: impl Into<PathBuf>,
