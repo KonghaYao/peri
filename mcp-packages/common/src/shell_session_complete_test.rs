@@ -66,7 +66,7 @@ fn queue_with_inbox() -> (Arc<MessageQueue>, Arc<SessionInbox>) {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn test_cancelled_background_shell_skips_completion_callback_and_defer() {
+async fn test_cancelled_background_shell_delivers_cleanup_once_without_second_terminal() {
     use peri_acp_types::tasks::TaskShutdownReport;
 
     let (queue, inbox) = queue_with_inbox();
@@ -77,6 +77,12 @@ async fn test_cancelled_background_shell_skips_completion_callback_and_defer() {
         let calls = Arc::clone(&calls);
         let delivered = Arc::clone(&delivered);
         Arc::new(move |result: &BackgroundTaskResult, kind: BgTaskKind| {
+            assert!(!result.success);
+            assert_eq!(kind, BgTaskKind::Shell);
+            assert_eq!(
+                result.output,
+                "Shell command cancelled; read the output files as needed."
+            );
             calls.fetch_add(1, Ordering::SeqCst);
             delivered(result, kind);
         })
@@ -93,6 +99,7 @@ async fn test_cancelled_background_shell_skips_completion_callback_and_defer() {
         )
         .expect("spawn_shell 必须成功（真进程 + 真注册）");
     assert_eq!(manager.active_count(), 1, "任务必须先登记（取消才有对象）");
+    let mut changes = manager.subscribe_events();
 
     manager
         .cancel(&shell.task_id)
@@ -114,24 +121,30 @@ async fn test_cancelled_background_shell_skips_completion_callback_and_defer() {
     );
     assert_eq!(
         calls.load(Ordering::SeqCst),
-        0,
-        "取消路径不得调用 on_bg_complete（claim_completion 短路）"
+        1,
+        "取消清理完成后必须恰好调用一次 on_bg_complete"
     );
-    assert_eq!(queue.len(), 0, "取消路径不得投递任何消息（含 Defer 提醒）");
-    assert!(!queue.has_wake_up(), "取消不产生唤醒信号");
+    assert_eq!(queue.len(), 1);
+    assert!(queue.has_wake_up());
+    let messages = queue.drain_all();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].kind, MessageKind::Defer);
+    assert_eq!(messages[0].source, MessageSource::ShellComplete);
+    assert!(matches!(
+        changes.try_recv().unwrap().event,
+        peri_acp_types::tasks::BgRegistryEvent::Cancelled { task_id, .. } if task_id == shell.task_id
+    ));
+    assert!(changes.try_recv().is_err());
 }
 
 /// U7 正向对照（同一夹具）：**自然完成**的同一路径必须调用回调并把结果投成 `Defer`。
-///
-/// 它证明上一条用例的绿不是「夹具本身不投递」造成的：同一对 `(manager, 回调, 队列)`，
-/// 只把「取消」换成「跑完」。
 ///
 /// 与 `test_shell_completion_is_delivered_as_defer_with_shell_source` 的分工：那条用
 /// **手工构造**的 `BackgroundTaskResult` 直接调闭包（锁投递形态），本条的 result 由真
 /// `TaskManager::spawn_shell` 的收尾链（`manager.rs:547` → `finalize_bg_shell`）产出
 /// （锁「真收尾路径确实会调到这个闭包」）。两者都不能替代对方。
 ///
-/// 区分力（破坏后必红）：把 `shell.rs:588-590` 的短路条件反转（自然完成也提前返回）⇒
+/// 区分力（破坏后必红）：自然完成也提前返回 ⇒
 /// 回调计数为 0、队列为空 ⇒ 本用例红。
 #[cfg(unix)]
 #[tokio::test]
