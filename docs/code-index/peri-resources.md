@@ -80,6 +80,7 @@ claim 新 epoch。ACP 据此在恢复前判断旧进程证明，避免失败的�
 | SQLite 行写入原语 | src/sessions/sqlite_store/session_rows.rs + canonical.rs | `ThreadRowInsert` / `insert_thread_row` / `insert_binding_row`；共用列形状与 env 插入规则，child 从父 env 继承 |
 | 会话存储 re-export / 只读入口 | src/sessions/mod.rs | `SqliteThreadStore` / `FilesystemThreadStore` / `SessionResourcesImpl`；`open_session_resources_read_only`（crate 内）；`default_database_path`（读写共用的纯路径解析） |
 | Workflow 门面 | src/workflow.rs | 全量 re-export peri_workflow 模块 |
+| SQLite frozen 快照测试 | src/sessions/sqlite_store/frozen_snapshot_test.rs | `tests::frozen_snapshot_tests`；write-once roundtrip 与并发 backfill CAS；按 `cargo test -p peri-resources --lib -- frozen_snapshot` 验证 |
 
 ## 跨模块契约
 

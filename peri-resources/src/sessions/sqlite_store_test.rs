@@ -18,7 +18,10 @@ async fn make_store() -> (SqliteThreadStore, tempfile::TempDir) {
 async fn test_sqlite_store_flush_persistence_makes_messages_and_flags_readable() {
     let (store, _dir) = make_store().await;
     let thread_id = store
-        .create_thread(ThreadMeta::new_at("/tmp", peri_time::now_wall()))
+        .create_thread(ThreadMeta::new_at(
+            absolute_test_path("tmp"),
+            peri_time::now_wall(),
+        ))
         .await
         .unwrap();
     let store: Arc<dyn ThreadStore> = Arc::new(store);
@@ -55,7 +58,10 @@ async fn test_sqlite_store_flush_persistence_makes_messages_and_flags_readable()
 async fn test_delete_messages_removes_exact_turn_ids_and_preserves_ancestor() {
     let (store, _dir) = make_store().await;
     let id = store
-        .create_thread(ThreadMeta::new_at("/tmp", peri_time::now_wall()))
+        .create_thread(ThreadMeta::new_at(
+            absolute_test_path("tmp"),
+            peri_time::now_wall(),
+        ))
         .await
         .unwrap();
     let messages = vec![
@@ -79,7 +85,7 @@ async fn test_delete_messages_removes_exact_turn_ids_and_preserves_ancestor() {
 #[tokio::test]
 async fn test_create_append_load() {
     let (store, _dir) = make_store().await;
-    let meta = ThreadMeta::new_at("/tmp", peri_time::now_wall());
+    let meta = ThreadMeta::new_at(absolute_test_path("tmp"), peri_time::now_wall());
     let id = store.create_thread(meta).await.unwrap();
 
     let msgs = vec![BaseMessage::human("Hello"), BaseMessage::ai("Hi there")];
@@ -91,64 +97,18 @@ async fn test_create_append_load() {
     assert_eq!(loaded[1].content(), "Hi there");
 }
 
-#[tokio::test]
-async fn test_frozen_snapshot_roundtrip_and_legacy_null() {
-    let (store, _dir) = make_store().await;
-    let id = store
-        .create_thread(ThreadMeta::new_at("/tmp", peri_time::now_wall()))
-        .await
-        .unwrap();
-    let snapshot = r#"{"version":1,"marker":"sqlite-frozen-prefix"}"#;
-
-    assert!(store.load_frozen_snapshot(&id).await.unwrap().is_none());
-    assert!(store
-        .store_frozen_snapshot_if_absent(&id, snapshot)
-        .await
-        .unwrap());
-    assert!(
-        !store
-            .store_frozen_snapshot_if_absent(&id, r#"{"version":2}"#)
-            .await
-            .unwrap(),
-        "frozen snapshot is write-once"
-    );
-
-    assert_eq!(
-        store.load_frozen_snapshot(&id).await.unwrap().as_deref(),
-        Some(snapshot)
-    );
-}
-
-#[tokio::test]
-async fn test_frozen_snapshot_concurrent_backfill_has_one_winner() {
-    let (store, _dir) = make_store().await;
-    let id = store
-        .create_thread(ThreadMeta::new_at("/tmp", peri_time::now_wall()))
-        .await
-        .unwrap();
-    let first = r#"{"version":1,"candidate":"first"}"#;
-    let second = r#"{"version":1,"candidate":"second"}"#;
-
-    let (first_won, second_won) = tokio::join!(
-        store.store_frozen_snapshot_if_absent(&id, first),
-        store.store_frozen_snapshot_if_absent(&id, second),
-    );
-    let first_won = first_won.unwrap();
-    let second_won = second_won.unwrap();
-    assert_ne!(first_won, second_won, "exactly one backfill must win");
-    let stored = store.load_frozen_snapshot(&id).await.unwrap().unwrap();
-    assert_eq!(stored, if first_won { first } else { second });
-}
+#[path = "sqlite_store/frozen_snapshot_test.rs"]
+mod frozen_snapshot_tests;
 
 #[tokio::test]
 async fn test_list_threads_order() {
     let (store, _dir) = make_store().await;
 
-    let m1 = ThreadMeta::new_at("/a", peri_time::now_wall());
+    let m1 = ThreadMeta::new_at(absolute_test_path("a"), peri_time::now_wall());
     let id1 = store.create_thread(m1).await.unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
 
-    let m2 = ThreadMeta::new_at("/b", peri_time::now_wall());
+    let m2 = ThreadMeta::new_at(absolute_test_path("b"), peri_time::now_wall());
     let id2 = store.create_thread(m2).await.unwrap();
 
     // 给 id2 追加消息，更新 updated_at
@@ -169,7 +129,10 @@ async fn test_list_thread_entries_filters_by_cwd_and_omits_hidden_and_empty_thre
     let (store, _dir) = make_store().await;
 
     let visible_id = store
-        .create_thread(ThreadMeta::new_at("/workspace", peri_time::now_wall()))
+        .create_thread(ThreadMeta::new_at(
+            absolute_test_path("workspace"),
+            peri_time::now_wall(),
+        ))
         .await
         .unwrap();
     store
@@ -178,11 +141,14 @@ async fn test_list_thread_entries_filters_by_cwd_and_omits_hidden_and_empty_thre
         .unwrap();
 
     let empty_id = store
-        .create_thread(ThreadMeta::new_at("/workspace", peri_time::now_wall()))
+        .create_thread(ThreadMeta::new_at(
+            absolute_test_path("workspace"),
+            peri_time::now_wall(),
+        ))
         .await
         .unwrap();
 
-    let mut hidden = ThreadMeta::new_at("/workspace", peri_time::now_wall());
+    let mut hidden = ThreadMeta::new_at(absolute_test_path("workspace"), peri_time::now_wall());
     hidden.hidden = true;
     let hidden_id = store.create_thread(hidden).await.unwrap();
     store
@@ -191,7 +157,10 @@ async fn test_list_thread_entries_filters_by_cwd_and_omits_hidden_and_empty_thre
         .unwrap();
 
     let other_id = store
-        .create_thread(ThreadMeta::new_at("/other", peri_time::now_wall()))
+        .create_thread(ThreadMeta::new_at(
+            absolute_test_path("other"),
+            peri_time::now_wall(),
+        ))
         .await
         .unwrap();
     store
@@ -199,11 +168,14 @@ async fn test_list_thread_entries_filters_by_cwd_and_omits_hidden_and_empty_thre
         .await
         .unwrap();
 
-    let summaries = store.list_thread_entries("/workspace").await.unwrap();
+    let summaries = store
+        .list_thread_entries(&absolute_test_path("workspace"))
+        .await
+        .unwrap();
 
     assert_eq!(summaries.len(), 1);
     assert_eq!(summaries[0].id, visible_id);
-    assert_eq!(summaries[0].cwd, "/workspace");
+    assert_eq!(summaries[0].cwd, absolute_test_path("workspace"));
     assert_eq!(summaries[0].message_count, 1);
     assert_ne!(summaries[0].id, empty_id);
     assert_ne!(summaries[0].id, hidden_id);
@@ -215,7 +187,10 @@ async fn test_list_thread_entries_orders_by_updated_at_descending() {
     let (store, _dir) = make_store().await;
 
     let first_id = store
-        .create_thread(ThreadMeta::new_at("/workspace", peri_time::now_wall()))
+        .create_thread(ThreadMeta::new_at(
+            absolute_test_path("workspace"),
+            peri_time::now_wall(),
+        ))
         .await
         .unwrap();
     store
@@ -225,7 +200,10 @@ async fn test_list_thread_entries_orders_by_updated_at_descending() {
     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
 
     let second_id = store
-        .create_thread(ThreadMeta::new_at("/workspace", peri_time::now_wall()))
+        .create_thread(ThreadMeta::new_at(
+            absolute_test_path("workspace"),
+            peri_time::now_wall(),
+        ))
         .await
         .unwrap();
     store
@@ -233,7 +211,10 @@ async fn test_list_thread_entries_orders_by_updated_at_descending() {
         .await
         .unwrap();
 
-    let summaries = store.list_thread_entries("/workspace").await.unwrap();
+    let summaries = store
+        .list_thread_entries(&absolute_test_path("workspace"))
+        .await
+        .unwrap();
 
     assert_eq!(summaries.len(), 2);
     assert_eq!(summaries[0].id, second_id);
@@ -243,7 +224,7 @@ async fn test_list_thread_entries_orders_by_updated_at_descending() {
 #[tokio::test]
 async fn test_delete_thread_cascade() {
     let (store, _dir) = make_store().await;
-    let meta = ThreadMeta::new_at("/tmp", peri_time::now_wall());
+    let meta = ThreadMeta::new_at(absolute_test_path("tmp"), peri_time::now_wall());
     let id = store.create_thread(meta).await.unwrap();
     store
         .append_messages(&id, &[BaseMessage::human("msg")])
@@ -269,14 +250,17 @@ async fn test_delete_thread_cascades_child_thread_tree() {
 
     // 父 → 子 → 孙 三层线程树（子 agent 链，hidden=true）
     let parent_id = store
-        .create_thread(ThreadMeta::new_at("/tmp", peri_time::now_wall()))
+        .create_thread(ThreadMeta::new_at(
+            absolute_test_path("tmp"),
+            peri_time::now_wall(),
+        ))
         .await
         .unwrap();
-    let mut child_meta = ThreadMeta::new_at("/tmp", peri_time::now_wall());
+    let mut child_meta = ThreadMeta::new_at(absolute_test_path("tmp"), peri_time::now_wall());
     child_meta.parent_thread_id = Some(parent_id.clone());
     child_meta.hidden = true;
     let child_id = store.create_thread(child_meta).await.unwrap();
-    let mut grand_meta = ThreadMeta::new_at("/tmp", peri_time::now_wall());
+    let mut grand_meta = ThreadMeta::new_at(absolute_test_path("tmp"), peri_time::now_wall());
     grand_meta.parent_thread_id = Some(child_id.clone());
     grand_meta.hidden = true;
     let grand_id = store.create_thread(grand_meta).await.unwrap();
@@ -317,7 +301,7 @@ async fn test_delete_thread_cascades_child_thread_tree() {
 #[tokio::test]
 async fn test_message_order_after_multiple_appends() {
     let (store, _dir) = make_store().await;
-    let meta = ThreadMeta::new_at("/tmp", peri_time::now_wall());
+    let meta = ThreadMeta::new_at(absolute_test_path("tmp"), peri_time::now_wall());
     let id = store.create_thread(meta).await.unwrap();
 
     store
@@ -343,7 +327,7 @@ async fn test_message_order_after_multiple_appends() {
 #[tokio::test]
 async fn test_title_auto_set() {
     let (store, _dir) = make_store().await;
-    let meta = ThreadMeta::new_at("/tmp", peri_time::now_wall());
+    let meta = ThreadMeta::new_at(absolute_test_path("tmp"), peri_time::now_wall());
     let id = store.create_thread(meta).await.unwrap();
 
     store
@@ -359,7 +343,7 @@ async fn test_title_auto_set() {
 #[tokio::test]
 async fn test_update_title() {
     let (store, _dir) = make_store().await;
-    let meta = ThreadMeta::new_at("/tmp", peri_time::now_wall());
+    let meta = ThreadMeta::new_at(absolute_test_path("tmp"), peri_time::now_wall());
     let id = store.create_thread(meta).await.unwrap();
 
     store.update_title(&id, "new title").await.unwrap();
@@ -370,7 +354,7 @@ async fn test_update_title() {
 #[tokio::test]
 async fn test_update_title_updates_timestamp() {
     let (store, _dir) = make_store().await;
-    let meta = ThreadMeta::new_at("/tmp", peri_time::now_wall());
+    let meta = ThreadMeta::new_at(absolute_test_path("tmp"), peri_time::now_wall());
     let id = store.create_thread(meta).await.unwrap();
 
     let before = store.load_meta(&id).await.unwrap().updated_at;
@@ -389,11 +373,11 @@ async fn test_update_title_updates_timestamp() {
 async fn test_child_thread_create_and_list() {
     let (store, _dir) = make_store().await;
     // 创建父线程
-    let parent_meta = ThreadMeta::new_at("/project", peri_time::now_wall());
+    let parent_meta = ThreadMeta::new_at(absolute_test_path("project"), peri_time::now_wall());
     let parent_id = store.create_thread(parent_meta).await.unwrap();
 
     // 创建子线程
-    let mut child_meta = ThreadMeta::new_at("/project", peri_time::now_wall());
+    let mut child_meta = ThreadMeta::new_at(absolute_test_path("project"), peri_time::now_wall());
     child_meta.parent_thread_id = Some(parent_id.clone());
     child_meta.hidden = true;
     let child_id = store.create_thread(child_meta).await.unwrap();
@@ -421,16 +405,19 @@ async fn test_session_threads_recursive() {
     let (store, _dir) = make_store().await;
     // L1 根线程
     let l1_id = store
-        .create_thread(ThreadMeta::new_at("/root", peri_time::now_wall()))
+        .create_thread(ThreadMeta::new_at(
+            absolute_test_path("root"),
+            peri_time::now_wall(),
+        ))
         .await
         .unwrap();
     // L2 子线程
-    let mut l2_meta = ThreadMeta::new_at("/root", peri_time::now_wall());
+    let mut l2_meta = ThreadMeta::new_at(absolute_test_path("root"), peri_time::now_wall());
     l2_meta.parent_thread_id = Some(l1_id.clone());
     l2_meta.hidden = true;
     let l2_id = store.create_thread(l2_meta).await.unwrap();
     // L3 孙线程
-    let mut l3_meta = ThreadMeta::new_at("/root", peri_time::now_wall());
+    let mut l3_meta = ThreadMeta::new_at(absolute_test_path("root"), peri_time::now_wall());
     l3_meta.parent_thread_id = Some(l2_id.clone());
     l3_meta.hidden = true;
     let l3_id = store.create_thread(l3_meta).await.unwrap();
@@ -449,7 +436,10 @@ async fn test_update_thread_status() {
     use peri_acp_types::thread::AgentStatus;
     let (store, _dir) = make_store().await;
     let id = store
-        .create_thread(ThreadMeta::new_at("/tmp", peri_time::now_wall()))
+        .create_thread(ThreadMeta::new_at(
+            absolute_test_path("tmp"),
+            peri_time::now_wall(),
+        ))
         .await
         .unwrap();
 
@@ -473,7 +463,10 @@ async fn test_update_thread_status_rejects_illegal_string() {
     // 关键约束：非法状态字符串不应静默 fallback，必须返回错误
     let (store, _dir) = make_store().await;
     let id = store
-        .create_thread(ThreadMeta::new_at("/tmp", peri_time::now_wall()))
+        .create_thread(ThreadMeta::new_at(
+            absolute_test_path("tmp"),
+            peri_time::now_wall(),
+        ))
         .await
         .unwrap();
     let result = store.update_thread_status(&id, "running").await;
@@ -490,7 +483,10 @@ async fn test_update_thread_status_rejects_illegal_string() {
 async fn test_load_context_without_parent() {
     let (store, _dir) = make_store().await;
     let id = store
-        .create_thread(ThreadMeta::new_at("/tmp", peri_time::now_wall()))
+        .create_thread(ThreadMeta::new_at(
+            absolute_test_path("tmp"),
+            peri_time::now_wall(),
+        ))
         .await
         .unwrap();
 
@@ -517,7 +513,10 @@ async fn test_load_context_with_snapshot() {
     let (store, _dir) = make_store().await;
     // 父线程 + 3 条消息
     let parent_id = store
-        .create_thread(ThreadMeta::new_at("/tmp", peri_time::now_wall()))
+        .create_thread(ThreadMeta::new_at(
+            absolute_test_path("tmp"),
+            peri_time::now_wall(),
+        ))
         .await
         .unwrap();
     let parent_msgs = vec![
@@ -535,7 +534,7 @@ async fn test_load_context_with_snapshot() {
     let snapshot_msg_id = parent_loaded[1].id().as_uuid().to_string();
 
     // 创建子线程
-    let mut child_meta = ThreadMeta::new_at("/tmp", peri_time::now_wall());
+    let mut child_meta = ThreadMeta::new_at(absolute_test_path("tmp"), peri_time::now_wall());
     child_meta.parent_thread_id = Some(parent_id.clone());
     child_meta.snapshot_at_message_id = Some(snapshot_msg_id);
     child_meta.hidden = true;
@@ -559,12 +558,15 @@ async fn test_list_threads_excludes_hidden() {
 
     // 创建普通线程
     let visible_id = store
-        .create_thread(ThreadMeta::new_at("/tmp", peri_time::now_wall()))
+        .create_thread(ThreadMeta::new_at(
+            absolute_test_path("tmp"),
+            peri_time::now_wall(),
+        ))
         .await
         .unwrap();
 
     // 创建 hidden 的子 agent 线程
-    let mut hidden_meta = ThreadMeta::new_at("/tmp", peri_time::now_wall());
+    let mut hidden_meta = ThreadMeta::new_at(absolute_test_path("tmp"), peri_time::now_wall());
     hidden_meta.parent_thread_id = Some(visible_id.clone());
     hidden_meta.hidden = true;
     let _hidden_id = store.create_thread(hidden_meta).await.unwrap();
@@ -581,7 +583,10 @@ async fn test_load_context_three_level_nesting() {
 
     // L1 根线程：3 条消息，快照到第 2 条
     let l1_id = store
-        .create_thread(ThreadMeta::new_at("/project", peri_time::now_wall()))
+        .create_thread(ThreadMeta::new_at(
+            absolute_test_path("project"),
+            peri_time::now_wall(),
+        ))
         .await
         .unwrap();
     let l1_msgs = vec![
@@ -594,7 +599,7 @@ async fn test_load_context_three_level_nesting() {
     let l1_snap = l1_loaded[1].id().as_uuid().to_string();
 
     // L2 子线程：2 条消息，快照到第 1 条
-    let mut l2_meta = ThreadMeta::new_at("/project", peri_time::now_wall());
+    let mut l2_meta = ThreadMeta::new_at(absolute_test_path("project"), peri_time::now_wall());
     l2_meta.parent_thread_id = Some(l1_id.clone());
     l2_meta.snapshot_at_message_id = Some(l1_snap);
     l2_meta.hidden = true;
@@ -605,7 +610,7 @@ async fn test_load_context_three_level_nesting() {
     let l2_snap = l2_loaded[0].id().as_uuid().to_string();
 
     // L3 孙线程：1 条消息，无快照
-    let mut l3_meta = ThreadMeta::new_at("/project", peri_time::now_wall());
+    let mut l3_meta = ThreadMeta::new_at(absolute_test_path("project"), peri_time::now_wall());
     l3_meta.parent_thread_id = Some(l2_id.clone());
     l3_meta.snapshot_at_message_id = Some(l2_snap);
     l3_meta.hidden = true;
@@ -629,7 +634,7 @@ async fn test_load_context_three_level_nesting() {
 #[tokio::test]
 async fn test_update_and_load_message_flags() {
     let (store, _dir) = make_store().await;
-    let meta = ThreadMeta::new_at("/tmp", peri_time::now_wall());
+    let meta = ThreadMeta::new_at(absolute_test_path("tmp"), peri_time::now_wall());
     let id = store.create_thread(meta).await.unwrap();
 
     let msgs = vec![
@@ -680,7 +685,7 @@ async fn test_update_and_load_message_flags() {
 #[tokio::test]
 async fn test_load_message_flags_empty_when_no_flags() {
     let (store, _dir) = make_store().await;
-    let meta = ThreadMeta::new_at("/tmp", peri_time::now_wall());
+    let meta = ThreadMeta::new_at(absolute_test_path("tmp"), peri_time::now_wall());
     let id = store.create_thread(meta).await.unwrap();
 
     let msgs = vec![BaseMessage::human("hello"), BaseMessage::ai("world")];
@@ -701,7 +706,7 @@ async fn test_update_message_flags_persists() {
     // 第一步：创建 store，写消息，设 flags
     let msg_id = {
         let store = SqliteThreadStore::new(db_path.clone()).await.unwrap();
-        let meta = ThreadMeta::new_at("/tmp", peri_time::now_wall());
+        let meta = ThreadMeta::new_at(absolute_test_path("tmp"), peri_time::now_wall());
         let tid = store.create_thread(meta).await.unwrap();
 
         let msgs = vec![
@@ -781,7 +786,7 @@ async fn test_update_message_flags_persists_projection() {
     // 第一步：写入 projection flag
     let (msg_id, tid) = {
         let store = SqliteThreadStore::new(db_path.clone()).await.unwrap();
-        let meta = ThreadMeta::new_at("/tmp", peri_time::now_wall());
+        let meta = ThreadMeta::new_at(absolute_test_path("tmp"), peri_time::now_wall());
         let tid = store.create_thread(meta).await.unwrap();
 
         let msgs = vec![BaseMessage::human("projected message")];
@@ -823,7 +828,10 @@ async fn test_update_message_flags_persists_projection() {
 async fn test_commit_compaction_lifecycle_persists_flags_and_appended_messages_in_order() {
     let (store, _dir) = make_store().await;
     let thread_id = store
-        .create_thread(ThreadMeta::new_at("/tmp", peri_time::now_wall()))
+        .create_thread(ThreadMeta::new_at(
+            absolute_test_path("tmp"),
+            peri_time::now_wall(),
+        ))
         .await
         .unwrap();
     let original_messages = vec![
@@ -901,7 +909,10 @@ async fn test_commit_compaction_lifecycle_persists_flags_and_appended_messages_i
 async fn test_commit_compaction_lifecycle_rolls_back_flags_and_appends_when_message_is_missing() {
     let (store, _dir) = make_store().await;
     let thread_id = store
-        .create_thread(ThreadMeta::new_at("/tmp", peri_time::now_wall()))
+        .create_thread(ThreadMeta::new_at(
+            absolute_test_path("tmp"),
+            peri_time::now_wall(),
+        ))
         .await
         .unwrap();
     let original_messages = vec![

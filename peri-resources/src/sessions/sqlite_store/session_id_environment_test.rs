@@ -9,7 +9,7 @@ async fn migration_keeps_schema_version_and_existing_history() {
     let store = SqliteThreadStore::new(&path).await.unwrap();
     let id = store
         .create_thread(ThreadMeta::new_at(
-            "/missing/old-machine",
+            absolute_test_path("missing/old-machine"),
             peri_time::now_wall(),
         ))
         .await
@@ -34,7 +34,7 @@ async fn migration_keeps_schema_version_and_existing_history() {
     assert_eq!(after.0, CURRENT_SCHEMA_VERSION);
     assert_eq!(
         reopened.load_meta(&id).await.unwrap().cwd,
-        "/missing/old-machine"
+        absolute_test_path("missing/old-machine")
     );
     assert_eq!(
         serde_json::to_value(reopened.load_messages(&id).await.unwrap()).unwrap(),
@@ -133,7 +133,10 @@ async fn machine_filters_follow_workspace_ownership_and_children_inherit() {
     let path = directory.path().join("threads.db");
     let (store, facade) = SqliteThreadStore::open_shared(&path).await.unwrap();
     let root = store
-        .create_thread(ThreadMeta::new_at("/same/path", peri_time::now_wall()))
+        .create_thread(ThreadMeta::new_at(
+            absolute_test_path("same/path"),
+            peri_time::now_wall(),
+        ))
         .await
         .unwrap();
     let root_workspace: (String,) =
@@ -156,7 +159,7 @@ async fn machine_filters_follow_workspace_ownership_and_children_inherit() {
         .execute(&store.database.pool)
         .await
         .unwrap();
-    let mut child = ThreadMeta::new_at("/same/path", peri_time::now_wall());
+    let mut child = ThreadMeta::new_at(absolute_test_path("same/path"), peri_time::now_wall());
     child.parent_thread_id = Some(root.clone());
     let child_id = store.create_thread(child).await.unwrap();
     assert_eq!(
@@ -167,7 +170,10 @@ async fn machine_filters_follow_workspace_ownership_and_children_inherit() {
             .as_deref(),
         Some(another_machine.as_str())
     );
-    let mut grandchild = ThreadMeta::new_at("/missing/child-path", peri_time::now_wall());
+    let mut grandchild = ThreadMeta::new_at(
+        absolute_test_path("missing/child-path"),
+        peri_time::now_wall(),
+    );
     grandchild.parent_thread_id = Some(child_id.clone());
     let grandchild_id = store.create_thread(grandchild).await.unwrap();
     assert_eq!(
@@ -179,7 +185,10 @@ async fn machine_filters_follow_workspace_ownership_and_children_inherit() {
         Some(another_machine.as_str())
     );
     let other = store
-        .create_thread(ThreadMeta::new_at("/same/path", peri_time::now_wall()))
+        .create_thread(ThreadMeta::new_at(
+            absolute_test_path("same/path"),
+            peri_time::now_wall(),
+        ))
         .await
         .unwrap();
     for id in [&root, &other] {

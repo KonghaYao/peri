@@ -7,7 +7,10 @@ async fn test_inherited_context_freezes_payloads_and_flags_across_store_reopen()
     let path = dir.path().join("inherited.db");
     let store = SqliteThreadStore::new(&path).await.unwrap();
     let parent_id = store
-        .create_thread(ThreadMeta::new_at("/tmp", peri_time::now_wall()))
+        .create_thread(ThreadMeta::new_at(
+            absolute_test_path("tmp"),
+            peri_time::now_wall(),
+        ))
         .await
         .unwrap();
     let parent = BaseMessage::human("parent snapshot");
@@ -19,7 +22,7 @@ async fn test_inherited_context_freezes_payloads_and_flags_across_store_reopen()
         truncated: true,
         ..Default::default()
     };
-    let mut child_meta = ThreadMeta::new_at("/tmp", peri_time::now_wall());
+    let mut child_meta = ThreadMeta::new_at(absolute_test_path("tmp"), peri_time::now_wall());
     child_meta.parent_thread_id = Some(parent_id.clone());
     child_meta.snapshot_at_message_id = Some(parent.id().as_uuid().to_string());
     let child_id = store.create_thread(child_meta).await.unwrap();
@@ -90,7 +93,10 @@ async fn test_inherited_context_rejects_future_corrupt_and_foreign_flags_without
         .await
         .unwrap();
     let id = store
-        .create_thread(ThreadMeta::new_at("/tmp", peri_time::now_wall()))
+        .create_thread(ThreadMeta::new_at(
+            absolute_test_path("tmp"),
+            peri_time::now_wall(),
+        ))
         .await
         .unwrap();
     let future = r#"{"version":2,"payloads":[],"flags":{}}"#;
@@ -119,7 +125,10 @@ async fn test_inherited_context_rejects_future_corrupt_and_foreign_flags_without
         assert_eq!(raw.0, snapshot);
     }
     let fresh = store
-        .create_thread(ThreadMeta::new_at("/tmp", peri_time::now_wall()))
+        .create_thread(ThreadMeta::new_at(
+            absolute_test_path("tmp"),
+            peri_time::now_wall(),
+        ))
         .await
         .unwrap();
     let invalid = InheritedContext {
@@ -148,10 +157,13 @@ async fn test_inherited_context_legacy_missing_cutoff_and_cycle_fail_closed() {
         .await
         .unwrap();
     let parent_id = store
-        .create_thread(ThreadMeta::new_at("/tmp", peri_time::now_wall()))
+        .create_thread(ThreadMeta::new_at(
+            absolute_test_path("tmp"),
+            peri_time::now_wall(),
+        ))
         .await
         .unwrap();
-    let mut child_meta = ThreadMeta::new_at("/tmp", peri_time::now_wall());
+    let mut child_meta = ThreadMeta::new_at(absolute_test_path("tmp"), peri_time::now_wall());
     child_meta.parent_thread_id = Some(parent_id.clone());
     child_meta.snapshot_at_message_id =
         Some(BaseMessage::human("missing").id().as_uuid().to_string());

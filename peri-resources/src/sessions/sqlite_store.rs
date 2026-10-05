@@ -694,6 +694,14 @@ impl ThreadStore for SqliteThreadStore {
 }
 
 #[cfg(test)]
+fn absolute_test_path(relative: &str) -> String {
+    std::env::temp_dir()
+        .join(relative)
+        .to_string_lossy()
+        .into_owned()
+}
+
+#[cfg(test)]
 #[path = "sqlite_store_test.rs"]
 mod tests;
 
