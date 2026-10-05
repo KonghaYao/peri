@@ -73,7 +73,7 @@ Langfuse 只有 public key 和 secret key **都存在**时才启用。以下环�
 | `HOME` | 用户目录/历史等路径的操作系统输入；影响缓存、插件、主题、历史等目录，具体使用依平台和组件而异。 | `peri-tui/src/kit/input_history.rs` 等 |
 | `USERPROFILE` | `HOME` 不可用时 TUI 历史和部分文件路径的回退用户目录；具体使用依平台和组件而异。 | `peri-tui/src/kit/input_history.rs`、`mcp-packages/workspace/src/image.rs` |
 | `PATH` | 查找 Node/npm/npx、shell 工具和可执行文件；动态 MCP 子进程按其 allowlist 继承。 | 相关进程启动入口 |
-| `MALLOC_CONF` | jemalloc 配置；已存在时 Peri 不覆盖，缺省时 TUI 启动入口注入自己的配置。 | `peri-tui/src/alloc_config.rs` |
+| `MALLOC_CONF` | jemalloc 配置；仅非 macOS/Windows 目标生效（macOS/Windows 使用系统分配器）。已存在时 Peri 不覆盖，缺省时 TUI 启动入口注入自己的配置。 | `peri-tui/src/alloc_config.rs` |
 
 ## 动态环境变量入口
 

@@ -495,11 +495,6 @@ pub static CRON_SCHEDULER_HANDLE: OnceLock<
 /// 在 entry.rs 中 acp_client 就绪后 set。
 pub static ACP_CLIENT_HANDLE: OnceLock<std::sync::Arc<crate::acp_client::client::AcpTuiClient>> =
     OnceLock::new();
-/// TUI 面板直读的 MCP 连接池句柄（`spawn_mcp_init` 创建后 set，C 类豁免）。
-/// OAuth 授权完成后（`handle_oauth_completed`）据此触发 reconnect——
-/// 从共享凭证文件恢复连接，面板状态随之刷新。
-pub static MCP_PANEL_POOL: OnceLock<std::sync::Arc<peri_middlewares::mcp::McpClientPool>> =
-    OnceLock::new();
 /// i18n 语言版本计数器——语言切换时递增，订阅此 atom 的组件自动重渲染。
 /// LcRegistry 本体存于 thread_local!（FluentBundle !Send，无法进 static）。
 pub static LANG_VERSION: AtomStatic<u64> = AtomStatic::new(|| 0);

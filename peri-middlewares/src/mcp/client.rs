@@ -39,11 +39,26 @@ use super::{
 use lifecycle::ServiceShutdownState;
 use oauth::{OAuthFlowKey, PendingOAuthCallback};
 use peri_acp_types::{
-    builtin_mcp::find, mcp::McpSubscriptionPort, ports::McpPoolShutdownReport, session::InboxHandle,
+    builtin_mcp::find,
+    command_registry::CommandRegistry,
+    dynamic_mcp::DynamicMcpInstanceKey,
+    mcp::McpSubscriptionPort,
+    mcp_skills::McpSkillRegistry,
+    ports::{
+        McpBuiltinWorkspaceState, McpOAuthStartDisposition, McpPoolShutdownReport,
+        McpServerConnectionStatus, McpServerInfo, McpServerOAuthStatus,
+    },
+    session::InboxHandle,
+    skills::SkillMetadata,
+    tasks::TaskManager,
 };
 use readiness::SystemReadinessTracker;
 use rmcp::model::{Resource, ResourceContents, Tool};
-use std::{any::Any, collections::HashMap, sync::Arc};
+use std::{
+    any::Any,
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 pub(crate) use cache::cache_scope_allows_persistence;
 pub use oauth::OAuthStartDisposition;
@@ -868,6 +883,171 @@ impl peri_acp_types::ports::McpPoolPort for McpClientPool {
                 "toolsCount": info.tool_count,
             })).collect::<Vec<_>>(),
         })
+    }
+
+    // ── W3 端口补全：委托既有固有方法，语义逐项对齐（见 ports.rs 契约文档）──
+
+    fn server_infos(&self) -> Result<Vec<McpServerInfo>, String> {
+        Ok(McpClientPool::all_server_infos(self)
+            .into_iter()
+            .map(mcp_server_info_projection)
+            .collect())
+    }
+
+    fn active_oauth_flow(&self, server_name: &str) -> Option<String> {
+        McpClientPool::active_oauth_flow(self, server_name)
+    }
+
+    fn spawn_oauth_flow_with_id(
+        self: Arc<Self>,
+        server_name: &str,
+        flow_id: &str,
+    ) -> Result<McpOAuthStartDisposition, String> {
+        Ok(
+            match McpClientPool::spawn_oauth_flow_with_id(&self, server_name, flow_id) {
+                OAuthStartDisposition::Started => McpOAuthStartDisposition::Started,
+                OAuthStartDisposition::AlreadyActive => McpOAuthStartDisposition::AlreadyActive,
+                OAuthStartDisposition::Conflict { active_flow_id } => {
+                    McpOAuthStartDisposition::Conflict { active_flow_id }
+                }
+            },
+        )
+    }
+
+    fn deliver_oauth_callback(
+        &self,
+        server_name: &str,
+        code: String,
+        state: String,
+    ) -> Result<(), String> {
+        McpClientPool::deliver_oauth_callback(self, server_name, code, state)
+    }
+
+    fn deliver_dynamic_oauth_callback(
+        &self,
+        instance: DynamicMcpInstanceKey,
+        flow_id: &str,
+        code: String,
+        state: String,
+    ) -> Result<(), String> {
+        McpClientPool::deliver_dynamic_oauth_callback(self, instance, flow_id, code, state)
+    }
+
+    fn cancel_oauth_callback(&self, server_name: &str) -> Result<bool, String> {
+        Ok(McpClientPool::cancel_oauth_callback(self, server_name))
+    }
+
+    fn cancel_dynamic_oauth_flow(
+        &self,
+        instance: DynamicMcpInstanceKey,
+        flow_id: &str,
+    ) -> Result<bool, String> {
+        Ok(McpClientPool::cancel_dynamic_oauth_flow(
+            self, instance, flow_id,
+        ))
+    }
+
+    async fn open_workspace_task_scope(&self, session_id: &str) -> Result<(), String> {
+        McpClientPool::open_workspace_task_scope(self, session_id).await
+    }
+
+    async fn close_workspace_task_scope(self: Arc<Self>, session_id: &str) -> Result<(), String> {
+        McpClientPool::close_workspace_task_scope(&self, session_id).await
+    }
+
+    async fn reconcile_closing_workspace_scope(&self, session_id: &str) -> Result<(), String> {
+        McpClientPool::reconcile_closing_workspace_scope(self, session_id).await
+    }
+
+    fn bind_session_task_manager(&self, session_id: &str, manager: &Arc<dyn TaskManager>) {
+        McpClientPool::bind_session_task_manager(self, session_id, manager);
+    }
+
+    async fn recover_workspace_tasks(self: Arc<Self>, session_id: &str) -> Result<(), String> {
+        McpClientPool::recover_workspace_tasks(&self, session_id).await
+    }
+
+    async fn watch_workspace_tasks(
+        self: Arc<Self>,
+        session_id: &str,
+        cancel: tokio_util::sync::CancellationToken,
+    ) {
+        McpClientPool::watch_workspace_tasks(&self, session_id, cancel).await
+    }
+
+    fn attach_connection_notifier(
+        self: Arc<Self>,
+        registry: Option<&Arc<McpSkillRegistry>>,
+        command_registry: Option<&Arc<CommandRegistry>>,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) {
+        super::middleware::attach_connection_notifier(
+            &self,
+            registry,
+            command_registry,
+            cancel,
+            None,
+        );
+    }
+
+    fn prewarm_discovery(
+        self: Arc<Self>,
+        registry: &Arc<McpSkillRegistry>,
+        command_registry: &Arc<CommandRegistry>,
+        session_id: &str,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) {
+        super::middleware::prewarm_discovery(&self, registry, command_registry, session_id, cancel);
+    }
+
+    fn builtin_workspace_state(&self) -> McpBuiltinWorkspaceState {
+        match McpClientPool::get_client(self, "workspace") {
+            None => McpBuiltinWorkspaceState::Absent,
+            Some(handle) if matches!(handle.status, ClientStatus::Connected) => {
+                McpBuiltinWorkspaceState::Connected
+            }
+            Some(_) => McpBuiltinWorkspaceState::NotConnected,
+        }
+    }
+
+    async fn read_builtin_workspace_skills(&self) -> Result<Vec<SkillMetadata>, String> {
+        McpClientPool::read_builtin_workspace_skills(self).await
+    }
+
+    async fn read_builtin_workspace_instructions(
+        &self,
+    ) -> Result<(Option<String>, Option<String>), String> {
+        McpClientPool::read_builtin_workspace_instructions(self).await
+    }
+
+    async fn read_builtin_workspace_meta(
+        &self,
+        enabled_sections: &HashSet<String>,
+    ) -> Result<HashMap<String, String>, String> {
+        McpClientPool::read_builtin_workspace_meta(self, enabled_sections).await
+    }
+}
+
+/// `mcp/list` 契约投影：只暴露面板需要的状态分类，屏蔽 `Failed` 的错误正文
+/// 与其余内部字段（与 `peri-acp` 原 downcast 后逐字段映射一致）。
+fn mcp_server_info_projection(info: ServerInfo) -> McpServerInfo {
+    McpServerInfo {
+        name: info.name,
+        transport: info.transport_type,
+        status: match info.status {
+            ClientStatus::Connected => McpServerConnectionStatus::Connected,
+            ClientStatus::Failed(_) => McpServerConnectionStatus::Failed,
+            ClientStatus::Disconnected => McpServerConnectionStatus::Disconnected,
+            ClientStatus::Disabled => McpServerConnectionStatus::Disabled,
+            ClientStatus::Uninitialized => McpServerConnectionStatus::Uninitialized,
+        },
+        oauth_status: match info.oauth_status {
+            OAuthStatus::None => McpServerOAuthStatus::None,
+            OAuthStatus::Authorized => McpServerOAuthStatus::Authorized,
+            OAuthStatus::NeedsAuthorization => McpServerOAuthStatus::NeedsAuthorization,
+        },
+        tool_count: info.tool_count,
+        resource_count: info.resource_count,
     }
 }
 

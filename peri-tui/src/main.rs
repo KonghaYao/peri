@@ -4,7 +4,10 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::{CommandFactory, Parser, Subcommand};
 
-#[cfg(not(target_os = "windows"))]
+// Linux / Unix 用 jemalloc；macOS 与 Windows 用系统分配器——macOS 因此不再
+// 引入 tikv-jemalloc-*（省去 tikv-jemalloc-sys 的 C 编译）。此门与
+// peri-tui/Cargo.toml 的 target 依赖门、src/alloc_config.rs 的 cfg 同步。
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
@@ -687,6 +690,7 @@ fn main() -> Result<()> {
     }
 
     // Set jemalloc MALLOC_CONF env vars before ordinary runtime startup.
+    // No-op where jemalloc is not linked (macOS / Windows).
     peri_tui::alloc_config::init_alloc_conf();
 
     let settings_stdin = argv_requests_settings_stdin(&args);

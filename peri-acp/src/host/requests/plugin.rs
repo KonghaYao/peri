@@ -9,6 +9,7 @@ use std::sync::Arc;
 use peri_acp_types::event_data::{
     PluginActionResult, PluginSearchResult, PluginSnapshot, PluginSnapshotEntry,
 };
+use peri_acp_types::plugin::PluginManagerPort;
 use peri_acp_types::PeriCaps;
 use serde_json::Value;
 
@@ -50,16 +51,13 @@ fn refresh_plugin_command_entries(
         .filter(|e| e.fullname.to_lowercase().starts_with("plugin:"))
         .map(|e| e.fullname.clone())
         .collect();
-    // 重载：与装配面同源（`load_enabled_plugins` → all_commands 聚合）；
+    // 重载：与装配面同源（`enabled_plugin_commands` → all_commands 聚合）；
     // 无 session 上下文（session_cwd = None）时仅用户级 enabledPlugins。
-    let fresh_commands = match peri_middlewares::plugin::load_enabled_plugins(
-        claude_dir,
-        session_cwd.map(Path::new),
-    ) {
-        Ok(plugins) => plugins
-            .iter()
-            .flat_map(|p| p.commands.clone())
-            .collect::<Vec<_>>(),
+    let fresh_commands = match cfg
+        .plugin_manager
+        .enabled_plugin_commands(claude_dir, session_cwd.map(Path::new))
+    {
+        Ok(commands) => commands,
         Err(e) => {
             tracing::warn!(
                 error = %e,
@@ -70,7 +68,7 @@ fn refresh_plugin_command_entries(
     };
     let (removed, added) = command_registry.reconcile(
         &stale,
-        peri_middlewares::plugin::plugin_route_entries(&fresh_commands),
+        cfg.plugin_manager.plugin_route_entries(&fresh_commands),
     );
     tracing::info!(
         session_id,
@@ -108,7 +106,7 @@ pub(super) async fn handle_install(
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
-    let claude_dir = peri_middlewares::plugin::claude_home();
+    let claude_dir = cfg.plugin_manager.claude_home();
     let cache_dir = cfg.plugin_manager.cache_dir();
 
     let caps = cfg.session_manager.get_caps(session_id);
@@ -181,7 +179,7 @@ pub(super) async fn handle_uninstall(
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
-    let claude_dir = peri_middlewares::plugin::claude_home();
+    let claude_dir = cfg.plugin_manager.claude_home();
 
     let caps = cfg.session_manager.get_caps(session_id);
 
@@ -261,7 +259,7 @@ pub(super) async fn handle_toggle(
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
-    let claude_dir = peri_middlewares::plugin::claude_home();
+    let claude_dir = cfg.plugin_manager.claude_home();
 
     let result = cfg
         .plugin_manager
@@ -323,7 +321,7 @@ pub(super) async fn handle_search(
         .unwrap_or("");
 
     let cache_dir = cfg.plugin_manager.cache_dir();
-    let results = search_marketplace_plugins(query, &cache_dir);
+    let results = search_marketplace_plugins(cfg.plugin_manager.as_ref(), query, &cache_dir);
 
     let caps = cfg.session_manager.get_caps(session_id);
     let _ = push_plugin_search_result(transport.as_ref(), session_id, query, &results, &caps).await;
@@ -351,7 +349,7 @@ pub(super) async fn handle_update(
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
-    let claude_dir = peri_middlewares::plugin::claude_home();
+    let claude_dir = cfg.plugin_manager.claude_home();
     let cache_dir = cfg.plugin_manager.cache_dir();
 
     let caps = cfg.session_manager.get_caps(session_id);
@@ -503,6 +501,7 @@ async fn push_plugin_search_result(
 }
 
 fn search_marketplace_plugins(
+    plugin_manager: &dyn PluginManagerPort,
     query: &str,
     cache_dir: &std::path::Path,
 ) -> Vec<PluginSnapshotEntry> {
@@ -517,9 +516,7 @@ fn search_marketplace_plugins(
                 .unwrap_or_default()
                 .to_string_lossy()
                 .to_string();
-            let Some(manifest_path) =
-                peri_middlewares::plugin::marketplace::find_marketplace_json(&mp_dir)
-            else {
+            let Some(manifest_path) = plugin_manager.find_marketplace_json(&mp_dir) else {
                 continue;
             };
             let marketplace_matches = mp_name.to_lowercase().contains(&query_lower);

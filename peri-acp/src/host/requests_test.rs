@@ -503,6 +503,33 @@ impl PluginManagerPort for MockPluginManager {
     fn snapshot(&self, _claude_dir: &Path) -> Vec<PluginSnapshotEntry> {
         vec![]
     }
+
+    // W3 端口补全：命令重载 / 路由投影 / 目录定位按真实加载器委托——与替换前
+    // ACP 直调 middlewares 静态函数的行为逐字节一致（磁盘夹具依赖这一路径）。
+    fn claude_home(&self) -> PathBuf {
+        peri_middlewares::plugin::claude_home()
+    }
+
+    fn enabled_plugin_commands(
+        &self,
+        claude_dir: &Path,
+        cwd: Option<&Path>,
+    ) -> Result<Vec<peri_acp_types::plugin::CommandEntry>, String> {
+        peri_middlewares::plugin::load_enabled_plugins(claude_dir, cwd)
+            .map(|plugins| plugins.into_iter().flat_map(|p| p.commands).collect())
+            .map_err(|error| error.to_string())
+    }
+
+    fn plugin_route_entries(
+        &self,
+        entries: &[peri_acp_types::plugin::CommandEntry],
+    ) -> Vec<peri_acp_types::command::command_route::RouteEntry> {
+        peri_middlewares::plugin::plugin_route_entries(entries)
+    }
+
+    fn find_marketplace_json(&self, dir: &Path) -> Option<PathBuf> {
+        peri_middlewares::plugin::marketplace::find_marketplace_json(dir)
+    }
 }
 
 /// 在 `{home}/.claude` 布置一个启用中的插件 `ecc`（含命令

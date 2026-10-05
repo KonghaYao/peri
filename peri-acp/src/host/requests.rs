@@ -168,11 +168,8 @@ fn bind_session_tasks(
         return;
     };
     let manager = Arc::clone(&session.task_manager);
-    let pool = cfg.mcp_pool.clone().and_then(|port| {
-        port.downcast_arc::<peri_middlewares::mcp::McpClientPool>()
-            .ok()
-    });
-    if let Some(pool) = &pool {
+    let pool = cfg.mcp_pool.clone();
+    if let Some(pool) = pool.as_ref() {
         pool.bind_session_task_manager(session_id, &manager);
     }
     if session.task_events_started.swap(true, Ordering::AcqRel) {
@@ -187,7 +184,7 @@ fn bind_session_tasks(
         if let Some(pool) = pool.as_ref() {
             let _ = peri_time::timeout(
                 std::time::Duration::from_millis(500),
-                pool.recover_workspace_tasks(&id),
+                Arc::clone(pool).recover_workspace_tasks(&id),
             )
             .await;
         }

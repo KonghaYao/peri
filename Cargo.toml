@@ -36,8 +36,15 @@ edition = "2021"
 #       "true" on macOS only strips debug info, leaving 8MB of symbol table.
 strip = "symbols"
 opt-level = "z"
-lto = true
-codegen-units = 1
+lto = "thin"
+codegen-units = 16
+
+[profile.dev]
+debug = 1
+
+# Dependencies carry no debug info in dev; workspace members keep debug=1.
+[profile.dev.package."*"]
+debug = false
 
 # ============================================================================
 # Workspace-wide dependency declarations
