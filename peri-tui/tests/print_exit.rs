@@ -325,8 +325,12 @@ async fn run_print(format: &str, scenario: ProviderScenario, bare: bool) -> std:
     .await
     .unwrap_or_else(|_| {
         panic!(
-            "the CLI must have reached the provider for every step: 期望 {expected_steps} 次，实到 {} 次",
-            served_steps.load(Ordering::SeqCst)
+            "the CLI must have reached the provider for every step: 期望 {expected_steps} 次，实到 {} 次; \
+             status: {}\nstdout:\n{}\nstderr:\n{}",
+            served_steps.load(Ordering::SeqCst),
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
         )
     });
     provider.abort();
