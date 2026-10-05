@@ -179,7 +179,7 @@ fn snapshot_loader_process_probe() {
     let global_path = temp.path().join("settings.json");
     let project_path = cwd.join(".mcp.json");
     let plugin_dir = claude_home.join("plugins/cache/market/sample/1.0.0");
-    let plugin_data = plugin_dir.join(".claude-plugin/data");
+    let plugin_data = plugin_dir.join(".claude-plugin").join("data");
     let global = serde_json::json!({
         "mcpServers": {
             "global": {
