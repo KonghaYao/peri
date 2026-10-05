@@ -245,6 +245,7 @@ async fn make_bound_session() -> BoundSession {
             .unwrap(),
     );
     let workspace = resources.resolve_workspace(repo.path()).await.unwrap();
+    let cwd = workspace.cwd.to_string_lossy().into_owned();
     let thread_id = uuid::Uuid::now_v7().to_string();
     resources
         .create_session(&NewSession {
@@ -252,7 +253,7 @@ async fn make_bound_session() -> BoundSession {
             created_at: "2026-09-28T00:00:00Z".into(),
             meta: NewSessionMeta {
                 title: Some("pressure adversarial".into()),
-                cwd: repo.path().to_string_lossy().into_owned(),
+                cwd: cwd.clone(),
                 parent_thread_id: None,
                 hidden: false,
                 cancel_policy: CancelPolicy::default(),
@@ -270,7 +271,7 @@ async fn make_bound_session() -> BoundSession {
         .await
         .unwrap();
     let session = Session::new(
-        Arc::from(repo.path().to_string_lossy().as_ref()),
+        Arc::from(cwd.as_str()),
         FrozenContext::builder().build(),
         Some(thread_id.clone()),
     );

@@ -38,9 +38,8 @@ fn close_reconciliation_rejects_reopened_epoch_before_selecting_cancel_targets()
     );
 }
 
-// 回归：没有目录条目的 false 不能令终态观察退出。
 #[tokio::test]
-async fn test_unconfirmed_terminal_settlement_is_retryable() {
+async fn test_unavailable_terminal_settlement_is_retryable() {
     use peri_acp_types::tasks::NoopTaskManager;
     use rmcp::model::{DetailedTask, Task, TaskPayload, TaskStatus};
     let pool = McpClientPool::new_pending();
@@ -55,11 +54,20 @@ async fn test_unconfirmed_terminal_settlement_is_retryable() {
             result: serde_json::Map::new(),
         },
     );
-    let error = pool
-        .deliver_managed_task_status("server", "task", "terminal", &task, false, &NoopTaskManager)
-        .await
-        .unwrap_err();
-    assert_eq!(error, "MCP task task terminal settlement is unconfirmed");
+    for transition_id in ["terminal", "terminal"] {
+        let error = pool
+            .deliver_managed_task_status(
+                "server",
+                "task",
+                transition_id,
+                &task,
+                false,
+                &NoopTaskManager,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error, "external terminal delivery is unavailable");
+    }
 }
 
 fn shell_result() -> BackgroundTaskResult {
