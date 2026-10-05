@@ -222,8 +222,12 @@ async fn assert_search_policy(git_repository: bool) {
         "ignored.txt",
         ".hidden/hidden.txt",
     ] {
-        let expected_path = root.path().join(path).to_string_lossy().into_owned();
-        assert!(glob.contains(&expected_path), "Glob 应包含 {path}: {glob}");
+        let expected_path = root.path().join(path);
+        assert!(
+            glob.lines()
+                .any(|line| std::path::Path::new(line) == expected_path),
+            "Glob 应包含 {path}: {glob}"
+        );
         let explicit = grep
             .invoke(
                 json!({"pattern":"NEEDLE", "path":root.path().join(path)}),
