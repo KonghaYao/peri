@@ -289,21 +289,31 @@ async fn durable_admission_preserves_original_ticket_receipt_and_requires_finish
     );
     let original = resources.apply_work_mutation(&enter).await.unwrap();
     assert_eq!(original.decision, WorkDecision::Accepted);
-    let finish = command(
-        "ticket-finish",
-        WorkAction::FinishAdmission {
-            admission: ticket.clone(),
-            evidence_id: "actual-future-exited".into(),
-        },
-    );
-    assert!(matches!(
+    let settlement = WorkAction::FinishAdmission {
+        admission: ticket.clone(),
+        evidence_id: "actual-future-exited".into(),
+    };
+    let unauthorized = command("ticket-finish", settlement.clone());
+    // 44309b13 调整了 finish 守卫语义：finish 不再要求先观察到 attempt 退出，而是一次
+    // FinishAdmission 同时清理 attempt 并写入结算证据；只有与登记 ticket 的 execution 不符的
+    // finish 才被拒。故原先「先 ObserveAttempt 退出、再 finish」的步骤重排为：
+    // 缺证据被拒 → attempt 归属他者时被拒 → 持有票面 attempt 时一次 finish 完成结算。
+    assert_eq!(
         resources
-            .apply_work_mutation(&finish)
+            .apply_work_mutation(&command(
+                "ticket-finish-without-proof",
+                WorkAction::FinishAdmission {
+                    admission: ticket.clone(),
+                    evidence_id: String::new(),
+                },
+            ))
             .await
             .unwrap()
             .decision,
-        WorkDecision::Rejected { .. }
-    ));
+        WorkDecision::Rejected {
+            reason: WorkRejection::InvalidTransition
+        }
+    );
     let control = resources
         .load_session_control(&"work-session".into())
         .await
@@ -319,14 +329,120 @@ async fn durable_admission_preserves_original_ticket_receipt_and_requires_finish
         })
         .await
         .unwrap();
-    let settled = command("ticket-settle", finish.action.clone());
+    let other = ControlAttempt {
+        turn_id: TurnId::new(),
+        attempt_id: AttemptId::new(),
+    };
+    assert_ne!(other, ticket.execution);
+    let control = resources
+        .load_session_control(&"work-session".into())
+        .await
+        .unwrap();
+    resources
+        .apply_session_control(&ControlCommand {
+            session_id: "work-session".into(),
+            command_id: "next-attempt".into(),
+            expected_lifecycle: control.lifecycle,
+            expected_revision: control.revision,
+            expected_control_generation: control.control_generation,
+            action: ControlAction::ObserveAttempt {
+                target: Some(other.clone()),
+            },
+        })
+        .await
+        .unwrap();
+    // attempt 已归属另一次执行：对原 ticket 的 finish 属于未授权结算，必须被拒。
     assert_eq!(
         resources
-            .apply_work_mutation(&settled)
+            .apply_work_mutation(&unauthorized)
             .await
             .unwrap()
             .decision,
-        WorkDecision::Accepted
+        WorkDecision::Rejected {
+            reason: WorkRejection::InvalidTransition
+        }
+    );
+    let held = snapshot(resources.as_ref()).await;
+    assert_eq!(held.control.attempt, Some(other));
+    assert!(held.state.admissions["ticket"].evidence_id.is_none());
+    let control = resources
+        .load_session_control(&"work-session".into())
+        .await
+        .unwrap();
+    resources
+        .apply_session_control(&ControlCommand {
+            session_id: "work-session".into(),
+            command_id: "release-attempt".into(),
+            expected_lifecycle: control.lifecycle,
+            expected_revision: control.revision,
+            expected_control_generation: control.control_generation,
+            action: ControlAction::ObserveAttempt { target: None },
+        })
+        .await
+        .unwrap();
+    let control = resources
+        .load_session_control(&"work-session".into())
+        .await
+        .unwrap();
+    resources
+        .apply_session_control(&ControlCommand {
+            session_id: "work-session".into(),
+            command_id: "ticket-attempt".into(),
+            expected_lifecycle: control.lifecycle,
+            expected_revision: control.revision,
+            expected_control_generation: control.control_generation,
+            action: ControlAction::ObserveAttempt {
+                target: Some(ticket.execution.clone()),
+            },
+        })
+        .await
+        .unwrap();
+    // 持有票面 attempt 时，一次 finish 即完成 attempt 清理与结算证据。
+    let before = snapshot(resources.as_ref()).await;
+    assert_eq!(before.control.attempt, Some(ticket.execution.clone()));
+    let settled = command("ticket-settle", settlement.clone());
+    let finished = resources.apply_work_mutation(&settled).await.unwrap();
+    assert_eq!(finished.decision, WorkDecision::Accepted);
+    let after = snapshot(resources.as_ref()).await;
+    assert!(after.control.attempt.is_none());
+    assert_eq!(after.control.revision, before.control.revision + 1);
+    assert_eq!(
+        after.control.control_generation,
+        before.control.control_generation
+    );
+    assert_eq!(
+        after.state.admissions["ticket"].evidence_id.as_deref(),
+        Some("actual-future-exited")
+    );
+    assert_eq!(
+        after.state.admissions["ticket"].settled_receipt.as_ref(),
+        Some(&finished)
+    );
+    // 换 mutation_id 幂等重放同一 finish：返回原始结算回执，且不再改动 control/state。
+    let replayed = resources
+        .apply_work_mutation(&command("ticket-settle-replay", settlement.clone()))
+        .await
+        .unwrap();
+    assert_eq!(replayed, finished);
+    let replayed_snapshot = snapshot(resources.as_ref()).await;
+    assert_eq!(replayed_snapshot.control, after.control);
+    assert_eq!(replayed_snapshot.state, after.state);
+    // 结算证据由首次认领固定：换证据重新认领同一张 ticket 触发冲突。
+    assert_eq!(
+        resources
+            .apply_work_mutation(&command(
+                "ticket-reclaim",
+                WorkAction::FinishAdmission {
+                    admission: ticket.clone(),
+                    evidence_id: "other-exit".into(),
+                },
+            ))
+            .await
+            .unwrap()
+            .decision,
+        WorkDecision::Rejected {
+            reason: WorkRejection::Conflict
+        }
     );
     assert_eq!(
         resources.apply_work_mutation(&enter).await.unwrap(),
