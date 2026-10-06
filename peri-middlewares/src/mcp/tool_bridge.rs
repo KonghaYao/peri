@@ -29,6 +29,17 @@ pub enum ToolCallError {
     },
 }
 
+fn completed_application_error(
+    result: &rmcp::model::CallToolResult,
+) -> Option<peri_acp_types::tools::EffectiveToolError> {
+    (result.is_error == Some(true)).then(|| {
+        peri_acp_types::tools::EffectiveToolError::new(
+            peri_acp_types::tools::EffectiveToolErrorCode::ApplicationFailed,
+            format_contents(&result.content),
+        )
+    })
+}
+
 /// 将单个 MCP tool 包装为 BaseTool 实现
 ///
 /// `Clone` 只复制已有的 String/Value/Arc/gate 字段，不建立新连接、不注册新 lease；
@@ -589,23 +600,26 @@ impl BaseTool for McpToolBridge {
         };
 
         // 4. 处理 is_error 标志。失败的实例化调用不得签发 App lease。
-        if result.is_error.unwrap_or(false) {
-            let error_text = format_contents(&result.content);
+        if let Some(application_error) = completed_application_error(&result) {
             let pool = self.output_pool.as_ref().and_then(std::sync::Weak::upgrade);
             let reason = format_output(
                 pool.as_deref(),
                 self.output_session_id
                     .as_deref()
                     .or(ctx.session_id.as_deref()),
-                error_text,
+                application_error.message,
                 true,
             )
             .await;
-            return Err(Box::new(ToolCallError::CallFailed {
-                server: self.server_name.clone(),
-                tool: self.tool_name.clone(),
-                reason,
-            }));
+            return Err(Box::new(peri_acp_types::tools::EffectiveToolError::new(
+                application_error.code,
+                ToolCallError::CallFailed {
+                    server: self.server_name.clone(),
+                    tool: self.tool_name.clone(),
+                    reason,
+                }
+                .to_string(),
+            )));
         }
 
         if let (

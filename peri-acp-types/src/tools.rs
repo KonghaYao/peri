@@ -376,6 +376,7 @@ pub enum EffectiveToolErrorCode {
     UserRejected,
     Cancelled,
     Timeout,
+    ApplicationFailed,
     ToolFailed,
 }
 
@@ -388,6 +389,7 @@ impl EffectiveToolErrorCode {
             Self::UserRejected => "USER_REJECTED",
             Self::Cancelled => "CANCELLED",
             Self::Timeout => "TIMEOUT",
+            Self::ApplicationFailed => "APPLICATION_FAILED",
             Self::ToolFailed => "TOOL_FAILED",
         }
     }

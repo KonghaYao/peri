@@ -4,6 +4,34 @@ use crate::session::queue::MessageQueue;
 use crate::session::transcript::MessageTranscript;
 use crate::session::turn::TurnContext;
 
+#[test]
+fn completed_application_failure_retains_typed_error_without_unknown_classification() {
+    let received = EffectiveToolError::new(
+        EffectiveToolErrorCode::ApplicationFailed,
+        "FileNotFound: missing-file.txt",
+    );
+    let effective = effective_tool_error_from_boxed(Box::new(received));
+    assert_eq!(effective.code, EffectiveToolErrorCode::ApplicationFailed);
+    assert_eq!(effective.message, "FileNotFound: missing-file.txt");
+    assert!(!requires_outcome_reconciliation(effective.code));
+    assert!(execution_for_effective_error(effective.code).is_none());
+}
+
+#[test]
+fn uncertain_tool_errors_require_reconciliation_even_with_application_error_text() {
+    for message in ["FileNotFound", "-32603", "transport disconnected"] {
+        let effective = effective_tool_error_from_boxed(std::io::Error::other(message).into());
+        assert_eq!(effective.code, EffectiveToolErrorCode::ToolFailed);
+        assert!(requires_outcome_reconciliation(effective.code));
+    }
+    assert!(requires_outcome_reconciliation(
+        EffectiveToolErrorCode::Timeout
+    ));
+    assert!(requires_outcome_reconciliation(
+        EffectiveToolErrorCode::Cancelled
+    ));
+}
+
 struct OutputTool {
     name: String,
     output: String,

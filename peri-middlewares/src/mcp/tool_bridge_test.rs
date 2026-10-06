@@ -667,3 +667,25 @@ async fn builtin_tool_call_surfaces_timeout_error_after_bridge_deadline() {
         handler.entered_count()
     );
 }
+#[test]
+fn completed_mcp_error_response_retains_known_application_failure() {
+    let result = rmcp::model::CallToolResult::error(vec![rmcp::model::ContentBlock::text(
+        "FileNotFound: missing-file.txt",
+    )]);
+    let error = super::completed_application_error(&result).unwrap();
+    assert_eq!(
+        error.code,
+        peri_acp_types::tools::EffectiveToolErrorCode::ApplicationFailed,
+    );
+    assert_eq!(error.message, "FileNotFound: missing-file.txt");
+}
+
+#[test]
+fn completed_mcp_success_does_not_infer_failure_from_content() {
+    let mut result = rmcp::model::CallToolResult::success(vec![rmcp::model::ContentBlock::text(
+        "FileNotFound -32603 transport disconnected",
+    )]);
+    assert!(super::completed_application_error(&result).is_none());
+    result.is_error = None;
+    assert!(super::completed_application_error(&result).is_none());
+}

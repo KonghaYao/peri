@@ -71,6 +71,15 @@ fn execution_for_effective_error(code: EffectiveToolErrorCode) -> Option<ToolExe
     })
 }
 
+fn requires_outcome_reconciliation(code: EffectiveToolErrorCode) -> bool {
+    matches!(
+        code,
+        EffectiveToolErrorCode::Cancelled
+            | EffectiveToolErrorCode::Timeout
+            | EffectiveToolErrorCode::ToolFailed
+    )
+}
+
 /// 收集阶段产物（内部使用）
 pub(super) struct CollectOutcome {
     pub(super) results: Vec<(ToolCall, ToolResult)>,
@@ -386,7 +395,7 @@ async fn dispatch_concurrent(
                     }
                 };
                 if let Err(error) = &result {
-                    if matches!(error.code, EffectiveToolErrorCode::Cancelled | EffectiveToolErrorCode::Timeout | EffectiveToolErrorCode::ToolFailed) {
+                    if requires_outcome_reconciliation(error.code) {
                         if let Err(error) = super::super::work_dispatch::unknown(&dispatch_context, &call_id, &error.to_string()).await {
                             tracing::error!(%error, "invocation reconciliation checkpoint unconfirmed");
                         }
