@@ -171,9 +171,9 @@ fn observer_floor_requires_unprocessed_new_required_delivery() {
                 },
             },
         };
-        let reduction = reduce_work(&command, &control, &state).unwrap();
+        let reduction = reduce_work(&command, &control, state.clone()).unwrap();
         assert_eq!(reduction.receipt.decision, WorkDecision::Accepted);
-        state = reduction.state;
+        state = reduction.state.unwrap();
         if delivery_id == "old" {
             let snapshot = WorkSnapshot::from_state(&query, control.clone(), state.clone());
             assert!(!inbox_work_available(

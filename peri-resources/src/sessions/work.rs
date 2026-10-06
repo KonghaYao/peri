@@ -1,6 +1,6 @@
 use peri_acp_types::session_resources::work::{
-    DeliveryRecord, WorkCommand, WorkDeliveryQuery, WorkReceipt, WorkReduction, WorkResolution,
-    WorkState,
+    DeliveryRecord, WorkAction, WorkCommand, WorkDeliveryQuery, WorkReceipt, WorkReduction,
+    WorkResolution, WorkState,
 };
 use peri_acp_types::session_resources::{
     ControlState, SessionResourceError, SessionResourceResult,
@@ -133,6 +133,35 @@ pub(super) fn state(
     }
     Ok(state)
 }
+
+/// JSON to persist for the pre-command state, computed before the state is moved
+/// into `reduce_work`: the raw column value when the session already has a state
+/// row, otherwise the encoding of the decoded state.
+pub(super) fn pre_state_json(
+    state_json: Option<String>,
+    current: &WorkState,
+) -> SessionResourceResult<String> {
+    match state_json {
+        Some(json) => Ok(json),
+        None => encode(current),
+    }
+}
+
+/// Command recorded for an in-flight terminal obligation, present only when the
+/// command acknowledges one. Read from the pre-command state, which `reduce_work`
+/// consumes, so the caller must extract it first.
+pub(super) fn terminal_parent_command(
+    command: &WorkCommand,
+    current: &WorkState,
+) -> Option<WorkCommand> {
+    match &command.action {
+        WorkAction::AcknowledgeTerminalObligation { admission_id, .. } => {
+            current.terminal_obligations.get(admission_id).cloned()
+        }
+        _ => None,
+    }
+}
+
 pub(super) fn replay(
     command: &WorkCommand,
     digest: &str,

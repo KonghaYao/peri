@@ -449,6 +449,44 @@ fn test_steer_takeback_receipt_after_reload_remains_recoverable() {
 }
 
 #[test]
+fn test_steer_late_takeback_after_instance_change_recovers_without_replacing_snapshot() {
+    let mut state = make_state();
+    let command = make_command(SteerCommandKind::TakeBack {
+        id: "a".to_owned(),
+        restore_draft: true,
+    });
+    state.begin(command.clone());
+    state.reset_session("s", 2);
+    let mut snapshot = make_snapshot(1);
+    snapshot.generation = "new-instance".into();
+    snapshot.items.clear();
+    assert!(state.accept_snapshot(snapshot.clone(), 2, true));
+    assert!(state.resume_pending("s", 2).is_empty());
+
+    state.settle(
+        &command,
+        UserInputQueueReceipt {
+            work_receipts: Vec::new(),
+            publication_generations: Default::default(),
+            snapshot: UserInputQueueSnapshot {
+                items: Vec::new(),
+                ..make_snapshot(2)
+            },
+            results: Vec::new(),
+            taken_back: Some(make_input("a")),
+        },
+    );
+
+    let current = state.snapshot("s", 2).unwrap();
+    assert_eq!(current.generation, snapshot.generation);
+    assert_eq!(current.revision, snapshot.revision);
+    assert!(current.items.is_empty());
+    assert!(state.pending_command("s", &command.command_id).is_none());
+    assert_eq!(state.recover("s", 2, true).unwrap().input_id, "a");
+    assert!(state.recover("s", 2, true).is_none());
+}
+
+#[test]
 fn test_steer_unknown_input_after_instance_change_stays_visible_without_retry() {
     let mut state = make_state();
     let command = make_command(SteerCommandKind::Enqueue(make_input("b")));

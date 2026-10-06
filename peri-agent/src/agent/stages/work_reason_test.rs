@@ -152,10 +152,11 @@ async fn reason_budget_reducer_blocks_before_request_and_maps_exact_limit() {
     state.limits.reason_requests = 64;
     let budget_id = state.works[&work_id].budget_id.clone();
     state.budgets.get_mut(&budget_id).unwrap().reason_requests = 64;
-    let reduction = reduce_work(&command, &snapshot.control, &state).unwrap();
+    let reduction = reduce_work(&command, &snapshot.control, state.clone()).unwrap();
     assert_eq!(reduction.receipt.stage, Some(WorkStage::Blocked));
-    assert!(reduction.state.works[&work_id].request_id.is_none());
-    assert_eq!(reduction.state.budgets[&budget_id].reason_requests, 64);
+    let accepted = reduction.state.as_ref().unwrap();
+    assert!(accepted.works[&work_id].request_id.is_none());
+    assert_eq!(accepted.budgets[&budget_id].reason_requests, 64);
     let error = budget_exhaustion(&state, &work_id, WorkBudgetKind::ReasonRequests).unwrap();
     let converted = AgentError::from(anyhow::Error::new(error));
     assert!(matches!(

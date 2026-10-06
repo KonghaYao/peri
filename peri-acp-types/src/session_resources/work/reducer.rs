@@ -2,29 +2,62 @@ use super::*;
 use crate::session_resources::ControlStatus;
 
 pub struct WorkReduction {
-    pub state: WorkState,
+    /// The post-command state, `Some` exactly when `receipt.decision` is accepted.
+    ///
+    /// `apply` mutates the state in place and can fail after partially mutating it
+    /// (for example `PublishStagedUserInputs` publishes deliveries one by one and
+    /// can still report a conflict), so a rejected command hands back no state at
+    /// all: the partially mutated state is dropped here and the durable state
+    /// stays whatever the database already holds. Use [`WorkReduction::accepted_state`]
+    /// to assert that pairing before persisting anything.
+    pub state: Option<WorkState>,
     pub receipt: WorkReceipt,
     pub projections: Vec<WorkPayload>,
     pub events: Vec<WorkEvent>,
     pub control: Option<ControlState>,
 }
 
+impl WorkReduction {
+    /// The state to persist, `None` when the command was rejected.
+    ///
+    /// Returns an error when `state` and the receipt disagree with each other,
+    /// so a rejected reduction can never be persisted as if it were accepted.
+    pub fn accepted_state(&self) -> SessionResourceResult<Option<&WorkState>> {
+        match (&self.receipt.decision, self.state.as_ref()) {
+            (WorkDecision::Accepted, Some(state)) => Ok(Some(state)),
+            (WorkDecision::Rejected { .. }, None) => Ok(None),
+            (WorkDecision::Accepted, None) => {
+                Err(invalid("accepted work reduction carries no state"))
+            }
+            (WorkDecision::Rejected { .. }, Some(_)) => {
+                Err(invalid("rejected work reduction carries state"))
+            }
+        }
+    }
+}
+
+/// Reduce one command into an owned snapshot.
+///
+/// Takes ownership of `current` and mutates it in place: callers already hold an
+/// exclusive snapshot (`read_snapshot` / `read_work_snapshot` return an owned
+/// `WorkState`), so no copy of the state — which embeds historical
+/// `works[].reasonRequest.serializedRequest` payloads — is made here.
 pub fn reduce_work(
     command: &WorkCommand,
     control: &ControlState,
-    current: &WorkState,
+    current: WorkState,
 ) -> SessionResourceResult<WorkReduction> {
     command.digest()?;
-    if let Ok(Some(receipt)) = super::admission::prior_receipt(command, current) {
+    if let Ok(Some(receipt)) = super::admission::prior_receipt(command, &current) {
+        let accepted = receipt.decision == WorkDecision::Accepted;
         return Ok(WorkReduction {
-            state: current.clone(),
+            state: accepted.then_some(current),
             receipt,
             projections: Vec::new(),
             events: Vec::new(),
             control: None,
         });
     }
-    let mut state = current.clone();
     let mut receipt = WorkReceipt {
         session_id: command.session_id.clone(),
         mutation_id: command.mutation_id.clone(),
@@ -38,10 +71,11 @@ pub fn reduce_work(
         work_revision: None,
         stage: None,
     };
+    let mut state = current;
     let mut projections = Vec::new();
     let mut events = Vec::new();
     let mut next_control = None;
-    let result = super::admission::prior_receipt(command, current).and_then(|_| {
+    let result = super::admission::prior_receipt(command, &state).and_then(|_| {
         apply(
             command,
             control,
@@ -84,9 +118,18 @@ pub fn reduce_work(
                 }
                 _ => {}
             }
+            Ok(WorkReduction {
+                state: Some(state),
+                receipt,
+                projections,
+                events,
+                control: next_control,
+            })
         }
         Err(reason) => {
-            state = current.clone();
+            // `state` may be partially applied; discard it instead of handing a
+            // half-applied state back to the caller.
+            drop(state);
             projections.clear();
             events.clear();
             next_control = None;
@@ -97,15 +140,15 @@ pub fn reduce_work(
             receipt.work_id = None;
             receipt.work_revision = None;
             receipt.stage = None;
+            Ok(WorkReduction {
+                state: None,
+                receipt,
+                projections,
+                events,
+                control: next_control,
+            })
         }
     }
-    Ok(WorkReduction {
-        state,
-        receipt,
-        projections,
-        events,
-        control: next_control,
-    })
 }
 
 fn apply(

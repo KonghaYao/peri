@@ -123,8 +123,16 @@ impl SqliteSessionData {
             .await
             .map_err(|error| map_sqlx(&error))?;
         let (control, state, state_json) = read_snapshot(&mut tx, &command.session_id).await?;
-        let reduction = reduce_work(command, &control, &state)?;
-        for effect in work::mutation_effects(command, &state, state_json, &control, &reduction)? {
+        let initial_json = work::pre_state_json(state_json, &state)?;
+        let parent_command = work::terminal_parent_command(command, &state);
+        let reduction = reduce_work(command, &control, state)?;
+        for effect in work::mutation_effects(
+            command,
+            initial_json,
+            parent_command.as_ref(),
+            &control,
+            &reduction,
+        )? {
             let mut query = sqlx::query(effect.sql);
             for value in effect.params {
                 query = query.bind(value);

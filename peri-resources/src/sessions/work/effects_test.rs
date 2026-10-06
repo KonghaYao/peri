@@ -45,8 +45,17 @@ fn effects(json: Option<String>, has_history: bool) -> Vec<WorkEffect> {
     let state = state(json.as_deref(), has_history).unwrap();
     let control = ControlState::default();
     let command = command();
-    let reduction = reduce_work(&command, &control, &state).unwrap();
-    mutation_effects(&command, &state, json, &control, &reduction).unwrap()
+    let initial_json = pre_state_json(json, &state).unwrap();
+    let parent_command = terminal_parent_command(&command, &state);
+    let reduction = reduce_work(&command, &control, state).unwrap();
+    mutation_effects(
+        &command,
+        initial_json,
+        parent_command.as_ref(),
+        &control,
+        &reduction,
+    )
+    .unwrap()
 }
 
 #[test]
@@ -56,9 +65,8 @@ fn noncanonical_json_is_reused_byte_for_byte_for_insert_and_guard() {
     let command = command();
     let current = state(Some(&raw), false).unwrap();
     let control = ControlState::default();
-    let reduction = reduce_work(&command, &control, &current).unwrap();
-    let effects =
-        mutation_effects(&command, &current, Some(raw.clone()), &control, &reduction).unwrap();
+    let reduction = reduce_work(&command, &control, current).unwrap();
+    let effects = mutation_effects(&command, raw.clone(), None, &control, &reduction).unwrap();
     assert_eq!(effects[2].sql, INSERT_STATE);
     assert_eq!(effects[2].params[1].as_bytes(), raw.as_bytes());
     assert_eq!(effects[3].sql, GUARD_STATE);
@@ -67,7 +75,7 @@ fn noncanonical_json_is_reused_byte_for_byte_for_insert_and_guard() {
         .iter()
         .find(|effect| effect.sql == UPDATE_STATE)
         .unwrap();
-    assert_eq!(next.params[1], encode(&reduction.state).unwrap());
+    assert_eq!(next.params[1], encode(&reduction.state.unwrap()).unwrap());
 }
 
 fn assert_missing_state_initialization(has_history: bool) {

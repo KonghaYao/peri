@@ -1,6 +1,67 @@
 use super::*;
 use peri_acp_types::session_resources::ControlStatus;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PublicationBlock {
+    Invalid,
+    Paused,
+    WorkBlocked,
+    ControlInactive,
+    ActiveRunning,
+    ActiveInterrupted,
+    ActiveCancelled,
+    ActiveIdentityMismatch,
+    UnattachedAttempt,
+    Dispatching,
+    Claimed,
+    Empty,
+}
+
+impl PublicationBlock {
+    fn detect(state: &MailboxState, snapshot: &WorkSnapshot) -> Option<Self> {
+        if !state.valid {
+            return Some(Self::Invalid);
+        }
+        if state.paused {
+            return Some(Self::Paused);
+        }
+        if snapshot.blocked {
+            return Some(Self::WorkBlocked);
+        }
+        if snapshot.control.status != ControlStatus::Active {
+            return Some(Self::ControlInactive);
+        }
+        if let Some(active) = &state.active {
+            if !state.suspended {
+                return Some(Self::ActiveRunning);
+            }
+            if active.reason != InterruptReason::None {
+                return Some(Self::ActiveInterrupted);
+            }
+            if active
+                .cancel
+                .as_ref()
+                .is_some_and(CancellationToken::is_cancelled)
+            {
+                return Some(Self::ActiveCancelled);
+            }
+            if active.sdk.as_ref().is_some_and(|sdk| {
+                snapshot.control.attempt.as_ref() != Some(&sdk.admission.execution)
+                    || snapshot.control.control_generation != sdk.admission.control_generation
+            }) {
+                return Some(Self::ActiveIdentityMismatch);
+            }
+        } else if snapshot.control.attempt.is_some() {
+            return Some(Self::UnattachedAttempt);
+        }
+        state.records.iter().find_map(|record| match record.state {
+            UserInputState::Dispatching => Some(Self::Dispatching),
+            UserInputState::Claimed => Some(Self::Claimed),
+            _ => None,
+        })
+    }
+}
+
 enum InputSelection {
     Automatic,
     InterruptCurrent,
@@ -372,35 +433,9 @@ impl UserInputMailbox {
         let durable = self.durable.as_ref().ok_or(UserInputQueueError::Closed)?;
         let snapshot = durable.load(&self.session_id).await?;
         self.project_publications(&snapshot);
-        {
-            let state = self.state.lock();
-            if !state.valid
-                || state.paused
-                || snapshot.blocked
-                || snapshot.control.status != ControlStatus::Active
-                || state.active.as_ref().is_some_and(|active| {
-                    !state.suspended
-                        || active.reason != InterruptReason::None
-                        || active
-                            .cancel
-                            .as_ref()
-                            .is_some_and(CancellationToken::is_cancelled)
-                        || active.sdk.as_ref().is_some_and(|sdk| {
-                            snapshot.control.attempt.as_ref() != Some(&sdk.admission.execution)
-                                || snapshot.control.control_generation
-                                    != sdk.admission.control_generation
-                        })
-                })
-                || (state.active.is_none() && snapshot.control.attempt.is_some())
-                || state.records.iter().any(|record| {
-                    matches!(
-                        record.state,
-                        UserInputState::Dispatching | UserInputState::Claimed
-                    )
-                })
-            {
-                return Ok(false);
-            }
+        let blocked = PublicationBlock::detect(&self.state.lock(), &snapshot);
+        if let Some(reason) = blocked {
+            return Ok(self.record_publication_block(reason, &snapshot));
         }
         let Some(record) = snapshot
             .state
@@ -412,7 +447,7 @@ impl UserInputMailbox {
             })
             .min_by_key(|record| record.sequence)
         else {
-            return Ok(false);
+            return Ok(self.record_publication_block(PublicationBlock::Empty, &snapshot));
         };
         let command_id = format!(
             "idle:{}:{}:{}",
@@ -427,7 +462,30 @@ impl UserInputMailbox {
         )
         .await?;
         self.state.lock().suspended = false;
+        *durable.publication_block.lock() = None;
         Ok(true)
+    }
+
+    fn record_publication_block(&self, reason: PublicationBlock, snapshot: &WorkSnapshot) -> bool {
+        let durable = self.durable.as_ref().expect("durable publication");
+        let mut previous = durable.publication_block.lock();
+        // 轮询和多个调用方共用去重状态，只在阻塞原因变化时记录，不输出输入内容。
+        if *previous != Some(reason) {
+            *previous = Some(reason);
+            let state = self.state.lock();
+            tracing::debug!(
+                session_id = %self.session_id,
+                ?reason,
+                lifecycle = snapshot.control.lifecycle,
+                control_generation = snapshot.control.control_generation,
+                work_revision = snapshot.state.revision,
+                queued = state.records.iter().filter(|r| r.state == UserInputState::Queued).count(),
+                dispatching = state.records.iter().filter(|r| r.state == UserInputState::Dispatching).count(),
+                claimed = state.records.iter().filter(|r| r.state == UserInputState::Claimed).count(),
+                "pending input publication deferred"
+            );
+        }
+        false
     }
 
     async fn publish_selection(

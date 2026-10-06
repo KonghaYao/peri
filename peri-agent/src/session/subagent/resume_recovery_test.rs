@@ -97,7 +97,9 @@ async fn explicit_resume_supersedes_failed_reason_without_replaying_or_erasing_i
         if original.stage == WorkStage::ReasonInFlight {
             let abandoned = &after.state.works[work_id];
             assert_eq!(abandoned.stage, WorkStage::Abandoned);
-            assert_eq!(abandoned.reason_request, original.reason_request);
+            // 终态裁剪：身份保留，请求正文不再随终态保存。
+            assert_eq!(abandoned.request_id, original.request_id);
+            assert!(abandoned.reason_request.is_none());
             assert_eq!(abandoned.response, original.response);
             assert_eq!(
                 after.state.budgets[&original.budget_id],

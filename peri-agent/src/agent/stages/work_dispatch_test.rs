@@ -240,7 +240,7 @@ macro_rules! race_resources {
                         guard.expected_revision = after.state.revision;
                         guard.expected_control_generation = after.control.control_generation;
                         guard.execution = after.control.attempt.clone().unwrap();
-                        let reduction = reduce_work(&stale_target, &after.control, &after.state)?;
+                        let reduction = reduce_work(&stale_target, &after.control, after.state)?;
                         assert_eq!(reduction.receipt.decision,
                             WorkDecision::Rejected { reason: WorkRejection::StaleWorkRevision });
                         return Ok(reduction.receipt);

@@ -80,32 +80,33 @@ fn add_admission(state: &mut WorkState, control: &ControlState, work_id: &str) {
             },
         },
         control,
-        state,
+        state.clone(),
     )
     .unwrap();
     assert_eq!(registered.receipt.decision, WorkDecision::Accepted);
     assert_eq!(registered.control.as_ref(), Some(control));
+    let registered_state = registered.state.unwrap();
     let blocked = reduce_work(
         &WorkCommand {
             session_id: "session".into(),
             recipient_lifecycle: control.lifecycle,
             mutation_id: format!("block-{work_id}"),
             action: WorkAction::BlockWork {
-                expected_revision: registered.state.revision,
+                expected_revision: registered_state.revision,
                 target: WorkTarget {
                     work_id: work_id.into(),
-                    expected_work_revision: registered.state.works[work_id].revision,
+                    expected_work_revision: registered_state.works[work_id].revision,
                 },
                 reason: "reason budget exhausted".into(),
                 recovery_condition: "explicit budget reset authorization".into(),
             },
         },
         control,
-        &registered.state,
+        registered_state,
     )
     .unwrap();
     assert_eq!(blocked.receipt.decision, WorkDecision::Accepted);
-    *state = blocked.state;
+    *state = blocked.state.unwrap();
 }
 
 fn publication(control: &ControlState, state: &mut WorkState) -> WorkCommand {
@@ -128,11 +129,11 @@ fn publication(control: &ControlState, state: &mut WorkState) -> WorkCommand {
             },
         },
         control,
-        state,
+        state.clone(),
     )
     .unwrap();
     assert_eq!(staged.receipt.decision, WorkDecision::Accepted);
-    *state = staged.state;
+    *state = staged.state.unwrap();
     WorkCommand {
         session_id: "session".into(),
         recipient_lifecycle: control.lifecycle,
@@ -220,24 +221,25 @@ fn explicit_selection_unblocks_exited_work_without_replaying_effects_or_resettin
     add_invocation(&mut state, "completed", InvocationStatus::Settled);
     add_invocation(&mut state, "unknown", InvocationStatus::OutcomeUnknown);
     let command = publication(&control, &mut state);
-    let reduction = reduce_work(&command, &control, &state).unwrap();
+    let reduction = reduce_work(&command, &control, state.clone()).unwrap();
     assert_eq!(reduction.receipt.decision, WorkDecision::Accepted);
-    assert_eq!(reduction.state.works["exited"].stage, WorkStage::Abandoned);
-    assert_eq!(reduction.state.works["exited"].revision, 8);
+    let accepted = reduction.state.as_ref().unwrap();
+    assert_eq!(accepted.works["exited"].stage, WorkStage::Abandoned);
+    assert_eq!(accepted.works["exited"].revision, 8);
     assert_eq!(
-        reduction.state.works["old-lifecycle"],
+        accepted.works["old-lifecycle"],
         state.works["old-lifecycle"]
     );
-    assert_eq!(reduction.state.works["settled"], state.works["settled"]);
-    assert_eq!(reduction.state.invocations, state.invocations);
-    assert_eq!(reduction.state.budgets, state.budgets);
-    assert_eq!(reduction.state.limits, WorkLimits::default());
-    assert_eq!(reduction.state.batches, state.batches);
+    assert_eq!(accepted.works["settled"], state.works["settled"]);
+    assert_eq!(accepted.invocations, state.invocations);
+    assert_eq!(accepted.budgets, state.budgets);
+    assert_eq!(accepted.limits, WorkLimits::default());
+    assert_eq!(accepted.batches, state.batches);
     assert_eq!(
-        reduction.state.obligations["exited"].status,
+        accepted.obligations["exited"].status,
         ObligationStatus::Abandoned
     );
-    assert!(reduction.state.works["exited"]
+    assert!(accepted.works["exited"]
         .reason
         .as_ref()
         .unwrap()
@@ -251,7 +253,7 @@ fn explicit_selection_unblocks_exited_work_without_replaying_effects_or_resettin
             limit: 10,
         },
         control,
-        reduction.state,
+        reduction.state.unwrap(),
     );
     assert!(!snapshot.blocked);
     assert_eq!(snapshot.candidates.len(), 1);
@@ -275,16 +277,14 @@ fn active_attempt_selection_only_abandons_exact_execution() {
     other_attempt.attempt_id = AttemptId::new();
     add_work(&mut state, "same-turn-other-attempt", 1, other_attempt);
     let command = publication(&control, &mut state);
-    let reduction = reduce_work(&command, &control, &state).unwrap();
+    let reduction = reduce_work(&command, &control, state.clone()).unwrap();
     assert_eq!(reduction.receipt.decision, WorkDecision::Accepted);
-    assert_eq!(reduction.state.limits, state.limits);
-    assert_eq!(reduction.state.works["active"].stage, WorkStage::Abandoned);
+    let accepted = reduction.state.as_ref().unwrap();
+    assert_eq!(accepted.limits, state.limits);
+    assert_eq!(accepted.works["active"].stage, WorkStage::Abandoned);
     for work_id in ["other", "same-turn-other-attempt"] {
-        assert_eq!(reduction.state.works[work_id], state.works[work_id]);
-        assert_eq!(
-            reduction.state.obligations[work_id],
-            state.obligations[work_id]
-        );
+        assert_eq!(accepted.works[work_id], state.works[work_id]);
+        assert_eq!(accepted.obligations[work_id], state.obligations[work_id]);
     }
 }
 
@@ -303,14 +303,12 @@ fn publication_without_explicit_interruption_keeps_exited_processing() {
     {
         *interrupt_current = false;
     }
-    let reduction = reduce_work(&command, &control, &state).unwrap();
+    let reduction = reduce_work(&command, &control, state.clone()).unwrap();
     assert_eq!(reduction.receipt.decision, WorkDecision::Accepted);
-    assert_eq!(reduction.state.limits, state.limits);
-    assert_eq!(reduction.state.works, state.works);
-    assert_eq!(
-        reduction.state.obligations["exited"],
-        state.obligations["exited"]
-    );
+    let accepted = reduction.state.as_ref().unwrap();
+    assert_eq!(accepted.limits, state.limits);
+    assert_eq!(accepted.works, state.works);
+    assert_eq!(accepted.obligations["exited"], state.obligations["exited"]);
 }
 
 /// [回归测试] A claim 的 batch 在 B recovery 后仍保留 A execution，选择必须跟随 B admission 与 successor。
@@ -319,7 +317,7 @@ fn recovered_attempt_selection_follows_admission_batch_and_successor() {
     let idle = ControlState::default();
     let mut state = WorkState::default();
     let publish = publication(&idle, &mut state);
-    let published = reduce_work(&publish, &idle, &state).unwrap();
+    let published = reduce_work(&publish, &idle, state.clone()).unwrap();
     assert_eq!(published.receipt.decision, WorkDecision::Accepted);
     let original_execution = attempt();
     let original_admission = WorkAdmission {
@@ -343,11 +341,12 @@ fn recovered_attempt_selection_follows_admission_batch_and_successor() {
             },
         },
         &idle,
-        &published.state,
+        published.state.unwrap(),
     )
     .unwrap();
     assert_eq!(registered.receipt.decision, WorkDecision::Accepted);
     let active = registered.control.unwrap();
+    let registered_state = registered.state.unwrap();
     let claimed = reduce_work(
         &WorkCommand {
             session_id: "session".into(),
@@ -355,7 +354,7 @@ fn recovered_attempt_selection_follows_admission_batch_and_successor() {
             mutation_id: "claim-original".into(),
             action: WorkAction::ClaimBatch {
                 guard: WorkGuard {
-                    expected_revision: registered.state.revision,
+                    expected_revision: registered_state.revision,
                     expected_control_generation: active.control_generation,
                     execution: original_execution.clone(),
                 },
@@ -364,7 +363,7 @@ fn recovered_attempt_selection_follows_admission_batch_and_successor() {
             },
         },
         &active,
-        &registered.state,
+        registered_state,
     )
     .unwrap();
     assert_eq!(claimed.receipt.decision, WorkDecision::Accepted);
@@ -393,12 +392,12 @@ fn recovered_attempt_selection_follows_admission_batch_and_successor() {
             },
         },
         &recovery_idle,
-        &claimed.state,
+        claimed.state.unwrap(),
     )
     .unwrap();
     assert_eq!(recovered.receipt.decision, WorkDecision::Accepted);
     let control = recovered.control.unwrap();
-    let mut state = recovered.state;
+    let mut state = recovered.state.unwrap();
     let mut successor = state.works["original-batch"].clone();
     state.works.get_mut("original-batch").unwrap().stage = WorkStage::Settled;
     successor.work_id = "recovered-successor".into();
@@ -422,36 +421,34 @@ fn recovered_attempt_selection_follows_admission_batch_and_successor() {
     if let WorkAction::PublishStagedUserInputs { deliveries, .. } = &mut command.action {
         deliveries[0].delivery_id = "fresh-input".into();
     }
-    let reduction = reduce_work(&command, &control, &state).unwrap();
+    let reduction = reduce_work(&command, &control, state.clone()).unwrap();
     assert_eq!(reduction.receipt.decision, WorkDecision::Accepted);
+    let accepted = reduction.state.as_ref().unwrap();
     assert_eq!(
-        reduction.state.works["recovered-successor"].stage,
+        accepted.works["recovered-successor"].stage,
         WorkStage::Abandoned
     );
     assert_eq!(
-        reduction.state.works["original-batch"],
+        accepted.works["original-batch"],
         state.works["original-batch"]
     );
     for work_id in ["unassociated-current-execution", "original-execution-only"] {
-        assert_eq!(reduction.state.works[work_id], state.works[work_id]);
-        assert_eq!(
-            reduction.state.obligations[work_id],
-            state.obligations[work_id]
-        );
+        assert_eq!(accepted.works[work_id], state.works[work_id]);
+        assert_eq!(accepted.obligations[work_id], state.obligations[work_id]);
     }
     assert_eq!(
-        reduction.state.batches["original-batch"].execution,
+        accepted.batches["original-batch"].execution,
         original_execution
     );
     assert_eq!(
-        reduction.state.obligations["new-input"].status,
+        accepted.obligations["new-input"].status,
         ObligationStatus::Abandoned
     );
-    assert_eq!(reduction.state.invocations, invocations);
-    assert_eq!(reduction.state.budgets, budgets);
-    assert_eq!(reduction.state.admissions, state.admissions);
+    assert_eq!(accepted.invocations, invocations);
+    assert_eq!(accepted.budgets, budgets);
+    assert_eq!(accepted.admissions, state.admissions);
     assert_eq!(
-        reduction.state.terminal_acknowledgements,
+        accepted.terminal_acknowledgements,
         state.terminal_acknowledgements
     );
 }
@@ -478,17 +475,15 @@ fn active_selection_without_current_admission_keeps_processing() {
             _ => unreachable!(),
         }
         let command = publication(&control, &mut state);
-        let reduction = reduce_work(&command, &control, &state).unwrap();
+        let reduction = reduce_work(&command, &control, state.clone()).unwrap();
         assert_eq!(
             reduction.receipt.decision,
             WorkDecision::Accepted,
             "variant {variant}"
         );
-        assert_eq!(reduction.state.works, state.works, "variant {variant}");
-        assert_eq!(
-            reduction.state.obligations["active"],
-            state.obligations["active"]
-        );
+        let accepted = reduction.state.as_ref().unwrap();
+        assert_eq!(accepted.works, state.works, "variant {variant}");
+        assert_eq!(accepted.obligations["active"], state.obligations["active"]);
     }
 }
 
@@ -512,31 +507,32 @@ fn selection_keeps_lifecycle_generation_cas_attempt_and_idempotence_guards() {
         (stale_generation, WorkRejection::StaleControlGeneration),
         (active_control, WorkRejection::StaleExecution),
     ] {
-        let rejected = reduce_work(&command, &changed_control, &state).unwrap();
+        let rejected = reduce_work(&command, &changed_control, state.clone()).unwrap();
         assert_eq!(rejected.receipt.decision, WorkDecision::Rejected { reason });
-        assert_eq!(rejected.state, state);
+        assert_eq!(rejected.state, None);
         assert!(rejected.events.is_empty());
     }
     let mut changed_state = state.clone();
     changed_state.revision += 1;
-    let rejected = reduce_work(&command, &control, &changed_state).unwrap();
+    let rejected = reduce_work(&command, &control, changed_state).unwrap();
     assert_eq!(
         rejected.receipt.decision,
         WorkDecision::Rejected {
             reason: WorkRejection::StaleRevision
         }
     );
-    assert_eq!(rejected.state, changed_state);
-    let accepted = reduce_work(&command, &control, &state).unwrap();
+    assert_eq!(rejected.state, None);
+    let accepted = reduce_work(&command, &control, state).unwrap();
     assert_eq!(accepted.receipt.decision, WorkDecision::Accepted);
-    let duplicate = reduce_work(&command, &control, &accepted.state).unwrap();
+    let accepted_state = accepted.state.unwrap();
+    let duplicate = reduce_work(&command, &control, accepted_state.clone()).unwrap();
     assert_eq!(
         duplicate.receipt.decision,
         WorkDecision::Rejected {
             reason: WorkRejection::StaleRevision
         }
     );
-    assert_eq!(duplicate.state, accepted.state);
+    assert_eq!(duplicate.state, None);
     assert!(duplicate.events.is_empty());
     let mut conflict = command;
     if let WorkAction::PublishStagedUserInputs {
@@ -546,16 +542,16 @@ fn selection_keeps_lifecycle_generation_cas_attempt_and_idempotence_guards() {
     } = &mut conflict.action
     {
         *interrupt_current = false;
-        *expected_revision = accepted.state.revision;
+        *expected_revision = accepted_state.revision;
     }
-    let rejected = reduce_work(&conflict, &control, &accepted.state).unwrap();
+    let rejected = reduce_work(&conflict, &control, accepted_state).unwrap();
     assert_eq!(
         rejected.receipt.decision,
         WorkDecision::Rejected {
             reason: WorkRejection::Conflict
         }
     );
-    assert_eq!(rejected.state, accepted.state);
+    assert_eq!(rejected.state, None);
 }
 
 #[test]
@@ -585,9 +581,12 @@ fn explicit_selection_after_stop_supersedes_exact_attempt_from_prior_control_gen
         crate::session_resources::ControlDecision::Accepted
     );
     let command = publication(&stopped.state, &mut state);
-    let selected = reduce_work(&command, &stopped.state, &state).unwrap();
+    let selected = reduce_work(&command, &stopped.state, state).unwrap();
     assert_eq!(selected.receipt.decision, WorkDecision::Accepted);
-    assert_eq!(selected.state.works["stopped"].stage, WorkStage::Abandoned);
+    assert_eq!(
+        selected.state.as_ref().unwrap().works["stopped"].stage,
+        WorkStage::Abandoned
+    );
     assert_eq!(
         selected.control.as_ref().unwrap().status,
         crate::session_resources::ControlStatus::Active

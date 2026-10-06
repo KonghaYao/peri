@@ -36,8 +36,12 @@ macro_rules! budget_resources {
             async fn apply_work_mutation(&self, command: &WorkCommand) -> SessionResourceResult<WorkReceipt> {
                 let mut saved = self.snapshot.lock().await;
                 assert_eq!(command.session_id, saved.session_id);
-                let reduction = reduce_work(command, &saved.control, &saved.state)?;
-                saved.state = reduction.state;
+                // Mirrors `SqliteSessionData::write_work`: a rejected reduction
+                // leaves the persisted state untouched.
+                let reduction = reduce_work(command, &saved.control, saved.state.clone())?;
+                if let Some(state) = reduction.state {
+                    saved.state = state;
+                }
                 if let Some(control) = reduction.control {
                     saved.control = control;
                 }

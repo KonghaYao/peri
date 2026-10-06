@@ -161,17 +161,18 @@ fn recovered_terminal_pending_idle_selection_releases_fresh_admission_without_ac
             },
         },
         &control,
-        &state,
+        state.clone(),
     )
     .unwrap();
     assert_eq!(staged.receipt.decision, WorkDecision::Accepted);
+    let staged_state = staged.state.clone().unwrap();
     let selected = reduce_work(
         &WorkCommand {
             session_id: "session".into(),
             recipient_lifecycle: 1,
             mutation_id: "select-fresh".into(),
             action: WorkAction::PublishStagedUserInputs {
-                expected_revision: staged.state.revision,
+                expected_revision: staged_state.revision,
                 expected_control_generation: control.control_generation,
                 expected_attempt: None,
                 interrupt_current: true,
@@ -179,29 +180,30 @@ fn recovered_terminal_pending_idle_selection_releases_fresh_admission_without_ac
             },
         },
         &control,
-        &staged.state,
+        staged_state,
     )
     .unwrap();
     assert_eq!(selected.receipt.decision, WorkDecision::Accepted);
+    let selected_state = selected.state.as_ref().unwrap();
     assert_eq!(
-        selected.state.works["successor"].stage,
+        selected_state.works["successor"].stage,
         WorkStage::Abandoned
     );
     assert_eq!(
-        selected.state.works["recovery-source"],
+        selected_state.works["recovery-source"],
         state.works["recovery-source"]
     );
-    assert!(!selected.state.has_pending_terminal_obligations_for(1));
-    assert!(selected.state.has_pending_terminal_obligations());
+    assert!(!selected_state.has_pending_terminal_obligations_for(1));
+    assert!(selected_state.has_pending_terminal_obligations());
     assert_eq!(
-        selected.state.terminal_obligations,
+        selected_state.terminal_obligations,
         state.terminal_obligations
     );
-    assert_eq!(selected.state.task_bindings, state.task_bindings);
-    assert_eq!(selected.state.admissions, state.admissions);
-    assert_eq!(selected.state.batches, state.batches);
-    assert!(selected.state.terminal_acknowledgements.is_empty());
-    let snapshot = snapshot(selected.state);
+    assert_eq!(selected_state.task_bindings, state.task_bindings);
+    assert_eq!(selected_state.admissions, state.admissions);
+    assert_eq!(selected_state.batches, state.batches);
+    assert!(selected_state.terminal_acknowledgements.is_empty());
+    let snapshot = snapshot(selected.state.unwrap());
     assert!(!snapshot.blocked);
     assert_eq!(snapshot.candidates.len(), 1);
     assert_eq!(snapshot.candidates[0].work_id, "fresh-input");
@@ -279,11 +281,11 @@ fn superseded_successor_releases_fresh_admission_without_acknowledging_terminal(
             },
         },
         &control,
-        &state,
+        state,
     )
     .unwrap();
     assert_eq!(reduction.receipt.decision, WorkDecision::Accepted);
-    let snapshot = snapshot(reduction.state);
+    let snapshot = snapshot(reduction.state.unwrap());
     assert!(!snapshot.blocked);
     assert_eq!(snapshot.candidates.len(), 1);
     assert_eq!(snapshot.candidates[0].work_id, "fresh-input");

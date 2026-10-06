@@ -95,14 +95,21 @@ impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for CapturedLogs {
 }
 
 /// 只放行生产默认级别（`info` 及以上），把事件写进内存缓冲。
+///
+/// `set_default` 只装线程局部订阅，不会重建 tracing 的全局 callsite 兴趣缓存：
+/// 并行测试若先在无订阅者的线程上命中同一 callsite，该 callsite 会被缓存为
+/// `never`，本测试要断言的 `warn!`/`info!` 会被静默丢弃（重试路径断言就会超时）。
+/// 因此安装订阅后显式重建兴趣缓存，让当前订阅者对已注册 callsite 生效。
 fn capture_logs(logs: &CapturedLogs) -> tracing::subscriber::DefaultGuard {
-    tracing::subscriber::set_default(
+    let guard = tracing::subscriber::set_default(
         tracing_subscriber::fmt()
             .with_writer(logs.clone())
             .with_ansi(false)
             .with_max_level(tracing::Level::INFO)
             .finish(),
-    )
+    );
+    tracing::callsite::rebuild_interest_cache();
+    guard
 }
 
 async fn wait_for_log_line(logs: &CapturedLogs, needle: &str) {
@@ -283,6 +290,9 @@ async fn terminal_publication_retry_keeps_reason_visible_without_log_flooding() 
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
             assert!(callback(&result, BgTaskKind::Shell).is_err());
+            // 该 callsite 与并行用例共享，全局兴趣缓存可能把它置为 never：重建后再重试，
+            // 避免把“记录被抑制”误判成“重试路径没走到”。
+            tracing::callsite::rebuild_interest_cache();
             if logs.count_lines("retrying original terminal publication") > 0 {
                 break;
             }

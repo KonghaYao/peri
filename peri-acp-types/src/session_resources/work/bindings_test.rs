@@ -39,9 +39,9 @@ fn fixture(count: usize) -> (WorkState, Vec<TaskBinding>) {
                 },
             },
         };
-        let reduced = reduce_work(&command, &ControlState::default(), &state).unwrap();
+        let reduced = reduce_work(&command, &ControlState::default(), state).unwrap();
         assert_eq!(reduced.receipt.decision, WorkDecision::Accepted);
-        state = reduced.state;
+        state = reduced.state.unwrap();
         bindings.push(binding);
     }
     (state, bindings)
@@ -60,9 +60,9 @@ fn command(binding: TaskBinding, observed_revision: u64, mutation_id: &str) -> W
 }
 
 fn assert_rejected(state: &WorkState, command: &WorkCommand, reason: WorkRejection) {
-    let reduced = reduce_work(command, &ControlState::default(), state).unwrap();
+    let reduced = reduce_work(command, &ControlState::default(), state.clone()).unwrap();
     assert_eq!(reduced.receipt.decision, WorkDecision::Rejected { reason });
-    assert_eq!(&reduced.state, state);
+    assert_eq!(reduced.state, None);
     assert_eq!(reduced.receipt.revision, state.revision);
     assert!(reduced.projections.is_empty());
     assert!(reduced.events.is_empty());
@@ -85,18 +85,18 @@ fn sibling_bindings_and_other_writers_accept_the_same_observed_revision() {
                     authorization_ref: "authorization".into(),
                 },
             };
-            let external = reduce_work(&external, &ControlState::default(), &state).unwrap();
+            let external = reduce_work(&external, &ControlState::default(), state).unwrap();
             assert_eq!(external.receipt.decision, WorkDecision::Accepted);
-            state = external.state;
+            state = external.state.unwrap();
             let command = command(
                 bindings[index].clone(),
                 observed_revision,
                 &format!("bind-{index}"),
             );
-            let reduced = reduce_work(&command, &ControlState::default(), &state).unwrap();
+            let reduced = reduce_work(&command, &ControlState::default(), state).unwrap();
             assert_eq!(reduced.receipt.decision, WorkDecision::Accepted);
             assert!(reduced.receipt.before_revision > observed_revision);
-            state = reduced.state;
+            state = reduced.state.unwrap();
         }
         assert_eq!(state.task_bindings.len(), 5);
         for binding in bindings {
@@ -112,7 +112,7 @@ fn observed_revision_is_a_lower_bound_and_future_revisions_are_rejected() {
         let reduced = reduce_work(
             &command(bindings[0].clone(), revision, "bind"),
             &ControlState::default(),
-            &state,
+            state.clone(),
         )
         .unwrap();
         assert_eq!(reduced.receipt.decision, WorkDecision::Accepted);
@@ -173,10 +173,10 @@ fn existing_binding_is_immutable_and_owner_task_cannot_alias_another_invocation(
     let reduced = reduce_work(
         &command(bindings[0].clone(), 0, "bind"),
         &ControlState::default(),
-        &state,
+        state,
     )
     .unwrap();
-    let state = reduced.state;
+    let state = reduced.state.unwrap();
     let mut replacement = bindings[0].clone();
     replacement.owner_task_id = "replacement-task".into();
     assert_rejected(
@@ -197,11 +197,11 @@ fn identical_binding_reconciliation_is_idempotent_across_mutation_identities() {
         let reduced = reduce_work(
             &command(bindings[0].clone(), 0, mutation_id),
             &ControlState::default(),
-            &state,
+            state,
         )
         .unwrap();
         assert_eq!(reduced.receipt.decision, WorkDecision::Accepted);
-        state = reduced.state;
+        state = reduced.state.unwrap();
         assert_eq!(state.invocations, invocations);
         assert_eq!(state.task_bindings.len(), 1);
         assert_eq!(state.task_bindings[&bindings[0].invocation_id], bindings[0]);
@@ -218,12 +218,12 @@ fn saved_invocation_lifecycle_not_current_attempt_controls_late_reconciliation()
     let reduced = reduce_work(
         &command(bindings[0].clone(), 0, "late-bind"),
         &control,
-        &state,
+        state,
     )
     .unwrap();
     assert_eq!(reduced.receipt.decision, WorkDecision::Accepted);
     assert_eq!(
-        reduced.state.task_bindings[&bindings[0].invocation_id],
+        reduced.state.unwrap().task_bindings[&bindings[0].invocation_id],
         bindings[0]
     );
 }
@@ -237,7 +237,7 @@ fn stored_binding_command_retains_original_wire_fields_and_digest() {
     assert_eq!(decoded.digest().unwrap(), original_digest);
     let (mut state, _) = fixture(1);
     state.revision = 10;
-    let reduced = reduce_work(&decoded, &ControlState::default(), &state).unwrap();
+    let reduced = reduce_work(&decoded, &ControlState::default(), state).unwrap();
     assert_eq!(reduced.receipt.decision, WorkDecision::Accepted);
     assert_eq!(decoded.digest().unwrap(), original_digest);
     let with_unknown = original.replace(

@@ -779,12 +779,12 @@ mod invoke_test;
 mod middleware_chain_test;
 #[path = "tool_test/model_tier_test.rs"]
 mod model_tier_test;
+#[path = "tool_test/resume_failure_test.rs"]
+mod resume_failure_test;
 #[path = "tool_test/resume_integration_test.rs"]
 mod resume_integration_test;
 #[path = "tool_test/resume_test.rs"]
 mod resume_test;
-#[path = "tool_test/resume_failure_test.rs"]
-mod resume_failure_test;
 #[path = "tool_test/session_isolation_test.rs"]
 mod session_isolation_test;
 

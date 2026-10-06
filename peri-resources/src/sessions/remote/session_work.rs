@@ -188,11 +188,13 @@ impl RemoteSessionData {
                     true,
                 )
                 .await?;
-            let reduction = reduce_work(command, &snapshot.control, &snapshot.state)?;
+            let initial_json = work::pre_state_json(state_json, &snapshot.state)?;
+            let parent_command = work::terminal_parent_command(command, &snapshot.state);
+            let reduction = reduce_work(command, &snapshot.control, snapshot.state)?;
             let effects = work::mutation_effects(
                 command,
-                &snapshot.state,
-                state_json,
+                initial_json,
+                parent_command.as_ref(),
                 &snapshot.control,
                 &reduction,
             )?

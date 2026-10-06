@@ -51,6 +51,48 @@ async fn load(fixture: &TestSession) -> WorkSnapshot {
 }
 
 #[tokio::test]
+async fn publication_block_reasons_preserve_once_only_handoff() {
+    use super::staging::PublicationBlock;
+
+    let fixture = TestSession::open().await;
+    let (mailbox, inbox) = mailbox(&fixture, fixture.resources());
+    let reason = || *mailbox.durable.as_ref().unwrap().publication_block.lock();
+    assert!(!mailbox.publish_next_durable().await.unwrap());
+    assert_eq!(reason(), Some(PublicationBlock::Empty));
+
+    let ticket = mailbox
+        .attach_external_attempt(CancellationToken::new(), false)
+        .unwrap();
+    let request = input(&mailbox, "staged during execution");
+    mailbox.enqueue_durable(&request).await.unwrap();
+    assert!(!mailbox.publish_next_durable().await.unwrap());
+    assert_eq!(reason(), Some(PublicationBlock::ActiveRunning));
+    assert!(inbox.queue().is_empty());
+
+    mailbox.finish_attempt(&ticket, UserInputAttemptOutcome::Completed);
+    assert!(mailbox.publish_next_durable().await.unwrap());
+    assert_eq!(reason(), None);
+    let handed_off = inbox.queue().drain_all();
+    assert_eq!(handed_off.len(), 1);
+    for _ in 0..2 {
+        assert!(!mailbox.publish_next_durable().await.unwrap());
+        assert_eq!(reason(), Some(PublicationBlock::Dispatching));
+        assert!(
+            inbox.queue().is_empty(),
+            "已交接的输入不能因 MQ 被排空而重投"
+        );
+    }
+    assert_eq!(load(&fixture).await.state.deliveries.len(), 1);
+
+    mailbox.state.lock().paused = true;
+    assert!(!mailbox.publish_next_durable().await.unwrap());
+    assert_eq!(reason(), Some(PublicationBlock::Paused));
+    mailbox.state.lock().valid = false;
+    assert!(!mailbox.publish_next_durable().await.unwrap());
+    assert_eq!(reason(), Some(PublicationBlock::Invalid));
+}
+
+#[tokio::test]
 async fn queued_enqueue_replay_after_restart_does_not_gain_publication_authority() {
     let fixture = TestSession::open().await;
     let (first, _) = mailbox(&fixture, fixture.resources());

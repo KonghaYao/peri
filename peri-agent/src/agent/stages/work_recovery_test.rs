@@ -37,10 +37,11 @@ fn claimed_snapshot() -> WorkSnapshot {
             },
         },
         &control,
-        &WorkState::default(),
+        WorkState::default(),
     )
     .unwrap();
     assert_eq!(published.receipt.decision, WorkDecision::Accepted);
+    let published_state = published.state.unwrap();
     let claimed = reduce_work(
         &WorkCommand {
             session_id: "session".into(),
@@ -48,7 +49,7 @@ fn claimed_snapshot() -> WorkSnapshot {
             mutation_id: "claim".into(),
             action: WorkAction::ClaimBatch {
                 guard: WorkGuard {
-                    expected_revision: published.state.revision,
+                    expected_revision: published_state.revision,
                     expected_control_generation: control.control_generation,
                     execution,
                 },
@@ -57,7 +58,7 @@ fn claimed_snapshot() -> WorkSnapshot {
             },
         },
         &control,
-        &published.state,
+        published_state,
     )
     .unwrap();
     assert_eq!(claimed.receipt.decision, WorkDecision::Accepted);
@@ -67,7 +68,7 @@ fn claimed_snapshot() -> WorkSnapshot {
             limit: 64,
         },
         control,
-        claimed.state,
+        claimed.state.unwrap(),
     )
 }
 

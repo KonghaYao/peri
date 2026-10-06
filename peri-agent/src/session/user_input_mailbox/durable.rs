@@ -12,6 +12,7 @@ pub(super) struct DurableMailbox {
     pub(super) store: Arc<dyn SessionResources>,
     pub(super) lifecycle: u64,
     operations: tokio::sync::Mutex<HashMap<String, FrozenOperation>>,
+    publication_block: Mutex<Option<staging::PublicationBlock>>,
 }
 
 struct FrozenOperation {
@@ -54,6 +55,7 @@ impl UserInputMailbox {
             store,
             lifecycle,
             operations: tokio::sync::Mutex::new(HashMap::new()),
+            publication_block: Mutex::new(None),
         });
         mailbox
     }

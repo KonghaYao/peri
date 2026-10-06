@@ -9,31 +9,39 @@ const INSERT_PROJECTION: &str =
 const GUARD_PROJECTION: &str = "INSERT INTO session_work_state(session_id,state_json) SELECT NULL,NULL WHERE NOT EXISTS (SELECT 1 FROM messages WHERE message_id=?1 AND thread_id=?2 AND role=?3 AND content=?4)";
 const REFRESH_COUNTS: &str = "UPDATE threads SET updated_at=?1,message_count=(SELECT COUNT(*) FROM messages WHERE thread_id=?2) WHERE id=?2";
 
+/// Effects for a work mutation.
+///
+/// `initial_json` is the JSON persisted for the pre-command state: the raw column
+/// value when one exists, otherwise the encoding of the state *before* it was
+/// moved into `reduce_work`. `parent_command` is the command recorded for an
+/// in-flight terminal obligation, read from the pre-command state when (and only
+/// when) the command acknowledges one.
 pub(in crate::sessions) fn mutation_effects(
     command: &WorkCommand,
-    current: &WorkState,
-    current_json: Option<String>,
+    initial_json: String,
+    parent_command: Option<&WorkCommand>,
     control: &ControlState,
     reduction: &WorkReduction,
 ) -> SessionResourceResult<Vec<WorkEffect>> {
-    let initial = match current_json {
-        Some(json) => json,
-        None => encode(current)?,
-    };
+    // Rejected reductions carry no state: `apply` may have partially mutated it.
+    let accepted_state = reduction.accepted_state()?;
     let mut effects = command_effects(command)?;
     effects.extend([
-        WorkEffect::texts(INSERT_STATE, [command.session_id.clone(), initial.clone()]),
+        WorkEffect::texts(
+            INSERT_STATE,
+            [command.session_id.clone(), initial_json.clone()],
+        ),
         WorkEffect::texts(
             GUARD_STATE,
             [
                 command.session_id.clone(),
-                initial,
+                initial_json,
                 encode(&ControlState::default())?,
                 encode(control)?,
             ],
         ),
     ]);
-    if reduction.receipt.decision == WorkDecision::Accepted {
+    if let Some(next_state) = accepted_state {
         if let WorkAction::BindWorkDelegation {
             binding,
             parent_binding_receipt,
@@ -42,16 +50,9 @@ pub(in crate::sessions) fn mutation_effects(
         {
             effects.push(WorkEffect::texts("INSERT INTO session_work_state(session_id,state_json) SELECT NULL,NULL WHERE NOT EXISTS(SELECT 1 FROM session_work_commands c JOIN session_work_receipts r ON r.mutation_id=c.mutation_id AND r.session_id=c.session_id AND r.digest=c.digest JOIN session_work_state s ON s.session_id=c.session_id WHERE c.mutation_id=?1 AND c.session_id=?2 AND r.resolution_json=?3 AND json_extract(c.command_json,'$.action.kind')='reconcileTaskBinding' AND json_extract(c.command_json,'$.action.binding')=?4 AND EXISTS(SELECT 1 FROM json_each(s.state_json,'$.taskBindings') b WHERE b.key=?5 AND b.value=?4))", [parent_binding_receipt.mutation_id.clone(),binding.initiator_session_id.clone(),encode(&WorkResolution::Applied { receipt: parent_binding_receipt.clone() })?,encode(binding)?,binding.invocation_id.clone()]));
         }
-        if let WorkAction::AcknowledgeTerminalObligation {
-            admission_id,
-            receipt,
-            ..
-        } = &command.action
-        {
-            let parent_command = current
-                .terminal_obligations
-                .get(admission_id)
-                .ok_or_else(|| corrupt("missing terminal obligation"))?;
+        if let WorkAction::AcknowledgeTerminalObligation { receipt, .. } = &command.action {
+            let parent_command =
+                parent_command.ok_or_else(|| corrupt("missing terminal obligation"))?;
             effects.push(WorkEffect::texts("INSERT INTO session_work_state(session_id,state_json) SELECT NULL,NULL WHERE NOT EXISTS(SELECT 1 FROM session_work_receipts WHERE mutation_id=?1 AND session_id=?2 AND digest=?3 AND resolution_json=?4)", [parent_command.mutation_id.clone(),parent_command.session_id.clone(),parent_command.digest()?,encode(&WorkResolution::Applied { receipt: receipt.clone() })?]));
         }
         if let Some(next_control) = &reduction.control {
@@ -100,7 +101,7 @@ pub(in crate::sessions) fn mutation_effects(
         }
         effects.push(WorkEffect::texts(
             UPDATE_STATE,
-            [command.session_id.clone(), encode(&reduction.state)?],
+            [command.session_id.clone(), encode(next_state)?],
         ));
     }
     let resolution = WorkResolution::Applied {

@@ -1,6 +1,14 @@
 use super::reducer::{bump, work_mut};
 use super::*;
 
+/// 终态裁剪：`Settled` / `Abandoned` 的 work 不再保留模型请求正文。正文占
+/// 账本体积约 95%，而终态对账不再读取它（恢复路径只对 `ReasonInFlight` /
+/// `Blocked` / `ActReady` 用正文）。保留 `request_id` 与 `response` 等身份事实；
+/// 既有存量记录不被扫描清理（用户裁决保留现场），因此只在进入终态的动作内调用。
+fn trim_terminal_request(work: &mut WorkRecord) {
+    work.reason_request = None;
+}
+
 fn blocked_budget(
     state: &mut WorkState,
     target: &WorkTarget,
@@ -188,6 +196,7 @@ pub(super) fn commit_reason(
     let work = work_mut(state, target)?;
     work.response = Some(response.clone());
     work.stage = WorkStage::Settled;
+    trim_terminal_request(work);
     bump(work, receipt)?;
     if let Some(next_work_id) = next_work_id {
         let next = state
@@ -342,6 +351,7 @@ pub(super) fn commit_act(
         work.stage = WorkStage::Settled;
         work.reason = None;
         work.recovery_condition = None;
+        trim_terminal_request(work);
     }
     bump(work, receipt)?;
     if complete {
@@ -500,6 +510,7 @@ pub(super) fn abandon(
     }
     work.stage = WorkStage::Abandoned;
     work.reason = Some(format!("{reason}; authorization={authorization_ref}"));
+    trim_terminal_request(work);
     let batch_id = work.batch_id.clone();
     bump(work, receipt)?;
     for obligation in state.obligations.values_mut().filter(|obligation| {
@@ -530,6 +541,7 @@ pub(super) fn settle(
     }
     let work = work_mut(state, target)?;
     work.stage = WorkStage::Settled;
+    trim_terminal_request(work);
     bump(work, receipt)
 }
 

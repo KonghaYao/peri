@@ -27,8 +27,27 @@ async fn async_tasks_owner_drop_and_cancel_join_panic_are_logged() {
         .with_writer(move || writer.clone())
         .finish();
     let _capture = tracing::subscriber::set_default(subscriber);
-    let manager = TaskManager::new();
-    drop(manager.begin_external_execution("test-owner").unwrap());
+    // 该 callsite 被同二进制多个并行用例共用，而 tracing 的 callsite 兴趣缓存是全局的：
+    // 无订阅者线程抢先完成首次注册时缓存即为 never，生产 warn 会被静默丢弃。注册只发生
+    // 一次，因此重建缓存后用全新 manager 重试即可收敛（新 scope 的 guard id 恒为 1）。
+    let manager = {
+        let mut attempts = 0u32;
+        loop {
+            tracing::callsite::rebuild_interest_cache();
+            let candidate = TaskManager::new();
+            drop(candidate.begin_external_execution("test-owner").unwrap());
+            let captured = String::from_utf8(logs.0.lock().clone()).unwrap();
+            if captured.contains("scope=test-owner id=1") {
+                break candidate;
+            }
+            attempts += 1;
+            assert!(
+                attempts < 32,
+                "owner drop 的 warn 始终未落到本订阅者；captured:\n{captured}"
+            );
+            tokio::task::yield_now().await;
+        }
+    };
     assert!(!manager.is_execution_idle());
     manager.resolve_external_execution_evidence("test-owner");
 

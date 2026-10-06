@@ -281,12 +281,12 @@ fn assert_reducer_rejected_without_effect(
     command: &WorkCommand,
     control: &ControlState,
 ) {
-    let reduction = reduce_work(command, control, state).unwrap();
+    let reduction = reduce_work(command, control, state.clone()).unwrap();
     assert!(matches!(
         reduction.receipt.decision,
         WorkDecision::Rejected { .. }
     ));
-    assert_eq!(&reduction.state, state);
+    assert_eq!(reduction.state, None);
     assert!(reduction.projections.is_empty());
     assert!(reduction.events.is_empty());
     assert!(reduction.control.is_none());
@@ -295,20 +295,18 @@ fn assert_reducer_rejected_without_effect(
 #[test]
 fn reducer_accepts_abandoned_original_execution_settlement_after_control_changes() {
     let (state, command, control, _) = reducer_fixture();
-    let reduction = reduce_work(&command, &control, &state).unwrap();
+    let reduction = reduce_work(&command, &control, state.clone()).unwrap();
     assert_eq!(reduction.receipt.decision, WorkDecision::Accepted);
     assert_eq!(reduction.receipt.stage, Some(WorkStage::Abandoned));
+    let accepted = reduction.state.as_ref().unwrap();
+    assert_eq!(accepted.works["original"].stage, WorkStage::Abandoned);
     assert_eq!(
-        reduction.state.works["original"].stage,
-        WorkStage::Abandoned
-    );
-    assert_eq!(
-        reduction.state.works["original"].reason,
+        accepted.works["original"].reason,
         state.works["original"].reason
     );
-    assert_eq!(reduction.state.works.len(), state.works.len());
+    assert_eq!(accepted.works.len(), state.works.len());
     assert_eq!(
-        reduction.state.invocations["invocation"].status,
+        accepted.invocations["invocation"].status,
         InvocationStatus::Settled
     );
     assert_eq!(reduction.projections.len(), 1);
@@ -325,12 +323,13 @@ fn reducer_accepts_registered_recovered_execution_for_original_batch_after_contr
     };
     guard.execution = recovered_execution;
     assert_ne!(guard.execution, state.batches["batch"].execution);
-    let reduction = reduce_work(&command, &control, &state).unwrap();
+    let reduction = reduce_work(&command, &control, state.clone()).unwrap();
     assert_eq!(reduction.receipt.decision, WorkDecision::Accepted);
     assert_eq!(reduction.receipt.stage, Some(WorkStage::Abandoned));
-    assert_eq!(reduction.state.works.len(), state.works.len());
+    let accepted = reduction.state.as_ref().unwrap();
+    assert_eq!(accepted.works.len(), state.works.len());
     assert_eq!(
-        reduction.state.invocations["invocation"].status,
+        accepted.invocations["invocation"].status,
         InvocationStatus::Settled
     );
     assert_eq!(reduction.projections.len(), 1);
@@ -383,4 +382,172 @@ fn reducer_original_execution_settlement_cannot_cross_lifecycle() {
     let (state, command, mut control, _) = reducer_fixture();
     control.lifecycle = 2;
     assert_reducer_rejected_without_effect(&state, &command, &control);
+}
+
+#[test]
+fn terminal_abandon_trims_request_evidence_and_keeps_identity() {
+    let (mut state, _, target, mut receipt) = fixture(WorkStage::ReasonInFlight);
+    {
+        let work = state.works.get_mut("original").unwrap();
+        work.request_id = Some("request".into());
+        work.reason_request = Some(ReasonRequest {
+            serialized_request: "{\"request\":{\"provider\":\"test\"}}".into(),
+            request_digest: "digest".into(),
+            model_ref: "model".into(),
+            authorization_ref: "auth".into(),
+        });
+    }
+    super::abandon(
+        &mut state,
+        &target,
+        "superseded",
+        "authorization",
+        &mut receipt,
+    )
+    .expect("in-flight work accepts explicit abandonment");
+    let work = &state.works["original"];
+    assert_eq!(work.stage, WorkStage::Abandoned);
+    assert!(work.reason_request.is_none(), "终态不再保留请求正文");
+    assert_eq!(work.request_id.as_deref(), Some("request"));
+}
+
+#[test]
+fn terminal_commit_reason_trims_request_evidence_and_keeps_response() {
+    let (mut state, _, target, mut receipt) = fixture(WorkStage::ReasonInFlight);
+    {
+        let work = state.works.get_mut("original").unwrap();
+        work.request_id = Some("request".into());
+        work.reason_request = Some(ReasonRequest {
+            serialized_request: "{\"request\":{\"provider\":\"test\"}}".into(),
+            request_digest: "digest".into(),
+            model_ref: "model".into(),
+            authorization_ref: "auth".into(),
+        });
+    }
+    state.batches.insert(
+        "batch".into(),
+        ProcessingBatch {
+            batch_id: "batch".into(),
+            delivery_ids: Vec::new(),
+            processing_delivery_ids: Vec::new(),
+            projection_versions: BTreeMap::new(),
+            execution: execution(),
+            recipient_lifecycle: 1,
+        },
+    );
+    let response =
+        WorkPayload::from_payload(&PersistedPayload::Message(BaseMessage::ai("final answer")))
+            .unwrap();
+    let command = WorkCommand {
+        session_id: "session".into(),
+        recipient_lifecycle: 1,
+        mutation_id: "commit".into(),
+        action: WorkAction::CommitReasonResponseAndDispatchIntent {
+            guard: WorkGuard {
+                expected_revision: state.revision,
+                expected_control_generation: 0,
+                execution: execution(),
+            },
+            target: target.clone(),
+            request_id: "request".into(),
+            response: response.clone(),
+            dispatch_intents: Vec::new(),
+            next_work_id: None,
+        },
+    };
+    super::commit_reason(&command, &mut state, &mut receipt, &mut Vec::new())
+        .expect("in-flight work accepts committed response");
+    let work = &state.works["original"];
+    assert_eq!(work.stage, WorkStage::Settled);
+    assert!(work.reason_request.is_none(), "终态不再保留请求正文");
+    assert_eq!(work.request_id.as_deref(), Some("request"));
+    assert_eq!(work.response.as_ref(), Some(&response));
+}
+
+#[test]
+fn terminal_commit_act_trims_request_evidence_and_keeps_identity() {
+    let (mut state, command, target, mut receipt) = fixture(WorkStage::ActReady);
+    let response = WorkPayload::from_payload(&PersistedPayload::Message(BaseMessage::ai(
+        "recorded response",
+    )))
+    .unwrap();
+    let work = state.works.get_mut("original").unwrap();
+    work.request_id = Some("request".into());
+    work.response = Some(response.clone());
+    work.reason_request = Some(ReasonRequest {
+        serialized_request: "{}".into(),
+        request_digest: "digest".into(),
+        model_ref: "model".into(),
+        authorization_ref: "auth".into(),
+    });
+
+    commit_act(
+        &command,
+        &mut state,
+        &target,
+        &[result()],
+        None,
+        &mut receipt,
+        &mut Vec::new(),
+    )
+    .unwrap();
+
+    let work = &state.works["original"];
+    assert_eq!(work.stage, WorkStage::Settled);
+    assert!(work.reason_request.is_none());
+    assert_eq!(work.request_id.as_deref(), Some("request"));
+    assert_eq!(work.response.as_ref(), Some(&response));
+}
+
+#[test]
+fn terminal_settle_trims_only_current_work_and_preserves_historical_evidence() {
+    let (mut state, _, target, mut receipt) = fixture(WorkStage::ActReady);
+    let work = state.works.get_mut("original").unwrap();
+    work.request_id = Some("request".into());
+    work.reason_request = Some(ReasonRequest {
+        serialized_request: "{}".into(),
+        request_digest: "digest".into(),
+        model_ref: "model".into(),
+        authorization_ref: "auth".into(),
+    });
+    let mut historical = work.clone();
+    historical.work_id = "historical".into();
+    historical.stage = WorkStage::Settled;
+    state.works.insert("historical".into(), historical.clone());
+    state.invocations.get_mut("invocation").unwrap().status = InvocationStatus::Settled;
+
+    settle(&mut state, &target, &mut receipt).unwrap();
+
+    let work = &state.works["original"];
+    assert_eq!(work.stage, WorkStage::Settled);
+    assert!(work.reason_request.is_none());
+    assert_eq!(work.request_id.as_deref(), Some("request"));
+    assert_eq!(state.works["historical"], historical);
+}
+
+#[test]
+fn blocking_in_flight_or_act_ready_work_preserves_request_evidence() {
+    for stage in [WorkStage::ReasonInFlight, WorkStage::ActReady] {
+        let (mut state, _, target, mut receipt) = fixture(stage);
+        let request = ReasonRequest {
+            serialized_request: "{}".into(),
+            request_digest: "digest".into(),
+            model_ref: "model".into(),
+            authorization_ref: "auth".into(),
+        };
+        state.works.get_mut("original").unwrap().reason_request = Some(request.clone());
+
+        block(
+            &mut state,
+            &target,
+            "paused",
+            "explicit authorization",
+            &mut receipt,
+        )
+        .unwrap();
+
+        let work = &state.works["original"];
+        assert_eq!(work.stage, WorkStage::Blocked);
+        assert_eq!(work.reason_request.as_ref(), Some(&request));
+    }
 }
