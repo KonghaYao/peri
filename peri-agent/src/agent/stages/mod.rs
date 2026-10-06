@@ -877,6 +877,14 @@ async fn run_react_loop_inner(context: StageContext, max_iterations: usize) -> L
             if truncated_without_tools {
                 loop_state.consecutive_truncations += 1;
                 if loop_state.consecutive_truncations > MAX_TRUNCATION_CONTINUATIONS {
+                    // 终态在 v2_execute 被分类为 failure=None（stop_reason=MaxTokens、
+                    // turn_status=Error），该路径没有 fatal error!；此处是缺口唯一的可见记录点。
+                    tracing::warn!(
+                        attempts = loop_state.consecutive_truncations,
+                        max_continuations = MAX_TRUNCATION_CONTINUATIONS,
+                        model = %context.runtime.llm.model_name(),
+                        "连续无工具截断耗尽续跑预算，终止本轮"
+                    );
                     return LoopResult::Error(crate::error::AgentError::OutputTruncated {
                         attempts: loop_state.consecutive_truncations,
                     });

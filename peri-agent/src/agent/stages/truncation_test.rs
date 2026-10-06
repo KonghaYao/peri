@@ -63,6 +63,45 @@ impl ReactLLM for ScriptedModel {
         }
         Ok(self.responses.lock().pop_front().expect("不得额外请求模型"))
     }
+
+    fn model_name(&self) -> String {
+        "scripted-truncation-model".into()
+    }
+}
+
+/// 内联日志捕获（本文件专用，不引入 workspace 级测试工具）。
+///
+/// 截断耗尽的 `warn!` 在 `run_react_loop` 内联执行、由测试线程轮询，
+/// 因此线程局部 `set_default` 订阅即可捕获；`with_max_level(WARN)` 同时
+/// 证明该记录在默认可见级别下出现。
+#[derive(Clone, Default)]
+struct LogCapture(Arc<parking_lot::Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogCapture {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl LogCapture {
+    fn text(&self) -> String {
+        String::from_utf8_lossy(self.0.lock().as_slice()).into_owned()
+    }
+
+    fn subscriber(&self) -> impl tracing::Subscriber + Send + Sync {
+        let sink = self.clone();
+        tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(move || sink.clone())
+            .finish()
+    }
 }
 
 struct CompletionCounter(Arc<AtomicUsize>);
@@ -116,8 +155,14 @@ async fn test_stream_interruption_continues_from_saved_message() {
 }
 
 /// [回归测试] 预算取事件而非另立常量，耗尽仍保留最后一条部分响应和错误事实。
+///
+/// 末尾的 0 次断言只是守卫：本用例的响应是 `EndTurn`，截断分支本就不可达；
+/// "`failure=Some` 的耗尽终态不重复记录"由
+/// `test_stream_recovery_exhaustion_preempts_truncation_record` 真正锁定。
 #[tokio::test]
 async fn test_stream_interruption_exhausts_event_budget() {
+    let capture = LogCapture::default();
+    let _subscriber = tracing::subscriber::set_default(capture.subscriber());
     for budget in [1, 2, 4] {
         let (ctx, model, completions) = make_context(
             vec![make_interrupted("partial", budget); budget as usize],
@@ -149,6 +194,45 @@ async fn test_stream_interruption_exhausts_event_budget() {
             budget as usize
         );
     }
+    let logs = capture.text();
+    assert_eq!(
+        logs.matches("连续无工具截断耗尽续跑预算").count(),
+        0,
+        "StreamRecoveryExhausted 不得产生第二条截断记录: {logs}"
+    );
+}
+
+/// [回归测试] `failure=Some` 终态优先于截断分支：同一响应同时满足"流中断"与
+/// "无工具 MaxTokens 截断"时，恢复预算耗尽必须返回 `StreamRecoveryExhausted`
+/// （该终态经 v2_execute 的 fatal `error!` 记录），不得落到截断 `warn!`，
+/// 否则同一终态会出现两条记录。
+#[tokio::test]
+async fn test_stream_recovery_exhaustion_preempts_truncation_record() {
+    let capture = LogCapture::default();
+    let _subscriber = tracing::subscriber::set_default(capture.subscriber());
+    let mut response = make_interrupted("partial", 1);
+    response.stop_reason = peri_model::StopReason::MaxTokens;
+    let (ctx, model, completions) = make_context(vec![response], None);
+    let result = run_react_loop(ctx.clone(), 10).await;
+    assert!(
+        matches!(
+            result,
+            LoopResult::Error(crate::error::AgentError::StreamRecoveryExhausted {
+                attempts: 1,
+                ..
+            })
+        ),
+        "{result:?}"
+    );
+    assert_eq!(model.requests.lock().len(), 1, "耗尽后不得再请求模型");
+    assert_eq!(completions.load(Ordering::SeqCst), 0);
+    assert!(ctx.session.queue.is_empty(), "耗尽后不能留下额外续跑请求");
+    let logs = capture.text();
+    assert_eq!(
+        logs.matches("连续无工具截断耗尽续跑预算").count(),
+        0,
+        "failure=Some 终态不得同时产生截断 warn: {logs}"
+    );
 }
 
 #[tokio::test]
@@ -476,8 +560,14 @@ async fn test_truncation_continues_without_premature_completion() {
 }
 
 /// [回归测试] 连续截断只允许两次续跑，保留最后响应但不能调用完成 hook。
+///
+/// 耗尽终态经 v2_execute 分类为 `failure=None`（stop_reason=MaxTokens、
+/// turn_status=Error），不会触发下游 fatal `error!`；本测试同时锁定
+/// 循环出口恰好一条默认级别可见的 `warn!`（含 attempts / 模型名）。
 #[tokio::test]
 async fn test_truncation_repeated_responses_stop_with_bounded_attempts() {
+    let capture = LogCapture::default();
+    let _subscriber = tracing::subscriber::set_default(capture.subscriber());
     let (ctx, model, completions) = make_context(vec![make_truncated("partial"); 3], None);
     let result = run_react_loop(ctx.clone(), 10).await;
     assert_eq!(model.requests.lock().len(), 3);
@@ -500,6 +590,20 @@ async fn test_truncation_repeated_responses_stop_with_bounded_attempts() {
             .count(),
         3
     );
+    let logs = capture.text();
+    assert_eq!(
+        logs.matches("连续无工具截断耗尽续跑预算").count(),
+        1,
+        "耗尽终态必须恰好产生一条记录: {logs}"
+    );
+    for expected in [
+        "WARN",
+        "attempts=3",
+        "max_continuations=2",
+        "model=scripted-truncation-model",
+    ] {
+        assert!(logs.contains(expected), "缺少 {expected}: {logs}");
+    }
 }
 
 /// 完整工具结果是进展，必须继续且重置连续无工具截断预算。
