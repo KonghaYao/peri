@@ -56,7 +56,7 @@ pub(crate) async fn begin(
         target: target.clone(),
         invocation_id: intent.invocation_id.clone(),
     });
-    let receipt = match session.ledger.commit(&command).await {
+    let receipt = match session.ledger.commit_execution_transition(&command).await {
         Ok(receipt) => receipt,
         Err(error) => {
             state.frozen = true;
@@ -185,7 +185,7 @@ pub(crate) async fn commit_results(
         results: outcomes,
         next_work_id: Some(next_work_id.clone()),
     });
-    match session.ledger.commit(&command).await {
+    match session.ledger.commit_execution_transition(&command).await {
         Ok(receipt)
             if receipt.stage == Some(WorkStage::ReasonReady)
                 && receipt.work_id.as_deref() == Some(&next_work_id) => {}

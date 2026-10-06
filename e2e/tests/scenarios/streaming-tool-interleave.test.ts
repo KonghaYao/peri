@@ -59,7 +59,7 @@ describe("scenarios: streaming + tool interleave", () => {
       tester = await launchPeri();
 
       const readmePath = join(PROJECT_ROOT, "README.md");
-      const packagePath = join(PROJECT_ROOT, "package.json");
+      const packagePath = join(PROJECT_ROOT, "e2e", "package.json");
 
       // 记录提交前的屏幕作为基准
       const base = await tester.getScreenText();

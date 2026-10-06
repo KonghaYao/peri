@@ -185,6 +185,7 @@ pub struct MessageQueue {
 struct MailboxState {
     messages: Mutex<VecDeque<QueuedMessage>>,
     wake: tokio::sync::Notify,
+    wake_version: tokio::sync::watch::Sender<u64>,
     next_sequence: AtomicU64,
     suppressed: Mutex<Vec<QueuedMessage>>,
 }
@@ -202,6 +203,7 @@ impl MessageQueue {
             state: Arc::new(MailboxState {
                 messages: Mutex::new(VecDeque::new()),
                 wake: tokio::sync::Notify::new(),
+                wake_version: tokio::sync::watch::channel(0).0,
                 next_sequence: AtomicU64::new(1),
                 suppressed: Mutex::new(Vec::new()),
             }),
@@ -221,6 +223,9 @@ impl MessageQueue {
         }
         if should_wake {
             self.state.wake.notify_waiters();
+            self.state
+                .wake_version
+                .send_modify(|version| *version = version.saturating_add(1));
         }
     }
 
@@ -247,7 +252,14 @@ impl MessageQueue {
         }
         if should_wake {
             self.state.wake.notify_waiters();
+            self.state
+                .wake_version
+                .send_modify(|version| *version = version.saturating_add(1));
         }
+    }
+
+    pub fn subscribe_wake(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.state.wake_version.subscribe()
     }
 
     /// 非破坏性等待可执行消息，注册通知后再检查状态以避免丢唤醒。

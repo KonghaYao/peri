@@ -4,6 +4,34 @@ use std::future::{poll_fn, Future};
 use std::task::Poll;
 use std::time::Duration;
 
+#[tokio::test]
+async fn retained_work_hints_observe_shared_queue_without_consuming_messages() {
+    let queue = MessageQueue::new();
+    let shared = queue.clone();
+    let mut changes = queue.subscribe_wake();
+    shared.push(message(MessageKind::Defer));
+    shared.push_batch(vec![message(MessageKind::Prompt)]);
+    assert!(changes.has_changed().unwrap());
+    assert_eq!(*changes.borrow_and_update(), 2);
+    assert_eq!(*shared.subscribe_wake().borrow(), 2);
+    assert!(!changes.has_changed().unwrap());
+    assert_eq!(queue.len(), 2);
+    assert_eq!(queue.drain_all().len(), 2);
+    assert_eq!(*changes.borrow(), 2);
+}
+
+#[tokio::test]
+async fn passive_messages_do_not_publish_retained_work_hints() {
+    let queue = MessageQueue::new();
+    let changes = queue.subscribe_wake();
+    queue.push(message(MessageKind::Info));
+    queue.push_batch(vec![message(MessageKind::Info)]);
+    queue.push_batch(vec![]);
+    assert!(!changes.has_changed().unwrap());
+    assert_eq!(*changes.borrow(), 0);
+    assert_eq!(queue.len(), 2);
+}
+
 fn message(kind: MessageKind) -> QueuedMessage {
     QueuedMessage::new(
         kind,

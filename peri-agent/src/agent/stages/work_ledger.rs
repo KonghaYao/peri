@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use peri_acp_types::session_resources::work::{
-    WorkCommand, WorkDecision, WorkQuery, WorkReceipt, WorkResolution, WorkSnapshot,
+    WorkAction, WorkCommand, WorkDecision, WorkQuery, WorkReceipt, WorkRejection, WorkResolution,
+    WorkSnapshot,
 };
 use peri_acp_types::session_resources::{MutationOutcome, SessionResourceError, SessionResources};
 use tokio::sync::Mutex;
@@ -74,6 +75,49 @@ impl WorkMutationBarrier {
             }
             Err(_) => self.resolve_original(command, &mut unconfirmed).await,
         }
+    }
+
+    pub(crate) async fn commit_execution_transition(
+        &self,
+        original: &WorkCommand,
+    ) -> Result<WorkReceipt, WorkCommitError> {
+        let mut command = original.clone();
+        for attempt in 0..8 {
+            match self.commit(&command).await {
+                Err(WorkCommitError::Rejected { receipt })
+                    if attempt < 7
+                        && receipt.decision
+                            == (WorkDecision::Rejected {
+                                reason: WorkRejection::StaleRevision,
+                            }) =>
+                {
+                    let snapshot = self
+                        .snapshot(&WorkQuery {
+                            session_id: command.session_id.clone(),
+                            limit: 1,
+                        })
+                        .await?;
+                    let guard = match &mut command.action {
+                        WorkAction::ClaimBatch { guard, .. }
+                        | WorkAction::BeginReason { guard, .. }
+                        | WorkAction::CommitReasonResponseAndDispatchIntent { guard, .. }
+                        | WorkAction::BeginDispatch { guard, .. }
+                        | WorkAction::CommitAct { guard, .. } => guard,
+                        _ => return Err(WorkCommitError::Rejected { receipt }),
+                    };
+                    if snapshot.control.lifecycle != command.recipient_lifecycle
+                        || snapshot.control.control_generation != guard.expected_control_generation
+                        || snapshot.control.attempt.as_ref() != Some(&guard.execution)
+                    {
+                        return Err(WorkCommitError::Rejected { receipt });
+                    }
+                    guard.expected_revision = snapshot.state.revision;
+                    command.mutation_id = uuid::Uuid::now_v7().to_string();
+                }
+                result => return result,
+            }
+        }
+        unreachable!()
     }
 
     async fn resolve_original(

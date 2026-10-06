@@ -2,41 +2,18 @@
  * 场景测试: 后台任务展示栏（BgTaskArea）多阶段会话融合
  *
  * 融合原 3 个测试（同一 UI 区域 BgTaskArea）：
- * - bg-agent-task-area:   bg subagent（sleep 3s）运行 ● agent → 完成 ✔ agent
- * - bg-shell-task-area:   bg shell（run_in_background sleep 20）运行 ● shell → ✔ shell
- * - fork-bg-callback:     bg fork subagent（sleep 5s）运行 → 完成回调通知
+ * - bg-agent-task-area:   bg subagent（sleep 12s）运行 ◎ agent → 持久完成
+ * - bg-shell-task-area:   bg shell（run_in_background sleep 20）运行 ◎ shell → 持久完成
+ * - fork-bg-callback:     bg fork subagent（sleep 12s）运行 → 子会话终态 ACK
  *
- * 一次会话 3 个顺序阶段。阶段边界用 BgTaskArea 条目状态：
- * ● shell 是 bg shell 独有；● agent 在阶段 1 完成（✔ 3s 后消失）后
- * 再次出现即阶段 3 的 fork。完成通知均为 "Agent: fork"，不可作边界。
+ * 一次会话 3 个顺序阶段。运行态必须在 BgTaskArea 可见；完成边界读取实际
+ * Peri Store 的直接父 required delivery、Satisfied batch 及子会话终态 ACK。
+ * 内部任务 reminder 不渲染，既不要求可见内部消息，也不以父回复猜测完成。
  */
 import { describe, it, expect, afterEach } from "vitest";
-import { launchPeri, sendPrompt, takePeriSnapshot } from "../../helpers/peri.js";
+import { createE2EModelHome, launchPeri, sendPrompt, takePeriSnapshot } from "../../helpers/peri.js";
+import { captureBgStageBoundary, completedBgStage } from "../../helpers/bg-task-durable-boundary.js";
 import type { TmuxTester } from "tui-tester";
-
-function hasBgCompletionAfterDispatch(
-  screen: string,
-  kind: "shell" | "subagent",
-  marker: string,
-): boolean {
-  const normalized = screen.replace(/\s+/g, " ");
-  const dispatch = kind === "shell" ? "✓ Shell" : "✓ Agent";
-  const dispatchIndex = normalized.lastIndexOf(dispatch);
-  if (dispatchIndex < 0) return false;
-  const reminder = `System reminder · Task · ${kind} · Info`;
-  const reminderIndex = normalized.indexOf(reminder, dispatchIndex);
-  if (reminderIndex < 0) return false;
-  return normalized.indexOf(marker, reminderIndex + reminder.length) >= 0;
-}
-
-describe("bg task completion boundary", () => {
-  it("requires dispatch before the stage completion reminder", () => {
-    const oldReminder = "System reminder · Task · subagent · Info 后台任务已完成，结果是：hello";
-    const newPrompt = "请输出 E2E_BG_FORK_DONE";
-    expect(hasBgCompletionAfterDispatch(`${oldReminder} ✓ Agent fork ${newPrompt}`, "subagent", "E2E_BG_FORK_DONE")).toBe(false);
-    expect(hasBgCompletionAfterDispatch("✓ Agent fork 完成 System reminder · Task · subagent · Info 后台任务已完成 E2E_BG_FORK_DONE", "subagent", "E2E_BG_FORK_DONE")).toBe(true);
-  });
-});
 
 describe("subagent: bg task area (merged)", () => {
   let tester: TmuxTester;
@@ -54,7 +31,9 @@ describe("subagent: bg task area (merged)", () => {
     "bg subagent / bg shell / bg fork 运行期间展示栏可见，完成后 ✔",
     { timeout: 600_000 },
     async () => {
-      tester = await launchPeri();
+      const home = createE2EModelHome();
+      tester = await launchPeri({ env: { HOME: home } });
+      const agentBoundary = captureBgStageBoundary(home);
 
       // ── 阶段 1：bg subagent（sleep 12s）──
       await sendPrompt(
@@ -72,7 +51,7 @@ describe("subagent: bg task area (merged)", () => {
       // 等持久化完成通知；✔ agent 只保留 3s，不能作为唯一完成屏障。
       try {
         await tester.waitFor(
-          (screen) => hasBgCompletionAfterDispatch(screen, "subagent", "hello"),
+          () => completedBgStage(home, agentBoundary, "subagent", "hello") !== undefined,
           { timeout: 180_000, interval: 1000, message: "等待 bg subagent 完成超时" },
         );
       } catch (error) {
@@ -80,6 +59,9 @@ describe("subagent: bg task area (merged)", () => {
         throw error;
       }
       const agentDone = await takePeriSnapshot(tester, "bg-task-agent-done");
+      const agentEvidence = completedBgStage(home, agentBoundary, "subagent", "hello");
+      expect(agentEvidence?.childAdmissionId).toBeDefined();
+      const shellBoundary = captureBgStageBoundary(home);
 
       // ── 阶段 2：bg shell（run_in_background sleep 20）──
       await sendPrompt(
@@ -101,8 +83,7 @@ describe("subagent: bg task area (merged)", () => {
       // 等持久完成通知；✔ shell 只保留 3s，不能作为唯一完成屏障。
       try {
         await tester.waitFor(
-          (screen) =>
-            hasBgCompletionAfterDispatch(screen, "shell", "E2E_BG_SHELL_DONE"),
+          () => completedBgStage(home, shellBoundary, "shell", "E2E_BG_SHELL_DONE") !== undefined,
           { timeout: 90_000, interval: 1000, message: "等待 bg shell 完成超时" },
         );
       } catch (error) {
@@ -110,6 +91,9 @@ describe("subagent: bg task area (merged)", () => {
         throw error;
       }
       const shellDone = await takePeriSnapshot(tester, "bg-task-shell-done");
+      const shellEvidence = completedBgStage(home, shellBoundary, "shell", "E2E_BG_SHELL_DONE");
+      expect(shellEvidence).toBeDefined();
+      const forkBoundary = captureBgStageBoundary(home);
 
       // ── 阶段 3：bg fork subagent（sleep 5s）──
       // 阶段 1 的 ● agent 已消失（✔ 保留 3s），● agent 再次出现即本阶段 fork
@@ -127,7 +111,7 @@ describe("subagent: bg task area (merged)", () => {
       // fork 完成：等待持久化的 Agent: fork 回调通知，避免错过短暂 ✔。
       try {
         await tester.waitFor(
-          (screen) => hasBgCompletionAfterDispatch(screen, "subagent", "E2E_BG_FORK_DONE"),
+          () => completedBgStage(home, forkBoundary, "subagent", "E2E_BG_FORK_DONE") !== undefined,
           { timeout: 180_000, interval: 1000, message: "等待 bg fork 完成超时" },
         );
       } catch (error) {
@@ -135,6 +119,8 @@ describe("subagent: bg task area (merged)", () => {
         throw error;
       }
       const forkDone = await takePeriSnapshot(tester, "bg-task-fork-done");
+      const forkEvidence = completedBgStage(home, forkBoundary, "subagent", "E2E_BG_FORK_DONE");
+      expect(forkEvidence?.childAdmissionId).toBeDefined();
 
       expect(agentRunning.text.length).toBeGreaterThan(50);
       expect(agentDone.text.length).toBeGreaterThan(50);
@@ -150,11 +136,12 @@ describe("subagent: bg task area (merged)", () => {
 
       // 所有断言都绑定到上面的因果屏障，避免再用 LLM judge 重复猜测 UI 状态。
       expect(agentRunning.text).toMatch(/◎ agent/);
-      expect(hasBgCompletionAfterDispatch(agentDone.text, "subagent", "hello")).toBe(true);
+      expect(agentEvidence?.batchId).toBeDefined();
       expect(shellRunning.text).toMatch(/◎ shell/);
-      expect(hasBgCompletionAfterDispatch(shellDone.text, "shell", "E2E_BG_SHELL_DONE")).toBe(true);
+      expect(shellEvidence?.parentSessionId).toBe(agentEvidence?.parentSessionId);
       expect(forkRunning.text).toMatch(/◎ agent/);
-      expect(hasBgCompletionAfterDispatch(forkDone.text, "subagent", "E2E_BG_FORK_DONE")).toBe(true);
+      expect(forkEvidence?.parentSessionId).toBe(agentEvidence?.parentSessionId);
+      expect(forkEvidence?.invocationId).not.toBe(agentEvidence?.invocationId);
     },
   );
 });

@@ -123,15 +123,31 @@ async fn publish_and_notify(
     lifecycle: u64,
     inbox: &MessageQueue,
 ) -> anyhow::Result<()> {
+    publish_inbox_work(
+        cfg.session_resources.clone(),
+        transport,
+        session_id,
+        lifecycle,
+        inbox,
+    )
+    .await
+}
+
+async fn publish_inbox_work(
+    resources: Arc<dyn peri_acp_types::session_resources::SessionResources>,
+    transport: &Arc<dyn crate::transport::AcpTransport>,
+    session_id: &str,
+    lifecycle: u64,
+    inbox: &MessageQueue,
+) -> anyhow::Result<()> {
     peri_agent::agent::stages::publish_session_inbox(
-        Arc::clone(&cfg.session_resources),
+        Arc::clone(&resources),
         session_id,
         lifecycle,
         inbox,
     )
     .await?;
-    let snapshot = cfg
-        .session_resources
+    let snapshot = resources
         .load_session_work(&WorkQuery {
             session_id: session_id.to_owned(),
             limit: 1,
@@ -148,6 +164,53 @@ async fn publish_and_notify(
         })).await.map_err(|error| anyhow::anyhow!("work availability notification failed: {error:?}"))?;
     }
     Ok(())
+}
+
+pub(super) fn spawn_inbox_work_notifications(
+    cfg: &AcpServerConfig,
+    transport: &Arc<dyn crate::transport::AcpTransport>,
+    session_id: String,
+    lifecycle: u64,
+    inbox: MessageQueue,
+    cancellation: CancellationToken,
+) -> Result<(), ()> {
+    let mut changes = inbox.subscribe_wake();
+    let resources = cfg.session_resources.clone();
+    let transport = transport.clone();
+    let shutdown = cfg.host_task_spawner.shutdown_token();
+    cfg.host_task_spawner.spawn(
+        HostTaskOwnerKind::Session,
+        HostTaskKind::InboxWorkNotifications,
+        async move {
+            loop {
+                for attempt in 0..3 {
+                    let publication = publish_inbox_work(
+                        resources.clone(), &transport, &session_id, lifecycle, &inbox,
+                    );
+                    let result = tokio::select! {
+                        biased;
+                        _ = cancellation.cancelled() => return,
+                        _ = shutdown.cancelled() => return,
+                        result = publication => result,
+                    };
+                    if result.is_ok() { break; }
+                    warn!(%session_id, attempt, "inbox work notification remains unconfirmed");
+                    tokio::select! {
+                        biased;
+                        _ = cancellation.cancelled() => return,
+                        _ = shutdown.cancelled() => return,
+                        _ = peri_time::sleep(std::time::Duration::from_millis(100 * (1 << attempt))) => {},
+                    }
+                }
+                tokio::select! {
+                    biased;
+                    _ = cancellation.cancelled() => return,
+                    _ = shutdown.cancelled() => return,
+                    changed = changes.changed() => if changed.is_err() { return; },
+                }
+            }
+        },
+    ).map_err(|_| ())
 }
 
 #[allow(clippy::too_many_arguments)]

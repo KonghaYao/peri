@@ -47,7 +47,7 @@ pub(crate) async fn prepare(
         request_id: request_id.clone(),
         request: checkpoint,
     });
-    let receipt = session.ledger.commit(&command).await?;
+    let receipt = session.ledger.commit_execution_transition(&command).await?;
     if receipt.stage != Some(WorkStage::ReasonInFlight) {
         return Err(anyhow::anyhow!("model budget blocked before send"));
     }
@@ -178,7 +178,7 @@ pub(crate) async fn commit_response(
         dispatch_intents: intents,
         next_work_id: next_work_id.clone(),
     });
-    session.ledger.commit(&command).await?;
+    session.ledger.commit_execution_transition(&command).await?;
     if let Some(next_work_id) = next_work_id {
         state.work_id = Some(next_work_id);
     }

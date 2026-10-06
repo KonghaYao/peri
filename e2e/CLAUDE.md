@@ -40,6 +40,7 @@ run-e2e.mjs → vitest worker → helpers/peri.ts → dev.sh → Peri TUI (tmux)
 | 当前 Peri 二进制构建 | `helpers/build.ts`（统一 patched Cargo + `--locked`；不得用裸 Cargo 改写 lockfile） |
 | stdio 执行准入桥接 | `helpers/stdio-execution-fixture.ts`（真实 Peri + SDK 协议，隔离 registry；不是 SDK 独立测试或构建） |
 | Workflow 等待（磁盘 + 可选屏幕） | `helpers/workflow.ts` |
+| 后台任务可靠完成屏障 | `helpers/bg-task-durable-boundary.ts`（直接发起会话的 required delivery、Satisfied 批次与 child 终态 ACK；不依赖内部提醒的可见文案） |
 | LLM Judge | `helpers/judge.ts` |
 | 录制 | `helpers/recorder.ts` |
 | 控制面 / 分层门禁 | `scripts/run-e2e.mjs` + `config/tiers.mjs` |
@@ -57,6 +58,7 @@ run-e2e.mjs → vitest worker → helpers/peri.ts → dev.sh → Peri TUI (tmux)
 - 完成态优先 **磁盘因果**（如 workflow `state.json`），屏幕通知可能滚走。
 - **L0 tier 用例不得依赖真实模型/凭据/外部网络**（TEST-HERMETIC-001）：用隔离 HOME + 本地假 model server 驱动（`helpers/replay-model.ts`）；确需真实模型链路的用例放 L1 及以后。
 - 不得把 `OPENAI_API_KEY` 写入测试、录制或报告。
+- 真实模型用例的默认与 HITL 启动均隔离 HOME，四档 profile 显式使用 E2E 模型与 `medium`；Judge 单独配置 `JUDGE_MODEL`，不继承 Peri profile。
 
 ## tmux / launchPeri
 

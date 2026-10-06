@@ -50,7 +50,7 @@ function ensureHomeShellCompat(home: string): void {
   }
 }
 
-function allocateIsoHome(): string {
+export function createE2EModelHome(): string {
   const rootEnvPath = path.join(PROJECT_ROOT, ".env");
   const rootEnvironment = fs.existsSync(rootEnvPath)
     ? dotenv.parse(fs.readFileSync(rootEnvPath)) : {};
@@ -67,8 +67,11 @@ function allocateIsoHome(): string {
     config: {
       language: "zh-CN",
       active_alias: "sonnet",
-      providers: [{ id: "e2e", type: "openai", apiKey, baseUrl, models: { sonnet: model } }],
-      profiles: { sonnet: { provider: "e2e", model, effort: "medium" } },
+      providers: [{ id: "e2e", type: "openai", apiKey, baseUrl,
+        models: { sonnet: model, haiku: model, opus: model, fable: model } }],
+      profiles: Object.fromEntries(["sonnet", "haiku", "opus", "fable"].map(
+        (alias) => [alias, { provider: "e2e", model, effort: "medium" }],
+      )),
     },
   }), { mode: 0o600 });
   ensureHomeShellCompat(isoHome);
@@ -88,7 +91,7 @@ function buildPeriLaunchEnv(
 ): Record<string, string> {
   const env: Record<string, string> = { ...(options.env ?? {}) };
   if (!env.HOME && defaults.isolateHome) {
-    env.HOME = allocateIsoHome();
+    env.HOME = createE2EModelHome();
   } else if (env.HOME) {
     ensureHomeShellCompat(env.HOME);
     const periSettings = path.join(env.HOME, ".peri", "settings.json");
@@ -401,7 +404,7 @@ export async function takePeriSnapshot(
 export async function launchPeriHITL(
   options: PeriLaunchOptions = {},
 ): Promise<TmuxTester> {
-  const env = buildPeriLaunchEnv(options, { isolateHome: false });
+  const env = buildPeriLaunchEnv(options, { isolateHome: true });
   const tester = createPeriTester(options, env, ["--permission-mode", "default"]);
 
   await startTester(tester, "launchPeriHITL");

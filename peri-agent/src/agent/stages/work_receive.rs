@@ -158,7 +158,7 @@ impl WorkBoundary {
                 batch_id: work_id.clone(),
                 delivery_ids: candidate.delivery_ids.clone(),
             });
-            session.ledger.commit(&command).await?;
+            session.ledger.commit_execution_transition(&command).await?;
             snapshot = session.snapshot().await?;
         }
         let recovered = recover_work(&snapshot, &work_id)?;
