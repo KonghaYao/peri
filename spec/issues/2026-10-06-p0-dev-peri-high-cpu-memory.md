@@ -26,6 +26,7 @@
 - 两轮止血已提交（见归档）；无受控 CPU / RSS 收益测量、无 Turso 网络验收、未跑完整 workspace 测试。
 - 失败归属已判定（只读排查 + lldb 运行时证据，均指向测试侧）：`remote_work_concurrent_publish_...`（`session_work_test.rs:322`）为 fixture 问题——同 session 并发未对账命令与 `work.rs::GUARD_COMMAND` 不变量冲突，`session_work_journal.rs::begin_owned_work` 把确定性 `NotApplied` 折叠为 `PersistenceUncertain` 且不重试，测试自 `ce4c9b37` 起 flaky（8 跑 7 败，无争抢时 8/8 通过）；`durable_act_handoff_...`（`durable_work_contract.rs:666`）为过期断言——`44309b13` 有意收紧停止态交棒（`processing.rs:262`）并同步了单测与 `work_dispatch.rs` 调用方，漏改该集成测试。两者修测试，不改生产语义。
 - 本轮免迁移窄化（进行中，用户已定范围：不做 schema 迁移）：Wave 1 后台 inbox 通知路径改窄查询（`continuation.rs:152` 的 `load_session_work(limit=1)` 不再反序列化整份状态）；Wave 2 提交路径去掉 `reducer.rs` 对 `WorkState` 的整份深拷贝。
+- 基线已绿（`peri-resources` 侧四类失败全部判定为测试侧问题并修正，见归档）。
 - 内存告警埋点已提交 `30a4942f`（`peri-tui/src/app/service_registry.rs` + `service_registry_test.rs`）。
 
 ## 未完成
@@ -37,7 +38,6 @@
 - [ ] 两轮止血未覆盖的根治项（2026-10-06 复核仍成立）：reducer 全量 clone（`work/reducer.rs`）、新状态全量编码（`work/effects.rs::UPDATE_STATE`）、事务 guard 仍以整份旧 JSON 作参数比较（`GUARD_STATE`）、后台 wake 与 2 s 定时全量读取（`continuation.rs` → `read_work` → `READ_STATE`）、`load_session_work(limit=1)` 先读整份状态、每条命令整份编码入库（`work.rs::command_effects`）。
 - [ ] 阶段 2–5：载荷与事务切片、增量账本、窄通知与执行隔离闭环、迁移与事故验收。
 - [ ] 根因确认后按 `docs/standards/testing.md` 补行为与生命周期回归；修复一类问题而非压低当前指标。
-- [ ] 两个回归失败的测试侧修正（归属已判定，修正进行中）。
 - [ ] 评审本轮排查发现的邻近问题：`session_work_journal.rs:84-91` 把确定性 `NotApplied` 折叠为 `PersistenceUncertain`，而该错误会冻结会话热态并阻塞续写，与 `mutation.rs` 自述的「未决才是不确定」矛盾。属本 issue 范围外，需单独决策。
 - [ ] 与《移除默认执行恢复 P0》的共同约束闭环：旧 work 隔离、旧未知副作用迁移，实施前重核共享工作树。
 - [ ] 确认内存告警在现场生效（`peri.mem` 可在日志中检出）。
@@ -71,4 +71,6 @@
 - 引入时间追溯：定位 `ce4c9b37` 及三个放大提交，父版本对照确认机制为首次引入。
 - 第一轮止血 `e628113f`：mutation gate 改为存在性查询（本地 / 远端共用根及后代 `SELECT EXISTS`），提交复用同快照原始 JSON 作旧状态 guard。定向测试 7 + 5 + 9 passed，契约 18 passed / 1 ignored。
 - 第二轮止血 `83ed1e44`：新增 `WorkDeliveryQuery` 与 `load_work_delivery`，消息级 inbox 去重不再反序列化整份 WorkState。定向测试 16 项 passed。
+- 基线归因与修正（全部判定为测试侧，不改生产语义）：远端并发发布用例改为顺序提交（同 session 不允许两条未对账命令）`5e3d7866`；停止态交棒与 admission finish 两处过期断言按 `44309b13` 新语义重排 `5e3d7866`、`02d71bf4`；远端 schema 形状守卫由「只比 canonical 计数」改为逐条比对完整 DDL 序列 `71e39356`。`durable_work_contract` 现为 26 passed / 0 failed / 1 ignored（ignored 为既有）。
+- 上述 schema 判定的依据：`session_schema::initialization_plan()` 的 20 条 = 14 条 canonical v2 DDL（9 表 + 5 索引）+ 6 条 control/work 机制表 DDL；新建路径（`remote/session_schema.rs:32-39`）与迁移路径（`remote/schema_v14_upgrade.rs:31-47`、`sqlite_store/schema.rs:202-242`）都会创建这 6 张表，未发现新建库与迁移库的结构或索引分叉。
 - 内存告警 `30a4942f`：复用 `ProcessResourceMonitor` 的 2 s 采样，RSS > 200 MiB 告警、60 s 节流，target `peri.mem`，仅 TUI 进程生效。
