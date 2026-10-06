@@ -118,31 +118,7 @@ impl RunCompletion {
             }
             // A late cleanup failure must override an earlier raw success result.
             let raw = if let Some(error) = execution_error {
-                if let Ok(mut state) = self.journal.read_state(&self.run_id) {
-                    state.status = "failed".into();
-                    state.execution_status = peri_acp_types::workflow::ExecutionStatus::Failed;
-                    state.post_processing_status =
-                        peri_acp_types::workflow::PostProcessingStatus::Failed;
-                    state.delivery_status = peri_acp_types::workflow::DeliveryStatus::Blocked;
-                    state.error = Some(error.clone());
-                    let _ = self.journal.write_state(&self.run_id, &state);
-                    self.progress
-                        .apply_event(&crate::protocol::ProgressEvent::RunDone {
-                            run_id: self.run_id.clone(),
-                            status: "failed".into(),
-                            return_value: None,
-                            error: Some(error.clone()),
-                        });
-                }
-                WorkflowResult {
-                    run_id: self.run_id.clone(),
-                    status: "failed".into(),
-                    return_value: None,
-                    error: Some(error),
-                    post_processing_status: peri_acp_types::workflow::PostProcessingStatus::Failed,
-                    delivery_status: peri_acp_types::workflow::DeliveryStatus::Blocked,
-                    stderr_tail: None,
-                }
+                self.settle_failed_terminal_state(&error)
             } else {
                 done_rx.borrow().clone().unwrap_or_else(|| WorkflowResult {
                     run_id: self.run_id.clone(),
@@ -171,6 +147,62 @@ impl RunCompletion {
             None => tokio::spawn(execution_task),
         };
         Ok((task, completed_rx))
+    }
+
+    /// A late cleanup failure must override an earlier raw success result, and
+    /// the failure must be observable even when the state file cannot be
+    /// touched.
+    ///
+    /// The convergence event is emitted outside the state read on purpose: a
+    /// read failure used to skip both the on-disk override and the
+    /// `RunDone`, leaving a stale success state on disk and a permanently
+    /// Running progress entry. When the previous state cannot be read there is
+    /// no safe rewrite (a synthetic `RunState` would drop the resume payload),
+    /// so the disk/result disagreement is declared in the log instead.
+    fn settle_failed_terminal_state(&self, error: &str) -> WorkflowResult {
+        use peri_acp_types::workflow::{DeliveryStatus, ExecutionStatus, PostProcessingStatus};
+
+        match self.journal.read_state(&self.run_id) {
+            Ok(mut state) => {
+                state.status = "failed".into();
+                state.execution_status = ExecutionStatus::Failed;
+                state.post_processing_status = PostProcessingStatus::Failed;
+                state.delivery_status = DeliveryStatus::Blocked;
+                state.error = Some(error.to_string());
+                if let Err(write_error) = self.journal.write_state(&self.run_id, &state) {
+                    tracing::warn!(
+                        target: "workflow",
+                        run_id = %self.run_id,
+                        error = %write_error,
+                        "failed to persist failed terminal state; the on-disk state still reports the previous terminal status while this run is reported as failed"
+                    );
+                }
+            }
+            Err(read_error) => {
+                tracing::warn!(
+                    target: "workflow",
+                    run_id = %self.run_id,
+                    error = %read_error,
+                    "failed to read workflow state; the on-disk terminal state is left unchanged and may still report success while this run is reported as failed"
+                );
+            }
+        }
+        self.progress
+            .apply_event(&crate::protocol::ProgressEvent::RunDone {
+                run_id: self.run_id.clone(),
+                status: "failed".into(),
+                return_value: None,
+                error: Some(error.to_string()),
+            });
+        WorkflowResult {
+            run_id: self.run_id.clone(),
+            status: "failed".into(),
+            return_value: None,
+            error: Some(error.to_string()),
+            post_processing_status: PostProcessingStatus::Failed,
+            delivery_status: DeliveryStatus::Blocked,
+            stderr_tail: None,
+        }
     }
 
     fn project(&self, result: WorkflowResult) -> WorkflowTaskResult {
@@ -234,3 +266,7 @@ pub(super) async fn receive_completion(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "completion_test.rs"]
+mod tests;
