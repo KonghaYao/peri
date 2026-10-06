@@ -91,9 +91,7 @@ impl OAuthCredentialClient {
     #[cfg(target_os = "emscripten")]
     pub fn new(store: Arc<dyn OAuthCredentialPort>) -> io::Result<Self> {
         let (sender, receiver) = tokio::sync::mpsc::unbounded_channel::<Job>();
-        // The browser event loop cannot wait synchronously for an MCP handshake.
-        // The first request waits for the worker to initialize or reports unavailable.
-        wasm_bindgen_futures::spawn_local(run_worker(store, receiver, None));
+        spawn_worker(store, receiver)?;
         Ok(Self { sender })
     }
 
@@ -249,6 +247,21 @@ impl OAuthCredentialClient {
     }
 }
 
+#[cfg(any(target_os = "emscripten", test))]
+fn spawn_worker(
+    store: Arc<dyn OAuthCredentialPort>,
+    receiver: tokio::sync::mpsc::UnboundedReceiver<Job>,
+) -> io::Result<tokio::task::JoinHandle<()>> {
+    let runtime = tokio::runtime::Handle::try_current().map_err(|error| {
+        diagnostic_error(
+            io::ErrorKind::Other,
+            "OAuth credential runtime is unavailable",
+            error,
+        )
+    })?;
+    Ok(runtime.spawn(run_worker(store, receiver, None)))
+}
+
 async fn run_worker(
     store: Arc<dyn OAuthCredentialPort>,
     mut receiver: tokio::sync::mpsc::UnboundedReceiver<Job>,
@@ -279,6 +292,7 @@ async fn run_worker(
                 tracing::warn!(%error, "OAuth credential MCP initialization failed");
             }
             server.abort();
+            let _ = server.await;
             return;
         }
         Err(error) => {
@@ -291,12 +305,14 @@ async fn run_worker(
                 let _ = ready.send(Err(error));
             }
             server.abort();
+            let _ = server.await;
             return;
         }
     };
     if ready.is_some_and(|ready| ready.send(Ok(())).is_err()) {
         let _ = client.close_with_timeout(Duration::from_secs(1)).await;
         server.abort();
+        let _ = server.await;
         return;
     }
     while let Some(job) = receiver.recv().await {
@@ -413,3 +429,6 @@ fn invalid_data() -> io::Error {
         "OAuth credential response is invalid",
     )
 }
+#[cfg(test)]
+#[path = "client_test.rs"]
+mod tests;
