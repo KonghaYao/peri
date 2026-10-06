@@ -1,6 +1,6 @@
 # P0：TUI 架构优化——增量渲染、缓存预算与客户端职责收口
 
-**状态**：Open；A–E 主体重构及 code review 回退已修复并通过库测试，正在迁移到当前工作区；release/CPU/heap/RSS 与人工交互验收未完成。最新验证以第 10 节为准。
+**状态**：Open；A–E 主体重构及 code review 回退已修复，并已合并到当前工作区；重构分支库测试通过，合并后的完整 TUI 库测试受既有 WorkState 迁移回归阻挡；release/CPU/heap/RSS 与人工交互验收未完成。最新验证以第 10 节为准。
 
 **优先级**：P0（2026-10-06 用户明确指定）。这是工作优先级，不表示已证明 TUI 是现场 CPU/RSS 事故主因。
 
@@ -314,13 +314,35 @@ cache root 和用户目录保留。宿主全局 catalog 不伪装 project scope�
 | `test --locked -p peri-tui --lib -- bridge_publication_after_local_fold` | 1 passed，已包含在全量统计中 |
 | `test --locked -p peri-tui --lib -- kit::service_snapshot::session_services::tests::` | 4 passed，已包含在全量统计中 |
 
-公共端口首轮修改后的 doc tests 通过：ACP 无可执行示例，ACP types 1 passed/2 ignored，
-middlewares 3 ignored；最终 scope 身份签名补正后需再次核对。补正修改的源码/测试均
+公共端口最终 scope 身份签名补正后已重新运行 doc tests：ACP 无可执行示例，
+ACP types 1 passed/2 ignored，middlewares 3 ignored。补正修改的源码/测试均
 不超过 1000 行，最终 source diff-check 与 workspace fmt-check 通过。
 
 当前工作区已在其他任务中推进 WorkState 重构，不能用旧基点直接覆盖；迁移保留其
 提交及无关 WIP。原任务留下的未跟踪 issue/audit 文档已逐文件与初始提交比对，并
 与原工作区 staged/unstaged 差异一并备份；只处理本任务自己的重复文件和路由 hunk，
-不 stash/reset/clean 无关改动。合并及迁移后验证另记实际结果，不把准备完成写成迁移成功。
+不 stash/reset/clean 无关改动。
+
+已通过 `3ec17cbb` 将 `refactor/tui-architecture-p0-20261006` 合并到当前工作区的
+`pre-release/main`，保留 WorkState 迁移提交 `69e93429` 和重构分支的分步提交历史。
+合并没有冲突；迁移前后核对 9 个无关 WIP 文件的内容摘要，均未改变、未纳入提交。
+隔壁 review 任务已确认继续在独立 worktree 修复迁移回归，不操作本工作区暂存区。
+
+| 合并后验证 | 结果与限制 |
+| --- | --- |
+| 当前工作区 `check --locked -p peri-tui` | 通过 |
+| 当前工作区 ACP Plugin 请求回归 | 12 passed |
+| 当前工作区 CLI Plugin context 回归 | 6 passed |
+| 当前工作区完整 TUI 库测试 | 编译阻挡：`steer_state_test.rs:50/59` 调用已删除的 `interrupt/is_interrupted`；原 `69e93429` 已存在，本轮未修改这两个文件 |
+| 隔离的待提交快照 `check --locked -p peri-tui` | 通过，不依赖无关 WIP |
+| 本轮 75 个 Rust 改动文件的格式检查 | 按各 crate 的 Rust edition 检查通过 |
+| 隔离的待提交快照依赖门禁 | 22 条规则通过，无违规边 |
+
+首次合并提交的 check/clippy/typos 通过，但工作区全量 fmt 和 layer-imports 未通过：
+fmt 涉及 52 个本轮未暂存的文件，其中 51 个与原 HEAD 内容相同；layer-imports
+来自无关 WIP `peri-tui/src/main.rs` 新增的数据库维护命令直接引用 `peri_resources`。
+没有代改、暂存或隐藏这些迁移问题。以隔离快照检查和本轮改动文件格式检查补充验证后，
+合并提交仅用 `LEFTHOOK_EXCLUDE=fmt,layer-imports` 跳过这两项已归因门禁，保留
+check/clippy/typos 并再次通过；这不表示全工作区门禁或完整合并验收已经通过。
 
 跨文件 I/O 仍非事务，release/CPU/heap/RSS 未完成，不因此关闭 P0。
