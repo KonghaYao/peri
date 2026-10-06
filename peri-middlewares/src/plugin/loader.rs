@@ -756,13 +756,19 @@ fn select_enabled_plugins(
     let installed = load_installed_plugins(Some(&plugins_path))?;
     let user_settings = load_claude_settings(Some(&settings_path))?;
 
-    // 尝试加载项目级 settings.json（与 P0-1 hooks 加载一致）
     let project_settings = cwd
-        .map(|p| p.join(".claude").join("settings.json"))
-        .filter(|p| p.exists())
-        .and_then(|p| load_claude_settings(Some(&p)).ok());
-
-    let enabled_ids = merge_enabled_plugins(&user_settings, project_settings.as_ref());
+        .map(|directory| load_claude_settings(Some(&directory.join(".claude/settings.json"))))
+        .transpose()?;
+    let local_settings = cwd
+        .map(|directory| load_claude_settings(Some(&directory.join(".claude/settings.local.json"))))
+        .transpose()?;
+    let inherited = ClaudeSettings {
+        enabled_plugins: merge_enabled_plugins(&user_settings, project_settings.as_ref())
+            .into_iter()
+            .collect(),
+        ..ClaudeSettings::default()
+    };
+    let enabled_ids = merge_enabled_plugins(&inherited, local_settings.as_ref());
 
     let filtered: Vec<_> = installed
         .plugins
@@ -948,3 +954,7 @@ fn aggregate_plugin_data(plugins: Vec<LoadedPlugin>) -> PluginLoadResult {
 #[cfg(test)]
 #[path = "loader_test.rs"]
 pub(crate) mod tests;
+
+#[cfg(test)]
+#[path = "loader_scope_test.rs"]
+mod scope_tests;

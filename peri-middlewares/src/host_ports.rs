@@ -49,12 +49,13 @@ impl PluginManagerPort for PluginManager {
         plugin_id: &str,
         scope: InstallScope,
         claude_dir: &Path,
+        project_dir: Option<&Path>,
         enable: bool,
     ) -> Result<(), String> {
         if enable {
-            update_enabled_plugins(plugin_id, scope, claude_dir, None)
+            update_enabled_plugins(plugin_id, scope, claude_dir, project_dir)
         } else {
-            remove_from_enabled_plugins(plugin_id, &scope, claude_dir, None)
+            remove_from_enabled_plugins(plugin_id, &scope, claude_dir, project_dir)
         }
         .map_err(|e| e.to_string())
     }
@@ -88,8 +89,8 @@ impl PluginManagerPort for PluginManager {
         Ok(manifest.plugins.len())
     }
 
-    fn snapshot(&self, claude_dir: &Path) -> Vec<PluginSnapshotEntry> {
-        let loaded = crate::plugin::load_enabled_plugins_aggregated(claude_dir, None);
+    fn snapshot(&self, claude_dir: &Path, project_dir: Option<&Path>) -> Vec<PluginSnapshotEntry> {
+        let loaded = crate::plugin::load_enabled_plugins_aggregated(claude_dir, project_dir);
 
         let plugins_path = claude_dir.join("plugins").join("installed_plugins.json");
         let installed = crate::plugin::load_installed_plugins(Some(&plugins_path))

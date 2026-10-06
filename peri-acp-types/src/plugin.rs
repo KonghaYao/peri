@@ -586,6 +586,7 @@ pub trait PluginManagerPort: Send + Sync {
         plugin_id: &str,
         scope: InstallScope,
         claude_dir: &Path,
+        project_dir: Option<&Path>,
         enable: bool,
     ) -> Result<(), String>;
 
@@ -625,7 +626,11 @@ pub trait PluginManagerPort: Send + Sync {
     fn marketplace_snapshot(&self) -> serde_json::Value;
 
     /// 聚合快照：已启用插件 × 已安装记录 → 协议快照条目（plugin-snapshot 事件）。
-    fn snapshot(&self, claude_dir: &Path) -> Vec<crate::event_data::PluginSnapshotEntry>;
+    fn snapshot(
+        &self,
+        claude_dir: &Path,
+        project_dir: Option<&Path>,
+    ) -> Vec<crate::event_data::PluginSnapshotEntry>;
 
     /// `~/.claude` 根目录（插件布局的用户级根，由实现方给出部署默认）。
     ///

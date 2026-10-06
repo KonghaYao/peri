@@ -20,7 +20,7 @@ pub struct CronTrigger {
 
 /// Cron 任务信息（`CronScheduler::list_tasks` 的契约镜像，供 cron/list 命令面
 /// 与 TUI 面板经 ACP 拿数据——契约层不引入 middlewares 的 `CronTask`）。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CronTaskInfo {
     pub id: String,
     pub expression: String,

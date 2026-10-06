@@ -91,6 +91,7 @@ Session ID 恢复与生命周期回归：`src/host/requests_workspace_cases_test
 | LLM 实例池 | session/agent_pool.rs | `AgentPool`；`has_valid_cache` / `invalidate`；完整 provider 配置（含 connection/key/options）经进程加盐 SHA256 形成内部指纹，阻止在途旧工厂回填后复用旧连接 |
 | 目标状态 | session/goal_state/mod.rs | `GoalState`（:59，`set_goal` :80 / `snapshot` :167） |
 | cron 桥与生产回归 | session/cron_bridge.rs、host/workspace.rs、host/requests_cron_test.rs | `SessionCronBridge` 跨 turn 存活；会话 scheduler 同时注入 builtin 与 bridge，部署 tick 策略沿 `WorkspaceAssembly` 传递；`cron_deployment_` 用例覆盖公开部署、双会话与真实 continuation |
+| Cron 管理 ACP 请求 | host/requests/cron.rs、host/requests/cron_endpoint_test.rs | cron/list、cron/toggle、cron/remove 校验 session、closing、实际 environment 与持久 workspace scope；只消费会话 CronSchedulerPort，不回退宿主 scheduler |
 | 状态构建 | session/state_builders.rs | `parse_permission_mode`（:19）/`apply_profile_effort`（:29）/`build_config_options`（:67） |
 
 ### src/event/（事件映射与转发）

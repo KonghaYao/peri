@@ -8,6 +8,9 @@ use peri_model::{
 };
 use std::time::Duration;
 
+#[path = "requests/cron_endpoint_test.rs"]
+mod endpoint_tests;
+
 #[derive(Default)]
 struct CronModel {
     prompts: parking_lot::Mutex<Vec<String>>,

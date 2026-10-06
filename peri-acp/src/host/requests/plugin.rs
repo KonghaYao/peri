@@ -130,7 +130,10 @@ pub(super) async fn handle_install(
             let _ = push_plugin_snapshot(
                 transport.as_ref(),
                 session_id,
-                &cfg.plugin_manager.snapshot(&claude_dir),
+                &cfg.plugin_manager.snapshot(
+                    &claude_dir,
+                    sessions.get(session_id).map(|state| Path::new(&state.cwd)),
+                ),
                 &caps,
             )
             .await;
@@ -198,7 +201,10 @@ pub(super) async fn handle_uninstall(
             let _ = push_plugin_snapshot(
                 transport.as_ref(),
                 session_id,
-                &cfg.plugin_manager.snapshot(&claude_dir),
+                &cfg.plugin_manager.snapshot(
+                    &claude_dir,
+                    sessions.get(session_id).map(|state| Path::new(&state.cwd)),
+                ),
                 &caps,
             )
             .await;
@@ -235,6 +241,7 @@ pub(super) async fn handle_uninstall(
 pub(super) async fn handle_toggle(
     params: &Value,
     cfg: &AcpServerConfig,
+    sessions: &HashMap<String, SessionState>,
     transport: &Arc<dyn crate::transport::AcpTransport>,
 ) -> Result<Value, AcpError> {
     let plugin_id = params
@@ -252,7 +259,8 @@ pub(super) async fn handle_toggle(
     let scope = match scope_str {
         "project" => peri_acp_types::plugin::InstallScope::Project,
         "local" => peri_acp_types::plugin::InstallScope::Local,
-        _ => peri_acp_types::plugin::InstallScope::User,
+        "user" => peri_acp_types::plugin::InstallScope::User,
+        _ => return Err(AcpError::new(-32602, "invalid plugin scope")),
     };
     let session_id = params
         .get("sessionId")
@@ -260,10 +268,11 @@ pub(super) async fn handle_toggle(
         .unwrap_or("");
 
     let claude_dir = cfg.plugin_manager.claude_home();
+    let project_dir = toggle_project_dir(scope, session_id, sessions)?;
 
     let result = cfg
         .plugin_manager
-        .set_enabled(plugin_id, scope, &claude_dir, enable);
+        .set_enabled(plugin_id, scope, &claude_dir, project_dir, enable);
 
     let caps = cfg.session_manager.get_caps(session_id);
 
@@ -283,13 +292,17 @@ pub(super) async fn handle_toggle(
             let _ = push_plugin_snapshot(
                 transport.as_ref(),
                 session_id,
-                &cfg.plugin_manager.snapshot(&claude_dir),
+                &cfg.plugin_manager.snapshot(
+                    &claude_dir,
+                    sessions.get(session_id).map(|state| Path::new(&state.cwd)),
+                ),
                 &caps,
             )
             .await;
             Ok(serde_json::json!({ "success": true }))
         }
         Err(e) => {
+            tracing::error!(session_id, plugin_id, scope = scope_str, error = %e, "Plugin toggle failed");
             let action = if enable { "enable" } else { "disable" };
             let _ = push_plugin_action_result(
                 transport.as_ref(),
@@ -304,6 +317,30 @@ pub(super) async fn handle_toggle(
             Err(AcpError::new(-32603, e.to_string()))
         }
     }
+}
+
+fn toggle_project_dir<'session>(
+    scope: peri_acp_types::plugin::InstallScope,
+    session_id: &str,
+    sessions: &'session HashMap<String, SessionState>,
+) -> Result<Option<&'session Path>, AcpError> {
+    if scope == peri_acp_types::plugin::InstallScope::User {
+        return Ok(None);
+    }
+    let state = sessions
+        .get(session_id)
+        .ok_or_else(|| AcpError::new(-32602, "plugin scope requires an active session"))?;
+    if state.closing {
+        return Err(AcpError::new(-32010, "Session is closing"));
+    }
+    let cwd = Path::new(&state.cwd);
+    if !cwd.is_absolute() {
+        return Err(AcpError::new(
+            -32602,
+            "session execution directory is invalid",
+        ));
+    }
+    Ok(Some(cwd))
 }
 
 pub(super) async fn handle_search(
@@ -338,6 +375,7 @@ pub(super) async fn handle_search(
 pub(super) async fn handle_update(
     params: &Value,
     cfg: &AcpServerConfig,
+    sessions: &HashMap<String, SessionState>,
     transport: &Arc<dyn crate::transport::AcpTransport>,
 ) -> Result<Value, AcpError> {
     let plugin_id = params
@@ -373,7 +411,10 @@ pub(super) async fn handle_update(
             let _ = push_plugin_snapshot(
                 transport.as_ref(),
                 session_id,
-                &cfg.plugin_manager.snapshot(&claude_dir),
+                &cfg.plugin_manager.snapshot(
+                    &claude_dir,
+                    sessions.get(session_id).map(|state| Path::new(&state.cwd)),
+                ),
                 &caps,
             )
             .await;

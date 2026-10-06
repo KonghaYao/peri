@@ -457,6 +457,7 @@ impl PluginManagerPort for MockPluginManager {
         _plugin_id: &str,
         _scope: InstallScope,
         _claude_dir: &Path,
+        _project_dir: Option<&Path>,
         _enable: bool,
     ) -> Result<(), String> {
         Ok(())
@@ -499,7 +500,11 @@ impl PluginManagerPort for MockPluginManager {
         json!({})
     }
 
-    fn snapshot(&self, _claude_dir: &Path) -> Vec<PluginSnapshotEntry> {
+    fn snapshot(
+        &self,
+        _claude_dir: &Path,
+        _project_dir: Option<&Path>,
+    ) -> Vec<PluginSnapshotEntry> {
         vec![]
     }
 
