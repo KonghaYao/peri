@@ -2,6 +2,17 @@ use super::transition::{guard, next, target, write_head, write_processing};
 use super::*;
 use crate::session_resources::ControlStatus;
 
+#[path = "processing_lifecycle.rs"]
+mod lifecycle;
+
+#[path = "processing_delegation.rs"]
+mod delegation;
+
+#[path = "processing_candidate.rs"]
+mod candidate;
+
+pub(super) use lifecycle::{abandon_processing_inputs, block_budget, is_budget_blocked};
+
 pub(super) fn apply(
     command: &WorkCommand,
     facts: &WorkFacts,
@@ -18,20 +29,39 @@ pub(super) fn apply(
                 return Err(WorkRejection::StaleExecution);
             }
             if let Some(prior) = &facts.admission {
+                if facts.processing.is_none()
+                    && prior
+                        .initial_delivery_ids
+                        .as_ref()
+                        .is_none_or(Vec::is_empty)
+                {
+                    return Err(WorkRejection::LegacyUnknown);
+                }
                 return if prior.admission == *admission && prior.leaving_evidence_id.is_none() {
                     Ok(())
                 } else {
                     Err(WorkRejection::Conflict)
                 };
             }
-            if let Some(processing) = &facts.processing {
+            let initial_delivery_ids = if let Some(processing) = &facts.processing {
                 if processing.processing_id != admission.work_id
+                    || processing.recipient_lifecycle != admission.lifecycle
                     || processing.revision != admission.work_revision
                     || matches!(processing.stage, WorkStage::Settled | WorkStage::Abandoned)
                 {
                     return Err(WorkRejection::StaleWorkRevision);
                 }
-            }
+                None
+            } else {
+                if admission.work_revision != 0 {
+                    return Err(WorkRejection::StaleWorkRevision);
+                }
+                Some(candidate::pending_delivery_ids(
+                    command,
+                    facts,
+                    &admission.work_id,
+                )?)
+            };
             if facts.head.current_admission_id.is_some() {
                 return Err(WorkRejection::Conflict);
             }
@@ -52,6 +82,7 @@ pub(super) fn apply(
                     admission: admission.clone(),
                     entering_mutation_id: command.mutation_id.clone(),
                     leaving_evidence_id: None,
+                    initial_delivery_ids,
                 },
             });
             write_head(facts, head, writes);
@@ -75,6 +106,15 @@ pub(super) fn apply(
                 } else {
                     Err(WorkRejection::Conflict)
                 };
+            }
+            if facts
+                .control
+                .attempt
+                .as_ref()
+                .is_some_and(|observed| observed != &admission.execution)
+                || facts.head.current_admission_id.as_ref() != Some(&admission.admission_id)
+            {
+                return Err(WorkRejection::StaleExecution);
             }
             let mut record = prior.clone();
             record.leaving_evidence_id = Some(evidence_id.clone());
@@ -144,38 +184,15 @@ pub(super) fn apply(
             binding,
             parent_binding_receipt,
             ..
-        } => {
-            let mut processing = facts.processing.clone().ok_or(WorkRejection::Conflict)?;
-            if processing.processing_id != *work_id
-                || binding.recipient_lifecycle == 0
-                || parent_binding_receipt.decision != WorkDecision::Accepted
-                || parent_binding_receipt.session_id != binding.initiator_session_id
-                || facts.parent_binding_receipt.as_ref() != Some(parent_binding_receipt)
-                || !facts.parent_effect.as_ref().is_some_and(|effect| {
-                    effect.invocation_id == binding.invocation_id
-                        && effect.recipient_lifecycle == binding.recipient_lifecycle
-                        && effect.binding.as_ref() == Some(binding)
-                })
-                || binding.invocation_id.is_empty()
-                || binding.owner_task_id.is_empty()
-            {
-                return Err(WorkRejection::Conflict);
-            }
-            let delegation = DelegationRef {
-                parent_session_id: binding.initiator_session_id.clone(),
-                parent_lifecycle: binding.recipient_lifecycle,
-                delegation_id: binding.invocation_id.clone(),
-            };
-            if processing
-                .delegation
-                .as_ref()
-                .is_some_and(|prior| prior != &delegation)
-            {
-                return Err(WorkRejection::Conflict);
-            }
-            processing.delegation = Some(delegation);
-            write_processing(processing, receipt, writes)
-        }
+        } => delegation::bind(
+            command,
+            facts,
+            work_id,
+            binding,
+            parent_binding_receipt,
+            receipt,
+            writes,
+        ),
         WorkAction::BeginReason {
             guard: execution_guard,
             target: work_target,
@@ -193,10 +210,15 @@ pub(super) fn apply(
             {
                 return Err(WorkRejection::InvalidTransition);
             }
-            processing.budget.reason_requests = next(processing.budget.reason_requests)?;
-            if processing.budget.reason_requests > facts.head.limits.reason_requests {
-                return Err(WorkRejection::Capacity);
+            if processing.budget.reason_requests >= facts.head.limits.reason_requests {
+                return block_budget(
+                    processing,
+                    crate::error::WorkBudgetKind::ReasonRequests,
+                    receipt,
+                    writes,
+                );
             }
+            processing.budget.reason_requests = next(processing.budget.reason_requests)?;
             processing.execution = execution_guard.execution.clone();
             processing.stage = WorkStage::ReasonInFlight;
             processing.request_id = Some(request_id.clone());
@@ -290,9 +312,16 @@ pub(super) fn apply(
                 payload: response.clone(),
             });
             if dispatch_intents.is_empty() {
-                processing.stage = WorkStage::Settled;
-                if head.current_processing_id.as_ref() == Some(&processing.processing_id) {
-                    head.current_processing_id = None;
+                if next_work_id.is_some() {
+                    processing.phase_sequence = next(processing.phase_sequence)?;
+                    processing.stage = WorkStage::ReasonReady;
+                    processing.request = None;
+                    processing.request_id = None;
+                } else {
+                    processing.stage = WorkStage::Settled;
+                    if head.current_processing_id.as_ref() == Some(&processing.processing_id) {
+                        head.current_processing_id = None;
+                    }
                 }
             } else {
                 processing.stage = WorkStage::ActReady;
@@ -332,10 +361,15 @@ pub(super) fn apply(
             if processing.stage != WorkStage::Blocked || recovery_evidence.is_empty() {
                 return Err(WorkRejection::InvalidTransition);
             }
-            processing.budget.recoveries = next(processing.budget.recoveries)?;
-            if processing.budget.recoveries > facts.head.limits.recoveries {
-                return Err(WorkRejection::Capacity);
+            if processing.budget.recoveries >= facts.head.limits.recoveries {
+                return block_budget(
+                    processing,
+                    crate::error::WorkBudgetKind::Recoveries,
+                    receipt,
+                    writes,
+                );
             }
+            processing.budget.recoveries = next(processing.budget.recoveries)?;
             processing.stage = processing
                 .resume_stage
                 .take()
@@ -374,6 +408,7 @@ pub(super) fn apply(
             processing.blocked_evidence = Some(reason.clone());
             processing.checkpoint = Some(command.mutation_id.clone());
             let mut head = facts.head.clone();
+            abandon_processing_inputs(facts, &processing, &mut head, writes)?;
             if head.current_processing_id.as_ref() == Some(&processing.processing_id) {
                 head.current_processing_id = None;
             }

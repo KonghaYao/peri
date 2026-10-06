@@ -197,7 +197,7 @@ async fn legacy_queued_enqueue_replay_without_authorization_remains_queued() {
 #[tokio::test]
 async fn authorized_enqueue_replay_recovers_staged_only_publication_with_frozen_identity() {
     let fixture = TestSession::open().await;
-    let (first, _) = mailbox(&fixture, fixture.read_only_resources().await);
+    let (first, _) = mailbox(&fixture, fixture.uncertain_work_resources());
     let request = input(&first, "authorized before crash");
     assert_eq!(
         first.enqueue_durable(&request).await.unwrap_err(),
@@ -255,7 +255,7 @@ async fn authorized_enqueue_replay_recovers_staged_only_publication_with_frozen_
 async fn authorized_enqueue_replay_does_not_recapture_changed_control_generation() {
     use peri_acp_types::session_resources::{ControlAction, ControlCommand, ControlDecision};
     let fixture = TestSession::open().await;
-    let (first, _) = mailbox(&fixture, fixture.read_only_resources().await);
+    let (first, _) = mailbox(&fixture, fixture.uncertain_work_resources());
     let request = input(&first, "stale authorization");
     assert_eq!(
         first.enqueue_durable(&request).await.unwrap_err(),
@@ -676,17 +676,17 @@ async fn uncertain_selection_freezes_original_whole_batch_without_partial_handof
     for request in [&first_input, &second_input] {
         first.enqueue_durable(request).await.unwrap();
     }
-    let (read_only, inbox) = mailbox(&fixture, fixture.read_only_resources().await);
-    read_only.refresh_durable().await.unwrap();
+    let (uncertain, inbox) = mailbox(&fixture, fixture.uncertain_work_resources());
+    uncertain.refresh_durable().await.unwrap();
     let selection = dispatch(
-        &read_only,
+        &uncertain,
         vec![first_input.input_id, second_input.input_id],
     );
     assert_eq!(
-        read_only.dispatch_durable(&selection).await.unwrap_err(),
+        uncertain.dispatch_durable(&selection).await.unwrap_err(),
         UserInputQueueError::OutcomeUnknown
     );
-    let original = read_only.durable.as_ref().unwrap().operations.lock().await
+    let original = uncertain.durable.as_ref().unwrap().operations.lock().await
         [&selection.command_id]
         .commands
         .clone();
@@ -698,15 +698,15 @@ async fn uncertain_selection_freezes_original_whole_batch_without_partial_handof
     let mut retry = selection.clone();
     retry.command_id = uuid::Uuid::now_v7().to_string();
     assert_eq!(
-        read_only.dispatch_durable(&retry).await.unwrap_err(),
+        uncertain.dispatch_durable(&retry).await.unwrap_err(),
         UserInputQueueError::OutcomeUnknown
     );
     assert_eq!(
-        read_only.dispatch_durable(&selection).await.unwrap_err(),
+        uncertain.dispatch_durable(&selection).await.unwrap_err(),
         UserInputQueueError::OutcomeUnknown
     );
     assert_eq!(
-        read_only.durable.as_ref().unwrap().operations.lock().await[&selection.command_id].commands,
+        uncertain.durable.as_ref().unwrap().operations.lock().await[&selection.command_id].commands,
         original
     );
     assert_eq!(load(&fixture).await.head.required_count, 0);

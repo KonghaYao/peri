@@ -65,13 +65,11 @@ async fn workrecords_remote_lost_ack_recovers_one_delivery_original_receipt() {
             drop_before_send: None,
         })
         .await;
-    assert!(
-        adapter
-            .apply_work_mutation(&command)
-            .await
-            .unwrap_err()
-            .is_persistence_uncertain()
-    );
+    assert!(adapter
+        .apply_work_mutation(&command)
+        .await
+        .unwrap_err()
+        .is_persistence_uncertain());
     let reopened = fixture.adapter().await;
     let WorkResolution::Applied { receipt } =
         reopened.resolve_work_mutation(&command).await.unwrap()
@@ -95,12 +93,10 @@ async fn workrecords_remote_lost_ack_recovers_one_delivery_original_receipt() {
             .unwrap(),
         1
     );
-    assert!(
-        !reopened
-            .has_pending_work_mutations(&command.session_id)
-            .await
-            .unwrap()
-    );
+    assert!(!reopened
+        .has_pending_work_mutations(&command.session_id)
+        .await
+        .unwrap());
 }
 
 #[tokio::test]
@@ -114,40 +110,32 @@ async fn workrecords_remote_missing_receipt_stays_unknown_until_final_seal() {
             drop_before_send: Some("session_work".into()),
         })
         .await;
-    assert!(
-        adapter
-            .apply_work_mutation(&command)
-            .await
-            .unwrap_err()
-            .is_persistence_uncertain()
-    );
+    assert!(adapter
+        .apply_work_mutation(&command)
+        .await
+        .unwrap_err()
+        .is_persistence_uncertain());
     assert_eq!(adapter.work_resolution(&command).await.unwrap(), None);
-    assert!(
-        adapter
-            .has_pending_work_mutations(&command.session_id)
-            .await
-            .unwrap()
-    );
+    assert!(adapter
+        .has_pending_work_mutations(&command.session_id)
+        .await
+        .unwrap());
     let fresh = fixture.adapter().await;
-    assert!(
-        fresh
-            .apply_work_mutation(&command)
-            .await
-            .unwrap_err()
-            .is_persistence_uncertain()
-    );
+    assert!(fresh
+        .apply_work_mutation(&command)
+        .await
+        .unwrap_err()
+        .is_persistence_uncertain());
     assert_eq!(
         fresh.resolve_work_mutation(&command).await.unwrap(),
         WorkResolution::NotApplied
     );
-    assert!(
-        fresh
-            .apply_work_mutation(&command)
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("sealed")
-    );
+    assert!(fresh
+        .apply_work_mutation(&command)
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("sealed"));
     assert!(deliveries(&fresh).await.is_empty());
     assert_eq!(
         sqlx::query_scalar::<_, String>(
@@ -215,14 +203,12 @@ async fn workrecords_remote_row_sequence_and_conflicting_identity() {
         mutation_id: first.mutation_id.clone(),
         ..second
     };
-    assert!(
-        adapter
-            .apply_work_mutation(&conflict)
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("identity conflicts")
-    );
+    assert!(adapter
+        .apply_work_mutation(&conflict)
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("identity conflicts"));
     assert_eq!(deliveries(&adapter).await.len(), 2);
 }
 
@@ -265,14 +251,12 @@ async fn workrecords_remote_sql_limit_and_payload_on_demand() {
         session_id: "work-session".into(),
         reference: records[0].publication.event.content.content.clone(),
     };
-    assert!(
-        adapter
-            .read_evidence(&evidence)
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("digest mismatch")
-    );
+    assert!(adapter
+        .read_evidence(&evidence)
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("digest mismatch"));
     let missing = adapter
         .inspect_work(&WorkQuery::new(
             "work-session",
@@ -473,25 +457,19 @@ async fn workrecords_remote_unknown_blocks_destructive_history_and_tree_delete()
             drop_before_send: Some("session_work".into()),
         })
         .await;
-    assert!(
-        adapter
-            .apply_work_mutation(&command)
-            .await
-            .unwrap_err()
-            .is_persistence_uncertain()
-    );
-    assert!(
-        adapter
-            .remove_history_entries(&session, &[payload.id()])
-            .await
-            .is_err()
-    );
-    assert!(
-        adapter
-            .rewind_history(&session, RewindBoundary::RemoveFrom(payload.id()))
-            .await
-            .is_err()
-    );
+    assert!(adapter
+        .apply_work_mutation(&command)
+        .await
+        .unwrap_err()
+        .is_persistence_uncertain());
+    assert!(adapter
+        .remove_history_entries(&session, &[payload.id()])
+        .await
+        .is_err());
+    assert!(adapter
+        .rewind_history(&session, RewindBoundary::RemoveFrom(payload.id()))
+        .await
+        .is_err());
     assert!(adapter.delete_tree(&session).await.is_err());
     let history = adapter.load_session_history(&session).await.unwrap();
     assert_eq!(history.len(), 1);

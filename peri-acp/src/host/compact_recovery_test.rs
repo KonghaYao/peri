@@ -1,7 +1,7 @@
 //! Compact 提交后跨 turn 的恢复回归；复用生产 executor/host 收尾与 SQLite。
 
 use super::*;
-use crate::host::{SessionState, SharedSessions, prompt::finish_prompt_turn};
+use crate::host::{prompt::finish_prompt_turn, SessionState, SharedSessions};
 use peri_acp_types::{
     messages::MessageId,
     session_resources::{
@@ -121,9 +121,22 @@ impl SessionResources for RecoveryStore {
                     .await
                     .unwrap();
             } else {
-                sqlx::query("INSERT INTO session_work_commands(mutation_id,session_id,digest,command_json,reconciled) VALUES (?1,?2,?3,?4,0)")
+                let payload = self
+                    .inner
+                    .prepare_evidence(&peri_acp_types::session_resources::work::EvidenceWrite {
+                        session_id: command.session_id.clone(),
+                        storage_scope: command.session_id.clone(),
+                        payload_id: format!("command:{}", command.digest().unwrap()),
+                        encoding: 1,
+                        bytes: serde_json::to_vec(command).unwrap(),
+                    })
+                    .await
+                    .unwrap();
+                sqlx::query("INSERT INTO session_work_commands(mutation_id,session_id,digest,command_json,command_scope,command_payload_id,lifecycle,reconciled) VALUES (?1,?2,?3,?4,?5,?6,?7,0)")
                     .bind(&command.mutation_id).bind(&command.session_id)
-                    .bind(command.digest().unwrap()).bind(serde_json::to_string(command).unwrap())
+                    .bind(command.digest().unwrap()).bind(serde_json::to_string(&payload).unwrap())
+                    .bind(&payload.storage_scope).bind(&payload.payload_id)
+                    .bind(command.recipient_lifecycle as i64)
                     .execute(&connection).await.unwrap();
             }
             *self.uncertain.lock().unwrap() = Some(command.clone());
@@ -524,6 +537,43 @@ async fn make_recovery_turn(
 }
 
 async fn assert_next_turn_sees_summary(mut ctx: SessionContext, sessions: &SharedSessions) {
+    use peri_acp_types::{execution_admission::*, session_resources::work::*};
+    let resources = ctx.session_resources.as_ref().unwrap();
+    let snapshot = resources
+        .inspect_work(&WorkQuery::new(
+            &ctx.session_id,
+            WorkSelector::CurrentAdmission,
+        ))
+        .await
+        .unwrap();
+    let WorkPage::Admissions(admissions) = snapshot.page else {
+        panic!("cold fixture must inspect the original admission");
+    };
+    for record in admissions {
+        assert!(record.leaving_evidence_id.is_none());
+        let admission = record.admission;
+        let evidence_id = crate::host::execution::finish_admission(resources.as_ref(), &admission)
+            .await
+            .expect("cold fixture must finish its original resolved execution");
+        let settled = ctx
+            .execution_admission_port
+            .as_ref()
+            .unwrap()
+            .settle(SettlementRequest {
+                admission: admission.clone(),
+                proof: AttemptStoppedProof::AttemptStopped {
+                    instance_id: admission.instance_id.clone(),
+                    generation_id: admission.generation_id.clone(),
+                    execution: admission.execution.clone(),
+                    evidence_id,
+                },
+            })
+            .await
+            .unwrap();
+        assert!(
+            matches!(settled, SettlementOutcome::Applied { receipt } if receipt.admission == admission)
+        );
+    }
     ctx.session_access = None;
     execution_fixture::bind_execution(&mut ctx, None);
     let requests = Arc::new(Mutex::new(Vec::new()));

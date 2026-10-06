@@ -64,10 +64,15 @@ pub(super) fn apply(
                 {
                     return Err(WorkRejection::InvalidTransition);
                 }
-                processing.budget.dispatches = next(processing.budget.dispatches)?;
-                if processing.budget.dispatches > facts.head.limits.dispatches {
-                    return Err(WorkRejection::Capacity);
+                if processing.budget.dispatches >= facts.head.limits.dispatches {
+                    return super::processing::block_budget(
+                        processing,
+                        crate::error::WorkBudgetKind::Dispatches,
+                        receipt,
+                        writes,
+                    );
                 }
+                processing.budget.dispatches = next(processing.budget.dispatches)?;
                 write_processing(processing, receipt, writes)?;
             }
             let mut updated = prior.clone();
@@ -166,7 +171,9 @@ pub(super) fn apply(
                 if !matches!(
                     prior.status,
                     InvocationStatus::DispatchAccepted | InvocationStatus::OutcomeUnknown
-                ) {
+                ) && !(prior.status == InvocationStatus::Prepared
+                    && matches!(result.outcome, InvocationOutcome::Cancelled { .. }))
+                {
                     return Err(WorkRejection::InvalidTransition);
                 }
                 if prior.processing_id.is_some() {
@@ -224,7 +231,10 @@ pub(super) fn apply(
                         .remaining_effects
                         .checked_sub(related_settled)
                         .ok_or(WorkRejection::Conflict)?;
-                    if record.remaining_effects == 0 && record.stage != WorkStage::Abandoned {
+                    if record.remaining_effects == 0
+                        && record.stage != WorkStage::Abandoned
+                        && !super::processing::is_budget_blocked(&record)
+                    {
                         record.phase_sequence = next(record.phase_sequence)?;
                         record.stage = if next_work_id.is_some() {
                             WorkStage::ReasonReady
@@ -248,6 +258,9 @@ pub(super) fn apply(
             Ok(())
         }
         WorkAction::ReconcileTaskBinding { binding, .. } => {
+            if binding.recipient_lifecycle != command.recipient_lifecycle {
+                return Err(WorkRejection::StaleLifecycle);
+            }
             let prior = facts
                 .effects
                 .iter()

@@ -4,6 +4,9 @@
 #[path = "test_resources/mock/mod.rs"]
 pub(crate) mod mock;
 
+#[path = "test_resources/uncertain_work.rs"]
+mod uncertain_work;
+
 use std::sync::Arc;
 
 use peri_acp_types::session_resources::{
@@ -76,6 +79,10 @@ impl TestSession {
                 .await
                 .unwrap(),
         )
+    }
+
+    pub(crate) fn uncertain_work_resources(&self) -> Arc<dyn SessionResources> {
+        Arc::new(uncertain_work::UncertainWorkResources(self.resources()))
     }
 }
 

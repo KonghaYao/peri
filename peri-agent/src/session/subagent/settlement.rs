@@ -50,13 +50,9 @@ impl OwnedSubagentExecution {
         {
             return Ok(());
         }
-        let binding = crate::session::work_access::delegation(
-            resources.as_ref(),
-            &admission.session_id,
-            &admission.work_id,
-        )
-        .await
-        .map_err(|error| error.to_string())?;
+        let binding = crate::session::work_access::delegation(resources.as_ref(), admission)
+            .await
+            .map_err(|error| error.to_string())?;
         if binding.owner_task_id != result.task_id {
             return Err("Incomplete: immutable child delegation identity conflicts".into());
         }

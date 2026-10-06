@@ -47,10 +47,11 @@ use peri_model::{
 use serial_test::serial;
 use tokio_util::sync::CancellationToken as AgentCancellationToken;
 
+use super::executor_flow_tests::execution_fixture::run_session_loop;
 use super::executor_flow_tests::{
     make_session_context, make_stage_build, make_turn_input, MockEventSink,
 };
-use crate::session::executor::{run_session_loop, PromptStopReason, SessionContext};
+use crate::session::executor::{PromptStopReason, SessionContext};
 
 /// 受控 stdio MCP 对端。只实现启动准入涉及的方法：
 /// `initialize` / `tools/list` / `resources/list` / `ping`；其余请求（含

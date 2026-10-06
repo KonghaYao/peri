@@ -8,12 +8,12 @@ use peri_acp_types::session_resources::{BindingRecheck, BindingState, FrozenStat
 use peri_acp_types::thread::ThreadId;
 use serde_json::Value;
 
-use crate::dispatch::ReplaySender;
 use crate::dispatch::config_update::make_config_options;
+use crate::dispatch::ReplaySender;
 use crate::host::notify::{send_available_commands_update, send_config_option_update};
 use crate::host::prepared::PreparedSessionInputs;
-use crate::host::workspace::{BindingCheck, workspace_error};
-use crate::host::{AcpServerConfig, SessionState, build_mode_state};
+use crate::host::workspace::{workspace_error, BindingCheck};
+use crate::host::{build_mode_state, AcpServerConfig, SessionState};
 use crate::session::frozen_snapshot::decode_frozen_snapshot;
 use crate::{dispatch, transport::types::AcpError};
 
@@ -382,13 +382,11 @@ pub(crate) async fn handle_metadata(
         };
         response["effort"] = serde_json::json!(effort);
         let config = cfg.peri_config.read();
-        response["providerName"] = serde_json::json!(
-            config
-                .config
-                .profiles
-                .get(&config.config.active_alias)
-                .map(|profile| profile.provider.clone())
-        );
+        response["providerName"] = serde_json::json!(config
+            .config
+            .profiles
+            .get(&config.config.active_alias)
+            .map(|profile| profile.provider.clone()));
     }
     if history {
         let payloads = cfg

@@ -25,7 +25,7 @@ async fn new_schema17_opens_with_reference_messages_only() {
         .fetch_one(&mut connection)
         .await
         .unwrap();
-    assert_eq!(version, 18);
+    assert_eq!(version, 17);
     let columns: Vec<String> = sqlx::query_scalar("SELECT name FROM pragma_table_info('messages')")
         .fetch_all(&mut connection)
         .await
@@ -112,7 +112,7 @@ async fn stopped_migration_preserves_raw_unknown_evidence_and_canonical_message(
         .fetch_one(&mut connection)
         .await
         .unwrap();
-    assert_eq!(version, 18);
+    assert_eq!(version, 17);
     let (reference, truncated): (String, bool) =
         sqlx::query_as("SELECT content_ref,truncated FROM messages")
             .fetch_one(&mut connection)
@@ -167,5 +167,65 @@ async fn failed_stopped_migration_rolls_back_schema_and_all_original_rows() {
     .await
     .unwrap();
     assert!(!payload_table);
+    connection.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn stopped_migration_quarantines_published_input_without_delivery_proof() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("unproven-input.db");
+    old_fixture(&path, true).await;
+    let mut connection = SqliteConnection::connect_with(
+        &SqliteConnectOptions::new()
+            .filename(&path)
+            .create_if_missing(false),
+    )
+    .await
+    .unwrap();
+    let state = serde_json::json!({
+        "revision": 0,
+        "nextAdmissionSequence": 1,
+        "legacyUnknown": {},
+        "works": {},
+        "batches": {},
+        "budgets": {},
+        "obligations": {},
+        "invocations": {},
+        "deliveries": {},
+        "admissions": {},
+        "stagedUserInputs": {
+            "input": {"status": "published", "publicationId": "missing-delivery"}
+        }
+    })
+    .to_string();
+    sqlx::query("UPDATE session_work_state SET state_json=?1")
+        .bind(&state)
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM session_work_commands")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    connection.close().await.unwrap();
+    let report = migrate_stopped_work_store(&path, &approval())
+        .await
+        .unwrap();
+    assert_eq!(report.legacy_unknown_sessions, 1);
+    let mut connection = SqliteConnection::connect_with(
+        &SqliteConnectOptions::new()
+            .filename(&path)
+            .create_if_missing(false),
+    )
+    .await
+    .unwrap();
+    let quarantined: i64 = sqlx::query_scalar(
+        "SELECT json_extract(record_json,'$.legacyUnknown') FROM session_work_head WHERE session_id='legacy-session'",
+    ).fetch_one(&mut connection).await.unwrap();
+    assert_eq!(quarantined, 1);
+    let retained: Vec<u8> = sqlx::query_scalar(
+        "SELECT bytes FROM session_payloads WHERE storage_scope='legacy-session' AND kind='legacyOriginal'",
+    ).fetch_one(&mut connection).await.unwrap();
+    assert_eq!(retained, state.as_bytes());
     connection.close().await.unwrap();
 }

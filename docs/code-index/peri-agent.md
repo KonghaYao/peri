@@ -59,6 +59,10 @@ Inbox 去重入口 `agent/stages/work_receive.rs` 使用 `inspect_work` 的精�
 
 ### 持久 RCRA 与 SDK 准入
 
+`work_recovery.rs` 保留当前 Processing 的 `phase_sequence`；同一 Processing 的阶段游标推进后，`work_receive.rs` 只唤醒后续阶段，不再重复消费初始 Delivery 或触发输入钩子。
+
+`work_receive.rs` 读取精确 Admission 的冻结初始成员，先 Claim 原批次再发布迟到 Inbox 内容；不以当前 Availability 替换已准入候选，也不把新投递加入旧票据。
+
 工具停止与成果结算分离：`tool_dispatch/execution.rs` 收集结果后先经 `work_dispatch.rs` 提交原 invocation outcome，再检查继续执行资格。Blocked/Abandoned 保留停止状态且不生成 successor；无 successor 的结算按原 batch 或真实恢复 admission 校验，不能借新 attempt 重放工具。邮箱 `staging.rs` 在首次 enqueue 的 staged JSON 内固定完整发布授权；原 Queued 重放不重新取得 NewTask 授权，已授权未完成的发布沿用原命令与控制代际。
 
 `agent/stages/work_boundary.rs` 在首个 hook 或模型调用前确认 SDK admission、领域登记和真实 entered ACK；`session/turn.rs` 固定 ticket 的 turn/attempt 与控制代际。`work_ledger.rs` 保存 Unknown 的原命令并冻结副作用；不通过改全局 revision/创建替代身份绕过原命令对账。`work_receive.rs` 原子接纳/领取/投影，`work_reason.rs` 通过不可变载荷引用保存本次实际请求与响应到 Act 的责任交接；`work_dispatch.rs` 按单 Effect revision 提交结果，最后一项原子推进同一 Processing 的阶段游标。`work_recovery.rs` 只按当前关联证据恢复，不把 Transcript 存在当处理完成，不盲重放 OutcomeUnknown。

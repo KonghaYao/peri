@@ -392,11 +392,15 @@ impl UserInputMailbox {
         let head = durable
             .inspect(&self.session_id, WorkSelector::Availability)
             .await?;
+        let WorkPage::Availability(availability) = &head.page else {
+            return Err(UserInputQueueError::IdentityConflict);
+        };
         self.refresh_durable().await?;
         let blocked = {
             let state = self.state.lock();
             !state.valid
                 || state.paused
+                || availability.blocked
                 || head.control.status != ControlStatus::Active
                 || state.records.iter().any(|record| {
                     matches!(

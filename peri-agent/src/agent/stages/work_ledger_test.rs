@@ -39,7 +39,7 @@ async fn publication(
 }
 
 #[tokio::test]
-async fn paused_recipient_still_accepts_durable_publication() {
+async fn paused_recipient_keeps_publication_pending_without_claiming_it() {
     let session = TestSession::open().await;
     let control = session
         .resources
@@ -84,8 +84,18 @@ async fn paused_recipient_still_accepts_durable_publication() {
             .find(|delivery| delivery.delivery_id == delivery_id)
             .unwrap()
             .obligation,
-        ObligationStatus::Blocked
+        ObligationStatus::Pending
     );
+    assert_eq!(
+        snapshot.control.status,
+        peri_acp_types::session_resources::ControlStatus::Paused
+    );
+    let delivery = deliveries
+        .iter()
+        .find(|delivery| delivery.delivery_id == delivery_id)
+        .unwrap();
+    assert!(delivery.processing_id.is_none());
+    assert!(delivery.projection.is_none());
     assert_eq!(snapshot.head.required_count, 1);
 }
 

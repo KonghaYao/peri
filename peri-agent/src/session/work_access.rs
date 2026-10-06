@@ -18,6 +18,7 @@ pub(crate) async fn inspect(
     Ok(inspection)
 }
 
+#[cfg(test)]
 pub(crate) async fn processing(
     resources: &dyn SessionResources,
     session_id: &str,
@@ -133,13 +134,9 @@ pub(crate) async fn terminal(
 
 pub(crate) async fn delegation(
     resources: &dyn SessionResources,
-    session_id: &str,
-    processing_id: &str,
+    execution_admission: &WorkAdmission,
 ) -> SessionResourceResult<TaskBinding> {
-    let processing = processing(resources, session_id, processing_id).await?;
-    let reference = processing
-        .delegation
-        .ok_or_else(|| SessionResourceError::conflict("processing delegation unavailable"))?;
+    let reference = delegation_reference(resources, execution_admission).await?;
     let effect = effect(
         resources,
         &reference.parent_session_id,
@@ -155,4 +152,95 @@ pub(crate) async fn delegation(
         ));
     }
     Ok(binding)
+}
+
+async fn delegation_reference(
+    resources: &dyn SessionResources,
+    execution_admission: &WorkAdmission,
+) -> SessionResourceResult<DelegationRef> {
+    let session_id = execution_admission.session_id.as_str();
+    let processing_id = execution_admission.work_id.as_str();
+    let inspection = inspect(
+        resources,
+        session_id,
+        WorkSelector::Processing {
+            processing_id: processing_id.into(),
+        },
+    )
+    .await?;
+    let WorkPage::Processings(records) = inspection.page else {
+        return Err(SessionResourceError::conflict(
+            "delegation processing lookup returned a different page",
+        ));
+    };
+    if !records.is_empty() {
+        if records.len() != 1
+            || records[0].processing_id != processing_id
+            || records[0].recipient_lifecycle != execution_admission.lifecycle
+        {
+            return Err(SessionResourceError::conflict(
+                "delegation processing identity mismatch",
+            ));
+        }
+        return records[0]
+            .delegation
+            .clone()
+            .ok_or_else(|| SessionResourceError::conflict("processing delegation unavailable"));
+    }
+    let registration = admission(resources, execution_admission).await?;
+    if registration.leaving_evidence_id.is_some() {
+        return Err(SessionResourceError::conflict(
+            "preclaim delegation admission is inactive",
+        ));
+    }
+    let delivery_ids = registration
+        .initial_delivery_ids
+        .as_ref()
+        .filter(|delivery_ids| {
+            !delivery_ids.is_empty() && delivery_ids.len() <= MAX_WORK_PAGE_SIZE as usize
+        })
+        .ok_or_else(|| {
+            SessionResourceError::conflict(
+                "preclaim delegation has no bounded frozen delivery membership",
+            )
+        })?;
+    let mut reference = None;
+    for delivery_id in delivery_ids {
+        let inspection = inspect(
+            resources,
+            session_id,
+            WorkSelector::Delivery {
+                delivery_id: delivery_id.clone(),
+            },
+        )
+        .await?;
+        let WorkPage::Deliveries(records) = inspection.page else {
+            return Err(SessionResourceError::conflict(
+                "delegation delivery lookup returned a different page",
+            ));
+        };
+        let delivery = records.first().ok_or_else(|| {
+            SessionResourceError::conflict("delegation candidate delivery unavailable")
+        })?;
+        if records.len() != 1
+            || delivery.delivery_id != *delivery_id
+            || delivery.recipient_lifecycle != execution_admission.lifecycle
+            || delivery.processing_id.is_some()
+        {
+            return Err(SessionResourceError::conflict(
+                "delegation candidate delivery identity mismatch",
+            ));
+        }
+        let current = delivery
+            .delegation
+            .as_ref()
+            .ok_or_else(|| SessionResourceError::conflict("candidate delegation unavailable"))?;
+        if reference.as_ref().is_some_and(|prior| prior != current) {
+            return Err(SessionResourceError::conflict(
+                "candidate delegation references differ",
+            ));
+        }
+        reference = Some(current.clone());
+    }
+    reference.ok_or_else(|| SessionResourceError::conflict("candidate delegation unavailable"))
 }

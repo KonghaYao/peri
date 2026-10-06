@@ -3,7 +3,7 @@ use peri_acp_types::{
     identity::AttemptId,
     messages::{BaseMessage, ToolCallRequest},
     session::{MessagePolicy, TurnId},
-    session_resources::{ControlAttempt, FrozenSnapshotBytes, NewSession, NewSessionMeta, work::*},
+    session_resources::{work::*, ControlAttempt, FrozenSnapshotBytes, NewSession, NewSessionMeta},
     store::PersistedPayload,
     workspace::SessionBinding,
 };
@@ -421,15 +421,28 @@ async fn lost_abandon_ack_resolves_original_command_without_rebuilding_revision(
 }
 
 async fn journal_before_effect(fixture: &Fixture, mutation: &WorkCommand) {
+    let payload = fixture
+        .resources
+        .prepare_evidence(&EvidenceWrite {
+            session_id: mutation.session_id.clone(),
+            storage_scope: mutation.session_id.clone(),
+            payload_id: format!("command:{}", mutation.digest().unwrap()),
+            encoding: 1,
+            bytes: serde_json::to_vec(mutation).unwrap(),
+        })
+        .await
+        .unwrap();
     let connection = sqlx::SqlitePool::connect(&format!(
         "sqlite://{}",
         fixture.directory.path().join("stop.db").display()
     ))
     .await
     .unwrap();
-    sqlx::query("INSERT INTO session_work_commands(mutation_id,session_id,digest,command_json,reconciled) VALUES (?1,?2,?3,?4,0)")
+    sqlx::query("INSERT INTO session_work_commands(mutation_id,session_id,digest,command_json,command_scope,command_payload_id,subject_id,lifecycle,reconciled) VALUES (?1,?2,?3,?4,?5,?6,?1,?7,0)")
         .bind(&mutation.mutation_id).bind(&mutation.session_id)
-        .bind(mutation.digest().unwrap()).bind(serde_json::to_string(mutation).unwrap())
+        .bind(mutation.digest().unwrap()).bind(serde_json::to_string(&payload).unwrap())
+        .bind(&payload.storage_scope).bind(&payload.payload_id)
+        .bind(mutation.recipient_lifecycle as i64)
         .execute(&connection).await.unwrap();
 }
 
@@ -475,7 +488,7 @@ async fn stop_before_effect_recovery_seals_not_applied_without_rebuilding() {
         let error = abandon_owned_work(&fresh, &command, &receipt)
             .await
             .unwrap_err();
-        assert!(error.message.contains("not applied"));
+        assert!(error.message.contains("not applied"), "{error:?}");
         assert_eq!(load(&fresh).await.head, snapshot.head);
     }
     let owned = crate::host::work_query::command(
@@ -504,11 +517,8 @@ async fn stop_replays_known_rejected_original_receipt_without_new_revision() {
         &fixture.admission.work_id,
     )
     .await;
-    if let WorkAction::AbandonWork {
-        expected_revision, ..
-    } = &mut original.action
-    {
-        *expected_revision = expected_revision.saturating_sub(1);
+    if let WorkAction::AbandonWork { target, .. } = &mut original.action {
+        target.expected_work_revision += 1;
     }
     let rejected = fixture
         .resources
@@ -636,11 +646,9 @@ async fn root_query_recovers_descendant_original_without_retargeting() {
         .await
         .unwrap();
     let before = load(&fresh).await;
-    assert!(
-        crate::host::work_query::availability(&before)
-            .unwrap()
-            .blocked
-    );
+    let availability = crate::host::work_query::availability(&before).unwrap();
+    assert!(availability.pending);
+    assert!(availability.candidates.is_empty());
     assert_eq!(pending(&fresh).await, vec![original.clone()]);
     let recovered = crate::host::work_recovery::resolve_pending(
         &fresh,

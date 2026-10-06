@@ -9,6 +9,111 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 struct ProbeTool(Arc<AtomicUsize>);
 
+#[tokio::test]
+async fn admitted_batch_claim_precedes_late_inbox_publication() {
+    let (model, _listener) = native_model().await;
+    let fixture = fixture(Arc::new(model), Vec::new()).await;
+    let late = BaseMessage::human("late notification");
+    let late_id = late.id();
+    fixture
+        .context
+        .session
+        .queue
+        .push(crate::session::QueuedMessage::prompt(
+            crate::session::MessageSource::SystemInjected,
+            late,
+        ));
+    let received = receive::run_receive(ReceiveInput {
+        context: fixture.context.clone(),
+    })
+    .await
+    .unwrap();
+    assert_eq!(received.consumed_count, 1);
+    assert_eq!(received.input_message_ids.len(), 1);
+    assert!(!received.input_message_ids.contains(&late_id));
+    let processing = saved_processing(&fixture).await;
+    assert_eq!(processing.processing_id, fixture.admission.work_id);
+    assert_eq!(processing.delivery_count, 1);
+    let inspection = fixture
+        .bound
+        .resources()
+        .inspect_work(&WorkQuery::new(
+            fixture.bound.thread_id(),
+            WorkSelector::Delivery {
+                delivery_id: late_id.as_uuid().to_string(),
+            },
+        ))
+        .await
+        .unwrap();
+    let WorkPage::Deliveries(deliveries) = inspection.page else {
+        panic!("expected late delivery");
+    };
+    assert_eq!(deliveries.len(), 1);
+    assert!(deliveries[0].processing_id.is_none());
+}
+
+#[tokio::test]
+async fn admitted_batch_claim_retains_registered_members_after_external_publication() {
+    let (model, _listener) = native_model().await;
+    let fixture = fixture(Arc::new(model), Vec::new()).await;
+    let resources = fixture.bound.resources();
+    let late = BaseMessage::human("external publication after admission");
+    let late_id = late.id().as_uuid().to_string();
+    let content = crate::agent::stages::prepare_work_payload(
+        resources.as_ref(),
+        &fixture.bound.thread_id(),
+        &peri_acp_types::store::PersistedPayload::Message(late),
+    )
+    .await
+    .unwrap();
+    let receipt = resources
+        .apply_work_mutation(&WorkCommand {
+            session_id: fixture.bound.thread_id(),
+            recipient_lifecycle: fixture.admission.lifecycle,
+            mutation_id: format!("external:{late_id}"),
+            action: WorkAction::PublishDelivery {
+                delivery: PublishDelivery {
+                    delivery_id: late_id.clone(),
+                    event: WorkEvent {
+                        producer_namespace: "external-producer".into(),
+                        event_id: late_id.clone(),
+                        event_kind: "agentMessage".into(),
+                        causation_id: None,
+                        content,
+                    },
+                    purpose: DeliveryPurpose::UserInput,
+                    policy: crate::session::MessagePolicy::ensure_processing(),
+                },
+            },
+        })
+        .await
+        .unwrap();
+    assert_eq!(receipt.decision, WorkDecision::Accepted);
+    let received = receive::run_receive(ReceiveInput {
+        context: fixture.context.clone(),
+    })
+    .await
+    .unwrap();
+    assert_eq!(received.consumed_count, 1);
+    assert_eq!(received.input_message_ids.len(), 1);
+    assert_eq!(saved_processing(&fixture).await.delivery_count, 1);
+    let inspection = resources
+        .inspect_work(&WorkQuery::new(
+            fixture.bound.thread_id(),
+            WorkSelector::Delivery {
+                delivery_id: late_id,
+            },
+        ))
+        .await
+        .unwrap();
+    let WorkPage::Deliveries(deliveries) = inspection.page else {
+        panic!("expected external delivery");
+    };
+    assert_eq!(deliveries.len(), 1);
+    assert!(deliveries[0].processing_id.is_none());
+    assert_eq!(deliveries[0].obligation, ObligationStatus::Pending);
+}
+
 #[async_trait::async_trait]
 impl BaseTool for ProbeTool {
     fn name(&self) -> &str {
@@ -101,15 +206,6 @@ async fn production_full_store_and_native_http_checkpoint_before_model_send_and_
     assert_eq!(reads.load(Ordering::SeqCst), 1);
     let body = server.await.unwrap();
     assert!(body.to_string().contains("dynamic system 0"));
-    let snapshot = fixture
-        .bound
-        .resources
-        .inspect_work(&WorkQuery::new(
-            fixture.bound.thread_id(),
-            WorkSelector::Head,
-        ))
-        .await
-        .unwrap();
     assert_eq!(
         saved_delivery(&fixture).await.obligation,
         ObligationStatus::Satisfied
@@ -144,6 +240,14 @@ async fn production_full_store_and_native_http_checkpoint_before_model_send_and_
     assert_eq!(before.len(), 2);
     assert_eq!(after.len(), before.len());
     assert_eq!(fixture.context.session.transcript.read().entries().len(), 2);
+    let received = receive::run_receive(ReceiveInput {
+        context: fixture.context.clone(),
+    })
+    .await
+    .unwrap();
+    assert_eq!(received.wake_up_count, 0);
+    assert_eq!(received.consumed_count, 0);
+    assert!(received.input_message_ids.is_empty());
 }
 
 #[tokio::test]

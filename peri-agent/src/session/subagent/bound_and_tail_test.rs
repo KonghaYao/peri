@@ -355,9 +355,7 @@ async fn subagent_spawn_rejects_unresolvable_identity_before_creating_child() {
         Ok(_) => panic!("untrusted invocation identity must not create a child"),
         Err(error) => error,
     };
-    assert!(error
-        .to_string()
-        .contains("delegation invocation unavailable"));
+    assert!(error.to_string().contains("effect identity unavailable"));
     assert_eq!(store.threads().len(), before);
 }
 

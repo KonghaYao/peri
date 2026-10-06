@@ -5,7 +5,6 @@ use crate::sessions::schema_cleanup::{
 };
 use peri_acp_types::messages::BaseMessage;
 use peri_acp_types::store::{serialize_persisted_payload, PersistedPayload};
-use peri_acp_types::workspace::WorkspaceError;
 use sqlx::{Connection, SqliteConnection};
 
 async fn old_database() -> (tempfile::TempDir, SqliteConnection) {
@@ -20,10 +19,16 @@ async fn old_database() -> (tempfile::TempDir, SqliteConnection) {
     .await
     .unwrap();
     for statement in CREATE_TABLES {
-        sqlx::query(*statement)
-            .execute(&mut connection)
-            .await
-            .unwrap();
+        sqlx::query(
+            if statement.contains("CREATE TABLE IF NOT EXISTS messages") {
+                LEGACY_MESSAGES_SQL
+            } else {
+                *statement
+            },
+        )
+        .execute(&mut connection)
+        .await
+        .unwrap();
     }
     sqlx::raw_sql("ALTER TABLE threads ADD COLUMN cached_context TEXT;
         ALTER TABLE threads ADD COLUMN context_cache_epoch INTEGER NOT NULL DEFAULT 0;
@@ -57,13 +62,6 @@ async fn old_database() -> (tempfile::TempDir, SqliteConnection) {
             .execute(&mut connection).await.unwrap();
     }
     (directory, connection)
-}
-
-async fn history(
-    connection: &mut SqliteConnection,
-) -> Vec<(i64, String, String, String, bool, bool, Option<String>)> {
-    sqlx::query_as("SELECT rowid, message_id, thread_id, content, truncated, excluded, projection FROM messages ORDER BY rowid")
-        .fetch_all(connection).await.unwrap()
 }
 
 #[tokio::test]
@@ -109,147 +107,27 @@ async fn environment_backfill_failure_rolls_back_schema_and_version() {
 }
 
 #[tokio::test]
-async fn schema_v11_upgrade_removes_only_retired_state_and_keeps_config_and_history() {
-    let (directory, mut connection) = old_database().await;
-    let before = history(&mut connection).await;
-    let path = directory.path().join("threads.db");
-    connection.close().await.unwrap();
-    let store = SqliteThreadStore::new(&path).await.unwrap();
-    let mut connection = store.database.pool.acquire().await.unwrap();
-    let (version,): (i64,) = sqlx::query_as("PRAGMA user_version")
-        .fetch_one(&mut *connection)
-        .await
-        .unwrap();
-    assert_eq!(version, super::schema::CURRENT_SCHEMA_VERSION);
-    let (retired,): (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM sqlite_master WHERE name IN ('thread_goals', 'execution_runs')",
-    )
-    .fetch_one(&mut *connection)
-    .await
-    .unwrap();
-    assert_eq!(retired, 0);
-    let (columns,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM pragma_table_xinfo('threads') WHERE name IN ('cached_context', 'context_cache_epoch')").fetch_one(&mut *connection).await.unwrap();
-    assert_eq!(columns, 0);
-    assert_eq!(history(&mut connection).await, before);
-    let (extension,): (String,) = sqlx::query_as("SELECT value FROM extension_state")
-        .fetch_one(&mut *connection)
-        .await
-        .unwrap();
-    assert_eq!(extension, "must survive");
-    drop(connection);
-    let mut meta = store.load_meta(&"older".into()).await.unwrap();
-    assert_eq!(meta.config.as_deref(), Some(r#"{"model":"keep"}"#));
-    meta.config = Some(r#"{"model":"changed"}"#.into());
-    store.update_meta(&"older".into(), meta).await.unwrap();
-    let reopened = SqliteThreadStore::new(&path).await.unwrap();
-    assert_eq!(
-        reopened
-            .load_meta(&"older".into())
-            .await
-            .unwrap()
-            .config
-            .as_deref(),
-        Some(r#"{"model":"changed"}"#)
-    );
-    assert_eq!(
-        reopened
-            .load_message_flags(&"older".into())
-            .await
-            .unwrap()
-            .len(),
-        1
-    );
-}
-
-#[tokio::test]
-async fn schema_v11_reading_context_preserves_timestamp_and_recent_order() {
+async fn schema_v11_refusal_preserves_retired_state_config_and_history() {
     let (directory, connection) = old_database().await;
     let path = directory.path().join("threads.db");
     connection.close().await.unwrap();
-    let store = SqliteThreadStore::new(&path).await.unwrap();
-    let before = store.load_meta(&"older".into()).await.unwrap().updated_at;
-    let order = store
-        .list_thread_entries("/tmp")
-        .await
-        .unwrap()
-        .into_iter()
-        .map(|entry| entry.id)
-        .collect::<Vec<_>>();
-    for _ in 0..2 {
-        let context = store.load_context(&"older".into()).await.unwrap();
-        assert_eq!(context.len(), 1);
-        assert_eq!(context[0].content(), "older");
-    }
-    assert_eq!(
-        store.load_meta(&"older".into()).await.unwrap().updated_at,
-        before
-    );
-    assert_eq!(
-        store
-            .list_thread_entries("/tmp")
-            .await
-            .unwrap()
-            .into_iter()
-            .map(|entry| entry.id)
-            .collect::<Vec<_>>(),
-        order
-    );
-    store
-        .update_title(&"older".into(), "renamed")
-        .await
-        .unwrap();
-    assert!(store.load_meta(&"older".into()).await.unwrap().updated_at > before);
-    assert_eq!(
-        store.list_thread_entries("/tmp").await.unwrap()[0].id,
-        "older"
-    );
+    assert_legacy_rejected(&path).await;
 }
 
 #[tokio::test]
-async fn schema_v11_readonly_old_and_new_databases_never_migrate_or_write_on_read() {
-    let (directory, mut connection) = old_database().await;
+async fn schema_v11_refusal_preserves_context_and_timestamps() {
+    let (directory, connection) = old_database().await;
     let path = directory.path().join("threads.db");
-    let before = history(&mut connection).await;
     connection.close().await.unwrap();
-    let reader = SqliteThreadStore::open_existing_read_only(&path)
-        .await
-        .unwrap();
-    assert_eq!(
-        reader.load_context(&"older".into()).await.unwrap()[0].content(),
-        "older"
-    );
-    let mut connection = reader.database.pool.acquire().await.unwrap();
-    let (version,): (i64,) = sqlx::query_as("PRAGMA user_version")
-        .fetch_one(&mut *connection)
-        .await
-        .unwrap();
-    assert_eq!(version, 10);
-    let (goals,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM thread_goals")
-        .fetch_one(&mut *connection)
-        .await
-        .unwrap();
-    assert_eq!(goals, 1);
-    assert_eq!(history(&mut connection).await, before);
-    drop(connection);
-    drop(reader);
-    let writer = SqliteThreadStore::new(&path).await.unwrap();
-    drop(writer);
-    let reader = SqliteThreadStore::open_existing_read_only(&path)
-        .await
-        .unwrap();
-    assert_eq!(
-        reader
-            .load_meta(&"older".into())
-            .await
-            .unwrap()
-            .config
-            .as_deref(),
-        Some(r#"{"model":"keep"}"#)
-    );
-    assert_eq!(
-        reader.load_context(&"older".into()).await.unwrap()[0].content(),
-        "older"
-    );
+    assert_legacy_rejected(&path).await;
+}
+
+#[tokio::test]
+async fn schema_v11_readonly_inline_history_is_refused_without_writes() {
+    let (directory, connection) = old_database().await;
+    let path = directory.path().join("threads.db");
+    connection.close().await.unwrap();
+    assert_legacy_rejected(&path).await;
 }
 
 #[tokio::test]
@@ -289,10 +167,9 @@ async fn schema_v11_unknown_goals_and_external_dependencies_refuse_without_data_
             Ok(_) => panic!("unexpected upgrade: {setup}"),
             Err(error) => error,
         };
-        assert!(matches!(
-            error.downcast_ref::<WorkspaceError>(),
-            Some(WorkspaceError::UnsupportedDatabaseSchema)
-        ));
+        assert!(error
+            .to_string()
+            .contains("explicit stopped-writer offline migration"));
         let mut connection = SqliteConnection::connect_with(
             &SqliteConnectOptions::new()
                 .filename(directory.path().join("threads.db"))
@@ -388,7 +265,7 @@ async fn schema_v11_failed_column_drop_rolls_back_the_prior_goal_drop() {
 }
 
 #[tokio::test]
-async fn schema_v11_cleans_prior_development_eleven_and_reopens_without_runtime_tables() {
+async fn schema_v11_refusal_preserves_prior_development_runtime_tables() {
     for definition in [LEGACY_EXECUTION_SQL, LEGACY_BOUND_EXECUTION_SQL] {
         let (directory, mut connection) = old_database().await;
         sqlx::raw_sql(
@@ -411,41 +288,10 @@ async fn schema_v11_cleans_prior_development_eleven_and_reopens_without_runtime_
         .execute(&mut connection)
         .await
         .unwrap();
-        let before = history(&mut connection).await;
-        let meta: (String, String, String) =
-            sqlx::query_as("SELECT config, created_at, updated_at FROM threads WHERE id='older'")
-                .fetch_one(&mut connection)
-                .await
-                .unwrap();
         connection.close().await.unwrap();
         let path = directory.path().join("threads.db");
         for _ in 0..2 {
-            let store = SqliteThreadStore::new(&path).await.unwrap();
-            let mut connection = store.database.pool.acquire().await.unwrap();
-            assert_eq!(history(&mut connection).await, before);
-            let after: (String, String, String) = sqlx::query_as(
-                "SELECT config, created_at, updated_at FROM threads WHERE id='older'",
-            )
-            .fetch_one(&mut *connection)
-            .await
-            .unwrap();
-            assert_eq!(after, meta);
-            let (version,): (i64,) = sqlx::query_as("PRAGMA user_version")
-                .fetch_one(&mut *connection)
-                .await
-                .unwrap();
-            assert_eq!(version, super::schema::CURRENT_SCHEMA_VERSION);
-            let (retired,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM sqlite_schema WHERE name IN ('execution_runs', 'idx_execution_generation')")
-                .fetch_one(&mut *connection).await.unwrap();
-            assert_eq!(retired, 0);
-            drop(connection);
-            let (retired,): (i64,) =
-                sqlx::query_as("SELECT COUNT(*) FROM sqlite_schema WHERE name = 'execution_runs'")
-                    .fetch_one(&store.database.pool)
-                    .await
-                    .unwrap();
-            assert_eq!(retired, 0);
-            store.close().await;
+            assert_legacy_rejected(&path).await;
         }
     }
 }
@@ -485,4 +331,183 @@ async fn schema_v11_same_version_unknown_execution_table_is_preserved() {
         .await
         .unwrap();
     assert_eq!(cache, "obsolete cache");
+}
+
+const LEGACY_MESSAGES_SQL: &str = r#"CREATE TABLE IF NOT EXISTS messages (
+    message_id TEXT PRIMARY KEY, thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+    role TEXT NOT NULL, content TEXT NOT NULL,
+    truncated BOOLEAN NOT NULL DEFAULT 0, excluded BOOLEAN NOT NULL DEFAULT 0, projection TEXT
+)"#;
+
+async fn assert_legacy_rejected(path: &std::path::Path) {
+    let before = legacy_evidence(path).await;
+    let backup = path.with_extension("verified-backup");
+    std::fs::copy(path, &backup).unwrap();
+    assert_eq!(
+        std::fs::read(&backup).unwrap(),
+        std::fs::read(path).unwrap()
+    );
+    let mut connection =
+        SqliteConnection::connect_with(&SqliteConnectOptions::new().filename(path).read_only(true))
+            .await
+            .unwrap();
+    let version: i64 = sqlx::query_scalar("PRAGMA user_version")
+        .fetch_one(&mut connection)
+        .await
+        .unwrap();
+    connection.close().await.unwrap();
+    if version != 17 {
+        let approval = crate::sessions::StoppedWriterApproval {
+            source_version: version,
+            writers_stopped: true,
+            backup_verified: true,
+        };
+        assert!(crate::sessions::migrate_stopped_work_store(path, &approval)
+            .await
+            .is_err());
+    }
+    let error = SqliteThreadStore::new(path)
+        .await
+        .err()
+        .expect("legacy writer must refuse");
+    assert!(
+        error
+            .to_string()
+            .contains("explicit stopped-writer offline migration"),
+        "{error:#}"
+    );
+    let error = SqliteThreadStore::open_existing_read_only(path)
+        .await
+        .err()
+        .expect("inline history is not reference history");
+    assert!(matches!(
+        error.kind(),
+        super::connection::ReadOnlyStoreErrorKind::SchemaIncompatible
+    ));
+    assert_eq!(
+        legacy_evidence(path).await,
+        before,
+        "refusal must preserve every schema object and row"
+    );
+}
+
+async fn legacy_evidence(path: &std::path::Path) -> Vec<(String, Vec<String>)> {
+    let mut connection =
+        SqliteConnection::connect_with(&SqliteConnectOptions::new().filename(path).read_only(true))
+            .await
+            .unwrap();
+    let version: i64 = sqlx::query_scalar("PRAGMA user_version")
+        .fetch_one(&mut connection)
+        .await
+        .unwrap();
+    let schema: Vec<String> = sqlx::query_scalar("SELECT json_array(type,name,tbl_name,sql) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name").fetch_all(&mut connection).await.unwrap();
+    let tables: Vec<String> = sqlx::query_scalar("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").fetch_all(&mut connection).await.unwrap();
+    let mut evidence = vec![
+        ("version".into(), vec![version.to_string()]),
+        ("schema".into(), schema),
+    ];
+    for table in tables {
+        let columns: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM pragma_table_info(?1) ORDER BY cid")
+                .bind(&table)
+                .fetch_all(&mut connection)
+                .await
+                .unwrap();
+        let expressions = columns
+            .iter()
+            .map(|column| format!("quote(\"{}\")", column.replace('"', "\"\"")))
+            .collect::<Vec<_>>()
+            .join(" || ',' || ");
+        let statement = format!(
+            "SELECT quote(rowid) || ':' || {expressions} FROM \"{}\" ORDER BY rowid",
+            table.replace('"', "\"\"")
+        );
+        let rows = sqlx::query_scalar(sqlx::AssertSqlSafe(statement))
+            .fetch_all(&mut connection)
+            .await
+            .unwrap();
+        evidence.push((table, rows));
+    }
+    connection.close().await.unwrap();
+    evidence
+}
+
+#[tokio::test]
+async fn reference_history_read_preserves_timestamps_recent_order_config_and_flags() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("reference.db");
+    let store = SqliteThreadStore::new(&path).await.unwrap();
+    let mut ids = Vec::new();
+    for title in ["older", "newer"] {
+        let id = store
+            .create_thread(peri_acp_types::thread::ThreadMeta::new_at(
+                "/tmp",
+                peri_time::now_wall(),
+            ))
+            .await
+            .unwrap();
+        store
+            .append_message(&id, BaseMessage::human(title))
+            .await
+            .unwrap();
+        ids.push(id);
+    }
+    sqlx::query("UPDATE threads SET updated_at='2020-01-01T00:00:00Z',config='{\"model\":\"keep\"}' WHERE id=?1").bind(&ids[0]).execute(&store.database.pool).await.unwrap();
+    sqlx::query("UPDATE threads SET updated_at='2020-02-01T00:00:00Z' WHERE id=?1")
+        .bind(&ids[1])
+        .execute(&store.database.pool)
+        .await
+        .unwrap();
+    let before = store.load_meta(&ids[0]).await.unwrap().updated_at;
+    let order = store
+        .list_thread_entries("/tmp")
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|entry| entry.id)
+        .collect::<Vec<_>>();
+    let flags = serde_json::to_value(store.load_message_flags(&ids[0]).await.unwrap()).unwrap();
+    for _ in 0..2 {
+        assert_eq!(
+            store.load_context(&ids[0]).await.unwrap()[0].content(),
+            "older"
+        );
+    }
+    assert_eq!(store.load_meta(&ids[0]).await.unwrap().updated_at, before);
+    assert_eq!(
+        store
+            .list_thread_entries("/tmp")
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.id)
+            .collect::<Vec<_>>(),
+        order
+    );
+    assert_eq!(
+        store.load_meta(&ids[0]).await.unwrap().config.as_deref(),
+        Some(r#"{"model":"keep"}"#)
+    );
+    store.close().await;
+    let reader = SqliteThreadStore::open_existing_read_only(&path)
+        .await
+        .unwrap();
+    assert_eq!(
+        reader.load_context(&ids[0]).await.unwrap()[0].content(),
+        "older"
+    );
+    assert_eq!(reader.load_meta(&ids[0]).await.unwrap().updated_at, before);
+    assert_eq!(
+        serde_json::to_value(reader.load_message_flags(&ids[0]).await.unwrap()).unwrap(),
+        flags
+    );
+    reader.close().await;
+    let store = SqliteThreadStore::new(&path).await.unwrap();
+    store.update_title(&ids[0], "renamed").await.unwrap();
+    assert!(store.load_meta(&ids[0]).await.unwrap().updated_at > before);
+    assert_eq!(
+        store.list_thread_entries("/tmp").await.unwrap()[0].id,
+        ids[0]
+    );
+    store.close().await;
 }

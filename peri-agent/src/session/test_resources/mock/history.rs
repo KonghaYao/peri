@@ -12,18 +12,35 @@ pub(crate) async fn seed_saved_fixture_runtime(
         .inspect_work(&WorkQuery::new(child_id, WorkSelector::Head))
         .await
         .unwrap();
-if let Ok(descriptor) = crate::session::work_access::descriptor(resources.as_ref(), child_id, work.control.lifecycle).await {
-    if descriptor.child_resume_metadata_json.is_some() { return; }
-}
-let previous = if work.control.lifecycle > 1 {
-    crate::session::work_access::descriptor(resources.as_ref(), child_id, work.control.lifecycle - 1).await.ok()
+    if let Ok(descriptor) = crate::session::work_access::descriptor(
+        resources.as_ref(),
+        child_id,
+        work.control.lifecycle,
+    )
+    .await
+    {
+        if descriptor.child_resume_metadata_json.is_some() {
+            return;
+        }
+    }
+    let previous = if work.control.lifecycle > 1 {
+        crate::session::work_access::descriptor(
+            resources.as_ref(),
+            child_id,
+            work.control.lifecycle - 1,
+        )
+        .await
+        .ok()
         .and_then(|descriptor| descriptor.child_resume_metadata_json)
-} else { None };
-let saved = if let Some(previous) = previous {
-    let mut saved: crate::session::subagent::ChildResumeMetadata = serde_json::from_str(&previous).unwrap();
-    saved.recipient_lifecycle = work.control.lifecycle;
-    saved
-} else {
+    } else {
+        None
+    };
+    let saved = if let Some(previous) = previous {
+        let mut saved: crate::session::subagent::ChildResumeMetadata =
+            serde_json::from_str(&previous).unwrap();
+        saved.recipient_lifecycle = work.control.lifecycle;
+        saved
+    } else {
         let intent =
             super::work::bind_fixture_task(resources.clone(), initiator, 1, child_id).await;
         crate::session::subagent::ChildResumeMetadata {

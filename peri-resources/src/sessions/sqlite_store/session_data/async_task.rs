@@ -74,7 +74,7 @@ impl SqliteSessionData {
     pub(super) async fn write_close_intent(&self, id: &ThreadId) -> SessionResourceResult<()> {
         self.writable()?;
         let current = self.read_control(id).await?;
-        if current.status == peri_acp_types::session_resources::ControlStatus::Closing {
+        if crate::sessions::control::close_request_already_recorded(&current) {
             return Ok(());
         }
         let command = crate::sessions::control::close_command(

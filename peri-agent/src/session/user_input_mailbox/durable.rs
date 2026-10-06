@@ -233,6 +233,8 @@ impl UserInputMailbox {
         )?;
         validate_input_id(&request.input_id)?;
         let fingerprint = compute_fingerprint(("takeback", request, control_generation));
+        self.refresh_inputs(std::slice::from_ref(&request.input_id))
+            .await?;
         let mut operations = durable.operations.lock().await;
         if !operations.contains_key(&request.command_id) {
             ensure_not_frozen(&operations)?;

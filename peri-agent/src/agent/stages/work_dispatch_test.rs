@@ -83,14 +83,17 @@ async fn mid_batch_budget_denial_persists_accepted_outcome_before_returning_budg
     .await
     .err()
     .unwrap();
-    assert!(matches!(
-        error,
-        crate::error::AgentError::WorkBudgetExhausted {
-            budget: peri_acp_types::error::WorkBudgetKind::Dispatches,
-            used: 1,
-            limit: 1,
-        }
-    ));
+    assert!(
+        matches!(
+            error,
+            crate::error::AgentError::WorkBudgetExhausted {
+                budget: peri_acp_types::error::WorkBudgetKind::Dispatches,
+                used: 1,
+                limit: 1,
+            }
+        ),
+        "{error:?}"
+    );
     assert_eq!(effects.load(Ordering::SeqCst), 1);
     let session = fixture
         .context
@@ -160,11 +163,13 @@ async fn parallel_effects_settle_once_and_advance_one_processing_cursor() {
         "independent effect probe",
     )
     .await;
-    super::super::receive::run_receive(super::super::ReceiveInput {
+    let initial = super::super::receive::run_receive(super::super::ReceiveInput {
         context: fixture.context.clone(),
     })
     .await
     .unwrap();
+    assert_eq!(initial.consumed_count, 1);
+    assert_eq!(initial.input_message_ids.len(), 1);
     super::super::work_reason::prepare(
         &fixture.context,
         &[BaseMessage::human("probe")],
@@ -231,4 +236,12 @@ async fn parallel_effects_settle_once_and_advance_one_processing_cursor() {
     assert_eq!(settled.remaining_effects, 0);
     assert_eq!(settled.phase_sequence, partial.phase_sequence + 1);
     assert_eq!(settled.budget.dispatches, 2);
+    let received = super::super::receive::run_receive(super::super::ReceiveInput {
+        context: fixture.context.clone(),
+    })
+    .await
+    .unwrap();
+    assert_eq!(received.wake_up_count, 1);
+    assert_eq!(received.consumed_count, 0);
+    assert!(received.input_message_ids.is_empty());
 }

@@ -28,6 +28,7 @@ use crate::messages::{BaseMessage, ToolCallRequest};
 use crate::session::tool_catalog::SessionToolCatalogSnapshot;
 use crate::tools::{BaseTool, CanonicalToolInvocation};
 use execution::collect_tool_results;
+pub(super) use execution::requires_outcome_reconciliation;
 
 /// 连续失败检测阈值
 const CONSECUTIVE_FAILURE_THRESHOLD: u32 = 5;

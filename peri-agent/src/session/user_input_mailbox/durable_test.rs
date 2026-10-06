@@ -246,6 +246,7 @@ async fn withdraw_then_resend_new_generation_cannot_revive_old_event() {
     let (mailbox, inbox) = mailbox(&fixture, fixture.resources());
     let old = input(&mailbox);
     let old_receipt = mailbox.enqueue_durable(&old).await.unwrap();
+    let old_delivery = input_delivery(&fixture, &old.input_id).await;
     let withdrawal = mailbox
         .take_back_durable(&takeback(&mailbox, &old))
         .await
@@ -255,7 +256,6 @@ async fn withdraw_then_resend_new_generation_cannot_revive_old_event() {
         old.original_draft
     );
     assert!(inbox.queue().drain_all().is_empty());
-    let old_delivery = input_delivery(&fixture, &old.input_id).await;
     let mut new = old.clone();
     new.command_id = uuid::Uuid::now_v7().to_string();
     let new_receipt = mailbox.enqueue_durable(&new).await.unwrap();
@@ -343,6 +343,7 @@ async fn withdrawal_wins_before_claim_cas_without_processing_projection() {
     let (mailbox, _) = mailbox(&fixture, fixture.resources());
     let request = input(&mailbox);
     mailbox.enqueue_durable(&request).await.unwrap();
+    let published = input_delivery(&fixture, &request.input_id).await;
     let admission = admit(&fixture).await;
     let snapshot = load(&fixture).await;
     let command = claim_command(&fixture, &snapshot, &admission);
@@ -356,16 +357,36 @@ async fn withdrawal_wins_before_claim_cas_without_processing_projection() {
         .await
         .unwrap();
     assert!(matches!(receipt.decision, WorkDecision::Rejected { .. }));
-    assert!(input_delivery(&fixture, &request.input_id)
+    assert!(delivery(&fixture, &published.delivery_id)
         .await
         .projection
         .is_none());
 }
 
 #[tokio::test]
-async fn store_write_failure_never_accepts_or_hands_off_and_freezes_original_command() {
+async fn evidence_write_failure_rejects_before_freezing_a_work_command() {
     let fixture = TestSession::open().await;
     let (mailbox, inbox) = mailbox(&fixture, fixture.read_only_resources().await);
+    let request = input(&mailbox);
+    let error = mailbox.enqueue_durable(&request).await.unwrap_err();
+    assert!(matches!(error, UserInputQueueError::DurableRejected(detail)
+        if detail.contains("read-only") && detail.contains("NotApplied")));
+    assert!(mailbox
+        .durable
+        .as_ref()
+        .unwrap()
+        .operations
+        .lock()
+        .await
+        .is_empty());
+    assert!(inbox.queue().is_empty());
+    assert_eq!(load(&fixture).await.head.required_count, 0);
+}
+
+#[tokio::test]
+async fn store_write_failure_never_accepts_or_hands_off_and_freezes_original_command() {
+    let fixture = TestSession::open().await;
+    let (mailbox, inbox) = mailbox(&fixture, fixture.uncertain_work_resources());
     let original = input(&mailbox);
     assert_eq!(
         mailbox.enqueue_durable(&original).await.unwrap_err(),
@@ -453,7 +474,7 @@ async fn stop_withdrawal_is_durable_before_return_to_draft() {
 #[tokio::test]
 async fn pending_commands_keep_original_authorization_without_revision_refresh() {
     let fixture = TestSession::open().await;
-    let (mailbox, _) = mailbox(&fixture, fixture.read_only_resources().await);
+    let (mailbox, _) = mailbox(&fixture, fixture.uncertain_work_resources());
     let request = input(&mailbox);
     assert_eq!(
         mailbox.enqueue_durable(&request).await.unwrap_err(),

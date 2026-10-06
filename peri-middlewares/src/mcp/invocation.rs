@@ -125,10 +125,10 @@ impl McpInvocation {
         existing: Option<RequestMetaObject>,
     ) -> Result<RequestMetaObject, InvocationError> {
         let mut metadata = existing.unwrap_or_default();
-        if metadata.0.0.contains_key(INVOCATION_META_KEY) {
+        if metadata.0 .0.contains_key(INVOCATION_META_KEY) {
             return Err(InvocationError::IdentityConflict);
         }
-        metadata.0.0.insert(
+        metadata.0 .0.insert(
             INVOCATION_META_KEY.into(),
             serde_json::json!({
                 "version": 1,

@@ -49,6 +49,10 @@ typed schema、默认值、领域合并、scope/revision/explain/update 归
 
 ### 持久 RCRA（src/session_resources/work/）
 
+`response.rs::validate_reason_response_intents` 核对不可变模型响应的身份、工具调用与意图的一一对应及原始参数摘要，由存储边界加载确切载荷后调用。`processing_lifecycle.rs` 管预算阻塞与未履行输入放弃；`processing_delegation.rs` 管准入前候选委托及领取后的 Processing 关联，Claim 原子转移临时 Delivery 委托引用。
+
+`processing_candidate.rs` 校验并冻结初始候选成员；`AdmissionRecord::initial_delivery_ids` 记录 Register 同事务选择的原成员，Claim 按原票据与精确集合领取，其他 producer 的后来投递不改变这份证明。
+
 2026-10-06 工作记录重构：`entities.rs` 定义 Mailbox、Processing、Effect 与标量 `SessionWorkHead`；`mailbox.rs`、`processing.rs`、`effect.rs` 各自实现领域规则，`transition.rs::transition_work` 只消费本次关联的 `WorkFacts`，输出 typed `WorkWrite`，不再维护整会话聚合 reducer。
 
 `query.rs` 定义 `WorkQuery`、`WorkSelector`、`WorkInspection` 与 typed `WorkPage`。`SessionResources::inspect_work` 按身份或有限页查询，最多 64 条；候选与 Unknown 判定有独立 selector，不允许以历史聚合替代。`prepare_evidence` / `read_evidence` 显式处理不可变 `PayloadRef`；命令及状态更新不重编码历史正文。

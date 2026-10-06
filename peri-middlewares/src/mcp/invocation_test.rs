@@ -347,11 +347,11 @@ async fn real_sql_prepare_preserves_same_work_link_and_wire_identity() {
     );
     let metadata = invocation.request_meta(None).unwrap();
     assert_eq!(
-        metadata.0.0[INVOCATION_META_KEY]["invocationId"],
+        metadata.0 .0[INVOCATION_META_KEY]["invocationId"],
         "invocation-1"
     );
     assert_eq!(
-        metadata.0.0[INVOCATION_META_KEY]["initiatorSessionId"],
+        metadata.0 .0[INVOCATION_META_KEY]["initiatorSessionId"],
         "mcp-session"
     );
 }
@@ -452,36 +452,35 @@ async fn real_sql_unknown_response_blocks_replay_of_original_rpc() {
 async fn identity_or_arguments_cannot_be_reinterpreted_after_prepare() {
     let fixture = Fixture::new().await;
     let context = fixture.context();
-    assert!(
-        McpInvocation::from_context(
-            &context,
-            &serde_json::json!({"command":"other"}),
-            "mcp__workspace__Bash",
-            "owner-1"
-        )
-        .await
-        .is_err()
-    );
+    assert!(McpInvocation::from_context(
+        &context,
+        &serde_json::json!({"command":"other"}),
+        "mcp__workspace__Bash",
+        "owner-1"
+    )
+    .await
+    .is_err());
     assert!(
         McpInvocation::from_context(&context, &fixture.input, "other-tool", "owner-1")
             .await
             .is_err()
     );
-    assert!(
-        McpInvocation::from_context(
-            &context,
-            &fixture.input,
-            "mcp__workspace__Bash",
-            "other-owner"
-        )
-        .await
-        .is_err()
-    );
+    assert!(McpInvocation::from_context(
+        &context,
+        &fixture.input,
+        "mcp__workspace__Bash",
+        "other-owner"
+    )
+    .await
+    .is_err());
     let mut context = fixture.context();
     context.invocation_id = Some("another-invocation".into());
-    assert!(
-        McpInvocation::from_context(&context, &fixture.input, "mcp__workspace__Bash", "owner-1")
-            .await
-            .is_err()
-    );
+    assert!(McpInvocation::from_context(
+        &context,
+        &fixture.input,
+        "mcp__workspace__Bash",
+        "owner-1"
+    )
+    .await
+    .is_err());
 }

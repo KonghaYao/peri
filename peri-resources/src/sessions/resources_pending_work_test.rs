@@ -58,7 +58,7 @@ async fn pending_work_gate_skips_unrelated_malformed_draft_but_keeps_unknown_blo
     let root = "root".to_owned();
     sqlx::query("INSERT INTO session_inputs(session_id,lifecycle,input_id,revision,fifo_seq,generation,status,record_json) VALUES (?1,1,'malformed',0,1,0,'queued',?2)")
         .bind(&root)
-        .bind("undecodable draft".repeat(100_000))
+        .bind(serde_json::json!({"unrelatedEvidence": "undecodable draft".repeat(100_000)}).to_string())
         .execute(fixture.facade.local_pool())
         .await
         .unwrap();

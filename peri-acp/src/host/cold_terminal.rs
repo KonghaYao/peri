@@ -100,14 +100,22 @@ pub(super) async fn reconcile(
         }
         Some(owned) => match owned.resolution {
             Some(WorkResolution::Applied { receipt }) => receipt,
-            Some(WorkResolution::NotApplied) => return Err(incomplete("original parent terminal command was sealed not applied")),
+            Some(WorkResolution::NotApplied) => {
+                return Err(incomplete(
+                    "original parent terminal command was sealed not applied",
+                ))
+            }
             _ => match resources
                 .resolve_work_mutation(command)
                 .await
                 .map_err(super::workspace::resource_error)?
             {
                 WorkResolution::Applied { receipt } => receipt,
-                WorkResolution::NotApplied => return Err(incomplete("original parent terminal command was sealed not applied")),
+                WorkResolution::NotApplied => {
+                    return Err(incomplete(
+                        "original parent terminal command was sealed not applied",
+                    ))
+                }
                 WorkResolution::Unknown => {
                     return Err(incomplete(
                         "original parent terminal command remains unknown",

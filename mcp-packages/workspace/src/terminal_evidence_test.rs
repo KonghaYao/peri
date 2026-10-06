@@ -149,11 +149,9 @@ async fn test_production_dispatch_persists_bash_tail_failure_evidence() {
     assert_eq!(evidence.exit_code, Some(7));
     assert!(evidence.output_truncated);
     let output_ref = evidence.output_ref.as_ref().expect("full output ref");
-    assert!(
-        std::fs::read_to_string(output_ref)
-            .unwrap()
-            .contains(&format!("{}TAIL_FAILURE", "x".repeat(20_000)))
-    );
+    assert!(std::fs::read_to_string(output_ref)
+        .unwrap()
+        .contains(&format!("{}TAIL_FAILURE", "x".repeat(20_000))));
     assert!(result.output.chars().count() <= 10_000);
 
     let transcript = context.session.transcript.read();

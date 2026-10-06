@@ -2,12 +2,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use peri_acp_types::plugin::{ConfigSource, McpServerConfig};
-use peri_acp_types::session_resources::FrozenState;
 use peri_acp_types::session_resources::work::{
     WorkAction, WorkCommand, WorkDecision, WorkInspection, WorkPage, WorkSelector,
 };
+use peri_acp_types::session_resources::FrozenState;
 
-use crate::host::{AcpServerConfig, prepared::PreparedSessionInputs};
+use crate::host::{prepared::PreparedSessionInputs, AcpServerConfig};
 use crate::transport::types::AcpError;
 
 pub(super) async fn bind(
@@ -171,15 +171,10 @@ pub(super) async fn copy_for_reopen(
     )
     .await?;
     let previous_descriptor =
-        crate::host::work_query::descriptor(&previous_page, previous_lifecycle)?.ok_or_else(
-            || {
-                AcpError::new(
-                    -32010,
-                    "Reopen Blocked: previous recovery descriptor missing",
-                )
-            },
-        )?;
-    let Some(previous) = previous_descriptor.resource_owners.as_ref() else {
+        crate::host::work_query::descriptor(&previous_page, previous_lifecycle)?;
+    let Some(previous) =
+        previous_descriptor.and_then(|descriptor| descriptor.resource_owners.as_ref())
+    else {
         load_for_restore(cfg, session_id).await?;
         return Err(AcpError::new(
             -32010,
@@ -213,7 +208,9 @@ pub(super) async fn copy_for_reopen(
         )
         .await?;
     }
-    if let Some(metadata) = &previous_descriptor.child_resume_metadata_json {
+    if let Some(metadata) =
+        previous_descriptor.and_then(|descriptor| descriptor.child_resume_metadata_json.as_ref())
+    {
         let mut metadata: peri_agent::session::subagent::ChildResumeMetadata =
             serde_json::from_str(metadata).map_err(|_| {
                 AcpError::new(

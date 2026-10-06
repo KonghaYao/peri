@@ -5,7 +5,7 @@ use peri_acp_types::event::{BackgroundTaskResult, EventSink};
 use peri_acp_types::session_resources::work::{
     WorkAction, WorkAdmission, WorkCommand, WorkDecision, WorkQuery, WorkTarget,
 };
-use peri_agent::agent::stages::{LoopResult, run_react_loop};
+use peri_agent::agent::stages::{run_react_loop, LoopResult};
 use peri_agent::session::subagent::{
     ChildResumeMetadata, ColdChildExecution, ColdChildRuntime, SessionFactory,
     SubagentChainContext, SubagentHost,
@@ -13,7 +13,7 @@ use peri_agent::session::subagent::{
 use peri_agent::tools::BaseTool;
 
 use super::{AcpServerConfig, SessionState, SharedSessions};
-use crate::transport::{AcpTransport, types::AcpError};
+use crate::transport::{types::AcpError, AcpTransport};
 
 pub(super) struct ColdChildRun {
     pub execution: ColdChildExecution,

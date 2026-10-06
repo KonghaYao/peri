@@ -276,7 +276,7 @@ async fn terminal_publication_failure_reason_is_visible_at_default_log_level() {
         logs.text()
     );
     assert!(
-        failure_line.contains("terminal publication has no durable invocation/task binding"),
+        failure_line.contains("terminal task binding unavailable or ambiguous"),
         "captured:\n{}",
         logs.text()
     );
@@ -325,7 +325,7 @@ async fn terminal_publication_retry_keeps_reason_visible_without_log_flooding() 
         logs.text()
     );
     assert!(
-        retry_line.contains("terminal publication has no durable invocation/task binding"),
+        retry_line.contains("terminal task binding unavailable or ambiguous"),
         "captured:\n{}",
         logs.text()
     );

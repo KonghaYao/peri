@@ -102,7 +102,9 @@ impl WorkMutationBarrier {
             Ok(WorkResolution::Applied { receipt }) => Self::confirm(command, receipt, unconfirmed),
             Ok(WorkResolution::NotApplied) => {
                 *unconfirmed = None;
-                Err(WorkCommitError::NotApplied { command: Box::new(command.clone()) })
+                Err(WorkCommitError::NotApplied {
+                    command: Box::new(command.clone()),
+                })
             }
             Ok(WorkResolution::Unknown) | Err(_) => Err(WorkCommitError::Unknown {
                 command: Box::new(command.clone()),

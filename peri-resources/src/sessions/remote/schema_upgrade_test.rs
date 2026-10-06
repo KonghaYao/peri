@@ -15,9 +15,7 @@ use super::connection::RemoteTransport;
 use super::generation::ConnectionGate;
 use super::mutation::{RemoteStore, StoreAccess};
 use super::schema::{self, StoreIdentityRead, StoreSnapshot};
-use super::schema_upgrade;
-use super::schema_v12_upgrade;
-use super::session_data::{open_step, OpenStep};
+use super::session_data::open_step;
 use super::sql::StatementSpec;
 use crate::sessions::{
     canonical::CREATE_TABLES,
@@ -25,96 +23,17 @@ use crate::sessions::{
 };
 
 #[tokio::test]
-async fn remote_v13_upgrade_drops_owner_tables_and_preserves_session_facts() {
-    let fixture = Fixture::new().await;
-    let store = fixture.store(StoreAccess::ReadWrite);
-    schema_upgrade::upgrade(&store, &fixture.snapshot)
-        .await
-        .unwrap();
-    let pool = &fixture.transport.pool;
-    sqlx::raw_sql(
-        "UPDATE peri_store_meta SET schema_version = 13;
-        CREATE TABLE session_execution_owners(root_id TEXT PRIMARY KEY REFERENCES threads(id), epoch INTEGER NOT NULL, nonce TEXT NOT NULL, expires_at_unix INTEGER NOT NULL, released INTEGER NOT NULL);
-        CREATE TABLE session_execution_workspace_descriptors(root_id TEXT PRIMARY KEY REFERENCES session_execution_owners(root_id), owner_epoch INTEGER NOT NULL, endpoint TEXT NOT NULL, key_identity TEXT NOT NULL, agent_generation_id TEXT NOT NULL, unsupported_async_owners INTEGER NOT NULL);
-        INSERT INTO session_execution_owners VALUES ('session', 7, 'retired', 0, 0);
-        INSERT INTO session_execution_workspace_descriptors VALUES ('session', 7, 'retired', 'retired', 'retired', 0);
-        INSERT INTO session_close_intents VALUES ('session', 'now')",
-    )
-    .execute(pool)
-    .await
-    .unwrap();
-    let StoreIdentityRead::Present(snapshot) = store.read_identity().await.unwrap() else {
-        panic!("missing v13 identity")
-    };
-    assert!(matches!(
-        open_step(
-            StoreIdentityRead::Present(snapshot.clone()),
-            StoreAccess::ReadWrite
-        )
-        .unwrap(),
-        OpenStep::Upgrade(_)
-    ));
-    let before: (String, String, String) = sqlx::query_as("SELECT t.frozen_context,m.content,m.projection FROM threads t JOIN messages m ON m.thread_id=t.id WHERE t.id=?1")
-        .bind("session").fetch_one(pool).await.unwrap();
-    schema_upgrade::upgrade(&store, &snapshot).await.unwrap();
-    assert_eq!(fixture.version().await, schema::REMOTE_SCHEMA_VERSION);
-    assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM sqlite_master WHERE name IN ('session_execution_owners','session_execution_workspace_descriptors')")
-        .fetch_one(pool).await.unwrap(), 0);
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>(
-            "SELECT count(*) FROM session_close_intents WHERE thread_id=?1"
-        )
-        .bind("session")
-        .fetch_one(pool)
-        .await
-        .unwrap(),
-        1
-    );
-    let after: (String, String, String) = sqlx::query_as("SELECT t.frozen_context,m.content,m.projection FROM threads t JOIN messages m ON m.thread_id=t.id WHERE t.id=?1")
-        .bind("session").fetch_one(pool).await.unwrap();
-    assert_eq!(before, after);
+async fn remote_v13_refusal_preserves_owner_tables_and_session_facts() {
+    let fixture = Fixture::legacy_v2(13).await;
+    fixture.transport.drop_reply.store(true, Ordering::SeqCst);
+    fixture.assert_refused().await;
 }
 
 #[tokio::test]
-async fn remote_v13_owner_removal_respects_read_only_and_reports_lost_commit() {
-    let fixture = Fixture::new().await;
-    let writable = fixture.store(StoreAccess::ReadWrite);
-    schema_upgrade::upgrade(&writable, &fixture.snapshot)
-        .await
-        .unwrap();
-    sqlx::raw_sql(
-        "UPDATE peri_store_meta SET schema_version = 13;
-        CREATE TABLE session_execution_owners(root_id TEXT PRIMARY KEY)",
-    )
-    .execute(&fixture.transport.pool)
-    .await
-    .unwrap();
-    let StoreIdentityRead::Present(snapshot) = writable.read_identity().await.unwrap() else {
-        panic!("missing identity")
-    };
-    let read_only = fixture.store(StoreAccess::ReadOnly);
-    let error = schema_upgrade::upgrade(&read_only, &snapshot)
-        .await
-        .unwrap_err();
-    assert!(matches!(
-        error.kind(),
-        SessionResourceErrorKind::ReadOnlyStore
-    ));
-    assert_eq!(fixture.version().await, 13);
+async fn remote_v13_refusal_never_sends_writes_even_with_lost_reply() {
+    let fixture = Fixture::legacy_v2(13).await;
     fixture.transport.drop_reply.store(true, Ordering::SeqCst);
-    assert!(schema_upgrade::upgrade(&writable, &snapshot)
-        .await
-        .unwrap_err()
-        .is_persistence_uncertain());
-    assert_eq!(fixture.version().await, schema::REMOTE_SCHEMA_VERSION);
-    assert!(matches!(
-        open_step(
-            writable.read_identity().await.unwrap(),
-            StoreAccess::ReadWrite
-        )
-        .unwrap(),
-        OpenStep::Existing(_)
-    ));
+    fixture.assert_refused().await;
 }
 
 struct SqliteTransport {
@@ -265,140 +184,10 @@ struct Fixture {
 }
 
 #[tokio::test]
-async fn v11_to_v12_remote_batch_preserves_history_and_clears_machine_credentials() {
-    let directory = tempfile::tempdir().unwrap();
-    let pool = SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect_with(
-            sqlx::sqlite::SqliteConnectOptions::new()
-                .filename(directory.path().join("remote-v11.db"))
-                .create_if_missing(true)
-                .foreign_keys(false),
-        )
-        .await
-        .unwrap();
-    for statement in CREATE_TABLES {
-        sqlx::query(*statement).execute(&pool).await.unwrap();
-    }
-    sqlx::query(schema::CREATE_STORE_META_SQL)
-        .execute(&pool)
-        .await
-        .unwrap();
-    let project = uuid::Uuid::new_v4().to_string();
-    let registration = uuid::Uuid::new_v4().to_string();
-    let machine = uuid::Uuid::new_v4().to_string();
-    let thread = uuid::Uuid::new_v4().to_string();
-    let discovery = serde_json::json!({
-        "root":"/repo", "root_identity":{"device":1,"inode":1},
-        "common_dir":null,"common_identity":null,"private_dir":null,"private_identity":null
-    })
-    .to_string();
-    sqlx::query(
-        "INSERT INTO peri_store_meta VALUES (0, 11, 'store-v11', 'peri.session.store/v2', 'now')",
-    )
-    .execute(&pool)
-    .await
-    .unwrap();
-    sqlx::query("INSERT INTO projects VALUES (?1, '/repo', 'object')")
-        .bind(&project)
-        .execute(&pool)
-        .await
-        .unwrap();
-    sqlx::query("INSERT INTO workspaces VALUES (?1, ?2, '/repo', 'object', ?3)")
-        .bind(&registration)
-        .bind(&project)
-        .bind(discovery)
-        .execute(&pool)
-        .await
-        .unwrap();
-    sqlx::query("INSERT INTO threads(id,cwd,created_at,updated_at,message_count,frozen_context) VALUES (?1,'/repo/src','now','now',1,'frozen')")
-        .bind(&thread).execute(&pool).await.unwrap();
-    sqlx::query("INSERT INTO session_bindings VALUES (?1,1,?2,?3,'src')")
-        .bind(&thread)
-        .bind(&project)
-        .bind(&registration)
-        .execute(&pool)
-        .await
-        .unwrap();
-    sqlx::query("INSERT INTO session_environments VALUES (?1,?2)")
-        .bind(&thread)
-        .bind(&machine)
-        .execute(&pool)
-        .await
-        .unwrap();
-    let mismatched_thread = uuid::Uuid::new_v4().to_string();
-    sqlx::query("INSERT INTO threads(id,cwd,created_at,updated_at,message_count,frozen_context) VALUES (?1,'/other/place','now','now',1,'frozen')")
-        .bind(&mismatched_thread).execute(&pool).await.unwrap();
-    sqlx::query("INSERT INTO session_bindings VALUES (?1,1,?2,?3,'wrong/relative')")
-        .bind(&mismatched_thread)
-        .bind(&project)
-        .bind(&registration)
-        .execute(&pool)
-        .await
-        .unwrap();
-    sqlx::query("INSERT INTO session_environments VALUES (?1,?2)")
-        .bind(&mismatched_thread)
-        .bind(&machine)
-        .execute(&pool)
-        .await
-        .unwrap();
-    sqlx::query("INSERT INTO messages(message_id,thread_id,role,content) VALUES ('message',?1,'user','history')")
-        .bind(&thread).execute(&pool).await.unwrap();
-    sqlx::query(
-        "INSERT INTO mcp_oauth_credentials VALUES ('local',?1,'server','old credential','now')",
-    )
-    .bind(&machine)
-    .execute(&pool)
-    .await
-    .unwrap();
-    let transport = Arc::new(SqliteTransport {
-        pool,
-        writes: AtomicUsize::new(0),
-        fail_column_drop: AtomicBool::new(false),
-        change_schema: AtomicBool::new(false),
-        drop_reply: AtomicBool::new(false),
-        truncate_reply: AtomicBool::new(false),
-    });
-    let store = Fixture::store_for(&transport, StoreAccess::ReadWrite);
-    let StoreIdentityRead::Present(snapshot) = store.read_identity().await.unwrap() else {
-        panic!("missing identity")
-    };
-    schema_v12_upgrade::upgrade(&store, &snapshot)
-        .await
-        .unwrap();
-    let row: (String, i64, String) = sqlx::query_as(
-        "SELECT t.cwd,t.archived,w.machine_id FROM threads t JOIN workspaces w ON w.id=t.workspace_id WHERE t.id=?1"
-    ).bind(&thread).fetch_one(&transport.pool).await.unwrap();
-    assert_eq!(row, ("/repo/src".into(), 0, machine));
-    let fallback: (String, String) = sqlx::query_as(
-        "SELECT w.path,w.path_source FROM threads t JOIN workspaces w ON w.id=t.workspace_id WHERE t.id=?1",
-    )
-    .bind(&mismatched_thread)
-    .fetch_one(&transport.pool)
-    .await
-    .unwrap();
-    assert_eq!(fallback, ("/other/place".into(), "unverified".into()));
-    let payload: (String,) = sqlx::query_as("SELECT content FROM messages WHERE thread_id=?1")
-        .bind(&thread)
-        .fetch_one(&transport.pool)
-        .await
-        .unwrap();
-    assert_eq!(payload.0, "history");
-    let credentials: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM mcp_oauth_credentials")
-        .fetch_one(&transport.pool)
-        .await
-        .unwrap();
-    assert_eq!(credentials.0, 0);
-    let environments: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'session_environments'",
-    )
-    .fetch_one(&transport.pool)
-    .await
-    .unwrap();
-    assert_eq!(environments.0, 0);
-    let upgraded = store.read_identity().await.unwrap();
-    assert!(matches!(upgraded, StoreIdentityRead::Present(snapshot)
-        if snapshot.schema_version == 12 && snapshot.contract == "peri.session.store/v3"));
+async fn v11_remote_refusal_preserves_history_and_machine_credentials() {
+    let fixture = Fixture::new().await;
+    sqlx::raw_sql("DROP TABLE thread_goals; ALTER TABLE threads DROP COLUMN cached_context; ALTER TABLE threads DROP COLUMN context_cache_epoch; UPDATE peri_store_meta SET schema_version=11").execute(&fixture.transport.pool).await.unwrap();
+    fixture.assert_refused().await;
 }
 
 impl Fixture {
@@ -414,7 +203,16 @@ impl Fixture {
             .await
             .unwrap();
         for statement in CREATE_TABLES {
-            sqlx::query(*statement).execute(&pool).await.unwrap();
+            sqlx::query(
+                if statement.contains("CREATE TABLE IF NOT EXISTS messages") {
+                    LEGACY_MESSAGES_SQL
+                } else {
+                    *statement
+                },
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
         }
         sqlx::query(schema::CREATE_STORE_META_SQL)
             .execute(&pool)
@@ -495,164 +293,47 @@ impl Fixture {
 }
 
 #[tokio::test]
-async fn remote_schema_upgrade_preserves_identity_ledger_config_and_rowid_history() {
+async fn remote_legacy_refusal_preserves_identity_ledger_config_and_rowid_history() {
     let fixture = Fixture::new().await;
-    let retained_sql = "SELECT 'threads', json_array(id, title, cwd, created_at, updated_at, message_count, parent_thread_id, snapshot_at_message_id, hidden, cancel_policy, config, frozen_context, inherited_context, agent_status) FROM threads
-        UNION ALL SELECT 'projects', json_array(id, locator, object_identity) FROM projects
-        UNION ALL SELECT 'bindings', json_array(thread_id, schema_version, project_id, workspace_id, relative_cwd) FROM session_bindings
-        ORDER BY 1, 2";
-    let before: Vec<(String, String)> = sqlx::query_as(retained_sql)
-        .fetch_all(&fixture.transport.pool)
-        .await
-        .unwrap();
-    let store = fixture.store(StoreAccess::ReadWrite);
-    assert!(matches!(
-        open_step(
-            StoreIdentityRead::Present(fixture.snapshot.clone()),
-            StoreAccess::ReadWrite
-        )
-        .unwrap(),
-        OpenStep::Upgrade(_)
-    ));
-    schema_upgrade::upgrade(&store, &fixture.snapshot)
-        .await
-        .unwrap();
-    assert_eq!(fixture.version().await, schema::REMOTE_SCHEMA_VERSION);
-    let after: Vec<(String, String)> = sqlx::query_as(retained_sql)
-        .fetch_all(&fixture.transport.pool)
-        .await
-        .unwrap();
-    assert_eq!(after, before);
-    let environments: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'session_environments'",
-    )
-    .fetch_one(&fixture.transport.pool)
-    .await
-    .unwrap();
-    assert_eq!(environments.0, 0);
-    let (identity, timestamp, config): (String, String, String) = sqlx::query_as(
-        "SELECT store_id, peri_store_meta.created_at, config FROM peri_store_meta, threads",
-    )
-    .fetch_one(&fixture.transport.pool)
-    .await
-    .unwrap();
-    assert_eq!(
-        (identity.as_str(), timestamp.as_str(), config.as_str()),
-        (
-            "existing-store",
-            "original timestamp",
-            r#"{"model":"keep"}"#
-        )
-    );
-    let (receipt,): (String,) = sqlx::query_as("SELECT receipt FROM peri_op_ledger")
-        .fetch_one(&fixture.transport.pool)
-        .await
-        .unwrap();
-    assert_eq!(receipt, "receipt");
-    let history: (i64, String, bool, String) =
-        sqlx::query_as("SELECT rowid, content, excluded, projection FROM messages")
-            .fetch_one(&fixture.transport.pool)
-            .await
-            .unwrap();
-    assert_eq!(
-        history,
-        (
-            7,
-            "original content".into(),
-            true,
-            "original projection".into()
-        )
-    );
-    let (retired,): (i64,) =
-        sqlx::query_as("SELECT COUNT(*) FROM sqlite_master WHERE name = 'thread_goals'")
-            .fetch_one(&fixture.transport.pool)
-            .await
-            .unwrap();
-    assert_eq!(retired, 0);
-    let (columns,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM pragma_table_xinfo('threads') WHERE name IN ('cached_context', 'context_cache_epoch')").fetch_one(&fixture.transport.pool).await.unwrap();
-    assert_eq!(columns, 0);
-    assert!(matches!(
-        open_step(store.read_identity().await.unwrap(), StoreAccess::ReadWrite).unwrap(),
-        OpenStep::Existing(_)
-    ));
-    assert_eq!(fixture.transport.writes.load(Ordering::SeqCst), 3);
-}
-
-#[tokio::test]
-async fn remote_schema_upgrade_readonly_access_never_sends_a_mutation() {
-    let fixture = Fixture::new().await;
-    let reader = fixture.store(StoreAccess::ReadOnly);
-    assert!(matches!(
-        open_step(reader.read_identity().await.unwrap(), StoreAccess::ReadOnly).unwrap(),
-        OpenStep::Existing(_)
-    ));
-    let error = schema_upgrade::upgrade(&reader, &fixture.snapshot)
-        .await
-        .unwrap_err();
-    assert!(matches!(
-        error.kind(),
-        SessionResourceErrorKind::ReadOnlyStore
-    ));
-    assert_eq!(fixture.transport.writes.load(Ordering::SeqCst), 0);
+    fixture.assert_refused().await;
     fixture.assert_old_state().await;
 }
 
 #[tokio::test]
-async fn remote_schema_upgrade_completes_an_identity_only_initialization_without_replacing_identity(
-) {
+async fn remote_legacy_readonly_refusal_never_sends_a_mutation() {
     let fixture = Fixture::new().await;
-    sqlx::raw_sql("DROP TABLE thread_goals; DROP TABLE messages; DROP TABLE threads; DROP TABLE session_bindings; DROP TABLE session_environments; DROP TABLE workspaces; DROP TABLE projects")
-        .execute(&fixture.transport.pool).await.unwrap();
-    schema_upgrade::upgrade(&fixture.store(StoreAccess::ReadWrite), &fixture.snapshot)
-        .await
-        .unwrap();
-    assert_eq!(fixture.version().await, schema::REMOTE_SCHEMA_VERSION);
-    let (identity,): (String,) = sqlx::query_as("SELECT store_id FROM peri_store_meta")
-        .fetch_one(&fixture.transport.pool)
-        .await
-        .unwrap();
-    assert_eq!(identity, "existing-store");
-    let (columns,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM pragma_table_xinfo('threads')")
-        .fetch_one(&fixture.transport.pool)
-        .await
-        .unwrap();
-    assert_eq!(columns, 16);
+    fixture.assert_refused().await;
+    fixture.assert_old_state().await;
 }
 
 #[tokio::test]
-async fn remote_schema_upgrade_failed_drop_rolls_back_goals_columns_and_version() {
+async fn remote_legacy_identity_only_store_is_refused_without_reinitialization() {
+    let fixture = Fixture::new().await;
+    sqlx::raw_sql("DROP TABLE thread_goals; DROP TABLE messages; DROP TABLE threads; DROP TABLE session_bindings; DROP TABLE session_environments; DROP TABLE workspaces; DROP TABLE projects")
+        .execute(&fixture.transport.pool).await.unwrap();
+    fixture.assert_refused().await;
+}
+
+#[tokio::test]
+async fn remote_legacy_refusal_never_attempts_column_drop() {
     let fixture = Fixture::new().await;
     fixture
         .transport
         .fail_column_drop
         .store(true, Ordering::SeqCst);
-    schema_upgrade::upgrade(&fixture.store(StoreAccess::ReadWrite), &fixture.snapshot)
-        .await
-        .unwrap_err();
+    fixture.assert_refused().await;
     fixture.assert_old_state().await;
-    schema_upgrade::upgrade(&fixture.store(StoreAccess::ReadWrite), &fixture.snapshot)
-        .await
-        .unwrap();
-    assert_eq!(fixture.version().await, schema::REMOTE_SCHEMA_VERSION);
 }
 
 #[tokio::test]
-async fn remote_schema_upgrade_detects_dependencies_created_after_its_snapshot() {
+async fn remote_legacy_refusal_never_attempts_schema_mutation() {
     let fixture = Fixture::new().await;
     fixture
         .transport
         .change_schema
         .store(true, Ordering::SeqCst);
-    schema_upgrade::upgrade(&fixture.store(StoreAccess::ReadWrite), &fixture.snapshot)
-        .await
-        .unwrap_err();
+    fixture.assert_refused().await;
     fixture.assert_old_state().await;
-    let (extensions,): (i64,) =
-        sqlx::query_as("SELECT COUNT(*) FROM sqlite_master WHERE name = 'late_extension'")
-            .fetch_one(&fixture.transport.pool)
-            .await
-            .unwrap();
-    assert_eq!(extensions, 1);
 }
 
 #[tokio::test]
@@ -662,15 +343,7 @@ async fn remote_schema_upgrade_rejects_unrecognized_goal_layout_before_writing()
         .execute(&fixture.transport.pool)
         .await
         .unwrap();
-    let error = schema_upgrade::upgrade(&fixture.store(StoreAccess::ReadWrite), &fixture.snapshot)
-        .await
-        .unwrap_err();
-    assert!(matches!(
-        error.kind(),
-        SessionResourceErrorKind::Unsupported
-    ));
-    assert_eq!(fixture.transport.writes.load(Ordering::SeqCst), 0);
-    fixture.assert_old_state().await;
+    fixture.assert_refused().await;
 }
 
 #[tokio::test]
@@ -680,20 +353,11 @@ async fn remote_schema_upgrade_rejects_missing_history_columns_without_advancing
         .execute(&fixture.transport.pool)
         .await
         .unwrap();
-    let error = schema_upgrade::upgrade(&fixture.store(StoreAccess::ReadWrite), &fixture.snapshot)
-        .await
-        .unwrap_err();
-    assert!(matches!(
-        error.kind(),
-        SessionResourceErrorKind::Unsupported
-    ));
-    assert_eq!(fixture.transport.writes.load(Ordering::SeqCst), 0);
-    fixture.assert_old_state().await;
+    fixture.assert_refused().await;
 }
 
 #[tokio::test]
-async fn remote_schema_upgrade_lost_or_incomplete_reply_is_uncertain_and_reopen_reads_committed_version(
-) {
+async fn remote_legacy_refusal_precedes_lost_or_incomplete_write_reply() {
     for lost in [true, false] {
         let fixture = Fixture::new().await;
         if lost {
@@ -704,30 +368,13 @@ async fn remote_schema_upgrade_lost_or_incomplete_reply_is_uncertain_and_reopen_
                 .truncate_reply
                 .store(true, Ordering::SeqCst);
         }
-        let error =
-            schema_upgrade::upgrade(&fixture.store(StoreAccess::ReadWrite), &fixture.snapshot)
-                .await
-                .unwrap_err();
-        assert!(matches!(
-            error.kind(),
-            SessionResourceErrorKind::PersistenceUncertain { .. }
-        ));
-        assert_eq!(fixture.version().await, 11);
-        let reopened = fixture.store(StoreAccess::ReadWrite);
-        assert!(matches!(
-            open_step(
-                reopened.read_identity().await.unwrap(),
-                StoreAccess::ReadWrite
-            )
-            .unwrap(),
-            OpenStep::Upgrade(_)
-        ));
-        assert_eq!(fixture.transport.writes.load(Ordering::SeqCst), 1);
+        fixture.assert_refused().await;
+        fixture.assert_old_state().await;
     }
 }
 
 #[tokio::test]
-async fn remote_schema_upgrade_removes_recognized_execution_table_but_keeps_ledger() {
+async fn remote_legacy_refusal_preserves_recognized_execution_rows_and_ledger() {
     let fixture = Fixture::new().await;
     sqlx::query(LEGACY_EXECUTION_SQL)
         .execute(&fixture.transport.pool)
@@ -737,23 +384,8 @@ async fn remote_schema_upgrade_removes_recognized_execution_table_but_keeps_ledg
         .execute(&fixture.transport.pool)
         .await
         .unwrap();
-    schema_upgrade::upgrade(&fixture.store(StoreAccess::ReadWrite), &fixture.snapshot)
-        .await
-        .unwrap();
-    assert_eq!(fixture.version().await, schema::REMOTE_SCHEMA_VERSION);
-    let (retired,): (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM sqlite_schema WHERE name IN ('execution_runs', 'thread_goals')",
-    )
-    .fetch_one(&fixture.transport.pool)
-    .await
-    .unwrap();
-    assert_eq!(retired, 0);
-    let (receipt,): (String,) =
-        sqlx::query_as("SELECT receipt FROM peri_op_ledger WHERE operation_id='operation'")
-            .fetch_one(&fixture.transport.pool)
-            .await
-            .unwrap();
-    assert_eq!(receipt, "receipt");
+    fixture.assert_refused().await;
+    fixture.assert_old_state().await;
 }
 
 #[tokio::test]
@@ -761,19 +393,11 @@ async fn remote_schema_upgrade_refuses_unknown_execution_state_without_writing()
     let fixture = Fixture::new().await;
     sqlx::query("CREATE TABLE execution_runs (thread_id TEXT PRIMARY KEY, generation INTEGER NOT NULL, clean BOOLEAN NOT NULL, extension_data TEXT)")
         .execute(&fixture.transport.pool).await.unwrap();
-    let error = schema_upgrade::upgrade(&fixture.store(StoreAccess::ReadWrite), &fixture.snapshot)
-        .await
-        .unwrap_err();
-    assert!(matches!(
-        error.kind(),
-        SessionResourceErrorKind::Unsupported
-    ));
-    assert_eq!(fixture.transport.writes.load(Ordering::SeqCst), 0);
-    fixture.assert_old_state().await;
+    fixture.assert_refused().await;
 }
 
 #[tokio::test]
-async fn remote_schema_upgrade_rollback_restores_execution_rows_and_version() {
+async fn remote_legacy_refusal_preserves_execution_rows_and_version() {
     let fixture = Fixture::new().await;
     sqlx::query(LEGACY_EXECUTION_SQL)
         .execute(&fixture.transport.pool)
@@ -787,21 +411,210 @@ async fn remote_schema_upgrade_rollback_restores_execution_rows_and_version() {
         .transport
         .fail_column_drop
         .store(true, Ordering::SeqCst);
-    assert!(
-        schema_upgrade::upgrade(&fixture.store(StoreAccess::ReadWrite), &fixture.snapshot)
-            .await
-            .is_err()
-    );
+    fixture.assert_refused().await;
     fixture.assert_old_state().await;
-    let execution: (String, i64, bool) =
-        sqlx::query_as("SELECT thread_id, generation, clean FROM execution_runs")
-            .fetch_one(&fixture.transport.pool)
-            .await
-            .unwrap();
-    assert_eq!(execution, ("session".to_owned(), 7, false));
 }
 
 // Full remote application behavior is tested with the same SQL transport fixture.
 mod full_remote_tests {
     include!("full_remote_test.rs");
+}
+
+const LEGACY_MESSAGES_SQL: &str = r#"CREATE TABLE IF NOT EXISTS messages (
+    message_id TEXT PRIMARY KEY, thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+    role TEXT NOT NULL, content TEXT NOT NULL,
+    truncated BOOLEAN NOT NULL DEFAULT 0, excluded BOOLEAN NOT NULL DEFAULT 0, projection TEXT
+)"#;
+const LEGACY_V2_SQL: &str = r#"CREATE TABLE IF NOT EXISTS machines (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL CHECK(length(trim(name)) > 0),
+    identity_kind TEXT NOT NULL CHECK(identity_kind IN ('known', 'legacy_unknown'))
+);
+CREATE TABLE IF NOT EXISTS workspaces (
+    id TEXT PRIMARY KEY,
+    machine_id TEXT NOT NULL REFERENCES machines(id),
+    path TEXT NOT NULL,
+    path_source TEXT NOT NULL CHECK(path_source IN ('discovered', 'derived_legacy', 'unverified')),
+    UNIQUE(machine_id, path)
+);
+CREATE TABLE IF NOT EXISTS threads (
+    id TEXT PRIMARY KEY, title TEXT, cwd TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL, updated_at TEXT NOT NULL, message_count INTEGER NOT NULL DEFAULT 0,
+    parent_thread_id TEXT, snapshot_at_message_id TEXT, hidden BOOLEAN NOT NULL DEFAULT 0,
+    cancel_policy TEXT NOT NULL DEFAULT 'cascade', config TEXT,
+    frozen_context TEXT, inherited_context TEXT, agent_status TEXT NOT NULL DEFAULT 'active',
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+    archived BOOLEAN NOT NULL DEFAULT 0 CHECK(archived IN (0, 1))
+);
+CREATE TABLE IF NOT EXISTS messages (
+    message_id TEXT PRIMARY KEY, thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+    role TEXT NOT NULL, content TEXT NOT NULL,
+    truncated BOOLEAN NOT NULL DEFAULT 0, excluded BOOLEAN NOT NULL DEFAULT 0, projection TEXT
+);
+CREATE TABLE IF NOT EXISTS projects (
+    id TEXT PRIMARY KEY, locator TEXT NOT NULL, object_identity TEXT NOT NULL,
+    UNIQUE(locator, object_identity)
+);
+CREATE TABLE IF NOT EXISTS legacy_execution_registrations (
+    id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
+    root TEXT NOT NULL, root_identity TEXT NOT NULL, discovery TEXT NOT NULL,
+    UNIQUE(root, root_identity), UNIQUE(id, project_id)
+);
+CREATE TABLE IF NOT EXISTS session_bindings (
+    thread_id TEXT PRIMARY KEY REFERENCES threads(id) ON DELETE CASCADE,
+    schema_version INTEGER NOT NULL,
+    project_id TEXT NOT NULL, workspace_id TEXT NOT NULL, relative_cwd TEXT NOT NULL,
+    discovery_snapshot TEXT,
+    evidence_origin TEXT NOT NULL,
+    FOREIGN KEY(workspace_id, project_id) REFERENCES legacy_execution_registrations(id, project_id)
+);
+CREATE TABLE IF NOT EXISTS mcp_oauth_credentials (
+    principal_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+    server_key TEXT NOT NULL,
+    credentials_blob TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(principal_id, workspace_id, server_key)
+);
+CREATE TABLE IF NOT EXISTS session_close_intents (
+    thread_id TEXT PRIMARY KEY REFERENCES threads(id) ON DELETE CASCADE,
+    requested_at TEXT NOT NULL
+);"#;
+
+async fn database_evidence(pool: &SqlitePool) -> Vec<(String, Vec<String>)> {
+    let objects: Vec<String> = sqlx::query_scalar("SELECT json_array(type,name,tbl_name,sql) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name").fetch_all(pool).await.unwrap();
+    let tables: Vec<String> = sqlx::query_scalar("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").fetch_all(pool).await.unwrap();
+    let mut evidence = vec![("schema".into(), objects)];
+    for table in tables {
+        let columns: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM pragma_table_info(?1) ORDER BY cid")
+                .bind(&table)
+                .fetch_all(pool)
+                .await
+                .unwrap();
+        let expressions = columns
+            .iter()
+            .map(|column| format!("quote(\"{}\")", column.replace('"', "\"\"")))
+            .collect::<Vec<_>>()
+            .join(" || ',' || ");
+        let statement = format!(
+            "SELECT {expressions} FROM \"{}\" ORDER BY rowid",
+            table.replace('"', "\"\"")
+        );
+        let rows = sqlx::query_scalar(sqlx::AssertSqlSafe(statement))
+            .fetch_all(pool)
+            .await
+            .unwrap();
+        evidence.push((table, rows));
+    }
+    evidence
+}
+
+impl Fixture {
+    async fn assert_refused(&self) {
+        let before = database_evidence(&self.transport.pool).await;
+        for access in [StoreAccess::ReadOnly, StoreAccess::ReadWrite] {
+            let store = self.store(access);
+            let error = open_step(store.read_identity().await.unwrap(), access).unwrap_err();
+            assert!(matches!(
+                error.kind(),
+                SessionResourceErrorKind::Unsupported
+            ));
+        }
+        assert_eq!(self.transport.writes.load(Ordering::SeqCst), 0);
+        assert_eq!(database_evidence(&self.transport.pool).await, before);
+    }
+
+    async fn legacy_v2(version: i64) -> Self {
+        let directory = tempfile::tempdir().unwrap();
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                sqlx::sqlite::SqliteConnectOptions::new()
+                    .filename(directory.path().join("remote.db"))
+                    .create_if_missing(true),
+            )
+            .await
+            .unwrap();
+        sqlx::raw_sql(LEGACY_V2_SQL).execute(&pool).await.unwrap();
+        sqlx::query(schema::CREATE_STORE_META_SQL)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(super::ledger::CREATE_OP_LEDGER_SQL)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO peri_store_meta VALUES (0,?1,'legacy-store','peri.session.store/v3','original timestamp')").bind(version).execute(&pool).await.unwrap();
+        sqlx::raw_sql("INSERT INTO machines VALUES ('machine','legacy','known');
+            INSERT INTO workspaces VALUES ('workspace','machine','/old','unverified');
+            INSERT INTO threads(id,cwd,created_at,updated_at,workspace_id,frozen_context) VALUES ('session','/old','now','now','workspace','frozen bytes');
+            INSERT INTO messages(message_id,thread_id,role,content,projection) VALUES ('message','session','user','original content','original projection');
+            INSERT INTO session_close_intents VALUES ('session','original close timestamp');").execute(&pool).await.unwrap();
+        if version == 13 {
+            sqlx::raw_sql("CREATE TABLE session_execution_owners(root_id TEXT PRIMARY KEY REFERENCES threads(id),epoch INTEGER NOT NULL,nonce TEXT NOT NULL,expires_at_unix INTEGER NOT NULL,released INTEGER NOT NULL);
+                CREATE TABLE session_execution_workspace_descriptors(root_id TEXT PRIMARY KEY REFERENCES session_execution_owners(root_id),owner_epoch INTEGER NOT NULL,endpoint TEXT NOT NULL,key_identity TEXT NOT NULL,agent_generation_id TEXT NOT NULL,unsupported_async_owners INTEGER NOT NULL);
+                INSERT INTO session_execution_owners VALUES ('session',7,'retired',0,0);
+                INSERT INTO session_execution_workspace_descriptors VALUES ('session',7,'retired','retired','retired',0);").execute(&pool).await.unwrap();
+        }
+        let transport = Arc::new(SqliteTransport {
+            pool,
+            writes: AtomicUsize::new(0),
+            fail_column_drop: AtomicBool::new(false),
+            change_schema: AtomicBool::new(false),
+            drop_reply: AtomicBool::new(false),
+            truncate_reply: AtomicBool::new(false),
+        });
+        let store = Self::store_for(&transport, StoreAccess::ReadWrite);
+        let StoreIdentityRead::Present(snapshot) = store.read_identity().await.unwrap() else {
+            panic!("missing legacy identity")
+        };
+        Self {
+            _directory: directory,
+            transport,
+            snapshot,
+        }
+    }
+
+    async fn fresh() -> Self {
+        let directory = tempfile::tempdir().unwrap();
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                sqlx::sqlite::SqliteConnectOptions::new()
+                    .filename(directory.path().join("remote.db"))
+                    .create_if_missing(true),
+            )
+            .await
+            .unwrap();
+        for statement in super::session_schema::initialization_plan() {
+            sqlx::query(statement.sql).execute(&pool).await.unwrap();
+        }
+        sqlx::query(super::ledger::CREATE_OP_LEDGER_SQL)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let store_id = schema::StoreId::mint();
+        for statement in schema::initialization_plan(&store_id, "now") {
+            query(&statement).execute(&pool).await.unwrap();
+        }
+        sqlx::raw_sql("INSERT INTO machines VALUES ('machine','current','known'); INSERT INTO workspaces VALUES ('workspace','machine','/current','discovered'); INSERT INTO threads(id,cwd,created_at,updated_at,workspace_id) VALUES ('session','/current','now','now','workspace')").execute(&pool).await.unwrap();
+        let transport = Arc::new(SqliteTransport {
+            pool,
+            writes: AtomicUsize::new(0),
+            fail_column_drop: AtomicBool::new(false),
+            change_schema: AtomicBool::new(false),
+            drop_reply: AtomicBool::new(false),
+            truncate_reply: AtomicBool::new(false),
+        });
+        let store = Self::store_for(&transport, StoreAccess::ReadWrite);
+        let StoreIdentityRead::Present(snapshot) = store.read_identity().await.unwrap() else {
+            panic!("missing fresh identity")
+        };
+        Self {
+            _directory: directory,
+            transport,
+            snapshot,
+        }
+    }
 }

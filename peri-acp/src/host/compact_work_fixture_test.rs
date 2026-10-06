@@ -16,11 +16,9 @@ pub(super) async fn assert_blocked_preserves_summary(
     let WorkPage::Processings(originals) = &before.page else {
         panic!("processing page expected")
     };
-    assert!(
-        originals.iter().any(
-            |processing| processing.stage == WorkStage::Blocked && processing.request.is_some()
-        )
-    );
+    assert!(originals
+        .iter()
+        .any(|processing| processing.stage == WorkStage::Blocked && processing.request.is_some()));
     let payloads = resources
         .load_session_history(ctx.thread_id.as_ref().unwrap())
         .await
@@ -93,11 +91,9 @@ async fn test_full_compact_cancel_preserves_summary_and_blocks_retry() {
         .await
         .unwrap();
     assert_eq!(wire["stopReason"], "cancelled");
-    assert!(
-        sessions.lock().await[&ctx.session_id]
-            .cancel_token
-            .is_none()
-    );
+    assert!(sessions.lock().await[&ctx.session_id]
+        .cancel_token
+        .is_none());
     assert_blocked_preserves_summary(ctx, &sessions).await;
 }
 
@@ -473,11 +469,9 @@ pub(super) async fn assert_unknown_command(
     let WorkPage::Commands(commands) = &snapshot.page else {
         panic!("command page expected")
     };
-    assert!(
-        commands
-            .iter()
-            .any(|owned| owned.pending && owned.command == original)
-    );
+    assert!(commands
+        .iter()
+        .any(|owned| owned.pending && owned.command == original));
     let entry =
         crate::host::work_query::command(store, &original.session_id, &original.mutation_id)
             .await
@@ -503,10 +497,8 @@ pub(super) async fn assert_unknown_command(
     let WorkPage::Commands(commands) = &recovered.page else {
         panic!("command page expected")
     };
-    assert!(
-        commands
-            .iter()
-            .any(|owned| owned.pending && owned.command == original)
-    );
+    assert!(commands
+        .iter()
+        .any(|owned| owned.pending && owned.command == original));
     original
 }

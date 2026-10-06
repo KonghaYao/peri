@@ -137,21 +137,40 @@ budget_resources! {
 
 pub(super) async fn install(context: &StageContext, reason_requests: u64, dispatches: u64) {
     let session = context.work.ensure(context).await.unwrap().unwrap();
-let snapshot = session.inspect_head().await.unwrap();
-let processing = session.processing(&session.admission.work_id).await.unwrap();
-let deliveries = session.deliveries(&processing.processing_id).await.unwrap();
-let effects = session.effects(&processing).await.unwrap();
-let mut head = snapshot.head;
-head.limits.reason_requests = reason_requests;
-head.limits.dispatches = dispatches;
-let admission = crate::session::work_access::admission(session.ledger.resources().as_ref(), &session.admission).await.unwrap();
-let resources: Arc<dyn SessionResources> = Arc::new(BudgetResources {
-    resources: session.ledger.resources(),
-    facts: Mutex::new(WorkFacts { session_id: session.admission.session_id.clone(),
-        control: snapshot.control, head, processing: Some(processing), deliveries, effects,
-        drafts: Vec::new(), admission: Some(admission), recovery_descriptor: None,
-        terminal_obligation: None, legacy_evidence: None, parent_binding_receipt: None, parent_effect: None }),
-});
+    let snapshot = session.inspect_head().await.unwrap();
+    let processing = session
+        .processing(&session.admission.work_id)
+        .await
+        .unwrap();
+    let deliveries = session.deliveries(&processing.processing_id).await.unwrap();
+    let effects = session.effects(&processing).await.unwrap();
+    let mut head = snapshot.head;
+    head.limits.reason_requests = reason_requests;
+    head.limits.dispatches = dispatches;
+    let admission = crate::session::work_access::admission(
+        session.ledger.resources().as_ref(),
+        &session.admission,
+    )
+    .await
+    .unwrap();
+    let resources: Arc<dyn SessionResources> = Arc::new(BudgetResources {
+        resources: session.ledger.resources(),
+        facts: Mutex::new(WorkFacts {
+            session_id: session.admission.session_id.clone(),
+            control: snapshot.control,
+            head,
+            processing: Some(processing),
+            deliveries,
+            effects,
+            drafts: Vec::new(),
+            admission: Some(admission),
+            recovery_descriptor: None,
+            terminal_obligation: None,
+            legacy_evidence: None,
+            parent_binding_receipt: None,
+            parent_effect: None,
+        }),
+    });
     let session_id = session.admission.session_id.clone();
     context.work.state.lock().await.session = Some(Arc::new(WorkSession {
         admission: session.admission.clone(),

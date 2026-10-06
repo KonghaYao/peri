@@ -1,15 +1,15 @@
 use super::*;
 use peri_acp_types::execution_admission::*;
-use peri_acp_types::session_resources::ControlAttempt;
 use peri_acp_types::session_resources::work::*;
+use peri_acp_types::session_resources::ControlAttempt;
 use peri_agent::agent::react::ToolCall;
-use peri_agent::agent::stages::{LoopResult, StageContext, publish_session_inbox, run_react_loop};
+use peri_agent::agent::stages::{publish_session_inbox, run_react_loop, LoopResult, StageContext};
 use peri_agent::session::{
     FrozenContext, MessageSource, MessageTranscript, QueuedMessage, Session,
 };
 use std::collections::BTreeMap;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 
 const MISSING_THREAD: &str = "00000000-0000-0000-0000-000000000000";
 
@@ -127,12 +127,10 @@ impl ReactLLM for MissingThreadParent {
         let WorkPage::Processings(processings) = &snapshot.page else {
             panic!("processing page expected")
         };
-        assert!(
-            processings
-                .iter()
-                .any(|processing| processing.stage == WorkStage::ReasonInFlight
-                    && processing.request.is_some())
-        );
+        assert!(processings
+            .iter()
+            .any(|processing| processing.stage == WorkStage::ReasonInFlight
+                && processing.request.is_some()));
         let request_count = {
             let mut requests = self.requests.lock().unwrap();
             requests.push(messages.to_vec());
@@ -358,11 +356,9 @@ async fn durable_parent_completes_after_real_agent_resume_missing_thread() {
         .await
         .unwrap();
     evidence.validate().unwrap();
-    assert!(
-        String::from_utf8(evidence.bytes)
-            .unwrap()
-            .contains("thread not found")
-    );
+    assert!(String::from_utf8(evidence.bytes)
+        .unwrap()
+        .contains("thread not found"));
     assert!(invocation.unknown_reason.is_none());
     let history = fixture
         .resources

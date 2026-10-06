@@ -579,51 +579,115 @@ async fn remote_control_close_and_reopen_project_existing_close_flags_atomically
 }
 
 #[tokio::test]
-async fn remote_control_v14_upgrade_seeds_existing_close_intent_and_keeps_store_identity() {
-    use super::super::schema::{initialization_plan, StoreSnapshot, STORE_CONTRACT};
-
-    let fixture = Fixture::new().await;
-    for spec in initialization_plan(&fixture.id, "2026-10-05T00:00:00Z") {
-        sqlx::query_with::<Sqlite, _>(spec.sql, arguments(&spec).unwrap())
-            .execute(&fixture.pool)
-            .await
-            .unwrap();
-    }
-    for sql in ["DROP TABLE session_control_state", "DROP TABLE session_control_receipts", "UPDATE peri_store_meta SET schema_version = 14", "INSERT INTO session_close_intents(thread_id,requested_at) VALUES ('remote-control','legacy')"] {
-        sqlx::query(sql).execute(&fixture.pool).await.unwrap();
-    }
+async fn remote_control_v14_refusal_preserves_existing_close_intent_and_store_identity() {
+    use super::super::schema::{StoreSnapshot, STORE_CONTRACT};
+    let directory = tempfile::tempdir().unwrap();
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(directory.path().join("legacy14.db"))
+                .create_if_missing(true),
+        )
+        .await
+        .unwrap();
+    sqlx::raw_sql(
+        r#"CREATE TABLE IF NOT EXISTS machines (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL CHECK(length(trim(name)) > 0),
+    identity_kind TEXT NOT NULL CHECK(identity_kind IN ('known', 'legacy_unknown'))
+);
+CREATE TABLE IF NOT EXISTS workspaces (
+    id TEXT PRIMARY KEY,
+    machine_id TEXT NOT NULL REFERENCES machines(id),
+    path TEXT NOT NULL,
+    path_source TEXT NOT NULL CHECK(path_source IN ('discovered', 'derived_legacy', 'unverified')),
+    UNIQUE(machine_id, path)
+);
+CREATE TABLE IF NOT EXISTS threads (
+    id TEXT PRIMARY KEY, title TEXT, cwd TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL, updated_at TEXT NOT NULL, message_count INTEGER NOT NULL DEFAULT 0,
+    parent_thread_id TEXT, snapshot_at_message_id TEXT, hidden BOOLEAN NOT NULL DEFAULT 0,
+    cancel_policy TEXT NOT NULL DEFAULT 'cascade', config TEXT,
+    frozen_context TEXT, inherited_context TEXT, agent_status TEXT NOT NULL DEFAULT 'active',
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+    archived BOOLEAN NOT NULL DEFAULT 0 CHECK(archived IN (0, 1))
+);
+CREATE TABLE IF NOT EXISTS messages (
+    message_id TEXT PRIMARY KEY, thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+    role TEXT NOT NULL, content TEXT NOT NULL,
+    truncated BOOLEAN NOT NULL DEFAULT 0, excluded BOOLEAN NOT NULL DEFAULT 0, projection TEXT
+);
+CREATE TABLE IF NOT EXISTS projects (
+    id TEXT PRIMARY KEY, locator TEXT NOT NULL, object_identity TEXT NOT NULL,
+    UNIQUE(locator, object_identity)
+);
+CREATE TABLE IF NOT EXISTS legacy_execution_registrations (
+    id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
+    root TEXT NOT NULL, root_identity TEXT NOT NULL, discovery TEXT NOT NULL,
+    UNIQUE(root, root_identity), UNIQUE(id, project_id)
+);
+CREATE TABLE IF NOT EXISTS session_bindings (
+    thread_id TEXT PRIMARY KEY REFERENCES threads(id) ON DELETE CASCADE,
+    schema_version INTEGER NOT NULL,
+    project_id TEXT NOT NULL, workspace_id TEXT NOT NULL, relative_cwd TEXT NOT NULL,
+    discovery_snapshot TEXT,
+    evidence_origin TEXT NOT NULL,
+    FOREIGN KEY(workspace_id, project_id) REFERENCES legacy_execution_registrations(id, project_id)
+);
+CREATE TABLE IF NOT EXISTS mcp_oauth_credentials (
+    principal_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+    server_key TEXT NOT NULL,
+    credentials_blob TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(principal_id, workspace_id, server_key)
+);
+CREATE TABLE IF NOT EXISTS session_close_intents (
+    thread_id TEXT PRIMARY KEY REFERENCES threads(id) ON DELETE CASCADE,
+    requested_at TEXT NOT NULL
+);"#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(super::super::schema::CREATE_STORE_META_SQL)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::raw_sql("INSERT INTO machines VALUES ('machine','legacy','known'); INSERT INTO workspaces VALUES ('workspace','machine','/old','unverified'); INSERT INTO threads(id,created_at,updated_at,workspace_id) VALUES ('remote-control','now','now','workspace'); INSERT INTO session_close_intents VALUES ('remote-control','legacy')").execute(&pool).await.unwrap();
+    let id = StoreId::mint();
+    sqlx::query("INSERT INTO peri_store_meta VALUES (0,14,?1,?2,'original timestamp')")
+        .bind(id.as_str())
+        .bind(STORE_CONTRACT)
+        .execute(&pool)
+        .await
+        .unwrap();
     let gate = Arc::new(ConnectionGate::default());
     let factory = Factory {
-        pool: fixture.pool.clone(),
+        pool: pool.clone(),
         gate,
     };
     let store = factory.connect().await.unwrap();
     let snapshot = StoreSnapshot {
-        store_id: fixture.id.clone(),
+        store_id: id.clone(),
         schema_version: 14,
         contract: STORE_CONTRACT.into(),
     };
-    super::super::schema_v14_upgrade::upgrade(&store, &snapshot)
+    let error = super::super::schema_v14_upgrade::upgrade(&store, &snapshot)
         .await
-        .unwrap();
-    let version: i64 = sqlx::query_scalar("SELECT schema_version FROM peri_store_meta")
-        .fetch_one(&fixture.pool)
-        .await
-        .unwrap();
-    assert_eq!(version, super::super::schema::REMOTE_SCHEMA_VERSION);
-    let identity: String = sqlx::query_scalar("SELECT store_id FROM peri_store_meta")
-        .fetch_one(&fixture.pool)
-        .await
-        .unwrap();
-    assert_eq!(identity, fixture.id.as_str());
-    assert_eq!(
-        fixture
-            .adapter()
-            .await
-            .load_session_control(&"remote-control".into())
-            .await
-            .unwrap()
-            .status,
-        ControlStatus::Closing
-    );
+        .unwrap_err();
+    assert!(matches!(
+        error.kind(),
+        peri_acp_types::session_resources::SessionResourceErrorKind::Unsupported
+    ));
+    let row: (i64, String, String) = sqlx::query_as(
+        "SELECT schema_version,store_id,requested_at FROM peri_store_meta,session_close_intents",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(row, (14, id.as_str().into(), "legacy".into()));
+    let tables: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_schema WHERE name IN ('session_control_state','session_control_receipts','session_work_head')").fetch_one(&pool).await.unwrap();
+    assert_eq!(tables, 0);
 }

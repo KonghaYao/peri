@@ -276,6 +276,12 @@ impl Fixture {
             },
         )
         .await;
+        crate::session::test_resources::mock::work::dispatch_fixture_invocation(
+            resources.as_ref(),
+            &parent.thread_id(),
+            &metadata.delegation_invocation_id,
+        )
+        .await;
         let parent_effect = crate::session::work_access::effect(
             resources.as_ref(),
             &parent.thread_id(),
@@ -334,6 +340,12 @@ impl Fixture {
                         expected_revision: parent_work.head.change_seq,
                         intent,
                     },
+                )
+                .await;
+                crate::session::test_resources::mock::work::dispatch_fixture_invocation(
+                    resources.as_ref(),
+                    &parent.thread_id(),
+                    invocation_id,
                 )
                 .await;
             }
@@ -776,14 +788,40 @@ async fn missing_current_work_delegation_blocks_without_metadata_fallback() {
     .await
     .unwrap();
     assert!(descriptor.child_resume_metadata_json.is_some());
-    let processing = crate::session::work_access::processing(
-        fixture.resources.as_ref(),
-        &fixture.admission.session_id,
-        &fixture.admission.work_id,
-    )
-    .await
-    .unwrap();
-    assert!(processing.delegation.is_none());
+    let inspection = fixture
+        .resources
+        .inspect_work(&WorkQuery::new(
+            &fixture.admission.session_id,
+            WorkSelector::Availability,
+        ))
+        .await
+        .unwrap();
+    let WorkPage::Availability(availability) = inspection.page else {
+        panic!("expected candidate availability");
+    };
+    let candidate = availability
+        .candidates
+        .iter()
+        .find(|candidate| candidate.work_id == fixture.admission.work_id)
+        .unwrap();
+    for delivery_id in &candidate.delivery_ids {
+        let inspection = fixture
+            .resources
+            .inspect_work(&WorkQuery::new(
+                &fixture.admission.session_id,
+                WorkSelector::Delivery {
+                    delivery_id: delivery_id.clone(),
+                },
+            ))
+            .await
+            .unwrap();
+        let WorkPage::Deliveries(deliveries) = inspection.page else {
+            panic!("expected queued delivery");
+        };
+        assert_eq!(deliveries.len(), 1);
+        assert!(deliveries[0].processing_id.is_none());
+        assert!(deliveries[0].delegation.is_none());
+    }
     let parent_effect = crate::session::work_access::effect(
         fixture.resources.as_ref(),
         &fixture.parent.thread_id(),
@@ -793,10 +831,5 @@ async fn missing_current_work_delegation_blocks_without_metadata_fallback() {
     .unwrap();
     assert!(parent_effect.binding.is_some());
     let runtime = fixture.runtime("http://127.0.0.1:1");
-    assert_blocked(
-        fixture,
-        runtime,
-        "current immutable work delegation reference missing",
-    )
-    .await;
+    assert_blocked(fixture, runtime, "candidate delegation unavailable").await;
 }

@@ -8,17 +8,24 @@ async fn fixture() -> (SqliteSessionData, WorkCommand) {
         .connect("sqlite::memory:")
         .await
         .unwrap();
-    sqlx::query("CREATE TABLE threads(id TEXT PRIMARY KEY)")
-        .execute(&pool)
-        .await
-        .unwrap();
+    for statement in crate::sessions::canonical::CREATE_V2_TABLES {
+        sqlx::query(*statement).execute(&pool).await.unwrap();
+    }
     sqlx::query(
         "CREATE TABLE session_control_state(session_id TEXT PRIMARY KEY,state_json TEXT NOT NULL)",
     )
     .execute(&pool)
     .await
     .unwrap();
-    sqlx::query("INSERT INTO threads VALUES ('fixture')")
+    sqlx::query("INSERT INTO machines(id,name,identity_kind) VALUES ('fixture-machine','fixture machine','known')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO workspaces(id,machine_id,path,path_source) VALUES ('fixture-workspace','fixture-machine','/fixture','discovered')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO threads(id,workspace_id,created_at,updated_at) VALUES ('fixture','fixture-workspace','2026-10-06T00:00:00Z','2026-10-06T00:00:00Z')")
         .execute(&pool)
         .await
         .unwrap();
@@ -103,6 +110,89 @@ async fn original_mutation_replays_one_draft_and_receipt() {
 }
 
 #[tokio::test]
+async fn root_pending_commands_preserve_descendant_original_identity() {
+    let (data, mut command) = fixture().await;
+    sqlx::query("INSERT INTO threads(id,parent_thread_id,workspace_id,created_at,updated_at) VALUES ('child','fixture','fixture-workspace','2026-10-06T00:00:00Z','2026-10-06T00:00:00Z')")
+        .execute(&data.database.pool)
+        .await
+        .unwrap();
+    command.session_id = "child".into();
+    let mut transaction = data
+        .database
+        .pool
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .unwrap();
+    assert_eq!(
+        record_original(&mut transaction, &command).await.unwrap(),
+        None
+    );
+    transaction.commit().await.unwrap();
+    let pending = data
+        .read_work(&WorkQuery::new("fixture", WorkSelector::PendingCommands))
+        .await
+        .unwrap();
+    let WorkPage::Commands(records) = pending.page else {
+        panic!("expected command page");
+    };
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].command, command);
+    assert_eq!(
+        data.resolve_work(&records[0].command).await.unwrap(),
+        WorkResolution::NotApplied
+    );
+    let pending = data
+        .read_work(&WorkQuery::new("fixture", WorkSelector::PendingCommands))
+        .await
+        .unwrap();
+    let WorkPage::Commands(records) = pending.page else {
+        panic!("expected command page");
+    };
+    assert!(records.is_empty());
+}
+
+#[tokio::test]
+async fn equal_evidence_bytes_reuse_the_verified_reference_without_overwriting_an_identity() {
+    let (data, command) = fixture().await;
+    let WorkAction::StageUserInput { content, .. } = command.action else {
+        panic!("expected staged input");
+    };
+    let write = EvidenceWrite {
+        session_id: "fixture".into(),
+        storage_scope: "fixture".into(),
+        payload_id: "same-bytes-different-identity".into(),
+        encoding: 1,
+        bytes: b"original input".to_vec(),
+    };
+    assert_eq!(data.store_evidence(&write).await.unwrap(), content);
+    assert_eq!(data.store_evidence(&write).await.unwrap(), content);
+    let conflicting = EvidenceWrite {
+        payload_id: content.payload_id.clone(),
+        bytes: b"changed input".to_vec(),
+        ..write
+    };
+    assert!(!data
+        .store_evidence(&conflicting)
+        .await
+        .unwrap_err()
+        .is_persistence_uncertain());
+    let stored = data
+        .load_evidence(&EvidenceQuery {
+            session_id: "fixture".into(),
+            reference: content,
+        })
+        .await
+        .unwrap();
+    assert_eq!(stored.bytes, b"original input");
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM session_payloads WHERE kind='evidence'")
+            .fetch_one(&data.database.pool)
+            .await
+            .unwrap();
+    assert_eq!(count, 1);
+}
+
+#[tokio::test]
 async fn sealed_original_cannot_later_apply_and_identity_cannot_change() {
     let (data, command) = fixture().await;
     assert_eq!(
@@ -156,7 +246,7 @@ async fn unknown_original_blocks_replacement_and_history_until_sealed() {
     let WorkPage::Availability(availability) = inspection.page else {
         panic!("expected availability");
     };
-    assert!(availability.blocked);
+    assert!(availability.pending);
     assert!(availability.candidates.is_empty());
     let mut transaction = data
         .database

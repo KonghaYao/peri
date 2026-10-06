@@ -1,20 +1,4 @@
-//! schema v10 回退迁移：删除 v7..v9 写下的本机远程痕迹。
-//!
-//! 用户裁决撤销「远程存储在本机留有痕迹」的整套能力，本机表结构回到 remote 工作之前：
-//! 不保留远程痕迹表或 store 维度；当前初始化补建环境表与 OAuth 凭据表。覆盖：
-//!
-//! - v7 / v8 / v9 三种来源库都收敛到同一形状（既有业务表与两张初始化表）；
-//! - 表数据连同表一起消失，**业务表逐行不动**；
-//! - schema 11 删除 `execution_runs`，不把其状态移入新的表或列；
-//! - 同名但形状不符的表 → fail-closed 拒绝并整体回滚，不删不认识的数据；
-//! - 没有那 5 张表的库是幂等的。
-//!
-//! 所有库都在 tempdir 中构造，不触碰真实本机数据库。
-
-use super::schema::CURRENT_SCHEMA_VERSION;
 use super::*;
-use crate::sessions::canonical::{OAUTH_CREDENTIALS_TABLE, SESSION_ENVIRONMENTS_TABLE};
-use peri_acp_types::workspace::WorkspaceError;
 use sqlx::{sqlite::SqliteConnectOptions, Connection, SqliteConnection};
 use std::path::Path;
 
@@ -144,7 +128,7 @@ async fn populate_business(connection: &mut SqliteConnection) {
     .unwrap();
 }
 
-/// 五张本机远程痕迹表各一行：迁移要连表带行一起删掉。
+/// 五张本机远程痕迹表各一行。
 async fn populate_remote_traces(connection: &mut SqliteConnection) {
     sqlx::raw_sql(
         "INSERT INTO session_lifecycle_commitments
@@ -169,131 +153,27 @@ async fn populate_remote_traces(connection: &mut SqliteConnection) {
     .unwrap();
 }
 
-/// 库内的表清单（不含 SQLite 内部表）。
-async fn table_names(connection: &mut SqliteConnection) -> Vec<String> {
-    let rows: Vec<(String,)> = sqlx::query_as(
-        "SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
-         ORDER BY name",
-    )
-    .fetch_all(&mut *connection)
-    .await
-    .unwrap();
-    rows.into_iter().map(|(name,)| name).collect()
-}
-
-async fn preserved_table_definitions(connection: &mut SqliteConnection) -> Vec<(String, String)> {
-    let mut rows: Vec<(String, String)> = sqlx::query_as(
-        "SELECT name, sql FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
-         ORDER BY name",
-    )
-    .fetch_all(&mut *connection)
-    .await
-    .unwrap();
-    rows.retain(|(name, _)| {
-        !DROPPED_TABLES.contains(&name.as_str())
-            && name != "threads"
-            && name != "execution_runs"
-            && name != "thread_goals"
-            && name != OAUTH_CREDENTIALS_TABLE
-            && name != SESSION_ENVIRONMENTS_TABLE
-            && name != "workspaces"
-            && name != "session_bindings"
-            && name != "legacy_execution_registrations"
-            && name != "machines"
-            && name != "session_close_intents"
-            && name != "session_execution_owners"
-            && name != "session_execution_workspace_descriptors"
-    });
-    rows
-}
-
 async fn read_only(path: &Path) -> SqliteConnection {
     SqliteConnection::connect_with(&SqliteConnectOptions::new().filename(path).read_only(true))
         .await
         .unwrap()
 }
 
-/// v7 / v8 / v9 收敛并补齐初始化表，既有业务表结构与数据保持不变。
 #[tokio::test]
-async fn test_v7_v8_v9_all_converge_and_drop_only_the_remote_tables() {
+async fn test_v7_v8_v9_refusal_preserves_remote_tables() {
     for source_version in [7, 8, 9] {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("threads.db");
         let mut connection = v9_database(&path, source_version).await;
         populate(&mut connection).await;
-        let tables_before = table_names(&mut connection).await;
-        let definitions_before = preserved_table_definitions(&mut connection).await;
         connection.close().await.unwrap();
 
-        let store = SqliteThreadStore::new(&path).await.unwrap();
-        let mut connection = read_only(&path).await;
-        let (version,): (i64,) = sqlx::query_as("PRAGMA user_version")
-            .fetch_one(&mut connection)
-            .await
-            .unwrap();
-        assert_eq!(version, CURRENT_SCHEMA_VERSION, "来源版本 {source_version}");
-
-        let tables_after = table_names(&mut connection).await;
-        for table in DROPPED_TABLES {
-            assert!(
-                !tables_after.iter().any(|name| name == table),
-                "来源版本 {source_version}：{table} 应当已被删除"
-            );
-            assert!(tables_before.iter().any(|name| name == table));
-        }
-        let mut expected: Vec<String> = tables_before
-            .iter()
-            .filter(|name| {
-                !DROPPED_TABLES.contains(&name.as_str()) && name.as_str() != "execution_runs"
-            })
-            .cloned()
-            .collect();
-        expected.extend([
-            OAUTH_CREDENTIALS_TABLE.to_owned(),
-            "legacy_execution_registrations".to_owned(),
-            "machines".to_owned(),
-            "session_close_intents".to_owned(),
-        ]);
-        expected.sort();
-        assert_eq!(tables_after, expected, "来源版本 {source_version}");
-        assert_eq!(
-            preserved_table_definitions(&mut connection).await,
-            definitions_before
-        );
-
-        // 业务表逐行保留。
-        let (title,): (String,) =
-            sqlx::query_as("SELECT title FROM threads WHERE id = 'local-root'")
-                .fetch_one(&mut connection)
-                .await
-                .unwrap();
-        assert_eq!(title, "本机会话");
-        let (cwd,): (String,) = sqlx::query_as(
-            "SELECT relative_cwd FROM session_bindings WHERE thread_id = 'local-root'",
-        )
-        .fetch_one(&mut connection)
-        .await
-        .unwrap();
-        assert_eq!(cwd, "");
-        let (locator,): (String,) = sqlx::query_as("SELECT locator FROM projects WHERE id = 'p1'")
-            .fetch_one(&mut connection)
-            .await
-            .unwrap();
-        assert_eq!(locator, "/work");
-
-        assert!(!tables_after.iter().any(|name| name == "execution_runs"));
-        connection.close().await.unwrap();
-
-        // 迁移后的库可以正常写打开（门面与桥共用同一条连接真相）。
-        store.close().await;
-        let reopened = SqliteThreadStore::new(&path).await.unwrap();
-        reopened.close().await;
+        assert_legacy_rejected(&path).await;
     }
 }
 
-/// 没有远程痕迹表时仅补齐初始化表，既有业务表结构与数据保持不变。
 #[tokio::test]
-async fn test_database_without_remote_tables_is_idempotent() {
+async fn test_legacy_database_without_remote_tables_is_refused_idempotently() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("threads.db");
     let mut connection = SqliteConnection::connect_with(
@@ -320,42 +200,9 @@ async fn test_database_without_remote_tables_is_idempotent() {
         .unwrap();
     // 这些库从来只有业务表，所以只填业务数据（远程痕迹表不存在，无从填写）。
     populate_business(&mut connection).await;
-    let tables_before = table_names(&mut connection).await;
-    let definitions_before = preserved_table_definitions(&mut connection).await;
     connection.close().await.unwrap();
 
-    let store = SqliteThreadStore::new(&path).await.unwrap();
-    let mut connection = read_only(&path).await;
-    let (version,): (i64,) = sqlx::query_as("PRAGMA user_version")
-        .fetch_one(&mut connection)
-        .await
-        .unwrap();
-    assert_eq!(version, CURRENT_SCHEMA_VERSION);
-    let mut expected = tables_before;
-    expected.retain(|name| name != "execution_runs");
-    expected.extend([
-        OAUTH_CREDENTIALS_TABLE.to_owned(),
-        "legacy_execution_registrations".to_owned(),
-        "machines".to_owned(),
-        "session_close_intents".to_owned(),
-    ]);
-    expected.sort();
-    assert_eq!(table_names(&mut connection).await, expected);
-    assert_eq!(
-        preserved_table_definitions(&mut connection).await,
-        definitions_before
-    );
-    let sessions: Vec<(String, String)> =
-        sqlx::query_as("SELECT id, title FROM threads ORDER BY id")
-            .fetch_all(&mut connection)
-            .await
-            .unwrap();
-    assert_eq!(
-        sessions,
-        vec![("local-root".to_owned(), "本机会话".to_owned())]
-    );
-    connection.close().await.unwrap();
-    store.close().await;
+    assert_legacy_rejected(&path).await;
 }
 
 /// 同名但形状不符的表 → fail-closed：拒绝升级、整体回滚，不认识的数据一行不动。
@@ -378,10 +225,9 @@ async fn test_mismatched_table_shape_fails_closed_and_rolls_back() {
     let before = std::fs::read(&path).unwrap();
 
     let error = SqliteThreadStore::new(&path).await.err().unwrap();
-    assert!(matches!(
-        error.downcast_ref::<WorkspaceError>(),
-        Some(WorkspaceError::UnsupportedDatabaseSchema)
-    ));
+    assert!(error
+        .to_string()
+        .contains("explicit stopped-writer offline migration"));
 
     let mut connection = read_only(&path).await;
     let (version,): (i64,) = sqlx::query_as("PRAGMA user_version")
@@ -408,4 +254,97 @@ async fn test_mismatched_table_shape_fails_closed_and_rolls_back() {
     connection.close().await.unwrap();
     // 结构未被部分改动（WAL 下文件字节可能变化，因此比对表清单而不是文件内容）。
     assert!(!before.is_empty());
+}
+
+async fn assert_legacy_rejected(path: &std::path::Path) {
+    let before = legacy_evidence(path).await;
+    let backup = path.with_extension("verified-backup");
+    std::fs::copy(path, &backup).unwrap();
+    assert_eq!(
+        std::fs::read(&backup).unwrap(),
+        std::fs::read(path).unwrap()
+    );
+    let mut connection =
+        SqliteConnection::connect_with(&SqliteConnectOptions::new().filename(path).read_only(true))
+            .await
+            .unwrap();
+    let version: i64 = sqlx::query_scalar("PRAGMA user_version")
+        .fetch_one(&mut connection)
+        .await
+        .unwrap();
+    connection.close().await.unwrap();
+    if version != 17 {
+        let approval = crate::sessions::StoppedWriterApproval {
+            source_version: version,
+            writers_stopped: true,
+            backup_verified: true,
+        };
+        assert!(crate::sessions::migrate_stopped_work_store(path, &approval)
+            .await
+            .is_err());
+    }
+    let error = SqliteThreadStore::new(path)
+        .await
+        .err()
+        .expect("legacy writer must refuse");
+    assert!(
+        error
+            .to_string()
+            .contains("explicit stopped-writer offline migration"),
+        "{error:#}"
+    );
+    let error = SqliteThreadStore::open_existing_read_only(path)
+        .await
+        .err()
+        .expect("inline history is not reference history");
+    assert!(matches!(
+        error.kind(),
+        super::connection::ReadOnlyStoreErrorKind::SchemaIncompatible
+    ));
+    assert_eq!(
+        legacy_evidence(path).await,
+        before,
+        "refusal must preserve every schema object and row"
+    );
+}
+
+async fn legacy_evidence(path: &std::path::Path) -> Vec<(String, Vec<String>)> {
+    let mut connection =
+        SqliteConnection::connect_with(&SqliteConnectOptions::new().filename(path).read_only(true))
+            .await
+            .unwrap();
+    let version: i64 = sqlx::query_scalar("PRAGMA user_version")
+        .fetch_one(&mut connection)
+        .await
+        .unwrap();
+    let schema: Vec<String> = sqlx::query_scalar("SELECT json_array(type,name,tbl_name,sql) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name").fetch_all(&mut connection).await.unwrap();
+    let tables: Vec<String> = sqlx::query_scalar("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").fetch_all(&mut connection).await.unwrap();
+    let mut evidence = vec![
+        ("version".into(), vec![version.to_string()]),
+        ("schema".into(), schema),
+    ];
+    for table in tables {
+        let columns: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM pragma_table_info(?1) ORDER BY cid")
+                .bind(&table)
+                .fetch_all(&mut connection)
+                .await
+                .unwrap();
+        let expressions = columns
+            .iter()
+            .map(|column| format!("quote(\"{}\")", column.replace('"', "\"\"")))
+            .collect::<Vec<_>>()
+            .join(" || ',' || ");
+        let statement = format!(
+            "SELECT quote(rowid) || ':' || {expressions} FROM \"{}\" ORDER BY rowid",
+            table.replace('"', "\"\"")
+        );
+        let rows = sqlx::query_scalar(sqlx::AssertSqlSafe(statement))
+            .fetch_all(&mut connection)
+            .await
+            .unwrap();
+        evidence.push((table, rows));
+    }
+    connection.close().await.unwrap();
+    evidence
 }

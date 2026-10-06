@@ -20,12 +20,15 @@ mod mailbox;
 mod processing;
 #[path = "work/query.rs"]
 mod query;
+#[path = "work/response.rs"]
+mod response;
 #[path = "work/transition.rs"]
 mod transition;
 
 pub use commands::*;
 pub use entities::*;
 pub use query::*;
+pub use response::*;
 pub use transition::*;
 
 pub const DEFAULT_AGENT_MAX_ITERATIONS: usize = 500;

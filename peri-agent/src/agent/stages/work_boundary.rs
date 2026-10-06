@@ -163,11 +163,20 @@ impl WorkBoundary {
             WorkRuntime::BestEffortFixture => return Ok(None),
         };
         let snapshot = session.inspect_head().await?;
-        let processing = session.ledger.inspect(&WorkQuery::new(&session.admission.session_id,
-            WorkSelector::Processing { processing_id: session.admission.work_id.clone() })).await?;
+        let processing = session
+            .ledger
+            .inspect(&WorkQuery::new(
+                &session.admission.session_id,
+                WorkSelector::Processing {
+                    processing_id: session.admission.work_id.clone(),
+                },
+            ))
+            .await?;
         if let WorkPage::Processings(records) = processing.page {
             if let Some(processing) = records.first() {
-                if let Some(error) = super::work_reason::blocked_budget_error(processing, &snapshot.head.limits) {
+                if let Some(error) =
+                    super::work_reason::blocked_budget_error(processing, &snapshot.head.limits)
+                {
                     return Err(error.into());
                 }
             }

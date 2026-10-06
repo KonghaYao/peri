@@ -1,8 +1,8 @@
 use super::*;
-use peri_acp_types::session_resources::ControlState;
 use peri_acp_types::session_resources::work::{
     Effect, EvidenceWrite, InvocationStatus, SessionWorkHead,
 };
+use peri_acp_types::session_resources::ControlState;
 use sha2::{Digest, Sha256};
 
 fn snapshot() -> WorkInspection {

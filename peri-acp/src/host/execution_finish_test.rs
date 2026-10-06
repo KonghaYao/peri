@@ -5,10 +5,10 @@ use peri_acp_types::{
     messages::BaseMessage,
     session::{MessagePolicy, TurnId},
     session_resources::{
-        ControlAction, ControlAttempt, ControlCommand, ControlDecision,
         work::{
             DeliveryPurpose, PublishDelivery, WorkEvent, WorkInspection, WorkPayload, WorkQuery,
         },
+        ControlAction, ControlAttempt, ControlCommand, ControlDecision,
     },
     store::PersistedPayload,
 };
@@ -228,11 +228,9 @@ async fn reconcile_finish_retries_known_not_applied_with_new_stable_mutation() {
     assert_eq!(unresolved.control, before.control);
     assert_eq!(unresolved.page, before.page);
 
-    assert!(
-        reconcile_finish(resources.as_ref(), &admission)
-            .await
-            .unwrap()
-    );
+    assert!(reconcile_finish(resources.as_ref(), &admission)
+        .await
+        .unwrap());
     let retry = command(&admission, 1);
     assert_ne!(retry.mutation_id, original.mutation_id);
     assert_eq!(retry.action, original.action);
@@ -266,24 +264,20 @@ async fn reconcile_finish_retries_known_not_applied_with_new_stable_mutation() {
         resources.resolve_work_mutation(&original).await.unwrap(),
         WorkResolution::NotApplied
     );
-    assert!(
-        reconcile_finish(resources.as_ref(), &admission)
-            .await
-            .unwrap()
-    );
+    assert!(reconcile_finish(resources.as_ref(), &admission)
+        .await
+        .unwrap());
     let replayed = snapshot(resources.as_ref(), &admission).await;
     assert_eq!(replayed.control, finished.control);
     assert_eq!(replayed.page, finished.page);
-    assert!(
-        crate::host::work_query::command(
-            resources.as_ref(),
-            &admission.session_id,
-            &command(&admission, 2).mutation_id
-        )
-        .await
-        .unwrap()
-        .is_none()
-    );
+    assert!(crate::host::work_query::command(
+        resources.as_ref(),
+        &admission.session_id,
+        &command(&admission, 2).mutation_id
+    )
+    .await
+    .unwrap()
+    .is_none());
 }
 
 #[tokio::test]
@@ -328,11 +322,9 @@ async fn finish_admission_rejects_original_execution_after_another_attempt_is_ob
             .is_none()
     );
     for _ in 0..2 {
-        assert!(
-            finish_admission(resources.as_ref(), &admission)
-                .await
-                .is_err()
-        );
+        assert!(finish_admission(resources.as_ref(), &admission)
+            .await
+            .is_err());
         let after = snapshot(resources.as_ref(), &admission).await;
         assert_eq!(after.control, before.control);
         assert_eq!(after.page, before.page);
@@ -361,11 +353,9 @@ async fn reconcile_finish_can_progress_past_previous_known_not_applied_retries()
             WorkResolution::NotApplied
         );
     }
-    assert!(
-        reconcile_finish(resources.as_ref(), &admission)
-            .await
-            .unwrap()
-    );
+    assert!(reconcile_finish(resources.as_ref(), &admission)
+        .await
+        .unwrap());
     let finished = snapshot(resources.as_ref(), &admission).await;
     assert!(finished.control.attempt.is_none());
     let journal = crate::host::work_query::command(
@@ -380,11 +370,9 @@ async fn reconcile_finish_can_progress_past_previous_known_not_applied_retries()
         journal.resolution,
         Some(WorkResolution::Applied { .. })
     ));
-    assert!(
-        reconcile_finish(resources.as_ref(), &admission)
-            .await
-            .unwrap()
-    );
+    assert!(reconcile_finish(resources.as_ref(), &admission)
+        .await
+        .unwrap());
     assert_eq!(
         snapshot(resources.as_ref(), &admission).await.page,
         finished.page
@@ -410,11 +398,9 @@ async fn reconcile_finish_without_journal_does_not_infer_settlement_from_absent_
     let before = snapshot(resources.as_ref(), &admission).await;
     assert!(before.control.attempt.is_none());
     for _ in 0..2 {
-        assert!(
-            !reconcile_finish(resources.as_ref(), &admission)
-                .await
-                .unwrap()
-        );
+        assert!(!reconcile_finish(resources.as_ref(), &admission)
+            .await
+            .unwrap());
         let after = snapshot(resources.as_ref(), &admission).await;
         assert_eq!(after.control, before.control);
         assert_eq!(after.page, before.page);
@@ -425,15 +411,13 @@ async fn reconcile_finish_without_journal_does_not_infer_settlement_from_absent_
         assert!(record.leaving_evidence_id.is_none());
     }
     for retry in 0..3 {
-        assert!(
-            crate::host::work_query::command(
-                resources.as_ref(),
-                &admission.session_id,
-                &command(&admission, retry).mutation_id
-            )
-            .await
-            .unwrap()
-            .is_none()
-        );
+        assert!(crate::host::work_query::command(
+            resources.as_ref(),
+            &admission.session_id,
+            &command(&admission, retry).mutation_id
+        )
+        .await
+        .unwrap()
+        .is_none());
     }
 }

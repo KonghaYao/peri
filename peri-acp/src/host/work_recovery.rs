@@ -1,6 +1,6 @@
 use peri_acp_types::session_resources::{
-    SessionResourceError, SessionResourceErrorKind, SessionResourceResult, SessionResources,
     work::{WorkInspection, WorkPage, WorkQuery, WorkResolution, WorkSelector},
+    SessionResourceError, SessionResourceErrorKind, SessionResourceResult, SessionResources,
 };
 
 pub(super) async fn resolve_pending(

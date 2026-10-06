@@ -1,5 +1,9 @@
 use super::*;
 
+pub fn pending_processing_id(session_id: &str, lifecycle: u64, next_delivery_seq: u64) -> String {
+    format!("batch:{session_id}:{lifecycle}:{next_delivery_seq}")
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PayloadRef {
@@ -192,6 +196,7 @@ pub struct Delivery {
     pub participates_in_reason: bool,
     pub obligation: ObligationStatus,
     pub disposition: Option<String>,
+    pub delegation: Option<DelegationRef>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -331,6 +336,7 @@ pub struct AdmissionRecord {
     pub admission: WorkAdmission,
     pub entering_mutation_id: String,
     pub leaving_evidence_id: Option<String>,
+    pub initial_delivery_ids: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

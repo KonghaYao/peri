@@ -67,7 +67,7 @@ pub struct SqliteThreadStore {
 }
 
 impl SqliteThreadStore {
-    /// 打开或创建会话数据库，原地升级已知旧 schema 并保留历史数据。
+    /// 打开或创建当前工作记录形状的会话数据库；旧形状须显式停写迁移。
     pub async fn new(db_path: impl Into<PathBuf>) -> Result<Self> {
         Ok(Self {
             database: Arc::new(SqliteSessionDatabase::open(db_path).await?),

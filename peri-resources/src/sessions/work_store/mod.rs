@@ -5,6 +5,8 @@ mod selection;
 pub(crate) use selection::{decode_facts, decode_inspection, inspection_plan, read_set};
 mod plan;
 pub(crate) use plan::sql_plan;
+mod response;
+pub(crate) use response::{response_validation_plan, validate_response_transition};
 mod lifecycle;
 pub(crate) use lifecycle::{creation_guard, history_guard, tombstone_plan};
 

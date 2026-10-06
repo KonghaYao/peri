@@ -3,7 +3,7 @@ use std::sync::Arc;
 use peri_acp_types::session::{MessageQueue, QueuedMessage, QueuedPayload};
 use peri_acp_types::session_resources::work::{
     DeliveryPurpose, PublishDelivery, TaskBinding, WorkAction, WorkCommand, WorkEvent, WorkPage,
-    WorkQuery, WorkSelector, WorkStage,
+    WorkQuery, WorkSelector,
 };
 use peri_acp_types::session_resources::SessionResources;
 use peri_acp_types::store::PersistedPayload;
@@ -108,7 +108,7 @@ pub(in crate::session::subagent) async fn publish_work_delegation(
         },
     };
     let identity = delivery_id.as_uuid().to_string();
-    let delivery = PublishDelivery {
+    let mut delivery = PublishDelivery {
         delivery_id: identity.clone(),
         event: WorkEvent {
             producer_namespace: "peri-agent.child-delegation".into(),
@@ -163,6 +163,40 @@ pub(in crate::session::subagent) async fn publish_work_delegation(
                 },
             };
             barrier.commit(&stage).await?;
+            let staged = barrier
+                .inspect(&WorkQuery::new(
+                    child_id,
+                    WorkSelector::Draft {
+                        input_id: input.input_id.clone(),
+                    },
+                ))
+                .await?;
+            let WorkPage::Drafts(drafts) = staged.page else {
+                return Err("delegation draft lookup returned a different page".into());
+            };
+            let draft = drafts
+                .first()
+                .filter(|draft| {
+                    drafts.len() == 1
+                        && draft.input_id == input.input_id
+                        && draft.command_id == invocation_id
+                        && draft.recipient_lifecycle == lifecycle
+                })
+                .ok_or("exact delegation draft unavailable")?;
+            delivery.event.causation_id = Some(serde_json::to_string(
+                &peri_acp_types::session_resources::work::UserInputPublicationIdentity {
+                    input_id: input.input_id,
+                    publication_generation: invocation_id.into(),
+                    fingerprint: draft.fingerprint,
+                    command_id: invocation_id.into(),
+                    draft_binding:
+                        peri_acp_types::session_resources::work::StagedUserInputPublicationBinding {
+                            draft_revision: draft.revision,
+                            draft_fingerprint: draft.fingerprint,
+                            canonical_content: delivery.event.content.content.clone(),
+                        },
+                },
+            )?);
             let current = barrier
                 .inspect(&WorkQuery::new(child_id, WorkSelector::Head))
                 .await?;

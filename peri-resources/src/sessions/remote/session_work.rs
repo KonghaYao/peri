@@ -57,7 +57,22 @@ impl RemoteSessionData {
             &write.session_id,
         )
         .await?;
-        Ok(reference)
+        let prepared = async {
+            let rows = rows(
+                self.store()
+                    .await?
+                    .read_batch(specifications(vec![
+                        work_store::payload::prepared_evidence_plan(write)?,
+                    ])?)
+                    .await?,
+            )?;
+            work_store::payload::prepared_evidence_reference(write, &rows[0])
+        }
+        .await;
+        prepared.map_err(|error| {
+            tracing::error!(%error, session_id = %write.session_id, "remote immutable evidence readback was not confirmed after commit");
+            SessionResourceError::persistence_uncertain(Some(write.session_id.clone()))
+        })
     }
 
     pub(super) async fn work_resolution(
@@ -99,7 +114,11 @@ impl RemoteSessionData {
             let store = self.store().await?;
             let results = rows(store.read_batch(read_plan.clone()).await?)?;
             let facts = work_store::decode_facts(command, &results)?;
-            let transition = transition_work(command, &facts)?;
+            let mut transition = transition_work(command, &facts)?;
+            if let Some(statement) = work_store::response_validation_plan(command, &transition)? {
+                let validation = rows(store.read_batch(specifications(vec![statement])?).await?)?;
+                work_store::validate_response_transition(command, &mut transition, &validation[0])?;
+            }
             let mut effects = specifications(work_store::sql_plan(command, &facts, &transition)?)?;
             let retry_guards = effects
                 .iter()

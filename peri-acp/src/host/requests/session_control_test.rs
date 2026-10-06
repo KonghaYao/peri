@@ -189,3 +189,69 @@ async fn independent_child_prevents_false_close_without_being_cancelled() {
     .unwrap();
     assert_ne!(snapshot["settlement"]["status"], "settled");
 }
+
+#[tokio::test]
+async fn close_returns_original_receipt_after_store_settlement_and_replays_without_another_finish()
+{
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (cfg, mut sessions, id) = fixture(&tmp).await;
+    super::super::resource_owners::bind(&cfg, &id, &HashMap::new())
+        .await
+        .unwrap();
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
+    let close = command(&cfg, &id, "close-once", ControlAction::Close).await;
+    let receipt = handle_request("session/control", &close, &cfg, &mut sessions, &transport)
+        .await
+        .unwrap();
+    assert_eq!(receipt["decision"]["kind"], "accepted");
+    assert_eq!(receipt["state"]["status"], "closing");
+    assert!(!sessions.contains_key(&id));
+    let settled = cfg
+        .session_resources
+        .load_session_control(&id)
+        .await
+        .unwrap();
+    assert_eq!(settled.status, ControlStatus::Closed);
+    assert_eq!(
+        settled.control_generation,
+        receipt["state"]["controlGeneration"].as_u64().unwrap() + 1
+    );
+    assert_eq!(
+        settled.revision,
+        receipt["state"]["revision"].as_u64().unwrap() + 1
+    );
+    let snapshot = handle_request(
+        "session/control/state",
+        &json!({"sessionId":id}),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+    assert_eq!(snapshot["settlement"]["status"], "settled");
+    assert_eq!(
+        handle_request("session/control", &close, &cfg, &mut sessions, &transport)
+            .await
+            .unwrap(),
+        receipt
+    );
+    let resolved = handle_request(
+        "session/control/resolve",
+        &close,
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+    assert_eq!(resolved["status"], "applied");
+    assert_eq!(resolved["receipt"], receipt);
+    assert_eq!(
+        cfg.session_resources
+            .load_session_control(&id)
+            .await
+            .unwrap(),
+        settled
+    );
+}
