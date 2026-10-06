@@ -55,6 +55,49 @@ async fn read_bootstrap_settings<R: AsyncRead + Unpin>(reader: &mut R) -> anyhow
     Ok(serde_json::to_string(&value)?)
 }
 
+/// 安装 ACP 宿主的 panic hook（**与 `peri-tui/src/kit/panic.rs:47-55` 同源语义**）。
+///
+/// 依赖方向为 `peri-tui` → `peri-acp`（见两侧 `Cargo.toml`），peri-acp 不能反向
+/// 复用 TUI 侧实现，故本地按同一语义实现：payload + 位置 + backtrace 经
+/// `tracing::error!` 结构化记录，不写 stderr。ACP 客户端（编辑器/IDE）消费的是
+/// 日志文件而非宿主 stderr，默认 hook 的 panic 输出对客户端不可见。
+///
+/// 必须在 `init_tracing` **之后**调用：`tracing::error!` 在没有 subscriber 时
+/// 不产生任何输出。修改 TUI 侧格式时须同步本处，避免语义漂移。
+fn install_panic_hook() {
+    std::panic::set_hook(Box::new(|panic_info| {
+        let msg = format_panic_message(panic_info);
+        tracing::error!("thread panicked at {}", msg);
+    }));
+}
+
+/// 格式化 panic 信息为可读字符串（消息 + 位置 + backtrace）。
+///
+/// 与 `peri-tui/src/kit/panic.rs::format_panic_message` 同源（依赖方向见上）。
+fn format_panic_message(panic_info: &std::panic::PanicHookInfo<'_>) -> String {
+    let payload = if let Some(s) = panic_info.payload().downcast_ref::<&str>() {
+        s.to_string()
+    } else if let Some(s) = panic_info.payload().downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic payload".to_string()
+    };
+
+    let location = panic_info
+        .location()
+        .map(|loc| format!("{}:{}:{}", loc.file(), loc.line(), loc.column()))
+        .unwrap_or_else(|| "unknown location".to_string());
+
+    // 自动捕获 backtrace（无需手动设置 RUST_BACKTRACE=1）
+    let backtrace = std::backtrace::Backtrace::capture();
+    let bt_str = match backtrace.status() {
+        std::backtrace::BacktraceStatus::Captured => format!("\n{}", backtrace),
+        _ => String::new(),
+    };
+
+    format!("'{}'\n  at {}{}", payload, location, bt_str)
+}
+
 /// 启动 ACP stdio 宿主（批 3：统一宿主 `run_acp_server` 接管全部业务处理）。
 ///
 /// 装配输入（cron/MCP 池/工具检索索引/插件数据等具体实现）由部署装配点
@@ -62,6 +105,12 @@ async fn read_bootstrap_settings<R: AsyncRead + Unpin>(reader: &mut R) -> anyhow
 /// ACP 层只持端口接口（3.0 批 2 波 2，§0 依赖方向）。
 pub async fn run_acp_stdio(input: StdioInput) -> anyhow::Result<()> {
     let _telemetry = peri_agent::telemetry::init_tracing("peri-acp");
+    // ACP 模式下 panic 必须落日志：客户端（编辑器/IDE）读日志文件而非宿主
+    // stderr，默认 hook 的输出对客户端不可见。装在 `init_tracing` **之后**——
+    // 若在 subscriber 就绪前安装，`init_tracing` 自身的启动失败 panic
+    // （日志目录不可写）反而会从 stderr 变成无声失败（TUI 路径同此顺序，
+    // 见 `cli_tui.rs`：init_tracing → init_panic_notify）。
+    install_panic_hook();
     let mut stdin = tokio::io::stdin();
     let injected_settings = if input.settings_stdin {
         Some(read_bootstrap_settings(&mut stdin).await?)
@@ -212,3 +261,71 @@ mod run_server_integration_tests;
 #[cfg(test)]
 #[path = "settings_bootstrap_test.rs"]
 mod settings_bootstrap_tests;
+
+/// panic hook 的日志出口验收（P1-3）：ACP 宿主 panic 必须经 `tracing::error!`
+/// 可见，而不是默认 hook 的 stderr。
+#[cfg(test)]
+mod panic_hook_tests {
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+
+    use serial_test::serial;
+
+    use super::install_panic_hook;
+
+    #[derive(Clone, Default)]
+    struct LogBuffer(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for LogBuffer {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl LogBuffer {
+        fn text(&self) -> String {
+            String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+        }
+
+        fn subscriber(&self) -> impl tracing::Subscriber + Send + Sync {
+            let buffer = self.clone();
+            tracing_subscriber::fmt()
+                .without_time()
+                .with_ansi(false)
+                .with_max_level(tracing::Level::ERROR)
+                .with_writer(move || buffer.clone())
+                .finish()
+        }
+    }
+
+    /// 仓库没有现成的 tracing 捕获工具，这里内联最小 `MakeWriter`（与
+    /// `host/diagnostics_test.rs` 同形）。hook 是进程全局状态，故 `serial`。
+    #[test]
+    #[serial]
+    fn panic_hook_records_panic_through_tracing() {
+        let buffer = LogBuffer::default();
+        let _subscriber = tracing::subscriber::set_default(buffer.subscriber());
+        let previous = std::panic::take_hook();
+        install_panic_hook();
+
+        let result = std::panic::catch_unwind(|| panic!("acp panic hook probe"));
+        std::panic::set_hook(previous);
+
+        assert!(result.is_err(), "catch_unwind 必须捕获 panic");
+        let logged = buffer.text();
+        assert!(
+            logged.contains("thread panicked at"),
+            "日志缺少 panic 记录：{logged}"
+        );
+        assert!(
+            logged.contains("acp panic hook probe"),
+            "日志缺少 panic 载荷：{logged}"
+        );
+        assert!(logged.contains("mod.rs"), "日志缺少 panic 位置：{logged}");
+    }
+}

@@ -791,6 +791,11 @@ fn main() -> Result<()> {
             agent: _,
             settings_stdin,
         }) => {
+            // [P1-3] 此处不安装 panic hook：本分支唯一的工作是把控制权交给
+            // `run_acp_stdio`，hook 必须装在 tracing subscriber 就绪之后
+            // （`init_tracing` 会在日志目录不可写时 panic；提前装 tracing-only
+            // hook 会让该 panic 从 stderr 变成彻底无声）。宿主层
+            // `run_acp_stdio` 已按此顺序安装同语义 hook，覆盖本路径。
             // 限制 worker 数（默认=CPU 核数，18 核=72MB 栈空间浪费），4 MB stack
             let rt = build_runtime()?;
             rt.block_on(async {
