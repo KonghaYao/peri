@@ -444,11 +444,9 @@ fn flush_on_receiver_close(
     if counter != *last_reset_counter {
         apply_bridge_reset(state, last_reset_counter, counter);
     } else if pending_publication || state.current_turn.has_unprojected_changes() {
-        crate::kit::bg_task_live::publish_pending_streams();
         acp_events::push_view_models(state);
-    } else {
-        crate::kit::bg_task_live::publish_pending_streams();
     }
+    crate::kit::bg_task_live::publish_pending_streams();
 }
 
 fn accepts_event_session(

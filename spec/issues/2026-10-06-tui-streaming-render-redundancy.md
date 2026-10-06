@@ -157,7 +157,9 @@
 
 ## 六、验收限制
 
-- 未提交 Git；保留工作区原有、与本任务无关的改动。
+- 首批回归：`./scripts/cargo-rmcp-patched.sh test --locked -p peri-tui --lib` 为 1580 passed / 6 ignored；doc tests 编译通过，0 个可执行示例。后台 scheduler 覆盖固定 deadline、隐藏主流、同会话重置后重排和重置与 receiver close 同时发生的收尾。
+- 本次变更的 Rust 文件均不超过 1000 行；全量 size 检查仍有 13 个既存测试文件超限，未宣称全库通过。
+- 首批进展按用户授权提交，保留工作区原有、与本任务无关的改动；未关闭项继续保持 P0。
 - 未做现场 perf / heap 采样，不提供 CPU/RSS 改善数字；原文倍数仅为审计假设，不作为验收事实。
 - §二为历史审计原始描述，不覆盖 §四的纠正和未完成范围。
 - `ProjectionCopiedBytes` 现有统计按整轮文本长度估算，不是实际分配/复制字节；不得据此宣称物化收益。

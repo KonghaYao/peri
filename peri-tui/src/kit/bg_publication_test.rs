@@ -115,3 +115,23 @@ fn same_session_reset_rearms_preserved_stream_without_another_event() {
     );
     assert_eq!(state.generation, 0);
 }
+
+#[test]
+#[serial_test::serial]
+fn receiver_close_flushes_preserved_background_stream_even_when_reset_is_pending() {
+    let fixture = Fixture::new();
+    let saved_view = atoms::VIEW_MODELS.state().read().clone();
+    let saved_acp = atoms::ACP_STATE.state().read().clone();
+    let mut state = super::tests::scheduler_state();
+    let mut scheduler = PublicationScheduler::default();
+    fixture.append("final background output");
+    scheduler.accept(PublicationIntent::None, &mut state);
+    let mut last_reset = atoms::BRIDGE_RESET_COUNTER.get().wrapping_sub(1);
+    flush_on_receiver_close(&mut state, &mut scheduler, &mut last_reset);
+    assert!(
+        matches!(&BG_LIVE_DETAIL.state().read()["scheduler-bg-test"].nested_units[0],
+        TuiRenderUnit::TuiAssistantBubble(bubble) if bubble.text == "final background output")
+    );
+    *atoms::VIEW_MODELS.state().write() = saved_view;
+    *atoms::ACP_STATE.state().write() = saved_acp;
+}
