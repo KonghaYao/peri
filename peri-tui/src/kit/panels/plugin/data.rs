@@ -71,7 +71,6 @@ pub(super) fn refresh_marketplace_cache() {
 fn load_marketplace_data() -> Vec<MsEntry> {
     let known = peri_middlewares::plugin::load_known_marketplaces(None).unwrap_or_default();
     let cache_dir = peri_middlewares::plugin::marketplaces_cache_dir();
-    let _ = std::fs::create_dir_all(&cache_dir);
 
     let installed = peri_middlewares::plugin::load_installed_plugins(None).unwrap_or_default();
 
@@ -177,7 +176,6 @@ fn load_marketplace_data() -> Vec<MsEntry> {
 fn load_discover_plugins_from_disk() -> Vec<PluginSearchResultItem> {
     let mut known = peri_middlewares::plugin::load_known_marketplaces(None).unwrap_or_default();
     let cache_dir = peri_middlewares::plugin::marketplaces_cache_dir();
-    let _ = std::fs::create_dir_all(&cache_dir);
 
     // 确保 official marketplace 已注册（参考项目行为：自动注入）
     let has_official = known.iter().any(|km| match &km.source {

@@ -175,6 +175,12 @@ impl PluginManagerPort for PluginManager {
         let removed_location = marketplaces
             .iter()
             .find(|mkt| MarketplaceManager::extract_name(&mkt.source) == name)
+            .filter(|marketplace| {
+                !matches!(
+                    &marketplace.source,
+                    MarketplaceSource::File { .. } | MarketplaceSource::Directory { .. }
+                )
+            })
             .map(|km| km.install_location.clone());
 
         let filtered: Vec<KnownMarketplace> = marketplaces
@@ -189,8 +195,17 @@ impl PluginManagerPort for PluginManager {
         save_known_marketplaces(&filtered, None).map_err(|e| e.to_string())?;
         if let Some(loc) = removed_location {
             let install_path = std::path::Path::new(&loc);
-            if !loc.is_empty() && install_path.exists() {
-                std::fs::remove_dir_all(install_path).map_err(|e| e.to_string())?;
+            let cache_dir = self.cache_dir();
+            if install_path.exists() && cache_dir.exists() {
+                let cache_root = cache_dir
+                    .canonicalize()
+                    .map_err(|error| error.to_string())?;
+                let installed = install_path
+                    .canonicalize()
+                    .map_err(|error| error.to_string())?;
+                if installed.starts_with(&cache_root) && installed != cache_root {
+                    std::fs::remove_dir_all(installed).map_err(|error| error.to_string())?;
+                }
             }
         }
         Ok(())

@@ -167,6 +167,40 @@ pub(super) async fn handle_install(
     }
 }
 
+pub(super) async fn handle_marketplace_add(
+    params: &Value,
+    cfg: &AcpServerConfig,
+) -> Result<Value, AcpError> {
+    let source = params
+        .get("source")
+        .and_then(Value::as_str)
+        .ok_or_else(|| AcpError::new(-32602, "missing 'source'"))?;
+    match cfg.plugin_manager.marketplace_add(source).await {
+        Ok(name) => Ok(serde_json::json!({"success": true, "name": name})),
+        Err(error) => {
+            tracing::error!(method = "marketplace/add", %error, "Marketplace operation failed");
+            Err(AcpError::new(-32603, error))
+        }
+    }
+}
+
+pub(super) async fn handle_marketplace_remove(
+    params: &Value,
+    cfg: &AcpServerConfig,
+) -> Result<Value, AcpError> {
+    let name = params
+        .get("name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| AcpError::new(-32602, "missing 'name'"))?;
+    match cfg.plugin_manager.marketplace_remove(name).await {
+        Ok(()) => Ok(serde_json::json!({"success": true})),
+        Err(error) => {
+            tracing::error!(method = "marketplace/remove", marketplace_name = name, %error, "Marketplace operation failed");
+            Err(AcpError::new(-32603, error))
+        }
+    }
+}
+
 pub(super) async fn handle_uninstall(
     params: &Value,
     cfg: &AcpServerConfig,

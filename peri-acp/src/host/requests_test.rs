@@ -545,6 +545,9 @@ mod user_input_tests;
 #[path = "requests/plugin_search_test.rs"]
 mod plugin_search_tests;
 
+#[path = "requests/marketplace_mutation_test.rs"]
+mod marketplace_mutation_tests;
+
 #[path = "requests_config_cases_test.rs"]
 mod config_cases;
 

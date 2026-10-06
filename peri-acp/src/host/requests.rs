@@ -148,6 +148,8 @@ pub(crate) async fn handle_request(
         "session/rewind-candidates" => rewind::handle_rewind_candidates(params, cfg, sessions),
         "session/rewind-preview" => rewind::handle_rewind_preview(params, cfg, sessions).await,
         "session/rewind" => rewind::handle_rewind(params, cfg, sessions, transport).await,
+        "marketplace/add" => plugin::handle_marketplace_add(params, cfg).await,
+        "marketplace/remove" => plugin::handle_marketplace_remove(params, cfg).await,
         "marketplace/refresh" => plugin::handle_refresh(params, cfg).await,
         "mcp/list" => mcp_oauth::handle_list(params, cfg),
         "cron/list" | "cron/toggle" | "cron/remove" => cron::handle(method, params, sessions).await,

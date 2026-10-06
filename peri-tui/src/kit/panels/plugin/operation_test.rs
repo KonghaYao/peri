@@ -93,6 +93,87 @@ fn old_session_completion_cannot_clear_a_new_pending_operation() {
     assert!(state.error.is_none());
 }
 
+#[test]
+fn marketplace_operations_encode_host_catalog_intent_without_project_paths() {
+    for (operation, method, action, params) in [
+        (
+            PluginOperation::marketplace_add("owner/tools".into()),
+            "marketplace/add",
+            "add_marketplace",
+            json!({"source": "owner/tools"}),
+        ),
+        (
+            PluginOperation::marketplace_remove("tools".into()),
+            "marketplace/remove",
+            "delete_marketplace",
+            json!({"name": "tools"}),
+        ),
+        (
+            PluginOperation::marketplace_refresh("tools".into()),
+            "marketplace/refresh",
+            "refresh_marketplace",
+            json!({"name": "tools"}),
+        ),
+    ] {
+        assert_eq!(operation.method, method);
+        assert_eq!(operation.action, action);
+        assert_eq!(operation.params, params);
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn marketplace_requests_preserve_ticket_context_and_surface_backend_failures() {
+    let _guard = SessionGuard::new();
+    for operation in [
+        PluginOperation::marketplace_add("owner/tools".into()),
+        PluginOperation::marketplace_remove("tools".into()),
+        PluginOperation::marketplace_refresh("tools".into()),
+    ] {
+        let (transport, server) = mpsc_transport_pair();
+        let (client, notification_tx, _notification_rx) = AcpTuiClient::new(transport);
+        client.force_stable_for_test("plugin-operation-session", true);
+        client.spawn_pump(notification_tx);
+        let state = Arc::new(parking_lot::Mutex::new(OperationState::default()));
+        let ticket = state
+            .lock()
+            .begin(operation.clone(), SearchSession::current());
+        let complete_state = state.clone();
+        let task = launch(ticket, Some(Arc::new(client)), move |ticket, result| {
+            complete_state.lock().complete(ticket, result);
+            None
+        });
+        let incoming = tokio::time::timeout(Duration::from_secs(2), server.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let IncomingMessage::Request { id, method, params } = incoming else {
+            panic!("expected marketplace request");
+        };
+        assert_eq!(method, operation.method);
+        let mut expected = operation.params;
+        expected["sessionId"] = json!("plugin-operation-session");
+        assert_eq!(params, expected);
+        server
+            .send_response(id, Err(AcpError::new(-32603, "catalog persistence failed")))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(state.lock().pending_action().is_none());
+        assert!(
+            state
+                .lock()
+                .error
+                .as_ref()
+                .unwrap()
+                .contains("catalog persistence failed")
+        );
+    }
+}
+
 #[tokio::test]
 #[serial]
 async fn missing_client_leaves_loading_and_preserves_visible_error() {

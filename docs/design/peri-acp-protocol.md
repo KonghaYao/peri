@@ -72,6 +72,9 @@ TUI 的所有主动行为通过标准 ACP JSON-RPC 方法调用。不定义自�
 | 方法 | 参数 | 返回值 | 语义 |
 |------|------|--------|------|
 | `plugin/search` | `{ query, sessionId? }` | `{ results }` | 搜索插件市场 |
+| `marketplace/add` | `{ source, sessionId? }` | `{ success, name }` | 宿主全局 marketplace catalog 注册与刷新，经 PluginManagerPort 持久化；读取、刷新或保存失败返回 -32603 并记录日志 |
+| `marketplace/remove` | `{ name, sessionId? }` | `{ success }` | 宿主全局 marketplace catalog 删除，经 PluginManagerPort 持久化并清理宿主缓存；不删除本地源目录；读取或保存失败返回 -32603 并记录日志 |
+| `marketplace/refresh` | `{ name, sessionId? }` | `{ success, pluginCount }` | 按宿主 catalog 名称刷新；失败返回 -32603 |
 | `plugin/install` | `{ name, marketplace, scope?, sessionId? }` | `{}` | 安装插件 |
 | `plugin/uninstall` | `{ name, sessionId? }` | `{}` | 卸载插件 |
 | `plugin/toggle` | `{ pluginId, enable, scope, sessionId? }` | `{ success }` | 宿主统一持久化启用/禁用；project/local scope 必须取有效 session 的执行目录，不回退用户级配置 |
@@ -79,6 +82,8 @@ TUI 的所有主动行为通过标准 ACP JSON-RPC 方法调用。不定义自�
 | `cron/toggle` | `{ sessionId, id }` | `{ id, success }` | 切换会话环境中的任务；校验 session/environment/workspace scope |
 | `cron/remove` | `{ sessionId, id }` | `{ id, success }` | 删除会话环境中的任务；不存在或不可用显式失败 |
 | `plugin/update` | `{ pluginId, sessionId? }` | `{ success, plugin }` | 更新插件（结果同时推送 `plugin-action-result` / `plugin-snapshot` 通知） |
+
+`marketplace/add`、`marketplace/remove`、`marketplace/refresh` 操作宿主全局 catalog，不按 project 或 session 重定位配置；可选 `sessionId` 仅供客户端响应 ticket 生命周期关联。TUI 经统一 PluginOperation 展示 pending/error，成功响应后刷新本地只读浏览缓存；服务端错误不被吞掉。
 
 ### 2.5 后台任务、工作流与 rewind
 

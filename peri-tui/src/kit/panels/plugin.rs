@@ -149,7 +149,6 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let projection_error = hooks.use_atom(&SERVICE_PROJECTION_ERROR);
     let add_marketplace_input = hooks.use_state(TextAreaState::default);
     let add_marketplace_active = hooks.use_state(|| false);
-    let marketplace_refreshing = hooks.use_state(|| false);
     // Marketplace detail state
     let marketplace_detail = hooks.use_state(|| Option::<usize>::None);
     let marketplace_detail_action = hooks.use_state(|| 0usize);
@@ -224,7 +223,6 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 detail_plugin_idx,
                 marketplace_detail,
                 marketplace_detail_action,
-                marketplace_refreshing,
                 add_marketplace_input,
                 add_marketplace_active,
             )
@@ -439,7 +437,7 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 success_color,
                 warning_color,
                 error_style,
-                *marketplace_refreshing.read(),
+                operation.read().pending_action() == Some("refresh_marketplace"),
                 *add_marketplace_active.read(),
                 add_marketplace_input.read().text.as_str(),
                 confirm_action.read().clone().as_deref(),
@@ -518,6 +516,9 @@ fn action_label(action: &str) -> String {
         "uninstall" => i18n::tr("panel-plugin-action-uninstall"),
         "update" => i18n::tr("panel-plugin-action-update"),
         "install" => i18n::tr("panel-plugin-action-install"),
+        "add_marketplace" => i18n::tr("panel-plugin-marketplace-add-label"),
+        "delete_marketplace" => i18n::tr("panel-plugin-marketplace-action-delete"),
+        "refresh_marketplace" => i18n::tr("panel-plugin-marketplace-action-refresh"),
         "back" => i18n::tr("panel-plugin-action-back"),
         _ => action.to_string(),
     }

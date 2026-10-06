@@ -1,12 +1,12 @@
 use crate::components::textarea::TextAreaState;
-use crate::kit::atoms::{ACP_CLIENT_HANDLE, PLUGIN_LIST, PluginViewTab};
+use crate::kit::atoms::{PLUGIN_LIST, PluginViewTab};
 use crate::kit::list_nav::{next_selection, previous_selection, scroll_start_for_selected};
 use crate::kit::panel_mouse::{ListLayout, hit_item, hit_row, is_scrollbar_column};
 use ratatui_kit::crossterm::event::{Event, KeyCode, KeyEventKind, MouseButton, MouseEventKind};
 use ratatui_kit::prelude::{EventResult, State};
 use ratatui_kit::ratatui::layout::Rect;
 
-use super::data::{get_marketplace_cache, refresh_discover_cache, refresh_marketplace_cache};
+use super::data::{get_marketplace_cache, refresh_discover_cache};
 use super::{VISIBLE_ITEMS, action_list, cycle_backward, cycle_forward};
 
 #[allow(clippy::too_many_arguments)]
@@ -23,7 +23,6 @@ pub(super) fn handle_panel_event(
     detail_plugin_idx: State<Option<usize>>,
     marketplace_detail: State<Option<usize>>,
     marketplace_detail_action: State<usize>,
-    marketplace_refreshing: State<bool>,
     add_marketplace_input: State<TextAreaState>,
     add_marketplace_active: State<bool>,
 ) -> EventResult {
@@ -36,7 +35,8 @@ pub(super) fn handle_panel_event(
             && !is_scrollbar_column(&mouse, area)
         {
             // ── 确认模式（uninstall / delete_marketplace）：点击 = 确认（Enter @L625）──
-            if let Some(action) = confirm_action.read().clone()
+            let confirmation = confirm_action.read().clone();
+            if let Some(action) = confirmation
                 && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
             {
                 let saved_loading = operation_loading.read().clone();
@@ -49,26 +49,12 @@ pub(super) fn handle_panel_event(
                         );
                     }
                     "delete_marketplace" => {
-                        let name = saved_loading.unwrap_or_default();
-                        std::thread::spawn(move || {
-                            let marketplaces =
-                                peri_middlewares::plugin::load_known_marketplaces(None)
-                                    .unwrap_or_default();
-                            let filtered: Vec<_> = marketplaces
-                                .into_iter()
-                                .filter(|km| {
-                                    peri_middlewares::plugin::MarketplaceManager::extract_name(
-                                        &km.source,
-                                    ) != name
-                                })
-                                .collect();
-                            let _ =
-                                peri_middlewares::plugin::save_known_marketplaces(&filtered, None);
-                            refresh_discover_cache();
-                            refresh_marketplace_cache();
-                            *confirm_action.write() = None;
-                            *operation_loading.write() = None;
-                        });
+                        super::operation::confirm_marketplace_remove(
+                            saved_loading.unwrap_or_default(),
+                            operation,
+                            confirm_action,
+                            operation_loading,
+                        );
                     }
                     _ => {
                         // 未知确认动作：安全起见也从独立线程写 state
@@ -103,30 +89,12 @@ pub(super) fn handle_panel_event(
                 if let Some(entry) = entries.get(s.saturating_sub(1)) {
                     match idx {
                         0 => {
-                            // Refresh
-                            let name = entry.source_label.clone();
-                            *marketplace_refreshing.write() = true;
-                            if let Some(cl) = ACP_CLIENT_HANDLE.get() {
-                                let client = cl.clone();
-                                let sid = client.current_session_id().unwrap_or_default();
-                                let name_for_refresh = name.clone();
-                                tokio::spawn(async move {
-                                    let _ = client
-                                        .send_raw_request(
-                                            "marketplace/refresh",
-                                            serde_json::json!({
-                                                "name": name_for_refresh,
-                                                "sessionId": sid,
-                                            }),
-                                        )
-                                        .await;
-                                });
-                            }
-                            // 将缓存刷新（同步 I/O）移到 blocking thread
-                            tokio::task::spawn_blocking(|| {
-                                refresh_discover_cache();
-                                refresh_marketplace_cache();
-                            });
+                            super::operation::dispatch(
+                                super::operation::PluginOperation::marketplace_refresh(
+                                    entry.name.clone(),
+                                ),
+                                operation,
+                            );
                         }
                         _ => {
                             // Delete
@@ -281,30 +249,12 @@ pub(super) fn handle_panel_event(
                 if let Some(entry) = entries.get(s.saturating_sub(1)) {
                     match *marketplace_detail_action.read() {
                         0 => {
-                            // Refresh
-                            let name = entry.source_label.clone();
-                            *marketplace_refreshing.write() = true;
-                            if let Some(cl) = ACP_CLIENT_HANDLE.get() {
-                                let client = cl.clone();
-                                let sid = client.current_session_id().unwrap_or_default();
-                                let name_for_refresh = name.clone();
-                                tokio::spawn(async move {
-                                    let _ = client
-                                        .send_raw_request(
-                                            "marketplace/refresh",
-                                            serde_json::json!({
-                                                "name": name_for_refresh,
-                                                "sessionId": sid,
-                                            }),
-                                        )
-                                        .await;
-                                });
-                            }
-                            // 将缓存刷新（同步 I/O）移到 blocking thread
-                            tokio::task::spawn_blocking(|| {
-                                refresh_discover_cache();
-                                refresh_marketplace_cache();
-                            });
+                            super::operation::dispatch(
+                                super::operation::PluginOperation::marketplace_refresh(
+                                    entry.name.clone(),
+                                ),
+                                operation,
+                            );
                         }
                         _ => {
                             // Delete
@@ -334,14 +284,7 @@ pub(super) fn handle_panel_event(
         // ── 确认模式优先 ──
         (_, true, KeyCode::Enter) => {
             let action = confirm_action.read().clone().unwrap_or_default();
-            // 不在事件处理器线程内写 confirm_action：generational-box
-            // SyncStorage 的 parking_lot::RwLock 不允许同一线程
-            // read→write 重入，否则死锁（[回归] marketplace 删除卡死）。
-            // 状态更新统一移到独立线程执行。
-            // *confirm_action.write() = None;
-
             let saved_loading = operation_loading.read().clone();
-            // *operation_loading.write() = Some(action.clone());
 
             match action.as_str() {
                 "uninstall" => {
@@ -352,25 +295,12 @@ pub(super) fn handle_panel_event(
                     );
                 }
                 "delete_marketplace" => {
-                    let name = saved_loading.unwrap_or_default();
-                    std::thread::spawn(move || {
-                        let marketplaces = peri_middlewares::plugin::load_known_marketplaces(None)
-                            .unwrap_or_default();
-                        let filtered: Vec<_> = marketplaces
-                            .into_iter()
-                            .filter(|km| {
-                                peri_middlewares::plugin::MarketplaceManager::extract_name(
-                                    &km.source,
-                                ) != name
-                            })
-                            .collect();
-                        let _ = peri_middlewares::plugin::save_known_marketplaces(&filtered, None);
-                        refresh_discover_cache();
-                        refresh_marketplace_cache();
-                        // State 写移到独立线程，避免事件循环线程的 RwLock 重入死锁
-                        *confirm_action.write() = None;
-                        *operation_loading.write() = None;
-                    });
+                    super::operation::confirm_marketplace_remove(
+                        saved_loading.unwrap_or_default(),
+                        operation,
+                        confirm_action,
+                        operation_loading,
+                    );
                 }
                 _ => {
                     // 未知确认动作：安全起见也从独立线程写 state

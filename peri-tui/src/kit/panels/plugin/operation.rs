@@ -74,6 +74,30 @@ impl PluginOperation {
         })
     }
 
+    pub fn marketplace_add(source: String) -> Self {
+        Self {
+            action: "add_marketplace",
+            method: "marketplace/add",
+            params: json!({"source": source}),
+        }
+    }
+
+    pub fn marketplace_remove(name: String) -> Self {
+        Self {
+            action: "delete_marketplace",
+            method: "marketplace/remove",
+            params: json!({"name": name}),
+        }
+    }
+
+    pub fn marketplace_refresh(name: String) -> Self {
+        Self {
+            action: "refresh_marketplace",
+            method: "marketplace/refresh",
+            params: json!({"name": name}),
+        }
+    }
+
     pub fn install(name: String, marketplace: String, scope: &str) -> Self {
         Self {
             action: "install",
@@ -200,6 +224,22 @@ pub(super) fn launch(
         } else {
             Err("ACP client not available".into())
         };
+        if result.is_ok()
+            && matches!(
+                ticket.operation.method,
+                "marketplace/add" | "marketplace/remove" | "marketplace/refresh"
+            )
+        {
+            match tokio::task::spawn_blocking(|| {
+                super::data::refresh_discover_cache();
+                super::data::refresh_marketplace_cache();
+            })
+            .await
+            {
+                Ok(()) => {}
+                Err(error) => result = Err(format!("Marketplace cache refresh failed: {error}")),
+            }
+        }
         if let Err(error) = &result {
             tracing::error!(session_id = %ticket.session.id, method = ticket.operation.method, %error, "Plugin operation failed");
         }
@@ -253,6 +293,17 @@ pub(super) fn confirm_uninstall(
     if let Some(operation) = operation {
         dispatch(operation, state);
     }
+}
+
+pub(super) fn confirm_marketplace_remove(
+    name: String,
+    state: State<OperationState>,
+    confirm_action: State<Option<String>>,
+    operation_loading: State<Option<String>>,
+) {
+    *confirm_action.write() = None;
+    *operation_loading.write() = None;
+    dispatch(PluginOperation::marketplace_remove(name), state);
 }
 
 #[cfg(test)]
