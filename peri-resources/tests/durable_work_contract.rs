@@ -654,6 +654,7 @@ async fn durable_act_handoff_has_full_intent_and_never_blindly_redispatches_unkn
             .unwrap(),
         },
     };
+    // 停下的 work（Blocked/Abandoned）只允许结算既有结果，不能再交出后继 work（44309b13 收紧）。
     let commit_act = command(
         "act-result",
         WorkAction::CommitAct {
@@ -669,12 +670,96 @@ async fn durable_act_handoff_has_full_intent_and_never_blindly_redispatches_unkn
             .await
             .unwrap()
             .decision,
+        WorkDecision::Rejected {
+            reason: WorkRejection::InvalidTransition
+        }
+    );
+}
+
+#[tokio::test]
+async fn durable_act_ready_commit_hands_off_successor_reason_work() {
+    let (_directory, resources) = fixture().await;
+    publish(resources.as_ref(), "delivery").await;
+    let ticket = claim(resources.as_ref()).await;
+    begin_reason(resources.as_ref(), &ticket.work_id).await;
+    let args = r#"{"command":"echo test"}"#.to_owned();
+    let intent = InvocationIntent {
+        invocation_id: "invocation".into(),
+        tool_call_id: "call".into(),
+        tool_name: "shell".into(),
+        arguments_digest: format!("{:x}", Sha256::digest(args.as_bytes())),
+        arguments_json: args,
+        effective_tool_name: "shell".into(),
+        effective_arguments_json: r#"{"command":"echo test"}"#.into(),
+        effective_arguments_digest: format!("{:x}", Sha256::digest(br#"{"command":"echo test"}"#)),
+        owner_identity: "trusted-owner".into(),
+        scope_id: "work-session".into(),
+        scope_epoch: Some(1),
+        authorization_ref: "test-auth".into(),
+        recovery_locator: "owner-original-call".into(),
+    };
+    let response =
+        WorkPayload::from_payload(&PersistedPayload::Message(BaseMessage::ai_with_tool_calls(
+            "run",
+            vec![ToolCallRequest::new(
+                "call",
+                "shell",
+                serde_json::json!({"command":"echo test"}),
+            )],
+        )))
+        .unwrap();
+    let loaded = snapshot(resources.as_ref()).await;
+    assert_eq!(
+        resources
+            .apply_work_mutation(&command(
+                "prepare-act",
+                WorkAction::CommitReasonResponseAndDispatchIntent {
+                    guard: guard(&loaded),
+                    target: target(&loaded, &ticket.work_id),
+                    request_id: "request".into(),
+                    response,
+                    dispatch_intents: vec![intent],
+                    next_work_id: Some("act-work".into()),
+                }
+            ))
+            .await
+            .unwrap()
+            .decision,
         WorkDecision::Accepted
     );
     let loaded = snapshot(resources.as_ref()).await;
+    assert_eq!(loaded.state.works["act-work"].stage, WorkStage::ActReady);
+    // ActReady 上结算全部 invocation 时允许交出后继 work：act-work 收口为 Settled，
+    // 后继 reason work 继承同一 budget。
+    let commit_act = command(
+        "act-handoff",
+        WorkAction::CommitAct {
+            guard: guard(&loaded),
+            target: target(&loaded, "act-work"),
+            results: vec![InvocationResult {
+                invocation_id: "invocation".into(),
+                outcome: InvocationOutcome::Cancelled {
+                    evidence: "rejected before effect".into(),
+                },
+            }],
+            next_work_id: Some("next-reason".into()),
+        },
+    );
+    assert_eq!(
+        resources
+            .apply_work_mutation(&commit_act)
+            .await
+            .unwrap()
+            .decision,
+        WorkDecision::Accepted
+    );
+    let loaded = snapshot(resources.as_ref()).await;
+    assert_eq!(loaded.state.works["act-work"].stage, WorkStage::Settled);
+    assert_eq!(
+        loaded.state.works["next-reason"].stage,
+        WorkStage::ReasonReady
+    );
     assert_eq!(loaded.state.works["next-reason"].budget_id, ticket.work_id);
-    assert_eq!(loaded.state.budgets[&ticket.work_id].reason_requests, 1);
-    assert_eq!(loaded.state.budgets[&ticket.work_id].dispatches, 1);
 }
 
 #[tokio::test]

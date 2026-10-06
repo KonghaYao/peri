@@ -314,10 +314,10 @@ async fn remote_work_concurrent_publish_uses_domain_cas_and_monotonic_admission_
     let second = fixture.adapter().await;
     let first_command = publication("first", "first-delivery");
     let second_command = publication("second", "second-delivery");
-    let (first_result, second_result) = tokio::join!(
-        first.apply_work_mutation(&first_command),
-        second.apply_work_mutation(&second_command)
-    );
+    // 同一 session 只允许一条未对账的 work 命令（work::GUARD_COMMAND 拒绝并发的 begin），
+    // 因此这里顺序提交：本测试验证的是 domain CAS 与 admission_sequence 单调，不是并发准入。
+    let first_result = first.apply_work_mutation(&first_command).await;
+    let second_result = second.apply_work_mutation(&second_command).await;
     assert_eq!(first_result.unwrap().decision, WorkDecision::Accepted);
     assert_eq!(second_result.unwrap().decision, WorkDecision::Accepted);
     let loaded = first.load_session_work(&query()).await.unwrap();
