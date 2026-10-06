@@ -49,11 +49,11 @@ typed schema、默认值、领域合并、scope/revision/explain/update 归
 
 ### 持久 RCRA（src/session_resources/work/）
 
-`reducer.rs` 区分 CommitAct 的当前执行推进与原身份无 successor 结算；`processing.rs` 在 Blocked/Abandoned 下只记录真实结果、不恢复 processing。`query.rs::admission_batch` 通过 admission work/delivery 与 batch lineage 关联恢复执行，供显式中断及终态隔离共用。`admission.rs::finish` 与原 admission settlement 同一 reduction 清除精确当前 attempt，拒绝清除其他执行。
+2026-10-06 工作记录重构：`entities.rs` 定义 Mailbox、Processing、Effect 与标量 `SessionWorkHead`；`mailbox.rs`、`processing.rs`、`effect.rs` 各自实现领域规则，`transition.rs::transition_work` 只消费本次关联的 `WorkFacts`，输出 typed `WorkWrite`，不再维护整会话聚合 reducer。
 
-`WorkDeliveryQuery` 显式携带 session / delivery 身份；`SessionResources::load_work_delivery` 返回单个 `DeliveryRecord`，只用于逐消息身份去重，不等价于完整 WorkSnapshot、候选判定或 Unknown 提交结论。未实现的后端默认返回 Unsupported，不回落全量读取。契约测试：`session_resources/work/delivery_query_test.rs`。
+`query.rs` 定义 `WorkQuery`、`WorkSelector`、`WorkInspection` 与 typed `WorkPage`。`SessionResources::inspect_work` 按身份或有限页查询，最多 64 条；候选与 Unknown 判定有独立 selector，不允许以历史聚合替代。`prepare_evidence` / `read_evidence` 显式处理不可变 `PayloadRef`；命令及状态更新不重编码历史正文。
 
-`policy.rs` 的 `DEFAULT_AGENT_MAX_ITERATIONS` 同时供默认 WorkLimits 与 Agent 默认循环消费；旧默认 limits 的升级仅在 `user_input.rs` 的成功显式选择中执行，保留历史 budget counters。`user_input.rs` 区分无 attempt 的当前生命周期旧 processing 放弃与有 attempt 的精确执行中断；`query.rs` 将已放弃批次的终态交付责任与新任务准入分开，缺失关联证据仍阻塞。原 invocation、结果、binding 与真实 ACK 不被删除或伪造。预算失败经 `error.rs::WorkBudgetExhausted` 和 `session/execution.rs` 公开安全原因；其余未知内部错误仍脱敏。
+`work.rs::DEFAULT_AGENT_MAX_ITERATIONS` 同时供默认 WorkLimits 与 Agent 循环消费。Processing 在同一批次内推进阶段游标和累计预算，Effect 按调用 revision 结算；原 invocation、结果、binding 与真实 ACK 不被删除或伪造。未确认终态 outbox 不单独阻断显式新输入，但保留独立责任，clear 不因此获得隐式放弃授权。预算失败经 `error.rs::WorkBudgetExhausted` 和 `session/execution.rs` 公开安全原因；其余未知内部错误仍脱敏。领域及生命周期契约测试：`work/domain_test.rs`、`work/lifecycle_test.rs`。
 
 ### compact（src/compact.rs）
 

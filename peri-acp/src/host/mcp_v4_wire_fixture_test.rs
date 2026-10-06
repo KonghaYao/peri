@@ -362,10 +362,7 @@ impl WireFixtureHarness {
         .mcp_servers;
         let resources = ctx.session_resources.as_ref().unwrap();
         let snapshot = resources
-            .load_session_work(&WorkQuery {
-                session_id: session_id.into(),
-                limit: 1,
-            })
+            .inspect_work(&WorkQuery::new(session_id, WorkSelector::Head))
             .await
             .unwrap();
         let ordered: std::collections::BTreeMap<_, _> = connections.iter().collect();
@@ -375,7 +372,7 @@ impl WireFixtureHarness {
                 recipient_lifecycle: snapshot.control.lifecycle,
                 mutation_id: format!("fixture-resource-owners:{session_id}"),
                 action: WorkAction::BindResourceOwners {
-                    expected_revision: snapshot.state.revision,
+                    expected_revision: snapshot.head.change_seq,
                     connections_json: serde_json::to_string(&ordered).unwrap(),
                     authorization_ref: format!("trusted-fixture-setup:{session_id}"),
                 },

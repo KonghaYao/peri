@@ -11,46 +11,7 @@ pub(super) fn owned_identity(
     ))
 }
 
-fn specifications(effects: Vec<work::WorkEffect>) -> Vec<StatementSpec> {
-    effects
-        .into_iter()
-        .map(|effect| {
-            StatementSpec::new(
-                effect.sql,
-                effect.params.into_iter().map(Value::Text).collect(),
-            )
-        })
-        .collect()
-}
-
 impl RemoteSessionData {
-    pub(in crate::sessions::remote) async fn read_work_command(
-        &self,
-        query: &peri_acp_types::session_resources::work::WorkCommandQuery,
-    ) -> SessionResourceResult<Option<peri_acp_types::session_resources::work::OwnedWorkCommand>>
-    {
-        let store = self.store().await?;
-        let row = store
-            .fetch_row(&StatementSpec::new(
-                work::READ_OWNED_COMMAND,
-                vec![
-                    Value::Text(query.mutation_id.clone()),
-                    Value::Text(query.session_id.clone()),
-                ],
-            ))
-            .await?;
-        row.map(|row| {
-            work::owned_command(
-                text_at(&row, 0).ok_or_else(|| corrupt("owned command is not readable"))?,
-                text_at(&row, 1).ok_or_else(|| corrupt("owned command digest is not readable"))?,
-                text_at(&row, 2),
-                int_at(&row, 3)
-                    .ok_or_else(|| corrupt("owned command reconciliation is not readable"))?
-                    != 0,
-            )
-        })
-        .transpose()
-    }
     pub(super) async fn begin_owned_work(
         &self,
         command: &WorkCommand,
@@ -78,7 +39,7 @@ impl RemoteSessionData {
         let outcome = store
             .apply_qualified(&QualifiedMutation {
                 identity: owned_identity(command, "begin")?,
-                effects: specifications(work::command_effects(command)?),
+                effects: specifications(work::command_effects(command)?)?,
             })
             .await?;
         match outcome {
@@ -118,24 +79,27 @@ impl RemoteSessionData {
 
     pub(super) async fn seal_owned_work(&self, command: &WorkCommand) -> SessionResourceResult<()> {
         let mut effects = work::command_effects(command)?;
-        effects.push(work::WorkEffect::texts(
+        effects.push(work_store::SqlStatement::new(
             work::INSERT_RECEIPT,
-            [
-                command.mutation_id.clone(),
-                command.session_id.clone(),
-                command.digest()?,
-                work::encode(&WorkResolution::NotApplied)?,
+            vec![
+                work_store::SqlParam::Text(command.mutation_id.clone()),
+                work_store::SqlParam::Text(command.session_id.clone()),
+                work_store::SqlParam::Text(command.digest()?),
+                work_store::SqlParam::Text(work::encode(&WorkResolution::NotApplied)?),
             ],
         ));
-        effects.push(work::WorkEffect::texts(
+        effects.push(work_store::SqlStatement::new(
             work::ACK_COMMAND,
-            [command.mutation_id.clone(), command.digest()?],
+            vec![
+                work_store::SqlParam::Text(command.mutation_id.clone()),
+                work_store::SqlParam::Text(command.digest()?),
+            ],
         ));
         let store = self.store().await?;
         let outcome = store
             .apply_qualified(&QualifiedMutation {
                 identity: owned_identity(command, "seal")?,
-                effects: specifications(effects),
+                effects: specifications(effects)?,
             })
             .await?;
         match outcome {

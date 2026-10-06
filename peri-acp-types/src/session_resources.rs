@@ -506,34 +506,26 @@ pub trait ChildResumeClaim: Send + Sync {
 /// - 结果不确定时返回 [`SessionResourceError::persistence_uncertain`]，不得重试后伪装成功。
 #[async_trait]
 pub trait SessionResources: Send + Sync {
-    async fn load_work_availability(
-        &self,
-        _id: &ThreadId,
-    ) -> SessionResourceResult<work::WorkAvailability> {
-        Err(SessionResourceError::new(
-            SessionResourceErrorKind::Unsupported,
-        ))
-    }
-    async fn load_work_delivery(
-        &self,
-        _query: &work::WorkDeliveryQuery,
-    ) -> SessionResourceResult<Option<work::DeliveryRecord>> {
-        Err(SessionResourceError::new(
-            SessionResourceErrorKind::Unsupported,
-        ))
-    }
-    async fn load_work_command(
-        &self,
-        _query: &work::WorkCommandQuery,
-    ) -> SessionResourceResult<Option<work::OwnedWorkCommand>> {
-        Err(SessionResourceError::new(
-            SessionResourceErrorKind::Unsupported,
-        ))
-    }
-    async fn load_session_work(
+    async fn inspect_work(
         &self,
         _query: &work::WorkQuery,
-    ) -> SessionResourceResult<work::WorkSnapshot> {
+    ) -> SessionResourceResult<work::WorkInspection> {
+        Err(SessionResourceError::new(
+            SessionResourceErrorKind::Unsupported,
+        ))
+    }
+    async fn read_evidence(
+        &self,
+        _query: &work::EvidenceQuery,
+    ) -> SessionResourceResult<work::EvidenceRecord> {
+        Err(SessionResourceError::new(
+            SessionResourceErrorKind::Unsupported,
+        ))
+    }
+    async fn prepare_evidence(
+        &self,
+        _write: &work::EvidenceWrite,
+    ) -> SessionResourceResult<work::PayloadRef> {
         Err(SessionResourceError::new(
             SessionResourceErrorKind::Unsupported,
         ))

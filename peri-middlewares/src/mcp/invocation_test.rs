@@ -53,8 +53,26 @@ impl Fixture {
             arguments_digest: format!("{:x}", Sha256::digest(arguments_json.as_bytes())),
             effective_tool_name: "mcp__workspace__Bash".into(),
             effective_arguments_digest: format!("{:x}", Sha256::digest(arguments_json.as_bytes())),
-            effective_arguments_json: arguments_json.clone(),
-            arguments_json,
+            effective_arguments: resources
+                .prepare_evidence(&EvidenceWrite {
+                    session_id: "mcp-session".into(),
+                    storage_scope: "mcp-session".into(),
+                    payload_id: "invocation-arguments".into(),
+                    encoding: 1,
+                    bytes: arguments_json.as_bytes().to_vec(),
+                })
+                .await
+                .unwrap(),
+            arguments: resources
+                .prepare_evidence(&EvidenceWrite {
+                    session_id: "mcp-session".into(),
+                    storage_scope: "mcp-session".into(),
+                    payload_id: "invocation-arguments".into(),
+                    encoding: 1,
+                    bytes: arguments_json.as_bytes().to_vec(),
+                })
+                .await
+                .unwrap(),
             owner_identity: "owner-1".into(),
             scope_id: "mcp-session".into(),
             scope_epoch: Some(7),
@@ -82,10 +100,9 @@ impl Fixture {
                             event_id: "event-1".into(),
                             event_kind: "request".into(),
                             causation_id: None,
-                            content: WorkPayload::from_payload(&PersistedPayload::Message(
-                                BaseMessage::human("run"),
-                            ))
-                            .unwrap(),
+                            content: fixture
+                                .payload(&PersistedPayload::Message(BaseMessage::human("run")))
+                                .await,
                         },
                         purpose: DeliveryPurpose::UserInput,
                         policy: MessagePolicy::ensure_processing(),
@@ -93,8 +110,16 @@ impl Fixture {
                 },
             )
             .await;
-        let snapshot = fixture.snapshot().await;
-        let candidate = &snapshot.candidates[0];
+        let snapshot = fixture
+            .resources
+            .inspect_work(&WorkQuery::new("mcp-session", WorkSelector::Availability))
+            .await
+            .unwrap();
+        let WorkPage::Availability(availability) = &snapshot.page else {
+            panic!("availability expected")
+        };
+        let candidate = &availability.candidates[0];
+        let delivery_ids = candidate.delivery_ids.clone();
         let admission = WorkAdmission {
             session_id: "mcp-session".into(),
             admission_id: "fixture-admission".into(),
@@ -124,7 +149,7 @@ impl Fixture {
                 WorkAction::ClaimBatch {
                     guard: Self::guard(&snapshot),
                     batch_id: admission.work_id.clone(),
-                    delivery_ids: snapshot.candidates[0].delivery_ids.clone(),
+                    delivery_ids,
                 },
             )
             .await;
@@ -137,7 +162,17 @@ impl Fixture {
                     target: Self::target(&snapshot, &admission.work_id),
                     request_id: "request-1".into(),
                     request: ReasonRequest {
-                        serialized_request: "{}".into(),
+                        payload: fixture
+                            .resources
+                            .prepare_evidence(&EvidenceWrite {
+                                session_id: "mcp-session".into(),
+                                storage_scope: "mcp-session".into(),
+                                payload_id: "reason-request".into(),
+                                encoding: 1,
+                                bytes: b"{}".to_vec(),
+                            })
+                            .await
+                            .unwrap(),
                         request_digest: format!("{:x}", Sha256::digest(b"{}")),
                         model_ref: "fixture-model".into(),
                         authorization_ref: "policy-1".into(),
@@ -153,19 +188,18 @@ impl Fixture {
                     guard: Self::guard(&snapshot),
                     target: Self::target(&snapshot, &admission.work_id),
                     request_id: "request-1".into(),
-                    response: WorkPayload::from_payload(&PersistedPayload::Message(
-                        BaseMessage::ai_with_tool_calls(
+                    response: fixture
+                        .payload(&PersistedPayload::Message(BaseMessage::ai_with_tool_calls(
                             "run",
                             vec![ToolCallRequest::new(
                                 "call-1",
                                 "mcp__workspace__Bash",
                                 fixture.input.clone(),
                             )],
-                        ),
-                    ))
-                    .unwrap(),
+                        )))
+                        .await,
                     dispatch_intents: vec![(*fixture.intent).clone()],
-                    next_work_id: Some("act-1".into()),
+                    next_work_id: Some(admission.work_id.clone()),
                 },
             )
             .await;
@@ -175,12 +209,13 @@ impl Fixture {
                 "dispatch",
                 WorkAction::BeginDispatch {
                     guard: Self::guard(&snapshot),
-                    target: Self::target(&snapshot, "act-1"),
+                    target: Self::target(&snapshot, &admission.work_id),
                     invocation_id: fixture.intent.invocation_id.clone(),
+                    expected_effect_revision: 0,
                 },
             )
             .await;
-        fixture.target = Self::target(&fixture.snapshot().await, "act-1");
+        fixture.target = Self::target(&fixture.snapshot().await, &admission.work_id);
         fixture
     }
 
@@ -197,14 +232,46 @@ impl Fixture {
         context
     }
 
-    pub(crate) async fn snapshot(&self) -> WorkSnapshot {
+    pub(crate) async fn snapshot(&self) -> WorkInspection {
         self.resources
-            .load_session_work(&WorkQuery {
+            .inspect_work(&WorkQuery {
                 session_id: "mcp-session".into(),
-                limit: 64,
+                selector: WorkSelector::CurrentProcessing,
+                limit: 1,
+                cursor: None,
             })
             .await
             .unwrap()
+    }
+
+    async fn payload(&self, payload: &PersistedPayload) -> WorkPayload {
+        let role = if matches!(
+            payload,
+            PersistedPayload::Message(BaseMessage::Human { .. })
+        ) {
+            "user"
+        } else {
+            "assistant"
+        };
+        let content = self
+            .resources
+            .prepare_evidence(&EvidenceWrite {
+                session_id: "mcp-session".into(),
+                storage_scope: "mcp-session".into(),
+                payload_id: payload.id().as_uuid().to_string(),
+                encoding: 1,
+                bytes: peri_acp_types::store::serialize_persisted_payload(payload)
+                    .unwrap()
+                    .into_bytes(),
+            })
+            .await
+            .unwrap();
+        WorkPayload {
+            message_id: payload.id(),
+            role: role.into(),
+            content,
+            tool_call_id: None,
+        }
     }
 
     async fn apply(&self, mutation_id: &str, action: WorkAction) {
@@ -221,18 +288,27 @@ impl Fixture {
         assert_eq!(receipt.decision, WorkDecision::Accepted);
     }
 
-    fn guard(snapshot: &WorkSnapshot) -> WorkGuard {
+    fn guard(snapshot: &WorkInspection) -> WorkGuard {
         WorkGuard {
-            expected_revision: snapshot.state.revision,
+            expected_revision: snapshot.head.change_seq,
             expected_control_generation: snapshot.control.control_generation,
             execution: snapshot.control.attempt.clone().unwrap(),
         }
     }
 
-    fn target(snapshot: &WorkSnapshot, work_id: &str) -> WorkTarget {
+    fn target(snapshot: &WorkInspection, work_id: &str) -> WorkTarget {
         WorkTarget {
             work_id: work_id.into(),
-            expected_work_revision: snapshot.state.works[work_id].revision,
+            expected_work_revision: match &snapshot.page {
+                WorkPage::Processings(records) => {
+                    records
+                        .iter()
+                        .find(|record| record.processing_id == work_id)
+                        .unwrap()
+                        .revision
+                }
+                _ => panic!("processing page expected"),
+            },
         }
     }
 }
@@ -246,24 +322,36 @@ async fn real_sql_prepare_preserves_same_work_link_and_wire_identity() {
         "mcp__workspace__Bash",
         "owner-1",
     )
+    .await
     .unwrap();
     let before = fixture.snapshot().await;
     invocation.prepare().await.unwrap();
     let snapshot = fixture.snapshot().await;
-    assert_eq!(snapshot.state, before.state);
+    assert_eq!(snapshot.page, before.page);
+    let effect_page = fixture
+        .resources
+        .inspect_work(&WorkQuery::new(
+            "mcp-session",
+            WorkSelector::Effect {
+                invocation_id: "invocation-1".into(),
+            },
+        ))
+        .await
+        .unwrap();
+    let WorkPage::Effects(effects) = effect_page.page else {
+        panic!("effect page expected")
+    };
     assert_eq!(
-        snapshot.state.invocations["invocation-1"]
-            .work_id
-            .as_deref(),
-        Some("act-1")
+        effects[0].processing_id.as_deref(),
+        Some(fixture.target.work_id.as_str())
     );
     let metadata = invocation.request_meta(None).unwrap();
     assert_eq!(
-        metadata.0 .0[INVOCATION_META_KEY]["invocationId"],
+        metadata.0.0[INVOCATION_META_KEY]["invocationId"],
         "invocation-1"
     );
     assert_eq!(
-        metadata.0 .0[INVOCATION_META_KEY]["initiatorSessionId"],
+        metadata.0.0[INVOCATION_META_KEY]["initiatorSessionId"],
         "mcp-session"
     );
 }
@@ -278,6 +366,7 @@ async fn concurrent_dispatch_validation_does_not_mutate_session_revision() {
             "mcp__workspace__Bash",
             "owner-1",
         )
+        .await
         .unwrap(),
     );
     let before = fixture.snapshot().await;
@@ -289,7 +378,7 @@ async fn concurrent_dispatch_validation_does_not_mutate_session_revision() {
     while let Some(result) = validations.join_next().await {
         result.unwrap().unwrap();
     }
-    assert_eq!(fixture.snapshot().await.state, before.state);
+    assert_eq!(fixture.snapshot().await.page, before.page);
 }
 
 #[tokio::test]
@@ -301,6 +390,7 @@ async fn real_sql_task_binding_ack_survives_cold_reload() {
         "mcp__workspace__Bash",
         "owner-1",
     )
+    .await
     .unwrap();
     invocation.prepare().await.unwrap();
     let binding = invocation.bind_task("owner-task-1").await.unwrap();
@@ -310,9 +400,14 @@ async fn real_sql_task_binding_ack_survives_cold_reload() {
         .await
         .unwrap();
     let snapshot = cold
-        .load_session_work(&WorkQuery {
+        .inspect_work(&WorkQuery {
             session_id: "mcp-session".into(),
-            limit: 0,
+            selector: WorkSelector::TaskBinding {
+                owner_identity: "owner-1".into(),
+                owner_task_id: "owner-task-1".into(),
+            },
+            limit: 1,
+            cursor: None,
         })
         .await
         .unwrap();
@@ -334,6 +429,7 @@ async fn real_sql_unknown_response_blocks_replay_of_original_rpc() {
         "mcp__workspace__Bash",
         "owner-1",
     )
+    .await
     .unwrap();
     invocation.prepare().await.unwrap();
     invocation.record_outcome_unknown().await.unwrap();
@@ -341,37 +437,51 @@ async fn real_sql_unknown_response_blocks_replay_of_original_rpc() {
         invocation.prepare().await,
         Err(InvocationError::OutcomeUnknown)
     ));
-    assert!(fixture.snapshot().await.blocked);
+    let availability = fixture
+        .resources
+        .inspect_work(&WorkQuery::new("mcp-session", WorkSelector::Availability))
+        .await
+        .unwrap();
+    let WorkPage::Availability(facts) = availability.page else {
+        panic!("availability expected")
+    };
+    assert!(facts.blocked);
 }
 
 #[tokio::test]
 async fn identity_or_arguments_cannot_be_reinterpreted_after_prepare() {
     let fixture = Fixture::new().await;
     let context = fixture.context();
-    assert!(McpInvocation::from_context(
-        &context,
-        &serde_json::json!({"command":"other"}),
-        "mcp__workspace__Bash",
-        "owner-1"
-    )
-    .is_err());
     assert!(
-        McpInvocation::from_context(&context, &fixture.input, "other-tool", "owner-1").is_err()
+        McpInvocation::from_context(
+            &context,
+            &serde_json::json!({"command":"other"}),
+            "mcp__workspace__Bash",
+            "owner-1"
+        )
+        .await
+        .is_err()
     );
-    assert!(McpInvocation::from_context(
-        &context,
-        &fixture.input,
-        "mcp__workspace__Bash",
-        "other-owner"
-    )
-    .is_err());
+    assert!(
+        McpInvocation::from_context(&context, &fixture.input, "other-tool", "owner-1")
+            .await
+            .is_err()
+    );
+    assert!(
+        McpInvocation::from_context(
+            &context,
+            &fixture.input,
+            "mcp__workspace__Bash",
+            "other-owner"
+        )
+        .await
+        .is_err()
+    );
     let mut context = fixture.context();
     context.invocation_id = Some("another-invocation".into());
-    assert!(McpInvocation::from_context(
-        &context,
-        &fixture.input,
-        "mcp__workspace__Bash",
-        "owner-1"
-    )
-    .is_err());
+    assert!(
+        McpInvocation::from_context(&context, &fixture.input, "mcp__workspace__Bash", "owner-1")
+            .await
+            .is_err()
+    );
 }

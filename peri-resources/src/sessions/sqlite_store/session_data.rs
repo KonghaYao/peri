@@ -9,9 +9,7 @@ use peri_acp_types::session_resources::{
     NewSession, NewSessionDraft, PersistenceRecovery, RewindBoundary, SessionMetaPatch,
     SessionResourceError, SessionResourceErrorKind, SessionResourceResult, SessionSnapshot,
 };
-use peri_acp_types::store::{
-    serialize_persisted_payload, CompactionChange, InheritedContext, MessageFlags, PersistedPayload,
-};
+use peri_acp_types::store::{CompactionChange, InheritedContext, MessageFlags, PersistedPayload};
 use peri_acp_types::system_reminder::TrustedSystemReminder;
 use peri_acp_types::thread::{AgentStatus, ThreadId, ThreadMeta};
 use peri_acp_types::workspace::{
@@ -45,8 +43,10 @@ mod control;
 mod history;
 #[path = "session_data/lifecycle.rs"]
 mod lifecycle;
+#[path = "session_data/messages.rs"]
+pub(super) mod messages;
 #[path = "session_data/work.rs"]
-mod work;
+pub(super) mod work;
 
 /// 同一份 [`SqliteSessionDatabase`] 的数据面句柄。
 ///
@@ -84,31 +84,23 @@ impl SessionDataPort for SqliteSessionData {
             .await
             .map_err(|error| map_sqlx(&error))
     }
-    async fn load_work_availability(
-        &self,
-        id: &ThreadId,
-    ) -> SessionResourceResult<peri_acp_types::session_resources::work::WorkAvailability> {
-        self.read_work_availability(id).await
-    }
-    async fn load_work_delivery(
-        &self,
-        query: &peri_acp_types::session_resources::work::WorkDeliveryQuery,
-    ) -> SessionResourceResult<Option<peri_acp_types::session_resources::work::DeliveryRecord>>
-    {
-        self.read_delivery(query).await
-    }
-    async fn load_work_command(
-        &self,
-        query: &peri_acp_types::session_resources::work::WorkCommandQuery,
-    ) -> SessionResourceResult<Option<peri_acp_types::session_resources::work::OwnedWorkCommand>>
-    {
-        self.read_work_command(query).await
-    }
-    async fn load_session_work(
+    async fn inspect_work(
         &self,
         query: &peri_acp_types::session_resources::work::WorkQuery,
-    ) -> SessionResourceResult<peri_acp_types::session_resources::work::WorkSnapshot> {
+    ) -> SessionResourceResult<peri_acp_types::session_resources::work::WorkInspection> {
         self.read_work(query).await
+    }
+    async fn read_evidence(
+        &self,
+        query: &peri_acp_types::session_resources::work::EvidenceQuery,
+    ) -> SessionResourceResult<peri_acp_types::session_resources::work::EvidenceRecord> {
+        self.load_evidence(query).await
+    }
+    async fn prepare_evidence(
+        &self,
+        evidence: &peri_acp_types::session_resources::work::EvidenceWrite,
+    ) -> SessionResourceResult<peri_acp_types::session_resources::work::PayloadRef> {
+        self.store_evidence(evidence).await
     }
     async fn apply_work_mutation(
         &self,
@@ -879,26 +871,28 @@ impl SessionDataPort for SqliteSessionData {
             .await
             .map_err(|error| map_sqlx(&error))?;
         self.require_session(&mut tx, id).await?;
-        let rowid: Option<(i64,)> =
-            sqlx::query_as("SELECT rowid FROM messages WHERE thread_id = ?1 AND message_id = ?2")
-                .bind(id.as_str())
-                .bind(&target)
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(|error| map_sqlx(&error))?;
+        messages::guard_history_mutation(&mut tx, id).await?;
+        let sequence: Option<(i64,)> = sqlx::query_as(
+            "SELECT transcript_seq FROM messages WHERE thread_id = ?1 AND message_id = ?2",
+        )
+        .bind(id.as_str())
+        .bind(&target)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|error| map_sqlx(&error))?;
         // 未知截止点保持无变更语义：找不到目标就不动历史。
-        if let Some((rowid,)) = rowid {
+        if let Some((sequence,)) = sequence {
             let sql = match boundary {
                 RewindBoundary::KeepThrough(_) => {
-                    "DELETE FROM messages WHERE thread_id = ?1 AND rowid > ?2"
+                    "DELETE FROM messages WHERE thread_id = ?1 AND transcript_seq > ?2"
                 }
                 RewindBoundary::RemoveFrom(_) => {
-                    "DELETE FROM messages WHERE thread_id = ?1 AND rowid >= ?2"
+                    "DELETE FROM messages WHERE thread_id = ?1 AND transcript_seq >= ?2"
                 }
             };
             sqlx::query(sql)
                 .bind(id.as_str())
-                .bind(rowid)
+                .bind(sequence)
                 .execute(&mut *tx)
                 .await
                 .map_err(|error| map_sqlx(&error))?;
@@ -930,6 +924,7 @@ impl SessionDataPort for SqliteSessionData {
             .await
             .map_err(|error| map_sqlx(&error))?;
         self.require_session(&mut tx, id).await?;
+        messages::guard_history_mutation(&mut tx, id).await?;
         for message_id in &unique {
             // 别会话的条目不允许被「精确移除」静默命中或静默跳过。
             let owner: Option<(String,)> =

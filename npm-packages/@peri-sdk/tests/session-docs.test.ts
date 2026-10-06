@@ -491,7 +491,7 @@ class ReplayTransport implements Transport {
   async request<T>(method: string, params?: unknown): Promise<T> {
     if (method.startsWith("session/control")) return controlResponse(method, params) as T;
     this.calls.push({ method, params });
-    if (method === "initialize") return { protocolVersion: 1 } as T;
+    if (method === "initialize") return { protocolVersion: 1, agentCapabilities: { _meta: { "peri.executionProtocol": 2 } } } as T;
     if (method === "session/new") return { sessionId: "s1" } as T;
     if (method === "session/input/enqueue") {
       const inputId = (params as { inputId: string }).inputId;

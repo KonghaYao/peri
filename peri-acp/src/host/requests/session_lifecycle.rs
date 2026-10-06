@@ -9,6 +9,7 @@ use agent_client_protocol::schema::v1::{
     CloseSessionResponse, DeleteSessionResponse, ForkSessionResponse, ListSessionsResponse,
     NewSessionResponse, SessionId,
 };
+use peri_acp_types::PeriCaps;
 use peri_acp_types::ports::WorkflowMiddlewarePort;
 use peri_acp_types::session_resources::{
     FrozenSnapshotBytes, FrozenState, NewSessionDraft, NewSessionMeta, SessionInitialization,
@@ -16,12 +17,11 @@ use peri_acp_types::session_resources::{
 };
 use peri_acp_types::thread::CancelPolicy;
 use peri_acp_types::workspace::{ResolvedWorkspace, SessionBinding};
-use peri_acp_types::PeriCaps;
 use serde_json::Value;
 use tracing::{info, warn};
 
 use super::super::notify::send_available_commands_update;
-use super::super::{build_mode_state, AcpServerConfig, SessionState};
+use super::super::{AcpServerConfig, SessionState, build_mode_state};
 use crate::dispatch::config_update::make_config_options;
 use crate::{dispatch, transport::types::AcpError};
 
@@ -84,6 +84,17 @@ pub(crate) fn handle_initialize(params: &Value, cfg: &AcpServerConfig) -> Result
         .and_then(|v| v.as_u64())
         .unwrap_or(1);
     info!(protocol_version = %version, "ACP initialize");
+
+    if let Some(protocol) = params.pointer("/clientCapabilities/_meta/peri.executionProtocol") {
+        if protocol.as_u64()
+            != Some(crate::host::execution_admission::EXECUTION_PROTOCOL_VERSION.into())
+        {
+            return Err(AcpError::new(
+                -32602,
+                "Unsupported Peri execution protocol; version 2 is required",
+            ));
+        }
+    }
 
     // 解析 clientCapabilities._meta 中的 peri 自定义 flag
     let peri_caps = params

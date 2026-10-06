@@ -3,7 +3,7 @@ use peri_acp_types::{
     identity::AttemptId,
     messages::{BaseMessage, ToolCallRequest},
     session::{MessagePolicy, TurnId},
-    session_resources::{work::*, ControlAttempt, FrozenSnapshotBytes, NewSession, NewSessionMeta},
+    session_resources::{ControlAttempt, FrozenSnapshotBytes, NewSession, NewSessionMeta, work::*},
     store::PersistedPayload,
     workspace::SessionBinding,
 };
@@ -51,10 +51,12 @@ async fn fixture() -> Fixture {
                     event_id: "input:publication".into(),
                     event_kind: "userInput".into(),
                     causation_id: None,
-                    content: WorkPayload::from_payload(&PersistedPayload::Message(
-                        BaseMessage::human("process"),
-                    ))
-                    .unwrap(),
+                    content: crate::host::work_query::test_payload(
+                        resources.as_ref(),
+                        "stop-session",
+                        &PersistedPayload::Message(BaseMessage::human("process")),
+                    )
+                    .await,
                 },
                 purpose: DeliveryPurpose::UserInput,
                 policy: MessagePolicy::ensure_processing(),
@@ -63,7 +65,9 @@ async fn fixture() -> Fixture {
     )
     .await;
     let snapshot = load(resources.as_ref()).await;
-    let candidate = &snapshot.candidates[0];
+    let candidate = &crate::host::work_query::availability(&snapshot)
+        .unwrap()
+        .candidates[0];
     let admission = WorkAdmission {
         session_id: "stop-session".into(),
         admission_id: "sdk-ticket".into(),
@@ -91,7 +95,11 @@ async fn fixture() -> Fixture {
         WorkAction::ClaimBatch {
             guard: guard(&snapshot),
             batch_id: admission.work_id.clone(),
-            delivery_ids: snapshot.candidates[0].delivery_ids.clone(),
+            delivery_ids: crate::host::work_query::availability(&snapshot)
+                .unwrap()
+                .candidates[0]
+                .delivery_ids
+                .clone(),
         },
     )
     .await;
@@ -102,11 +110,13 @@ async fn fixture() -> Fixture {
     }
 }
 
-async fn load(resources: &dyn SessionResources) -> WorkSnapshot {
+async fn load(resources: &dyn SessionResources) -> WorkInspection {
     resources
-        .load_session_work(&WorkQuery {
+        .inspect_work(&WorkQuery {
             session_id: "stop-session".into(),
             limit: 1,
+            selector: WorkSelector::Availability,
+            cursor: None,
         })
         .await
         .unwrap()
@@ -126,18 +136,24 @@ async fn apply(resources: &dyn SessionResources, action: WorkAction) -> WorkRece
     receipt
 }
 
-fn guard(snapshot: &WorkSnapshot) -> WorkGuard {
+fn guard(snapshot: &WorkInspection) -> WorkGuard {
     WorkGuard {
-        expected_revision: snapshot.state.revision,
+        expected_revision: snapshot.head.change_seq,
         expected_control_generation: snapshot.control.control_generation,
         execution: snapshot.control.attempt.clone().unwrap(),
     }
 }
 
-fn target(snapshot: &WorkSnapshot, work_id: &str) -> WorkTarget {
+async fn target(resources: &dyn SessionResources, work_id: &str) -> WorkTarget {
     WorkTarget {
         work_id: work_id.into(),
-        expected_work_revision: snapshot.state.works[work_id].revision,
+        expected_work_revision: crate::host::work_query::test_processing(
+            resources,
+            "stop-session",
+            work_id,
+        )
+        .await
+        .revision,
     }
 }
 
@@ -176,11 +192,23 @@ async fn stop_abandons_exact_owned_processing_work_and_replay_is_noop() {
     assert_eq!(applied.len(), 1);
     let snapshot = load(fixture.resources.as_ref()).await;
     assert_eq!(
-        snapshot.state.works[&fixture.admission.work_id].stage,
+        crate::host::work_query::test_processing(
+            fixture.resources.as_ref(),
+            "stop-session",
+            &fixture.admission.work_id
+        )
+        .await
+        .stage,
         WorkStage::Abandoned
     );
     assert_eq!(
-        snapshot.state.obligations["owned-input"].status,
+        crate::host::work_query::test_delivery(
+            fixture.resources.as_ref(),
+            "stop-session",
+            "owned-input"
+        )
+        .await
+        .obligation,
         ObligationStatus::Abandoned
     );
     assert!(
@@ -190,8 +218,8 @@ async fn stop_abandons_exact_owned_processing_work_and_replay_is_noop() {
             .is_empty()
     );
     assert_eq!(
-        load(fixture.resources.as_ref()).await.state.revision,
-        snapshot.state.revision
+        load(fixture.resources.as_ref()).await.head.change_seq,
+        snapshot.head.change_seq
     );
 }
 
@@ -218,7 +246,13 @@ async fn old_stop_after_resume_does_not_abandon_current_work() {
             .is_empty()
     );
     assert_eq!(
-        load(fixture.resources.as_ref()).await.state.works[&fixture.admission.work_id].stage,
+        crate::host::work_query::test_processing(
+            fixture.resources.as_ref(),
+            "stop-session",
+            &fixture.admission.work_id
+        )
+        .await
+        .stage,
         WorkStage::ReasonReady
     );
 }
@@ -240,7 +274,13 @@ async fn stop_does_not_abandon_batch_for_a_different_execution() {
             .is_empty()
     );
     assert_eq!(
-        load(fixture.resources.as_ref()).await.state.works[&fixture.admission.work_id].stage,
+        crate::host::work_query::test_processing(
+            fixture.resources.as_ref(),
+            "stop-session",
+            &fixture.admission.work_id
+        )
+        .await
+        .stage,
         WorkStage::ReasonReady
     );
 }
@@ -254,10 +294,10 @@ async fn unknown_external_invocation_facts_survive_processing_abandonment() {
         fixture.resources.as_ref(),
         WorkAction::BeginReason {
             guard: guard(&snapshot),
-            target: target(&snapshot, &fixture.admission.work_id),
+            target: target(fixture.resources.as_ref(), &fixture.admission.work_id).await,
             request_id: "reason-request".into(),
             request: ReasonRequest {
-                serialized_request: request.into(),
+                payload: evidence(fixture.resources.as_ref(), "stop-session", request).await,
                 request_digest: format!("{:x}", Sha256::digest(request.as_bytes())),
                 model_ref: "fixture-model".into(),
                 authorization_ref: "fixture-auth".into(),
@@ -270,10 +310,10 @@ async fn unknown_external_invocation_facts_survive_processing_abandonment() {
         invocation_id: "unknown-invocation".into(),
         tool_call_id: "call".into(),
         tool_name: "shell".into(),
-        arguments_json: arguments.into(),
+        arguments: evidence(fixture.resources.as_ref(), "stop-session", arguments).await,
         arguments_digest: format!("{:x}", Sha256::digest(arguments.as_bytes())),
         effective_tool_name: "shell".into(),
-        effective_arguments_json: arguments.into(),
+        effective_arguments: evidence(fixture.resources.as_ref(), "stop-session", arguments).await,
         effective_arguments_digest: format!("{:x}", Sha256::digest(arguments.as_bytes())),
         owner_identity: "external-owner".into(),
         scope_id: "stop-session".into(),
@@ -286,17 +326,19 @@ async fn unknown_external_invocation_facts_survive_processing_abandonment() {
         fixture.resources.as_ref(),
         WorkAction::CommitReasonResponseAndDispatchIntent {
             guard: guard(&snapshot),
-            target: target(&snapshot, &fixture.admission.work_id),
+            target: target(fixture.resources.as_ref(), &fixture.admission.work_id).await,
             request_id: "reason-request".into(),
-            response: WorkPayload::from_payload(&PersistedPayload::Message(
-                BaseMessage::ai_with_tool_calls(
+            response: crate::host::work_query::test_payload(
+                fixture.resources.as_ref(),
+                "stop-session",
+                &PersistedPayload::Message(BaseMessage::ai_with_tool_calls(
                     "dispatch",
                     vec![ToolCallRequest::new("call", "shell", serde_json::json!({}))],
-                ),
-            ))
-            .unwrap(),
+                )),
+            )
+            .await,
             dispatch_intents: vec![intent],
-            next_work_id: Some("act-owned-work".into()),
+            next_work_id: Some(fixture.admission.work_id.clone()),
         },
     )
     .await;
@@ -304,8 +346,9 @@ async fn unknown_external_invocation_facts_survive_processing_abandonment() {
     apply(
         fixture.resources.as_ref(),
         WorkAction::BeginDispatch {
+            expected_effect_revision: effect(fixture.resources.as_ref()).await.revision,
             guard: guard(&snapshot),
-            target: target(&snapshot, "act-owned-work"),
+            target: target(fixture.resources.as_ref(), &fixture.admission.work_id).await,
             invocation_id: "unknown-invocation".into(),
         },
     )
@@ -314,30 +357,35 @@ async fn unknown_external_invocation_facts_survive_processing_abandonment() {
     apply(
         fixture.resources.as_ref(),
         WorkAction::OutcomeUnknown {
-            expected_revision: snapshot.state.revision,
-            target: target(&snapshot, "act-owned-work"),
+            expected_effect_revision: effect(fixture.resources.as_ref()).await.revision,
+            expected_revision: snapshot.head.change_seq,
+            target: target(fixture.resources.as_ref(), &fixture.admission.work_id).await,
             invocation_id: "unknown-invocation".into(),
             reason: "owner outcome could not be established".into(),
         },
     )
     .await;
-    let original_invocation =
-        load(fixture.resources.as_ref()).await.state.invocations["unknown-invocation"].clone();
+    let original_invocation = effect(fixture.resources.as_ref()).await;
     let (command, receipt) = stop(&fixture).await;
     abandon_owned_work(fixture.resources.as_ref(), &command, &receipt)
         .await
         .unwrap();
-    let snapshot = load(fixture.resources.as_ref()).await;
     assert_eq!(
-        snapshot.state.works["act-owned-work"].stage,
+        crate::host::work_query::test_processing(
+            fixture.resources.as_ref(),
+            "stop-session",
+            &fixture.admission.work_id
+        )
+        .await
+        .stage,
         WorkStage::Abandoned
     );
     assert_eq!(
-        snapshot.state.invocations["unknown-invocation"],
+        effect(fixture.resources.as_ref()).await,
         original_invocation
     );
     assert_eq!(
-        snapshot.state.invocations["unknown-invocation"].status,
+        effect(fixture.resources.as_ref()).await.status,
         InvocationStatus::OutcomeUnknown
     );
 }
@@ -349,7 +397,7 @@ async fn lost_abandon_ack_resolves_original_command_without_rebuilding_revision(
     let applied = abandon_owned_work(fixture.resources.as_ref(), &command, &receipt)
         .await
         .unwrap();
-    let revision = load(fixture.resources.as_ref()).await.state.revision;
+    let revision = load(fixture.resources.as_ref()).await.head.change_seq;
     let connection = sqlx::SqlitePool::connect(&format!(
         "sqlite://{}",
         fixture.directory.path().join("stop.db").display()
@@ -368,8 +416,8 @@ async fn lost_abandon_ack_resolves_original_command_without_rebuilding_revision(
         .await
         .unwrap();
     assert_eq!(recovered, applied);
-    assert_eq!(load(&fresh).await.state.revision, revision);
-    assert!(load(&fresh).await.pending_commands.is_empty());
+    assert_eq!(load(&fresh).await.head.change_seq, revision);
+    assert!(pending(&fresh).await.is_empty());
 }
 
 async fn journal_before_effect(fixture: &Fixture, mutation: &WorkCommand) {
@@ -385,10 +433,11 @@ async fn journal_before_effect(fixture: &Fixture, mutation: &WorkCommand) {
         .execute(&connection).await.unwrap();
 }
 
-fn abandon_command(
+async fn abandon_command(
     command: &ControlCommand,
     receipt: &ControlReceipt,
-    snapshot: &WorkSnapshot,
+    snapshot: &WorkInspection,
+    resources: &dyn SessionResources,
     work_id: &str,
 ) -> WorkCommand {
     WorkCommand {
@@ -396,9 +445,9 @@ fn abandon_command(
         recipient_lifecycle: receipt.state.lifecycle,
         mutation_id: mutation_id(command, work_id),
         action: WorkAction::AbandonWork {
-            expected_revision: snapshot.state.revision,
+            expected_revision: snapshot.head.change_seq,
             expected_control_generation: receipt.state.control_generation,
-            target: target(snapshot, work_id),
+            target: target(resources, work_id).await,
             reason: "original frozen Stop".into(),
             authorization_ref: command.command_id.clone(),
         },
@@ -410,7 +459,14 @@ async fn stop_before_effect_recovery_seals_not_applied_without_rebuilding() {
     let fixture = fixture().await;
     let (command, receipt) = stop(&fixture).await;
     let snapshot = load(fixture.resources.as_ref()).await;
-    let original = abandon_command(&command, &receipt, &snapshot, &fixture.admission.work_id);
+    let original = abandon_command(
+        &command,
+        &receipt,
+        &snapshot,
+        fixture.resources.as_ref(),
+        &fixture.admission.work_id,
+    )
+    .await;
     journal_before_effect(&fixture, &original).await;
     let fresh = SessionResourcesImpl::open(fixture.directory.path().join("stop.db"))
         .await
@@ -420,16 +476,16 @@ async fn stop_before_effect_recovery_seals_not_applied_without_rebuilding() {
             .await
             .unwrap_err();
         assert!(error.message.contains("not applied"));
-        assert_eq!(load(&fresh).await.state, snapshot.state);
+        assert_eq!(load(&fresh).await.head, snapshot.head);
     }
-    let owned = fresh
-        .load_work_command(&WorkCommandQuery {
-            session_id: original.session_id.clone(),
-            mutation_id: original.mutation_id.clone(),
-        })
-        .await
-        .unwrap()
-        .unwrap();
+    let owned = crate::host::work_query::command(
+        &fresh,
+        &original.session_id.clone(),
+        &original.mutation_id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
     assert_eq!(owned.command, original);
     assert_eq!(owned.resolution, Some(WorkResolution::NotApplied));
     assert!(!owned.pending);
@@ -440,7 +496,14 @@ async fn stop_replays_known_rejected_original_receipt_without_new_revision() {
     let fixture = fixture().await;
     let (command, receipt) = stop(&fixture).await;
     let snapshot = load(fixture.resources.as_ref()).await;
-    let mut original = abandon_command(&command, &receipt, &snapshot, &fixture.admission.work_id);
+    let mut original = abandon_command(
+        &command,
+        &receipt,
+        &snapshot,
+        fixture.resources.as_ref(),
+        &fixture.admission.work_id,
+    )
+    .await;
     if let WorkAction::AbandonWork {
         expected_revision, ..
     } = &mut original.action
@@ -457,15 +520,14 @@ async fn stop_replays_known_rejected_original_receipt_without_new_revision() {
         .await
         .unwrap_err();
     assert!(error.message.contains("rejected"));
-    let owned = fixture
-        .resources
-        .load_work_command(&WorkCommandQuery {
-            session_id: original.session_id.clone(),
-            mutation_id: original.mutation_id.clone(),
-        })
-        .await
-        .unwrap()
-        .unwrap();
+    let owned = crate::host::work_query::command(
+        fixture.resources.as_ref(),
+        &original.session_id.clone(),
+        &original.mutation_id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
     assert_eq!(owned.command, original);
     assert_eq!(
         owned.resolution,
@@ -478,7 +540,14 @@ async fn query_recovery_only_resolves_original_without_applying_stop() {
     let fixture = fixture().await;
     let (command, receipt) = stop(&fixture).await;
     let snapshot = load(fixture.resources.as_ref()).await;
-    let original = abandon_command(&command, &receipt, &snapshot, &fixture.admission.work_id);
+    let original = abandon_command(
+        &command,
+        &receipt,
+        &snapshot,
+        fixture.resources.as_ref(),
+        &fixture.admission.work_id,
+    )
+    .await;
     journal_before_effect(&fixture, &original).await;
     let fresh = SessionResourcesImpl::open(fixture.directory.path().join("stop.db"))
         .await
@@ -488,20 +557,26 @@ async fn query_recovery_only_resolves_original_without_applying_stop() {
         &WorkQuery {
             session_id: original.session_id.clone(),
             limit: 1,
+            selector: WorkSelector::Availability,
+            cursor: None,
         },
     )
     .await
     .unwrap();
-    assert!(recovered.pending_commands.is_empty());
-    assert_eq!(recovered.state, snapshot.state);
-    let owned = fresh
-        .load_work_command(&WorkCommandQuery {
-            session_id: original.session_id.clone(),
-            mutation_id: original.mutation_id.clone(),
-        })
-        .await
-        .unwrap()
-        .unwrap();
+    assert!(
+        !crate::host::work_query::availability(&recovered)
+            .unwrap()
+            .pending
+    );
+    assert_eq!(recovered.head, snapshot.head);
+    let owned = crate::host::work_query::command(
+        &fresh,
+        &original.session_id.clone(),
+        &original.mutation_id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
     assert_eq!(owned.command, original);
     assert_eq!(owned.resolution, Some(WorkResolution::NotApplied));
 }
@@ -544,10 +619,12 @@ async fn root_query_recovers_descendant_original_without_retargeting() {
                     event_id: "child:publication".into(),
                     event_kind: "userInput".into(),
                     causation_id: None,
-                    content: WorkPayload::from_payload(&PersistedPayload::Message(
-                        BaseMessage::human("child"),
-                    ))
-                    .unwrap(),
+                    content: crate::host::work_query::test_payload(
+                        fixture.resources.as_ref(),
+                        "stop-child",
+                        &PersistedPayload::Message(BaseMessage::human("child")),
+                    )
+                    .await,
                 },
                 purpose: DeliveryPurpose::UserInput,
                 policy: MessagePolicy::ensure_processing(),
@@ -559,37 +636,88 @@ async fn root_query_recovers_descendant_original_without_retargeting() {
         .await
         .unwrap();
     let before = load(&fresh).await;
-    assert!(before.blocked);
-    assert_eq!(before.pending_commands, vec![original.clone()]);
+    assert!(
+        crate::host::work_query::availability(&before)
+            .unwrap()
+            .blocked
+    );
+    assert_eq!(pending(&fresh).await, vec![original.clone()]);
     let recovered = crate::host::work_recovery::resolve_pending(
         &fresh,
         &WorkQuery {
             session_id: "stop-session".into(),
             limit: 1,
+            selector: WorkSelector::Availability,
+            cursor: None,
         },
     )
     .await
     .unwrap();
-    assert!(recovered.pending_commands.is_empty());
-    assert_eq!(recovered.state, before.state);
-    let owned = fresh
-        .load_work_command(&WorkCommandQuery {
-            session_id: "stop-child".into(),
-            mutation_id: original.mutation_id.clone(),
-        })
+    assert!(
+        !crate::host::work_query::availability(&recovered)
+            .unwrap()
+            .pending
+    );
+    assert_eq!(recovered.head, before.head);
+    let owned = crate::host::work_query::command(&fresh, "stop-child", &original.mutation_id)
         .await
         .unwrap()
         .unwrap();
     assert_eq!(owned.command, original);
     assert_eq!(owned.resolution, Some(WorkResolution::NotApplied));
-    assert!(fresh
-        .load_session_work(&WorkQuery {
-            session_id: "stop-child".into(),
-            limit: 1
+    assert!(
+        fresh
+            .inspect_work(&WorkQuery {
+                session_id: "stop-child".into(),
+                limit: 1,
+                selector: WorkSelector::Availability,
+                cursor: None,
+            })
+            .await
+            .unwrap()
+            .head
+            .required_count
+            == 0
+    );
+}
+
+async fn evidence(resources: &dyn SessionResources, session_id: &str, bytes: &str) -> PayloadRef {
+    resources
+        .prepare_evidence(&EvidenceWrite {
+            session_id: session_id.into(),
+            storage_scope: session_id.into(),
+            payload_id: uuid::Uuid::now_v7().to_string(),
+            encoding: 1,
+            bytes: bytes.as_bytes().to_vec(),
         })
         .await
         .unwrap()
-        .state
-        .deliveries
-        .is_empty());
+}
+async fn effect(resources: &dyn SessionResources) -> Effect {
+    let inspection = resources
+        .inspect_work(&WorkQuery::new(
+            "stop-session",
+            WorkSelector::Effect {
+                invocation_id: "unknown-invocation".into(),
+            },
+        ))
+        .await
+        .unwrap();
+    let WorkPage::Effects(mut effects) = inspection.page else {
+        panic!("expected effect")
+    };
+    effects.remove(0)
+}
+async fn pending(resources: &dyn SessionResources) -> Vec<WorkCommand> {
+    let inspection = resources
+        .inspect_work(&WorkQuery::new(
+            "stop-session",
+            WorkSelector::PendingCommands,
+        ))
+        .await
+        .unwrap();
+    let WorkPage::Commands(commands) = inspection.page else {
+        panic!("expected commands")
+    };
+    commands.into_iter().map(|owned| owned.command).collect()
 }

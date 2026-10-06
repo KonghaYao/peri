@@ -43,6 +43,34 @@ fn make_state() -> SteerState {
 }
 
 #[test]
+fn interrupted_enqueue_preserves_unknown_identity_without_enabling_resend() {
+    let mut state = make_state();
+    let command = make_command(SteerCommandKind::Enqueue(make_input("unknown-input")));
+    state.begin(command.clone());
+    state.interrupt(&command);
+    let row = state
+        .rows("s")
+        .into_iter()
+        .find(|row| row.id == "unknown-input")
+        .unwrap();
+    assert_eq!(row.state, SteerItemState::Unconfirmed);
+    assert!(!row.state.can_take_back());
+    assert!(state.pending_command("s", &command.command_id).is_some());
+    assert!(state.is_interrupted(&command));
+    assert!(
+        state
+            .action_kind(
+                "s",
+                1,
+                SteerQueueAction::Dispatch { ids: vec![row.id] },
+                true
+            )
+            .is_none()
+    );
+    assert!(state.recover("s", 1, true).is_none());
+}
+
+#[test]
 fn test_steer_projection_rejects_old_revision_and_generation() {
     let mut state = make_state();
     let mut other_generation = make_snapshot(8);

@@ -14,8 +14,6 @@ impl SqliteSessionData {
             id: message_id,
             reminder: reminder.clone(),
         };
-        let content = serialize_persisted_payload(&payload)
-            .map_err(|_| corrupt("history entry is not serializable"))?;
         let mut tx = self
             .database
             .pool
@@ -26,14 +24,29 @@ impl SqliteSessionData {
         if !thread_exists_on(&mut tx, id).await.map_err(read_failure)? {
             return Err(not_found());
         }
-        let existing: Option<(String, String)> =
-            sqlx::query_as("SELECT thread_id, content FROM messages WHERE message_id = ?1")
-                .bind(message_id.as_uuid().to_string())
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(|error| map_sqlx(&error))?;
-        if let Some((owner, saved)) = existing {
-            if owner != id.as_str() || saved != content {
+        let existing: Option<(String, String, String)> = sqlx::query_as(
+            "SELECT thread_id, role, content_ref FROM messages WHERE message_id = ?1",
+        )
+        .bind(message_id.as_uuid().to_string())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|error| map_sqlx(&error))?;
+        if let Some((owner, role, reference)) = existing {
+            if owner != id.as_str() {
+                return Err(invalid_input("reminder id belongs to another session"));
+            }
+            let saved = messages::decode_payload(
+                &mut tx,
+                &message_id.as_uuid().to_string(),
+                &role,
+                &reference,
+            )
+            .await?;
+            if peri_acp_types::store::serialize_persisted_payload(&saved)
+                .map_err(|_| corrupt("stored reminder is not serializable"))?
+                != peri_acp_types::store::serialize_persisted_payload(&payload)
+                    .map_err(|_| corrupt("reminder is not serializable"))?
+            {
                 return Err(invalid_input(
                     "reminder id conflicts with another history entry",
                 ));
@@ -43,22 +56,15 @@ impl SqliteSessionData {
                 .map_err(|_| commit_failure(Some(id.clone())))?;
             return Ok(false);
         }
+        messages::insert_payload(&mut tx, id, &payload).await?;
         sqlx::query(
-            "INSERT INTO messages (message_id, thread_id, role, content) VALUES (?1, ?2, ?3, ?4)",
+            "UPDATE threads SET updated_at = ?1, message_count = message_count + 1 WHERE id = ?2",
         )
-        .bind(message_id.as_uuid().to_string())
+        .bind(peri_time::now_utc_rfc3339())
         .bind(id.as_str())
-        .bind(payload_role(&payload))
-        .bind(content)
         .execute(&mut *tx)
         .await
         .map_err(|e| map_sqlx(&e))?;
-        sqlx::query("UPDATE threads SET updated_at = ?1, message_count = (SELECT COUNT(*) FROM messages WHERE thread_id = ?2) WHERE id = ?2")
-            .bind(peri_time::now_utc_rfc3339())
-            .bind(id.as_str())
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| map_sqlx(&e))?;
         tx.commit()
             .await
             .map_err(|_| commit_failure(Some(id.clone())))?;
@@ -67,42 +73,26 @@ impl SqliteSessionData {
 
     pub(super) async fn write_close_intent(&self, id: &ThreadId) -> SessionResourceResult<()> {
         self.writable()?;
-        let mut tx = self
-            .database
-            .pool
-            .begin_with("BEGIN IMMEDIATE")
-            .await
-            .map_err(|e| map_sqlx(&e))?;
-        self.require_session(&mut tx, id).await?;
-        if !thread_exists_on(&mut tx, id).await.map_err(read_failure)? {
-            return Err(not_found());
+        let current = self.read_control(id).await?;
+        if current.status == peri_acp_types::session_resources::ControlStatus::Closing {
+            return Ok(());
         }
-        sqlx::query(
-            "INSERT OR IGNORE INTO session_close_intents(thread_id, requested_at) VALUES (?1, ?2)",
-        )
-        .bind(id.as_str())
-        .bind(peri_time::now_utc_rfc3339())
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| map_sqlx(&e))?;
-        tx.commit()
-            .await
-            .map_err(|_| commit_failure(Some(id.clone())))?;
+        let command = crate::sessions::control::close_command(
+            id,
+            &current,
+            peri_acp_types::session_resources::ControlAction::Close,
+        )?;
+        let receipt = self.write_control(&command).await?;
+        if receipt.decision != peri_acp_types::session_resources::ControlDecision::Accepted {
+            return Err(SessionResourceError::conflict(
+                "session close control was rejected",
+            ));
+        }
         Ok(())
     }
 
     pub(super) async fn read_close_intent(&self, id: &ThreadId) -> SessionResourceResult<bool> {
-        let table: Option<(String,)> = sqlx::query_as("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'session_close_intents'")
-            .fetch_optional(&self.database.pool).await.map_err(|e| map_sqlx(&e))?;
-        if table.is_none() {
-            return Ok(false);
-        }
-        let row: Option<(i64,)> =
-            sqlx::query_as("SELECT 1 FROM session_close_intents WHERE thread_id = ?1")
-                .bind(id.as_str())
-                .fetch_optional(&self.database.pool)
-                .await
-                .map_err(|e| map_sqlx(&e))?;
-        Ok(row.is_some())
+        Ok(self.read_control(id).await?.status
+            == peri_acp_types::session_resources::ControlStatus::Closing)
     }
 }

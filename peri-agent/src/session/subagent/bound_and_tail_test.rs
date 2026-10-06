@@ -139,19 +139,16 @@ async fn subagent_terminal_write_failure_logs_and_continues() {
     }
 }
 
-async fn unsettled_execution(store: &MockSessionResources, child_id: &str) -> WorkSnapshot {
+async fn unsettled_execution(store: &MockSessionResources, child_id: &str) -> WorkInspection {
     let snapshot = store
-        .load_session_work(&WorkQuery {
-            session_id: child_id.into(),
-            limit: 1,
-        })
+        .inspect_work(&WorkQuery::new(child_id, WorkSelector::CurrentAdmission))
         .await
         .unwrap();
-    assert_eq!(snapshot.state.admissions.len(), 1);
-    let admission = snapshot.state.admissions.values().next().unwrap();
-    assert!(admission.entering_receipt.is_some());
-    assert!(admission.settled_receipt.is_none());
-    assert!(snapshot.state.terminal_acknowledgements.is_empty());
+    let WorkPage::Admissions(admissions) = &snapshot.page else {
+        panic!("expected admission page")
+    };
+    assert_eq!(admissions.len(), 1);
+    assert!(admissions[0].leaving_evidence_id.is_none());
     assert!(store
         .load_meta(&child_id.to_owned())
         .await
@@ -446,19 +443,36 @@ async fn assert_background_tail_completion(outcome: TailOutcome, panic_forwarder
             BackgroundTaskStatus::Running
         ));
         assert_eq!(bridge_stops.load(std::sync::atomic::Ordering::SeqCst), 0);
-        let snapshot = unsettled_execution(&store, &spawned.child_thread_id).await;
-        assert_eq!(snapshot.state.terminal_obligations.len(), 1);
-        let command = snapshot.state.terminal_obligations.values().next().unwrap();
+        unsettled_execution(&store, &spawned.child_thread_id).await;
+        let snapshot = store
+            .inspect_work(&WorkQuery::new(
+                &spawned.child_thread_id,
+                WorkSelector::TerminalCommands,
+            ))
+            .await
+            .unwrap();
+        let WorkPage::TerminalCommands(commands) = snapshot.page else {
+            panic!("expected terminal commands page")
+        };
+        assert_eq!(commands.len(), 1);
+        assert!(commands[0].acknowledgement.is_none());
+        let command = &commands[0].command;
         let WorkAction::PublishTaskSettlement { delivery, binding } = &command.action else {
             panic!("forwarding failure must retain the exact task terminal publication");
         };
         assert_eq!(binding.owner_task_id, spawned.task_id.unwrap());
         if matches!(outcome, TailOutcome::ModelError) {
+            let evidence = store
+                .read_evidence(&EvidenceQuery {
+                    session_id: command.session_id.clone(),
+                    reference: delivery.event.content.content.clone(),
+                })
+                .await
+                .unwrap();
+            evidence.validate().unwrap();
+            let serialized = String::from_utf8(evidence.bytes).unwrap();
             let peri_acp_types::store::PersistedPayload::SystemReminder { reminder, .. } =
-                peri_acp_types::store::deserialize_persisted_payload(
-                    &delivery.event.content.serialized,
-                )
-                .unwrap()
+                peri_acp_types::store::deserialize_persisted_payload(&serialized).unwrap()
             else {
                 panic!("terminal responsibility must retain its typed failure reminder");
             };
@@ -476,13 +490,13 @@ async fn assert_background_tail_completion(outcome: TailOutcome, panic_forwarder
             );
         }
         let parent = store
-            .load_session_work(&WorkQuery {
-                session_id: "tail-parent".into(),
-                limit: 1,
-            })
+            .inspect_work(&WorkQuery::new("tail-parent", WorkSelector::Inbox))
             .await
             .unwrap();
-        assert!(parent.state.deliveries.is_empty());
+        let WorkPage::Deliveries(deliveries) = parent.page else {
+            panic!("expected inbox page")
+        };
+        assert!(deliveries.is_empty());
         let mut receiver = event_rx.lock();
         while let Ok(event) = receiver.try_recv() {
             assert!(!matches!(
@@ -500,21 +514,30 @@ async fn assert_background_tail_completion(outcome: TailOutcome, panic_forwarder
     assert_eq!(active_at_callback, 1, "通知先于 TaskManager 终态");
     assert_eq!(manager.active_count(), 0, "真实执行收尾后任务结束");
     let stored = store
-        .load_session_work(&WorkQuery {
-            session_id: spawned.child_thread_id.clone(),
-            limit: 1,
-        })
+        .inspect_work(&WorkQuery::new(
+            spawned.child_thread_id.clone(),
+            WorkSelector::TerminalCommands,
+        ))
         .await
         .unwrap();
-    let sdk_turn_id = stored
-        .state
-        .admissions
-        .values()
-        .next()
-        .unwrap()
-        .admission
-        .execution
-        .turn_id;
+    let WorkPage::TerminalCommands(commands) = stored.page else {
+        panic!("expected terminal commands page")
+    };
+    assert_eq!(commands.len(), 1);
+    assert!(commands[0].acknowledgement.is_some());
+    let admission = store
+        .inspect_work(&WorkQuery::new(
+            &spawned.child_thread_id,
+            WorkSelector::Admission {
+                admission_id: commands[0].admission_id.clone(),
+            },
+        ))
+        .await
+        .unwrap();
+    let WorkPage::Admissions(admissions) = admission.page else {
+        panic!("expected admission page")
+    };
+    let sdk_turn_id = admissions.first().unwrap().admission.execution.turn_id;
     assert_eq!(
         *lifecycle_turns.lock(),
         vec![sdk_turn_id, sdk_turn_id],

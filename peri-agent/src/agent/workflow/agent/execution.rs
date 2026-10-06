@@ -4,7 +4,9 @@ use std::sync::Arc;
 use peri_acp_types::execution_admission::{
     AttemptStoppedProof, ExecutionAdmissionPort, SettlementOutcome, SettlementRequest,
 };
-use peri_acp_types::session_resources::work::{WorkAction, WorkCommand, WorkQuery};
+use peri_acp_types::session_resources::work::{
+    WorkAction, WorkCommand, WorkPage, WorkQuery, WorkSelector,
+};
 use peri_acp_types::session_resources::{
     BindingState, ChildSnapshot, ControlStatus, FrozenState, NewSession, NewSessionMeta,
     SessionResources,
@@ -55,19 +57,21 @@ impl WorkflowExecution {
             return Err("Blocked: workflow execution workspace differs from parent".into());
         }
         let parent = resources
-            .load_session_work(&WorkQuery {
-                session_id: parent_id.clone(),
-                limit: 1,
-            })
+            .inspect_work(&WorkQuery::new(parent_id.clone(), WorkSelector::Head))
             .await
             .map_err(|error| error.to_string())?;
         if parent.control.status != ControlStatus::Active {
             return Err("Blocked: workflow initiating session is not Active".into());
         }
-        let owners = parent
-            .state
+        let descriptor = crate::session::work_access::descriptor(
+            resources.as_ref(),
+            &parent_id,
+            parent.control.lifecycle,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        let owners = descriptor
             .resource_owners
-            .get(&parent.control.lifecycle)
             .ok_or("Blocked: workflow owner authorization declarations unavailable")?;
         let mut root_id = parent_id.clone();
         let mut seen = HashSet::new();
@@ -108,10 +112,7 @@ impl WorkflowExecution {
             .await
             .map_err(|error| error.to_string())?;
         let child = resources
-            .load_session_work(&WorkQuery {
-                session_id: session_id.clone(),
-                limit: 1,
-            })
+            .inspect_work(&WorkQuery::new(session_id.clone(), WorkSelector::Head))
             .await
             .map_err(|error| error.to_string())?;
         WorkMutationBarrier::new(resources.clone())
@@ -120,7 +121,7 @@ impl WorkflowExecution {
                 recipient_lifecycle: child.control.lifecycle,
                 mutation_id: format!("workflow-child-owners:{session_id}"),
                 action: WorkAction::BindResourceOwners {
-                    expected_revision: child.state.revision,
+                    expected_revision: child.head.change_seq,
                     connections_json: owners.connections_json.clone(),
                     authorization_ref: owners.authorization_ref.clone(),
                 },
@@ -200,51 +201,52 @@ impl WorkflowExecution {
         &self,
         admission: &peri_acp_types::session_resources::work::WorkAdmission,
     ) -> Result<(), String> {
-        let query = WorkQuery {
-            session_id: self.session_id.clone(),
-            limit: 1,
-        };
         let barrier = WorkMutationBarrier::new(self.resources.clone());
-        let mut child = self
-            .resources
-            .load_session_work(&query)
-            .await
-            .map_err(|error| error.to_string())?;
-        for command in &child.pending_commands {
-            if matches!(
-                &command.action,
-                WorkAction::BindTerminalObligation { admission_id, .. }
-                    | WorkAction::AcknowledgeTerminalObligation { admission_id, .. }
-                    if admission_id == &admission.admission_id
-            ) {
-                barrier
-                    .commit(command)
-                    .await
-                    .map_err(|error| error.to_string())?;
+        let mut query = WorkQuery::new(&self.session_id, WorkSelector::PendingCommands);
+        loop {
+            let pending = self
+                .resources
+                .inspect_work(&query)
+                .await
+                .map_err(|error| error.to_string())?;
+            let WorkPage::Commands(commands) = pending.page else {
+                return Err(
+                    "Incomplete: pending command inspection returned different page".into(),
+                );
+            };
+            for owned in commands {
+                if matches!(&owned.command.action,
+            WorkAction::BindTerminalObligation { admission_id, .. }
+            | WorkAction::AcknowledgeTerminalObligation { admission_id, .. }
+            if admission_id == &admission.admission_id)
+                {
+                    barrier
+                        .commit(&owned.command)
+                        .await
+                        .map_err(|error| error.to_string())?;
+                }
             }
+            let Some(cursor) = pending.next_cursor else {
+                break;
+            };
+            if query.cursor.as_ref() == Some(&cursor) {
+                return Err("pending cursor failed to advance".into());
+            }
+            query.cursor = Some(cursor);
         }
-        child = self
-            .resources
-            .load_session_work(&query)
-            .await
-            .map_err(|error| error.to_string())?;
-        let Some(command) = child
-            .state
-            .terminal_obligations
-            .get(&admission.admission_id)
+        let Some(obligation) =
+            crate::session::work_access::terminal(self.resources.as_ref(), admission)
+                .await
+                .map_err(|error| error.to_string())?
         else {
             return Ok(());
         };
         let parent_receipt = barrier
-            .commit(command)
+            .commit(&obligation.command)
             .await
             .map_err(|error| error.to_string())?;
-        if let Some(receipt) = child
-            .state
-            .terminal_acknowledgements
-            .get(&admission.admission_id)
-        {
-            return if receipt == &parent_receipt {
+        if let Some(receipt) = obligation.acknowledgement {
+            return if receipt == parent_receipt {
                 Ok(())
             } else {
                 Err("Incomplete: workflow parent terminal acknowledgement conflicts".into())
@@ -252,7 +254,7 @@ impl WorkflowExecution {
         }
         let child = self
             .resources
-            .load_session_work(&query)
+            .inspect_work(&WorkQuery::new(&self.session_id, WorkSelector::Head))
             .await
             .map_err(|error| error.to_string())?;
         barrier
@@ -261,7 +263,7 @@ impl WorkflowExecution {
                 recipient_lifecycle: admission.lifecycle,
                 mutation_id: format!("workflow-terminal-ack:{}", admission.admission_id),
                 action: WorkAction::AcknowledgeTerminalObligation {
-                    expected_revision: child.state.revision,
+                    expected_revision: child.head.change_seq,
                     admission_id: admission.admission_id.clone(),
                     receipt: parent_receipt,
                 },

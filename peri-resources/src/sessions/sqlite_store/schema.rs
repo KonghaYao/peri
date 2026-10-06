@@ -31,6 +31,7 @@ pub(super) enum SchemaState {
     Version14,
     Version15,
     Version16,
+    LegacyWork17,
     Current,
 }
 
@@ -49,7 +50,18 @@ pub(super) async fn inspect(connection: &mut SqliteConnection) -> Result<SchemaS
         .fetch_one(&mut *connection)
         .await?;
     match version {
-        v if v == CURRENT_SCHEMA_VERSION => return Ok(SchemaState::Current),
+        17 => {
+            let old_work_table: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'session_work_state')",
+            )
+            .fetch_one(&mut *connection)
+            .await?;
+            return Ok(if old_work_table {
+                SchemaState::LegacyWork17
+            } else {
+                SchemaState::Current
+            });
+        }
         16 => return Ok(SchemaState::Version16),
         15 => return Ok(SchemaState::Version15),
         14 => return Ok(SchemaState::Version14),
@@ -161,55 +173,20 @@ impl SqliteSessionDatabase {
                 .await?;
             return Ok(());
         }
-        if matches!(
-            state,
-            SchemaState::Version12
-                | SchemaState::Version13
-                | SchemaState::Version14
-                | SchemaState::Version15
-                | SchemaState::Version16
-        ) {
-            return Self::remove_execution_owner_schema(&mut connection).await;
+        if state != SchemaState::Empty {
+            anyhow::bail!("legacy work schema 17 requires explicit stopped-writer offline migration; opening a legacy database never migrates it");
         }
-        if state == SchemaState::Version11 {
-            super::storage_v2_migration::migrate_local_v2(&mut connection).await?;
-            return Self::remove_execution_owner_schema(&mut connection).await;
-        }
-        // 登记表重建要对被引用的父表执行 DROP TABLE：SQLite 对父表做隐式删除时会
-        // 立即检查外键，`defer_foreign_keys` 也挡不住。该 PRAGMA 只在事务外生效，
-        // 因此重建路径整段使用同一条连接：先关外键，提交前用 foreign_key_check 补齐
-        // 校验，最后恢复连接设置。
-        let rebuilding = state.needs_registration_rebuild();
-        if rebuilding {
-            sqlx::query("PRAGMA foreign_keys = OFF")
-                .execute(&mut *connection)
-                .await?;
-        }
-        let migrated = Self::migrate_schema(&mut connection, state).await;
-        if rebuilding {
-            let restored = sqlx::query("PRAGMA foreign_keys = ON")
-                .execute(&mut *connection)
-                .await;
-            migrated?;
-            restored?;
-        } else {
-            migrated?;
-        }
-        super::storage_v2_migration::migrate_local_v2(&mut connection).await?;
-        Self::remove_execution_owner_schema(&mut connection).await
+        Self::initialize_work_schema(&mut connection).await
     }
 
-    async fn remove_execution_owner_schema(connection: &mut SqliteConnection) -> Result<()> {
+    async fn initialize_work_schema(connection: &mut SqliteConnection) -> Result<()> {
         let mut tx = connection.begin_with("BEGIN IMMEDIATE").await?;
-        sqlx::query(canonical::CREATE_SESSION_CLOSE_INTENTS_TABLE_SQL)
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query("DROP TABLE IF EXISTS session_execution_workspace_descriptors")
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query("DROP TABLE IF EXISTS session_execution_owners")
-            .execute(&mut *tx)
-            .await?;
+        for statement in canonical::CREATE_V2_TABLES
+            .iter()
+            .chain(canonical::CREATE_V2_INDEXES)
+        {
+            sqlx::query(*statement).execute(&mut *tx).await?;
+        }
         sqlx::query(crate::sessions::control::CREATE_STATE)
             .execute(&mut *tx)
             .await?;
@@ -219,22 +196,15 @@ impl SqliteSessionDatabase {
         sqlx::query(crate::sessions::control::SEED_STATE)
             .execute(&mut *tx)
             .await?;
-        for statement in [
-            crate::sessions::work::CREATE_STATE,
-            crate::sessions::work::CREATE_EVENTS,
-            crate::sessions::work::CREATE_RECEIPTS,
-            crate::sessions::work::CREATE_COMMANDS,
-        ] {
+        for statement in crate::sessions::work_store::schema::initialization_sql() {
             sqlx::query(statement).execute(&mut *tx).await?;
         }
-        sqlx::query(crate::sessions::work::SEED_STATE)
-            .bind(crate::sessions::work::legacy_state_json()?)
-            .bind(crate::sessions::work::initial_state_json()?)
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query(crate::sessions::work::QUARANTINE_UNOWNED_COMMANDS)
-            .execute(&mut *tx)
-            .await?;
+        sqlx::query(
+            "INSERT OR IGNORE INTO machines(id,name,identity_kind) VALUES (?1,'我的电脑','known')",
+        )
+        .bind(crate::sessions::machine::current()?)
+        .execute(&mut *tx)
+        .await?;
         sqlx::query("PRAGMA user_version = 17")
             .execute(&mut *tx)
             .await?;

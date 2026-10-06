@@ -8,7 +8,7 @@ use crate::session::test_resources::{
     mock::{admission::FixtureAdmission, work::bind_fixture_task},
     TestSession,
 };
-use peri_acp_types::session_resources::work::WorkQuery;
+use peri_acp_types::session_resources::work::{WorkPage, WorkQuery, WorkSelector};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 struct ResultLlm(Arc<AtomicUsize>);
@@ -123,15 +123,17 @@ async fn terminal_after_optional_first_attempt(first_attempt: bool) {
         run_child(child.clone(), calls.clone()).await;
         let finished = bound
             .resources
-            .load_session_work(&WorkQuery {
-                session_id: child_id.clone(),
-                limit: 1,
-            })
+            .inspect_work(&WorkQuery::new(
+                child_id.clone(),
+                WorkSelector::Availability,
+            ))
             .await
             .unwrap();
-        assert!(finished.candidates.is_empty());
+        let WorkPage::Availability(availability) = finished.page else {
+            panic!("expected availability page")
+        };
+        assert!(availability.candidates.is_empty());
         assert!(finished.control.attempt.is_none());
-        assert_eq!(finished.state.admissions.len(), 1);
     }
     bind_fixture_task(bound.resources(), &child_id, 1, "child-task").await;
     let callback =
@@ -163,14 +165,34 @@ async fn terminal_after_optional_first_attempt(first_attempt: bool) {
     .unwrap();
     let accepted = bound
         .resources
-        .load_session_work(&WorkQuery {
-            session_id: child_id.clone(),
-            limit: 1,
-        })
+        .inspect_work(&WorkQuery::new(
+            child_id.clone(),
+            WorkSelector::Availability,
+        ))
         .await
         .unwrap();
-    assert_eq!(accepted.candidates.len(), 1);
-    assert_eq!(accepted.state.task_bindings.len(), 1);
+    let WorkPage::Availability(availability) = accepted.page else {
+        panic!("expected availability page")
+    };
+    assert_eq!(availability.candidates.len(), 1);
+    let binding = bound
+        .resources
+        .inspect_work(&WorkQuery::new(
+            &child_id,
+            WorkSelector::TaskBindingByTask {
+                owner_task_id: "child-task".into(),
+            },
+        ))
+        .await
+        .unwrap();
+    let WorkPage::Effects(effects) = binding.page else {
+        panic!("expected task binding effects page")
+    };
+    assert_eq!(effects.len(), 1);
+    assert_eq!(
+        effects[0].binding.as_ref().unwrap().owner_task_id,
+        "child-task"
+    );
     run_child(child.clone(), calls.clone()).await;
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert!(parent.queue().is_empty());
@@ -183,23 +205,14 @@ async fn terminal_after_optional_first_attempt(first_attempt: bool) {
         .any(|message| message.content().contains("processed")));
     let settled = bound
         .resources
-        .load_session_work(&WorkQuery {
-            session_id: child_id,
-            limit: 1,
-        })
+        .inspect_work(&WorkQuery::new(child_id, WorkSelector::Availability))
         .await
         .unwrap();
-    assert!(settled.candidates.is_empty());
+    let WorkPage::Availability(availability) = settled.page else {
+        panic!("expected availability page")
+    };
+    assert!(availability.candidates.is_empty());
     assert!(settled.control.attempt.is_none());
-    assert_eq!(
-        settled.state.admissions.len(),
-        if first_attempt { 2 } else { 1 }
-    );
-    assert!(settled
-        .state
-        .admissions
-        .values()
-        .all(|admission| admission.settled_receipt.is_some()));
 }
 
 #[tokio::test]

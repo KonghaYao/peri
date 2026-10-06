@@ -188,25 +188,35 @@ async fn cron_register_tick_approval_continuation() {
     );
 
     assert!(scheduler.lock().force_next_fire_to_past(&task_id));
-    let snapshot = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+    use peri_acp_types::session_resources::work::{
+        EvidenceQuery, WorkPage, WorkQuery, WorkSelector,
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
         loop {
             let snapshot = cfg
                 .session_resources
-                .load_session_work(&peri_acp_types::session_resources::work::WorkQuery {
-                    session_id: session_id.clone(),
-                    limit: 1,
-                })
+                .inspect_work(&WorkQuery::new(&session_id, WorkSelector::Inbox))
                 .await
                 .unwrap();
-            if snapshot.state.deliveries.values().any(|delivery| {
-                delivery
-                    .publication
-                    .event
-                    .content
-                    .serialized
+            let WorkPage::Deliveries(deliveries) = snapshot.page else {
+                panic!("expected inbox delivery page");
+            };
+            assert!(snapshot.next_cursor.is_none());
+            for delivery in deliveries {
+                let evidence = cfg
+                    .session_resources
+                    .read_evidence(&EvidenceQuery {
+                        session_id: session_id.clone(),
+                        reference: delivery.publication.event.content.content,
+                    })
+                    .await
+                    .unwrap();
+                if String::from_utf8(evidence.bytes)
+                    .unwrap()
                     .contains(CRON_PROMPT)
-            }) {
-                break snapshot;
+                {
+                    return;
+                }
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
@@ -220,10 +230,15 @@ async fn cron_register_tick_approval_continuation() {
     );
     assert!(transport.requests().is_empty());
     transport.set_approve(true);
-    assert!(
-        snapshot.state.admissions.is_empty(),
-        "SDK is sole admission authority"
-    );
+    let admissions = cfg
+        .session_resources
+        .inspect_work(&WorkQuery::new(&session_id, WorkSelector::CurrentAdmission))
+        .await
+        .unwrap();
+    let WorkPage::Admissions(records) = admissions.page else {
+        panic!("expected admission page");
+    };
+    assert!(records.is_empty(), "SDK is sole admission authority");
     assert!(queue.is_empty());
     assert!(!queue.has_pending_defer(&MessageSource::CronTrigger));
     assert_eq!(

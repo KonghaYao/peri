@@ -1,8 +1,8 @@
 //! Durable notification bridge: approval, frozen recipient, and owned shutdown.
 
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc,
+    atomic::{AtomicBool, Ordering},
 };
 
 use peri_acp_types::interaction::{
@@ -80,9 +80,11 @@ async fn test_scheduler_does_not_own_its_ingress_sender() {
     drop(root);
 
     assert!(scheduler_ingress.upgrade().is_none());
-    assert!(recv_until_shutdown(&mut rx, &CancellationToken::new())
-        .await
-        .is_none());
+    assert!(
+        recv_until_shutdown(&mut rx, &CancellationToken::new())
+            .await
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -91,15 +93,17 @@ async fn test_continuation_child_is_rejected_after_admission_closes() {
     owner.begin_shutdown();
     let started = Arc::new(AtomicBool::new(false));
     let started_task = started.clone();
-    assert!(spawner
-        .spawn(
-            crate::host::task_scope::HostTaskOwnerKind::Session,
-            crate::host::task_scope::HostTaskKind::ContinuationTurn,
-            async move {
-                started_task.store(true, Ordering::SeqCst);
-            },
-        )
-        .is_err());
+    assert!(
+        spawner
+            .spawn(
+                crate::host::task_scope::HostTaskOwnerKind::Session,
+                crate::host::task_scope::HostTaskKind::ContinuationTurn,
+                async move {
+                    started_task.store(true, Ordering::SeqCst);
+                },
+            )
+            .is_err()
+    );
     tokio::task::yield_now().await;
     assert!(!started.load(Ordering::SeqCst));
 }
@@ -125,72 +129,54 @@ fn cron_frozen_recipient_never_retargets_reopened_lifecycle() {
     );
 }
 
-fn inbox_work_available(
-    snapshot: &peri_acp_types::session_resources::work::WorkSnapshot,
-    floor: Option<u64>,
-) -> bool {
-    peri_acp_types::session_resources::work::WorkAvailability {
-        control: snapshot.control.clone(),
-        state: (&snapshot.state).into(),
-    }
-    .is_available(snapshot.control.lifecycle, floor)
-}
-
 #[test]
-fn observer_floor_requires_unprocessed_new_required_delivery() {
+fn observer_floor_requires_new_pending_required_delivery() {
     use peri_acp_types::session_resources::work::*;
-    use peri_acp_types::session_resources::ControlState;
-
-    let control = ControlState::default();
-    let query = WorkQuery {
-        session_id: "observer-floor".into(),
-        limit: 1,
-    };
-    let mut state = WorkState::default();
-    for delivery_id in ["old", "new"] {
-        let content = WorkPayload::from_payload(&peri_acp_types::store::PersistedPayload::Message(
-            peri_acp_types::messages::BaseMessage::human(delivery_id),
-        ))
-        .unwrap();
-        let command = WorkCommand {
-            session_id: query.session_id.clone(),
-            recipient_lifecycle: control.lifecycle,
-            mutation_id: delivery_id.into(),
-            action: WorkAction::PublishDelivery {
-                delivery: PublishDelivery {
-                    delivery_id: delivery_id.into(),
-                    event: WorkEvent {
-                        producer_namespace: "observer-test".into(),
-                        event_id: delivery_id.into(),
-                        event_kind: "input".into(),
-                        causation_id: None,
-                        content,
-                    },
-                    purpose: DeliveryPurpose::UserInput,
-                    policy: peri_acp_types::session::MessagePolicy::ensure_processing(),
+    let content = EvidenceWrite {
+        session_id: "observer".into(),
+        storage_scope: "observer".into(),
+        payload_id: "body".into(),
+        encoding: 1,
+        bytes: b"{}".to_vec(),
+    }
+    .reference()
+    .unwrap();
+    let mut delivery = Delivery {
+        delivery_id: "new".into(),
+        recipient_lifecycle: 1,
+        revision: 0,
+        admission_sequence: 9,
+        publication: PublishDelivery {
+            delivery_id: "new".into(),
+            purpose: DeliveryPurpose::UserInput,
+            policy: peri_acp_types::session::MessagePolicy::ensure_processing(),
+            event: WorkEvent {
+                producer_namespace: "fixture".into(),
+                event_id: "new".into(),
+                event_kind: "input".into(),
+                causation_id: None,
+                content: WorkPayload {
+                    message_id: peri_acp_types::messages::MessageId::new(),
+                    role: "user".into(),
+                    content,
+                    tool_call_id: None,
                 },
             },
-        };
-        let reduction = reduce_work(&command, &control, state.clone()).unwrap();
-        assert_eq!(reduction.receipt.decision, WorkDecision::Accepted);
-        state = reduction.state.unwrap();
-        if delivery_id == "old" {
-            let snapshot = WorkSnapshot::from_state(&query, control.clone(), state.clone());
-            assert!(!inbox_work_available(
-                &snapshot,
-                Some(state.next_admission_sequence)
-            ));
-            assert!(inbox_work_available(&snapshot, None));
-        }
-    }
-    let floor = state.deliveries["new"].admission_sequence;
-    let mut snapshot = WorkSnapshot::from_state(&query, control, state);
-    assert!(inbox_work_available(&snapshot, Some(floor)));
-    snapshot.state.obligations.get_mut("new").unwrap().status = ObligationStatus::Satisfied;
-    assert!(!inbox_work_available(&snapshot, Some(floor)));
-    assert!(inbox_work_available(&snapshot, None));
-    assert_eq!(
-        snapshot.state.obligations["old"].status,
-        ObligationStatus::Pending
-    );
+        },
+        projection: None,
+        projection_version: 0,
+        processing_id: None,
+        batch_ordinal: None,
+        participates_in_reason: false,
+        obligation: ObligationStatus::Pending,
+        disposition: None,
+    };
+    assert!(super::observer_delivery_available(&delivery, 1, 9));
+    assert!(!super::observer_delivery_available(&delivery, 1, 10));
+    assert!(!super::observer_delivery_available(&delivery, 2, 9));
+    delivery.obligation = ObligationStatus::Satisfied;
+    assert!(!super::observer_delivery_available(&delivery, 1, 9));
+    delivery.obligation = ObligationStatus::Pending;
+    delivery.publication.policy = peri_acp_types::session::MessagePolicy::passive();
+    assert!(!super::observer_delivery_available(&delivery, 1, 9));
 }

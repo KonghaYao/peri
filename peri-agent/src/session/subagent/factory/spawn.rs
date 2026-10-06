@@ -269,15 +269,11 @@ pub(super) async fn spawn_subagent_impl(
         parent_thread_id.as_ref(),
         parent_invocation_id.as_ref(),
     ) {
-        use peri_acp_types::session_resources::work::WorkQuery;
         use sha2::{Digest, Sha256};
-        let parent_work = resources
-            .load_session_work(&WorkQuery {
-                session_id: initiator.clone(),
-                limit: 1,
-            })
-            .await?;
-        if let Some(delegation) = parent_work.state.invocations.get(invocation_id) {
+        let delegation =
+            crate::session::work_access::effect(resources.as_ref(), initiator, invocation_id)
+                .await?;
+        {
             let child_snapshot = resources.load_session_snapshot(&child_thread_id).await?;
             let peri_acp_types::session_resources::FrozenState::Present(bytes) =
                 child_snapshot.frozen
@@ -343,7 +339,7 @@ pub(super) async fn spawn_subagent_impl(
             super::cold::bind_delegation_task(
                 resources.as_ref(),
                 initiator,
-                delegation,
+                &delegation,
                 &metadata.delegation_task_id,
             )
             .await?;

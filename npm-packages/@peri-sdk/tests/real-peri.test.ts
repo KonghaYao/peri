@@ -103,7 +103,7 @@ async function initialize(transport: Transport, executionProtocol = false) {
   return transport.request<{
     protocolVersion: number;
     agentCapabilities: object;
-  }>("initialize", { protocolVersion: 1, ...(executionProtocol ? { clientCapabilities: { _meta: { "peri.executionProtocol": 1, "peri.userInputQueue": true } } } : {}) });
+  }>("initialize", { protocolVersion: 1, ...(executionProtocol ? { clientCapabilities: { _meta: { "peri.executionProtocol": 2, "peri.userInputQueue": true } } } : {}) });
 }
 
 async function unusedLoopbackPort(): Promise<number> {

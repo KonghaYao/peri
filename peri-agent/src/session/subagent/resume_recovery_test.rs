@@ -22,7 +22,7 @@ impl crate::agent::react::ReactLLM for UnknownToolReasonLlm {
     }
 }
 
-async fn failed_child() -> (Arc<MockSessionResources>, String, WorkSnapshot) {
+async fn failed_child() -> (Arc<MockSessionResources>, String, WorkInspection) {
     let store = MockSessionResources::new();
     let child_id = uuid::Uuid::now_v7().to_string();
     preset_resumable_thread(&store, &child_id, None).await;
@@ -44,26 +44,21 @@ async fn failed_child() -> (Arc<MockSessionResources>, String, WorkSnapshot) {
         None,
         None,
     );
-    let failure = AdmittedSessionFactory::resume_subagent(None, config)
+    let _failure = AdmittedSessionFactory::resume_subagent(None, config)
         .await
         .err()
         .expect("reason fixture must fail");
     let snapshot = store
-        .load_session_work(&WorkQuery {
-            session_id: child_id.clone(),
-            limit: 64,
-        })
+        .inspect_work(&WorkQuery::new(&child_id, WorkSelector::ActiveProcessing))
         .await
         .unwrap();
-    assert!(
-        snapshot
-            .state
-            .works
-            .values()
-            .any(|work| work.stage == WorkStage::ReasonInFlight && work.response.is_none()),
-        "failure={failure}; works={:?}",
-        snapshot.state.works
-    );
+    let WorkPage::Processings(records) = &snapshot.page else {
+        panic!("expected active processing page")
+    };
+    assert!(records
+        .iter()
+        .any(|processing| processing.stage == WorkStage::ReasonInFlight
+            && processing.response.is_none()));
     assert!(snapshot.control.attempt.is_none());
     (store, child_id, snapshot)
 }
@@ -71,6 +66,19 @@ async fn failed_child() -> (Arc<MockSessionResources>, String, WorkSnapshot) {
 #[tokio::test]
 async fn explicit_resume_supersedes_failed_reason_without_replaying_or_erasing_it() {
     let (store, child_id, before) = failed_child().await;
+    let WorkPage::Processings(processings) = &before.page else {
+        panic!("expected active processing page")
+    };
+    let original = processings
+        .iter()
+        .find(|processing| processing.stage == WorkStage::ReasonInFlight)
+        .unwrap();
+    let evidence_query = EvidenceQuery {
+        session_id: child_id.clone(),
+        reference: original.request.clone().unwrap(),
+    };
+    let original_evidence = store.read_evidence(&evidence_query).await.unwrap();
+    original_evidence.validate().unwrap();
     let llm = RecordingLLM::new();
     let calls = llm.received.clone();
     let mut config = resume_config_with(
@@ -86,32 +94,26 @@ async fn explicit_resume_supersedes_failed_reason_without_replaying_or_erasing_i
         .await
         .expect("explicit authorized input must be admitted after failed Reason");
     assert_eq!(resumed.child_thread_id, child_id);
+    let abandoned =
+        crate::session::work_access::processing(store.as_ref(), &child_id, &original.processing_id)
+            .await
+            .unwrap();
+    assert_eq!(abandoned.stage, WorkStage::Abandoned);
+    assert_eq!(abandoned.request_id, original.request_id);
+    let retained_evidence = store.read_evidence(&evidence_query).await.unwrap();
+    retained_evidence.validate().unwrap();
+    assert_eq!(retained_evidence, original_evidence);
     let after = store
-        .load_session_work(&WorkQuery {
-            session_id: child_id,
-            limit: 64,
-        })
+        .inspect_work(&WorkQuery::new(&child_id, WorkSelector::ActiveProcessing))
         .await
         .unwrap();
-    for (work_id, original) in &before.state.works {
-        if original.stage == WorkStage::ReasonInFlight {
-            let abandoned = &after.state.works[work_id];
-            assert_eq!(abandoned.stage, WorkStage::Abandoned);
-            // 终态裁剪：身份保留，请求正文不再随终态保存。
-            assert_eq!(abandoned.request_id, original.request_id);
-            assert!(abandoned.reason_request.is_none());
-            assert_eq!(abandoned.response, original.response);
-            assert_eq!(
-                after.state.budgets[&original.budget_id],
-                before.state.budgets[&original.budget_id]
-            );
-        }
-    }
-    assert!(!after
-        .state
-        .works
-        .values()
-        .any(|work| matches!(work.stage, WorkStage::ReasonInFlight | WorkStage::Blocked)));
+    let WorkPage::Processings(records) = after.page else {
+        panic!("expected active processing page")
+    };
+    assert!(!records.iter().any(|processing| matches!(
+        processing.stage,
+        WorkStage::ReasonInFlight | WorkStage::Blocked
+    )));
     let messages = calls.read();
     assert_eq!(messages.len(), 1);
     assert!(messages[0]
@@ -147,14 +149,11 @@ async fn implicit_resume_refuses_failed_reason_without_publishing_an_orphan_inpu
         crate::tools::EffectiveToolErrorCode::ApplicationFailed
     );
     let after = store
-        .load_session_work(&WorkQuery {
-            session_id: child_id,
-            limit: 64,
-        })
+        .inspect_work(&WorkQuery::new(&child_id, WorkSelector::ActiveProcessing))
         .await
         .unwrap();
-    assert_eq!(after.state.works, before.state.works);
-    assert_eq!(after.state.deliveries, before.state.deliveries);
+    assert_eq!(after.page, before.page);
+    assert_eq!(after.head.next_delivery_seq, before.head.next_delivery_seq);
     assert!(calls.read().is_empty());
 }
 

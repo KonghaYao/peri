@@ -81,20 +81,32 @@ async fn legacy_history_context_then_load_restores_saved_cwd_and_frozen_snapshot
         "零兜底前提：磁盘上的指令文件仍在"
     );
     let frozen = bridge.load_frozen_snapshot(&id).await.unwrap().unwrap();
+    use peri_acp_types::session_resources::work::{WorkPage, WorkQuery, WorkSelector};
     let work = cfg
         .session_resources
-        .load_session_work(&peri_acp_types::session_resources::work::WorkQuery {
-            session_id: id.clone(),
-            limit: 1,
-        })
+        .inspect_work(&WorkQuery::new(&id, WorkSelector::Availability))
         .await
         .unwrap();
-    assert!(work.blocked);
-    assert!(work
-        .state
-        .legacy_unknown
-        .keys()
-        .any(|identity| identity.starts_with("ownerMissing:")));
+    assert!(
+        crate::host::work_query::availability(&work)
+            .unwrap()
+            .blocked
+    );
+    let record_id = format!("ownerMissing:{id}:{}", work.control.lifecycle);
+    let legacy = cfg
+        .session_resources
+        .inspect_work(&WorkQuery::new(
+            &id,
+            WorkSelector::LegacyEvidence {
+                record_id: record_id.clone(),
+            },
+        ))
+        .await
+        .unwrap();
+    let WorkPage::LegacyEvidence(records) = legacy.page else {
+        panic!("expected legacy evidence page");
+    };
+    assert!(records.iter().any(|record| record.record_id == record_id));
     sessions.clear();
     std::fs::write(cwd.join("CLAUDE.md"), "CHANGED_LATER").unwrap();
     handle_request(
@@ -127,25 +139,34 @@ async fn legacy_history_context_then_load_restores_saved_cwd_and_frozen_snapshot
     );
     let source_work = cfg
         .session_resources
-        .load_session_work(&peri_acp_types::session_resources::work::WorkQuery {
-            session_id: id.clone(),
-            limit: 1,
-        })
+        .inspect_work(&WorkQuery::new(&id, WorkSelector::Availability))
         .await
         .unwrap();
-    assert!(source_work.blocked);
+    assert!(
+        crate::host::work_query::availability(&source_work)
+            .unwrap()
+            .blocked
+    );
     let fork_work = cfg
         .session_resources
-        .load_session_work(&peri_acp_types::session_resources::work::WorkQuery {
-            session_id: fork_id.to_owned(),
-            limit: 1,
-        })
+        .inspect_work(&WorkQuery::new(fork_id, WorkSelector::Head))
         .await
         .unwrap();
-    assert!(fork_work
-        .state
-        .resource_owners
-        .contains_key(&fork_work.control.lifecycle));
+    let descriptor = cfg
+        .session_resources
+        .inspect_work(&WorkQuery::new(
+            fork_id,
+            WorkSelector::RecoveryDescriptor {
+                lifecycle: fork_work.control.lifecycle,
+            },
+        ))
+        .await
+        .unwrap();
+    assert!(
+        crate::host::work_query::descriptor(&descriptor, fork_work.control.lifecycle)
+            .unwrap()
+            .is_some_and(|record| record.resource_owners.is_some())
+    );
     handle_request(
         "session/close",
         &json!({"sessionId":fork_id}),

@@ -85,7 +85,12 @@ pub(super) const BACKFILL_ENVIRONMENTS_SQL: &str = "WITH RECURSIVE tree(thread_i
 /// canonical 表清单（父表在前，与 [`CREATE_TABLES_SQL`] 的顺序一致）。
 pub(super) const CANONICAL_TABLES: &[&str] = &[
     "session_work_commands",
-    "session_work_state",
+    "session_work_head",
+    "session_inputs",
+    "session_deliveries",
+    "session_processing",
+    "session_effects",
+    "session_payloads",
     "session_work_events",
     "session_work_receipts",
     "session_control_state",
@@ -125,8 +130,10 @@ pub(super) const CREATE_TABLES: &[&str] = &[
 )",
     "CREATE TABLE IF NOT EXISTS messages (
     message_id TEXT PRIMARY KEY, thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
-    role TEXT NOT NULL, content TEXT NOT NULL,
-    truncated BOOLEAN NOT NULL DEFAULT 0, excluded BOOLEAN NOT NULL DEFAULT 0, projection TEXT
+    role TEXT NOT NULL, content_ref TEXT NOT NULL,
+    transcript_seq INTEGER NOT NULL CHECK(transcript_seq>=0),
+    truncated BOOLEAN NOT NULL DEFAULT 0, excluded BOOLEAN NOT NULL DEFAULT 0, projection TEXT,
+    UNIQUE(thread_id,transcript_seq)
 )",
     "CREATE TABLE IF NOT EXISTS projects (
     id TEXT PRIMARY KEY, locator TEXT NOT NULL, object_identity TEXT NOT NULL,

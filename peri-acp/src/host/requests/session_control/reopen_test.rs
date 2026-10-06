@@ -1,19 +1,40 @@
 use super::*;
 use crate::host::requests::resource_owners;
-use peri_acp_types::session_resources::work::{WorkAction, WorkCommand, WorkDecision, WorkQuery};
+use peri_acp_types::session_resources::work::{
+    WorkAction, WorkCommand, WorkDecision, WorkPage, WorkQuery, WorkSelector,
+};
 use peri_acp_types::session_resources::{ControlDecision, ControlResolution};
 
 async fn work(
     cfg: &AcpServerConfig,
     id: &str,
-) -> peri_acp_types::session_resources::work::WorkSnapshot {
+) -> peri_acp_types::session_resources::work::WorkInspection {
     cfg.session_resources
-        .load_session_work(&WorkQuery {
+        .inspect_work(&WorkQuery {
             session_id: id.into(),
             limit: 1,
+            selector: WorkSelector::Availability,
+            cursor: None,
         })
         .await
         .unwrap()
+}
+
+async fn legacy_evidence(cfg: &AcpServerConfig, id: &str, lifecycle: u64) -> Option<String> {
+    let inspection = cfg
+        .session_resources
+        .inspect_work(&WorkQuery::new(
+            id,
+            WorkSelector::LegacyEvidence {
+                record_id: format!("ownerMissing:{id}:{lifecycle}"),
+            },
+        ))
+        .await
+        .unwrap();
+    let WorkPage::LegacyEvidence(records) = inspection.page else {
+        panic!("expected legacy evidence")
+    };
+    records.into_iter().next().map(|record| record.evidence)
 }
 
 async fn bind_child(cfg: &AcpServerConfig, id: &str) -> String {
@@ -53,7 +74,7 @@ async fn bind_child(cfg: &AcpServerConfig, id: &str) -> String {
             recipient_lifecycle: 1,
             mutation_id: "original-child-metadata".into(),
             action: WorkAction::BindChildResumeMetadata {
-                expected_revision: snapshot.state.revision,
+                expected_revision: snapshot.head.change_seq,
                 metadata_json: metadata_json.clone(),
             },
         })
@@ -99,18 +120,44 @@ async fn reopen_copies_exact_owner_and_child_authority_and_replaces_lifecycle() 
             .recipient_lifecycle,
         2
     );
-    let mut expected_owner = snapshot.state.resource_owners[&1].clone();
+    let mut expected_owner =
+        crate::host::work_query::test_descriptor(cfg.session_resources.as_ref(), &id, 1)
+            .await
+            .unwrap()
+            .resource_owners
+            .unwrap()
+            .clone();
     expected_owner.recipient_lifecycle = 2;
-    assert_eq!(snapshot.state.resource_owners[&2], expected_owner);
+    assert_eq!(
+        crate::host::work_query::test_descriptor(cfg.session_resources.as_ref(), &id, 2)
+            .await
+            .unwrap()
+            .resource_owners
+            .unwrap(),
+        expected_owner
+    );
     let mut expected_metadata: Value = serde_json::from_str(&original_metadata).unwrap();
     expected_metadata["recipientLifecycle"] = json!(2);
     assert_eq!(
-        serde_json::from_str::<Value>(&snapshot.state.child_resume_metadata[&2]).unwrap(),
+        serde_json::from_str::<Value>(
+            &crate::host::work_query::test_descriptor(cfg.session_resources.as_ref(), &id, 2)
+                .await
+                .unwrap()
+                .child_resume_metadata_json
+                .unwrap()
+        )
+        .unwrap(),
         expected_metadata
     );
     assert_eq!(
-        serde_json::from_str::<Value>(&snapshot.state.child_resume_metadata[&1]).unwrap()
-            ["recipientLifecycle"],
+        serde_json::from_str::<Value>(
+            &crate::host::work_query::test_descriptor(cfg.session_resources.as_ref(), &id, 1)
+                .await
+                .unwrap()
+                .child_resume_metadata_json
+                .unwrap()
+        )
+        .unwrap()["recipientLifecycle"],
         1
     );
     assert!(!Arc::ptr_eq(
@@ -142,32 +189,38 @@ async fn reopen_copies_exact_owner_and_child_authority_and_replaces_lifecycle() 
 
 /// [回归测试] Missing legacy owners permit history restoration only after durable quarantine.
 #[tokio::test]
-async fn legacy_restore_quarantines_canonical_ids_without_binding_an_owner() {
+async fn legacy_restore_quarantines_owner_evidence_without_scanning_history() {
     let tmp = tempfile::tempdir().unwrap();
-    let (cfg, sessions, id) = fixture(&tmp).await;
-    assert!(resource_owners::load_for_restore(&cfg, &id)
-        .await
-        .unwrap()
-        .is_empty());
-    let snapshot = work(&cfg, &id).await;
-    assert!(snapshot.state.resource_owners.is_empty());
-    assert!(snapshot.blocked);
-    let evidence: Value =
-        serde_json::from_str(&snapshot.state.legacy_unknown[&format!("ownerMissing:{id}:1")])
-            .unwrap();
-    assert_eq!(evidence["kind"], "unknownBuiltin");
-    assert_eq!(
-        evidence["canonicalMessageIds"],
-        json!(sessions[&id]
-            .history_payloads
-            .iter()
-            .map(|payload| payload.id().as_uuid().to_string())
-            .collect::<Vec<_>>())
+    let (cfg, _sessions, id) = fixture(&tmp).await;
+    assert!(
+        resource_owners::load_for_restore(&cfg, &id)
+            .await
+            .unwrap()
+            .is_empty()
     );
+    let snapshot = work(&cfg, &id).await;
+    assert!(
+        crate::host::work_query::test_descriptor(
+            cfg.session_resources.as_ref(),
+            &id,
+            snapshot.control.lifecycle
+        )
+        .await
+        .is_none_or(|descriptor| descriptor.resource_owners.is_none())
+    );
+    assert!(
+        crate::host::work_query::availability(&snapshot)
+            .unwrap()
+            .blocked
+    );
+    let evidence: Value =
+        serde_json::from_str(&legacy_evidence(&cfg, &id, 1).await.unwrap()).unwrap();
+    assert_eq!(evidence["kind"], "unknownBuiltin");
+    assert!(evidence.get("canonicalMessageIds").is_none());
     assert!(resource_owners::load(&cfg, &id).await.is_err());
-    let revision = snapshot.state.revision;
+    let revision = snapshot.head.change_seq;
     resource_owners::load_for_restore(&cfg, &id).await.unwrap();
-    assert_eq!(work(&cfg, &id).await.state.revision, revision);
+    assert_eq!(work(&cfg, &id).await.head.change_seq, revision);
 }
 
 /// [回归测试] The new fork ID must carry a trusted owner declaration before publication.
@@ -197,13 +250,20 @@ async fn fork_persists_trusted_owners_under_the_new_id() {
     assert_ne!(new_id, id);
     assert!(sessions.contains_key(new_id));
     assert_eq!(
-        work(&cfg, new_id).await.state.resource_owners[&1].authorization_ref,
+        crate::host::work_query::test_descriptor(cfg.session_resources.as_ref(), new_id, 1)
+            .await
+            .unwrap()
+            .resource_owners
+            .unwrap()
+            .authorization_ref,
         format!("trusted-session-setup:{new_id}")
     );
-    assert!(resource_owners::load(&cfg, new_id)
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(
+        resource_owners::load(&cfg, new_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 /// [回归测试] A closed legacy session cannot acquire current-root owners through Reopen.
@@ -220,16 +280,27 @@ async fn reopen_without_previous_owner_is_durably_blocked_without_publication() 
     let error = handle_request("session/control", &reopen, &cfg, &mut sessions, &transport)
         .await
         .unwrap_err();
-    assert!(error
-        .message
-        .contains("previous persistent resource owners are missing"));
+    assert!(
+        error
+            .message
+            .contains("previous persistent resource owners are missing")
+    );
     let snapshot = work(&cfg, &id).await;
-    assert!(snapshot.blocked);
-    assert!(snapshot.state.resource_owners.is_empty());
-    assert!(snapshot
-        .state
-        .legacy_unknown
-        .contains_key(&format!("ownerMissing:{id}:2")));
+    assert!(
+        crate::host::work_query::availability(&snapshot)
+            .unwrap()
+            .blocked
+    );
+    assert!(
+        crate::host::work_query::test_descriptor(
+            cfg.session_resources.as_ref(),
+            &id,
+            snapshot.control.lifecycle
+        )
+        .await
+        .is_none_or(|descriptor| descriptor.resource_owners.is_none())
+    );
+    assert!(legacy_evidence(&cfg, &id, 2).await.is_some());
     assert!(!sessions.contains_key(&id));
     assert!(cfg.session_manager.get_session(&id).is_none());
 }
@@ -249,11 +320,22 @@ async fn cold_builtin_owner_is_honestly_quarantined_instead_of_restored() {
     assert!(error.message.contains("unknownBuiltin"));
     assert!(error.message.contains("Blocked"));
     let snapshot = work(&cfg, &id).await;
-    assert!(snapshot.blocked);
-    assert!(snapshot
-        .state
-        .legacy_unknown
-        .contains_key(&format!("unknownBuiltin:{id}:1")));
+    assert!(
+        crate::host::work_query::availability(&snapshot)
+            .unwrap()
+            .blocked
+    );
+    let evidence = cfg
+        .session_resources
+        .inspect_work(&WorkQuery::new(
+            &id,
+            WorkSelector::LegacyEvidence {
+                record_id: format!("unknownBuiltin:{id}:1"),
+            },
+        ))
+        .await
+        .unwrap();
+    assert!(matches!(evidence.page, WorkPage::LegacyEvidence(records) if records.len() == 1));
 }
 
 /// [回归测试] Settled builtin owners allow a new lifecycle, not reuse of the closed environment.
@@ -332,9 +414,29 @@ async fn settled_builtin_reopen_creates_a_fresh_environment_and_empty_queue() {
     assert_eq!(sessions[&id].cwd, cwd.to_str().unwrap());
     assert_eq!(sessions[&id].history.len(), 1);
     let snapshot = work(&cfg, &id).await;
-    assert!(!snapshot.blocked);
-    assert_eq!(snapshot.state.resource_owners[&1].connections_json, "{}");
-    assert_eq!(snapshot.state.resource_owners[&2].connections_json, "{}");
+    assert!(
+        !crate::host::work_query::availability(&snapshot)
+            .unwrap()
+            .blocked
+    );
+    assert_eq!(
+        crate::host::work_query::test_descriptor(cfg.session_resources.as_ref(), &id, 1)
+            .await
+            .unwrap()
+            .resource_owners
+            .unwrap()
+            .connections_json,
+        "{}"
+    );
+    assert_eq!(
+        crate::host::work_query::test_descriptor(cfg.session_resources.as_ref(), &id, 2)
+            .await
+            .unwrap()
+            .resource_owners
+            .unwrap()
+            .connections_json,
+        "{}"
+    );
 }
 
 /// [回归测试] A cold-loaded Closed history view is not a live execution owner or a closing authority.
@@ -426,20 +528,24 @@ async fn cold_load_closed_then_reopen_replaces_the_idle_view_environment() {
         &idle_manager,
         &fresh_environment.task_manager()
     ));
-    assert!(idle_manager
-        .as_any()
-        .downcast_ref::<peri_agent::agent::async_tasks::TaskManager>()
-        .unwrap()
-        .session_close_settled());
+    assert!(
+        idle_manager
+            .as_any()
+            .downcast_ref::<peri_agent::agent::async_tasks::TaskManager>()
+            .unwrap()
+            .session_close_settled()
+    );
     let fresh_session = fresh_environment
         .cfg
         .session_manager
         .get_session(&id)
         .unwrap();
     assert_eq!(fresh_session.recipient_lifecycle, 2);
-    assert!(fresh_session
-        .task_events_started
-        .load(std::sync::atomic::Ordering::Acquire));
+    assert!(
+        fresh_session
+            .task_events_started
+            .load(std::sync::atomic::Ordering::Acquire)
+    );
     assert!(fresh_session.v2_message_queue.is_empty());
     assert_eq!(loaded_sessions[&id].cwd, cwd.to_str().unwrap());
     assert_eq!(loaded_sessions[&id].history.len(), 1);
@@ -530,19 +636,23 @@ async fn reopen_preserves_actual_owned_futures_and_independent_children() {
         let error = handle_request("session/control", &reopen, &cfg, &mut sessions, &transport)
             .await
             .unwrap_err();
-        assert!(error
-            .message
-            .contains("previous live execution is not closed"));
+        assert!(
+            error
+                .message
+                .contains("previous live execution is not closed")
+        );
         assert!(!token.is_cancelled());
         assert!(Arc::ptr_eq(
             &previous_manager,
             &cfg.session_manager.get_session(&id).unwrap().task_manager
         ));
-        assert!(!previous_manager
-            .as_any()
-            .downcast_ref::<peri_agent::agent::async_tasks::TaskManager>()
-            .unwrap()
-            .session_close_settled());
+        assert!(
+            !previous_manager
+                .as_any()
+                .downcast_ref::<peri_agent::agent::async_tasks::TaskManager>()
+                .unwrap()
+                .session_close_settled()
+        );
         assert!(sessions.contains_key(&id));
     }
 }

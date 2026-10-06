@@ -3,6 +3,8 @@
 时间读取、有界等待及 MCP 周期 tick 的底层入口见 [peri-time 索引](peri-time.md)；
 预算、取消和错误分类仍由各 middleware 与 MCP 生命周期持有。
 
+Work 消费使用 `inspect_work` 的 typed page 与 `read_evidence` 的不可变正文引用：`mcp/invocation.rs` 校验 effective arguments 的引用及摘要，`mcp/invocation_recovery.rs` 按确切 Effect 的 owner/task 绑定恢复迟到终态，`mcp/client/invocation_owner_recovery.rs` 保留外部 owner wire 身份但不重建会话工作聚合。`mcp/owner_capabilities.rs` 与 `mcp/tool_bridge.rs` 按指定生命周期读取 RecoveryDescriptor；SDK 继续唯一持有执行实例与 attempt 所有权。
+
 会话运行时目录唯一入口是 `mcp/client/session_bindings.rs`，按 `(session ID, lifecycle)` 保留 Inbox/TaskManager 历史并登记当前绑定；恢复不能复活已关闭生命周期。`mcp/client/ports.rs` 实现会话 scope 关闭及共享环境关闭证明：历史子会话仍有执行或 required 工作时拒绝共享环境 shutdown，不能因子 Agent 自然完成而隐式终止其独立后台资源。
 
 > Builtin MCP 插件 handler 与工具已移入独立 crate，当前入口和测试命令见 [MCP packages 代码索引](mcp-packages.md)。本页只索引宿主 MCP runtime、policy、context、dispatch 与仍由 middleware 提供的能力。

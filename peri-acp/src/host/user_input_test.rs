@@ -71,10 +71,14 @@ async fn durable_scan_notifies_required_work_without_a_queue_wake_hint() {
         .await
         .unwrap();
     tokio::task::yield_now().await;
-    let content = WorkPayload::from_payload(&peri_acp_types::store::PersistedPayload::Message(
-        peri_acp_types::messages::BaseMessage::human("late durable work"),
-    ))
-    .unwrap();
+    let content = crate::host::work_query::test_payload(
+        cfg.session_resources.as_ref(),
+        &sid,
+        &peri_acp_types::store::PersistedPayload::Message(
+            peri_acp_types::messages::BaseMessage::human("late durable work"),
+        ),
+    )
+    .await;
     let receipt = cfg
         .session_resources
         .apply_work_mutation(&WorkCommand {
@@ -113,16 +117,24 @@ async fn durable_scan_notifies_required_work_without_a_queue_wake_hint() {
     .expect("bounded scans must rediscover durable work without an MQ hint");
     let snapshot = cfg
         .session_resources
-        .load_session_work(&WorkQuery {
+        .inspect_work(&WorkQuery {
             session_id: sid.clone(),
+            selector: WorkSelector::Head,
             limit: 1,
+            cursor: None,
         })
         .await
         .unwrap();
     assert!(snapshot.control.attempt.is_none());
-    assert!(snapshot.state.admissions.is_empty());
+    assert!(snapshot.head.current_admission_id.is_none());
     assert_eq!(
-        snapshot.state.obligations["lost-hint-delivery"].status,
+        crate::host::work_query::test_delivery(
+            cfg.session_resources.as_ref(),
+            &sid,
+            "lost-hint-delivery"
+        )
+        .await
+        .obligation,
         ObligationStatus::Pending
     );
     cfg.session_manager.pre_close_session(&sid);
@@ -143,20 +155,22 @@ async fn observer_scan_suppresses_history_but_not_new_or_explicit_publication() 
         .clone();
     let query = WorkQuery {
         session_id: sid.clone(),
+        selector: WorkSelector::Head,
         limit: 1,
+        cursor: None,
     };
-    let initial = cfg
-        .session_resources
-        .load_session_work(&query)
-        .await
-        .unwrap();
+    let initial = cfg.session_resources.inspect_work(&query).await.unwrap();
     let lifecycle = initial.control.lifecycle;
-    let mut floor = initial.state.next_admission_sequence;
+    let mut floor = initial.head.next_delivery_seq;
     for delivery_id in ["historical", "fresh"] {
-        let content = WorkPayload::from_payload(&peri_acp_types::store::PersistedPayload::Message(
-            peri_acp_types::messages::BaseMessage::human(delivery_id),
-        ))
-        .unwrap();
+        let content = crate::host::work_query::test_payload(
+            cfg.session_resources.as_ref(),
+            &sid,
+            &peri_acp_types::store::PersistedPayload::Message(
+                peri_acp_types::messages::BaseMessage::human(delivery_id),
+            ),
+        )
+        .await;
         let receipt = cfg
             .session_resources
             .apply_work_mutation(&WorkCommand {
@@ -184,11 +198,11 @@ async fn observer_scan_suppresses_history_but_not_new_or_explicit_publication() 
         if delivery_id == "historical" {
             floor = cfg
                 .session_resources
-                .load_session_work(&query)
+                .inspect_work(&query)
                 .await
                 .unwrap()
-                .state
-                .next_admission_sequence;
+                .head
+                .next_delivery_seq;
         }
         for _ in 0..2 {
             crate::host::continuation::publish_inbox_work(
@@ -230,15 +244,13 @@ async fn observer_scan_suppresses_history_but_not_new_or_explicit_publication() 
             .count(),
         3
     );
-    let snapshot = cfg
-        .session_resources
-        .load_session_work(&query)
-        .await
-        .unwrap();
+    let snapshot = cfg.session_resources.inspect_work(&query).await.unwrap();
     assert!(snapshot.control.attempt.is_none());
-    assert!(snapshot.state.admissions.is_empty());
+    assert!(snapshot.head.current_admission_id.is_none());
     assert_eq!(
-        snapshot.state.obligations["historical"].status,
+        crate::host::work_query::test_delivery(cfg.session_resources.as_ref(), &sid, "historical")
+            .await
+            .obligation,
         ObligationStatus::Pending
     );
 }
@@ -644,7 +656,7 @@ async fn test_user_input_work_notification_does_not_launch_a_loop() {
     .await
     .unwrap();
     assert_eq!(notice["sessionId"], sid);
-    assert_eq!(notice["executionProtocol"], 1);
+    assert_eq!(notice["executionProtocol"], 2);
     assert!(mailbox.reserve_run().is_none());
     assert!(mailbox.snapshot().active_request_id.is_none());
 }
@@ -862,26 +874,43 @@ async fn inbox_notification_uses_narrow_facts_with_undecodable_history() {
     ))
     .await
     .unwrap();
-    let mut state = serde_json::to_value(WorkState::default()).unwrap();
-    state["revision"] = json!(42);
-    state["deliveries"]["required"] = json!({
-        "recipientLifecycle": 1, "admissionSequence": 3, "batchId": null, "disposition": null,
-        "publication": {"policy": {"requirement": "required"}}
-    });
-    state["obligations"]["required"] = json!({"status": "pending"});
-    state["works"]["historical"] = json!({
-        "workId": "historical", "batchId": "historical", "stage": "settled",
-        "reasonRequest": {"serializedRequest": "history body".repeat(100_000)},
-        "revision": "not a number"
-    });
-    assert!(serde_json::from_value::<WorkState>(state.clone()).is_err());
-    sqlx::query("INSERT INTO session_work_state(session_id,state_json) VALUES (?1,?2) ON CONFLICT(session_id) DO UPDATE SET state_json=excluded.state_json")
-        .bind(&sid).bind(state.to_string()).execute(&pool).await.unwrap();
+    let content = crate::host::work_query::test_payload(
+        cfg.session_resources.as_ref(),
+        &sid,
+        &peri_acp_types::store::PersistedPayload::Message(
+            peri_acp_types::messages::BaseMessage::human("required"),
+        ),
+    )
+    .await;
+    cfg.session_resources
+        .apply_work_mutation(&WorkCommand {
+            session_id: sid.clone(),
+            recipient_lifecycle: 1,
+            mutation_id: "required".into(),
+            action: WorkAction::PublishDelivery {
+                delivery: PublishDelivery {
+                    delivery_id: "required".into(),
+                    purpose: DeliveryPurpose::UserInput,
+                    policy: peri_acp_types::session::MessagePolicy::ensure_processing(),
+                    event: WorkEvent {
+                        producer_namespace: "fixture".into(),
+                        event_id: "required".into(),
+                        event_kind: "input".into(),
+                        causation_id: None,
+                        content,
+                    },
+                },
+            },
+        })
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO session_processing(session_id,lifecycle,processing_id,revision,phase,phase_sequence,record_json) VALUES (?1,1,'historical',0,'settled',1,?2)")
+        .bind(&sid).bind("{\"request\":\"unreadable historical body\",\"revision\":\"not a number\"}").execute(&pool).await.unwrap();
     let inbox = peri_acp_types::session::MessageQueue::new();
     for (lifecycle, floor, count) in [
-        (1, Some(4), 0),
-        (2, Some(3), 0),
-        (1, Some(3), 1),
+        (1, Some(2), 0),
+        (2, Some(1), 0),
+        (1, Some(1), 1),
         (1, None, 2),
     ] {
         crate::host::continuation::publish_inbox_work(
@@ -904,8 +933,8 @@ async fn inbox_notification_uses_narrow_facts_with_undecodable_history() {
             assert_eq!(
                 params,
                 &json!({
-                    "sessionId": sid, "revision": 42, "lifecycle": 1,
-                    "controlGeneration": 0, "executionProtocol": 1,
+                    "sessionId": sid, "revision": 1, "lifecycle": 1,
+                    "controlGeneration": 0, "executionProtocol": 2,
                 })
             );
         }

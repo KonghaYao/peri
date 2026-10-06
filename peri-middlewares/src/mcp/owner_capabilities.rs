@@ -1,5 +1,5 @@
 use peri_acp_types::plugin::McpServerConfig;
-use peri_acp_types::session_resources::work::WorkSnapshot;
+use peri_acp_types::session_resources::work::{WorkInspection, WorkPage};
 use serde::Deserialize;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -51,14 +51,17 @@ impl OwnerCapabilities {
 }
 
 pub(crate) fn trusted_owner_configuration(
-    snapshot: &WorkSnapshot,
+    snapshot: &WorkInspection,
     recipient_lifecycle: u64,
     server: &str,
 ) -> Result<(McpServerConfig, String), String> {
-    let binding = snapshot
-        .state
-        .resource_owners
-        .get(&recipient_lifecycle)
+    let WorkPage::RecoveryDescriptors(descriptors) = &snapshot.page else {
+        return Err("Incomplete: expected trusted lifecycle descriptor".into());
+    };
+    let binding = descriptors
+        .iter()
+        .find(|descriptor| descriptor.recipient_lifecycle == recipient_lifecycle)
+        .and_then(|descriptor| descriptor.resource_owners.as_ref())
         .ok_or("Incomplete: durable trusted owner declarations unavailable")?;
     if binding.recipient_lifecycle != recipient_lifecycle || binding.authorization_ref.is_empty() {
         return Err("Incomplete: owner declaration lifecycle or authorization unavailable".into());

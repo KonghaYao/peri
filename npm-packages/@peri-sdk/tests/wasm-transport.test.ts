@@ -74,7 +74,7 @@ test("existing Agent and Session APIs run over an injected WASM frame port", asy
     methods.push(request.method);
     let result: unknown;
     switch (request.method) {
-      case "initialize": result = { protocolVersion: 1 }; break;
+      case "initialize": result = { protocolVersion: 1, agentCapabilities: { _meta: { "peri.executionProtocol": 2 } } }; break;
       case "session/new": result = { sessionId: "s1" }; break;
       case "session/input/snapshot": result = { generation: "g1" }; break;
       case "session/input/enqueue": result = { results: [{ inputId: request.params?.inputId, state: "delivered" }] }; break;

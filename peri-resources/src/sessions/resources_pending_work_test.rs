@@ -1,5 +1,5 @@
 use super::*;
-use peri_acp_types::session_resources::work::WorkQuery;
+use peri_acp_types::session_resources::work::{WorkPage, WorkQuery, WorkSelector};
 
 async fn pending(fixture: &Fixture, session: &str) {
     sqlx::query("INSERT INTO session_work_commands(mutation_id,session_id,digest,command_json) VALUES (?1,?1,'digest','undecodable command')")
@@ -52,22 +52,24 @@ async fn pending_work_root_and_descendants_block_until_reconciled() {
 }
 
 #[tokio::test]
-async fn pending_work_gate_skips_large_undecodable_state_but_keeps_unknown_blocked() {
+async fn pending_work_gate_skips_unrelated_malformed_draft_but_keeps_unknown_blocked() {
     let fixture = Fixture::new().await;
     fixture.create("root").await;
     let root = "root".to_owned();
-    sqlx::query("INSERT INTO session_work_state(session_id,state_json) VALUES (?1,?2)")
+    sqlx::query("INSERT INTO session_inputs(session_id,lifecycle,input_id,revision,fifo_seq,generation,status,record_json) VALUES (?1,1,'malformed',0,1,0,'queued',?2)")
         .bind(&root)
-        .bind("undecodable state".repeat(100_000))
+        .bind("undecodable draft".repeat(100_000))
         .execute(fixture.facade.local_pool())
         .await
         .unwrap();
     assert!(fixture
         .facade
-        .load_session_work(&WorkQuery {
-            session_id: root.clone(),
-            limit: 1
-        })
+        .inspect_work(&WorkQuery::new(
+            &root,
+            WorkSelector::Draft {
+                input_id: "malformed".into()
+            }
+        ))
         .await
         .is_err());
     fixture
@@ -144,7 +146,8 @@ async fn availability_sqlite_waits_for_root_and_preserves_uncertain_read_rules()
         })
     };
     entered_rx.await.unwrap();
-    let read = fixture.facade.load_work_availability(&child);
+    let query = WorkQuery::new(&child, WorkSelector::Availability);
+    let read = fixture.facade.inspect_work(&query);
     tokio::pin!(read);
     assert!(tokio::time::timeout(Duration::from_millis(20), &mut read)
         .await
@@ -161,16 +164,13 @@ async fn availability_sqlite_waits_for_root_and_preserves_uncertain_read_rules()
     for id in [&root, &child] {
         assert!(fixture
             .facade
-            .load_work_availability(id)
+            .inspect_work(&WorkQuery::new(id, WorkSelector::Availability))
             .await
             .unwrap_err()
             .is_persistence_uncertain());
         assert!(fixture
             .facade
-            .load_session_work(&WorkQuery {
-                session_id: id.clone(),
-                limit: 1
-            })
+            .inspect_work(&WorkQuery::new(id, WorkSelector::Head))
             .await
             .unwrap_err()
             .is_persistence_uncertain());
@@ -178,7 +178,7 @@ async fn availability_sqlite_waits_for_root_and_preserves_uncertain_read_rules()
 }
 
 #[tokio::test]
-async fn availability_sqlite_legacy_history_without_ledger_keeps_pending_hint() {
+async fn availability_does_not_infer_processing_responsibility_from_transcript() {
     let fixture = Fixture::new().await;
     fixture.create("root").await;
     let root = "root".to_owned();
@@ -187,21 +187,15 @@ async fn availability_sqlite_legacy_history_without_ledger_keeps_pending_hint() 
         .append_history(&root, &[payload("legacy")])
         .await
         .unwrap();
-    sqlx::query("DELETE FROM session_work_state WHERE session_id=?1")
-        .bind(&root)
-        .execute(fixture.facade.local_pool())
+    let inspection = fixture
+        .facade
+        .inspect_work(&WorkQuery::new(&root, WorkSelector::Availability))
         .await
         .unwrap();
-    let narrow = fixture.facade.load_work_availability(&root).await.unwrap();
-    assert!(narrow.is_available(1, None));
-    assert!(!narrow.is_available(1, Some(0)));
-    assert!(fixture
-        .facade
-        .load_session_work(&WorkQuery {
-            session_id: root,
-            limit: 1
-        })
-        .await
-        .unwrap()
-        .has_pending_current_work());
+    let WorkPage::Availability(availability) = inspection.page else {
+        panic!("availability page expected");
+    };
+    assert!(!availability.pending);
+    assert!(availability.candidates.is_empty());
+    assert!(!inspection.head.has_pending_work());
 }

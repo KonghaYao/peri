@@ -1,10 +1,10 @@
 //! 消息生命周期持久化：删除、flags、回滚与原子 compaction 事务。
 
+use super::database::SqliteSessionDatabase;
 use super::failure::commit_failure;
-use super::{database::SqliteSessionDatabase, row_mapping::role_of};
 use anyhow::Result;
 use peri_acp_types::{
-    store::{CompactionChange, MessageFlags},
+    store::{CompactionChange, MessageFlags, PersistedPayload},
     thread::ThreadId,
 };
 use sqlx::SqliteConnection;
@@ -19,6 +19,7 @@ pub(super) async fn delete_messages(
         return Ok(());
     }
     let mut tx = database.pool.begin().await?;
+    super::session_data::messages::guard_history_mutation(&mut tx, thread_id).await?;
     for mid in message_ids {
         let uuid_str = mid.as_uuid().to_string();
         sqlx::query("DELETE FROM messages WHERE message_id = ?1 AND thread_id = ?2")
@@ -112,17 +113,11 @@ pub(super) async fn commit_compaction_lifecycle_on(
     }
 
     for message in &lifecycle.appended_messages {
-        let message_id = message.id().as_uuid().to_string();
-        let content = serde_json::to_string(message)?;
-        sqlx::query(
-            "INSERT INTO messages (message_id, thread_id, role, content)
-                 VALUES (?1, ?2, ?3, ?4)",
+        super::session_data::messages::insert_payload(
+            tx,
+            thread_id,
+            &PersistedPayload::Message(message.clone()),
         )
-        .bind(&message_id)
-        .bind(thread_id.as_str())
-        .bind(role_of(message))
-        .bind(&content)
-        .execute(&mut *tx)
         .await?;
     }
 
@@ -190,19 +185,20 @@ pub(super) async fn delete_messages_since(
     thread_id: &ThreadId,
     message_id: &peri_acp_types::messages::MessageId,
 ) -> Result<()> {
-    // 通过 rowid 定位目标消息在时间线上的位置
-    let target_rowid: Option<(i64,)> =
-        sqlx::query_as("SELECT rowid FROM messages WHERE thread_id = ?1 AND message_id = ?2")
-            .bind(thread_id.as_str())
-            .bind(message_id.as_uuid().to_string())
-            .fetch_optional(&database.pool)
-            .await?;
+    let target_sequence: Option<(i64,)> = sqlx::query_as(
+        "SELECT transcript_seq FROM messages WHERE thread_id = ?1 AND message_id = ?2",
+    )
+    .bind(thread_id.as_str())
+    .bind(message_id.as_uuid().to_string())
+    .fetch_optional(&database.pool)
+    .await?;
 
-    if let Some((rowid,)) = target_rowid {
+    if let Some((sequence,)) = target_sequence {
         let mut tx = database.pool.begin().await?;
-        sqlx::query("DELETE FROM messages WHERE thread_id = ?1 AND rowid > ?2")
+        super::session_data::messages::guard_history_mutation(&mut tx, thread_id).await?;
+        sqlx::query("DELETE FROM messages WHERE thread_id = ?1 AND transcript_seq > ?2")
             .bind(thread_id.as_str())
-            .bind(rowid)
+            .bind(sequence)
             .execute(&mut *tx)
             .await?;
         let now = peri_time::now_utc_rfc3339();

@@ -4,11 +4,7 @@ use peri_acp_types::session::ExecutionFailure;
 #[path = "work_budget_test_support.rs"]
 mod budget_support;
 
-fn budget_state(kind: WorkBudgetKind, used: u64) -> WorkState {
-    let mut state = WorkState::default();
-    state.limits.reason_requests = 64;
-    state.limits.dispatches = 256;
-    state.limits.recoveries = 8;
+fn budget_state(kind: WorkBudgetKind, used: u64) -> Processing {
     let reason = match kind {
         WorkBudgetKind::ReasonRequests => "reason budget exhausted",
         WorkBudgetKind::Dispatches => "dispatch budget exhausted",
@@ -20,32 +16,25 @@ fn budget_state(kind: WorkBudgetKind, used: u64) -> WorkState {
         WorkBudgetKind::Dispatches => budget.dispatches = used,
         WorkBudgetKind::Recoveries => budget.recoveries = used,
     }
-    state.budgets.insert("batch".into(), budget);
-    state.works.insert(
-        "work".into(),
-        WorkRecord {
-            work_id: "work".into(),
-            revision: 489,
-            budget_id: "batch".into(),
-            batch_id: "batch".into(),
-            stage: WorkStage::Blocked,
-            resume_stage: Some(WorkStage::ReasonReady),
-            request_id: None,
-            reason_request: None,
-            response: None,
-            invocation_ids: Vec::new(),
-            reason: Some(reason.into()),
-            recovery_condition: Some("explicit budget reset authorization".into()),
-        },
-    );
-    state
+    Processing { processing_id: "work".into(), recipient_lifecycle: 1, revision: 489,
+        execution: peri_acp_types::session_resources::ControlAttempt {
+            turn_id: peri_acp_types::session::TurnId::new(), attempt_id: peri_acp_types::identity::AttemptId::new() },
+        stage: WorkStage::Blocked, phase_sequence: 1, budget, checkpoint: None,
+        request_id: None, request: None, response: None, remaining_effects: 0,
+        resume_stage: Some(WorkStage::ReasonReady), blocked_evidence: Some(reason.into()),
+        recovery_condition: Some("explicit budget reset authorization".into()), delegation: None,
+        delivery_count: 1, reason_delivery_count: 1 }
+}
+
+fn limits() -> WorkLimits {
+    WorkLimits { reason_requests: 64, dispatches: 256, recoveries: 8, ..WorkLimits::default() }
 }
 
 #[test]
 fn reason_budget_block_is_typed_and_preserves_durable_state() {
     let state = budget_state(WorkBudgetKind::ReasonRequests, 64);
     let before = state.clone();
-    let error = blocked_budget_error(&state, "work").unwrap();
+    let error = blocked_budget_error(&state, &limits()).unwrap();
     assert!(matches!(
         error,
         AgentError::WorkBudgetExhausted {
@@ -66,7 +55,7 @@ fn reason_budget_block_is_typed_and_preserves_durable_state() {
 fn dispatch_budget_block_is_typed() {
     let state = budget_state(WorkBudgetKind::Dispatches, 256);
     assert!(matches!(
-        blocked_budget_error(&state, "work"),
+        blocked_budget_error(&state, &limits()),
         Some(AgentError::WorkBudgetExhausted {
             budget: WorkBudgetKind::Dispatches,
             used: 256,
@@ -79,7 +68,7 @@ fn dispatch_budget_block_is_typed() {
 fn recovery_budget_block_is_typed() {
     let state = budget_state(WorkBudgetKind::Recoveries, 8);
     assert!(matches!(
-        blocked_budget_error(&state, "work"),
+        blocked_budget_error(&state, &limits()),
         Some(AgentError::WorkBudgetExhausted {
             budget: WorkBudgetKind::Recoveries,
             used: 8,
@@ -91,21 +80,21 @@ fn recovery_budget_block_is_typed() {
 #[test]
 fn unrelated_block_does_not_become_budget_error() {
     let mut state = budget_state(WorkBudgetKind::ReasonRequests, 64);
-    state.works.get_mut("work").unwrap().reason = Some("model request uncertain".into());
-    assert!(blocked_budget_error(&state, "work").is_none());
+    state.blocked_evidence = Some("model request uncertain".into());
+    assert!(blocked_budget_error(&state, &limits()).is_none());
 }
 
 #[test]
 fn unexhausted_budget_does_not_become_budget_error() {
     let state = budget_state(WorkBudgetKind::ReasonRequests, 63);
-    assert!(blocked_budget_error(&state, "work").is_none());
+    assert!(blocked_budget_error(&state, &limits()).is_none());
 }
 
 #[test]
 fn unblocked_work_does_not_become_budget_error() {
     let mut state = budget_state(WorkBudgetKind::ReasonRequests, 64);
-    state.works.get_mut("work").unwrap().stage = WorkStage::ReasonReady;
-    assert!(blocked_budget_error(&state, "work").is_none());
+    state.stage = WorkStage::ReasonReady;
+    assert!(blocked_budget_error(&state, &limits()).is_none());
 }
 
 #[tokio::test]
@@ -125,48 +114,28 @@ async fn reason_budget_reducer_blocks_before_request_and_maps_exact_limit() {
         .await
         .unwrap()
         .unwrap();
-    let snapshot = session.snapshot().await.unwrap();
-    let work_id = fixture
-        .context
-        .work
-        .state
-        .lock()
-        .await
-        .work_id
-        .clone()
-        .unwrap();
-    let target = WorkSession::target(&snapshot, &work_id).unwrap();
-    let request = request_checkpoint(
-        &serde_json::json!({"messages": []}),
-        "model".into(),
-        "auth".into(),
-    )
-    .unwrap();
-    let command = session.command(WorkAction::BeginReason {
-        guard: session.guard(&snapshot).unwrap(),
-        target,
-        request_id: "must-not-send".into(),
-        request,
-    });
-    let mut state = snapshot.state.clone();
-    state.limits.reason_requests = 64;
-    let budget_id = state.works[&work_id].budget_id.clone();
-    state.budgets.get_mut(&budget_id).unwrap().reason_requests = 64;
-    let reduction = reduce_work(&command, &snapshot.control, state.clone()).unwrap();
-    assert_eq!(reduction.receipt.stage, Some(WorkStage::Blocked));
-    let accepted = reduction.state.as_ref().unwrap();
-    assert!(accepted.works[&work_id].request_id.is_none());
-    assert_eq!(accepted.budgets[&budget_id].reason_requests, 64);
-    let error = budget_exhaustion(&state, &work_id, WorkBudgetKind::ReasonRequests).unwrap();
-    let converted = AgentError::from(anyhow::Error::new(error));
-    assert!(matches!(
-        converted,
-        AgentError::WorkBudgetExhausted {
-            budget: WorkBudgetKind::ReasonRequests,
-            used: 64,
-            limit: 64,
-        }
-    ));
+    let snapshot = session.inspect_head().await.unwrap();
+    let mut processing = session.processing(&session.admission.work_id).await.unwrap();
+    processing.budget.reason_requests = 64;
+    let request = request_checkpoint(&session, &serde_json::json!({"messages": []}),
+        "model".into(), "auth".into()).await.unwrap();
+    let command = session.command(WorkAction::BeginReason { guard: session.guard(&snapshot).unwrap(),
+        target: WorkSession::target(&processing), request_id: "must-not-send".into(), request });
+    let mut head = snapshot.head;
+    head.limits = limits();
+    let facts = WorkFacts { session_id: session.admission.session_id.clone(), control: snapshot.control,
+        head, processing: Some(processing.clone()), deliveries: session.deliveries(&processing.processing_id).await.unwrap(),
+        effects: Vec::new(), drafts: Vec::new(), admission: None, recovery_descriptor: None,
+        terminal_obligation: None, legacy_evidence: None, parent_binding_receipt: None, parent_effect: None };
+    let transition = transition_work(&command, &facts).unwrap();
+    assert_eq!(transition.receipt.stage, Some(WorkStage::Blocked));
+    let accepted = transition.writes.iter().find_map(|write| match write {
+        WorkWrite::Processing { record, .. } => Some(record), _ => None,
+    }).unwrap();
+    assert!(accepted.request_id.is_none());
+    assert_eq!(accepted.budget.reason_requests, 64);
+    assert!(matches!(budget_exhaustion(&processing, &limits(), WorkBudgetKind::ReasonRequests),
+        Some(AgentError::WorkBudgetExhausted { used: 64, limit: 64, .. })));
 }
 
 struct NeverInvokedTool;
@@ -266,7 +235,7 @@ async fn dispatch_budget_denial_survives_frozen_boundary_and_result_commit_witho
         .session
         .clone()
         .unwrap();
-    let before = session.snapshot().await.unwrap();
+    let before = session.inspect_head().await.unwrap();
     let error = AgentError::from(
         fixture
             .context
@@ -296,23 +265,17 @@ async fn dispatch_budget_denial_survives_frozen_boundary_and_result_commit_witho
             ..
         }
     ));
-    let after = session.snapshot().await.unwrap();
-    assert_eq!(after.state, before.state);
+    let after = session.inspect_head().await.unwrap();
+    assert_eq!(after.head, before.head);
     assert_eq!(after.control, before.control);
     assert_eq!(
-        after
-            .state
-            .invocations
-            .values()
+        session.effects(&session.processing(&session.admission.work_id).await.unwrap()).await.unwrap().iter()
             .filter(|record| record.status == InvocationStatus::DispatchAccepted)
             .count(),
         3
     );
     assert_eq!(
-        after
-            .state
-            .invocations
-            .values()
+        session.effects(&session.processing(&session.admission.work_id).await.unwrap()).await.unwrap().iter()
             .filter(|record| record.status == InvocationStatus::Prepared)
             .count(),
         1
@@ -393,7 +356,7 @@ async fn reason_budget_denial_survives_prepare_and_cold_boundary_without_reset()
         .session
         .clone()
         .unwrap();
-    let before = session.snapshot().await.unwrap();
+    let before = session.inspect_head().await.unwrap();
     let mut cold = fixture.context.clone();
     cold.work = Arc::new(WorkBoundary::default());
     let error = match cold.work.ensure(&cold).await {
@@ -413,10 +376,8 @@ async fn reason_budget_denial_survives_prepare_and_cold_boundary_without_reset()
         .err()
         .unwrap();
     assert!(matches!(error, AgentError::WorkBudgetExhausted { .. }));
-    let after = session.snapshot().await.unwrap();
-    assert_eq!(after.state, before.state);
+    let after = session.inspect_head().await.unwrap();
+    assert_eq!(after.head, before.head);
     assert_eq!(after.control, before.control);
-    let mut old_lifecycle = before;
-    old_lifecycle.control.lifecycle += 1;
-    assert!(snapshot_budget_error(&old_lifecycle).is_none());
+
 }

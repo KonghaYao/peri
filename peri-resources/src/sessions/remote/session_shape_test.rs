@@ -157,11 +157,8 @@ fn schema_ddl_matches_the_canonical_shape() {
         .chain([
             crate::sessions::control::CREATE_STATE,
             crate::sessions::control::CREATE_RECEIPTS,
-            crate::sessions::work::CREATE_STATE,
-            crate::sessions::work::CREATE_EVENTS,
-            crate::sessions::work::CREATE_RECEIPTS,
-            crate::sessions::work::CREATE_COMMANDS,
         ])
+        .chain(crate::sessions::work_store::schema::initialization_sql())
         .collect();
     let actual: Vec<&str> = plan.iter().map(|spec| spec.sql).collect();
     assert_eq!(
@@ -371,7 +368,10 @@ fn payload_row_round_trips_through_binding_parameters() {
         excluded: false,
         projection: Some(projection_directive()),
     };
-    let params = codec::payload_params("session-1", &payload, Some(&flags)).expect("encodable");
+    let (reference, _) =
+        crate::sessions::work_store::payload::prepare(&payload, "session-1").unwrap();
+    let params =
+        codec::payload_params("session-1", &payload, Some(&flags), &reference).expect("encodable");
     // 行形状：message_id, thread_id, role, content, truncated, excluded, projection
     assert_eq!(params.len(), 7);
     assert_eq!(params[2], Value::Text("user".to_owned()));
@@ -381,6 +381,15 @@ fn payload_row_round_trips_through_binding_parameters() {
         params[4].clone(),
         params[5].clone(),
         params[6].clone(),
+        params[2].clone(),
+        Value::Integer(i64::from(reference.encoding)),
+        Value::Integer(reference.byte_length as i64),
+        text(&reference.sha256),
+        Value::Blob(
+            peri_acp_types::store::serialize_persisted_payload(&payload)
+                .unwrap()
+                .into_bytes(),
+        ),
     ];
     let decoded = codec::decode_message_row(&row).expect("decodable");
     assert_eq!(decoded.id(), payload.id());
@@ -402,13 +411,24 @@ fn payload_row_round_trips_through_binding_parameters() {
 #[test]
 fn history_row_id_must_match_its_payload() {
     let payload = PersistedPayload::Message(BaseMessage::human("mismatch"));
-    let params = codec::payload_params("session-1", &payload, None).expect("encodable");
+    let (reference, _) =
+        crate::sessions::work_store::payload::prepare(&payload, "session-1").unwrap();
+    let params = codec::payload_params("session-1", &payload, None, &reference).expect("encodable");
     let mut row = vec![
         text("33333333-3333-3333-3333-333333333333"),
         params[3].clone(),
         params[4].clone(),
         params[5].clone(),
         params[6].clone(),
+        params[2].clone(),
+        Value::Integer(i64::from(reference.encoding)),
+        Value::Integer(reference.byte_length as i64),
+        text(&reference.sha256),
+        Value::Blob(
+            peri_acp_types::store::serialize_persisted_payload(&payload)
+                .unwrap()
+                .into_bytes(),
+        ),
     ];
     assert!(codec::decode_message_row(&row).is_err());
     row[0] = text(&payload.id().as_uuid().to_string());
@@ -520,7 +540,11 @@ async fn write_sql_is_static_and_all_values_are_bound() {
     let two =
         session_sql::insert_session_statements(&session_sql::session_insert(&second, 3, None))
             .expect("encodable");
-    assert_eq!(one.len(), 2);
+    assert_eq!(one.len(), 3);
+    assert!(one[0].sql.contains("session_work_commands"));
+    assert_eq!(one[0].params, vec![Value::Text("session-a".into())]);
+    let one = &one[1..];
+    let two = &two[1..];
     assert_eq!(one[0].sql, two[0].sql);
     assert_eq!(one[1].sql, two[1].sql);
     assert_ne!(one[0].params, two[0].params);
@@ -561,8 +585,8 @@ async fn write_sql_is_static_and_all_values_are_bound() {
         Some("{\"inherited\":true}"),
     ))
     .expect("encodable");
-    assert_eq!(child.len(), 3);
-    assert!(child[2]
+    assert_eq!(child.len(), 4);
+    assert!(child[3]
         .sql
         .starts_with("UPDATE threads SET inherited_context"));
 }
@@ -602,7 +626,7 @@ async fn draft_revocation_cleans_environment_without_cascade_and_preserves_commi
     for (id, frozen, expected_deleted) in [("draft", None, 1), ("committed", Some("{}"), 0)] {
         sqlx::query("INSERT INTO threads(id, created_at, updated_at, frozen_context) VALUES (?1, 'now', 'now', ?2)")
             .bind(id).bind(frozen).execute(&mut connection).await.unwrap();
-        sqlx::query("INSERT INTO messages(message_id, thread_id, role, content) VALUES (?1, ?1, 'human', '{}')")
+        sqlx::query("INSERT INTO messages(message_id, thread_id, role, content_ref,transcript_seq) VALUES (?1, ?1, 'human', '{}',1)")
             .bind(id).execute(&mut connection).await.unwrap();
         sqlx::query("INSERT INTO session_bindings(thread_id, schema_version, project_id, workspace_id, relative_cwd) VALUES (?1, 1, 'project', 'workspace', '')")
             .bind(id).execute(&mut connection).await.unwrap();

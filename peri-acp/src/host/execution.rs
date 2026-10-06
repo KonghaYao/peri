@@ -3,12 +3,13 @@ use std::sync::Arc;
 use peri_acp_types::execution_admission::{AdmissionOutcome, AdmissionRequest};
 
 use peri_acp_types::session_resources::work::{
-    AdmissionRecord, WorkAction, WorkAdmission, WorkCommand, WorkDecision, WorkQuery,
+    AdmissionRecord, WorkAction, WorkAdmission, WorkCommand, WorkDecision, WorkPage, WorkQuery,
+    WorkSelector,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::{AcpServerConfig, PromptLocks, SharedSessions};
-use crate::transport::{types::AcpError, AcpTransport};
+use crate::transport::{AcpTransport, types::AcpError};
 
 #[path = "execution_finish.rs"]
 mod finishing;
@@ -53,12 +54,24 @@ pub(super) async fn query(params: &Value, cfg: &AcpServerConfig) -> Result<Value
         cfg.session_resources.as_ref(),
         &WorkQuery {
             session_id: session_id.to_owned(),
-            limit: 1,
+            selector: WorkSelector::Availability,
+            limit: 64,
+            cursor: None,
         },
     )
     .await
     .map_err(super::workspace::resource_error)?;
-    let work = snapshot.candidates.first().map(|candidate| {
+    let availability = super::work_query::availability(&snapshot)?;
+    let pending = cfg
+        .session_resources
+        .inspect_work(&WorkQuery::new(session_id, WorkSelector::PendingCommands))
+        .await
+        .map_err(super::workspace::resource_error)?;
+    let WorkPage::Commands(commands) = pending.page else {
+        return Err(super::work_query::wrong_page());
+    };
+    let commands: Vec<_> = commands.into_iter().map(|owned| owned.command).collect();
+    let work = availability.candidates.first().map(|candidate| {
         json!({
             "workId": candidate.work_id,
             "revision": candidate.work_revision,
@@ -67,8 +80,8 @@ pub(super) async fn query(params: &Value, cfg: &AcpServerConfig) -> Result<Value
         })
     });
     Ok(
-        json!({"control": snapshot.control, "work": work, "blocked": snapshot.blocked,
-        "pendingCommands": snapshot.pending_commands}),
+        json!({"control": snapshot.control, "work": work, "blocked": availability.blocked,
+        "pendingCommands": commands}),
     )
 }
 
@@ -84,14 +97,12 @@ pub(super) async fn resolve_work(params: &Value, cfg: &AcpServerConfig) -> Resul
         return Err(AcpError::new(-32602, "work command recipient conflict"));
     }
     if matches!(&command.action, WorkAction::FinishAdmission { .. }) {
-        let owned = cfg
-            .session_resources
-            .load_work_command(&peri_acp_types::session_resources::work::WorkCommandQuery {
-                session_id: command.session_id.clone(),
-                mutation_id: command.mutation_id.clone(),
-            })
-            .await
-            .map_err(super::workspace::resource_error)?;
+        let owned = super::work_query::command(
+            cfg.session_resources.as_ref(),
+            &command.session_id,
+            &command.mutation_id,
+        )
+        .await?;
         if owned.is_none_or(|owned| owned.command != command) {
             return Err(AcpError::new(
                 -32010,
@@ -111,13 +122,17 @@ pub(super) async fn resolve(params: &Value, cfg: &AcpServerConfig) -> Result<Val
     let ticket = ticket(params)?;
     let snapshot = cfg
         .session_resources
-        .load_session_work(&WorkQuery {
+        .inspect_work(&WorkQuery {
             session_id: ticket.session_id.clone(),
+            selector: WorkSelector::Admission {
+                admission_id: ticket.admission_id.clone(),
+            },
             limit: 1,
+            cursor: None,
         })
         .await
         .map_err(super::workspace::resource_error)?;
-    match snapshot.state.admissions.get(&ticket.admission_id) {
+    match super::work_query::admission(&snapshot, &ticket.admission_id)? {
         Some(record) if record.admission == ticket => {
             if finishing::reconcile_finish(cfg.session_resources.as_ref(), &ticket).await?
                 || super::cold_terminal::reconcile(cfg.session_resources.as_ref(), &ticket).await?
@@ -125,16 +140,17 @@ pub(super) async fn resolve(params: &Value, cfg: &AcpServerConfig) -> Result<Val
                 finish_admission(cfg.session_resources.as_ref(), &ticket).await?;
                 let updated = cfg
                     .session_resources
-                    .load_session_work(&WorkQuery {
+                    .inspect_work(&WorkQuery {
                         session_id: ticket.session_id.clone(),
+                        selector: WorkSelector::Admission {
+                            admission_id: ticket.admission_id.clone(),
+                        },
                         limit: 1,
+                        cursor: None,
                     })
                     .await
                     .map_err(super::workspace::resource_error)?;
-                let record = updated
-                    .state
-                    .admissions
-                    .get(&ticket.admission_id)
+                let record = super::work_query::admission(&updated, &ticket.admission_id)?
                     .ok_or_else(|| AcpError::new(-32010, "terminal admission disappeared"))?;
                 return Ok(json!({"status": "applied", "reply": reply(record)}));
             }
@@ -173,13 +189,17 @@ pub(super) async fn execute(
     let admission = ticket(&params)?;
     let resources = &context.cfg.session_resources;
     let snapshot = resources
-        .load_session_work(&WorkQuery {
+        .inspect_work(&WorkQuery {
             session_id: admission.session_id.clone(),
+            selector: WorkSelector::Admission {
+                admission_id: admission.admission_id.clone(),
+            },
             limit: 1,
+            cursor: None,
         })
         .await
         .map_err(super::workspace::resource_error)?;
-    if let Some(record) = snapshot.state.admissions.get(&admission.admission_id) {
+    if let Some(record) = super::work_query::admission(&snapshot, &admission.admission_id)? {
         if record.admission != admission {
             return Err(AcpError::new(
                 -32010,
@@ -194,7 +214,13 @@ pub(super) async fn execute(
         }
         return Ok(reply(record));
     }
-    snapshot
+    let available = super::work_query::inspect(
+        resources.as_ref(),
+        &admission.session_id,
+        WorkSelector::Availability,
+    )
+    .await?;
+    peri_acp_types::execution_admission::AdmissionSnapshot::from(available)
         .validate_admission(&admission)
         .map_err(super::workspace::resource_error)?;
     let sdk = context
@@ -337,7 +363,7 @@ fn admission_command(admission: &WorkAdmission) -> WorkCommand {
 }
 
 fn reply(record: &AdmissionRecord) -> Value {
-    match &record.evidence_id {
+    match &record.leaving_evidence_id {
         Some(evidence_id) => settled_reply(&record.admission, evidence_id),
         None => json!({"status": "running", "ticket": record.admission}),
     }

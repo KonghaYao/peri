@@ -43,7 +43,7 @@ pub(in crate::host::requests) async fn close_session(
                 return Err(AcpError::new(
                     -32010,
                     "Session close incomplete: settlement is unknown",
-                ))
+                ));
             }
             CloseSettlement::Pending => {}
         }
@@ -78,26 +78,37 @@ pub(in crate::host::requests) async fn close_session(
                 return Err(AcpError::new(
                     -32010,
                     "Session close incomplete: closing intent is unconfirmed",
-                ))
+                ));
             }
         }
     }
-    let work = resources
-        .load_session_work(&peri_acp_types::session_resources::work::WorkQuery {
-            session_id: target.clone(),
-            limit: 1,
-        })
+    let control = resources
+        .load_session_control(&target)
         .await
         .map_err(resource_error)?;
-    if !work
-        .state
-        .resource_owners
-        .contains_key(&work.control.lifecycle)
-        && work
-            .state
-            .legacy_unknown
-            .keys()
-            .any(|identity| identity.starts_with("ownerMissing:"))
+    let work = crate::host::work_query::inspect(
+        resources.as_ref(),
+        &target,
+        peri_acp_types::session_resources::work::WorkSelector::RecoveryDescriptor {
+            lifecycle: control.lifecycle,
+        },
+    )
+    .await?;
+    let missing = crate::host::work_query::inspect(
+        resources.as_ref(),
+        &target,
+        peri_acp_types::session_resources::work::WorkSelector::LegacyEvidence {
+            record_id: format!("ownerMissing:{target}:{}", control.lifecycle),
+        },
+    )
+    .await?;
+    let peri_acp_types::session_resources::work::WorkPage::LegacyEvidence(evidence) = &missing.page
+    else {
+        return Err(crate::host::work_query::wrong_page());
+    };
+    if !crate::host::work_query::descriptor(&work, control.lifecycle)?
+        .is_some_and(|descriptor| descriptor.resource_owners.is_some())
+        && !evidence.is_empty()
     {
         return Err(AcpError::new(
             -32010,

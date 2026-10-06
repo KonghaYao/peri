@@ -133,12 +133,9 @@ async fn mutate(resources: &dyn SessionResources, session_id: &str, action: Work
     assert_eq!(receipt.decision, WorkDecision::Accepted, "{receipt:?}");
 }
 
-async fn load(resources: &dyn SessionResources, session_id: &str) -> WorkSnapshot {
+async fn load(resources: &dyn SessionResources, session_id: &str) -> WorkInspection {
     resources
-        .load_session_work(&WorkQuery {
-            session_id: session_id.into(),
-            limit: 10,
-        })
+        .inspect_work(&WorkQuery::new(session_id, WorkSelector::Head))
         .await
         .unwrap()
 }
@@ -245,14 +242,21 @@ impl Fixture {
         )
         .await;
         let arguments = "{}".to_owned();
+        let arguments_ref = crate::agent::stages::prepare_work_evidence(
+            resources.as_ref(),
+            &parent.thread_id(),
+            arguments.as_bytes().to_vec(),
+        )
+        .await
+        .unwrap();
         let intent = InvocationIntent {
             invocation_id: metadata.delegation_invocation_id.clone(),
             tool_call_id: "original-call".into(),
             tool_name: "subagent".into(),
-            arguments_json: arguments.clone(),
+            arguments: arguments_ref.clone(),
             arguments_digest: format!("{:x}", Sha256::digest(arguments.as_bytes())),
             effective_tool_name: "subagent".into(),
-            effective_arguments_json: arguments.clone(),
+            effective_arguments: arguments_ref.clone(),
             effective_arguments_digest: format!("{:x}", Sha256::digest(arguments.as_bytes())),
             owner_identity: "original-child-owner".into(),
             scope_id: parent.thread_id(),
@@ -266,17 +270,23 @@ impl Fixture {
             WorkAction::PrepareInvocation {
                 expected_revision: load(resources.as_ref(), &parent.thread_id())
                     .await
-                    .state
-                    .revision,
+                    .head
+                    .change_seq,
                 intent,
             },
         )
         .await;
-        let parent_work = load(resources.as_ref(), &parent.thread_id()).await;
+        let parent_effect = crate::session::work_access::effect(
+            resources.as_ref(),
+            &parent.thread_id(),
+            &metadata.delegation_invocation_id,
+        )
+        .await
+        .unwrap();
         bind_delegation_task(
             resources.as_ref(),
             &parent.thread_id(),
-            &parent_work.state.invocations[&metadata.delegation_invocation_id],
+            &parent_effect,
             &metadata.delegation_task_id,
         )
         .await
@@ -307,16 +317,21 @@ impl Fixture {
             };
             if current_delegation {
                 let parent_work = load(resources.as_ref(), &parent.thread_id()).await;
-                let mut intent = parent_work.state.invocations[&metadata.delegation_invocation_id]
-                    .intent
-                    .clone();
+                let mut intent = crate::session::work_access::effect(
+                    resources.as_ref(),
+                    &parent.thread_id(),
+                    &metadata.delegation_invocation_id,
+                )
+                .await
+                .unwrap()
+                .intent;
                 intent.invocation_id = invocation_id.into();
                 intent.tool_call_id = "current-call".into();
                 mutate(
                     resources.as_ref(),
                     &parent.thread_id(),
                     WorkAction::PrepareInvocation {
-                        expected_revision: parent_work.state.revision,
+                        expected_revision: parent_work.head.change_seq,
                         intent,
                     },
                 )
@@ -344,7 +359,11 @@ impl Fixture {
         let issued = FixtureAdmission(resources.clone())
             .admit(AdmissionRequest {
                 request_id: "cold-sdk-admission".into(),
-                snapshot: load(resources.as_ref(), &child_id).await.into(),
+                snapshot: resources
+                    .inspect_work(&WorkQuery::new(&child_id, WorkSelector::Availability))
+                    .await
+                    .unwrap()
+                    .into(),
                 existing_admission: None,
             })
             .await
@@ -436,7 +455,13 @@ async fn serve(listener: tokio::net::TcpListener) -> Value {
 
 async fn run_cold_child(current_delegation: bool) {
     let fixture = Fixture::with_delegation(true, false, false, true, current_delegation).await;
-    let parent_before = load(fixture.resources.as_ref(), &fixture.parent.thread_id()).await;
+    let original_before = crate::session::work_access::effect(
+        fixture.resources.as_ref(),
+        &fixture.parent.thread_id(),
+        &fixture.metadata.delegation_invocation_id,
+    )
+    .await
+    .unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let runtime = fixture.runtime(&format!("http://{}", listener.local_addr().unwrap()));
     let server = tokio::spawn(serve(listener));
@@ -474,9 +499,11 @@ async fn run_cold_child(current_delegation: bool) {
     assert!(matches!(result, LoopResult::Completed), "{result:?}");
     let stopped = load(fixture.resources.as_ref(), &fixture.admission.session_id).await;
     assert!(stopped.control.attempt.is_none());
-    assert!(stopped.state.admissions[&fixture.admission.admission_id]
-        .settled_receipt
-        .is_none());
+    let stopped_admission =
+        crate::session::work_access::admission(fixture.resources.as_ref(), &fixture.admission)
+            .await
+            .unwrap();
+    assert!(stopped_admission.leaving_evidence_id.is_none());
     let flush = execution
         .session
         .transcript()
@@ -512,17 +539,38 @@ async fn run_cold_child(current_delegation: bool) {
     assert!(!body.to_string().contains("root persona"));
     assert!(!body.to_string().contains("root instructions"));
     let child = load(fixture.resources.as_ref(), &fixture.admission.session_id).await;
-    assert_eq!(child.state.admissions.len(), 1);
-    assert!(child.state.admissions[&fixture.admission.admission_id]
-        .settled_receipt
-        .is_some());
+    let settled_admission =
+        crate::session::work_access::admission(fixture.resources.as_ref(), &fixture.admission)
+            .await
+            .unwrap();
+    assert!(settled_admission.leaving_evidence_id.is_some());
     assert!(child.control.attempt.is_none());
-    assert!(child.state.resource_owners.contains_key(&1));
+    let descriptor = crate::session::work_access::descriptor(
+        fixture.resources.as_ref(),
+        &fixture.admission.session_id,
+        1,
+    )
+    .await
+    .unwrap();
+    assert!(descriptor.resource_owners.is_some());
     let reopened = fixture.parent.read_only_resources().await;
     let reopened_child = load(reopened.as_ref(), &fixture.admission.session_id).await;
-    assert_eq!(reopened_child.state, child.state);
-    let reopened_metadata: ChildResumeMetadata =
-        serde_json::from_str(&reopened_child.state.child_resume_metadata[&1]).unwrap();
+    assert_eq!(reopened_child.head, child.head);
+    let reopened_descriptor = crate::session::work_access::descriptor(
+        reopened.as_ref(),
+        &fixture.admission.session_id,
+        1,
+    )
+    .await
+    .unwrap();
+    assert_eq!(reopened_descriptor, descriptor);
+    let reopened_metadata: ChildResumeMetadata = serde_json::from_str(
+        reopened_descriptor
+            .child_resume_metadata_json
+            .as_ref()
+            .unwrap(),
+    )
+    .unwrap();
     assert_eq!(
         reopened_metadata.child_session_id,
         fixture.admission.session_id
@@ -530,7 +578,10 @@ async fn run_cold_child(current_delegation: bool) {
     assert_eq!(reopened_metadata.delegation_task_id, "original-task");
     assert_eq!(reopened_metadata.authorization_ref, "original-auth");
     assert_eq!(
-        reopened_child.state.resource_owners[&1].authorization_ref,
+        reopened_descriptor
+            .resource_owners
+            .unwrap()
+            .authorization_ref,
         "original-auth"
     );
     assert_eq!(fixture.pool.manager.active_count(), 0);
@@ -554,18 +605,24 @@ async fn run_cold_child(current_delegation: bool) {
     let WorkAction::PublishTaskSettlement { binding, .. } = &terminal_command.action else {
         panic!("terminal must carry original immutable binding")
     };
+    let terminal_effect = crate::session::work_access::effect(
+        fixture.resources.as_ref(),
+        &fixture.parent.thread_id(),
+        &execution.delegation_binding.invocation_id,
+    )
+    .await
+    .unwrap();
+    assert_eq!(binding, terminal_effect.binding.as_ref().unwrap());
+    let original_after = crate::session::work_access::effect(
+        fixture.resources.as_ref(),
+        &fixture.parent.thread_id(),
+        &fixture.metadata.delegation_invocation_id,
+    )
+    .await
+    .unwrap();
+    assert_eq!(original_after, original_before);
     assert_eq!(
-        binding,
-        &parent_before.state.task_bindings[&execution.delegation_binding.invocation_id]
-    );
-    let parent_after = load(fixture.resources.as_ref(), &fixture.parent.thread_id()).await;
-    assert_eq!(parent_after.state, parent_before.state);
-    assert_eq!(
-        parent_after.state.task_bindings.len(),
-        if current_delegation { 2 } else { 1 }
-    );
-    assert_eq!(
-        parent_after.state.task_bindings[&fixture.metadata.delegation_invocation_id].owner_task_id,
+        original_after.binding.as_ref().unwrap().owner_task_id,
         "original-task"
     );
     if current_delegation {
@@ -584,17 +641,36 @@ async fn run_cold_child(current_delegation: bool) {
             .await
             .unwrap();
         assert_eq!(receipt.decision, WorkDecision::Accepted);
-        let routed = load(fixture.resources.as_ref(), &fixture.parent.thread_id()).await;
-        assert_eq!(
-            routed.state.task_bindings["original-delegation"],
-            parent_before.state.task_bindings["original-delegation"]
-        );
-        assert_eq!(
-            routed.state.invocations["original-delegation"],
-            parent_before.state.invocations["original-delegation"]
-        );
-        assert_eq!(routed.state.deliveries.len(), 1);
-        assert!(serde_json::to_string(&routed.state.deliveries)
+        let original_routed = crate::session::work_access::effect(
+            fixture.resources.as_ref(),
+            &fixture.parent.thread_id(),
+            &fixture.metadata.delegation_invocation_id,
+        )
+        .await
+        .unwrap();
+        assert_eq!(original_routed, original_before);
+        let routed = fixture
+            .resources
+            .inspect_work(&WorkQuery::new(
+                fixture.parent.thread_id(),
+                WorkSelector::Inbox,
+            ))
+            .await
+            .unwrap();
+        let WorkPage::Deliveries(deliveries) = routed.page else {
+            panic!("expected inbox page")
+        };
+        assert_eq!(deliveries.len(), 1);
+        let evidence = fixture
+            .resources
+            .read_evidence(&EvidenceQuery {
+                session_id: fixture.parent.thread_id(),
+                reference: deliveries[0].publication.event.content.content.clone(),
+            })
+            .await
+            .unwrap();
+        evidence.validate().unwrap();
+        assert!(String::from_utf8(evidence.bytes)
             .unwrap()
             .contains("current-task"));
     }
@@ -649,8 +725,8 @@ async fn assert_blocked(fixture: Fixture, runtime: ColdChildRuntime, expected: &
     assert_eq!(
         load(fixture.resources.as_ref(), &fixture.admission.session_id)
             .await
-            .state,
-        before.state
+            .head,
+        before.head
     );
     assert!(fixture.pool.manager.list_tasks().is_empty());
 }
@@ -692,17 +768,30 @@ async fn missing_resume_metadata_blocks_cold_child_before_model_or_task_creation
 #[tokio::test]
 async fn missing_current_work_delegation_blocks_without_metadata_fallback() {
     let fixture = Fixture::with_delegation(true, false, false, false, false).await;
-    let child = load(fixture.resources.as_ref(), &fixture.admission.session_id).await;
-    assert!(child.state.child_resume_metadata.contains_key(&1));
-    assert!(!child
-        .state
-        .work_delegations
-        .contains_key(&fixture.admission.work_id));
-    let parent = load(fixture.resources.as_ref(), &fixture.parent.thread_id()).await;
-    assert!(parent
-        .state
-        .task_bindings
-        .contains_key("original-delegation"));
+    let descriptor = crate::session::work_access::descriptor(
+        fixture.resources.as_ref(),
+        &fixture.admission.session_id,
+        1,
+    )
+    .await
+    .unwrap();
+    assert!(descriptor.child_resume_metadata_json.is_some());
+    let processing = crate::session::work_access::processing(
+        fixture.resources.as_ref(),
+        &fixture.admission.session_id,
+        &fixture.admission.work_id,
+    )
+    .await
+    .unwrap();
+    assert!(processing.delegation.is_none());
+    let parent_effect = crate::session::work_access::effect(
+        fixture.resources.as_ref(),
+        &fixture.parent.thread_id(),
+        "original-delegation",
+    )
+    .await
+    .unwrap();
+    assert!(parent_effect.binding.is_some());
     let runtime = fixture.runtime("http://127.0.0.1:1");
     assert_blocked(
         fixture,

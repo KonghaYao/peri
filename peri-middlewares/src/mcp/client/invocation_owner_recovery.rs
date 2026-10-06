@@ -47,13 +47,6 @@ impl McpClientPool {
                 .resources(session_id, lifecycle)
                 .ok_or("Unroutable: session durable resources unavailable")?
         };
-        let mut snapshot = resources
-            .load_session_work(&WorkQuery {
-                session_id: session_id.into(),
-                limit: 1,
-            })
-            .await
-            .map_err(|error| error.to_string())?;
         let meta = self
             .task_scope_meta_for(server, session_id)
             .ok_or("Unroutable: trusted owner scope unavailable")?;
@@ -88,12 +81,41 @@ impl McpClientPool {
             .get("invocationId")
             .and_then(serde_json::Value::as_str)
             .ok_or("Unroutable: immutable invocation ID missing")?;
-        let record = snapshot
-            .state
-            .invocations
-            .get(invocation_id)
+        let query = WorkQuery {
+            session_id: session_id.into(),
+            selector: WorkSelector::Effect {
+                invocation_id: invocation_id.into(),
+            },
+            limit: 1,
+            cursor: None,
+        };
+        let mut snapshot = resources
+            .inspect_work(&query)
+            .await
+            .map_err(|error| error.to_string())?;
+        let WorkPage::Effects(records) = &snapshot.page else {
+            return Err("Unroutable: exact invocation query returned wrong page".into());
+        };
+        let record = records
+            .first()
             .ok_or("OutcomeUnknown: original invocation intent unavailable")?;
+        if record.invocation_id != invocation_id {
+            return Err("Unroutable: invocation identity conflicts".into());
+        }
         let intent = &record.intent;
+        let arguments = resources
+            .read_evidence(&EvidenceQuery {
+                session_id: session_id.into(),
+                reference: intent.effective_arguments.clone(),
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+        arguments.validate().map_err(|error| error.to_string())?;
+        if arguments.reference != intent.effective_arguments {
+            return Err("Unroutable: invocation argument reference conflicts".into());
+        }
+        let arguments_json =
+            String::from_utf8(arguments.bytes).map_err(|error| error.to_string())?;
         if intent.owner_identity != catalog.owner_identity
             || intent.scope_id != session_id
             || intent.recovery_locator != server
@@ -120,7 +142,7 @@ impl McpClientPool {
             || evidence
                 .get("argumentsJson")
                 .and_then(serde_json::Value::as_str)
-                != Some(intent.effective_arguments_json.as_str())
+                != Some(arguments_json.as_str())
             || evidence.get("toolName").and_then(serde_json::Value::as_str)
                 != Some(intent.effective_tool_name.as_str())
             || evidence
@@ -139,7 +161,7 @@ impl McpClientPool {
             recovery_locator: intent.recovery_locator.clone(),
             authorization_ref: intent.authorization_ref.clone(),
         };
-        if !snapshot.state.task_bindings.contains_key(invocation_id) {
+        if record.binding.is_none() {
             let mut acknowledged = false;
             for _ in 0..3 {
                 let mut command = WorkCommand {
@@ -147,7 +169,7 @@ impl McpClientPool {
                     recipient_lifecycle: binding.recipient_lifecycle,
                     mutation_id: "owner-task-recovery".into(),
                     action: WorkAction::ReconcileTaskBinding {
-                        expected_revision: snapshot.state.revision,
+                        expected_revision: snapshot.head.change_seq,
                         binding: binding.clone(),
                     },
                 };
@@ -164,10 +186,7 @@ impl McpClientPool {
                         WorkRejection::StaleRevision,
                     )) => {
                         snapshot = resources
-                            .load_session_work(&WorkQuery {
-                                session_id: session_id.into(),
-                                limit: 1,
-                            })
+                            .inspect_work(&query)
                             .await
                             .map_err(|error| error.to_string())?;
                     }
@@ -178,10 +197,7 @@ impl McpClientPool {
                 return Err("Incomplete: task binding ACK unavailable".into());
             }
             snapshot = resources
-                .load_session_work(&WorkQuery {
-                    session_id: session_id.into(),
-                    limit: 1,
-                })
+                .inspect_work(&query)
                 .await
                 .map_err(|error| error.to_string())?;
         }

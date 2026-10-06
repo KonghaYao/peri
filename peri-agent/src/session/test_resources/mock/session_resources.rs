@@ -28,44 +28,19 @@ fn unsupported(behavior: &str) -> SessionResourceError {
 
 #[async_trait]
 impl SessionResources for MockSessionResources {
-    async fn load_work_availability(
-        &self,
-        id: &ThreadId,
-    ) -> SessionResourceResult<peri_acp_types::session_resources::work::WorkAvailability> {
-        self.durable_backend(id)
-            .await
-            .load_work_availability(id)
-            .await
-    }
-    async fn load_work_delivery(
-        &self,
-        query: &peri_acp_types::session_resources::work::WorkDeliveryQuery,
-    ) -> SessionResourceResult<Option<peri_acp_types::session_resources::work::DeliveryRecord>>
-    {
-        self.durable_backend(&query.session_id)
-            .await
-            .load_work_delivery(query)
-            .await
-    }
-    async fn load_work_command(
-        &self,
-        query: &peri_acp_types::session_resources::work::WorkCommandQuery,
-    ) -> SessionResourceResult<Option<peri_acp_types::session_resources::work::OwnedWorkCommand>>
-    {
-        self.durable_backend(&query.session_id)
-            .await
-            .load_work_command(query)
-            .await
-    }
-    async fn load_session_work(
-        &self,
-        query: &peri_acp_types::session_resources::work::WorkQuery,
-    ) -> SessionResourceResult<peri_acp_types::session_resources::work::WorkSnapshot> {
-        self.durable_backend(&query.session_id)
-            .await
-            .load_session_work(query)
-            .await
-    }
+async fn inspect_work(&self, query: &peri_acp_types::session_resources::work::WorkQuery)
+    -> SessionResourceResult<peri_acp_types::session_resources::work::WorkInspection> {
+    self.durable_backend(&query.session_id).await.inspect_work(query).await
+}
+async fn read_evidence(&self, query: &peri_acp_types::session_resources::work::EvidenceQuery)
+    -> SessionResourceResult<peri_acp_types::session_resources::work::EvidenceRecord> {
+    self.durable_backend(&query.session_id).await.read_evidence(query).await
+}
+async fn prepare_evidence(&self, evidence: &peri_acp_types::session_resources::work::EvidenceWrite)
+    -> SessionResourceResult<peri_acp_types::session_resources::work::PayloadRef> {
+    self.ensure_writable()?;
+    self.durable_backend(&evidence.session_id).await.prepare_evidence(evidence).await
+}
     async fn apply_work_mutation(
         &self,
         command: &peri_acp_types::session_resources::work::WorkCommand,

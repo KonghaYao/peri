@@ -1,6 +1,6 @@
 use peri_acp_types::session_resources::work::{
-    WorkAction, WorkAdmission, WorkCommand, WorkCommandQuery, WorkDecision, WorkQuery, WorkReceipt,
-    WorkRejection, WorkResolution,
+    WorkAction, WorkAdmission, WorkCommand, WorkDecision, WorkQuery, WorkReceipt, WorkRejection,
+    WorkResolution, WorkSelector,
 };
 use peri_acp_types::session_resources::{MutationOutcome, SessionResources};
 
@@ -13,18 +13,18 @@ pub(super) async fn persist(
 ) -> Result<(), AcpError> {
     for _ in 0..3 {
         let snapshot = resources
-            .load_session_work(&WorkQuery {
+            .inspect_work(&WorkQuery {
                 session_id: admission.session_id.clone(),
+                selector: WorkSelector::TerminalCommand {
+                    admission_id: admission.admission_id.clone(),
+                },
                 limit: 1,
+                cursor: None,
             })
             .await
             .map_err(super::workspace::resource_error)?;
-        if let Some(existing) = snapshot
-            .state
-            .terminal_obligations
-            .get(&admission.admission_id)
-        {
-            return if existing == &parent_command {
+        if let Some(existing) = super::work_query::terminal(&snapshot, &admission.admission_id)? {
+            return if existing.command.as_ref() == &parent_command {
                 Ok(())
             } else {
                 Err(incomplete("terminal obligation identity conflict"))
@@ -35,7 +35,7 @@ pub(super) async fn persist(
             recipient_lifecycle: admission.lifecycle,
             mutation_id: "child-terminal-obligation".into(),
             action: WorkAction::BindTerminalObligation {
-                expected_revision: snapshot.state.revision,
+                expected_revision: snapshot.head.change_seq,
                 admission_id: admission.admission_id.clone(),
                 command: Box::new(parent_command.clone()),
             },
@@ -51,7 +51,7 @@ pub(super) async fn persist(
                 reason: WorkRejection::StaleRevision,
             } => continue,
             WorkDecision::Rejected { .. } => {
-                return Err(incomplete("terminal obligation was rejected"))
+                return Err(incomplete("terminal obligation was rejected"));
             }
         }
     }
@@ -64,81 +64,54 @@ pub(super) async fn reconcile(
 ) -> Result<bool, AcpError> {
     let query = WorkQuery {
         session_id: admission.session_id.clone(),
+        selector: WorkSelector::TerminalCommand {
+            admission_id: admission.admission_id.clone(),
+        },
         limit: 1,
+        cursor: None,
     };
-    let mut child = resources
-        .load_session_work(&query)
+    let child = super::work_recovery::resolve_pending(resources, &query)
         .await
         .map_err(super::workspace::resource_error)?;
-    for command in &child.pending_commands {
-        if matches!(&command.action, WorkAction::BindTerminalObligation { admission_id, .. } if admission_id == &admission.admission_id)
-        {
-            let receipt = match resources
-                .resolve_work_mutation(command)
-                .await
-                .map_err(super::workspace::resource_error)?
-            {
-                WorkResolution::Applied { receipt } => receipt,
-                WorkResolution::NotApplied => commit(resources, command).await?,
-                WorkResolution::Unknown => {
-                    return Err(incomplete(
-                        "original child terminal obligation remains unknown",
-                    ))
-                }
-            };
-            if receipt.decision != WorkDecision::Accepted {
-                return Err(incomplete(
-                    "original child terminal obligation was rejected",
-                ));
-            }
-        }
-    }
-    child = resources
-        .load_session_work(&query)
-        .await
-        .map_err(super::workspace::resource_error)?;
-    let Some(command) = child
-        .state
-        .terminal_obligations
-        .get(&admission.admission_id)
-    else {
+    let Some(obligation) = super::work_query::terminal(&child, &admission.admission_id)? else {
         return Ok(false);
     };
-    let record = child
-        .state
-        .admissions
-        .get(&admission.admission_id)
+    let command = obligation.command.as_ref();
+    let admitted = super::work_query::inspect(
+        resources,
+        &admission.session_id,
+        WorkSelector::Admission {
+            admission_id: admission.admission_id.clone(),
+        },
+    )
+    .await?;
+    let record = super::work_query::admission(&admitted, &admission.admission_id)?
         .ok_or_else(|| incomplete("terminal obligation has no admission"))?;
     if record.admission != *admission || child.control.attempt.is_some() {
         return Err(incomplete(
             "terminal obligation has no exact stopped execution proof",
         ));
     }
-    let owned = resources
-        .load_work_command(&WorkCommandQuery {
-            session_id: command.session_id.clone(),
-            mutation_id: command.mutation_id.clone(),
-        })
-        .await
-        .map_err(super::workspace::resource_error)?;
+    let owned =
+        super::work_query::command(resources, &command.session_id, &command.mutation_id).await?;
     let receipt = match owned {
         Some(owned) if owned.command != *command => {
-            return Err(incomplete("parent terminal journal identity conflict"))
+            return Err(incomplete("parent terminal journal identity conflict"));
         }
         Some(owned) => match owned.resolution {
             Some(WorkResolution::Applied { receipt }) => receipt,
-            Some(WorkResolution::NotApplied) => commit(resources, command).await?,
+            Some(WorkResolution::NotApplied) => return Err(incomplete("original parent terminal command was sealed not applied")),
             _ => match resources
                 .resolve_work_mutation(command)
                 .await
                 .map_err(super::workspace::resource_error)?
             {
                 WorkResolution::Applied { receipt } => receipt,
-                WorkResolution::NotApplied => commit(resources, command).await?,
+                WorkResolution::NotApplied => return Err(incomplete("original parent terminal command was sealed not applied")),
                 WorkResolution::Unknown => {
                     return Err(incomplete(
                         "original parent terminal command remains unknown",
-                    ))
+                    ));
                 }
             },
         },
@@ -161,16 +134,18 @@ async fn acknowledge(
 ) -> Result<(), AcpError> {
     for _ in 0..3 {
         let child = resources
-            .load_session_work(&WorkQuery {
+            .inspect_work(&WorkQuery {
                 session_id: admission.session_id.clone(),
+                selector: WorkSelector::TerminalCommand {
+                    admission_id: admission.admission_id.clone(),
+                },
                 limit: 1,
+                cursor: None,
             })
             .await
             .map_err(super::workspace::resource_error)?;
-        if let Some(existing) = child
-            .state
-            .terminal_acknowledgements
-            .get(&admission.admission_id)
+        if let Some(existing) = super::work_query::terminal(&child, &admission.admission_id)?
+            .and_then(|obligation| obligation.acknowledgement.as_ref())
         {
             return if existing == parent_receipt {
                 Ok(())
@@ -183,7 +158,7 @@ async fn acknowledge(
             recipient_lifecycle: admission.lifecycle,
             mutation_id: "child-terminal-ack".into(),
             action: WorkAction::AcknowledgeTerminalObligation {
-                expected_revision: child.state.revision,
+                expected_revision: child.head.change_seq,
                 admission_id: admission.admission_id.clone(),
                 receipt: parent_receipt.clone(),
             },
@@ -199,7 +174,7 @@ async fn acknowledge(
                 reason: WorkRejection::StaleRevision,
             } => continue,
             WorkDecision::Rejected { .. } => {
-                return Err(incomplete("parent terminal acknowledgement was rejected"))
+                return Err(incomplete("parent terminal acknowledgement was rejected"));
             }
         }
     }

@@ -5,16 +5,16 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
 use crate::transport::{
+    RequestTransport,
     router::RequestRouter,
     types::{AcpError, IncomingMessage, RequestId},
-    RequestTransport,
 };
 
 const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
@@ -161,13 +161,17 @@ impl JsonlSdkDispatcher {
         let dispatcher = Self { sender, router };
         let ready = tokio::time::timeout(
             Duration::from_secs(10),
-            dispatcher.send_request("peri/execution/ready", json!({})),
+            dispatcher.send_request(
+                "peri/execution/ready",
+                json!({"protocolVersion": super::execution_admission::EXECUTION_PROTOCOL_VERSION}),
+            ),
         )
         .await
         .map_err(|_| anyhow::anyhow!("SDK execution dispatcher readiness timeout"))??;
         let readiness: Readiness = serde_json::from_value(ready)?;
         anyhow::ensure!(
-            readiness.protocol_version == 1 && readiness.durability == "durable",
+            readiness.protocol_version == super::execution_admission::EXECUTION_PROTOCOL_VERSION
+                && readiness.durability == "durable",
             "SDK persistent execution dispatcher capability required"
         );
         Ok(dispatcher)

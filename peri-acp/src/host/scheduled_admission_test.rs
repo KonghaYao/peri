@@ -115,9 +115,11 @@ async fn registered_cron_fixture(
     );
     let port = ReverseExecutionAdmission::new(dispatcher.clone());
     let snapshot = resources
-        .load_session_work(&WorkQuery {
+        .inspect_work(&WorkQuery {
             session_id: session_id.clone(),
-            limit: 1,
+            limit: 64,
+            selector: WorkSelector::Availability,
+            cursor: None,
         })
         .await
         .unwrap();
@@ -161,6 +163,7 @@ async fn registered_cron_fixture(
 async fn real_sdk_durable_cron_rejection_abandons_exact_work_after_started_ack_with_broker_fixture()
 {
     let (_directory, resources, _dispatcher, admission) = registered_cron_fixture(false).await;
+    let original_deliveries = deliveries(resources.as_ref(), &admission.session_id, None).await;
     let started = Arc::new(AtomicBool::new(false));
     let broker = Arc::new(StartedLeaseBrokerFixture {
         started: started.clone(),
@@ -177,30 +180,30 @@ async fn real_sdk_durable_cron_rejection_abandons_exact_work_after_started_ack_w
         SharedPermissionMode::new(PermissionMode::Default),
         broker.clone(),
     );
-    assert!(callback(admission.clone())
-        .await
-        .unwrap_err()
-        .contains("explicitly abandoned"));
+    assert!(
+        callback(admission.clone())
+            .await
+            .unwrap_err()
+            .contains("explicitly abandoned")
+    );
     let snapshot = resources
-        .load_session_work(&WorkQuery {
+        .inspect_work(&WorkQuery {
             session_id: admission.session_id.clone(),
-            limit: 1,
+            limit: 64,
+            selector: WorkSelector::Availability,
+            cursor: None,
         })
         .await
         .unwrap();
-    assert!(snapshot.state.works.is_empty());
-    assert!(snapshot.state.batches.is_empty());
-    assert!(snapshot
-        .state
-        .obligations
-        .values()
-        .all(|obligation| obligation.status
-            == peri_acp_types::session_resources::work::ObligationStatus::Abandoned));
-    assert!(snapshot
-        .state
-        .budgets
-        .values()
-        .all(|budget| budget.reason_requests == 0 && budget.dispatches == 0));
+    assert!(snapshot.head.current_processing_id.is_none());
+    let deliveries = reread_deliveries(
+        resources.as_ref(),
+        &admission.session_id,
+        &original_deliveries,
+    )
+    .await;
+    assert!(deliveries.iter().all(|delivery| delivery.obligation
+        == peri_acp_types::session_resources::work::ObligationStatus::Abandoned));
     assert_eq!(broker.requests.load(Ordering::SeqCst), 1);
 }
 
@@ -227,14 +230,16 @@ async fn real_sdk_durable_cron_preserves_existing_approval_policy_with_broker_fi
         .await
         .unwrap();
         let snapshot = resources
-            .load_session_work(&WorkQuery {
+            .inspect_work(&WorkQuery {
                 session_id: admission.session_id,
                 limit: 1,
+                selector: WorkSelector::Availability,
+                cursor: None,
             })
             .await
             .unwrap();
         assert!(
-            snapshot.state.works.is_empty(),
+            snapshot.head.current_processing_id.is_none(),
             "approval must not fake processing or Reason"
         );
         assert_eq!(
@@ -254,30 +259,35 @@ async fn real_sdk_durable_cron_cannot_prompt_without_started_ack_with_broker_fix
     });
     let ack: SdkRunStartedFn =
         Arc::new(|_| Box::pin(async { Err("RunStarted ACK unknown".into()) }));
-    assert!(after_run_started(
-        ack,
-        resources.clone(),
-        SharedPermissionMode::new(PermissionMode::Default),
-        broker.clone()
-    )(admission.clone())
-    .await
-    .is_err());
+    assert!(
+        after_run_started(
+            ack,
+            resources.clone(),
+            SharedPermissionMode::new(PermissionMode::Default),
+            broker.clone()
+        )(admission.clone())
+        .await
+        .is_err()
+    );
     assert_eq!(broker.requests.load(Ordering::SeqCst), 0);
     let snapshot = resources
-        .load_session_work(&WorkQuery {
+        .inspect_work(&WorkQuery {
             session_id: admission.session_id,
-            limit: 1,
+            limit: 64,
+            selector: WorkSelector::Availability,
+            cursor: None,
         })
         .await
         .unwrap();
-    assert!(snapshot.state.works.is_empty());
-    assert!(snapshot.state.has_pending_work());
+    assert!(snapshot.head.current_processing_id.is_none());
+    assert!(snapshot.head.has_pending_work());
 }
 
 #[tokio::test]
 async fn real_sdk_mixed_cron_rejection_preserves_earlier_user_delivery_with_broker_fixture() {
     use peri_acp_types::session_resources::work::ObligationStatus;
     let (_directory, resources, _dispatcher, admission) = registered_cron_fixture(true).await;
+    let original_deliveries = deliveries(resources.as_ref(), &admission.session_id, None).await;
     let started = Arc::new(AtomicBool::new(false));
     let broker = Arc::new(StartedLeaseBrokerFixture {
         started: started.clone(),
@@ -288,76 +298,74 @@ async fn real_sdk_mixed_cron_rejection_preserves_earlier_user_delivery_with_brok
         started.store(true, Ordering::SeqCst);
         Box::pin(async { Ok(()) })
     });
-    assert!(after_run_started(
-        ack,
-        resources.clone(),
-        SharedPermissionMode::new(PermissionMode::Default),
-        broker
-    )(admission.clone())
-    .await
-    .unwrap_err()
-    .contains("explicitly abandoned"));
+    assert!(
+        after_run_started(
+            ack,
+            resources.clone(),
+            SharedPermissionMode::new(PermissionMode::Default),
+            broker
+        )(admission.clone())
+        .await
+        .unwrap_err()
+        .contains("explicitly abandoned")
+    );
     let snapshot = resources
-        .load_session_work(&WorkQuery {
+        .inspect_work(&WorkQuery {
             session_id: admission.session_id,
-            limit: 1,
+            limit: 64,
+            selector: WorkSelector::Availability,
+            cursor: None,
         })
         .await
         .unwrap();
-    let user = snapshot
-        .state
-        .deliveries
-        .iter()
-        .find(|(_, delivery)| {
-            delivery
-                .publication
-                .event
-                .content
-                .serialized
-                .contains("unrelated durable user request")
-        })
-        .unwrap();
-    let cron = snapshot
-        .state
-        .deliveries
-        .iter()
-        .find(|(_, delivery)| {
-            delivery
-                .publication
-                .event
-                .content
-                .serialized
-                .contains("scheduled-task-fixture")
-        })
-        .unwrap();
+    let rows = reread_deliveries(
+        resources.as_ref(),
+        &snapshot.session_id,
+        &original_deliveries,
+    )
+    .await;
+    let mut user = None;
+    let mut cron = None;
+    for delivery in &rows {
+        let evidence = resources
+            .read_evidence(&EvidenceQuery {
+                session_id: snapshot.session_id.clone(),
+                reference: delivery.publication.event.content.content.clone(),
+            })
+            .await
+            .unwrap();
+        evidence.validate().unwrap();
+        let serialized = String::from_utf8(evidence.bytes).unwrap();
+        if serialized.contains("unrelated durable user request") {
+            user = Some(delivery);
+        }
+        if serialized.contains("scheduled-task-fixture") {
+            cron = Some(delivery);
+        }
+    }
+    let user = user.unwrap();
+    let cron = cron.unwrap();
+    assert!(user.admission_sequence < cron.admission_sequence);
+    assert_eq!(user.obligation, ObligationStatus::Pending);
+    assert!(user.processing_id.is_none());
+    assert_eq!(cron.obligation, ObligationStatus::Abandoned);
+    assert!(snapshot.head.current_processing_id.is_none());
     assert!(
-        user.1.admission_sequence < cron.1.admission_sequence,
-        "must cover selected non-prefix rejection"
+        crate::host::work_query::availability(&snapshot)
+            .unwrap()
+            .candidates
+            .iter()
+            .any(|candidate| candidate.delivery_ids == vec![user.delivery_id.clone()])
     );
-    assert_eq!(
-        snapshot.state.obligations[user.0].status,
-        ObligationStatus::Pending
-    );
-    assert!(user.1.batch_id.is_none());
-    assert_eq!(
-        snapshot.state.obligations[cron.0].status,
-        ObligationStatus::Abandoned
-    );
-    assert!(snapshot.state.works.is_empty());
-    assert!(snapshot.state.batches.is_empty());
-    assert!(!cron.1.projected);
-    assert!(snapshot
-        .candidates
-        .iter()
-        .any(|candidate| candidate.delivery_ids == vec![user.0.clone()]));
 }
 
 async fn claim_reason_ready_fixture(
     resources: &dyn SessionResources,
     admission: &WorkAdmission,
-) -> WorkSnapshot {
+) -> WorkInspection {
     let snapshot = snapshot_for(resources, admission).await.unwrap();
-    let candidate = snapshot
+    let candidate = crate::host::work_query::availability(&snapshot)
+        .unwrap()
         .candidates
         .iter()
         .find(|candidate| candidate.work_id == admission.work_id)
@@ -370,7 +378,7 @@ async fn claim_reason_ready_fixture(
             mutation_id: format!("restored-claim-fixture:{}", admission.admission_id),
             action: WorkAction::ClaimBatch {
                 guard: WorkGuard {
-                    expected_revision: snapshot.state.revision,
+                    expected_revision: snapshot.head.change_seq,
                     expected_control_generation: admission.control_generation,
                     execution: admission.execution.clone(),
                 },
@@ -388,6 +396,12 @@ async fn claim_reason_ready_fixture(
 async fn real_store_restored_reason_ready_reapproval_keeps_original_delivery_with_broker_fixture() {
     let (_directory, resources, _dispatcher, admission) = registered_cron_fixture(false).await;
     let original = claim_reason_ready_fixture(resources.as_ref(), &admission).await;
+    let original_deliveries = deliveries(
+        resources.as_ref(),
+        &admission.session_id,
+        Some(&admission.work_id),
+    )
+    .await;
     let started = Arc::new(AtomicBool::new(false));
     let broker = Arc::new(StartedLeaseBrokerFixture {
         started: started.clone(),
@@ -408,18 +422,33 @@ async fn real_store_restored_reason_ready_reapproval_keeps_original_delivery_wit
     callback(admission.clone()).await.unwrap();
     let restored = snapshot_for(resources.as_ref(), &admission).await.unwrap();
     assert_eq!(
-        restored.state, original.state,
+        restored.head, original.head,
         "reapproval cannot manufacture a new event, delivery or work generation"
     );
     assert_eq!(restored.control, original.control);
+    assert_eq!(
+        deliveries(
+            resources.as_ref(),
+            &admission.session_id,
+            Some(&admission.work_id)
+        )
+        .await,
+        original_deliveries
+    );
     assert_eq!(broker.requests.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]
-async fn real_store_claimed_mixed_cron_rejection_blocks_without_abandoning_user_with_broker_fixture(
-) {
+async fn real_store_claimed_mixed_cron_rejection_blocks_without_abandoning_user_with_broker_fixture()
+ {
     let (_directory, resources, _dispatcher, admission) = registered_cron_fixture(true).await;
-    let original = claim_reason_ready_fixture(resources.as_ref(), &admission).await;
+    claim_reason_ready_fixture(resources.as_ref(), &admission).await;
+    let original_deliveries = deliveries(
+        resources.as_ref(),
+        &admission.session_id,
+        Some(&admission.work_id),
+    )
+    .await;
     let started = Arc::new(AtomicBool::new(false));
     let broker = Arc::new(StartedLeaseBrokerFixture {
         started: started.clone(),
@@ -430,28 +459,84 @@ async fn real_store_claimed_mixed_cron_rejection_blocks_without_abandoning_user_
         started.store(true, Ordering::SeqCst);
         Box::pin(async { Ok(()) })
     });
-    assert!(after_run_started(
-        ack,
-        resources.clone(),
-        SharedPermissionMode::new(PermissionMode::Default),
-        broker
-    )(admission.clone())
-    .await
-    .unwrap_err()
-    .contains("durably blocked"));
+    assert!(
+        after_run_started(
+            ack,
+            resources.clone(),
+            SharedPermissionMode::new(PermissionMode::Default),
+            broker
+        )(admission.clone())
+        .await
+        .unwrap_err()
+        .contains("durably blocked")
+    );
     let snapshot = resources
-        .load_session_work(&WorkQuery {
+        .inspect_work(&WorkQuery {
             session_id: admission.session_id.clone(),
-            limit: 1,
+            limit: 64,
+            selector: WorkSelector::Availability,
+            cursor: None,
         })
         .await
         .unwrap();
     assert_eq!(
-        snapshot.state.works[&admission.work_id].stage,
+        crate::host::work_query::test_processing(
+            resources.as_ref(),
+            &admission.session_id,
+            &admission.work_id
+        )
+        .await
+        .stage,
         WorkStage::Blocked
     );
-    assert_eq!(snapshot.state.obligations, original.state.obligations);
-    assert_eq!(snapshot.state.deliveries, original.state.deliveries);
-    assert_eq!(snapshot.state.batches, original.state.batches);
-    assert!(snapshot.blocked);
+    assert_eq!(
+        deliveries(
+            resources.as_ref(),
+            &admission.session_id,
+            Some(&admission.work_id)
+        )
+        .await,
+        original_deliveries
+    );
+    assert!(
+        crate::host::work_query::availability(&snapshot)
+            .unwrap()
+            .blocked
+    );
+}
+
+async fn deliveries(
+    resources: &dyn SessionResources,
+    session_id: &str,
+    processing_id: Option<&str>,
+) -> Vec<Delivery> {
+    let selector = processing_id.map_or(WorkSelector::Inbox, |identity| {
+        WorkSelector::ProcessingDeliveries {
+            processing_id: identity.into(),
+        }
+    });
+    let inspection = resources
+        .inspect_work(&WorkQuery::new(session_id, selector))
+        .await
+        .unwrap();
+    let WorkPage::Deliveries(rows) = inspection.page else {
+        panic!("expected deliveries")
+    };
+    assert!(inspection.next_cursor.is_none());
+    rows
+}
+
+async fn reread_deliveries(
+    resources: &dyn SessionResources,
+    session_id: &str,
+    original: &[Delivery],
+) -> Vec<Delivery> {
+    let mut rows = Vec::new();
+    for delivery in original {
+        rows.push(
+            crate::host::work_query::test_delivery(resources, session_id, &delivery.delivery_id)
+                .await,
+        );
+    }
+    rows
 }

@@ -1,4 +1,5 @@
 use super::*;
+use peri_acp_types::store::serialize_persisted_payload;
 use peri_acp_types::workspace::{ScopedThreadQuery, ThreadScope};
 use sqlx::{Connection, SqliteConnection};
 

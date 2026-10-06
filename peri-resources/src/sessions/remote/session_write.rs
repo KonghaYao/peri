@@ -248,7 +248,7 @@ impl RemoteSessionData {
             .unwrap_or_default();
         statements.extend(session_sql::insert_session_statements(&insert)?);
         for payload in &fork.payloads {
-            statements.push(session_sql::insert_message_statement(
+            statements.extend(session_sql::insert_message_statement(
                 &fork.target.thread_id,
                 payload,
                 fork.flags.get(&payload.id()),
@@ -385,6 +385,7 @@ impl RemoteSessionData {
         effects: Vec<StatementSpec>,
         thread: &ThreadId,
     ) -> SessionResourceResult<Vec<u64>> {
+        super::session_work::validate_budget(&effects)?;
         let identity = mint_identity(behavior, thread, inputs);
         let store = self.store().await?;
         let (outcome, counts) = store

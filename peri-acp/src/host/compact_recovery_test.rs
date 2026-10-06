@@ -1,7 +1,7 @@
 //! Compact 提交后跨 turn 的恢复回归；复用生产 executor/host 收尾与 SQLite。
 
 use super::*;
-use crate::host::{prompt::finish_prompt_turn, SessionState, SharedSessions};
+use crate::host::{SessionState, SharedSessions, prompt::finish_prompt_turn};
 use peri_acp_types::{
     messages::MessageId,
     session_resources::{
@@ -74,19 +74,25 @@ struct RecoveryStore {
 
 #[async_trait]
 impl SessionResources for RecoveryStore {
-    async fn load_work_command(
-        &self,
-        query: &peri_acp_types::session_resources::work::WorkCommandQuery,
-    ) -> SessionResourceResult<Option<peri_acp_types::session_resources::work::OwnedWorkCommand>>
-    {
-        self.inner.load_work_command(query).await
-    }
-
-    async fn load_session_work(
+    async fn inspect_work(
         &self,
         query: &peri_acp_types::session_resources::work::WorkQuery,
-    ) -> SessionResourceResult<peri_acp_types::session_resources::work::WorkSnapshot> {
-        self.inner.load_session_work(query).await
+    ) -> SessionResourceResult<peri_acp_types::session_resources::work::WorkInspection> {
+        self.inner.inspect_work(query).await
+    }
+
+    async fn prepare_evidence(
+        &self,
+        write: &peri_acp_types::session_resources::work::EvidenceWrite,
+    ) -> SessionResourceResult<peri_acp_types::session_resources::work::PayloadRef> {
+        self.inner.prepare_evidence(write).await
+    }
+
+    async fn read_evidence(
+        &self,
+        query: &peri_acp_types::session_resources::work::EvidenceQuery,
+    ) -> SessionResourceResult<peri_acp_types::session_resources::work::EvidenceRecord> {
+        self.inner.read_evidence(query).await
     }
 
     async fn apply_work_mutation(

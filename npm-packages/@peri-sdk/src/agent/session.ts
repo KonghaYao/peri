@@ -2,7 +2,7 @@ import type { Agent } from "./agent";
 import { SendReceipt } from "./send-receipt";
 import type { JsonRpcNotification, Transport } from "../transport/types";
 import { SessionExecution } from "../execution/session-execution";
-import { ExecutionDataLossError } from "../execution/types";
+import { ExecutionDataLossError, EXECUTION_PROTOCOL_VERSION } from "../execution/types";
 import type { ActivationSource } from "../execution/types";
 import type { AdmissionResult } from "../execution/coordinator";
 import type { SessionDocs } from "../state/session-docs";
@@ -99,7 +99,12 @@ export class Session {
             let replayTurnPending = false;
             this.unsubscribe = transport.subscribe((event) => {
                 if (event.method === "session/work/available") {
-                    const sessionId = (event.params as { sessionId?: string } | undefined)?.sessionId;
+                    const notice = event.params as { sessionId?: string; executionProtocol?: number } | undefined;
+                    if (notice?.executionProtocol !== EXECUTION_PROTOCOL_VERSION) {
+                        console.error("Unsupported Peri work activation protocol");
+                        return;
+                    }
+                    const sessionId = notice.sessionId;
                     if (sessionId && sessionId === this.sessionId) void this.ensureProcessing("notification").catch((error) => {
                         console.error("SDK work admission failed", error);
                     });
@@ -143,12 +148,12 @@ export class Session {
                 this.acceptDeliveryEvent(event);
                 this.notifications.push(event);
             });
-            await transport.request("initialize", {
+            const initialized = await transport.request<{ agentCapabilities?: { _meta?: Record<string, unknown> } }>("initialize", {
                 protocolVersion: 1,
                 clientCapabilities: {
                     _meta: {
                         "peri.userInputQueue": true,
-                        "peri.executionProtocol": 1,
+                        "peri.executionProtocol": EXECUTION_PROTOCOL_VERSION,
                         "peri.agentEvent": true,
                         "peri.sessionWorkspaceV1": true,
                         "peri.agentEventDone": true,
@@ -159,6 +164,8 @@ export class Session {
                     },
                 },
             });
+            if (initialized.agentCapabilities?._meta?.["peri.executionProtocol"] !== EXECUTION_PROTOCOL_VERSION)
+                throw new TypeError("Peri execution protocol version 2 capability is required");
             const mcpServers = this.agent.mcpServers();
             const params = {
                 cwd: path,

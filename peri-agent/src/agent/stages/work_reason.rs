@@ -5,7 +5,7 @@ use peri_acp_types::session_resources::work::*;
 use peri_acp_types::store::PersistedPayload;
 use sha2::{Digest, Sha256};
 
-use super::work_boundary::{persisted_projection, WorkBoundary};
+use super::work_boundary::WorkBoundary;
 use super::work_pipeline::{request_checkpoint, WorkSession};
 use super::work_recovery::{recover_work, RecoveredStage};
 use super::StageContext;
@@ -25,6 +25,7 @@ pub(crate) async fn prepare(
     };
     let prepared = ctx.runtime.llm.prepare_reasoning(messages, tools)?;
     let checkpoint = request_checkpoint(
+        &session,
         &serde_json::json!({
             "request": prepared.checkpoint(),
             "authorizationRef": session.admission.admission_id,
@@ -32,16 +33,19 @@ pub(crate) async fn prepare(
         }),
         ctx.runtime.llm.model_name(),
         session.admission.admission_id.clone(),
-    )?;
+    )
+    .await?;
     let mut state = ctx.work.state.lock().await;
-    let snapshot = session.snapshot().await?;
-    let target = WorkSession::target(
-        &snapshot,
-        state
-            .work_id
-            .as_deref()
-            .ok_or_else(|| anyhow::anyhow!("model work missing"))?,
-    )?;
+    let snapshot = session.inspect_head().await?;
+    let processing = session
+        .processing(
+            state
+                .work_id
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("model work missing"))?,
+        )
+        .await?;
+    let target = WorkSession::target(&processing);
     let request_id = uuid::Uuid::now_v7().to_string();
     let command = session.command(WorkAction::BeginReason {
         guard: session.guard(&snapshot)?,
@@ -53,8 +57,8 @@ pub(crate) async fn prepare(
     if receipt.stage != Some(WorkStage::ReasonInFlight) {
         if receipt.stage == Some(WorkStage::Blocked) {
             if let Some(error) = budget_exhaustion(
-                &snapshot.state,
-                &target.work_id,
+                &processing,
+                &snapshot.head.limits,
                 WorkBudgetKind::ReasonRequests,
             ) {
                 return Err(anyhow::Error::new(error));
@@ -67,16 +71,16 @@ pub(crate) async fn prepare(
 }
 
 pub(super) fn budget_exhaustion(
-    state: &WorkState,
-    work_id: &str,
+    processing: &Processing,
+    limits: &WorkLimits,
     kind: WorkBudgetKind,
 ) -> Option<AgentError> {
-    let work = state.works.get(work_id)?;
-    let budget = state.budgets.get(&work.budget_id)?;
     let (used, limit) = match kind {
-        WorkBudgetKind::ReasonRequests => (budget.reason_requests, state.limits.reason_requests),
-        WorkBudgetKind::Dispatches => (budget.dispatches, state.limits.dispatches),
-        WorkBudgetKind::Recoveries => (budget.recoveries, state.limits.recoveries),
+        WorkBudgetKind::ReasonRequests => {
+            (processing.budget.reason_requests, limits.reason_requests)
+        }
+        WorkBudgetKind::Dispatches => (processing.budget.dispatches, limits.dispatches),
+        WorkBudgetKind::Recoveries => (processing.budget.recoveries, limits.recoveries),
     };
     (used >= limit).then_some(AgentError::WorkBudgetExhausted {
         budget: kind,
@@ -85,31 +89,20 @@ pub(super) fn budget_exhaustion(
     })
 }
 
-pub(super) fn blocked_budget_error(state: &WorkState, work_id: &str) -> Option<AgentError> {
-    let work = state.works.get(work_id)?;
-    if work.stage != WorkStage::Blocked {
+pub(super) fn blocked_budget_error(
+    processing: &Processing,
+    limits: &WorkLimits,
+) -> Option<AgentError> {
+    if processing.stage != WorkStage::Blocked {
         return None;
     }
-    let kind = match work.reason.as_deref()? {
+    let kind = match processing.blocked_evidence.as_deref()? {
         "reason budget exhausted" => WorkBudgetKind::ReasonRequests,
         "dispatch budget exhausted" => WorkBudgetKind::Dispatches,
         "recovery budget exhausted" => WorkBudgetKind::Recoveries,
         _ => return None,
     };
-    budget_exhaustion(state, work_id, kind)
-}
-
-pub(super) fn snapshot_budget_error(snapshot: &WorkSnapshot) -> Option<AgentError> {
-    if !snapshot.blocked {
-        return None;
-    }
-    snapshot.state.works.values().find_map(|work| {
-        let batch = snapshot.state.batches.get(&work.batch_id)?;
-        if batch.recipient_lifecycle != snapshot.control.lifecycle {
-            return None;
-        }
-        blocked_budget_error(&snapshot.state, &work.work_id)
-    })
+    budget_exhaustion(processing, limits, kind)
 }
 
 async fn bind_intent(
@@ -152,13 +145,23 @@ async fn bind_intent(
         tool_call_id: call.id.clone(),
         tool_name: call.name.clone(),
         arguments_digest: format!("{:x}", Sha256::digest(arguments_json.as_bytes())),
-        arguments_json,
+        arguments: super::work_reads::prepare_evidence(
+            session.ledger.resources().as_ref(),
+            &session.admission.session_id,
+            arguments_json.into_bytes(),
+        )
+        .await?,
         effective_tool_name: invocation.policy_call.name.clone(),
         effective_arguments_digest: format!(
             "{:x}",
             Sha256::digest(effective_arguments_json.as_bytes())
         ),
-        effective_arguments_json,
+        effective_arguments: super::work_reads::prepare_evidence(
+            session.ledger.resources().as_ref(),
+            &session.admission.session_id,
+            effective_arguments_json.into_bytes(),
+        )
+        .await?,
         owner_identity: metadata.owner_identity,
         scope_id: metadata.scope_id,
         scope_epoch: metadata.scope_epoch,
@@ -214,14 +217,16 @@ pub(crate) async fn commit_response(
         intents.push(bind_intent(&session, &invocation).await?);
         invocations.insert(call.id.clone(), invocation);
     }
-    let snapshot = session.snapshot().await?;
-    let target = WorkSession::target(
-        &snapshot,
-        state
-            .work_id
-            .as_deref()
-            .ok_or_else(|| anyhow::anyhow!("response work missing"))?,
-    )?;
+    let snapshot = session.inspect_head().await?;
+    let processing = session
+        .processing(
+            state
+                .work_id
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("response work missing"))?,
+        )
+        .await?;
+    let target = WorkSession::target(&processing);
     let request_id = state
         .request_id
         .clone()
@@ -230,7 +235,7 @@ pub(crate) async fn commit_response(
         || reasoning.stop_reason == peri_model::StopReason::MaxTokens
         || reasoning.stream_interruption.is_some()
     {
-        Some(uuid::Uuid::now_v7().to_string())
+        Some(target.work_id.clone())
     } else {
         None
     };
@@ -238,7 +243,9 @@ pub(crate) async fn commit_response(
         guard: session.guard(&snapshot)?,
         target,
         request_id,
-        response: WorkPayload::from_payload(&PersistedPayload::Message(source.clone()))?,
+        response: session
+            .prepare_payload(&PersistedPayload::Message(source.clone()))
+            .await?,
         dispatch_intents: intents,
         next_work_id: next_work_id.clone(),
     });
@@ -260,14 +267,14 @@ pub(crate) async fn recover_reasoning(
         return Ok(None);
     };
     let mut state = ctx.work.state.lock().await;
-    let snapshot = session.snapshot().await?;
     let recovered = recover_work(
-        &snapshot,
+        &session,
         state
             .work_id
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("recovery work missing"))?,
-    )?;
+    )
+    .await?;
     let RecoveredStage::ActReady {
         response,
         prepared,
@@ -303,7 +310,7 @@ pub(crate) async fn recover_reasoning(
             .find(|intent| intent.tool_call_id == call.id)
             .ok_or_else(|| anyhow::anyhow!("recovered intent missing"))?;
         if prior.effective_tool_name != candidate.effective_tool_name
-            || prior.effective_arguments_json != candidate.effective_arguments_json
+            || prior.effective_arguments_digest != candidate.effective_arguments_digest
             || prior.owner_identity != candidate.owner_identity
             || prior.scope_id != candidate.scope_id
             || prior.scope_epoch != candidate.scope_epoch
@@ -335,25 +342,29 @@ pub(crate) async fn mirror_response(
         return Ok(false);
     };
     let state = ctx.work.state.lock().await;
-    let snapshot = session.snapshot().await?;
-    let response = snapshot
-        .state
-        .works
-        .get(
+    let processing = session
+        .processing(
             state
                 .work_id
                 .as_deref()
-                .ok_or_else(|| anyhow::anyhow!("response work missing"))?,
+                .ok_or_else(|| anyhow::anyhow!("response processing missing"))?,
         )
-        .and_then(|work| work.response.as_ref())
+        .await?;
+    let response = processing
+        .response
+        .as_ref()
         .ok_or_else(|| anyhow::anyhow!("response checkpoint missing"))?;
-    if response != &WorkPayload::from_payload(&PersistedPayload::Message(message))? {
+    let persisted = session.payload(response).await?;
+    let actual = peri_acp_types::store::serialize_persisted_payload(&persisted)?;
+    let expected =
+        peri_acp_types::store::serialize_persisted_payload(&PersistedPayload::Message(message))?;
+    if actual != expected {
         return Err(anyhow::anyhow!("Act projected an uncommitted response"));
     }
     ctx.session
         .transcript
         .write()
-        .mirror_committed_payload(persisted_projection(response)?);
+        .mirror_committed_payload(persisted);
     Ok(true)
 }
 
@@ -366,19 +377,21 @@ pub(crate) async fn block_uncertain_model(ctx: &StageContext) -> anyhow::Result<
         return Ok(());
     };
     state.frozen = true;
-    let snapshot = session.snapshot().await?;
-    let target = WorkSession::target(
-        &snapshot,
-        state
-            .work_id
-            .as_deref()
-            .ok_or_else(|| anyhow::anyhow!("uncertain model work missing"))?,
-    )?;
-    if snapshot.state.works[&target.work_id].stage != WorkStage::ReasonInFlight {
+    let snapshot = session.inspect_head().await?;
+    let processing = session
+        .processing(
+            state
+                .work_id
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("uncertain model work missing"))?,
+        )
+        .await?;
+    let target = WorkSession::target(&processing);
+    if processing.stage != WorkStage::ReasonInFlight {
         return Ok(());
     }
     let command = session.command(WorkAction::BlockWork {
-        expected_revision: snapshot.state.revision,
+        expected_revision: snapshot.head.change_seq,
         target,
         reason: "model request has no durably committed response".into(),
         recovery_condition: format!(

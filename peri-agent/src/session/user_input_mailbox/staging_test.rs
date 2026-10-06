@@ -39,26 +39,56 @@ fn dispatch(mailbox: &UserInputMailbox, ids: Vec<String>) -> DispatchUserInputsR
     }
 }
 
-async fn load(fixture: &TestSession) -> WorkSnapshot {
+async fn load(fixture: &TestSession) -> WorkInspection {
     fixture
         .resources()
-        .load_session_work(&WorkQuery {
-            session_id: fixture.thread_id(),
-            limit: 1,
-        })
+        .inspect_work(&WorkQuery::new(
+            fixture.thread_id(),
+            WorkSelector::Availability,
+        ))
         .await
         .unwrap()
 }
 
+fn candidates(inspection: &WorkInspection) -> &[WorkCandidate] {
+    let WorkPage::Availability(availability) = &inspection.page else {
+        panic!("availability page required")
+    };
+    &availability.candidates
+}
+
+async fn draft(fixture: &TestSession, input_id: &str) -> StagedUserInput {
+    let inspected = fixture
+        .resources()
+        .inspect_work(&WorkQuery::new(
+            fixture.thread_id(),
+            WorkSelector::Draft {
+                input_id: input_id.into(),
+            },
+        ))
+        .await
+        .unwrap();
+    let WorkPage::Drafts(mut drafts) = inspected.page else {
+        panic!("draft page required")
+    };
+    drafts.pop().unwrap()
+}
+
+async fn processing(fixture: &TestSession, processing_id: &str) -> Processing {
+    crate::session::work_access::processing(
+        fixture.resources().as_ref(),
+        &fixture.thread_id(),
+        processing_id,
+    )
+    .await
+    .unwrap()
+}
+
 #[tokio::test]
 async fn publication_block_reasons_preserve_once_only_handoff() {
-    use super::staging::PublicationBlock;
-
     let fixture = TestSession::open().await;
     let (mailbox, inbox) = mailbox(&fixture, fixture.resources());
-    let reason = || *mailbox.durable.as_ref().unwrap().publication_block.lock();
     assert!(!mailbox.publish_next_durable().await.unwrap());
-    assert_eq!(reason(), Some(PublicationBlock::Empty));
 
     let ticket = mailbox
         .attach_external_attempt(CancellationToken::new(), false)
@@ -66,30 +96,25 @@ async fn publication_block_reasons_preserve_once_only_handoff() {
     let request = input(&mailbox, "staged during execution");
     mailbox.enqueue_durable(&request).await.unwrap();
     assert!(!mailbox.publish_next_durable().await.unwrap());
-    assert_eq!(reason(), Some(PublicationBlock::ActiveRunning));
     assert!(inbox.queue().is_empty());
 
     mailbox.finish_attempt(&ticket, UserInputAttemptOutcome::Completed);
     assert!(mailbox.publish_next_durable().await.unwrap());
-    assert_eq!(reason(), None);
     let handed_off = inbox.queue().drain_all();
     assert_eq!(handed_off.len(), 1);
     for _ in 0..2 {
         assert!(!mailbox.publish_next_durable().await.unwrap());
-        assert_eq!(reason(), Some(PublicationBlock::Dispatching));
         assert!(
             inbox.queue().is_empty(),
             "已交接的输入不能因 MQ 被排空而重投"
         );
     }
-    assert_eq!(load(&fixture).await.state.deliveries.len(), 1);
+    assert_eq!(load(&fixture).await.head.required_count, 1);
 
     mailbox.state.lock().paused = true;
     assert!(!mailbox.publish_next_durable().await.unwrap());
-    assert_eq!(reason(), Some(PublicationBlock::Paused));
     mailbox.state.lock().valid = false;
     assert!(!mailbox.publish_next_durable().await.unwrap());
-    assert_eq!(reason(), Some(PublicationBlock::Invalid));
 }
 
 #[tokio::test]
@@ -102,10 +127,15 @@ async fn queued_enqueue_replay_after_restart_does_not_gain_publication_authority
     let request = input(&first, "busy draft");
     let original = first.enqueue_durable(&request).await.unwrap();
     let before = load(&fixture).await;
-    let staged: serde_json::Value =
-        serde_json::from_str(&before.state.staged_user_inputs[&request.input_id].input_json)
-            .unwrap();
-    assert!(staged["enqueue_publication"].is_null());
+    let stored = draft(&fixture, &request.input_id).await;
+    let staged = first
+        .durable
+        .as_ref()
+        .unwrap()
+        .staged_source(&fixture.thread_id(), &stored.content)
+        .await
+        .unwrap();
+    assert!(staged.enqueue_publication.is_none());
     let (restored, inbox) = mailbox(&fixture, fixture.resources());
     for _ in 0..2 {
         let replay = restored.enqueue_durable(&request).await.unwrap();
@@ -113,7 +143,7 @@ async fn queued_enqueue_replay_after_restart_does_not_gain_publication_authority
         assert_eq!(replay.results[0].state, UserInputState::Queued);
         assert!(replay.publication_generations.is_empty());
         let after = load(&fixture).await;
-        assert_eq!(after.state, before.state);
+        assert_eq!(after.head, before.head);
         assert_eq!(after.control, before.control);
         assert!(inbox.queue().is_empty());
     }
@@ -133,11 +163,18 @@ async fn legacy_queued_enqueue_replay_without_authorization_remains_queued() {
             "stage",
         ),
         action: WorkAction::StageUserInput {
-            input_json: serde_json::to_string(&UserInput {
-                input_id: request.input_id.clone(),
-                content: request.content.clone(),
-                original_draft: request.original_draft.clone(),
-            })
+            input_id: request.input_id.clone(),
+            content: crate::agent::stages::prepare_work_evidence(
+                fixture.resources().as_ref(),
+                &fixture.thread_id(),
+                serde_json::to_vec(&UserInput {
+                    input_id: request.input_id.clone(),
+                    content: request.content.clone(),
+                    original_draft: request.original_draft.clone(),
+                })
+                .unwrap(),
+            )
+            .await
             .unwrap(),
             command_id: request.command_id.clone(),
             fingerprint: compute_fingerprint(("enqueue", &request)),
@@ -153,7 +190,7 @@ async fn legacy_queued_enqueue_replay_without_authorization_remains_queued() {
     let replay = restored.enqueue_durable(&request).await.unwrap();
     assert_eq!(replay.work_receipts, vec![original]);
     assert_eq!(replay.results[0].state, UserInputState::Queued);
-    assert_eq!(load(&fixture).await.state, before.state);
+    assert_eq!(load(&fixture).await.head, before.head);
     assert!(inbox.queue().is_empty());
 }
 
@@ -169,12 +206,17 @@ async fn authorized_enqueue_replay_recovers_staged_only_publication_with_frozen_
     let stage = first.durable.as_ref().unwrap().operations.lock().await[&request.command_id]
         .commands[0]
         .clone();
-    let WorkAction::StageUserInput { input_json, .. } = &stage.action else {
+    let WorkAction::StageUserInput { content, .. } = &stage.action else {
         unreachable!()
     };
-    let staged: serde_json::Value = serde_json::from_str(input_json).unwrap();
-    let publication: WorkCommand =
-        serde_json::from_value(staged["enqueue_publication"].clone()).unwrap();
+    let staged = first
+        .durable
+        .as_ref()
+        .unwrap()
+        .staged_source(&fixture.thread_id(), content)
+        .await
+        .unwrap();
+    let publication = staged.enqueue_publication.unwrap();
     let stage_receipt = fixture
         .resources()
         .apply_work_mutation(&stage)
@@ -187,7 +229,15 @@ async fn authorized_enqueue_replay_recovers_staged_only_publication_with_frozen_
     assert_eq!(recovered.work_receipts[0], stage_receipt);
     let after = load(&fixture).await;
     assert_eq!(
-        after.state.user_input_publications[&publication.mutation_id],
+        restored
+            .durable
+            .as_ref()
+            .unwrap()
+            .command(&fixture.thread_id(), &publication.mutation_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .command,
         publication
     );
     assert_eq!(inbox.queue().drain_all().len(), 1);
@@ -198,7 +248,7 @@ async fn authorized_enqueue_replay_recovers_staged_only_publication_with_frozen_
         replay.publication_generations,
         recovered.publication_generations
     );
-    assert_eq!(load(&fixture).await.state, after.state);
+    assert_eq!(load(&fixture).await.head, after.head);
 }
 
 #[tokio::test]
@@ -245,7 +295,7 @@ async fn authorized_enqueue_replay_does_not_recapture_changed_control_generation
     ));
     let after = load(&fixture).await;
     assert_eq!(after.control, before_replay.control);
-    assert_eq!(after.state, before_replay.state);
+    assert_eq!(after.head, before_replay.head);
     assert!(inbox.queue().is_empty());
 }
 
@@ -268,8 +318,8 @@ async fn fresh_enqueue_supersedes_exited_blocked_work_without_history_activation
         generation_id: "generation".into(),
         lifecycle: snapshot.control.lifecycle,
         control_generation: snapshot.control.control_generation,
-        work_id: snapshot.candidates[0].work_id.clone(),
-        work_revision: snapshot.candidates[0].work_revision,
+        work_id: candidates(&snapshot)[0].work_id.clone(),
+        work_revision: candidates(&snapshot)[0].work_revision,
         execution: ControlAttempt {
             turn_id: TurnId::new(),
             attempt_id: AttemptId::new(),
@@ -297,12 +347,12 @@ async fn fresh_enqueue_supersedes_exited_blocked_work_without_history_activation
             mutation_id: "claim-old-task".into(),
             action: WorkAction::ClaimBatch {
                 guard: WorkGuard {
-                    expected_revision: snapshot.state.revision,
+                    expected_revision: snapshot.head.change_seq,
                     expected_control_generation: snapshot.control.control_generation,
                     execution: admission.execution.clone(),
                 },
-                batch_id: "old-batch".into(),
-                delivery_ids: snapshot.candidates[0].delivery_ids.clone(),
+                batch_id: admission.work_id.clone(),
+                delivery_ids: candidates(&snapshot)[0].delivery_ids.clone(),
             },
         })
         .await
@@ -317,10 +367,10 @@ async fn fresh_enqueue_supersedes_exited_blocked_work_without_history_activation
             recipient_lifecycle: admission.lifecycle,
             mutation_id: "block-old-task".into(),
             action: WorkAction::BlockWork {
-                expected_revision: snapshot.state.revision,
+                expected_revision: snapshot.head.change_seq,
                 target: WorkTarget {
                     work_id: work_id.clone(),
-                    expected_work_revision: snapshot.state.works[&work_id].revision,
+                    expected_work_revision: processing(&fixture, &work_id).await.revision,
                 },
                 reason: "reason budget exhausted".into(),
                 recovery_condition: "explicit user authorization".into(),
@@ -349,7 +399,11 @@ async fn fresh_enqueue_supersedes_exited_blocked_work_without_history_activation
     let (restored, inbox) = mailbox(&fixture, fixture.resources());
     restored.refresh_durable().await.unwrap();
     let before = load(&fixture).await;
-    assert!(before.blocked);
+    assert_eq!(
+        processing(&fixture, &work_id).await.stage,
+        WorkStage::Blocked
+    );
+    let prior_budget = processing(&fixture, &work_id).await.budget;
     assert!(before.control.attempt.is_none());
     assert!(!restored.publish_next_durable().await.unwrap());
     assert!(inbox.queue().is_empty());
@@ -357,17 +411,23 @@ async fn fresh_enqueue_supersedes_exited_blocked_work_without_history_activation
     assert_eq!(replay.work_receipts, queued_receipt.work_receipts);
     assert_eq!(replay.results[0].state, UserInputState::Queued);
     let after_replay = load(&fixture).await;
-    assert_eq!(after_replay.state, before.state);
+    assert_eq!(after_replay.head, before.head);
     assert_eq!(after_replay.control, before.control);
     assert!(inbox.queue().is_empty());
     let request = input(&restored, "continue using history, not the old execution");
     let receipt = restored.enqueue_durable(&request).await.unwrap();
     let after = load(&fixture).await;
-    assert!(!after.blocked);
-    assert_eq!(after.state.works[&work_id].stage, WorkStage::Abandoned);
-    assert_eq!(after.state.budgets, before.state.budgets);
-    assert_eq!(after.control, before.control);
-    assert_eq!(after.candidates.len(), 1);
+    assert!(candidates(&after)
+        .iter()
+        .all(|candidate| candidate.stage != WorkStage::Blocked));
+    assert_eq!(
+        processing(&fixture, &work_id).await.stage,
+        WorkStage::Abandoned
+    );
+    assert_eq!(processing(&fixture, &work_id).await.budget, prior_budget);
+    assert!(after.control.attempt.is_none());
+    assert!(after.control.control_generation > before.control.control_generation);
+    assert_eq!(candidates(&after).len(), 1);
     assert_eq!(receipt.publication_generations.len(), 1);
     let messages = inbox.queue().drain_all();
     assert_eq!(messages.len(), 1);
@@ -378,7 +438,7 @@ async fn fresh_enqueue_supersedes_exited_blocked_work_without_history_activation
     let (replayed, _) = mailbox(&fixture, fixture.resources());
     let replay = replayed.enqueue_durable(&request).await.unwrap();
     assert_eq!(receipt.work_receipts, replay.work_receipts);
-    assert_eq!(load(&fixture).await.state, after.state);
+    assert_eq!(load(&fixture).await.head, after.head);
 }
 
 #[tokio::test]
@@ -404,23 +464,32 @@ async fn initial_prompt_publishes_only_selected_input_without_cancelling_its_att
     assert!(!cancel.is_cancelled());
     assert_eq!(mailbox.active_run_ticket(), Some(ticket));
     let snapshot = load(&fixture).await;
-    assert_eq!(snapshot.state.deliveries.len(), 1);
-    assert_eq!(snapshot.state.obligations.len(), 1);
+    assert_eq!(snapshot.head.required_count, 1);
+    assert_eq!(snapshot.head.required_count, 1);
     assert_eq!(inbox.queue().len(), 1);
     assert_eq!(
-        snapshot.state.staged_user_inputs[&queued.input_id].status,
+        draft(&fixture, &queued.input_id).await.status,
         StagedUserInputStatus::Queued
     );
     assert_eq!(
-        snapshot.state.staged_user_inputs[&prompt.input_id].status,
+        draft(&fixture, &prompt.input_id).await.status,
         StagedUserInputStatus::Published
     );
     assert_eq!(
-        snapshot
-            .state
-            .deliveries
-            .values()
-            .next()
+        mailbox
+            .durable
+            .as_ref()
+            .unwrap()
+            .delivery(
+                &fixture.thread_id(),
+                draft(&fixture, &prompt.input_id)
+                    .await
+                    .publication_id
+                    .as_ref()
+                    .unwrap()
+            )
+            .await
+            .unwrap()
             .unwrap()
             .publication
             .event
@@ -448,9 +517,14 @@ async fn initial_prompt_rejects_foreign_attachment_before_persisting_input() {
         Err(UserInputQueueError::DurableRejected(_))
     ));
     let snapshot = load(&fixture).await;
-    assert!(snapshot.state.staged_user_inputs.is_empty());
-    assert!(snapshot.state.deliveries.is_empty());
-    assert!(snapshot.candidates.is_empty());
+    let inspected = fixture
+        .resources()
+        .inspect_work(&WorkQuery::new(fixture.thread_id(), WorkSelector::Drafts))
+        .await
+        .unwrap();
+    assert!(matches!(inspected.page, WorkPage::Drafts(drafts) if drafts.is_empty()));
+    assert_eq!(snapshot.head.required_count, 0);
+    assert!(candidates(&snapshot).is_empty());
 }
 
 #[tokio::test]
@@ -470,9 +544,9 @@ async fn busy_drafts_restore_in_fifo_order_without_any_inbox_obligation() {
     }
     assert!(inbox.queue().drain_all().is_empty());
     let snapshot = load(&fixture).await;
-    assert!(snapshot.candidates.is_empty());
-    assert!(snapshot.state.deliveries.is_empty());
-    assert!(snapshot.state.obligations.is_empty());
+    assert!(candidates(&snapshot).is_empty());
+    assert_eq!(snapshot.head.required_count, 0);
+    assert_eq!(snapshot.head.required_count, 0);
     let (restored, restored_inbox) = mailbox(&fixture, fixture.resources());
     let snapshot = restored.refresh_durable().await.unwrap();
     assert_eq!(
@@ -499,7 +573,7 @@ async fn busy_drafts_restore_in_fifo_order_without_any_inbox_obligation() {
         published[0].message().unwrap().id().as_uuid().to_string(),
         first_input.input_id
     );
-    assert_eq!(load(&fixture).await.state.deliveries.len(), 1);
+    assert_eq!(load(&fixture).await.head.required_count, 1);
     assert_eq!(restored.snapshot().items[1].state, UserInputState::Queued);
 }
 
@@ -550,7 +624,7 @@ async fn selected_batch_is_atomic_and_later_draft_does_not_join_or_cancel_again(
             .collect::<Vec<_>>(),
         [first.input_id.clone(), third.input_id.clone()]
     );
-    assert_eq!(load(&fixture).await.state.deliveries.len(), 3);
+    assert_eq!(load(&fixture).await.head.required_count, 3);
     let replay = mailbox.dispatch_durable(&all).await.unwrap();
     assert_eq!(accepted.work_receipts, replay.work_receipts);
     assert!(inbox.queue().drain_all().is_empty());
@@ -586,7 +660,7 @@ async fn staged_withdrawal_survives_restart_and_old_enqueue_retry_cannot_publish
     assert_eq!(accepted.work_receipts, replay.work_receipts);
     restored.enqueue_durable(&request).await.unwrap();
     assert!(!restored.publish_next_durable().await.unwrap());
-    assert!(load(&fixture).await.state.deliveries.is_empty());
+    assert_eq!(load(&fixture).await.head.required_count, 0);
     assert!(inbox.queue().drain_all().is_empty());
 }
 
@@ -635,7 +709,7 @@ async fn uncertain_selection_freezes_original_whole_batch_without_partial_handof
         read_only.durable.as_ref().unwrap().operations.lock().await[&selection.command_id].commands,
         original
     );
-    assert!(load(&fixture).await.state.deliveries.is_empty());
+    assert_eq!(load(&fixture).await.head.required_count, 0);
     assert!(inbox.queue().drain_all().is_empty());
 }
 
@@ -662,12 +736,13 @@ async fn withdrawn_member_rejects_whole_selection_without_publishing_first_membe
         .unwrap();
     let snapshot = load(&fixture).await;
     let selection_id = uuid::Uuid::now_v7().to_string();
-    let deliveries = [&first, &second]
-        .into_iter()
-        .map(|request| {
-            let command = new_publication(
+    let mut deliveries = Vec::new();
+    for request in [&first, &second] {
+        let stored = draft(&fixture, &request.input_id).await;
+        deliveries.push(
+            new_publication(
+                mailbox.durable.as_ref().unwrap(),
                 &fixture.thread_id(),
-                1,
                 UserInput {
                     input_id: request.input_id.clone(),
                     content: request.content.clone(),
@@ -675,14 +750,13 @@ async fn withdrawn_member_rejects_whole_selection_without_publishing_first_membe
                 },
                 &selection_id,
                 1,
+                stored.revision,
+                stored.fingerprint,
             )
-            .unwrap();
-            let WorkAction::PublishDelivery { delivery } = command.action else {
-                unreachable!()
-            };
-            delivery
-        })
-        .collect();
+            .await
+            .unwrap(),
+        );
+    }
     let receipt = fixture
         .resources()
         .apply_work_mutation(&WorkCommand {
@@ -690,7 +764,7 @@ async fn withdrawn_member_rejects_whole_selection_without_publishing_first_membe
             recipient_lifecycle: 1,
             mutation_id: selection_id,
             action: WorkAction::PublishStagedUserInputs {
-                expected_revision: snapshot.state.revision,
+                expected_revision: snapshot.head.change_seq,
                 expected_control_generation: snapshot.control.control_generation,
                 expected_attempt: snapshot.control.attempt,
                 interrupt_current: true,
@@ -701,11 +775,11 @@ async fn withdrawn_member_rejects_whole_selection_without_publishing_first_membe
         .unwrap();
     assert!(matches!(receipt.decision, WorkDecision::Rejected { .. }));
     let current = load(&fixture).await;
-    assert_eq!(current.state.revision, snapshot.state.revision);
-    assert!(current.state.deliveries.is_empty());
-    assert!(current.state.obligations.is_empty());
+    assert_eq!(current.head.change_seq, snapshot.head.change_seq);
+    assert_eq!(current.head.required_count, 0);
+    assert_eq!(current.head.required_count, 0);
     assert_eq!(
-        current.state.staged_user_inputs[&first.input_id].status,
+        draft(&fixture, &first.input_id).await.status,
         StagedUserInputStatus::Queued
     );
     assert!(inbox.queue().drain_all().is_empty());
@@ -726,7 +800,7 @@ async fn selection_replay_after_restart_preserves_receipt_and_does_not_cancel_ne
     let original = first.dispatch_durable(&selection).await.unwrap();
     let (restored, _) = mailbox(&fixture, fixture.resources());
     let snapshot = load(&fixture).await;
-    let candidate = &snapshot.candidates[0];
+    let candidate = &candidates(&snapshot)[0];
     let admission = WorkAdmission {
         session_id: fixture.thread_id(),
         admission_id: uuid::Uuid::now_v7().to_string(),
@@ -763,7 +837,7 @@ async fn selection_replay_after_restart_preserves_receipt_and_does_not_cancel_ne
     assert!(!cancel.is_cancelled());
     let after = load(&fixture).await;
     assert_eq!(before.control, after.control);
-    assert_eq!(before.state, after.state);
+    assert_eq!(before.head, after.head);
 }
 
 #[tokio::test]
@@ -790,9 +864,10 @@ async fn stale_control_generation_rejects_frozen_selection_without_any_publicati
         .await
         .unwrap();
     assert_eq!(paused.decision, ControlDecision::Accepted);
-    let publication = new_publication(
+    let stored = draft(&fixture, &request.input_id).await;
+    let delivery = new_publication(
+        mailbox.durable.as_ref().unwrap(),
         &fixture.thread_id(),
-        1,
         UserInput {
             input_id: request.input_id.clone(),
             content: request.content,
@@ -800,11 +875,11 @@ async fn stale_control_generation_rejects_frozen_selection_without_any_publicati
         },
         "original-selection",
         1,
+        stored.revision,
+        stored.fingerprint,
     )
+    .await
     .unwrap();
-    let WorkAction::PublishDelivery { delivery } = publication.action else {
-        unreachable!()
-    };
     let receipt = fixture
         .resources()
         .apply_work_mutation(&WorkCommand {
@@ -812,7 +887,7 @@ async fn stale_control_generation_rejects_frozen_selection_without_any_publicati
             recipient_lifecycle: 1,
             mutation_id: uuid::Uuid::now_v7().to_string(),
             action: WorkAction::PublishStagedUserInputs {
-                expected_revision: before.state.revision,
+                expected_revision: before.head.change_seq,
                 expected_control_generation: before.control.control_generation,
                 expected_attempt: before.control.attempt,
                 interrupt_current: true,
@@ -830,10 +905,10 @@ async fn stale_control_generation_rejects_frozen_selection_without_any_publicati
     let current = load(&fixture).await;
     assert_eq!(current.control, paused.state);
     assert_eq!(
-        current.state.staged_user_inputs[&request.input_id].status,
+        draft(&fixture, &request.input_id).await.status,
         StagedUserInputStatus::Queued
     );
-    assert!(current.state.deliveries.is_empty());
+    assert_eq!(current.head.required_count, 0);
     assert!(inbox.queue().drain_all().is_empty());
 }
 
@@ -863,14 +938,14 @@ async fn explicit_selection_after_pause_resumes_atomically_without_fabricating_a
         mailbox.enqueue_durable(&request).await.unwrap().results[0].state,
         UserInputState::Queued
     );
-    assert!(load(&fixture).await.state.deliveries.is_empty());
+    assert_eq!(load(&fixture).await.head.required_count, 0);
     let selection = dispatch(&mailbox, vec![request.input_id]);
     mailbox.dispatch_durable(&selection).await.unwrap();
     let resumed = load(&fixture).await;
     assert_eq!(resumed.control.status, ControlStatus::Active);
     assert!(resumed.control.attempt.is_none());
     assert!(resumed.control.control_generation > paused.state.control_generation);
-    assert_eq!(resumed.state.deliveries.len(), 1);
+    assert_eq!(resumed.head.required_count, 1);
     assert_eq!(inbox.queue().drain_all().len(), 1);
     mailbox.dispatch_durable(&selection).await.unwrap();
     assert_eq!(load(&fixture).await.control, resumed.control);

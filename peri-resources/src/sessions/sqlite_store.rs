@@ -18,6 +18,7 @@ pub(crate) mod row_mapping;
 mod schema;
 mod schema_cleanup;
 mod session_data;
+pub use session_data::work::offline::migrate_stopped_work_store;
 mod session_rows;
 #[path = "storage_v2_migration.rs"]
 mod storage_v2_migration;
@@ -30,13 +31,10 @@ use chrono::{DateTime, Utc};
 pub use connection::{ReadOnlyStoreErrorKind, ReadOnlyThreadStoreError};
 use peri_acp_types::{
     messages::BaseMessage,
-    store::{
-        deserialize_persisted_payload, serialize_persisted_payload, CompactionChange,
-        InheritedContext, MessageFlags, PersistedPayload, ThreadStore,
-    },
+    store::{CompactionChange, InheritedContext, MessageFlags, PersistedPayload, ThreadStore},
     thread::{AgentStatus, ThreadId, ThreadListEntry, ThreadMeta},
 };
-use row_mapping::{extract_title, meta_from_row, role_of, ThreadRow, THREAD_META_COLUMNS};
+use row_mapping::{meta_from_row, ThreadRow, THREAD_META_COLUMNS};
 use sqlx::AssertSqlSafe;
 use std::{collections::HashMap, path::PathBuf, str::FromStr, sync::Arc};
 
@@ -213,71 +211,20 @@ impl ThreadStore for SqliteThreadStore {
     }
 
     async fn load_messages(&self, id: &ThreadId) -> Result<Vec<BaseMessage>> {
-        let rows: Vec<(String,)> =
-            sqlx::query_as("SELECT content FROM messages WHERE thread_id = ?1 ORDER BY rowid")
-                .bind(id.as_str())
-                .fetch_all(&self.database.pool)
-                .await?;
-
-        rows.into_iter()
-            .filter_map(|(content,)| match deserialize_persisted_payload(&content) {
-                Ok(PersistedPayload::Message(message)) => Some(Ok(message)),
-                Ok(PersistedPayload::SystemReminder { .. }) => None,
-                Err(error) => Some(Err(error)),
-            })
-            .collect()
+        Ok(self
+            .database
+            .load_payloads(id)
+            .await?
+            .into_iter()
+            .filter_map(|payload| payload.as_message().cloned())
+            .collect())
     }
 
     async fn append_payloads(&self, id: &ThreadId, payloads: &[PersistedPayload]) -> Result<()> {
-        let result = async {
-            if payloads.is_empty() {
-                return Ok(());
-            }
-            let mut tx = self.database.pool.begin().await?;
-            for payload in payloads {
-                let message_id = payload.id().as_uuid().to_string();
-                let role = payload
-                    .as_message()
-                    .map(role_of)
-                    .unwrap_or("system_reminder");
-                let content = serialize_persisted_payload(payload)?;
-                sqlx::query(
-                    "INSERT OR IGNORE INTO messages (message_id, thread_id, role, content)
-                 VALUES (?1, ?2, ?3, ?4)",
-                )
-                .bind(&message_id)
-                .bind(id.as_str())
-                .bind(role)
-                .bind(&content)
-                .execute(&mut *tx)
-                .await?;
-            }
-            sqlx::query(
-                "UPDATE threads SET updated_at = ?1,
-                message_count = (SELECT COUNT(*) FROM messages WHERE thread_id = ?2)
-             WHERE id = ?2",
-            )
-            .bind(peri_time::now_utc_rfc3339())
-            .bind(id.as_str())
-            .execute(&mut *tx)
+        session_data::SqliteSessionData::new(Arc::clone(&self.database))
+            .append_history_rows(id, payloads)
             .await?;
-            let messages = payloads
-                .iter()
-                .filter_map(PersistedPayload::as_message)
-                .cloned()
-                .collect::<Vec<_>>();
-            if let Some(title) = extract_title(&messages) {
-                sqlx::query("UPDATE threads SET title = ?1 WHERE id = ?2 AND title IS NULL")
-                    .bind(&title)
-                    .bind(id.as_str())
-                    .execute(&mut *tx)
-                    .await?;
-            }
-            tx.commit().await?;
-            Ok(())
-        }
-        .await;
-        result
+        Ok(())
     }
 
     async fn load_payloads(&self, id: &ThreadId) -> Result<Vec<PersistedPayload>> {
@@ -457,6 +404,12 @@ impl ThreadStore for SqliteThreadStore {
                         .await?;
                 to_delete.extend(children.into_iter().map(|(cid,)| cid));
                 idx += 1;
+            }
+            for thread in &to_delete {
+                session_data::messages::guard_history_mutation(&mut tx, thread).await?;
+            }
+            for thread in &to_delete {
+                session_data::messages::tombstone_session(&mut tx, thread).await?;
             }
             for tid in &to_delete {
                 // `messages` 与 `session_bindings` 同样显式删除，**不再**依赖

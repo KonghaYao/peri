@@ -58,13 +58,13 @@ test("replacement without actual old instance stopped proof stays blocked", asyn
 test("actual Bun JSONL sidecar advertises durable SQLite and handles readiness", async () => {
     const directory = await mkdtemp(join(tmpdir(), "peri-jsonl-"));
     try {
-        const frames = [{ id: "ready", method: "peri/execution/ready", params: {} },
+        const frames = [{ id: "ready", method: "peri/execution/ready", params: { protocolVersion: 2 } },
             { id: "admit", method: "peri/execution/admit", params: { requestId: "input", snapshot: snapshot() } }];
         const child = Bun.spawn([process.execPath, join(import.meta.dir, "../src/execution/sidecar.ts"), "--database", join(directory, "registry.db"),
             "--instance-id", "jsonl-instance", "--generation-id", "jsonl-generation"], { stdin: new Blob([frames.map((frame) => JSON.stringify(frame)).join("\n") + "\n"]), stdout: "pipe", stderr: "pipe" });
         const output = (await new Response(child.stdout).text()).trim().split("\n").map((line) => JSON.parse(line));
         expect(await child.exited).toBe(0);
-        expect(output.find((frame) => frame.id === "ready").result).toEqual({ protocolVersion: 1, durability: "durable" });
+        expect(output.find((frame) => frame.id === "ready").result).toEqual({ protocolVersion: 2, durability: "durable" });
         expect(output.find((frame) => frame.id === "admit").result.status).toBe("admitted");
     } finally { await rm(directory, { recursive: true, force: true }); }
 });

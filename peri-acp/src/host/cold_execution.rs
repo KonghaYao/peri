@@ -5,7 +5,7 @@ use peri_acp_types::event::{BackgroundTaskResult, EventSink};
 use peri_acp_types::session_resources::work::{
     WorkAction, WorkAdmission, WorkCommand, WorkDecision, WorkQuery, WorkTarget,
 };
-use peri_agent::agent::stages::{run_react_loop, LoopResult};
+use peri_agent::agent::stages::{LoopResult, run_react_loop};
 use peri_agent::session::subagent::{
     ChildResumeMetadata, ColdChildExecution, ColdChildRuntime, SessionFactory,
     SubagentChainContext, SubagentHost,
@@ -13,7 +13,7 @@ use peri_agent::session::subagent::{
 use peri_agent::tools::BaseTool;
 
 use super::{AcpServerConfig, SessionState, SharedSessions};
-use crate::transport::{types::AcpError, AcpTransport};
+use crate::transport::{AcpTransport, types::AcpError};
 
 pub(super) struct ColdChildRun {
     pub execution: ColdChildExecution,
@@ -28,16 +28,19 @@ pub(super) async fn run(
 ) -> Result<ColdChildRun, AcpError> {
     let work = cfg
         .session_resources
-        .load_session_work(&WorkQuery {
+        .inspect_work(&WorkQuery {
             session_id: admission.session_id.clone(),
+            selector: peri_acp_types::session_resources::work::WorkSelector::RecoveryDescriptor {
+                lifecycle: admission.lifecycle,
+            },
             limit: 1,
+            cursor: None,
         })
         .await
         .map_err(super::workspace::resource_error)?;
     let metadata: ChildResumeMetadata = serde_json::from_str(
-        work.state
-            .child_resume_metadata
-            .get(&admission.lifecycle)
+        super::work_query::descriptor(&work, admission.lifecycle)?
+            .and_then(|descriptor| descriptor.child_resume_metadata_json.as_deref())
             .ok_or_else(|| blocked("persisted child resume metadata missing"))?,
     )
     .map_err(|error| blocked(format!("invalid child resume metadata: {error}")))?;
@@ -324,16 +327,17 @@ pub(super) async fn block(
 ) -> Result<(), AcpError> {
     let work = cfg
         .session_resources
-        .load_session_work(&WorkQuery {
+        .inspect_work(&WorkQuery {
             session_id: admission.session_id.clone(),
+            selector: peri_acp_types::session_resources::work::WorkSelector::Processing {
+                processing_id: admission.work_id.clone(),
+            },
             limit: 1,
+            cursor: None,
         })
         .await
         .map_err(super::workspace::resource_error)?;
-    let target = work
-        .state
-        .works
-        .get(&admission.work_id)
+    let target = super::work_query::processing(&work, &admission.work_id)?
         .ok_or_else(|| blocked("original child work unavailable"))?;
     let receipt = cfg
         .session_resources
@@ -342,7 +346,7 @@ pub(super) async fn block(
             recipient_lifecycle: admission.lifecycle,
             mutation_id: format!("cold-child-block:{}", admission.admission_id),
             action: WorkAction::BlockWork {
-                expected_revision: work.state.revision,
+                expected_revision: work.head.change_seq,
                 target: WorkTarget {
                     work_id: admission.work_id.clone(),
                     expected_work_revision: target.revision,

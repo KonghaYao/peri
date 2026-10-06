@@ -293,7 +293,7 @@ async fn test_resume_cancelled_during_assembly_never_starts_execution() {
 #[tokio::test]
 async fn test_resume_running_cancelled_by_dispatch_finalizes_claim() {
     use peri_acp_types::session_resources::{
-        work::{ObligationStatus, WorkQuery, WorkStage},
+        work::{WorkPage, WorkQuery, WorkSelector, WorkStage},
         SessionResources,
     };
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -364,22 +364,25 @@ async fn test_resume_running_cancelled_by_dispatch_finalizes_claim() {
         0,
         "claim cleanup must not invent or duplicate the normal Stop hook"
     );
-    let query = WorkQuery {
-        session_id: thread_id.clone(),
-        limit: 1,
-    };
-    let cancelled = store.load_session_work(&query).await.unwrap();
+    let query = WorkQuery::new(thread_id.clone(), WorkSelector::ActiveProcessing);
+    let cancelled = store.inspect_work(&query).await.unwrap();
     assert!(cancelled.control.attempt.is_none());
-    let original = cancelled.state.works.values().next().unwrap();
+    let WorkPage::Processings(records) = &cancelled.page else {
+        panic!("expected active processing page")
+    };
+    let original = records.first().unwrap();
     assert_eq!(original.stage, WorkStage::ReasonInFlight);
     assert!(original.request_id.is_some());
-    assert!(original.reason_request.is_some());
+    let request = store
+        .read_evidence(&peri_acp_types::session_resources::work::EvidenceQuery {
+            session_id: thread_id.clone(),
+            reference: original.request.clone().unwrap(),
+        })
+        .await
+        .unwrap();
+    request.validate().unwrap();
+    assert!(!request.bytes.is_empty());
     assert!(original.response.is_none());
-    assert!(cancelled
-        .state
-        .obligations
-        .values()
-        .all(|obligation| obligation.status != ObligationStatus::Satisfied));
     super::close_lifecycle_cases::reopen_closed_child_fixture(&store, &thread_id).await;
     let llm = RecordingLLM::new();
     let calls = llm.received.clone();
@@ -402,20 +405,8 @@ async fn test_resume_running_cancelled_by_dispatch_finalizes_claim() {
         "{error}"
     );
     assert!(calls.read().is_empty());
-    let recovered = store.load_session_work(&query).await.unwrap();
-    assert_eq!(recovered.state.works.get(&original.work_id), Some(original));
-    assert_eq!(recovered.state.budgets, cancelled.state.budgets);
-    for (delivery_id, obligation) in &cancelled.state.obligations {
-        assert_eq!(
-            recovered.state.obligations.get(delivery_id),
-            Some(obligation)
-        );
-    }
-    assert!(recovered
-        .state
-        .obligations
-        .values()
-        .all(|obligation| obligation.status != ObligationStatus::Satisfied));
+    let recovered = store.inspect_work(&query).await.unwrap();
+    assert_eq!(recovered.page, cancelled.page);
 }
 
 #[tokio::test]

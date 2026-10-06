@@ -2,12 +2,14 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use peri_acp_types::execution_admission::{
-    AdmissionOutcome, AdmissionRequest, ExecutionAdmissionError, ExecutionAdmissionPort,
-    SettlementOutcome, SettlementRequest, ADMIT_METHOD, SETTLE_METHOD,
+    ADMIT_METHOD, AdmissionOutcome, AdmissionRequest, ExecutionAdmissionError,
+    ExecutionAdmissionPort, SETTLE_METHOD, SettlementOutcome, SettlementRequest,
 };
 
 use crate::transport::RequestTransport;
-use peri_acp_types::execution_admission::{EntryOutcome, EntryRequest, ENTERED_METHOD};
+use peri_acp_types::execution_admission::{ENTERED_METHOD, EntryOutcome, EntryRequest};
+
+pub const EXECUTION_PROTOCOL_VERSION: u32 = 2;
 
 pub struct ReverseExecutionAdmission {
     transport: Arc<dyn RequestTransport>,

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use peri_acp_types::session_resources::work::{
-    ReasonRequest, WorkAction, WorkAdmission, WorkCommand, WorkGuard, WorkSnapshot,
+    ReasonRequest, WorkAction, WorkAdmission, WorkCommand, WorkGuard, WorkInspection,
 };
 use peri_acp_types::session_resources::SessionResources;
 use sha2::{Digest, Sha256};
@@ -71,12 +71,12 @@ impl WorkRuntime {
 }
 
 impl WorkSession {
-    pub(crate) fn guard(&self, snapshot: &WorkSnapshot) -> Result<WorkGuard, WorkSetupError> {
+    pub(crate) fn guard(&self, snapshot: &WorkInspection) -> Result<WorkGuard, WorkSetupError> {
         if snapshot.session_id != self.admission.session_id {
             return Err(WorkSetupError::SessionMismatch);
         }
         Ok(WorkGuard {
-            expected_revision: snapshot.state.revision,
+            expected_revision: snapshot.head.change_seq,
             expected_control_generation: self.admission.control_generation,
             execution: self.admission.execution.clone(),
         })
@@ -92,18 +92,24 @@ impl WorkSession {
     }
 }
 
-pub(crate) fn request_checkpoint(
+pub(crate) async fn request_checkpoint(
+    session: &WorkSession,
     request: &serde_json::Value,
     model_ref: String,
     authorization_ref: String,
-) -> Result<ReasonRequest, WorkSetupError> {
+) -> anyhow::Result<ReasonRequest> {
     if model_ref.is_empty() || authorization_ref.is_empty() {
-        return Err(WorkSetupError::InvalidRequest);
+        return Err(WorkSetupError::InvalidRequest.into());
     }
     let serialized_request = serde_json::to_string(request)?;
     let request_digest = format!("{:x}", Sha256::digest(serialized_request.as_bytes()));
     Ok(ReasonRequest {
-        serialized_request,
+        payload: super::work_reads::prepare_evidence(
+            session.ledger.resources().as_ref(),
+            &session.admission.session_id,
+            serialized_request.into_bytes(),
+        )
+        .await?,
         request_digest,
         model_ref,
         authorization_ref,

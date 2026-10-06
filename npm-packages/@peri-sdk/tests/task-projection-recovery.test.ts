@@ -61,7 +61,7 @@ test("Session asks Peri for a task snapshot after a missed notification", async 
     snapshotCalls = 0;
     async request<T>(method: string, _params?: unknown): Promise<T> {
     if (method.startsWith("session/control")) return controlResponse(method, _params) as T;
-      if (method === "initialize") return { protocolVersion: 1 } as T;
+      if (method === "initialize") return { protocolVersion: 1, agentCapabilities: { _meta: { "peri.executionProtocol": 2 } } } as T;
       if (method === "session/load") return {} as T;
       if (method === "session/input/snapshot") return { generation: "g1" } as T;
       if (method === "session/bg-tasks") {

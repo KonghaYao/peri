@@ -54,20 +54,25 @@ fn best_effort_fixture_requires_explicit_test_only_opt_in() {
     ));
 }
 
-#[test]
-fn checkpoint_retains_full_request_and_digests_its_exact_bytes() {
+#[tokio::test]
+async fn checkpoint_retains_full_request_and_digests_its_exact_bytes() {
     let request = json!({"messages":[{"role":"user","content":"input"}],
         "tools":[{"name":"tool","schema":{"type":"object"}}],"config":{"temperature":0}});
-    let checkpoint = request_checkpoint(&request, "model".into(), "authorization".into()).unwrap();
+    let fixture = crate::session::test_resources::TestSession::open().await;
+    let mut admission = admission();
+    admission.session_id = fixture.thread_id();
+    let session = WorkSession { admission, ledger: WorkMutationBarrier::new(fixture.resources()) };
+    let checkpoint = request_checkpoint(&session, &request, "model".into(), "authorization".into()).await.unwrap();
+    let bytes = session.evidence(&checkpoint.payload).await.unwrap();
     assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&checkpoint.serialized_request).unwrap(),
+        serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
         request
     );
     assert_eq!(
         checkpoint.request_digest,
         format!(
             "{:x}",
-            Sha256::digest(checkpoint.serialized_request.as_bytes())
+            Sha256::digest(&bytes)
         )
     );
     assert_eq!(checkpoint.model_ref, "model");

@@ -64,6 +64,13 @@ impl SqliteSessionData {
             .execute(&mut *tx)
             .await
             .map_err(|error| map_sqlx(&error))?;
+        sqlx::query(control::GUARD_STATE)
+            .bind(&command.session_id)
+            .bind(control::encode(&current)?)
+            .bind(i64::from(command.action == ControlAction::FinishClose))
+            .execute(&mut *tx)
+            .await
+            .map_err(super::work::execution::sql_failure)?;
         sqlx::query(control::UPDATE_STATE)
             .bind(&command.session_id)
             .bind(control::encode(&receipt.state)?)

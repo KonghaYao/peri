@@ -17,8 +17,7 @@ use peri_acp_types::session_resources::{
     SessionResourceError, SessionResourceErrorKind, SessionResourceResult,
 };
 use peri_acp_types::store::{
-    deserialize_persisted_payload, serialize_persisted_payload, InheritedContext, MessageFlags,
-    PersistedPayload,
+    deserialize_persisted_payload, InheritedContext, MessageFlags, PersistedPayload,
 };
 use peri_acp_types::thread::{AgentStatus, CancelPolicy, ThreadMeta};
 use peri_acp_types::workspace::{ProjectId, SessionBinding, WorkspaceId};
@@ -54,6 +53,7 @@ pub(super) fn payload_params(
     thread_id: &str,
     payload: &PersistedPayload,
     flags: Option<&MessageFlags>,
+    reference: &peri_acp_types::session_resources::work::PayloadRef,
 ) -> SessionResourceResult<Vec<Value>> {
     let flags = flags.cloned().unwrap_or_default();
     let projection = flags
@@ -66,10 +66,7 @@ pub(super) fn payload_params(
         Value::Text(payload.id().as_uuid().to_string()),
         Value::Text(thread_id.to_owned()),
         Value::Text(canonical::payload_role(payload).to_owned()),
-        Value::Text(
-            serialize_persisted_payload(payload)
-                .map_err(|_| corrupt("history entry is not serializable"))?,
-        ),
+        Value::Text(crate::sessions::work::encode(reference)?),
         int_value(i64::from(flags.truncated)),
         int_value(i64::from(flags.excluded)),
         optional_text(projection.as_deref()),
@@ -164,8 +161,20 @@ pub(super) fn decode_binding(
 /// 自有 payload 行：`message_id, content, truncated, excluded, projection`。
 pub(super) fn decode_message_row(values: &[Value]) -> SessionResourceResult<PersistedPayload> {
     let row_id = text_field(values, 0, "message id")?;
-    let content = text_field(values, 1, "message content")?;
-    decode_payload_text(&content, &row_id)
+    let reference: peri_acp_types::session_resources::work::PayloadRef =
+        crate::sessions::work::decode(&text_field(values, 1, "message content reference")?)?;
+    let columns = values
+        .get(6..10)
+        .ok_or_else(|| corrupt("message payload projection is missing"))?;
+    let batches = super::session_work::rows(vec![vec![columns.to_vec()]])?;
+    let evidence = crate::sessions::work_store::payload::decode_evidence(&reference, &batches[0])?;
+    let content = std::str::from_utf8(&evidence.bytes)
+        .map_err(|_| corrupt("message payload encoding is invalid"))?;
+    let payload = decode_payload_text(content, &row_id)?;
+    if text_field(values, 5, "message role")? != canonical::payload_role(&payload) {
+        return Err(corrupt("message payload role conflicts"));
+    }
+    Ok(payload)
 }
 
 /// 历史行里的 flags 部分：`message_id, content, truncated, excluded, projection`。

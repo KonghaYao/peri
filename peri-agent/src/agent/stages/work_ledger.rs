@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use peri_acp_types::session_resources::work::{
-    WorkAction, WorkCommand, WorkDecision, WorkQuery, WorkReceipt, WorkRejection, WorkResolution,
-    WorkSnapshot,
+    EvidenceQuery, EvidenceRecord, WorkCommand, WorkDecision, WorkInspection, WorkQuery,
+    WorkReceipt, WorkResolution,
 };
 use peri_acp_types::session_resources::{MutationOutcome, SessionResourceError, SessionResources};
 use tokio::sync::Mutex;
@@ -17,6 +17,8 @@ pub(crate) enum WorkCommitError {
     Frozen { command: Box<WorkCommand> },
     #[error("work receipt does not match the original mutation")]
     InvalidReceipt { command: Box<WorkCommand> },
+    #[error("original work mutation was finally not applied")]
+    NotApplied { command: Box<WorkCommand> },
     #[error(transparent)]
     Resource(#[from] SessionResourceError),
 }
@@ -37,15 +39,22 @@ impl WorkMutationBarrier {
         }
     }
 
-    pub(crate) async fn snapshot(
+    pub(crate) async fn inspect(
         &self,
         query: &WorkQuery,
-    ) -> Result<WorkSnapshot, WorkCommitError> {
-        let snapshot = self.resources.load_session_work(query).await?;
-        if snapshot.session_id != query.session_id {
-            return Err(SessionResourceError::conflict("work snapshot session mismatch").into());
+    ) -> Result<WorkInspection, WorkCommitError> {
+        let inspection = self.resources.inspect_work(query).await?;
+        if inspection.session_id != query.session_id {
+            return Err(SessionResourceError::conflict("work inspection session mismatch").into());
         }
-        Ok(snapshot)
+        Ok(inspection)
+    }
+
+    pub(crate) async fn read_evidence(
+        &self,
+        query: &EvidenceQuery,
+    ) -> Result<EvidenceRecord, WorkCommitError> {
+        Ok(self.resources.read_evidence(query).await?)
     }
 
     pub(crate) async fn pending_command(&self) -> Option<WorkCommand> {
@@ -81,52 +90,7 @@ impl WorkMutationBarrier {
         &self,
         original: &WorkCommand,
     ) -> Result<WorkReceipt, WorkCommitError> {
-        let mut command = original.clone();
-        for attempt in 0..8 {
-            match self.commit(&command).await {
-                Err(WorkCommitError::Rejected { receipt })
-                    if attempt < 7
-                        && receipt.decision
-                            == (WorkDecision::Rejected {
-                                reason: WorkRejection::StaleRevision,
-                            }) =>
-                {
-                    let snapshot = self
-                        .snapshot(&WorkQuery {
-                            session_id: command.session_id.clone(),
-                            limit: 1,
-                        })
-                        .await?;
-                    let settlement_only = matches!(
-                        &command.action,
-                        WorkAction::CommitAct {
-                            next_work_id: None,
-                            ..
-                        }
-                    );
-                    let guard = match &mut command.action {
-                        WorkAction::ClaimBatch { guard, .. }
-                        | WorkAction::BeginReason { guard, .. }
-                        | WorkAction::CommitReasonResponseAndDispatchIntent { guard, .. }
-                        | WorkAction::BeginDispatch { guard, .. }
-                        | WorkAction::CommitAct { guard, .. } => guard,
-                        _ => return Err(WorkCommitError::Rejected { receipt }),
-                    };
-                    if snapshot.control.lifecycle != command.recipient_lifecycle
-                        || (!settlement_only
-                            && (snapshot.control.control_generation
-                                != guard.expected_control_generation
-                                || snapshot.control.attempt.as_ref() != Some(&guard.execution)))
-                    {
-                        return Err(WorkCommitError::Rejected { receipt });
-                    }
-                    guard.expected_revision = snapshot.state.revision;
-                    command.mutation_id = uuid::Uuid::now_v7().to_string();
-                }
-                result => return result,
-            }
-        }
-        unreachable!()
+        self.commit(original).await
     }
 
     async fn resolve_original(
@@ -137,16 +101,8 @@ impl WorkMutationBarrier {
         match self.resources.resolve_work_mutation(command).await {
             Ok(WorkResolution::Applied { receipt }) => Self::confirm(command, receipt, unconfirmed),
             Ok(WorkResolution::NotApplied) => {
-                match self.resources.apply_work_mutation(command).await {
-                    Ok(receipt) => Self::confirm(command, receipt, unconfirmed),
-                    Err(error) if error.effect() == MutationOutcome::NotApplied => {
-                        *unconfirmed = None;
-                        Err(error.into())
-                    }
-                    Err(_) => Err(WorkCommitError::Unknown {
-                        command: Box::new(command.clone()),
-                    }),
-                }
+                *unconfirmed = None;
+                Err(WorkCommitError::NotApplied { command: Box::new(command.clone()) })
             }
             Ok(WorkResolution::Unknown) | Err(_) => Err(WorkCommitError::Unknown {
                 command: Box::new(command.clone()),

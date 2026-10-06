@@ -62,7 +62,7 @@ let active;
 const reply = frame => process.stdout.write(JSON.stringify(frame)+'\n');
 require('readline').createInterface({input:process.stdin}).on('line', line => {
   const frame = JSON.parse(line);
-  if (frame.method === 'peri/execution/ready') reply({id:frame.id,result:{protocolVersion:1,durability:'durable'}});
+  if (frame.method === 'peri/execution/ready') reply({id:frame.id,result:{protocolVersion:2,durability:'durable'}});
   else if (frame.method === 'peri/execution/activate') { active=frame.id; reply({id:'sdk-fixture',method:'session/execute',params:{}}); }
   else if (frame.method === 'fixture/confirm') reply({id:frame.id,result:frame.params});
   else if (frame.id === 'sdk-fixture') reply({id:active,result:frame.result});
@@ -88,7 +88,7 @@ const lines = require('readline').createInterface({input: process.stdin});
 lines.on('line', line => {
   const request = JSON.parse(line);
   const result = request.method === 'peri/execution/ready'
-    ? {protocolVersion:1,durability:'durable'} : request.params;
+    ? {protocolVersion:2,durability:'durable'} : request.params;
   process.stdout.write(JSON.stringify({id:request.id,result})+'\n');
 });
 "#,
@@ -108,7 +108,7 @@ async fn fixture_disconnect_after_request_is_unknown_not_settled() {
 require('readline').createInterface({input:process.stdin}).on('line', line => {
   const request = JSON.parse(line);
   if (request.method !== 'peri/execution/ready') process.exit(0);
-  process.stdout.write(JSON.stringify({id:request.id,result:{protocolVersion:1,durability:'durable'}})+'\n');
+  process.stdout.write(JSON.stringify({id:request.id,result:{protocolVersion:2,durability:'durable'}})+'\n');
 });
 "#).await;
     let error = dispatcher
@@ -129,7 +129,7 @@ async fn fixture_mismatched_response_poisoned_without_retry() {
 require('readline').createInterface({input:process.stdin}).on('line', line => {
   const request = JSON.parse(line);
   const ready = request.method === 'peri/execution/ready';
-  process.stdout.write(JSON.stringify({id:ready?request.id:'wrong',result:ready?{protocolVersion:1,durability:'durable'}:{status:'applied'}})+'\n');
+  process.stdout.write(JSON.stringify({id:ready?request.id:'wrong',result:ready?{protocolVersion:2,durability:'durable'}:{status:'applied'}})+'\n');
 });
 "#).await;
     assert_eq!(
@@ -191,7 +191,7 @@ let active;
 const reply = frame => process.stdout.write(JSON.stringify(frame)+'\n');
 require('readline').createInterface({input:process.stdin}).on('line', line => {
   const frame = JSON.parse(line);
-  if (frame.method === 'peri/execution/ready') reply({id:frame.id,result:{protocolVersion:1,durability:'durable'}});
+  if (frame.method === 'peri/execution/ready') reply({id:frame.id,result:{protocolVersion:2,durability:'durable'}});
   else if (frame.method === 'fixture/resolve') { active=frame.id; reply({id:'sdk-original-command',method:'session/work/resolve',params:frame.params}); }
   else if (frame.method === 'fixture/forbidden') { active=frame.id; reply({id:'sdk-original-command',method:'session/work/mutate',params:frame.params}); }
   else if (frame.id === 'sdk-original-command') reply({id:active,result:frame.result ?? {error:frame.error}});

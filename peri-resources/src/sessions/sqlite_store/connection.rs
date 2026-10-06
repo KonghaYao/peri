@@ -29,7 +29,21 @@ pub(super) const REQUIRED_THREAD_COLUMNS: &[&str] = &[
     "config",
     "agent_status",
 ];
-pub(super) const REQUIRED_MESSAGE_COLUMNS: &[&str] = &["thread_id", "content"];
+pub(super) const REQUIRED_MESSAGE_COLUMNS: &[&str] = &[
+    "message_id",
+    "thread_id",
+    "role",
+    "content_ref",
+    "transcript_seq",
+];
+const REQUIRED_PAYLOAD_COLUMNS: &[&str] = &[
+    "storage_scope",
+    "payload_id",
+    "version",
+    "byte_length",
+    "sha256",
+    "bytes",
+];
 
 /// 只读 session 数据库访问的稳定失败分类。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -216,6 +230,7 @@ impl SqliteSessionDatabase {
         for (table, required) in [
             ("threads", REQUIRED_THREAD_COLUMNS),
             ("messages", REQUIRED_MESSAGE_COLUMNS),
+            ("session_payloads", REQUIRED_PAYLOAD_COLUMNS),
         ] {
             let rows: Vec<(String,)> = sqlx::query_as(AssertSqlSafe(format!(
                 "SELECT name FROM pragma_table_info('{table}')"

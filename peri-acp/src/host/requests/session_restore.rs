@@ -8,12 +8,12 @@ use peri_acp_types::session_resources::{BindingRecheck, BindingState, FrozenStat
 use peri_acp_types::thread::ThreadId;
 use serde_json::Value;
 
-use crate::dispatch::config_update::make_config_options;
 use crate::dispatch::ReplaySender;
+use crate::dispatch::config_update::make_config_options;
 use crate::host::notify::{send_available_commands_update, send_config_option_update};
 use crate::host::prepared::PreparedSessionInputs;
-use crate::host::workspace::{workspace_error, BindingCheck};
-use crate::host::{build_mode_state, AcpServerConfig, SessionState};
+use crate::host::workspace::{BindingCheck, workspace_error};
+use crate::host::{AcpServerConfig, SessionState, build_mode_state};
 use crate::session::frozen_snapshot::decode_frozen_snapshot;
 use crate::{dispatch, transport::types::AcpError};
 
@@ -99,7 +99,7 @@ pub(super) async fn prepare_existing(
             return Err(AcpError::new(
                 -32010,
                 format!("Session execution unavailable: {reason:?}"),
-            ))
+            ));
         }
     }
     cfg.session_resources
@@ -148,18 +148,21 @@ pub(super) async fn prepare_existing(
             }
             None => PreparedSessionInputs::prepare_restore(cfg, &cwd, &persisted)?,
         };
-        let owner_state = cfg
+        let control = cfg
             .session_resources
-            .load_session_work(&peri_acp_types::session_resources::work::WorkQuery {
-                session_id: id.to_owned(),
-                limit: 1,
-            })
+            .load_session_control(&id.to_owned())
             .await
             .map_err(crate::host::workspace::resource_error)?;
-        let owner_known = owner_state
-            .state
-            .resource_owners
-            .contains_key(&owner_state.control.lifecycle);
+        let owner_state = crate::host::work_query::inspect(
+            cfg.session_resources.as_ref(),
+            id,
+            peri_acp_types::session_resources::work::WorkSelector::RecoveryDescriptor {
+                lifecycle: control.lifecycle,
+            },
+        )
+        .await?;
+        let owner_known = crate::host::work_query::descriptor(&owner_state, control.lifecycle)?
+            .is_some_and(|descriptor| descriptor.resource_owners.is_some());
         prepared.session_mcp_servers =
             super::super::resource_owners::load_for_restore(cfg, id).await?;
         let supplied = super::session_mcp_servers(params)?;
@@ -379,11 +382,13 @@ pub(crate) async fn handle_metadata(
         };
         response["effort"] = serde_json::json!(effort);
         let config = cfg.peri_config.read();
-        response["providerName"] = serde_json::json!(config
-            .config
-            .profiles
-            .get(&config.config.active_alias)
-            .map(|profile| profile.provider.clone()));
+        response["providerName"] = serde_json::json!(
+            config
+                .config
+                .profiles
+                .get(&config.config.active_alias)
+                .map(|profile| profile.provider.clone())
+        );
     }
     if history {
         let payloads = cfg
@@ -592,10 +597,17 @@ async fn reopen_workspace_scope_after_restore(
         if cleanup.is_ok() {
             sessions.remove(id);
         }
-        return Err(AcpError::new(-32010, match cleanup {
-            Ok(()) => format!("Session restore incomplete: Workspace task scope unavailable: {error}"),
-            Err(cause) => format!("Session restore incomplete: Workspace task scope unavailable: {error}; cleanup incomplete: {cause}"),
-        }));
+        return Err(AcpError::new(
+            -32010,
+            match cleanup {
+                Ok(()) => {
+                    format!("Session restore incomplete: Workspace task scope unavailable: {error}")
+                }
+                Err(cause) => format!(
+                    "Session restore incomplete: Workspace task scope unavailable: {error}; cleanup incomplete: {cause}"
+                ),
+            },
+        ));
     }
     Ok(())
 }

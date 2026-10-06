@@ -27,7 +27,8 @@ pub fn durable_task_terminal_delivery(
     SessionTerminalDelivery::for_session(resources, session_id, recipient_lifecycle, queue)
 }
 
-pub fn build_task_terminal_command(
+pub async fn build_task_terminal_command(
+    resources: &dyn SessionResources,
     session_id: &str,
     recipient_lifecycle: u64,
     binding: &TaskBinding,
@@ -50,10 +51,15 @@ pub fn build_task_terminal_command(
         return Err("terminal publication differs from its immutable task binding".into());
     }
     let identity = delivery_id.as_uuid().to_string();
-    let content = WorkPayload::from_payload(&PersistedPayload::SystemReminder {
-        id: delivery_id,
-        reminder: reminder.clone(),
-    })
+    let content = crate::agent::stages::prepare_work_payload(
+        resources,
+        session_id,
+        &PersistedPayload::SystemReminder {
+            id: delivery_id,
+            reminder: reminder.clone(),
+        },
+    )
+    .await
     .map_err(|error| error.to_string())?;
     let queued = QueuedMessage::system_reminder_with_delivery_id(
         MessageKind::Defer,
@@ -148,25 +154,32 @@ impl TaskTerminalDelivery for SessionTerminalDelivery {
         source: MessageSource,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>> {
         Box::pin(async move {
-            let snapshot = self
-                .resources
-                .load_session_work(&WorkQuery {
-                    session_id: self.thread_id.clone(),
-                    limit: 1,
-                })
-                .await
-                .map_err(|error| error.to_string())?;
             let task_id = reminder
                 .as_reminder()
                 .metadata
                 .get("task_id")
                 .and_then(serde_json::Value::as_str)
                 .ok_or("terminal publication has no trusted task identity")?;
-            let binding = snapshot
-                .state
-                .task_bindings
-                .values()
-                .find(|binding| {
+            let snapshot = self
+                .resources
+                .inspect_work(&WorkQuery::new(
+                    &self.thread_id,
+                    WorkSelector::TaskBindingByTask {
+                        owner_task_id: task_id.into(),
+                    },
+                ))
+                .await
+                .map_err(|error| error.to_string())?;
+            let WorkPage::Effects(effects) = &snapshot.page else {
+                return Err("terminal task binding lookup returned a different page".into());
+            };
+            if effects.len() != 1 || snapshot.next_cursor.is_some() {
+                return Err("terminal task binding unavailable or ambiguous".into());
+            }
+            let binding = effects[0]
+                .binding
+                .as_ref()
+                .filter(|binding| {
                     binding.owner_task_id == task_id
                         && binding.initiator_session_id == self.thread_id
                         && binding.recipient_lifecycle == self.recipient_lifecycle
@@ -174,13 +187,15 @@ impl TaskTerminalDelivery for SessionTerminalDelivery {
                 .ok_or("terminal publication has no durable invocation/task binding")?
                 .clone();
             let command = build_task_terminal_command(
+                self.resources.as_ref(),
                 &self.thread_id,
                 self.recipient_lifecycle,
                 &binding,
                 delivery_id,
                 reminder,
                 source.clone(),
-            )?;
+            )
+            .await?;
             let queued = QueuedMessage::system_reminder_with_delivery_id(
                 MessageKind::Defer,
                 source,

@@ -236,11 +236,8 @@ async fn prepare_child_fixture_intent(context: &SessionContext) -> String {
     use peri_acp_types::session_resources::work::*;
     use sha2::{Digest, Sha256};
     let resources = context.session_resources.as_ref().unwrap();
-    let query = WorkQuery {
-        session_id: context.session_id.clone(),
-        limit: 1,
-    };
-    let mut snapshot = resources.load_session_work(&query).await.unwrap();
+    let query = WorkQuery::new(&context.session_id, WorkSelector::Head);
+    let mut snapshot = resources.inspect_work(&query).await.unwrap();
     let authorization_ref = "explicit-dynamic-fixture:no-external-tools".to_owned();
     let receipt = resources
         .apply_work_mutation(&WorkCommand {
@@ -248,7 +245,7 @@ async fn prepare_child_fixture_intent(context: &SessionContext) -> String {
             recipient_lifecycle: snapshot.control.lifecycle,
             mutation_id: uuid::Uuid::now_v7().to_string(),
             action: WorkAction::BindResourceOwners {
-                expected_revision: snapshot.state.revision,
+                expected_revision: snapshot.head.change_seq,
                 connections_json: "[]".into(),
                 authorization_ref: authorization_ref.clone(),
             },
@@ -256,25 +253,35 @@ async fn prepare_child_fixture_intent(context: &SessionContext) -> String {
         .await
         .unwrap();
     assert_eq!(receipt.decision, WorkDecision::Accepted);
-    snapshot = resources.load_session_work(&query).await.unwrap();
+    snapshot = resources.inspect_work(&query).await.unwrap();
     let invocation_id = uuid::Uuid::now_v7().to_string();
     let arguments_json = serde_json::json!({"prompt":"finish"}).to_string();
     let arguments_digest = format!("{:x}", Sha256::digest(arguments_json.as_bytes()));
+    let arguments = resources
+        .prepare_evidence(&EvidenceWrite {
+            session_id: context.session_id.clone(),
+            storage_scope: context.session_id.clone(),
+            payload_id: format!("dynamic-child-arguments:{invocation_id}"),
+            encoding: 1,
+            bytes: arguments_json.into_bytes(),
+        })
+        .await
+        .unwrap();
     let receipt = resources
         .apply_work_mutation(&WorkCommand {
             session_id: context.session_id.clone(),
             recipient_lifecycle: snapshot.control.lifecycle,
             mutation_id: format!("dynamic-child-intent:{invocation_id}"),
             action: WorkAction::PrepareInvocation {
-                expected_revision: snapshot.state.revision,
+                expected_revision: snapshot.head.change_seq,
                 intent: InvocationIntent {
                     invocation_id: invocation_id.clone(),
                     tool_call_id: uuid::Uuid::now_v7().to_string(),
                     tool_name: "Subagent".into(),
-                    arguments_json: arguments_json.clone(),
+                    arguments: arguments.clone(),
                     arguments_digest: arguments_digest.clone(),
                     effective_tool_name: "Subagent".into(),
-                    effective_arguments_json: arguments_json,
+                    effective_arguments: arguments,
                     effective_arguments_digest: arguments_digest,
                     owner_identity: "explicit-dynamic-fixture-local-owner".into(),
                     scope_id: context.session_id.clone(),

@@ -1,8 +1,8 @@
 //! Durable inbox publication and SDK work-availability hints; never executes RCRA.
 
 use super::{
-    task_scope::{HostTaskKind, HostTaskOwnerKind, HostTaskSpawner},
     AcpServerConfig, PromptLocks, SharedSessions,
+    task_scope::{HostTaskKind, HostTaskOwnerKind, HostTaskSpawner},
 };
 use crate::session::executor::ContinuationRequest;
 #[cfg(test)]
@@ -12,7 +12,7 @@ use peri_acp_types::session::{MessageKind, MessageQueue, MessageSource, QueuedMe
 use peri_acp_types::session_resources::ControlState;
 use peri_acp_types::system_reminder::{
     ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
-    ReminderSource, SystemReminder, TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
+    ReminderSource, SYSTEM_REMINDER_VERSION, SystemReminder, TrustedSystemReminderFactory,
 };
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -149,16 +149,79 @@ pub(super) async fn publish_inbox_work(
     )
     .await?;
     let snapshot = resources
-        .load_work_availability(&session_id.to_owned())
+        .inspect_work(&peri_acp_types::session_resources::work::WorkQuery {
+            session_id: session_id.into(),
+            selector: peri_acp_types::session_resources::work::WorkSelector::Availability,
+            limit: 1,
+            cursor: None,
+        })
         .await?;
-    if snapshot.is_available(lifecycle, observer_floor) {
+    let available = inbox_work_available(&snapshot, lifecycle)?;
+    let available = match observer_floor {
+        Some(floor) if available => {
+            recent_inbox_work_available(resources.as_ref(), session_id, lifecycle, floor).await?
+        }
+        _ => available,
+    };
+    if available {
         transport.send_notification("session/work/available", serde_json::json!({
-            "sessionId": session_id, "revision": snapshot.state.revision,
+            "sessionId": session_id, "revision": snapshot.head.change_seq,
             "lifecycle": lifecycle, "controlGeneration": snapshot.control.control_generation,
-            "executionProtocol": 1,
+            "executionProtocol": super::execution_admission::EXECUTION_PROTOCOL_VERSION,
         })).await.map_err(|error| anyhow::anyhow!("work availability notification failed: {error:?}"))?;
     }
     Ok(())
+}
+
+fn inbox_work_available(
+    inspection: &peri_acp_types::session_resources::work::WorkInspection,
+    lifecycle: u64,
+) -> Result<bool, crate::transport::types::AcpError> {
+    let availability = super::work_query::availability(inspection)?;
+    Ok(inspection.control.lifecycle == lifecycle
+        && availability.lifecycle == lifecycle
+        && inspection.head.has_pending_work())
+}
+
+async fn recent_inbox_work_available(
+    resources: &dyn peri_acp_types::session_resources::SessionResources,
+    session_id: &str,
+    lifecycle: u64,
+    floor: u64,
+) -> anyhow::Result<bool> {
+    use peri_acp_types::session_resources::work::{WorkPage, WorkQuery, WorkSelector};
+    let mut query = WorkQuery::new(session_id, WorkSelector::Inbox);
+    query.cursor = Some(format!("{floor:020}:"));
+    loop {
+        let inspection = resources.inspect_work(&query).await?;
+        if inspection.control.lifecycle != lifecycle {
+            return Ok(false);
+        }
+        let WorkPage::Deliveries(deliveries) = inspection.page else {
+            anyhow::bail!("inbox observer expected a bounded delivery page");
+        };
+        if deliveries
+            .iter()
+            .any(|delivery| observer_delivery_available(delivery, lifecycle, floor))
+        {
+            return Ok(true);
+        }
+        let Some(cursor) = inspection.next_cursor else {
+            return Ok(false);
+        };
+        query.cursor = Some(cursor);
+    }
+}
+
+fn observer_delivery_available(
+    delivery: &peri_acp_types::session_resources::work::Delivery,
+    lifecycle: u64,
+    floor: u64,
+) -> bool {
+    delivery.recipient_lifecycle == lifecycle
+        && delivery.admission_sequence >= floor
+        && delivery.obligation == peri_acp_types::session_resources::work::ObligationStatus::Pending
+        && delivery.publication.policy.ensures_processing()
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -12,7 +12,7 @@ pub(super) struct DurableMailbox {
     pub(super) store: Arc<dyn SessionResources>,
     pub(super) lifecycle: u64,
     operations: tokio::sync::Mutex<HashMap<String, FrozenOperation>>,
-    publication_block: Mutex<Option<staging::PublicationBlock>>,
+    restore: tokio::sync::Mutex<bool>,
 }
 
 struct FrozenOperation {
@@ -25,19 +25,19 @@ struct FrozenOperation {
 }
 
 #[derive(Serialize, Deserialize)]
-struct PublicationIdentity {
-    input: UserInput,
-    publication_generation: String,
-    fingerprint: u64,
-    command_id: String,
-}
-
-#[derive(Serialize, Deserialize)]
 struct WithdrawalIdentity {
     command_id: String,
     fingerprint: u64,
     expected_revision: u64,
     expected_control_generation: Option<u64>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct StagedEnqueueInput {
+    #[serde(flatten)]
+    input: UserInput,
+    #[serde(default)]
+    enqueue_publication: Option<WorkCommand>,
 }
 
 impl UserInputMailbox {
@@ -55,16 +55,160 @@ impl UserInputMailbox {
             store,
             lifecycle,
             operations: tokio::sync::Mutex::new(HashMap::new()),
-            publication_block: Mutex::new(None),
+            restore: tokio::sync::Mutex::new(false),
         });
         mailbox
     }
 
     pub async fn refresh_durable(&self) -> Result<UserInputQueueSnapshot, UserInputQueueError> {
+        self.refresh_inputs(&[]).await
+    }
+
+    async fn refresh_inputs(
+        &self,
+        requested: &[String],
+    ) -> Result<UserInputQueueSnapshot, UserInputQueueError> {
         let durable = self.durable.as_ref().ok_or(UserInputQueueError::Closed)?;
-        let snapshot = durable.load(&self.session_id).await?;
-        self.project_publications(&snapshot);
+        let head = durable
+            .inspect(&self.session_id, WorkSelector::Head)
+            .await?;
+        let mut restored = durable.restore.lock().await;
+        let mut input_ids = self
+            .state
+            .lock()
+            .records
+            .iter()
+            .filter(|record| {
+                matches!(
+                    record.state,
+                    UserInputState::Queued | UserInputState::Dispatching | UserInputState::Claimed
+                )
+            })
+            .map(|record| record.input.input_id.clone())
+            .collect::<Vec<_>>();
+        for input_id in requested {
+            if !input_ids.contains(input_id) {
+                input_ids.push(input_id.clone());
+            }
+        }
+        let mut drafts = if !*restored {
+            durable
+                .draft_page(&self.session_id, WorkSelector::UnresolvedInputs)
+                .await?
+        } else {
+            Vec::new()
+        };
+        for input_id in input_ids {
+            if drafts.iter().any(|draft| draft.input_id == input_id) {
+                continue;
+            }
+            if let Some(draft) = durable.draft(&self.session_id, &input_id).await? {
+                drafts.push(draft);
+            }
+        }
+        for draft in drafts {
+            let input = durable.input(&self.session_id, &draft.content).await?;
+            let delivery = match &draft.publication_id {
+                Some(delivery_id) => durable.delivery(&self.session_id, delivery_id).await?,
+                None => None,
+            };
+            let (status, publication_id, generation) = if let Some(delivery) = &delivery {
+                let identity = identity(delivery)?;
+                let withdrawn = delivery
+                    .disposition
+                    .as_deref()
+                    .and_then(|value| value.strip_prefix("withdrawn: "))
+                    .and_then(|value| serde_json::from_str::<WithdrawalIdentity>(value).ok());
+                let status = if draft.status == StagedUserInputStatus::Queued {
+                    UserInputState::Queued
+                } else if draft.status == StagedUserInputStatus::Withdrawn {
+                    UserInputState::Withdrawn
+                } else if delivery.disposition.is_some() {
+                    if withdrawn.is_some_and(|authorization| {
+                        authorization.expected_control_generation.is_some()
+                    }) {
+                        UserInputState::Queued
+                    } else {
+                        UserInputState::Withdrawn
+                    }
+                } else if delivery.projection.is_some() {
+                    UserInputState::Delivered
+                } else if delivery.processing_id.is_some() {
+                    UserInputState::Claimed
+                } else {
+                    UserInputState::Dispatching
+                };
+                (
+                    status,
+                    Some(delivery.delivery_id.clone()),
+                    Some(identity.publication_generation),
+                )
+            } else {
+                (
+                    match draft.status {
+                        StagedUserInputStatus::Queued => UserInputState::Queued,
+                        StagedUserInputStatus::Withdrawn => UserInputState::Withdrawn,
+                        StagedUserInputStatus::Published => {
+                            return Err(UserInputQueueError::OutcomeUnknown)
+                        }
+                    },
+                    None,
+                    None,
+                )
+            };
+            let mut state = self.state.lock();
+            let position = state
+                .records
+                .iter()
+                .position(|record| record.input.input_id == input.input_id);
+            let record = if let Some(position) = position {
+                &mut state.records[position]
+            } else {
+                state.records.push(InputRecord {
+                    fingerprint: compute_fingerprint(&input),
+                    input: input.clone(),
+                    state: status,
+                    handed_off: false,
+                    publication_id: None,
+                    publication_generation: None,
+                });
+                state.records.last_mut().expect("record inserted")
+            };
+            if record.state == UserInputState::Delivered
+                && matches!(
+                    status,
+                    UserInputState::Claimed | UserInputState::Dispatching
+                )
+            {
+                continue;
+            }
+            record.input = input;
+            record.state = status;
+            record.publication_id = publication_id;
+            record.publication_generation = generation;
+            if status == UserInputState::Dispatching && !record.handed_off {
+                let delivery = delivery
+                    .as_ref()
+                    .ok_or(UserInputQueueError::OutcomeUnknown)?;
+                let mut queued = QueuedMessage::prompt(
+                    MessageSource::UserInput,
+                    BaseMessage::Human {
+                        id: delivery.publication.event.content.message_id,
+                        content: record.input.content.clone(),
+                    },
+                );
+                queued.delivery_id = Some(MessageId::from(
+                    uuid::Uuid::parse_str(&delivery.delivery_id)
+                        .map_err(|_| UserInputQueueError::InvalidIdentity)?,
+                ));
+                self.inbox.handle().push(queued);
+                record.handed_off = true;
+            }
+            state.projected_revision = state.projected_revision.max(head.head.change_seq);
+            state.revision = state.revision.max(head.head.change_seq);
+        }
         let snapshot = self.snapshot();
+        *restored = true;
         self.publish(snapshot.clone());
         Ok(snapshot)
     }
@@ -82,120 +226,101 @@ impl UserInputMailbox {
         control_generation: Option<u64>,
     ) -> Result<UserInputQueueReceipt, UserInputQueueError> {
         let durable = self.durable.as_ref().ok_or(UserInputQueueError::Closed)?;
-        let fingerprint = compute_fingerprint(("takeback", request, control_generation));
-        let mut operations = durable.operations.lock().await;
         self.validate_request(
             &request.session_id,
             &request.generation,
             &request.command_id,
         )?;
         validate_input_id(&request.input_id)?;
+        let fingerprint = compute_fingerprint(("takeback", request, control_generation));
+        let mut operations = durable.operations.lock().await;
         if !operations.contains_key(&request.command_id) {
-            ensure_not_frozen(&operations, std::slice::from_ref(&request.input_id))?;
-            let snapshot = durable.load(&self.session_id).await?;
-            self.project_publications(&snapshot);
-            let recovered = recover_pending(
-                &snapshot,
-                &request.command_id,
-                fingerprint,
-                std::slice::from_ref(&request.input_id),
-            )?;
-            let was_pending = !recovered.is_empty();
-            let replay_record = snapshot.state.deliveries.values().find(|record| {
-                record
-                    .disposition
-                    .as_deref()
-                    .and_then(|disposition| disposition.strip_prefix("withdrawn: "))
-                    .and_then(|json| serde_json::from_str::<WithdrawalIdentity>(json).ok())
-                    .is_some_and(|identity| identity.command_id == request.command_id)
-            });
-            let prior = replay_record.or_else(|| find_publication(&snapshot, &request.input_id));
-            let previous = prior
-                .and_then(|record| record.disposition.as_deref())
-                .and_then(|disposition| disposition.strip_prefix("withdrawn: "))
-                .and_then(|json| serde_json::from_str::<WithdrawalIdentity>(json).ok());
-            if previous.as_ref().is_some_and(|identity| {
-                identity.command_id == request.command_id && identity.fingerprint != fingerprint
-            }) {
-                return Err(UserInputQueueError::IdentityConflict);
-            }
-            let replay = previous.filter(|identity| identity.command_id == request.command_id);
-            let authorization = replay.unwrap_or(WithdrawalIdentity {
-                command_id: request.command_id.clone(),
-                fingerprint,
-                expected_revision: snapshot.state.revision,
-                expected_control_generation: control_generation,
-            });
-            let commands = if was_pending {
-                recovered
-            } else if snapshot
-                .state
-                .staged_user_inputs
-                .get(&request.input_id)
-                .is_some_and(|record| {
-                    record.recipient_lifecycle == durable.lifecycle
-                        && (record.status == StagedUserInputStatus::Queued
-                            || record
-                                .withdrawal
-                                .as_ref()
-                                .is_some_and(|(command_id, _)| command_id == &request.command_id))
-                })
-            {
-                vec![WorkCommand {
-                    session_id: self.session_id.clone(),
-                    recipient_lifecycle: durable.lifecycle,
-                    mutation_id: mutation_id(
-                        &format!(
-                            "{}:{}:{}",
-                            self.session_id, durable.lifecycle, request.command_id
-                        ),
-                        &request.input_id,
-                        "withdraw-staged",
-                    ),
-                    action: WorkAction::WithdrawStagedUserInput {
+            ensure_not_frozen(&operations)?;
+            let mutation = mutation_id(
+                &format!(
+                    "{}:{}:{}",
+                    self.session_id, durable.lifecycle, request.command_id
+                ),
+                &request.input_id,
+                "withdraw",
+            );
+            let saved = durable.command(&self.session_id, &mutation).await?;
+            let reconcile = saved.is_some();
+            let command = if let Some(saved) = saved {
+                let valid = match &saved.command.action {
+                    WorkAction::WithdrawStagedUserInput {
+                        input_id,
+                        command_id,
+                        fingerprint: original,
+                    } => {
+                        input_id == &request.input_id
+                            && command_id == &request.command_id
+                            && *original == fingerprint
+                    }
+                    WorkAction::WithdrawDelivery {
+                        delivery_id,
+                        authorization_ref,
+                        ..
+                    } => {
+                        let authorization: WithdrawalIdentity =
+                            serde_json::from_str(authorization_ref)
+                                .map_err(|_| UserInputQueueError::IdentityConflict)?;
+                        let delivery = durable
+                            .delivery(&self.session_id, delivery_id)
+                            .await?
+                            .ok_or(UserInputQueueError::IdentityConflict)?;
+                        authorization.command_id == request.command_id
+                            && authorization.fingerprint == fingerprint
+                            && identity(&delivery)?.input_id == request.input_id
+                    }
+                    _ => false,
+                };
+                if !valid {
+                    return Err(UserInputQueueError::IdentityConflict);
+                }
+                saved.command
+            } else {
+                durable.ensure_confirmed(&self.session_id).await?;
+                let draft = durable
+                    .draft(&self.session_id, &request.input_id)
+                    .await?
+                    .ok_or(UserInputQueueError::IdentityConflict)?;
+                let head = durable
+                    .inspect(&self.session_id, WorkSelector::Head)
+                    .await?;
+                let action = if draft.status == StagedUserInputStatus::Queued {
+                    WorkAction::WithdrawStagedUserInput {
                         input_id: request.input_id.clone(),
                         command_id: request.command_id.clone(),
                         fingerprint,
-                    },
-                }]
-            } else {
-                prior
-                    .filter(|record| {
-                        record.disposition.is_none()
-                            || authorization.expected_revision != snapshot.state.revision
-                    })
-                    .map(|record| WorkCommand {
-                        session_id: self.session_id.clone(),
-                        recipient_lifecycle: durable.lifecycle,
-                        mutation_id: mutation_id(
-                            &format!(
-                                "{}:{}:{}",
-                                self.session_id, durable.lifecycle, request.command_id
-                            ),
-                            &request.input_id,
-                            "withdraw",
-                        ),
-                        action: WorkAction::WithdrawDelivery {
-                            expected_revision: authorization.expected_revision,
-                            expected_control_generation: authorization.expected_control_generation,
-                            delivery_id: record.publication.delivery_id.clone(),
-                            authorization_ref: serde_json::to_string(&authorization)
-                                .expect("withdrawal identity serializes"),
-                        },
-                    })
-                    .into_iter()
-                    .collect()
+                    }
+                } else {
+                    let delivery_id = draft
+                        .publication_id
+                        .ok_or(UserInputQueueError::IdentityConflict)?;
+                    WorkAction::WithdrawDelivery {
+                        expected_revision: head.head.change_seq,
+                        expected_control_generation: control_generation,
+                        delivery_id,
+                        authorization_ref: serde_json::to_string(&WithdrawalIdentity {
+                            command_id: request.command_id.clone(),
+                            fingerprint,
+                            expected_revision: head.head.change_seq,
+                            expected_control_generation: control_generation,
+                        })
+                        .map_err(|_| UserInputQueueError::InvalidIdentity)?,
+                    }
+                };
+                WorkCommand {
+                    session_id: self.session_id.clone(),
+                    recipient_lifecycle: durable.lifecycle,
+                    mutation_id: mutation,
+                    action,
+                }
             };
             operations.insert(
                 request.command_id.clone(),
-                FrozenOperation {
-                    fingerprint,
-                    commands,
-                    receipt: None,
-                    attempted: was_pending,
-                    uncertain: was_pending,
-                    rejection: None,
-                },
+                frozen_operation(fingerprint, vec![command], reconcile),
             );
         }
         self.finish_operation(
@@ -238,7 +363,6 @@ impl UserInputMailbox {
                 {
                     record.state = UserInputState::Queued;
                     record.handed_off = false;
-                    state.revision += 1;
                 }
             }
         }
@@ -278,10 +402,9 @@ impl UserInputMailbox {
         }
         if let Some(receipt) = &operation.receipt {
             let mut receipt = receipt.clone();
-            let snapshot = durable.load(&self.session_id).await?;
-            self.project_publications(&snapshot);
-            project_withdrawn_results(&mut receipt, &operation.commands, &snapshot);
+            self.refresh_inputs(input_ids).await?;
             receipt.snapshot = self.snapshot();
+            receipt.results = results_for(&self.state.lock(), input_ids);
             return Ok(receipt);
         }
         let reconcile = operation.attempted;
@@ -300,41 +423,33 @@ impl UserInputMailbox {
                     return Err(error);
                 }
             };
-            let deliveries = match &command.action {
-                WorkAction::PublishDelivery { delivery } => std::slice::from_ref(delivery),
-                WorkAction::PublishStagedUserInputs { deliveries, .. } => deliveries.as_slice(),
-                _ => &[],
-            };
-            for delivery in deliveries {
-                let identity: PublicationIdentity = serde_json::from_str(
-                    delivery.event.causation_id.as_deref().unwrap_or_default(),
-                )
-                .map_err(|_| UserInputQueueError::IdentityConflict)?;
-                generations.insert(identity.input.input_id, identity.publication_generation);
+            if let WorkAction::PublishStagedUserInputs { deliveries, .. } = &command.action {
+                for delivery in deliveries {
+                    let identity: UserInputPublicationIdentity = serde_json::from_str(
+                        delivery
+                            .event
+                            .causation_id
+                            .as_deref()
+                            .ok_or(UserInputQueueError::IdentityConflict)?,
+                    )
+                    .map_err(|_| UserInputQueueError::IdentityConflict)?;
+                    generations.insert(identity.input_id, identity.publication_generation);
+                }
             }
             receipts.push(receipt);
         }
-        let snapshot = durable.load(&self.session_id).await?;
-        self.project_publications(&snapshot);
+        self.refresh_inputs(input_ids).await?;
+        if withdrawing {
+            let identities = input_ids
+                .iter()
+                .map(|input_id| uuid::Uuid::parse_str(input_id).map(MessageId::from))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|_| UserInputQueueError::InvalidIdentity)?;
+            self.inbox.queue().withdraw_user_inputs(&identities);
+        }
         let mut state = self.state.lock();
         let mut taken_back = None;
         if withdrawing {
-            for command in &operation.commands {
-                if let WorkAction::WithdrawStagedUserInput { input_id, .. } = &command.action {
-                    if let Some(record) = snapshot.state.staged_user_inputs.get(input_id) {
-                        if record.status == StagedUserInputStatus::Withdrawn {
-                            taken_back = serde_json::from_str(&record.input_json).ok();
-                        }
-                    }
-                }
-                if let WorkAction::WithdrawDelivery { delivery_id, .. } = &command.action {
-                    if let Some(delivery) = snapshot.state.deliveries.get(delivery_id) {
-                        if delivery.disposition.is_some() {
-                            taken_back = identity(delivery).map(|identity| identity.input);
-                        }
-                    }
-                }
-            }
             for record in &mut state.records {
                 if input_ids.contains(&record.input.input_id)
                     && matches!(
@@ -349,155 +464,187 @@ impl UserInputMailbox {
             }
             state.revision += 1;
         }
-        let mut receipt = UserInputQueueReceipt {
+        let receipt = UserInputQueueReceipt {
             snapshot: self.snapshot_locked(&state),
             results: results_for(&state, input_ids),
             taken_back,
             work_receipts: receipts,
             publication_generations: generations,
         };
-        project_withdrawn_results(&mut receipt, &operation.commands, &snapshot);
         operation.receipt = Some(receipt.clone());
         operation.uncertain = false;
         drop(state);
         self.publish(receipt.snapshot.clone());
         Ok(receipt)
     }
-
-    pub(super) fn project_publications(&self, snapshot: &WorkSnapshot) {
-        let mut latest = std::collections::BTreeMap::<String, &DeliveryRecord>::new();
-        for record in snapshot.state.deliveries.values().filter(|record| {
-            record.publication.purpose == DeliveryPurpose::UserInput
-                && self
-                    .durable
-                    .as_ref()
-                    .is_some_and(|durable| record.recipient_lifecycle == durable.lifecycle)
-        }) {
-            if let Some(identity) = identity(record) {
-                let prior = latest.entry(identity.input.input_id).or_insert(record);
-                if record.admission_sequence > prior.admission_sequence {
-                    *prior = record;
-                }
-            }
-        }
-        let mut publications: Vec<_> = latest.into_values().collect();
-        publications.sort_by_key(|record| record.admission_sequence);
-        let mut state = self.state.lock();
-        if snapshot.state.revision < state.projected_revision {
-            return;
-        }
-        state.projected_revision = snapshot.state.revision;
-        self.project_staged_inputs(&mut state, snapshot);
-        state.revision = state.revision.max(snapshot.state.revision);
-        for delivery in publications {
-            let Some(identity) = identity(delivery) else {
-                continue;
-            };
-            if snapshot
-                .state
-                .staged_user_inputs
-                .get(&identity.input.input_id)
-                .is_some_and(|record| {
-                    record.recipient_lifecycle == snapshot.control.lifecycle
-                        && record.publication_id.as_deref()
-                            != Some(&delivery.publication.delivery_id)
-                })
-            {
-                continue;
-            }
-            let withdrawn = delivery
-                .disposition
-                .as_deref()
-                .and_then(|disposition| disposition.strip_prefix("withdrawn: "))
-                .and_then(|json| serde_json::from_str::<WithdrawalIdentity>(json).ok());
-            let status = if delivery.disposition.is_some() {
-                if withdrawn.is_some_and(|identity| identity.expected_control_generation.is_some())
-                {
-                    UserInputState::Queued
-                } else {
-                    UserInputState::Withdrawn
-                }
-            } else if delivery.projected {
-                UserInputState::Delivered
-            } else if delivery.batch_id.is_some() {
-                UserInputState::Claimed
-            } else {
-                UserInputState::Dispatching
-            };
-            let index = state
-                .records
-                .iter()
-                .position(|record| record.input.input_id == identity.input.input_id);
-            let record = if let Some(index) = index {
-                &mut state.records[index]
-            } else {
-                state.records.push(InputRecord {
-                    fingerprint: compute_fingerprint(&identity.input),
-                    input: identity.input.clone(),
-                    state: status,
-                    handed_off: false,
-                    publication_id: None,
-                    publication_generation: None,
-                });
-                state.records.last_mut().expect("record inserted")
-            };
-            if record.state == UserInputState::Delivered && status == UserInputState::Claimed {
-                continue;
-            }
-            if record.state == UserInputState::Queued
-                && status == UserInputState::Withdrawn
-                && record.publication_id.as_deref() == Some(&delivery.publication.delivery_id)
-            {
-                continue;
-            }
-            let changed = record.state != status;
-            record.publication_generation = Some(identity.publication_generation);
-            record.input = identity.input;
-            record.state = status;
-            record.publication_id = Some(delivery.publication.delivery_id.clone());
-            if status == UserInputState::Dispatching && !record.handed_off {
-                let mut queued = QueuedMessage::prompt(
-                    MessageSource::UserInput,
-                    BaseMessage::Human {
-                        id: delivery.publication.event.content.message_id,
-                        content: record.input.content.clone(),
-                    },
-                );
-                queued.delivery_id = uuid::Uuid::parse_str(&delivery.publication.delivery_id)
-                    .ok()
-                    .map(MessageId::from);
-                queued.admission_sequence = Some(delivery.admission_sequence);
-                record.handed_off = true;
-                self.inbox.handle().push_batch(vec![queued]);
-            }
-            if matches!(status, UserInputState::Withdrawn | UserInputState::Queued)
-                && record.handed_off
-            {
-                let id = delivery.publication.event.content.message_id;
-                self.inbox.queue().withdraw_user_inputs(&[id]);
-                record.handed_off = false;
-            }
-            if changed {
-                state.revision += 1;
-            }
-        }
-    }
 }
 
 impl DurableMailbox {
-    async fn load(&self, session_id: &str) -> Result<WorkSnapshot, UserInputQueueError> {
-        let snapshot = self
+    pub(super) async fn inspect(
+        &self,
+        session_id: &str,
+        selector: WorkSelector,
+    ) -> Result<WorkInspection, UserInputQueueError> {
+        let inspection = self
             .store
-            .load_session_work(&WorkQuery {
-                session_id: session_id.into(),
-                limit: 1,
-            })
+            .inspect_work(&WorkQuery::new(session_id, selector))
             .await
-            .map_err(|_| UserInputQueueError::OutcomeUnknown)?;
-        if snapshot.control.lifecycle != self.lifecycle {
+            .map_err(|error| UserInputQueueError::DurableRejected(error.to_string()))?;
+        if inspection.session_id != session_id || inspection.control.lifecycle != self.lifecycle {
             return Err(UserInputQueueError::StaleSession);
         }
-        Ok(snapshot)
+        Ok(inspection)
+    }
+
+    async fn drafts(&self, session_id: &str) -> Result<Vec<StagedUserInput>, UserInputQueueError> {
+        self.draft_page(session_id, WorkSelector::Drafts).await
+    }
+
+    async fn draft_page(
+        &self,
+        session_id: &str,
+        selector: WorkSelector,
+    ) -> Result<Vec<StagedUserInput>, UserInputQueueError> {
+        let mut query = WorkQuery::new(session_id, selector);
+        let mut drafts = Vec::new();
+        loop {
+            let inspected = self
+                .store
+                .inspect_work(&query)
+                .await
+                .map_err(|error| UserInputQueueError::DurableRejected(error.to_string()))?;
+            let WorkPage::Drafts(page) = inspected.page else {
+                return Err(UserInputQueueError::IdentityConflict);
+            };
+            drafts.extend(
+                page.into_iter()
+                    .filter(|record| record.recipient_lifecycle == self.lifecycle),
+            );
+            let Some(cursor) = inspected.next_cursor else {
+                break;
+            };
+            if query.cursor.as_ref() == Some(&cursor) {
+                return Err(UserInputQueueError::OutcomeUnknown);
+            }
+            query.cursor = Some(cursor);
+        }
+        Ok(drafts)
+    }
+
+    async fn draft(
+        &self,
+        session_id: &str,
+        input_id: &str,
+    ) -> Result<Option<StagedUserInput>, UserInputQueueError> {
+        let inspection = self
+            .inspect(
+                session_id,
+                WorkSelector::Draft {
+                    input_id: input_id.into(),
+                },
+            )
+            .await?;
+        let WorkPage::Drafts(mut drafts) = inspection.page else {
+            return Err(UserInputQueueError::IdentityConflict);
+        };
+        Ok(drafts.pop())
+    }
+
+    async fn delivery(
+        &self,
+        session_id: &str,
+        delivery_id: &str,
+    ) -> Result<Option<Delivery>, UserInputQueueError> {
+        let inspection = self
+            .inspect(
+                session_id,
+                WorkSelector::Delivery {
+                    delivery_id: delivery_id.into(),
+                },
+            )
+            .await?;
+        let WorkPage::Deliveries(mut records) = inspection.page else {
+            return Err(UserInputQueueError::IdentityConflict);
+        };
+        Ok(records.pop())
+    }
+
+    async fn command(
+        &self,
+        session_id: &str,
+        mutation_id: &str,
+    ) -> Result<Option<OwnedWorkCommand>, UserInputQueueError> {
+        let inspection = self
+            .inspect(
+                session_id,
+                WorkSelector::Command {
+                    mutation_id: mutation_id.into(),
+                },
+            )
+            .await?;
+        let WorkPage::Commands(mut records) = inspection.page else {
+            return Err(UserInputQueueError::IdentityConflict);
+        };
+        Ok(records.pop())
+    }
+
+    async fn ensure_confirmed(&self, session_id: &str) -> Result<(), UserInputQueueError> {
+        let inspection = self
+            .inspect(session_id, WorkSelector::PendingCommands)
+            .await?;
+        let WorkPage::Commands(commands) = inspection.page else {
+            return Err(UserInputQueueError::IdentityConflict);
+        };
+        if !commands.is_empty() {
+            return Err(UserInputQueueError::OutcomeUnknown);
+        }
+        Ok(())
+    }
+
+    async fn input(
+        &self,
+        session_id: &str,
+        reference: &PayloadRef,
+    ) -> Result<UserInput, UserInputQueueError> {
+        let evidence = self
+            .store
+            .read_evidence(&EvidenceQuery {
+                session_id: session_id.into(),
+                reference: reference.clone(),
+            })
+            .await
+            .map_err(|error| UserInputQueueError::DurableRejected(error.to_string()))?;
+        evidence
+            .validate()
+            .map_err(|error| UserInputQueueError::DurableRejected(error.to_string()))?;
+        if evidence.reference != *reference {
+            return Err(UserInputQueueError::IdentityConflict);
+        }
+        serde_json::from_slice::<StagedEnqueueInput>(&evidence.bytes)
+            .map(|source| source.input)
+            .map_err(|_| UserInputQueueError::IdentityConflict)
+    }
+
+    async fn staged_source(
+        &self,
+        session_id: &str,
+        reference: &PayloadRef,
+    ) -> Result<StagedEnqueueInput, UserInputQueueError> {
+        let evidence = self
+            .store
+            .read_evidence(&EvidenceQuery {
+                session_id: session_id.into(),
+                reference: reference.clone(),
+            })
+            .await
+            .map_err(|error| UserInputQueueError::DurableRejected(error.to_string()))?;
+        evidence
+            .validate()
+            .map_err(|error| UserInputQueueError::DurableRejected(error.to_string()))?;
+        if evidence.reference != *reference {
+            return Err(UserInputQueueError::IdentityConflict);
+        }
+        serde_json::from_slice(&evidence.bytes).map_err(|_| UserInputQueueError::IdentityConflict)
     }
 
     async fn commit(
@@ -505,32 +652,32 @@ impl DurableMailbox {
         command: &WorkCommand,
         reconcile: bool,
     ) -> Result<WorkReceipt, UserInputQueueError> {
-        if reconcile {
-            match self.store.resolve_work_mutation(command).await {
-                Ok(WorkResolution::Applied { receipt }) => return accepted(receipt),
-                Ok(WorkResolution::NotApplied) => {
-                    return Err(UserInputQueueError::DurableRejected(
-                        "Original mutation was not applied".into(),
-                    ))
+        if !reconcile {
+            match self.store.apply_work_mutation(command).await {
+                Ok(receipt) => return accepted(receipt),
+                Err(error)
+                    if error.effect()
+                        == peri_acp_types::session_resources::MutationOutcome::NotApplied =>
+                {
+                    return Err(UserInputQueueError::DurableRejected(error.to_string()));
                 }
-                _ => return Err(UserInputQueueError::OutcomeUnknown),
+                Err(error) => {
+                    tracing::warn!(mutation_id = %command.mutation_id, error = %error, "user input commit requires reconciliation")
+                }
             }
         }
-        match self.store.apply_work_mutation(command).await {
-            Ok(receipt) => accepted(receipt),
-            Err(_) => match self.store.resolve_work_mutation(command).await {
-                Ok(WorkResolution::Applied { receipt }) => accepted(receipt),
-                Ok(WorkResolution::NotApplied) => Err(UserInputQueueError::DurableRejected(
-                    "Original mutation was not applied".into(),
-                )),
-                _ => Err(UserInputQueueError::OutcomeUnknown),
-            },
+        match self.store.resolve_work_mutation(command).await {
+            Ok(WorkResolution::Applied { receipt }) => accepted(receipt),
+            Ok(WorkResolution::NotApplied) => Err(UserInputQueueError::DurableRejected(
+                "Original mutation was not applied".into(),
+            )),
+            _ => Err(UserInputQueueError::OutcomeUnknown),
         }
     }
 }
 
 fn accepted(receipt: WorkReceipt) -> Result<WorkReceipt, UserInputQueueError> {
-    match &receipt.decision {
+    match receipt.decision {
         WorkDecision::Accepted => Ok(receipt),
         WorkDecision::Rejected { reason } => {
             Err(UserInputQueueError::DurableRejected(format!("{reason:?}")))
@@ -538,24 +685,16 @@ fn accepted(receipt: WorkReceipt) -> Result<WorkReceipt, UserInputQueueError> {
     }
 }
 
-fn identity(record: &DeliveryRecord) -> Option<PublicationIdentity> {
-    serde_json::from_str(record.publication.event.causation_id.as_deref()?).ok()
-}
-
-fn find_publication<'snapshot>(
-    snapshot: &'snapshot WorkSnapshot,
-    input_id: &str,
-) -> Option<&'snapshot DeliveryRecord> {
-    snapshot
-        .state
-        .deliveries
-        .values()
-        .filter(|record| {
-            record.publication.purpose == DeliveryPurpose::UserInput
-                && record.recipient_lifecycle == snapshot.control.lifecycle
-                && identity(record).is_some_and(|identity| identity.input.input_id == input_id)
-        })
-        .max_by_key(|record| record.admission_sequence)
+fn identity(record: &Delivery) -> Result<UserInputPublicationIdentity, UserInputQueueError> {
+    serde_json::from_str(
+        record
+            .publication
+            .event
+            .causation_id
+            .as_deref()
+            .ok_or(UserInputQueueError::IdentityConflict)?,
+    )
+    .map_err(|_| UserInputQueueError::IdentityConflict)
 }
 
 fn mutation_id(command_id: &str, input_id: &str, action: &str) -> String {
@@ -567,64 +706,51 @@ fn mutation_id(command_id: &str, input_id: &str, action: &str) -> String {
     )
 }
 
-fn publication_command(
+async fn new_publication(
+    durable: &DurableMailbox,
     session_id: &str,
-    lifecycle: u64,
-    command_id: &str,
-    delivery: PublishDelivery,
-) -> WorkCommand {
-    WorkCommand {
-        session_id: session_id.into(),
-        recipient_lifecycle: lifecycle,
-        mutation_id: mutation_id(
-            &format!("{session_id}:{lifecycle}:{command_id}"),
-            &delivery.event.content.message_id.as_uuid().to_string(),
-            "publish",
-        ),
-        action: WorkAction::PublishDelivery { delivery },
-    }
-}
-
-fn new_publication(
-    session_id: &str,
-    lifecycle: u64,
     input: UserInput,
     command_id: &str,
     fingerprint: u64,
-) -> Result<WorkCommand, UserInputQueueError> {
-    let message = PersistedPayload::Message(BaseMessage::Human {
+    draft_revision: u64,
+    draft_fingerprint: u64,
+) -> Result<PublishDelivery, UserInputQueueError> {
+    let payload = PersistedPayload::Message(BaseMessage::Human {
         id: MessageId::from(
             uuid::Uuid::parse_str(&input.input_id)
                 .map_err(|_| UserInputQueueError::InvalidIdentity)?,
         ),
-        content: input.content.clone(),
+        content: input.content,
     });
-    let event_id = format!("user-input:{}:{command_id}", input.input_id);
-    let identity = PublicationIdentity {
-        input,
-        publication_generation: command_id.into(),
-        fingerprint,
-        command_id: command_id.into(),
-    };
-    let delivery = PublishDelivery {
-        delivery_id: delivery_id(session_id, lifecycle, &identity.input.input_id, command_id),
+    let content =
+        crate::agent::stages::prepare_work_payload(durable.store.as_ref(), session_id, &payload)
+            .await
+            .map_err(|error| UserInputQueueError::DurableRejected(error.to_string()))?;
+    Ok(PublishDelivery {
+        delivery_id: delivery_id(session_id, durable.lifecycle, &input.input_id, command_id),
         event: WorkEvent {
             producer_namespace: format!("peri:user-input:{session_id}"),
-            event_id,
+            event_id: format!("user-input:{}:{command_id}", input.input_id),
             event_kind: "userInput".into(),
             causation_id: Some(
-                serde_json::to_string(&identity)
-                    .map_err(|_| UserInputQueueError::InvalidIdentity)?,
-            ),
-            content: WorkPayload::from_payload(&message)
+                serde_json::to_string(&UserInputPublicationIdentity {
+                    input_id: input.input_id,
+                    publication_generation: command_id.into(),
+                    fingerprint,
+                    command_id: command_id.into(),
+                    draft_binding: StagedUserInputPublicationBinding {
+                        draft_revision,
+                        draft_fingerprint,
+                        canonical_content: content.content.clone(),
+                    },
+                })
                 .map_err(|_| UserInputQueueError::InvalidIdentity)?,
+            ),
+            content,
         },
         purpose: DeliveryPurpose::UserInput,
         policy: MessagePolicy::ensure_processing(),
-    };
-    Ok(publication_command(
-        session_id, lifecycle, command_id, delivery,
-    ))
+    })
 }
 
 fn delivery_id(
@@ -652,176 +778,31 @@ fn delivery_id(
 
 fn ensure_not_frozen(
     operations: &HashMap<String, FrozenOperation>,
-    input_ids: &[String],
 ) -> Result<(), UserInputQueueError> {
-    if operations.values().any(|operation| {
-        operation.uncertain
-            && operation
-                .commands
-                .iter()
-                .any(|command| match &command.action {
-                    WorkAction::PublishDelivery { delivery } => {
-                        input_ids.contains(&delivery.event.content.message_id.as_uuid().to_string())
-                    }
-                    WorkAction::PublishStagedUserInputs { deliveries, .. } => {
-                        deliveries.iter().any(|delivery| {
-                            input_ids
-                                .contains(&delivery.event.content.message_id.as_uuid().to_string())
-                        })
-                    }
-                    WorkAction::StageUserInput { input_json, .. } => {
-                        serde_json::from_str::<UserInput>(input_json)
-                            .map_or(true, |input| input_ids.contains(&input.input_id))
-                    }
-                    WorkAction::WithdrawStagedUserInput { input_id, .. } => {
-                        input_ids.contains(input_id)
-                    }
-                    WorkAction::WithdrawDelivery { .. } => true,
-                    _ => false,
-                })
-    }) {
+    if operations.values().any(|operation| operation.uncertain) {
         return Err(UserInputQueueError::OutcomeUnknown);
     }
     Ok(())
 }
 
-fn project_withdrawn_results(
-    receipt: &mut UserInputQueueReceipt,
-    commands: &[WorkCommand],
-    snapshot: &WorkSnapshot,
-) {
-    for command in commands {
-        let deliveries = match &command.action {
-            WorkAction::PublishDelivery { delivery } => std::slice::from_ref(delivery),
-            WorkAction::PublishStagedUserInputs { deliveries, .. } => deliveries.as_slice(),
-            WorkAction::WithdrawDelivery { delivery_id, .. } => snapshot
-                .state
-                .deliveries
-                .get(delivery_id)
-                .map(|record| std::slice::from_ref(&record.publication))
-                .unwrap_or(&[]),
-            _ => &[],
-        };
-        for delivery in deliveries {
-            if snapshot
-                .state
-                .deliveries
-                .get(&delivery.delivery_id)
-                .is_some_and(|record| record.disposition.is_some())
-            {
-                for result in &mut receipt.results {
-                    if result.input_id == delivery.event.content.message_id.as_uuid().to_string() {
-                        result.state = UserInputState::Withdrawn;
-                    }
-                }
-            }
-        }
-    }
-}
-
-fn recover_pending(
-    snapshot: &WorkSnapshot,
-    command_id: &str,
+fn frozen_operation(
     fingerprint: u64,
-    input_ids: &[String],
-) -> Result<Vec<WorkCommand>, UserInputQueueError> {
-    let mut recovered = Vec::new();
-    for command in &snapshot.pending_commands {
-        if let WorkAction::PublishStagedUserInputs { deliveries, .. } = &command.action {
-            let identities = deliveries
-                .iter()
-                .map(|delivery| {
-                    serde_json::from_str::<PublicationIdentity>(
-                        delivery.event.causation_id.as_deref().unwrap_or_default(),
-                    )
-                })
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|_| UserInputQueueError::IdentityConflict)?;
-            if identities
-                .iter()
-                .any(|identity| identity.command_id == command_id)
-            {
-                if identities.len() != input_ids.len()
-                    || identities.iter().any(|identity| {
-                        identity.command_id != command_id
-                            || identity.fingerprint != fingerprint
-                            || !input_ids.contains(&identity.input.input_id)
-                    })
-                {
-                    return Err(UserInputQueueError::IdentityConflict);
-                }
-                recovered.push(command.clone());
-            }
-            continue;
-        }
-        let association = match &command.action {
-            WorkAction::StageUserInput {
-                input_json,
-                command_id,
-                fingerprint,
-            } => serde_json::from_str::<UserInput>(input_json)
-                .ok()
-                .map(|input| (command_id.clone(), *fingerprint, input.input_id)),
-            WorkAction::WithdrawStagedUserInput {
-                input_id,
-                command_id,
-                fingerprint,
-            } => Some((command_id.clone(), *fingerprint, input_id.clone())),
-            WorkAction::PublishDelivery { delivery } => delivery
-                .event
-                .causation_id
-                .as_deref()
-                .and_then(|json| serde_json::from_str::<PublicationIdentity>(json).ok())
-                .map(|identity| {
-                    (
-                        identity.command_id,
-                        identity.fingerprint,
-                        identity.input.input_id,
-                    )
-                }),
-            WorkAction::WithdrawDelivery {
-                authorization_ref,
-                delivery_id,
-                ..
-            } => serde_json::from_str::<WithdrawalIdentity>(authorization_ref)
-                .ok()
-                .and_then(|identity| {
-                    snapshot.state.deliveries.get(delivery_id).map(|delivery| {
-                        (
-                            identity.command_id,
-                            identity.fingerprint,
-                            delivery
-                                .publication
-                                .event
-                                .content
-                                .message_id
-                                .as_uuid()
-                                .to_string(),
-                        )
-                    })
-                }),
-            _ => None,
-        };
-        if let Some((owner, original_fingerprint, input_id)) = association {
-            if owner != command_id {
-                continue;
-            }
-            if original_fingerprint != fingerprint || !input_ids.contains(&input_id) {
-                return Err(UserInputQueueError::IdentityConflict);
-            }
-            recovered.push(command.clone());
-        }
+    commands: Vec<WorkCommand>,
+    reconcile: bool,
+) -> FrozenOperation {
+    FrozenOperation {
+        fingerprint,
+        commands,
+        receipt: None,
+        attempted: reconcile,
+        uncertain: reconcile,
+        rejection: None,
     }
-    if !snapshot.pending_commands.is_empty() && recovered.is_empty() {
-        return Err(UserInputQueueError::OutcomeUnknown);
-    }
-    Ok(recovered)
 }
-
-#[cfg(test)]
-#[path = "durable_test.rs"]
-mod tests;
 
 #[cfg(test)]
 #[path = "staging_test.rs"]
 mod staging_tests;
+#[cfg(test)]
+#[path = "durable_test.rs"]
+mod tests;

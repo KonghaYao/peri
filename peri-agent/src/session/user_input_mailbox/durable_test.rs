@@ -30,15 +30,56 @@ fn input(mailbox: &UserInputMailbox) -> EnqueueUserInputRequest {
     }
 }
 
-async fn load(fixture: &TestSession) -> WorkSnapshot {
+async fn load(fixture: &TestSession) -> WorkInspection {
     fixture
         .resources
-        .load_session_work(&WorkQuery {
-            session_id: fixture.thread_id(),
-            limit: 1,
-        })
+        .inspect_work(&WorkQuery::new(
+            fixture.thread_id(),
+            WorkSelector::Availability,
+        ))
         .await
         .unwrap()
+}
+
+fn candidates(inspection: &WorkInspection) -> &[WorkCandidate] {
+    let WorkPage::Availability(availability) = &inspection.page else {
+        panic!("availability page required")
+    };
+    &availability.candidates
+}
+
+async fn input_delivery(fixture: &TestSession, input_id: &str) -> Delivery {
+    let inspected = fixture
+        .resources
+        .inspect_work(&WorkQuery::new(
+            fixture.thread_id(),
+            WorkSelector::Draft {
+                input_id: input_id.into(),
+            },
+        ))
+        .await
+        .unwrap();
+    let WorkPage::Drafts(drafts) = inspected.page else {
+        panic!("draft page required")
+    };
+    delivery(fixture, drafts[0].publication_id.as_ref().unwrap()).await
+}
+
+async fn delivery(fixture: &TestSession, delivery_id: &str) -> Delivery {
+    let inspected = fixture
+        .resources
+        .inspect_work(&WorkQuery::new(
+            fixture.thread_id(),
+            WorkSelector::Delivery {
+                delivery_id: delivery_id.into(),
+            },
+        ))
+        .await
+        .unwrap();
+    let WorkPage::Deliveries(mut deliveries) = inspected.page else {
+        panic!("delivery page required")
+    };
+    deliveries.pop().unwrap()
 }
 
 fn takeback(
@@ -55,7 +96,7 @@ fn takeback(
 
 async fn admit(fixture: &TestSession) -> WorkAdmission {
     let snapshot = load(fixture).await;
-    let candidate = &snapshot.candidates[0];
+    let candidate = &candidates(&snapshot)[0];
     let admission = WorkAdmission {
         session_id: fixture.thread_id(),
         admission_id: uuid::Uuid::now_v7().to_string(),
@@ -88,7 +129,7 @@ async fn admit(fixture: &TestSession) -> WorkAdmission {
 
 fn claim_command(
     fixture: &TestSession,
-    snapshot: &WorkSnapshot,
+    snapshot: &WorkInspection,
     admission: &WorkAdmission,
 ) -> WorkCommand {
     WorkCommand {
@@ -97,12 +138,12 @@ fn claim_command(
         mutation_id: uuid::Uuid::now_v7().to_string(),
         action: WorkAction::ClaimBatch {
             guard: WorkGuard {
-                expected_revision: snapshot.state.revision,
+                expected_revision: snapshot.head.change_seq,
                 expected_control_generation: snapshot.control.control_generation,
                 execution: admission.execution.clone(),
             },
             batch_id: admission.work_id.clone(),
-            delivery_ids: snapshot.candidates[0].delivery_ids.clone(),
+            delivery_ids: candidates(snapshot)[0].delivery_ids.clone(),
         },
     }
 }
@@ -116,7 +157,7 @@ async fn accepted_has_recoverable_required_receipt_and_distinct_delivery_identit
     let snapshot = load(&fixture).await;
     assert_eq!(receipt.work_receipts.len(), 2);
     assert_eq!(receipt.work_receipts[0].decision, WorkDecision::Accepted);
-    let delivery = snapshot.state.deliveries.values().next().unwrap();
+    let delivery = input_delivery(&fixture, &request.input_id).await;
     assert_eq!(
         delivery.publication.policy.requirement,
         MessageRequirement::Required
@@ -139,7 +180,7 @@ async fn accepted_has_recoverable_required_receipt_and_distinct_delivery_identit
         )
     );
     assert_ne!(delivery.publication.delivery_id, request.input_id);
-    assert!(!delivery.projected);
+    assert!(delivery.projection.is_none());
     let messages = inbox.queue().drain_all();
     assert_eq!(messages.len(), 1);
     assert_eq!(
@@ -171,14 +212,14 @@ async fn busy_enqueue_stages_draft_until_idle_without_interrupting_execution() {
     assert!(!cancel.is_cancelled());
     assert!(inbox.queue().drain_all().is_empty());
     let staged = load(&fixture).await;
-    assert!(staged.state.deliveries.is_empty());
-    assert!(staged.state.obligations.is_empty());
-    assert!(staged.candidates.is_empty());
-    assert_eq!(staged.state.staged_user_inputs.len(), 1);
+    assert_eq!(staged.head.required_count, 0);
+    assert_eq!(staged.head.unresolved_effects, 0);
+    assert!(candidates(&staged).is_empty());
+    assert_eq!(mailbox.snapshot().items.len(), 1);
     mailbox.enter_idle_durable().await.unwrap();
     mailbox.finish_attempt(&ticket, UserInputAttemptOutcome::Completed);
     assert_eq!(inbox.queue().drain_all().len(), 1);
-    assert_eq!(load(&fixture).await.state.deliveries.len(), 1);
+    assert_eq!(load(&fixture).await.head.required_count, 1);
     assert!(mailbox.reserve_run().is_none());
 }
 
@@ -195,7 +236,7 @@ async fn restart_replay_returns_original_publication_receipt() {
         accepted.publication_generations,
         replay.publication_generations
     );
-    assert_eq!(load(&fixture).await.state.deliveries.len(), 1);
+    assert_eq!(load(&fixture).await.head.required_count, 1);
     assert_eq!(inbox.queue().drain_all().len(), 1);
 }
 
@@ -214,6 +255,7 @@ async fn withdraw_then_resend_new_generation_cannot_revive_old_event() {
         old.original_draft
     );
     assert!(inbox.queue().drain_all().is_empty());
+    let old_delivery = input_delivery(&fixture, &old.input_id).await;
     let mut new = old.clone();
     new.command_id = uuid::Uuid::now_v7().to_string();
     let new_receipt = mailbox.enqueue_durable(&new).await.unwrap();
@@ -222,26 +264,12 @@ async fn withdraw_then_resend_new_generation_cannot_revive_old_event() {
         new_receipt.publication_generations
     );
     mailbox.enqueue_durable(&old).await.unwrap();
-    let snapshot = load(&fixture).await;
-    assert_eq!(snapshot.state.deliveries.len(), 2);
-    assert_eq!(
-        snapshot
-            .state
-            .deliveries
-            .values()
-            .filter(|record| record.disposition.is_none())
-            .count(),
-        1
-    );
-    assert_eq!(
-        snapshot
-            .state
-            .obligations
-            .values()
-            .filter(|record| record.status == ObligationStatus::Abandoned)
-            .count(),
-        1
-    );
+    let archived = delivery(&fixture, &old_delivery.delivery_id).await;
+    assert!(archived.disposition.is_some());
+    assert_eq!(archived.obligation, ObligationStatus::Abandoned);
+    let current = input_delivery(&fixture, &new.input_id).await;
+    assert!(current.disposition.is_none());
+    assert_ne!(current.delivery_id, archived.delivery_id);
     assert_eq!(inbox.queue().drain_all().len(), 1);
 }
 
@@ -270,8 +298,8 @@ async fn durable_claim_blocks_withdrawal_and_keeps_canonical_message_identity() 
         Err(UserInputQueueError::DurableRejected(_))
     ));
     let snapshot = load(&fixture).await;
-    let delivery = snapshot.state.deliveries.values().next().unwrap();
-    assert!(delivery.projected);
+    let delivery = input_delivery(&fixture, &request.input_id).await;
+    assert!(delivery.projection.is_some());
     assert_eq!(
         delivery
             .publication
@@ -328,16 +356,10 @@ async fn withdrawal_wins_before_claim_cas_without_processing_projection() {
         .await
         .unwrap();
     assert!(matches!(receipt.decision, WorkDecision::Rejected { .. }));
-    assert!(
-        !load(&fixture)
-            .await
-            .state
-            .deliveries
-            .values()
-            .next()
-            .unwrap()
-            .projected
-    );
+    assert!(input_delivery(&fixture, &request.input_id)
+        .await
+        .projection
+        .is_none());
 }
 
 #[tokio::test]
@@ -366,7 +388,7 @@ async fn store_write_failure_never_accepts_or_hands_off_and_freezes_original_com
     let operations = mailbox.durable.as_ref().unwrap().operations.lock().await;
     assert_eq!(operations[&original.command_id].commands[0], frozen);
     assert!(inbox.queue().drain_all().is_empty());
-    assert!(load(&fixture).await.state.deliveries.is_empty());
+    assert_eq!(load(&fixture).await.head.required_count, 0);
 }
 
 #[tokio::test]
@@ -393,6 +415,7 @@ async fn stop_withdrawal_is_durable_before_return_to_draft() {
     let (mailbox, inbox) = mailbox(&fixture, fixture.resources());
     let request = input(&mailbox);
     mailbox.enqueue_durable(&request).await.unwrap();
+    let original_delivery = input_delivery(&fixture, &request.input_id).await;
     mailbox
         .reclaim_unclaimed_durable("stop-command", 0)
         .await
@@ -403,7 +426,9 @@ async fn stop_withdrawal_is_durable_before_return_to_draft() {
     );
     let snapshot = load(&fixture).await;
     assert_eq!(
-        snapshot.state.obligations.values().next().unwrap().status,
+        delivery(&fixture, &original_delivery.delivery_id)
+            .await
+            .obligation,
         ObligationStatus::Abandoned
     );
     assert!(inbox.queue().drain_all().is_empty());
@@ -417,86 +442,33 @@ async fn stop_withdrawal_is_durable_before_return_to_draft() {
         mailbox.dispatch_durable(&dispatch).await.unwrap().results[0].state,
         UserInputState::Dispatching
     );
-    assert_eq!(load(&fixture).await.state.deliveries.len(), 2);
+    assert_ne!(
+        input_delivery(&fixture, &dispatch.input_ids[0])
+            .await
+            .delivery_id,
+        original_delivery.delivery_id
+    );
 }
 
 #[tokio::test]
-async fn pending_withdrawal_recovery_uses_original_revision_not_latest_snapshot() {
+async fn pending_commands_keep_original_authorization_without_revision_refresh() {
     let fixture = TestSession::open().await;
-    let (mailbox, _) = mailbox(&fixture, fixture.resources());
+    let (mailbox, _) = mailbox(&fixture, fixture.read_only_resources().await);
     let request = input(&mailbox);
-    mailbox.enqueue_durable(&request).await.unwrap();
-    let withdrawal = takeback(&mailbox, &request);
-    let fingerprint = compute_fingerprint(("takeback", &withdrawal, None::<u64>));
-    let mut snapshot = load(&fixture).await;
-    let frozen_revision = snapshot.state.revision;
-    let command = WorkCommand {
-        session_id: fixture.thread_id(),
-        recipient_lifecycle: 1,
-        mutation_id: "pending-original-withdraw".into(),
-        action: WorkAction::WithdrawDelivery {
-            expected_revision: frozen_revision,
-            expected_control_generation: None,
-            delivery_id: snapshot.state.deliveries.keys().next().unwrap().clone(),
-            authorization_ref: serde_json::to_string(&WithdrawalIdentity {
-                command_id: withdrawal.command_id.clone(),
-                fingerprint,
-                expected_revision: frozen_revision,
-                expected_control_generation: None,
-            })
-            .unwrap(),
-        },
-    };
-    snapshot.pending_commands.push(command.clone());
-    snapshot.state.revision += 10;
-    let recovered = recover_pending(
-        &snapshot,
-        &withdrawal.command_id,
-        fingerprint,
-        &[request.input_id],
-    )
-    .unwrap();
-    assert_eq!(recovered, vec![command]);
-}
-
-#[tokio::test]
-async fn pending_publication_blocks_new_command_after_mailbox_reconstruction() {
-    let fixture = TestSession::open().await;
-    let (mailbox, _) = mailbox(&fixture, fixture.resources());
-    let request = input(&mailbox);
-    let fingerprint = compute_fingerprint(("enqueue", &request));
-    let command = new_publication(
-        &fixture.thread_id(),
-        1,
-        UserInput {
-            input_id: request.input_id.clone(),
-            content: request.content.clone(),
-            original_draft: request.original_draft.clone(),
-        },
-        &request.command_id,
-        fingerprint,
-    )
-    .unwrap();
-    let mut snapshot = load(&fixture).await;
-    snapshot.pending_commands.push(command.clone());
     assert_eq!(
-        recover_pending(
-            &snapshot,
-            "different-send-command",
-            fingerprint,
-            std::slice::from_ref(&request.input_id)
-        )
-        .unwrap_err(),
+        mailbox.enqueue_durable(&request).await.unwrap_err(),
         UserInputQueueError::OutcomeUnknown
     );
+    let operations = mailbox.durable.as_ref().unwrap().operations.lock().await;
+    let operation = &operations[&request.command_id];
+    let frozen = operation.commands.clone();
+    assert!(operation.attempted);
+    assert!(operation.uncertain);
+    drop(operations);
     assert_eq!(
-        recover_pending(
-            &snapshot,
-            &request.command_id,
-            fingerprint,
-            &[request.input_id]
-        )
-        .unwrap(),
-        vec![command]
+        mailbox.enqueue_durable(&request).await.unwrap_err(),
+        UserInputQueueError::OutcomeUnknown
     );
+    let operations = mailbox.durable.as_ref().unwrap().operations.lock().await;
+    assert_eq!(operations[&request.command_id].commands, frozen);
 }

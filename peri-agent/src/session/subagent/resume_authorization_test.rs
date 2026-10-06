@@ -111,13 +111,17 @@ async fn prepare_resume_invocation_for(
 ) {
     let parent_id = initiator.to_owned();
     let snapshot = store
-        .load_session_work(&WorkQuery {
-            session_id: parent_id.clone(),
-            limit: 1,
-        })
+        .inspect_work(&WorkQuery::new(parent_id.clone(), WorkSelector::Head))
         .await
         .unwrap();
     let arguments = "{}".to_owned();
+    let arguments_ref = crate::agent::stages::prepare_work_evidence(
+        store,
+        &parent_id,
+        arguments.as_bytes().to_vec(),
+    )
+    .await
+    .unwrap();
     let digest = format!("{:x}", Sha256::digest(arguments.as_bytes()));
     let receipt = store
         .apply_work_mutation(&WorkCommand {
@@ -125,15 +129,15 @@ async fn prepare_resume_invocation_for(
             recipient_lifecycle: snapshot.control.lifecycle,
             mutation_id: format!("authorization-resume:{invocation_id}"),
             action: WorkAction::PrepareInvocation {
-                expected_revision: snapshot.state.revision,
+                expected_revision: snapshot.head.change_seq,
                 intent: InvocationIntent {
                     invocation_id: invocation_id.into(),
                     tool_call_id: invocation_id.into(),
                     tool_name: "Agent".into(),
-                    arguments_json: arguments.clone(),
+                    arguments: arguments_ref.clone(),
                     arguments_digest: digest.clone(),
                     effective_tool_name: "Agent".into(),
-                    effective_arguments_json: arguments,
+                    effective_arguments: arguments_ref,
                     effective_arguments_digest: digest,
                     owner_identity: "fixture-agent-owner".into(),
                     scope_id: scope.into(),
@@ -162,14 +166,11 @@ fn current_resume_config(
 }
 
 async fn saved_metadata(store: &MockSessionResources, child_id: &str) -> String {
-    let work = store
-        .load_session_work(&WorkQuery {
-            session_id: child_id.into(),
-            limit: 1,
-        })
+    crate::session::work_access::descriptor(store, child_id, 1)
         .await
-        .unwrap();
-    work.state.child_resume_metadata[&work.control.lifecycle].clone()
+        .unwrap()
+        .child_resume_metadata_json
+        .unwrap()
 }
 
 async fn save_authorization_sibling(store: &MockSessionResources, child_id: &str) -> String {
@@ -237,18 +238,17 @@ async fn test_resume_cross_admission_preserves_saved_authorization_ceiling() {
             .expect("new admission must not equal the original authorization ref");
         assert_eq!(resumed.child_thread_id, child_id);
         assert_eq!(saved_metadata(&store, &child_id).await, saved);
-        let work = store
-            .load_session_work(&WorkQuery {
-                session_id: child_id.clone(),
-                limit: 64,
-            })
-            .await
-            .unwrap();
-        assert!(work.state.work_delegations.values().any(|binding| {
-            binding.invocation_id == invocation_id
-                && binding.authorization_ref == authorization_ref
-                && binding.initiator_session_id == "authorization-parent"
-        }));
+        let effect = crate::session::work_access::effect(
+            store.as_ref(),
+            "authorization-parent",
+            invocation_id,
+        )
+        .await
+        .unwrap();
+        let binding = effect.binding.unwrap();
+        assert_eq!(binding.invocation_id, invocation_id);
+        assert_eq!(binding.authorization_ref, authorization_ref);
+        assert_eq!(binding.initiator_session_id, "authorization-parent");
         assert_eq!(
             store.load_meta(&child_id).await.unwrap().agent_status,
             AgentStatus::Done
@@ -274,18 +274,14 @@ async fn test_resume_current_invocation_foreign_scope_is_rejected() {
         store.load_meta(&child_id).await.unwrap().agent_status,
         AgentStatus::Done
     );
-    let work = store
-        .load_session_work(&WorkQuery {
-            session_id: child_id,
-            limit: 1,
-        })
-        .await
-        .unwrap();
-    assert!(!work
-        .state
-        .work_delegations
-        .values()
-        .any(|binding| binding.invocation_id == "foreign-scope"));
+    let effect = crate::session::work_access::effect(
+        store.as_ref(),
+        "authorization-parent",
+        "foreign-scope",
+    )
+    .await
+    .unwrap();
+    assert!(effect.binding.is_none());
 }
 
 #[tokio::test]
@@ -322,20 +318,13 @@ async fn test_resume_same_root_sibling_uses_its_own_current_authorization() {
         .unwrap();
     assert_eq!(resumed.child_thread_id, child_id);
     assert_eq!(saved_metadata(&store, &child_id).await, saved);
-    let work = store
-        .load_session_work(&WorkQuery {
-            session_id: child_id.clone(),
-            limit: 64,
-        })
+    let effect = crate::session::work_access::effect(store.as_ref(), &sibling_id, "sibling-resume")
         .await
         .unwrap();
-    assert!(work
-        .state
-        .work_delegations
-        .values()
-        .any(|binding| binding.invocation_id == "sibling-resume"
-            && binding.initiator_session_id == sibling_id
-            && binding.authorization_ref == "sibling-admission"));
+    let binding = effect.binding.unwrap();
+    assert_eq!(binding.invocation_id, "sibling-resume");
+    assert_eq!(binding.initiator_session_id, sibling_id);
+    assert_eq!(binding.authorization_ref, "sibling-admission");
     assert_eq!(
         store.load_meta(&child_id).await.unwrap().agent_status,
         AgentStatus::Done
@@ -366,10 +355,7 @@ async fn test_resume_saved_ceiling_requires_original_authorization_evidence() {
             _ => unreachable!(),
         }
         let work = store
-            .load_session_work(&WorkQuery {
-                session_id: child_id.clone(),
-                limit: 1,
-            })
+            .inspect_work(&WorkQuery::new(child_id.clone(), WorkSelector::Head))
             .await
             .unwrap();
         let receipt = store
@@ -378,7 +364,7 @@ async fn test_resume_saved_ceiling_requires_original_authorization_evidence() {
                 recipient_lifecycle: work.control.lifecycle,
                 mutation_id: format!("corrupt-metadata:{corruption}"),
                 action: WorkAction::BindChildResumeMetadata {
-                    expected_revision: work.state.revision,
+                    expected_revision: work.head.change_seq,
                     metadata_json: serde_json::to_string(&metadata).unwrap(),
                 },
             })

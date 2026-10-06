@@ -16,6 +16,7 @@ mod filesystem;
 mod local_port;
 mod machine;
 mod work;
+mod work_store;
 #[cfg(not(target_os = "emscripten"))]
 pub use machine::adopt_file_identity;
 pub use machine::current as current_machine_id;
@@ -38,7 +39,10 @@ mod sqlite_store;
 pub use filesystem::FilesystemThreadStore;
 pub use resources::SessionResourcesImpl;
 #[cfg(not(target_os = "emscripten"))]
+pub use sqlite_store::migrate_stopped_work_store;
+#[cfg(not(target_os = "emscripten"))]
 pub use sqlite_store::{ReadOnlyStoreErrorKind, ReadOnlyThreadStoreError, SqliteThreadStore};
+pub use work_store::migration::{StoppedWriterApproval, WorkMigrationReport};
 
 pub(crate) use open::{AccessIntent, LocatorError, ResolvedLocator, SessionStoreOpenRequest};
 

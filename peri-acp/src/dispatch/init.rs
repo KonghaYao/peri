@@ -3,12 +3,12 @@
 // [TRAP] initialize 响应必须声明全部 session capabilities
 // 与 TUI 路径的 AcpServerConfig 对齐，否则 client 无法使用对应功能。
 
+use agent_client_protocol_schema::ProtocolVersion;
 use agent_client_protocol_schema::v1::{
     AgentCapabilities, InitializeResponse, McpCapabilities, PromptCapabilities,
     SessionCapabilities, SessionCloseCapabilities, SessionDeleteCapabilities,
     SessionForkCapabilities, SessionListCapabilities, SessionResumeCapabilities,
 };
-use agent_client_protocol_schema::ProtocolVersion;
 use peri_acp_types::PeriCaps;
 
 /// Construct the full [`InitializeResponse`] with all session lifecycle
@@ -35,6 +35,11 @@ pub fn build_initialize_response(peri_caps: &PeriCaps) -> InitializeResponse {
                 .delete(SessionDeleteCapabilities::new()),
         )
         .mcp_capabilities(McpCapabilities::new().acp(true).http(true));
-    let caps = caps.meta(peri_caps.to_agent_meta());
+    let mut metadata = peri_caps.to_agent_meta();
+    metadata.insert(
+        "peri.executionProtocol".into(),
+        serde_json::json!(crate::host::execution_admission::EXECUTION_PROTOCOL_VERSION),
+    );
+    let caps = caps.meta(metadata);
     InitializeResponse::new(ProtocolVersion::V1).agent_capabilities(caps)
 }

@@ -43,7 +43,7 @@ async fn database_snapshot(path: &std::path::Path) -> DatabaseSnapshot {
     .await
     .unwrap_or_default();
     let message_rows = sqlx::query_scalar(
-        "SELECT printf('%Q|%Q|%Q|%Q|%Q|%Q|%Q', message_id, thread_id, role, content,
+        "SELECT printf('%Q|%Q|%Q|%Q|%Q|%Q|%Q', message_id, thread_id, role, content_ref,
             truncated, excluded, projection) FROM messages ORDER BY message_id",
     )
     .fetch_all(&mut connection)
@@ -100,8 +100,11 @@ async fn create_schema_without(path: &std::path::Path, omitted_table: &str, omit
         ),
     ];
     let message_definitions = [
+        ("message_id", "message_id TEXT NOT NULL"),
         ("thread_id", "thread_id TEXT NOT NULL"),
-        ("content", "content TEXT NOT NULL"),
+        ("role", "role TEXT NOT NULL"),
+        ("content_ref", "content_ref TEXT NOT NULL"),
+        ("transcript_seq", "transcript_seq INTEGER NOT NULL"),
     ];
     let columns = |table: &str, definitions: &[(&str, &str)]| {
         definitions
@@ -127,6 +130,12 @@ async fn create_schema_without(path: &std::path::Path, omitted_table: &str, omit
         .execute(&mut connection)
         .await
         .unwrap();
+    for statement in crate::sessions::work_store::schema::initialization_sql() {
+        sqlx::query(statement)
+            .execute(&mut connection)
+            .await
+            .unwrap();
+    }
     connection.close().await.unwrap();
 }
 

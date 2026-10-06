@@ -1,6 +1,6 @@
 use peri_acp_types::session_resources::work::{
-    reduce_work, DeliveryRecord, WorkCommand, WorkDeliveryQuery, WorkQuery, WorkReceipt,
-    WorkResolution, WorkSnapshot,
+    transition_work, EvidenceQuery, EvidenceRecord, EvidenceWrite, PayloadRef, WorkCommand,
+    WorkInspection, WorkQuery, WorkReceipt, WorkResolution,
 };
 use peri_acp_types::session_resources::{SessionResourceError, SessionResourceResult};
 use turso_serverless::Value;
@@ -9,9 +9,13 @@ use super::{
     ledger::{LedgerRow, OperationId, OperationIdentity},
     mutation::{MutationOutcome, OperationResolution, QualifiedMutation},
     session_data::RemoteSessionData,
-    sql::{int_at, text_at, StatementSpec},
+    sql::{text_at, StatementSpec},
 };
-use crate::sessions::{failure::corrupt, work};
+use crate::sessions::{failure::corrupt, work, work_store};
+
+#[path = "work_records/transport.rs"]
+mod transport;
+pub(super) use transport::{rows, specifications, validate_budget};
 
 fn identity(command: &WorkCommand) -> SessionResourceResult<OperationIdentity> {
     Ok(OperationIdentity::with_digest(
@@ -22,135 +26,47 @@ fn identity(command: &WorkCommand) -> SessionResourceResult<OperationIdentity> {
 }
 
 impl RemoteSessionData {
-    pub(super) async fn read_work_availability(
-        &self,
-        id: &peri_acp_types::thread::ThreadId,
-    ) -> SessionResourceResult<peri_acp_types::session_resources::work::WorkAvailability> {
-        let results = self
-            .store()
-            .await?
-            .read_batch(vec![StatementSpec::new(
-                work::READ_AVAILABILITY,
-                vec![Value::Text(id.clone())],
-            )])
-            .await?;
-        let row = results
-            .first()
-            .and_then(|rows| rows.first())
-            .ok_or_else(|| corrupt("work availability facts are not readable"))?;
-        match row.as_slice() {
-            [Value::Integer(exists), control, facts, Value::Integer(history)]
-                if matches!(control, Value::Null | Value::Text(_))
-                    && matches!(facts, Value::Null | Value::Text(_)) =>
-            {
-                work::availability(
-                    *exists != 0,
-                    text_at(row, 1),
-                    text_at(row, 2),
-                    *history != 0,
-                )
-            }
-            _ => Err(corrupt("work availability row is not readable")),
-        }
-    }
-
-    pub(super) async fn read_delivery(
-        &self,
-        query: &WorkDeliveryQuery,
-    ) -> SessionResourceResult<Option<DeliveryRecord>> {
-        let row = self
-            .store()
-            .await?
-            .fetch_row(&StatementSpec::new(
-                work::READ_DELIVERY,
-                vec![
-                    Value::Text(query.session_id.clone()),
-                    Value::Text(query.delivery_id.clone()),
-                ],
-            ))
-            .await?
-            .ok_or_else(|| corrupt("work delivery facts are not readable"))?;
-        match row.as_slice() {
-            [Value::Integer(0), Value::Null, Value::Null] => Err(super::session_data::not_found()),
-            [Value::Integer(1), Value::Null, Value::Null] => work::delivery(query, None, None),
-            [Value::Integer(1), Value::Text(kind), Value::Text(json)] => {
-                work::delivery(query, Some(kind), Some(json))
-            }
-            _ => Err(corrupt("work delivery row is not readable")),
-        }
-    }
-
-    pub(super) async fn read_work(&self, query: &WorkQuery) -> SessionResourceResult<WorkSnapshot> {
-        self.read_work_snapshot(query, false)
-            .await
-            .map(|(snapshot, _)| snapshot)
-    }
-
-    async fn read_work_snapshot(
+    pub(super) async fn read_work(
         &self,
         query: &WorkQuery,
-        retain_state_json: bool,
-    ) -> SessionResourceResult<(WorkSnapshot, Option<String>)> {
-        let store = self.store().await?;
-        let mut results = store.read_batch(vec![
-            StatementSpec::new(crate::sessions::control::READ_STATE,vec![Value::Text(query.session_id.clone())]),
-            StatementSpec::new(work::READ_STATE,vec![Value::Text(query.session_id.clone())]),
-            StatementSpec::new("SELECT EXISTS(SELECT 1 FROM threads WHERE id=?1),EXISTS(SELECT 1 FROM messages WHERE thread_id=?1)",vec![Value::Text(query.session_id.clone())]),
-            StatementSpec::new(work::READ_PENDING, vec![Value::Text(query.session_id.clone())]),
-        ]).await?;
-        let control = results[0]
-            .first()
-            .map(|row| text_at(row, 0).ok_or_else(|| corrupt("work control is not readable")))
-            .transpose()?;
-        let state = results[1]
-            .first()
-            .map(|row| text_at(row, 0).ok_or_else(|| corrupt("work state is not readable")))
-            .transpose()?;
-        let facts = results[2]
-            .first()
-            .ok_or_else(|| corrupt("work session facts are not readable"))?;
-        let exists =
-            int_at(facts, 0).ok_or_else(|| corrupt("work session facts are not readable"))? != 0;
-        let has_history =
-            int_at(facts, 1).ok_or_else(|| corrupt("work session facts are not readable"))? != 0;
-        if !exists && state.is_none() && control.is_none() {
-            return Err(super::session_data::not_found());
-        }
-        let mut snapshot = WorkSnapshot::from_state(
-            query,
-            crate::sessions::control::state(control)?,
-            work::state(state, has_history)?,
-        );
-        snapshot.pending_commands = results[3]
-            .iter()
-            .map(|row| {
-                work::original_command(
-                    text_at(row, 0).ok_or_else(|| corrupt("owned command is not readable"))?,
-                )
-            })
-            .collect::<SessionResourceResult<_>>()?;
-        if !snapshot.pending_commands.is_empty() {
-            snapshot.blocked = true;
-            snapshot.candidates.clear();
-        }
-        let state_json = if retain_state_json {
-            match results[1].pop().and_then(|row| row.into_iter().next()) {
-                Some(Value::Text(json)) => Some(json),
-                None => None,
-                _ => return Err(corrupt("work state is not readable")),
-            }
-        } else {
-            None
-        };
-        Ok((snapshot, state_json))
+    ) -> SessionResourceResult<WorkInspection> {
+        let statements = specifications(work_store::inspection_plan(query)?)?;
+        let results = rows(self.store().await?.read_batch(statements).await?)?;
+        work_store::decode_inspection(query, &results)
+    }
+
+    pub(super) async fn read_work_evidence(
+        &self,
+        query: &EvidenceQuery,
+    ) -> SessionResourceResult<EvidenceRecord> {
+        let statements = specifications(work_store::evidence_plan(query)?)?;
+        let results = rows(self.store().await?.read_batch(statements).await?)?;
+        work_store::decode_evidence(query, &results)
+    }
+
+    pub(super) async fn prepare_work_evidence(
+        &self,
+        write: &EvidenceWrite,
+    ) -> SessionResourceResult<PayloadRef> {
+        let (reference, statements) = work_store::prepare_evidence_plan(write)?;
+        let effects = specifications(statements)?;
+        self.commit_effects(
+            "prepare_evidence",
+            &[write.session_id.clone(), work::encode(&reference)?],
+            effects,
+            &write.session_id,
+        )
+        .await?;
+        Ok(reference)
     }
 
     pub(super) async fn work_resolution(
         &self,
         command: &WorkCommand,
     ) -> SessionResourceResult<Option<WorkResolution>> {
-        let store = self.store().await?;
-        let row = store
+        let row = self
+            .store()
+            .await?
             .fetch_row(&StatementSpec::new(
                 work::READ_RECEIPT,
                 vec![Value::Text(command.mutation_id.clone())],
@@ -169,6 +85,7 @@ impl RemoteSessionData {
         command: &WorkCommand,
     ) -> SessionResourceResult<WorkReceipt> {
         let identity = identity(command)?;
+        let read_plan = specifications(work_store::read_set(command)?)?;
         if let Some(resolution) = self.work_resolution(command).await? {
             self.acknowledge_work(command).await?;
             return work::receipt(resolution);
@@ -179,34 +96,40 @@ impl RemoteSessionData {
                 self.acknowledge_work(command).await?;
                 return work::receipt(resolution);
             }
-            let (snapshot, state_json) = self
-                .read_work_snapshot(
-                    &WorkQuery {
-                        session_id: command.session_id.clone(),
-                        limit: 64,
-                    },
-                    true,
-                )
-                .await?;
-            let initial_json = work::pre_state_json(state_json, &snapshot.state)?;
-            let parent_command = work::terminal_parent_command(command, &snapshot.state);
-            let reduction = reduce_work(command, &snapshot.control, snapshot.state)?;
-            let effects = work::mutation_effects(
-                command,
-                initial_json,
-                parent_command.as_ref(),
-                &snapshot.control,
-                &reduction,
-            )?
-            .into_iter()
-            .map(|effect| {
-                StatementSpec::new(
-                    effect.sql,
-                    effect.params.into_iter().map(Value::Text).collect(),
-                )
-            })
-            .collect();
             let store = self.store().await?;
+            let results = rows(store.read_batch(read_plan.clone()).await?)?;
+            let facts = work_store::decode_facts(command, &results)?;
+            let transition = transition_work(command, &facts)?;
+            let mut effects = specifications(work_store::sql_plan(command, &facts, &transition)?)?;
+            let retry_guards = effects
+                .iter()
+                .enumerate()
+                .filter_map(|(index, statement)| {
+                    statement
+                        .sql
+                        .contains("SELECT NULL WHERE")
+                        .then_some(index + 1)
+                })
+                .collect::<Vec<_>>();
+            effects.push(StatementSpec::new(
+                work::INSERT_RECEIPT,
+                vec![
+                    Value::Text(command.mutation_id.clone()),
+                    Value::Text(command.session_id.clone()),
+                    Value::Text(command.digest()?),
+                    Value::Text(work::encode(&WorkResolution::Applied {
+                        receipt: transition.receipt,
+                    })?),
+                ],
+            ));
+            effects.push(StatementSpec::new(
+                work::ACK_COMMAND,
+                vec![
+                    Value::Text(command.mutation_id.clone()),
+                    Value::Text(command.digest()?),
+                ],
+            ));
+            validate_budget(&effects)?;
             let outcome = store
                 .apply_qualified(&QualifiedMutation {
                     identity: identity.clone(),
@@ -216,36 +139,23 @@ impl RemoteSessionData {
             drop(store);
             match outcome {
                 MutationOutcome::Applied { .. } => {
-                    self.acknowledge_work(command).await?;
                     return self
                         .work_resolution(command)
                         .await
-                        .map_err(|_| {
-                            SessionResourceError::persistence_uncertain(Some(
-                                command.session_id.clone(),
-                            ))
-                        })?
-                        .ok_or_else(|| {
-                            SessionResourceError::persistence_uncertain(Some(
-                                command.session_id.clone(),
-                            ))
-                        })
+                        .map_err(|_| uncertain(command))?
+                        .ok_or_else(|| uncertain(command))
                         .and_then(work::receipt);
                 }
-                MutationOutcome::Unknown { .. } => {
-                    return Err(SessionResourceError::persistence_uncertain(Some(
-                        command.session_id.clone(),
-                    )))
-                }
+                MutationOutcome::Unknown { .. } => return Err(uncertain(command)),
                 MutationOutcome::ClosedNeverApplied => {
                     return Err(SessionResourceError::conflict(
                         "work mutation was finalized without applying",
                     ))
                 }
                 MutationOutcome::NotApplied {
-                    rejected_statement: Some(4),
+                    rejected_statement: Some(index),
                     ..
-                } => continue,
+                } if retry_guards.contains(&index) => continue,
                 other => {
                     if let Some(resolution) = self.work_resolution(command).await? {
                         return work::receipt(resolution);
@@ -256,9 +166,7 @@ impl RemoteSessionData {
                 }
             }
         }
-        Err(SessionResourceError::persistence_uncertain(Some(
-            command.session_id.clone(),
-        )))
+        Err(uncertain(command))
     }
 
     pub(super) async fn resolve_work(
@@ -320,9 +228,9 @@ impl RemoteSessionData {
             OperationResolution::Applied { .. } => {
                 drop(store);
                 self.acknowledge_work(command).await?;
-                self.work_resolution(command).await?.ok_or_else(|| {
-                    SessionResourceError::persistence_uncertain(Some(command.session_id.clone()))
-                })
+                self.work_resolution(command)
+                    .await?
+                    .ok_or_else(|| uncertain(command))
             }
             OperationResolution::ClosedNeverApplied => {
                 let row = store
@@ -343,6 +251,10 @@ impl RemoteSessionData {
             OperationResolution::StillUnknown { .. } => Ok(WorkResolution::Unknown),
         }
     }
+}
+
+fn uncertain(command: &WorkCommand) -> SessionResourceError {
+    SessionResourceError::persistence_uncertain(Some(command.session_id.clone()))
 }
 
 #[path = "session_work_journal.rs"]

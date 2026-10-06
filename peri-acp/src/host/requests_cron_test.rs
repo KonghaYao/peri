@@ -388,25 +388,35 @@ async fn cron_deployment_registration_and_tick_are_session_scoped() {
         },
     ));
     assert!(sched_a.lock().force_next_fire_to_past(&task_a));
+    use peri_acp_types::session_resources::work::{
+        EvidenceQuery, WorkPage, WorkQuery, WorkSelector,
+    };
     let published = tokio::time::timeout(Duration::from_secs(15), async {
         loop {
             let snapshot = cfg
                 .session_resources
-                .load_session_work(&peri_acp_types::session_resources::work::WorkQuery {
-                    session_id: a.clone(),
-                    limit: 1,
-                })
+                .inspect_work(&WorkQuery::new(&a, WorkSelector::Inbox))
                 .await
                 .unwrap();
-            if snapshot.state.deliveries.values().any(|delivery| {
-                delivery
-                    .publication
-                    .event
-                    .content
-                    .serialized
+            let WorkPage::Deliveries(deliveries) = &snapshot.page else {
+                panic!("expected inbox delivery page");
+            };
+            assert!(snapshot.next_cursor.is_none());
+            for delivery in deliveries {
+                let evidence = cfg
+                    .session_resources
+                    .read_evidence(&EvidenceQuery {
+                        session_id: a.clone(),
+                        reference: delivery.publication.event.content.content.clone(),
+                    })
+                    .await
+                    .unwrap();
+                if String::from_utf8(evidence.bytes)
+                    .unwrap()
                     .contains("session-a-marker")
-            }) {
-                break snapshot;
+                {
+                    return snapshot;
+                }
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
@@ -433,10 +443,15 @@ async fn cron_deployment_registration_and_tick_are_session_scoped() {
         published.control.lifecycle,
         trigger.recipient_control.lifecycle
     );
-    assert!(
-        published.state.admissions.is_empty(),
-        "Peri producer cannot admit attempts"
-    );
+    let admissions = cfg
+        .session_resources
+        .inspect_work(&WorkQuery::new(&a, WorkSelector::CurrentAdmission))
+        .await
+        .unwrap();
+    let WorkPage::Admissions(records) = admissions.page else {
+        panic!("expected admission page");
+    };
+    assert!(records.is_empty(), "Peri producer cannot admit attempts");
     assert!(
         model.prompts.lock().is_empty(),
         "no Rust continuation scheduler execution"

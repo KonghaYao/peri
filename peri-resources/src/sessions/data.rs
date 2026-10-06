@@ -35,23 +35,19 @@ pub struct ChildResumeRecord {
 /// 「未生效」报告成成功，也不得在失败后遗留部分写入。
 #[async_trait]
 pub(crate) trait SessionDataPort: Send + Sync {
-    async fn load_work_availability(
-        &self,
-        id: &ThreadId,
-    ) -> SessionResourceResult<peri_acp_types::session_resources::work::WorkAvailability>;
-    async fn load_work_delivery(
-        &self,
-        query: &peri_acp_types::session_resources::work::WorkDeliveryQuery,
-    ) -> SessionResourceResult<Option<peri_acp_types::session_resources::work::DeliveryRecord>>;
     async fn has_pending_work_mutations(&self, id: &ThreadId) -> SessionResourceResult<bool>;
-    async fn load_work_command(
-        &self,
-        query: &peri_acp_types::session_resources::work::WorkCommandQuery,
-    ) -> SessionResourceResult<Option<peri_acp_types::session_resources::work::OwnedWorkCommand>>;
-    async fn load_session_work(
+    async fn inspect_work(
         &self,
         query: &peri_acp_types::session_resources::work::WorkQuery,
-    ) -> SessionResourceResult<peri_acp_types::session_resources::work::WorkSnapshot>;
+    ) -> SessionResourceResult<peri_acp_types::session_resources::work::WorkInspection>;
+    async fn read_evidence(
+        &self,
+        query: &peri_acp_types::session_resources::work::EvidenceQuery,
+    ) -> SessionResourceResult<peri_acp_types::session_resources::work::EvidenceRecord>;
+    async fn prepare_evidence(
+        &self,
+        write: &peri_acp_types::session_resources::work::EvidenceWrite,
+    ) -> SessionResourceResult<peri_acp_types::session_resources::work::PayloadRef>;
     async fn apply_work_mutation(
         &self,
         command: &peri_acp_types::session_resources::work::WorkCommand,

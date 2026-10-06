@@ -1,49 +1,10 @@
 use super::*;
 use peri_acp_types::session_resources::work::{
-    WorkCommand, WorkQuery, WorkReceipt, WorkResolution, WorkSnapshot,
+    EvidenceWrite, PayloadRef, WorkCommand, WorkInspection, WorkPage, WorkQuery, WorkReceipt,
+    WorkResolution, WorkSelector,
 };
 
 impl MutationGate {
-    pub(in crate::sessions::resources) async fn load_work_availability(
-        &self,
-        id: &ThreadId,
-    ) -> SessionResourceResult<peri_acp_types::session_resources::work::WorkAvailability> {
-        self.ensure_recovery_permitted()?;
-        let root = self.work_root(id).await?;
-        let pending = self.pending_for(&root);
-        let _barrier = pending.barrier.read().await;
-        if pending
-            .work
-            .lock()
-            .expect("pending work lock poisoned")
-            .is_none()
-        {
-            Self::check_pending(&pending, &root)?;
-        }
-        // 通知从未消费 blocked / candidates / pending_commands，不读取或克隆命令正文。
-        self.data.load_work_availability(id).await
-    }
-
-    pub(in crate::sessions::resources) async fn load_work_delivery(
-        &self,
-        query: &peri_acp_types::session_resources::work::WorkDeliveryQuery,
-    ) -> SessionResourceResult<Option<peri_acp_types::session_resources::work::DeliveryRecord>>
-    {
-        self.ensure_recovery_permitted()?;
-        let root = self.work_root(&query.session_id).await?;
-        let pending = self.pending_for(&root);
-        let _barrier = pending.barrier.read().await;
-        if pending
-            .work
-            .lock()
-            .expect("pending work lock poisoned")
-            .is_none()
-        {
-            Self::check_pending(&pending, &root)?;
-        }
-        self.data.load_work_delivery(query).await
-    }
-
     async fn work_root(&self, id: &ThreadId) -> SessionResourceResult<ThreadId> {
         {
             let pending = self.pending.lock().expect("pending writes lock poisoned");
@@ -71,7 +32,8 @@ impl MutationGate {
     pub(in crate::sessions::resources) async fn load_work(
         &self,
         query: &WorkQuery,
-    ) -> SessionResourceResult<WorkSnapshot> {
+    ) -> SessionResourceResult<WorkInspection> {
+        query.validate()?;
         self.ensure_recovery_permitted()?;
         let root = self.work_root(&query.session_id).await?;
         let pending = self.pending_for(&root);
@@ -84,15 +46,29 @@ impl MutationGate {
         if original.is_none() {
             Self::check_pending(&pending, &root)?;
         }
-        let mut snapshot = self.data.load_session_work(query).await?;
-        if let Some(original) = original {
-            if !snapshot.pending_commands.contains(&original) {
-                snapshot.pending_commands.push(original);
+        let mut inspection = self.data.inspect_work(query).await?;
+        if original.is_some() {
+            if let WorkPage::Availability(availability) = &mut inspection.page {
+                availability.blocked = true;
             }
-            snapshot.blocked = true;
-            snapshot.candidates.clear();
         }
-        Ok(snapshot)
+        Ok(inspection)
+    }
+
+    pub(in crate::sessions::resources) async fn prepare_evidence(
+        &self,
+        write: &EvidenceWrite,
+    ) -> SessionResourceResult<PayloadRef> {
+        write.reference()?;
+        self.ensure_session_write()?;
+        let root = self.work_root(&write.session_id).await?;
+        let pending = self.pending_for(&root);
+        let _barrier = pending.barrier.read().await;
+        Self::check_pending(&pending, &root)?;
+        if self.data.has_pending_work_mutations(&root).await? {
+            return Err(SessionResourceError::persistence_uncertain(Some(root)));
+        }
+        self.data.prepare_evidence(write).await
     }
 
     pub(in crate::sessions::resources) async fn apply_work(
@@ -134,25 +110,22 @@ impl MutationGate {
         let root = self.work_root(&command.session_id).await?;
         let pending = self.pending_for(&root);
         let _barrier = pending.barrier.write().await;
-        let snapshot = self
-            .data
-            .load_session_work(&WorkQuery {
-                session_id: root.clone(),
-                limit: 64,
-            })
-            .await;
-        if let Ok(snapshot) = snapshot {
-            if !snapshot.pending_commands.is_empty()
-                && !snapshot.pending_commands.contains(command)
-                && self
-                    .data
-                    .load_work_command(&peri_acp_types::session_resources::work::WorkCommandQuery {
-                        session_id: command.session_id.clone(),
+        if self.data.has_pending_work_mutations(&root).await? {
+            let inspection = self
+                .data
+                .inspect_work(&WorkQuery::new(
+                    &command.session_id,
+                    WorkSelector::Command {
                         mutation_id: command.mutation_id.clone(),
-                    })
-                    .await?
-                    .is_none_or(|owned| owned.command != *command)
-            {
+                    },
+                ))
+                .await?;
+            let WorkPage::Commands(owned) = inspection.page else {
+                return Err(SessionResourceError::conflict(
+                    "owned work command page is invalid",
+                ));
+            };
+            if owned.first().is_none_or(|owned| owned.command != *command) {
                 return Err(SessionResourceError::conflict(
                     "resolve the original owned work mutation",
                 ));
@@ -187,7 +160,10 @@ impl MutationGate {
                 pending.uncertain.store(false, Ordering::Release);
                 return Err(error);
             }
-            Err(_) => return Err(SessionResourceError::persistence_uncertain(Some(root))),
+            Err(error) => {
+                tracing::error!(session_id=%command.session_id,mutation_id=%command.mutation_id,%error,"work resolution failed");
+                return Err(SessionResourceError::persistence_uncertain(Some(root)));
+            }
         };
         if !matches!(resolution, WorkResolution::Unknown) {
             pending

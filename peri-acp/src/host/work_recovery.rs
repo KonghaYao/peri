@@ -1,22 +1,36 @@
 use peri_acp_types::session_resources::{
-    work::{WorkQuery, WorkResolution, WorkSnapshot},
-    SessionResourceResult, SessionResources,
+    SessionResourceError, SessionResourceErrorKind, SessionResourceResult, SessionResources,
+    work::{WorkInspection, WorkPage, WorkQuery, WorkResolution, WorkSelector},
 };
 
 pub(super) async fn resolve_pending(
     resources: &dyn SessionResources,
     query: &WorkQuery,
-) -> SessionResourceResult<WorkSnapshot> {
-    let snapshot = resources.load_session_work(query).await?;
-    for command in &snapshot.pending_commands {
-        match resources.resolve_work_mutation(command).await {
-            Ok(WorkResolution::Unknown) => return Ok(snapshot),
-            Err(error) if error.is_persistence_uncertain() => {
-                return Ok(snapshot);
+) -> SessionResourceResult<WorkInspection> {
+    let mut pending = WorkQuery::new(&query.session_id, WorkSelector::PendingCommands);
+    loop {
+        let inspection = resources.inspect_work(&pending).await?;
+        let WorkPage::Commands(commands) = inspection.page else {
+            return Err(SessionResourceError::new(
+                SessionResourceErrorKind::InvalidInput {
+                    detail: "expected pending command page".into(),
+                },
+            ));
+        };
+        for owned in commands {
+            match resources.resolve_work_mutation(&owned.command).await {
+                Ok(WorkResolution::Unknown) => return resources.inspect_work(query).await,
+                Err(error) if error.is_persistence_uncertain() => {
+                    return resources.inspect_work(query).await;
+                }
+                Err(error) => return Err(error),
+                Ok(_) => {}
             }
-            Err(error) => return Err(error),
-            Ok(_) => {}
         }
+        let Some(cursor) = inspection.next_cursor else {
+            break;
+        };
+        pending.cursor = Some(cursor);
     }
-    resources.load_session_work(query).await
+    resources.inspect_work(query).await
 }

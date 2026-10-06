@@ -40,6 +40,7 @@ pub mod execution_admission;
 pub mod execution_admission_jsonl;
 mod lifecycle;
 mod work_recovery;
+mod work_query;
 mod workspace;
 #[cfg(not(target_os = "emscripten"))]
 mod workspace_resources;

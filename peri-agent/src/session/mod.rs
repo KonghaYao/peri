@@ -41,6 +41,7 @@ pub mod transcript;
 pub(crate) mod test_resources;
 pub mod turn;
 pub mod user_input_mailbox;
+pub(crate) mod work_access;
 pub mod workflow_completion;
 
 pub use config::{PermissionMode, SessionConfig, ThinkingConfig};

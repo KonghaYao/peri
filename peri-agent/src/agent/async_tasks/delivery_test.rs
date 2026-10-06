@@ -94,20 +94,19 @@ async fn assert_terminal_receipt_wakes(source: MessageSource, severity: Reminder
     assert_eq!(reminder.as_reminder().severity, severity);
     let snapshot = bound
         .resources
-        .load_session_work(&WorkQuery {
-            session_id: bound.thread_id(),
-            limit: 1,
-        })
+        .inspect_work(&WorkQuery::new(
+            bound.thread_id(),
+            WorkSelector::Delivery {
+                delivery_id: delivery_id.as_uuid().to_string(),
+            },
+        ))
         .await
         .unwrap();
-    assert!(snapshot
-        .state
-        .deliveries
-        .contains_key(&delivery_id.as_uuid().to_string()));
-    assert_eq!(
-        snapshot.state.obligations[&delivery_id.as_uuid().to_string()].status,
-        ObligationStatus::Pending
-    );
+    let WorkPage::Deliveries(deliveries) = snapshot.page else {
+        panic!("delivery page required")
+    };
+    assert_eq!(deliveries.len(), 1);
+    assert_eq!(deliveries[0].obligation, ObligationStatus::Pending);
     assert!(bound
         .resources
         .load_session_history(&bound.thread_id())

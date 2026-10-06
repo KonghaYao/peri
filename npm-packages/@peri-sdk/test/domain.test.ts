@@ -80,7 +80,7 @@ class FakeTransport implements Transport {
     this.calls.push({ method, params });
     if (method === this.failOn) throw new Error(`failed: ${method}`);
     switch (method) {
-      case "initialize": return { protocolVersion: 1 } as T;
+      case "initialize": return { protocolVersion: 1, agentCapabilities: { _meta: { "peri.executionProtocol": 2 } } } as T;
       case "session/new": return { sessionId: this.newSessionId } as T;
       case "session/load": return {} as T;
       case "session/input/snapshot": return { generation: "generation-1" } as T;

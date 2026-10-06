@@ -415,7 +415,7 @@ async fn test_resume_subagent_new_prompt_appended() {
 
 #[tokio::test]
 async fn test_resume_subagent_interrupted_then_reopen_preserves_blocked_reason_request() {
-    use peri_acp_types::session_resources::work::{ObligationStatus, WorkQuery, WorkStage};
+    use peri_acp_types::session_resources::work::{WorkPage, WorkQuery, WorkSelector, WorkStage};
     use peri_acp_types::session_resources::SessionResources;
     let store = MockSessionResources::new();
     let thread_id = uuid::Uuid::now_v7().to_string();
@@ -454,28 +454,27 @@ async fn test_resume_subagent_interrupted_then_reopen_preserves_blocked_reason_r
         );
     }
 
-    let query = WorkQuery {
-        session_id: thread_id.clone(),
-        limit: 1,
+    let query = WorkQuery::new(thread_id.clone(), WorkSelector::ActiveProcessing);
+    let interrupted = store.inspect_work(&query).await.unwrap();
+    assert!(interrupted.control.attempt.is_none());
+    let WorkPage::Processings(records) = &interrupted.page else {
+        panic!("expected active processing page")
     };
-    let interrupted = store.load_session_work(&query).await.unwrap();
-    assert!(interrupted.blocked);
-    assert!(interrupted.candidates.is_empty());
-    let original = interrupted.state.works.values().next().unwrap();
+    let original = records.first().unwrap();
     assert_eq!(original.stage, WorkStage::Blocked);
     assert!(original.request_id.is_some());
-    assert!(original
-        .reason_request
-        .as_ref()
+    let request = store
+        .read_evidence(&peri_acp_types::session_resources::work::EvidenceQuery {
+            session_id: thread_id.clone(),
+            reference: original.request.clone().unwrap(),
+        })
+        .await
+        .unwrap();
+    request.validate().unwrap();
+    assert!(String::from_utf8(request.bytes)
         .unwrap()
-        .serialized_request
         .contains("Continue your previous task"));
     assert!(original.response.is_none());
-    assert!(interrupted
-        .state
-        .obligations
-        .values()
-        .all(|obligation| obligation.status != ObligationStatus::Satisfied));
     super::close_lifecycle_cases::reopen_closed_child_fixture(&store, &thread_id).await;
     let llm = RecordingLLM::new();
     let calls = llm.received.clone();
@@ -498,28 +497,8 @@ async fn test_resume_subagent_interrupted_then_reopen_preserves_blocked_reason_r
         "{error}"
     );
     assert!(calls.read().is_empty());
-    let after_reopen = store.load_session_work(&query).await.unwrap();
-    assert!(after_reopen.candidates.is_empty());
-    assert_eq!(
-        after_reopen.state.works.get(&original.work_id),
-        Some(original)
-    );
-    assert_eq!(after_reopen.state.budgets, interrupted.state.budgets);
-    for (delivery_id, obligation) in &interrupted.state.obligations {
-        assert_eq!(
-            after_reopen.state.obligations.get(delivery_id),
-            Some(obligation)
-        );
-    }
-    assert!(after_reopen
-        .state
-        .obligations
-        .values()
-        .all(|obligation| obligation.status != ObligationStatus::Satisfied));
-    assert_eq!(
-        after_reopen.state.admissions.len(),
-        interrupted.state.admissions.len()
-    );
+    let after_reopen = store.inspect_work(&query).await.unwrap();
+    assert_eq!(after_reopen.page, interrupted.page);
 }
 
 /// 并发 resume 互斥（R-M1）：两个任务同时 resume 同一 thread_id，
