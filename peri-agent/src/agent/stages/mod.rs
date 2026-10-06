@@ -591,7 +591,9 @@ async fn run_react_loop_inner(context: StageContext, max_iterations: usize) -> L
                     .unwrap_or(false);
                 if should_wait && context.async_ctx.idle_wait_enabled {
                     if let Some(mailbox) = &context.session.user_input_mailbox {
-                        mailbox.enter_idle();
+                        if let Err(error) = mailbox.enter_idle_durable().await {
+                            return LoopResult::Error(anyhow::anyhow!(error).into());
+                        }
                     }
                     // loading 期间的队首输入在 idle 边界交接，直接回 Receive，
                     // 不先发布一个并未真正等待的 TurnSuspended。

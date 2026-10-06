@@ -77,6 +77,11 @@ pub fn reduce_work(
                         .ok_or_else(|| invalid("missing admission record"))?
                         .settled_receipt = Some(receipt.clone())
                 }
+                WorkAction::PublishStagedUserInputs { .. } => {
+                    state
+                        .user_input_publications
+                        .insert(command.mutation_id.clone(), command.clone());
+                }
                 _ => {}
             }
         }
@@ -200,6 +205,65 @@ fn apply(
         }
     }
     match &command.action {
+        WorkAction::StageUserInput {
+            input_json,
+            command_id,
+            fingerprint,
+        } => super::user_input::stage(
+            command,
+            control,
+            state,
+            input_json,
+            command_id,
+            *fingerprint,
+        ),
+        WorkAction::WithdrawStagedUserInput {
+            input_id,
+            command_id,
+            fingerprint,
+        } => super::user_input::withdraw(command, state, input_id, command_id, *fingerprint),
+        WorkAction::PublishStagedUserInputs {
+            expected_revision,
+            expected_control_generation,
+            expected_attempt,
+            interrupt_current,
+            deliveries,
+        } => {
+            revision_guard(state, *expected_revision)?;
+            if *expected_control_generation != control.control_generation {
+                return Err(WorkRejection::StaleControlGeneration);
+            }
+            if *expected_attempt != control.attempt {
+                return Err(WorkRejection::StaleExecution);
+            }
+            super::user_input::publish(
+                command,
+                control,
+                state,
+                deliveries,
+                *interrupt_current,
+                receipt,
+                events,
+            )?;
+            if *interrupt_current && control.status == ControlStatus::Paused {
+                let resumed = crate::session_resources::control::decide_control(
+                    &crate::session_resources::ControlCommand {
+                        session_id: command.session_id.clone(),
+                        command_id: format!("{}:resume", command.mutation_id),
+                        expected_lifecycle: control.lifecycle,
+                        expected_revision: control.revision,
+                        expected_control_generation: control.control_generation,
+                        action: crate::session_resources::ControlAction::Resume,
+                    },
+                    control,
+                );
+                if resumed.decision != crate::session_resources::ControlDecision::Accepted {
+                    return Err(WorkRejection::InvalidTransition);
+                }
+                *next_control = Some(resumed.state);
+            }
+            Ok(())
+        }
         WorkAction::RegisterAdmission { admission } => {
             *next_control = Some(super::admission::register(
                 command, control, state, admission, receipt,
@@ -366,7 +430,13 @@ fn apply(
             {
                 return Err(WorkRejection::StaleControlGeneration);
             }
-            super::delivery::withdraw(state, delivery_id, authorization_ref, receipt)
+            super::delivery::withdraw(state, delivery_id, authorization_ref, receipt)?;
+            super::user_input::withdraw_published(
+                state,
+                delivery_id,
+                expected_control_generation.is_some(),
+            )?;
+            Ok(())
         }
         WorkAction::AbandonDelivery {
             guard,

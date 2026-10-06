@@ -359,6 +359,8 @@ pub(crate) async fn run_prompt(
             // （与主链同一份）；会话未登记时为 None（技能面为空，不回落磁盘）。
             mcp_skill_registry: session_manager.mcp_skill_registry_for(&session_id),
             session_id: Some(session_id.clone()),
+            session_resources: Some(deployment.session_resources.clone()),
+            execution_admission_port: deployment.execution_admission_port.clone(),
             compact_config: {
                 let mut cc = peri_config_snapshot
                     .config

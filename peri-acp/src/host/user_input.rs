@@ -288,6 +288,12 @@ pub(super) fn schedule_mailbox(
         task_scope::HostTaskOwnerKind::Session,
         task_scope::HostTaskKind::ContinuationTurn,
         async move {
+            if let Some(mailbox) = cfg.session_manager.user_input_mailbox_for(&sid) {
+                if let Err(error) = mailbox.publish_next_durable().await {
+                    tracing::warn!(session_id = %sid, %error, "pending input publication unconfirmed");
+                    return;
+                }
+            }
             let query = peri_acp_types::session_resources::work::WorkQuery {
                 session_id: sid.clone(),
                 limit: 1,

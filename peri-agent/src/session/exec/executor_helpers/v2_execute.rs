@@ -263,15 +263,21 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_owned)
                 .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
+            let ticket = mailbox.active_run_ticket().ok_or_else(|| {
+                anyhow::anyhow!("initial prompt execution attachment unavailable")
+            })?;
             mailbox
-                .enqueue_durable(&peri_acp_types::session::EnqueueUserInputRequest {
-                    session_id: req.session_id.clone(),
-                    generation: mailbox.generation().to_owned(),
-                    command_id,
-                    input_id,
-                    content: req.agent_input.content.clone(),
-                    original_draft: req.agent_input.content.text_content(),
-                })
+                .publish_prompt_durable(
+                    &peri_acp_types::session::EnqueueUserInputRequest {
+                        session_id: req.session_id.clone(),
+                        generation: mailbox.generation().to_owned(),
+                        command_id,
+                        input_id,
+                        content: req.agent_input.content.clone(),
+                        original_draft: req.agent_input.content.text_content(),
+                    },
+                    &ticket,
+                )
                 .await
                 .map_err(anyhow::Error::new)?;
         }

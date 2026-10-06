@@ -159,15 +159,50 @@ async fn sdk_observation_recovers_input_ids_only_from_exact_durable_batch() {
         .unwrap();
     assert_eq!(receipt.decision, WorkDecision::Accepted);
     let ticket = mailbox.observe_sdk_run(&admission).await.unwrap();
+    let persisted = fixture
+        .resources
+        .load_session_work(&WorkQuery {
+            session_id: fixture.thread_id(),
+            limit: 1,
+        })
+        .await
+        .unwrap();
+    let batch = &persisted.state.batches[&admission.work_id];
+    assert_eq!(batch.execution, admission.execution);
+    assert_eq!(batch.processing_delivery_ids.len(), 1);
+    let delivery = &persisted.state.deliveries[&batch.processing_delivery_ids[0]];
+    let identity: serde_json::Value =
+        serde_json::from_str(delivery.publication.event.causation_id.as_deref().unwrap()).unwrap();
+    let publication_generation = identity["publication_generation"].as_str().unwrap();
+    let input_id = delivery
+        .publication
+        .event
+        .content
+        .message_id
+        .as_uuid()
+        .to_string();
+    let draft = &persisted.state.staged_user_inputs[&input_id];
+    assert_eq!(draft.command_id, "publication-generation");
+    assert_ne!(publication_generation, draft.command_id);
+    assert_eq!(
+        delivery.publication.event.event_id,
+        format!("user-input:{input_id}:{publication_generation}")
+    );
     let history = fixture
         .resources
         .load_session_history(&fixture.thread_id())
         .await
         .unwrap();
+    assert_eq!(history.len(), 1);
     assert_eq!(mailbox.sdk_run_input_ids(&ticket), vec![history[0].id()]);
     assert_eq!(
+        history[0].id(),
+        delivery.publication.event.content.message_id
+    );
+    assert_eq!(mailbox.sdk_run_publication_generations(&ticket).len(), 1);
+    assert_eq!(
         mailbox.sdk_run_publication_generations(&ticket)[&history[0].id().as_uuid().to_string()],
-        "publication-generation"
+        publication_generation
     );
 }
 

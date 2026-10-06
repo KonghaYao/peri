@@ -92,6 +92,7 @@ struct CommandReceipt {
 
 struct MailboxState {
     revision: u64,
+    projected_revision: u64,
     records: Vec<InputRecord>,
     ready: Vec<String>,
     commands: HashMap<String, CommandReceipt>,
@@ -134,6 +135,7 @@ impl UserInputMailbox {
             inbox,
             state: Mutex::new(MailboxState {
                 revision: 0,
+                projected_revision: 0,
                 records: Vec::new(),
                 ready: Vec::new(),
                 commands: HashMap::new(),

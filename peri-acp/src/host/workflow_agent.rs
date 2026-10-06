@@ -194,6 +194,10 @@ pub(crate) fn create_session_workflow_middleware(
     publish_hook: Option<WorkflowPublishHook>,
     agent_catalog: Arc<dyn AgentCatalogPort>,
     mcp_skill_registry: Option<Arc<McpSkillRegistry>>,
+    session_resources: Arc<dyn peri_acp_types::session_resources::SessionResources>,
+    execution_admission_port: Option<
+        Arc<dyn peri_acp_types::execution_admission::ExecutionAdmissionPort>,
+    >,
 ) -> Option<Arc<dyn WorkflowMiddlewarePort>> {
     let compact_config = super::compact_config::load_compact_config(&peri_config.read());
     let (progress_tx, progress_rx) = tokio::sync::mpsc::unbounded_channel::<ProgressEvent>();
@@ -206,6 +210,8 @@ pub(crate) fn create_session_workflow_middleware(
         // 同一份）；None = 未装配技能面（如 print/无会话 registry）。
         mcp_skill_registry,
         session_id: Some(session_id.to_string()),
+        session_resources: Some(session_resources),
+        execution_admission_port,
         compact_config: Some(compact_config),
         cancel: None,
         // 16_workflow 已删除（C2）：子面向 prompt 与主 prompt 字节相同，

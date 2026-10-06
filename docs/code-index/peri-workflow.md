@@ -12,6 +12,7 @@ Workflow 的运行耗时、RPC 有界等待和终态时间戳使用 [peri-time](
 - 主链：`WorkflowTool::invoke → preflight/GitBaseline → registry.reserve → RunCompletion::spawn → WorkflowRunner::run → peri-js-runtime → Node engine → agent/run → AgentExecutor → Git postcondition/state.json → done_tx → RunCompletion::project → registry.complete → session consumer → TUI/Defer`。
 - 入口：`peri-workflow/src/tool.rs::WorkflowTool::invoke`；执行与终态：`peri-workflow/src/runner.rs::WorkflowRunner::run`；通用进程 host 与 NDJSON framing/pending：`peri-js-runtime/src/{host,rpc}.rs`；Workflow agent ownership/kill：`peri-workflow/src/rpc.rs`。
 - 契约事实源：`peri-acp-types/src/workflow.rs` 的 `AgentExecutor`、`AgentRunParams`、`AgentRunResult`、`ProgressEvent`、四维状态、`WorkflowAttempt`、`WorkflowTaskResult`。wire 变更须同步 `npm-packages/@peri-workflow/src/types.ts`。
+- Workflow Agent 的持久执行边界在 `peri-agent/src/agent/workflow/agent/execution.rs`：从直接发起会话继承 binding、frozen 与资源授权，保存真实 child 后交由共享 WorkBoundary 获取 SDK 唯一准入；实际执行、forwarder 和持久化排空后，先结清存在的直接发起会话终态 ACK，再结束准入。生命周期缺失或结清未知不降级为内存执行。
 - 并发不变量：start/resume 共用 `WorkflowTool::start_run`，先取得 session execution owner、`WorkflowTaskRegistry::reserve` 并登记取消通道，再经 `TaskManager::spawn_owned` 启动，拒绝路径不得产生 detached runner。
 - 交付不变量：engine `completed` 只表示 execution completed；acceptance、post-processing、delivery 独立投影。`acceptance_status: unknown` 且 execution/post-processing 成功时，delivery 保持 `unknown`；明确执行/验收/Git postcondition 失败才为 `blocked`。Git postcondition 只比较 Workflow 前后状态发生变化的路径，已有且未变化的无关 dirty path 不阻塞；异常只报告并 blocked，不执行 add/commit/stash/reset/restore/clean。
 

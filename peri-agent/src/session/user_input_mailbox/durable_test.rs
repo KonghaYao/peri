@@ -114,7 +114,7 @@ async fn accepted_has_recoverable_required_receipt_and_distinct_delivery_identit
     let request = input(&mailbox);
     let receipt = mailbox.enqueue_durable(&request).await.unwrap();
     let snapshot = load(&fixture).await;
-    assert_eq!(receipt.work_receipts.len(), 1);
+    assert_eq!(receipt.work_receipts.len(), 2);
     assert_eq!(receipt.work_receipts[0].decision, WorkDecision::Accepted);
     let delivery = snapshot.state.deliveries.values().next().unwrap();
     assert_eq!(
@@ -133,7 +133,10 @@ async fn accepted_has_recoverable_required_receipt_and_distinct_delivery_identit
     );
     assert_eq!(
         delivery.publication.event.event_id,
-        format!("user-input:{}:{}", request.input_id, request.command_id)
+        format!(
+            "user-input:{}:{}",
+            request.input_id, receipt.publication_generations[&request.input_id]
+        )
     );
     assert_ne!(delivery.publication.delivery_id, request.input_id);
     assert!(!delivery.projected);
@@ -154,7 +157,7 @@ async fn accepted_has_recoverable_required_receipt_and_distinct_delivery_identit
 }
 
 #[tokio::test]
-async fn busy_enqueue_publishes_required_without_interrupting_or_starting_execution() {
+async fn busy_enqueue_stages_draft_until_idle_without_interrupting_execution() {
     let fixture = TestSession::open().await;
     let (mailbox, inbox) = mailbox(&fixture, fixture.resources());
     let cancel = CancellationToken::new();
@@ -163,10 +166,16 @@ async fn busy_enqueue_publishes_required_without_interrupting_or_starting_execut
         .unwrap();
     let request = input(&mailbox);
     let receipt = mailbox.enqueue_durable(&request).await.unwrap();
-    assert_eq!(receipt.results[0].state, UserInputState::Dispatching);
+    assert_eq!(receipt.results[0].state, UserInputState::Queued);
     assert_eq!(receipt.work_receipts.len(), 1);
     assert!(!cancel.is_cancelled());
-    mailbox.enter_idle();
+    assert!(inbox.queue().drain_all().is_empty());
+    let staged = load(&fixture).await;
+    assert!(staged.state.deliveries.is_empty());
+    assert!(staged.state.obligations.is_empty());
+    assert!(staged.candidates.is_empty());
+    assert_eq!(staged.state.staged_user_inputs.len(), 1);
+    mailbox.enter_idle_durable().await.unwrap();
     mailbox.finish_attempt(&ticket, UserInputAttemptOutcome::Completed);
     assert_eq!(inbox.queue().drain_all().len(), 1);
     assert_eq!(load(&fixture).await.state.deliveries.len(), 1);
@@ -273,7 +282,21 @@ async fn durable_claim_blocks_withdrawal_and_keeps_canonical_message_identity() 
             .to_string(),
         request.input_id
     );
-    assert_eq!(mailbox.snapshot().items[0].state, UserInputState::Claimed);
+    assert!(
+        mailbox.snapshot().items.is_empty(),
+        "canonical Delivered must leave the pending queue"
+    );
+    assert_eq!(
+        mailbox
+            .state
+            .lock()
+            .records
+            .iter()
+            .find(|record| record.input.input_id == request.input_id)
+            .unwrap()
+            .state,
+        UserInputState::Delivered
+    );
     let history = fixture
         .resources
         .load_session_history(&fixture.thread_id())
@@ -281,6 +304,9 @@ async fn durable_claim_blocks_withdrawal_and_keeps_canonical_message_identity() 
         .unwrap();
     assert_eq!(history.len(), 1);
     assert_eq!(history[0].id().as_uuid().to_string(), request.input_id);
+    assert!(
+        matches!(&history[0], PersistedPayload::Message(BaseMessage::Human { content, .. }) if content == &request.content)
+    );
 }
 
 #[tokio::test]

@@ -67,6 +67,8 @@ pub(super) fn create_session_workflow_middleware(
         // W4b（F4）：workflow agent 与主链共用会话级 MCP skill registry
         // （会话已登记时取到；未登记/print 模式为 None → 技能工具为空面）。
         cfg.session_manager.mcp_skill_registry_for(session_id),
+        cfg.session_resources.clone(),
+        cfg.execution_admission_port.clone(),
     );
     if let (Some(middleware), Some(session)) =
         (&middleware, cfg.session_manager.get_session(session_id))

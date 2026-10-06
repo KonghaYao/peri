@@ -18,6 +18,28 @@ pub(super) struct ProjectedResult {
 }
 
 impl ProjectedResult {
+    pub(super) fn with_unsettled(mut self, detail: String) -> Self {
+        let original = match &self.result {
+            AgentRunResult::Dead {
+                reason,
+                detail: original,
+            } => format!(
+                "Original workflow execution failure ({}): {}. {detail}",
+                reason.as_deref().unwrap_or("unknown"),
+                original.as_deref().unwrap_or("no diagnostic available"),
+            ),
+            _ => detail.clone(),
+        };
+        self.result = AgentRunResult::Dead {
+            reason: Some("execution-unsettled".into()),
+            detail: Some(original),
+        };
+        if self.failure.is_none() {
+            self.failure = Some(ExecutionFailure::internal(detail));
+        }
+        self
+    }
+
     pub fn telemetry_outcome(&self) -> TurnTelemetryOutcome {
         match &self.result {
             AgentRunResult::Dead { reason, .. } if reason.as_deref() == Some("interrupted") => {

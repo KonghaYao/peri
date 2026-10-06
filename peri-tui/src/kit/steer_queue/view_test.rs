@@ -222,6 +222,64 @@ fn published_unclaimed_row_enables_takeback_but_not_dispatch() {
 }
 
 #[test]
+fn queue_render_distinguishes_confirmed_draft_from_published_input() {
+    for unicode in [true, false] {
+        for (state, dispatch_enabled, takeback_enabled) in [
+            (SteerItemState::Queued, true, true),
+            (SteerItemState::Submitting, false, false),
+            (SteerItemState::Publishing, false, false),
+            (SteerItemState::Dispatching, false, true),
+            (SteerItemState::Claimed, false, false),
+        ] {
+            let item = SteerQueueItem {
+                id: "confirmed-input".into(),
+                text: "STEER_待发送".into(),
+                state,
+            };
+            let mut view = make_view(vec![item]);
+            view.symbols = symbols(&TerminalCaps {
+                unicode,
+                ..Default::default()
+            });
+            let area = Rect::new(5, 2, 100, 4);
+            let frame = view.layout(area);
+            let mut buffer = Buffer::empty(area);
+            view.clone().render(area, &mut buffer);
+            let dispatch = frame
+                .controls
+                .iter()
+                .find(|control| control.selection == Selection::Dispatch("confirmed-input".into()))
+                .unwrap();
+            let takeback = frame
+                .controls
+                .iter()
+                .find(|control| control.selection == Selection::TakeBack("confirmed-input".into()))
+                .unwrap();
+            assert_eq!(dispatch.enabled, dispatch_enabled, "{state:?}");
+            assert_eq!(takeback.enabled, takeback_enabled, "{state:?}");
+            assert_eq!(frame.dispatch_ids.is_empty(), !dispatch_enabled);
+            assert_eq!(
+                buffer[(dispatch.area.x + 1, dispatch.area.y)].symbol(),
+                if dispatch_enabled {
+                    view.symbols.send
+                } else {
+                    view.symbols.running
+                },
+                "{state:?} must not render a published or uncertain input as queued"
+            );
+            assert_eq!(
+                buffer[(takeback.area.x + 1, takeback.area.y)].symbol(),
+                view.symbols.take_back
+            );
+            assert_eq!(
+                validated_action(&dispatch.selection, &frame.dispatch_ids, &view.items).is_some(),
+                dispatch_enabled
+            );
+        }
+    }
+}
+
+#[test]
 fn claimed_row_has_no_takeback_control_or_keyboard_action() {
     let mut items = make_items();
     items[1].state = SteerItemState::Claimed;

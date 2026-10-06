@@ -13,6 +13,14 @@ use crate::transport::{types::AcpError, AcpTransport};
 
 pub(super) async fn query(params: &Value, cfg: &AcpServerConfig) -> Result<Value, AcpError> {
     let session_id = session_id(params)?;
+    if let Some(mailbox) = cfg.session_manager.user_input_mailbox_for(session_id) {
+        mailbox.publish_next_durable().await.map_err(|error| {
+            AcpError::new(
+                -32010,
+                format!("pending input publication unconfirmed: {error}"),
+            )
+        })?;
+    }
     let control = cfg
         .session_resources
         .load_session_control(&session_id.to_owned())

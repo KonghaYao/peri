@@ -51,6 +51,7 @@ use crate::session::{
     subagent::{DefaultSubagentV2ContextBuilder, SubagentV2ContextBuilder},
 };
 
+mod execution;
 mod observation;
 mod result;
 
@@ -87,6 +88,9 @@ pub struct WorkflowAgentContext {
     /// 宿主绑定的调用方会话 ID（compact 事件和日志关联）。
     /// 仅由会话装配注入，不得取自 workflow 参数或模型工具输入。
     pub session_id: Option<String>,
+    pub session_resources: Option<Arc<dyn peri_acp_types::session_resources::SessionResources>>,
+    pub execution_admission_port:
+        Option<Arc<dyn peri_acp_types::execution_admission::ExecutionAdmissionPort>>,
     /// Compact 配置（None = 不启用自动 compact）
     pub compact_config: Option<CompactConfig>,
     /// 取消令牌（None = workflow agent 创建内部 token）
@@ -177,6 +181,8 @@ pub fn create_default_executor(
         frozen_skill_summary: None,
         mcp_skill_registry: None,
         session_id: None,
+        session_resources: None,
+        execution_admission_port: None,
         compact_config: None,
         cancel: None,
         system_prompt: None,
@@ -435,12 +441,19 @@ impl AgentExecutor for WorkflowAgentExecutor {
             format!("{system_prompt}\n\n{contributions}")
         };
 
+        let execution = match execution::WorkflowExecution::prepare(&self.ctx, &params).await {
+            Ok(execution) => execution,
+            Err(detail) => {
+                return AgentRunResult::Dead {
+                    reason: Some("execution-blocked".into()),
+                    detail: Some(detail),
+                };
+            }
+        };
         // 构造 AgentModelBridge（现在 system_prompt 已就绪）
         let mut base_llm =
             AgentModelBridge::from_arc(base_model).with_system(system_prompt.clone());
-        if let Some(ref sid) = self.ctx.session_id {
-            base_llm = base_llm.with_session_id(sid);
-        }
+        base_llm = base_llm.with_session_id(&execution.session_id);
         let llm: Box<dyn crate::agent::react::ReactLLM + Send + Sync> = Box::new(base_llm);
 
         // 构造 v2 StageContext（workflow agent 无 parent_messages）
@@ -450,7 +463,7 @@ impl AgentExecutor for WorkflowAgentExecutor {
             .subagent_ctx_builder
             .clone()
             .unwrap_or_else(|| Arc::new(DefaultSubagentV2ContextBuilder));
-        let session_id = uuid::Uuid::now_v7().to_string();
+        let session_id = execution.session_id.clone();
         let session = crate::session::Session::new_with_cancel_and_queue(
             Arc::from(self.ctx.cwd.as_str()),
             crate::session::FrozenContext::builder().build(),
@@ -458,12 +471,20 @@ impl AgentExecutor for WorkflowAgentExecutor {
             Arc::new(cancel_token.clone()),
             crate::session::MessageQueue::new(),
         );
+        {
+            let transcript = session.transcript();
+            let mut transcript = transcript.write();
+            *transcript = std::mem::take(&mut *transcript)
+                .with_persistence(execution.resources.clone(), session_id.clone());
+        }
         session.set_subagent_host(crate::session::subagent::SubagentHost {
-            task_manager: Some(task_manager),
+            task_manager: Some(task_manager.clone()),
             mcp_pool: self.ctx.middleware_factory.mcp_pool(),
+            session_resources: Some(execution.resources.clone()),
+            execution_admission_port: Some(execution.admission_port.clone()),
             ..Default::default()
         });
-        let v2_ctx = ctx_builder.build(
+        let mut v2_ctx = ctx_builder.build(
             Some(session),
             llm,
             chain,
@@ -478,6 +499,7 @@ impl AgentExecutor for WorkflowAgentExecutor {
                 &session_id,
             )),
         );
+        v2_ctx.context.recipient_lifecycle = Some(execution.lifecycle);
 
         // EventBus forwarder（v2 → v1 ExecutorEvent，转发给 event_handler）。
         // 经注入的 ForwarderLauncherFn 启动——biased select 顺序不变量单点
@@ -496,6 +518,7 @@ impl AgentExecutor for WorkflowAgentExecutor {
             agent_id: _,
             event_bus,
         } = v2_ctx;
+        let execution_turn = context.session.turn.clone();
         let handler_for_forwarder = Arc::clone(&event_handler);
         let publish_hook = self.ctx.publish_hook.clone();
         let sid_for_forwarder = self.ctx.session_id.clone();
@@ -522,11 +545,25 @@ impl AgentExecutor for WorkflowAgentExecutor {
             BaseMessage::human(params.prompt.clone()),
         ));
 
+        let mut execution_guard = match peri_acp_types::tasks::TaskManager::begin_external_execution(
+            task_manager.as_ref(),
+            "workflow-agent",
+        ) {
+            Ok(guard) => guard,
+            Err(detail) => {
+                drop(context);
+                let _ = await_workflow_forwarder(event_bus, forwarder_handle).await;
+                return AgentRunResult::Dead {
+                    reason: Some("execution-blocked".into()),
+                    detail: Some(detail),
+                };
+            }
+        };
         // 7. 运行 v2 ReAct 循环
         let loop_result = run_react_loop(context, max_iterations).await;
         let forwarder_result = await_workflow_forwarder(event_bus, forwarder_handle).await;
-
-        let projected = result::project_run_result(
+        let forwarded = forwarder_result.is_ok();
+        let mut projected = result::project_run_result(
             loop_result,
             forwarder_result,
             &session,
@@ -535,6 +572,18 @@ impl AgentExecutor for WorkflowAgentExecutor {
             &model_name,
             started_at,
         );
+        if forwarded {
+            if execution_turn.work_admission().is_none() {
+                projected = projected.with_unsettled(
+                    "Incomplete: workflow execution has no SDK admission proof".into(),
+                );
+            } else {
+                match execution.finish(&session, &execution_turn).await {
+                    Ok(()) => execution_guard.confirm_stopped(),
+                    Err(detail) => projected = projected.with_unsettled(detail),
+                }
+            }
+        }
 
         // 保持 final event 消费与统计提取之后的终态钩子；flush 仍为 fire-and-forget。
         if let Some(ref hooks) = self.ctx.langfuse_hooks {

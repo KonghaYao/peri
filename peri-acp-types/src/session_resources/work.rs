@@ -25,6 +25,10 @@ mod projection;
 mod query;
 #[path = "work/reducer.rs"]
 mod reducer;
+#[path = "work/user_input.rs"]
+mod user_input;
+
+pub use user_input::{StagedUserInput, StagedUserInputStatus};
 
 pub use query::validate_admission_association;
 pub use reducer::{reduce_work, WorkReduction};
@@ -187,6 +191,23 @@ pub struct TaskBinding {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
 pub enum WorkAction {
+    StageUserInput {
+        input_json: String,
+        command_id: String,
+        fingerprint: u64,
+    },
+    WithdrawStagedUserInput {
+        input_id: String,
+        command_id: String,
+        fingerprint: u64,
+    },
+    PublishStagedUserInputs {
+        expected_revision: u64,
+        expected_control_generation: u64,
+        expected_attempt: Option<ControlAttempt>,
+        interrupt_current: bool,
+        deliveries: Vec<PublishDelivery>,
+    },
     RegisterAdmission {
         admission: WorkAdmission,
     },
@@ -492,6 +513,10 @@ pub struct WorkState {
     pub terminal_acknowledgements: BTreeMap<String, WorkReceipt>,
     #[serde(default)]
     pub work_delegations: BTreeMap<String, TaskBinding>,
+    #[serde(default)]
+    pub staged_user_inputs: BTreeMap<String, StagedUserInput>,
+    #[serde(default)]
+    pub user_input_publications: BTreeMap<String, WorkCommand>,
 }
 
 impl Default for WorkState {
@@ -520,6 +545,8 @@ impl WorkState {
             terminal_obligations: BTreeMap::new(),
             terminal_acknowledgements: BTreeMap::new(),
             work_delegations: BTreeMap::new(),
+            staged_user_inputs: BTreeMap::new(),
+            user_input_publications: BTreeMap::new(),
         }
     }
     pub fn has_pending_work(&self) -> bool {
