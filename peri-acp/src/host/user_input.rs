@@ -203,15 +203,27 @@ pub(super) async fn ensure_mailbox(
     if let Some(mailbox) = &session.user_input_mailbox {
         return Ok(Arc::clone(mailbox));
     }
-    super::continuation::spawn_inbox_work_notifications(
-        cfg,
-        transport,
-        session_id.to_owned(),
-        work.control.lifecycle,
-        session.v2_message_queue.clone(),
-        session.user_input_events_cancel.clone(),
-    )
-    .map_err(|_| AcpError::new(-32800, "session is closing"))?;
+    if session
+        .inbox_work_notifications
+        .as_ref()
+        .map(|(lifecycle, _)| *lifecycle)
+        != Some(work.control.lifecycle)
+    {
+        if let Some((_, cancellation)) = session.inbox_work_notifications.take() {
+            cancellation.cancel();
+        }
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        super::continuation::spawn_inbox_work_notifications(
+            cfg,
+            transport,
+            session_id.to_owned(),
+            work.control.lifecycle,
+            session.v2_message_queue.clone(),
+            cancellation.clone(),
+        )
+        .map_err(|_| AcpError::new(-32800, "session is closing"))?;
+        session.inbox_work_notifications = Some((work.control.lifecycle, cancellation));
+    }
     let (bus, handles) = EventBus::new(EventBusConfig::default());
     let mailbox = UserInputMailbox::new_durable(
         session_id.to_string(),

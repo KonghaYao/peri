@@ -103,6 +103,7 @@ impl SessionManager {
             session_inbox: None,
             user_input_mailbox: None,
             user_input_events_cancel: CancellationToken::new(),
+            inbox_work_notifications: None,
             cron_bridge: None,
             task_manager,
             task_events_started: std::sync::atomic::AtomicBool::new(false),

@@ -207,6 +207,7 @@ pub(super) fn spawn_inbox_work_notifications(
                     _ = cancellation.cancelled() => return,
                     _ = shutdown.cancelled() => return,
                     changed = changes.changed() => if changed.is_err() { return; },
+                    _ = peri_time::sleep(std::time::Duration::from_secs(2)) => {},
                 }
             }
         },

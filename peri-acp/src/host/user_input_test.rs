@@ -34,6 +34,101 @@ fn make_user_input_request(sid: &str, generation: &str, input_id: &str, text: &s
 }
 
 #[tokio::test]
+async fn inbox_notifications_outlive_mailbox_invalidation_and_stop_on_session_close() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (cfg, _, sid) = make_user_input_session(&tmp).await;
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
+    crate::host::user_input::ensure_mailbox(&sid, &cfg, &transport)
+        .await
+        .unwrap();
+    let cancellation = cfg
+        .session_manager
+        .get_session(&sid)
+        .unwrap()
+        .inbox_work_notifications
+        .as_ref()
+        .unwrap()
+        .1
+        .clone();
+    cfg.session_manager.invalidate_user_input_mailbox(&sid);
+    assert!(!cancellation.is_cancelled());
+    crate::host::user_input::ensure_mailbox(&sid, &cfg, &transport)
+        .await
+        .unwrap();
+    assert!(!cancellation.is_cancelled());
+    cfg.session_manager.pre_close_session(&sid);
+    assert!(cancellation.is_cancelled());
+}
+
+#[tokio::test]
+async fn durable_scan_notifies_required_work_without_a_queue_wake_hint() {
+    use peri_acp_types::session_resources::work::*;
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (cfg, _, sid) = make_user_input_session(&tmp).await;
+    let captured = Arc::new(MockTransport::default());
+    let transport: Arc<dyn crate::transport::AcpTransport> = captured.clone();
+    crate::host::user_input::ensure_mailbox(&sid, &cfg, &transport)
+        .await
+        .unwrap();
+    tokio::task::yield_now().await;
+    let content = WorkPayload::from_payload(&peri_acp_types::store::PersistedPayload::Message(
+        peri_acp_types::messages::BaseMessage::human("late durable work"),
+    ))
+    .unwrap();
+    let receipt = cfg
+        .session_resources
+        .apply_work_mutation(&WorkCommand {
+            session_id: sid.clone(),
+            recipient_lifecycle: 1,
+            mutation_id: "lost-hint-publication".into(),
+            action: WorkAction::PublishDelivery {
+                delivery: PublishDelivery {
+                    delivery_id: "lost-hint-delivery".into(),
+                    event: WorkEvent {
+                        producer_namespace: "inbox-notification-test".into(),
+                        event_id: "lost-hint-event".into(),
+                        event_kind: "lateInput".into(),
+                        causation_id: None,
+                        content,
+                    },
+                    purpose: DeliveryPurpose::UserInput,
+                    policy: peri_acp_types::session::MessagePolicy::ensure_processing(),
+                },
+            },
+        })
+        .await
+        .unwrap();
+    assert_eq!(receipt.decision, WorkDecision::Accepted);
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if captured.notifications().iter().any(|(method, params)| {
+                method == "session/work/available" && params["sessionId"] == sid
+            }) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("bounded scans must rediscover durable work without an MQ hint");
+    let snapshot = cfg
+        .session_resources
+        .load_session_work(&WorkQuery {
+            session_id: sid.clone(),
+            limit: 1,
+        })
+        .await
+        .unwrap();
+    assert!(snapshot.control.attempt.is_none());
+    assert!(snapshot.state.admissions.is_empty());
+    assert_eq!(
+        snapshot.state.obligations["lost-hint-delivery"].status,
+        ObligationStatus::Pending
+    );
+    cfg.session_manager.pre_close_session(&sid);
+}
+
+#[tokio::test]
 async fn test_user_input_methods_require_capability() {
     let tmp = tempfile::TempDir::new().unwrap();
     let (cfg, mut sessions, sid) = make_user_input_session(&tmp).await;

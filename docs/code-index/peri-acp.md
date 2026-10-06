@@ -26,7 +26,7 @@ workspace 资源输入从本次选中 `ConfigSource` 的资源投影取关闭位
 
 - 持久执行协议：`host/execution.rs` 承接 `session/work/query`、`session/work/resolve`、`session/execute` 与 `session/execute/resolve`；执行前确认 SDK 已登记的完整 admission，再由共同 Store 保存领域关联。这里不申请 Peri lease、不从连接消失推断旧 attempt 已退出。退出回执只在执行 future 与持久屏障结束、精确 attempt 清除后生成。
 - SDK 反向端口：`host/execution_admission.rs` 与 `execution_admission_jsonl.rs` 实现准入、真实进入确认和终结；stdio 走同一请求桥，TUI/print 连接 SDK SQLite sidecar。`host/user_input.rs::sdk_run_started_publisher` 在任何交互 hook 前等待客户端实际接收启动事件，事件排队不算确认。
-- 跨 turn Inbox 提示：`host/continuation.rs::spawn_inbox_work_notifications` 是 host 所有的会话任务，订阅共享 MQ 的 retained wake hint；只持久发布原 delivery 并通知 SDK `session/work/available`，启动时复核 durable work，取消/关闭时退出，不执行 RCRA 或取得执行所有权。
+- 跨 turn Inbox 提示：`host/continuation.rs::spawn_inbox_work_notifications` 是 host 所有的会话任务，订阅共享 MQ 的 retained wake hint，并按有界批次定期扫描 durable work；只持久发布原 delivery 并通知 SDK `session/work/available`。生命周期独立于用户输入 mailbox 的失效/重建，会话关闭或换生命周期时取消旧任务；不执行 RCRA 或取得执行所有权。`host/user_input_test.rs` 覆盖丢 hint 后的重新发现与关闭屏障。
 - 原命令恢复：`session/work/query` 返回 `pendingCommands`，`session/work/resolve` 只接受完整原 `WorkCommand`；Unknown 不生成新命令身份或重建预期 revision。`requests/resource_owners.rs` 保存生命周期级可信 owner 连接，冷恢复缺少连接/授权时明确阻塞，不借用启动会话的 MCP owner。
 
 - 领域控制入口：`host/requests/session_control.rs` 承接 `session/control`、`session/control/resolve`、`session/control/state`；Store 回执不可改写，解析出确定 Applied 后才协调取消/关闭。回放重验原生命周期、控制代际与精确 attempt；Close 的 accepted intent 不等于 settled，Independent 未交接返回未结清且不取消它。`agent/stages/execution_control.rs` 在 Receive/Reason/Act/逐工具入口核对绑定代际，暂停后即便 Resume 也不提交旧响应；验证 `host/requests/session_control_test.rs`、Agent execution-control、TUI cancel 与 SDK 真实 stdio 测试。SDK 持久 attempt 准入仍属后续步骤。
