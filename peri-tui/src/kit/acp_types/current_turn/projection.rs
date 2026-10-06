@@ -7,6 +7,14 @@ use crate::kit::tui_render_unit::{
 use std::time::Instant;
 
 impl CurrentTurn {
+    fn materialize_text(text: &str) -> String {
+        #[cfg(test)]
+        crate::kit::acp_bridge::observe_perf(
+            crate::kit::acp_bridge::PerfCounter::ProjectionCopiedBytes,
+            text.len() as u64,
+        );
+        text.to_string()
+    }
     /// Accessor: returns cached ViewModels.
     ///
     /// 缓存由 `sync_cache` 增量维护：流式变更只置 dirty 标记，
@@ -60,7 +68,7 @@ impl CurrentTurn {
                 EntryStatus::Completed
             };
             Some(TuiReasoningBlock {
-                text: reasoning.to_string(),
+                text: Self::materialize_text(reasoning),
                 fold: fold_for_status(FoldTarget::Reasoning, status),
                 status,
                 is_running: reasoning_running,
@@ -106,10 +114,6 @@ impl CurrentTurn {
             crate::kit::acp_bridge::observe_perf(
                 crate::kit::acp_bridge::PerfCounter::Projection,
                 1,
-            );
-            crate::kit::acp_bridge::observe_perf(
-                crate::kit::acp_bridge::PerfCounter::ProjectionCopiedBytes,
-                (self.text.len() + self.reasoning.len()) as u64,
             );
         }
 
@@ -190,16 +194,19 @@ impl CurrentTurn {
                             None,
                         );
                         self.cached_view_models
-                            .push_back(TuiRenderUnit::TuiAssistantBubble(TuiAssistantBubble {
-                                text: text_slice.to_string(),
-                                reasoning,
-                                message_id: message_id.clone(),
-                                // 冻结段无正文时长起点——时长由折叠 pass 在翻转点
-                                // 对 trailing bubble 冻结；此处恒 None（G-Tokens）。
-                                started_at: None,
-                                duration_ms: None,
-                                content_hash,
-                            }));
+                            .push_back(TuiRenderUnit::TuiAssistantBubble(
+                                TuiAssistantBubble {
+                                    text: Self::materialize_text(text_slice),
+                                    reasoning,
+                                    message_id: message_id.clone(),
+                                    // 冻结段无正文时长起点——时长由折叠 pass 在翻转点
+                                    // 对 trailing bubble 冻结；此处恒 None（G-Tokens）。
+                                    started_at: None,
+                                    duration_ms: None,
+                                    content_hash,
+                                }
+                                .into(),
+                            ));
                     }
                     prev_text_end = text_end;
                     prev_reasoning_end = reason_end;
@@ -336,7 +343,7 @@ impl CurrentTurn {
                         })
                     });
                     let mut bubble = TuiAssistantBubble {
-                        text: text_slice.to_string(),
+                        text: Self::materialize_text(text_slice),
                         reasoning,
                         message_id: self.last_message_id.clone(),
                         started_at: None,
@@ -347,7 +354,7 @@ impl CurrentTurn {
                     // （build_bubble_parts 的 !running 路径 text_duration=0，
                     // 不含冻结正文时长）。
                     bubble.recompute_hash();
-                    TuiRenderUnit::TuiAssistantBubble(bubble)
+                    TuiRenderUnit::TuiAssistantBubble(bubble.into())
                 } else {
                     let (reasoning, content_hash) = Self::build_bubble_parts(
                         reasoning_slice,
@@ -359,14 +366,17 @@ impl CurrentTurn {
                         self.trailing_reasoning_frozen_ms,
                         self.text_started_at,
                     );
-                    TuiRenderUnit::TuiAssistantBubble(TuiAssistantBubble {
-                        text: text_slice.to_string(),
-                        reasoning,
-                        message_id: self.last_message_id.clone(),
-                        started_at: self.text_started_at,
-                        duration_ms: None,
-                        content_hash,
-                    })
+                    TuiRenderUnit::TuiAssistantBubble(
+                        TuiAssistantBubble {
+                            text: Self::materialize_text(text_slice),
+                            reasoning,
+                            message_id: self.last_message_id.clone(),
+                            started_at: self.text_started_at,
+                            duration_ms: None,
+                            content_hash,
+                        }
+                        .into(),
+                    )
                 };
                 if self.cached_view_models.len() <= trailing_idx {
                     self.cached_view_models.push_back(trailing);

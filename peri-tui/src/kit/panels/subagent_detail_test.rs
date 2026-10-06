@@ -219,7 +219,7 @@ fn text_unit(text: &str) -> TuiRenderUnit {
         content_hash: 0,
     };
     bubble.recompute_hash();
-    TuiRenderUnit::TuiAssistantBubble(bubble)
+    TuiRenderUnit::TuiAssistantBubble(bubble.into())
 }
 
 /// 某次 bg 运行产生的 live 明细——记录它属于哪一次运行（`SubAgentAccumulator`

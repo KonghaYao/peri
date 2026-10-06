@@ -21,7 +21,7 @@ pub(crate) struct BgStream {
 impl BgStream {
     fn new(detail: &BgLiveDetail, message_id: Option<String>) -> Self {
         let (bubble, projected) = match detail.nested_units.back() {
-            Some(TuiRenderUnit::TuiAssistantBubble(bubble)) => (bubble.clone(), true),
+            Some(TuiRenderUnit::TuiAssistantBubble(bubble)) => ((**bubble).clone(), true),
             _ => (
                 TuiAssistantBubble {
                     text: String::new(),
@@ -64,7 +64,9 @@ fn flush_detail(detail: &mut BgLiveDetail) -> bool {
     }
     detail
         .nested_units
-        .push_back(TuiRenderUnit::TuiAssistantBubble(stream.bubble.clone()));
+        .push_back(TuiRenderUnit::TuiAssistantBubble(
+            stream.bubble.clone().into(),
+        ));
     stream.projected = true;
     stream.dirty = false;
     true
@@ -202,7 +204,7 @@ fn finalize_nested_reasoning(detail: &mut BgLiveDetail) {
         let TuiRenderUnit::TuiAssistantBubble(bubble) = unit else {
             continue;
         };
-        let mut bubble = bubble.clone();
+        let mut bubble = (**bubble).clone();
         if let Some(reasoning) = bubble.reasoning.as_mut() {
             reasoning.duration_ms = reasoning.duration_ms.or_else(|| {
                 reasoning
@@ -215,7 +217,7 @@ fn finalize_nested_reasoning(detail: &mut BgLiveDetail) {
             reasoning.fold = FoldState::Collapsed;
         }
         bubble.recompute_hash();
-        *unit = TuiRenderUnit::TuiAssistantBubble(bubble);
+        *unit = TuiRenderUnit::TuiAssistantBubble(bubble.into());
     }
 }
 

@@ -499,7 +499,8 @@ pub(super) fn handle_rewind_completed(state: &mut BridgeState, messages_json: &s
                                 started_at: None,
                                 duration_ms: None,
                                 content_hash,
-                            },
+                            }
+                            .into(),
                         ));
                     }
                     _ => {}

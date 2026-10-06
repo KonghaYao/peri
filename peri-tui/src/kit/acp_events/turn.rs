@@ -421,7 +421,7 @@ pub(super) fn handle_committed_assistant_text(
         content_hash: 0,
     };
     bubble.recompute_hash();
-    let vm = TuiRenderUnit::TuiAssistantBubble(bubble);
+    let vm = TuiRenderUnit::TuiAssistantBubble(bubble.into());
     state.committed.push_back(vm);
     // Replay publication 由 bridge scheduler 合帧；避免每条历史消息完整扫描 committed。
     super::render::push_acp_state(state);

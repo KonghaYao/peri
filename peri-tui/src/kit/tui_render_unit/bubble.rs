@@ -39,7 +39,7 @@ tui_impl_partial_eq!(TuiUserBubble: text, reminder, source);
 ///
 /// Tool invocations are **siblings** (separate `TuiToolCard` entries), not
 /// embedded inside the bubble.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct TuiAssistantBubble {
     /// Markdown source text.
     pub text: String,
@@ -57,6 +57,33 @@ pub struct TuiAssistantBubble {
     pub duration_ms: Option<u64>,
     /// 内容哈希——rebuild 时用于检测是否需重新渲染
     pub content_hash: u64,
+}
+
+impl Clone for TuiAssistantBubble {
+    fn clone(&self) -> Self {
+        #[cfg(test)]
+        {
+            use crate::kit::acp_bridge::{PerfCounter, observe_perf};
+            observe_perf(PerfCounter::AssistantCloneCalls, 1);
+            observe_perf(
+                PerfCounter::AssistantCloneBytes,
+                (self.text.len()
+                    + self
+                        .reasoning
+                        .as_ref()
+                        .map(|block| block.text.len())
+                        .unwrap_or(0)) as u64,
+            );
+        }
+        Self {
+            text: self.text.clone(),
+            reasoning: self.reasoning.clone(),
+            message_id: self.message_id.clone(),
+            started_at: self.started_at,
+            duration_ms: self.duration_ms,
+            content_hash: self.content_hash,
+        }
+    }
 }
 
 impl TuiAssistantBubble {
@@ -155,6 +182,8 @@ impl TuiAssistantBubble {
 
 tui_impl_partial_eq!(TuiAssistantBubble: text, reasoning, message_id, started_at, duration_ms);
 
+impl Eq for TuiAssistantBubble {}
+
 // ---------------------------------------------------------------------------
 // Shared helper types
 // ---------------------------------------------------------------------------
@@ -169,7 +198,7 @@ tui_impl_partial_eq!(TuiAssistantBubble: text, reasoning, message_id, started_at
 ///   hash 含按秒取整的 elapsed——流式期间时长文本随 token 重建刷新。
 /// - Completed 块：`duration_ms = Some(冻结值)`（segment flush 或折叠 pass
 ///   在 phase 离开 PromptRunning 时冻结），hash 稳定。
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TuiReasoningBlock {
     pub text: String,
     /// 折叠状态——由折叠 pass（spec §7 表）与用户覆盖（FOLD_OVERRIDES）驱动。

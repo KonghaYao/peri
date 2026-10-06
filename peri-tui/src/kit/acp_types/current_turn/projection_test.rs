@@ -20,6 +20,35 @@ fn running_turn() -> CurrentTurn {
     turn
 }
 
+#[test]
+fn growing_publications_materialize_once_and_leave_old_snapshot_immutable() {
+    use std::sync::Arc;
+    let mut turn = CurrentTurn::new();
+    turn.append_text("initial", Some("message"));
+    let old = turn.view_models().clone();
+    let TuiRenderUnit::TuiAssistantBubble(previous) = &old[0] else {
+        panic!("expected assistant");
+    };
+    reset_perf_counters();
+    let mut expected_bytes = 0;
+    for _ in 0..20 {
+        turn.append_text(" 中文", Some("message"));
+        expected_bytes += turn.text.len() as u64;
+        let snapshot = turn.view_models().clone();
+        let TuiRenderUnit::TuiAssistantBubble(current) = &snapshot[0] else {
+            panic!("expected assistant");
+        };
+        assert!(!Arc::ptr_eq(previous, current));
+        assert_eq!(previous.text, "initial");
+    }
+    assert_eq!(perf_counters().projection_copied_bytes, expected_bytes);
+    assert_eq!(perf_counters().assistant_clone_bytes, 0);
+    reset_perf_counters();
+    turn.invalidate_cache();
+    turn.view_models();
+    assert_eq!(perf_counters().projection_copied_bytes, 0);
+}
+
 /// [回归测试] 相同秒内的 publication 不重建未变工具；跨秒刷新保留 fold 与 hash 契约。
 #[tokio::test(start_paused = true)]
 async fn test_tool_projection_reuses_unchanged_and_ticks_with_fold() {

@@ -2,6 +2,7 @@ use super::{
     TuiAskUserBlock, TuiAssistantBubble, TuiCollapsedGroup, TuiDivider, TuiSubAgentGroup,
     TuiSystemNote, TuiSystemReminder, TuiTodoSummary, TuiToolCard, TuiUserBubble,
 };
+use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // Top-level enum
@@ -11,7 +12,7 @@ use super::{
 #[derive(Debug, Clone, PartialEq)]
 pub enum TuiRenderUnit {
     TuiUserBubble(TuiUserBubble),
-    TuiAssistantBubble(TuiAssistantBubble),
+    TuiAssistantBubble(Arc<TuiAssistantBubble>),
     TuiToolCard(TuiToolCard),
     TuiSystemNote(TuiSystemNote),
     TuiSystemReminder(TuiSystemReminder),
@@ -23,6 +24,10 @@ pub enum TuiRenderUnit {
     /// 由 push_view_models 从 `TODO_ITEMS` 派生，插在最终回答之前。
     TuiTodoSummary(TuiTodoSummary),
 }
+
+#[cfg(test)]
+#[path = "shared_bubble_test.rs"]
+mod shared_bubble_tests;
 
 impl TuiRenderUnit {
     /// 返回该 VM 内部存储的 content_hash。

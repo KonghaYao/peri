@@ -1,6 +1,6 @@
 # P0：TUI 流式与渲染链冗余
 
-**状态**：Astra 源码复核完成；确定冗余的首批修复已实施，F2/F3 与资源现场验收仍未关闭。下文发现位置保留审计时快照，实施状态以「裁决与实施」为准。
+**状态**：Astra 源码复核完成；首批修复与 F2 共享气泡阶段已实施，F3 与资源现场验收继续推进。下文发现位置保留审计时快照，实施状态以「裁决与实施」为准。
 **优先级**：P0（用户明确要求将核实正确项提升）。这表示实施优先级，不表示已证明现场资源事故因果；独立于 [`2026-10-06-p0-dev-peri-high-cpu-memory.md`](2026-10-06-p0-dev-peri-high-cpu-memory.md) 的现场验收。
 **类型**：TUI 渲染计算冗余 / 常驻内存放大 / 日志噪音。
 **来源**：主 agent 直接复核 + 三组只读 subagent（渲染层、常驻内存、流式事件链）。全部为源码静态阅读，未运行 perf / heap / 现场采样。
@@ -136,7 +136,7 @@
 | 条目 | 优先级 / 实施状态 | 当前边界与验收 |
 | --- | --- | --- |
 | F1 | P0 / 已实施 | 独占 BgStream 累积 + 增量 hash；50ms 独立后台 deadline，不逐 chunk 写发布 atom；工具/任务终态/receiver close flush，重置失效。publication 仍物化完整快照，未宣称消除其 O(n)。 |
-| F2 | P0 / 未关闭 | owned trailing 与 im COW 成本成立，但 Arc 从 String 物化本身仍 O(n)；需要共享文本/VM 表示设计及真实复制计量，不以换容器名称假称修复。 |
+| F2 | P0 / 冗余 COW 已修，必要物化保留 | assistant payload 改为 Arc；im 快照克隆、拼接和节点 COW 共享完整正文/推理，fold/终态只在确有变化时显式复制。BgStream 仍独占缓冲，避免退回逐 chunk COW。source→VM owned trailing 仍每次增长物化 O(n)，未宣称完全消除。 |
 | F3 | P0 / 未关闭 | 保留引用链接后向解析、列表、表格与 fence 的保守尾部及 terminal full parse。仅记录停点或全文 hash 无法消除增长 tail 的重解析；须在 full-reference 等价回归下设计 parser/物化分片。准确图片停点为 `![`，不是任意 `!`。 |
 | F4 | P0 / 确定部分已实施 | terminal 丢弃 chunk_source buffer（不只是 clear），wrap cache 接收 owned lines 后直接移动进 Arc，取消额外深拷贝。可见窗口/LRU 未实施，需独立验证滚动高度、选择与复制。 |
 | F5 | P0 / 确定部分已实施 | 三组逐帧扫描缓冲复用；reasoning 仅秒级时长刷新，不再强制 100ms 重建；工具/subagent 保留动画。O(N) 扫描与动画 chrome/content 分离未关闭。 |
@@ -157,9 +157,11 @@
 
 ## 六、验收限制
 
+- F2 阶段：隔离 worktree（提交锁文件 + 本阶段 patch，不含并行任务 WIP）验证 1583 passed / 6 ignored；doc tests 编译通过（0 个示例）。128 个大气泡的快照 COW 回归记录正文/推理 Clone 为 0 字节；20 次增长发布的 source→VM 物化恰为各 trailing 长度之和，未变 trailing 不物化。变更后的旧快照与手动 fold 独立性也有回归。源测试按渲染职责拆分，保留原有案例与 canonical 模块过滤前缀。
+- F2 全量并发验证有一次 `test_bridge_reset_rehydrates_pending_compact_note_for_same_session` 的全局 ACP_STATE loading 断言失败；该例定向复查和全量串行均通过。未修改该测试或用重试推定失败归因；上述 F2 通过数字以最终串行验证为准。
 - 首批回归：`./scripts/cargo-rmcp-patched.sh test --locked -p peri-tui --lib` 为 1580 passed / 6 ignored；doc tests 编译通过，0 个可执行示例。后台 scheduler 覆盖固定 deadline、隐藏主流、同会话重置后重排和重置与 receiver close 同时发生的收尾。
 - 本次变更的 Rust 文件均不超过 1000 行；全量 size 检查仍有 13 个既存测试文件超限，未宣称全库通过。
 - 首批进展按用户授权提交，保留工作区原有、与本任务无关的改动；未关闭项继续保持 P0。
 - 未做现场 perf / heap 采样，不提供 CPU/RSS 改善数字；原文倍数仅为审计假设，不作为验收事实。
 - §二为历史审计原始描述，不覆盖 §四的纠正和未完成范围。
-- `ProjectionCopiedBytes` 现有统计按整轮文本长度估算，不是实际分配/复制字节；不得据此宣称物化收益。
+- `ProjectionCopiedBytes` 已改为 source→VM `String` 构造点的正文/推理字节；`AssistantCloneBytes` 计气泡 Clone 的正文/推理字节。二者均不等于全部 allocator/COW/RSS 测量，不据此宣称现场资源收益。

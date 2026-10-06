@@ -117,7 +117,7 @@ pub(super) fn apply_fold_pass(
                 // 正文时长冻结（§6.2）：仅 trailing 流式段持有 started_at。
                 let text_freeze = phase != SessionPhase::PromptRunning && b.started_at.is_some();
                 if changed || text_freeze {
-                    let mut updated = b.clone();
+                    let mut updated = (**b).clone();
                     if let Some((fold, status, is_running, frozen)) = reasoning_update {
                         let r = updated.reasoning.as_mut().expect("reasoning_update 必有块");
                         r.fold = fold;
@@ -137,7 +137,7 @@ pub(super) fn apply_fold_pass(
                         updated.started_at = None;
                     }
                     updated.recompute_hash();
-                    updates.push((i, TuiAssistantBubble(updated)));
+                    updates.push((i, TuiAssistantBubble(updated.into())));
                 }
             }
             TuiToolCard(t) => {

@@ -28,6 +28,10 @@ pub(super) fn move_entry_focus(
     Some(next.clamp(0, items_len as i64 - 1) as usize)
 }
 
+#[cfg(test)]
+#[path = "entry_nav_shared_test.rs"]
+mod shared_bubble_tests;
+
 /// entry 的折叠键 + 当前 fold（无折叠能力的 entry → `None`）。
 /// 与折叠 pass（`acp_events/render.rs::apply_fold_pass`）的键控口径一致：
 /// Reasoning(message_id) / Tool(tool_id) / SubAgent(agent_id) /
@@ -121,9 +125,16 @@ pub(super) fn entry_click_decision(
 pub(super) fn apply_fold_override(vm: &mut TuiRenderUnit, fold: FoldState) {
     match vm {
         TuiRenderUnit::TuiAssistantBubble(b) => {
-            if let Some(r) = b.reasoning.as_mut() {
-                r.fold = fold;
-                b.recompute_hash();
+            if b.reasoning
+                .as_ref()
+                .is_none_or(|reasoning| reasoning.fold == fold)
+            {
+                return;
+            }
+            let bubble = std::sync::Arc::make_mut(b);
+            if let Some(reasoning) = bubble.reasoning.as_mut() {
+                reasoning.fold = fold;
+                bubble.recompute_hash();
             }
         }
         TuiRenderUnit::TuiToolCard(t) => {

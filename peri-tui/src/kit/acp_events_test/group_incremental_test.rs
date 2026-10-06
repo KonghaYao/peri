@@ -53,6 +53,7 @@ fn normalize_assembly_clock(unit: &TuiRenderUnit) -> TuiRenderUnit {
     let mut unit = unit.clone();
     match &mut unit {
         TuiRenderUnit::TuiAssistantBubble(bubble) => {
+            let bubble = std::sync::Arc::make_mut(bubble);
             bubble.duration_ms = bubble.duration_ms.map(|_| 0);
             if let Some(reasoning) = bubble.reasoning.as_mut() {
                 reasoning.duration_ms = reasoning.duration_ms.map(|_| 0);

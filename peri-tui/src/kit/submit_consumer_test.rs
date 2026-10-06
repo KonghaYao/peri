@@ -260,7 +260,8 @@ async fn test_clear_request_bypasses_prompt() {
                 reasoning: None,
                 message_id: None,
                 content_hash: tui_hash_str("existing|"),
-            },
+            }
+            .into(),
         )]),
         generation: 0,
     };

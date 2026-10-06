@@ -39,6 +39,7 @@ impl Drop for Fixture {
 #[serial_test::serial]
 fn chunks_accumulate_without_projecting_until_publication() {
     let fixture = Fixture::new();
+    crate::kit::acp_bridge::reset_perf_counters();
     for _ in 0..200 {
         fixture.text("中文🙂");
     }
@@ -46,6 +47,10 @@ fn chunks_accumulate_without_projecting_until_publication() {
         BG_LIVE_DETAIL.state().read()["stream-test"]
             .nested_units
             .is_empty()
+    );
+    assert_eq!(
+        crate::kit::acp_bridge::perf_counters().assistant_clone_calls,
+        0
     );
     publish_pending_streams();
     let live = BG_LIVE_DETAIL.state();
@@ -55,6 +60,14 @@ fn chunks_accumulate_without_projecting_until_publication() {
         panic!("expected bubble");
     };
     assert_eq!(bubble.text, "中文🙂".repeat(200));
+    assert_eq!(
+        crate::kit::acp_bridge::perf_counters().assistant_clone_calls,
+        1
+    );
+    assert_eq!(
+        crate::kit::acp_bridge::perf_counters().assistant_clone_bytes,
+        bubble.text.len() as u64
+    );
     assert_eq!(
         bubble.content_hash,
         TuiAssistantBubble::compute_hash(&bubble.text, None, bubble.duration_secs(), false)
