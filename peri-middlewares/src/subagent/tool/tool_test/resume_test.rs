@@ -176,12 +176,75 @@ async fn test_resume_thread_id_not_found() {
             peri_agent::tools::ToolContext::new(&[], "."),
         )
         .await;
-    let err = result.unwrap_err().to_string();
+    let error = result.unwrap_err();
+    assert_eq!(
+        error
+            .downcast_ref::<peri_agent::tools::EffectiveToolError>()
+            .expect("missing target must be a typed preflight rejection")
+            .code,
+        peri_agent::tools::EffectiveToolErrorCode::InvalidInput,
+    );
+    let err = error.to_string();
     assert!(
         err.contains("thread not found"),
         "不存在的 thread 应报 not found: {}",
         err
     );
+    assert!(fixture.load_meta(&parent_id).await.is_ok());
+    assert!(fixture
+        .facade()
+        .list_children(&parent_id)
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn test_resume_missing_resources_is_a_typed_preflight_rejection() {
+    let tool = make_subagent_tool(vec![]);
+    let error = tool
+        .invoke_resume(
+            uuid::Uuid::now_v7().to_string(),
+            Some("ping".into()),
+            "/tmp".into(),
+            false,
+            None,
+        )
+        .await
+        .unwrap_err();
+    let rejection = error
+        .downcast_ref::<peri_agent::tools::EffectiveToolError>()
+        .unwrap();
+    assert_eq!(
+        rejection.code,
+        peri_agent::tools::EffectiveToolErrorCode::ApplicationFailed
+    );
+    assert!(rejection.message.contains("session resources required"));
+}
+
+#[tokio::test]
+async fn test_resume_invalid_identity_is_a_typed_preflight_rejection() {
+    let dir = tempdir().unwrap();
+    let fixture = SessionFixture::open_in(dir.path()).await;
+    let tool = make_subagent_tool(vec![]).with_session_resources(fixture.facade());
+    let error = tool
+        .invoke_resume(
+            "../invalid".into(),
+            Some("ping".into()),
+            fixture.workspace_cwd(),
+            false,
+            None,
+        )
+        .await
+        .unwrap_err();
+    let rejection = error
+        .downcast_ref::<peri_agent::tools::EffectiveToolError>()
+        .unwrap();
+    assert_eq!(
+        rejection.code,
+        peri_agent::tools::EffectiveToolErrorCode::InvalidInput
+    );
+    assert!(rejection.message.contains("invalid thread id"));
 }
 
 /// 校验：thread 状态 active（未正常收尾）→ Err（R-M4 文本）。
@@ -218,7 +281,15 @@ async fn test_resume_thread_id_active_rejected() {
             peri_agent::tools::ToolContext::new(&[], "."),
         )
         .await;
-    let err = result.unwrap_err().to_string();
+    let error = result.unwrap_err();
+    assert_eq!(
+        error
+            .downcast_ref::<peri_agent::tools::EffectiveToolError>()
+            .expect("active target without a receiver must be a typed rejection")
+            .code,
+        peri_agent::tools::EffectiveToolErrorCode::ApplicationFailed,
+    );
+    let err = error.to_string();
     assert!(
         err.contains("is still active"),
         "active thread 应被拒绝: {}",

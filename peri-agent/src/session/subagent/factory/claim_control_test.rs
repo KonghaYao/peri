@@ -1,5 +1,6 @@
 use super::*;
 use crate::session::test_resources::mock::MockSessionResources;
+use peri_acp_types::tasks::TaskManager as _;
 
 async fn observed(store: &MockSessionResources, session_id: &ThreadId) -> ControlAttempt {
     let attempt = ControlAttempt {
@@ -97,4 +98,17 @@ async fn synchronous_completion_propagates_claim_worker_failure() {
         claim.finish(AgentStatus::Error).await.unwrap_err(),
         "resume claim settle failed"
     );
+}
+
+#[tokio::test]
+async fn preflight_rejection_confirms_unused_external_execution() {
+    let store = MockSessionResources::new();
+    let manager = crate::agent::async_tasks::TaskManager::new();
+    let guard =
+        peri_acp_types::tasks::TaskManager::begin_external_execution(&manager, "resume").unwrap();
+    assert!(!manager.is_execution_idle());
+    let child_id = uuid::Uuid::now_v7().to_string();
+    let result = ResumeClaim::acquire(store, child_id.clone(), child_id, Some(guard)).await;
+    assert!(result.is_err());
+    assert!(manager.is_execution_idle());
 }

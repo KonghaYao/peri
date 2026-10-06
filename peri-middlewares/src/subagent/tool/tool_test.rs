@@ -783,6 +783,8 @@ mod model_tier_test;
 mod resume_integration_test;
 #[path = "tool_test/resume_test.rs"]
 mod resume_test;
+#[path = "tool_test/resume_failure_test.rs"]
+mod resume_failure_test;
 #[path = "tool_test/session_isolation_test.rs"]
 mod session_isolation_test;
 

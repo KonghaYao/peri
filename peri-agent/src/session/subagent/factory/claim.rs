@@ -13,9 +13,10 @@ use std::sync::Arc;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
+use crate::tools::{EffectiveToolError, EffectiveToolErrorCode};
 use peri_acp_types::session_resources::{
     ControlAction, ControlAttempt, ControlCommand, ControlDecision, SessionMetaPatch,
-    SessionResources,
+    SessionResourceErrorKind, SessionResources,
 };
 use peri_acp_types::thread::{AgentStatus, ThreadId, ThreadMeta};
 
@@ -139,20 +140,29 @@ async fn own_claim(
     store: Arc<dyn SessionResources>,
     thread_id: ThreadId,
     root_id: ThreadId,
-    mut meta_tx: oneshot::Sender<Result<ThreadMeta, String>>,
+    mut meta_tx: oneshot::Sender<Result<ThreadMeta, Box<dyn std::error::Error + Send + Sync>>>,
     decision: oneshot::Receiver<ClaimDecision>,
     mut ownership: Option<Box<dyn peri_acp_types::tasks::ExternalExecutionGuard>>,
 ) -> Result<(), String> {
     // 校验只读且可被调用方取消；取消后不再进入写入。
     let validated = tokio::select! {
         biased;
-        _ = meta_tx.closed() => return Ok(()),
+        _ = meta_tx.closed() => {
+            if let Some(owner) = ownership.as_mut() {
+                owner.confirm_stopped();
+            }
+            return Ok(());
+        },
         result = validate_thread(store.as_ref(), &thread_id) => result,
     };
     let meta = match validated {
         Ok(meta) => meta,
         Err(error) => {
-            let _ = meta_tx.send(Err(error.to_string()));
+            tracing::warn!(%thread_id, %error, "resume claim validation failed");
+            if let Some(owner) = ownership.as_mut() {
+                owner.confirm_stopped();
+            }
+            let _ = meta_tx.send(Err(error));
             return Ok(());
         }
     };
@@ -161,9 +171,13 @@ async fn own_claim(
     let handle = match store.claim_child_resume(&thread_id, &root_id).await {
         Ok(handle) => handle,
         Err(error) => {
-            let _ = meta_tx.send(Err(format!(
-                "resume_subagent: failed to claim thread {thread_id}: {error}"
-            )));
+            tracing::error!(%thread_id, %error, effect = ?error.effect(), "resume thread claim failed");
+            if error.effect() == peri_acp_types::session_resources::MutationOutcome::NotApplied {
+                if let Some(owner) = ownership.as_mut() {
+                    owner.confirm_stopped();
+                }
+            }
+            let _ = meta_tx.send(Err(error.into()));
             return Ok(());
         }
     };
@@ -259,21 +273,37 @@ pub(in crate::session::subagent) async fn clear_stopped_attempt(
 #[path = "claim_control_test.rs"]
 mod control_tests;
 
+#[cfg(test)]
+#[path = "claim_preflight_test.rs"]
+mod preflight_tests;
+
 async fn validate_thread(
     store: &dyn SessionResources,
     thread_id: &str,
 ) -> Result<ThreadMeta, Box<dyn std::error::Error + Send + Sync>> {
-    super::validate_thread_id_format(thread_id)?;
-    let meta = store
-        .load_session_meta(&thread_id.to_owned())
-        .await
-        .map_err(|_| format!("resume_subagent: thread not found: {}", thread_id))?;
+    super::validate_thread_id_format(thread_id).map_err(|error| {
+        EffectiveToolError::new(EffectiveToolErrorCode::InvalidInput, error.to_string())
+    })?;
+    let meta = match store.load_session_meta(&thread_id.to_owned()).await {
+        Ok(meta) => meta,
+        Err(error) if matches!(error.kind(), SessionResourceErrorKind::NotFound) => {
+            return Err(EffectiveToolError::new(
+                EffectiveToolErrorCode::InvalidInput,
+                format!("resume_subagent: thread not found: {thread_id}"),
+            )
+            .into());
+        }
+        Err(error) => return Err(error.into()),
+    };
     if meta.agent_status.is_active() {
-        return Err(format!(
-            "resume_subagent: thread {} is still active \
+        return Err(EffectiveToolError::new(
+            EffectiveToolErrorCode::ApplicationFailed,
+            format!(
+                "resume_subagent: thread {} is still active \
             (thread 仍处于运行态: 可能仍在执行, 或上次异常退出未收尾; \
             若确认无执行中任务, 可改用 Agent(subagent_type: ...) 新建)",
-            thread_id
+                thread_id
+            ),
         )
         .into());
     }

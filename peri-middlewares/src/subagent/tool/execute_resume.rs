@@ -17,10 +17,26 @@
 
 use std::sync::Arc;
 
+use peri_acp_types::session_resources::SessionResourceErrorKind;
 use peri_agent::session::subagent::{
     extract_last_ai_text, format_subagent_result, SubagentCancelPolicy, SubagentRunMode,
 };
-use peri_agent::tools::BaseTool;
+use peri_agent::tools::{BaseTool, EffectiveToolError, EffectiveToolErrorCode};
+
+fn preflight_rejected(
+    thread_id: &str,
+    stage: &'static str,
+    code: EffectiveToolErrorCode,
+    message: impl Into<String>,
+) -> Box<dyn std::error::Error + Send + Sync> {
+    tracing::warn!(
+        child_thread_id = %peri_acp_types::session::sanitize_public_error(thread_id, 120),
+        stage,
+        code = code.as_str(),
+        "subagent resume preflight rejected before execution"
+    );
+    Box::new(EffectiveToolError::new(code, message))
+}
 
 impl super::SubAgentTool {
     /// 向本会话 active 后台 subagent 发 Defer，或恢复非 active thread。
@@ -46,7 +62,23 @@ impl super::SubAgentTool {
         // Live 执行是 active 的事实源。投递只做同步查找和入队，不能跨 load_meta
         // await 后再解析同一 thread，以免把消息投给期间恢复的新执行。
         if let Some(manager) = &host.task_manager {
-            if let Some(receipt) = manager.send_subagent_message(&thread_id, prompt.as_deref())? {
+            let receipt = manager
+                .send_subagent_message(&thread_id, prompt.as_deref())
+                .map_err(|error| {
+                    use peri_agent::agent::async_tasks::SubagentMessageError;
+                    let code = match &error {
+                        SubagentMessageError::EmptyPrompt
+                        | SubagentMessageError::TooLarge
+                        | SubagentMessageError::InvalidEnvelope(_) => {
+                            EffectiveToolErrorCode::InvalidInput
+                        }
+                        SubagentMessageError::Closed | SubagentMessageError::Full => {
+                            EffectiveToolErrorCode::ApplicationFailed
+                        }
+                    };
+                    preflight_rejected(&thread_id, "live_message", code, error.to_string())
+                })?;
+            if let Some(receipt) = receipt {
                 return Ok(format!(
                     "action: send\nstatus: queued\nchild_thread_id: {thread_id}\ntask_id: {}\n\
                      Supplemental prompt queued as Defer for the active background sub-agent. \
@@ -58,35 +90,65 @@ impl super::SubAgentTool {
             }
         }
         // 无 live receiver 时才进入磁盘恢复路径。
-        let session_resources = host.session_resources.clone().ok_or(
+        let session_resources = host.session_resources.clone().ok_or_else(|| preflight_rejected(
+            &thread_id, "resources", EffectiveToolErrorCode::ApplicationFailed,
             "resume_subagent: session resources required (resume_thread_id needs a persisted thread)",
-        )?;
+        ))?;
 
         // 双保险（review MEDIUM-1）：bg resume 在 agent 层注册失败会回滚 status，
         // 但无 task_manager 时先在此预检，避免「置 active → 注册失败 → 回滚」的
         // 无效往返（execute_bg.rs:29-32 同款文本）
         if run_in_background && host.task_manager.is_none() {
-            return Err("Background tasks not available: no task manager configured".into());
+            return Err(preflight_rejected(
+                &thread_id,
+                "background_manager",
+                EffectiveToolErrorCode::ApplicationFailed,
+                "Background tasks not available: no task manager configured",
+            ));
         }
 
         // 0. thread_id 格式校验（review low-2）：FilesystemThreadStore 按 id 拼路径，
         //    非 UUID 在 load_meta 之前统一拒绝（agent 层同文本，双保险）
         if uuid::Uuid::parse_str(&thread_id).is_err() {
-            return Err(format!("resume_subagent: invalid thread id: {}", thread_id).into());
+            return Err(preflight_rejected(
+                &thread_id,
+                "identity",
+                EffectiveToolErrorCode::InvalidInput,
+                format!(
+                    "resume_subagent: invalid thread id: {}",
+                    peri_acp_types::session::sanitize_public_error(&thread_id, 120)
+                ),
+            ));
         }
 
         // 1. load_meta 取 title（决定工具集恢复路径，issue 决策 11）
         let meta = session_resources
             .load_session_meta(&thread_id)
             .await
-            .map_err(|_| format!("resume_subagent: thread not found: {}", thread_id))?;
+            .map_err(|error| {
+                let (code, message) = match error.kind() {
+                    SessionResourceErrorKind::NotFound => (
+                        EffectiveToolErrorCode::InvalidInput,
+                        format!("resume_subagent: thread not found: {thread_id}"),
+                    ),
+                    _ => (
+                        EffectiveToolErrorCode::ApplicationFailed,
+                        format!("resume_subagent: failed to read thread {thread_id}: {error}"),
+                    ),
+                };
+                preflight_rejected(&thread_id, "metadata", code, message)
+            })?;
         if meta.agent_status.is_active() {
-            return Err(format!(
-                "send_subagent: thread {thread_id} is still active, but no live background \
+            return Err(preflight_rejected(
+                &thread_id,
+                "active_without_receiver",
+                EffectiveToolErrorCode::ApplicationFailed,
+                format!(
+                    "send_subagent: thread {thread_id} is still active, but no live background \
                  receiver is available in this session. Message was not queued; \
                  no execution was started or resumed."
-            )
-            .into());
+                ),
+            ));
         }
         let title = meta.title.clone().unwrap_or_default();
 
@@ -106,13 +168,21 @@ impl super::SubAgentTool {
             )
         } else {
             let agent_def = if title.starts_with("mcp__") {
-                self.load_and_approve_mcp_agent(&title)
-                    .await
-                    .map_err(|error| format!("resume_subagent: {error}"))?
+                self.load_and_approve_mcp_agent(&title).await?
             } else {
                 self.load_agent_def_for_resume(&title)
                     .await
-                    .map_err(|error| format!("resume_subagent: {error}"))?
+                    .map_err(|error| {
+                        preflight_rejected(
+                            &thread_id,
+                            "definition",
+                            EffectiveToolErrorCode::ApplicationFailed,
+                            format!(
+                                "resume_subagent: {}",
+                                peri_acp_types::session::sanitize_public_error(&error, 2000)
+                            ),
+                        )
+                    })?
             };
             let build_result = self
                 .build_agent_from_def(

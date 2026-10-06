@@ -206,6 +206,7 @@ pub(super) async fn resume_subagent_impl(
             )),
         ));
     }
+    let cluster_root = super::execution_root(session_resources.as_ref(), &thread_id).await?;
     let ownership = task_manager
         .as_ref()
         .map(|manager| {
@@ -216,7 +217,6 @@ pub(super) async fn resume_subagent_impl(
         })
         .transpose()
         .map_err(|message| preparation_rejected(&thread_id, preparation_failed(message)))?;
-    let cluster_root = super::execution_root(session_resources.as_ref(), &thread_id).await?;
     let (meta, claim) = ResumeClaim::acquire(
         Arc::clone(&session_resources),
         thread_id.clone(),
