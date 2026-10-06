@@ -597,7 +597,9 @@ fn build_snapshot_source(
                     commands_count: p.commands.len(),
                     agents_count: p.agents_dirs.len(),
                     mcp_count: p.mcp_servers.len(),
-                    install_scope: "user".to_string(),
+                    install_scope: None,
+                    toggle_supported: Some(false),
+                    management_error: Some("startup plugin projection is read-only".into()),
                     load_error: None,
                 })
                 .collect();

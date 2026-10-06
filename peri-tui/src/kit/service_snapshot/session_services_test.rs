@@ -84,3 +84,53 @@ fn last_good_projection_is_scoped_to_session_generation_not_only_session_id() {
     refresh.reset_services(&None);
     assert!(refresh.services.cron_jobs.is_empty());
 }
+
+#[tokio::test]
+async fn plugin_projection_keeps_writable_scope_and_read_only_entries_distinct() {
+    let (transport, server) = mpsc_transport_pair();
+    let (client, _, _) = AcpTuiClient::new(transport);
+    let server_task = tokio::spawn(async move {
+        for _ in 0..3 {
+            let Some(IncomingMessage::Request { id, method, .. }) = server.recv().await else {
+                panic!("expected service projection request");
+            };
+            let response = match method.as_str() {
+                "plugin/list" => {
+                    let plugins = [Some("user"), Some("project"), Some("local"), None]
+                        .into_iter()
+                        .map(|scope| {
+                            json!({
+                                "name":"fixture", "version":"1", "enabled":true,
+                                "root":"/fixture", "description":"fixture", "marketplace":"tools",
+                                "author":null, "skills_count":0, "commands_count":0,
+                                "agents_count":0, "mcp_count":0, "source":"session",
+                                "install_scope":scope, "toggle_supported":scope.is_some(),
+                                "load_error":null,
+                                "management_error":scope.is_none().then_some("no writable installation record")
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    json!({"plugins":plugins, "hooks":[]})
+                }
+                "mcp/list" => json!({"servers":[]}),
+                "cron/list" => json!({"jobs":[]}),
+                other => panic!("unexpected service request: {other}"),
+            };
+            server.send_response(id, Ok(response)).await.unwrap();
+        }
+    });
+    let mut services = SessionServices::default();
+    assert!(query(&client, "session-a", &mut services).await.is_none());
+    for (entry, scope) in
+        services
+            .plugins
+            .iter()
+            .zip([Some("user"), Some("project"), Some("local"), None])
+    {
+        assert_eq!(entry.install_scope.as_deref(), scope);
+        assert_eq!(entry.toggle_supported, Some(scope.is_some()));
+        assert_eq!(entry.management_error.is_some(), scope.is_none());
+    }
+    assert_eq!(services.plugins.len(), 4);
+    server_task.await.unwrap();
+}

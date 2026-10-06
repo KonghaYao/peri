@@ -42,6 +42,36 @@ pub(super) fn refresh_discover_cache() {
 /// 使用 Option<Vec<T>>：None = 未初始化，Some(vec) = 已填充（可能为空）。
 static MARKETPLACE_CACHE: OnceLock<parking_lot::Mutex<Option<Vec<MsEntry>>>> = OnceLock::new();
 
+#[cfg(test)]
+pub(super) struct EmptyCatalogGuard {
+    discover: Option<Vec<PluginSearchResultItem>>,
+    marketplaces: Option<Vec<MsEntry>>,
+}
+
+#[cfg(test)]
+pub(super) fn empty_catalog_for_test() -> EmptyCatalogGuard {
+    let discover = DISCOVER_CACHE
+        .get_or_init(|| parking_lot::Mutex::new(None))
+        .lock()
+        .replace(Vec::new());
+    let marketplaces = MARKETPLACE_CACHE
+        .get_or_init(|| parking_lot::Mutex::new(None))
+        .lock()
+        .replace(Vec::new());
+    EmptyCatalogGuard {
+        discover,
+        marketplaces,
+    }
+}
+
+#[cfg(test)]
+impl Drop for EmptyCatalogGuard {
+    fn drop(&mut self) {
+        *DISCOVER_CACHE.get().unwrap().lock() = self.discover.take();
+        *MARKETPLACE_CACHE.get().unwrap().lock() = self.marketplaces.take();
+    }
+}
+
 pub(super) fn get_marketplace_cache() -> Vec<MsEntry> {
     let cache = MARKETPLACE_CACHE.get_or_init(|| parking_lot::Mutex::new(None));
     {

@@ -229,6 +229,22 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         },
     );
 
+    #[cfg(test)]
+    operation::tests::visit_mounted_panel(operation::tests::MountedPanel {
+        operation,
+        selected,
+        active_tab,
+        discover,
+        action_index,
+        confirm_action,
+        operation_loading,
+        detail_plugin_idx,
+        marketplace_detail,
+        marketplace_detail_action,
+        add_marketplace_input,
+        add_marketplace_active,
+    });
+
     // ── 构建行 ──
     let sel = *selected.read();
     let current_tab = *active_tab.read();
@@ -460,9 +476,13 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     } else if let Some(error) = projection_error.read().as_ref() {
         format!("{}: {}", i18n::tr("panel-plugin-operation-failed"), error)
     } else if let Some(error) = operation.read().error.as_ref() {
-        format!("{}: {}", i18n::tr("panel-plugin-operation-failed"), error)
+        format!("{}: {}", i18n::tr("panel-plugin-operation-status"), error)
     } else if let Some(op) = operation.read().pending_action() {
-        format!("{}...", action_label(op))
+        format!(
+            "{}... {}",
+            action_label(op),
+            i18n::tr("panel-plugin-operation-wait-hint")
+        )
     } else if let Some(ref op) = *operation_loading.read() {
         match op.as_str() {
             "uninstall" => format!("{}...", i18n::tr("panel-plugin-action-uninstall")),

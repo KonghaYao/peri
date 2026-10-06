@@ -9,6 +9,8 @@ use serde_json::{Value, json};
 use std::{sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 
+const OPERATION_TIMEOUT: Duration = Duration::from_secs(10);
+
 pub(super) fn detail_action_index(
     event: &Event,
     area: Option<Rect>,
@@ -49,25 +51,35 @@ pub(super) struct PluginOperation {
 }
 
 impl PluginOperation {
-    pub fn installed(action: &str, plugin: &PluginSummary) -> Option<Self> {
+    pub fn installed(action: &str, plugin: &PluginSummary) -> Result<Self, String> {
         let plugin_id = if plugin.marketplace.is_empty() {
             plugin.name.clone()
         } else {
             format!("{}@{}", plugin.name, plugin.marketplace)
         };
-        let mut params = json!({"pluginId": plugin_id});
         let (action, method) = match action {
             "enable" => ("enable", "plugin/toggle"),
             "disable" => ("disable", "plugin/toggle"),
             "uninstall" => ("uninstall", "plugin/uninstall"),
             "update" => ("update", "plugin/update"),
-            _ => return None,
+            _ => return Err(format!("Unsupported plugin action: {action}")),
         };
+        let scope = plugin.install_scope.as_deref();
+        if !matches!(scope, Some("user" | "project" | "local"))
+            || plugin.toggle_supported != Some(true)
+        {
+            return Err(plugin
+                .management_error
+                .as_ref()
+                .filter(|error| !error.trim().is_empty())
+                .cloned()
+                .unwrap_or_else(|| crate::i18n::tr("panel-plugin-management-unsupported")));
+        }
+        let mut params = json!({"pluginId": plugin_id, "scope": scope});
         if method == "plugin/toggle" {
             params["enable"] = json!(action == "enable");
-            params["scope"] = json!(plugin.install_scope);
         }
-        Some(Self {
+        Ok(Self {
             action,
             method,
             params,
@@ -137,6 +149,17 @@ impl OperationState {
         }
     }
 
+    pub fn cancel_wait(&mut self) -> bool {
+        let Some(ticket) = self.pending.take() else {
+            return false;
+        };
+        ticket.cancelled.cancel();
+        self.error = Some(crate::i18n::tr("panel-plugin-operation-wait-cancelled"));
+        tracing::warn!(session_id = %ticket.session.id, method = ticket.operation.method,
+            "Plugin client wait cancelled; server outcome unknown");
+        true
+    }
+
     pub fn reset_session(&mut self, session: SearchSession) {
         if self.session != session {
             self.cancel();
@@ -181,6 +204,16 @@ impl OperationState {
     }
 }
 
+pub(super) fn handle_pending_event(event: &Event, state: State<OperationState>) -> bool {
+    let pending = state.read().pending_action().is_some();
+    if pending
+        && matches!(event, Event::Key(key) if key.kind == KeyEventKind::Press && key.code == KeyCode::Esc)
+    {
+        state.write().cancel_wait();
+    }
+    pending
+}
+
 pub(super) fn dispatch(operation: PluginOperation, state: State<OperationState>) {
     let ticket = state.write().begin(operation, SearchSession::current());
     drop(launch(
@@ -204,16 +237,28 @@ pub(super) fn launch(
     + Send
     + 'static,
 ) -> tokio::task::JoinHandle<()> {
+    let identity = client.as_ref().and_then(|client| {
+        client
+            .stable_session_identity()
+            .filter(|identity| identity.0 == ticket.session.id)
+    });
     tokio::spawn(async move {
-        let mut result = if let Some(client) = client {
+        let mut result = if let Some(client) = client.as_ref() {
             let mut params = ticket.operation.params.clone();
             params["sessionId"] = json!(ticket.session.id);
             tokio::select! {
                 biased;
                 _ = ticket.cancelled.cancelled() => return,
-                result = client.send_raw_request(ticket.operation.method, params) => result,
+                result = peri_time::timeout(OPERATION_TIMEOUT, async {
+                    let identity = identity.as_ref().ok_or_else(|| {
+                        "ACP session not available for plugin operation".to_string()
+                    })?;
+                    client.send_session_request(identity, ticket.operation.method, params)
+                        .await.map_err(|error| error.to_string())
+                }) => result.unwrap_or_else(|_| {
+                    Err(crate::i18n::tr("panel-plugin-operation-timed-out"))
+                }),
             }
-            .map_err(|error| error.to_string())
             .and_then(|value| {
                 if value.get("success").and_then(Value::as_bool) == Some(true) {
                     Ok(())
@@ -224,20 +269,33 @@ pub(super) fn launch(
         } else {
             Err("ACP client not available".into())
         };
+        if let Some(client) = client.as_ref()
+            && identity.is_some()
+            && client.stable_session_identity() != identity
+        {
+            if let Err(error) = &result {
+                tracing::error!(session_id = %ticket.session.id, method = ticket.operation.method,
+                    %error, "Stale plugin operation failed");
+            }
+            result = Err(crate::i18n::tr("panel-plugin-operation-session-changed"));
+        }
         if result.is_ok()
             && matches!(
                 ticket.operation.method,
                 "marketplace/add" | "marketplace/remove" | "marketplace/refresh"
             )
         {
-            match tokio::task::spawn_blocking(|| {
-                super::data::refresh_discover_cache();
-                super::data::refresh_marketplace_cache();
-            })
-            .await
-            {
-                Ok(()) => {}
-                Err(error) => result = Err(format!("Marketplace cache refresh failed: {error}")),
+            tokio::select! {
+                biased;
+                _ = ticket.cancelled.cancelled() => return,
+                refresh = peri_time::timeout(OPERATION_TIMEOUT, tokio::task::spawn_blocking(|| {
+                    super::data::refresh_discover_cache();
+                    super::data::refresh_marketplace_cache();
+                })) => match refresh {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => result = Err(format!("Marketplace cache refresh failed: {error}")),
+                    Err(error) => result = Err(format!("Marketplace operation succeeded; cache refresh timed out: {error}")),
+                }
             }
         }
         if let Err(error) = &result {
@@ -246,6 +304,15 @@ pub(super) fn launch(
         loop {
             if ticket.cancelled.is_cancelled() || SearchSession::current() != ticket.session {
                 return;
+            }
+            if let Some(client) = client.as_ref()
+                && identity.is_some()
+                && client.stable_session_identity() != identity
+            {
+                let error = crate::i18n::tr("panel-plugin-operation-session-changed");
+                tracing::warn!(session_id = %ticket.session.id, method = ticket.operation.method,
+                    %error, "Discarding stale plugin operation result");
+                result = Err(error);
             }
             let Some(unconsumed) = complete(&ticket, result) else {
                 return;
@@ -271,13 +338,21 @@ pub(super) fn installed_action(
         *detail_plugin_idx.write() = None;
         return;
     }
-    if let Some(operation) = PluginOperation::installed(action, plugin) {
-        if action == "uninstall" {
-            state.write().confirmation = Some(operation);
-            *confirm_action.write() = Some("uninstall".into());
-        } else {
-            dispatch(operation, state);
-            *detail_plugin_idx.write() = None;
+    match PluginOperation::installed(action, plugin) {
+        Ok(operation) => {
+            if action == "uninstall" {
+                state.write().confirmation = Some(operation);
+                *confirm_action.write() = Some("uninstall".into());
+            } else {
+                dispatch(operation, state);
+                *detail_plugin_idx.write() = None;
+            }
+        }
+        Err(error) => {
+            tracing::error!(plugin_name = %plugin.name, marketplace = %plugin.marketplace,
+                install_scope = ?plugin.install_scope, toggle_supported = ?plugin.toggle_supported,
+                action, %error, "Plugin operation unsupported");
+            state.write().error = Some(error);
         }
     }
 }
@@ -308,4 +383,4 @@ pub(super) fn confirm_marketplace_remove(
 
 #[cfg(test)]
 #[path = "operation_test.rs"]
-mod tests;
+pub(super) mod tests;

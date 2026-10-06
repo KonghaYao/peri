@@ -197,6 +197,7 @@ scope 快照携 epoch；`taskClose`/`taskOpen` 按该 epoch 做 owner 端 CAS，
 | 加载 | loader.rs（parse_command_md :73 / load_manifest :84 / load_plugins :589 / merge_plugin_mcp_servers :782 / load_enabled_plugins_aggregated :802；MCP 专用严格入口 load_enabled_plugins_for_mcp :755 + validate_mcp_server_config :456，非法 MCP 配置不降级为空配置） |
 | 配置 / 持久化 | config.rs（ClaudeSettings :11、installed_plugins 持久化 :175/:325、settings.json 启用名单 :428/:465） |
 | 安装 / 市场 | installer/（install.rs:12 / update_plugin install.rs:168 / uninstall.rs:15）；marketplace/（MarketplaceManager :20）；install_counts.rs |
+| 宿主插件管理范围 | host_ports.rs（PluginManager）；installer/mod.rs（installation_for_mutation / enabled_plugins_settings_path）；installer/scope_test.rs、identity_test.rs | 安装前校验 scope/cwd；user 记录无 projectPath；update/uninstall 公共签名必须传 InstallScope，以 ID + scope + projectPath 精确匹配唯一记录，不猜 scoped、不跨范围回退；toggle 校验唯一可写记录；project/local 不清用户 pluginConfigs；真实端口回归模块 `plugin::installer::scope_tests` / `plugin::installer::identity_tests`；CLI `peri-tui/src/cli_plugin.rs` 的 plugin_scope_context 统一解析五类安装动作的 scope 与受信 current_dir，隔离测试 `cli_plugin_test.rs` |
 | 中间件 / 类型 | middleware.rs（PluginMiddleware :7）；types.rs（仅 re-export，事实源 peri-acp-types/src/plugin.rs:269） |
 
 ### Skills（src/skills/）

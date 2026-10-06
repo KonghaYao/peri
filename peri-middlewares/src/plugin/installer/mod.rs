@@ -191,23 +191,19 @@ pub fn update_enabled_plugins(
         .entry("enabledPlugins")
         .or_insert(serde_json::Value::Object(serde_json::Map::new()));
 
-    let enabled_map = if let Some(arr) = enabled.as_array() {
+    if let Some(arr) = enabled.as_array() {
         let map: serde_json::Map<String, serde_json::Value> = arr
             .iter()
             .filter_map(|v| v.as_str())
             .map(|s| (s.to_string(), serde_json::Value::Bool(true)))
             .collect();
-        *enabled = serde_json::Value::Object(map.clone());
-        map
-    } else {
-        enabled.as_object().cloned().unwrap_or_default()
-    };
-
-    if !enabled_map.contains_key(plugin_id) {
-        if let Some(obj) = enabled.as_object_mut() {
-            obj.insert(plugin_id.to_string(), serde_json::Value::Bool(true));
-        }
+        *enabled = serde_json::Value::Object(map);
     }
+
+    let enabled = enabled.as_object_mut().ok_or_else(|| {
+        InstallerError::SettingsError("enabledPlugins must be an object or array".into())
+    })?;
+    enabled.insert(plugin_id.to_string(), serde_json::Value::Bool(true));
 
     atomic_write_settings(&settings_path, &value)
 }
@@ -254,6 +250,16 @@ fn enabled_plugins_settings_path(
                     "project and local plugin scopes require a session directory".into(),
                 )
             })?;
+            if !project_dir.is_absolute() {
+                return Err(InstallerError::SettingsError(
+                    "plugin session directory must be absolute".into(),
+                ));
+            }
+            if !project_dir.is_dir() {
+                return Err(InstallerError::SettingsError(
+                    "plugin session directory must exist".into(),
+                ));
+            }
             let filename = if scope == InstallScope::Local {
                 "settings.local.json"
             } else {
@@ -268,16 +274,52 @@ fn enabled_plugins_settings_path(
 #[path = "scope_test.rs"]
 mod scope_tests;
 
+#[cfg(test)]
+#[path = "identity_test.rs"]
+mod identity_tests;
+
 /// 匹配 project_path：两者都为 None，或者路径字符串匹配
 pub(crate) fn match_project_path(stored: &Option<String>, given: Option<&Path>) -> bool {
     match (stored, given) {
         (None, None) => true,
         (None, Some(_)) => false,
         (Some(_), None) => false,
-        (Some(s), Some(p)) => {
-            let given_str = p.to_str().unwrap_or("");
-            s == given_str || s.ends_with(given_str) || given_str.ends_with(s)
+        (Some(stored), Some(given)) => Path::new(stored) == given,
+    }
+}
+
+fn installation_for_mutation<'record>(
+    installed: &'record crate::plugin::types::InstalledPlugins,
+    plugin_id: &str,
+    scope: InstallScope,
+    project_dir: Option<&Path>,
+) -> Result<&'record crate::plugin::types::InstalledPlugin, InstallerError> {
+    let project_dir = if scope == InstallScope::User {
+        None
+    } else {
+        project_dir
+    };
+    let records = installed
+        .plugins
+        .iter()
+        .filter(|record| {
+            record.id == plugin_id
+                && record.scope == scope
+                && match_project_path(&record.project_path, project_dir)
+        })
+        .collect::<Vec<_>>();
+    match records.as_slice() {
+        [record] => Ok(record),
+        [] => {
+            let (name, marketplace) = plugin_id.split_once('@').unwrap_or((plugin_id, ""));
+            Err(InstallerError::PluginNotFound {
+                name: name.into(),
+                marketplace: marketplace.into(),
+            })
         }
+        _ => Err(InstallerError::SettingsError(
+            "plugin installation scope is ambiguous".into(),
+        )),
     }
 }
 

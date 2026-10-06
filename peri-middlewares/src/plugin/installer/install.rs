@@ -17,6 +17,12 @@ pub async fn install_plugin(
     claude_dir: &Path,
     project_dir: Option<&Path>,
 ) -> Result<InstalledPlugin, InstallerError> {
+    super::enabled_plugins_settings_path(scope, claude_dir, project_dir)?;
+    let project_dir = if scope == InstallScope::User {
+        None
+    } else {
+        project_dir
+    };
     let plugins_path = claude_dir.join("plugins").join("installed_plugins.json");
     let mut installed = load_installed_plugins(Some(&plugins_path))?;
 
@@ -178,22 +184,22 @@ pub async fn install_plugin(
 
 pub async fn update_plugin(
     plugin_id: &str,
+    scope: InstallScope,
     marketplace_cache_dir: &Path,
     claude_dir: &Path,
     project_dir: Option<&Path>,
 ) -> Result<InstalledPlugin, InstallerError> {
+    super::enabled_plugins_settings_path(scope, claude_dir, project_dir)?;
+    let project_dir = if scope == InstallScope::User {
+        None
+    } else {
+        project_dir
+    };
     let (name, marketplace) = plugin_id.split_once('@').unwrap_or((plugin_id, ""));
 
     let plugins_path = claude_dir.join("plugins").join("installed_plugins.json");
     let installed = load_installed_plugins(Some(&plugins_path))?;
-    let current = installed
-        .plugins
-        .iter()
-        .find(|p| p.id == plugin_id)
-        .ok_or_else(|| InstallerError::PluginNotFound {
-            name: name.into(),
-            marketplace: marketplace.into(),
-        })?;
+    let current = super::installation_for_mutation(&installed, plugin_id, scope, project_dir)?;
 
     let manifest = get_marketplace_manifest(marketplace, marketplace_cache_dir)?;
     let latest = manifest
@@ -215,11 +221,11 @@ pub async fn update_plugin(
         return Ok(current.clone());
     }
 
-    super::uninstall::uninstall_plugin(plugin_id, claude_dir, project_dir).await?;
+    super::uninstall::uninstall_plugin(plugin_id, scope, claude_dir, project_dir).await?;
     install_plugin(
         name,
         marketplace,
-        current.scope,
+        scope,
         marketplace_cache_dir,
         claude_dir,
         project_dir,

@@ -22,7 +22,7 @@ pub(super) fn handle_search_event(
     add_marketplace_input: State<TextAreaState>,
     add_marketplace_active: State<bool>,
 ) -> EventResult {
-    if operation.read().pending_action().is_some() {
+    if super::operation::handle_pending_event(&event, operation) {
         return EventResult::Consumed;
     }
     // 鼠标：add_marketplace 输入与 Discover tab（click as enter）

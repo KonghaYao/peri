@@ -225,9 +225,14 @@ async fn test_uninstall_plugin() {
     .await
     .unwrap();
 
-    uninstall_plugin("test-plugin@test-mkt", claude_dir.path(), None)
-        .await
-        .unwrap();
+    uninstall_plugin(
+        "test-plugin@test-mkt",
+        InstallScope::User,
+        claude_dir.path(),
+        None,
+    )
+    .await
+    .unwrap();
 
     let installed = load_installed_plugins(Some(
         &claude_dir
@@ -249,7 +254,13 @@ async fn test_uninstall_plugin() {
 #[tokio::test]
 async fn test_uninstall_plugin_not_found() {
     let claude_dir = tempdir().unwrap();
-    let result = uninstall_plugin("nonexistent@test", claude_dir.path(), None).await;
+    let result = uninstall_plugin(
+        "nonexistent@test",
+        InstallScope::User,
+        claude_dir.path(),
+        None,
+    )
+    .await;
     assert!(result.is_err());
 }
 
@@ -272,6 +283,7 @@ async fn test_update_plugin_same_version() {
 
     let result = update_plugin(
         "test-plugin@test-mkt",
+        InstallScope::User,
         cache_dir.path(),
         claude_dir.path(),
         None,
@@ -518,12 +530,12 @@ fn test_match_project_path_exact_match() {
 }
 
 #[test]
-fn test_match_project_path_suffix_match() {
-    assert!(match_project_path(
+fn test_match_project_path_rejects_suffix_match() {
+    assert!(!match_project_path(
         &Some("/home/user/project".into()),
         Some(Path::new("project"))
     ));
-    assert!(match_project_path(
+    assert!(!match_project_path(
         &Some("project".into()),
         Some(Path::new("/home/user/project"))
     ));

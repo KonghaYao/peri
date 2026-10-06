@@ -575,10 +575,23 @@ pub trait PluginManagerPort: Send + Sync {
         scope: InstallScope,
         cache_dir: &Path,
         claude_dir: &Path,
+        project_dir: Option<&Path>,
     ) -> Result<InstalledPlugin, String>;
 
     /// 卸载插件。
-    async fn uninstall(&self, plugin_id: &str, claude_dir: &Path) -> Result<(), String>;
+    async fn uninstall(
+        &self,
+        plugin_id: &str,
+        scope: InstallScope,
+        claude_dir: &Path,
+        project_dir: Option<&Path>,
+    ) -> Result<(), String>;
+
+    fn installation_scope(
+        &self,
+        claude_dir: &Path,
+        plugin: &LoadedPlugin,
+    ) -> Result<Option<InstallScope>, String>;
 
     /// 启用/禁用插件（写 enabledPlugins 配置）。
     fn set_enabled(
@@ -597,8 +610,10 @@ pub trait PluginManagerPort: Send + Sync {
     async fn update(
         &self,
         plugin_id: &str,
+        scope: InstallScope,
         cache_dir: &Path,
         claude_dir: &Path,
+        project_dir: Option<&Path>,
     ) -> Result<InstalledPlugin, String>;
 
     /// 刷新 marketplace（按名称定位 known_marketplaces 条目），返回插件数量。

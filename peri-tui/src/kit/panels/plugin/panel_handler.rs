@@ -26,7 +26,7 @@ pub(super) fn handle_panel_event(
     add_marketplace_input: State<TextAreaState>,
     add_marketplace_active: State<bool>,
 ) -> EventResult {
-    if operation.read().pending_action().is_some() {
+    if super::operation::handle_pending_event(&event, operation) {
         return EventResult::Consumed;
     }
     // 鼠标：区域内左键点击 = 选中该项并执行 Enter 动作（click as enter）

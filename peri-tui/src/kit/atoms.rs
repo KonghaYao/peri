@@ -165,7 +165,9 @@ pub struct PluginSummary {
     pub commands_count: usize,
     pub agents_count: usize,
     pub mcp_count: usize,
-    pub install_scope: String,
+    pub install_scope: Option<String>,
+    pub toggle_supported: Option<bool>,
+    pub management_error: Option<String>,
     pub load_error: Option<String>,
 }
 
