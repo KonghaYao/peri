@@ -40,12 +40,10 @@ fn effective_tool_error_from_boxed(
         Ok(error) => return *error,
         Err(error) => error,
     };
-    if let Some(AgentError::ToolRejected { tool, reason }) = error.downcast_ref::<AgentError>() {
-        return effective_tool_error(AgentError::ToolRejected {
-            tool: tool.clone(),
-            reason: reason.clone(),
-        });
-    }
+    let error = match error.downcast::<AgentError>() {
+        Ok(error) => return effective_tool_error(*error),
+        Err(error) => error,
+    };
     let mut effective =
         EffectiveToolError::new(EffectiveToolErrorCode::ToolFailed, error.to_string());
     if let Some(failure) = error.downcast_ref::<SubagentFailure>() {
@@ -580,3 +578,7 @@ fn post_process_result(
 #[cfg(test)]
 #[path = "execution_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "execution_durable_test.rs"]
+mod durable_tests;

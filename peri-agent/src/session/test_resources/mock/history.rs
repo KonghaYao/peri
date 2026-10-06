@@ -40,7 +40,7 @@ pub(crate) async fn seed_saved_fixture_runtime(
             direct_initiator_lifecycle: 1,
             delegation_invocation_id: intent.invocation_id,
             delegation_task_id: child_id.into(),
-            authorization_ref: "fixture-delegation-authorization".into(),
+            authorization_ref: intent.authorization_ref,
             frozen_digest: format!("{:x}", Sha256::digest(frozen.as_str().as_bytes())),
             tool_ceiling: Default::default(),
             tool_origins: Default::default(),

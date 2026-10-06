@@ -15,6 +15,44 @@ use super::context::{build_subagent_session_v2, derive_cancel_token};
 use crate::messages::BaseMessage;
 use crate::session::queue::{MessageKind, MessageSource, QueuedMessage};
 use crate::session::Session;
+use crate::tools::{EffectiveToolError, EffectiveToolErrorCode};
+
+fn authorization_denied(message: &str) -> EffectiveToolError {
+    EffectiveToolError::new(EffectiveToolErrorCode::PermissionDenied, message)
+}
+
+fn preparation_failed(message: impl Into<String>) -> EffectiveToolError {
+    EffectiveToolError::new(EffectiveToolErrorCode::ApplicationFailed, message)
+}
+
+fn preparation_rejected(
+    child_thread_id: &str,
+    error: EffectiveToolError,
+) -> Box<dyn std::error::Error + Send + Sync> {
+    let reason = match error.code {
+        EffectiveToolErrorCode::PermissionDenied => {
+            "resume authorization or capability validation failed"
+        }
+        EffectiveToolErrorCode::InvalidInput => "resume target identity is invalid or absent",
+        _ => "resume preparation evidence or state is unavailable",
+    };
+    tracing::warn!(
+        child_thread_id,
+        code = error.code.as_str(),
+        reason,
+        "resume preparation rejected"
+    );
+    Box::new(error)
+}
+
+fn rollback_unknown(child_thread_id: &str) {
+    tracing::error!(
+        child_thread_id,
+        code = "UNKNOWN",
+        reason = "resume preparation rollback is unconfirmed",
+        "resume claim remains uncertain"
+    );
+}
 
 // ─── 恢复（统一入口 resume_subagent） ───────────────────────────────────────
 
@@ -26,6 +64,8 @@ use crate::session::Session;
 ///
 /// bound 子会话必须与调用者属于同一根会话及工作区，兄弟子会话可互相恢复。
 /// 缺少已保存授权与 frozen 证据的历史会话不可重新执行。
+/// 保存的 authorization_ref 证明原委托的 ceiling；本次 trusted invocation
+/// 授权新的输入投递，可以来自不同 admission，但不得改写保存的 ceiling。
 ///
 /// 校验 → 置 active 段整体持锁（R-M1：防并发双 resume 双执行同一 thread）；
 /// 锁内仅 load_meta + update_thread_status（无嵌套锁，不 await run_react_loop）。
@@ -86,6 +126,13 @@ pub(super) async fn resume_subagent_impl(
         frozen_date: _,
     } = config;
 
+    super::validate_thread_id_format(&thread_id).map_err(|error| {
+        preparation_rejected(
+            &thread_id,
+            EffectiveToolError::new(EffectiveToolErrorCode::InvalidInput, error.to_string()),
+        )
+    })?;
+
     // 绑定校验用一次一致快照：child 的绑定必须与 owning parent 完全相同，且两者同根。
     // 存在性是本函数的第一个校验分支：快照读取报 `NotFound` 即「thread not found」，
     // 与后续 `ResumeClaim` 的状态校验分开报错（不能把「不存在」说成「仍处于运行态」）。
@@ -98,8 +145,13 @@ pub(super) async fn resume_subagent_impl(
             ) =>
         {
             // 先判格式再判存在：非 UUID 不是「不存在」，与 `validate_thread` 同判据。
-            super::validate_thread_id_format(&thread_id)?;
-            return Err(format!("resume_subagent: thread not found: {thread_id}").into());
+            return Err(preparation_rejected(
+                &thread_id,
+                EffectiveToolError::new(
+                    EffectiveToolErrorCode::InvalidInput,
+                    format!("resume_subagent: thread not found: {thread_id}"),
+                ),
+            ));
         }
         Err(error) => return Err(error.into()),
     };
@@ -109,21 +161,50 @@ pub(super) async fn resume_subagent_impl(
         _ => None,
     };
     if binding.is_some() {
-        let parent_id = super::spawn::parent_thread_id_of(parent)
-            .ok_or("bound child resume requires its owning parent session")?;
+        let parent_id = super::spawn::parent_thread_id_of(parent).ok_or_else(|| {
+            preparation_rejected(
+                &thread_id,
+                authorization_denied("bound child resume requires its owning parent session"),
+            )
+        })?;
         let parent_snapshot = session_resources.load_session_snapshot(&parent_id).await?;
         let parent_binding = match &parent_snapshot.binding {
             peri_acp_types::session_resources::BindingState::Bound(binding) => binding.clone(),
-            _ => return Err("bound subagent parent has no execution binding".into()),
+            _ => {
+                return Err(preparation_rejected(
+                    &thread_id,
+                    authorization_denied("bound subagent parent has no execution binding"),
+                ))
+            }
         };
         if binding.as_ref() != Some(&parent_binding) {
-            return Err(peri_acp_types::workspace::WorkspaceError::ExecutionBindingMismatch.into());
+            return Err(preparation_rejected(
+                &thread_id,
+                authorization_denied(
+                    &peri_acp_types::workspace::WorkspaceError::ExecutionBindingMismatch
+                        .to_string(),
+                ),
+            ));
         }
         if super::execution_root(session_resources.as_ref(), &thread_id).await?
             != super::execution_root(session_resources.as_ref(), &parent_id).await?
         {
-            return Err("bound subagent belongs to another root session".into());
+            return Err(preparation_rejected(
+                &thread_id,
+                authorization_denied("bound subagent belongs to another root session"),
+            ));
         }
+    }
+    if child_snapshot.meta.agent_status.is_active() {
+        return Err(preparation_rejected(
+            &thread_id,
+            preparation_failed(format!(
+                "resume_subagent: thread {} is still active \
+            (thread 仍处于运行态: 可能仍在执行, 或上次异常退出未收尾; \
+            若确认无执行中任务, 可改用 Agent(subagent_type: ...) 新建)",
+                thread_id
+            )),
+        ));
     }
     let ownership = task_manager
         .as_ref()
@@ -133,7 +214,8 @@ pub(super) async fn resume_subagent_impl(
                 "subagent",
             )
         })
-        .transpose()?;
+        .transpose()
+        .map_err(|message| preparation_rejected(&thread_id, preparation_failed(message)))?;
     let cluster_root = super::execution_root(session_resources.as_ref(), &thread_id).await?;
     let (meta, claim) = ResumeClaim::acquire(
         Arc::clone(&session_resources),
@@ -158,19 +240,23 @@ pub(super) async fn resume_subagent_impl(
                 limit: 1,
             })
             .await?;
+        if work.control.status != peri_acp_types::session_resources::ControlStatus::Active {
+            return Err(preparation_failed("Incomplete: child control is not Active; explicit Reopen required").into());
+        }
         if prompt.is_none() && work.state.works.values().any(|work|
             matches!(work.stage, peri_acp_types::session_resources::work::WorkStage::ReasonInFlight | peri_acp_types::session_resources::work::WorkStage::Blocked)
                 && work.reason_request.is_some() && work.response.is_none()) {
-            anyhow::bail!("Blocked: original model request requires reconciliation before implicit continuation");
+            return Err(preparation_failed("Blocked: original model request requires reconciliation before implicit continuation").into());
         }
         let raw = work
             .state
             .child_resume_metadata
             .get(&work.control.lifecycle)
-            .ok_or_else(|| anyhow::anyhow!("Blocked: saved child runtime metadata unavailable"))?;
-        let saved: super::cold::ChildResumeMetadata = serde_json::from_str(raw)?;
+            .ok_or_else(|| preparation_failed("Blocked: saved child runtime metadata unavailable"))?;
+        let saved: super::cold::ChildResumeMetadata = serde_json::from_str(raw)
+            .map_err(|error| preparation_failed(format!("Blocked: invalid saved child runtime metadata: {error}")))?;
         let FrozenState::Present(bytes) = &snapshot.frozen else {
-            anyhow::bail!("Blocked: saved child frozen snapshot unavailable");
+            return Err(preparation_failed("Blocked: saved child frozen snapshot unavailable").into());
         };
         if saved.version != 1
             || saved.child_session_id != thread_id
@@ -178,6 +264,9 @@ pub(super) async fn resume_subagent_impl(
             || saved.frozen_digest != format!("{:x}", Sha256::digest(bytes.as_str().as_bytes()))
             || saved.model_name != llm.model_name()
             || saved.authorization_ref.is_empty()
+            || saved.direct_initiator_session_id.is_empty()
+            || saved.delegation_invocation_id.is_empty()
+            || saved.delegation_task_id.is_empty()
             || saved
                 .tool_origins
                 .keys()
@@ -185,7 +274,55 @@ pub(super) async fn resume_subagent_impl(
                 .collect::<std::collections::BTreeSet<_>>()
                 != saved.tool_ceiling
         {
-            anyhow::bail!("Blocked: saved child runtime identity or authorization unavailable");
+            return Err(preparation_failed("Blocked: saved child runtime identity or authorization unavailable").into());
+        }
+        let initiator = super::spawn::parent_thread_id_of(parent)
+            .ok_or_else(|| authorization_denied("current delegation initiator unavailable"))?;
+        if meta.parent_thread_id.as_deref().is_some_and(|parent_id|
+            parent_id != saved.direct_initiator_session_id)
+            || saved.direct_initiator_lifecycle == 0
+        {
+            return Err(authorization_denied("saved child direct initiator differs from owning parent").into());
+        }
+        let original_parent_work = session_resources
+            .load_session_work(&WorkQuery {
+                session_id: saved.direct_initiator_session_id.clone(),
+                limit: 1,
+            })
+            .await?;
+        if original_parent_work.control.lifecycle != saved.direct_initiator_lifecycle {
+            return Err(authorization_denied("saved child initiator lifecycle differs from owning parent").into());
+        }
+        let original = original_parent_work
+            .state
+            .invocations
+            .get(&saved.delegation_invocation_id)
+            .ok_or_else(|| authorization_denied("original trusted delegation invocation unavailable"))?;
+        if original.recipient_lifecycle != saved.direct_initiator_lifecycle
+            || original.intent.authorization_ref != saved.authorization_ref
+            || original.intent.scope_id != saved.direct_initiator_session_id
+        {
+            return Err(authorization_denied("original delegation does not prove saved child authorization ceiling").into());
+        }
+        let invocation_id = parent_tool_call_id
+            .as_deref()
+            .ok_or_else(|| authorization_denied("current delegation invocation unavailable"))?;
+        let parent_work = session_resources
+            .load_session_work(&WorkQuery {
+                session_id: initiator.clone(),
+                limit: 1,
+            })
+            .await?;
+        let current = parent_work
+            .state
+            .invocations
+            .get(invocation_id)
+            .ok_or_else(|| authorization_denied("current trusted invocation unavailable"))?;
+        if current.recipient_lifecycle != parent_work.control.lifecycle
+            || current.intent.scope_id != initiator
+            || current.intent.authorization_ref.is_empty()
+        {
+            return Err(authorization_denied("current delegation authorization or scope unavailable").into());
         }
         if tools
             .iter()
@@ -201,7 +338,7 @@ pub(super) async fn resume_subagent_impl(
                 .tool_ceiling
                 .is_subset(&tools.iter().map(|tool| tool.name().to_owned()).collect())
         {
-            anyhow::bail!("Blocked: saved child tool origin or ceiling unavailable");
+            return Err(authorization_denied("Blocked: saved child tool origin or ceiling unavailable").into());
         }
         let mut inherited = snapshot.inherited;
         let own = snapshot.payloads;
@@ -215,7 +352,7 @@ pub(super) async fn resume_subagent_impl(
             .map(PersistedPayload::id)
             .collect::<std::collections::HashSet<_>>();
         if own_ids.iter().any(|id| ancestor_ids.contains(id)) {
-            anyhow::bail!("inherited context overlaps child own history");
+            return Err(preparation_failed("inherited context overlaps child own history").into());
         }
         inherited.flags.extend(
             snapshot
@@ -230,6 +367,15 @@ pub(super) async fn resume_subagent_impl(
         Ok(history) => history,
         Err(error) => {
             let rollback = claim.rollback().await;
+            if rollback.is_ok() && error.is::<EffectiveToolError>() {
+                return Err(preparation_rejected(
+                    &thread_id,
+                    error.downcast::<EffectiveToolError>()?,
+                ));
+            }
+            if rollback.is_err() {
+                rollback_unknown(&thread_id);
+            }
             let suffix = rollback.err().map(|e| format!("; {e}")).unwrap_or_default();
             return Err(format!(
                 "resume_subagent: failed to load messages for {}: {}{}",
@@ -337,6 +483,10 @@ pub(super) async fn resume_subagent_impl(
     let prompt_text = prompt.unwrap_or_else(|| IMPLICIT_CONTINUE_PROMPT.to_string());
     if matches!(run_mode, SubagentRunMode::Background) && task_manager.is_none() {
         let rollback = claim.rollback().await;
+        if rollback.is_ok() {
+            return Err(preparation_rejected(&thread_id, preparation_failed(format!("resume_subagent: thread {thread_id}: Background tasks not available: no task manager configured"))));
+        }
+        rollback_unknown(&thread_id);
         let suffix = rollback
             .err()
             .map(|error| format!("; {error}"))
@@ -353,11 +503,12 @@ pub(super) async fn resume_subagent_impl(
         SubagentRunMode::Background => format!("bg-{}", uuid::Uuid::now_v7()),
     };
     let publication = async {
-        let initiator = super::spawn::parent_thread_id_of(parent)
-            .ok_or("Blocked: current delegation initiator unavailable")?;
-        let invocation_id = parent_tool_call_id
-            .as_deref()
-            .ok_or("Blocked: current delegation invocation unavailable")?;
+        let initiator = super::spawn::parent_thread_id_of(parent).ok_or_else(|| {
+            authorization_denied("Blocked: current delegation initiator unavailable")
+        })?;
+        let invocation_id = parent_tool_call_id.as_deref().ok_or_else(|| {
+            authorization_denied("Blocked: current delegation invocation unavailable")
+        })?;
         let current = session_resources
             .load_session_work(&WorkQuery {
                 session_id: initiator.clone(),
@@ -368,11 +519,17 @@ pub(super) async fn resume_subagent_impl(
             .state
             .invocations
             .get(invocation_id)
-            .ok_or("Blocked: current trusted invocation unavailable")?;
-        if invocation.intent.authorization_ref != saved.authorization_ref {
-            return Err(
-                "Blocked: current delegation authorization differs from saved ceiling".into(),
-            );
+            .ok_or_else(|| {
+                authorization_denied("Blocked: current trusted invocation unavailable")
+            })?;
+        if invocation.recipient_lifecycle != current.control.lifecycle
+            || invocation.intent.scope_id != initiator
+            || invocation.intent.authorization_ref.is_empty()
+        {
+            return Err(authorization_denied(
+                "current delegation authorization or scope unavailable",
+            )
+            .into());
         }
         let lifecycle = session_resources
             .load_session_control(&thread_id)
@@ -398,6 +555,15 @@ pub(super) async fn resume_subagent_impl(
     .await;
     if let Err(error) = publication {
         let rollback = claim.rollback().await;
+        if rollback.is_ok() && error.is::<EffectiveToolError>() {
+            return Err(preparation_rejected(
+                &thread_id,
+                *error.downcast::<EffectiveToolError>()?,
+            ));
+        }
+        if rollback.is_err() {
+            rollback_unknown(&thread_id);
+        }
         let suffix = rollback
             .err()
             .map(|error| format!("; {error}"))
@@ -470,6 +636,9 @@ pub(super) async fn resume_subagent_impl(
                     // 回滚至原值，防 thread 永久停留 active（R-M1 执行前失败回滚
                     // 契约，与 load_messages 失败回滚同款）；错误携带 thread_id
                     let rollback = claim.rollback().await;
+                    if rollback.is_err() {
+                        rollback_unknown(&thread_id);
+                    }
                     let suffix = rollback.err().map(|e| format!("; {e}")).unwrap_or_default();
                     return Err(
                         format!("resume_subagent: thread {}: {}{}", thread_id, e, suffix).into(),

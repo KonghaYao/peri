@@ -32,6 +32,43 @@ fn uncertain_tool_errors_require_reconciliation_even_with_application_error_text
     ));
 }
 
+#[test]
+fn boxed_known_agent_rejections_preserve_failure_classification() {
+    for (error, expected) in [
+        (
+            AgentError::ToolNotFound("resume".into()),
+            EffectiveToolErrorCode::UnknownTool,
+        ),
+        (
+            AgentError::ToolRejected {
+                tool: "resume".into(),
+                reason: "denied".into(),
+            },
+            EffectiveToolErrorCode::UserRejected,
+        ),
+    ] {
+        let effective = effective_tool_error_from_boxed(Box::new(error));
+        assert_eq!(effective.code, expected);
+        assert!(!requires_outcome_reconciliation(effective.code));
+    }
+}
+
+#[test]
+fn boxed_interruption_still_requires_outcome_reconciliation() {
+    let effective = effective_tool_error_from_boxed(Box::new(AgentError::Interrupted));
+    assert_eq!(effective.code, EffectiveToolErrorCode::Cancelled);
+    assert!(requires_outcome_reconciliation(effective.code));
+}
+
+#[test]
+fn boxed_unclassified_agent_error_still_requires_outcome_reconciliation() {
+    let effective = effective_tool_error_from_boxed(Box::new(AgentError::Other(anyhow::anyhow!(
+        "resume preparation rejected"
+    ))));
+    assert_eq!(effective.code, EffectiveToolErrorCode::ToolFailed);
+    assert!(requires_outcome_reconciliation(effective.code));
+}
+
 struct OutputTool {
     name: String,
     output: String,
