@@ -3,7 +3,7 @@ use crate::kit::acp_types::PendingInteraction;
 use peri_acp_types::event_data::{AskUser, HitlPending};
 use serial_test::serial;
 
-fn scheduler_state() -> BridgeState {
+pub(super) fn scheduler_state() -> BridgeState {
     crate::kit::atoms::init_atoms();
     BridgeState {
         variant: 0,

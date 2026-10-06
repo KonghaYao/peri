@@ -34,6 +34,8 @@ static HIGHLIGHT_CACHE: LazyLock<RwLock<HlCache>> = LazyLock::new(|| RwLock::new
 
 struct HlCache {
     cap: usize,
+    byte_cap: usize,
+    bytes: usize,
     entries: HashMap<(String, u64), CacheValue>,
     /// LRU 顺序：末尾为最近访问，头部为最旧。
     order: Vec<(String, u64)>,
@@ -43,6 +45,8 @@ impl HlCache {
     fn new() -> Self {
         Self {
             cap: 32,
+            byte_cap: 4 * 1024 * 1024,
+            bytes: 0,
             entries: HashMap::new(),
             order: Vec::with_capacity(33),
         }
@@ -61,13 +65,24 @@ impl HlCache {
 
     /// 插入新条目；若已满则淘汰 order 头部最旧条目。
     fn insert(&mut self, key: (String, u64), val: CacheValue) {
-        if !self.entries.contains_key(&key)
-            && self.entries.len() >= self.cap
-            && let Some(evicted) = self.order.first().cloned()
-        {
-            self.entries.remove(&evicted);
+        if let Some(previous) = self.entries.remove(&key) {
+            self.bytes = self.bytes.saturating_sub(cache_value_bytes(&previous));
+            self.order.retain(|cached| cached != &key);
+        }
+        let bytes = cache_value_bytes(&val);
+        if bytes > self.byte_cap {
+            return;
+        }
+        while self.entries.len() >= self.cap || self.bytes.saturating_add(bytes) > self.byte_cap {
+            let Some(evicted) = self.order.first().cloned() else {
+                break;
+            };
+            if let Some(previous) = self.entries.remove(&evicted) {
+                self.bytes = self.bytes.saturating_sub(cache_value_bytes(&previous));
+            }
             self.order.remove(0);
         }
+        self.bytes += bytes;
         self.entries.insert(key.clone(), val);
         self.order.retain(|k| k != &key);
         self.order.push(key);
@@ -78,24 +93,41 @@ impl HlCache {
     fn clear(&mut self) {
         self.entries.clear();
         self.order.clear();
+        self.bytes = 0;
     }
+}
+
+fn cache_value_bytes(value: &CacheValue) -> usize {
+    value.as_ref().map_or(0, |lines| {
+        lines.capacity() * std::mem::size_of::<Line<'static>>()
+            + lines
+                .iter()
+                .map(|line| {
+                    line.spans.capacity() * std::mem::size_of::<Span<'static>>()
+                        + line
+                            .spans
+                            .iter()
+                            .map(|span| span.content.len())
+                            .sum::<usize>()
+                })
+                .sum::<usize>()
+    })
 }
 
 // ── 代码块高亮 ──────────────────────────────────────────────────────
 
-pub(crate) fn highlight_code_block(lang: &str, raw_lines: &[String]) -> Option<Vec<Line<'static>>> {
+pub(crate) fn highlight_code_block(lang: &str, raw_lines: &[String]) -> CacheValue {
     let key_hash = hash_raw_lines(raw_lines);
     let key = (lang.to_string(), key_hash);
 
     // 1. 查缓存：命中则直接 clone 返回
     if let Some(cached) = HIGHLIGHT_CACHE.write().get(&key) {
-        return cached.map(|arc| (*arc).clone());
+        return cached;
     }
 
     // 2. miss → 跑 syntect
-    let result = highlight_code_block_inner(lang, raw_lines);
-    let arc_result = result.clone().map(Arc::new);
-    HIGHLIGHT_CACHE.write().insert(key, arc_result);
+    let result = highlight_code_block_inner(lang, raw_lines).map(Arc::new);
+    HIGHLIGHT_CACHE.write().insert(key, result.clone());
     result
 }
 
@@ -104,16 +136,15 @@ pub(crate) fn highlight_code_block(lang: &str, raw_lines: &[String]) -> Option<V
 pub(crate) fn highlight_code_block_with_hit(
     lang: &str,
     raw_lines: &[String],
-) -> (Option<Vec<Line<'static>>>, bool) {
+) -> (CacheValue, bool) {
     let key_hash = hash_raw_lines(raw_lines);
     let key = (lang.to_string(), key_hash);
 
     if let Some(cached) = HIGHLIGHT_CACHE.write().get(&key) {
-        return (cached.map(|arc| (*arc).clone()), true);
+        return (cached, true);
     }
-    let result = highlight_code_block_inner(lang, raw_lines);
-    let arc_result = result.clone().map(Arc::new);
-    HIGHLIGHT_CACHE.write().insert(key, arc_result);
+    let result = highlight_code_block_inner(lang, raw_lines).map(Arc::new);
+    HIGHLIGHT_CACHE.write().insert(key, result.clone());
     (result, false)
 }
 
@@ -188,11 +219,11 @@ pub(crate) fn code_block_lines(
         // 单行代码块：inline code style
         if let Some(hl_lines) = highlighted {
             return hl_lines
-                .into_iter()
+                .iter()
                 .map(|line| {
                     let mut spans = Vec::with_capacity(line.spans.len());
-                    for span in line.spans {
-                        spans.push(Span::styled(span.content, patch_bg(span.style)));
+                    for span in &line.spans {
+                        spans.push(Span::styled(span.content.clone(), patch_bg(span.style)));
                     }
                     Line::from(spans)
                 })
@@ -210,11 +241,11 @@ pub(crate) fn code_block_lines(
 
     if let Some(hl_lines) = highlighted {
         hl_lines
-            .into_iter()
+            .iter()
             .map(|line| {
                 let mut spans = vec![prefix.clone()];
-                for span in line.spans {
-                    spans.push(Span::styled(span.content, patch_bg(span.style)));
+                for span in &line.spans {
+                    spans.push(Span::styled(span.content.clone(), patch_bg(span.style)));
                 }
                 Line::from(spans)
             })

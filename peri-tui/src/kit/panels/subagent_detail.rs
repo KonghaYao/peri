@@ -16,7 +16,6 @@ use crate::kit::atoms::{
     BG_DISPLAY, BG_LIVE_DETAIL, BgDisplayEntry, LANG_VERSION, SELECTED_SUBAGENT_ID, VIEW_MODELS,
 };
 use crate::kit::message_area::grid::GridSpec;
-use crate::kit::message_area::render::vm_to_lines_cached;
 use crate::kit::panel_registry::clean_scrollbars;
 use crate::kit::tui_render_unit::{
     EntryStatus, FoldTarget, TuiRenderUnit, TuiSubAgentGroup, fold_for_status,
@@ -33,12 +32,16 @@ use ratatui_kit::{
     },
 };
 
+#[path = "subagent_detail_cache.rs"]
+mod render_cache;
+
 #[component]
 pub fn SubAgentDetailPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let theme_def = hooks.use_atom(&THEME_ATOM);
     let _lang_ver = hooks.use_atom(&LANG_VERSION);
     // 外部滚动状态——面板滚轮仲裁（panel_scroll.rs）驱动，统一 3 行/格 + 节流
     let sv = hooks.use_state(ScrollViewState::default);
+    let render_cache = hooks.use_state(render_cache::DetailRenderCache::default);
 
     // 选中 subagent：SELECTED_SUBAGENT_ID（消息区焦点分派写入）→ 候选源解析
     let selected_id = SELECTED_SUBAGENT_ID.state().read().clone();
@@ -90,11 +93,9 @@ pub fn SubAgentDetailPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 Style::new().fg(theme_def.read().semantic.text.dim),
             )]));
             lines.push(Line::from(""));
-            let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
-            for vm in g.view_models.iter() {
-                let (vm_lines, _, _, _) = vm_to_lines_cached(vm, &grid, &mut cache, false);
-                lines.extend(vm_lines);
-            }
+            let theme = theme_def.read().clone();
+            let mut cache = render_cache.write_no_update();
+            lines.extend(cache.render(g, &grid, theme, LANG_VERSION.get()));
         }
         None => {
             lines.push(Line::from(vec![Span::styled(

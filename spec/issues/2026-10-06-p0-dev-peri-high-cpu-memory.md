@@ -24,7 +24,8 @@
 - 用户现场反馈（2026-10-06）：CPU 暴涨现象明显减少；未按验收步骤做同负载对比采样，不作为闭环验收，内存侧无现场结论。
 - 源码复核（2026-10-06）：两轮止血已移除 gate 的全量状态读取（`work.rs::HAS_PENDING` 递归 EXISTS）、消息级去重对整份 WorkState 的反序列化（`READ_DELIVERY` 单条 delivery）与提交时的旧状态重编码（`effects.rs` 复用 `current_json`）。
 - 两轮止血已提交（见归档）；无受控 CPU / RSS 收益测量、无 Turso 网络验收、未跑完整 workspace 测试。
-- 复核失败：`remote_work_concurrent_publish_...` 在 `session_work_test.rs:322` 仍 `PersistenceUncertain/Unknown`；`durable_act_handoff_...` 在 `durable_work_contract.rs:666` 仍 `Rejected { InvalidTransition }`。归属未经隔离基线证明。
+- 失败归属已判定（只读排查 + lldb 运行时证据，均指向测试侧）：`remote_work_concurrent_publish_...`（`session_work_test.rs:322`）为 fixture 问题——同 session 并发未对账命令与 `work.rs::GUARD_COMMAND` 不变量冲突，`session_work_journal.rs::begin_owned_work` 把确定性 `NotApplied` 折叠为 `PersistenceUncertain` 且不重试，测试自 `ce4c9b37` 起 flaky（8 跑 7 败，无争抢时 8/8 通过）；`durable_act_handoff_...`（`durable_work_contract.rs:666`）为过期断言——`44309b13` 有意收紧停止态交棒（`processing.rs:262`）并同步了单测与 `work_dispatch.rs` 调用方，漏改该集成测试。两者修测试，不改生产语义。
+- 本轮免迁移窄化（进行中，用户已定范围：不做 schema 迁移）：Wave 1 后台 inbox 通知路径改窄查询（`continuation.rs:152` 的 `load_session_work(limit=1)` 不再反序列化整份状态）；Wave 2 提交路径去掉 `reducer.rs` 对 `WorkState` 的整份深拷贝。
 - 内存告警埋点已提交 `30a4942f`（`peri-tui/src/app/service_registry.rs` + `service_registry_test.rs`）。
 
 ## 未完成
@@ -36,7 +37,8 @@
 - [ ] 两轮止血未覆盖的根治项（2026-10-06 复核仍成立）：reducer 全量 clone（`work/reducer.rs`）、新状态全量编码（`work/effects.rs::UPDATE_STATE`）、事务 guard 仍以整份旧 JSON 作参数比较（`GUARD_STATE`）、后台 wake 与 2 s 定时全量读取（`continuation.rs` → `read_work` → `READ_STATE`）、`load_session_work(limit=1)` 先读整份状态、每条命令整份编码入库（`work.rs::command_effects`）。
 - [ ] 阶段 2–5：载荷与事务切片、增量账本、窄通知与执行隔离闭环、迁移与事故验收。
 - [ ] 根因确认后按 `docs/standards/testing.md` 补行为与生命周期回归；修复一类问题而非压低当前指标。
-- [ ] 两个回归失败的归属判定或修复。
+- [ ] 两个回归失败的测试侧修正（归属已判定，修正进行中）。
+- [ ] 评审本轮排查发现的邻近问题：`session_work_journal.rs:84-91` 把确定性 `NotApplied` 折叠为 `PersistenceUncertain`，而该错误会冻结会话热态并阻塞续写，与 `mutation.rs` 自述的「未决才是不确定」矛盾。属本 issue 范围外，需单独决策。
 - [ ] 与《移除默认执行恢复 P0》的共同约束闭环：旧 work 隔离、旧未知副作用迁移，实施前重核共享工作树。
 - [ ] 确认内存告警在现场生效（`peri.mem` 可在日志中检出）。
 

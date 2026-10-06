@@ -259,6 +259,7 @@ const PUBLICATION_INTERVAL: std::time::Duration = std::time::Duration::from_mill
 #[derive(Debug, Default)]
 struct PublicationScheduler {
     pending_deadline: Option<peri_time::Instant>,
+    bg_pending_deadline: Option<peri_time::Instant>,
     token: u64,
     /// 与 projection cache 无关，记录已接收但尚未发布的 canonical 更新。
     unpublished: bool,
@@ -269,6 +270,7 @@ struct PublicationScheduler {
 impl PublicationScheduler {
     fn invalidate(&mut self) {
         self.pending_deadline = None;
+        self.bg_pending_deadline = None;
         self.token = self.token.wrapping_add(1);
         self.unpublished = false;
         self.pending_mode = None;
@@ -292,8 +294,12 @@ impl PublicationScheduler {
         }
         match intent {
             PublicationIntent::None => {}
-            PublicationIntent::Published => self.invalidate(),
+            PublicationIntent::Published => {
+                crate::kit::bg_task_live::publish_pending_streams();
+                self.invalidate();
+            }
             PublicationIntent::Immediate => {
+                crate::kit::bg_task_live::publish_pending_streams();
                 self.invalidate();
                 acp_events::push_view_models(state);
                 self.last_streaming_mode = Some(mode);
@@ -321,14 +327,36 @@ impl PublicationScheduler {
                 self.last_streaming_mode = Some(mode);
             }
         }
+        self.schedule_background_at(now);
+    }
+
+    fn schedule_background_at(&mut self, now: peri_time::Instant) {
+        if crate::kit::bg_task_live::has_pending_streams() {
+            self.bg_pending_deadline
+                .get_or_insert(now + PUBLICATION_INTERVAL);
+        }
+    }
+
+    fn next_deadline(&self) -> Option<peri_time::Instant> {
+        self.pending_deadline
+            .into_iter()
+            .chain(self.bg_pending_deadline)
+            .min()
     }
 
     fn fire_at(&mut self, state: &mut BridgeState, now: peri_time::Instant) -> bool {
+        let bg_published = self
+            .bg_pending_deadline
+            .is_some_and(|deadline| now >= deadline);
+        if bg_published {
+            self.bg_pending_deadline = None;
+            crate::kit::bg_task_live::publish_pending_streams();
+        }
         let Some(deadline) = self.pending_deadline else {
-            return false;
+            return bg_published;
         };
         if now < deadline {
-            return false;
+            return bg_published;
         }
         self.pending_deadline = None;
         if self
@@ -402,12 +430,6 @@ fn apply_bridge_reset(state: &mut BridgeState, last_reset_counter: &mut u64, cou
     if state.current_turn.has_unprojected_changes() {
         acp_events::push_view_models(state);
     }
-    tracing::info!(
-        old,
-        new = counter,
-        sid = %state.active_session_id,
-        "[CLEAR_DEBUG] bridge: state reset by BRIDGE_RESET_COUNTER"
-    );
     old
 }
 
@@ -422,7 +444,10 @@ fn flush_on_receiver_close(
     if counter != *last_reset_counter {
         apply_bridge_reset(state, last_reset_counter, counter);
     } else if pending_publication || state.current_turn.has_unprojected_changes() {
+        crate::kit::bg_task_live::publish_pending_streams();
         acp_events::push_view_models(state);
+    } else {
+        crate::kit::bg_task_live::publish_pending_streams();
     }
 }
 
@@ -504,7 +529,8 @@ fn spawn_acp_bridge_inner(
         tick_interval.set_missed_tick_behavior(peri_time::MissedTickBehavior::Skip);
 
         loop {
-            let deadline = scheduler.pending_deadline.unwrap_or_else(|| {
+            scheduler.schedule_background_at(peri_time::monotonic_now());
+            let deadline = scheduler.next_deadline().unwrap_or_else(|| {
                 peri_time::monotonic_now() + std::time::Duration::from_secs(86_400)
             });
             tokio::select! {
@@ -512,7 +538,7 @@ fn spawn_acp_bridge_inner(
                     scheduler.invalidate();
                     break;
                 },
-                _ = peri_time::sleep_until(deadline), if scheduler.pending_deadline.is_some() => {
+                _ = peri_time::sleep_until(deadline), if scheduler.next_deadline().is_some() => {
                     let counter = atoms::BRIDGE_RESET_COUNTER.get();
                     if counter != last_reset_counter {
                         scheduler.invalidate();
@@ -604,37 +630,12 @@ fn spawn_acp_bridge_inner(
 
                             let event = epoch_event.event;
 
-                            // === [CLEAR_DEBUG] 诊断 instrumentation（临时） ===
-                            // 目的：定位 /clear 后哪个事件把旧数据写回 committed。
-                            // 仅在状态变化或刚 reset 时打印，避免日志爆炸。
-                            let event_kind = event_kind_short(&event);
-                            let committed_before = state.committed.len();
-                            let was_dirty = state.current_turn.has_unprojected_changes();
-
                             let intent = acp_events::dispatch_trusted_structured_for_bridge(
                                 &mut state,
                                 event,
                             );
                             scheduler.accept(intent, &mut state);
 
-                            let committed_after = state.committed.len();
-                            let is_dirty = state.current_turn.has_unprojected_changes();
-
-                            if committed_after != committed_before
-                                || is_dirty != was_dirty
-                                || just_reset
-                            {
-                                tracing::info!(
-                                    event_kind,
-                                    committed_before,
-                                    committed_after,
-                                    was_dirty,
-                                    is_dirty,
-                                    just_reset,
-                                    generation = state.generation,
-                                    "[CLEAR_DEBUG] dispatch event"
-                                );
-                            }
                             if let Some(tx) = &observed {
                                 let _ = tx.send(true);
                             }
@@ -669,73 +670,9 @@ pub(crate) fn spawn_acp_bridge_observed_with_client(
 #[path = "acp_bridge_test.rs"]
 mod tests;
 
-/// [CLEAR_DEBUG] 诊断 helper：返回 AcpEventData 变体的短名字。
-///
-/// 临时 instrumentation——避免每条日志打印完整 event 内容。定位到 /clear 后
-/// 污染 committed 的事件类型后即可移除。
-fn event_kind_short(event: &AcpEventData) -> &'static str {
-    use AcpEventData::*;
-    match event {
-        TextChunk(_) => "TextChunk",
-        ReasoningChunk(_) => "ReasoningChunk",
-        ToolStarted(_) => "ToolStarted",
-        ToolEnded(_) => "ToolEnded",
-        PromptStarted => "PromptStarted",
-        PromptSubmitted { .. } => "PromptSubmitted",
-        CacheUsageUpdated(_) => "CacheUsageUpdated",
-        SessionReplayStarted => "SessionReplayStarted",
-        SessionReplayDone => "SessionReplayDone",
-        TurnDone => "TurnDone",
-        TurnInterrupted { .. } => "TurnInterrupted",
-        TurnSuspended => "TurnSuspended",
-        LocalUserBubble { .. } => "LocalUserBubble",
-        UserInputQueueChanged { .. } => "UserInputQueueChanged",
-        UserInputDelivered { .. } => "UserInputDelivered",
-        ReplayedUserBubble { .. } => "ReplayedUserBubble",
-        LocalLoadingReset => "LocalLoadingReset",
-        BgCallbackBubble { .. } => "BgCallbackBubble",
-        CommittedAssistantText { .. } => "CommittedAssistantText",
-        ReplayToolStarted { .. } => "ReplayToolStarted",
-        ReplayToolEnded { .. } => "ReplayToolEnded",
-        ToolCount(_) => "ToolCount",
-        Progress(_) => "Progress",
-        BudgetWarning(_) => "BudgetWarning",
-        SystemNotification(_) => "SystemNotification",
-        SystemReminder { .. } => "SystemReminder",
-        SystemReminderFallback { .. } => "SystemReminderFallback",
-        GoalSnapshot { .. } => "GoalSnapshot",
-        CommandFeedback(_) => "CommandFeedback",
-        Prediction(_) => "Prediction",
-        FileSuggestions(_) => "FileSuggestions",
-        HitlPending(_) => "HitlPending",
-        AskUser(_) => "AskUser",
-        InteractionTerminal { .. } => "InteractionTerminal",
-        RewindPreview(_) => "RewindPreview",
-        OauthNeeded(_) => "OauthNeeded",
-        OauthCompleted { .. } => "OauthCompleted",
-        OauthFailed { .. } => "OauthFailed",
-        OauthRestored { .. } => "OauthRestored",
-        SubagentStarted { .. } => "SubagentStarted",
-        SubagentStopped { .. } => "SubagentStopped",
-        Unknown { .. } => "Unknown",
-        BgTaskStarted(_) => "BgTaskStarted",
-        BgTaskCompleted { .. } => "BgTaskCompleted",
-        BgTaskCancelled { .. } => "BgTaskCancelled",
-        BgTaskUpdated { .. } => "BgTaskUpdated",
-        BgTaskSnapshot { .. } => "BgTaskSnapshot",
-        TurnCommitted { .. } => "TurnCommitted",
-        CompactStarted => "CompactStarted",
-        CompactCompleted { .. } => "CompactCompleted",
-        BackgroundTaskCompleted { .. } => "BackgroundTaskCompleted",
-        LlmRetrying { .. } => "LlmRetrying",
-        AgentExecutionFailed { .. } => "AgentExecutionFailed",
-        WorkflowProgress { .. } => "WorkflowProgress",
-        RewindCompleted { .. } => "RewindCompleted",
-        PluginSnapshot(_) => "PluginSnapshot",
-        PluginActionResult(_) => "PluginActionResult",
-        PluginSearchResult(_) => "PluginSearchResult",
-    }
-}
+#[cfg(test)]
+#[path = "bg_publication_test.rs"]
+mod bg_publication_tests;
 
 #[cfg(test)]
 #[path = "publication_test.rs"]

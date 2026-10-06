@@ -63,7 +63,7 @@ pub(crate) fn current_streaming_mode() -> StreamingMode {
     }
 }
 
-/// 检测 full_text 中 since_chars 之后是否出现了 Markdown 块边界。
+/// 检测未发布文本中的新增 Markdown 块边界，偏移均为字节数。
 ///
 /// 块边界定义：
 /// - 两个连续换行（段落分隔）
@@ -71,76 +71,36 @@ pub(crate) fn current_streaming_mode() -> StreamingMode {
 /// - 以 ``` 开头的行（代码块开始/结束）
 /// - 以 `---`、`***`、`___` 开头的行（水平线）
 ///
-/// since_chars 为 0 时始终返回 true（首次推送）。
-fn has_md_block_boundary_since(full_text: &str, since_chars: usize) -> bool {
-    // 首次推送
-    if since_chars == 0 {
+/// 首次推送直接返回；其余只扫描新 chunk，回看最多两个字节识别跨 chunk 标记。
+/// 新 chunk 含换行时才检查未发布前缀；两个换行即发布，因此前缀扫描摊销线性。
+fn has_md_block_boundary_since(full_text: &str, published: usize, chunk_start: usize) -> bool {
+    if published == 0 {
         return true;
     }
-
-    // 将 since_chars（字符偏移）转换为字节偏移
-    let start_byte = full_text
-        .char_indices()
-        .nth(since_chars)
-        .map(|(i, _)| i)
-        .unwrap_or(full_text.len());
-
-    // 无增量文本
-    if start_byte >= full_text.len() {
+    let bytes = full_text.as_bytes();
+    let new_start = chunk_start.max(published).min(bytes.len());
+    if new_start == bytes.len() {
         return false;
     }
-
-    let new = &full_text[start_byte..];
-
-    // 从 since_chars 开始逐字符扫描，检测块边界。
-    // 同时追踪行数——fallback：累计 ≥ 3 行时也返回 true，
-    // 防止无格式长段落导致 block 模式下 UI 永久冻结。
-    let mut is_line_start = start_byte == 0 || full_text.as_bytes()[start_byte - 1] == b'\n';
-
-    let mut chars = new.char_indices().peekable();
-    let mut line_count = 0usize;
-
-    while let Some((_byte_i, ch)) = chars.next() {
-        if is_line_start {
-            // 标题：以 # 开头（且后跟空格或行尾）
-            if ch == '#' && chars.peek().is_none_or(|(_, c)| *c == ' ') {
-                return true;
-            }
-
-            // 代码块边界：以 ``` 开头
-            if ch == '`' {
-                let mut peek = chars.clone();
-                if let (Some((_, '`')), Some((_, '`'))) = (peek.next(), peek.next()) {
-                    return true;
-                }
-            }
-
-            // 水平线：以 ---、***、___ 开头（三个相同字符）
-            if (ch == '-' || ch == '*' || ch == '_')
-                && {
-                    let mut peek = chars.clone();
-                    matches!((peek.next(), peek.next()), (Some((_, c2)), Some((_, c3))) if c2 == ch && c3 == ch)
-                }
+    let scan_start = new_start.saturating_sub(2).max(published);
+    for offset in scan_start..bytes.len() {
+        if offset == 0 || bytes[offset - 1] == b'\n' {
+            let byte = bytes[offset];
+            if (byte == b'#' && bytes.get(offset + 1).is_none_or(|next| *next == b' '))
+                || (matches!(byte, b'`' | b'-' | b'*' | b'_')
+                    && bytes.get(offset + 1) == Some(&byte)
+                    && bytes.get(offset + 2) == Some(&byte))
             {
                 return true;
             }
         }
-
-        // 追踪换行 + 段落边界 \n\n
-        if ch == '\n' {
-            line_count += 1;
-            let mut peek = chars.clone();
-            if let Some((_, '\n')) = peek.next() {
-                return true;
-            }
-        }
-
-        is_line_start = ch == '\n';
     }
-
-    // Fallback：增量文本累计 ≥ 3 行时也刷新，防止单段长文本永不推送
-    // 2 个换行 = 至少 3 行（与 str::lines().count() >= 3 语义一致）
-    line_count >= 2
+    let new_lines = bytes[new_start..]
+        .iter()
+        .filter(|byte| **byte == b'\n')
+        .take(2)
+        .count();
+    new_lines >= 2 || (new_lines == 1 && bytes[published..new_start].contains(&b'\n'))
 }
 
 // ---------------------------------------------------------------------------
@@ -183,10 +143,10 @@ pub struct BridgeState {
     /// 本轮用户提交的文本——TurnInterrupted 零产出回滚时用于恢复输入框。
     /// LocalUserBubble 到达时写入，TurnInterrupted 零产出时消费并清空。
     pub last_submitted_text: Option<String>,
-    /// streaming_mode=block 时追踪上次推送后主 agent 文本的字符数。
+    /// streaming_mode=block 时追踪上次推送后主 agent 文本的字节数。
     /// 用于 `has_md_block_boundary_since` 的比较基点。
     pub last_pushed_text_len: usize,
-    /// streaming_mode=block 时追踪上次推送后主 agent 推理的字符数。
+    /// streaming_mode=block 时追踪上次推送后主 agent 推理的字节数。
     pub last_pushed_reasoning_len: usize,
     /// 当前会话最近一次成功 TodoWrite 的完整快照；仅用于下一张 Todo 卡片的变更集。
     pub(crate) last_successful_todos: Option<crate::kit::tool_semantics::TodoSnapshot>,
@@ -607,6 +567,7 @@ pub(crate) fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData)
     if dispatch_for_bridge(state, event) != PublicationIntent::Published {
         render::push_view_models(state);
     }
+    crate::kit::bg_task_live::publish_pending_streams();
 }
 
 // ---------------------------------------------------------------------------

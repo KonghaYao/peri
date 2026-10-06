@@ -2,7 +2,7 @@ use super::super::tool_card::build_tool_card;
 use super::{CurrentTurn, TurnSegment};
 use crate::kit::tui_render_unit::{
     EntryStatus, FoldTarget, TuiAssistantBubble, TuiReasoningBlock, TuiRenderUnit, TuiSystemNote,
-    entry_status_code, fold_for_status, fold_state_code, tui_hash_combine,
+    fold_for_status,
 };
 use std::time::Instant;
 
@@ -84,24 +84,13 @@ impl CurrentTurn {
         let text_duration_secs = text_started_at
             .map(|t| peri_time::elapsed_since(t).as_secs())
             .unwrap_or(0);
-        let text_frozen = u64::from(text_started_at.is_none());
-        let content_hash = match block.as_ref() {
-            Some(r) => {
-                let mut h = tui_hash_combine(
-                    tui_hash_combine(text_hash, reasoning_hash),
-                    fold_state_code(r.fold),
-                );
-                h = tui_hash_combine(h, entry_status_code(r.status));
-                h = tui_hash_combine(h, u64::from(r.is_running));
-                h = tui_hash_combine(h, r.duration_code());
-                h = tui_hash_combine(h, text_duration_secs);
-                tui_hash_combine(h, text_frozen)
-            }
-            None => {
-                let h = tui_hash_combine(text_hash, text_duration_secs);
-                tui_hash_combine(h, text_frozen)
-            }
-        };
+        let content_hash = TuiAssistantBubble::compute_hash_from_rolls(
+            text_hash,
+            reasoning_hash,
+            block.as_ref(),
+            text_duration_secs,
+            text_started_at.is_none(),
+        );
         (block, content_hash)
     }
 
@@ -217,13 +206,24 @@ impl CurrentTurn {
                 }
                 TurnSegment::Tool { tool_idx } => {
                     if let Some(t) = self.tool_cards.get(*tool_idx) {
-                        // 运行中卡片每 sync 重建（刷新 duration，hash 按秒变化）；
-                        // 已结束卡片仅在 output 变化时重建一次。
+                        let is_running = self.active && t.output_summary.is_none();
+                        let duration = is_running
+                            .then(|| peri_time::elapsed_since(t.started_at).as_millis() as u64);
                         let needs_rebuild = match self.cached_view_models.get(i) {
                             Some(TuiRenderUnit::TuiToolCard(c)) => {
-                                c.is_running
-                                    || Some(c.output_summary.as_str())
-                                        != t.output_summary.as_deref()
+                                c.is_running != is_running
+                                    || c.tool_name != t.tool_name
+                                    || c.input_summary != t.input_summary
+                                    || c.presentation != t.presentation
+                                    || c.is_error != t.is_error
+                                    || c.output_summary
+                                        != t.output_summary.as_deref().unwrap_or_default()
+                                    || c.completed_duration_ms
+                                        != if is_running {
+                                            None
+                                        } else {
+                                            t.completed_duration_ms
+                                        }
                             }
                             _ => true,
                         };
@@ -236,6 +236,15 @@ impl CurrentTurn {
                                 self.cached_view_models
                                     .set(i, TuiRenderUnit::TuiToolCard(card));
                             }
+                        } else if let Some(TuiRenderUnit::TuiToolCard(card)) =
+                            self.cached_view_models.get(i)
+                            && card.running_duration_ms.map(|ms| ms / 1000)
+                                != duration.map(|ms| ms / 1000)
+                            && let Some(TuiRenderUnit::TuiToolCard(card)) =
+                                self.cached_view_models.get_mut(i)
+                        {
+                            card.running_duration_ms = duration;
+                            card.recompute_hash();
                         }
                     }
                 }
@@ -368,3 +377,7 @@ impl CurrentTurn {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "projection_test.rs"]
+mod tests;

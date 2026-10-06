@@ -81,9 +81,27 @@ impl TuiAssistantBubble {
         duration_secs: u64,
         frozen: bool,
     ) -> u64 {
-        let mut h = tui_hash_roll(text);
+        Self::compute_hash_from_rolls(
+            tui_hash_roll(text),
+            reasoning
+                .map(|block| tui_hash_roll(&block.text))
+                .unwrap_or(0),
+            reasoning,
+            duration_secs,
+            frozen,
+        )
+    }
+
+    pub(crate) fn compute_hash_from_rolls(
+        text_hash: u64,
+        reasoning_hash: u64,
+        reasoning: Option<&TuiReasoningBlock>,
+        duration_secs: u64,
+        frozen: bool,
+    ) -> u64 {
+        let mut h = text_hash;
         if let Some(r) = reasoning {
-            h = tui_hash_combine(h, tui_hash_roll(&r.text));
+            h = tui_hash_combine(h, reasoning_hash);
             h = tui_hash_combine(h, fold_state_code(r.fold));
             h = tui_hash_combine(h, entry_status_code(r.status));
             h = tui_hash_combine(h, u64::from(r.is_running));

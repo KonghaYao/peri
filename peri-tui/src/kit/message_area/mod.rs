@@ -150,6 +150,9 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     // [TRAP] write_no_update 必须用——ratatui-kit ReactiveMutRef::Drop 无条件 wake()，
     // render body 内 write 会自激回路 100% CPU。
     let vm_caches: State<Vec<VmCacheSlot>> = hooks.use_state(Vec::new);
+    let frame_hashes = hooks.use_state(Vec::<u64>::new);
+    let frame_animation_periods = hooks.use_state(Vec::<u64>::new);
+    let frame_rebuild_indices = hooks.use_state(Vec::<usize>::new);
 
     // ── Footer 行预计算：必须在 empty 分支之前调用，确保所有 hook 顺序一致 ──
     // keepgoing 防抖：KEEPGOING_BLOCKED_UNTIL 内的时间未过期 → 按钮禁用样式渲染
@@ -253,20 +256,17 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         .unwrap_or(0);
     // running 类 VM 标记（tool/subagent/reasoning running）——与 hash 同一次
     // 扫描派生，rebuild 判定按帧强制重建这些 slot。
-    let mut running_flags: Vec<bool> = Vec::with_capacity(snapshot.items.len());
-    let item_hashes: Vec<u64> = snapshot
-        .items
-        .iter()
-        .enumerate()
-        .map(|(i, vm)| {
-            if anchor_slot.is_none() && matches!(vm, TuiRenderUnit::TuiAskUserBlock(a) if a.pending)
-            {
-                anchor_slot = Some(i);
-            }
-            running_flags.push(vm.is_animating());
-            vm.content_hash()
-        })
-        .collect();
+    let mut animation_periods = frame_animation_periods.write_no_update();
+    animation_periods.clear();
+    let mut item_hashes = frame_hashes.write_no_update();
+    item_hashes.clear();
+    for (i, vm) in snapshot.items.iter().enumerate() {
+        if anchor_slot.is_none() && matches!(vm, TuiRenderUnit::TuiAskUserBlock(a) if a.pending) {
+            anchor_slot = Some(i);
+        }
+        animation_periods.push(vm.animation_period_frames());
+        item_hashes.push(vm.content_hash());
+    }
     let items_len = item_hashes.len();
     // [Slice 4 §6.8] pending 完成（结果回写 pending=false）后扫描不到 →
     // anchor 自然清除。write_no_update 不触发自激重渲染；block 完成时
@@ -285,27 +285,24 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
 
     // 第一阶段：检测哪些 slot 需要 rebuild（content_hash 或 vis_width 变化）
     // [Opt B] 用 item_hashes (Vec<u64>) 替代 items_vec 迭代，避免持有 TuiRenderUnit clone。
-    let rebuild_indices: Vec<usize> = {
+    let mut rebuild_indices = frame_rebuild_indices.write_no_update();
+    rebuild_indices.clear();
+    {
         let caches_read = vm_caches.read();
-        item_hashes
-            .iter()
-            .enumerate()
-            .filter_map(|(i, hash)| {
-                let slot = &caches_read[i];
-                if slot.content_hash != *hash
+        for (i, hash) in item_hashes.iter().enumerate() {
+            let slot = &caches_read[i];
+            let period = animation_periods[i];
+            if slot.content_hash != *hash
                     || slot.width != vis_width
                     || slot.palette_key != current_palette_key
                     || slot.lang_key != LANG_VERSION.get()
                     // §8.2 running 类 VM 按动画帧强制重建（hash 可能跨秒才变）
-                    || (running_flags[i] && slot.anim_frame != anim_frame)
-                {
-                    Some(i)
-                } else {
-                    None
-                }
-            })
-            .collect()
-    };
+                    || (period != 0 && slot.anim_frame / period != anim_frame / period)
+            {
+                rebuild_indices.push(i);
+            }
+        }
+    }
     // [PERI_RENDER_TIMING] hash 比对耗时
     let t_hash = peri_time::monotonic_now();
     trace_phase(
@@ -330,7 +327,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         let snapshot2 = view_models.read();
         let safe_len = snapshot2.items.len().min(items_len);
         let mut caches = vm_caches.write_no_update();
-        for i in &rebuild_indices {
+        for i in rebuild_indices.iter() {
             if *i >= safe_len {
                 continue; // TOCTOU 防御：跳过不可用索引，下帧重新同步
             }

@@ -26,6 +26,7 @@ fn test_highlight_cache_hit_on_same_input() {
     let (r2, hit2) = highlight_code_block_with_hit("rust", &lines);
     assert!(hit2, "相同 (lang, lines) 第二次应命中缓存");
     assert_eq!(r1, r2, "命中缓存应返回一致结果");
+    assert!(Arc::ptr_eq(r1.as_ref().unwrap(), r2.as_ref().unwrap()));
 }
 
 #[test]
@@ -106,4 +107,19 @@ fn test_hash_raw_lines_same_input_same_hash() {
     let h1 = hash_raw_lines(&make_lines(&["fn main() {}", "    println!(\"hi\");"]));
     let h2 = hash_raw_lines(&make_lines(&["fn main() {}", "    println!(\"hi\");"]));
     assert_eq!(h1, h2);
+}
+
+#[test]
+fn test_highlight_cache_byte_budget_evicts_and_rejects_oversized_results() {
+    let mut cache = HlCache::new();
+    let value = Some(Arc::new(vec![Line::from("cached result")]));
+    cache.byte_cap = cache_value_bytes(&value);
+    cache.insert(("rust".into(), 1), value.clone());
+    cache.insert(("rust".into(), 2), value);
+    assert!(cache.get(&("rust".into(), 1)).is_none());
+    assert_eq!(cache.entries.len(), 1);
+    let oversized = Some(Arc::new(vec![Line::from("x".repeat(cache.byte_cap + 1))]));
+    cache.insert(("rust".into(), 3), oversized);
+    assert!(cache.get(&("rust".into(), 3)).is_none());
+    assert!(cache.bytes <= cache.byte_cap);
 }

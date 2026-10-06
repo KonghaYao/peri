@@ -93,6 +93,9 @@ core `ConfigSource::save(expected_revision, &PeriConfig)` 返回 accepted snapsh
 | scroll 滚动引擎 | `message_area/scroll.rs` | `handle_event`（:516）；滚轮节流、拖拽选中、键盘滚动、吸底跟随（`should_follow_after_user_scroll` :378） |
 | 语义选区 | `message_area/selection.rs` | 拖拽选区与语义复制（`map_slice_to_semantic` :469，复制时剥视觉前缀） |
 | markdown 渲染 | `markdown/`（convert.rs / code_block.rs / table.rs / scan.rs） | 文本 → 带样式的行渲染；代码块、表格、扫描 |
+| Markdown 缓存生命周期 | `src/kit/markdown/{mod.rs,cache_lifecycle_test.rs,code_block.rs,code_block_test.rs}` | terminal full parse 释放流式原文 buffer；高亮缓存共享 Arc，按 32 条 / 4 MiB 高亮 payload 预算淘汰，超预算单项不入缓存；旧增量 convert API 只编入测试，生产 ConvertState 保留 |
+| Subagent 详情缓存 | `src/kit/panels/{subagent_detail.rs,subagent_detail_cache.rs,subagent_detail_cache_test.rs}` | 每个 nested VM 独立持久 Markdown/行缓存；按 occurrence、内容 hash、宽度、主题 identity、语言和动画帧失效 |
+| 后台 subagent 文本合帧 | `src/kit/{bg_task_live.rs,bg_task_live_test.rs,bg_publication_test.rs,acp_bridge.rs}` | BgStream 独占累积正文/推理并维护增量 hash；独立 50ms deadline 发布 BG_LIVE_DETAIL，不受主流 Streaming/Block/None 与主 turn 结束影响；工具/终态/接收关闭 flush，会话边界清空，同会话 replay 保留 dirty stream 并重新安排 deadline |
 | subagent 工具行 | `message_area/render/group.rs` | `render_subagent_group_lines`（:29）、`subagent_tool_line`（:92，固定 2 格缩进 `SUBAGENT_TOOL_INDENT` :22、label 无 bold）、`subagent_error_reason_line`（:168，错误不弱化） |
 | InputArea（输入区） | `input_area.rs` + `input_area/image.rs` | 编辑、@mention、slash 补全、提交分发（`input_area/submit.rs::dispatch_submit_request` :21）；图片粘贴由 `PasteGate` 限制为单任务；macOS `save_native_clipboard_png` 优先原样保存 ≤20 MiB PNG（只读 IHDR、不解码像素、不套用预览尺寸限制），仅 PNG 缺席回退 arboard owned RGBA + 流式编码；`image_test.rs` 覆盖独立 NSPasteboard 与手动性能对比；多行渲染按显示宽度 |
 | input_history（输入历史） | `input_history.rs` | `push_history`（:23）/`history_up`（:54）；持久化 `~/.peri/input-history.json`（唯一存储，`load_history` :119） |

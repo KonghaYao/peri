@@ -29,8 +29,8 @@ pub(super) fn handle_tool_started(state: &mut BridgeState, ts: &TuiToolStarted) 
             state.publish_barrier();
             // block 模式：ToolStarted 时已推送缓冲文本到视图，
             // 同步追踪变量，确保工具执行完毕后新 TextChunk 的块边界检测从正确位置开始。
-            state.last_pushed_text_len = state.current_turn.text.chars().count();
-            state.last_pushed_reasoning_len = state.current_turn.reasoning.chars().count();
+            state.last_pushed_text_len = state.current_turn.text.len();
+            state.last_pushed_reasoning_len = state.current_turn.reasoning.len();
         } else {
             // 同步 sub-agent: 路由到 SubAgentAccumulator
             let routed = state.current_turn.start_subagent_tool(
@@ -71,8 +71,8 @@ pub(super) fn handle_tool_started(state: &mut BridgeState, ts: &TuiToolStarted) 
             state.variant = 1;
             state.phase = SessionPhase::PromptRunning;
             state.publish_barrier();
-            state.last_pushed_text_len = state.current_turn.text.chars().count();
-            state.last_pushed_reasoning_len = state.current_turn.reasoning.chars().count();
+            state.last_pushed_text_len = state.current_turn.text.len();
+            state.last_pushed_reasoning_len = state.current_turn.reasoning.len();
         }
     } else {
         state
@@ -87,8 +87,8 @@ pub(super) fn handle_tool_started(state: &mut BridgeState, ts: &TuiToolStarted) 
         state.variant = 1;
         state.phase = SessionPhase::PromptRunning;
         state.publish_barrier();
-        state.last_pushed_text_len = state.current_turn.text.chars().count();
-        state.last_pushed_reasoning_len = state.current_turn.reasoning.chars().count();
+        state.last_pushed_text_len = state.current_turn.text.len();
+        state.last_pushed_reasoning_len = state.current_turn.reasoning.len();
     }
     super::render::push_acp_state(state);
 }
@@ -105,8 +105,8 @@ pub(super) fn handle_tool_ended(state: &mut BridgeState, te: &TuiToolEnded) {
             state.variant = 1;
             // bg 工具事件不触碰 phase（Issue 2026-08-12，同 ToolStarted）。
             state.publish_barrier();
-            state.last_pushed_text_len = state.current_turn.text.chars().count();
-            state.last_pushed_reasoning_len = state.current_turn.reasoning.chars().count();
+            state.last_pushed_text_len = state.current_turn.text.len();
+            state.last_pushed_reasoning_len = state.current_turn.reasoning.len();
             state.complete_todo_if_current(&te.tool_id, te.is_error)
         } else {
             let ended = state.current_turn.end_subagent_tool(
@@ -122,8 +122,8 @@ pub(super) fn handle_tool_ended(state: &mut BridgeState, te: &TuiToolEnded) {
             state.variant = 1;
             state.phase = SessionPhase::PromptRunning;
             state.publish_barrier();
-            state.last_pushed_text_len = state.current_turn.text.chars().count();
-            state.last_pushed_reasoning_len = state.current_turn.reasoning.chars().count();
+            state.last_pushed_text_len = state.current_turn.text.len();
+            state.last_pushed_reasoning_len = state.current_turn.reasoning.len();
             ended && state.complete_todo_if_current(&te.tool_id, te.is_error)
         }
     } else {
@@ -134,8 +134,8 @@ pub(super) fn handle_tool_ended(state: &mut BridgeState, te: &TuiToolEnded) {
         state.variant = 1;
         state.phase = SessionPhase::PromptRunning;
         state.publish_barrier();
-        state.last_pushed_text_len = state.current_turn.text.chars().count();
-        state.last_pushed_reasoning_len = state.current_turn.reasoning.chars().count();
+        state.last_pushed_text_len = state.current_turn.text.len();
+        state.last_pushed_reasoning_len = state.current_turn.reasoning.len();
         ended && state.complete_todo_if_current(&te.tool_id, te.is_error)
     };
 

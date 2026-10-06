@@ -700,6 +700,7 @@ pub struct BgLiveDetail {
     pub(crate) tool_cards: Vec<crate::kit::acp_types::ToolCardAccumulator>,
     pub(crate) subagent_result: Option<String>,
     pub(crate) subagent_is_error: bool,
+    pub(crate) stream: Option<crate::kit::bg_task_live::BgStream>,
 }
 
 impl Default for BgLiveDetail {
@@ -719,6 +720,7 @@ impl Default for BgLiveDetail {
             tool_cards: Vec::new(),
             subagent_result: None,
             subagent_is_error: false,
+            stream: None,
         }
     }
 }

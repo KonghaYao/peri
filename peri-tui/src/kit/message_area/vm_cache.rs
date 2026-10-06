@@ -91,16 +91,17 @@ pub(super) struct MarkdownLineCache {
 }
 
 impl MarkdownLineCache {
-    pub(super) fn retain_and_wrap(&mut self, width: u16, chunks: &[(usize, Vec<Line<'static>>)]) {
+    pub(super) fn retain_and_wrap(&mut self, width: u16, chunks: Vec<(usize, Vec<Line<'static>>)>) {
         if self.width != width {
             self.stable.clear();
             self.width = width;
         }
-        for (index, (identity, lines)) in chunks.iter().enumerate() {
+        let chunk_count = chunks.len();
+        for (index, (identity, lines)) in chunks.into_iter().enumerate() {
             if self
                 .stable
                 .get(index)
-                .is_some_and(|cached| cached.identity == *identity)
+                .is_some_and(|cached| cached.identity == identity)
             {
                 continue;
             }
@@ -109,17 +110,17 @@ impl MarkdownLineCache {
             // 空 lines 表示调用方判定该 chunk 无可见内容，按空内容重建即可；旧实现
             // 试图复用 `self.stable[index]`，但 `truncate(index)` 已保证 len <= index
             // ——渲染热路径上任何空 lines 都会越界 panic（宽度变化清理 stable 后必现）。
-            let lines = Arc::new(lines.clone());
+            let lines = Arc::new(lines);
             let (_, wrap_map) = build_wrap_map(&lines, width);
             let visual_rows = wrap_map.last().map(|entry| entry.visual_end).unwrap_or(0);
             self.stable.push(MarkdownLineChunk {
-                identity: *identity,
+                identity,
                 lines,
                 wrap_map: Arc::new(wrap_map),
                 visual_rows,
             });
         }
-        self.stable.truncate(chunks.len());
+        self.stable.truncate(chunk_count);
     }
 
     pub(super) fn stable_overlay(&self) -> Option<(usize, Vec<Arc<Vec<Line<'static>>>>)> {
@@ -204,8 +205,8 @@ pub(super) struct VmCacheSlot {
     /// [T4 §4] @image 行渲染期信息（slot 内逻辑索引 + 展示路径 + 受管理标志）。
     /// rebuild 时随 lines 重建，供点击/hover 屏幕命中映射。
     pub(super) image_lines: Vec<ImageLineInfo>,
-    /// 上次渲染时的动画帧（§8.2 壁钟 tick，100ms 粒度）。running 类 VM
-    /// （tool/subagent/reasoning）帧变化时强制重建——braille 动画随帧推进。
+    /// 上次渲染时的基准帧（100ms 粒度），按 VM 的 animation_period_frames
+    /// 判定刷新：braille 按帧推进，reasoning 时长按秒更新。
     pub(super) anim_frame: u64,
 }
 
@@ -218,7 +219,7 @@ fn test_markdown_line_cache_reuses_stable_wrap_and_rebuilds_tail_only() {
     let stable = vec![Line::from("stable 中文 line")];
     let identity = 7usize;
     let mut cache = MarkdownLineCache::default();
-    cache.retain_and_wrap(20, &[(identity, stable.clone())]);
+    cache.retain_and_wrap(20, vec![(identity, stable.clone())]);
     let stable_lines = Arc::clone(&cache.stable[0].lines);
     cache.stable_start = Some(1);
 
@@ -239,9 +240,9 @@ fn test_markdown_line_cache_width_invalidates_stable_wrap() {
     use ratatui_kit::ratatui::text::Line;
 
     let mut cache = MarkdownLineCache::default();
-    cache.retain_and_wrap(20, &[(1, vec![Line::from("long stable line")])]);
+    cache.retain_and_wrap(20, vec![(1, vec![Line::from("long stable line")])]);
     let first = Arc::clone(&cache.stable[0].wrap_map);
-    cache.retain_and_wrap(8, &[(1, vec![Line::from("long stable line")])]);
+    cache.retain_and_wrap(8, vec![(1, vec![Line::from("long stable line")])]);
     assert!(!Arc::ptr_eq(&first, &cache.stable[0].wrap_map));
 }
 
@@ -255,9 +256,9 @@ fn test_markdown_line_cache_empty_chunk_after_width_change_does_not_panic() {
     use ratatui_kit::ratatui::text::Line;
 
     let mut cache = MarkdownLineCache::default();
-    cache.retain_and_wrap(20, &[(1, vec![Line::from("stable line")])]);
+    cache.retain_and_wrap(20, vec![(1, vec![Line::from("stable line")])]);
 
-    cache.retain_and_wrap(8, &[(1, Vec::new())]);
+    cache.retain_and_wrap(8, vec![(1, Vec::new())]);
 
     assert_eq!(cache.stable.len(), 1);
     assert!(cache.stable[0].lines.is_empty());
@@ -269,9 +270,9 @@ fn test_markdown_line_cache_hit_with_empty_placeholder_keeps_cached_lines() {
     use ratatui_kit::ratatui::text::Line;
 
     let mut cache = MarkdownLineCache::default();
-    cache.retain_and_wrap(20, &[(7, vec![Line::from("stable line")])]);
+    cache.retain_and_wrap(20, vec![(7, vec![Line::from("stable line")])]);
 
-    cache.retain_and_wrap(20, &[(7, Vec::new())]);
+    cache.retain_and_wrap(20, vec![(7, Vec::new())]);
 
     assert_eq!(cache.stable.len(), 1);
     assert_eq!(cache.stable[0].lines.len(), 1);

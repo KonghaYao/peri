@@ -5,8 +5,127 @@ use crate::kit::atoms::{BG_LIVE_DETAIL, BgLiveDetail, BgLiveStatus};
 use crate::kit::bg_task_identity::task_id_for_agent_id;
 use crate::kit::stream_data::{TuiReasoningChunk, TuiTextChunk, TuiToolEnded, TuiToolStarted};
 use crate::kit::tui_render_unit::{
-    EntryStatus, FoldState, TuiAssistantBubble, TuiReasoningBlock, TuiRenderUnit,
+    EntryStatus, FoldState, TuiAssistantBubble, TuiReasoningBlock, TuiRenderUnit, tui_hash_roll,
+    tui_hash_roll_update,
 };
+
+#[derive(Debug, Clone)]
+pub(crate) struct BgStream {
+    bubble: TuiAssistantBubble,
+    text_hash: u64,
+    reasoning_hash: u64,
+    projected: bool,
+    dirty: bool,
+}
+
+impl BgStream {
+    fn new(detail: &BgLiveDetail, message_id: Option<String>) -> Self {
+        let (bubble, projected) = match detail.nested_units.back() {
+            Some(TuiRenderUnit::TuiAssistantBubble(bubble)) => (bubble.clone(), true),
+            _ => (
+                TuiAssistantBubble {
+                    text: String::new(),
+                    reasoning: None,
+                    message_id,
+                    started_at: None,
+                    duration_ms: None,
+                    content_hash: 0,
+                },
+                false,
+            ),
+        };
+        Self {
+            text_hash: tui_hash_roll(&bubble.text),
+            reasoning_hash: bubble
+                .reasoning
+                .as_ref()
+                .map(|block| tui_hash_roll(&block.text))
+                .unwrap_or(0),
+            bubble,
+            projected,
+            dirty: false,
+        }
+    }
+}
+
+fn flush_detail(detail: &mut BgLiveDetail) -> bool {
+    let Some(stream) = detail.stream.as_mut().filter(|stream| stream.dirty) else {
+        return false;
+    };
+    stream.bubble.content_hash = TuiAssistantBubble::compute_hash_from_rolls(
+        stream.text_hash,
+        stream.reasoning_hash,
+        stream.bubble.reasoning.as_ref(),
+        stream.bubble.duration_secs(),
+        stream.bubble.started_at.is_none(),
+    );
+    if stream.projected {
+        detail.nested_units.pop_back();
+    }
+    detail
+        .nested_units
+        .push_back(TuiRenderUnit::TuiAssistantBubble(stream.bubble.clone()));
+    stream.projected = true;
+    stream.dirty = false;
+    true
+}
+
+pub(crate) fn has_pending_streams() -> bool {
+    BG_LIVE_DETAIL
+        .state()
+        .read()
+        .values()
+        .any(|detail| detail.stream.as_ref().is_some_and(|stream| stream.dirty))
+}
+
+pub(crate) fn publish_pending_streams() {
+    if !has_pending_streams() {
+        return;
+    }
+    let live = BG_LIVE_DETAIL.state();
+    let mut map = live.write();
+    for detail in map.values_mut() {
+        flush_detail(detail);
+    }
+}
+
+fn append_stream(agent_id: &str, message_id: Option<String>, chunk: &str, reasoning: bool) {
+    let Some(task_id) = task_id_for_agent_id(agent_id) else {
+        return;
+    };
+    let live = BG_LIVE_DETAIL.state();
+    let mut map = live.write_no_update();
+    let Some(detail) = map.get_mut(&task_id) else {
+        return;
+    };
+    if detail.stream.is_none() {
+        detail.stream = Some(BgStream::new(detail, message_id));
+    }
+    let stream = detail.stream.as_mut().unwrap();
+    if reasoning {
+        let block = stream
+            .bubble
+            .reasoning
+            .get_or_insert_with(|| TuiReasoningBlock {
+                text: String::new(),
+                fold: FoldState::Preview,
+                status: EntryStatus::Running,
+                is_running: true,
+                started_at: Some(peri_time::monotonic_now()),
+                duration_ms: None,
+            });
+        block.text.push_str(chunk);
+        stream.reasoning_hash = tui_hash_roll_update(stream.reasoning_hash, chunk);
+    } else {
+        stream
+            .bubble
+            .started_at
+            .get_or_insert_with(peri_time::monotonic_now);
+        stream.bubble.text.push_str(chunk);
+        stream.text_hash = tui_hash_roll_update(stream.text_hash, chunk);
+    }
+    stream.dirty = true;
+}
 
 fn with_live_detail<F>(task_id: &str, f: F)
 where
@@ -14,7 +133,10 @@ where
 {
     let live = BG_LIVE_DETAIL.state();
     let mut map = live.write();
-    f(map.entry(task_id.to_string()).or_default());
+    let detail = map.entry(task_id.to_string()).or_default();
+    flush_detail(detail);
+    detail.stream = None;
+    f(detail);
 }
 
 fn with_live_detail_for_agent<F>(agent_id: &str, f: F)
@@ -27,6 +149,8 @@ where
     let live = BG_LIVE_DETAIL.state();
     let mut map = live.write();
     if let Some(detail) = map.get_mut(&task_id) {
+        flush_detail(detail);
+        detail.stream = None;
         f(&task_id, detail);
     }
 }
@@ -188,75 +312,14 @@ pub fn append_bg_text_chunk(agent_id: &str, tc: &TuiTextChunk) {
     if tc.text.is_empty() {
         return;
     }
-    with_live_detail_for_agent(agent_id, |_, detail| {
-        if let Some(TuiRenderUnit::TuiAssistantBubble(b)) = detail.nested_units.back() {
-            let mut b = b.clone();
-            b.text.push_str(&tc.text);
-            b.recompute_hash();
-            let _ = detail.nested_units.pop_back();
-            detail
-                .nested_units
-                .push_back(TuiRenderUnit::TuiAssistantBubble(b));
-        } else {
-            let mut bubble = TuiAssistantBubble {
-                text: tc.text.clone(),
-                reasoning: None,
-                message_id: tc.message_id.clone(),
-                started_at: Some(peri_time::monotonic_now()),
-                duration_ms: None,
-                content_hash: 0,
-            };
-            bubble.recompute_hash();
-            detail
-                .nested_units
-                .push_back(TuiRenderUnit::TuiAssistantBubble(bubble));
-        }
-    });
+    append_stream(agent_id, tc.message_id.clone(), &tc.text, false);
 }
 
 pub fn append_bg_reasoning_chunk(agent_id: &str, rc: &TuiReasoningChunk) {
     if rc.text.is_empty() {
         return;
     }
-    with_live_detail_for_agent(agent_id, |_, detail| {
-        if let Some(TuiRenderUnit::TuiAssistantBubble(b)) = detail.nested_units.back() {
-            let mut b = b.clone();
-            let reasoning = b.reasoning.get_or_insert_with(|| TuiReasoningBlock {
-                text: String::new(),
-                fold: FoldState::Preview,
-                status: EntryStatus::Running,
-                is_running: true,
-                started_at: Some(peri_time::monotonic_now()),
-                duration_ms: None,
-            });
-            reasoning.text.push_str(&rc.text);
-            b.recompute_hash();
-            let _ = detail.nested_units.pop_back();
-            detail
-                .nested_units
-                .push_back(TuiRenderUnit::TuiAssistantBubble(b));
-            return;
-        }
-        let mut bubble = TuiAssistantBubble {
-            text: String::new(),
-            reasoning: Some(TuiReasoningBlock {
-                text: rc.text.clone(),
-                fold: FoldState::Preview,
-                status: EntryStatus::Running,
-                is_running: true,
-                started_at: Some(peri_time::monotonic_now()),
-                duration_ms: None,
-            }),
-            message_id: rc.message_id.clone(),
-            started_at: None,
-            duration_ms: None,
-            content_hash: 0,
-        };
-        bubble.recompute_hash();
-        detail
-            .nested_units
-            .push_back(TuiRenderUnit::TuiAssistantBubble(bubble));
-    });
+    append_stream(agent_id, rc.message_id.clone(), &rc.text, true);
 }
 
 pub fn handle_bg_subagent_stopped(agent_id: &str, result: &str, is_error: bool) {
@@ -311,3 +374,7 @@ pub fn seed_unobserved_snapshot(task_id: &str, kind: &str, summary: &str, pid: O
         sync_tool_units(detail);
     });
 }
+
+#[cfg(test)]
+#[path = "bg_task_live_test.rs"]
+mod tests;

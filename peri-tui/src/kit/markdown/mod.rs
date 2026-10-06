@@ -264,8 +264,7 @@ pub fn parse_markdown_terminal(
     cache: &mut MarkdownRenderCache,
 ) -> RenderedMarkdown {
     let full = parse_markdown(input, max_width, palette, base_fg);
-    cache.chunk_source.clear();
-    cache.chunk_source.push_str(input);
+    cache.chunk_source = String::new();
     cache.chunk_width = max_width as u16;
     cache.chunk_palette = palette;
     cache.stable_source_end = 0;
@@ -366,9 +365,13 @@ impl RenderedMarkdown {
 #[derive(Clone, Debug, Default)]
 pub struct MarkdownRenderCache {
     /// 旧增量 convert 路径的稳定 parser 输入。
+    #[cfg(test)]
     stable_text: String,
+    #[cfg(test)]
     stable_width: u16,
+    #[cfg(test)]
     stable_palette: Palette,
+    #[cfg(test)]
     stable_state: convert::ConvertState,
     /// Phase C：只在明确空行边界冻结的 rendered chunks。
     chunk_source: String,
@@ -381,6 +384,7 @@ pub struct MarkdownRenderCache {
 
 impl MarkdownRenderCache {
     /// 是否有有效的稳定前缀（可复用）。
+    #[cfg(test)]
     fn has_stable_prefix(&self) -> bool {
         !self.stable_text.is_empty()
     }
@@ -413,6 +417,7 @@ impl MarkdownRenderCache {
 /// 调用方应将 cache 与 VM（AssistantBubble）一一绑定，避免跨 VM 复用。
 /// 在 message_area/mod.rs::VmCacheSlot 中嵌入。
 /// `base_fg` 作为普通段落文本的前景色（来自主题 `component.markdown.text`）。
+#[cfg(test)]
 pub fn parse_markdown_cached(
     input: &str,
     max_width: usize,
@@ -539,3 +544,7 @@ pub fn parse_markdown_cached(
 #[cfg(test)]
 #[path = "mod_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "cache_lifecycle_test.rs"]
+mod cache_lifecycle_tests;
