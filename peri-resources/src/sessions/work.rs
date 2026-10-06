@@ -1,5 +1,6 @@
 use peri_acp_types::session_resources::work::{
-    WorkCommand, WorkReceipt, WorkReduction, WorkResolution, WorkState,
+    DeliveryRecord, WorkCommand, WorkDeliveryQuery, WorkReceipt, WorkReduction, WorkResolution,
+    WorkState,
 };
 use peri_acp_types::session_resources::{
     ControlState, SessionResourceError, SessionResourceResult,
@@ -68,6 +69,25 @@ pub(super) fn owned_command(
 }
 pub(super) const READ_STATE: &str =
     "SELECT state_json FROM session_work_state WHERE session_id = ?1";
+pub(super) const READ_DELIVERY: &str = "SELECT EXISTS(SELECT 1 FROM threads WHERE id=?1 UNION ALL SELECT 1 FROM session_control_state WHERE session_id=?1 UNION ALL SELECT 1 FROM session_work_state WHERE session_id=?1),entry.type,entry.value FROM (SELECT 1) LEFT JOIN session_work_state AS state ON state.session_id=?1 LEFT JOIN json_each(state.state_json,'$.deliveries') AS entry ON entry.key=?2";
+
+pub(super) fn delivery(
+    query: &WorkDeliveryQuery,
+    kind: Option<&str>,
+    json: Option<&str>,
+) -> SessionResourceResult<Option<DeliveryRecord>> {
+    match (kind, json) {
+        (None, None) => Ok(None),
+        (Some("object"), Some(json)) => {
+            let record: DeliveryRecord = decode(json)?;
+            if record.publication.delivery_id != query.delivery_id {
+                return Err(corrupt("work delivery identity conflicts"));
+            }
+            Ok(Some(record))
+        }
+        _ => Err(corrupt("work delivery is not readable")),
+    }
+}
 pub(super) const READ_RECEIPT: &str =
     "SELECT digest, resolution_json FROM session_work_receipts WHERE mutation_id = ?1";
 pub(super) const INSERT_STATE: &str =

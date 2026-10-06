@@ -49,6 +49,8 @@ typed schema、默认值、领域合并、scope/revision/explain/update 归
 
 ### 持久 RCRA（src/session_resources/work/）
 
+`WorkDeliveryQuery` 显式携带 session / delivery 身份；`SessionResources::load_work_delivery` 返回单个 `DeliveryRecord`，只用于逐消息身份去重，不等价于完整 WorkSnapshot、候选判定或 Unknown 提交结论。未实现的后端默认返回 Unsupported，不回落全量读取。契约测试：`session_resources/work/delivery_query_test.rs`。
+
 `policy.rs` 的 `DEFAULT_AGENT_MAX_ITERATIONS` 同时供默认 WorkLimits 与 Agent 默认循环消费；旧默认 limits 的升级仅在 `user_input.rs` 的成功显式选择中执行，保留历史 budget counters。`user_input.rs` 区分无 attempt 的当前生命周期旧 processing 放弃与有 attempt 的精确执行中断；`query.rs` 将已放弃批次的终态交付责任与新任务准入分开，缺失关联证据仍阻塞。原 invocation、结果、binding 与真实 ACK 不被删除或伪造。预算失败经 `error.rs::WorkBudgetExhausted` 和 `session/execution.rs` 公开安全原因；其余未知内部错误仍脱敏。
 
 ### compact（src/compact.rs）

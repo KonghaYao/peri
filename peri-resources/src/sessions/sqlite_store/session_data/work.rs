@@ -1,10 +1,28 @@
 use super::*;
 use crate::sessions::work;
 use peri_acp_types::session_resources::work::{
-    reduce_work, WorkCommand, WorkQuery, WorkReceipt, WorkResolution, WorkSnapshot,
+    reduce_work, DeliveryRecord, WorkCommand, WorkDeliveryQuery, WorkQuery, WorkReceipt,
+    WorkResolution, WorkSnapshot,
 };
 
 impl SqliteSessionData {
+    pub(super) async fn read_delivery(
+        &self,
+        query: &WorkDeliveryQuery,
+    ) -> SessionResourceResult<Option<DeliveryRecord>> {
+        let (exists, kind, json): (bool, Option<String>, Option<String>) =
+            sqlx::query_as(work::READ_DELIVERY)
+                .bind(&query.session_id)
+                .bind(&query.delivery_id)
+                .fetch_one(&self.database.pool)
+                .await
+                .map_err(|error| map_sqlx(&error))?;
+        if !exists {
+            return Err(not_found());
+        }
+        work::delivery(query, kind.as_deref(), json.as_deref())
+    }
+
     pub(super) async fn read_work_command(
         &self,
         query: &peri_acp_types::session_resources::work::WorkCommandQuery,

@@ -1,5 +1,6 @@
 use peri_acp_types::session_resources::work::{
-    reduce_work, WorkCommand, WorkQuery, WorkReceipt, WorkResolution, WorkSnapshot,
+    reduce_work, DeliveryRecord, WorkCommand, WorkDeliveryQuery, WorkQuery, WorkReceipt,
+    WorkResolution, WorkSnapshot,
 };
 use peri_acp_types::session_resources::{SessionResourceError, SessionResourceResult};
 use turso_serverless::Value;
@@ -21,6 +22,32 @@ fn identity(command: &WorkCommand) -> SessionResourceResult<OperationIdentity> {
 }
 
 impl RemoteSessionData {
+    pub(super) async fn read_delivery(
+        &self,
+        query: &WorkDeliveryQuery,
+    ) -> SessionResourceResult<Option<DeliveryRecord>> {
+        let row = self
+            .store()
+            .await?
+            .fetch_row(&StatementSpec::new(
+                work::READ_DELIVERY,
+                vec![
+                    Value::Text(query.session_id.clone()),
+                    Value::Text(query.delivery_id.clone()),
+                ],
+            ))
+            .await?
+            .ok_or_else(|| corrupt("work delivery facts are not readable"))?;
+        match row.as_slice() {
+            [Value::Integer(0), Value::Null, Value::Null] => Err(super::session_data::not_found()),
+            [Value::Integer(1), Value::Null, Value::Null] => work::delivery(query, None, None),
+            [Value::Integer(1), Value::Text(kind), Value::Text(json)] => {
+                work::delivery(query, Some(kind), Some(json))
+            }
+            _ => Err(corrupt("work delivery row is not readable")),
+        }
+    }
+
     pub(super) async fn read_work(&self, query: &WorkQuery) -> SessionResourceResult<WorkSnapshot> {
         self.read_work_snapshot(query, false)
             .await

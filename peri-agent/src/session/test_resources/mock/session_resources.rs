@@ -28,6 +28,16 @@ fn unsupported(behavior: &str) -> SessionResourceError {
 
 #[async_trait]
 impl SessionResources for MockSessionResources {
+    async fn load_work_delivery(
+        &self,
+        query: &peri_acp_types::session_resources::work::WorkDeliveryQuery,
+    ) -> SessionResourceResult<Option<peri_acp_types::session_resources::work::DeliveryRecord>>
+    {
+        self.durable_backend(&query.session_id)
+            .await
+            .load_work_delivery(query)
+            .await
+    }
     async fn load_work_command(
         &self,
         query: &peri_acp_types::session_resources::work::WorkCommandQuery,

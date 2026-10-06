@@ -256,3 +256,16 @@ ce4 的父提交为 `873ed575a0031a9ff56d0f0cda60dacb68dd53d9`（2026-10-06 07:0
 验证过程中修正了新测试的动态 SQL（SQLx 0.9 要求字面量）以及远端 fixture 初始化假设；最终远端窄查询测试仅依赖既有 work fixture，不扩张到无关会话创建契约。无业务断言放宽、无 schema 变更、未操作用户数据库、未提交 Git。
 
 用户现场步骤：先妥善结束或取消当前任务，再用 `./dev.sh` 重新编译并启动，在相同长会话下显式发起任务；对比空闲、流式与工具结束提交时的 CPU / RSS，验证新消息与工具结果仍完整。历史加载本身不应恢复旧执行。若资源仍高，保留新 PID 与调用栈再推进下一轮，不据此跳过 Unknown 安全屏障或清理历史证据。
+
+## 第二轮小范围止血（2026-10-06）
+
+按用户要求，第一轮已使用 `git commit --no-verify` 提交为 `e628113f36514bc16a342ebe2e8a6f9c6d4002a1`。第二轮同样按用户明确要求使用 `--no-verify` 单独提交，现场资源收益仍待用户验证。
+
+- 新增显式 `WorkDeliveryQuery` 与 `load_work_delivery` 窄读契约。逐消息 inbox 去重不再反序列化完整 WorkState，只读取目标 DeliveryRecord；SQLite / Turso 共用查询与身份校验，查询值绑定，不拼接 JSON path。
+- 保留读取恢复约束、根会话读屏障及原有提交 gate；保留 lifecycle / content / policy 冲突检测、稳定重试身份、失败批次回队和 Unknown 禁止即时重放。单条读的 None 不代表先前未知提交已确定未应用。
+- 不迁移 schema、不清理历史、不操作用户数据库。SQL JSON 引擎仍解析 / 扫描大 blob；后台两秒候选发现、reducer 全量 clone 和新状态全量编码仍在，不宣称资源问题已根治。
+- 后台 available 判定牵涉 Unknown、孤立交付、终态责任和领取边界，本轮不复制领域规则到 SQL，不通过拉长轮询或缓存掩盖问题。
+
+新增定向测试已通过：types 身份序列化 2 项、本地 delivery 查询 4 项、远端 delivery 查询 4 项、Agent 接纳 / 去重 / 冲突 / 重试 / Unknown / 回队 6 项，共 16 项。测试覆盖大历史载荷不进入 Rust 类型解码、特殊身份绑定、跨会话隔离和目标记录损坏拒绝；没有真实 CPU / RSS 收益测量或 Turso 网络部署验收。
+
+扩大回归：Agent `work_production_test` 9 passed；远端 work 模块 12 passed / 1 failed，本地 durable work 契约 21 passed / 1 failed / 1 ignored。失败分别是旧并发发布在 `session_work_test.rs:322` 返回 PersistenceUncertain / Unknown（隔离重跑仍失败），旧 Act 交接在 `durable_work_contract.rs:666` 得到 InvalidTransition。当前共享工作树同时存在其他领域处理变更，不能把扩大回归表述为全通过，也尚未通过隔离基线证明失败归属；本轮不放宽断言或扩修这些路径。

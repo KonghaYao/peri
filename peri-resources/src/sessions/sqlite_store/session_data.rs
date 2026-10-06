@@ -84,6 +84,13 @@ impl SessionDataPort for SqliteSessionData {
             .await
             .map_err(|error| map_sqlx(&error))
     }
+    async fn load_work_delivery(
+        &self,
+        query: &peri_acp_types::session_resources::work::WorkDeliveryQuery,
+    ) -> SessionResourceResult<Option<peri_acp_types::session_resources::work::DeliveryRecord>>
+    {
+        self.read_delivery(query).await
+    }
     async fn load_work_command(
         &self,
         query: &peri_acp_types::session_resources::work::WorkCommandQuery,

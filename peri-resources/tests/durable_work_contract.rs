@@ -27,6 +27,9 @@ mod terminal_contract;
 #[path = "durable_work/reopen_contract.rs"]
 mod reopen_contract;
 
+#[path = "durable_work/delivery_query_contract.rs"]
+mod delivery_query_contract;
+
 async fn fixture() -> (TempDir, Arc<dyn SessionResources>) {
     let directory = tempfile::tempdir().unwrap();
     let resources = Arc::new(

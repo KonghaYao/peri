@@ -27,6 +27,9 @@ use crate::sessions::data::SessionDataPort;
 #[path = "session_pending_work_test.rs"]
 mod pending_work;
 
+#[path = "session_delivery_query_test.rs"]
+mod delivery_query;
+
 struct SqliteTransport {
     pool: SqlitePool,
 }

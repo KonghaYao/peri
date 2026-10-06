@@ -53,6 +53,8 @@ Emscripten 最小入口见 [`peri-wasm`](peri-wasm.md)：复用本 crate 的 `ru
 
 ## 子系统
 
+Inbox 去重入口 `agent/stages/work_receive.rs` 使用 `SessionResources::load_work_delivery` 读取单条交付；保留 lifecycle / content / policy 冲突校验、稳定提交身份和失败后批次回队。不修改候选发现或 Unknown 写屏障；回归入口 `agent/stages/work_receive_test.rs`。
+
 ### 持久 RCRA 与 SDK 准入
 
 `agent/stages/work_boundary.rs` 在首个 hook 或模型调用前确认完整 SDK admission、领域登记和真实 entered ACK；`session/turn.rs` 固定该 ticket 的 turn/attempt 与控制代际。`work_ledger.rs` 保存 Unknown 的完整原命令并冻结副作用；仅对已有确定拒绝回执的 `StaleRevision` 阶段提交，在原生命周期/控制代际/attempt 仍一致时有界重读全局 revision 并创建新提交身份，保留目标工作 revision、完整响应/结果与所有其余 guard，不重跑模型或工具。`work_receive.rs` 原子接纳/领取/投影，`work_reason.rs` 保存实际发送的完整模型请求及响应到 Act 的责任交接，`work_dispatch.rs` 保存工具意图和结果。`work_recovery.rs` 仅使用持久证据恢复阶段，不把 Transcript 存在当作处理完成，不盲重放 OutcomeUnknown 调用。

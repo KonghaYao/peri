@@ -63,13 +63,14 @@ pub async fn publish_session_inbox(
             },
         };
         let content = WorkPayload::from_payload(&payload)?;
-        let snapshot = ledger
-            .snapshot(&WorkQuery {
+        let prior = ledger
+            .resources()
+            .load_work_delivery(&WorkDeliveryQuery {
                 session_id: session_id.into(),
-                limit: 1,
+                delivery_id: identity.clone(),
             })
             .await?;
-        if let Some(prior) = snapshot.state.deliveries.get(&identity) {
+        if let Some(prior) = prior {
             if prior.recipient_lifecycle != recipient_lifecycle
                 || prior.publication.event.content != content
                 || prior.publication.policy != message.policy
@@ -112,6 +113,10 @@ pub async fn publish_session_inbox(
     batch.messages = None;
     Ok(receipts)
 }
+
+#[cfg(test)]
+#[path = "work_receive_test.rs"]
+mod tests;
 
 pub(crate) async fn receive(ctx: &StageContext) -> AgentResult<Option<ReceiveOutput>> {
     let Some(session) = ctx.work.ensure(ctx).await? else {

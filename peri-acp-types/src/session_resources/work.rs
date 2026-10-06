@@ -630,6 +630,17 @@ pub struct WorkQuery {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkDeliveryQuery {
+    pub session_id: String,
+    pub delivery_id: String,
+}
+
+#[cfg(test)]
+#[path = "work/delivery_query_test.rs"]
+mod delivery_query_tests;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorkCommandQuery {
     pub session_id: String,
     pub mutation_id: String,
