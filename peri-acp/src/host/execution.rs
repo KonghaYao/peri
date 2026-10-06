@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use peri_acp_types::execution_admission::{AdmissionOutcome, AdmissionRequest};
-use peri_acp_types::session_resources::{ControlAction, ControlCommand, ControlDecision};
 
 use peri_acp_types::session_resources::work::{
     AdmissionRecord, WorkAction, WorkAdmission, WorkCommand, WorkDecision, WorkQuery,
@@ -10,6 +9,9 @@ use serde_json::{json, Value};
 
 use super::{AcpServerConfig, PromptLocks, SharedSessions};
 use crate::transport::{types::AcpError, AcpTransport};
+
+#[path = "execution_finish.rs"]
+mod finishing;
 
 pub(super) async fn query(params: &Value, cfg: &AcpServerConfig) -> Result<Value, AcpError> {
     let session_id = session_id(params)?;
@@ -81,6 +83,22 @@ pub(super) async fn resolve_work(params: &Value, cfg: &AcpServerConfig) -> Resul
     if command.session_id != session_id(params)? {
         return Err(AcpError::new(-32602, "work command recipient conflict"));
     }
+    if matches!(&command.action, WorkAction::FinishAdmission { .. }) {
+        let owned = cfg
+            .session_resources
+            .load_work_command(&peri_acp_types::session_resources::work::WorkCommandQuery {
+                session_id: command.session_id.clone(),
+                mutation_id: command.mutation_id.clone(),
+            })
+            .await
+            .map_err(super::workspace::resource_error)?;
+        if owned.is_none_or(|owned| owned.command != command) {
+            return Err(AcpError::new(
+                -32010,
+                "original execution finish journal is required",
+            ));
+        }
+    }
     let resolution = cfg
         .session_resources
         .resolve_work_mutation(&command)
@@ -101,7 +119,9 @@ pub(super) async fn resolve(params: &Value, cfg: &AcpServerConfig) -> Result<Val
         .map_err(super::workspace::resource_error)?;
     match snapshot.state.admissions.get(&ticket.admission_id) {
         Some(record) if record.admission == ticket => {
-            if super::cold_terminal::reconcile(cfg.session_resources.as_ref(), &ticket).await? {
+            if finishing::reconcile_finish(cfg.session_resources.as_ref(), &ticket).await?
+                || super::cold_terminal::reconcile(cfg.session_resources.as_ref(), &ticket).await?
+            {
                 finish_admission(cfg.session_resources.as_ref(), &ticket).await?;
                 let updated = cfg
                     .session_resources
@@ -166,7 +186,9 @@ pub(super) async fn execute(
                 "execution admission identity conflict",
             ));
         }
-        if super::cold_terminal::reconcile(resources.as_ref(), &admission).await? {
+        if finishing::reconcile_finish(resources.as_ref(), &admission).await?
+            || super::cold_terminal::reconcile(resources.as_ref(), &admission).await?
+        {
             let evidence_id = finish_admission(resources.as_ref(), &admission).await?;
             return Ok(settled_reply(&admission, &evidence_id));
         }
@@ -300,45 +322,7 @@ pub(super) async fn finish_admission(
     resources: &dyn peri_acp_types::session_resources::SessionResources,
     admission: &WorkAdmission,
 ) -> Result<String, AcpError> {
-    let control = resources
-        .load_session_control(&admission.session_id)
-        .await
-        .map_err(super::workspace::resource_error)?;
-    if control.attempt.as_ref() == Some(&admission.execution) {
-        let exited = resources
-            .apply_session_control(&ControlCommand {
-                session_id: admission.session_id.clone(),
-                command_id: format!("execution-ended:{}", admission.admission_id),
-                expected_lifecycle: control.lifecycle,
-                expected_revision: control.revision,
-                expected_control_generation: control.control_generation,
-                action: ControlAction::ObserveAttempt { target: None },
-            })
-            .await
-            .map_err(super::workspace::resource_error)?;
-        if exited.decision != ControlDecision::Accepted {
-            return Err(AcpError::new(-32010, "execution exit remains unconfirmed"));
-        }
-    } else if control.attempt.is_some() {
-        return Err(AcpError::new(-32010, "another execution is still observed"));
-    }
-    let evidence_id = format!("execution-exit:{}", admission.admission_id);
-    let settlement = resources
-        .apply_work_mutation(&WorkCommand {
-            session_id: admission.session_id.clone(),
-            recipient_lifecycle: admission.lifecycle,
-            mutation_id: format!("execution-finish:{}", admission.admission_id),
-            action: WorkAction::FinishAdmission {
-                admission: admission.clone(),
-                evidence_id: evidence_id.clone(),
-            },
-        })
-        .await
-        .map_err(super::workspace::resource_error)?;
-    if !matches!(settlement.decision, WorkDecision::Accepted) {
-        return Err(AcpError::new(-32010, "execution settlement was rejected"));
-    }
-    Ok(evidence_id)
+    finishing::finish_admission(resources, admission).await
 }
 
 fn admission_command(admission: &WorkAdmission) -> WorkCommand {

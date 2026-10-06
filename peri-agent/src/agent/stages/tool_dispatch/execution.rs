@@ -135,7 +135,6 @@ pub(super) async fn collect_tool_results(
     .await;
 
     // 阶段三：聚合 + 错误延迟
-    ctx.work.ensure(ctx).await?;
     Ok(settle_results(
         ctx,
         approval,

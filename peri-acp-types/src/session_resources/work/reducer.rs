@@ -152,7 +152,9 @@ fn apply(
         evidence_id,
     } = &command.action
     {
-        return super::admission::finish(command, control, state, admission, evidence_id, receipt);
+        *next_control =
+            super::admission::finish(command, control, state, admission, evidence_id, receipt)?;
+        return Ok(());
     }
     if let WorkAction::PublishDelivery { delivery } = &command.action {
         return super::delivery::publish(command, control, state, delivery, receipt, events);
@@ -344,7 +346,11 @@ fn apply(
             results,
             next_work_id,
         } => {
-            execution_guard(command, control, state, guard, false)?;
+            if next_work_id.is_some() {
+                execution_guard(command, control, state, guard, false)?;
+            } else {
+                settlement_guard(command, control, state, guard, target)?;
+            }
             super::processing::commit_act(
                 command,
                 state,
@@ -500,6 +506,46 @@ fn apply(
 pub(super) fn revision_guard(state: &WorkState, revision: u64) -> Result<(), WorkRejection> {
     if state.revision != revision {
         return Err(WorkRejection::StaleRevision);
+    }
+    Ok(())
+}
+
+fn settlement_guard(
+    command: &WorkCommand,
+    control: &ControlState,
+    state: &WorkState,
+    guard: &WorkGuard,
+    target: &WorkTarget,
+) -> Result<(), WorkRejection> {
+    revision_guard(state, guard.expected_revision)?;
+    if command.recipient_lifecycle != control.lifecycle {
+        return Err(WorkRejection::StaleLifecycle);
+    }
+    let work = state
+        .works
+        .get(&target.work_id)
+        .ok_or(WorkRejection::Conflict)?;
+    let batch = state
+        .batches
+        .get(&work.batch_id)
+        .ok_or(WorkRejection::Conflict)?;
+    if batch.recipient_lifecycle != command.recipient_lifecycle {
+        return Err(WorkRejection::StaleLifecycle);
+    }
+    let admitted = state.admissions.values().any(|record| {
+        record.admission.session_id == command.session_id
+            && record.admission.lifecycle == command.recipient_lifecycle
+            && record.admission.execution == guard.execution
+            && record
+                .entering_receipt
+                .as_ref()
+                .is_some_and(|receipt| receipt.decision == WorkDecision::Accepted)
+            && state
+                .admission_batch(&record.admission)
+                .is_some_and(|admitted_batch| admitted_batch.batch_id == work.batch_id)
+    });
+    if batch.execution != guard.execution && !admitted {
+        return Err(WorkRejection::StaleExecution);
     }
     Ok(())
 }

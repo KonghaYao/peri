@@ -278,6 +278,16 @@ impl WorkBoundary {
         state.session = Some(Arc::clone(&session));
         Ok(Some(session))
     }
+
+    pub(crate) async fn settlement_session(
+        &self,
+        ctx: &StageContext,
+    ) -> anyhow::Result<Option<Arc<WorkSession>>> {
+        if let Some(session) = self.state.lock().await.session.clone() {
+            return Ok(Some(session));
+        }
+        self.ensure(ctx).await
+    }
 }
 
 impl WorkSession {

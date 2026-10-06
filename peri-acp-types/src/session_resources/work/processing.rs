@@ -254,9 +254,12 @@ pub(super) fn commit_act(
     projections: &mut Vec<WorkPayload>,
 ) -> Result<(), WorkRejection> {
     let source = work_mut(state, target)?.clone();
-    if !matches!(source.stage, WorkStage::ActReady | WorkStage::Blocked)
-        || source.invocation_ids.is_empty()
+    if !matches!(
+        source.stage,
+        WorkStage::ActReady | WorkStage::Blocked | WorkStage::Abandoned
+    ) || source.invocation_ids.is_empty()
         || results.is_empty()
+        || (source.stage != WorkStage::ActReady && next_work_id.is_some())
     {
         return Err(WorkRejection::InvalidTransition);
     }
@@ -272,6 +275,11 @@ pub(super) fn commit_act(
             .invocations
             .get_mut(&result.invocation_id)
             .ok_or(WorkRejection::Conflict)?;
+        if invocation.work_id.as_deref() != Some(&source.work_id)
+            || invocation.recipient_lifecycle != command.recipient_lifecycle
+        {
+            return Err(WorkRejection::Conflict);
+        }
         let rejected_before_dispatch = invocation.status == InvocationStatus::Prepared
             && matches!(&result.outcome, InvocationOutcome::Cancelled { evidence } if !evidence.is_empty());
         if !rejected_before_dispatch
@@ -330,7 +338,7 @@ pub(super) fn commit_act(
         }
     }
     let work = work_mut(state, target)?;
-    if complete {
+    if complete && source.stage == WorkStage::ActReady {
         work.stage = WorkStage::Settled;
         work.reason = None;
         work.recovery_condition = None;
@@ -386,6 +394,9 @@ pub(super) fn unknown(
     receipt: &mut WorkReceipt,
 ) -> Result<(), WorkRejection> {
     let work = work_mut(state, target)?.clone();
+    if reason.is_empty() {
+        return Err(WorkRejection::InvalidTransition);
+    }
     if !work
         .invocation_ids
         .iter()
@@ -397,11 +408,16 @@ pub(super) fn unknown(
         .invocations
         .get_mut(invocation_id)
         .ok_or(WorkRejection::Conflict)?;
-    if invocation.status != InvocationStatus::DispatchAccepted {
+    if invocation.status != InvocationStatus::DispatchAccepted
+        || invocation.work_id.as_deref() != Some(&work.work_id)
+    {
         return Err(WorkRejection::InvalidTransition);
     }
     invocation.status = InvocationStatus::OutcomeUnknown;
     invocation.unknown_reason = Some(reason.into());
+    if work.stage == WorkStage::Abandoned {
+        return bump(work_mut(state, target)?, receipt);
+    }
     block(
         state,
         target,
@@ -516,3 +532,7 @@ pub(super) fn settle(
     work.stage = WorkStage::Settled;
     bump(work, receipt)
 }
+
+#[cfg(test)]
+#[path = "processing_test.rs"]
+mod tests;

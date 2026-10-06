@@ -199,10 +199,20 @@ pub(super) fn publish(
                 !matches!(work.stage, WorkStage::Settled | WorkStage::Abandoned)
                     && state.batches.get(&work.batch_id).is_some_and(|batch| {
                         batch.recipient_lifecycle == command.recipient_lifecycle
-                            && control
-                                .attempt
-                                .as_ref()
-                                .is_none_or(|attempt| attempt == &batch.execution)
+                            && control.attempt.as_ref().is_none_or(|attempt| {
+                                state.admissions.values().any(|record| {
+                                    let admission = &record.admission;
+                                    admission.session_id == command.session_id
+                                        && admission.lifecycle == control.lifecycle
+                                        && admission.control_generation
+                                            <= control.control_generation
+                                        && admission.execution == *attempt
+                                        && record.settled_receipt.is_none()
+                                        && state.admission_batch(admission).is_some_and(
+                                            |associated| associated.batch_id == work.batch_id,
+                                        )
+                                })
+                            })
                     })
             })
             .map(|work| WorkTarget {

@@ -5,6 +5,7 @@ use peri_acp_types::session_resources::work::*;
 use peri_acp_types::session_resources::SessionResources;
 use peri_acp_types::store::PersistedPayload;
 
+use super::work_ledger::WorkCommitError;
 use super::work_pipeline::WorkSession;
 use super::StageContext;
 use crate::agent::react::{ToolCall, ToolResult};
@@ -130,7 +131,10 @@ pub(crate) async fn commit_results(
     ctx: &StageContext,
     results: &[(ToolCall, ToolResult)],
 ) -> anyhow::Result<Option<Vec<BaseMessage>>> {
-    let Some(session) = ctx.work.ensure(ctx).await? else {
+    if results.is_empty() {
+        ctx.work.ensure(ctx).await?;
+    }
+    let Some(session) = ctx.work.settlement_session(ctx).await? else {
         return Ok(None);
     };
     let mut state = ctx.work.state.lock().await;
@@ -142,6 +146,16 @@ pub(crate) async fn commit_results(
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("Act work missing"))?,
     )?;
+    let source = snapshot
+        .state
+        .works
+        .get(&target.work_id)
+        .ok_or_else(|| anyhow::anyhow!("Act work missing"))?;
+    let may_advance = !state.frozen
+        && source.stage == WorkStage::ActReady
+        && snapshot.control.status == peri_acp_types::session_resources::ControlStatus::Active
+        && snapshot.control.control_generation == session.admission.control_generation
+        && snapshot.control.attempt.as_ref() == Some(&session.admission.execution);
     let mut outcomes = Vec::new();
     let mut invocation_ids = Vec::new();
     for (_, result) in results {
@@ -154,6 +168,17 @@ pub(crate) async fn commit_results(
                     && record.intent.tool_call_id == result.tool_call_id
             })
             .ok_or_else(|| anyhow::anyhow!("tool result has no durable invocation association"))?;
+        let stopped_before_effect = source.stage == WorkStage::Abandoned
+            || (source.stage == WorkStage::Blocked
+                && source.reason.as_deref() == Some("dispatch budget exhausted"));
+        if invocation.status == InvocationStatus::Prepared
+            && result.effective_error_code
+                != Some(crate::tools::EffectiveToolErrorCode::UserRejected)
+            && !may_advance
+            && !stopped_before_effect
+        {
+            continue;
+        }
         let message = BaseMessage::tool_result_with_execution_and_failure(
             &result.tool_call_id,
             result.output.as_str(),
@@ -163,16 +188,20 @@ pub(crate) async fn commit_results(
         );
         let payload = WorkPayload::from_payload(&PersistedPayload::Message(message.clone()))?;
         let outcome = if invocation.status == InvocationStatus::Prepared {
-            if result.effective_error_code
-                != Some(crate::tools::EffectiveToolErrorCode::UserRejected)
+            let cancellation = if result.effective_error_code
+                == Some(crate::tools::EffectiveToolErrorCode::UserRejected)
             {
+                "user-rejected"
+            } else if stopped_before_effect {
+                "processing-stopped-before-dispatch"
+            } else {
                 return Err(anyhow::anyhow!(
                     "undispatched invocation has no trusted rejection evidence"
                 ));
-            }
+            };
             InvocationOutcome::Cancelled {
                 evidence: format!(
-                    "before-effect:user-rejected:{}",
+                    "before-effect:{cancellation}:{}",
                     invocation.intent.invocation_id
                 ),
             }
@@ -187,30 +216,123 @@ pub(crate) async fn commit_results(
             outcome,
         });
     }
-    let next_work_id = uuid::Uuid::now_v7().to_string();
-    let command = session.command(WorkAction::CommitAct {
-        guard: session.guard(&snapshot)?,
-        target,
-        results: outcomes,
-        next_work_id: Some(next_work_id.clone()),
+    let complete = source.invocation_ids.iter().all(|identity| {
+        invocation_ids.contains(identity)
+            || snapshot
+                .state
+                .invocations
+                .get(identity)
+                .is_some_and(|invocation| invocation.status == InvocationStatus::Settled)
     });
-    match session.ledger.commit_execution_transition(&command).await {
-        Ok(receipt)
-            if receipt.stage == Some(WorkStage::ReasonReady)
-                && receipt.work_id.as_deref() == Some(&next_work_id) => {}
-        Ok(_) => {
+    let mut next_work_id = (may_advance && complete).then(|| uuid::Uuid::now_v7().to_string());
+    if outcomes.is_empty() {
+        state.frozen = true;
+        return Ok(Some(Vec::new()));
+    }
+    let mut command = session.command(WorkAction::CommitAct {
+        guard: session.guard(&snapshot)?,
+        target: target.clone(),
+        results: outcomes.clone(),
+        next_work_id: next_work_id.clone(),
+    });
+    let mut expected_stage = if complete && source.stage == WorkStage::ActReady {
+        WorkStage::Settled
+    } else {
+        source.stage
+    };
+    let mut committed_receipt = None;
+    for attempt in 0..8 {
+        match session.ledger.commit(&command).await {
+            Ok(receipt) => {
+                committed_receipt = Some(receipt);
+                break;
+            }
+            Err(WorkCommitError::Rejected { receipt })
+                if attempt < 7
+                    && matches!(
+                        receipt.decision,
+                        WorkDecision::Rejected {
+                            reason: WorkRejection::StaleRevision | WorkRejection::StaleWorkRevision
+                        }
+                    ) =>
+            {
+                let refreshed = session.snapshot().await?;
+                let refreshed_target = WorkSession::target(&refreshed, &target.work_id)?;
+                let refreshed_work = &refreshed.state.works[&target.work_id];
+                let WorkAction::CommitAct {
+                    guard,
+                    target: prior_target,
+                    ..
+                } = &command.action
+                else {
+                    unreachable!();
+                };
+                let unchanged_execution_work = next_work_id.is_some()
+                    && refreshed.control.lifecycle == session.admission.lifecycle
+                    && refreshed.control.control_generation == guard.expected_control_generation
+                    && refreshed.control.attempt.as_ref() == Some(&guard.execution)
+                    && refreshed.control.status
+                        == peri_acp_types::session_resources::ControlStatus::Active
+                    && refreshed_target.expected_work_revision
+                        == prior_target.expected_work_revision
+                    && refreshed_work.stage == WorkStage::ActReady;
+                if !unchanged_execution_work {
+                    state.frozen = true;
+                    next_work_id = None;
+                }
+                let complete = refreshed_work.invocation_ids.iter().all(|identity| {
+                    invocation_ids.contains(identity)
+                        || refreshed
+                            .state
+                            .invocations
+                            .get(identity)
+                            .is_some_and(|invocation| {
+                                invocation.status == InvocationStatus::Settled
+                            })
+                });
+                expected_stage = if complete && refreshed_work.stage == WorkStage::ActReady {
+                    WorkStage::Settled
+                } else {
+                    refreshed_work.stage
+                };
+                command = session.command(WorkAction::CommitAct {
+                    guard: session.guard(&refreshed)?,
+                    target: refreshed_target,
+                    results: outcomes.clone(),
+                    next_work_id: next_work_id.clone(),
+                });
+            }
+            Err(error) => {
+                state.frozen = true;
+                return Err(error.into());
+            }
+        }
+    }
+    match committed_receipt {
+        Some(receipt)
+            if match &next_work_id {
+                Some(next) => {
+                    receipt.stage == Some(WorkStage::ReasonReady)
+                        && receipt.work_id.as_deref() == Some(next)
+                }
+                None => {
+                    receipt.work_id.as_deref() == Some(&target.work_id)
+                        && receipt.stage == Some(expected_stage)
+                }
+            } => {}
+        _ => {
             state.frozen = true;
             return Err(anyhow::anyhow!(
                 "Act receipt does not confirm the exact successor"
             ));
         }
-        Err(error) => {
-            state.frozen = true;
-            return Err(error.into());
-        }
     }
-    state.work_id = Some(next_work_id);
-    state.invocations.clear();
+    if let Some(next_work_id) = next_work_id {
+        state.work_id = Some(next_work_id);
+        state.invocations.clear();
+    } else {
+        state.frozen = true;
+    }
     let committed = session.snapshot().await?;
     let mut projections = Vec::new();
     for invocation_id in invocation_ids {
@@ -232,3 +354,7 @@ pub(crate) async fn commit_results(
     }
     Ok(Some(projections))
 }
+
+#[cfg(test)]
+#[path = "work_dispatch_test.rs"]
+mod tests;

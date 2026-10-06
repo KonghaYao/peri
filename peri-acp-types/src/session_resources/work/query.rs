@@ -155,12 +155,33 @@ impl WorkState {
         })
     }
 
+    pub(super) fn admission_batch(&self, admission: &WorkAdmission) -> Option<&ProcessingBatch> {
+        let batch = if let Some(work) = self.works.get(&admission.work_id) {
+            self.batches.get(&work.batch_id)?
+        } else {
+            let mut batches = self.batches.values().filter(|batch| {
+                batch.processing_delivery_ids.contains(&admission.work_id)
+                    && batch.recipient_lifecycle == admission.lifecycle
+            });
+            let batch = batches.next()?;
+            if batches.next().is_some() {
+                return None;
+            }
+            batch
+        };
+        (batch.recipient_lifecycle == admission.lifecycle).then_some(batch)
+    }
+
     fn admission_processing_superseded(&self, admission: &WorkAdmission) -> bool {
         let mut abandoned = false;
-        for batch in self.batches.values().filter(|batch| {
-            batch.recipient_lifecycle == admission.lifecycle
-                && batch.execution == admission.execution
+        for record in self.admissions.values().filter(|record| {
+            record.admission.lifecycle == admission.lifecycle
+                && record.admission.session_id == admission.session_id
+                && record.admission.execution == admission.execution
         }) {
+            let Some(batch) = self.admission_batch(&record.admission) else {
+                return false;
+            };
             let mut found_work = false;
             for work in self
                 .works

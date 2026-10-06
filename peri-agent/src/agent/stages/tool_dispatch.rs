@@ -199,8 +199,6 @@ pub async fn dispatch_tools(
     )
     .await?;
 
-    super::execution_control::validate(ctx).await?;
-
     // 阶段 B：原子写入 transcript（staging 模式）
     let mut durable_results = collect_outcome.results.clone();
     durable_results.extend(resolution_errors.clone());
@@ -240,6 +238,9 @@ pub async fn dispatch_tools(
             tracker.add_estimated_tool_tokens(&result.output);
         }
     }
+
+    super::execution_control::validate(ctx).await?;
+    ctx.work.ensure(ctx).await?;
 
     // 阶段 C：仅已进入 policy 的调用触发 after_tools_batch。
     // Resolution 错误在 middleware 前结算，不能产生任何 hook 副作用。

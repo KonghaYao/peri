@@ -97,6 +97,13 @@ impl WorkMutationBarrier {
                             limit: 1,
                         })
                         .await?;
+                    let settlement_only = matches!(
+                        &command.action,
+                        WorkAction::CommitAct {
+                            next_work_id: None,
+                            ..
+                        }
+                    );
                     let guard = match &mut command.action {
                         WorkAction::ClaimBatch { guard, .. }
                         | WorkAction::BeginReason { guard, .. }
@@ -106,8 +113,10 @@ impl WorkMutationBarrier {
                         _ => return Err(WorkCommitError::Rejected { receipt }),
                     };
                     if snapshot.control.lifecycle != command.recipient_lifecycle
-                        || snapshot.control.control_generation != guard.expected_control_generation
-                        || snapshot.control.attempt.as_ref() != Some(&guard.execution)
+                        || (!settlement_only
+                            && (snapshot.control.control_generation
+                                != guard.expected_control_generation
+                                || snapshot.control.attempt.as_ref() != Some(&guard.execution)))
                     {
                         return Err(WorkCommitError::Rejected { receipt });
                     }

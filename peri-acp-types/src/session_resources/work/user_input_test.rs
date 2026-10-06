@@ -58,6 +58,56 @@ fn add_work(state: &mut WorkState, work_id: &str, lifecycle: u64, execution: Con
     );
 }
 
+fn add_admission(state: &mut WorkState, control: &ControlState, work_id: &str) {
+    state.works.get_mut(work_id).unwrap().stage = WorkStage::ReasonReady;
+    let registered = reduce_work(
+        &WorkCommand {
+            session_id: "session".into(),
+            recipient_lifecycle: control.lifecycle,
+            mutation_id: format!("register-{work_id}"),
+            action: WorkAction::RegisterAdmission {
+                admission: WorkAdmission {
+                    session_id: "session".into(),
+                    admission_id: work_id.into(),
+                    instance_id: "instance".into(),
+                    generation_id: "generation".into(),
+                    lifecycle: control.lifecycle,
+                    control_generation: control.control_generation,
+                    work_id: work_id.into(),
+                    work_revision: state.works[work_id].revision,
+                    execution: control.attempt.clone().unwrap(),
+                },
+            },
+        },
+        control,
+        state,
+    )
+    .unwrap();
+    assert_eq!(registered.receipt.decision, WorkDecision::Accepted);
+    assert_eq!(registered.control.as_ref(), Some(control));
+    let blocked = reduce_work(
+        &WorkCommand {
+            session_id: "session".into(),
+            recipient_lifecycle: control.lifecycle,
+            mutation_id: format!("block-{work_id}"),
+            action: WorkAction::BlockWork {
+                expected_revision: registered.state.revision,
+                target: WorkTarget {
+                    work_id: work_id.into(),
+                    expected_work_revision: registered.state.works[work_id].revision,
+                },
+                reason: "reason budget exhausted".into(),
+                recovery_condition: "explicit budget reset authorization".into(),
+            },
+        },
+        control,
+        &registered.state,
+    )
+    .unwrap();
+    assert_eq!(blocked.receipt.decision, WorkDecision::Accepted);
+    *state = blocked.state;
+}
+
 fn publication(control: &ControlState, state: &mut WorkState) -> WorkCommand {
     let message_id = MessageId::new();
     let content = MessageContent::text("continue with this new instruction");
@@ -219,6 +269,7 @@ fn active_attempt_selection_only_abandons_exact_execution() {
     state.limits.dispatches = 256;
     state.limits.recoveries = 9;
     add_work(&mut state, "active", 1, control.attempt.clone().unwrap());
+    add_admission(&mut state, &control, "active");
     add_work(&mut state, "other", 1, attempt());
     let mut other_attempt = control.attempt.clone().unwrap();
     other_attempt.attempt_id = AttemptId::new();
@@ -260,6 +311,185 @@ fn publication_without_explicit_interruption_keeps_exited_processing() {
         reduction.state.obligations["exited"],
         state.obligations["exited"]
     );
+}
+
+/// [回归测试] A claim 的 batch 在 B recovery 后仍保留 A execution，选择必须跟随 B admission 与 successor。
+#[test]
+fn recovered_attempt_selection_follows_admission_batch_and_successor() {
+    let idle = ControlState::default();
+    let mut state = WorkState::default();
+    let publish = publication(&idle, &mut state);
+    let published = reduce_work(&publish, &idle, &state).unwrap();
+    assert_eq!(published.receipt.decision, WorkDecision::Accepted);
+    let original_execution = attempt();
+    let original_admission = WorkAdmission {
+        session_id: "session".into(),
+        admission_id: "original-admission".into(),
+        instance_id: "original-instance".into(),
+        generation_id: "original-generation".into(),
+        lifecycle: 1,
+        control_generation: 0,
+        work_id: "new-input".into(),
+        work_revision: 0,
+        execution: original_execution.clone(),
+    };
+    let registered = reduce_work(
+        &WorkCommand {
+            session_id: "session".into(),
+            recipient_lifecycle: 1,
+            mutation_id: "register-original".into(),
+            action: WorkAction::RegisterAdmission {
+                admission: original_admission,
+            },
+        },
+        &idle,
+        &published.state,
+    )
+    .unwrap();
+    assert_eq!(registered.receipt.decision, WorkDecision::Accepted);
+    let active = registered.control.unwrap();
+    let claimed = reduce_work(
+        &WorkCommand {
+            session_id: "session".into(),
+            recipient_lifecycle: 1,
+            mutation_id: "claim-original".into(),
+            action: WorkAction::ClaimBatch {
+                guard: WorkGuard {
+                    expected_revision: registered.state.revision,
+                    expected_control_generation: active.control_generation,
+                    execution: original_execution.clone(),
+                },
+                batch_id: "original-batch".into(),
+                delivery_ids: vec!["new-input".into()],
+            },
+        },
+        &active,
+        &registered.state,
+    )
+    .unwrap();
+    assert_eq!(claimed.receipt.decision, WorkDecision::Accepted);
+    let recovery_idle = ControlState {
+        attempt: None,
+        ..active
+    };
+    let recovered_execution = attempt();
+    let recovered = reduce_work(
+        &WorkCommand {
+            session_id: "session".into(),
+            recipient_lifecycle: 1,
+            mutation_id: "register-recovery".into(),
+            action: WorkAction::RegisterAdmission {
+                admission: WorkAdmission {
+                    session_id: "session".into(),
+                    admission_id: "recovery-admission".into(),
+                    instance_id: "recovery-instance".into(),
+                    generation_id: "recovery-generation".into(),
+                    lifecycle: 1,
+                    control_generation: recovery_idle.control_generation,
+                    work_id: "original-batch".into(),
+                    work_revision: 0,
+                    execution: recovered_execution.clone(),
+                },
+            },
+        },
+        &recovery_idle,
+        &claimed.state,
+    )
+    .unwrap();
+    assert_eq!(recovered.receipt.decision, WorkDecision::Accepted);
+    let control = recovered.control.unwrap();
+    let mut state = recovered.state;
+    let mut successor = state.works["original-batch"].clone();
+    state.works.get_mut("original-batch").unwrap().stage = WorkStage::Settled;
+    successor.work_id = "recovered-successor".into();
+    state.works.insert(successor.work_id.clone(), successor);
+    add_work(
+        &mut state,
+        "unassociated-current-execution",
+        1,
+        recovered_execution,
+    );
+    add_work(
+        &mut state,
+        "original-execution-only",
+        1,
+        original_execution.clone(),
+    );
+    let invocations = state.invocations.clone();
+    let budgets = state.budgets.clone();
+    let mut command = publication(&control, &mut state);
+    command.mutation_id = "recovery-selection".into();
+    if let WorkAction::PublishStagedUserInputs { deliveries, .. } = &mut command.action {
+        deliveries[0].delivery_id = "fresh-input".into();
+    }
+    let reduction = reduce_work(&command, &control, &state).unwrap();
+    assert_eq!(reduction.receipt.decision, WorkDecision::Accepted);
+    assert_eq!(
+        reduction.state.works["recovered-successor"].stage,
+        WorkStage::Abandoned
+    );
+    assert_eq!(
+        reduction.state.works["original-batch"],
+        state.works["original-batch"]
+    );
+    for work_id in ["unassociated-current-execution", "original-execution-only"] {
+        assert_eq!(reduction.state.works[work_id], state.works[work_id]);
+        assert_eq!(
+            reduction.state.obligations[work_id],
+            state.obligations[work_id]
+        );
+    }
+    assert_eq!(
+        reduction.state.batches["original-batch"].execution,
+        original_execution
+    );
+    assert_eq!(
+        reduction.state.obligations["new-input"].status,
+        ObligationStatus::Abandoned
+    );
+    assert_eq!(reduction.state.invocations, invocations);
+    assert_eq!(reduction.state.budgets, budgets);
+    assert_eq!(reduction.state.admissions, state.admissions);
+    assert_eq!(
+        reduction.state.terminal_acknowledgements,
+        state.terminal_acknowledgements
+    );
+}
+
+/// [回归测试] batch execution 相同不能替代精确当前 admission 授权。
+#[test]
+fn active_selection_without_current_admission_keeps_processing() {
+    for variant in 0..6 {
+        let control = ControlState {
+            attempt: Some(attempt()),
+            ..ControlState::default()
+        };
+        let mut state = WorkState::default();
+        add_work(&mut state, "active", 1, control.attempt.clone().unwrap());
+        add_admission(&mut state, &control, "active");
+        let admission = &mut state.admissions.get_mut("active").unwrap().admission;
+        match variant {
+            0 => admission.session_id = "other-session".into(),
+            1 => admission.lifecycle += 1,
+            2 => admission.control_generation += 1,
+            3 => admission.execution.attempt_id = AttemptId::new(),
+            4 => admission.work_id = "missing-work".into(),
+            5 => state.admissions.clear(),
+            _ => unreachable!(),
+        }
+        let command = publication(&control, &mut state);
+        let reduction = reduce_work(&command, &control, &state).unwrap();
+        assert_eq!(
+            reduction.receipt.decision,
+            WorkDecision::Accepted,
+            "variant {variant}"
+        );
+        assert_eq!(reduction.state.works, state.works, "variant {variant}");
+        assert_eq!(
+            reduction.state.obligations["active"],
+            state.obligations["active"]
+        );
+    }
 }
 
 #[test]
@@ -326,4 +556,41 @@ fn selection_keeps_lifecycle_generation_cas_attempt_and_idempotence_guards() {
         }
     );
     assert_eq!(rejected.state, accepted.state);
+}
+
+#[test]
+fn explicit_selection_after_stop_supersedes_exact_attempt_from_prior_control_generation() {
+    let active = ControlState {
+        attempt: Some(attempt()),
+        ..ControlState::default()
+    };
+    let mut state = WorkState::default();
+    add_work(&mut state, "stopped", 1, active.attempt.clone().unwrap());
+    add_admission(&mut state, &active, "stopped");
+    let stopped = crate::session_resources::control::decide_control(
+        &crate::session_resources::ControlCommand {
+            session_id: "session".into(),
+            command_id: "stop-original".into(),
+            expected_lifecycle: active.lifecycle,
+            expected_revision: active.revision,
+            expected_control_generation: active.control_generation,
+            action: crate::session_resources::ControlAction::Stop {
+                target: active.attempt.clone().unwrap(),
+            },
+        },
+        &active,
+    );
+    assert_eq!(
+        stopped.decision,
+        crate::session_resources::ControlDecision::Accepted
+    );
+    let command = publication(&stopped.state, &mut state);
+    let selected = reduce_work(&command, &stopped.state, &state).unwrap();
+    assert_eq!(selected.receipt.decision, WorkDecision::Accepted);
+    assert_eq!(selected.state.works["stopped"].stage, WorkStage::Abandoned);
+    assert_eq!(
+        selected.control.as_ref().unwrap().status,
+        crate::session_resources::ControlStatus::Active
+    );
+    assert_eq!(selected.control.as_ref().unwrap().attempt, active.attempt);
 }

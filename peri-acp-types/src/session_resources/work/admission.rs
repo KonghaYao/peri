@@ -98,11 +98,13 @@ pub(super) fn finish(
     admission: &WorkAdmission,
     evidence_id: &str,
     receipt: &mut WorkReceipt,
-) -> Result<(), WorkRejection> {
+) -> Result<Option<ControlState>, WorkRejection> {
     if admission.session_id != command.session_id
         || admission.lifecycle != command.recipient_lifecycle
         || evidence_id.is_empty()
-        || control.attempt.is_some()
+        || control.attempt.as_ref().is_some_and(|attempt| {
+            control.lifecycle != admission.lifecycle || attempt != &admission.execution
+        })
         || (state
             .terminal_obligations
             .contains_key(&admission.admission_id)
@@ -119,10 +121,21 @@ pub(super) fn finish(
     if record.admission != *admission || record.entering_receipt.is_none() {
         return Err(WorkRejection::Conflict);
     }
+    let next_control = if control.attempt.is_some() {
+        let mut next = control.clone();
+        next.attempt = None;
+        next.revision = next
+            .revision
+            .checked_add(1)
+            .ok_or(WorkRejection::VersionExhausted)?;
+        Some(next)
+    } else {
+        None
+    };
     record.evidence_id = Some(evidence_id.into());
     receipt.work_id = Some(admission.work_id.clone());
     receipt.work_revision = Some(admission.work_revision);
-    Ok(())
+    Ok(next_control)
 }
 
 pub(super) fn bind_terminal(

@@ -57,6 +57,8 @@ Inbox 去重入口 `agent/stages/work_receive.rs` 使用 `SessionResources::load
 
 ### 持久 RCRA 与 SDK 准入
 
+工具停止与成果结算分离：`tool_dispatch/execution.rs` 收集结果后先经 `work_dispatch.rs` 提交原 invocation outcome，再检查继续执行资格。Blocked/Abandoned 保留停止状态且不生成 successor；无 successor 的结算按原 batch 或真实恢复 admission 校验，不能借新 attempt 重放工具。邮箱 `staging.rs` 在首次 enqueue 的 staged JSON 内固定完整发布授权；原 Queued 重放不重新取得 NewTask 授权，已授权未完成的发布沿用原命令与控制代际。
+
 `agent/stages/work_boundary.rs` 在首个 hook 或模型调用前确认完整 SDK admission、领域登记和真实 entered ACK；`session/turn.rs` 固定该 ticket 的 turn/attempt 与控制代际。`work_ledger.rs` 保存 Unknown 的完整原命令并冻结副作用；仅对已有确定拒绝回执的 `StaleRevision` 阶段提交，在原生命周期/控制代际/attempt 仍一致时有界重读全局 revision 并创建新提交身份，保留目标工作 revision、完整响应/结果与所有其余 guard，不重跑模型或工具。`work_receive.rs` 原子接纳/领取/投影，`work_reason.rs` 保存实际发送的完整模型请求及响应到 Act 的责任交接，`work_dispatch.rs` 保存工具意图和结果。`work_recovery.rs` 仅使用持久证据恢复阶段，不把 Transcript 存在当作处理完成，不盲重放 OutcomeUnknown 调用。
 
 `tool_dispatch/execution.rs` 保留工具返回的 typed `UserRejected`；MCP Agent 在批准前拒绝明确表示未启动子代理，拒绝理由作为 error tool result 继续交给模型，不能被 boxed 字符串误分类为未知副作用。没有可信分类的普通工具失败仍冻结并保留 OutcomeUnknown。

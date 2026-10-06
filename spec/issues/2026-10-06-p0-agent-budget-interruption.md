@@ -48,6 +48,16 @@
 
 ## 修复与验收
 
+### P1 review 补修（2026-10-06）
+
+- Dispatch 批次中途预算拒绝后，先结算已接受调用的成果，再返回预算/控制错误；确定未派发的调用记录 before-effect 取消证据并投影明确取消消息，保持消息配对，不伪造工具执行成果。
+- Abandoned processing 保留原 invocation 的成果与 Unknown 结算通道；无 successor 的原身份结算不要求当前 attempt 仍活跃，但保留生命周期、batch/admission 身份、revision 和调用归属检查，不恢复执行。
+- 已恢复执行按 admission 关联的 work/batch lineage 放弃 processing、隔离旧终态，不使用原始 claim execution 代替当前恢复 admission，不伪造 ACK。
+- Enqueue 首次接纳持久固定 publication 授权；旧 Queued 请求重放不能获得新授权，已授权未完成发布沿用原身份和代际。
+- 主会话 FinishAdmission 原子提交 attempt 退出与收尾；原收尾 journal 支持有界确定 NotApplied 重试，Unknown 不绕过，无 journal 不伪造退出证据。
+- 验证仅针对上述路径；真实会话、远端网络及最终 E2E 仍由用户验收。Review 的独立 P2（普通 publication CAS 激活失败、Recovery 预算覆盖 resume_stage）不纳入本轮 P1 已修复声明。
+- [x] P1 补修定向回归共 50 项通过：types work 26、Dispatch 预算与结算竞态 4、mailbox staging 15、ACP 原子收尾与恢复 5；未执行全 workspace 或真实模型 E2E。格式与差异空白检查通过。
+
 - [x] 对推理预算、工具派发预算及冷加载预算阻塞提供 typed `WorkBudgetExhausted`；anyhow 边界保留预算错误，其他未知错误继续脱敏。ACP wire kind 保留 `internal`，公开消息不再退化为通用内部错误。
 - [x] 用户可见消息明确已耗尽的预算、已用/上限及需要显式授权；保持失败/Blocked，不伪装成功。
 - [x] 回归验证：恰好达到上限后的下一次请求不发送模型/执行工具；Block 状态与原预算保持持久化；安全错误投影保留可核对原因。

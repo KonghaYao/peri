@@ -51,6 +51,163 @@ async fn load(fixture: &TestSession) -> WorkSnapshot {
 }
 
 #[tokio::test]
+async fn queued_enqueue_replay_after_restart_does_not_gain_publication_authority() {
+    let fixture = TestSession::open().await;
+    let (first, _) = mailbox(&fixture, fixture.resources());
+    first
+        .attach_external_attempt(CancellationToken::new(), false)
+        .unwrap();
+    let request = input(&first, "busy draft");
+    let original = first.enqueue_durable(&request).await.unwrap();
+    let before = load(&fixture).await;
+    let staged: serde_json::Value =
+        serde_json::from_str(&before.state.staged_user_inputs[&request.input_id].input_json)
+            .unwrap();
+    assert!(staged["enqueue_publication"].is_null());
+    let (restored, inbox) = mailbox(&fixture, fixture.resources());
+    for _ in 0..2 {
+        let replay = restored.enqueue_durable(&request).await.unwrap();
+        assert_eq!(replay.work_receipts, original.work_receipts);
+        assert_eq!(replay.results[0].state, UserInputState::Queued);
+        assert!(replay.publication_generations.is_empty());
+        let after = load(&fixture).await;
+        assert_eq!(after.state, before.state);
+        assert_eq!(after.control, before.control);
+        assert!(inbox.queue().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn legacy_queued_enqueue_replay_without_authorization_remains_queued() {
+    let fixture = TestSession::open().await;
+    let (restored, inbox) = mailbox(&fixture, fixture.resources());
+    let request = input(&restored, "legacy queued draft");
+    let stage = WorkCommand {
+        session_id: fixture.thread_id(),
+        recipient_lifecycle: 1,
+        mutation_id: mutation_id(
+            &format!("{}:1:{}", fixture.thread_id(), request.command_id),
+            &request.input_id,
+            "stage",
+        ),
+        action: WorkAction::StageUserInput {
+            input_json: serde_json::to_string(&UserInput {
+                input_id: request.input_id.clone(),
+                content: request.content.clone(),
+                original_draft: request.original_draft.clone(),
+            })
+            .unwrap(),
+            command_id: request.command_id.clone(),
+            fingerprint: compute_fingerprint(("enqueue", &request)),
+        },
+    };
+    let original = fixture
+        .resources()
+        .apply_work_mutation(&stage)
+        .await
+        .unwrap();
+    assert_eq!(original.decision, WorkDecision::Accepted);
+    let before = load(&fixture).await;
+    let replay = restored.enqueue_durable(&request).await.unwrap();
+    assert_eq!(replay.work_receipts, vec![original]);
+    assert_eq!(replay.results[0].state, UserInputState::Queued);
+    assert_eq!(load(&fixture).await.state, before.state);
+    assert!(inbox.queue().is_empty());
+}
+
+#[tokio::test]
+async fn authorized_enqueue_replay_recovers_staged_only_publication_with_frozen_identity() {
+    let fixture = TestSession::open().await;
+    let (first, _) = mailbox(&fixture, fixture.read_only_resources().await);
+    let request = input(&first, "authorized before crash");
+    assert_eq!(
+        first.enqueue_durable(&request).await.unwrap_err(),
+        UserInputQueueError::OutcomeUnknown
+    );
+    let stage = first.durable.as_ref().unwrap().operations.lock().await[&request.command_id]
+        .commands[0]
+        .clone();
+    let WorkAction::StageUserInput { input_json, .. } = &stage.action else {
+        unreachable!()
+    };
+    let staged: serde_json::Value = serde_json::from_str(input_json).unwrap();
+    let publication: WorkCommand =
+        serde_json::from_value(staged["enqueue_publication"].clone()).unwrap();
+    let stage_receipt = fixture
+        .resources()
+        .apply_work_mutation(&stage)
+        .await
+        .unwrap();
+    assert_eq!(stage_receipt.decision, WorkDecision::Accepted);
+    let (restored, inbox) = mailbox(&fixture, fixture.resources());
+    let recovered = restored.enqueue_durable(&request).await.unwrap();
+    assert_eq!(recovered.work_receipts.len(), 2);
+    assert_eq!(recovered.work_receipts[0], stage_receipt);
+    let after = load(&fixture).await;
+    assert_eq!(
+        after.state.user_input_publications[&publication.mutation_id],
+        publication
+    );
+    assert_eq!(inbox.queue().drain_all().len(), 1);
+    let (restarted, _) = mailbox(&fixture, fixture.resources());
+    let replay = restarted.enqueue_durable(&request).await.unwrap();
+    assert_eq!(replay.work_receipts, recovered.work_receipts);
+    assert_eq!(
+        replay.publication_generations,
+        recovered.publication_generations
+    );
+    assert_eq!(load(&fixture).await.state, after.state);
+}
+
+#[tokio::test]
+async fn authorized_enqueue_replay_does_not_recapture_changed_control_generation() {
+    use peri_acp_types::session_resources::{ControlAction, ControlCommand, ControlDecision};
+    let fixture = TestSession::open().await;
+    let (first, _) = mailbox(&fixture, fixture.read_only_resources().await);
+    let request = input(&first, "stale authorization");
+    assert_eq!(
+        first.enqueue_durable(&request).await.unwrap_err(),
+        UserInputQueueError::OutcomeUnknown
+    );
+    let stage = first.durable.as_ref().unwrap().operations.lock().await[&request.command_id]
+        .commands[0]
+        .clone();
+    assert_eq!(
+        fixture
+            .resources()
+            .apply_work_mutation(&stage)
+            .await
+            .unwrap()
+            .decision,
+        WorkDecision::Accepted
+    );
+    let before = load(&fixture).await;
+    let paused = fixture
+        .resources()
+        .apply_session_control(&ControlCommand {
+            session_id: fixture.thread_id(),
+            command_id: uuid::Uuid::now_v7().to_string(),
+            expected_lifecycle: before.control.lifecycle,
+            expected_revision: before.control.revision,
+            expected_control_generation: before.control.control_generation,
+            action: ControlAction::Pause,
+        })
+        .await
+        .unwrap();
+    assert_eq!(paused.decision, ControlDecision::Accepted);
+    let before_replay = load(&fixture).await;
+    let (restored, inbox) = mailbox(&fixture, fixture.resources());
+    assert!(matches!(
+        restored.enqueue_durable(&request).await,
+        Err(UserInputQueueError::DurableRejected(_))
+    ));
+    let after = load(&fixture).await;
+    assert_eq!(after.control, before_replay.control);
+    assert_eq!(after.state, before_replay.state);
+    assert!(inbox.queue().is_empty());
+}
+
+#[tokio::test]
 async fn fresh_enqueue_supersedes_exited_blocked_work_without_history_activation() {
     use peri_acp_types::identity::AttemptId;
     use peri_acp_types::session_resources::{ControlAction, ControlAttempt, ControlCommand};
@@ -130,6 +287,9 @@ async fn fresh_enqueue_supersedes_exited_blocked_work_without_history_activation
         .await
         .unwrap();
     assert_eq!(blocked.decision, WorkDecision::Accepted);
+    let queued_request = input(&first, "queued while the old execution was busy");
+    let queued_receipt = first.enqueue_durable(&queued_request).await.unwrap();
+    assert_eq!(queued_receipt.results[0].state, UserInputState::Queued);
     let snapshot = load(&fixture).await;
     fixture
         .resources()
@@ -150,6 +310,13 @@ async fn fresh_enqueue_supersedes_exited_blocked_work_without_history_activation
     assert!(before.blocked);
     assert!(before.control.attempt.is_none());
     assert!(!restored.publish_next_durable().await.unwrap());
+    assert!(inbox.queue().is_empty());
+    let replay = restored.enqueue_durable(&queued_request).await.unwrap();
+    assert_eq!(replay.work_receipts, queued_receipt.work_receipts);
+    assert_eq!(replay.results[0].state, UserInputState::Queued);
+    let after_replay = load(&fixture).await;
+    assert_eq!(after_replay.state, before.state);
+    assert_eq!(after_replay.control, before.control);
     assert!(inbox.queue().is_empty());
     let request = input(&restored, "continue using history, not the old execution");
     let receipt = restored.enqueue_durable(&request).await.unwrap();

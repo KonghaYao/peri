@@ -5,6 +5,8 @@
 
 ## 架构速览
 
+执行收尾入口 `src/host/execution_finish.rs` 以稳定 `FinishAdmission` 命令原子提交精确 attempt 退出与 admission settlement，不先单独清空 attempt。`execution.rs::resolve` 只依据原收尾 journal 恢复主会话收尾；确定 NotApplied 使用有界的新重试身份，Unknown 保持阻挡，不从 attempt=None 推断执行结束。回归入口 `src/host/execution_finish_test.rs`。
+
 Emscripten 的 ACP 部署入口在 `src/host/assemble.rs::assemble_wasm_server_config`：
 注入 provider、配置 source、session resources 与 shutdown，复用 `AcpServerConfig`
 和 `host/requests.rs` 的单一方法分发；`transport/wire_bridge.rs` 将宿主字节流接入
