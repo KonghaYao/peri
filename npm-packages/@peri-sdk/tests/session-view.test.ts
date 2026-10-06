@@ -29,7 +29,7 @@ describe("transport independent session view", () => {
         expect(view.entries[1]?.blocks.map((block) => block.type)).toEqual(["text", "tool_call"]);
         expect(view.entries[1]?.blocks[1]).toMatchObject({ toolCallId: "tool-1", tool: { name: "Read", status: "completed", arguments: { path: "README.md" }, result: { contentText: "File" } } });
         expect(view.plansByTurn[view.activeTurnId!]?.[0]).toMatchObject({ activeForm: "Inspecting" });
-        expect(view.tasks[0]).toMatchObject({ taskId: "task-1", title: "Checking", status: "running" });
+        expect(view.tasks[0]).toMatchObject({ taskId: "task-1", title: "Checking", status: "unobserved:running" });
     });
 
     test("store batches two document notifications, replaces docs, and detaches old docs", async () => {

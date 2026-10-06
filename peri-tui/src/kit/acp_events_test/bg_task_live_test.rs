@@ -5,6 +5,227 @@ use crate::kit::stream_data::{TuiTextChunk, TuiToolEnded, TuiToolStarted};
 use crate::kit::tui_render_unit::TuiRenderUnit;
 use serial_test::serial;
 
+struct RestoreSnapshotAtoms {
+    tasks: Vec<crate::kit::acp_types::BgTaskEntry>,
+    display: Vec<crate::kit::atoms::BgDisplayEntry>,
+    live: std::collections::HashMap<String, crate::kit::atoms::BgLiveDetail>,
+    identity: std::collections::HashMap<String, crate::kit::atoms::BgTaskIdentity>,
+    agent_ids: std::collections::HashSet<String>,
+    revision: Option<u64>,
+}
+
+impl RestoreSnapshotAtoms {
+    fn empty() -> Self {
+        crate::kit::atoms::init_atoms();
+        let saved = Self {
+            tasks: crate::kit::atoms::BG_TASKS.state().read().clone(),
+            display: BG_DISPLAY.state().read().clone(),
+            live: BG_LIVE_DETAIL.state().read().clone(),
+            identity: crate::kit::atoms::BG_TASK_IDENTITY.state().read().clone(),
+            agent_ids: crate::kit::atoms::BG_AGENT_IDS.state().read().clone(),
+            revision: *BG_TASK_REVISION.state().read(),
+        };
+        crate::kit::atoms::BG_TASKS.state().write().clear();
+        BG_DISPLAY.state().write().clear();
+        BG_LIVE_DETAIL.state().write().clear();
+        crate::kit::atoms::BG_TASK_IDENTITY.state().write().clear();
+        crate::kit::atoms::BG_AGENT_IDS.state().write().clear();
+        BG_TASK_REVISION.set(None);
+        saved
+    }
+}
+
+impl Drop for RestoreSnapshotAtoms {
+    fn drop(&mut self) {
+        crate::kit::atoms::BG_TASKS.set(self.tasks.clone());
+        BG_DISPLAY.set(self.display.clone());
+        BG_LIVE_DETAIL.set(self.live.clone());
+        crate::kit::atoms::BG_TASK_IDENTITY.set(self.identity.clone());
+        crate::kit::atoms::BG_AGENT_IDS.set(self.agent_ids.clone());
+        BG_TASK_REVISION.set(self.revision);
+    }
+}
+
+#[test]
+#[serial]
+fn background_started_does_not_restore_parent_loading() {
+    let _restore = RestoreSnapshotAtoms::empty();
+    let mut state = make_fold_test_state();
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::SubagentStarted {
+            agent_id: "background-observed".into(),
+            agent_name: "worker".into(),
+            is_background: true,
+            parent_tool_call_id: None,
+        },
+    );
+    assert_eq!(state.phase, SessionPhase::Idle);
+    assert!(!ACP_STATE.state().read().is_loading);
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::PromptSubmitted {
+            request_id: Some("live-parent".into()),
+        },
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::SubagentStarted {
+            agent_id: "second-background-observed".into(),
+            agent_name: "worker".into(),
+            is_background: true,
+            parent_tool_call_id: None,
+        },
+    );
+    assert_eq!(state.phase, SessionPhase::PromptRunning);
+    assert!(ACP_STATE.state().read().is_loading);
+}
+
+#[test]
+#[serial]
+fn live_lost_update_revokes_activity_without_snapshot_resurrection() {
+    let _restore = RestoreSnapshotAtoms::empty();
+    let mut state = make_fold_test_state();
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::BgTaskStarted(crate::kit::acp_types::BgTaskEntry {
+            task_id: "lost-worker".into(),
+            kind: "agent".into(),
+            summary: "current worker".into(),
+            started_at: String::new(),
+            pid: None,
+            revision: Some(1),
+            status: Some("running".into()),
+        }),
+    );
+    assert!(BG_DISPLAY.state().read()[0].is_active);
+    super::super::system::handle_bg_task_updated("lost-worker", "lost", Some(2));
+    assert!(BG_DISPLAY.state().read().is_empty());
+    assert_eq!(
+        BG_LIVE_DETAIL.state().read()["lost-worker"].status,
+        BgLiveStatus::Unobserved
+    );
+    super::super::system::handle_bg_task_updated("lost-worker", "running", Some(3));
+    assert!(BG_DISPLAY.state().read().is_empty());
+    assert_eq!(
+        BG_LIVE_DETAIL.state().read()["lost-worker"].status,
+        BgLiveStatus::Unobserved
+    );
+}
+
+#[test]
+#[serial]
+fn historical_nonterminal_snapshots_do_not_create_live_activity() {
+    let _restore = RestoreSnapshotAtoms::empty();
+    for (revision, status) in [
+        Some("running"),
+        Some("lost"),
+        Some("reconciling"),
+        Some("delivery_pending"),
+        Some("unknown"),
+        None,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let task = crate::kit::acp_types::BgTaskEntry {
+            task_id: "historical-agent".into(),
+            kind: "agent".into(),
+            summary: "saved task".into(),
+            started_at: "2026-10-01T00:00:00Z".into(),
+            pid: Some(123),
+            revision: None,
+            status: status.map(str::to_string),
+        };
+        assert!(super::super::system::apply_bg_task_snapshot(
+            &[task.clone()],
+            Some(revision as u64),
+        ));
+        assert!(BG_DISPLAY.state().read().is_empty());
+        assert_eq!(
+            BG_LIVE_DETAIL.state().read()[&task.task_id].status,
+            BgLiveStatus::Unobserved
+        );
+        assert_eq!(
+            crate::kit::atoms::BG_TASKS.state().read()[0].status,
+            task.status
+        );
+    }
+}
+
+#[test]
+#[serial]
+fn live_started_event_remains_active_but_snapshot_cannot_resurrect_it() {
+    let _restore = RestoreSnapshotAtoms::empty();
+    let mut state = make_fold_test_state();
+    let mut task = crate::kit::acp_types::BgTaskEntry {
+        task_id: "observed-shell".into(),
+        kind: "shell".into(),
+        summary: "sleep 1".into(),
+        started_at: String::new(),
+        pid: None,
+        revision: Some(1),
+        status: Some("running".into()),
+    };
+    assert!(super::super::system::apply_bg_task_snapshot(
+        &[task.clone()],
+        Some(1)
+    ));
+    assert!(BG_DISPLAY.state().read().is_empty());
+    task.revision = Some(2);
+    dispatch_and_notify(&mut state, &AcpEventData::BgTaskStarted(task.clone()));
+    let started_at = BG_DISPLAY.state().read()[0].created_at;
+    BG_LIVE_DETAIL
+        .state()
+        .write()
+        .get_mut(&task.task_id)
+        .unwrap()
+        .tool_cards
+        .push(crate::kit::acp_types::ToolCardAccumulator::with_input(
+            "unconfirmed-read".into(),
+            "Read".into(),
+            "file".into(),
+            serde_json::json!({"file_path": "file"}),
+            None,
+        ));
+    assert!(super::super::system::apply_bg_task_snapshot(
+        &[task.clone()],
+        Some(3)
+    ));
+    assert!(BG_DISPLAY.state().read()[0].is_active);
+    assert_eq!(BG_DISPLAY.state().read()[0].created_at, started_at);
+    assert_eq!(
+        BG_LIVE_DETAIL.state().read()[&task.task_id].status,
+        BgLiveStatus::Running
+    );
+    task.status = Some("lost".into());
+    assert!(super::super::system::apply_bg_task_snapshot(
+        &[task.clone()],
+        Some(4)
+    ));
+    assert!(BG_DISPLAY.state().read().is_empty());
+    assert_eq!(
+        BG_LIVE_DETAIL.state().read()[&task.task_id].status,
+        BgLiveStatus::Unobserved
+    );
+    let live = BG_LIVE_DETAIL.state().read().clone();
+    let TuiRenderUnit::TuiToolCard(card) = &live[&task.task_id].nested_units[0] else {
+        panic!("expected an unconfirmed tool record");
+    };
+    assert!(!card.is_running);
+    assert!(card.is_error);
+    assert_eq!(
+        card.output_summary,
+        crate::i18n::tr("shell-detail-status-unobserved")
+    );
+    task.status = Some("running".into());
+    assert!(super::super::system::apply_bg_task_snapshot(
+        &[task],
+        Some(5)
+    ));
+    assert!(BG_DISPLAY.state().read().is_empty());
+}
+
 #[test]
 #[serial]
 fn bg_tool_duplicate_start_upgrades_input_without_restarting() {

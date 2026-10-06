@@ -31,6 +31,8 @@ mod diff_grouping_test;
 mod fold_test;
 #[path = "acp_events_test/group_incremental_test.rs"]
 mod group_incremental_test;
+#[path = "acp_events_test/history_runtime_test.rs"]
+mod history_runtime_test;
 #[path = "acp_events_test/input_buffer_test.rs"]
 mod input_buffer_test;
 #[path = "acp_events_test/interaction_test.rs"]

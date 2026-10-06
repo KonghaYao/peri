@@ -49,13 +49,13 @@ describe("Peri ACP wire aggregation", () => {
         { task_id: "agent-2", kind: "agent", summary: "Review patch", started_at: "2026-10-04T00:00:01Z", status: "completed", duration_ms: 12, output_preview: "private output" },
       ],
     }));
-    expect(task(docs, "shell-1")?.get("status")).toBe("running");
+    expect(task(docs, "shell-1")?.get("status")).toBe("unobserved:running");
     expect(task(docs, "shell-1")?.get("title")).toBe("Build workspace");
     expect(task(docs, "agent-2")?.get("status")).toBe("completed");
     expect(JSON.stringify(docs.session.getMap("root").toJSON())).not.toContain("private output");
 
     docs.accept(unstable("bg-task-updated", { task_id: "shell-1", status: "waiting", revision: 11 }));
-    expect(task(docs, "shell-1")?.get("status")).toBe("waiting");
+    expect(task(docs, "shell-1")?.get("status")).toBe("unobserved:waiting");
     // The server sends a full snapshot after a skipped revision or lagged receiver.
     docs.accept(unstable("bg-task-snapshot", {
       revision: 13,

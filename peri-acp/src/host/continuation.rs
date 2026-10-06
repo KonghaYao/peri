@@ -9,7 +9,7 @@ use crate::session::executor::ContinuationRequest;
 use crate::transport::types::AcpError;
 use peri_acp_types::cron::{CronContinuationRequest, CronTrigger};
 use peri_acp_types::session::{MessageKind, MessageQueue, MessageSource, QueuedMessage};
-use peri_acp_types::session_resources::work::WorkQuery;
+use peri_acp_types::session_resources::work::{WorkQuery, WorkSnapshot};
 use peri_acp_types::session_resources::ControlState;
 use peri_acp_types::system_reminder::{
     ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
@@ -129,16 +129,18 @@ async fn publish_and_notify(
         session_id,
         lifecycle,
         inbox,
+        None,
     )
     .await
 }
 
-async fn publish_inbox_work(
+pub(super) async fn publish_inbox_work(
     resources: Arc<dyn peri_acp_types::session_resources::SessionResources>,
     transport: &Arc<dyn crate::transport::AcpTransport>,
     session_id: &str,
     lifecycle: u64,
     inbox: &MessageQueue,
+    observer_floor: Option<u64>,
 ) -> anyhow::Result<()> {
     peri_agent::agent::stages::publish_session_inbox(
         Arc::clone(&resources),
@@ -156,7 +158,7 @@ async fn publish_inbox_work(
     if snapshot.control.lifecycle != lifecycle {
         return Ok(());
     }
-    if snapshot.has_pending_current_work() {
+    if inbox_work_available(&snapshot, observer_floor) {
         transport.send_notification("session/work/available", serde_json::json!({
             "sessionId": session_id, "revision": snapshot.state.revision,
             "lifecycle": lifecycle, "controlGeneration": snapshot.control.control_generation,
@@ -166,11 +168,29 @@ async fn publish_inbox_work(
     Ok(())
 }
 
+fn inbox_work_available(snapshot: &WorkSnapshot, observer_floor: Option<u64>) -> bool {
+    let Some(floor) = observer_floor else {
+        return snapshot.has_pending_current_work();
+    };
+    snapshot
+        .state
+        .claimable_deliveries(snapshot.control.lifecycle)
+        .iter()
+        .any(|delivery_id| {
+            let delivery = &snapshot.state.deliveries[delivery_id];
+            delivery.admission_sequence >= floor
+                && delivery.publication.policy.requirement
+                    == peri_acp_types::session::MessageRequirement::Required
+        })
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(super) fn spawn_inbox_work_notifications(
     cfg: &AcpServerConfig,
     transport: &Arc<dyn crate::transport::AcpTransport>,
     session_id: String,
     lifecycle: u64,
+    observer_floor: u64,
     inbox: MessageQueue,
     cancellation: CancellationToken,
 ) -> Result<(), ()> {
@@ -186,6 +206,7 @@ pub(super) fn spawn_inbox_work_notifications(
                 for attempt in 0..3 {
                     let publication = publish_inbox_work(
                         resources.clone(), &transport, &session_id, lifecycle, &inbox,
+                        Some(observer_floor),
                     );
                     let result = tokio::select! {
                         biased;

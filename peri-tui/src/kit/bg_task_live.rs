@@ -46,20 +46,31 @@ fn sync_tool_units(detail: &mut BgLiveDetail) {
             continue;
         };
         seen.insert(acc.tool_id.clone());
-        *unit = TuiRenderUnit::TuiToolCard(build_tool_card(
-            acc,
-            detail.status == BgLiveStatus::Running,
-        ));
+        *unit = TuiRenderUnit::TuiToolCard(detail_tool_card(detail, acc));
     }
     for acc in &detail.tool_cards {
         if seen.insert(acc.tool_id.clone()) {
-            units.push_back(TuiRenderUnit::TuiToolCard(build_tool_card(
-                acc,
-                detail.status == BgLiveStatus::Running,
-            )));
+            units.push_back(TuiRenderUnit::TuiToolCard(detail_tool_card(detail, acc)));
         }
     }
     detail.nested_units = units;
+}
+
+fn detail_tool_card(
+    detail: &BgLiveDetail,
+    tool: &ToolCardAccumulator,
+) -> crate::kit::tui_render_unit::TuiToolCard {
+    let mut card = build_tool_card(tool, detail.status == BgLiveStatus::Running);
+    if detail.status == BgLiveStatus::Unobserved && tool.output_summary.is_none() {
+        card.is_error = true;
+        card.output_summary = crate::i18n::tr("shell-detail-status-unobserved");
+        card.fold = crate::kit::tui_render_unit::fold_for_status(
+            crate::kit::tui_render_unit::FoldTarget::Tool,
+            EntryStatus::Error,
+        );
+        card.recompute_hash();
+    }
+    card
 }
 
 fn finalize_nested_reasoning(detail: &mut BgLiveDetail) {
@@ -290,10 +301,13 @@ pub fn mark_task_cancelled(task_id: &str, reason: &str) {
     });
 }
 
-pub fn reconcile_live_snapshot(active_task_ids: &[String]) {
-    let live = BG_LIVE_DETAIL.state();
-    let mut map = live.write();
-    for task_id in active_task_ids {
-        map.entry(task_id.clone()).or_default().status = BgLiveStatus::Running;
-    }
+pub fn seed_unobserved_snapshot(task_id: &str, kind: &str, summary: &str, pid: Option<u32>) {
+    with_live_detail(task_id, |detail| {
+        detail.kind = kind.to_string();
+        detail.summary = summary.to_string();
+        detail.pid = pid;
+        detail.status = BgLiveStatus::Unobserved;
+        finalize_nested_reasoning(detail);
+        sync_tool_units(detail);
+    });
 }

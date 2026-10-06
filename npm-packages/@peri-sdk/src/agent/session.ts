@@ -209,9 +209,6 @@ export class Session {
             this.generation = snapshot.generation;
             this.docs.setTaskSnapshotRequester(() => this.transport!.request("session/bg-tasks", { sessionId: id }));
             this.state = "active";
-            if (requestedSessionId !== null) void this.ensureProcessing("recovery").catch((error) => {
-                console.error("SDK recovery admission failed", error);
-            });
             return this;
         } catch (error) {
             this.state = "cleanup-pending";

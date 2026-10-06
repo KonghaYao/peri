@@ -49,6 +49,31 @@ fn delivered() -> AcpEventData {
 
 #[test]
 #[serial]
+fn input_delivery_without_a_current_run_does_not_start_loading() {
+    let (mut state, _restore) = make_steer_bridge();
+    dispatch_and_notify(&mut state, &delivered());
+    assert_eq!(state.committed.len(), 1);
+    assert_eq!(state.phase, SessionPhase::Idle);
+    assert!(!crate::kit::atoms::ACP_STATE.state().read().is_loading);
+}
+
+#[test]
+#[serial]
+fn input_delivery_preserves_loading_from_a_current_run_start() {
+    let (mut state, _restore) = make_steer_bridge();
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::PromptSubmitted {
+            request_id: Some("current-run".into()),
+        },
+    );
+    dispatch_and_notify(&mut state, &delivered());
+    assert_eq!(state.phase, SessionPhase::PromptRunning);
+    assert!(crate::kit::atoms::ACP_STATE.state().read().is_loading);
+}
+
+#[test]
+#[serial]
 fn test_steer_delivered_reuses_chat_bubble_between_assistant_turns() {
     let (mut state, _restore) = make_steer_bridge();
     dispatch_and_notify(

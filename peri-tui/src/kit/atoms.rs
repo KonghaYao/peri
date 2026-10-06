@@ -673,6 +673,7 @@ pub struct BgTaskIdentity {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BgLiveStatus {
+    Unobserved,
     Running,
     Succeeded,
     Failed,
@@ -704,7 +705,7 @@ pub struct BgLiveDetail {
 impl Default for BgLiveDetail {
     fn default() -> Self {
         Self {
-            status: BgLiveStatus::Running,
+            status: BgLiveStatus::Unobserved,
             kind: String::new(),
             summary: String::new(),
             agent_id: None,

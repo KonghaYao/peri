@@ -1216,3 +1216,5 @@ setup-connectivity-status = 端点返回 HTTP { $status }；尚未验证 API Key
 setup-migration-failed = 未能在 ~/.claude/settings.json 找到有效的 Provider。请选择自定义 API 手动填写。
 setup-provider-incomplete = 请至少选中一个 Provider，并填写完整的 ID、API Key 和模型。
 setup-field-id-readonly = ID（只读）
+msg-history-tool-result-missing = 历史记录不完整：未记录工具结果；未恢复执行。
+shell-detail-status-unobserved = 状态：未观察到当前执行

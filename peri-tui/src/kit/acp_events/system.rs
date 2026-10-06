@@ -15,8 +15,8 @@ use crate::kit::atoms::{
 };
 use crate::kit::bg_task_identity::upsert_identity_from_started;
 use crate::kit::bg_task_live::{
-    mark_task_cancelled, mark_task_completed, reconcile_live_snapshot, seed_live_from_started,
-    seed_live_from_terminal_snapshot,
+    mark_task_cancelled, mark_task_completed, seed_live_from_started,
+    seed_live_from_terminal_snapshot, seed_unobserved_snapshot,
 };
 use crate::kit::tui_render_unit::{
     DisplayTrusted, InteractionKind, TuiAskUserBlock, TuiNoteLevel, TuiRenderUnit,
@@ -647,28 +647,34 @@ pub(crate) fn apply_bg_task_snapshot(tasks: &[BgTaskEntry], revision: Option<u64
     *BG_TASK_REVISION.state().write() = revision;
     let tasks_vec: Vec<BgTaskEntry> = tasks.to_vec();
     BG_TASKS.state().write().clone_from(&tasks_vec);
+    let previous_display = BG_DISPLAY.state().read().clone();
+    let observed_live = crate::kit::atoms::BG_LIVE_DETAIL.state().read().clone();
     // 从快照全量构造 BG_DISPLAY 条目
     let entries: Vec<crate::kit::atoms::BgDisplayEntry> = tasks
         .iter()
-        .map(|t| {
+        .filter_map(|t| {
             let terminal = bg_task_terminal(t.status.as_deref());
-            crate::kit::atoms::BgDisplayEntry {
+            let previous = previous_display.iter().find(|row| row.id == t.task_id);
+            let active = matches!(t.status.as_deref(), None | Some("running"))
+                && previous.is_some_and(|row| row.is_active)
+                && observed_live.get(&t.task_id).is_some_and(|detail| {
+                    detail.status == crate::kit::atoms::BgLiveStatus::Running
+                });
+            if !terminal && !active {
+                return None;
+            }
+            Some(crate::kit::atoms::BgDisplayEntry {
                 id: t.task_id.clone(),
-                linked_agent_id: BG_DISPLAY
-                    .state()
-                    .read()
-                    .iter()
-                    .find(|e| e.id == t.task_id)
-                    .and_then(|e| e.linked_agent_id.clone()),
+                linked_agent_id: previous.and_then(|row| row.linked_agent_id.clone()),
                 agent_type: t.kind.clone(),
                 desc: bg_task_description(&t.summary, t.status.as_deref()),
-                is_active: !terminal,
+                is_active: active,
                 is_error: matches!(t.status.as_deref(), Some("failed" | "cancelled")),
-                current_tool: None,
-                tool_count: 0,
-                created_at: peri_time::monotonic_now(),
+                current_tool: previous.and_then(|row| row.current_tool.clone()),
+                tool_count: previous.map_or(0, |row| row.tool_count),
+                created_at: previous.map_or_else(peri_time::monotonic_now, |row| row.created_at),
                 completed_at: terminal.then(peri_time::monotonic_now),
-            }
+            })
         })
         .collect();
     BG_DISPLAY.state().write().clone_from(&entries);
@@ -680,17 +686,13 @@ pub(crate) fn apply_bg_task_snapshot(tasks: &[BgTaskEntry], revision: Option<u64
             .filter(|status| bg_task_terminal(Some(status)))
         {
             seed_live_from_terminal_snapshot(&t.task_id, &t.kind, &t.summary, t.pid, status);
-        } else {
-            seed_live_from_started(&t.task_id, &t.kind, &t.summary, t.pid);
+        } else if !entries
+            .iter()
+            .any(|row| row.id == t.task_id && row.is_active)
+        {
+            seed_unobserved_snapshot(&t.task_id, &t.kind, &t.summary, t.pid);
         }
     }
-    reconcile_live_snapshot(
-        &tasks
-            .iter()
-            .filter(|task| !bg_task_terminal(task.status.as_deref()))
-            .map(|task| task.task_id.clone())
-            .collect::<Vec<_>>(),
-    );
     true
 }
 
@@ -773,11 +775,11 @@ pub(super) fn handle_bg_task_started(_state: &mut BridgeState, entry: &BgTaskEnt
     }
     // A snapshot can arrive before a buffered started event. Keep one row per
     // task and do not resurrect a task that has already reached a terminal state.
-    if BG_DISPLAY
+    if BG_TASKS
         .state()
         .read()
         .iter()
-        .any(|row| row.id == entry.task_id && !row.is_active)
+        .any(|task| task.task_id == entry.task_id && bg_task_terminal(task.status.as_deref()))
     {
         return;
     }
@@ -809,6 +811,8 @@ pub(super) fn handle_bg_task_started(_state: &mut BridgeState, entry: &BgTaskEnt
     if let Some(existing) = display.iter_mut().find(|e| e.id == entry.task_id) {
         existing.agent_type = entry.kind.clone();
         existing.desc = bg_task_description(&entry.summary, entry.status.as_deref());
+        existing.is_active = true;
+        existing.completed_at = None;
     } else {
         display.push(display_entry);
     }
@@ -902,6 +906,9 @@ pub(super) fn handle_bg_task_updated(task_id: &str, status: &str, revision: Opti
             entry.desc = description;
         }
     }
+    let snapshot = tasks.clone();
+    drop(tasks);
+    apply_bg_task_snapshot(&snapshot, revision);
 }
 
 // ── §4.9 Plugin events ──

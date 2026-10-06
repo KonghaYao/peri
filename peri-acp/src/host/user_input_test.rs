@@ -129,6 +129,121 @@ async fn durable_scan_notifies_required_work_without_a_queue_wake_hint() {
 }
 
 #[tokio::test]
+async fn observer_scan_suppresses_history_but_not_new_or_explicit_publication() {
+    use peri_acp_types::session_resources::work::*;
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (cfg, _, sid) = make_user_input_session(&tmp).await;
+    let captured = Arc::new(MockTransport::default());
+    let transport: Arc<dyn crate::transport::AcpTransport> = captured.clone();
+    let inbox = cfg
+        .session_manager
+        .get_session(&sid)
+        .unwrap()
+        .v2_message_queue
+        .clone();
+    let query = WorkQuery {
+        session_id: sid.clone(),
+        limit: 1,
+    };
+    let initial = cfg
+        .session_resources
+        .load_session_work(&query)
+        .await
+        .unwrap();
+    let lifecycle = initial.control.lifecycle;
+    let mut floor = initial.state.next_admission_sequence;
+    for delivery_id in ["historical", "fresh"] {
+        let content = WorkPayload::from_payload(&peri_acp_types::store::PersistedPayload::Message(
+            peri_acp_types::messages::BaseMessage::human(delivery_id),
+        ))
+        .unwrap();
+        let receipt = cfg
+            .session_resources
+            .apply_work_mutation(&WorkCommand {
+                session_id: sid.clone(),
+                recipient_lifecycle: lifecycle,
+                mutation_id: delivery_id.into(),
+                action: WorkAction::PublishDelivery {
+                    delivery: PublishDelivery {
+                        delivery_id: delivery_id.into(),
+                        event: WorkEvent {
+                            producer_namespace: "observer-history-test".into(),
+                            event_id: delivery_id.into(),
+                            event_kind: "input".into(),
+                            causation_id: None,
+                            content,
+                        },
+                        purpose: DeliveryPurpose::UserInput,
+                        policy: peri_acp_types::session::MessagePolicy::ensure_processing(),
+                    },
+                },
+            })
+            .await
+            .unwrap();
+        assert_eq!(receipt.decision, WorkDecision::Accepted);
+        if delivery_id == "historical" {
+            floor = cfg
+                .session_resources
+                .load_session_work(&query)
+                .await
+                .unwrap()
+                .state
+                .next_admission_sequence;
+        }
+        for _ in 0..2 {
+            crate::host::continuation::publish_inbox_work(
+                cfg.session_resources.clone(),
+                &transport,
+                &sid,
+                lifecycle,
+                &inbox,
+                Some(floor),
+            )
+            .await
+            .unwrap();
+        }
+        let availability_count = captured
+            .notifications()
+            .iter()
+            .filter(|(method, _)| method == "session/work/available")
+            .count();
+        assert_eq!(
+            availability_count,
+            if delivery_id == "historical" { 0 } else { 2 }
+        );
+    }
+    crate::host::continuation::publish_inbox_work(
+        cfg.session_resources.clone(),
+        &transport,
+        &sid,
+        lifecycle,
+        &inbox,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        captured
+            .notifications()
+            .iter()
+            .filter(|(method, _)| method == "session/work/available")
+            .count(),
+        3
+    );
+    let snapshot = cfg
+        .session_resources
+        .load_session_work(&query)
+        .await
+        .unwrap();
+    assert!(snapshot.control.attempt.is_none());
+    assert!(snapshot.state.admissions.is_empty());
+    assert_eq!(
+        snapshot.state.obligations["historical"].status,
+        ObligationStatus::Pending
+    );
+}
+
+#[tokio::test]
 async fn test_user_input_methods_require_capability() {
     let tmp = tempfile::TempDir::new().unwrap();
     let (cfg, mut sessions, sid) = make_user_input_session(&tmp).await;

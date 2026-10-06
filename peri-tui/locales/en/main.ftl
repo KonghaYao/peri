@@ -1218,3 +1218,5 @@ setup-connectivity-status = Endpoint returned HTTP { $status }; API key and mode
 setup-migration-failed = Could not find a valid provider in ~/.claude/settings.json. Choose Custom API to enter one.
 setup-provider-incomplete = Select at least one provider and complete its ID, API key, and model fields.
 setup-field-id-readonly = ID (read-only)
+msg-history-tool-result-missing = Incomplete history: no tool result recorded. Execution was not resumed.
+shell-detail-status-unobserved = Status: no current execution observed

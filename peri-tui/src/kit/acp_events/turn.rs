@@ -352,7 +352,6 @@ pub(super) fn handle_user_input_delivered(
     }
     state.flush_current_turn();
     state.last_submitted_text = None;
-    state.phase = SessionPhase::PromptRunning;
     state.variant = 1;
     state
         .committed

@@ -3,7 +3,9 @@ import { DocModel } from "./doc-model";
 import { finite, object, string, type RecordValue } from "./protocol";
 
 const TERMINAL = new Set(["completed", "failed", "cancelled"]);
+const LIVE_BACKGROUND_STATUSES = new Set(["running", "waiting"]);
 const MAX_TASKS = 200;
+type UnobservedTaskStatus = `unobserved:${string}`;
 function safeSummary(raw: unknown): string | null {
     if (typeof raw !== "string") return null;
     const text = raw.trim()
@@ -24,6 +26,7 @@ export class TaskProjection {
     private backgroundRevision: number | null = null;
     private awaitingSnapshot = false;
     private requestSnapshot: (() => void) | null = null;
+    private readonly liveBackgroundTasks = new Set<string>();
 
     constructor(private readonly docs: DocModel) {}
 
@@ -35,6 +38,11 @@ export class TaskProjection {
     private needSnapshot(): void {
         this.awaitingSnapshot = true;
         this.requestSnapshot?.();
+    }
+
+    private backgroundStatus(id: string, status: string): string | UnobservedTaskStatus {
+        return TERMINAL.has(status) || this.liveBackgroundTasks.has(id)
+            ? status : `unobserved:${status}`;
     }
 
     private upsert(id: string, kind: string, title: string, status: string, fields: RecordValue = {}): void {
@@ -60,6 +68,7 @@ export class TaskProjection {
             const terminal = ids.findIndex((taskId) => TERMINAL.has(String(tasks.get(taskId)?.get("status"))));
             const index = terminal < 0 ? 0 : terminal;
             tasks.delete(ids[index]!);
+            this.liveBackgroundTasks.delete(ids[index]!);
             order.delete(index, 1);
         }
     }
@@ -106,7 +115,9 @@ export class TaskProjection {
             return false;
         }
         const text = safeSummary(data.summary);
-        this.docs.session.transact(() => this.upsert(id, "background", text?.slice(0, 120) ?? string(data.kind) ?? "Background task", status, {
+        if (name === "bg-task-started") this.liveBackgroundTasks.add(id);
+        if (!LIVE_BACKGROUND_STATUSES.has(status)) this.liveBackgroundTasks.delete(id);
+        this.docs.session.transact(() => this.upsert(id, "background", text?.slice(0, 120) ?? string(data.kind) ?? "Background task", this.backgroundStatus(id, status), {
             isBackground: true,
             ...(string(data.kind) ? { taskSubtype: data.kind } : {}),
             ...(text ? { summary: text } : {}),
@@ -145,7 +156,10 @@ export class TaskProjection {
             const order = this.docs.sessionRoot().get("taskOrder") as Y.Array<string>;
             const incoming = new Set(rows.map((row) => string(row?.task_id)!));
             for (const [id, task] of tasks) {
-                if (task.get("kind") === "background" && !incoming.has(id)) tasks.delete(id);
+                if (task.get("kind") === "background" && !incoming.has(id)) {
+                    tasks.delete(id);
+                    this.liveBackgroundTasks.delete(id);
+                }
             }
             const kept = order.toArray().filter((id) => tasks.has(id));
             if (kept.length !== order.length) {
@@ -157,7 +171,11 @@ export class TaskProjection {
                 if (tasks.get(id)?.get("kind") === "subagent") continue;
                 const text = safeSummary(row?.summary);
                 const status = string(row?.status)!;
-                this.upsert(id, "background", text?.slice(0, 120) ?? string(row?.kind) ?? "Background task", status, {
+                const existingStatus = string(tasks.get(id)?.get("status"));
+                if (!LIVE_BACKGROUND_STATUSES.has(status)) this.liveBackgroundTasks.delete(id);
+                const projectedStatus = existingStatus && TERMINAL.has(existingStatus)
+                    ? existingStatus : this.backgroundStatus(id, status);
+                this.upsert(id, "background", text?.slice(0, 120) ?? string(row?.kind) ?? "Background task", projectedStatus, {
                     isBackground: true,
                     ...(string(row?.kind) ? { taskSubtype: row?.kind } : {}),
                     ...(text ? { summary: text } : {}),

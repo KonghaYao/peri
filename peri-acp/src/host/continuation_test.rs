@@ -124,3 +124,62 @@ fn cron_frozen_recipient_never_retargets_reopened_lifecycle() {
         "closing publication decisions belong to the common Store"
     );
 }
+
+#[test]
+fn observer_floor_requires_unprocessed_new_required_delivery() {
+    use peri_acp_types::session_resources::work::*;
+    use peri_acp_types::session_resources::ControlState;
+
+    let control = ControlState::default();
+    let query = WorkQuery {
+        session_id: "observer-floor".into(),
+        limit: 1,
+    };
+    let mut state = WorkState::default();
+    for delivery_id in ["old", "new"] {
+        let content = WorkPayload::from_payload(&peri_acp_types::store::PersistedPayload::Message(
+            peri_acp_types::messages::BaseMessage::human(delivery_id),
+        ))
+        .unwrap();
+        let command = WorkCommand {
+            session_id: query.session_id.clone(),
+            recipient_lifecycle: control.lifecycle,
+            mutation_id: delivery_id.into(),
+            action: WorkAction::PublishDelivery {
+                delivery: PublishDelivery {
+                    delivery_id: delivery_id.into(),
+                    event: WorkEvent {
+                        producer_namespace: "observer-test".into(),
+                        event_id: delivery_id.into(),
+                        event_kind: "input".into(),
+                        causation_id: None,
+                        content,
+                    },
+                    purpose: DeliveryPurpose::UserInput,
+                    policy: peri_acp_types::session::MessagePolicy::ensure_processing(),
+                },
+            },
+        };
+        let reduction = reduce_work(&command, &control, &state).unwrap();
+        assert_eq!(reduction.receipt.decision, WorkDecision::Accepted);
+        state = reduction.state;
+        if delivery_id == "old" {
+            let snapshot = WorkSnapshot::from_state(&query, control.clone(), state.clone());
+            assert!(!super::inbox_work_available(
+                &snapshot,
+                Some(state.next_admission_sequence)
+            ));
+            assert!(super::inbox_work_available(&snapshot, None));
+        }
+    }
+    let floor = state.deliveries["new"].admission_sequence;
+    let mut snapshot = WorkSnapshot::from_state(&query, control, state);
+    assert!(super::inbox_work_available(&snapshot, Some(floor)));
+    snapshot.state.obligations.get_mut("new").unwrap().status = ObligationStatus::Satisfied;
+    assert!(!super::inbox_work_available(&snapshot, Some(floor)));
+    assert!(super::inbox_work_available(&snapshot, None));
+    assert_eq!(
+        snapshot.state.obligations["old"].status,
+        ObligationStatus::Pending
+    );
+}

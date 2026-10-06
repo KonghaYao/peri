@@ -10,6 +10,8 @@
 
 消息行为统一收敛到 MQ（§4）：类型由可信生产者在发布时确定，loop 在 Receive 领取时按类型决定行为；生产者不得另设唤醒路径，唤醒信号只是加速通知。
 
+历史会话加载恢复 Transcript 和冻结上下文，不隐含恢复旧执行。load/replay 本身不是模型或工具执行请求，也不以旧 started、非终态快照或消息已投影推导当前 Running/loading。手动新输入和当前可靠消息的合法激活继续按统一准入推进；旧 work、未知副作用和交付责任仍须按各自身份对账，不清库、不伪造完成、不盲目重发工具。历史恢复与当前执行状态的分离验收见 [P0 active issue](../../spec/issues/2026-10-06-p0-remove-session-runtime-state-restoration.md)。
+
 [消息与 Transcript](message-transcript.md) 继续描述现行内容模型与投影实现；其中易失 MQ、Prompt/Defer/Info 是现状，不构成目标可靠性契约。[System Reminder](system-reminder.md) 继续负责内容分类和受众，不拥有执行调度权。[用户待发送队列](user-input-queue.md) 继续负责输入发布前的选择、取回和排序。
 
 权威设计与现状不一致意味着实施缺口，不允许把现有测试的旧期望反写成目标。本文不引入消息代理产品、独立服务数量或 Store 执行租约；物理实现由接口契约和部署验证决定。

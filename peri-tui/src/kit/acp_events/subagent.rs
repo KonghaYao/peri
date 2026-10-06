@@ -40,7 +40,9 @@ pub(super) fn handle_subagent_started(
         }
     }
     state.variant = 1;
-    state.phase = SessionPhase::PromptRunning;
+    if !is_background {
+        state.phase = SessionPhase::PromptRunning;
+    }
     state.publish_barrier();
     super::render::push_acp_state(state);
 }

@@ -218,6 +218,7 @@ pub(super) async fn ensure_mailbox(
             transport,
             session_id.to_owned(),
             work.control.lifecycle,
+            work.state.next_admission_sequence,
             session.v2_message_queue.clone(),
             cancellation.clone(),
         )

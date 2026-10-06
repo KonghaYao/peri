@@ -1,5 +1,5 @@
 import { closeCommand, controlResponse } from "./control-fixture";
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { Agent } from "../src/agent/agent";
 import { AgentClaimConflictError } from "../src/kv/agent-claim-conflict-error";
 import { MemoryKV } from "../src/kv/memory-kv";
@@ -23,6 +23,7 @@ class FakeTransport implements Transport {
   startupGate?: Promise<void>;
   closeGate?: Promise<void>;
   loadResponse: unknown = {};
+  loadEvents: JsonRpcNotification[] = [];
 
   async request<Response>(method: string, params?: unknown): Promise<Response> {
     this.calls.push({ method, params });
@@ -33,7 +34,14 @@ class FakeTransport implements Transport {
       return { generation: "generation-1" } as Response;
     }
     if (method === "session/new") return { sessionId: "existing" } as Response;
-    if (method === "session/load") return this.loadResponse as Response;
+    if (method === "session/load") {
+      for (const event of this.loadEvents) this.emit(event);
+      return this.loadResponse as Response;
+    }
+    if (method === "session/input/dispatch") return {
+      results: [{ inputId: "new-input", state: "queued" }],
+      workReceipts: [{ decision: { kind: "accepted" } }],
+    } as Response;
     return {} as Response;
   }
 
@@ -44,6 +52,10 @@ class FakeTransport implements Transport {
   async notify(): Promise<void> {}
   async *events(): AsyncIterable<JsonRpcNotification> {}
   setRequestHandler(): void {}
+
+  emit(event: JsonRpcNotification): void {
+    for (const listener of this.listeners) listener(event);
+  }
 
   subscribe(listener: (event: JsonRpcNotification) => void): () => void {
     this.listeners.add(listener);
@@ -247,4 +259,69 @@ test("invalid session id leaves the session retryable", async () => {
   await expect(agent.session.start("")).rejects.toThrow("nonempty");
   await agent.session.start(null);
   await agent.close(closeCommand);
+});
+
+test("loading history preserves the transcript without activating old execution", async () => {
+  const { agent, transport } = setup();
+  transport.loadEvents = [
+    { method: "session/update", params: { sessionId: "existing", update: {
+      sessionUpdate: "user_message_chunk", content: { type: "text", text: "old question" },
+      _meta: { periReplay: true, periMessageId: "old-user" },
+    } } },
+    { method: "session/update", params: { sessionId: "existing", update: {
+      sessionUpdate: "agent_message_chunk", content: { type: "text", text: "old answer" },
+      _meta: { periReplay: true, periMessageId: "old-assistant" },
+    } } },
+  ];
+  const activation = spyOn(agent.session, "ensureProcessing").mockResolvedValue({ status: "idle" });
+  try {
+    await agent.session.start("existing");
+    await Bun.sleep(0);
+    expect(activation).not.toHaveBeenCalled();
+    expect(JSON.stringify(agent.docs.chat.toJSON())).toContain("old question");
+    expect(JSON.stringify(agent.docs.chat.toJSON())).toContain("old answer");
+    const info = agent.docs.session.getMap("root").get("session") as { get(key: string): unknown };
+    expect(info.get("activeTurnStatus")).toBe("completed");
+    expect(transport.calls.map((call) => call.method)).toEqual([
+      "initialize", "session/load", "session/input/snapshot",
+    ]);
+  } finally {
+    activation.mockRestore();
+    await agent.close(closeCommand);
+  }
+});
+
+test("current matching work notification still activates a loaded session", async () => {
+  const { agent, transport } = setup();
+  const activation = spyOn(agent.session, "ensureProcessing").mockResolvedValue({ status: "idle" });
+  try {
+    await agent.session.start("existing");
+    expect(activation).not.toHaveBeenCalled();
+    transport.emit({ method: "session/work/available", params: { sessionId: "other" } });
+    expect(activation).not.toHaveBeenCalled();
+    transport.emit({ method: "session/work/available", params: { sessionId: "existing" } });
+    expect(activation).toHaveBeenCalledTimes(1);
+    expect(activation).toHaveBeenCalledWith("notification");
+  } finally {
+    activation.mockRestore();
+    await agent.close(closeCommand);
+  }
+});
+
+test("explicit new input still activates a loaded session after accepted publication", async () => {
+  const { agent, transport } = setup();
+  const activation = spyOn(agent.session, "ensureProcessing").mockResolvedValue({ status: "idle" });
+  try {
+    await agent.session.start("existing");
+    expect(activation).not.toHaveBeenCalled();
+    await agent.session.dispatch("new-input");
+    expect(activation).toHaveBeenCalledTimes(1);
+    expect(activation).toHaveBeenCalledWith("send");
+    expect(transport.calls.find((call) => call.method === "session/input/dispatch")?.params).toEqual({
+      sessionId: "existing", generation: "generation-1", commandId: "new-input:dispatch", inputIds: ["new-input"],
+    });
+  } finally {
+    activation.mockRestore();
+    await agent.close(closeCommand);
+  }
 });
