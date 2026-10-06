@@ -37,6 +37,8 @@ run-e2e.mjs → vitest worker → helpers/peri.ts → dev.sh → Peri TUI (tmux)
 | 任务 | 位置 |
 | --- | --- |
 | 启动、输入、稳定等待、抓屏 | `helpers/peri.ts` |
+| 当前 Peri 二进制构建 | `helpers/build.ts`（统一 patched Cargo + `--locked`；不得用裸 Cargo 改写 lockfile） |
+| stdio 执行准入桥接 | `helpers/stdio-execution-fixture.ts`（真实 Peri + SDK 协议，隔离 registry；不是 SDK 独立测试或构建） |
 | Workflow 等待（磁盘 + 可选屏幕） | `helpers/workflow.ts` |
 | LLM Judge | `helpers/judge.ts` |
 | 录制 | `helpers/recorder.ts` |

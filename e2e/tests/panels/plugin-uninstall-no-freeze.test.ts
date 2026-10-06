@@ -43,7 +43,11 @@ describe("panels: plugin uninstall no-freeze", () => {
       fs.mkdirSync(path.join(testHome, ".peri"), { recursive: true });
       fs.writeFileSync(
         path.join(testHome, ".peri", "settings.json"),
-        JSON.stringify({ config: { language: "zh-CN" } }),
+        JSON.stringify({ config: {
+          language: "zh-CN", active_alias: "sonnet",
+          providers: [{ id: "offline-panel", type: "anthropic", apiKey: "fixture-only-key",
+            baseUrl: "http://127.0.0.1:9", models: { sonnet: "fixture-model" } }],
+        } }),
       );
       const pluginsDir = path.join(testHome, ".claude", "plugins");
       const cacheDir = path.join(pluginsDir, "cache", "fixture-marketplace", "fixture-plugin", "1.0.0");
@@ -87,11 +91,7 @@ describe("panels: plugin uninstall no-freeze", () => {
       await tester.sendKey("Enter");
       await tester.sleep(800);
       const detailText = (await tester.captureScreen()).text;
-      // 若无插件可进详情，跳过后续断言（环境无关性）
-      if (!detailText.includes("操作")) {
-        console.log("SKIP: 无已安装插件，无法进入详情");
-        return;
-      }
+      expect(detailText, "安装夹具必须进入插件详情，不能跳过卸载确认断言").toContain("操作");
 
       // ── down 选中 Uninstall action ──
       await tester.sendKey("down");

@@ -1,3 +1,4 @@
+import { buildPeriForE2e } from "../../helpers/build.js";
 /**
  * W6 A 线：TUI 可观察行为（真实二进制 `target/debug/peri` + tmux）。
  *
@@ -16,10 +17,7 @@
  * `e2e/helpers/workspace-mcp-fixture.ts`；本文件只覆盖 TUI 通道。
  */
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import { TmuxTester } from "tui-tester";
-import { PROJECT_ROOT } from "../../helpers/peri.js";
 import {
   FX_AGENT,
   FX_SERVER,
@@ -78,11 +76,7 @@ describe("workspace MCP resources：TUI 可观察行为", () => {
   let testers: TmuxTester[] = [];
 
   beforeAll(async () => {
-    await promisify(execFile)("cargo", ["build", "-p", "peri-tui", "--bin", "peri"], {
-      cwd: PROJECT_ROOT,
-      timeout: 600_000,
-      maxBuffer: 8 * 1024 * 1024,
-    });
+    await buildPeriForE2e();
   }, 610_000);
 
   afterEach(async () => {

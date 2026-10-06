@@ -7,6 +7,7 @@
 import path from "node:path";
 import fs from "node:fs";
 import os from "node:os";
+import dotenv from "dotenv";
 import { fileURLToPath } from "node:url";
 import { TmuxTester, createTester } from "tui-tester";
 import type { ScreenCapture, TerminalSize } from "tui-tester";
@@ -50,10 +51,25 @@ function ensureHomeShellCompat(home: string): void {
 }
 
 function allocateIsoHome(): string {
+  const rootEnvPath = path.join(PROJECT_ROOT, ".env");
+  const rootEnvironment = fs.existsSync(rootEnvPath)
+    ? dotenv.parse(fs.readFileSync(rootEnvPath)) : {};
+  const apiKey = process.env.OPENAI_API_KEY || rootEnvironment.OPENAI_API_KEY;
+  const baseUrl = process.env.OPENAI_BASE_URL || rootEnvironment.OPENAI_BASE_URL;
+  const model = process.env.OPENAI_MODEL || rootEnvironment.OPENAI_MODEL;
+  if (!apiKey || !baseUrl || !model) {
+    throw new Error("E2E model configuration requires OPENAI_API_KEY, OPENAI_BASE_URL and OPENAI_MODEL");
+  }
   const isoHome = fs.mkdtempSync(path.join(os.tmpdir(), "peri-e2e-home-"));
   const periDir = path.join(isoHome, ".peri");
   fs.mkdirSync(periDir, { recursive: true });
-  fs.writeFileSync(path.join(periDir, "settings.json"), "{}");
+  fs.writeFileSync(path.join(periDir, "settings.json"), JSON.stringify({
+    config: {
+      language: "zh-CN",
+      active_alias: "sonnet",
+      providers: [{ id: "e2e", type: "openai", apiKey, baseUrl, models: { sonnet: model } }],
+    },
+  }), { mode: 0o600 });
   ensureHomeShellCompat(isoHome);
   process.on("exit", () => {
     try {
@@ -299,7 +315,7 @@ async function waitForPeriReady(
  *
  * dev.sh 会 source .env 并运行 cargo run -p peri-tui
  *
- * HOME 隔离：默认注入临时 HOME（含空 .peri/settings.json），防止 e2e 会话
+ * HOME 隔离：默认注入临时 HOME（含显式 E2E provider 配置），防止 e2e 会话
  * 读取/污染用户真实 ~/.peri/settings.json（TUI 启动即可能触发配置保存，如
  * daily color 落盘；此前仅 model-switch 测试隔离 HOME，其余 e2e 直接读
  * 真实配置——真实配置曾因此被透传写入高危 meta_harness 全关字段导致功能

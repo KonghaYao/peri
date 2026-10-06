@@ -1,3 +1,4 @@
+import { buildPeriForE2e } from "../../helpers/build.js";
 /**
  * 工具卡片场景: 每个 batch 的第一个工具调用 stuck Running
  *
@@ -14,8 +15,6 @@
  * 不依赖真实模型/凭据/外部网络。
  */
 import { describe, it, expect, afterEach, beforeAll } from "vitest";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import { rm } from "node:fs/promises";
 import { PROJECT_ROOT, sendPrompt, takePeriSnapshot } from "../../helpers/peri.js";
 import {
@@ -34,11 +33,7 @@ describe("tool-card: first tool not stuck running", () => {
 
   beforeAll(async () => {
     // 控制面脚本不构建 binary；本用例必须跑当前源码。
-    await promisify(execFile)("cargo", ["build", "-p", "peri-tui", "--bin", "peri"], {
-      cwd: PROJECT_ROOT,
-      timeout: 600_000,
-      maxBuffer: 8 * 1024 * 1024,
-    });
+    await buildPeriForE2e();
   }, 610_000);
 
   afterEach(async () => {

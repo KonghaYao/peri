@@ -494,14 +494,14 @@ pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             Style::new().fg(theme_def.read().semantic.status.warning),
         )]));
     } else {
-        lines.push(Line::from(vec![Span::styled(
-            i18n::tr(if panel_area.width < 80 {
-                "thread-browser-actions-compact"
-            } else {
-                "thread-browser-actions"
-            }),
-            muted_style,
-        )]));
+        use unicode_width::UnicodeWidthStr;
+        let actions = i18n::tr("thread-browser-actions");
+        let actions = if actions.width() > panel_area.width.saturating_sub(2) as usize {
+            i18n::tr("thread-browser-actions-compact")
+        } else {
+            actions
+        };
+        lines.push(Line::from(vec![Span::styled(actions, muted_style)]));
     }
 
     if let Some(id) = preview_id.read().as_ref() {

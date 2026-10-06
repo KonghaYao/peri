@@ -1,3 +1,4 @@
+import { buildPeriForE2e } from "../../helpers/build.js";
 /**
  * 无 Git 环境的普通目录会话：PATH 中不存在 `git` 时，仍能新建会话并发送输入。
  *
@@ -54,16 +55,17 @@ describe("无 Git 环境的工作区", () => {
     }
     const node = path.join(shim, "node");
     await symlink(process.execPath, node).catch(() => {});
+    const { stdout } = await execFileAsync("/bin/sh", ["-c", "command -v bun"]);
+    const bun = await realpath(stdout.trim());
+    expect(path.isAbsolute(bun)).toBe(true);
+    await rm(path.join(shim, "bun"), { force: true });
+    await symlink(bun, path.join(shim, "bun"));
     return shim;
   }
 
   beforeAll(async () => {
     // 控制面脚本不构建 binary；本用例必须跑当前源码。
-    await execFileAsync("cargo", ["build", "-p", "peri-tui", "--bin", "peri"], {
-      cwd: PROJECT_ROOT,
-      timeout: 600_000,
-      maxBuffer: 8 * 1024 * 1024,
-    });
+    await buildPeriForE2e();
   }, 610_000);
 
   beforeEach(async () => {
@@ -205,13 +207,15 @@ describe("无 Git 环境的工作区", () => {
     await prompt("NO_GIT_FIRST_INPUT", 1);
 
     // 普通目录模式：没有 Git 布局证据，不猜测父目录归属。
-    const workspaces = await query<{ discovery: string }>("SELECT discovery FROM workspaces");
+    const workspaces = await query<{ discovery: string }>("SELECT discovery FROM legacy_execution_registrations");
     expect(workspaces, "登记后应恰好有一个工作区").toHaveLength(1);
     const discovery = JSON.parse(workspaces[0].discovery) as {
       root: string; common_dir: string | null; private_dir: string | null;
     };
     expect(discovery.common_dir, "无 Git 时不得推断出仓库布局").toBeNull();
     expect(discovery.private_dir).toBeNull();
+    expect(discovery.root).toBe(await realpath(work));
+    expect(await query("SELECT path FROM workspaces")).toEqual([{ path: await realpath(work) }]);
     expect(await query("SELECT id FROM projects")).toHaveLength(1);
     expect(await query("SELECT thread_id FROM session_bindings")).toHaveLength(1);
 
@@ -247,11 +251,12 @@ describe("无 Git 环境的工作区", () => {
 
     const projects = await query<{ id: string }>("SELECT id FROM projects");
     const workspaces = await query<{ id: string; project_id: string }>(
-      "SELECT id, project_id FROM workspaces",
+      "SELECT id, project_id FROM legacy_execution_registrations",
     );
     expect(projects).toHaveLength(1);
     expect(workspaces).toHaveLength(1);
     expect(workspaces[0].project_id).toBe(projects[0].id);
+    expect(await query("SELECT path FROM workspaces")).toEqual([{ path: await realpath(work) }]);
     expect(await query("SELECT thread_id FROM session_bindings")).toHaveLength(2);
   }, 180_000);
 
@@ -269,12 +274,13 @@ describe("无 Git 环境的工作区", () => {
     await launch(nested);
     await prompt("NO_GIT_REPO_INPUT", 1);
 
-    const workspaces = await query<{ discovery: string }>("SELECT discovery FROM workspaces");
+    const workspaces = await query<{ discovery: string }>("SELECT discovery FROM legacy_execution_registrations");
     expect(workspaces, "登记后应恰好有一个工作区").toHaveLength(1);
     const discovery = JSON.parse(workspaces[0].discovery) as {
       root: string; common_dir: string | null; private_dir: string | null;
     };
     const expectedRoot = await realpath(nested);
+    expect(await query("SELECT path FROM workspaces")).toEqual([{ path: expectedRoot }]);
     expect(
       discovery.root === expectedRoot
         ? "cwd"

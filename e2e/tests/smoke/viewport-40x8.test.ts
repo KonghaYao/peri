@@ -1,3 +1,4 @@
+import { buildPeriForE2e } from "../../helpers/build.js";
 /**
  * 冒烟场景: 40×8 极小视口（§11 响应式降级，Slice 1）
  *
@@ -17,10 +18,8 @@
  * 不依赖真实模型/凭据/外部网络。
  */
 import { describe, it, expect, afterEach, beforeAll } from "vitest";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import { rm } from "node:fs/promises";
-import { PROJECT_ROOT, sendPrompt, takePeriSnapshot } from "../../helpers/peri.js";
+import { sendPrompt, takePeriSnapshot } from "../../helpers/peri.js";
 import {
   launchReplayTui,
   makeReplayHome,
@@ -37,11 +36,7 @@ describe("smoke: 40x8 minimal viewport", () => {
 
   beforeAll(async () => {
     // 控制面脚本不构建 binary；本用例必须跑当前源码。
-    await promisify(execFile)("cargo", ["build", "-p", "peri-tui", "--bin", "peri"], {
-      cwd: PROJECT_ROOT,
-      timeout: 600_000,
-      maxBuffer: 8 * 1024 * 1024,
-    });
+    await buildPeriForE2e();
   }, 610_000);
 
   afterEach(async () => {

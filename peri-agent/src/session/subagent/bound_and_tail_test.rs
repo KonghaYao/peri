@@ -127,23 +127,34 @@ fn tail_spawn_config(
     }
 }
 
-struct TailPanicBridge(Arc<std::sync::atomic::AtomicUsize>);
+struct TailPanicBridge {
+    stops: Arc<std::sync::atomic::AtomicUsize>,
+    panic_on_chunk: bool,
+    lifecycle_turns: Arc<parking_lot::Mutex<Vec<crate::session::turn::TurnId>>>,
+}
 
 impl crate::agent::LangfuseBridgeLike for TailPanicBridge {
     fn process_render_event(&self, event: &crate::agent::events_v2::RenderEvent) {
-        if matches!(
-            event,
-            crate::agent::events_v2::RenderEvent::TextChunk { .. }
-        ) {
+        if self.panic_on_chunk
+            && matches!(
+                event,
+                crate::agent::events_v2::RenderEvent::TextChunk { .. }
+            )
+        {
             panic!("tail forwarding fixture panic");
         }
     }
     fn process_observe_event(&self, event: &crate::agent::events_v2::ObserveEvent) {
+        if let crate::agent::events_v2::ObserveEvent::SubagentStart { turn_id, .. }
+        | crate::agent::events_v2::ObserveEvent::SubagentStop { turn_id, .. } = event
+        {
+            self.lifecycle_turns.lock().push(*turn_id);
+        }
         if matches!(
             event,
             crate::agent::events_v2::ObserveEvent::SubagentStop { .. }
         ) {
-            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.stops.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
     }
 }
@@ -159,13 +170,16 @@ async fn assert_background_tail_completion(outcome: TailOutcome, panic_forwarder
     let callback_rx = event_rx.clone();
     let callback_manager = manager.clone();
     let bridge_stops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let lifecycle_turns = Arc::new(parking_lot::Mutex::new(Vec::new()));
     let mut config = tail_spawn_config(store.clone(), outcome);
     config.run_mode = SubagentRunMode::Background;
     config.task_manager = Some(manager.clone());
     config.bg_event_sender = Some(event_tx);
-    if panic_forwarder {
-        config.langfuse_bridge = Some(Arc::new(TailPanicBridge(bridge_stops.clone())));
-    }
+    config.langfuse_bridge = Some(Arc::new(TailPanicBridge {
+        stops: bridge_stops.clone(),
+        panic_on_chunk: panic_forwarder,
+        lifecycle_turns: lifecycle_turns.clone(),
+    }));
     config.on_bg_complete = Some(Arc::new(move |result: &BackgroundTaskResult, _| {
         let mut events = Vec::new();
         while let Ok(event) = callback_rx.lock().try_recv() {
@@ -242,6 +256,27 @@ async fn assert_background_tail_completion(outcome: TailOutcome, panic_forwarder
             .unwrap();
     assert_eq!(active_at_callback, 1, "通知先于 TaskManager 终态");
     assert_eq!(manager.active_count(), 0, "真实执行收尾后任务结束");
+    let stored = store
+        .load_session_work(&WorkQuery {
+            session_id: spawned.child_thread_id.clone(),
+            limit: 1,
+        })
+        .await
+        .unwrap();
+    let sdk_turn_id = stored
+        .state
+        .admissions
+        .values()
+        .next()
+        .unwrap()
+        .admission
+        .execution
+        .turn_id;
+    assert_eq!(
+        *lifecycle_turns.lock(),
+        vec![sdk_turn_id, sdk_turn_id],
+        "Started/Stopped must use the same stored SDK admission turn"
+    );
     assert_eq!(
         result.child_thread_id.as_deref(),
         Some(spawned.child_thread_id.as_str())
@@ -359,7 +394,11 @@ async fn test_spawn_subagent_sync_forwarder_panic_is_failure() {
     let capture = events.clone();
     let bridge_stops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let mut config = tail_spawn_config(store.clone(), TailOutcome::Completed);
-    config.langfuse_bridge = Some(Arc::new(TailPanicBridge(bridge_stops.clone())));
+    config.langfuse_bridge = Some(Arc::new(TailPanicBridge {
+        stops: bridge_stops.clone(),
+        panic_on_chunk: true,
+        lifecycle_turns: Arc::new(parking_lot::Mutex::new(Vec::new())),
+    }));
     config.event_handler = Some(Arc::new(FnEventHandler(move |event| {
         capture.lock().push(event);
     })));

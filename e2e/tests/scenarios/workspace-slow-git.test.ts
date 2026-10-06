@@ -1,3 +1,4 @@
+import { buildPeriForE2e } from "../../helpers/build.js";
 /**
  * 慢 Git 的端到端：每次 Git 调用固定等待时，仓库目录仍能建会话并发送输入。
  *
@@ -66,6 +67,11 @@ describe("慢 Git 的工作区发现", () => {
       }
     }
     await symlink(process.execPath, path.join(bin, "node")).catch(() => {});
+    const { stdout } = await execFileAsync("/bin/sh", ["-c", "command -v bun"]);
+    const bun = await realpath(stdout.trim());
+    expect(path.isAbsolute(bun)).toBe(true);
+    await rm(path.join(bin, "bun"), { force: true });
+    await symlink(bun, path.join(bin, "bun"));
     const real = execFileSync("/bin/sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
     await writeFile(
       path.join(bin, "git"),
@@ -77,11 +83,7 @@ describe("慢 Git 的工作区发现", () => {
 
   beforeAll(async () => {
     // 控制面脚本不构建 binary；本用例必须跑当前源码。
-    await execFileAsync("cargo", ["build", "-p", "peri-tui", "--bin", "peri"], {
-      cwd: PROJECT_ROOT,
-      timeout: 600_000,
-      maxBuffer: 8 * 1024 * 1024,
-    });
+    await buildPeriForE2e();
   }, 610_000);
 
   beforeEach(async () => {
@@ -312,7 +314,7 @@ describe("慢 Git 的工作区发现", () => {
     }
 
     // 慢 Git 仍然是 Git：观测是仓库模式，不是降级出来的目录模式。
-    const workspaces = await query<{ discovery: string }>("SELECT discovery FROM workspaces");
+    const workspaces = await query<{ discovery: string }>("SELECT discovery FROM legacy_execution_registrations");
     expect(workspaces, "登记后应恰好有一个工作区").toHaveLength(1);
     const observed = JSON.parse(workspaces[0].discovery) as {
       root: string; common_dir: string | null; private_dir: string | null;
@@ -320,6 +322,8 @@ describe("慢 Git 的工作区发现", () => {
     expect(observed.common_dir, "慢 Git 的仓库布局必须被识别").not.toBeNull();
     expect(observed.private_dir).not.toBeNull();
     expect(observed.root.endsWith("slow-repository"), `观测根应是仓库根：${observed.root}`).toBe(true);
+    expect(observed.root).toBe(await realpath(work));
+    expect(await query("SELECT path FROM workspaces")).toEqual([{ path: await realpath(work) }]);
     expect(await query("SELECT id FROM projects")).toHaveLength(1);
     expect(await query("SELECT thread_id FROM session_bindings")).toHaveLength(1);
 

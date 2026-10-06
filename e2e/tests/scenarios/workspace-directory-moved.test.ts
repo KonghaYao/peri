@@ -1,3 +1,4 @@
+import { buildPeriForE2e } from "../../helpers/build.js";
 /**
  * 已登记目录整体搬迁到新位置 → 新位置仍能建立会话并发送输入，旧绑定与历史原样保留。
  *
@@ -34,11 +35,7 @@ describe("已登记目录搬迁到新位置", () => {
 
   beforeAll(async () => {
     // 控制面脚本不构建 binary；本用例必须跑当前源码。
-    await execFileAsync("cargo", ["build", "-p", "peri-tui", "--bin", "peri"], {
-      cwd: PROJECT_ROOT,
-      timeout: 600_000,
-      maxBuffer: 8 * 1024 * 1024,
-    });
+    await buildPeriForE2e();
   }, 610_000);
 
   beforeEach(async () => {
@@ -155,10 +152,14 @@ describe("已登记目录搬迁到新位置", () => {
     await launch(work);
     await prompt("MOVED_FIRST_INPUT", 1);
     const before = await query<{
-      project_id: string; workspace_id: string; root: string; locator: string;
+      thread_id: string; project_id: string; workspace_id: string; root: string; locator: string;
+      schema_version: number; relative_cwd: string; discovery_snapshot: string | null;
+      evidence_origin: string; current_path: string;
     }>(
-      `SELECT b.project_id, b.workspace_id, w.root, p.locator FROM session_bindings b
-       JOIN workspaces w ON w.id = b.workspace_id JOIN projects p ON p.id = b.project_id`,
+      `SELECT b.*, r.root, p.locator, w.path AS current_path FROM session_bindings b
+       JOIN legacy_execution_registrations r ON r.id = b.workspace_id
+       JOIN projects p ON p.id = b.project_id JOIN threads t ON t.id = b.thread_id
+       JOIN workspaces w ON w.id = t.workspace_id`,
     );
     expect(before, "首个会话已登记绑定").toHaveLength(1);
 
@@ -174,7 +175,7 @@ describe("已登记目录搬迁到新位置", () => {
     // ④ 新位置得到独立登记，执行目录是搬迁后的真实路径。
     const projects = await query<{ id: string }>("SELECT id FROM projects");
     const workspaces = await query<{ id: string; project_id: string; discovery: string }>(
-      "SELECT id, project_id, discovery FROM workspaces",
+      "SELECT id, project_id, discovery FROM legacy_execution_registrations",
     );
     expect(projects, "旧登记保持原样、新位置单独登记").toHaveLength(2);
     expect(workspaces).toHaveLength(2);
@@ -182,6 +183,13 @@ describe("已登记目录搬迁到新位置", () => {
     expect(relocated, "新会话属于新登记的工作区").toBeDefined();
     expect(relocated!.project_id).not.toBe(before[0].project_id);
     expect(JSON.parse(relocated!.discovery).root).toBe(await realpath(moved));
+    const currentWorkspaces = await query<{ id: string; path: string }>(
+      "SELECT id, path FROM workspaces",
+    );
+    expect(currentWorkspaces).toHaveLength(2);
+    expect(currentWorkspaces.map((workspace) => workspace.path).sort()).toEqual(
+      [before[0].current_path, await realpath(moved)].sort(),
+    );
 
     // ⑤ 旧绑定没有被改绑、隐藏或重写到新位置，历史消息仍在。
     const bindings = await query<{ project_id: string; workspace_id: string }>(
@@ -191,8 +199,15 @@ describe("已登记目录搬迁到新位置", () => {
     expect(bindings.some((binding) =>
       binding.project_id === before[0].project_id
       && binding.workspace_id === before[0].workspace_id)).toBe(true);
+    const preserved = await query<typeof before[number]>(
+      `SELECT b.*, r.root, p.locator, w.path AS current_path FROM session_bindings b
+       JOIN legacy_execution_registrations r ON r.id = b.workspace_id
+       JOIN projects p ON p.id = b.project_id JOIN threads t ON t.id = b.thread_id
+       JOIN workspaces w ON w.id = t.workspace_id`,
+    );
+    expect(preserved.find((binding) => binding.thread_id === before[0].thread_id)).toEqual(before[0]);
     const oldWorkspace = (await query<{ id: string; root: string }>(
-      "SELECT id, root FROM workspaces",
+      "SELECT id, root FROM legacy_execution_registrations",
     )).find((workspace) => workspace.id === before[0].workspace_id);
     const oldProject = (await query<{ id: string; locator: string }>(
       "SELECT id, locator FROM projects",

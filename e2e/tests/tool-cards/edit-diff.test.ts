@@ -1,3 +1,4 @@
+import { buildPeriForE2e } from "../../helpers/build.js";
 /**
  * 工具卡片场景: Edit/Write diff 摘要渲染（§6.5，G-Diff，Slice 5）
  *
@@ -21,13 +22,11 @@
  * （`helpers/replay-model.ts`）。
  */
 import { describe, it, expect, afterEach, beforeAll } from "vitest";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { rm } from "node:fs/promises";
-import { PROJECT_ROOT, sendPrompt, takePeriSnapshot } from "../../helpers/peri.js";
+import { sendPrompt, takePeriSnapshot } from "../../helpers/peri.js";
 import {
   launchReplayTui,
   makeReplayHome,
@@ -47,11 +46,7 @@ describe("tool-card: edit/write diff summary rendering (G-Diff)", () => {
 
   beforeAll(async () => {
     // 控制面脚本不构建 binary；本用例必须跑当前源码。
-    await promisify(execFile)("cargo", ["build", "-p", "peri-tui", "--bin", "peri"], {
-      cwd: PROJECT_ROOT,
-      timeout: 600_000,
-      maxBuffer: 8 * 1024 * 1024,
-    });
+    await buildPeriForE2e();
   }, 610_000);
 
   afterEach(async () => {

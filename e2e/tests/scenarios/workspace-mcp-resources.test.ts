@@ -1,3 +1,4 @@
+import { buildPeriForE2e } from "../../helpers/build.js";
 /**
  * W6 A 线：真实二进制链路验收（print / stdio ACP）。
  *
@@ -24,9 +25,8 @@
  * `workspace-mcp-resources-tui.test.ts`。
  */
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
-import { execFile, spawn } from "node:child_process";
-import { promisify } from "node:util";
-import { PROJECT_ROOT } from "../../helpers/peri.js";
+import { spawn } from "node:child_process";
+import { startStdioExecutionFixture } from "../../helpers/stdio-execution-fixture.js";
 import {
   FX_AGENT,
   FX_SERVER,
@@ -55,15 +55,6 @@ import {
   type World,
   type ToolPlan,
 } from "../../helpers/workspace-mcp-fixture.js";
-
-async function waitFor(condition: () => boolean, timeoutMs: number, label: string): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (condition()) return;
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  throw new Error(`等待超时：${label}`);
-}
 
 /** print 路径：真实 binary，`-p "..." --output-format stream-json`。 */
 async function runPrint(
@@ -98,47 +89,25 @@ async function runStdio(
   prompt: string,
   permission: "approve" | "reject" | "none",
 ): Promise<StdioRun> {
-  const child = spawn(PERI_BIN, ["acp", "--cwd", world.work], {
-    cwd: world.work,
-    env: isolatedEnv(world),
-    stdio: ["pipe", "pipe", "pipe"],
-  });
-  let exitCode: number | null = null;
-  child.on("exit", (code) => (exitCode = code));
-  const send = (payload: object) => child.stdin.write(`${JSON.stringify(payload)}\n`);
-  const pending = new Map<number, { resolve: (value: any) => void; reject: (error: Error) => void }>();
   const serverRequests: StdioRun["serverRequests"] = [];
   const commandSnapshots: string[][] = [];
-  let idSeq = 0;
-  const call = (method: string, params: object, timeoutMs = 120_000) => {
-    const id = ++idSeq;
-    return new Promise<any>((resolve, reject) => {
-      pending.set(id, { resolve, reject });
-      send({ jsonrpc: "2.0", id, method, params });
-      setTimeout(() => {
-        if (pending.delete(id)) reject(new Error(`timeout: ${method}`));
-      }, timeoutMs);
-    });
-  };
-  const { createInterface } = await import("node:readline");
-  createInterface({ input: child.stdout }).on("line", (line) => {
-    let message: any;
-    try {
-      message = JSON.parse(line);
-    } catch {
-      return;
-    }
-    if (message.method !== undefined && message.id === undefined) {
+  const fixture = await startStdioExecutionFixture({
+    binary: PERI_BIN,
+    cwd: world.work,
+    home: world.home,
+    env: isolatedEnv(world),
+    onNotification(message) {
       if (message.method === "session/update") {
         const commands = message.params?.update?.availableCommands;
         if (Array.isArray(commands)) {
           commandSnapshots.push(commands.map((command: any) => command.name));
         }
       }
-      return;
-    }
-    if (message.method !== undefined && message.id !== undefined) {
+    },
+    onServerRequest(message) {
       serverRequests.push({ method: message.method, params: message.params });
+    },
+    handleServerRequest(message) {
       if (message.method === "session/request_permission") {
         const outcome =
           permission === "approve"
@@ -146,51 +115,48 @@ async function runStdio(
             : permission === "reject"
               ? { outcome: "selected", optionId: "reject_once" }
               : { outcome: "cancelled" };
-        send({ jsonrpc: "2.0", id: message.id, result: { outcome } });
-        return;
+        return { result: { outcome } };
       }
-      send({
-        jsonrpc: "2.0",
-        id: message.id,
+      return {
         error: { code: -32601, message: `unsupported: ${message.method}` },
-      });
-      return;
-    }
-    if (message.id !== undefined) {
-      const entry = pending.get(message.id);
-      if (entry) {
-        pending.delete(message.id);
-        entry.resolve(message);
-      }
-    }
+      };
+    },
   });
-  const initialize = await call("initialize", { protocolVersion: 1 }, 30_000);
-  expect(initialize.result?.protocolVersion, "initialize 应答 protocolVersion").toBe(1);
-  const created = await call("session/new", { cwd: world.work }, 60_000);
-  const sessionId = created.result?.sessionId as string;
-  expect(sessionId, "session/new 返回 sessionId").toBeTruthy();
-  await new Promise((resolve) => setTimeout(resolve, 1200));
-  await call("session/prompt", { sessionId, prompt: [{ type: "text", text: prompt }] }, 180_000);
-  await new Promise((resolve) => setTimeout(resolve, 500));
-  child.stdin.end();
   try {
-    await waitFor(() => exitCode !== null, 15_000, "peri acp 退出");
+    const initialize = await fixture.call("initialize", {
+      protocolVersion: 1,
+      clientCapabilities: {
+        _meta: { "peri.userInputQueue": true },
+      },
+    }, 30_000);
+    expect(initialize.result?.protocolVersion, "initialize 应答 protocolVersion").toBe(1);
+    expect(initialize.result?.agentCapabilities?._meta?.["peri.userInputQueue"],
+      "initialize must negotiate the actual user input queue capability before session/new",
+    ).toBe(true);
+    const created = await fixture.call("session/new", { cwd: world.work }, 60_000);
+    const sessionId = created.result?.sessionId as string;
+    expect(sessionId, "session/new 返回 sessionId").toBeTruthy();
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    const response = await fixture.call("session/prompt", {
+      sessionId,
+      prompt: [{ type: "text", text: prompt }],
+    }, 180_000);
+    expect(response.error,
+      `session/prompt must reach actual execution, not fail required preflight; ACP error=${JSON.stringify(response.error)}; stdio bridge=${fixture.diagnostics()}`,
+    ).toBeUndefined();
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    const exitCode = await fixture.close();
+    return { serverRequests, commandSnapshots, exitCode };
   } finally {
-    // 失败路径兜底：等待超时不把 peri 子进程留在机器上。
-    if (exitCode === null) child.kill("SIGTERM");
+    await fixture.close();
   }
-  return { serverRequests, commandSnapshots, exitCode };
 }
 
 describe("workspace MCP resources：真实二进制验收（print / stdio）", () => {
   let worlds: World[] = [];
 
   beforeAll(async () => {
-    await promisify(execFile)("cargo", ["build", "-p", "peri-tui", "--bin", "peri"], {
-      cwd: PROJECT_ROOT,
-      timeout: 600_000,
-      maxBuffer: 8 * 1024 * 1024,
-    });
+    await buildPeriForE2e();
   }, 610_000);
 
   afterEach(async () => {
@@ -351,9 +317,28 @@ describe("workspace MCP resources：真实二进制验收（print / stdio）", (
     expect(names).not.toContain("mcp__workspace__SkillTool");
     expect(system.includes(SKILL_SECTION_MARKER), "关闭后不得有技能摘要").toBe(false);
     expect(system.includes(INSTRUCTION_SENTINEL), "关闭后不得有项目指令").toBe(false);
-    // 磁盘上有技能文件也不回落：正文不注入任何模型请求
-    expect(messagesJson(w).includes(SKILL_BODY_SENTINEL), "关闭态正文哨兵不得进入 messages").toBe(false);
     const wire = await fixtureWireLines(w.fixtureLog);
+    const sentinelRequests = w.requests.flatMap((entry) => {
+      const messages = JSON.stringify(entry.body?.messages ?? []);
+      const position = messages.indexOf(SKILL_BODY_SENTINEL);
+      if (position < 0) return [];
+      return [{
+        requestIndex: entry.index,
+        isMain: entry.isMain,
+        excerpt: messages.slice(Math.max(0, position - 240), position + SKILL_BODY_SENTINEL.length + 240),
+      }];
+    });
+    const closedDiagnostic = JSON.stringify({
+      sentinelRequests,
+      home: w.home,
+      work: w.work,
+      modelPort: w.modelPort,
+      fixtureWire: wire.slice(-12),
+      stderr: run.stderr.slice(-4000),
+    });
+    expect(messagesJson(w).includes(SKILL_BODY_SENTINEL),
+      `关闭态正文哨兵不得进入 messages; actual closed-world evidence=${closedDiagnostic}`,
+    ).toBe(false);
     expect(countFixtureMethod(wire, "resources/read"), "关闭时不产生技能正文读取").toBe(0);
   });
 
