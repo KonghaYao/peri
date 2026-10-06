@@ -56,7 +56,7 @@ peri-config = { path = "peri-config" }
 peri-time = { path = "peri-time" }
 # --- Async runtime ---
 # Shared runtime baseline; native crates opt into full features at their target boundary.
-tokio = { version = "1", default-features = false, features = ["rt", "macros", "sync", "time", "io-util"] }
+tokio = { version = "=1.53.1", default-features = false, features = ["rt", "macros", "sync", "time", "io-util"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 futures = "0.3"
 async-trait = "0.1"
@@ -111,7 +111,7 @@ peri-mcp-artifact = { path = "mcp-packages/artifact" }
 peri-mcp-cron = { path = "mcp-packages/cron" }
 peri-mcp-workspace = { path = "mcp-packages/workspace" }
 # Apply patches/rmcp-3.5.0-task-subscriptions.patch via scripts/cargo-rmcp-patched.sh.
-rmcp = "3.5.0"
+rmcp = "=3.5.0"
 
 # --- Build ---
 tempfile = "3"

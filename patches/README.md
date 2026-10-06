@@ -1,5 +1,20 @@
 # 固定第三方补丁
 
+## 版本约束与锁文件维护
+
+根 workspace 的 `rmcp` 与 `tokio` 使用精确版本约束，与脚本中的补丁版本保持一致，避免普通依赖更新选择更高版本的未打补丁发布包。Mio 是传递依赖，更新时也必须保留脚本固定的 Git 分支版本；`hyper-util` 必须解析到本地补丁源码。
+
+若锁文件已偏离补丁配置，保留 `dev.sh` 的 `--locked`，通过补丁脚本定向修复，而不是直接运行 `cargo update` 或删除锁文件：
+
+```bash
+./scripts/cargo-rmcp-patched.sh update --offline -p rmcp --precise 3.5.0
+./scripts/cargo-rmcp-patched.sh update --offline -p tokio --precise 1.53.1
+./scripts/cargo-rmcp-patched.sh update --offline -p mio --precise 1.2.3
+python3 scripts/test-cargo-patches.py
+```
+
+`--offline` 要求依赖索引与 Git 源码已缓存；首次拉取缺失依赖时可省略它。回归测试在仓库目录和外部工作目录执行真实的 `metadata --locked --offline`，核对补丁版本、来源和锁文件未变更；运行环境需要 Python 3.9+、Rust 与本机目标依赖缓存。
+
 仓库使用 `rmcp 3.5.0`，并通过 [补丁](rmcp-3.5.0-task-subscriptions.patch)补齐 Tasks 扩展的 `taskIds` 订阅和 `notifications/tasks`。补丁不依赖 GitHub fork，也不提交第三方源码。
 
 从新 checkout 构建时，用仓库脚本代替直接调用 Cargo：

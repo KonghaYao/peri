@@ -166,6 +166,7 @@ claude-blog-cn
 !scripts/test-i386.py
 !scripts/test-loongarch64.py
 !scripts/test-install-beta.py
+!scripts/test-cargo-patches.py
 !scripts/rcra_message_contract_probe.py
 build
 .tmp
