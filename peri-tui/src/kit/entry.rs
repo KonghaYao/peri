@@ -179,9 +179,6 @@ pub async fn run_kit_fullscreen(
     // 2c. H1a: 把 SharedPermissionMode 句柄塞到全局 OnceLock，让 ConfigPanel
     //     提供无会话时的默认权限显示；当前会话权限经 ACP 读取和修改。
     let _ = atoms::PERMISSION_MODE_HANDLE.set(app.services.permission_mode.clone());
-    // 2d. H1g: 把 CronScheduler 共享句柄塞到全局 OnceLock，让 CronPanel
-    //     能直接 toggle/remove。service_snapshot 下次 tick 自动派生新列表。
-    let _ = atoms::CRON_SCHEDULER_HANDLE.set(app.services.cron.scheduler.clone());
 
     // 2e. I17-B：检测首次启动未配置 Provider，触发 SetupWizard 渲染。
     //     wizard 即使是引导界面也支持 Esc/q 退出（避免首次启动锁死）。
@@ -644,9 +641,6 @@ fn build_snapshot_source(
         client,
         peri_config: s.peri_config.clone(),
         permission_mode: s.permission_mode.clone(),
-        cron_scheduler: s.cron.scheduler.clone(),
-        mcp_pool: s.mcp_pool.clone(),
-        mcp_init_rx: s.mcp_init_rx.clone(),
         resource_monitor: Arc::new(Mutex::new(ProcessResourceMonitor::new())),
         hooks,
         plugins,

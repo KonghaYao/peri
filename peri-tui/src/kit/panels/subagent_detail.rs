@@ -3,9 +3,8 @@
 //! §6.7 subagent 详情 pane：Enter 打开 nested transcript 或详情 pane，不把
 //! 完整嵌套消息铺入主时间轴。本面板从 VIEW_MODELS 扫描 `TuiSubAgentGroup`
 //! （按 `SELECTED_SUBAGENT_ID` 匹配，由消息区焦点分派在 Enter 时写入），
-//! 用 `GridSpec::with_content` 嵌套渲染子消息，复用 `vm_to_lines_cached`
-//! （render_copy_button=false——嵌套渲染不渲染 md 复制按钮，与历史
-//! SubAgentGroup 递归渲染口径一致）。
+//! 用 `GridSpec::with_content` 和共享 EntryRenderCache 嵌套渲染子消息。
+//! 缓存保留完整内容高度，只为可见范围访问行，不渲染 md 复制按钮。
 //!
 //! 只读面板 + 可滚动（`register_panel_scroll` 面板滚轮仲裁）；Esc 单层关闭
 //! （栈顶弹栈，不触及其他面板/焦点仲裁）。
@@ -16,7 +15,6 @@ use crate::kit::atoms::{
     BG_DISPLAY, BG_LIVE_DETAIL, BgDisplayEntry, LANG_VERSION, SELECTED_SUBAGENT_ID, VIEW_MODELS,
 };
 use crate::kit::message_area::grid::GridSpec;
-use crate::kit::panel_registry::clean_scrollbars;
 use crate::kit::tui_render_unit::{
     EntryStatus, FoldTarget, TuiRenderUnit, TuiSubAgentGroup, fold_for_status,
 };
@@ -25,10 +23,10 @@ use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind},
     prelude::*,
     ratatui::{
-        layout::Constraint,
+        layout::{Constraint, Rect},
         style::{Style, Stylize},
         text::{Line, Span},
-        widgets::Paragraph,
+        widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState},
     },
 };
 
@@ -40,8 +38,12 @@ pub fn SubAgentDetailPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let theme_def = hooks.use_atom(&THEME_ATOM);
     let _lang_ver = hooks.use_atom(&LANG_VERSION);
     // 外部滚动状态——面板滚轮仲裁（panel_scroll.rs）驱动，统一 3 行/格 + 节流
-    let sv = hooks.use_state(ScrollViewState::default);
+    let sv = hooks.use_state(|| 0usize);
     let render_cache = hooks.use_state(render_cache::DetailRenderCache::default);
+    hooks.use_hook(move || DetailViewportHook {
+        cache: render_cache,
+        scroll: sv,
+    });
 
     // 选中 subagent：SELECTED_SUBAGENT_ID（消息区焦点分派写入）→ 候选源解析
     let selected_id = SELECTED_SUBAGENT_ID.state().read().clone();
@@ -95,39 +97,85 @@ pub fn SubAgentDetailPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             lines.push(Line::from(""));
             let theme = theme_def.read().clone();
             let mut cache = render_cache.write_no_update();
-            lines.extend(cache.render(g, &grid, theme, LANG_VERSION.get()));
+            if cache.prepare(g, &grid, theme, LANG_VERSION.get(), lines) {
+                *sv.write_no_update() = 0;
+            }
         }
         None => {
             lines.push(Line::from(vec![Span::styled(
                 i18n::tr("subagent-detail-not-found"),
                 Style::new().fg(theme_def.read().semantic.text.muted),
             )]));
+            render_cache.write_no_update().clear(lines);
         }
     }
 
-    let content_height = scroll_content_height(lines.len());
-    let content = Paragraph::new(ratatui::text::Text::from(lines));
-
-    crate::kit::panel_scroll::register_panel_scroll(PanelKind::SubAgentDetail, area, sv);
+    crate::kit::panel_scroll::register_virtual_panel_scroll(
+        PanelKind::SubAgentDetail,
+        area,
+        sv,
+        render_cache.read().height(),
+        area.height.saturating_sub(2) as usize,
+    );
 
     panel_shell!(PanelKind::SubAgentDetail, {
-        ScrollView(
-            scrollbars: clean_scrollbars(),
-            state: Some(sv),
+        View(
             width: Constraint::Fill(1),
             height: Constraint::Fill(1),
-        ) {
-            View(
-                width: Constraint::Fill(1),
-                height: Constraint::Length(content_height),
-            ) {
-                Text(text: content)
-            }
-        }
+        )
     })
 }
 
-/// ScrollView 需要子节点声明完整内容高度，才能计算 overflow 与滚动条。
+struct DetailViewportHook {
+    cache: State<render_cache::DetailRenderCache>,
+    scroll: State<usize>,
+}
+
+impl Hook for DetailViewportHook {
+    fn post_component_draw(&mut self, drawer: &mut ComponentDrawer) {
+        let outer = drawer.area;
+        let viewport = Rect {
+            y: outer.y.saturating_add(1),
+            height: outer.height.saturating_sub(2),
+            width: outer.width.saturating_sub(1),
+            ..outer
+        };
+        if viewport.is_empty() {
+            return;
+        }
+        let mut cache = self.cache.write_no_update();
+        let height = cache.height();
+        let mut scroll = self.scroll.write_no_update();
+        let top = clamp_detail_offset(*scroll, height, viewport.height as usize);
+        *scroll = top;
+        cache.draw(drawer, viewport, top);
+        if height > viewport.height as usize {
+            let semantic = peri_theme::atoms::THEME_ATOM.state().read().semantic;
+            let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(None)
+                .end_symbol(None)
+                .track_style(Style::default().fg(semantic.border.dim))
+                .thumb_style(Style::default().fg(semantic.text.muted));
+            let mut state = ScrollbarState::new(height)
+                .position(top)
+                .viewport_content_length(viewport.height as usize);
+            drawer.render_stateful_widget(
+                scrollbar,
+                Rect {
+                    width: outer.width,
+                    ..viewport
+                },
+                &mut state,
+            );
+        }
+    }
+}
+
+fn clamp_detail_offset(top: usize, height: usize, viewport_height: usize) -> usize {
+    top.min(height.saturating_sub(viewport_height))
+}
+
+#[cfg(test)]
 fn scroll_content_height(line_count: usize) -> u16 {
     line_count.clamp(1, u16::MAX as usize) as u16
 }
@@ -198,7 +246,7 @@ fn find_live_detail_subagent(
     } else {
         EntryStatus::Completed
     };
-    let mut group = TuiSubAgentGroup {
+    let group = TuiSubAgentGroup {
         instance_id: task_id.to_string(),
         agent_id: detail
             .agent_id
@@ -217,7 +265,6 @@ fn find_live_detail_subagent(
         user_modified: false,
         content_hash: 0,
     };
-    group.recompute_hash();
     Some(group)
 }
 

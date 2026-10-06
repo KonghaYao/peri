@@ -78,6 +78,8 @@ pub(crate) fn push_view_models(state: &mut BridgeState) {
     // 说明存在上一 turn 内容）且 current_turn 有内容时，在 prompt 之前插一条
     // 无 label 分隔线——committed|current_turn 边界本身通常是「prompt ↔ 回复」
     // 的同一 turn 内部，不能直接用它；以「末项为 user bubble」判定新 turn 起点。
+    let history = items.clone();
+    let active_start = history.len().saturating_sub(1);
     if items.len() >= 2
         && matches!(items.back(), Some(TuiRenderUnit::TuiUserBubble(_)))
         && !state.current_turn.is_empty()
@@ -94,6 +96,21 @@ pub(crate) fn push_view_models(state: &mut BridgeState) {
             }),
         );
     }
+    let previous_generation = VIEW_MODELS.state().read().generation;
+    let confirmed_prefix =
+        TRANSCRIPT_HISTORY
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map_or(0, |(old, start, generation)| {
+                if *generation == previous_generation
+                    && (old.ptr_eq(&history) || (history.is_inline() && old == &history))
+                {
+                    (*start).min(active_start)
+                } else {
+                    0
+                }
+            });
     join_into(&mut items, active);
     #[cfg(test)]
     {
@@ -120,7 +137,7 @@ pub(crate) fn push_view_models(state: &mut BridgeState) {
     // 搬入 committed 再发布终态快照；若只扫描 current_turn 段，归档边界会让同一批
     // 工具从 TuiCollapsedGroup 退回独立卡片。用户气泡、divider、文本及不可分组工具
     // 仍作为天然边界，因此完整扫描不会跨 turn 合并。
-    group_successful_tools(&mut items, 0);
+    let changed_from = group_successful_tools_from(&mut items, 0, confirmed_prefix);
     #[cfg(test)]
     {
         crate::kit::acp_bridge::observe_perf(
@@ -145,6 +162,15 @@ pub(crate) fn push_view_models(state: &mut BridgeState) {
             crate::kit::acp_bridge::PublicationReason::Terminal
         },
     });
+    let mut previous = TRANSCRIPT_HISTORY.lock().unwrap();
+    *previous = Some((history, active_start, state.generation));
+    drop(previous);
+    *crate::kit::atoms::TRANSCRIPT_PUBLICATION.state().write() =
+        crate::kit::atoms::TranscriptPublication {
+            generation: state.generation,
+            previous_generation,
+            changed_from,
+        };
     let snapshot = ViewModelsSnapshot {
         items,
         generation: state.generation,
@@ -163,6 +189,9 @@ pub(crate) fn push_view_models(state: &mut BridgeState) {
 /// 普通文本 token 复用上次摘要文本，跳过 clone + 双扫描 + i18n 格式化。
 /// 纯 memoization：文本只依赖 (todos 内容, 语言版本)，命中即与重建等价。
 static TODO_SUMMARY_CACHE: Mutex<Option<(u64, u64, String)>> = Mutex::new(None);
+
+static TRANSCRIPT_HISTORY: Mutex<Option<(im::Vector<TuiRenderUnit>, usize, u64)>> =
+    Mutex::new(None);
 
 /// [§6.9] 从 `TODO_ITEMS` 派生活动 turn 的 todo 进度摘要行。
 ///
@@ -356,19 +385,6 @@ fn same_entry(a: &TuiRenderUnit, b: &TuiRenderUnit) -> bool {
     }
 }
 
-/// 首个差异下标——逐条身份比较；前段完全一致时返回较短段的长度。
-///
-/// [PERF] 顺序迭代（叶子游标）而非逐下标 `get`：每次 `get` 都要一次树下降，
-/// 而本函数在最常见情形（整段前缀一致）会走满全长，是每事件最热的 O(段长) 循环。
-fn first_divergence(a: &im::Vector<TuiRenderUnit>, b: &im::Vector<TuiRenderUnit>) -> usize {
-    for (i, (x, y)) in a.iter().zip(b.iter()).enumerate() {
-        if !same_entry(x, y) {
-            return i;
-        }
-    }
-    a.len().min(b.len())
-}
-
 /// [PERF] 把 `tail` 并入 `items`——按尾长选择代价更低的合并方式。
 ///
 /// `im::Vector::append` 在「大向量接小向量」路径上**退化为整树重建**：实测
@@ -501,7 +517,16 @@ fn register_span_cuts(
 /// 旧实现把整段折成一个指纹、任何变化都全量重建，并在整段上逆序 `remove` +
 /// `insert` 就地改写：im::Vector 的节点与快照共享，每次 remove/insert 都触发
 /// COW 路径复制（整 chunk 渲染单元深拷贝），长会话下每事件成本随历史线性增长。
+#[cfg(test)]
 fn group_successful_tools(items: &mut im::Vector<TuiRenderUnit>, start: usize) {
+    group_successful_tools_from(items, start, 0);
+}
+
+fn group_successful_tools_from(
+    items: &mut im::Vector<TuiRenderUnit>,
+    start: usize,
+    confirmed_prefix: usize,
+) -> usize {
     // 拆分 current_turn 段——快照层是纯视觉变换，不触碰 segment↔cache 索引对齐。
     // [PERF] `start == 0`（生产唯一取值）等价于取走整个向量：`std::mem::take`
     // 是 O(1)，而 `split_off(0)` 实测有 ~17 µs 的常数开销（`Focus` 窗口重建）。
@@ -530,7 +555,10 @@ fn group_successful_tools(items: &mut im::Vector<TuiRenderUnit>, start: usize) {
     let cache = TOOL_GROUP_CACHE.lock().unwrap_or_else(|e| e.into_inner());
     let (rebuild_from, mut grouped, mut cuts) = match cache.as_ref() {
         Some(c) if c.aux == aux => {
-            let d = first_divergence(&c.input, &segment);
+            let prefix = confirmed_prefix.min(c.input.len()).min(segment.len());
+            let d = (prefix..c.input.len().min(segment.len()))
+                .find(|&index| !same_entry(&c.input[index], &segment[index]))
+                .unwrap_or(c.input.len().min(segment.len()));
             if d == segment.len() && d == c.input.len() {
                 // 段与上次逐条一致（无变化的重复发布）——整段复用。
                 (d, c.grouped.clone(), c.cuts.clone())
@@ -554,6 +582,7 @@ fn group_successful_tools(items: &mut im::Vector<TuiRenderUnit>, start: usize) {
         }
         _ => (0, im::Vector::new(), Vec::new()),
     };
+    let changed_from = start.saturating_add(grouped.len());
     if rebuild_from == segment.len() {
         #[cfg(test)]
         crate::kit::acp_bridge::observe_perf(
@@ -562,7 +591,7 @@ fn group_successful_tools(items: &mut im::Vector<TuiRenderUnit>, start: usize) {
         );
         drop(cache);
         join_into(items, grouped);
-        return;
+        return changed_from;
     }
     #[cfg(test)]
     {
@@ -673,6 +702,7 @@ fn group_successful_tools(items: &mut im::Vector<TuiRenderUnit>, start: usize) {
         aux,
     });
     join_into(items, grouped);
+    changed_from
 }
 
 /// 由一段相邻可合并工具卡构造折叠组（§7 标题聚合 `Read 3 · Glob 2`）。
@@ -738,6 +768,8 @@ pub fn push_view_models_for_reset() {
     // [S2 §3.4] 焦点单一事实源同源清空（跨 session 身份不唯一——slot 与 key
     // 都依赖旧会话索引/身份，残留会让新会话焦点/免疫错误指向）。
     *crate::kit::atoms::FOCUSED_ENTRY.state().write() = None;
+    *TRANSCRIPT_HISTORY.lock().unwrap() = None;
+    *crate::kit::atoms::TRANSCRIPT_PUBLICATION.state().write() = Default::default();
     let snapshot = ViewModelsSnapshot {
         items: im::Vector::new(),
         generation: 0,

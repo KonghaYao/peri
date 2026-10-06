@@ -9,7 +9,7 @@ use crate::components::textarea::TextAreaState;
 use crate::i18n;
 use crate::kit::atoms::{
     ACTIVE_SESSION_ID, BRIDGE_RESET_COUNTER, LANG_VERSION, PLUGIN_LIST, PluginSummary,
-    PluginViewTab, RENDER_HEARTBEAT,
+    PluginViewTab, RENDER_HEARTBEAT, SERVICE_PROJECTION_ERROR,
 };
 use crate::kit::list_nav::scroll_start_for_selected;
 use crate::kit::panel_mouse::AreaTracker;
@@ -26,6 +26,7 @@ mod data;
 mod discover;
 mod discover_handler;
 use discover::{DiscoverState, SearchSession};
+mod operation;
 mod panel_handler;
 mod render;
 mod search_handler;
@@ -144,6 +145,8 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let cursor_visible = hooks.use_state(|| true);
     let cursor_last_toggle = hooks.use_state(peri_time::monotonic_now);
     let operation_loading = hooks.use_state(|| Option::<String>::None);
+    let operation = hooks.use_state(operation::OperationState::default);
+    let projection_error = hooks.use_atom(&SERVICE_PROJECTION_ERROR);
     let add_marketplace_input = hooks.use_state(TextAreaState::default);
     let add_marketplace_active = hooks.use_state(|| false);
     let marketplace_refreshing = hooks.use_state(|| false);
@@ -159,6 +162,12 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     discover
         .write_no_update()
         .reset_session(SearchSession::current());
+    let operation_session = SearchSession::current();
+    let session_for_effect = operation_session.clone();
+    hooks.use_effect(
+        move || operation.write().reset_session(session_for_effect),
+        operation_session,
+    );
     let count = plugins.len();
 
     // RENDER_HEARTBEAT: 驱动 cursor blink（Discover 搜索框）
@@ -189,6 +198,7 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 marketplace_detail_action,
                 confirm_action,
                 operation_loading,
+                operation,
                 add_marketplace_input,
                 add_marketplace_active,
             )
@@ -210,6 +220,7 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 action_index,
                 confirm_action,
                 operation_loading,
+                operation,
                 detail_plugin_idx,
                 marketplace_detail,
                 marketplace_detail_action,
@@ -448,6 +459,12 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // ── footer ──
     let footer_text = if *add_marketplace_active.read() {
         i18n::tr("panel-plugin-marketplace-add-input-footer").to_string()
+    } else if let Some(error) = projection_error.read().as_ref() {
+        format!("{}: {}", i18n::tr("panel-plugin-operation-failed"), error)
+    } else if let Some(error) = operation.read().error.as_ref() {
+        format!("{}: {}", i18n::tr("panel-plugin-operation-failed"), error)
+    } else if let Some(op) = operation.read().pending_action() {
+        format!("{}...", action_label(op))
     } else if let Some(ref op) = *operation_loading.read() {
         match op.as_str() {
             "uninstall" => format!("{}...", i18n::tr("panel-plugin-action-uninstall")),
@@ -500,6 +517,7 @@ fn action_label(action: &str) -> String {
         "enable" => i18n::tr("panel-plugin-action-enable"),
         "uninstall" => i18n::tr("panel-plugin-action-uninstall"),
         "update" => i18n::tr("panel-plugin-action-update"),
+        "install" => i18n::tr("panel-plugin-action-install"),
         "back" => i18n::tr("panel-plugin-action-back"),
         _ => action.to_string(),
     }

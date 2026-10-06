@@ -513,7 +513,10 @@ pub(super) fn register_scroll_events(
         // [D3 §9] 语义复制：事件时点读快照 VM 列表（im::Vector clone O(1)，
         // 只读不改——与 parking_lot 读锁安全共存；选区提取需要 VM 类型
         // 分派语义文本，不能只靠已渲染行）。
-        let vms_snapshot = view_models_for_closure.read().items.clone();
+        let vms_snapshot = index_for_closure
+            .canonical_items()
+            .cloned()
+            .unwrap_or_else(|| view_models_for_closure.read().items.clone());
         scroll::handle_event(
             &event,
             area_rect,

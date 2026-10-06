@@ -884,6 +884,13 @@ panel-betas-nav-hint =   ↑/↓::navigate  Enter::open  Esc::close
 
 # ---- Cron Panel ----
 panel-cron-stats =   { $configured } 个已配置，{ $enabled } 个已启用
+service-projection-startup = 当前显示启动配置的插件与 Hooks；会话 MCP 和定时任务数据需要活跃会话。
+service-projection-no-client = 服务数据不可用：未连接 ACP 客户端。
+service-projection-session-unavailable = 会话正在切换或尚未就绪，服务数据暂不可用。
+service-projection-failed = 服务数据刷新失败：{ $detail }
+panel-cron-action-failed = 定时任务操作失败：{ $detail }
+panel-cron-no-client = 定时任务操作需要连接 ACP 客户端。
+panel-cron-no-session = 定时任务操作需要活跃会话。
 panel-cron-confirm-hint =   Enter::confirm  Esc::close
 panel-cron-nav-hint =   ↑/↓::navigate  Enter::toggle  Esc::close
 panel-cron-empty =   暂未配置定时任务

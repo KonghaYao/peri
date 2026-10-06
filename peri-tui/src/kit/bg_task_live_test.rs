@@ -37,6 +37,74 @@ impl Drop for Fixture {
 
 #[test]
 #[serial_test::serial]
+fn duplicate_end_and_late_start_preserve_terminal_background_task() {
+    let _fixture = Fixture::new();
+    let started = TuiToolStarted {
+        tool_id: "tool".into(),
+        tool_name: "Shell".into(),
+        input_summary: "null".into(),
+        raw_input: serde_json::Value::Null,
+        agent_id: Some("stream-agent".into()),
+    };
+    handle_bg_tool_started("stream-agent", &started, None);
+    handle_bg_tool_ended(
+        "stream-agent",
+        &TuiToolEnded {
+            tool_id: "tool".into(),
+            output_summary: "original".into(),
+            is_error: false,
+            agent_id: Some("stream-agent".into()),
+        },
+    );
+    let duration = BG_LIVE_DETAIL.state().read()["stream-test"].tool_cards[0].completed_duration_ms;
+    handle_bg_subagent_stopped("stream-agent", "done", false);
+    handle_bg_tool_ended(
+        "stream-agent",
+        &TuiToolEnded {
+            tool_id: "tool".into(),
+            output_summary: "duplicate".into(),
+            is_error: true,
+            agent_id: Some("stream-agent".into()),
+        },
+    );
+    handle_bg_tool_started(
+        "stream-agent",
+        &TuiToolStarted {
+            input_summary: "pwd".into(),
+            raw_input: serde_json::json!({"command": "pwd"}),
+            ..started.clone()
+        },
+        None,
+    );
+    handle_bg_tool_started(
+        "stream-agent",
+        &TuiToolStarted {
+            tool_id: "late".into(),
+            ..started
+        },
+        None,
+    );
+    let live = BG_LIVE_DETAIL.state();
+    let map = live.read();
+    let detail = &map["stream-test"];
+    assert_eq!(detail.status, BgLiveStatus::Succeeded);
+    assert_eq!(
+        detail.tool_cards[0].output_summary.as_deref(),
+        Some("original")
+    );
+    assert_eq!(detail.tool_cards[0].completed_duration_ms, duration);
+    assert_eq!(detail.tool_cards[0].input_summary, "pwd");
+    assert!(!detail.tool_cards[0].is_error);
+    assert!(
+        detail
+            .nested_units
+            .iter()
+            .all(|unit| matches!(unit, TuiRenderUnit::TuiToolCard(card) if !card.is_running))
+    );
+}
+
+#[test]
+#[serial_test::serial]
 fn chunks_accumulate_without_projecting_until_publication() {
     let fixture = Fixture::new();
     crate::kit::acp_bridge::reset_perf_counters();

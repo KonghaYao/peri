@@ -42,6 +42,7 @@ pub struct CurrentTurn {
 
     /// Whether the turn is actively streaming (any text / tool event arrived).
     pub active: bool,
+    deactivated: bool,
 
     /// Streaming sub-agent occurrences routed by agent_id / instance_id.
     ///
@@ -131,6 +132,7 @@ impl Default for CurrentTurn {
             tool_cards: Vec::new(),
             committed: false,
             active: false,
+            deactivated: false,
             subagents: Vec::new(),
             pending_subagent_groups: Vec::new(),
             segments: Vec::new(),
@@ -239,6 +241,7 @@ impl CurrentTurn {
     pub fn deactivate(&mut self) {
         self.freeze_trailing();
         self.active = false;
+        self.deactivated = true;
         self.invalidate_cache();
     }
 
@@ -262,6 +265,7 @@ impl CurrentTurn {
         self.cache_dirty = false;
         self.active = false;
         self.committed = true;
+        self.deactivated = true;
     }
 
     /// [§6.7] 冻结 trailing 流式段（镜像顶层折叠 pass 的翻转点语义）。

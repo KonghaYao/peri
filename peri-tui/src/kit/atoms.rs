@@ -75,6 +75,16 @@ impl Default for ViewModelsSnapshot {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct TranscriptPublication {
+    pub(crate) generation: u64,
+    pub(crate) previous_generation: u64,
+    pub(crate) changed_from: usize,
+}
+
+pub(crate) static TRANSCRIPT_PUBLICATION: AtomStatic<TranscriptPublication> =
+    AtomStatic::new(TranscriptPublication::default);
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ServiceSnapshot {
     pub cwd: String,
@@ -488,9 +498,8 @@ pub static TUI_CONFIG_HANDLE: OnceLock<
 pub static PERMISSION_MODE_HANDLE: OnceLock<
     std::sync::Arc<peri_acp_types::permission::SharedPermissionMode>,
 > = OnceLock::new();
-pub static CRON_SCHEDULER_HANDLE: OnceLock<
-    std::sync::Arc<parking_lot::Mutex<peri_mcp_cron::CronScheduler>>,
-> = OnceLock::new();
+pub static SERVICE_PROJECTION_ERROR: AtomStatic<Option<String>> = AtomStatic::new(|| None);
+pub static CRON_ACTION_ERROR: AtomStatic<Option<String>> = AtomStatic::new(|| None);
 /// ACP 客户端全局句柄——供 Plugin Panel 等面板调用 send_raw_request。
 /// 在 entry.rs 中 acp_client 就绪后 set。
 pub static ACP_CLIENT_HANDLE: OnceLock<std::sync::Arc<crate::acp_client::client::AcpTuiClient>> =

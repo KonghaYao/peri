@@ -22,6 +22,7 @@ ACP notification → acp_notifier → acp_bridge / BridgeState
 | 全局状态与 ViewModel | `src/kit/atoms.rs`、`src/kit/acp_types.rs` |
 | 输入、提交、历史、@mention、slash | `src/kit/input_area.rs`、`src/kit/input_history.rs`、`src/kit/submit_consumer.rs` |
 | 消息渲染、滚动、选择 | `src/kit/message_area/`、`src/kit/markdown/`、`src/kit/text_selection.rs` |
+| 增量布局与派生缓存预算 | `src/kit/message_area/transcript.rs`、`transcript_index.rs`、`src/kit/entry_render_cache.rs` |
 | 键盘、鼠标、焦点与事件优先级 | `src/kit/event_handlers.rs`、`src/kit/focus_router.rs` |
 | 面板、弹窗与确认交互 | `src/kit/panels/`、`src/kit/popups/`、`src/kit/panel_overlay.rs` |
 | 国际化与主题 | `src/i18n/`、`locales/`、`peri-theme` atoms |
@@ -38,6 +39,8 @@ ACP notification → acp_notifier → acp_bridge / BridgeState
 - History 面板使用单行会话列表与固定详情/操作栏；按容器高度计算视口，列表和只读预览各持有独立滚动状态。刷新按 thread ID 保留选择，执行操作使用已选身份，删除确认固定待删 ID，不能用旧索引查新列表决定目标。
 - Config / Model / Login / Betas / Theme 的持久配置仍编辑宿主启动时选中的 `ConfigSource`，面板明确标识“宿主配置”和实际保存路径；权限切换（配置行、Shift+Tab、slash）及会话模型选择等运行请求继续按 session ID 路由。整份配置上送不带 session ID；切换会话不重定位宿主配置写入。同配置源会话刷新 provider 连接并失效模型缓存，保留各自的模型/profile 选择和 frozen 数据。
 - render body 不写 atom；render 内派生缓存使用既有无通知写入模式，副作用放在事件或 effect 边界。
+- 消息区使用带 generation 验证的 publication 变化提示与持久布局索引；旧 frame 保留不可变布局，冷缓存不改变选择、复制或滚动高度。主消息与详情共享 entry 缓存规则；重型预算不等同 canonical 历史、轻量索引或整个进程 RSS 上限。
+- Cron/MCP 会话投影与 Cron 操作通过 ACP 消费；快照按真实 session generation 隔离，无会话仅展示明确标注的启动插件/Hooks。断连、能力缺席与刷新失败保留错误状态，同会话 last-good 不得跨代复用；具体 scheduler/pool 和关闭权留在宿主装配侧。
 - Assistant VM 的完整气泡以 `Arc<TuiAssistantBubble>` 发布，快照与 im 节点 COW 共享不可变 payload；修改 fold/终态前先判定是否真的变化，再复制或 `Arc::make_mut`，不能改动旧快照。后台流式累积仍持有独占正文，不能把共享发布气泡直接当逐 chunk 写入缓冲。
 - Markdown 稳定分片仅冻结安全空行边界，fence 内部空行不能切断代码块；引用、列表、表格与未闭合 fence 保留可变尾部，terminal full parse 校正。正文前景与代码背景须同时进入内外层缓存 key，主题变化只复用 parsed blocks，不复用旧样式。
 - `#[component]` 的 hooks 必须在所有条件分支、`match` 与提前返回前按稳定顺序调用。

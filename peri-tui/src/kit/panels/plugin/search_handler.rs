@@ -19,9 +19,13 @@ pub(super) fn handle_search_event(
     marketplace_detail_action: State<usize>,
     confirm_action: State<Option<String>>,
     operation_loading: State<Option<String>>,
+    operation: State<super::operation::OperationState>,
     add_marketplace_input: State<TextAreaState>,
     add_marketplace_active: State<bool>,
 ) -> EventResult {
+    if operation.read().pending_action().is_some() {
+        return EventResult::Consumed;
+    }
     // 鼠标：add_marketplace 输入与 Discover tab（click as enter）
     if let Event::Mouse(mouse) = event {
         // 详情/confirm 模式由 Normal handler 负责命中
@@ -46,7 +50,7 @@ pub(super) fn handle_search_event(
                     event,
                     Some(area),
                     discover,
-                    operation_loading,
+                    operation,
                 );
             }
         }
@@ -69,7 +73,7 @@ pub(super) fn handle_search_event(
         if operation_loading.read().is_some() {
             return EventResult::Ignored;
         }
-        return super::discover_handler::handle_event(event, area, discover, operation_loading);
+        return super::discover_handler::handle_event(event, area, discover, operation);
     }
 
     // ── ESC handling: detail exit / confirm cancel / close panel ──

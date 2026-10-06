@@ -10,6 +10,10 @@ use std::time::Instant;
 
 static NEXT_SUBAGENT_INSTANCE_ID: AtomicU64 = AtomicU64::new(1);
 
+#[cfg(test)]
+#[path = "tool_card_test.rs"]
+mod tests;
+
 /// 从 `ToolCardAccumulator` 派生 `TuiToolCard`。
 ///
 /// fold 按 spec §7 表取当前状态的目标值（running=Preview / completed/error=
@@ -128,6 +132,17 @@ pub struct ToolCardAccumulator {
 }
 
 impl ToolCardAccumulator {
+    pub(crate) fn finish(&mut self, output: String, is_error: bool) -> bool {
+        if self.output_summary.is_some() {
+            return false;
+        }
+        self.output_summary = Some(output);
+        self.is_error = is_error;
+        self.completed_duration_ms =
+            Some(peri_time::elapsed_since(self.started_at).as_millis() as u64);
+        true
+    }
+
     pub(crate) fn upgrade_input(&mut self, tool: Self) -> bool {
         if tool.raw_input.is_null() || !self.raw_input.is_null() {
             return false;
