@@ -75,7 +75,12 @@ fn publication_callback(resolve: DeliveryResolver) -> OnBgCompleteFn {
                     )
                 }
                 PublicationStatus::Failed(error) => {
-                    tracing::debug!(%error, "retrying original terminal publication")
+                    tracing::info!(
+                        ?delivery_id,
+                        task_id = %result.task_id,
+                        %error,
+                        "retrying original terminal publication"
+                    )
                 }
             }
         }
@@ -97,14 +102,24 @@ fn publication_callback(resolve: DeliveryResolver) -> OnBgCompleteFn {
             BgTaskKind::Workflow => peri_acp_types::session::MessageSource::WorkflowComplete,
             BgTaskKind::Mcp => peri_acp_types::session::MessageSource::DynamicMcpNotification,
         };
+        let task_id = result.task_id.clone();
         runtime.spawn(async move {
             let outcome = delivery.deliver(delivery_id, &reminder, source).await;
             let mut state = publications.lock();
             if let Some(publication) = state.get_mut(&identity) {
-                publication.status = match outcome {
+                publication.status = match &outcome {
                     Ok(()) => PublicationStatus::Accepted,
-                    Err(error) => PublicationStatus::Failed(error),
+                    Err(error) => PublicationStatus::Failed(error.clone()),
                 };
+            }
+            drop(state);
+            if let Err(error) = &outcome {
+                tracing::warn!(
+                    ?delivery_id,
+                    task_id = %task_id,
+                    %error,
+                    "terminal publication failed"
+                );
             }
         });
         Err(
