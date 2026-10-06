@@ -91,6 +91,9 @@ impl ExecutionFailure {
     /// 受控诊断日志。HTTP status 作为独立 allowlist 字段保留。
     pub fn from_agent_error(error: &crate::error::AgentError) -> Self {
         match error {
+            crate::error::AgentError::WorkBudgetExhausted { .. } => {
+                Self::internal(error.user_facing_message())
+            }
             crate::error::AgentError::LlmHttpError { status, message } => Self::new(
                 ExecutionFailureKind::LlmHttp,
                 format!("LLM HTTP {status}: {}", redact_public_error(message)),

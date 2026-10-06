@@ -10,8 +10,10 @@ use super::work_pipeline::{request_checkpoint, WorkSession};
 use super::work_recovery::{recover_work, RecoveredStage};
 use super::StageContext;
 use crate::agent::react::{Reasoning, ToolCall};
+use crate::error::AgentError;
 use crate::session::tool_catalog::SessionToolCatalogSnapshot;
 use crate::tools::{BaseTool, CanonicalToolInvocation};
+use peri_acp_types::error::WorkBudgetKind;
 
 pub(crate) async fn prepare(
     ctx: &StageContext,
@@ -43,16 +45,71 @@ pub(crate) async fn prepare(
     let request_id = uuid::Uuid::now_v7().to_string();
     let command = session.command(WorkAction::BeginReason {
         guard: session.guard(&snapshot)?,
-        target,
+        target: target.clone(),
         request_id: request_id.clone(),
         request: checkpoint,
     });
     let receipt = session.ledger.commit_execution_transition(&command).await?;
     if receipt.stage != Some(WorkStage::ReasonInFlight) {
+        if receipt.stage == Some(WorkStage::Blocked) {
+            if let Some(error) = budget_exhaustion(
+                &snapshot.state,
+                &target.work_id,
+                WorkBudgetKind::ReasonRequests,
+            ) {
+                return Err(anyhow::Error::new(error));
+            }
+        }
         return Err(anyhow::anyhow!("model budget blocked before send"));
     }
     state.request_id = Some(request_id);
     Ok(Some(prepared))
+}
+
+pub(super) fn budget_exhaustion(
+    state: &WorkState,
+    work_id: &str,
+    kind: WorkBudgetKind,
+) -> Option<AgentError> {
+    let work = state.works.get(work_id)?;
+    let budget = state.budgets.get(&work.budget_id)?;
+    let (used, limit) = match kind {
+        WorkBudgetKind::ReasonRequests => (budget.reason_requests, state.limits.reason_requests),
+        WorkBudgetKind::Dispatches => (budget.dispatches, state.limits.dispatches),
+        WorkBudgetKind::Recoveries => (budget.recoveries, state.limits.recoveries),
+    };
+    (used >= limit).then_some(AgentError::WorkBudgetExhausted {
+        budget: kind,
+        used,
+        limit,
+    })
+}
+
+pub(super) fn blocked_budget_error(state: &WorkState, work_id: &str) -> Option<AgentError> {
+    let work = state.works.get(work_id)?;
+    if work.stage != WorkStage::Blocked {
+        return None;
+    }
+    let kind = match work.reason.as_deref()? {
+        "reason budget exhausted" => WorkBudgetKind::ReasonRequests,
+        "dispatch budget exhausted" => WorkBudgetKind::Dispatches,
+        "recovery budget exhausted" => WorkBudgetKind::Recoveries,
+        _ => return None,
+    };
+    budget_exhaustion(state, work_id, kind)
+}
+
+pub(super) fn snapshot_budget_error(snapshot: &WorkSnapshot) -> Option<AgentError> {
+    if !snapshot.blocked {
+        return None;
+    }
+    snapshot.state.works.values().find_map(|work| {
+        let batch = snapshot.state.batches.get(&work.batch_id)?;
+        if batch.recipient_lifecycle != snapshot.control.lifecycle {
+            return None;
+        }
+        blocked_budget_error(&snapshot.state, &work.work_id)
+    })
 }
 
 async fn bind_intent(
@@ -324,3 +381,7 @@ pub(crate) async fn block_uncertain_model(ctx: &StageContext) -> anyhow::Result<
     session.ledger.commit(&command).await?;
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "work_reason_test.rs"]
+mod tests;

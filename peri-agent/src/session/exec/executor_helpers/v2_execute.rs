@@ -11,7 +11,7 @@ use peri_acp_types::{
     messages::BaseMessage,
     runtime::UnstampedEvent,
     session::ExecutionFailure,
-    session_resources::SessionResources,
+    session_resources::{work::DEFAULT_AGENT_MAX_ITERATIONS, SessionResources},
     tasks::{BgTaskKind, TaskManager},
 };
 use tokio_util::sync::CancellationToken;
@@ -474,7 +474,7 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
     // run_react_loop 消费后仍可访问累积的 recall。
     let recall_buffer = Arc::clone(&v2_out.context.recall_buffer);
 
-    // Phase 7: 运行 v2 ReAct 循环（max_iterations 与 v1 一致 = 500）
+    // Phase 7: 运行 v2 ReAct 循环
     // langfuse v2: capture turn_id before move, emit TurnStarted
     let loop_turn_id = v2_out.context.turn_id().to_string();
     {
@@ -495,7 +495,7 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
             },
         );
     }
-    let loop_result = run_react_loop(v2_out.context, 500).await;
+    let loop_result = run_react_loop(v2_out.context, DEFAULT_AGENT_MAX_ITERATIONS).await;
 
     if matches!(&loop_result, LoopResult::Completed) {
         let queue = v2_out.session.queue();

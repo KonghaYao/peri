@@ -10,6 +10,48 @@ use crate::command::PromptStopReason;
 use crate::error::AgentError;
 use crate::session::{sanitize_public_error, ExecutionFailure, ExecutionFailureKind, PromptResult};
 
+#[test]
+fn work_budget_failure_preserves_typed_error_through_anyhow_and_public_projection() {
+    let error = AgentError::WorkBudgetExhausted {
+        budget: crate::error::WorkBudgetKind::ReasonRequests,
+        used: 64,
+        limit: 64,
+    };
+    let error = AgentError::from(anyhow::Error::new(error).context("private checkpoint context"));
+    assert!(matches!(
+        error,
+        AgentError::WorkBudgetExhausted {
+            used: 64,
+            limit: 64,
+            ..
+        }
+    ));
+    let failure = ExecutionFailure::from_agent_error(&error);
+    assert_eq!(failure.kind, ExecutionFailureKind::Internal);
+    assert_eq!(failure.kind.wire_name(), "internal");
+    assert!(failure.public_message.contains("reason requests (64/64)"));
+    assert!(failure
+        .public_message
+        .contains("explicit budget reset authorization"));
+    assert!(!failure
+        .public_message
+        .contains("private checkpoint context"));
+    assert!(failure.http_status.is_none());
+    assert!(failure.diagnostic.is_none());
+}
+
+#[test]
+fn non_budget_typed_error_wrapped_in_anyhow_keeps_original_redaction() {
+    let error = AgentError::from(anyhow::Error::new(AgentError::LlmError(
+        "secret-provider-body".into(),
+    )));
+    assert!(matches!(error, AgentError::Other(_)));
+    assert_eq!(
+        error.user_facing_message(),
+        "An internal error occurred. Check logs for details."
+    );
+}
+
 /// 默认结果缺失语义：必须带 fatal failure，而不是成功 EndTurn。
 #[test]
 fn default_prompt_result_is_safe_fatal_failure() {

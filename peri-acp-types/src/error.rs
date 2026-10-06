@@ -3,11 +3,35 @@
 //! `AgentError` 为 Agent 层边界错误枚举（终止类语义：Interrupted 等防 `?`
 //! 误报失败），事实源归契约层；`peri-agent::error` 保留 re-export。
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkBudgetKind {
+    ReasonRequests,
+    Dispatches,
+    Recoveries,
+}
+
+impl std::fmt::Display for WorkBudgetKind {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::ReasonRequests => "reason requests",
+            Self::Dispatches => "tool dispatches",
+            Self::Recoveries => "work recoveries",
+        })
+    }
+}
+
 /// Agent 层边界错误
 #[derive(Debug, thiserror::Error)]
 pub enum AgentError {
     #[error("Max iterations exceeded ({0})")]
     MaxIterationsExceeded(usize),
+
+    #[error("Work budget exhausted for {budget} ({used}/{limit}). This work is blocked; send a new instruction to start a new task using the saved conversation. Resuming this work requires explicit budget reset authorization.")]
+    WorkBudgetExhausted {
+        budget: WorkBudgetKind,
+        used: u64,
+        limit: u64,
+    },
 
     #[error("Model output reached the token limit for {attempts} consecutive responses; the task is incomplete.")]
     OutputTruncated { attempts: usize },
@@ -74,7 +98,25 @@ pub enum AgentError {
     },
 
     #[error(transparent)]
-    Other(#[from] anyhow::Error),
+    Other(anyhow::Error),
+}
+
+impl From<anyhow::Error> for AgentError {
+    fn from(error: anyhow::Error) -> Self {
+        if let Some(Self::WorkBudgetExhausted {
+            budget,
+            used,
+            limit,
+        }) = error.downcast_ref::<Self>()
+        {
+            return Self::WorkBudgetExhausted {
+                budget: *budget,
+                used: *used,
+                limit: *limit,
+            };
+        }
+        Self::Other(error)
+    }
 }
 
 pub type AgentResult<T> = Result<T, AgentError>;

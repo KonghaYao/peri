@@ -17,6 +17,8 @@ mod admission;
 mod bindings;
 #[path = "work/delivery.rs"]
 mod delivery;
+#[path = "work/policy.rs"]
+mod policy;
 #[path = "work/processing.rs"]
 mod processing;
 #[path = "work/projection.rs"]
@@ -28,6 +30,7 @@ mod reducer;
 #[path = "work/user_input.rs"]
 mod user_input;
 
+pub use policy::DEFAULT_AGENT_MAX_ITERATIONS;
 pub use user_input::{StagedUserInput, StagedUserInputStatus};
 
 pub use query::validate_admission_association;
@@ -382,8 +385,8 @@ impl Default for WorkLimits {
             required_bytes: 8 * 1024 * 1024,
             optional_bytes: 512 * 1024,
             max_batch_size: 64,
-            reason_requests: 64,
-            dispatches: 256,
+            reason_requests: DEFAULT_AGENT_MAX_ITERATIONS as u64,
+            dispatches: policy::DEFAULT_DISPATCH_BUDGET,
             recoveries: 8,
         }
     }

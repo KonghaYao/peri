@@ -78,6 +78,14 @@ impl WorkBoundary {
         }
         let mut state = self.state.lock().await;
         if state.frozen {
+            if let (Some(session), Some(work_id)) = (&state.session, &state.work_id) {
+                let snapshot = session.snapshot().await?;
+                if let Some(error) =
+                    super::work_reason::blocked_budget_error(&snapshot.state, work_id)
+                {
+                    return Err(anyhow::Error::new(error));
+                }
+            }
             return Err(anyhow::anyhow!(
                 "durable execution is frozen for reconciliation"
             ));
@@ -158,6 +166,9 @@ impl WorkBoundary {
         };
         let snapshot = session.snapshot().await?;
         if snapshot.blocked || !snapshot.pending_commands.is_empty() {
+            if let Some(error) = super::work_reason::snapshot_budget_error(&snapshot) {
+                return Err(anyhow::Error::new(error));
+            }
             return Err(anyhow::anyhow!(
                 "durable work is blocked or has unresolved original commands"
             ));

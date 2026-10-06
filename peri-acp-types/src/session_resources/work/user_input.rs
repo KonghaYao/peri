@@ -2,6 +2,10 @@ use super::*;
 use crate::session::UserInput;
 use crate::session_resources::ControlStatus;
 
+#[cfg(test)]
+#[path = "user_input_test.rs"]
+mod tests;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum StagedUserInputStatus {
@@ -195,7 +199,10 @@ pub(super) fn publish(
                 !matches!(work.stage, WorkStage::Settled | WorkStage::Abandoned)
                     && state.batches.get(&work.batch_id).is_some_and(|batch| {
                         batch.recipient_lifecycle == command.recipient_lifecycle
-                            && control.attempt.as_ref() == Some(&batch.execution)
+                            && control
+                                .attempt
+                                .as_ref()
+                                .is_none_or(|attempt| attempt == &batch.execution)
                     })
             })
             .map(|work| WorkTarget {
@@ -206,6 +213,7 @@ pub(super) fn publish(
         for target in targets {
             super::processing::abandon(state, &target, "processing superseded by explicit user input selection; external outcomes remain recorded", &command.mutation_id, receipt)?;
         }
+        state.upgrade_default_budget_policy_for_user_selection();
     }
     Ok(())
 }

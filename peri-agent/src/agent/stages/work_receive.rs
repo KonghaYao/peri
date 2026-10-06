@@ -183,9 +183,14 @@ impl WorkBoundary {
                 reason,
                 recovery_condition,
             } => {
+                if let Some(error) =
+                    super::work_reason::blocked_budget_error(&snapshot.state, &work_id)
+                {
+                    return Err(anyhow::Error::new(error));
+                }
                 return Err(anyhow::anyhow!(
                     "work blocked: {reason:?}; recovery: {recovery_condition:?}"
-                ))
+                ));
             }
         };
         tracing::trace!(work_id = %recovered.target.work_id, work_revision = recovered.target.expected_work_revision,

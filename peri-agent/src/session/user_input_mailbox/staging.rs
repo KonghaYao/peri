@@ -1,6 +1,13 @@
 use super::*;
 use peri_acp_types::session_resources::ControlStatus;
 
+#[derive(Clone, Copy)]
+enum InputSelection {
+    Automatic,
+    InterruptCurrent,
+    NewTask { control_generation: u64 },
+}
+
 impl UserInputMailbox {
     pub(crate) async fn publish_prompt_durable(
         &self,
@@ -16,7 +23,7 @@ impl UserInputMailbox {
             &command_id,
             compute_fingerprint(("prompt", &command_id, &input_ids)),
             &input_ids,
-            false,
+            InputSelection::Automatic,
         )
         .await
     }
@@ -137,7 +144,45 @@ impl UserInputMailbox {
                         .is_some_and(|receipt| receipt.revision == record.sequence)
             })
         {
-            self.publish_next_durable().await?;
+            let has_inactive_work = snapshot.state.works.values().any(|work| {
+                !matches!(work.stage, WorkStage::Settled | WorkStage::Abandoned)
+                    && snapshot.state.work_lifecycle(&work.work_id)
+                        == Some(snapshot.control.lifecycle)
+            });
+            let publish_new_task = snapshot.control.status == ControlStatus::Active
+                && snapshot.control.attempt.is_none()
+                && snapshot.pending_commands.is_empty()
+                && {
+                    let state = self.state.lock();
+                    state.valid
+                        && !state.paused
+                        && state.active.is_none()
+                        && (has_inactive_work
+                            || !state.records.iter().any(|record| {
+                                matches!(
+                                    record.state,
+                                    UserInputState::Dispatching | UserInputState::Claimed
+                                )
+                            }))
+                };
+            if publish_new_task {
+                let command_id = format!(
+                    "idle:{}:{}:0",
+                    request.command_id, receipt.work_receipts[0].revision
+                );
+                let input_ids = vec![request.input_id.clone()];
+                self.publish_selection(
+                    &command_id,
+                    compute_fingerprint(("idle", &command_id, &input_ids)),
+                    &input_ids,
+                    InputSelection::NewTask {
+                        control_generation: snapshot.control.control_generation,
+                    },
+                )
+                .await?;
+            } else {
+                self.publish_next_durable().await?;
+            }
         }
         receipt.snapshot = self.snapshot();
         receipt.results = results_for(&self.state.lock(), std::slice::from_ref(&request.input_id));
@@ -188,7 +233,7 @@ impl UserInputMailbox {
                 &request.command_id,
                 compute_fingerprint(("dispatch", request)),
                 &request.input_ids,
-                true,
+                InputSelection::InterruptCurrent,
             )
             .await?;
         let durable = self.durable.as_ref().ok_or(UserInputQueueError::Closed)?;
@@ -282,7 +327,7 @@ impl UserInputMailbox {
             &command_id,
             compute_fingerprint(("idle", &command_id, &ids)),
             &ids,
-            false,
+            InputSelection::Automatic,
         )
         .await?;
         self.state.lock().suspended = false;
@@ -294,7 +339,7 @@ impl UserInputMailbox {
         command_id: &str,
         fingerprint: u64,
         input_ids: &[String],
-        interrupt_current: bool,
+        selection: InputSelection,
     ) -> Result<UserInputQueueReceipt, UserInputQueueError> {
         let durable = self.durable.as_ref().ok_or(UserInputQueueError::Closed)?;
         let mut operations = durable.operations.lock().await;
@@ -364,14 +409,30 @@ impl UserInputMailbox {
                     };
                     deliveries.push(delivery);
                 }
+                let (expected_control_generation, expected_attempt, interrupt_current) =
+                    match selection {
+                        InputSelection::Automatic => (
+                            snapshot.control.control_generation,
+                            snapshot.control.attempt.clone(),
+                            false,
+                        ),
+                        InputSelection::InterruptCurrent => (
+                            snapshot.control.control_generation,
+                            snapshot.control.attempt.clone(),
+                            true,
+                        ),
+                        InputSelection::NewTask { control_generation } => {
+                            (control_generation, None, true)
+                        }
+                    };
                 vec![WorkCommand {
                     session_id: self.session_id.clone(),
                     recipient_lifecycle: durable.lifecycle,
                     mutation_id: mutation,
                     action: WorkAction::PublishStagedUserInputs {
                         expected_revision: snapshot.state.revision,
-                        expected_control_generation: snapshot.control.control_generation,
-                        expected_attempt: snapshot.control.attempt.clone(),
+                        expected_control_generation,
+                        expected_attempt,
                         interrupt_current,
                         deliveries,
                     },

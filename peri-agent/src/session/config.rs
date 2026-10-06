@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use parking_lot::RwLock;
+use peri_acp_types::session_resources::work::DEFAULT_AGENT_MAX_ITERATIONS;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
@@ -83,7 +84,7 @@ impl Default for SessionConfig {
             cancel_token: Arc::new(CancellationToken::new()),
             turn_timeout: RwLock::new(None),
             thinking: RwLock::new(None),
-            max_iterations: RwLock::new(500),
+            max_iterations: RwLock::new(DEFAULT_AGENT_MAX_ITERATIONS),
         }
     }
 }

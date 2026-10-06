@@ -51,6 +51,128 @@ async fn load(fixture: &TestSession) -> WorkSnapshot {
 }
 
 #[tokio::test]
+async fn fresh_enqueue_supersedes_exited_blocked_work_without_history_activation() {
+    use peri_acp_types::identity::AttemptId;
+    use peri_acp_types::session_resources::{ControlAction, ControlAttempt, ControlCommand};
+
+    let fixture = TestSession::open().await;
+    let (first, _) = mailbox(&fixture, fixture.resources());
+    first
+        .enqueue_durable(&input(&first, "old task"))
+        .await
+        .unwrap();
+    let snapshot = load(&fixture).await;
+    let admission = WorkAdmission {
+        session_id: fixture.thread_id(),
+        admission_id: uuid::Uuid::now_v7().to_string(),
+        instance_id: "budget-regression".into(),
+        generation_id: "generation".into(),
+        lifecycle: snapshot.control.lifecycle,
+        control_generation: snapshot.control.control_generation,
+        work_id: snapshot.candidates[0].work_id.clone(),
+        work_revision: snapshot.candidates[0].work_revision,
+        execution: ControlAttempt {
+            turn_id: TurnId::new(),
+            attempt_id: AttemptId::new(),
+        },
+    };
+    let registered = fixture
+        .resources()
+        .apply_work_mutation(&WorkCommand {
+            session_id: fixture.thread_id(),
+            recipient_lifecycle: admission.lifecycle,
+            mutation_id: "register-old-task".into(),
+            action: WorkAction::RegisterAdmission {
+                admission: admission.clone(),
+            },
+        })
+        .await
+        .unwrap();
+    assert_eq!(registered.decision, WorkDecision::Accepted);
+    let snapshot = load(&fixture).await;
+    let claimed = fixture
+        .resources()
+        .apply_work_mutation(&WorkCommand {
+            session_id: fixture.thread_id(),
+            recipient_lifecycle: admission.lifecycle,
+            mutation_id: "claim-old-task".into(),
+            action: WorkAction::ClaimBatch {
+                guard: WorkGuard {
+                    expected_revision: snapshot.state.revision,
+                    expected_control_generation: snapshot.control.control_generation,
+                    execution: admission.execution.clone(),
+                },
+                batch_id: "old-batch".into(),
+                delivery_ids: snapshot.candidates[0].delivery_ids.clone(),
+            },
+        })
+        .await
+        .unwrap();
+    assert_eq!(claimed.decision, WorkDecision::Accepted);
+    let snapshot = load(&fixture).await;
+    let work_id = claimed.work_id.unwrap();
+    let blocked = fixture
+        .resources()
+        .apply_work_mutation(&WorkCommand {
+            session_id: fixture.thread_id(),
+            recipient_lifecycle: admission.lifecycle,
+            mutation_id: "block-old-task".into(),
+            action: WorkAction::BlockWork {
+                expected_revision: snapshot.state.revision,
+                target: WorkTarget {
+                    work_id: work_id.clone(),
+                    expected_work_revision: snapshot.state.works[&work_id].revision,
+                },
+                reason: "reason budget exhausted".into(),
+                recovery_condition: "explicit user authorization".into(),
+            },
+        })
+        .await
+        .unwrap();
+    assert_eq!(blocked.decision, WorkDecision::Accepted);
+    let snapshot = load(&fixture).await;
+    fixture
+        .resources()
+        .apply_session_control(&ControlCommand {
+            session_id: fixture.thread_id(),
+            command_id: "old-execution-ended".into(),
+            expected_lifecycle: snapshot.control.lifecycle,
+            expected_revision: snapshot.control.revision,
+            expected_control_generation: snapshot.control.control_generation,
+            action: ControlAction::ObserveAttempt { target: None },
+        })
+        .await
+        .unwrap();
+
+    let (restored, inbox) = mailbox(&fixture, fixture.resources());
+    restored.refresh_durable().await.unwrap();
+    let before = load(&fixture).await;
+    assert!(before.blocked);
+    assert!(before.control.attempt.is_none());
+    assert!(!restored.publish_next_durable().await.unwrap());
+    assert!(inbox.queue().is_empty());
+    let request = input(&restored, "continue using history, not the old execution");
+    let receipt = restored.enqueue_durable(&request).await.unwrap();
+    let after = load(&fixture).await;
+    assert!(!after.blocked);
+    assert_eq!(after.state.works[&work_id].stage, WorkStage::Abandoned);
+    assert_eq!(after.state.budgets, before.state.budgets);
+    assert_eq!(after.control, before.control);
+    assert_eq!(after.candidates.len(), 1);
+    assert_eq!(receipt.publication_generations.len(), 1);
+    let messages = inbox.queue().drain_all();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(
+        messages[0].message().unwrap().id().as_uuid().to_string(),
+        request.input_id
+    );
+    let (replayed, _) = mailbox(&fixture, fixture.resources());
+    let replay = replayed.enqueue_durable(&request).await.unwrap();
+    assert_eq!(receipt.work_receipts, replay.work_receipts);
+    assert_eq!(load(&fixture).await.state, after.state);
+}
+
+#[tokio::test]
 async fn initial_prompt_publishes_only_selected_input_without_cancelling_its_attachment() {
     let fixture = TestSession::open().await;
     let (mailbox, inbox) = mailbox(&fixture, fixture.resources());

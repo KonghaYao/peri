@@ -65,6 +65,15 @@ pub(crate) async fn begin(
     };
     if receipt.stage != Some(WorkStage::ActReady) {
         state.frozen = true;
+        if receipt.stage == Some(WorkStage::Blocked) {
+            if let Some(error) = super::work_reason::budget_exhaustion(
+                &snapshot.state,
+                &target.work_id,
+                peri_acp_types::error::WorkBudgetKind::Dispatches,
+            ) {
+                return Err(anyhow::Error::new(error));
+            }
+        }
         return Err(anyhow::anyhow!("dispatch budget blocked before effect"));
     }
     let target = WorkTarget {

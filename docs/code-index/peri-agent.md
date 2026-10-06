@@ -59,6 +59,10 @@ Emscripten 最小入口见 [`peri-wasm`](peri-wasm.md)：复用本 crate 的 `ru
 
 `tool_dispatch/execution.rs` 保留工具返回的 typed `UserRejected`；MCP Agent 在批准前拒绝明确表示未启动子代理，拒绝理由作为 error tool result 继续交给模型，不能被 boxed 字符串误分类为未知副作用。没有可信分类的普通工具失败仍冻结并保留 OutcomeUnknown。
 
+`work_reason.rs`、`work_dispatch.rs`、`work_receive.rs` 和 `work_boundary.rs` 对已确认的持久预算阻塞提取预算类别、已用量与上限，经 `peri-acp-types/src/error.rs` 的 `WorkBudgetExhausted` 保留至安全失败投影，不公开任意内部原因。预算策略与默认语义循环上限统一引用 `peri-acp-types/src/session_resources/work/policy.rs`，错误投影本身仍不自动重置或解阻。
+
+`session/user_input_mailbox/staging.rs` 将真实新输入的空闲新任务发布与自动历史扫描分开；新任务发布固定无 attempt 预期和控制代际，不接管并发新执行。`peri-acp-types/src/session_resources/work/user_input.rs` 在显式选择中放弃已退出的当前生命周期旧 processing，并按完整指纹升级旧默认预算；`work/query.rs` 不让已被放弃批次的旧终态交付责任绑架新任务。未知 mutation、原 invocation 和终态 ACK 证据不被清除。用户最终验收见 [active P0](../../spec/issues/2026-10-06-p0-agent-budget-interruption.md)。
+
 `session/subagent/background.rs::local_other_diagnostic` 将后台本地失败映射为 allowlist 静态诊断码；不输出任意错误文本、模型请求或凭据。work mutation 拒绝另记录结构化 decision/revision，诊断不改变执行、授权或恢复裁决。
 
 `session/user_input_mailbox.rs` 及其子模块负责持久发布、withdraw 与 SDK run 的精确观察；它不再是执行准入者。`session/subagent/factory/cold.rs` 根据子会话自己的 frozen 数据、保存的委托身份和授权上限重建运行环境，不依赖活跃父 runtime 或根会话 persona。`agent/model_bridge.rs` 与 `peri-model` prepared-stream 端口将检查点和实际 HTTP 请求绑定，不能用脱敏诊断快照代替发送正文。

@@ -70,6 +70,14 @@ pub(super) async fn fixture(
     llm: Arc<dyn ReactLLM + Send + Sync>,
     tools: Vec<Arc<dyn BaseTool>>,
 ) -> ProductionFixture {
+    fixture_with_input(llm, tools, &"full durable input ".repeat(5000)).await
+}
+
+pub(super) async fn fixture_with_input(
+    llm: Arc<dyn ReactLLM + Send + Sync>,
+    tools: Vec<Arc<dyn BaseTool>>,
+    input: &str,
+) -> ProductionFixture {
     let bound = TestSession::open().await;
     let session = Session::new(
         Arc::from("/tmp/rcra-production-test"),
@@ -78,7 +86,7 @@ pub(super) async fn fixture(
     );
     *session.transcript().write() =
         MessageTranscript::new().with_persistence(bound.resources(), bound.thread_id());
-    let initial = BaseMessage::human("full durable input ".repeat(5000));
+    let initial = BaseMessage::human(input);
     session
         .queue()
         .push(QueuedMessage::prompt(MessageSource::UserInput, initial));

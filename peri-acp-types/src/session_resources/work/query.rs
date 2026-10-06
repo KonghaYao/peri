@@ -2,6 +2,10 @@ use super::*;
 use crate::session::MessageRequirement;
 use crate::session_resources::ControlStatus;
 
+#[cfg(test)]
+#[path = "terminal_query_test.rs"]
+mod terminal_query_test;
+
 impl WorkSnapshot {
     pub fn from_state(query: &WorkQuery, control: ControlState, state: WorkState) -> Self {
         let blocked = control.status != ControlStatus::Active
@@ -144,11 +148,37 @@ impl WorkState {
     pub fn has_pending_terminal_obligations_for(&self, lifecycle: u64) -> bool {
         self.terminal_obligations.keys().any(|admission_id| {
             !self.terminal_acknowledgements.contains_key(admission_id)
-                && self
-                    .admissions
-                    .get(admission_id)
-                    .is_none_or(|record| record.admission.lifecycle == lifecycle)
+                && self.admissions.get(admission_id).is_none_or(|record| {
+                    record.admission.lifecycle == lifecycle
+                        && !self.admission_processing_superseded(&record.admission)
+                })
         })
+    }
+
+    fn admission_processing_superseded(&self, admission: &WorkAdmission) -> bool {
+        let mut abandoned = false;
+        for batch in self.batches.values().filter(|batch| {
+            batch.recipient_lifecycle == admission.lifecycle
+                && batch.execution == admission.execution
+        }) {
+            let mut found_work = false;
+            for work in self
+                .works
+                .values()
+                .filter(|work| work.batch_id == batch.batch_id)
+            {
+                found_work = true;
+                match work.stage {
+                    WorkStage::Abandoned => abandoned = true,
+                    WorkStage::Settled => {}
+                    _ => return false,
+                }
+            }
+            if !found_work {
+                return false;
+            }
+        }
+        abandoned
     }
 
     pub fn has_pending_work_for(&self, lifecycle: u64) -> bool {
