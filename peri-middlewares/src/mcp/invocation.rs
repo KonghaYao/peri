@@ -98,24 +98,14 @@ impl McpInvocation {
     }
 
     pub(crate) async fn prepare(&self) -> Result<(), InvocationError> {
-        for _ in 0..3 {
-            let snapshot = self.snapshot().await?;
-            self.validate_record(&snapshot)?;
-            if snapshot.control.lifecycle != self.lifecycle
-                || snapshot.control.status != ControlStatus::Active
-            {
-                return Err(InvocationError::NotPrepared);
-            }
-            let command = self.command(WorkAction::PrepareInvocation {
-                expected_revision: snapshot.state.revision,
-                intent: (*self.intent).clone(),
-            })?;
-            match commit(self.resources.as_ref(), &command).await {
-                Err(InvocationError::Rejected(WorkRejection::StaleRevision)) => continue,
-                result => return result.map(|_| ()),
-            }
+        let snapshot = self.snapshot().await?;
+        self.validate_record(&snapshot)?;
+        if snapshot.control.lifecycle != self.lifecycle
+            || snapshot.control.status != ControlStatus::Active
+        {
+            return Err(InvocationError::NotPrepared);
         }
-        Err(InvocationError::Rejected(WorkRejection::StaleRevision))
+        Ok(())
     }
 
     pub(crate) fn request_meta(

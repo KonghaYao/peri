@@ -247,8 +247,10 @@ async fn real_sql_prepare_preserves_same_work_link_and_wire_identity() {
         "owner-1",
     )
     .unwrap();
+    let before = fixture.snapshot().await;
     invocation.prepare().await.unwrap();
     let snapshot = fixture.snapshot().await;
+    assert_eq!(snapshot.state, before.state);
     assert_eq!(
         snapshot.state.invocations["invocation-1"]
             .work_id
@@ -264,6 +266,30 @@ async fn real_sql_prepare_preserves_same_work_link_and_wire_identity() {
         metadata.0 .0[INVOCATION_META_KEY]["initiatorSessionId"],
         "mcp-session"
     );
+}
+
+#[tokio::test]
+async fn concurrent_dispatch_validation_does_not_mutate_session_revision() {
+    let fixture = Fixture::new().await;
+    let invocation = Arc::new(
+        McpInvocation::from_context(
+            &fixture.context(),
+            &fixture.input,
+            "mcp__workspace__Bash",
+            "owner-1",
+        )
+        .unwrap(),
+    );
+    let before = fixture.snapshot().await;
+    let mut validations = tokio::task::JoinSet::new();
+    for _ in 0..16 {
+        let invocation = Arc::clone(&invocation);
+        validations.spawn(async move { invocation.prepare().await });
+    }
+    while let Some(result) = validations.join_next().await {
+        result.unwrap().unwrap();
+    }
+    assert_eq!(fixture.snapshot().await.state, before.state);
 }
 
 #[tokio::test]
