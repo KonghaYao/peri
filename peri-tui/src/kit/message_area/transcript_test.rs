@@ -126,6 +126,126 @@ fn local_publication_and_same_length_replacement_keep_old_version() {
 
 #[test]
 #[serial_test::serial]
+fn bridge_publication_after_local_fold_updates_resident_and_appended_entries() {
+    use crate::kit::acp_events::{BridgeState, SessionPhase, push_view_models};
+    use crate::kit::acp_types::CurrentTurn;
+    use crate::kit::atoms::{TRANSCRIPT_PUBLICATION, VIEW_MODELS};
+    use crate::kit::tui_render_unit::{EntryStatus, FoldState, TuiReasoningBlock};
+
+    let context = context();
+    crate::kit::acp_events::push_view_models_for_reset();
+    let mut bubble = TuiAssistantBubble {
+        text: "before".into(),
+        reasoning: Some(TuiReasoningBlock {
+            text: "reasoning body".into(),
+            fold: FoldState::Collapsed,
+            status: EntryStatus::Completed,
+            is_running: false,
+            started_at: None,
+            duration_ms: Some(1000),
+        }),
+        message_id: Some("fold-collision".into()),
+        started_at: None,
+        duration_ms: None,
+        content_hash: 0,
+    };
+    bubble.recompute_hash();
+    let mut bridge = BridgeState {
+        variant: 0,
+        committed: im::Vector::from(vec![TuiRenderUnit::TuiAssistantBubble(Arc::new(bubble))]),
+        current_turn: CurrentTurn::new(),
+        phase: SessionPhase::Idle,
+        popup_kind: None,
+        generation: 0,
+        active_session_id: String::new(),
+        compact_just_completed: false,
+        last_submitted_text: None,
+        last_pushed_text_len: 0,
+        last_pushed_reasoning_len: 0,
+        last_successful_todos: None,
+        last_successful_todo_sequence: None,
+        next_todo_sequence: 0,
+        todo_call_inputs: Default::default(),
+        turn_generation: 0,
+        last_prompt_generation: 0,
+        current_request_id: None,
+        pending_cache_usage: None,
+        publication_intent: Default::default(),
+        folded_history: Default::default(),
+    };
+    let grid = GridSpec::grid_for(80);
+    let mut transcript = Transcript::default();
+    let mut caches = Vec::new();
+    push_view_models(&mut bridge);
+    for fold_count in [1, 2] {
+        for _ in 0..fold_count {
+            let view_models = VIEW_MODELS.state();
+            let mut snapshot = view_models.write();
+            assert_eq!(
+                super::super::entry_nav::apply_fold_toggle(&mut snapshot, 0, false),
+                ratatui_kit::prelude::EventResult::Consumed,
+            );
+        }
+        let folded = VIEW_MODELS.state().read().clone();
+        transcript.prepare(
+            &folded,
+            &TRANSCRIPT_PUBLICATION.get(),
+            &mut caches,
+            grid,
+            grid.line_width(),
+            context.clone(),
+            10,
+            0,
+            0,
+            100,
+        );
+        let TuiRenderUnit::TuiAssistantBubble(bubble) = &bridge.committed[0] else {
+            panic!("expected assistant bubble");
+        };
+        let mut replacement = bubble.as_ref().clone();
+        replacement.text = format!("updated-after-{fold_count}");
+        replacement.recompute_hash();
+        bridge
+            .committed
+            .set(0, TuiRenderUnit::TuiAssistantBubble(Arc::new(replacement)));
+        bridge
+            .committed
+            .push_back(TuiRenderUnit::TuiUserBubble(TuiUserBubble::new(format!(
+                "appended-{fold_count}"
+            ))));
+        push_view_models(&mut bridge);
+        let published = VIEW_MODELS.state().read().clone();
+        assert!(published.generation > folded.generation);
+        let index = transcript.prepare(
+            &published,
+            &TRANSCRIPT_PUBLICATION.get(),
+            &mut caches,
+            grid,
+            grid.line_width(),
+            context.clone(),
+            10,
+            0,
+            0,
+            100,
+        );
+        assert_eq!(index.slot_count(), published.items.len());
+        let copied = extract_visual_range_index(
+            &index,
+            (0, 0),
+            (index.total_visual().saturating_sub(1), 80),
+            grid.line_width(),
+            Some(&published.items),
+            Some(grid),
+        )
+        .expect("complete transcript copy");
+        assert!(copied.contains(&format!("updated-after-{fold_count}")));
+        assert!(copied.contains(&format!("appended-{fold_count}")));
+    }
+    crate::kit::acp_events::push_view_models_for_reset();
+}
+
+#[test]
+#[serial_test::serial]
 fn eviction_releases_old_frame_payload_and_cold_unicode_copy_matches_warm() {
     let context = context();
     let text = "# 中文🙂\n\n- first item\n- 第二项\n\n```rust\nlet answer = 42;\n```\n\n| left | right |\n| --- | --- |\n| 中文 | 🙂 |";

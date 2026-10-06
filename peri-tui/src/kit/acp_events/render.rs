@@ -147,7 +147,12 @@ pub(crate) fn push_view_models(state: &mut BridgeState) {
         __t = peri_time::monotonic_now();
     }
 
-    state.generation = state.generation.wrapping_add(1);
+    let view_models = VIEW_MODELS.state();
+    let mut published_snapshot = view_models.write();
+    state.generation = state
+        .generation
+        .max(published_snapshot.generation)
+        .wrapping_add(1);
     #[cfg(test)]
     crate::kit::acp_bridge::observe_publication(crate::kit::acp_bridge::PublicationObservation {
         generation: state.generation,
@@ -175,8 +180,8 @@ pub(crate) fn push_view_models(state: &mut BridgeState) {
         items,
         generation: state.generation,
     };
-    tracing::trace!(target: "frozen_diag", gen = state.generation, "bridge: acquiring VIEW_MODELS write lock");
-    *VIEW_MODELS.state().write() = snapshot;
+    *published_snapshot = snapshot;
+    drop(published_snapshot);
     #[cfg(test)]
     crate::kit::acp_bridge::observe_perf(
         crate::kit::acp_bridge::PerfCounter::StageWriteNs,
