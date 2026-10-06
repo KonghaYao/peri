@@ -45,6 +45,8 @@ Auto-follow effect 将纯内部记账用无通知写入，真实滚动/follow �
 消息区维护持久 logical/visual 树索引；publication 提供带前后 generation 的变化后缀提示，
 连续版本只更新变化 slot。版本不连续、reset、历史结构变化或全局布局失效允许完整重建，
 不能把不可靠提示用于跳过正确性失效。无变化帧复用历史索引，活动动画仅访问可见集合；
+本地折叠与 bridge 发布在同一 VIEW_MODELS 写锁内递增已发布版本；bridge 不得仅递增
+私有计数而与本地版本碰撞。构建期间前驱发生变化时，变化提示不匹配则完整失效。
 Global visual 或 logical 坐标先定位 slot，再查询 slot-local 行高映射。
 production 不构建 transcript-wide aggregate wrap map。
 

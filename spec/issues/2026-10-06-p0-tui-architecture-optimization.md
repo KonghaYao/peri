@@ -1,6 +1,6 @@
 # P0：TUI 架构优化——增量渲染、缓存预算与客户端职责收口
 
-**状态**：Open；A–E 主体重构及 Plugin marketplace 写盘余项已补正，通过库测试及独立 subagent 简单复验；release/CPU/heap/RSS 与人工交互验收未完成。
+**状态**：Open；A–E 主体重构及 code review 回退已修复并通过库测试，正在迁移到当前工作区；release/CPU/heap/RSS 与人工交互验收未完成。最新验证以第 10 节为准。
 
 **优先级**：P0（2026-10-06 用户明确指定）。这是工作优先级，不表示已证明 TUI 是现场 CPU/RSS 事故主因。
 
@@ -274,3 +274,53 @@ cache root 和用户目录保留。宿主全局 catalog 不伪装 project scope�
   外层详情源解析仍扫描 VM。轻量高度索引随逻辑行增长，没有常数总内存保证。
 - 未实施预取；可见超大条目和冷区复制瞬时工作集须现场观测，缓存预算不等于进程预算。
 - 真实键鼠、焦点、拖选、图片及完整 wire/lifecycle 现场验收未运行；未因此关闭 P0。
+
+## 10. Code review 补正与工作区迁移
+
+用户要求独立 code review 后直接修复、不再逐项询问；原简单验收不替代后续 code review。
+两名 reviewer 对 `129b40c1` 相对初始基点只读审查，确认 1 个 P1、3 个 P2；
+修复复验又发现 update/uninstall 丢失所选安装身份这一实际阻断，继续补正而非降级忽略。
+
+- **发布版本碰撞**：本地折叠和 bridge 私有计数曾产生同 generation 的不同内容，
+  Transcript 因而跳过更新。`0a150e03` 在 VIEW_MODELS 写锁内从已发布版本递增，
+  覆盖一/多次真实折叠后发布、已驻留正文更新和历史追加，不仅测试孤立计数。
+- **Plugin list/toggle 契约**：展示来源与真实 scope 分离；宿主核实安装记录，
+  UI 消费 nullable scope 与显式管理能力，未管理/歧义来源显示原因，不伪装 user。
+- **Scoped mutation 落盘顺序**：受信 session cwd 贯穿 install/update/uninstall，
+  非绝对/缺失目录、无效 scope 和不匹配记录在复制或修改安装记录前失败。
+  project/local 不改用户 pluginConfigs；enable 将既有 false 明确写回 true。
+- **等待与退出**：Plugin/marketplace 请求有 10 秒等待上限；超时说明结果未知，
+  不自动重试。Esc 只取消客户端等待并清票据，随后可正常退出，不宣称服务端已取消；
+  真实 session lifecycle 身份拒绝同 ID 重载后的迟到结果。
+- **所选安装身份**：所有已安装项操作发送 scope；宿主及 installer 按 ID + scope +
+  受信项目目录精确定位，不优先猜测 scoped 记录。同 ID 的多个安装根须互不误操作；
+  CLI 的 scope 也必须显式传递，而不能硬编码 user。
+
+挂载测试验证实际面板事件 handler 与错误反馈，不新增视觉快照框架；仅测试 feature
+启用 ratatui-kit test-util，runtime 依赖不变。只读 catalog cache 由测试 guard 暂存、
+置空并恢复，避免挂载读取真实用户目录。未覆盖库内私有 InputRuntime 或人工终端操作。
+
+`892981ac` 集成 Plugin 读写契约、真实安装身份、CLI context 和有界等待；与
+`0a150e03` 分步提交，check/clippy/fmt/layer imports/typos hooks 全部通过。
+独立 reviewer 只读复验确认原四项与追加的身份阻断已消除；其最后复验时尚未读到
+全量 TUI/CLI 最终日志，主 agent 随后核对最终退出状态和非零测试数如下。
+
+| 补正后串行验证 | 结果 |
+| --- | --- |
+| `test --locked -p peri-tui --lib` | 1657 passed，0 failed，6 ignored |
+| `test --locked -p peri-middlewares --lib -- plugin::installer` | 42 passed |
+| `test --locked -p peri-acp --lib -- host::requests::tests::plugin` | 12 passed，包含 scope/identity 与既有 Plugin 请求回归 |
+| `test --locked -p peri-tui --bin peri -- cli_plugin::tests::` | 6 passed |
+| `test --locked -p peri-tui --lib -- bridge_publication_after_local_fold` | 1 passed，已包含在全量统计中 |
+| `test --locked -p peri-tui --lib -- kit::service_snapshot::session_services::tests::` | 4 passed，已包含在全量统计中 |
+
+公共端口首轮修改后的 doc tests 通过：ACP 无可执行示例，ACP types 1 passed/2 ignored，
+middlewares 3 ignored；最终 scope 身份签名补正后需再次核对。补正修改的源码/测试均
+不超过 1000 行，最终 source diff-check 与 workspace fmt-check 通过。
+
+当前工作区已在其他任务中推进 WorkState 重构，不能用旧基点直接覆盖；迁移保留其
+提交及无关 WIP。原任务留下的未跟踪 issue/audit 文档已逐文件与初始提交比对，并
+与原工作区 staged/unstaged 差异一并备份；只处理本任务自己的重复文件和路由 hunk，
+不 stash/reset/clean 无关改动。合并及迁移后验证另记实际结果，不把准备完成写成迁移成功。
+
+跨文件 I/O 仍非事务，release/CPU/heap/RSS 未完成，不因此关闭 P0。
