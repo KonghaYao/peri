@@ -1,6 +1,6 @@
 # P0：TUI 架构优化——增量渲染、缓存预算与客户端职责收口
 
-**状态**：Open；任务范围已定稿，实施与行为/性能验收未开始。
+**状态**：Open；A–E 主体重构及 Plugin marketplace 写盘余项已补正，通过库测试及独立 subagent 简单复验；release/CPU/heap/RSS 与人工交互验收未完成。
 
 **优先级**：P0（2026-10-06 用户明确指定）。这是工作优先级，不表示已证明 TUI 是现场 CPU/RSS 事故主因。
 
@@ -13,15 +13,16 @@
 让 TUI 的稳态和局部变化计算不再随全部历史扫描，让可重建渲染数据有明确内存预算，
 收敛主消息/详情的重复缓存规则，并明确客户端与宿主资源所有者的职责。
 
-本轮只读源码复核，未运行构建、测试、perf 或 heap 采样。可以确认现行计算、复制和
-依赖路径，不能确认其现场 CPU 占比、内存放大倍数、泄漏或收益百分比。
+定稿时仅只读源码复核；后续实施与测试结果见第 9 节。源码、确定性测试及 debug
+publication probe 可以支持结构与局部行为结论，不能确认现场 CPU 占比、内存放大倍数、
+泄漏或整体收益百分比。
 同进程 backend WorkState 的资源问题继续由[进程 P0](2026-10-06-p0-dev-peri-high-cpu-memory.md)管理。
 
 已经存在的 50ms 流式合帧、lazy projection、Arc 正文、增量 Markdown、slot-local
 wrap map、后台流节流和详情持久缓存必须保留；不将旧审计中的已修问题重新登记。
 现行设计以 [TUI 数据流](../../docs/design/tui-acp-data-flow.md)和
 [流式 Markdown 性能设计](../../docs/design/tui-streaming-markdown-performance.md)为准。
-本 issue 中的新结构是待实施目标，不提前改写现行设计为已实现。
+第 2 节保留重构前审查快照；目标及关闭条件不因阶段交付自动视为全部达成。
 
 ## 2. Astra 裁决与现行证据
 
@@ -164,8 +165,112 @@ git diff --check
 
 实施影响结构时同步 `peri-tui/CLAUDE.md`、`docs/code-index/peri-tui.md` 与
 `docs/design/tui-streaming-markdown-performance.md`；协议/能力改变再核对 TUI 数据流设计和
-architecture contracts。当前仅任务定稿，现行设计继续如实描述每帧索引，不提前修改规范。
+architecture contracts。现行设计已同步持久索引、共享缓存、预算例外与 ACP 能力入口，
+不得将未完成的性能采样写成设计保证。
 阶段进度与性能记录留在本 issue，关闭前按 `DOC-HISTORY-001` 收口，不复制到权威设计。
 
-本轮交付只包含 P0 issue、关联去重路由与文档检查；未修改运行代码，未执行 Rust 测试、
-构建或性能采样，不把 Astra 静态复核表述为实验验证。
+最初定稿交付仅包含 P0 issue、关联去重路由与文档检查。以下另记后续实施，
+不把 Astra 静态复核表述为实验验证。
+
+## 9. 2026-10-06 分阶段重构记录
+
+按用户要求，在独立 worktree 并行实施、大幅重构、中等范围测试，再由独立 subagent
+进行简单验收；未要求本轮完成全量现场性能实验或 E2E。原工作区未用于本轮源代码编辑，
+既有未提交工作不合并、不覆盖。
+
+- worktree：`/Users/konghayao/code/ai/peri-tui-architecture-20261006`。
+- 分支：`refactor/tui-architecture-p0-20261006`，基点 `0c6d58d709af11596e9f5b9a8796d31424db7181`。
+- `ed877cee`：固定 P0 契约及审计路由；`058e1184`：宿主能力和作用域权威；
+  `3bc88ff5`：TUI 持久布局、共享缓存和操作收口；`8c74215a`：简单验收阻断补正。
+  各阶段正常提交，未绕过 hooks；补正首次 fmt gate 失败，修正格式后全部 hooks 通过。
+
+### 已集成的结构与契约
+
+- A：publication 携带 generation/changed-from；Transcript 持久高度树以局部更新维护布局，
+  暖态复用旧索引。旧布局仅 Weak 引用可淘汰重型行，冷区复制按 slot 暂态恢复。
+- B：主消息与详情共用 `EntryRenderCache` 的失效规则；详情以 usize 高度和 viewport
+  按需取行替代全历史 ScrollView buffer，保留既有滚轮路由与节流。
+- C：主消息重型缓存预算 16 MiB，详情 8 MiB，按 owned String/Vec capacity、
+  Markdown 块及行数据递归估算 retained heap，同 cache 内 Arc 去重。
+  canonical 历史、轻量高度索引、可见超大条目、复制暂态、allocator 开销及全局高亮缓存
+  不计入此预算；跨 cache 共享分配保守重复计量。这不是 RSS 上限。
+- D：主/后台工具卡共用幂等完成规则，迟到 start 不复活已停止回合；Plugin 已安装项
+  键鼠操作共用请求与 ticket，拒绝 session/reset 迟到响应，反馈失败。
+- E：TUI 不再持具体 Cron scheduler/MCP pool；服务投影经 ACP，并以 session ID +
+  生命周期 generation 隔离 last-good 数据。Cron 增 `cron/list`、`cron/toggle`、
+  `cron/remove`，由活动会话环境提供 scheduler 与 workspace scope；缺能力显式失败。
+  Plugin toggle 的 user/project/local 配置由宿主持久化，项目路径取受信会话 cwd；
+  local settings 纳入宿主 loader，不再由 UI 独立写 toggle 设置。
+
+### 已完成验证
+
+以下命令均通过仓库 patched Cargo 脚本运行、使用 `--locked`；共享构建产物仅用于
+减少编译时间。初次编译发现 publication 缺 Copy，初次新测试把折行后的逐字符 Span
+误作完整单词；已修正实现及语义断言，再运行最终测试，并非忽略失败。
+
+| 验证 | 最终结果 |
+| --- | --- |
+| `test --locked -p peri-tui --lib` | 补正后最终 1648 passed，0 failed，6 ignored |
+| `test --locked -p peri-middlewares --lib -- plugin::installer` | 34 passed |
+| `test --locked -p peri-middlewares --lib -- plugin::loader` | 62 passed |
+| `test --locked -p peri-acp --lib -- cron_tests::endpoint_tests` | 2 passed |
+| `test --locked -p peri-acp --lib -- marketplace_mutation_tests` | 5 passed |
+| `test --locked -p peri-tui --lib -- kit::panels::plugin::operation::tests --test-threads=1` | 8 passed，已包含在 TUI 全量统计中 |
+| 提交 hooks | fmt、Cargo check、changed-crates clippy、typos、layer imports 通过 |
+| 结构检查 | 累计 65 个已修改 Rust 源码/测试文件均不超过 1000 行；layer gate 22 条规则、0 违规；`git diff --check` 通过 |
+
+确定性用例覆盖持久树旧版本、Weak 回收、冷/暖 Unicode 复制、缓存预算/恢复、
+retained-bytes 饱和与共享计量、详情虚拟滚动、session ABA、操作迟到响应及 scoped settings。
+这些库测试不替代真实终端图片、拖选、焦点和端到端 transport 人工验收。
+
+### Debug publication probe：改善与回退均保留
+
+前后命令均为：
+
+```bash
+./scripts/cargo-rmcp-patched.sh test --locked -p peri-tui --lib -- perf_probe_push_view_models --ignored --nocapture
+```
+
+基线为重构前源码加原工作区既有 dirty 状态，源码基点同上述基点，test/debug profile；
+基线 binary SHA-256 为 `2199daaeea863301168b99c6f6d6fc5d15d0f5d42e4d76513eee7e6c6d5d4994`。
+Cargo.lock SHA-256 为 `dac72db776e1705fac780d4f9d70fc95066c10c66e0f540b9e2804df6269caa5`。
+下表为 N=1000 的暖态单次运行 mean，单位 μs/call；不是 release benchmark：
+
+| 场景 | 前 | 后 |
+| --- | ---: | ---: |
+| A_steady_push | 49.9 | 2.7 |
+| B_tool_started | 164.0 | 167.4 |
+| C_text_chunk16 | 169.9 | 187.1 |
+| C2_text_handler_only | 0.5 | 0.8 |
+| D_tool_lifecycle | 1012.3 | 1338.0 |
+| E_turn_committed | 49.5 | 3.6 |
+
+两个 probe 均 1 passed；后测与提交 hooks 时间重叠，存在系统负载干扰，未串行重复、
+未采置信区间，冷路径也未证明改善。只观察到稳态 publication 和 turn-commit 的局部收益，
+活动/工具路径没有整体变快，不能据此宣称 TUI 性能或内存问题已解决。
+
+### 简单验收与未完成项
+
+独立 subagent 只读抽查集成源码和最终日志，确认 Weak 淘汰/冷复制、详情共享缓存、
+session generation 隔离及 Cron scope；同时发现 marketplace 删除仍在 UI 本地写盘且吞错，
+首轮判定阻断，不把首轮验收写成 PASS。
+
+补正将 marketplace 增删刷新统一为 `PluginOperation` → ACP → 既有
+`PluginManagerPort`；新增 `marketplace/add`、`marketplace/remove`，复用 refresh。
+读写失败返回并记录日志，进入 UI operation error。目录清理排除用户本地 File/Directory
+source，且只允许 canonical cache root 的严格子目录；临时目录测试覆盖 `..`、外部 symlink、
+cache root 和用户目录保留。宿主全局 catalog 不伪装 project scope。
+已保留的只读 browse cache 及其宽松读错误处理尚未迁移；持久化后 cleanup 失败可能部分完成，
+此时返回失败而不是冒充整体成功。
+
+独立 subagent 最终复验结论为 **PASS（本轮简单验收）**：首轮阻断消除，未发现新阻断；
+复验包含只读源码抽查及上述最终测试日志独立核对，没有自行运行模型、E2E 或人工终端操作。
+主 agent 随后确认补正提交的 check、clippy、fmt、layer imports、typos hooks 全部通过。
+
+仍需在后续性能验收中验证或补齐：
+
+- 串行 release 前后重复采样，解释活动/工具 publication 回退；CPU/heap/RSS 归因仍空缺。
+- 历史结构/折叠、全局失效和缺失 hint 允许全量维护；详情 publication 仍遍历组内 slot，
+  外层详情源解析仍扫描 VM。轻量高度索引随逻辑行增长，没有常数总内存保证。
+- 未实施预取；可见超大条目和冷区复制瞬时工作集须现场观测，缓存预算不等于进程预算。
+- 真实键鼠、焦点、拖选、图片及完整 wire/lifecycle 现场验收未运行；未因此关闭 P0。
