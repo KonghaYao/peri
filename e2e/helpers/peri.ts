@@ -68,6 +68,7 @@ function allocateIsoHome(): string {
       language: "zh-CN",
       active_alias: "sonnet",
       providers: [{ id: "e2e", type: "openai", apiKey, baseUrl, models: { sonnet: model } }],
+      profiles: { sonnet: { provider: "e2e", model, effort: "medium" } },
     },
   }), { mode: 0o600 });
   ensureHomeShellCompat(isoHome);
