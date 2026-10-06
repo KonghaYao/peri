@@ -79,6 +79,7 @@
 - E2E 收尾修正了 MCP Agent 批准前明确拒绝被 boxed 字符串误分类为 OutcomeUnknown，以及动态 MCP 投影丢失源 pool 的 builtin 关闭策略、使技能正文重新可见的问题；批准/拒绝和 print/stdio 关闭矩阵真实通过（`run-2026-10-06T02-18-06`），未放宽拒绝、授权或正文隔离断言。
 
 - 全量 `run-2026-10-06T02-56-13` 首轮 27/38 文件通过，11 个文件失败；修复期间已中止重试，首轮 worker 报告保留，不计作全量通过。真实 Workflow journal 暴露 child 缺少 SDK 准入和 recipient lifecycle；待发送队列暴露草稿被提前发布；其余夹具中的旧工具名称、可见内部提醒假设及模型时延耦合正在按既定契约修正，不放宽原行为验收门槛。
+- 2026-10-06 本轮按用户要求收尾并停止继续修复：最新 L0 `run-2026-10-06T05-22-29` 首轮 11/11 全绿；header 工具卡定向通过，后台 agent/shell 阶段取得完成证据，但 fork 仍失败。后台已确认 `resolver_tool_not_found`，具体工具与 catalog 差异待核实；修复后的完整 release 未重跑，不标记全部验收完成。剩余问题与验收入口见 [TUI 执行失败、后台结算与恢复缺口](2026-10-06-tui-execution-failures.md)。
 
 ## 实施工作
 

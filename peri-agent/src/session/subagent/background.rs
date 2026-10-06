@@ -23,6 +23,58 @@ use crate::session::factory::{DeregisterRuntimeFn, RegisterRuntimeFn};
 use peri_acp_types::session_resources::{SessionMetaPatch, SessionResources};
 use peri_acp_types::thread::{AgentStatus, ThreadId};
 
+fn local_other_diagnostic(error: &anyhow::Error) -> &'static str {
+    use crate::agent::stages::work_ledger::WorkCommitError;
+    use crate::error::AgentError;
+
+    if let Some(error) = error.downcast_ref::<WorkCommitError>() {
+        return match error {
+            WorkCommitError::Rejected { .. } => "work_mutation_rejected",
+            WorkCommitError::Unknown { .. } => "work_mutation_unknown",
+            WorkCommitError::Frozen { .. } => "work_mutation_frozen",
+            WorkCommitError::InvalidReceipt { .. } => "work_receipt_invalid",
+            WorkCommitError::Resource(_) => "work_resource_error",
+        };
+    }
+    if let Some(error) = error.downcast_ref::<AgentError>() {
+        return match error {
+            AgentError::ToolNotFound(name) => match name.as_str() {
+                "Bash" => "resolver_bash_not_found",
+                "Agent" => "resolver_agent_not_found",
+                "mcp__workspace__Bash" => "resolver_workspace_bash_not_found",
+                "functions.Bash" => "resolver_functions_bash_not_found",
+                _ => "resolver_tool_not_found",
+            },
+            AgentError::ToolExecutionFailed { .. } => "resolver_tool_execution_failed",
+            AgentError::SerializationError(_) => "agent_serialization_error",
+            _ => "typed_agent_error",
+        };
+    }
+    if let Some(error) = error.downcast_ref::<serde_json::Error>() {
+        return match error.classify() {
+            serde_json::error::Category::Io => "json_io_error",
+            serde_json::error::Category::Syntax => "json_syntax_error",
+            serde_json::error::Category::Data => "json_data_error",
+            serde_json::error::Category::Eof => "json_eof_error",
+        };
+    }
+    match error.root_cause().to_string().as_str() {
+        "model invocation IDs are invalid" => "model_invocation_ids_invalid",
+        "MCP target has no trusted owner metadata" => "mcp_owner_metadata_missing",
+        "invocation owner metadata is incomplete" => "invocation_owner_metadata_incomplete",
+        "Blocked: MCP lifecycle owner unavailable" => "mcp_lifecycle_owner_unavailable",
+        "Blocked: exact MCP lifecycle resources unavailable" => "mcp_lifecycle_resources_missing",
+        "Blocked: durable trusted owner authorization missing" => "mcp_owner_authorization_missing",
+        "Blocked: durable owner authorization missing" => "mcp_owner_authorization_empty",
+        "Blocked: trusted MCP scope unavailable" => "mcp_scope_unavailable",
+        "Blocked: owner discovery timeout" => "mcp_owner_discovery_timeout",
+        "Blocked: invalid owner capability response" => "mcp_owner_capability_invalid",
+        "response work missing" => "response_work_missing",
+        "response request identity missing" => "response_request_identity_missing",
+        _ => "unclassified_local_other",
+    }
+}
+
 // ─── 后台运行 ────────────────────────────────────────────────────────────────
 
 /// 后台子 agent：tokio::spawn 包装运行 + TaskManager 注册（S3.1 gate）+ 收尾。
@@ -164,6 +216,24 @@ pub(super) async fn spawn_background_subagent(
         );
 
         let loop_result = run_react_loop(context, max_iterations).await;
+        if let LoopResult::Error(crate::error::AgentError::Other(error)) = &loop_result {
+            tracing::error!(
+                child_thread_id = %child_thread_id_for_task,
+                diagnostic = local_other_diagnostic(error),
+                "background child local execution failed"
+            );
+            if let Some(crate::agent::stages::work_ledger::WorkCommitError::Rejected { receipt }) =
+                error.downcast_ref::<crate::agent::stages::work_ledger::WorkCommitError>()
+            {
+                tracing::error!(
+                    child_thread_id = %child_thread_id_for_task,
+                    decision = ?receipt.decision,
+                    before_revision = receipt.before_revision,
+                    revision = receipt.revision,
+                    "background child work mutation rejected"
+                );
+            }
+        }
         if let Err(error) = super::close::settle_explicit_close(
             &session,
             matches!(&loop_result, LoopResult::Interrupted),
@@ -364,4 +434,28 @@ pub(super) async fn spawn_background_subagent(
     let _ = reg_tx.send(Ok(()));
 
     Ok(())
+}
+
+#[cfg(test)]
+mod local_diagnostic_tests {
+    use super::local_other_diagnostic;
+
+    #[test]
+    fn diagnostic_never_projects_arbitrary_error_text() {
+        let error = anyhow::anyhow!("provider body contains secret and request payload");
+        assert_eq!(local_other_diagnostic(&error), "unclassified_local_other");
+    }
+
+    #[test]
+    fn diagnostic_preserves_only_resolver_type_and_known_local_code() {
+        let error = anyhow::Error::new(crate::error::AgentError::ToolNotFound(
+            "untrusted tool name".into(),
+        ));
+        assert_eq!(local_other_diagnostic(&error), "resolver_tool_not_found");
+        let error = anyhow::anyhow!("Blocked: exact MCP lifecycle resources unavailable");
+        assert_eq!(
+            local_other_diagnostic(&error),
+            "mcp_lifecycle_resources_missing"
+        );
+    }
 }

@@ -1,6 +1,6 @@
 # TUI 执行失败、后台结算与恢复缺口
 
-状态：调查完成；并发 MCP 准入定向测试通过，真实四路 Read 待验收，其余问题待实施。
+状态：本轮收尾；并发 MCP 准入定向测试通过，真实四路 Read 与完整 release E2E 待验收，其余问题待实施。按用户要求停止继续修复，保留问题和证据，不标记全部完成。
 
 ## 证据与边界
 
@@ -8,6 +8,14 @@
 - 只读核对：本机 `~/.peri/threads/threads.db` 的 work state、invocation 与 mutation receipt；未修改用户会话、控制状态或执行注册表。
 - 本文时间统一用 2026-10-06 UTC；北京时间为 UTC + 8。
 - active issue 仅记录尚需验收或实施的工作，不替代设计与标准。
+
+### E2E 收尾结果（2026-10-06）
+
+- 最新 L0：`run-2026-10-06T05-22-29` 首轮 11/11 文件通过，零失败、零跳过、零重试。
+- 工具卡：`run-2026-10-06T05-05-05` 的 header 用例通过；同轮后台用例失败，因此该轮整体为 1/2，不能报告整轮通过。
+- 后台：`run-2026-10-06T05-14-29` 的 agent 和 shell 阶段已获得持久完成证据，fork 阶段超时；整个文件仍为失败。
+- 上次完整 release 首轮 `run-2026-10-06T02-56-13` 为 27/38，通过后续局部修复不能推算新的全量通过率。修复后的完整 release 尚未重跑。
+- 本轮不执行额外 SDK 独立测试、Native/WASM 构建或安装包验收。工作区内其他任务的修改不属于本轮提交范围。
 
 ## 1. 并发 Read 的冗余准入写入（已修复，真实运行待验收）
 
@@ -83,14 +91,31 @@ Agent 的 `CommitReasonResponseAndDispatchIntent` 与 `BeginDispatch` 已持久�
 任务专用订阅路径另有 `task_scope_meta_for`。
 需要核实通用配置与 task scope 订阅的能力边界，不能仅忽略错误或不断重连。
 
-## 5. internal error 可观测性缺口（待实施）
+## 5. internal error 可观测性缺口（后台诊断已补，完整覆盖待实施）
 
 `ExecutionFailure::from_agent_error` 对非模型错误输出安全通用提示。
 `v2_execute.rs` 的日志再使用同一 public projection，导致 “Check logs” 的指引指向同一句泛化提示。
 本次只能依靠持久 work reason 找到具体的 StaleRevision 与 child 恢复失败。
 
+收尾补丁在 `session/subagent/background.rs` 为本地 `Other` 增加 allowlist 静态诊断码；未知文本只记录固定分类，work mutation 拒绝只记录结构化 decision/revision，不输出原错误、请求、provider body 或凭据。两个相邻纯契约测试验证任意错误文本不外泄。本补丁只补后台失败诊断，不表示主执行错误分类已完整覆盖，也不改变 fork 执行行为。
+
 验收：保留用户侧脱敏消息，同时记录结构化、allowlist 的失败阶段与 rejection kind，
 不把任意 error cause、模型内容或凭据直接写入日志。
+
+## 6. 后台 fork 在响应提交前找不到工具（待修复）
+
+`run-2026-10-06T05-14-29` 的 fork 子会话 `01a10fa4-baff-7712-8bea-0efacdd915a8` 进入 `ReasonInFlight` 后失败。真实 Store 的最后阶段命令为 `BeginReason` accepted；没有 `CommitReasonResponseAndDispatchIntent` 命令或拒绝回执，随后仅记录终态义务、父 ACK 和 admission 结算。因此不能将该故障归因于阶段提交的 `StaleRevision`。
+
+隔离空历史会话的快速复现也失败；2026-10-06 05:31:22 UTC 的后台诊断明确记录 `resolver_tool_not_found`。这排除了“必须有旧父历史才失败”的假设，但尚未确认具体缺失工具名，不能判定是 child catalog 丢失工具、resolver 接线不一致，还是模型返回未声明名称。原冻结模型请求的有界直接探针返回 HTTP 200，不等同于真实流式 fork 成功。
+
+收尾状态：诊断进程和 subagent 已停止；未实施 fork/resolver 修复，未扩展 resume 授权规则，未修改持久 blocked/Unknown 数据。问题保留，不将任务终态 ACK、局部阶段完成或 L0 全绿冒充完整后台行为通过。
+
+后续验收：
+
+- [ ] 对齐失败工具名称、模型可见定义和 child 实际 catalog，明确最小修复点。
+- [ ] 修复后验证真实 fork 的工具执行、直接父 required delivery、Satisfied 批次与子终态 ACK；不放宽权限、恢复上限或副作用屏障。
+- [ ] `tests/subagent/bg-task-area.test.ts` 首轮完整通过，包含 agent、shell、fork 三阶段。
+- [ ] 重跑完整 `npm --prefix e2e run e2e:release`，所有文件通过且满足 flake 门禁，再更新主 active issue 的验收状态。
 
 ## 非主因与操作约束
 
