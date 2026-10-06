@@ -99,8 +99,14 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     // 确保所有 Markdown 色值随主题更新。
     let _palette = hooks.use_atom(&PALETTE_ATOM);
     let theme = hooks.use_atom(&peri_theme::atoms::THEME_ATOM);
-    let current_palette_key =
-        palette_markdown_key(&_palette.read(), theme.read().semantic.surface.sunken);
+    let current_palette_key = {
+        let current_theme = theme.read();
+        palette_markdown_key(
+            &_palette.read(),
+            current_theme.semantic.surface.sunken,
+            current_theme.component.markdown.text,
+        )
+    };
     // 订阅 TERMINAL_CAPS：NO_COLOR 时对可见行做颜色剥离（§12，G3 视口级 pass）。
     // 启动时探测一次后不再变化；订阅仅为语义完整（切换不重渲染也无副作用）。
     let caps = hooks.use_atom(&crate::kit::atoms::TERMINAL_CAPS);

@@ -13,6 +13,7 @@ use ratatui_kit::ratatui::text::Line;
 pub(super) fn palette_markdown_key(
     p: &ratatui_kit::prelude::Palette,
     surface_sunken: ratatui_kit::ratatui::style::Color,
+    markdown_text: ratatui_kit::ratatui::style::Color,
 ) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     p.fg.hash(&mut h);
@@ -21,6 +22,7 @@ pub(super) fn palette_markdown_key(
     p.accent.hash(&mut h);
     p.surface.hash(&mut h);
     surface_sunken.hash(&mut h);
+    markdown_text.hash(&mut h);
     p.border.hash(&mut h);
     p.success.hash(&mut h);
     p.warning.hash(&mut h);
@@ -276,4 +278,24 @@ fn test_markdown_line_cache_hit_with_empty_placeholder_keeps_cached_lines() {
 
     assert_eq!(cache.stable.len(), 1);
     assert_eq!(cache.stable[0].lines.len(), 1);
+}
+
+#[test]
+fn test_markdown_key_tracks_text_color_and_code_background() {
+    use ratatui_kit::ratatui::style::Color;
+
+    let palette = ratatui_kit::prelude::Palette::default();
+    let original = palette_markdown_key(&palette, Color::Black, Color::White);
+    assert_ne!(
+        original,
+        palette_markdown_key(&palette, Color::Black, Color::Green)
+    );
+    assert_ne!(
+        original,
+        palette_markdown_key(&palette, Color::Blue, Color::White)
+    );
+    assert_eq!(
+        original,
+        palette_markdown_key(&palette, Color::Black, Color::White)
+    );
 }

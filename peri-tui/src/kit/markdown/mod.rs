@@ -17,6 +17,7 @@
 //! - `convert`：convert_to_segments（块级分发）
 //! - `scan`：图片前置扫描 + 占位替换（P0，T2）
 
+mod boundary;
 mod code_block;
 mod convert;
 mod heading;
@@ -129,52 +130,7 @@ fn convert_parsed_piece(
 }
 
 fn stable_chunk_end(input: &str, start: usize) -> usize {
-    let mut end = start;
-    let mut cursor = start;
-    while let Some(relative) = input[cursor..].find("\n\n") {
-        let candidate_end = cursor + relative + 2;
-        let candidate = &input[end..candidate_end];
-        // References can retroactively resolve image/link syntax. Keep such regions mutable.
-        // Fences are frozen only when balanced inside the candidate.
-        let fences = candidate
-            .lines()
-            .filter(|line| line.trim_start().starts_with("```"))
-            .count();
-        // GFM 表格可省略前导竖线（`a | b` + `--- | ---`），仅按 starts_with('|')
-        // 判定会漏检：表格冻结进 stable 后渲染为空（stable 路径只处理 Text 段）
-        // → 内容丢失，且成为宽度变化时空 chunk 越界的触发源。
-        // 分隔行（字符集限于 `| - :` 与空白且含 `|`）是无前导竖线表格的可靠特征；
-        // 误判只损失缓存命中，不损失正确性（tail 路径可渲染全部段类型）。
-        let table_like = candidate.lines().any(|line| {
-            let trimmed = line.trim();
-            (trimmed.starts_with('|') && trimmed.matches('|').count() >= 2)
-                || (trimmed.contains('|')
-                    && trimmed.contains('-')
-                    && trimmed
-                        .chars()
-                        .all(|c| matches!(c, '|' | '-' | ':' | ' ' | '\t')))
-        });
-        let list_like = candidate.lines().any(|line| {
-            let trimmed = line.trim_start();
-            trimmed.starts_with("- ")
-                || trimmed.starts_with("* ")
-                || trimmed.starts_with("+ ")
-                || trimmed
-                    .split_once(". ")
-                    .is_some_and(|(number, _)| number.chars().all(|c| c.is_ascii_digit()))
-        });
-        if candidate.contains("![")
-            || (candidate.contains('[') && candidate.contains(']'))
-            || fences % 2 == 1
-            || table_like
-            || list_like
-        {
-            break;
-        }
-        end = candidate_end;
-        cursor = candidate_end;
-    }
-    end
+    boundary::stable_end(input, start)
 }
 
 /// Phase C：复用 immutable rendered chunks，仅 preprocess/parse/materialize 保守 mutable tail。
@@ -191,8 +147,17 @@ pub fn parse_markdown_chunks_cached(
     }
 
     let append_only = input.starts_with(cache.chunk_source.as_str());
-    let reusable =
-        append_only && cache.chunk_width == max_width as u16 && cache.chunk_palette == palette;
+    let sunken = peri_theme::atoms::THEME_ATOM
+        .state()
+        .read()
+        .semantic
+        .surface
+        .sunken;
+    let reusable = append_only
+        && cache.chunk_width == max_width as u16
+        && cache.chunk_palette == palette
+        && cache.chunk_base_fg == base_fg
+        && cache.chunk_sunken == Some(sunken);
     if append_only && !reusable && !cache.stable_chunk_blocks.is_empty() {
         cache.stable_chunks = cache
             .stable_chunk_blocks
@@ -228,7 +193,13 @@ pub fn parse_markdown_chunks_cached(
     }
 
     let tail_input = &input[cache.stable_source_end..];
-    let (tail, _) = parse_markdown_piece(tail_input, max_width, palette, base_fg);
+    let (mut tail, _) = parse_markdown_piece(tail_input, max_width, palette, base_fg);
+    for segment in &mut tail {
+        if let MarkdownSegment::Image(image) = segment {
+            image.byte_start += cache.stable_source_end;
+            image.byte_end += cache.stable_source_end;
+        }
+    }
     #[cfg(test)]
     if !tail_input.is_empty() {
         crate::kit::acp_bridge::observe_perf(crate::kit::acp_bridge::PerfCounter::TailParse, 1);
@@ -249,6 +220,8 @@ pub fn parse_markdown_chunks_cached(
     }
     cache.chunk_width = max_width as u16;
     cache.chunk_palette = palette;
+    cache.chunk_base_fg = base_fg;
+    cache.chunk_sunken = Some(sunken);
     RenderedMarkdown {
         stable: cache.stable_chunks.clone(),
         tail,
@@ -377,6 +350,8 @@ pub struct MarkdownRenderCache {
     chunk_source: String,
     chunk_width: u16,
     chunk_palette: Palette,
+    chunk_base_fg: Color,
+    chunk_sunken: Option<Color>,
     stable_source_end: usize,
     stable_chunk_blocks: Vec<Vec<ratatui_kit_markdown::ParsedBlock>>,
     stable_chunks: Vec<Arc<Vec<MarkdownSegment>>>,
@@ -548,3 +523,7 @@ mod tests;
 #[cfg(test)]
 #[path = "cache_lifecycle_test.rs"]
 mod cache_lifecycle_tests;
+
+#[cfg(test)]
+#[path = "boundary_test.rs"]
+mod boundary_tests;

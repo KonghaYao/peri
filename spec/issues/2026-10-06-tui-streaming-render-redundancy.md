@@ -1,6 +1,6 @@
 # P0：TUI 流式与渲染链冗余
 
-**状态**：Astra 源码复核完成；首批修复与 F2 共享气泡阶段已实施，F3 与资源现场验收继续推进。下文发现位置保留审计时快照，实施状态以「裁决与实施」为准。
+**状态**：Astra 源码复核完成；首批修复、F2 共享气泡与 F3 已闭合 fence 分片已实施，复杂可变尾部与资源现场验收继续推进。下文发现位置保留审计时快照，实施状态以「裁决与实施」为准。
 **优先级**：P0（用户明确要求将核实正确项提升）。这表示实施优先级，不表示已证明现场资源事故因果；独立于 [`2026-10-06-p0-dev-peri-high-cpu-memory.md`](2026-10-06-p0-dev-peri-high-cpu-memory.md) 的现场验收。
 **类型**：TUI 渲染计算冗余 / 常驻内存放大 / 日志噪音。
 **来源**：主 agent 直接复核 + 三组只读 subagent（渲染层、常驻内存、流式事件链）。全部为源码静态阅读，未运行 perf / heap / 现场采样。
@@ -137,7 +137,7 @@
 | --- | --- | --- |
 | F1 | P0 / 已实施 | 独占 BgStream 累积 + 增量 hash；50ms 独立后台 deadline，不逐 chunk 写发布 atom；工具/任务终态/receiver close flush，重置失效。publication 仍物化完整快照，未宣称消除其 O(n)。 |
 | F2 | P0 / 冗余 COW 已修，必要物化保留 | assistant payload 改为 Arc；im 快照克隆、拼接和节点 COW 共享完整正文/推理，fold/终态只在确有变化时显式复制。BgStream 仍独占缓冲，避免退回逐 chunk COW。source→VM owned trailing 仍每次增长物化 O(n)，未宣称完全消除。 |
-| F3 | P0 / 未关闭 | 保留引用链接后向解析、列表、表格与 fence 的保守尾部及 terminal full parse。仅记录停点或全文 hash 无法消除增长 tail 的重解析；须在 full-reference 等价回归下设计 parser/物化分片。准确图片停点为 `![`，不是任意 `!`。 |
+| F3 | P0 / 已闭合 fence 已分片，复杂尾部保留 | 单次逐行扫描识别 backtick/tilde fence，跨内部空行冻结已闭合代码块，后续增长只解析/物化后缀，stable rendered chunk 共享 Arc；图片尾部恢复全局字节偏移。保留引用链接后向解析、列表、表格、未闭合 fence 的保守尾部及 terminal full parse；其增长仍 O(n)，前缀一致性比较亦未消除。 |
 | F4 | P0 / 确定部分已实施 | terminal 丢弃 chunk_source buffer（不只是 clear），wrap cache 接收 owned lines 后直接移动进 Arc，取消额外深拷贝。可见窗口/LRU 未实施，需独立验证滚动高度、选择与复制。 |
 | F5 | P0 / 确定部分已实施 | 三组逐帧扫描缓冲复用；reasoning 仅秒级时长刷新，不再强制 100ms 重建；工具/subagent 保留动画。O(N) 扫描与动画 chrome/content 分离未关闭。 |
 | F6 | P0 / 已实施 | 字节发布游标，扫描新增 chunk 并有限回看跨 chunk 标记，保留 Unicode 正文和分段边界。非默认 Block 模式专项回归。 |
@@ -157,10 +157,12 @@
 
 ## 六、验收限制
 
+- F3 阶段：同一隔离 worktree 验证 Markdown 定向 110 passed / 1 ignored，最终串行全量 1590 passed / 6 ignored；doc tests 编译通过（0 个示例）。128 个含内部空行的代码行块冻结后，32 次逐字增长只解析各次后缀长度之和，物化 32 行，稳定正文 Arc identity 不变；1024 组内部空行的边界搜索只遍历一次行序列。逐字符 Unicode / 引用 / 图片 / 列表 / 表格后缀在 24、80 列下比较完整参考的语义段落，terminal 输出严格相等；闭合、resize、改写与主题失效有回归。Astra 复核补齐了 tab/裸列表 marker 的保守阻断，以及内外层正文前景/代码背景缓存 key；颜色变化从 parsed blocks 重物化，不重解析。
+- fence 补全仍沿用三反引号行计数，四反引号与 tilde 内部反引号存在既有语义局限；新边界保留 parity 门控，不将补全文本错误固化。完整参考也经过该补全函数，因此等价回归不代表已经证明 CommonMark fence 语义完整正确。未闭合或语义敏感尾部的 O(n) 成本仍为 P0 余项。
 - F2 阶段：隔离 worktree（提交锁文件 + 本阶段 patch，不含并行任务 WIP）验证 1583 passed / 6 ignored；doc tests 编译通过（0 个示例）。128 个大气泡的快照 COW 回归记录正文/推理 Clone 为 0 字节；20 次增长发布的 source→VM 物化恰为各 trailing 长度之和，未变 trailing 不物化。变更后的旧快照与手动 fold 独立性也有回归。源测试按渲染职责拆分，保留原有案例与 canonical 模块过滤前缀。
 - F2 全量并发验证有一次 `test_bridge_reset_rehydrates_pending_compact_note_for_same_session` 的全局 ACP_STATE loading 断言失败；该例定向复查和全量串行均通过。未修改该测试或用重试推定失败归因；上述 F2 通过数字以最终串行验证为准。
 - 首批回归：`./scripts/cargo-rmcp-patched.sh test --locked -p peri-tui --lib` 为 1580 passed / 6 ignored；doc tests 编译通过，0 个可执行示例。后台 scheduler 覆盖固定 deadline、隐藏主流、同会话重置后重排和重置与 receiver close 同时发生的收尾。
-- 本次变更的 Rust 文件均不超过 1000 行；全量 size 检查仍有 13 个既存测试文件超限，未宣称全库通过。
+- 本次变更的 Rust 文件均不超过 1000 行；F2 按职责拆分后，全量 size 检查仍有 10 个既存测试文件超限（首批为 13 个），未宣称全库通过。
 - 首批进展按用户授权提交，保留工作区原有、与本任务无关的改动；未关闭项继续保持 P0。
 - 未做现场 perf / heap 采样，不提供 CPU/RSS 改善数字；原文倍数仅为审计假设，不作为验收事实。
 - §二为历史审计原始描述，不覆盖 §四的纠正和未完成范围。
