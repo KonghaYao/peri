@@ -33,9 +33,7 @@ use super::SharedSessions;
 /// fatal turn failure 的稳定 JSON-RPC server error code。
 ///
 /// 取自 JSON-RPC 2.0 保留段 server error（`-32000..=-32099`）的首值，语义为
-/// "agent turn execution failed"。具名常量替代调用点 magic number；`data`
-/// 只携带稳定 allowlist 分类和可选 HTTP status，不包含 provider payload 或
-/// 内部错误链（D2/D5）。
+/// "agent turn execution failed"。`data` 保留稳定分类与完整诊断。
 pub const ACP_TURN_EXECUTION_FAILED_CODE: i64 = -32000;
 
 /// [`ExecutionFailureKind`] → JSON-RPC server error code 的穷尽映射。
@@ -53,9 +51,9 @@ const fn execution_failure_kind_code(kind: ExecutionFailureKind) -> i64 {
 /// Agent→ACP 结果边界的窄映射：`ExecutionFailure` → 传输层 `AcpError`。
 ///
 /// - `code`：按 [`execution_failure_kind_code`] 穷尽映射；
-/// - `message`：直接使用 failure 的脱敏 public message（非空由
+/// - `message`：直接使用 failure 的错误信息（非空由
 ///   [`ExecutionFailure::internal`] 保证，空输入回落稳定 fallback）；
-/// - `data`：稳定 allowlist `kind`，LLM HTTP 错误额外携带 `status`。
+/// - `data`：稳定 `kind`、HTTP `status` 与完整 `diagnostic`。
 pub(crate) fn execution_failure_to_acp_error(failure: &ExecutionFailure) -> AcpError {
     let mut data = serde_json::Map::new();
     data.insert(
@@ -67,40 +65,17 @@ pub(crate) fn execution_failure_to_acp_error(failure: &ExecutionFailure) -> AcpE
             data.insert("status".to_string(), Value::from(status));
         }
     }
-    if let Some(diagnostic) = &failure.diagnostic {
-        let mut projection = serde_json::Map::new();
-        projection.insert(
-            "category".to_string(),
-            Value::String(diagnostic.category_name().to_string()),
+    if let Some(category) = &failure.error_category {
+        data.insert(
+            "error_category".to_string(),
+            Value::String(category.clone()),
         );
-        if let Some(status) = diagnostic.status() {
-            projection.insert("status".to_string(), Value::from(status));
-        }
-        if let Some(provider) = diagnostic.provider() {
-            projection.insert("provider".to_string(), Value::String(provider.to_string()));
-        }
-        if let Some(request_id) = diagnostic.request_id() {
-            projection.insert(
-                "request_id".to_string(),
-                Value::String(request_id.to_string()),
-            );
-        }
-        if let Some(transport) = diagnostic.transport() {
-            projection.insert(
-                "transport".to_string(),
-                Value::String(transport.to_string()),
-            );
-        }
-        if let Some(protocol) = diagnostic.protocol() {
-            projection.insert("protocol".to_string(), Value::String(protocol.to_string()));
-        }
-        if let Some(attempts) = diagnostic.retry_attempts() {
-            projection.insert("retry_attempts".to_string(), Value::from(attempts));
-        }
-        if let Some(kind) = diagnostic.retry_kind() {
-            projection.insert("retry_kind".to_string(), Value::String(kind.to_string()));
-        }
-        data.insert("diagnostic".to_string(), Value::Object(projection));
+    }
+    if !failure.causes.is_empty() {
+        data.insert("causes".to_string(), serde_json::json!(failure.causes));
+    }
+    if let Some(diagnostic) = &failure.diagnostic {
+        data.insert("diagnostic".to_string(), serde_json::json!(diagnostic));
     }
     AcpError {
         code: execution_failure_kind_code(failure.kind),

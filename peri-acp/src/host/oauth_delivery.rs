@@ -220,6 +220,7 @@ async fn deliver_oauth_event(
                         flow_id,
                         server_name.clone(),
                         failure_class,
+                        legacy_error.clone(),
                     ),
                 )
                 .await;

@@ -113,8 +113,9 @@ export class JsonRpcTransport implements Transport {
       const value = JSON.parse(frame);
       if (!value || typeof value !== "object" || Array.isArray(value) || value.jsonrpc !== "2.0") return;
       message = value;
-    } catch {
-      throw new Error("invalid ACP JSON-RPC frame");
+    } catch (error) {
+      console.error("invalid ACP JSON-RPC frame", error);
+      throw new Error("invalid ACP JSON-RPC frame", { cause: error });
     }
     if (typeof message.method === "string") {
       if ("id" in message) void this.replyToReverseRequest(message);

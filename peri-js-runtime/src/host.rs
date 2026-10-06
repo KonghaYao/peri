@@ -64,9 +64,10 @@ impl std::fmt::Debug for JsProcessSpec {
         formatter
             .debug_struct("JsProcessSpec")
             .field("program", &self.program)
-            .field("args", &"[REDACTED]")
-            .field("cwd", &self.cwd.as_ref().map(|_| "[REDACTED]"))
+            .field("args", &self.args)
+            .field("cwd", &self.cwd)
             .field("inherit_environment", &self.inherit_environment)
+            .field("environment", &self.environment)
             .finish()
     }
 }

@@ -182,7 +182,7 @@ fn env_indirection_resolves_exactly_once() {
 }
 
 #[test]
-fn request_debug_keeps_host_and_credentials_out() {
+fn request_debug_preserves_remote_locator() {
     let request = request(
         &format!("turso://{FAKE_HOST}"),
         Some(RemoteEngine::Turso),
@@ -195,7 +195,7 @@ fn request_debug_keeps_host_and_credentials_out() {
         FAKE_TOKEN_ENV
     );
     assert!(!rendered.contains("sentinel-db"));
-    assert!(rendered.contains("remote locator redacted"));
+    assert!(!rendered.contains("remote locator redacted"));
 }
 
 #[test]

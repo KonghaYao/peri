@@ -23,34 +23,6 @@ fn transport_type_of(source: Option<&ConfigSource>, url: Option<&str>) -> &'stat
     }
 }
 
-/// 供状态与日志使用的 MCP 错误文本清洗：移除 URL query，遮蔽常见凭据键值。
-/// 不应将原始底层错误链直接投影到 UI 或日志。
-pub fn redact_mcp_error(input: &str) -> String {
-    let mut output = String::with_capacity(input.len());
-    for token in input.split_whitespace() {
-        let token = if let Some((prefix, _)) = token.split_once('?') {
-            if prefix.starts_with("http://") || prefix.starts_with("https://") {
-                format!("{prefix}?…")
-            } else {
-                token.to_string()
-            }
-        } else {
-            token.to_string()
-        };
-        let lower = token.to_ascii_lowercase();
-        if ["token=", "password=", "secret=", "api_key=", "apikey="]
-            .iter()
-            .any(|key| lower.contains(key))
-        {
-            output.push_str("[redacted]");
-        } else {
-            output.push_str(&token);
-        }
-        output.push(' ');
-    }
-    output.trim_end().to_string()
-}
-
 pub(super) fn mcp_status_label(status: &ClientStatus) -> &'static str {
     match status {
         ClientStatus::Connected => "connected",
@@ -65,7 +37,7 @@ pub(super) fn mcp_error_summary(status: &ClientStatus) -> Option<String> {
     let ClientStatus::Failed(reason) = status else {
         return None;
     };
-    let summary = redact_mcp_error(reason.lines().next().unwrap_or_default().trim());
+    let summary = reason.trim();
     let summary: String = summary.chars().take(160).collect();
     (!summary.is_empty()).then_some(summary)
 }

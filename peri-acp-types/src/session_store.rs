@@ -41,13 +41,11 @@ pub enum SessionStoreLocator {
 }
 
 impl fmt::Debug for SessionStoreLocator {
-    /// 只给形态，不给取值：`Locator` 原文可能是含主机与库名的远程 locator，
-    /// 本机路径含用户环境。
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Default => formatter.write_str("Default"),
-            Self::LocalPath(_) => formatter.write_str("LocalPath(<redacted>)"),
-            Self::Locator(_) => formatter.write_str("Locator(<redacted>)"),
+            Self::LocalPath(path) => formatter.debug_tuple("LocalPath").field(path).finish(),
+            Self::Locator(locator) => formatter.debug_tuple("Locator").field(locator).finish(),
         }
     }
 }
@@ -148,20 +146,12 @@ impl Default for SessionStoreDeployment {
 }
 
 impl fmt::Debug for SessionStoreDeployment {
-    /// 故意不打印 locator 取值与凭证变量名之外的内容：诊断只需要「形态 + 是否配置」。
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("SessionStoreDeployment")
-            .field(
-                "locator",
-                &match self.locator {
-                    SessionStoreLocator::Default => "<default-local>",
-                    SessionStoreLocator::LocalPath(_) => "<local-path>",
-                    SessionStoreLocator::Locator(_) => "<configured>",
-                },
-            )
-            .field("engine_configured", &self.engine.is_some())
-            .field("credential_env_configured", &self.credential_env.is_some())
+            .field("locator", &self.locator)
+            .field("engine", &self.engine)
+            .field("credential_env", &self.credential_env)
             .field("access", &self.access)
             .finish()
     }

@@ -15,6 +15,17 @@ use tokio_util::sync::CancellationToken;
 use super::{HttpBody, HttpRequest, HttpResponse, HttpTransport};
 use crate::{ModelError, ModelResult, TransportErrorKind};
 
+#[test]
+fn reqwest_error_keeps_message_and_underlying_parse_cause() {
+    let original = reqwest::Client::new().get("http://").build().unwrap_err();
+    let message = original.to_string();
+    let mapped = super::http::map_reqwest_error(original);
+    let diagnostic = mapped.diagnostic();
+    assert_eq!(diagnostic.message(), Some(message.as_str()));
+    assert!(!diagnostic.causes().is_empty());
+    assert!(mapped.to_string().contains(&diagnostic.causes()[0]));
+}
+
 #[derive(Clone)]
 enum Response {
     Ready {

@@ -12,10 +12,10 @@ pub enum JsRuntimeError {
     #[error("Failed to spawn JavaScript runtime: {0}")]
     SpawnFailed(String),
 
-    #[error("JavaScript RPC protocol error")]
+    #[error("JavaScript RPC protocol error: {0}")]
     Rpc(String),
 
-    #[error("JavaScript RPC request failed")]
+    #[error("JavaScript RPC request failed: {0:?}")]
     RpcResponse(crate::JsonRpcError),
 
     #[error(

@@ -4,74 +4,60 @@ use super::{
 };
 
 #[test]
-fn test_model_error_never_formats_request_secrets_or_raw_body() {
-    let errors = [
-        ModelError::http_status(401, "openai", Some("request_123")),
-        ModelError::transport(TransportErrorKind::Connection, Some("openai")),
-        ModelError::protocol_with_summary(
-            ProtocolErrorKind::Provider,
-            "provider rejected request with sk-live-secret Authorization: Bearer sk-live-secret; very long user prompt",
-        ),
-        ModelError::stream_interrupted(Some("openai"), Some("request_123")),
-        ModelError::retry_exhausted(3, RetryErrorKind::HttpStatus).expect("valid attempts"),
-    ];
-
-    for error in errors {
-        let rendered = format!("{error:?} {error}");
-        assert!(!rendered.contains("sk-live-secret"));
-        assert!(!rendered.contains("Authorization"));
-        assert!(!rendered.contains("very long user prompt"));
-    }
+fn error_context_preserves_content_and_rejects_only_oversized_identity() {
+    let value = "sk-live-secret Authorization 诊断";
+    let error = ModelError::http_status(401, value, Some(value));
+    assert_eq!(error.provider(), Some(value));
+    assert_eq!(error.request_id(), Some(value));
+    assert!(format!("{error:?} {error}").contains(value));
+    let oversized = "x".repeat(129);
+    let error = ModelError::http_status(401, &oversized, Some(&oversized));
+    assert_eq!(error.provider(), None);
+    assert_eq!(error.request_id(), None);
 }
 
 #[test]
-fn test_model_error_replaces_malicious_provider_and_request_id_in_debug_and_display() {
-    let provider = "sk-live-secret Authorization";
-    let request_id = "prompt=very secret request";
-    let errors = [
-        ModelError::transport(TransportErrorKind::Connection, Some(provider)),
-        ModelError::http_status(401, provider, Some(request_id)),
-        ModelError::stream_interrupted(Some(provider), Some(request_id)),
-    ];
-
-    for error in errors {
-        let rendered = format!("{error:?} {error}");
-        assert!(!rendered.contains(provider));
-        assert!(!rendered.contains(request_id));
-        assert!(!rendered.contains("sk-live-secret"));
-        assert!(!rendered.contains("Authorization"));
-        assert!(!rendered.contains("prompt"));
-        assert!(!rendered.contains("[invalid]"));
-        assert_eq!(error.provider(), None);
-        assert_eq!(error.request_id(), None);
+fn error_details_survive_retry_and_interruption_projection() {
+    let error = ModelError::protocol_with_summary(ProtocolErrorKind::Provider, "invalid JSON 诊断")
+        .with_body("{raw secret body}")
+        .with_causes(vec!["transport secret cause".into()]);
+    let retried = ModelError::retry_exhausted_with_context(3, RetryErrorKind::Protocol, &error);
+    for diagnostic in [error.diagnostic(), retried.diagnostic()] {
+        assert_eq!(diagnostic.message(), Some("invalid JSON 诊断"));
+        assert_eq!(diagnostic.body(), Some("{raw secret body}"));
+        assert_eq!(diagnostic.causes(), &["transport secret cause"]);
     }
+    let projected = error
+        .clone()
+        .with_interruption_diagnostic(error.diagnostic(), true);
+    assert_eq!(
+        projected.interruption_diagnostic(),
+        Some(&error.diagnostic())
+    );
+    assert!(projected.interruption_logged());
+    assert!(retried.to_string().contains("raw secret body"));
 }
 
 #[test]
-fn test_model_error_diagnostic_omits_invalid_identity_without_sentinel() {
-    let error = ModelError::http_status(401, "provider with spaces", Some("request_id=secret"));
+fn diagnostic_text_is_utf8_bounded_and_causes_are_bounded() {
+    let error = ModelError::protocol(ProtocolErrorKind::Provider)
+        .with_message("界".repeat(20_000))
+        .with_body("界".repeat(20_000))
+        .with_causes(vec!["界".repeat(20_000); 30]);
     let diagnostic = error.diagnostic();
-
-    assert_eq!(diagnostic.category_name(), "http_status");
-    assert_eq!(diagnostic.status(), Some(401));
-    assert_eq!(diagnostic.provider(), None);
-    assert_eq!(diagnostic.request_id(), None);
-}
-
-#[test]
-fn test_model_error_rejects_sk_credential_family_in_all_safe_context_fields() {
-    let credential = "sk-ant-api03-very-secret";
-    let http = ModelError::http_status(401, credential, Some(credential));
-    let protocol = ModelError::protocol_with_summary(ProtocolErrorKind::Provider, credential);
-
-    for error in [http, protocol] {
-        let rendered = format!("{error:?} {error}");
-        assert!(!rendered.contains(credential));
-        assert!(!rendered.contains("[invalid]"));
-        let diagnostic = error.diagnostic();
-        assert_eq!(diagnostic.provider(), None);
-        assert_eq!(diagnostic.request_id(), None);
-    }
+    assert!(diagnostic.message().unwrap().len() <= super::MAX_DIAGNOSTIC_BYTES);
+    assert!(diagnostic.body().unwrap().len() <= super::MAX_DIAGNOSTIC_BYTES);
+    assert!(diagnostic.message().unwrap().ends_with("[TRUNCATED]"));
+    assert!(diagnostic.body().unwrap().ends_with("[TRUNCATED]"));
+    assert_eq!(diagnostic.causes().len(), 16);
+    assert!(diagnostic
+        .causes()
+        .iter()
+        .all(|cause| cause.len() <= super::MAX_DIAGNOSTIC_BYTES));
+    assert_eq!(
+        diagnostic.causes().last().unwrap(),
+        "[TRUNCATED: additional causes omitted]"
+    );
 }
 
 #[test]
@@ -127,6 +113,9 @@ fn diagnostic_accepts_retry_producer_shapes_and_rejects_mismatches() {
         transport: None,
         protocol: None,
         retry_attempts: Some(3),
+        message: None,
+        body: None,
+        causes: &[],
         retry_kind: Some(RetryErrorKind::HttpStatus),
     })
     .expect("retry exhausted without an underlying cause is a valid producer shape");
@@ -140,6 +129,9 @@ fn diagnostic_accepts_retry_producer_shapes_and_rejects_mismatches() {
         transport: None,
         protocol: None,
         retry_attempts: Some(6),
+        message: None,
+        body: None,
+        causes: &[],
         retry_kind: Some(RetryErrorKind::HttpStatus),
     })
     .expect("original HTTP category may carry a matching retry pair");
@@ -154,9 +146,36 @@ fn diagnostic_accepts_retry_producer_shapes_and_rejects_mismatches() {
         transport: None,
         protocol: None,
         retry_attempts: Some(6),
+        message: None,
+        body: None,
+        causes: &[],
         retry_kind: Some(RetryErrorKind::Transport),
     })
     .is_none());
+}
+
+#[test]
+fn diagnostic_parts_preserve_content_and_serialize_new_fields() {
+    let diagnostic = ModelErrorDiagnostic::from_parts(ModelErrorDiagnosticParts {
+        category: ModelErrorCategory::HttpStatus,
+        status: Some(401),
+        provider: Some("provider secret 诊断"),
+        request_id: Some("request secret 诊断"),
+        transport: None,
+        protocol: None,
+        retry_attempts: None,
+        retry_kind: None,
+        message: Some("actual secret failure"),
+        body: Some("provider secret body"),
+        causes: &["actual secret cause".into()],
+    })
+    .unwrap();
+    let serialized = serde_json::to_value(&diagnostic).unwrap();
+    assert_eq!(serialized["message"], "actual secret failure");
+    assert_eq!(serialized["body"], "provider secret body");
+    assert_eq!(serialized["causes"][0], "actual secret cause");
+    assert_eq!(diagnostic.provider(), Some("provider secret 诊断"));
+    assert_eq!(diagnostic.request_id(), Some("request secret 诊断"));
 }
 
 #[test]
@@ -196,7 +215,7 @@ fn test_protocol_error_kinds_are_explicit_and_stable() {
 }
 
 #[test]
-fn test_protocol_error_restricts_unknown_summary() {
+fn test_protocol_error_keeps_long_summary_in_diagnostic() {
     let error = ModelError::protocol_with_summary(
         ProtocolErrorKind::Other,
         format!("invalid payload\\n{}", "x".repeat(300)),
@@ -208,6 +227,7 @@ fn test_protocol_error_restricts_unknown_summary() {
     assert_eq!(protocol_error.to_string(), "other failure");
     let diagnostic = error.diagnostic();
     assert_eq!(diagnostic.protocol(), Some(ProtocolErrorKind::Other));
+    assert!(diagnostic.message().unwrap().starts_with("invalid payload"));
     assert!(serde_json::to_value(&diagnostic)
         .expect("diagnostic is serializable")
         .get("summary")

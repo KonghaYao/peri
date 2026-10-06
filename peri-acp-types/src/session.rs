@@ -21,7 +21,7 @@ use std::{sync::atomic::AtomicBool, sync::Arc};
 
 pub use cron_owner::CronOwner;
 pub use execution::{
-    sanitize_public_error, ExecutionFailure, ExecutionFailureKind, PromptResult,
+    bounded_error_message, ExecutionFailure, ExecutionFailureKind, PromptResult,
     TurnTelemetryOutcome, EXECUTION_FAILURE_FALLBACK_MESSAGE,
 };
 pub use inbox::{InboxHandle, SessionInbox};

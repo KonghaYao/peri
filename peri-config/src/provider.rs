@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::fmt;
 
 use crate::app::{AppConfig, PeriConfig, ProfileConfig, ProviderConfig};
 
@@ -7,7 +6,7 @@ const DEFAULT_ANTHROPIC_MODEL: &str = "claude-sonnet-4-6";
 const DEFAULT_OPENAI_MODEL: &str = "gpt-4o";
 const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResolvedProvider {
     Anthropic {
         api_key: String,
@@ -25,19 +24,6 @@ pub enum ResolvedProvider {
         max_tokens: u32,
         context_1m: bool,
     },
-}
-
-impl fmt::Debug for ResolvedProvider {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let name = match self {
-            Self::Anthropic { .. } => "Anthropic",
-            Self::OpenAi { .. } => "OpenAi",
-        };
-        formatter
-            .debug_struct(name)
-            .field("configuration", &"[REDACTED]")
-            .finish()
-    }
 }
 
 pub fn resolve(
@@ -345,15 +331,15 @@ mod tests {
     }
 
     #[test]
-    fn resolved_debug_redacts_both_variants() {
+    fn resolved_debug_preserves_both_variants() {
         for provider_type in ["anthropic", "openai"] {
             let mut config = settings(provider_type);
             config.config.providers[0].base_url = "https://private-key.example".into();
             let provider = resolve_for_alias(&config, "opus").unwrap();
             let debug = format!("{provider:?}");
-            assert!(!debug.contains("configured-key"));
-            assert!(!debug.contains("private-key"));
-            assert!(debug.contains("[REDACTED]"));
+            assert!(debug.contains("configured-key"));
+            assert!(debug.contains("private-key"));
+            assert!(!debug.contains("[REDACTED]"));
         }
     }
 }

@@ -466,8 +466,14 @@ async fn assert_background_tail_completion(outcome: TailOutcome, panic_forwarder
                 serde_json::from_value(reminder.as_reminder().metadata["subagent_failure"].clone())
                     .unwrap();
             assert_eq!(failure.child_thread_id(), spawned.child_thread_id);
-            assert_eq!(failure.diagnostic().status(), Some(429));
-            assert_eq!(failure.diagnostic().provider(), Some("fixture"));
+            assert_eq!(
+                failure.diagnostic().expect("model diagnostic").status(),
+                Some(429)
+            );
+            assert_eq!(
+                failure.diagnostic().expect("model diagnostic").provider(),
+                Some("fixture")
+            );
         }
         let parent = store
             .load_session_work(&WorkQuery {

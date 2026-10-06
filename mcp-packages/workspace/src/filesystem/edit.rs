@@ -174,12 +174,12 @@ impl BaseTool for EditFileTool {
         with_target_lock(&resolved, |locked| {
             let pre = match locked.read_pre() {
                 Ok(Some(content)) => content,
-                Ok(None) => return Err(ToolFailure::new(super::path_hints::with_path_hint("File not found. Verify file_path or locate the file with Glob.", &self.cwd, &resolved), "Error: File not found").into()),
-                Err(_) => return Err(ToolFailure::new("Edit failed while reading the file. Verify access permissions and UTF-8 encoding.", "Edit failed while reading the file.").into()),
+                Ok(None) => return Err(ToolFailure::new(super::path_hints::with_path_hint("File not found. Verify file_path or locate the file with Glob.", &self.cwd, &resolved), format!("Error: File not found at {}", resolved.display())).into()),
+                Err(error) => return Err(ToolFailure::new("Edit failed while reading the file. Verify access permissions and UTF-8 encoding.", format!("Edit failed while reading {}: {error}", resolved.display())).into()),
             };
             let content = match String::from_utf8(pre.clone()) {
                 Ok(content) => content,
-                Err(_) => return Err(ToolFailure::new("Edit failed while reading the file. Verify access permissions and UTF-8 encoding.", "Edit failed while reading the file.").into()),
+                Err(error) => return Err(ToolFailure::new("Edit failed while reading the file. Verify access permissions and UTF-8 encoding.", format!("Edit failed while decoding {}: {error}", resolved.display())).into()),
             };
 
             let old_lines = old_string.lines().count();
@@ -233,7 +233,7 @@ impl BaseTool for EditFileTool {
                         if occurrences == 1 { "" } else { "s" }
                     )),
                     Err(CommitError::Sentinel) => Err(ToolFailure::new(SENTINEL_REJECTION, SENTINEL_REJECTION).into()),
-                    Err(CommitError::Io) => Err(ToolFailure::new("Edit failed while committing the file. Check write permissions and available disk space; Read before retrying.", "Edit failed while committing the file.").into()),
+                    Err(CommitError::Io(error)) => Err(ToolFailure::new("Edit failed while committing the file. Check write permissions and available disk space; Read before retrying.", format!("Edit failed while committing {}: {error}", resolved.display())).into()),
                 }
             } else {
                 let occurrences = content.matches(old_string).count();
@@ -281,7 +281,7 @@ impl BaseTool for EditFileTool {
                 match locked.guard_and_commit(&pre, new_content.as_bytes()) {
                     Ok(()) => Ok(format!("{} to {}", diff_desc, rel)),
                     Err(CommitError::Sentinel) => Err(ToolFailure::new(SENTINEL_REJECTION, SENTINEL_REJECTION).into()),
-                    Err(CommitError::Io) => Err(ToolFailure::new("Edit failed while committing the file. Check write permissions and available disk space; Read before retrying.", "Edit failed while committing the file.").into()),
+                    Err(CommitError::Io(error)) => Err(ToolFailure::new("Edit failed while committing the file. Check write permissions and available disk space; Read before retrying.", format!("Edit failed while committing {}: {error}", resolved.display())).into()),
                 }
             }
         })

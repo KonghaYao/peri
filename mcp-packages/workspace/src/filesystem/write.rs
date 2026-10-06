@@ -49,7 +49,7 @@ impl WriteFileTool {
         append: bool,
     ) -> Result<usize, CommitError> {
         with_target_lock(target, |locked| {
-            let pre = locked.read_pre().map_err(|_| CommitError::Io)?;
+            let pre = locked.read_pre().map_err(CommitError::Io)?;
             let pre = pre.unwrap_or_default();
             let post = if append {
                 let mut post = Vec::with_capacity(pre.len() + content.len());
@@ -97,14 +97,17 @@ impl WriteFileTool {
             Err(CommitError::Sentinel) => {
                 Err(ToolFailure::new(SENTINEL_REJECTION, SENTINEL_REJECTION).into())
             }
-            Err(CommitError::Io) => {
+            Err(CommitError::Io(error)) => {
                 let hint = self
                     .save_draft(target_id, content, append)
                     .map(|id| draft_hint_en(&id, content))
                     .unwrap_or_default();
                 Err(ToolFailure::new(
                     format!("{WRITE_IO_ERROR}{hint}"),
-                    format!("{WRITE_IO_ERROR}{hint}"),
+                    format!(
+                        "{WRITE_IO_ERROR}{hint}\nWrite failed at {}: {error}",
+                        target.display()
+                    ),
                 )
                 .into())
             }
@@ -135,9 +138,11 @@ impl WriteFileTool {
             Err(DraftAccessError::Operation(CommitError::Sentinel)) => {
                 Err(ToolFailure::new(SENTINEL_REJECTION, SENTINEL_REJECTION).into())
             }
-            Err(DraftAccessError::Operation(CommitError::Io)) => {
-                Err(ToolFailure::new(WRITE_IO_ERROR, WRITE_IO_ERROR).into())
-            }
+            Err(DraftAccessError::Operation(CommitError::Io(error))) => Err(ToolFailure::new(
+                WRITE_IO_ERROR,
+                format!("Write failed at {}: {error}", target.display()),
+            )
+            .into()),
         }
     }
 }

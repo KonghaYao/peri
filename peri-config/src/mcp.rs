@@ -100,37 +100,18 @@ pub fn parse_global(value: &Value) -> Result<McpConfigFile, McpConfigError> {
 }
 
 pub fn parse_project(value: &Value) -> Result<McpConfigFile, McpConfigError> {
-    serde_json::from_value(value.clone()).map_err(redact_parse_error)
+    serde_json::from_value(value.clone()).map_err(McpConfigError::InvalidConfig)
 }
 
 pub fn parse_servers(value: &Value) -> Result<HashMap<String, McpServerConfig>, McpConfigError> {
-    serde_json::from_value(value.clone()).map_err(redact_parse_error)
+    serde_json::from_value(value.clone()).map_err(McpConfigError::InvalidConfig)
 }
 
 fn parse_cache_setting(container: Option<&Value>) -> Result<Option<bool>, McpConfigError> {
     container
         .and_then(|value| value.get("mcpCache"))
-        .map(|value| serde_json::from_value(value.clone()).map_err(redact_parse_error))
+        .map(|value| serde_json::from_value(value.clone()).map_err(McpConfigError::InvalidConfig))
         .transpose()
-}
-
-fn redact_parse_error(error: serde_json::Error) -> McpConfigError {
-    use peri_acp_types::plugin::McpServerConfigValidationError;
-    let message = error.to_string();
-    let rule = [
-        McpServerConfigValidationError::SystemMcpToolsRequiresSystemMcp,
-        McpServerConfigValidationError::SystemMcpTimeoutRequiresSystemMcp,
-        McpServerConfigValidationError::SystemMcpTimeoutOutOfRange,
-    ]
-    .into_iter()
-    .find(|rule| message.starts_with(&rule.to_string()));
-    let safe_message = rule
-        .map(|rule| rule.to_string())
-        .unwrap_or_else(|| "invalid MCP configuration field".to_owned());
-    McpConfigError::InvalidConfig(serde_json::Error::io(std::io::Error::new(
-        std::io::ErrorKind::InvalidData,
-        safe_message,
-    )))
 }
 
 pub fn parse_environment(value: Option<&str>) -> Result<Option<bool>, McpConfigError> {

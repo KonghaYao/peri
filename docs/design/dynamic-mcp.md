@@ -20,7 +20,7 @@ Dynamic MCP 允许 Agent 在 ReAct loop 运行期间提交 MCP server 配置，�
 4. **目录一致性**：工具目录只在 Reason 边界原子更新，不在正在执行的模型请求或工具调用中途漂移。
 5. **单一任务所有权**：initialize、OAuth、reconnect、subscription 和关闭任务全部纳入 deployment-held `McpTaskOwner`。
 6. **可撤销**：卸载先撤销新调用能力，再优雅排空在途调用和连接。
-7. **秘密隔离**：模型只可提交 secret 引用；平台控制的 tool arguments、审批、operation、通知、日志和错误不得包含解析后的 secret。MCP server 是被授权的 secret recipient，平台不承诺阻止不可信 server 在工具结果中主动回显或变形泄露其已获得的 secret。
+7. **诊断保真**：配置、审批、operation、通知、日志和错误不做内容脱敏；secret reference 解析与批准对象仍受既有执行边界约束，运行时输出按完整数据管理访问，遵循 ARC-SECRET-001。
 
 ### 1.2 在范围内
 
@@ -32,7 +32,7 @@ Dynamic MCP 允许 Agent 在 ReAct loop 运行期间提交 MCP server 配置，�
 - 异步 operation 状态机和进度投影。
 - MCP tools、resources、skills 的运行时发现与移除。
 - ToolSearch session-local 索引刷新。
-- HITL effective action、脱敏审批卡和 secret 引用解析。
+- HITL effective action、完整审批卡和 secret 引用解析。
 - session close 与 host shutdown 清理。
 
 ### 1.3 不在范围内
@@ -168,12 +168,12 @@ ExecuteExtraTool(raw)
   → target = DynamicMCP
   → 严格解析并规范化 method/params
   → policy_call.name = DynamicMCP.load | DynamicMCP.status | DynamicMCP.unload
-  → policy_call.input = 脱敏 canonical input
+  → policy_call.input = canonical input（不做内容脱敏）
   → HITL / permission policy
   → 执行已解析的 immutable canonical action
 ```
 
-`invoke` 不得在审批后重新解释可变 raw input。未知 method、重复字段、类型错误和无法脱敏的配置必须在 HITL 前失败且零副作用。测试必须断言 broker 实际观察到 method 级 effective name，不能只断言出现过一次审批。
+`invoke` 不得在审批后重新解释可变 raw input。未知 method、重复字段和类型错误必须在 HITL 前失败且零副作用；不得因字段被认定敏感或无法脱敏而拒绝有效配置。测试必须断言 broker 实际观察到 method 级 effective name，不能只断言出现过一次审批。
 
 ### 4.2 `load`
 
@@ -213,7 +213,7 @@ HITL 通过后立即创建异步 operation 并返回：
 
 传入 `operationId` 或 `name` 时返回对应状态；无参数时返回当前 session 的动态 server 与 operation 列表。不得暴露其他 session 的存在。
 
-状态结果包含：operation ID、server name、state、当前阶段、脱敏配置摘要、稳定错误码、安全错误摘要、工具/资源数量和 capability generation。不得返回 secret 值、底层错误链或 server stdout/stderr 原文。
+状态结果包含：operation ID、server name、state、当前阶段、配置摘要、稳定错误码、实际错误与原因链、工具/资源数量和 capability generation。配置及诊断内容不脱敏；stdout/stderr 是否采集及长度边界遵循各出口契约，不改变 session 访问隔离。
 
 ### 4.4 `unload`
 
@@ -252,29 +252,29 @@ HITL 通过后立即创建异步 operation 并返回：
 
 ### 5.2 Secret 引用
 
-动态配置中的敏感值只能表示为 opaque secret reference。Agent tool schema 不接受明文 secret 字段。secret resolver 在 HITL 批准后、启动 transport 前解析引用；解析结果只存在于最小执行作用域。
+动态配置保留 opaque secret reference 支持；已支持的 literal 值不得因字段名或值形状被认定敏感而拒绝。secret resolver 仍在 HITL 批准后、启动 transport 前解析引用；不改变批准对象、解析职责及执行所有权。
 
 必须保证：
 
 - config hash 基于规范化配置和 secret reference identity，不包含 secret value。
-- Debug、Serialize、tracing 和错误类型不能携带解析后的 secret。
-- 连接失败摘要先脱敏再进入 operation、通知或 UI。
+- Debug、tracing 和错误诊断不做内容脱敏；控制面持久化仍保存规范化配置及 reference，不要求额外持久化 resolver 输出。
+- 连接失败保留实际错误与原因链进入 operation、通知或 UI，不替换为固定安全摘要。
 - server env 必须先 `env_clear`，再显式加入运行所需的最小非秘密环境和已批准 secret；禁止默认继承整个宿主环境。
 - secret 可由 transport 或 stdio child 在连接生命周期内持有，但不得进入长期可序列化控制面状态。
 - secret 缺失进入 `failed(SECRET_NOT_FOUND)`，不得要求 Agent 在下一次 tool call 中提交明文。
 
-MCP server/process 是 secret 的最终接收者，属于审批时必须展示的信任边界。平台可以保证自身生成的控制面数据不包含 resolved secret，但无法保证恶意 server 不在 tool result 中回显、编码或变形泄露 secret；如未来要求结果防泄漏，必须另行设计 taint/redaction 机制，且不得宣称可完全阻止变形泄漏。
+MCP server/process 的环境与连接参数属于审批时必须展示的执行边界。运行时输出按完整数据管理访问，当前契约不提供内容脱敏或结果防泄漏保证；权限、secret reference 解析和生命周期约束仍独立有效。
 
 ### 5.3 HITL 审批卡
 
-`load` 审批展示完整脱敏配置：
+`load` 审批展示完整配置，不做内容脱敏：
 
 - server name 与 session scope；
 - transport；
 - executable/argv 或 URL；
 - cwd；
 - env 变量名到 secretRef 名称的映射；
-- headers 中非敏感字段与 secretRef；
+- headers 中 literal 字段与 secretRef；
 - timeout、protocol version；
 - 是否遮蔽静态 server及其来源。
 
@@ -293,7 +293,7 @@ HITL approved
   → Ready
 
 任一非终态
-  → Failed(code, safe_summary)
+  → Failed(code, error_detail)
 ```
 
 `Ready` 的提交条件是：
@@ -354,13 +354,13 @@ SHUTDOWN_INCOMPLETE
 INTERNAL
 ```
 
-错误面只返回稳定 code、阶段和固定安全摘要。原始 SDK、process 或网络错误不得直接投影。
+错误面保留稳定 code、阶段、实际 SDK/process/网络错误及原因链；不再使用固定安全摘要代替原始原因，长度约束独立有效。
 
 ## 7. 幂等、并发与发布原子性
 
 ### 7.1 配置 identity
 
-规范化配置 identity 必须覆盖所有影响连接行为的非秘密字段以及 secret reference identity，包括：transport、command、args、cwd、env key/ref、URL、headers key/ref、protocol version、subscriptions 与 timeout。实现可使用碰撞安全 digest 加速索引，但幂等判定最终必须比较 canonical redacted config 结构，不能只比较现有 `u64` hash。
+规范化配置 identity 必须覆盖所有影响连接行为的 literal 字段以及 secret reference identity，包括：transport、command、args、cwd、env key/ref、URL、headers key/ref、protocol version、subscriptions 与 timeout。实现可使用碰撞安全 digest 加速索引，但幂等判定最终必须比较 canonical config 结构，不能只比较现有 `u64` hash；不为此扩张 resolver 输出的持久化范围。
 
 同一 `(session_id, server_name)`：
 
@@ -583,7 +583,7 @@ ACP 只负责 deployment 装配、端口注入、session 定位和协议化投�
 ### 12.2 P1 状态机与故障测试
 
 - stdio / HTTP connect success、timeout、initialize failure、tool discovery failure。
-- secretRef missing、resolver failure、脱敏边界。
+- secretRef missing、resolver failure、错误内容与原因链保真。
 - OAuth pending、拒绝、成功、session close 竞态。
 - notification 丢失后 status 与 generation refresh 仍正确。
 - ToolSearch index rebuild 失败保持旧快照并可重试。

@@ -36,32 +36,37 @@ impl LockedTarget<'_> {
             return Err(CommitError::Sentinel);
         }
 
-        let parent = self.path.parent().ok_or(CommitError::Io)?;
+        let parent = self.path.parent().ok_or_else(|| {
+            CommitError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("target has no parent: {}", self.path.display()),
+            ))
+        })?;
         if !parent.exists() {
-            std::fs::create_dir_all(parent).map_err(|_| CommitError::Io)?;
+            std::fs::create_dir_all(parent).map_err(CommitError::Io)?;
         }
 
         let tmp_path = self
             .path
             .with_extension(format!("tmp.{}", uuid::Uuid::now_v7()));
-        if std::fs::write(&tmp_path, post).is_err() {
+        if let Err(error) = std::fs::write(&tmp_path, post) {
             let _ = std::fs::remove_file(&tmp_path);
-            return Err(CommitError::Io);
+            return Err(CommitError::Io(error));
         }
 
         if let Ok(metadata) = std::fs::metadata(self.path) {
             #[cfg(unix)]
-            if std::fs::set_permissions(&tmp_path, metadata.permissions()).is_err() {
+            if let Err(error) = std::fs::set_permissions(&tmp_path, metadata.permissions()) {
                 let _ = std::fs::remove_file(&tmp_path);
-                return Err(CommitError::Io);
+                return Err(CommitError::Io(error));
             }
             #[cfg(not(unix))]
             let _ = metadata;
         }
 
-        if std::fs::rename(&tmp_path, self.path).is_err() {
+        if let Err(error) = std::fs::rename(&tmp_path, self.path) {
             let _ = std::fs::remove_file(&tmp_path);
-            return Err(CommitError::Io);
+            return Err(CommitError::Io(error));
         }
         Ok(())
     }
@@ -87,10 +92,10 @@ fn introduces_projection_sentinel_bytes(pre: &[u8], post: &[u8]) -> bool {
         .any(|(sentinel, count)| count > pre_counts.get(&sentinel).copied().unwrap_or(0))
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Debug)]
 pub(crate) enum CommitError {
     Sentinel,
-    Io,
+    Io(std::io::Error),
 }
 
 pub(crate) fn target_key(cwd: &str, file_path: &str) -> PathBuf {

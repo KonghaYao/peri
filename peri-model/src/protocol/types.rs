@@ -17,7 +17,9 @@ impl JsonObject {
 
     pub fn from_value(value: Value) -> ModelResult<Self> {
         let Value::Object(fields) = value else {
-            return Err(ModelError::protocol(ProtocolErrorKind::InvalidJsonObject));
+            return Err(ModelError::protocol(ProtocolErrorKind::InvalidJsonObject)
+                .with_message("JSON object required")
+                .with_body(value.to_string()));
         };
         Ok(Self(fields.into_iter().collect()))
     }

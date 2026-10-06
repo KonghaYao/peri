@@ -83,8 +83,8 @@ impl fmt::Debug for OpenAiConfig {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("OpenAiConfig")
-            .field("endpoint", &debug_endpoint_projection(&self.endpoint))
-            .field("api_key", &"[REDACTED]")
+            .field("endpoint", &self.endpoint)
+            .field("api_key", &self.api_key)
             .field("model", &self.model)
             .field("reasoning_effort", &self.reasoning_effort)
             .field("thinking_enabled", &self.thinking_enabled)
@@ -92,13 +92,6 @@ impl fmt::Debug for OpenAiConfig {
             .field("max_tokens", &self.max_tokens)
             .field("runtime", &self.runtime)
             .finish()
-    }
-}
-
-fn debug_endpoint_projection(endpoint: &Url) -> String {
-    match endpoint.host() {
-        Some(host) => format!("{}://{host}/[REDACTED]", endpoint.scheme()),
-        None => format!("{}://[REDACTED]", endpoint.scheme()),
     }
 }
 
@@ -147,7 +140,9 @@ impl OpenAiModel {
             .bearer_auth(api_key)
             .json(&built.body)
             .build()
-            .map_err(|_| ModelError::protocol(crate::ProtocolErrorKind::Provider))?;
+            .map_err(|error| {
+                ModelError::protocol(crate::ProtocolErrorKind::Provider).with_error(&error)
+            })?;
         Ok(HttpRequest::new(request))
     }
 }
@@ -221,3 +216,7 @@ impl crate::Model for OpenAiModel {
 #[cfg(test)]
 #[path = "mod_test.rs"]
 mod mod_test;
+
+#[cfg(test)]
+#[path = "diagnostic_test.rs"]
+mod diagnostic_test;

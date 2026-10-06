@@ -83,8 +83,8 @@ impl fmt::Debug for AnthropicConfig {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("AnthropicConfig")
-            .field("endpoint", &debug_endpoint_projection(&self.endpoint))
-            .field("api_key", &"[REDACTED]")
+            .field("endpoint", &self.endpoint)
+            .field("api_key", &self.api_key)
             .field("model", &self.model)
             .field("extended_thinking", &self.extended_thinking)
             .field("thinking_budget", &self.thinking_budget)
@@ -93,13 +93,6 @@ impl fmt::Debug for AnthropicConfig {
             .field("max_tokens", &self.max_tokens)
             .field("runtime", &self.runtime)
             .finish()
-    }
-}
-
-fn debug_endpoint_projection(endpoint: &Url) -> String {
-    match endpoint.host() {
-        Some(host) => format!("{}://{host}/[REDACTED]", endpoint.scheme()),
-        None => format!("{}://[REDACTED]", endpoint.scheme()),
     }
 }
 
@@ -158,10 +151,9 @@ impl AnthropicModel {
         if let Some(session_id) = &built.session_id {
             request = request.header("x-session-id", session_id);
         }
-        request
-            .build()
-            .map(HttpRequest::new)
-            .map_err(|_| ModelError::protocol(crate::ProtocolErrorKind::Provider))
+        request.build().map(HttpRequest::new).map_err(|error| {
+            ModelError::protocol(crate::ProtocolErrorKind::Provider).with_error(&error)
+        })
     }
 }
 
@@ -235,3 +227,17 @@ impl crate::Model for AnthropicModel {
 #[cfg(test)]
 #[path = "mod_test.rs"]
 mod mod_test;
+
+#[cfg(test)]
+#[path = "config_test.rs"]
+mod config_test;
+#[cfg(test)]
+#[path = "stream_failure_test.rs"]
+mod stream_failure_test;
+#[cfg(test)]
+#[path = "stream_lifecycle_test.rs"]
+mod stream_lifecycle_test;
+
+#[cfg(test)]
+#[path = "diagnostic_test.rs"]
+mod diagnostic_test;

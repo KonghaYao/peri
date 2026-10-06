@@ -12,7 +12,7 @@ use crate::{
 
 use super::response::{decode_usage, provider_protocol_error, stop_reason};
 
-/// 畸形帧的解码诊断：保留 `Provider` 分类并附带受限摘要（仅 `[A-Za-z0-9._-]`），
+/// 畸形帧的解码诊断：保留 `Provider` 分类并附带有界摘要，
 /// 使 fail-closed 的原因在错误出口可见，而不是被降级成空事件。
 fn malformed_frame_error(summary: &str) -> ModelError {
     ModelError::protocol_with_summary(crate::ProtocolErrorKind::Provider, summary)
@@ -48,14 +48,25 @@ pub(super) fn decoders() -> SseDecoderFactory {
 }
 
 fn decode_event(state: &Mutex<StreamState>, event: SseEvent) -> ModelResult<Vec<ModelStreamEvent>> {
+    let body = event.data.clone();
+    decode_event_inner(state, event).map_err(|error| error.with_body(body))
+}
+
+fn decode_event_inner(
+    state: &Mutex<StreamState>,
+    event: SseEvent,
+) -> ModelResult<Vec<ModelStreamEvent>> {
     if event.data == "[DONE]" {
         return Ok(Vec::new());
     }
-    let value: Value = serde_json::from_str(&event.data).map_err(|_| provider_protocol_error())?;
+    let value: Value = serde_json::from_str(&event.data)
+        .map_err(|error| provider_protocol_error().with_error(&error))?;
     if value.get("error").is_some_and(|error| !error.is_null()) {
-        return Err(provider_protocol_error());
+        return Err(provider_protocol_error().with_message(value["error"].to_string()));
     }
-    let mut state = state.lock().map_err(|_| provider_protocol_error())?;
+    let mut state = state
+        .lock()
+        .map_err(|error| provider_protocol_error().with_message(error.to_string()))?;
     if state.request_id.is_none() {
         state.request_id = value.get("id").and_then(Value::as_str).map(str::to_owned);
     }
@@ -165,7 +176,9 @@ fn decode_event(state: &Mutex<StreamState>, event: SseEvent) -> ModelResult<Vec<
 }
 
 fn complete_stream(state: &Mutex<StreamState>) -> ModelResult<Vec<ModelStreamEvent>> {
-    let state = state.lock().map_err(|_| provider_protocol_error())?;
+    let state = state
+        .lock()
+        .map_err(|error| provider_protocol_error().with_message(error.to_string()))?;
     // DONE 只代表传输结束；缺失 provider 结束原因时不能把部分响应当作 EndTurn。
     let finish_reason = state
         .finish_reason
@@ -194,10 +207,13 @@ fn completed_response(
                 .name
                 .as_deref()
                 .ok_or_else(provider_protocol_error)?;
-            let arguments: Value = serde_json::from_str(&tool_call.arguments)
-                .map_err(|_| provider_protocol_error())?;
-            let arguments =
-                JsonObject::from_value(arguments).map_err(|_| provider_protocol_error())?;
+            let arguments: Value = serde_json::from_str(&tool_call.arguments).map_err(|error| {
+                provider_protocol_error()
+                    .with_error(&error)
+                    .with_body(&tool_call.arguments)
+            })?;
+            let arguments = JsonObject::from_value(arguments)
+                .map_err(|error| provider_protocol_error().with_error(&error))?;
             Ok(ToolCall::new(id, name, arguments))
         })
         .collect::<ModelResult<Vec<_>>>()?;

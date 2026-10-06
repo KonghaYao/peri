@@ -198,7 +198,7 @@ async fn handle_agent_text_submit(
     // 原有的 MessageContent::text（不改变无附件提交的在线形态）。
     let content = crate::kit::steer_state::content_with_attachments(trimmed, &attachments);
     acp_client.prompt(&content, request_id).await.map_err(|e| {
-        warn!(error = %e, "kit submit_consumer: prompt RPC failed");
+        warn!(session_id = ?acp_client.current_session_id(), error = ?e, "kit submit_consumer: prompt RPC failed");
         Box::new(e) as Box<dyn std::error::Error + Send + Sync>
     })?;
     Ok(())
@@ -249,7 +249,7 @@ async fn handle_keepgoing_submit(
         .prompt(&MessageContent::text(""), request_id)
         .await
         .map_err(|e| {
-            warn!(error = %e, "kit submit_consumer: keepgoing prompt RPC failed");
+            warn!(session_id = ?acp_client.current_session_id(), error = ?e, "kit submit_consumer: keepgoing prompt RPC failed");
             Box::new(e) as Box<dyn std::error::Error + Send + Sync>
         })?;
     Ok(())

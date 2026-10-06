@@ -2,6 +2,19 @@ use std::sync::Arc;
 
 use super::*;
 
+#[test]
+fn rpc_failure_debug_and_display_preserve_payload() {
+    let error = JsonRpcError {
+        code: -32000,
+        message: "JavaScript token=fixture failed".into(),
+        data: Some(serde_json::json!({"cause": "cwd=/fixture\nTLS reset"})),
+    };
+    let rendered = crate::JsRuntimeError::RpcResponse(error).to_string();
+    assert!(rendered.contains("token=fixture"));
+    assert!(rendered.contains("cwd=/fixture"));
+    assert!(rendered.contains("TLS reset"));
+}
+
 async fn make_channel() -> (RpcChannel, tokio::process::Child) {
     let mut child = tokio::process::Command::new("node")
         .args(["-e", "setTimeout(() => {}, 60_000);"])

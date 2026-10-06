@@ -234,7 +234,7 @@ impl McpClientPool {
                                 );
                                 let error = McpPoolError::ResourceDiscoveryFailed {
                                     server: server_name.to_string(),
-                                    reason: super::client::redact_mcp_error(&error.to_string()),
+                                    reason: error.to_string(),
                                 };
                                 self.emit_oauth_failure(
                                     flow_id,

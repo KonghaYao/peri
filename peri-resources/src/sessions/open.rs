@@ -209,10 +209,6 @@ impl fmt::Debug for StorageLocator {
         match self {
             Self::Default => formatter.write_str("Default"),
             Self::LocalPath(path) => formatter.debug_tuple("LocalPath").field(path).finish(),
-            Self::Literal(raw) if looks_like_remote_url(raw) => {
-                // 解析后由 `RemoteEndpoint` 的脱敏 `Debug` 给 scheme/引擎/主机家族。
-                formatter.write_str("Literal(<remote locator redacted>)")
-            }
             Self::Literal(raw) => formatter.debug_tuple("Literal").field(raw).finish(),
             Self::EnvVar(name) => formatter.debug_tuple("EnvVar").field(name).finish(),
         }

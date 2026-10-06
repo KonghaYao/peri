@@ -11,13 +11,11 @@ use crate::progress::WorkflowProgressStore;
 use crate::protocol::ProgressEvent;
 
 fn public_workflow_error(error: &str) -> String {
-    peri_acp_types::session::sanitize_public_error(error, 2_000)
+    peri_acp_types::session::bounded_error_message(error, 2_000)
 }
 
 fn public_stderr_summary(stderr_tail: Option<String>) -> Option<String> {
-    stderr_tail.filter(|tail| !tail.trim().is_empty()).map(|_| {
-        "workflow process emitted diagnostic stderr; check protected logs for details".into()
-    })
+    stderr_tail.filter(|tail| !tail.trim().is_empty())
 }
 
 fn persist_failed_state(

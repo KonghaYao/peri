@@ -1,4 +1,4 @@
-//! Turn 错误的稳定分类与安全观测；原始错误正文不得进入遥测。
+//! Turn 错误的稳定分类与完整诊断观测。
 
 use super::event_builder::{new_uuid, now_rfc3339, try_add_or_warn_via_session, VERSION};
 use super::LangfuseTracer;
@@ -36,7 +36,7 @@ impl LangfuseTracer {
                 metadata: Some(serde_json::json!({
                     "synthetic_error": true,
                     "error_class": error_class,
-                    "error_schema_version": 2,
+                    "error_schema_version": 3,
                 })),
                 tags: None,
                 environment: None,
@@ -95,7 +95,7 @@ impl LangfuseTracer {
                 "was_sampled": sampled,
                 "turn_id": &turn_id,
                 "error_class": error_class,
-                "error_schema_version": 2,
+                "error_schema_version": 3,
             })),
             level: Some(ObservationLevel::Error),
             status_message: None,
@@ -132,7 +132,32 @@ pub(super) fn failure_output(failure: &ExecutionFailure, error_class: &str) -> s
         "error_class": error_class,
         "error_kind": failure.kind.wire_name(),
         "http_status": failure.http_status,
-        "message": "The operation failed. Check protected logs for details.",
+        "message": failure.public_message,
+        "diagnostic": failure.diagnostic,
+        "error_category": failure.error_category,
+        "causes": failure.causes,
         "error_schema_version": 3,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn error_output_preserves_non_model_causes() {
+        let failure = ExecutionFailure {
+            kind: ExecutionFailureKind::Internal,
+            public_message: "storage token=fixture failed".into(),
+            http_status: None,
+            diagnostic: None,
+            error_category: Some("storage".into()),
+            causes: vec!["connection reset\nSQL api_key=fixture".into()],
+        };
+        let output = failure_output(&failure, "internal");
+        assert_eq!(output["message"], failure.public_message);
+        assert_eq!(output["error_category"], "storage");
+        assert_eq!(output["causes"], serde_json::json!(failure.causes));
+        assert_eq!(output["error_schema_version"], 3);
+    }
 }

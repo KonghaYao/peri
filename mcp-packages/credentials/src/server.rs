@@ -72,13 +72,19 @@ impl ServerHandler for OAuthCredentialMcpServer {
                 None,
             ));
         }
-        let request = request
-            .params
-            .and_then(|params| serde_json::from_value(params).ok())
-            .ok_or_else(|| ErrorData::invalid_params("Invalid OAuth credential request", None))?;
+        let params = request.params.ok_or_else(|| {
+            ErrorData::invalid_params(
+                "Invalid OAuth credential request: parameters required",
+                None,
+            )
+        })?;
+        let request = serde_json::from_value(params).map_err(|error| {
+            ErrorData::invalid_params(format!("Invalid OAuth credential request: {error}"), None)
+        })?;
         let result = self.execute(request).await;
-        let value = serde_json::to_value(result)
-            .map_err(|_| ErrorData::internal_error("OAuth credential response failed", None))?;
+        let value = serde_json::to_value(result).map_err(|error| {
+            ErrorData::internal_error(format!("OAuth credential response failed: {error}"), None)
+        })?;
         Ok(CustomResult(value))
     }
 }

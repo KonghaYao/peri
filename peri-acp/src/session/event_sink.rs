@@ -236,9 +236,6 @@ impl EventSink for TransportEventSink {
             }
         }
 
-        // Privacy-safe GUI activity channel. This is intentionally independent
-        // from legacy `peri/agent_event`: the mapper has already removed raw
-        // messages, summaries, paths, outputs, errors and URLs before transport.
         if caps.agent_activity {
             if let Some(activity) = map_agent_activity(event) {
                 if let Err(error) = self

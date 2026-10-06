@@ -350,7 +350,7 @@ async fn test_llm_end_without_start_emits_synthetic_generation() {
 }
 
 #[tokio::test]
-async fn test_unsampled_failure_emits_parent_before_error_and_redacts_message() {
+async fn test_unsampled_failure_emits_parent_before_error_and_preserves_message() {
     let (mut t, session) = make_tracer(0.0);
     let parent_id = t.agent_observation_id.clone();
     let secrets = "sk-live-raw eyJhbGciOiJIUzI1NiJ9.payload.signature -----BEGIN PRIVATE KEY----- postgres://user:password@host/db";
@@ -393,8 +393,8 @@ async fn test_unsampled_failure_emits_parent_before_error_and_redacts_message() 
         "postgres://",
     ] {
         assert!(
-            !serialized.contains(secret),
-            "Langfuse payload leaked secret marker: {secret}"
+            serialized.contains(secret),
+            "Langfuse payload lost diagnostic marker: {secret}"
         );
     }
 }
@@ -440,7 +440,7 @@ async fn test_llm_generation_emits_events() {
 }
 
 #[tokio::test]
-async fn test_llm_error_uses_safe_status_message() {
+async fn test_llm_error_preserves_status_message() {
     let (mut t, session) = make_tracer(1.0);
     t.on_turn_start("turn_1");
     t.on_llm_start("main", 0, &[], &[]);
@@ -472,10 +472,10 @@ async fn test_llm_error_uses_safe_status_message() {
     );
     assert_eq!(
         gen.status_message.as_deref(),
-        Some("provider_or_stream_failure"),
-        "generation statusMessage 应为稳定分类"
+        Some("ERROR: sentinel-secret"),
+        "generation statusMessage 应保留实际错误"
     );
-    assert!(!format!("{gen:?}").contains("sentinel-secret"));
+    assert!(format!("{gen:?}").contains("sentinel-secret"));
 }
 
 #[tokio::test]
@@ -487,6 +487,8 @@ async fn test_turn_error_reason_is_safe_in_error_span() {
         failure: peri_acp_types::session::ExecutionFailure {
             kind: peri_acp_types::session::ExecutionFailureKind::Llm,
             public_message: "LLM failure".to_string(),
+            error_category: None,
+            causes: Vec::new(),
             http_status: None,
             diagnostic: None,
         },
@@ -516,7 +518,7 @@ async fn test_turn_error_reason_is_safe_in_error_span() {
             .metadata
             .as_ref()
             .and_then(|metadata| metadata.get("error_schema_version")),
-        Some(&serde_json::json!(2))
+        Some(&serde_json::json!(3))
     );
     assert!(!format!("{error_span:?}").contains("sentinel-secret"));
 }
@@ -960,7 +962,7 @@ async fn test_tool_observation_error_marks_error_class() {
         Some(serde_json::json!({
             "error_class": "tool_failure",
             "error_message": "command failed",
-            "error_schema_version": 2,
+            "error_schema_version": 3,
         })),
         "错误工具 output 应保留 error_class 与 error_message 标记"
     );

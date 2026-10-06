@@ -56,18 +56,22 @@ impl OAuthCredentialPort for SqliteOAuthCredentialStore {
     async fn load(&self, server_key: &str) -> OAuthCredentialResult<Option<String>> {
         validate_server_key(server_key)?;
         let (principal_id, workspace_id) = self.scope(false)?;
-        let row: Option<(String,)> =
-            sqlx::query_as(AssertSqlSafe(canonical::SELECT_V2_OAUTH_CREDENTIAL_SQL))
-                .bind(principal_id)
-                .bind(workspace_id)
-                .bind(server_key)
-                .fetch_optional(&self.database.pool)
-                .await
-                .map_err(|_| OAuthCredentialError::Unavailable)?;
+        let row: Option<(String,)> = sqlx::query_as(AssertSqlSafe(
+            canonical::SELECT_V2_OAUTH_CREDENTIAL_SQL,
+        ))
+        .bind(principal_id)
+        .bind(workspace_id)
+        .bind(server_key)
+        .fetch_optional(&self.database.pool)
+        .await
+        .map_err(|error| {
+            tracing::error!(error = %error, source = ?error, "OAuth credential storage failed");
+            OAuthCredentialError::Unavailable
+        })?;
         match row {
             Some((credentials,)) => {
                 validate_credentials(&credentials)
-                    .map_err(|_| OAuthCredentialError::InvalidData)?;
+                    .map_err(|error| { tracing::error!(error = %error, source = ?error, "OAuth credential data is invalid"); OAuthCredentialError::InvalidData })?;
                 Ok(Some(credentials))
             }
             None => Ok(None),
@@ -86,7 +90,10 @@ impl OAuthCredentialPort for SqliteOAuthCredentialStore {
             .bind(peri_time::now_utc_rfc3339())
             .execute(&self.database.pool)
             .await
-            .map_err(|_| OAuthCredentialError::Unavailable)?;
+            .map_err(|error| {
+                tracing::error!(error = %error, source = ?error, "OAuth credential storage failed");
+                OAuthCredentialError::Unavailable
+            })?;
         Ok(())
     }
 
@@ -99,7 +106,10 @@ impl OAuthCredentialPort for SqliteOAuthCredentialStore {
             .bind(server_key)
             .execute(&self.database.pool)
             .await
-            .map_err(|_| OAuthCredentialError::Unavailable)?;
+            .map_err(|error| {
+                tracing::error!(error = %error, source = ?error, "OAuth credential storage failed");
+                OAuthCredentialError::Unavailable
+            })?;
         Ok(())
     }
 
@@ -112,22 +122,29 @@ impl OAuthCredentialPort for SqliteOAuthCredentialStore {
         .bind(workspace_id)
         .execute(&self.database.pool)
         .await
-        .map_err(|_| OAuthCredentialError::Unavailable)?;
+        .map_err(|error| {
+            tracing::error!(error = %error, source = ?error, "OAuth credential storage failed");
+            OAuthCredentialError::Unavailable
+        })?;
         Ok(())
     }
 
     async fn list(&self) -> OAuthCredentialResult<Vec<String>> {
         let (principal_id, workspace_id) = self.scope(false)?;
-        let rows: Vec<(String,)> =
-            sqlx::query_as(AssertSqlSafe(canonical::LIST_V2_OAUTH_CREDENTIALS_SQL))
-                .bind(principal_id)
-                .bind(workspace_id)
-                .fetch_all(&self.database.pool)
-                .await
-                .map_err(|_| OAuthCredentialError::Unavailable)?;
+        let rows: Vec<(String,)> = sqlx::query_as(AssertSqlSafe(
+            canonical::LIST_V2_OAUTH_CREDENTIALS_SQL,
+        ))
+        .bind(principal_id)
+        .bind(workspace_id)
+        .fetch_all(&self.database.pool)
+        .await
+        .map_err(|error| {
+            tracing::error!(error = %error, source = ?error, "OAuth credential storage failed");
+            OAuthCredentialError::Unavailable
+        })?;
         rows.into_iter()
             .map(|(server_key,)| {
-                validate_server_key(&server_key).map_err(|_| OAuthCredentialError::InvalidData)?;
+                validate_server_key(&server_key).map_err(|error| { tracing::error!(error = %error, source = ?error, "OAuth credential data is invalid"); OAuthCredentialError::InvalidData })?;
                 Ok(server_key)
             })
             .collect()

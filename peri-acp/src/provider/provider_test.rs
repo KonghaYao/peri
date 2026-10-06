@@ -41,10 +41,8 @@ fn into_model_openai_produces_openai_compatible_protocol() {
         peri_model::ProviderProtocol::OpenAiCompatible
     ));
     assert_eq!(prepared.model_id(), "gpt-4o");
-    // PreparedModelRequest 是有意的安全观测投影：endpoint path 被脱敏为 /[REDACTED]，
-    // host 保留。协议补全路径（/v1/chat/completions）只发生在私有请求构造期。
     assert_eq!(prepared.endpoint().host_str(), Some("api.example.com"));
-    assert_eq!(prepared.endpoint().path(), "/[REDACTED]");
+    assert_eq!(prepared.endpoint().path(), "/v1/chat/completions");
 }
 
 #[test]
@@ -58,9 +56,8 @@ fn into_model_anthropic_produces_anthropic_protocol() {
         peri_model::ProviderProtocol::Anthropic
     ));
     assert_eq!(prepared.model_id(), "claude-sonnet-4-6");
-    // 同 OpenAI：host 保留，path 在观测投影中脱敏。
     assert_eq!(prepared.endpoint().host_str(), Some("api.anthropic.com"));
-    assert_eq!(prepared.endpoint().path(), "/[REDACTED]");
+    assert_eq!(prepared.endpoint().path(), "/v1/messages");
 }
 
 #[test]
@@ -213,9 +210,8 @@ fn into_model_invalid_base_url_falls_back_without_panic() {
     let prepared = model
         .prepare_request(&peri_model::ModelRequest::default())
         .expect("prepare_request 必须成功");
-    // 非法 base_url 回落到默认 endpoint（api.openai.com），host 保留，path 脱敏。
     assert_eq!(prepared.endpoint().host_str(), Some("api.openai.com"));
-    assert_eq!(prepared.endpoint().path(), "/[REDACTED]");
+    assert_eq!(prepared.endpoint().path(), "/v1/chat/completions");
 }
 
 #[test]

@@ -343,7 +343,7 @@ impl McpClientPool {
                             );
                             return Err(McpPoolError::ResourceDiscoveryFailed {
                                 server: server_name.to_string(),
-                                reason: super::client::redact_mcp_error(&error.to_string()),
+                                reason: error.to_string(),
                             });
                         }
                         downgrade_resource_listing(server_name, &error.to_string());

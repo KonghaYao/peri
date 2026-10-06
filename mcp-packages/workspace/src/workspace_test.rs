@@ -56,11 +56,10 @@ async fn unknown_tool_is_invalid_params() {
 }
 
 #[tokio::test]
-async fn tool_failures_return_sanitized_error_result() {
+async fn tool_failures_preserve_diagnostic_error_result() {
     let dir = tempfile::tempdir().expect("临时目录夹具必须可创建");
     let server = server_in(&dir);
 
-    // ① 缺必填参数：固定规则文本含工具名，恢复原因点明缺参（不透传输入值）。
     let missing = complete(
         invoke_tool_call(server.tools(), &server.cwd, &request("Read", json!({})))
             .await
@@ -77,7 +76,6 @@ async fn tool_failures_return_sanitized_error_result() {
         "缺参恢复原因必须点明参数与 required：{missing_text}"
     );
 
-    // ② 路径不存在且含路径形状哨兵：原始错误不得进入模型面文本，只给固定的安全原因。
     const LEAK_PATH: &str = "/tmp/secret-marker/private.txt";
     let leaky = complete(
         invoke_tool_call(
@@ -96,11 +94,10 @@ async fn tool_failures_return_sanitized_error_result() {
         "不存在路径必须给固定原因：{leaky_text}"
     );
     assert!(
-        !leaky_text.contains(LEAK_PATH),
-        "模型面文本不得含路径形状串：{leaky_text}"
+        leaky_text.contains(LEAK_PATH),
+        "模型面文本必须保留实际路径：{leaky_text}"
     );
 
-    // ③ Bash 的失败路径同样经共享投影（含命令文本的原始错误不得外泄）。
     let bash = complete(
         invoke_tool_call(server.tools(), &server.cwd, &request("Bash", json!({})))
             .await

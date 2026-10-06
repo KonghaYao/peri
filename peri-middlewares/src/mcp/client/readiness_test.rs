@@ -305,11 +305,11 @@ async fn system_ready_rejects_initialize_error() {
     assert_eq!(
         error,
         SystemReadinessError::ConnectionFailed {
-            server: "sys".to_string()
+            server: "sys".to_string(),
+            reason: "fixture: initialize failed".to_string(),
         }
     );
-    // 失败文案不含底层原因原文，也不含任何传输细节。
-    assert!(!error.to_string().contains("fixture"));
+    assert!(error.to_string().contains("fixture"));
 
     fixture.shutdown().await;
 }
@@ -328,7 +328,8 @@ async fn system_ready_rejects_tools_list_error_instead_of_empty() {
     assert_eq!(
         error,
         SystemReadinessError::ToolDiscoveryFailed {
-            server: "sys".to_string()
+            server: "sys".to_string(),
+            reason: "tools/list did not complete successfully".to_string(),
         }
     );
 
@@ -644,7 +645,8 @@ async fn system_ready_reports_disabled_and_authorization_required() {
     assert_eq!(
         error,
         SystemReadinessError::AuthorizationRequired {
-            server: "sys".to_string()
+            server: "sys".to_string(),
+            reason: "fixture: authorization required".to_string(),
         }
     );
     auth.shutdown().await;
@@ -694,6 +696,7 @@ fn system_readiness_error_maps_cancellation_to_interrupted_only() {
 
     let mapped = SystemReadinessError::ConnectionFailed {
         server: "sys".to_string(),
+        reason: String::new(),
     }
     .into_agent_error("McpMiddleware");
     match mapped {
@@ -717,15 +720,18 @@ fn system_readiness_error_carries_the_frozen_status_set() {
         },
         SystemReadinessError::AuthorizationRequired {
             server: "s".to_string(),
+            reason: String::new(),
         },
         SystemReadinessError::ConnectionFailed {
             server: "s".to_string(),
+            reason: String::new(),
         },
         SystemReadinessError::NegotiationIncomplete {
             server: "s".to_string(),
         },
         SystemReadinessError::ToolDiscoveryFailed {
             server: "s".to_string(),
+            reason: String::new(),
         },
         SystemReadinessError::ConnectionChanged {
             server: "s".to_string(),

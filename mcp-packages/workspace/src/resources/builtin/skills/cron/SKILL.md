@@ -61,7 +61,7 @@ Use `mcp__cron__cron_list` to verify the registered task and its next fire time 
 
 In approval mode, `mcp__cron__cron_register` always prompts the user before registering (`mcp__cron__cron_list` and `mcp__cron__cron_remove` do not require approval).
 
-If a call fails, the returned text is a fixed, redacted message naming only the tool — it never echoes the expression, the prompt, or any path. Do not read the failure text as a diagnostic of your arguments; re-check the input and retry.
+If a call fails, the returned text names the tool and preserves its actual diagnostic, including expression or path details when present. Use the diagnostic and any recovery guidance to correct the input before retrying.
 
 ## Workflow
 

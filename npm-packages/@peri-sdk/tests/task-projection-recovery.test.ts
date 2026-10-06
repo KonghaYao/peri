@@ -101,5 +101,24 @@ test("Session asks Peri for a task snapshot after a missed notification", async 
   await Promise.resolve();
   expect(transport.snapshotCalls).toBe(1);
   expect(tasks(agent.docs).get("shell-1")?.get("status")).toBe("completed");
+  const projectionError = new Error("projection failed /tmp/fixture?token=synthetic", { cause: new Error("fixture source") });
+  const originalAccept = agent.docs.accept;
+  const originalLog = console.error;
+  const logs: unknown[][] = [];
+  agent.docs.accept = () => { throw projectionError; };
+  console.error = (...args: unknown[]) => { logs.push(args); };
+  const raw = { jsonrpc: "2.0" as const, method: "peri/agent_event", params: {
+    sessionId: "s1", event_json: JSON.stringify({ type: "subagent_started", value: { instance_id: "fixture", agent_name: "Fixture" } }),
+  } };
+  try {
+    transport.emit(raw);
+    expect(logs.some((args) => args[1] === projectionError)).toBe(true);
+    const stream = agent.session.stream()[Symbol.asyncIterator]();
+    expect((await stream.next()).value).toEqual(raw);
+    await stream.return?.();
+  } finally {
+    agent.docs.accept = originalAccept;
+    console.error = originalLog;
+  }
   await agent.close(closeCommand);
 });

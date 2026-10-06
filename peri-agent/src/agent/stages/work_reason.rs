@@ -206,7 +206,7 @@ pub(crate) async fn commit_response(
             .resolve(call, &all_tools)
             .map_err(|error| {
                 tracing::warn!(
-                    tool = %peri_acp_types::session::sanitize_public_error(&call.name, 120),
+                    tool = %peri_acp_types::session::bounded_error_message(&call.name, 120),
                     "completed model response rejected before tool dispatch; original Reason checkpoint retained"
                 );
                 error

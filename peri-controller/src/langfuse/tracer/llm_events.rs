@@ -253,12 +253,13 @@ impl LangfuseTracer {
             }
         }
 
-        // LLM 失败路径只保留固定分类，避免将 provider 原始错误写入 statusMessage 或 output。
         let (level, status_message, generation_output) = if output.starts_with("ERROR: ") {
             (
                 Some(ObservationLevel::Error),
-                Some("provider_or_stream_failure".to_string()),
-                Some(serde_json::json!({"error_class": "provider_or_stream_failure"})),
+                Some(output.to_string()),
+                Some(
+                    serde_json::json!({"error_class": "provider_or_stream_failure", "text": output}),
+                ),
             )
         } else {
             (None, None, Some(parse_output(output)))

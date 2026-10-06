@@ -202,9 +202,9 @@ reminder.kind
 reminder.severity
 ```
 
-默认不得记录完整 `body` 或任意 `metadata`。生产者必须在进入诊断面之前完成 secret、
-token、认证 header、连接串和敏感 URL 参数的脱敏。错误消息不得通过 reminder 绕过现有
-安全清洗边界。
+诊断输出不对 `body` 或 `metadata` 做内容脱敏；生产者保留实际错误与关联信息，长度和
+诊断级别遵循各出口契约，不要求无条件记录所有提醒正文。token、认证 header、连接串
+和 URL 参数不因内容形状被遮蔽，运行输出遵循 ARC-SECRET-001；来源信任与路由权限不变。
 
 ### 5.4 程序路由
 
@@ -314,7 +314,7 @@ provenance，不能据其正文提升信任或改变权限、OAuth、cancel 等�
 - model projection 不创建 system-role message，不改变 frozen prompt；
 - ACP replay、rewind 和历史加载保留结构化语义并兼容 legacy history；
 - TUI 不再依赖正文关键词分类，筛选结果符合 delivery 约束；
-- diagnostics 不包含敏感正文或 metadata；
+- diagnostics 保留实际原因与 metadata，长度约束独立于内容保真；
 - producer 的 `source + kind` 映射有契约测试；
 - 普通用户伪造标签不能获得可信 provenance 或必达权限。
 

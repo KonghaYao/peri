@@ -524,6 +524,9 @@ pub fn build_stage_context(
     };
 
     let context = builder.build();
+    input
+        .retry_events
+        .set_context(&session_id, &context.session.turn);
 
     Ok((
         V2AgentOutput {

@@ -110,7 +110,7 @@ fn cancellable_body(body: HttpBody, cancellation: CancellationToken) -> HttpBody
     ))
 }
 
-fn map_reqwest_error(error: reqwest::Error) -> ModelError {
+pub(super) fn map_reqwest_error(error: reqwest::Error) -> ModelError {
     let kind = if error.is_timeout() {
         TransportErrorKind::Timeout
     } else if error.is_connect() {
@@ -118,5 +118,5 @@ fn map_reqwest_error(error: reqwest::Error) -> ModelError {
     } else {
         TransportErrorKind::Other
     };
-    ModelError::transport(kind, None::<&str>)
+    ModelError::transport(kind, None::<&str>).with_error(&error)
 }

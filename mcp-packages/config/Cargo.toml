@@ -13,6 +13,7 @@ fs2 = "0.4"
 rmcp = { workspace = true, features = ["client"] }
 serde_json.workspace = true
 tokio.workspace = true
+tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]

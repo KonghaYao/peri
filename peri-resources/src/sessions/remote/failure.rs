@@ -1,8 +1,6 @@
 //! SDK 失败 → 私有分类 → 领域失败。
 //!
-//! 原始 SDK 文本（`Error::Http(String)`、`Constraint(String)` 等载荷）只在本模块内用于
-//! 判别，**不进入**领域失败的 detail、日志或诊断输出：那些载荷可能包含 URL、
-//! Authorization 头或 SQL 片段。对外只给稳定分类。
+//! SDK 文本保留在诊断与领域 detail 中，分类与执行结果语义保持独立。
 
 use peri_acp_types::session_resources::{SessionResourceError, SessionResourceErrorKind};
 use turso_serverless::Error as SdkError;
@@ -136,4 +134,25 @@ fn classify_http(message: &str) -> RemoteFailureClass {
     } else {
         RemoteFailureClass::Transport
     }
+}
+
+pub(crate) fn from_sdk_error(error: &SdkError) -> SessionResourceError {
+    let class = classify(error);
+    tracing::error!(error = %error, source = ?error, class = class.as_str(), "remote session store operation failed");
+    let detail = peri_acp_types::session::bounded_error_message(&error.to_string(), 2_000);
+    let kind = match class {
+        RemoteFailureClass::AuthRejected | RemoteFailureClass::Constraint => {
+            SessionResourceErrorKind::InvalidInput { detail }
+        }
+        RemoteFailureClass::NotAdb | RemoteFailureClass::Corrupt => {
+            SessionResourceErrorKind::Corrupt { detail }
+        }
+        RemoteFailureClass::Transport
+        | RemoteFailureClass::ServerError
+        | RemoteFailureClass::Busy
+        | RemoteFailureClass::Unsupported
+        | RemoteFailureClass::Unknown => SessionResourceErrorKind::Unavailable { detail },
+        _ => return class.into_session_resource_error(),
+    };
+    SessionResourceError::new(kind)
 }

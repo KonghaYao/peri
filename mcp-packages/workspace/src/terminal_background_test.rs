@@ -348,8 +348,8 @@ async fn test_sync_timeout_without_registry_kills_and_persists_partial() {
 /// 无 TaskManager 时显式 `run_in_background` 必须被拒绝：退化分支的原始错误点明
 /// `run_in_background` 与「未配置 manager」。
 ///
-/// handler 面的固定脱敏投影（模型面文本不含原因短语）由 `workspace_test.rs` 的
-/// `tool_failures_return_sanitized_error_result` 覆盖。
+/// handler 面的诊断投影由 `workspace_test.rs` 的
+/// `tool_failures_preserve_diagnostic_error_result` 覆盖。
 /// （自 `peri-middlewares` 的 host wire 证据下沉：断言主体即本工具行为。）
 #[tokio::test]
 async fn test_bg_without_task_manager_rejects_run_in_background() {

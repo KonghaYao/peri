@@ -155,19 +155,24 @@ export class StdioTransport extends JsonRpcTransport {
       }
       const code = await this.process.exited;
       this.fail(new Error(`ACP process exited (code ${code})`));
-    } catch {
-      this.fail(new Error("ACP stdout failed"));
+    } catch (error) {
+      console.error("ACP stdout failed", error);
+      this.fail(new Error("ACP stdout failed", { cause: error }));
       this.process.kill();
     }
   }
 
   private async drainStderr(): Promise<void> {
     try {
-      for await (const _chunk of this.process.stderr) {
-        /* never expose secrets from stderr */
+      const decoder = new TextDecoder();
+      for await (const chunk of this.process.stderr) {
+        const text = decoder.decode(chunk, { stream: true });
+        if (text) console.error(text);
       }
-    } catch {
-      /* exit path settles pending requests */
+      const tail = decoder.decode();
+      if (tail) console.error(tail);
+    } catch (error) {
+      console.error("ACP stderr failed", error);
     }
   }
 

@@ -161,8 +161,8 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
             tm as Arc<dyn std::any::Any + Send + Sync>;
         tm_any.downcast::<AgentTaskManager>().ok()
     });
-    let (mut v2_out, new_cache, inherited, own_flags) =
-        match restored_history.and_then(|(inherited, own_flags)| {
+    let (mut v2_out, new_cache, inherited, own_flags) = match restored_history.and_then(
+        |(inherited, own_flags)| {
             (req.stage_build)(StageBuildRequest {
                 cached_llm: req.cached_llm,
                 frozen_session: req.frozen_session,
@@ -178,35 +178,37 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
             })
             .map(|(output, cache)| (output, cache, inherited, own_flags))
             .map_err(anyhow::Error::from)
-        }) {
-            Ok(output) => output,
-            Err(error) => {
-                error!(session_id = %req.session_id, error = %error, "[v2] stage build failed");
-                let failure = ExecutionFailure::internal("Agent stage initialization failed");
-                let source = UnstampedEvent::new(
-                    String::new(),
-                    String::new(),
-                    None,
-                    EventDeliveryClass::Critical,
-                );
-                req.publisher.publish_event(
-                    &req.session_id,
-                    &source,
-                    ExecutorEvent::AgentExecutionFailed {
-                        message: failure.public_message.clone(),
-                    },
-                );
-                return ExecOutcome {
-                    ok: false,
-                    stop_reason: PromptStopReason::EndTurn,
-                    failure: Some(failure),
-                    history_replaced_by_compaction: false,
-                    persisted_payloads: req.history_payloads,
-                    persistence_inconsistent: false,
-                    agent_state: AgentState::new(&req.cwd),
-                };
-            }
-        };
+        },
+    ) {
+        Ok(output) => output,
+        Err(error) => {
+            error!(session_id = %req.session_id, turn_id = ?req.execution_admission.as_ref().map(|admission| &admission.execution.turn_id), stage = "stage_build", error = %format_args!("{error:#}"), causes = ?error.chain().map(ToString::to_string).collect::<Vec<_>>(), "[v2] stage build failed");
+            let failure =
+                ExecutionFailure::internal(format!("Agent stage initialization failed: {error:#}"));
+            let source = UnstampedEvent::new(
+                String::new(),
+                String::new(),
+                None,
+                EventDeliveryClass::Critical,
+            );
+            req.publisher.publish_event(
+                &req.session_id,
+                &source,
+                ExecutorEvent::AgentExecutionFailed {
+                    message: failure.public_message.clone(),
+                },
+            );
+            return ExecOutcome {
+                ok: false,
+                stop_reason: PromptStopReason::EndTurn,
+                failure: Some(failure),
+                history_replaced_by_compaction: false,
+                persisted_payloads: req.history_payloads,
+                persistence_inconsistent: false,
+                agent_state: AgentState::new(&req.cwd),
+            };
+        }
+    };
     if let Some(admission) = req.execution_admission {
         if admission.session_id != req.session_id
             || !v2_out.context.session.turn.bind_work_admission(admission)
@@ -522,7 +524,9 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
         Ok(()) => None,
         Err(join_error) => {
             error!(session_id = %req.session_id, error = %join_error, "[v2] event forwarder failed");
-            Some(ExecutionFailure::internal("Agent event forwarding failed"))
+            Some(ExecutionFailure::internal(format!(
+                "Agent event forwarding failed: {join_error}"
+            )))
         }
     };
 
@@ -546,8 +550,8 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
         .is_uncertain();
     let persistence_inconsistent = flush_error.is_some() || compact_uncertain;
     let persistence_failure = if persistence_inconsistent {
-        if let Some(error) = flush_error {
-            error!(session_id = %req.session_id, error = %error, "[v2] phase 8 transcript flush failed");
+        if let Some(error) = &flush_error {
+            error!(session_id = %req.session_id, turn_id = %loop_turn_id, stage = "transcript_flush", error = %format_args!("{error:#}"), causes = ?error.chain().map(ToString::to_string).collect::<Vec<_>>(), "[v2] phase 8 transcript flush failed");
         } else {
             error!(session_id = %req.session_id, "[v2] compact persistence outcome is unconfirmed");
         }
@@ -556,9 +560,15 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
         // Preserve the durable prefix and require a cold reload; ID-only deletion cannot
         // roll back old flags and can destroy the only visible summary.
         v2_out.session.transcript().read().shutdown_persistence();
-        Some(ExecutionFailure::internal(
-            "Conversation persistence failed; reload the session to recover",
-        ))
+        Some(ExecutionFailure::internal(match &flush_error {
+            Some(error) => {
+                format!("Conversation persistence failed: {error:#}; reload the session to recover")
+            }
+            None => {
+                "Conversation persistence outcome is unconfirmed; reload the session to recover"
+                    .to_owned()
+            }
+        }))
     } else {
         None
     };
@@ -602,6 +612,7 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
     // Phase 9: 映射 LoopResult → ExecOutcome。cancel 在 transcript flush 之后
     // 只采样一次，后续 failure / TurnEnded / cascade / outcome 共用同一分类。
     let sampled_cancel = req.cancel.is_cancelled();
+    let finalization_failed = persistence_failure.is_some() || forwarder_failure.is_some();
     let terminal = match persistence_failure.or(forwarder_failure) {
         Some(failure) => internal_failure_terminal(failure),
         None => classify_loop_terminal(&loop_result, sampled_cancel),
@@ -624,17 +635,13 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
             mailbox.invalidate();
         }
     }
-    // 诊断日志与 wire 使用同一安全投影：保留错误原意和 HTTP status，但不得把
-    // provider body 中的凭据或完整 cause chain 写入日志。
-    if let Some(failure) = &terminal.failure {
-        error!(
-            session_id = %req.session_id,
-            kind = failure.kind.wire_name(),
-            http_status = failure.http_status,
-            message = %failure.public_message,
-            "[v2] execution failed"
-        );
-    }
+    log_loop_terminal(
+        &req.session_id,
+        &loop_turn_id,
+        &loop_result,
+        &terminal,
+        finalization_failed,
+    );
     // 对非 Interrupted/MaxIterations/cancel 的致命错误，通知 TUI 显示红色错误提示
     // issue: spec/issues/2026-07-22-llm-api-error-silently-swallowed-in-tui.md
     // （与 failure 共享同一 fatal 判定：fatal ↔ 发射；message 同一来源）
@@ -788,3 +795,41 @@ pub(crate) fn classify_loop_terminal(
         turn_error_kind: Some(TurnErrorKind::LlmFailure),
     }
 }
+
+fn log_loop_terminal(
+    session_id: &str,
+    turn_id: &str,
+    loop_result: &LoopResult,
+    terminal: &LoopTerminal,
+    finalization_failed: bool,
+) {
+    if let Some(failure) = &terminal.failure {
+        error!(
+            session_id = %session_id,
+            turn_id = %turn_id,
+            diagnostic_origin = "executor_terminal",
+            kind = failure.kind.wire_name(),
+            category = if finalization_failed { Some("execution_finalize") } else { match loop_result { LoopResult::Error(error) => Some(error.category_name()), _ => None } },
+            http_status = failure.http_status,
+            message = %failure.public_message,
+            loop_error_category = match loop_result { LoopResult::Error(error) => Some(error.category_name()), _ => None },
+            loop_error = ?match loop_result { LoopResult::Error(error) => Some(error.user_facing_message()), _ => None },
+            causes = ?match loop_result { LoopResult::Error(error) => error.cause_chain(), _ => Vec::new() },
+            diagnostic = ?failure.diagnostic,
+            "[v2] execution failed"
+        );
+    } else if let LoopResult::Error(error) = loop_result {
+        tracing::debug!(
+            session_id = %session_id,
+            turn_id = %turn_id,
+            stop_reason = ?terminal.stop_reason,
+            category = error.category_name(),
+            causes = ?error.cause_chain(),
+            "[v2] non-fatal loop termination"
+        );
+    }
+}
+
+#[cfg(test)]
+#[path = "terminal_diagnostic_test.rs"]
+mod diagnostic_tests;

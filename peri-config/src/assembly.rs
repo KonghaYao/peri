@@ -36,7 +36,6 @@ struct DomainShape {
     field: ConfigurationField,
     sources: &'static [Source],
     merge_rule: &'static str,
-    sensitive: bool,
 }
 
 // Declare source participation once. Domain-specific merge functions below implement these
@@ -46,13 +45,11 @@ const DOMAINS: &[DomainShape] = &[
         field: ConfigurationField::Settings,
         sources: &[Source::Global, Source::Workspace],
         merge_rule: "workspace overrides by domain rules; profiles replace as a unit",
-        sensitive: true,
     },
     DomainShape {
         field: ConfigurationField::McpServers,
         sources: &[Source::Global, Source::PluginMcp, Source::ProjectMcp],
         merge_rule: "global < plugin < project; manual namespaces deduplicate plugins",
-        sensitive: true,
     },
     DomainShape {
         field: ConfigurationField::McpCache,
@@ -62,13 +59,11 @@ const DOMAINS: &[DomainShape] = &[
             Source::Environment(&[mcp::MCP_CACHE_ENV]),
         ],
         merge_rule: "any false disables; true never relaxes another source",
-        sensitive: false,
     },
     DomainShape {
         field: ConfigurationField::BuiltinMcp,
         sources: &[Source::Environment(&[mcp::MCP_BUILTIN_ENV])],
         merge_rule: "off/0 disables runtime builtin injection; absent or unknown enables",
-        sensitive: false,
     },
     DomainShape {
         field: ConfigurationField::Provider,
@@ -78,7 +73,6 @@ const DOMAINS: &[DomainShape] = &[
             Source::Environment(provider::ENVIRONMENT_KEYS),
         ],
         merge_rule: "settings profiles first; environment provider is fallback only",
-        sensitive: true,
     },
     DomainShape {
         field: ConfigurationField::Observability,
@@ -87,19 +81,16 @@ const DOMAINS: &[DomainShape] = &[
             Source::Environment(observability::ENVIRONMENT_KEYS),
         ],
         merge_rule: "global settings then named environment overrides",
-        sensitive: true,
     },
     DomainShape {
         field: ConfigurationField::Ui,
         sources: &[Source::Global, Source::Workspace],
         merge_rule: "workspace overrides by domain rules; profiles replace as a unit",
-        sensitive: false,
     },
     DomainShape {
         field: ConfigurationField::Resources,
         sources: &[Source::Global],
         merge_rule: "global nested disableBundledSkills precedes top-level; default false",
-        sensitive: false,
     },
 ];
 
@@ -162,7 +153,6 @@ pub(crate) fn explain(
         revision,
         contributors,
         rule: shape.merge_rule,
-        contains_sensitive_values: shape.sensitive,
     }
 }
 
@@ -211,12 +201,15 @@ pub(crate) fn resolve_mcp(
 ) -> Result<McpConfigFile, ConfigurationError> {
     let global = parse_document(inputs.global.as_deref(), SourceIdentity::GlobalFile)?;
     let project = parse_document(inputs.project.as_deref(), SourceIdentity::ProjectMcpFile)?;
-    let mut global = mcp::parse_global(&global).map_err(|_| ConfigurationError::InvalidInput {
-        source_identity: SourceIdentity::GlobalFile,
-        domain: "MCP",
-    })?;
+    let mut global =
+        mcp::parse_global(&global).map_err(|error| ConfigurationError::InvalidInput {
+            cause: Box::new(error),
+            source_identity: SourceIdentity::GlobalFile,
+            domain: "MCP",
+        })?;
     let mut project =
-        mcp::parse_project(&project).map_err(|_| ConfigurationError::InvalidInput {
+        mcp::parse_project(&project).map_err(|error| ConfigurationError::InvalidInput {
+            cause: Box::new(error),
             source_identity: SourceIdentity::ProjectMcpFile,
             domain: "MCP",
         })?;
@@ -226,8 +219,9 @@ pub(crate) fn resolve_mcp(
     for server in project.mcp_servers.values_mut() {
         server.source = Some(ConfigSource::Project(project_mcp_path(&scope.cwd)));
     }
-    mcp::resolve_from_files(&global, &project, plugins, &inputs.environment).map_err(|_| {
+    mcp::resolve_from_files(&global, &project, plugins, &inputs.environment).map_err(|error| {
         ConfigurationError::InvalidInput {
+            cause: Box::new(error),
             source_identity: if plugins.is_empty() {
                 SourceIdentity::Environment(mcp::MCP_CACHE_ENV.to_owned())
             } else {
@@ -249,15 +243,21 @@ pub(crate) fn parse_document(
     match content {
         None => Ok(serde_json::json!({})),
         Some(content) => {
-            let document: Value =
-                serde_json::from_str(content).map_err(|_| ConfigurationError::InvalidInput {
+            let document: Value = serde_json::from_str(content).map_err(|error| {
+                ConfigurationError::InvalidInput {
+                    cause: Box::new(error),
                     source_identity: source_identity.clone(),
                     domain: "JSON",
-                })?;
+                }
+            })?;
             if !document.is_object() {
                 return Err(ConfigurationError::InvalidInput {
                     source_identity,
                     domain: "JSON object",
+                    cause: Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "expected a JSON object",
+                    )),
                 });
             }
             Ok(document)
@@ -269,11 +269,13 @@ fn parse_settings(
     document: &Value,
     source_identity: SourceIdentity,
 ) -> Result<PeriConfig, ConfigurationError> {
-    let mut config: PeriConfig =
-        serde_json::from_value(document.clone()).map_err(|_| ConfigurationError::InvalidInput {
+    let mut config: PeriConfig = serde_json::from_value(document.clone()).map_err(|error| {
+        ConfigurationError::InvalidInput {
+            cause: Box::new(error),
             source_identity,
             domain: "settings",
-        })?;
+        }
+    })?;
     config.config.validate_meta_harness();
     Ok(config)
 }

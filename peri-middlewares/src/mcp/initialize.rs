@@ -107,7 +107,7 @@ pub(super) fn commit_discovery_failure(
 /// `tools/list` 失败的统一收口：不提交 `Connected`（那会伪装成「发现完成且无工具」），
 /// 改为显式 `Failed` + 本代 `tools_list_ok = false` 的证据。
 pub(super) fn fail_tool_discovery(pool: &Arc<McpClientPool>, server_name: &str, error: &str) {
-    let reason = format!("工具发现失败: {}", super::client::redact_mcp_error(error));
+    let reason = format!("工具发现失败: {}", error);
     tracing::warn!(server = %server_name, error = %reason, "MCP tools/list 失败，不发布连接与 ready 证据");
     McpClientPool::insert_failed(pool, server_name, reason);
     commit_discovery_failure(pool, server_name, true);
@@ -119,7 +119,7 @@ pub(super) fn fail_tool_discovery(pool: &Arc<McpClientPool>, server_name: &str, 
 pub(super) fn downgrade_resource_listing(server_name: &str, error: &str) {
     tracing::warn!(
         server = %server_name,
-        error = %super::client::redact_mcp_error(error),
+        error = %error,
         "MCP resources/list 失败，本次不发布资源"
     );
 }
@@ -129,7 +129,7 @@ pub(super) fn fail_workspace_resource_discovery(
     server_name: &str,
     error: &str,
 ) {
-    let reason = format!("资源发现失败: {}", super::client::redact_mcp_error(error));
+    let reason = format!("资源发现失败: {}", error);
     tracing::warn!(server = %server_name, error = %reason, "Workspace resources/list 失败，不发布连接与 ready 证据");
     McpClientPool::insert_failed(pool, server_name, reason);
     commit_discovery_failure(pool, server_name, true);
@@ -492,7 +492,7 @@ impl McpClientPool {
                             serve_client_auto(transport, &pool.capability_profile, timeout).await
                         }
                         Err(e) => {
-                            let err_str = super::client::redact_mcp_error(&e.to_string());
+                            let err_str = e.to_string();
                             tracing::warn!(server = %name, error = %err_str, "MCP stdio 启动失败");
                             Self::insert_failed(&pool, name, format!("stdio 启动失败: {err_str}"));
                             commit_discovery_failure(&pool, name, false);
@@ -645,7 +645,7 @@ impl McpClientPool {
                     };
                 }
                 Ok(Err(e)) => {
-                    let err_str = super::client::redact_mcp_error(&e.to_string());
+                    let err_str = e.to_string();
                     tracing::warn!(server = %name, error = %err_str, "MCP 连接失败");
                     if Self::is_auth_required_error(&err_str, is_http) {
                         // 服务器要求授权（如 sentry 401）：标记待授权，不主动

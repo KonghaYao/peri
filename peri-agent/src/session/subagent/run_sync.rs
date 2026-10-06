@@ -118,6 +118,21 @@ pub(super) async fn run_sync_subagent(
     // 运行 v2 ReAct 循环
     let execution_turn = v2_ctx.context.session.turn.clone();
     let loop_result = run_react_loop(v2_ctx.context, max_iterations).await;
+    if let LoopResult::Error(error) = &loop_result {
+        if !execution_turn.cancel_token.is_cancelled()
+            && !matches!(error, crate::error::AgentError::Interrupted)
+        {
+            tracing::error!(
+                session_id = %child_thread_id,
+                turn_id = %execution_turn.turn_id(),
+                agent_name,
+                category = error.category_name(),
+                error = %error.user_facing_message(),
+                causes = ?error.cause_chain(),
+                "sync child execution failed"
+            );
+        }
+    }
     let subagent_turn_id = execution_turn
         .work_admission()
         .map(|admission| admission.execution.turn_id);

@@ -377,7 +377,7 @@ sequenceDiagram
 
 ### 9.9 可观测性与测试断言
 
-不记录 prompt、工具参数中的 secret、HTML 正文、OAuth token 或完整用户数据。允许记录不可逆的 `serverId`（若其本身不含敏感信息）、resource URI 的 scheme/host 摘要、App session hash、方法名、方向、耗时、结果大小和错误类别。
+诊断保留原始 `serverId`、resource URI、方法名、方向、耗时、结果大小、错误类别与实际失败原因，不因 token、路径或 URL 形状遮蔽内容。诊断不要求无条件记录所有 prompt、HTML 或完整成功结果；长度/级别和访问管理遵循 ARC-SECRET-001，App session 及资源权限隔离不变。
 
 最小测试矩阵：
 

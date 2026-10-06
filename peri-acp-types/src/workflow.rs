@@ -466,7 +466,7 @@ impl WorkflowTaskResult {
                 .as_deref()
                 .filter(|error| !error.trim().is_empty())
                 .unwrap_or("no error details available");
-            let error = escape_reminder_text(&crate::session::sanitize_public_error(error, 2_000));
+            let error = escape_reminder_text(&crate::session::bounded_error_message(error, 2_000));
             format!("Error: {error}\n")
         } else {
             String::new()

@@ -479,7 +479,7 @@ async fn system_gate_concludes_tools_list_failure_without_waiting_for_timeout() 
         .await
         .expect_err("发现失败不得放行启动");
     match outcome {
-        crate::mcp::client::SystemReadinessError::ToolDiscoveryFailed { server } => {
+        crate::mcp::client::SystemReadinessError::ToolDiscoveryFailed { server, .. } => {
             assert_eq!(server, "gate-broken")
         }
         other => panic!("必须归类为工具发现失败，实际: {other:?}"),

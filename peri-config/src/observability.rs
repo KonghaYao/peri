@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::fmt;
 
 pub const ENVIRONMENT_KEYS: &[&str] = &[
     "LANGFUSE_PUBLIC_KEY",
@@ -17,7 +16,7 @@ pub const ENVIRONMENT_KEYS: &[&str] = &[
     "LANGFUSE_USER_ID",
 ];
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct LangfuseConfig {
     pub public_key: Option<String>,
     pub secret_key: Option<String>,
@@ -32,33 +31,6 @@ pub struct LangfuseConfig {
     pub batch_max_queue_bytes: usize,
     pub batch_flush_interval_secs: u64,
     pub user_id: Option<String>,
-}
-
-impl fmt::Debug for LangfuseConfig {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("LangfuseConfig")
-            .field(
-                "public_key",
-                &self.public_key.as_ref().map(|_| "[REDACTED]"),
-            )
-            .field(
-                "secret_key",
-                &self.secret_key.as_ref().map(|_| "[REDACTED]"),
-            )
-            .field("host", &"[REDACTED]")
-            .field("trace_sampling", &self.trace_sampling)
-            .field("error_span_always", &self.error_span_always)
-            .field("batch_max_events", &self.batch_max_events)
-            .field("batch_queue_capacity", &self.batch_queue_capacity)
-            .field("batch_max_in_flight", &self.batch_max_in_flight)
-            .field("batch_max_event_bytes", &self.batch_max_event_bytes)
-            .field("batch_max_bytes", &self.batch_max_bytes)
-            .field("batch_max_queue_bytes", &self.batch_max_queue_bytes)
-            .field("batch_flush_interval_secs", &self.batch_flush_interval_secs)
-            .field("user_id", &self.user_id.as_ref().map(|_| "[REDACTED]"))
-            .finish()
-    }
 }
 
 impl Default for LangfuseConfig {

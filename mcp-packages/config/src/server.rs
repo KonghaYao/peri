@@ -157,17 +157,22 @@ impl ServerHandler for ConfigurationMcpServer {
             serde_json::from_value(request.params.ok_or_else(|| {
                 ErrorData::invalid_params("configuration operation required", None)
             })?)
-            .map_err(|_| ErrorData::invalid_params("invalid configuration operation", None))?;
+            .map_err(|error| {
+                ErrorData::invalid_params(format!("invalid configuration operation: {error}"), None)
+            })?;
         let server = self.clone();
         let result = tokio::select! {
             biased;
             _ = context.ct.cancelled() => return Err(ErrorData::internal_error("configuration request cancelled", None)),
             result = tokio::task::spawn_blocking(move || server.execute(request)) => result
-                .map_err(|_| ErrorData::internal_error("configuration operation failed", None))?,
+                .map_err(|error| ErrorData::internal_error(format!("configuration operation failed: {error}"), None))?,
         };
         let response: ConfigurationResponse = result.map_err(failure);
-        let value = serde_json::to_value(response).map_err(|_| {
-            ErrorData::internal_error("configuration response encoding failed", None)
+        let value = serde_json::to_value(response).map_err(|error| {
+            ErrorData::internal_error(
+                format!("configuration response encoding failed: {error}"),
+                None,
+            )
         })?;
         Ok(CustomResult::new(value))
     }
@@ -245,16 +250,17 @@ fn failure(error: io::Error) -> ConfigurationFailure {
         io::ErrorKind::TimedOut => ConfigurationErrorKind::TimedOut,
         _ => ConfigurationErrorKind::Other,
     };
-    let message = match &kind {
-        ConfigurationErrorKind::NotFound => "configuration file not found",
-        ConfigurationErrorKind::PermissionDenied => "configuration access denied",
-        ConfigurationErrorKind::AlreadyExists => "configuration file already exists",
-        ConfigurationErrorKind::InvalidInput => "invalid configuration input",
-        ConfigurationErrorKind::InvalidData => "invalid configuration data",
-        ConfigurationErrorKind::TimedOut => "configuration operation timed out",
-        ConfigurationErrorKind::Other => "configuration I/O failed",
+    let mut message = error.to_string();
+    let mut cause = std::error::Error::source(&error);
+    for _ in 1..16 {
+        let Some(source) = cause else { break };
+        message.push_str(&format!("\nCaused by: {source}"));
+        cause = source.source();
     }
-    .into();
+    if cause.is_some() {
+        message.push_str("\n[Cause chain truncated after 16 levels]");
+    }
+    tracing::warn!(diagnostic = %message, "configuration operation failed");
     ConfigurationFailure { kind, message }
 }
 
@@ -265,3 +271,7 @@ fn canonical_path(path: &Path) -> io::Result<Option<PathBuf>> {
         Err(error) => Err(error),
     }
 }
+
+#[cfg(test)]
+#[path = "server_diagnostics_test.rs"]
+mod diagnostic_tests;

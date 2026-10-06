@@ -148,7 +148,7 @@ pub async fn run_pipeline(ctx: CommandContext) -> PipelineOutcome {
             return PipelineOutcome::EarlyReturn {
                 history,
                 stop_reason: PromptStopReason::EndTurn,
-                message: "compact persistence failed".to_string(),
+                message: format!("compact persistence failed: {error:#}"),
             };
         }
     }
@@ -158,12 +158,12 @@ pub async fn run_pipeline(ctx: CommandContext) -> PipelineOutcome {
     // 选择可见内容；不能拿 visible view 与 canonical 输入比较。
     let snapshot = match session_resources.load_session_snapshot(&thread_id).await {
         Ok(snapshot) => snapshot,
-        Err(_) => {
-            warn!("compact: failed to load persisted history");
+        Err(error) => {
+            warn!(error = %format_args!("{error:#}"), "compact: failed to load persisted history");
             return PipelineOutcome::EarlyReturn {
                 history,
                 stop_reason: PromptStopReason::EndTurn,
-                message: "compact persistence failed".to_string(),
+                message: format!("compact persistence failed: {error:#}"),
             };
         }
     };
@@ -188,12 +188,12 @@ pub async fn run_pipeline(ctx: CommandContext) -> PipelineOutcome {
         for message in &history {
             transcript.append(message.clone());
         }
-        if transcript.flush_persistence().await.is_err() {
-            warn!("compact: failed to persist initial history");
+        if let Err(error) = transcript.flush_persistence().await {
+            warn!(error = %format_args!("{error:#}"), "compact: failed to persist initial history");
             return PipelineOutcome::EarlyReturn {
                 history,
                 stop_reason: PromptStopReason::EndTurn,
-                message: "compact persistence failed".to_string(),
+                message: format!("compact persistence failed: {error:#}"),
             };
         }
     } else {

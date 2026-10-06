@@ -553,8 +553,14 @@ async fn background_http_429_consumes_typed_result_and_safe_notification() {
         .subagent_failure
         .as_ref()
         .expect("background result keeps typed child failure");
-    assert_eq!(failure.diagnostic().status(), Some(429));
-    assert_eq!(failure.diagnostic().request_id(), Some("req-429"));
+    assert_eq!(
+        failure.diagnostic().expect("model diagnostic").status(),
+        Some(429)
+    );
+    assert_eq!(
+        failure.diagnostic().expect("model diagnostic").request_id(),
+        Some("req-429")
+    );
     assert_eq!(provider.request_count(), 6);
     let encoded_result = serde_json::to_vec(&result).expect("background result JSON");
     let decoded_result: BackgroundTaskResult =
@@ -564,7 +570,13 @@ async fn background_http_429_consumes_typed_result_and_safe_notification() {
         .subagent_failure
         .as_ref()
         .expect("roundtrip keeps background safe failure");
-    assert_eq!(decoded_failure.diagnostic().status(), Some(429));
+    assert_eq!(
+        decoded_failure
+            .diagnostic()
+            .expect("model diagnostic")
+            .status(),
+        Some(429)
+    );
     assert_eq!(
         decoded_result.to_notification(),
         result.to_notification(),
@@ -597,8 +609,20 @@ async fn background_http_429_consumes_typed_result_and_safe_notification() {
         ..
     } = &lifecycle[stop_positions[0]]
     {
-        assert_eq!(stop_failure.diagnostic().status(), Some(429));
-        assert_eq!(stop_failure.diagnostic().request_id(), Some("req-429"));
+        assert_eq!(
+            stop_failure
+                .diagnostic()
+                .expect("model diagnostic")
+                .status(),
+            Some(429)
+        );
+        assert_eq!(
+            stop_failure
+                .diagnostic()
+                .expect("model diagnostic")
+                .request_id(),
+            Some("req-429")
+        );
     } else {
         panic!("background error stop must carry its safe failure facts");
     }

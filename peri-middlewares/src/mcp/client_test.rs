@@ -624,7 +624,7 @@ fn test_cache_scope_persistence_accepts_known_scopes_only() {
 }
 
 #[test]
-fn test_server_info_projects_safe_failed_status() {
+fn test_server_info_preserves_multiline_failed_status() {
     let status = ClientStatus::Failed(
         "request failed: https://example.test/mcp?token=top-secret\ncaused by: verbose trace"
             .to_string(),
@@ -632,17 +632,25 @@ fn test_server_info_projects_safe_failed_status() {
 
     assert_eq!(mcp_status_label(&status), "failed");
     let summary = mcp_error_summary(&status).unwrap();
-    assert_eq!(summary, "request failed: https://example.test/mcp?…");
-    assert!(!summary.contains("top-secret"));
-    assert!(!summary.contains("verbose trace"));
+    assert_eq!(
+        summary,
+        "request failed: https://example.test/mcp?token=top-secret\ncaused by: verbose trace"
+    );
+    assert!(summary.contains("top-secret"));
+    assert!(summary.contains("verbose trace"));
 }
 
 #[test]
-fn test_redact_mcp_error_masks_secret_assignment() {
+fn test_mcp_error_summary_keeps_assignments_and_limits_length() {
     assert_eq!(
-        redact_mcp_error("connection failed token=top-secret"),
-        "connection failed [redacted]"
+        mcp_error_summary(&ClientStatus::Failed(
+            "connection failed token=top-secret".into()
+        ))
+        .unwrap(),
+        "connection failed token=top-secret"
     );
+    let summary = mcp_error_summary(&ClientStatus::Failed("错".repeat(200))).unwrap();
+    assert_eq!(summary.chars().count(), 160);
 }
 
 #[path = "client_builtin_context_test.rs"]

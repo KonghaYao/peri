@@ -76,7 +76,6 @@ pub(crate) use service::ControlledMcpService;
 pub(crate) use service::{
     mcpp_client_info_for_profile, peer_declares_skills, McpServiceOwner, McpServiceWrapper,
 };
-pub use status::redact_mcp_error;
 #[cfg(test)]
 pub(crate) use status::status_change_text;
 #[cfg(test)]

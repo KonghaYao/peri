@@ -8,7 +8,7 @@
 ## 1. 设计边界
 
 `peri-model` 只负责 provider 无关的模型协议、HTTP/SSE transport、重试、响应解码与
-安全观测投影。Agent 业务语义、Transcript、工具调度与客户端事件不进入该 crate。
+有界观测投影。Agent 业务语义、Transcript、工具调度与客户端事件不进入该 crate。
 
 ```mermaid
 flowchart LR
@@ -43,7 +43,7 @@ Agent 侧 `AgentModelBridge` 是 `peri-model` 与 ReAct 的边界：它把
 
 Anthropic 与 OpenAI-compatible adapter 都实现三项核心职责：
 
-1. `prepare_request`：构造可安全观测的 provider-native 请求投影；
+1. `prepare_request`：构造 provider-native 请求观测投影；
 2. `stream`：经公共 HTTP/SSE runtime 发起请求并返回统一事件流；
 3. 请求/响应映射：在统一 `ContentBlock` 与 provider wire JSON 之间无损转换。
 
@@ -70,18 +70,18 @@ breakpoint 的 adapter 消费该 seam；其他 adapter 只做字节守恒剥离�
 - SSE parser 与 decoder 保持事件顺序：后续坏帧不能丢弃此前完整增量，完成后的尾帧
   不再消费。OpenAI-compatible 的 `[DONE]` 还须有有效 `finish_reason`，流内 error
   不得忽略或转为正常完成；
-- retry observer 只接收安全摘要与时序字段，不得携带请求正文、响应正文或凭据；
+- retry observer 保留失败分类、时序、实际错误内容与原因链，不能在重试或中断转换时丢弃底层原因；
 - jitter、最大尝试次数与错误分类由 `ModelRuntimeConfig` 提供，Agent 不复制重试器。
 
-## 5. 观测与秘密
+## 5. 观测与诊断
 
-API key 只存在于 provider config/model 内。Debug、错误、tracing、Langfuse input 和
-测试 fixture 都不得输出完整凭据。`PreparedModelRequest::observe` 负责生成安全观测
-投影，对敏感键、data URI、超长值与非安全字段做脱敏或截断；完整观测只能通过显式
-配置开启，并仍服从 ARC-SECRET-001。
+Debug、错误、tracing 与 Langfuse input 不做内容脱敏。`PreparedModelRequest::observe`
+保留键、路径、URL/query、data URI 与原始值，仍遵循观测级别和长度限制；截断不能伪装
+为完整观测。HTTP/provider 失败保留有界实际正文，传输失败保留原因链；既有诊断投影
+须传递实际错误而非只保留分类。运行输出与合成测试数据遵循 ARC-SECRET-001。
 
 Provider 配置由 ACP 装配面构造并注入，不由 `peri-model` 读取环境变量。URL 必须限制
-到 adapter 支持的 scheme，并拒绝 userinfo 等凭据旁路。
+到 adapter 支持的 scheme；不能因 userinfo/query 的内容形状而拒绝诊断或持久请求。
 
 ## 6. 新增 Provider 检查清单
 
@@ -89,7 +89,7 @@ Provider 配置由 ACP 装配面构造并注入，不由 `peri-model` 读取环�
 2. 覆盖全部 `ContentBlock`、tool call/result、usage 与 stop reason 映射。
 3. 使用公共 HTTP/SSE、取消与 retry runtime，不创建平行 transport。
 4. 消费或安全剥离 system prompt cache 控制字，wire 上不得泄漏。
-5. 提供 config/error/observation 脱敏测试。
+5. 提供 config/error/observation 保真、错误原因链与长度边界测试。
 6. 在 `peri-acp/src/provider/mod.rs` 的 provider 工厂显式注册；不得被现有通配分支
    意外吞掉。
 7. 运行 provider 相邻测试、`cargo test -p peri-model --lib`，并检查

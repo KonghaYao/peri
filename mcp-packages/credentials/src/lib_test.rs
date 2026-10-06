@@ -75,7 +75,7 @@ async fn mcp_round_trip_and_blocking_cleanup_need_no_tool_pool() {
 }
 
 #[tokio::test]
-async fn invalid_identity_and_payload_errors_do_not_reveal_credentials() {
+async fn invalid_identity_and_payload_errors_preserve_classification_and_diagnostics() {
     let provider = Arc::new(MemoryCredentials::default());
     provider
         .0
@@ -85,13 +85,15 @@ async fn invalid_identity_and_payload_errors_do_not_reveal_credentials() {
     let client = OAuthCredentialClient::new(provider).unwrap();
     let error = client.load_server("corrupt").await.err().unwrap();
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
-    assert!(!error.to_string().contains("secret-marker"));
+    assert!(error
+        .to_string()
+        .contains("OAuth credential decoding failed"));
+    assert!(error.to_string().contains("missing field"));
     let error = client
         .save_server(" ", credentials("secret-marker"))
         .await
         .unwrap_err();
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
-    assert!(!error.to_string().contains("secret-marker"));
 }
 
 struct ReadOnlyCredentials;

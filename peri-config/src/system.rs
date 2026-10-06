@@ -56,10 +56,10 @@ impl fmt::Debug for ConfigurationInputs {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ConfigurationInputs")
-            .field("global_present", &self.global.is_some())
-            .field("workspace_present", &self.workspace.is_some())
-            .field("project_present", &self.project.is_some())
-            .field("environment_keys", &self.environment.keys())
+            .field("global", &self.global)
+            .field("workspace", &self.workspace)
+            .field("project", &self.project)
+            .field("environment", &self.environment)
             .finish()
     }
 }
@@ -104,26 +104,27 @@ pub struct FieldExplanation {
     pub revision: ConfigurationRevision,
     pub contributors: Vec<SourceIdentity>,
     pub rule: &'static str,
-    pub contains_sensitive_values: bool,
 }
 
 #[derive(Debug, Error)]
 pub enum ConfigurationError {
     #[error("configuration scope requires absolute paths")]
     InvalidScope,
-    #[error("configuration input I/O failed")]
-    InputUnavailable,
-    #[error("invalid configuration in {source_identity:?} ({domain})")]
+    #[error("configuration input I/O failed: {0}")]
+    InputUnavailable(#[source] std::io::Error),
+    #[error("invalid configuration in {source_identity:?} ({domain}): {cause}")]
     InvalidInput {
         source_identity: SourceIdentity,
         domain: &'static str,
+        #[source]
+        cause: Box<dyn std::error::Error + Send + Sync>,
     },
     #[error("configuration revision conflict; reload before saving")]
     Conflict,
     #[error("configuration scope has not been resolved")]
     UnresolvedScope,
-    #[error("configuration update could not be serialized")]
-    Serialization,
+    #[error("configuration update could not be serialized: {0}")]
+    Serialization(#[source] serde_json::Error),
 }
 
 #[derive(Clone)]
@@ -146,7 +147,15 @@ impl fmt::Debug for ConfigurationSnapshot {
             .debug_struct("ConfigurationSnapshot")
             .field("scope", &self.scope)
             .field("revision", &self.revision)
-            .finish_non_exhaustive()
+            .field("inputs", &self.inputs)
+            .field("settings", &self.settings)
+            .field("global_settings", &self.global_settings)
+            .field("mcp", &self.mcp)
+            .field("effective_provider", &self.effective_provider)
+            .field("observability", &self.observability)
+            .field("ui", &self.ui)
+            .field("resources", &self.resources)
+            .finish()
     }
 }
 
@@ -210,7 +219,8 @@ impl ConfigurationSnapshot {
             &HashMap::new(),
             &self.inputs.environment,
         )
-        .map_err(|_| ConfigurationError::InvalidInput {
+        .map_err(|error| ConfigurationError::InvalidInput {
+            cause: Box::new(error),
             source_identity: SourceIdentity::Environment(crate::mcp::MCP_CACHE_ENV.to_owned()),
             domain: "MCP cache",
         })
@@ -276,7 +286,7 @@ impl ConfigurationSystem {
         let inputs = self
             .source
             .collect(&scope)
-            .map_err(|_| ConfigurationError::InputUnavailable)?;
+            .map_err(ConfigurationError::InputUnavailable)?;
         let snapshot = Arc::new(ConfigurationSnapshot::resolve(scope.clone(), inputs)?);
         snapshots.insert(scope, snapshot.clone());
         Ok(snapshot)
@@ -331,8 +341,7 @@ impl ConfigurationSystem {
                     SourceIdentity::GlobalFile
                 },
             )?;
-            let encoded =
-                serde_json::to_value(layer).map_err(|_| ConfigurationError::Serialization)?;
+            let encoded = serde_json::to_value(layer).map_err(ConfigurationError::Serialization)?;
             let mut settings_document = encoded["config"].clone();
             for key in ["mcpServers", "mcpCache"] {
                 if let Some(original) = document.get("config").and_then(|config| config.get(key)) {
@@ -350,7 +359,7 @@ impl ConfigurationSystem {
             let expected = content.clone();
             *content = Some(
                 serde_json::to_string_pretty(&document)
-                    .map_err(|_| ConfigurationError::Serialization)?,
+                    .map_err(ConfigurationError::Serialization)?,
             );
             let path = if workspace {
                 assembly::workspace_settings_path(&scope.cwd)
@@ -378,6 +387,10 @@ impl ConfigurationSystem {
                         return Err(ConfigurationError::InvalidInput {
                             source_identity: SourceIdentity::ProjectMcpFile,
                             domain: "project MCP update cannot import non-project servers",
+                            cause: Box::new(std::io::Error::new(
+                                std::io::ErrorKind::InvalidInput,
+                                "server source is not the current project",
+                            )),
                         })
                     }
                 }
@@ -385,7 +398,7 @@ impl ConfigurationSystem {
             let mut document =
                 parse_document(inputs.project.as_deref(), SourceIdentity::ProjectMcpFile)?;
             let encoded =
-                serde_json::to_value(config).map_err(|_| ConfigurationError::Serialization)?;
+                serde_json::to_value(config).map_err(ConfigurationError::Serialization)?;
             document["mcpServers"] = encoded["mcpServers"].clone();
             if let Some(cache) = encoded.get("mcpCache") {
                 document["mcpCache"] = cache.clone();
@@ -394,7 +407,7 @@ impl ConfigurationSystem {
             }
             let expected = inputs.project.clone();
             let content = serde_json::to_string_pretty(&document)
-                .map_err(|_| ConfigurationError::Serialization)?;
+                .map_err(ConfigurationError::Serialization)?;
             inputs.project = Some(content.clone());
             Ok((assembly::project_mcp_path(&scope.cwd), expected, content))
         })
@@ -422,7 +435,7 @@ impl ConfigurationSystem {
         let mut inputs = self
             .source
             .collect(scope)
-            .map_err(|_| ConfigurationError::InputUnavailable)?;
+            .map_err(ConfigurationError::InputUnavailable)?;
         if revision_of(scope, &inputs)? != expected_revision {
             return Err(ConfigurationError::Conflict);
         }
@@ -431,7 +444,7 @@ impl ConfigurationSystem {
         if !self
             .source
             .write_if_unchanged(&path, expected.as_deref(), &content)
-            .map_err(|_| ConfigurationError::InputUnavailable)?
+            .map_err(ConfigurationError::InputUnavailable)?
         {
             return Err(ConfigurationError::Conflict);
         }
@@ -447,7 +460,7 @@ fn revision_of(
     scope: &ConfigurationScope,
     inputs: &ConfigurationInputs,
 ) -> Result<ConfigurationRevision, ConfigurationError> {
-    let encoded = serde_json::to_vec(inputs).map_err(|_| ConfigurationError::Serialization)?;
+    let encoded = serde_json::to_vec(inputs).map_err(ConfigurationError::Serialization)?;
     let mut digest = Sha256::new();
     digest.update(b"peri-configuration-v1");
     for path in [&scope.cwd, &scope.global_settings] {

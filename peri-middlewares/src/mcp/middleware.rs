@@ -29,8 +29,7 @@ use serde_json::json;
 
 use super::{
     client::{
-        redact_mcp_error, ClientStatus, McpClientPool, NegotiatedSystemMcp, SystemMcpManifest,
-        SystemReadinessError,
+        ClientStatus, McpClientPool, NegotiatedSystemMcp, SystemMcpManifest, SystemReadinessError,
     },
     discover_tool::DiscoverMCPTool,
     resource_tool::McpResourceTool,
@@ -43,27 +42,19 @@ use super::{
 const MAX_STARTUP_REASON_CHARS: usize = 512;
 const MCP_TOOL_USAGE_HINT: &str = "已直接注入的 system MCP 工具按原始名称调用；其余 MCP 工具经 tool search 发现，名称格式为 mcp__<server>__<tool>。";
 
-/// 用户可见启动错误文本的最后一道清洗：控制字符折叠为空格、URL query 与凭据
-/// 形态遮蔽、限长。
-///
-/// ACP 不会替任意 MCP cause 自动脱敏（`AgentError::user_facing_message` 走
-/// `Display`），因此清洗必须在 MCP 边界完成；只保留阶段与安全类别，不输出
-/// env / headers / URL 认证信息 / 协议 payload / schema 默认值。
+/// 用户可见启动错误文本的控制字符折叠与长度限制。
 fn safe_startup_reason(raw: &str) -> String {
     let folded: String = raw
         .chars()
         .map(|character| {
-            if character.is_control() {
+            if character.is_control() && !matches!(character, '\n' | '\t') {
                 ' '
             } else {
                 character
             }
         })
         .collect();
-    redact_mcp_error(&folded)
-        .chars()
-        .take(MAX_STARTUP_REASON_CHARS)
-        .collect()
+    folded.chars().take(MAX_STARTUP_REASON_CHARS).collect()
 }
 
 /// 本次 System MCP 准入的候选快照（冻结签名：IF-M3 / sub-plan B §4.3）。

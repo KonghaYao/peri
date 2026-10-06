@@ -3,6 +3,14 @@ use std::collections::BTreeMap;
 use super::*;
 
 #[test]
+fn configuration_errors_preserve_original_parser_causes() {
+    use std::error::Error;
+    let error = parse_document(Some("{\n\"token\": "), SourceIdentity::GlobalFile).unwrap_err();
+    assert!(error.to_string().contains("line 2"));
+    assert!(error.source().unwrap().to_string().contains("EOF"));
+}
+
+#[test]
 fn every_domain_has_one_shape_and_environment_collection_follows_it() {
     let fields = [
         ConfigurationField::Settings,

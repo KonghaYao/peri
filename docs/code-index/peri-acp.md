@@ -1,5 +1,7 @@
 # peri-acp 代码索引
 
+执行失败协议出口：`host/prompt.rs::execution_failure_to_acp_error` 保留 `kind/status`、`error_category/causes` 与完整有界 Model `diagnostic`；`host/diagnostics.rs::ResponseDiagnostics` 记录 method/rpc/session 和错误内容。日志、ACP message/data 与遥测不做内容脱敏；分类、权限和终止语义保持独立，规则见 ARC-SECRET-001。
+
 > 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-10-01（ACP 会话级 HTTP/stdio MCP 声明与 Peri instructions 扩展）。
 > 依据：peri-acp/CLAUDE.md、docs/standards/architecture-contracts.md、docs/design/peri-acp-protocol.md、源码
 

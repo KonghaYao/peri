@@ -55,6 +55,7 @@ fn save_statement(principal: &str, workspace_id: &str, key: &str, payload: &str)
 }
 
 fn storage_error(error: SessionResourceError) -> OAuthCredentialError {
+    tracing::error!(error = %error, source = ?error, "remote OAuth credential storage failed");
     match error.kind() {
         SessionResourceErrorKind::ReadOnlyStore => OAuthCredentialError::ReadOnly,
         SessionResourceErrorKind::Corrupt { .. } => OAuthCredentialError::InvalidData,
@@ -79,7 +80,7 @@ fn decode_load(rows: Vec<Vec<Value>>) -> OAuthCredentialResult<Option<String>> {
         [] => Ok(None),
         [row] => match row.as_slice() {
             [Value::Text(payload)] => {
-                validate_credentials(payload).map_err(|_| OAuthCredentialError::InvalidData)?;
+                validate_credentials(payload).map_err(|error| { tracing::error!(error = %error, source = ?error, "OAuth credential data is invalid"); OAuthCredentialError::InvalidData })?;
                 Ok(Some(payload.clone()))
             }
             _ => Err(OAuthCredentialError::InvalidData),
@@ -92,7 +93,7 @@ fn decode_list(rows: Vec<Vec<Value>>) -> OAuthCredentialResult<Vec<String>> {
     rows.into_iter()
         .map(|row| match row.as_slice() {
             [Value::Text(key)] => {
-                validate_server_key(key).map_err(|_| OAuthCredentialError::InvalidData)?;
+                validate_server_key(key).map_err(|error| { tracing::error!(error = %error, source = ?error, "OAuth credential data is invalid"); OAuthCredentialError::InvalidData })?;
                 Ok(key.clone())
             }
             _ => Err(OAuthCredentialError::InvalidData),

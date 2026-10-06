@@ -386,6 +386,8 @@ impl AgentModelBridge {
                             &diagnostic,
                             attempts,
                             max_attempts,
+                            self.session_id.as_deref(),
+                            streaming.as_ref().map(|context| context.turn_id),
                         );
                     }
                     // 正文为空（只收到思考或半截工具）时不制造 assistant 消息：空

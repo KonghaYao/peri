@@ -112,7 +112,7 @@ fn test_environment_key_list_includes_all_supported_overrides() {
 }
 
 #[test]
-fn debug_output_redacts_endpoint_credentials_and_user_identity() {
+fn debug_output_preserves_endpoint_credentials_and_user_identity() {
     let config = resolve(
         &json!({}),
         &BTreeMap::from([
@@ -124,19 +124,19 @@ fn debug_output_redacts_endpoint_credentials_and_user_identity() {
         ]),
     );
     let rendered = format!("{config:?}");
-    assert!(!rendered.contains("hidden-token"));
-    assert!(!rendered.contains("hidden-user"));
+    assert!(rendered.contains("hidden-token"));
+    assert!(rendered.contains("hidden-user"));
 }
 
 #[test]
-fn test_debug_redacts_credentials() {
+fn test_debug_preserves_credentials() {
     let config = LangfuseConfig {
         public_key: Some("public-sensitive".to_string()),
         secret_key: Some("secret-sensitive".to_string()),
         ..Default::default()
     };
     let debug = format!("{config:?}");
-    assert!(!debug.contains("public-sensitive"));
-    assert!(!debug.contains("secret-sensitive"));
-    assert!(debug.contains("[REDACTED]"));
+    assert!(debug.contains("public-sensitive"));
+    assert!(debug.contains("secret-sensitive"));
+    assert!(!debug.contains("[REDACTED]"));
 }

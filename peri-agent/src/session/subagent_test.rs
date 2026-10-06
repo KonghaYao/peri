@@ -45,7 +45,7 @@ fn subagent_failure_keeps_child_identity_and_typed_model_diagnostic() {
     assert_eq!(diagnostic.provider(), Some("anthropic"));
     assert_eq!(diagnostic.request_id(), Some("req-123"));
     assert!(failure.to_string().contains("child_thread_id: child-123"));
-    assert!(!failure.to_string().contains("req-123"));
+    assert!(failure.to_string().contains("req-123"));
 }
 
 fn build_ctx_with(agent_id: Option<AgentId>) -> V2SubagentContext {

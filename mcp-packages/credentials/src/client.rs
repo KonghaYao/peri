@@ -1,5 +1,3 @@
-#[cfg(target_os = "emscripten")]
-use std::future::Future;
 use std::{
     io,
     sync::{mpsc, Arc},
@@ -57,27 +55,36 @@ impl OAuthCredentialClient {
     pub fn new(store: Arc<dyn OAuthCredentialPort>) -> io::Result<Self> {
         let (sender, receiver) = tokio::sync::mpsc::unbounded_channel::<Job>();
         let (ready, startup) = mpsc::channel();
+        let dispatcher = tracing::dispatcher::get_default(Clone::clone);
         std::thread::Builder::new()
             .name("peri-credentials-mcp".into())
             .spawn(move || {
+                let _dispatcher = tracing::dispatcher::set_default(&dispatcher);
                 let runtime = match tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
                 {
                     Ok(runtime) => runtime,
-                    Err(_) => {
-                        let _ = ready.send(Err(unavailable()));
+                    Err(error) => {
+                        let _ = ready.send(Err(diagnostic_error(
+                            io::ErrorKind::Other,
+                            "OAuth credential runtime initialization failed",
+                            error,
+                        )));
                         return;
                     }
                 };
-                tracing::subscriber::with_default(
-                    tracing::subscriber::NoSubscriber::default(),
-                    || runtime.block_on(run_worker(store, receiver, Some(ready))),
-                );
+                runtime.block_on(run_worker(store, receiver, Some(ready)));
             })?;
         startup
             .recv_timeout(REQUEST_TIMEOUT + Duration::from_secs(2))
-            .map_err(|_| timed_out())??;
+            .map_err(|error| {
+                diagnostic_error(
+                    io::ErrorKind::TimedOut,
+                    "OAuth credential startup failed",
+                    error,
+                )
+            })??;
         Ok(Self { sender })
     }
 
@@ -86,9 +93,7 @@ impl OAuthCredentialClient {
         let (sender, receiver) = tokio::sync::mpsc::unbounded_channel::<Job>();
         // The browser event loop cannot wait synchronously for an MCP handshake.
         // The first request waits for the worker to initialize or reports unavailable.
-        wasm_bindgen_futures::spawn_local(without_payload_tracing(run_worker(
-            store, receiver, None,
-        )));
+        wasm_bindgen_futures::spawn_local(run_worker(store, receiver, None));
         Ok(Self { sender })
     }
 
@@ -101,11 +106,29 @@ impl OAuthCredentialClient {
                 deadline,
                 reply: Reply::Async(reply),
             })
-            .map_err(|_| unavailable())?;
+            .map_err(|error| {
+                diagnostic_error(
+                    io::ErrorKind::Other,
+                    "OAuth credential job submission failed",
+                    error,
+                )
+            })?;
         peri_time::timeout_at(deadline, response)
             .await
-            .map_err(|_| timed_out())?
-            .map_err(|_| unavailable())?
+            .map_err(|error| {
+                diagnostic_error(
+                    io::ErrorKind::TimedOut,
+                    "OAuth credential operation timed out; outcome is not confirmed",
+                    error,
+                )
+            })?
+            .map_err(|error| {
+                diagnostic_error(
+                    io::ErrorKind::Other,
+                    "OAuth credential worker reply failed",
+                    error,
+                )
+            })?
     }
 
     pub async fn load_server(&self, server_key: &str) -> io::Result<Option<StoredCredentials>> {
@@ -118,7 +141,13 @@ impl OAuthCredentialClient {
             OAuthCredentialValue::Credentials(Some(credentials)) => {
                 serde_json::from_str(&credentials)
                     .map(Some)
-                    .map_err(|_| invalid_data())
+                    .map_err(|error| {
+                        diagnostic_error(
+                            io::ErrorKind::InvalidData,
+                            "OAuth credential decoding failed",
+                            error,
+                        )
+                    })
             }
             OAuthCredentialValue::Credentials(None) => Ok(None),
             _ => Err(invalid_data()),
@@ -130,7 +159,13 @@ impl OAuthCredentialClient {
         server_key: &str,
         credentials: StoredCredentials,
     ) -> io::Result<()> {
-        let credentials = serde_json::to_string(&credentials).map_err(|_| invalid_data())?;
+        let credentials = serde_json::to_string(&credentials).map_err(|error| {
+            diagnostic_error(
+                io::ErrorKind::InvalidData,
+                "OAuth credential encoding failed",
+                error,
+            )
+        })?;
         match self
             .request(OAuthCredentialRequest::Save {
                 server_key: server_key.to_owned(),
@@ -166,11 +201,22 @@ impl OAuthCredentialClient {
                 deadline: peri_time::monotonic_now() + REQUEST_TIMEOUT,
                 reply: Reply::Blocking(reply),
             })
-            .map_err(|_| unavailable())?;
+            .map_err(|error| {
+                diagnostic_error(
+                    io::ErrorKind::Other,
+                    "OAuth credential job submission failed",
+                    error,
+                )
+            })?;
         match response
             .recv_timeout(REQUEST_TIMEOUT + Duration::from_secs(2))
-            .map_err(|_| timed_out())??
-        {
+            .map_err(|error| {
+                diagnostic_error(
+                    io::ErrorKind::TimedOut,
+                    "OAuth credential operation timed out; outcome is not confirmed",
+                    error,
+                )
+            })?? {
             OAuthCredentialValue::Saved => Ok(()),
             _ => Err(invalid_data()),
         }
@@ -210,19 +256,39 @@ async fn run_worker(
 ) {
     let (client_io, server_io) = tokio::io::duplex(65536);
     let server_task = async move {
-        if let Ok(service) = OAuthCredentialMcpServer::new(store).serve(server_io).await {
-            let _ = service.waiting().await;
+        match OAuthCredentialMcpServer::new(store).serve(server_io).await {
+            Ok(service) => {
+                if let Err(error) = service.waiting().await {
+                    tracing::warn!(%error, "OAuth credential server failed");
+                }
+            }
+            Err(error) => tracing::warn!(%error, "OAuth credential server initialization failed"),
         }
     };
-    #[cfg(not(target_os = "emscripten"))]
     let mut server = tokio::spawn(server_task);
-    #[cfg(target_os = "emscripten")]
-    let mut server = tokio::spawn(without_payload_tracing(server_task));
     let mut client = match peri_time::timeout(REQUEST_TIMEOUT, ().serve(client_io)).await {
         Ok(Ok(client)) => client,
-        _ => {
+        Ok(Err(error)) => {
             if let Some(ready) = ready {
-                let _ = ready.send(Err(unavailable()));
+                let _ = ready.send(Err(diagnostic_error(
+                    io::ErrorKind::Other,
+                    "OAuth credential MCP initialization failed",
+                    error,
+                )));
+            } else {
+                tracing::warn!(%error, "OAuth credential MCP initialization failed");
+            }
+            server.abort();
+            return;
+        }
+        Err(error) => {
+            let error = diagnostic_error(
+                io::ErrorKind::TimedOut,
+                "OAuth credential MCP initialization timed out",
+                error,
+            );
+            if let Some(ready) = ready {
+                let _ = ready.send(Err(error));
             }
             server.abort();
             return;
@@ -235,7 +301,13 @@ async fn run_worker(
     }
     while let Some(job) = receiver.recv().await {
         let result = async {
-            let params = serde_json::to_value(job.request).map_err(|_| invalid_data())?;
+            let params = serde_json::to_value(job.request).map_err(|error| {
+                diagnostic_error(
+                    io::ErrorKind::InvalidData,
+                    "OAuth credential request encoding failed",
+                    error,
+                )
+            })?;
             let handle = peri_time::timeout_at(
                 job.deadline,
                 client.peer().send_request_with_option(
@@ -247,13 +319,31 @@ async fn run_worker(
                 ),
             )
             .await
-            .map_err(|_| timed_out())?
-            .map_err(|_| unavailable())?;
+            .map_err(|error| {
+                diagnostic_error(
+                    io::ErrorKind::TimedOut,
+                    "OAuth credential operation timed out; outcome is not confirmed",
+                    error,
+                )
+            })?
+            .map_err(|error| {
+                diagnostic_error(
+                    io::ErrorKind::Other,
+                    "OAuth credential request failed",
+                    error,
+                )
+            })?;
             let request_id = handle.id.clone();
             let response = match peri_time::timeout_at(job.deadline, handle.await_response()).await
             {
-                Ok(response) => response.map_err(|_| unavailable())?,
-                Err(_) => {
+                Ok(response) => response.map_err(|error| {
+                    diagnostic_error(
+                        io::ErrorKind::Other,
+                        "OAuth credential response failed",
+                        error,
+                    )
+                })?,
+                Err(error) => {
                     let _ = peri_time::timeout(
                         Duration::from_secs(1),
                         client.peer().notify_cancelled(
@@ -264,14 +354,24 @@ async fn run_worker(
                         ),
                     )
                     .await;
-                    return Err(timed_out());
+                    return Err(diagnostic_error(
+                        io::ErrorKind::TimedOut,
+                        "OAuth credential operation timed out; outcome is not confirmed",
+                        error,
+                    ));
                 }
             };
             let ServerResult::CustomResult(response) = response else {
                 return Err(invalid_data());
             };
             let response: OAuthCredentialResponse =
-                serde_json::from_value(response.0).map_err(|_| invalid_data())?;
+                serde_json::from_value(response.0).map_err(|error| {
+                    diagnostic_error(
+                        io::ErrorKind::InvalidData,
+                        "OAuth credential response decoding failed",
+                        error,
+                    )
+                })?;
             response.map_err(storage_error)
         }
         .await;
@@ -287,30 +387,29 @@ async fn run_worker(
     }
 }
 
-#[cfg(target_os = "emscripten")]
-fn without_payload_tracing<F: Future>(future: F) -> impl Future<Output = F::Output> {
-    let mut future = Box::pin(future);
-    std::future::poll_fn(move |cx| {
-        tracing::subscriber::with_default(tracing::subscriber::NoSubscriber::default(), || {
-            future.as_mut().poll(cx)
-        })
-    })
+#[derive(Debug, thiserror::Error)]
+#[error("{operation}: {source}")]
+struct CredentialClientFailure {
+    operation: &'static str,
+    source: Box<dyn std::error::Error + Send + Sync>,
 }
 
-fn unavailable() -> io::Error {
-    io::Error::other("OAuth credential MCP is unavailable")
+fn diagnostic_error(
+    kind: io::ErrorKind,
+    operation: &'static str,
+    source: impl std::error::Error + Send + Sync + 'static,
+) -> io::Error {
+    let error = CredentialClientFailure {
+        operation,
+        source: Box::new(source),
+    };
+    tracing::warn!(%error, "OAuth credential client failed");
+    io::Error::new(kind, error)
 }
 
 fn invalid_data() -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidData,
         "OAuth credential response is invalid",
-    )
-}
-
-fn timed_out() -> io::Error {
-    io::Error::new(
-        io::ErrorKind::TimedOut,
-        "OAuth credential operation timed out; outcome is not confirmed",
     )
 }

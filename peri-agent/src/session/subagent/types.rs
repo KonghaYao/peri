@@ -306,29 +306,15 @@ impl SubagentFailure {
         }
     }
 
-    /// Project only the child identity and validated model facts for a parent
-    /// canonical result. Raw AgentError causes never cross this boundary.
     pub fn safe_failure(&self) -> Option<peri_acp_types::error::SafeSubagentFailure> {
-        let diagnostic = self.diagnostic()?;
-        peri_acp_types::error::SafeSubagentFailure::new(
-            &self.child_thread_id,
-            peri_acp_types::error::SafeModelErrorDiagnostic::from_model(diagnostic),
-        )
+        Self::safe_failure_from_error(&self.child_thread_id, &self.error)
     }
 
     pub fn safe_failure_from_error(
         child_thread_id: &str,
         error: &crate::error::AgentError,
     ) -> Option<peri_acp_types::error::SafeSubagentFailure> {
-        let diagnostic = match error {
-            crate::error::AgentError::ModelError(error) => error.diagnostic(),
-            crate::error::AgentError::StreamRecoveryExhausted { source, .. } => source.diagnostic(),
-            _ => return None,
-        };
-        peri_acp_types::error::SafeSubagentFailure::new(
-            child_thread_id,
-            peri_acp_types::error::SafeModelErrorDiagnostic::from_model(diagnostic),
-        )
+        peri_acp_types::error::SafeSubagentFailure::from_agent_error(child_thread_id, error)
     }
 
     pub fn public_message(&self) -> String {
@@ -338,16 +324,7 @@ impl SubagentFailure {
 
 impl std::fmt::Display for SubagentFailure {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // The typed diagnostic travels separately through canonical facts. Keep
-        // the boxed error's compatibility text free of even safe identities so
-        // legacy string consumers cannot accidentally turn it into a payload.
-        let message = match &self.error {
-            crate::error::AgentError::ModelError(error) => error
-                .http_status_code()
-                .map(|status| format!("An LLM API error occurred (HTTP {status})."))
-                .unwrap_or_else(|| "An LLM API error occurred.".to_string()),
-            _ => self.public_message(),
-        };
+        let message = self.public_message();
         write!(
             formatter,
             "child_thread_id: {}\n{} execution failed: {}",

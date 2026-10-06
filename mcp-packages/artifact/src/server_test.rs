@@ -2,7 +2,7 @@
 //!
 //! 覆盖口径（主 plan §3 IF-D14 / §6 I-01 行）：
 //! - **映射三种形态**：未知工具名 → `invalid_params`；`Ok(text)` → success；
-//!   `Err` → 模型可见的 error 结果（且路径 / 凭据形状串不泄漏）。
+//!   `Err` → 模型可见的 error 结果，保留实际诊断。
 //! - **真实上传协议**：`ArtifactTool` + `ArtifactClient` 打到本地回环桩（注入的
 //!   base url 与假 token），无网络、无真实凭据。
 //! - **真实链路**：server 半边是生产 handler（`rmcp::serve_server`），client 半边是
@@ -235,7 +235,7 @@ async fn artifact_call_tool_unknown_name_is_invalid_params() {
 }
 
 #[tokio::test]
-async fn artifact_call_tool_missing_file_maps_to_error_result_without_path_leak() {
+async fn artifact_call_tool_missing_file_maps_to_error_result_with_path() {
     let dir = cwd_with_report();
     let cwd = dir.path().to_string_lossy().into_owned();
     let server = ArtifactMcpServer::with_tools(&cwd, vec![artifact_tool(&cwd, UNREACHED_BASE_URL)]);
@@ -252,14 +252,7 @@ async fn artifact_call_tool_missing_file_maps_to_error_result_without_path_leak(
     assert_eq!(result.is_error, Some(true));
     let text = first_text(&result).expect("错误结果必须有文本块");
     assert!(text.contains("artifact"), "错误文本应含工具名：{text}");
-    assert!(
-        !text.contains(&cwd),
-        "错误文本不得含路径（§9 规则 7）：{text}"
-    );
-    assert!(
-        !text.contains(FAKE_TOKEN),
-        "错误文本不得含凭据（§9 规则 7）：{text}"
-    );
+    assert!(text.contains(&cwd), "错误文本必须保留路径：{text}");
 }
 
 #[tokio::test]
@@ -369,7 +362,7 @@ async fn artifact_handler_tools_list_and_both_result_forms_round_trip_over_wire(
     );
     assert_eq!(failure.is_error, Some(true));
     let text = first_text(&failure).expect("错误结果必须有文本块");
-    assert!(!text.contains(&cwd), "线路上的错误文本不得含路径");
+    assert!(text.contains(&cwd), "线路上的错误文本必须保留路径");
 
     assert!(
         stub.await.expect("桩任务不得 panic").is_some(),

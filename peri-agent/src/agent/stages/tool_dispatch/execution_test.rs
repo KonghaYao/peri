@@ -245,8 +245,14 @@ async fn test_dispatch_concurrent_preserves_typed_subagent_failure() {
         .subagent_failure()
         .expect("typed child failure must survive dispatch");
     assert_eq!(failure.child_thread_id(), "child-123");
-    assert_eq!(failure.diagnostic().status(), Some(500));
-    assert_eq!(failure.diagnostic().request_id(), Some("req-123"));
+    assert_eq!(
+        failure.diagnostic().expect("model diagnostic").status(),
+        Some(500)
+    );
+    assert_eq!(
+        failure.diagnostic().expect("model diagnostic").request_id(),
+        Some("req-123")
+    );
     assert!(!error.to_string().contains("provider body"));
 }
 

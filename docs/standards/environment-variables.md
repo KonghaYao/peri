@@ -86,4 +86,4 @@ Langfuse 只有 public key 和 secret key **都存在**时才启用。以下环�
 | `--session-store-token-env=<NAME>` | 按 CLI 给定名称读取远端 Session Store 凭据；文档只传名称，不登记 secret 值。 | `peri-resources/src/sessions/remote/credentials.rs` |
 | 子进程运行环境 | MCP、hook、Workflow 和工具进程各自按配置或 allowlist 接收环境；Peri 注入的 `CLAUDE_*`、`GIT_OPTIONAL_LOCKS`、`TERM` 等是子进程输入，不是启动 Peri 的用户开关。 | 对应进程构造器 |
 
-密钥值不得写入本表、日志或示例；见 [ARC-SECRET-001](architecture-contracts.md#arc-secret-001)。
+真实运行密钥值不得主动写入本表或示例；运行时日志不做内容脱敏，按完整运行数据管理访问，见 [ARC-SECRET-001](architecture-contracts.md#arc-secret-001)。

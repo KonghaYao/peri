@@ -12,10 +12,12 @@ use crate::{ConfigurationScope, ConfigurationSnapshot, ConfigurationSystem};
 
 #[derive(Debug, Error)]
 pub enum SettingsError {
-    #[error("configuration input I/O failed")]
+    #[error("configuration input I/O failed: {0}")]
     Input(#[from] std::io::Error),
     #[error("configuration JSON must be a valid object")]
     InvalidJson,
+    #[error("configuration JSON failed: {0}")]
+    Json(#[from] serde_json::Error),
     #[error(transparent)]
     Resolution(#[from] crate::ConfigurationError),
     #[error("configuration authority unavailable; reload the configuration source")]
@@ -336,12 +338,11 @@ fn load_with_raw(path: &Path) -> Result<(PeriConfig, Option<String>)> {
         return Ok((PeriConfig::default(), None));
     }
     let content = crate::io::read_text(path)?;
-    let document: Value = serde_json::from_str(&content).map_err(|_| SettingsError::InvalidJson)?;
+    let document: Value = serde_json::from_str(&content).map_err(SettingsError::Json)?;
     if !document.is_object() {
         return Err(SettingsError::InvalidJson);
     }
-    let mut config: PeriConfig =
-        serde_json::from_value(document).map_err(|_| SettingsError::InvalidJson)?;
+    let mut config: PeriConfig = serde_json::from_value(document).map_err(SettingsError::Json)?;
     config.config.validate_meta_harness();
     Ok((config, Some(content)))
 }
@@ -356,9 +357,9 @@ pub fn save_to(config: &PeriConfig, path: &Path) -> Result<()> {
 }
 
 fn save_preserving_siblings(config: &PeriConfig, path: &Path, raw: Option<&str>) -> Result<()> {
-    let mut serialized = serde_json::to_value(config).map_err(|_| SettingsError::InvalidJson)?;
+    let mut serialized = serde_json::to_value(config).map_err(SettingsError::Json)?;
     if let (Some(raw), Some(serialized)) = (raw, serialized.as_object_mut()) {
-        let existing: Value = serde_json::from_str(raw).map_err(|_| SettingsError::InvalidJson)?;
+        let existing: Value = serde_json::from_str(raw).map_err(SettingsError::Json)?;
         let Value::Object(mut existing) = existing else {
             return Err(SettingsError::InvalidJson);
         };
@@ -368,8 +369,7 @@ fn save_preserving_siblings(config: &PeriConfig, path: &Path, raw: Option<&str>)
         existing.extend(serialized.clone());
         *serialized = existing;
     }
-    let content =
-        serde_json::to_string_pretty(&serialized).map_err(|_| SettingsError::InvalidJson)?;
+    let content = serde_json::to_string_pretty(&serialized).map_err(SettingsError::Json)?;
     if !crate::io::write_text_if_unchanged(path, &raw.map(str::to_owned), &content)? {
         return Err(SettingsError::Conflict);
     }

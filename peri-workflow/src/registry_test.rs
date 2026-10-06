@@ -154,7 +154,7 @@ fn test_notification_includes_error_when_failed() {
 }
 
 #[test]
-fn test_notification_redacts_and_limits_untrusted_error() {
+fn test_notification_preserves_and_limits_error() {
     let secret = "workflow-secret-value";
     let result = WorkflowTaskResult {
         run_id: "run-secret".into(),
@@ -178,11 +178,11 @@ fn test_notification_redacts_and_limits_untrusted_error() {
     };
 
     let notification = result.to_notification();
-    assert!(!notification.contains(secret));
-    assert!(!notification.contains("https://example.invalid/run?api_key="));
+    assert!(notification.contains(secret));
+    assert!(notification.contains("https://example.invalid/run?api_key="));
     assert!(!notification.contains("</system-reminder>"));
     assert!(!notification.contains("<system-reminder"));
-    assert!(notification.contains("[redacted]"));
+    assert!(!notification.contains("[redacted]"));
     assert!(notification.contains("&lt;/system-reminder&gt;"));
     assert!(notification.contains('…'));
 }

@@ -7,6 +7,10 @@ use crate::{
 
 #[allow(dead_code)]
 pub(super) fn decode_completed_response(value: &Value) -> ModelResult<ModelResponse> {
+    decode_completed_response_inner(value).map_err(|error| error.with_body(value.to_string()))
+}
+
+fn decode_completed_response_inner(value: &Value) -> ModelResult<ModelResponse> {
     let choice = value
         .get("choices")
         .and_then(Value::as_array)
@@ -94,10 +98,18 @@ pub(super) fn decode_assistant_message(
                         .map(str::trim)
                         .filter(|arguments| !arguments.is_empty());
                     let arguments = match arguments {
-                        Some(arguments) => serde_json::from_str(arguments)
-                            .ok()
-                            .and_then(|arguments| JsonObject::from_value(arguments).ok())
-                            .ok_or_else(provider_protocol_error)?,
+                        Some(arguments) => {
+                            let value = serde_json::from_str(arguments).map_err(|error| {
+                                provider_protocol_error()
+                                    .with_error(&error)
+                                    .with_body(arguments)
+                            })?;
+                            JsonObject::from_value(value).map_err(|error| {
+                                provider_protocol_error()
+                                    .with_error(&error)
+                                    .with_body(arguments)
+                            })?
+                        }
                         None => JsonObject::default(),
                     };
                     Ok(ToolCall::new(id, name, arguments))
@@ -136,6 +148,10 @@ pub(super) fn stop_reason(value: Option<&str>) -> StopReason {
     }
 }
 
+#[track_caller]
 pub(super) fn provider_protocol_error() -> ModelError {
-    ModelError::protocol(crate::ProtocolErrorKind::Provider)
+    ModelError::protocol(crate::ProtocolErrorKind::Provider).with_message(format!(
+        "invalid provider payload at {}",
+        std::panic::Location::caller()
+    ))
 }

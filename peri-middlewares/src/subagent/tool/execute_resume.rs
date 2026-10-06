@@ -30,7 +30,7 @@ fn preflight_rejected(
     message: impl Into<String>,
 ) -> Box<dyn std::error::Error + Send + Sync> {
     tracing::warn!(
-        child_thread_id = %peri_acp_types::session::sanitize_public_error(thread_id, 120),
+        child_thread_id = %peri_acp_types::session::bounded_error_message(thread_id, 120),
         stage,
         code = code.as_str(),
         "subagent resume preflight rejected before execution"
@@ -116,7 +116,7 @@ impl super::SubAgentTool {
                 EffectiveToolErrorCode::InvalidInput,
                 format!(
                     "resume_subagent: invalid thread id: {}",
-                    peri_acp_types::session::sanitize_public_error(&thread_id, 120)
+                    peri_acp_types::session::bounded_error_message(&thread_id, 120)
                 ),
             ));
         }
@@ -179,7 +179,7 @@ impl super::SubAgentTool {
                             EffectiveToolErrorCode::ApplicationFailed,
                             format!(
                                 "resume_subagent: {}",
-                                peri_acp_types::session::sanitize_public_error(&error, 2000)
+                                peri_acp_types::session::bounded_error_message(&error, 2000)
                             ),
                         )
                     })?

@@ -253,14 +253,14 @@ fn request_contract_covers_qwen_kimi_and_litellm_options() {
 }
 
 #[test]
-fn config_debug_does_not_expose_credential() {
+fn config_debug_preserves_credential() {
     let rendered = format!("{:?}", config("gpt-4o"));
-    assert!(!rendered.contains("test-credential"));
-    assert!(rendered.contains("[REDACTED]"));
+    assert!(rendered.contains("test-credential"));
+    assert!(!rendered.contains("[REDACTED]"));
 }
 
 #[test]
-fn config_debug_redacts_all_endpoint_components() {
+fn config_debug_preserves_all_endpoint_components() {
     let config = OpenAiConfig::new(
         Url::parse("https://user:sk-live-secret@api.example.test/v1?api_key=secret#fragment")
             .expect("valid endpoint"),
@@ -270,7 +270,7 @@ fn config_debug_redacts_all_endpoint_components() {
 
     let rendered = format!("{config:?}");
 
-    assert!(rendered.contains("https://api.example.test/[REDACTED]"));
+    assert!(!rendered.contains("[REDACTED]"));
     for sensitive_fragment in [
         "user",
         "sk-live-secret",
@@ -280,7 +280,7 @@ fn config_debug_redacts_all_endpoint_components() {
         "test-credential",
     ] {
         assert!(
-            !rendered.contains(sensitive_fragment),
+            rendered.contains(sensitive_fragment),
             "Debug output exposed {sensitive_fragment:?}: {rendered}"
         );
     }
@@ -305,32 +305,16 @@ fn chat_completions_endpoint_preserves_base_path_without_trailing_slash() {
     }
 }
 
-#[tokio::test]
-async fn chat_completions_endpoint_rejects_userinfo() {
-    let transport = Arc::new(FakeTransport::with_response(FakeResponse {
-        status: 200,
-        request_id: None,
-        chunks: vec![],
-    }));
-    let model = OpenAiModel::with_transport(
-        OpenAiConfig::new(
-            Url::parse("https://user:password@proxy.example.test/v1/").expect("valid endpoint URL"),
-            "test-credential",
-            "gpt-4o",
-        ),
-        transport.clone(),
-    );
-
-    let error = match model.stream(request(), CancellationToken::new()).await {
-        Err(error) => error,
-        Ok(_) => panic!("userinfo endpoint must be rejected before transport"),
-    };
-
+#[test]
+fn chat_completions_endpoint_preserves_userinfo_and_query() {
+    let endpoint = super::request::chat_completions_endpoint(
+        &Url::parse("https://user:password@api.example.test/v1?api_key=secret#fragment").unwrap(),
+    )
+    .unwrap();
     assert_eq!(
-        error.protocol_error().map(|error| error.kind()),
-        Some(crate::ProtocolErrorKind::InvalidEndpoint)
+        endpoint.as_str(),
+        "https://user:password@api.example.test/v1/chat/completions?api_key=secret#fragment"
     );
-    assert!(transport.bodies().is_empty());
 }
 
 #[tokio::test]

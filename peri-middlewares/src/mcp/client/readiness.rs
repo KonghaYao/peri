@@ -30,8 +30,7 @@ use crate::mcp::system_tools::SystemToolError;
 /// 安全展示用的 server 标签上限（字符数）。
 const MAX_SERVER_LABEL_CHARS: usize = 64;
 
-/// server/tool 展示用清洗：控制字符折叠为空格、移除 URL query、遮蔽凭据形态，
-/// 并限制长度。错误文案不携带 env / headers / URL 认证信息 / 协议 payload。
+/// server/tool 展示用控制字符折叠与长度限制。
 fn safe_server_label(raw: impl AsRef<str>) -> String {
     let collapsed: String = raw
         .as_ref()
@@ -45,7 +44,7 @@ fn safe_server_label(raw: impl AsRef<str>) -> String {
             }
         })
         .collect();
-    super::redact_mcp_error(&collapsed)
+    collapsed
 }
 
 /// System MCP 启动等待的配置清单状态。
@@ -153,8 +152,7 @@ impl std::fmt::Debug for NegotiatedSystemMcp {
 /// System MCP 启动准入错误（变体全集冻结于 sub-plan B §4.4；主 plan IF-M3 追加两条
 /// 硬约束：`Cancelled → AgentError::Interrupted`、timeout 不是 cancel）。
 ///
-/// 全部变体的 Display 都是**固定模板**：不含 `ClientStatus::Failed` 原文、env、
-/// headers、URL 认证信息或协议 payload；`{server}` 经 [`safe_server_label`] 清洗。
+/// Display 保留原始失败原因；server 标签仅做终端控制字符和长度处理。
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub(crate) enum SystemReadinessError {
     #[error("System MCP 启动失败：配置清单在 30000ms 内未就绪")]
@@ -169,25 +167,25 @@ pub(crate) enum SystemReadinessError {
     )]
     Disabled { server: String },
     #[error(
-        "System MCP \"{}\" 启动失败：需要完成授权",
+        "System MCP \"{}\" 启动失败：需要完成授权：{reason}",
         safe_server_label(.server)
     )]
-    AuthorizationRequired { server: String },
+    AuthorizationRequired { server: String, reason: String },
     #[error(
-        "System MCP \"{}\" 启动失败：transport 或协议初始化失败",
+        "System MCP \"{}\" 启动失败：transport 或协议初始化失败：{reason}",
         safe_server_label(.server)
     )]
-    ConnectionFailed { server: String },
+    ConnectionFailed { server: String, reason: String },
     #[error(
         "System MCP \"{}\" 启动失败：缺少有效协议协商证据",
         safe_server_label(.server)
     )]
     NegotiationIncomplete { server: String },
     #[error(
-        "System MCP \"{}\" 启动失败：tools/list 失败",
+        "System MCP \"{}\" 启动失败：tools/list 失败：{reason}",
         safe_server_label(.server)
     )]
-    ToolDiscoveryFailed { server: String },
+    ToolDiscoveryFailed { server: String, reason: String },
     #[error(
         "System MCP \"{}\" 启动失败：连接代际已变化，请重试本次输入",
         safe_server_label(.server)
@@ -485,25 +483,30 @@ impl McpClientPool {
             ClientStatus::Disabled => Err(SystemReadinessError::Disabled {
                 server: server.to_string(),
             }),
-            ClientStatus::Failed(_) if handle.oauth_status == OAuthStatus::NeedsAuthorization => {
+            ClientStatus::Failed(reason)
+                if handle.oauth_status == OAuthStatus::NeedsAuthorization =>
+            {
                 Err(SystemReadinessError::AuthorizationRequired {
                     server: server.to_string(),
+                    reason: reason.clone(),
                 })
             }
-            // 失败原因只保留阶段类别：不把 `Failed(String)` 原文写进错误链。
-            ClientStatus::Failed(_) => {
+            ClientStatus::Failed(reason) => {
                 Err(if self.discovery_concluded_with_failure(server, &handle) {
                     SystemReadinessError::ToolDiscoveryFailed {
                         server: server.to_string(),
+                        reason: reason.clone(),
                     }
                 } else {
                     SystemReadinessError::ConnectionFailed {
                         server: server.to_string(),
+                        reason: reason.clone(),
                     }
                 })
             }
             ClientStatus::Disconnected => Err(SystemReadinessError::ConnectionFailed {
                 server: server.to_string(),
+                reason: "disconnected".to_string(),
             }),
             ClientStatus::Uninitialized => Ok(None),
             ClientStatus::Connected => self.evaluate_connected_requirement(requirement, handle),
@@ -538,6 +541,7 @@ impl McpClientPool {
             Some(evidence) if !evidence.tools_list_ok => {
                 Err(SystemReadinessError::ToolDiscoveryFailed {
                     server: server.to_string(),
+                    reason: "tools/list did not complete successfully".to_string(),
                 })
             }
             Some(_) => Ok(Some(NegotiatedSystemMcp {

@@ -2,7 +2,7 @@
 //!
 //! 覆盖口径（主 plan §3 IF-D14 / §6 I-01 行）：
 //! - **映射三种形态**：未知工具名 → `invalid_params`；`Ok(text)` → success；
-//!   `Err` → 模型可见的 error 结果（且原始错误文本不泄漏）。
+//!   `Err` → 模型可见的 error 结果，保留实际诊断。
 //! - **真实链路**：server 半边是生产 handler（`rmcp::serve_server`），client 半边是
 //!   rmcp 原生 Auto lifecycle client；
 //!   `tools/list` 与 `tools/call` 两个方向都经真实 wire。
@@ -296,7 +296,7 @@ async fn web_call_tool_empty_arguments_are_passed_as_empty_object() {
 }
 
 #[tokio::test]
-async fn web_call_tool_error_maps_to_error_result_without_detail_leak() {
+async fn web_call_tool_error_maps_to_error_result_with_detail() {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let server = WebMcpServer::with_tools(vec![StubTool::failing("StubFailing", &calls)]);
 
@@ -312,13 +312,10 @@ async fn web_call_tool_error_maps_to_error_result_without_detail_leak() {
     );
     let text = first_text(&result).expect("错误结果必须有文本块");
     assert!(text.contains("StubFailing"), "错误文本应含工具名：{text}");
+    assert!(text.contains(LEAK_PATH), "错误文本必须保留路径：{text}");
     assert!(
-        !text.contains(LEAK_PATH),
-        "错误文本不得含路径（§9 规则 7）：{text}"
-    );
-    assert!(
-        !text.contains(LEAK_TOKEN),
-        "错误文本不得含凭据形状串（§9 规则 7）：{text}"
+        text.contains(LEAK_TOKEN),
+        "错误文本必须保留合成凭据形状串：{text}"
     );
 }
 
@@ -385,10 +382,10 @@ async fn web_handler_success_and_failure_forms_round_trip_over_wire() {
     assert_eq!(failure.is_error, Some(true));
     let text = first_text(&failure).expect("错误结果必须有文本块");
     assert!(text.contains("StubFailing"));
-    assert!(!text.contains(LEAK_PATH), "线路上的错误文本不得含路径");
+    assert!(text.contains(LEAK_PATH), "线路上的错误文本必须保留路径");
     assert!(
-        !text.contains(LEAK_TOKEN),
-        "线路上的错误文本不得含凭据形状串"
+        text.contains(LEAK_TOKEN),
+        "线路上的错误文本必须保留合成凭据形状串"
     );
 
     pair.shutdown().await;
@@ -504,12 +501,12 @@ async fn web_handler_tools_call_reaches_real_http_stub_over_wire() {
         "固定失败文本应含工具名：{failure_text}"
     );
     assert!(
-        failure_text.contains("withheld by policy"),
-        "失败细节须被策略扣留：{failure_text}"
+        !failure_text.contains("withheld by policy"),
+        "失败细节不得被策略替换：{failure_text}"
     );
     assert!(
-        !failure_text.contains("stub extract upstream is down"),
-        "非 2xx 的响应体不得泄漏到模型面文本（§9 规则 7）：{failure_text}"
+        failure_text.contains("stub extract upstream is down"),
+        "非 2xx 的实际响应体必须保留：{failure_text}"
     );
 
     pair.shutdown().await;

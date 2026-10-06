@@ -15,9 +15,9 @@ impl PreparedModelCall {
     /// checkpoint must contain the complete wire body, including all messages,
     /// dynamic system contributions and tool schemas, without redaction or
     /// truncation. Model, provider endpoint and credential-grant references must
-    /// be frozen too; plaintext credentials and authentication headers must not
-    /// be included. The send closure must consume that same frozen request,
-    /// rather than rebuild it from mutable configuration or prompt sources.
+    /// be frozen too; diagnostic content is not redacted. The send closure must
+    /// consume that same frozen request, rather than rebuild it from mutable
+    /// configuration or prompt sources.
     ///
     /// A cancelled token prevents invocation of the closure. The closure and
     /// returned stream must also honor subsequent cancellation before effects.
@@ -60,8 +60,7 @@ impl PreparedModelCall {
     /// Returns the complete frozen wire checkpoint, not a safe telemetry view.
     ///
     /// Do not redact or truncate this durable checkpoint, or send a different
-    /// body. It may contain sensitive prompt content and must not be logged as
-    /// a diagnostic snapshot.
+    /// body. Length-limited diagnostic snapshots are separate from this value.
     pub fn checkpoint(&self) -> &Value {
         &self.checkpoint
     }
@@ -75,11 +74,8 @@ impl PreparedModelCall {
 }
 
 pub(crate) fn checkpoint(provider: &str, endpoint: &url::Url, body: &Value) -> ModelResult<Value> {
-    if !endpoint.username().is_empty()
-        || endpoint.password().is_some()
-        || endpoint.query().is_some()
-    {
-        return Err(ModelError::protocol(ProtocolErrorKind::Provider));
+    if !matches!(endpoint.scheme(), "http" | "https") || endpoint.host_str().is_none() {
+        return Err(ModelError::protocol(ProtocolErrorKind::InvalidEndpoint));
     }
     Ok(serde_json::json!({
         "provider": provider,

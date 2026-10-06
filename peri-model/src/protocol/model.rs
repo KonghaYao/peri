@@ -54,8 +54,11 @@ fn complete_tool_calls(tool_calls: BTreeMap<usize, PendingToolCall>) -> ModelRes
             let name = tool_call
                 .name
                 .ok_or_else(|| ModelError::protocol(ProtocolErrorKind::ToolCallMissingName))?;
-            let value = serde_json::from_str(&tool_call.arguments)
-                .map_err(|_| ModelError::protocol(ProtocolErrorKind::ToolCallInvalidArguments))?;
+            let value = serde_json::from_str(&tool_call.arguments).map_err(|error| {
+                ModelError::protocol(ProtocolErrorKind::ToolCallInvalidArguments)
+                    .with_error(&error)
+                    .with_body(&tool_call.arguments)
+            })?;
             let arguments = JsonObject::from_value(value)?;
             Ok(ToolCall::new(id, name, arguments))
         })

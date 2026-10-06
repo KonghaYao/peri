@@ -48,10 +48,12 @@ impl SseParser {
         for raw_line in complete.split_inclusive(|byte| *byte == b'\n') {
             let raw_line = match std::str::from_utf8(raw_line) {
                 Ok(line) => line,
-                Err(_) => {
+                Err(error) => {
                     events.push(Err(ModelError::protocol(
                         crate::ProtocolErrorKind::Provider,
-                    )));
+                    )
+                    .with_error(&error)
+                    .with_body(String::from_utf8_lossy(raw_line))));
                     break;
                 }
             };

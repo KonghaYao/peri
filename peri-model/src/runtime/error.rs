@@ -2,7 +2,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-/// 传输层失败的安全分类。
+/// 传输层失败的分类。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TransportErrorKind {
@@ -24,7 +24,7 @@ impl fmt::Display for TransportErrorKind {
     }
 }
 
-/// 重试耗尽时最后一次失败的安全分类。
+/// 重试耗尽时最后一次失败的分类。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RetryErrorKind {
@@ -76,7 +76,7 @@ impl fmt::Display for ProtocolErrorKind {
     }
 }
 
-/// Provider 协议失败的安全详情。
+/// Provider 协议失败的有界详情。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProtocolError {
     kind: ProtocolErrorKind,
@@ -119,62 +119,19 @@ impl fmt::Display for ProtocolError {
 
 const MAX_ERROR_CONTEXT_LEN: usize = 128;
 
-/// 经过长度、字符集和敏感内容检查的错误上下文。
-///
-/// 仅内部错误变体可以保存此值，防止未验证的 provider 或 request id 进入格式化输出。
+/// 具有长度上限的错误上下文。
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SafeErrorContext(String);
 
 impl SafeErrorContext {
     fn new(value: impl AsRef<str>) -> Option<Self> {
         let value = value.as_ref();
-        if value.len() <= MAX_ERROR_CONTEXT_LEN
-            && value
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
-            && !contains_sensitive_context(value)
-        {
-            Some(Self(value.to_owned()))
-        } else {
-            None
-        }
+        (value.len() <= MAX_ERROR_CONTEXT_LEN).then(|| Self(value.to_owned()))
     }
 
     fn as_str(&self) -> &str {
         &self.0
     }
-}
-
-fn contains_sensitive_context(value: &str) -> bool {
-    let lower = value.to_ascii_lowercase();
-    if lower.starts_with("sk-") || lower.starts_with("sk_") {
-        return true;
-    }
-    let normalized = value
-        .bytes()
-        .filter_map(|byte| {
-            byte.is_ascii_alphanumeric()
-                .then_some(byte.to_ascii_lowercase())
-        })
-        .collect::<Vec<_>>();
-
-    [
-        b"apikey".as_slice(),
-        b"authorization",
-        b"cookie",
-        b"credential",
-        b"password",
-        b"prompt",
-        b"secret",
-        b"token",
-        b"sklive",
-    ]
-    .iter()
-    .any(|needle| {
-        normalized
-            .windows(needle.len())
-            .any(|window| window == *needle)
-    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -201,10 +158,7 @@ enum ModelErrorInner {
     },
 }
 
-/// A bounded, allowlisted model failure projection safe to pass across an
-/// Agent/ACP boundary.  It deliberately contains no provider body, headers,
-/// prompt, URL, free-form protocol summary or retryability decision. Protocol
-/// diagnostics carry only their stable kind; the summary remains local.
+/// A bounded model failure projection for Agent and ACP boundaries.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ModelErrorDiagnostic {
     category: ModelErrorCategory,
@@ -215,6 +169,9 @@ pub struct ModelErrorDiagnostic {
     protocol: Option<ProtocolErrorKind>,
     retry_attempts: Option<u32>,
     retry_kind: Option<RetryErrorKind>,
+    message: Option<String>,
+    body: Option<String>,
+    causes: Vec<String>,
 }
 
 /// Untrusted diagnostic facts supplied by a serialization boundary. Keeping
@@ -228,6 +185,9 @@ pub struct ModelErrorDiagnosticParts<'a> {
     pub protocol: Option<ProtocolErrorKind>,
     pub retry_attempts: Option<u32>,
     pub retry_kind: Option<RetryErrorKind>,
+    pub message: Option<&'a str>,
+    pub body: Option<&'a str>,
+    pub causes: &'a [String],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -242,8 +202,7 @@ pub enum ModelErrorCategory {
 }
 
 impl ModelErrorDiagnostic {
-    /// Construct a diagnostic from an external boundary only after validating
-    /// every identity field with the same runtime safe-context rules.
+    /// Construct a diagnostic after validating its shape and identity lengths.
     pub fn from_parts(parts: ModelErrorDiagnosticParts<'_>) -> Option<Self> {
         let ModelErrorDiagnosticParts {
             category,
@@ -254,6 +213,9 @@ impl ModelErrorDiagnostic {
             protocol,
             retry_attempts,
             retry_kind,
+            message,
+            body,
+            causes,
         } = parts;
         let retry_pair = match (retry_attempts, retry_kind) {
             (None, None) => true,
@@ -339,6 +301,9 @@ impl ModelErrorDiagnostic {
             protocol,
             retry_attempts,
             retry_kind,
+            message: message.map(bounded_text),
+            body: body.map(bounded_text),
+            causes: bounded_causes(causes.iter().cloned()),
         })
     }
 
@@ -385,6 +350,18 @@ impl ModelErrorDiagnostic {
         self.retry_kind
     }
 
+    pub fn message(&self) -> Option<&str> {
+        self.message.as_deref()
+    }
+
+    pub fn body(&self) -> Option<&str> {
+        self.body.as_deref()
+    }
+
+    pub fn causes(&self) -> &[String] {
+        &self.causes
+    }
+
     fn with_retry(mut self, attempts: u32, kind: RetryErrorKind) -> Self {
         self.retry_attempts = Some(attempts);
         self.retry_kind = Some(kind);
@@ -392,19 +369,84 @@ impl ModelErrorDiagnostic {
     }
 }
 
-/// 模型调用失败的结构化、安全错误。
-///
-/// 此错误只保存经过验证的 provider、HTTP status、request id 与受限摘要，绝不保存请求/响应
-/// 正文、headers、cookie 或认证凭据。
+/// 模型调用失败的结构化、有界错误。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ModelError(ModelErrorInner, Option<(ModelErrorDiagnostic, bool)>);
+pub struct ModelError(
+    ModelErrorInner,
+    Option<(ModelErrorDiagnostic, bool)>,
+    ErrorDetails,
+);
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ErrorDetails {
+    message: Option<String>,
+    body: Option<String>,
+    causes: Vec<String>,
+}
+
+pub(crate) const MAX_DIAGNOSTIC_BYTES: usize = 16_384;
+const MAX_CAUSES: usize = 16;
+const TRUNCATED_MARKER: &str = "[TRUNCATED]";
+
+fn bounded_text(value: impl AsRef<str>) -> String {
+    let value = value.as_ref();
+    if value.len() <= MAX_DIAGNOSTIC_BYTES {
+        return value.to_owned();
+    }
+    let mut end = MAX_DIAGNOSTIC_BYTES - TRUNCATED_MARKER.len();
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{TRUNCATED_MARKER}", &value[..end])
+}
+
+fn bounded_causes(values: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut values = values.into_iter();
+    let mut causes = values
+        .by_ref()
+        .take(MAX_CAUSES)
+        .map(bounded_text)
+        .collect::<Vec<_>>();
+    if values.next().is_some() {
+        causes[MAX_CAUSES - 1] = "[TRUNCATED: additional causes omitted]".into();
+    }
+    causes
+}
 
 impl ModelError {
     fn new(inner: ModelErrorInner) -> Self {
-        Self(inner, None)
+        Self(inner, None, ErrorDetails::default())
     }
 
-    /// 中断降级前的安全诊断及 observer 是否已负责记录；不改变错误分类。
+    pub fn with_message(mut self, message: impl AsRef<str>) -> Self {
+        self.2.message = Some(bounded_text(message));
+        self
+    }
+
+    pub fn with_body(mut self, body: impl AsRef<str>) -> Self {
+        self.2.body = Some(bounded_text(body));
+        self
+    }
+
+    pub fn with_causes(mut self, causes: impl IntoIterator<Item = String>) -> Self {
+        self.2.causes = bounded_causes(causes);
+        self
+    }
+
+    pub(crate) fn with_error(self, error: &(dyn std::error::Error + 'static)) -> Self {
+        let mut causes = Vec::new();
+        let mut source = error.source();
+        while let Some(cause) = source {
+            if causes.len() > MAX_CAUSES {
+                break;
+            }
+            causes.push(bounded_text(cause.to_string()));
+            source = cause.source();
+        }
+        self.with_message(error.to_string()).with_causes(causes)
+    }
+
+    /// 中断降级前的有界诊断及 observer 是否已负责记录；不改变错误分类。
     pub fn interruption_diagnostic(&self) -> Option<&ModelErrorDiagnostic> {
         self.1.as_ref().map(|(diagnostic, _)| diagnostic)
     }
@@ -447,8 +489,10 @@ impl ModelError {
 
     pub fn protocol_with_summary(kind: ProtocolErrorKind, summary: impl AsRef<str>) -> Self {
         Self::new(ModelErrorInner::Protocol(ProtocolError::with_summary(
-            kind, summary,
+            kind,
+            summary.as_ref(),
         )))
+        .with_message(summary)
     }
 
     pub fn cancelled() -> Self {
@@ -567,7 +611,7 @@ impl ModelError {
     /// Return the bounded diagnostic projection. Invalid or absent provider and
     /// request identities are represented as `None`, never as a sentinel.
     pub fn diagnostic(&self) -> ModelErrorDiagnostic {
-        match &self.0 {
+        let mut diagnostic = match &self.0 {
             ModelErrorInner::Transport { kind, provider } => ModelErrorDiagnostic {
                 category: ModelErrorCategory::Transport,
                 status: None,
@@ -577,6 +621,9 @@ impl ModelError {
                 protocol: None,
                 retry_attempts: None,
                 retry_kind: None,
+                message: None,
+                body: None,
+                causes: Vec::new(),
             },
             ModelErrorInner::HttpStatus {
                 status,
@@ -591,6 +638,9 @@ impl ModelError {
                 protocol: None,
                 retry_attempts: None,
                 retry_kind: None,
+                message: None,
+                body: None,
+                causes: Vec::new(),
             },
             ModelErrorInner::Protocol(error) => ModelErrorDiagnostic {
                 category: ModelErrorCategory::Protocol,
@@ -601,6 +651,9 @@ impl ModelError {
                 protocol: Some(error.kind()),
                 retry_attempts: None,
                 retry_kind: None,
+                message: None,
+                body: None,
+                causes: Vec::new(),
             },
             ModelErrorInner::Cancelled => ModelErrorDiagnostic {
                 category: ModelErrorCategory::Cancelled,
@@ -611,6 +664,9 @@ impl ModelError {
                 protocol: None,
                 retry_attempts: None,
                 retry_kind: None,
+                message: None,
+                body: None,
+                causes: Vec::new(),
             },
             ModelErrorInner::StreamInterrupted {
                 provider,
@@ -624,6 +680,9 @@ impl ModelError {
                 protocol: None,
                 retry_attempts: None,
                 retry_kind: None,
+                message: None,
+                body: None,
+                causes: Vec::new(),
             },
             ModelErrorInner::RetryExhausted {
                 attempts,
@@ -638,8 +697,21 @@ impl ModelError {
                 protocol: None,
                 retry_attempts: Some(*attempts),
                 retry_kind: Some(*last_error),
+                message: None,
+                body: None,
+                causes: Vec::new(),
             }),
+        };
+        if self.2.message.is_some() {
+            diagnostic.message = self.2.message.clone();
         }
+        if self.2.body.is_some() {
+            diagnostic.body = self.2.body.clone();
+        }
+        if !self.2.causes.is_empty() {
+            diagnostic.causes = self.2.causes.clone();
+        }
+        diagnostic
     }
 }
 
@@ -659,6 +731,9 @@ impl fmt::Display for ModelError {
                 write_provider_suffix(formatter, provider.as_ref())?;
                 write_request_id_suffix(formatter, request_id.as_ref())
             }
+            ModelErrorInner::Protocol(error) if self.2.message.is_some() => {
+                write!(formatter, "model protocol error: {}", error.kind())
+            }
             ModelErrorInner::Protocol(error) => write!(formatter, "model protocol error: {error}"),
             ModelErrorInner::Cancelled => formatter.write_str("model request was cancelled"),
             ModelErrorInner::StreamInterrupted {
@@ -677,7 +752,18 @@ impl fmt::Display for ModelError {
                 formatter,
                 "model retry exhausted after {attempts} attempts; last failure: {last_error}"
             ),
+        }?;
+        let diagnostic = self.diagnostic();
+        if let Some(message) = diagnostic.message() {
+            write!(formatter, ": {message}")?;
         }
+        if let Some(body) = diagnostic.body() {
+            write!(formatter, "; body: {body}")?;
+        }
+        for cause in diagnostic.causes() {
+            write!(formatter, "; caused by: {cause}")?;
+        }
+        Ok(())
     }
 }
 

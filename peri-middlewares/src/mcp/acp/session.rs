@@ -26,8 +26,8 @@ use serde_json::{Map, Value};
 
 use super::transport::{create_bridge, AcpBridgeHandle, MCP_CONNECT_METHOD, MCP_DISCONNECT_METHOD};
 use crate::mcp::client::{
-    peer_declares_skills, redact_mcp_error, serve_client_auto, ClientStatus, McpClientHandle,
-    McpClientPool, OAuthStatus, HTTP_CONNECT_TIMEOUT, SHUTDOWN_TIMEOUT,
+    peer_declares_skills, serve_client_auto, ClientStatus, McpClientHandle, McpClientPool,
+    OAuthStatus, HTTP_CONNECT_TIMEOUT, SHUTDOWN_TIMEOUT,
 };
 use crate::mcp::task_scope::McpTaskKey;
 
@@ -299,7 +299,7 @@ async fn connect_server(
     let service = match served {
         Ok(Ok(service)) => service,
         Ok(Err(error)) => {
-            let message = redact_mcp_error(&error.to_string());
+            let message = error.to_string();
             fail_connection(&pool, &state, &gateway, &spec, &connection_id, message).await;
             return;
         }
@@ -323,7 +323,7 @@ async fn connect_server(
     let tools = match peer.list_all_tools().await {
         Ok(tools) => tools,
         Err(error) => {
-            let message = redact_mcp_error(&error.to_string());
+            let message = error.to_string();
             let _ = service.close_with_timeout(SHUTDOWN_TIMEOUT).await;
             fail_connection(&pool, &state, &gateway, &spec, &connection_id, message).await;
             return;

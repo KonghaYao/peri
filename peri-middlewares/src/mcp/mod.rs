@@ -42,7 +42,7 @@ pub use apps::{
 pub use auth_store::{OAuthCredentialClient, PerServerCredentialStore};
 pub use callback_server::{parse_code_from_url, CallbackError, OAuthCallbackServer};
 pub use client::{
-    redact_mcp_error, ClientStatus, McpClientHandle, McpClientPool, McpInitStatus, McpPoolError,
+    ClientStatus, McpClientHandle, McpClientPool, McpInitStatus, McpPoolError,
     OAuthStartDisposition, OAuthStatus, ServerInfo,
 };
 pub use config::{

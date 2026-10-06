@@ -85,8 +85,9 @@ impl AcpTuiClient {
         request_id: Option<String>,
     ) -> Result<PromptResponse, AcpError> {
         let response = self.send_prompt(content, request_id).await?;
-        serde_json::from_value(response)
-            .map_err(|_| AcpError::new(-32603, "invalid session/prompt response"))
+        serde_json::from_value(response).map_err(|error| {
+            AcpError::new(-32603, format!("invalid session/prompt response: {error}"))
+        })
     }
 
     async fn send_prompt(
@@ -104,7 +105,12 @@ impl AcpTuiClient {
         if let Some(rid) = request_id {
             params["requestId"] = json!(rid);
         }
+        let session_id = params.get("sessionId").cloned();
+        let request_id = params.get("requestId").cloned();
         let result = self.transport.send_request("session/prompt", params).await;
+        if let Err(error) = &result {
+            tracing::warn!(session_id = ?session_id, request_id = ?request_id, code = error.code, error = %error.message, data = ?error.data, "session/prompt RPC failed");
+        }
         let _operation = self.lifecycle.operation_gate().lock().await;
         let claims = lease.finish();
         self.settle_claims_owned(claims).await;
@@ -135,7 +141,12 @@ impl AcpTuiClient {
         if let Some(rid) = request_id {
             params["requestId"] = json!(rid);
         }
+        let session_id = params.get("sessionId").cloned();
+        let request_id = params.get("requestId").cloned();
         let result = self.transport.send_request("session/prompt", params).await;
+        if let Err(error) = &result {
+            tracing::warn!(session_id = ?session_id, request_id = ?request_id, code = error.code, error = %error.message, data = ?error.data, "session/prompt RPC failed");
+        }
         let _operation = self.lifecycle.operation_gate().lock().await;
         let claims = lease.finish();
         self.settle_claims_owned(claims).await;

@@ -1,5 +1,7 @@
 # peri-agent 代码索引
 
+错误诊断入口：`peri-acp-types/src/error.rs` 的 `AgentError::category_name` / `cause_chain` 保留实际错误；`session/exec/executor_helpers/v2_execute.rs` 的 fatal 漏斗记录 session/turn、分类与原因链。`ExecutionFailure` 将 `error_category`、`causes` 及 Model diagnostic 显式交给 ACP/遥测，不以通用公开提示替代诊断。重试与中断由 `session/retry_events.rs` / `agent/model_bridge.rs` 保留底层原因；内容不脱敏，长度与终止语义仍按 ARC-SECRET-001 和原执行契约约束。
+
 会话执行唯一性与接管由 `peri-sdk` 负责；Agent 不申请会话执行 lease、不继承 owner token、不执行 Store owner CAS 或 fencing。以下 task/cron/MCP owner 与 projection lease 均属资源或 capability 生命周期，不是会话执行所有权。
 
 RCRA 控制入口见 `agent/stages/execution_control.rs`：持久登记精确 turn/attempt 观察，固定本次控制代际，并在 Receive、Reason、Act 及每次工具发送前验证；Pause 后旧模型响应不能借 Resume 新代际提交。观察不是 attempt 调度准入。子会话显式关闭见 `session/subagent/close.rs`：关闭任务独立持有，调用者 Future 丢弃不撤销关闭；资源屏障未确认保留 Closing/Incomplete，不投递伪造的完成结果。`session/subagent/factory/claim.rs` 只在证明自身执行退出后清除对应观察；旧生命周期的 Inbox/任务事实保留，新生命周期采用新目录绑定。

@@ -553,7 +553,7 @@ impl RemoteStore {
         self.transport
             .sql_values(&StatementSpec::bare("PRAGMA foreign_keys = OFF"))
             .await
-            .map_err(|error| failure::classify(&error).into_session_resource_error())?;
+            .map_err(|error| failure::from_sdk_error(&error))?;
         Ok(())
     }
 
@@ -573,7 +573,7 @@ impl RemoteStore {
     pub(super) async fn close(&self) -> SessionResourceResult<()> {
         match self.budgeted(self.transport.close()).await {
             Budgeted::Done(()) => Ok(()),
-            Budgeted::Failed(error) => Err(failure::classify(&error).into_session_resource_error()),
+            Budgeted::Failed(error) => Err(failure::from_sdk_error(&error)),
             Budgeted::Exceeded => Err(RemoteFailureClass::Timeout.into_session_resource_error()),
         }
     }
@@ -722,7 +722,7 @@ impl RemoteStore {
     async fn rows(&self, spec: &StatementSpec) -> SessionResourceResult<Vec<Vec<Value>>> {
         match self.guarded(self.transport.sql_values(spec)).await {
             Budgeted::Done(rows) => Ok(rows),
-            Budgeted::Failed(error) => Err(failure::classify(&error).into_session_resource_error()),
+            Budgeted::Failed(error) => Err(failure::from_sdk_error(&error)),
             Budgeted::Exceeded => Err(RemoteFailureClass::Timeout.into_session_resource_error()),
         }
     }

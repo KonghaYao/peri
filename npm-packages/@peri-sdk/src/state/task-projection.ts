@@ -6,14 +6,9 @@ const TERMINAL = new Set(["completed", "failed", "cancelled"]);
 const LIVE_BACKGROUND_STATUSES = new Set(["running", "waiting"]);
 const MAX_TASKS = 200;
 type UnobservedTaskStatus = `unobserved:${string}`;
-function safeSummary(raw: unknown): string | null {
+function boundedSummary(raw: unknown): string | null {
     if (typeof raw !== "string") return null;
-    const text = raw.trim()
-        .replace(/\b(?:https?|wss?):\/\/[^\s<>'"`]+/giu, "[REDACTED_URL]")
-        .replace(/\b(?:bearer\s+)?[A-Za-z0-9_-]*(?:token|secret|password|api[_-]?key)[A-Za-z0-9_-]*\s*[:=]\s*[^\s,;]+/giu, "[REDACTED_SECRET]")
-        .replace(/\bBearer\s+[A-Za-z0-9._~+/-]+=*/giu, "[REDACTED_SECRET]")
-        .replace(/(?:^|\s)(?:~\/|\/(?:Users|home|var|tmp|private|etc|opt|srv|workspace)\/)[^\s<>'"`]+/gu,
-            (match) => `${match.startsWith(" ") ? " " : ""}[REDACTED_PATH]`);
+    const text = raw.trim();
     return text ? text.slice(0, 500) : null;
 }
 function validTime(raw: unknown): string | null {
@@ -80,7 +75,7 @@ export class TaskProjection {
         const existing = this.docs.tasks().get(id);
         if (existing && (existing.get("kind") !== "subagent" || TERMINAL.has(String(existing.get("status"))))) return false;
         this.docs.session.transact(() => this.upsert(
-            id, "subagent", safeSummary(value.agent_name)?.slice(0, 120) ?? "Subagent",
+            id, "subagent", boundedSummary(value.agent_name)?.slice(0, 120) ?? "Subagent",
             type === "subagent_started" ? "running" : value.is_error === true ? "failed" : "completed",
             type === "subagent_started"
                 ? { isBackground: value.is_background === true, startedAt: new Date().toISOString() }
@@ -114,7 +109,7 @@ export class TaskProjection {
             if (revision !== null) this.backgroundRevision = revision;
             return false;
         }
-        const text = safeSummary(data.summary);
+        const text = boundedSummary(data.summary);
         if (name === "bg-task-started") this.liveBackgroundTasks.add(id);
         if (!LIVE_BACKGROUND_STATUSES.has(status)) this.liveBackgroundTasks.delete(id);
         this.docs.session.transact(() => this.upsert(id, "background", text?.slice(0, 120) ?? string(data.kind) ?? "Background task", this.backgroundStatus(id, status), {
@@ -169,7 +164,7 @@ export class TaskProjection {
             for (const row of rows) {
                 const id = string(row?.task_id)!;
                 if (tasks.get(id)?.get("kind") === "subagent") continue;
-                const text = safeSummary(row?.summary);
+                const text = boundedSummary(row?.summary);
                 const status = string(row?.status)!;
                 const existingStatus = string(tasks.get(id)?.get("status"));
                 if (!LIVE_BACKGROUND_STATUSES.has(status)) this.liveBackgroundTasks.delete(id);

@@ -154,7 +154,7 @@ impl RetryConfig {
     }
 }
 
-/// 可安全发送给上层的 retry 观测；不包含 request、response、Agent 或 telemetry 类型。
+/// 可发送给上层的 retry 观测；不包含 request、response、Agent 或 telemetry 类型。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RetryObservation {
     attempt: u32,
@@ -196,13 +196,13 @@ impl RetryObservation {
         self.error_kind
     }
 
-    /// Safe facts from the failed attempt.  No retryability decision is
+    /// Bounded facts from the failed attempt.  No retryability decision is
     /// exposed; the policy remains owned by `RetryConfig`.
     pub fn diagnostic(&self) -> Option<&crate::ModelErrorDiagnostic> {
         self.diagnostic.as_ref()
     }
 
-    /// Derive the retry class and safe facts from one model error. This keeps
+    /// Derive the retry class and bounded facts from one model error. This keeps
     /// the observer from receiving two independently supplied classifications.
     pub fn from_model_error(
         attempt: u32,
@@ -228,7 +228,7 @@ impl RetryObservation {
     }
 }
 
-/// 上层可注册的、安全 retry 观测回调。
+/// 上层可注册的、retry 观测回调。
 ///
 /// 回调只接收 attempt、最大尝试数、实际退避与失败分类，不会收到请求、响应、headers 或 telemetry
 /// 对象。
@@ -506,7 +506,6 @@ fn observe_interruption(
     max_attempts: u32,
     error: ModelError,
 ) -> ModelError {
-    // 必须在 transport 被压成 StreamInterrupted 前保留安全分类，绝不投影自由文本。
     let diagnostic = error.diagnostic();
     let observation = RetryObservation {
         attempt: attempts,
@@ -533,7 +532,16 @@ fn observe_interruption(
 }
 
 fn interrupted_from(error: &ModelError) -> ModelError {
-    ModelError::stream_interrupted(error.provider(), error.request_id())
+    let diagnostic = error.diagnostic();
+    let mut interrupted = ModelError::stream_interrupted(error.provider(), error.request_id())
+        .with_causes(diagnostic.causes().iter().cloned());
+    if let Some(message) = diagnostic.message() {
+        interrupted = interrupted.with_message(message);
+    }
+    if let Some(body) = diagnostic.body() {
+        interrupted = interrupted.with_body(body);
+    }
+    interrupted
 }
 
 #[cfg(test)]

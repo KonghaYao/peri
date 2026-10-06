@@ -135,9 +135,9 @@ export class Session {
                 }
                 try {
                     this.docs.accept(event);
-                } catch {
+                } catch (error) {
                     // State projection must not suppress delivery handling or the raw ACP stream.
-                    console.error("Failed to project ACP notification into SessionDocs");
+                    console.error("Failed to project ACP notification into SessionDocs", error);
                 }
                 if (!rawEvent) return;
                 this.acceptDeliveryEvent(event);

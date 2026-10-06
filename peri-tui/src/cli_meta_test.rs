@@ -7,6 +7,19 @@ use peri_acp_types::thread::{AgentStatus, ThreadMeta};
 
 use super::*;
 
+#[test]
+fn resource_failure_details_survive_meta_error_projection() {
+    let message = "database https://example.test/db?token=fixture failed\ncaused by: TLS reset";
+    let error = SessionResourceError::new(SessionResourceErrorKind::Unavailable {
+        detail: message.to_owned(),
+    });
+    let outcome = error_outcome_with_message(map_resource_error(&error), true, error.to_string());
+    assert_eq!(outcome.exit_code, 4);
+    let wire: serde_json::Value = serde_json::from_str(outcome.stderr.as_deref().unwrap()).unwrap();
+    assert_eq!(wire["error"]["kind"], "database_unreadable");
+    assert!(wire["error"]["message"].as_str().unwrap().contains(message));
+}
+
 fn meta_with_control_characters() -> ThreadMeta {
     ThreadMeta {
         id: "550e8400-e29b-41d4-a716-446655440000".to_owned(),

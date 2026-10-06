@@ -403,7 +403,7 @@ fn failed_cas_or_io_write_does_not_publish_next_snapshot() {
     source.fail_writes();
     assert!(matches!(
         system.update(&scope, current.revision(), &updated),
-        Err(ConfigurationError::InputUnavailable)
+        Err(ConfigurationError::InputUnavailable(_))
     ));
     assert!(Arc::ptr_eq(&current, &system.current(&scope).unwrap()));
     assert!(source.writes().is_empty());
@@ -786,7 +786,6 @@ fn explanations_and_debug_output_do_not_reveal_environment_secrets() {
         "{snapshot:?} {inputs:?} {explanation:?} {:?}",
         snapshot.observability()
     );
-    assert!(explanation.contains_sensitive_values);
     assert!(!rendered.contains("pk-visible-secret"));
     assert!(!rendered.contains("sk-hidden-secret"));
 }

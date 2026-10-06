@@ -37,7 +37,7 @@ pub fn list_tools_of(tools: &[Arc<dyn BaseTool>]) -> ListToolsResult {
     )
 }
 
-/// Invoke a registered tool and project failures through the shared safe diagnostic policy.
+/// Invoke a registered tool and preserve diagnostic detail in tool failures.
 pub async fn invoke_tool_call(
     tools: &[Arc<dyn BaseTool>],
     cwd: &str,
@@ -58,11 +58,12 @@ pub async fn invoke_tool_call(
         Ok(text) => Ok(CallToolResponse::Complete(CallToolResult::success(vec![
             ContentBlock::text(text),
         ]))),
-        Err(error) => Ok(CallToolResponse::Complete(CallToolResult::error(vec![
-            ContentBlock::text(crate::result_mapping::failure_text(
-                tool.name(),
-                error.as_ref(),
-            )),
-        ]))),
+        Err(error) => {
+            let text = crate::result_mapping::failure_text(tool.name(), error.as_ref());
+            tracing::warn!(tool = tool.name(), diagnostic = %text, "MCP tool call failed");
+            Ok(CallToolResponse::Complete(CallToolResult::error(vec![
+                ContentBlock::text(text),
+            ])))
+        }
     }
 }

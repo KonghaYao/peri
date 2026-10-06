@@ -84,6 +84,6 @@ Langfuse HTTP 重试与批次失败日志由 `langfuse-client/src/client.rs` 和
 - ARC-EVENT-001：`publish_event` / `publish` 是协议化前双投递出口；Langfuse 旁路不参与业务执行，不建立第二条事件投递链。
 - 控制面测试：`peri-controller/src/controller_test.rs` 覆盖取消、事件双投递、会话销毁与端口注入。
 - 异常关闭回归：`peri-controller/src/langfuse/tracer/registry_lifecycle_test.rs` 的重复 Start/Stop、已 Closed 后重复 Stop；子 agent 终态与 Workflow 在内存闭合后发送一次完整 Create，不重发同 ID 更新。
-- 观测顺序回归：`peri-controller/src/langfuse/bridge_test.rs` 的双 producer/乱序矩阵，以及 `tracer/tracer_test.rs` 的缺少 LlmCallEnd、未采样错误 parent-first 和错误脱敏。
+- 观测顺序回归：`peri-controller/src/langfuse/bridge_test.rs` 的双 producer/乱序矩阵，以及 `tracer/tracer_test.rs` 的缺少 LlmCallEnd、未采样错误 parent-first 和错误内容保真。
 - bridge 原有内联测试入口迁到 `peri-controller/src/langfuse/bridge/lifecycle_test.rs`，保留 `bridge::tests` 模块路径。
 - 验证：`cargo test -p peri-controller`、`cargo test -p peri-controller --doc`、`cargo clippy -p peri-controller --all-targets -- -D warnings`；集成测试使用 `FakeLangfuseSession`，不向真实服务发请求。

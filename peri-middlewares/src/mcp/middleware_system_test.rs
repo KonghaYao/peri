@@ -182,7 +182,12 @@ impl GateFixture {
             resources: vec![],
             status: ClientStatus::Connected,
             oauth_status: OAuthStatus::default(),
-            source: self.pool.configs.read().get(name).and_then(|config| config.source.clone()),
+            source: self
+                .pool
+                .configs
+                .read()
+                .get(name)
+                .and_then(|config| config.source.clone()),
             url: None,
             skills_capable: false,
         });
@@ -475,7 +480,7 @@ async fn system_mcp_gate_uses_deployment_pool_not_session_projection() {
 
 /// 错误文案安全：控制字符折叠为空格、凭据形态遮蔽（危险形态只用非真实凭据形状）。
 #[tokio::test]
-async fn startup_error_text_folds_control_chars_and_redacts_credentials() {
+async fn startup_error_text_folds_control_chars_and_preserves_credentials() {
     let mut fixture = GateFixture::new();
     fixture.config(
         "sys",
@@ -503,8 +508,8 @@ async fn startup_error_text_folds_control_chars_and_redacts_credentials() {
         "控制字符必须折叠: {reason}"
     );
     assert!(
-        !reason.contains("FAKE-SHAPE-ONLY"),
-        "凭据形态必须遮蔽: {reason}"
+        reason.contains("FAKE-SHAPE-ONLY"),
+        "错误信息必须保留: {reason}"
     );
     assert!(
         reason.contains("未提供必需工具"),
@@ -789,6 +794,9 @@ async fn remote_workspace_uses_discovered_tools_even_with_builtin_workspace_clos
     let (_, generation) = fixture.connect("workspace", vec![]).await;
     fixture.ready("workspace", generation);
     let snapshot = mw.await_system_ready().await.unwrap();
-    assert!(snapshot.bridges.is_empty(), "empty live tools/list is valid");
+    assert!(
+        snapshot.bridges.is_empty(),
+        "empty live tools/list is valid"
+    );
     fixture.shutdown().await;
 }

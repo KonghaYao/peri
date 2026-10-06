@@ -99,7 +99,7 @@ impl RunCompletion {
                     tracing::warn!(%error, "Workflow execution failed");
                     (
                         stopped,
-                        Some(peri_acp_types::session::sanitize_public_error(
+                        Some(peri_acp_types::session::bounded_error_message(
                             &error.to_string(),
                             2_000,
                         )),

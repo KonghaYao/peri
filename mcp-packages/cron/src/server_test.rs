@@ -7,7 +7,7 @@
 //! - **路由**：三条工具打到**同一** scheduler（经 `list_tasks` / `get_task` 与工具
 //!   返回文本观察）；未知工具名 → `invalid_params`。
 //! - **IF-D14 映射**：失败 → `Ok(Complete(error 结果))`，文本等于 `invoke_tool_call`
-//!   的固定脱敏文本（不含 `CronError` 原文 / 用户 prompt / 路径）；成功 → 工具返回文本。
+//!   的诊断文本（保留实际错误）；成功 → 工具返回文本。
 //! - **A32（handler 不驱动 tick）**：可证伪的正/反控见
 //!   `cron_server_maps_three_tools_without_tick`。
 //! - **A32（代监督者持有 tick，handler 不持有）**：宿主 tick 驱动由
@@ -454,9 +454,6 @@ async fn call_tool_uses_if_d14_error_mapping() {
     let (scheduler, _triggers) = scheduler_fixture();
     let server = CronMcpServer::new(Arc::clone(&scheduler));
 
-    // 参考文本：**同一** IF-D14 实现（`invoke_tool_call`）对**同名**替身工具的失败形态。
-    // 规则文本只由工具名决定，所以这就是 `cron_register` 的固定脱敏文本——本文件因此
-    // 不硬编码第三份规则字面量。
     let stub: Vec<Arc<dyn BaseTool>> = vec![Arc::new(FailingStubTool)];
     let reference = complete(
         invoke_tool_call(&stub, "", &call("cron_register", json!({})))
@@ -466,11 +463,10 @@ async fn call_tool_uses_if_d14_error_mapping() {
     assert_eq!(reference.is_error, Some(true));
     let expected = first_text(&reference).expect("错误结果必须有文本块");
     assert!(
-        !expected.contains(LEAK_PATH),
-        "固定文本本身不得含替身工具的原文：{expected}"
+        expected.contains(LEAK_PATH),
+        "错误文本必须保留替身工具的实际诊断：{expected}"
     );
 
-    // ① 业务失败（缺 `expression` 字段）→ 固定脱敏文本
     let missing = complete(
         invoke_tool_call(
             server.tools(),
@@ -482,10 +478,7 @@ async fn call_tool_uses_if_d14_error_mapping() {
     );
     assert_eq!(missing.is_error, Some(true));
     let missing_text = first_text(&missing).expect("错误结果必须有文本块");
-    assert_eq!(
-        missing_text, expected,
-        "失败文本必须等于 IF-D14 的固定脱敏文本"
-    );
+    assert!(missing_text.contains("missing expression field"));
     assert!(
         missing_text.contains("cron_register"),
         "规则文本只带工具名：{missing_text}"
@@ -495,7 +488,6 @@ async fn call_tool_uses_if_d14_error_mapping() {
         "不得泄漏用户 prompt：{missing_text}"
     );
 
-    // ② 非法 cron 表达式 → `CronError::InvalidExpression` 原文不得泄漏
     let invalid = complete(
         invoke_tool_call(
             server.tools(),
@@ -511,19 +503,18 @@ async fn call_tool_uses_if_d14_error_mapping() {
     assert_eq!(invalid.is_error, Some(true));
     let invalid_text = first_text(&invalid).expect("错误结果必须有文本块");
     assert!(
-        !invalid_text.contains("cron 表达式无效"),
-        "不得泄漏 CronError 原文：{invalid_text}"
+        invalid_text.contains("cron 表达式无效"),
+        "必须保留 CronError 原文：{invalid_text}"
     );
     assert!(
-        !invalid_text.contains(INVALID_EXPRESSION),
-        "不得回传表达式原文：{invalid_text}"
+        invalid_text.contains(INVALID_EXPRESSION),
+        "必须保留表达式原文：{invalid_text}"
     );
     assert!(
         !invalid_text.contains(LEAK_PROMPT),
         "不得泄漏用户 prompt：{invalid_text}"
     );
 
-    // ③ 路径形状的 id → `CronRemoveTool` 的 not-found 原文不得泄漏路径
     let not_found = complete(
         invoke_tool_call(
             server.tools(),
@@ -536,12 +527,12 @@ async fn call_tool_uses_if_d14_error_mapping() {
     assert_eq!(not_found.is_error, Some(true));
     let not_found_text = first_text(&not_found).expect("错误结果必须有文本块");
     assert!(
-        !not_found_text.contains(LEAK_PATH),
-        "不得泄漏路径（§9 规则 7）：{not_found_text}"
+        not_found_text.contains(LEAK_PATH),
+        "必须保留路径形状的 id：{not_found_text}"
     );
     assert!(
-        !not_found_text.contains("not found"),
-        "不得泄漏工具原文：{not_found_text}"
+        not_found_text.contains("not found"),
+        "必须保留工具原文：{not_found_text}"
     );
 
     // ④ 成功形态：content 文本 = 工具自身的返回文本（同一 scheduler、同一实现）

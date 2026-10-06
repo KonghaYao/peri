@@ -92,11 +92,11 @@ impl BaseTool for BoundDynamicMcpTool {
             .execute(&self.session_id, self.action.clone())
             .await
             .and_then(|response| {
-                serde_json::to_string(&response).map_err(|_| {
+                serde_json::to_string(&response).map_err(|error| {
                     peri_acp_types::dynamic_mcp::DynamicMcpFailure::new(
                         peri_acp_types::dynamic_mcp::DynamicMcpErrorCode::Internal,
                         peri_acp_types::dynamic_mcp::DynamicMcpOperationState::Failed,
-                        "Dynamic MCP response serialization failed",
+                        format!("Dynamic MCP response serialization failed: {error}"),
                     )
                 })
             })

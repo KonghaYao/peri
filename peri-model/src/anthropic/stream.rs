@@ -9,7 +9,7 @@ use crate::{
 
 use super::response::{provider_protocol_error, stop_reason};
 
-/// 畸形帧的解码诊断：保留 `Provider` 分类并附带受限摘要（仅 `[A-Za-z0-9._-]`），
+/// 畸形帧的解码诊断：保留 `Provider` 分类并附带有界摘要，
 /// 使 fail-closed 的原因在错误出口可见，而不是被降级成空事件。
 fn malformed_frame_error(summary: &str) -> ModelError {
     ModelError::protocol_with_summary(crate::ProtocolErrorKind::Provider, summary)
@@ -74,7 +74,17 @@ fn decode_event(
     event: SseEvent,
     header_request_id: Option<String>,
 ) -> ModelResult<Vec<ModelStreamEvent>> {
-    let value: Value = serde_json::from_str(&event.data).map_err(|_| provider_protocol_error())?;
+    let body = event.data.clone();
+    decode_event_inner(state, event, header_request_id).map_err(|error| error.with_body(body))
+}
+
+fn decode_event_inner(
+    state: &Mutex<StreamState>,
+    event: SseEvent,
+    header_request_id: Option<String>,
+) -> ModelResult<Vec<ModelStreamEvent>> {
+    let value: Value = serde_json::from_str(&event.data)
+        .map_err(|error| provider_protocol_error().with_error(&error))?;
     let payload_type = match value.get("type") {
         Some(Value::String(payload_type)) => Some(payload_type.as_str()),
         Some(_) => return Err(provider_protocol_error()),
@@ -86,7 +96,9 @@ fn decode_event(
         (Some(event_type), None) | (None, Some(event_type)) => event_type,
         (None, None) => return Err(provider_protocol_error()),
     };
-    let mut state = state.lock().map_err(|_| provider_protocol_error())?;
+    let mut state = state
+        .lock()
+        .map_err(|error| provider_protocol_error().with_message(error.to_string()))?;
     match event_type {
         "message_start" => {
             if state.message_started || state.completed {
@@ -154,6 +166,8 @@ fn decode_event(
             events.push(ModelStreamEvent::Completed(completed_response(&state)?));
             Ok(events)
         }
+        "error" => Err(provider_protocol_error()
+            .with_message(value.get("error").unwrap_or(&value).to_string())),
         "ping" if !state.completed => Ok(Vec::new()),
         _ => Err(provider_protocol_error()),
     }
@@ -323,10 +337,13 @@ fn finish_block(state: &mut StreamState, value: &Value) -> ModelResult<Vec<Model
             name,
             arguments,
         } => {
-            let arguments: Value =
-                serde_json::from_str(&arguments).map_err(|_| provider_protocol_error())?;
-            let arguments =
-                JsonObject::from_value(arguments).map_err(|_| provider_protocol_error())?;
+            let arguments: Value = serde_json::from_str(&arguments).map_err(|error| {
+                provider_protocol_error()
+                    .with_error(&error)
+                    .with_body(&arguments)
+            })?;
+            let arguments = JsonObject::from_value(arguments)
+                .map_err(|error| provider_protocol_error().with_error(&error))?;
             state.content.push(ContentBlock::ToolUse {
                 tool_call: ToolCall::new(id, name, arguments),
             });

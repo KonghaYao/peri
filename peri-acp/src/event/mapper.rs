@@ -288,3 +288,7 @@ fn stop_reason_wire(reason: &peri_model::StopReason) -> String {
 #[cfg(test)]
 #[path = "mapper_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "failure_wire_test.rs"]
+mod failure_wire_tests;
