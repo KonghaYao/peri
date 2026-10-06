@@ -451,6 +451,143 @@ async fn test_resolution_error_emits_tool_started_and_ended() {
     assert!(started, "resolution error must emit ToolStarted");
     assert!(ended, "resolution error must emit ToolEnded");
 }
+
+// ── 结算路径逐条日志（本文件专用内联最小捕获，不引入公共测试工具/依赖）──────
+//
+// `dispatch_tools` 由测试线程 await，`warn!` 就发生在该线程，线程局部
+// `set_default` 即可捕获；`with_max_level(INFO)` 复现生产默认过滤起点
+// （`telemetry/subscriber.rs` 的 `EnvFilter::new("info,...")`），从而证明
+// 这些记录在默认可见级别下出现。
+//
+// 静态可达性：`resolution_errors` 当前为 test-only 分支（生产路径上畸形 ID 与
+// resolver 失败都被 Reason 阶段的 `work_reason::commit_response` 提前拦截），
+// 因此这两条用例是该记录点唯一可执行的行为锁。
+
+#[derive(Clone, Default)]
+struct LogCapture(Arc<parking_lot::Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogCapture {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl LogCapture {
+    fn text(&self) -> String {
+        String::from_utf8_lossy(self.0.lock().as_slice()).into_owned()
+    }
+
+    /// 只取结算路径的逐条记录行，避免其它 `warn!` 干扰计数。
+    fn resolution_log_lines(&self) -> Vec<String> {
+        self.text()
+            .lines()
+            .filter(|line| line.contains("tool call resolution failed"))
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn subscriber(&self) -> impl tracing::Subscriber + Send + Sync {
+        let sink = self.clone();
+        tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(move || sink.clone())
+            .finish()
+    }
+}
+
+#[tokio::test]
+async fn test_malformed_tool_ids_log_per_call_at_default_level() {
+    let capture = LogCapture::default();
+    let _subscriber = tracing::subscriber::set_default(capture.subscriber());
+
+    // 畸形 ID 在 resolver 之前结算，空工具表即可复现。
+    let ctx = make_test_ctx();
+    let reasoning = Reasoning::with_tools(
+        "",
+        vec![
+            ToolCall::new("dup", "Read", json!({})),
+            ToolCall::new("dup", "Bash", json!({})),
+            ToolCall::new("", "Read", json!({})),
+        ],
+    );
+    let catalog = ctx
+        .runtime
+        .tool_catalog
+        .pin_working_tools(&ctx.runtime.tools.read())
+        .unwrap();
+    let outcome = dispatch_tools(&ctx, &reasoning, &catalog, &CancellationToken::new())
+        .await
+        .expect("malformed calls should settle as tool errors");
+    assert_eq!(outcome.results.len(), 3);
+
+    let lines = capture.resolution_log_lines();
+    assert_eq!(lines.len(), 3, "每条结算错误都必须有独立记录: {lines:?}");
+    assert_eq!(
+        lines.iter().filter(|line| line.contains("dup")).count(),
+        2,
+        "重复 ID 的两条调用各自记录，而不是合并: {lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("dup") && line.contains("tool=Read")),
+        "{lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("dup") && line.contains("tool=Bash")),
+        "{lines:?}"
+    );
+    let empty_id_line = lines
+        .iter()
+        .find(|line| line.contains("tool=Read") && !line.contains("dup"))
+        .unwrap_or_else(|| panic!("空 ID 缺少逐条记录: {lines:?}"));
+    assert!(empty_id_line.contains("tool_call_id="), "{empty_id_line}");
+    assert!(
+        empty_id_line.contains("reason=malformed tool call id"),
+        "{empty_id_line}"
+    );
+}
+
+#[tokio::test]
+async fn test_resolver_failure_logs_per_call_at_default_level() {
+    let capture = LogCapture::default();
+    let _subscriber = tracing::subscriber::set_default(capture.subscriber());
+
+    // BestEffortFixture：`ensure()` 返回 Ok(None)，进入 resolver 兜底分支。
+    let ctx = make_test_ctx();
+    let reasoning = Reasoning::with_tools(
+        "",
+        vec![ToolCall::new("missing-1", "NotARealTool", json!({}))],
+    );
+    let catalog = ctx
+        .runtime
+        .tool_catalog
+        .pin_working_tools(&ctx.runtime.tools.read())
+        .unwrap();
+    dispatch_tools(&ctx, &reasoning, &catalog, &CancellationToken::new())
+        .await
+        .expect("unknown tool should settle as error");
+
+    let lines = capture.resolution_log_lines();
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    let line = &lines[0];
+    assert!(line.contains("tool_call_id=missing-1"), "{line}");
+    assert!(line.contains("tool=NotARealTool"), "{line}");
+    assert!(
+        line.contains("reason=Tool not found: NotARealTool"),
+        "{line}"
+    );
+}
+
 /// Both properties are real API fields: approval must describe the same input
 /// that the target receives, including any approved change to `path`.
 async fn assert_dual_path_schema_survives_dispatch(approved_path: Option<&str>, wrapped: bool) {

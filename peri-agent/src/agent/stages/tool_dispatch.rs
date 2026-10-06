@@ -157,6 +157,31 @@ pub async fn dispatch_tools(
         }
     }
     for (call, result) in &resolution_errors {
+        // 结算路径的逐条记录点：解析失败的工具不进入 policy/invoke，执行路径的
+        // `tool call failed`（tool_dispatch/execution.rs）覆盖不到它们，只能在
+        // 这里补齐，否则错误只以事件（ToolEnded{is_error:true}）离开进程。
+        //
+        // 静态可达性（2026-10-06 核实，见
+        // spec/issues/2026-10-06-error-path-logging-gaps-p1.md P1-8）：本分支当前为
+        // test-only。`resolution_errors` 的两条来源在生产路径上均被上游拦截——
+        // 畸形/重复 ID 与 resolver 失败已由 Reason 阶段的
+        // `work_reason::commit_response` 校验并返回 Err（`reason.rs` 以 `?` 传播，
+        // dispatch 不会执行）；且 resolver 兜底分支要求 `ensure()` 返回 `Ok(None)`，
+        // 而生产装配下 `ctx.work` 恒为 `Durable`（`work_boundary.rs` 的
+        // `#[cfg(not(test))] let WorkRuntime::Durable(session) = runtime`），
+        // 仅 `BestEffortFixture` 测试装配会走到。
+        //
+        // 保留该日志的意图：非 durable 装配、或上游校验放宽/调整时，这里是唯一的
+        // 逐条错误记录。请勿因“当前不可达”而按死代码删除。
+        //
+        // 脱敏：只记录 id、工具名与解析失败原因，与 `v2_execute.rs` 的 wire 投影同
+        // 一约束——不得写入 provider body、凭据或完整 cause chain。
+        tracing::warn!(
+            tool_call_id = %call.id,
+            tool = %call.name,
+            reason = %result.output,
+            "tool call resolution failed"
+        );
         if should_emit_settled_tool_render(call) {
             emit_settled_tool_render(ctx, call, result);
         }
