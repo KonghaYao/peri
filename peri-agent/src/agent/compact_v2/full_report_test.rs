@@ -298,7 +298,7 @@ async fn test_full_report_request_preserves_structured_tool_history() {
 async fn test_full_report_invalid_summary_preserves_original_history() {
     for (summary, stop) in [
         ("<analysis>thinking only</analysis>", StopReason::EndTurn),
-        ("<summary>partial", StopReason::MaxTokens),
+        ("<analysis>thinking only</analysis>", StopReason::MaxTokens),
     ] {
         let bound = TestSession::open().await;
         let mut transcript =

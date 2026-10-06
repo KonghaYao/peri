@@ -58,8 +58,10 @@ async fn full_continuation_preserves_chunks_and_commits_complete_summary() {
     // 同时覆盖正文 Unicode 与跨响应拆开的控制标签，不能插入分隔符破坏原文。
     let model = SummaryModel::new([
         response("<sum", StopReason::MaxTokens),
-        response("mary>保留决策，", StopReason::MaxTokens),
-        response("继续未完成工作。</summary>", StopReason::EndTurn),
+        response(
+            "mary>保留决策，继续未完成工作。</summary>",
+            StopReason::EndTurn,
+        ),
     ]);
     let result = full_compact_inner(
         &mut transcript,
@@ -76,7 +78,7 @@ async fn full_continuation_preserves_chunks_and_commits_complete_summary() {
     assert!(transcript.flags(original).excluded);
     {
         let requests = model.requests.lock().unwrap();
-        assert_eq!(requests.len(), 3);
+        assert_eq!(requests.len(), 2);
         for request in requests.iter() {
             assert_eq!(request.max_tokens, Some(16_000));
             assert!(request.tools.is_empty());
@@ -92,10 +94,11 @@ async fn full_continuation_preserves_chunks_and_commits_complete_summary() {
             requests[1].messages[requests[0].messages.len()],
             ModelMessage::assistant_text("<sum")
         );
-        assert_eq!(
-            requests[2].messages[requests[1].messages.len()],
-            ModelMessage::assistant_text("mary>保留决策，")
-        );
+        assert_eq!(requests[1].messages.len(), requests[0].messages.len() + 2);
+        assert_eq!(requests[1].max_tokens, requests[0].max_tokens);
+        let continuation_prompt = requests[1].messages.last().unwrap().text_content().unwrap();
+        assert!(continuation_prompt.contains("cut off by the output token limit"));
+        assert!(continuation_prompt.contains("There will be no further continuation"));
     }
     let stored = bound
         .resources
@@ -115,9 +118,48 @@ async fn full_continuation_preserves_chunks_and_commits_complete_summary() {
         .contains("保留决策，继续未完成工作。"));
 }
 
-/// [回归测试] 续写预算耗尽仍须保留原始持久化历史，不能提交半截摘要。
 #[tokio::test]
-async fn full_continuation_exhaustion_preserves_history() {
+async fn full_continuation_accepts_closed_summary_at_output_limit() {
+    for responses in [
+        vec![response(
+            "<summary>保留工作状态。</summary>",
+            StopReason::MaxTokens,
+        )],
+        vec![
+            response("<summary>保留", StopReason::MaxTokens),
+            response("工作状态。</summary>", StopReason::MaxTokens),
+        ],
+    ] {
+        let bound = TestSession::open().await;
+        let mut transcript =
+            MessageTranscript::new().with_persistence(bound.resources(), bound.thread_id.clone());
+        let original = transcript.append(BaseMessage::human("ORIGINAL_TASK"));
+        transcript.flush_persistence().await.unwrap();
+        let expected_requests = responses.len();
+        let model = SummaryModel::new(responses);
+        let result = full_compact_inner(
+            &mut transcript,
+            Some(&model),
+            &CompactConfig::default(),
+            "/tmp",
+        )
+        .await
+        .unwrap();
+        assert!(result.summary.unwrap().ends_with("保留工作状态。"));
+        assert_eq!(model.requests.lock().unwrap().len(), expected_requests);
+        assert!(transcript.flags(original).excluded);
+        let stored = bound
+            .resources
+            .load_session_snapshot(&bound.thread_id)
+            .await
+            .unwrap();
+        assert_eq!(stored.payloads.len(), 2);
+        assert!(stored.flags[&original].excluded);
+    }
+}
+
+#[tokio::test]
+async fn full_continuation_keeps_two_chunks_and_never_requests_third() {
     let bound = TestSession::open().await;
     let mut transcript =
         MessageTranscript::new().with_persistence(bound.resources(), bound.thread_id.clone());
@@ -128,30 +170,33 @@ async fn full_continuation_exhaustion_preserves_history() {
         response(" second", StopReason::MaxTokens),
         response(" third", StopReason::MaxTokens),
     ]);
-    let error = full_compact_inner(
+    let result = full_compact_inner(
         &mut transcript,
         Some(&model),
         &CompactConfig::default(),
         "/tmp",
     )
     .await
-    .unwrap_err();
-    assert!(matches!(
-        error,
-        AgentError::CompactIncompleteResponse {
-            stop_reason: StopReason::MaxTokens
-        }
-    ));
-    assert_eq!(model.requests.lock().unwrap().len(), 3);
-    assert!(!transcript.flags(original).excluded);
-    assert!(!transcript.full_compaction_committed());
+    .unwrap();
+    let summary = result.summary.unwrap();
+    assert!(summary.contains("first second"));
+    assert!(summary.contains("remaining tail was omitted"));
+    assert!(!summary.contains("third"));
+    assert_eq!(model.requests.lock().unwrap().len(), 2);
+    assert_eq!(model.responses.lock().unwrap().len(), 1);
+    assert!(transcript.flags(original).excluded);
+    assert!(transcript.full_compaction_committed());
     let stored = bound
         .resources
         .load_session_snapshot(&bound.thread_id)
         .await
         .unwrap();
-    assert_eq!(stored.payloads.len(), 1);
-    assert!(stored.flags.is_empty());
+    assert_eq!(stored.payloads.len(), 2);
+    assert!(stored.flags[&original].excluded);
+    assert_eq!(
+        stored.payloads[0].as_message().unwrap().content(),
+        "ORIGINAL_TASK"
+    );
 }
 
 /// [回归测试] 只产生隐藏思考的截断没有可续接正文，不能重放空 assistant 或重新付费生成。

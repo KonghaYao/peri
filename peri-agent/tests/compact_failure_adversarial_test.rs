@@ -346,12 +346,6 @@ async fn assert_unusable_summary_blocks_reason(failure: Failure) {
             assert!(matches!(error, AgentError::ModelError(_)));
             assert_eq!(public.diagnostic.unwrap().retry_attempts(), Some(3));
         }
-        Failure::MaxTokens => assert!(matches!(
-            error,
-            AgentError::CompactIncompleteResponse {
-                stop_reason: StopReason::MaxTokens
-            }
-        )),
         Failure::ToolUse => assert!(matches!(
             error,
             AgentError::CompactIncompleteResponse {
@@ -362,16 +356,16 @@ async fn assert_unusable_summary_blocks_reason(failure: Failure) {
             error,
             AgentError::CompactRetriesExhausted { attempts: 3, .. }
         )),
-        Failure::Success => unreachable!(),
+        Failure::MaxTokens | Failure::Success => unreachable!(),
     }
     assert_eq!(
         summary.calls.load(Ordering::SeqCst),
-        if matches!(failure, Failure::AnalysisOnly | Failure::MaxTokens) {
+        if matches!(failure, Failure::AnalysisOnly) {
             3
         } else {
             1
         },
-        "空摘要重试和 MaxTokens 续写有界；Provider 失败不能在 Compact 层重启"
+        "空摘要重试有界；Provider 失败不能在 Compact 层重启"
     );
 }
 
@@ -393,24 +387,35 @@ async fn test_provider_retry_exhaustion_blocks_reason() {
     assert_unusable_summary_blocks_reason(Failure::ProviderRetryExhausted).await;
 }
 
-/// [回归测试] MaxTokens 输出不是完整摘要，失败后不得拿原高压历史继续请求。
 #[tokio::test]
-async fn test_max_tokens_summary_blocks_reason() {
-    assert_unusable_summary_blocks_reason(Failure::MaxTokens).await;
+async fn test_max_tokens_summary_uses_two_chunks_without_third_call() {
+    let (_bound, ctx, reason, summary, _) =
+        make_case(Failure::MaxTokens, usize::MAX, false, None).await;
+    let result = run_react_loop(ctx, 4).await;
+    assert!(matches!(result, LoopResult::Completed), "{result:?}");
+    assert_eq!(summary.calls.load(Ordering::SeqCst), 2);
+    let requests = reason.requests.lock();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0]
+        .iter()
+        .any(|message| message.content().contains("incomplete task still pending")));
+    assert!(requests[0]
+        .iter()
+        .any(|message| message.content().contains("remaining tail was omitted")));
 }
 
 /// [回归测试] 最后一次续写成功后，下一次 Reason 必须看到所有摘要片段而不是原历史。
 #[tokio::test]
 async fn test_max_tokens_summary_continuation_resumes_reason_with_complete_summary() {
-    let (_bound, ctx, reason, summary, _) = make_case(Failure::MaxTokens, 2, false, None).await;
+    let (_bound, ctx, reason, summary, _) = make_case(Failure::MaxTokens, 1, false, None).await;
     let result = run_react_loop(ctx, 4).await;
     assert!(matches!(result, LoopResult::Completed), "{result:?}");
-    assert_eq!(summary.calls.load(Ordering::SeqCst), 3);
+    assert_eq!(summary.calls.load(Ordering::SeqCst), 2);
     let requests = reason.requests.lock();
     assert_eq!(requests.len(), 1);
-    assert!(requests[0].iter().any(|message| message
-        .content()
-        .contains("incomplete task still pending RECOVERED task")));
+    assert!(requests[0]
+        .iter()
+        .any(|message| message.content().contains("incomplete task RECOVERED task")));
     assert!(!requests[0]
         .iter()
         .any(|message| message.content() == "original task"));

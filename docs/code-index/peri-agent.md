@@ -87,6 +87,8 @@ Inbox 去重入口 `agent/stages/work_receive.rs` 使用 `SessionResources::load
 
 ### Compact v2（src/agent/compact_v2/）
 
+Full 摘要不改变模型思考配置和单次输出上限。首轮正文截断时，第二轮保留原请求前缀并追加首轮正文及超限续写提示；两轮正文直接拼接，最多补偿一次，不发第三轮。纯函数 `full::summary::assemble_summary(first, second)` 是拼接、完成判定与正文提取的单一权威；第二轮仍 MaxTokens 时保留可用正文并标明尾部省略，原始 transcript 仍保留供回查。无可用正文、取消或 provider 失败不提交摘要。
+
 | 功能 | 文件 | 入口/关键点 |
 | --- | --- | --- |
 | 策略选择 + 触发编排 | compact_v2/mod.rs | `determine_compact_action`（:102）；`run_compact`（:125）；`CompactResult` |
@@ -94,6 +96,7 @@ Inbox 去重入口 `agent/stages/work_receive.rs` 使用 `SessionResources::load
 | Micro 执行（按 round 截断） | compact_v2/micro.rs | `micro_compact` |
 | Smart 执行（废弃中，恒 false） | compact_v2/smart.rs | `smart_compact` |
 | Full 执行 | compact_v2/full.rs | `full_compact_inner` 从可见历史（含工具结果）生成结构化摘要，排除 own reminder 等旧历史，仅追加摘要；不从计算实例本机回读 Read/Skill 路径；回归 `full_report_test.rs` / `full_test.rs` / `full_continuation_test.rs`（摘要截断续写、失败保全及远端内容来源） |
+| 摘要纯合成 | compact_v2/summary.rs | `assemble_summary` 只接收首轮响应及可选第二轮响应，不调用模型、不写 transcript、不修改输入；纯函数回归 `summary_test.rs` |
 | 配置 re-export | compact_v2/config.rs | `CompactConfig`（事实源 peri-acp-types）、`CONTINUATION_HINT` |
 | 摘要 prompt 模板 | compact_v2/descriptions/ | summary_system_prompt.md / summary_user_prompt.md |
 
