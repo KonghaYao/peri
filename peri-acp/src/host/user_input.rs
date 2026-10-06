@@ -1,4 +1,4 @@
-//! User input control and session event wiring. Scheduling decisions remain in Agent.
+//! User input events report durable Work facts; SDK owns admission and scheduling.
 
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -22,7 +22,7 @@ pub(crate) struct UserInputRun {
 }
 
 impl UserInputRun {
-    fn new(ticket: UserInputRunTicket) -> Self {
+    pub(super) fn new(ticket: UserInputRunTicket) -> Self {
         Self {
             ticket,
             terminal_delivered: Arc::new(AtomicBool::new(false)),
@@ -77,14 +77,33 @@ pub(super) async fn publish_run_started(
     cfg: &AcpServerConfig,
     transport: &Arc<dyn AcpTransport>,
 ) -> Result<(), AcpError> {
+    publish_run_started_owned(
+        session_id,
+        mailbox,
+        ticket,
+        &cfg.controller,
+        cfg.session_manager.caps_registry(),
+        transport,
+    )
+    .await
+}
+
+async fn publish_run_started_owned(
+    session_id: &str,
+    mailbox: &UserInputMailbox,
+    ticket: &UserInputRunTicket,
+    controller: &Arc<peri_controller::Controller>,
+    caps: Arc<dashmap::DashMap<String, peri_acp_types::PeriCaps>>,
+    transport: &Arc<dyn AcpTransport>,
+) -> Result<(), AcpError> {
     let event = mailbox
         .run_started_event(ticket)
         .ok_or_else(|| AcpError::new(-32800, "user input attempt superseded"))?;
-    let mut subscriber = cfg.controller.subscribe();
+    let mut subscriber = controller.subscribe();
     let (bus, handles) = EventBus::new(EventBusConfig::default());
     bus.emit_state(event);
     drop(bus);
-    let controller = Arc::clone(&cfg.controller);
+    let controller = Arc::clone(controller);
     let sid = session_id.to_string();
     crate::event::forward_eventbus(
         handles,
@@ -104,12 +123,9 @@ pub(super) async fn publish_run_started(
                 }) = message.event
                 {
                     if request_id == ticket.id {
-                        return TransportEventSink::new(
-                            Arc::clone(transport),
-                            cfg.session_manager.caps_registry(),
-                        )
-                        .push_user_input_started(session_id, generation, request_id)
-                        .await;
+                        return TransportEventSink::new(Arc::clone(transport), caps)
+                            .push_user_input_started(session_id, generation, request_id)
+                            .await;
                     }
                 }
             }
@@ -119,7 +135,48 @@ pub(super) async fn publish_run_started(
     }
 }
 
-pub(super) fn ensure_mailbox(
+pub(super) fn sdk_run_started_publisher(
+    session_id: String,
+    mailbox: Arc<UserInputMailbox>,
+    cfg: &AcpServerConfig,
+    transport: Arc<dyn AcpTransport>,
+    already_published: Option<String>,
+) -> peri_agent::agent::stages::SdkRunStartedFn {
+    let controller = Arc::clone(&cfg.controller);
+    let caps = cfg.session_manager.caps_registry();
+    Arc::new(move |admission| {
+        let mailbox = Arc::clone(&mailbox);
+        let controller = Arc::clone(&controller);
+        let caps = Arc::clone(&caps);
+        let transport = Arc::clone(&transport);
+        let session_id = session_id.clone();
+        let already_published = already_published.clone();
+        Box::pin(async move {
+            if admission.session_id != session_id {
+                return Err("SDK RunStarted recipient conflict".to_owned());
+            }
+            let ticket = mailbox
+                .observe_sdk_run(&admission)
+                .await
+                .map_err(|error| error.to_string())?;
+            if already_published.as_ref() == Some(&ticket.id) {
+                return Ok(());
+            }
+            publish_run_started_owned(
+                &session_id,
+                &mailbox,
+                &ticket,
+                &controller,
+                caps,
+                &transport,
+            )
+            .await
+            .map_err(|error| error.to_string())
+        })
+    })
+}
+
+pub(super) async fn ensure_mailbox(
     session_id: &str,
     cfg: &AcpServerConfig,
     transport: &Arc<dyn AcpTransport>,
@@ -127,6 +184,14 @@ pub(super) fn ensure_mailbox(
     if let Some(mailbox) = cfg.session_manager.user_input_mailbox_for(session_id) {
         return Ok(mailbox);
     }
+    let work = cfg
+        .session_resources
+        .load_session_work(&peri_acp_types::session_resources::work::WorkQuery {
+            session_id: session_id.to_owned(),
+            limit: 1,
+        })
+        .await
+        .map_err(|_| AcpError::new(-32603, "durable user input store unavailable"))?;
     let inbox = cfg
         .session_manager
         .session_inbox_for(session_id)
@@ -139,10 +204,12 @@ pub(super) fn ensure_mailbox(
         return Ok(Arc::clone(mailbox));
     }
     let (bus, handles) = EventBus::new(EventBusConfig::default());
-    let mailbox = UserInputMailbox::new(
+    let mailbox = UserInputMailbox::new_durable(
         session_id.to_string(),
         inbox,
         Arc::new(move |event| bus.emit_state(event)),
+        Arc::clone(&cfg.session_resources),
+        work.control.lifecycle,
     );
     let controller = Arc::downgrade(&cfg.controller);
     let sid = session_id.to_string();
@@ -205,70 +272,44 @@ pub(super) fn ensure_mailbox(
 
 pub(super) fn schedule_mailbox(
     session_id: &str,
-    sessions: &SharedSessions,
-    prompt_locks: &PromptLocks,
+    _sessions: &SharedSessions,
+    _prompt_locks: &PromptLocks,
     cfg: &Arc<AcpServerConfig>,
     transport: &Arc<dyn AcpTransport>,
-    cont_tx: &Arc<
+    _cont_tx: &Arc<
         tokio::sync::mpsc::UnboundedSender<crate::session::executor::ContinuationRequest>,
     >,
 ) {
-    let Some(mailbox) = cfg.session_manager.user_input_mailbox_for(session_id) else {
-        return;
-    };
-    let Some(ticket) = mailbox.reserve_run() else {
-        return;
-    };
-    let failed_mailbox = Arc::clone(&mailbox);
-    let failed_ticket = ticket.clone();
     let sid = session_id.to_string();
-    let sessions = Arc::clone(sessions);
-    let prompt_locks = Arc::clone(prompt_locks);
     let transport = Arc::clone(transport);
-    let cont_tx = Arc::clone(cont_tx);
     let cfg = Arc::clone(cfg);
     let spawner = cfg.host_task_spawner.clone();
-    let result = spawner.spawn(
+    let _ = spawner.spawn(
         task_scope::HostTaskOwnerKind::Session,
         task_scope::HostTaskKind::ContinuationTurn,
         async move {
-            let mut next_ticket = Some(ticket);
-            while let Some(ticket) = next_ticket {
-                // 覆盖等待 prompt lock 期间的任务丢弃；进入 Agent 后由本轮 guard 结算。
-                let _reserved_guard = InputAttemptGuard::new(Arc::clone(&mailbox), ticket.clone());
-                let run = UserInputRun::new(ticket.clone());
-                let params = serde_json::json!({
-                    "sessionId": sid,
-                    "requestId": ticket.id,
-                    "message": { "role": "user", "content": [] },
-                });
-                let result = super::prompt_dispatch::dispatch_prompt_turn_with_input(
-                    params,
-                    true,
-                    None,
-                    &sessions,
-                    &prompt_locks,
-                    &transport,
-                    &cfg,
-                    &cont_tx,
-                    Some(run.clone()),
-                )
-                .await;
-                if let Err(error) = result {
-                    mailbox.fail_reserved(&ticket);
-                    if !run.terminal_delivered.load(Ordering::Acquire) {
-                        TransportEventSink::new(Arc::clone(&transport), cfg.session_manager.caps_registry())
-                            .push_done(&sid, "error", Some(&ticket.id)).await;
-                    }
-                    tracing::warn!(session_id = %sid, code = error.code, "user input execution failed");
+            let query = peri_acp_types::session_resources::work::WorkQuery {
+                session_id: sid.clone(),
+                limit: 1,
+            };
+            if let Ok(work) = cfg.session_resources.load_session_work(&query).await {
+                if work.has_pending_current_work() {
+                    let _ = transport
+                        .send_notification(
+                            "session/work/available",
+                            serde_json::json!({
+                                "sessionId": sid,
+                                "revision": work.state.revision,
+                                "lifecycle": work.control.lifecycle,
+                                "controlGeneration": work.control.control_generation,
+                                "executionProtocol": 1,
+                            }),
+                        )
+                        .await;
                 }
-                next_ticket = mailbox.reserve_run();
             }
         },
     );
-    if result.is_err() {
-        failed_mailbox.fail_reserved(&failed_ticket);
-    }
 }
 
 pub(super) fn starts_execution(method: &str) -> bool {

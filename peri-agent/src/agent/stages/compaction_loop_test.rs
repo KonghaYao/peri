@@ -2,7 +2,7 @@
 use super::super::*;
 use crate::session::queue::MessageSource;
 use crate::session::store::FrozenContext;
-use crate::session::test_resources::mock::MockSessionResources;
+use crate::session::test_resources::TestSession;
 use crate::session::Session;
 
 /// 构造测试用 StageContext
@@ -13,7 +13,7 @@ fn make_stage_context() -> StageContext {
         .build();
     let session = Session::new(cwd, frozen, None);
     let turn = session.start_turn();
-    StageContext::new(turn, session.transcript(), session.queue().clone())
+    StageContext::new_best_effort_fixture(turn, session.transcript(), session.queue().clone())
 }
 
 struct UsageChurnReactLLM {
@@ -210,21 +210,14 @@ impl crate::tools::BaseTool for SuccessfulFullReadTool {
 #[tokio::test]
 async fn test_run_react_loop_successful_full_replaces_history_without_file_re_read_and_resets_usage(
 ) {
-    use crate::thread::ThreadMeta;
-
     let dir = tempfile::tempdir().unwrap();
     let file_path = dir.path().join("full-read-marker.txt");
     let file_marker = "successful full historical file marker";
     std::fs::write(&file_path, file_marker).unwrap();
 
-    let store = MockSessionResources::new();
-    let thread_id = store
-        .create_thread(ThreadMeta::new_at(
-            dir.path().to_string_lossy(),
-            peri_time::now_wall(),
-        ))
-        .await
-        .unwrap();
+    let bound = TestSession::open().await;
+    let store = bound.resources();
+    let thread_id = bound.thread_id();
     let store_dyn: Arc<dyn peri_acp_types::session_resources::SessionResources> = store.clone();
     let session = Session::new(
         Arc::from(dir.path().to_string_lossy().as_ref()),
@@ -257,20 +250,24 @@ async fn test_run_react_loop_successful_full_replaces_history_without_file_re_re
     let mut budget = crate::agent::token::ContextBudget::new(100_000);
     budget.output_reserve = 40_000;
     let turn = session.start_turn();
-    let context = StageContext::builder(turn, session.transcript(), session.queue().clone())
-        .with_llm(Arc::new(SuccessfulFullReactLLM {
-            calls: Arc::clone(&reason_calls),
-            requests: Arc::clone(&reason_requests),
-            file_path: file_path.to_string_lossy().into_owned(),
-        }))
-        .with_tools(tools)
-        .with_event_bus(Arc::new(bus))
-        .with_context_budget(budget)
-        .with_compact_config(config)
-        .with_compact_llm(Arc::new(CountingCompactModel {
-            calls: Arc::clone(&compact_calls),
-        }))
-        .build();
+    let context = StageContext::best_effort_fixture_builder(
+        turn,
+        session.transcript(),
+        session.queue().clone(),
+    )
+    .with_llm(Arc::new(SuccessfulFullReactLLM {
+        calls: Arc::clone(&reason_calls),
+        requests: Arc::clone(&reason_requests),
+        file_path: file_path.to_string_lossy().into_owned(),
+    }))
+    .with_tools(tools)
+    .with_event_bus(Arc::new(bus))
+    .with_context_budget(budget)
+    .with_compact_config(config)
+    .with_compact_llm(Arc::new(CountingCompactModel {
+        calls: Arc::clone(&compact_calls),
+    }))
+    .build();
     let prompt_marker = "successful full original prompt marker";
     context.session.queue.push(QueuedMessage::prompt(
         MessageSource::UserInput,
@@ -333,8 +330,13 @@ async fn test_run_react_loop_successful_full_replaces_history_without_file_re_re
     crate::session::transcript::MessageTranscript::flush_via_tx(&persist_tx)
         .await
         .unwrap();
-    let persisted = store.load_messages(&thread_id).await.unwrap();
-    let flags = store.load_message_flags(&thread_id).await.unwrap();
+    let snapshot = store.load_session_snapshot(&thread_id).await.unwrap();
+    let persisted: Vec<_> = snapshot
+        .payloads
+        .iter()
+        .filter_map(|payload| payload.as_message())
+        .collect();
+    let flags = snapshot.flags;
     let summary_count = persisted
         .iter()
         .filter(|message| message.content().contains("compact generation 0"))
@@ -396,20 +398,24 @@ async fn test_run_react_loop_new_high_usage_generations_continue_full_micro_chur
     };
     let mut budget = crate::agent::token::ContextBudget::new(100_000);
     budget.output_reserve = 40_000;
-    let context = StageContext::builder(turn, session.transcript(), session.queue().clone())
-        .with_llm(Arc::new(UsageChurnReactLLM {
-            usages: vec![96_000, 80_000, 97_000, 81_000],
-            calls: Arc::clone(&reason_calls),
-            requests: Arc::clone(&reason_requests),
-        }))
-        .with_tools(tools)
-        .with_event_bus(Arc::new(bus))
-        .with_context_budget(budget)
-        .with_compact_config(config)
-        .with_compact_llm(Arc::new(CountingCompactModel {
-            calls: Arc::clone(&compact_calls),
-        }))
-        .build();
+    let context = StageContext::best_effort_fixture_builder(
+        turn,
+        session.transcript(),
+        session.queue().clone(),
+    )
+    .with_llm(Arc::new(UsageChurnReactLLM {
+        usages: vec![96_000, 80_000, 97_000, 81_000],
+        calls: Arc::clone(&reason_calls),
+        requests: Arc::clone(&reason_requests),
+    }))
+    .with_tools(tools)
+    .with_event_bus(Arc::new(bus))
+    .with_context_budget(budget)
+    .with_compact_config(config)
+    .with_compact_llm(Arc::new(CountingCompactModel {
+        calls: Arc::clone(&compact_calls),
+    }))
+    .build();
     context.session.queue.push(QueuedMessage::prompt(
         MessageSource::UserInput,
         BaseMessage::human("characterize usage churn"),
@@ -529,12 +535,9 @@ impl crate::tools::BaseTool for AuditAlternatingOutputTool {
 #[tokio::test]
 async fn test_run_react_loop_successful_full_does_not_recompact_excluded_history() {
     use crate::agent::compact_v2::{planner::plan_micro, projection, CompactOutcome};
-    use crate::thread::ThreadMeta;
-    let store = MockSessionResources::new();
-    let thread_id = store
-        .create_thread(ThreadMeta::new_at("/tmp", peri_time::now_wall()))
-        .await
-        .unwrap();
+    let bound = TestSession::open().await;
+    let store = bound.resources();
+    let thread_id = bound.thread_id();
     let session = Session::new(
         Arc::from("/tmp"),
         FrozenContext::builder().build(),
@@ -559,7 +562,7 @@ async fn test_run_react_loop_successful_full_does_not_recompact_excluded_history
     };
     let mut budget = crate::agent::token::ContextBudget::new(100_000);
     budget.output_reserve = 40_000;
-    let context = StageContext::builder(
+    let context = StageContext::best_effort_fixture_builder(
         session.start_turn(),
         session.transcript(),
         session.queue().clone(),
@@ -627,7 +630,7 @@ async fn test_run_react_loop_successful_full_does_not_recompact_excluded_history
     crate::session::transcript::MessageTranscript::flush_via_tx(&tx)
         .await
         .unwrap();
-    let flags = store.load_message_flags(&thread_id).await.unwrap();
+    let flags = store.load_session_snapshot(&thread_id).await.unwrap().flags;
     assert_eq!(
         flags
             .values()
@@ -721,7 +724,7 @@ async fn test_audit_micro_savings_must_change_previous_reason_view() {
         }
     }
     let (bus, mut handles) = crate::agent::events_v2::EventBus::new(Default::default());
-    let context = StageContext::builder(
+    let context = StageContext::best_effort_fixture_builder(
         session.start_turn(),
         session.transcript(),
         session.queue().clone(),

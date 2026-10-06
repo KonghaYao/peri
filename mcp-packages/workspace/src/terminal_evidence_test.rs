@@ -293,11 +293,13 @@ async fn test_production_dispatch_persists_promoted_timeout_lifecycle() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn test_production_dispatch_persists_outer_cancel_evidence() {
+async fn test_production_dispatch_persists_outer_cancel_uncertainty() {
     let fixture = tempfile::tempdir().unwrap();
+    let started = fixture.path().join("started");
+    let manager = Arc::new(peri_mcp_common::create_local_task_manager());
     let context = dispatch_context(
         fixture.path(),
-        BashTool::new(fixture.path().to_string_lossy()),
+        BashTool::new(fixture.path().to_string_lossy()).with_task_manager(manager.clone()),
     );
     let cancel = CancellationToken::new();
     let task_context = context.clone();
@@ -305,35 +307,98 @@ async fn test_production_dispatch_persists_outer_cancel_evidence() {
     let dispatch = tokio::spawn(async move {
         dispatch_bash(
             &task_context,
-            serde_json::json!({"command": "sleep 2"}),
+            serde_json::json!({"command": "printf '%s' $$ > started; sleep 2"}),
             task_cancel,
         )
         .await
     });
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !tokio::fs::read_to_string(&started)
+            .await
+            .is_ok_and(|process_id| process_id.trim().parse::<u32>().is_ok())
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("Bash must physically start before cancellation");
+    let mut shutdown = peri_acp_types::tasks::TaskManager::shutdown(manager.as_ref());
+    assert!(
+        futures::poll!(&mut shutdown).is_pending(),
+        "live Bash must retain its task owner"
+    );
     cancel.cancel();
     let error = match dispatch.await.unwrap() {
         Ok(_) => panic!("cancel must interrupt dispatch"),
         Err(error) => error,
     };
-    assert!(matches!(error, peri_agent::error::AgentError::Interrupted));
-    let transcript = context.session.transcript.read();
-    let message = transcript
-        .visible_messages()
-        .into_iter()
-        .find_map(|message| match message {
-            BaseMessage::Tool {
-                execution,
-                is_error,
-                ..
-            } => Some((execution, is_error)),
-            _ => None,
-        })
-        .expect("canonical cancelled tool message");
-    let (evidence, is_error) = message;
     assert_eq!(
-        evidence.as_ref().expect("cancel evidence").status,
-        ToolExecutionStatus::Cancelled
+        shutdown.await,
+        peri_acp_types::tasks::TaskShutdownReport::Complete
     );
-    assert!(is_error);
+    assert!(
+        error.to_string().contains("frozen for reconciliation"),
+        "unexpected cancellation result: {error:?}"
+    );
+    let (resources, session_id, _) = context
+        .session
+        .transcript
+        .read()
+        .idempotent_reminder_port()
+        .unwrap();
+    let snapshot = resources
+        .load_session_work(&peri_acp_types::session_resources::work::WorkQuery {
+            session_id,
+            limit: 1,
+        })
+        .await
+        .unwrap();
+    let invocation = snapshot
+        .state
+        .invocations
+        .values()
+        .find(|record| record.intent.tool_call_id == "bash-call")
+        .unwrap();
+    assert_eq!(
+        invocation.status,
+        peri_acp_types::session_resources::work::InvocationStatus::OutcomeUnknown
+    );
+    assert!(
+        invocation.outcome.is_none(),
+        "outer cancellation is not owner settlement proof"
+    );
+    let work = &snapshot.state.works[invocation.work_id.as_ref().unwrap()];
+    assert_eq!(
+        work.stage,
+        peri_acp_types::session_resources::work::WorkStage::Blocked
+    );
+    assert!(
+        !context
+            .session
+            .transcript
+            .read()
+            .visible_messages()
+            .iter()
+            .any(|message| matches!(message, BaseMessage::Tool { .. })),
+        "unknown outcome must not publish synthetic Cancelled tool results"
+    );
+    let process_id = tokio::fs::read_to_string(&started).await.unwrap();
+    assert!(process_id.trim().parse::<u32>().unwrap() > 0);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let status = tokio::process::Command::new("kill")
+                .args(["-0", process_id.trim()])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .await
+                .unwrap();
+            if !status.success() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("cancelled Bash process must actually stop");
 }

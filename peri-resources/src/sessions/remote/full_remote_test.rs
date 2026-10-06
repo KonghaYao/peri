@@ -206,11 +206,8 @@ async fn virtual_remote_cold_recovery_and_read_only_fallbacks() {
         )
         .await
         .unwrap();
-    for statement in crate::sessions::canonical::CREATE_V2_TABLES
-        .iter()
-        .chain(crate::sessions::canonical::CREATE_V2_INDEXES)
-    {
-        sqlx::query(*statement).execute(&pool).await.unwrap();
+    for statement in super::super::session_schema::initialization_plan() {
+        sqlx::query(statement.sql).execute(&pool).await.unwrap();
     }
     sqlx::query(schema::CREATE_STORE_META_SQL)
         .execute(&pool)
@@ -220,8 +217,8 @@ async fn virtual_remote_cold_recovery_and_read_only_fallbacks() {
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO peri_store_meta VALUES (0, 13, 'virtual-test', 'peri.session.store/v3', 'now')")
-        .execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO peri_store_meta VALUES (0, ?1, 'virtual-test', 'peri.session.store/v3', 'now')")
+        .bind(schema::REMOTE_SCHEMA_VERSION).execute(&pool).await.unwrap();
     let transport = Arc::new(SqliteTransport {
         pool: pool.clone(),
         writes: AtomicUsize::new(0),
@@ -341,11 +338,8 @@ async fn remote_only_cold_recovery_uses_saved_evidence_and_old_distinct_registra
         )
         .await
         .unwrap();
-    for statement in crate::sessions::canonical::CREATE_V2_TABLES
-        .iter()
-        .chain(crate::sessions::canonical::CREATE_V2_INDEXES)
-    {
-        sqlx::query(*statement).execute(&pool).await.unwrap();
+    for statement in super::super::session_schema::initialization_plan() {
+        sqlx::query(statement.sql).execute(&pool).await.unwrap();
     }
     sqlx::query(schema::CREATE_STORE_META_SQL)
         .execute(&pool)
@@ -355,8 +349,8 @@ async fn remote_only_cold_recovery_uses_saved_evidence_and_old_distinct_registra
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO peri_store_meta VALUES (0, 13, 'remote-only-test', 'peri.session.store/v3', 'now')")
-        .execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO peri_store_meta VALUES (0, ?1, 'remote-only-test', 'peri.session.store/v3', 'now')")
+        .bind(schema::REMOTE_SCHEMA_VERSION).execute(&pool).await.unwrap();
     let transport = Arc::new(SqliteTransport {
         pool: pool.clone(),
         writes: AtomicUsize::new(0),

@@ -1,0 +1,487 @@
+use super::*;
+use crate::session_resources::ControlStatus;
+
+pub struct WorkReduction {
+    pub state: WorkState,
+    pub receipt: WorkReceipt,
+    pub projections: Vec<WorkPayload>,
+    pub events: Vec<WorkEvent>,
+    pub control: Option<ControlState>,
+}
+
+pub fn reduce_work(
+    command: &WorkCommand,
+    control: &ControlState,
+    current: &WorkState,
+) -> SessionResourceResult<WorkReduction> {
+    command.digest()?;
+    if let Ok(Some(receipt)) = super::admission::prior_receipt(command, current) {
+        return Ok(WorkReduction {
+            state: current.clone(),
+            receipt,
+            projections: Vec::new(),
+            events: Vec::new(),
+            control: None,
+        });
+    }
+    let mut state = current.clone();
+    let mut receipt = WorkReceipt {
+        session_id: command.session_id.clone(),
+        mutation_id: command.mutation_id.clone(),
+        before_revision: current.revision,
+        revision: current.revision,
+        decision: WorkDecision::Accepted,
+        delivery_id: None,
+        admission_sequence: None,
+        batch_id: None,
+        work_id: None,
+        work_revision: None,
+        stage: None,
+    };
+    let mut projections = Vec::new();
+    let mut events = Vec::new();
+    let mut next_control = None;
+    let result = super::admission::prior_receipt(command, current).and_then(|_| {
+        apply(
+            command,
+            control,
+            &mut state,
+            &mut receipt,
+            &mut projections,
+            &mut events,
+            &mut next_control,
+        )
+    });
+    let result = result.and_then(|()| {
+        state.revision = state
+            .revision
+            .checked_add(1)
+            .ok_or(WorkRejection::VersionExhausted)?;
+        Ok(())
+    });
+    match result {
+        Ok(()) => {
+            receipt.revision = state.revision;
+            match &command.action {
+                WorkAction::RegisterAdmission { admission } => {
+                    state
+                        .admissions
+                        .get_mut(&admission.admission_id)
+                        .ok_or_else(|| invalid("missing admission record"))?
+                        .entering_receipt = Some(receipt.clone())
+                }
+                WorkAction::FinishAdmission { admission, .. } => {
+                    state
+                        .admissions
+                        .get_mut(&admission.admission_id)
+                        .ok_or_else(|| invalid("missing admission record"))?
+                        .settled_receipt = Some(receipt.clone())
+                }
+                _ => {}
+            }
+        }
+        Err(reason) => {
+            state = current.clone();
+            projections.clear();
+            events.clear();
+            next_control = None;
+            receipt.decision = WorkDecision::Rejected { reason };
+            receipt.delivery_id = None;
+            receipt.admission_sequence = None;
+            receipt.batch_id = None;
+            receipt.work_id = None;
+            receipt.work_revision = None;
+            receipt.stage = None;
+        }
+    }
+    Ok(WorkReduction {
+        state,
+        receipt,
+        projections,
+        events,
+        control: next_control,
+    })
+}
+
+fn apply(
+    command: &WorkCommand,
+    control: &ControlState,
+    state: &mut WorkState,
+    receipt: &mut WorkReceipt,
+    projections: &mut Vec<WorkPayload>,
+    events: &mut Vec<WorkEvent>,
+    next_control: &mut Option<ControlState>,
+) -> Result<(), WorkRejection> {
+    match &command.action {
+        WorkAction::BindTerminalObligation {
+            expected_revision,
+            admission_id,
+            command: parent_command,
+        } => {
+            revision_guard(state, *expected_revision)?;
+            return super::admission::bind_terminal(
+                command,
+                control,
+                state,
+                admission_id,
+                parent_command,
+            );
+        }
+        WorkAction::AcknowledgeTerminalObligation {
+            expected_revision,
+            admission_id,
+            receipt: parent_receipt,
+        } => {
+            revision_guard(state, *expected_revision)?;
+            return super::admission::acknowledge_terminal(
+                command,
+                state,
+                admission_id,
+                parent_receipt,
+            );
+        }
+        _ => {}
+    }
+    if let WorkAction::FinishAdmission {
+        admission,
+        evidence_id,
+    } = &command.action
+    {
+        return super::admission::finish(command, control, state, admission, evidence_id, receipt);
+    }
+    if let WorkAction::PublishDelivery { delivery } = &command.action {
+        return super::delivery::publish(command, control, state, delivery, receipt, events);
+    }
+    if let WorkAction::PublishTaskSettlement { delivery, binding } = &command.action {
+        if binding.initiator_session_id != command.session_id
+            || binding.recipient_lifecycle != command.recipient_lifecycle
+            || state.task_bindings.get(&binding.invocation_id) != Some(binding)
+            || !matches!(
+                delivery.purpose,
+                DeliveryPurpose::TaskTerminal | DeliveryPurpose::Settlement
+            )
+        {
+            return Err(WorkRejection::Conflict);
+        }
+        return super::delivery::publish(command, control, state, delivery, receipt, events);
+    }
+    if let WorkAction::ReconcileTaskBinding {
+        expected_revision,
+        binding,
+    } = &command.action
+    {
+        revision_guard(state, *expected_revision)?;
+        return super::bindings::reconcile(command, state, binding);
+    }
+    if command.recipient_lifecycle != control.lifecycle {
+        return Err(WorkRejection::StaleLifecycle);
+    }
+    let target = match &command.action {
+        WorkAction::BeginReason { target, .. }
+        | WorkAction::CommitReasonResponseAndDispatchIntent { target, .. }
+        | WorkAction::BeginDispatch { target, .. }
+        | WorkAction::CommitAct { target, .. }
+        | WorkAction::ResumeWork { target, .. }
+        | WorkAction::OutcomeUnknown { target, .. }
+        | WorkAction::BlockWork { target, .. }
+        | WorkAction::AbandonWork { target, .. }
+        | WorkAction::SettleWork { target, .. } => Some(target),
+        _ => None,
+    };
+    if let Some(target) = target {
+        if state.works.contains_key(&target.work_id) {
+            match state.work_lifecycle(&target.work_id) {
+                Some(lifecycle) if lifecycle != command.recipient_lifecycle => {
+                    return Err(WorkRejection::StaleLifecycle)
+                }
+                None => return Err(WorkRejection::LegacyUnknown),
+                _ => {}
+            }
+        }
+    }
+    match &command.action {
+        WorkAction::RegisterAdmission { admission } => {
+            *next_control = Some(super::admission::register(
+                command, control, state, admission, receipt,
+            )?);
+            Ok(())
+        }
+        WorkAction::BindResourceOwners {
+            expected_revision,
+            connections_json,
+            authorization_ref,
+        } => {
+            revision_guard(state, *expected_revision)?;
+            super::admission::bind_resources(command, state, connections_json, authorization_ref)
+        }
+        WorkAction::BindChildResumeMetadata {
+            expected_revision,
+            metadata_json,
+        } => {
+            revision_guard(state, *expected_revision)?;
+            super::admission::bind_child_metadata(command, state, metadata_json)
+        }
+        WorkAction::BindWorkDelegation {
+            expected_revision,
+            work_id,
+            binding,
+            parent_binding_receipt,
+        } => {
+            revision_guard(state, *expected_revision)?;
+            super::admission::bind_work_delegation(
+                command,
+                control,
+                state,
+                work_id,
+                binding,
+                parent_binding_receipt,
+            )
+        }
+        WorkAction::ClaimBatch {
+            guard,
+            batch_id,
+            delivery_ids,
+        } => {
+            execution_guard(command, control, state, guard, true)?;
+            super::delivery::claim(
+                command,
+                state,
+                guard,
+                batch_id,
+                delivery_ids,
+                receipt,
+                projections,
+            )
+        }
+        WorkAction::BeginReason {
+            guard,
+            target,
+            request_id,
+            request,
+        } => {
+            execution_guard(command, control, state, guard, true)?;
+            super::processing::begin_reason(state, target, request_id, request, receipt)
+        }
+        WorkAction::CommitReasonResponseAndDispatchIntent { guard, .. } => {
+            execution_guard(command, control, state, guard, false)?;
+            super::processing::commit_reason(command, state, receipt, projections)
+        }
+        WorkAction::BeginDispatch {
+            guard,
+            target,
+            invocation_id,
+        } => {
+            execution_guard(command, control, state, guard, true)?;
+            super::processing::begin_dispatch(state, target, invocation_id, receipt)
+        }
+        WorkAction::CommitAct {
+            guard,
+            target,
+            results,
+            next_work_id,
+        } => {
+            execution_guard(command, control, state, guard, false)?;
+            super::processing::commit_act(
+                command,
+                state,
+                target,
+                results,
+                next_work_id.as_deref(),
+                receipt,
+                projections,
+            )
+        }
+        WorkAction::ResumeWork {
+            guard,
+            target,
+            recovery_evidence,
+        } => {
+            execution_guard(command, control, state, guard, true)?;
+            super::processing::resume(state, target, recovery_evidence, receipt)
+        }
+        WorkAction::OutcomeUnknown {
+            expected_revision,
+            target,
+            invocation_id,
+            reason,
+        } => {
+            revision_guard(state, *expected_revision)?;
+            super::processing::unknown(state, target, invocation_id, reason, receipt)
+        }
+        WorkAction::BlockWork {
+            expected_revision,
+            target,
+            reason,
+            recovery_condition,
+        } => {
+            revision_guard(state, *expected_revision)?;
+            super::processing::block(state, target, reason, recovery_condition, receipt)
+        }
+        WorkAction::AbandonWork {
+            expected_revision,
+            expected_control_generation,
+            target,
+            reason,
+            authorization_ref,
+        } => {
+            revision_guard(state, *expected_revision)?;
+            if control.control_generation != *expected_control_generation {
+                return Err(WorkRejection::StaleControlGeneration);
+            }
+            super::processing::abandon(state, target, reason, authorization_ref, receipt)
+        }
+        WorkAction::SettleWork {
+            expected_revision,
+            target,
+        } => {
+            revision_guard(state, *expected_revision)?;
+            super::processing::settle(state, target, receipt)
+        }
+        WorkAction::PrepareInvocation {
+            expected_revision,
+            intent,
+        } => {
+            revision_guard(state, *expected_revision)?;
+            if control.status != ControlStatus::Active {
+                return Err(WorkRejection::InvalidTransition);
+            }
+            super::bindings::prepare(command, state, intent, None)
+        }
+        WorkAction::ReconcileTaskBinding {
+            expected_revision,
+            binding,
+        } => {
+            revision_guard(state, *expected_revision)?;
+            super::bindings::reconcile(command, state, binding)
+        }
+        WorkAction::WithdrawDelivery {
+            expected_revision,
+            expected_control_generation,
+            delivery_id,
+            authorization_ref,
+        } => {
+            revision_guard(state, *expected_revision)?;
+            if expected_control_generation
+                .is_some_and(|generation| generation != control.control_generation)
+            {
+                return Err(WorkRejection::StaleControlGeneration);
+            }
+            super::delivery::withdraw(state, delivery_id, authorization_ref, receipt)
+        }
+        WorkAction::AbandonDelivery {
+            guard,
+            delivery_id,
+            reason,
+            evidence,
+        } => {
+            execution_guard(command, control, state, guard, true)?;
+            super::delivery::abandon_delivery(
+                command,
+                state,
+                delivery_id,
+                reason,
+                evidence,
+                receipt,
+            )
+        }
+        WorkAction::ResetBudget {
+            expected_revision,
+            budget_id,
+            authorization_ref,
+        } => {
+            revision_guard(state, *expected_revision)?;
+            if authorization_ref.is_empty() || !state.budgets.contains_key(budget_id) {
+                return Err(WorkRejection::InvalidTransition);
+            }
+            state
+                .budgets
+                .insert(budget_id.clone(), WorkBudget::default());
+            Ok(())
+        }
+        WorkAction::QuarantineLegacy {
+            expected_revision,
+            record_id,
+            evidence,
+        } => {
+            revision_guard(state, *expected_revision)?;
+            if record_id.is_empty() || evidence.is_empty() {
+                return Err(WorkRejection::InvalidTransition);
+            }
+            if state
+                .legacy_unknown
+                .get(record_id)
+                .is_some_and(|existing| existing != evidence)
+            {
+                return Err(WorkRejection::Conflict);
+            }
+            state
+                .legacy_unknown
+                .insert(record_id.clone(), evidence.clone());
+            Ok(())
+        }
+        WorkAction::PublishDelivery { .. }
+        | WorkAction::PublishTaskSettlement { .. }
+        | WorkAction::BindTerminalObligation { .. }
+        | WorkAction::AcknowledgeTerminalObligation { .. }
+        | WorkAction::FinishAdmission { .. } => unreachable!(),
+    }
+}
+
+pub(super) fn revision_guard(state: &WorkState, revision: u64) -> Result<(), WorkRejection> {
+    if state.revision != revision {
+        return Err(WorkRejection::StaleRevision);
+    }
+    Ok(())
+}
+
+fn execution_guard(
+    command: &WorkCommand,
+    control: &ControlState,
+    state: &WorkState,
+    guard: &WorkGuard,
+    require_active: bool,
+) -> Result<(), WorkRejection> {
+    revision_guard(state, guard.expected_revision)?;
+    if control.control_generation != guard.expected_control_generation {
+        return Err(WorkRejection::StaleControlGeneration);
+    }
+    if control.attempt.as_ref() != Some(&guard.execution) {
+        return Err(WorkRejection::StaleExecution);
+    }
+    if require_active && control.status != ControlStatus::Active {
+        return Err(WorkRejection::InvalidTransition);
+    }
+    if !state.legacy_unknown.is_empty() {
+        return Err(WorkRejection::LegacyUnknown);
+    }
+    if command.recipient_lifecycle != control.lifecycle {
+        return Err(WorkRejection::StaleLifecycle);
+    }
+    Ok(())
+}
+
+pub(super) fn work_mut<'state>(
+    state: &'state mut WorkState,
+    target: &WorkTarget,
+) -> Result<&'state mut WorkRecord, WorkRejection> {
+    let work = state
+        .works
+        .get_mut(&target.work_id)
+        .ok_or(WorkRejection::InvalidTransition)?;
+    if work.revision != target.expected_work_revision {
+        return Err(WorkRejection::StaleWorkRevision);
+    }
+    Ok(work)
+}
+
+pub(super) fn bump(work: &mut WorkRecord, receipt: &mut WorkReceipt) -> Result<(), WorkRejection> {
+    work.revision = work
+        .revision
+        .checked_add(1)
+        .ok_or(WorkRejection::VersionExhausted)?;
+    receipt.work_id = Some(work.work_id.clone());
+    receipt.work_revision = Some(work.revision);
+    receipt.batch_id = Some(work.batch_id.clone());
+    receipt.stage = Some(work.stage);
+    Ok(())
+}

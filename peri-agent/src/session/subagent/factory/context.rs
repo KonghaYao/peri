@@ -98,11 +98,19 @@ pub(super) async fn build_subagent_session_v2(
         None => Arc::new(crate::agent::async_tasks::TaskManager::new()),
     });
     host.parent_thread_id = Some(child_thread_id.clone());
-    let router = crate::session::async_router::AsyncRouter::for_queue(session.queue());
-    host.on_bg_complete = Some(Arc::new(move |result, kind| {
-        router.route_bg_result(result, kind);
-        Ok(())
-    }));
+    host.on_bg_complete = match (&session_resources, lifecycle) {
+        (Some(resources), Some(lifecycle)) => {
+            Some(crate::session::bg_complete::durable_bg_complete_callback(
+                crate::agent::async_tasks::durable_task_terminal_delivery(
+                    resources.clone(),
+                    child_thread_id.clone(),
+                    lifecycle,
+                    session.queue().clone(),
+                ),
+            ))
+        }
+        _ => None,
+    };
     if let (Some(pool), Some(lifecycle), Some(manager)) =
         (&host.mcp_pool, lifecycle, &host.task_manager)
     {
@@ -113,6 +121,10 @@ pub(super) async fn build_subagent_session_v2(
             inbox.handle(),
             manager.clone(),
         )?;
+        let resources = session_resources
+            .clone()
+            .ok_or("Incomplete: child session resources unavailable")?;
+        pool.bind_agent_session_resources(&child_thread_id, lifecycle, resources)?;
     }
     session.set_subagent_host(host);
 
@@ -156,7 +168,7 @@ pub(super) async fn build_subagent_session_v2(
         .into_iter()
         .filter(|tool| tool_filter(tool.as_ref()))
         .collect();
-    let v2_ctx = build_v2_subagent_context(
+    let mut v2_ctx = build_v2_subagent_context(
         Some(session.clone()),
         llm,
         chain,
@@ -171,6 +183,7 @@ pub(super) async fn build_subagent_session_v2(
         compact_llm,
         agent_id,
     );
+    v2_ctx.context.recipient_lifecycle = lifecycle;
 
     Ok((session, v2_ctx))
 }

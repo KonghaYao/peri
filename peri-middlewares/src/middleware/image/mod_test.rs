@@ -12,7 +12,10 @@ use peri_agent::{
 use super::test_support::ImageFixture;
 use super::ImageMiddleware;
 
-/// [回归测试] 同一次运行中追加图片后触发 Micro，模型仍须收到图片载荷。
+#[path = "../../at_mention/work_fixture.rs"]
+mod work_fixture;
+
+/// [回归测试] 后续 SDK 执行接收追加图片后触发 Micro，模型仍须收到图片载荷。
 /// 历史缺口：图片准备仅挂在一次性的 before_agent，第二批输入只留下 @image 文本。
 #[tokio::test]
 async fn test_image_later_input_reaches_model_after_micro_compact() {
@@ -30,11 +33,37 @@ async fn test_image_later_input_reaches_model_after_micro_compact() {
     use std::sync::Mutex;
     struct CapturingLlm {
         requests: Arc<Mutex<Vec<Vec<BaseMessage>>>>,
+        pending_messages: Mutex<Vec<BaseMessage>>,
         queue: MessageQueue,
         next_input: BaseMessage,
     }
     #[async_trait::async_trait]
     impl ReactLLM for CapturingLlm {
+        fn prepare_reasoning(
+            &self,
+            messages: &[BaseMessage],
+            tools: &[&dyn BaseTool],
+        ) -> peri_agent::error::AgentResult<peri_model::PreparedModelCall> {
+            *self.pending_messages.lock().unwrap() = messages.to_vec();
+            peri_agent::agent::model_bridge::AgentModelBridge::new(Arc::new(
+                peri_model::OpenAiModel::new(peri_model::OpenAiConfig::new(
+                    "http://127.0.0.1:1".parse().unwrap(),
+                    "fixture-unused-key",
+                    "fixture-model",
+                )),
+            ))
+            .prepare_reasoning(messages, tools)
+        }
+
+        async fn generate_prepared_reasoning(
+            &self,
+            _prepared: peri_model::PreparedModelCall,
+            streaming: Option<StreamingContext>,
+        ) -> peri_agent::error::AgentResult<Reasoning> {
+            let messages = std::mem::take(&mut *self.pending_messages.lock().unwrap());
+            self.generate_reasoning(&messages, &[], streaming).await
+        }
+
         async fn generate_reasoning(
             &self,
             messages: &[BaseMessage],
@@ -94,7 +123,7 @@ async fn test_image_later_input_reaches_model_after_micro_compact() {
     let fixture = ImageFixture::new(dir.path()).await;
     let mut chain = MiddlewareChain::new();
     chain.add(Box::new(fixture.middleware()));
-    let ctx = StageContext::builder(
+    let mut ctx = StageContext::builder(
         session.start_turn(),
         session.transcript(),
         session.queue().clone(),
@@ -102,6 +131,7 @@ async fn test_image_later_input_reaches_model_after_micro_compact() {
     .with_middleware_chain(Arc::new(chain))
     .with_llm(Arc::new(CapturingLlm {
         requests: Arc::clone(&requests),
+        pending_messages: Mutex::new(Vec::new()),
         queue: session.queue().clone(),
         next_input: later.clone(),
     }))
@@ -111,11 +141,40 @@ async fn test_image_later_input_reaches_model_after_micro_compact() {
         ..Default::default()
     })
     .build();
+    let _work_fixture = work_fixture::bind(&mut ctx).await;
     let result = run_react_loop(ctx.clone(), 3).await;
     assert!(
         matches!(result, LoopResult::Completed),
         "循环应正常完成：{result:?}"
     );
+    let first_admission = ctx.session.turn.work_admission().unwrap().clone();
+    let mut next_context = StageContext::builder(
+        session.start_turn(),
+        session.transcript(),
+        session.queue().clone(),
+    )
+    .with_recipient_lifecycle(1)
+    .with_execution_admission_port(ctx.execution_admission_port().unwrap())
+    .with_middleware_chain(Arc::clone(&ctx.runtime.middleware_chain))
+    .with_llm(Arc::clone(&ctx.runtime.llm))
+    .build();
+    next_context.compact = ctx.compact.clone();
+    let result = run_react_loop(next_context.clone(), 3).await;
+    assert!(
+        matches!(result, LoopResult::Completed),
+        "后续执行应完成：{result:?}"
+    );
+    assert_ne!(
+        next_context
+            .session
+            .turn
+            .work_admission()
+            .unwrap()
+            .admission_id,
+        first_admission.admission_id,
+        "新输入必须获得独立 SDK admission"
+    );
+    let ctx = next_context;
     {
         let requests = requests.lock().unwrap();
         assert_eq!(requests.len(), 2, "追加输入驱动第二次模型请求");
@@ -166,11 +225,13 @@ async fn image_replacement_reaches_transcript_with_the_original_message_id() {
         missing_image.display()
     )));
     session.transcript().write().append(original.clone());
-    let mut ctx = StageContext::new(
+    let mut ctx = StageContext::builder(
         session.start_turn(),
         session.transcript(),
         session.queue().clone(),
-    );
+    )
+    .build();
+    let _work_fixture = work_fixture::bind(&mut ctx).await;
     let mut chain = MiddlewareChain::new();
     let fixture = ImageFixture::new(dir.path()).await;
     chain.add(Box::new(fixture.middleware()));
@@ -226,11 +287,13 @@ async fn test_image_batch_prepares_first_input_and_never_reloads_history() {
             input.clone(),
         ));
     }
-    let mut ctx = StageContext::new(
+    let mut ctx = StageContext::builder(
         session.start_turn(),
         session.transcript(),
         session.queue().clone(),
-    );
+    )
+    .build();
+    let _work_fixture = work_fixture::bind(&mut ctx).await;
     let mut chain = MiddlewareChain::new();
     let fixture = ImageFixture::new(dir.path()).await;
     chain.add(Box::new(fixture.middleware()));
@@ -301,11 +364,13 @@ async fn test_image_explicit_empty_batch_does_not_fall_back_to_history() {
         None,
     );
     session.transcript().write().append(original.clone());
-    let mut ctx = StageContext::new(
+    let mut ctx = StageContext::builder(
         session.start_turn(),
         session.transcript(),
         session.queue().clone(),
-    );
+    )
+    .build();
+    let _work_fixture = work_fixture::bind(&mut ctx).await;
     let mut chain = MiddlewareChain::new();
     chain.add(Box::new(ImageMiddleware::new()));
     ctx.runtime.middleware_chain = Arc::new(chain);

@@ -6,6 +6,7 @@ use peri_acp_types::tasks::TaskManager;
 
 #[derive(Default)]
 struct Binding {
+    resources: Option<Arc<dyn peri_acp_types::session_resources::SessionResources>>,
     inbox: Option<InboxHandle>,
     manager: Option<Arc<dyn TaskManager>>,
     registered: bool,
@@ -18,6 +19,39 @@ pub(crate) struct SessionBindings {
 }
 
 impl SessionBindings {
+    pub(crate) fn resources(
+        &self,
+        session: &str,
+        lifecycle: u64,
+    ) -> Option<Arc<dyn peri_acp_types::session_resources::SessionResources>> {
+        self.history
+            .get(&(session.into(), lifecycle))?
+            .resources
+            .clone()
+    }
+
+    pub(crate) fn bind_resources(
+        &mut self,
+        session: &str,
+        lifecycle: u64,
+        resources: Arc<dyn peri_acp_types::session_resources::SessionResources>,
+    ) -> Result<(), String> {
+        let binding = self
+            .history
+            .get_mut(&(session.into(), lifecycle))
+            .ok_or("Incomplete: exact MCP session lifecycle binding unavailable")?;
+        binding.resources = Some(resources);
+        Ok(())
+    }
+
+    pub(crate) fn binding_at(
+        &self,
+        session: &str,
+        lifecycle: u64,
+    ) -> Option<(InboxHandle, Arc<dyn TaskManager>)> {
+        let binding = self.history.get(&(session.into(), lifecycle))?;
+        Some((binding.inbox.clone()?, binding.manager.clone()?))
+    }
     #[cfg(test)]
     pub(crate) fn registered_sessions(&self) -> Vec<String> {
         self.current
@@ -98,9 +132,14 @@ impl SessionBindings {
                 return Err("Incomplete: session lifecycle already has an execution owner".into());
             }
         }
+        let resources = self
+            .history
+            .get(&(session.into(), lifecycle))
+            .and_then(|binding| binding.resources.clone());
         self.history.insert(
             (session.into(), lifecycle),
             Binding {
+                resources,
                 inbox: Some(inbox),
                 manager: Some(manager),
                 registered: true,

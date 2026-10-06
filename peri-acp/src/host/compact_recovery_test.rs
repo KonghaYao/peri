@@ -58,13 +58,15 @@ enum AfterCommitAction {
 
 /// 真门面 + 提交点注入：故障包在真实 SQLite 门面调用外围，不能用内存替身伪造提交。
 ///
-/// 迁移后 compact/append/删除都走 [`SessionResources`]；本包装只改写「Full 提交点被
-/// 取消 / 提交后确认丢失 / 提交后的追加失败」三种时序，其余行为逐项转发真实门面
+/// 本包装注入 Full 提交点取消、Work journal 前故障与 Work commit ACK 丢失；
+/// 所有 canonical 消息仍由真实 Work reducer 提交，其余行为逐项转发真实门面
 /// （同一库句柄，见 [`make_recovery_context`]）。
 struct RecoveryStore {
     inner: Arc<dyn SessionResources>,
+    database: std::path::PathBuf,
+    uncertain: Mutex<Option<peri_acp_types::session_resources::work::WorkCommand>>,
     compact_commits: AtomicUsize,
-    fail_appends: AtomicBool,
+    fail_claim: AtomicBool,
     fail_after_full: bool,
     deletes: AtomicUsize,
     after_commit: Mutex<Option<AfterCommitAction>>,
@@ -72,6 +74,68 @@ struct RecoveryStore {
 
 #[async_trait]
 impl SessionResources for RecoveryStore {
+    async fn load_work_command(
+        &self,
+        query: &peri_acp_types::session_resources::work::WorkCommandQuery,
+    ) -> SessionResourceResult<Option<peri_acp_types::session_resources::work::OwnedWorkCommand>>
+    {
+        self.inner.load_work_command(query).await
+    }
+
+    async fn load_session_work(
+        &self,
+        query: &peri_acp_types::session_resources::work::WorkQuery,
+    ) -> SessionResourceResult<peri_acp_types::session_resources::work::WorkSnapshot> {
+        self.inner.load_session_work(query).await
+    }
+
+    async fn apply_work_mutation(
+        &self,
+        command: &peri_acp_types::session_resources::work::WorkCommand,
+    ) -> SessionResourceResult<peri_acp_types::session_resources::work::WorkReceipt> {
+        use peri_acp_types::session_resources::work::WorkAction;
+        let before_effect = self.fail_claim.load(Ordering::SeqCst)
+            && matches!(command.action, WorkAction::ClaimBatch { .. });
+        let after_effect = self.fail_after_full
+            && self.compact_commits.load(Ordering::SeqCst) > 0
+            && matches!(
+                command.action,
+                WorkAction::CommitReasonResponseAndDispatchIntent { .. }
+            );
+        if before_effect || after_effect {
+            let connection =
+                sqlx::SqlitePool::connect(&format!("sqlite://{}", self.database.display()))
+                    .await
+                    .unwrap();
+            if after_effect {
+                self.inner.apply_work_mutation(command).await?;
+                sqlx::query("UPDATE session_work_commands SET reconciled=0 WHERE mutation_id=?1")
+                    .bind(&command.mutation_id)
+                    .execute(&connection)
+                    .await
+                    .unwrap();
+            } else {
+                sqlx::query("INSERT INTO session_work_commands(mutation_id,session_id,digest,command_json,reconciled) VALUES (?1,?2,?3,?4,0)")
+                    .bind(&command.mutation_id).bind(&command.session_id)
+                    .bind(command.digest().unwrap()).bind(serde_json::to_string(command).unwrap())
+                    .execute(&connection).await.unwrap();
+            }
+            *self.uncertain.lock().unwrap() = Some(command.clone());
+            return Err(SessionResourceError::persistence_uncertain(None));
+        }
+        self.inner.apply_work_mutation(command).await
+    }
+
+    async fn resolve_work_mutation(
+        &self,
+        command: &peri_acp_types::session_resources::work::WorkCommand,
+    ) -> SessionResourceResult<peri_acp_types::session_resources::work::WorkResolution> {
+        if self.uncertain.lock().unwrap().as_ref() == Some(command) {
+            return Ok(peri_acp_types::session_resources::work::WorkResolution::Unknown);
+        }
+        self.inner.resolve_work_mutation(command).await
+    }
+
     async fn load_session_control(
         &self,
         id: &ThreadId,
@@ -194,15 +258,6 @@ impl SessionResources for RecoveryStore {
         id: &ThreadId,
         payloads: &[PersistedPayload],
     ) -> SessionResourceResult<()> {
-        if self.fail_appends.load(Ordering::SeqCst)
-            || (self.fail_after_full && self.compact_commits.load(Ordering::SeqCst) > 0)
-        {
-            return Err(SessionResourceError::new(
-                SessionResourceErrorKind::Unavailable {
-                    detail: "injected post-compact writer failure".to_owned(),
-                },
-            ));
-        }
         self.inner.append_history(id, payloads).await
     }
 
@@ -356,10 +411,6 @@ fn make_host_sessions(ctx: &SessionContext, payloads: Vec<PersistedPayload>) -> 
         workflow_middleware: None,
         title: None,
         tags: vec![],
-
-        continuation_epoch: 0,
-        continuation_in_flight: false,
-        continuation_mq_steering_pending: false,
     };
     Arc::new(tokio::sync::Mutex::new(HashMap::from([(
         ctx.session_id.clone(),
@@ -379,8 +430,10 @@ async fn make_recovery_context(
             .unwrap();
     let store = Arc::new(RecoveryStore {
         inner: Arc::new(facade),
+        database: dir.path().join("recovery.db"),
+        uncertain: Mutex::new(None),
         compact_commits: AtomicUsize::new(0),
-        fail_appends: AtomicBool::new(false),
+        fail_claim: AtomicBool::new(false),
         fail_after_full,
         deletes: AtomicUsize::new(0),
         after_commit: Mutex::new(None),
@@ -410,23 +463,14 @@ async fn make_recovery_context(
         })
         .await
         .unwrap();
-    let history = vec![BaseMessage::human(OLD), BaseMessage::ai("old answer")];
-    store
-        .append_history(
-            &thread_id,
-            &history
-                .iter()
-                .cloned()
-                .map(PersistedPayload::Message)
-                .collect::<Vec<_>>(),
-        )
-        .await
-        .unwrap();
     let mut ctx = make_session_context(&thread_id).await;
     ctx.cwd = cwd.into();
     ctx.thread_id = Some(thread_id.clone());
     ctx.session_resources = Some(store.clone());
+    ctx.session_access = None;
+    let history = execution_fixture::seed_history(&ctx, OLD, "old answer").await;
     ctx.primary_llm_factory = Some(Arc::new(move || model.clone()));
+    execution_fixture::bind_execution(&mut ctx, None);
     let sessions = make_host_sessions(
         &ctx,
         history.into_iter().map(PersistedPayload::Message).collect(),
@@ -474,6 +518,8 @@ async fn make_recovery_turn(
 }
 
 async fn assert_next_turn_sees_summary(mut ctx: SessionContext, sessions: &SharedSessions) {
+    ctx.session_access = None;
+    execution_fixture::bind_execution(&mut ctx, None);
     let requests = Arc::new(Mutex::new(Vec::new()));
     let model: Arc<dyn Model> = Arc::new(CapturePromptModel {
         requests: requests.clone(),
@@ -495,361 +541,5 @@ async fn assert_next_turn_sees_summary(mut ctx: SessionContext, sessions: &Share
     assert!(!text.contains(OLD), "旧历史 excluded 标记必须继续生效");
 }
 
-/// [回归测试] Full 提交后 cancel 的结果仍更新热 host，下一轮恢复摘要与 flags。
-#[tokio::test]
-#[serial]
-async fn test_full_compact_cancel_preserves_next_turn_summary() {
-    let dir = tempfile::tempdir().unwrap();
-    let _home = HomeGuard::set(dir.path());
-    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
-    let model: Arc<dyn Model> = Arc::new(CancelGateModel {
-        entered: Mutex::new(Some(entered_tx)),
-    });
-    let (ctx, store, sessions) = make_recovery_context(&dir, model, false).await;
-    let turn = make_recovery_turn(&ctx, &sessions, true).await;
-    let running_ctx = ctx.clone();
-    let task = tokio::spawn(async move { run_session_loop(running_ctx, turn).await });
-    entered_rx.await.unwrap();
-    assert_eq!(
-        store.compact_commits.load(Ordering::SeqCst),
-        1,
-        "取消必须发生在真实 Full 提交之后"
-    );
-    ctx.cancel.cancel();
-    let result = task.await.unwrap();
-    assert!(!result.ok);
-    assert!(result.history_replaced_by_compaction);
-    assert!(!result.persistence_inconsistent);
-    let wire = finish_prompt_turn(&sessions, &ctx.session_id, false, result)
-        .await
-        .unwrap();
-    assert_eq!(wire["stopReason"], "cancelled");
-    assert!(sessions.lock().await[&ctx.session_id]
-        .cancel_token
-        .is_none());
-    assert_next_turn_sees_summary(ctx, &sessions).await;
-}
-
-/// [回归测试] Full 提交后的 fatal LLM error 保持 wire error，同时采纳 canonical progress。
-#[tokio::test]
-#[serial]
-async fn test_full_compact_llm_error_preserves_next_turn_summary() {
-    let dir = tempfile::tempdir().unwrap();
-    let _home = HomeGuard::set(dir.path());
-    let (ctx, store, sessions) = make_recovery_context(&dir, Arc::new(FatalModel), false).await;
-    let turn = make_recovery_turn(&ctx, &sessions, true).await;
-    let result = run_session_loop(ctx.clone(), turn).await;
-    assert_eq!(store.compact_commits.load(Ordering::SeqCst), 1);
-    assert!(!result.ok);
-    assert!(result.history_replaced_by_compaction);
-    let wire = finish_prompt_turn(&sessions, &ctx.session_id, false, result)
-        .await
-        .unwrap_err();
-    assert_eq!(
-        wire.code,
-        crate::host::prompt::ACP_TURN_EXECUTION_FAILED_CODE
-    );
-    assert_eq!(wire.data.unwrap()["kind"], "llm_http");
-    assert_next_turn_sees_summary(ctx, &sessions).await;
-}
-
-/// [回归测试] Full 提交后的 forwarder 失败不丢 canonical 摘要。
-#[tokio::test]
-#[serial]
-async fn test_full_compact_forwarder_error_preserves_next_turn_summary() {
-    let dir = tempfile::tempdir().unwrap();
-    let _home = HomeGuard::set(dir.path());
-    let model: Arc<dyn Model> = Arc::new(CapturePromptModel {
-        requests: Arc::new(Mutex::new(Vec::new())),
-    });
-    let (ctx, store, sessions) = make_recovery_context(&dir, model, false).await;
-    let mut turn = make_recovery_turn(&ctx, &sessions, true).await;
-    turn.forwarder_launcher = make_aborting_forwarder_launcher();
-    let result = run_session_loop(ctx.clone(), turn).await;
-    assert_eq!(store.compact_commits.load(Ordering::SeqCst), 1);
-    assert!(!result.ok);
-    assert!(result.history_replaced_by_compaction);
-    let wire = finish_prompt_turn(&sessions, &ctx.session_id, false, result)
-        .await
-        .unwrap_err();
-    assert_eq!(wire.data.unwrap()["kind"], "internal");
-    assert_next_turn_sees_summary(ctx, &sessions).await;
-}
-
-/// [回归测试] Full 事务后追加失败，不能按 turn ID 删除摘要；新 SQLite owner 可恢复。
-#[tokio::test]
-#[serial]
-async fn test_full_compact_writer_error_evicts_host_and_cold_reload_recovers_summary() {
-    let dir = tempfile::tempdir().unwrap();
-    let _home = HomeGuard::set(dir.path());
-    let model: Arc<dyn Model> = Arc::new(CapturePromptModel {
-        requests: Arc::new(Mutex::new(Vec::new())),
-    });
-    let (mut ctx, store, sessions) = make_recovery_context(&dir, model, true).await;
-    let turn = make_recovery_turn(&ctx, &sessions, true).await;
-    let result = run_session_loop(ctx.clone(), turn).await;
-    assert_eq!(store.compact_commits.load(Ordering::SeqCst), 1);
-    assert!(!result.ok);
-    assert!(
-        result.persistence_inconsistent,
-        "写失败必须使 host snapshot 失效"
-    );
-    let wire = finish_prompt_turn(&sessions, &ctx.session_id, false, result)
-        .await
-        .unwrap_err();
-    assert_eq!(wire.data.unwrap()["kind"], "internal");
-    assert!(!sessions.lock().await.contains_key(&ctx.session_id));
-    assert_eq!(
-        store.deletes.load(Ordering::SeqCst),
-        0,
-        "不得删除已提交 lifecycle 的消息"
-    );
-    // 释放原持久化句柄，再打开全新的 SQLite store（桥与门面重新配对）。
-    ctx.session_resources = None;
-    drop(store);
-    let (recovered, recovered_facade) =
-        peri_resources::sessions::open_store_and_facade_for_tests(dir.path().join("recovery.db"))
-            .await
-            .unwrap();
-    let thread_id = ctx.thread_id.as_ref().unwrap();
-    let payloads = recovered.load_payloads(thread_id).await.unwrap();
-    let flags = recovered.load_message_flags(thread_id).await.unwrap();
-    let old = payloads
-        .iter()
-        .find(|p| p.as_message().is_some_and(|m| m.content() == OLD))
-        .unwrap();
-    assert!(flags[&old.id()].excluded);
-    assert_eq!(
-        payloads
-            .iter()
-            .filter(|p| p
-                .as_message()
-                .is_some_and(|m| m.content().contains(SUMMARY)))
-            .count(),
-        1
-    );
-    ctx.session_resources = Some(Arc::new(recovered_facade));
-    let cold_sessions = make_host_sessions(&ctx, payloads);
-    assert_next_turn_sees_summary(ctx, &cold_sessions).await;
-}
-
-/// [回归测试] 未发生 Full 的 writer 错误同样移除热状态，不能假称 ID 回滚成功。
-#[tokio::test]
-#[serial]
-async fn test_writer_error_without_compact_evicts_host_without_deleting_durable_history() {
-    let dir = tempfile::tempdir().unwrap();
-    let _home = HomeGuard::set(dir.path());
-    let model: Arc<dyn Model> = Arc::new(CapturePromptModel {
-        requests: Arc::new(Mutex::new(Vec::new())),
-    });
-    let (ctx, store, sessions) = make_recovery_context(&dir, model, false).await;
-    store.fail_appends.store(true, Ordering::SeqCst);
-    let turn = make_recovery_turn(&ctx, &sessions, false).await;
-    let result = run_session_loop(ctx.clone(), turn).await;
-    assert!(!result.ok);
-    assert!(result.persistence_inconsistent);
-    let wire = finish_prompt_turn(&sessions, &ctx.session_id, false, result)
-        .await
-        .unwrap_err();
-    assert_eq!(wire.data.unwrap()["kind"], "internal");
-    assert!(!sessions.lock().await.contains_key(&ctx.session_id));
-    assert_eq!(store.compact_commits.load(Ordering::SeqCst), 0);
-    assert_eq!(store.deletes.load(Ordering::SeqCst), 0);
-    assert_eq!(
-        store
-            .load_payloads(ctx.thread_id.as_ref().unwrap())
-            .await
-            .unwrap()
-            .len(),
-        2
-    );
-}
-
-/// [回归测试] 未执行的真实 PromptHandle 不提供可验证 snapshot，host 必须要求冷加载。
-#[tokio::test]
-#[serial]
-async fn test_missing_prompt_result_evicts_host_without_adopting_empty_snapshot() {
-    let dir = tempfile::tempdir().unwrap();
-    let _home = HomeGuard::set(dir.path());
-    let (ctx, store, sessions) = make_recovery_context(&dir, Arc::new(FatalModel), false).await;
-    let turn = make_recovery_turn(&ctx, &sessions, false).await;
-    let handle = crate::host::prompt_handle::PromptHandle::new(ctx.clone(), turn);
-    let wire = finish_prompt_turn(&sessions, &ctx.session_id, false, handle.take_result())
-        .await
-        .unwrap_err();
-    assert_eq!(wire.data.unwrap()["kind"], "internal");
-    assert!(!sessions.lock().await.contains_key(&ctx.session_id));
-    assert_eq!(
-        store
-            .load_payloads(ctx.thread_id.as_ref().unwrap())
-            .await
-            .unwrap()
-            .len(),
-        2
-    );
-}
-
-/// [回归测试] 装配失败仍回传原 canonical snapshot，可以保留热状态；区别于缺失结果。
-#[tokio::test]
-#[serial]
-async fn test_stage_initialization_failure_preserves_verified_previous_snapshot() {
-    let dir = tempfile::tempdir().unwrap();
-    let _home = HomeGuard::set(dir.path());
-    let (ctx, store, sessions) = make_recovery_context(&dir, Arc::new(FatalModel), false).await;
-    let mut turn = make_recovery_turn(&ctx, &sessions, false).await;
-    let previous_ids = turn
-        .history_payloads
-        .iter()
-        .map(PersistedPayload::id)
-        .collect::<Vec<_>>();
-    turn.stage_build = Arc::new(|_| {
-        Err(
-            peri_agent::session::exec::stage_builder::StageBuildError::ToolCatalog(
-                peri_agent::session::tool_catalog::CatalogRefreshError::AliasConflict,
-            ),
-        )
-    });
-    let result = run_session_loop(ctx.clone(), turn).await;
-    assert!(!result.ok);
-    assert!(!result.persistence_inconsistent);
-    let wire = finish_prompt_turn(&sessions, &ctx.session_id, false, result)
-        .await
-        .unwrap_err();
-    assert_eq!(wire.data.unwrap()["kind"], "internal");
-    let sessions = sessions.lock().await;
-    let state = sessions
-        .get(&ctx.session_id)
-        .expect("装配前未修改持久化，热状态仍有效");
-    assert_eq!(
-        state
-            .history_payloads
-            .iter()
-            .map(PersistedPayload::id)
-            .collect::<Vec<_>>(),
-        previous_ids
-    );
-    assert!(state.cancel_token.is_none());
-    assert_eq!(store.deletes.load(Ordering::SeqCst), 0);
-}
-
-async fn assert_unconfirmed_commit_requires_cold_recovery(cancel_after_commit: bool) {
-    let dir = tempfile::tempdir().unwrap();
-    let _home = HomeGuard::set(dir.path());
-    let requests = Arc::new(Mutex::new(Vec::new()));
-    let model: Arc<dyn Model> = Arc::new(CapturePromptModel {
-        requests: requests.clone(),
-    });
-    let (mut ctx, store, sessions) = make_recovery_context(&dir, model, false).await;
-    *store.after_commit.lock().unwrap() = Some(if cancel_after_commit {
-        AfterCommitAction::Cancel(ctx.cancel.clone())
-    } else {
-        AfterCommitAction::Error
-    });
-    let turn = make_recovery_turn(&ctx, &sessions, true).await;
-    let result = run_session_loop(ctx.clone(), turn).await;
-    assert_eq!(
-        store.compact_commits.load(Ordering::SeqCst),
-        1,
-        "故障必须发生在真实COMMIT之后: {:?}",
-        result.failure
-    );
-    assert!(
-        requests.lock().unwrap().is_empty(),
-        "未知持久化状态不能继续Reason读取旧快照"
-    );
-    assert!(!result.ok);
-    assert!(
-        result.persistence_inconsistent,
-        "普通writer barrier成功不能抹去未确认commit"
-    );
-    assert_eq!(
-        result.failure.as_ref().unwrap().kind,
-        peri_acp_types::session::ExecutionFailureKind::Internal
-    );
-    assert_eq!(
-        result.stop_reason,
-        PromptStopReason::EndTurn,
-        "未知持久化沿用Internal收尾，不能伪装普通cancel"
-    );
-    let wire = finish_prompt_turn(&sessions, &ctx.session_id, false, result)
-        .await
-        .unwrap_err();
-    assert_eq!(wire.data.unwrap()["kind"], "internal");
-    assert!(wire.message.contains("reload"));
-    assert!(!sessions.lock().await.contains_key(&ctx.session_id));
-    assert_eq!(store.deletes.load(Ordering::SeqCst), 0);
-    // Reopen the persisted history through a fresh store facade.
-    ctx.session_resources = None;
-    drop(store);
-    let (recovered, recovered_facade) =
-        peri_resources::sessions::open_store_and_facade_for_tests(dir.path().join("recovery.db"))
-            .await
-            .unwrap();
-    let thread_id = ctx.thread_id.as_ref().unwrap();
-    let payloads = recovered.load_payloads(thread_id).await.unwrap();
-    let flags = recovered.load_message_flags(thread_id).await.unwrap();
-    let old = payloads
-        .iter()
-        .find(|p| p.as_message().is_some_and(|m| m.content() == OLD))
-        .unwrap();
-    assert!(flags[&old.id()].excluded);
-    assert_eq!(
-        payloads
-            .iter()
-            .filter(|p| p
-                .as_message()
-                .is_some_and(|m| m.content().contains(SUMMARY)))
-            .count(),
-        1
-    );
-    ctx.session_resources = Some(Arc::new(recovered_facade));
-    let cold_sessions = make_host_sessions(&ctx, payloads);
-    assert_next_turn_sees_summary(ctx, &cold_sessions).await;
-}
-
-/// [回归测试] SQLite已COMMIT但尚未apply内存时取消，不能把旧snapshot当成功flush结果。
-#[tokio::test]
-#[serial]
-async fn test_full_compact_cancel_after_durable_commit_requires_cold_recovery() {
-    assert_unconfirmed_commit_requires_cold_recovery(true).await;
-}
-
-/// [回归测试] store已COMMIT后返回Err，不能降级继续Reason或采纳旧snapshot。
-#[tokio::test]
-#[serial]
-async fn test_full_compact_error_after_durable_commit_requires_cold_recovery() {
-    assert_unconfirmed_commit_requires_cold_recovery(false).await;
-}
-
-/// [回归测试] Full内部barrier消费写错误后，Phase8的成功barrier仍不得证明快照安全。
-#[tokio::test]
-#[serial]
-async fn test_full_compact_precommit_flush_error_remains_uncertain_at_final_barrier() {
-    let dir = tempfile::tempdir().unwrap();
-    let _home = HomeGuard::set(dir.path());
-    let requests = Arc::new(Mutex::new(Vec::new()));
-    let model: Arc<dyn Model> = Arc::new(CapturePromptModel {
-        requests: requests.clone(),
-    });
-    let (ctx, store, sessions) = make_recovery_context(&dir, model, false).await;
-    store.fail_appends.store(true, Ordering::SeqCst);
-    let turn = make_recovery_turn(&ctx, &sessions, true).await;
-    let result = run_session_loop(ctx.clone(), turn).await;
-    assert!(result.persistence_inconsistent);
-    assert_eq!(store.compact_commits.load(Ordering::SeqCst), 0);
-    assert!(requests.lock().unwrap().is_empty());
-    let wire = finish_prompt_turn(&sessions, &ctx.session_id, false, result)
-        .await
-        .unwrap_err();
-    assert_eq!(wire.data.unwrap()["kind"], "internal");
-    assert!(!sessions.lock().await.contains_key(&ctx.session_id));
-    assert_eq!(store.deletes.load(Ordering::SeqCst), 0);
-    assert_eq!(
-        store
-            .load_payloads(ctx.thread_id.as_ref().unwrap())
-            .await
-            .unwrap()
-            .len(),
-        2
-    );
-}
+#[path = "compact_work_fixture_test.rs"]
+mod work_fixture;

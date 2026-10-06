@@ -88,6 +88,7 @@ pub struct V2ExecuteRequest {
     pub session_resources: Option<Arc<dyn SessionResources>>,
     pub thread_id: Option<String>,
     pub agent_input: AgentInput,
+    pub execution_admission: Option<peri_acp_types::session_resources::work::WorkAdmission>,
     pub history_payloads: Vec<peri_acp_types::store::PersistedPayload>,
     pub history: Vec<BaseMessage>,
     pub cached_llm: Option<CachedLlmInstances>,
@@ -135,10 +136,6 @@ pub struct V2ExecuteRequest {
 /// workflow 消费者 spawn、goal_controller）。所有副作用与 v1 一致。
 pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
     use peri_acp_types::session::{MessageKind, MessageSource as V2MessageSource, QueuedMessage};
-    let input_ticket = req
-        .user_input_mailbox
-        .as_ref()
-        .and_then(|mailbox| mailbox.active_run_ticket());
 
     // Restore the inherited boundary and compact state before spawning forwarders.
     // A failed/corrupt snapshot must not enter Reason with unclassified history.
@@ -210,6 +207,23 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
                 };
             }
         };
+    if let Some(admission) = req.execution_admission {
+        if admission.session_id != req.session_id
+            || !v2_out.context.session.turn.bind_work_admission(admission)
+        {
+            return ExecOutcome {
+                ok: false,
+                stop_reason: PromptStopReason::EndTurn,
+                failure: Some(ExecutionFailure::internal(
+                    "Execution admission identity conflict",
+                )),
+                history_replaced_by_compaction: false,
+                persisted_payloads: req.history_payloads,
+                persistence_inconsistent: false,
+                agent_state: AgentState::new(&req.cwd),
+            };
+        }
+    }
     v2_out.context.session.user_input_mailbox = req.user_input_mailbox.clone();
     if let Some(mailbox) = &req.user_input_mailbox {
         v2_out.session.set_user_input_mailbox(mailbox.clone());
@@ -217,6 +231,73 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
     if let Some(cache) = new_cache {
         (req.store_llm)(cache);
     }
+
+    let preflight = async {
+        #[cfg(test)]
+        if v2_out.context.work.is_best_effort_fixture() {
+            if !req.continuation && !req.agent_input.content.is_empty() {
+                v2_out.context.session.queue.push(QueuedMessage::prompt(
+                    V2MessageSource::UserInput,
+                    BaseMessage::human(req.agent_input.content.clone()),
+                ));
+            }
+            v2_out.context.work.ensure(&v2_out.context).await?;
+            return Ok::<_, anyhow::Error>(());
+        }
+        if !req.continuation && !req.agent_input.content.is_empty() {
+            let mailbox = req
+                .user_input_mailbox
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("required initial input has no durable mailbox"))?;
+            let command_id = req
+                .agent_input
+                .params
+                .get("request_id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+                .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
+            let input_id = req
+                .agent_input
+                .params
+                .get("input_id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+                .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
+            mailbox
+                .enqueue_durable(&peri_acp_types::session::EnqueueUserInputRequest {
+                    session_id: req.session_id.clone(),
+                    generation: mailbox.generation().to_owned(),
+                    command_id,
+                    input_id,
+                    content: req.agent_input.content.clone(),
+                    original_draft: req.agent_input.content.text_content(),
+                })
+                .await
+                .map_err(anyhow::Error::new)?;
+        }
+        v2_out.context.work.ensure(&v2_out.context).await?;
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    if let Err(error) = preflight {
+        return ExecOutcome {
+            ok: false,
+            stop_reason: PromptStopReason::EndTurn,
+            failure: Some(ExecutionFailure::internal(format!(
+                "Required execution preflight failed: {error}"
+            ))),
+            history_replaced_by_compaction: false,
+            persisted_payloads: req.history_payloads,
+            persistence_inconsistent: false,
+            agent_state: AgentState::new(&req.cwd),
+        };
+    }
+
+    let executing_admission = v2_out.context.session.turn.work_admission().cloned();
+    let input_ticket = req
+        .user_input_mailbox
+        .as_ref()
+        .and_then(|mailbox| mailbox.active_run_ticket());
 
     // Phase 2: bg event pump（复用 V2AgentOutput.bg_event_rx）
     // 事件三层化：发射点统一经 `EventPublisher`（身份：v2 循环 turn_id / 主
@@ -352,13 +433,6 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
     // 空 human 不进入 transcript（保持 keepgoing 的"不写入空 human"约束由
     // 显式分支承担，而非复用 keepgoing 语义）；loop 仅消费已 route 的
     // Defer/Info 消息（bg 结果、workflow 完成等）。
-    if !req.continuation {
-        v2_out.context.session.queue.push(QueuedMessage::new(
-            MessageKind::Prompt,
-            V2MessageSource::UserInput,
-            BaseMessage::human(req.agent_input.content),
-        ));
-    }
     // Phase 6.2: 首轮用户 turn 的一次性受控通知（MCP 概览等）。
     // 仅在首个模型可见 turn（history 为空且非 continuation）触发：收集
     // middleware chain 的 `first_turn_reminder` 非空贡献，作为 Info 消息
@@ -535,7 +609,11 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
         } else {
             UserInputAttemptOutcome::Failed
         };
-        mailbox.record_attempt_outcome(ticket, outcome);
+        if let Some(admission) = &executing_admission {
+            mailbox.finish_sdk_run(admission, outcome);
+        } else {
+            mailbox.record_attempt_outcome(ticket, outcome);
+        }
         if persistence_inconsistent {
             mailbox.invalidate();
         }

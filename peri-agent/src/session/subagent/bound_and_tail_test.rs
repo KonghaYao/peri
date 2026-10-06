@@ -1,6 +1,29 @@
 //! Bound subagent identity and background tail behavior.
 
 use super::*;
+use peri_acp_types::session_resources::{work::*, SessionResources};
+
+async fn unsettled_execution(store: &MockSessionResources, child_id: &str) -> WorkSnapshot {
+    let snapshot = store
+        .load_session_work(&WorkQuery {
+            session_id: child_id.into(),
+            limit: 1,
+        })
+        .await
+        .unwrap();
+    assert_eq!(snapshot.state.admissions.len(), 1);
+    let admission = snapshot.state.admissions.values().next().unwrap();
+    assert!(admission.entering_receipt.is_some());
+    assert!(admission.settled_receipt.is_none());
+    assert!(snapshot.state.terminal_acknowledgements.is_empty());
+    assert!(store
+        .load_meta(&child_id.to_owned())
+        .await
+        .unwrap()
+        .agent_status
+        .is_active());
+    snapshot
+}
 
 #[tokio::test]
 async fn test_bound_subagent_resume_requires_same_root_but_allows_siblings() {
@@ -44,7 +67,7 @@ async fn test_bound_subagent_resume_requires_same_root_but_allows_siblings() {
     );
     let mut config = resume_config(MockSessionResources::new(), child_id.clone());
     config.session_resources = Arc::clone(&store);
-    SessionFactory::resume_subagent(Some(&sibling), config)
+    AdmittedSessionFactory::resume_subagent(Some(&sibling), config)
         .await
         .expect("same-root siblings can resume");
     assert_eq!(
@@ -156,9 +179,62 @@ async fn assert_background_tail_completion(outcome: TailOutcome, panic_forwarder
             .unwrap();
         Ok(())
     }));
-    let spawned = SessionFactory::spawn_subagent(None, config)
+    let spawned = AdmittedSessionFactory::spawn_subagent(None, config)
         .await
         .expect("后台注册成功");
+    if panic_forwarder {
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(5), complete_rx)
+                .await
+                .unwrap()
+                .is_err()
+        );
+        assert_eq!(manager.active_count(), 1);
+        assert!(matches!(
+            manager.list_tasks()[0].1,
+            BackgroundTaskStatus::Running
+        ));
+        assert_eq!(bridge_stops.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let snapshot = unsettled_execution(&store, &spawned.child_thread_id).await;
+        assert_eq!(snapshot.state.terminal_obligations.len(), 1);
+        let command = snapshot.state.terminal_obligations.values().next().unwrap();
+        let WorkAction::PublishTaskSettlement { delivery, binding } = &command.action else {
+            panic!("forwarding failure must retain the exact task terminal publication");
+        };
+        assert_eq!(binding.owner_task_id, spawned.task_id.unwrap());
+        if matches!(outcome, TailOutcome::ModelError) {
+            let peri_acp_types::store::PersistedPayload::SystemReminder { reminder, .. } =
+                peri_acp_types::store::deserialize_persisted_payload(
+                    &delivery.event.content.serialized,
+                )
+                .unwrap()
+            else {
+                panic!("terminal responsibility must retain its typed failure reminder");
+            };
+            let failure: peri_acp_types::error::SafeSubagentFailure =
+                serde_json::from_value(reminder.as_reminder().metadata["subagent_failure"].clone())
+                    .unwrap();
+            assert_eq!(failure.child_thread_id(), spawned.child_thread_id);
+            assert_eq!(failure.diagnostic().status(), Some(429));
+            assert_eq!(failure.diagnostic().provider(), Some("fixture"));
+        }
+        let parent = store
+            .load_session_work(&WorkQuery {
+                session_id: "tail-parent".into(),
+                limit: 1,
+            })
+            .await
+            .unwrap();
+        assert!(parent.state.deliveries.is_empty());
+        let mut receiver = event_rx.lock();
+        while let Ok(event) = receiver.try_recv() {
+            assert!(!matches!(
+                event,
+                ExecutorEvent::SubagentStopped { .. } | ExecutorEvent::BackgroundTaskCompleted(_)
+            ));
+        }
+        return;
+    }
     let (result, events, active_at_callback) =
         tokio::time::timeout(std::time::Duration::from_secs(5), complete_rx)
             .await
@@ -287,29 +363,26 @@ async fn test_spawn_subagent_sync_forwarder_panic_is_failure() {
     config.event_handler = Some(Arc::new(FnEventHandler(move |event| {
         capture.lock().push(event);
     })));
-    let error = match SessionFactory::spawn_subagent(None, config).await {
+    let error = match AdmittedSessionFactory::spawn_subagent(None, config).await {
         Ok(_) => panic!("forwarder panic 不得返回成功"),
         Err(error) => error,
     };
     assert!(error.to_string().contains("An internal error occurred"));
     assert!(error.to_string().contains("child_thread_id:"));
     assert_eq!(bridge_stops.load(std::sync::atomic::Ordering::SeqCst), 0);
-    let events = events.lock();
-    assert!(matches!(
-        events.last(),
-        Some(ExecutorEvent::SubagentStopped { is_error: true, .. })
-    ));
+    let child_id = error
+        .downcast_ref::<crate::session::subagent::SubagentFailure>()
+        .unwrap()
+        .child_thread_id();
     assert_eq!(
         events
+            .lock()
             .iter()
             .filter(|event| matches!(event, ExecutorEvent::SubagentStopped { .. }))
             .count(),
-        1
+        0
     );
-    assert_eq!(
-        store.statuses().last().map(|(_, status)| status.as_str()),
-        Some("error")
-    );
+    unsettled_execution(&store, child_id).await;
 }
 
 struct TerminalPanicBridge;
@@ -337,18 +410,19 @@ async fn test_spawn_subagent_terminal_bridge_panic_is_failure() {
     config.event_handler = Some(Arc::new(FnEventHandler(move |event| {
         capture.lock().push(event);
     })));
-    let error = match SessionFactory::spawn_subagent(None, config).await {
+    let error = match AdmittedSessionFactory::spawn_subagent(None, config).await {
         Ok(_) => panic!("terminal bridge panic 不得返回成功"),
         Err(error) => error,
     };
     assert!(error.to_string().contains("An internal error occurred"));
     assert!(error.to_string().contains("child_thread_id:"));
-    assert!(matches!(
-        events.lock().last(),
-        Some(ExecutorEvent::SubagentStopped { is_error: true, .. })
-    ));
-    assert_eq!(
-        store.statuses().last().map(|(_, status)| status.as_str()),
-        Some("error")
-    );
+    assert!(!events
+        .lock()
+        .iter()
+        .any(|event| matches!(event, ExecutorEvent::SubagentStopped { .. })));
+    let child_id = error
+        .downcast_ref::<crate::session::subagent::SubagentFailure>()
+        .unwrap()
+        .child_thread_id();
+    unsettled_execution(&store, child_id).await;
 }

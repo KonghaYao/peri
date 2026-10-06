@@ -63,7 +63,7 @@ async fn pause_or_later_resume_cannot_commit_the_old_models_response() {
             FrozenContext::builder().build(),
             None,
         );
-        let mut context = StageContext::builder(
+        let mut context = StageContext::best_effort_fixture_builder(
             session.start_turn(),
             session.transcript(),
             session.queue().clone(),

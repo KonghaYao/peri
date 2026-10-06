@@ -7,7 +7,7 @@ use super::v2_bridge::build_subagent_stop_v2;
 use crate::agent::events::ExecutorEvent;
 use crate::agent::events_v2::{observe_event_to_executor, EventBus};
 use crate::session::factory::DeregisterRuntimeFn;
-use crate::session::turn::TurnId;
+use crate::session::TurnContext;
 use peri_acp_types::session_resources::{SessionMetaPatch, SessionResources};
 use peri_acp_types::thread::{AgentStatus, ThreadId};
 
@@ -67,7 +67,7 @@ impl Drop for DeregisterGuard {
 /// 排空，遥测可以保持 incomplete，不能宣称取消后仍能保证 v2 Stop 交付。
 pub(crate) struct BgStopEmitV2 {
     pub(crate) event_bus: Weak<EventBus>,
-    pub(crate) turn_id: TurnId,
+    pub(crate) turn: Arc<TurnContext>,
     pub(crate) parent_agent_id: Option<AgentId>,
     pub(crate) child_agent_id: AgentId,
     pub(crate) agent_name: String,
@@ -100,10 +100,13 @@ impl Drop for BgCleanupGuard {
             deregister(&self.thread_id);
         }
         if let Some(stop) = &self.stop {
+            let Some(admission) = stop.turn.work_admission() else {
+                return;
+            };
             // 单一 v2 事件构造：v2 发射（parent 身份存在时）+ v1 协议化直发
             // （sender 存在时）。ObserveEvent 身份透传：child_agent_id → instance_id。
             let ev = build_subagent_stop_v2(
-                stop.turn_id,
+                admission.execution.turn_id,
                 stop.parent_agent_id,
                 stop.child_agent_id,
                 &stop.agent_name,

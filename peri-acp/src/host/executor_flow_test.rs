@@ -25,7 +25,6 @@ use peri_acp_types::{
     interaction::{InteractionContext, InteractionResponse, UserInteractionBroker},
     messages::{BaseMessage, MessageContent},
     permission::{PermissionMode, SharedPermissionMode},
-    session_resources::SessionResources,
 };
 use peri_agent::session::exec::executor_helpers::{
     ForwarderLauncherFn, StageBuildFn, StageBuildRequest,
@@ -34,13 +33,16 @@ use serial_test::serial;
 use tokio_util::sync::CancellationToken as AgentCancellationToken;
 
 use crate::session::executor::{
-    run_session_loop, AutoClassifierFactory, FrozenSessionData, PromptStopReason, SessionContext,
-    SubagentLlmFactory, TurnInput,
+    AutoClassifierFactory, FrozenSessionData, PromptStopReason, SessionContext, SubagentLlmFactory,
+    TurnInput,
 };
+#[path = "execution_fixture_test.rs"]
+pub(super) mod execution_fixture;
 use crate::{
     provider::{LlmProvider, PeriConfig, ProfileConfig, Profiles, ProviderConfig, ProviderModels},
     session::{agent_pool::AgentPool, event_sink::EventSink, SessionManager},
 };
+pub(super) use execution_fixture::run_session_loop;
 use peri_middlewares::{host_ports::AgentCatalogProvider, tool_search::ToolSearchIndex};
 #[cfg(not(windows))]
 use peri_model::{
@@ -276,7 +278,7 @@ impl UserInteractionBroker for NoopBroker {
 
 // ── Helper 工厂函数 ─────────────────────────────────────────────────────────
 
-/// 构造最小 SessionContext（flow 测试走预取消中断路径；stage 装配桥经
+/// 构造可靠 Store 与显式 mock SDK 的 SessionContext（stage 装配桥经
 /// 真实 ACP 桥注入——与生产 host/prompt.rs 同模式；LLM 工厂从测试
 /// LlmProvider + AgentPool 烘焙，装配路径实际调用）。
 ///
@@ -284,16 +286,9 @@ impl UserInteractionBroker for NoopBroker {
 pub(super) async fn make_session_context(session_id: &str) -> SessionContext {
     // 事件广播宿主：发射端（EventPublisher 适配）与订阅端（subscribe 工厂）
     // 共享同一 Controller 实例，保持迁移前「publish/subscribe 同一广播」语义。
-    // Controller 只持会话资源门面：夹具开一个临时真实库（该门面在本用例里不被执行）。
-    let controller: Arc<dyn SessionResources> =
-        peri_agent::resources::open_session_resources_with(Some(
-            std::env::temp_dir()
-                .join(format!("peri-exec-flow-{}", uuid::Uuid::new_v4()))
-                .join("threads.db"),
-        ))
-        .await
-        .unwrap();
-    let controller = Arc::new(peri_controller::Controller::new(controller));
+    // Controller 与 durable execution 共享同一次打开的真实 SQLite 门面。
+    let (resources, directory) = execution_fixture::new_resources(session_id).await;
+    let controller = Arc::new(peri_controller::Controller::new(resources.clone()));
     // 测试 LlmProvider + AgentPool + PeriConfig（与迁移前 executor_test 同源）
     let provider = LlmProvider::OpenAi {
         api_key: "test-key".to_string(),
@@ -398,7 +393,7 @@ pub(super) async fn make_session_context(session_id: &str) -> SessionContext {
         }))
     };
 
-    SessionContext {
+    let mut context = SessionContext {
         cwd: "/tmp".to_string(),
         provider_name: "OpenAI:gpt-4o".to_string(),
         provider_model_name: "gpt-4o".to_string(),
@@ -418,8 +413,8 @@ pub(super) async fn make_session_context(session_id: &str) -> SessionContext {
         broker: Arc::new(NoopBroker),
         permission_mode: SharedPermissionMode::new(PermissionMode::Bypass),
         session_access: None,
-        session_resources: None,
-        thread_id: None,
+        session_resources: Some(resources),
+        thread_id: Some(session_id.into()),
         plugin_skill_roots: vec![],
         plugin_loaded: vec![],
         hook_groups: vec![],
@@ -456,11 +451,18 @@ pub(super) async fn make_session_context(session_id: &str) -> SessionContext {
         ),
         session_start_source: None,
         request_id: None,
+        execution_admission: None,
+        recipient_lifecycle: 1,
+        execution_admission_port: None,
+        sdk_run_started: None,
+        sdk_admission_observed: None,
         allow_await_wake: false,
         continuation_notify: None,
         user_input_mailbox: None,
         frozen_fallback_builder: None,
-    }
+    };
+    execution_fixture::bind_execution(&mut context, Some(directory));
+    context
 }
 
 /// 夹具的会话任务管理器登记：生产由 host 请求路径（`bind_session_tasks`，
@@ -477,11 +479,14 @@ pub(super) struct SessionTaskBindings {
 }
 
 impl SessionTaskBindings {
-    /// 生成真实 `TaskManager` 并绑定到 `pool` 的 `session_id`。
-    pub(super) fn bind(&self, pool: &peri_middlewares::mcp::McpClientPool, session_id: &str) {
-        let manager: Arc<dyn peri_acp_types::tasks::TaskManager> =
-            Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
-        pool.bind_session_task_manager(session_id, &manager);
+    /// 把 executor 持有的真实 `TaskManager` 绑定到 `pool`。
+    pub(super) fn bind(&self, pool: &peri_middlewares::mcp::McpClientPool, ctx: &SessionContext) {
+        let manager = ctx
+            .session_access
+            .as_ref()
+            .and_then(|access| access.task_manager(&ctx.session_id))
+            .expect("fixture must bind the actual executor task owner");
+        pool.bind_session_task_manager(&ctx.session_id, &manager);
         self.managers
             .lock()
             .expect("夹具任务管理器登记不得中毒")
@@ -537,6 +542,8 @@ async fn make_session_context_with_manager(
         .expect("session 登记失败");
     ctx.session_access =
         Some(Arc::new(sm.clone()) as Arc<dyn peri_acp_types::session::SessionAccessPort>);
+    ctx.session_resources = Some(sm.session_resources().clone());
+    execution_fixture::bind_execution(&mut ctx, None);
     (ctx, sm)
 }
 
@@ -544,7 +551,11 @@ async fn make_session_context_with_manager(
 /// ProductionChainAssembler + build_compact_hooks（测试 ctx hook_groups 为空
 /// → (None, None)）；测试无 Langfuse → bridge factory None）。
 pub(super) fn make_stage_build(ctx: &SessionContext) -> StageBuildFn {
-    let ctx_for_stage = ctx.clone();
+    let mut ctx_for_stage = ctx.clone();
+    if let Some(factory) = ctx.primary_llm_factory.clone() {
+        ctx_for_stage.primary_llm_factory =
+            Some(Arc::new(move || execution_fixture::wrap_model(factory())));
+    }
     Arc::new(move |sbr| {
         let (compact_pre_hook, compact_post_hook) = crate::host::prompt::build_compact_hooks(
             &ctx_for_stage.hook_groups,

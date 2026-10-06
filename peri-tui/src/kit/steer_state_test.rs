@@ -95,8 +95,118 @@ fn test_steer_pending_dispatch_disables_repeat_takeback() {
     ])));
     assert_eq!(
         state.rows("s")[0].state,
-        SteerItemState::Dispatching,
+        SteerItemState::Publishing,
         "发出意图后同条不得继续取回"
+    );
+}
+
+#[test]
+fn published_unclaimed_input_allows_only_atomic_takeback() {
+    let mut state = make_state();
+    let mut snapshot = make_snapshot(2);
+    snapshot.items[0].state = UserInputState::Dispatching;
+    state.accept_snapshot(snapshot, 1, true);
+    assert_eq!(state.rows("s")[0].state, SteerItemState::Dispatching);
+    assert!(matches!(
+        state.action_kind("s", 1, SteerQueueAction::TakeBack { id: "a".into() }, true),
+        Some(SteerCommandKind::TakeBack {
+            restore_draft: true,
+            ..
+        })
+    ));
+    assert!(
+        state
+            .action_kind(
+                "s",
+                1,
+                SteerQueueAction::Dispatch {
+                    ids: vec!["a".into()]
+                },
+                true
+            )
+            .is_none()
+    );
+    assert!(state.recover("s", 1, true).is_none());
+}
+
+#[test]
+fn claimed_snapshot_cannot_be_taken_back_or_republished() {
+    let mut state = make_state();
+    let mut snapshot = make_snapshot(2);
+    snapshot.items[0].state = UserInputState::Claimed;
+    state.accept_snapshot(snapshot, 1, true);
+    assert_eq!(state.rows("s")[0].state, SteerItemState::Claimed);
+    assert!(
+        state
+            .action_kind("s", 1, SteerQueueAction::TakeBack { id: "a".into() }, true)
+            .is_none()
+    );
+    assert!(
+        state
+            .action_kind(
+                "s",
+                1,
+                SteerQueueAction::Dispatch {
+                    ids: vec!["a".into()]
+                },
+                true
+            )
+            .is_none()
+    );
+}
+
+#[test]
+fn unknown_publication_or_withdrawal_keeps_original_command_and_no_recovery() {
+    for kind in [
+        SteerCommandKind::Dispatch(vec!["a".into()]),
+        SteerCommandKind::TakeBack {
+            id: "a".into(),
+            restore_draft: true,
+        },
+    ] {
+        let mut state = make_state();
+        let command = make_command(kind);
+        state.begin(command.clone());
+        state.reject(&command, false);
+        let mut snapshot = make_snapshot(2);
+        snapshot.items[0].state = UserInputState::Dispatching;
+        state.accept_snapshot(snapshot, 1, true);
+        assert!(
+            state
+                .action_kind("s", 1, SteerQueueAction::TakeBack { id: "a".into() }, true)
+                .is_none()
+        );
+        assert!(
+            state
+                .action_kind(
+                    "s",
+                    1,
+                    SteerQueueAction::Dispatch {
+                        ids: vec!["a".into()]
+                    },
+                    true
+                )
+                .is_none()
+        );
+        assert!(state.pending_command("s", &command.command_id).is_some());
+        assert!(state.recover("s", 1, true).is_none());
+    }
+}
+
+#[test]
+fn unknown_enqueue_does_not_enable_takeback_from_a_later_published_snapshot() {
+    let mut state = make_state();
+    let command = make_command(SteerCommandKind::Enqueue(make_input("a")));
+    state.begin(command.clone());
+    state.reject(&command, false);
+    let mut snapshot = make_snapshot(2);
+    snapshot.items[0].state = UserInputState::Dispatching;
+    state.accept_snapshot(snapshot, 1, true);
+    assert_eq!(state.rows("s")[0].state, SteerItemState::Submitting);
+    assert!(
+        state
+            .action_kind("s", 1, SteerQueueAction::TakeBack { id: "a".into() }, true)
+            .is_none()
     );
 }
 
@@ -115,6 +225,8 @@ fn test_steer_takeback_waits_for_receipt_and_preserves_raw_draft() {
     state.settle(
         &command,
         UserInputQueueReceipt {
+            work_receipts: Vec::new(),
+            publication_generations: Default::default(),
             snapshot: UserInputQueueSnapshot {
                 items: Vec::new(),
                 ..make_snapshot(2)
@@ -198,6 +310,8 @@ fn test_steer_takeback_discard_keeps_rejected_enqueue_recoverable() {
 
 fn takeback_receipt() -> UserInputQueueReceipt {
     UserInputQueueReceipt {
+        work_receipts: Vec::new(),
+        publication_generations: Default::default(),
         snapshot: UserInputQueueSnapshot {
             items: Vec::new(),
             ..make_snapshot(2)
@@ -277,6 +391,8 @@ fn test_steer_confirmed_takeback_survives_session_reload() {
     state.settle(
         &command,
         UserInputQueueReceipt {
+            work_receipts: Vec::new(),
+            publication_generations: Default::default(),
             snapshot: UserInputQueueSnapshot {
                 items: Vec::new(),
                 ..make_snapshot(2)
@@ -314,6 +430,8 @@ fn test_steer_takeback_receipt_after_reload_remains_recoverable() {
     state.settle(
         &command,
         UserInputQueueReceipt {
+            work_receipts: Vec::new(),
+            publication_generations: Default::default(),
             snapshot: UserInputQueueSnapshot {
                 items: Vec::new(),
                 ..make_snapshot(2)
@@ -380,6 +498,8 @@ fn test_steer_idle_submission_skips_queue_until_delivery() {
     state.settle(
         &command,
         UserInputQueueReceipt {
+            work_receipts: Vec::new(),
+            publication_generations: Default::default(),
             snapshot,
             results: Vec::new(),
             taken_back: None,
@@ -423,14 +543,14 @@ fn test_steer_idle_submission_rejected_recovers_draft() {
 }
 
 #[test]
-fn test_steer_idle_submission_queued_by_server_becomes_visible() {
+fn test_steer_idle_submission_snapshot_without_receipt_stays_unconfirmed() {
     let mut state = make_idle_state();
     state.begin(make_command(SteerCommandKind::Enqueue(make_input("a"))));
     state.accept_snapshot(make_snapshot(3), 1, false);
     assert_eq!(
         state.rows("s")[0].state,
-        SteerItemState::Queued,
-        "竞争或取消退回后遵循服务端排队事实"
+        SteerItemState::Submitting,
+        "队列事实不替代原命令回执，未知发布不能同时撤回或重发"
     );
 }
 

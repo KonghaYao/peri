@@ -66,7 +66,7 @@ fn make_test_ctx() -> StageContext {
     );
     let transcript = std::sync::Arc::new(parking_lot::RwLock::new(MessageTranscript::new()));
     let queue = MessageQueue::new();
-    StageContext::new(turn, transcript, queue)
+    StageContext::new_best_effort_fixture(turn, transcript, queue)
 }
 
 #[tokio::test]

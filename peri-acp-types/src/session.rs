@@ -78,6 +78,12 @@ impl std::fmt::Display for TurnId {
 /// ACP 侧 `SessionManager` 实现本端口；print mode / 测试等无 session 场景
 /// 为 `None`（调用方保持原 None 语义，仅读路径可用时生效）。
 pub trait SessionAccessPort: Send + Sync {
+    fn task_terminal_delivery(
+        &self,
+        _session_id: &str,
+    ) -> Option<Arc<dyn crate::tasks::TaskTerminalDelivery>> {
+        None
+    }
     /// 会话级共享 v2 MessageQueue（`AcpSession.v2_message_queue`）。
     /// 返回 clone（内部 Arc 共享，语义同 `SessionManager::v2_queue_for`）。
     fn v2_message_queue(&self, session_id: &str) -> Option<MessageQueue>;

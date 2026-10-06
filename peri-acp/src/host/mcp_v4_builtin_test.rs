@@ -523,9 +523,13 @@ async fn closed_web_tool_call_never_reaches_approval_or_wire() {
         // 关闭名：模型编造的调用（批准决策 ⇒ 若它触达审批，计数必然变化）。
         ScriptedToolCall::new(CLOSED_NAME, serde_json::json!({ "query": "closed" })),
     ]));
-    let result = run_wire_prompt_with_frozen(
+    let ctx =
         session_context_with_broker(&harness, "mcp-v4-builtin-closed-diff", Arc::clone(&broker))
-            .await,
+            .await;
+    let resources = ctx.session_resources.clone().unwrap();
+    let session_id = ctx.session_id.clone();
+    let result = run_wire_prompt_with_frozen(
+        ctx,
         &sink,
         &model,
         Some(frozen_with_disabled(&["WebMiddleware"])),
@@ -533,14 +537,14 @@ async fn closed_web_tool_call_never_reaches_approval_or_wire() {
     .await;
 
     assert!(
-        result.ok,
-        "模型编造未知名只能结算为工具级错误，不得 fatal: {:?}",
+        !result.ok,
+        "模型编造无可信 target 的工具必须冻结原 Reason: {:?}",
         result.failure
     );
     assert_eq!(
         model.call_count(),
-        3,
-        "两条脚本调用 + 收尾必须都在**同一条 turn** 内跑完（Reason ×3）"
+        2,
+        "无可信 target 的响应不得提交或触发第三次 Reason"
     );
 
     // ① 正控制：可用工具确实触达审批恰 1 次 ⇒ 审批面已装配（下面的「未触达」才非空）。
@@ -569,22 +573,26 @@ async fn closed_web_tool_call_never_reaches_approval_or_wire() {
         .filter(|(name, _, _)| name == CLOSED_NAME)
         .cloned()
         .collect();
-    assert_eq!(
-        closed_ends.len(),
-        1,
-        "编造的关闭名调用必须恰有一条结算（说明该调用真的走到了结算面）: {all_ends:?}"
-    );
     assert!(
-        closed_ends[0].2,
-        "未知工具结算必须是 error 结果: {closed_ends:?}"
+        closed_ends.is_empty(),
+        "不得虚构未 dispatch 工具的结算: {all_ends:?}"
     );
-    assert!(
-        closed_ends[0]
-            .1
-            .contains(&format!("Tool not found: {CLOSED_NAME}")),
-        "结算文案必须是「未知工具」（不是审批拒绝 / 不是 server 侧失败）: {:?}",
-        closed_ends[0].1
-    );
+    let work = resources
+        .load_session_work(&peri_acp_types::session_resources::work::WorkQuery {
+            session_id,
+            limit: 100,
+        })
+        .await
+        .unwrap();
+    assert!(work.blocked);
+    assert!(work.state.works.values().any(|record| record.stage
+        == peri_acp_types::session_resources::work::WorkStage::Blocked
+        && record.reason_request.is_some()));
+    assert!(!work
+        .state
+        .invocations
+        .values()
+        .any(|record| record.intent.tool_name == CLOSED_NAME));
 
     // ④ wire 面：关闭名 0 次；available 工具恰一条（同一 turn 内的正控制）。
     let calls = wire_tool_calls(&harness);

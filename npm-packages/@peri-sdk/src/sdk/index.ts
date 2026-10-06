@@ -4,7 +4,7 @@ export { SendReceipt } from "../agent/send-receipt";
 export { BareHarnessConfig } from "../config/bare-harness-config";
 export type { MetaHarnessKey, PeriConfig } from "../config/peri-config";
 export { Session } from "../agent/session";
-export { SessionCloseIncompleteError, SessionCloseUnknownError, SessionControlNotAppliedError } from "../agent/session-control";
+export { SessionCloseIncompleteError, SessionCloseUnknownError, SessionControlNotAppliedError, SessionControlBlockedError } from "../agent/session-control";
 export type {
     ExecutionBinding, ControlAction, ControlCommand, ControlState, ControlReceipt, ControlRejection,
     ControlResolution, ControlSnapshot, CommandExpectation, StopCommand, CloseOptions,
@@ -32,6 +32,8 @@ export { TursoStorage } from "../storage/turso-storage";
 export type { SessionStorage } from "../storage/types";
 export type { SessionSummary } from "../storage/session-summary";
 export { StdioTransport } from "../transport/stdio-transport";
+export { RpcError } from "../transport/rpc-error";
+export * from "../execution/index";
 export type {
   JsonRpcNotification,
   ReverseRequestHandler,

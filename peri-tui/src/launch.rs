@@ -173,7 +173,7 @@ pub async fn attach_acp(
         };
 
         if let Some(provider) = provider {
-            let host_config = peri_acp::host::assemble::assemble_server_config(
+            let mut host_config = peri_acp::host::assemble::assemble_server_config(
                 peri_acp::host::assemble::HostAssemblyInput {
                     provider: provider.clone(),
                     peri_config: app.services.peri_config.clone(),
@@ -213,11 +213,19 @@ pub async fn attach_acp(
             // 该句柄此前仅由 ServiceRegistry 持有但无任何消费者读取。
 
             let (client_transport, server_transport) = mpsc_transport_pair();
-            let host = peri_acp::host::spawn_acp_server(Arc::new(server_transport), host_config);
-
             let (acp_client, notification_tx, notification_rx) =
                 AcpTuiClient::new_interactive(client_transport);
-            acp_client.spawn_pump(notification_tx);
+            let dispatcher =
+                crate::sdk_execution::launch_sdk_dispatcher_for_client(acp_client.clone()).await?;
+            let server_transport = Arc::new(server_transport);
+            host_config.execution_admission_port = Some(Arc::new(
+                peri_acp::host::execution_admission::ReverseExecutionAdmission::new(Arc::new(
+                    peri_acp::transport::AcpRequestBridge(server_transport.clone()),
+                )),
+            ));
+            let host = peri_acp::host::spawn_acp_server(server_transport, host_config);
+
+            acp_client.spawn_pump_with_execution_dispatcher(notification_tx, Some(dispatcher));
 
             app.acp_deployment = Some(crate::acp_client::AcpDeployment::new(
                 acp_client.clone(),

@@ -359,7 +359,7 @@ fn make_test_ctx() -> StageContext {
     );
     let transcript = std::sync::Arc::new(parking_lot::RwLock::new(MessageTranscript::new()));
     let queue = MessageQueue::new();
-    StageContext::new(turn, transcript, queue)
+    StageContext::new_best_effort_fixture(turn, transcript, queue)
 }
 
 #[tokio::test]
@@ -394,7 +394,7 @@ async fn test_resolution_error_emits_tool_started_and_ended() {
     let turn = TurnContext::new(Arc::from("/tmp"), Arc::new(CancellationToken::new()));
     let transcript = Arc::new(parking_lot::RwLock::new(MessageTranscript::new()));
     let queue = MessageQueue::new();
-    let ctx = StageContext::builder(turn, transcript, queue)
+    let ctx = StageContext::best_effort_fixture_builder(turn, transcript, queue)
         .with_event_bus(Arc::new(bus))
         .build();
 
@@ -712,9 +712,13 @@ async fn test_dispatch_emits_fast_completion_before_atomic_batch_commit() {
     transcript
         .write()
         .append(BaseMessage::human("previous history"));
-    let mut ctx = StageContext::builder(turn, Arc::clone(&transcript), MessageQueue::new())
-        .with_event_bus(Arc::new(bus))
-        .build();
+    let mut ctx = StageContext::best_effort_fixture_builder(
+        turn,
+        Arc::clone(&transcript),
+        MessageQueue::new(),
+    )
+    .with_event_bus(Arc::new(bus))
+    .build();
     let release = Arc::new(tokio::sync::Notify::new());
     for (name, gate) in [("Slow", Some(Arc::clone(&release))), ("Fast", None)] {
         ctx.runtime.tools.write().insert(

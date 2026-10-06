@@ -54,10 +54,6 @@ async fn test_fork_registers_session_and_copies_history() {
             workflow_middleware: None,
             title: None,
             tags: Vec::new(),
-
-            continuation_epoch: 0,
-            continuation_in_flight: false,
-            continuation_mq_steering_pending: false,
         },
     );
     let server_task = tokio::spawn(host::run_acp_server_with_sessions(

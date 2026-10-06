@@ -12,9 +12,7 @@ export class SendReceipt implements PromiseLike<void> {
         text: string,
     ) {
         session.trackInput(this.inputId, text);
-        this.delivery = session.waitForDelivery(this.inputId, () =>
-            this.queued.then(() => session.dispatch(this.inputId)),
-        ).then(() => {
+        this.delivery = session.waitForDelivery(this.inputId).then(() => {
             this.sent = true;
         });
         this.queued = session.enqueue(this.inputId, text).then(

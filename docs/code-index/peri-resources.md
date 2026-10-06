@@ -1,6 +1,6 @@
 # peri-resources 代码索引
 
-> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-10-05（schema 15 增加领域控制与命令回执；schema 14 删除会话执行 owner 表；schema 12 的 Machine → Workspace → Session 归属仍保留）。
+> 速查表：把「我想做什么」映射到文件。细节以代码为准。schema 17 增加持久原 WorkCommand journal；schema 16 增加 durable work；schema 15 增加领域控制与命令回执；schema 14 删除会话执行 owner 表；schema 12 的 Machine → Workspace → Session 归属仍保留。
 > 依据：peri-resources/src 源码、lib.rs 模块注释（伞形 PRD 决策 20）
 
 Emscripten target 只编译 Turso adapter，排除 SQLx、workflow 与 `sqlite_store` 源码；Native target 同时编译 SQLite 与 Turso adapter，由 `context` 按 locator 选择。`sessions::failure` 与 `canonical` 提供共用领域规则。Turso 会话数据存于远端；WASM 复用 `RemoteExecution` 的虚拟工作区观测，通过远端组合工厂接入主线。会话执行唯一性、进程代际协调与接管由 `peri-sdk` 负责，Resources 不持有执行 registry、租约或 Store owner CAS。旧 WASM 身份与快照格式的会话只读历史，不能继续执行。Node/Bun 的可写会话、ACP、模型调用与恢复验收见 [`WASM 接入验收`](../../spec/issues/2026-10-02-wasm-feasibility-plan.md)。
@@ -10,6 +10,16 @@ Emscripten target 只编译 Turso adapter，排除 SQLx、workflow 与 `sqlite_s
 ## 架构速览
 
 - 领域控制：`sessions/control.rs` 维护共用 SQL/回执编码，规则由 `peri-acp-types::session_resources::control::decide_control` 单一权威裁决；`sqlite_store/session_data/control.rs` 与 `remote/session_control.rs` 同事务提交状态、命令摘要/原回执与 closing 投影。`resources/gate_control.rs` 在 Unknown 时冻结并只对账原命令；内部 ObserveAttempt 仅定位当前执行，不签发执行资格/lease。schema 14→15 保留 store ID、历史和旧 closing 意图；契约 `tests/session_control_contract.rs` 与 `remote/session_control_test.rs`。
+- Durable work：`peri-acp-types/src/session_resources/work/reducer.rs` 是唯一业务 reducer；`sessions/work.rs`、`sessions/work/effects.rs` 与 `sqlite_store/session_data/work.rs`、`remote/session_work{,_journal}.rs` 原子提交 content/event、processing obligation、Reason/Act checkpoint 与原回执。schema 17 的 `session_work_commands` 在业务效果之前保存完整原命令；remote 复用 qualified mutation，Begin ACK Unknown 不发送业务效果。`resources/gate_work.rs` 与 `gate.rs` 从 Store journal 恢复冻结；`load_session_work` 返回 `pending_commands` 和 blocked snapshot，`load_work_command` 按 session/mutation ID 查询已 ACK 的原命令与原回执。恢复只对账原 ID/原 qualifiers，不建立 Peri lease。真实事务与进程退出窗口契约：`tests/durable_work_contract.rs`、`tests/durable_work/journal_contract.rs`、`remote/session_work_test.rs`；remote transport 合同使用真实 SQLite，不代表 Turso 网络部署验收。
+- Work lifecycle：`work/query.rs` 的候选、Blocked 与 processing barrier 依据真实 batch/admission lifecycle；`WorkSnapshot::validate_work_lifecycle` 与 reducer 拒绝将旧 work 重标为当前生命周期。`has_pending_current_work` 用于当前生命周期 barrier，全历史查询保留旧记录；缺失来源仍 LegacyUnknown/fail-closed。真实 Close→Reopen 隔离契约位于 `tests/durable_work/reopen_contract.rs` 与 `terminal_contract.rs`。
+
+### 持久能力与失效边界（RCRA §8.6）
+
+- 本地部署使用 `src/sessions/sqlite_store/connection.rs` 的 SQLite WAL + `synchronous=NORMAL`，不是 FULL。对数据库及 WAL 文件保持完整的进程崩溃/重启域，已 ACK 的 processing 责任声明 RPO=0；证据是 `tests/durable_work/journal_contract.rs::sqlite_owned_command_journal_survives_process_crash_before_and_after_effects` 真子进程 kill 后重新开库，保留已 Accepted 的原命令、原回执、内容、投影与义务，并对未知 mutation 恢复原 ID。该合同覆盖业务提交前、提交后但 journal ACK 前的窗口，不是电断/fsync 实验。
+- 不声明备份回退、跨 host、掉电、磁盘毁损的 RPO=0；NORMAL 不能当成 FULL 的掉电保证。域外丢失已进入执行的证据不能由 Transcript、缺行或 LegacyUnknown 猜回已处理，须由部署/SDK 报告 typed DataLoss；Resources 未提供不可回退日志或跨主机副本。SDK 独立存储的 FULL 配置不扩大本地 Resources 的故障域。
+- Remote 通过 `turso_serverless 0.1.3` 的真实 HTTP/libSQL 托管事务提交业务效果与回执；BEGIN/业务/ACK 各自有稳定 qualified ID，读回原 receipt 才算对账。成功 provider ACK 表达驱动观察到事务成功、autocommit 状态，不自行证明 provider 的 fsync、跨副本耐久性或备份 RPO。响应丢失/超时冻结原 command，禁止重造 qualifiers 或盲重派。`remote/session_work_test.rs` 的 SQL 故障 transport 合同只证明适配器规则；实际 HTTP 入口另见 `tests/durable_work_http_contract.rs`，实际 WASM 接线验收归 SDK，不把前者替代后者。
+- 真实 HTTP 合同已在本机 `sqld 0.24.32` 上验证空库首开、原命令/Accepted 回执与正文跨 facade 重开保留、同 ID 异内容冲突和 pre-send NotApplied 封存；它未模拟 provider 掉电或跨副本失效。显式运行入口：`PERI_TEST_SQLD=$(cd npm-packages/@peri-sdk && mise which sqld) ./scripts/cargo-rmcp-patched.sh test --locked -p peri-resources --test durable_work_http_contract -- --ignored`。Current schema writable-open 不执行旧 `session_environments` backfill；v2 Machine/Workspace 归属仍为唯一权威。
+- 本文不宣称事件/回执/原命令已具有有限保留期或安全退休水位。现实现保留内容和去重证据，不因 Close/Reopen、投影或 ACK 删除；pending 配额不能冒充全历史容量上限。无不可重放证明时不得做 TTL 删除；全历史容量治理/去重退休仍是独立发布缺口。
 
 - 时间入口：生产路径经 `peri-time` 读取 UTC 墙钟、单调时钟并执行 sleep/timeout。`src/sessions/remote/connection.rs` 保留远端请求超时的 `Exceeded` 分类；`src/sessions/resources/deployment.rs` 与 `resources.rs` 保留关闭结清超时分类；`src/sessions/sqlite_store/connection.rs` 用单调时钟限制 schema 开库锁等待。持久字段继续使用既有 RFC 3339 形状，`ThreadMeta` 的 Chrono 类型在本 crate 边界由 `SystemTime` 转换。
 

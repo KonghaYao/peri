@@ -193,18 +193,22 @@ impl McpClientPool {
     ) -> Result<(), String> {
         let initiator = row.initiator_for_scope(session_id)?;
         let raw_id = row.task.task.task_id.clone();
+        let (binding, manager, delivery) = self
+            .recover_immutable_task_owner(session_id, &client.name, &raw_id, peer)
+            .await?;
+        let (_, registration) = self.external_task_registration_for_lifecycle(
+            session_id,
+            binding.recipient_lifecycle,
+            Some(initiator),
+            Some(delivery),
+            &client.name,
+            &raw_id,
+            BgTaskKind::Shell,
+            &row.summary,
+            true,
+            &row.task.task.created_at,
+        )?;
         if row.task.status().is_terminal() {
-            let (manager, registration) = self.external_task_registration(
-                session_id,
-                Some(initiator),
-                None,
-                &client.name,
-                &raw_id,
-                BgTaskKind::Shell,
-                &row.summary,
-                true,
-                &row.task.task.created_at,
-            )?;
             let transition_id = row
                 .terminal_transition_id
                 .as_deref()
@@ -217,24 +221,15 @@ impl McpClientPool {
                 )
                 .await?;
         } else {
-            let task_id = self.register_external_task(
-                session_id,
-                Some(initiator),
-                None,
-                &client.name,
-                &raw_id,
-                BgTaskKind::Shell,
-                &row.summary,
-                true,
-                &row.task.task.created_at,
-            )?;
-            match self.spawn_managed_task_subscription(
+            let task_id = manager.register_external(registration)?;
+            match self.spawn_managed_task_subscription_for_lifecycle(
                 client.name.clone(),
                 session_id.to_owned(),
                 raw_id,
                 task_id,
                 true,
                 peer.clone(),
+                binding.recipient_lifecycle,
             ) {
                 Ok(()) | Err(crate::mcp::task_scope::TaskAdmissionError::DuplicateKey) => {}
                 Err(error) => return Err(error.to_string()),
@@ -546,7 +541,8 @@ impl McpClientPool {
         }
         Ok(())
     }
-    pub(crate) fn spawn_managed_task_subscription(
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn spawn_managed_task_subscription_for_lifecycle(
         self: &Arc<Self>,
         server: String,
         session_id: String,
@@ -554,9 +550,14 @@ impl McpClientPool {
         task_id: String,
         is_workspace_shell: bool,
         initial_peer: Peer<RoleClient>,
+        lifecycle: u64,
     ) -> Result<(), crate::mcp::task_scope::TaskAdmissionError> {
         let weak_pool = Arc::downgrade(self);
-        let manager = self.session_bindings.read().manager(&session_id);
+        let manager = self
+            .session_bindings
+            .read()
+            .binding_at(&session_id, lifecycle)
+            .map(|(_, manager)| manager);
         let key = crate::mcp::McpTaskKey::TaskStatus {
             server: server.clone(),
             task_id: task_id.clone(),

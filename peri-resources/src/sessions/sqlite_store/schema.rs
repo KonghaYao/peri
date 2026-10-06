@@ -29,6 +29,8 @@ pub(super) enum SchemaState {
     Version12,
     Version13,
     Version14,
+    Version15,
+    Version16,
     Current,
 }
 
@@ -48,6 +50,8 @@ pub(super) async fn inspect(connection: &mut SqliteConnection) -> Result<SchemaS
         .await?;
     match version {
         v if v == CURRENT_SCHEMA_VERSION => return Ok(SchemaState::Current),
+        16 => return Ok(SchemaState::Version16),
+        15 => return Ok(SchemaState::Version15),
         14 => return Ok(SchemaState::Version14),
         13 => return Ok(SchemaState::Version13),
         12 => return Ok(SchemaState::Version12),
@@ -159,7 +163,11 @@ impl SqliteSessionDatabase {
         }
         if matches!(
             state,
-            SchemaState::Version12 | SchemaState::Version13 | SchemaState::Version14
+            SchemaState::Version12
+                | SchemaState::Version13
+                | SchemaState::Version14
+                | SchemaState::Version15
+                | SchemaState::Version16
         ) {
             return Self::remove_execution_owner_schema(&mut connection).await;
         }
@@ -211,7 +219,23 @@ impl SqliteSessionDatabase {
         sqlx::query(crate::sessions::control::SEED_STATE)
             .execute(&mut *tx)
             .await?;
-        sqlx::query("PRAGMA user_version = 15")
+        for statement in [
+            crate::sessions::work::CREATE_STATE,
+            crate::sessions::work::CREATE_EVENTS,
+            crate::sessions::work::CREATE_RECEIPTS,
+            crate::sessions::work::CREATE_COMMANDS,
+        ] {
+            sqlx::query(statement).execute(&mut *tx).await?;
+        }
+        sqlx::query(crate::sessions::work::SEED_STATE)
+            .bind(crate::sessions::work::legacy_state_json()?)
+            .bind(crate::sessions::work::initial_state_json()?)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(crate::sessions::work::QUARANTINE_UNOWNED_COMMANDS)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("PRAGMA user_version = 17")
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;

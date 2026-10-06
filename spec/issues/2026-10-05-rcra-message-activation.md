@@ -67,6 +67,14 @@
 - 验证：六 crate 全量 lib 5711 passed / 10 ignored；补充 owner 10 passed、stdio 18 passed；七 crate all-targets clippy（`-D warnings`）、workspace check、doc tests（11 passed / 5 ignored）、层依赖和格式检查通过。控制存储本地契约 12 passed、远端生产 adapter + SQLite 故障传输 10 passed；不是远端部署或整体发布证据。
 - 边界：SDK 唯一 attempt 准入、持久处理检查点、所有生产者可靠发布及原协议切换属于第 5 步。冷关闭缺少可信资源 owner 连接时返回 Incomplete 并保留意图；不能把连接缺失当作已关闭。全部真实 E2E 在完成第 5 步生产接线后执行。
 
+### 第 5 步实施与验证中的边界
+
+- SessionResources 使用统一领域 reducer，持久保存完整原 WorkCommand、可靠接纳、领取、Reason 请求、响应与 Act 意图、调用绑定及终态投递义务；本地和远端 adapter 不从 Transcript 重造处理责任。schema 17 为原命令对账提供版本准入；无证据的旧数据保持 LegacyUnknown。
+- SDK 持久 registry 是唯一 instance/attempt 准入，主、子及 TUI/print 使用同一协议。Peri 执行入口先校验完整票据与当前生命周期，再提交领域入口回执；真正执行和资源排空后才结清 attempt。通知只提示扫描，不直接启动旧 continuation loop。
+- Reason 冻结实际模型请求，响应与所有 Act 意图原子移交责任；非幂等副作用在未知提交或结果时阻塞，不能盲目重放。子会话冻结能力上限，当前工作的委托引用独立持久保存；结果先获得直接发起会话强 ACK，再释放子会话终态义务。
+- Reopen 保留旧事实但创建新生命周期资源，旧批次、旧终态及旧控制不成为新生命周期执行候选。用户输入先可靠发布，撤回与领取原子竞争；大正文不进入 SDK 准入摘要。
+- 已完成的局部证据包括真实 SQLite 子进程崩溃、远端 adapter 故障传输、原命令 Unknown 对账、真实 HTTP 模型请求、冷子会话恢复、终态投递和历史生命周期隔离。完整 workspace、SDK Native/WASM、安装包及 E2E 门槛正在收敛；下方发布清单尚未据这些局部结果勾选。
+
 ## 实施工作
 
 - [ ] 定义稳定调用/任务/事件/投递/批次契约与可信会话能力，统一主子调用绑定。

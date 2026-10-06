@@ -1,4 +1,5 @@
 import type { Sandbox } from "../sandbox/sandbox";
+import type { SessionExecutionOptions } from "../execution/session-execution";
 
 export type AcpMcpServer =
     | { type: "http"; url: string; headers?: Record<string, string> }
@@ -39,6 +40,7 @@ export interface AgentOptions {
     path?: string;
     instructions?: string;
     mcpServers?: Record<string, AcpMcpServer>;
+    execution?: SessionExecutionOptions;
     onPermissionRequest?: (request: PermissionRequest) => "allow_once" | "reject_once" | Promise<"allow_once" | "reject_once">;
     onElicitation?: (request: ElicitationRequest) => ElicitationDecision | Promise<ElicitationDecision>;
 }

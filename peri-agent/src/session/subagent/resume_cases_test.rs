@@ -31,7 +31,7 @@ async fn test_resume_subagent_active_thread_rejected() {
     let mut meta = ThreadMeta::new_at("/tmp", peri_time::now_wall());
     meta.id = id.clone();
     meta.parent_thread_id = Some("parent-thread-1".to_string());
-    store.create_thread(meta).await.unwrap();
+    store.create_resumable_thread(meta).await.unwrap();
 
     // 预置 active（ThreadMeta 默认）→ 拒绝
     let config = resume_config(Arc::clone(&store), id.clone());
@@ -53,7 +53,7 @@ async fn test_resume_subagent_active_thread_rejected() {
 
     // 非 active 后校验通过 → 完整执行（EchoLLM 完成 → 收尾 done）
     let config = resume_config(Arc::clone(&store), id.clone());
-    let spawned = SessionFactory::resume_subagent(None, config)
+    let spawned = AdmittedSessionFactory::resume_subagent(None, config)
         .await
         .expect("非 active 后可恢复");
     assert_eq!(spawned.child_thread_id, id);
@@ -66,17 +66,14 @@ async fn test_resume_subagent_active_thread_rejected() {
     );
 }
 
-/// resume_subagent：parent 链不匹配不再拒绝（parent 链校验已移除）——
-/// meta.parent_thread_id 与父 session thread_id 不一致时仍可恢复成功。
-/// thread_id 即恢复凭证，不做所有权校验（曾误判拒绝兄弟 subagent 恢复）。
 #[tokio::test]
-async fn test_resume_subagent_parent_mismatch_not_rejected() {
+async fn test_resume_subagent_legacy_thread_identity_does_not_authorize_execution() {
     let store = MockSessionResources::new();
     let id = uuid::Uuid::now_v7().to_string();
     let mut meta = ThreadMeta::new_at("/tmp", peri_time::now_wall());
     meta.id = id.clone();
     meta.parent_thread_id = Some("other-parent".to_string()); // 与父 session 不一致
-    store.create_thread(meta).await.unwrap();
+    store.create_legacy_thread(meta).await.unwrap();
     store.update_thread_status(&id, "done").await.unwrap();
 
     let parent = Session::new(
@@ -84,16 +81,27 @@ async fn test_resume_subagent_parent_mismatch_not_rejected() {
         FrozenContext::builder().build(),
         Some("parent-thread-2".into()),
     );
-    let config = resume_config(store.clone(), id.clone());
-    let spawned = SessionFactory::resume_subagent(Some(&parent), config)
-        .await
-        .expect("parent 链不匹配不再拒绝恢复");
-    assert_eq!(spawned.child_thread_id, id, "thread_id 不变");
+    let llm = RecordingLLM::new();
+    let calls = llm.received.clone();
+    let config = resume_config_with(
+        store.clone(),
+        id.clone(),
+        Box::new(llm),
+        SubagentRunMode::Sync,
+        None,
+        None,
+    );
+    let error = resume_err(Some(&parent), config).await;
+    assert!(
+        error.contains("Blocked: saved child runtime metadata unavailable"),
+        "{error}"
+    );
+    assert!(calls.read().is_empty());
     let statuses = store.statuses();
     assert_eq!(
         statuses.last().map(|(_, s)| s.as_str()),
         Some("done"),
-        "恢复完成后收尾 done"
+        "拒绝执行后必须回滚准备阶段认领"
     );
 }
 
@@ -118,7 +126,7 @@ async fn test_resume_subagent_main_agent_via_host_parent_id() {
     });
 
     let config = resume_config(Arc::clone(&store), id.clone());
-    let spawned = SessionFactory::resume_subagent(Some(&parent), config)
+    let spawned = AdmittedSessionFactory::resume_subagent(Some(&parent), config)
         .await
         .expect("主 agent 场景恢复应成功");
     assert_eq!(spawned.child_thread_id, id, "thread_id 不变");
@@ -138,7 +146,7 @@ async fn test_resume_subagent_validation_passes_and_runs() {
     let mut meta = ThreadMeta::new_at("/tmp", peri_time::now_wall());
     meta.id = id.clone();
     meta.parent_thread_id = Some("parent-thread-3".to_string());
-    store.create_thread(meta).await.unwrap();
+    store.create_resumable_thread(meta).await.unwrap();
     store.update_thread_status(&id, "done").await.unwrap();
 
     let parent = Session::new(
@@ -147,7 +155,7 @@ async fn test_resume_subagent_validation_passes_and_runs() {
         Some("parent-thread-3".into()),
     );
     let config = resume_config(store.clone(), id.clone());
-    let spawned = SessionFactory::resume_subagent(Some(&parent), config)
+    let spawned = AdmittedSessionFactory::resume_subagent(Some(&parent), config)
         .await
         .expect("校验通过后恢复执行");
     assert_eq!(spawned.child_thread_id, id, "thread_id 不变");
@@ -188,7 +196,7 @@ async fn test_resume_subagent_replays_transcript_and_preserves_thread_id() {
         Some(parent_id.into()),
     );
     let config = resume_config(store.clone(), thread_id.clone());
-    let spawned = SessionFactory::resume_subagent(Some(&parent), config)
+    let spawned = AdmittedSessionFactory::resume_subagent(Some(&parent), config)
         .await
         .expect("resume ok");
 
@@ -280,7 +288,7 @@ async fn test_resume_subagent_pops_unpaired_tool_call_ai() {
         None,
         None,
     );
-    let spawned = SessionFactory::resume_subagent(None, config)
+    let spawned = AdmittedSessionFactory::resume_subagent(None, config)
         .await
         .expect("resume ok");
     assert!(!spawned.interrupted);
@@ -350,7 +358,7 @@ async fn test_resume_subagent_keeps_complete_tool_round() {
         .unwrap();
 
     let config = resume_config(store.clone(), thread_id.clone());
-    let spawned = SessionFactory::resume_subagent(None, config)
+    let spawned = AdmittedSessionFactory::resume_subagent(None, config)
         .await
         .expect("resume ok");
 
@@ -382,7 +390,7 @@ async fn test_resume_subagent_new_prompt_appended() {
 
     let mut config = resume_config(store.clone(), thread_id.clone());
     config.prompt = Some("do the new thing".to_string());
-    let spawned = SessionFactory::resume_subagent(None, config)
+    let spawned = AdmittedSessionFactory::resume_subagent(None, config)
         .await
         .expect("resume ok");
 
@@ -405,10 +413,10 @@ async fn test_resume_subagent_new_prompt_appended() {
     );
 }
 
-/// 中断 → 恢复 → 完成（R-M3 实际语义）：sync 中断收尾写 "error"，
-/// 恢复完成后写 "done"；thread_id 全程不变
 #[tokio::test]
-async fn test_resume_subagent_interrupted_then_resumed_completes() {
+async fn test_resume_subagent_interrupted_then_reopen_preserves_blocked_reason_request() {
+    use peri_acp_types::session_resources::work::{ObligationStatus, WorkQuery, WorkStage};
+    use peri_acp_types::session_resources::SessionResources;
     let store = MockSessionResources::new();
     let thread_id = uuid::Uuid::now_v7().to_string();
     preset_resumable_thread(&store, &thread_id, None).await;
@@ -429,7 +437,7 @@ async fn test_resume_subagent_interrupted_then_resumed_completes() {
         Some(token.clone()),
     );
     let first_resume =
-        tokio::spawn(async move { SessionFactory::resume_subagent(None, config).await });
+        tokio::spawn(async move { AdmittedSessionFactory::resume_subagent(None, config).await });
     entered_rx.await.expect("sync subagent 必须进入 Reason");
     token.cancel();
     let spawned1 = first_resume
@@ -446,34 +454,71 @@ async fn test_resume_subagent_interrupted_then_resumed_completes() {
         );
     }
 
+    let query = WorkQuery {
+        session_id: thread_id.clone(),
+        limit: 1,
+    };
+    let interrupted = store.load_session_work(&query).await.unwrap();
+    assert!(interrupted.blocked);
+    assert!(interrupted.candidates.is_empty());
+    let original = interrupted.state.works.values().next().unwrap();
+    assert_eq!(original.stage, WorkStage::Blocked);
+    assert!(original.request_id.is_some());
+    assert!(original
+        .reason_request
+        .as_ref()
+        .unwrap()
+        .serialized_request
+        .contains("Continue your previous task"));
+    assert!(original.response.is_none());
+    assert!(interrupted
+        .state
+        .obligations
+        .values()
+        .all(|obligation| obligation.status != ObligationStatus::Satisfied));
     super::close_lifecycle_cases::reopen_closed_child_fixture(&store, &thread_id).await;
-    let config = resume_config(store.clone(), thread_id.clone());
-    let spawned2 = SessionFactory::resume_subagent(None, config)
-        .await
-        .expect("resume 2 ok");
-    assert!(!spawned2.interrupted);
-    assert_eq!(spawned2.child_thread_id, thread_id, "thread_id 不变");
-    assert!(!Arc::ptr_eq(
-        spawned1
-            .session
-            .subagent_host()
-            .unwrap()
-            .task_manager
-            .as_ref()
-            .unwrap(),
-        spawned2
-            .session
-            .subagent_host()
-            .unwrap()
-            .task_manager
-            .as_ref()
-            .unwrap(),
-    ));
-    let statuses = store.statuses();
+    let llm = RecordingLLM::new();
+    let calls = llm.received.clone();
+    let config = resume_config_with(
+        store.clone(),
+        thread_id.clone(),
+        Box::new(llm),
+        SubagentRunMode::Sync,
+        None,
+        None,
+    );
+    let error = match AdmittedSessionFactory::resume_subagent(None, config).await {
+        Err(error) => error,
+        Ok(_) => panic!("Reopen must not authorize regeneration of the unknown model request"),
+    };
+    assert!(
+        error.to_string().contains(
+            "Blocked: original model request requires reconciliation before implicit continuation"
+        ),
+        "{error}"
+    );
+    assert!(calls.read().is_empty());
+    let after_reopen = store.load_session_work(&query).await.unwrap();
+    assert!(after_reopen.candidates.is_empty());
     assert_eq!(
-        statuses.last().map(|(_, s)| s.as_str()),
-        Some("done"),
-        "恢复完成后收尾 done"
+        after_reopen.state.works.get(&original.work_id),
+        Some(original)
+    );
+    assert_eq!(after_reopen.state.budgets, interrupted.state.budgets);
+    for (delivery_id, obligation) in &interrupted.state.obligations {
+        assert_eq!(
+            after_reopen.state.obligations.get(delivery_id),
+            Some(obligation)
+        );
+    }
+    assert!(after_reopen
+        .state
+        .obligations
+        .values()
+        .all(|obligation| obligation.status != ObligationStatus::Satisfied));
+    assert_eq!(
+        after_reopen.state.admissions.len(),
+        interrupted.state.admissions.len()
     );
 }
 
@@ -498,7 +543,7 @@ async fn test_resume_subagent_concurrent_resume_mutex() {
             None,
             None,
         );
-        SessionFactory::resume_subagent(None, config).await
+        AdmittedSessionFactory::resume_subagent(None, config).await
     });
 
     // 等待 t1 完成「校验 → 置 active」（锁内置位；随后 t1 进入执行并被 gate 挂起）
@@ -518,7 +563,7 @@ async fn test_resume_subagent_concurrent_resume_mutex() {
     let thread_id2 = thread_id.clone();
     let t2 = tokio::spawn(async move {
         let config = resume_config(store2.clone(), thread_id2);
-        SessionFactory::resume_subagent(None, config).await
+        AdmittedSessionFactory::resume_subagent(None, config).await
     });
     let t2_res = t2.await.expect("t2 task ok");
     match t2_res {
@@ -577,7 +622,7 @@ async fn test_resume_subagent_rolls_back_status_on_rebuild_failure() {
 
     // 回滚后可再次恢复成功（不残留互斥态）
     let config = resume_config(store.clone(), thread_id.clone());
-    let spawned = SessionFactory::resume_subagent(None, config)
+    let spawned = AdmittedSessionFactory::resume_subagent(None, config)
         .await
         .expect("回滚后可再次恢复");
     assert_eq!(spawned.child_thread_id, thread_id);
@@ -586,7 +631,7 @@ async fn test_resume_subagent_rolls_back_status_on_rebuild_failure() {
 /// parent None 组合：meta.parent_thread_id = Some(x) 且调用方无 parent session
 /// （/bg 命令等路径）→ 恢复成功（无 parent 链校验，仅存在性 + status 校验）
 #[tokio::test]
-async fn test_resume_subagent_parent_none_skips_chain_check() {
+async fn test_resume_subagent_explicit_delegation_runs_without_parent_session_handle() {
     let store = MockSessionResources::new();
     let thread_id = uuid::Uuid::now_v7().to_string();
     // meta 声明了父链，但调用方无 parent session（/bg 命令等路径）
@@ -597,7 +642,7 @@ async fn test_resume_subagent_parent_none_skips_chain_check() {
         .unwrap();
 
     let config = resume_config(store.clone(), thread_id.clone());
-    let spawned = SessionFactory::resume_subagent(None, config)
+    let spawned = AdmittedSessionFactory::resume_subagent(None, config)
         .await
         .expect("parent None 时无 parent 链校验，恢复成功");
     assert_eq!(spawned.child_thread_id, thread_id);
@@ -632,7 +677,7 @@ async fn test_resume_subagent_background_mode_done() {
         Some(Arc::clone(&task_manager)),
         None,
     );
-    let spawned = SessionFactory::resume_subagent(None, config)
+    let spawned = AdmittedSessionFactory::resume_subagent(None, config)
         .await
         .expect("bg resume ok");
 
@@ -704,7 +749,7 @@ async fn test_resume_subagent_background_mode_cancelled() {
         }
         Ok(())
     }));
-    let spawned = SessionFactory::resume_subagent(None, config)
+    let spawned = AdmittedSessionFactory::resume_subagent(None, config)
         .await
         .expect("bg resume ok");
     assert!(spawned.task_id.is_some(), "bg 模式必须有 task_id");
@@ -781,7 +826,7 @@ async fn test_resume_subagent_bg_registration_failure_rolls_back() {
         Some(Arc::clone(&task_manager)),
         None,
     );
-    let spawned = SessionFactory::resume_subagent(None, config)
+    let spawned = AdmittedSessionFactory::resume_subagent(None, config)
         .await
         .expect("回滚后可再次恢复");
     assert_eq!(spawned.child_thread_id, thread_id);
@@ -844,7 +889,7 @@ async fn test_resume_subagent_bg_beyond_previous_agent_cap() {
         Some(Arc::clone(&task_manager)),
         None,
     );
-    let spawned = SessionFactory::resume_subagent(None, config)
+    let spawned = AdmittedSessionFactory::resume_subagent(None, config)
         .await
         .expect("超过 3 个在跑任务时 bg 恢复不得被拒绝");
     assert_eq!(spawned.child_thread_id, thread_id);

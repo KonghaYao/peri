@@ -170,11 +170,26 @@ pub(super) async fn build_and_execute_agent(
         .and_then(|sa| sa.task_manager(session_id));
 
     let on_bg_complete = Some({
-        let router = async_router.clone();
-        Arc::new(move |result: &BackgroundTaskResult, kind: BgTaskKind| {
-            router.route_bg_result(result, kind);
-            Ok(())
-        }) as peri_acp_types::tasks::OnBgCompleteFn
+        match (
+            &ctx.session_resources,
+            ctx.session_access
+                .as_ref()
+                .and_then(|access| access.v2_message_queue(session_id)),
+        ) {
+            (Some(resources), Some(queue)) => {
+                crate::session::bg_complete::durable_bg_complete_callback(
+                    crate::agent::async_tasks::durable_task_terminal_delivery(
+                        Arc::clone(resources),
+                        session_id.into(),
+                        ctx.recipient_lifecycle,
+                        queue,
+                    ),
+                )
+            }
+            _ => Arc::new(|_: &BackgroundTaskResult, _: BgTaskKind| {
+                Err("required terminal publication route unavailable".into())
+            }) as peri_acp_types::tasks::OnBgCompleteFn,
+        }
     });
 
     // ── L5 执行体注入面（stage 构建 / 事件发射 / LLM 缓存 / cancel cascade / forwarder）──
@@ -207,6 +222,7 @@ pub(super) async fn build_and_execute_agent(
         session_resources: ctx.session_resources.clone(),
         thread_id: ctx.thread_id.clone(),
         agent_input,
+        execution_admission: ctx.execution_admission.clone(),
         history_payloads,
         history,
         cached_llm: cached_llm.cloned(),

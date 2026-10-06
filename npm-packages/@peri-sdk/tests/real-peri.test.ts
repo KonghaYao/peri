@@ -13,6 +13,11 @@ import { ManagedAgents } from "../src/managed/managed-agents.ts";
 import { AgentClaimConflictError } from "../src/kv/agent-claim-conflict-error.ts";
 import { MemoryKV } from "../src/kv/memory-kv.ts";
 import { SqliteFileStorage } from "../src/storage/sqlite-file-storage.ts";
+import { SqliteExecutionRegistry } from "../src/execution/sqlite-registry.ts";
+import { SessionExecution } from "../src/execution/session-execution.ts";
+import { SessionControl } from "../src/agent/session-control.ts";
+import { drainClose } from "../src/agent/close-drain.ts";
+import type { PeriConfig } from "../src/config/peri-config.ts";
 
 const periBinary = resolve(import.meta.dir, "../../../target/debug/peri");
 const temporaryRoots: string[] = [];
@@ -22,7 +27,7 @@ type Fixture = {
   home: string;
   workspace: string;
   database: string;
-  settings: object;
+  settings: PeriConfig;
 };
 
 async function fixture(): Promise<Fixture> {
@@ -94,11 +99,11 @@ async function start(f: Fixture): Promise<StdioTransport> {
   });
 }
 
-async function initialize(transport: Transport) {
+async function initialize(transport: Transport, executionProtocol = false) {
   return transport.request<{
     protocolVersion: number;
     agentCapabilities: object;
-  }>("initialize", { protocolVersion: 1 });
+  }>("initialize", { protocolVersion: 1, ...(executionProtocol ? { clientCapabilities: { _meta: { "peri.executionProtocol": 1, "peri.userInputQueue": true } } } : {}) });
 }
 
 async function unusedLoopbackPort(): Promise<number> {
@@ -107,7 +112,7 @@ async function unusedLoopbackPort(): Promise<number> {
   const address = listener.address();
   if (!address || typeof address === "string")
     throw new Error("TCP listener has no port");
-  await new Promise<void>((done) => listener.close(done));
+  await new Promise<void>((done, reject) => listener.close((error) => error ? reject(error) : done()));
   return address.port;
 }
 
@@ -187,9 +192,11 @@ test("omitting settings lets Peri load its global model configuration", async ()
 test("a session can be listed and loaded by a fresh Peri process", async () => {
   const f = await fixture();
   const first = await start(f);
+  const execution = new SessionExecution(first, { database: resolve(f.home, "execution", "registry.db") });
+  first.setRequestHandler((method, params) => execution.handle(method, params));
   let sessionId: string;
   try {
-    await initialize(first);
+    await initialize(first, true);
     const created = await first.request<{ sessionId: string }>("session/new", {
       cwd: f.workspace,
       mcpServers: [],
@@ -201,14 +208,11 @@ test("a session can be listed and loaded by a fresh Peri process", async () => {
     }>("session/list", { cwd: f.workspace });
     // Peri deliberately hides sessions with no user messages from session/list.
     expect(listed.sessions).toEqual([]);
-    const completed = await first.request<{ stopReason: string }>(
-      "session/prompt",
-      {
-        sessionId,
-        prompt: [{ type: "text", text: "Reply once" }],
-      },
-    );
-    expect(completed.stopReason).toBe("end_turn");
+    const queue = await first.request<{ generation: string }>("session/input/snapshot", { sessionId });
+    const inputId = crypto.randomUUID();
+    await first.request("session/input/enqueue", { sessionId, generation: queue.generation,
+      commandId: `${inputId}:enqueue`, inputId, content: "Reply once", originalDraft: "Reply once" });
+    expect(await execution.activate(sessionId, "send")).toEqual({ status: "idle" });
     const visible = await first.request<{
       sessions: Array<{ sessionId: string }>;
     }>("session/list", { cwd: f.workspace });
@@ -216,8 +220,18 @@ test("a session can be listed and loaded by a fresh Peri process", async () => {
       visible.sessions.some((session) => session.sessionId === sessionId),
       JSON.stringify(visible),
     ).toBe(true);
+    const controls = new SessionControl();
+    const { state } = await controls.snapshot(first, sessionId);
+    const command = { sessionId, commandId: crypto.randomUUID(), expectedLifecycle: state.lifecycle,
+      expectedRevision: state.revision, expectedControlGeneration: state.controlGeneration, action: { kind: "close" as const } };
+    await drainClose(command, { apply: () => controls.apply(first, command), resolve: () => controls.resolve(first, command),
+      snapshot: () => controls.snapshot(first, sessionId), isUnresolved: () => controls.isUnresolved(command.commandId) }, {});
   } finally {
+    execution.beginRetirement();
     await first.close();
+    await execution.joinOwnedCalls();
+    await execution.recordStopped();
+    execution.close();
   }
 
   const second = await start(f);
@@ -326,7 +340,8 @@ test("one Session delivers multiple inputs through real Peri without a turn wait
 }, 30_000);
 
 test("ManagedAgents directly creates Agents and loads a historical Session", async () => {
-  const f = await fixture();
+    const f = await fixture();
+    const executionDatabase = resolve(f.home, "execution", "registry.db");
   const sandbox = new Sandbox({
     id: "demo-history",
     storage: new SqliteFileStorage({ path: f.database }),
@@ -334,7 +349,7 @@ test("ManagedAgents directly creates Agents and loads a historical Session", asy
   });
   const kv = new MemoryKV();
   const firstManager = new ManagedAgents({ kv });
-  const firstAgent = firstManager.createAgent({ path: f.workspace, id: "first-agent", sandbox });
+  const firstAgent = firstManager.createAgent({ path: f.workspace, id: "first-agent", sandbox, execution: { database: executionDatabase } });
   const created = await firstAgent.session.start(null);
   const sessionId = created.id;
   const delivery = created.send("Hello through the Agent");
@@ -357,17 +372,37 @@ test("ManagedAgents directly creates Agents and loads a historical Session", asy
     [firstAgent.id, await closeExpectation(firstAgent.session)],
     [anotherAgent.id, await closeExpectation(anotherAgent.session)],
   ]));
+  const executionRegistry = new SqliteExecutionRegistry({ path: executionDatabase });
+  const retired = await executionRegistry.read(sessionId);
+  expect(retired.instance?.status).toBe("stopped");
+  expect(retired.instance?.proofRoute.dispatcherPid).toBe(process.pid);
+  executionRegistry.close();
 
   const secondManager = new ManagedAgents({ kv });
-  const loadedAgent = secondManager.createAgent({ id: "loaded-agent", sandbox });
+  const loadedAgent = secondManager.createAgent({ id: "loaded-agent", sandbox, execution: { database: executionDatabase } });
+  let historyError: unknown;
   try {
     const loaded = await loadedAgent.session.start(sessionId);
     expect(loaded.id).toBe(sessionId);
     const { state } = await loaded.controlState();
     expect((await loaded.reopen({ commandId: crypto.randomUUID(), expectedLifecycle: state.lifecycle, expectedRevision: state.revision, expectedControlGeneration: state.controlGeneration })).decision.kind).toBe("accepted");
+    await loaded.send("Continue after verified dispatcher retirement");
+    const resumedRegistry = new SqliteExecutionRegistry({ path: executionDatabase });
+    const resumed = await resumedRegistry.read(sessionId);
+    expect(resumed.instance?.generationId).not.toBe(retired.instance?.generationId);
+    expect(resumed.previousInstances[0]?.status).toBe("stopped");
+    expect(resumed.budgets.find((budget) => budget.workId === retired.budgets[0]?.workId)?.attempts).toBe(retired.budgets[0]?.attempts);
+    resumedRegistry.close();
     expect(loadedAgent.id).not.toBe(firstAgent.id);
+  } catch (error) {
+    historyError = error;
+    throw error;
   } finally {
-    await secondManager.closeAgent(loadedAgent.id, await closeExpectation(loadedAgent.session));
+    try { await secondManager.closeAgent(loadedAgent.id, await closeExpectation(loadedAgent.session)); }
+    catch (cleanupError) {
+      if (historyError) throw new AggregateError([historyError, cleanupError], "Historical Session execution and domain cleanup failed", { cause: historyError });
+      throw cleanupError;
+    }
   }
 }, 20_000);
 
@@ -404,7 +439,10 @@ test("Sandbox Workspace MCP is discovered before the real ACP Session and outliv
   }
 }, 30_000);
 
-test("fresh ACP close remains incomplete without trusted owner recovery and retains intent", async () => {
+test.each([
+  { title: "legacy session without persisted owner binding has honest incomplete cold close and retains intent", missingBinding: true },
+  { title: "fresh ACP cold close restores persisted owner binding and settles the actual resource scope", missingBinding: false },
+])("$title", async ({ missingBinding }) => {
   const f = await fixture();
   const bind = `127.0.0.1:${await unusedLoopbackPort()}`;
   const sandbox = new Sandbox({
@@ -448,6 +486,12 @@ test("fresh ACP close remains incomplete without trusted owner recovery and reta
     expect(intent.changes).toBe(1);
     process.kill(first.pid, "SIGKILL");
     expect(await first.waitForTerminationProof()).toBe(true);
+    if (missingBinding) {
+      const legacy = new Database(f.database);
+      expect(legacy.query("UPDATE session_work_state SET state_json=json_set(state_json,'$.resourceOwners',json('{}')) WHERE session_id=?")
+        .run(sessionId).changes).toBe(1);
+      legacy.close();
+    }
 
     const before = await workspaceRpc(workspace.url, "workspace/taskSnapshot", 3, {
       _meta: { "peri/taskScope": capability },
@@ -458,19 +502,31 @@ test("fresh ACP close remains incomplete without trusted owner recovery and reta
 
     second = await sandbox.createTransport(f.workspace) as StdioTransport;
     await initialize(second);
-    await expect(second.request("session/close", { sessionId })).rejects.toMatchObject({ code: -32010 });
+    if (missingBinding) {
+      await expect(second.request("session/close", { sessionId })).rejects.toMatchObject({ code: -32010 });
+    } else {
+      const controls = new SessionControl();
+      const { state } = await controls.snapshot(second, sessionId);
+      const command = { sessionId, commandId: crypto.randomUUID(), expectedLifecycle: state.lifecycle,
+        expectedRevision: state.revision, expectedControlGeneration: state.controlGeneration, action: { kind: "close" as const } };
+      await drainClose(command, { apply: () => controls.apply(second!, command), resolve: () => controls.resolve(second!, command),
+        snapshot: () => controls.snapshot(second!, sessionId), isUnresolved: () => controls.isUnresolved(command.commandId) }, {});
+      expect(await controls.snapshot(second, sessionId)).toMatchObject({ state: { status: "closed" }, settlement: { status: "settled" } });
+    }
     const settled = new Database(f.database, { readonly: true });
     const remainingIntent = settled.query("SELECT 1 FROM session_close_intents WHERE thread_id = ?")
       .get(sessionId);
     settled.close();
-    expect(remainingIntent).not.toBeNull();
+    if (missingBinding) expect(remainingIntent).not.toBeNull();
+    else expect(remainingIntent).toBeNull();
     const snapshot = await workspaceRpc(workspace.url, "workspace/taskSnapshot", 4, {
       _meta: { "peri/taskScope": taskScopeToken(sessionId) },
     }, peer);
     const task = (snapshot.value.result?.tasks as Array<{ task?: { taskId?: string; status?: string } }>)
       .find((row) => row.task?.taskId === rawTaskId);
     expect(task).toBeDefined();
-    expect(task?.task?.status).toBe("working");
+    if (missingBinding) expect(task?.task?.status).toBe("working");
+    else expect(["completed", "failed", "cancelled"]).toContain(task?.task?.status ?? "missing");
   } finally {
     await second?.close().catch(() => {});
     await first.close().catch(() => {});

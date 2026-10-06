@@ -2,14 +2,16 @@
 
 use std::sync::Arc;
 
+use peri_acp_types::session_resources::{work::WorkQuery, FrozenState};
 use peri_acp_types::store::PersistedPayload;
+use sha2::{Digest, Sha256};
 
 use super::super::background::spawn_background_subagent;
 use super::super::run_sync::run_sync_subagent;
 use super::super::types::{SubagentResumeConfig, SubagentRunMode, SubagentSpawned};
 use super::super::v2_bridge::agent_id_from_child_thread;
 use super::claim::ResumeClaim;
-use super::context::{build_subagent_session_v2, derive_cancel_token, inherited_frozen_context};
+use super::context::{build_subagent_session_v2, derive_cancel_token};
 use crate::messages::BaseMessage;
 use crate::session::queue::{MessageKind, MessageSource, QueuedMessage};
 use crate::session::Session;
@@ -23,7 +25,7 @@ use crate::session::Session;
 /// 2. status：`agent_status == Active`（可能未正常收尾）→ 拒绝恢复
 ///
 /// bound 子会话必须与调用者属于同一根会话及工作区，兄弟子会话可互相恢复。
-/// legacy 无绑定入口保留旧行为；新执行权不能仅由持有 child_thread_id 推断。
+/// 缺少已保存授权与 frozen 证据的历史会话不可重新执行。
 ///
 /// 校验 → 置 active 段整体持锁（R-M1：防并发双 resume 双执行同一 thread）；
 /// 锁内仅 load_meta + update_thread_status（无嵌套锁，不 await run_react_loop）。
@@ -31,7 +33,7 @@ use crate::session::Session;
 /// - 分别装载 inherited/own payload 与 flags；**仅当 own 末条**含未配对 tool_calls 的 AI 时
 ///   pop（R2-MID-1：禁止从后往前找 AI；pop 后其后无消息，无孤儿 Tool 可清理）
 /// - cwd 取 `meta.cwd`（thread 创建时固化，进程重启后不得改用父 cwd）
-/// - frozen 从父 session copy（ARC-FROZEN-001；parent None 用 config 回退）
+/// - frozen、工具上限与来源来自已保存的子会话事实。
 /// - cancel token：Cascade 从父 token 优先、config fallback 派生；Independent
 ///   恒新建 token（不复用父或 config token）
 /// - **不注入** parent_messages / identity System / skill_names（F4 / R-H1：
@@ -78,10 +80,10 @@ pub(super) async fn resume_subagent_impl(
         parent_tool_call_id,
         cancel_token: cancel_token_cfg,
         cwd: _,
-        frozen_claude_md: frozen_claude_md_cfg,
-        frozen_claude_local_md: frozen_claude_local_md_cfg,
-        frozen_skill_summary: frozen_skill_summary_cfg,
-        frozen_date: frozen_date_cfg,
+        frozen_claude_md: _,
+        frozen_claude_local_md: _,
+        frozen_skill_summary: _,
+        frozen_date: _,
     } = config;
 
     // 绑定校验用一次一致快照：child 的绑定必须与 owning parent 完全相同，且两者同根。
@@ -150,6 +152,57 @@ pub(super) async fn resume_subagent_impl(
             .load_session_snapshot(&thread_id)
             .await
             .map_err(|error| anyhow::anyhow!("{error}"))?;
+        let work = session_resources
+            .load_session_work(&WorkQuery {
+                session_id: thread_id.clone(),
+                limit: 1,
+            })
+            .await?;
+        if prompt.is_none() && work.state.works.values().any(|work|
+            matches!(work.stage, peri_acp_types::session_resources::work::WorkStage::ReasonInFlight | peri_acp_types::session_resources::work::WorkStage::Blocked)
+                && work.reason_request.is_some() && work.response.is_none()) {
+            anyhow::bail!("Blocked: original model request requires reconciliation before implicit continuation");
+        }
+        let raw = work
+            .state
+            .child_resume_metadata
+            .get(&work.control.lifecycle)
+            .ok_or_else(|| anyhow::anyhow!("Blocked: saved child runtime metadata unavailable"))?;
+        let saved: super::cold::ChildResumeMetadata = serde_json::from_str(raw)?;
+        let FrozenState::Present(bytes) = &snapshot.frozen else {
+            anyhow::bail!("Blocked: saved child frozen snapshot unavailable");
+        };
+        if saved.version != 1
+            || saved.child_session_id != thread_id
+            || saved.recipient_lifecycle != work.control.lifecycle
+            || saved.frozen_digest != format!("{:x}", Sha256::digest(bytes.as_str().as_bytes()))
+            || saved.model_name != llm.model_name()
+            || saved.authorization_ref.is_empty()
+            || saved
+                .tool_origins
+                .keys()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>()
+                != saved.tool_ceiling
+        {
+            anyhow::bail!("Blocked: saved child runtime identity or authorization unavailable");
+        }
+        if tools
+            .iter()
+            .filter(|tool| saved.tool_ceiling.contains(tool.name()))
+            .any(|tool| {
+                saved
+                    .tool_origins
+                    .get(tool.name())
+                    .map(|origin| origin.as_deref())
+                    != Some(tool.mcp_server_name())
+            })
+            || !saved
+                .tool_ceiling
+                .is_subset(&tools.iter().map(|tool| tool.name().to_owned()).collect())
+        {
+            anyhow::bail!("Blocked: saved child tool origin or ceiling unavailable");
+        }
         let mut inherited = snapshot.inherited;
         let own = snapshot.payloads;
         let ancestor_ids = inherited
@@ -170,10 +223,10 @@ pub(super) async fn resume_subagent_impl(
                 .into_iter()
                 .filter(|(id, _)| own_ids.contains(id)),
         );
-        Ok::<_, anyhow::Error>((inherited, own))
+        Ok::<_, anyhow::Error>((inherited, own, saved))
     }
     .await;
-    let (inherited, mut loaded) = match restored {
+    let (inherited, mut loaded, saved) = match restored {
         Ok(history) => history,
         Err(error) => {
             let rollback = claim.rollback().await;
@@ -185,6 +238,7 @@ pub(super) async fn resume_subagent_impl(
             .into());
         }
     };
+    let max_iterations = max_iterations.min(saved.max_iterations);
     if loaded.last().is_some_and(|payload| {
         payload
             .as_message()
@@ -197,23 +251,28 @@ pub(super) async fn resume_subagent_impl(
     //    绑定身份已在上方与 owning parent 比对相等，工作区一致性随该绑定成立。
     let cwd = meta.cwd.clone();
 
-    // 3. frozen 从父 session copy（ARC-FROZEN-001：不重读磁盘；parent None 用
-    //    config 回退，与 spawn 的父侧解析一致）
-    let frozen_claude_md = parent
-        .map(|p| p.store().frozen.claude_md.to_string())
-        .or(frozen_claude_md_cfg);
-    let frozen_skill_summary = parent
-        .map(|p| p.store().frozen.skill_summary.to_string())
-        .or(frozen_skill_summary_cfg);
-    let frozen_date = parent
-        .map(|p| p.store().frozen.date.to_string())
-        .or(frozen_date_cfg);
-    let frozen = inherited_frozen_context(
-        parent,
-        &frozen_claude_md,
-        &frozen_skill_summary,
-        &frozen_date,
-    );
+    let frozen_claude_md = Some(saved.claude_md.clone());
+    let frozen_skill_summary = Some(saved.skill_summary.clone());
+    let frozen = crate::session::FrozenContext {
+        system_prompt: Arc::from(saved.system_prompt.as_str()),
+        claude_md: Arc::from(saved.claude_md.as_str()),
+        skill_summary: Arc::from(saved.skill_summary.as_str()),
+        date: Arc::from(saved.date.as_str()),
+        language: saved.language.as_deref().map(Arc::from),
+        meta_harness: peri_acp_types::meta_harness::MetaHarnessState {
+            section_overrides: saved
+                .section_overrides
+                .iter()
+                .map(|(key, value)| (key.clone(), Arc::from(value.as_str())))
+                .collect(),
+            disabled_middlewares: saved.disabled_middlewares.iter().cloned().collect(),
+            built_in_subagents_enabled: saved.built_in_subagents_enabled,
+        },
+    };
+    let ceiling = saved.tool_ceiling.clone();
+    let configured_filter = tool_filter;
+    let tool_filter: crate::session::tool_catalog::ToolFilter =
+        Arc::new(move |tool| ceiling.contains(tool.name()) && configured_filter(tool));
 
     // 4. cancel token：Cascade = 父 cancel 传播（parent 优先，回退 config 注入的
     //    父 token；均缺失时新建——与 spawn 的 :466-472 完全对齐，review low-2），
@@ -247,7 +306,7 @@ pub(super) async fn resume_subagent_impl(
             .and_then(|host| host.session_mcp_capability.clone()),
         Vec::new(), // skill_names 恒空（R-H1：恢复不重复注入 SkillPreload）
         frozen_claude_md,
-        frozen_claude_local_md_cfg,
+        saved.claude_local_md.clone(),
         frozen_skill_summary,
         tool_invocation_resolver,
         compact_config,
@@ -276,11 +335,75 @@ pub(super) async fn resume_subagent_impl(
     // 7. prompt 入队：Some(p) 原样追加（不套 fork directive——恢复目标仍是原
     //    任务，直接追加指令）；None 注入隐式 continue 常量（issue 决策 9）
     let prompt_text = prompt.unwrap_or_else(|| IMPLICIT_CONTINUE_PROMPT.to_string());
-    v2_ctx.context.session.queue.push(QueuedMessage::new(
-        MessageKind::Prompt,
-        MessageSource::UserInput,
-        BaseMessage::human(prompt_text.clone()),
-    ));
+    if matches!(run_mode, SubagentRunMode::Background) && task_manager.is_none() {
+        let rollback = claim.rollback().await;
+        let suffix = rollback
+            .err()
+            .map(|error| format!("; {error}"))
+            .unwrap_or_default();
+        return Err(format!("resume_subagent: thread {thread_id}: Background tasks not available: no task manager configured{suffix}").into());
+    }
+    let task_id = match run_mode {
+        SubagentRunMode::Sync => format!(
+            "sync-{}",
+            parent_tool_call_id
+                .as_deref()
+                .ok_or("Blocked: current delegation invocation unavailable")?
+        ),
+        SubagentRunMode::Background => format!("bg-{}", uuid::Uuid::now_v7()),
+    };
+    let publication = async {
+        let initiator = super::spawn::parent_thread_id_of(parent)
+            .ok_or("Blocked: current delegation initiator unavailable")?;
+        let invocation_id = parent_tool_call_id
+            .as_deref()
+            .ok_or("Blocked: current delegation invocation unavailable")?;
+        let current = session_resources
+            .load_session_work(&WorkQuery {
+                session_id: initiator.clone(),
+                limit: 1,
+            })
+            .await?;
+        let invocation = current
+            .state
+            .invocations
+            .get(invocation_id)
+            .ok_or("Blocked: current trusted invocation unavailable")?;
+        if invocation.intent.authorization_ref != saved.authorization_ref {
+            return Err(
+                "Blocked: current delegation authorization differs from saved ceiling".into(),
+            );
+        }
+        let lifecycle = session_resources
+            .load_session_control(&thread_id)
+            .await?
+            .lifecycle;
+        super::delegation::publish_work_delegation(
+            session_resources.clone(),
+            &thread_id,
+            lifecycle,
+            &v2_ctx.context.session.queue,
+            QueuedMessage::new(
+                MessageKind::Prompt,
+                MessageSource::UserInput,
+                BaseMessage::human(prompt_text.clone()),
+            ),
+            &initiator,
+            invocation_id,
+            &task_id,
+        )
+        .await?;
+        Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
+    }
+    .await;
+    if let Err(error) = publication {
+        let rollback = claim.rollback().await;
+        let suffix = rollback
+            .err()
+            .map(|error| format!("; {error}"))
+            .unwrap_or_default();
+        return Err(format!("{error}{suffix}").into());
+    }
 
     // 8. 执行（run mode 由本次调用决定，issue 决策 8）
     match run_mode {
@@ -317,7 +440,6 @@ pub(super) async fn resume_subagent_impl(
             // slice 5：后台恢复——生成新 task_id、TaskManager 注册（参数与 spawn
             // 调用点对齐；prompt 传实际注入文本——用户 prompt 或 continue 常量，
             // 仅用于 prompt_summary 展示，R2-LOW-3）
-            let task_id = format!("bg-{}", uuid::Uuid::now_v7());
             match spawn_background_subagent(
                 task_id.clone(),
                 thread_id.clone(),

@@ -305,15 +305,21 @@ impl SteerState {
             .as_ref()
             .into_iter()
             .flat_map(|snapshot| &snapshot.items)
+            .filter(|item| {
+                matches!(
+                    item.state,
+                    UserInputState::Queued | UserInputState::Dispatching | UserInputState::Claimed
+                )
+            })
             .filter(|item| !session.delivered.contains(&item.input_id))
             .filter(|item| !session.direct_submissions.contains(&item.input_id))
             .map(|item| SteerQueueItem {
                 id: item.input_id.clone(),
                 text: item.original_draft.clone(),
-                state: if item.state == UserInputState::Queued {
-                    SteerItemState::Queued
-                } else {
-                    SteerItemState::Dispatching
+                state: match item.state {
+                    UserInputState::Queued => SteerItemState::Queued,
+                    UserInputState::Claimed => SteerItemState::Claimed,
+                    _ => SteerItemState::Dispatching,
                 },
             })
             .collect();
@@ -324,8 +330,9 @@ impl SteerState {
         {
             match &command.kind {
                 SteerCommandKind::Enqueue(input) => {
-                    if !rows.iter().any(|row| row.id == input.input_id)
-                        && !session.delivered.contains(&input.input_id)
+                    if let Some(row) = rows.iter_mut().find(|row| row.id == input.input_id) {
+                        row.state = SteerItemState::Submitting;
+                    } else if !session.delivered.contains(&input.input_id)
                         && !session.direct_submissions.contains(&input.input_id)
                     {
                         rows.push(SteerQueueItem {
@@ -338,7 +345,7 @@ impl SteerState {
                 SteerCommandKind::Dispatch(ids) => {
                     for row in &mut rows {
                         if ids.contains(&row.id) {
-                            row.state = SteerItemState::Dispatching;
+                            row.state = SteerItemState::Publishing;
                         }
                     }
                 }
@@ -362,6 +369,49 @@ impl SteerState {
             });
         }
         rows
+    }
+
+    fn action_kind(
+        &self,
+        session_id: &str,
+        epoch: u64,
+        action: SteerQueueAction,
+        draft_is_empty: bool,
+    ) -> Option<SteerCommandKind> {
+        let snapshot = self.snapshot(session_id, epoch)?;
+        let rows = self.rows(session_id);
+        let queued = |id: &str| {
+            rows.iter()
+                .any(|row| row.id == id && row.state == SteerItemState::Queued)
+                && snapshot
+                    .items
+                    .iter()
+                    .any(|item| item.input_id == id && item.state == UserInputState::Queued)
+        };
+        match action {
+            SteerQueueAction::Dispatch { ids } => {
+                let ids: Vec<_> = ids.into_iter().filter(|id| queued(id)).collect();
+                (!ids.is_empty()).then_some(SteerCommandKind::Dispatch(ids))
+            }
+            SteerQueueAction::TakeBack { id }
+                if rows
+                    .iter()
+                    .any(|row| row.id == id && row.state.can_take_back())
+                    && snapshot.items.iter().any(|item| {
+                        item.input_id == id
+                            && matches!(
+                                item.state,
+                                UserInputState::Queued | UserInputState::Dispatching
+                            )
+                    }) =>
+            {
+                Some(SteerCommandKind::TakeBack {
+                    id,
+                    restore_draft: draft_is_empty,
+                })
+            }
+            _ => None,
+        }
     }
 }
 
@@ -423,24 +473,8 @@ pub(crate) fn act(action: SteerQueueAction, draft_is_empty: bool) {
     let epoch = atoms::BRIDGE_RESET_COUNTER.get();
     let atom = STEERS.state();
     let mut state = atom.write();
-    let rows = state.rows(&session_id);
-    let queued = |id: &str| {
-        rows.iter()
-            .any(|row| row.id == id && row.state == SteerItemState::Queued)
-    };
-    let kind = match action {
-        SteerQueueAction::Dispatch { ids } => {
-            let ids: Vec<_> = ids.into_iter().filter(|id| queued(id)).collect();
-            if ids.is_empty() {
-                return;
-            }
-            SteerCommandKind::Dispatch(ids)
-        }
-        SteerQueueAction::TakeBack { id } if queued(&id) => SteerCommandKind::TakeBack {
-            id,
-            restore_draft: draft_is_empty,
-        },
-        _ => return,
+    let Some(kind) = state.action_kind(&session_id, epoch, action, draft_is_empty) else {
+        return;
     };
     let command = SteerCommand {
         session_id: session_id.clone(),

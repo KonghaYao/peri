@@ -124,7 +124,7 @@ impl OpenAiModel {
     }
 
     #[cfg(test)]
-    fn with_transport(config: OpenAiConfig, transport: Arc<dyn HttpTransport>) -> Self {
+    pub(crate) fn with_transport(config: OpenAiConfig, transport: Arc<dyn HttpTransport>) -> Self {
         Self {
             config,
             transport,
@@ -154,6 +154,30 @@ impl OpenAiModel {
 
 #[async_trait]
 impl crate::Model for OpenAiModel {
+    fn prepare_stream(&self, request: ModelRequest) -> ModelResult<crate::PreparedModelCall> {
+        let built = Arc::new(self.build_request(&request)?);
+        let checkpoint =
+            crate::protocol::prepared::checkpoint(PROVIDER_NAME, &built.endpoint, &built.body)?;
+        let client = self.client.clone();
+        let api_key = self.config.api_key.clone();
+        let request_factory =
+            Arc::new(move || Self::native_http_request(&client, &api_key, &built));
+        let runtime = self.config.runtime.clone();
+        let transport = Arc::clone(&self.transport);
+        Ok(crate::PreparedModelCall::new(
+            checkpoint,
+            move |cancellation| {
+                Ok(runtime_http_sse_stream(
+                    &runtime,
+                    cancellation,
+                    transport,
+                    request_factory,
+                    Arc::<str>::from(PROVIDER_NAME),
+                    stream::decoders(),
+                ))
+            },
+        ))
+    }
     fn capabilities(&self) -> ModelCapabilities {
         ModelCapabilities {
             supports_tools: true,

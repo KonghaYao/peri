@@ -14,6 +14,9 @@ use tempfile::tempdir;
 use super::*;
 use crate::workspace_io::{WorkspaceMentionContent, WorkspaceReadError};
 
+#[path = "work_fixture.rs"]
+mod work_fixture;
+
 struct Reader(HashMap<String, String>);
 
 #[async_trait]
@@ -129,11 +132,13 @@ async fn mention_batch_reads_first_input_without_replaying_history() {
             input.clone(),
         ));
     }
-    let mut ctx = StageContext::new(
+    let mut ctx = StageContext::builder(
         session.start_turn(),
         session.transcript(),
         session.queue().clone(),
-    );
+    )
+    .build();
+    let _work_fixture = work_fixture::bind(&mut ctx).await;
     let mut chain = MiddlewareChain::new();
     chain.add(Box::new(AtMentionMiddleware::new(reader(&[(
         "fresh.txt",
@@ -171,11 +176,13 @@ async fn explicit_empty_batch_does_not_read_history() {
         None,
     );
     session.transcript().write().append(original.clone());
-    let mut ctx = StageContext::new(
+    let mut ctx = StageContext::builder(
         session.start_turn(),
         session.transcript(),
         session.queue().clone(),
-    );
+    )
+    .build();
+    let _work_fixture = work_fixture::bind(&mut ctx).await;
     let mut chain = MiddlewareChain::new();
     chain.add(Box::new(AtMentionMiddleware::new(reader(&[(
         "old.txt", "not read",

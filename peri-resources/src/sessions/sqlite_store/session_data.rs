@@ -45,6 +45,8 @@ mod control;
 mod history;
 #[path = "session_data/lifecycle.rs"]
 mod lifecycle;
+#[path = "session_data/work.rs"]
+mod work;
 
 /// 同一份 [`SqliteSessionDatabase`] 的数据面句柄。
 ///
@@ -75,6 +77,31 @@ pub(super) use helpers::{new_session_draft_row, new_session_row, validate_unboun
 
 #[async_trait]
 impl SessionDataPort for SqliteSessionData {
+    async fn load_work_command(
+        &self,
+        query: &peri_acp_types::session_resources::work::WorkCommandQuery,
+    ) -> SessionResourceResult<Option<peri_acp_types::session_resources::work::OwnedWorkCommand>>
+    {
+        self.read_work_command(query).await
+    }
+    async fn load_session_work(
+        &self,
+        query: &peri_acp_types::session_resources::work::WorkQuery,
+    ) -> SessionResourceResult<peri_acp_types::session_resources::work::WorkSnapshot> {
+        self.read_work(query).await
+    }
+    async fn apply_work_mutation(
+        &self,
+        command: &peri_acp_types::session_resources::work::WorkCommand,
+    ) -> SessionResourceResult<peri_acp_types::session_resources::work::WorkReceipt> {
+        self.write_work(command).await
+    }
+    async fn resolve_work_mutation(
+        &self,
+        command: &peri_acp_types::session_resources::work::WorkCommand,
+    ) -> SessionResourceResult<peri_acp_types::session_resources::work::WorkResolution> {
+        self.resolve_work(command).await
+    }
     async fn load_session_control(
         &self,
         id: &ThreadId,
@@ -106,55 +133,11 @@ impl SessionDataPort for SqliteSessionData {
     }
 
     async fn finish_close(&self, root: &ThreadId) -> SessionResourceResult<()> {
-        self.writable()?;
-        let mut tx = self
-            .database
-            .pool
-            .begin_with("BEGIN IMMEDIATE")
-            .await
-            .map_err(|error| map_sqlx(&error))?;
-        self.require_session(&mut tx, root).await?;
-        let deleted = sqlx::query("DELETE FROM session_close_intents WHERE thread_id = ?1")
-            .bind(root.as_str())
-            .execute(&mut *tx)
-            .await
-            .map_err(|error| map_sqlx(&error))?;
-        if deleted.rows_affected() != 1 {
-            return Err(SessionResourceError::conflict(
-                "session close intent is missing",
-            ));
-        }
-        tx.commit()
-            .await
-            .map_err(|_| commit_failure(Some(root.clone())))?;
-        Ok(())
+        self.finish_close_intent(root).await
     }
 
     async fn close_settlement(&self, root: &ThreadId) -> SessionResourceResult<CloseSettlement> {
-        let mut tx = self
-            .database
-            .pool
-            .begin()
-            .await
-            .map_err(|error| map_sqlx(&error))?;
-        let exists = thread_exists_on(&mut tx, root)
-            .await
-            .map_err(read_failure)?;
-        let pending: Option<(i64,)> =
-            sqlx::query_as("SELECT 1 FROM session_close_intents WHERE thread_id = ?1")
-                .bind(root.as_str())
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(|error| map_sqlx(&error))?;
-        let state = if !exists {
-            CloseSettlement::Unknown
-        } else if pending.is_some() {
-            CloseSettlement::Pending
-        } else {
-            CloseSettlement::Finished
-        };
-        tx.commit().await.map_err(|error| map_sqlx(&error))?;
-        Ok(state)
+        self.read_close_settlement(root).await
     }
 
     async fn machine_id_of(&self, id: &ThreadId) -> SessionResourceResult<Option<String>> {

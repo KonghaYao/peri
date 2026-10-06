@@ -10,6 +10,12 @@ use serde_json::{json, Value};
 use super::super::{workspace::resource_error, AcpServerConfig, SessionState};
 use crate::transport::types::AcpError;
 
+#[path = "session_control/stop_work.rs"]
+mod stop_work;
+
+#[path = "session_control/reopen.rs"]
+mod reopen;
+
 pub(super) async fn handle(
     method: &str,
     params: &Value,
@@ -83,8 +89,18 @@ async fn reconcile_effects(
                 && current.status == ControlStatus::Closing
                 && current.lifecycle == receipt.state.lifecycle
                 && current.control_generation == receipt.state.control_generation)
+            || (matches!(
+                command.action,
+                ControlAction::Pause | ControlAction::Stop { .. }
+            ) && current.status == ControlStatus::Paused
+                && current.lifecycle == receipt.state.lifecycle
+                && current.control_generation == receipt.state.control_generation)
         {
             apply_effects(cfg, sessions, command, &current).await?;
+            if matches!(command.action, ControlAction::Stop { .. }) {
+                stop_work::abandon_owned_work(cfg.session_resources.as_ref(), command, receipt)
+                    .await?;
+            }
         }
     }
     Ok(())
@@ -100,13 +116,22 @@ async fn apply_effects(
     match &command.action {
         ControlAction::Pause | ControlAction::Stop { .. } => {
             if let Some(state) = sessions.get_mut(id) {
-                state.continuation_mq_steering_pending = false;
-                state.continuation_epoch = state.continuation_epoch.saturating_add(1);
                 if let Some(token) = &state.cancel_token {
                     token.cancel();
                 }
             }
             if let Some(mailbox) = cfg.session_manager.user_input_mailbox_for(id) {
+                if matches!(command.action, ControlAction::Stop { .. }) {
+                    mailbox
+                        .reclaim_unclaimed_durable(&command.command_id, current.control_generation)
+                        .await
+                        .map_err(|error| {
+                            AcpError::new(
+                                -32010,
+                                format!("Stop input settlement remains unconfirmed: {error}"),
+                            )
+                        })?;
+                }
                 mailbox.stop();
             }
             cfg.session_manager.cancel_session(id);
@@ -148,9 +173,7 @@ async fn apply_effects(
         }
         ControlAction::Resume => {}
         ControlAction::Reopen => {
-            if let Some(state) = sessions.get_mut(id) {
-                state.closing = false;
-            }
+            reopen::apply(cfg, sessions, command, current).await?;
         }
         ControlAction::FinishClose | ControlAction::ObserveAttempt { .. } => unreachable!(),
     }

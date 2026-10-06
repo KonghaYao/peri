@@ -9,6 +9,10 @@ use super::{LoopResult, StageContext};
 mod tests;
 
 pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> LoopResult {
+    let durable = match context.work.ensure(&context).await {
+        Ok(session) => session,
+        Err(error) => return LoopResult::Error(error.into()),
+    };
     let port = context.session.transcript.read().idempotent_reminder_port();
     let binding = context.session.turn.execution_binding();
     let attempt = ControlAttempt {
@@ -24,6 +28,23 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                         "session activation is paused or closed",
                     ),
                 );
+            }
+            if let Some(session) = &durable {
+                if current.attempt.as_ref() != Some(&session.admission.execution)
+                    || current.lifecycle != session.admission.lifecycle
+                    || current.control_generation != session.admission.control_generation
+                    || !context
+                        .session
+                        .turn
+                        .bind_control_generation(session.admission.control_generation)
+                {
+                    return Err(
+                        peri_acp_types::session_resources::SessionResourceError::conflict(
+                            "registered SDK ticket no longer matches execution control",
+                        ),
+                    );
+                }
+                return Ok(());
             }
             let receipt = resources
                 .apply_session_control(&ControlCommand {

@@ -22,6 +22,10 @@ use peri_acp_types::session_resources::{
 };
 use peri_acp_types::workspace::{SessionBinding, SESSION_BINDING_VERSION};
 
+#[path = "subagent/test_helpers.rs"]
+mod test_helpers;
+use test_helpers::AdmittedSessionFactory;
+
 #[test]
 fn subagent_failure_keeps_child_identity_and_typed_model_diagnostic() {
     let failure = crate::session::subagent::SubagentFailure::new(
@@ -327,7 +331,7 @@ async fn test_spawn_subagent_creates_child_thread_with_parent_link() {
         frozen_date: None,
     };
 
-    let spawned = SessionFactory::spawn_subagent(Some(&parent), config)
+    let spawned = AdmittedSessionFactory::spawn_subagent(Some(&parent), config)
         .await
         .expect("spawn ok");
 
@@ -432,7 +436,7 @@ async fn test_spawn_subagent_main_agent_via_host_writes_parent_link() {
         frozen_date: None,
     };
 
-    let _ = SessionFactory::spawn_subagent(Some(&parent), config)
+    let _ = AdmittedSessionFactory::spawn_subagent(Some(&parent), config)
         .await
         .expect("spawn ok");
 
@@ -512,7 +516,7 @@ async fn test_spawn_subagent_copies_frozen_from_parent() {
         frozen_date: None,
     };
 
-    let spawned = SessionFactory::spawn_subagent(Some(&parent), config)
+    let spawned = AdmittedSessionFactory::spawn_subagent(Some(&parent), config)
         .await
         .expect("spawn ok");
 
@@ -588,7 +592,7 @@ async fn test_spawn_subagent_without_parent_uses_config_fallback() {
         frozen_date: Some("2026-08-05".to_string()),
     };
 
-    let spawned = SessionFactory::spawn_subagent(None, config)
+    let spawned = AdmittedSessionFactory::spawn_subagent(None, config)
         .await
         .expect("spawn ok");
 
@@ -825,7 +829,7 @@ async fn preset_resumable_thread(
     let mut meta = ThreadMeta::new_at("/tmp/work", peri_time::now_wall());
     meta.id = thread_id.to_string();
     meta.parent_thread_id = parent_thread_id.map(|s| s.to_string());
-    store.create_thread(meta).await.unwrap();
+    store.create_resumable_thread(meta).await.unwrap();
     store
         .update_thread_status(&thread_id.to_string(), "done")
         .await
@@ -835,7 +839,7 @@ async fn preset_resumable_thread(
 /// 断言 resume_subagent 返回 Err 并取回错误文本（SubagentSpawned 无 Debug，
 /// 不能直接用 unwrap_err）
 async fn resume_err(parent: Option<&Arc<Session>>, config: SubagentResumeConfig) -> String {
-    match SessionFactory::resume_subagent(parent, config).await {
+    match AdmittedSessionFactory::resume_subagent(parent, config).await {
         Err(e) => e.to_string(),
         Ok(_) => panic!("resume_subagent 应返回 Err（校验失败或重建失败）"),
     }
@@ -894,6 +898,13 @@ async fn save_bound_child(
         )
         .await
         .unwrap();
+    crate::session::test_resources::mock::history::seed_saved_fixture_runtime(
+        store.clone(),
+        &child_id,
+        frozen.clone(),
+        root,
+    )
+    .await;
     child_id
 }
 

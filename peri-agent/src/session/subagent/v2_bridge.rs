@@ -263,19 +263,6 @@ pub fn build_v2_subagent_context(
     };
 
     let host = session.subagent_host();
-    if let Some(host) = &host {
-        if let (Some(pool), Some(manager), Some(session_id)) = (
-            &host.mcp_pool,
-            &host.task_manager,
-            session.store().thread_id.as_deref(),
-        ) {
-            if pool.agent_session_binding(session_id).is_none() {
-                let inbox =
-                    peri_acp_types::session::SessionInbox::new(Arc::new(session.queue().clone()));
-                pool.bind_agent_session(session_id, inbox.handle(), manager.clone());
-            }
-        }
-    }
     let turn = session.start_turn();
     let transcript = session.transcript();
     let queue_clone = session.queue().clone();
@@ -328,6 +315,17 @@ pub fn build_v2_subagent_context(
         .with_event_bus(Arc::clone(&event_bus_arc))
         .with_session_context(session_context);
 
+    if let Some(port) = host
+        .as_ref()
+        .and_then(|host| host.execution_admission_port.clone())
+    {
+        builder = builder.with_execution_admission_port(port);
+    }
+    if let Some(host) = &host {
+        if let (Some(pool), Some(manager)) = (&host.mcp_pool, &host.task_manager) {
+            builder = builder.with_work_mcp_binding(pool.clone(), manager.clone());
+        }
+    }
     if let Some(manager) = host.and_then(|host| host.task_manager.clone()) {
         let wait = crate::agent::async_tasks::handoff::BoundedWait::new(
             crate::agent::async_tasks::handoff::HANDOFF_MAX_WAIT,

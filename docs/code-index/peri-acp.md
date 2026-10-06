@@ -24,6 +24,10 @@ workspace 资源输入从本次选中 `ConfigSource` 的资源投影取关闭位
 
 ## 速查表
 
+- 持久执行协议：`host/execution.rs` 承接 `session/work/query`、`session/work/resolve`、`session/execute` 与 `session/execute/resolve`；执行前确认 SDK 已登记的完整 admission，再由共同 Store 保存领域关联。这里不申请 Peri lease、不从连接消失推断旧 attempt 已退出。退出回执只在执行 future 与持久屏障结束、精确 attempt 清除后生成。
+- SDK 反向端口：`host/execution_admission.rs` 与 `execution_admission_jsonl.rs` 实现准入、真实进入确认和终结；stdio 走同一请求桥，TUI/print 连接 SDK SQLite sidecar。`host/user_input.rs::sdk_run_started_publisher` 在任何交互 hook 前等待客户端实际接收启动事件，事件排队不算确认。
+- 原命令恢复：`session/work/query` 返回 `pendingCommands`，`session/work/resolve` 只接受完整原 `WorkCommand`；Unknown 不生成新命令身份或重建预期 revision。`requests/resource_owners.rs` 保存生命周期级可信 owner 连接，冷恢复缺少连接/授权时明确阻塞，不借用启动会话的 MCP owner。
+
 - 领域控制入口：`host/requests/session_control.rs` 承接 `session/control`、`session/control/resolve`、`session/control/state`；Store 回执不可改写，解析出确定 Applied 后才协调取消/关闭。回放重验原生命周期、控制代际与精确 attempt；Close 的 accepted intent 不等于 settled，Independent 未交接返回未结清且不取消它。`agent/stages/execution_control.rs` 在 Receive/Reason/Act/逐工具入口核对绑定代际，暂停后即便 Resume 也不提交旧响应；验证 `host/requests/session_control_test.rs`、Agent execution-control、TUI cancel 与 SDK 真实 stdio 测试。SDK 持久 attempt 准入仍属后续步骤。
 
 ACP 出站错误诊断统一位于 `src/host/diagnostics.rs`：`ServerLoop` 的普通请求、prompt、MCP Apps、MCP over ACP、准入拒绝及生命周期锁失败均经 `ResponseDiagnostics::send` 记录方法、RPC ID、可用会话 ID、错误码与错误消息，再原样发送响应；内部错误为 ERROR，其余拒绝为 WARN，正常取消为 DEBUG。`notify.rs` 的会话信息、配置项和命令列表通知共用 `send_session_update` 记录投递失败，不记录请求参数、响应数据或通知内容。针对性回归：`./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp --lib -- host::diagnostics`。

@@ -117,6 +117,20 @@ impl SessionManager {
     }
 }
 impl SessionAccessPort for SessionManager {
+    fn task_terminal_delivery(
+        &self,
+        session_id: &str,
+    ) -> Option<Arc<dyn peri_acp_types::tasks::TaskTerminalDelivery>> {
+        let session = self.inner.sessions.get(session_id)?;
+        Some(
+            peri_agent::agent::async_tasks::durable_task_terminal_delivery(
+                self.inner.session_resources.clone(),
+                session_id.to_owned(),
+                session.recipient_lifecycle,
+                session.v2_message_queue.clone(),
+            ),
+        )
+    }
     fn v2_message_queue(&self, session_id: &str) -> Option<peri_acp_types::session::MessageQueue> {
         self.v2_queue_for(session_id)
     }

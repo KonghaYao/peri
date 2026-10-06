@@ -15,6 +15,7 @@ mod failure;
 mod filesystem;
 mod local_port;
 mod machine;
+mod work;
 #[cfg(not(target_os = "emscripten"))]
 pub use machine::adopt_file_identity;
 pub use machine::current as current_machine_id;

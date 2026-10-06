@@ -16,7 +16,7 @@ fn make_context() -> StageContext {
     let frozen = FrozenContext::builder().build();
     let session = Session::new(cwd, frozen, None);
     let turn = session.start_turn();
-    StageContext::new(turn, session.transcript(), session.queue().clone())
+    StageContext::new_best_effort_fixture(turn, session.transcript(), session.queue().clone())
 }
 
 fn make_context_with_observe() -> (StageContext, EventHandles) {

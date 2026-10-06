@@ -62,3 +62,24 @@ fn test_user_input_receipt_roundtrip_with_partial_optional_fields() {
         "快照与逐条状态回执应原样往返"
     );
 }
+
+#[test]
+fn test_user_input_receipt_preserves_durable_publication_identity() {
+    let value = serde_json::json!({
+        "snapshot": {"sessionId":"session", "generation":"session:1", "revision":1, "items":[]},
+        "results": [{"inputId":"input", "state":"dispatching"}],
+        "publicationGenerations": {"input":"send-command"},
+        "workReceipts": [{
+            "sessionId":"session", "mutationId":"input-mutation", "beforeRevision":0,
+            "revision":1, "decision":{"kind":"accepted"}, "deliveryId":"delivery",
+            "admissionSequence":1, "batchId":null, "workId":null, "workRevision":null, "stage":null
+        }]
+    });
+    let receipt: UserInputQueueReceipt = serde_json::from_value(value.clone()).unwrap();
+    assert_eq!(receipt.publication_generations["input"], "send-command");
+    assert_eq!(
+        receipt.work_receipts[0].delivery_id.as_deref(),
+        Some("delivery")
+    );
+    assert_eq!(serde_json::to_value(receipt).unwrap(), value);
+}

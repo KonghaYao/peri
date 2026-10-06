@@ -1,4 +1,5 @@
 import { EventQueue } from "./event-queue";
+import { RpcError } from "./rpc-error";
 import type { JsonRpcNotification, ReverseRequestHandler, Transport } from "./types";
 
 type Pending = {
@@ -128,7 +129,8 @@ export class JsonRpcTransport implements Transport {
       const detail = message.error;
       const description = detail && typeof detail === "object" && "message" in detail
         ? String(detail.message) : "ACP request failed";
-      pending.reject(new Error(description));
+      const fields = detail && typeof detail === "object" ? detail as { code?: unknown; data?: unknown } : {};
+      pending.reject(new RpcError(typeof fields.code === "number" ? fields.code : -32603, description, fields.data));
     } else pending.resolve(message.result);
   }
 

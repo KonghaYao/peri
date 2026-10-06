@@ -200,6 +200,10 @@ pub(crate) fn build_stage_context(
         // 会话数据
         cwd: ctx.cwd.clone(),
         session_id: ctx.session_id.clone(),
+        execution_admission_port: ctx.execution_admission_port.clone(),
+        sdk_run_started: ctx.sdk_run_started.clone(),
+        sdk_admission_observed: ctx.sdk_admission_observed.clone(),
+        recipient_lifecycle: ctx.recipient_lifecycle,
         cancel: ctx.cancel.clone(),
         broker: Arc::clone(&ctx.broker),
         permission_mode: Arc::clone(&ctx.permission_mode),

@@ -239,7 +239,7 @@ impl AssembledHostFixture {
         let mut ctx = crate::host::executor_flow_tests::make_session_context(session_id).await;
         ctx.cwd = self.dirs.workspace_str();
         ctx.mcp_pool = Some(Arc::clone(&self.pool) as Arc<dyn McpPoolPort>);
-        self.session_tasks.bind(&self.pool, session_id);
+        self.session_tasks.bind(&self.pool, &ctx);
         ctx
     }
 }

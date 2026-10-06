@@ -1,260 +1,125 @@
-//! Tests for [`session_bg_complete_callback`](super::session_bg_complete_callback)
-//! —— lazy resolve、Shell 完成投递语义、别名口径。
-
 use super::*;
-use peri_acp_types::event::ShellOutput;
-use peri_acp_types::frozen::{DeregisterRuntimeFn, RegisterRuntimeFn};
-use peri_acp_types::goal::GoalController;
-use peri_acp_types::session::{
-    MessageKind, MessageQueue, MessageSource, QueuedPayload, SessionInbox,
-};
-use peri_acp_types::system_reminder::{ReminderCategory, ReminderSource};
-use peri_acp_types::tasks::{BgTaskKind, TaskManager};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use crate::agent::async_tasks::durable_task_terminal_delivery;
+use crate::session::test_resources::{mock::work::bind_fixture_task, TestSession};
+use peri_acp_types::session::MessageQueue;
+use peri_acp_types::session_resources::work::WorkQuery;
 
-const SESSION_ID: &str = "session-bg-complete-test";
-
-/// 手写测试端口：只有 `session_inbox` 是真实路径。
-///
-/// 其余方法一律 `unimplemented!()` —— helper 一旦触碰 inbox 之外的会话状态，
-/// 测试立即失败（而不是静默通过）。
-struct FakeAccessPort {
-    inbox: parking_lot::Mutex<Option<Arc<SessionInbox>>>,
-    inbox_calls: AtomicUsize,
-}
-
-impl FakeAccessPort {
-    fn new() -> Arc<Self> {
-        Arc::new(Self {
-            inbox: parking_lot::Mutex::new(None),
-            inbox_calls: AtomicUsize::new(0),
-        })
-    }
-
-    fn with_inbox(inbox: Arc<SessionInbox>) -> Arc<Self> {
-        let port = Self::new();
-        port.set_inbox(inbox);
-        port
-    }
-
-    /// 模拟 session 注册完成后 inbox 变为可见（lazy-init 写回同一槽位）。
-    fn set_inbox(&self, inbox: Arc<SessionInbox>) {
-        *self.inbox.lock() = Some(inbox);
-    }
-
-    fn inbox_calls(&self) -> usize {
-        self.inbox_calls.load(Ordering::SeqCst)
-    }
-}
-
-impl SessionAccessPort for FakeAccessPort {
-    fn v2_message_queue(&self, _session_id: &str) -> Option<MessageQueue> {
-        unimplemented!("session bg complete callback must not read v2_message_queue")
-    }
-
-    fn session_inbox(&self, session_id: &str) -> Option<Arc<SessionInbox>> {
-        assert_eq!(
-            session_id, SESSION_ID,
-            "callback must resolve its own session id"
-        );
-        self.inbox_calls.fetch_add(1, Ordering::SeqCst);
-        self.inbox.lock().clone()
-    }
-
-    fn idle_suspended_flag(&self, _session_id: &str) -> Option<Arc<AtomicBool>> {
-        unimplemented!("session bg complete callback must not read idle_suspended_flag")
-    }
-
-    fn task_manager(&self, _session_id: &str) -> Option<Arc<dyn TaskManager>> {
-        unimplemented!("session bg complete callback must not read task_manager")
-    }
-
-    fn goal_controller(&self, _session_id: &str) -> Option<Arc<dyn GoalController>> {
-        unimplemented!("session bg complete callback must not read goal_controller")
-    }
-
-    fn register_runtime(&self, _session_id: &str) -> Option<RegisterRuntimeFn> {
-        unimplemented!("session bg complete callback must not read register_runtime")
-    }
-
-    fn deregister_runtime(&self, _session_id: &str) -> Option<DeregisterRuntimeFn> {
-        unimplemented!("session bg complete callback must not read deregister_runtime")
-    }
-
-    fn cancel_cascade_children(&self, _session_id: &str) {
-        unimplemented!("session bg complete callback must not cascade children")
-    }
-
-    fn cron_bridge_for(&self, _session_id: &str) -> bool {
-        unimplemented!("session bg complete callback must not start cron bridge")
-    }
-}
-
-/// Shell 类 bg 结果（走 `to_notification` 的 shell 分支，与生产路径同形）。
 fn shell_result(task_id: &str) -> BackgroundTaskResult {
     BackgroundTaskResult {
-        task_id: task_id.to_string(),
-        agent_name: "Bash".to_string(),
-        prompt_summary: "cargo test -p peri-agent".to_string(),
+        task_id: task_id.into(),
+        agent_name: "Bash".into(),
+        prompt_summary: "durable shell".into(),
         success: true,
-        output: String::new(),
+        output: "terminal output".into(),
         tool_calls_count: 0,
         duration_ms: 1200,
         child_thread_id: None,
         timed_out: false,
         subagent_failure: None,
-        shell_output: Some(Box::new(ShellOutput {
-            stdout_path: Some("/tmp/peri-bg/stdout.log".to_string()),
-            stderr_path: None,
-            complete: true,
-            error: None,
-            exit_code: Some(0),
-        })),
+        shell_output: None,
     }
 }
 
-fn queue_with_inbox() -> (Arc<MessageQueue>, Arc<SessionInbox>) {
-    let queue = Arc::new(MessageQueue::new());
-    let inbox = Arc::new(SessionInbox::new(Arc::clone(&queue)));
-    (queue, inbox)
+async fn wait_for_ack(callback: &OnBgCompleteFn, result: &BackgroundTaskResult) {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if callback(result, BgTaskKind::Shell).is_ok() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("durable terminal publication never acknowledged");
 }
 
 #[tokio::test]
-async fn owner_retains_result_until_late_inbox_registration_then_wakes_it() {
-    use crate::agent::async_tasks::{BackgroundTask, BackgroundTaskStatus, BgCancelHandle};
-    let manager = crate::agent::async_tasks::TaskManager::new();
-    manager
-        .register_with_kind(BackgroundTask {
-            id: "shell-lazy".into(),
-            agent_name: "Bash".into(),
-            prompt_summary: "task".into(),
-            status: BackgroundTaskStatus::Running,
-            started_at: std::time::Instant::now(),
-            chrono_started_at: chrono::Utc::now(),
-            kind: BgTaskKind::Shell,
-            cancel_handle: BgCancelHandle::Kill(Some(Box::new(|| {}))),
-            cancel_token: None,
-            pid: None,
-            output_preview: None,
-            agent_inbox: None,
-            initiator_session_id: None,
-            owner_session_id: None,
-            owner_identity: None,
+async fn owner_ack_requires_confirmed_reliable_inbox_not_queue_or_transcript() {
+    let bound = TestSession::open().await;
+    bind_fixture_task(bound.resources(), &bound.thread_id(), 1, "shell-durable").await;
+    let queue = MessageQueue::new();
+    let delivery =
+        durable_task_terminal_delivery(bound.resources(), bound.thread_id(), 1, queue.clone());
+    let callback = durable_bg_complete_callback(delivery);
+    let result = shell_result("shell-durable");
+    assert!(callback(&result, BgTaskKind::Shell).is_err());
+    wait_for_ack(&callback, &result).await;
+    assert!(callback(&result, BgTaskKind::Shell).is_ok());
+    let snapshot = bound
+        .resources
+        .load_session_work(&WorkQuery {
+            session_id: bound.thread_id(),
+            limit: 1,
         })
-        .unwrap();
-    let port = FakeAccessPort::new();
-    let delivery = session_bg_complete_callback(port.clone(), SESSION_ID.into());
-    assert!(manager
-        .settle_completed("shell-lazy", shell_result("shell-lazy"), delivery)
-        .is_err());
-    assert_eq!(manager.active_count(), 1);
-    let (queue, inbox) = queue_with_inbox();
-    port.set_inbox(Arc::clone(&inbox));
-    let waiting = inbox.await_wake();
-    tokio::pin!(waiting);
-    futures::future::poll_fn(|context| {
-        use std::future::Future;
-        assert!(waiting.as_mut().poll(context).is_pending());
-        std::task::Poll::Ready(())
-    })
-    .await;
-    assert_eq!(manager.retry_pending_deliveries(), 1);
-    tokio::time::timeout(std::time::Duration::from_secs(1), waiting)
         .await
         .unwrap();
-    assert_eq!(manager.active_count(), 0);
-    assert_eq!(queue.len(), 1);
-    assert_eq!(manager.retry_pending_deliveries(), 0);
+    assert_eq!(snapshot.state.deliveries.len(), 1);
+    assert_eq!(snapshot.state.task_bindings.len(), 1);
+    assert!(bound
+        .resources
+        .load_session_history(&bound.thread_id())
+        .await
+        .unwrap()
+        .is_empty());
 }
 
-#[test]
-fn test_missing_inbox_reports_delivery_failure() {
-    // 装配点形态：session 尚未注册（`session_inbox` 恒 None）。
-    let port = FakeAccessPort::new();
-    let callback = session_bg_complete_callback(port.clone(), SESSION_ID.to_string());
-    let result = shell_result("shell-noop");
-
-    assert!(callback(&result, BgTaskKind::Shell).is_err());
-    assert!(callback(&result, BgTaskKind::Shell).is_err());
-
-    assert_eq!(
-        port.inbox_calls(),
-        2,
-        "callback must probe the port on every call (no cached/panicking path)"
-    );
-}
-
-#[test]
-fn test_inbox_is_resolved_lazily_at_call_time() {
-    // 构造回调时 inbox 不存在（装配点早于 session 注册）。
-    let port = FakeAccessPort::new();
-    let callback = session_bg_complete_callback(port.clone(), SESSION_ID.to_string());
-    let result = shell_result("shell-lazy");
-
-    assert!(callback(&result, BgTaskKind::Shell).is_err());
-
-    // session 注册之后：同一闭包（无需重建）必须能投递。
-    let (queue, inbox) = queue_with_inbox();
-    port.set_inbox(inbox);
-    callback(&result, BgTaskKind::Shell).unwrap();
-
-    assert_eq!(
-        queue.len(),
+#[tokio::test]
+async fn missing_immutable_task_binding_never_acknowledges_or_falls_back_to_queue() {
+    let bound = TestSession::open().await;
+    let queue = MessageQueue::new();
+    let callback = durable_bg_complete_callback(durable_task_terminal_delivery(
+        bound.resources(),
+        bound.thread_id(),
         1,
-        "lazily resolved inbox must receive the Defer"
-    );
-    assert!(queue.has_wake_up(), "Defer must wake the idle session loop");
+        queue.clone(),
+    ));
+    let result = shell_result("unbound-shell");
+    for _ in 0..10 {
+        assert!(callback(&result, BgTaskKind::Shell).is_err());
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(queue.is_empty());
+    let snapshot = bound
+        .resources
+        .load_session_work(&WorkQuery {
+            session_id: bound.thread_id(),
+            limit: 1,
+        })
+        .await
+        .unwrap();
+    assert!(snapshot.state.deliveries.is_empty());
+    assert!(bound
+        .resources
+        .load_session_history(&bound.thread_id())
+        .await
+        .unwrap()
+        .is_empty());
 }
 
-#[test]
-fn test_shell_completion_is_delivered_as_defer_with_shell_source() {
-    let (queue, inbox) = queue_with_inbox();
-    let port = FakeAccessPort::with_inbox(inbox);
-    let callback = session_bg_complete_callback(port, SESSION_ID.to_string());
-    // task_id 恰好 8 字符，`to_notification` 的 short_id 截断对其为恒等。
-    let result = shell_result("shell-ab");
-
-    callback(&result, BgTaskKind::Shell).unwrap();
-
-    assert_eq!(queue.len(), 1, "exactly one message per completion");
-    assert!(queue.has_wake_up(), "Defer must wake the idle session loop");
-
-    let messages = queue.drain_all();
-    assert_eq!(messages.len(), 1);
-    assert_eq!(messages[0].kind, MessageKind::Defer);
-    assert_eq!(messages[0].source, MessageSource::ShellComplete);
-
-    let QueuedPayload::SystemReminder(reminder) = &messages[0].payload else {
-        panic!("bg completion must be delivered as a trusted system reminder");
-    };
-    let reminder = reminder.as_reminder();
-    assert_eq!(reminder.category, ReminderCategory::Task);
-    assert_eq!(reminder.source, ReminderSource("shell".to_string()));
-    assert_eq!(
-        reminder.body,
-        result.to_notification(),
-        "reminder body must be the canonical notification text"
-    );
-    assert!(reminder
-        .body
-        .starts_with("[后台任务 shell-ab 已完成] Agent: Bash | 退出码 0"));
-    assert!(reminder
-        .body
-        .contains("stdout 输出文件：/tmp/peri-bg/stdout.log"));
-}
-
-#[test]
-fn test_callback_result_is_assignable_to_acp_types_alias() {
-    // 口径证据：两处 `OnBgCompleteFn` 是同一底层类型的别名，本 helper 的返回值
-    // 可直接作为 seam 字段（acp-types 口径）使用。
-    let (queue, inbox) = queue_with_inbox();
-    let port = FakeAccessPort::with_inbox(inbox);
-    let callback: peri_acp_types::tasks::OnBgCompleteFn =
-        session_bg_complete_callback(port, SESSION_ID.to_string());
-    let result = shell_result("shell-alias");
-
-    callback(&result, BgTaskKind::Shell).unwrap();
-
-    assert_eq!(queue.len(), 1);
-    assert_eq!(queue.drain_all()[0].source, MessageSource::ShellComplete);
+#[tokio::test]
+async fn same_terminal_identity_cannot_acknowledge_changed_payload() {
+    let bound = TestSession::open().await;
+    bind_fixture_task(bound.resources(), &bound.thread_id(), 1, "shell-conflict").await;
+    let callback = durable_bg_complete_callback(durable_task_terminal_delivery(
+        bound.resources(),
+        bound.thread_id(),
+        1,
+        MessageQueue::new(),
+    ));
+    let mut result = shell_result("shell-conflict");
+    assert!(callback(&result, BgTaskKind::Shell).is_err());
+    wait_for_ack(&callback, &result).await;
+    result.output = "different terminal output".into();
+    assert!(callback(&result, BgTaskKind::Shell)
+        .unwrap_err()
+        .contains("conflicting"));
+    let snapshot = bound
+        .resources
+        .load_session_work(&WorkQuery {
+            session_id: bound.thread_id(),
+            limit: 1,
+        })
+        .await
+        .unwrap();
+    assert_eq!(snapshot.state.deliveries.len(), 1);
 }

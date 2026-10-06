@@ -1,4 +1,4 @@
-//! Upgrade remote schema 12–14 with durable control and remove obsolete execution ownership.
+//! Upgrade remote schema 12–16 with durable control and owned work commands.
 
 use peri_acp_types::session_resources::{
     SessionResourceError, SessionResourceErrorKind, SessionResourceResult,
@@ -17,7 +17,7 @@ pub(super) async fn upgrade(
     store: &RemoteStore,
     snapshot: &StoreSnapshot,
 ) -> SessionResourceResult<()> {
-    if !matches!(snapshot.schema_version, 12..=14) || snapshot.contract != schema::STORE_CONTRACT {
+    if !matches!(snapshot.schema_version, 12..=16) || snapshot.contract != schema::STORE_CONTRACT {
         return Err(SessionResourceError::new(
             SessionResourceErrorKind::Unsupported,
         ));
@@ -34,8 +34,14 @@ pub(super) async fn upgrade(
         StatementSpec::bare(crate::sessions::control::CREATE_STATE),
         StatementSpec::bare(crate::sessions::control::CREATE_RECEIPTS),
         StatementSpec::bare(crate::sessions::control::SEED_STATE),
+        StatementSpec::bare(crate::sessions::work::CREATE_STATE),
+        StatementSpec::bare(crate::sessions::work::CREATE_EVENTS),
+        StatementSpec::bare(crate::sessions::work::CREATE_RECEIPTS),
+        StatementSpec::bare(crate::sessions::work::CREATE_COMMANDS),
+        StatementSpec::new(crate::sessions::work::SEED_STATE,vec![Value::Text(crate::sessions::work::legacy_state_json()?),Value::Text(crate::sessions::work::initial_state_json()?)]),
+        StatementSpec::bare(crate::sessions::work::QUARANTINE_UNOWNED_COMMANDS),
         StatementSpec::new(
-            "UPDATE peri_store_meta SET schema_version = 15 WHERE singleton = 0 AND schema_version = ?1 AND store_id = ?2 AND contract = ?3",
+            "UPDATE peri_store_meta SET schema_version = 17 WHERE singleton = 0 AND schema_version = ?1 AND store_id = ?2 AND contract = ?3",
             vec![Value::Integer(snapshot.schema_version), Value::Text(snapshot.store_id.as_str().to_owned()), Value::Text(snapshot.contract.clone())],
         ),
     ]).await

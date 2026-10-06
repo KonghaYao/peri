@@ -5,6 +5,35 @@ use super::*;
 // 命令面）为新增数据端口；TUI 不再直持池句柄与 watch channel。
 #[async_trait::async_trait]
 impl peri_acp_types::ports::McpPoolPort for McpClientPool {
+    async fn cold_session_tools(
+        self: Arc<Self>,
+        session_id: &str,
+    ) -> Result<Vec<Arc<dyn peri_acp_types::tools::BaseTool>>, String> {
+        use peri_agent::middleware::r#trait::Middleware;
+        if self
+            .get_all_clients_visible_to(Some(session_id))
+            .iter()
+            .any(|client| client.peer.is_none())
+        {
+            return Err("Blocked: cold session MCP owner is not connected".into());
+        }
+        Ok(crate::mcp::middleware::McpMiddleware::new(self)
+            .with_session_id(session_id)
+            .collect_tools("")
+            .into_iter()
+            .map(Arc::from)
+            .collect())
+    }
+    fn bind_agent_session_resources(
+        &self,
+        session_id: &str,
+        lifecycle: u64,
+        resources: Arc<dyn peri_acp_types::session_resources::SessionResources>,
+    ) -> Result<(), String> {
+        self.session_bindings
+            .write()
+            .bind_resources(session_id, lifecycle, resources)
+    }
     fn verify_shared_environment_close(&self, root_session_id: &str) -> Result<(), String> {
         self.session_bindings
             .read()

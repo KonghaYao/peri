@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { Agent } from "../src/agent/agent";
-import { SessionCloseIncompleteError, SessionCloseUnknownError, SessionControlNotAppliedError, type ControlCommand, type ControlReceipt, type ControlSnapshot, type ControlResolution } from "../src/agent/session-control";
+import { SessionCloseIncompleteError, SessionCloseUnknownError, SessionControlNotAppliedError, SessionControlBlockedError, type ControlCommand, type ControlReceipt, type ControlSnapshot, type ControlResolution } from "../src/agent/session-control";
 import { AgentClaimConflictError } from "../src/kv/agent-claim-conflict-error";
 import { MemoryKV } from "../src/kv/memory-kv";
 import { ManagedAgents } from "../src/managed/managed-agents";
@@ -80,10 +80,14 @@ test("Stop sends an exact execution binding and exposes the unchanged Store rece
   const { agent, transport } = await setup();
   const receipt = await agent.session.stop({ ...closeCommand, commandId: "stop-exact", target });
   expect(receipt).toBe(transport.receipt!);
-  expect(transport.calls.at(-1)).toEqual({ method: "session/control", params: {
+  expect(transport.calls.filter((call) => call.method === "session/control")).toEqual([{ method: "session/control", params: {
     ...closeCommand, commandId: "stop-exact", sessionId: "session-1", action: { kind: "stop", target },
-  } });
+  } }]);
   expect(receipt.state.status).toBe("paused");
+  const queries = transport.calls.filter((call) => call.method === "session/work/query").length;
+  for (const source of ["inboxScan", "notification", "recovery", "cron"] as const)
+    expect(await agent.session.ensureProcessing(source)).toEqual({ status: "blocked", reason: "sessionDomainControlBlocksAdmission" });
+  expect(transport.calls.filter((call) => call.method === "session/work/query")).toHaveLength(queries);
   expect(() => agent.session.send("do not automatically continue")).toThrow("blocked by domain control");
   expect(transport.closed).toBe(0);
   const response = await agent.session.resume({ ...closeCommand, commandId: "resume-exact" });
@@ -95,6 +99,18 @@ test("Stop refuses missing identity and never constructs a random target", async
   const { agent, transport } = await setup();
   expect(() => agent.session.stop({ ...closeCommand, target: { attemptId: "attempt-exact" } } as never)).toThrow("exact turnId");
   expect(transport.calls.filter((call) => call.method === "session/control")).toHaveLength(0);
+});
+
+test("Close blocked by another Unknown control does not resolve or seal a never-submitted Close identity", async () => {
+  const { agent, transport, create } = await setup();
+  transport.failControl = true;
+  await expect(agent.session.pause({ ...closeCommand, commandId: "original-unknown-pause" })).rejects.toThrow("ACK lost");
+  const calls = transport.calls.length;
+  await expect(agent.close({ ...closeCommand, commandId: "new-close" })).rejects.toBeInstanceOf(SessionControlBlockedError);
+  expect(transport.calls).toHaveLength(calls);
+  expect(transport.closed).toBe(0);
+  expect(agent.session.isClosed).toBe(false);
+  await expect(create("other").session.start("session-1")).rejects.toBeInstanceOf(AgentClaimConflictError);
 });
 
 test("duplicate controls go back to Store; changed parameters cannot reuse an ID", async () => {

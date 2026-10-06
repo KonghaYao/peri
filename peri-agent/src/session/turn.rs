@@ -33,9 +33,10 @@ pub use peri_acp_types::session::TurnId;
 #[derive(Debug)]
 pub struct TurnContext {
     /// Turn 唯一 ID（事件流纽带）
-    pub turn_id: TurnId,
-    pub attempt_id: peri_acp_types::identity::AttemptId,
+    turn_id: TurnId,
+    attempt_id: peri_acp_types::identity::AttemptId,
     control_generation: OnceLock<u64>,
+    work_admission: OnceLock<peri_acp_types::session_resources::work::WorkAdmission>,
     /// 当前 ReAct step（turn 内的循环迭代次数，AtomicUsize 支持 &self 自增）
     step: AtomicUsize,
     /// 工作目录（只读）
@@ -53,6 +54,7 @@ impl TurnContext {
             turn_id: TurnId::new(),
             attempt_id: peri_acp_types::identity::AttemptId::new(),
             control_generation: OnceLock::new(),
+            work_admission: OnceLock::new(),
             step: AtomicUsize::new(0),
             cwd,
             cancel_token,
@@ -66,10 +68,33 @@ impl TurnContext {
     }
 
     pub fn execution_binding(&self) -> peri_acp_types::session::ExecutionBinding {
+        if let Some(admission) = self.work_admission() {
+            return peri_acp_types::session::ExecutionBinding {
+                turn_id: admission.execution.turn_id,
+                attempt_id: admission.execution.attempt_id.clone(),
+            };
+        }
         peri_acp_types::session::ExecutionBinding {
             turn_id: self.turn_id,
             attempt_id: self.attempt_id.clone(),
         }
+    }
+
+    pub fn turn_id(&self) -> TurnId {
+        self.execution_binding().turn_id
+    }
+
+    pub fn work_admission(
+        &self,
+    ) -> Option<&peri_acp_types::session_resources::work::WorkAdmission> {
+        self.work_admission.get()
+    }
+
+    pub fn bind_work_admission(
+        &self,
+        admission: peri_acp_types::session_resources::work::WorkAdmission,
+    ) -> bool {
+        self.work_admission.get() == Some(&admission) || self.work_admission.set(admission).is_ok()
     }
 
     pub fn bind_control_generation(&self, generation: u64) -> bool {

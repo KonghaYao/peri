@@ -42,6 +42,7 @@ test("Agent start, send, list and load work through WASM ACP", async () => {
     "mise", "exec", "--", "sqld", "--no-welcome", "--http-listen-addr",
     `127.0.0.1:${sqlPort}`, "--db-path", resolve(root, "sessions"),
   ], { cwd: resolve(import.meta.dir, ".."), stdin: "ignore", stdout: "ignore", stderr: "pipe" });
+  const sqldLog = new Response(sqld.stderr).text();
   let modelCalls = 0;
   const telemetry: unknown[] = [];
   const langfuse = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
@@ -88,11 +89,14 @@ test("Agent start, send, list and load work through WASM ACP", async () => {
   });
   const manager = new ManagedAgents({ kv: new MemoryKV() });
   const agents: ReturnType<typeof manager.createAgent>[] = [];
+  const started = new Set<ReturnType<typeof manager.createAgent>>();
+  let primaryError: unknown;
   try {
     await waitForSqld(sqlPort, sqld);
     const createdAgent = manager.createAgent({ path: workspace, id: "created", sandbox });
     agents.push(createdAgent);
     const created = await createdAgent.session.start(null);
+    started.add(createdAgent);
     const sessionId = created.id;
     const receipt = created.send("Reply once");
     await receipt;
@@ -107,19 +111,31 @@ test("Agent start, send, list and load work through WASM ACP", async () => {
     const loadedAgent = manager.createAgent({ id: "loaded", sandbox });
     agents.push(loadedAgent);
     const loaded = await loadedAgent.session.start(sessionId);
+    started.add(loadedAgent);
     expect(loaded.id).toBe(sessionId);
     const { state } = await loaded.controlState();
     expect((await loaded.reopen({ commandId: crypto.randomUUID(), expectedLifecycle: state.lifecycle,
       expectedRevision: state.revision, expectedControlGeneration: state.controlGeneration })).decision.kind).toBe("accepted");
+  } catch (error) {
+    primaryError = error;
+    throw error;
   } finally {
+    const cleanupErrors: unknown[] = [];
     for (const agent of agents) {
       if (agent.session.isClosed) continue;
-      await manager.closeAgent(agent.id, await closeExpectation(agent.session));
+      try {
+        if (started.has(agent)) await manager.closeAgent(agent.id, await closeExpectation(agent.session));
+        else await agent.session.cleanupStartup();
+      } catch (error) { cleanupErrors.push(error); }
     }
     model.stop(true);
     langfuse.stop(true);
     sqld.kill("SIGTERM");
     await sqld.exited;
+    const serverLog = await sqldLog;
+    if (primaryError && serverLog) console.error(serverLog);
     await rm(root, { recursive: true, force: true });
+    if (cleanupErrors.length) throw new AggregateError(primaryError ? [primaryError, ...cleanupErrors] : cleanupErrors,
+      "WASM integration domain or startup cleanup failed", { cause: primaryError });
   }
 }, 90_000);

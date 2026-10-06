@@ -118,6 +118,7 @@ pub(super) async fn collect_tool_results(
     .await;
 
     // 阶段三：聚合 + 错误延迟
+    ctx.work.ensure(ctx).await?;
     Ok(settle_results(
         ctx,
         approval,
@@ -298,6 +299,9 @@ async fn dispatch_concurrent(
                 let timeout_opt = tool.as_ref().and_then(|t| t.timeout());
                 let invoke_fut = async {
                     super::super::execution_control::validate(&dispatch_context).await.map_err(effective_tool_error)?;
+                    let effective_call = ToolCall::new(call_id.clone(), tool_name.clone(), input.clone());
+                    let binding = super::super::work_dispatch::begin(&dispatch_context, &effective_call).await
+                        .map_err(|error| effective_tool_error(error.into()))?;
                     let mut ctx_param = crate::tools::ToolContext::new(&messages, &cwd)
                         .with_effective_tool_dispatcher(
                             Arc::new(StageEffectiveToolDispatcher::new(
@@ -315,14 +319,20 @@ async fn dispatch_concurrent(
                                 .get("session_id")
                                 .cloned()
                                 .unwrap_or_else(|| dispatch_context.session.agent_id.to_string()),
-                            dispatch_context.session.turn.turn_id.to_string(),
+                            dispatch_context.session.turn.turn_id().to_string(),
                         );
+                    if let Some(binding) = binding {
+                        ctx_param.session_id = dispatch_context.session.turn.work_admission().map(|admission| admission.session_id.clone());
+                        ctx_param.invocation_id = Some(binding.intent.invocation_id.clone());
+                        ctx_param = ctx_param.with_work_invocation(binding.lifecycle, binding.intent, binding.target, binding.resources);
+                    }
                     // 投递归属 = 直接发起会话（本 session）；路由取自该会话的
                     // canonical 持久化句柄，不接受模型参数。
                     if let Some(delivery) =
                         crate::agent::async_tasks::delivery::SessionTerminalDelivery::for_transcript(
                             &dispatch_context.session.transcript,
                             &dispatch_context.session.queue,
+                            ctx_param.session_lifecycle,
                         )
                     {
                         ctx_param = ctx_param.with_task_terminal_delivery(delivery);
@@ -365,6 +375,13 @@ async fn dispatch_concurrent(
                         }
                     }
                 };
+                if let Err(error) = &result {
+                    if matches!(error.code, EffectiveToolErrorCode::Cancelled | EffectiveToolErrorCode::Timeout | EffectiveToolErrorCode::ToolFailed) {
+                        if let Err(error) = super::super::work_dispatch::unknown(&dispatch_context, &call_id, &error.to_string()).await {
+                            tracing::error!(%error, "invocation reconciliation checkpoint unconfirmed");
+                        }
+                    }
+                }
                 // 工具完成即刻 emit ToolEnded，不等 join_all 返回
                 // 快速工具的 Langfuse observation endTime 不再被慢工具拖高
                 let (output, is_error) = match &result {

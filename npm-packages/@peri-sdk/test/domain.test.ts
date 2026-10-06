@@ -84,10 +84,11 @@ class FakeTransport implements Transport {
       case "session/new": return { sessionId: this.newSessionId } as T;
       case "session/load": return {} as T;
       case "session/input/snapshot": return { generation: "generation-1" } as T;
+      case "session/work/query": return { control: { lifecycle: 1, revision: 0, controlGeneration: 0, status: "active", attempt: null }, work: null } as T;
       case "session/input/enqueue":
         await this.enqueueGate;
-        return { results: [{ inputId: (params as any).inputId, state: "queued" }] } as T;
-      case "session/input/dispatch": return { results: [{ inputId: (params as any).inputIds[0], state: "dispatching" }] } as T;
+        return { results: [{ inputId: (params as any).inputId, state: "queued" }], workReceipts: [{ decision: { kind: "accepted" } }] } as T;
+      case "session/input/dispatch": return { results: [{ inputId: (params as any).inputIds[0], state: "dispatching" }], workReceipts: [{ decision: { kind: "accepted" } }] } as T;
       case "session/input/takeback": return { takenBack: { inputId: (params as any).inputId } } as T;
       case "session/list": return { sessions: [{ sessionId: "session-1" }] } as T;
       default: throw new Error(`unexpected method: ${method}`);
@@ -118,11 +119,21 @@ function declaration(manager: ManagedAgents, id = "agent-1", transport = new Fak
       transportFactory: () => { created++; return transport; },
     }),
     instructions: "Be helpful",
+    execution: { database: `/tmp/peri-domain-test-${crypto.randomUUID()}.db` },
   });
   return { agent, transport, get created() { return created; } };
 }
 
 describe("ManagedAgents lifecycle", () => {
+  test("loading routes durable recovery through SDK work query without a second publication", async () => {
+    const { agent, transport } = declaration(new ManagedAgents({ kv: new MemoryClaims() }));
+    await agent.session.start("existing");
+    await agent.session.ensureProcessing("recovery");
+    expect(transport.calls.some((call) => call.method === "session/work/query")).toBe(true);
+    expect(transport.calls.some((call) => call.method === "session/input/enqueue" || call.method === "session/input/dispatch")).toBe(false);
+    expect(transport.closed).toBe(false);
+  });
+
   test("declaration is synchronous and does not claim or create transport", () => {
     const kv = new MemoryClaims();
     const manager = new ManagedAgents({ kv });
@@ -246,31 +257,33 @@ describe("ManagedAgents lifecycle", () => {
     unblock();
   });
 
-  test("a failed unclaimed run is dispatched once more and can deliver", async () => {
+  test("an unclaimed failure does not automatically republish or restart input", async () => {
     const { agent, transport } = declaration(new ManagedAgents({ kv: new MemoryClaims() }));
     const session = await agent.session.start(null);
     const receipt = session.send("hello");
     transport.emit(queueChanged(receipt.inputId, "dispatching"));
     transport.emit(queueChanged(receipt.inputId, "queued"));
     await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(transport.calls.filter((call) => call.method === "session/input/dispatch")).toHaveLength(1);
+    expect(transport.calls.filter((call) => call.method === "session/input/dispatch")).toHaveLength(0);
     transport.emit(delivered(receipt.inputId));
     await receipt;
     expect(receipt.isSent).toBe(true);
   });
 
-  test("a second failed unclaimed run withdraws input and rejects delivery", async () => {
+  test("repeated unknown execution preserves publication rather than withdrawing it", async () => {
     const { agent, transport } = declaration(new ManagedAgents({ kv: new MemoryClaims() }));
     const session = await agent.session.start(null);
     const receipt = session.send("hello");
-    const result = Promise.resolve(receipt);
     transport.emit(queueChanged(receipt.inputId, "dispatching"));
     transport.emit(queueChanged(receipt.inputId, "queued"));
     await new Promise((resolve) => setTimeout(resolve, 0));
     transport.emit(queueChanged(receipt.inputId, "dispatching"));
     transport.emit(queueChanged(receipt.inputId, "queued"));
-    await expect(result).rejects.toThrow("Input execution failed before delivery");
-    expect(transport.calls.some((call) => call.method === "session/input/takeback")).toBe(true);
+    expect(transport.calls.some((call) => call.method === "session/input/takeback")).toBe(false);
+    expect(transport.calls.some((call) => call.method === "session/input/dispatch")).toBe(false);
+    expect(receipt.isSent).toBe(false);
+    transport.emit(delivered(receipt.inputId));
+    await receipt;
   });
 
   test("close rejects input waiting for delivery", async () => {

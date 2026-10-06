@@ -3,6 +3,60 @@
 use super::*;
 
 impl SqliteSessionData {
+    pub(super) async fn finish_close_intent(&self, root: &ThreadId) -> SessionResourceResult<()> {
+        self.writable()?;
+        let mut tx = self
+            .database
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(|error| map_sqlx(&error))?;
+        self.require_session(&mut tx, root).await?;
+        let deleted = sqlx::query("DELETE FROM session_close_intents WHERE thread_id = ?1")
+            .bind(root.as_str())
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| map_sqlx(&error))?;
+        if deleted.rows_affected() != 1 {
+            return Err(SessionResourceError::conflict(
+                "session close intent is missing",
+            ));
+        }
+        tx.commit()
+            .await
+            .map_err(|_| commit_failure(Some(root.clone())))?;
+        Ok(())
+    }
+
+    pub(super) async fn read_close_settlement(
+        &self,
+        root: &ThreadId,
+    ) -> SessionResourceResult<CloseSettlement> {
+        let mut tx = self
+            .database
+            .pool
+            .begin()
+            .await
+            .map_err(|error| map_sqlx(&error))?;
+        let exists = thread_exists_on(&mut tx, root)
+            .await
+            .map_err(read_failure)?;
+        let pending: Option<(i64,)> =
+            sqlx::query_as("SELECT 1 FROM session_close_intents WHERE thread_id = ?1")
+                .bind(root.as_str())
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|error| map_sqlx(&error))?;
+        let state = if !exists {
+            CloseSettlement::Unknown
+        } else if pending.is_some() {
+            CloseSettlement::Pending
+        } else {
+            CloseSettlement::Finished
+        };
+        tx.commit().await.map_err(|error| map_sqlx(&error))?;
+        Ok(state)
+    }
     pub(super) async fn require_session(
         &self,
         connection: &mut SqliteConnection,

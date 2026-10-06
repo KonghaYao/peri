@@ -48,9 +48,12 @@ pub(in crate::host::requests) async fn close_session(
             CloseSettlement::Pending => {}
         }
     }
-    let environment = sessions
+    let mut environment = sessions
         .get(session_id)
         .and_then(|state| state.environment.clone());
+    if environment.is_none() && cfg.workspace_assembly.is_some() {
+        environment = super::super::resource_owners::cold_environment(cfg, session_id).await?;
+    }
     let local = environment.as_ref().map(|env| &env.cfg).unwrap_or(cfg);
     if environment.is_none() && local.workspace_assembly.is_some() && local.mcp_pool.is_none() {
         return Err(AcpError::new(
@@ -78,6 +81,28 @@ pub(in crate::host::requests) async fn close_session(
                 ))
             }
         }
+    }
+    let work = resources
+        .load_session_work(&peri_acp_types::session_resources::work::WorkQuery {
+            session_id: target.clone(),
+            limit: 1,
+        })
+        .await
+        .map_err(resource_error)?;
+    if !work
+        .state
+        .resource_owners
+        .contains_key(&work.control.lifecycle)
+        && work
+            .state
+            .legacy_unknown
+            .keys()
+            .any(|identity| identity.starts_with("ownerMissing:"))
+    {
+        return Err(AcpError::new(
+            -32010,
+            "Session close incomplete: historical resource owner is unknown",
+        ));
     }
     if let Some(state) = sessions.get_mut(session_id) {
         if local

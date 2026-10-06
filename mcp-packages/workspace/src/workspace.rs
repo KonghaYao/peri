@@ -204,6 +204,7 @@ impl WorkspaceMcpServer {
         request: &CallToolRequestParams,
         client_supports_tasks: bool,
         scope: Option<&str>,
+        invocation_id: Option<&str>,
     ) -> Result<CallToolResponse, McpError> {
         let tasks = self
             .shell_tasks
@@ -226,7 +227,13 @@ impl WorkspaceMcpServer {
                 .filter(|timeout| *timeout > 0)
                 .map(|timeout| timeout.min(600_000));
             let task = tasks
-                .spawn_scoped(command.into(), self.cwd.clone(), timeout, scope)
+                .spawn_scoped_for_invocation(
+                    command.into(),
+                    self.cwd.clone(),
+                    timeout,
+                    scope,
+                    invocation_id,
+                )
                 .await?;
             if client_supports_tasks {
                 return Ok(CallToolResponse::Task(CreateTaskResult::new(task)));
@@ -247,6 +254,7 @@ impl WorkspaceMcpServer {
         let started_owner = tasks.clone();
         let started_scope = scope.map(str::to_owned);
         let started_command = command.clone();
+        let started_invocation_id = invocation_id.map(str::to_owned);
         let bash = BashTool::new(&self.cwd)
             .with_task_manager(tasks.manager())
             .with_on_bg_complete(callback)
@@ -256,6 +264,10 @@ impl WorkspaceMcpServer {
                     started_scope.as_deref(),
                     started_command.as_deref(),
                 );
+                if let (Some(scope), Some(invocation_id)) = (&started_scope, &started_invocation_id)
+                {
+                    started_owner.bind_invocation_task(scope, invocation_id, task_id);
+                }
             }));
         let result = match bash.execute(input, ToolContext::new(&[], &self.cwd)).await {
             Ok(output) => {
@@ -551,6 +563,8 @@ impl ServerHandler for WorkspaceMcpServer {
         if matches!(
             request.method.as_str(),
             "workspace/taskSnapshot"
+                | "workspace/taskCapabilities"
+                | "workspace/invocationSnapshot"
                 | "workspace/taskChanges"
                 | "workspace/taskClose"
                 | "workspace/taskOpen"
@@ -565,6 +579,8 @@ impl ServerHandler for WorkspaceMcpServer {
             let capability = authority.resolve_capability(&_context.meta)?;
             let scope = capability.session_id.as_str();
             let value = match request.method.as_str() {
+                "workspace/taskCapabilities" => Ok(tasks.owner_capabilities(scope)),
+                "workspace/invocationSnapshot" => Ok(tasks.discover_invocations(scope)),
                 "workspace/taskSnapshot" => serde_json::to_value(tasks.snapshot(scope)),
                 "workspace/taskChanges" => {
                     let cursor = params
@@ -786,6 +802,24 @@ impl ServerHandler for WorkspaceMcpServer {
         let client_supports_tasks = context
             .client_capabilities()
             .is_some_and(|caps| caps.supports_tasks());
+        let capability = self.task_capability(&context)?;
+        let scope = capability
+            .as_ref()
+            .map(|capability| capability.session_id.as_str());
+        let invocation_id = match (&self.shell_tasks, scope) {
+            (Some(tasks), Some(scope)) => tasks.accept_invocation(
+                scope,
+                &context.meta,
+                &serde_json::Value::Object(request.arguments.clone().unwrap_or_default()),
+            )?,
+            _ if context.meta.0 .0.contains_key("peri.invocation") => {
+                return Err(McpError::invalid_params(
+                    "trusted invocation scope unavailable",
+                    None,
+                ))
+            }
+            _ => None,
+        };
         // 传实例冻结的 host cwd（不走 `web` / `cron` 的空串形态）。**注意**：本参
         // 只落进 `ToolContext`，而本波 7 个工具都忽略 `ToolContext`（`invoke` 的 `_ctx`），
         // 真正生效的 cwd 绑定点是 [`Self::new`] 注入各工具的 `cwd` 字段——不得据本行推断
@@ -795,14 +829,23 @@ impl ServerHandler for WorkspaceMcpServer {
             _ = context.ct.cancelled() => Ok(CallToolResponse::Complete(rmcp::model::CallToolResult::error(vec![rmcp::model::ContentBlock::text("Tool execution cancelled.")]))),
             result = async {
                 if request.name.as_ref() == "Bash" && self.shell_tasks.is_some() {
-                    let capability = self.task_capability(&context)?;
                     self.call_owned_bash(&request, client_supports_tasks,
-                        capability.as_ref().map(|capability| capability.session_id.as_str())).await
+                        scope, invocation_id.as_deref()).await
                 } else {
                     invoke_tool_call(self.tools(), &self.cwd, &request).await
                 }
             } => result,
         };
+        if let (Some(tasks), Some(scope), Some(invocation_id)) =
+            (&self.shell_tasks, scope, &invocation_id)
+        {
+            if let Ok(CallToolResponse::Task(result)) = &response {
+                tasks.bind_invocation_task(scope, invocation_id, &result.task.task_id);
+            }
+            if response.is_ok() {
+                tasks.observe_invocation_response(scope, invocation_id);
+            }
+        }
         // D-1 触发语义：仅**成功**返回后触发（`is_error != Some(true)`，旧 after_tool 门
         // 逐字）；`spawn` 不阻塞响应，采样在后台收口。
         if matches!(&response, Ok(CallToolResponse::Complete(result)) if result.is_error != Some(true))

@@ -246,6 +246,12 @@ pub struct SessionContext {
     /// （Issue 2026-08-05）。缺失路径（continuation / Immediate 命令 /
     /// stdio / print 模式）为 None——TUI 侧相应跳过 id 判定、回退代际兜底。
     pub request_id: Option<String>,
+    pub execution_admission: Option<peri_acp_types::session_resources::work::WorkAdmission>,
+    pub recipient_lifecycle: u64,
+    pub execution_admission_port:
+        Option<Arc<dyn peri_acp_types::execution_admission::ExecutionAdmissionPort>>,
+    pub sdk_run_started: Option<crate::agent::stages::SdkRunStartedFn>,
+    pub sdk_admission_observed: Option<crate::agent::stages::SdkAdmissionObservedFn>,
 
     // ── transport: transport-aware flags ───────────────────────────────────
     pub allow_await_wake: bool,

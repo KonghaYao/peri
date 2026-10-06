@@ -112,6 +112,10 @@ export class StdioTransport extends JsonRpcTransport {
 
   /** OS identity for host supervision and crash testing. */
   get pid(): number { return this.process.pid; }
+  async executionStopped(): Promise<boolean> {
+    if (this.process.exitCode === null && this.process.signalCode === null) return false;
+    return this.terminationProof;
+  }
 
   private async readOutput(): Promise<void> {
     try {

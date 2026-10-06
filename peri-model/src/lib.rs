@@ -2,6 +2,8 @@
 
 pub mod anthropic;
 pub mod openai_compatible;
+#[cfg(test)]
+mod prepared_stream_test;
 pub mod prompt_cache;
 pub mod protocol;
 pub mod runtime;
@@ -11,8 +13,8 @@ pub use anthropic::{AnthropicConfig, AnthropicModel};
 pub use openai_compatible::{OpenAiConfig, OpenAiModel};
 pub use protocol::{
     ContentBlock, DocumentSource, ImageSource, JsonObject, MediaType, Model, ModelCapabilities,
-    ModelMessage, ModelRequest, ModelResponse, ModelStream, ModelStreamEvent, ProviderProtocol,
-    StopReason, TokenUsage, ToolCall, ToolDefinition, ToolResult,
+    ModelMessage, ModelRequest, ModelResponse, ModelStream, ModelStreamEvent, PreparedModelCall,
+    ProviderProtocol, StopReason, TokenUsage, ToolCall, ToolDefinition, ToolResult,
 };
 pub use runtime::{
     ModelError, ModelErrorCategory, ModelErrorDiagnostic, ModelErrorDiagnosticParts, ModelResult,

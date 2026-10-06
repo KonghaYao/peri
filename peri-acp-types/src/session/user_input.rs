@@ -38,7 +38,7 @@ pub struct UserInputQueueItem {
 #[serde(rename_all = "camelCase")]
 pub struct UserInputQueueSnapshot {
     pub session_id: String,
-    /// 内存 mailbox 实例身份，重建会话后更换。
+    /// 可信会话生命周期身份；重建实例不改变，Reopen 后更换。
     pub generation: String,
     pub revision: u64,
     /// 已绑定真实执行的队列 run；仅预留、尚未启动时为空。
@@ -96,10 +96,14 @@ pub struct UserInputItemResult {
 #[serde(rename_all = "camelCase")]
 pub struct UserInputQueueReceipt {
     pub snapshot: UserInputQueueSnapshot,
-    /// 命令首次裁决的结果；重试时可与最新 snapshot 的状态不同。
+    /// 命令引用的发布代际裁决；重放不改绑后来代际，可与最新快照不同。
     pub results: Vec<UserInputItemResult>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub taken_back: Option<UserInput>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub work_receipts: Vec<crate::session_resources::work::WorkReceipt>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub publication_generations: std::collections::BTreeMap<String, String>,
 }
 
 #[cfg(test)]

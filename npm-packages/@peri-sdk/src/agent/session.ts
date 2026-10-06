@@ -1,6 +1,10 @@
 import type { Agent } from "./agent";
 import { SendReceipt } from "./send-receipt";
 import type { JsonRpcNotification, Transport } from "../transport/types";
+import { SessionExecution } from "../execution/session-execution";
+import { ExecutionDataLossError } from "../execution/types";
+import type { ActivationSource } from "../execution/types";
+import type { AdmissionResult } from "../execution/coordinator";
 import type { SessionDocs } from "../state/session-docs";
 import { EventQueue } from "../transport/event-queue";
 import {
@@ -16,20 +20,17 @@ type QueueSnapshot = {
     activeRequestId?: string;
     items?: Array<{ inputId: string; state: string }>;
 };
-type QueueReceipt = { results: Array<{ inputId: string; state: string }> };
+type QueueReceipt = { results: Array<{ inputId: string; state: string }>; workReceipts?: Array<{ decision: { kind: string } }> };
 type SessionState = "declared" | "starting" | "active" | "cleanup-pending" | "closed";
 type PendingDelivery = {
     resolve: () => void;
     reject: (error: Error) => void;
-    retry: () => Promise<void>;
-    wasDispatching: boolean;
-    wasClaimed: boolean;
-    retries: number;
 };
 
 export class Session {
     private state: SessionState = "declared";
     private transport?: Transport;
+    private execution?: SessionExecution;
     private sessionId?: string;
     private currentPath?: string;
     private generation?: string;
@@ -88,11 +89,22 @@ export class Session {
                 : `Session not found: ${requestedSessionId}`);
             transport = await this.agent.options.sandbox.createTransport(path);
             this.transport = transport;
-            transport.setRequestHandler((method, params) =>
-                this.docs.handleRequest(method, params, this.sessionId, this.agent.options),
-            );
+            transport.setRequestHandler((method, params) => {
+                if ((method === "peri/execution/admit" || method === "peri/execution/entered") && (this.closePromise || this.controls.executionBlocked))
+                    return { status: "blocked", reason: "sessionDomainControlBlocksAdmission" };
+                if (method === "peri/execution/admit" || method === "peri/execution/settle" || method === "peri/execution/entered")
+                    return this.executionRuntime().handle(method, params);
+                return this.docs.handleRequest(method, params, this.sessionId, this.agent.options);
+            });
             let replayTurnPending = false;
             this.unsubscribe = transport.subscribe((event) => {
+                if (event.method === "session/work/available") {
+                    const sessionId = (event.params as { sessionId?: string } | undefined)?.sessionId;
+                    if (sessionId && sessionId === this.sessionId) void this.ensureProcessing("notification").catch((error) => {
+                        console.error("SDK work admission failed", error);
+                    });
+                    return;
+                }
                 const rawEvent =
                     event.method === "session/update" ||
                     event.method === "peri/agent_event";
@@ -136,6 +148,7 @@ export class Session {
                 clientCapabilities: {
                     _meta: {
                         "peri.userInputQueue": true,
+                        "peri.executionProtocol": 1,
                         "peri.agentEvent": true,
                         "peri.sessionWorkspaceV1": true,
                         "peri.agentEventDone": true,
@@ -196,6 +209,9 @@ export class Session {
             this.generation = snapshot.generation;
             this.docs.setTaskSnapshotRequester(() => this.transport!.request("session/bg-tasks", { sessionId: id }));
             this.state = "active";
+            if (requestedSessionId !== null) void this.ensureProcessing("recovery").catch((error) => {
+                console.error("SDK recovery admission failed", error);
+            });
             return this;
         } catch (error) {
             this.state = "cleanup-pending";
@@ -221,6 +237,12 @@ export class Session {
     private async cleanupExecution(): Promise<void> {
         if (this.transport) {
             await this.transport.close();
+            await this.execution?.joinOwnedCalls();
+            const native = this.transport as Transport & { executionStopped?: () => Promise<boolean> };
+            if (this.execution && this.sessionId && this.settledClose && await native.executionStopped?.())
+                await this.execution.recordStopped();
+            this.execution?.close();
+            this.execution = undefined;
             this.transport = undefined;
         }
         await this.agent.claims.release();
@@ -240,15 +262,25 @@ export class Session {
         return new SendReceipt(this, text);
     }
 
+    private executionRuntime(): SessionExecution {
+        if (!this.execution) this.execution = new SessionExecution(this.activeTransport(), this.agent.options.execution);
+        return this.execution;
+    }
+
+    ensureProcessing(source: ActivationSource = "inboxScan"): Promise<AdmissionResult> {
+        if (this.closePromise || this.state !== "active" || this.controls.executionBlocked)
+            return Promise.resolve({ status: "blocked", reason: "sessionDomainControlBlocksAdmission" });
+        return this.executionRuntime().activate(this.id, source);
+    }
+
     trackInput(inputId: string, text: string): void {
         this.pendingInputText.set(inputId, text);
     }
 
-    waitForDelivery(inputId: string, retry: () => Promise<void>): Promise<void> {
+    waitForDelivery(inputId: string): Promise<void> {
         return new Promise((resolve, reject) =>
             this.pendingDeliveries.set(inputId, {
-                resolve, reject, retry,
-                wasDispatching: false, wasClaimed: false, retries: 0,
+                resolve, reject,
             }),
         );
     }
@@ -290,37 +322,10 @@ export class Session {
             value?: {
                 input_id?: string;
                 generation?: string;
-                snapshot?: {
-                    generation?: string;
-                    items?: Array<{ inputId: string; state: string }>;
-                };
             };
         };
         const value = payload.value;
         if (!value) return;
-        if (payload.type === "user_input_queue_changed") {
-            const snapshot = value.snapshot;
-            const items = snapshot?.items;
-            if (snapshot?.generation !== this.generation || !Array.isArray(items)) return;
-            for (const [inputId, pending] of this.pendingDeliveries) {
-                const state = items.find((item) => item.inputId === inputId)?.state;
-                if (state === "dispatching") pending.wasDispatching = true;
-                else if (state === "claimed") pending.wasClaimed = true;
-                else if (state === "queued" && pending.wasDispatching) {
-                    if (this.controls.executionBlocked || this.closePromise) continue;
-                    pending.wasDispatching = false;
-                    if (!pending.wasClaimed && pending.retries++ === 0) {
-                        void pending.retry().catch((error) => this.rejectDelivery(inputId, error));
-                    } else {
-                        void this.takeBack(inputId).then(
-                            () => this.rejectDelivery(inputId, new Error("Input execution failed before delivery")),
-                            () => this.rejectDelivery(inputId, new Error("Input execution failed; queued input could not be withdrawn")),
-                        );
-                    }
-                }
-            }
-            return;
-        }
         if (
             payload.type === "user_input_delivered" &&
             value.generation === this.generation &&
@@ -335,7 +340,7 @@ export class Session {
             {
                 sessionId: this.id,
                 generation: this.generation,
-                commandId: crypto.randomUUID(),
+                commandId: `${inputId}:enqueue`,
                 inputId,
                 content: text,
                 originalDraft: text,
@@ -346,6 +351,8 @@ export class Session {
         )?.state;
         if (!state || state === "unknown" || state === "withdrawn")
             throw new Error(`Input not accepted: ${state ?? "missing"}`);
+        if (state !== "delivered") this.requirePublication(receipt);
+        if (state !== "delivered") this.activatePublishedInput(inputId, "send");
         return state;
     }
 
@@ -355,7 +362,7 @@ export class Session {
             {
                 sessionId: this.id,
                 generation: this.generation,
-                commandId: crypto.randomUUID(),
+                commandId: `${inputId}:dispatch`,
                 inputIds: [inputId],
             },
         );
@@ -364,13 +371,29 @@ export class Session {
         )?.state;
         if (!state || state === "unknown" || state === "withdrawn")
             throw new Error(`Input not dispatched: ${state ?? "missing"}`);
+        if (state !== "delivered") this.requirePublication(receipt);
+        this.activatePublishedInput(inputId, "send");
     }
 
-    private async takeBack(inputId: string): Promise<void> {
+    private activatePublishedInput(inputId: string, source: ActivationSource): void {
+        if (this.closePromise || this.state !== "active" || this.controls.executionBlocked) return;
+        void this.ensureProcessing(source).then((result) => {
+            if (result.status === "disaster") this.rejectDelivery(inputId, new ExecutionDataLossError(result.disaster));
+            else if (result.status === "unknown" || result.status === "blocked")
+                this.rejectDelivery(inputId, new Error(`Execution admission ${result.status}: ${result.reason}`));
+        }, (error) => this.rejectDelivery(inputId, error));
+    }
+
+    private requirePublication(receipt: QueueReceipt): void {
+        if (!receipt.workReceipts?.length || receipt.workReceipts.some((work) => work.decision?.kind !== "accepted"))
+            throw new Error("Required input publication has no verified accepted domain receipt");
+    }
+
+    async takeBack(inputId: string): Promise<void> {
         await this.activeTransport().request("session/input/takeback", {
             sessionId: this.id,
             generation: this.generation,
-            commandId: crypto.randomUUID(),
+            commandId: `${inputId}:takeback`,
             inputId,
         });
     }
@@ -410,11 +433,13 @@ export class Session {
         return { ...expectation, sessionId: this.id, action };
     }
 
-    control(command: ControlCommand): Promise<ControlReceipt> {
+    async control(command: ControlCommand): Promise<ControlReceipt> {
         if (this.closePromise) throw new Error("Session domain Close is in progress");
         if (command.sessionId !== this.id)
             throw new Error("Control command targets a different Session");
-        return this.controls.apply(this.controlTransport(), command);
+        const receipt = await this.controls.apply(this.controlTransport(), command);
+        if (receipt.decision.kind === "accepted" && this.execution) await this.execution.observeControl(this.id, receipt.state);
+        return receipt;
     }
 
     stop({ target, ...expectation }: StopCommand): Promise<ControlReceipt> {
@@ -429,8 +454,15 @@ export class Session {
         return this.control(this.command(expectation, { kind: "resume" }));
     }
 
-    reopen(expectation: CommandExpectation): Promise<ControlReceipt> {
-        return this.control(this.command(expectation, { kind: "reopen" }));
+    async reopen(expectation: CommandExpectation): Promise<ControlReceipt> {
+        const receipt = await this.control(this.command(expectation, { kind: "reopen" }));
+        if (receipt.decision.kind === "accepted") {
+            const snapshot = await this.controlTransport().request<QueueSnapshot>("session/input/snapshot", { sessionId: this.id });
+            if (!snapshot.generation) throw new Error("Reopen has no verified input publication generation");
+            this.generation = snapshot.generation;
+            this.docs.seedInputQueue(snapshot);
+        }
+        return receipt;
     }
 
     resolveControl(command: ControlCommand): Promise<ControlResolution> {
@@ -476,6 +508,7 @@ export class Session {
         if (!this.settledClose) {
             this.settledClose = { command, receipt };
         }
+        this.execution?.beginRetirement();
         this.state = "cleanup-pending";
         this.docs.setTaskSnapshotRequester(null);
         await this.cleanupExecution();

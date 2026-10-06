@@ -24,12 +24,15 @@ use crate::sessions::resources::lifecycle::{Lifecycle, LifecycleState};
 
 #[path = "gate_control.rs"]
 mod control;
+#[path = "gate_work.rs"]
+mod work;
 
 #[derive(Default)]
 struct PendingWrites {
     barrier: Arc<RwLock<()>>,
     uncertain: AtomicBool,
     control: Mutex<Option<peri_acp_types::session_resources::ControlCommand>>,
+    work: Mutex<Option<peri_acp_types::session_resources::work::WorkCommand>>,
 }
 
 pub(super) struct WriteScope {
@@ -136,6 +139,11 @@ impl MutationGate {
     fn check_pending(pending: &PendingWrites, root: &ThreadId) -> SessionResourceResult<()> {
         if pending.uncertain.load(Ordering::Acquire)
             || pending
+                .work
+                .lock()
+                .expect("pending work lock poisoned")
+                .is_some()
+            || pending
                 .control
                 .lock()
                 .expect("pending control lock poisoned")
@@ -157,12 +165,31 @@ impl MutationGate {
         };
         self.ensure_session_write()?;
         Self::check_pending(&pending, root)?;
+        self.check_owned_work(root).await?;
         Ok(WriteScope {
             pending,
             _concurrent: concurrent,
             _exclusive: exclusive,
             settled: false,
         })
+    }
+
+    async fn check_owned_work(&self, root: &ThreadId) -> SessionResourceResult<()> {
+        match self
+            .data
+            .load_session_work(&peri_acp_types::session_resources::work::WorkQuery {
+                session_id: root.clone(),
+                limit: 1,
+            })
+            .await
+        {
+            Ok(snapshot) if !snapshot.pending_commands.is_empty() => Err(
+                SessionResourceError::persistence_uncertain(Some(root.clone())),
+            ),
+            Ok(_) => Ok(()),
+            Err(error) if matches!(error.kind(), SessionResourceErrorKind::NotFound) => Ok(()),
+            Err(error) => Err(error),
+        }
     }
 
     pub(super) async fn admit(&self, id: &ThreadId) -> SessionResourceResult<WriteScope> {
@@ -240,11 +267,19 @@ impl MutationGate {
                 )
             })?;
         if pending
-            .control
+            .work
             .lock()
-            .expect("pending control lock poisoned")
+            .expect("pending work lock poisoned")
             .is_some()
+            || pending
+                .control
+                .lock()
+                .expect("pending control lock poisoned")
+                .is_some()
         {
+            return Ok(PersistenceRecovery::StillBlocked);
+        }
+        if self.check_owned_work(&root).await.is_err() {
             return Ok(PersistenceRecovery::StillBlocked);
         }
         let result = self.data.recover_persistence(id).await?;

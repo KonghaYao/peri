@@ -431,6 +431,14 @@ impl MessageTranscript {
         true
     }
 
+    pub fn mirror_committed_payload(&mut self, payload: PersistedPayload) -> bool {
+        if self.id_index.contains_key(&payload.id()) {
+            return false;
+        }
+        self.push_loaded_payload(payload);
+        true
+    }
+
     pub fn idempotent_reminder_port(&self) -> Option<IdempotentReminderPort> {
         Some((
             Arc::clone(self.session_resources.as_ref()?),

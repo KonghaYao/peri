@@ -27,6 +27,13 @@ const result = await Bun.build({
   external: ["yjs"],
 });
 if (!result.success) throw new Error(`SDK bundle failed: ${result.logs.join("; ")}`);
+const dispatcher = await Bun.build({
+  entrypoints: [resolve(packageRoot, "src/execution/sidecar.ts")],
+  outdir: resolve(output, "execution"),
+  target: "bun",
+  format: "esm",
+});
+if (!dispatcher.success) throw new Error(`SDK execution dispatcher bundle failed: ${dispatcher.logs.join("; ")}`);
 const browser = await Bun.build({
   entrypoints: [resolve(packageRoot, "src/wasm.ts")],
   outdir: output,

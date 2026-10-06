@@ -164,6 +164,17 @@ impl Drop for ModelStream {
 pub trait Model: Send + Sync {
     fn capabilities(&self) -> ModelCapabilities;
 
+    /// Freezes the complete request for a durable checkpoint before execution.
+    ///
+    /// Implementations must satisfy [`crate::PreparedModelCall::new`]'s full
+    /// wire, same-request and cancellation contracts. This is not the safe
+    /// observation projection returned by [`Model::prepare_request`]. The
+    /// default rejects unsupported providers rather than rebuilding or sending
+    /// a request outside the durable execution boundary.
+    fn prepare_stream(&self, _request: ModelRequest) -> ModelResult<crate::PreparedModelCall> {
+        Err(ModelError::protocol(ProtocolErrorKind::Provider))
+    }
+
     /// 构造可安全用于观测的 provider 请求投影。
     ///
     /// Provider 必须覆盖此方法；默认实现明确拒绝未实现的协议请求构造。

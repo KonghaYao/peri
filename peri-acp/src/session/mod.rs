@@ -22,6 +22,7 @@ pub mod executor;
 mod frozen;
 pub(crate) mod frozen_snapshot;
 pub mod goal_state;
+mod lifecycle_binding;
 pub mod retry_events;
 pub mod state_builders;
 
@@ -66,6 +67,7 @@ pub type TaskManagerFactory =
     Arc<dyn Fn() -> Arc<dyn peri_acp_types::tasks::TaskManager> + Send + Sync>;
 
 pub struct AcpSession {
+    pub recipient_lifecycle: u64,
     pub session_id: String,
     pub thread_id: ThreadId,
     pub cwd: String,

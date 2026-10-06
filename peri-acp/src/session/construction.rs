@@ -77,6 +77,7 @@ impl SessionManager {
         let task_manager = task_manager.unwrap_or_else(|| self.new_session_task_manager());
 
         AcpSession {
+            recipient_lifecycle: 1,
             session_id: session_id.to_string(),
             thread_id,
             cwd: cwd.to_string(),

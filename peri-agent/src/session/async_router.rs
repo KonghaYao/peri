@@ -71,6 +71,7 @@ pub(crate) fn background_result_reminder(
             "success": result.success,
             "timed_out": result.timed_out,
             "child_thread_id": result.child_thread_id,
+            "subagent_failure": result.subagent_failure,
         }),
     ).unwrap_or_else(|error| {
         tracing::error!(task_id = %result.task_id, %error, "background completion notification rejected");
@@ -87,7 +88,8 @@ pub(crate) fn background_result_reminder(
             ReminderDelivery::Configurable,
             format!("后台任务 {task_id} 已结束，但详细结果通知未通过校验。请检查运行日志。"),
             Some("Background completion notification rejected".into()),
-            json!({"task_id": task_id, "success": result.success, "timed_out": result.timed_out}),
+            json!({"task_id": task_id, "success": result.success, "timed_out": result.timed_out,
+                "subagent_failure": result.subagent_failure}),
         )
     })
 }

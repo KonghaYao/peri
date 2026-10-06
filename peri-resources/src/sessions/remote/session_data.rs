@@ -102,7 +102,8 @@ use session_open::{refuse_legacy_shape, resolve_open_machine_id};
 ///
 /// 本机**不再**持有远端操作的日志（v10 删除了 `session_remote_operations`）：远端账本
 /// （`peri_op_ledger`）仍按「资格先于效果」写，但它是**远端**事实，本机不复制。跨进程重启
-/// 后没有「按原 id 求证终态」这条路径，未结清只在本进程的 persistence gate 上表达。
+/// WorkCommand 的完整原命令与回执留在同一远端 Store，跨进程恢复可按原 ID 查询并对账；
+/// 其他通用 mutation 不因此获得完整原命令恢复能力，不能把内存 gate 当成持久日志。
 pub(super) struct RemoteSessionData {
     pub(super) machine_id: String,
     /// 连接的生命周期槽位：服务中，或关闭中（含已确认关闭）。
@@ -178,12 +179,6 @@ impl RemoteSessionData {
                 .apply_schema(vec![StatementSpec::new(
                     "INSERT OR IGNORE INTO machines(id, name, identity_kind) VALUES (?1, '我的电脑', 'known')",
                     vec![Value::Text(machine_id.clone())],
-                )])
-                .await?;
-            store
-                .apply_schema(vec![StatementSpec::new(
-                    crate::sessions::canonical::BACKFILL_ENVIRONMENTS_SQL,
-                    vec![Value::Text(format!("legacy:{}", store_id.as_str()))],
                 )])
                 .await?;
         }
@@ -538,6 +533,31 @@ pub(super) fn unsupported_behavior(behavior: &'static str) -> SessionResourceErr
 
 #[async_trait]
 impl SessionDataPort for RemoteSessionData {
+    async fn load_work_command(
+        &self,
+        query: &peri_acp_types::session_resources::work::WorkCommandQuery,
+    ) -> SessionResourceResult<Option<peri_acp_types::session_resources::work::OwnedWorkCommand>>
+    {
+        self.read_work_command(query).await
+    }
+    async fn load_session_work(
+        &self,
+        query: &peri_acp_types::session_resources::work::WorkQuery,
+    ) -> SessionResourceResult<peri_acp_types::session_resources::work::WorkSnapshot> {
+        self.read_work(query).await
+    }
+    async fn apply_work_mutation(
+        &self,
+        command: &peri_acp_types::session_resources::work::WorkCommand,
+    ) -> SessionResourceResult<peri_acp_types::session_resources::work::WorkReceipt> {
+        self.write_work(command).await
+    }
+    async fn resolve_work_mutation(
+        &self,
+        command: &peri_acp_types::session_resources::work::WorkCommand,
+    ) -> SessionResourceResult<peri_acp_types::session_resources::work::WorkResolution> {
+        self.resolve_work(command).await
+    }
     async fn load_session_control(
         &self,
         id: &ThreadId,

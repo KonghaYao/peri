@@ -900,10 +900,6 @@ async fn prompt_without_frozen_snapshot_fails_closed() {
             workflow_middleware: None,
             title: None,
             tags: Vec::new(),
-
-            continuation_epoch: 0,
-            continuation_in_flight: false,
-            continuation_mq_steering_pending: false,
         },
     );
 

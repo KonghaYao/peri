@@ -27,10 +27,6 @@ fn retain_failed_assembly(
             workflow_middleware: None,
             title: None,
             tags: Vec::new(),
-
-            continuation_epoch: 0,
-            continuation_in_flight: false,
-            continuation_mq_steering_pending: false,
         },
     );
 }

@@ -7,6 +7,24 @@
 
 ## 架构速览
 
+嵌入式 TUI 与 print 的 SDK 执行部署入口是 `src/sdk_execution.rs::launch_sdk_dispatcher_for_client`，
+由 `src/launch.rs`、`src/cli_print.rs` 注入。安装布局要求可执行文件同目录下的
+`peri-sdk/execution/sidecar.js`（SDK build 产物 `dist/execution/sidecar.js`，安装器必须复制到该可信布局）；开发布局只读取编译时仓库路径
+`npm-packages/@peri-sdk/src/execution/sidecar.ts`，不从用户工作区寻找模块。
+launcher 从绝对 PATH 目录定位 Bun，以模块目录为工作目录启动 JSONL sidecar，
+持久 SQLite registry 位于 `~/.peri/execution/registry.db`。缺 Bun、模块、持久存储
+或协议能力时启动报错；没有 Rust scheduler、Rust lease/CAS 或默认内存准入回落。
+`src/acp_client/client/pump.rs` 转发 admit/entered/settle reverse RPC，收到
+`session/work/available` 只向 SDK 发 activate hint。SDK 经全双工 JSONL 请求 ACP
+query/execute/resolve；精确 existing ticket 确认不再次准入，Unknown 不推断 ownership 已释放。
+
+持久输入撤回入口 `src/kit/steer_state.rs` 以原 snapshot 与 pending command 共同校验：
+Queued 与未 claim 的 Dispatching 可以请求权威 withdraw receipt；Claimed 不可以。
+Unknown enqueue/dispatch/withdraw 保留原命令，禁止同时重发、撤回或恢复编辑器内容。
+视图 `src/kit/steer_queue/view.rs` 不把 Claimed 当作可撤回的 Dispatching。
+回归入口：`sdk_execution::tests`、`kit::steer_state::tests`、`kit::steer_queue::tests`；
+JSONL/SQLite transport 的协议与故障测试见 `peri-acp/src/host/execution_admission*_test.rs`。
+
 设置类型和配置源见 [`peri-config`](peri-config.md)：`src/config/mod.rs` 保留公共
 re-export，`tui_config.rs` 只 re-export core `ui::TuiConfig`。`kit/entry.rs` 优先从
 宿主 `ConfigSource` snapshot 初始化 UI projection，面板草稿/atoms 留在 TUI。

@@ -26,6 +26,22 @@ use crate::session::SessionManager;
 use super::task_scope::{HostTaskKind, HostTaskOwner, HostTaskOwnerKind};
 use super::AcpServerConfig;
 
+pub(super) fn child_chain_assembler(
+    sessions: &SessionManager,
+    session_id: &str,
+) -> Arc<dyn peri_agent::session::subagent::SubagentChainAssembler> {
+    Arc::new(
+        peri_middlewares::subagent::SubagentChainAssemblerImpl::with_registry(
+            sessions.mcp_skill_registry_for(session_id),
+        ),
+    )
+}
+
+pub(super) fn child_tool_invocation_resolver() -> Arc<dyn peri_agent::tools::ToolInvocationResolver>
+{
+    Arc::new(peri_middlewares::tool_search::ExecuteExtraToolResolver::default())
+}
+
 /// host 装配输入：调用方（cli/TUI/print/stdio）持有的轻量输入。
 ///
 /// M-TUI 收口（`spec/history/2026-08.md` 2026-08-05 条目，原文见 Git 历史）：
@@ -854,6 +870,7 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
     }
 
     AcpServerConfig {
+        execution_admission_port: None,
         workspace_assembly: (!session_scoped).then(|| WorkspaceAssembly {
             startup_cwd: cwd.clone(),
             bare,

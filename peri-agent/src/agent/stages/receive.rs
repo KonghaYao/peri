@@ -24,6 +24,9 @@ fn synthetic_defer_text(message: &QueuedMessage) -> Option<String> {
 /// 对 Defer 消息 emit `SyntheticUserMessage` 事件（TUI bridge 刷新 committed 视图用）。
 /// 消费后通过共享 helper `append_messages_to_transcript` 写入 Transcript。
 pub async fn run_receive(input: ReceiveInput) -> crate::error::AgentResult<ReceiveOutput> {
+    if let Some(output) = super::work_receive::receive(&input.context).await? {
+        return Ok(output);
+    }
     super::execution_control::validate(&input.context).await?;
     let execution = input.context.session.turn.execution_binding();
     let consumed = input.context.session.queue.drain_batch(64);
@@ -189,7 +192,7 @@ pub async fn run_receive(input: ReceiveInput) -> crate::error::AgentResult<Recei
             }
         }
         tracing::debug!(
-            turn_id = %input.context.session.turn.turn_id,
+            turn_id = %input.context.session.turn.turn_id(),
             count,
             "Receive 阶段消费消息"
         );

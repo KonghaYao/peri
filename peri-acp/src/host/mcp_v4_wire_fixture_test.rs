@@ -67,10 +67,11 @@ use peri_model::{
 use serial_test::serial;
 use tokio_util::sync::CancellationToken as AgentCancellationToken;
 
+use super::executor_flow_tests::execution_fixture::run_session_loop;
 use super::executor_flow_tests::{
     make_session_context, make_stage_build, make_turn_input, MockEventSink, SessionTaskBindings,
 };
-use crate::session::executor::{run_session_loop, FrozenSessionData, PromptResult, SessionContext};
+use crate::session::executor::{FrozenSessionData, PromptResult, SessionContext};
 
 /// 夹具 server 名。**异名**：A3 规定 `web` / `artifact`（及预留 `cron` /
 /// `workspace`）是保留实例名，夹具不得占用。
@@ -350,9 +351,40 @@ impl WireFixtureHarness {
     /// 同时按生产语义绑定本会话的任务管理器（`bind_session_tasks` 的会话侧一半）：
     /// 本节用例经 `run_wire_prompt` 直连 `run_session_loop`，未经 host 请求路径。
     pub(super) async fn session_context(&self, session_id: &str) -> SessionContext {
+        use peri_acp_types::session_resources::work::*;
         let mut ctx = make_session_context(session_id).await;
+        let workspace = self._tmp.path().join("workspace");
+        let connections = peri_middlewares::mcp::config::load_merged_config(
+            &workspace,
+            &self._tmp.path().join("claude"),
+        )
+        .unwrap()
+        .mcp_servers;
+        let resources = ctx.session_resources.as_ref().unwrap();
+        let snapshot = resources
+            .load_session_work(&WorkQuery {
+                session_id: session_id.into(),
+                limit: 1,
+            })
+            .await
+            .unwrap();
+        let ordered: std::collections::BTreeMap<_, _> = connections.iter().collect();
+        let receipt = resources
+            .apply_work_mutation(&WorkCommand {
+                session_id: session_id.into(),
+                recipient_lifecycle: snapshot.control.lifecycle,
+                mutation_id: format!("fixture-resource-owners:{session_id}"),
+                action: WorkAction::BindResourceOwners {
+                    expected_revision: snapshot.state.revision,
+                    connections_json: serde_json::to_string(&ordered).unwrap(),
+                    authorization_ref: format!("trusted-fixture-setup:{session_id}"),
+                },
+            })
+            .await
+            .unwrap();
+        assert_eq!(receipt.decision, WorkDecision::Accepted);
         ctx.mcp_pool = Some(Arc::clone(&self.pool) as Arc<dyn McpPoolPort>);
-        self.session_tasks.bind(&self.pool, session_id);
+        self.session_tasks.bind(&self.pool, &ctx);
         ctx
     }
 
@@ -566,6 +598,10 @@ pub(super) async fn run_wire_prompt_with_frozen(
     model: &Arc<WireScriptedModel>,
     frozen: Option<FrozenSessionData>,
 ) -> PromptResult {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_test_writer()
+        .try_init();
     let model = Arc::clone(model);
     let mut ctx = ctx;
     ctx.primary_llm_factory = Some(Arc::new(move || Arc::clone(&model) as Arc<dyn Model>));
@@ -813,8 +849,8 @@ async fn baseline_first_model_request_reports_web_and_artifact_capabilities() {
 
     assert!(
         result.ok,
-        "准入成功后 prompt 必须正常结束: stop={:?}",
-        result.stop_reason
+        "准入成功后 prompt 必须正常结束: stop={:?}, failure={:?}",
+        result.stop_reason, result.failure
     );
     assert_eq!(model.call_count(), 1, "首个 prompt 恰好一次模型调用");
 

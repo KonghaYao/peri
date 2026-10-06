@@ -6,6 +6,9 @@ use peri_acp_types::session_resources::{
 };
 use tokio_util::sync::CancellationToken;
 
+#[path = "session_control/reopen_test.rs"]
+mod reopen_tests;
+
 async fn fixture(
     tmp: &tempfile::TempDir,
 ) -> (AcpServerConfig, HashMap<String, SessionState>, String) {
@@ -135,7 +138,14 @@ async fn stop_rejects_wrong_execution_and_matches_exact_current_attempt() {
     assert_eq!(receipt["state"]["status"], "paused");
     assert!(token.is_cancelled());
 
-    assert!(!sessions[&id].continuation_mq_steering_pending);
+    assert_eq!(
+        cfg.session_resources
+            .load_session_control(&id)
+            .await
+            .unwrap()
+            .status,
+        peri_acp_types::session_resources::ControlStatus::Paused
+    );
 }
 
 #[tokio::test]

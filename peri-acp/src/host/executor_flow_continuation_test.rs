@@ -9,6 +9,7 @@ use super::*;
 async fn test_continuation_bypasses_keepgoing_short_circuit() {
     // Arrange：预取消 token，保证进入管线后快速中断（不触发真实 LLM 调用）
     let ctx = make_session_context("test-continuation").await;
+    execution_fixture::publish_continuation(&ctx).await;
     ctx.cancel.cancel();
     let stage_build = make_stage_build(&ctx);
     let mock_sink = Arc::new(MockEventSink::new());
@@ -45,6 +46,7 @@ async fn test_turn_terminal_state_unique_and_last() {
     // Arrange：预取消 token，进入管线后立即中断（不触发真实 LLM 调用）
     let mock_sink = Arc::new(MockEventSink::new());
     let ctx = make_session_context("test-turn-terminal").await;
+    execution_fixture::publish_continuation(&ctx).await;
     ctx.cancel.cancel();
     let stage_build = make_stage_build(&ctx);
     let turn = make_turn_input(
@@ -426,17 +428,12 @@ async fn test_continuation_skips_empty_prompt_push() {
     );
     let _ = run_session_loop(ctx2, turn2).await;
 
-    // Assert 2：keepgoing 会 push 一条 Prompt（空 human 由 stages 跳过转录）
+    // Assert 2：keepgoing 也不得虚构空 human publication。
     let drained = sm
         .get_session(session_id)
         .expect("session 应存在")
         .v2_message_queue
         .clone()
         .drain_all();
-    assert_eq!(drained.len(), 1, "keepgoing 应 push 一条空 Prompt 消息");
-    assert_eq!(
-        drained[0].kind,
-        peri_agent::session::queue::MessageKind::Prompt,
-        "keepgoing push 的消息应为 Prompt kind"
-    );
+    assert!(drained.is_empty(), "keepgoing 不得虚构空 human publication");
 }

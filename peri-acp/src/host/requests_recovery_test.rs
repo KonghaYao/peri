@@ -134,6 +134,59 @@ async fn test_clean_load_resume_and_fork_ignore_caller_cwd_and_keep_saved_facts(
 }
 
 #[tokio::test]
+async fn fork_rejects_persisted_attempt_before_runtime_attachment() {
+    use peri_acp_types::identity::AttemptId;
+    use peri_acp_types::session::TurnId;
+    use peri_acp_types::session_resources::{ControlAction, ControlAttempt, ControlCommand};
+
+    let mut fixture = Fixture::new().await;
+    let control = fixture
+        .cfg
+        .session_resources
+        .load_session_control(&fixture.id)
+        .await
+        .unwrap();
+    let attempt = ControlAttempt {
+        turn_id: TurnId::new(),
+        attempt_id: AttemptId::new(),
+    };
+    fixture
+        .cfg
+        .session_resources
+        .apply_session_control(&ControlCommand {
+            session_id: fixture.id.clone(),
+            command_id: "fork-observed-attempt".into(),
+            expected_lifecycle: control.lifecycle,
+            expected_revision: control.revision,
+            expected_control_generation: control.control_generation,
+            action: ControlAction::ObserveAttempt {
+                target: Some(attempt.clone()),
+            },
+        })
+        .await
+        .unwrap();
+    assert!(fixture.sessions[&fixture.id].cancel_token.is_none());
+    let session_id = fixture.id.clone();
+    let error = fixture
+        .request("session/fork", &json!({"sessionId": session_id}))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, -32010);
+    assert_eq!(
+        error.message,
+        "Cannot fork while source execution is active"
+    );
+    let retained = fixture
+        .cfg
+        .session_resources
+        .load_session_control(&fixture.id)
+        .await
+        .unwrap();
+    assert_eq!(retained.attempt, Some(attempt));
+    assert_eq!(fixture.sessions.len(), 1);
+}
+
+#[tokio::test]
 #[serial]
 async fn load_and_resume_after_runtime_loss_restore_without_owner_proof() {
     for method in ["session/load", "session/resume"] {

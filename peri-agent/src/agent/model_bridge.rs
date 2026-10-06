@@ -250,6 +250,7 @@ impl AgentModelBridge {
         &self,
         request: ModelRequest,
         streaming: Option<StreamingContext>,
+        prepared: Option<peri_model::PreparedModelCall>,
     ) -> AgentResult<Reasoning> {
         let model_name = self.model_name();
         // 本条 AI 消息的稳定身份：一次 LLM 调用 = 一条 assistant 消息。流式
@@ -261,11 +262,16 @@ impl AgentModelBridge {
             .as_ref()
             .map(|context| context.cancel.clone())
             .unwrap_or_default();
-        let mut stream = self
-            .model
-            .stream(request, cancellation.clone())
-            .await
-            .map_err(map_model_error)?;
+        let mut stream = match prepared {
+            Some(prepared) => prepared
+                .start(cancellation.clone())
+                .map_err(map_model_error)?,
+            None => self
+                .model
+                .stream(request, cancellation.clone())
+                .await
+                .map_err(map_model_error)?,
+        };
 
         // [Fix think-end] 本消息内是否已提前 emit ToolStarted：工具块开始
         // （Anthropic `content_block_start`，即 thinking 结束）时首个带
@@ -419,6 +425,24 @@ impl AgentModelBridge {
 
 #[async_trait]
 impl ReactLLM for AgentModelBridge {
+    fn prepare_reasoning(
+        &self,
+        messages: &[BaseMessage],
+        tools: &[&dyn BaseTool],
+    ) -> AgentResult<peri_model::PreparedModelCall> {
+        self.model
+            .prepare_stream(self.build_request(messages, tools)?)
+            .map_err(map_model_error)
+    }
+
+    async fn generate_prepared_reasoning(
+        &self,
+        prepared: peri_model::PreparedModelCall,
+        streaming: Option<StreamingContext>,
+    ) -> AgentResult<Reasoning> {
+        self.generate_from_request(ModelRequest::default(), streaming, Some(prepared))
+            .await
+    }
     fn estimate_request_tokens(&self, messages: &[BaseMessage], tools: &[&dyn BaseTool]) -> u64 {
         // 只读冻结前缀，不构建 provider 请求，也不第二次调用动态贡献 provider。
         // 冷启动尚未知动态后缀成本；后续有效 usage 会将其纳入权威基线。
@@ -437,7 +461,7 @@ impl ReactLLM for AgentModelBridge {
         streaming: Option<StreamingContext>,
     ) -> AgentResult<Reasoning> {
         let request = self.build_request(messages, tools)?;
-        self.generate_from_request(request, streaming).await
+        self.generate_from_request(request, streaming, None).await
     }
 
     async fn generate_reasoning_with_observed_body(
@@ -453,7 +477,7 @@ impl ReactLLM for AgentModelBridge {
             .prepare_request(&request)
             .ok()
             .map(|prepared| prepared.body().as_value().clone());
-        let reasoning = self.generate_from_request(request, streaming).await?;
+        let reasoning = self.generate_from_request(request, streaming, None).await?;
         Ok((reasoning, observed_body))
     }
 

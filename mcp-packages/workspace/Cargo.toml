@@ -32,9 +32,12 @@ tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
 uuid.workspace = true
+sha2.workspace = true
 walkdir = "2.5"
 
 [dev-dependencies]
+peri-model = { path = "../../peri-model" }
+peri-resources = { path = "../../peri-resources" }
 filetime = "0.2"
 futures.workspace = true
 regex = "1"

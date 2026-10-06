@@ -277,6 +277,10 @@ async fn test_stage_completion_reminders_share_assembled_task_manager() {
             let fixture = tempfile::tempdir().unwrap();
             let queue = MessageQueue::new();
             let input = StageBuildInput {
+                recipient_lifecycle: 1,
+                execution_admission_port: None,
+                sdk_run_started: None,
+                sdk_admission_observed: None,
                 agent_catalog: Arc::new(crate::host_ports::NoopAgentCatalog),
                 cwd: fixture.path().to_string_lossy().into_owned(),
                 session_id: "completion-assembly".into(),

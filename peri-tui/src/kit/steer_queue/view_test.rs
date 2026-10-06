@@ -186,7 +186,7 @@ fn test_queue_action_takeback_uses_queued_stable_id() {
 fn test_queue_action_transitional_items_reject_commands() {
     let mut items = make_items();
     items[0].state = SteerItemState::Submitting;
-    items[1].state = SteerItemState::Dispatching;
+    items[1].state = SteerItemState::Publishing;
     items[2].state = SteerItemState::Withdrawing;
     for id in ["A", "B", "C"] {
         assert_eq!(
@@ -200,6 +200,39 @@ fn test_queue_action_transitional_items_reject_commands() {
             "暂态不得取回 {id}"
         );
     }
+}
+
+#[test]
+fn published_unclaimed_row_enables_takeback_but_not_dispatch() {
+    let mut items = make_items();
+    items[1].state = SteerItemState::Dispatching;
+    assert_eq!(
+        validated_action(&Selection::TakeBack("B".into()), &[], &items),
+        Some(SteerQueueAction::TakeBack { id: "B".into() })
+    );
+    assert!(validated_action(&Selection::Dispatch("B".into()), &[], &items).is_none());
+    assert!(super::view::selections(&items, 5).contains(&Selection::TakeBack("B".into())));
+    let frame = make_view(items).layout(Rect::new(0, 0, 50, 7));
+    assert!(
+        frame
+            .controls
+            .iter()
+            .any(|control| control.selection == Selection::TakeBack("B".into()) && control.enabled)
+    );
+}
+
+#[test]
+fn claimed_row_has_no_takeback_control_or_keyboard_action() {
+    let mut items = make_items();
+    items[1].state = SteerItemState::Claimed;
+    assert!(validated_action(&Selection::TakeBack("B".into()), &[], &items).is_none());
+    assert!(!super::view::selections(&items, 5).contains(&Selection::TakeBack("B".into())));
+    let frame = make_view(items).layout(Rect::new(0, 0, 50, 7));
+    assert!(
+        frame.controls.iter().any(
+            |control| control.selection == Selection::TakeBack("B".into()) && !control.enabled
+        )
+    );
 }
 
 #[test]

@@ -53,6 +53,12 @@ Emscripten 最小入口见 [`peri-wasm`](peri-wasm.md)：复用本 crate 的 `ru
 
 ## 子系统
 
+### 持久 RCRA 与 SDK 准入
+
+`agent/stages/work_boundary.rs` 在首个 hook 或模型调用前确认完整 SDK admission、领域登记和真实 entered ACK；`session/turn.rs` 固定该 ticket 的 turn/attempt 与控制代际。`work_ledger.rs` 保存 Unknown 的完整原命令并冻结副作用，`work_receive.rs` 原子接纳/领取/投影，`work_reason.rs` 保存实际发送的完整模型请求及响应到 Act 的责任交接，`work_dispatch.rs` 保存工具意图和结果。`work_recovery.rs` 仅使用持久证据恢复阶段，不把 Transcript 存在当作处理完成，不盲重放 OutcomeUnknown 调用。
+
+`session/user_input_mailbox.rs` 及其子模块负责持久发布、withdraw 与 SDK run 的精确观察；它不再是执行准入者。`session/subagent/factory/cold.rs` 根据子会话自己的 frozen 数据、保存的委托身份和授权上限重建运行环境，不依赖活跃父 runtime 或根会话 persona。`agent/model_bridge.rs` 与 `peri-model` prepared-stream 端口将检查点和实际 HTTP 请求绑定，不能用脱敏诊断快照代替发送正文。
+
 ### RCRA 阶段（src/agent/stages/）
 
 | 功能 | 文件 | 入口/关键点 |

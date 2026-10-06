@@ -15,7 +15,7 @@ fn make_context() -> StageContext {
     let frozen = FrozenContext::builder().build();
     let session = Session::new(cwd, frozen, None);
     let turn = session.start_turn();
-    StageContext::new(turn, session.transcript(), session.queue().clone())
+    StageContext::new_best_effort_fixture(turn, session.transcript(), session.queue().clone())
 }
 
 /// 构造带 EventHandles 的 StageContext（测试可订阅 render 事件断言 TurnCompleted）
@@ -25,9 +25,13 @@ fn make_context_with_handles() -> (StageContext, EventHandles) {
     let session = Session::new(cwd, frozen, None);
     let turn = session.start_turn();
     let (bus, handles) = EventBus::new(Default::default());
-    let ctx = StageContext::builder(turn, session.transcript(), session.queue().clone())
-        .with_event_bus(Arc::new(bus))
-        .build();
+    let ctx = StageContext::best_effort_fixture_builder(
+        turn,
+        session.transcript(),
+        session.queue().clone(),
+    )
+    .with_event_bus(Arc::new(bus))
+    .build();
     (ctx, handles)
 }
 
@@ -114,10 +118,14 @@ async fn test_act_after_agent_failure_emits_turn_completed() {
     let (bus, mut handles) = EventBus::new(Default::default());
     let mut chain = MiddlewareChain::new();
     chain.add(Box::new(FailingAfterAgentMiddleware));
-    let ctx = StageContext::builder(turn, session.transcript(), session.queue().clone())
-        .with_event_bus(Arc::new(bus))
-        .with_middleware_chain(Arc::new(chain))
-        .build();
+    let ctx = StageContext::best_effort_fixture_builder(
+        turn,
+        session.transcript(),
+        session.queue().clone(),
+    )
+    .with_event_bus(Arc::new(bus))
+    .with_middleware_chain(Arc::new(chain))
+    .build();
 
     let reasoning = Reasoning::with_answer("thinking", "final answer");
     let result = run_act(ActInput {

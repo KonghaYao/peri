@@ -17,6 +17,7 @@ use crate::agent::compact_v2::planner::ContextPressure;
 /// 运行 Compact 阶段
 pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<CompactOutput> {
     let ctx = &input.context;
+    super::execution_control::validate(ctx).await?;
 
     // PreCompact 插件 hook 回调（fire-and-forget）
     if let Some(ref hook) = ctx.compact.compact_pre_hook {
@@ -55,6 +56,7 @@ pub(super) mod context_pressure;
 pub(crate) async fn run_compact_core(
     input: CompactInput,
 ) -> crate::error::AgentResult<CompactOutput> {
+    super::execution_control::validate(&input.context).await?;
     compact_core(input).await.0
 }
 

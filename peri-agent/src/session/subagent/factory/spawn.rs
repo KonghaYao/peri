@@ -258,6 +258,91 @@ pub(super) async fn spawn_subagent_impl(
         &frozen_skill_summary,
         &frozen_date,
     );
+    if let (Some(resources), Some(initiator), Some(invocation_id)) = (
+        session_resources.as_ref(),
+        parent_thread_id.as_ref(),
+        parent_tool_call_id.as_ref(),
+    ) {
+        use peri_acp_types::session_resources::work::WorkQuery;
+        use sha2::{Digest, Sha256};
+        let parent_work = resources
+            .load_session_work(&WorkQuery {
+                session_id: initiator.clone(),
+                limit: 1,
+            })
+            .await?;
+        if let Some(delegation) = parent_work.state.invocations.get(invocation_id) {
+            let child_snapshot = resources.load_session_snapshot(&child_thread_id).await?;
+            let peri_acp_types::session_resources::FrozenState::Present(bytes) =
+                child_snapshot.frozen
+            else {
+                return Err("Incomplete: child frozen snapshot missing".into());
+            };
+            let metadata = super::cold::ChildResumeMetadata {
+                version: 1,
+                child_session_id: child_thread_id.clone(),
+                recipient_lifecycle: 1,
+                agent_name: agent_name.clone(),
+                model_name: llm.model_name(),
+                direct_initiator_session_id: initiator.clone(),
+                direct_initiator_lifecycle: delegation.recipient_lifecycle,
+                delegation_invocation_id: invocation_id.clone(),
+                authorization_ref: delegation.intent.authorization_ref.clone(),
+                delegation_task_id: if run_mode == SubagentRunMode::Background {
+                    task_id.clone()
+                } else {
+                    child_thread_id.clone()
+                },
+                frozen_digest: format!("{:x}", Sha256::digest(bytes.as_str().as_bytes())),
+                tool_ceiling: tools
+                    .iter()
+                    .filter(|tool| tool_filter(tool.as_ref()))
+                    .map(|tool| tool.name().to_owned())
+                    .collect(),
+                tool_origins: tools
+                    .iter()
+                    .filter(|tool| tool_filter(tool.as_ref()))
+                    .map(|tool| {
+                        (
+                            tool.name().to_owned(),
+                            tool.mcp_server_name().map(str::to_owned),
+                        )
+                    })
+                    .collect(),
+                skill_names: skill_names.clone(),
+                max_iterations,
+                persona: system_prompt.clone(),
+                system_prompt: frozen.system_prompt.to_string(),
+                claude_md: frozen.claude_md.to_string(),
+                claude_local_md: frozen_claude_local_md.clone(),
+                skill_summary: frozen.skill_summary.to_string(),
+                date: frozen.date.to_string(),
+                language: frozen.language.as_ref().map(ToString::to_string),
+                section_overrides: frozen
+                    .meta_harness
+                    .section_overrides
+                    .iter()
+                    .map(|(key, value)| (key.clone(), value.to_string()))
+                    .collect(),
+                disabled_middlewares: frozen
+                    .meta_harness
+                    .disabled_middlewares
+                    .iter()
+                    .cloned()
+                    .collect(),
+                built_in_subagents_enabled: frozen.meta_harness.built_in_subagents_enabled,
+            };
+            super::cold::copy_child_resource_owners(resources.as_ref(), &metadata).await?;
+            super::cold::persist_child_resume_metadata(resources.as_ref(), &metadata).await?;
+            super::cold::bind_delegation_task(
+                resources.as_ref(),
+                initiator,
+                delegation,
+                &metadata.delegation_task_id,
+            )
+            .await?;
+        }
+    }
     let (session, v2_ctx) = build_subagent_session_v2(
         cwd.clone(),
         frozen,
@@ -308,11 +393,35 @@ pub(super) async fn spawn_subagent_impl(
         Some(ForkDirectiveKind::Bg) => build_bg_fork_directive(&prompt),
         None => prompt.clone(),
     };
-    v2_ctx.context.session.queue.push(QueuedMessage::new(
+    let queued = QueuedMessage::new(
         MessageKind::Prompt,
         MessageSource::UserInput,
         BaseMessage::human(prompt_message),
-    ));
+    );
+    super::delegation::publish_work_delegation(
+        session_resources
+            .clone()
+            .ok_or("Blocked: child resources unavailable")?,
+        &child_thread_id,
+        v2_ctx
+            .context
+            .recipient_lifecycle
+            .ok_or("Blocked: child lifecycle unavailable")?,
+        &v2_ctx.context.session.queue,
+        queued,
+        parent_thread_id
+            .as_deref()
+            .ok_or("Blocked: current delegation initiator unavailable")?,
+        parent_tool_call_id
+            .as_deref()
+            .ok_or("Blocked: current delegation invocation unavailable")?,
+        if matches!(run_mode, SubagentRunMode::Background) {
+            &task_id
+        } else {
+            &child_thread_id
+        },
+    )
+    .await?;
 
     match run_mode {
         SubagentRunMode::Sync => {

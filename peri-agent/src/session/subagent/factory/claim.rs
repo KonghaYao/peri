@@ -33,7 +33,10 @@ pub(in crate::session::subagent) struct ResumeClaim {
     decision: Option<oneshot::Sender<ClaimDecision>>,
     /// worker 的写入不能被调用方取消：只 detach（不 abort）。
     worker: JoinHandle<Result<(), String>>,
-    running: Option<(ControlAttempt, Arc<crate::session::Session>)>,
+    running: Option<(
+        Arc<crate::session::TurnContext>,
+        Arc<crate::session::Session>,
+    )>,
 }
 
 impl ResumeClaim {
@@ -74,10 +77,10 @@ impl ResumeClaim {
 
     pub(in crate::session::subagent) fn mark_running(
         &mut self,
-        attempt: ControlAttempt,
+        turn: Arc<crate::session::TurnContext>,
         session: Arc<crate::session::Session>,
     ) {
-        self.running = Some((attempt, session));
+        self.running = Some((turn, session));
     }
 
     /// 同步 Stop 已运行 hook：把领域终态交给 worker，由它先结清认领再写入。
@@ -112,9 +115,14 @@ impl Drop for ResumeClaim {
     fn drop(&mut self) {
         // 运行中被取消 → 领域终态「取消」；准备阶段被取消 → 直接关闭决定通道，
         // 由 worker 恢复认领前的记录。两者都不取消资源侧正在进行的写入。
-        let Some((attempt, session)) = self.running.take() else {
+        let Some((turn, session)) = self.running.take() else {
             return;
         };
+        let Some(admission) = turn.work_admission() else {
+            self.decision = None;
+            return;
+        };
+        let attempt = admission.execution.clone();
         if let Some(decision_tx) = self.decision.take() {
             let _ = decision_tx.send(ClaimDecision::CancelRunning(attempt, session));
         }

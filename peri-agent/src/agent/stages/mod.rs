@@ -13,10 +13,26 @@ mod compact_progress;
 mod execution_control;
 pub use execution_control::run_react_loop;
 pub mod middleware_runner;
+mod null_llm;
 mod queue_to_transcript;
 pub mod reason;
 pub mod receive;
 pub mod tool_dispatch;
+mod work_boundary;
+pub use work_boundary::{SdkAdmissionObservedFn, SdkRunStartedFn};
+mod context_builder;
+mod work_dispatch;
+pub(crate) mod work_ledger;
+mod work_pipeline;
+#[cfg(test)]
+mod work_production_test;
+mod work_reason;
+mod work_receive;
+mod work_recovery;
+#[cfg(test)]
+mod work_test_support;
+pub use null_llm::NullReactLLM;
+pub use work_receive::publish_session_inbox;
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -112,6 +128,16 @@ pub struct CompactContext {
 /// 让 stages 可以自驱完整 ReAct 循环，由 [`run_react_loop`] 入口统一驱动。
 #[derive(Clone)]
 pub struct StageContext {
+    pub(crate) sdk_run_started: Option<work_boundary::SdkRunStartedFn>,
+    pub(crate) sdk_admission_observed: Option<work_boundary::SdkAdmissionObservedFn>,
+    pub recipient_lifecycle: Option<u64>,
+    pub(crate) mcp_work_binding: Option<(
+        Arc<dyn peri_acp_types::ports::McpPoolPort>,
+        Arc<dyn peri_acp_types::tasks::TaskManager>,
+    )>,
+    pub(crate) work: Arc<work_boundary::WorkBoundary>,
+    pub execution_admission_port:
+        Option<Arc<dyn peri_acp_types::execution_admission::ExecutionAdmissionPort>>,
     pub session: SessionHandle,
     pub runtime: RuntimeServices,
     pub compact: CompactContext,
@@ -130,7 +156,8 @@ impl StageContext {
     /// 兼容旧测试：仅传会话实体时构造 minimal context（运行时字段需要单独填充）
     ///
     /// **注意**：此构造函数仅用于单元测试。生产代码请用 `StageContextBuilder`。
-    pub fn new(
+    #[cfg(test)]
+    pub fn new_best_effort_fixture(
         turn: TurnContext,
         transcript: Arc<RwLock<MessageTranscript>>,
         queue: MessageQueue,
@@ -147,6 +174,12 @@ impl StageContext {
         let sctx = Arc::new(RwLock::new(std::collections::HashMap::new()));
         let rbuf = Arc::new(RwLock::new(Vec::new()));
         Self {
+            work: Arc::new(work_boundary::WorkBoundary::fixture()),
+            sdk_run_started: None,
+            sdk_admission_observed: None,
+            recipient_lifecycle: None,
+            mcp_work_binding: None,
+            execution_admission_port: None,
             session: SessionHandle {
                 turn: turn_arc,
                 transcript,
@@ -195,6 +228,12 @@ impl StageContext {
         queue: MessageQueue,
     ) -> StageContextBuilder {
         StageContextBuilder {
+            work: Arc::new(work_boundary::WorkBoundary::default()),
+            sdk_run_started: None,
+            sdk_admission_observed: None,
+            recipient_lifecycle: None,
+            mcp_work_binding: None,
+            execution_admission_port: None,
             session: SessionHandle {
                 turn: Arc::new(turn),
                 transcript,
@@ -239,7 +278,7 @@ impl StageContext {
 
     /// 便捷访问：当前 turn_id
     pub fn turn_id(&self) -> crate::session::turn::TurnId {
-        self.session.turn.turn_id
+        self.session.turn.turn_id()
     }
 
     /// 便捷访问：当前 cwd
@@ -262,28 +301,6 @@ impl StageContext {
 /// 空 ReactLLM——用于未配置 LLM 的测试场景
 ///
 /// 调用时返回 Interrupted 错误，避免 stub 默认行为掩盖生产配置缺失。
-#[derive(Debug, Default, Clone, Copy)]
-pub struct NullReactLLM;
-
-#[async_trait::async_trait]
-impl ReactLLM for NullReactLLM {
-    async fn generate_reasoning(
-        &self,
-        _messages: &[BaseMessage],
-        _tools: &[&dyn BaseTool],
-        _streaming: Option<crate::agent::react::StreamingContext>,
-    ) -> crate::error::AgentResult<crate::agent::react::Reasoning> {
-        Err(crate::error::AgentError::Interrupted)
-    }
-
-    fn model_name(&self) -> String {
-        "null".to_string()
-    }
-
-    fn provider_capabilities(&self) -> crate::agent::compact_v2::projection::ProviderCapabilities {
-        crate::agent::compact_v2::projection::ProviderCapabilities::default()
-    }
-}
 
 // ─── StageContextBuilder ────────────────────────────────────────────────────
 
@@ -292,111 +309,21 @@ impl ReactLLM for NullReactLLM {
 /// 必填：turn / transcript / queue / llm（生产场景）
 /// 可选：tools / middleware_chain / event_bus / budget / compact_config 等
 pub struct StageContextBuilder {
+    sdk_run_started: Option<work_boundary::SdkRunStartedFn>,
+    sdk_admission_observed: Option<work_boundary::SdkAdmissionObservedFn>,
+    recipient_lifecycle: Option<u64>,
+    mcp_work_binding: Option<(
+        Arc<dyn peri_acp_types::ports::McpPoolPort>,
+        Arc<dyn peri_acp_types::tasks::TaskManager>,
+    )>,
+    work: Arc<work_boundary::WorkBoundary>,
+    execution_admission_port:
+        Option<Arc<dyn peri_acp_types::execution_admission::ExecutionAdmissionPort>>,
     session: SessionHandle,
     runtime: RuntimeServices,
     compact: CompactContext,
     async_ctx: AsyncContext,
     goal_controller: Option<Arc<dyn peri_acp_types::goal::GoalController>>,
-}
-
-impl StageContextBuilder {
-    pub fn with_llm(mut self, llm: Arc<dyn ReactLLM + Send + Sync>) -> Self {
-        self.runtime.llm = llm;
-        self
-    }
-
-    pub fn with_tools(mut self, tools: SharedToolMap) -> Self {
-        // `with_tools` is a builder convenience seam; production installs its
-        // validated session catalog explicitly with `with_tool_catalog`.
-        self.runtime.tool_catalog = Arc::new(
-            SessionToolCatalog::try_new(tools.read().clone(), None)
-                .unwrap_or_else(|_| SessionToolCatalog::new(BTreeMap::new(), None)),
-        );
-        self.runtime.tools = tools;
-        self
-    }
-
-    pub fn with_tool_catalog(mut self, catalog: Arc<SessionToolCatalog>) -> Self {
-        self.runtime.tool_catalog = catalog;
-        self
-    }
-
-    pub fn with_tool_invocation_resolver(
-        mut self,
-        resolver: Arc<dyn ToolInvocationResolver>,
-    ) -> Self {
-        self.runtime.tool_invocation_resolver = resolver;
-        self
-    }
-
-    pub fn with_middleware_chain(mut self, chain: Arc<MiddlewareChain>) -> Self {
-        self.runtime.middleware_chain = chain;
-        self
-    }
-
-    pub fn with_event_bus(mut self, bus: Arc<EventBus>) -> Self {
-        self.runtime.event_bus = bus;
-        self
-    }
-
-    pub fn with_context_budget(mut self, budget: ContextBudget) -> Self {
-        self.compact.context_budget = Some(budget);
-        self
-    }
-
-    pub fn with_compact_config(mut self, config: CompactConfig) -> Self {
-        self.compact.compact_config = Some(config);
-        self
-    }
-
-    pub fn with_compact_llm(mut self, llm: Arc<dyn peri_model::Model>) -> Self {
-        self.compact.compact_llm = Some(llm);
-        self
-    }
-
-    pub fn with_shared_tools(mut self, shared: SharedToolMap) -> Self {
-        self.runtime.shared_tools = Some(shared);
-        self
-    }
-
-    pub fn with_agent_id(mut self, agent_id: AgentId) -> Self {
-        self.session.agent_id = agent_id;
-        self
-    }
-
-    pub fn with_session_context(mut self, ctx: Arc<RwLock<HashMap<String, String>>>) -> Self {
-        self.session.session_context = ctx;
-        self
-    }
-
-    pub fn with_compact_pre_hook(mut self, hook: Arc<dyn Fn() + Send + Sync>) -> Self {
-        self.compact.compact_pre_hook = Some(hook);
-        self
-    }
-
-    pub fn with_compact_post_hook(mut self, hook: Arc<dyn Fn(bool, usize) + Send + Sync>) -> Self {
-        self.compact.compact_post_hook = Some(hook);
-        self
-    }
-
-    pub fn with_goal_controller(
-        mut self,
-        controller: Arc<dyn peri_acp_types::goal::GoalController>,
-    ) -> Self {
-        self.goal_controller = Some(controller);
-        self
-    }
-
-    pub fn build(self) -> StageContext {
-        StageContext {
-            session: self.session,
-            runtime: self.runtime,
-            compact: self.compact,
-            async_ctx: self.async_ctx,
-            goal_controller: self.goal_controller,
-            recall_buffer: Arc::new(RwLock::new(Vec::new())),
-        }
-    }
 }
 
 // ─── Compact 阶段类型 ────────────────────────────────────────────────────────
@@ -631,6 +558,14 @@ async fn run_react_loop_inner(context: StageContext, max_iterations: usize) -> L
                 Err(e) => return e,
             };
 
+            if receive_out.wake_up_count == 0 {
+                match context.work.ensure(&context).await {
+                    Ok(Some(_)) => break 'rcra,
+                    Ok(None) => {}
+                    Err(error) => return LoopResult::Error(error.into()),
+                }
+            }
+
             // 退出判断：本轮没有可唤醒消息且上一轮无工具调用 → 检查是否该退出。
             // Info 只做状态维护，虽被 Receive 消费，但不能单独驱动 Compact → Reason → Act。
             // 工具调用结果写入 transcript 而非队列：has_tool_calls=true 时
@@ -740,7 +675,7 @@ async fn run_react_loop_inner(context: StageContext, max_iterations: usize) -> L
                                 return LoopResult::Interrupted;
                             }
                             tracing::debug!(
-                                turn_id = %context.session.turn.turn_id,
+                                turn_id = %context.session.turn.turn_id(),
                                 queue_len_after_wake = context.session.queue.len(),
                                 "run_react_loop: idle inbox woken, continue to Receive"
                             );
@@ -756,7 +691,7 @@ async fn run_react_loop_inner(context: StageContext, max_iterations: usize) -> L
                                 mailbox.leave_idle();
                             }
                             tracing::debug!(
-                                turn_id = %context.session.turn.turn_id,
+                                turn_id = %context.session.turn.turn_id(),
                                 "run_react_loop: bounded wait deadline reached, re-evaluate exit"
                             );
                             // 到点必须回到退出判断，由 pending_handoff 写交接记录。
@@ -770,7 +705,7 @@ async fn run_react_loop_inner(context: StageContext, max_iterations: usize) -> L
                                 mailbox.leave_idle();
                             }
                             tracing::debug!(
-                                turn_id = %context.session.turn.turn_id,
+                                turn_id = %context.session.turn.turn_id(),
                                 queue_len_after_wake = context.session.queue.len(),
                                 "run_react_loop: registry activity changed, continue to Receive"
                             );

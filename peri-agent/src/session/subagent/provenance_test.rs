@@ -182,7 +182,7 @@ async fn test_sqlite_subagent_spawn_full_micro_cold_resume_preserves_provenance(
         *arc.write() = transcript;
     }
     let config = spawn_config(store.clone(), parent_messages.clone(), &cwd);
-    let spawned = SessionFactory::spawn_subagent(Some(&parent), config)
+    let spawned = AdmittedSessionFactory::spawn_subagent(Some(&parent), config)
         .await
         .unwrap();
     let child_id = spawned.child_thread_id.clone();
@@ -263,7 +263,7 @@ async fn test_sqlite_subagent_spawn_full_micro_cold_resume_preserves_provenance(
         None,
         None,
     );
-    let resumed = SessionFactory::resume_subagent(Some(&parent), config)
+    let resumed = AdmittedSessionFactory::resume_subagent(Some(&parent), config)
         .await
         .unwrap();
     {

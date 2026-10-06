@@ -133,6 +133,7 @@ mod session_lifecycle;
 mod session_read;
 mod session_schema;
 mod session_sql;
+mod session_work;
 mod session_write;
 mod sql;
 

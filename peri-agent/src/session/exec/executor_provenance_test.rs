@@ -76,6 +76,7 @@ async fn test_hidden_child_executor_restores_ancestor_and_own_flags_separately()
         turn.cancel_token.cancel();
         let (bus, handles) = EventBus::new(Default::default());
         let context = StageContext::builder(turn, session.transcript(), session.queue().clone())
+            .with_best_effort_work_fixture()
             .with_event_bus(Arc::new(bus))
             .build();
         let (_, todo_rx) = tokio::sync::mpsc::channel(8);

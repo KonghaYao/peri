@@ -28,12 +28,19 @@ async fn terminal_subagent_error_wakes_idle_inbox_as_defer() {
 
 async fn assert_terminal_receipt_wakes(source: MessageSource, severity: ReminderSeverity) {
     let bound = TestSession::open().await;
+    crate::session::test_resources::mock::work::bind_fixture_task(
+        bound.resources(),
+        &bound.thread_id(),
+        1,
+        "terminal-fixture-task",
+    )
+    .await;
     let transcript = Arc::new(parking_lot::RwLock::new(
         MessageTranscript::new().with_persistence(bound.resources(), bound.thread_id()),
     ));
     let queue = MessageQueue::new();
     let inbox = Arc::new(SessionInbox::new(Arc::new(queue.clone())));
-    let delivery = SessionTerminalDelivery::for_transcript(&transcript, &queue).unwrap();
+    let delivery = SessionTerminalDelivery::for_transcript(&transcript, &queue, Some(1)).unwrap();
     let reminder = TrustedSystemReminderFactory::for_producer()
         .construct(SystemReminder {
             version: SYSTEM_REMINDER_VERSION,
@@ -53,7 +60,7 @@ async fn assert_terminal_receipt_wakes(source: MessageSource, severity: Reminder
             audiences: ReminderAudiences(vec![ReminderAudience::Model]),
             body: "task finished".into(),
             summary: None,
-            metadata: serde_json::json!({}),
+            metadata: serde_json::json!({"task_id":"terminal-fixture-task"}),
         })
         .unwrap();
     let waiting = tokio::spawn({
@@ -85,4 +92,26 @@ async fn assert_terminal_receipt_wakes(source: MessageSource, severity: Reminder
         QueuedPayload::SystemReminder(_)
     ));
     assert_eq!(reminder.as_reminder().severity, severity);
+    let snapshot = bound
+        .resources
+        .load_session_work(&WorkQuery {
+            session_id: bound.thread_id(),
+            limit: 1,
+        })
+        .await
+        .unwrap();
+    assert!(snapshot
+        .state
+        .deliveries
+        .contains_key(&delivery_id.as_uuid().to_string()));
+    assert_eq!(
+        snapshot.state.obligations[&delivery_id.as_uuid().to_string()].status,
+        ObligationStatus::Pending
+    );
+    assert!(bound
+        .resources
+        .load_session_history(&bound.thread_id())
+        .await
+        .unwrap()
+        .is_empty());
 }

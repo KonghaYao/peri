@@ -12,6 +12,67 @@ use tokio_util::sync::CancellationToken;
 
 use super::*;
 
+#[path = "../../../peri-middlewares/src/at_mention/work_fixture.rs"]
+mod work_fixture;
+
+struct DispatchLlm(serde_json::Value);
+
+#[derive(Clone)]
+struct DispatchFixture {
+    context: StageContext,
+    directory: Arc<parking_lot::Mutex<Option<tempfile::TempDir>>>,
+}
+
+impl std::ops::Deref for DispatchFixture {
+    type Target = StageContext;
+
+    fn deref(&self) -> &Self::Target {
+        &self.context
+    }
+}
+
+#[async_trait::async_trait]
+impl peri_agent::agent::react::ReactLLM for DispatchLlm {
+    fn prepare_reasoning(
+        &self,
+        messages: &[BaseMessage],
+        tools: &[&dyn BaseTool],
+    ) -> peri_agent::error::AgentResult<peri_model::PreparedModelCall> {
+        peri_agent::agent::model_bridge::AgentModelBridge::new(Arc::new(
+            peri_model::OpenAiModel::new(peri_model::OpenAiConfig::new(
+                "http://127.0.0.1:1".parse().unwrap(),
+                "fixture-unused-key",
+                "fixture-model",
+            )),
+        ))
+        .prepare_reasoning(messages, tools)
+    }
+
+    async fn generate_prepared_reasoning(
+        &self,
+        _prepared: peri_model::PreparedModelCall,
+        _streaming: Option<peri_agent::agent::react::StreamingContext>,
+    ) -> peri_agent::error::AgentResult<Reasoning> {
+        Ok(Reasoning::with_tools(
+            "run Bash",
+            vec![peri_agent::agent::react::ToolCall::new(
+                "bash-call",
+                "Bash",
+                self.0.clone(),
+            )],
+        ))
+    }
+
+    async fn generate_reasoning(
+        &self,
+        _messages: &[BaseMessage],
+        _tools: &[&dyn BaseTool],
+        _streaming: Option<peri_agent::agent::react::StreamingContext>,
+    ) -> peri_agent::error::AgentResult<Reasoning> {
+        panic!("durable dispatch fixture must use prepared reasoning")
+    }
+}
+
 // Exercise the real platform shell without relying on Python availability or
 // PowerShell's native-executable argument quoting. Tail is fixture-owned text.
 fn output_command(count: usize, tail: &str, exit_code: i32) -> String {
@@ -22,62 +83,68 @@ fn output_command(count: usize, tail: &str, exit_code: i32) -> String {
     }
 }
 
-fn dispatch_context(cwd: &Path, tool: BashTool) -> StageContext {
+fn dispatch_context(cwd: &Path, tool: BashTool) -> DispatchFixture {
     let turn = peri_agent::session::turn::TurnContext::new(
         Arc::from(cwd.to_string_lossy().into_owned()),
         Arc::new(CancellationToken::new()),
     );
     let transcript = Arc::new(parking_lot::RwLock::new(MessageTranscript::new()));
-    let context = StageContext::new(turn, transcript, MessageQueue::new());
-    context
-        .runtime
-        .tools
-        .write()
-        .insert("Bash".to_string(), Arc::new(tool) as Arc<dyn BaseTool>);
-    context
+    let tools = Arc::new(parking_lot::RwLock::new(std::collections::BTreeMap::from(
+        [("Bash".to_string(), Arc::new(tool) as Arc<dyn BaseTool>)],
+    )));
+    let context = StageContext::builder(turn, transcript, MessageQueue::new())
+        .with_tools(tools)
+        .build();
+    DispatchFixture {
+        context,
+        directory: Arc::new(parking_lot::Mutex::new(None)),
+    }
 }
 
 fn dispatch_context_with_events(
     cwd: &Path,
     tool: BashTool,
-) -> (StageContext, peri_acp_types::event_v2::EventHandles) {
-    let turn = peri_agent::session::turn::TurnContext::new(
-        Arc::from(cwd.to_string_lossy().into_owned()),
-        Arc::new(CancellationToken::new()),
-    );
-    let transcript = Arc::new(parking_lot::RwLock::new(MessageTranscript::new()));
+) -> (DispatchFixture, peri_acp_types::event_v2::EventHandles) {
     let (bus, handles) = EventBus::new(Default::default());
-    let context = StageContext::builder(turn, transcript, MessageQueue::new())
-        .with_event_bus(Arc::new(bus))
-        .build();
-    context
-        .runtime
-        .tools
-        .write()
-        .insert("Bash".to_string(), Arc::new(tool) as Arc<dyn BaseTool>);
+    let mut context = dispatch_context(cwd, tool);
+    context.context.runtime.event_bus = Arc::new(bus);
     (context, handles)
 }
 
 async fn dispatch_bash(
-    context: &StageContext,
+    context: &DispatchFixture,
     input: serde_json::Value,
     cancel: CancellationToken,
 ) -> Result<DispatchOutcome, peri_agent::error::AgentError> {
-    let catalog = context
-        .runtime
-        .tool_catalog
-        .pin_working_tools(&context.runtime.tools.read())
-        .unwrap();
-    let reasoning = Reasoning::with_tools(
-        "run Bash",
-        vec![peri_agent::agent::react::ToolCall::new(
-            "bash-call",
-            "Bash",
-            input,
-        )],
-    );
-    peri_agent::agent::stages::tool_dispatch::dispatch_tools(context, &reasoning, &catalog, &cancel)
-        .await
+    let mut stage = context.context.clone();
+    let directory = work_fixture::bind(&mut stage).await;
+    *context.directory.lock() = Some(directory);
+    let mut context = stage;
+    context
+        .session
+        .queue
+        .push(peri_agent::session::QueuedMessage::prompt(
+            peri_agent::session::MessageSource::UserInput,
+            BaseMessage::human("exercise Bash execution evidence"),
+        ));
+    context.runtime.llm = Arc::new(DispatchLlm(input));
+    peri_agent::agent::stages::receive::run_receive(peri_agent::agent::stages::ReceiveInput {
+        context: context.clone(),
+    })
+    .await?;
+    let reasoned =
+        peri_agent::agent::stages::reason::run_reason(peri_agent::agent::stages::ReasonInput {
+            context: context.clone(),
+            has_tool_calls: false,
+        })
+        .await?;
+    peri_agent::agent::stages::tool_dispatch::dispatch_tools(
+        &context,
+        &reasoned.reasoning,
+        &reasoned.catalog,
+        &cancel,
+    )
+    .await
 }
 
 fn maybe_export_fixture(messages: &[BaseMessage]) {

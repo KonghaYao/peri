@@ -14,6 +14,14 @@ use crate::error::{AgentError, AgentResult};
 pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
     super::execution_control::validate(&input.context).await?;
     let ctx = &input.context;
+    let recovery_catalog = ctx.runtime.tool_catalog.snapshot();
+    if let Some(reasoning) = super::work_reason::recover_reasoning(ctx, &recovery_catalog).await? {
+        return Ok(ReasonOutput {
+            reasoning,
+            catalog: recovery_catalog,
+            messages_snapshot: ctx.visible_messages().into(),
+        });
+    }
     let step = ctx.session.turn.current_step();
     let turn_id = ctx.turn_id();
     let agent_id = ctx.session.agent_id;
@@ -151,19 +159,27 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
     // 使用 generate_reasoning_with_observed_body：观测体复用本次调用已构建的
     // request（消除每轮 request 双构建），LlmRequestPayload 在成功后、LlmCallEnd
     // 之前 emit——Langfuse 按 step 缓存 raw_body，时序兼容（on_llm_end 前到达即可）。
-    let (reasoning, observed_body): (Reasoning, Option<serde_json::Value>) = tokio::select! {
+    let prepared = super::work_reason::prepare(ctx, &messages_snapshot, &tool_refs).await?;
+    let (mut reasoning, observed_body): (Reasoning, Option<serde_json::Value>) = tokio::select! {
         biased;
         _ = ctx.session.turn.cancel_token.cancelled() => {
+            if let Err(error) = super::work_reason::block_uncertain_model(ctx).await {
+                tracing::error!(%error, "cancelled model request checkpoint unconfirmed");
+            }
             return Err(AgentError::Interrupted);
         }
-        result = ctx.runtime.llm.generate_reasoning_with_observed_body(
-            &messages_snapshot,
-            &tool_refs,
-            streaming,
-        ) => {
+        result = async {
+            match prepared {
+                Some(prepared) => ctx.runtime.llm.generate_prepared_reasoning(prepared, streaming).await.map(|reasoning| (reasoning, None)),
+                None => ctx.runtime.llm.generate_reasoning_with_observed_body(&messages_snapshot, &tool_refs, streaming).await,
+            }
+        } => {
             match result {
                 Ok((r, body)) => (r, body),
                 Err(e) => {
+                    if let Err(error) = super::work_reason::block_uncertain_model(ctx).await {
+                        tracing::error!(%error, "failed model request checkpoint unconfirmed");
+                    }
                     tracing::error!(
                         step,
                         model = %ctx.runtime.llm.model_name(),
@@ -309,6 +325,7 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
     }
 
     // after_model middleware（hook_middleware / git_attribution 等在此）
+    super::work_reason::commit_response(ctx, &mut reasoning, &catalog).await?;
     run_after_model(ctx, &reasoning).await?;
 
     Ok(ReasonOutput {

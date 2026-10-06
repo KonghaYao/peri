@@ -33,6 +33,8 @@ Emscripten 路径：`src/transport/http.rs` 复用 reqwest native/Hyper HTTP/SSE
 
 ### protocol/（协议 DTO + 模型接口事实源）
 
+`protocol/prepared.rs::PreparedModelCall` 是 RCRA 持久请求屏障使用的 opaque full-wire 请求：`Model::prepare_stream` 冻结 provider body、endpoint/model 与 credential 配置关联，`checkpoint()` 保留完整消息、system 和工具 schema，`start()` 消费同一冻结请求后才允许 HTTP effect。公开 `new` 构造器供受信跨 crate provider 实现同一精确请求契约，准备阶段无执行副作用；不允许自动降级。Anthropic/OpenAI 两个 adapter 共享此契约；不支持的 Model 默认拒绝。此类型不是经过脱敏/截断的 `PreparedModelRequest` observation，checkpoint 不含认证 headers/API keys。对应验证：`prepared_stream_test`（发送 body 等于完整 checkpoint；取消零发送）及 `PreparedModelCall::new` doc test（取消时不调用发送闭包）。
+
 | 功能 | 文件 | 入口/关键点 |
 | --- | --- | --- |
 | 内容块/消息/请求响应 | protocol/types.rs | `JsonObject` :11（BTreeMap 承载）；`ContentBlock` :71；`ModelMessage` :229；`ModelRequest` :302；`ModelResponse` :335（`new` :366 强制 assistant）；`TokenUsage` :453；`StopReason` :475；`ModelCapabilities` :484；`ProviderProtocol` :498 |

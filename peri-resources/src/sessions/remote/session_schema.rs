@@ -32,6 +32,10 @@ pub(super) fn initialization_plan() -> Vec<StatementSpec> {
         .chain([
             StatementSpec::bare(crate::sessions::control::CREATE_STATE),
             StatementSpec::bare(crate::sessions::control::CREATE_RECEIPTS),
+            StatementSpec::bare(crate::sessions::work::CREATE_STATE),
+            StatementSpec::bare(crate::sessions::work::CREATE_EVENTS),
+            StatementSpec::bare(crate::sessions::work::CREATE_RECEIPTS),
+            StatementSpec::bare(crate::sessions::work::CREATE_COMMANDS),
         ])
         .collect()
 }

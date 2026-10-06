@@ -1,5 +1,5 @@
 import {
-    SessionCloseIncompleteError, SessionCloseUnknownError, SessionControlNotAppliedError,
+    SessionCloseIncompleteError, SessionCloseUnknownError, SessionControlNotAppliedError, SessionControlBlockedError,
     type CloseOptions, type ControlCommand, type ControlReceipt,
     type ControlResolution, type ControlSnapshot,
 } from "./session-control";
@@ -69,7 +69,7 @@ export async function drainClose(
                 receipt = await request(operations.apply());
             }
         } catch (error) {
-            if (error instanceof SessionControlNotAppliedError) throw error;
+            if (error instanceof SessionControlNotAppliedError || error instanceof SessionControlBlockedError) throw error;
             failure = error;
             unknown = true;
         }

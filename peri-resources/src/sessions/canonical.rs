@@ -24,7 +24,7 @@
 use peri_acp_types::{messages::BaseMessage, store::PersistedPayload};
 
 /// 两种会话数据 adapter 的同一 schema 版本。
-pub(super) const CURRENT_SCHEMA_VERSION: i64 = 15;
+pub(super) const CURRENT_SCHEMA_VERSION: i64 = 17;
 
 /// 会话事实表。
 pub(super) const THREADS_TABLE: &str = "threads";
@@ -84,6 +84,10 @@ pub(super) const BACKFILL_ENVIRONMENTS_SQL: &str = "WITH RECURSIVE tree(thread_i
 
 /// canonical 表清单（父表在前，与 [`CREATE_TABLES_SQL`] 的顺序一致）。
 pub(super) const CANONICAL_TABLES: &[&str] = &[
+    "session_work_commands",
+    "session_work_state",
+    "session_work_events",
+    "session_work_receipts",
     "session_control_state",
     "session_control_receipts",
     THREADS_TABLE,

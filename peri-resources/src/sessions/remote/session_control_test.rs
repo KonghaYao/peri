@@ -610,7 +610,7 @@ async fn remote_control_v14_upgrade_seeds_existing_close_intent_and_keeps_store_
         .fetch_one(&fixture.pool)
         .await
         .unwrap();
-    assert_eq!(version, 15);
+    assert_eq!(version, super::super::schema::REMOTE_SCHEMA_VERSION);
     let identity: String = sqlx::query_scalar("SELECT store_id FROM peri_store_meta")
         .fetch_one(&fixture.pool)
         .await

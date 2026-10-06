@@ -139,6 +139,12 @@ pub enum McpBuiltinWorkspaceState {
 /// `McpClientPool`，路径不变。
 #[async_trait::async_trait]
 pub trait McpPoolPort: Send + Sync {
+    async fn cold_session_tools(
+        self: Arc<Self>,
+        _session_id: &str,
+    ) -> Result<Vec<Arc<dyn crate::tools::BaseTool>>, String> {
+        Err("Blocked: cold session tool reconstruction is unsupported".into())
+    }
     /// 还原具体实现（downcast 还原点，供 middlewares 装配面与装配面宿主使用）。
     fn as_any(&self) -> &dyn Any;
 
@@ -186,6 +192,15 @@ pub trait McpPoolPort: Send + Sync {
 
     fn verify_shared_environment_close(&self, _root_session_id: &str) -> Result<(), String> {
         Err("Incomplete: shared environment child ownership unknown".into())
+    }
+
+    fn bind_agent_session_resources(
+        &self,
+        _session_id: &str,
+        _lifecycle: u64,
+        _resources: Arc<dyn crate::session_resources::SessionResources>,
+    ) -> Result<(), String> {
+        Err("Incomplete: typed MCP session resources binding unavailable".into())
     }
 
     /// Revert recorded file changes in the session's trusted Workspace owner.

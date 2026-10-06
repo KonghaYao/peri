@@ -10,13 +10,18 @@ export interface WasmAcpTransportOptions {
 
 /** ACP over the in-process Emscripten port. No ACP method is handled here. */
 export class WasmAcpTransport extends JsonRpcTransport {
+  readonly generationId = crypto.randomUUID();
+  readonly executionKind = "wasmHost" as const;
+  private terminated = false;
   private constructor(private readonly native: NativeWasmAcp) {
     super((frame) => native.send(frame), async () => {
       await native.close();
       native.free?.();
+      this.terminated = true;
     });
     void this.receiveFrames();
   }
+  async executionStopped(): Promise<boolean> { return this.terminated; }
 
   static async start(options: WasmAcpTransportOptions): Promise<WasmAcpTransport> {
     const wasm = await loadPeriWasm(options.moduleUrl, options.env);

@@ -148,7 +148,28 @@ pub(super) async fn prepare_existing(
             }
             None => PreparedSessionInputs::prepare_restore(cfg, &cwd, &persisted)?,
         };
-        prepared.session_mcp_servers = super::session_mcp_servers(params)?;
+        let owner_state = cfg
+            .session_resources
+            .load_session_work(&peri_acp_types::session_resources::work::WorkQuery {
+                session_id: id.to_owned(),
+                limit: 1,
+            })
+            .await
+            .map_err(crate::host::workspace::resource_error)?;
+        let owner_known = owner_state
+            .state
+            .resource_owners
+            .contains_key(&owner_state.control.lifecycle);
+        prepared.session_mcp_servers =
+            super::super::resource_owners::load_for_restore(cfg, id).await?;
+        let supplied = super::session_mcp_servers(params)?;
+        if !supplied.is_empty() {
+            if owner_known {
+                super::super::resource_owners::bind(cfg, id, &supplied).await?;
+            } else {
+                prepared.session_mcp_servers = supplied;
+            }
+        }
         let frozen = prepared
             .frozen
             .clone()
@@ -192,10 +213,6 @@ pub(super) async fn prepare_existing(
             workflow_middleware,
             title: None,
             tags: Vec::new(),
-
-            continuation_epoch: 0,
-            continuation_in_flight: false,
-            continuation_mq_steering_pending: false,
         })
     }
     .await;

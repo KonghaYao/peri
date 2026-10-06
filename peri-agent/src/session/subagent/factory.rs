@@ -1,7 +1,10 @@
 use std::sync::Arc;
 
 mod claim;
+mod cold;
 mod context;
+mod delegation;
+pub use cold::{ChildResumeMetadata, ColdChildBlocked, ColdChildExecution, ColdChildRuntime};
 mod resume;
 mod spawn;
 

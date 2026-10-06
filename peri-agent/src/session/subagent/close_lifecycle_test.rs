@@ -29,6 +29,7 @@ pub(super) async fn reopen_closed_child_fixture(
     assert_eq!(receipt.decision, ControlDecision::Accepted);
     assert_eq!(receipt.state.status, ControlStatus::Active);
     assert_eq!(receipt.state.lifecycle, current.lifecycle + 1);
+    store.initialize_historical_fixture(session_id).await;
 }
 
 #[derive(Default)]
@@ -75,6 +76,16 @@ impl McpPoolPort for UnavailableClosePool {
         self.entered.notify_one();
         Err("Incomplete: resource owner unavailable".into())
     }
+    fn bind_agent_session_resources(
+        &self,
+        _: &str,
+        lifecycle: u64,
+        resources: Arc<dyn SessionResources>,
+    ) -> Result<(), String> {
+        assert_eq!(lifecycle, 1);
+        drop(resources);
+        Ok(())
+    }
 }
 
 #[tokio::test]
@@ -107,7 +118,7 @@ async fn background_close_resource_failure_keeps_delegation_unfinished() {
         terminal.send(result.clone()).unwrap();
         Ok(())
     }));
-    let spawned = SessionFactory::resume_subagent(Some(&parent), config)
+    let spawned = AdmittedSessionFactory::resume_subagent(Some(&parent), config)
         .await
         .unwrap();
     entered.await.unwrap();
@@ -159,8 +170,9 @@ async fn running_caller_drop_resource_failure_keeps_close_and_claim_unfinished()
         None,
         None,
     );
-    let running =
-        tokio::spawn(async move { SessionFactory::resume_subagent(Some(&parent), config).await });
+    let running = tokio::spawn(async move {
+        AdmittedSessionFactory::resume_subagent(Some(&parent), config).await
+    });
     entered.await.unwrap();
     let observed = store.load_session_control(&thread_id).await.unwrap();
     assert!(observed.attempt.is_some());
@@ -176,11 +188,12 @@ async fn running_caller_drop_resource_failure_keeps_close_and_claim_unfinished()
         store.load_meta(&thread_id).await.unwrap().agent_status,
         AgentStatus::Active
     );
-    assert!(
-        SessionFactory::resume_subagent(None, resume_config(store.clone(), thread_id.clone()))
-            .await
-            .is_err()
-    );
+    assert!(AdmittedSessionFactory::resume_subagent(
+        None,
+        resume_config(store.clone(), thread_id.clone())
+    )
+    .await
+    .is_err());
 }
 
 #[tokio::test]

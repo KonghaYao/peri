@@ -38,6 +38,8 @@ pub struct CronTaskInfo {
 #[derive(Debug, Clone)]
 pub struct CronContinuationRequest {
     pub session_id: String,
+    pub recipient_control: crate::session_resources::ControlState,
+    pub inbox: crate::session::MessageQueue,
     pub trigger: CronTrigger,
 }
 

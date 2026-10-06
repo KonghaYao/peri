@@ -28,7 +28,15 @@ pub enum SteerItemState {
     Queued,
     Submitting,
     Dispatching,
+    Publishing,
+    Claimed,
     Withdrawing,
+}
+
+impl SteerItemState {
+    pub(crate) fn can_take_back(self) -> bool {
+        matches!(self, Self::Queued | Self::Dispatching)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

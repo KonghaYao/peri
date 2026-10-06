@@ -7,6 +7,7 @@ mod evidence;
 mod gate;
 mod lifecycle;
 mod oauth_credentials;
+mod work;
 
 use std::path::Path;
 #[cfg(not(target_os = "emscripten"))]
@@ -256,6 +257,31 @@ impl SessionResourcesImpl {
 
 #[async_trait]
 impl SessionResources for SessionResourcesImpl {
+    async fn load_work_command(
+        &self,
+        query: &peri_acp_types::session_resources::work::WorkCommandQuery,
+    ) -> SessionResourceResult<Option<peri_acp_types::session_resources::work::OwnedWorkCommand>>
+    {
+        self.read_work_command(query).await
+    }
+    async fn load_session_work(
+        &self,
+        query: &peri_acp_types::session_resources::work::WorkQuery,
+    ) -> SessionResourceResult<peri_acp_types::session_resources::work::WorkSnapshot> {
+        self.read_session_work(query).await
+    }
+    async fn apply_work_mutation(
+        &self,
+        command: &peri_acp_types::session_resources::work::WorkCommand,
+    ) -> SessionResourceResult<peri_acp_types::session_resources::work::WorkReceipt> {
+        self.write_work_mutation(command).await
+    }
+    async fn resolve_work_mutation(
+        &self,
+        command: &peri_acp_types::session_resources::work::WorkCommand,
+    ) -> SessionResourceResult<peri_acp_types::session_resources::work::WorkResolution> {
+        self.reconcile_work_mutation(command).await
+    }
     async fn load_session_control(
         &self,
         id: &ThreadId,

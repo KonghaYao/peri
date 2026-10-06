@@ -138,11 +138,17 @@ pub async fn dispatch_tools(
             ));
             continue;
         }
-        match ctx
-            .runtime
-            .tool_invocation_resolver
-            .resolve(call, &all_tools)
-        {
+        let resolved = match ctx.work.bound_invocation(&call.id).await {
+            Some(invocation) => Ok(invocation),
+            None if ctx.work.ensure(ctx).await?.is_some() => {
+                return Err(anyhow::anyhow!("Act missing pinned durable target binding").into());
+            }
+            None => ctx
+                .runtime
+                .tool_invocation_resolver
+                .resolve(call, &all_tools),
+        };
+        match resolved {
             Ok(invocation) => invocations.push(invocation),
             Err(error) => resolution_errors.push((
                 call.clone(),
@@ -196,7 +202,15 @@ pub async fn dispatch_tools(
     super::execution_control::validate(ctx).await?;
 
     // 阶段 B：原子写入 transcript（staging 模式）
-    {
+    let mut durable_results = collect_outcome.results.clone();
+    durable_results.extend(resolution_errors.clone());
+    if let Some(projections) = super::work_dispatch::commit_results(ctx, &durable_results).await? {
+        let mut tx = ctx.session.transcript.write();
+        tx.mirror_committed_payload(peri_acp_types::store::PersistedPayload::Message(ai_msg));
+        for message in projections {
+            tx.mirror_committed_payload(peri_acp_types::store::PersistedPayload::Message(message));
+        }
+    } else {
         let mut tx = ctx.session.transcript.write();
         tx.stage_ai_message(ai_msg);
         for (_, result) in &collect_outcome.results {

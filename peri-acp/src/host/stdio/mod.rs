@@ -68,18 +68,19 @@ pub async fn run_acp_stdio(input: StdioInput) -> anyhow::Result<()> {
     } else {
         None
     };
-    let cfg = assemble_stdio_config(input, injected_settings.as_deref()).await?;
+    let mut cfg = assemble_stdio_config(input, injected_settings.as_deref()).await?;
     let sessions: super::SharedSessions = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
     let transport = StdioTransport::from_reader_writer(stdin, tokio::io::stdout())
         .with_cancel_hook(Some(Arc::new(|_line| {
             tracing::warn!("identity-free cancel ignored; use a stable session/control command");
         })));
-    super::run_acp_server_with_sessions(
-        Arc::new(transport) as Arc<dyn AcpTransport>,
-        cfg,
-        sessions,
-    )
-    .await;
+    let transport: Arc<dyn AcpTransport> = Arc::new(transport);
+    cfg.execution_admission_port = Some(Arc::new(
+        super::execution_admission::ReverseExecutionAdmission::new(Arc::new(
+            crate::transport::AcpRequestBridge(transport.clone()),
+        )),
+    ));
+    super::run_acp_server_with_sessions(transport, cfg, sessions).await;
     Ok(())
 }
 

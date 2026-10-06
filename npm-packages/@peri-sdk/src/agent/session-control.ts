@@ -52,6 +52,13 @@ export class SessionControlNotAppliedError extends Error {
     }
 }
 
+export class SessionControlBlockedError extends Error {
+    constructor(readonly blockingCommandId: string, message: string) {
+        super(message);
+        this.name = "SessionControlBlockedError";
+    }
+}
+
 export class SessionCloseIncompleteError extends Error {
     constructor(
         readonly receipt: ControlReceipt,
@@ -134,9 +141,9 @@ export class SessionControl {
         const pending = this.pending.get(command.commandId);
         if (pending) return pending;
         if (this.pending.size > 0)
-            throw new Error("A domain control command is already in progress");
+            throw new SessionControlBlockedError(this.pending.keys().next().value!, "A domain control command is already in progress");
         if (this.unresolved.size > 0)
-            throw new Error("Control outcome is unknown; resolve the original command first");
+            throw new SessionControlBlockedError(this.unresolved.values().next().value!, "Control outcome is unknown; resolve the original command first");
         const request = transport.request<ControlReceipt>("session/control", command)
             .then((receipt) => this.accept(command, receipt))
             .catch((error) => { this.unresolved.add(command.commandId); throw error; })

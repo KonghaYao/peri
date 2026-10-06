@@ -1,6 +1,5 @@
 //! Deployment → session/new → MCP → session scheduler → continuation regression.
 use super::*;
-use peri_agent::tools::{BaseTool, ToolContext};
 use peri_mcp_cron::CronSchedulerPortHandle;
 use peri_middlewares::mcp::McpClientPool;
 use peri_model::{
@@ -225,8 +224,8 @@ async fn restricted_deployment_omits_local_optional_capabilities_in_session() {
 
 async fn cron_tool(
     env: &crate::host::workspace::SessionEnvironment,
-    session_id: &str,
-    cwd: &str,
+    _session_id: &str,
+    _cwd: &str,
     name: &str,
     args: Value,
 ) -> String {
@@ -249,15 +248,21 @@ async fn cron_tool(
     })
     .await
     .expect("cron tools ready");
-    let tool = client.tools.iter().find(|t| t.name == name).unwrap();
-    peri_middlewares::mcp::tool_bridge::McpToolBridge::new("cron", tool, client.clone())
-        .with_output_store(&pool, Some(session_id))
-        .invoke(
-            args,
-            ToolContext::new(&[], cwd).with_session_identity(session_id, "test-turn"),
-        )
-        .await
+    let result = client
+        .peer
+        .as_ref()
         .unwrap()
+        .call_tool(serde_json::from_value(json!({"name": name, "arguments": args})).unwrap())
+        .await
+        .unwrap();
+    assert_ne!(result.is_error, Some(true));
+    result
+        .content
+        .iter()
+        .filter_map(|content| content.as_text())
+        .map(|content| content.text.clone())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn scheduler(
@@ -305,7 +310,8 @@ async fn cron_deployment_registration_and_tick_are_session_scoped() {
     );
     let (cron_tx, mut cron_rx) = tokio::sync::mpsc::unbounded_channel();
     cfg.session_manager.bind_cron_continuation(cron_tx);
-    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
+    let recorded_transport = Arc::new(MockTransport::default());
+    let transport: Arc<dyn crate::transport::AcpTransport> = recorded_transport.clone();
     let cwd = tmp
         .path()
         .canonicalize()
@@ -362,7 +368,6 @@ async fn cron_deployment_registration_and_tick_are_session_scoped() {
         "one due task must produce exactly one continuation, without cross-session broadcast"
     );
 
-    // Observe the actual continuation through the production scheduler and prompt path.
     let model = Arc::new(CronModel::default());
     let fingerprint = crate::session::agent_pool::fingerprint(&env_a.cfg.provider.read().clone());
     sessions
@@ -372,33 +377,71 @@ async fn cron_deployment_registration_and_tick_are_session_scoped() {
         .subagent_llm_cache
         .insert(fingerprint, model.clone());
     let shared = Arc::new(tokio::sync::Mutex::new(sessions));
-    let (cont_tx, _cont_rx) = tokio::sync::mpsc::unbounded_channel();
     let shutdown = tokio_util::sync::CancellationToken::new();
     let driver = tokio::spawn(crate::host::run_cron_continuation_scheduler(
         cron_rx,
         crate::host::CronContinuationContext {
-            sessions: shared.clone(),
-            prompt_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             cfg: cfg.clone(),
             transport: transport.clone(),
-            cont_tx: Arc::new(cont_tx),
             task_spawner: cfg.host_task_spawner.clone(),
             shutdown: shutdown.clone(),
         },
     ));
     assert!(sched_a.lock().force_next_fire_to_past(&task_a));
-    tokio::time::timeout(Duration::from_secs(15), async {
+    let published = tokio::time::timeout(Duration::from_secs(15), async {
         loop {
-            if shared.lock().await[&a].history.len() == 1 {
-                break;
+            let snapshot = cfg
+                .session_resources
+                .load_session_work(&peri_acp_types::session_resources::work::WorkQuery {
+                    session_id: a.clone(),
+                    limit: 1,
+                })
+                .await
+                .unwrap();
+            if snapshot.state.deliveries.values().any(|delivery| {
+                delivery
+                    .publication
+                    .event
+                    .content
+                    .serialized
+                    .contains("session-a-marker")
+            }) {
+                break snapshot;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     })
     .await
-    .expect("scheduled continuation must finish and commit history");
-    assert_eq!(model.prompts.lock().len(), 1);
-    assert!(model.prompts.lock()[0].contains("session-a-marker"));
+    .expect("scheduled trigger must durably publish its original recipient");
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if recorded_transport
+                .notifications()
+                .iter()
+                .any(|(method, params)| {
+                    method == "session/work/available" && params["sessionId"] == a
+                })
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("durable work publication must notify the SDK");
+    assert_eq!(
+        published.control.lifecycle,
+        trigger.recipient_control.lifecycle
+    );
+    assert!(
+        published.state.admissions.is_empty(),
+        "Peri producer cannot admit attempts"
+    );
+    assert!(
+        model.prompts.lock().is_empty(),
+        "no Rust continuation scheduler execution"
+    );
+    assert!(shared.lock().await[&a].history.is_empty());
     assert!(shared.lock().await[&b].history.is_empty());
 
     // Deleting a registered task prevents later ticks; closing A stops its generation.
@@ -439,7 +482,7 @@ async fn cron_deployment_registration_and_tick_are_session_scoped() {
             .is_err(),
         "closed session must stop its only tick driver"
     );
-    assert_eq!(model.prompts.lock().len(), 1);
+    assert!(model.prompts.lock().is_empty());
     // B remains usable after A closes.
     cron_tool(
         &env_b,

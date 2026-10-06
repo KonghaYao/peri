@@ -12,7 +12,7 @@ use serde_json::Value;
 use super::super::{AcpServerConfig, SessionState};
 use crate::transport::{types::AcpError, AcpTransport};
 
-pub(super) fn handle_user_input(
+pub(super) async fn handle_user_input(
     method: &str,
     params: &Value,
     cfg: &AcpServerConfig,
@@ -33,7 +33,7 @@ pub(super) fn handle_user_input(
     sessions
         .get(session_id)
         .ok_or_else(|| AcpError::new(-32602, "session not found"))?;
-    let mailbox = super::super::user_input::ensure_mailbox(session_id, cfg, transport)?;
+    let mailbox = super::super::user_input::ensure_mailbox(session_id, cfg, transport).await?;
     let rejected = |error: String| {
         AcpError::new(-32602, error).with_data(serde_json::json!({
             "rejected": true,
@@ -43,19 +43,22 @@ pub(super) fn handle_user_input(
     let receipt = match method {
         "session/input/enqueue" => {
             let request: EnqueueUserInputRequest = decode(params)?;
-            mailbox.enqueue(&request)
+            mailbox.enqueue_durable(&request).await
         }
         "session/input/dispatch" => {
             let request: DispatchUserInputsRequest = decode(params)?;
-            mailbox.dispatch(&request)
+            mailbox.dispatch_durable(&request).await
         }
         "session/input/takeback" => {
             let request: TakeBackUserInputRequest = decode(params)?;
-            mailbox.take_back(&request)
+            mailbox.take_back_durable(&request).await
         }
         "session/input/snapshot" => {
             let request: UserInputQueueSnapshotRequest = decode(params)?;
-            let snapshot = mailbox.snapshot();
+            let snapshot = mailbox
+                .refresh_durable()
+                .await
+                .map_err(|error| AcpError::new(-32603, error.to_string()))?;
             if request
                 .generation
                 .is_some_and(|generation| generation != snapshot.generation)
@@ -66,7 +69,20 @@ pub(super) fn handle_user_input(
         }
         _ => return Err(AcpError::new(-32601, "unknown user input method")),
     };
-    encode(receipt.map_err(|error| rejected(error.to_string()))?)
+    encode(receipt.map_err(|error| {
+        if matches!(
+            error,
+            peri_agent::session::user_input_mailbox::UserInputQueueError::OutcomeUnknown
+        ) {
+            AcpError::new(-32603, error.to_string()).with_data(serde_json::json!({
+                "status": "unknown",
+                "retryOriginalCommand": true,
+                "snapshot": mailbox.snapshot(),
+            }))
+        } else {
+            rejected(error.to_string())
+        }
+    })?)
 }
 
 fn decode<T: DeserializeOwned>(params: &Value) -> Result<T, AcpError> {

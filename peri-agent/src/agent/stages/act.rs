@@ -136,7 +136,9 @@ pub async fn run_act(input: ActInput) -> AgentResult<ActOutput> {
         // 消息——空 text block 会被 provider 拒绝（Anthropic 400），使本可续跑的
         // 断流变成下一轮硬失败。判空沿用 `MessageContent::is_empty()`（不 trim）。
         if !ai_msg.message_content().is_empty() {
-            ctx.session.transcript.write().append(ai_msg);
+            if !super::work_reason::mirror_response(ctx, ai_msg.clone()).await? {
+                ctx.session.transcript.write().append(ai_msg);
+            }
         }
 
         // 非流式时 emit TextChunk（流式由 LLM 适配器直接 emit）

@@ -38,7 +38,7 @@ pub(super) async fn run_sync_subagent(
     langfuse_bridge: Option<Arc<dyn LangfuseBridgeLike>>,
     parent_agent_id: Option<AgentId>,
     parent_tool_call_id: Option<String>,
-    v2_ctx: V2SubagentContext,
+    mut v2_ctx: V2SubagentContext,
     session: Arc<Session>,
     mut resume_claim: Option<ResumeClaim>,
 ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
@@ -61,14 +61,7 @@ pub(super) async fn run_sync_subagent(
     // The resumed claim crosses the first execution await with us. Its Drop
     // records cancellation without duplicating lifecycle Stop/hook delivery.
     if let Some(claim) = &mut resume_claim {
-        let binding = v2_ctx.context.session.turn.execution_binding();
-        claim.mark_running(
-            peri_acp_types::session_resources::ControlAttempt {
-                turn_id: binding.turn_id,
-                attempt_id: binding.attempt_id,
-            },
-            session.clone(),
-        );
+        claim.mark_running(v2_ctx.context.session.turn.clone(), session.clone());
     }
     let stop_resources = if resume_claim.is_some() {
         None // 认领持有终态写入（finish 内定向写状态），此处不重复写。
@@ -76,38 +69,40 @@ pub(super) async fn run_sync_subagent(
         session_resources
     };
 
-    // lifecycle hook（SubagentStart）
-    if let Some(ref on_start) = on_subagent_start {
-        on_start(&agent_name, &cwd);
-    }
-
-    // v2 SubagentStart（C2）：parent_agent_id 未注入时静默跳过（helper 内 warn）
-    emit_subagent_start_v2(
-        &v2_ctx.event_bus,
-        v2_ctx.context.turn_id(),
-        parent_agent_id,
-        v2_ctx.agent_id,
-        &agent_name,
-        false,
-        parent_tool_call_id.clone(),
-    );
-    // v1 协议化载体直发（SubagentStarted）：发射语义单一事实源为 v2 事件构造
-    // （ObserveEvent 身份透传：child_agent_id → instance_id / parent_tool_call_id →
-    // 父工具卡片配对键），经 `observe_event_to_executor` 同步映射后直发父
-    // handler——同步保证 Started 恒先于本 turn 后续事件到达父协议化链路
-    // （v1 ExecutorEvent 中间态已退役，仅保留 ACP 协议序列化面映射，
-    // `2026-07-18-executor-event-retirement.md`）。
-    forward_subagent_start_v1(
-        event_handler.as_ref(),
-        build_subagent_start_v2(
-            v2_ctx.context.turn_id(),
+    let previous_observer = v2_ctx.context.sdk_admission_observed.take();
+    let start_bus = v2_ctx.event_bus.clone();
+    let start_handler = event_handler.clone();
+    let start_agent_id = v2_ctx.agent_id;
+    let start_name = agent_name.clone();
+    let start_cwd = cwd.clone();
+    v2_ctx.context.sdk_admission_observed = Some(Arc::new(move |admission| {
+        if let Some(observe) = &previous_observer {
+            observe(admission.clone());
+        }
+        if let Some(on_start) = &on_subagent_start {
+            on_start(&start_name, &start_cwd);
+        }
+        emit_subagent_start_v2(
+            &start_bus,
+            admission.execution.turn_id,
             parent_agent_id,
-            v2_ctx.agent_id,
-            &agent_name,
+            start_agent_id,
+            &start_name,
             false,
-            parent_tool_call_id,
-        ),
-    );
+            parent_tool_call_id.clone(),
+        );
+        forward_subagent_start_v1(
+            start_handler.as_ref(),
+            build_subagent_start_v2(
+                admission.execution.turn_id,
+                parent_agent_id,
+                start_agent_id,
+                &start_name,
+                false,
+                parent_tool_call_id.clone(),
+            ),
+        );
+    }));
 
     // v2 事件转发器：子 EventBus → 父事件 handler（TUI 可见子 agent 工具调用/AI 文本）
     let forwarder_handle = spawn_subagent_event_forwarder_for_completion(
@@ -118,10 +113,14 @@ pub(super) async fn run_sync_subagent(
     );
     let child_agent_id = v2_ctx.agent_id;
     let event_bus = v2_ctx.event_bus;
+    let owned_execution = super::settlement::OwnedSubagentExecution::capture(&v2_ctx.context);
 
     // 运行 v2 ReAct 循环
-    let subagent_turn_id = v2_ctx.context.turn_id();
-    let mut loop_result = run_react_loop(v2_ctx.context, max_iterations).await;
+    let execution_turn = v2_ctx.context.session.turn.clone();
+    let loop_result = run_react_loop(v2_ctx.context, max_iterations).await;
+    let subagent_turn_id = execution_turn
+        .work_admission()
+        .map(|admission| admission.execution.turn_id);
     if let Err(error) = super::close::settle_explicit_close(
         &session,
         matches!(&loop_result, LoopResult::Interrupted),
@@ -136,13 +135,13 @@ pub(super) async fn run_sync_subagent(
     }
 
     // v2 SubagentStop（C3）：一个 emit 点覆盖 Completed / Interrupted / Error 三路
-    let mut stop_failure = match &loop_result {
+    let stop_failure = match &loop_result {
         LoopResult::Error(error) => {
             SubagentFailure::safe_failure_from_error(child_thread_id, error)
         }
         _ => None,
     };
-    let (mut stop_result, mut stop_is_error) = match &loop_result {
+    let (stop_result, stop_is_error) = match &loop_result {
         LoopResult::Completed => (
             extract_last_ai_text(&session)
                 .chars()
@@ -166,46 +165,55 @@ pub(super) async fn run_sync_subagent(
     // v2 SubagentStop（C3）：一个 emit 点覆盖 Completed / Interrupted / Error 三路。
     // 恢复路径复用本 Stop 发射点（R-L4）：stop_result 不含 child_thread_id——
     // issue 验收仅要求工具返回文本与 bg 通知文本携带 thread_id，事件侧不加。
-    emit_subagent_stop_v2_with_failure(
-        &event_bus,
-        SubagentStopV2Input {
-            turn_id: subagent_turn_id,
-            parent_agent_id,
-            child_agent_id,
-            agent_name: &agent_name,
-            result: &stop_result,
-            is_error: stop_is_error,
-            subagent_failure: stop_failure.clone(),
-        },
-    );
+    if let Some(subagent_turn_id) = subagent_turn_id {
+        emit_subagent_stop_v2_with_failure(
+            &event_bus,
+            SubagentStopV2Input {
+                turn_id: subagent_turn_id,
+                parent_agent_id,
+                child_agent_id,
+                agent_name: &agent_name,
+                result: &stop_result,
+                is_error: stop_is_error,
+                subagent_failure: stop_failure.clone(),
+            },
+        );
+    }
     // Close the child producer after the terminal v2 event. Awaiting the
     // forwarder drains queued render/observe events (including visible deltas)
     // before the synchronous v1 stop reaches the parent handler.
     if let Err(error) = drain_subagent_events(event_bus, forwarder_handle, langfuse_bridge).await {
         // Retain cancellation and typed model diagnostics when execution had
         // already failed; a successful loop cannot hide forwarding failure.
-        if matches!(loop_result, LoopResult::Completed) {
-            stop_result = error.user_facing_message();
-            stop_is_error = true;
-            stop_failure = None;
-            loop_result = LoopResult::Error(error);
+        deregister_guard.deregister = None;
+        if let Some(claim) = resume_claim.take() {
+            claim.release().await;
         }
+        return Err(Box::new(SubagentFailure::new(
+            child_thread_id,
+            &agent_name,
+            error,
+        )));
     }
     // v1 协议化载体直发（SubagentStopped）：与 Started 同源（v2 事件构造 +
     // observe_event_to_executor 同步映射），保证 Stopped 在 turn 收尾前到达
     // 父协议化链路（TUI 容器销毁 / depth 配对）。
-    forward_subagent_stop_v1(
-        event_handler.as_ref(),
-        build_subagent_stop_v2_with_failure(
-            subagent_turn_id,
-            parent_agent_id,
-            child_agent_id,
-            &agent_name,
-            &stop_result,
-            stop_is_error,
-            stop_failure,
-        ),
-    );
+    if let Some(subagent_turn_id) = subagent_turn_id {
+        forward_subagent_stop_v1(
+            event_handler.as_ref(),
+            build_subagent_stop_v2_with_failure(
+                subagent_turn_id,
+                parent_agent_id,
+                child_agent_id,
+                &agent_name,
+                &stop_result,
+                stop_is_error,
+                stop_failure,
+            ),
+        );
+    }
+
+    owned_execution.finish().await?;
 
     let (final_text, interrupted) = match loop_result {
         LoopResult::Completed => {

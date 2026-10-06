@@ -5,6 +5,7 @@ use peri_acp_types::{compact::CompactConfig, goal::GoalController, session::Sess
 use std::sync::Arc;
 
 pub(super) struct StageDependencies {
+    pub(super) task_manager: Arc<crate::agent::async_tasks::TaskManager>,
     pub(super) goal_controller: Option<Arc<dyn GoalController>>,
     pub(super) context_budget: Option<ContextBudget>,
     pub(super) compact_config: Option<CompactConfig>,
@@ -19,6 +20,7 @@ pub(super) fn configure_stage(
     dependencies: StageDependencies,
 ) -> StageContextBuilder {
     let StageDependencies {
+        task_manager,
         goal_controller,
         context_budget,
         compact_config,
@@ -26,6 +28,19 @@ pub(super) fn configure_stage(
         idle_inbox,
         idle_should_wait,
     } = dependencies;
+    builder = builder.with_recipient_lifecycle(input.recipient_lifecycle);
+    if let Some(pool) = &input.mcp_pool {
+        builder = builder.with_work_mcp_binding(pool.clone(), task_manager);
+    }
+    if let Some(port) = &input.execution_admission_port {
+        builder = builder.with_execution_admission_port(port.clone());
+    }
+    if let Some(publish) = &input.sdk_run_started {
+        builder = builder.with_sdk_run_started(publish.clone());
+    }
+    if let Some(observe) = &input.sdk_admission_observed {
+        builder = builder.with_sdk_admission_observed(observe.clone());
+    }
     if let Some(controller) = goal_controller {
         builder = builder.with_goal_controller(controller);
     }

@@ -13,7 +13,7 @@ fn make_stage_context() -> StageContext {
         .build();
     let session = Session::new(cwd, frozen, None);
     let turn = session.start_turn();
-    StageContext::new(turn, session.transcript(), session.queue().clone())
+    StageContext::new_best_effort_fixture(turn, session.transcript(), session.queue().clone())
 }
 
 /// Mock LLM：首轮返回 final_answer，无 tool_calls
@@ -65,11 +65,15 @@ async fn test_e2e_final_answer_no_tools() {
     let frozen = FrozenContext::builder().build();
     let session = Session::new(cwd, frozen, None);
     let turn = session.start_turn();
-    let ctx = StageContext::builder(turn, session.transcript(), session.queue().clone())
-        .with_llm(Arc::new(FinalAnswerLLM {
-            answer: "task completed",
-        }))
-        .build();
+    let ctx = StageContext::best_effort_fixture_builder(
+        turn,
+        session.transcript(),
+        session.queue().clone(),
+    )
+    .with_llm(Arc::new(FinalAnswerLLM {
+        answer: "task completed",
+    }))
+    .build();
 
     // 推入用户输入
     ctx.session.queue.push(QueuedMessage::prompt(
@@ -222,11 +226,15 @@ async fn test_e2e_cancel_before_loop() {
     let frozen = FrozenContext::builder().build();
     let session = Session::new(cwd, frozen, None);
     let turn = session.start_turn();
-    let ctx = StageContext::builder(turn, session.transcript(), session.queue().clone())
-        .with_llm(Arc::new(FinalAnswerLLM {
-            answer: "should not reach",
-        }))
-        .build();
+    let ctx = StageContext::best_effort_fixture_builder(
+        turn,
+        session.transcript(),
+        session.queue().clone(),
+    )
+    .with_llm(Arc::new(FinalAnswerLLM {
+        answer: "should not reach",
+    }))
+    .build();
 
     // 立即 cancel
     ctx.session.turn.cancel_token.cancel();
@@ -251,12 +259,16 @@ async fn test_run_react_loop_cancel_during_reason_is_interrupted() {
     );
     let turn = session.start_turn();
     let (bus, mut handles) = crate::agent::events_v2::EventBus::new(Default::default());
-    let ctx = StageContext::builder(turn, session.transcript(), session.queue().clone())
-        .with_llm(Arc::new(InterruptibleReasonLLM {
-            entered: std::sync::Mutex::new(Some(entered_tx)),
-        }))
-        .with_event_bus(Arc::new(bus))
-        .build();
+    let ctx = StageContext::best_effort_fixture_builder(
+        turn,
+        session.transcript(),
+        session.queue().clone(),
+    )
+    .with_llm(Arc::new(InterruptibleReasonLLM {
+        entered: std::sync::Mutex::new(Some(entered_tx)),
+    }))
+    .with_event_bus(Arc::new(bus))
+    .build();
     ctx.session.queue.push(QueuedMessage::prompt(
         MessageSource::UserInput,
         BaseMessage::human("cancel while reasoning"),
@@ -300,9 +312,13 @@ async fn test_e2e_empty_queue_completes_immediately() {
     let frozen = FrozenContext::builder().build();
     let session = Session::new(cwd, frozen, None);
     let turn = session.start_turn();
-    let ctx = StageContext::builder(turn, session.transcript(), session.queue().clone())
-        .with_llm(Arc::new(FinalAnswerLLM { answer: "answer" }))
-        .build();
+    let ctx = StageContext::best_effort_fixture_builder(
+        turn,
+        session.transcript(),
+        session.queue().clone(),
+    )
+    .with_llm(Arc::new(FinalAnswerLLM { answer: "answer" }))
+    .build();
 
     // 不推入 Prompt，直接跑循环（首轮 Receive consumed=0 → 直接退出）
     let result = run_react_loop(ctx.clone(), 0).await;

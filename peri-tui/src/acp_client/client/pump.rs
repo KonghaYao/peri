@@ -114,12 +114,27 @@ impl AcpTuiClient {
     /// 长生命周期对象，否则 channel 不再随 pump 退出关闭，notifier 的
     /// recv-None 兜底失效（Issue 2）。从 client 主动发通知走显式参数传递。
     pub fn spawn_pump(&self, notification_tx: mpsc::UnboundedSender<AcpNotification>) {
+        self.spawn_pump_with_execution_dispatcher(notification_tx, None);
+    }
+
+    pub fn spawn_pump_with_execution_dispatcher(
+        &self,
+        notification_tx: mpsc::UnboundedSender<AcpNotification>,
+        dispatcher: Option<Arc<dyn peri_acp::transport::RequestTransport>>,
+    ) {
         let transport = self.transport.clone();
         let lifecycle = self.lifecycle.clone();
         let user_input_queue = self.user_input_queue.clone();
         *self.notification_weak.lock().unwrap() = Some(notification_tx.downgrade());
         tokio::spawn(async move {
-            Self::run_pump(transport, notification_tx, lifecycle, user_input_queue).await;
+            Self::run_pump(
+                transport,
+                notification_tx,
+                lifecycle,
+                user_input_queue,
+                dispatcher,
+            )
+            .await;
         });
     }
 
@@ -151,13 +166,30 @@ impl AcpTuiClient {
         notification_tx: mpsc::UnboundedSender<AcpNotification>,
         lifecycle: InteractionLifecycle,
         user_input_queue: Arc<std::sync::atomic::AtomicBool>,
+        dispatcher: Option<Arc<dyn peri_acp::transport::RequestTransport>>,
     ) {
         let mut event_count: u64 = 0;
         loop {
             let msg = transport.recv().await;
             match msg {
                 Some(IncomingMessage::Notification { method, params }) => {
-                    if method == "peri/agent_event" {
+                    if method == "session/work/available" {
+                        let dispatcher = dispatcher.clone();
+                        tokio::spawn(async move {
+                            let Some(dispatcher) = dispatcher else {
+                                error!(
+                                    "SDK work dispatcher unavailable; no Rust scheduler fallback"
+                                );
+                                return;
+                            };
+                            if let Err(error) = dispatcher
+                                .send_request("peri/execution/activate", params)
+                                .await
+                            {
+                                warn!(?error, "SDK activation outcome remains unconfirmed");
+                            }
+                        });
+                    } else if method == "peri/agent_event" {
                         event_count += 1;
                         let session_id = params
                             .get("sessionId")
@@ -382,6 +414,24 @@ impl AcpTuiClient {
                     }
                 }
                 Some(IncomingMessage::Request { id, method, params }) => {
+                    if method == peri_acp_types::execution_admission::ADMIT_METHOD
+                        || method == peri_acp_types::execution_admission::SETTLE_METHOD
+                        || method == peri_acp_types::execution_admission::ENTERED_METHOD
+                    {
+                        let transport = transport.clone();
+                        let dispatcher = dispatcher.clone();
+                        tokio::spawn(async move {
+                            let result = match dispatcher {
+                                Some(dispatcher) => dispatcher.send_request(&method, params).await,
+                                None => Err(peri_acp::transport::types::AcpError::new(
+                                    -32601,
+                                    "SDK persistent execution admission capability unavailable",
+                                )),
+                            };
+                            let _ = transport.send_response(id, result).await;
+                        });
+                        continue;
+                    }
                     let _gate = if user_input_queue.load(std::sync::atomic::Ordering::Acquire) {
                         Some(lifecycle.operation_gate().lock().await)
                     } else {

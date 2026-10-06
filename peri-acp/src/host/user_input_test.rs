@@ -135,8 +135,8 @@ async fn test_user_input_takeback_and_dispatch_share_server_state() {
         "剩余队列只有已发布的第二条"
     );
     assert!(
-        cfg.session_manager.v2_queue_for(&sid).unwrap().is_empty(),
-        "中断收尾前不能提前交 MQ"
+        cfg.session_manager.v2_queue_for(&sid).unwrap().len() == 1,
+        "只有可靠发布成功的第二条可作为 MQ 提示"
     );
 }
 
@@ -154,10 +154,10 @@ async fn test_user_input_generation_invalidation_rejects_old_command() {
     )
     .await
     .unwrap();
-    cfg.session_manager.invalidate_user_input_mailbox(&sid);
+    let stale_generation = format!("{}:stale", old["generation"].as_str().unwrap());
     let request = make_user_input_request(
         &sid,
-        old["generation"].as_str().unwrap(),
+        &stale_generation,
         "00000000-0000-0000-0000-000000000001",
         "旧请求",
     );
@@ -174,8 +174,8 @@ async fn test_user_input_generation_invalidation_rejects_old_command() {
     assert_eq!(error.code, -32602, "旧 generation 必须明确拒绝");
     assert_eq!(data["rejected"], true, "拒绝标记让客户端保留草稿");
     assert_ne!(
-        data["snapshot"]["generation"], old["generation"],
-        "恢复实例必须生成不同身份"
+        data["snapshot"]["generation"], stale_generation,
+        "生命周期身份不接受陈旧命令"
     );
     assert!(
         data["snapshot"]["items"].as_array().unwrap().is_empty(),
@@ -229,7 +229,7 @@ async fn test_closing_user_input_session_can_read_but_cannot_mutate() {
 }
 
 #[tokio::test]
-async fn test_user_input_stop_revokes_ticket_before_cancel_token_registration() {
+async fn test_user_input_pause_preserves_durable_work_without_peri_ticket() {
     let tmp = tempfile::TempDir::new().unwrap();
     let (cfg, mut sessions, sid) = make_user_input_session(&tmp).await;
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
@@ -257,7 +257,7 @@ async fn test_user_input_stop_revokes_ticket_before_cancel_token_registration() 
     .await
     .unwrap();
     let mailbox = cfg.session_manager.user_input_mailbox_for(&sid).unwrap();
-    let ticket = mailbox.reserve_run().unwrap();
+    assert!(mailbox.reserve_run().is_none());
     let control = cfg
         .session_resources
         .load_session_control(&sid)
@@ -276,14 +276,10 @@ async fn test_user_input_stop_revokes_ticket_before_cancel_token_registration() 
     )
     .await
     .unwrap();
-    assert!(
-        !mailbox.attach_attempt(&ticket, tokio_util::sync::CancellationToken::new()),
-        "Stop 后旧 ticket 不能进入执行"
-    );
     assert_eq!(
         mailbox.snapshot().items[0].state,
-        peri_acp_types::session::UserInputState::Queued,
-        "尚未领取的输入恢复为可取回"
+        peri_acp_types::session::UserInputState::Dispatching,
+        "Pause 保留持久义务，不能伪造已撤回"
     );
     assert!(
         mailbox.reserve_run().is_none(),
@@ -302,7 +298,9 @@ async fn test_user_input_wire_control_responds_while_prompt_lock_is_held() {
     let (client, server) = crate::transport::mpsc::mpsc_transport_pair();
     let client = Arc::new(client);
     let server: Arc<dyn AcpTransport> = Arc::new(server);
-    let mailbox = crate::host::user_input::ensure_mailbox(&sid, &cfg, &server).unwrap();
+    let mailbox = crate::host::user_input::ensure_mailbox(&sid, &cfg, &server)
+        .await
+        .unwrap();
     let cancel = CancellationToken::new();
     states.get_mut(&sid).unwrap().cancel_token = Some(cancel.clone());
     mailbox.attach_external_attempt(cancel, false).unwrap();
@@ -345,8 +343,8 @@ async fn test_user_input_wire_control_responds_while_prompt_lock_is_held() {
     .expect("队列请求不能等待 prompt 锁")
     .unwrap();
     assert_eq!(
-        reply["results"][0]["state"], "queued",
-        "运行中普通输入只进入待发区"
+        reply["results"][0]["state"], "dispatching",
+        "运行中发送必须先可靠发布，执行仍由 SDK 串行准入"
     );
     let reply = tokio::time::timeout(
         std::time::Duration::from_secs(2),
@@ -375,7 +373,7 @@ async fn test_user_input_wire_control_responds_while_prompt_lock_is_held() {
 }
 
 #[tokio::test]
-async fn test_user_input_run_started_is_delivered_before_execution_can_continue() {
+async fn test_user_input_work_notification_does_not_launch_a_loop() {
     let tmp = tempfile::TempDir::new().unwrap();
     let (cfg, mut sessions, sid) = make_user_input_session(&tmp).await;
     let transport = Arc::new(MockTransport::default());
@@ -389,13 +387,13 @@ async fn test_user_input_run_started_is_delivered_before_execution_can_continue(
     )
     .await
     .unwrap();
-    handle_request(
+    let receipt = handle_request(
         "session/input/enqueue",
         &make_user_input_request(
             &sid,
             initial["generation"].as_str().unwrap(),
             "00000000-0000-0000-0000-000000000001",
-            "需要审批的工作",
+            "等待 SDK 准入",
         ),
         &cfg,
         &mut sessions,
@@ -403,36 +401,42 @@ async fn test_user_input_run_started_is_delivered_before_execution_can_continue(
     )
     .await
     .unwrap();
-    let mailbox = cfg.session_manager.user_input_mailbox_for(&sid).unwrap();
-    let ticket = mailbox.reserve_run().unwrap();
-    assert!(mailbox.attach_attempt(&ticket, tokio_util::sync::CancellationToken::new()));
-    crate::host::user_input::publish_run_started(&sid, &mailbox, &ticket, &cfg, &transport_dyn)
-        .await
-        .unwrap();
-    let started: Vec<_> = transport
-        .notifications()
-        .into_iter()
-        .filter_map(|(method, payload)| {
-            if method != "peri/agent_event" {
-                return None;
-            }
-            serde_json::from_str::<crate::event::AcpEvent>(payload["event_json"].as_str()?).ok()
-        })
-        .filter(|event| matches!(event, crate::event::AcpEvent::UserInputRunStarted { .. }))
-        .collect();
+    assert_eq!(receipt["workReceipts"][0]["decision"]["kind"], "accepted");
     assert_eq!(
-        started.len(),
-        1,
-        "await 返回前必须有且仅有一个启动通知写入 transport"
+        receipt["publicationGenerations"].as_object().unwrap().len(),
+        1
     );
-    assert!(
-        matches!(
-            &started[0],
-            crate::event::AcpEvent::UserInputRunStarted { generation, request_id }
-                if generation == mailbox.generation() && request_id == &ticket.id
-        ),
-        "启动通知与后续 done 共享 ticket 身份"
+    let mailbox = cfg.session_manager.user_input_mailbox_for(&sid).unwrap();
+    let cfg = Arc::new(cfg);
+    let sessions = Arc::new(tokio::sync::Mutex::new(sessions));
+    let locks = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+    let (sender, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    crate::host::user_input::schedule_mailbox(
+        &sid,
+        &sessions,
+        &locks,
+        &cfg,
+        &transport_dyn,
+        &Arc::new(sender),
     );
+    let notice = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if let Some((_, params)) = transport
+                .notifications()
+                .into_iter()
+                .find(|(method, _)| method == "session/work/available")
+            {
+                break params;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(notice["sessionId"], sid);
+    assert_eq!(notice["executionProtocol"], 1);
+    assert!(mailbox.reserve_run().is_none());
+    assert!(mailbox.snapshot().active_request_id.is_none());
 }
 
 #[tokio::test]
@@ -450,7 +454,9 @@ async fn test_user_input_stdio_uses_same_short_control_requests() {
             transport_read,
             transport_write,
         ));
-    let mailbox = crate::host::user_input::ensure_mailbox(&sid, &cfg, &server).unwrap();
+    let mailbox = crate::host::user_input::ensure_mailbox(&sid, &cfg, &server)
+        .await
+        .unwrap();
     mailbox
         .attach_external_attempt(CancellationToken::new(), false)
         .unwrap();
@@ -509,7 +515,7 @@ async fn test_user_input_stdio_uses_same_short_control_requests() {
     .await
     .expect("stdio 控制请求必须及时回复");
     assert_eq!(
-        response["result"]["results"][0]["state"], "queued",
+        response["result"]["results"][0]["state"], "dispatching",
         "stdio 与 MPSC 保持相同入队行为"
     );
     assert_eq!(
@@ -551,8 +557,9 @@ async fn test_user_input_cancel_rejects_stale_ticket_without_cancelling_current_
     .await
     .unwrap();
     let mailbox = cfg.session_manager.user_input_mailbox_for(&sid).unwrap();
-    let old = mailbox.reserve_run().unwrap();
-    assert!(mailbox.attach_attempt(&old, CancellationToken::new()));
+    let old = mailbox
+        .attach_external_attempt(CancellationToken::new(), false)
+        .unwrap();
     mailbox.stop();
     mailbox.finish_attempt(&old, UserInputAttemptOutcome::Interrupted);
     handle_request(
@@ -569,9 +576,10 @@ async fn test_user_input_cancel_rejects_stale_ticket_without_cancelling_current_
     )
     .await
     .unwrap();
-    let current = mailbox.reserve_run().unwrap();
     let current_cancel = CancellationToken::new();
-    assert!(mailbox.attach_attempt(&current, current_cancel.clone()));
+    mailbox
+        .attach_external_attempt(current_cancel.clone(), false)
+        .unwrap();
     sessions.get_mut(&sid).unwrap().cancel_token = Some(current_cancel.clone());
     let old_target = peri_acp_types::session_resources::ControlAttempt {
         turn_id: peri_acp_types::session::TurnId::new(),

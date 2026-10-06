@@ -21,6 +21,11 @@ use tokio_util::sync::CancellationToken;
 
 const PENDING_CAPACITY: usize = 32;
 
+#[path = "user_input_mailbox/durable.rs"]
+mod durable;
+#[path = "user_input_mailbox/sdk_run.rs"]
+mod sdk_run;
+
 /// 预留的单次执行身份；失效 ticket 不能启动或结算后来的一次执行。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserInputRunTicket {
@@ -34,7 +39,7 @@ pub enum UserInputAttemptOutcome {
     Failed,
 }
 
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
 pub enum UserInputQueueError {
     #[error("User input queue belongs to a different session generation")]
     StaleSession,
@@ -48,6 +53,10 @@ pub enum UserInputQueueError {
     Capacity,
     #[error("Identity was already used for a different operation")]
     IdentityConflict,
+    #[error("Durable user input outcome is unknown; reconcile the original command")]
+    OutcomeUnknown,
+    #[error("Durable user input was rejected: {0}")]
+    DurableRejected(String),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -63,6 +72,7 @@ struct ActiveRun {
     reason: InterruptReason,
     outcome: Option<UserInputAttemptOutcome>,
     managed: bool,
+    sdk: Option<sdk_run::SdkRunObservation>,
 }
 
 struct InputRecord {
@@ -70,6 +80,8 @@ struct InputRecord {
     fingerprint: u64,
     state: UserInputState,
     handed_off: bool,
+    publication_id: Option<String>,
+    publication_generation: Option<String>,
 }
 
 struct CommandReceipt {
@@ -98,10 +110,20 @@ pub struct UserInputMailbox {
     emit: Arc<dyn Fn(StateEvent) + Send + Sync>,
     control_turn: TurnId,
     control_agent: AgentId,
+    durable: Option<durable::DurableMailbox>,
 }
 
 impl UserInputMailbox {
+    #[cfg(test)]
     pub fn new(
+        session_id: String,
+        inbox: Arc<SessionInbox>,
+        emit: Arc<dyn Fn(StateEvent) + Send + Sync>,
+    ) -> Arc<Self> {
+        Self::new_unbound(session_id, inbox, emit)
+    }
+
+    fn new_unbound(
         session_id: String,
         inbox: Arc<SessionInbox>,
         emit: Arc<dyn Fn(StateEvent) + Send + Sync>,
@@ -123,6 +145,7 @@ impl UserInputMailbox {
             emit,
             control_turn: TurnId::new(),
             control_agent: AgentId::new(),
+            durable: None,
         })
     }
 
@@ -154,6 +177,9 @@ impl UserInputMailbox {
         &self,
         request: &EnqueueUserInputRequest,
     ) -> Result<UserInputQueueReceipt, UserInputQueueError> {
+        if self.durable.is_some() {
+            return Err(UserInputQueueError::OutcomeUnknown);
+        }
         let fingerprint = compute_fingerprint(("enqueue", request));
         let mut state = self.state.lock();
         self.validate(
@@ -198,6 +224,8 @@ impl UserInputMailbox {
                 fingerprint: input_fingerprint,
                 state: UserInputState::Queued,
                 handed_off: false,
+                publication_id: None,
+                publication_generation: None,
             });
             state.revision += 1;
             if state.active.is_none() || state.paused {
@@ -218,6 +246,9 @@ impl UserInputMailbox {
         &self,
         request: &DispatchUserInputsRequest,
     ) -> Result<UserInputQueueReceipt, UserInputQueueError> {
+        if self.durable.is_some() {
+            return Err(UserInputQueueError::OutcomeUnknown);
+        }
         let fingerprint = compute_fingerprint(("dispatch", request));
         let mut state = self.state.lock();
         self.validate(
@@ -262,6 +293,9 @@ impl UserInputMailbox {
         &self,
         request: &TakeBackUserInputRequest,
     ) -> Result<UserInputQueueReceipt, UserInputQueueError> {
+        if self.durable.is_some() {
+            return Err(UserInputQueueError::OutcomeUnknown);
+        }
         let fingerprint = compute_fingerprint(("takeback", request));
         let mut state = self.state.lock();
         self.validate(
@@ -304,6 +338,9 @@ impl UserInputMailbox {
 
     /// 只预留一次执行，不交接消息；宿主取得既有 prompt lock 后再 attach。
     pub fn reserve_run(&self) -> Option<UserInputRunTicket> {
+        if self.durable.is_some() {
+            return None;
+        }
         let mut state = self.state.lock();
         if !state.valid || state.paused || state.active.is_some() || state.ready.is_empty() {
             return None;
@@ -315,6 +352,7 @@ impl UserInputMailbox {
             reason: InterruptReason::None,
             outcome: None,
             managed: true,
+            sdk: None,
         });
         Some(ticket)
     }
@@ -360,9 +398,10 @@ impl UserInputMailbox {
             reason: InterruptReason::None,
             outcome: None,
             managed: false,
+            sdk: None,
         });
         state.revision += 1;
-        if resume_pending {
+        if resume_pending && self.durable.is_none() {
             state.paused = false;
             promote_next(&mut state);
             self.handoff_locked(&mut state);
@@ -393,7 +432,11 @@ impl UserInputMailbox {
             return None;
         }
         Some(StateEvent::UserInputRunStarted {
-            turn_id: self.control_turn,
+            turn_id: state
+                .active
+                .as_ref()
+                .and_then(|active| active.sdk.as_ref())
+                .map_or(self.control_turn, |sdk| sdk.admission.execution.turn_id),
             agent_id: self.control_agent,
             generation: self.generation.clone(),
             request_id: ticket.id.clone(),
@@ -447,7 +490,8 @@ impl UserInputMailbox {
             self.reclaim_locked(&mut state);
         } else if state.paused {
             self.reclaim_locked(&mut state);
-        } else if active.reason == InterruptReason::None
+        } else if self.durable.is_none()
+            && active.reason == InterruptReason::None
             && outcome == UserInputAttemptOutcome::Completed
         {
             // 已接受的立即发送优先；普通待办每次只释放队首一条。
@@ -539,6 +583,9 @@ impl UserInputMailbox {
     }
 
     fn wake_suspended_locked(&self, state: &mut MailboxState) -> bool {
+        if self.durable.is_some() {
+            return false;
+        }
         // 迟到的 idle 不能恢复 Stop、立即发送收尾或已经取消的旧 attempt。
         if !state.valid
             || state.paused
@@ -563,6 +610,13 @@ impl UserInputMailbox {
     /// Receive 已从 MQ 独占取走这些 ID；任何 Stop 都不得再将它们恢复 queued。
     pub(crate) fn mark_claimed(&self, ids: &[MessageId]) {
         let mut state = self.state.lock();
+        if let Some(sdk) = state.active.as_mut().and_then(|active| active.sdk.as_mut()) {
+            for id in ids {
+                if !sdk.input_ids.contains(id) {
+                    sdk.input_ids.push(*id);
+                }
+            }
+        }
         let mut changed = false;
         for record in &mut state.records {
             if record.state == UserInputState::Dispatching && matches_id(record, ids) {
@@ -601,6 +655,9 @@ impl UserInputMailbox {
     }
 
     fn handoff_locked(&self, state: &mut MailboxState) {
+        if self.durable.is_some() {
+            return;
+        }
         let ready = std::mem::take(&mut state.ready);
         let messages = ready
             .into_iter()
@@ -627,6 +684,9 @@ impl UserInputMailbox {
     }
 
     fn reclaim_locked(&self, state: &mut MailboxState) {
+        if self.durable.is_some() {
+            return;
+        }
         let ids: Vec<_> = state
             .records
             .iter()
@@ -721,6 +781,8 @@ impl UserInputMailbox {
             snapshot: self.snapshot_locked(state),
             results,
             taken_back,
+            work_receipts: Vec::new(),
+            publication_generations: Default::default(),
         }
     }
 
@@ -740,6 +802,8 @@ impl UserInputMailbox {
             snapshot: self.snapshot_locked(state),
             results: receipt.results.clone(),
             taken_back: receipt.taken_back.clone(),
+            work_receipts: Vec::new(),
+            publication_generations: Default::default(),
         }))
     }
 

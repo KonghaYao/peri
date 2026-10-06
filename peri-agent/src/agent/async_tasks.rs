@@ -8,6 +8,7 @@
 
 mod agent_inbox;
 pub(crate) mod delivery;
+pub use delivery::{build_task_terminal_command, durable_task_terminal_delivery};
 pub(crate) mod handoff;
 mod manager;
 mod registry;
