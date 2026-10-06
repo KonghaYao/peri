@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use peri_acp_types::messages::MessageId;
 use peri_acp_types::session::{MessageQueue, QueuedMessage, QueuedPayload};
 use peri_acp_types::session_resources::work::{
     DeliveryPurpose, PublishDelivery, TaskBinding, WorkAction, WorkCommand, WorkEvent, WorkPayload,
@@ -45,7 +44,7 @@ pub(in crate::session::subagent) async fn publish_work_delegation(
         recovery_locator: invocation.intent.recovery_locator.clone(),
         authorization_ref: invocation.intent.authorization_ref.clone(),
     };
-    let delivery_id = message.delivery_id.unwrap_or_else(MessageId::new);
+    let delivery_id = message.delivery_id.unwrap_or_default();
     message.delivery_id = Some(delivery_id);
     let payload = match &message.payload {
         QueuedPayload::Message(message) => PersistedPayload::Message(message.clone()),

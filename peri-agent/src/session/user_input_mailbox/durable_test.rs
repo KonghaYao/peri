@@ -458,7 +458,7 @@ async fn pending_publication_blocks_new_command_after_mailbox_reconstruction() {
             &snapshot,
             "different-send-command",
             fingerprint,
-            &[request.input_id.clone()]
+            std::slice::from_ref(&request.input_id)
         )
         .unwrap_err(),
         UserInputQueueError::OutcomeUnknown

@@ -12,8 +12,7 @@ use peri_agent::{
 use super::test_support::ImageFixture;
 use super::ImageMiddleware;
 
-#[path = "../../at_mention/work_fixture.rs"]
-mod work_fixture;
+use crate::at_mention::tests::work_fixture;
 
 /// [回归测试] 后续 SDK 执行接收追加图片后触发 Micro，模型仍须收到图片载荷。
 /// 历史缺口：图片准备仅挂在一次性的 before_agent，第二批输入只留下 @image 文本。

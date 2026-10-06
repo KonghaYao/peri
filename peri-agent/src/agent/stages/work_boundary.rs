@@ -124,9 +124,9 @@ impl WorkBoundary {
                 .await
                 .map_err(|error| anyhow::anyhow!(error))?;
             let AdmissionOutcome::Admitted { admission } = outcome else {
-                return Err(
-                    anyhow::anyhow!("SDK execution admission not confirmed: {outcome:?}").into(),
-                );
+                return Err(anyhow::anyhow!(
+                    "SDK execution admission not confirmed: {outcome:?}"
+                ));
             };
             if admission.session_id != *session_id || admission.lifecycle != lifecycle {
                 return Err(anyhow::anyhow!(
@@ -145,13 +145,15 @@ impl WorkBoundary {
                 .commit(&command)
                 .await?;
             if !ctx.session.turn.bind_work_admission(admission) {
-                return Err(anyhow::anyhow!("SDK execution ticket binding changed").into());
+                return Err(anyhow::anyhow!("SDK execution ticket binding changed"));
             }
         }
         let runtime = WorkRuntime::bind(self.mode, ctx.session.turn.work_admission(), resources)?;
+        #[cfg(not(test))]
+        let WorkRuntime::Durable(session) = runtime;
+        #[cfg(test)]
         let session = match runtime {
             WorkRuntime::Durable(session) => session,
-            #[cfg(test)]
             WorkRuntime::BestEffortFixture => return Ok(None),
         };
         let snapshot = session.snapshot().await?;
@@ -174,9 +176,9 @@ impl WorkBoundary {
                 .as_ref()
                 .is_none_or(|(_, session_id, _)| *session_id != session.admission.session_id)
         {
-            return Err(
-                anyhow::anyhow!("SDK ticket is not durably registered for this session").into(),
-            );
+            return Err(anyhow::anyhow!(
+                "SDK ticket is not durably registered for this session"
+            ));
         }
         if snapshot.control.lifecycle != session.admission.lifecycle
             || snapshot.control.control_generation != session.admission.control_generation
@@ -346,5 +348,5 @@ impl StageContextBuilder {
 
 pub(crate) fn persisted_projection(payload: &WorkPayload) -> anyhow::Result<PersistedPayload> {
     payload.validate()?;
-    Ok(deserialize_persisted_payload(&payload.serialized)?)
+    deserialize_persisted_payload(&payload.serialized)
 }

@@ -15,7 +15,7 @@ use super::*;
 use crate::workspace_io::{WorkspaceMentionContent, WorkspaceReadError};
 
 #[path = "work_fixture.rs"]
-mod work_fixture;
+pub(crate) mod work_fixture;
 
 struct Reader(HashMap<String, String>);
 

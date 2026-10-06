@@ -10,7 +10,7 @@ use peri_resources::sessions::SessionResourcesImpl;
 #[path = "../../../peri-agent/src/session/test_resources/mock/admission.rs"]
 mod admission;
 
-pub(super) async fn bind(context: &mut StageContext) -> tempfile::TempDir {
+pub(crate) async fn bind(context: &mut StageContext) -> tempfile::TempDir {
     let directory = tempfile::tempdir().unwrap();
     let resources: Arc<dyn SessionResources> = Arc::new(
         SessionResourcesImpl::open(directory.path().join("fixture.db"))

@@ -142,4 +142,4 @@ impl AtMentionMiddleware {
 
 #[cfg(test)]
 #[path = "mod_test.rs"]
-mod tests;
+pub(crate) mod tests;

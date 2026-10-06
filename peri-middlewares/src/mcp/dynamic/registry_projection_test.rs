@@ -12,7 +12,7 @@ async fn checked_projection_ready_shadow_unload_aba_and_close() {
         .insert("example".into(), static_handle);
     static_pool
         .set_builtin_instance_context(Arc::new(
-            crate::mcp::builtin::BuiltinInstanceContext::new("projection-source")
+            crate::mcp::builtin::context::BuiltinInstanceContext::new("projection-source")
                 .with_closed(std::collections::BTreeSet::from(["workspace".into()]))
                 .with_skills_face_closed(true),
         ))

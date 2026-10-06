@@ -298,10 +298,6 @@ impl StageContext {
     }
 }
 
-/// 空 ReactLLM——用于未配置 LLM 的测试场景
-///
-/// 调用时返回 Interrupted 错误，避免 stub 默认行为掩盖生产配置缺失。
-
 // ─── StageContextBuilder ────────────────────────────────────────────────────
 
 /// StageContext 构建器
