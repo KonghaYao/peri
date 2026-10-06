@@ -49,6 +49,8 @@ mod snapshot_test;
 mod steer_test;
 #[path = "acp_events_test/streaming_test.rs"]
 mod streaming_test;
+#[path = "acp_events_test/subagent_identity_test.rs"]
+mod subagent_identity_test;
 #[path = "acp_events_test/subagent_loading_test.rs"]
 mod subagent_loading_test;
 #[path = "acp_events_test/system_reminder_test.rs"]

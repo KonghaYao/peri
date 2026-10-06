@@ -16,6 +16,52 @@ pub(super) enum DelegationInputMode {
     ReplaceProcessing,
 }
 
+pub(super) async fn parent_tool_call_id(
+    resources: Option<&dyn SessionResources>,
+    initiator: Option<&str>,
+    invocation_id: Option<&str>,
+) -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
+    let Some(invocation_id) = invocation_id else {
+        return Ok(None);
+    };
+    let resources = resources.ok_or_else(|| {
+        tracing::error!(
+            invocation_id,
+            "delegation resources unavailable for event identity"
+        );
+        "Blocked: delegation resources unavailable"
+    })?;
+    let initiator = initiator.ok_or_else(|| {
+        tracing::error!(
+            invocation_id,
+            "delegation initiator unavailable for event identity"
+        );
+        "Blocked: delegation initiator unavailable"
+    })?;
+    let parent = resources
+        .load_session_work(&WorkQuery {
+            session_id: initiator.into(),
+            limit: 1,
+        })
+        .await?;
+    let invocation = parent.state.invocations.get(invocation_id).ok_or_else(|| {
+        tracing::error!(
+            invocation_id,
+            parent_session_id = initiator,
+            "delegation invocation unavailable for event identity"
+        );
+        "Blocked: delegation invocation unavailable for event identity"
+    })?;
+    if invocation.intent.tool_call_id.is_empty() {
+        tracing::error!(
+            invocation_id,
+            "delegation invocation has no tool-call identity"
+        );
+        return Err("Incomplete: delegation tool-call identity unavailable".into());
+    }
+    Ok(Some(invocation.intent.tool_call_id.clone()))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(in crate::session::subagent) async fn publish_work_delegation(
     resources: Arc<dyn SessionResources>,

@@ -252,7 +252,7 @@ fn tail_spawn_config(
         register_runtime: None,
         deregister_runtime: None,
         parent_agent_id: Some(AgentId::new()),
-        parent_tool_call_id: None,
+        parent_invocation_id: None,
         cancel_token: None,
         cwd: Some("/tmp/tail-fixture".into()),
         parent_thread_id: Some("tail-parent".into()),
@@ -261,6 +261,107 @@ fn tail_spawn_config(
         frozen_skill_summary: None,
         frozen_date: None,
     }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn subagent_start_uses_model_call_identity_for_spawn_and_resume() {
+    use crate::agent::events::{ExecutorEvent, FnEventHandler};
+    for background in [false, true] {
+        let store = MockSessionResources::new();
+        let manager = Arc::new(TaskManager::new());
+        let events = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let capture = events.clone();
+        let handler = Arc::new(FnEventHandler(move |event| capture.lock().push(event)));
+        let (event_sender, mut event_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut config = tail_spawn_config(store.clone(), TailOutcome::Completed);
+        config.parent_invocation_id = Some("durable-spawn-invocation".into());
+        config.event_handler = Some(handler.clone());
+        config.bg_event_sender = Some(event_sender.clone());
+        config.run_mode = if background {
+            SubagentRunMode::Background
+        } else {
+            SubagentRunMode::Sync
+        };
+        config.task_manager = background.then(|| manager.clone());
+        let spawned = AdmittedSessionFactory::spawn_subagent(None, config)
+            .await
+            .unwrap();
+        if background {
+            wait_execution_idle(&manager).await;
+        }
+        let parent = Session::new(
+            Arc::from("/tmp/tail-fixture"),
+            FrozenContext::builder().build(),
+            Some("tail-parent".into()),
+        );
+        let mut config = resume_config(store.clone(), spawned.child_thread_id.clone());
+        config.parent_invocation_id = Some("durable-resume-invocation".into());
+        config.event_handler = Some(handler);
+        config.bg_event_sender = Some(event_sender);
+        config.run_mode = if background {
+            SubagentRunMode::Background
+        } else {
+            SubagentRunMode::Sync
+        };
+        config.task_manager = background.then(|| manager.clone());
+        AdmittedSessionFactory::resume_subagent(Some(&parent), config)
+            .await
+            .unwrap();
+        if background {
+            wait_execution_idle(&manager).await;
+        }
+        while let Ok(event) = event_receiver.try_recv() {
+            events.lock().push(event);
+        }
+        let starts: Vec<_> = events
+            .lock()
+            .iter()
+            .filter_map(|event| match event {
+                ExecutorEvent::SubagentStarted {
+                    parent_tool_call_id,
+                    instance_id,
+                    is_background,
+                    ..
+                } => Some((
+                    parent_tool_call_id.clone(),
+                    instance_id.clone(),
+                    *is_background,
+                )),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            starts,
+            vec![
+                (
+                    Some("model-call:durable-spawn-invocation".into()),
+                    spawned.child_thread_id.clone(),
+                    background
+                ),
+                (
+                    Some("model-call:durable-resume-invocation".into()),
+                    spawned.child_thread_id,
+                    background
+                ),
+            ]
+        );
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn subagent_spawn_rejects_unresolvable_identity_before_creating_child() {
+    let store = MockSessionResources::new();
+    let mut config = tail_spawn_config(store.clone(), TailOutcome::Completed);
+    config.parent_invocation_id = Some("missing-invocation".into());
+    let before = store.threads().len();
+    let error = match SessionFactory::spawn_subagent(None, config).await {
+        Ok(_) => panic!("untrusted invocation identity must not create a child"),
+        Err(error) => error,
+    };
+    assert!(error
+        .to_string()
+        .contains("delegation invocation unavailable"));
+    assert_eq!(store.threads().len(), before);
 }
 
 struct TailPanicBridge {

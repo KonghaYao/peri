@@ -209,12 +209,11 @@ pub struct SubagentSpawnConfig {
     /// 父 agent 事件侧 AgentId（v2 SubagentStart/Stop 的 agent_id 字段；
     /// None = /bg 命令等无 Langfuse tracer 路径 → 不 emit v2 Start/Stop）
     pub parent_agent_id: Option<AgentId>,
-    /// 发起本次子 agent 的父 Agent 工具调用 id（tool_call_id）。
+    /// 发起本次子 agent 的父 Agent 持久化执行身份（InvocationIntent.invocation_id）。
     ///
-    /// 来源是父侧 `ToolContext.invocation_id`；随 `SubagentStarted` 透传到 TUI，
-    /// 使子分组与父 Agent 工具卡片按身份配对而不是按事件到达顺序。None = 无工具
-    /// 调用上下文（/bg 等）。
-    pub parent_tool_call_id: Option<String>,
+    /// 来源是父侧 `ToolContext.invocation_id`，用于委派授权与任务绑定。
+    /// 启动事件独立读取该 intent 的 tool_call_id，禁止把执行身份当作卡片身份。
+    pub parent_invocation_id: Option<String>,
     // ── 父侧数据回退（parent 为 None 时使用；parent 存在时被覆盖） ──
     /// 父 cancel token（Cascade 时取其 child_token；parent 存在时从 parent 读取）
     pub cancel_token: Option<CancellationToken>,
@@ -434,10 +433,9 @@ pub struct SubagentResumeConfig {
     /// 父 agent 事件侧 AgentId（v2 SubagentStart/Stop 的 agent_id 字段；
     /// None = /bg 命令等无 Langfuse tracer 路径 → 不 emit v2 Start/Stop）
     pub parent_agent_id: Option<AgentId>,
-    /// 发起本次恢复的父 Agent 工具调用 id（tool_call_id）。语义同
-    /// [`SubagentSpawnConfig::parent_tool_call_id`]：TUI 据此把恢复产生的子分组
-    /// 配到 Continue 调用的卡片上。
-    pub parent_tool_call_id: Option<String>,
+    /// 发起本次恢复的父 Agent 持久化执行身份。语义同
+    /// [`SubagentSpawnConfig::parent_invocation_id`]，不是模型 tool_call_id。
+    pub parent_invocation_id: Option<String>,
     // ── 父侧数据回退（parent 为 None 时使用；parent 存在时被覆盖） ──
     /// 父 cancel token（Cascade 时取其 child_token；parent 存在时从 parent 读取）
     pub cancel_token: Option<CancellationToken>,

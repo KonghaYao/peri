@@ -85,7 +85,7 @@ pub(super) async fn spawn_subagent_impl(
         register_runtime,
         deregister_runtime,
         parent_agent_id,
-        parent_tool_call_id,
+        parent_invocation_id,
         cancel_token: cancel_token_cfg,
         cwd: cwd_cfg,
         parent_thread_id: parent_thread_id_cfg,
@@ -109,6 +109,12 @@ pub(super) async fn spawn_subagent_impl(
         .or(cwd_cfg)
         .ok_or("spawn_subagent: cwd 未提供（parent 缺失且 config.cwd 为 None）")?;
     let parent_thread_id = parent_thread_id_of(parent).or(parent_thread_id_cfg);
+    let parent_tool_call_id = super::delegation::parent_tool_call_id(
+        session_resources.as_deref(),
+        parent_thread_id.as_deref(),
+        parent_invocation_id.as_deref(),
+    )
+    .await?;
     let frozen_claude_md = parent
         .map(|p| p.store().frozen.claude_md.to_string())
         .or(frozen_claude_md_cfg);
@@ -261,7 +267,7 @@ pub(super) async fn spawn_subagent_impl(
     if let (Some(resources), Some(initiator), Some(invocation_id)) = (
         session_resources.as_ref(),
         parent_thread_id.as_ref(),
-        parent_tool_call_id.as_ref(),
+        parent_invocation_id.as_ref(),
     ) {
         use peri_acp_types::session_resources::work::WorkQuery;
         use sha2::{Digest, Sha256};
@@ -412,7 +418,7 @@ pub(super) async fn spawn_subagent_impl(
         parent_thread_id
             .as_deref()
             .ok_or("Blocked: current delegation initiator unavailable")?,
-        parent_tool_call_id
+        parent_invocation_id
             .as_deref()
             .ok_or("Blocked: current delegation invocation unavailable")?,
         if matches!(run_mode, SubagentRunMode::Background) {

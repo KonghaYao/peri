@@ -402,7 +402,7 @@ pub enum ObserveEvent {
         is_background: bool,
         /// 发起本次子 Agent 的父 Agent 工具调用 id（Agent 工具调用的 tool_call_id）。
         ///
-        /// 身份事实源是父侧 `ToolContext.invocation_id`；消费方据此把子 Agent 与
+        /// 身份事实源是父侧持久化 `InvocationIntent.tool_call_id`；消费方据此把子 Agent 与
         /// 其父工具卡片精确配对，不再依赖事件到达顺序（并发批次下顺序不可判定）。
         /// None = 发起方未提供（/bg 命令等无工具调用上下文的路径）。
         parent_tool_call_id: Option<String>,

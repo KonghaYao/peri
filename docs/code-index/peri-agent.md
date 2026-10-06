@@ -149,3 +149,5 @@ Inbox 去重入口 `agent/stages/work_receive.rs` 使用 `SessionResources::load
 - ARC-MIDDLEWARE-001：中间件链序是行为契约，链序蓝本 `production_blueprint`；Web / Artifact 不是链槽位
 - ARC-CAPABILITY-CLOSURE-001：builtin 实例关闭同时作用于首个模型请求 tools、deferred 目录、subagent 继承面与 workflow agent 工具列表；本 crate 的落点为 `ToolFilterPolicy::canonical` 与 `stage_builder/tools.rs` 的谓词边界
 - ARC-MIDDLEWARE-CAPABILITY-001：阶段能力接口 `middleware/capabilities.rs`；执行适配与回写入口 `agent/stages/middleware_runner.rs`
+
+子 Agent 的委派执行身份与工具卡片身份遵守 `ARC-SUBAGENT-IDENTITY-001`：`SubagentSpawnConfig` / `SubagentResumeConfig` 接收 `parent_invocation_id`，`session/subagent/factory/delegation.rs::parent_tool_call_id` 从可信父执行 intent 解析模型卡片身份后交给 sync/background 发射。实际工厂回归见 `subagent/bound_and_tail_test.rs::subagent_start_uses_model_call_identity_for_spawn_and_resume`；委派 fixture 必须保持两种 ID 不同。

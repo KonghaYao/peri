@@ -654,7 +654,7 @@ pub enum ExecutorEvent {
         is_background: bool,
         /// 发起本次子 agent 的父 Agent 工具调用 id（tool_call_id）。
         ///
-        /// 由父侧 `ToolContext.invocation_id` 透传（`ObserveEvent::SubagentStart`
+        /// 由父侧持久化 `InvocationIntent.tool_call_id` 透传（`ObserveEvent::SubagentStart`
         /// 同名字段）；消费方按它把子分组与父 Agent 工具卡片精确配对，不依赖
         /// 事件到达顺序。None = 发起路径没有工具调用上下文（/bg 等）。
         #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -117,7 +117,7 @@ pub(super) async fn resume_subagent_impl(
         register_runtime,
         deregister_runtime,
         parent_agent_id,
-        parent_tool_call_id,
+        parent_invocation_id,
         cancel_token: cancel_token_cfg,
         cwd: _,
         frozen_claude_md: _,
@@ -304,7 +304,7 @@ pub(super) async fn resume_subagent_impl(
         {
             return Err(authorization_denied("original delegation does not prove saved child authorization ceiling").into());
         }
-        let invocation_id = parent_tool_call_id
+        let invocation_id = parent_invocation_id
             .as_deref()
             .ok_or_else(|| authorization_denied("current delegation invocation unavailable"))?;
         let parent_work = session_resources
@@ -501,17 +501,18 @@ pub(super) async fn resume_subagent_impl(
     let task_id = match run_mode {
         SubagentRunMode::Sync => format!(
             "sync-{}",
-            parent_tool_call_id
+            parent_invocation_id
                 .as_deref()
                 .ok_or("Blocked: current delegation invocation unavailable")?
         ),
         SubagentRunMode::Background => format!("bg-{}", uuid::Uuid::now_v7()),
     };
+    let mut parent_tool_call_id = None;
     let publication = async {
         let initiator = super::spawn::parent_thread_id_of(parent).ok_or_else(|| {
             authorization_denied("Blocked: current delegation initiator unavailable")
         })?;
-        let invocation_id = parent_tool_call_id.as_deref().ok_or_else(|| {
+        let invocation_id = parent_invocation_id.as_deref().ok_or_else(|| {
             authorization_denied("Blocked: current delegation invocation unavailable")
         })?;
         let current = session_resources
@@ -540,6 +541,12 @@ pub(super) async fn resume_subagent_impl(
             .load_session_control(&thread_id)
             .await?
             .lifecycle;
+        parent_tool_call_id = super::delegation::parent_tool_call_id(
+            Some(session_resources.as_ref()),
+            Some(&initiator),
+            Some(invocation_id),
+        )
+        .await?;
         super::delegation::publish_work_delegation(
             session_resources.clone(),
             &thread_id,

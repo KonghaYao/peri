@@ -34,6 +34,12 @@
 - **Rule**：已批准目标以 [RCRA 消息权威](../design/rcra-message-activation.md) 为准：每会话独立 Task/Inbox/处理义务，父子关系不决定默认收件人；共享基础设施不得共享含混的会话回调。可靠接纳、canonical 投影与处理检查点分别确认，禁止 root fallback 或以历史去重抹除待处理义务。激活由会话领域统一判定，执行唯一性归 SDK，ACP 不另设业务调度权威。现行实现尚未完成，重构以该设计为基线，状态见 [active issue](../../spec/issues/2026-10-05-rcra-message-activation.md)，不得把旧代码或测试当作降低目标的理由。
 - **Verify**：核对消息权威的主/子同构、乱序、崩溃、退出交接、暂停/关闭和副作用恢复矩阵；实现变更须提供行为证据，文档变更检查链接与 `git diff --check`。
 
+### ARC-SUBAGENT-IDENTITY-001
+
+- **Scope**：Agent 子会话委派、ACP 子 Agent 生命周期事件与 TUI 分组。
+- **Rule**：持久化执行身份 `InvocationIntent.invocation_id` 用于委派授权、恢复与任务绑定；模型工具调用身份 `InvocationIntent.tool_call_id` 用于工具卡片。子 Agent 工厂接收 `parent_invocation_id`，从该执行 intent 解析 `parent_tool_call_id` 后发射启动事件；禁止把执行身份直接填进展示身份字段。spawn/resume 与 sync/background 共用转换规则，提供父执行身份但缺少其可信执行记录或卡片身份时须明确失败，不按到达顺序猜测有身份分组的归属。身份链回归必须让 invocation ID 与 tool-call ID 不同，同名 Agent 不构成共享身份。
+- **Verify**：`subagent_start_uses_model_call_identity_for_spawn_and_resume` 覆盖实际工厂与生命周期事件；`three_same_named_subagents_keep_distinct_owners_across_arrival_orders` 覆盖 TUI 发布快照与三组乱序归属；事件映射与 notifier 继续验证字段透传。
+
 ### ARC-CANCEL-001
 
 - **Scope**：`peri-controller`、`peri-runtime`、`peri-agent`（cancel 链路）。

@@ -71,7 +71,7 @@ async fn authorization_fixture(
         register_runtime: None,
         deregister_runtime: None,
         parent_agent_id: None,
-        parent_tool_call_id: Some("original-spawn".into()),
+        parent_invocation_id: Some("original-spawn".into()),
         cancel_token: None,
         cwd: None,
         parent_thread_id: None,
@@ -155,7 +155,7 @@ fn current_resume_config(
     tools: Vec<Arc<dyn BaseTool>>,
 ) -> SubagentResumeConfig {
     let mut config = resume_config(store, child_id);
-    config.parent_tool_call_id = Some(invocation_id.into());
+    config.parent_invocation_id = Some(invocation_id.into());
     config.llm = Box::new(PreparedFixtureLlm::new(Box::new(EchoLLM), tools.clone()));
     config.tools = tools;
     config

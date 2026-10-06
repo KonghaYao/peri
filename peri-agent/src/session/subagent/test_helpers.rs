@@ -46,7 +46,7 @@ impl AdmittedSessionFactory {
             })
             .unwrap();
         let invocation_id = config
-            .parent_tool_call_id
+            .parent_invocation_id
             .clone()
             .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
         delegation_fixture::prepare_delegation(
@@ -55,7 +55,7 @@ impl AdmittedSessionFactory {
             &invocation_id,
         )
         .await;
-        config.parent_tool_call_id = Some(invocation_id);
+        config.parent_invocation_id = Some(invocation_id);
         SessionFactory::spawn_subagent(Some(&fixture_parent), config).await
     }
 
@@ -118,7 +118,7 @@ impl AdmittedSessionFactory {
         initiator: String,
     ) -> Result<SubagentSpawned, Box<dyn std::error::Error + Send + Sync>> {
         let invocation_id = config
-            .parent_tool_call_id
+            .parent_invocation_id
             .clone()
             .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
         delegation_fixture::prepare_delegation(
@@ -127,7 +127,7 @@ impl AdmittedSessionFactory {
             &invocation_id,
         )
         .await;
-        config.parent_tool_call_id = Some(invocation_id);
+        config.parent_invocation_id = Some(invocation_id);
         SessionFactory::resume_subagent(Some(&fixture_parent), config).await
     }
 }

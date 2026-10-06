@@ -56,7 +56,7 @@ impl super::SubAgentTool {
         prompt: Option<String>,
         cwd: String,
         run_in_background: bool,
-        parent_tool_call_id: Option<String>,
+        parent_invocation_id: Option<String>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let host = self.host();
         // Live 执行是 active 的事实源。投递只做同步查找和入队，不能跨 load_meta
@@ -225,7 +225,7 @@ impl super::SubAgentTool {
             tool_filter,
             session_resources,
             cwd,
-            parent_tool_call_id,
+            parent_invocation_id,
         );
 
         // 4. 统一恢复入口（Agent 层完成校验 / 重建 / 执行 / 收尾）

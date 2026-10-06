@@ -466,7 +466,8 @@ pub struct ToolContext<'a> {
     pub cwd: &'a str,
     /// 当前 canonical dispatch 能力；仅 dispatch 中调用工具时存在。
     pub effective_tool_dispatcher: Option<std::sync::Arc<dyn EffectiveToolDispatcher>>,
-    /// 当前外层 tool call ID，供宿主工具关联内部 invocation。
+    /// 当前执行 invocation ID；durable dispatch 使用 InvocationIntent.invocation_id。
+    /// 模型工具卡片身份独立存放在 invocation_intent.tool_call_id。
     pub invocation_id: Option<String>,
     /// 当前外层调用的取消令牌。
     pub cancellation: tokio_util::sync::CancellationToken,

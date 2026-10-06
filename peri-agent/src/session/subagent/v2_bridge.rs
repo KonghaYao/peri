@@ -55,7 +55,7 @@ pub fn agent_id_from_child_thread(child_thread_id: &str) -> AgentId {
 /// 该字段，仅 v2 emit（Langfuse tracer 归属）需要真实父身份。
 ///
 /// `parent_tool_call_id` 为发起本次子 agent 的父 Agent 工具调用 id（父侧
-/// `ToolContext.invocation_id`）；`/bg` 等无工具调用上下文的路径传 None。
+/// `InvocationIntent.tool_call_id`）；执行 invocation_id 不用于卡片配对。
 pub(crate) fn build_subagent_start_v2(
     turn_id: TurnId,
     parent_agent_id: Option<AgentId>,

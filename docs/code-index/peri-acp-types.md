@@ -166,3 +166,5 @@ channel 已退役：`SECTION_IDS` 不再包含 `15_channel`，`interaction.rs` �
 - ARC-EVENT-001：事件链路单事实源（Agent emit v2 → `*_event_to_executor` 协议序列化面 → ACP 映射 → TUI）；穷尽匹配、禁止 wildcard 兜底、禁止恢复 v2_tx 双轨直连
 - ARC-FROZEN-001：会话创建时冻结日期/项目指引/skills 摘要/system prompt，会话及 SubAgent 复用，禁止中途重读改变 prompt 前缀
 - ARC-CAPABILITY-CLOSURE-001：本 crate 提供关闭判定的事实源（`BUILTIN_MCP_INSTANCES[].policy_key` 与 `BUILTIN_INSTANCE_POLICY_KEYS`）；关闭必须在同一 frozen policy 下同时关闭四个工具面，且「键仍在、语义已死」的中间态判失败（旧键必须仍被识别为已知键）
+
+子 Agent 启动事件的 `parent_tool_call_id` 来源为父执行 `InvocationIntent.tool_call_id`，与 `ToolContext.invocation_id` 的执行身份不同；映射仅透传，转换由 Agent 子会话工厂完成（`ARC-SUBAGENT-IDENTITY-001`）。

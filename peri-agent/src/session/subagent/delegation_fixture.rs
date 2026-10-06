@@ -29,7 +29,7 @@ pub(super) async fn prepare_delegation(
                 expected_revision: snapshot.state.revision,
                 intent: InvocationIntent {
                     invocation_id: invocation_id.into(),
-                    tool_call_id: invocation_id.into(),
+                    tool_call_id: format!("model-call:{invocation_id}"),
                     tool_name: "fixture-delegation".into(),
                     arguments_json: arguments.clone(),
                     arguments_digest: digest.clone(),
