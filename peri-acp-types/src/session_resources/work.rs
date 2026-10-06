@@ -11,6 +11,10 @@ use crate::session_resources::{
 };
 use crate::store::{deserialize_persisted_payload, serialize_persisted_payload, PersistedPayload};
 
+#[path = "work/availability.rs"]
+mod availability;
+pub use availability::{WorkAvailability, WorkAvailabilityState};
+
 #[path = "work/admission.rs"]
 mod admission;
 #[path = "work/bindings.rs"]

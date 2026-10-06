@@ -119,3 +119,89 @@ async fn pending_work_missing_root_keeps_registration_allowed() {
     fixture.create("new-root").await;
     assert_eq!(fixture.count_threads("new-root").await, 1);
 }
+
+#[tokio::test]
+async fn availability_sqlite_waits_for_root_and_preserves_uncertain_read_rules() {
+    let fixture = Fixture::new().await;
+    fixture.create("root").await;
+    fixture.child("child", "root").await;
+    let root = "root".to_owned();
+    let child = "child".to_owned();
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let writer = {
+        let facade = fixture.facade.clone();
+        let root = root.clone();
+        tokio::spawn(async move {
+            facade
+                .gate
+                .with_exclusive(&root, || async {
+                    entered_tx.send(()).unwrap();
+                    release_rx.await.unwrap();
+                    Ok(())
+                })
+                .await
+        })
+    };
+    entered_rx.await.unwrap();
+    let read = fixture.facade.load_work_availability(&child);
+    tokio::pin!(read);
+    assert!(tokio::time::timeout(Duration::from_millis(20), &mut read)
+        .await
+        .is_err());
+    release_tx.send(()).unwrap();
+    writer.await.unwrap().unwrap();
+    read.await.unwrap();
+    let unknown: SessionResourceResult<()> = fixture
+        .facade
+        .gate
+        .with_mutation(&root, || async { Err(commit_failure(Some(root.clone()))) })
+        .await;
+    assert!(unknown.unwrap_err().is_persistence_uncertain());
+    for id in [&root, &child] {
+        assert!(fixture
+            .facade
+            .load_work_availability(id)
+            .await
+            .unwrap_err()
+            .is_persistence_uncertain());
+        assert!(fixture
+            .facade
+            .load_session_work(&WorkQuery {
+                session_id: id.clone(),
+                limit: 1
+            })
+            .await
+            .unwrap_err()
+            .is_persistence_uncertain());
+    }
+}
+
+#[tokio::test]
+async fn availability_sqlite_legacy_history_without_ledger_keeps_pending_hint() {
+    let fixture = Fixture::new().await;
+    fixture.create("root").await;
+    let root = "root".to_owned();
+    fixture
+        .facade
+        .append_history(&root, &[payload("legacy")])
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM session_work_state WHERE session_id=?1")
+        .bind(&root)
+        .execute(fixture.facade.local_pool())
+        .await
+        .unwrap();
+    let narrow = fixture.facade.load_work_availability(&root).await.unwrap();
+    assert!(narrow.is_available(1, None));
+    assert!(!narrow.is_available(1, Some(0)));
+    assert!(fixture
+        .facade
+        .load_session_work(&WorkQuery {
+            session_id: root,
+            limit: 1
+        })
+        .await
+        .unwrap()
+        .has_pending_current_work());
+}

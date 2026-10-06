@@ -848,3 +848,66 @@ async fn test_user_input_cancel_rejects_stale_ticket_without_cancelling_current_
         "当前 ticket 的 Stop 必须传到真实执行 token"
     );
 }
+
+#[tokio::test]
+async fn inbox_notification_uses_narrow_facts_with_undecodable_history() {
+    use peri_acp_types::session_resources::work::*;
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (cfg, _, sid) = make_user_input_session(&tmp).await;
+    let captured = Arc::new(MockTransport::default());
+    let transport: Arc<dyn crate::transport::AcpTransport> = captured.clone();
+    let pool = sqlx::SqlitePool::connect(&format!(
+        "sqlite:{}",
+        tmp.path().join("threads.db").display()
+    ))
+    .await
+    .unwrap();
+    let mut state = serde_json::to_value(WorkState::default()).unwrap();
+    state["revision"] = json!(42);
+    state["deliveries"]["required"] = json!({
+        "recipientLifecycle": 1, "admissionSequence": 3, "batchId": null, "disposition": null,
+        "publication": {"policy": {"requirement": "required"}}
+    });
+    state["obligations"]["required"] = json!({"status": "pending"});
+    state["works"]["historical"] = json!({
+        "workId": "historical", "batchId": "historical", "stage": "settled",
+        "reasonRequest": {"serializedRequest": "history body".repeat(100_000)},
+        "revision": "not a number"
+    });
+    assert!(serde_json::from_value::<WorkState>(state.clone()).is_err());
+    sqlx::query("INSERT INTO session_work_state(session_id,state_json) VALUES (?1,?2) ON CONFLICT(session_id) DO UPDATE SET state_json=excluded.state_json")
+        .bind(&sid).bind(state.to_string()).execute(&pool).await.unwrap();
+    let inbox = peri_acp_types::session::MessageQueue::new();
+    for (lifecycle, floor, count) in [
+        (1, Some(4), 0),
+        (2, Some(3), 0),
+        (1, Some(3), 1),
+        (1, None, 2),
+    ] {
+        crate::host::continuation::publish_inbox_work(
+            cfg.session_resources.clone(),
+            &transport,
+            &sid,
+            lifecycle,
+            &inbox,
+            floor,
+        )
+        .await
+        .unwrap();
+        let notifications = captured.notifications();
+        let available: Vec<_> = notifications
+            .iter()
+            .filter(|(method, _)| method == "session/work/available")
+            .collect();
+        assert_eq!(available.len(), count);
+        if let Some((_, params)) = available.last() {
+            assert_eq!(
+                params,
+                &json!({
+                    "sessionId": sid, "revision": 42, "lifecycle": 1,
+                    "controlGeneration": 0, "executionProtocol": 1,
+                })
+            );
+        }
+    }
+}

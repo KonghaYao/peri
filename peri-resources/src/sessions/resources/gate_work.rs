@@ -4,6 +4,26 @@ use peri_acp_types::session_resources::work::{
 };
 
 impl MutationGate {
+    pub(in crate::sessions::resources) async fn load_work_availability(
+        &self,
+        id: &ThreadId,
+    ) -> SessionResourceResult<peri_acp_types::session_resources::work::WorkAvailability> {
+        self.ensure_recovery_permitted()?;
+        let root = self.work_root(id).await?;
+        let pending = self.pending_for(&root);
+        let _barrier = pending.barrier.read().await;
+        if pending
+            .work
+            .lock()
+            .expect("pending work lock poisoned")
+            .is_none()
+        {
+            Self::check_pending(&pending, &root)?;
+        }
+        // 通知从未消费 blocked / candidates / pending_commands，不读取或克隆命令正文。
+        self.data.load_work_availability(id).await
+    }
+
     pub(in crate::sessions::resources) async fn load_work_delivery(
         &self,
         query: &peri_acp_types::session_resources::work::WorkDeliveryQuery,

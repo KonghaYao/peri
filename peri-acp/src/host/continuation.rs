@@ -9,7 +9,6 @@ use crate::session::executor::ContinuationRequest;
 use crate::transport::types::AcpError;
 use peri_acp_types::cron::{CronContinuationRequest, CronTrigger};
 use peri_acp_types::session::{MessageKind, MessageQueue, MessageSource, QueuedMessage};
-use peri_acp_types::session_resources::work::{WorkQuery, WorkSnapshot};
 use peri_acp_types::session_resources::ControlState;
 use peri_acp_types::system_reminder::{
     ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
@@ -150,15 +149,9 @@ pub(super) async fn publish_inbox_work(
     )
     .await?;
     let snapshot = resources
-        .load_session_work(&WorkQuery {
-            session_id: session_id.to_owned(),
-            limit: 1,
-        })
+        .load_work_availability(&session_id.to_owned())
         .await?;
-    if snapshot.control.lifecycle != lifecycle {
-        return Ok(());
-    }
-    if inbox_work_available(&snapshot, observer_floor) {
+    if snapshot.is_available(lifecycle, observer_floor) {
         transport.send_notification("session/work/available", serde_json::json!({
             "sessionId": session_id, "revision": snapshot.state.revision,
             "lifecycle": lifecycle, "controlGeneration": snapshot.control.control_generation,
@@ -166,22 +159,6 @@ pub(super) async fn publish_inbox_work(
         })).await.map_err(|error| anyhow::anyhow!("work availability notification failed: {error:?}"))?;
     }
     Ok(())
-}
-
-fn inbox_work_available(snapshot: &WorkSnapshot, observer_floor: Option<u64>) -> bool {
-    let Some(floor) = observer_floor else {
-        return snapshot.has_pending_current_work();
-    };
-    snapshot
-        .state
-        .claimable_deliveries(snapshot.control.lifecycle)
-        .iter()
-        .any(|delivery_id| {
-            let delivery = &snapshot.state.deliveries[delivery_id];
-            delivery.admission_sequence >= floor
-                && delivery.publication.policy.requirement
-                    == peri_acp_types::session::MessageRequirement::Required
-        })
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -9,6 +9,10 @@ use serde::{de::DeserializeOwned, Serialize};
 
 use super::failure::corrupt;
 
+#[path = "work/availability.rs"]
+mod availability;
+pub(super) use availability::{availability, READ_AVAILABILITY};
+
 #[path = "work/effects.rs"]
 mod effects;
 pub(super) use effects::mutation_effects;

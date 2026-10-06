@@ -139,126 +139,35 @@ impl WorkState {
     }
 
     pub fn has_unknown_live_work_lifecycle(&self) -> bool {
-        self.works.values().any(|work| {
-            !matches!(work.stage, WorkStage::Settled | WorkStage::Abandoned)
-                && self.work_lifecycle(&work.work_id).is_none()
-        })
+        WorkAvailabilityState::from(self).has_unknown_live_work_lifecycle()
     }
 
     pub fn has_pending_terminal_obligations_for(&self, lifecycle: u64) -> bool {
-        self.terminal_obligations.keys().any(|admission_id| {
-            !self.terminal_acknowledgements.contains_key(admission_id)
-                && self.admissions.get(admission_id).is_none_or(|record| {
-                    record.admission.lifecycle == lifecycle
-                        && !self.admission_processing_superseded(&record.admission)
-                })
-        })
+        WorkAvailabilityState::from(self).has_pending_terminal_obligations_for(lifecycle)
     }
 
     pub(super) fn admission_batch(&self, admission: &WorkAdmission) -> Option<&ProcessingBatch> {
-        let batch = if let Some(work) = self.works.get(&admission.work_id) {
-            self.batches.get(&work.batch_id)?
-        } else {
-            let mut batches = self.batches.values().filter(|batch| {
-                batch.processing_delivery_ids.contains(&admission.work_id)
-                    && batch.recipient_lifecycle == admission.lifecycle
-            });
-            let batch = batches.next()?;
-            if batches.next().is_some() {
-                return None;
-            }
-            batch
-        };
-        (batch.recipient_lifecycle == admission.lifecycle).then_some(batch)
-    }
-
-    fn admission_processing_superseded(&self, admission: &WorkAdmission) -> bool {
-        let mut abandoned = false;
-        for record in self.admissions.values().filter(|record| {
-            record.admission.lifecycle == admission.lifecycle
-                && record.admission.session_id == admission.session_id
-                && record.admission.execution == admission.execution
-        }) {
-            let Some(batch) = self.admission_batch(&record.admission) else {
-                return false;
-            };
-            let mut found_work = false;
-            for work in self
-                .works
-                .values()
-                .filter(|work| work.batch_id == batch.batch_id)
-            {
-                found_work = true;
-                match work.stage {
-                    WorkStage::Abandoned => abandoned = true,
-                    WorkStage::Settled => {}
-                    _ => return false,
-                }
-            }
-            if !found_work {
-                return false;
-            }
-        }
-        abandoned
+        let key = super::availability::admission_batch_key(
+            self.works
+                .get(&admission.work_id)
+                .map(|work| work.batch_id.as_str()),
+            &admission.work_id,
+            admission.lifecycle,
+            self.batches.iter().map(|(id, batch)| {
+                (
+                    id.as_str(),
+                    batch.recipient_lifecycle,
+                    batch.processing_delivery_ids.as_slice(),
+                )
+            }),
+        )?;
+        self.batches.get(key)
     }
 
     pub fn has_pending_work_for(&self, lifecycle: u64) -> bool {
-        !self.legacy_unknown.is_empty()
-            || self.has_unknown_live_work_lifecycle()
-            || self.has_pending_terminal_obligations_for(lifecycle)
-            || self.obligations.iter().any(|(delivery_id, record)| {
-                matches!(
-                    record.status,
-                    ObligationStatus::Pending
-                        | ObligationStatus::InProgress
-                        | ObligationStatus::Blocked
-                ) && self
-                    .deliveries
-                    .get(delivery_id)
-                    .is_none_or(|delivery| delivery.recipient_lifecycle == lifecycle)
-            })
-            || self.works.values().any(|work| {
-                !matches!(work.stage, WorkStage::Settled | WorkStage::Abandoned)
-                    && self.work_lifecycle(&work.work_id) == Some(lifecycle)
-            })
+        WorkAvailabilityState::from(self).has_pending_work_for(lifecycle)
     }
     pub fn claimable_deliveries(&self, lifecycle: u64) -> Vec<String> {
-        let mut pending: Vec<_> = self
-            .deliveries
-            .iter()
-            .filter(|(delivery_id, record)| {
-                record.recipient_lifecycle == lifecycle
-                    && record.batch_id.is_none()
-                    && record.disposition.is_none()
-                    && self.obligations.get(*delivery_id).is_none_or(|obligation| {
-                        matches!(
-                            obligation.status,
-                            ObligationStatus::Pending | ObligationStatus::Blocked
-                        )
-                    })
-            })
-            .collect();
-        pending.sort_by_key(|(_, record)| record.admission_sequence);
-        let limit = self.limits.max_batch_size as usize;
-        let mut selected: Vec<_> = pending.iter().take(limit).copied().collect();
-        if limit > 0
-            && !selected.iter().any(|(_, record)| {
-                record.publication.policy.requirement == MessageRequirement::Required
-            })
-        {
-            if let Some(required) = pending.iter().find(|(_, record)| {
-                record.publication.policy.requirement == MessageRequirement::Required
-            }) {
-                if selected.len() == limit {
-                    selected.pop();
-                }
-                selected.push(*required);
-                selected.sort_by_key(|(_, record)| record.admission_sequence);
-            }
-        }
-        selected
-            .into_iter()
-            .map(|(delivery_id, _)| delivery_id.clone())
-            .collect()
+        WorkAvailabilityState::from(self).claimable_deliveries(lifecycle)
     }
 }

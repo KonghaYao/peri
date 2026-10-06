@@ -125,6 +125,17 @@ fn cron_frozen_recipient_never_retargets_reopened_lifecycle() {
     );
 }
 
+fn inbox_work_available(
+    snapshot: &peri_acp_types::session_resources::work::WorkSnapshot,
+    floor: Option<u64>,
+) -> bool {
+    peri_acp_types::session_resources::work::WorkAvailability {
+        control: snapshot.control.clone(),
+        state: (&snapshot.state).into(),
+    }
+    .is_available(snapshot.control.lifecycle, floor)
+}
+
 #[test]
 fn observer_floor_requires_unprocessed_new_required_delivery() {
     use peri_acp_types::session_resources::work::*;
@@ -165,19 +176,19 @@ fn observer_floor_requires_unprocessed_new_required_delivery() {
         state = reduction.state;
         if delivery_id == "old" {
             let snapshot = WorkSnapshot::from_state(&query, control.clone(), state.clone());
-            assert!(!super::inbox_work_available(
+            assert!(!inbox_work_available(
                 &snapshot,
                 Some(state.next_admission_sequence)
             ));
-            assert!(super::inbox_work_available(&snapshot, None));
+            assert!(inbox_work_available(&snapshot, None));
         }
     }
     let floor = state.deliveries["new"].admission_sequence;
     let mut snapshot = WorkSnapshot::from_state(&query, control, state);
-    assert!(super::inbox_work_available(&snapshot, Some(floor)));
+    assert!(inbox_work_available(&snapshot, Some(floor)));
     snapshot.state.obligations.get_mut("new").unwrap().status = ObligationStatus::Satisfied;
-    assert!(!super::inbox_work_available(&snapshot, Some(floor)));
-    assert!(super::inbox_work_available(&snapshot, None));
+    assert!(!inbox_work_available(&snapshot, Some(floor)));
+    assert!(inbox_work_available(&snapshot, None));
     assert_eq!(
         snapshot.state.obligations["old"].status,
         ObligationStatus::Pending

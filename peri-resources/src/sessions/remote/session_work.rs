@@ -22,6 +22,38 @@ fn identity(command: &WorkCommand) -> SessionResourceResult<OperationIdentity> {
 }
 
 impl RemoteSessionData {
+    pub(super) async fn read_work_availability(
+        &self,
+        id: &peri_acp_types::thread::ThreadId,
+    ) -> SessionResourceResult<peri_acp_types::session_resources::work::WorkAvailability> {
+        let results = self
+            .store()
+            .await?
+            .read_batch(vec![StatementSpec::new(
+                work::READ_AVAILABILITY,
+                vec![Value::Text(id.clone())],
+            )])
+            .await?;
+        let row = results
+            .first()
+            .and_then(|rows| rows.first())
+            .ok_or_else(|| corrupt("work availability facts are not readable"))?;
+        match row.as_slice() {
+            [Value::Integer(exists), control, facts, Value::Integer(history)]
+                if matches!(control, Value::Null | Value::Text(_))
+                    && matches!(facts, Value::Null | Value::Text(_)) =>
+            {
+                work::availability(
+                    *exists != 0,
+                    text_at(row, 1),
+                    text_at(row, 2),
+                    *history != 0,
+                )
+            }
+            _ => Err(corrupt("work availability row is not readable")),
+        }
+    }
+
     pub(super) async fn read_delivery(
         &self,
         query: &WorkDeliveryQuery,

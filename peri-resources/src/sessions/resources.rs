@@ -257,6 +257,12 @@ impl SessionResourcesImpl {
 
 #[async_trait]
 impl SessionResources for SessionResourcesImpl {
+    async fn load_work_availability(
+        &self,
+        id: &ThreadId,
+    ) -> SessionResourceResult<peri_acp_types::session_resources::work::WorkAvailability> {
+        self.gate.load_work_availability(id).await
+    }
     async fn load_work_delivery(
         &self,
         query: &peri_acp_types::session_resources::work::WorkDeliveryQuery,
