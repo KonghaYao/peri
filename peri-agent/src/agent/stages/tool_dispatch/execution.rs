@@ -47,6 +47,9 @@ fn effective_tool_error_from_boxed(
     let mut effective =
         EffectiveToolError::new(EffectiveToolErrorCode::ToolFailed, error.to_string());
     if let Some(failure) = error.downcast_ref::<SubagentFailure>() {
+        if failure.execution_finished() {
+            effective.code = EffectiveToolErrorCode::ApplicationFailed;
+        }
         if let Some(safe_failure) = failure.safe_failure() {
             effective = effective.with_subagent_failure(safe_failure);
         }

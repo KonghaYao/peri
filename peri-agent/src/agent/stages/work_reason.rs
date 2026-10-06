@@ -203,7 +203,14 @@ pub(crate) async fn commit_response(
         let invocation = ctx
             .runtime
             .tool_invocation_resolver
-            .resolve(call, &all_tools)?;
+            .resolve(call, &all_tools)
+            .map_err(|error| {
+                tracing::warn!(
+                    tool = %peri_acp_types::session::sanitize_public_error(&call.name, 120),
+                    "completed model response rejected before tool dispatch; original Reason checkpoint retained"
+                );
+                error
+            })?;
         intents.push(bind_intent(&session, &invocation).await?);
         invocations.insert(call.id.clone(), invocation);
     }
@@ -385,3 +392,7 @@ pub(crate) async fn block_uncertain_model(ctx: &StageContext) -> anyhow::Result<
 #[cfg(test)]
 #[path = "work_reason_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "work_reason_resolver_test.rs"]
+mod resolver_tests;

@@ -84,9 +84,14 @@ impl ResumeClaim {
     }
 
     /// 同步 Stop 已运行 hook：把领域终态交给 worker，由它先结清认领再写入。
-    pub(in crate::session::subagent) async fn finish(mut self, status: AgentStatus) {
+    pub(in crate::session::subagent) async fn finish(
+        mut self,
+        status: AgentStatus,
+    ) -> Result<(), String> {
         self.decide(ClaimDecision::Finish(status));
-        Self::await_worker(&mut self.worker).await;
+        (&mut self.worker)
+            .await
+            .map_err(|error| format!("resume status completion worker failed: {error}"))?
     }
 
     /// 准备失败：关闭决定通道，worker 恢复到认领前的记录并报告其失败。

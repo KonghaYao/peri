@@ -225,7 +225,7 @@ pub(super) async fn run_sync_subagent(
             // child_thread_id 前缀：错误路径（LLM 网络错误等）必须可恢复——主 agent
             // 凭返回值中的 thread_id 找回执行现场（与 define.rs 成功路径
             // `child_thread_id: {id}\n{result}` 格式一致，多行展示）
-            let failure = SubagentFailure::new(child_thread_id, &agent_name, e);
+            let failure = SubagentFailure::completed(child_thread_id, &agent_name, e);
             let error_summary = failure.to_string();
             let error_result: String = error_summary.chars().take(500).collect();
             // 统一后处理（hook + thread_store；v1 协议化直发已在 emit_subagent_stop_v2
@@ -243,7 +243,7 @@ pub(super) async fn run_sync_subagent(
             if let Some(claim) = resume_claim.take() {
                 claim
                     .finish(peri_acp_types::thread::AgentStatus::Error)
-                    .await;
+                    .await?;
             }
             return Err(Box::new(failure));
         }
@@ -271,7 +271,7 @@ pub(super) async fn run_sync_subagent(
             } else {
                 peri_acp_types::thread::AgentStatus::Done
             })
-            .await;
+            .await?;
     }
 
     Ok(interrupted)

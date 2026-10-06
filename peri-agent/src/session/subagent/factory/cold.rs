@@ -132,7 +132,7 @@ pub(super) async fn bind_delegation_task(
     Box<dyn std::error::Error + Send + Sync>,
 > {
     use peri_acp_types::session_resources::work::{
-        TaskBinding, WorkAction, WorkCommand, WorkDecision, WorkRejection, WorkResolution,
+        TaskBinding, WorkAction, WorkCommand, WorkDecision, WorkResolution,
     };
     let binding = TaskBinding {
         invocation_id: invocation.intent.invocation_id.clone(),
@@ -143,50 +143,52 @@ pub(super) async fn bind_delegation_task(
         recovery_locator: invocation.intent.recovery_locator.clone(),
         authorization_ref: invocation.intent.authorization_ref.clone(),
     };
-    for _ in 0..3 {
-        let work = resources
-            .load_session_work(&WorkQuery {
-                session_id: initiator.into(),
-                limit: 1,
-            })
-            .await?;
-        let mut command = WorkCommand {
+    let work = resources
+        .load_session_work(&WorkQuery {
             session_id: initiator.into(),
-            recipient_lifecycle: invocation.recipient_lifecycle,
-            mutation_id: "child-delegation".into(),
-            action: WorkAction::ReconcileTaskBinding {
-                expected_revision: work.state.revision,
-                binding: binding.clone(),
-            },
-        };
-        command.mutation_id = format!("child-delegation:{}", command.digest()?);
-        let receipt = match resources.apply_work_mutation(&command).await {
-            Ok(receipt) => receipt,
-            Err(error)
-                if error.effect()
-                    == peri_acp_types::session_resources::MutationOutcome::Unknown =>
-            {
-                match resources.resolve_work_mutation(&command).await? {
-                    WorkResolution::Applied { receipt } => receipt,
-                    _ => return Err("Incomplete: delegation task binding ACK unknown".into()),
-                }
+            limit: 1,
+        })
+        .await?;
+    let mut command = WorkCommand {
+        session_id: initiator.into(),
+        recipient_lifecycle: invocation.recipient_lifecycle,
+        mutation_id: "child-delegation".into(),
+        action: WorkAction::ReconcileTaskBinding {
+            expected_revision: work.state.revision,
+            binding,
+        },
+    };
+    command.mutation_id = format!("child-delegation:{}", command.digest()?);
+    let receipt = match resources.apply_work_mutation(&command).await {
+        Ok(receipt) => receipt,
+        Err(error)
+            if error.effect() == peri_acp_types::session_resources::MutationOutcome::Unknown =>
+        {
+            match resources.resolve_work_mutation(&command).await? {
+                WorkResolution::Applied { receipt } => receipt,
+                _ => return Err("Incomplete: delegation task binding ACK unknown".into()),
             }
-            Err(error) => return Err(error.into()),
-        };
-        if receipt.session_id != command.session_id || receipt.mutation_id != command.mutation_id {
-            return Err("Incomplete: delegation binding receipt conflicts".into());
         }
-        match receipt.decision {
-            WorkDecision::Accepted => return Ok(receipt),
-            WorkDecision::Rejected {
-                reason: WorkRejection::StaleRevision,
-            } => continue,
-            WorkDecision::Rejected { reason } => {
-                return Err(format!("delegation task binding rejected: {reason:?}").into())
-            }
+        Err(error) => return Err(error.into()),
+    };
+    if receipt.session_id != command.session_id || receipt.mutation_id != command.mutation_id {
+        return Err("Incomplete: delegation binding receipt conflicts".into());
+    }
+    match receipt.decision {
+        WorkDecision::Accepted => Ok(receipt),
+        WorkDecision::Rejected { reason } => {
+            tracing::warn!(
+                initiator_session_id = initiator,
+                invocation_id = invocation.intent.invocation_id,
+                rejection = ?reason,
+                "delegation task binding explicitly rejected"
+            );
+            Err(Box::new(crate::tools::EffectiveToolError::new(
+                crate::tools::EffectiveToolErrorCode::ApplicationFailed,
+                format!("delegation task binding rejected: {reason:?}"),
+            )))
         }
     }
-    Err("Incomplete: delegation binding revision did not settle".into())
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -561,3 +563,7 @@ impl super::SessionFactory {
 #[cfg(test)]
 #[path = "cold_test.rs"]
 mod cold_tests;
+
+#[cfg(test)]
+#[path = "cold_binding_test.rs"]
+mod cold_binding_tests;

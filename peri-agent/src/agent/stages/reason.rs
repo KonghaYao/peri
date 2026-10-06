@@ -325,7 +325,12 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
     }
 
     // after_model middleware（hook_middleware / git_attribution 等在此）
-    super::work_reason::commit_response(ctx, &mut reasoning, &catalog).await?;
+    super::work_reason::commit_response(ctx, &mut reasoning, &catalog)
+        .await
+        .map_err(|error| match error.downcast::<AgentError>() {
+            Ok(error) => error,
+            Err(error) => AgentError::Other(error),
+        })?;
     run_after_model(ctx, &reasoning).await?;
 
     Ok(ReasonOutput {

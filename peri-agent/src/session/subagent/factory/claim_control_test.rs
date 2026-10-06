@@ -77,3 +77,24 @@ async fn failed_observation_mutation_leaves_claim_cleanup_unconfirmed() {
         Some(attempt)
     );
 }
+
+#[tokio::test]
+async fn synchronous_completion_propagates_claim_worker_failure() {
+    let (decision, received) = tokio::sync::oneshot::channel();
+    let worker = tokio::spawn(async move {
+        assert!(matches!(
+            received.await.unwrap(),
+            ClaimDecision::Finish(AgentStatus::Error)
+        ));
+        Err("resume claim settle failed".into())
+    });
+    let claim = ResumeClaim {
+        decision: Some(decision),
+        worker,
+        running: None,
+    };
+    assert_eq!(
+        claim.finish(AgentStatus::Error).await.unwrap_err(),
+        "resume claim settle failed"
+    );
+}

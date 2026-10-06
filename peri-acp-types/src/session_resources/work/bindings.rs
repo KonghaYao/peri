@@ -64,13 +64,19 @@ pub(super) fn prepare(
 pub(super) fn reconcile(
     command: &WorkCommand,
     state: &mut WorkState,
+    observed_revision: u64,
     binding: &TaskBinding,
 ) -> Result<(), WorkRejection> {
+    if observed_revision > state.revision {
+        return Err(WorkRejection::StaleRevision);
+    }
     let invocation = state
         .invocations
         .get(&binding.invocation_id)
         .ok_or(WorkRejection::InvalidTransition)?;
     if binding.owner_task_id.is_empty()
+        || binding.invocation_id != invocation.intent.invocation_id
+        || command.recipient_lifecycle != invocation.recipient_lifecycle
         || binding.owner_identity != invocation.intent.owner_identity
         || binding.initiator_session_id != command.session_id
         || binding.recipient_lifecycle != invocation.recipient_lifecycle
@@ -96,3 +102,7 @@ pub(super) fn reconcile(
         .insert(binding.invocation_id.clone(), binding.clone());
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "bindings_test.rs"]
+mod tests;

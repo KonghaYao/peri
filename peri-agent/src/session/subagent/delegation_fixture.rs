@@ -19,8 +19,9 @@ pub(super) async fn prepare_delegation(
         .unwrap();
     let arguments = "{}".to_owned();
     let digest = format!("{:x}", Sha256::digest(arguments.as_bytes()));
-    let receipt = resources
-        .apply_work_mutation(&WorkCommand {
+    apply_fixture_mutation(
+        resources,
+        WorkCommand {
             session_id: initiator.into(),
             recipient_lifecycle: control.lifecycle,
             mutation_id: format!("fixture-delegation-prepare:{invocation_id}"),
@@ -42,10 +43,9 @@ pub(super) async fn prepare_delegation(
                     recovery_locator: format!("fixture-delegation:{invocation_id}"),
                 },
             },
-        })
-        .await
-        .unwrap();
-    assert_eq!(receipt.decision, WorkDecision::Accepted);
+        },
+    )
+    .await;
     let snapshot = resources
         .load_session_work(&WorkQuery {
             session_id: initiator.into(),
@@ -53,8 +53,9 @@ pub(super) async fn prepare_delegation(
         })
         .await
         .unwrap();
-    let receipt = resources
-        .apply_work_mutation(&WorkCommand {
+    apply_fixture_mutation(
+        resources,
+        WorkCommand {
             session_id: initiator.into(),
             recipient_lifecycle: control.lifecycle,
             mutation_id: format!("fixture-delegation-resources:{invocation_id}"),
@@ -63,8 +64,42 @@ pub(super) async fn prepare_delegation(
                 connections_json: "{}".into(),
                 authorization_ref: "fixture-delegation-authorization".into(),
             },
-        })
-        .await
-        .unwrap();
-    assert_eq!(receipt.decision, WorkDecision::Accepted);
+        },
+    )
+    .await;
+}
+
+async fn apply_fixture_mutation(resources: &dyn SessionResources, mut command: WorkCommand) {
+    let identity = command.mutation_id.clone();
+    loop {
+        let snapshot = resources
+            .load_session_work(&WorkQuery {
+                session_id: command.session_id.clone(),
+                limit: 1,
+            })
+            .await
+            .unwrap();
+        match &mut command.action {
+            WorkAction::PrepareInvocation {
+                expected_revision, ..
+            }
+            | WorkAction::BindResourceOwners {
+                expected_revision, ..
+            } => {
+                *expected_revision = snapshot.state.revision;
+            }
+            _ => panic!("unexpected delegation fixture action"),
+        }
+        command.mutation_id = format!("{identity}:{}", command.digest().unwrap());
+        let receipt = resources.apply_work_mutation(&command).await.unwrap();
+        assert_eq!(receipt.session_id, command.session_id);
+        assert_eq!(receipt.mutation_id, command.mutation_id);
+        match receipt.decision {
+            WorkDecision::Accepted => return,
+            WorkDecision::Rejected {
+                reason: WorkRejection::StaleRevision,
+            } => {}
+            decision => panic!("delegation fixture mutation rejected: {decision:?}"),
+        }
+    }
 }

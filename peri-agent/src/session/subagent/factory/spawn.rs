@@ -420,6 +420,7 @@ pub(super) async fn spawn_subagent_impl(
         } else {
             &child_thread_id
         },
+        super::delegation::DelegationInputMode::FollowUp,
     )
     .await?;
 

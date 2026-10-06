@@ -252,6 +252,7 @@ pub struct SubagentFailure {
     child_thread_id: String,
     agent_name: String,
     error: crate::error::AgentError,
+    execution_finished: bool,
 }
 
 impl SubagentFailure {
@@ -264,7 +265,22 @@ impl SubagentFailure {
             child_thread_id: child_thread_id.into(),
             agent_name: agent_name.into(),
             error,
+            execution_finished: false,
         }
+    }
+
+    pub(super) fn completed(
+        child_thread_id: impl Into<String>,
+        agent_name: impl Into<String>,
+        error: crate::error::AgentError,
+    ) -> Self {
+        let mut failure = Self::new(child_thread_id, agent_name, error);
+        failure.execution_finished = true;
+        failure
+    }
+
+    pub(crate) fn execution_finished(&self) -> bool {
+        self.execution_finished
     }
 
     pub fn child_thread_id(&self) -> &str {

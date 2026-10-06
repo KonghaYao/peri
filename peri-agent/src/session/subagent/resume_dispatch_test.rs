@@ -5,6 +5,9 @@ use super::*;
 #[path = "resume_authorization_test.rs"]
 mod authorization_cases;
 
+#[path = "resume_recovery_test.rs"]
+mod recovery_cases;
+
 async fn dispatch_resume_fixture(
     config: SubagentResumeConfig,
     cancel: &CancellationToken,

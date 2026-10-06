@@ -177,8 +177,7 @@ fn apply(
         binding,
     } = &command.action
     {
-        revision_guard(state, *expected_revision)?;
-        return super::bindings::reconcile(command, state, binding);
+        return super::bindings::reconcile(command, state, *expected_revision, binding);
     }
     if command.recipient_lifecycle != control.lifecycle {
         return Err(WorkRejection::StaleLifecycle);
@@ -420,10 +419,7 @@ fn apply(
         WorkAction::ReconcileTaskBinding {
             expected_revision,
             binding,
-        } => {
-            revision_guard(state, *expected_revision)?;
-            super::bindings::reconcile(command, state, binding)
-        }
+        } => super::bindings::reconcile(command, state, *expected_revision, binding),
         WorkAction::WithdrawDelivery {
             expected_revision,
             expected_control_generation,

@@ -480,6 +480,11 @@ pub(super) async fn resume_subagent_impl(
 
     // 7. prompt 入队：Some(p) 原样追加（不套 fork directive——恢复目标仍是原
     //    任务，直接追加指令）；None 注入隐式 continue 常量（issue 决策 9）
+    let input_mode = if prompt.is_some() {
+        super::delegation::DelegationInputMode::ReplaceProcessing
+    } else {
+        super::delegation::DelegationInputMode::FollowUp
+    };
     let prompt_text = prompt.unwrap_or_else(|| IMPLICIT_CONTINUE_PROMPT.to_string());
     if matches!(run_mode, SubagentRunMode::Background) && task_manager.is_none() {
         let rollback = claim.rollback().await;
@@ -548,6 +553,7 @@ pub(super) async fn resume_subagent_impl(
             &initiator,
             invocation_id,
             &task_id,
+            input_mode,
         )
         .await?;
         Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())

@@ -331,6 +331,7 @@ impl Fixture {
                 &parent.thread_id(),
                 invocation_id,
                 task_id,
+                super::super::delegation::DelegationInputMode::FollowUp,
             )
             .await
             .unwrap();

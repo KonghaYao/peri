@@ -313,6 +313,8 @@ pub enum WorkAction {
         intent: InvocationIntent,
     },
     ReconcileTaskBinding {
+        /// Observed session revision; future revisions are rejected, older revisions
+        /// do not invalidate the immutable per-invocation binding comparison.
         expected_revision: u64,
         binding: TaskBinding,
     },
