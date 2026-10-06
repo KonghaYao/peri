@@ -175,17 +175,10 @@ impl MutationGate {
     }
 
     async fn check_owned_work(&self, root: &ThreadId) -> SessionResourceResult<()> {
-        match self
-            .data
-            .load_session_work(&peri_acp_types::session_resources::work::WorkQuery {
-                session_id: root.clone(),
-                limit: 1,
-            })
-            .await
-        {
-            Ok(snapshot) if !snapshot.pending_commands.is_empty() => Err(
-                SessionResourceError::persistence_uncertain(Some(root.clone())),
-            ),
+        match self.data.has_pending_work_mutations(root).await {
+            Ok(true) => Err(SessionResourceError::persistence_uncertain(Some(
+                root.clone(),
+            ))),
             Ok(_) => Ok(()),
             Err(error) if matches!(error.kind(), SessionResourceErrorKind::NotFound) => Ok(()),
             Err(error) => Err(error),

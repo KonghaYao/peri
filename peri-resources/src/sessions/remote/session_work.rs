@@ -22,8 +22,18 @@ fn identity(command: &WorkCommand) -> SessionResourceResult<OperationIdentity> {
 
 impl RemoteSessionData {
     pub(super) async fn read_work(&self, query: &WorkQuery) -> SessionResourceResult<WorkSnapshot> {
+        self.read_work_snapshot(query, false)
+            .await
+            .map(|(snapshot, _)| snapshot)
+    }
+
+    async fn read_work_snapshot(
+        &self,
+        query: &WorkQuery,
+        retain_state_json: bool,
+    ) -> SessionResourceResult<(WorkSnapshot, Option<String>)> {
         let store = self.store().await?;
-        let results = store.read_batch(vec![
+        let mut results = store.read_batch(vec![
             StatementSpec::new(crate::sessions::control::READ_STATE,vec![Value::Text(query.session_id.clone())]),
             StatementSpec::new(work::READ_STATE,vec![Value::Text(query.session_id.clone())]),
             StatementSpec::new("SELECT EXISTS(SELECT 1 FROM threads WHERE id=?1),EXISTS(SELECT 1 FROM messages WHERE thread_id=?1)",vec![Value::Text(query.session_id.clone())]),
@@ -64,7 +74,16 @@ impl RemoteSessionData {
             snapshot.blocked = true;
             snapshot.candidates.clear();
         }
-        Ok(snapshot)
+        let state_json = if retain_state_json {
+            match results[1].pop().and_then(|row| row.into_iter().next()) {
+                Some(Value::Text(json)) => Some(json),
+                None => None,
+                _ => return Err(corrupt("work state is not readable")),
+            }
+        } else {
+            None
+        };
+        Ok((snapshot, state_json))
     }
 
     pub(super) async fn work_resolution(
@@ -101,23 +120,31 @@ impl RemoteSessionData {
                 self.acknowledge_work(command).await?;
                 return work::receipt(resolution);
             }
-            let snapshot = self
-                .read_work(&WorkQuery {
-                    session_id: command.session_id.clone(),
-                    limit: 64,
-                })
+            let (snapshot, state_json) = self
+                .read_work_snapshot(
+                    &WorkQuery {
+                        session_id: command.session_id.clone(),
+                        limit: 64,
+                    },
+                    true,
+                )
                 .await?;
             let reduction = reduce_work(command, &snapshot.control, &snapshot.state)?;
-            let effects =
-                work::mutation_effects(command, &snapshot.state, &snapshot.control, &reduction)?
-                    .into_iter()
-                    .map(|effect| {
-                        StatementSpec::new(
-                            effect.sql,
-                            effect.params.into_iter().map(Value::Text).collect(),
-                        )
-                    })
-                    .collect();
+            let effects = work::mutation_effects(
+                command,
+                &snapshot.state,
+                state_json,
+                &snapshot.control,
+                &reduction,
+            )?
+            .into_iter()
+            .map(|effect| {
+                StatementSpec::new(
+                    effect.sql,
+                    effect.params.into_iter().map(Value::Text).collect(),
+                )
+            })
+            .collect();
             let store = self.store().await?;
             let outcome = store
                 .apply_qualified(&QualifiedMutation {

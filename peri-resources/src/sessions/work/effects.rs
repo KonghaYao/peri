@@ -12,10 +12,14 @@ const REFRESH_COUNTS: &str = "UPDATE threads SET updated_at=?1,message_count=(SE
 pub(in crate::sessions) fn mutation_effects(
     command: &WorkCommand,
     current: &WorkState,
+    current_json: Option<String>,
     control: &ControlState,
     reduction: &WorkReduction,
 ) -> SessionResourceResult<Vec<WorkEffect>> {
-    let initial = encode(current)?;
+    let initial = match current_json {
+        Some(json) => json,
+        None => encode(current)?,
+    };
     let mut effects = command_effects(command)?;
     effects.extend([
         WorkEffect::texts(INSERT_STATE, [command.session_id.clone(), initial.clone()]),
@@ -119,3 +123,7 @@ pub(in crate::sessions) fn mutation_effects(
     }
     Ok(effects)
 }
+
+#[cfg(all(test, not(target_os = "emscripten")))]
+#[path = "effects_test.rs"]
+mod tests;

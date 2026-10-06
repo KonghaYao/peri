@@ -29,7 +29,7 @@ impl SqliteSessionData {
             .begin()
             .await
             .map_err(|error| map_sqlx(&error))?;
-        let (control, state) = read_snapshot(&mut tx, &query.session_id).await?;
+        let (control, state, _) = read_snapshot(&mut tx, &query.session_id).await?;
         let mut snapshot = WorkSnapshot::from_state(query, control, state);
         let rows: Vec<(String,)> = sqlx::query_as(work::READ_PENDING)
             .bind(&query.session_id)
@@ -91,9 +91,9 @@ impl SqliteSessionData {
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(|error| map_sqlx(&error))?;
-        let (control, state) = read_snapshot(&mut tx, &command.session_id).await?;
+        let (control, state, state_json) = read_snapshot(&mut tx, &command.session_id).await?;
         let reduction = reduce_work(command, &control, &state)?;
-        for effect in work::mutation_effects(command, &state, &control, &reduction)? {
+        for effect in work::mutation_effects(command, &state, state_json, &control, &reduction)? {
             let mut query = sqlx::query(effect.sql);
             for value in effect.params {
                 query = query.bind(value);
@@ -205,6 +205,7 @@ async fn read_snapshot(
 ) -> SessionResourceResult<(
     peri_acp_types::session_resources::ControlState,
     peri_acp_types::session_resources::work::WorkState,
+    Option<String>,
 )> {
     let control: Option<(String,)> = sqlx::query_as(crate::sessions::control::READ_STATE)
         .bind(id)
@@ -231,5 +232,6 @@ async fn read_snapshot(
     Ok((
         crate::sessions::control::state(control.as_ref().map(|row| row.0.as_str()))?,
         work::state(state.as_ref().map(|row| row.0.as_str()), has_history)?,
+        state.map(|row| row.0),
     ))
 }

@@ -533,6 +533,23 @@ pub(super) fn unsupported_behavior(behavior: &'static str) -> SessionResourceErr
 
 #[async_trait]
 impl SessionDataPort for RemoteSessionData {
+    async fn has_pending_work_mutations(&self, id: &ThreadId) -> SessionResourceResult<bool> {
+        let row = self
+            .store()
+            .await?
+            .fetch_row(&StatementSpec::new(
+                crate::sessions::work::HAS_PENDING,
+                vec![Value::Text(id.clone())],
+            ))
+            .await?;
+        match row.as_deref().and_then(|row| super::sql::int_at(row, 0)) {
+            Some(0) => Ok(false),
+            Some(1) => Ok(true),
+            _ => Err(crate::sessions::failure::corrupt(
+                "pending work existence is not readable",
+            )),
+        }
+    }
     async fn load_work_command(
         &self,
         query: &peri_acp_types::session_resources::work::WorkCommandQuery,

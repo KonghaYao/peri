@@ -22,6 +22,7 @@ pub(super) const READ_COMMAND: &str =
     "SELECT command_json FROM session_work_commands WHERE mutation_id=?1";
 pub(super) const READ_OWNED_COMMAND: &str = "SELECT c.command_json,c.digest,r.resolution_json,c.reconciled FROM session_work_commands c LEFT JOIN session_work_receipts r ON r.mutation_id=c.mutation_id AND r.session_id=c.session_id AND r.digest=c.digest WHERE c.mutation_id=?1 AND c.session_id=?2";
 pub(super) const READ_PENDING: &str = "WITH RECURSIVE scope(id) AS (SELECT ?1 UNION ALL SELECT threads.id FROM threads JOIN scope ON threads.parent_thread_id=scope.id) SELECT command_json FROM session_work_commands WHERE session_id IN (SELECT id FROM scope) AND reconciled=0 ORDER BY mutation_id";
+pub(super) const HAS_PENDING: &str = "WITH RECURSIVE scope(id) AS (SELECT ?1 UNION ALL SELECT threads.id FROM threads JOIN scope ON threads.parent_thread_id=scope.id) SELECT EXISTS (SELECT 1 FROM session_work_commands WHERE session_id IN (SELECT id FROM scope) AND reconciled=0)";
 pub(super) const ACK_COMMAND: &str = "UPDATE session_work_commands SET reconciled=1 WHERE mutation_id=?1 AND digest=?2 AND EXISTS(SELECT 1 FROM session_work_receipts WHERE mutation_id=?1 AND digest=?2)";
 
 pub(super) fn command_effects(command: &WorkCommand) -> SessionResourceResult<Vec<WorkEffect>> {
