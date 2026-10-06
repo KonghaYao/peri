@@ -17,7 +17,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createServer, type Server } from "node:http";
 import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";

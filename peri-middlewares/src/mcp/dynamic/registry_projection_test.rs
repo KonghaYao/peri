@@ -5,11 +5,22 @@ async fn checked_projection_ready_shadow_unload_aba_and_close() {
     let (mut owner, spawner) = McpTaskOwner::new();
     let registry = DynamicMcpRegistry::new(spawner, FakeConnector::new());
     let static_handle = handle("example", "static_lookup");
-    let static_token: peri_acp_types::mcp_skills::HandleToken = static_handle.clone();
+    let static_pool = Arc::new(crate::mcp::McpClientPool::new_pending());
+    static_pool
+        .clients
+        .write()
+        .insert("example".into(), static_handle);
+    static_pool
+        .set_builtin_instance_context(Arc::new(
+            crate::mcp::builtin::BuiltinInstanceContext::new("projection-source")
+                .with_closed(std::collections::BTreeSet::from(["workspace".into()]))
+                .with_skills_face_closed(true),
+        ))
+        .unwrap();
     let skills = Arc::new(McpSkillRegistry::new());
     let commands = Arc::new(CommandRegistry::new());
     let lease = registry.capability("session-a").bind_projection(
-        vec![("example".to_string(), static_token)],
+        static_pool.clone(),
         Arc::clone(&skills),
         Arc::clone(&commands),
     );
@@ -17,6 +28,10 @@ async fn checked_projection_ready_shadow_unload_aba_and_close() {
         .as_any()
         .downcast_ref::<CheckedSessionMcpProjection>()
         .unwrap();
+    assert!(Arc::ptr_eq(
+        &static_pool.builtin_instance_context().unwrap(),
+        &projection.pool().builtin_instance_context().unwrap(),
+    ));
     assert_eq!(
         projection.pool().get_client("example").unwrap().tools[0].name,
         "static_lookup"
@@ -122,7 +137,7 @@ async fn session_owned_projection_keeps_existing_discover_instance_live_until_cl
     let commands = Arc::new(CommandRegistry::new());
     let holder = Arc::new(parking_lot::Mutex::new(Some(
         registry.capability("session-a").bind_projection(
-            Vec::new(),
+            Arc::new(crate::mcp::McpClientPool::new_pending()),
             Arc::clone(&skills),
             Arc::clone(&commands),
         ),

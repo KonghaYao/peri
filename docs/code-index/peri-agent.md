@@ -9,7 +9,7 @@ RCRA 控制入口见 `agent/stages/execution_control.rs`：持久登记精确 tu
 
 Emscripten 最小入口见 [`peri-wasm`](peri-wasm.md)：复用本 crate 的 `run_react_loop` 和 `AgentModelBridge`；`resources` 模块及其 Native 存储依赖在目标平台不编入。
 
-消息与激活的已批准目标（**待重构**基线）见 [RCRA 消息权威](../design/rcra-message-activation.md)，重构顺序见 [active issue](../../spec/issues/2026-10-05-rcra-message-activation.md)。下表仍为现行代码入口，不表示可靠 Inbox 或统一激活已经落地。
+消息与激活的已批准目标见 [RCRA 消息权威](../design/rcra-message-activation.md)，实施与验收边界见 [active issue](../../spec/issues/2026-10-05-rcra-message-activation.md)。下表与持久 RCRA 子系统说明提供现行实现入口，不表示完整发布矩阵已经通过。
 
 ## 架构速览
 
@@ -56,6 +56,8 @@ Emscripten 最小入口见 [`peri-wasm`](peri-wasm.md)：复用本 crate 的 `ru
 ### 持久 RCRA 与 SDK 准入
 
 `agent/stages/work_boundary.rs` 在首个 hook 或模型调用前确认完整 SDK admission、领域登记和真实 entered ACK；`session/turn.rs` 固定该 ticket 的 turn/attempt 与控制代际。`work_ledger.rs` 保存 Unknown 的完整原命令并冻结副作用，`work_receive.rs` 原子接纳/领取/投影，`work_reason.rs` 保存实际发送的完整模型请求及响应到 Act 的责任交接，`work_dispatch.rs` 保存工具意图和结果。`work_recovery.rs` 仅使用持久证据恢复阶段，不把 Transcript 存在当作处理完成，不盲重放 OutcomeUnknown 调用。
+
+`tool_dispatch/execution.rs` 保留工具返回的 typed `UserRejected`；MCP Agent 在批准前拒绝明确表示未启动子代理，拒绝理由作为 error tool result 继续交给模型，不能被 boxed 字符串误分类为未知副作用。没有可信分类的普通工具失败仍冻结并保留 OutcomeUnknown。
 
 `session/user_input_mailbox.rs` 及其子模块负责持久发布、withdraw 与 SDK run 的精确观察；它不再是执行准入者。`session/subagent/factory/cold.rs` 根据子会话自己的 frozen 数据、保存的委托身份和授权上限重建运行环境，不依赖活跃父 runtime 或根会话 persona。`agent/model_bridge.rs` 与 `peri-model` prepared-stream 端口将检查点和实际 HTTP 请求绑定，不能用脱敏诊断快照代替发送正文。
 

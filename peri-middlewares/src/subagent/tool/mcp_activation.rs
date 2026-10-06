@@ -61,9 +61,19 @@ impl super::SubAgentTool {
                         }
                         _ => "MCP Agent activation was not approved",
                     };
-                    return Err(reason.to_string().into());
+                    return Err(peri_agent::error::AgentError::ToolRejected {
+                        tool: "MCP Agent activation".into(),
+                        reason: reason.to_string(),
+                    }
+                    .into());
                 }
-                _ => return Err("MCP Agent activation was rejected".into()),
+                _ => {
+                    return Err(peri_agent::error::AgentError::ToolRejected {
+                        tool: "MCP Agent activation".into(),
+                        reason: "MCP Agent activation was rejected".into(),
+                    }
+                    .into());
+                }
             }
         }
         Ok(activated.definition)

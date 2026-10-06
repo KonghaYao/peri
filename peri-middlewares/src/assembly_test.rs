@@ -92,7 +92,7 @@ impl peri_acp_types::ports::DynamicMcpDeploymentPort for FakeDynamicDeployment {
 
             fn bind_projection(
                 &self,
-                _static_handles: Vec<(String, peri_acp_types::mcp_skills::HandleToken)>,
+                _static_pool: Arc<dyn peri_acp_types::ports::McpPoolPort>,
                 _skill_registry: Arc<peri_acp_types::mcp_skills::McpSkillRegistry>,
                 _command_registry: Arc<peri_acp_types::command_registry::CommandRegistry>,
             ) -> Arc<dyn peri_acp_types::ports::SessionMcpProjectionLease> {

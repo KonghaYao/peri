@@ -22,7 +22,7 @@ use crate::dynamic_mcp::{
     DynamicMcpNotification, DynamicMcpResponse, DynamicMcpShutdownReport, ResolvedSecret,
     SecretRef, SessionMcpCapabilitySnapshot,
 };
-use crate::mcp_skills::{HandleToken, McpSkillRegistry};
+use crate::mcp_skills::McpSkillRegistry;
 use crate::skills::SkillMetadata;
 use crate::tasks::TaskManager;
 use tokio_util::sync::CancellationToken;
@@ -555,12 +555,13 @@ pub trait SessionMcpCapabilityPort: Send + Sync {
     fn snapshot(&self) -> Arc<SessionMcpCapabilitySnapshot>;
 
     /// Bind the existing session MCP read/discovery registries to this checked
-    /// capability source. The returned lease owns no parallel capability
-    /// registry: it only projects the effective handles into the existing MCP
+    /// capability source, preserving the source pool's builtin policy. The
+    /// returned lease owns no parallel capability registry: it only projects
+    /// the effective handles into the existing MCP
     /// pool, skill registry and command registry.
     fn bind_projection(
         &self,
-        _static_handles: Vec<(String, HandleToken)>,
+        _static_pool: Arc<dyn McpPoolPort>,
         _skill_registry: Arc<crate::mcp_skills::McpSkillRegistry>,
         _command_registry: Arc<crate::command_registry::CommandRegistry>,
     ) -> Arc<dyn SessionMcpProjectionLease> {

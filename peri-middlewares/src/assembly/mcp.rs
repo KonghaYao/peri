@@ -34,14 +34,6 @@ pub(super) fn add_mcp(
                     .map(|projection| projection.pool())
                     .unwrap_or_else(|| Arc::clone(pool))
             } else {
-                let static_handles = pool
-                    .get_all_clients()
-                    .into_iter()
-                    .map(|handle| {
-                        let token: peri_acp_types::mcp_skills::HandleToken = handle.clone();
-                        (handle.name.clone(), token)
-                    })
-                    .collect();
                 let skill_registry = ctx
                     .mcp_skill_registry
                     .clone()
@@ -50,7 +42,7 @@ pub(super) fn add_mcp(
                     .clone()
                     .unwrap_or_else(|| Arc::new(CommandRegistry::new()));
                 let lease = deployment.capability(session_id).bind_projection(
-                    static_handles,
+                    pool.clone(),
                     skill_registry,
                     command_registry,
                 );

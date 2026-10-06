@@ -36,6 +36,16 @@ pub(super) fn effective_tool_error(error: AgentError) -> EffectiveToolError {
 fn effective_tool_error_from_boxed(
     error: Box<dyn std::error::Error + Send + Sync>,
 ) -> EffectiveToolError {
+    let error = match error.downcast::<EffectiveToolError>() {
+        Ok(error) => return *error,
+        Err(error) => error,
+    };
+    if let Some(AgentError::ToolRejected { tool, reason }) = error.downcast_ref::<AgentError>() {
+        return effective_tool_error(AgentError::ToolRejected {
+            tool: tool.clone(),
+            reason: reason.clone(),
+        });
+    }
     let mut effective =
         EffectiveToolError::new(EffectiveToolErrorCode::ToolFailed, error.to_string());
     if let Some(failure) = error.downcast_ref::<SubagentFailure>() {

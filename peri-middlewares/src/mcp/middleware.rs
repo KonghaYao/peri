@@ -307,6 +307,12 @@ pub(crate) fn run_ensure_discovery(
             !super::builtin::is_closed_source(&handle.name, handle.source.as_ref(), &closed)
         })
         .collect();
+    tracing::debug!(
+        session_id,
+        ?closed,
+        sources = ?connected_handles.iter().map(|handle| (&handle.name, &handle.source)).collect::<Vec<_>>(),
+        "MCP skill projection boundary"
+    );
     let connected: Vec<(String, HandleToken)> = connected_handles
         .iter()
         .map(|h| (h.name.clone(), h.clone() as HandleToken))

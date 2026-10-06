@@ -1,7 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { access, mkdir } from "node:fs/promises";
+import { access, mkdir, open, readdir } from "node:fs/promises";
 import path from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
@@ -233,10 +233,37 @@ async function trustedBun(env: Record<string, string>): Promise<string> {
   throw new Error("Stdio execution E2E requires Bun; no fixture admission or Rust fallback");
 }
 
+async function readRustDiagnostics(directory: string): Promise<Record<string, unknown>> {
+  const names = (await readdir(directory, { withFileTypes: true }))
+    .filter((entry) => entry.isFile() && entry.name.startsWith("stdio-execution."))
+    .map((entry) => entry.name)
+    .sort()
+    .slice(-3);
+  const files = [];
+  for (const name of names) {
+    const file = await open(path.join(directory, name), "r");
+    try {
+      const size = (await file.stat()).size;
+      const buffer = Buffer.alloc(Math.min(size, 64 * 1024));
+      const { bytesRead } = await file.read(buffer, 0, buffer.length, size - buffer.length);
+      const lines = buffer.subarray(0, bytesRead).toString("utf8").split("\n").filter(Boolean);
+      files.push({
+        name,
+        errors: lines.filter((line) => /"level":"(?:ERROR|WARN)"/.test(line)).slice(-16),
+        rejection: lines.filter((line) => /reject|denied|permission|invocation|checkpoint|projection boundary/i.test(line)).slice(-24),
+        tail: lines.slice(-16),
+      });
+    } finally {
+      await file.close();
+    }
+  }
+  return { directory, files };
+}
+
 export async function startStdioExecutionFixture(options: FixtureOptions): Promise<{
   call(method: string, params: any, timeoutMs?: number): Promise<WireMessage>;
   close(): Promise<number | null>;
-  diagnostics(): string;
+  diagnostics(): Promise<string>;
 }> {
   if (!path.isAbsolute(options.home) || options.env.HOME !== options.home) {
     throw new Error("Execution E2E requires an explicitly isolated absolute HOME");
@@ -247,6 +274,14 @@ export async function startStdioExecutionFixture(options: FixtureOptions): Promi
   const executable = await trustedBun(options.env);
   const database = path.join(options.home, ".peri/execution/registry.db");
   await mkdir(path.dirname(database), { recursive: true, mode: 0o700 });
+  const logDirectory = path.join(options.home, ".peri/logs");
+  await mkdir(logDirectory, { recursive: true, mode: 0o700 });
+  const periEnv = {
+    ...options.env,
+    RUST_LOG_FILE: path.join(logDirectory, "stdio-execution.log"),
+    RUST_LOG_FORMAT: "json",
+    RUST_LOG: "info,peri_agent::agent::stages=debug,peri_middlewares::subagent=debug,peri_middlewares::mcp::middleware=debug",
+  };
   const peers: JsonlPeer[] = [];
   let peri: JsonlPeer;
   let sdk: JsonlPeer;
@@ -266,9 +301,9 @@ export async function startStdioExecutionFixture(options: FixtureOptions): Promi
     if (failures.length) throw new AggregateError(failures, "Owned stdio execution processes could not close");
     return periExit;
   })();
-  const launch = (binary: string, args: string[], cwd: string) => spawn(binary, args, {
+  const launch = (binary: string, args: string[], cwd: string, env = options.env) => spawn(binary, args, {
     cwd,
-    env: options.env,
+    env,
     stdio: ["pipe", "pipe", "pipe"],
     detached: process.platform !== "win32",
   });
@@ -282,7 +317,7 @@ export async function startStdioExecutionFixture(options: FixtureOptions): Promi
         return replyFrom(await peri.call(request.method, request.params, 180_000, request.id));
       }, () => {});
     peers.push(sdk);
-    peri = new JsonlPeer(launch(options.binary, ["acp", "--cwd", options.cwd], options.cwd), "peri",
+    peri = new JsonlPeer(launch(options.binary, ["acp", "--cwd", options.cwd], options.cwd, periEnv), "peri",
       async (request) => {
         options.onServerRequest(request);
         if (ADMISSION_METHODS.has(request.method)) {
@@ -305,7 +340,10 @@ export async function startStdioExecutionFixture(options: FixtureOptions): Promi
     return {
       call: (method, params, timeoutMs) => peri.call(method, params, timeoutMs),
       close,
-      diagnostics: () => JSON.stringify(peers.map((peer) => peer.diagnostics())),
+      diagnostics: async () => JSON.stringify({
+        rust: await readRustDiagnostics(logDirectory),
+        peers: peers.map((peer) => peer.diagnostics()),
+      }),
     };
   } catch (error) {
     try {

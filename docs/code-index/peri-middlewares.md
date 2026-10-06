@@ -144,7 +144,7 @@ scope 快照携 epoch；`taskClose`/`taskOpen` 按该 epoch 做 owner 端 CAS，
 | 端口与继承工具准备 | `assembly/preparation.rs`：`ResolvedPorts` / `resolve_ports` / `build_parent_tools`；还原具体池与 broker，返回句柄由原 assemble 作用域继续持有，disabled 工具不进入父工具集 |
 | 冻结 prompt / skills | `assembly/prompt.rs`：`add_agents_md` / `add_skills` / `add_skill_preload`；仅在相应启用槽位调用，使用冻结数据和 session 注册表 |
 | Hook 组展开 | `assembly/hooks.rs::add_hooks`；保留组序、空组跳过及按槽位展开行为 |
-| MCP 构造副作用 | `assembly/mcp.rs::add_mcp`；checked projection lease 复用/绑定、ensure_discovery、notifier 注入按原顺序，仅从启用 Mcp 槽位调用 |
+| MCP 构造副作用 | `assembly/mcp.rs::add_mcp`；checked projection lease 绑定原 MCP pool，先继承同一 builtin 上下文再刷新可见 handles；关闭实例与宿主技能面策略不因动态投影丢失。lease 复用/绑定、ensure_discovery、notifier 注入按原顺序，仅从启用 Mcp 槽位调用 |
 | Workflow agent 工厂 | `assembly/workflow.rs`：`WorkflowAgentMiddlewareFactory` / `default_workflow_middleware_factory`（根 re-export）；`resolve_agent_definition` / `build_tools` / `build_middlewares` / `build_tool_resolver` / `build_workflow_middleware`；独立链序、disabled 与 sandbox 契约不变 |
 
 ### deferred 工具（src/tool_search/）

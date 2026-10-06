@@ -81,6 +81,7 @@ interface StdioRun {
   /** `session/update` 的 available_commands_update 快照（每次通知一项，命令名列表）。 */
   commandSnapshots: string[][];
   exitCode: number | null;
+  diagnostics: string;
 }
 
 /** stdio ACP 路径：真实 binary，`peri acp --cwd`，initialize → session/new → prompt。 */
@@ -141,12 +142,13 @@ async function runStdio(
       sessionId,
       prompt: [{ type: "text", text: prompt }],
     }, 180_000);
+    const failureEvidence = response.error ? await fixture.diagnostics() : "";
     expect(response.error,
-      `session/prompt must reach actual execution, not fail required preflight; ACP error=${JSON.stringify(response.error)}; stdio bridge=${fixture.diagnostics()}`,
+      `session/prompt must reach actual execution, not fail required preflight; ACP error=${JSON.stringify(response.error)}; stdio bridge=${failureEvidence}`,
     ).toBeUndefined();
     await new Promise((resolve) => setTimeout(resolve, 500));
     const exitCode = await fixture.close();
-    return { serverRequests, commandSnapshots, exitCode };
+    return { serverRequests, commandSnapshots, exitCode, diagnostics: await fixture.diagnostics() };
   } finally {
     await fixture.close();
   }
@@ -344,9 +346,22 @@ describe("workspace MCP resources：真实二进制验收（print / stdio）", (
 
   it("④ 关闭矩阵（stdio 命令面）：技能命令不可激活（不注入全文）", async () => {
     const w = await world({ metaHarness: { WorkspaceMiddleware: false } });
-    await runStdio(w, `/${SKILL_NAME} should not load`, "none");
+    const run = await runStdio(w, `/${SKILL_NAME} should not load`, "none");
     const messages = messagesJson(w);
-    expect(messages.includes(SKILL_BODY_SENTINEL), "关闭态不得注入技能正文").toBe(false);
+    const sentinelRequests = w.requests.flatMap((entry) => {
+      const content = JSON.stringify(entry.body?.messages ?? []);
+      const position = content.indexOf(SKILL_BODY_SENTINEL);
+      if (position < 0) return [];
+      return [{
+        requestIndex: entry.index,
+        isMain: entry.isMain,
+        excerpt: content.slice(Math.max(0, position - 240), position + SKILL_BODY_SENTINEL.length + 240),
+      }];
+    });
+    const wire = await fixtureWireLines(w.fixtureLog);
+    expect(messages.includes(SKILL_BODY_SENTINEL),
+      `关闭态不得注入技能正文; sentinel=${JSON.stringify(sentinelRequests)}; stdio bridge=${run.diagnostics}; fixture wire=${JSON.stringify(wire.slice(-12))}`,
+    ).toBe(false);
     expect(messages.includes('"name":"SkillTool"'), "关闭态不得产生 SkillTool 调用").toBe(false);
   });
 

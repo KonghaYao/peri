@@ -1,6 +1,6 @@
 # RCRA 消息、任务归属与激活权威
 
-> 状态：已批准目标设计，**待重构**（作为代码重构基线）。所有 Agent（含主 Agent、Subagent、Workflow 内 Agent）都是一等公民，适用同一会话、消息和激活契约；本文件不声明这些目标已经实现。
+> 状态：已批准目标设计，**实施验收中**。所有 Agent（含主 Agent、Subagent、Workflow 内 Agent）都是一等公民，适用同一会话、消息和激活契约；具体实现及验证证据以 active issue、代码和契约测试为准，本文件不声明发布门槛已经通过。
 >
 > Scope：会话级 Task/MQ 隔离、可靠消息接纳、消息分级、RCRA 消费和执行激活。实施与验收见 [active issue](../../spec/issues/2026-10-05-rcra-message-activation.md)。任务执行与关闭细则见 [Session 异步任务](session-async-tasks.md)。
 
