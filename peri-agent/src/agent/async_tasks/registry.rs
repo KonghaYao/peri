@@ -770,21 +770,33 @@ impl BackgroundTaskRegistry {
                         Ok(_) => {
                             let task_id_owned = task_id.to_string();
                             self.scope.spawn_admitted(async move {
-                                if peri_time::timeout(
+                                let joined = match peri_time::timeout(
                                     std::time::Duration::from_secs(CANCEL_GRACE_SECS),
                                     &mut handle,
                                 )
                                 .await
-                                .is_err()
                                 {
-                                    handle.abort();
-                                    let _ = handle.await;
-                                    warn!(
-                                        task_id = %task_id_owned,
-                                        "bg task cancel: grace period elapsed, aborted task \
-                                         (async cleanup lost: thread status / stop hooks; \
-                                         sync cleanup guard still runs)"
-                                    );
+                                    Ok(joined) => joined,
+                                    Err(_) => {
+                                        handle.abort();
+                                        let joined = handle.await;
+                                        warn!(
+                                            task_id = %task_id_owned,
+                                            "bg task cancel: grace period elapsed, aborted task \
+                                             (async cleanup lost: thread status / stop hooks; \
+                                             sync cleanup guard still runs)"
+                                        );
+                                        joined
+                                    }
+                                };
+                                if let Err(error) = joined {
+                                    if !error.is_cancelled() {
+                                        warn!(
+                                            task_id = %task_id_owned,
+                                            is_panic = error.is_panic(),
+                                            "bg task cancel: execution join failed"
+                                        );
+                                    }
                                 }
                             });
                         }

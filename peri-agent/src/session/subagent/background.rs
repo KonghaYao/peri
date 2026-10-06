@@ -1,5 +1,7 @@
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
+use futures::FutureExt;
 use peri_acp_types::identity::AgentId;
 use tokio_util::sync::CancellationToken;
 
@@ -120,6 +122,12 @@ pub(super) async fn spawn_background_subagent(
     let agent_name_for_task = agent_name.clone();
     let prompt_summary_for_task = prompt_summary.clone();
     let cwd_for_task = cwd.clone();
+    let panic_task_id = task_id.clone();
+    let panic_thread_id = child_thread_id.clone();
+    let panic_agent_name = agent_name.clone();
+    let panic_prompt_summary = prompt_summary.clone();
+    let panic_on_complete = on_bg_complete.clone();
+    let panic_manager = Arc::clone(&task_manager);
 
     let execution = async move {
         // S3.1 门控：注册结果（失败时调用方已发 Err；sender 被 drop 同样返回）
@@ -360,7 +368,7 @@ pub(super) async fn spawn_background_subagent(
                 "cancelled" => AgentStatus::Cancelled,
                 _ => AgentStatus::Done,
             };
-            let _ = store
+            if let Err(error) = store
                 .update_session_meta(
                     &ThreadId::from(child_thread_id_for_task.as_str()),
                     &SessionMetaPatch {
@@ -368,7 +376,10 @@ pub(super) async fn spawn_background_subagent(
                         ..Default::default()
                     },
                 )
-                .await;
+                .await
+            {
+                tracing::warn!(thread_id = %child_thread_id_for_task, %error, "subagent terminal status write failed");
+            }
         }
 
         // Preserve the error-path protocol: Stopped is the last wire event,
@@ -396,7 +407,39 @@ pub(super) async fn spawn_background_subagent(
     };
     let join_handle = peri_acp_types::tasks::TaskManager::spawn_owned(
         task_manager.as_ref(),
-        Box::pin(execution),
+        Box::pin(async move {
+            let started_at = peri_time::monotonic_now();
+            if AssertUnwindSafe(execution).catch_unwind().await.is_err() {
+                tracing::error!(
+                    task_id = %panic_task_id,
+                    thread_id = %panic_thread_id,
+                    "background subagent execution panicked"
+                );
+                let result = crate::agent::events::BackgroundTaskResult {
+                    task_id: panic_task_id.clone(),
+                    agent_name: panic_agent_name,
+                    prompt_summary: panic_prompt_summary,
+                    success: false,
+                    output: "Background sub-agent execution panicked".into(),
+                    tool_calls_count: 0,
+                    duration_ms: started_at.elapsed().as_millis() as u64,
+                    child_thread_id: Some(panic_thread_id),
+                    timed_out: false,
+                    subagent_failure: None,
+                    shell_output: None,
+                };
+                if let Some(on_complete) = panic_on_complete {
+                    if let Err(error) =
+                        panic_manager.settle_completed(&panic_task_id, result, on_complete)
+                    {
+                        tracing::error!(task_id = %panic_task_id, %error, "subagent terminal delivery is pending");
+                    }
+                } else {
+                    panic_manager.complete(&panic_task_id, result);
+                }
+            }
+            // panic 已在边界内收敛；正常返回让 spawn_owned 确认执行已停止。
+        }),
     )?;
 
     // 注册到 BackgroundTaskRegistry

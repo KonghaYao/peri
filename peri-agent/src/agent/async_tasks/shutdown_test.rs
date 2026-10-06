@@ -1,6 +1,82 @@
 use super::*;
 use peri_acp_types::tasks::{TaskManager as TaskManagerPort, TaskShutdownReport};
 
+#[derive(Clone, Default)]
+struct LogBuffer(std::sync::Arc<parking_lot::Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogBuffer {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn async_tasks_owner_drop_and_cancel_join_panic_are_logged() {
+    use crate::agent::async_tasks::{BackgroundTask, BackgroundTaskStatus, BgCancelHandle};
+    let logs = LogBuffer::default();
+    let writer = logs.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .without_time()
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .finish();
+    let _capture = tracing::subscriber::set_default(subscriber);
+    let manager = TaskManager::new();
+    drop(manager.begin_external_execution("test-owner").unwrap());
+    assert!(!manager.is_execution_idle());
+    manager.resolve_external_execution_evidence("test-owner");
+
+    // 直接注册未捕获 panic 的 handle，验证取消等待层，而非后台包装层。
+    let handle = tokio::spawn(async { panic!("取消等待测试 panic") });
+    manager
+        .register_with_kind(BackgroundTask {
+            id: "cancel-panic-task".into(),
+            agent_name: "fixture".into(),
+            prompt_summary: "task".into(),
+            status: BackgroundTaskStatus::Running,
+            started_at: peri_time::monotonic_now(),
+            chrono_started_at: peri_time::now_wall().into(),
+            kind: BgTaskKind::Agent,
+            cancel_handle: BgCancelHandle::Abort(handle),
+            cancel_token: None,
+            pid: None,
+            output_preview: None,
+            agent_inbox: None,
+            initiator_session_id: None,
+            owner_session_id: None,
+            owner_identity: None,
+        })
+        .unwrap();
+    manager.cancel("cancel-panic-task").unwrap();
+    assert_eq!(manager.shutdown().await, TaskShutdownReport::Complete);
+    assert!(manager.is_execution_idle());
+    let text = String::from_utf8(logs.0.lock().clone()).unwrap();
+    for (message, field) in [
+        (
+            "external execution scope still uncertain after owner drop",
+            "scope=test-owner id=1",
+        ),
+        (
+            "bg task cancel: execution join failed",
+            "task_id=cancel-panic-task is_panic=true",
+        ),
+    ] {
+        let line = text
+            .lines()
+            .find(|line| line.contains(message))
+            .expect(&text);
+        assert!(line.contains("WARN"), "{line}");
+        assert!(line.contains(field), "{line}");
+        std::io::Write::write_all(&mut std::io::stdout(), format!("{line}\n").as_bytes()).unwrap();
+    }
+}
+
 #[derive(Default)]
 struct RecordingShellExecutor {
     request: std::sync::Mutex<Option<(String, String, Option<u64>)>>,

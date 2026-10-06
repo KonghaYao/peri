@@ -3,6 +3,142 @@
 use super::*;
 use peri_acp_types::session_resources::{work::*, SessionResources};
 
+#[derive(Clone, Default)]
+struct LogBuffer(Arc<parking_lot::Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogBuffer {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn capture_logs() -> (LogBuffer, tracing::subscriber::DefaultGuard) {
+    let logs = LogBuffer::default();
+    let writer = logs.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .without_time()
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .finish();
+    (logs, tracing::subscriber::set_default(subscriber))
+}
+
+fn matching_log(logs: &LogBuffer, message: &str) -> String {
+    let text = String::from_utf8(logs.0.lock().clone()).unwrap();
+    let lines: Vec<_> = text.lines().filter(|line| line.contains(message)).collect();
+    assert_eq!(lines.len(), 1, "日志必须恰好出现一次：{text}");
+    // --nocapture 时输出实际捕获行，便于核验字段；不安装全局 subscriber。
+    std::io::Write::write_all(&mut std::io::stdout(), format!("{}\n", lines[0]).as_bytes())
+        .unwrap();
+    lines[0].to_owned()
+}
+
+async fn wait_execution_idle(manager: &TaskManager) {
+    use peri_acp_types::tasks::TaskManager as _;
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !manager.is_execution_idle() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("后台执行必须确认停止，不能遗留 owned 不确定性");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn background_subagent_panic_settles_and_logs() {
+    use peri_acp_types::tasks::TaskManager as _;
+    for with_callback in [false, true] {
+        let (logs, _capture) = capture_logs();
+        let manager = Arc::new(TaskManager::new());
+        let mut config = tail_spawn_config(MockSessionResources::new(), TailOutcome::Completed);
+        config.run_mode = SubagentRunMode::Background;
+        config.task_manager = Some(manager.clone());
+        config.on_subagent_start = Some(Arc::new(|_, _| panic!("后台执行测试 panic")));
+        let results = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        if with_callback {
+            let results = results.clone();
+            config.on_bg_complete = Some(Arc::new(move |result, _| {
+                results.lock().push(result.clone());
+                Ok(())
+            }));
+        }
+        let spawned = AdmittedSessionFactory::spawn_subagent(None, config)
+            .await
+            .unwrap();
+        let task_id = spawned.task_id.unwrap();
+        wait_execution_idle(&manager).await;
+        assert_eq!(manager.active_count(), 0);
+        assert_eq!(manager.snapshot().tasks[0].status, "failed");
+        if with_callback {
+            let results = results.lock();
+            assert_eq!(results.len(), 1);
+            assert!(!results[0].success);
+            assert_eq!(results[0].task_id, task_id);
+            assert_eq!(
+                results[0].child_thread_id.as_deref(),
+                Some(spawned.child_thread_id.as_str())
+            );
+        }
+        let line = matching_log(&logs, "background subagent execution panicked");
+        assert!(line.contains("ERROR"));
+        assert!(line.contains(&format!("task_id={task_id}")));
+        assert!(line.contains(&format!("thread_id={}", spawned.child_thread_id)));
+        assert!(!String::from_utf8(logs.0.lock().clone())
+            .unwrap()
+            .contains("scope still uncertain"));
+        manager.begin_session_close();
+        assert!(manager.wait_session_close().await);
+        assert!(manager.session_close_settled());
+        assert!(manager.is_execution_idle());
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn subagent_terminal_write_failure_logs_and_continues() {
+    for background in [false, true] {
+        let (logs, _capture) = capture_logs();
+        let store = MockSessionResources::new();
+        let manager = Arc::new(TaskManager::new());
+        let mut config = tail_spawn_config(store.clone(), TailOutcome::Completed);
+        let stopped_store = store.clone();
+        config.on_subagent_stop = Some(Arc::new(move |_, _, _, _| {
+            // 只在最后的状态 patch 前注入失败，不干扰执行与持久化结算。
+            stopped_store.restrict_to_history_read_only();
+        }));
+        let delivered = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        if background {
+            config.run_mode = SubagentRunMode::Background;
+            config.task_manager = Some(manager.clone());
+            let delivered = delivered.clone();
+            config.on_bg_complete = Some(Arc::new(move |result, _| {
+                delivered.lock().push(result.success);
+                Ok(())
+            }));
+        }
+        let spawned = AdmittedSessionFactory::spawn_subagent(None, config)
+            .await
+            .expect("终态状态 patch 失败不能中断原流程");
+        if background {
+            wait_execution_idle(&manager).await;
+            assert_eq!(*delivered.lock(), vec![true]);
+            assert_eq!(manager.snapshot().tasks[0].status, "completed");
+        }
+        let line = matching_log(&logs, "subagent terminal status write failed");
+        assert!(line.contains("WARN"));
+        assert!(line.contains(&format!("thread_id={}", spawned.child_thread_id)));
+        let error = peri_acp_types::session_resources::SessionResourceError::new(
+            peri_acp_types::session_resources::SessionResourceErrorKind::Unsupported,
+        );
+        assert!(line.contains(&format!("error={error}")));
+    }
+}
+
 async fn unsettled_execution(store: &MockSessionResources, child_id: &str) -> WorkSnapshot {
     let snapshot = store
         .load_session_work(&WorkQuery {

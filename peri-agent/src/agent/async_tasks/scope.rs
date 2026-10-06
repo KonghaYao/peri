@@ -145,6 +145,11 @@ impl Drop for ExternalGuard {
                 .uncertain
                 .lock()
                 .insert(self.id, self.scope.clone());
+            tracing::warn!(
+                scope = %self.scope,
+                id = self.id,
+                "external execution scope still uncertain after owner drop"
+            );
         }
     }
 }

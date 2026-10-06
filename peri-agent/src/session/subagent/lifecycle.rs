@@ -157,7 +157,7 @@ pub(crate) async fn on_subagent_stop_handler(
         } else {
             AgentStatus::Done
         };
-        let _ = store
+        if let Err(error) = store
             .update_session_meta(
                 &ThreadId::from(child_thread_id),
                 &SessionMetaPatch {
@@ -165,7 +165,10 @@ pub(crate) async fn on_subagent_stop_handler(
                     ..Default::default()
                 },
             )
-            .await;
+            .await
+        {
+            tracing::warn!(thread_id = %child_thread_id, %error, "subagent terminal status write failed");
+        }
     }
 }
 
