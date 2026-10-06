@@ -3,11 +3,17 @@ use std::sync::{Arc, Mutex};
 use serde_json::Value;
 
 use crate::{
-    runtime::stream::SseDecoderFactory, transport::SseEvent, ContentBlock, JsonObject,
+    runtime::stream::SseDecoderFactory, transport::SseEvent, ContentBlock, JsonObject, ModelError,
     ModelMessage, ModelResponse, ModelResult, ModelStreamEvent, TokenUsage, ToolCall,
 };
 
 use super::response::{provider_protocol_error, stop_reason};
+
+/// 畸形帧的解码诊断：保留 `Provider` 分类并附带受限摘要（仅 `[A-Za-z0-9._-]`），
+/// 使 fail-closed 的原因在错误出口可见，而不是被降级成空事件。
+fn malformed_frame_error(summary: &str) -> ModelError {
+    ModelError::protocol_with_summary(crate::ProtocolErrorKind::Provider, summary)
+}
 
 #[derive(Default)]
 struct StreamState {
@@ -267,10 +273,21 @@ fn apply_delta(state: &mut StreamState, value: &Value) -> ModelResult<Vec<ModelS
             Ok(Vec::new())
         }
         (ActiveKind::ToolUse { arguments, .. }, Some("input_json_delta")) => {
-            let delta = delta
-                .get("partial_json")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
+            // `input_json_delta` 的存在意义就是携带参数分片：缺字段或类型错是畸形帧，
+            // 必须上报诊断，而不是发出空分片让残缺参数继续累积。
+            let delta = match delta.get("partial_json") {
+                Some(Value::String(delta)) => delta.as_str(),
+                Some(Value::Null) | None => {
+                    return Err(malformed_frame_error(
+                        "anthropic_stream_partial_json_missing",
+                    ));
+                }
+                Some(_) => {
+                    return Err(malformed_frame_error(
+                        "anthropic_stream_partial_json_not_string",
+                    ));
+                }
+            };
             arguments.push_str(delta);
             Ok(vec![ModelStreamEvent::ToolCallDelta {
                 index: active.index,

@@ -6,11 +6,17 @@ use std::{
 use serde_json::Value;
 
 use crate::{
-    runtime::stream::SseDecoderFactory, transport::SseEvent, ContentBlock, JsonObject,
+    runtime::stream::SseDecoderFactory, transport::SseEvent, ContentBlock, JsonObject, ModelError,
     ModelMessage, ModelResponse, ModelResult, ModelStreamEvent, TokenUsage, ToolCall,
 };
 
 use super::response::{decode_usage, provider_protocol_error, stop_reason};
+
+/// 畸形帧的解码诊断：保留 `Provider` 分类并附带受限摘要（仅 `[A-Za-z0-9._-]`），
+/// 使 fail-closed 的原因在错误出口可见，而不是被降级成空事件。
+fn malformed_frame_error(summary: &str) -> ModelError {
+    ModelError::protocol_with_summary(crate::ProtocolErrorKind::Provider, summary)
+}
 
 #[derive(Default)]
 struct ToolCallAccumulator {
@@ -65,9 +71,23 @@ fn decode_event(state: &Mutex<StreamState>, event: SseEvent) -> ModelResult<Vec<
         .and_then(Value::as_array)
         .and_then(|choices| choices.first())
     else {
-        return Ok(events);
+        // 无 choices 的帧只有携带 usage 对象时才是合法 usage-only 尾帧（Qwen 等适配器）；
+        // 其余帧是畸形帧，必须上报诊断而不是静默降级为空事件。
+        if value.get("usage").is_some_and(Value::is_object) {
+            return Ok(events);
+        }
+        return Err(malformed_frame_error("openai_stream_missing_choices"));
     };
-    let delta = choice.get("delta").unwrap_or(&Value::Null);
+    if !choice.is_object() {
+        return Err(malformed_frame_error("openai_stream_choice_not_object"));
+    }
+    let delta = match choice.get("delta") {
+        Some(delta) if !delta.is_object() && !delta.is_null() => {
+            return Err(malformed_frame_error("openai_stream_delta_not_object"));
+        }
+        Some(delta) => delta,
+        None => &Value::Null,
+    };
 
     if let Some(reasoning) = delta
         .get("reasoning_content")
@@ -109,12 +129,19 @@ fn decode_event(state: &Mutex<StreamState>, event: SseEvent) -> ModelResult<Vec<
                 .and_then(Value::as_str)
                 .filter(|name| !name.trim().is_empty())
                 .map(str::to_owned);
-            let arguments_delta = tool_call
-                .get("function")
-                .and_then(|function| function.get("arguments"))
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_owned();
+            // `function` 缺失（首个分片只带 id/name）与 `arguments` 空串是合法 wire 形态；
+            // 只有显式类型错误才上升为诊断，避免把缺参数误判成畸形帧。
+            let function = tool_call.get("function");
+            if function.is_some_and(|function| !function.is_object()) {
+                return Err(malformed_frame_error("openai_stream_function_not_object"));
+            }
+            let arguments_delta = match function.and_then(|function| function.get("arguments")) {
+                Some(Value::String(arguments)) => arguments.clone(),
+                Some(arguments) if !arguments.is_null() => {
+                    return Err(malformed_frame_error("openai_stream_arguments_not_string"));
+                }
+                _ => String::new(),
+            };
             if let Some(id) = &id {
                 accumulator.id = Some(id.clone());
             }

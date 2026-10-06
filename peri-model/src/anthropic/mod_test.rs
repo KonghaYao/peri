@@ -1405,3 +1405,73 @@ async fn test_stream_final_usage_overflow_rejected() {
         Some(crate::ProtocolErrorKind::Provider)
     );
 }
+
+/// [回归测试] P1-4：`input_json_delta` 缺少 `partial_json` 或类型错都是解码诊断，
+/// 不得发出空分片让残缺参数继续累积；诊断须随可见中断一起上报。
+#[tokio::test]
+async fn stream_tool_partial_json_type_error_is_diagnosed_without_partial_delta() {
+    for (delta, expected_summary) in [
+        (
+            "{\"type\":\"input_json_delta\",\"partial_json\":{\"path\":\"a.rs\"}}",
+            "anthropic_stream_partial_json_not_string",
+        ),
+        (
+            "{\"type\":\"input_json_delta\"}",
+            "anthropic_stream_partial_json_missing",
+        ),
+    ] {
+        let transport = Arc::new(FakeTransport::with_response(FakeResponse {
+            status: 200,
+            request_id: None,
+            body: FakeBody::Chunks(vec![Ok([
+                "event: message_start\ndata: {\"message\":{\"id\":\"body-id\"}}\n\n".to_string(),
+                "event: content_block_start\ndata: {\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"tool-1\",\"name\":\"Read\"}}\n\n".to_string(),
+                format!("event: content_block_delta\ndata: {{\"index\":0,\"delta\":{delta}}}\n\n"),
+                "event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"tool_use\"}}\n\n".to_string(),
+                "event: message_stop\ndata: {}\n\n".to_string(),
+            ]
+            .join("")
+            .into_bytes())]),
+        }));
+        let model =
+            AnthropicModel::with_transport(config_without_protocol_retry(), transport.clone());
+        let events = model
+            .stream(
+                ModelRequest::new(vec![ModelMessage::user_text("go")]),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("stream")
+            .collect::<Vec<_>>()
+            .await;
+
+        let tool_deltas = events
+            .iter()
+            .filter_map(|event| match event {
+                Ok(ModelStreamEvent::ToolCallDelta {
+                    arguments_delta, ..
+                }) => Some(arguments_delta.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            tool_deltas,
+            vec![""],
+            "只有 content_block_start 的身份分片可见，畸形参数分片不得进入 ToolCallDelta：{events:?}"
+        );
+        let Some(Ok(ModelStreamEvent::Interrupted { error, .. })) = events.last() else {
+            panic!("畸形 partial_json 必须终止为携带诊断的中断：{events:?}");
+        };
+        let protocol = error.protocol_error().expect("provider protocol error");
+        assert_eq!(protocol.kind(), crate::ProtocolErrorKind::Provider);
+        assert_eq!(
+            protocol.summary(),
+            Some(expected_summary),
+            "解码摘要必须可读：{protocol}"
+        );
+        assert!(events
+            .iter()
+            .all(|event| !matches!(event, Ok(ModelStreamEvent::Completed(_)))));
+        assert_eq!(transport.calls(), 1, "已产生可见分片的请求不得重放");
+    }
+}
