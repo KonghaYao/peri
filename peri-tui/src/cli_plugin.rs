@@ -2,9 +2,39 @@
 
 use anyhow::Result;
 use chrono::Local;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::cli_args::PluginScope;
+
+struct PluginScopeContext {
+    scope: peri_acp_types::plugin::InstallScope,
+    project_dir: Option<PathBuf>,
+}
+
+fn plugin_scope_context(
+    scope_str: Option<&str>,
+    current_dir: impl FnOnce() -> std::io::Result<PathBuf>,
+) -> Result<PluginScopeContext> {
+    let scope: PluginScope = scope_str
+        .unwrap_or("user")
+        .parse()
+        .map_err(|error: String| anyhow::anyhow!("无效的 scope: {error}"))?;
+    let project_dir = match scope {
+        PluginScope::User => None,
+        PluginScope::Project | PluginScope::Local => {
+            let directory = current_dir()?;
+            anyhow::ensure!(
+                directory.is_absolute() && directory.is_dir(),
+                "plugin execution directory must be an existing absolute directory"
+            );
+            Some(directory)
+        }
+    };
+    Ok(PluginScopeContext {
+        scope: scope.into(),
+        project_dir,
+    })
+}
 
 struct PluginListEntry {
     id: String,
@@ -77,7 +107,7 @@ pub fn run_plugin_list(json: bool) -> Result<()> {
 }
 
 pub async fn run_plugin_install(plugin_name: &str, scope_str: &str) -> Result<()> {
-    let scope: PluginScope = scope_str.parse().map_err(|e: String| anyhow::anyhow!(e))?;
+    let context = plugin_scope_context(Some(scope_str), std::env::current_dir)?;
     let claude_dir = dirs_next::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join(".claude");
@@ -95,10 +125,10 @@ pub async fn run_plugin_install(plugin_name: &str, scope_str: &str) -> Result<()
     let result = peri_middlewares::plugin::install_plugin(
         name,
         &marketplace,
-        scope.into(),
+        context.scope,
         &cache_dir,
         &claude_dir,
-        None,
+        context.project_dir.as_deref(),
     )
     .await
     .map_err(|e| anyhow::anyhow!("安装失败: {e}"))?;
@@ -110,14 +140,20 @@ pub async fn run_plugin_install(plugin_name: &str, scope_str: &str) -> Result<()
     Ok(())
 }
 
-pub async fn run_plugin_uninstall(plugin_id: &str, _scope_str: Option<&str>) -> Result<()> {
+pub async fn run_plugin_uninstall(plugin_id: &str, scope_str: Option<&str>) -> Result<()> {
+    let context = plugin_scope_context(scope_str, std::env::current_dir)?;
     let claude_dir = dirs_next::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join(".claude");
 
-    peri_middlewares::plugin::uninstall_plugin(plugin_id, &claude_dir, None)
-        .await
-        .map_err(|e| anyhow::anyhow!("卸载失败: {e}"))?;
+    peri_middlewares::plugin::uninstall_plugin(
+        plugin_id,
+        context.scope,
+        &claude_dir,
+        context.project_dir.as_deref(),
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("卸载失败: {e}"))?;
 
     println!("已卸载: {}", plugin_id);
     Ok(())
@@ -278,16 +314,18 @@ pub async fn run_marketplace_update(name: &str) -> Result<()> {
 // ── plugin enable ───────────────────────────────────────────────────────
 
 pub fn run_plugin_enable(plugin_id: &str, scope_str: &str) -> Result<()> {
-    let scope: PluginScope = scope_str
-        .parse()
-        .map_err(|e: String| anyhow::anyhow!("无效的 scope: {e}"))?;
-    let install_scope: peri_acp_types::plugin::InstallScope = scope.into();
+    let context = plugin_scope_context(Some(scope_str), std::env::current_dir)?;
     let claude_dir = dirs_next::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join(".claude");
 
-    peri_middlewares::plugin::update_enabled_plugins(plugin_id, install_scope, &claude_dir, None)
-        .map_err(|e| anyhow::anyhow!("启用插件失败: {e}"))?;
+    peri_middlewares::plugin::update_enabled_plugins(
+        plugin_id,
+        context.scope,
+        &claude_dir,
+        context.project_dir.as_deref(),
+    )
+    .map_err(|e| anyhow::anyhow!("启用插件失败: {e}"))?;
 
     println!("已启用插件: {} (scope: {})", plugin_id, scope_str);
     Ok(())
@@ -296,19 +334,16 @@ pub fn run_plugin_enable(plugin_id: &str, scope_str: &str) -> Result<()> {
 // ── plugin disable ──────────────────────────────────────────────────────
 
 pub fn run_plugin_disable(plugin_id: &str, scope_str: &str) -> Result<()> {
-    let scope: PluginScope = scope_str
-        .parse()
-        .map_err(|e: String| anyhow::anyhow!("无效的 scope: {e}"))?;
-    let install_scope: peri_acp_types::plugin::InstallScope = scope.into();
+    let context = plugin_scope_context(Some(scope_str), std::env::current_dir)?;
     let claude_dir = dirs_next::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join(".claude");
 
     peri_middlewares::plugin::remove_from_enabled_plugins(
         plugin_id,
-        &install_scope,
+        &context.scope,
         &claude_dir,
-        None,
+        context.project_dir.as_deref(),
     )
     .map_err(|e| anyhow::anyhow!("禁用插件失败: {e}"))?;
 
@@ -319,16 +354,21 @@ pub fn run_plugin_disable(plugin_id: &str, scope_str: &str) -> Result<()> {
 // ── plugin update ───────────────────────────────────────────────────────
 
 pub async fn run_plugin_update(plugin_id: &str, scope_str: &str) -> Result<()> {
-    let scope: PluginScope = scope_str
-        .parse()
-        .map_err(|e: String| anyhow::anyhow!("无效的 scope: {e}"))?;
-    let _install_scope: peri_acp_types::plugin::InstallScope = scope.into();
+    let context = plugin_scope_context(Some(scope_str), std::env::current_dir)?;
     let claude_dir = dirs_next::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join(".claude");
     let cache_dir = peri_middlewares::plugin::config::marketplaces_cache_dir();
 
-    match peri_middlewares::plugin::update_plugin(plugin_id, &cache_dir, &claude_dir, None).await {
+    match peri_middlewares::plugin::update_plugin(
+        plugin_id,
+        context.scope,
+        &cache_dir,
+        &claude_dir,
+        context.project_dir.as_deref(),
+    )
+    .await
+    {
         Ok(installed) => {
             println!("已更新插件: {} v{}", installed.id, installed.version);
         }
@@ -430,6 +470,10 @@ pub async fn run_plugin_cleanup(claude_dir: &Path) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "cli_plugin_test.rs"]
+mod tests;
 
 // ── plugin search ────────────────────────────────────────────────────────
 

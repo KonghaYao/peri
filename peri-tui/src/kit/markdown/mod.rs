@@ -22,6 +22,7 @@ mod code_block;
 mod convert;
 mod heading;
 mod list;
+mod memory;
 mod scan;
 mod span_style;
 mod table;
@@ -358,6 +359,19 @@ pub struct MarkdownRenderCache {
 }
 
 impl MarkdownRenderCache {
+    /// Deterministic retained-heap budget estimate, not allocator usage or RSS.
+    ///
+    /// Counts String/Vec capacities and recursively owned parser/render payloads,
+    /// including spare slots after `clear`. Each distinct stable Arc allocation is
+    /// charged once within this cache, in full even when shared with other owners;
+    /// its Vec header and estimated two-usize reference-count header are included.
+    /// Borrowed Cow text, inline cache storage, allocator metadata/rounding, global
+    /// highlight caches, external rendered tails and cfg(test)-only legacy state
+    /// are excluded. Arithmetic saturates rather than wrapping the budget.
+    pub fn retained_bytes(&self) -> usize {
+        memory::cache_retained_bytes(self)
+    }
+
     /// 是否有有效的稳定前缀（可复用）。
     #[cfg(test)]
     fn has_stable_prefix(&self) -> bool {
@@ -527,3 +541,7 @@ mod cache_lifecycle_tests;
 #[cfg(test)]
 #[path = "boundary_test.rs"]
 mod boundary_tests;
+
+#[cfg(test)]
+#[path = "memory_test.rs"]
+mod memory_tests;

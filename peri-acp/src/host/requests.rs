@@ -21,6 +21,7 @@ use super::{AcpServerConfig, SessionState};
 
 pub(crate) mod acp_mcp;
 pub(crate) mod config_options;
+mod cron;
 mod mcp_oauth;
 mod plugin;
 pub(crate) mod resource_owners;
@@ -139,16 +140,19 @@ pub(crate) async fn handle_request(
         }
         "plugin/install" => plugin::handle_install(params, cfg, sessions, transport).await,
         "plugin/uninstall" => plugin::handle_uninstall(params, cfg, sessions, transport).await,
-        "plugin/toggle" => plugin::handle_toggle(params, cfg, transport).await,
+        "plugin/toggle" => plugin::handle_toggle(params, cfg, sessions, transport).await,
         "plugin/search" => plugin::handle_search(params, cfg, transport).await,
         "plugin/list" => plugin::handle_session_snapshot(cfg),
-        "plugin/update" => plugin::handle_update(params, cfg, transport).await,
+        "plugin/update" => plugin::handle_update(params, cfg, sessions, transport).await,
         "session/rename" => session_lifecycle::handle_rename(params, cfg, transport).await,
         "session/rewind-candidates" => rewind::handle_rewind_candidates(params, cfg, sessions),
         "session/rewind-preview" => rewind::handle_rewind_preview(params, cfg, sessions).await,
         "session/rewind" => rewind::handle_rewind(params, cfg, sessions, transport).await,
+        "marketplace/add" => plugin::handle_marketplace_add(params, cfg).await,
+        "marketplace/remove" => plugin::handle_marketplace_remove(params, cfg).await,
         "marketplace/refresh" => plugin::handle_refresh(params, cfg).await,
         "mcp/list" => mcp_oauth::handle_list(params, cfg),
+        "cron/list" | "cron/toggle" | "cron/remove" => cron::handle(method, params, sessions).await,
         "mcp/oauth_start" => mcp_oauth::handle_oauth_start(params, cfg),
         "mcp/oauth_callback" => mcp_oauth::handle_oauth_callback(params, cfg),
         "mcp/oauth_cancel" => mcp_oauth::handle_oauth_cancel(params, cfg),

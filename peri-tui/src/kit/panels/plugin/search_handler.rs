@@ -1,11 +1,10 @@
 use crate::components::textarea::TextAreaState;
-use crate::kit::atoms::{ACP_CLIENT_HANDLE, PluginViewTab};
+use crate::kit::atoms::PluginViewTab;
 use crate::kit::panel_mouse::is_scrollbar_column;
 use ratatui_kit::crossterm::event::{Event, KeyCode, KeyEventKind, MouseButton, MouseEventKind};
 use ratatui_kit::prelude::{EventResult, State};
 use ratatui_kit::ratatui::layout::Rect;
 
-use super::data::{refresh_discover_cache, refresh_marketplace_cache};
 use super::{close_panel, discover::DiscoverState};
 
 #[allow(clippy::too_many_arguments)]
@@ -19,9 +18,13 @@ pub(super) fn handle_search_event(
     marketplace_detail_action: State<usize>,
     confirm_action: State<Option<String>>,
     operation_loading: State<Option<String>>,
+    operation: State<super::operation::OperationState>,
     add_marketplace_input: State<TextAreaState>,
     add_marketplace_active: State<bool>,
 ) -> EventResult {
+    if super::operation::handle_pending_event(&event, operation) {
+        return EventResult::Consumed;
+    }
     // 鼠标：add_marketplace 输入与 Discover tab（click as enter）
     if let Event::Mouse(mouse) = event {
         // 详情/confirm 模式由 Normal handler 负责命中
@@ -46,7 +49,7 @@ pub(super) fn handle_search_event(
                     event,
                     Some(area),
                     discover,
-                    operation_loading,
+                    operation,
                 );
             }
         }
@@ -69,7 +72,7 @@ pub(super) fn handle_search_event(
         if operation_loading.read().is_some() {
             return EventResult::Ignored;
         }
-        return super::discover_handler::handle_event(event, area, discover, operation_loading);
+        return super::discover_handler::handle_event(event, area, discover, operation);
     }
 
     // ── ESC handling: detail exit / confirm cancel / close panel ──
@@ -103,61 +106,10 @@ pub(super) fn handle_search_event(
             KeyCode::Enter => {
                 let url = add_marketplace_input.read().text.clone();
                 if !url.is_empty() {
-                    let result = peri_middlewares::plugin::parse_marketplace_input(&url);
-                    match result {
-                        Ok(source) => {
-                            let name =
-                                peri_middlewares::plugin::MarketplaceManager::extract_name(&source);
-                            // 将同步磁盘 I/O 移到 dedicated blocking thread，
-                            // 避免阻塞 TUI 主事件循环。
-                            let source_for_blocking = source.clone();
-                            let name_for_refresh = name.clone();
-                            tokio::spawn(async move {
-                                let added = tokio::task::spawn_blocking(move || {
-                                    let mut marketplaces =
-                                        peri_middlewares::plugin::load_known_marketplaces(None)
-                                            .unwrap_or_default();
-                                    let already_exists = marketplaces
-                                        .iter()
-                                        .any(|km| km.source == source_for_blocking);
-                                    if already_exists {
-                                        return false;
-                                    }
-                                    marketplaces.push(peri_middlewares::plugin::KnownMarketplace {
-                                        source: source_for_blocking,
-                                        install_location: String::new(),
-                                        auto_update: false,
-                                        last_updated: String::new(),
-                                    });
-                                    let _ = peri_middlewares::plugin::save_known_marketplaces(
-                                        &marketplaces,
-                                        None,
-                                    );
-                                    refresh_discover_cache();
-                                    refresh_marketplace_cache();
-                                    true
-                                })
-                                .await
-                                .unwrap();
-                                if added && let Some(cl) = ACP_CLIENT_HANDLE.get() {
-                                    let client = cl.clone();
-                                    let sid = client.current_session_id().unwrap_or_default();
-                                    let _ = client
-                                        .send_raw_request(
-                                            "marketplace/refresh",
-                                            serde_json::json!({
-                                                "name": name_for_refresh,
-                                                "sessionId": sid,
-                                            }),
-                                        )
-                                        .await;
-                                }
-                            });
-                        }
-                        Err(e) => {
-                            tracing::warn!(target: "plugin-panel", error = %e, "invalid marketplace input");
-                        }
-                    }
+                    super::operation::dispatch(
+                        super::operation::PluginOperation::marketplace_add(url),
+                        operation,
+                    );
                 }
                 *add_marketplace_input.write() = TextAreaState::default();
                 *add_marketplace_active.write() = false;

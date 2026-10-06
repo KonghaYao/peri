@@ -886,6 +886,13 @@ panel-betas-nav-hint =   ↑/↓::navigate  Enter::open  Esc::close
 
 # ---- Cron Panel ----
 panel-cron-stats =   { $configured } configured, { $enabled } enabled
+service-projection-startup = Showing startup plugins and hooks; session MCP and cron data require an active session.
+service-projection-no-client = Service data is unavailable: no ACP client is connected.
+service-projection-session-unavailable = Service data is unavailable while the session is changing or has not become active.
+service-projection-failed = Service data could not be refreshed: { $detail }
+panel-cron-action-failed = Cron operation failed: { $detail }
+panel-cron-no-client = Cron operations require a connected ACP client.
+panel-cron-no-session = Cron operations require an active session.
 panel-cron-confirm-hint =   Enter::confirm  Esc::close
 panel-cron-nav-hint =   ↑/↓::navigate  Enter::toggle  Esc::close
 panel-cron-empty =   No cron tasks configured
@@ -1041,6 +1048,12 @@ panel-plugin-search-error = Search failed: { $error }
 panel-plugin-search-invalid-response = Invalid search response
 panel-plugin-operation-complete = operation complete
 panel-plugin-operation-failed = operation failed
+panel-plugin-operation-status = operation status
+panel-plugin-management-unsupported = This plugin cannot be managed in an unambiguous writable installation scope.
+panel-plugin-operation-wait-hint = Esc stops client waiting only
+panel-plugin-operation-wait-cancelled = Client waiting stopped. Server outcome unknown; check state before retrying.
+panel-plugin-operation-timed-out = Client wait timed out. Server outcome unknown; check state before retrying.
+panel-plugin-operation-session-changed = Session changed. Server outcome unknown; check state before retrying.
 panel-plugin-discover-press-enter = Press Enter to search
 panel-plugin-action-install = Install
 panel-plugin-list-count = { $count } plugins found

@@ -884,6 +884,13 @@ panel-betas-nav-hint =   ↑/↓::navigate  Enter::open  Esc::close
 
 # ---- Cron Panel ----
 panel-cron-stats =   { $configured } 个已配置，{ $enabled } 个已启用
+service-projection-startup = 当前显示启动配置的插件与 Hooks；会话 MCP 和定时任务数据需要活跃会话。
+service-projection-no-client = 服务数据不可用：未连接 ACP 客户端。
+service-projection-session-unavailable = 会话正在切换或尚未就绪，服务数据暂不可用。
+service-projection-failed = 服务数据刷新失败：{ $detail }
+panel-cron-action-failed = 定时任务操作失败：{ $detail }
+panel-cron-no-client = 定时任务操作需要连接 ACP 客户端。
+panel-cron-no-session = 定时任务操作需要活跃会话。
 panel-cron-confirm-hint =   Enter::confirm  Esc::close
 panel-cron-nav-hint =   ↑/↓::navigate  Enter::toggle  Esc::close
 panel-cron-empty =   暂未配置定时任务
@@ -1039,6 +1046,12 @@ panel-plugin-search-error = 搜索失败: { $error }
 panel-plugin-search-invalid-response = 搜索响应格式无效
 panel-plugin-operation-complete = 操作完成
 panel-plugin-operation-failed = 操作失败
+panel-plugin-operation-status = 操作状态
+panel-plugin-management-unsupported = 此插件无法在明确且可写的安装作用域中进行管理操作。
+panel-plugin-operation-wait-hint = Esc 仅停止客户端等待
+panel-plugin-operation-wait-cancelled = 已停止客户端等待。服务端结果未知，请核对状态后再决定是否重试。
+panel-plugin-operation-timed-out = 客户端等待超时。服务端结果未知，请核对状态后再决定是否重试。
+panel-plugin-operation-session-changed = 会话已变更。服务端结果未知，请核对状态后再决定是否重试。
 panel-plugin-discover-press-enter = 按 Enter 搜索
 panel-plugin-action-install = 安装
 panel-plugin-list-count = 发现 { $count } 个插件

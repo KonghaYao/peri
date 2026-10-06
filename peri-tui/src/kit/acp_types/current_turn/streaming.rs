@@ -128,6 +128,9 @@ impl CurrentTurn {
             }
             return;
         }
+        if self.committed {
+            return;
+        }
         self.flush_text_segment();
         let idx = self.tool_cards.len();
         self.segments.push(TurnSegment::Tool { tool_idx: idx });
@@ -136,7 +139,7 @@ impl CurrentTurn {
         if is_agent_launcher {
             self.adopt_pending_subagent_group(idx, self.segments.len() - 1);
         }
-        self.active = true;
+        self.active = !self.deactivated;
         self.invalidate_cache();
     }
 
@@ -145,18 +148,12 @@ impl CurrentTurn {
     /// Returns `true` only when this call transitions the matching card from running
     /// to finished. Unknown and duplicate end events are no-ops.
     pub fn end_tool(&mut self, tool_id: &str, output: String, is_error: bool) -> bool {
-        let Some(t) = self
-            .tool_cards
-            .iter_mut()
-            .find(|t| t.tool_id == tool_id && t.output_summary.is_none())
-        else {
+        let Some(t) = self.tool_cards.iter_mut().find(|t| t.tool_id == tool_id) else {
             return false;
         };
-        t.output_summary = Some(output);
-        t.is_error = is_error;
-        // [G-started_at] 完成时刻冻结时长——running→completed 不重建 accumulator，
-        // completed 显示用同源 started_at 的冻结差值（不再增长）。
-        t.completed_duration_ms = Some(peri_time::elapsed_since(t.started_at).as_millis() as u64);
+        if !t.finish(output, is_error) {
+            return false;
+        }
         self.invalidate_cache();
         true
     }

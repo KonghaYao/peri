@@ -72,10 +72,23 @@ TUI 的所有主动行为通过标准 ACP JSON-RPC 方法调用。不定义自�
 | 方法 | 参数 | 返回值 | 语义 |
 |------|------|--------|------|
 | `plugin/search` | `{ query, sessionId? }` | `{ results }` | 搜索插件市场 |
-| `plugin/install` | `{ name, marketplace, scope?, sessionId? }` | `{}` | 安装插件 |
-| `plugin/uninstall` | `{ name, sessionId? }` | `{}` | 卸载插件 |
-| `plugin/toggle` | `{ name, enabled, sessionId? }` | `{}` | 启用/禁用插件 |
-| `plugin/update` | `{ pluginId, sessionId? }` | `{ success, plugin }` | 更新插件（结果同时推送 `plugin-action-result` / `plugin-snapshot` 通知） |
+| `marketplace/add` | `{ source, sessionId? }` | `{ success, name }` | 宿主全局 marketplace catalog 注册与刷新，经 PluginManagerPort 持久化；读取、刷新或保存失败返回 -32603 并记录日志 |
+| `marketplace/remove` | `{ name, sessionId? }` | `{ success }` | 宿主全局 marketplace catalog 删除，经 PluginManagerPort 持久化并清理宿主缓存；不删除本地源目录；读取或保存失败返回 -32603 并记录日志 |
+| `marketplace/refresh` | `{ name, sessionId? }` | `{ success, pluginCount }` | 按宿主 catalog 名称刷新；失败返回 -32603 |
+| `plugin/list` | `{ sessionId? }` | `{ plugins, hooks }` | 当前会话装配插件投影，不扩展为宿主所有安装插件；来源与可写安装范围分开 |
+| `plugin/install` | `{ name, marketplace, scope?, sessionId? }` | `{ success, plugin }` | scope 仅 user/project/local，缺省 user；未知值或非字符串返回 -32602；project/local 必须取有效 session 的绝对执行目录 |
+| `plugin/uninstall` | `{ pluginId, scope?, sessionId? }` | `{ success }` | scope 缺省 user；显式安装范围贯穿生产端口与 installer，以 ID + scope + projectPath 精确匹配唯一记录；校验在记录修改前完成 |
+| `plugin/toggle` | `{ pluginId, enable, scope, sessionId? }` | `{ success }` | 宿主统一持久化启用/禁用；project/local scope 必须取有效 session 的执行目录，不回退用户级配置 |
+| `cron/list` | `{ sessionId }` | `{ jobs }` | 查询实际会话环境的定时任务；无能力显式报错 |
+| `cron/toggle` | `{ sessionId, id }` | `{ id, success }` | 切换会话环境中的任务；校验 session/environment/workspace scope |
+| `cron/remove` | `{ sessionId, id }` | `{ id, success }` | 删除会话环境中的任务；不存在或不可用显式失败 |
+| `plugin/update` | `{ pluginId, scope?, sessionId? }` | `{ success, plugin }` | scope 缺省 user；与卸载共用精确安装身份，不根据 session cwd 猜范围；结果同时推送 `plugin-action-result` / `plugin-snapshot` 通知 |
+
+`marketplace/add`、`marketplace/remove`、`marketplace/refresh` 操作宿主全局 catalog，不按 project 或 session 重定位配置；可选 `sessionId` 仅供客户端响应 ticket 生命周期关联。TUI 经统一 PluginOperation 展示 pending/error，成功响应后刷新本地只读浏览缓存；服务端错误不被吞掉。
+
+`plugin/list` 的 `source="session"` 只表示展示来源，不能作为写入 scope。`install_scope` 从匹配插件 ID（name + marketplace）及安装根的真实记录核实，只返回 user/project/local 或 null；`toggle_supported` 表示是否核实可写范围，不能确认（含同根多范围歧义、无安装记录的 managed 来源）时为 false，并提供 `management_error`。宿主 snapshot 的 `load_error` 保留为独立加载诊断，不用管理错误覆盖；不返回 pluginConfigs 或 MCP 配置正文。toggle 的生产端口还核对请求 scope/cwd 对应的安装记录，不能通过手填 user scope 获得未记录来源的写权限。
+
+ACP install/update/uninstall 的 project/local 目录只来自受信 session 状态，不读取请求自带 project_dir，不回落进程 cwd。所有管理动作使用明确 InstallScope；update/uninstall 的外部请求缺省 user。CLI install/update/uninstall/enable/disable 统一解析 scope（缺省 user），仅 project/local 获取 CLI 进程真实 current_dir 作为 host-local 受信上下文；无法获取或目录无效时失败，不回退 user。user 范围的 projectPath 固定为空，无 session 可用，即使带 project session 也不选择项目记录；project/local 仅匹配受信 cwd 下同 ID、同 scope 的记录，不回退其他范围。同 ID 的 user/project 或 project/local 记录可以并存，选择一条不会修改另一条的安装记录、配置或独立 root。精确身份无记录或出现多条匹配均 fail closed；project/local 卸载不删除用户 pluginConfigs。目录缺失/非绝对、失效 session、关闭中 session 在复制或修改安装记录前失败；此校验不是跨文件事务保证，后续 I/O 失败仍可能留下部分成果，MCP 配置变更仍需下次装配。
 
 ### 2.5 后台任务、工作流与 rewind
 

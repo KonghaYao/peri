@@ -33,6 +33,7 @@ use self::helpers::{format_completed_duration, place_meta, prefixed_cont_line};
 pub(crate) use self::interaction::InteractionLayout;
 use self::interaction::render_ask_user_block_lines;
 use self::reasoning::render_reasoning_block;
+pub(crate) use self::reasoning::render_running_reasoning_header;
 pub(crate) use self::semantic::semantic_line_text;
 #[cfg(test)]
 use self::semantic::strip_visual_prefix;
@@ -66,13 +67,13 @@ pub(crate) struct ImageLineInfo {
     /// slot 内逻辑行索引（wrap_map 中该 meta 行的 visual_start）。
     pub(super) logical_idx: usize,
     /// 展示路径（T5 canonicalize 后；失败时为原始文本）——open 目标 + hover 显示。
-    pub(super) path: String,
+    pub(crate) path: String,
     /// 受管理目录内（~/.peri/images）→ 自动预览候选；手工路径 → 仅文本
     /// （差异在 T7 预览，本任务显示层两者一致，§6.1 Q6）。
     pub(super) managed: bool,
     /// 重建期算好的大小文案（B/KB/MB 或 missing）——hover 渲染复用，
     /// hover 时不再 stat（§4.4 stat 时机取舍）。
-    pub(super) size_text: String,
+    pub(crate) size_text: String,
 }
 
 /// md 复制按钮的最小内容长度（字符数，`chars().count()` 口径——与复制反馈
@@ -155,7 +156,7 @@ pub(crate) fn vm_to_lines_cached(
     vm_to_lines_cached_with_layout(vm, grid, md_cache, None, render_copy_button)
 }
 
-pub(super) fn vm_to_lines_cached_with_layout(
+pub(crate) fn vm_to_lines_cached_with_layout(
     vm: &TuiRenderUnit,
     grid: &GridSpec,
     md_cache: &mut crate::kit::markdown::MarkdownRenderCache,

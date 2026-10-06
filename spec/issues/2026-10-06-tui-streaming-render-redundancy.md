@@ -131,6 +131,10 @@
 
 ## 四、裁决与实施
 
+2026-10-06 用户指定的 [P0 TUI 架构优化](2026-10-06-p0-tui-architecture-optimization.md)
+已定稿并独占承接 F4 的重型历史缓存预算、F5 的增量索引/动画分离、F10 的共享缓存及详情聚合余项。
+本 issue 保留已实施记录、原现场验收与其他余项；迁出工作不在此维护第二套实施清单。
+
 保留后台 subagent 能力及实时详情，不删除工具或协议能力。Astra 核实各成本点仍存在，同时纠正以下论据：普通连续流式合帧为 50ms，Immediate/barrier 不受此上限约束；atom 通知不等于逐 chunk 必画一帧；F2 的固定「≥2×n」、F4 的常驻倍数均未被分配计量证明；运行中工具输出为空且不解析 diff，F8 不能归因为长 stdout/diff；ConvertState 为生产转换使用，不能整体删除。
 
 | 条目 | 优先级 / 实施状态 | 当前边界与验收 |
@@ -138,13 +142,13 @@
 | F1 | P0 / 已实施 | 独占 BgStream 累积 + 增量 hash；50ms 独立后台 deadline，不逐 chunk 写发布 atom；工具/任务终态/receiver close flush，重置失效。publication 仍物化完整快照，未宣称消除其 O(n)。 |
 | F2 | P0 / 冗余 COW 已修，必要物化保留 | assistant payload 改为 Arc；im 快照克隆、拼接和节点 COW 共享完整正文/推理，fold/终态只在确有变化时显式复制。BgStream 仍独占缓冲，避免退回逐 chunk COW。source→VM owned trailing 仍每次增长物化 O(n)，未宣称完全消除。 |
 | F3 | P0 / 已闭合 fence 已分片，复杂尾部保留 | 单次逐行扫描识别 backtick/tilde fence，跨内部空行冻结已闭合代码块，后续增长只解析/物化后缀，stable rendered chunk 共享 Arc；图片尾部恢复全局字节偏移。保留引用链接后向解析、列表、表格、未闭合 fence 的保守尾部及 terminal full parse；其增长仍 O(n)，前缀一致性比较亦未消除。 |
-| F4 | P0 / 确定部分已实施 | terminal 丢弃 chunk_source buffer（不只是 clear），wrap cache 接收 owned lines 后直接移动进 Arc，取消额外深拷贝。可见窗口/LRU 未实施，需独立验证滚动高度、选择与复制。 |
-| F5 | P0 / 确定部分已实施 | 三组逐帧扫描缓冲复用；reasoning 仅秒级时长刷新，不再强制 100ms 重建；工具/subagent 保留动画。O(N) 扫描与动画 chrome/content 分离未关闭。 |
+| F4 | P0 / 确定部分已实施 | terminal 丢弃 chunk_source buffer（不只是 clear），wrap cache 接收 owned lines 后直接移动进 Arc，取消额外深拷贝。重型历史缓存预算余项迁至架构 P0 工作包 C。 |
+| F5 | P0 / 确定部分已实施 | 三组逐帧扫描缓冲复用；reasoning 仅秒级时长刷新，不再强制 100ms 重建；工具/subagent 保留动画。增量索引与动画 chrome/content 分离余项迁至架构 P0 工作包 A。 |
 | F6 | P0 / 已实施 | 字节发布游标，扫描新增 chunk 并有限回看跨 chunk 标记，保留 Unicode 正文和分段边界。非默认 Block 模式专项回归。 |
 | F7 | P0 / 已实施 | 删除 CLEAR_DEBUG 临时 info instrumentation 与专用 helper。 |
 | F8 | P0 / 已实施 | 未变工具卡不按 publication 重新构建/hash；按秒更新时间并保留 fold；流式 format writer 直接 hash，不分配完整拼接 String。 |
 | F9 | P0 / 已实施 | 高亮命中返回 Arc，miss 只保存一份；32 条与 4 MiB 高亮 payload 双预算，超大结果不入缓存。最终加背景/前缀的输出仍需要一次物化；有界跨会话复用保留。 |
-| F10 | P0 / 确定部分已实施 | 详情面板逐 VM 持久缓存，绑定 occurrence/内容/宽度/主题/语言/动画；旧 parse_markdown_cached 与旧字段只编入测试，生产 ConvertState 保留。测试 oracle 的最终删除/迁移未做。 |
+| F10 | P0 / 确定部分已实施 | 详情面板逐 VM 持久缓存，绑定 occurrence/内容/宽度/主题/语言/动画；旧 parse_markdown_cached 与旧字段只编入测试，生产 ConvertState 保留。共享缓存与详情聚合余项迁至架构 P0 工作包 B；测试 oracle 的最终删除/迁移仍归本 issue。 |
 
 行为/缓存回归不替代 §五 的现场 CPU/RSS、复制与解析计量。本 issue 在余项与现场验收完成前保持 active，不标记整体已解决。
 

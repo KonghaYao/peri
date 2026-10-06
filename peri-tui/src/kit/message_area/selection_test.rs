@@ -730,10 +730,22 @@ fn slot_index_fixture(slot_count: usize, lines_per_slot: usize) -> SlotIndex {
 #[test]
 fn test_slot_index_visual_and_logical_lookup_match_flatten_reference() {
     let index = slot_index_fixture(10, 7);
+    let maps: Vec<_> = (0..10)
+        .map(|slot| {
+            let lines = index.materialize(slot).unwrap();
+            build_wrap_map(
+                &(0..7)
+                    .map(|local| lines.line(local).unwrap().clone())
+                    .collect::<Vec<_>>(),
+                8,
+            )
+            .1
+        })
+        .collect();
     let flattened = concat_wrap_maps(
         &(0..10)
             .map(|slot| {
-                let map = index.wrap_maps[slot].as_slice();
+                let map = maps[slot].as_slice();
                 (map, slot * 7, slot)
             })
             .collect::<Vec<_>>(),
@@ -812,11 +824,11 @@ fn test_slot_index_equivalence_matrix_covers_empty_and_varied_wraps() {
             slots.push(Arc::new(lines));
             maps.push(Arc::new(map));
         }
-        let index = SlotIndex::new(slots, maps);
+        let index = SlotIndex::new(slots, maps.clone());
         let flattened = concat_wrap_maps(
             &(0..slot_count)
                 .map(|slot| {
-                    let map = index.wrap_maps[slot].as_slice();
+                    let map = maps[slot].as_slice();
                     (map, slot * lines_per_slot, slot)
                 })
                 .collect::<Vec<_>>(),
@@ -895,8 +907,7 @@ fn test_slot_lines_composite_shares_large_stable_part_without_flattening() {
 fn test_slot_index_scales_by_slots_not_logical_lines() {
     for slots in [10usize, 100, 1000] {
         let index = slot_index_fixture(slots, 20);
-        assert_eq!(index.logical_prefix.len(), slots + 1);
-        assert_eq!(index.visual_prefix.len(), slots + 1);
+        assert_eq!(index.slot_count(), slots);
         assert_eq!(index.total_logical(), slots * 20);
     }
 }

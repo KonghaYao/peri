@@ -7,7 +7,7 @@
 //!
 //! `App` 含 TextArea 等非 Send 字段，无法跨 tokio task 共享。本任务持的是
 //! `ServiceRegistry` 中已经 Arc 化的共享字段（ACP client / peri_config /
-//! permission_mode / cron / mcp_pool），它们天然 Send+Sync，可安全跨越 task 边界。
+//! permission_mode），活动会话资源仅通过 ACP 投影读取。
 //!
 //! ## 派生而非直读
 //!
@@ -32,10 +32,10 @@ use crate::kit::atoms::{
     THREAD_LIST_HAS_MORE, THREAD_LIST_PAGE_COUNT, THREAD_LIST_PAGE_SIZE, ThreadBrowserScope,
 };
 use crate::kit::atoms::{
-    ACTIVE_SESSION_ID, CRON_JOBS, CURRENT_SESSION_TITLE, CronJobSummary, FILE_LIST, HOOK_LIST,
-    Handle, HookSummary, MCP_SERVERS, MEMORY_LIST, McpInitPhase, McpServerSummary,
-    McpStatusSnapshot, MemoryEntry, PLUGIN_LIST, PROVIDER_LIST, PluginSummary, ProviderSummary,
-    SERVICE_SNAPSHOT, ServiceSnapshot, THREAD_LIST, ThreadSummary,
+    ACTIVE_SESSION_ID, CRON_JOBS, CURRENT_SESSION_TITLE, FILE_LIST, HOOK_LIST, Handle, HookSummary,
+    MCP_SERVERS, MEMORY_LIST, MemoryEntry, PLUGIN_LIST, PROVIDER_LIST, PluginSummary,
+    ProviderSummary, SERVICE_PROJECTION_ERROR, SERVICE_SNAPSHOT, ServiceSnapshot, THREAD_LIST,
+    ThreadSummary,
 };
 use peri_acp_types::workspace::{ResolvedWorkspace, ScopedThreadQuery, ThreadScope};
 
@@ -50,13 +50,6 @@ pub struct SnapshotSource {
     pub client: Option<AcpTuiClient>,
     pub peri_config: SharedPeriConfig,
     pub permission_mode: Arc<SharedPermissionMode>,
-    /// Cron/MCP 资源句柄直读（C 类豁免至 M-TUI，见批 3 tui-deps 未做项）
-    pub cron_scheduler: Arc<Mutex<peri_mcp_cron::CronScheduler>>,
-    pub mcp_pool: Option<Arc<peri_middlewares::mcp::McpClientPool>>,
-    /// MCP 初始化状态 watch receiver——`.borrow()` 即可读当前状态。
-    /// 用 `tokio::sync::watch::Receiver` 而非 `Arc<watch::Sender<...>>` 因为
-    /// receiver 自身 `Clone` 后仍指向同一 watch channel。
-    pub mcp_init_rx: Option<tokio::sync::watch::Receiver<peri_middlewares::mcp::McpInitStatus>>,
     /// 独立的进程监控器（采样进程级数据，多实例不影响正确性）。
     /// 用 `Arc<Mutex<_>>` 让 task 间共享，避免每 tick 重建。
     pub resource_monitor: Arc<Mutex<ProcessResourceMonitor>>,
@@ -129,6 +122,8 @@ async fn run_service_snapshot(
 }
 
 struct SlowSnapshotRefresh {
+    services_identity: Option<(String, u64)>,
+    services: session_services::SessionServices,
     next_file_scan: Instant,
     file_cwd: String,
     list_cwd: String,
@@ -149,6 +144,8 @@ struct SlowSnapshotRefresh {
 impl Default for SlowSnapshotRefresh {
     fn default() -> Self {
         Self {
+            services_identity: None,
+            services: session_services::SessionServices::default(),
             next_file_scan: peri_time::monotonic_now(),
             file_cwd: String::new(),
             list_cwd: String::new(),
@@ -163,6 +160,15 @@ impl Default for SlowSnapshotRefresh {
             memory_entries: Vec::new(),
             current_title_session_id: String::new(),
             current_title: String::new(),
+        }
+    }
+}
+
+impl SlowSnapshotRefresh {
+    fn reset_services(&mut self, identity: &Option<(String, u64)>) {
+        if *identity != self.services_identity {
+            self.services = session_services::SessionServices::default();
+            self.services_identity = identity.clone();
         }
     }
 }
@@ -185,28 +191,6 @@ async fn tick_once(
 
     // ── 3. permission_mode ─────────────────────────────────────────────
     let mut permission_mode = permission_mode_label(src.permission_mode.load()).to_string();
-
-    // ── 4. MCP 池状态 ────────────────────────────────────────────────────
-    let mut mcp = derive_mcp_status(&src.mcp_pool, &src.mcp_init_rx);
-
-    // ── 5. Cron 任务 ─────────────────────────────────────────────────────
-    let (cron_total, cron_enabled, cron_jobs) = {
-        let scheduler = src.cron_scheduler.lock();
-        let tasks = scheduler.list_tasks();
-        let total = tasks.len();
-        let enabled = tasks.iter().filter(|t| t.enabled).count();
-        let jobs: Vec<CronJobSummary> = tasks
-            .iter()
-            .map(|t| CronJobSummary {
-                id: t.id.clone(),
-                expression: t.expression.clone(),
-                prompt: t.prompt.clone(),
-                enabled: t.enabled,
-                next_fire: t.next_fire,
-            })
-            .collect();
-        (total, enabled, jobs)
-    };
 
     let now = peri_time::monotonic_now();
     let active_cwd = ACTIVE_EXECUTION_CWD.state().read().clone();
@@ -256,7 +240,6 @@ async fn tick_once(
         slow.next_file_scan = now + Duration::from_secs(30);
     }
     let files = slow.files.clone();
-    let mut mcp_servers: Vec<McpServerSummary> = derive_mcp_servers(&src.mcp_pool);
 
     // ── 6d. H1h: ~/.claude/memory 文件扫描 ──────────────────────────────
     // Memory 面板数据慢频刷新即可，避免空闲时每 2 秒扫 ~/.claude/memory。
@@ -275,16 +258,38 @@ async fn tick_once(
     // ── 6e. 当前会话标题：从 ACP metadata 派生（节流查询） ───────────────
     // 标题与实际运行配置一起查询；metadata 是主键查询，不运行 Git 探测。
     let session_id = ACTIVE_SESSION_ID.state().read().clone();
+    let identity = src
+        .client
+        .as_ref()
+        .and_then(AcpTuiClient::stable_session_identity);
+    slow.reset_services(&identity);
+    let projection_error;
     let (hooks, plugins) = if let Some(client) = &src.client
         && !session_id.is_empty()
+        && identity.as_ref().is_some_and(|owner| owner.0 == session_id)
     {
-        let services = session_services::query(client, &session_id).await;
-        mcp = services.mcp;
-        mcp_servers = services.mcp_servers;
-        (services.hooks, services.plugins)
+        projection_error = session_services::query(client, &session_id, &mut slow.services).await;
+        (slow.services.hooks.clone(), slow.services.plugins.clone())
     } else {
-        (src.hooks.clone(), src.plugins.clone())
+        slow.services = session_services::SessionServices::default();
+        projection_error = Some(crate::i18n::tr(if session_id.is_empty() {
+            "service-projection-startup"
+        } else if src.client.is_none() {
+            "service-projection-no-client"
+        } else {
+            "service-projection-session-unavailable"
+        }));
+        if session_id.is_empty() {
+            (src.hooks.clone(), src.plugins.clone())
+        } else {
+            (Vec::new(), Vec::new())
+        }
     };
+    let mcp = slow.services.mcp.clone();
+    let mcp_servers = slow.services.mcp_servers.clone();
+    let cron_jobs = slow.services.cron_jobs.clone();
+    let cron_total = cron_jobs.len();
+    let cron_enabled = cron_jobs.iter().filter(|job| job.enabled).count();
 
     let session_changed = session_id != slow.current_title_session_id;
     if session_changed && session_id.is_empty() {
@@ -373,6 +378,11 @@ async fn tick_once(
 
     if ACTIVE_EXECUTION_CWD.state().read().clone() != active_cwd
         || ACTIVE_SESSION_ID.state().read().clone() != session_id
+        || src
+            .client
+            .as_ref()
+            .and_then(AcpTuiClient::stable_session_identity)
+            != identity
         || THREAD_BROWSER_SCOPE.get() != scope
         || THREAD_BROWSER_ARCHIVED.get() != archived
         || THREAD_LIST_PAGE_COUNT.get() != page_count
@@ -380,6 +390,7 @@ async fn tick_once(
         return Ok(());
     }
     write_if_changed(&CURRENT_SESSION_TITLE.state(), current_title);
+    write_if_changed(&SERVICE_PROJECTION_ERROR.state(), projection_error);
     write_if_changed(&THREAD_LIST_ERROR.state(), thread_error);
     write_if_changed(&THREAD_LIST_HAS_MORE.state(), has_more);
     write_if_changed(&SERVICE_SNAPSHOT.state(), snap);
@@ -682,32 +693,6 @@ fn derive_providers(peri_config: &SharedPeriConfig) -> Vec<ProviderSummary> {
         .collect()
 }
 
-/// 从 `McpClientPool` 派生详细 MCP server 列表（H1d）。
-fn derive_mcp_servers(
-    pool: &Option<Arc<peri_middlewares::mcp::McpClientPool>>,
-) -> Vec<McpServerSummary> {
-    let Some(p) = pool else {
-        return Vec::new();
-    };
-    p.all_server_infos()
-        .into_iter()
-        .map(|info| McpServerSummary {
-            name: info.name.clone(),
-            version: info.version,
-            status: info.status_label,
-            error_summary: info.error_summary,
-            transport: info.transport_type.clone(),
-            tools_count: info.tool_count,
-            needs_auth: matches!(
-                info.oauth_status,
-                peri_middlewares::mcp::OAuthStatus::NeedsAuthorization
-            ),
-            url: info.url.clone(),
-            cache_status: info.cache_status,
-        })
-        .collect()
-}
-
 /// 扫描 ~/.claude/memory 目录（H1h）。
 ///
 /// 返回每个文件的相对路径、字节数、最后修改时间。失败时返回空 Vec。
@@ -760,43 +745,6 @@ fn scan_memory_dir() -> Vec<MemoryEntry> {
         }
     }
     out
-}
-
-/// 从 `McpClientPool` + `McpInitStatus` watch 派生 MCP 池状态。
-fn derive_mcp_status(
-    pool: &Option<Arc<peri_middlewares::mcp::McpClientPool>>,
-    init_rx: &Option<tokio::sync::watch::Receiver<peri_middlewares::mcp::McpInitStatus>>,
-) -> McpStatusSnapshot {
-    let init_phase = match init_rx {
-        Some(rx) => match *rx.borrow() {
-            peri_middlewares::mcp::McpInitStatus::Pending => McpInitPhase::Pending,
-            peri_middlewares::mcp::McpInitStatus::Initializing { .. } => McpInitPhase::Initializing,
-            peri_middlewares::mcp::McpInitStatus::Ready { .. } => McpInitPhase::Ready,
-            peri_middlewares::mcp::McpInitStatus::Failed(_) => McpInitPhase::Failed,
-        },
-        None => McpInitPhase::Pending,
-    };
-
-    let (total, connected) = match pool {
-        Some(p) => {
-            let infos = p.all_server_infos();
-            let total = infos.len();
-            let connected = infos
-                .iter()
-                .filter(|info| {
-                    matches!(info.status, peri_middlewares::mcp::ClientStatus::Connected)
-                })
-                .count();
-            (total, connected)
-        }
-        None => (0, 0),
-    };
-
-    McpStatusSnapshot {
-        init_phase,
-        total,
-        connected,
-    }
 }
 
 #[cfg(test)]

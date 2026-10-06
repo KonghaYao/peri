@@ -17,6 +17,7 @@ use crate::kit::atoms::{
 };
 use crate::kit::layout::CenterBandHook;
 use crate::kit::text_selection::TextSelection;
+#[cfg(test)]
 use crate::kit::tui_render_unit::TuiRenderUnit;
 #[cfg(test)]
 use crate::kit::tui_render_unit::{FoldKey, FoldState};
@@ -40,13 +41,15 @@ mod no_color;
 mod props;
 pub(crate) mod render;
 pub(crate) mod scroll;
-mod selection;
+pub(crate) mod selection;
 #[cfg(test)]
 pub(crate) use selection::run_synthetic_slot_index;
 #[cfg(test)]
 pub(crate) fn measure_synthetic_wrap(lines: &[Line<'static>], width: u16) {
     let _ = selection::build_wrap_map(lines, width);
 }
+mod transcript;
+mod transcript_index;
 mod vm_cache;
 
 #[cfg(test)]
@@ -67,9 +70,7 @@ use self::image_action::{
     OpenImageError, build_open_command, build_open_command_with, try_open_image,
 };
 use self::no_color::strip_line_colors;
-use self::vm_cache::{
-    VmCacheSlot, palette_markdown_key, render_timing_enabled, total_visual_rows, trace_phase,
-};
+use self::vm_cache::{VmCacheSlot, render_timing_enabled, total_visual_rows, trace_phase};
 #[cfg(test)]
 use footer::KeepGoingLayout;
 use footer::build_footer_lines;
@@ -77,13 +78,10 @@ pub(crate) use footer::hash_todo_items;
 pub use footer::{TodoItem, TodoStatus};
 pub use props::MessageAreaProps;
 use props::{MsgAreaTracker, ScrollbarFields, ScrollbarHook};
-use render::vm_to_lines_cached_with_layout;
 #[cfg(test)]
 use scroll::GesturePending;
 use scroll::{DragThrottle, ScrollThrottle, ScrollbarDragState};
-use selection::{
-    SlotIndex, SlotLines, WrappedLineInfo, build_wrap_map, highlight_line_in_selection,
-};
+use selection::{WrappedLineInfo, build_wrap_map, highlight_line_in_selection};
 
 // ── 组件 ──────────────────────────────────────────────────────────────────
 
@@ -99,14 +97,6 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     // 确保所有 Markdown 色值随主题更新。
     let _palette = hooks.use_atom(&PALETTE_ATOM);
     let theme = hooks.use_atom(&peri_theme::atoms::THEME_ATOM);
-    let current_palette_key = {
-        let current_theme = theme.read();
-        palette_markdown_key(
-            &_palette.read(),
-            current_theme.semantic.surface.sunken,
-            current_theme.component.markdown.text,
-        )
-    };
     // 订阅 TERMINAL_CAPS：NO_COLOR 时对可见行做颜色剥离（§12，G3 视口级 pass）。
     // 启动时探测一次后不再变化；订阅仅为语义完整（切换不重渲染也无副作用）。
     let caps = hooks.use_atom(&crate::kit::atoms::TERMINAL_CAPS);
@@ -156,9 +146,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     // [TRAP] write_no_update 必须用——ratatui-kit ReactiveMutRef::Drop 无条件 wake()，
     // render body 内 write 会自激回路 100% CPU。
     let vm_caches: State<Vec<VmCacheSlot>> = hooks.use_state(Vec::new);
-    let frame_hashes = hooks.use_state(Vec::<u64>::new);
-    let frame_animation_periods = hooks.use_state(Vec::<u64>::new);
-    let frame_rebuild_indices = hooks.use_state(Vec::<usize>::new);
+    let transcript = hooks.use_state(transcript::Transcript::default);
 
     // ── Footer 行预计算：必须在 empty 分支之前调用，确保所有 hook 顺序一致 ──
     // keepgoing 防抖：KEEPGOING_BLOCKED_UNTIL 内的时间未过期 → 按钮禁用样式渲染
@@ -239,166 +227,37 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
 
     let vis_height = area_rect.map(|r| r.height).unwrap_or(60).max(1);
 
-    // ── 遍历每个 VM，按 (content_hash, vis_width) 命中判断 ──
-    // [Why] 流式期间只有最后一个 AssistantBubble 的 content_hash 变化（text 累积），
-    // 其余 committed VM hash 完全稳定——直接复用 Arc<Vec<Line>> 和 Arc<Vec<WrappedLineInfo>>。
-    // 单次成本从 O(N×W) 降至 O(W)。
-    //
-    // [Opt B] hash-only clone：只收集 content_hash (u64)，避免每帧全量 clone TuiRenderUnit。
-    // rebuild 阶段按需通过 snapshot 重读 VM 数据（流式期间只追加，索引有效）。
-    //
-    // [TRAP] 必须先提取 hashes 再 drop(snapshot)，否则 vm_caches.write_no_update 与
-    // view_models read guard 冲突。
-    //
-    // [Fix §15] [Slice 4 §6.8] pending interaction block 的 slot index 与
-    // item_hashes 同一次扫描派生（原独立 O(N) 循环合并——每帧至多一次全量
-    // 遍历；同一时刻至多一个 pending block（模态互斥），break 语义保留）。
-    let mut anchor_slot: Option<usize> = None;
-    // §8.2 动画帧：100ms 粒度壁钟 tick——running 类 VM 每帧重建以推进
-    // braille 动画（与 render.rs anim_tick 同公式同源）。
     let anim_frame = peri_time::now_wall()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64 / 100)
+        .map(|duration| duration.as_millis() as u64 / 100)
         .unwrap_or(0);
-    // running 类 VM 标记（tool/subagent/reasoning running）——与 hash 同一次
-    // 扫描派生，rebuild 判定按帧强制重建这些 slot。
-    let mut animation_periods = frame_animation_periods.write_no_update();
-    animation_periods.clear();
-    let mut item_hashes = frame_hashes.write_no_update();
-    item_hashes.clear();
-    for (i, vm) in snapshot.items.iter().enumerate() {
-        if anchor_slot.is_none() && matches!(vm, TuiRenderUnit::TuiAskUserBlock(a) if a.pending) {
-            anchor_slot = Some(i);
-        }
-        animation_periods.push(vm.animation_period_frames());
-        item_hashes.push(vm.content_hash());
-    }
-    let items_len = item_hashes.len();
-    // [Slice 4 §6.8] pending 完成（结果回写 pending=false）后扫描不到 →
-    // anchor 自然清除。write_no_update 不触发自激重渲染；block 完成时
-    // push_view_models 的 generation 变化会触发 auto_follow effect。
-    if *anchor_slot_state.read() != anchor_slot {
-        *anchor_slot_state.write_no_update() = anchor_slot;
-    }
-    drop(snapshot);
-
-    // 同步 vm_caches 长度对齐 item_hashes
-    if vm_caches.read().len() != items_len {
-        vm_caches
-            .write_no_update()
-            .resize(items_len, VmCacheSlot::default());
-    }
-
-    // 第一阶段：检测哪些 slot 需要 rebuild（content_hash 或 vis_width 变化）
-    // [Opt B] 用 item_hashes (Vec<u64>) 替代 items_vec 迭代，避免持有 TuiRenderUnit clone。
-    let mut rebuild_indices = frame_rebuild_indices.write_no_update();
-    rebuild_indices.clear();
-    {
-        let caches_read = vm_caches.read();
-        for (i, hash) in item_hashes.iter().enumerate() {
-            let slot = &caches_read[i];
-            let period = animation_periods[i];
-            if slot.content_hash != *hash
-                    || slot.width != vis_width
-                    || slot.palette_key != current_palette_key
-                    || slot.lang_key != LANG_VERSION.get()
-                    // §8.2 running 类 VM 按动画帧强制重建（hash 可能跨秒才变）
-                    || (period != 0 && slot.anim_frame / period != anim_frame / period)
-            {
-                rebuild_indices.push(i);
-            }
-        }
-    }
-    // [PERI_RENDER_TIMING] hash 比对耗时
-    let t_hash = peri_time::monotonic_now();
-    trace_phase(
-        "hash+detect",
-        frame_t0.unwrap_or(t_hash),
-        Some(&format!(
-            "items={items_len}, rebuilds={}",
-            rebuild_indices.len()
-        )),
-    );
-
-    // 第二阶段：rebuild 需要更新的 slot——只有这些 VM 调用 vm_to_lines + build_wrap_map
-    // [Phase 2] markdown_cache 在 slot 内部跨 rebuild 复用：即使 VM hash 变化（text 追加 token），
-    // cache 仍能命中上次 stable_text 前缀，仅处理新增 block。
-    // [Borrow] 单次 write_no_update 持锁整个 rebuild 循环——ratatui-kit State 仅在
-    // render body 单线程访问，无锁竞争。直接可变借用 slot.markdown_cache，避免 clone
-    // ConvertState（含 Vec<Line>，clone 成本高）。
-    //
-    // [Opt B] 仅 rebuild_indices 非空时才重新 read snapshot 获取 VM 引用。
-    // safe_len 防御 TOCTOU 索引越界（Rewind/Reset 可能缩短 items）。
-    if !rebuild_indices.is_empty() {
-        let snapshot2 = view_models.read();
-        let safe_len = snapshot2.items.len().min(items_len);
-        let mut caches = vm_caches.write_no_update();
-        for i in rebuild_indices.iter() {
-            if *i >= safe_len {
-                continue; // TOCTOU 防御：跳过不可用索引，下帧重新同步
-            }
-            let vm = &snapshot2.items[*i];
-            let vm_hash = vm.content_hash();
-            let slot = &mut caches[*i];
-            let (lines, copy_button, interaction, image_lines) = vm_to_lines_cached_with_layout(
-                vm,
-                &grid,
-                &mut slot.markdown_cache,
-                Some(&mut slot.markdown_lines),
-                true,
-            );
-            let lines = Arc::new(lines);
-            let (_, wm) = slot.markdown_lines.build_slot_wrap_map(&lines, vis_width);
-            let visual_rows = wm.last().map(|e| e.visual_end).unwrap_or(0);
-            slot.content_hash = vm_hash;
-            slot.width = vis_width;
-            slot.palette_key = current_palette_key;
-            slot.lang_key = LANG_VERSION.get();
-            slot.anim_frame = anim_frame;
-            slot.lines = lines;
-            slot.wrap_map = Arc::new(wm);
-            slot.visual_rows = visual_rows;
-            slot.copy_button = copy_button;
-            slot.interaction = interaction;
-            slot.image_lines = image_lines;
-        }
-    }
-    // [PERI_RENDER_TIMING] rebuild 耗时（仅 rebuild_indices 非空时有意义）
-    let t_rebuild = peri_time::monotonic_now();
-    if !rebuild_indices.is_empty() {
-        trace_phase(
-            "rebuild",
-            t_hash,
-            Some(&format!("{} slots", rebuild_indices.len())),
-        );
-    }
-
-    // 第三阶段：构建 O(slot count) prefix index；slot-local lines/wrap map 保持 Arc 共享。
-    let mut slot_arcs = Vec::new();
-    let mut slot_wrap_maps = Vec::new();
-    let slot_index = {
-        let caches_read = vm_caches.read();
-        slot_arcs.reserve(caches_read.len());
-        slot_wrap_maps.reserve(caches_read.len());
-        for slot in caches_read.iter() {
-            let slot_lines = match slot.markdown_lines.stable_overlay() {
-                Some((stable_start, stable)) => {
-                    SlotLines::composite(Arc::clone(&slot.lines), stable_start, stable)
-                }
-                None => SlotLines::single(Arc::clone(&slot.lines)),
-            };
-            slot_arcs.push(slot_lines);
-            slot_wrap_maps.push(Arc::clone(&slot.wrap_map));
-        }
-        Arc::new(SlotIndex::new_with_overlays(slot_arcs, slot_wrap_maps))
+    let items_len = snapshot.items.len();
+    let publication = crate::kit::atoms::TRANSCRIPT_PUBLICATION.get();
+    let context = crate::kit::entry_render_cache::EntryRenderContext {
+        theme: Arc::clone(&theme.read()),
+        language: LANG_VERSION.get(),
+        surface: crate::kit::entry_render_cache::EntrySurface::Message,
+        occurrence: BRIDGE_RESET_COUNTER.get(),
     };
+    let slot_index = transcript.write_no_update().prepare(
+        &snapshot,
+        &publication,
+        &mut vm_caches.write_no_update(),
+        grid,
+        vis_width,
+        context,
+        anim_frame,
+        BRIDGE_RESET_COUNTER.get(),
+        scroll_state.read().offset(),
+        vis_height as usize,
+    );
+    *anchor_slot_state.write_no_update() = transcript.read().anchor();
+    drop(snapshot);
+    let t_rebuild = peri_time::monotonic_now();
+    trace_phase("transcript", frame_t0.unwrap_or(t_rebuild), None);
     let total_logical_lines = slot_index.total_logical();
     let core_total_visual_rows = slot_index.total_visual();
     let num_slots = slot_index.slot_count();
-
-    let slot_visual_starts: Vec<usize> = (0..num_slots)
-        .filter_map(|slot| slot_index.slot_visual_start(slot))
-        .collect();
 
     // [Slice 4 §6.8] anchor 的视觉行范围（core 行）：slot 起始偏移 + slot 内
     // 视觉行数。供 auto_follow 的 anchor 分支对齐视口到 block 底部。
@@ -650,6 +509,13 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         );
     }
 
+    let slot_index = transcript.write_no_update().warm_visible(
+        &view_models.read(),
+        &mut vm_caches.write_no_update(),
+        scroll_y,
+        vis_height as usize,
+    );
+
     hits::update_copy_button_hits(
         copy_buttons,
         &vm_caches,
@@ -657,7 +523,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         area_rect,
         vis_height,
         scroll_y,
-        &slot_visual_starts,
+        &slot_index,
     );
 
     hits::update_image_line_hits(
@@ -666,7 +532,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         area_rect,
         vis_height,
         scroll_y,
-        &slot_visual_starts,
+        &slot_index,
         grid,
     );
 
@@ -676,7 +542,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         area_rect,
         vis_height,
         scroll_y,
-        &slot_visual_starts,
+        &slot_index,
         &focused_entry_atom,
         &interaction_option,
     );
@@ -763,6 +629,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
             .saturating_add(footer_lines.len()),
     );
 
+    let mut materialized: Option<(usize, Arc<selection::SlotLines>)> = None;
     if scroll_y < core_total_visual_rows && vp_core_start <= vp_core_end && core_len > 0 {
         let end = vp_core_end.min(core_len - 1);
         for i in vp_core_start..=end {
@@ -775,10 +642,19 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
                     slot_index: lookup.slot_index,
                 };
                 let local_idx = lookup.local_logical;
-                let line = slot_index.line(lookup.slot_index, local_idx).unwrap();
+                if materialized
+                    .as_ref()
+                    .is_none_or(|(slot, _)| *slot != lookup.slot_index)
+                {
+                    materialized = Some((
+                        lookup.slot_index,
+                        slot_index.materialize(lookup.slot_index).unwrap(),
+                    ));
+                }
+                let line = materialized.as_ref().unwrap().1.line(local_idx).unwrap();
                 let mut out = if in_sel {
                     let (_, _, sr, sc, er, ec) = sel_bounds.unwrap();
-                    highlight_line_in_selection(line, &entry, sr, er, sc, ec, vis_width, sel_bg)
+                    highlight_line_in_selection(&line, &entry, sr, er, sc, ec, vis_width, sel_bg)
                 } else {
                     line.clone()
                 };

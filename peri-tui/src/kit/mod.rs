@@ -18,6 +18,7 @@ pub mod bg_task_identity;
 pub mod bg_task_live;
 pub mod diff_parser;
 pub mod entry;
+pub(crate) mod entry_render_cache;
 pub mod event_handlers;
 pub mod focus_router;
 pub mod hitl_response;

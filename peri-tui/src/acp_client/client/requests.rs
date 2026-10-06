@@ -16,7 +16,37 @@ const CONTROL_RPC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 #[path = "cancel_test.rs"]
 mod cancel_tests;
 
+#[cfg(test)]
+#[path = "session_request_test.rs"]
+mod session_request_tests;
+
 impl AcpTuiClient {
+    pub(crate) fn stable_session_identity(&self) -> Option<(String, u64)> {
+        self.lifecycle.stable_identity()
+    }
+
+    pub(crate) async fn send_session_request(
+        &self,
+        identity: &(String, u64),
+        method: &str,
+        params: Value,
+    ) -> Result<Value, AcpError> {
+        {
+            let _operation = self.lifecycle.operation_gate().lock().await;
+            if self.lifecycle.stable_identity().as_ref() != Some(identity)
+                || params.get("sessionId").and_then(Value::as_str) != Some(identity.0.as_str())
+            {
+                return Err(AcpError::new(-32602, "session changed before request"));
+            }
+        }
+        peri_time::timeout(
+            std::time::Duration::from_secs(10),
+            self.transport.send_request(method, params),
+        )
+        .await
+        .map_err(|_| AcpError::new(-32603, "session RPC outcome unknown: timed out"))?
+    }
+
     /// Send a raw ACP request and return the response.
     /// Used for custom RPC methods like `workflow/list_runs`.
     pub async fn send_raw_request(&self, method: &str, params: Value) -> Result<Value, AcpError> {

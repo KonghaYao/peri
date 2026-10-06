@@ -1,12 +1,12 @@
 use crate::components::textarea::TextAreaState;
-use crate::kit::atoms::{ACP_CLIENT_HANDLE, PLUGIN_LIST, PluginViewTab};
+use crate::kit::atoms::{PLUGIN_LIST, PluginViewTab};
 use crate::kit::list_nav::{next_selection, previous_selection, scroll_start_for_selected};
 use crate::kit::panel_mouse::{ListLayout, hit_item, hit_row, is_scrollbar_column};
 use ratatui_kit::crossterm::event::{Event, KeyCode, KeyEventKind, MouseButton, MouseEventKind};
 use ratatui_kit::prelude::{EventResult, State};
 use ratatui_kit::ratatui::layout::Rect;
 
-use super::data::{get_marketplace_cache, refresh_discover_cache, refresh_marketplace_cache};
+use super::data::{get_marketplace_cache, refresh_discover_cache};
 use super::{VISIBLE_ITEMS, action_list, cycle_backward, cycle_forward};
 
 #[allow(clippy::too_many_arguments)]
@@ -19,76 +19,42 @@ pub(super) fn handle_panel_event(
     action_index: State<usize>,
     confirm_action: State<Option<String>>,
     operation_loading: State<Option<String>>,
+    operation: State<super::operation::OperationState>,
     detail_plugin_idx: State<Option<usize>>,
     marketplace_detail: State<Option<usize>>,
     marketplace_detail_action: State<usize>,
-    marketplace_refreshing: State<bool>,
     add_marketplace_input: State<TextAreaState>,
     add_marketplace_active: State<bool>,
 ) -> EventResult {
+    if super::operation::handle_pending_event(&event, operation) {
+        return EventResult::Consumed;
+    }
     // 鼠标：区域内左键点击 = 选中该项并执行 Enter 动作（click as enter）
     if let Event::Mouse(mouse) = event {
         if let Some(area) = area
             && !is_scrollbar_column(&mouse, area)
         {
             // ── 确认模式（uninstall / delete_marketplace）：点击 = 确认（Enter @L625）──
-            if let Some(action) = confirm_action.read().clone()
+            let confirmation = confirm_action.read().clone();
+            if let Some(action) = confirmation
                 && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
             {
                 let saved_loading = operation_loading.read().clone();
                 match action.as_str() {
                     "uninstall" => {
-                        let idx = detail_plugin_idx.read().unwrap_or(0);
-                        if let Some(p) = PLUGIN_LIST.state().read().get(idx) {
-                            let plugin_id = if p.marketplace.is_empty() {
-                                p.name.clone()
-                            } else {
-                                format!("{}@{}", p.name, p.marketplace)
-                            };
-                            if let Some(cl) = ACP_CLIENT_HANDLE.get() {
-                                let client = cl.clone();
-                                let sid = client.current_session_id().unwrap_or_default();
-                                tokio::spawn(async move {
-                                    let _ = client
-                                        .send_raw_request(
-                                            "plugin/uninstall",
-                                            serde_json::json!({
-                                                "pluginId": plugin_id,
-                                                "sessionId": sid,
-                                            }),
-                                        )
-                                        .await;
-                                });
-                            }
-                        }
-                        *detail_plugin_idx.write() = None;
-                        // 关闭确认弹窗（独立线程避免 RwLock 重入）
-                        std::thread::spawn(move || {
-                            *confirm_action.write() = None;
-                            *operation_loading.write() = None;
-                        });
+                        super::operation::confirm_uninstall(
+                            operation,
+                            confirm_action,
+                            detail_plugin_idx,
+                        );
                     }
                     "delete_marketplace" => {
-                        let name = saved_loading.unwrap_or_default();
-                        std::thread::spawn(move || {
-                            let marketplaces =
-                                peri_middlewares::plugin::load_known_marketplaces(None)
-                                    .unwrap_or_default();
-                            let filtered: Vec<_> = marketplaces
-                                .into_iter()
-                                .filter(|km| {
-                                    peri_middlewares::plugin::MarketplaceManager::extract_name(
-                                        &km.source,
-                                    ) != name
-                                })
-                                .collect();
-                            let _ =
-                                peri_middlewares::plugin::save_known_marketplaces(&filtered, None);
-                            refresh_discover_cache();
-                            refresh_marketplace_cache();
-                            *confirm_action.write() = None;
-                            *operation_loading.write() = None;
-                        });
+                        super::operation::confirm_marketplace_remove(
+                            saved_loading.unwrap_or_default(),
+                            operation,
+                            confirm_action,
+                            operation_loading,
+                        );
                     }
                     _ => {
                         // 未知确认动作：安全起见也从独立线程写 state
@@ -123,30 +89,12 @@ pub(super) fn handle_panel_event(
                 if let Some(entry) = entries.get(s.saturating_sub(1)) {
                     match idx {
                         0 => {
-                            // Refresh
-                            let name = entry.source_label.clone();
-                            *marketplace_refreshing.write() = true;
-                            if let Some(cl) = ACP_CLIENT_HANDLE.get() {
-                                let client = cl.clone();
-                                let sid = client.current_session_id().unwrap_or_default();
-                                let name_for_refresh = name.clone();
-                                tokio::spawn(async move {
-                                    let _ = client
-                                        .send_raw_request(
-                                            "marketplace/refresh",
-                                            serde_json::json!({
-                                                "name": name_for_refresh,
-                                                "sessionId": sid,
-                                            }),
-                                        )
-                                        .await;
-                                });
-                            }
-                            // 将缓存刷新（同步 I/O）移到 blocking thread
-                            tokio::task::spawn_blocking(|| {
-                                refresh_discover_cache();
-                                refresh_marketplace_cache();
-                            });
+                            super::operation::dispatch(
+                                super::operation::PluginOperation::marketplace_refresh(
+                                    entry.name.clone(),
+                                ),
+                                operation,
+                            );
                         }
                         _ => {
                             // Delete
@@ -166,107 +114,23 @@ pub(super) fn handle_panel_event(
             if detail_plugin_opt.is_some()
                 && let Some(detail) = detail_plugin_opt
                 && let Some(detail_p) = PLUGIN_LIST.state().read().get(detail).cloned()
-                && let Some(idx) = hit_item(
-                    &mouse,
-                    area,
-                    ListLayout {
-                        // 标题 + 空行 + 状态 + 空行 + 4 字段 + 空行 + 4 capabilities
-                        // + [可选 error 2 行] + 空行 + actions 标题 + 空行
-                        header_rows: if detail_p.load_error.is_some() {
-                            18
-                        } else {
-                            16
-                        },
-                        item_rows: 1,
-                        footer_rows: 0,
-                        visible_items: 4,
-                        scroll_start: 0,
-                        item_count: 4,
-                    },
+                && let Some(idx) = super::operation::detail_action_index(
+                    &event,
+                    Some(area),
+                    &detail_p,
+                    *action_index.read(),
                 )
             {
                 *action_index.write() = idx;
                 let actions = action_list(detail_p.enabled);
                 if let Some(action) = actions.get(idx) {
-                    match *action {
-                        "uninstall" => {
-                            *confirm_action.write() = Some("uninstall".into());
-                        }
-                        "back" => {
-                            *detail_plugin_idx.write() = None;
-                        }
-                        "enable" | "disable" => {
-                            *operation_loading.write() = Some(action.to_string());
-                            let detail = detail_plugin_idx.read().unwrap_or(0);
-                            let plugin_info = PLUGIN_LIST.state().read().get(detail).cloned();
-                            if let Some(p) = plugin_info {
-                                let plugin_id = if p.marketplace.is_empty() {
-                                    p.name.clone()
-                                } else {
-                                    format!("{}@{}", p.name, p.marketplace)
-                                };
-                                let plugin_id_for_persist = plugin_id.clone();
-                                let enable = *action == "enable";
-                                let scope = p.install_scope.clone();
-                                if let Some(cl) = ACP_CLIENT_HANDLE.get() {
-                                    let client = cl.clone();
-                                    let sid = client.current_session_id().unwrap_or_default();
-                                    tokio::spawn(async move {
-                                        let _ = client
-                                            .send_raw_request(
-                                                "plugin/toggle",
-                                                serde_json::json!({
-                                                    "pluginId": plugin_id,
-                                                    "enable": enable,
-                                                    "scope": scope,
-                                                    "sessionId": sid,
-                                                }),
-                                            )
-                                            .await;
-                                    });
-                                }
-                                // 将同步写盘移到 blocking thread，避免阻塞 TUI 主事件循环
-                                tokio::task::spawn_blocking(move || {
-                                    let _ = peri_middlewares::plugin::save_claude_settings_enabled_plugins(
-                                        &[(plugin_id_for_persist, enable)],
-                                        None,
-                                    );
-                                });
-                            }
-                            *detail_plugin_idx.write() = None;
-                        }
-                        "update" => {
-                            *operation_loading.write() = Some("update".into());
-                            let detail = detail_plugin_idx.read().unwrap_or(0);
-                            let p = PLUGIN_LIST.state().read().get(detail).cloned();
-                            if let Some(p) = p {
-                                let plugin_id = if p.marketplace.is_empty() {
-                                    p.name.clone()
-                                } else {
-                                    format!("{}@{}", p.name, p.marketplace)
-                                };
-                                if let Some(cl) = ACP_CLIENT_HANDLE.get() {
-                                    let client = cl.clone();
-                                    let sid = client.current_session_id().unwrap_or_default();
-                                    tokio::spawn(async move {
-                                        let _ = client
-                                            .send_raw_request(
-                                                "plugin/update",
-                                                serde_json::json!({
-                                                    "pluginId": plugin_id,
-                                                    "sessionId": sid,
-                                                }),
-                                            )
-                                            .await;
-                                    });
-                                }
-                            }
-                            *detail_plugin_idx.write() = None;
-                        }
-                        other => {
-                            tracing::info!(target: "plugin-panel", "unknown action {} on {}", other, detail_p.name);
-                        }
-                    }
+                    super::operation::installed_action(
+                        action,
+                        &detail_p,
+                        operation,
+                        confirm_action,
+                        detail_plugin_idx,
+                    );
                 }
                 return EventResult::Consumed;
             }
@@ -385,30 +249,12 @@ pub(super) fn handle_panel_event(
                 if let Some(entry) = entries.get(s.saturating_sub(1)) {
                     match *marketplace_detail_action.read() {
                         0 => {
-                            // Refresh
-                            let name = entry.source_label.clone();
-                            *marketplace_refreshing.write() = true;
-                            if let Some(cl) = ACP_CLIENT_HANDLE.get() {
-                                let client = cl.clone();
-                                let sid = client.current_session_id().unwrap_or_default();
-                                let name_for_refresh = name.clone();
-                                tokio::spawn(async move {
-                                    let _ = client
-                                        .send_raw_request(
-                                            "marketplace/refresh",
-                                            serde_json::json!({
-                                                "name": name_for_refresh,
-                                                "sessionId": sid,
-                                            }),
-                                        )
-                                        .await;
-                                });
-                            }
-                            // 将缓存刷新（同步 I/O）移到 blocking thread
-                            tokio::task::spawn_blocking(|| {
-                                refresh_discover_cache();
-                                refresh_marketplace_cache();
-                            });
+                            super::operation::dispatch(
+                                super::operation::PluginOperation::marketplace_refresh(
+                                    entry.name.clone(),
+                                ),
+                                operation,
+                            );
                         }
                         _ => {
                             // Delete
@@ -438,67 +284,23 @@ pub(super) fn handle_panel_event(
         // ── 确认模式优先 ──
         (_, true, KeyCode::Enter) => {
             let action = confirm_action.read().clone().unwrap_or_default();
-            // 不在事件处理器线程内写 confirm_action：generational-box
-            // SyncStorage 的 parking_lot::RwLock 不允许同一线程
-            // read→write 重入，否则死锁（[回归] marketplace 删除卡死）。
-            // 状态更新统一移到独立线程执行。
-            // *confirm_action.write() = None;
-
             let saved_loading = operation_loading.read().clone();
-            // *operation_loading.write() = Some(action.clone());
 
             match action.as_str() {
                 "uninstall" => {
-                    let idx = detail_plugin_idx.read().unwrap_or(0);
-                    if let Some(p) = PLUGIN_LIST.state().read().get(idx) {
-                        let plugin_id = if p.marketplace.is_empty() {
-                            p.name.clone()
-                        } else {
-                            format!("{}@{}", p.name, p.marketplace)
-                        };
-                        if let Some(cl) = ACP_CLIENT_HANDLE.get() {
-                            let client = cl.clone();
-                            let sid = client.current_session_id().unwrap_or_default();
-                            tokio::spawn(async move {
-                                let _ = client
-                                    .send_raw_request(
-                                        "plugin/uninstall",
-                                        serde_json::json!({
-                                            "pluginId": plugin_id,
-                                            "sessionId": sid,
-                                        }),
-                                    )
-                                    .await;
-                            });
-                        }
-                    }
-                    *detail_plugin_idx.write() = None;
-                    // 关闭确认弹窗（独立线程避免 RwLock 重入）
-                    std::thread::spawn(move || {
-                        *confirm_action.write() = None;
-                        *operation_loading.write() = None;
-                    });
+                    super::operation::confirm_uninstall(
+                        operation,
+                        confirm_action,
+                        detail_plugin_idx,
+                    );
                 }
                 "delete_marketplace" => {
-                    let name = saved_loading.unwrap_or_default();
-                    std::thread::spawn(move || {
-                        let marketplaces = peri_middlewares::plugin::load_known_marketplaces(None)
-                            .unwrap_or_default();
-                        let filtered: Vec<_> = marketplaces
-                            .into_iter()
-                            .filter(|km| {
-                                peri_middlewares::plugin::MarketplaceManager::extract_name(
-                                    &km.source,
-                                ) != name
-                            })
-                            .collect();
-                        let _ = peri_middlewares::plugin::save_known_marketplaces(&filtered, None);
-                        refresh_discover_cache();
-                        refresh_marketplace_cache();
-                        // State 写移到独立线程，避免事件循环线程的 RwLock 重入死锁
-                        *confirm_action.write() = None;
-                        *operation_loading.write() = None;
-                    });
+                    super::operation::confirm_marketplace_remove(
+                        saved_loading.unwrap_or_default(),
+                        operation,
+                        confirm_action,
+                        operation_loading,
+                    );
                 }
                 _ => {
                     // 未知确认动作：安全起见也从独立线程写 state
@@ -564,87 +366,16 @@ pub(super) fn handle_panel_event(
             let idx = detail_plugin_idx.read().unwrap_or(0);
             if let Some(p) = PLUGIN_LIST.state().read().get(idx) {
                 let actions = action_list(p.enabled);
-                let ai = *action_index.read();
-                if let Some(action) = actions.get(ai) {
-                    match *action {
-                        "uninstall" => {
-                            *confirm_action.write() = Some("uninstall".into());
-                        }
-                        "back" => {
-                            *detail_plugin_idx.write() = None;
-                        }
-                        "enable" | "disable" => {
-                            *operation_loading.write() = Some(action.to_string());
-                            let idx = detail_plugin_idx.read().unwrap_or(0);
-                            let plugin_info = PLUGIN_LIST.state().read().get(idx).cloned();
-                            if let Some(p) = plugin_info {
-                                let plugin_id = if p.marketplace.is_empty() {
-                                    p.name.clone()
-                                } else {
-                                    format!("{}@{}", p.name, p.marketplace)
-                                };
-                                let plugin_id_for_persist = plugin_id.clone();
-                                let enable = *action == "enable";
-                                let scope = p.install_scope.clone();
-                                if let Some(cl) = ACP_CLIENT_HANDLE.get() {
-                                    let client = cl.clone();
-                                    let sid = client.current_session_id().unwrap_or_default();
-                                    tokio::spawn(async move {
-                                        let _ = client
-                                            .send_raw_request(
-                                                "plugin/toggle",
-                                                serde_json::json!({
-                                                    "pluginId": plugin_id,
-                                                    "enable": enable,
-                                                    "scope": scope,
-                                                    "sessionId": sid,
-                                                }),
-                                            )
-                                            .await;
-                                    });
-                                }
-                                // 将同步写盘移到 blocking thread，避免阻塞 TUI 主事件循环
-                                tokio::task::spawn_blocking(move || {
-                                    let _ = peri_middlewares::plugin::save_claude_settings_enabled_plugins(
-                                        &[(plugin_id_for_persist, enable)],
-                                        None,
-                                    );
-                                });
-                            }
-                            *detail_plugin_idx.write() = None;
-                        }
-                        "update" => {
-                            *operation_loading.write() = Some("update".into());
-                            let idx = detail_plugin_idx.read().unwrap_or(0);
-                            let p = PLUGIN_LIST.state().read().get(idx).cloned();
-                            if let Some(p) = p {
-                                let plugin_id = if p.marketplace.is_empty() {
-                                    p.name.clone()
-                                } else {
-                                    format!("{}@{}", p.name, p.marketplace)
-                                };
-                                if let Some(cl) = ACP_CLIENT_HANDLE.get() {
-                                    let client = cl.clone();
-                                    let sid = client.current_session_id().unwrap_or_default();
-                                    tokio::spawn(async move {
-                                        let _ = client
-                                            .send_raw_request(
-                                                "plugin/update",
-                                                serde_json::json!({
-                                                    "pluginId": plugin_id,
-                                                    "sessionId": sid,
-                                                }),
-                                            )
-                                            .await;
-                                    });
-                                }
-                            }
-                            *detail_plugin_idx.write() = None;
-                        }
-                        other => {
-                            tracing::info!(target: "plugin-panel", "unknown action {} on {}", other, p.name);
-                        }
-                    }
+                let ai =
+                    super::operation::detail_action_index(&event, area, p, *action_index.read());
+                if let Some(action) = ai.and_then(|index| actions.get(index)) {
+                    super::operation::installed_action(
+                        action,
+                        &p,
+                        operation,
+                        confirm_action,
+                        detail_plugin_idx,
+                    );
                 }
             }
         }

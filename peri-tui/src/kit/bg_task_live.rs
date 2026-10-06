@@ -299,14 +299,13 @@ pub fn handle_bg_tool_ended(agent_id: &str, te: &TuiToolEnded) {
         let Some(t) = detail
             .tool_cards
             .iter_mut()
-            .find(|t| t.tool_id == te.tool_id && t.output_summary.is_none())
+            .find(|t| t.tool_id == te.tool_id)
         else {
             return;
         };
-        t.output_summary = Some(te.output_summary.clone());
-        t.is_error = te.is_error;
-        t.completed_duration_ms = Some(peri_time::elapsed_since(t.started_at).as_millis() as u64);
-        sync_tool_units(detail);
+        if t.finish(te.output_summary.clone(), te.is_error) {
+            sync_tool_units(detail);
+        }
     });
 }
 

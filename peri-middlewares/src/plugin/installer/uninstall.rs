@@ -14,22 +14,20 @@ use crate::plugin::{
 
 pub async fn uninstall_plugin(
     plugin_id: &str,
+    scope: crate::plugin::types::InstallScope,
     claude_dir: &Path,
     project_dir: Option<&Path>,
 ) -> Result<(), InstallerError> {
-    let (name, marketplace) = plugin_id.split_once('@').unwrap_or((plugin_id, ""));
-
+    super::enabled_plugins_settings_path(scope, claude_dir, project_dir)?;
+    let project_dir = if scope == crate::plugin::types::InstallScope::User {
+        None
+    } else {
+        project_dir
+    };
     let plugins_path = claude_dir.join("plugins").join("installed_plugins.json");
     let mut installed = load_installed_plugins(Some(&plugins_path))?;
 
-    let entry = installed
-        .plugins
-        .iter()
-        .find(|p| p.id == plugin_id && match_project_path(&p.project_path, project_dir))
-        .ok_or_else(|| InstallerError::PluginNotFound {
-            name: name.into(),
-            marketplace: marketplace.into(),
-        })?;
+    let entry = super::installation_for_mutation(&installed, plugin_id, scope, project_dir)?;
 
     let install_path = entry.install_path.clone();
     let scope = entry.scope;
@@ -57,7 +55,9 @@ pub async fn uninstall_plugin(
                 tokio::fs::remove_dir_all(&data_dir).await.ok();
             }
 
-            remove_plugin_options(plugin_id, claude_dir)?;
+            if scope == crate::plugin::types::InstallScope::User {
+                remove_plugin_options(plugin_id, claude_dir)?;
+            }
 
             let _ = mark_orphaned(&install_path).await;
         }

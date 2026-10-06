@@ -14,7 +14,7 @@ use crate::app::panel_types::PanelKind;
 use crate::i18n;
 use crate::kit::atoms::{
     ACP_CLIENT_HANDLE, AVAILABLE_SLASH_COMMANDS, LANG_VERSION, MCP_SERVERS, McpServerSummary,
-    SERVICE_SNAPSHOT,
+    SERVICE_PROJECTION_ERROR, SERVICE_SNAPSHOT,
 };
 use crate::kit::list_nav::{next_selection, previous_selection, scroll_start_for_selected};
 use crate::kit::panel_mouse::{AreaTracker, left_down};
@@ -46,6 +46,7 @@ pub fn McpPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // 外部滚动状态——面板滚轮仲裁（panel_scroll.rs）驱动，统一 3 行/格 + 节流
     let sv = hooks.use_state(ScrollViewState::default);
     let store = hooks.use_atom(&MCP_SERVERS);
+    let projection_error = hooks.use_atom(&SERVICE_PROJECTION_ERROR);
     let servers: Vec<McpServerSummary> = store.read().clone();
     let _ = store;
 
@@ -337,6 +338,12 @@ pub fn McpPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         );
     }
 
+    if let Some(error) = projection_error.read().as_ref() {
+        lines.push(Line::styled(
+            error.clone(),
+            Style::new().fg(theme_def.read().semantic.status.warning),
+        ));
+    }
     let content = Paragraph::new(ratatui::text::Text::from(lines));
 
     // 面板滚轮仲裁注册（每帧覆盖写入，area 用上一帧组件区域）

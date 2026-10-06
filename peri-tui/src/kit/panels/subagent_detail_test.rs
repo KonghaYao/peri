@@ -37,6 +37,14 @@ fn test_subagent_detail_content_height_is_non_zero_and_saturating() {
 }
 
 #[test]
+fn virtual_detail_offset_preserves_full_height_and_clamps_after_resize() {
+    assert_eq!(clamp_detail_offset(90_000, 100_000, 20), 90_000);
+    assert_eq!(clamp_detail_offset(100_000, 100_000, 20), 99_980);
+    assert_eq!(clamp_detail_offset(99_980, 100_000, 100), 99_900);
+    assert_eq!(clamp_detail_offset(50, 10, 20), 0);
+}
+
+#[test]
 fn test_find_selected_subagent_none_when_no_selection() {
     let snap = ViewModelsSnapshot {
         items: im::Vector::from(vec![TuiRenderUnit::TuiSubAgentGroup(make_subagent(

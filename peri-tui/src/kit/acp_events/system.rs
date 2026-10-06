@@ -930,7 +930,12 @@ pub(super) fn handle_plugin_snapshot(snapshot: &PluginSnapshot) {
             commands_count: p.commands_count,
             agents_count: p.agents_count,
             mcp_count: p.mcp_count,
-            install_scope: p.install_scope.clone(),
+            install_scope: Some(p.install_scope.clone()),
+            toggle_supported: Some(matches!(
+                p.install_scope.as_str(),
+                "user" | "project" | "local"
+            )),
+            management_error: None,
             load_error: p.load_error.clone(),
         })
         .collect();

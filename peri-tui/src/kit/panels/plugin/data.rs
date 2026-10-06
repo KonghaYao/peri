@@ -42,6 +42,36 @@ pub(super) fn refresh_discover_cache() {
 /// 使用 Option<Vec<T>>：None = 未初始化，Some(vec) = 已填充（可能为空）。
 static MARKETPLACE_CACHE: OnceLock<parking_lot::Mutex<Option<Vec<MsEntry>>>> = OnceLock::new();
 
+#[cfg(test)]
+pub(super) struct EmptyCatalogGuard {
+    discover: Option<Vec<PluginSearchResultItem>>,
+    marketplaces: Option<Vec<MsEntry>>,
+}
+
+#[cfg(test)]
+pub(super) fn empty_catalog_for_test() -> EmptyCatalogGuard {
+    let discover = DISCOVER_CACHE
+        .get_or_init(|| parking_lot::Mutex::new(None))
+        .lock()
+        .replace(Vec::new());
+    let marketplaces = MARKETPLACE_CACHE
+        .get_or_init(|| parking_lot::Mutex::new(None))
+        .lock()
+        .replace(Vec::new());
+    EmptyCatalogGuard {
+        discover,
+        marketplaces,
+    }
+}
+
+#[cfg(test)]
+impl Drop for EmptyCatalogGuard {
+    fn drop(&mut self) {
+        *DISCOVER_CACHE.get().unwrap().lock() = self.discover.take();
+        *MARKETPLACE_CACHE.get().unwrap().lock() = self.marketplaces.take();
+    }
+}
+
 pub(super) fn get_marketplace_cache() -> Vec<MsEntry> {
     let cache = MARKETPLACE_CACHE.get_or_init(|| parking_lot::Mutex::new(None));
     {
@@ -71,7 +101,6 @@ pub(super) fn refresh_marketplace_cache() {
 fn load_marketplace_data() -> Vec<MsEntry> {
     let known = peri_middlewares::plugin::load_known_marketplaces(None).unwrap_or_default();
     let cache_dir = peri_middlewares::plugin::marketplaces_cache_dir();
-    let _ = std::fs::create_dir_all(&cache_dir);
 
     let installed = peri_middlewares::plugin::load_installed_plugins(None).unwrap_or_default();
 
@@ -177,7 +206,6 @@ fn load_marketplace_data() -> Vec<MsEntry> {
 fn load_discover_plugins_from_disk() -> Vec<PluginSearchResultItem> {
     let mut known = peri_middlewares::plugin::load_known_marketplaces(None).unwrap_or_default();
     let cache_dir = peri_middlewares::plugin::marketplaces_cache_dir();
-    let _ = std::fs::create_dir_all(&cache_dir);
 
     // 确保 official marketplace 已注册（参考项目行为：自动注入）
     let has_official = known.iter().any(|km| match &km.source {

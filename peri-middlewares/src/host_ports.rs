@@ -32,16 +32,53 @@ impl PluginManagerPort for PluginManager {
         scope: InstallScope,
         cache_dir: &Path,
         claude_dir: &Path,
+        project_dir: Option<&Path>,
     ) -> Result<InstalledPlugin, String> {
-        install_plugin(name, marketplace, scope, cache_dir, claude_dir, None)
+        install_plugin(name, marketplace, scope, cache_dir, claude_dir, project_dir)
             .await
             .map_err(|e| e.to_string())
     }
 
-    async fn uninstall(&self, plugin_id: &str, claude_dir: &Path) -> Result<(), String> {
-        uninstall_plugin(plugin_id, claude_dir, None)
+    async fn uninstall(
+        &self,
+        plugin_id: &str,
+        scope: InstallScope,
+        claude_dir: &Path,
+        project_dir: Option<&Path>,
+    ) -> Result<(), String> {
+        uninstall_plugin(plugin_id, scope, claude_dir, project_dir)
             .await
             .map_err(|e| e.to_string())
+    }
+
+    fn installation_scope(
+        &self,
+        claude_dir: &Path,
+        plugin: &peri_acp_types::plugin::LoadedPlugin,
+    ) -> Result<Option<InstallScope>, String> {
+        let installed =
+            load_installed_plugins(Some(&claude_dir.join("plugins/installed_plugins.json")))
+                .map_err(|error| error.to_string())?;
+        let mut records = installed.plugins.iter().filter(|record| {
+            record.id == format!("{}@{}", plugin.name, plugin.marketplace)
+                && record.install_path == plugin.install_path
+        });
+        let Some(record) = records.next() else {
+            return Ok(None);
+        };
+        if (record.scope == InstallScope::User && record.project_path.is_some())
+            || (record.scope != InstallScope::User
+                && !record
+                    .project_path
+                    .as_deref()
+                    .is_some_and(|directory| Path::new(directory).is_absolute()))
+        {
+            return Err("plugin installation record has an invalid scope directory".into());
+        }
+        if records.next().is_some() {
+            return Err("plugin installation scope is ambiguous".into());
+        }
+        Ok(Some(record.scope))
     }
 
     fn set_enabled(
@@ -49,12 +86,36 @@ impl PluginManagerPort for PluginManager {
         plugin_id: &str,
         scope: InstallScope,
         claude_dir: &Path,
+        project_dir: Option<&Path>,
         enable: bool,
     ) -> Result<(), String> {
+        let installed =
+            load_installed_plugins(Some(&claude_dir.join("plugins/installed_plugins.json")))
+                .map_err(|error| error.to_string())?;
+        let writable = installed
+            .plugins
+            .iter()
+            .filter(|record| {
+                record.id == plugin_id
+                    && record.scope == scope
+                    && if scope == InstallScope::User {
+                        record.project_path.is_none()
+                    } else {
+                        record.project_path.as_deref().map(Path::new) == project_dir
+                            && project_dir.is_some()
+                    }
+            })
+            .count();
+        if writable > 1 {
+            return Err("plugin installation scope is ambiguous".into());
+        }
+        if writable == 0 {
+            return Err("plugin has no writable installation record in the requested scope".into());
+        }
         if enable {
-            update_enabled_plugins(plugin_id, scope, claude_dir, None)
+            update_enabled_plugins(plugin_id, scope, claude_dir, project_dir)
         } else {
-            remove_from_enabled_plugins(plugin_id, &scope, claude_dir, None)
+            remove_from_enabled_plugins(plugin_id, &scope, claude_dir, project_dir)
         }
         .map_err(|e| e.to_string())
     }
@@ -66,10 +127,12 @@ impl PluginManagerPort for PluginManager {
     async fn update(
         &self,
         plugin_id: &str,
+        scope: InstallScope,
         cache_dir: &Path,
         claude_dir: &Path,
+        project_dir: Option<&Path>,
     ) -> Result<InstalledPlugin, String> {
-        update_plugin(plugin_id, cache_dir, claude_dir, None)
+        update_plugin(plugin_id, scope, cache_dir, claude_dir, project_dir)
             .await
             .map_err(|e| e.to_string())
     }
@@ -88,13 +151,14 @@ impl PluginManagerPort for PluginManager {
         Ok(manifest.plugins.len())
     }
 
-    fn snapshot(&self, claude_dir: &Path) -> Vec<PluginSnapshotEntry> {
-        let loaded = crate::plugin::load_enabled_plugins_aggregated(claude_dir, None);
+    fn snapshot(&self, claude_dir: &Path, project_dir: Option<&Path>) -> Vec<PluginSnapshotEntry> {
+        let loaded = crate::plugin::load_enabled_plugins_aggregated(claude_dir, project_dir);
 
         let plugins_path = claude_dir.join("plugins").join("installed_plugins.json");
-        let installed = crate::plugin::load_installed_plugins(Some(&plugins_path))
-            .ok()
-            .unwrap_or_default();
+        let installed = crate::plugin::load_installed_plugins(Some(&plugins_path));
+        if let Err(error) = &installed {
+            tracing::error!(%error, "Plugin snapshot installation records failed");
+        }
 
         loaded
             .plugins
@@ -102,7 +166,7 @@ impl PluginManagerPort for PluginManager {
             .map(|p| PluginSnapshotEntry {
                 name: p.manifest.name.clone(),
                 version: p.manifest.version.clone(),
-                enabled: installed.plugins.iter().any(|ip| ip.name == p.name),
+                enabled: true,
                 root: p.install_path.to_string_lossy().to_string(),
                 description: p.manifest.description.clone(),
                 marketplace: p.marketplace.clone(),
@@ -112,12 +176,19 @@ impl PluginManagerPort for PluginManager {
                 agents_count: p.agents_dirs.len(),
                 mcp_count: p.mcp_servers.len(),
                 install_scope: installed
-                    .plugins
-                    .iter()
-                    .find(|ip| ip.name == p.name)
+                    .as_ref()
+                    .ok()
+                    .and_then(|installed| {
+                        installed.plugins.iter().find(|ip| {
+                            ip.id == format!("{}@{}", p.name, p.marketplace)
+                                && ip.install_path == p.install_path
+                                && (ip.scope == InstallScope::User
+                                    || ip.project_path.as_deref().map(Path::new) == project_dir)
+                        })
+                    })
                     .map(|ip| format!("{:?}", ip.scope).to_lowercase())
                     .unwrap_or_default(),
-                load_error: None,
+                load_error: installed.as_ref().err().map(ToString::to_string),
             })
             .collect()
     }
@@ -174,6 +245,12 @@ impl PluginManagerPort for PluginManager {
         let removed_location = marketplaces
             .iter()
             .find(|mkt| MarketplaceManager::extract_name(&mkt.source) == name)
+            .filter(|marketplace| {
+                !matches!(
+                    &marketplace.source,
+                    MarketplaceSource::File { .. } | MarketplaceSource::Directory { .. }
+                )
+            })
             .map(|km| km.install_location.clone());
 
         let filtered: Vec<KnownMarketplace> = marketplaces
@@ -188,8 +265,17 @@ impl PluginManagerPort for PluginManager {
         save_known_marketplaces(&filtered, None).map_err(|e| e.to_string())?;
         if let Some(loc) = removed_location {
             let install_path = std::path::Path::new(&loc);
-            if !loc.is_empty() && install_path.exists() {
-                std::fs::remove_dir_all(install_path).map_err(|e| e.to_string())?;
+            let cache_dir = self.cache_dir();
+            if install_path.exists() && cache_dir.exists() {
+                let cache_root = cache_dir
+                    .canonicalize()
+                    .map_err(|error| error.to_string())?;
+                let installed = install_path
+                    .canonicalize()
+                    .map_err(|error| error.to_string())?;
+                if installed.starts_with(&cache_root) && installed != cache_root {
+                    std::fs::remove_dir_all(installed).map_err(|error| error.to_string())?;
+                }
             }
         }
         Ok(())

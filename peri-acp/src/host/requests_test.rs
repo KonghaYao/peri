@@ -412,6 +412,7 @@ impl Drop for HomeDirGuard {
 /// cache_dir；`unstable_event` caps 默认关闭，push_plugin_* 不发通知）。
 struct MockPluginManager {
     cache_dir: PathBuf,
+    snapshot_entries: Vec<PluginSnapshotEntry>,
     install_result: std::sync::Mutex<Result<InstalledPlugin, String>>,
     uninstall_result: std::sync::Mutex<Result<(), String>>,
 }
@@ -420,6 +421,7 @@ impl MockPluginManager {
     fn install_ok(id: &str) -> Self {
         Self {
             cache_dir: PathBuf::from("/tmp/mock-cache"),
+            snapshot_entries: Vec::new(),
             install_result: std::sync::Mutex::new(Ok(InstalledPlugin {
                 id: id.to_string(),
                 name: id.to_string(),
@@ -444,12 +446,27 @@ impl PluginManagerPort for MockPluginManager {
         _scope: InstallScope,
         _cache_dir: &Path,
         _claude_dir: &Path,
+        _project_dir: Option<&Path>,
     ) -> Result<InstalledPlugin, String> {
         self.install_result.lock().unwrap().clone()
     }
 
-    async fn uninstall(&self, _plugin_id: &str, _claude_dir: &Path) -> Result<(), String> {
+    async fn uninstall(
+        &self,
+        _plugin_id: &str,
+        _scope: InstallScope,
+        _claude_dir: &Path,
+        _project_dir: Option<&Path>,
+    ) -> Result<(), String> {
         self.uninstall_result.lock().unwrap().clone()
+    }
+
+    fn installation_scope(
+        &self,
+        claude_dir: &Path,
+        plugin: &peri_acp_types::plugin::LoadedPlugin,
+    ) -> Result<Option<InstallScope>, String> {
+        peri_middlewares::host_ports::PluginManager.installation_scope(claude_dir, plugin)
     }
 
     fn set_enabled(
@@ -457,6 +474,7 @@ impl PluginManagerPort for MockPluginManager {
         _plugin_id: &str,
         _scope: InstallScope,
         _claude_dir: &Path,
+        _project_dir: Option<&Path>,
         _enable: bool,
     ) -> Result<(), String> {
         Ok(())
@@ -469,8 +487,10 @@ impl PluginManagerPort for MockPluginManager {
     async fn update(
         &self,
         _plugin_id: &str,
+        _scope: InstallScope,
         _cache_dir: &Path,
         _claude_dir: &Path,
+        _project_dir: Option<&Path>,
     ) -> Result<InstalledPlugin, String> {
         Err("mock: unused".into())
     }
@@ -499,8 +519,12 @@ impl PluginManagerPort for MockPluginManager {
         json!({})
     }
 
-    fn snapshot(&self, _claude_dir: &Path) -> Vec<PluginSnapshotEntry> {
-        vec![]
+    fn snapshot(
+        &self,
+        _claude_dir: &Path,
+        _project_dir: Option<&Path>,
+    ) -> Vec<PluginSnapshotEntry> {
+        self.snapshot_entries.clone()
     }
 
     // W3 端口补全：命令重载 / 路由投影 / 目录定位按真实加载器委托——与替换前
@@ -539,6 +563,15 @@ mod user_input_tests;
 
 #[path = "requests/plugin_search_test.rs"]
 mod plugin_search_tests;
+
+#[path = "requests/plugin_scope_test.rs"]
+mod plugin_scope_tests;
+
+#[path = "requests/plugin_identity_test.rs"]
+mod plugin_identity_tests;
+
+#[path = "requests/marketplace_mutation_test.rs"]
+mod marketplace_mutation_tests;
 
 #[path = "requests_config_cases_test.rs"]
 mod config_cases;
