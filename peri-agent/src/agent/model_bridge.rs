@@ -377,6 +377,17 @@ impl AgentModelBridge {
                     attempts,
                     max_attempts,
                 })) => {
+                    if !error.interruption_logged() {
+                        let diagnostic = error
+                            .interruption_diagnostic()
+                            .cloned()
+                            .unwrap_or_else(|| error.diagnostic());
+                        crate::session::retry_events::log_interruption(
+                            &diagnostic,
+                            attempts,
+                            max_attempts,
+                        );
+                    }
                     // 正文为空（只收到思考或半截工具）时不制造 assistant 消息：空
                     // 消息不是规范历史，且会被 provider 拒绝（Anthropic 对空 text
                     // block 返回 400）。此时仅靠续跑提醒继续。

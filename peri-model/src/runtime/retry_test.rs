@@ -64,6 +64,74 @@ fn retry_observation_rejects_mismatched_diagnostic_and_derives_model_facts() {
     );
 }
 
+/// 三个抑制出口只通知一次，且 transport 降级前的诊断可供边界兜底。
+#[tokio::test]
+async fn interrupted_observation_covers_all_suppressed_exits() {
+    struct Observer(Mutex<Vec<RetryObservation>>);
+    impl super::RetryObserver for Observer {
+        fn on_retry(&self, _: RetryObservation) {
+            panic!("可见输出后不应重试");
+        }
+
+        fn on_interrupted(&self, observation: RetryObservation) -> bool {
+            self.0.lock().unwrap().push(observation);
+            true
+        }
+    }
+
+    for tail in [
+        vec![Err(ModelError::transport(
+            TransportErrorKind::Connection,
+            Some("openai"),
+        ))],
+        vec![Ok(ModelStreamEvent::Usage(Default::default()))],
+        vec![],
+    ] {
+        for with_observer in [false, true] {
+            let observer = Arc::new(Observer(Mutex::new(Vec::new())));
+            let mut events = vec![Ok(ModelStreamEvent::TextDelta {
+                text: "partial".into(),
+            })];
+            events.extend(tail.clone());
+            let events = retrying_stream(
+                config(),
+                CancellationToken::new(),
+                with_observer.then(|| observer.clone() as Arc<dyn super::RetryObserver>),
+                scripted_attempt(vec![Ok(events)], Arc::new(AtomicUsize::new(0))),
+            )
+            .collect::<Vec<_>>()
+            .await;
+            let Some(Ok(ModelStreamEvent::Interrupted {
+                error,
+                attempts,
+                max_attempts,
+            })) = events.last()
+            else {
+                panic!("必须保留 Interrupted 事件");
+            };
+            assert_eq!((*attempts, *max_attempts), (1, 3));
+            assert_eq!(error.interruption_logged(), with_observer);
+            let diagnostic = error.interruption_diagnostic().unwrap();
+            if matches!(tail.first(), Some(Err(_))) {
+                assert!(error.is_stream_interrupted());
+                assert_eq!(diagnostic.transport(), Some(TransportErrorKind::Connection));
+                assert_eq!(diagnostic.provider(), Some("openai"));
+            } else {
+                assert_eq!(
+                    diagnostic.protocol(),
+                    Some(crate::ProtocolErrorKind::StreamEndedWithoutCompleted)
+                );
+            }
+            let observed = observer.0.lock().unwrap();
+            assert_eq!(observed.len(), usize::from(with_observer));
+            if with_observer {
+                assert_eq!(observed[0].diagnostic(), Some(diagnostic));
+                assert_eq!((observed[0].attempt(), observed[0].max_attempts()), (1, 3));
+            }
+        }
+    }
+}
+
 #[test]
 fn jittered_delay_never_exceeds_max_delay() {
     let config = RetryConfig::default()

@@ -32,6 +32,126 @@ const PARTIAL: &str =
     "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}]}\n\n";
 const COMPLETE: &str = "data: {\"choices\":[{\"delta\":{\"content\":\"continued\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
 
+#[derive(Clone, Default)]
+struct LogBuffer(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogBuffer {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBuffer {
+    type Writer = Self;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+/// 独立 current_thread runtime 使 provider 的 spawn 和 bridge 共用同步订阅作用域。
+#[test]
+fn interrupted_logs_are_visible_once_per_exit_and_safe() {
+    use peri_acp_types::event::FnEventHandler;
+    use peri_agent::session::retry_events::{retry_observer_for, RetryEventForwarder};
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let handler = Arc::new(FnEventHandler(|_| {}));
+    let forwarder = RetryEventForwarder::new();
+    forwarder.set(Some(handler.clone()));
+    let observers: Vec<Option<Arc<dyn peri_model::RetryObserver>>> = vec![
+        None,
+        Some(Arc::new(|_: peri_model::RetryObservation| {})),
+        Some(retry_observer_for(handler)),
+        Some(forwarder.as_retry_observer()),
+        Some(RetryEventForwarder::new().as_retry_observer()),
+    ];
+    for observer in observers {
+        for exhausted in [false, true] {
+            let buffer = LogBuffer::default();
+            let subscriber = tracing_subscriber::fmt()
+                .with_max_level(tracing::Level::INFO)
+                .with_ansi(false)
+                .without_time()
+                .with_writer(buffer.clone())
+                .finish();
+            let evidence = tracing::subscriber::with_default(subscriber, || {
+                runtime.block_on(run_script_with_observer(
+                    vec![
+                        PARTIAL.as_bytes().to_vec(),
+                        if exhausted { PARTIAL } else { COMPLETE }
+                            .as_bytes()
+                            .to_vec(),
+                    ],
+                    observer.clone(),
+                    true,
+                ))
+            });
+            if exhausted {
+                assert!(matches!(
+                    evidence.result,
+                    LoopResult::Error(AgentError::StreamRecoveryExhausted { attempts: 2, .. })
+                ));
+            } else {
+                assert!(matches!(evidence.result, LoopResult::Completed));
+            }
+            let logs = String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap();
+            let lines: Vec<_> = logs
+                .lines()
+                .filter(|line| line.contains("模型流中断"))
+                .collect();
+            assert_eq!(
+                lines.len(),
+                if exhausted { 2 } else { 1 },
+                "每个抑制出口恰好一条日志: {logs}"
+            );
+            for line in &lines {
+                assert!(
+                    line.contains("WARN") && line.contains("stream_interrupted"),
+                    "{logs}"
+                );
+                assert!(
+                    line.contains("attempts=1") && line.contains("max_attempts=2"),
+                    "{logs}"
+                );
+                assert!(
+                    line.contains("provider=\"openai\"")
+                        && line.contains("error_kind=\"transport\"")
+                        && line.contains("transport="),
+                    "{logs}"
+                );
+            }
+            for forbidden in [
+                "fixture-key",
+                "finish the task",
+                "partial",
+                "continued",
+                "choices",
+                "Bearer",
+                "Authorization",
+            ] {
+                assert!(!logs.contains(forbidden), "日志泄漏请求或响应内容");
+            }
+            // 仅将已经通过脱敏断言的捕获日志交给测试输出，便于验收核对。
+            tracing::subscriber::with_default(
+                tracing_subscriber::fmt()
+                    .with_ansi(false)
+                    .without_time()
+                    .finish(),
+                || tracing::info!(captured = %lines.join("\n"), "中断日志断言通过"),
+            );
+        }
+    }
+}
+
 struct CompletionCounter(Arc<AtomicUsize>);
 
 #[async_trait::async_trait]
@@ -86,17 +206,28 @@ struct Evidence {
 }
 
 async fn run_script(responses: Vec<Vec<u8>>) -> Evidence {
+    run_script_with_observer(responses, None, false).await
+}
+
+async fn run_script_with_observer(
+    responses: Vec<Vec<u8>>,
+    observer: Option<Arc<dyn peri_model::RetryObserver>>,
+    truncated_transport: bool,
+) -> Evidence {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}/v1/", listener.local_addr().unwrap());
+    let mut runtime = peri_model::ModelRuntimeConfig::default().with_retry(
+        peri_model::RetryConfig::default()
+            .with_max_attempts(2)
+            .with_base_delay(Duration::ZERO)
+            .with_jitter(false),
+    );
+    if let Some(observer) = observer {
+        runtime = runtime.with_retry_observer(observer);
+    }
     let model = OpenAiModel::new(
-        OpenAiConfig::new(endpoint.parse().unwrap(), "fixture-key", "fixture-model").with_runtime(
-            peri_model::ModelRuntimeConfig::default().with_retry(
-                peri_model::RetryConfig::default()
-                    .with_max_attempts(2)
-                    .with_base_delay(Duration::ZERO)
-                    .with_jitter(false),
-            ),
-        ),
+        OpenAiConfig::new(endpoint.parse().unwrap(), "fixture-key", "fixture-model")
+            .with_runtime(runtime),
     );
     let directory = tempfile::tempdir().unwrap();
     let session = Session::new(
@@ -128,7 +259,7 @@ async fn run_script(responses: Vec<Vec<u8>>) -> Evidence {
             requests.push(read_request(&mut socket).await);
             let header = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                body.len()
+                body.len() + usize::from(truncated_transport && body == PARTIAL.as_bytes())
             );
             socket
                 .write_all(&[header.as_bytes(), &body].concat())

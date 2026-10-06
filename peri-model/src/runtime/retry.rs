@@ -234,6 +234,12 @@ impl RetryObservation {
 /// 对象。
 pub trait RetryObserver: Send + Sync {
     fn on_retry(&self, observation: RetryObservation);
+
+    /// 可见输出后的中断观测（delay 为零，不表示将重试）。
+    /// 返回 true 表示已记录诊断；默认不处理，由 Agent 边界兜底。
+    fn on_interrupted(&self, _observation: RetryObservation) -> bool {
+        false
+    }
 }
 
 impl<F> RetryObserver for F
@@ -347,11 +353,12 @@ async fn run_retrying_stream(
                 }
                 Some(Err(error)) if error.is_cancelled() => return,
                 Some(Err(error)) if visible => {
-                    let error = if error.transport_kind().is_some() {
-                        interrupted_from(&error)
-                    } else {
-                        error
-                    };
+                    let error = observe_interruption(
+                        observer.as_ref(),
+                        attempt_number,
+                        config.max_attempts(),
+                        error,
+                    );
                     let _ = send_event(
                         &sender,
                         &cancellation,
@@ -380,13 +387,17 @@ async fn run_retrying_stream(
                     break;
                 }
                 None if usage_after_visible => {
+                    let error = observe_interruption(
+                        observer.as_ref(),
+                        attempt_number,
+                        config.max_attempts(),
+                        ModelError::protocol(crate::ProtocolErrorKind::StreamEndedWithoutCompleted),
+                    );
                     let _ = send_event(
                         &sender,
                         &cancellation,
                         Ok(ModelStreamEvent::Interrupted {
-                            error: ModelError::protocol(
-                                crate::ProtocolErrorKind::StreamEndedWithoutCompleted,
-                            ),
+                            error,
                             attempts: attempt_number,
                             max_attempts: config.max_attempts(),
                         }),
@@ -395,11 +406,21 @@ async fn run_retrying_stream(
                     return;
                 }
                 None if visible => {
+                    let source = observe_interruption(
+                        observer.as_ref(),
+                        attempt_number,
+                        config.max_attempts(),
+                        ModelError::protocol(crate::ProtocolErrorKind::StreamEndedWithoutCompleted),
+                    );
+                    let error = interrupted_from(&source).with_interruption_diagnostic(
+                        source.diagnostic(),
+                        source.interruption_logged(),
+                    );
                     let _ = send_event(
                         &sender,
                         &cancellation,
                         Ok(ModelStreamEvent::Interrupted {
-                            error: ModelError::stream_interrupted(None::<&str>, None::<&str>),
+                            error,
                             attempts: attempt_number,
                             max_attempts: config.max_attempts(),
                         }),
@@ -477,6 +498,38 @@ async fn send_event(
         _ = cancellation.cancelled() => false,
         result = sender.send(event) => result.is_ok(),
     }
+}
+
+fn observe_interruption(
+    observer: Option<&Arc<dyn RetryObserver>>,
+    attempts: u32,
+    max_attempts: u32,
+    error: ModelError,
+) -> ModelError {
+    // 必须在 transport 被压成 StreamInterrupted 前保留安全分类，绝不投影自由文本。
+    let diagnostic = error.diagnostic();
+    let observation = RetryObservation {
+        attempt: attempts,
+        max_attempts,
+        delay: Duration::ZERO,
+        error_kind: error.retry_error_kind().unwrap_or_else(|| {
+            if error.transport_kind().is_some() {
+                RetryErrorKind::Transport
+            } else if error.http_status_code().is_some() {
+                RetryErrorKind::HttpStatus
+            } else {
+                RetryErrorKind::Protocol
+            }
+        }),
+        diagnostic: Some(diagnostic.clone()),
+    };
+    let logged = observer.is_some_and(|observer| observer.on_interrupted(observation));
+    let error = if error.transport_kind().is_some() {
+        interrupted_from(&error)
+    } else {
+        error
+    };
+    error.with_interruption_diagnostic(diagnostic, logged)
 }
 
 fn interrupted_from(error: &ModelError) -> ModelError {

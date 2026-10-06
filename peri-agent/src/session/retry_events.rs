@@ -33,9 +33,28 @@ pub(crate) fn translate_observation(
 /// 将 `AgentEventHandler` 包装为 `RetryObserver`：重试观测直接翻译为
 /// `ExecutorEvent::LlmRetrying` 交给 handler。
 pub fn retry_observer_for(handler: Arc<dyn AgentEventHandler>) -> Arc<dyn RetryObserver> {
-    Arc::new(move |observation: RetryObservation| {
-        translate_observation(&observation, &handler);
-    })
+    let forwarder = RetryEventForwarder::new();
+    forwarder.set(Some(handler));
+    forwarder.as_retry_observer()
+}
+
+/// 与边界错误共用白名单投影；不得格式化原始 error、body 或 cause chain。
+pub(crate) fn log_interruption(
+    diagnostic: &peri_model::ModelErrorDiagnostic,
+    attempts: u32,
+    max_attempts: u32,
+) {
+    tracing::warn!(
+        provider = diagnostic.provider().unwrap_or("unknown"),
+        request_id = diagnostic.request_id(),
+        attempts,
+        max_attempts,
+        error_kind = diagnostic.category_name(),
+        transport = diagnostic.transport().map(|kind| kind.to_string()),
+        http_status = diagnostic.status(),
+        protocol = diagnostic.protocol().map(|kind| kind.to_string()),
+        "模型流中断 (stream_interrupted)"
+    );
 }
 
 /// Session 级可更新 retry 事件转发器。
@@ -57,11 +76,27 @@ impl RetryEventForwarder {
     }
 
     pub fn as_retry_observer(&self) -> Arc<dyn RetryObserver> {
-        let cell = self.clone();
-        Arc::new(move |observation: RetryObservation| {
-            if let Some(handler) = cell.handler.read().clone() {
-                translate_observation(&observation, &handler);
-            }
-        })
+        Arc::new(self.clone())
+    }
+}
+
+impl RetryObserver for RetryEventForwarder {
+    fn on_retry(&self, observation: RetryObservation) {
+        if let Some(handler) = self.handler.read().clone() {
+            translate_observation(&observation, &handler);
+        }
+    }
+
+    fn on_interrupted(&self, observation: RetryObservation) -> bool {
+        let Some(diagnostic) = observation.diagnostic() else {
+            return false;
+        };
+        // 日志不依赖 turn handler，池化模型暂未绑定 handler 时也不能静默。
+        log_interruption(
+            diagnostic,
+            observation.attempt(),
+            observation.max_attempts(),
+        );
+        true
     }
 }

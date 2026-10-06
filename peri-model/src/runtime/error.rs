@@ -397,11 +397,33 @@ impl ModelErrorDiagnostic {
 /// 此错误只保存经过验证的 provider、HTTP status、request id 与受限摘要，绝不保存请求/响应
 /// 正文、headers、cookie 或认证凭据。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ModelError(ModelErrorInner);
+pub struct ModelError(ModelErrorInner, Option<(ModelErrorDiagnostic, bool)>);
 
 impl ModelError {
+    fn new(inner: ModelErrorInner) -> Self {
+        Self(inner, None)
+    }
+
+    /// 中断降级前的安全诊断及 observer 是否已负责记录；不改变错误分类。
+    pub fn interruption_diagnostic(&self) -> Option<&ModelErrorDiagnostic> {
+        self.1.as_ref().map(|(diagnostic, _)| diagnostic)
+    }
+
+    pub fn interruption_logged(&self) -> bool {
+        self.1.as_ref().is_some_and(|(_, logged)| *logged)
+    }
+
+    pub(crate) fn with_interruption_diagnostic(
+        mut self,
+        diagnostic: ModelErrorDiagnostic,
+        logged: bool,
+    ) -> Self {
+        self.1 = Some((diagnostic, logged));
+        self
+    }
+
     pub fn transport(kind: TransportErrorKind, provider: Option<impl AsRef<str>>) -> Self {
-        Self(ModelErrorInner::Transport {
+        Self::new(ModelErrorInner::Transport {
             kind,
             provider: provider.and_then(|value| SafeErrorContext::new(value)),
         })
@@ -412,7 +434,7 @@ impl ModelError {
         provider: impl AsRef<str>,
         request_id: Option<impl AsRef<str>>,
     ) -> Self {
-        Self(ModelErrorInner::HttpStatus {
+        Self::new(ModelErrorInner::HttpStatus {
             status,
             provider: SafeErrorContext::new(provider),
             request_id: request_id.and_then(|value| SafeErrorContext::new(value)),
@@ -420,31 +442,31 @@ impl ModelError {
     }
 
     pub fn protocol(kind: ProtocolErrorKind) -> Self {
-        Self(ModelErrorInner::Protocol(ProtocolError::new(kind)))
+        Self::new(ModelErrorInner::Protocol(ProtocolError::new(kind)))
     }
 
     pub fn protocol_with_summary(kind: ProtocolErrorKind, summary: impl AsRef<str>) -> Self {
-        Self(ModelErrorInner::Protocol(ProtocolError::with_summary(
+        Self::new(ModelErrorInner::Protocol(ProtocolError::with_summary(
             kind, summary,
         )))
     }
 
     pub fn cancelled() -> Self {
-        Self(ModelErrorInner::Cancelled)
+        Self::new(ModelErrorInner::Cancelled)
     }
 
     pub fn stream_interrupted(
         provider: Option<impl AsRef<str>>,
         request_id: Option<impl AsRef<str>>,
     ) -> Self {
-        Self(ModelErrorInner::StreamInterrupted {
+        Self::new(ModelErrorInner::StreamInterrupted {
             provider: provider.and_then(|value| SafeErrorContext::new(value)),
             request_id: request_id.and_then(|value| SafeErrorContext::new(value)),
         })
     }
 
     pub fn retry_exhausted(attempts: u32, last_error: RetryErrorKind) -> Option<Self> {
-        (attempts > 0).then_some(Self(ModelErrorInner::RetryExhausted {
+        (attempts > 0).then_some(Self::new(ModelErrorInner::RetryExhausted {
             attempts,
             last_error,
             diagnostic: None,
@@ -460,7 +482,7 @@ impl ModelError {
             attempts > 0,
             "retry exhaustion requires at least one attempt"
         );
-        Self(ModelErrorInner::RetryExhausted {
+        Self::new(ModelErrorInner::RetryExhausted {
             attempts,
             last_error,
             diagnostic: Some(error.diagnostic().with_retry(attempts, last_error)),
