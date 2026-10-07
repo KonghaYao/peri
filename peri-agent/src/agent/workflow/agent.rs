@@ -89,8 +89,6 @@ pub struct WorkflowAgentContext {
     /// 仅由会话装配注入，不得取自 workflow 参数或模型工具输入。
     pub session_id: Option<String>,
     pub session_resources: Option<Arc<dyn peri_acp_types::session_resources::SessionResources>>,
-    pub execution_admission_port:
-        Option<Arc<dyn peri_acp_types::execution_admission::ExecutionAdmissionPort>>,
     /// Compact 配置（None = 不启用自动 compact）
     pub compact_config: Option<CompactConfig>,
     /// 取消令牌（None = workflow agent 创建内部 token）
@@ -182,7 +180,6 @@ pub fn create_default_executor(
         mcp_skill_registry: None,
         session_id: None,
         session_resources: None,
-        execution_admission_port: None,
         compact_config: None,
         cancel: None,
         system_prompt: None,
@@ -481,10 +478,9 @@ impl AgentExecutor for WorkflowAgentExecutor {
             task_manager: Some(task_manager.clone()),
             mcp_pool: self.ctx.middleware_factory.mcp_pool(),
             session_resources: Some(execution.resources.clone()),
-            execution_admission_port: Some(execution.admission_port.clone()),
             ..Default::default()
         });
-        let mut v2_ctx = ctx_builder.build(
+        let v2_ctx = ctx_builder.build(
             Some(session),
             llm,
             chain,
@@ -499,7 +495,6 @@ impl AgentExecutor for WorkflowAgentExecutor {
                 &session_id,
             )),
         );
-        v2_ctx.context.recipient_lifecycle = Some(execution.lifecycle);
 
         // EventBus forwarder（v2 → v1 ExecutorEvent，转发给 event_handler）。
         // 经注入的 ForwarderLauncherFn 启动——biased select 顺序不变量单点
@@ -518,7 +513,6 @@ impl AgentExecutor for WorkflowAgentExecutor {
             agent_id: _,
             event_bus,
         } = v2_ctx;
-        let execution_turn = context.session.turn.clone();
         let handler_for_forwarder = Arc::clone(&event_handler);
         let publish_hook = self.ctx.publish_hook.clone();
         let sid_for_forwarder = self.ctx.session_id.clone();
@@ -560,10 +554,13 @@ impl AgentExecutor for WorkflowAgentExecutor {
             }
         };
         // 7. 运行 v2 ReAct 循环
-        let loop_result = run_react_loop(context, max_iterations).await;
+        let mut loop_result = run_react_loop(context, max_iterations).await;
+        if let Err(error) = crate::session::subagent::flush_session_history(&session).await {
+            loop_result = crate::agent::stages::LoopResult::Error(error);
+        }
         let forwarder_result = await_workflow_forwarder(event_bus, forwarder_handle).await;
         let forwarded = forwarder_result.is_ok();
-        let mut projected = result::project_run_result(
+        let projected = result::project_run_result(
             loop_result,
             forwarder_result,
             &session,
@@ -573,16 +570,7 @@ impl AgentExecutor for WorkflowAgentExecutor {
             started_at,
         );
         if forwarded {
-            if execution_turn.work_admission().is_none() {
-                projected = projected.with_unsettled(
-                    "Incomplete: workflow execution has no SDK admission proof".into(),
-                );
-            } else {
-                match execution.finish(&session, &execution_turn).await {
-                    Ok(()) => execution_guard.confirm_stopped(),
-                    Err(detail) => projected = projected.with_unsettled(detail),
-                }
-            }
+            execution_guard.confirm_stopped();
         }
 
         // 保持 final event 消费与统计提取之后的终态钩子；flush 仍为 fire-and-forget。

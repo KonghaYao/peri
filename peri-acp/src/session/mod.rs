@@ -22,7 +22,6 @@ pub mod executor;
 mod frozen;
 pub(crate) mod frozen_snapshot;
 pub mod goal_state;
-mod lifecycle_binding;
 pub mod retry_events;
 pub mod state_builders;
 
@@ -67,7 +66,6 @@ pub type TaskManagerFactory =
     Arc<dyn Fn() -> Arc<dyn peri_acp_types::tasks::TaskManager> + Send + Sync>;
 
 pub struct AcpSession {
-    pub recipient_lifecycle: u64,
     pub session_id: String,
     pub thread_id: ThreadId,
     pub cwd: String,
@@ -107,7 +105,6 @@ pub struct AcpSession {
     pub(crate) user_input_mailbox:
         Option<Arc<peri_agent::session::user_input_mailbox::UserInputMailbox>>,
     pub(crate) user_input_events_cancel: CancellationToken,
-    pub(crate) inbox_work_notifications: Option<(u64, CancellationToken)>,
     /// Session 级 cron bridge（lazy-init，跨 turn 存活；close_session 时随本结构 drop）。
     pub cron_bridge: Option<crate::session::cron_bridge::SessionCronBridge>,
     /// 后台任务管理器（Agent 层 per-session 聚合：registry + bg shell 执行；
@@ -190,9 +187,7 @@ impl AcpSession {
             mailbox.invalidate();
         }
         self.user_input_events_cancel.cancel();
-        if let Some((_, cancellation)) = &self.inbox_work_notifications {
-            cancellation.cancel();
-        }
+
         if let Some(projection) = self.dynamic_mcp_projection.lock().take() {
             projection.close();
         }
@@ -324,9 +319,7 @@ impl SessionManager {
                 mailbox.invalidate();
             }
             session.user_input_events_cancel.cancel();
-            if let Some((_, cancellation)) = &session.inbox_work_notifications {
-                cancellation.cancel();
-            }
+
             peri_acp_types::session::cancel_cascade_agents(session.active_agents.values());
             session.cancel_token.cancel();
             session.task_manager.cancel_all();

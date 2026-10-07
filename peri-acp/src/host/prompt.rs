@@ -224,8 +224,7 @@ pub(crate) async fn run_prompt(
         .and_then(|v| v.as_str())
         .map(String::from);
 
-    let user_input_mailbox =
-        super::user_input::ensure_mailbox(&session_id, deployment, transport).await?;
+    let user_input_mailbox = super::user_input::ensure_mailbox(&session_id, deployment, transport)?;
 
     // Create cancel token and register in sessions.
     // `AgentCancellationToken` 即 `tokio_util::sync::CancellationToken` 别名
@@ -318,7 +317,6 @@ pub(crate) async fn run_prompt(
             mcp_skill_registry: session_manager.mcp_skill_registry_for(&session_id),
             session_id: Some(session_id.clone()),
             session_resources: Some(deployment.session_resources.clone()),
-            execution_admission_port: deployment.execution_admission_port.clone(),
             compact_config: {
                 let mut cc = peri_config_snapshot
                     .config
@@ -448,26 +446,6 @@ pub(crate) async fn run_prompt(
         .map(|session| Arc::clone(&session.dynamic_mcp_projection))
         .unwrap_or_else(|| Arc::new(parking_lot::Mutex::new(None)));
 
-    let recipient_lifecycle = deployment
-        .session_resources
-        .load_session_control(&session_id)
-        .await
-        .map_err(super::workspace::resource_error)?
-        .lifecycle;
-    let observed_admission = Arc::new(std::sync::OnceLock::new());
-    let observe_admission = Arc::clone(&observed_admission);
-    let sdk_run_started = super::scheduled_admission::after_run_started(
-        super::user_input::sdk_run_started_publisher(
-            session_id.clone(),
-            Arc::clone(&user_input_mailbox),
-            deployment,
-            Arc::clone(transport),
-            input_ticket.as_ref().map(|run| run.ticket.id.clone()),
-        ),
-        Arc::clone(&deployment.session_resources),
-        Arc::clone(permission_mode),
-        Arc::clone(&broker),
-    );
     let ctx = executor::SessionContext {
         cwd,
         provider_name,
@@ -516,19 +494,6 @@ pub(crate) async fn run_prompt(
             None
         },
         request_id,
-        execution_admission: params
-            .get("executionAdmission")
-            .map(|value| serde_json::from_value(value.clone()))
-            .transpose()
-            .map_err(|error| {
-                AcpError::new(-32602, format!("invalid execution admission: {error}"))
-            })?,
-        execution_admission_port: deployment.execution_admission_port.clone(),
-        sdk_admission_observed: Some(Arc::new(move |admission| {
-            let _ = observe_admission.set(admission);
-        })),
-        sdk_run_started: Some(sdk_run_started),
-        recipient_lifecycle,
         allow_await_wake: true,
         continuation_notify: cont_tx,
         user_input_mailbox: Some(Arc::clone(&user_input_mailbox)),
@@ -590,57 +555,15 @@ pub(crate) async fn run_prompt(
     }
     input_attempt_guard.finish(&result);
 
-    let response = finish_prompt_turn(
+    finish_prompt_turn(
         sessions,
         &session_id,
         continuation && !managed_input,
         result,
     )
-    .await;
-    if !params
-        .as_object()
-        .is_some_and(|params| params.contains_key("executionAdmission"))
-    {
-        if let Some(admission) = observed_admission.get() {
-            let evidence_id = super::execution::finish_admission(
-                deployment.session_resources.as_ref(),
-                admission,
-            )
-            .await?;
-            let port = deployment
-                .execution_admission_port
-                .as_ref()
-                .ok_or_else(|| AcpError::new(-32010, "SDK settlement capability is unavailable"))?;
-            use peri_acp_types::execution_admission::{
-                AttemptStoppedProof, SettlementOutcome, SettlementRequest,
-            };
-            let outcome = port
-                .settle(SettlementRequest {
-                    admission: admission.clone(),
-                    proof: AttemptStoppedProof::AttemptStopped {
-                        instance_id: admission.instance_id.clone(),
-                        generation_id: admission.generation_id.clone(),
-                        execution: admission.execution.clone(),
-                        evidence_id: evidence_id.clone(),
-                    },
-                })
-                .await
-                .map_err(|error| AcpError::new(-32010, error.to_string()))?;
-            if !matches!(outcome, SettlementOutcome::Applied { receipt }
-                if receipt.admission == *admission && receipt.evidence_id == evidence_id)
-            {
-                return Err(AcpError::new(
-                    -32010,
-                    "SDK execution settlement remains unconfirmed",
-                ));
-            }
-        }
-    }
-    response
+    .await
 }
 
-// Durable progress is independent of the terminal status. This boundary also owns wire
-// projection so that cancellation/error responses can never bypass canonical state adoption.
 pub(super) async fn finish_prompt_turn(
     sessions: &SharedSessions,
     session_id: &str,

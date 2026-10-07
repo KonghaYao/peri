@@ -21,7 +21,7 @@ typed schema、默认值、领域合并、scope/revision/explain/update 归
 
 | 我想做什么 | 主文件 | 入口/关键函数 | 关键逻辑 |
 | --- | --- | --- | --- |
-| 改项目、工作区与执行绑定协议 | `src/workspace.rs` + `src/store/mod.rs` + `src/session_resources.rs` + `src/peri_caps.rs` | `ProjectId`、`WorkspaceId`、`SessionBinding`、`ResolvedWorkspace`、`ThreadScope`、`ScopedThreadQuery`、`WorkspaceErrorData`、`ThreadStore::{validate_session_binding,reassert_session_binding}`、`PeriCaps::session_recovery_v1` | 身份独立于路径；存储接口封装发现、binding 校验与 SQL scope，不提供会话执行租约或只读 ownership 准入。`validate_session_binding` 完整复核，`reassert_session_binding` 不启动外部进程；扩展经 sessionWorkspaceV1 协商，错误不得当空列表或 legacy 绑定。`peri.sessionRecoveryV1` 保留 caps/wire 键但置 false，已无 dirty reset RPC。 |
+| 改项目、工作区与执行绑定协议 | `src/workspace.rs` + `src/store/mod.rs` + `src/session_resources.rs` + `src/peri_caps.rs` | `ProjectId`、`WorkspaceId`、`SessionBinding`、`ResolvedWorkspace`、`ThreadScope`、`ScopedThreadQuery`、`WorkspaceErrorData`、`ThreadStore::{validate_session_binding,reassert_session_binding}`、移除的 execution-recovery capability | 身份独立于路径；存储接口封装发现、binding 校验与 SQL scope，不提供会话执行租约或只读 ownership 准入。`validate_session_binding` 完整复核，`reassert_session_binding` 不启动外部进程；扩展经 sessionWorkspaceV1 协商，错误不得当空列表或 legacy 绑定。`peri.sessionRecoveryV1` 保留 caps/wire 键但置 false，已无 dirty reset RPC。 |
 | 存储 v2 的 Machine / Workspace 归属类型 | `src/workspace.rs` | `MachineId`、`MachineInfo`、`MachineIdentityKind`、`WorkspaceInfo`、`WorkspacePathSource` | 已加入纯契约类型；schema、迁移、资源接口和 ACP/TUI 消费仍按 active issue 实施，不能把这些类型当作已生效的存储隔离 |
 | 改会话关闭读回契约 | `src/session_resources.rs` | `SessionResources::{finish_close,close_settlement}`、`CloseSettlement` | `Finished` / `Pending` / `Unknown` 表达关闭持久化事实，不携带或比较执行 owner token；执行唯一性与接管由 `peri-sdk` 负责，types 不再提供 `ExecutionOwnerToken`、`SessionExecutionLease` 或 `ReadOnlyAdmission`。 |
 | 改后台任务与外部执行排空契约 | `src/tasks.rs` | `TaskManager::{spawn_owned,begin_external_execution,execution_cancel_token,shutdown,settle_completed,retry_pending_deliveries}`、`OnBgCompleteFn`、`ExternalExecutionGuard`、`TaskShutdownReport` | 请求取消与实际停止分开；owned 完成先确认交付再发布终态，失败保留结果供重试；UI活跃数不是执行证据；pending/in-flight 不可假装排空，默认 external settlement 不绕过交付 |
@@ -47,17 +47,9 @@ typed schema、默认值、领域合并、scope/revision/explain/update 归
 
 ## 子系统
 
-### 持久 RCRA（src/session_resources/work/）
+### 执行与存储契约
 
-`command.rs::PreparedWorkCommand` 消费原 `WorkCommand`，以不可变共享对象持有唯一 canonical 编码与摘要；`SessionResources::{apply_work_mutation,resolve_work_mutation}` 及 reducer 统一接收 Prepared，重试/Unknown 不修改已冻结命令。持久 DTO、pending snapshot 与原 journal wire 不变；冷读取仍严格解码并核对 canonical digest。`command_test.rs` 覆盖字节/摘要 golden、共享指针与真实编码/哈希计数。准备诊断 target 为 `peri_acp_types::work_prepare`，`elapsed_wall_us` 是 wall time，不是 CPU。
-
-`query.rs::WorkSnapshot::from_state` 的 blocked / unknown / claimable 判定复用一份 availability 元数据投影，规则仍由 `availability.rs` 维护；`terminal_query_test.rs` 通过真实构造计数防止重复投影回归。`processing.rs` 只借用 WorkRecord 元数据，不为推进阶段深拷贝请求/响应正文。
-
-`reducer.rs` 区分 CommitAct 的当前执行推进与原身份无 successor 结算；`processing.rs` 在 Blocked/Abandoned 下只记录真实结果、不恢复 processing。`query.rs::admission_batch` 通过 admission work/delivery 与 batch lineage 关联恢复执行，供显式中断及终态隔离共用。`admission.rs::finish` 与原 admission settlement 同一 reduction 清除精确当前 attempt，拒绝清除其他执行。
-
-`WorkDeliveryQuery` 显式携带 session / delivery 身份；`SessionResources::load_work_delivery` 返回单个 `DeliveryRecord`，只用于逐消息身份去重，不等价于完整 WorkSnapshot、候选判定或 Unknown 提交结论。未实现的后端默认返回 Unsupported，不回落全量读取。契约测试：`session_resources/work/delivery_query_test.rs`。
-
-`policy.rs` 的 `DEFAULT_AGENT_MAX_ITERATIONS` 同时供默认 WorkLimits 与 Agent 默认循环消费；旧默认 limits 的升级仅在 `user_input.rs` 的成功显式选择中执行，保留历史 budget counters。`user_input.rs` 区分无 attempt 的当前生命周期旧 processing 放弃与有 attempt 的精确执行中断；`query.rs` 将已放弃批次的终态交付责任与新任务准入分开，缺失关联证据仍阻塞。原 invocation、结果、binding 与真实 ACK 不被删除或伪造。预算失败经 `error.rs::WorkBudgetExhausted` 和 `session/execution.rs` 公开安全原因；其余未知内部错误仍脱敏。
+`session_resources.rs` 保留普通会话/历史/关闭/环境接口；持久 work/control 与 execution_admission 模块移除。`tools.rs::ToolContext` 持有当前 session_id、invocation_id 和可选 tool_call_id，不承载持久 intent/work target。类型变更与轻量验证见 [active plan](../../spec/issues/2026-10-07-remove-execution-recovery-plan.md)。
 
 ### compact（src/compact.rs）
 

@@ -4,8 +4,8 @@ use rmcp::handler::server::ServerHandler;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 #[path = "tool_bridge_invocation_fixture_test.rs"]
-mod durable_invocation_fixture;
-use durable_invocation_fixture::DurableInvocationFixture;
+mod current_invocation_fixture;
+use current_invocation_fixture::CurrentInvocationFixture;
 
 fn make_tool(name: &str, description: Option<&str>) -> Tool {
     let json = serde_json::json!({
@@ -557,7 +557,7 @@ async fn builtin_tool_call_surfaces_timeout_error_after_bridge_deadline() {
         "token": CREDENTIAL_MARKER,
     });
     let followup = serde_json::json!({ "expression": "*/5 * * * *" });
-    let fixture = DurableInvocationFixture::new(
+    let fixture = CurrentInvocationFixture::new(
         "deadline-session",
         "mcp__cron__cron_list",
         &[input.clone(), followup.clone()],

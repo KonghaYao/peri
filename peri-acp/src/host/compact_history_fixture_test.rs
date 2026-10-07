@@ -1,26 +1,24 @@
-//! Compact 提交后跨 turn 的恢复回归；复用生产 executor/host 收尾与 SQLite。
+//! Ordinary Compact history and cancellation regressions through the production host.
 
 use super::*;
 use crate::host::{prompt::finish_prompt_turn, SessionState, SharedSessions};
-use peri_acp_types::session_resources::work::PreparedWorkCommand;
 use peri_acp_types::{
     messages::MessageId,
     session_resources::{
         ChildResumeClaim, ChildSnapshot, ForkSnapshot, FrozenSnapshotBytes, NewSession,
         NewSessionMeta, PersistenceRecovery, RewindBoundary, SessionAvailability, SessionMetaPatch,
-        SessionResourceError, SessionResourceErrorKind, SessionResourceResult, SessionResources,
-        SessionSnapshot,
+        SessionResourceResult, SessionResources, SessionSnapshot,
     },
-    store::{CompactionChange, MessageFlags, PersistedPayload, ThreadStore},
+    store::{CompactionChange, MessageFlags, PersistedPayload},
     thread::{ThreadId, ThreadMeta},
     workspace::{ResolvedWorkspace, ScopedThreadPage, ScopedThreadQuery, SessionBinding},
 };
-use std::{collections::HashMap, sync::atomic::AtomicBool};
+use std::collections::HashMap;
 
 #[path = "compact_command_test.rs"]
 mod compact_command_tests;
 
-const SUMMARY: &str = "COMMITTED_COMPACT_RECOVERY_SUMMARY";
+const SUMMARY: &str = "COMMITTED_COMPACT_HISTORY_SUMMARY";
 const OLD: &str = "OLD_HISTORY_MUST_STAY_EXCLUDED";
 
 struct SummaryModel;
@@ -52,124 +50,13 @@ impl Model for SummaryModel {
     }
 }
 
-enum AfterCommitAction {
-    Cancel(AgentCancellationToken),
-    Error,
-}
-
-/// 真门面 + 提交点注入：故障包在真实 SQLite 门面调用外围，不能用内存替身伪造提交。
-///
-/// 本包装注入 Full 提交点取消、Work journal 前故障与 Work commit ACK 丢失；
-/// 所有 canonical 消息仍由真实 Work reducer 提交，其余行为逐项转发真实门面
-/// （同一库句柄，见 [`make_recovery_context`]）。
-struct RecoveryStore {
+struct CompactStore {
     inner: Arc<dyn SessionResources>,
-    database: std::path::PathBuf,
-    uncertain: Mutex<Option<PreparedWorkCommand>>,
     compact_commits: AtomicUsize,
-    fail_claim: AtomicBool,
-    fail_after_full: bool,
-    deletes: AtomicUsize,
-    after_commit: Mutex<Option<AfterCommitAction>>,
 }
 
 #[async_trait]
-impl SessionResources for RecoveryStore {
-    async fn load_work_availability(
-        &self,
-        id: &ThreadId,
-    ) -> SessionResourceResult<peri_acp_types::session_resources::work::WorkAvailability> {
-        self.inner.load_work_availability(id).await
-    }
-
-    async fn load_work_delivery(
-        &self,
-        query: &peri_acp_types::session_resources::work::WorkDeliveryQuery,
-    ) -> SessionResourceResult<Option<peri_acp_types::session_resources::work::DeliveryRecord>>
-    {
-        self.inner.load_work_delivery(query).await
-    }
-
-    async fn load_work_command(
-        &self,
-        query: &peri_acp_types::session_resources::work::WorkCommandQuery,
-    ) -> SessionResourceResult<Option<peri_acp_types::session_resources::work::OwnedWorkCommand>>
-    {
-        self.inner.load_work_command(query).await
-    }
-
-    async fn load_session_work(
-        &self,
-        query: &peri_acp_types::session_resources::work::WorkQuery,
-    ) -> SessionResourceResult<peri_acp_types::session_resources::work::WorkSnapshot> {
-        self.inner.load_session_work(query).await
-    }
-
-    async fn apply_work_mutation(
-        &self,
-        command: &PreparedWorkCommand,
-    ) -> SessionResourceResult<peri_acp_types::session_resources::work::WorkReceipt> {
-        use peri_acp_types::session_resources::work::WorkAction;
-        let before_effect = self.fail_claim.load(Ordering::SeqCst)
-            && matches!(command.action, WorkAction::ClaimBatch { .. });
-        let after_effect = self.fail_after_full
-            && self.compact_commits.load(Ordering::SeqCst) > 0
-            && matches!(
-                command.action,
-                WorkAction::CommitReasonResponseAndDispatchIntent { .. }
-            );
-        if before_effect || after_effect {
-            let connection =
-                sqlx::SqlitePool::connect(&format!("sqlite://{}", self.database.display()))
-                    .await
-                    .unwrap();
-            if after_effect {
-                self.inner.apply_work_mutation(command).await?;
-                sqlx::query("UPDATE session_work_commands SET reconciled=0 WHERE mutation_id=?1")
-                    .bind(&command.mutation_id)
-                    .execute(&connection)
-                    .await
-                    .unwrap();
-            } else {
-                sqlx::query("INSERT INTO session_work_commands(mutation_id,session_id,digest,command_json,reconciled) VALUES (?1,?2,?3,?4,0)")
-                    .bind(&command.mutation_id).bind(&command.session_id)
-                    .bind(command.digest()).bind(command.encoded().as_ref())
-                    .execute(&connection).await.unwrap();
-            }
-            *self.uncertain.lock().unwrap() = Some(command.clone());
-            return Err(SessionResourceError::persistence_uncertain(None));
-        }
-        self.inner.apply_work_mutation(command).await
-    }
-
-    async fn resolve_work_mutation(
-        &self,
-        command: &PreparedWorkCommand,
-    ) -> SessionResourceResult<peri_acp_types::session_resources::work::WorkResolution> {
-        if self.uncertain.lock().unwrap().as_ref() == Some(command) {
-            return Ok(peri_acp_types::session_resources::work::WorkResolution::Unknown);
-        }
-        self.inner.resolve_work_mutation(command).await
-    }
-
-    async fn load_session_control(
-        &self,
-        id: &ThreadId,
-    ) -> SessionResourceResult<peri_acp_types::session_resources::ControlState> {
-        self.inner.load_session_control(id).await
-    }
-    async fn apply_session_control(
-        &self,
-        command: &peri_acp_types::session_resources::ControlCommand,
-    ) -> SessionResourceResult<peri_acp_types::session_resources::ControlReceipt> {
-        self.inner.apply_session_control(command).await
-    }
-    async fn resolve_session_control(
-        &self,
-        command: &peri_acp_types::session_resources::ControlCommand,
-    ) -> SessionResourceResult<peri_acp_types::session_resources::ControlResolution> {
-        self.inner.resolve_session_control(command).await
-    }
+impl SessionResources for CompactStore {
     async fn inspect_availability(
         &self,
         session: Option<&ThreadId>,
@@ -331,22 +218,6 @@ impl SessionResources for RecoveryStore {
         self.inner.apply_compaction(id, change).await?;
         if !change.appended_messages.is_empty() {
             self.compact_commits.fetch_add(1, Ordering::SeqCst);
-            // guard 必须在 await 之前释放（`SessionResources` 的 future 需要 Send）。
-            let action = self.after_commit.lock().unwrap().take();
-            match action {
-                Some(AfterCommitAction::Cancel(cancel)) => {
-                    cancel.cancel();
-                    std::future::pending::<()>().await;
-                }
-                Some(AfterCommitAction::Error) => {
-                    return Err(SessionResourceError::new(
-                        SessionResourceErrorKind::Unavailable {
-                            detail: "injected error after durable compact commit".to_owned(),
-                        },
-                    ));
-                }
-                None => {}
-            }
         }
         Ok(())
     }
@@ -364,7 +235,6 @@ impl SessionResources for RecoveryStore {
         id: &ThreadId,
         boundary: RewindBoundary,
     ) -> SessionResourceResult<()> {
-        self.deletes.fetch_add(1, Ordering::SeqCst);
         self.inner.rewind_history(id, boundary).await
     }
 
@@ -373,7 +243,6 @@ impl SessionResources for RecoveryStore {
         id: &ThreadId,
         ids: &[MessageId],
     ) -> SessionResourceResult<()> {
-        self.deletes.fetch_add(1, Ordering::SeqCst);
         self.inner.remove_history_entries(id, ids).await
     }
 
@@ -401,7 +270,7 @@ impl SessionResources for RecoveryStore {
     }
 }
 
-impl RecoveryStore {
+impl CompactStore {
     /// 夹具侧直接读回持久化历史（走门面的一致快照，不另开连接）。
     async fn load_payloads(&self, id: &ThreadId) -> anyhow::Result<Vec<PersistedPayload>> {
         Ok(self.inner.load_session_snapshot(id).await?.payloads)
@@ -421,6 +290,10 @@ fn make_host_sessions(ctx: &SessionContext, payloads: Vec<PersistedPayload>) -> 
             .collect(),
         history_payloads: payloads,
         cancel_token: Some(ctx.cancel.clone()),
+        continuation_armed: false,
+        continuation_epoch: 0,
+        continuation_in_flight: false,
+        continuation_mq_steering_pending: false,
         frozen: Some(make_sentinel_frozen()),
         recall_items: vec![],
         agent_pool: AgentPool::new(),
@@ -434,25 +307,19 @@ fn make_host_sessions(ctx: &SessionContext, payloads: Vec<PersistedPayload>) -> 
     )])))
 }
 
-async fn make_recovery_context(
+async fn make_compact_context(
     dir: &tempfile::TempDir,
     model: Arc<dyn Model>,
-    fail_after_full: bool,
-) -> (SessionContext, Arc<RecoveryStore>, SharedSessions) {
+) -> (SessionContext, Arc<CompactStore>, SharedSessions) {
     // 夹具与生产同构：门面来自同一次打开，并经公共会话创建入口保存完整身份。
-    let (_bridge, facade) =
-        peri_resources::sessions::open_store_and_facade_for_tests(dir.path().join("recovery.db"))
-            .await
-            .unwrap();
-    let store = Arc::new(RecoveryStore {
+    let (_bridge, facade) = peri_resources::sessions::open_store_and_facade_for_tests(
+        dir.path().join("compact-history.db"),
+    )
+    .await
+    .unwrap();
+    let store = Arc::new(CompactStore {
         inner: Arc::new(facade),
-        database: dir.path().join("recovery.db"),
-        uncertain: Mutex::new(None),
         compact_commits: AtomicUsize::new(0),
-        fail_claim: AtomicBool::new(false),
-        fail_after_full,
-        deletes: AtomicUsize::new(0),
-        after_commit: Mutex::new(None),
     });
     let cwd = dir.path().to_str().unwrap();
     let meta = ThreadMeta::new_at(cwd, peri_time::now_wall());
@@ -484,9 +351,20 @@ async fn make_recovery_context(
     ctx.thread_id = Some(thread_id.clone());
     ctx.session_resources = Some(store.clone());
     ctx.session_access = None;
-    let history = execution_fixture::seed_history(&ctx, OLD, "old answer").await;
+    let history = vec![BaseMessage::human(OLD), BaseMessage::ai("old answer")];
+    store
+        .append_history(
+            &thread_id,
+            &history
+                .iter()
+                .cloned()
+                .map(PersistedPayload::Message)
+                .collect::<Vec<_>>(),
+        )
+        .await
+        .unwrap();
     ctx.primary_llm_factory = Some(Arc::new(move || model.clone()));
-    execution_fixture::bind_execution(&mut ctx, None);
+    execution_fixture::initialize_runtime(&mut ctx, None);
     let sessions = make_host_sessions(
         &ctx,
         history.into_iter().map(PersistedPayload::Message).collect(),
@@ -494,7 +372,7 @@ async fn make_recovery_context(
     (ctx, store, sessions)
 }
 
-async fn make_recovery_turn(
+async fn make_compact_turn(
     ctx: &SessionContext,
     sessions: &SharedSessions,
     trigger_full: bool,
@@ -523,7 +401,7 @@ async fn make_recovery_turn(
     let state = sessions.get(&ctx.session_id).unwrap();
     let mut turn = make_turn_input(
         Arc::new(MockEventSink::new()),
-        MessageContent::text("continue recovery lifecycle"),
+        MessageContent::text("continue ordinary session"),
         false,
         state.history.clone(),
         stage_build,
@@ -535,14 +413,14 @@ async fn make_recovery_turn(
 
 async fn assert_next_turn_sees_summary(mut ctx: SessionContext, sessions: &SharedSessions) {
     ctx.session_access = None;
-    execution_fixture::bind_execution(&mut ctx, None);
+    execution_fixture::initialize_runtime(&mut ctx, None);
     let requests = Arc::new(Mutex::new(Vec::new()));
     let model: Arc<dyn Model> = Arc::new(CapturePromptModel {
         requests: requests.clone(),
     });
     ctx.primary_llm_factory = Some(Arc::new(move || model.clone()));
     ctx.cancel = AgentCancellationToken::new();
-    let turn = make_recovery_turn(&ctx, sessions, false).await;
+    let turn = make_compact_turn(&ctx, sessions, false).await;
     let result = run_session_loop(ctx, turn).await;
     assert!(result.ok, "恢复后的下一轮应成功: {:?}", result.failure);
     let requests = requests.lock().unwrap();
@@ -556,6 +434,3 @@ async fn assert_next_turn_sees_summary(mut ctx: SessionContext, sessions: &Share
     assert!(text.contains(SUMMARY), "下一轮必须包含已提交摘要");
     assert!(!text.contains(OLD), "旧历史 excluded 标记必须继续生效");
 }
-
-#[path = "compact_work_fixture_test.rs"]
-mod work_fixture;

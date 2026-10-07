@@ -1,13 +1,5 @@
 //! Deployment → session/new → MCP → session scheduler → continuation regression.
 use super::*;
-use peri_acp_types::execution_admission::{
-    AdmissionOutcome, AdmissionRequest, AdmissionSnapshot, EntryOutcome, EntryReceipt,
-    EntryRequest, ExecutionAdmissionError, ExecutionAdmissionPort, SettlementOutcome,
-    SettlementReceipt, SettlementRequest,
-};
-use peri_acp_types::identity::AttemptId;
-use peri_acp_types::session::TurnId;
-use peri_acp_types::session_resources::{work::WorkQuery, ControlAttempt};
 use peri_mcp_cron::CronSchedulerPortHandle;
 use peri_middlewares::mcp::McpClientPool;
 use peri_model::{
@@ -26,129 +18,6 @@ struct CronModel {
     prompts: Arc<parking_lot::Mutex<Vec<String>>>,
     first_request_tools: Arc<parking_lot::Mutex<Vec<String>>>,
     first_request_system: Arc<parking_lot::Mutex<Option<String>>>,
-}
-
-struct CronPromptAdmission {
-    resources: Arc<dyn peri_acp_types::session_resources::SessionResources>,
-}
-
-#[async_trait]
-impl ExecutionAdmissionPort for CronPromptAdmission {
-    async fn admit(
-        &self,
-        request: AdmissionRequest,
-    ) -> Result<AdmissionOutcome, ExecutionAdmissionError> {
-        let snapshot = self
-            .resources
-            .load_session_work(&WorkQuery {
-                session_id: request.snapshot.session_id.clone(),
-                limit: 1,
-            })
-            .await
-            .map_err(|error| ExecutionAdmissionError::Protocol(error.to_string()))?;
-        if AdmissionSnapshot::from(&snapshot) != request.snapshot
-            || snapshot.blocked
-            || !snapshot.pending_commands.is_empty()
-        {
-            return Err(ExecutionAdmissionError::Protocol(
-                "stale work snapshot".into(),
-            ));
-        }
-        let candidate = snapshot
-            .candidates
-            .first()
-            .ok_or_else(|| ExecutionAdmissionError::Protocol("no durable work candidate".into()))?;
-        let admission = peri_acp_types::session_resources::work::WorkAdmission {
-            session_id: snapshot.session_id,
-            admission_id: format!("cron-prompt:{}", request.request_id),
-            instance_id: "cron-prompt-fixture".into(),
-            generation_id: uuid::Uuid::now_v7().to_string(),
-            lifecycle: snapshot.control.lifecycle,
-            control_generation: snapshot.control.control_generation,
-            work_id: candidate.work_id.clone(),
-            work_revision: candidate.work_revision,
-            execution: ControlAttempt {
-                turn_id: TurnId::new(),
-                attempt_id: AttemptId::new(),
-            },
-        };
-        Ok(AdmissionOutcome::Admitted { admission })
-    }
-
-    async fn entered(
-        &self,
-        request: EntryRequest,
-    ) -> Result<EntryOutcome, ExecutionAdmissionError> {
-        let snapshot = self
-            .resources
-            .load_session_work(&WorkQuery {
-                session_id: request.admission.session_id.clone(),
-                limit: 1,
-            })
-            .await
-            .map_err(|error| ExecutionAdmissionError::Protocol(error.to_string()))?;
-        let valid = snapshot
-            .state
-            .admissions
-            .get(&request.admission.admission_id)
-            .is_some_and(|record| {
-                record.admission == request.admission
-                    && record.settled_receipt.is_none()
-                    && record.entering_receipt.as_ref().is_some_and(|receipt| {
-                        receipt.decision
-                            == peri_acp_types::session_resources::work::WorkDecision::Accepted
-                            && receipt.mutation_id == request.entry_evidence_id
-                    })
-            })
-            && snapshot.control.attempt.as_ref() == Some(&request.admission.execution);
-        if !valid {
-            return Err(ExecutionAdmissionError::Protocol(
-                "entry not registered".into(),
-            ));
-        }
-        Ok(EntryOutcome::Applied {
-            receipt: EntryReceipt {
-                admission: request.admission,
-                entry_evidence_id: request.entry_evidence_id,
-            },
-        })
-    }
-
-    async fn settle(
-        &self,
-        request: SettlementRequest,
-    ) -> Result<SettlementOutcome, ExecutionAdmissionError> {
-        if !request.proof.validates(&request.admission) {
-            return Err(ExecutionAdmissionError::Protocol(
-                "invalid stopped proof".into(),
-            ));
-        }
-        let snapshot = self
-            .resources
-            .load_session_work(&WorkQuery {
-                session_id: request.admission.session_id.clone(),
-                limit: 1,
-            })
-            .await
-            .map_err(|error| ExecutionAdmissionError::Protocol(error.to_string()))?;
-        if snapshot.control.attempt.is_some()
-            || !snapshot
-                .state
-                .admissions
-                .get(&request.admission.admission_id)
-                .is_some_and(|record| {
-                    record.admission == request.admission && record.settled_receipt.is_some()
-                })
-        {
-            return Err(ExecutionAdmissionError::Protocol("work not settled".into()));
-        }
-        Ok(SettlementOutcome::Applied {
-            receipt: SettlementReceipt {
-                admission: request.admission,
-                evidence_id: request.proof.evidence_id().into(),
-            },
-        })
-    }
 }
 
 #[async_trait]
@@ -287,10 +156,7 @@ async fn restricted_deployment_omits_local_optional_capabilities_in_session() {
         plugins: false,
         settings_hooks: false,
     };
-    let mut cfg = deployment_with_capabilities(&tmp, true, capabilities).await;
-    cfg.execution_admission_port = Some(Arc::new(CronPromptAdmission {
-        resources: cfg.session_resources.clone(),
-    }));
+    let cfg = deployment_with_capabilities(&tmp, true, capabilities).await;
     assert!(cfg.cron_scheduler.is_none());
     assert!(cfg.hook_groups.is_empty());
     assert_eq!(
@@ -550,6 +416,9 @@ async fn cron_deployment_registration_and_tick_are_session_scoped() {
     let driver = tokio::spawn(crate::host::run_cron_continuation_scheduler(
         cron_rx,
         crate::host::CronContinuationContext {
+            sessions: shared.clone(),
+            prompt_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            cont_tx: Arc::new(tokio::sync::mpsc::unbounded_channel().0),
             cfg: cfg.clone(),
             transport: transport.clone(),
             task_spawner: cfg.host_task_spawner.clone(),
@@ -557,61 +426,24 @@ async fn cron_deployment_registration_and_tick_are_session_scoped() {
         },
     ));
     assert!(sched_a.lock().force_next_fire_to_past(&task_a));
-    let published = tokio::time::timeout(Duration::from_secs(15), async {
+    tokio::time::timeout(Duration::from_secs(4), async {
         loop {
-            let snapshot = cfg
-                .session_resources
-                .load_session_work(&peri_acp_types::session_resources::work::WorkQuery {
-                    session_id: a.clone(),
-                    limit: 1,
-                })
-                .await
-                .unwrap();
-            if snapshot.state.deliveries.values().any(|delivery| {
-                delivery
-                    .publication
-                    .event
-                    .content
-                    .serialized
-                    .contains("session-a-marker")
-            }) {
-                break snapshot;
+            if model
+                .prompts
+                .lock()
+                .iter()
+                .any(|prompt| prompt.contains("session-a-marker"))
+                && !shared.lock().await[&a].history.is_empty()
+            {
+                break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     })
     .await
-    .expect("scheduled trigger must durably publish its original recipient");
-    tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            if recorded_transport
-                .notifications()
-                .iter()
-                .any(|(method, params)| {
-                    method == "session/work/available" && params["sessionId"] == a
-                })
-            {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("durable work publication must notify the SDK");
-    assert_eq!(
-        published.control.lifecycle,
-        trigger.recipient_control.lifecycle
-    );
-    assert!(
-        published.state.admissions.is_empty(),
-        "Peri producer cannot admit attempts"
-    );
-    assert!(
-        model.prompts.lock().is_empty(),
-        "no Rust continuation scheduler execution"
-    );
-    assert!(shared.lock().await[&a].history.is_empty());
+    .expect("scheduled continuation must execute on the current session");
     assert!(shared.lock().await[&b].history.is_empty());
+    let completed_prompts = model.prompts.lock().len();
 
     // Deleting a registered task prevents later ticks; closing A stops its generation.
     cron_tool(&env_a, &a, &cwd, "cron_remove", json!({"id": task_a})).await;
@@ -651,7 +483,7 @@ async fn cron_deployment_registration_and_tick_are_session_scoped() {
             .is_err(),
         "closed session must stop its only tick driver"
     );
-    assert!(model.prompts.lock().is_empty());
+    assert_eq!(model.prompts.lock().len(), completed_prompts);
     // B remains usable after A closes.
     cron_tool(
         &env_b,

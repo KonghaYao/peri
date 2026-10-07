@@ -81,21 +81,15 @@ async fn legacy_history_context_then_load_restores_saved_cwd_and_frozen_snapshot
         "零兜底前提：磁盘上的指令文件仍在"
     );
     let frozen = bridge.load_frozen_snapshot(&id).await.unwrap().unwrap();
-    let work = cfg
-        .session_resources
-        .load_session_work(&peri_acp_types::session_resources::work::WorkQuery {
-            session_id: id.clone(),
-            limit: 1,
-        })
-        .await
-        .unwrap();
-    assert!(work.blocked);
-    assert!(work
-        .state
-        .legacy_unknown
-        .keys()
-        .any(|identity| identity.starts_with("ownerMissing:")));
-    sessions.clear();
+    handle_request(
+        "session/close",
+        &json!({"sessionId":id}),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
     std::fs::write(cwd.join("CLAUDE.md"), "CHANGED_LATER").unwrap();
     handle_request(
         "session/resume",
@@ -125,27 +119,6 @@ async fn legacy_history_context_then_load_restores_saved_cwd_and_frozen_snapshot
         sessions[fork_id].history[0].content(),
         "legacy user message"
     );
-    let source_work = cfg
-        .session_resources
-        .load_session_work(&peri_acp_types::session_resources::work::WorkQuery {
-            session_id: id.clone(),
-            limit: 1,
-        })
-        .await
-        .unwrap();
-    assert!(source_work.blocked);
-    let fork_work = cfg
-        .session_resources
-        .load_session_work(&peri_acp_types::session_resources::work::WorkQuery {
-            session_id: fork_id.to_owned(),
-            limit: 1,
-        })
-        .await
-        .unwrap();
-    assert!(fork_work
-        .state
-        .resource_owners
-        .contains_key(&fork_work.control.lifecycle));
     handle_request(
         "session/close",
         &json!({"sessionId":fork_id}),
@@ -155,7 +128,7 @@ async fn legacy_history_context_then_load_restores_saved_cwd_and_frozen_snapshot
     )
     .await
     .unwrap();
-    let close_error = handle_request(
+    handle_request(
         "session/close",
         &json!({"sessionId":id}),
         &cfg,
@@ -163,9 +136,8 @@ async fn legacy_history_context_then_load_restores_saved_cwd_and_frozen_snapshot
         &transport,
     )
     .await
-    .unwrap_err();
-    assert_eq!(close_error.code, -32010);
-    assert!(cfg.session_resources.is_session_closing(&id).await.unwrap());
+    .unwrap();
+    assert!(!cfg.session_resources.is_session_closing(&id).await.unwrap());
 }
 
 #[tokio::test]
@@ -248,7 +220,7 @@ async fn legacy_history_load_ignores_wrong_directory_and_preserves_saved_cwd() {
     assert_eq!(Path::new(&bridge.load_meta(&id).await.unwrap().cwd), saved);
     assert!(bridge.load_session_binding(&id).await.unwrap().is_some());
     assert!(bridge.load_frozen_snapshot(&id).await.unwrap().is_some());
-    let close_error = handle_request(
+    handle_request(
         "session/close",
         &json!({"sessionId":id}),
         &cfg,
@@ -256,9 +228,9 @@ async fn legacy_history_load_ignores_wrong_directory_and_preserves_saved_cwd() {
         &transport,
     )
     .await
-    .unwrap_err();
-    assert_eq!(close_error.code, -32010);
-    assert!(cfg.session_resources.is_session_closing(&id).await.unwrap());
+    .unwrap();
+    assert!(!sessions.contains_key(&id));
+    assert!(!cfg.session_resources.is_session_closing(&id).await.unwrap());
 }
 
 #[tokio::test]
@@ -419,7 +391,7 @@ async fn legacy_history_freezes_saved_workspace_configuration_and_plugins() {
         "legacy 接纳不得从磁盘/插件根读技能目录：{}",
         frozen.skill_summary
     );
-    let close_error = handle_request(
+    handle_request(
         "session/close",
         &json!({"sessionId":id}),
         &cfg,
@@ -427,10 +399,7 @@ async fn legacy_history_freezes_saved_workspace_configuration_and_plugins() {
         &transport,
     )
     .await
-    .unwrap_err();
-    assert_eq!(close_error.code, -32010);
-    assert!(cfg.session_resources.is_session_closing(&id).await.unwrap());
-    if let Some(environment) = &sessions[&id].environment {
-        assert!(environment.shutdown().await);
-    }
+    .unwrap();
+    assert!(!sessions.contains_key(&id));
+    assert!(!cfg.session_resources.is_session_closing(&id).await.unwrap());
 }

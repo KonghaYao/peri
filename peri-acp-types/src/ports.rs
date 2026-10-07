@@ -139,12 +139,6 @@ pub enum McpBuiltinWorkspaceState {
 /// `McpClientPool`，路径不变。
 #[async_trait::async_trait]
 pub trait McpPoolPort: Send + Sync {
-    async fn cold_session_tools(
-        self: Arc<Self>,
-        _session_id: &str,
-    ) -> Result<Vec<Arc<dyn crate::tools::BaseTool>>, String> {
-        Err("Blocked: cold session tool reconstruction is unsupported".into())
-    }
     /// 还原具体实现（downcast 还原点，供 middlewares 装配面与装配面宿主使用）。
     fn as_any(&self) -> &dyn Any;
 
@@ -166,41 +160,8 @@ pub trait McpPoolPort: Send + Sync {
         None
     }
 
-    async fn agent_session_binding_for_lifecycle(
-        self: Arc<Self>,
-        _session_id: &str,
-        _lifecycle: u64,
-    ) -> Result<
-        Option<(
-            crate::session::InboxHandle,
-            Arc<dyn crate::tasks::TaskManager>,
-        )>,
-        String,
-    > {
-        Err("Incomplete: typed session lifecycle binding unavailable".into())
-    }
-
-    fn bind_agent_session_for_lifecycle(
-        &self,
-        _session_id: &str,
-        _lifecycle: u64,
-        _inbox: crate::session::InboxHandle,
-        _manager: Arc<dyn crate::tasks::TaskManager>,
-    ) -> Result<(), String> {
-        Err("Incomplete: typed session lifecycle binding unavailable".into())
-    }
-
     fn verify_shared_environment_close(&self, _root_session_id: &str) -> Result<(), String> {
         Err("Incomplete: shared environment child ownership unknown".into())
-    }
-
-    fn bind_agent_session_resources(
-        &self,
-        _session_id: &str,
-        _lifecycle: u64,
-        _resources: Arc<dyn crate::session_resources::SessionResources>,
-    ) -> Result<(), String> {
-        Err("Incomplete: typed MCP session resources binding unavailable".into())
     }
 
     /// Revert recorded file changes in the session's trusted Workspace owner.
@@ -329,11 +290,6 @@ pub trait McpPoolPort: Send + Sync {
 
     /// 绑定会话 TaskManager（外部任务取消/结算的投影）。默认跳过。
     fn bind_session_task_manager(&self, _session_id: &str, _manager: &Arc<dyn TaskManager>) {}
-
-    /// 从 Workspace owner 重建可丢弃的 Agent 任务投影。默认跳过。
-    async fn recover_workspace_tasks(self: Arc<Self>, _session_id: &str) -> Result<(), String> {
-        Ok(())
-    }
 
     /// 在初始快照后保持 scope 游标（长驻任务；`cancel` 触发即退出）。默认立即返回。
     async fn watch_workspace_tasks(self: Arc<Self>, _session_id: &str, _cancel: CancellationToken) {

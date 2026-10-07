@@ -96,81 +96,21 @@ async fn migrate_transaction(connection: &mut SqliteConnection) -> Result<()> {
         .await?;
     }
 
-    // 先建完整目标表再搬运；任何旧的未知线程列都必须拒绝，不能在重建时静默丢弃。
-    let columns: Vec<(String,)> = sqlx::query_as("SELECT name FROM pragma_table_info('threads')")
-        .fetch_all(&mut *tx)
-        .await?;
-    const OLD_THREAD_COLUMNS: &[&str] = &[
-        "id",
-        "title",
-        "cwd",
-        "created_at",
-        "updated_at",
-        "message_count",
-        "parent_thread_id",
-        "snapshot_at_message_id",
-        "hidden",
-        "cancel_policy",
-        "config",
-        "frozen_context",
-        "inherited_context",
-        "agent_status",
-    ];
-    if columns.len() != OLD_THREAD_COLUMNS.len()
-        || columns
-            .iter()
-            .any(|(column,)| !OLD_THREAD_COLUMNS.contains(&column.as_str()))
-    {
-        bail!("storage v2 migration found unrecognized thread columns");
-    }
-    let retained_indexes: Vec<(String,)> = sqlx::query_as(
-        "SELECT sql FROM sqlite_master WHERE type = 'index' AND tbl_name = 'threads'
-         AND name != 'idx_threads_updated' AND sql IS NOT NULL ORDER BY name",
-    )
-    .fetch_all(&mut *tx)
-    .await?;
-    sqlx::query(canonical::CREATE_V2_TEMP_THREADS_TABLE_SQL)
+    sqlx::query("ALTER TABLE threads ADD COLUMN workspace_id TEXT REFERENCES workspaces(id)")
         .execute(&mut *tx)
         .await?;
+    sqlx::query("ALTER TABLE threads ADD COLUMN archived BOOLEAN NOT NULL DEFAULT 0 CHECK(archived IN (0, 1))")
+        .execute(&mut *tx).await?;
     for (thread_id, workspace_id) in &plan.session_workspace_ids {
-        sqlx::query(
-            "INSERT INTO threads_v12 (
-            id, title, cwd, created_at, updated_at, message_count, parent_thread_id,
-            snapshot_at_message_id, hidden, cancel_policy, config, frozen_context,
-            inherited_context, agent_status, workspace_id, archived)
-            SELECT id, title, cwd, created_at, updated_at, message_count, parent_thread_id,
-            snapshot_at_message_id, hidden, cancel_policy, config, frozen_context,
-            inherited_context, agent_status, ?2, 0 FROM threads WHERE id = ?1",
-        )
-        .bind(thread_id)
-        .bind(workspace_id.to_string())
-        .execute(&mut *tx)
-        .await?;
-    }
-    let source_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM threads")
-        .fetch_one(&mut *tx)
-        .await?;
-    let target_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM threads_v12")
-        .fetch_one(&mut *tx)
-        .await?;
-    if source_count != target_count {
-        bail!("storage v2 thread copy is incomplete");
-    }
-    sqlx::query("DROP TABLE threads").execute(&mut *tx).await?;
-    sqlx::query("ALTER TABLE threads_v12 RENAME TO threads")
-        .execute(&mut *tx)
-        .await?;
-    sqlx::query("CREATE INDEX idx_threads_updated ON threads(updated_at DESC, id DESC) WHERE hidden = 0 AND message_count > 0")
-        .execute(&mut *tx)
-        .await?;
-    sqlx::query("CREATE INDEX idx_threads_workspace_archived ON threads(workspace_id, archived, updated_at DESC, id DESC) WHERE parent_thread_id IS NULL AND message_count > 0")
-        .execute(&mut *tx)
-        .await?;
-    for (index_sql,) in retained_indexes {
-        sqlx::raw_sql(sqlx::AssertSqlSafe(index_sql))
+        sqlx::query("UPDATE threads SET workspace_id = ?2 WHERE id = ?1")
+            .bind(thread_id)
+            .bind(workspace_id.to_string())
             .execute(&mut *tx)
             .await?;
     }
+    sqlx::query(canonical::CREATE_V2_INDEXES[4])
+        .execute(&mut *tx)
+        .await?;
 
     sqlx::query("ALTER TABLE session_bindings ADD COLUMN discovery_snapshot TEXT")
         .execute(&mut *tx)

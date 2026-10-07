@@ -1,6 +1,6 @@
 # Session 异步任务
 
-- 状态：**已批准目标 / 执行恢复剥离实施中**。
+- 状态：**执行恢复已剥离，当前任务生命周期保留**；验证范围见剥离计划。
 - 消息与运行生命周期服从 [RCRA 权威](rcra-message-activation.md)；实施状态见[剥离计划](../../spec/issues/2026-10-07-remove-execution-recovery-plan.md)。
 
 ## 1. 归属与当前运行

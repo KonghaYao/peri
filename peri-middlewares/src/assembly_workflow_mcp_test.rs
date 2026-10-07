@@ -13,8 +13,7 @@ use peri_agent::agent::workflow::{WorkflowAgentExecutor, WorkflowModel};
 use peri_mcp_common::task_scope::{TaskScopeAuthority, TASK_SCOPE_META_KEY};
 use rmcp::{
     model::{
-        CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, CustomRequest,
-        CustomResult, RequestMetaObject,
+        CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, RequestMetaObject,
     },
     service::{RequestContext, RoleServer},
     ServerHandler, ServiceExt,
@@ -45,30 +44,9 @@ fn scope_token_of(meta: &RequestMetaObject) -> Option<String> {
 
 struct SyncSource {
     calls: Arc<parking_lot::Mutex<Vec<WireCall>>>,
-    authority: TaskScopeAuthority,
 }
 
 impl ServerHandler for SyncSource {
-    async fn on_custom_request(
-        &self,
-        request: CustomRequest,
-        context: RequestContext<RoleServer>,
-    ) -> Result<CustomResult, rmcp::ErrorData> {
-        assert_eq!(request.method, "workspace/taskCapabilities");
-        let capability = self.authority.resolve_capability(&context.meta).unwrap();
-        Ok(CustomResult::new(json!({
-            "version": 1,
-            "ownerIdentity": "workflow-fixture-owner",
-            "scopeId": capability.session_id,
-            "scopeEpoch": 0,
-            "invocationDiscovery": true,
-            "retainedTasks": true,
-            "scopeCloseBarrier": true,
-            "resourceSettlement": true,
-            "invocationIdempotency": false,
-        })))
-    }
-
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
@@ -189,11 +167,6 @@ async fn run_workflow_mcp(scenario: Scenario<'_>) -> Outcome {
     let (client_io, server_io) = tokio::io::duplex(8192);
     let source = SyncSource {
         calls: calls.clone(),
-        authority: if workspace_remote {
-            TaskScopeAuthority::trusted_connection()
-        } else {
-            pool.task_scope_authority.clone()
-        },
     };
     let server_task = tokio::spawn(async move {
         source
@@ -344,6 +317,13 @@ async fn test_workflow_mcp_sync_bash_uses_agent_session_owner() {
         "同步调用必须真正到达 wire 且只发一次"
     );
     assert_eq!(outcome.calls[0].name, "Bash");
+    let invocation = &outcome.calls[0].meta.0 .0["peri.invocation"];
+    assert_eq!(invocation["version"], 2);
+    assert_eq!(invocation["initiatorSessionId"], outcome.agent_session_id);
+    assert!(invocation["invocationId"].is_string());
+    assert!(invocation["toolCallId"].is_string());
+    assert!(invocation.get("recipientLifecycle").is_none());
+
     let wire_token =
         scope_token_of(&outcome.calls[0].meta).expect("workspace 调用必须携带 task scope 能力");
     assert_eq!(

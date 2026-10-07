@@ -632,3 +632,147 @@ async fn foreground_timeout_promotion_returns_queryable_task() {
         Some(peri_acp_types::tasks::TaskShutdownReport::Complete)
     );
 }
+
+fn current_invocation_meta(scope: Option<&str>, session: &str) -> rmcp::model::RequestMetaObject {
+    let mut metadata = scope.map(scope_meta).unwrap_or_default();
+    metadata.0 .0.insert(
+        "peri.invocation".into(),
+        serde_json::json!({
+            "initiatorSessionId": session,
+            "invocationId": "current-invocation",
+            "toolCallId": "model-call"
+        }),
+    );
+    metadata
+}
+
+#[tokio::test]
+async fn current_invocation_metadata_allows_ordinary_calls_without_task_owner() {
+    let directory = tempfile::tempdir().unwrap();
+    tokio::fs::write(directory.path().join("current.txt"), "current call result")
+        .await
+        .unwrap();
+    let server = WorkspaceMcpServer::new(directory.path().to_string_lossy().into_owned(), None);
+    let (client, server_task) = connect(server, ClientCapabilities::default()).await;
+    for _attempt in 0..2 {
+        let mut request = CallToolRequestParams::new("Read").with_arguments(
+            serde_json::json!({"file_path":"current.txt"})
+                .as_object()
+                .unwrap()
+                .clone(),
+        );
+        request.meta = Some(current_invocation_meta(None, "session"));
+        let CallToolResponse::Complete(result) =
+            client.peer().call_tool_once(request).await.unwrap()
+        else {
+            panic!("ordinary Read must return a result without a task owner")
+        };
+        assert_ne!(result.is_error, Some(true));
+        assert!(serde_json::to_string(&result)
+            .unwrap()
+            .contains("current call result"));
+    }
+    client.cancel().await.unwrap();
+    server_task.await.unwrap();
+}
+
+#[tokio::test]
+async fn current_invocation_metadata_rejects_scope_mismatch_before_tool_execution() {
+    let directory = tempfile::tempdir().unwrap();
+    let authority = TaskScopeAuthority::trusted_connection();
+    let token = authority.issue("session");
+    let server = WorkspaceMcpServer::standalone(directory.path().to_string_lossy())
+        .with_task_scope_authority(authority);
+    let (client, server_task) = connect(server.clone(), ClientCapabilities::default()).await;
+    let mut request = CallToolRequestParams::new("Write").with_arguments(
+        serde_json::json!({"file_path":"unexpected.txt", "content":"must not be written"})
+            .as_object()
+            .unwrap()
+            .clone(),
+    );
+    request.meta = Some(current_invocation_meta(Some(&token), "other-session"));
+    let error = client
+        .peer()
+        .call_tool_once(request)
+        .await
+        .expect_err("scope mismatch must be rejected");
+    assert!(matches!(error, rmcp::ServiceError::McpError(error)
+        if error.code == rmcp::model::ErrorCode::INVALID_PARAMS));
+    assert!(!directory.path().join("unexpected.txt").exists());
+    client.cancel().await.unwrap();
+    server_task.await.unwrap();
+    assert_eq!(
+        server.shutdown_shell_tasks().await,
+        Some(peri_acp_types::tasks::TaskShutdownReport::Complete)
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn current_invocation_metadata_keeps_tasks_without_invocation_recovery() {
+    let directory = tempfile::tempdir().unwrap();
+    let authority = TaskScopeAuthority::trusted_connection();
+    let token = authority.issue("session");
+    let server = WorkspaceMcpServer::standalone(directory.path().to_string_lossy())
+        .with_task_scope_authority(authority);
+    let (client, server_task) = connect(
+        server.clone(),
+        ClientCapabilities::builder().enable_tasks().build(),
+    )
+    .await;
+    let mut task_ids = Vec::new();
+    for _attempt in 0..2 {
+        let mut request = CallToolRequestParams::new("Bash").with_arguments(
+            serde_json::json!({"command":"sleep 30", "run_in_background":true})
+                .as_object()
+                .unwrap()
+                .clone(),
+        );
+        request.meta = Some(current_invocation_meta(Some(&token), "session"));
+        let CallToolResponse::Task(created) = client.peer().call_tool_once(request).await.unwrap()
+        else {
+            panic!("current background call must return its normal task handle")
+        };
+        task_ids.push(created.task.task_id);
+    }
+    assert_ne!(
+        task_ids[0], task_ids[1],
+        "current metadata must not create replay fencing"
+    );
+    let snapshot = scope_request(&client, "workspace/taskSnapshot", &token, None)
+        .await
+        .unwrap();
+    assert_eq!(snapshot["tasks"].as_array().unwrap().len(), 2);
+    assert!(snapshot.get("invocations").is_none());
+    for method in ["workspace/invocationSnapshot", "workspace/taskCapabilities"] {
+        let error = scope_request(&client, method, &token, None)
+            .await
+            .expect_err("removed recovery protocol");
+        assert!(matches!(error, rmcp::ServiceError::McpError(error)
+            if error.code == rmcp::model::ErrorCode::METHOD_NOT_FOUND));
+    }
+    for task_id in task_ids {
+        let mut cancel = CancelTaskParams::new(&task_id);
+        cancel.meta = Some(scope_meta(&token));
+        client.peer().cancel_task(cancel).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let mut query = GetTaskParams::new(&task_id);
+                query.meta = Some(scope_meta(&token));
+                let task = client.peer().get_task(query).await.unwrap();
+                if task.task.status() == TaskStatus::Cancelled {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("cancelled task must become queryable terminal state");
+    }
+    client.cancel().await.unwrap();
+    server_task.await.unwrap();
+    assert_eq!(
+        server.shutdown_shell_tasks().await,
+        Some(peri_acp_types::tasks::TaskShutdownReport::Complete)
+    );
+}

@@ -359,7 +359,7 @@ fn make_test_ctx() -> StageContext {
     );
     let transcript = std::sync::Arc::new(parking_lot::RwLock::new(MessageTranscript::new()));
     let queue = MessageQueue::new();
-    StageContext::new_best_effort_fixture(turn, transcript, queue)
+    StageContext::new(turn, transcript, queue)
 }
 
 #[tokio::test]
@@ -394,7 +394,7 @@ async fn test_resolution_error_emits_tool_started_and_ended() {
     let turn = TurnContext::new(Arc::from("/tmp"), Arc::new(CancellationToken::new()));
     let transcript = Arc::new(parking_lot::RwLock::new(MessageTranscript::new()));
     let queue = MessageQueue::new();
-    let ctx = StageContext::best_effort_fixture_builder(turn, transcript, queue)
+    let ctx = StageContext::builder(turn, transcript, queue)
         .with_event_bus(Arc::new(bus))
         .build();
 
@@ -459,9 +459,6 @@ async fn test_resolution_error_emits_tool_started_and_ended() {
 // （`telemetry/subscriber.rs` 的 `EnvFilter::new("info,...")`），从而证明
 // 这些记录在默认可见级别下出现。
 //
-// 静态可达性：`resolution_errors` 当前为 test-only 分支（生产路径上畸形 ID 与
-// resolver 失败都被 Reason 阶段的 `work_reason::commit_response` 提前拦截），
-// 因此这两条用例是该记录点唯一可执行的行为锁。
 
 #[derive(Clone, Default)]
 struct LogCapture(Arc<parking_lot::Mutex<Vec<u8>>>);
@@ -849,13 +846,9 @@ async fn test_dispatch_emits_fast_completion_before_atomic_batch_commit() {
     transcript
         .write()
         .append(BaseMessage::human("previous history"));
-    let mut ctx = StageContext::best_effort_fixture_builder(
-        turn,
-        Arc::clone(&transcript),
-        MessageQueue::new(),
-    )
-    .with_event_bus(Arc::new(bus))
-    .build();
+    let mut ctx = StageContext::builder(turn, Arc::clone(&transcript), MessageQueue::new())
+        .with_event_bus(Arc::new(bus))
+        .build();
     let release = Arc::new(tokio::sync::Notify::new());
     for (name, gate) in [("Slow", Some(Arc::clone(&release))), ("Fast", None)] {
         ctx.runtime.tools.write().insert(

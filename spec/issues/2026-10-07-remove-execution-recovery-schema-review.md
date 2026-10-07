@@ -1,10 +1,10 @@
 # 执行恢复机制剥离：改动面与 SQLite 表结构审核
 
-- 状态：**结构基线 / 用户已授权先修正文档与计划，再在独立 worktree 实施；真实用户库操作不在授权内**。
+- 状态：**结构基线与 schema18 实现对照；剥离已在独立 worktree 实施，真实用户库操作不在授权内**。
 - 日期：2026-10-07。
 - 裁决：删除新增执行恢复机制，不删除 history 面板的历史会话加载和正常续聊。
 - 基线：本地 `main=d7ee444e`（2026-09-29），对照本轮当前工作树；未 fetch。
-- 本轮只读源码并新增本审核文档；未改业务代码、未访问或修改真实数据库。
+- 初始审核仅只读源码；后续实现与验证见剥离计划。未访问或修改真实数据库。
 - 本文表数指代码管理的新库结构，不是用户数据库的实际对象数量；旧库扩展对象另行保护。
 
 ## 1. 删除与保留的能力边界
@@ -76,7 +76,7 @@ SDK 暂不修改。其现有 work query/admission/resolve 协议消费会受影�
 
 ### 2.3 History 的实际解耦点
 
-当前 `peri-acp/src/host/requests/session_restore.rs` 不仅加载 payload/frozen，
+剥离前 `peri-acp/src/host/requests/session_restore.rs` 不仅加载 payload/frozen，
 还读取 WorkState 的 resource owner，再调用 `requests/resource_owners.rs::load_for_restore`。
 后者缺 owner 时会写入 Work quarantine，因此 history 的上层装配仍有依赖，必须删除该耦合。
 
@@ -86,7 +86,7 @@ SDK 暂不修改。其现有 work query/admission/resolve 协议消费会受影�
 应保留这条历史数据链，按原 main 的语义重新装配新的 live runtime，而不是恢复旧 runtime。
 MCP 连接配置重新装配不等于恢复旧 MCP 调用或接管旧外部任务。
 
-## 3. 候选目标表清单
+## 3. schema18 目标表清单
 
 ### 3.1 保留：共享业务表 9 张
 
@@ -102,7 +102,7 @@ MCP 连接配置重新装配不等于恢复旧 MCP 调用或接管旧外部任�
 | mcp_oauth_credentials | Workspace 级 OAuth 凭证 | 普通 MCP 接入能力 |
 | session_close_intents | 显式关闭意图 | 当前普通关闭/结清也使用；本方案不取消关闭语义 |
 
-这里的“保留”是候选结构，等待审核，不是已批准的最终数据库。
+本次实现保留上述九表，不代表用户数据库已迁移；真实库结构仍须单独核对。
 `session_close_intents` 虽非 main 已有，也不能只因为新增就归为执行恢复表。
 若进一步要求取消跨重启关闭意图，需单独裁决其生命周期语义，再评估第九张表。
 
@@ -129,7 +129,7 @@ MCP 连接配置重新装配不等于恢复旧 MCP 调用或接管旧外部任�
 - 当前 schema 不再创建 `execution_runs`、`session_environments`，本方案不重建它们。
 - SQLite 自带的 `sqlite_*` 系统对象不计业务表数，也不操作。
 
-## 4. 完整候选 DDL
+## 4. 完整目标 DDL
 
 这是供审核的**新库目标结构**，不是可直接对用户旧库执行的迁移脚本。
 复用当前非恢复表的字段/默认值/约束，不顺带做 nullable、命名或字段清理。
@@ -272,11 +272,11 @@ CREATE TABLE peri_op_ledger (
 ## 5. 迁移与验收边界
 
 1. 使用向前的新 schema 版本，不降级到 main 的 schema 10。
-   当前为17；18仅是候选，实施时重新检查其他并行变更是否已占用。
+   隔离基线为17，本次实现推进到18；原工作树的并行改动未混入。
 2. 先停止相关写入者并解除上层依赖，再删除六表；不能先删表让当前执行路径报错。
 3. 17→目标版本无需重建九张保留表，保留 messages.rowid 和既有字段/数据。
-4. 当前旧迁移清理器会删除识别到的旧 `thread_goals`；不能原样套用该清理步骤。
-   旧版本直升还必须避免再次创建 Work/control 表；按实际版本重新梳理。
+4. 旧迁移清理器删除 `thread_goals` 的行为已修正；旧版本直升保留该表及普通扩展，
+   不再创建 Work/control 表；11→12 保留扩展列、索引与 trigger。
 5. 校验待删除对象的形状与外部引用；发现未知 FK/view/trigger 依赖时明确失败，
    不扩大删表范围。不自动 VACUUM，不操作其他数据库，不删除未知普通对象。
 6. 本地删除/版本推进同事务；远端保留 store_id/contract，使用受守卫的托管事务。
@@ -285,7 +285,7 @@ CREATE TABLE peri_op_ledger (
    验证当前工具/子任务、取消、消息/模型/工具结果持久化；重启后不恢复旧执行。
 8. 现有恢复契约不再是验收要求，但要用新的可观察行为测试替换，不能仅删失败测试。
 9. 实施时同步 architecture、RCRA active design/spec、模块指引和 code-index；
-   本次只新增提案，不将尚未实现的裁决改写成当前事实。
+   当前源码与定向验证已同步，真实远端及完整端到端保证不作为已验证事实。
 
 ## 6. 证据与局限
 
@@ -295,7 +295,8 @@ Astra 在 SQLite 3.51.0 的纯内存夹具中验证了候选 DDL 和删六表隔
 这是合成数据库结构验证，不是实际 adapter、Turso 网络或完整上层行为验收。
 
 未测真实数据库对象数量、磁盘空间回收、实施工时或性能收益。
-工作区存在持续变化的 Work storage/repository/maintenance 及其他并行 WIP，
-本轮仅新增本文，未修改这些文件；当前六表名单在上述 WIP 中仍一致。
+初始盘点时原工作区存在并行 WIP；实现从固定提交建立独立 worktree，未包含这些改动。
+SQLite 与 SQLite-backed RemoteTransport adapter 的迁移、守卫和历史回归已补齐；
+实际验证命令、结果及限制见剥离计划和 `peri-resources/execution-recovery-removal-report.md`。
 
 实施状态与分工以 `2026-10-07-remove-execution-recovery-plan.md` 为准。

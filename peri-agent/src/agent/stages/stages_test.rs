@@ -13,7 +13,7 @@ fn make_stage_context() -> StageContext {
         .build();
     let session = Session::new(cwd, frozen, None);
     let turn = session.start_turn();
-    StageContext::new_best_effort_fixture(turn, session.transcript(), session.queue().clone())
+    StageContext::new(turn, session.transcript(), session.queue().clone())
 }
 
 /// Mock LLM：首轮返回 final_answer，无 tool_calls
@@ -125,12 +125,7 @@ fn test_stage_context_builder_default() {
     let frozen = FrozenContext::builder().build();
     let session = Session::new(cwd, frozen, None);
     let turn = session.start_turn();
-    let ctx = StageContext::best_effort_fixture_builder(
-        turn,
-        session.transcript(),
-        session.queue().clone(),
-    )
-    .build();
+    let ctx = StageContext::builder(turn, session.transcript(), session.queue().clone()).build();
     assert_eq!(ctx.runtime.llm.model_name(), "null");
 }
 
@@ -232,13 +227,9 @@ async fn test_e2e_defer_consumed_in_receive() {
     let frozen = FrozenContext::builder().build();
     let session = Session::new(cwd, frozen, None);
     let turn = session.start_turn();
-    let ctx = StageContext::best_effort_fixture_builder(
-        turn,
-        session.transcript(),
-        session.queue().clone(),
-    )
-    .with_llm(Arc::new(FinalAnswerLLM { answer: "ok" }))
-    .build();
+    let ctx = StageContext::builder(turn, session.transcript(), session.queue().clone())
+        .with_llm(Arc::new(FinalAnswerLLM { answer: "ok" }))
+        .build();
 
     ctx.session.queue.push(QueuedMessage::defer(
         MessageSource::SubAgentComplete,

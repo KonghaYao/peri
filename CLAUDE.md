@@ -41,17 +41,17 @@ v4 分阶段推进存算分离。阶段状态以代码、契约测试及 active 
 
 先读 [标准索引](docs/standards/index.md)，区分现状与目标。按 `docs/code-index/` 核实入口、同步变更。Peri loader 不继承父目录，须显式读取模块指引。
 
-| 任务                                                         | 先读                                                        |
+| 任务 | 先读 |
 | ------------------------------------------------------------ | ----------------------------------------------------------- |
-| Agent loop、Compact、provider、session                       | `peri-agent/CLAUDE.md` + architecture/rust                  |
-| ACP host、stdio、prompt、event、caps                         | `peri-acp/CLAUDE.md` + architecture/rust                    |
-| Controller/Runtime、cancel、Langfuse                         | architecture/rust + 对应 code-index                         |
+| Agent loop、Compact、provider、session | `peri-agent/CLAUDE.md` + architecture/rust |
+| ACP host、stdio、prompt、event、caps | `peri-acp/CLAUDE.md` + architecture/rust |
+| Controller/Runtime、cancel、Langfuse | architecture/rust + 对应 code-index |
 | MCP（含内置实例）、plugin、skills、subagent、HITL、工具 | middlewares 与 `mcp-packages/CLAUDE.md` + architecture/rust |
-| Workflow                                                     | middleware guide + `docs/code-index/peri-workflow.md`       |
-| TUI                                                          | `peri-tui/CLAUDE.md` + tui/rust                             |
-| E2E                                                          | `e2e/CLAUDE.md` + testing                                   |
-| 文档站                                                       | `peri-cool/CLAUDE.md` + documentation                       |
-| 历史学习                                                     | `.claude/skills/learn-from-history/SKILL.md`                |
+| Workflow | middleware guide + `docs/code-index/peri-workflow.md` |
+| TUI | `peri-tui/CLAUDE.md` + tui/rust |
+| E2E | `e2e/CLAUDE.md` + testing |
+| 文档站 | `peri-cool/CLAUDE.md` + documentation |
+| 历史学习 | `.claude/skills/learn-from-history/SKILL.md` |
 
 简称指同名标准文件，architecture 指 `architecture-contracts.md`；跨层、prompt、事件、工具、链序或安全变更读 architecture，Git 操作读 `git.md`，指引维护读 `documentation.md`。
 

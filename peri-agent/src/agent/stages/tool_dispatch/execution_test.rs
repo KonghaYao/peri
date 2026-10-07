@@ -13,23 +13,15 @@ fn completed_application_failure_retains_typed_error_without_unknown_classificat
     let effective = effective_tool_error_from_boxed(Box::new(received));
     assert_eq!(effective.code, EffectiveToolErrorCode::ApplicationFailed);
     assert_eq!(effective.message, "FileNotFound: missing-file.txt");
-    assert!(!requires_outcome_reconciliation(effective.code));
     assert!(execution_for_effective_error(effective.code).is_none());
 }
 
 #[test]
-fn uncertain_tool_errors_require_reconciliation_even_with_application_error_text() {
+fn unclassified_tool_errors_retain_failure_classification() {
     for message in ["FileNotFound", "-32603", "transport disconnected"] {
         let effective = effective_tool_error_from_boxed(std::io::Error::other(message).into());
         assert_eq!(effective.code, EffectiveToolErrorCode::ToolFailed);
-        assert!(requires_outcome_reconciliation(effective.code));
     }
-    assert!(requires_outcome_reconciliation(
-        EffectiveToolErrorCode::Timeout
-    ));
-    assert!(requires_outcome_reconciliation(
-        EffectiveToolErrorCode::Cancelled
-    ));
 }
 
 #[test]
@@ -49,24 +41,21 @@ fn boxed_known_agent_rejections_preserve_failure_classification() {
     ] {
         let effective = effective_tool_error_from_boxed(Box::new(error));
         assert_eq!(effective.code, expected);
-        assert!(!requires_outcome_reconciliation(effective.code));
     }
 }
 
 #[test]
-fn boxed_interruption_still_requires_outcome_reconciliation() {
+fn boxed_interruption_retains_cancelled_classification() {
     let effective = effective_tool_error_from_boxed(Box::new(AgentError::Interrupted));
     assert_eq!(effective.code, EffectiveToolErrorCode::Cancelled);
-    assert!(requires_outcome_reconciliation(effective.code));
 }
 
 #[test]
-fn boxed_unclassified_agent_error_still_requires_outcome_reconciliation() {
+fn boxed_unclassified_agent_error_retains_tool_failed_classification() {
     let effective = effective_tool_error_from_boxed(Box::new(AgentError::Other(anyhow::anyhow!(
         "resume preparation rejected"
     ))));
     assert_eq!(effective.code, EffectiveToolErrorCode::ToolFailed);
-    assert!(requires_outcome_reconciliation(effective.code));
 }
 
 struct OutputTool {
@@ -131,7 +120,81 @@ fn make_test_ctx() -> StageContext {
     );
     let transcript = std::sync::Arc::new(parking_lot::RwLock::new(MessageTranscript::new()));
     let queue = MessageQueue::new();
-    StageContext::new_best_effort_fixture(turn, transcript, queue)
+    StageContext::new(turn, transcript, queue)
+}
+
+#[tokio::test]
+async fn same_name_calls_have_distinct_invocations_and_original_model_ids() {
+    type Identities = Arc<parking_lot::Mutex<Vec<(String, String, String)>>>;
+    struct IdentityProbe(Identities);
+    #[async_trait::async_trait]
+    impl BaseTool for IdentityProbe {
+        fn name(&self) -> &str {
+            "Probe"
+        }
+        fn description(&self) -> &str {
+            "identity probe"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({})
+        }
+        async fn invoke(
+            &self,
+            _: serde_json::Value,
+            context: crate::tools::ToolContext<'_>,
+        ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+            self.0.lock().push((
+                context.session_id.unwrap(),
+                context.invocation_id.unwrap(),
+                context.tool_call_id.unwrap(),
+            ));
+            Ok("ok".into())
+        }
+    }
+    let context = make_test_ctx();
+    context
+        .session
+        .session_context
+        .write()
+        .insert("session_id".into(), "current-session".into());
+    let captured: Identities = Arc::default();
+    let tool: Arc<dyn BaseTool> = Arc::new(IdentityProbe(captured.clone()));
+    let calls = vec![
+        ToolCall::new("model-call-1", "Probe", serde_json::json!({})),
+        ToolCall::new("model-call-2", "Probe", serde_json::json!({})),
+    ];
+    let targets = HashMap::from([
+        ("model-call-1".into(), tool.clone()),
+        ("model-call-2".into(), tool),
+    ]);
+    let output = dispatch_concurrent(
+        &context,
+        &calls,
+        &HashMap::new(),
+        &targets,
+        &context.runtime.tool_catalog.snapshot(),
+        &CancellationToken::new(),
+        &BaseMessage::ai("call"),
+        None,
+    )
+    .await;
+    assert!(output.iter().all(Result::is_ok));
+    let identities = captured.lock();
+    assert_eq!(identities.len(), 2);
+    assert_ne!(identities[0].1, identities[1].1);
+    for (session, invocation, model_call) in identities.iter() {
+        assert_eq!(session, "current-session");
+        assert_ne!(invocation, model_call);
+        assert!(uuid::Uuid::parse_str(invocation).is_ok());
+    }
+    let model_ids: std::collections::HashSet<_> = identities
+        .iter()
+        .map(|identity| identity.2.as_str())
+        .collect();
+    assert_eq!(
+        model_ids,
+        std::collections::HashSet::from(["model-call-1", "model-call-2"])
+    );
 }
 
 #[tokio::test]
@@ -165,6 +228,7 @@ async fn test_dispatch_concurrent_single_tool_succeeds() {
         &catalog,
         &cancel,
         &ai_msg,
+        None,
     )
     .await;
     assert_eq!(results.len(), 1);
@@ -204,6 +268,7 @@ async fn test_dispatch_concurrent_cancelled() {
         &catalog,
         &cancel,
         &ai_msg,
+        None,
     )
     .await;
     assert_eq!(results.len(), 1);
@@ -238,6 +303,7 @@ async fn test_dispatch_concurrent_preserves_typed_subagent_failure() {
         &catalog,
         &cancel,
         &ai_msg,
+        None,
     )
     .await;
     let error = results[0].as_ref().expect_err("child failure");

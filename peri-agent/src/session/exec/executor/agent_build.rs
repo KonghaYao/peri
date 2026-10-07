@@ -176,16 +176,9 @@ pub(super) async fn build_and_execute_agent(
                 .as_ref()
                 .and_then(|access| access.v2_message_queue(session_id)),
         ) {
-            (Some(resources), Some(queue)) => {
-                crate::session::bg_complete::durable_bg_complete_callback(
-                    crate::agent::async_tasks::durable_task_terminal_delivery(
-                        Arc::clone(resources),
-                        session_id.into(),
-                        ctx.recipient_lifecycle,
-                        queue,
-                    ),
-                )
-            }
+            (Some(_), Some(queue)) => crate::session::bg_complete::task_bg_complete_callback(
+                crate::agent::async_tasks::delivery::SessionTerminalDelivery::for_queue(queue),
+            ),
             _ => Arc::new(|_: &BackgroundTaskResult, _: BgTaskKind| {
                 Err("required terminal publication route unavailable".into())
             }) as peri_acp_types::tasks::OnBgCompleteFn,
@@ -222,7 +215,6 @@ pub(super) async fn build_and_execute_agent(
         session_resources: ctx.session_resources.clone(),
         thread_id: ctx.thread_id.clone(),
         agent_input,
-        execution_admission: ctx.execution_admission.clone(),
         history_payloads,
         history,
         cached_llm: cached_llm.cloned(),

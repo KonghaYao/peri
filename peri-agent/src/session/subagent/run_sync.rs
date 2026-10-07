@@ -38,7 +38,7 @@ pub(super) async fn run_sync_subagent(
     langfuse_bridge: Option<Arc<dyn LangfuseBridgeLike>>,
     parent_agent_id: Option<AgentId>,
     parent_tool_call_id: Option<String>,
-    mut v2_ctx: V2SubagentContext,
+    v2_ctx: V2SubagentContext,
     session: Arc<Session>,
     mut resume_claim: Option<ResumeClaim>,
 ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
@@ -61,7 +61,7 @@ pub(super) async fn run_sync_subagent(
     // The resumed claim crosses the first execution await with us. Its Drop
     // records cancellation without duplicating lifecycle Stop/hook delivery.
     if let Some(claim) = &mut resume_claim {
-        claim.mark_running(v2_ctx.context.session.turn.clone(), session.clone());
+        claim.mark_running(session.clone());
     }
     let stop_resources = if resume_claim.is_some() {
         None // 认领持有终态写入（finish 内定向写状态），此处不重复写。
@@ -69,40 +69,29 @@ pub(super) async fn run_sync_subagent(
         session_resources
     };
 
-    let previous_observer = v2_ctx.context.sdk_admission_observed.take();
-    let start_bus = v2_ctx.event_bus.clone();
-    let start_handler = event_handler.clone();
-    let start_agent_id = v2_ctx.agent_id;
-    let start_name = agent_name.clone();
-    let start_cwd = cwd.clone();
-    v2_ctx.context.sdk_admission_observed = Some(Arc::new(move |admission| {
-        if let Some(observe) = &previous_observer {
-            observe(admission.clone());
-        }
-        if let Some(on_start) = &on_subagent_start {
-            on_start(&start_name, &start_cwd);
-        }
-        emit_subagent_start_v2(
-            &start_bus,
-            admission.execution.turn_id,
+    if let Some(on_start) = &on_subagent_start {
+        on_start(&agent_name, &cwd);
+    }
+    emit_subagent_start_v2(
+        &v2_ctx.event_bus,
+        v2_ctx.context.turn_id(),
+        parent_agent_id,
+        v2_ctx.agent_id,
+        &agent_name,
+        false,
+        parent_tool_call_id.clone(),
+    );
+    forward_subagent_start_v1(
+        event_handler.as_ref(),
+        build_subagent_start_v2(
+            v2_ctx.context.turn_id(),
             parent_agent_id,
-            start_agent_id,
-            &start_name,
+            v2_ctx.agent_id,
+            &agent_name,
             false,
-            parent_tool_call_id.clone(),
-        );
-        forward_subagent_start_v1(
-            start_handler.as_ref(),
-            build_subagent_start_v2(
-                admission.execution.turn_id,
-                parent_agent_id,
-                start_agent_id,
-                &start_name,
-                false,
-                parent_tool_call_id.clone(),
-            ),
-        );
-    }));
+            parent_tool_call_id,
+        ),
+    );
 
     // v2 事件转发器：子 EventBus → 父事件 handler（TUI 可见子 agent 工具调用/AI 文本）
     let forwarder_handle = spawn_subagent_event_forwarder_for_completion(
@@ -113,11 +102,13 @@ pub(super) async fn run_sync_subagent(
     );
     let child_agent_id = v2_ctx.agent_id;
     let event_bus = v2_ctx.event_bus;
-    let owned_execution = super::settlement::OwnedSubagentExecution::capture(&v2_ctx.context);
 
     // 运行 v2 ReAct 循环
     let execution_turn = v2_ctx.context.session.turn.clone();
-    let loop_result = run_react_loop(v2_ctx.context, max_iterations).await;
+    let mut loop_result = run_react_loop(v2_ctx.context, max_iterations).await;
+    if let Err(error) = super::lifecycle::flush_session_history(&session).await {
+        loop_result = LoopResult::Error(error);
+    }
     if let LoopResult::Error(error) = &loop_result {
         if !execution_turn.cancel_token.is_cancelled()
             && !matches!(error, crate::error::AgentError::Interrupted)
@@ -133,9 +124,7 @@ pub(super) async fn run_sync_subagent(
             );
         }
     }
-    let subagent_turn_id = execution_turn
-        .work_admission()
-        .map(|admission| admission.execution.turn_id);
+    let subagent_turn_id = Some(execution_turn.turn_id());
     if let Err(error) = super::close::settle_explicit_close(
         &session,
         matches!(&loop_result, LoopResult::Interrupted),
@@ -144,7 +133,7 @@ pub(super) async fn run_sync_subagent(
     {
         deregister_guard.deregister = None;
         if let Some(claim) = resume_claim.take() {
-            claim.release().await;
+            claim.release().await?;
         }
         return Err(error.into());
     }
@@ -202,7 +191,7 @@ pub(super) async fn run_sync_subagent(
         // already failed; a successful loop cannot hide forwarding failure.
         deregister_guard.deregister = None;
         if let Some(claim) = resume_claim.take() {
-            claim.release().await;
+            claim.release().await?;
         }
         return Err(Box::new(SubagentFailure::new(
             child_thread_id,
@@ -227,8 +216,6 @@ pub(super) async fn run_sync_subagent(
             ),
         );
     }
-
-    owned_execution.finish().await?;
 
     let (final_text, interrupted) = match loop_result {
         LoopResult::Completed => {

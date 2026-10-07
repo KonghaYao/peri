@@ -190,7 +190,7 @@ impl BaseTool for SubAgentTool {
                     prompt,
                     cwd,
                     run_in_background,
-                    ctx.invocation_id.clone(),
+                    ctx.tool_call_id.clone(),
                 )
                 .await;
         }
@@ -221,14 +221,14 @@ impl BaseTool for SubAgentTool {
                     is_fork,
                     current_messages,
                     model.as_deref(),
-                    ctx.invocation_id.clone(),
+                    ctx.tool_call_id.clone(),
                 )
                 .await;
         }
 
         if is_fork {
             return self
-                .invoke_fork(&prompt, &cwd, current_messages, ctx.invocation_id.clone())
+                .invoke_fork(&prompt, &cwd, current_messages, ctx.tool_call_id.clone())
                 .await;
         }
 
@@ -285,7 +285,7 @@ impl BaseTool for SubAgentTool {
             build_result.system_prompt,
             build_result.skill_names,
             cwd,
-            ctx.invocation_id.clone(),
+            ctx.tool_call_id.clone(),
         );
 
         let spawned = self.spawn(config).await?;

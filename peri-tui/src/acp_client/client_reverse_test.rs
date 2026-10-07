@@ -745,7 +745,7 @@ async fn test_pump_cancels_exact_request_when_notification_receiver_is_dropped()
     assert_cancel_response("session/request_permission", response);
 }
 
-async fn cancel_drains_kind_after_receipt(method: &'static str) {
+async fn cancel_drains_kind_before_notification(method: &'static str) {
     let (client_transport, server_transport) = mpsc_transport_pair();
     let (client, notification_tx, mut notification_rx) = AcpTuiClient::new(client_transport);
     client.lifecycle.force_stable("s1", true);
@@ -765,37 +765,28 @@ async fn cancel_drains_kind_after_receipt(method: &'static str) {
     ));
     let cancel_client = client.clone();
     let cancel = tokio::spawn(async move { cancel_client.cancel().await.unwrap() });
-    let (id, _) = receive_lifecycle_request(&server, "session/control/state").await;
-    let state = json!({"lifecycle":1,"revision":0,"controlGeneration":0,"status":"active",
-        "attempt":{"turnId":peri_acp_types::session::TurnId::new(),
-        "attemptId":peri_acp_types::identity::AttemptId::new()}});
-    server
-        .send_response(id, Ok(json!({"state":state,"settlement":null})))
-        .await
-        .unwrap();
-    let (id, params) = receive_lifecycle_request(&server, "session/control").await;
-    assert!(!request.is_finished());
-    let receipt = peri_acp_types::session_resources::control::decide_control(
-        &serde_json::from_value(params).unwrap(),
-        &serde_json::from_value(state).unwrap(),
-    );
-    server
-        .send_response(id, Ok(serde_json::to_value(receipt).unwrap()))
-        .await
-        .unwrap();
     let response = request.await.unwrap();
     assert_cancel_response(method, response);
+    let message = server.recv().await.unwrap();
+    let IncomingMessage::Notification {
+        method: notification_method,
+        ..
+    } = message
+    else {
+        panic!()
+    };
+    assert_eq!(notification_method, "session/cancel");
     cancel.await.unwrap();
 }
 
 #[tokio::test]
 async fn test_cancel_drains_permission_before_turn_terminal() {
-    cancel_drains_kind_after_receipt("session/request_permission").await;
+    cancel_drains_kind_before_notification("session/request_permission").await;
 }
 
 #[tokio::test]
 async fn test_cancel_drains_elicitation_before_turn_terminal() {
-    cancel_drains_kind_after_receipt("elicitation/create").await;
+    cancel_drains_kind_before_notification("elicitation/create").await;
 }
 
 #[tokio::test]

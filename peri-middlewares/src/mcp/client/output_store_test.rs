@@ -17,9 +17,9 @@ use rmcp::{
 };
 use tokio::sync::Notify;
 
-#[path = "durable_invocation_fixture_test.rs"]
-pub(crate) mod durable_invocation_fixture;
-use durable_invocation_fixture::DurableInvocationFixture;
+#[path = "current_invocation_fixture_test.rs"]
+pub(crate) mod current_invocation_fixture;
+use current_invocation_fixture::CurrentInvocationFixture;
 
 pub(crate) fn large_output() -> String {
     (0..2200)
@@ -101,7 +101,7 @@ impl ServerHandler for LostTaskReceipt {
 
 #[tokio::test]
 async fn lost_mcp_task_receipt_keeps_session_shutdown_incomplete() {
-    let fixture = DurableInvocationFixture::new(
+    let fixture = CurrentInvocationFixture::new(
         "receipt-session",
         "mcp__remote__large",
         &[serde_json::json!({})],
@@ -274,7 +274,7 @@ async fn child_scope_metadata_ignores_owner_parameters_and_captured_root() {
         "mcp_task_owner_session_id": "root-session",
         "task_scope": "root-session"
     });
-    let fixture = DurableInvocationFixture::new(
+    let fixture = CurrentInvocationFixture::new(
         "child-thread",
         "mcp__source__large",
         std::slice::from_ref(&input),
@@ -314,7 +314,7 @@ async fn child_scope_metadata_ignores_owner_parameters_and_captured_root() {
 
 #[tokio::test]
 async fn child_mcp_bridge_uses_child_binding_for_real_call() {
-    let fixture = DurableInvocationFixture::new(
+    let fixture = CurrentInvocationFixture::new(
         "child-thread",
         "mcp__source__large",
         &[serde_json::json!({})],
@@ -342,7 +342,7 @@ async fn child_mcp_bridge_uses_child_binding_for_real_call() {
 #[tokio::test]
 async fn child_mcp_task_receipt_registers_under_child_owner() {
     use peri_acp_types::session::{MessageQueue, SessionInbox};
-    let fixture = DurableInvocationFixture::new(
+    let fixture = CurrentInvocationFixture::new(
         "child-thread",
         "mcp__source__large",
         &[serde_json::json!({})],
@@ -386,7 +386,7 @@ async fn bound_child_mcp_task_receipt_uses_its_own_catalog_without_root_override
         "task_owner": "root-session",
         "initiator_session_id": "root-session"
     });
-    let fixture = DurableInvocationFixture::new(
+    let fixture = CurrentInvocationFixture::new(
         "child-thread",
         "mcp__source__large",
         std::slice::from_ref(&input),
@@ -425,7 +425,7 @@ async fn bound_child_mcp_task_receipt_uses_its_own_catalog_without_root_override
 async fn test_closed_monitor_owner_returns_honest_task_receipt_error() {
     use peri_acp_types::session::{MessageQueue, SessionInbox};
     let fixture =
-        DurableInvocationFixture::new("session", "mcp__source__large", &[serde_json::json!({})])
+        CurrentInvocationFixture::new("session", "mcp__source__large", &[serde_json::json!({})])
             .await;
     let wire = Wire::connect(StartedTask).await;
     let pool = Arc::new(McpClientPool::new_empty());
@@ -465,7 +465,7 @@ async fn child_initiated_task_receipt_delivers_to_the_child_not_root() {
     use peri_acp_types::system_reminder::TrustedSystemReminder;
     use peri_acp_types::tasks::TaskTerminalDelivery;
 
-    let fixture = DurableInvocationFixture::new(
+    let fixture = CurrentInvocationFixture::new(
         "child-thread",
         "mcp__source__large",
         &[serde_json::json!({})],
@@ -607,7 +607,7 @@ pub(crate) async fn assert_remote_readback(
 
 #[tokio::test]
 async fn host_bridge_success_error_and_resource_use_workspace_wire_readback() {
-    let fixture = DurableInvocationFixture::new(
+    let fixture = CurrentInvocationFixture::new(
         "session",
         "mcp__source__large",
         &[serde_json::json!({}), serde_json::json!({"error": true})],
@@ -689,7 +689,7 @@ async fn host_bridge_success_error_and_resource_use_workspace_wire_readback() {
 
 #[tokio::test]
 async fn missing_workspace_does_not_claim_saved_output() {
-    let fixture = DurableInvocationFixture::new(
+    let fixture = CurrentInvocationFixture::new(
         "session",
         "mcp__source__large",
         &[serde_json::json!({}), serde_json::json!({"error": true})],

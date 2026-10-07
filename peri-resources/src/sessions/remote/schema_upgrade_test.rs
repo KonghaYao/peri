@@ -24,6 +24,9 @@ use crate::sessions::{
     schema_cleanup::{LEGACY_EXECUTION_SQL, LEGACY_GOALS_SQL},
 };
 
+#[path = "schema_v18_test.rs"]
+mod v18_tests;
+
 #[tokio::test]
 async fn remote_v13_upgrade_drops_owner_tables_and_preserves_session_facts() {
     let fixture = Fixture::new().await;
@@ -121,6 +124,7 @@ struct SqliteTransport {
     pool: SqlitePool,
     writes: AtomicUsize,
     fail_column_drop: AtomicBool,
+    fail_recovery_drop: AtomicBool,
     change_schema: AtomicBool,
     drop_reply: AtomicBool,
     truncate_reply: AtomicBool,
@@ -198,8 +202,11 @@ impl RemoteTransport for SqliteTransport {
             .map_err(error_of)?;
         let mut counts = Vec::new();
         for (index, statement) in statements.iter().enumerate() {
-            let result = if statement.sql == "ALTER TABLE threads DROP COLUMN cached_context"
-                && self.fail_column_drop.swap(false, Ordering::SeqCst)
+            let fail_recovery = statement.sql == "DROP TABLE IF EXISTS session_control_state"
+                && self.fail_recovery_drop.swap(false, Ordering::SeqCst);
+            let result = if fail_recovery
+                || (statement.sql == "ALTER TABLE threads DROP COLUMN cached_context"
+                    && self.fail_column_drop.swap(false, Ordering::SeqCst))
             {
                 sqlx::query("ALTER TABLE threads DROP COLUMN absent_column")
                     .execute(&mut *transaction)
@@ -355,6 +362,7 @@ async fn v11_to_v12_remote_batch_preserves_history_and_clears_machine_credential
         pool,
         writes: AtomicUsize::new(0),
         fail_column_drop: AtomicBool::new(false),
+        fail_recovery_drop: AtomicBool::new(false),
         change_schema: AtomicBool::new(false),
         drop_reply: AtomicBool::new(false),
         truncate_reply: AtomicBool::new(false),
@@ -444,6 +452,7 @@ impl Fixture {
             pool,
             writes: AtomicUsize::new(0),
             fail_column_drop: AtomicBool::new(false),
+            fail_recovery_drop: AtomicBool::new(false),
             change_schema: AtomicBool::new(false),
             drop_reply: AtomicBool::new(false),
             truncate_reply: AtomicBool::new(false),
@@ -568,7 +577,7 @@ async fn remote_schema_upgrade_preserves_identity_ledger_config_and_rowid_histor
             .fetch_one(&fixture.transport.pool)
             .await
             .unwrap();
-    assert_eq!(retired, 0);
+    assert_eq!(retired, 1);
     let (columns,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM pragma_table_xinfo('threads') WHERE name IN ('cached_context', 'context_cache_epoch')").fetch_one(&fixture.transport.pool).await.unwrap();
     assert_eq!(columns, 0);
     assert!(matches!(
@@ -656,21 +665,25 @@ async fn remote_schema_upgrade_detects_dependencies_created_after_its_snapshot()
 }
 
 #[tokio::test]
-async fn remote_schema_upgrade_rejects_unrecognized_goal_layout_before_writing() {
+async fn remote_schema_upgrade_preserves_extended_goal_layout() {
     let fixture = Fixture::new().await;
     sqlx::query("ALTER TABLE thread_goals ADD COLUMN unknown_data TEXT")
         .execute(&fixture.transport.pool)
         .await
         .unwrap();
-    let error = schema_upgrade::upgrade(&fixture.store(StoreAccess::ReadWrite), &fixture.snapshot)
+    sqlx::query("UPDATE thread_goals SET unknown_data = 'keep'")
+        .execute(&fixture.transport.pool)
         .await
-        .unwrap_err();
-    assert!(matches!(
-        error.kind(),
-        SessionResourceErrorKind::Unsupported
-    ));
-    assert_eq!(fixture.transport.writes.load(Ordering::SeqCst), 0);
-    fixture.assert_old_state().await;
+        .unwrap();
+    schema_upgrade::upgrade(&fixture.store(StoreAccess::ReadWrite), &fixture.snapshot)
+        .await
+        .unwrap();
+    let (retained,): (String,) = sqlx::query_as("SELECT unknown_data FROM thread_goals")
+        .fetch_one(&fixture.transport.pool)
+        .await
+        .unwrap();
+    assert_eq!(retained, "keep");
+    assert_eq!(fixture.version().await, schema::REMOTE_SCHEMA_VERSION);
 }
 
 #[tokio::test]
@@ -747,7 +760,7 @@ async fn remote_schema_upgrade_removes_recognized_execution_table_but_keeps_ledg
     .fetch_one(&fixture.transport.pool)
     .await
     .unwrap();
-    assert_eq!(retired, 0);
+    assert_eq!(retired, 1);
     let (receipt,): (String,) =
         sqlx::query_as("SELECT receipt FROM peri_op_ledger WHERE operation_id='operation'")
             .fetch_one(&fixture.transport.pool)

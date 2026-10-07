@@ -146,14 +146,11 @@ async fn test_image_later_input_reaches_model_after_micro_compact() {
         matches!(result, LoopResult::Completed),
         "循环应正常完成：{result:?}"
     );
-    let first_admission = ctx.session.turn.work_admission().unwrap().clone();
     let mut next_context = StageContext::builder(
         session.start_turn(),
         session.transcript(),
         session.queue().clone(),
     )
-    .with_recipient_lifecycle(1)
-    .with_execution_admission_port(ctx.execution_admission_port().unwrap())
     .with_middleware_chain(Arc::clone(&ctx.runtime.middleware_chain))
     .with_llm(Arc::clone(&ctx.runtime.llm))
     .build();
@@ -162,16 +159,6 @@ async fn test_image_later_input_reaches_model_after_micro_compact() {
     assert!(
         matches!(result, LoopResult::Completed),
         "后续执行应完成：{result:?}"
-    );
-    assert_ne!(
-        next_context
-            .session
-            .turn
-            .work_admission()
-            .unwrap()
-            .admission_id,
-        first_admission.admission_id,
-        "新输入必须获得独立 SDK admission"
     );
     let ctx = next_context;
     {

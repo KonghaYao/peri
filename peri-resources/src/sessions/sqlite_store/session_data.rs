@@ -38,14 +38,10 @@ use sqlx::SqliteConnection;
 mod async_task;
 #[path = "session_data/catalog.rs"]
 mod catalog;
-#[path = "session_data/control.rs"]
-mod control;
 #[path = "session_data/history.rs"]
 mod history;
 #[path = "session_data/lifecycle.rs"]
 mod lifecycle;
-#[path = "session_data/work.rs"]
-mod work;
 
 /// 同一份 [`SqliteSessionDatabase`] 的数据面句柄。
 ///
@@ -76,79 +72,6 @@ pub(super) use helpers::{new_session_draft_row, new_session_row, validate_unboun
 
 #[async_trait]
 impl SessionDataPort for SqliteSessionData {
-    async fn load_resource_owner_facts(
-        &self,
-        id: &ThreadId,
-        previous_lifecycle: u64,
-    ) -> SessionResourceResult<peri_acp_types::session_resources::work::ResourceOwnerFacts> {
-        self.read_resource_owner_facts(id, previous_lifecycle).await
-    }
-    async fn load_work_revision(&self, id: &ThreadId) -> SessionResourceResult<u64> {
-        self.read_work_revision(id).await
-    }
-    async fn has_pending_work_mutations(&self, id: &ThreadId) -> SessionResourceResult<bool> {
-        sqlx::query_scalar(crate::sessions::work::HAS_PENDING)
-            .bind(id)
-            .fetch_one(&self.database.pool)
-            .await
-            .map_err(|error| map_sqlx(&error))
-    }
-    async fn load_work_availability(
-        &self,
-        id: &ThreadId,
-    ) -> SessionResourceResult<peri_acp_types::session_resources::work::WorkAvailability> {
-        self.read_work_availability(id).await
-    }
-    async fn load_work_delivery(
-        &self,
-        query: &peri_acp_types::session_resources::work::WorkDeliveryQuery,
-    ) -> SessionResourceResult<Option<peri_acp_types::session_resources::work::DeliveryRecord>>
-    {
-        self.read_delivery(query).await
-    }
-    async fn load_work_command(
-        &self,
-        query: &peri_acp_types::session_resources::work::WorkCommandQuery,
-    ) -> SessionResourceResult<Option<peri_acp_types::session_resources::work::OwnedWorkCommand>>
-    {
-        self.read_work_command(query).await
-    }
-    async fn load_session_work(
-        &self,
-        query: &peri_acp_types::session_resources::work::WorkQuery,
-    ) -> SessionResourceResult<peri_acp_types::session_resources::work::WorkSnapshot> {
-        self.read_work(query).await
-    }
-    async fn apply_work_mutation(
-        &self,
-        command: &peri_acp_types::session_resources::work::PreparedWorkCommand,
-    ) -> SessionResourceResult<peri_acp_types::session_resources::work::WorkReceipt> {
-        self.write_work(command).await
-    }
-    async fn resolve_work_mutation(
-        &self,
-        command: &peri_acp_types::session_resources::work::PreparedWorkCommand,
-    ) -> SessionResourceResult<peri_acp_types::session_resources::work::WorkResolution> {
-        self.resolve_work(command).await
-    }
-    async fn load_session_control(
-        &self,
-        id: &ThreadId,
-    ) -> SessionResourceResult<peri_acp_types::session_resources::ControlState> {
-        self.read_control(id).await
-    }
-    async fn apply_session_control(
-        &self,
-        command: &peri_acp_types::session_resources::ControlCommand,
-    ) -> SessionResourceResult<peri_acp_types::session_resources::ControlReceipt> {
-        self.write_control(command).await
-    }
-    async fn resolve_session_control(
-        &self,
-        command: &peri_acp_types::session_resources::ControlCommand,
-    ) -> SessionResourceResult<peri_acp_types::session_resources::ControlResolution> {
-        self.resolve_control(command).await
-    }
     fn oauth_credentials_for_workspace(
         self: Arc<Self>,
         workspace_id: peri_acp_types::workspace::WorkspaceId,

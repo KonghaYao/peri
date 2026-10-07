@@ -97,9 +97,8 @@ use session_open::{refuse_legacy_shape, resolve_open_machine_id};
 /// 与否）再没有重连：槽里没有可服务的连接时如实返回关闭错误，绝不用一次重连把关闭事实盖掉。
 ///
 /// 本机**不再**持有远端操作的日志（v10 删除了 `session_remote_operations`）：远端账本
-/// （`peri_op_ledger`）仍按「资格先于效果」写，但它是**远端**事实，本机不复制。跨进程重启
-/// WorkCommand 的完整原命令与回执留在同一远端 Store，跨进程恢复可按原 ID 查询并对账；
-/// 其他通用 mutation 不因此获得完整原命令恢复能力，不能把内存 gate 当成持久日志。
+/// （`peri_op_ledger`）仍按「资格先于效果」写，但它是**远端**事实，本机不复制。
+/// 普通 mutation 的写入确认保留；它不提供 Agent 执行恢复，不能把内存 gate 当成持久日志。
 pub(super) struct RemoteSessionData {
     pub(super) machine_id: String,
     /// 连接的生命周期槽位：服务中，或关闭中（含已确认关闭）。
@@ -528,89 +527,6 @@ pub(super) fn unsupported_behavior(behavior: &'static str) -> SessionResourceErr
 
 #[async_trait]
 impl SessionDataPort for RemoteSessionData {
-    async fn load_resource_owner_facts(
-        &self,
-        id: &ThreadId,
-        previous_lifecycle: u64,
-    ) -> SessionResourceResult<peri_acp_types::session_resources::work::ResourceOwnerFacts> {
-        self.read_resource_owner_facts(id, previous_lifecycle).await
-    }
-    async fn load_work_revision(&self, id: &ThreadId) -> SessionResourceResult<u64> {
-        self.read_work_revision(id).await
-    }
-    async fn has_pending_work_mutations(&self, id: &ThreadId) -> SessionResourceResult<bool> {
-        let row = self
-            .store()
-            .await?
-            .fetch_row(&StatementSpec::new(
-                crate::sessions::work::HAS_PENDING,
-                vec![Value::Text(id.clone())],
-            ))
-            .await?;
-        match row.as_deref().and_then(|row| super::sql::int_at(row, 0)) {
-            Some(0) => Ok(false),
-            Some(1) => Ok(true),
-            _ => Err(crate::sessions::failure::corrupt(
-                "pending work existence is not readable",
-            )),
-        }
-    }
-    async fn load_work_availability(
-        &self,
-        id: &ThreadId,
-    ) -> SessionResourceResult<peri_acp_types::session_resources::work::WorkAvailability> {
-        self.read_work_availability(id).await
-    }
-    async fn load_work_delivery(
-        &self,
-        query: &peri_acp_types::session_resources::work::WorkDeliveryQuery,
-    ) -> SessionResourceResult<Option<peri_acp_types::session_resources::work::DeliveryRecord>>
-    {
-        self.read_delivery(query).await
-    }
-    async fn load_work_command(
-        &self,
-        query: &peri_acp_types::session_resources::work::WorkCommandQuery,
-    ) -> SessionResourceResult<Option<peri_acp_types::session_resources::work::OwnedWorkCommand>>
-    {
-        self.read_work_command(query).await
-    }
-    async fn load_session_work(
-        &self,
-        query: &peri_acp_types::session_resources::work::WorkQuery,
-    ) -> SessionResourceResult<peri_acp_types::session_resources::work::WorkSnapshot> {
-        self.read_work(query).await
-    }
-    async fn apply_work_mutation(
-        &self,
-        command: &peri_acp_types::session_resources::work::PreparedWorkCommand,
-    ) -> SessionResourceResult<peri_acp_types::session_resources::work::WorkReceipt> {
-        self.write_work(command).await
-    }
-    async fn resolve_work_mutation(
-        &self,
-        command: &peri_acp_types::session_resources::work::PreparedWorkCommand,
-    ) -> SessionResourceResult<peri_acp_types::session_resources::work::WorkResolution> {
-        self.resolve_work(command).await
-    }
-    async fn load_session_control(
-        &self,
-        id: &ThreadId,
-    ) -> SessionResourceResult<peri_acp_types::session_resources::ControlState> {
-        self.read_control(id).await
-    }
-    async fn apply_session_control(
-        &self,
-        command: &peri_acp_types::session_resources::ControlCommand,
-    ) -> SessionResourceResult<peri_acp_types::session_resources::ControlReceipt> {
-        self.write_control(command).await
-    }
-    async fn resolve_session_control(
-        &self,
-        command: &peri_acp_types::session_resources::ControlCommand,
-    ) -> SessionResourceResult<peri_acp_types::session_resources::ControlResolution> {
-        self.resolve_control(command).await
-    }
     async fn finish_close(&self, id: &ThreadId) -> SessionResourceResult<()> {
         self.finish_session_close(id).await
     }

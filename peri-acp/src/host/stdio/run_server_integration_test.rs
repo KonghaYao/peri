@@ -156,7 +156,6 @@ async fn make_server_config_with(
     let (host_task_owner, host_task_spawner) = crate::host::task_scope::HostTaskOwner::new();
     let (mcp_task_owner, _mcp_task_spawner) = peri_middlewares::mcp::McpTaskOwner::new();
     AcpServerConfig {
-        execution_admission_port: None,
         workspace_assembly: None,
         host_task_owner: Some(host_task_owner),
         host_task_spawner,

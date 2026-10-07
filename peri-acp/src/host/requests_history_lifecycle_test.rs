@@ -57,7 +57,7 @@ impl Fixture {
         .unwrap();
         let id = created["sessionId"].as_str().unwrap().to_owned();
         bridge
-            .append_message(&id, BaseMessage::human("preserved recovery history"))
+            .append_message(&id, BaseMessage::human("preserved session history"))
             .await
             .unwrap();
         Self {
@@ -91,7 +91,7 @@ impl Fixture {
     fn assert_restored_history(&self, id: &str) {
         let state = &self.sessions[id];
         assert_eq!(Path::new(&state.cwd), self.cwd);
-        assert_eq!(state.history[0].content(), "preserved recovery history");
+        assert_eq!(state.history[0].content(), "preserved session history");
         assert!(state.frozen.is_some());
     }
 }
@@ -134,61 +134,25 @@ async fn test_clean_load_resume_and_fork_ignore_caller_cwd_and_keep_saved_facts(
 }
 
 #[tokio::test]
-async fn fork_rejects_persisted_attempt_before_runtime_attachment() {
-    use peri_acp_types::identity::AttemptId;
-    use peri_acp_types::session::TurnId;
-    use peri_acp_types::session_resources::{ControlAction, ControlAttempt, ControlCommand};
-
+#[serial]
+async fn fork_rejects_current_prompt_without_persistent_execution_state() {
     let mut fixture = Fixture::new().await;
-    let control = fixture
-        .cfg
-        .session_resources
-        .load_session_control(&fixture.id)
-        .await
-        .unwrap();
-    let attempt = ControlAttempt {
-        turn_id: TurnId::new(),
-        attempt_id: AttemptId::new(),
-    };
-    fixture
-        .cfg
-        .session_resources
-        .apply_session_control(&ControlCommand {
-            session_id: fixture.id.clone(),
-            command_id: "fork-observed-attempt".into(),
-            expected_lifecycle: control.lifecycle,
-            expected_revision: control.revision,
-            expected_control_generation: control.control_generation,
-            action: ControlAction::ObserveAttempt {
-                target: Some(attempt.clone()),
-            },
-        })
-        .await
-        .unwrap();
-    assert!(fixture.sessions[&fixture.id].cancel_token.is_none());
-    let session_id = fixture.id.clone();
+    let id = fixture.id.clone();
+    fixture.sessions.get_mut(&id).unwrap().cancel_token =
+        Some(tokio_util::sync::CancellationToken::new());
     let error = fixture
-        .request("session/fork", &json!({"sessionId": session_id}))
+        .request("session/fork", &json!({"sessionId": id}))
         .await
         .unwrap_err();
-    assert_eq!(error.code, -32010);
-    assert_eq!(
-        error.message,
-        "Cannot fork while source execution is active"
-    );
-    let retained = fixture
-        .cfg
-        .session_resources
-        .load_session_control(&fixture.id)
-        .await
-        .unwrap();
-    assert_eq!(retained.attempt, Some(attempt));
+    assert!(error.message.contains("execution is active"));
     assert_eq!(fixture.sessions.len(), 1);
+    fixture.sessions.get_mut(&id).unwrap().cancel_token = None;
+    fixture.close(&id).await;
 }
 
 #[tokio::test]
 #[serial]
-async fn load_and_resume_after_runtime_loss_restore_without_owner_proof() {
+async fn load_and_resume_after_runtime_loss_preserve_session_history() {
     for method in ["session/load", "session/resume"] {
         let mut fixture = Fixture::new().await;
         let id = fixture.id.clone();
@@ -254,7 +218,7 @@ async fn another_host_handle_can_restore_without_peri_execution_exclusion() {
     assert!(other_sessions[&id].frozen.is_some());
     assert_eq!(
         other_sessions[&id].history[0].content(),
-        "preserved recovery history"
+        "preserved session history"
     );
     assert!(fixture.sessions.contains_key(&id));
     handle_request(
@@ -271,7 +235,7 @@ async fn another_host_handle_can_restore_without_peri_execution_exclusion() {
 
 #[tokio::test]
 #[serial]
-async fn unloaded_close_and_delete_settle_without_takeover_proof() {
+async fn unloaded_close_and_delete_settle_normally() {
     for delete in [false, true] {
         let mut fixture = Fixture::new().await;
         let id = fixture.id.clone();

@@ -2,6 +2,9 @@
 
 use std::sync::Arc;
 
+use super::continuation;
+use crate::dispatch::prompt::extract_and_validate_run_prompt_params;
+use peri_acp_types::messages::BaseMessage;
 use serde_json::Value;
 
 use super::{extract_session_id, run_prompt, AcpServerConfig, PromptLocks, SharedSessions};
@@ -13,11 +16,12 @@ use crate::transport::types::AcpError;
 /// （history 持久化 / cancel 回滚 / recall 回写）、prediction fork。continuation
 /// 不发送 ACP response（无 request id），且不触发 prediction。
 ///
-/// SDK admission 与持久控制是执行权威；内部工作通知不调用此执行入口。
+/// 用户 prompt 与当前运行态的内部续跑共享同一序列化入口。
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn dispatch_prompt_turn(
     params: Value,
     is_continuation: bool,
+    continuation_epoch: Option<u64>,
     sessions: &SharedSessions,
     prompt_locks: &PromptLocks,
     transport: &Arc<dyn crate::transport::AcpTransport>,
@@ -27,6 +31,7 @@ pub(crate) async fn dispatch_prompt_turn(
     dispatch_prompt_turn_with_input(
         params,
         is_continuation,
+        continuation_epoch,
         sessions,
         prompt_locks,
         transport,
@@ -41,6 +46,7 @@ pub(crate) async fn dispatch_prompt_turn(
 pub(crate) async fn dispatch_prompt_turn_with_input(
     params: Value,
     is_continuation: bool,
+    continuation_epoch: Option<u64>,
     sessions: &SharedSessions,
     prompt_locks: &PromptLocks,
     transport: &Arc<dyn crate::transport::AcpTransport>,
@@ -75,6 +81,47 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
     // 而不是先排队等锁。本次准入的权威复核在取得锁之后（见下方 validate_expected）。
     super::workspace::reassert_expected(cfg, &prompt_session_id, None).await?;
 
+    // 用户显式新 prompt 清掉未运行的 continuation（scheduler 的原子 take 与
+    // epoch 校验保证不会重复/过期执行）。必须在等待 prompt lock 前递增代际，
+    // 使已排队的 continuation 失效；continuation 自身仅在真正拿到锁后才标记
+    // in_flight，避免其尚在排队时掩盖对原 prompt 的取消。
+    if !is_continuation {
+        let mut sessions = sessions.lock().await;
+        if let Some(state) = sessions.get_mut(&prompt_session_id) {
+            state.continuation_armed = false;
+            state.continuation_epoch += 1;
+        }
+    }
+
+    // 挂起注入：session 当前在 await_wake 挂起（turn 在途但 idle，通常因 bg
+    // 任务活跃——executor 在 run_react_loop 挂起期间置 idle_suspended 标志）。
+    // 若在此等待 per-session prompt lock，注入会阻塞至当前 turn 完成——bg 任务
+    // 可能长达数分钟，用户输入表现为"nothing happen"（TUI 侧 submit_consumer
+    // 串行 await prompt RPC，被挂起的 RPC 卡住，后续提交全部排队）。
+    // 正确语义：直接把用户消息推入 session inbox（Prompt + wake），挂起的
+    // run_react_loop 醒来后由 Receive drain_all 消费，在**同一 turn** 内继续。
+    // 注入后立即返回——当前 turn 的 TurnDone 会携带原 request_id（挂起时
+    // 该 turn 已在执行），TUI 侧仅用 request_id 做 stale TurnInterrupted 配对，
+    // TurnDone 路径不比对（见 peri-tui acp_events/turn.rs）。
+    // NOTE: 此分支仅处理用户 prompt（is_continuation=false）。prompt_with_bg_results
+    // 的 bgResults 在 run_session_loop 内 push Defer——挂起注入路径不携带
+    // bgResults（该 RPC 仅 stdio 会话使用，allow_await_wake=false 永不挂起）。
+    if !is_continuation && cfg.session_manager.is_idle_suspended(&prompt_session_id) {
+        super::workspace::validate_expected(cfg, &prompt_session_id, None).await?;
+        let (_, content, _attachments) = extract_and_validate_run_prompt_params(&params)?;
+        if let Some(inbox) = cfg.session_manager.session_inbox_for(&prompt_session_id) {
+            inbox.handle().push_prompt(
+                peri_acp_types::session::MessageSource::UserInput,
+                BaseMessage::human(content),
+            );
+            tracing::info!(
+                session_id = %prompt_session_id,
+                "prompt injected while turn suspended (await_wake); loop will wake and consume"
+            );
+            return Ok(serde_json::json!({}));
+        }
+    }
+
     let prompt_lock = {
         let mut locks = prompt_locks.lock().await;
         locks
@@ -103,16 +150,37 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
         }
     }
     super::workspace::validate_expected(cfg, &prompt_session_id, None).await?;
-    let control = cfg
-        .session_resources
-        .load_session_control(&prompt_session_id)
-        .await
-        .map_err(super::workspace::resource_error)?;
-    if control.status != peri_acp_types::session_resources::ControlStatus::Active {
-        return Err(AcpError::new(
-            -32010,
-            "Session activation is paused or closed",
-        ));
+    if let Some(epoch) = continuation_epoch {
+        let dispatchable = {
+            let sessions = sessions.lock().await;
+            sessions.get(&prompt_session_id).is_some_and(|state| {
+                let (has_subagent, has_mq) = cfg
+                    .session_manager
+                    .get_session(&prompt_session_id)
+                    .map(|session| {
+                        (
+                            session.v2_message_queue.has_pending_defer(
+                                &peri_acp_types::session::MessageSource::SubAgentComplete,
+                            ),
+                            session.v2_message_queue.needs_mq_continuation(),
+                        )
+                    })
+                    .unwrap_or((false, false));
+                continuation::continuation_dispatchable(state, epoch, has_subagent, has_mq)
+            })
+        };
+        if !dispatchable {
+            tracing::debug!(
+                session_id = %prompt_session_id,
+                "continuation: superseded (newer prompt or Defer consumed), aborting"
+            );
+            return Ok(serde_json::Value::Null);
+        }
+        let mut sessions = sessions.lock().await;
+        if let Some(state) = sessions.get_mut(&prompt_session_id) {
+            state.continuation_in_flight = true;
+            state.continuation_mq_steering_pending = false;
+        }
     }
 
     // Extract AgentPool from session, wrap in Arc<Mutex> for
@@ -151,6 +219,7 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
     {
         let mut sessions = sessions.lock().await;
         if let Some(state) = sessions.get_mut(&prompt_session_id) {
+            state.continuation_in_flight = false;
             if result.is_err() {
                 // Early assembly/controller errors may precede finish_prompt_turn.
                 // The prompt lock still identifies this attempt as the sole writer.
@@ -162,5 +231,30 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
         }
     }
 
+    let mq_continuation = {
+        let mut sessions = sessions.lock().await;
+        sessions.get_mut(&prompt_session_id).is_some_and(|state| {
+            let pending = state.continuation_mq_steering_pending
+                && cfg
+                    .session_manager
+                    .v2_queue_for(&prompt_session_id)
+                    .is_some_and(|queue| queue.needs_mq_continuation());
+            if pending {
+                state.continuation_mq_steering_pending = false;
+            }
+            pending
+        })
+    };
+    if mq_continuation
+        && cont_tx
+            .send(crate::session::executor::ContinuationRequest {
+                session_id: prompt_session_id,
+                kind: peri_acp_types::tasks::BgTaskKind::Agent,
+                mq_steering: true,
+            })
+            .is_err()
+    {
+        tracing::warn!("continuation scheduling failed: channel closed");
+    }
     result
 }

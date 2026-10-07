@@ -93,7 +93,6 @@ async fn prepared_test_host(
     let (host_task_owner, host_task_spawner) = crate::host::task_scope::HostTaskOwner::new();
     let (mcp_task_owner, _mcp_task_spawner) = peri_middlewares::mcp::McpTaskOwner::new();
     AcpServerConfig {
-        execution_admission_port: None,
         workspace_assembly,
         host_task_owner: Some(host_task_owner),
         host_task_spawner,

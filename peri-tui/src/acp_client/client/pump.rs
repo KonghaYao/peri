@@ -114,27 +114,12 @@ impl AcpTuiClient {
     /// 长生命周期对象，否则 channel 不再随 pump 退出关闭，notifier 的
     /// recv-None 兜底失效（Issue 2）。从 client 主动发通知走显式参数传递。
     pub fn spawn_pump(&self, notification_tx: mpsc::UnboundedSender<AcpNotification>) {
-        self.spawn_pump_with_execution_dispatcher(notification_tx, None);
-    }
-
-    pub fn spawn_pump_with_execution_dispatcher(
-        &self,
-        notification_tx: mpsc::UnboundedSender<AcpNotification>,
-        dispatcher: Option<Arc<dyn peri_acp::transport::RequestTransport>>,
-    ) {
         let transport = self.transport.clone();
         let lifecycle = self.lifecycle.clone();
         let user_input_queue = self.user_input_queue.clone();
         *self.notification_weak.lock().unwrap() = Some(notification_tx.downgrade());
         tokio::spawn(async move {
-            Self::run_pump(
-                transport,
-                notification_tx,
-                lifecycle,
-                user_input_queue,
-                dispatcher,
-            )
-            .await;
+            Self::run_pump(transport, notification_tx, lifecycle, user_input_queue).await;
         });
     }
 
@@ -166,80 +151,10 @@ impl AcpTuiClient {
         notification_tx: mpsc::UnboundedSender<AcpNotification>,
         lifecycle: InteractionLifecycle,
         user_input_queue: Arc<std::sync::atomic::AtomicBool>,
-        dispatcher: Option<Arc<dyn peri_acp::transport::RequestTransport>>,
-    ) {
-        let (projection_tx, projection_rx) = mpsc::unbounded_channel();
-        let incoming_transport = transport.clone();
-        let reception = async move {
-            while let Some(message) = incoming_transport.recv().await {
-                match message {
-                    IncomingMessage::Notification { method, params }
-                        if method == "session/work/available" =>
-                    {
-                        let dispatcher = dispatcher.clone();
-                        tokio::spawn(async move {
-                            let Some(dispatcher) = dispatcher else {
-                                error!(
-                                    "SDK work dispatcher unavailable; no Rust scheduler fallback"
-                                );
-                                return;
-                            };
-                            if let Err(error) = dispatcher
-                                .send_request("peri/execution/activate", params)
-                                .await
-                            {
-                                warn!(?error, "SDK activation outcome remains unconfirmed");
-                            }
-                        });
-                    }
-                    IncomingMessage::Request { id, method, params }
-                        if method == peri_acp_types::execution_admission::ADMIT_METHOD
-                            || method == peri_acp_types::execution_admission::SETTLE_METHOD
-                            || method == peri_acp_types::execution_admission::ENTERED_METHOD =>
-                    {
-                        let transport = incoming_transport.clone();
-                        let dispatcher = dispatcher.clone();
-                        tokio::spawn(async move {
-                            let result = match dispatcher {
-                                Some(dispatcher) => dispatcher.send_request(&method, params).await,
-                                None => Err(peri_acp::transport::types::AcpError::new(
-                                    -32601,
-                                    "SDK persistent execution admission capability unavailable",
-                                )),
-                            };
-                            let _ = transport.send_response(id, result).await;
-                        });
-                    }
-                    message => {
-                        if projection_tx.send(message).is_err() {
-                            break;
-                        }
-                    }
-                }
-            }
-        };
-        tokio::join!(
-            reception,
-            Self::run_projection_pump(
-                transport,
-                notification_tx,
-                lifecycle,
-                user_input_queue,
-                projection_rx,
-            )
-        );
-    }
-
-    async fn run_projection_pump(
-        transport: Arc<MpscClientTransport>,
-        notification_tx: mpsc::UnboundedSender<AcpNotification>,
-        lifecycle: InteractionLifecycle,
-        user_input_queue: Arc<std::sync::atomic::AtomicBool>,
-        mut incoming: mpsc::UnboundedReceiver<IncomingMessage>,
     ) {
         let mut event_count: u64 = 0;
         loop {
-            let msg = incoming.recv().await;
+            let msg = transport.recv().await;
             match msg {
                 Some(IncomingMessage::Notification { method, params }) => {
                     if method == "peri/agent_event" {

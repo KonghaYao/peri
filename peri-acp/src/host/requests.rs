@@ -5,9 +5,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::session::event_sink::TransportEventSink;
-use peri_acp_types::session_resources::{
-    ControlAction, ControlCommand, ControlDecision, ControlReceipt, ControlResolution,
-};
 use peri_acp_types::tasks::BgRegistryEvent;
 use serde_json::json;
 use serde_json::Value;
@@ -24,9 +21,7 @@ pub(crate) mod config_options;
 mod cron;
 mod mcp_oauth;
 mod plugin;
-pub(crate) mod resource_owners;
 mod rewind;
-mod session_control;
 pub(super) mod session_io;
 pub(crate) mod session_lifecycle;
 mod storage_v2;
@@ -44,22 +39,15 @@ pub(crate) async fn handle_request(
         .get("sessionId")
         .or_else(|| params.get("session_id"))
         .and_then(Value::as_str);
-    let reopening = matches!(method, "session/control" | "session/control/resolve")
-        && params
-            .get("action")
-            .and_then(|action| action.get("kind"))
-            .and_then(Value::as_str)
-            == Some("reopen");
-    let lifecycle = reopening
-        || matches!(
-            method,
-            "session/new"
-                | "session/load"
-                | "session/resume"
-                | "session/fork"
-                | "session/close"
-                | "session/delete"
-        );
+    let lifecycle = matches!(
+        method,
+        "session/new"
+            | "session/load"
+            | "session/resume"
+            | "session/fork"
+            | "session/close"
+            | "session/delete"
+    );
     let environment = session_id
         .and_then(|id| sessions.get(id))
         .and_then(|state| state.environment.clone());
@@ -100,12 +88,6 @@ pub(crate) async fn handle_request(
     let result = match method {
         "initialize" => session_lifecycle::handle_initialize(params, cfg),
         "session/new" => session_lifecycle::handle_new(params, cfg, sessions).await,
-        "session/work/query" => super::execution::query(params, cfg).await,
-        "session/work/resolve" => super::execution::resolve_work(params, cfg).await,
-        "session/execute/resolve" => super::execution::resolve(params, cfg).await,
-        "session/control" | "session/control/resolve" | "session/control/state" => {
-            session_control::handle(method, params, cfg, sessions).await
-        }
         "session/set_mode" => config_options::handle_set_mode(params, cfg, transport).await,
         "session/set_config_option" => {
             config_options::handle_set_config_option(params, cfg, sessions, transport).await
@@ -179,38 +161,6 @@ pub(crate) async fn handle_request(
             }
         }
     }
-    if matches!(method, "session/control" | "session/control/resolve")
-        && serde_json::from_value::<ControlCommand>(params.clone())
-            .is_ok_and(|command| command.action == ControlAction::Reopen)
-    {
-        if let Ok(value) = &result {
-            let receipt = if method == "session/control" {
-                serde_json::from_value::<ControlReceipt>(value.clone()).ok()
-            } else {
-                match serde_json::from_value::<ControlResolution>(value.clone()).ok() {
-                    Some(ControlResolution::Applied { receipt }) => Some(receipt),
-                    _ => None,
-                }
-            };
-            if let Some(receipt) =
-                receipt.filter(|receipt| receipt.decision == ControlDecision::Accepted)
-            {
-                let id = receipt.session_id.as_str();
-                if sessions.contains_key(id)
-                    && cfg.session_manager.get_session(id).is_some_and(|session| {
-                        session.recipient_lifecycle == receipt.state.lifecycle
-                    })
-                {
-                    let local = sessions
-                        .get(id)
-                        .and_then(|state| state.environment.as_ref())
-                        .map(|environment| &environment.cfg)
-                        .unwrap_or(cfg);
-                    bind_session_tasks(id, local, transport);
-                }
-            }
-        }
-    }
     result
 }
 
@@ -236,13 +186,6 @@ fn bind_session_tasks(
     let id = session_id.to_owned();
     drop(session);
     tokio::spawn(async move {
-        if let Some(pool) = pool.as_ref() {
-            let _ = peri_time::timeout(
-                std::time::Duration::from_millis(500),
-                Arc::clone(pool).recover_workspace_tasks(&id),
-            )
-            .await;
-        }
         let snapshot = manager.snapshot();
         let mut revision = snapshot.revision;
         let watcher = pool.map(|pool| {

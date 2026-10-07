@@ -7,9 +7,6 @@ use peri_acp_types::workspace::{SessionBinding, SESSION_BINDING_VERSION};
 use peri_agent::agent::stages::StageContext;
 use peri_resources::sessions::SessionResourcesImpl;
 
-#[path = "../../../peri-agent/src/session/test_resources/mock/admission.rs"]
-mod admission;
-
 pub(crate) async fn bind(context: &mut StageContext) -> tempfile::TempDir {
     let directory = tempfile::tempdir().unwrap();
     let resources: Arc<dyn SessionResources> = Arc::new(
@@ -32,7 +29,7 @@ pub(crate) async fn bind(context: &mut StageContext) -> tempfile::TempDir {
             thread_id: session_id.clone(),
             created_at: peri_time::now_utc_rfc3339(),
             meta: NewSessionMeta {
-                title: Some("durable middleware fixture".into()),
+                title: Some("middleware history fixture".into()),
                 cwd: workspace.cwd.to_string_lossy().into_owned(),
                 parent_thread_id: None,
                 hidden: false,
@@ -55,7 +52,5 @@ pub(crate) async fn bind(context: &mut StageContext) -> tempfile::TempDir {
         *transcript =
             std::mem::take(&mut *transcript).with_persistence(Arc::clone(&resources), session_id);
     }
-    context.recipient_lifecycle = Some(1);
-    context.execution_admission_port = Some(Arc::new(admission::FixtureAdmission(resources)));
     directory
 }

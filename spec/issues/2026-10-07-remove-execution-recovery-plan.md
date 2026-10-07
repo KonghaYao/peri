@@ -1,6 +1,6 @@
 # 执行恢复机制剥离计划
 
-- 状态：**权威文档已修正；计划完成，准备并行实施**。
+- 状态：**四个 worker 已完成，整合与定向验证完成；准备提交并对提交快照轻量复验**。
 - 授权：2026-10-07 用户要求文档 → 充分计划 → 多 subagent → 完成/提交/整合 → 轻量验证；全部在独立 worktree。
 - 工作树：`/Users/konghayao/code/ai/peri-remove-execution-recovery-20261007`。
 - 分支：`refactor/remove-execution-recovery-20261007`；基线 `01c0efecff74427ca563a77a57de6188be256646`。
@@ -118,9 +118,37 @@ worker完成后协调者统一暂存/提交，避免并发操作git index。
 
 - [x] 独立worktree、固定基线、无upstream。
 - [x] 权威目标修正、表结构基线与充分计划。
-- [ ] 文档基线提交。
-- [ ] A/B/C/D并行完成。
-- [ ] review、整合、路由与验证更新。
+- [x] 文档基线提交：`0dbfb386`。
+- [x] A/B/C/D并行完成，均已关闭。
+- [x] review、整合、路由与验证更新。
 - [ ] 整合提交及提交后轻量确认。
 
-实际结果、失败和提交OID在完成时补充，不预填通过。
+### 实施与整合
+
+- A 删除领域与存储 work/control，落地 schema18，保护 history rowid、九表与普通扩展；详细证据见 `peri-resources/execution-recovery-removal-report.md`。
+- B 重接进程内 MQ、RCRA、消息持久化和当前父子任务；模型 tool-call ID 与独立 invocation ID 分离，当前后台结果接受不声称持久交付完成。
+- C 删除 ACP 恢复协议、SDK reverse admission 与 cold owner 装配；旧方法返回 -32601，history/fork/compact/普通续聊保留。
+- D 删除 middleware 与 Workspace 的持久 invocation/owner 恢复，包括后端 v1 内存 owner ledger，不保留 v2 绕过分支；当前 scope、task subscription、结果与取消保留。
+- 协调者修正跨层 parent_tool_call_id 归属、TUI 普通 cancel 通知与 pump、移除 sidecar 启动和失效回执夹具。history UI 未重写，SDK alpha 源码未改。
+- 编译整合暴露并修正：子任务配置字段、TUI 生产 run accessor、过时回执字段、middleware 测试夹具 context 参数。没有屏蔽错误或恢复旧兼容类型。
+- 原工作树 WIP 未混入，没有访问或迁移真实用户库，没有 push 或 merge 回原分支。
+
+### 已完成定向验证
+
+所有 Cargo 命令使用 `./scripts/cargo-rmcp-patched.sh`、`--locked --offline`；未运行 workspace 全量测试或 clippy。
+
+| 范围 | 结果 |
+| --- | --- |
+| A：types lib | 526 passed |
+| A：resources schema / history / migration / contract | 83 / 41 / 3 / 6 passed；history 1 ignored |
+| A：types doc | 1 passed，2 ignored |
+| B：agent 定向 lib / doc / tests check | 289 / 10 passed；check 通过 |
+| C：ACP 输入、取消、history、fork、compact、cron、关闭等定向测试 | 104 passed |
+| D：Workspace 当前 invocation wire、取消与 scope barrier | 5 passed |
+| 协调者：TUI cancel、load reservation、history load、旧 admission 忽略、stop wire、cancel drain | 9 passed |
+| 协调者：peri-tui 入口 check | 通过，包含受影响生产依赖编译 |
+| 协调者：middleware tests check / 当前 invocation 身份测试 | check 通过；3 passed |
+
+ignored 不算通过。日志保存在隔离工作树 `target/removal-*.log` 和 A 的 `/tmp/peri-a-*-test.log`，不提交构建产物。
+schema18 远端验证采用 SQLite-backed RemoteTransport，不是实际 Turso 网络验证；未执行真实用户库、WASM、UI E2E、跨进程故障注入或性能收益 benchmark。
+提交后的命令和实际 OID 在复验完成后补充，不预填通过。

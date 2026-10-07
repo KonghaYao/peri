@@ -67,6 +67,76 @@ async fn history(
 }
 
 #[tokio::test]
+async fn old_versions_upgrade_preserving_goal_extensions_thread_columns_and_history_rowids() {
+    for version in [10, 11] {
+        let (directory, mut connection) = old_database().await;
+        sqlx::raw_sql(
+            "ALTER TABLE thread_goals ADD COLUMN extension TEXT;
+            UPDATE thread_goals SET extension = 'goal extension';
+            ALTER TABLE threads ADD COLUMN extension_value TEXT;
+            UPDATE threads SET extension_value = 'thread extension' WHERE id = 'older';
+            CREATE TABLE extension_goal_rows (id TEXT REFERENCES thread_goals(thread_id));
+            INSERT INTO extension_goal_rows VALUES ('older');
+            CREATE INDEX extension_goal_index ON thread_goals(objective);
+            CREATE VIEW extension_goal_view AS SELECT objective FROM thread_goals;
+            CREATE TRIGGER extension_goal_trigger AFTER UPDATE OF title ON threads
+                BEGIN UPDATE thread_goals SET extension = 'updated' WHERE thread_id = NEW.id; END;",
+        )
+        .execute(&mut connection)
+        .await
+        .unwrap();
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+            "PRAGMA user_version = {version}"
+        )))
+        .execute(&mut connection)
+        .await
+        .unwrap();
+        let before = history(&mut connection).await;
+        let objects: Vec<(String, Option<String>)> = sqlx::query_as(
+            "SELECT name, sql FROM sqlite_schema WHERE name LIKE 'extension_%' ORDER BY name",
+        )
+        .fetch_all(&mut connection)
+        .await
+        .unwrap();
+        connection.close().await.unwrap();
+        let store = SqliteThreadStore::new(directory.path().join("threads.db"))
+            .await
+            .unwrap();
+        let mut connection = store.database.pool.acquire().await.unwrap();
+        assert_eq!(before, history(&mut connection).await);
+        let after: Vec<(String, Option<String>)> = sqlx::query_as(
+            "SELECT name, sql FROM sqlite_schema WHERE name LIKE 'extension_%' ORDER BY name",
+        )
+        .fetch_all(&mut *connection)
+        .await
+        .unwrap();
+        assert_eq!(objects, after);
+        let retained: (String, String) = sqlx::query_as(
+            "SELECT t.extension_value, g.extension FROM threads t JOIN thread_goals g ON g.thread_id = t.id WHERE t.id = 'older'",
+        ).fetch_one(&mut *connection).await.unwrap();
+        assert_eq!(
+            retained,
+            ("thread extension".into(), "goal extension".into())
+        );
+        let version: i64 = sqlx::query_scalar("PRAGMA user_version")
+            .fetch_one(&mut *connection)
+            .await
+            .unwrap();
+        assert_eq!(version, 18);
+        drop(connection);
+        store
+            .update_title(&"older".into(), "changed")
+            .await
+            .unwrap();
+        let extension: String = sqlx::query_scalar("SELECT extension FROM thread_goals")
+            .fetch_one(&store.database.pool)
+            .await
+            .unwrap();
+        assert_eq!(extension, "updated");
+    }
+}
+
+#[tokio::test]
 async fn environment_backfill_failure_rolls_back_schema_and_version() {
     let (directory, mut connection) = old_database().await;
     sqlx::query("DROP TABLE session_environments")
@@ -127,7 +197,7 @@ async fn schema_v11_upgrade_removes_only_retired_state_and_keeps_config_and_hist
     .fetch_one(&mut *connection)
     .await
     .unwrap();
-    assert_eq!(retired, 0);
+    assert_eq!(retired, 1);
     let (columns,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM pragma_table_xinfo('threads') WHERE name IN ('cached_context', 'context_cache_epoch')").fetch_one(&mut *connection).await.unwrap();
     assert_eq!(columns, 0);
     assert_eq!(history(&mut connection).await, before);
@@ -253,7 +323,7 @@ async fn schema_v11_readonly_old_and_new_databases_never_migrate_or_write_on_rea
 }
 
 #[tokio::test]
-async fn schema_v11_unknown_goals_and_external_dependencies_refuse_without_data_loss() {
+async fn schema_v11_unknown_retired_state_and_external_dependencies_refuse_without_data_loss() {
     let cases = [
         "ALTER TABLE execution_runs ADD COLUMN extension_data TEXT",
         "DROP TABLE execution_runs; CREATE TABLE execution_runs (thread_id TEXT PRIMARY KEY, generation INTEGER NOT NULL, clean BOOLEAN NOT NULL CHECK(clean = 1))",
@@ -263,16 +333,8 @@ async fn schema_v11_unknown_goals_and_external_dependencies_refuse_without_data_
         "CREATE VIEW execution_view AS SELECT * FROM execution_runs",
         "CREATE TRIGGER execution_trigger AFTER UPDATE ON execution_runs BEGIN UPDATE threads SET title='extension' WHERE id=NEW.thread_id; END",
         "CREATE TRIGGER thread_execution_trigger AFTER UPDATE ON threads BEGIN DELETE FROM execution_runs WHERE thread_id=NEW.id; END",
-        "ALTER TABLE thread_goals ADD COLUMN extension TEXT",
-        "CREATE TABLE extension_goals (id TEXT PRIMARY KEY REFERENCES 'thread_goals'(thread_id) ON DELETE CASCADE); INSERT INTO extension_goals VALUES ('older')",
-        "CREATE TABLE extension_goals (id TEXT PRIMARY KEY REFERENCES 'THREAD_GOALS'(thread_id) ON DELETE CASCADE); INSERT INTO extension_goals VALUES ('older')",
-        "CREATE TABLE sqlitex_extension_goals (id TEXT PRIMARY KEY REFERENCES thread_goals(thread_id) ON DELETE CASCADE); INSERT INTO sqlitex_extension_goals VALUES ('older')",
-        "CREATE VIEW extension_view AS SELECT objective FROM thread_goals",
-        "CREATE TRIGGER extension_trigger AFTER UPDATE ON threads BEGIN DELETE FROM thread_goals WHERE thread_id = NEW.id; END",
         "CREATE VIEW extension_cache AS SELECT cached_context FROM threads",
-        "CREATE VIEW extension_goals AS SELECT * FROM 'thread_goals'",
         "CREATE VIEW extension_threads AS SELECT * FROM 'threads'",
-        "ALTER TABLE threads ADD COLUMN extension_goal TEXT REFERENCES thread_goals(thread_id) ON DELETE CASCADE; UPDATE threads SET extension_goal='older' WHERE id='older'",
         "ALTER TABLE threads RENAME COLUMN cached_context TO retained_cache; ALTER TABLE threads ADD COLUMN cached_context INTEGER; UPDATE threads SET cached_context=retained_cache",
         "CREATE VIEW extension_all AS SELECT * FROM threads",
     ];
@@ -333,7 +395,7 @@ async fn schema_v11_unknown_goals_and_external_dependencies_refuse_without_data_
 }
 
 #[tokio::test]
-async fn schema_v11_failed_column_drop_rolls_back_the_prior_goal_drop() {
+async fn schema_v11_failed_column_drop_rolls_back_the_prior_execution_drop() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("threads.db");
     let mut connection = SqliteConnection::connect_with(

@@ -234,13 +234,13 @@ Host 可以共享 transport、全局配置来源与确定可共享的服务；�
 
 ## 8. 存储打开与版本边界
 
-默认读写使用 `~/.peri/threads/threads.db`，`--db-path` 可选择显式路径；schema 版本记录在 `PRAGMA user_version`，当前版本由 `peri-resources/src/sessions/canonical.rs::CURRENT_SCHEMA_VERSION` 定义（schema17；v12 建立 Machine/Workspace/Session 归属，v14 删除持久执行所有权）。版本与迁移入口见 [Resources 代码索引](../code-index/peri-resources.md)，历史归属设计见 [存储 v2](storage-v2-machine-workspace-session.md)；阶段迁移版本不等于当前版本。
+默认读写使用 `~/.peri/threads/threads.db`，`--db-path` 可选择显式路径；schema 版本记录在 `PRAGMA user_version`，当前版本由 `peri-resources/src/sessions/canonical.rs::CURRENT_SCHEMA_VERSION` 定义（v12 建立 Machine/Workspace/Session 归属，v14 删除持久执行所有权；执行恢复表移除见 active plan）。版本与迁移入口见 [Resources 代码索引](../code-index/peri-resources.md)，历史归属设计见 [存储 v2](storage-v2-machine-workspace-session.md)；阶段迁移版本不等于当前版本。
 
 只读 metadata 打开不创建数据库、不升级 schema、不登记或绑定；缺失的默认库按空历史处理，损坏与不兼容 shape 返回错误。启动时写打开失败（schema 锁被占、库文件或 WAL 不可写）降级为只读打开并记 warning：进入与历史浏览不受影响，但降级不假装可写——新会话与目录登记在进入 SQL 前按 `ReadOnlyStore` 失败。写打开走到版本判定时，本构建不认识的 schema 与 `user_version` 返回 `UnsupportedDatabaseSchema` / `UnsupportedSchemaVersion`，且不降级；升级前必须停止所有旧 writer，不支持新旧二进制混用同一库。schema 版本号不是对不遵守协议的旧 writer 或外部 SQLite writer 的访问控制。
 
 ## 9. 保证边界
 
 - hardlink 发布只解决初次身份文件的完整可见性与竞争创建，不代表整个系统全面并发安全。文件系统须支持同目录 hardlink；目录创建未强制私有权限，已有身份文件权限/符号链接未额外校验，非 Unix 不提供 `0600` 保证。未同步父目录，也未保证崩溃后无残留临时文件或身份目录项持久性。
-- 执行所有权与跨实例协调归 `peri-sdk`；Peri 的事务、访问模式、关闭意图与持久化恢复不提供单执行者或工具副作用去重保证。部署入口必须先由 SDK 建立执行唯一性，再开放 Peri 的 ACP 调用。
+- 执行所有权与跨实例协调归 `peri-sdk`；Peri 的事务、访问模式和关闭意图不提供跨实例单执行者或工具副作用去重保证。普通 ACP 执行不要求 SDK 持久 admission；跨实例部署的唯一性由其外部编排管理，Peri 不恢复旧 Agent 执行。
 - Session ID 可查找性不是认证，env 分区不是多用户权限隔离；机器 ID 文件与 override 都不是安全凭证。数据库/服务访问授权独立，不能仅靠列表过滤或执行只读标记宣称安全。
 - 本设计不承诺任意缺路径/缺快照/坏库均能完整恢复，也不宣称只读界面替代所有存储写权限检查。全面 URI/VFS、插件与 MCP 缓存迁移不是本次前置条件。

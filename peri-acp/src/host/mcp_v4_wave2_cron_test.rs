@@ -1,5 +1,4 @@
 use super::*;
-use peri_acp_types::session_resources::work::PreparedWorkCommand;
 
 // ── 用例 8：cron 端到端（§8 第 6 行 / H04 / V 子计划 `[W2 cron-e2e]`）──────────
 
@@ -8,9 +7,7 @@ use peri_acp_types::session_resources::work::PreparedWorkCommand;
 /// （每 1s 到期的表达式会让触发时刻不受控，拒绝/批准两段的计数会被自发触发污染）。
 const W2_SPARSE_CRON: &str = "*/5 * * * *";
 
-/// Actual MCP registration/tick publishes durable cron work while the prompt lock is held.
-/// The producer cannot prompt for permission or directly enter RCRA; scheduled permission
-/// is separately tested after SDK RunStarted in scheduled_admission_test.rs.
+/// Actual MCP registration/tick requires approval before the current runtime consumes a trigger.
 #[cfg(not(windows))]
 #[tokio::test]
 #[serial]
@@ -21,34 +18,6 @@ async fn cron_register_tick_approval_continuation() {
     fixture.assert_all_ready();
     let scheduler = fixture.cron_scheduler();
     let mut register_ctx = fixture.session_context("w2-cron-e2e-register").await;
-    let resources = register_ctx.session_resources.as_ref().unwrap();
-    let snapshot = resources
-        .load_session_work(&peri_acp_types::session_resources::work::WorkQuery {
-            session_id: register_ctx.session_id.clone(),
-            limit: 1,
-        })
-        .await
-        .unwrap();
-    let receipt = resources
-        .apply_work_mutation(
-            &PreparedWorkCommand::try_new(peri_acp_types::session_resources::work::WorkCommand {
-                session_id: register_ctx.session_id.clone(),
-                recipient_lifecycle: snapshot.control.lifecycle,
-                mutation_id: "w2-cron-e2e-owner-setup".into(),
-                action: peri_acp_types::session_resources::work::WorkAction::BindResourceOwners {
-                    expected_revision: snapshot.state.revision,
-                    connections_json: "{}".into(),
-                    authorization_ref: "trusted-w2-cron-e2e-setup".into(),
-                },
-            })
-            .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        receipt.decision,
-        peri_acp_types::session_resources::work::WorkDecision::Accepted
-    );
     let AssembledHostFixture {
         dirs,
         cfg,
@@ -205,6 +174,9 @@ async fn cron_register_tick_approval_continuation() {
                 crate::host::run_cron_continuation_scheduler(
                     cron_cont_rx,
                     crate::host::CronContinuationContext {
+                        sessions: shared.clone(),
+                        prompt_locks: locks.clone(),
+                        cont_tx: Arc::new(tokio::sync::mpsc::unbounded_channel().0),
                         cfg: Arc::clone(&cfg),
                         transport: Arc::clone(&dyn_transport),
                         task_spawner: cfg.host_task_spawner.clone(),
@@ -217,62 +189,45 @@ async fn cron_register_tick_approval_continuation() {
     );
 
     assert!(scheduler.lock().force_next_fire_to_past(&task_id));
-    let snapshot = tokio::time::timeout(std::time::Duration::from_secs(15), async {
-        loop {
-            let snapshot = cfg
-                .session_resources
-                .load_session_work(&peri_acp_types::session_resources::work::WorkQuery {
-                    session_id: session_id.clone(),
-                    limit: 1,
-                })
-                .await
-                .unwrap();
-            if snapshot.state.deliveries.values().any(|delivery| {
-                delivery
-                    .publication
-                    .event
-                    .content
-                    .serialized
-                    .contains(CRON_PROMPT)
-            }) {
-                break snapshot;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("cron must durably publish without prompt lock or interactive approval");
-    assert_eq!(
-        transport.approvals(),
-        0,
-        "producer has no SDK RunStarted/HITL lease"
-    );
-    assert!(transport.requests().is_empty());
-    transport.set_approve(true);
-    assert!(
-        snapshot.state.admissions.is_empty(),
-        "SDK is sole admission authority"
-    );
-    assert!(queue.is_empty());
-    assert!(!queue.has_pending_defer(&MessageSource::CronTrigger));
-    assert_eq!(
-        turn_model.calls(),
-        0,
-        "publication cannot dispatch RCRA directly"
-    );
-    assert!(turn_model.requests().is_empty());
-    assert!(shared.lock().await[&session_id].history.is_empty());
     assert!(
         wait_until(
-            "SDK work notification",
-            std::time::Duration::from_secs(2),
-            || transport
-                .notifications()
-                .iter()
-                .any(|method| method == "session/work/available")
+            "rejected scheduled approval",
+            std::time::Duration::from_secs(15),
+            || transport.approvals() == 1
         )
         .await
     );
+    assert!(queue.is_empty());
+    assert_eq!(turn_model.calls(), 0);
+    transport.set_approve(true);
+    assert!(scheduler.lock().force_next_fire_to_past(&task_id));
+    assert!(
+        wait_until(
+            "approved trigger queued before prompt lock",
+            std::time::Duration::from_secs(15),
+            || queue.has_pending_defer(&MessageSource::CronTrigger)
+        )
+        .await
+    );
+    assert_eq!(transport.approvals(), 2);
+    assert_eq!(transport.requests().len(), 2);
+    assert_eq!(turn_model.calls(), 0);
     drop(gate_guard);
+    assert!(
+        wait_until(
+            "approved scheduled turn",
+            std::time::Duration::from_secs(15),
+            || turn_model.calls() > 0
+        )
+        .await
+    );
+    assert!(turn_model
+        .requests()
+        .iter()
+        .any(|request| request.contains(CRON_PROMPT)));
+    assert!(transport
+        .notifications()
+        .iter()
+        .all(|method| method != "session/work/available"));
     drop(mcp_owner);
 }

@@ -31,7 +31,7 @@ use crate::kit::submit_request::{
     ExportMode, SessionControlRequest, SubmitRequest, ViewActionRequest,
 };
 
-/// 控制回执的等待上限；超时后请求仍继续结算，不把未知结果当作已停止。
+/// 取消通知的等待上限；超时不把未知结果当作已停止。
 const CANCEL_RPC_TIMEOUT_SECS: u64 = 2;
 
 /// 启动提交消费者后台任务。
@@ -441,16 +441,15 @@ pub fn spawn_cancel_consumer(
                                 pending.as_mut(),
                             )
                             .await;
-                            let receipt = match cancel_result {
+                            let outcome = match cancel_result {
                                 Ok(result) => result,
                                 Err(_) => {
-                                    tracing::warn!("cancel_consumer: control receipt pending");
+                                    tracing::warn!("cancel_consumer: cancellation notification pending");
                                     pending.await
                                 }
                             };
-                            match receipt {
-                                Ok(receipt) => tracing::info!(command_id = %receipt.command_id,
-                                    decision = ?receipt.decision, "cancel_consumer: control receipt"),
+                            match outcome {
+                                Ok(()) => tracing::info!("cancel_consumer: cancellation notification sent"),
                                 Err(error) => tracing::warn!(%error, data = ?error.data,
                                     "cancel_consumer: stop outcome unresolved"),
                             }

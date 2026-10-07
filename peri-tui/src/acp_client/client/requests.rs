@@ -2,15 +2,10 @@
 
 use agent_client_protocol::schema::v1::PromptResponse;
 use peri_acp::transport::{AcpTransport, types::AcpError};
-use peri_acp_types::session_resources::{
-    ControlAction, ControlCommand, ControlDecision, ControlReceipt, ControlResolution, ControlState,
-};
 use peri_acp_types::{PeriCaps, command::command_route::UiCommandSpec};
 use serde_json::{Value, json};
 
 use super::AcpTuiClient;
-
-const CONTROL_RPC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
 #[cfg(test)]
 #[path = "cancel_test.rs"]
@@ -264,107 +259,26 @@ impl AcpTuiClient {
         Ok(())
     }
 
-    pub async fn cancel(&self) -> Result<ControlReceipt, AcpError> {
+    pub async fn cancel(&self) -> Result<(), AcpError> {
         let _operation = self.lifecycle.operation_gate().lock().await;
         let session_id = self
             .lifecycle
             .current_session_id()
             .ok_or_else(|| AcpError::new(-32603, "no active session"))?;
-        let command_id = uuid::Uuid::now_v7().to_string();
-        let snapshot = self
-            .send_control_request("session/control/state", json!({"sessionId": session_id}))
-            .await?;
-        let state: ControlState = serde_json::from_value(snapshot["state"].clone())
-            .map_err(|error| AcpError::new(-32603, format!("invalid control state: {error}")))?;
-        let action = match state.attempt {
-            Some(target) => ControlAction::Stop { target },
-            None => ControlAction::Pause,
-        };
-        let command = ControlCommand {
-            session_id,
-            command_id,
-            expected_lifecycle: state.lifecycle,
-            expected_revision: state.revision,
-            expected_control_generation: state.control_generation,
-            action,
-        };
-        let receipt = self.submit_stop_command(&command).await?;
-        if receipt.decision == ControlDecision::Accepted {
-            let claims = self.lifecycle.cancel_active_prompt();
-            self.settle_claims_owned(claims).await;
+        let managed_run = self
+            .supports_user_input_queue()
+            .then(|| self.lifecycle.active_user_input_run())
+            .flatten();
+        let claims = self.lifecycle.cancel_active_prompt();
+        self.settle_claims_owned(claims).await;
+        let mut params = json!({ "sessionId": session_id });
+        if let Some((_, generation, request_id)) = managed_run {
+            params["generation"] = json!(generation);
+            params["requestId"] = json!(request_id);
         }
-        Ok(receipt)
-    }
-
-    async fn submit_stop_command(
-        &self,
-        command: &ControlCommand,
-    ) -> Result<ControlReceipt, AcpError> {
-        let params = serde_json::to_value(command)
-            .map_err(|error| AcpError::new(-32603, error.to_string()))?;
-        let response = match self
-            .send_control_request("session/control", params.clone())
+        self.transport
+            .send_notification("session/cancel", params)
             .await
-        {
-            Ok(response) => response,
-            Err(error) => {
-                let resolution = self
-                    .send_control_request("session/control/resolve", params.clone())
-                    .await
-                    .map_err(|resolve_error| {
-                        resolve_error.with_data(json!({"command": command}))
-                    })?;
-                let resolution: ControlResolution =
-                    serde_json::from_value(resolution).map_err(|decode_error| {
-                        AcpError::new(
-                            -32603,
-                            format!("invalid control resolution: {decode_error}"),
-                        )
-                        .with_data(json!({"command": command}))
-                    })?;
-                match resolution {
-                    ControlResolution::Applied { receipt } => {
-                        return Self::validate_stop_receipt(command, receipt);
-                    }
-                    ControlResolution::NotApplied => self
-                        .send_control_request("session/control", params)
-                        .await
-                        .map_err(|retry_error| {
-                            retry_error.with_data(json!({"command": command}))
-                        })?,
-                    ControlResolution::Unknown => {
-                        return Err(
-                            error.with_data(json!({"command": command, "resolution": "unknown"}))
-                        );
-                    }
-                }
-            }
-        };
-        let receipt = serde_json::from_value(response).map_err(|error| {
-            AcpError::new(-32603, format!("invalid control receipt: {error}"))
-                .with_data(json!({"command": command}))
-        })?;
-        Self::validate_stop_receipt(command, receipt)
-    }
-
-    async fn send_control_request(&self, method: &str, params: Value) -> Result<Value, AcpError> {
-        peri_time::timeout(
-            CONTROL_RPC_TIMEOUT,
-            self.transport.send_request(method, params),
-        )
-        .await
-        .map_err(|_| AcpError::new(-32603, "control RPC outcome unknown: timed out"))?
-    }
-
-    fn validate_stop_receipt(
-        command: &ControlCommand,
-        receipt: ControlReceipt,
-    ) -> Result<ControlReceipt, AcpError> {
-        if receipt.session_id != command.session_id || receipt.command_id != command.command_id {
-            return Err(AcpError::new(-32603, "control receipt identity mismatch")
-                .with_data(json!({"command": command})));
-        }
-        Ok(receipt)
     }
 
     /// Cancel a specific background task by task_id.

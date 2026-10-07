@@ -1,34 +1,11 @@
 # peri-resources 代码索引
 
-工作存储性能入口：`sessions/work.rs::{READ_PENDING,HAS_PENDING,GUARD_COMMAND,READ_SNAPSHOT}` 共用 SQL 过滤未决命令并保留子树范围、恢复顺序与原命令屏障；`NOT INDEXED` 避免 pending 排序诱导全局主键随机回表，没有索引时仍可能扫描全表。`sessions/work/effects_test.rs` 覆盖查询计划、排序/范围与 missing/legacy/raw JSON。
-
-`sessions/sqlite_store/session_data/work.rs` 与 `sessions/remote/session_work.rs` 共用快照 SQL，避免写入准备时构造无用候选；原始 JSON CAS 和 journal/效果/ACK 顺序保留。`sessions/work/diagnostics.rs::WorkPhase` 记录读取、状态体积与事务阶段，嵌套阶段不可直接求和。本路径优化不修改表、索引或 schema 版本。
-
-> 速查表：把「我想做什么」映射到文件。细节以代码为准。schema 17 增加持久原 WorkCommand journal；schema 16 增加 durable work；schema 15 增加领域控制与命令回执；schema 14 删除会话执行 owner 表；schema 12 的 Machine → Workspace → Session 归属仍保留。
-> 依据：peri-resources/src 源码、lib.rs 模块注释（伞形 PRD 决策 20）
-
-Emscripten target 只编译 Turso adapter，排除 SQLx、workflow 与 `sqlite_store` 源码；Native target 同时编译 SQLite 与 Turso adapter，由 `context` 按 locator 选择。`sessions::failure` 与 `canonical` 提供共用领域规则。Turso 会话数据存于远端；WASM 复用 `RemoteExecution` 的虚拟工作区观测，通过远端组合工厂接入主线。会话执行唯一性、进程代际协调与接管由 `peri-sdk` 负责，Resources 不持有执行 registry、租约或 Store owner CAS。旧 WASM 身份与快照格式的会话只读历史，不能继续执行。Node/Bun 的可写会话、ACP、模型调用与恢复验收见 [`WASM 接入验收`](../../spec/history/2026-10.md)（2026-10-02 条目）。
-
-`SessionResourcesImpl::inspect_availability` 检查存储访问模式、持久化状态及保存的执行环境，不查询或签发会话执行 owner；恢复不依赖旧进程停止 proof。关闭意图、持久化排空与任务资源生命周期仍独立保留。
+> 执行恢复剥离见 [active plan](../../spec/issues/2026-10-07-remove-execution-recovery-plan.md)；schema版本以 `sessions/canonical.rs::CURRENT_SCHEMA_VERSION` 为准。
 
 ## 架构速览
 
-- 领域控制：`sessions/control.rs` 维护共用 SQL/回执编码，规则由 `peri-acp-types::session_resources::control::decide_control` 单一权威裁决；`sqlite_store/session_data/control.rs` 与 `remote/session_control.rs` 同事务提交状态、命令摘要/原回执与 closing 投影。`resources/gate_control.rs` 在 Unknown 时冻结并只对账原命令；内部 ObserveAttempt 仅定位当前执行，不签发执行资格/lease。schema 14→15 保留 store ID、历史和旧 closing 意图；契约 `tests/session_control_contract.rs` 与 `remote/session_control_test.rs`。
-- Durable work：`peri-acp-types/src/session_resources/work/reducer.rs` 是唯一业务 reducer；`sessions/work.rs`、`sessions/work/effects.rs` 与 `sqlite_store/session_data/work.rs`、`remote/session_work{,_journal}.rs` 原子提交 content/event、processing obligation、Reason/Act checkpoint 与原回执。schema 17 的 `session_work_commands` 在业务效果之前保存完整原命令；remote 复用 qualified mutation，Begin ACK Unknown 不发送业务效果。`resources/gate_work.rs` 与 `gate.rs` 从 Store journal 恢复冻结；`load_session_work` 返回 `pending_commands` 和 blocked snapshot，`load_work_command` 按 session/mutation ID 查询已 ACK 的原命令与原回执。恢复只对账原 ID/原 qualifiers，不建立 Peri lease。真实事务与进程退出窗口契约：`tests/durable_work_contract.rs`、`tests/durable_work/journal_contract.rs`、`remote/session_work_test.rs`；remote transport 合同使用真实 SQLite，不代表 Turso 网络部署验收。
-- Work 热路径：内部 `SessionDataPort::has_pending_work_mutations` 通过共用 `sessions/work.rs::HAS_PENDING` 查询根及后代的未决命令存在性，`resources/gate.rs::check_owned_work` 不加载全量 WorkState；`SessionResources::load_work_revision` 经 `MutationGate` 使用共用 `READ_REVISION`，只返回旧 `session_work_state` JSON 的 revision，不读取其他工作记录或消息正文；SQLite 与 Turso 均保留 Unknown 阻断及查询错误拒绝写入。提交路径将同一快照的原始旧状态 JSON 移交 `mutation_effects` 作事务 guard，缺失状态仍按原初始语义编码；新状态仍全量编码。回归入口：`resources_pending_work_test.rs`、`remote/session_delivery_query_test.rs`、`remote/session_pending_work_test.rs`、`work/effects_test.rs`。
-- Work 命令准备与参数共享：门面、`SessionDataPort`、gate 与两个 adapter 统一接收 `PreparedWorkCommand`，pending 只共享原命令；`work.rs::command_effects` 与 `work/effects.rs` 复用同一 canonical 编码和摘要，INSERT/GUARD 参数通过 `Arc<str>` 共享。SQLite 末端借用绑定，remote 在 `Value::Text` 边界仍需拥有文本；原始 state guard 与 SQL 布局保留，新 state 仍全量编码。`work/prepared_effects_test.rs` 覆盖大命令共享、cold canonical 验证及正常 Reason 动作序列；`work/diagnostics.rs` 在 debug 启用时记录逻辑参数与唯一 buffer 字节，不把 wall time 或提交作用域计数当 CPU/成功提交。
-- Work 请求保留契约：`tests/durable_work/request_retention_contract.rs` 挂入 `durable_work_contract`，验证进行中完整检查点在重开数据库后保留、终态只裁剪请求正文并保留响应/身份，以及拒绝提交和原命令重放不改变已持久化状态或重复追加历史；命令为 `./scripts/cargo-rmcp-patched.sh test --locked -p peri-resources --test durable_work_contract`。
-- Owner 窄读：`SessionResources::load_resource_owner_facts` 经 `resources/gate_work.rs` 的 Unknown 屏障，从 schema17 JSON 仅投影当前/前一生命周期的 owner、child metadata、control 与 revision；`peri-acp` 的 owner 绑定、恢复和重开不再为这些字段解码全量 WorkState。SQLite 与 Turso 共用 `sessions/work.rs::READ_RESOURCE_OWNER_FACTS`；数据库端仍解析原 JSON，写入仍整行重编码。回归入口：`resources_pending_work_test.rs`、`remote/session_work_test.rs`、ACP `host/requests/session_control/reopen_test.rs`。
-- Inbox 去重窄读：`SessionResources::load_work_delivery` 经 `resources/gate_work.rs` 的读屏障进入 adapter；共用 `sessions/work.rs::READ_DELIVERY` 绑定 session / delivery 身份，只返回目标记录并验证载荷身份。不存在的会话为 NotFound，记录缺失为 None，损坏记录拒绝。SQLite / Turso 不向 Rust 返回历史请求；数据库仍解析 JSON blob，非增量账本或恒定时间查询。回归入口：`tests/durable_work/delivery_query_contract.rs`、`remote/session_delivery_query_test.rs`。
-- Work lifecycle：`work/query.rs` 的候选、Blocked 与 processing barrier 依据真实 batch/admission lifecycle；`WorkSnapshot::validate_work_lifecycle` 与 reducer 拒绝将旧 work 重标为当前生命周期。`has_pending_current_work` 用于当前生命周期 barrier，全历史查询保留旧记录；缺失来源仍 LegacyUnknown/fail-closed。真实 Close→Reopen 隔离契约位于 `tests/durable_work/reopen_contract.rs` 与 `terminal_contract.rs`。
-
-### 持久能力与失效边界（RCRA §8.6）
-
-- 本地部署使用 `src/sessions/sqlite_store/connection.rs` 的 SQLite WAL + `synchronous=NORMAL`，不是 FULL。对数据库及 WAL 文件保持完整的进程崩溃/重启域，已 ACK 的 processing 责任声明 RPO=0；证据是 `tests/durable_work/journal_contract.rs::sqlite_owned_command_journal_survives_process_crash_before_and_after_effects` 真子进程 kill 后重新开库，保留已 Accepted 的原命令、原回执、内容、投影与义务，并对未知 mutation 恢复原 ID。该合同覆盖业务提交前、提交后但 journal ACK 前的窗口，不是电断/fsync 实验。
-- 不声明备份回退、跨 host、掉电、磁盘毁损的 RPO=0；NORMAL 不能当成 FULL 的掉电保证。域外丢失已进入执行的证据不能由 Transcript、缺行或 LegacyUnknown 猜回已处理，须由部署/SDK 报告 typed DataLoss；Resources 未提供不可回退日志或跨主机副本。SDK 独立存储的 FULL 配置不扩大本地 Resources 的故障域。
-- Remote 通过 `turso_serverless 0.1.3` 的真实 HTTP/libSQL 托管事务提交业务效果与回执；BEGIN/业务/ACK 各自有稳定 qualified ID，读回原 receipt 才算对账。成功 provider ACK 表达驱动观察到事务成功、autocommit 状态，不自行证明 provider 的 fsync、跨副本耐久性或备份 RPO。响应丢失/超时冻结原 command，禁止重造 qualifiers 或盲重派。`remote/session_work_test.rs` 的 SQL 故障 transport 合同只证明适配器规则；实际 HTTP 入口另见 `tests/durable_work_http_contract.rs`，实际 WASM 接线验收归 SDK，不把前者替代后者。
-- 真实 HTTP 合同已在本机 `sqld 0.24.32` 上验证空库首开、原命令/Accepted 回执与正文跨 facade 重开保留、同 ID 异内容冲突和 pre-send NotApplied 封存；它未模拟 provider 掉电或跨副本失效。显式运行入口：`PERI_TEST_SQLD=$(cd npm-packages/@peri-sdk && mise which sqld) ./scripts/cargo-rmcp-patched.sh test --locked -p peri-resources --test durable_work_http_contract -- --ignored`。Current schema writable-open 不执行旧 `session_environments` backfill；v2 Machine/Workspace 归属仍为唯一权威。
-- 本文不宣称事件/回执/原命令已具有有限保留期或安全退休水位。现实现保留内容和去重证据，不因 Close/Reopen、投影或 ACK 删除；pending 配额不能冒充全历史容量上限。无不可重放证明时不得做 TTL 删除；全历史容量治理/去重退休仍是独立发布缺口。
+- 执行恢复：Work/control 数据端口、reducer 与六张账本表移除；新库不创建，schema18 向前迁移删除。`sessions/canonical.rs` 定义保留业务表及删除清单；本地 `sqlite_store/schema.rs` 与远端 `remote/schema_upgrade.rs` 负责版本转换。
+- 历史数据：snapshot/history、frozen/inherited、消息 flags/projection、普通关闭意图与 OAuth 保留；普通远端 operation ledger 不属于 Agent 恢复账本。迁移验收命令与结果见 active plan，不宣称网络/重启全套已通过。
 
 - 时间入口：生产路径经 `peri-time` 读取 UTC 墙钟、单调时钟并执行 sleep/timeout。`src/sessions/remote/connection.rs` 保留远端请求超时的 `Exceeded` 分类；`src/sessions/resources/deployment.rs` 与 `resources.rs` 保留关闭结清超时分类；`src/sessions/sqlite_store/connection.rs` 用单调时钟限制 schema 开库锁等待。持久字段继续使用既有 RFC 3339 形状，`ThreadMeta` 的 Chrono 类型在本 crate 边界由 `SystemTime` 转换。
 

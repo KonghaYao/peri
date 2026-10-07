@@ -55,7 +55,7 @@ pub fn agent_id_from_child_thread(child_thread_id: &str) -> AgentId {
 /// 该字段，仅 v2 emit（Langfuse tracer 归属）需要真实父身份。
 ///
 /// `parent_tool_call_id` 为发起本次子 agent 的父 Agent 工具调用 id（父侧
-/// `InvocationIntent.tool_call_id`）；执行 invocation_id 不用于卡片配对。
+/// `ToolContext.tool_call_id`）；当前 invocation_id 不用于卡片配对。
 pub(crate) fn build_subagent_start_v2(
     turn_id: TurnId,
     parent_agent_id: Option<AgentId>,
@@ -315,17 +315,6 @@ pub fn build_v2_subagent_context(
         .with_event_bus(Arc::clone(&event_bus_arc))
         .with_session_context(session_context);
 
-    if let Some(port) = host
-        .as_ref()
-        .and_then(|host| host.execution_admission_port.clone())
-    {
-        builder = builder.with_execution_admission_port(port);
-    }
-    if let Some(host) = &host {
-        if let (Some(pool), Some(manager)) = (&host.mcp_pool, &host.task_manager) {
-            builder = builder.with_work_mcp_binding(pool.clone(), manager.clone());
-        }
-    }
     if let Some(manager) = host.and_then(|host| host.task_manager.clone()) {
         let wait = crate::agent::async_tasks::handoff::BoundedWait::new(
             crate::agent::async_tasks::handoff::HANDOFF_MAX_WAIT,

@@ -686,7 +686,6 @@ impl InteractionLifecycle {
         Some(claims)
     }
 
-    #[cfg(test)]
     pub(crate) fn active_user_input_run(&self) -> Option<(String, String, String)> {
         let state = self.state.lock().unwrap();
         let marker = state.active_prompt.as_ref()?;

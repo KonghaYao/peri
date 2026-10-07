@@ -1,7 +1,7 @@
 //! Bound subagent identity and background tail behavior.
 
 use super::*;
-use peri_acp_types::session_resources::{work::*, SessionResources};
+use peri_acp_types::tasks::TaskManager as _;
 
 #[derive(Clone, Default)]
 struct LogBuffer(Arc<parking_lot::Mutex<Vec<u8>>>);
@@ -40,7 +40,6 @@ fn matching_log(logs: &LogBuffer, message: &str) -> String {
 }
 
 async fn wait_execution_idle(manager: &TaskManager) {
-    use peri_acp_types::tasks::TaskManager as _;
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         while !manager.is_execution_idle() {
             tokio::task::yield_now().await;
@@ -52,7 +51,6 @@ async fn wait_execution_idle(manager: &TaskManager) {
 
 #[tokio::test(flavor = "current_thread")]
 async fn background_subagent_panic_settles_and_logs() {
-    use peri_acp_types::tasks::TaskManager as _;
     for with_callback in [false, true] {
         let (logs, _capture) = capture_logs();
         let manager = Arc::new(TaskManager::new());
@@ -68,9 +66,7 @@ async fn background_subagent_panic_settles_and_logs() {
                 Ok(())
             }));
         }
-        let spawned = AdmittedSessionFactory::spawn_subagent(None, config)
-            .await
-            .unwrap();
+        let spawned = SessionFactory::spawn_subagent(None, config).await.unwrap();
         let task_id = spawned.task_id.unwrap();
         wait_execution_idle(&manager).await;
         assert_eq!(manager.active_count(), 0);
@@ -121,7 +117,7 @@ async fn subagent_terminal_write_failure_logs_and_continues() {
                 Ok(())
             }));
         }
-        let spawned = AdmittedSessionFactory::spawn_subagent(None, config)
+        let spawned = SessionFactory::spawn_subagent(None, config)
             .await
             .expect("终态状态 patch 失败不能中断原流程");
         if background {
@@ -137,28 +133,6 @@ async fn subagent_terminal_write_failure_logs_and_continues() {
         );
         assert!(line.contains(&format!("error={error}")));
     }
-}
-
-async fn unsettled_execution(store: &MockSessionResources, child_id: &str) -> WorkSnapshot {
-    let snapshot = store
-        .load_session_work(&WorkQuery {
-            session_id: child_id.into(),
-            limit: 1,
-        })
-        .await
-        .unwrap();
-    assert_eq!(snapshot.state.admissions.len(), 1);
-    let admission = snapshot.state.admissions.values().next().unwrap();
-    assert!(admission.entering_receipt.is_some());
-    assert!(admission.settled_receipt.is_none());
-    assert!(snapshot.state.terminal_acknowledgements.is_empty());
-    assert!(store
-        .load_meta(&child_id.to_owned())
-        .await
-        .unwrap()
-        .agent_status
-        .is_active());
-    snapshot
 }
 
 #[tokio::test]
@@ -203,7 +177,7 @@ async fn test_bound_subagent_resume_requires_same_root_but_allows_siblings() {
     );
     let mut config = resume_config(MockSessionResources::new(), child_id.clone());
     config.session_resources = Arc::clone(&store);
-    AdmittedSessionFactory::resume_subagent(Some(&sibling), config)
+    SessionFactory::resume_subagent(Some(&sibling), config)
         .await
         .expect("same-root siblings can resume");
     assert_eq!(
@@ -252,7 +226,7 @@ fn tail_spawn_config(
         register_runtime: None,
         deregister_runtime: None,
         parent_agent_id: Some(AgentId::new()),
-        parent_invocation_id: None,
+        parent_tool_call_id: None,
         cancel_token: None,
         cwd: Some("/tmp/tail-fixture".into()),
         parent_thread_id: Some("tail-parent".into()),
@@ -274,7 +248,7 @@ async fn subagent_start_uses_model_call_identity_for_spawn_and_resume() {
         let handler = Arc::new(FnEventHandler(move |event| capture.lock().push(event)));
         let (event_sender, mut event_receiver) = tokio::sync::mpsc::unbounded_channel();
         let mut config = tail_spawn_config(store.clone(), TailOutcome::Completed);
-        config.parent_invocation_id = Some("durable-spawn-invocation".into());
+        config.parent_tool_call_id = Some("spawn-model-call".into());
         config.event_handler = Some(handler.clone());
         config.bg_event_sender = Some(event_sender.clone());
         config.run_mode = if background {
@@ -283,9 +257,7 @@ async fn subagent_start_uses_model_call_identity_for_spawn_and_resume() {
             SubagentRunMode::Sync
         };
         config.task_manager = background.then(|| manager.clone());
-        let spawned = AdmittedSessionFactory::spawn_subagent(None, config)
-            .await
-            .unwrap();
+        let spawned = SessionFactory::spawn_subagent(None, config).await.unwrap();
         if background {
             wait_execution_idle(&manager).await;
         }
@@ -295,7 +267,7 @@ async fn subagent_start_uses_model_call_identity_for_spawn_and_resume() {
             Some("tail-parent".into()),
         );
         let mut config = resume_config(store.clone(), spawned.child_thread_id.clone());
-        config.parent_invocation_id = Some("durable-resume-invocation".into());
+        config.parent_tool_call_id = Some("resume-model-call".into());
         config.event_handler = Some(handler);
         config.bg_event_sender = Some(event_sender);
         config.run_mode = if background {
@@ -304,7 +276,7 @@ async fn subagent_start_uses_model_call_identity_for_spawn_and_resume() {
             SubagentRunMode::Sync
         };
         config.task_manager = background.then(|| manager.clone());
-        AdmittedSessionFactory::resume_subagent(Some(&parent), config)
+        SessionFactory::resume_subagent(Some(&parent), config)
             .await
             .unwrap();
         if background {
@@ -334,34 +306,18 @@ async fn subagent_start_uses_model_call_identity_for_spawn_and_resume() {
             starts,
             vec![
                 (
-                    Some("model-call:durable-spawn-invocation".into()),
+                    Some("spawn-model-call".into()),
                     spawned.child_thread_id.clone(),
                     background
                 ),
                 (
-                    Some("model-call:durable-resume-invocation".into()),
+                    Some("resume-model-call".into()),
                     spawned.child_thread_id,
                     background
                 ),
             ]
         );
     }
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn subagent_spawn_rejects_unresolvable_identity_before_creating_child() {
-    let store = MockSessionResources::new();
-    let mut config = tail_spawn_config(store.clone(), TailOutcome::Completed);
-    config.parent_invocation_id = Some("missing-invocation".into());
-    let before = store.threads().len();
-    let error = match SessionFactory::spawn_subagent(None, config).await {
-        Ok(_) => panic!("untrusted invocation identity must not create a child"),
-        Err(error) => error,
-    };
-    assert!(error
-        .to_string()
-        .contains("delegation invocation unavailable"));
-    assert_eq!(store.threads().len(), before);
 }
 
 struct TailPanicBridge {
@@ -430,7 +386,7 @@ async fn assert_background_tail_completion(outcome: TailOutcome, panic_forwarder
             .unwrap();
         Ok(())
     }));
-    let spawned = AdmittedSessionFactory::spawn_subagent(None, config)
+    let spawned = SessionFactory::spawn_subagent(None, config)
         .await
         .expect("后台注册成功");
     if panic_forwarder {
@@ -446,43 +402,6 @@ async fn assert_background_tail_completion(outcome: TailOutcome, panic_forwarder
             BackgroundTaskStatus::Running
         ));
         assert_eq!(bridge_stops.load(std::sync::atomic::Ordering::SeqCst), 0);
-        let snapshot = unsettled_execution(&store, &spawned.child_thread_id).await;
-        assert_eq!(snapshot.state.terminal_obligations.len(), 1);
-        let command = snapshot.state.terminal_obligations.values().next().unwrap();
-        let WorkAction::PublishTaskSettlement { delivery, binding } = &command.action else {
-            panic!("forwarding failure must retain the exact task terminal publication");
-        };
-        assert_eq!(binding.owner_task_id, spawned.task_id.unwrap());
-        if matches!(outcome, TailOutcome::ModelError) {
-            let peri_acp_types::store::PersistedPayload::SystemReminder { reminder, .. } =
-                peri_acp_types::store::deserialize_persisted_payload(
-                    &delivery.event.content.serialized,
-                )
-                .unwrap()
-            else {
-                panic!("terminal responsibility must retain its typed failure reminder");
-            };
-            let failure: peri_acp_types::error::SafeSubagentFailure =
-                serde_json::from_value(reminder.as_reminder().metadata["subagent_failure"].clone())
-                    .unwrap();
-            assert_eq!(failure.child_thread_id(), spawned.child_thread_id);
-            assert_eq!(
-                failure.diagnostic().expect("model diagnostic").status(),
-                Some(429)
-            );
-            assert_eq!(
-                failure.diagnostic().expect("model diagnostic").provider(),
-                Some("fixture")
-            );
-        }
-        let parent = store
-            .load_session_work(&WorkQuery {
-                session_id: "tail-parent".into(),
-                limit: 1,
-            })
-            .await
-            .unwrap();
-        assert!(parent.state.deliveries.is_empty());
         let mut receiver = event_rx.lock();
         while let Ok(event) = receiver.try_recv() {
             assert!(!matches!(
@@ -499,27 +418,13 @@ async fn assert_background_tail_completion(outcome: TailOutcome, panic_forwarder
             .unwrap();
     assert_eq!(active_at_callback, 1, "通知先于 TaskManager 终态");
     assert_eq!(manager.active_count(), 0, "真实执行收尾后任务结束");
-    let stored = store
-        .load_session_work(&WorkQuery {
-            session_id: spawned.child_thread_id.clone(),
-            limit: 1,
-        })
-        .await
-        .unwrap();
-    let sdk_turn_id = stored
-        .state
-        .admissions
-        .values()
-        .next()
-        .unwrap()
-        .admission
-        .execution
-        .turn_id;
+    let turns = lifecycle_turns.lock();
+    assert_eq!(turns.len(), 2);
     assert_eq!(
-        *lifecycle_turns.lock(),
-        vec![sdk_turn_id, sdk_turn_id],
-        "Started/Stopped must use the same stored SDK admission turn"
+        turns[0], turns[1],
+        "Started/Stopped use the same current turn"
     );
+    drop(turns);
     assert_eq!(
         result.child_thread_id.as_deref(),
         Some(spawned.child_thread_id.as_str())
@@ -645,7 +550,7 @@ async fn test_spawn_subagent_sync_forwarder_panic_is_failure() {
     config.event_handler = Some(Arc::new(FnEventHandler(move |event| {
         capture.lock().push(event);
     })));
-    let error = match AdmittedSessionFactory::spawn_subagent(None, config).await {
+    let error = match SessionFactory::spawn_subagent(None, config).await {
         Ok(_) => panic!("forwarder panic 不得返回成功"),
         Err(error) => error,
     };
@@ -666,7 +571,12 @@ async fn test_spawn_subagent_sync_forwarder_panic_is_failure() {
             .count(),
         0
     );
-    unsettled_execution(&store, child_id).await;
+    assert!(store
+        .load_meta(&child_id.to_owned())
+        .await
+        .unwrap()
+        .agent_status
+        .is_active());
 }
 
 struct TerminalPanicBridge;
@@ -694,7 +604,7 @@ async fn test_spawn_subagent_terminal_bridge_panic_is_failure() {
     config.event_handler = Some(Arc::new(FnEventHandler(move |event| {
         capture.lock().push(event);
     })));
-    let error = match AdmittedSessionFactory::spawn_subagent(None, config).await {
+    let error = match SessionFactory::spawn_subagent(None, config).await {
         Ok(_) => panic!("terminal bridge panic 不得返回成功"),
         Err(error) => error,
     };
@@ -710,5 +620,10 @@ async fn test_spawn_subagent_terminal_bridge_panic_is_failure() {
         .downcast_ref::<crate::session::subagent::SubagentFailure>()
         .unwrap()
         .child_thread_id();
-    unsettled_execution(&store, child_id).await;
+    assert!(store
+        .load_meta(&child_id.to_owned())
+        .await
+        .unwrap()
+        .agent_status
+        .is_active());
 }
