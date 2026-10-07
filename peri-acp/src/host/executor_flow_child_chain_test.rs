@@ -14,7 +14,7 @@ mod captured {
     use super::*;
     use peri_agent::session::subagent::{
         ForkDirectiveKind, SessionFactory, SubagentCancelPolicy, SubagentLlmSource,
-        SubagentRunMode, SubagentSpawnConfig,
+        SubagentResumeConfig, SubagentRunMode, SubagentSpawnConfig,
     };
     use peri_agent::tools::BaseTool;
     use serde_json::{json, Value};
@@ -247,6 +247,7 @@ mod captured {
 
     /// 定义型前台子链：项目指令 / 技能摘要 / 延迟工具目录与子身份各恰一次。
     #[tokio::test]
+    #[serial]
     async fn real_child_chain_first_request_carries_instructions_skills_deferred_and_identity_once()
     {
         let captured = run_captured_child(&[], ChildOptions::DEFINED).await;
@@ -256,6 +257,7 @@ mod captured {
 
     /// fork 前台：父消息作为 ancestor 进入对话体，身份与贡献仍恰一次。
     #[tokio::test]
+    #[serial]
     async fn fork_child_chain_request_keeps_parent_ancestors_and_single_identity() {
         let captured = run_captured_child(&[], ChildOptions::FORK).await;
         assert_single_contributions(&captured[0]);
@@ -279,6 +281,7 @@ mod captured {
 
     /// 后台（定义型与 fork）：请求在后台任务内发出，请求面契约与前台一致。
     #[tokio::test]
+    #[serial]
     async fn background_child_requests_keep_the_same_single_contribution_contract() {
         for options in [
             ChildOptions::DEFINED_BACKGROUND,
@@ -291,6 +294,7 @@ mod captured {
 
     /// 关闭位生效：AgentsMd / Skills / ToolSearch 关闭后对应贡献缺席，身份仍在。
     #[tokio::test]
+    #[serial]
     async fn disabled_child_capabilities_do_not_reach_the_first_request() {
         let captured = run_captured_child(
             &["AgentsMdMiddleware", "SkillsMiddleware", "ToolSearch"],
@@ -327,6 +331,203 @@ mod captured {
         assert!(
             !names.contains(&"Agent"),
             "子链不得声明 Agent 能力: {names:?}"
+        );
+    }
+
+    fn child_llm(model: &Arc<CapturePromptModel>) -> SubagentLlmSource {
+        SubagentLlmSource::model(
+            execution_fixture::wrap_model(Arc::clone(model) as Arc<dyn Model>),
+            "capture-model",
+        )
+    }
+
+    /// 真实 durable 宿主夹具（spawn + resume 共用；与既有动态夹具同源步骤）。
+    struct ResumeFixture {
+        ctx: SessionContext,
+        parent: Arc<peri_agent::session::Session>,
+        manager: SessionManager,
+        _tmp: tempfile::TempDir,
+        _workspace: tempfile::TempDir,
+    }
+
+    async fn resume_fixture() -> ResumeFixture {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut ctx, manager) =
+            make_session_context_with_manager("child-chain-resume", &tmp).await;
+        let sentinel = chain_frozen(&[]);
+        let workspace = tempfile::tempdir().unwrap();
+        let _resources =
+            dynamic_tests::bind_child_fixture_resources(&mut ctx, workspace.path(), &sentinel)
+                .await;
+        // 夹具前置（与生产 ACP 宿主同值）：stage 装配注入 thread_persistence
+        // （会话 thread 身份 + 子会话资源门面），主会话的 SubagentHost 由此携带
+        // 自身 thread 身份，供 bound child resume 的 owning-parent 判据使用。
+        // 测试夹具的 `make_stage_request` 默认空持久化，这里补上合法前置。
+        let mut request = make_stage_request(sentinel.clone(), None);
+        request.thread_persistence.parent_thread_id = Some(ctx.session_id.clone());
+        request.thread_persistence.session_resources = ctx.session_resources.clone();
+        let (out, _) = make_stage_build(&ctx)(request).unwrap();
+        ResumeFixture {
+            ctx,
+            parent: out.session,
+            manager,
+            _tmp: tmp,
+            _workspace: workspace,
+        }
+    }
+
+    /// live resume：恢复路径经同一 bridge 装配点，请求面契约与 spawn 一致，
+    /// 且子会话既有历史与本次追加指令都在对话体中。
+    #[tokio::test]
+    #[serial]
+    async fn live_resume_child_request_keeps_single_identity_and_contributions() {
+        let fixture = resume_fixture().await;
+        let ctx = &fixture.ctx;
+        let spawn_invocation = dynamic_tests::prepare_child_fixture_intent(ctx).await;
+        // resume 是父侧新一次可信委派：在 spawn 之前登记，避免与子会话
+        // 收尾期的数据库写入竞争（夹具前提，不改变生产路径）。
+        let resume_invocation = dynamic_tests::prepare_child_fixture_intent(ctx).await;
+        let spawn_requests = Arc::new(Mutex::new(Vec::new()));
+        let spawn_model = Arc::new(CapturePromptModel {
+            requests: Arc::clone(&spawn_requests),
+        });
+        let spawned = SessionFactory::spawn_subagent(
+            Some(&fixture.parent),
+            SubagentSpawnConfig {
+                agent_name: "resumable-child".into(),
+                prompt: "first turn".into(),
+                parent_messages: vec![],
+                cancel_policy: SubagentCancelPolicy::Independent,
+                max_iterations: 1,
+                fork_directive_kind: None,
+                run_mode: SubagentRunMode::Sync,
+                skill_names: vec![],
+                llm: child_llm(&spawn_model),
+                chain_assembler: crate::host::assemble::child_chain_assembler(
+                    &fixture.manager,
+                    &ctx.session_id,
+                ),
+                tools: vec![Arc::new(DeferredFixtureTool) as Arc<dyn BaseTool>],
+                tool_filter: Arc::new(|_| true),
+                system_prompt: Some(IDENTITY.into()),
+                tool_invocation_resolver: Some(
+                    crate::host::assemble::child_tool_invocation_resolver(),
+                ),
+                compact_config: None,
+                context_budget: None,
+                compact_llm: None,
+                session_resources: ctx.session_resources.clone(),
+                event_handler: None,
+                bg_event_sender: None,
+                task_manager: None,
+                on_bg_complete: None,
+                langfuse_bridge: None,
+                on_subagent_start: None,
+                on_subagent_stop: None,
+                register_runtime: None,
+                deregister_runtime: None,
+                parent_agent_id: None,
+                parent_invocation_id: Some(spawn_invocation),
+                cancel_token: None,
+                cwd: None,
+                parent_thread_id: Some(ctx.session_id.clone()),
+                frozen_claude_md: None,
+                frozen_claude_local_md: None,
+                frozen_skill_summary: None,
+                frozen_date: None,
+            },
+        )
+        .await
+        .expect("真实子链 spawn 必须成功");
+        assert!(!spawned.interrupted);
+        assert_eq!(spawn_requests.lock().unwrap().len(), 1);
+        // 夹具前置：父宿主必须携带**自己的** thread 身份（resume 的 owning parent 判据）。
+        assert!(
+            fixture.parent.store().thread_id.is_some()
+                || fixture
+                    .parent
+                    .subagent_host()
+                    .and_then(|host| host.parent_thread_id.clone())
+                    .is_some(),
+            "fixture parent must carry a thread identity: store={:?} host_present={:?} host_parent={:?} ctx_thread={:?}",
+            fixture.parent.store().thread_id,
+            fixture.parent.subagent_host().is_some(),
+            fixture
+                .parent
+                .subagent_host()
+                .and_then(|host| host.parent_thread_id.clone()),
+            fixture.ctx.thread_id
+        );
+
+        let resume_requests = Arc::new(Mutex::new(Vec::new()));
+        let resume_model = Arc::new(CapturePromptModel {
+            requests: Arc::clone(&resume_requests),
+        });
+        let resumed = SessionFactory::resume_subagent(
+            Some(&fixture.parent),
+            SubagentResumeConfig {
+                thread_id: spawned.child_thread_id.clone(),
+                prompt: Some("continue".into()),
+                agent_name: None,
+                run_mode: SubagentRunMode::Sync,
+                max_iterations: 1,
+                llm: child_llm(&resume_model),
+                chain_assembler: crate::host::assemble::child_chain_assembler(
+                    &fixture.manager,
+                    &ctx.session_id,
+                ),
+                tools: vec![Arc::new(DeferredFixtureTool) as Arc<dyn BaseTool>],
+                tool_filter: Arc::new(|_| true),
+                tool_invocation_resolver: Some(
+                    crate::host::assemble::child_tool_invocation_resolver(),
+                ),
+                compact_config: None,
+                context_budget: None,
+                compact_llm: None,
+                session_resources: ctx.session_resources.clone().expect("fixture resources"),
+                event_handler: None,
+                bg_event_sender: None,
+                task_manager: None,
+                on_bg_complete: None,
+                langfuse_bridge: None,
+                on_subagent_start: None,
+                on_subagent_stop: None,
+                register_runtime: None,
+                deregister_runtime: None,
+                parent_agent_id: None,
+                parent_invocation_id: Some(resume_invocation),
+                cancel_token: None,
+                cwd: None,
+                frozen_claude_md: None,
+                frozen_claude_local_md: None,
+                frozen_skill_summary: None,
+                frozen_date: None,
+            },
+        )
+        .await
+        .expect("resume 必须成功（同一 durable 子会话）");
+        assert!(!resumed.interrupted, "sync resume 必须跑完首轮");
+        assert_eq!(
+            resumed.child_thread_id, spawned.child_thread_id,
+            "resume 不得换子线程"
+        );
+        let captured = resume_requests.lock().unwrap().clone();
+        assert_eq!(captured.len(), 1, "resume 首轮恰一个模型请求");
+        assert_single_contributions(&captured[0]);
+        let conversation = captured[0]
+            .messages
+            .iter()
+            .filter(|message| !matches!(message, ModelMessage::System { .. }))
+            .map(|message| message.text_content().unwrap_or_default())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            conversation.contains("first turn"),
+            "resume 请求必须携带子会话历史: {conversation}"
+        );
+        assert!(
+            conversation.contains("continue"),
+            "resume 请求必须携带本次追加指令: {conversation}"
         );
     }
 }
