@@ -30,7 +30,10 @@ impl OutputStore {
     fn write(&self, request: StoreOutputRequest) -> Result<serde_json::Value, std::io::Error> {
         let mut artifacts = self.artifacts.lock();
         if artifacts.is_empty() && !self.directory.exists() {
+            #[cfg(unix)]
             let mut builder = std::fs::DirBuilder::new();
+            #[cfg(not(unix))]
+            let builder = std::fs::DirBuilder::new();
             #[cfg(unix)]
             {
                 use std::os::unix::fs::DirBuilderExt;
