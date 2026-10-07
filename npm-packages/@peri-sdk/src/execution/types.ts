@@ -129,4 +129,3 @@ export interface InstanceProofProvider {
     >;
 }
 export type ActivationSource = "send" | "inboxScan" | "notification" | "recovery" | "cron";
-export const EXECUTION_PROTOCOL_VERSION = 2;

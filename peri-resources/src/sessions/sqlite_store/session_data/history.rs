@@ -1,7 +1,7 @@
 use super::*;
 
 impl SqliteSessionData {
-    pub(in crate::sessions::sqlite_store) async fn append_history_rows(
+    pub(super) async fn append_history_rows(
         &self,
         id: &ThreadId,
         payloads: &[PersistedPayload],
@@ -30,20 +30,29 @@ impl SqliteSessionData {
             return Err(not_found());
         }
         for payload in payloads {
-            messages::insert_payload(&mut tx, id, payload).await?;
+            sqlx::query(
+                "INSERT INTO messages (message_id, thread_id, role, content)
+                 VALUES (?1, ?2, ?3, ?4)",
+            )
+            .bind(payload.id().as_uuid().to_string())
+            .bind(id.as_str())
+            .bind(payload_role(payload))
+            .bind(
+                serialize_persisted_payload(payload)
+                    .map_err(|_| corrupt("history entry is not serializable"))?,
+            )
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| map_sqlx(&error))?;
         }
         let now = peri_time::now_utc_rfc3339();
         let updated = sqlx::query(
             "UPDATE threads SET updated_at = ?1,
-                message_count = message_count + ?3
+                message_count = (SELECT COUNT(*) FROM messages WHERE thread_id = ?2)
              WHERE id = ?2",
         )
         .bind(&now)
         .bind(id.as_str())
-        .bind(
-            i64::try_from(payloads.len())
-                .map_err(|_| invalid_input("history batch is too large"))?,
-        )
         .execute(&mut *tx)
         .await
         .map_err(|error| map_sqlx(&error))?;

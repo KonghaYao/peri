@@ -53,20 +53,13 @@ fn receipt_preserves_ticket_and_execution_fields() {
 
 #[test]
 fn existing_admission_is_explicit_and_optional_in_the_same_protocol() {
-    let snapshot = crate::session_resources::work::WorkInspection {
+    let snapshot = crate::session_resources::work::WorkSnapshot {
+        pending_commands: Vec::new(),
         session_id: "s".into(),
         control: crate::session_resources::ControlState::default(),
-        head: crate::session_resources::work::SessionWorkHead::default(),
-        page: crate::session_resources::work::WorkPage::Availability(
-            crate::session_resources::work::WorkAvailability {
-                lifecycle: 1,
-                change_seq: 0,
-                blocked: false,
-                pending: false,
-                candidates: Vec::new(),
-            },
-        ),
-        next_cursor: None,
+        state: crate::session_resources::work::WorkState::default(),
+        candidates: Vec::new(),
+        blocked: false,
     };
     let lean = AdmissionSnapshot::from(&snapshot);
     let wire = json!({"requestId":"request", "snapshot":lean});

@@ -9,8 +9,6 @@ use peri_acp_types::execution_admission::{
 use crate::transport::RequestTransport;
 use peri_acp_types::execution_admission::{EntryOutcome, EntryRequest, ENTERED_METHOD};
 
-pub const EXECUTION_PROTOCOL_VERSION: u32 = 2;
-
 pub struct ReverseExecutionAdmission {
     transport: Arc<dyn RequestTransport>,
 }

@@ -291,14 +291,9 @@ impl BaseTool for McpToolBridge {
             .resources(session_id, session_lifecycle)
             .ok_or("Blocked: exact MCP lifecycle resources unavailable")?;
         let snapshot = resources
-            .inspect_work(&peri_acp_types::session_resources::work::WorkQuery {
+            .load_session_work(&peri_acp_types::session_resources::work::WorkQuery {
                 session_id: session_id.into(),
-                selector:
-                    peri_acp_types::session_resources::work::WorkSelector::RecoveryDescriptor {
-                        lifecycle: session_lifecycle,
-                    },
                 limit: 1,
-                cursor: None,
             })
             .await
             .map_err(|error| error.to_string())?;
@@ -307,15 +302,10 @@ impl BaseTool for McpToolBridge {
             Some(super::config::ConfigSource::Builtin { .. })
         );
         let (canonical, authorization_ref) = if builtin {
-            let peri_acp_types::session_resources::work::WorkPage::RecoveryDescriptors(descriptors) =
-                &snapshot.page
-            else {
-                return Err("Blocked: trusted recovery descriptor query mismatch".into());
-            };
-            let owners = descriptors
-                .iter()
-                .find(|descriptor| descriptor.recipient_lifecycle == session_lifecycle)
-                .and_then(|descriptor| descriptor.resource_owners.as_ref())
+            let owners = snapshot
+                .state
+                .resource_owners
+                .get(&session_lifecycle)
                 .ok_or("Blocked: durable trusted owner authorization missing")?;
             if owners.authorization_ref.is_empty() {
                 return Err("Blocked: durable owner authorization missing".into());
@@ -450,8 +440,7 @@ impl BaseTool for McpToolBridge {
             &input,
             &self.full_name,
             &owner_identity,
-        )
-        .await?;
+        )?;
         invocation.prepare().await?;
 
         // 2. 构建 rmcp 请求参数
@@ -556,9 +545,7 @@ impl BaseTool for McpToolBridge {
                         return Err(Box::new(ToolCallError::CallFailed {
                             server: self.server_name.clone(),
                             tool: self.tool_name.clone(),
-                            reason: format!(
-                                "{reason}; immutable owner task {task_id} retained for reconciliation; do not repeat the invocation"
-                            ),
+                            reason: format!("{reason}; immutable owner task {task_id} retained for reconciliation; do not repeat the invocation"),
                         }));
                     }
                 };
@@ -573,12 +560,12 @@ impl BaseTool for McpToolBridge {
                 ) {
                     if error != super::task_scope::TaskAdmissionError::DuplicateKey {
                         return Err(Box::new(ToolCallError::CallFailed {
-                            server: self.server_name.clone(),
-                            tool: self.tool_name.clone(),
-                            reason: format!(
-                                "background task {public_id} exists, but its monitor was not admitted: {error}; completion delivery is not guaranteed; do not repeat the command"
-                            ),
-                        }));
+                                    server: self.server_name.clone(),
+                                    tool: self.tool_name.clone(),
+                                    reason: format!(
+                                        "background task {public_id} exists, but its monitor was not admitted: {error}; completion delivery is not guaranteed; do not repeat the command"
+                                    ),
+                                }));
                     }
                 }
                 // 回执只承诺可达的投递：有 canonical 路由 = 持久送达

@@ -161,17 +161,13 @@ impl JsonlSdkDispatcher {
         let dispatcher = Self { sender, router };
         let ready = tokio::time::timeout(
             Duration::from_secs(10),
-            dispatcher.send_request(
-                "peri/execution/ready",
-                json!({"protocolVersion": super::execution_admission::EXECUTION_PROTOCOL_VERSION}),
-            ),
+            dispatcher.send_request("peri/execution/ready", json!({})),
         )
         .await
         .map_err(|_| anyhow::anyhow!("SDK execution dispatcher readiness timeout"))??;
         let readiness: Readiness = serde_json::from_value(ready)?;
         anyhow::ensure!(
-            readiness.protocol_version == super::execution_admission::EXECUTION_PROTOCOL_VERSION
-                && readiness.durability == "durable",
+            readiness.protocol_version == 1 && readiness.durability == "durable",
             "SDK persistent execution dispatcher capability required"
         );
         Ok(dispatcher)

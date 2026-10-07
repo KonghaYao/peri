@@ -28,10 +28,7 @@ class FakeTransport implements Transport {
   async request<Response>(method: string, params?: unknown): Promise<Response> {
     this.calls.push({ method, params });
     if (method.startsWith("session/control")) return controlResponse(method, params) as Response;
-    if (method === "initialize") {
-      await this.startupGate;
-      return { agentCapabilities: { _meta: { "peri.executionProtocol": 2 } } } as Response;
-    }
+    if (method === "initialize") await this.startupGate;
     if (method === "session/input/snapshot") {
       if (this.failStartup) throw this.startupError;
       return { generation: "generation-1" } as Response;
@@ -300,9 +297,9 @@ test("current matching work notification still activates a loaded session", asyn
   try {
     await agent.session.start("existing");
     expect(activation).not.toHaveBeenCalled();
-    transport.emit({ method: "session/work/available", params: { sessionId: "other", executionProtocol: 2 } });
+    transport.emit({ method: "session/work/available", params: { sessionId: "other" } });
     expect(activation).not.toHaveBeenCalled();
-    transport.emit({ method: "session/work/available", params: { sessionId: "existing", executionProtocol: 2 } });
+    transport.emit({ method: "session/work/available", params: { sessionId: "existing" } });
     expect(activation).toHaveBeenCalledTimes(1);
     expect(activation).toHaveBeenCalledWith("notification");
   } finally {

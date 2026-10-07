@@ -1,14 +1,33 @@
-use peri_acp_types::session_resources::work::*;
-use peri_acp_types::store::PersistedPayload;
+use peri_acp_types::session_resources::work::{
+    InvocationIntent, InvocationOutcome, InvocationResult, InvocationStatus, ReasonRequest,
+    WorkPayload, WorkSnapshot, WorkStage, WorkTarget,
+};
+use peri_acp_types::store::{deserialize_persisted_payload, PersistedPayload};
 
-use super::work_pipeline::WorkSession;
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum WorkRecoveryError {
+    #[error("legacy records require explicit recovery evidence")]
+    LegacyUnknown { record_ids: Vec<String> },
+    #[error("durable work record is missing")]
+    MissingWork,
+    #[error("durable work batch does not match its delivery records")]
+    InvalidBatch,
+    #[error("durable work does not have a confirmed current recipient lifecycle")]
+    UnconfirmedLifecycle,
+    #[error("durable work projection is incomplete or inconsistent")]
+    InvalidProjection,
+    #[error("durable model response or request checkpoint is missing")]
+    MissingCheckpoint,
+    #[error("durable invocation record is incomplete or inconsistent")]
+    InvalidInvocation,
+}
 
 #[derive(Debug)]
 pub(crate) enum RecoveredStage {
     ReasonReady,
     ReasonUncertain {
         request_id: String,
-        request: PayloadRef,
+        request: ReasonRequest,
     },
     ActReady {
         response: PersistedPayload,
@@ -28,76 +47,130 @@ pub(crate) enum RecoveredStage {
 #[derive(Debug)]
 pub(crate) struct RecoveredWork {
     pub(crate) target: WorkTarget,
-    pub(crate) phase_sequence: u64,
-    pub(crate) deliveries: Vec<Delivery>,
+    pub(crate) budget_id: String,
+    pub(crate) batch_id: String,
+    pub(crate) delivery_ids: Vec<String>,
+    pub(crate) processing_delivery_ids: Vec<String>,
+    pub(crate) projection: Vec<PersistedPayload>,
     pub(crate) stage: RecoveredStage,
 }
 
-pub(crate) async fn recover_work(
-    session: &WorkSession,
+fn decode_payload(payload: &WorkPayload) -> Result<PersistedPayload, WorkRecoveryError> {
+    payload
+        .validate()
+        .map_err(|_| WorkRecoveryError::InvalidProjection)?;
+    deserialize_persisted_payload(&payload.serialized)
+        .map_err(|_| WorkRecoveryError::InvalidProjection)
+}
+
+pub(crate) fn recover_work(
+    snapshot: &WorkSnapshot,
     work_id: &str,
-) -> anyhow::Result<RecoveredWork> {
-    let head = session.inspect_head().await?;
-    if head.head.legacy_unknown != 0 {
-        return Err(anyhow::anyhow!(
-            "legacy responsibility requires explicit recovery evidence"
-        ));
+) -> Result<RecoveredWork, WorkRecoveryError> {
+    if !snapshot.state.legacy_unknown.is_empty() {
+        return Err(WorkRecoveryError::LegacyUnknown {
+            record_ids: snapshot.state.legacy_unknown.keys().cloned().collect(),
+        });
     }
-    let processing = session.processing(work_id).await?;
-    let deliveries = session.deliveries(work_id).await?;
-    for delivery in &deliveries {
-        if delivery.processing_id.as_deref() != Some(work_id)
-            || delivery.recipient_lifecycle != processing.recipient_lifecycle
-            || (delivery.participates_in_reason && delivery.projection.is_none())
+    let work = snapshot
+        .state
+        .works
+        .get(work_id)
+        .ok_or(WorkRecoveryError::MissingWork)?;
+    if work.work_id != work_id || !snapshot.state.budgets.contains_key(&work.budget_id) {
+        return Err(WorkRecoveryError::MissingWork);
+    }
+    snapshot
+        .validate_work_lifecycle(work_id)
+        .map_err(|_| WorkRecoveryError::UnconfirmedLifecycle)?;
+    let batch = snapshot
+        .state
+        .batches
+        .get(&work.batch_id)
+        .ok_or(WorkRecoveryError::InvalidBatch)?;
+    if batch.batch_id != work.batch_id {
+        return Err(WorkRecoveryError::InvalidBatch);
+    }
+    let mut projection = Vec::new();
+    for delivery_id in &batch.delivery_ids {
+        let delivery = snapshot
+            .state
+            .deliveries
+            .get(delivery_id)
+            .ok_or(WorkRecoveryError::InvalidBatch)?;
+        if delivery.batch_id.as_ref() != Some(&batch.batch_id)
+            || delivery.recipient_lifecycle != batch.recipient_lifecycle
         {
-            return Err(anyhow::anyhow!(
-                "durable processing delivery membership is inconsistent"
-            ));
+            return Err(WorkRecoveryError::InvalidBatch);
+        }
+        if let Some(version) = batch.projection_versions.get(delivery_id) {
+            if !delivery.projected || delivery.projection_version != *version {
+                return Err(WorkRecoveryError::InvalidProjection);
+            }
+            if delivery.publication.policy.model_visible {
+                projection.push(decode_payload(&delivery.projection)?);
+            }
+        } else if delivery.disposition.is_none() {
+            return Err(WorkRecoveryError::InvalidProjection);
         }
     }
-    let stage = match processing.stage {
+    let stage = match work.stage {
         WorkStage::ReasonReady => RecoveredStage::ReasonReady,
         WorkStage::ReasonInFlight => RecoveredStage::ReasonUncertain {
-            request_id: processing
+            request_id: work
                 .request_id
                 .clone()
-                .ok_or_else(|| anyhow::anyhow!("uncertain request identity missing"))?,
-            request: processing
-                .request
+                .ok_or(WorkRecoveryError::MissingCheckpoint)?,
+            request: work
+                .reason_request
                 .clone()
-                .ok_or_else(|| anyhow::anyhow!("uncertain request evidence missing"))?,
+                .ok_or(WorkRecoveryError::MissingCheckpoint)?,
         },
         WorkStage::ActReady => {
-            let response = session
-                .payload(
-                    processing
-                        .response
-                        .as_ref()
-                        .ok_or_else(|| anyhow::anyhow!("Act response checkpoint missing"))?,
-                )
-                .await?;
+            let response = decode_payload(
+                work.response
+                    .as_ref()
+                    .ok_or(WorkRecoveryError::MissingCheckpoint)?,
+            )?;
             let mut prepared = Vec::new();
             let mut settled = Vec::new();
             let mut uncertain = Vec::new();
-            for effect in session.effects(&processing).await? {
-                if effect.processing_id.as_deref() != Some(work_id)
-                    || effect.recipient_lifecycle != session.admission.lifecycle
+            for invocation_id in &work.invocation_ids {
+                let invocation = snapshot
+                    .state
+                    .invocations
+                    .get(invocation_id)
+                    .ok_or(WorkRecoveryError::InvalidInvocation)?;
+                if invocation.intent.invocation_id != *invocation_id
+                    || invocation.work_id.as_deref() != Some(work_id)
+                    || invocation.recipient_lifecycle != batch.recipient_lifecycle
                 {
-                    return Err(anyhow::anyhow!(
-                        "effect responsibility differs from processing"
-                    ));
+                    return Err(WorkRecoveryError::InvalidInvocation);
                 }
-                match effect.status {
-                    InvocationStatus::Prepared => prepared.push(effect.intent),
-                    InvocationStatus::Settled => settled.push(InvocationResult {
-                        invocation_id: effect.invocation_id,
-                        expected_effect_revision: effect.revision,
-                        outcome: effect
-                            .outcome
-                            .ok_or_else(|| anyhow::anyhow!("settled outcome missing"))?,
-                    }),
+                match invocation.status {
+                    InvocationStatus::Prepared => prepared.push(invocation.intent.clone()),
                     InvocationStatus::DispatchAccepted | InvocationStatus::OutcomeUnknown => {
-                        uncertain.push(effect.invocation_id);
+                        uncertain.push(invocation_id.clone());
+                    }
+                    InvocationStatus::Settled => {
+                        let outcome = invocation
+                            .outcome
+                            .as_ref()
+                            .ok_or(WorkRecoveryError::InvalidInvocation)?;
+                        match outcome {
+                            InvocationOutcome::Completed { result }
+                            | InvocationOutcome::Failed { result } => {
+                                decode_payload(result)?;
+                            }
+                            InvocationOutcome::Cancelled { evidence } if evidence.is_empty() => {
+                                return Err(WorkRecoveryError::InvalidInvocation);
+                            }
+                            InvocationOutcome::Cancelled { .. } => {}
+                        }
+                        settled.push(InvocationResult {
+                            invocation_id: invocation_id.clone(),
+                            outcome: outcome.clone(),
+                        });
                     }
                 }
             }
@@ -114,15 +187,21 @@ pub(crate) async fn recover_work(
             }
         }
         WorkStage::Blocked => RecoveredStage::Blocked {
-            reason: processing.blocked_evidence.clone(),
-            recovery_condition: processing.recovery_condition.clone(),
+            reason: work.reason.clone(),
+            recovery_condition: work.recovery_condition.clone(),
         },
         WorkStage::Settled | WorkStage::Abandoned => RecoveredStage::Finished,
     };
     Ok(RecoveredWork {
-        target: WorkSession::target(&processing),
-        phase_sequence: processing.phase_sequence,
-        deliveries,
+        target: WorkTarget {
+            work_id: work.work_id.clone(),
+            expected_work_revision: work.revision,
+        },
+        budget_id: work.budget_id.clone(),
+        batch_id: work.batch_id.clone(),
+        delivery_ids: batch.delivery_ids.clone(),
+        processing_delivery_ids: batch.processing_delivery_ids.clone(),
+        projection,
         stage,
     })
 }

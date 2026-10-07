@@ -1,9 +1,8 @@
 use std::sync::Arc;
 
 use peri_acp_types::session_resources::work::{
-    EvidenceQuery, InvocationIntent, InvocationStatus, TaskBinding, WorkAction, WorkCommand,
-    WorkDecision, WorkInspection, WorkPage, WorkQuery, WorkReceipt, WorkRejection, WorkResolution,
-    WorkSelector, WorkTarget,
+    InvocationIntent, InvocationStatus, TaskBinding, WorkAction, WorkCommand, WorkDecision,
+    WorkQuery, WorkReceipt, WorkRejection, WorkResolution, WorkSnapshot, WorkTarget,
 };
 use peri_acp_types::session_resources::{
     ControlStatus, MutationOutcome, SessionResourceError, SessionResources,
@@ -41,11 +40,10 @@ pub(crate) struct McpInvocation {
     lifecycle: u64,
     intent: Arc<InvocationIntent>,
     target: WorkTarget,
-    effective_arguments_json: String,
 }
 
 impl McpInvocation {
-    pub(crate) async fn from_context(
+    pub(crate) fn from_context(
         context: &ToolContext<'_>,
         input: &Value,
         effective_tool: &str,
@@ -72,19 +70,7 @@ impl McpInvocation {
             .session_resources
             .clone()
             .ok_or(InvocationError::MissingIdentity)?;
-        let evidence = resources
-            .read_evidence(&EvidenceQuery {
-                session_id: session_id.clone(),
-                reference: intent.effective_arguments.clone(),
-            })
-            .await?;
-        evidence.validate()?;
-        if evidence.reference != intent.effective_arguments {
-            return Err(InvocationError::IdentityConflict);
-        }
-        let effective_arguments_json =
-            String::from_utf8(evidence.bytes).map_err(|_| InvocationError::IdentityConflict)?;
-        let parsed: Value = serde_json::from_str(&effective_arguments_json)
+        let parsed: Value = serde_json::from_str(&intent.effective_arguments_json)
             .map_err(|_| InvocationError::IdentityConflict)?;
         if context.invocation_id.as_deref() != Some(intent.invocation_id.as_str())
             || intent.effective_tool_name != effective_tool
@@ -93,7 +79,10 @@ impl McpInvocation {
             || intent.authorization_ref.is_empty()
             || intent.recovery_locator.is_empty()
             || intent.effective_arguments_digest
-                != format!("{:x}", Sha256::digest(effective_arguments_json.as_bytes()))
+                != format!(
+                    "{:x}",
+                    Sha256::digest(intent.effective_arguments_json.as_bytes())
+                )
             || parsed != *input
             || target.work_id.is_empty()
         {
@@ -105,7 +94,6 @@ impl McpInvocation {
             lifecycle,
             intent,
             target,
-            effective_arguments_json,
         })
     }
 
@@ -136,7 +124,7 @@ impl McpInvocation {
                 "initiatorSessionId": self.session_id,
                 "recipientLifecycle": self.lifecycle,
                 "argumentsDigest": self.intent.effective_arguments_digest,
-                "argumentsJson": self.effective_arguments_json,
+                "argumentsJson": self.intent.effective_arguments_json,
                 "toolName": self.intent.effective_tool_name,
                 "ownerIdentity": self.intent.owner_identity,
                 "scopeId": self.intent.scope_id,
@@ -165,7 +153,7 @@ impl McpInvocation {
         };
         for _ in 0..3 {
             let snapshot = self.snapshot().await?;
-            if let Some(prior) = effect(&snapshot)?.binding.as_ref() {
+            if let Some(prior) = snapshot.state.task_bindings.get(&binding.invocation_id) {
                 return if prior == &binding {
                     Ok(binding)
                 } else {
@@ -174,7 +162,7 @@ impl McpInvocation {
             }
             self.validate_record(&snapshot)?;
             let command = self.command(WorkAction::ReconcileTaskBinding {
-                expected_revision: snapshot.head.change_seq,
+                expected_revision: snapshot.state.revision,
                 binding: binding.clone(),
             })?;
             match commit(self.resources.as_ref(), &command).await {
@@ -189,34 +177,29 @@ impl McpInvocation {
     pub(crate) async fn record_outcome_unknown(&self) -> Result<(), InvocationError> {
         for _ in 0..3 {
             let snapshot = self.snapshot().await?;
-            let record = effect(&snapshot)?;
+            let record = snapshot
+                .state
+                .invocations
+                .get(&self.intent.invocation_id)
+                .ok_or(InvocationError::NotPrepared)?;
             if record.intent != *self.intent || record.recipient_lifecycle != self.lifecycle {
                 return Err(InvocationError::IdentityConflict);
             }
             if record.status == InvocationStatus::OutcomeUnknown {
                 return Ok(());
             }
-            let processing = self
-                .resources
-                .inspect_work(&WorkQuery::new(
-                    &self.session_id,
-                    WorkSelector::Processing {
-                        processing_id: self.target.work_id.clone(),
-                    },
-                ))
-                .await?;
-            let WorkPage::Processings(records) = &processing.page else {
-                return Err(InvocationError::IdentityConflict);
-            };
-            let work = records.first().ok_or(InvocationError::NotPrepared)?;
+            let work = snapshot
+                .state
+                .works
+                .get(&self.target.work_id)
+                .ok_or(InvocationError::NotPrepared)?;
             let command = self.command(WorkAction::OutcomeUnknown {
-                expected_revision: processing.head.change_seq,
+                expected_revision: snapshot.state.revision,
                 target: WorkTarget {
                     work_id: self.target.work_id.clone(),
                     expected_work_revision: work.revision,
                 },
                 invocation_id: self.intent.invocation_id.clone(),
-                expected_effect_revision: record.revision,
                 reason: "MCP response or durable task ACK unavailable; original owner outcome unconfirmed".into(),
             })?;
             match commit(self.resources.as_ref(), &command).await {
@@ -227,16 +210,12 @@ impl McpInvocation {
         Err(InvocationError::Rejected(WorkRejection::StaleRevision))
     }
 
-    async fn snapshot(&self) -> Result<WorkInspection, InvocationError> {
+    async fn snapshot(&self) -> Result<WorkSnapshot, InvocationError> {
         let snapshot = self
             .resources
-            .inspect_work(&WorkQuery {
+            .load_session_work(&WorkQuery {
                 session_id: self.session_id.clone(),
-                selector: WorkSelector::Effect {
-                    invocation_id: self.intent.invocation_id.clone(),
-                },
-                limit: 1,
-                cursor: None,
+                limit: 0,
             })
             .await?;
         if snapshot.session_id != self.session_id {
@@ -245,12 +224,15 @@ impl McpInvocation {
         Ok(snapshot)
     }
 
-    fn validate_record(&self, snapshot: &WorkInspection) -> Result<(), InvocationError> {
-        let record = effect(snapshot)?;
-        if record.invocation_id != self.intent.invocation_id
-            || record.intent != *self.intent
+    fn validate_record(&self, snapshot: &WorkSnapshot) -> Result<(), InvocationError> {
+        let record = snapshot
+            .state
+            .invocations
+            .get(&self.intent.invocation_id)
+            .ok_or(InvocationError::NotPrepared)?;
+        if record.intent != *self.intent
             || record.recipient_lifecycle != self.lifecycle
-            || record.processing_id.as_deref() != Some(self.target.work_id.as_str())
+            || record.work_id.as_deref() != Some(self.target.work_id.as_str())
         {
             return Err(InvocationError::IdentityConflict);
         }
@@ -273,18 +255,6 @@ impl McpInvocation {
     }
 }
 
-fn effect(
-    snapshot: &WorkInspection,
-) -> Result<&peri_acp_types::session_resources::work::Effect, InvocationError> {
-    let WorkPage::Effects(records) = &snapshot.page else {
-        return Err(InvocationError::IdentityConflict);
-    };
-    if records.len() != 1 {
-        return Err(InvocationError::NotPrepared);
-    }
-    Ok(&records[0])
-}
-
 pub(crate) async fn commit(
     resources: &dyn SessionResources,
     command: &WorkCommand,
@@ -297,7 +267,7 @@ pub(crate) async fn commit(
                 _ => {
                     return Err(InvocationError::Unconfirmed {
                         command: Box::new(command.clone()),
-                    });
+                    })
                 }
             }
         }

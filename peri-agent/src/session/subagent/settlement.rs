@@ -3,7 +3,7 @@ use std::sync::Arc;
 use peri_acp_types::execution_admission::{
     AttemptStoppedProof, ExecutionAdmissionPort, SettlementOutcome, SettlementRequest,
 };
-use peri_acp_types::session_resources::work::{WorkAction, WorkCommand, WorkQuery, WorkSelector};
+use peri_acp_types::session_resources::work::{WorkAction, WorkCommand, WorkQuery};
 use peri_acp_types::session_resources::{
     ControlAction, ControlCommand, ControlDecision, SessionResources,
 };
@@ -37,24 +37,39 @@ impl OwnedSubagentExecution {
             .ok_or("Incomplete: child SDK admission unavailable")?;
         let resources = self.resources()?;
         let child = resources
-            .inspect_work(&WorkQuery::new(
-                admission.session_id.clone(),
-                WorkSelector::Head,
-            ))
+            .load_session_work(&WorkQuery {
+                session_id: admission.session_id.clone(),
+                limit: 1,
+            })
             .await
             .map_err(|error| error.to_string())?;
-        if crate::session::work_access::terminal(resources.as_ref(), admission)
-            .await
-            .map_err(|error| error.to_string())?
-            .is_some()
+        if child
+            .state
+            .terminal_obligations
+            .contains_key(&admission.admission_id)
         {
             return Ok(());
         }
-        let binding = crate::session::work_access::delegation(resources.as_ref(), admission)
-            .await
-            .map_err(|error| error.to_string())?;
+        let binding = child
+            .state
+            .work_delegations
+            .get(&admission.work_id)
+            .ok_or("Incomplete: current immutable work delegation reference unavailable")?;
         if binding.owner_task_id != result.task_id {
             return Err("Incomplete: immutable child delegation identity conflicts".into());
+        }
+        let parent = resources
+            .load_session_work(&WorkQuery {
+                session_id: binding.initiator_session_id.clone(),
+                limit: 1,
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+        if parent.state.task_bindings.get(&binding.invocation_id) != Some(binding) {
+            return Err(
+                "Incomplete: current delegation binding differs from immutable parent task binding"
+                    .into(),
+            );
         }
         let reminder = crate::session::async_router::background_result_reminder(
             result,
@@ -65,22 +80,20 @@ impl OwnedSubagentExecution {
             "terminal",
         );
         let command = crate::agent::async_tasks::build_task_terminal_command(
-            resources.as_ref(),
             &binding.initiator_session_id,
             binding.recipient_lifecycle,
-            &binding,
+            binding,
             delivery_id,
             &reminder,
             peri_acp_types::session::MessageSource::SubAgentComplete,
-        )
-        .await?;
+        )?;
         let barrier = WorkMutationBarrier::new(resources.clone());
         let mut owned = WorkCommand {
             session_id: admission.session_id.clone(),
             recipient_lifecycle: admission.lifecycle,
             mutation_id: "child-terminal-obligation".into(),
             action: WorkAction::BindTerminalObligation {
-                expected_revision: child.head.change_seq,
+                expected_revision: child.state.revision,
                 admission_id: admission.admission_id.clone(),
                 command: Box::new(command.clone()),
             },
@@ -102,21 +115,28 @@ impl OwnedSubagentExecution {
             .work_admission()
             .ok_or("Incomplete: child SDK admission unavailable")?;
         let resources = self.resources()?;
-        let obligation = crate::session::work_access::terminal(resources.as_ref(), admission)
+        let child = resources
+            .load_session_work(&WorkQuery {
+                session_id: admission.session_id.clone(),
+                limit: 1,
+            })
             .await
-            .map_err(|error| error.to_string())?
+            .map_err(|error| error.to_string())?;
+        let command = child
+            .state
+            .terminal_obligations
+            .get(&admission.admission_id)
             .ok_or("Incomplete: durable child terminal obligation unavailable")?;
-        let command = obligation.command;
         let barrier = WorkMutationBarrier::new(resources.clone());
         let receipt = barrier
-            .commit(&command)
+            .commit(command)
             .await
             .map_err(|error| error.to_string())?;
         let child = resources
-            .inspect_work(&WorkQuery::new(
-                admission.session_id.clone(),
-                WorkSelector::Head,
-            ))
+            .load_session_work(&WorkQuery {
+                session_id: admission.session_id.clone(),
+                limit: 1,
+            })
             .await
             .map_err(|error| error.to_string())?;
         let mut ack = WorkCommand {
@@ -124,7 +144,7 @@ impl OwnedSubagentExecution {
             recipient_lifecycle: admission.lifecycle,
             mutation_id: "child-terminal-ack".into(),
             action: WorkAction::AcknowledgeTerminalObligation {
-                expected_revision: child.head.change_seq,
+                expected_revision: child.state.revision,
                 admission_id: admission.admission_id.clone(),
                 receipt,
             },

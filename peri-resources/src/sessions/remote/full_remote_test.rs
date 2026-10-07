@@ -3,7 +3,11 @@ use super::*;
 #[tokio::test]
 async fn remote_close_intent_finishes_without_execution_ownership() {
     use crate::sessions::data::SessionDataPort;
-    let fixture = Fixture::fresh().await;
+    let fixture = Fixture::new().await;
+    let store = fixture.store(StoreAccess::ReadWrite);
+    schema_upgrade::upgrade(&store, &fixture.snapshot)
+        .await
+        .unwrap();
     let gate = Arc::new(ConnectionGate::default());
     let store = RemoteStore::new(
         fixture.transport.clone(),
@@ -36,16 +40,6 @@ async fn remote_close_intent_finishes_without_execution_ownership() {
         data.close_settlement(&id).await.unwrap(),
         CloseSettlement::Finished
     );
-    let state = data.load_session_control(&id).await.unwrap();
-    data.mark_session_closing(&id).await.unwrap();
-    assert_eq!(data.load_session_control(&id).await.unwrap(), state);
-    assert!(!data.is_session_closing(&id).await.unwrap());
-    let reopen = peri_acp_types::session_resources::ControlCommand {
-        session_id: id.clone(), command_id: "reopen-close-test".into(), expected_lifecycle: state.lifecycle,
-        expected_revision: state.revision, expected_control_generation: state.control_generation,
-        action: peri_acp_types::session_resources::ControlAction::Reopen,
-    };
-    data.apply_session_control(&reopen).await.unwrap();
     data.mark_session_closing(&id).await.unwrap();
     let read_only_gate = Arc::new(ConnectionGate::default());
     let read_only = super::super::session_data::RemoteSessionData::with_connection_for_test(
@@ -71,7 +65,7 @@ async fn remote_close_intent_finishes_without_execution_ownership() {
         CloseSettlement::Pending
     );
     data.inject_faults(super::super::mutation::FaultPlan {
-        drop_reply: Some("session_control".to_owned()),
+        drop_reply: Some("finish_close".to_owned()),
         drop_before_send: None,
     })
     .await;

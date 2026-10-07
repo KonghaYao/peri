@@ -147,7 +147,6 @@ async fn test_image_later_input_reaches_model_after_micro_compact() {
         "循环应正常完成：{result:?}"
     );
     let first_admission = ctx.session.turn.work_admission().unwrap().clone();
-    work_fixture::finish(&ctx, "image-first-history-flushed-owner-stopped").await;
     let mut next_context = StageContext::builder(
         session.start_turn(),
         session.transcript(),
@@ -164,7 +163,6 @@ async fn test_image_later_input_reaches_model_after_micro_compact() {
         matches!(result, LoopResult::Completed),
         "后续执行应完成：{result:?}"
     );
-    work_fixture::finish(&next_context, "image-next-history-flushed-owner-stopped").await;
     assert_ne!(
         next_context
             .session

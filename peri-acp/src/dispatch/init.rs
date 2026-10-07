@@ -35,11 +35,6 @@ pub fn build_initialize_response(peri_caps: &PeriCaps) -> InitializeResponse {
                 .delete(SessionDeleteCapabilities::new()),
         )
         .mcp_capabilities(McpCapabilities::new().acp(true).http(true));
-    let mut metadata = peri_caps.to_agent_meta();
-    metadata.insert(
-        "peri.executionProtocol".into(),
-        serde_json::json!(crate::host::execution_admission::EXECUTION_PROTOCOL_VERSION),
-    );
-    let caps = caps.meta(metadata);
+    let caps = caps.meta(peri_caps.to_agent_meta());
     InitializeResponse::new(ProtocolVersion::V1).agent_capabilities(caps)
 }

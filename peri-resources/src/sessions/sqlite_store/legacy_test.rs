@@ -1,5 +1,4 @@
 use super::*;
-use peri_acp_types::store::serialize_persisted_payload;
 use peri_acp_types::workspace::{ScopedThreadQuery, ThreadScope};
 use sqlx::{Connection, SqliteConnection};
 
@@ -61,25 +60,75 @@ async fn legacy_database(path: &std::path::Path, cwd: &std::path::Path) -> Strin
     id
 }
 
+/// Upgrading, and reopening a database already upgraded by 3.15.0, retain usable history lists.
 #[tokio::test]
-async fn legacy_history_refused_without_upgrade_on_repeated_opens() {
+async fn legacy_history_visible_after_upgrade_and_schema3_reopen() {
     let dir = tempfile::tempdir().unwrap();
     // Old releases saved the caller's ordinary path, not canonical/verbatim Windows paths.
     let cwd = legacy_saved_text(dir.path());
     let path = dir.path().join("threads.db");
-    legacy_database(&path, &cwd).await;
+    let id = legacy_database(&path, &cwd).await;
     for _ in 0..2 {
-        assert_legacy_rejected(&path).await;
+        let store = SqliteThreadStore::new(&path).await.unwrap();
+        let workspace = store.resolve_workspace(&cwd).await.unwrap();
+        let owner: (String,) = sqlx::query_as("SELECT workspace_id FROM threads WHERE id = ?1")
+            .bind(&id)
+            .fetch_one(&store.database.pool)
+            .await
+            .unwrap();
+        let owner_id = owner.0.parse().unwrap();
+        for scope in [
+            ThreadScope::Project(workspace.project_id),
+            ThreadScope::Workspace(owner_id),
+            ThreadScope::ExactDirectory {
+                workspace_id: owner_id,
+                relative_cwd: std::path::PathBuf::new(),
+            },
+            ThreadScope::All,
+        ] {
+            let page = store
+                .list_scoped_threads(&ScopedThreadQuery {
+                    scope: scope.clone(),
+                    cursor: None,
+                    limit: 10,
+                })
+                .await
+                .unwrap();
+            assert_eq!(page.entries.len(), 1, "old history missing from {scope:?}");
+            assert_eq!(page.entries[0].thread.id, id);
+        }
+        assert!(
+            store.load_session_binding(&id).await.unwrap().is_none(),
+            "listing must not grant execution identity"
+        );
+        assert_eq!(
+            store.load_messages(&id).await.unwrap()[0].content(),
+            "history survives upgrade"
+        );
+        store.close().await;
     }
 }
 
 #[tokio::test]
-async fn legacy_history_in_missing_directory_is_preserved_on_refusal() {
+async fn legacy_history_in_missing_directory_remains_in_all_scope() {
     let dir = tempfile::tempdir().unwrap();
     let missing = dir.path().join("removed-checkout");
     let path = dir.path().join("threads.db");
-    legacy_database(&path, &missing).await;
-    assert_legacy_rejected(&path).await;
+    let id = legacy_database(&path, &missing).await;
+    let store = SqliteThreadStore::new(&path).await.unwrap();
+    let page = store
+        .list_scoped_threads(&ScopedThreadQuery {
+            scope: ThreadScope::All,
+            cursor: None,
+            limit: 10,
+        })
+        .await
+        .unwrap();
+    assert_eq!(page.entries.len(), 1);
+    assert_eq!(page.entries[0].thread.id, id);
+    assert_eq!(page.entries[0].effective_cwd, missing);
+    assert!(store.load_session_binding(&id).await.unwrap().is_none());
+    store.close().await;
 }
 
 #[tokio::test]
@@ -87,7 +136,7 @@ async fn legacy_adoption_commits_snapshot_once_across_concurrent_restorers() {
     let dir = tempfile::tempdir().unwrap();
     let cwd = std::fs::canonicalize(dir.path()).unwrap();
     let path = dir.path().join("threads.db");
-    let id = unbound_history_database(&path, &cwd).await;
+    let id = legacy_database(&path, &cwd).await;
     let left = SqliteThreadStore::new(&path).await.unwrap();
     let right = SqliteThreadStore::new(&path).await.unwrap();
     let workspace = left.resolve_workspace(&cwd).await.unwrap();
@@ -152,7 +201,7 @@ async fn legacy_adoption_failure_rolls_back_binding_and_snapshot() {
     let dir = tempfile::tempdir().unwrap();
     let cwd = std::fs::canonicalize(dir.path()).unwrap();
     let path = dir.path().join("threads.db");
-    let id = unbound_history_database(&path, &cwd).await;
+    let id = legacy_database(&path, &cwd).await;
     let store = SqliteThreadStore::new(&path).await.unwrap();
     let workspace = store.resolve_workspace(&cwd).await.unwrap();
     sqlx::raw_sql("CREATE TRIGGER reject_binding BEFORE INSERT ON session_bindings BEGIN SELECT RAISE(FAIL, 'injected binding failure'); END;")
@@ -395,115 +444,4 @@ async fn legacy_history_scopes_keep_path_boundaries_and_mixed_pagination() {
     assert_eq!(exact.entries.len(), 1);
     assert!(exact.entries[0].binding.is_none());
     store.close().await;
-}
-
-async fn assert_legacy_rejected(path: &std::path::Path) {
-    let before = legacy_evidence(path).await;
-    let backup = path.with_extension("verified-backup");
-    std::fs::copy(path, &backup).unwrap();
-    assert_eq!(
-        std::fs::read(&backup).unwrap(),
-        std::fs::read(path).unwrap()
-    );
-    let mut connection =
-        SqliteConnection::connect_with(&SqliteConnectOptions::new().filename(path).read_only(true))
-            .await
-            .unwrap();
-    let version: i64 = sqlx::query_scalar("PRAGMA user_version")
-        .fetch_one(&mut connection)
-        .await
-        .unwrap();
-    connection.close().await.unwrap();
-    if version != 17 {
-        let approval = crate::sessions::StoppedWriterApproval {
-            source_version: version,
-            writers_stopped: true,
-            backup_verified: true,
-        };
-        assert!(crate::sessions::migrate_stopped_work_store(path, &approval)
-            .await
-            .is_err());
-    }
-    let error = SqliteThreadStore::new(path)
-        .await
-        .err()
-        .expect("legacy writer must refuse");
-    assert!(
-        error
-            .to_string()
-            .contains("explicit stopped-writer offline migration"),
-        "{error:#}"
-    );
-    let error = SqliteThreadStore::open_existing_read_only(path)
-        .await
-        .err()
-        .expect("inline history is not reference history");
-    assert!(matches!(
-        error.kind(),
-        super::connection::ReadOnlyStoreErrorKind::SchemaIncompatible
-    ));
-    assert_eq!(
-        legacy_evidence(path).await,
-        before,
-        "refusal must preserve every schema object and row"
-    );
-}
-
-async fn unbound_history_database(path: &std::path::Path, cwd: &std::path::Path) -> String {
-    let store = SqliteThreadStore::new(path).await.unwrap();
-    let id = store
-        .create_thread(ThreadMeta::new_at(
-            cwd.to_str().unwrap(),
-            peri_time::now_wall(),
-        ))
-        .await
-        .unwrap();
-    store
-        .append_message(&id, BaseMessage::human("history survives upgrade"))
-        .await
-        .unwrap();
-    assert!(store.load_session_binding(&id).await.unwrap().is_none());
-    store.close().await;
-    id
-}
-
-async fn legacy_evidence(path: &std::path::Path) -> Vec<(String, Vec<String>)> {
-    let mut connection =
-        SqliteConnection::connect_with(&SqliteConnectOptions::new().filename(path).read_only(true))
-            .await
-            .unwrap();
-    let version: i64 = sqlx::query_scalar("PRAGMA user_version")
-        .fetch_one(&mut connection)
-        .await
-        .unwrap();
-    let schema: Vec<String> = sqlx::query_scalar("SELECT json_array(type,name,tbl_name,sql) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name").fetch_all(&mut connection).await.unwrap();
-    let tables: Vec<String> = sqlx::query_scalar("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").fetch_all(&mut connection).await.unwrap();
-    let mut evidence = vec![
-        ("version".into(), vec![version.to_string()]),
-        ("schema".into(), schema),
-    ];
-    for table in tables {
-        let columns: Vec<String> =
-            sqlx::query_scalar("SELECT name FROM pragma_table_info(?1) ORDER BY cid")
-                .bind(&table)
-                .fetch_all(&mut connection)
-                .await
-                .unwrap();
-        let expressions = columns
-            .iter()
-            .map(|column| format!("quote(\"{}\")", column.replace('"', "\"\"")))
-            .collect::<Vec<_>>()
-            .join(" || ',' || ");
-        let statement = format!(
-            "SELECT quote(rowid) || ':' || {expressions} FROM \"{}\" ORDER BY rowid",
-            table.replace('"', "\"\"")
-        );
-        let rows = sqlx::query_scalar(sqlx::AssertSqlSafe(statement))
-            .fetch_all(&mut connection)
-            .await
-            .unwrap();
-        evidence.push((table, rows));
-    }
-    connection.close().await.unwrap();
-    evidence
 }

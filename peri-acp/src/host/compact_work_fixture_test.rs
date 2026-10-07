@@ -4,30 +4,26 @@ pub(super) async fn assert_blocked_preserves_summary(
     mut ctx: SessionContext,
     sessions: &SharedSessions,
 ) {
-    use peri_acp_types::session_resources::work::{WorkPage, WorkQuery, WorkSelector, WorkStage};
+    use peri_acp_types::session_resources::work::{WorkQuery, WorkStage};
     let resources = ctx.session_resources.clone().unwrap();
     let query = WorkQuery {
         session_id: ctx.session_id.clone(),
-        selector: WorkSelector::CurrentProcessing,
-        limit: 1,
-        cursor: None,
+        limit: 100,
     };
-    let before = resources.inspect_work(&query).await.unwrap();
-    let WorkPage::Processings(originals) = &before.page else {
-        panic!("processing page expected")
-    };
-    assert!(originals
-        .iter()
-        .any(|processing| processing.stage == WorkStage::Blocked && processing.request.is_some()));
+    let before = resources.load_session_work(&query).await.unwrap();
+    assert!(before.blocked);
+    assert!(before
+        .state
+        .works
+        .values()
+        .any(|work| work.stage == WorkStage::Blocked && work.reason_request.is_some()));
     let payloads = resources
         .load_session_history(ctx.thread_id.as_ref().unwrap())
         .await
         .unwrap();
-    assert!(payloads.iter().any(|payload| {
-        payload
-            .as_message()
-            .is_some_and(|message| message.content().contains(SUMMARY))
-    }));
+    assert!(payloads.iter().any(|payload| payload
+        .as_message()
+        .is_some_and(|message| message.content().contains(SUMMARY))));
     ctx.session_access = None;
     execution_fixture::bind_execution(&mut ctx, None);
     let requests = Arc::new(Mutex::new(Vec::new()));
@@ -45,20 +41,18 @@ pub(super) async fn assert_blocked_preserves_summary(
         requests.lock().unwrap().is_empty(),
         "unresolved Reason must not be retried"
     );
-    let after = resources.inspect_work(&query).await.unwrap();
-    let WorkPage::Processings(restored) = &after.page else {
-        panic!("processing page expected")
-    };
-    for original in originals
+    let after = resources.load_session_work(&query).await.unwrap();
+    assert!(after.blocked);
+    for (work_id, original) in before
+        .state
+        .works
         .iter()
-        .filter(|processing| processing.stage == WorkStage::Blocked)
+        .filter(|(_, work)| work.stage == WorkStage::Blocked)
     {
-        let processing = restored
-            .iter()
-            .find(|processing| processing.processing_id == original.processing_id)
-            .unwrap();
-        assert_eq!(processing.stage, WorkStage::Blocked);
-        assert_eq!(processing.request, original.request);
+        assert_eq!(
+            after.state.works[work_id].reason_request,
+            original.reason_request
+        );
     }
 }
 
@@ -448,9 +442,7 @@ pub(super) async fn assert_unknown_command(
     ctx: &SessionContext,
     store: &RecoveryStore,
 ) -> peri_acp_types::session_resources::work::WorkCommand {
-    use peri_acp_types::session_resources::work::{
-        WorkPage, WorkQuery, WorkResolution, WorkSelector,
-    };
+    use peri_acp_types::session_resources::work::{WorkQuery, WorkResolution};
     let original = store
         .uncertain
         .lock()
@@ -458,25 +450,22 @@ pub(super) async fn assert_unknown_command(
         .clone()
         .expect("real journal must retain original command");
     let snapshot = store
-        .inspect_work(&WorkQuery {
+        .load_session_work(&WorkQuery {
             session_id: ctx.session_id.clone(),
-            selector: WorkSelector::PendingCommands,
-            limit: 64,
-            cursor: None,
+            limit: 100,
         })
         .await
         .unwrap();
-    let WorkPage::Commands(commands) = &snapshot.page else {
-        panic!("command page expected")
-    };
-    assert!(commands
-        .iter()
-        .any(|owned| owned.pending && owned.command == original));
-    let entry =
-        crate::host::work_query::command(store, &original.session_id, &original.mutation_id)
-            .await
-            .unwrap()
-            .unwrap();
+    assert!(snapshot.blocked);
+    assert!(snapshot.pending_commands.contains(&original));
+    let entry = store
+        .load_work_command(&peri_acp_types::session_resources::work::WorkCommandQuery {
+            session_id: original.session_id.clone(),
+            mutation_id: original.mutation_id.clone(),
+        })
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(entry.command, original);
     assert!(entry.pending);
     assert_eq!(
@@ -487,18 +476,12 @@ pub(super) async fn assert_unknown_command(
         store,
         &WorkQuery {
             session_id: ctx.session_id.clone(),
-            selector: WorkSelector::PendingCommands,
-            limit: 64,
-            cursor: None,
+            limit: 100,
         },
     )
     .await
     .unwrap();
-    let WorkPage::Commands(commands) = &recovered.page else {
-        panic!("command page expected")
-    };
-    assert!(commands
-        .iter()
-        .any(|owned| owned.pending && owned.command == original));
+    assert!(recovered.blocked);
+    assert!(recovered.pending_commands.contains(&original));
     original
 }

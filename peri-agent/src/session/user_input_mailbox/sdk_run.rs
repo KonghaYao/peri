@@ -1,6 +1,6 @@
 use super::*;
 use peri_acp_types::session_resources::work::{
-    DeliveryPurpose, WorkAdmission, WorkPage, WorkQuery, WorkSelector,
+    DeliveryPurpose, WorkAdmission, WorkDecision, WorkQuery,
 };
 
 pub(super) struct SdkRunObservation {
@@ -41,17 +41,25 @@ impl UserInputMailbox {
     ) -> Result<UserInputRunTicket, UserInputQueueError> {
         let durable = self.durable.as_ref().ok_or(UserInputQueueError::Closed)?;
         let snapshot = durable
-            .inspect(
-                &self.session_id,
-                WorkSelector::Admission {
-                    admission_id: admission.admission_id.clone(),
-                },
-            )
-            .await?;
-        let registered = matches!(&snapshot.page, WorkPage::Admissions(records) if records.iter().any(|record| {
-            record.admission == *admission && record.leaving_evidence_id.is_none()
-                && !record.entering_mutation_id.is_empty()
-        }));
+            .store
+            .load_session_work(&WorkQuery {
+                session_id: self.session_id.clone(),
+                limit: 1,
+            })
+            .await
+            .map_err(|_| UserInputQueueError::OutcomeUnknown)?;
+        let registered = snapshot
+            .state
+            .admissions
+            .get(&admission.admission_id)
+            .is_some_and(|record| {
+                record.admission == *admission
+                    && record.settled_receipt.is_none()
+                    && record
+                        .entering_receipt
+                        .as_ref()
+                        .is_some_and(|receipt| receipt.decision == WorkDecision::Accepted)
+            });
         if admission.session_id != self.session_id
             || admission.lifecycle != durable.lifecycle
             || admission.lifecycle != snapshot.control.lifecycle
@@ -63,31 +71,34 @@ impl UserInputMailbox {
                 "SDK admission is not durably registered for this exact execution".into(),
             ));
         }
-        self.refresh_durable().await?;
-        let inspection = durable
-            .store
-            .inspect_work(&WorkQuery::new(
-                &self.session_id,
-                WorkSelector::ProcessingDeliveries {
-                    processing_id: admission.work_id.clone(),
-                },
-            ))
-            .await
-            .map_err(|error| UserInputQueueError::DurableRejected(error.to_string()))?;
-        let WorkPage::Deliveries(deliveries) = inspection.page else {
-            return Err(UserInputQueueError::IdentityConflict);
-        };
-        if inspection.next_cursor.is_some() {
-            return Err(UserInputQueueError::Capacity);
-        }
-        let input_ids = deliveries
-            .iter()
-            .filter(|delivery| {
-                delivery.participates_in_reason
-                    && delivery.publication.purpose == DeliveryPurpose::UserInput
+        self.project_publications(&snapshot);
+        let batch_id = snapshot
+            .state
+            .works
+            .get(&admission.work_id)
+            .map(|work| work.batch_id.as_str())
+            .unwrap_or(&admission.work_id);
+        let input_ids = snapshot
+            .state
+            .batches
+            .get(batch_id)
+            .map(|batch| {
+                batch
+                    .processing_delivery_ids
+                    .iter()
+                    .filter_map(|delivery_id| {
+                        snapshot
+                            .state
+                            .deliveries
+                            .get(delivery_id)
+                            .filter(|delivery| {
+                                delivery.publication.purpose == DeliveryPurpose::UserInput
+                            })
+                            .map(|delivery| delivery.publication.event.content.message_id)
+                    })
+                    .collect()
             })
-            .map(|delivery| delivery.publication.event.content.message_id)
-            .collect();
+            .unwrap_or_default();
         let ticket = UserInputRunTicket {
             id: admission.admission_id.clone(),
         };

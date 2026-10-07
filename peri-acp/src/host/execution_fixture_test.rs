@@ -25,16 +25,6 @@ pub(in crate::host) async fn run_session_loop(
     mut ctx: SessionContext,
     mut turn: TurnInput,
 ) -> PromptResult {
-    let mut input_guard = if !turn.continuation && !turn.content.is_empty() {
-        ctx.user_input_mailbox.as_ref().map(|mailbox| {
-            let ticket = mailbox
-                .attach_external_attempt(ctx.cancel.clone(), false)
-                .expect("fixture initial prompt must own its execution attachment");
-            crate::host::user_input::InputAttemptGuard::new(mailbox.clone(), ticket)
-        })
-    } else {
-        None
-    };
     let observed = Arc::new(std::sync::OnceLock::new());
     let publish = ctx.sdk_admission_observed.clone();
     let capture = observed.clone();
@@ -56,24 +46,8 @@ pub(in crate::host) async fn run_session_loop(
     let resources = ctx.session_resources.clone();
     let sdk = ctx.execution_admission_port.clone();
     let result = crate::session::executor::run_session_loop(ctx, turn).await;
-    if let Some(guard) = &mut input_guard {
-        guard.finish(&result);
-    }
     if !result.persistence_inconsistent {
         if let Some(admission) = observed.get() {
-            let snapshot = resources
-                .as_ref()
-                .unwrap()
-                .inspect_work(&WorkQuery::new(
-                    &admission.session_id,
-                    WorkSelector::Availability,
-                ))
-                .await
-                .expect("fixture root must inspect durable work before settlement");
-            if matches!(snapshot.page, WorkPage::Availability(ref availability) if availability.pending)
-            {
-                return result;
-            }
             let evidence_id = super::super::execution::finish_admission(
                 resources.as_ref().unwrap().as_ref(),
                 admission,
@@ -284,16 +258,13 @@ impl ExecutionAdmissionPort for MockSdkAdmission {
         }
         let snapshot = self
             .resources
-            .inspect_work(&WorkQuery {
+            .load_session_work(&WorkQuery {
                 session_id: self.session_id.clone(),
-                selector: WorkSelector::Availability,
-                limit: 64,
-                cursor: None,
+                limit: 1,
             })
             .await
             .map_err(protocol)?;
-        let availability = crate::host::work_query::availability(&snapshot).map_err(protocol)?;
-        if availability.blocked || availability.pending {
+        if snapshot.blocked || !snapshot.pending_commands.is_empty() {
             return Ok(AdmissionOutcome::Blocked {
                 reason: "fixture has unresolved durable Work".into(),
             });
@@ -301,7 +272,7 @@ impl ExecutionAdmissionPort for MockSdkAdmission {
         if AdmissionSnapshot::from(&snapshot) != request.snapshot {
             return Err(protocol("fixture SDK received stale Work facts"));
         }
-        let candidate = availability
+        let candidate = snapshot
             .candidates
             .first()
             .ok_or_else(|| protocol("fixture SDK requires an actual durable candidate"))?;
@@ -329,22 +300,23 @@ impl ExecutionAdmissionPort for MockSdkAdmission {
     ) -> Result<EntryOutcome, ExecutionAdmissionError> {
         let snapshot = self
             .resources
-            .inspect_work(&WorkQuery {
+            .load_session_work(&WorkQuery {
                 session_id: request.admission.session_id.clone(),
-                selector: WorkSelector::Admission {
-                    admission_id: request.admission.admission_id.clone(),
-                },
                 limit: 1,
-                cursor: None,
             })
             .await
             .map_err(protocol)?;
-        let valid = crate::host::work_query::admission(&snapshot, &request.admission.admission_id)
-            .map_err(protocol)?
+        let valid = snapshot
+            .state
+            .admissions
+            .get(&request.admission.admission_id)
             .is_some_and(|record| {
                 record.admission == request.admission
-                    && record.leaving_evidence_id.is_none()
-                    && record.entering_mutation_id == request.entry_evidence_id
+                    && record.settled_receipt.is_none()
+                    && record.entering_receipt.as_ref().is_some_and(|receipt| {
+                        receipt.decision == WorkDecision::Accepted
+                            && receipt.mutation_id == request.entry_evidence_id
+                    })
             })
             && snapshot.control.lifecycle == request.admission.lifecycle
             && snapshot.control.control_generation == request.admission.control_generation
@@ -368,22 +340,20 @@ impl ExecutionAdmissionPort for MockSdkAdmission {
     ) -> Result<SettlementOutcome, ExecutionAdmissionError> {
         let snapshot = self
             .resources
-            .inspect_work(&WorkQuery {
+            .load_session_work(&WorkQuery {
                 session_id: request.admission.session_id.clone(),
-                selector: WorkSelector::Admission {
-                    admission_id: request.admission.admission_id.clone(),
-                },
                 limit: 1,
-                cursor: None,
             })
             .await
             .map_err(protocol)?;
         if !request.proof.validates(&request.admission)
             || snapshot.control.attempt.is_some()
-            || !crate::host::work_query::admission(&snapshot, &request.admission.admission_id)
-                .map_err(protocol)?
+            || !snapshot
+                .state
+                .admissions
+                .get(&request.admission.admission_id)
                 .is_some_and(|record| {
-                    record.admission == request.admission && record.leaving_evidence_id.is_some()
+                    record.admission == request.admission && record.settled_receipt.is_some()
                 })
         {
             return Err(protocol(
@@ -438,15 +408,13 @@ pub(in crate::host) async fn publish_continuation(ctx: &SessionContext) {
                         event_id,
                         event_kind: "continuation".into(),
                         causation_id: None,
-                        content: crate::host::work_query::test_payload(
-                            ctx.session_resources.as_ref().unwrap().as_ref(),
-                            &ctx.session_id,
+                        content: WorkPayload::from_payload(
                             &peri_acp_types::store::PersistedPayload::SystemReminder {
                                 id: peri_acp_types::messages::MessageId::new(),
                                 reminder,
                             },
                         )
-                        .await,
+                        .unwrap(),
                     },
                 },
             },
@@ -666,11 +634,9 @@ mod tests {
         let resources = ctx.session_resources.as_ref().unwrap();
         let query = WorkQuery {
             session_id: ctx.session_id.clone(),
-            selector: WorkSelector::Availability,
-            limit: 64,
-            cursor: None,
+            limit: 1,
         };
-        let snapshot = resources.inspect_work(&query).await.unwrap();
+        let snapshot = resources.load_session_work(&query).await.unwrap();
         let sdk = ctx.execution_admission_port.as_ref().unwrap();
         let AdmissionOutcome::Admitted { admission } = sdk
             .admit(AdmissionRequest {
@@ -684,12 +650,12 @@ mod tests {
             panic!("actual Store candidate must be admitted by mock SDK")
         };
         assert!(resources
-            .inspect_work(&query)
+            .load_session_work(&query)
             .await
             .unwrap()
-            .head
-            .current_admission_id
-            .is_none());
+            .state
+            .admissions
+            .is_empty());
         assert!(sdk
             .entered(EntryRequest {
                 admission: admission.clone(),
@@ -730,15 +696,13 @@ mod tests {
         );
         assert!(mailbox.reserve_run().is_none());
         assert_eq!(
-            usize::from(
-                resources
-                    .inspect_work(&query)
-                    .await
-                    .unwrap()
-                    .head
-                    .current_admission_id
-                    .is_some()
-            ),
+            resources
+                .load_session_work(&query)
+                .await
+                .unwrap()
+                .state
+                .admissions
+                .len(),
             1
         );
     }

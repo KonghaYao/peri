@@ -33,7 +33,7 @@ test("actual Peri entered ACK survives SDK retirement but domain SQLite backup r
         const execution = new SessionExecution(transport, { database: registryPath });
         transport.setRequestHandler((method, params) => execution.handle(method, params));
         await transport.request("initialize", { protocolVersion: 1, clientCapabilities: {
-            _meta: { "peri.executionProtocol": 2, "peri.userInputQueue": true } } });
+            _meta: { "peri.executionProtocol": 1, "peri.userInputQueue": true } } });
         return { transport, execution };
     }
     const first = await start();

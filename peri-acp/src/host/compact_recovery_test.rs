@@ -74,25 +74,19 @@ struct RecoveryStore {
 
 #[async_trait]
 impl SessionResources for RecoveryStore {
-    async fn inspect_work(
+    async fn load_work_command(
+        &self,
+        query: &peri_acp_types::session_resources::work::WorkCommandQuery,
+    ) -> SessionResourceResult<Option<peri_acp_types::session_resources::work::OwnedWorkCommand>>
+    {
+        self.inner.load_work_command(query).await
+    }
+
+    async fn load_session_work(
         &self,
         query: &peri_acp_types::session_resources::work::WorkQuery,
-    ) -> SessionResourceResult<peri_acp_types::session_resources::work::WorkInspection> {
-        self.inner.inspect_work(query).await
-    }
-
-    async fn prepare_evidence(
-        &self,
-        write: &peri_acp_types::session_resources::work::EvidenceWrite,
-    ) -> SessionResourceResult<peri_acp_types::session_resources::work::PayloadRef> {
-        self.inner.prepare_evidence(write).await
-    }
-
-    async fn read_evidence(
-        &self,
-        query: &peri_acp_types::session_resources::work::EvidenceQuery,
-    ) -> SessionResourceResult<peri_acp_types::session_resources::work::EvidenceRecord> {
-        self.inner.read_evidence(query).await
+    ) -> SessionResourceResult<peri_acp_types::session_resources::work::WorkSnapshot> {
+        self.inner.load_session_work(query).await
     }
 
     async fn apply_work_mutation(
@@ -121,22 +115,9 @@ impl SessionResources for RecoveryStore {
                     .await
                     .unwrap();
             } else {
-                let payload = self
-                    .inner
-                    .prepare_evidence(&peri_acp_types::session_resources::work::EvidenceWrite {
-                        session_id: command.session_id.clone(),
-                        storage_scope: command.session_id.clone(),
-                        payload_id: format!("command:{}", command.digest().unwrap()),
-                        encoding: 1,
-                        bytes: serde_json::to_vec(command).unwrap(),
-                    })
-                    .await
-                    .unwrap();
-                sqlx::query("INSERT INTO session_work_commands(mutation_id,session_id,digest,command_json,command_scope,command_payload_id,lifecycle,reconciled) VALUES (?1,?2,?3,?4,?5,?6,?7,0)")
+                sqlx::query("INSERT INTO session_work_commands(mutation_id,session_id,digest,command_json,reconciled) VALUES (?1,?2,?3,?4,0)")
                     .bind(&command.mutation_id).bind(&command.session_id)
-                    .bind(command.digest().unwrap()).bind(serde_json::to_string(&payload).unwrap())
-                    .bind(&payload.storage_scope).bind(&payload.payload_id)
-                    .bind(command.recipient_lifecycle as i64)
+                    .bind(command.digest().unwrap()).bind(serde_json::to_string(command).unwrap())
                     .execute(&connection).await.unwrap();
             }
             *self.uncertain.lock().unwrap() = Some(command.clone());
@@ -537,43 +518,6 @@ async fn make_recovery_turn(
 }
 
 async fn assert_next_turn_sees_summary(mut ctx: SessionContext, sessions: &SharedSessions) {
-    use peri_acp_types::{execution_admission::*, session_resources::work::*};
-    let resources = ctx.session_resources.as_ref().unwrap();
-    let snapshot = resources
-        .inspect_work(&WorkQuery::new(
-            &ctx.session_id,
-            WorkSelector::CurrentAdmission,
-        ))
-        .await
-        .unwrap();
-    let WorkPage::Admissions(admissions) = snapshot.page else {
-        panic!("cold fixture must inspect the original admission");
-    };
-    for record in admissions {
-        assert!(record.leaving_evidence_id.is_none());
-        let admission = record.admission;
-        let evidence_id = crate::host::execution::finish_admission(resources.as_ref(), &admission)
-            .await
-            .expect("cold fixture must finish its original resolved execution");
-        let settled = ctx
-            .execution_admission_port
-            .as_ref()
-            .unwrap()
-            .settle(SettlementRequest {
-                admission: admission.clone(),
-                proof: AttemptStoppedProof::AttemptStopped {
-                    instance_id: admission.instance_id.clone(),
-                    generation_id: admission.generation_id.clone(),
-                    execution: admission.execution.clone(),
-                    evidence_id,
-                },
-            })
-            .await
-            .unwrap();
-        assert!(
-            matches!(settled, SettlementOutcome::Applied { receipt } if receipt.admission == admission)
-        );
-    }
     ctx.session_access = None;
     execution_fixture::bind_execution(&mut ctx, None);
     let requests = Arc::new(Mutex::new(Vec::new()));

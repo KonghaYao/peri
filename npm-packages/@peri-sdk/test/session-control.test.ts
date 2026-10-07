@@ -23,8 +23,7 @@ class ControlTransport implements Transport {
 
   async request<Response>(method: string, params?: unknown): Promise<Response> {
     this.calls.push({ method, params });
-    if (method === "initialize") return { agentCapabilities: { _meta: { "peri.executionProtocol": 2 } } } as Response;
-    if (method === "session/load") return {} as Response;
+    if (method === "initialize" || method === "session/load") return {} as Response;
     if (method === "session/new") return { sessionId: "session-1" } as Response;
     if (method === "session/input/snapshot") return { generation: "generation-1" } as Response;
     if (method === "session/control/state") return structuredClone(this.snapshot) as Response;

@@ -5,21 +5,26 @@ use super::*;
 impl SqliteSessionData {
     pub(super) async fn finish_close_intent(&self, root: &ThreadId) -> SessionResourceResult<()> {
         self.writable()?;
-        let current = self.read_control(root).await?;
-        if current.status == peri_acp_types::session_resources::ControlStatus::Closed {
-            return Ok(());
-        }
-        let command = crate::sessions::control::close_command(
-            root,
-            &current,
-            peri_acp_types::session_resources::ControlAction::FinishClose,
-        )?;
-        let receipt = self.write_control(&command).await?;
-        if receipt.decision != peri_acp_types::session_resources::ControlDecision::Accepted {
+        let mut tx = self
+            .database
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(|error| map_sqlx(&error))?;
+        self.require_session(&mut tx, root).await?;
+        let deleted = sqlx::query("DELETE FROM session_close_intents WHERE thread_id = ?1")
+            .bind(root.as_str())
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| map_sqlx(&error))?;
+        if deleted.rows_affected() != 1 {
             return Err(SessionResourceError::conflict(
-                "session close completion was rejected",
+                "session close intent is missing",
             ));
         }
+        tx.commit()
+            .await
+            .map_err(|_| commit_failure(Some(root.clone())))?;
         Ok(())
     }
 
@@ -36,17 +41,15 @@ impl SqliteSessionData {
         let exists = thread_exists_on(&mut tx, root)
             .await
             .map_err(read_failure)?;
-        let control: Option<(String,)> = sqlx::query_as(crate::sessions::control::READ_STATE)
-            .bind(root.as_str())
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(|error| map_sqlx(&error))?;
-        let state = if !exists && control.is_none() {
+        let pending: Option<(i64,)> =
+            sqlx::query_as("SELECT 1 FROM session_close_intents WHERE thread_id = ?1")
+                .bind(root.as_str())
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|error| map_sqlx(&error))?;
+        let state = if !exists {
             CloseSettlement::Unknown
-        } else if crate::sessions::control::state(control.as_ref().map(|row| row.0.as_str()))?
-            .status
-            == peri_acp_types::session_resources::ControlStatus::Closing
-        {
+        } else if pending.is_some() {
             CloseSettlement::Pending
         } else {
             CloseSettlement::Finished
@@ -131,7 +134,6 @@ impl SqliteSessionData {
                 ));
             }
         }
-        messages::guard_history_mutation(&mut tx, id).await?;
         // 子表行同样显式删除，不借 `ON DELETE CASCADE`：那份级联只在 SQLite 上存在，
         // 远端执行器没有（见 [`session_rows::THREAD_CHILD_DELETES`]）。先子后父。
         delete_thread_child_rows(&mut tx, id.as_str())
@@ -215,12 +217,6 @@ impl SqliteSessionData {
             return Err(not_found());
         }
         let tree = thread_tree_on(&mut tx, id).await.map_err(read_failure)?;
-        for thread in &tree {
-            messages::guard_history_mutation(&mut tx, thread).await?;
-        }
-        for thread in &tree {
-            messages::tombstone_session(&mut tx, thread).await?;
-        }
         // 子表行显式删除，不借 `ON DELETE CASCADE`：级联只在 SQLite 上存在，远端执行器
         // 没有（见 [`session_rows::THREAD_CHILD_DELETES`]）。顺序与远端 delete_tree 一致：
         // 子行全部先删，最后才删 threads 行。

@@ -110,34 +110,23 @@ async fn assert_known_rejection_allows_parent_successor(code: EffectiveToolError
         .session
         .clone()
         .unwrap();
-    let processing = session
-        .processing(&fixture.admission.work_id)
-        .await
-        .unwrap();
-    let inspection = fixture
-        .bound
-        .resources
-        .inspect_work(&peri_acp_types::session_resources::work::WorkQuery::new(
-            fixture.bound.thread_id(),
-            peri_acp_types::session_resources::work::WorkSelector::Effects {
-                processing_id: processing.processing_id.clone(),
-                phase_sequence: None,
-            },
-        ))
-        .await
-        .unwrap();
-    let peri_acp_types::session_resources::work::WorkPage::Effects(effects) = inspection.page
-    else {
-        panic!("effect page required")
-    };
-    let invocation = &effects[0];
+    let snapshot = session.snapshot().await.unwrap();
+    let invocation = snapshot.state.invocations.values().next().unwrap();
     assert_eq!(invocation.status, InvocationStatus::Settled);
     assert!(matches!(
         &invocation.outcome,
         Some(peri_acp_types::session_resources::work::InvocationOutcome::Failed { .. })
     ));
-    assert_eq!(processing.stage, WorkStage::ReasonReady);
-    assert_ne!(processing.stage, WorkStage::Blocked);
+    assert!(snapshot
+        .state
+        .works
+        .values()
+        .any(|work| work.stage == WorkStage::ReasonReady));
+    assert!(!snapshot
+        .state
+        .works
+        .values()
+        .any(|work| work.stage == WorkStage::Blocked));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     let server = tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await.unwrap();
@@ -236,31 +225,23 @@ async fn assert_uncertain_result_keeps_parent_blocked(code: Option<EffectiveTool
         .session
         .clone()
         .unwrap();
-    let processing = session
-        .processing(&fixture.admission.work_id)
-        .await
-        .unwrap();
-    let inspection = fixture
-        .bound
-        .resources
-        .inspect_work(&peri_acp_types::session_resources::work::WorkQuery::new(
-            fixture.bound.thread_id(),
-            peri_acp_types::session_resources::work::WorkSelector::Effects {
-                processing_id: processing.processing_id.clone(),
-                phase_sequence: None,
-            },
-        ))
-        .await
-        .unwrap();
-    let peri_acp_types::session_resources::work::WorkPage::Effects(effects) = inspection.page
-    else {
-        panic!("effect page required")
-    };
-    let invocation = &effects[0];
+    let snapshot = session.snapshot().await.unwrap();
+    let invocation = snapshot.state.invocations.values().next().unwrap();
     assert_eq!(invocation.status, InvocationStatus::OutcomeUnknown);
-    assert_eq!(processing.stage, WorkStage::Blocked);
-    assert_eq!(processing.stage, WorkStage::Blocked);
-    assert_ne!(processing.stage, WorkStage::ReasonReady);
+    assert_eq!(
+        snapshot.state.works[invocation.work_id.as_ref().unwrap()].stage,
+        WorkStage::Blocked
+    );
+    assert!(snapshot
+        .state
+        .works
+        .values()
+        .any(|work| work.stage == WorkStage::Blocked));
+    assert!(!snapshot
+        .state
+        .works
+        .values()
+        .any(|work| work.stage == WorkStage::ReasonReady));
     assert!(
         crate::agent::stages::work_dispatch::begin(&fixture.context, &reasoning.tool_calls[0])
             .await

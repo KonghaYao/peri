@@ -4,30 +4,6 @@ use std::sync::Arc;
 
 pub(crate) struct FixtureAdmission(pub(crate) Arc<dyn SessionResources>);
 
-async fn registration(
-    resources: &dyn SessionResources,
-    admission: &WorkAdmission,
-) -> Result<AdmissionRecord, ExecutionAdmissionError> {
-    let inspected = resources
-        .inspect_work(&WorkQuery::new(
-            &admission.session_id,
-            WorkSelector::Admission {
-                admission_id: admission.admission_id.clone(),
-            },
-        ))
-        .await
-        .map_err(|error| ExecutionAdmissionError::Protocol(error.to_string()))?;
-    let WorkPage::Admissions(mut records) = inspected.page else {
-        return Err(ExecutionAdmissionError::Protocol(
-            "fixture admission page required".into(),
-        ));
-    };
-    records
-        .pop()
-        .filter(|record| record.admission == *admission)
-        .ok_or_else(|| ExecutionAdmissionError::Protocol("fixture admission missing".into()))
-}
-
 #[async_trait::async_trait]
 impl ExecutionAdmissionPort for FixtureAdmission {
     async fn admit(
@@ -67,15 +43,18 @@ impl ExecutionAdmissionPort for FixtureAdmission {
     ) -> Result<EntryOutcome, ExecutionAdmissionError> {
         let snapshot = self
             .0
-            .inspect_work(&WorkQuery::new(
-                request.admission.session_id.clone(),
-                WorkSelector::Head,
-            ))
+            .load_session_work(&WorkQuery {
+                session_id: request.admission.session_id.clone(),
+                limit: 1,
+            })
             .await
             .map_err(|error| ExecutionAdmissionError::Protocol(error.to_string()))?;
-        let registration = registration(self.0.as_ref(), &request.admission).await?;
+        let registration = &snapshot.state.admissions[&request.admission.admission_id];
         assert_eq!(registration.admission, request.admission);
-        assert_eq!(registration.entering_mutation_id, request.entry_evidence_id);
+        assert_eq!(
+            registration.entering_receipt.as_ref().unwrap().mutation_id,
+            request.entry_evidence_id
+        );
         assert_eq!(
             snapshot.control.attempt.as_ref(),
             Some(&request.admission.execution)
@@ -95,17 +74,21 @@ impl ExecutionAdmissionPort for FixtureAdmission {
         assert!(request.proof.validates(&request.admission));
         let snapshot = self
             .0
-            .inspect_work(&WorkQuery::new(
-                request.admission.session_id.clone(),
-                WorkSelector::Head,
-            ))
+            .load_session_work(&WorkQuery {
+                session_id: request.admission.session_id.clone(),
+                limit: 1,
+            })
             .await
             .map_err(|error| ExecutionAdmissionError::Protocol(error.to_string()))?;
         assert!(snapshot.control.attempt.is_none());
-        let registration = registration(self.0.as_ref(), &request.admission).await?;
+        let registration = &snapshot.state.admissions[&request.admission.admission_id];
         assert_eq!(registration.admission, request.admission);
-        if let Some(evidence) = &registration.leaving_evidence_id {
-            assert_eq!(Some(evidence.as_str()), Some(request.proof.evidence_id()));
+        if let Some(receipt) = &registration.settled_receipt {
+            assert_eq!(
+                registration.evidence_id.as_deref(),
+                Some(request.proof.evidence_id())
+            );
+            assert_eq!(receipt.decision, WorkDecision::Accepted);
         } else {
             let receipt = self
                 .0

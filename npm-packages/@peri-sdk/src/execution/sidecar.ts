@@ -5,7 +5,6 @@ import type { AdmissionRequest, SettlementRequest } from "./admission-service";
 import { localHostIdentity, LocalInstanceProofProvider } from "./local-proof";
 import { SessionExecution } from "./session-execution";
 import type { ActivationSource } from "./types";
-import { EXECUTION_PROTOCOL_VERSION } from "./types";
 import type { Transport } from "../transport/types";
 import { RpcError } from "../transport/rpc-error";
 
@@ -58,11 +57,7 @@ async function handle(line: string): Promise<void> {
         if (typeof id !== "string" || !id || typeof frame.method !== "string") throw new TypeError("Invalid JSONL request");
         let result: unknown;
         switch (frame.method) {
-            case "peri/execution/ready":
-                if (frame.params?.protocolVersion !== EXECUTION_PROTOCOL_VERSION)
-                    throw new TypeError("Unsupported Peri execution protocol; version 2 is required");
-                result = { protocolVersion: EXECUTION_PROTOCOL_VERSION, durability: "durable" };
-                break;
+            case "peri/execution/ready": result = { protocolVersion: 1, durability: "durable" }; break;
             case "peri/execution/admit": result = await service.handle(frame.method, frame.params as AdmissionRequest); break;
             case "peri/execution/settle": result = await service.handle(frame.method, frame.params as SettlementRequest); break;
             case "peri/execution/entered": result = await service.handle(frame.method, frame.params); break;

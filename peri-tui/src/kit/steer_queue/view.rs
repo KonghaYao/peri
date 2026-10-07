@@ -330,7 +330,6 @@ impl Widget for QueueView {
                             item_state,
                             Some(
                                 SteerItemState::Submitting
-                                    | SteerItemState::Unconfirmed
                                     | SteerItemState::Dispatching
                                     | SteerItemState::Publishing
                                     | SteerItemState::Claimed

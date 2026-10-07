@@ -148,25 +148,28 @@ async fn apply_effects(
                 .load_session_control(&command.session_id)
                 .await
                 .map_err(resource_error)?;
-            let completion = ControlCommand {
-                session_id: command.session_id.clone(),
-                command_id: format!(
-                    "close-settled:{}",
-                    command.digest().map_err(resource_error)?
-                ),
-                expected_lifecycle: current.lifecycle,
-                expected_revision: current.revision,
-                expected_control_generation: current.control_generation,
-                action: ControlAction::FinishClose,
-            };
-            let expected =
-                peri_acp_types::session_resources::control::decide_control(&completion, current);
-            if expected.decision != ControlDecision::Accepted || settled != expected.state {
+            if settled.lifecycle != current.lifecycle
+                || settled.control_generation != current.control_generation
+            {
                 return Err(AcpError::new(
                     -32010,
                     "Close generation changed before settlement",
                 ));
             }
+            cfg.session_resources
+                .apply_session_control(&ControlCommand {
+                    session_id: command.session_id.clone(),
+                    command_id: format!(
+                        "close-settled:{}",
+                        command.digest().map_err(resource_error)?
+                    ),
+                    expected_lifecycle: settled.lifecycle,
+                    expected_revision: settled.revision,
+                    expected_control_generation: settled.control_generation,
+                    action: ControlAction::FinishClose,
+                })
+                .await
+                .map_err(resource_error)?;
         }
         ControlAction::Resume => {}
         ControlAction::Reopen => {

@@ -1,9 +1,8 @@
 use peri_acp_types::session_resources::{
     ControlAction, ControlCommand, ControlDecision, ControlReceipt, ControlResolution,
-    ControlState, ControlStatus, SessionResourceError, SessionResourceResult,
+    ControlState, SessionResourceError, SessionResourceResult,
 };
 use serde::{de::DeserializeOwned, Serialize};
-use sha2::{Digest, Sha256};
 
 use super::failure::corrupt;
 
@@ -22,7 +21,7 @@ pub(super) const READ_STATE: &str =
 pub(super) const READ_RECEIPT: &str =
     "SELECT digest, resolution_json FROM session_control_receipts WHERE command_id = ?1";
 pub(super) const INSERT_STATE: &str = "INSERT OR IGNORE INTO session_control_state(session_id, state_json) SELECT ?1, ?2 FROM threads WHERE id = ?1";
-pub(super) const GUARD_STATE: &str = "INSERT INTO session_control_state(session_id, state_json) SELECT NULL, NULL WHERE (?3 = 0 AND NOT EXISTS (SELECT 1 FROM threads WHERE id = ?1)) OR NOT EXISTS (SELECT 1 FROM session_control_state WHERE session_id = ?1 AND json_extract(state_json,'$.lifecycle')=json_extract(?2,'$.lifecycle') AND json_extract(state_json,'$.revision')=json_extract(?2,'$.revision') AND json_extract(state_json,'$.controlGeneration')=json_extract(?2,'$.controlGeneration')) OR EXISTS(WITH RECURSIVE scope(id) AS (SELECT ?1 UNION ALL SELECT threads.id FROM threads JOIN scope ON threads.parent_thread_id=scope.id) SELECT 1 FROM session_work_commands WHERE session_id IN (SELECT id FROM scope) AND reconciled=0 AND kind='mutation')";
+pub(super) const GUARD_STATE: &str = "INSERT INTO session_control_state(session_id, state_json) SELECT NULL, NULL WHERE (?3 = 0 AND NOT EXISTS (SELECT 1 FROM threads WHERE id = ?1)) OR NOT EXISTS (SELECT 1 FROM session_control_state WHERE session_id = ?1 AND state_json = ?2) OR EXISTS(WITH RECURSIVE scope(id) AS (SELECT ?1 UNION ALL SELECT threads.id FROM threads JOIN scope ON threads.parent_thread_id=scope.id) SELECT 1 FROM session_work_commands WHERE session_id IN (SELECT id FROM scope) AND reconciled=0)";
 pub(super) const UPDATE_STATE: &str =
     "UPDATE session_control_state SET state_json = ?2 WHERE session_id = ?1";
 pub(super) const INSERT_RECEIPT: &str = "INSERT INTO session_control_receipts(command_id, session_id, digest, resolution_json) VALUES (?1, ?2, ?3, ?4)";
@@ -48,42 +47,8 @@ pub(super) fn closing_projection(
     }
 }
 
-pub(super) fn close_command(
-    session_id: &str,
-    current: &ControlState,
-    action: ControlAction,
-) -> SessionResourceResult<ControlCommand> {
-    if !matches!(action, ControlAction::Close | ControlAction::FinishClose) {
-        return Err(corrupt("invalid internal close action"));
-    }
-    let identity = encode(&(
-        session_id,
-        current.lifecycle,
-        current.revision,
-        current.control_generation,
-        &action,
-    ))?;
-    let command = ControlCommand {
-        session_id: session_id.into(),
-        command_id: format!("close:{:x}", Sha256::digest(identity.as_bytes())),
-        expected_lifecycle: current.lifecycle,
-        expected_revision: current.revision,
-        expected_control_generation: current.control_generation,
-        action,
-    };
-    command.digest()?;
-    Ok(command)
-}
-
 pub(super) fn encode(value: &impl Serialize) -> SessionResourceResult<String> {
     serde_json::to_string(value).map_err(|_| corrupt("control record is not serializable"))
-}
-
-pub(super) fn close_request_already_recorded(current: &ControlState) -> bool {
-    matches!(
-        current.status,
-        ControlStatus::Closing | ControlStatus::Closed
-    )
 }
 
 pub(super) fn decode<Value: DeserializeOwned>(json: &str) -> SessionResourceResult<Value> {

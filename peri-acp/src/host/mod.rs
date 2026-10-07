@@ -39,7 +39,6 @@ pub mod execution_admission;
 #[cfg(not(target_os = "emscripten"))]
 pub mod execution_admission_jsonl;
 mod lifecycle;
-mod work_query;
 mod work_recovery;
 mod workspace;
 #[cfg(not(target_os = "emscripten"))]

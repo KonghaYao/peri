@@ -9,35 +9,22 @@ pub(crate) async fn seed_saved_fixture_runtime(
     initiator: &str,
 ) {
     let work = resources
-        .inspect_work(&WorkQuery::new(child_id, WorkSelector::Head))
+        .load_session_work(&WorkQuery {
+            session_id: child_id.into(),
+            limit: 1,
+        })
         .await
         .unwrap();
-    if let Ok(descriptor) = crate::session::work_access::descriptor(
-        resources.as_ref(),
-        child_id,
-        work.control.lifecycle,
-    )
-    .await
+    if work
+        .state
+        .child_resume_metadata
+        .contains_key(&work.control.lifecycle)
     {
-        if descriptor.child_resume_metadata_json.is_some() {
-            return;
-        }
+        return;
     }
-    let previous = if work.control.lifecycle > 1 {
-        crate::session::work_access::descriptor(
-            resources.as_ref(),
-            child_id,
-            work.control.lifecycle - 1,
-        )
-        .await
-        .ok()
-        .and_then(|descriptor| descriptor.child_resume_metadata_json)
-    } else {
-        None
-    };
-    let saved = if let Some(previous) = previous {
+    let saved = if let Some(previous) = work.state.child_resume_metadata.values().last() {
         let mut saved: crate::session::subagent::ChildResumeMetadata =
-            serde_json::from_str(&previous).unwrap();
+            serde_json::from_str(previous).unwrap();
         saved.recipient_lifecycle = work.control.lifecycle;
         saved
     } else {
@@ -72,7 +59,10 @@ pub(crate) async fn seed_saved_fixture_runtime(
         }
     };
     let work = resources
-        .inspect_work(&WorkQuery::new(child_id, WorkSelector::Head))
+        .load_session_work(&WorkQuery {
+            session_id: child_id.into(),
+            limit: 1,
+        })
         .await
         .unwrap();
     let receipt = resources
@@ -84,7 +74,7 @@ pub(crate) async fn seed_saved_fixture_runtime(
                 work.control.lifecycle
             ),
             action: WorkAction::BindChildResumeMetadata {
-                expected_revision: work.head.change_seq,
+                expected_revision: work.state.revision,
                 metadata_json: serde_json::to_string(&saved).unwrap(),
             },
         })

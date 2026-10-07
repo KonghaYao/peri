@@ -2,7 +2,7 @@ use peri_acp_types::messages::{BaseMessage, MessageId};
 use peri_acp_types::session_resources::work::*;
 use peri_acp_types::store::PersistedPayload;
 
-use super::work_boundary::WorkBoundary;
+use super::work_boundary::{persisted_projection, WorkBoundary};
 use super::work_recovery::{recover_work, RecoveredStage};
 use super::{ReceiveOutput, StageContext};
 use crate::error::AgentResult;
@@ -50,7 +50,7 @@ pub async fn publish_session_inbox(
             });
         }
     }
-    let ledger = super::work_ledger::WorkMutationBarrier::new(Arc::clone(&resources));
+    let ledger = super::work_ledger::WorkMutationBarrier::new(resources);
     let mut receipts = Vec::new();
     for message in messages.iter() {
         let delivery_id = message.delivery_id.expect("stable inbox identity");
@@ -62,20 +62,14 @@ pub async fn publish_session_inbox(
                 reminder: reminder.clone(),
             },
         };
-        let content =
-            super::work_reads::prepare_payload(resources.as_ref(), session_id, &payload).await?;
-        let inspected = ledger
-            .inspect(&WorkQuery::new(
-                session_id,
-                WorkSelector::Delivery {
-                    delivery_id: identity.clone(),
-                },
-            ))
+        let content = WorkPayload::from_payload(&payload)?;
+        let prior = ledger
+            .resources()
+            .load_work_delivery(&WorkDeliveryQuery {
+                session_id: session_id.into(),
+                delivery_id: identity.clone(),
+            })
             .await?;
-        let WorkPage::Deliveries(mut records) = inspected.page else {
-            return Err(anyhow::anyhow!("delivery lookup returned a different page"));
-        };
-        let prior = records.pop();
         if let Some(prior) = prior {
             if prior.recipient_lifecycle != recipient_lifecycle
                 || prior.publication.event.content != content
@@ -129,6 +123,13 @@ pub(crate) async fn receive(ctx: &StageContext) -> AgentResult<Option<ReceiveOut
         return Ok(None);
     };
     super::execution_control::validate(ctx).await?;
+    publish_session_inbox(
+        session.ledger.resources(),
+        &session.admission.session_id,
+        session.admission.lifecycle,
+        &ctx.session.queue,
+    )
+    .await?;
     let result = ctx.work.receive_batch(ctx, &session).await;
     result.map(Some).map_err(Into::into)
 }
@@ -140,82 +141,32 @@ impl WorkBoundary {
         session: &super::work_pipeline::WorkSession,
     ) -> anyhow::Result<ReceiveOutput> {
         let mut state = self.state.lock().await;
-        let snapshot = session
-            .ledger
-            .inspect(&WorkQuery::new(
-                &session.admission.session_id,
-                WorkSelector::Head,
-            ))
-            .await?;
+        let mut snapshot = session.snapshot().await?;
         let work_id = state
             .work_id
             .clone()
             .ok_or_else(|| anyhow::anyhow!("SDK work identity is missing"))?;
-        let processing = session
-            .ledger
-            .inspect(&WorkQuery::new(
-                &session.admission.session_id,
-                WorkSelector::Processing {
-                    processing_id: work_id.clone(),
-                },
-            ))
-            .await?;
-        let WorkPage::Processings(records) = &processing.page else {
-            return Err(anyhow::anyhow!(
-                "SDK processing query returned a different page"
-            ));
-        };
-        let exists = !records.is_empty();
-        if !exists {
-            let registration = session
-                .ledger
-                .inspect(&WorkQuery::new(
-                    &session.admission.session_id,
-                    WorkSelector::Admission {
-                        admission_id: session.admission.admission_id.clone(),
-                    },
-                ))
-                .await?;
-            let WorkPage::Admissions(records) = registration.page else {
-                return Err(anyhow::anyhow!(
-                    "SDK admission query returned a different page"
-                ));
-            };
-            let record = records
-                .first()
-                .filter(|record| {
-                    records.len() == 1
-                        && record.admission == session.admission
-                        && record.admission.work_id == work_id
-                        && record.leaving_evidence_id.is_none()
-                })
-                .ok_or_else(|| anyhow::anyhow!("exact active SDK admission is unavailable"))?;
-            let delivery_ids = record
-                .initial_delivery_ids
-                .as_ref()
-                .filter(|delivery_ids| {
-                    !delivery_ids.is_empty() && delivery_ids.len() <= MAX_WORK_PAGE_SIZE as usize
+        if !snapshot.state.works.contains_key(&work_id) {
+            let candidate = snapshot
+                .candidates
+                .iter()
+                .find(|candidate| {
+                    candidate.work_id == work_id
+                        && candidate.work_revision == session.admission.work_revision
+                        && candidate.batch_id.is_none()
                 })
                 .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "SDK admitted initial batch has no bounded frozen delivery membership"
-                    )
+                    anyhow::anyhow!("SDK admitted exact batch is no longer claimable")
                 })?;
             let command = session.command(WorkAction::ClaimBatch {
                 guard: session.guard(&snapshot)?,
                 batch_id: work_id.clone(),
-                delivery_ids: delivery_ids.clone(),
+                delivery_ids: candidate.delivery_ids.clone(),
             });
             session.ledger.commit_execution_transition(&command).await?;
+            snapshot = session.snapshot().await?;
         }
-        publish_session_inbox(
-            session.ledger.resources(),
-            &session.admission.session_id,
-            session.admission.lifecycle,
-            &ctx.session.queue,
-        )
-        .await?;
-        let recovered = recover_work(session, &work_id).await?;
+        let recovered = recover_work(&snapshot, &work_id)?;
         let live = match recovered.stage {
             RecoveredStage::ReasonReady | RecoveredStage::ActReady { .. } => true,
             RecoveredStage::Finished => false,
@@ -225,7 +176,7 @@ impl WorkBoundary {
             } => {
                 return Err(anyhow::anyhow!(
                     "model request {request_id} ({}) requires reconciliation, never regeneration",
-                    request.sha256
+                    request.request_digest
                 ))
             }
             RecoveredStage::ReconcileInvocations { invocation_ids } => {
@@ -237,10 +188,9 @@ impl WorkBoundary {
                 reason,
                 recovery_condition,
             } => {
-                if let Some(error) = super::work_reason::blocked_budget_error(
-                    &session.processing(&work_id).await?,
-                    &snapshot.head.limits,
-                ) {
+                if let Some(error) =
+                    super::work_reason::blocked_budget_error(&snapshot.state, &work_id)
+                {
                     return Err(anyhow::Error::new(error));
                 }
                 return Err(anyhow::anyhow!(
@@ -248,29 +198,28 @@ impl WorkBoundary {
                 ));
             }
         };
-        tracing::trace!(work_id = %recovered.target.work_id,
-    work_revision = recovered.target.expected_work_revision,
-    delivery_count = recovered.deliveries.len(), "durable Receive recovery");
-        if !live || recovered.phase_sequence != 0 {
-            return Ok(ReceiveOutput {
-                consumed_count: 0,
-                wake_up_count: usize::from(live),
-                input_message_ids: Vec::new(),
-            });
-        }
+        tracing::trace!(work_id = %recovered.target.work_id, work_revision = recovered.target.expected_work_revision,
+            budget_id = %recovered.budget_id, projection_count = recovered.projection.len(), "durable Receive recovery");
+        let batch = snapshot
+            .state
+            .batches
+            .get(&recovered.batch_id)
+            .ok_or_else(|| anyhow::anyhow!("claimed exact batch is missing"))?;
         let mut input_message_ids = Vec::new();
         let mut delivered_inputs = Vec::new();
-        for delivery in &recovered.deliveries {
-            if delivery.projection.is_none() {
+        for delivery_id in &recovered.delivery_ids {
+            if !batch.projection_versions.contains_key(delivery_id) {
                 continue;
             }
-            let payload = session.payload(&delivery.publication.event.content).await?;
-            if delivery.participates_in_reason {
-                if let PersistedPayload::Message(BaseMessage::Human { id, content }) = &payload {
+            let delivery = &snapshot.state.deliveries[delivery_id];
+            let original = persisted_projection(&delivery.publication.event.content)?;
+            if let PersistedPayload::Message(BaseMessage::Human { id, content }) = &original {
+                if recovered.processing_delivery_ids.contains(delivery_id) {
                     input_message_ids.push(*id);
                     delivered_inputs.push((*id, content.clone()));
                 }
             }
+            let payload = persisted_projection(&delivery.projection)?;
             ctx.session
                 .transcript
                 .write()
@@ -296,7 +245,7 @@ impl WorkBoundary {
         }
         state.work_id = Some(work_id);
         Ok(ReceiveOutput {
-            consumed_count: recovered.deliveries.len(),
+            consumed_count: batch.delivery_ids.len(),
             wake_up_count: usize::from(live),
             input_message_ids,
         })

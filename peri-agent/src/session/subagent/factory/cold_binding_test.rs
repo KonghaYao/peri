@@ -65,9 +65,9 @@ impl SessionResources for BindingResources {
         self.inner.list_children(parent).await
     }
 
-    async fn inspect_work(&self, query: &WorkQuery) -> SessionResourceResult<WorkInspection> {
+    async fn load_session_work(&self, query: &WorkQuery) -> SessionResourceResult<WorkSnapshot> {
         self.reads.fetch_add(1, Ordering::SeqCst);
-        let snapshot = self.inner.inspect_work(query).await?;
+        let snapshot = self.inner.load_session_work(query).await?;
         tokio::time::sleep(Duration::from_millis(20)).await;
         Ok(snapshot)
     }
@@ -89,17 +89,17 @@ impl SessionResources for BindingResources {
         if matches!(self.mode, AckMode::ConcurrentWriter) {
             let snapshot = self
                 .inner
-                .inspect_work(&WorkQuery::new(
-                    command.session_id.clone(),
-                    WorkSelector::Head,
-                ))
+                .load_session_work(&WorkQuery {
+                    session_id: command.session_id.clone(),
+                    limit: 1,
+                })
                 .await?;
             let mut external = WorkCommand {
                 session_id: command.session_id.clone(),
                 recipient_lifecycle: command.recipient_lifecycle,
                 mutation_id: "external-writer".into(),
                 action: WorkAction::BindResourceOwners {
-                    expected_revision: snapshot.head.change_seq,
+                    expected_revision: snapshot.state.revision,
                     connections_json: "[]".into(),
                     authorization_ref: "child-authorization".into(),
                 },
@@ -333,32 +333,18 @@ impl SessionResources for BindingResources {
     }
 }
 
-async fn binding_effect(
-    resources: &dyn SessionResources,
-    session_id: &str,
-    invocation_id: &str,
-) -> Effect {
-    crate::session::work_access::effect(resources, session_id, invocation_id)
-        .await
-        .unwrap()
-}
-
-async fn prepare_invocations(session: &TestSession, count: usize) -> Vec<Effect> {
+async fn prepare_invocations(session: &TestSession, count: usize) -> Vec<InvocationRecord> {
     let resources = session.resources();
     let session_id = session.thread_id();
     for index in 0..count {
         let snapshot = resources
-            .inspect_work(&WorkQuery::new(session_id.clone(), WorkSelector::Head))
+            .load_session_work(&WorkQuery {
+                session_id: session_id.clone(),
+                limit: 1,
+            })
             .await
             .unwrap();
         let arguments = "{}".to_owned();
-        let arguments_ref = crate::agent::stages::prepare_work_evidence(
-            resources.as_ref(),
-            &session_id,
-            arguments.as_bytes().to_vec(),
-        )
-        .await
-        .unwrap();
         let digest = format!("{:x}", Sha256::digest(arguments.as_bytes()));
         let receipt = resources
             .apply_work_mutation(&WorkCommand {
@@ -366,15 +352,15 @@ async fn prepare_invocations(session: &TestSession, count: usize) -> Vec<Effect>
                 recipient_lifecycle: 1,
                 mutation_id: format!("prepare-{index}"),
                 action: WorkAction::PrepareInvocation {
-                    expected_revision: snapshot.head.change_seq,
+                    expected_revision: snapshot.state.revision,
                     intent: InvocationIntent {
                         invocation_id: format!("invocation-{index}"),
                         tool_call_id: format!("call-{index}"),
                         tool_name: "subagent".into(),
-                        arguments: arguments_ref.clone(),
+                        arguments_json: arguments.clone(),
                         arguments_digest: digest.clone(),
                         effective_tool_name: "subagent".into(),
-                        effective_arguments: arguments_ref,
+                        effective_arguments_json: arguments,
                         effective_arguments_digest: digest,
                         owner_identity: "child-owner".into(),
                         scope_id: session_id.clone(),
@@ -387,25 +373,15 @@ async fn prepare_invocations(session: &TestSession, count: usize) -> Vec<Effect>
             .await
             .unwrap();
         assert_eq!(receipt.decision, WorkDecision::Accepted);
-        crate::session::test_resources::mock::work::dispatch_fixture_invocation(
-            resources.as_ref(),
-            &session_id,
-            &format!("invocation-{index}"),
-        )
-        .await;
     }
-    let mut effects = Vec::new();
-    for index in 0..count {
-        effects.push(
-            binding_effect(
-                resources.as_ref(),
-                &session_id,
-                &format!("invocation-{index}"),
-            )
-            .await,
-        );
-    }
-    effects
+    let snapshot = resources
+        .load_session_work(&WorkQuery {
+            session_id,
+            limit: 1,
+        })
+        .await
+        .unwrap();
+    snapshot.state.invocations.into_values().collect()
 }
 
 #[tokio::test]
@@ -452,14 +428,17 @@ async fn five_parallel_delegation_bindings_all_persist_without_revision_collisio
         first.writes.load(Ordering::SeqCst) + second.writes.load(Ordering::SeqCst),
         5
     );
+    let snapshot = session
+        .resources()
+        .load_session_work(&WorkQuery {
+            session_id: session.thread_id(),
+            limit: 1,
+        })
+        .await
+        .unwrap();
+    assert_eq!(snapshot.state.task_bindings.len(), 5);
     for (index, invocation) in invocations.iter().enumerate() {
-        let effect = binding_effect(
-            session.resources().as_ref(),
-            &session.thread_id(),
-            &invocation.intent.invocation_id,
-        )
-        .await;
-        let binding = effect.binding.as_ref().unwrap();
+        let binding = &snapshot.state.task_bindings[&invocation.intent.invocation_id];
         assert_eq!(binding.owner_task_id, format!("task-{index}"));
         assert_eq!(binding.initiator_session_id, session.thread_id());
         assert_eq!(binding.owner_identity, invocation.intent.owner_identity);
@@ -487,14 +466,17 @@ async fn unknown_binding_ack_remains_incomplete_without_retry_or_downgrade() {
         );
         assert_eq!(resources.writes.load(Ordering::SeqCst), 1);
         assert_eq!(resources.resolutions.load(Ordering::SeqCst), 1);
-        assert!(binding_effect(
-            session.resources().as_ref(),
-            &session.thread_id(),
-            &invocation.intent.invocation_id
-        )
-        .await
-        .binding
-        .is_none());
+        assert!(session
+            .resources()
+            .load_session_work(&WorkQuery {
+                session_id: session.thread_id(),
+                limit: 1
+            })
+            .await
+            .unwrap()
+            .state
+            .task_bindings
+            .is_empty());
     }
 }
 
@@ -542,13 +524,18 @@ async fn other_parent_writers_do_not_invalidate_observed_binding_revision() {
     assert_eq!(receipt.decision, WorkDecision::Accepted);
     assert_eq!(resources.writes.load(Ordering::SeqCst), 1);
     assert_eq!(resources.resolutions.load(Ordering::SeqCst), 0);
-    let effect = binding_effect(
-        session.resources().as_ref(),
-        &session.thread_id(),
-        &invocation.intent.invocation_id,
-    )
-    .await;
-    assert_eq!(effect.binding.unwrap().owner_task_id, "task");
+    let snapshot = session
+        .resources()
+        .load_session_work(&WorkQuery {
+            session_id: session.thread_id(),
+            limit: 1,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        snapshot.state.task_bindings[&invocation.intent.invocation_id].owner_task_id,
+        "task"
+    );
 }
 
 #[tokio::test]
@@ -617,11 +604,16 @@ async fn conflicting_immutable_binding_is_a_typed_explicit_rejection_without_ret
     assert!(error.to_string().contains("Conflict"));
     assert_eq!(resources.writes.load(Ordering::SeqCst), 2);
     assert_eq!(resources.resolutions.load(Ordering::SeqCst), 0);
-    let effect = binding_effect(
-        session.resources().as_ref(),
-        &session.thread_id(),
-        &invocation.intent.invocation_id,
-    )
-    .await;
-    assert_eq!(effect.binding.unwrap().owner_task_id, "original-task");
+    let snapshot = session
+        .resources()
+        .load_session_work(&WorkQuery {
+            session_id: session.thread_id(),
+            limit: 1,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        snapshot.state.task_bindings[&invocation.intent.invocation_id].owner_task_id,
+        "original-task"
+    );
 }

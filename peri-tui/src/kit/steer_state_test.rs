@@ -43,84 +43,6 @@ fn make_state() -> SteerState {
 }
 
 #[test]
-fn uncertain_enqueue_preserves_unknown_identity_without_enabling_resend() {
-    let mut state = make_state();
-    let command = make_command(SteerCommandKind::Enqueue(make_input("unknown-input")));
-    state.begin(command.clone());
-    state.reject(&command, false);
-    let row = state
-        .rows("s")
-        .into_iter()
-        .find(|row| row.id == "unknown-input")
-        .unwrap();
-    assert_eq!(row.state, SteerItemState::Unconfirmed);
-    assert!(!row.state.can_take_back());
-    assert!(state.pending_command("s", &command.command_id).is_some());
-    assert!(
-        state
-            .action_kind(
-                "s",
-                1,
-                SteerQueueAction::Dispatch { ids: vec![row.id] },
-                true
-            )
-            .is_none()
-    );
-    assert!(state.recover("s", 1, true).is_none());
-}
-
-#[test]
-fn delivered_enqueue_does_not_become_unconfirmed_after_a_late_timeout() {
-    let mut state = make_state();
-    let command = make_command(SteerCommandKind::Enqueue(make_input("a")));
-    state.begin(command.clone());
-    assert!(state.claim_delivery("s", "a"));
-    state.reject(&command, false);
-    assert!(state.sessions["s"].unconfirmed.is_empty());
-    assert!(state.rows("s").is_empty());
-    assert!(state.recover("s", 1, true).is_none());
-}
-
-#[test]
-fn uncertain_enqueue_receipt_restores_confirmed_queue_actions() {
-    let mut state = make_state();
-    let command = make_command(SteerCommandKind::Enqueue(make_input("a")));
-    state.begin(command.clone());
-    state.reject(&command, false);
-    state.settle(
-        &command,
-        UserInputQueueReceipt {
-            work_receipts: Vec::new(),
-            publication_generations: Default::default(),
-            snapshot: make_snapshot(2),
-            results: Vec::new(),
-            taken_back: None,
-        },
-    );
-    assert!(state.pending_command("s", &command.command_id).is_none());
-    assert!(state.sessions["s"].unconfirmed.is_empty());
-    assert_eq!(state.rows("s")[0].state, SteerItemState::Queued);
-    assert!(
-        state
-            .action_kind("s", 1, SteerQueueAction::TakeBack { id: "a".into() }, true)
-            .is_some()
-    );
-}
-
-#[test]
-fn uncertain_enqueue_delivery_clears_pending_confirmation() {
-    let mut state = make_state();
-    let command = make_command(SteerCommandKind::Enqueue(make_input("a")));
-    state.begin(command.clone());
-    state.reject(&command, false);
-    assert!(state.claim_delivery("s", "a"));
-    assert!(state.pending_command("s", &command.command_id).is_none());
-    assert!(state.sessions["s"].unconfirmed.is_empty());
-    assert!(state.rows("s").is_empty());
-    assert!(state.recover("s", 1, true).is_none());
-}
-
-#[test]
 fn test_steer_projection_rejects_old_revision_and_generation() {
     let mut state = make_state();
     let mut other_generation = make_snapshot(8);
@@ -280,7 +202,7 @@ fn unknown_enqueue_does_not_enable_takeback_from_a_later_published_snapshot() {
     let mut snapshot = make_snapshot(2);
     snapshot.items[0].state = UserInputState::Dispatching;
     state.accept_snapshot(snapshot, 1, true);
-    assert_eq!(state.rows("s")[0].state, SteerItemState::Unconfirmed);
+    assert_eq!(state.rows("s")[0].state, SteerItemState::Submitting);
     assert!(
         state
             .action_kind("s", 1, SteerQueueAction::TakeBack { id: "a".into() }, true)

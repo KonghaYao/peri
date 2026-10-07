@@ -1,13 +1,14 @@
 //! Thread 列投影、强类型元数据解码和消息展示字段。
 
 pub(crate) use crate::sessions::canonical::extract_title;
+pub(in crate::sessions) use crate::sessions::canonical::role_of;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use peri_acp_types::thread::{AgentStatus, CancelPolicy, ThreadMeta};
 use std::str::FromStr;
 
 pub(super) const THREAD_META_COLUMNS: &str = "t.id, t.title, t.cwd, t.created_at, t.updated_at, t.message_count,
-    (SELECT COALESCE(SUM(json_extract(m.content_ref,'$.byteLength')), 0) FROM messages m WHERE m.thread_id = t.id) as content_size,
+    (SELECT COALESCE(SUM(LENGTH(m.content)), 0) FROM messages m WHERE m.thread_id = t.id) as content_size,
     t.parent_thread_id, t.snapshot_at_message_id, t.hidden, t.cancel_policy, t.config, t.agent_status";
 
 /// 元数据行形状；字段顺序与上方列常量一致。

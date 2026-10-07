@@ -11,17 +11,13 @@ pub(super) async fn prepare_delegation(
         .await
         .unwrap();
     let snapshot = resources
-        .inspect_work(&WorkQuery::new(initiator, WorkSelector::Head))
+        .load_session_work(&WorkQuery {
+            session_id: initiator.into(),
+            limit: 1,
+        })
         .await
         .unwrap();
     let arguments = "{}".to_owned();
-    let arguments_ref = crate::agent::stages::prepare_work_evidence(
-        resources,
-        initiator,
-        arguments.as_bytes().to_vec(),
-    )
-    .await
-    .unwrap();
     let digest = format!("{:x}", Sha256::digest(arguments.as_bytes()));
     apply_fixture_mutation(
         resources,
@@ -30,15 +26,15 @@ pub(super) async fn prepare_delegation(
             recipient_lifecycle: control.lifecycle,
             mutation_id: format!("fixture-delegation-prepare:{invocation_id}"),
             action: WorkAction::PrepareInvocation {
-                expected_revision: snapshot.head.change_seq,
+                expected_revision: snapshot.state.revision,
                 intent: InvocationIntent {
                     invocation_id: invocation_id.into(),
                     tool_call_id: format!("model-call:{invocation_id}"),
                     tool_name: "fixture-delegation".into(),
-                    arguments: arguments_ref.clone(),
+                    arguments_json: arguments.clone(),
                     arguments_digest: digest.clone(),
                     effective_tool_name: "fixture-delegation".into(),
-                    effective_arguments: arguments_ref,
+                    effective_arguments_json: arguments,
                     effective_arguments_digest: digest,
                     owner_identity: "fixture-agent-owner".into(),
                     scope_id: initiator.into(),
@@ -50,14 +46,11 @@ pub(super) async fn prepare_delegation(
         },
     )
     .await;
-    crate::session::test_resources::mock::work::dispatch_fixture_invocation(
-        resources,
-        initiator,
-        invocation_id,
-    )
-    .await;
     let snapshot = resources
-        .inspect_work(&WorkQuery::new(initiator, WorkSelector::Head))
+        .load_session_work(&WorkQuery {
+            session_id: initiator.into(),
+            limit: 1,
+        })
         .await
         .unwrap();
     apply_fixture_mutation(
@@ -67,7 +60,7 @@ pub(super) async fn prepare_delegation(
             recipient_lifecycle: control.lifecycle,
             mutation_id: format!("fixture-delegation-resources:{invocation_id}"),
             action: WorkAction::BindResourceOwners {
-                expected_revision: snapshot.head.change_seq,
+                expected_revision: snapshot.state.revision,
                 connections_json: "{}".into(),
                 authorization_ref: "fixture-delegation-authorization".into(),
             },
@@ -80,10 +73,10 @@ async fn apply_fixture_mutation(resources: &dyn SessionResources, mut command: W
     let identity = command.mutation_id.clone();
     loop {
         let snapshot = resources
-            .inspect_work(&WorkQuery::new(
-                command.session_id.clone(),
-                WorkSelector::Head,
-            ))
+            .load_session_work(&WorkQuery {
+                session_id: command.session_id.clone(),
+                limit: 1,
+            })
             .await
             .unwrap();
         match &mut command.action {
@@ -93,7 +86,7 @@ async fn apply_fixture_mutation(resources: &dyn SessionResources, mut command: W
             | WorkAction::BindResourceOwners {
                 expected_revision, ..
             } => {
-                *expected_revision = snapshot.head.change_seq;
+                *expected_revision = snapshot.state.revision;
             }
             _ => panic!("unexpected delegation fixture action"),
         }

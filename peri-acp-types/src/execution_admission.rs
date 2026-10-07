@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::session_resources::{
-    work::{WorkAdmission, WorkCandidate, WorkInspection, WorkPage},
+    work::{WorkAdmission, WorkCandidate, WorkSnapshot},
     ControlAttempt, ControlState, SessionResourceResult,
 };
 
@@ -19,26 +19,25 @@ pub struct AdmissionSnapshot {
     pub blocked: bool,
 }
 
-impl From<&WorkInspection> for AdmissionSnapshot {
-    fn from(snapshot: &WorkInspection) -> Self {
-        let (candidates, blocked) = match &snapshot.page {
-            WorkPage::Availability(availability) => {
-                (availability.candidates.clone(), availability.blocked)
-            }
-            _ => (Vec::new(), true),
-        };
+impl From<&WorkSnapshot> for AdmissionSnapshot {
+    fn from(snapshot: &WorkSnapshot) -> Self {
         Self {
             session_id: snapshot.session_id.clone(),
             control: snapshot.control.clone(),
-            candidates,
-            blocked,
+            candidates: snapshot.candidates.clone(),
+            blocked: snapshot.blocked,
         }
     }
 }
 
-impl From<WorkInspection> for AdmissionSnapshot {
-    fn from(snapshot: WorkInspection) -> Self {
-        Self::from(&snapshot)
+impl From<WorkSnapshot> for AdmissionSnapshot {
+    fn from(snapshot: WorkSnapshot) -> Self {
+        Self {
+            session_id: snapshot.session_id,
+            control: snapshot.control,
+            candidates: snapshot.candidates,
+            blocked: snapshot.blocked,
+        }
     }
 }
 

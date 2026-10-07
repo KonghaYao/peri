@@ -19,7 +19,7 @@ enum Failure {
 
 struct PublicationResources {
     backend: Arc<dyn SessionResources>,
-    queries: Mutex<Vec<WorkQuery>>,
+    queries: Mutex<Vec<WorkDeliveryQuery>>,
     commands: Mutex<Vec<WorkCommand>>,
     snapshots: AtomicUsize,
     resolutions: AtomicUsize,
@@ -43,11 +43,12 @@ macro_rules! publication_resources {
     ($(fn $method:ident($($argument:ident: $argument_type:ty),*) -> $result:ty;)*) => {
         #[async_trait::async_trait]
         impl SessionResources for PublicationResources {
-            async fn inspect_work(&self, query: &WorkQuery) -> SessionResourceResult<WorkInspection> {
-                if !matches!(query.selector, WorkSelector::Delivery { .. }) {
-                    self.snapshots.fetch_add(1, Ordering::SeqCst);
-                    return Err(SessionResourceError::conflict("publication must only inspect exact delivery"));
-                }
+            async fn load_session_work(&self, _: &WorkQuery) -> SessionResourceResult<WorkSnapshot> {
+                self.snapshots.fetch_add(1, Ordering::SeqCst);
+                Err(SessionResourceError::conflict("publication must not load work history"))
+            }
+
+            async fn load_work_delivery(&self, query: &WorkDeliveryQuery) -> SessionResourceResult<Option<DeliveryRecord>> {
                 self.queries.lock().unwrap().push(query.clone());
                 let failure = *self.failure.lock().unwrap();
                 if matches!(failure, Failure::Read) {
@@ -55,15 +56,7 @@ macro_rules! publication_resources {
                         detail: "injected narrow read failure".into(),
                     }));
                 }
-                self.backend.inspect_work(query).await
-            }
-
-            async fn prepare_evidence(&self, evidence: &EvidenceWrite) -> SessionResourceResult<PayloadRef> {
-                self.backend.prepare_evidence(evidence).await
-            }
-
-            async fn read_evidence(&self, query: &EvidenceQuery) -> SessionResourceResult<EvidenceRecord> {
-                self.backend.read_evidence(query).await
+                self.backend.load_work_delivery(query).await
             }
 
             async fn apply_work_mutation(&self, command: &WorkCommand) -> SessionResourceResult<WorkReceipt> {
@@ -162,12 +155,10 @@ async fn new_delivery_commits_once_and_duplicate_never_loads_history_or_rewrites
     assert_eq!(
         resources.queries.lock().unwrap().as_slice(),
         &vec![
-            WorkQuery::new(
-                bound.thread_id.clone(),
-                WorkSelector::Delivery {
-                    delivery_id: delivery_id.as_uuid().to_string(),
-                }
-            );
+            WorkDeliveryQuery {
+                session_id: bound.thread_id.clone(),
+                delivery_id: delivery_id.as_uuid().to_string(),
+            };
             3
         ]
     );

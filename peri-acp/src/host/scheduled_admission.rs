@@ -3,9 +3,8 @@ use std::sync::Arc;
 use peri_acp_types::interaction::UserInteractionBroker;
 use peri_acp_types::permission::SharedPermissionMode;
 use peri_acp_types::session_resources::work::{
-    Delivery, EvidenceQuery, WorkAction, WorkAdmission, WorkCommand, WorkDecision, WorkGuard,
-    WorkInspection, WorkPage, WorkQuery, WorkReceipt, WorkResolution, WorkSelector, WorkStage,
-    WorkTarget,
+    WorkAction, WorkAdmission, WorkCommand, WorkDecision, WorkGuard, WorkQuery, WorkReceipt,
+    WorkResolution, WorkSnapshot, WorkStage, WorkTarget,
 };
 use peri_acp_types::session_resources::{ControlStatus, SessionResources};
 use peri_acp_types::store::{deserialize_persisted_payload, PersistedPayload};
@@ -41,168 +40,98 @@ pub(crate) fn after_run_started(
 async fn snapshot_for(
     resources: &dyn SessionResources,
     admission: &WorkAdmission,
-) -> anyhow::Result<WorkInspection> {
-    let snapshot =
-        super::work_query::inspect(resources, &admission.session_id, WorkSelector::Availability)
-            .await?;
-    let admitted = super::work_query::inspect(
-        resources,
-        &admission.session_id,
-        WorkSelector::Admission {
-            admission_id: admission.admission_id.clone(),
-        },
-    )
-    .await?;
-    let availability = super::work_query::availability(&snapshot)?;
+) -> anyhow::Result<WorkSnapshot> {
+    let snapshot = resources
+        .load_session_work(&WorkQuery {
+            session_id: admission.session_id.clone(),
+            limit: 1,
+        })
+        .await?;
     if snapshot.control.lifecycle != admission.lifecycle
         || snapshot.control.control_generation != admission.control_generation
         || snapshot.control.status != ControlStatus::Active
         || snapshot.control.attempt.as_ref() != Some(&admission.execution)
-        || admitted.control != snapshot.control
-        || availability.blocked
-        || availability.pending
-        || !super::work_query::admission(&admitted, &admission.admission_id)?.is_some_and(
-            |record| {
+        || snapshot.blocked
+        || !snapshot.pending_commands.is_empty()
+        || !snapshot
+            .state
+            .admissions
+            .get(&admission.admission_id)
+            .is_some_and(|record| {
                 record.admission == *admission
-                    && !record.entering_mutation_id.is_empty()
-                    && record.leaving_evidence_id.is_none()
-            },
-        )
+                    && record.entering_receipt.is_some()
+                    && record.settled_receipt.is_none()
+            })
     {
         anyhow::bail!("scheduled admission no longer owns the exact active SDK execution");
     }
     Ok(snapshot)
 }
 
-async fn scheduled_triggers(
-    resources: &dyn SessionResources,
-    snapshot: &WorkInspection,
+fn scheduled_triggers(
+    snapshot: &WorkSnapshot,
     admission: &WorkAdmission,
 ) -> anyhow::Result<Vec<ScheduledTrigger>> {
-    let availability = super::work_query::availability(snapshot)?;
-    let candidate = availability
-        .candidates
-        .iter()
-        .find(|candidate| {
-            candidate.work_id == admission.work_id
-                && candidate.work_revision == admission.work_revision
-        })
-        .ok_or_else(|| anyhow::anyhow!("scheduled admission candidate is no longer exact"))?;
+    let candidate = snapshot.candidates.iter().find(|candidate| {
+        candidate.work_id == admission.work_id && candidate.work_revision == admission.work_revision
+    });
+    let Some(candidate) = candidate else {
+        anyhow::bail!("scheduled admission candidate is no longer exact");
+    };
     if candidate.stage != WorkStage::ReasonReady {
         return Ok(Vec::new());
     }
-    let processing = super::work_query::inspect(
-        resources,
-        &admission.session_id,
-        WorkSelector::Processing {
-            processing_id: admission.work_id.clone(),
-        },
-    )
-    .await?;
-    let mut triggers = Vec::new();
-    if super::work_query::processing(&processing, &admission.work_id)?.is_some() {
-        let mut query = WorkQuery::new(
-            &admission.session_id,
-            WorkSelector::ProcessingDeliveries {
-                processing_id: admission.work_id.clone(),
-            },
-        );
-        loop {
-            let page = resources.inspect_work(&query).await?;
-            if page.control != snapshot.control {
-                anyhow::bail!("scheduled recipient changed")
-            }
-            let WorkPage::Deliveries(deliveries) = page.page else {
-                anyhow::bail!("scheduled delivery inspection returned conflicting page");
-            };
-            for delivery in deliveries
-                .into_iter()
-                .filter(|delivery| delivery.participates_in_reason)
-            {
-                if let Some(trigger) = scheduled_trigger(resources, admission, &delivery).await? {
-                    triggers.push(trigger)
-                }
-            }
-            let Some(cursor) = page.next_cursor else {
-                break;
-            };
-            query.cursor = Some(cursor);
-        }
+    let delivery_ids = if let Some(batch_id) = &candidate.batch_id {
+        let batch = snapshot
+            .state
+            .batches
+            .get(batch_id)
+            .filter(|batch| batch.recipient_lifecycle == admission.lifecycle)
+            .ok_or_else(|| anyhow::anyhow!("scheduled restored batch recipient is not exact"))?;
+        &batch.processing_delivery_ids
     } else {
-        for delivery_id in &candidate.delivery_ids {
-            let page = super::work_query::inspect(
-                resources,
-                &admission.session_id,
-                WorkSelector::Delivery {
-                    delivery_id: delivery_id.clone(),
-                },
-            )
-            .await?;
-            let WorkPage::Deliveries(deliveries) = &page.page else {
-                anyhow::bail!("scheduled delivery page missing")
-            };
-            let delivery = deliveries
-                .first()
-                .ok_or_else(|| anyhow::anyhow!("scheduled candidate delivery missing"))?;
-            if let Some(trigger) = scheduled_trigger(resources, admission, delivery).await? {
-                triggers.push(trigger)
-            }
+        &candidate.delivery_ids
+    };
+    let mut triggers = Vec::new();
+    for delivery_id in delivery_ids {
+        let delivery = snapshot
+            .state
+            .deliveries
+            .get(delivery_id)
+            .ok_or_else(|| anyhow::anyhow!("scheduled candidate delivery is missing"))?;
+        if delivery.recipient_lifecycle != admission.lifecycle {
+            anyhow::bail!("scheduled candidate recipient changed");
         }
+        let payload =
+            deserialize_persisted_payload(&delivery.publication.event.content.serialized)?;
+        let PersistedPayload::SystemReminder { reminder, .. } = payload else {
+            continue;
+        };
+        let reminder = reminder.as_reminder();
+        if reminder.source.0 != "cron" || reminder.kind != "triggered" {
+            continue;
+        }
+        if delivery.publication.event.producer_namespace != "peri-agent.inbox" {
+            anyhow::bail!("scheduled trigger producer identity is not trusted");
+        }
+        let task_id = reminder
+            .metadata
+            .get("task_id")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("scheduled task identity missing"))?;
+        let prompt = reminder
+            .metadata
+            .get("prompt")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("scheduled original prompt missing"))?;
+        triggers.push(ScheduledTrigger {
+            delivery_id: delivery_id.clone(),
+            task_id: task_id.into(),
+            prompt: prompt.into(),
+        });
     }
     Ok(triggers)
-}
-
-async fn scheduled_trigger(
-    resources: &dyn SessionResources,
-    admission: &WorkAdmission,
-    delivery: &Delivery,
-) -> anyhow::Result<Option<ScheduledTrigger>> {
-    if delivery.recipient_lifecycle != admission.lifecycle {
-        anyhow::bail!("scheduled recipient changed")
-    }
-    let event = &delivery.publication.event;
-    if event.content.role != "system_reminder" {
-        return Ok(None);
-    }
-    let evidence = resources
-        .read_evidence(&EvidenceQuery {
-            session_id: admission.session_id.clone(),
-            reference: event.content.content.clone(),
-        })
-        .await?;
-    evidence.validate()?;
-    if evidence.reference != event.content.content {
-        anyhow::bail!("scheduled evidence reference conflicts")
-    }
-    let serialized = String::from_utf8(evidence.bytes)?;
-    let PersistedPayload::SystemReminder { reminder, .. } =
-        deserialize_persisted_payload(&serialized)?
-    else {
-        return Ok(None);
-    };
-    let reminder = reminder.as_reminder();
-    if reminder.source.0 != "cron" || reminder.kind != "triggered" {
-        return Ok(None);
-    }
-    if event.producer_namespace != "peri-agent.inbox" {
-        anyhow::bail!("scheduled producer identity is not trusted")
-    }
-    let task_id = reminder
-        .metadata
-        .get("task_id")
-        .and_then(serde_json::Value::as_str)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| anyhow::anyhow!("scheduled task identity missing"))?;
-    let prompt = reminder
-        .metadata
-        .get("prompt")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| anyhow::anyhow!("scheduled original prompt missing"))?;
-    Ok(Some(ScheduledTrigger {
-        delivery_id: delivery.delivery_id.clone(),
-        task_id: task_id.into(),
-        prompt: prompt.into(),
-    }))
 }
 
 async fn approve_work(
@@ -212,7 +141,7 @@ async fn approve_work(
     broker: &Arc<dyn UserInteractionBroker>,
 ) -> anyhow::Result<()> {
     let snapshot = snapshot_for(resources, admission).await?;
-    for trigger in scheduled_triggers(resources, &snapshot, admission).await? {
+    for trigger in scheduled_triggers(&snapshot, admission)? {
         if !super::prompt::approve_scheduled_trigger(
             permission_mode,
             Some(broker),
@@ -260,41 +189,32 @@ async fn abandon_work(
 ) -> anyhow::Result<()> {
     for delivery_id in denied_delivery_ids {
         let snapshot = snapshot_for(resources, admission).await?;
-        let page = super::work_query::inspect(
-            resources,
-            &admission.session_id,
-            WorkSelector::Delivery {
-                delivery_id: delivery_id.clone(),
-            },
-        )
-        .await?;
-        let WorkPage::Deliveries(deliveries) = &page.page else {
-            anyhow::bail!("rejected scheduled delivery page missing")
-        };
-        let delivery = deliveries
-            .first()
+        let delivery = snapshot
+            .state
+            .deliveries
+            .get(delivery_id)
             .ok_or_else(|| anyhow::anyhow!("rejected scheduled delivery missing"))?;
-        let processing = super::work_query::inspect(
-            resources,
-            &admission.session_id,
-            WorkSelector::Processing {
-                processing_id: admission.work_id.clone(),
-            },
-        )
-        .await?;
-        let action = if let Some(processing_id) = &delivery.processing_id {
-            let work = super::work_query::processing(&processing, &admission.work_id)?
-                .filter(|work| &work.processing_id == processing_id)
+        let action = if let Some(batch_id) = &delivery.batch_id {
+            let batch = snapshot
+                .state
+                .batches
+                .get(batch_id)
+                .ok_or_else(|| anyhow::anyhow!("restored scheduled batch missing"))?;
+            let work = snapshot
+                .state
+                .works
+                .get(&admission.work_id)
+                .filter(|work| work.batch_id == *batch_id)
                 .ok_or_else(|| {
                     anyhow::anyhow!("rejected scheduled work is not the exact SDK work")
                 })?;
-            if work.delivery_count as usize != denied_delivery_ids.len() {
+            if batch.delivery_ids != denied_delivery_ids {
                 commit_original(resources, &WorkCommand {
                     session_id: admission.session_id.clone(), recipient_lifecycle: admission.lifecycle,
                     mutation_id: format!("scheduled-rejection-block:{}:{delivery_id}", admission.admission_id),
                     action: WorkAction::BlockWork {
-                        expected_revision: processing.head.change_seq,
-                        target: WorkTarget { work_id: work.processing_id.clone(), expected_work_revision: work.revision },
+                        expected_revision: snapshot.state.revision,
+                        target: WorkTarget { work_id: work.work_id.clone(), expected_work_revision: work.revision },
                         reason: "restored mixed scheduled batch approval rejected".into(),
                         recovery_condition: "selective durable resolution must preserve unrelated claimed deliveries".into(),
                     },
@@ -304,10 +224,10 @@ async fn abandon_work(
                 );
             }
             WorkAction::AbandonWork {
-                expected_revision: processing.head.change_seq,
+                expected_revision: snapshot.state.revision,
                 expected_control_generation: admission.control_generation,
                 target: WorkTarget {
-                    work_id: work.processing_id.clone(),
+                    work_id: work.work_id.clone(),
                     expected_work_revision: work.revision,
                 },
                 reason: "scheduled trigger approval rejected".into(),
@@ -319,7 +239,7 @@ async fn abandon_work(
         } else {
             WorkAction::AbandonDelivery {
                 guard: WorkGuard {
-                    expected_revision: snapshot.head.change_seq,
+                    expected_revision: snapshot.state.revision,
                     expected_control_generation: admission.control_generation,
                     execution: admission.execution.clone(),
                 },

@@ -174,17 +174,6 @@ impl AcpTuiClient {
             match msg {
                 Some(IncomingMessage::Notification { method, params }) => {
                     if method == "session/work/available" {
-                        if params
-                            .get("executionProtocol")
-                            .and_then(serde_json::Value::as_u64)
-                            != Some(
-                                peri_acp::host::execution_admission::EXECUTION_PROTOCOL_VERSION
-                                    .into(),
-                            )
-                        {
-                            tracing::error!("Unsupported Peri work activation protocol");
-                            continue;
-                        }
                         let dispatcher = dispatcher.clone();
                         tokio::spawn(async move {
                             let Some(dispatcher) = dispatcher else {

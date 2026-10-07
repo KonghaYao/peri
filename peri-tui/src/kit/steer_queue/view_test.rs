@@ -227,7 +227,6 @@ fn queue_render_distinguishes_confirmed_draft_from_published_input() {
         for (state, dispatch_enabled, takeback_enabled) in [
             (SteerItemState::Queued, true, true),
             (SteerItemState::Submitting, false, false),
-            (SteerItemState::Unconfirmed, false, false),
             (SteerItemState::Publishing, false, false),
             (SteerItemState::Dispatching, false, true),
             (SteerItemState::Claimed, false, false),

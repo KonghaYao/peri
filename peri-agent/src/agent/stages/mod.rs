@@ -24,10 +24,6 @@ mod context_builder;
 mod work_dispatch;
 pub(crate) mod work_ledger;
 mod work_pipeline;
-mod work_reads;
-pub(crate) use work_reads::{
-    prepare_evidence as prepare_work_evidence, prepare_payload as prepare_work_payload,
-};
 #[cfg(test)]
 mod work_production_test;
 mod work_reason;

@@ -186,11 +186,9 @@ pub(super) async fn ensure_mailbox(
     }
     let work = cfg
         .session_resources
-        .inspect_work(&peri_acp_types::session_resources::work::WorkQuery {
+        .load_session_work(&peri_acp_types::session_resources::work::WorkQuery {
             session_id: session_id.to_owned(),
-            selector: peri_acp_types::session_resources::work::WorkSelector::Head,
             limit: 1,
-            cursor: None,
         })
         .await
         .map_err(|_| AcpError::new(-32603, "durable user input store unavailable"))?;
@@ -220,7 +218,7 @@ pub(super) async fn ensure_mailbox(
             transport,
             session_id.to_owned(),
             work.control.lifecycle,
-            work.head.next_delivery_seq,
+            work.state.next_admission_sequence,
             session.v2_message_queue.clone(),
             cancellation.clone(),
         )
@@ -320,21 +318,19 @@ pub(super) fn schedule_mailbox(
             }
             let query = peri_acp_types::session_resources::work::WorkQuery {
                 session_id: sid.clone(),
-                selector: peri_acp_types::session_resources::work::WorkSelector::Availability,
                 limit: 1,
-                cursor: None,
             };
-            if let Ok(work) = cfg.session_resources.inspect_work(&query).await {
-                if work.head.has_pending_work() {
+            if let Ok(work) = cfg.session_resources.load_session_work(&query).await {
+                if work.has_pending_current_work() {
                     let _ = transport
                         .send_notification(
                             "session/work/available",
                             serde_json::json!({
                                 "sessionId": sid,
-                                "revision": work.head.change_seq,
+                                "revision": work.state.revision,
                                 "lifecycle": work.control.lifecycle,
                                 "controlGeneration": work.control.control_generation,
-                                "executionProtocol": super::execution_admission::EXECUTION_PROTOCOL_VERSION,
+                                "executionProtocol": 1,
                             }),
                         )
                         .await;

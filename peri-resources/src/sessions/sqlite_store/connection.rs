@@ -29,21 +29,7 @@ pub(super) const REQUIRED_THREAD_COLUMNS: &[&str] = &[
     "config",
     "agent_status",
 ];
-pub(super) const REQUIRED_MESSAGE_COLUMNS: &[&str] = &[
-    "message_id",
-    "thread_id",
-    "role",
-    "content_ref",
-    "transcript_seq",
-];
-const REQUIRED_PAYLOAD_COLUMNS: &[&str] = &[
-    "storage_scope",
-    "payload_id",
-    "version",
-    "byte_length",
-    "sha256",
-    "bytes",
-];
+pub(super) const REQUIRED_MESSAGE_COLUMNS: &[&str] = &["thread_id", "content"];
 
 /// 只读 session 数据库访问的稳定失败分类。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,7 +112,7 @@ pub(super) fn classify_shape_probe_failure(error: &sqlx::Error) -> ReadOnlyThrea
 }
 
 impl SqliteSessionDatabase {
-    /// 打开或创建当前工作记录形状的会话数据库；旧形状须显式停写迁移。
+    /// 打开或创建会话数据库，原地升级已知旧 schema 并保留历史数据。
     pub(super) async fn open(db_path: impl Into<PathBuf>) -> Result<Self> {
         let db_path = db_path.into();
         // 确保父目录存在
@@ -230,7 +216,6 @@ impl SqliteSessionDatabase {
         for (table, required) in [
             ("threads", REQUIRED_THREAD_COLUMNS),
             ("messages", REQUIRED_MESSAGE_COLUMNS),
-            ("session_payloads", REQUIRED_PAYLOAD_COLUMNS),
         ] {
             let rows: Vec<(String,)> = sqlx::query_as(AssertSqlSafe(format!(
                 "SELECT name FROM pragma_table_info('{table}')"

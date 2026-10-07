@@ -29,7 +29,7 @@ test("packaged JSONL dispatcher runs SQLite admission and durable entry ACK with
         return frame.result;
     }
     try {
-        expect(await rpc("ready", "peri/execution/ready", { protocolVersion: 2 })).toEqual({ protocolVersion: 2, durability: "durable" });
+        expect(await rpc("ready", "peri/execution/ready", {})).toEqual({ protocolVersion: 1, durability: "durable" });
         const snapshot = { sessionId: "package-session", control: { lifecycle: 1, revision: 0, controlGeneration: 0, status: "active", attempt: null },
             blocked: false, candidates: [{ workId: "package-work", workRevision: 0, stage: "reasonReady", requiresRecovery: false }] };
         const result = await rpc("reserve", "peri/execution/admit", { requestId: "stable-package-request", snapshot });

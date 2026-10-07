@@ -99,7 +99,7 @@ pub(super) async fn prepare_existing(
             return Err(AcpError::new(
                 -32010,
                 format!("Session execution unavailable: {reason:?}"),
-            ));
+            ))
         }
     }
     cfg.session_resources
@@ -148,21 +148,18 @@ pub(super) async fn prepare_existing(
             }
             None => PreparedSessionInputs::prepare_restore(cfg, &cwd, &persisted)?,
         };
-        let control = cfg
+        let owner_state = cfg
             .session_resources
-            .load_session_control(&id.to_owned())
+            .load_session_work(&peri_acp_types::session_resources::work::WorkQuery {
+                session_id: id.to_owned(),
+                limit: 1,
+            })
             .await
             .map_err(crate::host::workspace::resource_error)?;
-        let owner_state = crate::host::work_query::inspect(
-            cfg.session_resources.as_ref(),
-            id,
-            peri_acp_types::session_resources::work::WorkSelector::RecoveryDescriptor {
-                lifecycle: control.lifecycle,
-            },
-        )
-        .await?;
-        let owner_known = crate::host::work_query::descriptor(&owner_state, control.lifecycle)?
-            .is_some_and(|descriptor| descriptor.resource_owners.is_some());
+        let owner_known = owner_state
+            .state
+            .resource_owners
+            .contains_key(&owner_state.control.lifecycle);
         prepared.session_mcp_servers =
             super::super::resource_owners::load_for_restore(cfg, id).await?;
         let supplied = super::session_mcp_servers(params)?;
@@ -595,17 +592,10 @@ async fn reopen_workspace_scope_after_restore(
         if cleanup.is_ok() {
             sessions.remove(id);
         }
-        return Err(AcpError::new(
-            -32010,
-            match cleanup {
-                Ok(()) => {
-                    format!("Session restore incomplete: Workspace task scope unavailable: {error}")
-                }
-                Err(cause) => format!(
-                    "Session restore incomplete: Workspace task scope unavailable: {error}; cleanup incomplete: {cause}"
-                ),
-            },
-        ));
+        return Err(AcpError::new(-32010, match cleanup {
+            Ok(()) => format!("Session restore incomplete: Workspace task scope unavailable: {error}"),
+            Err(cause) => format!("Session restore incomplete: Workspace task scope unavailable: {error}; cleanup incomplete: {cause}"),
+        }));
     }
     Ok(())
 }

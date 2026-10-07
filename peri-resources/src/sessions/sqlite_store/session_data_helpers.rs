@@ -189,7 +189,16 @@ pub(in crate::sessions) async fn insert_history_rows(
         if !ids.insert(payload.id()) {
             anyhow::bail!("history batch repeats a message id");
         }
-        messages::insert_payload(connection, thread_id, payload).await?;
+        sqlx::query(
+            "INSERT INTO messages (message_id, thread_id, role, content)
+             VALUES (?1, ?2, ?3, ?4)",
+        )
+        .bind(payload.id().as_uuid().to_string())
+        .bind(thread_id.as_str())
+        .bind(payload_role(payload))
+        .bind(serialize_persisted_payload(payload)?)
+        .execute(&mut *connection)
+        .await?;
     }
     Ok(ids)
 }

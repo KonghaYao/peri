@@ -5,7 +5,7 @@ use peri_acp_types::execution_admission::{
     AdmissionOutcome, AdmissionRequest, ExecutionAdmissionPort,
 };
 use peri_acp_types::session_resources::work::*;
-
+use peri_acp_types::store::{deserialize_persisted_payload, PersistedPayload};
 use tokio::sync::Mutex;
 
 use super::work_pipeline::{WorkMode, WorkRuntime, WorkSession};
@@ -79,11 +79,10 @@ impl WorkBoundary {
         let mut state = self.state.lock().await;
         if state.frozen {
             if let (Some(session), Some(work_id)) = (&state.session, &state.work_id) {
-                let snapshot = session.inspect_head().await?;
-                if let Some(error) = super::work_reason::blocked_budget_error(
-                    &session.processing(work_id).await?,
-                    &snapshot.head.limits,
-                ) {
+                let snapshot = session.snapshot().await?;
+                if let Some(error) =
+                    super::work_reason::blocked_budget_error(&snapshot.state, work_id)
+                {
                     return Err(anyhow::Error::new(error));
                 }
             }
@@ -119,7 +118,10 @@ impl WorkBoundary {
             )
             .await?;
             let snapshot = resources
-                .inspect_work(&WorkQuery::new(session_id, WorkSelector::Availability))
+                .load_session_work(&WorkQuery {
+                    session_id: session_id.clone(),
+                    limit: 1,
+                })
                 .await?;
             let outcome = admission_port
                 .admit(AdmissionRequest {
@@ -162,55 +164,24 @@ impl WorkBoundary {
             WorkRuntime::Durable(session) => session,
             WorkRuntime::BestEffortFixture => return Ok(None),
         };
-        let snapshot = session.inspect_head().await?;
-        let processing = session
-            .ledger
-            .inspect(&WorkQuery::new(
-                &session.admission.session_id,
-                WorkSelector::Processing {
-                    processing_id: session.admission.work_id.clone(),
-                },
-            ))
-            .await?;
-        if let WorkPage::Processings(records) = processing.page {
-            if let Some(processing) = records.first() {
-                if let Some(error) =
-                    super::work_reason::blocked_budget_error(processing, &snapshot.head.limits)
-                {
-                    return Err(error.into());
-                }
+        let snapshot = session.snapshot().await?;
+        if snapshot.blocked || !snapshot.pending_commands.is_empty() {
+            if let Some(error) = super::work_reason::snapshot_budget_error(&snapshot) {
+                return Err(anyhow::Error::new(error));
             }
-        }
-        let pending = session
-            .ledger
-            .inspect(&WorkQuery::new(
-                &session.admission.session_id,
-                WorkSelector::PendingCommands,
-            ))
-            .await?;
-        if matches!(pending.page, WorkPage::Commands(ref records) if !records.is_empty()) {
             return Err(anyhow::anyhow!(
                 "durable work is blocked or has unresolved original commands"
             ));
         }
-        let registration = session
-            .ledger
-            .inspect(&WorkQuery::new(
-                &session.admission.session_id,
-                WorkSelector::Admission {
-                    admission_id: session.admission.admission_id.clone(),
-                },
-            ))
-            .await?;
-        let WorkPage::Admissions(records) = registration.page else {
-            return Err(anyhow::anyhow!("admission query returned a different page"));
-        };
-        let registration = records.first().filter(|record| {
-            record.admission == session.admission
-                && !record.entering_mutation_id.is_empty()
-                && record.leaving_evidence_id.is_none()
-        });
-        let registered = registration.is_some();
+        let registered = snapshot
+            .state
+            .admissions
+            .get(&session.admission.admission_id)
+            .is_some_and(|record| {
+                record.admission == session.admission
+                    && record.entering_receipt.is_some()
+                    && record.settled_receipt.is_none()
+            });
         if !registered
             || port
                 .as_ref()
@@ -238,9 +209,11 @@ impl WorkBoundary {
         let entry_port = ctx
             .execution_admission_port()
             .ok_or_else(|| anyhow::anyhow!("SDK entered-ACK port missing"))?;
-        let entry_evidence_id = registration
-            .expect("validated admission")
-            .entering_mutation_id
+        let entry_evidence_id = snapshot.state.admissions[&session.admission.admission_id]
+            .entering_receipt
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("durable registration receipt missing"))?
+            .mutation_id
             .clone();
         let entry = entry_port
             .entered(peri_acp_types::execution_admission::EntryRequest {
@@ -318,11 +291,26 @@ impl WorkBoundary {
 }
 
 impl WorkSession {
-    pub(crate) fn target(processing: &Processing) -> WorkTarget {
-        WorkTarget {
-            work_id: processing.processing_id.clone(),
-            expected_work_revision: processing.revision,
-        }
+    pub(crate) async fn snapshot(&self) -> anyhow::Result<WorkSnapshot> {
+        Ok(self
+            .ledger
+            .snapshot(&WorkQuery {
+                session_id: self.admission.session_id.clone(),
+                limit: 1,
+            })
+            .await?)
+    }
+
+    pub(crate) fn target(snapshot: &WorkSnapshot, work_id: &str) -> anyhow::Result<WorkTarget> {
+        let work = snapshot
+            .state
+            .works
+            .get(work_id)
+            .ok_or_else(|| anyhow::anyhow!("durable stage work is missing"))?;
+        Ok(WorkTarget {
+            work_id: work.work_id.clone(),
+            expected_work_revision: work.revision,
+        })
     }
 }
 
@@ -377,4 +365,9 @@ impl StageContextBuilder {
         self.work = Arc::new(WorkBoundary::fixture());
         self
     }
+}
+
+pub(crate) fn persisted_projection(payload: &WorkPayload) -> anyhow::Result<PersistedPayload> {
+    payload.validate()?;
+    deserialize_persisted_payload(&payload.serialized)
 }

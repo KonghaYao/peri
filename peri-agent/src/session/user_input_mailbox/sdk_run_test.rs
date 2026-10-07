@@ -28,16 +28,13 @@ async fn fixture() -> (TestSession, Arc<UserInputMailbox>, WorkAdmission) {
         .unwrap();
     let snapshot = fixture
         .resources
-        .inspect_work(&WorkQuery::new(
-            fixture.thread_id(),
-            WorkSelector::Availability,
-        ))
+        .load_session_work(&WorkQuery {
+            session_id: fixture.thread_id(),
+            limit: 1,
+        })
         .await
         .unwrap();
-    let WorkPage::Availability(availability) = &snapshot.page else {
-        panic!("availability page required")
-    };
-    let candidate = &availability.candidates[0];
+    let candidate = &snapshot.candidates[0];
     let admission = WorkAdmission {
         session_id: fixture.thread_id(),
         admission_id: "sdk-exact-ticket".into(),
@@ -76,10 +73,10 @@ async fn sdk_observation_rejects_unregistered_ticket_without_local_admission() {
     let (fixture, mailbox, admission) = fixture().await;
     let before = fixture
         .resources
-        .inspect_work(&WorkQuery::new(
-            fixture.thread_id(),
-            WorkSelector::Availability,
-        ))
+        .load_session_work(&WorkQuery {
+            session_id: fixture.thread_id(),
+            limit: 1,
+        })
         .await
         .unwrap();
     assert!(matches!(
@@ -89,13 +86,13 @@ async fn sdk_observation_rejects_unregistered_ticket_without_local_admission() {
     assert!(mailbox.active_run_ticket().is_none());
     let after = fixture
         .resources
-        .inspect_work(&WorkQuery::new(
-            fixture.thread_id(),
-            WorkSelector::Availability,
-        ))
+        .load_session_work(&WorkQuery {
+            session_id: fixture.thread_id(),
+            limit: 1,
+        })
         .await
         .unwrap();
-    assert_eq!(before.head, after.head);
+    assert_eq!(before.state, after.state);
 }
 
 #[tokio::test]
@@ -136,10 +133,10 @@ async fn sdk_observation_recovers_input_ids_only_from_exact_durable_batch() {
     register(&fixture, &admission).await;
     let snapshot = fixture
         .resources
-        .inspect_work(&WorkQuery::new(
-            fixture.thread_id(),
-            WorkSelector::Availability,
-        ))
+        .load_session_work(&WorkQuery {
+            session_id: fixture.thread_id(),
+            limit: 1,
+        })
         .await
         .unwrap();
     let receipt = fixture
@@ -150,46 +147,30 @@ async fn sdk_observation_recovers_input_ids_only_from_exact_durable_batch() {
             mutation_id: "claim-sdk-exact-batch".into(),
             action: WorkAction::ClaimBatch {
                 guard: WorkGuard {
-                    expected_revision: snapshot.head.change_seq,
+                    expected_revision: snapshot.state.revision,
                     expected_control_generation: snapshot.control.control_generation,
                     execution: admission.execution.clone(),
                 },
                 batch_id: admission.work_id.clone(),
-                delivery_ids: match &snapshot.page {
-                    WorkPage::Availability(availability) => {
-                        availability.candidates[0].delivery_ids.clone()
-                    }
-                    _ => panic!("availability page required"),
-                },
+                delivery_ids: snapshot.candidates[0].delivery_ids.clone(),
             },
         })
         .await
         .unwrap();
     assert_eq!(receipt.decision, WorkDecision::Accepted);
     let ticket = mailbox.observe_sdk_run(&admission).await.unwrap();
-    let processing = crate::session::work_access::processing(
-        fixture.resources().as_ref(),
-        &fixture.thread_id(),
-        &admission.work_id,
-    )
-    .await
-    .unwrap();
-    assert_eq!(processing.execution, admission.execution);
-    let inspected = fixture
+    let persisted = fixture
         .resources
-        .inspect_work(&WorkQuery::new(
-            fixture.thread_id(),
-            WorkSelector::ProcessingDeliveries {
-                processing_id: admission.work_id.clone(),
-            },
-        ))
+        .load_session_work(&WorkQuery {
+            session_id: fixture.thread_id(),
+            limit: 1,
+        })
         .await
         .unwrap();
-    let WorkPage::Deliveries(deliveries) = inspected.page else {
-        panic!("delivery page required")
-    };
-    assert_eq!(deliveries.len(), 1);
-    let delivery = &deliveries[0];
+    let batch = &persisted.state.batches[&admission.work_id];
+    assert_eq!(batch.execution, admission.execution);
+    assert_eq!(batch.processing_delivery_ids.len(), 1);
+    let delivery = &persisted.state.deliveries[&batch.processing_delivery_ids[0]];
     let identity: serde_json::Value =
         serde_json::from_str(delivery.publication.event.causation_id.as_deref().unwrap()).unwrap();
     let publication_generation = identity["publication_generation"].as_str().unwrap();
@@ -200,20 +181,7 @@ async fn sdk_observation_recovers_input_ids_only_from_exact_durable_batch() {
         .message_id
         .as_uuid()
         .to_string();
-    let inspected = fixture
-        .resources
-        .inspect_work(&WorkQuery::new(
-            fixture.thread_id(),
-            WorkSelector::Draft {
-                input_id: input_id.clone(),
-            },
-        ))
-        .await
-        .unwrap();
-    let WorkPage::Drafts(drafts) = inspected.page else {
-        panic!("draft page required")
-    };
-    let draft = &drafts[0];
+    let draft = &persisted.state.staged_user_inputs[&input_id];
     assert_eq!(draft.command_id, "publication-generation");
     assert_ne!(publication_generation, draft.command_id);
     assert_eq!(
@@ -279,10 +247,10 @@ async fn sdk_attach_first_binding_starts_once_and_rejects_foreign_admission() {
     let ticket = mailbox.observe_sdk_run(&admission).await.unwrap();
     let before = fixture
         .resources
-        .inspect_work(&WorkQuery::new(
-            fixture.thread_id(),
-            WorkSelector::Availability,
-        ))
+        .load_session_work(&WorkQuery {
+            session_id: fixture.thread_id(),
+            limit: 1,
+        })
         .await
         .unwrap();
     let parent = CancellationToken::new();
@@ -309,13 +277,13 @@ async fn sdk_attach_first_binding_starts_once_and_rejects_foreign_admission() {
     );
     let after = fixture
         .resources
-        .inspect_work(&WorkQuery::new(
-            fixture.thread_id(),
-            WorkSelector::Availability,
-        ))
+        .load_session_work(&WorkQuery {
+            session_id: fixture.thread_id(),
+            limit: 1,
+        })
         .await
         .unwrap();
-    assert_eq!(after.head, before.head);
+    assert_eq!(after.state, before.state);
     assert!(mailbox.stop_attempt(&ticket.id, mailbox.generation()));
     assert!(parent.is_cancelled());
     assert!(!mailbox.attach_sdk_attempt(&admission, CancellationToken::new()));

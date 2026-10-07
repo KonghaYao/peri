@@ -55,23 +55,19 @@ Emscripten 最小入口见 [`peri-wasm`](peri-wasm.md)：复用本 crate 的 `ru
 
 ## 子系统
 
-Inbox 去重入口 `agent/stages/work_receive.rs` 使用 `inspect_work` 的精确 Delivery selector；`work_reads.rs` 只按当前 Processing/phase 分页取得关联记录，并经 `read_evidence` 显式读取所需正文。保留 lifecycle/content/policy 校验、稳定提交身份和失败后批次回队，不加载整个会话账本。
+Inbox 去重入口 `agent/stages/work_receive.rs` 使用 `SessionResources::load_work_delivery` 读取单条交付；保留 lifecycle / content / policy 冲突校验、稳定提交身份和失败后批次回队。不修改候选发现或 Unknown 写屏障；回归入口 `agent/stages/work_receive_test.rs`。
 
 ### 持久 RCRA 与 SDK 准入
 
-`work_recovery.rs` 保留当前 Processing 的 `phase_sequence`；同一 Processing 的阶段游标推进后，`work_receive.rs` 只唤醒后续阶段，不再重复消费初始 Delivery 或触发输入钩子。
-
-`work_receive.rs` 读取精确 Admission 的冻结初始成员，先 Claim 原批次再发布迟到 Inbox 内容；不以当前 Availability 替换已准入候选，也不把新投递加入旧票据。
-
 工具停止与成果结算分离：`tool_dispatch/execution.rs` 收集结果后先经 `work_dispatch.rs` 提交原 invocation outcome，再检查继续执行资格。Blocked/Abandoned 保留停止状态且不生成 successor；无 successor 的结算按原 batch 或真实恢复 admission 校验，不能借新 attempt 重放工具。邮箱 `staging.rs` 在首次 enqueue 的 staged JSON 内固定完整发布授权；原 Queued 重放不重新取得 NewTask 授权，已授权未完成的发布沿用原命令与控制代际。
 
-`agent/stages/work_boundary.rs` 在首个 hook 或模型调用前确认 SDK admission、领域登记和真实 entered ACK；`session/turn.rs` 固定 ticket 的 turn/attempt 与控制代际。`work_ledger.rs` 保存 Unknown 的原命令并冻结副作用；不通过改全局 revision/创建替代身份绕过原命令对账。`work_receive.rs` 原子接纳/领取/投影，`work_reason.rs` 通过不可变载荷引用保存本次实际请求与响应到 Act 的责任交接；`work_dispatch.rs` 按单 Effect revision 提交结果，最后一项原子推进同一 Processing 的阶段游标。`work_recovery.rs` 只按当前关联证据恢复，不把 Transcript 存在当处理完成，不盲重放 OutcomeUnknown。
+`agent/stages/work_boundary.rs` 在首个 hook 或模型调用前确认完整 SDK admission、领域登记和真实 entered ACK；`session/turn.rs` 固定该 ticket 的 turn/attempt 与控制代际。`work_ledger.rs` 保存 Unknown 的完整原命令并冻结副作用；仅对已有确定拒绝回执的 `StaleRevision` 阶段提交，在原生命周期/控制代际/attempt 仍一致时有界重读全局 revision 并创建新提交身份，保留目标工作 revision、完整响应/结果与所有其余 guard，不重跑模型或工具。`work_receive.rs` 原子接纳/领取/投影，`work_reason.rs` 保存实际发送的完整模型请求及响应到 Act 的责任交接，`work_dispatch.rs` 保存工具意图和结果。`work_recovery.rs` 仅使用持久证据恢复阶段，不把 Transcript 存在当作处理完成，不盲重放 OutcomeUnknown 调用。
 
 `tool_dispatch/execution.rs` 保留工具返回的 typed `UserRejected`；MCP Agent 在批准前拒绝明确表示未启动子代理，拒绝理由作为 error tool result 继续交给模型，不能被 boxed 字符串误分类为未知副作用。没有可信分类的普通工具失败仍冻结并保留 OutcomeUnknown。
 
-`work_reason.rs`、`work_dispatch.rs`、`work_receive.rs` 和 `work_boundary.rs` 对已确认的预算阻塞保留类别、已用量与上限；默认语义循环上限引用 `peri-acp-types::session_resources::work::DEFAULT_AGENT_MAX_ITERATIONS`，预算累计归 Processing。错误投影本身不自动重置或解阻。
+`work_reason.rs`、`work_dispatch.rs`、`work_receive.rs` 和 `work_boundary.rs` 对已确认的持久预算阻塞提取预算类别、已用量与上限，经 `peri-acp-types/src/error.rs` 的 `WorkBudgetExhausted` 保留至安全失败投影，不公开任意内部原因。预算策略与默认语义循环上限统一引用 `peri-acp-types/src/session_resources/work/policy.rs`，错误投影本身仍不自动重置或解阻。
 
-`session/user_input_mailbox/staging.rs` 将显式新任务发布与自动历史扫描分开；发布携带精确控制代际和 attempt 预期，不接管并发执行。`work/mailbox.rs` 裁决领取/撤回/显式放弃；旧终态交付责任不无条件阻断新任务，但 Unknown/current barrier、原调用和 ACK 证据不能清除。新模型与快速验证状态见 [实施任务](../../spec/issues/2026-10-06-workstate-redesign-implementation.md)。
+`session/user_input_mailbox/staging.rs` 将真实新输入的空闲新任务发布与自动历史扫描分开；新任务发布固定无 attempt 预期和控制代际，不接管并发新执行。`peri-acp-types/src/session_resources/work/user_input.rs` 在显式选择中放弃已退出的当前生命周期旧 processing，并按完整指纹升级旧默认预算；`work/query.rs` 不让已被放弃批次的旧终态交付责任绑架新任务。未知 mutation、原 invocation 和终态 ACK 证据不被清除。用户最终验收见 [active P0](../../spec/issues/2026-10-06-p0-agent-budget-interruption.md)。
 
 `session/subagent/background.rs::local_other_diagnostic` 将后台本地失败映射为 allowlist 静态诊断码；不输出任意错误文本、模型请求或凭据。work mutation 拒绝另记录结构化 decision/revision，诊断不改变执行、授权或恢复裁决。
 

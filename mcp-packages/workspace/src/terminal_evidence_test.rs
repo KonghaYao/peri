@@ -346,33 +346,17 @@ async fn test_production_dispatch_persists_outer_cancel_uncertainty() {
         .read()
         .idempotent_reminder_port()
         .unwrap();
-    use peri_acp_types::session_resources::work::{WorkPage, WorkQuery, WorkSelector};
-    let inspection = resources
-        .inspect_work(&WorkQuery::new(
-            &session_id,
-            WorkSelector::CurrentProcessing,
-        ))
+    let snapshot = resources
+        .load_session_work(&peri_acp_types::session_resources::work::WorkQuery {
+            session_id,
+            limit: 1,
+        })
         .await
         .unwrap();
-    let WorkPage::Processings(processings) = inspection.page else {
-        panic!("processing page required")
-    };
-    let processing = processings.first().expect("current processing");
-    let inspection = resources
-        .inspect_work(&WorkQuery::new(
-            &session_id,
-            WorkSelector::Effects {
-                processing_id: processing.processing_id.clone(),
-                phase_sequence: Some(processing.phase_sequence),
-            },
-        ))
-        .await
-        .unwrap();
-    let WorkPage::Effects(effects) = inspection.page else {
-        panic!("effect page required")
-    };
-    let invocation = effects
-        .iter()
+    let invocation = snapshot
+        .state
+        .invocations
+        .values()
         .find(|record| record.intent.tool_call_id == "bash-call")
         .unwrap();
     assert_eq!(
@@ -383,8 +367,9 @@ async fn test_production_dispatch_persists_outer_cancel_uncertainty() {
         invocation.outcome.is_none(),
         "outer cancellation is not owner settlement proof"
     );
+    let work = &snapshot.state.works[invocation.work_id.as_ref().unwrap()];
     assert_eq!(
-        processing.stage,
+        work.stage,
         peri_acp_types::session_resources::work::WorkStage::Blocked
     );
     assert!(

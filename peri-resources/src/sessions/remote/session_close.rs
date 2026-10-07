@@ -1,38 +1,40 @@
+//! Durable close intent settlement without execution ownership.
+
 use peri_acp_types::session_resources::{
-    CloseSettlement, ControlAction, ControlDecision, ControlStatus, SessionResourceError,
-    SessionResourceResult,
+    CloseSettlement, SessionResourceError, SessionResourceErrorKind, SessionResourceResult,
 };
 use peri_acp_types::thread::ThreadId;
 use turso_serverless::Value;
 
 use super::super::mutation::RemoteStore;
-use super::super::sql::{int_at, text_at, StatementSpec};
-use super::RemoteSessionData;
-use crate::sessions::{control, failure::corrupt};
+use super::super::sql::{int_at, StatementSpec};
+use super::{not_found, RemoteSessionData};
 
 impl RemoteSessionData {
-    pub(in crate::sessions::remote) async fn change_close_status(
-        &self,
-        id: &ThreadId,
-        action: ControlAction,
-    ) -> SessionResourceResult<()> {
-        let current = self.read_control(id).await?;
-        if action == ControlAction::Close && control::close_request_already_recorded(&current) {
-            return Ok(());
+    pub(super) async fn finish_session_close(&self, id: &ThreadId) -> SessionResourceResult<()> {
+        if !self.exists(id).await? {
+            return Err(not_found());
         }
-        let command = control::close_command(id, &current, action)?;
-        let receipt = self.write_control(&command).await?;
-        if receipt.decision != ControlDecision::Accepted {
+        if !self.read_close_intent(id).await? {
             return Err(SessionResourceError::conflict(
-                "session close control transition was rejected",
+                "session close intent is missing",
             ));
         }
-        Ok(())
-    }
-
-    pub(super) async fn finish_session_close(&self, id: &ThreadId) -> SessionResourceResult<()> {
-        self.change_close_status(id, ControlAction::FinishClose)
-            .await
+        self.commit_effects(
+            "finish_close",
+            std::slice::from_ref(id),
+            vec![StatementSpec::new(
+                "INSERT INTO peri_store_meta(singleton) SELECT 0 WHERE NOT EXISTS
+                    (SELECT 1 FROM threads t JOIN session_close_intents c ON c.thread_id = t.id WHERE t.id = ?1)",
+                vec![Value::Text(id.clone())],
+            ), StatementSpec::new(
+                "DELETE FROM session_close_intents WHERE thread_id = ?1",
+                vec![Value::Text(id.clone())],
+            )],
+            id,
+        )
+        .await
+        .map(|_| ())
     }
 }
 
@@ -41,26 +43,22 @@ impl RemoteStore {
         &self,
         id: &ThreadId,
     ) -> SessionResourceResult<CloseSettlement> {
-        let row = self.fetch_row(&StatementSpec::new(
-            "SELECT EXISTS(SELECT 1 FROM threads WHERE id=?1),state_json FROM (SELECT 1) LEFT JOIN session_control_state ON session_id=?1",
-            vec![Value::Text(id.clone())],
-        )).await?.ok_or_else(||corrupt("session close settlement is missing"))?;
-        let exists = int_at(&row, 0).ok_or_else(|| corrupt("invalid close settlement reply"))?;
-        let json = match row.get(1) {
-            Some(Value::Null) => None,
-            Some(Value::Text(_)) => text_at(&row, 1),
-            _ => return Err(corrupt("invalid close control state")),
-        };
-        if exists == 0 && json.is_none() {
-            return Ok(CloseSettlement::Unknown);
-        }
-        match control::state(json)?.status {
-            ControlStatus::Closing => Ok(CloseSettlement::Pending),
-            ControlStatus::Closed => Ok(CloseSettlement::Finished),
-            ControlStatus::Active | ControlStatus::Paused if exists != 0 => {
-                Ok(CloseSettlement::Finished)
-            }
-            ControlStatus::Active | ControlStatus::Paused => Ok(CloseSettlement::Unknown),
+        let row = self
+            .fetch_row(&StatementSpec::new(
+                "SELECT EXISTS (SELECT 1 FROM threads WHERE id = ?1),
+                    EXISTS (SELECT 1 FROM session_close_intents WHERE thread_id = ?1)",
+                vec![Value::Text(id.clone())],
+            ))
+            .await?;
+        match row.as_deref().map(|row| (int_at(row, 0), int_at(row, 1))) {
+            Some((Some(0), _)) => Ok(CloseSettlement::Unknown),
+            Some((Some(1), Some(1))) => Ok(CloseSettlement::Pending),
+            Some((Some(1), Some(0))) => Ok(CloseSettlement::Finished),
+            _ => Err(SessionResourceError::new(
+                SessionResourceErrorKind::Internal {
+                    detail: "invalid close settlement reply".to_owned(),
+                },
+            )),
         }
     }
 }

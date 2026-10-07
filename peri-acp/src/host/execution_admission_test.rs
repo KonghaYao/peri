@@ -3,7 +3,7 @@ use crate::transport::types::AcpError;
 use peri_acp_types::{
     execution_admission::AttemptStoppedProof,
     session_resources::{
-        work::{WorkAdmission, WorkCandidate, WorkStage},
+        work::{WorkAdmission, WorkCandidate, WorkSnapshot, WorkStage, WorkState},
         ControlState,
     },
 };
@@ -45,18 +45,22 @@ fn request() -> AdmissionRequest {
     AdmissionRequest {
         existing_admission: None,
         request_id: "stable-request".into(),
-        snapshot: peri_acp_types::execution_admission::AdmissionSnapshot {
+        snapshot: WorkSnapshot {
+            pending_commands: Vec::new(),
             session_id: "s".into(),
             control: ControlState::default(),
+            state: WorkState::default(),
             blocked: false,
             candidates: vec![WorkCandidate {
                 work_id: "w".into(),
                 work_revision: 0,
                 stage: WorkStage::ReasonReady,
+                batch_id: None,
                 delivery_ids: Vec::new(),
                 requires_recovery: false,
             }],
-        },
+        }
+        .into(),
     }
 }
 

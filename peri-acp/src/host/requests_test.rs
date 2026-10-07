@@ -35,9 +35,6 @@ mod recovery_tests;
 #[path = "requests/session_control_test.rs"]
 mod session_control_tests;
 
-#[path = "execution_work_test.rs"]
-mod execution_work_tests;
-
 #[path = "requests_legacy_test.rs"]
 mod legacy_tests;
 

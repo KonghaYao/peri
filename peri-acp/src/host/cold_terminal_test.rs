@@ -65,28 +65,10 @@ impl Fixture {
             invocation_id: "delegation-invocation".into(),
             tool_call_id: "delegation-call".into(),
             tool_name: "Task".into(),
-            arguments: resources
-                .prepare_evidence(&EvidenceWrite {
-                    session_id: "original-parent".into(),
-                    storage_scope: "original-parent".into(),
-                    payload_id: "arguments".into(),
-                    encoding: 1,
-                    bytes: b"{}".to_vec(),
-                })
-                .await
-                .unwrap(),
+            arguments_json: "{}".into(),
             arguments_digest: digest.clone(),
             effective_tool_name: "Task".into(),
-            effective_arguments: resources
-                .prepare_evidence(&EvidenceWrite {
-                    session_id: "original-parent".into(),
-                    storage_scope: "original-parent".into(),
-                    payload_id: "arguments".into(),
-                    encoding: 1,
-                    bytes: b"{}".to_vec(),
-                })
-                .await
-                .unwrap(),
+            effective_arguments_json: "{}".into(),
             effective_arguments_digest: digest,
             owner_identity: "owned-child-factory".into(),
             scope_id: "original-parent".into(),
@@ -103,26 +85,31 @@ impl Fixture {
             recovery_locator: intent.recovery_locator.clone(),
             authorization_ref: intent.authorization_ref.clone(),
         };
-        prepare_parent_dispatch(resources.as_ref(), intent).await;
-        let parent = snapshot(resources.as_ref(), "original-parent").await;
+        apply(
+            resources.as_ref(),
+            "original-parent",
+            "prepare",
+            WorkAction::PrepareInvocation {
+                expected_revision: 0,
+                intent,
+            },
+        )
+        .await;
         let parent_binding_receipt = apply(
             resources.as_ref(),
             "original-parent",
             "bind",
             WorkAction::ReconcileTaskBinding {
-                expected_revision: parent.head.change_seq,
+                expected_revision: 1,
                 binding: binding.clone(),
             },
         )
         .await;
         let delivery = publication(
-            resources.as_ref(),
-            "child",
             "child-input",
             "execute saved child",
             DeliveryPurpose::UserInput,
-        )
-        .await;
+        );
         apply(
             resources.as_ref(),
             "child",
@@ -131,9 +118,19 @@ impl Fixture {
         )
         .await;
         let work = snapshot(resources.as_ref(), "child").await;
-        let candidate = &crate::host::work_query::availability(&work)
-            .unwrap()
-            .candidates[0];
+        let candidate = &work.candidates[0];
+        apply(
+            resources.as_ref(),
+            "child",
+            "delegation",
+            WorkAction::BindWorkDelegation {
+                expected_revision: work.state.revision,
+                work_id: candidate.work_id.clone(),
+                binding: binding.clone(),
+                parent_binding_receipt,
+            },
+        )
+        .await;
         let admission = WorkAdmission {
             session_id: "child".into(),
             admission_id: "owned-admission".into(),
@@ -164,33 +161,15 @@ impl Fixture {
             "claim",
             WorkAction::ClaimBatch {
                 guard: WorkGuard {
-                    expected_revision: work.head.change_seq,
+                    expected_revision: work.state.revision,
                     expected_control_generation: work.control.control_generation,
                     execution: admission.execution.clone(),
                 },
                 batch_id: admission.work_id.clone(),
-                delivery_ids: crate::host::work_query::availability(&work)
-                    .unwrap()
-                    .candidates[0]
-                    .delivery_ids
-                    .clone(),
+                delivery_ids: work.candidates[0].delivery_ids.clone(),
             },
         )
         .await;
-        let work = snapshot(resources.as_ref(), "child").await;
-        apply(
-            resources.as_ref(),
-            "child",
-            "delegation",
-            WorkAction::BindWorkDelegation {
-                expected_revision: work.head.change_seq,
-                work_id: admission.work_id.clone(),
-                binding: binding.clone(),
-                parent_binding_receipt,
-            },
-        )
-        .await;
-
         let work = snapshot(resources.as_ref(), "child").await;
         apply(
             resources.as_ref(),
@@ -198,32 +177,17 @@ impl Fixture {
             "reason",
             WorkAction::BeginReason {
                 guard: WorkGuard {
-                    expected_revision: work.head.change_seq,
+                    expected_revision: work.state.revision,
                     expected_control_generation: work.control.control_generation,
                     execution: admission.execution.clone(),
                 },
                 target: WorkTarget {
                     work_id: admission.work_id.clone(),
-                    expected_work_revision: crate::host::work_query::test_processing(
-                        resources.as_ref(),
-                        "child",
-                        &admission.work_id,
-                    )
-                    .await
-                    .revision,
+                    expected_work_revision: work.state.works[&admission.work_id].revision,
                 },
                 request_id: "child-request".into(),
                 request: ReasonRequest {
-                    payload: resources
-                        .prepare_evidence(&EvidenceWrite {
-                            session_id: "child".into(),
-                            storage_scope: "child".into(),
-                            payload_id: "request".into(),
-                            encoding: 1,
-                            bytes: b"{}".to_vec(),
-                        })
-                        .await
-                        .unwrap(),
+                    serialized_request: "{}".into(),
                     request_digest: format!("{:x}", Sha256::digest(b"{}")),
                     model_ref: "saved-child-model".into(),
                     authorization_ref: "saved-child-authorization".into(),
@@ -238,27 +202,19 @@ impl Fixture {
             "model-response",
             WorkAction::CommitReasonResponseAndDispatchIntent {
                 guard: WorkGuard {
-                    expected_revision: work.head.change_seq,
+                    expected_revision: work.state.revision,
                     expected_control_generation: work.control.control_generation,
                     execution: admission.execution.clone(),
                 },
                 target: WorkTarget {
                     work_id: admission.work_id.clone(),
-                    expected_work_revision: crate::host::work_query::test_processing(
-                        resources.as_ref(),
-                        "child",
-                        &admission.work_id,
-                    )
-                    .await
-                    .revision,
+                    expected_work_revision: work.state.works[&admission.work_id].revision,
                 },
                 request_id: "child-request".into(),
-                response: crate::host::work_query::test_payload(
-                    resources.as_ref(),
-                    "child",
-                    &PersistedPayload::Message(BaseMessage::ai("saved child result")),
-                )
-                .await,
+                response: WorkPayload::from_payload(&PersistedPayload::Message(BaseMessage::ai(
+                    "saved child result",
+                )))
+                .unwrap(),
                 dispatch_intents: Vec::new(),
                 next_work_id: None,
             },
@@ -270,7 +226,7 @@ impl Fixture {
             "child",
             "metadata",
             WorkAction::BindChildResumeMetadata {
-                expected_revision: work.head.change_seq,
+                expected_revision: work.state.revision,
                 metadata_json:
                     serde_json::json!({"version":1,"childSessionId":"child","recipientLifecycle":1,
                 "directInitiatorSessionId":"original-parent","directInitiatorLifecycle":1,
@@ -302,13 +258,10 @@ impl Fixture {
             mutation_id: "original-terminal-command".into(),
             action: WorkAction::PublishTaskSettlement {
                 delivery: publication(
-                    resources.as_ref(),
-                    "original-parent",
                     "original-terminal",
                     "saved child result",
                     DeliveryPurpose::TaskTerminal,
-                )
-                .await,
+                ),
                 binding,
             },
         };
@@ -327,13 +280,7 @@ impl Fixture {
     }
 }
 
-async fn publication(
-    resources: &dyn SessionResources,
-    session_id: &str,
-    id: &str,
-    text: &str,
-    purpose: DeliveryPurpose,
-) -> PublishDelivery {
+fn publication(id: &str, text: &str, purpose: DeliveryPurpose) -> PublishDelivery {
     PublishDelivery {
         delivery_id: id.into(),
         event: WorkEvent {
@@ -341,190 +288,24 @@ async fn publication(
             event_id: id.into(),
             event_kind: "terminal-test".into(),
             causation_id: None,
-            content: crate::host::work_query::test_payload(
-                resources,
-                session_id,
-                &PersistedPayload::Message(BaseMessage::human(text)),
-            )
-            .await,
+            content: WorkPayload::from_payload(&PersistedPayload::Message(BaseMessage::human(
+                text,
+            )))
+            .unwrap(),
         },
         purpose,
         policy: MessagePolicy::ensure_processing(),
     }
 }
 
-async fn snapshot(resources: &dyn SessionResources, session_id: &str) -> WorkInspection {
+async fn snapshot(resources: &dyn SessionResources, session_id: &str) -> WorkSnapshot {
     resources
-        .inspect_work(&WorkQuery {
+        .load_session_work(&WorkQuery {
             session_id: session_id.into(),
-            selector: WorkSelector::Availability,
             limit: 1,
-            cursor: None,
         })
         .await
         .unwrap()
-}
-
-async fn prepare_parent_dispatch(resources: &dyn SessionResources, intent: InvocationIntent) {
-    let session_id = "original-parent";
-    let delivery = publication(
-        resources,
-        session_id,
-        "parent-input",
-        "delegate to child",
-        DeliveryPurpose::UserInput,
-    )
-    .await;
-    apply(
-        resources,
-        session_id,
-        "parent-input",
-        WorkAction::PublishDelivery { delivery },
-    )
-    .await;
-    let available = snapshot(resources, session_id).await;
-    let candidate = &crate::host::work_query::availability(&available)
-        .unwrap()
-        .candidates[0];
-    let admission = WorkAdmission {
-        session_id: session_id.into(),
-        admission_id: "parent-admission".into(),
-        instance_id: "sdk-instance".into(),
-        generation_id: "sdk-generation".into(),
-        lifecycle: available.control.lifecycle,
-        control_generation: available.control.control_generation,
-        work_id: candidate.work_id.clone(),
-        work_revision: candidate.work_revision,
-        execution: ControlAttempt {
-            turn_id: TurnId::new(),
-            attempt_id: AttemptId::new(),
-        },
-    };
-    let delivery_ids = candidate.delivery_ids.clone();
-    apply(
-        resources,
-        session_id,
-        "parent-enter",
-        WorkAction::RegisterAdmission {
-            admission: admission.clone(),
-        },
-    )
-    .await;
-    let work = snapshot(resources, session_id).await;
-    apply(
-        resources,
-        session_id,
-        "parent-claim",
-        WorkAction::ClaimBatch {
-            guard: WorkGuard {
-                expected_revision: work.head.change_seq,
-                expected_control_generation: work.control.control_generation,
-                execution: admission.execution.clone(),
-            },
-            batch_id: admission.work_id.clone(),
-            delivery_ids,
-        },
-    )
-    .await;
-    let work = snapshot(resources, session_id).await;
-    let processing =
-        crate::host::work_query::test_processing(resources, session_id, &admission.work_id).await;
-    apply(
-        resources,
-        session_id,
-        "parent-reason",
-        WorkAction::BeginReason {
-            guard: WorkGuard {
-                expected_revision: work.head.change_seq,
-                expected_control_generation: work.control.control_generation,
-                execution: admission.execution.clone(),
-            },
-            target: WorkTarget {
-                work_id: admission.work_id.clone(),
-                expected_work_revision: processing.revision,
-            },
-            request_id: "parent-request".into(),
-            request: ReasonRequest {
-                payload: intent.arguments.clone(),
-                request_digest: intent.arguments_digest.clone(),
-                model_ref: "saved-parent-model".into(),
-                authorization_ref: intent.authorization_ref.clone(),
-            },
-        },
-    )
-    .await;
-    let work = snapshot(resources, session_id).await;
-    let processing =
-        crate::host::work_query::test_processing(resources, session_id, &admission.work_id).await;
-    let response = crate::host::work_query::test_payload(
-        resources,
-        session_id,
-        &PersistedPayload::Message(BaseMessage::ai_with_tool_calls(
-            "delegate to child",
-            vec![peri_acp_types::messages::ToolCallRequest::new(
-                &intent.tool_call_id,
-                &intent.tool_name,
-                serde_json::json!({}),
-            )],
-        )),
-    )
-    .await;
-    apply(
-        resources,
-        session_id,
-        "parent-response",
-        WorkAction::CommitReasonResponseAndDispatchIntent {
-            guard: WorkGuard {
-                expected_revision: work.head.change_seq,
-                expected_control_generation: work.control.control_generation,
-                execution: admission.execution.clone(),
-            },
-            target: WorkTarget {
-                work_id: admission.work_id.clone(),
-                expected_work_revision: processing.revision,
-            },
-            request_id: "parent-request".into(),
-            response,
-            dispatch_intents: vec![intent.clone()],
-            next_work_id: None,
-        },
-    )
-    .await;
-    let work = snapshot(resources, session_id).await;
-    let processing =
-        crate::host::work_query::test_processing(resources, session_id, &admission.work_id).await;
-    let effect = crate::host::work_query::inspect(
-        resources,
-        session_id,
-        WorkSelector::Effect {
-            invocation_id: intent.invocation_id.clone(),
-        },
-    )
-    .await
-    .unwrap();
-    let WorkPage::Effects(effects) = effect.page else {
-        panic!("expected invocation page")
-    };
-    assert_eq!(effects[0].status, InvocationStatus::Prepared);
-    apply(
-        resources,
-        session_id,
-        "parent-dispatch",
-        WorkAction::BeginDispatch {
-            guard: WorkGuard {
-                expected_revision: work.head.change_seq,
-                expected_control_generation: work.control.control_generation,
-                execution: admission.execution,
-            },
-            target: WorkTarget {
-                work_id: admission.work_id,
-                expected_work_revision: processing.revision,
-            },
-            invocation_id: intent.invocation_id,
-            expected_effect_revision: effects[0].revision,
-        },
-    )
-    .await;
 }
 
 async fn apply(
@@ -542,11 +323,7 @@ async fn apply(
         })
         .await
         .unwrap();
-    assert_eq!(
-        receipt.decision,
-        WorkDecision::Accepted,
-        "{session_id}:{mutation_id}"
-    );
+    assert_eq!(receipt.decision, WorkDecision::Accepted);
     receipt
 }
 
@@ -561,22 +338,25 @@ async fn crash_before_parent_rpc_recovers_original_obligation_without_model_reex
     .await
     .unwrap();
     let cold = fixture.reopen().await;
-    assert!(snapshot(&cold, "original-parent").await.head.required_count == 0);
+    assert!(snapshot(&cold, "original-parent")
+        .await
+        .state
+        .deliveries
+        .is_empty());
     assert!(
-        crate::host::work_query::test_admission(&cold, "child", "owned-admission")
-            .await
-            .leaving_evidence_id
+        snapshot(&cold, "child").await.state.admissions["owned-admission"]
+            .settled_receipt
             .is_none()
     );
     assert!(reconcile(&cold, &fixture.admission).await.unwrap());
-    let owned = crate::host::work_query::command(
-        &cold,
-        &fixture.terminal.session_id,
-        &fixture.terminal.mutation_id,
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    let owned = cold
+        .load_work_command(&WorkCommandQuery {
+            session_id: fixture.terminal.session_id.clone(),
+            mutation_id: fixture.terminal.mutation_id.clone(),
+        })
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(owned.command, fixture.terminal);
     assert!(
         matches!(owned.resolution, Some(WorkResolution::Applied { receipt }) if receipt.decision == WorkDecision::Accepted)
@@ -585,14 +365,17 @@ async fn crash_before_parent_rpc_recovers_original_obligation_without_model_reex
         .await
         .unwrap();
     assert!(
-        crate::host::work_query::test_admission(&cold, "child", "owned-admission")
-            .await
-            .leaving_evidence_id
+        snapshot(&cold, "child").await.state.admissions["owned-admission"]
+            .settled_receipt
             .is_some()
     );
     assert!(reconcile(&cold, &fixture.admission).await.unwrap());
     assert_eq!(
-        snapshot(&cold, "original-parent").await.head.required_count,
+        snapshot(&cold, "original-parent")
+            .await
+            .state
+            .deliveries
+            .len(),
         1
     );
 }
@@ -615,23 +398,18 @@ async fn conflicting_terminal_payload_cannot_replace_unfinished_obligation() {
             .is_err()
     );
     assert_eq!(
-        *crate::host::work_query::test_terminal(
-            fixture.resources.as_ref(),
-            "child",
-            "owned-admission"
-        )
-        .await
-        .command,
+        snapshot(fixture.resources.as_ref(), "child")
+            .await
+            .state
+            .terminal_obligations["owned-admission"],
         fixture.terminal
     );
-    assert!(crate::host::work_query::test_admission(
-        fixture.resources.as_ref(),
-        "child",
-        "owned-admission"
-    )
-    .await
-    .leaving_evidence_id
-    .is_none());
+    assert!(snapshot(fixture.resources.as_ref(), "child")
+        .await
+        .state
+        .admissions["owned-admission"]
+        .settled_receipt
+        .is_none());
 }
 
 struct LostTerminalAck {
@@ -648,22 +426,16 @@ macro_rules! unsupported_facade_operations {
                 Err(SessionResourceError::new(SessionResourceErrorKind::Unsupported))
             })*
 
-            async fn inspect_work(&self, query: &WorkQuery) -> SessionResourceResult<WorkInspection> {
-                let inspected = self.inner.inspect_work(query).await?;
-                if query.session_id == "original-parent" && matches!(query.selector, WorkSelector::Command { .. })
-                    && matches!(&inspected.page, WorkPage::Commands(commands) if !commands.is_empty())
-                    && self.unavailable.load(Ordering::SeqCst) {
+            async fn load_session_work(&self, query: &WorkQuery) -> SessionResourceResult<WorkSnapshot> {
+                self.inner.load_session_work(query).await
+            }
+
+            async fn load_work_command(&self, query: &WorkCommandQuery) -> SessionResourceResult<Option<OwnedWorkCommand>> {
+                let owned = self.inner.load_work_command(query).await?;
+                if query.session_id == "original-parent" && owned.is_some() && self.unavailable.load(Ordering::SeqCst) {
                     return Err(SessionResourceError::persistence_uncertain(Some(query.session_id.clone())));
                 }
-                Ok(inspected)
-            }
-
-            async fn prepare_evidence(&self, write: &EvidenceWrite) -> SessionResourceResult<PayloadRef> {
-                self.inner.prepare_evidence(write).await
-            }
-
-            async fn read_evidence(&self, query: &EvidenceQuery) -> SessionResourceResult<EvidenceRecord> {
-                self.inner.read_evidence(query).await
+                Ok(owned)
             }
 
             async fn apply_work_mutation(&self, command: &WorkCommand) -> SessionResourceResult<WorkReceipt> {
@@ -735,32 +507,16 @@ async fn lost_parent_ack_keeps_child_admission_running_until_cold_original_comma
         unavailable: AtomicBool::new(true),
     };
     assert!(reconcile(&partitioned, &fixture.admission).await.is_err());
+    let pending = snapshot(fixture.resources.as_ref(), "child").await;
     assert_eq!(
-        crate::host::work_query::test_processing(
-            fixture.resources.as_ref(),
-            "child",
-            &fixture.admission.work_id
-        )
-        .await
-        .stage,
+        pending.state.works[&fixture.admission.work_id].stage,
         WorkStage::Settled
     );
-    assert!(crate::host::work_query::test_admission(
-        fixture.resources.as_ref(),
-        "child",
-        "owned-admission"
-    )
-    .await
-    .leaving_evidence_id
-    .is_none());
+    assert!(pending.state.admissions["owned-admission"]
+        .settled_receipt
+        .is_none());
     assert_eq!(
-        *crate::host::work_query::test_terminal(
-            fixture.resources.as_ref(),
-            "child",
-            "owned-admission"
-        )
-        .await
-        .command,
+        pending.state.terminal_obligations["owned-admission"],
         fixture.terminal
     );
     let cold = fixture.reopen().await;
@@ -769,13 +525,16 @@ async fn lost_parent_ack_keeps_child_admission_running_until_cold_original_comma
         .await
         .unwrap();
     assert!(
-        crate::host::work_query::test_admission(&cold, "child", "owned-admission")
-            .await
-            .leaving_evidence_id
+        snapshot(&cold, "child").await.state.admissions["owned-admission"]
+            .settled_receipt
             .is_some()
     );
     assert_eq!(
-        snapshot(&cold, "original-parent").await.head.required_count,
+        snapshot(&cold, "original-parent")
+            .await
+            .state
+            .deliveries
+            .len(),
         1
     );
 }

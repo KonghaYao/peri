@@ -6,7 +6,7 @@ use peri_acp_types::execution_admission::{
 };
 use peri_acp_types::execution_admission::{EntryOutcome, EntryRequest};
 use peri_acp_types::session_resources::{
-    work::{WorkCandidate, WorkStage},
+    work::{WorkCandidate, WorkSnapshot, WorkStage, WorkState},
     ControlState,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -309,18 +309,22 @@ fn snapshot_request(request_id: &str) -> AdmissionRequest {
     AdmissionRequest {
         existing_admission: None,
         request_id: request_id.into(),
-        snapshot: peri_acp_types::execution_admission::AdmissionSnapshot {
+        snapshot: WorkSnapshot {
+            pending_commands: Vec::new(),
             session_id: "sqlite-transport-session".into(),
             control: ControlState::default(),
+            state: WorkState::default(),
             blocked: false,
             candidates: vec![WorkCandidate {
                 work_id: "fixture-work".into(),
                 work_revision: 0,
                 stage: WorkStage::ReasonReady,
+                batch_id: None,
                 delivery_ids: Vec::new(),
                 requires_recovery: false,
             }],
-        },
+        }
+        .into(),
     }
 }
 
@@ -363,22 +367,14 @@ async fn real_sqlite_large_required_payload_is_admitted_by_real_sdk_through_lean
         .await
         .unwrap();
     let snapshot = resources
-        .inspect_work(&WorkQuery {
+        .load_session_work(&WorkQuery {
             session_id: session_id.clone(),
-            selector: peri_acp_types::session_resources::work::WorkSelector::Availability,
             limit: 1,
-            cursor: None,
         })
         .await
         .unwrap();
-    assert!(serde_json::to_vec(&snapshot).unwrap().len() < 4096);
-    assert_eq!(
-        crate::host::work_query::availability(&snapshot)
-            .unwrap()
-            .candidates
-            .len(),
-        1
-    );
+    assert!(serde_json::to_vec(&snapshot).unwrap().len() > 4 * 1024 * 1024);
+    assert_eq!(snapshot.candidates.len(), 1);
     let request = AdmissionRequest {
         request_id: "large-required-store-fixture".into(),
         snapshot: (&snapshot).into(),
@@ -400,9 +396,7 @@ async fn real_sqlite_large_required_payload_is_admitted_by_real_sdk_through_lean
     let AdmissionOutcome::Admitted { admission } = port.admit(request).await.unwrap() else {
         panic!("durable large Required input must reach actual SDK admission")
     };
-    peri_acp_types::execution_admission::AdmissionSnapshot::from(&snapshot)
-        .validate_admission(&admission)
-        .unwrap();
+    snapshot.validate_admission(&admission).unwrap();
     let record = dispatcher
         .send_request("peri/execution/query", json!({"sessionId":session_id}))
         .await

@@ -11,7 +11,7 @@ use super::{
 use anyhow::Result;
 use peri_acp_types::{
     messages::BaseMessage,
-    store::{InheritedContext, PersistedPayload},
+    store::{deserialize_persisted_payload, InheritedContext, PersistedPayload},
     thread::{ThreadId, ThreadMeta},
 };
 use sqlx::{AssertSqlSafe, SqliteConnection};
@@ -113,18 +113,26 @@ pub(super) async fn load_meta_on(
     )
 }
 
-/// 自有 payload 按 transcript sequence 读取，并复核 envelope 身份与内容引用。
+/// 自有 payload 读取：`rowid` 顺序即 canonical 顺序，并复核行内 ID 与主键一致。
 pub(super) async fn load_payloads_on(
     connection: &mut SqliteConnection,
     id: &ThreadId,
 ) -> Result<Vec<PersistedPayload>> {
-    let rows: Vec<(String, String, String)> = sqlx::query_as(
-        "SELECT message_id, role, content_ref FROM messages WHERE thread_id = ?1 ORDER BY transcript_seq, message_id",
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT message_id, content FROM messages WHERE thread_id = ?1 ORDER BY rowid",
     )
     .bind(id.as_str())
     .fetch_all(&mut *connection)
     .await?;
-    Ok(super::session_data::messages::decode_rows(connection, rows).await?)
+    rows.into_iter()
+        .map(|(row_id, content)| {
+            let payload = deserialize_persisted_payload(&content)?;
+            if payload.id().as_uuid().to_string() != row_id {
+                anyhow::bail!("persisted payload message id mismatch");
+            }
+            Ok(payload)
+        })
+        .collect()
 }
 
 pub(super) async fn load_context_payloads_on(
@@ -239,24 +247,31 @@ async fn load_payloads_up_to_on(
     thread_id: &ThreadId,
     message_id: &str,
 ) -> Result<Vec<PersistedPayload>> {
-    let target_row: Option<(i64,)> = sqlx::query_as(
-        "SELECT transcript_seq FROM messages WHERE thread_id = ?1 AND message_id = ?2",
-    )
-    .bind(thread_id.as_str())
-    .bind(message_id)
-    .fetch_optional(&mut *connection)
-    .await?;
-    let Some((target_sequence,)) = target_row else {
+    let target_row: Option<(i64,)> =
+        sqlx::query_as("SELECT rowid FROM messages WHERE thread_id = ?1 AND message_id = ?2")
+            .bind(thread_id.as_str())
+            .bind(message_id)
+            .fetch_optional(&mut *connection)
+            .await?;
+    let Some((target_rowid,)) = target_row else {
         return Ok(vec![]);
     };
-    let rows: Vec<(String, String, String)> = sqlx::query_as(
-        "SELECT message_id, role, content_ref FROM messages WHERE thread_id = ?1 AND transcript_seq <= ?2 ORDER BY transcript_seq, message_id",
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT message_id, content FROM messages WHERE thread_id = ?1 AND rowid <= ?2 ORDER BY rowid",
     )
     .bind(thread_id.as_str())
-    .bind(target_sequence)
+    .bind(target_rowid)
     .fetch_all(&mut *connection)
     .await?;
-    Ok(super::session_data::messages::decode_rows(connection, rows).await?)
+    rows.into_iter()
+        .map(|(row_id, content)| {
+            let payload = deserialize_persisted_payload(&content)?;
+            if payload.id().as_uuid().to_string() != row_id {
+                anyhow::bail!("persisted payload message id mismatch");
+            }
+            Ok(payload)
+        })
+        .collect()
 }
 
 impl SqliteSessionDatabase {

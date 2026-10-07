@@ -27,18 +27,18 @@ impl ExecutionAdmissionPort for ExplicitSdkFixture {
     ) -> Result<EntryOutcome, ExecutionAdmissionError> {
         let snapshot = self
             .0
-            .inspect_work(&WorkQuery::new(
-                request.admission.session_id.clone(),
-                WorkSelector::Availability,
-            ))
+            .load_session_work(&WorkQuery {
+                session_id: request.admission.session_id.clone(),
+                limit: 1,
+            })
             .await
             .map_err(|error| ExecutionAdmissionError::Protocol(error.to_string()))?;
-        let registration =
-            crate::session::work_access::admission(self.0.as_ref(), &request.admission)
-                .await
-                .map_err(|error| ExecutionAdmissionError::Protocol(error.to_string()))?;
+        let registration = &snapshot.state.admissions[&request.admission.admission_id];
         assert_eq!(registration.admission, request.admission);
-        assert_eq!(registration.entering_mutation_id, request.entry_evidence_id);
+        assert_eq!(
+            registration.entering_receipt.as_ref().unwrap().mutation_id,
+            request.entry_evidence_id
+        );
         assert_eq!(
             snapshot.control.attempt.as_ref(),
             Some(&request.admission.execution)
@@ -64,54 +64,6 @@ pub(super) struct ProductionFixture {
     pub(super) context: StageContext,
     pub(super) admission: WorkAdmission,
     pub(super) delivery_id: String,
-}
-
-pub(super) async fn saved_processing(fixture: &ProductionFixture) -> Processing {
-    crate::session::work_access::processing(
-        fixture.bound.resources().as_ref(),
-        &fixture.bound.thread_id(),
-        &fixture.admission.work_id,
-    )
-    .await
-    .unwrap()
-}
-
-pub(super) async fn saved_effects(fixture: &ProductionFixture) -> Vec<Effect> {
-    let inspected = fixture
-        .bound
-        .resources()
-        .inspect_work(&WorkQuery::new(
-            fixture.bound.thread_id(),
-            WorkSelector::Effects {
-                processing_id: fixture.admission.work_id.clone(),
-                phase_sequence: None,
-            },
-        ))
-        .await
-        .unwrap();
-    let WorkPage::Effects(effects) = inspected.page else {
-        panic!("expected effect page")
-    };
-    assert!(inspected.next_cursor.is_none());
-    effects
-}
-
-pub(super) async fn saved_delivery(fixture: &ProductionFixture) -> Delivery {
-    let inspected = fixture
-        .bound
-        .resources()
-        .inspect_work(&WorkQuery::new(
-            fixture.bound.thread_id(),
-            WorkSelector::Delivery {
-                delivery_id: fixture.delivery_id.clone(),
-            },
-        ))
-        .await
-        .unwrap();
-    let WorkPage::Deliveries(mut deliveries) = inspected.page else {
-        panic!("expected delivery page")
-    };
-    deliveries.pop().unwrap()
 }
 
 pub(super) async fn fixture(
@@ -143,16 +95,13 @@ pub(super) async fn fixture_with_input(
         .unwrap();
     let snapshot = bound
         .resources
-        .inspect_work(&WorkQuery::new(
-            bound.thread_id(),
-            WorkSelector::Availability,
-        ))
+        .load_session_work(&WorkQuery {
+            session_id: bound.thread_id(),
+            limit: 1,
+        })
         .await
         .unwrap();
-    let WorkPage::Availability(availability) = &snapshot.page else {
-        panic!("expected availability")
-    };
-    let candidate = &availability.candidates[0];
+    let candidate = &snapshot.candidates[0];
     let turn = session.start_turn();
     let execution = turn.execution_binding();
     let admission = WorkAdmission {
@@ -198,7 +147,7 @@ pub(super) async fn fixture_with_input(
         bound,
         context,
         admission,
-        delivery_id: candidate.delivery_ids[0].clone(),
+        delivery_id: candidate.work_id.clone(),
     }
 }
 
@@ -260,31 +209,25 @@ pub(super) fn serve(
         let (mut socket, _) = listener.accept().await.unwrap();
         let body = read_http_body(&mut socket).await;
         let snapshot = resources
-            .inspect_work(&WorkQuery::new(&session_id, WorkSelector::Head))
-            .await
-            .unwrap();
-        let work = crate::session::work_access::processing(
-            resources.as_ref(),
-            &session_id,
-            snapshot.head.current_processing_id.as_deref().unwrap(),
-        )
-        .await
-        .unwrap();
-        assert_eq!(work.stage, WorkStage::ReasonInFlight);
-        let checkpoint = resources
-            .read_evidence(&EvidenceQuery {
+            .load_session_work(&WorkQuery {
                 session_id,
-                reference: work.request.clone().unwrap(),
+                limit: 1,
             })
             .await
             .unwrap();
-        checkpoint.validate().unwrap();
-        let full: Value = serde_json::from_slice(&checkpoint.bytes).unwrap();
+        let work = snapshot
+            .state
+            .works
+            .values()
+            .find(|work| work.stage == WorkStage::ReasonInFlight)
+            .unwrap();
+        let checkpoint = work.reason_request.as_ref().unwrap();
+        let full: Value = serde_json::from_str(&checkpoint.serialized_request).unwrap();
         assert_eq!(full["request"]["body"], body);
-        assert!(!String::from_utf8(checkpoint.bytes)
-            .unwrap()
+        assert!(!checkpoint
+            .serialized_request
             .contains("never-persist-this-api-key"));
-        assert_eq!(work.budget.reason_requests, 1);
+        assert_eq!(snapshot.state.budgets[&work.budget_id].reason_requests, 1);
         let delta = if tools {
             json!({"role":"assistant","tool_calls":[{"index":0,"id":"call-native","type":"function","function":{"name":"probe","arguments":"{\"value\":\"exact\"}"}}]})
         } else {

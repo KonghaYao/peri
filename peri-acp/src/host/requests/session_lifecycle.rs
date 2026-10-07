@@ -85,17 +85,6 @@ pub(crate) fn handle_initialize(params: &Value, cfg: &AcpServerConfig) -> Result
         .unwrap_or(1);
     info!(protocol_version = %version, "ACP initialize");
 
-    if let Some(protocol) = params.pointer("/clientCapabilities/_meta/peri.executionProtocol") {
-        if protocol.as_u64()
-            != Some(crate::host::execution_admission::EXECUTION_PROTOCOL_VERSION.into())
-        {
-            return Err(AcpError::new(
-                -32602,
-                "Unsupported Peri execution protocol; version 2 is required",
-            ));
-        }
-    }
-
     // 解析 clientCapabilities._meta 中的 peri 自定义 flag
     let peri_caps = params
         .get("clientCapabilities")

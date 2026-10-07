@@ -33,22 +33,18 @@ impl ExecutionAdmissionPort for ExplicitSdkFixture {
     ) -> Result<EntryOutcome, ExecutionAdmissionError> {
         let snapshot = self
             .resources
-            .inspect_work(&WorkQuery {
+            .load_session_work(&WorkQuery {
                 session_id: request.admission.session_id.clone(),
-                selector: WorkSelector::Admission {
-                    admission_id: request.admission.admission_id.clone(),
-                },
-                limit: 1,
-                cursor: None,
+                limit: 10,
             })
             .await
             .unwrap();
-        let WorkPage::Admissions(records) = &snapshot.page else {
-            panic!("admission page expected")
-        };
-        let registration = &records[0];
+        let registration = &snapshot.state.admissions[&request.admission.admission_id];
         assert_eq!(registration.admission, request.admission);
-        assert_eq!(registration.entering_mutation_id, request.entry_evidence_id);
+        assert_eq!(
+            registration.entering_receipt.as_ref().unwrap().mutation_id,
+            request.entry_evidence_id
+        );
         assert_eq!(
             snapshot.control.attempt.as_ref(),
             Some(&request.admission.execution)
@@ -116,27 +112,18 @@ impl ReactLLM for MissingThreadParent {
     ) -> peri_agent::error::AgentResult<Reasoning> {
         let snapshot = self
             .resources
-            .inspect_work(&WorkQuery {
+            .load_session_work(&WorkQuery {
                 session_id: self.parent_id.clone(),
-                selector: WorkSelector::CurrentProcessing,
-                limit: 1,
-                cursor: None,
+                limit: 10,
             })
             .await
             .unwrap();
-        let WorkPage::Processings(processings) = &snapshot.page else {
-            panic!("processing page expected")
-        };
-        assert!(processings
-            .iter()
-            .any(|processing| processing.stage == WorkStage::ReasonInFlight
-                && processing.request.is_some()));
-        let request_count = {
-            let mut requests = self.requests.lock().unwrap();
-            requests.push(messages.to_vec());
-            requests.len()
-        };
-        match request_count {
+        assert!(snapshot.state.works.values().any(|work| {
+            work.stage == WorkStage::ReasonInFlight && work.reason_request.is_some()
+        }));
+        let mut requests = self.requests.lock().unwrap();
+        requests.push(messages.to_vec());
+        match requests.len() {
             1 => Ok(Reasoning::with_tools(
                 "resume missing child",
                 vec![ToolCall::new(
@@ -159,22 +146,8 @@ impl ReactLLM for MissingThreadParent {
                 assert_eq!(tool_result["is_error"], true);
                 assert!(tool_result.to_string().contains("thread not found"));
                 assert!(tool_result.to_string().contains(MISSING_THREAD));
-                let effects = self
-                    .resources
-                    .inspect_work(&WorkQuery::new(
-                        &self.parent_id,
-                        WorkSelector::Effects {
-                            processing_id: processings[0].processing_id.clone(),
-                            phase_sequence: None,
-                        },
-                    ))
-                    .await
-                    .unwrap();
-                let WorkPage::Effects(effects) = &effects.page else {
-                    panic!("effects page expected")
-                };
-                assert_eq!(effects.len(), 1);
-                let invocation = &effects[0];
+                assert_eq!(snapshot.state.invocations.len(), 1);
+                let invocation = snapshot.state.invocations.values().next().unwrap();
                 assert_eq!(invocation.status, InvocationStatus::Settled);
                 assert!(matches!(
                     invocation.outcome,
@@ -226,19 +199,14 @@ async fn durable_parent_completes_after_real_agent_resume_missing_thread() {
     .unwrap();
     let snapshot = fixture
         .resources
-        .inspect_work(&WorkQuery {
+        .load_session_work(&WorkQuery {
             session_id: parent_id.clone(),
-            selector: WorkSelector::Availability,
-            limit: 1,
-            cursor: None,
+            limit: 10,
         })
         .await
         .unwrap();
-    let WorkPage::Availability(availability) = &snapshot.page else {
-        panic!("availability page expected")
-    };
-    assert_eq!(availability.candidates.len(), 1);
-    let candidate = &availability.candidates[0];
+    assert_eq!(snapshot.candidates.len(), 1);
+    let candidate = &snapshot.candidates[0];
     let turn = parent.start_turn();
     let execution = turn.execution_binding();
     let admission = WorkAdmission {
@@ -312,53 +280,25 @@ async fn durable_parent_completes_after_real_agent_resume_missing_thread() {
     assert_eq!(model.requests.lock().unwrap().len(), 2);
     let persisted = fixture
         .resources
-        .inspect_work(&WorkQuery {
+        .load_session_work(&WorkQuery {
             session_id: parent_id.clone(),
-            selector: WorkSelector::Processing {
-                processing_id: admission.work_id.clone(),
-            },
-            limit: 1,
-            cursor: None,
+            limit: 10,
         })
         .await
         .unwrap();
-    let WorkPage::Processings(processings) = &persisted.page else {
-        panic!("processing page expected")
-    };
-    assert_eq!(processings.len(), 1);
-    assert_eq!(processings[0].stage, WorkStage::Settled);
-    let effects = fixture
-        .resources
-        .inspect_work(&WorkQuery::new(
-            &parent_id,
-            WorkSelector::Effects {
-                processing_id: admission.work_id.clone(),
-                phase_sequence: None,
-            },
-        ))
-        .await
-        .unwrap();
-    let WorkPage::Effects(effects) = &effects.page else {
-        panic!("effects page expected")
-    };
-    assert_eq!(effects.len(), 1);
-    let invocation = &effects[0];
+    assert!(!persisted.state.works.is_empty());
+    assert!(persisted
+        .state
+        .works
+        .values()
+        .all(|work| work.stage == WorkStage::Settled));
+    assert_eq!(persisted.state.invocations.len(), 1);
+    let invocation = persisted.state.invocations.values().next().unwrap();
     assert_eq!(invocation.status, InvocationStatus::Settled);
     let Some(InvocationOutcome::Failed { result }) = &invocation.outcome else {
         panic!("missing-thread invocation must settle Failed, not OutcomeUnknown");
     };
-    let evidence = fixture
-        .resources
-        .read_evidence(&EvidenceQuery {
-            session_id: parent_id.clone(),
-            reference: result.content.clone(),
-        })
-        .await
-        .unwrap();
-    evidence.validate().unwrap();
-    assert!(String::from_utf8(evidence.bytes)
-        .unwrap()
-        .contains("thread not found"));
+    assert!(result.serialized.contains("thread not found"));
     assert!(invocation.unknown_reason.is_none());
     let history = fixture
         .resources

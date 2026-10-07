@@ -1,7 +1,7 @@
 use peri_acp_types::session_resources::{
     work::{
-        WorkAction, WorkCommand, WorkDecision, WorkInspection, WorkPage, WorkQuery, WorkReceipt,
-        WorkResolution, WorkSelector, WorkStage, WorkTarget,
+        WorkAction, WorkCommand, WorkCommandQuery, WorkDecision, WorkQuery, WorkReceipt,
+        WorkResolution, WorkSnapshot, WorkStage, WorkTarget,
     },
     ControlAction, ControlCommand, ControlDecision, ControlReceipt, ControlStatus,
     SessionResources,
@@ -30,77 +30,74 @@ pub(super) async fn abandon_owned_work(
             "Stop work settlement requires the original accepted receipt",
         ));
     }
-    let mut query = WorkQuery::new(&command.session_id, WorkSelector::PendingCommands);
+    let query = WorkQuery {
+        session_id: command.session_id.clone(),
+        limit: 1,
+    };
+    let pending = resources
+        .load_session_work(&query)
+        .await
+        .map_err(resource_error)?;
+    if !same_stop_generation(&pending, original) {
+        return Ok(Vec::new());
+    }
     let mut receipts = Vec::new();
-    loop {
-        let pending = resources
-            .inspect_work(&query)
+    for frozen in &pending.pending_commands {
+        let resolution = resources
+            .resolve_work_mutation(frozen)
             .await
             .map_err(resource_error)?;
-        if !same_stop_generation(&pending, original) {
-            return Ok(receipts);
-        }
-        let WorkPage::Commands(commands) = pending.page else {
-            return Err(crate::host::work_query::wrong_page());
-        };
-        for owned in commands {
-            let frozen = &owned.command;
-            match resources
-                .resolve_work_mutation(frozen)
-                .await
-                .map_err(resource_error)?
-            {
-                WorkResolution::Unknown => return Err(unconfirmed(&frozen.mutation_id)),
-                WorkResolution::NotApplied => {
-                    if matches!(&frozen.action, WorkAction::AbandonWork { authorization_ref, .. } if authorization_ref == &command.command_id)
-                    {
-                        return Err(AcpError::new(
-                            -32010,
-                            "Original Stop settlement was not applied; a new explicit control command is required",
-                        ));
-                    }
+        match resolution {
+            WorkResolution::Unknown => return Err(unconfirmed(&frozen.mutation_id)),
+            WorkResolution::NotApplied => {
+                if matches!(&frozen.action, WorkAction::AbandonWork { authorization_ref, .. } if authorization_ref == &command.command_id)
+                {
+                    return Err(AcpError::new(-32010, "Original Stop work settlement was not applied; a new explicit control command is required")
+                        .with_data(serde_json::json!({"status":"notApplied","mutationId":frozen.mutation_id})));
                 }
-                WorkResolution::Applied { receipt } => {
-                    if matches!(&frozen.action, WorkAction::AbandonWork { authorization_ref, .. } if authorization_ref == &command.command_id)
-                    {
-                        accept(&receipt)?;
-                        receipts.push(receipt);
-                    }
+            }
+            WorkResolution::Applied { receipt } => {
+                if matches!(&frozen.action, WorkAction::AbandonWork { authorization_ref, .. } if authorization_ref == &command.command_id)
+                {
+                    accept(&receipt)?;
+                    receipts.push(receipt);
                 }
             }
         }
-        let Some(cursor) = pending.next_cursor else {
-            break;
-        };
-        query.cursor = Some(cursor);
     }
-    query = WorkQuery::new(&command.session_id, WorkSelector::ActiveProcessing);
     loop {
         let snapshot = resources
-            .inspect_work(&query)
+            .load_session_work(&query)
             .await
             .map_err(resource_error)?;
         if !same_stop_generation(&snapshot, original) {
             return Ok(receipts);
         }
-        let WorkPage::Processings(processings) = &snapshot.page else {
-            return Err(crate::host::work_query::wrong_page());
-        };
-        let owned = processings.iter().find(|processing| {
-            !matches!(processing.stage, WorkStage::Abandoned | WorkStage::Settled)
-                && processing.recipient_lifecycle == original.state.lifecycle
-                && processing.execution == *target
+        if !snapshot.pending_commands.is_empty() {
+            return Err(unconfirmed(&snapshot.pending_commands[0].mutation_id));
+        }
+        let owned = snapshot.state.works.values().find(|work| {
+            !matches!(work.stage, WorkStage::Abandoned | WorkStage::Settled)
+                && snapshot
+                    .state
+                    .batches
+                    .get(&work.batch_id)
+                    .is_some_and(|batch| {
+                        batch.recipient_lifecycle == original.state.lifecycle
+                            && batch.execution == *target
+                    })
         });
         let Some(work) = owned else {
-            if let Some(cursor) = snapshot.next_cursor {
-                query.cursor = Some(cursor);
-                continue;
-            }
             return Ok(receipts);
         };
-        let identity = mutation_id(command, &work.processing_id);
-        if let Some(owned_command) =
-            crate::host::work_query::command(resources, &command.session_id, &identity).await?
+        let identity = mutation_id(command, &work.work_id);
+        if let Some(owned_command) = resources
+            .load_work_command(&WorkCommandQuery {
+                session_id: command.session_id.clone(),
+                mutation_id: identity.clone(),
+            })
+            .await
+            .map_err(resource_error)?
         {
             let resolution = match owned_command.resolution {
                 Some(resolution) if !owned_command.pending => resolution,
@@ -126,9 +123,9 @@ pub(super) async fn abandon_owned_work(
             recipient_lifecycle: original.state.lifecycle,
             mutation_id: identity,
             action: WorkAction::AbandonWork {
-                expected_revision: snapshot.head.change_seq,
+                expected_revision: snapshot.state.revision,
                 expected_control_generation: original.state.control_generation,
-                target: WorkTarget { work_id: work.processing_id.clone(), expected_work_revision: work.revision },
+                target: WorkTarget { work_id: work.work_id.clone(), expected_work_revision: work.revision },
                 reason: "processing abandoned by explicit Stop; external resource outcomes remain independently recorded".into(),
                 authorization_ref: command.command_id.clone(),
             },
@@ -153,11 +150,10 @@ pub(super) async fn abandon_owned_work(
         };
         accept(&receipt)?;
         receipts.push(receipt);
-        query.cursor = None;
     }
 }
 
-fn same_stop_generation(snapshot: &WorkInspection, original: &ControlReceipt) -> bool {
+fn same_stop_generation(snapshot: &WorkSnapshot, original: &ControlReceipt) -> bool {
     snapshot.control.lifecycle == original.state.lifecycle
         && snapshot.control.control_generation == original.state.control_generation
         && snapshot.control.status == ControlStatus::Paused

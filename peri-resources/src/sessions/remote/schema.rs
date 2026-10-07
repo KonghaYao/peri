@@ -105,6 +105,8 @@ impl StoreSnapshot {
 
     pub(super) fn readable(&self) -> bool {
         self.matches_build()
+            || (self.contract == STORE_CONTRACT && matches!(self.schema_version, 12..=16))
+            || (self.contract == "peri.session.store/v2" && matches!(self.schema_version, 10 | 11))
     }
 }
 
@@ -124,6 +126,8 @@ pub(super) enum SchemaAcceptance {
 pub(super) fn acceptance(version: i64) -> SchemaAcceptance {
     if version == REMOTE_SCHEMA_VERSION {
         SchemaAcceptance::Accept
+    } else if matches!(version, 10..=16) {
+        SchemaAcceptance::Upgradeable
     } else if version > REMOTE_SCHEMA_VERSION {
         SchemaAcceptance::TooNew
     } else {

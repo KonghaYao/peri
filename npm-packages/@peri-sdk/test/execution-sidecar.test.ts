@@ -55,32 +55,16 @@ test("replacement without actual old instance stopped proof stays blocked", asyn
     } finally { replacement.close(); await rm(directory, { recursive: true, force: true }); }
 });
 
-test("existing ticket confirmation rejects a missing availability page without replacing the reserved attempt", async () => {
-    const directory = await mkdtemp(join(tmpdir(), "peri-availability-confirmation-"));
-    const service = new ExecutionAdmissionService({ database: join(directory, "registry.db"), instance });
-    try {
-        const first = await service.admit({ requestId: "reserved-work", snapshot: snapshot() });
-        if (first.status !== "admitted") throw new Error("Expected admitted");
-        const verification = { requestId: first.admission.admissionId, snapshot: snapshot(), existingAdmission: first.admission };
-        const reserved = await service.registry.read("session");
-        expect(await service.admit({ ...verification, snapshot: { ...snapshot(), candidates: [], blocked: true } }))
-            .toEqual({ status: "blocked", reason: "existingAdmissionNotLive" });
-        expect(await service.registry.read("session")).toEqual(reserved);
-        expect(await service.admit(verification)).toEqual(first);
-        expect((await service.registry.read("session")).budgets[0]?.attempts).toBe(1);
-    } finally { service.close(); await rm(directory, { recursive: true, force: true }); }
-});
-
 test("actual Bun JSONL sidecar advertises durable SQLite and handles readiness", async () => {
     const directory = await mkdtemp(join(tmpdir(), "peri-jsonl-"));
     try {
-        const frames = [{ id: "ready", method: "peri/execution/ready", params: { protocolVersion: 2 } },
+        const frames = [{ id: "ready", method: "peri/execution/ready", params: {} },
             { id: "admit", method: "peri/execution/admit", params: { requestId: "input", snapshot: snapshot() } }];
         const child = Bun.spawn([process.execPath, join(import.meta.dir, "../src/execution/sidecar.ts"), "--database", join(directory, "registry.db"),
             "--instance-id", "jsonl-instance", "--generation-id", "jsonl-generation"], { stdin: new Blob([frames.map((frame) => JSON.stringify(frame)).join("\n") + "\n"]), stdout: "pipe", stderr: "pipe" });
         const output = (await new Response(child.stdout).text()).trim().split("\n").map((line) => JSON.parse(line));
         expect(await child.exited).toBe(0);
-        expect(output.find((frame) => frame.id === "ready").result).toEqual({ protocolVersion: 2, durability: "durable" });
+        expect(output.find((frame) => frame.id === "ready").result).toEqual({ protocolVersion: 1, durability: "durable" });
         expect(output.find((frame) => frame.id === "admit").result.status).toBe("admitted");
     } finally { await rm(directory, { recursive: true, force: true }); }
 });

@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use peri_acp_types::session_resources::work::{WorkAdmission, WorkQuery, WorkSelector};
+use peri_acp_types::session_resources::work::{WorkAdmission, WorkQuery};
 use peri_acp_types::session_resources::{ControlStatus, FrozenState, SessionResources};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -21,18 +21,15 @@ pub(super) async fn persist_child_resume_metadata(
     };
     let serialized = serde_json::to_string(metadata)?;
     for _ in 0..3 {
-        let snapshot = resources
-            .inspect_work(&WorkQuery::new(
-                metadata.child_session_id.clone(),
-                WorkSelector::Head,
-            ))
+        let availability = resources
+            .load_work_availability(&metadata.child_session_id)
             .await?;
         let mut command = WorkCommand {
             session_id: metadata.child_session_id.clone(),
             recipient_lifecycle: metadata.recipient_lifecycle,
             mutation_id: "child-resume".into(),
             action: WorkAction::BindChildResumeMetadata {
-                expected_revision: snapshot.head.change_seq,
+                expected_revision: availability.state.revision,
                 metadata_json: serialized.clone(),
             },
         };
@@ -73,27 +70,29 @@ pub(super) async fn copy_child_resource_owners(
     use peri_acp_types::session_resources::work::{
         WorkAction, WorkCommand, WorkDecision, WorkResolution,
     };
-    let descriptor = crate::session::work_access::descriptor(
-        resources,
-        &metadata.direct_initiator_session_id,
-        metadata.direct_initiator_lifecycle,
-    )
-    .await?;
-    let owners = descriptor
+    let parent = resources
+        .load_session_work(&WorkQuery {
+            session_id: metadata.direct_initiator_session_id.clone(),
+            limit: 1,
+        })
+        .await?;
+    let owners = parent
+        .state
         .resource_owners
+        .get(&metadata.direct_initiator_lifecycle)
         .ok_or("Blocked: original child owner authorization declarations unavailable")?;
     let child = resources
-        .inspect_work(&WorkQuery::new(
-            metadata.child_session_id.clone(),
-            WorkSelector::Head,
-        ))
+        .load_session_work(&WorkQuery {
+            session_id: metadata.child_session_id.clone(),
+            limit: 1,
+        })
         .await?;
     let mut command = WorkCommand {
         session_id: metadata.child_session_id.clone(),
         recipient_lifecycle: metadata.recipient_lifecycle,
         mutation_id: "child-owners".into(),
         action: WorkAction::BindResourceOwners {
-            expected_revision: child.head.change_seq,
+            expected_revision: child.state.revision,
             connections_json: owners.connections_json.clone(),
             authorization_ref: owners.authorization_ref.clone(),
         },
@@ -123,7 +122,7 @@ pub(super) async fn copy_child_resource_owners(
 pub(super) async fn bind_delegation_task(
     resources: &dyn SessionResources,
     initiator: &str,
-    invocation: &peri_acp_types::session_resources::work::Effect,
+    invocation: &peri_acp_types::session_resources::work::InvocationRecord,
     task_id: &str,
 ) -> Result<
     peri_acp_types::session_resources::work::WorkReceipt,
@@ -142,14 +141,17 @@ pub(super) async fn bind_delegation_task(
         authorization_ref: invocation.intent.authorization_ref.clone(),
     };
     let work = resources
-        .inspect_work(&WorkQuery::new(initiator, WorkSelector::Head))
+        .load_session_work(&WorkQuery {
+            session_id: initiator.into(),
+            limit: 1,
+        })
         .await?;
     let mut command = WorkCommand {
         session_id: initiator.into(),
         recipient_lifecycle: invocation.recipient_lifecycle,
         mutation_id: "child-delegation".into(),
         action: WorkAction::ReconcileTaskBinding {
-            expected_revision: work.head.change_seq,
+            expected_revision: work.state.revision,
             binding,
         },
     };
@@ -269,21 +271,22 @@ impl ColdChildExecution {
             .work_admission()
             .ok_or_else(|| ColdChildBlocked::new("original SDK admission unavailable"))?;
         let child = resources
-            .inspect_work(&WorkQuery::new(
-                admission.session_id.clone(),
-                WorkSelector::Head,
-            ))
-            .await
-            .map_err(|error| ColdChildBlocked::new(error.to_string()))?;
-        let registered = crate::session::work_access::admission(resources.as_ref(), admission)
-            .await
-            .map_err(|error| ColdChildBlocked::new(error.to_string()))?;
-        let delegation = crate::session::work_access::delegation(resources.as_ref(), admission)
+            .load_session_work(&WorkQuery {
+                session_id: admission.session_id.clone(),
+                limit: 1,
+            })
             .await
             .map_err(|error| ColdChildBlocked::new(error.to_string()))?;
         if result.task_id != self.delegation_binding.owner_task_id
-            || delegation != self.delegation_binding
-            || registered.entering_mutation_id.is_empty()
+            || child.state.work_delegations.get(&admission.work_id)
+                != Some(&self.delegation_binding)
+            || !child
+                .state
+                .admissions
+                .get(&admission.admission_id)
+                .is_some_and(|record| {
+                    record.admission == *admission && record.entering_receipt.is_some()
+                })
             || child.control.attempt.is_some()
         {
             return Err(ColdChildBlocked::new(
@@ -297,20 +300,25 @@ impl ColdChildExecution {
                     ColdChildBlocked::new(format!("child close incomplete: {error}"))
                 })?;
         }
-        let effect = crate::session::work_access::effect(
-            resources.as_ref(),
-            &self.delegation_binding.initiator_session_id,
-            &self.delegation_binding.invocation_id,
-        )
-        .await
-        .map_err(|error| ColdChildBlocked::new(error.to_string()))?;
-        let binding = effect
-            .binding
-            .as_ref()
-            .filter(|binding| **binding == self.delegation_binding)
+        let parent = resources
+            .load_session_work(&WorkQuery {
+                session_id: self.delegation_binding.initiator_session_id.clone(),
+                limit: 1,
+            })
+            .await
+            .map_err(|error| ColdChildBlocked::new(error.to_string()))?;
+        let binding = parent
+            .state
+            .task_bindings
+            .get(&self.delegation_binding.invocation_id)
             .ok_or_else(|| {
-                ColdChildBlocked::new("current immutable delegation task binding conflicts")
+                ColdChildBlocked::new("original immutable delegation binding unavailable")
             })?;
+        if binding != &self.delegation_binding {
+            return Err(ColdChildBlocked::new(
+                "current work delegation binding conflicts",
+            ));
+        }
         let reminder = crate::session::async_router::background_result_reminder(
             result,
             peri_acp_types::tasks::BgTaskKind::Agent,
@@ -320,7 +328,6 @@ impl ColdChildExecution {
             "terminal",
         );
         crate::agent::async_tasks::build_task_terminal_command(
-            resources.as_ref(),
             &binding.initiator_session_id,
             binding.recipient_lifecycle,
             binding,
@@ -328,7 +335,6 @@ impl ColdChildExecution {
             &reminder,
             peri_acp_types::session::MessageSource::SubAgentComplete,
         )
-        .await
         .map_err(ColdChildBlocked::new)
     }
 }
@@ -361,48 +367,48 @@ impl super::SessionFactory {
         }
         let work = runtime
             .resources
-            .inspect_work(&WorkQuery::new(
-                admission.session_id.clone(),
-                WorkSelector::Head,
-            ))
+            .load_session_work(&WorkQuery {
+                session_id: admission.session_id.clone(),
+                limit: 1,
+            })
             .await
             .map_err(|error| ColdChildBlocked::new(error.to_string()))?;
         if work.control.status != ControlStatus::Active
             || work.control.lifecycle != admission.lifecycle
             || work.control.control_generation != admission.control_generation
-            || crate::session::work_access::admission(runtime.resources.as_ref(), &admission)
-                .await
-                .map_err(|error| ColdChildBlocked::new(error.to_string()))?
-                .leaving_evidence_id
-                .is_some()
+            || !work
+                .state
+                .admissions
+                .get(&admission.admission_id)
+                .is_some_and(|record| {
+                    record.admission == admission
+                        && record.entering_receipt.is_some()
+                        && record.settled_receipt.is_none()
+                })
         {
             return Err(ColdChildBlocked::new(
                 "exact SDK admission is not durably active",
             ));
         }
-        let descriptor = crate::session::work_access::descriptor(
-            runtime.resources.as_ref(),
-            &admission.session_id,
-            admission.lifecycle,
-        )
-        .await
-        .map_err(|error| ColdChildBlocked::new(error.to_string()))?;
-        let raw = descriptor
-            .child_resume_metadata_json
-            .as_deref()
+        let raw = work
+            .state
+            .child_resume_metadata
+            .get(&admission.lifecycle)
             .ok_or_else(|| {
                 ColdChildBlocked::new("persisted child authorization metadata missing")
             })?;
         let metadata: ChildResumeMetadata = serde_json::from_str(raw)
             .map_err(|error| ColdChildBlocked::new(format!("invalid child metadata: {error}")))?;
-        let delegation_binding =
-            crate::session::work_access::delegation(runtime.resources.as_ref(), &admission)
-                .await
-                .map_err(|error| ColdChildBlocked::new(error.to_string()))?;
-        let FrozenState::Present(bytes) = &snapshot.frozen else {
-            return Err(ColdChildBlocked::new(
-                "child frozen authorization snapshot unavailable",
-            ));
+        let delegation_binding = work
+            .state
+            .work_delegations
+            .get(&admission.work_id)
+            .cloned()
+            .ok_or_else(|| {
+                ColdChildBlocked::new("current immutable work delegation reference missing")
+            })?;
+        let FrozenState::Present(bytes) = snapshot.frozen else {
+            return Err(ColdChildBlocked::new("persisted frozen snapshot missing"));
         };
         if metadata.version != 1
             || metadata.child_session_id != admission.session_id
@@ -456,19 +462,35 @@ impl super::SessionFactory {
                 "saved child tool origin cannot be reconstructed",
             ));
         }
-        let parent_effect = crate::session::work_access::effect(
-            runtime.resources.as_ref(),
-            &delegation_binding.initiator_session_id,
-            &delegation_binding.invocation_id,
-        )
-        .await
-        .map_err(|error| ColdChildBlocked::new(error.to_string()))?;
-        if parent_effect.recipient_lifecycle != delegation_binding.recipient_lifecycle
-            || parent_effect.intent.authorization_ref != delegation_binding.authorization_ref
-            || parent_effect.binding.as_ref() != Some(&delegation_binding)
+        let parent_work = runtime
+            .resources
+            .load_session_work(&WorkQuery {
+                session_id: delegation_binding.initiator_session_id.clone(),
+                limit: 1,
+            })
+            .await
+            .map_err(|error| ColdChildBlocked::new(error.to_string()))?;
+        if !parent_work
+            .state
+            .invocations
+            .get(&delegation_binding.invocation_id)
+            .is_some_and(|record| {
+                record.recipient_lifecycle == delegation_binding.recipient_lifecycle
+                    && record.intent.authorization_ref == delegation_binding.authorization_ref
+            })
         {
             return Err(ColdChildBlocked::new(
-                "original immutable delegation task binding unavailable",
+                "original delegation binding unavailable",
+            ));
+        }
+        if parent_work
+            .state
+            .task_bindings
+            .get(&delegation_binding.invocation_id)
+            != Some(&delegation_binding)
+        {
+            return Err(ColdChildBlocked::new(
+                "immutable original delegation task binding unavailable",
             ));
         }
         let ceiling = metadata.tool_ceiling.clone();

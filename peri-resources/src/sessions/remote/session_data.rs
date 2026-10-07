@@ -550,23 +550,31 @@ impl SessionDataPort for RemoteSessionData {
             )),
         }
     }
-    async fn inspect_work(
+    async fn load_work_availability(
+        &self,
+        id: &ThreadId,
+    ) -> SessionResourceResult<peri_acp_types::session_resources::work::WorkAvailability> {
+        self.read_work_availability(id).await
+    }
+    async fn load_work_delivery(
+        &self,
+        query: &peri_acp_types::session_resources::work::WorkDeliveryQuery,
+    ) -> SessionResourceResult<Option<peri_acp_types::session_resources::work::DeliveryRecord>>
+    {
+        self.read_delivery(query).await
+    }
+    async fn load_work_command(
+        &self,
+        query: &peri_acp_types::session_resources::work::WorkCommandQuery,
+    ) -> SessionResourceResult<Option<peri_acp_types::session_resources::work::OwnedWorkCommand>>
+    {
+        self.read_work_command(query).await
+    }
+    async fn load_session_work(
         &self,
         query: &peri_acp_types::session_resources::work::WorkQuery,
-    ) -> SessionResourceResult<peri_acp_types::session_resources::work::WorkInspection> {
+    ) -> SessionResourceResult<peri_acp_types::session_resources::work::WorkSnapshot> {
         self.read_work(query).await
-    }
-    async fn read_evidence(
-        &self,
-        query: &peri_acp_types::session_resources::work::EvidenceQuery,
-    ) -> SessionResourceResult<peri_acp_types::session_resources::work::EvidenceRecord> {
-        self.read_work_evidence(query).await
-    }
-    async fn prepare_evidence(
-        &self,
-        write: &peri_acp_types::session_resources::work::EvidenceWrite,
-    ) -> SessionResourceResult<peri_acp_types::session_resources::work::PayloadRef> {
-        self.prepare_work_evidence(write).await
     }
     async fn apply_work_mutation(
         &self,

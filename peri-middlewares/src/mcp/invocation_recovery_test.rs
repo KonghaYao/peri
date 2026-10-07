@@ -1,37 +1,21 @@
 use super::*;
 use peri_acp_types::session_resources::work::{
-    Effect, EvidenceWrite, InvocationStatus, SessionWorkHead,
+    InvocationRecord, InvocationStatus, WorkQuery, WorkState,
 };
 use peri_acp_types::session_resources::ControlState;
 use sha2::{Digest, Sha256};
 
-fn snapshot() -> WorkInspection {
+fn snapshot() -> WorkSnapshot {
     let arguments_json = "{\"command\":\"sleep 30\"}".to_owned();
     let intent = InvocationIntent {
         invocation_id: "invocation-1".into(),
         tool_call_id: "call-1".into(),
         tool_name: "mcp__workspace__Bash".into(),
         effective_tool_name: "mcp__workspace__Bash".into(),
-        effective_arguments: EvidenceWrite {
-            session_id: "direct-child".into(),
-            storage_scope: "direct-child".into(),
-            payload_id: "arguments-1".into(),
-            encoding: 1,
-            bytes: arguments_json.as_bytes().to_vec(),
-        }
-        .reference()
-        .unwrap(),
+        effective_arguments_json: arguments_json.clone(),
         effective_arguments_digest: format!("{:x}", Sha256::digest(arguments_json.as_bytes())),
         arguments_digest: format!("{:x}", Sha256::digest(arguments_json.as_bytes())),
-        arguments: EvidenceWrite {
-            session_id: "direct-child".into(),
-            storage_scope: "direct-child".into(),
-            payload_id: "arguments-1".into(),
-            encoding: 1,
-            bytes: arguments_json.as_bytes().to_vec(),
-        }
-        .reference()
-        .unwrap(),
+        arguments_json,
         owner_identity: "authenticated-owner-1".into(),
         scope_id: "direct-child".into(),
         scope_epoch: Some(7),
@@ -47,25 +31,29 @@ fn snapshot() -> WorkInspection {
         recovery_locator: intent.recovery_locator.clone(),
         authorization_ref: intent.authorization_ref.clone(),
     };
-    WorkInspection {
-        session_id: "direct-child".into(),
-        control: ControlState::default(),
-        head: SessionWorkHead::default(),
-        next_cursor: None,
-        page: WorkPage::Effects(vec![Effect {
-            invocation_id: intent.invocation_id.clone(),
+    let mut state = WorkState::default();
+    state.invocations.insert(
+        intent.invocation_id.clone(),
+        InvocationRecord {
             intent,
             recipient_lifecycle: 1,
-            processing_id: Some("act-1".into()),
-            phase_sequence: 1,
-            revision: 0,
+            work_id: Some("act-1".into()),
             status: InvocationStatus::DispatchAccepted,
             outcome: None,
             unknown_reason: None,
-            binding: Some(binding),
-            delegation: None,
-        }]),
-    }
+        },
+    );
+    state
+        .task_bindings
+        .insert(binding.invocation_id.clone(), binding);
+    WorkSnapshot::from_state(
+        &WorkQuery {
+            session_id: "direct-child".into(),
+            limit: 0,
+        },
+        ControlState::default(),
+        state,
+    )
 }
 
 #[test]
@@ -95,10 +83,7 @@ fn root_catalog_cannot_adopt_child_binding() {
 #[test]
 fn task_binding_without_original_intent_is_unroutable() {
     let mut snapshot = snapshot();
-    let WorkPage::Effects(effects) = &mut snapshot.page else {
-        panic!("effect page expected")
-    };
-    effects.clear();
+    snapshot.state.invocations.clear();
     assert!(recover_task_binding(&snapshot, "authenticated-owner-1", "shell-1").is_err());
 }
 
@@ -106,10 +91,7 @@ fn task_binding_without_original_intent_is_unroutable() {
 fn conflicting_owner_authorization_or_scope_is_unroutable() {
     for changed in ["authorization", "owner", "scope", "locator"] {
         let mut snapshot = snapshot();
-        let WorkPage::Effects(effects) = &mut snapshot.page else {
-            panic!("effect page expected")
-        };
-        let record = &mut effects[0];
+        let record = snapshot.state.invocations.get_mut("invocation-1").unwrap();
         match changed {
             "authorization" => record.intent.authorization_ref = "other-policy".into(),
             "owner" => record.intent.owner_identity = "other-owner".into(),
@@ -124,13 +106,11 @@ fn conflicting_owner_authorization_or_scope_is_unroutable() {
 #[test]
 fn ambiguous_task_identity_cannot_choose_a_current_binding() {
     let mut snapshot = snapshot();
-    let WorkPage::Effects(effects) = &mut snapshot.page else {
-        panic!("effect page expected")
-    };
-    let mut duplicate = effects[0].clone();
+    let mut duplicate = snapshot.state.task_bindings["invocation-1"].clone();
     duplicate.invocation_id = "invocation-2".into();
-    duplicate.intent.invocation_id = "invocation-2".into();
-    duplicate.binding.as_mut().unwrap().invocation_id = "invocation-2".into();
-    effects.push(duplicate);
+    snapshot
+        .state
+        .task_bindings
+        .insert(duplicate.invocation_id.clone(), duplicate);
     assert!(recover_task_binding(&snapshot, "authenticated-owner-1", "shell-1").is_err());
 }

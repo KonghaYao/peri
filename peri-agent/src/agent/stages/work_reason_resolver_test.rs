@@ -67,33 +67,28 @@ async fn completed_model_unknown_tool_reproduces_uncommitted_reason_checkpoint()
         .session
         .clone()
         .unwrap();
-    let work = session
-        .processing(&session.admission.work_id)
-        .await
+    let snapshot = session.snapshot().await.unwrap();
+    let work = snapshot
+        .state
+        .works
+        .values()
+        .find(|work| work.stage == WorkStage::ReasonInFlight)
         .unwrap();
-    assert_eq!(work.stage, WorkStage::ReasonInFlight);
-    let request = session
-        .evidence(work.request.as_ref().unwrap())
-        .await
-        .unwrap();
-    assert!(!request.is_empty());
+    assert!(work.reason_request.is_some());
     assert!(work.request_id.is_some());
     assert!(work.response.is_none());
-    assert!(session.effects(&work).await.unwrap().is_empty());
-    let deliveries = session.deliveries(&work.processing_id).await.unwrap();
+    assert!(snapshot.state.invocations.is_empty());
     assert_eq!(
-        deliveries
-            .iter()
-            .find(|delivery| delivery.delivery_id == fixture.delivery_id)
-            .unwrap()
-            .obligation,
+        snapshot.state.obligations[&fixture.delivery_id].status,
         ObligationStatus::InProgress
     );
+    assert!(!snapshot
+        .state
+        .works
+        .values()
+        .any(|work| work.stage == WorkStage::ActReady));
     assert!(matches!(
-        recover_work(&session, &work.processing_id)
-            .await
-            .unwrap()
-            .stage,
+        recover_work(&snapshot, &work.work_id).unwrap().stage,
         RecoveredStage::ReasonUncertain { .. }
     ));
     assert!(fixture.context.work.state.lock().await.request_id.is_some());
@@ -134,11 +129,7 @@ async fn mixed_resolved_and_unknown_calls_do_not_publish_partial_dispatch_intent
         .session
         .clone()
         .unwrap();
-    let before = session.inspect_head().await.unwrap();
-    let before_processing = session
-        .processing(&session.admission.work_id)
-        .await
-        .unwrap();
+    let before = session.snapshot().await.unwrap();
     let mut reasoning = Reasoning::with_tools(
         "mixed calls",
         vec![
@@ -156,14 +147,9 @@ async fn mixed_resolved_and_unknown_calls_do_not_publish_partial_dispatch_intent
     assert!(
         matches!(error.downcast_ref::<AgentError>(), Some(AgentError::ToolNotFound(name)) if name == "missing")
     );
-    let after = session.inspect_head().await.unwrap();
-    assert_eq!(after, before);
-    let after_processing = session
-        .processing(&session.admission.work_id)
-        .await
-        .unwrap();
-    assert_eq!(after_processing, before_processing);
-    assert!(session.effects(&after_processing).await.unwrap().is_empty());
+    let after = session.snapshot().await.unwrap();
+    assert_eq!(after.state, before.state);
+    assert!(after.state.invocations.is_empty());
     assert!(fixture
         .context
         .work
@@ -201,14 +187,7 @@ async fn uncommitted_model_request_remains_blocked_for_reconciliation() {
         .session
         .clone()
         .unwrap();
-    let before = session
-        .processing(&session.admission.work_id)
-        .await
-        .unwrap();
-    let before_evidence = session
-        .evidence(before.request.as_ref().unwrap())
-        .await
-        .unwrap();
+    let before = session.snapshot().await.unwrap();
     let request_id = fixture
         .context
         .work
@@ -219,19 +198,17 @@ async fn uncommitted_model_request_remains_blocked_for_reconciliation() {
         .clone()
         .unwrap();
     block_uncertain_model(&fixture.context).await.unwrap();
-    let work = session
-        .processing(&session.admission.work_id)
-        .await
+    let after = session.snapshot().await.unwrap();
+    let work = after
+        .state
+        .works
+        .values()
+        .find(|work| work.stage == WorkStage::Blocked)
         .unwrap();
-    assert_eq!(work.stage, WorkStage::Blocked);
     assert!(work.response.is_none());
-    assert_eq!(work.request, before.request);
     assert_eq!(
-        session
-            .evidence(work.request.as_ref().unwrap())
-            .await
-            .unwrap(),
-        before_evidence
+        work.reason_request,
+        before.state.works[&work.work_id].reason_request
     );
     assert_eq!(work.request_id.as_deref(), Some(request_id.as_str()));
     assert!(work
@@ -267,28 +244,24 @@ async fn completed_unknown_tool_response_cannot_commit_without_a_dispatch_intent
     .unwrap();
     let state = fixture.context.work.state.lock().await;
     let session = state.session.clone().unwrap();
-    let before = session.inspect_head().await.unwrap();
-    let processing = session
-        .processing(state.work_id.as_deref().unwrap())
-        .await
-        .unwrap();
+    let before = session.snapshot().await.unwrap();
     let command = session.command(WorkAction::CommitReasonResponseAndDispatchIntent {
         guard: session.guard(&before).unwrap(),
-        target: WorkSession::target(&processing),
+        target: WorkSession::target(&before, state.work_id.as_deref().unwrap()).unwrap(),
         request_id: state.request_id.clone().unwrap(),
-        response: session
-            .prepare_payload(&PersistedPayload::Message(BaseMessage::ai_with_tool_calls(
+        response: WorkPayload::from_payload(&PersistedPayload::Message(
+            BaseMessage::ai_with_tool_calls(
                 "unknown tool",
                 vec![ToolCallRequest::new(
                     "missing-call",
                     "missing",
                     serde_json::json!({}),
                 )],
-            )))
-            .await
-            .unwrap(),
+            ),
+        ))
+        .unwrap(),
         dispatch_intents: Vec::new(),
-        next_work_id: Some(processing.processing_id.clone()),
+        next_work_id: Some(uuid::Uuid::now_v7().to_string()),
     });
     drop(state);
     let receipt = fixture
@@ -303,11 +276,6 @@ async fn completed_unknown_tool_response_cannot_commit_without_a_dispatch_intent
             reason: WorkRejection::Conflict
         }
     );
-    let after = session.inspect_head().await.unwrap();
-    assert_eq!(after, before);
-    assert_eq!(
-        session.processing(&processing.processing_id).await.unwrap(),
-        processing
-    );
-    assert!(session.effects(&processing).await.unwrap().is_empty());
+    let after = session.snapshot().await.unwrap();
+    assert_eq!(after.state, before.state);
 }

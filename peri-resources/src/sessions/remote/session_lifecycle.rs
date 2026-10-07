@@ -56,13 +56,35 @@ const SELECT_AGENT_STATUS_SQL: &str = "SELECT agent_status FROM threads WHERE id
 
 impl RemoteSessionData {
     pub(super) async fn write_close_intent(&self, id: &ThreadId) -> SessionResourceResult<()> {
-        self.change_close_status(id, peri_acp_types::session_resources::ControlAction::Close)
-            .await
+        if !self.exists(id).await? {
+            return Err(not_found());
+        }
+        self.commit_effects(
+            "mark_session_closing",
+            &[id.as_str().to_owned()],
+            vec![StatementSpec::new(
+                "INSERT OR IGNORE INTO session_close_intents(thread_id, requested_at) VALUES (?1, ?2)",
+                vec![Value::Text(id.as_str().to_owned()), Value::Text(peri_time::now_utc_rfc3339())],
+            )],
+            id,
+        ).await.map(|_| ())
     }
 
     pub(super) async fn read_close_intent(&self, id: &ThreadId) -> SessionResourceResult<bool> {
-        Ok(self.read_control(id).await?.status
-            == peri_acp_types::session_resources::ControlStatus::Closing)
+        let store = self.store().await?;
+        let table = store.fetch_row(&StatementSpec::bare(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'session_close_intents'",
+        )).await?;
+        if table.is_none() {
+            return Ok(false);
+        }
+        Ok(store
+            .fetch_row(&StatementSpec::new(
+                "SELECT 1 FROM session_close_intents WHERE thread_id = ?1",
+                vec![Value::Text(id.as_str().to_owned())],
+            ))
+            .await?
+            .is_some())
     }
 
     /// 撤销未发布的创建（write-once 完整创建的失败补偿：fork 等）。
@@ -138,10 +160,7 @@ impl RemoteSessionData {
         // 子会话数与后面的写入各取一次连接：借用不跨过去（见上）。
         drop(store);
         revocation_gate(children.as_ref().and_then(|values| int_at(values, 0)))?;
-        let mut guarded =
-            super::session_work::specifications(crate::sessions::work_store::history_guard(id))?;
-        guarded.extend(effects);
-        self.commit_effects(behavior, &[format!("id:{}", id.as_str())], guarded, id)
+        self.commit_effects(behavior, &[format!("id:{}", id.as_str())], effects, id)
             .await
     }
 
@@ -169,12 +188,6 @@ impl RemoteSessionData {
         // 与 `canonical::THREAD_CHILD_DELETES` 同一份语句与顺序）再清会话行，
         // 全部在同一个批里。
         let mut effects = Vec::with_capacity(tree.len() * 4);
-        for thread in &tree {
-            let current = self.read_control(thread).await?;
-            effects.extend(super::session_work::specifications(
-                crate::sessions::work_store::tombstone_plan(thread, &current)?,
-            )?);
-        }
         for (_, statement) in crate::sessions::canonical::THREAD_CHILD_DELETES {
             for thread in &tree {
                 effects.push(StatementSpec::new(

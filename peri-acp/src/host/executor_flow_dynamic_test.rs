@@ -236,8 +236,11 @@ async fn prepare_child_fixture_intent(context: &SessionContext) -> String {
     use peri_acp_types::session_resources::work::*;
     use sha2::{Digest, Sha256};
     let resources = context.session_resources.as_ref().unwrap();
-    let query = WorkQuery::new(&context.session_id, WorkSelector::Head);
-    let snapshot = resources.inspect_work(&query).await.unwrap();
+    let query = WorkQuery {
+        session_id: context.session_id.clone(),
+        limit: 1,
+    };
+    let mut snapshot = resources.load_session_work(&query).await.unwrap();
     let authorization_ref = "explicit-dynamic-fixture:no-external-tools".to_owned();
     let receipt = resources
         .apply_work_mutation(&WorkCommand {
@@ -245,7 +248,7 @@ async fn prepare_child_fixture_intent(context: &SessionContext) -> String {
             recipient_lifecycle: snapshot.control.lifecycle,
             mutation_id: uuid::Uuid::now_v7().to_string(),
             action: WorkAction::BindResourceOwners {
-                expected_revision: snapshot.head.change_seq,
+                expected_revision: snapshot.state.revision,
                 connections_json: "[]".into(),
                 authorization_ref: authorization_ref.clone(),
             },
@@ -253,256 +256,38 @@ async fn prepare_child_fixture_intent(context: &SessionContext) -> String {
         .await
         .unwrap();
     assert_eq!(receipt.decision, WorkDecision::Accepted);
+    snapshot = resources.load_session_work(&query).await.unwrap();
     let invocation_id = uuid::Uuid::now_v7().to_string();
     let arguments_json = serde_json::json!({"prompt":"finish"}).to_string();
     let arguments_digest = format!("{:x}", Sha256::digest(arguments_json.as_bytes()));
-    let arguments = resources
-        .prepare_evidence(&EvidenceWrite {
-            session_id: context.session_id.clone(),
-            storage_scope: context.session_id.clone(),
-            payload_id: format!("dynamic-child-arguments:{invocation_id}"),
-            encoding: 1,
-            bytes: arguments_json.into_bytes(),
-        })
-        .await
-        .unwrap();
-    let intent = InvocationIntent {
-        invocation_id: invocation_id.clone(),
-        tool_call_id: uuid::Uuid::now_v7().to_string(),
-        tool_name: "Subagent".into(),
-        arguments: arguments.clone(),
-        arguments_digest: arguments_digest.clone(),
-        effective_tool_name: "Subagent".into(),
-        effective_arguments: arguments,
-        effective_arguments_digest: arguments_digest,
-        owner_identity: "explicit-dynamic-fixture-local-owner".into(),
-        scope_id: context.session_id.clone(),
-        scope_epoch: None,
-        authorization_ref,
-        recovery_locator: format!("dynamic-child:{invocation_id}"),
-    };
-    prepare_dynamic_dispatch(context, intent).await;
-    invocation_id
-}
-
-async fn dynamic_fixture_action(
-    resources: &dyn peri_acp_types::session_resources::SessionResources,
-    session_id: &str,
-    action: peri_acp_types::session_resources::work::WorkAction,
-) {
-    use peri_acp_types::session_resources::work::*;
-    let head = resources
-        .inspect_work(&WorkQuery::new(session_id, WorkSelector::Head))
-        .await
-        .unwrap();
     let receipt = resources
         .apply_work_mutation(&WorkCommand {
-            session_id: session_id.into(),
-            recipient_lifecycle: head.control.lifecycle,
-            mutation_id: uuid::Uuid::now_v7().to_string(),
-            action,
-        })
-        .await
-        .unwrap();
-    assert_eq!(receipt.decision, WorkDecision::Accepted, "{receipt:?}");
-}
-
-async fn prepare_dynamic_dispatch(
-    context: &SessionContext,
-    intent: peri_acp_types::session_resources::work::InvocationIntent,
-) {
-    use peri_acp_types::{execution_admission::*, session_resources::work::*};
-    let resources = context.session_resources.as_ref().unwrap().as_ref();
-    let session_id = context.session_id.as_str();
-    let delivery_id = uuid::Uuid::now_v7().to_string();
-    let content = crate::host::work_query::test_payload(
-        resources,
-        session_id,
-        &peri_acp_types::store::PersistedPayload::Message(BaseMessage::human("finish")),
-    )
-    .await;
-    dynamic_fixture_action(
-        resources,
-        session_id,
-        WorkAction::PublishDelivery {
-            delivery: PublishDelivery {
-                delivery_id: delivery_id.clone(),
-                event: WorkEvent {
-                    producer_namespace: "dynamic-fixture".into(),
-                    event_id: delivery_id,
-                    event_kind: "userInput".into(),
-                    causation_id: None,
-                    content,
+            session_id: context.session_id.clone(),
+            recipient_lifecycle: snapshot.control.lifecycle,
+            mutation_id: format!("dynamic-child-intent:{invocation_id}"),
+            action: WorkAction::PrepareInvocation {
+                expected_revision: snapshot.state.revision,
+                intent: InvocationIntent {
+                    invocation_id: invocation_id.clone(),
+                    tool_call_id: uuid::Uuid::now_v7().to_string(),
+                    tool_name: "Subagent".into(),
+                    arguments_json: arguments_json.clone(),
+                    arguments_digest: arguments_digest.clone(),
+                    effective_tool_name: "Subagent".into(),
+                    effective_arguments_json: arguments_json,
+                    effective_arguments_digest: arguments_digest,
+                    owner_identity: "explicit-dynamic-fixture-local-owner".into(),
+                    scope_id: context.session_id.clone(),
+                    scope_epoch: None,
+                    authorization_ref,
+                    recovery_locator: format!("dynamic-child:{invocation_id}"),
                 },
-                purpose: DeliveryPurpose::UserInput,
-                policy: peri_acp_types::session::MessagePolicy::ensure_processing(),
             },
-        },
-    )
-    .await;
-    let available = resources
-        .inspect_work(&WorkQuery::new(session_id, WorkSelector::Availability))
-        .await
-        .unwrap();
-    let candidate = &crate::host::work_query::availability(&available)
-        .unwrap()
-        .candidates[0];
-    let sdk = context.execution_admission_port.as_ref().unwrap();
-    let AdmissionOutcome::Admitted { admission } = sdk
-        .admit(AdmissionRequest {
-            request_id: uuid::Uuid::now_v7().to_string(),
-            snapshot: (&available).into(),
-            existing_admission: None,
         })
         .await
-        .unwrap()
-    else {
-        panic!("dynamic fixture requires SDK admission");
-    };
-    let delivery_ids = candidate.delivery_ids.clone();
-    let registered = WorkCommand {
-        session_id: session_id.into(),
-        recipient_lifecycle: admission.lifecycle,
-        mutation_id: uuid::Uuid::now_v7().to_string(),
-        action: WorkAction::RegisterAdmission {
-            admission: admission.clone(),
-        },
-    };
-    assert_eq!(
-        resources
-            .apply_work_mutation(&registered)
-            .await
-            .unwrap()
-            .decision,
-        WorkDecision::Accepted
-    );
-    assert!(matches!(sdk.entered(EntryRequest {
-        admission: admission.clone(), entry_evidence_id: registered.mutation_id,
-    }).await.unwrap(), EntryOutcome::Applied { receipt } if receipt.admission == admission));
-    let snapshot = resources
-        .inspect_work(&WorkQuery::new(session_id, WorkSelector::Head))
-        .await
         .unwrap();
-    dynamic_fixture_action(
-        resources,
-        session_id,
-        WorkAction::ClaimBatch {
-            guard: WorkGuard {
-                expected_revision: snapshot.head.change_seq,
-                expected_control_generation: admission.control_generation,
-                execution: admission.execution.clone(),
-            },
-            batch_id: admission.work_id.clone(),
-            delivery_ids,
-        },
-    )
-    .await;
-    let snapshot = resources
-        .inspect_work(&WorkQuery::new(session_id, WorkSelector::Head))
-        .await
-        .unwrap();
-    let processing =
-        crate::host::work_query::test_processing(resources, session_id, &admission.work_id).await;
-    let request_id = uuid::Uuid::now_v7().to_string();
-    dynamic_fixture_action(
-        resources,
-        session_id,
-        WorkAction::BeginReason {
-            guard: WorkGuard {
-                expected_revision: snapshot.head.change_seq,
-                expected_control_generation: admission.control_generation,
-                execution: admission.execution.clone(),
-            },
-            target: WorkTarget {
-                work_id: admission.work_id.clone(),
-                expected_work_revision: processing.revision,
-            },
-            request_id: request_id.clone(),
-            request: ReasonRequest {
-                payload: intent.arguments.clone(),
-                request_digest: intent.arguments_digest.clone(),
-                model_ref: "dynamic-fixture-model".into(),
-                authorization_ref: intent.authorization_ref.clone(),
-            },
-        },
-    )
-    .await;
-    let snapshot = resources
-        .inspect_work(&WorkQuery::new(session_id, WorkSelector::Head))
-        .await
-        .unwrap();
-    let processing =
-        crate::host::work_query::test_processing(resources, session_id, &admission.work_id).await;
-    let response = crate::host::work_query::test_payload(
-        resources,
-        session_id,
-        &peri_acp_types::store::PersistedPayload::Message(BaseMessage::ai_with_tool_calls(
-            "finish",
-            vec![peri_acp_types::messages::ToolCallRequest::new(
-                &intent.tool_call_id,
-                &intent.tool_name,
-                serde_json::json!({"prompt":"finish"}),
-            )],
-        )),
-    )
-    .await;
-    dynamic_fixture_action(
-        resources,
-        session_id,
-        WorkAction::CommitReasonResponseAndDispatchIntent {
-            guard: WorkGuard {
-                expected_revision: snapshot.head.change_seq,
-                expected_control_generation: admission.control_generation,
-                execution: admission.execution.clone(),
-            },
-            target: WorkTarget {
-                work_id: admission.work_id.clone(),
-                expected_work_revision: processing.revision,
-            },
-            request_id,
-            response,
-            dispatch_intents: vec![intent.clone()],
-            next_work_id: None,
-        },
-    )
-    .await;
-    let snapshot = resources
-        .inspect_work(&WorkQuery::new(session_id, WorkSelector::Head))
-        .await
-        .unwrap();
-    let processing =
-        crate::host::work_query::test_processing(resources, session_id, &admission.work_id).await;
-    let effects = resources
-        .inspect_work(&WorkQuery::new(
-            session_id,
-            WorkSelector::Effect {
-                invocation_id: intent.invocation_id.clone(),
-            },
-        ))
-        .await
-        .unwrap();
-    let WorkPage::Effects(effects) = effects.page else {
-        panic!("dynamic fixture requires its actual effect");
-    };
-    assert_eq!(effects[0].status, InvocationStatus::Prepared);
-    dynamic_fixture_action(
-        resources,
-        session_id,
-        WorkAction::BeginDispatch {
-            guard: WorkGuard {
-                expected_revision: snapshot.head.change_seq,
-                expected_control_generation: admission.control_generation,
-                execution: admission.execution,
-            },
-            target: WorkTarget {
-                work_id: admission.work_id,
-                expected_work_revision: processing.revision,
-            },
-            invocation_id: intent.invocation_id,
-            expected_effect_revision: effects[0].revision,
-        },
-    )
-    .await;
+    assert_eq!(receipt.decision, WorkDecision::Accepted);
+    invocation_id
 }
 
 /// [回归测试] production stage 创建的主 Session 必须保存 session/new 的完整
@@ -719,6 +504,7 @@ async fn test_production_stage_keeps_empty_frozen_prompt_inputs_after_late_files
     }) as Arc<dyn Model>;
     let mut ctx = make_session_context("late-frozen-files").await;
     let _resources = bind_child_fixture_resources(&mut ctx, &cwd, &frozen).await;
+    let invocation_id = prepare_child_fixture_intent(&ctx).await;
     ctx.primary_llm_factory = Some(Arc::new(move || Arc::clone(&model)));
     let stage_build = make_stage_build(&ctx);
     let (out, _) = stage_build(make_stage_request(frozen, None)).unwrap();
@@ -737,36 +523,7 @@ async fn test_production_stage_keeps_empty_frozen_prompt_inputs_after_late_files
     .await
     .expect("真实 loop 不得挂起");
 
-    assert!(
-        matches!(loop_result, LoopResult::Completed),
-        "{loop_result:?}"
-    );
-    use peri_acp_types::{execution_admission::*, session_resources::work::*};
-    let resources = ctx.session_resources.as_ref().unwrap();
-    let current = resources
-        .inspect_work(&WorkQuery::new(
-            &ctx.session_id,
-            WorkSelector::CurrentAdmission,
-        ))
-        .await
-        .unwrap();
-    let WorkPage::Admissions(admissions) = current.page else {
-        panic!("parent fixture requires its original admission");
-    };
-    let admission = admissions[0].admission.clone();
-    let evidence_id = crate::host::execution::finish_admission(resources.as_ref(), &admission)
-        .await
-        .unwrap();
-    assert!(
-        matches!(ctx.execution_admission_port.as_ref().unwrap().settle(SettlementRequest {
-        admission: admission.clone(),
-        proof: AttemptStoppedProof::AttemptStopped {
-            instance_id: admission.instance_id.clone(), generation_id: admission.generation_id.clone(),
-            execution: admission.execution.clone(), evidence_id,
-        },
-    }).await.unwrap(), SettlementOutcome::Applied { receipt } if receipt.admission == admission)
-    );
-    let invocation_id = prepare_child_fixture_intent(&ctx).await;
+    assert!(matches!(loop_result, LoopResult::Completed));
     let contributions = chain.collect_prompt_contributions();
     assert!(
         !contributions.contains("LATE_CLAUDE_MARKER"),

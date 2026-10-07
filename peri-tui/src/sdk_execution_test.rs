@@ -3,30 +3,33 @@ use crate::acp_client::AcpTuiClient;
 use peri_acp::host::execution_admission::ReverseExecutionAdmission;
 use peri_acp::transport::{AcpRequestBridge, mpsc::mpsc_transport_pair};
 use peri_acp_types::execution_admission::{
-    AdmissionOutcome, AdmissionRequest, AdmissionSnapshot, ExecutionAdmissionError,
-    ExecutionAdmissionPort,
+    AdmissionOutcome, AdmissionRequest, ExecutionAdmissionError, ExecutionAdmissionPort,
 };
 use peri_acp_types::session_resources::{
     ControlState,
-    work::{WorkCandidate, WorkStage},
+    work::{WorkCandidate, WorkSnapshot, WorkStage, WorkState},
 };
 
 fn snapshot_request() -> AdmissionRequest {
     AdmissionRequest {
         request_id: "bridge-fixture".into(),
         existing_admission: None,
-        snapshot: AdmissionSnapshot {
+        snapshot: WorkSnapshot {
+            pending_commands: Vec::new(),
             session_id: "bridge-session".into(),
             control: ControlState::default(),
+            state: WorkState::default(),
             blocked: false,
             candidates: vec![WorkCandidate {
                 work_id: "bridge-work".into(),
                 work_revision: 0,
                 stage: WorkStage::ReasonReady,
+                batch_id: None,
                 delivery_ids: Vec::new(),
                 requires_recovery: false,
             }],
-        },
+        }
+        .into(),
     }
 }
 
@@ -119,7 +122,7 @@ async fn real_sdk_available_hint_reverses_query_over_actual_tui_transport_with_i
             "session/work/available",
             serde_json::json!({
                 "sessionId":"available-hint-fixture", "revision":5, "lifecycle":1,
-                "controlGeneration":0, "executionProtocol":2,
+                "controlGeneration":0, "executionProtocol":1,
             }),
         )
         .await

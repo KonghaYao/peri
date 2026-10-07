@@ -72,9 +72,7 @@ fn execution_for_effective_error(code: EffectiveToolErrorCode) -> Option<ToolExe
     })
 }
 
-pub(in crate::agent::stages) fn requires_outcome_reconciliation(
-    code: EffectiveToolErrorCode,
-) -> bool {
+fn requires_outcome_reconciliation(code: EffectiveToolErrorCode) -> bool {
     matches!(
         code,
         EffectiveToolErrorCode::Cancelled

@@ -1,508 +1,550 @@
-use super::transition::{guard, next, target, write_head, write_processing};
+use super::reducer::{bump, work_mut};
 use super::*;
-use crate::session_resources::ControlStatus;
 
-#[path = "processing_lifecycle.rs"]
-mod lifecycle;
+/// 终态裁剪：`Settled` / `Abandoned` 的 work 不再保留模型请求正文。正文占
+/// 账本体积约 95%，而终态对账不再读取它（恢复路径只对 `ReasonInFlight` /
+/// `Blocked` / `ActReady` 用正文）。保留 `request_id` 与 `response` 等身份事实；
+/// 既有存量记录不被扫描清理（用户裁决保留现场），因此只在进入终态的动作内调用。
+fn trim_terminal_request(work: &mut WorkRecord) {
+    work.reason_request = None;
+}
 
-#[path = "processing_delegation.rs"]
-mod delegation;
-
-#[path = "processing_candidate.rs"]
-mod candidate;
-
-pub(super) use lifecycle::{abandon_processing_inputs, block_budget, is_budget_blocked};
-
-pub(super) fn apply(
-    command: &WorkCommand,
-    facts: &WorkFacts,
+fn blocked_budget(
+    state: &mut WorkState,
+    target: &WorkTarget,
     receipt: &mut WorkReceipt,
-    writes: &mut Vec<WorkWrite>,
+    reason: &str,
 ) -> Result<(), WorkRejection> {
-    match &command.action {
-        WorkAction::RegisterAdmission { admission } => {
-            if !validate_execution_association(admission, &facts.control)
-                || admission.session_id != command.session_id
-                || facts.control.status != ControlStatus::Active
-                || facts.head.legacy_unknown != 0
-            {
-                return Err(WorkRejection::StaleExecution);
-            }
-            if let Some(prior) = &facts.admission {
-                if facts.processing.is_none()
-                    && prior
-                        .initial_delivery_ids
-                        .as_ref()
-                        .is_none_or(Vec::is_empty)
-                {
-                    return Err(WorkRejection::LegacyUnknown);
-                }
-                return if prior.admission == *admission && prior.leaving_evidence_id.is_none() {
-                    Ok(())
-                } else {
-                    Err(WorkRejection::Conflict)
-                };
-            }
-            let initial_delivery_ids = if let Some(processing) = &facts.processing {
-                if processing.processing_id != admission.work_id
-                    || processing.recipient_lifecycle != admission.lifecycle
-                    || processing.revision != admission.work_revision
-                    || matches!(processing.stage, WorkStage::Settled | WorkStage::Abandoned)
-                {
-                    return Err(WorkRejection::StaleWorkRevision);
-                }
-                None
-            } else {
-                if admission.work_revision != 0 {
-                    return Err(WorkRejection::StaleWorkRevision);
-                }
-                Some(candidate::pending_delivery_ids(
-                    command,
-                    facts,
-                    &admission.work_id,
-                )?)
-            };
-            if facts.head.current_admission_id.is_some() {
-                return Err(WorkRejection::Conflict);
-            }
-            if facts.control.attempt.is_none() {
-                let mut control = facts.control.clone();
-                control.revision = next(control.revision)?;
-                control.attempt = Some(admission.execution.clone());
-                writes.push(WorkWrite::Control {
-                    expected_revision: facts.control.revision,
-                    record: control,
-                });
-            }
-            let mut head = facts.head.clone();
-            head.current_admission_id = Some(admission.admission_id.clone());
-            writes.push(WorkWrite::Admission {
-                expected_entering_mutation_id: None,
-                record: AdmissionRecord {
-                    admission: admission.clone(),
-                    entering_mutation_id: command.mutation_id.clone(),
-                    leaving_evidence_id: None,
-                    initial_delivery_ids,
-                },
-            });
-            write_head(facts, head, writes);
-            Ok(())
+    let work = work_mut(state, target)?;
+    work.resume_stage = Some(work.stage);
+    work.stage = WorkStage::Blocked;
+    work.reason = Some(reason.into());
+    work.recovery_condition = Some("explicit budget reset authorization".into());
+    bump(work, receipt)
+}
+
+pub(super) fn begin_reason(
+    state: &mut WorkState,
+    target: &WorkTarget,
+    request_id: &str,
+    request: &ReasonRequest,
+    receipt: &mut WorkReceipt,
+) -> Result<(), WorkRejection> {
+    let work = work_mut(state, target)?.clone();
+    if work.stage != WorkStage::ReasonReady
+        || request_id.is_empty()
+        || state
+            .works
+            .values()
+            .any(|prior| prior.request_id.as_deref() == Some(request_id))
+    {
+        return Err(WorkRejection::InvalidTransition);
+    }
+    if request.model_ref.is_empty()
+        || request.authorization_ref.is_empty()
+        || serde_json::from_str::<serde_json::Value>(&request.serialized_request).is_err()
+        || request.request_digest
+            != format!(
+                "{:x}",
+                Sha256::digest(request.serialized_request.as_bytes())
+            )
+    {
+        return Err(WorkRejection::InvalidTransition);
+    }
+    let budget = state
+        .budgets
+        .get_mut(&work.budget_id)
+        .ok_or(WorkRejection::Conflict)?;
+    if budget.reason_requests >= state.limits.reason_requests {
+        return blocked_budget(state, target, receipt, "reason budget exhausted");
+    }
+    budget.reason_requests = budget
+        .reason_requests
+        .checked_add(1)
+        .ok_or(WorkRejection::VersionExhausted)?;
+    let work = work_mut(state, target)?;
+    work.stage = WorkStage::ReasonInFlight;
+    work.request_id = Some(request_id.into());
+    work.reason_request = Some(request.clone());
+    bump(work, receipt)
+}
+
+fn successor(
+    state: &mut WorkState,
+    source: &WorkRecord,
+    next_work_id: &str,
+    stage: WorkStage,
+    invocation_ids: Vec<String>,
+) -> Result<(), WorkRejection> {
+    if next_work_id.is_empty() || state.works.contains_key(next_work_id) {
+        return Err(WorkRejection::Conflict);
+    }
+    state.works.insert(
+        next_work_id.into(),
+        WorkRecord {
+            work_id: next_work_id.into(),
+            revision: 0,
+            budget_id: source.budget_id.clone(),
+            batch_id: source.batch_id.clone(),
+            stage,
+            resume_stage: None,
+            request_id: None,
+            reason_request: None,
+            response: None,
+            invocation_ids,
+            reason: None,
+            recovery_condition: None,
+        },
+    );
+    if let Some(binding) = state.work_delegations.get(&source.work_id).cloned() {
+        state.work_delegations.insert(next_work_id.into(), binding);
+    }
+    Ok(())
+}
+
+pub(super) fn commit_reason(
+    command: &WorkCommand,
+    state: &mut WorkState,
+    receipt: &mut WorkReceipt,
+    projections: &mut Vec<WorkPayload>,
+) -> Result<(), WorkRejection> {
+    let WorkAction::CommitReasonResponseAndDispatchIntent {
+        target,
+        request_id,
+        response,
+        dispatch_intents: intents,
+        next_work_id,
+        ..
+    } = &command.action
+    else {
+        return Err(WorkRejection::InvalidTransition);
+    };
+    let next_work_id = next_work_id.as_deref();
+    let source = work_mut(state, target)?.clone();
+    if source.stage != WorkStage::ReasonInFlight
+        || source.request_id.as_deref() != Some(request_id.as_str())
+        || response.role != "assistant"
+        || response.validate().is_err()
+        || (!intents.is_empty() && next_work_id.is_none())
+    {
+        return Err(WorkRejection::InvalidTransition);
+    }
+    let payload = deserialize_persisted_payload(&response.serialized)
+        .map_err(|_| WorkRejection::InvalidTransition)?;
+    let message = payload
+        .as_message()
+        .ok_or(WorkRejection::InvalidTransition)?;
+    let calls = message.tool_calls();
+    if calls.len() != intents.len() {
+        return Err(WorkRejection::Conflict);
+    }
+    let mut invocation_ids = Vec::new();
+    for intent in intents {
+        if invocation_ids.contains(&intent.invocation_id) {
+            return Err(WorkRejection::Conflict);
         }
-        WorkAction::FinishAdmission {
-            admission,
-            evidence_id,
-        } => {
-            let prior = facts.admission.as_ref().ok_or(WorkRejection::Conflict)?;
-            if admission.lifecycle != command.recipient_lifecycle
-                || prior.admission != *admission
-                || evidence_id.is_empty()
-                || admission.session_id != command.session_id
-            {
-                return Err(WorkRejection::Conflict);
-            }
-            if let Some(evidence) = &prior.leaving_evidence_id {
-                return if evidence == evidence_id {
-                    Ok(())
-                } else {
-                    Err(WorkRejection::Conflict)
-                };
-            }
-            if facts
-                .control
-                .attempt
-                .as_ref()
-                .is_some_and(|observed| observed != &admission.execution)
-                || facts.head.current_admission_id.as_ref() != Some(&admission.admission_id)
-            {
-                return Err(WorkRejection::StaleExecution);
-            }
-            let mut record = prior.clone();
-            record.leaving_evidence_id = Some(evidence_id.clone());
-            writes.push(WorkWrite::Admission {
-                expected_entering_mutation_id: Some(prior.entering_mutation_id.clone()),
-                record,
-            });
-            let mut head = facts.head.clone();
-            if head.current_admission_id.as_ref() == Some(&admission.admission_id) {
-                head.current_admission_id = None;
-                if facts.control.attempt.as_ref() == Some(&admission.execution) {
-                    let mut control = facts.control.clone();
-                    control.revision = next(control.revision)?;
-                    control.attempt = None;
-                    writes.push(WorkWrite::Control {
-                        expected_revision: facts.control.revision,
-                        record: control,
-                    });
-                }
-            }
-            write_head(facts, head, writes);
-            Ok(())
+        let call = calls
+            .iter()
+            .find(|call| call.id == intent.tool_call_id)
+            .ok_or(WorkRejection::Conflict)?;
+        let arguments: serde_json::Value = serde_json::from_str(&intent.arguments_json)
+            .map_err(|_| WorkRejection::InvalidTransition)?;
+        if call.name != intent.tool_name || call.arguments != arguments {
+            return Err(WorkRejection::Conflict);
         }
-        WorkAction::BindResourceOwners {
-            connections_json,
-            authorization_ref,
-            ..
-        } => {
-            if authorization_ref.is_empty()
-                || serde_json::from_str::<serde_json::Value>(connections_json).is_err()
-            {
-                return Err(WorkRejection::InvalidTransition);
-            }
-            let mut descriptor = descriptor(command, facts);
-            let owners = ResourceOwnerBinding {
-                recipient_lifecycle: command.recipient_lifecycle,
-                connections_json: connections_json.clone(),
-                authorization_ref: authorization_ref.clone(),
-            };
-            if descriptor
-                .resource_owners
-                .as_ref()
-                .is_some_and(|prior| prior != &owners)
-            {
-                return Err(WorkRejection::Conflict);
-            }
-            descriptor.resource_owners = Some(owners);
-            write_descriptor(facts, descriptor, writes)
+        super::bindings::prepare(command, state, intent, next_work_id)?;
+        invocation_ids.push(intent.invocation_id.clone());
+    }
+    let batch = state
+        .batches
+        .get(&source.batch_id)
+        .ok_or(WorkRejection::Conflict)?
+        .clone();
+    for delivery_id in &batch.processing_delivery_ids {
+        let obligation = state
+            .obligations
+            .get_mut(delivery_id)
+            .ok_or(WorkRejection::Conflict)?;
+        if !matches!(
+            obligation.status,
+            ObligationStatus::InProgress | ObligationStatus::Satisfied
+        ) {
+            return Err(WorkRejection::InvalidTransition);
         }
-        WorkAction::BindChildResumeMetadata { metadata_json, .. } => {
-            if serde_json::from_str::<serde_json::Value>(metadata_json).is_err() {
-                return Err(WorkRejection::InvalidTransition);
-            }
-            let mut descriptor = descriptor(command, facts);
-            if descriptor
-                .child_resume_metadata_json
-                .as_ref()
-                .is_some_and(|prior| prior != metadata_json)
-            {
-                return Err(WorkRejection::Conflict);
-            }
-            descriptor.child_resume_metadata_json = Some(metadata_json.clone());
-            write_descriptor(facts, descriptor, writes)
-        }
-        WorkAction::BindWorkDelegation {
-            work_id,
-            binding,
-            parent_binding_receipt,
-            ..
-        } => delegation::bind(
-            command,
-            facts,
-            work_id,
-            binding,
-            parent_binding_receipt,
-            receipt,
-            writes,
-        ),
-        WorkAction::BeginReason {
-            guard: execution_guard,
-            target: work_target,
-            request_id,
-            request,
-        } => {
-            guard(facts, execution_guard)?;
-            let mut processing = target(facts, work_target)?;
-            if processing.stage != WorkStage::ReasonReady
-                || request_id.is_empty()
-                || request.payload.validate().is_err()
-                || request.request_digest != request.payload.sha256
-                || request.model_ref.is_empty()
-                || request.authorization_ref.is_empty()
-            {
-                return Err(WorkRejection::InvalidTransition);
-            }
-            if processing.budget.reason_requests >= facts.head.limits.reason_requests {
-                return block_budget(
-                    processing,
-                    crate::error::WorkBudgetKind::ReasonRequests,
-                    receipt,
-                    writes,
-                );
-            }
-            processing.budget.reason_requests = next(processing.budget.reason_requests)?;
-            processing.execution = execution_guard.execution.clone();
-            processing.stage = WorkStage::ReasonInFlight;
-            processing.request_id = Some(request_id.clone());
-            processing.request = Some(request.payload.clone());
-            processing.checkpoint = Some(command.mutation_id.clone());
-            write_processing(processing, receipt, writes)
-        }
-        WorkAction::CommitReasonResponseAndDispatchIntent {
-            guard: execution_guard,
-            target: work_target,
-            request_id,
-            response,
-            dispatch_intents,
+        obligation.status = ObligationStatus::Satisfied;
+        obligation.reason = None;
+    }
+    projections.push(response.clone());
+    if let Some(next_work_id) = next_work_id {
+        successor(
+            state,
+            &source,
             next_work_id,
-        } => {
-            guard(facts, execution_guard)?;
-            let mut processing = target(facts, work_target)?;
-            if processing.stage != WorkStage::ReasonInFlight
-                || processing.request_id.as_ref() != Some(request_id)
-                || response.validate().is_err()
-                || response.role != "assistant"
-                || dispatch_intents.len() > MAX_WORK_PAGE_SIZE as usize
-                || next_work_id
-                    .as_ref()
-                    .is_some_and(|identity| identity != &processing.processing_id)
-            {
-                return Err(WorkRejection::InvalidTransition);
-            }
-            let mut unique = Vec::new();
-            let mut tool_calls = Vec::new();
-            for intent in dispatch_intents {
-                super::effect::validate_intent(intent)?;
-                if unique.contains(&intent.invocation_id)
-                    || tool_calls.contains(&intent.tool_call_id)
-                    || facts
-                        .effects
-                        .iter()
-                        .any(|effect| effect.invocation_id == intent.invocation_id)
+            if intents.is_empty() {
+                WorkStage::ReasonReady
+            } else {
+                WorkStage::ActReady
+            },
+            invocation_ids,
+        )?;
+        state
+            .works
+            .get_mut(next_work_id)
+            .ok_or(WorkRejection::Conflict)?
+            .response = Some(response.clone());
+    }
+    let work = work_mut(state, target)?;
+    work.response = Some(response.clone());
+    work.stage = WorkStage::Settled;
+    trim_terminal_request(work);
+    bump(work, receipt)?;
+    if let Some(next_work_id) = next_work_id {
+        let next = state
+            .works
+            .get(next_work_id)
+            .ok_or(WorkRejection::Conflict)?;
+        receipt.work_id = Some(next.work_id.clone());
+        receipt.work_revision = Some(next.revision);
+        receipt.stage = Some(next.stage);
+    }
+    Ok(())
+}
+
+pub(super) fn begin_dispatch(
+    state: &mut WorkState,
+    target: &WorkTarget,
+    invocation_id: &str,
+    receipt: &mut WorkReceipt,
+) -> Result<(), WorkRejection> {
+    let source = work_mut(state, target)?.clone();
+    if source.stage != WorkStage::ActReady
+        || !source
+            .invocation_ids
+            .iter()
+            .any(|identity| identity == invocation_id)
+    {
+        return Err(WorkRejection::InvalidTransition);
+    }
+    let invocation = state
+        .invocations
+        .get(invocation_id)
+        .ok_or(WorkRejection::Conflict)?;
+    if invocation.status != InvocationStatus::Prepared
+        || invocation.work_id.as_deref() != Some(&source.work_id)
+    {
+        return Err(WorkRejection::InvalidTransition);
+    }
+    let budget = state
+        .budgets
+        .get_mut(&source.budget_id)
+        .ok_or(WorkRejection::Conflict)?;
+    if budget.dispatches >= state.limits.dispatches {
+        return blocked_budget(state, target, receipt, "dispatch budget exhausted");
+    }
+    budget.dispatches = budget
+        .dispatches
+        .checked_add(1)
+        .ok_or(WorkRejection::VersionExhausted)?;
+    state
+        .invocations
+        .get_mut(invocation_id)
+        .ok_or(WorkRejection::Conflict)?
+        .status = InvocationStatus::DispatchAccepted;
+    bump(work_mut(state, target)?, receipt)
+}
+
+pub(super) fn commit_act(
+    command: &WorkCommand,
+    state: &mut WorkState,
+    target: &WorkTarget,
+    results: &[InvocationResult],
+    next_work_id: Option<&str>,
+    receipt: &mut WorkReceipt,
+    projections: &mut Vec<WorkPayload>,
+) -> Result<(), WorkRejection> {
+    let source = work_mut(state, target)?.clone();
+    if !matches!(
+        source.stage,
+        WorkStage::ActReady | WorkStage::Blocked | WorkStage::Abandoned
+    ) || source.invocation_ids.is_empty()
+        || results.is_empty()
+        || (source.stage != WorkStage::ActReady && next_work_id.is_some())
+    {
+        return Err(WorkRejection::InvalidTransition);
+    }
+    let mut seen = Vec::new();
+    for result in results {
+        if !source.invocation_ids.contains(&result.invocation_id)
+            || seen.contains(&result.invocation_id)
+        {
+            return Err(WorkRejection::Conflict);
+        }
+        seen.push(result.invocation_id.clone());
+        let invocation = state
+            .invocations
+            .get_mut(&result.invocation_id)
+            .ok_or(WorkRejection::Conflict)?;
+        if invocation.work_id.as_deref() != Some(&source.work_id)
+            || invocation.recipient_lifecycle != command.recipient_lifecycle
+        {
+            return Err(WorkRejection::Conflict);
+        }
+        let rejected_before_dispatch = invocation.status == InvocationStatus::Prepared
+            && matches!(&result.outcome, InvocationOutcome::Cancelled { evidence } if !evidence.is_empty());
+        if !rejected_before_dispatch
+            && !matches!(
+                invocation.status,
+                InvocationStatus::DispatchAccepted | InvocationStatus::OutcomeUnknown
+            )
+        {
+            return Err(WorkRejection::InvalidTransition);
+        }
+        match &result.outcome {
+            InvocationOutcome::Completed { result } | InvocationOutcome::Failed { result } => {
+                if result.role != "tool" || result.validate().is_err() {
+                    return Err(WorkRejection::InvalidTransition);
+                }
+                let payload = deserialize_persisted_payload(&result.serialized)
+                    .map_err(|_| WorkRejection::InvalidTransition)?;
+                if !matches!(payload.as_message(), Some(crate::messages::BaseMessage::Tool { tool_call_id, .. }) if tool_call_id == &invocation.intent.tool_call_id)
                 {
                     return Err(WorkRejection::Conflict);
                 }
-                unique.push(intent.invocation_id.clone());
-                tool_calls.push(intent.tool_call_id.clone());
-                writes.push(WorkWrite::Effect {
-                    expected_revision: None,
-                    record: Effect {
-                        invocation_id: intent.invocation_id.clone(),
-                        recipient_lifecycle: command.recipient_lifecycle,
-                        revision: 0,
-                        processing_id: Some(processing.processing_id.clone()),
-                        phase_sequence: processing.phase_sequence,
-                        intent: intent.clone(),
-                        binding: None,
-                        status: InvocationStatus::Prepared,
-                        outcome: None,
-                        unknown_reason: None,
-                        delegation: None,
-                    },
-                });
             }
-            let mut head = facts.head.clone();
-            let mut satisfied = 0u32;
-            for prior in &facts.deliveries {
-                if prior.processing_id.as_ref() != Some(&processing.processing_id)
-                    || !prior.participates_in_reason
-                    || prior.obligation != ObligationStatus::InProgress
-                {
-                    continue;
-                }
-                let mut delivery = prior.clone();
-                delivery.revision = next(delivery.revision)?;
-                delivery.obligation = ObligationStatus::Satisfied;
-                super::mailbox::release(&mut head, &delivery)?;
-                satisfied += 1;
-                writes.push(WorkWrite::Delivery {
-                    expected_revision: Some(prior.revision),
-                    record: delivery,
-                });
+            InvocationOutcome::Cancelled { evidence } if evidence.is_empty() => {
+                return Err(WorkRejection::InvalidTransition);
             }
-            if processing.phase_sequence == 0 && satisfied != processing.reason_delivery_count {
-                return Err(WorkRejection::Conflict);
-            }
-            head.unresolved_effects = head
-                .unresolved_effects
-                .checked_add(dispatch_intents.len() as u64)
-                .ok_or(WorkRejection::VersionExhausted)?;
-            processing.remaining_effects = dispatch_intents.len() as u64;
-            processing.response = Some(response.clone());
-            processing.checkpoint = Some(command.mutation_id.clone());
-            writes.push(WorkWrite::Transcript {
-                payload: response.clone(),
-            });
-            if dispatch_intents.is_empty() {
-                if next_work_id.is_some() {
-                    processing.phase_sequence = next(processing.phase_sequence)?;
-                    processing.stage = WorkStage::ReasonReady;
-                    processing.request = None;
-                    processing.request_id = None;
-                } else {
-                    processing.stage = WorkStage::Settled;
-                    if head.current_processing_id.as_ref() == Some(&processing.processing_id) {
-                        head.current_processing_id = None;
-                    }
-                }
-            } else {
-                processing.stage = WorkStage::ActReady;
-            }
-            write_head(facts, head, writes);
-            write_processing(processing, receipt, writes)
+            InvocationOutcome::Cancelled { .. } => {}
         }
-        WorkAction::BlockWork {
-            target: work_target,
-            reason,
-            recovery_condition,
-            ..
-        } => {
-            let mut processing = target(facts, work_target)?;
-            if reason.is_empty()
-                || recovery_condition.is_empty()
-                || matches!(
-                    processing.stage,
-                    WorkStage::Settled | WorkStage::Abandoned | WorkStage::Blocked
-                )
-            {
-                return Err(WorkRejection::InvalidTransition);
-            }
-            processing.resume_stage = Some(processing.stage);
-            processing.stage = WorkStage::Blocked;
-            processing.blocked_evidence = Some(reason.clone());
-            processing.recovery_condition = Some(recovery_condition.clone());
-            write_processing(processing, receipt, writes)
+        invocation.status = InvocationStatus::Settled;
+        invocation.outcome = Some(result.outcome.clone());
+        invocation.unknown_reason = None;
+        if let Some(projection) = invocation
+            .settled_projection(&command.session_id)
+            .map_err(|_| WorkRejection::InvalidTransition)?
+        {
+            projections.push(projection);
         }
-        WorkAction::ResumeWork {
-            guard: execution_guard,
-            target: work_target,
-            recovery_evidence,
-        } => {
-            guard(facts, execution_guard)?;
-            let mut processing = target(facts, work_target)?;
-            if processing.stage != WorkStage::Blocked || recovery_evidence.is_empty() {
-                return Err(WorkRejection::InvalidTransition);
-            }
-            if processing.budget.recoveries >= facts.head.limits.recoveries {
-                return block_budget(
-                    processing,
-                    crate::error::WorkBudgetKind::Recoveries,
-                    receipt,
-                    writes,
-                );
-            }
-            processing.budget.recoveries = next(processing.budget.recoveries)?;
-            processing.stage = processing
-                .resume_stage
-                .take()
-                .ok_or(WorkRejection::InvalidTransition)?;
-            if !matches!(
-                processing.stage,
-                WorkStage::ReasonReady | WorkStage::ReasonInFlight | WorkStage::ActReady
-            ) {
-                return Err(WorkRejection::InvalidTransition);
-            }
-            if processing.stage == WorkStage::ReasonInFlight && processing.request.is_none() {
-                return Err(WorkRejection::InvalidTransition);
-            }
-            processing.execution = execution_guard.execution.clone();
-            processing.blocked_evidence = Some(recovery_evidence.clone());
-            write_processing(processing, receipt, writes)
-        }
-        WorkAction::AbandonWork {
-            expected_control_generation,
-            target: work_target,
-            reason,
-            authorization_ref,
-            ..
-        } => {
-            if *expected_control_generation != facts.control.control_generation {
-                return Err(WorkRejection::StaleControlGeneration);
-            }
-            if reason.is_empty() || authorization_ref.is_empty() {
-                return Err(WorkRejection::InvalidTransition);
-            }
-            let mut processing = target(facts, work_target)?;
-            if matches!(processing.stage, WorkStage::Settled | WorkStage::Abandoned) {
-                return Err(WorkRejection::InvalidTransition);
-            }
-            processing.stage = WorkStage::Abandoned;
-            processing.blocked_evidence = Some(reason.clone());
-            processing.checkpoint = Some(command.mutation_id.clone());
-            let mut head = facts.head.clone();
-            abandon_processing_inputs(facts, &processing, &mut head, writes)?;
-            if head.current_processing_id.as_ref() == Some(&processing.processing_id) {
-                head.current_processing_id = None;
-            }
-            write_head(facts, head, writes);
-            write_processing(processing, receipt, writes)
-        }
-        WorkAction::SettleWork {
-            target: work_target,
-            ..
-        } => {
-            let mut processing = target(facts, work_target)?;
-            if processing.remaining_effects != 0 || processing.stage != WorkStage::ReasonReady {
-                return Err(WorkRejection::InvalidTransition);
-            }
-            processing.stage = WorkStage::Settled;
-            let mut head = facts.head.clone();
-            if head.current_processing_id.as_ref() == Some(&processing.processing_id) {
-                head.current_processing_id = None;
-            }
-            write_head(facts, head, writes);
-            write_processing(processing, receipt, writes)
-        }
-        WorkAction::ResetBudget {
-            budget_id,
-            authorization_ref,
-            ..
-        } => {
-            let mut processing = facts.processing.clone().ok_or(WorkRejection::Conflict)?;
-            if authorization_ref.is_empty() || *budget_id != processing.processing_id {
-                return Err(WorkRejection::InvalidTransition);
-            }
-            processing.budget = WorkBudget::default();
-            write_processing(processing, receipt, writes)
-        }
-        WorkAction::QuarantineLegacy {
-            record_id,
-            evidence,
-            ..
-        } => {
-            if record_id.is_empty() || evidence.is_empty() {
-                return Err(WorkRejection::InvalidTransition);
-            }
-            let record = LegacyEvidence {
-                record_id: record_id.clone(),
-                evidence: evidence.clone(),
-            };
-            if let Some(prior) = &facts.legacy_evidence {
-                return if prior == &record {
-                    Ok(())
-                } else {
-                    Err(WorkRejection::Conflict)
-                };
-            }
-            let mut head = facts.head.clone();
-            head.legacy_unknown = next(head.legacy_unknown)?;
-            writes.push(WorkWrite::LegacyEvidence { record });
-            write_head(facts, head, writes);
-            Ok(())
-        }
-        _ => Err(WorkRejection::InvalidTransition),
     }
-}
-
-fn descriptor(command: &WorkCommand, facts: &WorkFacts) -> RecoveryDescriptor {
-    facts
-        .recovery_descriptor
-        .clone()
-        .unwrap_or_else(|| RecoveryDescriptor {
-            descriptor_id: format!("{}:{}", command.session_id, command.recipient_lifecycle),
-            recipient_lifecycle: command.recipient_lifecycle,
-            revision: 0,
-            resource_owners: None,
-            child_resume_metadata_json: None,
-        })
-}
-
-fn write_descriptor(
-    facts: &WorkFacts,
-    mut descriptor: RecoveryDescriptor,
-    writes: &mut Vec<WorkWrite>,
-) -> Result<(), WorkRejection> {
-    let expected_revision = facts
-        .recovery_descriptor
-        .as_ref()
-        .map(|record| record.revision);
-    if let Some(previous) = expected_revision {
-        descriptor.revision = next(previous)?;
-    }
-    let mut head = facts.head.clone();
-    head.recovery_descriptor_id = Some(descriptor.descriptor_id.clone());
-    writes.push(WorkWrite::RecoveryDescriptor {
-        expected_revision,
-        record: descriptor,
+    let complete = source.invocation_ids.iter().all(|invocation_id| {
+        state
+            .invocations
+            .get(invocation_id)
+            .is_some_and(|invocation| invocation.status == InvocationStatus::Settled)
     });
-    write_head(facts, head, writes);
+    if !complete && next_work_id.is_some() {
+        return Err(WorkRejection::InvalidTransition);
+    }
+    if complete {
+        if let Some(next_work_id) = next_work_id {
+            successor(
+                state,
+                &source,
+                next_work_id,
+                WorkStage::ReasonReady,
+                Vec::new(),
+            )?;
+        }
+    }
+    let work = work_mut(state, target)?;
+    if complete && source.stage == WorkStage::ActReady {
+        work.stage = WorkStage::Settled;
+        work.reason = None;
+        work.recovery_condition = None;
+        trim_terminal_request(work);
+    }
+    bump(work, receipt)?;
+    if complete {
+        if let Some(next_work_id) = next_work_id {
+            receipt.work_id = Some(next_work_id.into());
+            receipt.work_revision = Some(0);
+            receipt.stage = Some(WorkStage::ReasonReady);
+        }
+    }
     Ok(())
 }
+
+pub(super) fn block(
+    state: &mut WorkState,
+    target: &WorkTarget,
+    reason: &str,
+    recovery_condition: &str,
+    receipt: &mut WorkReceipt,
+) -> Result<(), WorkRejection> {
+    if reason.is_empty() || recovery_condition.is_empty() {
+        return Err(WorkRejection::InvalidTransition);
+    }
+    let work = work_mut(state, target)?;
+    if matches!(work.stage, WorkStage::Settled | WorkStage::Abandoned) {
+        return Err(WorkRejection::InvalidTransition);
+    }
+    if work.stage != WorkStage::Blocked {
+        work.resume_stage = Some(work.stage);
+    }
+    work.stage = WorkStage::Blocked;
+    work.reason = Some(reason.into());
+    work.recovery_condition = Some(recovery_condition.into());
+    let batch_id = work.batch_id.clone();
+    bump(work, receipt)?;
+    for obligation in state.obligations.values_mut().filter(|obligation| {
+        obligation.work_id.as_deref() == Some(&batch_id)
+            && obligation.status == ObligationStatus::InProgress
+    }) {
+        obligation.status = ObligationStatus::Blocked;
+        obligation.reason = Some(reason.into());
+    }
+    Ok(())
+}
+
+pub(super) fn unknown(
+    state: &mut WorkState,
+    target: &WorkTarget,
+    invocation_id: &str,
+    reason: &str,
+    receipt: &mut WorkReceipt,
+) -> Result<(), WorkRejection> {
+    let work = work_mut(state, target)?.clone();
+    if reason.is_empty() {
+        return Err(WorkRejection::InvalidTransition);
+    }
+    if !work
+        .invocation_ids
+        .iter()
+        .any(|identity| identity == invocation_id)
+    {
+        return Err(WorkRejection::Conflict);
+    }
+    let invocation = state
+        .invocations
+        .get_mut(invocation_id)
+        .ok_or(WorkRejection::Conflict)?;
+    if invocation.status != InvocationStatus::DispatchAccepted
+        || invocation.work_id.as_deref() != Some(&work.work_id)
+    {
+        return Err(WorkRejection::InvalidTransition);
+    }
+    invocation.status = InvocationStatus::OutcomeUnknown;
+    invocation.unknown_reason = Some(reason.into());
+    if work.stage == WorkStage::Abandoned {
+        return bump(work_mut(state, target)?, receipt);
+    }
+    block(
+        state,
+        target,
+        reason,
+        "query original owner invocation or explicit resolution",
+        receipt,
+    )
+}
+
+pub(super) fn resume(
+    state: &mut WorkState,
+    target: &WorkTarget,
+    evidence: &str,
+    receipt: &mut WorkReceipt,
+) -> Result<(), WorkRejection> {
+    let source = work_mut(state, target)?.clone();
+    if source.stage != WorkStage::Blocked
+        || evidence.is_empty()
+        || source.invocation_ids.iter().any(|invocation_id| {
+            state
+                .invocations
+                .get(invocation_id)
+                .is_some_and(|invocation| {
+                    matches!(
+                        invocation.status,
+                        InvocationStatus::DispatchAccepted | InvocationStatus::OutcomeUnknown
+                    )
+                })
+        })
+    {
+        return Err(WorkRejection::InvalidTransition);
+    }
+    let resume_stage = source
+        .resume_stage
+        .ok_or(WorkRejection::InvalidTransition)?;
+    if resume_stage == WorkStage::ReasonInFlight {
+        return Err(WorkRejection::InvalidTransition);
+    }
+    let budget = state
+        .budgets
+        .get_mut(&source.budget_id)
+        .ok_or(WorkRejection::Conflict)?;
+    if budget.recoveries >= state.limits.recoveries {
+        return blocked_budget(state, target, receipt, "recovery budget exhausted");
+    }
+    budget.recoveries = budget
+        .recoveries
+        .checked_add(1)
+        .ok_or(WorkRejection::VersionExhausted)?;
+    let work = work_mut(state, target)?;
+    work.stage = resume_stage;
+    work.resume_stage = None;
+    work.reason = None;
+    work.recovery_condition = None;
+    let batch_id = work.batch_id.clone();
+    bump(work, receipt)?;
+    for obligation in state.obligations.values_mut().filter(|obligation| {
+        obligation.work_id.as_deref() == Some(&batch_id)
+            && obligation.status == ObligationStatus::Blocked
+    }) {
+        obligation.status = ObligationStatus::InProgress;
+        obligation.reason = None;
+    }
+    Ok(())
+}
+
+pub(super) fn abandon(
+    state: &mut WorkState,
+    target: &WorkTarget,
+    reason: &str,
+    authorization_ref: &str,
+    receipt: &mut WorkReceipt,
+) -> Result<(), WorkRejection> {
+    if reason.is_empty() || authorization_ref.is_empty() {
+        return Err(WorkRejection::InvalidTransition);
+    }
+    let work = work_mut(state, target)?;
+    if matches!(work.stage, WorkStage::Settled | WorkStage::Abandoned) {
+        return Err(WorkRejection::InvalidTransition);
+    }
+    work.stage = WorkStage::Abandoned;
+    work.reason = Some(format!("{reason}; authorization={authorization_ref}"));
+    trim_terminal_request(work);
+    let batch_id = work.batch_id.clone();
+    bump(work, receipt)?;
+    for obligation in state.obligations.values_mut().filter(|obligation| {
+        obligation.work_id.as_deref() == Some(&batch_id)
+            && obligation.status != ObligationStatus::Satisfied
+    }) {
+        obligation.status = ObligationStatus::Abandoned;
+        obligation.reason = Some(reason.into());
+    }
+    Ok(())
+}
+
+pub(super) fn settle(
+    state: &mut WorkState,
+    target: &WorkTarget,
+    receipt: &mut WorkReceipt,
+) -> Result<(), WorkRejection> {
+    let source = work_mut(state, target)?.clone();
+    if source.stage != WorkStage::ActReady
+        || !source.invocation_ids.iter().all(|invocation_id| {
+            state
+                .invocations
+                .get(invocation_id)
+                .is_some_and(|invocation| invocation.status == InvocationStatus::Settled)
+        })
+    {
+        return Err(WorkRejection::InvalidTransition);
+    }
+    let work = work_mut(state, target)?;
+    work.stage = WorkStage::Settled;
+    trim_terminal_request(work);
+    bump(work, receipt)
+}
+
+#[cfg(test)]
+#[path = "processing_test.rs"]
+mod tests;

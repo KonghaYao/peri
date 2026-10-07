@@ -58,7 +58,7 @@ async fn registration_upgrade_fixture(path: &Path) {
     .await
     .unwrap();
     for statement in crate::sessions::canonical::CREATE_TABLES {
-        sqlx::raw_sql(AssertSqlSafe(if statement.contains("CREATE TABLE IF NOT EXISTS messages") { "CREATE TABLE messages(message_id TEXT PRIMARY KEY,thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,role TEXT NOT NULL,content TEXT NOT NULL,truncated BOOLEAN NOT NULL DEFAULT 0,excluded BOOLEAN NOT NULL DEFAULT 0,projection TEXT)".to_owned() } else { (*statement).to_owned() }))
+        sqlx::raw_sql(AssertSqlSafe((*statement).to_owned()))
             .execute(&mut connection)
             .await
             .unwrap();
@@ -88,32 +88,50 @@ async fn registration_upgrade_fixture(path: &Path) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn concurrent_legacy_refusal_preserves_registration_tables() {
+async fn concurrent_migration_rebuilds_registration_tables_only_once() {
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("concurrent-refusal.db");
+    let control_path = directory.path().join("control.db");
+    registration_upgrade_fixture(&control_path).await;
+    let control = SqliteThreadStore::new(&control_path).await.unwrap();
+    let (expected_cookie,): (i64,) = sqlx::query_as("PRAGMA schema_version")
+        .fetch_one(&control.database.pool)
+        .await
+        .unwrap();
+    control.close().await;
+    let path = directory.path().join("concurrent-upgrade.db");
     registration_upgrade_fixture(&path).await;
-    let before = legacy_evidence(&path).await;
-    let barrier = Arc::new(Barrier::new(8));
-    let mut opens = JoinSet::new();
-    for _ in 0..8 {
-        let path = path.clone();
-        let barrier = barrier.clone();
-        opens.spawn(async move {
-            barrier.wait().await;
-            SqliteThreadStore::new(path).await
-        });
+    let stores = concurrent_stores(&path, 8).await;
+    for store in stores {
+        let (cookie,): (i64,) = sqlx::query_as("PRAGMA schema_version")
+            .fetch_one(&store.database.pool)
+            .await
+            .unwrap();
+        assert_eq!(cookie, expected_cookie, "DDL must run only once");
+        let row: (String, String, String, String) = sqlx::query_as(
+            "SELECT projects.id, projects.object_identity, r.id, r.discovery
+             FROM projects JOIN legacy_execution_registrations r ON r.project_id = projects.id",
+        )
+        .fetch_one(&store.database.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            row,
+            (
+                "project".into(),
+                "project-identity".into(),
+                "11111111-1111-4111-8111-111111111111".into(),
+                "{\"root\":\"/original\",\"root_identity\":{\"device\":1,\"inode\":1},\"common_dir\":null,\"common_identity\":null,\"private_dir\":null,\"private_identity\":null}".into()
+            )
+        );
+        store.close().await;
     }
-    while let Some(opened) = opens.join_next().await {
-        let error = opened.unwrap().err().expect("legacy open must refuse");
-        assert!(error
-            .to_string()
-            .contains("explicit stopped-writer offline migration"));
-    }
-    let held = lock_schema_open(&path, Duration::ZERO).await.unwrap();
-    drop(held);
-    assert!(!path.with_extension("db-wal").exists());
-    assert!(!path.with_extension("db-shm").exists());
-    assert_eq!(legacy_evidence(&path).await, before);
+    let reopened = SqliteThreadStore::new(&path).await.unwrap();
+    let (cookie,): (i64,) = sqlx::query_as("PRAGMA schema_version")
+        .fetch_one(&reopened.database.pool)
+        .await
+        .unwrap();
+    assert_eq!(cookie, expected_cookie);
+    reopened.close().await;
 }
 
 #[tokio::test]
@@ -267,7 +285,7 @@ async fn cancelling_an_open_during_schema_initialization_releases_its_lock() {
 }
 
 #[tokio::test]
-async fn legacy_refusal_closes_connections_and_releases_initialization_lock() {
+async fn failed_migration_closes_connections_and_releases_initialization_lock() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("failed.db");
     let mut connection = sqlx::SqliteConnection::connect_with(
@@ -287,9 +305,7 @@ async fn legacy_refusal_closes_connections_and_releases_initialization_lock() {
         .unwrap();
     connection.close().await.unwrap();
     let error = SqliteThreadStore::new(&path).await.err().unwrap();
-    assert!(error
-        .to_string()
-        .contains("explicit stopped-writer offline migration"));
+    assert!(error.to_string().contains("session_bindings"));
     assert!(!path.with_extension("db-wal").exists());
     assert!(!path.with_extension("db-shm").exists());
     let held = lock_schema_open(&path, Duration::ZERO).await.unwrap();
@@ -308,14 +324,8 @@ async fn legacy_refusal_closes_connections_and_releases_initialization_lock() {
         .await
         .unwrap();
     connection.close().await.unwrap();
-    let before = std::fs::read(&path).unwrap();
-    let error = SqliteThreadStore::new(&path).await.err().unwrap();
-    assert!(error
-        .to_string()
-        .contains("explicit stopped-writer offline migration"));
-    assert_eq!(std::fs::read(&path).unwrap(), before);
-    let held = lock_schema_open(&path, Duration::ZERO).await.unwrap();
-    drop(held);
+    let store = SqliteThreadStore::new(&path).await.unwrap();
+    store.close().await;
 }
 
 #[tokio::test]
@@ -359,18 +369,20 @@ async fn incompatible_schema_is_rejected_without_wal_or_database_changes() {
 async fn read_only_open_never_creates_an_initialization_lock() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("read-only.db");
-    let store = SqliteThreadStore::new(&path).await.unwrap();
-    store.close().await;
-    let mut connection =
-        sqlx::SqliteConnection::connect_with(&SqliteConnectOptions::new().filename(&path))
+    let mut connection = sqlx::SqliteConnection::connect_with(
+        &SqliteConnectOptions::new()
+            .filename(&path)
+            .create_if_missing(true),
+    )
+    .await
+    .unwrap();
+    for statement in crate::sessions::canonical::CREATE_TABLES {
+        sqlx::raw_sql(AssertSqlSafe((*statement).to_owned()))
+            .execute(&mut connection)
             .await
             .unwrap();
-    sqlx::query("PRAGMA journal_mode=DELETE")
-        .execute(&mut connection)
-        .await
-        .unwrap();
+    }
     connection.close().await.unwrap();
-    std::fs::remove_file(schema_lock_path(&path).await.unwrap()).unwrap();
     let before = tokio::fs::read(&path).await.unwrap();
     let store = SqliteThreadStore::open_existing_read_only(&path)
         .await
@@ -476,46 +488,4 @@ async fn exited_process_releases_initialization_lock_for_retry() {
         .unwrap();
     store.close().await;
     assert!(lock_path.exists());
-}
-
-async fn legacy_evidence(path: &std::path::Path) -> Vec<(String, Vec<String>)> {
-    let mut connection = sqlx::SqliteConnection::connect_with(
-        &SqliteConnectOptions::new().filename(path).read_only(true),
-    )
-    .await
-    .unwrap();
-    let version: i64 = sqlx::query_scalar("PRAGMA user_version")
-        .fetch_one(&mut connection)
-        .await
-        .unwrap();
-    let schema: Vec<String> = sqlx::query_scalar("SELECT json_array(type,name,tbl_name,sql) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name").fetch_all(&mut connection).await.unwrap();
-    let tables: Vec<String> = sqlx::query_scalar("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").fetch_all(&mut connection).await.unwrap();
-    let mut evidence = vec![
-        ("version".into(), vec![version.to_string()]),
-        ("schema".into(), schema),
-    ];
-    for table in tables {
-        let columns: Vec<String> =
-            sqlx::query_scalar("SELECT name FROM pragma_table_info(?1) ORDER BY cid")
-                .bind(&table)
-                .fetch_all(&mut connection)
-                .await
-                .unwrap();
-        let expressions = columns
-            .iter()
-            .map(|column| format!("quote(\"{}\")", column.replace('"', "\"\"")))
-            .collect::<Vec<_>>()
-            .join(" || ',' || ");
-        let statement = format!(
-            "SELECT quote(rowid) || ':' || {expressions} FROM \"{}\" ORDER BY rowid",
-            table.replace('"', "\"\"")
-        );
-        let rows = sqlx::query_scalar(sqlx::AssertSqlSafe(statement))
-            .fetch_all(&mut connection)
-            .await
-            .unwrap();
-        evidence.push((table, rows));
-    }
-    connection.close().await.unwrap();
-    evidence
 }

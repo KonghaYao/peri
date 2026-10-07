@@ -36,6 +36,8 @@ use turso_serverless::Value;
 use super::session_codec as codec;
 use super::session_data::{invalid_input, not_found, RemoteSessionData};
 use super::sql::{int_at, StatementSpec};
+use crate::sessions::canonical;
+use crate::sessions::canonical::role_of as role_of_message;
 
 // ─── 批内守卫 ─────────────────────────────────────────────────────────────────
 
@@ -63,8 +65,9 @@ const GUARD_MESSAGE_FOREIGN_SQL: &str = "INSERT INTO peri_store_meta(singleton)
 ///
 /// canonical 顺序由 `rowid` 承载：同批内语句按顺序执行，插入序即历史序，不需要
 /// 「先读序号再写」的往返，也不需要远端曾经那列显式 `ordinal`。
-#[cfg(test)]
-use super::session_sql::INSERT_MESSAGE_SQL as APPEND_MESSAGE_SQL;
+const APPEND_MESSAGE_SQL: &str = "INSERT INTO messages
+    (message_id, thread_id, role, content, truncated, excluded, projection)
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)";
 
 /// 改写一条条目的 flags（投影与 compact 的 flag 更新共用同一形状）。
 pub(super) const UPDATE_FLAGS_SQL: &str = "UPDATE messages
@@ -124,20 +127,17 @@ impl RemoteSessionData {
         message_id: MessageId,
     ) -> SessionResourceResult<Option<(String, String)>> {
         let statement = StatementSpec::new(
-            "SELECT m.message_id,m.content_ref,m.truncated,m.excluded,m.projection,m.role,p.version,p.byte_length,p.sha256,p.bytes,m.thread_id FROM messages m LEFT JOIN session_payloads p ON p.storage_scope=json_extract(m.content_ref,'$.storageScope') AND p.payload_id=json_extract(m.content_ref,'$.payloadId') WHERE m.message_id=?1",
+            "SELECT thread_id, content FROM messages WHERE message_id = ?1",
             vec![Value::Text(message_label(message_id))],
         );
         let store = self.store().await?;
         let Some(row) = store.fetch_row(&statement).await? else {
             return Ok(None);
         };
-        let Some(Value::Text(owner)) = row.get(10) else {
+        let [Value::Text(owner), Value::Text(content), ..] = row.as_slice() else {
             return Err(codec::corrupt("invalid reminder row"));
         };
-        Ok(Some((
-            owner.clone(),
-            payload_content(&codec::decode_message_row(&row)?)?,
-        )))
+        Ok(Some((owner.clone(), content.clone())))
     }
 
     /// 追加 canonical payload 批次：顺序稳定、计数重数、自动标题按本机同一规则补齐。
@@ -172,10 +172,13 @@ impl RemoteSessionData {
             .map(|(payload, content)| (payload.id(), content.clone()))
             .collect::<Vec<_>>();
         let mut effects = Vec::with_capacity(payloads.len() + 2);
-        for payload in payloads {
-            effects.extend(super::session_sql::insert_message_statement(
-                id, payload, None,
-            )?);
+        for (payload, (message, content)) in payloads.iter().zip(&entries) {
+            effects.push(append_statement(
+                id,
+                *message,
+                content,
+                canonical::payload_role(payload),
+            ));
         }
         if let Some(title) = title_statement(id, payloads) {
             effects.push(title);
@@ -268,12 +271,13 @@ impl RemoteSessionData {
             .zip(&appended)
             .map(|(message, content)| (message.id(), content.clone()))
             .collect::<Vec<_>>();
-        for message in &change.appended_messages {
-            effects.extend(super::session_sql::insert_message_statement(
+        for (message, (message_id, content)) in change.appended_messages.iter().zip(&entries) {
+            effects.push(append_statement(
                 id,
-                &PersistedPayload::Message(message.clone()),
-                None,
-            )?);
+                *message_id,
+                content,
+                role_of_message(message),
+            ));
         }
         inputs.extend(entry_inputs(&entries));
         effects.push(refresh_statement(id, &timestamp()));
@@ -300,15 +304,13 @@ impl RemoteSessionData {
             RewindBoundary::KeepThrough(_) => (REWIND_KEEP_THROUGH_SQL, "keep_through"),
             RewindBoundary::RemoveFrom(_) => (REWIND_REMOVE_FROM_SQL, "remove_from"),
         };
-        let mut effects =
-            super::session_work::specifications(crate::sessions::work_store::history_guard(id))?;
-        effects.extend([
+        let effects = vec![
             StatementSpec::new(
                 sql,
                 vec![Value::Text(id.as_str().to_owned()), codec::int_value(rowid)],
             ),
             refresh_statement(id, &timestamp()),
-        ]);
+        ];
         // 方向进摘要：同一个边界上的 `KeepThrough` 与 `RemoveFrom` 是**两个操作**，
         // 只按 (会话, 边界, rowid) 摘要会让后者撞上前者的操作 id，被当成重放静默跳过。
         let inputs = vec![
@@ -346,8 +348,7 @@ impl RemoteSessionData {
                 return Err(invalid_input("history entry belongs to another session"));
             }
         }
-        let mut effects =
-            super::session_work::specifications(crate::sessions::work_store::history_guard(id))?;
+        let mut effects = Vec::with_capacity(unique.len() * 2 + 1);
         let mut inputs = vec![id.as_str().to_owned()];
         for message in &unique {
             effects.push(StatementSpec::new(
@@ -456,6 +457,21 @@ fn check_reminder_row(
 // ─── 语句组装 ─────────────────────────────────────────────────────────────────
 
 /// 追加语句：`?1` 消息 id、`?2` 会话 id、`?3` role、`?4` 内容、`?5..?7` 默认 flags。
+fn append_statement(id: &ThreadId, message: MessageId, content: &str, role: &str) -> StatementSpec {
+    StatementSpec::new(
+        APPEND_MESSAGE_SQL,
+        vec![
+            Value::Text(message_label(message)),
+            Value::Text(id.as_str().to_owned()),
+            Value::Text(role.to_owned()),
+            Value::Text(content.to_owned()),
+            codec::int_value(0),
+            codec::int_value(0),
+            Value::Null,
+        ],
+    )
+}
+
 /// flags 更新语句（`projection` 为已序列化 JSON 或 NULL）。
 fn flag_statement(id: &ThreadId, message: MessageId, flags: &MessageFlags) -> StatementSpec {
     StatementSpec::new(
@@ -593,7 +609,7 @@ mod tests {
             (GUARD_MESSAGE_NOT_IN_SESSION_SQL, 2),
             (GUARD_MESSAGE_FOREIGN_SQL, 2),
             // 追加语句里 `?2`（会话 id）被主查询与取序号的子查询共用，因此是 7 个占位符。
-            (APPEND_MESSAGE_SQL, 8),
+            (APPEND_MESSAGE_SQL, 7),
             (UPDATE_FLAGS_SQL, 5),
             // 同一次「重数 + 推进时间戳」里 `?2` 出现两次。
             (REFRESH_COUNTS_SQL, 3),
@@ -651,9 +667,9 @@ mod tests {
     /// 顺序交给 `rowid`（不再有显式序号列，也就不需要「先读序号再写」）。
     #[test]
     fn append_matches_the_canonical_message_insert() {
-        assert!(APPEND_MESSAGE_SQL.contains("message_id, thread_id, role, content_ref"));
+        assert!(APPEND_MESSAGE_SQL.contains("(message_id, thread_id, role, content"));
         assert!(!APPEND_MESSAGE_SQL.contains("ordinal"));
-        assert!(APPEND_MESSAGE_SQL.contains("MAX(transcript_seq)"));
+        assert!(!APPEND_MESSAGE_SQL.contains("MAX("));
     }
 
     /// 计数是**重数**而不是自增：任何一条历史路径都不会把计数带偏。

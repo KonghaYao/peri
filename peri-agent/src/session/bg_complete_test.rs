@@ -2,7 +2,7 @@ use super::*;
 use crate::agent::async_tasks::durable_task_terminal_delivery;
 use crate::session::test_resources::{mock::work::bind_fixture_task, TestSession};
 use peri_acp_types::session::MessageQueue;
-use peri_acp_types::session_resources::work::{WorkPage, WorkQuery, WorkSelector};
+use peri_acp_types::session_resources::work::WorkQuery;
 
 fn shell_result(task_id: &str) -> BackgroundTaskResult {
     BackgroundTaskResult {
@@ -166,26 +166,14 @@ async fn owner_ack_requires_confirmed_reliable_inbox_not_queue_or_transcript() {
     assert!(callback(&result, BgTaskKind::Shell).is_ok());
     let snapshot = bound
         .resources
-        .inspect_work(&WorkQuery::new(bound.thread_id(), WorkSelector::Inbox))
+        .load_session_work(&WorkQuery {
+            session_id: bound.thread_id(),
+            limit: 1,
+        })
         .await
         .unwrap();
-    let WorkPage::Deliveries(deliveries) = snapshot.page else {
-        panic!("delivery page required")
-    };
-    assert_eq!(deliveries.len(), 1);
-    let binding = bound
-        .resources
-        .inspect_work(&WorkQuery::new(
-            bound.thread_id(),
-            WorkSelector::TaskBindingByTask {
-                owner_task_id: "shell-durable".into(),
-            },
-        ))
-        .await
-        .unwrap();
-    assert!(
-        matches!(binding.page, WorkPage::Effects(effects) if effects.len() == 1 && effects[0].binding.is_some())
-    );
+    assert_eq!(snapshot.state.deliveries.len(), 1);
+    assert_eq!(snapshot.state.task_bindings.len(), 1);
     assert!(bound
         .resources
         .load_session_history(&bound.thread_id())
@@ -212,10 +200,13 @@ async fn missing_immutable_task_binding_never_acknowledges_or_falls_back_to_queu
     assert!(queue.is_empty());
     let snapshot = bound
         .resources
-        .inspect_work(&WorkQuery::new(bound.thread_id(), WorkSelector::Inbox))
+        .load_session_work(&WorkQuery {
+            session_id: bound.thread_id(),
+            limit: 1,
+        })
         .await
         .unwrap();
-    assert!(matches!(snapshot.page, WorkPage::Deliveries(deliveries) if deliveries.is_empty()));
+    assert!(snapshot.state.deliveries.is_empty());
     assert!(bound
         .resources
         .load_session_history(&bound.thread_id())
@@ -243,13 +234,13 @@ async fn same_terminal_identity_cannot_acknowledge_changed_payload() {
         .contains("conflicting"));
     let snapshot = bound
         .resources
-        .inspect_work(&WorkQuery::new(bound.thread_id(), WorkSelector::Inbox))
+        .load_session_work(&WorkQuery {
+            session_id: bound.thread_id(),
+            limit: 1,
+        })
         .await
         .unwrap();
-    let WorkPage::Deliveries(deliveries) = snapshot.page else {
-        panic!("delivery page required")
-    };
-    assert_eq!(deliveries.len(), 1);
+    assert_eq!(snapshot.state.deliveries.len(), 1);
 }
 
 #[tokio::test]
@@ -276,7 +267,7 @@ async fn terminal_publication_failure_reason_is_visible_at_default_log_level() {
         logs.text()
     );
     assert!(
-        failure_line.contains("terminal task binding unavailable or ambiguous"),
+        failure_line.contains("terminal publication has no durable invocation/task binding"),
         "captured:\n{}",
         logs.text()
     );
@@ -325,7 +316,7 @@ async fn terminal_publication_retry_keeps_reason_visible_without_log_flooding() 
         logs.text()
     );
     assert!(
-        retry_line.contains("terminal task binding unavailable or ambiguous"),
+        retry_line.contains("terminal publication has no durable invocation/task binding"),
         "captured:\n{}",
         logs.text()
     );

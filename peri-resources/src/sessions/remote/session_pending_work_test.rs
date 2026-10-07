@@ -39,16 +39,17 @@ async fn pending_work_remote_root_and_descendants_block_until_reconciled() {
 }
 
 #[tokio::test]
-async fn workrecords_pending_query_skips_large_undecodable_payload() {
+async fn pending_work_remote_query_skips_large_undecodable_state() {
     let fixture = Fixture::new().await;
     let adapter = fixture.adapter().await;
     let root = "work-session".to_owned();
-    sqlx::query("INSERT INTO session_payloads(storage_scope,payload_id,kind,codec,version,byte_length,sha256,bytes,retention_class) VALUES (?1,'irrelevant','evidence','json',1,length(?2),'invalid',?2,'evidence')")
+    sqlx::query("INSERT INTO session_work_state(session_id,state_json) VALUES (?1,?2)")
         .bind(&root)
-        .bind("undecodable payload".repeat(100_000).into_bytes())
+        .bind("undecodable state".repeat(100_000))
         .execute(&fixture.pool)
         .await
         .unwrap();
+    assert!(adapter.load_session_work(&query()).await.is_err());
     assert!(!adapter.has_pending_work_mutations(&root).await.unwrap());
     pending(&fixture, &root).await;
     assert!(adapter.has_pending_work_mutations(&root).await.unwrap());

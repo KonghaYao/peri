@@ -1,5 +1,7 @@
 use peri_acp_types::session_resources::{
-    work::{WorkAction, WorkAdmission, WorkCommand, WorkDecision, WorkResolution},
+    work::{
+        WorkAction, WorkAdmission, WorkCommand, WorkCommandQuery, WorkDecision, WorkResolution,
+    },
     SessionResources,
 };
 
@@ -27,9 +29,13 @@ pub(super) async fn reconcile_finish(
     admission: &WorkAdmission,
 ) -> Result<bool, AcpError> {
     let original = command(admission, 0);
-    let owned =
-        super::super::work_query::command(resources, &original.session_id, &original.mutation_id)
-            .await?;
+    let owned = resources
+        .load_work_command(&WorkCommandQuery {
+            session_id: original.session_id.clone(),
+            mutation_id: original.mutation_id.clone(),
+        })
+        .await
+        .map_err(super::super::workspace::resource_error)?;
     match owned {
         None => Ok(false),
         Some(owned) if owned.command != original => Err(AcpError::new(
@@ -51,12 +57,13 @@ pub(super) async fn finish_admission(
     let mut new_attempts = 0;
     loop {
         let original = command(admission, retry);
-        let owned = super::super::work_query::command(
-            resources,
-            &original.session_id,
-            &original.mutation_id,
-        )
-        .await?;
+        let owned = resources
+            .load_work_command(&WorkCommandQuery {
+                session_id: original.session_id.clone(),
+                mutation_id: original.mutation_id.clone(),
+            })
+            .await
+            .map_err(super::super::workspace::resource_error)?;
         let resolution = match owned {
             Some(owned) => {
                 if owned.command != original {

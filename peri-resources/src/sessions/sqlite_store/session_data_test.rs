@@ -892,11 +892,7 @@ async fn close_intent_survives_reopen_and_finishes_without_execution_owner() {
         CloseSettlement::Finished
     );
     assert!(!successor.is_session_closing(&id).await.unwrap());
-    successor.finish_close(&id).await.unwrap();
-    let settled = successor.load_session_control(&id).await.unwrap();
-    successor.mark_session_closing(&id).await.unwrap();
-    assert_eq!(successor.load_session_control(&id).await.unwrap(), settled);
-    assert!(!successor.is_session_closing(&id).await.unwrap());
+    assert!(successor.finish_close(&id).await.is_err());
     assert_eq!(
         successor
             .close_settlement(&"missing".to_owned())

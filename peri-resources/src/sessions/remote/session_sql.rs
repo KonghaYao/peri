@@ -29,7 +29,7 @@ use crate::sessions::canonical;
 macro_rules! meta_columns {
     () => {
         "s.id, s.title, s.cwd, s.created_at, s.updated_at, s.message_count,
-    (SELECT COALESCE(SUM(json_extract(m.content_ref,'$.byteLength')), 0) FROM messages m WHERE m.thread_id = s.id),
+    (SELECT COALESCE(SUM(LENGTH(m.content)), 0) FROM messages m WHERE m.thread_id = s.id),
     s.parent_thread_id, s.snapshot_at_message_id, s.hidden, s.cancel_policy, s.config, s.agent_status"
     };
 }
@@ -130,8 +130,8 @@ const SELECT_TREE_SQL: &str = concat!(
 );
 
 const SELECT_MESSAGES_SQL: &str =
-    "SELECT m.message_id,m.content_ref,m.truncated,m.excluded,m.projection,m.role,p.version,p.byte_length,p.sha256,p.bytes
-    FROM messages m LEFT JOIN session_payloads p ON p.storage_scope=json_extract(m.content_ref,'$.storageScope') AND p.payload_id=json_extract(m.content_ref,'$.payloadId') WHERE m.thread_id=?1 ORDER BY m.transcript_seq ASC,m.rowid ASC";
+    "SELECT m.message_id, m.content, m.truncated, m.excluded, m.projection
+    FROM messages m WHERE m.thread_id = ?1 ORDER BY m.rowid ASC";
 
 /// 沿父链上溯到的根（含自身即根的情形）；链上没有根时不返回行，由调用方判为事实不完整。
 const SELECT_ROOT_SQL: &str = "WITH RECURSIVE a AS (
@@ -363,9 +363,9 @@ const INSERT_BINDING_SQL: &str =
 const UPDATE_INHERITED_SQL: &str = "UPDATE threads SET inherited_context = ?1 WHERE id = ?2";
 
 /// 历史行插入：列清单与本机 `messages` 一致（含 `role`），顺序由 `rowid` 承载。
-pub(super) const INSERT_MESSAGE_SQL: &str = "INSERT INTO messages (
-    message_id, thread_id, role, content_ref, truncated, excluded, projection,transcript_seq)
-    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7,(SELECT COALESCE(MAX(transcript_seq),0)+1 FROM messages WHERE thread_id=?2))";
+const INSERT_MESSAGE_SQL: &str = "INSERT INTO messages (
+    message_id, thread_id, role, content, truncated, excluded, projection)
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)";
 
 /// 定向更新：`Some(None)` 清除、`None` 保持不变、`None` 之外的值照写。
 ///
@@ -441,10 +441,7 @@ pub(super) fn insert_session_statements(
     row: &SessionInsert<'_>,
 ) -> SessionResourceResult<Vec<StatementSpec>> {
     let relative = binding_relative_text(row.binding)?;
-    let mut statements = super::session_work::specifications(
-        crate::sessions::work_store::creation_guard(row.thread_id),
-    )?;
-    statements.extend([
+    let mut statements = vec![
         StatementSpec::new(
             INSERT_THREAD_SQL,
             vec![
@@ -478,7 +475,7 @@ pub(super) fn insert_session_statements(
                 optional_text(row.parent_thread_id),
             ],
         ),
-    ]);
+    ];
     if let Some(inherited) = row.inherited {
         statements.push(StatementSpec::new(
             UPDATE_INHERITED_SQL,
@@ -505,10 +502,7 @@ pub(super) fn insert_session_draft_statements(
         .meta
         .snapshot_at_message_id
         .map(|id| id.as_uuid().to_string());
-    let mut statements = super::session_work::specifications(
-        crate::sessions::work_store::creation_guard(&draft.thread_id),
-    )?;
-    statements.extend([
+    Ok(vec![
         StatementSpec::new(
             INSERT_THREAD_DRAFT_SQL,
             vec![
@@ -541,8 +535,7 @@ pub(super) fn insert_session_draft_statements(
                 optional_text(draft.meta.parent_thread_id.as_deref()),
             ],
         ),
-    ]);
-    Ok(statements)
+    ])
 }
 
 /// 一次性提交 frozen 的语句（write-once CAS；受影响行数由调用方按 1 核对）。
@@ -570,12 +563,11 @@ pub(super) fn insert_message_statement(
     thread_id: &str,
     payload: &PersistedPayload,
     flags: Option<&MessageFlags>,
-) -> SessionResourceResult<Vec<StatementSpec>> {
-    let (reference, prepared) = crate::sessions::work_store::payload::prepare(payload, thread_id)?;
-    let mut statements = super::session_work::specifications(prepared)?;
-    let params = payload_params(thread_id, payload, flags, &reference)?;
-    statements.push(StatementSpec::new(INSERT_MESSAGE_SQL, params));
-    Ok(statements)
+) -> SessionResourceResult<StatementSpec> {
+    Ok(StatementSpec::new(
+        INSERT_MESSAGE_SQL,
+        payload_params(thread_id, payload, flags)?,
+    ))
 }
 
 /// 定向 metadata 更新语句（`None` 不动、`Some(None)` 清除）。

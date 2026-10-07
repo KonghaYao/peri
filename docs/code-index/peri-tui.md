@@ -21,7 +21,7 @@ query/execute/resolve；精确 existing ticket 确认不再次准入，Unknown �
 持久输入撤回入口 `src/kit/steer_state.rs` 以原 snapshot 与 pending command 共同校验：
 Queued 与未 claim 的 Dispatching 可以请求权威 withdraw receipt；Claimed 不可以。
 Unknown enqueue/dispatch/withdraw 保留原命令，禁止同时重发、撤回或恢复编辑器内容。
-视图 `src/kit/steer_queue/view.rs` 不把 Claimed 当作可撤回的 Dispatching。入队回执不明时，`SteerState::reject` 保留原命令身份并投影为 Unconfirmed；原命令回执或 Delivered 确认后清除未确认标记，期间不开放取回或重新发布。
+视图 `src/kit/steer_queue/view.rs` 不把 Claimed 当作可撤回的 Dispatching。
 回归入口：`sdk_execution::tests`、`kit::steer_state::tests`、`kit::steer_queue::tests`；
 JSONL/SQLite transport 的协议与故障测试见 `peri-acp/src/host/execution_admission*_test.rs`。
 

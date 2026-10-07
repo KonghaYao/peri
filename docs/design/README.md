@@ -54,7 +54,6 @@ draft、proposal、可行性探查、审计报告和未采纳方案不进入本�
 | --- | --- | --- |
 | 时间能力边界 | [time-runtime.md](time-runtime.md) | [时间模块边界实施](../../spec/issues/2026-10-04-time-runtime-boundary.md)；原生边界已落地，WASM 完整验收与既有公开 Chrono 契约范围仍待核实 |
 | RCRA 消息、任务归属与激活 | [rcra-message-activation.md](rcra-message-activation.md) | 一等公民 Agent 独立 Task/MQ、类型驱动的 MQ 消费语义、可靠接纳与处理义务；**实施验收中**，范围与证据见 [active issue](../../spec/issues/2026-10-05-rcra-message-activation.md) |
-| 会话工作记录 | [session-work-records.md](session-work-records.md) | Mailbox、Processing、Effect 分责，删除 WorkState 全聚合运行存储；[独立 worktree 实施](../../spec/issues/2026-10-06-workstate-redesign-implementation.md) |
 | Session 异步任务统一入口 | [session-async-tasks.md](session-async-tasks.md) | 每会话独立任务领域、执行 owner、发现/取消/关闭；消息与激活服从 RCRA 权威，执行唯一性归 SDK；**待重构** |
 | 存储 v2：Machine → Workspace → Session | [storage-v2-machine-workspace-session.md](storage-v2-machine-workspace-session.md) | `spec/issues/2026-10-02-storage-v2-machine-workspace-session.md`；schema 版本以代码索引为准，Git 使用 worktree 根、非 Git 使用启动 cwd；验收状态见 active issue |
 | Command 系统 | [command-system.md](command-system.md) | 对应 command active issue 与代码 |

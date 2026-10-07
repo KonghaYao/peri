@@ -50,13 +50,6 @@ pub(crate) async fn bind(context: &mut StageContext) -> tempfile::TempDir {
         })
         .await
         .unwrap();
-    let history = context.session.transcript.read().persisted_payloads();
-    if !history.is_empty() {
-        resources
-            .append_history(&session_id, &history)
-            .await
-            .unwrap();
-    }
     {
         let mut transcript = context.session.transcript.write();
         *transcript =
@@ -65,37 +58,4 @@ pub(crate) async fn bind(context: &mut StageContext) -> tempfile::TempDir {
     context.recipient_lifecycle = Some(1);
     context.execution_admission_port = Some(Arc::new(admission::FixtureAdmission(resources)));
     directory
-}
-
-pub(crate) async fn finish(context: &StageContext, evidence_id: &str) {
-    use peri_acp_types::execution_admission::{
-        AttemptStoppedProof, SettlementOutcome, SettlementRequest,
-    };
-    let writer = context
-        .session
-        .transcript
-        .read()
-        .persist_tx_handle()
-        .unwrap();
-    peri_agent::session::MessageTranscript::flush_via_tx(&writer)
-        .await
-        .unwrap();
-    let admission = context.session.turn.work_admission().unwrap().clone();
-    let proof = AttemptStoppedProof::AttemptStopped {
-        instance_id: admission.instance_id.clone(),
-        generation_id: admission.generation_id.clone(),
-        execution: admission.execution.clone(),
-        evidence_id: evidence_id.into(),
-    };
-    let outcome = context
-        .execution_admission_port()
-        .unwrap()
-        .settle(SettlementRequest {
-            admission: admission.clone(),
-            proof,
-        })
-        .await
-        .unwrap();
-    assert!(matches!(outcome, SettlementOutcome::Applied { receipt }
-        if receipt.admission == admission && receipt.evidence_id == evidence_id));
 }

@@ -27,7 +27,6 @@ pub struct SteerQueueItem {
 pub enum SteerItemState {
     Queued,
     Submitting,
-    Unconfirmed,
     Dispatching,
     Publishing,
     Claimed,

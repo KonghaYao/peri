@@ -28,19 +28,16 @@ pub(super) async fn run(
 ) -> Result<ColdChildRun, AcpError> {
     let work = cfg
         .session_resources
-        .inspect_work(&WorkQuery {
+        .load_session_work(&WorkQuery {
             session_id: admission.session_id.clone(),
-            selector: peri_acp_types::session_resources::work::WorkSelector::RecoveryDescriptor {
-                lifecycle: admission.lifecycle,
-            },
             limit: 1,
-            cursor: None,
         })
         .await
         .map_err(super::workspace::resource_error)?;
     let metadata: ChildResumeMetadata = serde_json::from_str(
-        super::work_query::descriptor(&work, admission.lifecycle)?
-            .and_then(|descriptor| descriptor.child_resume_metadata_json.as_deref())
+        work.state
+            .child_resume_metadata
+            .get(&admission.lifecycle)
             .ok_or_else(|| blocked("persisted child resume metadata missing"))?,
     )
     .map_err(|error| blocked(format!("invalid child resume metadata: {error}")))?;
@@ -327,17 +324,16 @@ pub(super) async fn block(
 ) -> Result<(), AcpError> {
     let work = cfg
         .session_resources
-        .inspect_work(&WorkQuery {
+        .load_session_work(&WorkQuery {
             session_id: admission.session_id.clone(),
-            selector: peri_acp_types::session_resources::work::WorkSelector::Processing {
-                processing_id: admission.work_id.clone(),
-            },
             limit: 1,
-            cursor: None,
         })
         .await
         .map_err(super::workspace::resource_error)?;
-    let target = super::work_query::processing(&work, &admission.work_id)?
+    let target = work
+        .state
+        .works
+        .get(&admission.work_id)
         .ok_or_else(|| blocked("original child work unavailable"))?;
     let receipt = cfg
         .session_resources
@@ -346,7 +342,7 @@ pub(super) async fn block(
             recipient_lifecycle: admission.lifecycle,
             mutation_id: format!("cold-child-block:{}", admission.admission_id),
             action: WorkAction::BlockWork {
-                expected_revision: work.head.change_seq,
+                expected_revision: work.state.revision,
                 target: WorkTarget {
                     work_id: admission.work_id.clone(),
                     expected_work_revision: target.revision,

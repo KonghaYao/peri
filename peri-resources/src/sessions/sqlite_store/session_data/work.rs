@@ -1,73 +1,81 @@
 use super::*;
-use crate::sessions::{work as journal, work_store};
+use crate::sessions::work;
 use peri_acp_types::session_resources::work::{
-    transition_work, EvidenceQuery, EvidenceRecord, EvidenceWrite, PayloadRef, WorkCommand,
-    WorkInspection, WorkQuery, WorkReceipt, WorkResolution,
+    reduce_work, DeliveryRecord, WorkCommand, WorkDeliveryQuery, WorkQuery, WorkReceipt,
+    WorkResolution, WorkSnapshot,
 };
 
-#[path = "work/execution.rs"]
-pub(super) mod execution;
-#[path = "work/offline.rs"]
-pub(in crate::sessions::sqlite_store) mod offline;
-use execution::{execute_plan, read_plan, rollback, sql_failure};
-
 impl SqliteSessionData {
-    pub(super) async fn read_work(
+    pub(super) async fn read_work_availability(
         &self,
-        query: &WorkQuery,
-    ) -> SessionResourceResult<WorkInspection> {
-        query.validate()?;
-        let mut transaction = self.database.pool.begin().await.map_err(sql_failure)?;
-        let statements = work_store::inspection_plan(query)?;
-        let rows = read_plan(&mut transaction, &statements).await?;
-        let inspection = work_store::decode_inspection(query, &rows)?;
-        transaction.commit().await.map_err(sql_failure)?;
-        Ok(inspection)
+        id: &ThreadId,
+    ) -> SessionResourceResult<peri_acp_types::session_resources::work::WorkAvailability> {
+        let (exists, control, facts, history): (bool, Option<String>, Option<String>, bool) =
+            sqlx::query_as(work::READ_AVAILABILITY)
+                .bind(id)
+                .fetch_one(&self.database.pool)
+                .await
+                .map_err(|error| map_sqlx(&error))?;
+        work::availability(exists, control.as_deref(), facts.as_deref(), history)
     }
 
-    pub(super) async fn load_evidence(
+    pub(super) async fn read_delivery(
         &self,
-        query: &EvidenceQuery,
-    ) -> SessionResourceResult<EvidenceRecord> {
-        let mut transaction = self.database.pool.begin().await.map_err(sql_failure)?;
-        let statements = work_store::evidence_plan(query)?;
-        let rows = read_plan(&mut transaction, &statements).await?;
-        let evidence = work_store::decode_evidence(query, &rows)?;
-        evidence.validate()?;
-        transaction.commit().await.map_err(sql_failure)?;
-        Ok(evidence)
+        query: &WorkDeliveryQuery,
+    ) -> SessionResourceResult<Option<DeliveryRecord>> {
+        let (exists, kind, json): (bool, Option<String>, Option<String>) =
+            sqlx::query_as(work::READ_DELIVERY)
+                .bind(&query.session_id)
+                .bind(&query.delivery_id)
+                .fetch_one(&self.database.pool)
+                .await
+                .map_err(|error| map_sqlx(&error))?;
+        if !exists {
+            return Err(not_found());
+        }
+        work::delivery(query, kind.as_deref(), json.as_deref())
     }
 
-    pub(super) async fn store_evidence(
+    pub(super) async fn read_work_command(
         &self,
-        evidence: &EvidenceWrite,
-    ) -> SessionResourceResult<PayloadRef> {
-        self.writable()?;
-        let (_, statements) = work_store::prepare_evidence_plan(evidence)?;
-        let read_statement = work_store::payload::prepared_evidence_plan(evidence)?;
-        let mut transaction = self
+        query: &peri_acp_types::session_resources::work::WorkCommandQuery,
+    ) -> SessionResourceResult<Option<peri_acp_types::session_resources::work::OwnedWorkCommand>>
+    {
+        let row: Option<(String, String, Option<String>, bool)> =
+            sqlx::query_as(work::READ_OWNED_COMMAND)
+                .bind(&query.mutation_id)
+                .bind(&query.session_id)
+                .fetch_optional(&self.database.pool)
+                .await
+                .map_err(|error| map_sqlx(&error))?;
+        row.map(|(json, digest, resolution, reconciled)| {
+            work::owned_command(&json, &digest, resolution.as_deref(), reconciled)
+        })
+        .transpose()
+    }
+    pub(super) async fn read_work(&self, query: &WorkQuery) -> SessionResourceResult<WorkSnapshot> {
+        let mut tx = self
             .database
             .pool
-            .begin_with("BEGIN IMMEDIATE")
+            .begin()
             .await
-            .map_err(sql_failure)?;
-        if let Err(error) = execute_plan(&mut transaction, &statements).await {
-            return Err(rollback(transaction, error, &evidence.session_id).await);
+            .map_err(|error| map_sqlx(&error))?;
+        let (control, state, _) = read_snapshot(&mut tx, &query.session_id).await?;
+        let mut snapshot = WorkSnapshot::from_state(query, control, state);
+        let rows: Vec<(String,)> = sqlx::query_as(work::READ_PENDING)
+            .bind(&query.session_id)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(|error| map_sqlx(&error))?;
+        snapshot.pending_commands = rows
+            .into_iter()
+            .map(|row| work::original_command(&row.0))
+            .collect::<SessionResourceResult<_>>()?;
+        if !snapshot.pending_commands.is_empty() {
+            snapshot.blocked = true;
+            snapshot.candidates.clear();
         }
-        let prepared = async {
-            let rows = read_plan(&mut transaction, &[read_statement]).await?;
-            work_store::payload::prepared_evidence_reference(evidence, &rows[0])
-        }
-        .await;
-        let reference = match prepared {
-            Ok(reference) => reference,
-            Err(error) => return Err(rollback(transaction, error, &evidence.session_id).await),
-        };
-        transaction.commit().await.map_err(|error| {
-            tracing::error!(%error, "SQLite immutable evidence commit outcome unknown");
-            commit_failure(Some(evidence.session_id.clone()))
-        })?;
-        Ok(reference)
+        Ok(snapshot)
     }
 
     pub(super) async fn write_work(
@@ -76,32 +84,78 @@ impl SqliteSessionData {
     ) -> SessionResourceResult<WorkReceipt> {
         self.writable()?;
         command.digest()?;
-        let mut transaction = self
+        let mut tx = self
             .database
             .pool
             .begin_with("BEGIN IMMEDIATE")
             .await
-            .map_err(sql_failure)?;
-        let replay = match record_original(&mut transaction, command).await {
-            Ok(replay) => replay,
-            Err(error) => return Err(rollback(transaction, error, &command.session_id).await),
-        };
-        commit(transaction, command).await?;
-        if let Some(resolution) = replay {
-            return journal::receipt(resolution);
+            .map_err(|error| map_sqlx(&error))?;
+        if let Some(resolution) = saved_resolution(&mut tx, command).await? {
+            acknowledge(&mut tx, command).await?;
+            tx.commit()
+                .await
+                .map_err(|_| commit_failure(Some(command.session_id.clone())))?;
+            return work::receipt(resolution);
         }
-        let mut transaction = self
+        if let Some((json,)) = sqlx::query_as::<_, (String,)>(work::READ_COMMAND)
+            .bind(&command.mutation_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|error| map_sqlx(&error))?
+        {
+            if work::original_command(&json)? != *command {
+                return Err(SessionResourceError::conflict(
+                    "work original command identity conflicts",
+                ));
+            }
+            return Err(commit_failure(Some(command.session_id.clone())));
+        }
+        for effect in work::command_effects(command)? {
+            execute_effect(&mut tx, effect).await?;
+        }
+        tx.commit()
+            .await
+            .map_err(|_| commit_failure(Some(command.session_id.clone())))?;
+        let mut tx = self
             .database
             .pool
             .begin_with("BEGIN IMMEDIATE")
             .await
-            .map_err(sql_failure)?;
-        let receipt = match apply_original(&mut transaction, command).await {
-            Ok(receipt) => receipt,
-            Err(error) => return Err(rollback(transaction, error, &command.session_id).await),
-        };
-        commit(transaction, command).await?;
-        Ok(receipt)
+            .map_err(|error| map_sqlx(&error))?;
+        let (control, state, state_json) = read_snapshot(&mut tx, &command.session_id).await?;
+        let initial_json = work::pre_state_json(state_json, &state)?;
+        let parent_command = work::terminal_parent_command(command, &state);
+        let reduction = reduce_work(command, &control, state)?;
+        for effect in work::mutation_effects(
+            command,
+            initial_json,
+            parent_command.as_ref(),
+            &control,
+            &reduction,
+        )? {
+            let mut query = sqlx::query(effect.sql);
+            for value in effect.params {
+                query = query.bind(value);
+            }
+            query
+                .execute(&mut *tx)
+                .await
+                .map_err(|error| map_sqlx(&error))?;
+        }
+        tx.commit()
+            .await
+            .map_err(|_| commit_failure(Some(command.session_id.clone())))?;
+        let mut tx = self
+            .database
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(|error| map_sqlx(&error))?;
+        acknowledge(&mut tx, command).await?;
+        tx.commit()
+            .await
+            .map_err(|_| commit_failure(Some(command.session_id.clone())))?;
+        Ok(reduction.receipt)
     }
 
     pub(super) async fn resolve_work(
@@ -109,116 +163,65 @@ impl SqliteSessionData {
         command: &WorkCommand,
     ) -> SessionResourceResult<WorkResolution> {
         self.writable()?;
-        command.digest()?;
-        let mut transaction = self
+        let digest = command.digest()?;
+        let mut tx = self
             .database
             .pool
             .begin_with("BEGIN IMMEDIATE")
             .await
-            .map_err(sql_failure)?;
-        let resolution = match seal_original(&mut transaction, command).await {
-            Ok(resolution) => resolution,
-            Err(error) => return Err(rollback(transaction, error, &command.session_id).await),
-        };
-        commit(transaction, command).await?;
+            .map_err(|error| map_sqlx(&error))?;
+        if let Some(resolution) = saved_resolution(&mut tx, command).await? {
+            acknowledge(&mut tx, command).await?;
+            tx.commit()
+                .await
+                .map_err(|_| commit_failure(Some(command.session_id.clone())))?;
+            return Ok(resolution);
+        }
+        for effect in work::command_effects(command)? {
+            execute_effect(&mut tx, effect).await?;
+        }
+        let resolution = WorkResolution::NotApplied;
+        sqlx::query(work::INSERT_RECEIPT)
+            .bind(&command.mutation_id)
+            .bind(&command.session_id)
+            .bind(digest)
+            .bind(work::encode(&resolution)?)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| map_sqlx(&error))?;
+        acknowledge(&mut tx, command).await?;
+        tx.commit()
+            .await
+            .map_err(|_| commit_failure(Some(command.session_id.clone())))?;
         Ok(resolution)
     }
 }
 
-async fn record_original(
+async fn execute_effect(
     connection: &mut SqliteConnection,
-    command: &WorkCommand,
-) -> SessionResourceResult<Option<WorkResolution>> {
-    if let Some(resolution) = saved_resolution(connection, command).await? {
-        acknowledge(connection, command).await?;
-        return Ok(Some(resolution));
+    effect: work::WorkEffect,
+) -> SessionResourceResult<()> {
+    let mut query = sqlx::query(effect.sql);
+    for value in effect.params {
+        query = query.bind(value);
     }
-    if let Some((json,)) = sqlx::query_as::<_, (String,)>(journal::READ_COMMAND)
-        .bind(&command.mutation_id)
-        .fetch_optional(&mut *connection)
+    query
+        .execute(connection)
         .await
-        .map_err(sql_failure)?
-    {
-        if journal::original_command(&json)? != *command {
-            return Err(SessionResourceError::conflict(
-                "work original command identity conflicts",
-            ));
-        }
-        return Err(commit_failure(Some(command.session_id.clone())));
-    }
-    execute_plan(connection, &journal::command_effects(command)?).await?;
-    Ok(None)
-}
-
-async fn apply_original(
-    connection: &mut SqliteConnection,
-    command: &WorkCommand,
-) -> SessionResourceResult<WorkReceipt> {
-    if let Some(resolution) = saved_resolution(connection, command).await? {
-        acknowledge(connection, command).await?;
-        return journal::receipt(resolution);
-    }
-    let statements = work_store::read_set(command)?;
-    let rows = read_plan(connection, &statements).await?;
-    let facts = work_store::decode_facts(command, &rows)?;
-    let mut transition = transition_work(command, &facts)?;
-    if let Some(statement) = work_store::response_validation_plan(command, &transition)? {
-        let validation = read_plan(connection, &[statement]).await?;
-        work_store::validate_response_transition(command, &mut transition, &validation[0])?;
-    }
-    let statements = work_store::sql_plan(command, &facts, &transition)?;
-    execute_plan(connection, &statements).await?;
-    sqlx::query(journal::INSERT_RECEIPT)
-        .bind(&command.mutation_id)
-        .bind(&command.session_id)
-        .bind(command.digest()?)
-        .bind(journal::encode(&WorkResolution::Applied {
-            receipt: transition.receipt.clone(),
-        })?)
-        .execute(&mut *connection)
-        .await
-        .map_err(sql_failure)?;
-    acknowledge(connection, command).await?;
-    Ok(transition.receipt)
-}
-
-async fn seal_original(
-    connection: &mut SqliteConnection,
-    command: &WorkCommand,
-) -> SessionResourceResult<WorkResolution> {
-    if let Some(resolution) = saved_resolution(connection, command).await? {
-        acknowledge(connection, command).await?;
-        return Ok(resolution);
-    }
-    execute_plan(connection, &journal::command_effects(command)?).await?;
-    let resolution = WorkResolution::NotApplied;
-    sqlx::query(journal::INSERT_RECEIPT)
-        .bind(&command.mutation_id)
-        .bind(&command.session_id)
-        .bind(command.digest()?)
-        .bind(journal::encode(&resolution)?)
-        .execute(&mut *connection)
-        .await
-        .map_err(sql_failure)?;
-    acknowledge(connection, command).await?;
-    Ok(resolution)
+        .map_err(|error| map_sqlx(&error))?;
+    Ok(())
 }
 
 async fn acknowledge(
     connection: &mut SqliteConnection,
     command: &WorkCommand,
 ) -> SessionResourceResult<()> {
-    let updated = sqlx::query(journal::ACK_COMMAND)
+    sqlx::query(work::ACK_COMMAND)
         .bind(&command.mutation_id)
         .bind(command.digest()?)
         .execute(connection)
         .await
-        .map_err(sql_failure)?;
-    if updated.rows_affected() != 1 {
-        return Err(SessionResourceError::conflict(
-            "work receipt acknowledgement guard failed",
-        ));
-    }
+        .map_err(|_| commit_failure(Some(command.session_id.clone())))?;
     Ok(())
 }
 
@@ -226,25 +229,48 @@ async fn saved_resolution(
     connection: &mut SqliteConnection,
     command: &WorkCommand,
 ) -> SessionResourceResult<Option<WorkResolution>> {
-    let row: Option<(String, String)> = sqlx::query_as(journal::READ_RECEIPT)
+    let row: Option<(String, String)> = sqlx::query_as(work::READ_RECEIPT)
         .bind(&command.mutation_id)
         .fetch_optional(connection)
         .await
-        .map_err(sql_failure)?;
-    row.map(|(digest, json)| journal::replay(command, &digest, &json))
+        .map_err(|error| map_sqlx(&error))?;
+    row.map(|(digest, json)| work::replay(command, &digest, &json))
         .transpose()
 }
 
-async fn commit(
-    transaction: sqlx::Transaction<'_, sqlx::Sqlite>,
-    command: &WorkCommand,
-) -> SessionResourceResult<()> {
-    transaction.commit().await.map_err(|error| {
-        tracing::error!(%error, session_id = %command.session_id, mutation_id = %command.mutation_id, "SQLite work commit outcome unknown");
-        commit_failure(Some(command.session_id.clone()))
-    })
+async fn read_snapshot(
+    connection: &mut SqliteConnection,
+    id: &str,
+) -> SessionResourceResult<(
+    peri_acp_types::session_resources::ControlState,
+    peri_acp_types::session_resources::work::WorkState,
+    Option<String>,
+)> {
+    let control: Option<(String,)> = sqlx::query_as(crate::sessions::control::READ_STATE)
+        .bind(id)
+        .fetch_optional(&mut *connection)
+        .await
+        .map_err(|error| map_sqlx(&error))?;
+    let state: Option<(String,)> = sqlx::query_as(work::READ_STATE)
+        .bind(id)
+        .fetch_optional(&mut *connection)
+        .await
+        .map_err(|error| map_sqlx(&error))?;
+    let exists = thread_exists_on(connection, &id.to_owned())
+        .await
+        .map_err(read_failure)?;
+    if !exists && control.is_none() && state.is_none() {
+        return Err(not_found());
+    }
+    let has_history: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM messages WHERE thread_id=?1)")
+            .bind(id)
+            .fetch_one(&mut *connection)
+            .await
+            .map_err(|error| map_sqlx(&error))?;
+    Ok((
+        crate::sessions::control::state(control.as_ref().map(|row| row.0.as_str()))?,
+        work::state(state.as_ref().map(|row| row.0.as_str()), has_history)?,
+        state.map(|row| row.0),
+    ))
 }
-
-#[cfg(test)]
-#[path = "work/work_test.rs"]
-mod tests;

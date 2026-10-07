@@ -1,41 +1,83 @@
 use super::*;
+use crate::sessions::data::SessionDataPort;
+use crate::sessions::sqlite_store::SqliteSessionData;
+// `SessionResources` 的方法只在 unix 子进程用例里调用（Windows 的 home_dir 不读 HOME）。
+#[cfg(unix)]
+use peri_acp_types::session_resources::SessionResources;
 use peri_acp_types::{
     messages::BaseMessage,
     store::{serialize_persisted_payload, PersistedPayload, ThreadStore},
+    thread::ThreadMeta,
+    workspace::{ScopedThreadQuery, ThreadScope},
 };
 use sqlx::{sqlite::SqliteConnectOptions, AssertSqlSafe, Connection};
 use std::path::Path;
+use std::sync::Arc;
 
 #[tokio::test]
-async fn v13_refusal_preserves_owner_tables_and_close_intent() {
+async fn v13_upgrade_drops_execution_owner_tables_and_preserves_close_intent() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("threads.db");
-    let mut connection = SqliteConnection::connect_with(
-        &SqliteConnectOptions::new()
-            .filename(&path)
-            .create_if_missing(true),
-    )
-    .await
-    .unwrap();
-    sqlx::raw_sql(LEGACY_V13_SQL)
-        .execute(&mut connection)
+    let store = SqliteThreadStore::new(&path).await.unwrap();
+    let id = store
+        .create_thread(ThreadMeta::new_at(
+            directory.path().to_string_lossy().into_owned(),
+            peri_time::now_wall(),
+        ))
         .await
         .unwrap();
-    sqlx::raw_sql("INSERT INTO machines VALUES ('machine','legacy','known');
-        INSERT INTO workspaces VALUES ('workspace','machine','/old','unverified');
-        INSERT INTO threads(id,cwd,created_at,updated_at,workspace_id) VALUES ('session','/old','2026-10-05T00:00:00Z','2026-10-05T00:00:00Z','workspace');
-        CREATE TABLE session_execution_owners(root_id TEXT PRIMARY KEY REFERENCES threads(id),epoch INTEGER NOT NULL,nonce TEXT NOT NULL,expires_at_unix INTEGER NOT NULL,released INTEGER NOT NULL);
-        CREATE TABLE session_execution_workspace_descriptors(root_id TEXT PRIMARY KEY REFERENCES session_execution_owners(root_id),owner_epoch INTEGER NOT NULL,endpoint TEXT NOT NULL,key_identity TEXT NOT NULL,agent_generation_id TEXT NOT NULL,unsupported_async_owners INTEGER NOT NULL);
-        INSERT INTO session_execution_owners VALUES ('session',7,'retired',0,0);
-        INSERT INTO session_execution_workspace_descriptors VALUES ('session',7,'retired','retired','retired',0);
-        INSERT INTO session_close_intents VALUES ('session','2026-10-05T00:00:00Z');
-        PRAGMA user_version=13;").execute(&mut connection).await.unwrap();
-    connection.close().await.unwrap();
-    assert_legacy_rejected(&path).await;
+    store
+        .append_message(&id, BaseMessage::human("preserved"))
+        .await
+        .unwrap();
+    sqlx::raw_sql(
+        "CREATE TABLE session_execution_owners(root_id TEXT PRIMARY KEY REFERENCES threads(id), epoch INTEGER, nonce TEXT, released INTEGER);
+         CREATE TABLE session_execution_workspace_descriptors(root_id TEXT PRIMARY KEY REFERENCES session_execution_owners(root_id), endpoint TEXT);
+         PRAGMA user_version = 13;",
+    ).execute(&store.database.pool).await.unwrap();
+    sqlx::query("INSERT INTO session_execution_owners VALUES (?1, 7, 'retired', 0)")
+        .bind(&id)
+        .execute(&store.database.pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO session_execution_workspace_descriptors VALUES (?1, 'retired')")
+        .bind(&id)
+        .execute(&store.database.pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO session_close_intents VALUES (?1, '2026-10-05T00:00:00Z')")
+        .bind(&id)
+        .execute(&store.database.pool)
+        .await
+        .unwrap();
+    store.close().await;
+
+    let reopened = SqliteThreadStore::new(&path).await.unwrap();
+    let (retired,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM sqlite_schema WHERE name IN ('session_execution_owners', 'session_execution_workspace_descriptors')")
+        .fetch_one(&reopened.database.pool).await.unwrap();
+    assert_eq!(retired, 0);
+    let (version,): (i64,) = sqlx::query_as("PRAGMA user_version")
+        .fetch_one(&reopened.database.pool)
+        .await
+        .unwrap();
+    assert_eq!(version, CURRENT_SCHEMA_VERSION);
+    let data = SqliteSessionData::new(Arc::clone(&reopened.database));
+    assert!(data.is_session_closing(&id).await.unwrap());
+    assert_eq!(
+        reopened.load_messages(&id).await.unwrap()[0].content(),
+        "preserved"
+    );
+    data.finish_close(&id).await.unwrap();
+    reopened.close().await;
+    let reopened = SqliteThreadStore::new(&path).await.unwrap();
+    let (retired,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM sqlite_schema WHERE name IN ('session_execution_owners', 'session_execution_workspace_descriptors')")
+        .fetch_one(&reopened.database.pool).await.unwrap();
+    assert_eq!(retired, 0);
 }
 
+/// [回归测试] 实际旧库包含 thread_goals，不能因额外业务表而拒绝启动。
 #[tokio::test]
-async fn test_legacy_with_goals_refuses_and_preserves_goals_and_extensions() {
+async fn test_legacy_with_goals_upgrades_removing_goals_and_preserving_extensions() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("threads.db");
     let mut connection = SqliteConnection::connect_with(
@@ -58,15 +100,69 @@ async fn test_legacy_with_goals_refuses_and_preserves_goals_and_extensions() {
         CREATE TABLE extension_state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
         INSERT INTO extension_state VALUES ('state', 'preserved extension bytes');",
     ).execute(&mut connection).await.unwrap();
+    let before = history_bytes(&mut connection).await;
+    let extra_schema: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT name, sql FROM sqlite_schema WHERE name IN ('extension_state', 'idx_threads_parent_thread_id') ORDER BY name",
+    ).fetch_all(&mut connection).await.unwrap();
     connection.close().await.unwrap();
-    let error = crate::sessions::open_store_and_facade_for_tests(path.clone())
+    // 调用应用启动所用的 Resources 门面，复现相同的写打开入口。
+    let (store, _facade) = crate::sessions::open_store_and_facade_for_tests(path.clone())
         .await
-        .err()
-        .expect("legacy facade must refuse");
-    assert!(error
-        .to_string()
-        .contains("explicit stopped-writer offline migration"));
-    assert_legacy_rejected(&path).await;
+        .unwrap();
+    assert_eq!(
+        store
+            .load_meta(&"old-session".to_owned())
+            .await
+            .unwrap()
+            .title
+            .as_deref(),
+        Some("旧会话")
+    );
+    assert!(store
+        .load_session_binding(&"old-session".to_owned())
+        .await
+        .unwrap()
+        .is_none());
+    let mut connection = SqliteConnection::connect_with(
+        &SqliteConnectOptions::new().filename(&path).read_only(true),
+    )
+    .await
+    .unwrap();
+    let (goals,): (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM sqlite_schema WHERE name = 'thread_goals'")
+            .fetch_one(&mut connection)
+            .await
+            .unwrap();
+    assert_eq!(goals, 0);
+    let after_schema: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT name, sql FROM sqlite_schema WHERE name IN ('extension_state', 'idx_threads_parent_thread_id') ORDER BY name",
+    ).fetch_all(&mut connection).await.unwrap();
+    assert_eq!(after_schema, extra_schema);
+    let (value,): (String,) =
+        sqlx::query_as("SELECT value FROM extension_state WHERE key = 'state'")
+            .fetch_one(&mut connection)
+            .await
+            .unwrap();
+    assert_eq!(value, "preserved extension bytes");
+    assert_eq!(history_bytes(&mut connection).await, before);
+    let violations = sqlx::query("PRAGMA foreign_key_check")
+        .fetch_all(&mut connection)
+        .await
+        .unwrap();
+    assert!(violations.is_empty());
+    connection.close().await.unwrap();
+    let workspace = store.resolve_workspace(dir.path()).await.unwrap();
+    let id = store
+        .create_bound_thread(
+            ThreadMeta::new_at(dir.path().to_str().unwrap(), peri_time::now_wall()),
+            &workspace,
+        )
+        .await
+        .unwrap();
+    store
+        .append_messages(&id, &[BaseMessage::human("新会话")])
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -131,8 +227,9 @@ async fn legacy_database(path: &Path) -> SqliteConnection {
     connection
 }
 
+/// [回归测试] 默认读写沿用原数据库，升级保留历史、不补造旧绑定，执行代际独立记录。
 #[tokio::test]
-async fn test_single_database_refusal_preserves_history_without_binding_sessions() {
+async fn test_single_database_upgrade_preserves_history_and_binds_only_new_sessions() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("threads.db");
     let mut connection = legacy_database(&path).await;
@@ -143,12 +240,92 @@ async fn test_single_database_refusal_preserves_history_without_binding_sessions
     .execute(&mut connection)
     .await
     .unwrap();
+    let history: Vec<(String, String)> = sqlx::query_as(
+        "SELECT message_id, content FROM messages WHERE thread_id = 'old-session' ORDER BY rowid",
+    )
+    .fetch_all(&mut connection)
+    .await
+    .unwrap();
     connection.close().await.unwrap();
-    assert_legacy_rejected(&path).await;
+    let store = SqliteThreadStore::new(&path).await.unwrap();
+    let old_id = "old-session".to_owned();
+    let old = store.load_meta(&old_id).await.unwrap();
+    assert_eq!(old.title.as_deref(), Some("旧会话"));
+    assert_eq!(old.cwd, "/old/worktree");
+    assert_eq!(old.message_count, 1);
+    assert_eq!(old.config.as_deref(), Some(r#"{"model":"legacy"}"#));
+    assert_eq!(
+        store.load_messages(&old_id).await.unwrap()[0].content(),
+        "保留的历史消息"
+    );
+    assert_eq!(store.load_session_binding(&old_id).await.unwrap(), None);
+    assert_eq!(store.load_session_binding(&old_id).await.unwrap(), None);
+    assert_eq!(store.load_frozen_snapshot(&old_id).await.unwrap(), None);
+    let workspace = store.resolve_workspace(dir.path()).await.unwrap();
+    let id = store
+        .create_bound_thread(
+            ThreadMeta::new_at(dir.path().to_str().unwrap(), peri_time::now_wall()),
+            &workspace,
+        )
+        .await
+        .unwrap();
+    store
+        .append_messages(&id, &[BaseMessage::human("新会话")])
+        .await
+        .unwrap();
+    store.close().await;
+    let reopened = SqliteThreadStore::new(&path).await.unwrap();
+    let page = reopened
+        .list_scoped_threads(&ScopedThreadQuery {
+            scope: ThreadScope::All,
+            cursor: None,
+            limit: 10,
+        })
+        .await
+        .unwrap();
+    assert_eq!(page.entries.len(), 2);
+    assert!(page
+        .entries
+        .iter()
+        .any(|entry| entry.thread.id == id && entry.binding.is_some()));
+    assert!(page
+        .entries
+        .iter()
+        .any(|entry| entry.thread.id == old_id && entry.binding.is_none()));
+    assert_eq!(
+        reopened.validate_session_binding(&id).await.unwrap(),
+        workspace
+    );
+    assert_eq!(
+        serde_json::to_value(reopened.load_meta(&old_id).await.unwrap()).unwrap(),
+        serde_json::to_value(&old).unwrap()
+    );
+    let persisted_history: Vec<(String, String)> = sqlx::query_as(
+        "SELECT message_id, content FROM messages WHERE thread_id = ?1 ORDER BY rowid",
+    )
+    .bind(&old_id)
+    .fetch_all(&reopened.database.pool)
+    .await
+    .unwrap();
+    assert_eq!(persisted_history, history);
+    assert_eq!(reopened.load_session_binding(&old_id).await.unwrap(), None);
+    assert_eq!(reopened.load_frozen_snapshot(&old_id).await.unwrap(), None);
+    let (version,): (i64,) = sqlx::query_as("PRAGMA user_version")
+        .fetch_one(&reopened.database.pool)
+        .await
+        .unwrap();
+    assert_eq!(version, CURRENT_SCHEMA_VERSION);
+    reopened.close().await;
+    let reader = SqliteThreadStore::open_existing_read_only(&path)
+        .await
+        .unwrap();
+    assert_eq!(reader.load_meta(&old_id).await.unwrap().title, old.title);
+    reader.close().await;
+    assert!(!dir.path().join("threads-v2.db").exists());
 }
 
 #[tokio::test]
-async fn test_single_database_refusal_preserves_all_existing_columns_and_context_bytes() {
+async fn test_single_database_upgrade_preserves_all_existing_columns_and_context_bytes() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("threads.db");
     let mut connection = legacy_database(&path).await;
@@ -172,8 +349,22 @@ async fn test_single_database_refusal_preserves_all_existing_columns_and_context
             context_cache_epoch = 7;
         UPDATE messages SET truncated = 1, excluded = 1, projection = 'projection bytes';",
     ).execute(&mut connection).await.unwrap();
+    let before = history_bytes(&mut connection).await;
     connection.close().await.unwrap();
-    assert_legacy_rejected(&path).await;
+    let store = SqliteThreadStore::new(&path).await.unwrap();
+    let after = history_bytes(&mut store.database.pool.acquire().await.unwrap()).await;
+    assert_eq!(
+        after, before,
+        "所有原始列值（包括不解码的上下文）必须保持原样"
+    );
+    assert_eq!(
+        store
+            .load_session_binding(&"old-session".to_owned())
+            .await
+            .unwrap(),
+        None
+    );
+    store.close().await;
 }
 
 async fn history_bytes(connection: &mut SqliteConnection) -> (String, String) {
@@ -209,9 +400,7 @@ async fn test_single_database_failed_upgrade_rolls_back_schema_and_version() {
     connection.close().await.unwrap();
     let error = SqliteThreadStore::new(&path).await.err().unwrap();
     assert!(
-        error
-            .to_string()
-            .contains("explicit stopped-writer offline migration"),
+        error.to_string().contains("projects already exists"),
         "{error}"
     );
     let mut connection = SqliteConnection::connect_with(
@@ -266,27 +455,36 @@ async fn test_single_database_future_version_is_rejected_before_writing() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_single_database_concurrent_legacy_refusal_is_idempotent() {
+async fn test_single_database_concurrent_upgrade_is_idempotent() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("threads.db");
     legacy_database(&path).await.close().await.unwrap();
-    let before = legacy_evidence(&path).await;
     let (first, second) =
         tokio::join!(SqliteThreadStore::new(&path), SqliteThreadStore::new(&path));
-    for opened in [first, second] {
-        let error = opened.err().expect("concurrent legacy opens must refuse");
-        assert!(error
-            .to_string()
-            .contains("explicit stopped-writer offline migration"));
+    let first = first.unwrap();
+    let second = second.unwrap();
+    for store in [&first, &second] {
+        assert_eq!(
+            store
+                .load_messages(&"old-session".to_owned())
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM session_bindings")
+            .fetch_one(&store.database.pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+        store.close().await;
     }
-    assert_eq!(legacy_evidence(&path).await, before);
-    assert_legacy_rejected(&path).await;
 }
 
 /// [回归测试] Unix 子进程通过 HOME 隔离默认路径；Windows home_dir 不读取该环境变量。
 #[cfg(unix)]
 #[tokio::test]
-async fn test_single_database_default_writer_refuses_existing_legacy_path() {
+async fn test_single_database_default_writer_upgrades_existing_default_path() {
     let dir = tempfile::tempdir().unwrap();
     let parent = dir.path().join(".peri/threads");
     std::fs::create_dir_all(&parent).unwrap();
@@ -312,7 +510,16 @@ async fn test_single_database_default_writer_refuses_existing_legacy_path() {
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("running 1 test"));
     assert!(!parent.join("threads-v2.db").exists());
-    assert_legacy_rejected(&path).await;
+    let store = SqliteThreadStore::new(&path).await.unwrap();
+    assert_eq!(
+        store
+            .load_messages(&"old-session".to_owned())
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    store.close().await;
 }
 
 #[cfg(unix)]
@@ -321,19 +528,33 @@ async fn test_single_database_default_writer_child_process() {
     let Ok(home) = std::env::var("PERI_TEST_SINGLE_DB_HOME") else {
         return;
     };
-    let path = Path::new(&home).join(".peri/threads/threads.db");
-    let before = legacy_evidence(&path).await;
-    let error = SqliteThreadStore::default_path()
+    let store = SqliteThreadStore::default_path().await.unwrap();
+    assert_eq!(
+        store.database.db_path,
+        std::fs::canonicalize(Path::new(&home).join(".peri/threads/threads.db")).unwrap()
+    );
+    assert_eq!(
+        store
+            .load_meta(&"old-session".to_owned())
+            .await
+            .unwrap()
+            .cwd,
+        "/old/worktree"
+    );
+    store.close().await;
+    // 只读命令面（meta 子命令）的生产入口：只读门面，不创建目录/库/schema。
+    let reader = crate::sessions::open_session_resources_read_only(None)
         .await
-        .err()
-        .expect("default writer must refuse old schema");
-    assert!(error
-        .to_string()
-        .contains("explicit stopped-writer offline migration"));
-    assert!(crate::sessions::open_session_resources_read_only(None)
-        .await
-        .is_err());
-    assert_eq!(legacy_evidence(&path).await, before);
+        .unwrap();
+    assert_eq!(
+        reader
+            .load_session_meta(&"old-session".to_owned())
+            .await
+            .unwrap()
+            .title
+            .as_deref(),
+        Some("旧会话")
+    );
 }
 
 // 独立保留 v2 的 revision 非空且无默认值约束，避免新 schema 掩盖旧库 INSERT 失败。
@@ -443,7 +664,7 @@ async fn version3_database(path: &Path, root: &Path) -> SqliteConnection {
 }
 
 #[tokio::test]
-async fn test_schema3_refusal_preserves_binding_and_identity() {
+async fn test_schema3_identity_migration_reuses_binding_and_survives_reopen() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("threads.db");
     let status = std::process::Command::new("git")
@@ -457,7 +678,70 @@ async fn test_schema3_refusal_preserves_binding_and_identity() {
         .await
         .unwrap();
 
-    assert_legacy_rejected(&path).await;
+    let store = SqliteThreadStore::new(&path).await.unwrap();
+    let workspace = store.resolve_workspace(dir.path()).await.unwrap();
+    assert_eq!(
+        workspace.project_id.to_string(),
+        "11111111-1111-4111-8111-111111111111"
+    );
+    assert_eq!(
+        workspace.workspace_id.to_string(),
+        "22222222-2222-4222-8222-222222222222"
+    );
+    let execution: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM sqlite_schema WHERE name = 'execution_runs'")
+            .fetch_one(&store.database.pool)
+            .await
+            .unwrap();
+    assert_eq!(execution, (0,));
+    assert_eq!(
+        store
+            .load_messages(&"old-session".to_owned())
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        store
+            .load_frozen_snapshot(&"old-session".to_owned())
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("frozen-owner-state")
+    );
+    let binding = store
+        .load_session_binding(&"old-session".to_owned())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        binding.project_id.to_string(),
+        workspace.project_id.to_string()
+    );
+    assert_eq!(
+        store
+            .validate_session_binding(&"old-session".to_owned())
+            .await
+            .unwrap(),
+        workspace
+    );
+    store.close().await;
+
+    let reopened = SqliteThreadStore::new(&path).await.unwrap();
+    let again = reopened.resolve_workspace(dir.path()).await.unwrap();
+    assert_eq!(again.project_id, workspace.project_id);
+    assert_eq!(again.workspace_id, workspace.workspace_id);
+    assert_eq!(
+        reopened
+            .load_session_binding(&"old-session".to_owned())
+            .await
+            .unwrap()
+            .unwrap()
+            .workspace_id,
+        workspace.workspace_id
+    );
+    reopened.close().await;
 }
 
 /// 记录 v2 升级不能改动的身份数据。
@@ -487,7 +771,7 @@ async fn identity_bytes(connection: &mut SqliteConnection) -> Vec<String> {
 }
 
 #[tokio::test]
-async fn test_version2_refusal_preserves_required_revision_and_identity() {
+async fn test_version2_upgrade_removes_required_revision_and_preserves_identity() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("threads.db");
     let mut connection = version2_database(&path).await;
@@ -495,9 +779,64 @@ async fn test_version2_refusal_preserves_required_revision_and_identity() {
         "SELECT \"notnull\", dflt_value FROM pragma_table_info('session_bindings') WHERE name = 'revision'",
     ).fetch_one(&mut connection).await.unwrap();
     assert_eq!(revision, (1, None));
+    let before_history = history_bytes(&mut connection).await;
     connection.close().await.unwrap();
 
-    assert_legacy_rejected(&path).await;
+    let store = SqliteThreadStore::new(&path).await.unwrap();
+    let mut connection = store.database.pool.acquire().await.unwrap();
+    assert_eq!(history_bytes(&mut connection).await, before_history);
+    let migrated_identity = identity_bytes(&mut connection).await;
+    assert!(migrated_identity
+        .iter()
+        .all(|value| !value.contains("birth_")));
+    assert!(!column_names(&mut connection, "session_bindings")
+        .await
+        .unwrap()
+        .contains("revision"));
+    let (version,): (i64,) = sqlx::query_as("PRAGMA user_version")
+        .fetch_one(&mut *connection)
+        .await
+        .unwrap();
+    assert_eq!(version, CURRENT_SCHEMA_VERSION);
+    drop(connection);
+
+    let old = store
+        .load_session_binding(&"old-session".to_owned())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(old.revision, 1);
+    assert_eq!(
+        old.project_id.to_string(),
+        "11111111-1111-4111-8111-111111111111"
+    );
+    assert_eq!(
+        old.workspace_id.to_string(),
+        "22222222-2222-4222-8222-222222222222"
+    );
+    assert!(old.cwd_relative_to_workspace.as_os_str().is_empty());
+    let workspace = store.resolve_workspace(dir.path()).await.unwrap();
+    let id = store
+        .create_bound_thread(
+            ThreadMeta::new_at(dir.path().to_str().unwrap(), peri_time::now_wall()),
+            &workspace,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        store.validate_session_binding(&id).await.unwrap(),
+        workspace
+    );
+    assert_eq!(
+        store
+            .load_session_binding(&id)
+            .await
+            .unwrap()
+            .unwrap()
+            .revision,
+        1
+    );
+    store.close().await;
 }
 
 #[tokio::test]
@@ -519,7 +858,10 @@ async fn test_version2_failed_column_drop_preserves_schema_version_and_data() {
     connection.close().await.unwrap();
     let error = SqliteThreadStore::new(&path).await.err().unwrap();
     let message = error.to_string();
-    assert!(message.contains("explicit stopped-writer offline migration"));
+    assert!(
+        message.contains("binding_revision_view") && message.contains("no such column: revision"),
+        "应因视图依赖 revision 而拒绝 DROP COLUMN，实际错误：{message}"
+    );
     let mut connection = SqliteConnection::connect_with(
         &SqliteConnectOptions::new().filename(&path).read_only(true),
     )
@@ -600,326 +942,3 @@ async fn test_identity_migration_corrupt_discovery_rolls_back_schema() {
 
 #[path = "schema_registration_test.rs"]
 mod registration_tests;
-
-async fn assert_legacy_rejected(path: &std::path::Path) {
-    let before = legacy_evidence(path).await;
-    let backup = path.with_extension("verified-backup");
-    std::fs::copy(path, &backup).unwrap();
-    assert_eq!(
-        std::fs::read(&backup).unwrap(),
-        std::fs::read(path).unwrap()
-    );
-    let mut connection =
-        SqliteConnection::connect_with(&SqliteConnectOptions::new().filename(path).read_only(true))
-            .await
-            .unwrap();
-    let version: i64 = sqlx::query_scalar("PRAGMA user_version")
-        .fetch_one(&mut connection)
-        .await
-        .unwrap();
-    connection.close().await.unwrap();
-    if version != 17 {
-        let approval = crate::sessions::StoppedWriterApproval {
-            source_version: version,
-            writers_stopped: true,
-            backup_verified: true,
-        };
-        assert!(crate::sessions::migrate_stopped_work_store(path, &approval)
-            .await
-            .is_err());
-    }
-    let error = SqliteThreadStore::new(path)
-        .await
-        .err()
-        .expect("legacy writer must refuse");
-    assert!(
-        error
-            .to_string()
-            .contains("explicit stopped-writer offline migration"),
-        "{error:#}"
-    );
-    let error = SqliteThreadStore::open_existing_read_only(path)
-        .await
-        .err()
-        .expect("inline history is not reference history");
-    assert!(matches!(
-        error.kind(),
-        crate::sessions::sqlite_store::connection::ReadOnlyStoreErrorKind::SchemaIncompatible
-    ));
-    assert_eq!(
-        legacy_evidence(path).await,
-        before,
-        "refusal must preserve every schema object and row"
-    );
-}
-
-const LEGACY_V13_SQL: &str = r#"CREATE TABLE IF NOT EXISTS machines (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL CHECK(length(trim(name)) > 0),
-    identity_kind TEXT NOT NULL CHECK(identity_kind IN ('known', 'legacy_unknown'))
-);
-CREATE TABLE IF NOT EXISTS workspaces (
-    id TEXT PRIMARY KEY,
-    machine_id TEXT NOT NULL REFERENCES machines(id),
-    path TEXT NOT NULL,
-    path_source TEXT NOT NULL CHECK(path_source IN ('discovered', 'derived_legacy', 'unverified')),
-    UNIQUE(machine_id, path)
-);
-CREATE TABLE IF NOT EXISTS threads (
-    id TEXT PRIMARY KEY, title TEXT, cwd TEXT NOT NULL DEFAULT '',
-    created_at TEXT NOT NULL, updated_at TEXT NOT NULL, message_count INTEGER NOT NULL DEFAULT 0,
-    parent_thread_id TEXT, snapshot_at_message_id TEXT, hidden BOOLEAN NOT NULL DEFAULT 0,
-    cancel_policy TEXT NOT NULL DEFAULT 'cascade', config TEXT,
-    frozen_context TEXT, inherited_context TEXT, agent_status TEXT NOT NULL DEFAULT 'active',
-    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
-    archived BOOLEAN NOT NULL DEFAULT 0 CHECK(archived IN (0, 1))
-);
-CREATE TABLE IF NOT EXISTS messages (
-    message_id TEXT PRIMARY KEY, thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
-    role TEXT NOT NULL, content TEXT NOT NULL,
-    truncated BOOLEAN NOT NULL DEFAULT 0, excluded BOOLEAN NOT NULL DEFAULT 0, projection TEXT
-);
-CREATE TABLE IF NOT EXISTS projects (
-    id TEXT PRIMARY KEY, locator TEXT NOT NULL, object_identity TEXT NOT NULL,
-    UNIQUE(locator, object_identity)
-);
-CREATE TABLE IF NOT EXISTS legacy_execution_registrations (
-    id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
-    root TEXT NOT NULL, root_identity TEXT NOT NULL, discovery TEXT NOT NULL,
-    UNIQUE(root, root_identity), UNIQUE(id, project_id)
-);
-CREATE TABLE IF NOT EXISTS session_bindings (
-    thread_id TEXT PRIMARY KEY REFERENCES threads(id) ON DELETE CASCADE,
-    schema_version INTEGER NOT NULL,
-    project_id TEXT NOT NULL, workspace_id TEXT NOT NULL, relative_cwd TEXT NOT NULL,
-    discovery_snapshot TEXT,
-    evidence_origin TEXT NOT NULL,
-    FOREIGN KEY(workspace_id, project_id) REFERENCES legacy_execution_registrations(id, project_id)
-);
-CREATE TABLE IF NOT EXISTS mcp_oauth_credentials (
-    principal_id TEXT NOT NULL,
-    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
-    server_key TEXT NOT NULL,
-    credentials_blob TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    PRIMARY KEY(principal_id, workspace_id, server_key)
-);
-CREATE TABLE IF NOT EXISTS session_close_intents (
-    thread_id TEXT PRIMARY KEY REFERENCES threads(id) ON DELETE CASCADE,
-    requested_at TEXT NOT NULL
-);"#;
-const LEGACY_V17_WORK_SQL: &str = r#"CREATE TABLE IF NOT EXISTS session_control_state (
-    session_id TEXT PRIMARY KEY NOT NULL,
-    state_json TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS session_control_receipts (
-    command_id TEXT PRIMARY KEY NOT NULL,
-    session_id TEXT NOT NULL,
-    digest TEXT NOT NULL,
-    resolution_json TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS session_work_state (session_id TEXT PRIMARY KEY NOT NULL, state_json TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS session_work_events (event_key TEXT PRIMARY KEY NOT NULL, event_json TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS session_work_receipts (mutation_id TEXT PRIMARY KEY NOT NULL, session_id TEXT NOT NULL, digest TEXT NOT NULL, resolution_json TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS session_work_commands (mutation_id TEXT PRIMARY KEY NOT NULL, session_id TEXT NOT NULL, digest TEXT NOT NULL, command_json TEXT NOT NULL, reconciled INTEGER NOT NULL DEFAULT 0 CHECK(reconciled IN (0,1)));
-PRAGMA user_version=17;"#;
-
-async fn legacy_work_database(path: &Path, valid: bool) -> String {
-    let mut connection = SqliteConnection::connect_with(
-        &SqliteConnectOptions::new()
-            .filename(path)
-            .create_if_missing(true),
-    )
-    .await
-    .unwrap();
-    sqlx::raw_sql(LEGACY_V13_SQL)
-        .execute(&mut connection)
-        .await
-        .unwrap();
-    sqlx::raw_sql(LEGACY_V17_WORK_SQL)
-        .execute(&mut connection)
-        .await
-        .unwrap();
-    sqlx::raw_sql("INSERT INTO machines VALUES ('machine','legacy','known');
-        INSERT INTO workspaces VALUES ('workspace','machine','/old','unverified');
-        INSERT INTO threads(id,cwd,created_at,updated_at,workspace_id,frozen_context,message_count) VALUES ('session','/old','2026-10-05T00:00:00Z','2026-10-05T00:00:00Z','workspace','frozen bytes',1);
-        INSERT INTO session_close_intents VALUES ('session','original close timestamp');
-        INSERT INTO session_control_state VALUES ('session','{\"lifecycle\":1,\"revision\":0,\"controlGeneration\":0,\"status\":\"closing\",\"attempt\":null}');
-        INSERT INTO session_work_state VALUES ('session','{}');
-        INSERT INTO session_work_commands VALUES ('original','session','digest','unknown original command bytes',0);
-        INSERT INTO session_work_events VALUES ('event','original event bytes');").execute(&mut connection).await.unwrap();
-    let message = BaseMessage::human("original history 🦀");
-    let content = if valid {
-        serialize_persisted_payload(&PersistedPayload::Message(message.clone())).unwrap()
-    } else {
-        "invalid original JSON".into()
-    };
-    sqlx::query("INSERT INTO messages(rowid,message_id,thread_id,role,content,truncated,excluded,projection) VALUES (7,?1,'session','user',?2,1,1,'original projection bytes')")
-        .bind(message.id().as_uuid().to_string()).bind(&content).execute(&mut connection).await.unwrap();
-    connection.close().await.unwrap();
-    content
-}
-
-fn stopped_approval(path: &Path) -> crate::sessions::StoppedWriterApproval {
-    let backup = path.with_extension("verified-backup");
-    std::fs::copy(path, &backup).unwrap();
-    assert_eq!(std::fs::read(path).unwrap(), std::fs::read(backup).unwrap());
-    crate::sessions::StoppedWriterApproval {
-        source_version: 17,
-        writers_stopped: true,
-        backup_verified: true,
-    }
-}
-
-#[tokio::test]
-async fn legacy_v17_open_refuses_until_public_stopped_migration_preserves_history_and_evidence() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("legacy17.db");
-    let content = legacy_work_database(&path, true).await;
-    assert_legacy_rejected(&path).await;
-    let approval = stopped_approval(&path);
-    let report = crate::sessions::migrate_stopped_work_store(&path, &approval)
-        .await
-        .unwrap();
-    assert_eq!(report.messages, 1);
-    assert!(report.retained_evidence >= 3);
-    assert!(report.legacy_unknown_sessions >= 1);
-    for _ in 0..2 {
-        let store = SqliteThreadStore::new(&path).await.unwrap();
-        let row: (i64, bool, bool, String) =
-            sqlx::query_as("SELECT rowid,truncated,excluded,projection FROM messages")
-                .fetch_one(&store.database.pool)
-                .await
-                .unwrap();
-        assert_eq!(row, (7, true, true, "original projection bytes".into()));
-        let payload: Vec<u8> = sqlx::query_scalar("SELECT p.bytes FROM messages m JOIN session_payloads p ON p.storage_scope=m.thread_id AND p.payload_id=json_extract(m.content_ref,'$.payloadId')").fetch_one(&store.database.pool).await.unwrap();
-        assert_eq!(payload, content.as_bytes());
-        assert_eq!(
-            store.load_messages(&"session".into()).await.unwrap()[0].content(),
-            "original history 🦀"
-        );
-        let evidence: Vec<Vec<u8>> =
-            sqlx::query_scalar("SELECT bytes FROM session_payloads WHERE kind='legacyOriginal'")
-                .fetch_all(&store.database.pool)
-                .await
-                .unwrap();
-        for expected in [
-            "{}",
-            "unknown original command bytes",
-            "original event bytes",
-        ] {
-            assert!(evidence.iter().any(|bytes| bytes == expected.as_bytes()));
-        }
-        assert_eq!(
-            store
-                .load_frozen_snapshot(&"session".into())
-                .await
-                .unwrap()
-                .as_deref(),
-            Some("frozen bytes")
-        );
-        let close: String = sqlx::query_scalar(
-            "SELECT requested_at FROM session_close_intents WHERE thread_id='session'",
-        )
-        .fetch_one(&store.database.pool)
-        .await
-        .unwrap();
-        assert_eq!(close, "original close timestamp");
-        assert!(store
-            .load_session_binding(&"session".into())
-            .await
-            .unwrap()
-            .is_none());
-        store.close().await;
-        let reader = SqliteThreadStore::open_existing_read_only(&path)
-            .await
-            .unwrap();
-        assert_eq!(
-            reader
-                .load_meta(&"session".into())
-                .await
-                .unwrap()
-                .message_count,
-            1
-        );
-        reader.close().await;
-    }
-}
-
-#[tokio::test]
-async fn public_stopped_migration_requires_backup_and_stopped_writers_without_writes() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("legacy17.db");
-    legacy_work_database(&path, true).await;
-    let before = std::fs::read(&path).unwrap();
-    for (writers_stopped, backup_verified) in [(false, true), (true, false), (false, false)] {
-        let approval = crate::sessions::StoppedWriterApproval {
-            source_version: 17,
-            writers_stopped,
-            backup_verified,
-        };
-        assert!(
-            crate::sessions::migrate_stopped_work_store(&path, &approval)
-                .await
-                .is_err()
-        );
-        assert_eq!(std::fs::read(&path).unwrap(), before);
-    }
-}
-
-#[tokio::test]
-async fn failed_public_stopped_migration_preserves_original_schema_and_raw_rows() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("legacy17.db");
-    legacy_work_database(&path, false).await;
-    let approval = stopped_approval(&path);
-    let before = std::fs::read(&path).unwrap();
-    assert!(
-        crate::sessions::migrate_stopped_work_store(&path, &approval)
-            .await
-            .is_err()
-    );
-    assert_eq!(std::fs::read(&path).unwrap(), before);
-    assert_legacy_rejected(&path).await;
-}
-
-async fn legacy_evidence(path: &std::path::Path) -> Vec<(String, Vec<String>)> {
-    let mut connection =
-        SqliteConnection::connect_with(&SqliteConnectOptions::new().filename(path).read_only(true))
-            .await
-            .unwrap();
-    let version: i64 = sqlx::query_scalar("PRAGMA user_version")
-        .fetch_one(&mut connection)
-        .await
-        .unwrap();
-    let schema: Vec<String> = sqlx::query_scalar("SELECT json_array(type,name,tbl_name,sql) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name").fetch_all(&mut connection).await.unwrap();
-    let tables: Vec<String> = sqlx::query_scalar("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").fetch_all(&mut connection).await.unwrap();
-    let mut evidence = vec![
-        ("version".into(), vec![version.to_string()]),
-        ("schema".into(), schema),
-    ];
-    for table in tables {
-        let columns: Vec<String> =
-            sqlx::query_scalar("SELECT name FROM pragma_table_info(?1) ORDER BY cid")
-                .bind(&table)
-                .fetch_all(&mut connection)
-                .await
-                .unwrap();
-        let expressions = columns
-            .iter()
-            .map(|column| format!("quote(\"{}\")", column.replace('"', "\"\"")))
-            .collect::<Vec<_>>()
-            .join(" || ',' || ");
-        let statement = format!(
-            "SELECT quote(rowid) || ':' || {expressions} FROM \"{}\" ORDER BY rowid",
-            table.replace('"', "\"\"")
-        );
-        let rows = sqlx::query_scalar(sqlx::AssertSqlSafe(statement))
-            .fetch_all(&mut connection)
-            .await
-            .unwrap();
-        evidence.push((table, rows));
-    }
-    connection.close().await.unwrap();
-    evidence
-}

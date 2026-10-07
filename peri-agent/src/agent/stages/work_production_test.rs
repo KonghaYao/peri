@@ -9,111 +9,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 struct ProbeTool(Arc<AtomicUsize>);
 
-#[tokio::test]
-async fn admitted_batch_claim_precedes_late_inbox_publication() {
-    let (model, _listener) = native_model().await;
-    let fixture = fixture(Arc::new(model), Vec::new()).await;
-    let late = BaseMessage::human("late notification");
-    let late_id = late.id();
-    fixture
-        .context
-        .session
-        .queue
-        .push(crate::session::QueuedMessage::prompt(
-            crate::session::MessageSource::SystemInjected,
-            late,
-        ));
-    let received = receive::run_receive(ReceiveInput {
-        context: fixture.context.clone(),
-    })
-    .await
-    .unwrap();
-    assert_eq!(received.consumed_count, 1);
-    assert_eq!(received.input_message_ids.len(), 1);
-    assert!(!received.input_message_ids.contains(&late_id));
-    let processing = saved_processing(&fixture).await;
-    assert_eq!(processing.processing_id, fixture.admission.work_id);
-    assert_eq!(processing.delivery_count, 1);
-    let inspection = fixture
-        .bound
-        .resources()
-        .inspect_work(&WorkQuery::new(
-            fixture.bound.thread_id(),
-            WorkSelector::Delivery {
-                delivery_id: late_id.as_uuid().to_string(),
-            },
-        ))
-        .await
-        .unwrap();
-    let WorkPage::Deliveries(deliveries) = inspection.page else {
-        panic!("expected late delivery");
-    };
-    assert_eq!(deliveries.len(), 1);
-    assert!(deliveries[0].processing_id.is_none());
-}
-
-#[tokio::test]
-async fn admitted_batch_claim_retains_registered_members_after_external_publication() {
-    let (model, _listener) = native_model().await;
-    let fixture = fixture(Arc::new(model), Vec::new()).await;
-    let resources = fixture.bound.resources();
-    let late = BaseMessage::human("external publication after admission");
-    let late_id = late.id().as_uuid().to_string();
-    let content = crate::agent::stages::prepare_work_payload(
-        resources.as_ref(),
-        &fixture.bound.thread_id(),
-        &peri_acp_types::store::PersistedPayload::Message(late),
-    )
-    .await
-    .unwrap();
-    let receipt = resources
-        .apply_work_mutation(&WorkCommand {
-            session_id: fixture.bound.thread_id(),
-            recipient_lifecycle: fixture.admission.lifecycle,
-            mutation_id: format!("external:{late_id}"),
-            action: WorkAction::PublishDelivery {
-                delivery: PublishDelivery {
-                    delivery_id: late_id.clone(),
-                    event: WorkEvent {
-                        producer_namespace: "external-producer".into(),
-                        event_id: late_id.clone(),
-                        event_kind: "agentMessage".into(),
-                        causation_id: None,
-                        content,
-                    },
-                    purpose: DeliveryPurpose::UserInput,
-                    policy: crate::session::MessagePolicy::ensure_processing(),
-                },
-            },
-        })
-        .await
-        .unwrap();
-    assert_eq!(receipt.decision, WorkDecision::Accepted);
-    let received = receive::run_receive(ReceiveInput {
-        context: fixture.context.clone(),
-    })
-    .await
-    .unwrap();
-    assert_eq!(received.consumed_count, 1);
-    assert_eq!(received.input_message_ids.len(), 1);
-    assert_eq!(saved_processing(&fixture).await.delivery_count, 1);
-    let inspection = resources
-        .inspect_work(&WorkQuery::new(
-            fixture.bound.thread_id(),
-            WorkSelector::Delivery {
-                delivery_id: late_id,
-            },
-        ))
-        .await
-        .unwrap();
-    let WorkPage::Deliveries(deliveries) = inspection.page else {
-        panic!("expected external delivery");
-    };
-    assert_eq!(deliveries.len(), 1);
-    assert!(deliveries[0].processing_id.is_none());
-    assert_eq!(deliveries[0].obligation, ObligationStatus::Pending);
-}
-
 #[async_trait::async_trait]
 impl BaseTool for ProbeTool {
     fn name(&self) -> &str {
@@ -138,37 +33,25 @@ impl BaseTool for ProbeTool {
             Some(intent.invocation_id.as_str())
         );
         let snapshot = resources
-            .inspect_work(&WorkQuery::new(ctx.session_id.unwrap(), WorkSelector::Head))
+            .load_session_work(&WorkQuery {
+                session_id: ctx.session_id.unwrap(),
+                limit: 1,
+            })
             .await?;
-        let effect = crate::session::work_access::effect(
-            resources.as_ref(),
-            &snapshot.session_id,
-            &intent.invocation_id,
-        )
-        .await?;
-        assert_eq!(effect.status, InvocationStatus::DispatchAccepted);
-        let processing_id = effect.processing_id.as_deref().unwrap();
-        let processing = crate::session::work_access::processing(
-            resources.as_ref(),
-            &snapshot.session_id,
-            processing_id,
-        )
-        .await?;
-        assert!(processing.response.is_some());
-        let inspection = resources
-            .inspect_work(&WorkQuery::new(
-                &snapshot.session_id,
-                WorkSelector::ProcessingDeliveries {
-                    processing_id: processing_id.into(),
-                },
-            ))
-            .await?;
-        let WorkPage::Deliveries(deliveries) = inspection.page else {
-            panic!("expected deliveries")
-        };
-        assert!(deliveries
-            .iter()
-            .all(|delivery| delivery.obligation == ObligationStatus::Satisfied));
+        assert_eq!(
+            snapshot.state.invocations[&intent.invocation_id].status,
+            InvocationStatus::DispatchAccepted
+        );
+        assert!(snapshot
+            .state
+            .obligations
+            .values()
+            .all(|obligation| obligation.status == ObligationStatus::Satisfied));
+        assert!(snapshot
+            .state
+            .works
+            .values()
+            .any(|work| work.response.is_some()));
         self.0.fetch_add(1, Ordering::SeqCst);
         Ok("confirmed probe output".into())
     }
@@ -206,8 +89,17 @@ async fn production_full_store_and_native_http_checkpoint_before_model_send_and_
     assert_eq!(reads.load(Ordering::SeqCst), 1);
     let body = server.await.unwrap();
     assert!(body.to_string().contains("dynamic system 0"));
+    let snapshot = fixture
+        .bound
+        .resources
+        .load_session_work(&WorkQuery {
+            session_id: fixture.bound.thread_id(),
+            limit: 1,
+        })
+        .await
+        .unwrap();
     assert_eq!(
-        saved_delivery(&fixture).await.obligation,
+        snapshot.state.obligations[&fixture.delivery_id].status,
         ObligationStatus::Satisfied
     );
     let before = fixture
@@ -240,14 +132,6 @@ async fn production_full_store_and_native_http_checkpoint_before_model_send_and_
     assert_eq!(before.len(), 2);
     assert_eq!(after.len(), before.len());
     assert_eq!(fixture.context.session.transcript.read().entries().len(), 2);
-    let received = receive::run_receive(ReceiveInput {
-        context: fixture.context.clone(),
-    })
-    .await
-    .unwrap();
-    assert_eq!(received.wake_up_count, 0);
-    assert_eq!(received.consumed_count, 0);
-    assert!(received.input_message_ids.is_empty());
 }
 
 #[tokio::test]
@@ -291,22 +175,24 @@ async fn production_commit_response_and_begin_dispatch_precede_tool_effect_and_r
     let snapshot = fixture
         .bound
         .resources
-        .inspect_work(&WorkQuery::new(
-            fixture.bound.thread_id(),
-            WorkSelector::Head,
-        ))
+        .load_session_work(&WorkQuery {
+            session_id: fixture.bound.thread_id(),
+            limit: 1,
+        })
         .await
         .unwrap();
-    assert_eq!(
-        saved_processing(&fixture).await.stage,
-        WorkStage::ReasonReady
-    );
-    assert!(saved_effects(&fixture)
-        .await
-        .iter()
+    assert_eq!(snapshot.candidates.len(), 1);
+    assert_eq!(snapshot.candidates[0].stage, WorkStage::ReasonReady);
+    assert!(snapshot
+        .state
+        .invocations
+        .values()
         .all(|invocation| invocation.status == InvocationStatus::Settled));
-
-    assert_eq!(saved_processing(&fixture).await.budget.dispatches, 1);
+    assert_eq!(snapshot.state.budgets.len(), 1);
+    assert_eq!(
+        snapshot.state.budgets[&fixture.admission.work_id].dispatches,
+        1
+    );
     let history = fixture
         .bound
         .resources
@@ -376,15 +262,16 @@ async fn production_stale_dispatch_is_rejected_without_invoking_new_or_old_targe
     let snapshot = fixture
         .bound
         .resources
-        .inspect_work(&WorkQuery::new(
-            fixture.bound.thread_id(),
-            WorkSelector::Head,
-        ))
+        .load_session_work(&WorkQuery {
+            session_id: fixture.bound.thread_id(),
+            limit: 1,
+        })
         .await
         .unwrap();
-    assert!(saved_effects(&fixture)
-        .await
-        .iter()
+    assert!(snapshot
+        .state
+        .invocations
+        .values()
         .all(|invocation| invocation.status == InvocationStatus::Prepared));
 }
 
@@ -445,24 +332,21 @@ async fn production_native_model_failure_freezes_checkpoint_without_regeneration
         let (mut socket, _) = listener.accept().await.unwrap();
         let body = read_http_body(&mut socket).await;
         let snapshot = resources
-            .inspect_work(&WorkQuery::new(&session_id, WorkSelector::Head))
-            .await
-            .unwrap();
-        let work = crate::session::work_access::processing(
-            resources.as_ref(),
-            &session_id,
-            snapshot.head.current_processing_id.as_deref().unwrap(),
-        )
-        .await
-        .unwrap();
-        let evidence = resources
-            .read_evidence(&EvidenceQuery {
+            .load_session_work(&WorkQuery {
                 session_id,
-                reference: work.request.unwrap(),
+                limit: 1,
             })
             .await
             .unwrap();
-        let checkpoint: serde_json::Value = serde_json::from_slice(&evidence.bytes).unwrap();
+        let work = snapshot
+            .state
+            .works
+            .values()
+            .find(|work| work.stage == WorkStage::ReasonInFlight)
+            .unwrap();
+        let checkpoint: serde_json::Value =
+            serde_json::from_str(&work.reason_request.as_ref().unwrap().serialized_request)
+                .unwrap();
         assert_eq!(checkpoint["request"]["body"], body);
         use tokio::io::AsyncWriteExt;
         socket.write_all(b"HTTP/1.1 400 Bad Request\r\ncontent-type: application/json\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}").await.unwrap();
@@ -482,17 +366,17 @@ async fn production_native_model_failure_freezes_checkpoint_without_regeneration
     let snapshot = fixture
         .bound
         .resources
-        .inspect_work(&WorkQuery::new(
-            fixture.bound.thread_id(),
-            WorkSelector::Head,
-        ))
+        .load_session_work(&WorkQuery {
+            session_id: fixture.bound.thread_id(),
+            limit: 1,
+        })
         .await
         .unwrap();
-    let work = saved_processing(&fixture).await;
+    let work = &snapshot.state.works[&fixture.admission.work_id];
     assert_eq!(work.stage, WorkStage::Blocked);
-    assert!(work.request.is_some());
+    assert!(work.reason_request.is_some());
     assert!(work.response.is_none());
-    assert_eq!(work.budget.reason_requests, 1);
+    assert_eq!(snapshot.state.budgets[&work.budget_id].reason_requests, 1);
     assert!(reason::run_reason(ReasonInput {
         context: fixture.context.clone(),
         has_tool_calls: false
@@ -507,14 +391,17 @@ async fn production_native_model_failure_freezes_checkpoint_without_regeneration
     let after = fixture
         .bound
         .resources
-        .inspect_work(&WorkQuery::new(
-            fixture.bound.thread_id(),
-            WorkSelector::Head,
-        ))
+        .load_session_work(&WorkQuery {
+            session_id: fixture.bound.thread_id(),
+            limit: 1,
+        })
         .await
         .unwrap();
-    assert_eq!(saved_processing(&fixture).await.budget.reason_requests, 1);
-    assert_eq!(saved_processing(&fixture).await.request, work.request);
+    assert_eq!(after.state.budgets[&work.budget_id].reason_requests, 1);
+    assert_eq!(
+        after.state.works[&fixture.admission.work_id].reason_request,
+        work.reason_request
+    );
 }
 
 struct UncertainEntry {
@@ -572,7 +459,7 @@ async fn production_uncertain_sdk_entry_has_no_model_effect_or_ticket_replacemen
         observed: observed.clone(),
     }));
     assert!(matches!(
-        run_react_loop(fixture.context.clone(), 2).await,
+        run_react_loop(fixture.context, 2).await,
         LoopResult::Error(_)
     ));
     assert_eq!(effects.load(Ordering::SeqCst), 0);
@@ -581,28 +468,18 @@ async fn production_uncertain_sdk_entry_has_no_model_effect_or_ticket_replacemen
     let snapshot = fixture
         .bound
         .resources
-        .inspect_work(&WorkQuery::new(
-            fixture.bound.thread_id(),
-            WorkSelector::Head,
-        ))
+        .load_session_work(&WorkQuery {
+            session_id: fixture.bound.thread_id(),
+            limit: 1,
+        })
         .await
         .unwrap();
-    assert_eq!(
-        usize::from(
-            crate::session::work_access::admission(
-                fixture.bound.resources().as_ref(),
-                &fixture.admission
-            )
-            .await
-            .is_ok()
-        ),
-        1
-    );
+    assert_eq!(snapshot.state.admissions.len(), 1);
     assert_eq!(
         snapshot.control.attempt.as_ref(),
         Some(&fixture.admission.execution)
     );
-    assert!(saved_effects(&fixture).await.is_empty());
+    assert!(snapshot.state.invocations.is_empty());
 }
 
 #[tokio::test]
@@ -619,7 +496,7 @@ async fn production_finished_exact_work_exits_without_premature_sdk_settlement_o
     );
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(5),
-        run_react_loop(fixture.context.clone(), 2),
+        run_react_loop(fixture.context, 2),
     )
     .await
     .unwrap();
@@ -628,22 +505,21 @@ async fn production_finished_exact_work_exits_without_premature_sdk_settlement_o
     let snapshot = fixture
         .bound
         .resources
-        .inspect_work(&WorkQuery::new(
-            fixture.bound.thread_id(),
-            WorkSelector::Head,
-        ))
+        .load_session_work(&WorkQuery {
+            session_id: fixture.bound.thread_id(),
+            limit: 1,
+        })
         .await
         .unwrap();
     assert!(snapshot.control.attempt.is_none());
-    assert!(crate::session::work_access::admission(
-        fixture.bound.resources().as_ref(),
-        &fixture.admission
-    )
-    .await
-    .unwrap()
-    .leaving_evidence_id
-    .is_none());
-    assert_eq!(saved_processing(&fixture).await.stage, WorkStage::Settled);
+    assert!(snapshot.state.admissions[&fixture.admission.admission_id]
+        .settled_receipt
+        .is_none());
+    assert!(snapshot
+        .state
+        .works
+        .values()
+        .all(|work| work.stage == WorkStage::Settled));
 }
 
 #[tokio::test]
@@ -681,15 +557,16 @@ async fn production_before_effect_rejection_mirrors_same_canonical_paired_tool_r
     let snapshot = fixture
         .bound
         .resources
-        .inspect_work(&WorkQuery::new(
-            fixture.bound.thread_id(),
-            WorkSelector::Head,
-        ))
+        .load_session_work(&WorkQuery {
+            session_id: fixture.bound.thread_id(),
+            limit: 1,
+        })
         .await
         .unwrap();
-    let invocation = saved_effects(&fixture)
-        .await
-        .into_iter()
+    let invocation = snapshot
+        .state
+        .invocations
+        .values()
         .find(|invocation| invocation.intent.tool_call_id == call.id)
         .unwrap();
     assert_eq!(invocation.status, InvocationStatus::Settled);
@@ -697,26 +574,15 @@ async fn production_before_effect_rejection_mirrors_same_canonical_paired_tool_r
         invocation.outcome,
         Some(InvocationOutcome::Cancelled { .. })
     ));
-    let Some(InvocationOutcome::Cancelled {
-        result: canonical, ..
-    }) = &invocation.outcome
-    else {
-        panic!("expected canonical cancellation result");
-    };
-    let payload = fixture
-        .bound
-        .resources()
-        .read_evidence(&EvidenceQuery {
-            session_id: fixture.bound.thread_id(),
-            reference: canonical.content.clone(),
-        })
-        .await
+    let canonical = invocation
+        .settled_projection(&fixture.bound.thread_id())
+        .unwrap()
         .unwrap();
     assert_eq!(
-        std::str::from_utf8(&payload.bytes).unwrap(),
-        peri_acp_types::store::serialize_persisted_payload(
-            &peri_acp_types::store::PersistedPayload::Message(projections[0].clone())
-        )
+        canonical,
+        WorkPayload::from_payload(&peri_acp_types::store::PersistedPayload::Message(
+            projections[0].clone()
+        ))
         .unwrap()
     );
     fixture
@@ -728,7 +594,10 @@ async fn production_before_effect_rejection_mirrors_same_canonical_paired_tool_r
             projections[0].clone(),
         ));
     assert_eq!(effects.load(Ordering::SeqCst), 0);
-    assert_eq!(saved_processing(&fixture).await.budget.dispatches, 0);
+    assert_eq!(
+        snapshot.state.budgets[&fixture.admission.work_id].dispatches,
+        0
+    );
     let history = fixture
         .bound
         .resources

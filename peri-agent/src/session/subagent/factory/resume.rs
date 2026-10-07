@@ -2,10 +2,7 @@
 
 use std::sync::Arc;
 
-use peri_acp_types::session_resources::{
-    work::{WorkQuery, WorkSelector},
-    FrozenState,
-};
+use peri_acp_types::session_resources::{work::WorkQuery, FrozenState};
 use peri_acp_types::store::PersistedPayload;
 use sha2::{Digest, Sha256};
 
@@ -22,20 +19,6 @@ use crate::tools::{EffectiveToolError, EffectiveToolErrorCode};
 
 fn authorization_denied(message: &str) -> EffectiveToolError {
     EffectiveToolError::new(EffectiveToolErrorCode::PermissionDenied, message)
-}
-
-async fn authorization_effect(
-    resources: &dyn peri_acp_types::session_resources::SessionResources,
-    session_id: &str,
-    invocation_id: &str,
-) -> Result<peri_acp_types::session_resources::work::Effect, EffectiveToolError> {
-    crate::session::work_access::effect(resources, session_id, invocation_id)
-        .await
-        .map_err(|error| {
-            authorization_denied(&format!(
-                "delegation authorization evidence unavailable: {error}"
-            ))
-        })
 }
 
 fn preparation_failed(message: impl Into<String>) -> EffectiveToolError {
@@ -252,33 +235,24 @@ pub(super) async fn resume_subagent_impl(
             .await
             .map_err(|error| anyhow::anyhow!("{error}"))?;
         let work = session_resources
-            .inspect_work(&WorkQuery::new(thread_id.clone(), WorkSelector::Head))
+            .load_session_work(&WorkQuery {
+                session_id: thread_id.clone(),
+                limit: 1,
+            })
             .await?;
         if work.control.status != peri_acp_types::session_resources::ControlStatus::Active {
             return Err(preparation_failed("Incomplete: child control is not Active; explicit Reopen required").into());
         }
-if prompt.is_none() {
-    let active = session_resources.inspect_work(&WorkQuery::new(
-        &thread_id,
-        WorkSelector::ActiveProcessing,
-    )).await?;
-    let peri_acp_types::session_resources::work::WorkPage::Processings(processings) = active.page else {
-        return Err(preparation_failed("active child processing query returned a different page").into());
-    };
-    if processings.iter().any(|processing| {
-        matches!(processing.stage, peri_acp_types::session_resources::work::WorkStage::ReasonInFlight
-            | peri_acp_types::session_resources::work::WorkStage::Blocked)
-            && processing.request.is_some() && processing.response.is_none()
-    }) {
-        return Err(preparation_failed("Blocked: original model request requires reconciliation before implicit continuation").into());
-    }
-}
-let descriptor = crate::session::work_access::descriptor(session_resources.as_ref(),
-    &thread_id, work.control.lifecycle).await.map_err(|error| preparation_failed(format!(
-        "Blocked: saved child runtime metadata unavailable: {error}"
-    )))?;
-let raw = descriptor.child_resume_metadata_json.as_deref()
-    .ok_or_else(|| preparation_failed("Blocked: saved child runtime metadata unavailable"))?;
+        if prompt.is_none() && work.state.works.values().any(|work|
+            matches!(work.stage, peri_acp_types::session_resources::work::WorkStage::ReasonInFlight | peri_acp_types::session_resources::work::WorkStage::Blocked)
+                && work.reason_request.is_some() && work.response.is_none()) {
+            return Err(preparation_failed("Blocked: original model request requires reconciliation before implicit continuation").into());
+        }
+        let raw = work
+            .state
+            .child_resume_metadata
+            .get(&work.control.lifecycle)
+            .ok_or_else(|| preparation_failed("Blocked: saved child runtime metadata unavailable"))?;
         let saved: super::cold::ChildResumeMetadata = serde_json::from_str(raw)
             .map_err(|error| preparation_failed(format!("Blocked: invalid saved child runtime metadata: {error}")))?;
         let FrozenState::Present(bytes) = &snapshot.frozen else {
@@ -311,12 +285,19 @@ let raw = descriptor.child_resume_metadata_json.as_deref()
             return Err(authorization_denied("saved child direct initiator differs from owning parent").into());
         }
         let original_parent_work = session_resources
-            .inspect_work(&WorkQuery::new(saved.direct_initiator_session_id.clone(), WorkSelector::Head))
+            .load_session_work(&WorkQuery {
+                session_id: saved.direct_initiator_session_id.clone(),
+                limit: 1,
+            })
             .await?;
         if original_parent_work.control.lifecycle != saved.direct_initiator_lifecycle {
             return Err(authorization_denied("saved child initiator lifecycle differs from owning parent").into());
         }
-        let original = authorization_effect(session_resources.as_ref(), &saved.direct_initiator_session_id, &saved.delegation_invocation_id).await?;
+        let original = original_parent_work
+            .state
+            .invocations
+            .get(&saved.delegation_invocation_id)
+            .ok_or_else(|| authorization_denied("original trusted delegation invocation unavailable"))?;
         if original.recipient_lifecycle != saved.direct_initiator_lifecycle
             || original.intent.authorization_ref != saved.authorization_ref
             || original.intent.scope_id != saved.direct_initiator_session_id
@@ -327,9 +308,16 @@ let raw = descriptor.child_resume_metadata_json.as_deref()
             .as_deref()
             .ok_or_else(|| authorization_denied("current delegation invocation unavailable"))?;
         let parent_work = session_resources
-            .inspect_work(&WorkQuery::new(initiator.clone(), WorkSelector::Head))
+            .load_session_work(&WorkQuery {
+                session_id: initiator.clone(),
+                limit: 1,
+            })
             .await?;
-        let current = authorization_effect(session_resources.as_ref(), &initiator, invocation_id).await?;
+        let current = parent_work
+            .state
+            .invocations
+            .get(invocation_id)
+            .ok_or_else(|| authorization_denied("current trusted invocation unavailable"))?;
         if current.recipient_lifecycle != parent_work.control.lifecycle
             || current.intent.scope_id != initiator
             || current.intent.authorization_ref.is_empty()
@@ -528,14 +516,18 @@ let raw = descriptor.child_resume_metadata_json.as_deref()
             authorization_denied("Blocked: current delegation invocation unavailable")
         })?;
         let current = session_resources
-            .inspect_work(&WorkQuery::new(initiator.clone(), WorkSelector::Head))
+            .load_session_work(&WorkQuery {
+                session_id: initiator.clone(),
+                limit: 1,
+            })
             .await?;
-        let invocation = crate::session::work_access::effect(
-            session_resources.as_ref(),
-            &initiator,
-            invocation_id,
-        )
-        .await?;
+        let invocation = current
+            .state
+            .invocations
+            .get(invocation_id)
+            .ok_or_else(|| {
+                authorization_denied("Blocked: current trusted invocation unavailable")
+            })?;
         if invocation.recipient_lifecycle != current.control.lifecycle
             || invocation.intent.scope_id != initiator
             || invocation.intent.authorization_ref.is_empty()

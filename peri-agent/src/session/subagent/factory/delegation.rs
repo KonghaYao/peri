@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use peri_acp_types::session::{MessageQueue, QueuedMessage, QueuedPayload};
 use peri_acp_types::session_resources::work::{
-    DeliveryPurpose, PublishDelivery, TaskBinding, WorkAction, WorkCommand, WorkEvent, WorkPage,
-    WorkQuery, WorkSelector,
+    DeliveryPurpose, PublishDelivery, TaskBinding, WorkAction, WorkCommand, WorkEvent, WorkPayload,
+    WorkQuery,
 };
 use peri_acp_types::session_resources::SessionResources;
 use peri_acp_types::store::PersistedPayload;
@@ -38,8 +38,20 @@ pub(super) async fn parent_tool_call_id(
         );
         "Blocked: delegation initiator unavailable"
     })?;
-    let invocation =
-        crate::session::work_access::effect(resources, initiator, invocation_id).await?;
+    let parent = resources
+        .load_session_work(&WorkQuery {
+            session_id: initiator.into(),
+            limit: 1,
+        })
+        .await?;
+    let invocation = parent.state.invocations.get(invocation_id).ok_or_else(|| {
+        tracing::error!(
+            invocation_id,
+            parent_session_id = initiator,
+            "delegation invocation unavailable for event identity"
+        );
+        "Blocked: delegation invocation unavailable for event identity"
+    })?;
     if invocation.intent.tool_call_id.is_empty() {
         tracing::error!(
             invocation_id,
@@ -64,15 +76,25 @@ pub(in crate::session::subagent) async fn publish_work_delegation(
 ) -> Result<TaskBinding, Box<dyn std::error::Error + Send + Sync>> {
     let barrier = WorkMutationBarrier::new(resources.clone());
     let child = barrier
-        .inspect(&WorkQuery::new(child_id, WorkSelector::Head))
+        .snapshot(&WorkQuery {
+            session_id: child_id.into(),
+            limit: 64,
+        })
         .await?;
-    let unresolved = child.head.current_processing_id.is_some();
+    let unresolved = child.state.works.values().any(|work| {
+        child.state.work_lifecycle(&work.work_id) == Some(lifecycle)
+            && !matches!(
+                work.stage,
+                peri_acp_types::session_resources::work::WorkStage::Settled
+                    | peri_acp_types::session_resources::work::WorkStage::Abandoned
+            )
+    });
     if child.control.lifecycle != lifecycle
         || child.control.status != peri_acp_types::session_resources::ControlStatus::Active
         || child.control.attempt.is_some()
-        || child.head.terminal_obligations != 0
-        || child.head.unresolved_effects != 0
-        || child.head.legacy_unknown != 0
+        || child.state.has_pending_terminal_obligations_for(lifecycle)
+        || child.state.has_unknown_live_work_lifecycle()
+        || !child.state.legacy_unknown.is_empty()
         || (matches!(input_mode, DelegationInputMode::FollowUp) && unresolved)
     {
         tracing::warn!(
@@ -84,10 +106,19 @@ pub(in crate::session::subagent) async fn publish_work_delegation(
             "Blocked: child requires reconciliation before delegation; provide explicit input only when authorized to replace prior processing",
         )));
     }
-    let invocation =
-        crate::session::work_access::effect(resources.as_ref(), initiator, invocation_id).await?;
+    let parent = resources
+        .load_session_work(&WorkQuery {
+            session_id: initiator.into(),
+            limit: 1,
+        })
+        .await?;
+    let invocation = parent
+        .state
+        .invocations
+        .get(invocation_id)
+        .ok_or("Blocked: current trusted delegation invocation unavailable")?;
     let parent_binding_receipt =
-        super::cold::bind_delegation_task(resources.as_ref(), initiator, &invocation, task_id)
+        super::cold::bind_delegation_task(resources.as_ref(), initiator, invocation, task_id)
             .await?;
     let binding = TaskBinding {
         invocation_id: invocation_id.into(),
@@ -108,19 +139,14 @@ pub(in crate::session::subagent) async fn publish_work_delegation(
         },
     };
     let identity = delivery_id.as_uuid().to_string();
-    let mut delivery = PublishDelivery {
+    let delivery = PublishDelivery {
         delivery_id: identity.clone(),
         event: WorkEvent {
             producer_namespace: "peri-agent.child-delegation".into(),
             event_id: identity.clone(),
             event_kind: "delegatedInput".into(),
             causation_id: Some(invocation_id.into()),
-            content: crate::agent::stages::prepare_work_payload(
-                resources.as_ref(),
-                child_id,
-                &payload,
-            )
-            .await?,
+            content: WorkPayload::from_payload(&payload)?,
         },
         purpose: DeliveryPurpose::UserInput,
         policy: message.policy.clone(),
@@ -151,57 +177,20 @@ pub(in crate::session::subagent) async fn publish_work_delegation(
                 recipient_lifecycle: lifecycle,
                 mutation_id: format!("child-delegation-stage:{identity}"),
                 action: WorkAction::StageUserInput {
-                    input_id: input.input_id.clone(),
-                    content: crate::agent::stages::prepare_work_evidence(
-                        resources.as_ref(),
-                        child_id,
-                        input_json.into_bytes(),
-                    )
-                    .await?,
+                    input_json,
                     command_id: invocation_id.into(),
                     fingerprint: u64::from_be_bytes(fingerprint_bytes),
                 },
             };
             barrier.commit(&stage).await?;
-            let staged = barrier
-                .inspect(&WorkQuery::new(
-                    child_id,
-                    WorkSelector::Draft {
-                        input_id: input.input_id.clone(),
-                    },
-                ))
-                .await?;
-            let WorkPage::Drafts(drafts) = staged.page else {
-                return Err("delegation draft lookup returned a different page".into());
-            };
-            let draft = drafts
-                .first()
-                .filter(|draft| {
-                    drafts.len() == 1
-                        && draft.input_id == input.input_id
-                        && draft.command_id == invocation_id
-                        && draft.recipient_lifecycle == lifecycle
-                })
-                .ok_or("exact delegation draft unavailable")?;
-            delivery.event.causation_id = Some(serde_json::to_string(
-                &peri_acp_types::session_resources::work::UserInputPublicationIdentity {
-                    input_id: input.input_id,
-                    publication_generation: invocation_id.into(),
-                    fingerprint: draft.fingerprint,
-                    command_id: invocation_id.into(),
-                    draft_binding:
-                        peri_acp_types::session_resources::work::StagedUserInputPublicationBinding {
-                            draft_revision: draft.revision,
-                            draft_fingerprint: draft.fingerprint,
-                            canonical_content: delivery.event.content.content.clone(),
-                        },
-                },
-            )?);
             let current = barrier
-                .inspect(&WorkQuery::new(child_id, WorkSelector::Head))
+                .snapshot(&WorkQuery {
+                    session_id: child_id.into(),
+                    limit: 64,
+                })
                 .await?;
             WorkAction::PublishStagedUserInputs {
-                expected_revision: current.head.change_seq,
+                expected_revision: current.state.revision,
                 expected_control_generation: current.control.control_generation,
                 expected_attempt: current.control.attempt,
                 interrupt_current: true,
@@ -217,12 +206,12 @@ pub(in crate::session::subagent) async fn publish_work_delegation(
     };
     barrier.commit(&command).await?;
     let child = resources
-        .inspect_work(&WorkQuery::new(child_id, WorkSelector::Availability))
+        .load_session_work(&WorkQuery {
+            session_id: child_id.into(),
+            limit: 64,
+        })
         .await?;
-    let WorkPage::Availability(availability) = &child.page else {
-        return Err("Blocked: delegation availability returned a different page".into());
-    };
-    let candidate = availability
+    let candidate = child
         .candidates
         .iter()
         .find(|candidate| candidate.delivery_ids.contains(&identity))
@@ -232,7 +221,7 @@ pub(in crate::session::subagent) async fn publish_work_delegation(
         recipient_lifecycle: lifecycle,
         mutation_id: "child-work-delegation".into(),
         action: WorkAction::BindWorkDelegation {
-            expected_revision: child.head.change_seq,
+            expected_revision: child.state.revision,
             work_id: candidate.work_id.clone(),
             binding: binding.clone(),
             parent_binding_receipt,

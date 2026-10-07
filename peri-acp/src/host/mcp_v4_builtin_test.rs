@@ -577,46 +577,21 @@ async fn closed_web_tool_call_never_reaches_approval_or_wire() {
         closed_ends.is_empty(),
         "不得虚构未 dispatch 工具的结算: {all_ends:?}"
     );
-    use peri_acp_types::session_resources::work::{WorkPage, WorkQuery, WorkSelector, WorkStage};
     let work = resources
-        .inspect_work(&WorkQuery::new(&session_id, WorkSelector::Availability))
+        .load_session_work(&peri_acp_types::session_resources::work::WorkQuery {
+            session_id,
+            limit: 100,
+        })
         .await
         .unwrap();
-    assert!(
-        crate::host::work_query::availability(&work)
-            .unwrap()
-            .blocked
-    );
-    let processing = resources
-        .inspect_work(&WorkQuery::new(
-            &session_id,
-            WorkSelector::CurrentProcessing,
-        ))
-        .await
-        .unwrap();
-    let WorkPage::Processings(records) = processing.page else {
-        panic!("expected processing page");
-    };
-    let record = records
-        .iter()
-        .find(|record| record.stage == WorkStage::Blocked && record.request.is_some())
-        .expect("closed tool must leave a blocked processing with reason evidence");
-    let effects = resources
-        .inspect_work(&WorkQuery::new(
-            &session_id,
-            WorkSelector::Effects {
-                processing_id: record.processing_id.clone(),
-                phase_sequence: None,
-            },
-        ))
-        .await
-        .unwrap();
-    let WorkPage::Effects(records) = effects.page else {
-        panic!("expected effects page");
-    };
-    assert!(effects.next_cursor.is_none());
-    assert!(!records
-        .iter()
+    assert!(work.blocked);
+    assert!(work.state.works.values().any(|record| record.stage
+        == peri_acp_types::session_resources::work::WorkStage::Blocked
+        && record.reason_request.is_some()));
+    assert!(!work
+        .state
+        .invocations
+        .values()
         .any(|record| record.intent.tool_name == CLOSED_NAME));
 
     // ④ wire 面：关闭名 0 次；available 工具恰一条（同一 turn 内的正控制）。
