@@ -196,6 +196,15 @@ impl Middleware for SkillPreloadMiddleware {
             return Ok(());
         }
 
+        #[cfg(target_os = "emscripten")]
+        if skill_names.len() > 256 {
+            return Err(peri_agent::error::AgentError::MiddlewareError {
+                middleware: "SkillPreloadMiddleware".to_string(),
+                reason: "WASM skill preload is limited to 256 registry lookups per invocation"
+                    .to_string(),
+            });
+        }
+
         // W4b（F5/J5）：预载只按名查 MCP registry——本地磁盘兜底扫描已删除。
         // 未装配 registry（print/遗留装配）或未命中 → 缺口报告（warn），
         // 不回落磁盘、不静默假装成功；显式名单路径（W6：子代理 / workflow）在此
@@ -225,7 +234,7 @@ impl Middleware for SkillPreloadMiddleware {
         // 顺序逐名产出查找结果（命中/歧义/未命中），缺口留在原位。
         // 闭包只借一份 registry 快照；激活阶段继续用外层句柄（Arc 克隆廉价）。
         let lookup_registry = std::sync::Arc::clone(&registry);
-        let lookups: Vec<(String, RegistryLookup)> = tokio::task::spawn_blocking(move || {
+        let lookup = move || {
             skill_names
                 .into_iter()
                 .map(|name| {
@@ -269,12 +278,16 @@ impl Middleware for SkillPreloadMiddleware {
                     (name, outcome)
                 })
                 .collect()
-        })
-        .await
-        .map_err(|e| peri_agent::error::AgentError::MiddlewareError {
-            middleware: "SkillPreloadMiddleware".to_string(),
-            reason: format!("spawn_blocking 失败: {e}"),
-        })?;
+        };
+        #[cfg(target_os = "emscripten")]
+        let lookups: Vec<(String, RegistryLookup)> = lookup();
+        #[cfg(not(target_os = "emscripten"))]
+        let lookups: Vec<(String, RegistryLookup)> = tokio::task::spawn_blocking(lookup)
+            .await
+            .map_err(|e| peri_agent::error::AgentError::MiddlewareError {
+                middleware: "SkillPreloadMiddleware".to_string(),
+                reason: format!("spawn_blocking 失败: {e}"),
+            })?;
 
         // 逐名处置（保持声明顺序）：命中项走统一 activation（resources/read +
         // digest/frontmatter 校验；stale 经 skills/get 刷新一次，见

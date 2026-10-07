@@ -3754,6 +3754,7 @@ dependencies = [
  "tokio-util",
  "url",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
 ]
 
 [[package]]
@@ -3897,6 +3898,7 @@ dependencies = [
  "parking_lot",
  "peri-acp",
  "peri-acp-types",
+ "peri-model",
  "peri-resources",
  "serde_json",
  "tokio",

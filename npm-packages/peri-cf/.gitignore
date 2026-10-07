@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.wrangler/
+.cache/
+.dev.vars
+.env*
+!.env.example
+worker/wasm/generated/
+worker/wasm/generated.tmp-*/
+worker-configuration.d.ts
