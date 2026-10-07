@@ -48,7 +48,8 @@ async fn write_draft_receipt_can_restore_without_resending_content() {
         })
         .unwrap();
     assert!(!text.contains("private-draft-marker"));
-    assert!(text.contains(&cwd));
+    assert!(text.contains("Write failed at "), "{text}");
+    assert!(text.contains("retry.txt"), "{text}");
     let draft = text
         .split("from_draft=")
         .nth(1)

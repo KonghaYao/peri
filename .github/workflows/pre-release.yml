@@ -63,13 +63,9 @@ jobs:
                       ${{ runner.os }}-${{ matrix.target }}-build-
                       ${{ runner.os }}-${{ matrix.target }}-
 
-            - name: Install cross
-              if: runner.os == 'Linux'
-              run: cargo install cross
-
             - name: Build agent-tui (Linux)
               if: runner.os == 'Linux'
-              run: ./scripts/cargo-rmcp-patched.sh --cross build --locked -p peri-tui --release --target ${{ matrix.target }}
+              run: ./scripts/cargo-rmcp-patched.sh build --locked -p peri-tui --bin peri --release --target ${{ matrix.target }}
 
             - name: Build agent-tui (non-Linux)
               if: runner.os != 'Linux'
