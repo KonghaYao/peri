@@ -70,7 +70,7 @@
 | SQLite 会话存储 | src/sessions/sqlite_store.rs | `SqliteThreadStore`（:60，迁移桥，持共享库句柄）；`ThreadStore` impl 处理 metadata/payload/frozen，context/compaction 委托私有模块；`delete_thread` 与数据面删除同语义（递归删整棵树：每节点显式删子表行 → `threads` 行，不借外键级联；v10 起不再写删除墓碑） |
 | 会话资源门面（生产入口） | src/sessions/resources.rs + resources/{gate,claim,lifecycle}.rs | `SessionResourcesImpl`（公开 API，`Arc<dyn SessionResources>` 的构造点）；`Lifecycle::{state,begin_closing,confirm_closed}`（关闭生命周期事实） |
 | 执行环境观测端口 | src/sessions/local_port.rs + src/sessions/sqlite_store/local.rs + sessions/remote/{environment,execution}.rs | `LocalExecutionPort`；本机 SQLite 与 Turso 虚拟/原生环境提供目录与 binding 观测，不申请会话执行 lease；Turso 无本地 SQLite 连接 |
-| SQLite 连接与解码 | src/sessions/sqlite_store/{database,connection,schema,row_mapping}.rs | `database.rs` 持共享 pool 与实例内强引用句柄登记；`connection.rs` 持有有界 canonical 路径初始化锁（预检/WAL/DDL，不做会话锁），只读 shape probe 无写入；`schema.rs` 原子迁移至 canonical 当前版本（17），未知版本/结构 fail-closed；`row_mapping.rs` 共用 metadata 解码 |
+| SQLite 连接与解码 | src/sessions/sqlite_store/{database,connection,schema,row_mapping}.rs | `database.rs` 持共享 pool 与实例内强引用句柄登记；`connection.rs` 持有有界 canonical 路径初始化锁（预检/WAL/DDL，不做会话锁），只读 shape probe 无写入；`schema.rs` 原子迁移至 canonical 当前版本（18），未知版本/结构 fail-closed；`row_mapping.rs` 共用 metadata 解码 |
 | SQLite 上下文与事务 | src/sessions/sqlite_store/{context,compaction}.rs | context.rs（`*_on` 连接作用域读原语与取连接的包装：ancestor payload、child/session tree；读历史不写 `updated_at`）；compaction.rs（flags、事务提交、回滚删除；`load_flags_on` 对损坏 ID/projection 失败而不是跳过） |
 | 测试文件存储 | src/sessions/filesystem.rs | `FilesystemThreadStore`（:25） |
 | SQLite 行写入原语 | src/sessions/sqlite_store/session_rows.rs + canonical.rs | `ThreadRowInsert` / `insert_thread_row` / `insert_binding_row`；共用列形状与 env 插入规则，child 从父 env 继承 |
@@ -79,6 +79,8 @@
 | SQLite frozen 快照测试 | src/sessions/sqlite_store/frozen_snapshot_test.rs | `tests::frozen_snapshot_tests`；write-once roundtrip 与并发 backfill CAS；按 `cargo test -p peri-resources --lib -- frozen_snapshot` 验证 |
 
 ## 跨模块契约
+
+- 普通历史 rewind/remove 的 SQLite 实现在 `src/sessions/sqlite_store/session_data/history.rs`，由 `session_data.rs` 消费；远端测试装配位于 `src/sessions/remote/session_data_fixture.rs`，不属于执行恢复账本。
 
 - Session ID/environment 现行契约见 [ARC-WORKSPACE-001](../standards/architecture-contracts.md) 与[现行设计](../design/session-id-environment.md)：机器身份发布与权限限制、迁移来源假设、恢复/执行边界和并发保证以此为准；跨实例执行协调归部署方，Peri 不提供旧执行接管；工作区身份、目录与 binding 校验不构成 Peri 内部执行所有权协议。
 

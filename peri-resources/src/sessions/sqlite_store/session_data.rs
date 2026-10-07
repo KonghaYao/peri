@@ -802,44 +802,7 @@ impl SessionDataPort for SqliteSessionData {
         id: &ThreadId,
         boundary: RewindBoundary,
     ) -> SessionResourceResult<()> {
-        self.writable()?;
-        let target = boundary.message_id().as_uuid().to_string();
-        let mut tx = self
-            .database
-            .pool
-            .begin_with("BEGIN IMMEDIATE")
-            .await
-            .map_err(|error| map_sqlx(&error))?;
-        self.require_session(&mut tx, id).await?;
-        let rowid: Option<(i64,)> =
-            sqlx::query_as("SELECT rowid FROM messages WHERE thread_id = ?1 AND message_id = ?2")
-                .bind(id.as_str())
-                .bind(&target)
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(|error| map_sqlx(&error))?;
-        // 未知截止点保持无变更语义：找不到目标就不动历史。
-        if let Some((rowid,)) = rowid {
-            let sql = match boundary {
-                RewindBoundary::KeepThrough(_) => {
-                    "DELETE FROM messages WHERE thread_id = ?1 AND rowid > ?2"
-                }
-                RewindBoundary::RemoveFrom(_) => {
-                    "DELETE FROM messages WHERE thread_id = ?1 AND rowid >= ?2"
-                }
-            };
-            sqlx::query(sql)
-                .bind(id.as_str())
-                .bind(rowid)
-                .execute(&mut *tx)
-                .await
-                .map_err(|error| map_sqlx(&error))?;
-            refresh_history_derivations(&mut tx, id).await?;
-        }
-        tx.commit()
-            .await
-            .map_err(|_| commit_failure(Some(id.clone())))?;
-        Ok(())
+        self.rewind_stored_history(id, boundary).await
     }
 
     async fn remove_history_entries(
@@ -847,48 +810,7 @@ impl SessionDataPort for SqliteSessionData {
         id: &ThreadId,
         ids: &[MessageId],
     ) -> SessionResourceResult<()> {
-        self.writable()?;
-        if ids.is_empty() {
-            return Ok(());
-        }
-        let unique: Vec<MessageId> = {
-            let mut seen = HashSet::with_capacity(ids.len());
-            ids.iter().copied().filter(|id| seen.insert(*id)).collect()
-        };
-        let mut tx = self
-            .database
-            .pool
-            .begin_with("BEGIN IMMEDIATE")
-            .await
-            .map_err(|error| map_sqlx(&error))?;
-        self.require_session(&mut tx, id).await?;
-        for message_id in &unique {
-            // 别会话的条目不允许被「精确移除」静默命中或静默跳过。
-            let owner: Option<(String,)> =
-                sqlx::query_as("SELECT thread_id FROM messages WHERE message_id = ?1")
-                    .bind(message_id.as_uuid().to_string())
-                    .fetch_optional(&mut *tx)
-                    .await
-                    .map_err(|error| map_sqlx(&error))?;
-            match owner {
-                Some((owner,)) if owner == id.as_str() => {
-                    sqlx::query("DELETE FROM messages WHERE message_id = ?1 AND thread_id = ?2")
-                        .bind(message_id.as_uuid().to_string())
-                        .bind(id.as_str())
-                        .execute(&mut *tx)
-                        .await
-                        .map_err(|error| map_sqlx(&error))?;
-                }
-                Some(_) => return Err(invalid_input("history entry belongs to another session")),
-                // 已经不存在的条目是幂等删除，不产生错误。
-                None => {}
-            }
-        }
-        refresh_history_derivations(&mut tx, id).await?;
-        tx.commit()
-            .await
-            .map_err(|_| commit_failure(Some(id.clone())))?;
-        Ok(())
+        self.remove_stored_history_entries(id, ids).await
     }
 
     async fn update_meta(

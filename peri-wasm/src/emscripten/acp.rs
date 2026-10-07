@@ -12,9 +12,7 @@ use peri_acp::{
         spawn_acp_server, AcpHostHandle,
     },
     provider::{ConfigSource, LlmProvider},
-    transport::{
-        mpsc::mpsc_transport_pair, wire_bridge::WireBridge, AcpTransport,
-    },
+    transport::{mpsc::mpsc_transport_pair, wire_bridge::WireBridge, AcpTransport},
 };
 use peri_acp_types::permission::{PermissionMode, SharedPermissionMode};
 use tokio::sync::Mutex;

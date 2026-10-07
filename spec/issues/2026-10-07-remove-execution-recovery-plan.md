@@ -1,10 +1,10 @@
 # 执行恢复机制剥离计划
 
-- 状态：**四个 worker 已完成，代码已整合提交，提交后轻量复验通过**。
+- 状态：**隔离剥离交付与轻量复验完成；追加授权合并已完成，现有 WIP 已按优先级适配并通过原生定向验证**。
 - 授权：2026-10-07 用户要求文档 → 充分计划 → 多 subagent → 完成/提交/整合 → 轻量验证；全部在独立 worktree。
 - 工作树：`/Users/konghayao/code/ai/peri-remove-execution-recovery-20261007`。
 - 分支：`refactor/remove-execution-recovery-20261007`；基线 `01c0efecff74427ca563a77a57de6188be256646`。
-- 不包含原工作树并行 WIP，不修改真实用户库，不推送、不合并回原脏工作树。
+- 初次隔离交付不包含原工作树并行 WIP；后续用户授权合并与 WIP 适配见第7节。始终不修改真实用户库、不推送。
 - 结构基线：[表结构审核](2026-10-07-remove-execution-recovery-schema-review.md)。
 
 ## 1. 交付契约
@@ -112,7 +112,7 @@ worker完成后协调者统一暂存/提交，避免并发操作git index。
 5. 扫描production不再依赖WorkState/journal/reverse admission/cold recovery；migration删表语句和历史文档可留名称。
 6. 构建阻碍如实记录，不宣称完整验收；真实Turso、WASM、UI E2E不在轻量门禁。
 
-代码/文档只提交到新分支，不push，不纳入原WIP，不自动merge回原树。
+初次交付只提交到新分支，不push、不自动merge回原树；后续合并须单独授权（第7节已记录）。
 
 ## 6. 进度与证据
 
@@ -166,4 +166,40 @@ schema18 远端验证采用 SQLite-backed RemoteTransport，不是实际 Turso �
 日志：`target/removal-postcommit-{entry-check,schema18-test,cancel-test,history-test}.log`。
 修改源码≤1000行、根 CLAUDE 5892字节/70行、修改 Markdown 本地链接及 `git diff --check` 均通过。
 恢复符号残留仅为迁移识别数据、历史文档及明确验证旧协议已撤销的测试；生产依赖已移除。
-本记录提交仅改文档，不改变上述复验代码快照；工作树交付保持干净，无 upstream/push/原树合并。
+初次验收记录提交仅改文档，不改变上述复验代码快照；当时工作树干净，无 upstream/push/原树合并。后续状态见第7节。
+
+## 7. 授权合并与现有 WIP 适配
+
+2026-10-07 用户追加要求合并回原分支，明确允许完整备份现有 WIP，保留无关改动、撤销旧恢复重构；本次恢复剥离的优先级最高。
+
+### 备份与冲突裁决
+
+- 原目标：`pre-release/main`，合并前 HEAD `434e8484`；原 WIP 包含75个已跟踪路径和22个未跟踪路径，暂存区为空。
+- 完整备份固定 OID：`29b27fae25158a53a6a90d8a256fd062089d7a66`，持久分支 `backup/wip-before-recovery-removal-20261007`；stash 未删除。
+- 该备份是 stash 三父提交：原 HEAD、index 快照 `878faeae424370e200b6650a12a8a799adc5ef58`、未跟踪快照 `d0135d26dd7b0b55943f2936ef63577bc2b56d22`。未跟踪内容不在备份 HEAD tree 内，须从其第三父读取；不按漂移的 stash 序号操作。
+- 原分支 merge 提交 `fe3735e9` 保留 CF 的已提交改动；唯一 Git 冲突是 `peri-resources/src/sessions/work.rs` modify/delete，按用户优先级保留删除。
+- 原有 Work/records/storage/repository/migration、冷恢复、owner 接线和 Work maintenance CLI 不回灌；完整原文留在固定备份，不在主分支留下替代账本或失效入口。
+- 原未跟踪结构审核同路径由更高优先级的 schema18 审核版本覆盖；其旧内容仍在备份第三父。
+
+### 保留并适配的改动
+
+- 根 CLAUDE 的「数据库结构须用户明确批准」原则保留，压缩表述满足根文档预算。
+- SQLite 普通 rewind/remove history 方法拆分保留；只迁移既有历史逻辑，不恢复 Work 模块。
+- Remote 普通测试 fixture 拆分保留，并修正嵌套模块可见性供 remote 回归使用；不恢复 Work 查询方法或迁移接口。
+- 高 CPU 事故补充与上下文注入 preflight 原 WIP 文档逐字保留；旧 Work 增长提案和 multi-subagent 调查保留并标记已被新裁决取代，相关实施检查项撤销。
+- CF 合入带来的 WASM host 残留 `ReverseExecutionAdmission` 已删除，改用普通 ACP runtime。SDK/CF 消费端源代码未额外修改；旧恢复协调协议不承诺兼容。
+
+### 复验范围
+
+- 在独立 worktree 对合并并适配后的源码完成以下命令，统一使用 patched Cargo、`--locked --offline`：
+
+| 命令参数 | 结果 |
+| --- | --- |
+| `check --locked --offline -p peri-tui -p peri-resources --tests` | 通过；既有 mio patch 未使用警告保留 |
+| `test --locked --offline -p peri-resources --lib history -- --test-threads=1` | 41 passed，1 ignored；包括拆分后的 rewind/remove 行为 |
+| `test --locked --offline -p peri-resources --lib schema_v18 -- --test-threads=1` | 10 passed |
+| `test --locked --offline -p peri-tui --lib requests::cancel_tests -- --test-threads=1` | 2 passed |
+
+- 日志为隔离工作树 `target/removal-merge-{native-check,history-test,schema18-test,cancel-test,wasm-check}.log`，不提交构建产物；格式、源码大小、根 CLAUDE 6006字节/71行及修改 Markdown 本地链接检查通过。
+- WASM check 使用 `scripts/cargo-wasm.sh check --locked --offline --target wasm32-unknown-emscripten -p peri-wasm --features cloudflare`，在 `mio` 依赖失败；目标分支原 HEAD 已锁定 registry `mio 1.2.4`，其 `1.2.3` Emscripten patch 未使用。本轮未修改该无关锁文件，未到达当前 WASM crate 或链接验收。
+- 未访问真实用户库，未push；备份分支和stash保留，不做全库迁移、WASM E2E或SDK兼容修复。

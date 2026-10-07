@@ -83,3 +83,14 @@ durable 的 ignored 为既有崩溃测试子进程入口，由父测试显式启
 分工：子 Agent 按 types / resources / agent / ACP 测试分成互不重叠的写入范围；主 Agent 负责跨层契约、其他调用方迁移、集成、测试与文档，不覆盖已有共享树修改。
 
 DOC-UPDATE-001：稳定接口与入口已同步 types/resources/agent code-index；本 issue 仅记录证据与未完成验收，不替代领域规则。性能验收未完成，保持 active，不另建完成过程归档。
+
+## 旧增长提案（已被执行恢复删除裁决取代）
+
+以下保留原 WIP 调查，不再作为实施要求；Work 存储、迁移及相关验收已撤销。
+
+按用户要求再次询问 Astra，形成 [增长模式根治提案](2026-10-07-workstate-root-cause-remediation.md)。独立核实除全量 Work JSON 外，GUARD_COMMAND / READ_PENDING / HAS_PENDING 及控制 guard 存在随全库 journal 增长的扫描；仅分离请求正文、缓存或 JSON patch 无法同时去除这些成本。
+
+推荐活动 head、定址实体/历史及事务 pending 目录，复用既有表主键，保持 schema17，无 DDL。本提案不是现行持久协议：改变 JSON/row 含义、历史校验时机、pending 权威目录与全体 writer 切换必须先裁决，现场迁移另行授权；不删历史、命令或回执，不削弱 Unknown/ACK/生命周期。目标是固定活动工作量时，热动作不再线性处理无关历史或扫描全部 journal，不承诺磁盘、真实大请求或全历史审计零成本。
+
+- 已撤销：提案 D1–D4 / D6 的约束放宽不再申请。
+- 已撤销：不推进 S0–S7 的 Work 持久化重构。
