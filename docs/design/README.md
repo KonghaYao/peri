@@ -53,8 +53,8 @@ draft、proposal、可行性探查、审计报告和未采纳方案不进入本�
 | 主题 | 文档 | 进度事实源 |
 | --- | --- | --- |
 | 时间能力边界 | [time-runtime.md](time-runtime.md) | [时间模块边界实施](../../spec/history/2026-10.md)（2026-10-04 条目）；原生边界已落地，WASM 完整验收与既有公开 Chrono 契约范围仍待核实 |
-| RCRA 消息、任务归属与激活 | [rcra-message-activation.md](rcra-message-activation.md) | 一等公民 Agent 独立 Task/MQ、类型驱动的 MQ 消费语义、可靠接纳与处理义务；**实施验收中**，范围与证据见 [2026-10 月志](../../spec/history/2026-10.md)（2026-10-05 条目） |
-| Session 异步任务统一入口 | [session-async-tasks.md](session-async-tasks.md) | 每会话独立任务领域、执行 owner、发现/取消/关闭；消息与激活服从 RCRA 权威，执行唯一性归 SDK；**待重构** |
+| RCRA 消息、任务归属与激活 | [rcra-message-activation.md](rcra-message-activation.md) | 当前进程 Task/MQ、canonical 历史与普通执行；**持久执行恢复目标已撤销 / 剥离实施中**，见 [active plan](../../spec/issues/2026-10-07-remove-execution-recovery-plan.md) |
+| Session 异步任务统一入口 | [session-async-tasks.md](session-async-tasks.md) | 当前会话任务归属、结果/取消/关闭；**不做冷恢复**，消息与执行服从 RCRA 权威 |
 | 存储 v2：Machine → Workspace → Session | [storage-v2-machine-workspace-session.md](storage-v2-machine-workspace-session.md) | `spec/history/2026-10.md`（2026-10-02 条目）；schema 版本以代码索引为准，Git 使用 worktree 根、非 Git 使用启动 cwd；验收状态见该条目 |
 | Command 系统 | [command-system.md](command-system.md) | 对应 command active issue 与代码 |
 | TUI Chat Workbench | [tui-chat-workbench.md](tui-chat-workbench.md) | `spec/history/2026-08.md`（2026-08-10 条目） |

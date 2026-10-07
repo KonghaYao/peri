@@ -7,13 +7,13 @@ Peri 是终端 AI 编程助手：用户交付任务，Agent 推进工作，过�
 v4 分阶段推进存算分离。阶段状态以代码、契约测试及 active spec 为准。
 
 - **单机本地：已完成。** 本地 Agent、会话与工具形成可用闭环。
-- **单机服务化：未完成。** TS SDK 负责服务入口、进程与跨主 Agent 管理；Peri 负责 ACP 后端、Agent 执行、Store 直连和 MCP Client。补齐进程重启后的执行与成果恢复。
+- **单机服务化：未完成。** TS SDK 负责服务入口、进程与跨主 Agent 管理；Peri 负责 ACP 后端、Agent 执行、Store 直连和 MCP Client。进程重启后保留历史会话加载与正常续聊，不恢复旧 Agent 执行。
 - **集群化 / Serverless 化：未完成。** 推进多实例协调与接管、工具环境独立驻留及云端部署；计算核心减少重型依赖，支持实例替换，Agent 决策、模型推理和工具执行可分开部署。
 
 1. **Harness**：RCRA（Receive → Compact → Reason → Act）循环执行，hook 扩展生命周期，Middleware 承载业务能力。
-2. **Sessions**：存储会话、消息及执行恢复状态，后端可替换；会话、任务运行与计算实例具有独立生命周期。
+2. **Sessions**：存储会话、消息、配置及冻结上下文，不持久化 Agent 执行恢复状态；后端可替换；会话、任务运行与计算实例具有独立生命周期。
 3. **Resources**：文件系统工具、Skill、Cron 等能力经 MCP Middleware 接入；工作区与工具环境可独立于计算实例驻留。
-4. **Orchestration**：基于同构 Agent，管理 Subagent、Multitask 与 Workflow 的任务关系、协调、等待和恢复；Middleware 提供接入，编排生命周期不绑定某个活跃 Harness 实例。
+4. **Orchestration**：基于同构 Agent，管理 Subagent、Multitask 与 Workflow 的任务关系、协调与当前运行期等待；不恢复旧执行。Middleware 提供接入，编排生命周期不绑定某个活跃 Harness 实例。
 5. **Endpoint**：ACP 是统一出口协议，stdio 是本地传输方式；传输层可自定义，客户端复用同一业务语义。
 
 **内部依赖走 MCP，外部出口走 ACP**：依赖按能力消费方向定义，与部署位置无关；MCP 能力边界不强制对应独立进程，部署隔离按信任边界和生命周期确定。

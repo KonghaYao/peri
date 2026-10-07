@@ -1,5 +1,7 @@
 # peri-acp 协议设计
 
+> 已批准变更（2026-10-07，实施中）：移除持久执行恢复及 Work query/resolve、SDK admission/entered/settlement 和 durable control 协议。普通 prompt、输入队列与取消不依赖这些能力；history list/load/resume/replay 保留。状态见[剥离计划](../../spec/issues/2026-10-07-remove-execution-recovery-plan.md)，撤销接口明确 method-not-found，不保留成功 shim。
+
 > 状态：现行设计
 >
 > 本文是 wire 语义说明；当前实现入口以 `docs/code-index/peri-acp.md` 为准，跨层不变量以 `docs/standards/architecture-contracts.md` 为准。
