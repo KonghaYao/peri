@@ -49,7 +49,7 @@ impl super::SubAgentTool {
             SubagentRunMode::Sync,
             llm,
             tools,
-            Arc::new(|_: &dyn BaseTool| true),
+            crate::subagent::fork::child_inheritance_filter(),
             system_prompt,
             Vec::new(),
             cwd.to_string(),

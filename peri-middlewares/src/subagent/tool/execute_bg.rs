@@ -54,7 +54,7 @@ impl super::SubAgentTool {
                 SubagentRunMode::Background,
                 llm,
                 tools,
-                Arc::new(|_: &dyn BaseTool| true),
+                crate::subagent::fork::child_inheritance_filter(),
                 system_prompt,
                 Vec::new(),
                 cwd.clone(),

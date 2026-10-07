@@ -311,3 +311,185 @@ async fn test_fork_directive_includes_rules() {
         *last
     );
 }
+
+// ─── 子链继承策略（单一权威）决策单测：不需要 durable 执行 ───────────────────
+
+/// 夹具工具：可按名与可信 builtin 实例身份声明排除面。
+struct CapabilityTool {
+    name: &'static str,
+    builtin_instance: Option<&'static str>,
+}
+
+#[async_trait::async_trait]
+impl BaseTool for CapabilityTool {
+    fn name(&self) -> &str {
+        self.name
+    }
+    fn description(&self) -> &str {
+        "capability fixture"
+    }
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({})
+    }
+    fn builtin_mcp_instance(&self) -> Option<&str> {
+        self.builtin_instance
+    }
+    async fn invoke(
+        &self,
+        _input: serde_json::Value,
+        _ctx: peri_agent::tools::ToolContext<'_>,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(String::new())
+    }
+}
+
+fn capability_tools() -> Vec<Arc<dyn BaseTool>> {
+    vec![
+        Arc::new(CapabilityTool {
+            name: "Agent",
+            builtin_instance: None,
+        }),
+        Arc::new(CapabilityTool {
+            name: "AskUserQuestion",
+            builtin_instance: None,
+        }),
+        Arc::new(CapabilityTool {
+            name: "Workflow",
+            builtin_instance: None,
+        }),
+        Arc::new(CapabilityTool {
+            name: "cron_list",
+            builtin_instance: Some("cron"),
+        }),
+        // 用户 MCP 工具恰好叫 Workflow / cron 名字：同样是 fail-closed 排除，
+        // 但**不是**按名字归因 builtin——非 builtin 的 cron 同样排除（名字面）。
+        Arc::new(CapabilityTool {
+            name: "mcp__user__cron",
+            builtin_instance: None,
+        }),
+        Arc::new(CapabilityTool {
+            name: "Read",
+            builtin_instance: None,
+        }),
+        Arc::new(CapabilityTool {
+            name: "Bash",
+            builtin_instance: Some("workspace"),
+        }),
+    ]
+}
+
+/// 继承策略：Agent / AskUser / Workflow / builtin cron 全部闭合；工作区工具保持。
+#[test]
+fn child_inheritance_filter_closes_extension_faces_and_keeps_workspace() {
+    use crate::subagent::fork::child_inheritance_filter;
+    let filter = child_inheritance_filter();
+    let tools = capability_tools();
+    let allowed: Vec<&str> = tools
+        .iter()
+        .filter(|tool| filter(tool.as_ref()))
+        .map(|tool| tool.name())
+        .collect();
+    assert_eq!(
+        allowed,
+        vec!["mcp__user__cron", "Read", "Bash"],
+        "只有非扩展面的工具有效"
+    );
+}
+
+/// 定义型与 fork 共用同一策略：`canonical_tool_filter`（含 `*` 继承）与
+/// `filter_tools` 结果一致闭合。
+#[test]
+fn definition_and_fork_share_one_inheritance_policy() {
+    use crate::subagent::fork::{canonical_tool_filter, filter_tools};
+    use peri_mcp_core::agent_definition::ToolsValue;
+    let tools = capability_tools();
+    let star = ToolsValue::List(vec!["*".to_string()]);
+    let definition_filter = canonical_tool_filter(&star, &ToolsValue::Empty);
+    let names: Vec<&str> = tools
+        .iter()
+        .filter(|tool| definition_filter(tool.as_ref()))
+        .map(|tool| tool.name())
+        .collect();
+    assert_eq!(names, vec!["mcp__user__cron", "Read", "Bash"]);
+
+    let filtered = filter_tools(&tools, &star, &ToolsValue::Empty);
+    let filtered_names: Vec<&str> = filtered.iter().map(|tool| tool.name()).collect();
+    assert_eq!(
+        filtered_names,
+        vec!["mcp__user__cron", "Read", "Bash"],
+        "filter_tools 与 canonical_tool_filter 同一决策"
+    );
+}
+
+/// fork 生成的 spawn config 使用同一策略：前台/后台路径传入的过滤在组合后
+/// 仍然闭合扩展面（直接检查 `SubagentSpawnConfig.tool_filter` 决策）。
+#[tokio::test]
+async fn fork_spawn_config_filter_closes_extension_tools() {
+    use peri_agent::session::subagent::{ForkDirectiveKind, SubagentCancelPolicy, SubagentRunMode};
+    let model = super::mock_model::RecordingModel::new("done");
+    let parent_tools = Arc::new(capability_tools());
+    let tool = SubAgentTool::new(
+        Arc::clone(&parent_tools),
+        None,
+        Arc::new({
+            let model = Arc::clone(&model);
+            move |_: Option<&str>| {
+                SubagentLlmSource::model(model.clone() as Arc<dyn peri_model::Model>, "mock-model")
+            }
+        }),
+        "/tmp".to_string(),
+    );
+    let config = tool.spawn_config_base(
+        "fork".to_string(),
+        "do it".to_string(),
+        Vec::new(),
+        SubagentCancelPolicy::Cascade,
+        200,
+        Some(ForkDirectiveKind::Fork),
+        SubagentRunMode::Sync,
+        SubagentLlmSource::model(
+            Arc::clone(&model) as Arc<dyn peri_model::Model>,
+            "mock-model",
+        ),
+        parent_tools.iter().cloned().collect(),
+        crate::subagent::fork::child_inheritance_filter(),
+        Some("FORK_IDENTITY".to_string()),
+        Vec::new(),
+        "/tmp".to_string(),
+        None,
+    );
+    for tool in parent_tools.iter() {
+        let kept = (config.tool_filter)(tool.as_ref());
+        match tool.name() {
+            "Agent" | "AskUserQuestion" | "Workflow" | "cron_list" => {
+                assert!(!kept, "{} 不得进入 fork 工具面", tool.name())
+            }
+            _ => assert!(kept, "{} 应保持可继承", tool.name()),
+        }
+    }
+}
+
+/// deferred 面同样闭合：会话工具目录（ToolSearch 索引来源）用同一
+/// `tool_filter` 构建 published 视图，被策略拒绝的扩展面不会经 deferred
+/// 搜索/执行重新可见。
+#[test]
+fn child_inheritance_filter_closes_deferred_catalog_view() {
+    let tools = capability_tools();
+    let mut base = std::collections::BTreeMap::new();
+    for tool in tools {
+        base.insert(tool.name().to_string(), tool);
+    }
+    let catalog = peri_agent::session::tool_catalog::SessionToolCatalog::with_filter(
+        base,
+        None,
+        crate::subagent::fork::child_inheritance_filter(),
+    );
+    let names: Vec<String> = catalog.snapshot().tools.keys().cloned().collect();
+    for excluded in ["Agent", "AskUserQuestion", "Workflow", "cron_list"] {
+        assert!(
+            !names.iter().any(|name| name == excluded),
+            "{excluded} 不得进入 deferred 目录视图: {names:?}"
+        );
+    }
+    assert!(names.iter().any(|name| name == "Read"), "{names:?}");
+}
