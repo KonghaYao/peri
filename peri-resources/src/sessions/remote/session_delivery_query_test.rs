@@ -38,6 +38,23 @@ async fn set_state(fixture: &Fixture, session: &str, state: &JsonValue) {
 }
 
 #[tokio::test]
+async fn work_revision_remote_reads_only_the_schema17_revision() {
+    let (fixture, adapter, _) = setup().await;
+    let session = "work-session".to_owned();
+    assert!(StatementSpec::new(crate::sessions::work::READ_REVISION, vec![]).is_read_only());
+    set_state(&fixture, &session, &json!({"revision": 23})).await;
+    assert_eq!(adapter.load_work_revision(&session).await.unwrap(), 23);
+    assert!(matches!(
+        adapter
+            .load_work_revision(&"missing".into())
+            .await
+            .unwrap_err()
+            .kind(),
+        SessionResourceErrorKind::NotFound
+    ));
+}
+
+#[tokio::test]
 async fn delivery_query_remote_selects_bound_id_and_session_without_writes() {
     let (fixture, adapter, expected) = setup().await;
     let query = delivery_query("work-session");

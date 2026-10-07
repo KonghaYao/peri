@@ -533,6 +533,9 @@ pub(super) fn unsupported_behavior(behavior: &'static str) -> SessionResourceErr
 
 #[async_trait]
 impl SessionDataPort for RemoteSessionData {
+    async fn load_work_revision(&self, id: &ThreadId) -> SessionResourceResult<u64> {
+        self.read_work_revision(id).await
+    }
     async fn has_pending_work_mutations(&self, id: &ThreadId) -> SessionResourceResult<bool> {
         let row = self
             .store()

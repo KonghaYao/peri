@@ -21,15 +21,15 @@ pub(super) async fn persist_child_resume_metadata(
     };
     let serialized = serde_json::to_string(metadata)?;
     for _ in 0..3 {
-        let availability = resources
-            .load_work_availability(&metadata.child_session_id)
+        let revision = resources
+            .load_work_revision(&metadata.child_session_id)
             .await?;
         let mut command = WorkCommand {
             session_id: metadata.child_session_id.clone(),
             recipient_lifecycle: metadata.recipient_lifecycle,
             mutation_id: "child-resume".into(),
             action: WorkAction::BindChildResumeMetadata {
-                expected_revision: availability.state.revision,
+                expected_revision: revision,
                 metadata_json: serialized.clone(),
             },
         };
@@ -81,18 +81,15 @@ pub(super) async fn copy_child_resource_owners(
         .resource_owners
         .get(&metadata.direct_initiator_lifecycle)
         .ok_or("Blocked: original child owner authorization declarations unavailable")?;
-    let child = resources
-        .load_session_work(&WorkQuery {
-            session_id: metadata.child_session_id.clone(),
-            limit: 1,
-        })
+    let revision = resources
+        .load_work_revision(&metadata.child_session_id)
         .await?;
     let mut command = WorkCommand {
         session_id: metadata.child_session_id.clone(),
         recipient_lifecycle: metadata.recipient_lifecycle,
         mutation_id: "child-owners".into(),
         action: WorkAction::BindResourceOwners {
-            expected_revision: child.state.revision,
+            expected_revision: revision,
             connections_json: owners.connections_json.clone(),
             authorization_ref: owners.authorization_ref.clone(),
         },

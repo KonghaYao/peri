@@ -22,6 +22,34 @@ fn identity(command: &WorkCommand) -> SessionResourceResult<OperationIdentity> {
 }
 
 impl RemoteSessionData {
+    pub(super) async fn read_work_revision(
+        &self,
+        id: &peri_acp_types::thread::ThreadId,
+    ) -> SessionResourceResult<u64> {
+        let row = self
+            .store()
+            .await?
+            .fetch_row(&StatementSpec::new(
+                work::READ_REVISION,
+                vec![Value::Text(id.clone())],
+            ))
+            .await?
+            .ok_or_else(|| corrupt("work revision row is not readable"))?;
+        match row.as_slice() {
+            [Value::Integer(session_exists), Value::Integer(control_exists), Value::Integer(state_exists), revision_json]
+                if matches!(revision_json, Value::Null | Value::Text(_)) =>
+            {
+                work::revision(
+                    *session_exists,
+                    *control_exists,
+                    *state_exists,
+                    text_at(&row, 3),
+                )
+            }
+            _ => Err(corrupt("work revision row is not readable")),
+        }
+    }
+
     pub(super) async fn read_work_availability(
         &self,
         id: &peri_acp_types::thread::ThreadId,

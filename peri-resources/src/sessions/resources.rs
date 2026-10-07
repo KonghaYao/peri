@@ -257,6 +257,9 @@ impl SessionResourcesImpl {
 
 #[async_trait]
 impl SessionResources for SessionResourcesImpl {
+    async fn load_work_revision(&self, id: &ThreadId) -> SessionResourceResult<u64> {
+        self.gate.load_work_revision(id).await
+    }
     async fn load_work_availability(
         &self,
         id: &ThreadId,

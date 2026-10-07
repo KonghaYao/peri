@@ -77,6 +77,9 @@ pub(super) use helpers::{new_session_draft_row, new_session_row, validate_unboun
 
 #[async_trait]
 impl SessionDataPort for SqliteSessionData {
+    async fn load_work_revision(&self, id: &ThreadId) -> SessionResourceResult<u64> {
+        self.read_work_revision(id).await
+    }
     async fn has_pending_work_mutations(&self, id: &ThreadId) -> SessionResourceResult<bool> {
         sqlx::query_scalar(crate::sessions::work::HAS_PENDING)
             .bind(id)

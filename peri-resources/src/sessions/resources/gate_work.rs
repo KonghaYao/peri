@@ -4,6 +4,25 @@ use peri_acp_types::session_resources::work::{
 };
 
 impl MutationGate {
+    pub(in crate::sessions::resources) async fn load_work_revision(
+        &self,
+        id: &ThreadId,
+    ) -> SessionResourceResult<u64> {
+        self.ensure_recovery_permitted()?;
+        let root = self.work_root(id).await?;
+        let pending = self.pending_for(&root);
+        let _barrier = pending.barrier.read().await;
+        if pending
+            .work
+            .lock()
+            .expect("pending work lock poisoned")
+            .is_none()
+        {
+            Self::check_pending(&pending, &root)?;
+        }
+        self.data.load_work_revision(id).await
+    }
+
     pub(in crate::sessions::resources) async fn load_work_availability(
         &self,
         id: &ThreadId,

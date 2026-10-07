@@ -18,6 +18,28 @@ mod effects;
 pub(super) use effects::mutation_effects;
 
 pub(super) const CREATE_STATE: &str = "CREATE TABLE IF NOT EXISTS session_work_state (session_id TEXT PRIMARY KEY NOT NULL, state_json TEXT NOT NULL)";
+pub(super) const READ_REVISION: &str = "SELECT EXISTS(SELECT 1 FROM threads WHERE id=?1), EXISTS(SELECT 1 FROM session_control_state WHERE session_id=?1), state.state_json IS NOT NULL, state.state_json -> '$.revision' FROM (SELECT 1) LEFT JOIN session_work_state AS state ON state.session_id=?1";
+
+pub(super) fn revision(
+    session_exists: i64,
+    control_exists: i64,
+    state_exists: i64,
+    revision_json: Option<&str>,
+) -> SessionResourceResult<u64> {
+    if session_exists == 0 && control_exists == 0 && state_exists == 0 {
+        return Err(SessionResourceError::new(
+            peri_acp_types::session_resources::SessionResourceErrorKind::NotFound,
+        ));
+    }
+    if state_exists == 0 {
+        return Ok(0);
+    }
+    revision_json
+        .ok_or_else(|| corrupt("work revision is not readable"))
+        .and_then(|value| {
+            serde_json::from_str(value).map_err(|_| corrupt("work revision is not readable"))
+        })
+}
 pub(super) const CREATE_EVENTS: &str = "CREATE TABLE IF NOT EXISTS session_work_events (event_key TEXT PRIMARY KEY NOT NULL, event_json TEXT NOT NULL)";
 pub(super) const CREATE_RECEIPTS: &str = "CREATE TABLE IF NOT EXISTS session_work_receipts (mutation_id TEXT PRIMARY KEY NOT NULL, session_id TEXT NOT NULL, digest TEXT NOT NULL, resolution_json TEXT NOT NULL)";
 pub(super) const CREATE_COMMANDS: &str = "CREATE TABLE IF NOT EXISTS session_work_commands (mutation_id TEXT PRIMARY KEY NOT NULL, session_id TEXT NOT NULL, digest TEXT NOT NULL, command_json TEXT NOT NULL, reconciled INTEGER NOT NULL DEFAULT 0 CHECK(reconciled IN (0,1)))";

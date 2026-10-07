@@ -316,12 +316,8 @@ pub(super) fn schedule_mailbox(
                     return;
                 }
             }
-            let query = peri_acp_types::session_resources::work::WorkQuery {
-                session_id: sid.clone(),
-                limit: 1,
-            };
-            if let Ok(work) = cfg.session_resources.load_session_work(&query).await {
-                if work.has_pending_current_work() {
+            if let Ok(work) = cfg.session_resources.load_work_availability(&sid).await {
+                if work.is_available(work.control.lifecycle, None) {
                     let _ = transport
                         .send_notification(
                             "session/work/available",

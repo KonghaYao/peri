@@ -910,4 +910,38 @@ async fn inbox_notification_uses_narrow_facts_with_undecodable_history() {
             );
         }
     }
+    let cfg = Arc::new(cfg);
+    let sessions = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+    let locks = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+    let (sender, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    crate::host::user_input::schedule_mailbox(
+        &sid,
+        &sessions,
+        &locks,
+        &cfg,
+        &transport,
+        &Arc::new(sender),
+    );
+    let notice = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if let Some((_, params)) = captured
+                .notifications()
+                .into_iter()
+                .filter(|(method, _)| method == "session/work/available")
+                .nth(2)
+            {
+                break params;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        notice,
+        json!({
+            "sessionId": sid, "revision": 42, "lifecycle": 1,
+            "controlGeneration": 0, "executionProtocol": 1,
+        })
+    );
 }

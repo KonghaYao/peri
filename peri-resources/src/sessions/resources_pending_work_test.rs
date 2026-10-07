@@ -161,6 +161,12 @@ async fn availability_sqlite_waits_for_root_and_preserves_uncertain_read_rules()
     for id in [&root, &child] {
         assert!(fixture
             .facade
+            .load_work_revision(id)
+            .await
+            .unwrap_err()
+            .is_persistence_uncertain());
+        assert!(fixture
+            .facade
             .load_work_availability(id)
             .await
             .unwrap_err()
@@ -175,6 +181,27 @@ async fn availability_sqlite_waits_for_root_and_preserves_uncertain_read_rules()
             .unwrap_err()
             .is_persistence_uncertain());
     }
+}
+
+#[tokio::test]
+async fn work_revision_reads_only_the_schema17_revision() {
+    let fixture = Fixture::new().await;
+    fixture.create("root").await;
+    let root = "root".to_owned();
+    assert_eq!(fixture.facade.load_work_revision(&root).await.unwrap(), 0);
+    sqlx::query(
+        "INSERT INTO session_work_state(session_id,state_json) VALUES (?1,'{\"revision\":7}')",
+    )
+    .bind(&root)
+    .execute(fixture.facade.local_pool())
+    .await
+    .unwrap();
+    assert_eq!(fixture.facade.load_work_revision(&root).await.unwrap(), 7);
+    assert!(fixture
+        .facade
+        .load_work_revision(&"missing".into())
+        .await
+        .is_err());
 }
 
 #[tokio::test]

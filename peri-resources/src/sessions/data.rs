@@ -35,6 +35,9 @@ pub struct ChildResumeRecord {
 /// 「未生效」报告成成功，也不得在失败后遗留部分写入。
 #[async_trait]
 pub(crate) trait SessionDataPort: Send + Sync {
+    async fn load_work_revision(&self, id: &ThreadId) -> SessionResourceResult<u64> {
+        Ok(self.load_work_availability(id).await?.state.revision)
+    }
     async fn load_work_availability(
         &self,
         id: &ThreadId,

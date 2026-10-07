@@ -6,6 +6,25 @@ use peri_acp_types::session_resources::work::{
 };
 
 impl SqliteSessionData {
+    pub(super) async fn read_work_revision(&self, id: &ThreadId) -> SessionResourceResult<u64> {
+        let (session_exists, control_exists, state_exists, revision_json): (
+            i64,
+            i64,
+            i64,
+            Option<String>,
+        ) = sqlx::query_as(work::READ_REVISION)
+            .bind(id)
+            .fetch_one(&self.database.pool)
+            .await
+            .map_err(|error| map_sqlx(&error))?;
+        work::revision(
+            session_exists,
+            control_exists,
+            state_exists,
+            revision_json.as_deref(),
+        )
+    }
+
     pub(super) async fn read_work_availability(
         &self,
         id: &ThreadId,

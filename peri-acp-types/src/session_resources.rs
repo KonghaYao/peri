@@ -506,6 +506,9 @@ pub trait ChildResumeClaim: Send + Sync {
 /// - 结果不确定时返回 [`SessionResourceError::persistence_uncertain`]，不得重试后伪装成功。
 #[async_trait]
 pub trait SessionResources: Send + Sync {
+    async fn load_work_revision(&self, id: &ThreadId) -> SessionResourceResult<u64> {
+        Ok(self.load_work_availability(id).await?.state.revision)
+    }
     async fn load_work_availability(
         &self,
         _id: &ThreadId,

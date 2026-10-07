@@ -108,10 +108,7 @@ impl WorkflowExecution {
             .await
             .map_err(|error| error.to_string())?;
         let child = resources
-            .load_session_work(&WorkQuery {
-                session_id: session_id.clone(),
-                limit: 1,
-            })
+            .load_work_availability(&session_id)
             .await
             .map_err(|error| error.to_string())?;
         WorkMutationBarrier::new(resources.clone())
@@ -250,9 +247,9 @@ impl WorkflowExecution {
                 Err("Incomplete: workflow parent terminal acknowledgement conflicts".into())
             };
         }
-        let child = self
+        let revision = self
             .resources
-            .load_session_work(&query)
+            .load_work_revision(&self.session_id)
             .await
             .map_err(|error| error.to_string())?;
         barrier
@@ -261,7 +258,7 @@ impl WorkflowExecution {
                 recipient_lifecycle: admission.lifecycle,
                 mutation_id: format!("workflow-terminal-ack:{}", admission.admission_id),
                 action: WorkAction::AcknowledgeTerminalObligation {
-                    expected_revision: child.state.revision,
+                    expected_revision: revision,
                     admission_id: admission.admission_id.clone(),
                     receipt: parent_receipt,
                 },

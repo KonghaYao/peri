@@ -1,6 +1,6 @@
 # WorkState 性能重设计：保留 schema17 存储契约
 
-状态：分阶段实施。2026-10-07 的回退恢复 `69e93429` 之前的持久化契约；子 Agent 冷启动写入恢复元数据时，revision 读取已改用现有 WorkAvailability 投影。其余全量状态热点尚未拆解，性能问题未宣称解决。
+状态：分阶段实施。2026-10-07 的回退恢复 `69e93429` 之前的持久化契约；子 Agent 与 workflow 的纯 revision 读取已改用 SQLite/Turso 共用的 `load_work_revision` 投影，工作通知改用 `load_work_availability`。其余全量状态热点尚未拆解，性能问题未宣称解决。
 
 ## 问题与证据
 
