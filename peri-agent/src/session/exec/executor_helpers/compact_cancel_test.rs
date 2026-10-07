@@ -477,7 +477,7 @@ async fn run_case(mode: CommitMode, pause: HandlerPause, pre_cancel: bool) -> Ca
         thread_id,
         history,
         report_id,
-        result,
+        result: *result,
         done_count: sink.push_done_count(),
         done_reasons,
     }

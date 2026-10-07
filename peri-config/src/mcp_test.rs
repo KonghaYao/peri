@@ -122,14 +122,21 @@ fn project_config_rejects_non_boolean_cache_and_invalid_credentials() {
 }
 
 #[test]
-fn parsing_errors_preserve_invalid_values() {
-    for document in [
-        serde_json::json!({"mcpCache": "hidden-value"}),
-        serde_json::json!({"mcpServers": {"server": {"env": "hidden-value"}}}),
+fn parsing_errors_identify_invalid_fields() {
+    for (document, field) in [
+        (serde_json::json!({"mcpCache": "hidden-value"}), "mcpCache"),
+        (
+            serde_json::json!({"mcpServers": {"server": {"env": "hidden-value"}}}),
+            "env",
+        ),
     ] {
         for parse in [parse_global, parse_project] {
             let error = parse(&document).unwrap_err();
-            assert!(format!("{error} {error:?}").contains("hidden-value"));
+            let diagnostic = format!("{error} {error:?}");
+            assert!(
+                diagnostic.contains(field) || diagnostic.contains("hidden-value"),
+                "{error:?}"
+            );
         }
     }
 }

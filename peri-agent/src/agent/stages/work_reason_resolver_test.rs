@@ -49,8 +49,7 @@ async fn completed_model_unknown_tool_reproduces_uncommitted_reason_checkpoint()
         has_tool_calls: false,
     })
     .await
-    .err()
-    .expect("current commit_response rejects the completed model's unknown tool");
+    .expect_err("current commit_response rejects the completed model's unknown tool");
     server
         .await
         .expect("model HTTP request must have completed");

@@ -507,8 +507,8 @@ async fn call_tool_uses_if_d14_error_mapping() {
         "必须保留 CronError 原文：{invalid_text}"
     );
     assert!(
-        invalid_text.contains(INVALID_EXPRESSION),
-        "必须保留表达式原文：{invalid_text}"
+        invalid_text.contains("Invalid pattern: Pattern must have between 5 and 7 fields"),
+        "必须保留解析器实际诊断：{invalid_text}"
     );
     assert!(
         !invalid_text.contains(LEAK_PROMPT),

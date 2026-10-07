@@ -649,7 +649,9 @@ async fn test_spawn_subagent_sync_forwarder_panic_is_failure() {
         Ok(_) => panic!("forwarder panic 不得返回成功"),
         Err(error) => error,
     };
-    assert!(error.to_string().contains("An internal error occurred"));
+    assert!(error
+        .to_string()
+        .contains("Subagent event forwarding failed"));
     assert!(error.to_string().contains("child_thread_id:"));
     assert_eq!(bridge_stops.load(std::sync::atomic::Ordering::SeqCst), 0);
     let child_id = error
@@ -696,7 +698,9 @@ async fn test_spawn_subagent_terminal_bridge_panic_is_failure() {
         Ok(_) => panic!("terminal bridge panic 不得返回成功"),
         Err(error) => error,
     };
-    assert!(error.to_string().contains("An internal error occurred"));
+    assert!(error
+        .to_string()
+        .contains("Subagent terminal event forwarding failed"));
     assert!(error.to_string().contains("child_thread_id:"));
     assert!(!events
         .lock()

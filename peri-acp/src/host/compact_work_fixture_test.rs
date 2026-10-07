@@ -176,6 +176,38 @@ async fn test_full_compact_work_commit_unknown_cold_resolve_preserves_summary() 
         resolution,
         peri_acp_types::session_resources::work::WorkResolution::Applied { .. }
     ));
+    let snapshot = recovered_facade
+        .load_session_work(&peri_acp_types::session_resources::work::WorkQuery {
+            session_id: ctx.session_id.clone(),
+            limit: 1,
+        })
+        .await
+        .unwrap();
+    assert!(snapshot.pending_commands.is_empty());
+    let admission = snapshot
+        .state
+        .admissions
+        .values()
+        .find(|record| {
+            snapshot.control.attempt.as_ref() == Some(&record.admission.execution)
+                && record.settled_receipt.is_none()
+        })
+        .unwrap()
+        .admission
+        .clone();
+    crate::host::execution::finish_admission(&recovered_facade, &admission)
+        .await
+        .unwrap();
+    assert!(recovered_facade
+        .load_session_work(&peri_acp_types::session_resources::work::WorkQuery {
+            session_id: ctx.session_id.clone(),
+            limit: 1,
+        })
+        .await
+        .unwrap()
+        .control
+        .attempt
+        .is_none());
     let thread_id = ctx.thread_id.as_ref().unwrap();
     let payloads = recovered.load_payloads(thread_id).await.unwrap();
     let flags = recovered.load_message_flags(thread_id).await.unwrap();

@@ -2,7 +2,7 @@ use super::*;
 
 // ── reminder 检测 ────────────────────────────────────────────────────
 
-mod reminder_tests {
+mod cases {
     use super::*;
 
     #[test]

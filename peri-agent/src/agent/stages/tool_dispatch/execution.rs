@@ -481,7 +481,7 @@ async fn settle_results(
                     ToolResult::error(&modified_call.id, &modified_call.name, e.to_string());
                 result.effective_error_code = Some(e.code);
                 result.execution = execution_for_effective_error(e.code);
-                result.subagent_failure = e.subagent_failure.clone();
+                result.subagent_failure = e.subagent_failure.as_deref().cloned();
                 if let Some(failure) = &result.subagent_failure {
                     result.output.push('\n');
                     result.output.push_str(&failure.render_model_summary());

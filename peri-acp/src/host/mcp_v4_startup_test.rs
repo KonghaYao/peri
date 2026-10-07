@@ -48,9 +48,9 @@ use serial_test::serial;
 use tokio_util::sync::CancellationToken as AgentCancellationToken;
 
 use super::executor_flow_tests::{
-    make_session_context, make_stage_build, make_turn_input, MockEventSink,
+    make_session_context, make_stage_build, make_turn_input, run_session_loop, MockEventSink,
 };
-use crate::session::executor::{run_session_loop, PromptStopReason, SessionContext};
+use crate::session::executor::{PromptStopReason, SessionContext};
 
 /// 受控 stdio MCP 对端。只实现启动准入涉及的方法：
 /// `initialize` / `tools/list` / `resources/list` / `ping`；其余请求（含
@@ -402,8 +402,12 @@ fn assert_fatal_without_reason(
     );
     assert_eq!(
         wire.data,
-        Some(serde_json::json!({ "kind": "internal" })),
-        "MCP 准入失败只能投影为 internal 类别"
+        Some(serde_json::json!({
+            "kind": "internal",
+            "error_category": "middleware",
+            "causes": [failure.public_message],
+        })),
+        "MCP 准入失败必须保留 internal 类别与中间件原因"
     );
     assert!(wire.message.contains("McpMiddleware"));
     assert!(wire.message.contains(expected_fragment));

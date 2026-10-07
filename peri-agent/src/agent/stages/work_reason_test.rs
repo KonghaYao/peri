@@ -1,8 +1,7 @@
 use super::*;
 use peri_acp_types::session::ExecutionFailure;
 
-#[path = "work_budget_test_support.rs"]
-mod budget_support;
+use super::super::work_budget_test_support as budget_support;
 
 fn budget_state(kind: WorkBudgetKind, used: u64) -> WorkState {
     let mut state = WorkState::default();

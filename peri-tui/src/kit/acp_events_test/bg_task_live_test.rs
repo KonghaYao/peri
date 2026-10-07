@@ -138,7 +138,7 @@ fn historical_nonterminal_snapshots_do_not_create_live_activity() {
             status: status.map(str::to_string),
         };
         assert!(super::super::system::apply_bg_task_snapshot(
-            &[task.clone()],
+            std::slice::from_ref(&task),
             Some(revision as u64),
         ));
         assert!(BG_DISPLAY.state().read().is_empty());

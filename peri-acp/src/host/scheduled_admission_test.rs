@@ -418,6 +418,7 @@ async fn real_store_restored_reason_ready_reapproval_keeps_original_delivery_wit
 #[tokio::test]
 async fn real_store_claimed_mixed_cron_rejection_blocks_without_abandoning_user_with_broker_fixture(
 ) {
+    use peri_acp_types::session_resources::work::ObligationStatus;
     let (_directory, resources, _dispatcher, admission) = registered_cron_fixture(true).await;
     let original = claim_reason_ready_fixture(resources.as_ref(), &admission).await;
     let started = Arc::new(AtomicBool::new(false));
@@ -450,7 +451,20 @@ async fn real_store_claimed_mixed_cron_rejection_blocks_without_abandoning_user_
         snapshot.state.works[&admission.work_id].stage,
         WorkStage::Blocked
     );
-    assert_eq!(snapshot.state.obligations, original.state.obligations);
+    assert_eq!(
+        snapshot.state.obligations.keys().collect::<Vec<_>>(),
+        original.state.obligations.keys().collect::<Vec<_>>()
+    );
+    for (delivery_id, obligation) in &snapshot.state.obligations {
+        let original_obligation = &original.state.obligations[delivery_id];
+        assert_eq!(original_obligation.status, ObligationStatus::InProgress);
+        assert_eq!(obligation.status, ObligationStatus::Blocked);
+        assert_eq!(obligation.work_id, original_obligation.work_id);
+        assert_eq!(
+            obligation.reason.as_deref(),
+            Some("restored mixed scheduled batch approval rejected")
+        );
+    }
     assert_eq!(snapshot.state.deliveries, original.state.deliveries);
     assert_eq!(snapshot.state.batches, original.state.batches);
     assert!(snapshot.blocked);

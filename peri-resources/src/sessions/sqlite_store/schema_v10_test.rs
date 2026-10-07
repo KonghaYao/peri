@@ -28,6 +28,15 @@ const DROPPED_TABLES: &[&str] = &[
     "remote_lifecycle_commitments",
 ];
 
+const CONTROL_WORK_TABLES: &[&str] = &[
+    "session_control_receipts",
+    "session_control_state",
+    "session_work_commands",
+    "session_work_events",
+    "session_work_receipts",
+    "session_work_state",
+];
+
 /// v9 库的完整形状：v6 时代的业务表 + v7..v9 追加的本机远程痕迹。
 const V9_SCHEMA: &str = r#"
 PRAGMA user_version = 9;
@@ -191,6 +200,7 @@ async fn preserved_table_definitions(connection: &mut SqliteConnection) -> Vec<(
     .unwrap();
     rows.retain(|(name, _)| {
         !DROPPED_TABLES.contains(&name.as_str())
+            && !CONTROL_WORK_TABLES.contains(&name.as_str())
             && name != "threads"
             && name != "execution_runs"
             && name != "thread_goals"
@@ -254,6 +264,7 @@ async fn test_v7_v8_v9_all_converge_and_drop_only_the_remote_tables() {
             "machines".to_owned(),
             "session_close_intents".to_owned(),
         ]);
+        expected.extend(CONTROL_WORK_TABLES.iter().map(|table| (*table).to_owned()));
         expected.sort();
         assert_eq!(tables_after, expected, "来源版本 {source_version}");
         assert_eq!(
@@ -339,6 +350,7 @@ async fn test_database_without_remote_tables_is_idempotent() {
         "machines".to_owned(),
         "session_close_intents".to_owned(),
     ]);
+    expected.extend(CONTROL_WORK_TABLES.iter().map(|table| (*table).to_owned()));
     expected.sort();
     assert_eq!(table_names(&mut connection).await, expected);
     assert_eq!(

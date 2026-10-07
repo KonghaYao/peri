@@ -73,43 +73,6 @@ impl EventSink for MockEventSink {
     }
 }
 
-// ── Fake CommandHandler（mock command_lookup 注入）─────────────────────────
-
-/// Fake CommandHandler：execute 返回拦截时的历史（与真实 Immediate 命令的
-/// messages 透传语义一致）。
-struct FakeImmediateHandler;
-
-#[async_trait]
-impl CommandHandler for FakeImmediateHandler {
-    async fn execute(&self, ctx: CommandContext) -> CommandOutcome {
-        CommandOutcome::Done(CommandResult {
-            messages: ctx.history,
-            stop_reason: PromptStopReason::EndTurn,
-            feedback: None,
-        })
-    }
-}
-
-/// 测试用 RouteEntry（core 域 Command 条目，假 handler）。
-fn test_route_entry() -> RouteEntry {
-    use peri_acp_types::command::command_route::{
-        CommandEntryKind, CommandLifecycle, CommandProvenance, CommandSource,
-    };
-    RouteEntry {
-        fullname: "core:compact".to_string(),
-        aliases: vec![],
-        description: "fake immediate command for tests".to_string(),
-        kind: CommandEntryKind::Command,
-        category: None,
-        args_schema: None,
-        handler: Arc::new(FakeImmediateHandler),
-        provenance: CommandProvenance {
-            source: CommandSource::Core,
-            lifecycle: CommandLifecycle::Connected,
-        },
-    }
-}
-
 // ── Helper 工厂函数 ─────────────────────────────────────────────────────────
 
 /// 构造最小 InterceptRequest（auxiliary_model / thread_store / frozen 等均为 None）。
@@ -164,61 +127,6 @@ fn make_bg_infra() -> (
     let registry = Arc::new(crate::agent::async_tasks::TaskManager::new())
         as Arc<dyn peri_acp_types::tasks::TaskManager>;
     (tx, registry)
-}
-
-/// 默认 command_lookup mock：未注册（None），等价 ACP 注册表未命中。
-fn no_match_lookup() -> super::super::CommandLookupFn {
-    Arc::new(|_text: &str| None)
-}
-
-/// 命中 Fake CommandHandler 的 command_lookup mock（/compact 路径；
-/// P1-6：返回 `ResolvedCommand`，args 词法切分由注册表 resolve 完成）。
-fn immediate_lookup() -> super::super::CommandLookupFn {
-    Arc::new(|text: &str| {
-        if text == "compact" {
-            Some(ResolvedCommand {
-                entry: Arc::new(test_route_entry()),
-                args: String::new(),
-            })
-        } else {
-            None
-        }
-    })
-}
-
-/// 命中返回 Inject 的 handler 的 command_lookup mock（Phase 5 Step 6 语义：
-/// 回传 `Inject(text)`，executor.rs 调用点转 AgentInput::blocks 进 agent 管线）。
-fn inject_lookup() -> super::super::CommandLookupFn {
-    struct InjectHandler;
-    #[async_trait]
-    impl CommandHandler for InjectHandler {
-        async fn execute(&self, _ctx: CommandContext) -> CommandOutcome {
-            CommandOutcome::Inject("/skill tdd".to_string())
-        }
-    }
-    Arc::new(|text: &str| {
-        if text == "inject-me" {
-            Some(ResolvedCommand {
-                entry: Arc::new(RouteEntry {
-                    fullname: "core:inject-me".to_string(),
-                    aliases: vec![],
-                    description: "inject handler for tests".to_string(),
-                    kind: peri_acp_types::command::command_route::CommandEntryKind::Command,
-                    category: None,
-                    args_schema: None,
-                    handler: Arc::new(InjectHandler),
-                    provenance: peri_acp_types::command::command_route::CommandProvenance {
-                        source: peri_acp_types::command::command_route::CommandSource::Core,
-                        lifecycle:
-                            peri_acp_types::command::command_route::CommandLifecycle::Connected,
-                    },
-                }),
-                args: String::new(),
-            })
-        } else {
-            None
-        }
-    })
 }
 
 // ── intercept_immediate_command: 路径分支测试 ─────────────────────────────

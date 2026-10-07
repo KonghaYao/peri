@@ -110,7 +110,9 @@ mod tests {
 
         tracer.on_turn_start("turn_err");
         let _handle = tracer.on_turn_end(peri_acp_types::session::TurnTelemetryOutcome::Failed {
-            failure: peri_acp_types::session::ExecutionFailure::internal("SomeError"),
+            failure: Box::new(peri_acp_types::session::ExecutionFailure::internal(
+                "SomeError",
+            )),
         });
 
         tokio::task::yield_now().await;

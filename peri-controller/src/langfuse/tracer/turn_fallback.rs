@@ -22,7 +22,7 @@ impl<'a> GenerationFallbackStatus<'a> {
             TurnTelemetryOutcome::Failed { failure } => GenerationFallbackStatus {
                 error_class: failure_error_class(failure),
                 level: ObservationLevel::Error,
-                failure: Some(failure),
+                failure: Some(failure.as_ref()),
             },
             TurnTelemetryOutcome::Stopped {
                 reason: PromptStopReason::Cancelled,

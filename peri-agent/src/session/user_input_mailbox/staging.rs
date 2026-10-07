@@ -65,7 +65,7 @@ impl PublicationBlock {
 enum InputSelection {
     Automatic,
     InterruptCurrent,
-    Authorized(WorkCommand),
+    Authorized(Box<WorkCommand>),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -242,7 +242,7 @@ impl UserInputMailbox {
                     &command_id,
                     compute_fingerprint(("idle", &command_id, &input_ids)),
                     &input_ids,
-                    InputSelection::Authorized(command),
+                    InputSelection::Authorized(Box::new(command)),
                 )
                 .await?;
                 self.state.lock().suspended = false;
@@ -536,7 +536,7 @@ impl UserInputMailbox {
                 {
                     return Err(UserInputQueueError::IdentityConflict);
                 }
-                vec![command]
+                vec![*command]
             } else {
                 let mut selected: Vec<_> = snapshot
                     .state

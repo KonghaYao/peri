@@ -283,8 +283,7 @@ async fn wire_result(response: Result<Value, AcpError>, late: bool) -> Option<St
         .unwrap()
         .unwrap();
     assert!(state.lock().pending_action().is_none());
-    let error = state.lock().error.clone();
-    error
+    state.lock().error.clone()
 }
 
 #[tokio::test]
@@ -332,8 +331,10 @@ pub(crate) struct MountedPanel {
     pub add_marketplace_active: State<bool>,
 }
 
+type MountVisitor = Option<Box<dyn FnOnce(MountedPanel)>>;
+
 thread_local! {
-    static MOUNT_VISITOR: std::cell::RefCell<Option<Box<dyn FnOnce(MountedPanel)>>> =
+    static MOUNT_VISITOR: std::cell::RefCell<MountVisitor> =
         const { std::cell::RefCell::new(None) };
 }
 

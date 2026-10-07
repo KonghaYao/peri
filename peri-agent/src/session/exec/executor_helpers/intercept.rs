@@ -107,7 +107,7 @@ pub async fn emit_command_feedback(
 /// - [`InterceptOutcome::PassThrough`]：未命中 / 词法非法 / 非 Immediate：
 ///   fall through 进 agent 管线（不报错，设计 §78）
 pub enum InterceptOutcome {
-    Handled(PromptResult),
+    Handled(Box<PromptResult>),
     Inject(String),
     PassThrough,
 }
@@ -176,7 +176,7 @@ pub async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Intercept
                 req.event_sink
                     .push_done(req.session_id, "end_turn", None)
                     .await;
-                return InterceptOutcome::Handled(PromptResult {
+                return InterceptOutcome::Handled(Box::new(PromptResult {
                     persisted_payloads: req.history_payloads.clone(),
                     messages: result.messages,
                     ok: true,
@@ -186,7 +186,7 @@ pub async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Intercept
                     recall_items: Vec::new(),
                     pending_tasks: 0,
                     failure: None,
-                });
+                }));
             }
         },
         None => None,
@@ -316,7 +316,7 @@ pub async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Intercept
                     .cloned()
                     .map(peri_acp_types::store::PersistedPayload::Message),
             );
-            InterceptOutcome::Handled(PromptResult {
+            InterceptOutcome::Handled(Box::new(PromptResult {
                 persisted_payloads,
                 messages: result.messages,
                 ok: !persistence_inconsistent,
@@ -326,7 +326,7 @@ pub async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Intercept
                 recall_items: Vec::new(),
                 pending_tasks: 0,
                 failure,
-            })
+            }))
         }
         CommandOutcome::Inject(payload) => InterceptOutcome::Inject(payload),
         CommandOutcome::Delegate(_) => {

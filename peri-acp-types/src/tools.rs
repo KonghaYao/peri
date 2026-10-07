@@ -402,7 +402,7 @@ pub struct EffectiveToolError {
     pub message: String,
     /// Typed child failure facts, when this effective call crossed a subagent
     /// boundary.  The textual message remains the user-facing projection.
-    pub subagent_failure: Option<crate::error::SafeSubagentFailure>,
+    pub subagent_failure: Option<Box<crate::error::SafeSubagentFailure>>,
 }
 
 impl EffectiveToolError {
@@ -415,12 +415,12 @@ impl EffectiveToolError {
     }
 
     pub fn with_subagent_failure(mut self, failure: crate::error::SafeSubagentFailure) -> Self {
-        self.subagent_failure = Some(failure);
+        self.subagent_failure = Some(Box::new(failure));
         self
     }
 
     pub fn subagent_failure(&self) -> Option<&crate::error::SafeSubagentFailure> {
-        self.subagent_failure.as_ref()
+        self.subagent_failure.as_deref()
     }
 }
 

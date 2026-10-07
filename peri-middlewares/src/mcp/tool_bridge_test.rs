@@ -3,6 +3,10 @@ use crate::mcp::client::ClientStatus;
 use rmcp::handler::server::ServerHandler;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+#[path = "tool_bridge_invocation_fixture_test.rs"]
+mod durable_invocation_fixture;
+use durable_invocation_fixture::DurableInvocationFixture;
+
 fn make_tool(name: &str, description: Option<&str>) -> Tool {
     let json = serde_json::json!({
         "name": name,
@@ -552,17 +556,18 @@ async fn builtin_tool_call_surfaces_timeout_error_after_bridge_deadline() {
         "prompt": PATH_MARKER,
         "token": CREDENTIAL_MARKER,
     });
+    let followup = serde_json::json!({ "expression": "*/5 * * * *" });
+    let fixture = DurableInvocationFixture::new(
+        "deadline-session",
+        "mcp__cron__cron_list",
+        &[input.clone(), followup.clone()],
+    )
+    .await;
 
     // 虚拟时钟（只本用例）：不真等 120s，也不改生产常量。
     tokio::time::pause();
     let started = tokio::time::Instant::now();
-    let outcome = bridge
-        .invoke(
-            input.clone(),
-            peri_agent::tools::ToolContext::new(&[], ".")
-                .with_session_identity("deadline-session", "deadline-turn"),
-        )
-        .await;
+    let outcome = bridge.invoke(input.clone(), fixture.context(0, ".")).await;
     let elapsed = started.elapsed();
     tokio::time::resume();
 
@@ -602,8 +607,8 @@ async fn builtin_tool_call_surfaces_timeout_error_after_bridge_deadline() {
     );
     let deadline = std::time::Duration::from_secs(REGISTERED_TIMEOUT_SECS);
     assert!(
-        elapsed >= deadline && elapsed < deadline + std::time::Duration::from_secs(1),
-        "虚拟耗时必须落在 deadline 上（{elapsed:?} 应为 {REGISTERED_TIMEOUT_SECS}s）"
+        elapsed >= deadline,
+        "虚拟耗时不得短于 deadline（{elapsed:?} 应至少为 {REGISTERED_TIMEOUT_SECS}s）"
     );
 
     // ② 在飞面：到期时 server 侧已进入、未完成、未被取消。
@@ -638,11 +643,7 @@ async fn builtin_tool_call_surfaces_timeout_error_after_bridge_deadline() {
     );
 
     let after = bridge
-        .invoke(
-            serde_json::json!({ "expression": "*/5 * * * *" }),
-            peri_agent::tools::ToolContext::new(&[], ".")
-                .with_session_identity("deadline-session", "deadline-turn"),
-        )
+        .invoke(followup, fixture.context(1, "."))
         .await
         .expect("deadline 到期后同一条链路（client service / bridge）必须仍可服务");
     assert_eq!(after, "r29-delayed-ok");

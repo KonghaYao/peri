@@ -21,6 +21,9 @@ pub mod tool_dispatch;
 mod work_boundary;
 pub use work_boundary::{SdkAdmissionObservedFn, SdkRunStartedFn};
 mod context_builder;
+#[cfg(test)]
+#[path = "work_budget_test_support.rs"]
+mod work_budget_test_support;
 mod work_dispatch;
 pub(crate) mod work_ledger;
 mod work_pipeline;

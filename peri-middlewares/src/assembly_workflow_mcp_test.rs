@@ -13,7 +13,8 @@ use peri_agent::agent::workflow::{WorkflowAgentExecutor, WorkflowModel};
 use peri_mcp_common::task_scope::{TaskScopeAuthority, TASK_SCOPE_META_KEY};
 use rmcp::{
     model::{
-        CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, RequestMetaObject,
+        CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, CustomRequest,
+        CustomResult, RequestMetaObject,
     },
     service::{RequestContext, RoleServer},
     ServerHandler, ServiceExt,
@@ -44,9 +45,30 @@ fn scope_token_of(meta: &RequestMetaObject) -> Option<String> {
 
 struct SyncSource {
     calls: Arc<parking_lot::Mutex<Vec<WireCall>>>,
+    authority: TaskScopeAuthority,
 }
 
 impl ServerHandler for SyncSource {
+    async fn on_custom_request(
+        &self,
+        request: CustomRequest,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CustomResult, rmcp::ErrorData> {
+        assert_eq!(request.method, "workspace/taskCapabilities");
+        let capability = self.authority.resolve_capability(&context.meta).unwrap();
+        Ok(CustomResult::new(json!({
+            "version": 1,
+            "ownerIdentity": "workflow-fixture-owner",
+            "scopeId": capability.session_id,
+            "scopeEpoch": 0,
+            "invocationDiscovery": true,
+            "retainedTasks": true,
+            "scopeCloseBarrier": true,
+            "resourceSettlement": true,
+            "invocationIdempotency": false,
+        })))
+    }
+
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
@@ -63,6 +85,7 @@ impl ServerHandler for SyncSource {
 }
 
 /// 假模型：首轮调用指定工具（参数里自称 SPOOFED owner），次轮逐字回显工具结果。
+#[derive(Clone)]
 struct ToolThenEchoModel {
     tool: String,
 }
@@ -75,6 +98,10 @@ impl Model for ToolThenEchoModel {
             supports_streaming: true,
             ..ModelCapabilities::default()
         }
+    }
+
+    fn prepare_stream(&self, request: ModelRequest) -> ModelResult<peri_model::PreparedModelCall> {
+        prepared_workflow_model_call(self.clone(), request)
     }
 
     async fn stream(
@@ -157,11 +184,16 @@ async fn run_workflow_mcp(scenario: Scenario<'_>) -> Outcome {
         ctx_root,
         bound_sessions,
     } = scenario;
-    let fixture = tempfile::tempdir().unwrap();
     let calls = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let pool = Arc::new(McpClientPool::new_empty());
     let (client_io, server_io) = tokio::io::duplex(8192);
     let source = SyncSource {
         calls: calls.clone(),
+        authority: if workspace_remote {
+            TaskScopeAuthority::trusted_connection()
+        } else {
+            pool.task_scope_authority.clone()
+        },
     };
     let server_task = tokio::spawn(async move {
         source
@@ -178,7 +210,6 @@ async fn run_workflow_mcp(scenario: Scenario<'_>) -> Outcome {
     .serve(client_io)
     .await
     .unwrap();
-    let pool = Arc::new(McpClientPool::new_empty());
     let mut handle = make_connected_handle(
         server,
         vec![serde_json::from_value(json!({
@@ -215,8 +246,9 @@ async fn run_workflow_mcp(scenario: Scenario<'_>) -> Outcome {
         "GitAttributionMiddleware",
         "TodoMiddleware",
     ]);
-    ctx.cwd = fixture.path().to_str().unwrap().into();
-    ctx.session_id = ctx_root.map(str::to_owned);
+    let execution_fixture =
+        WorkflowExecutionFixture::new(ctx_root.unwrap_or("workflow-unbound-parent")).await;
+    execution_fixture.bind(&mut ctx);
     ctx.system_prompt = Some("执行一次工具调用，然后逐字返回工具结果。".into());
     ctx.middleware_factory = default_workflow_middleware_factory_with_pool(Some(pool.clone()));
     let tool_name = tool.to_owned();

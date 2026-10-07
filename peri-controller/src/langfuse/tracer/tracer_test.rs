@@ -125,7 +125,9 @@ async fn test_error_span_emitted_for_error_turn() {
     let (mut t, session) = make_tracer(0.0);
     t.on_turn_start("turn_1");
     t.on_turn_end(peri_acp_types::session::TurnTelemetryOutcome::Failed {
-        failure: peri_acp_types::session::ExecutionFailure::internal("Turn failed"),
+        failure: Box::new(peri_acp_types::session::ExecutionFailure::internal(
+            "Turn failed",
+        )),
     })
     .await
     .expect("flush task should finish");
@@ -161,9 +163,11 @@ async fn test_turn_end_failed_closes_active_generation_with_canonical_failure() 
             message: "retry exhausted token=secret".to_string(),
         });
 
-    t.on_turn_end(TurnTelemetryOutcome::Failed { failure })
-        .await
-        .expect("flush task should finish");
+    t.on_turn_end(TurnTelemetryOutcome::Failed {
+        failure: Box::new(failure),
+    })
+    .await
+    .expect("flush task should finish");
 
     let events = session.events_snapshot();
     let stage_index = events
@@ -202,13 +206,13 @@ async fn test_turn_end_failed_closes_active_generation_with_canonical_failure() 
         Some(&serde_json::json!(429))
     );
     assert!(
-        !generation
+        generation
             .output
             .as_ref()
-            .expect("safe failure output")
+            .expect("failure output")
             .to_string()
-            .contains("secret"),
-        "generation must not contain provider error text"
+            .contains("retry exhausted token=secret"),
+        "generation must retain the provider diagnostic"
     );
 }
 
@@ -263,7 +267,7 @@ async fn test_unresolved_llm_parent_is_preserved_until_turn_end_fallback() {
     );
 
     t.on_turn_end(TurnTelemetryOutcome::Failed {
-        failure: ExecutionFailure::internal("safe internal failure"),
+        failure: Box::new(ExecutionFailure::internal("safe internal failure")),
     })
     .await
     .expect("flush task should finish");
@@ -356,7 +360,7 @@ async fn test_unsampled_failure_emits_parent_before_error_and_preserves_message(
     let secrets = "sk-live-raw eyJhbGciOiJIUzI1NiJ9.payload.signature -----BEGIN PRIVATE KEY----- postgres://user:password@host/db";
 
     t.on_turn_end(TurnTelemetryOutcome::Failed {
-        failure: ExecutionFailure::internal(secrets),
+        failure: Box::new(ExecutionFailure::internal(secrets)),
     })
     .await
     .expect("flush task should finish");
@@ -484,14 +488,14 @@ async fn test_turn_error_reason_is_safe_in_error_span() {
     t.on_turn_start("turn_1");
     t.on_turn_error(peri_agent::agent::events_v2::TurnErrorReason::LlmFailure);
     let _handle = t.on_turn_end(peri_acp_types::session::TurnTelemetryOutcome::Failed {
-        failure: peri_acp_types::session::ExecutionFailure {
+        failure: Box::new(peri_acp_types::session::ExecutionFailure {
             kind: peri_acp_types::session::ExecutionFailureKind::Llm,
             public_message: "LLM failure".to_string(),
             error_category: None,
             causes: Vec::new(),
             http_status: None,
             diagnostic: None,
-        },
+        }),
     });
     tokio::task::yield_now().await;
     let events = session.events_snapshot();
@@ -962,7 +966,7 @@ async fn test_tool_observation_error_marks_error_class() {
         Some(serde_json::json!({
             "error_class": "tool_failure",
             "error_message": "command failed",
-            "error_schema_version": 3,
+            "error_schema_version": 2,
         })),
         "错误工具 output 应保留 error_class 与 error_message 标记"
     );

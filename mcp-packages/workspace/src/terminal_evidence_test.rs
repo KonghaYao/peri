@@ -293,7 +293,7 @@ async fn test_production_dispatch_persists_promoted_timeout_lifecycle() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn test_production_dispatch_persists_outer_cancel_uncertainty() {
+async fn test_production_dispatch_persists_outer_cancel_result() {
     let fixture = tempfile::tempdir().unwrap();
     let started = fixture.path().join("started");
     let manager = Arc::new(peri_mcp_common::create_local_task_manager());
@@ -361,11 +361,15 @@ async fn test_production_dispatch_persists_outer_cancel_uncertainty() {
         .unwrap();
     assert_eq!(
         invocation.status,
-        peri_acp_types::session_resources::work::InvocationStatus::OutcomeUnknown
+        peri_acp_types::session_resources::work::InvocationStatus::Settled
     );
     assert!(
-        invocation.outcome.is_none(),
-        "outer cancellation is not owner settlement proof"
+        matches!(
+            &invocation.outcome,
+            Some(peri_acp_types::session_resources::work::InvocationOutcome::Failed { result })
+                if result.serialized.contains(r#""status":"cancelled""#)
+        ),
+        "cancelled Bash must persist a failed tool result: {invocation:?}"
     );
     let work = &snapshot.state.works[invocation.work_id.as_ref().unwrap()];
     assert_eq!(
@@ -373,14 +377,14 @@ async fn test_production_dispatch_persists_outer_cancel_uncertainty() {
         peri_acp_types::session_resources::work::WorkStage::Blocked
     );
     assert!(
-        !context
+        context
             .session
             .transcript
             .read()
             .visible_messages()
             .iter()
             .any(|message| matches!(message, BaseMessage::Tool { .. })),
-        "unknown outcome must not publish synthetic Cancelled tool results"
+        "settled cancellation must remain visible as a tool result"
     );
     let process_id = tokio::fs::read_to_string(&started).await.unwrap();
     assert!(process_id.trim().parse::<u32>().unwrap() > 0);

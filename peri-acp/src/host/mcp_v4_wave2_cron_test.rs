@@ -20,6 +20,31 @@ async fn cron_register_tick_approval_continuation() {
     fixture.assert_all_ready();
     let scheduler = fixture.cron_scheduler();
     let mut register_ctx = fixture.session_context("w2-cron-e2e-register").await;
+    let resources = register_ctx.session_resources.as_ref().unwrap();
+    let snapshot = resources
+        .load_session_work(&peri_acp_types::session_resources::work::WorkQuery {
+            session_id: register_ctx.session_id.clone(),
+            limit: 1,
+        })
+        .await
+        .unwrap();
+    let receipt = resources
+        .apply_work_mutation(&peri_acp_types::session_resources::work::WorkCommand {
+            session_id: register_ctx.session_id.clone(),
+            recipient_lifecycle: snapshot.control.lifecycle,
+            mutation_id: "w2-cron-e2e-owner-setup".into(),
+            action: peri_acp_types::session_resources::work::WorkAction::BindResourceOwners {
+                expected_revision: snapshot.state.revision,
+                connections_json: "{}".into(),
+                authorization_ref: "trusted-w2-cron-e2e-setup".into(),
+            },
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        receipt.decision,
+        peri_acp_types::session_resources::work::WorkDecision::Accepted
+    );
     let AssembledHostFixture {
         dirs,
         cfg,

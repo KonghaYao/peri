@@ -58,6 +58,35 @@ async fn make_session_manager_with_cron(
     (manager, scheduler, continuation_rx)
 }
 
+async fn persist_cron_session(manager: &SessionManager, tmp: &tempfile::TempDir, session_id: &str) {
+    use peri_acp_types::session_resources::{FrozenSnapshotBytes, NewSession, NewSessionMeta};
+    use peri_acp_types::workspace::SessionBinding;
+
+    let workspace = manager
+        .session_resources()
+        .resolve_workspace(tmp.path())
+        .await
+        .unwrap();
+    manager
+        .session_resources()
+        .create_session(&NewSession {
+            thread_id: session_id.into(),
+            created_at: peri_time::now_utc_rfc3339(),
+            meta: NewSessionMeta {
+                title: None,
+                cwd: workspace.cwd.to_string_lossy().into_owned(),
+                parent_thread_id: None,
+                hidden: false,
+                cancel_policy: Default::default(),
+                snapshot_at_message_id: None,
+            },
+            binding: SessionBinding::from_workspace(&workspace),
+            frozen: FrozenSnapshotBytes::new(r#"{"v":1}"#),
+        })
+        .await
+        .unwrap();
+}
+
 /// 同 make_session_manager，仅 SessionManager::new 末参按需传入 cron scheduler。
 async fn make_manager_with_cron_option(
     tmp: &tempfile::TempDir,
@@ -328,6 +357,7 @@ async fn test_ensure_session_subscribes_cron_before_first_turn() {
     let (mgr, scheduler, mut continuation_rx) = make_session_manager_with_cron(&tmp).await;
     let session_id = "test-cron-before-first-turn";
 
+    persist_cron_session(&mgr, &tmp, session_id).await;
     mgr.ensure_session(session_id, "/tmp");
 
     let task_id = scheduler
@@ -357,6 +387,7 @@ async fn test_cron_bridge_survives_turn_error() {
     let tmp = tempfile::TempDir::new().unwrap();
     let (mgr, scheduler, mut continuation_rx) = make_session_manager_with_cron(&tmp).await;
     let session_id = "test-cron-turn-error";
+    persist_cron_session(&mgr, &tmp, session_id).await;
     mgr.ensure_session(session_id, "/tmp");
     assert!(mgr.cron_bridge_for(session_id));
 
@@ -402,6 +433,7 @@ async fn test_cron_bridge_idle_trigger_forwards_continuation_without_early_enque
     let tmp = tempfile::TempDir::new().unwrap();
     let (mgr, scheduler, mut continuation_rx) = make_session_manager_with_cron(&tmp).await;
     let session_id = "test-cron-idle";
+    persist_cron_session(&mgr, &tmp, session_id).await;
     mgr.ensure_session(session_id, "/tmp");
     assert!(mgr.cron_bridge_for(session_id));
 

@@ -776,10 +776,10 @@ impl OpaqueIdExt for WorkspaceId {
     }
 }
 
-/// 语句形状断言不依赖客户端：`StatementSpec` 的 Debug 不打印绑定值。
+/// 语句形状断言不依赖客户端：`StatementSpec` 的 Debug 保留绑定值供诊断。
 #[test]
-fn statement_debug_does_not_leak_bound_values() {
+fn statement_debug_preserves_bound_values() {
     let spec: StatementSpec = session_sql::select_meta_statement("session-secret");
     let rendered = format!("{spec:?}");
-    assert!(!rendered.contains("session-secret"));
+    assert!(rendered.contains("session-secret"));
 }

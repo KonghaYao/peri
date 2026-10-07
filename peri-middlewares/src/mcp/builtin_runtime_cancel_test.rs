@@ -1,7 +1,7 @@
 use super::*;
 
 /// 外层取消必须返回 interrupted、不重放调用，并保持同一 pool 可继续服务。
-/// 本用例的 FixtureBuiltinHandler 故意不消费取消，释放 GatedTool 后核对关闭；
+/// 本用例的 FixtureBuiltinHandler 故意不消费取消，释放 GatedTool 后核对可继续服务；
 /// 生产 handler 的通知传播与 shell 清理由 workspace_recovery_test 单独覆盖。
 #[tokio::test]
 async fn builtin_handler_in_flight_cancel_has_no_replay_and_keeps_pool_serving() {
@@ -11,6 +11,14 @@ async fn builtin_handler_in_flight_cancel_has_no_replay_and_keeps_pool_serving()
     let gated_tool: Arc<dyn BaseTool> = Arc::clone(&gated) as Arc<dyn BaseTool>;
     let link = TappedLink::connect(web, "runtime-fixture-web", vec![gated_tool]).await;
     let bridge = link.bridge(declaration.effective_name);
+    let invocation_fixture = invocation_fixture::InvocationFixture::new(
+        declaration.effective_name,
+        &[
+            json!({ "payload": "in-flight" }),
+            json!({ "payload": "after-cancel" }),
+        ],
+    )
+    .await;
     let cancel = AgentCancellationToken::new();
 
     // 等「server 侧已进入本次 tools/call」再取消：这是「在飞」的定义点。
@@ -32,7 +40,7 @@ async fn builtin_handler_in_flight_cancel_has_no_replay_and_keeps_pool_serving()
             )),
             result = bridge.invoke(
                 json!({ "payload": "in-flight" }),
-                fixture_tool_context("/tmp"),
+                invocation_fixture.context(0),
             ) => result.map_err(|error| {
                 EffectiveToolError::new(EffectiveToolErrorCode::ToolFailed, error.to_string())
             }),
@@ -71,9 +79,9 @@ async fn builtin_handler_in_flight_cancel_has_no_replay_and_keeps_pool_serving()
         "工具体只应被进入一次（取消不重放、不重试）"
     );
 
-    // ③ 放行被弃置的在飞 handler，再确认 pool 仍可服务。
+    // ③ 允许被弃置的 handler 结束，再确认 pool 仍可服务。
+    gated.released.store(true, Ordering::SeqCst);
     gated.release.notify_one();
-    gated.finished.notified().await;
     assert_eq!(
         gated.call_count(),
         1,
@@ -83,7 +91,7 @@ async fn builtin_handler_in_flight_cancel_has_no_replay_and_keeps_pool_serving()
     let text = bridge
         .invoke(
             json!({ "payload": "after-cancel" }),
-            fixture_tool_context("/tmp"),
+            invocation_fixture.context(1),
         )
         .await
         .expect("取消后同一条 wire / 同一 client service 必须仍可服务");

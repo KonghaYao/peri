@@ -9,9 +9,9 @@ use peri_acp_types::thread::{ThreadId, ThreadMeta};
 use peri_acp_types::workspace::{ResolvedWorkspace, ScopedThreadPage, ScopedThreadQuery};
 use tokio::sync::Mutex;
 
-use super::super::super::work_ledger::WorkMutationBarrier;
-use super::super::super::work_pipeline::WorkSession;
-use super::super::super::StageContext;
+use super::work_ledger::WorkMutationBarrier;
+use super::work_pipeline::WorkSession;
+use super::StageContext;
 
 struct BudgetResources {
     snapshot: Mutex<WorkSnapshot>,

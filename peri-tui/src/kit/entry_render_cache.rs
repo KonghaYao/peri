@@ -88,12 +88,11 @@ impl EntryRenderCache {
         if invalidation == EntryInvalidation::Animation {
             if let TuiRenderUnit::TuiAssistantBubble(bubble) = vm {
                 if let Some(reasoning) = bubble.reasoning.as_ref().filter(|entry| entry.is_running)
+                    && let Some(first) = Arc::make_mut(&mut self.lines).first_mut()
                 {
-                    if let Some(first) = Arc::make_mut(&mut self.lines).first_mut() {
-                        *first = crate::kit::message_area::render::render_running_reasoning_header(
-                            reasoning, grid,
-                        );
-                    }
+                    *first = crate::kit::message_area::render::render_running_reasoning_header(
+                        reasoning, grid,
+                    );
                 }
             } else {
                 let (lines, copy_button, interaction, image_lines) = vm_to_lines_cached_with_layout(
@@ -139,17 +138,17 @@ impl EntryRenderCache {
     }
 
     pub(crate) fn line(&self, index: usize) -> Option<&Line<'static>> {
-        if let Some(start) = self.markdown_lines.stable_start {
-            if index >= start {
-                let local = index - start;
-                let chunk = self
-                    .markdown_lines
-                    .prefix
-                    .partition_point(|offset| *offset <= local)
-                    .saturating_sub(1);
-                if let Some(lines) = self.markdown_lines.stable.get(chunk) {
-                    return lines.lines.get(local - self.markdown_lines.prefix[chunk]);
-                }
+        if let Some(start) = self.markdown_lines.stable_start
+            && index >= start
+        {
+            let local = index - start;
+            let chunk = self
+                .markdown_lines
+                .prefix
+                .partition_point(|offset| *offset <= local)
+                .saturating_sub(1);
+            if let Some(lines) = self.markdown_lines.stable.get(chunk) {
+                return lines.lines.get(local - self.markdown_lines.prefix[chunk]);
             }
         }
         self.lines.get(index)

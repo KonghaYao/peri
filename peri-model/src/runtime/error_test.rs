@@ -4,6 +4,11 @@ use super::{
 };
 
 #[test]
+fn test_model_error_fits_clippy_result_error_limit() {
+    assert!(std::mem::size_of::<ModelError>() <= 128);
+}
+
+#[test]
 fn error_context_preserves_content_and_rejects_only_oversized_identity() {
     let value = "sk-live-secret Authorization 诊断";
     let error = ModelError::http_status(401, value, Some(value));

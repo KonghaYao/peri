@@ -5,41 +5,43 @@ use peri_acp_types::session_resources::work::{
     WorkResolution, WorkSnapshot,
 };
 
+type ResourceOwnerSqliteRow = (
+    bool,
+    Option<String>,
+    bool,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
 impl SqliteSessionData {
     pub(super) async fn read_resource_owner_facts(
         &self,
         id: &ThreadId,
         previous_lifecycle: u64,
     ) -> SessionResourceResult<peri_acp_types::session_resources::work::ResourceOwnerFacts> {
-        let row: (
-            bool,
-            Option<String>,
-            bool,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-        ) = sqlx::query_as(work::READ_RESOURCE_OWNER_FACTS)
+        let row: ResourceOwnerSqliteRow = sqlx::query_as(work::READ_RESOURCE_OWNER_FACTS)
             .bind(id)
             .bind(previous_lifecycle.to_string())
             .fetch_one(&self.database.pool)
             .await
             .map_err(|error| map_sqlx(&error))?;
-        work::resource_owner_facts(
-            row.0,
-            row.1.as_deref(),
-            row.2,
-            row.3.as_deref(),
-            row.4.as_deref(),
-            row.5.as_deref(),
-            row.6.as_deref(),
-            row.7.as_deref(),
-            row.8.as_deref(),
-            row.9.as_deref(),
-        )
+        work::resource_owner_facts(work::ResourceOwnerRow {
+            session_exists: row.0,
+            control_json: row.1.as_deref(),
+            state_exists: row.2,
+            revision_json: row.3.as_deref(),
+            current_owner_json: row.4.as_deref(),
+            previous_owner_json: row.5.as_deref(),
+            current_child_json: row.6.as_deref(),
+            previous_child_json: row.7.as_deref(),
+            owners_type: row.8.as_deref(),
+            child_metadata_type: row.9.as_deref(),
+        })
     }
     pub(super) async fn read_work_revision(&self, id: &ThreadId) -> SessionResourceResult<u64> {
         let (session_exists, control_exists, state_exists, revision_json): (

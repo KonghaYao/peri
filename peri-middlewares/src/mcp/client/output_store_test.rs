@@ -3,6 +3,7 @@ use crate::mcp::{
     config::ConfigSource, resource_tool::McpResourceTool, tool_bridge::McpToolBridge,
     McpClientHandle, OAuthStatus,
 };
+use peri_acp_types::mcp::McpSubscriptionPort;
 use peri_acp_types::mcp_skills::McpSkillRegistry;
 use peri_acp_types::tasks::{TaskManager as TaskManagerPort, TaskShutdownReport};
 use peri_agent::tools::{BaseTool, ToolContext};
@@ -15,6 +16,10 @@ use rmcp::{
     ServerHandler, ServiceExt,
 };
 use tokio::sync::Notify;
+
+#[path = "durable_invocation_fixture_test.rs"]
+pub(crate) mod durable_invocation_fixture;
+use durable_invocation_fixture::DurableInvocationFixture;
 
 pub(crate) fn large_output() -> String {
     (0..2200)
@@ -96,6 +101,12 @@ impl ServerHandler for LostTaskReceipt {
 
 #[tokio::test]
 async fn lost_mcp_task_receipt_keeps_session_shutdown_incomplete() {
+    let fixture = DurableInvocationFixture::new(
+        "receipt-session",
+        "mcp__remote__large",
+        &[serde_json::json!({})],
+    )
+    .await;
     let created = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
     let wire = Wire::connect(LostTaskReceipt {
@@ -112,10 +123,7 @@ async fn lost_mcp_task_receipt_keeps_session_shutdown_incomplete() {
         .with_output_store(&pool, Some("receipt-session"));
     let call = tokio::spawn(async move {
         bridge
-            .invoke(
-                serde_json::json!({}),
-                ToolContext::new(&[], ".").with_session_identity("receipt-session", "turn"),
-            )
+            .invoke(serde_json::json!({}), fixture.context(0, "."))
             .await
     });
     tokio::time::timeout(std::time::Duration::from_secs(2), created.notified())
@@ -261,6 +269,17 @@ async fn missing_or_unknown_child_binding_fails_before_send_without_root_fallbac
 
 #[tokio::test]
 async fn child_scope_metadata_ignores_owner_parameters_and_captured_root() {
+    let input = serde_json::json!({
+        "session_id": "root-session",
+        "mcp_task_owner_session_id": "root-session",
+        "task_scope": "root-session"
+    });
+    let fixture = DurableInvocationFixture::new(
+        "child-thread",
+        "mcp__source__large",
+        std::slice::from_ref(&input),
+    )
+    .await;
     let calls = Arc::new(parking_lot::Mutex::new(Vec::new()));
     let wire = Wire::connect(RecordingSource {
         calls: calls.clone(),
@@ -276,17 +295,7 @@ async fn child_scope_metadata_ignores_owner_parameters_and_captured_root() {
     pool.bind_session_task_manager("child-thread", &child);
     let bridge = McpToolBridge::new("source", &test_tool(), pool.get_client("source").unwrap())
         .with_output_store(&pool, Some("root-session"));
-    bridge
-        .invoke(
-            serde_json::json!({
-                "session_id": "root-session",
-                "mcp_task_owner_session_id": "root-session",
-                "task_scope": "root-session"
-            }),
-            ToolContext::new(&[], ".").with_session_identity("child-thread", "turn"),
-        )
-        .await
-        .unwrap();
+    bridge.invoke(input, fixture.context(0, ".")).await.unwrap();
     {
         let calls = calls.lock();
         assert_eq!(calls.len(), 1);
@@ -305,6 +314,12 @@ async fn child_scope_metadata_ignores_owner_parameters_and_captured_root() {
 
 #[tokio::test]
 async fn child_mcp_bridge_uses_child_binding_for_real_call() {
+    let fixture = DurableInvocationFixture::new(
+        "child-thread",
+        "mcp__source__large",
+        &[serde_json::json!({})],
+    )
+    .await;
     let wire = Wire::connect(Source).await;
     let pool = Arc::new(McpClientPool::new_empty());
     wire.install(&pool, "source", false);
@@ -313,7 +328,7 @@ async fn child_mcp_bridge_uses_child_binding_for_real_call() {
     pool.bind_session_task_manager("child-thread", &manager);
     let bridge = McpToolBridge::new("source", &test_tool(), pool.get_client("source").unwrap())
         .with_output_store(&pool, Some("root-session"));
-    let context = ToolContext::new(&[], ".").with_session_identity("child-thread", "child-turn");
+    let context = fixture.context(0, ".");
     assert_eq!(context.session_id.as_deref(), Some("child-thread"));
     let result = bridge.invoke(serde_json::json!({}), context).await;
     assert!(
@@ -326,6 +341,13 @@ async fn child_mcp_bridge_uses_child_binding_for_real_call() {
 
 #[tokio::test]
 async fn child_mcp_task_receipt_registers_under_child_owner() {
+    use peri_acp_types::session::{MessageQueue, SessionInbox};
+    let fixture = DurableInvocationFixture::new(
+        "child-thread",
+        "mcp__source__large",
+        &[serde_json::json!({})],
+    )
+    .await;
     let wire = Wire::connect(StartedTask).await;
     let (mut owner, spawner) = crate::mcp::task_scope::McpTaskOwner::new();
     let pool = Arc::new(McpClientPool::new_pending_with_spawner(spawner));
@@ -333,17 +355,18 @@ async fn child_mcp_task_receipt_registers_under_child_owner() {
     let manager = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
     let task_manager: Arc<dyn TaskManagerPort> = manager.clone();
     pool.bind_session_task_manager("child-thread", &task_manager);
+    pool.register_inbox(
+        "child-thread",
+        SessionInbox::new(Arc::new(MessageQueue::new())).handle(),
+    );
     let bridge = McpToolBridge::new("source", &test_tool(), pool.get_client("source").unwrap())
         .with_output_store(&pool, Some("root-session"));
-    let context = ToolContext::new(&[], ".").with_session_identity("child-thread", "child-turn");
+    let context = fixture.context(0, ".");
     let output = bridge.invoke(serde_json::json!({}), context).await.unwrap();
     assert!(output.contains("Background task started:"), "{output}");
     assert!(!manager.snapshot().tasks.is_empty());
     let duplicate = bridge
-        .invoke(
-            serde_json::json!({}),
-            ToolContext::new(&[], ".").with_session_identity("child-thread", "child-turn"),
-        )
+        .invoke(serde_json::json!({}), fixture.context(0, "."))
         .await
         .unwrap();
     assert_eq!(duplicate, output);
@@ -356,6 +379,19 @@ async fn child_mcp_task_receipt_registers_under_child_owner() {
 async fn bound_child_mcp_task_receipt_uses_its_own_catalog_without_root_override() {
     use peri_acp_types::ports::McpPoolPort;
     use peri_acp_types::session::{MessageQueue, SessionInbox};
+
+    let input = serde_json::json!({
+        "session_id": "root-session",
+        "mcp_task_owner_session_id": "root-session",
+        "task_owner": "root-session",
+        "initiator_session_id": "root-session"
+    });
+    let fixture = DurableInvocationFixture::new(
+        "child-thread",
+        "mcp__source__large",
+        std::slice::from_ref(&input),
+    )
+    .await;
 
     let wire = Wire::connect(StartedTask).await;
     let (mut owner, spawner) = crate::mcp::task_scope::McpTaskOwner::new();
@@ -375,18 +411,7 @@ async fn bound_child_mcp_task_receipt_uses_its_own_catalog_without_root_override
     );
     let bridge = McpToolBridge::new("source", &test_tool(), pool.get_client("source").unwrap())
         .with_output_store(&pool, Some("root-session"));
-    let output = bridge
-        .invoke(
-            serde_json::json!({
-                "session_id": "root-session",
-                "mcp_task_owner_session_id": "root-session",
-                "task_owner": "root-session",
-                "initiator_session_id": "root-session"
-            }),
-            ToolContext::new(&[], ".").with_session_identity("child-thread", "child-turn"),
-        )
-        .await
-        .unwrap();
+    let output = bridge.invoke(input, fixture.context(0, ".")).await.unwrap();
     assert!(output.contains("Background task started:"), "{output}");
     assert!(root.snapshot().tasks.is_empty());
     assert_eq!(child.snapshot().tasks.len(), 1);
@@ -398,19 +423,24 @@ async fn bound_child_mcp_task_receipt_uses_its_own_catalog_without_root_override
 // 回归：任务已存在但 monitor 准入失败，不再承诺完成通知必达。
 #[tokio::test]
 async fn test_closed_monitor_owner_returns_honest_task_receipt_error() {
+    use peri_acp_types::session::{MessageQueue, SessionInbox};
+    let fixture =
+        DurableInvocationFixture::new("session", "mcp__source__large", &[serde_json::json!({})])
+            .await;
     let wire = Wire::connect(StartedTask).await;
     let pool = Arc::new(McpClientPool::new_empty());
     wire.install(&pool, "source", false);
     let manager: Arc<dyn TaskManagerPort> =
         Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
     pool.bind_session_task_manager("session", &manager);
+    pool.register_inbox(
+        "session",
+        SessionInbox::new(Arc::new(MessageQueue::new())).handle(),
+    );
     let bridge = McpToolBridge::new("source", &test_tool(), pool.get_client("source").unwrap())
         .with_output_store(&pool, Some("session"));
     let error = bridge
-        .invoke(
-            serde_json::json!({}),
-            ToolContext::new(&[], ".").with_session_identity("session", "turn"),
-        )
+        .invoke(serde_json::json!({}), fixture.context(0, "."))
         .await
         .unwrap_err()
         .to_string();
@@ -434,6 +464,13 @@ async fn child_initiated_task_receipt_delivers_to_the_child_not_root() {
     use peri_acp_types::session::{MessageQueue, SessionInbox};
     use peri_acp_types::system_reminder::TrustedSystemReminder;
     use peri_acp_types::tasks::TaskTerminalDelivery;
+
+    let fixture = DurableInvocationFixture::new(
+        "child-thread",
+        "mcp__source__large",
+        &[serde_json::json!({})],
+    )
+    .await;
 
     struct RecordingDelivery {
         delivered: parking_lot::Mutex<Vec<(MessageId, TrustedSystemReminder)>>,
@@ -460,6 +497,10 @@ async fn child_initiated_task_receipt_delivers_to_the_child_not_root() {
     let manager = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
     let task_manager: Arc<dyn TaskManagerPort> = manager.clone();
     pool.bind_session_task_manager("child-thread", &task_manager);
+    pool.register_inbox(
+        "child-thread",
+        SessionInbox::new(Arc::new(MessageQueue::new())).handle(),
+    );
     let root_manager: Arc<dyn TaskManagerPort> =
         Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
     pool.bind_session_task_manager("root-session", &root_manager);
@@ -474,8 +515,8 @@ async fn child_initiated_task_receipt_delivers_to_the_child_not_root() {
     });
     let bridge = McpToolBridge::new("source", &test_tool(), pool.get_client("source").unwrap())
         .with_output_store(&pool, Some("root-session"));
-    let context = ToolContext::new(&[], ".")
-        .with_session_identity("child-thread", "child-turn")
+    let context = fixture
+        .context(0, ".")
         .with_task_terminal_delivery(delivery.clone());
     let output = bridge.invoke(serde_json::json!({}), context).await.unwrap();
     assert!(
@@ -566,6 +607,12 @@ pub(crate) async fn assert_remote_readback(
 
 #[tokio::test]
 async fn host_bridge_success_error_and_resource_use_workspace_wire_readback() {
+    let fixture = DurableInvocationFixture::new(
+        "session",
+        "mcp__source__large",
+        &[serde_json::json!({}), serde_json::json!({"error": true})],
+    )
+    .await;
     let host = tempfile::tempdir().unwrap();
     let remote = tempfile::tempdir().unwrap();
     let workspace = Wire::connect(peri_mcp_workspace::WorkspaceMcpServer::new(
@@ -583,18 +630,14 @@ async fn host_bridge_success_error_and_resource_use_workspace_wire_readback() {
     source.install(&pool, "source", false);
     let bridge = McpToolBridge::new("source", &test_tool(), pool.get_client("source").unwrap())
         .with_output_store(&pool, Some("session"));
-    for error in [false, true] {
+    for (index, error) in [false, true].into_iter().enumerate() {
         let input = if error {
             serde_json::json!({"error": true})
         } else {
             serde_json::json!({})
         };
         let result = bridge
-            .invoke(
-                input,
-                ToolContext::new(&[], host.path().to_str().unwrap())
-                    .with_session_identity("session", "turn"),
-            )
+            .invoke(input, fixture.context(index, host.path().to_str().unwrap()))
             .await;
         let output = if error {
             result.unwrap_err().to_string()
@@ -646,6 +689,12 @@ async fn host_bridge_success_error_and_resource_use_workspace_wire_readback() {
 
 #[tokio::test]
 async fn missing_workspace_does_not_claim_saved_output() {
+    let fixture = DurableInvocationFixture::new(
+        "session",
+        "mcp__source__large",
+        &[serde_json::json!({}), serde_json::json!({"error": true})],
+    )
+    .await;
     let source = Wire::connect(Source).await;
     let pool = Arc::new(McpClientPool::new_empty());
     source.install(&pool, "source", false);
@@ -654,18 +703,13 @@ async fn missing_workspace_does_not_claim_saved_output() {
     pool.bind_session_task_manager("session", &manager);
     let bridge = McpToolBridge::new("source", &test_tool(), pool.get_client("source").unwrap())
         .with_output_store(&pool, None);
-    for error in [false, true] {
+    for (index, error) in [false, true].into_iter().enumerate() {
         let input = if error {
             serde_json::json!({"error": true})
         } else {
             serde_json::json!({})
         };
-        let result = bridge
-            .invoke(
-                input,
-                ToolContext::new(&[], ".").with_session_identity("session", "turn"),
-            )
-            .await;
+        let result = bridge.invoke(input, fixture.context(index, ".")).await;
         let output = if error {
             result.unwrap_err().to_string()
         } else {

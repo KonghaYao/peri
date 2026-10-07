@@ -7,7 +7,7 @@ use crate::mcp::builtin::closed_instances;
 use crate::mcp::builtin::context::BuiltinInstanceContext;
 use crate::mcp::{ClientStatus, McpClientHandle, McpClientPool, McpMiddleware};
 
-const FIXTURE_SESSION_ID: &str = "builtin-runtime-session";
+use invocation_fixture::FIXTURE_SESSION_ID;
 
 fn bind_fixture_session(pool: &McpClientPool) {
     if pool
@@ -22,9 +22,6 @@ fn bind_fixture_session(pool: &McpClientPool) {
     }
 }
 
-fn fixture_tool_context(cwd: &str) -> ToolContext<'_> {
-    ToolContext::new(&[], cwd).with_session_identity(FIXTURE_SESSION_ID, "fixture-turn")
-}
 // V-01（W4）：真实启动路径 / 审批 approve+reject + wire 计数 / 关闭矩阵四面 /
 // 无 orphan / 大 payload（A16）/ 实例隔离可观察断言（A13）
 //
@@ -869,6 +866,9 @@ mod wire;
 
 #[path = "builtin_runtime_cancel_test.rs"]
 mod cancel;
+
+#[path = "builtin_runtime_invocation_fixture_test.rs"]
+mod invocation_fixture;
 
 #[path = "builtin_runtime_wave3_test.rs"]
 mod wave3;

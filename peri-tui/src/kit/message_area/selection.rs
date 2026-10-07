@@ -1,5 +1,6 @@
 //! 文本选区 + 折行映射：wrap_map 构建、视觉→逻辑行转换、选区提取、剪贴板复制。
 
+#[cfg(test)]
 use std::cmp::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
@@ -385,8 +386,8 @@ pub(super) fn highlight_line_in_selection(
     width: u16,
     sel_bg: ratatui_kit::ratatui::style::Color,
 ) -> Line<'static> {
-    let plain = text_selection::line_to_plain_text(&line);
-    let row_starts = wrap_byte_starts(&line, &plain, width);
+    let plain = text_selection::line_to_plain_text(line);
+    let row_starts = wrap_byte_starts(line, &plain, width);
     let row_max = row_starts.len().saturating_sub(1);
 
     let sr_in_line = sel_sr >= entry.visual_start && sel_sr < entry.visual_end;
@@ -550,14 +551,14 @@ pub(super) fn extract_visual_range_index(
             materialized = Some((lookup.slot_index, index.materialize(lookup.slot_index)?));
         }
         let line = materialized.as_ref()?.1.line(local_idx)?;
-        let plain = text_selection::line_to_plain_text(&line);
+        let plain = text_selection::line_to_plain_text(line);
         // [D3 §9] 语义文本（无 UI chrome）——仅提取层替换，列模拟仍基于 plain。
         // [Fix §15] 传入已渲染行而非重渲染 VM：slot 行与渲染缓存同源，
         // 避免 N 行选区 × N 次全量 markdown 解析（旧实现每行新建缓存重渲染）。
         let semantic: Option<(String, usize)> = view_models
             .and_then(|vms| vms.get(entry.slot_index))
             .and_then(|vm| {
-                grid.and_then(|g| super::render::semantic_line_text(vm, local_idx, &line, &g))
+                grid.and_then(|g| super::render::semantic_line_text(vm, local_idx, line, &g))
             })
             .map(|sem| {
                 // 语义文本在 plain 中的定位（重建行如 tool header 可能不是
@@ -566,7 +567,7 @@ pub(super) fn extract_visual_range_index(
                 (sem, p)
             });
         // 每个视觉行在该逻辑行 plain text 中的 byte 起始偏移
-        let row_starts = wrap_byte_starts(&line, &plain, width);
+        let row_starts = wrap_byte_starts(line, &plain, width);
         // 把视觉行号 clamp 到 row_starts 索引范围内（防御：footer 区域等异常 sr/er）
         let row_max = row_starts.len().saturating_sub(1);
         let sr_off = sr.saturating_sub(entry.visual_start).min(row_max);

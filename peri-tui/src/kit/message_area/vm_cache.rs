@@ -7,8 +7,6 @@ use super::render;
 use super::render::ImageLineInfo;
 use super::scroll;
 use super::selection::WrappedLineInfo;
-#[cfg(test)]
-
 /// 计算 palette 中影响 markdown 渲染的关键字段哈希。
 /// 当主题切换时，hash 变化 → 触发 vm_caches 重建 → markdown 色值更新。
 #[cfg(test)]

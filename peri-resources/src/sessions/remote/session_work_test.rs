@@ -245,8 +245,10 @@ async fn remote_resource_owner_projection_reads_only_selected_lifecycles() {
         .load_resource_owner_facts(&"absent".into(), 0)
         .await
         .is_err());
-    let mut state = WorkState::default();
-    state.revision = 3;
+    let mut state = WorkState {
+        revision: 3,
+        ..Default::default()
+    };
     state.resource_owners.insert(
         1,
         ResourceOwnerBinding {
@@ -265,8 +267,10 @@ async fn remote_resource_owner_projection_reads_only_selected_lifecycles() {
     assert_eq!(facts.revision, 3);
     assert_eq!(facts.current_owner.unwrap().authorization_ref, "trusted");
     assert!(facts.previous_owner.is_none());
-    let mut control = peri_acp_types::session_resources::ControlState::default();
-    control.lifecycle = 2;
+    let control = peri_acp_types::session_resources::ControlState {
+        lifecycle: 2,
+        ..Default::default()
+    };
     sqlx::query("INSERT INTO session_control_state(session_id,state_json) VALUES (?1,?2)")
         .bind(&id)
         .bind(serde_json::to_string(&control).unwrap())

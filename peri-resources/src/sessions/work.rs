@@ -39,40 +39,47 @@ LEFT JOIN session_control_state AS control ON control.session_id=?1
 WHERE NOT EXISTS(SELECT 1 FROM session_work_state WHERE session_id=?1)
 "#;
 
+pub(super) struct ResourceOwnerRow<'a> {
+    pub session_exists: bool,
+    pub control_json: Option<&'a str>,
+    pub state_exists: bool,
+    pub revision_json: Option<&'a str>,
+    pub current_owner_json: Option<&'a str>,
+    pub previous_owner_json: Option<&'a str>,
+    pub current_child_json: Option<&'a str>,
+    pub previous_child_json: Option<&'a str>,
+    pub owners_type: Option<&'a str>,
+    pub child_metadata_type: Option<&'a str>,
+}
+
 pub(super) fn resource_owner_facts(
-    session_exists: bool,
-    control_json: Option<&str>,
-    state_exists: bool,
-    revision_json: Option<&str>,
-    current_owner_json: Option<&str>,
-    previous_owner_json: Option<&str>,
-    current_child_json: Option<&str>,
-    previous_child_json: Option<&str>,
-    owners_type: Option<&str>,
-    child_metadata_type: Option<&str>,
+    row: ResourceOwnerRow<'_>,
 ) -> SessionResourceResult<ResourceOwnerFacts> {
     let revision = revision(
-        i64::from(session_exists),
-        i64::from(control_json.is_some()),
-        i64::from(state_exists),
-        revision_json,
+        i64::from(row.session_exists),
+        i64::from(row.control_json.is_some()),
+        i64::from(row.state_exists),
+        row.revision_json,
     )?;
-    if state_exists
-        && (owners_type != Some("object") || !matches!(child_metadata_type, None | Some("object")))
+    if row.state_exists
+        && (row.owners_type != Some("object")
+            || !matches!(row.child_metadata_type, None | Some("object")))
     {
         return Err(corrupt("resource owner state is not readable"));
     }
     Ok(ResourceOwnerFacts {
-        control: crate::sessions::control::state(control_json)?,
+        control: crate::sessions::control::state(row.control_json)?,
         revision,
-        current_owner: current_owner_json
+        current_owner: row
+            .current_owner_json
             .map(decode::<ResourceOwnerBinding>)
             .transpose()?,
-        previous_owner: previous_owner_json
+        previous_owner: row
+            .previous_owner_json
             .map(decode::<ResourceOwnerBinding>)
             .transpose()?,
-        current_child_metadata: current_child_json.map(decode::<String>).transpose()?,
-        previous_child_metadata: previous_child_json.map(decode::<String>).transpose()?,
+        current_child_metadata: row.current_child_json.map(decode::<String>).transpose()?,
+        previous_child_metadata: row.previous_child_json.map(decode::<String>).transpose()?,
     })
 }
 

@@ -42,7 +42,6 @@ struct Wave3Fixture {
     _fixture: tempfile::TempDir,
     _env: LoaderEnvGuard,
     pool: Arc<McpClientPool>,
-    project: PathBuf,
     scheduler: Arc<parking_lot::Mutex<CronScheduler>>,
     triggers: tokio::sync::mpsc::UnboundedReceiver<CronTrigger>,
 }
@@ -79,7 +78,6 @@ impl Wave3Fixture {
             _fixture: fixture,
             _env: env,
             pool,
-            project,
             scheduler,
             triggers,
         }

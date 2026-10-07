@@ -89,7 +89,7 @@ struct RawPersistedEnvelope {
 #[serde(tag = "type", rename_all = "snake_case")]
 enum RawPersistedPayload {
     Message {
-        message: BaseMessage,
+        message: Box<BaseMessage>,
     },
     SystemReminder {
         id: MessageId,
@@ -123,7 +123,7 @@ pub fn deserialize_persisted_payload(input: &str) -> Result<PersistedPayload> {
         anyhow::bail!("unsupported persisted payload version {}", envelope.version);
     }
     match envelope.payload {
-        RawPersistedPayload::Message { message } => Ok(PersistedPayload::Message(message)),
+        RawPersistedPayload::Message { message } => Ok(PersistedPayload::Message(*message)),
         RawPersistedPayload::SystemReminder { id, reminder } => {
             let reminder = serde_json::to_vec(&reminder)?;
             let reminder = decode_system_reminder_json(&reminder)?;

@@ -52,10 +52,6 @@ impl FakeTransport {
     fn bodies(&self) -> Vec<Value> {
         self.bodies.lock().expect("lock available").clone()
     }
-
-    fn calls(&self) -> usize {
-        self.calls.load(Ordering::SeqCst)
-    }
 }
 
 #[async_trait]

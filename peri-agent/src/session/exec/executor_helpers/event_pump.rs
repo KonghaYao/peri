@@ -185,9 +185,9 @@ pub fn spawn_event_pump(req: SpawnPumpRequest) -> PumpHandle {
         let (stop_reason, telemetry_outcome) = stop_reason_rx.await.unwrap_or((
             PromptStopReason::EndTurn,
             TurnTelemetryOutcome::Failed {
-                failure: peri_acp_types::session::ExecutionFailure::internal(
+                failure: Box::new(peri_acp_types::session::ExecutionFailure::internal(
                     "Agent execution result was unavailable",
-                ),
+                )),
             },
         ));
 

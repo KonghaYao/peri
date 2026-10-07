@@ -74,6 +74,21 @@ struct RecoveryStore {
 
 #[async_trait]
 impl SessionResources for RecoveryStore {
+    async fn load_work_availability(
+        &self,
+        id: &ThreadId,
+    ) -> SessionResourceResult<peri_acp_types::session_resources::work::WorkAvailability> {
+        self.inner.load_work_availability(id).await
+    }
+
+    async fn load_work_delivery(
+        &self,
+        query: &peri_acp_types::session_resources::work::WorkDeliveryQuery,
+    ) -> SessionResourceResult<Option<peri_acp_types::session_resources::work::DeliveryRecord>>
+    {
+        self.inner.load_work_delivery(query).await
+    }
+
     async fn load_work_command(
         &self,
         query: &peri_acp_types::session_resources::work::WorkCommandQuery,

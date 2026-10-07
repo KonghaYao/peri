@@ -204,12 +204,11 @@ pub(crate) async fn commit_response(
             .runtime
             .tool_invocation_resolver
             .resolve(call, &all_tools)
-            .map_err(|error| {
+            .inspect_err(|_| {
                 tracing::warn!(
                     tool = %peri_acp_types::session::bounded_error_message(&call.name, 120),
                     "completed model response rejected before tool dispatch; original Reason checkpoint retained"
                 );
-                error
             })?;
         intents.push(bind_intent(&session, &invocation).await?);
         invocations.insert(call.id.clone(), invocation);

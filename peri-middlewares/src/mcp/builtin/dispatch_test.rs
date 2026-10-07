@@ -68,6 +68,269 @@ use peri_mcp_workspace::{
     WorkspaceResourcesInput,
 };
 
+mod invocation_fixture {
+    use std::sync::Arc;
+
+    use peri_acp_types::identity::AttemptId;
+    use peri_acp_types::messages::{BaseMessage, ToolCallRequest};
+    use peri_acp_types::session::{MessagePolicy, TurnId};
+    use peri_acp_types::session_resources::work::*;
+    use peri_acp_types::session_resources::{
+        ControlAttempt, FrozenSnapshotBytes, NewSession, NewSessionMeta, SessionResources,
+    };
+    use peri_acp_types::store::PersistedPayload;
+    use peri_acp_types::tools::ToolContext;
+    use peri_acp_types::workspace::SessionBinding;
+    use peri_resources::sessions::SessionResourcesImpl;
+    use serde_json::Value;
+    use sha2::{Digest, Sha256};
+
+    pub(super) const FIXTURE_SESSION_ID: &str = "builtin-dispatch-session";
+
+    pub(super) struct InvocationFixture {
+        _directory: tempfile::TempDir,
+        resources: Arc<dyn SessionResources>,
+        intents: Vec<Arc<InvocationIntent>>,
+        target: WorkTarget,
+    }
+
+    impl InvocationFixture {
+        pub(super) async fn new_calls(calls: &[(&str, Value)]) -> Self {
+            let directory = tempfile::tempdir().unwrap();
+            let resources: Arc<dyn SessionResources> = Arc::new(
+                SessionResourcesImpl::open(directory.path().join("invocations.db"))
+                    .await
+                    .unwrap(),
+            );
+            let workspace = resources.resolve_workspace(directory.path()).await.unwrap();
+            resources
+                .create_session(&NewSession {
+                    thread_id: FIXTURE_SESSION_ID.into(),
+                    created_at: peri_time::now_utc_rfc3339(),
+                    meta: NewSessionMeta {
+                        title: None,
+                        cwd: workspace.cwd.to_string_lossy().into_owned(),
+                        parent_thread_id: None,
+                        hidden: false,
+                        cancel_policy: Default::default(),
+                        snapshot_at_message_id: None,
+                    },
+                    binding: SessionBinding::from_workspace(&workspace),
+                    frozen: FrozenSnapshotBytes::new("{\"version\":1}"),
+                })
+                .await
+                .unwrap();
+            let intents = calls
+                .iter()
+                .enumerate()
+                .map(|(index, (tool, input))| {
+                    let arguments_json = serde_json::to_string(input).unwrap();
+                    let digest = format!("{:x}", Sha256::digest(arguments_json.as_bytes()));
+                    Arc::new(InvocationIntent {
+                        invocation_id: format!("invocation-{index}"),
+                        tool_call_id: format!("call-{index}"),
+                        tool_name: (*tool).into(),
+                        arguments_digest: digest.clone(),
+                        effective_tool_name: (*tool).into(),
+                        effective_arguments_digest: digest,
+                        effective_arguments_json: arguments_json.clone(),
+                        arguments_json,
+                        owner_identity: "fixture-owner".into(),
+                        scope_id: FIXTURE_SESSION_ID.into(),
+                        scope_epoch: None,
+                        authorization_ref: "fixture-policy".into(),
+                        recovery_locator: "fixture-link".into(),
+                    })
+                })
+                .collect::<Vec<_>>();
+            let mut fixture = Self {
+                _directory: directory,
+                resources,
+                intents,
+                target: WorkTarget {
+                    work_id: "act-work".into(),
+                    expected_work_revision: 0,
+                },
+            };
+            fixture
+                .apply(
+                    "publish",
+                    WorkAction::PublishDelivery {
+                        delivery: PublishDelivery {
+                            delivery_id: "delivery".into(),
+                            event: WorkEvent {
+                                producer_namespace: "fixture".into(),
+                                event_id: "event".into(),
+                                event_kind: "request".into(),
+                                causation_id: None,
+                                content: WorkPayload::from_payload(&PersistedPayload::Message(
+                                    BaseMessage::human("run"),
+                                ))
+                                .unwrap(),
+                            },
+                            purpose: DeliveryPurpose::UserInput,
+                            policy: MessagePolicy::ensure_processing(),
+                        },
+                    },
+                )
+                .await;
+            let snapshot = fixture.snapshot().await;
+            fixture
+                .apply(
+                    "admit",
+                    WorkAction::RegisterAdmission {
+                        admission: WorkAdmission {
+                            session_id: FIXTURE_SESSION_ID.into(),
+                            admission_id: "admission".into(),
+                            instance_id: "fixture-sdk".into(),
+                            generation_id: "fixture-generation".into(),
+                            lifecycle: 1,
+                            control_generation: snapshot.control.control_generation,
+                            work_id: snapshot.candidates[0].work_id.clone(),
+                            work_revision: snapshot.candidates[0].work_revision,
+                            execution: ControlAttempt {
+                                turn_id: TurnId::new(),
+                                attempt_id: AttemptId::new(),
+                            },
+                        },
+                    },
+                )
+                .await;
+            let snapshot = fixture.snapshot().await;
+            fixture
+                .apply(
+                    "claim",
+                    WorkAction::ClaimBatch {
+                        guard: Self::guard(&snapshot),
+                        batch_id: snapshot.candidates[0].work_id.clone(),
+                        delivery_ids: snapshot.candidates[0].delivery_ids.clone(),
+                    },
+                )
+                .await;
+            let snapshot = fixture.snapshot().await;
+            fixture
+                .apply(
+                    "reason",
+                    WorkAction::BeginReason {
+                        guard: Self::guard(&snapshot),
+                        target: Self::target(&snapshot, &snapshot.candidates[0].work_id),
+                        request_id: "request".into(),
+                        request: ReasonRequest {
+                            serialized_request: "{}".into(),
+                            request_digest: format!("{:x}", Sha256::digest(b"{}")),
+                            model_ref: "fixture-model".into(),
+                            authorization_ref: "fixture-policy".into(),
+                        },
+                    },
+                )
+                .await;
+            let snapshot = fixture.snapshot().await;
+            fixture
+                .apply(
+                    "response",
+                    WorkAction::CommitReasonResponseAndDispatchIntent {
+                        guard: Self::guard(&snapshot),
+                        target: Self::target(&snapshot, &snapshot.candidates[0].work_id),
+                        request_id: "request".into(),
+                        response: WorkPayload::from_payload(&PersistedPayload::Message(
+                            BaseMessage::ai_with_tool_calls(
+                                "run",
+                                fixture
+                                    .intents
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(index, intent)| {
+                                        ToolCallRequest::new(
+                                            &intent.tool_call_id,
+                                            &intent.tool_name,
+                                            calls[index].1.clone(),
+                                        )
+                                    })
+                                    .collect(),
+                            ),
+                        ))
+                        .unwrap(),
+                        dispatch_intents: fixture
+                            .intents
+                            .iter()
+                            .map(|intent| (**intent).clone())
+                            .collect(),
+                        next_work_id: Some("act-work".into()),
+                    },
+                )
+                .await;
+            for (index, intent) in fixture.intents.iter().enumerate() {
+                let snapshot = fixture.snapshot().await;
+                fixture
+                    .apply(
+                        &format!("dispatch-{index}"),
+                        WorkAction::BeginDispatch {
+                            guard: Self::guard(&snapshot),
+                            target: Self::target(&snapshot, "act-work"),
+                            invocation_id: intent.invocation_id.clone(),
+                        },
+                    )
+                    .await;
+            }
+            fixture.target = Self::target(&fixture.snapshot().await, "act-work");
+            fixture
+        }
+
+        pub(super) fn context(&self, index: usize) -> ToolContext<'_> {
+            let intent = &self.intents[index];
+            let mut context = ToolContext::new(&[], "/tmp")
+                .with_session_identity(FIXTURE_SESSION_ID, "fixture-turn")
+                .with_work_invocation(
+                    1,
+                    intent.clone(),
+                    self.target.clone(),
+                    self.resources.clone(),
+                );
+            context.invocation_id = Some(intent.invocation_id.clone());
+            context
+        }
+
+        async fn snapshot(&self) -> WorkSnapshot {
+            self.resources
+                .load_session_work(&WorkQuery {
+                    session_id: FIXTURE_SESSION_ID.into(),
+                    limit: 64,
+                })
+                .await
+                .unwrap()
+        }
+
+        async fn apply(&self, mutation_id: &str, action: WorkAction) {
+            let receipt = self
+                .resources
+                .apply_work_mutation(&WorkCommand {
+                    session_id: FIXTURE_SESSION_ID.into(),
+                    recipient_lifecycle: 1,
+                    mutation_id: mutation_id.into(),
+                    action,
+                })
+                .await
+                .unwrap();
+            assert_eq!(receipt.decision, WorkDecision::Accepted);
+        }
+
+        fn guard(snapshot: &WorkSnapshot) -> WorkGuard {
+            WorkGuard {
+                expected_revision: snapshot.state.revision,
+                expected_control_generation: snapshot.control.control_generation,
+                execution: snapshot.control.attempt.clone().unwrap(),
+            }
+        }
+
+        fn target(snapshot: &WorkSnapshot, work_id: &str) -> WorkTarget {
+            WorkTarget {
+                work_id: work_id.into(),
+                expected_work_revision: snapshot.state.works[work_id].revision,
+            }
+        }
+    }
+}
+
 // ══════════════════════════════════════════════════════════════════════════════
 // V 矩阵第 20 行：注册表 → 工厂映射；builtin 身份经 discover / status 传播
 // ══════════════════════════════════════════════════════════════════════════════
@@ -207,7 +470,7 @@ fn complete(response: CallToolResponse) -> CallToolResult {
 /// V 矩阵第 22 行（**宿主面**，原具名用例 `call_tool_uses_shared_result_mapping`）：cron
 /// 实例经 dispatch 工厂 + 真实 wire 的**烟测**（成功 / 业务失败两形态的协议外观），
 /// 以及 effective 名字（模型面）经生产 `McpToolBridge` 打回同一条真实链路的**桥接一致性**
-/// （成功文本 == 线路文本；失败转 `ToolCallError::CallFailed`，reason == 线路失败文本）。
+/// （成功文本 == 线路文本；失败转 `ApplicationFailed`，其封装的 reason == 线路失败文本）。
 ///
 /// 映射**规则本身**（固定脱敏文本、未知工具 → `invalid_params`、业务细节不入模型面）由各
 /// package 的 `server_test.rs` 逐实例覆盖，本文件不重复断言规则字面量：宿主已无映射实现
@@ -290,13 +553,14 @@ async fn call_tool_smoke_and_effective_bridge_round_trip() {
         //    `build_deferred_tool_bridges` 打回**同一条**真实链路的 handler。
         let pool = bridge_pool(case.instance, &peer).await;
         let bridges = build_deferred_tool_bridges(&pool);
+        let invocation_fixture = invocation_fixture::InvocationFixture::new_calls(&[
+            (effective_of(case.success_tool), case.success_input.clone()),
+            (effective_of(case.fail_tool), case.fail_input.clone()),
+        ])
+        .await;
         let success_bridge = bridge_of(&bridges, effective_of(case.success_tool));
         let bridged_success = success_bridge
-            .invoke(
-                case.success_input.clone(),
-                ToolContext::new(&[], &fixture.ctx.cwd)
-                    .with_session_identity("dispatch-session", "dispatch-turn"),
-            )
+            .invoke(case.success_input.clone(), invocation_fixture.context(0))
             .await
             .unwrap_or_else(|error| {
                 panic!("{}: effective 桥的成功路径不得失败：{error}", case.instance)
@@ -309,25 +573,29 @@ async fn call_tool_smoke_and_effective_bridge_round_trip() {
 
         let failure_bridge = bridge_of(&bridges, effective_of(case.fail_tool));
         let bridged_error = failure_bridge
-            .invoke(
-                case.fail_input.clone(),
-                ToolContext::new(&[], &fixture.ctx.cwd)
-                    .with_session_identity("dispatch-session", "dispatch-turn"),
-            )
+            .invoke(case.fail_input.clone(), invocation_fixture.context(1))
             .await
-            .expect_err("工具级失败经桥必须 Err（桥把 error 结果转成 CallFailed）");
-        match bridged_error.downcast_ref::<ToolCallError>() {
-            Some(ToolCallError::CallFailed { reason, tool, .. }) => {
+            .expect_err("工具级失败经桥必须 Err（桥把 error 结果转成 ApplicationFailed）");
+        match bridged_error.downcast_ref::<peri_acp_types::tools::EffectiveToolError>() {
+            Some(error) => {
                 assert_eq!(
-                    reason.as_str(),
-                    failure_text.as_str(),
+                    error.code,
+                    peri_acp_types::tools::EffectiveToolErrorCode::ApplicationFailed
+                );
+                assert_eq!(
+                    error.message,
+                    ToolCallError::CallFailed {
+                        server: case.instance.into(),
+                        tool: case.fail_tool.into(),
+                        reason: failure_text.into(),
+                    }
+                    .to_string(),
                     "{}: 桥接失败原因必须与线路失败文本逐字一致",
                     case.instance
                 );
-                assert_eq!(tool, case.fail_tool);
             }
             other => panic!(
-                "{}: 期望 CallFailed（reason = 线路失败文本），实际 {other:?}",
+                "{}: 期望 ApplicationFailed（reason = 线路失败文本），实际 {other:?}",
                 case.instance
             ),
         }
@@ -359,7 +627,7 @@ struct Wave2CallCase {
 async fn bridge_pool(instance: &str, peer: &Peer<RoleClient>) -> Arc<McpClientPool> {
     let pool = Arc::new(McpClientPool::new_empty());
     let manager: Arc<dyn TaskManager> = Arc::new(ConcreteTaskManager::new());
-    pool.bind_session_task_manager("dispatch-session", &manager);
+    pool.bind_session_task_manager(invocation_fixture::FIXTURE_SESSION_ID, &manager);
     let tools = peer
         .list_all_tools()
         .await

@@ -164,7 +164,7 @@ async fn missing_database_maps_to_database_not_found() {
 }
 
 /// 远程 locator 而凭证来源没配好（变量显式不存在）是**配置**错误：exit 2
-/// `store_not_configured`，在连网与本机 I/O 之前失败；locator 原文与凭证来源名都不回显。
+/// `store_not_configured`，在连网与本机 I/O 之前失败；错误保留凭证来源名。
 ///
 /// 该用例的前身是 `unwired_remote_store_reports_unavailable`（前提 `RemoteStoreNotWired`
 /// 已在 C 批删除，远程分支是真装配）：此时再断言「远程不可用」既非事实，也要求真去连网。
@@ -197,10 +197,7 @@ async fn missing_credential_configuration_is_a_configuration_error() {
         !rendered.contains("sentinel-db-sentinel-org"),
         "不回显 locator 原文: {rendered}"
     );
-    assert!(
-        !rendered.contains(ABSENT_CREDENTIAL_ENV),
-        "不回显凭证来源名: {rendered}"
-    );
+    assert!(rendered.contains(ABSENT_CREDENTIAL_ENV));
 }
 
 /// 缺少 locator 的凭证来源是配置错误：不是「空库」也不是「不存在」。

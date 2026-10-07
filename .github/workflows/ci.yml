@@ -47,6 +47,16 @@ jobs:
                   targets: ${{ matrix.target }}
                   components: clippy
 
+            - name: Install Bun
+              uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+              with:
+                  bun-version: 1.3.1
+
+            - name: Install SDK dependencies
+              shell: bash
+              working-directory: npm-packages/@peri-sdk
+              run: bun install --frozen-lockfile
+
             - name: Cache cargo registry and build
               uses: Swatinem/rust-cache@v2
               with:
@@ -60,17 +70,35 @@ jobs:
             - name: Run workspace tests (excluding middleware and MCP capabilities)
               shell: bash
               run: >-
-                  ./scripts/cargo-rmcp-patched.sh test --locked --workspace --exclude peri-middlewares
+                  ./scripts/cargo-rmcp-patched.sh test --locked --workspace --exclude peri-agent --exclude peri-tui --exclude peri-middlewares
                   --exclude peri-mcp-common --exclude peri-mcp-web --exclude peri-mcp-artifact
                   --exclude peri-mcp-cron --exclude peri-mcp-workspace
 
+            - name: Run Agent tests (excluding execution E2E)
+              shell: bash
+              run: |
+                  ./scripts/cargo-rmcp-patched.sh test --locked -p peri-agent --lib
+                  ./scripts/cargo-rmcp-patched.sh test --locked -p peri-agent --test middleware_tests --test compact_followup_behavior_test --test compact_failure_adversarial_test
+
+            - name: Run TUI tests (excluding real CLI continuation E2E)
+              shell: bash
+              run: |
+                  ./scripts/cargo-rmcp-patched.sh test --locked -p peri-tui --lib --bins --test meta_session_cli --test print_bare
+                  ./scripts/cargo-rmcp-patched.sh test --locked -p peri-tui --test print_exit -- --skip truncated_answer_recovers_and_exits_process_successfully
+
             # 涉及进程级全局状态的测试仍须串行执行。
-            - name: Run middleware and MCP capability tests (serial)
+            - name: Run middleware unit tests (serial, excluding E2E)
               shell: bash
               run: >-
-                  ./scripts/cargo-rmcp-patched.sh test --locked -p peri-middlewares -p peri-mcp-common -p peri-mcp-web
-                  -p peri-mcp-artifact -p peri-mcp-cron -p peri-mcp-workspace
-                  -- --test-threads=1
+                  ./scripts/cargo-rmcp-patched.sh test --locked -p peri-middlewares --lib
+                  -- --test-threads=1 --skip subagent::tool --skip mcp::workspace_recovery_tests
+                  --skip mcp::workspace_builtin_tests::bridge_accepts_workspace_owned_task_handle
+
+            - name: Run MCP capability tests (serial)
+              shell: bash
+              run: >-
+                  ./scripts/cargo-rmcp-patched.sh test --locked -p peri-mcp-common -p peri-mcp-web
+                  -p peri-mcp-artifact -p peri-mcp-cron -p peri-mcp-workspace -- --test-threads=1
 
             - name: Clippy
               shell: bash

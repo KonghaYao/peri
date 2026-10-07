@@ -24,8 +24,10 @@ async fn resource_owner_projection_preserves_missing_and_corrupt_facts() {
         SessionResourceErrorKind::NotFound
     ));
 
-    let mut state = WorkState::default();
-    state.revision = 7;
+    let mut state = WorkState {
+        revision: 7,
+        ..Default::default()
+    };
     let owner = ResourceOwnerBinding {
         recipient_lifecycle: 1,
         connections_json: "{}".into(),

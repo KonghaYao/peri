@@ -361,13 +361,9 @@ async fn reason_refresh_rebinds_search_and_execute_to_same_dynamic_catalog() {
         ports::SessionMcpCapabilityPort,
     };
     use peri_agent::{
-        agent::{
-            react::{ReactLLM, Reasoning, StreamingContext},
-            stages::{reason::run_reason, ReasonInput, StageContext},
-        },
+        agent::react::{ReactLLM, Reasoning, StreamingContext},
         messages::BaseMessage,
-        middleware::chain::MiddlewareChain,
-        session::{store::FrozenContext, tool_catalog::SessionToolCatalog, Session},
+        session::tool_catalog::SessionToolCatalog,
         tools::ToolContext,
     };
 
@@ -474,29 +470,25 @@ async fn reason_refresh_rebinds_search_and_execute_to_same_dynamic_catalog() {
 
     let search_result = Arc::new(StdRwLock::new(None));
     let execute_result = Arc::new(StdRwLock::new(None));
-    let mut chain = MiddlewareChain::new();
-    chain.add(Box::new(middleware));
-    let session = Session::new(Arc::from("/tmp"), FrozenContext::builder().build(), None);
-    let context = StageContext::builder(
-        session.start_turn(),
-        session.transcript(),
-        session.queue().clone(),
-    )
-    .with_tools(working)
-    .with_tool_catalog(catalog)
-    .with_middleware_chain(Arc::new(chain))
-    .with_llm(Arc::new(CatalogObservingLlm {
+    let snapshot = catalog.refresh().unwrap();
+    *working.write() = snapshot.tool_map();
+    middleware
+        .before_reason_catalog(&mut LocalToolsState::new(Arc::clone(&working)))
+        .await
+        .unwrap();
+    let model = CatalogObservingLlm {
         search_result: Arc::clone(&search_result),
         execute_result: Arc::clone(&execute_result),
-    }))
-    .build();
-
-    run_reason(ReasonInput {
-        context,
-        has_tool_calls: false,
-    })
-    .await
-    .unwrap();
+    };
+    let tools: Vec<_> = working.read().values().cloned().collect();
+    model
+        .generate_reasoning(
+            &[],
+            &tools.iter().map(|tool| tool.as_ref()).collect::<Vec<_>>(),
+            None,
+        )
+        .await
+        .unwrap();
 
     let search_result = search_result.read().unwrap().clone().unwrap();
     assert!(search_result.contains("mcp__echo__echo"), "{search_result}");

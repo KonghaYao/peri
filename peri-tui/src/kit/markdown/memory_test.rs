@@ -89,8 +89,10 @@ fn owned_cow_capacity_is_charged_but_borrowed_text_is_not() {
 
 #[test]
 fn legacy_test_only_state_is_excluded_from_production_budget() {
-    let mut cache = MarkdownRenderCache::default();
-    cache.stable_text = "legacy".repeat(4096);
+    let mut cache = MarkdownRenderCache {
+        stable_text: "legacy".repeat(4096),
+        ..Default::default()
+    };
     cache.stable_state.current_text = vec![Line::from("legacy".repeat(4096))];
     cache.stable_state.segments = vec![MarkdownSegment::Text(vec![Line::from(
         "legacy".repeat(4096),

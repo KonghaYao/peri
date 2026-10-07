@@ -110,7 +110,7 @@ pub fn state_event_to_executor(event: StateEvent) -> Option<ExecutorEvent> {
         StateEvent::UserInputQueueChanged { snapshot, .. } => {
             Some(ExecutorEvent::UserInputQueueChanged(snapshot))
         }
-        StateEvent::ProtocolEvent { event, .. } => Some(event),
+        StateEvent::ProtocolEvent { event, .. } => Some(*event),
         StateEvent::StateSnapshot {
             message_count,
             total_tokens,

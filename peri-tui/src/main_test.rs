@@ -368,9 +368,9 @@ fn test_session_store_deployment_normalizes_locator_options() {
     assert_eq!(deployment.access(), AccessMode::ReadOnly);
 }
 
-/// `Debug` 不回显 locator 原文（远程 locator 含主机与库名）。
+/// `Debug` 保留 locator 原文，供运行时诊断。
 #[test]
-fn test_session_store_deployment_debug_keeps_locator_out() {
+fn test_session_store_deployment_debug_preserves_locator() {
     let cli = Cli::try_parse_from([
         "peri",
         "--session-store",
@@ -379,8 +379,7 @@ fn test_session_store_deployment_debug_keeps_locator_out() {
     .unwrap();
     let deployment = session_store_deployment(&cli, AccessMode::ReadWrite).unwrap();
     let rendered = format!("{deployment:?}");
-    assert!(!rendered.contains("sentinel-db-sentinel"));
-    assert!(rendered.contains("<configured>"));
+    assert!(rendered.contains("sentinel-db-sentinel"));
 }
 
 /// meta 的受限 grammar 同步：只接受定位参数与 session 自身的 `--json`。

@@ -1,3 +1,4 @@
+use super::*;
 use agent_client_protocol_schema::v1::{
     ToolCallContent, ToolCallStatus, ToolCallUpdateFields, ToolKind,
 };
@@ -8,10 +9,6 @@ use peri_acp_types::event::{
 use peri_acp_types::messages::{BaseMessage, MessageId};
 use peri_acp_types::tools::ToolDefinition;
 use peri_model::{StopReason, TokenUsage};
-use serde_json::Value;
-
-use super::*;
-
 #[test]
 fn test_llm_call_end_maps_to_enriched_usage_update() {
     let event = ExecutorEvent::LlmCallEnd {

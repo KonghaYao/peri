@@ -26,13 +26,15 @@ pub enum ExecutionFailureKind {
 pub enum TurnTelemetryOutcome {
     Completed,
     Stopped { reason: PromptStopReason },
-    Failed { failure: ExecutionFailure },
+    Failed { failure: Box<ExecutionFailure> },
 }
 
 impl TurnTelemetryOutcome {
     pub fn from_result(stop_reason: PromptStopReason, failure: Option<ExecutionFailure>) -> Self {
         if let Some(failure) = failure {
-            Self::Failed { failure }
+            Self::Failed {
+                failure: Box::new(failure),
+            }
         } else if stop_reason == PromptStopReason::EndTurn {
             Self::Completed
         } else {
@@ -77,7 +79,7 @@ pub struct ExecutionFailure {
     pub http_status: Option<u16>,
     /// Optional allowlisted model facts. ACP serializes these through an
     /// explicit host projection; this DTO itself is not serde.
-    pub diagnostic: Option<peri_model::ModelErrorDiagnostic>,
+    pub diagnostic: Option<Box<peri_model::ModelErrorDiagnostic>>,
 }
 
 impl ExecutionFailure {
@@ -154,7 +156,7 @@ impl ExecutionFailure {
             error_category: None,
             causes: Vec::new(),
             http_status,
-            diagnostic,
+            diagnostic: diagnostic.map(Box::new),
         }
     }
 

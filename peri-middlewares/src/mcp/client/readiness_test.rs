@@ -664,15 +664,15 @@ fn discovery_evidence_is_complete_only_with_nonzero_generation() {
 }
 
 #[test]
-fn system_readiness_error_display_is_secret_safe() {
-    // 危险形态：控制字符 + URL query 凭据（全部为虚构值）。
+fn system_readiness_error_display_preserves_diagnostics_without_control_characters() {
+    // 控制字符仍折叠；原始 server 诊断依 ARC-SECRET-001 保留。
     let error = SystemReadinessError::Disabled {
         server: "sys\u{0}\nhttps://mcp.example.invalid/endpoint?token=fixture-value".to_string(),
     };
     let text = error.to_string();
     assert!(!text.contains('\n'), "文案不得包含换行: {text}");
     assert!(!text.contains('\u{0}'), "文案不得包含控制字符: {text}");
-    assert!(!text.contains("fixture-value"), "文案不得包含凭据: {text}");
+    assert!(text.contains("fixture-value"), "诊断不得被改写: {text}");
     assert!(text.contains("sys"));
     assert!(text.contains("服务器已禁用"));
 

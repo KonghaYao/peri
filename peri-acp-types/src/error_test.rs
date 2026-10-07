@@ -32,7 +32,7 @@ fn stream_recovery_preserves_attempts_and_raw_model_details() {
     };
     let failure = ExecutionFailure::from_agent_error(&error);
     assert_eq!(failure.kind, ExecutionFailureKind::Llm);
-    assert_eq!(failure.diagnostic, Some(source.diagnostic()));
+    assert_eq!(failure.diagnostic.as_deref(), Some(&source.diagnostic()));
     for fact in [
         "recovery exhausted after 6 attempts",
         "socket closed while streaming",
@@ -59,7 +59,7 @@ fn stream_recovery_preserves_http_classification() {
     let failure = ExecutionFailure::from_agent_error(&error);
     assert_eq!(failure.kind, ExecutionFailureKind::LlmHttp);
     assert_eq!(failure.http_status, Some(503));
-    assert_eq!(failure.diagnostic, Some(source.diagnostic()));
+    assert_eq!(failure.diagnostic.as_deref(), Some(&source.diagnostic()));
     assert!(failure.public_message.contains("Bearer synthetic-request"));
 }
 

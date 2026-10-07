@@ -117,9 +117,10 @@ fn sql_binds_all_dynamic_values() {
         _ => panic!("timestamp must be text"),
     }
     let debug = format!("{spec:?}");
-    for secret in [principal, machine, key, payload, "top-secret"] {
-        assert!(!debug.contains(secret));
+    for value in [principal, machine, key, "top-secret"] {
+        assert!(debug.contains(value));
     }
+    assert!(debug.contains(&format!("{:?}", Value::Text(payload.into()))));
 }
 
 #[tokio::test]

@@ -259,6 +259,7 @@ async fn worktree_new_resources_use_the_target_directory() {
     let target = tmp.path().join("target");
     std::fs::create_dir(&startup).unwrap();
     std::fs::create_dir(&target).unwrap();
+    std::fs::write(startup.join("CLAUDE.md"), "STARTUP_FROZEN_CONFIGURATION").unwrap();
     std::fs::write(target.join("CLAUDE.md"), "TARGET_FROZEN_CONFIGURATION").unwrap();
     let config =
         make_peri_config_with_provider(make_provider_config("test", "openai", "key", "model"));
@@ -293,6 +294,13 @@ async fn worktree_new_resources_use_the_target_directory() {
         .v2_frozen()
         .claude_md
         .contains("TARGET_FROZEN_CONFIGURATION"));
+    assert!(!state
+        .frozen
+        .as_ref()
+        .unwrap()
+        .v2_frozen()
+        .claude_md
+        .contains("STARTUP_FROZEN_CONFIGURATION"));
     assert_eq!(
         environment.cfg.session_manager.get_session(id).unwrap().cwd,
         state.cwd
@@ -307,7 +315,7 @@ async fn worktree_new_resources_use_the_target_directory() {
     let workspace = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
             if let Some(client) = pool.get_client("workspace") {
-                if client.peer.is_some() && !client.tools.is_empty() {
+                if client.peer.is_some() && !client.resources.is_empty() {
                     break client;
                 }
             }
@@ -316,25 +324,13 @@ async fn worktree_new_resources_use_the_target_directory() {
     })
     .await
     .expect("bare workspace 必须完成初始化");
-    use peri_agent::tools::{BaseTool, ToolContext};
-    let read_tool = workspace
-        .tools
-        .iter()
-        .find(|tool| tool.name == "Read")
-        .unwrap();
-    let read = peri_middlewares::mcp::tool_bridge::McpToolBridge::new(
-        "workspace",
-        read_tool,
-        workspace.clone(),
-    )
-    .with_output_store(&pool, Some(id))
-    .invoke(
-        json!({"file_path": "CLAUDE.md"}),
-        ToolContext::new(&[], &state.cwd).with_session_identity(id, "test-turn"),
-    )
-    .await
-    .unwrap();
-    assert!(read.contains("TARGET_FROZEN_CONFIGURATION"));
+    assert!(workspace.resources.iter().any(|resource| {
+        resource.uri == peri_acp_types::workspace_resources::INSTRUCTION_MAIN_URI
+    }));
+    let (main, _) = pool.read_builtin_workspace_instructions().await.unwrap();
+    let main = main.expect("target workspace instruction resource must be readable");
+    assert!(main.contains("TARGET_FROZEN_CONFIGURATION"));
+    assert!(!main.contains("STARTUP_FROZEN_CONFIGURATION"));
     assert!(environment.cfg.hook_groups.is_empty());
     assert_eq!(cfg.session_manager.get_session(id).unwrap().cwd, state.cwd);
     handle_request(

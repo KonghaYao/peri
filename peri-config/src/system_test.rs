@@ -770,7 +770,7 @@ fn mcp_update_accepts_unattributed_and_current_project_servers() {
 }
 
 #[test]
-fn explanations_and_debug_output_do_not_reveal_environment_secrets() {
+fn explanations_omit_environment_secrets_while_debug_preserves_inputs() {
     let temp = tempfile::tempdir().unwrap();
     let scope = make_scope(temp.path(), "project");
     let mut inputs = make_inputs(None, None, None);
@@ -782,10 +782,10 @@ fn explanations_and_debug_output_do_not_reveal_environment_secrets() {
         .insert("LANGFUSE_SECRET_KEY".into(), "sk-hidden-secret".into());
     let snapshot = ConfigurationSnapshot::resolve(scope, inputs.clone()).unwrap();
     let explanation = snapshot.explain(ConfigurationField::Observability);
-    let rendered = format!(
-        "{snapshot:?} {inputs:?} {explanation:?} {:?}",
-        snapshot.observability()
-    );
-    assert!(!rendered.contains("pk-visible-secret"));
-    assert!(!rendered.contains("sk-hidden-secret"));
+    let explanation_rendered = format!("{explanation:?}");
+    assert!(!explanation_rendered.contains("pk-visible-secret"));
+    assert!(!explanation_rendered.contains("sk-hidden-secret"));
+    let debug = format!("{snapshot:?} {inputs:?} {:?}", snapshot.observability());
+    assert!(debug.contains("pk-visible-secret"));
+    assert!(debug.contains("sk-hidden-secret"));
 }

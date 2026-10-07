@@ -344,9 +344,28 @@ async fn test_user_input_takeback_and_dispatch_share_server_state() {
         1,
         "剩余队列只有已发布的第二条"
     );
-    assert!(
-        cfg.session_manager.v2_queue_for(&sid).unwrap().len() == 1,
-        "只有可靠发布成功的第二条可作为 MQ 提示"
+    let work = cfg
+        .session_resources
+        .load_session_work(&peri_acp_types::session_resources::work::WorkQuery {
+            session_id: sid,
+            limit: 1,
+        })
+        .await
+        .unwrap();
+    assert_eq!(work.state.deliveries.len(), 1);
+    assert_eq!(
+        work.state
+            .deliveries
+            .values()
+            .next()
+            .unwrap()
+            .publication
+            .event
+            .content
+            .message_id
+            .as_uuid()
+            .to_string(),
+        second_id
     );
 }
 
@@ -553,8 +572,8 @@ async fn test_user_input_wire_control_responds_while_prompt_lock_is_held() {
     .expect("队列请求不能等待 prompt 锁")
     .unwrap();
     assert_eq!(
-        reply["results"][0]["state"], "dispatching",
-        "运行中发送必须先可靠发布，执行仍由 SDK 串行准入"
+        reply["results"][0]["state"], "queued",
+        "运行中的输入等待 SDK 串行准入"
     );
     let reply = tokio::time::timeout(
         std::time::Duration::from_secs(2),
@@ -725,7 +744,7 @@ async fn test_user_input_stdio_uses_same_short_control_requests() {
     .await
     .expect("stdio 控制请求必须及时回复");
     assert_eq!(
-        response["result"]["results"][0]["state"], "dispatching",
+        response["result"]["results"][0]["state"], "queued",
         "stdio 与 MPSC 保持相同入队行为"
     );
     assert_eq!(
@@ -757,6 +776,10 @@ async fn test_user_input_cancel_rejects_stale_ticket_without_cancelling_current_
     .unwrap();
     let generation = initial["generation"].as_str().unwrap();
     let input_id = "00000000-0000-0000-0000-000000000001";
+    let mailbox = cfg.session_manager.user_input_mailbox_for(&sid).unwrap();
+    let old = mailbox
+        .attach_external_attempt(CancellationToken::new(), false)
+        .unwrap();
     handle_request(
         "session/input/enqueue",
         &make_user_input_request(&sid, generation, input_id, "继续这条"),
@@ -766,10 +789,6 @@ async fn test_user_input_cancel_rejects_stale_ticket_without_cancelling_current_
     )
     .await
     .unwrap();
-    let mailbox = cfg.session_manager.user_input_mailbox_for(&sid).unwrap();
-    let old = mailbox
-        .attach_external_attempt(CancellationToken::new(), false)
-        .unwrap();
     mailbox.stop();
     mailbox.finish_attempt(&old, UserInputAttemptOutcome::Interrupted);
     handle_request(

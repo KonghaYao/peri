@@ -584,10 +584,7 @@ async fn closed_web_tool_call_never_reaches_approval_or_wire() {
         })
         .await
         .unwrap();
-    assert!(work.blocked);
-    assert!(work.state.works.values().any(|record| record.stage
-        == peri_acp_types::session_resources::work::WorkStage::Blocked
-        && record.reason_request.is_some()));
+    assert!(!work.blocked, "未知工具错误不应伪造持久 Work 阻塞");
     assert!(!work
         .state
         .invocations
@@ -808,8 +805,12 @@ async fn system_dependency_failure_is_fatal_even_with_builtin_instances_live() {
     );
     assert_eq!(
         wire.data,
-        Some(serde_json::json!({ "kind": "internal" })),
-        "MCP 准入失败只能投影为 internal 类别"
+        Some(serde_json::json!({
+            "kind": "internal",
+            "error_category": "middleware",
+            "causes": [failure.public_message],
+        })),
+        "MCP 准入失败必须保留 internal 类别与中间件原因"
     );
 
     let operations = sink.operations();

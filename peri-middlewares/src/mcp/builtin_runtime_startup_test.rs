@@ -527,7 +527,7 @@ async fn builtin_instances_are_distinct_and_reconnect_touches_one_generation() {
 /// 且能力面按关闭集收缩。
 ///
 /// 该往返用真实 `ArtifactMcpServer`（`ArtifactTool::new(cwd)`）：不存在的文件在**网络之前**
-/// 失败，因此结果是 IF-D14 的固定规则文本（错误形态、无路径 / 无凭据泄漏），而**往返本身**
+/// 失败，因此结果是 package 契约中的缺失文件诊断（含解析后的路径），而**往返本身**
 /// 是完整的（请求真的上了链路、结果真的回来了）。成功上载形态由 `mcp::builtin::artifact`
 /// 用注入客户端覆盖（需要网络或本地桩，不在本文件重复）。
 #[tokio::test]
@@ -601,21 +601,22 @@ async fn closing_web_keeps_artifact_capability_and_real_call() {
         "artifact 声明的 direct 必须生效（IF-D13）"
     );
 
+    let input = json!({ "file_path": "missing-artifact-fixture.html" });
+    let invocation_fixture =
+        invocation_fixture::InvocationFixture::new(bridge.name(), std::slice::from_ref(&input))
+            .await;
     let error = bridge
-        .invoke(
-            json!({ "file_path": "missing-artifact-fixture.html" }),
-            fixture_tool_context(&cwd),
-        )
+        .invoke(input, invocation_fixture.context(0))
         .await
         .expect_err("不存在的文件必须在建立网络请求之前失败");
     let message = error.to_string();
     assert!(
-        message.contains("withheld by policy"),
-        "结果必须是 IF-D14 的固定规则文本，实际: {message}"
+        message.contains("File not found:"),
+        "结果必须保留真实的缺失文件诊断，实际: {message}"
     );
     assert!(
-        !message.contains(&cwd),
-        "IF-D14 文本不得泄漏路径，实际: {message}"
+        message.contains(&cwd),
+        "artifact package 契约要求错误诊断保留解析后的路径，实际: {message}"
     );
 
     fixture.shutdown().await;

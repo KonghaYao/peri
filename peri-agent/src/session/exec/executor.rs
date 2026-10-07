@@ -342,7 +342,7 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
     })
     .await
     {
-        InterceptOutcome::Handled(result) => return result,
+        InterceptOutcome::Handled(result) => return *result,
         InterceptOutcome::Inject(text) => MessageContent::text(text),
         InterceptOutcome::PassThrough => content,
     };

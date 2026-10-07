@@ -223,12 +223,13 @@ async fn policy_close_dimensions() {
         mw_instance_tools(&projection, "cron").is_empty(),
         "实例键关闭后 cron 工具必须从投影中消失"
     );
-    let call_cwd = fixture.project.to_string_lossy().to_string();
+    let invocation_fixture =
+        invocation_fixture::InvocationFixture::new("mcp__cron__cron_list", &[json!({})]).await;
     let text = tokio::time::timeout(
         MW_BOUND,
         fixture
             .typed_bridge("mcp__cron__cron_list")
-            .invoke(json!({}), fixture_tool_context(&call_cwd)),
+            .invoke(json!({}), invocation_fixture.context(0)),
     )
     .await
     .expect("策略关闭后 raw bridge 调用仍必须在有界等待内返回")

@@ -96,7 +96,7 @@ mod wire_projection {
             kind: ExecutionFailureKind::LlmHttp,
             public_message: "upstream failed".into(),
             http_status: Some(500),
-            diagnostic: Some(diagnostic),
+            diagnostic: Some(Box::new(diagnostic)),
             error_category: Some("http_status".into()),
             causes: causes.clone(),
         };
@@ -249,7 +249,7 @@ mod wire_projection {
         );
         assert_eq!(data["causes"], serde_json::json!(failure.causes));
         let wire = serde_json::to_string(&err).expect("safe ACP error should serialize");
-        assert!(!wire.contains("body"));
+        assert!(data["diagnostic"]["body"].is_null());
         assert!(!wire.contains("prompt"));
     }
 
@@ -362,9 +362,9 @@ mod wire_projection {
     }
 
     /// System MCP 启动准入失败（`McpMiddleware`）在 ACP 边界的投影契约：
-    /// 类别固定 `Internal` → `-32000`、`data` 只有 `kind=internal`、不携带
-    /// status / diagnostic，message 保留 `Middleware error: {middleware} - {reason}`
-    /// 形态——安全文案由 MCP 边界构造，ACP 不替它脱敏也不额外补内部 cause。
+    /// 类别固定 `Internal` → `-32000`、`data` 不携带 status / diagnostic，
+    /// 但保留 error_category / causes；message 保留
+    /// `Middleware error: {middleware} - {reason}` 形态。
     ///
     /// 真实失败文本由 `host::mcp_v4_startup_tests` 的端到端用例断言（真实
     /// gate 产生的 `ExecutionFailure` 走同一投影函数）。
@@ -389,11 +389,25 @@ mod wire_projection {
             err.message,
             "Middleware error: McpMiddleware - System MCP startup rejected"
         );
-        assert_eq!(err.data, Some(serde_json::json!({"kind": "internal"})));
+        assert_eq!(
+            err.data,
+            Some(serde_json::json!({
+                "kind": "internal",
+                "error_category": failure.error_category,
+                "causes": failure.causes,
+            }))
+        );
 
         let wire = serde_json::to_value(&err).expect("AcpError 序列化不应失败");
         assert_eq!(wire["code"], ACP_TURN_EXECUTION_FAILED_CODE);
-        assert_eq!(wire["data"], serde_json::json!({"kind": "internal"}));
+        assert_eq!(
+            wire["data"],
+            serde_json::json!({
+                "kind": "internal",
+                "error_category": failure.error_category,
+                "causes": failure.causes,
+            })
+        );
     }
 }
 

@@ -17,7 +17,7 @@ fn complete(response: CallToolResponse) -> CallToolResult {
     }
 }
 
-/// Failed writes expose an owned draft reference, never the draft content.
+/// Failed writes expose an owned draft reference and the I/O diagnostic, never the draft content.
 #[tokio::test]
 async fn write_draft_receipt_can_restore_without_resending_content() {
     let dir = tempfile::tempdir().unwrap();
@@ -47,10 +47,14 @@ async fn write_draft_receipt_can_restore_without_resending_content() {
             _ => None,
         })
         .unwrap();
-    assert!(!text.contains("private-draft-marker") && !text.contains(&cwd));
+    assert!(!text.contains("private-draft-marker"));
+    assert!(text.contains(&cwd));
     let draft = text
         .split("from_draft=")
         .nth(1)
+        .unwrap()
+        .split_whitespace()
+        .next()
         .unwrap()
         .trim_end_matches('.');
 

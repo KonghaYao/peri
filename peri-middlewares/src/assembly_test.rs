@@ -11,7 +11,7 @@
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 
 use async_trait::async_trait;
-use futures::stream;
+use futures::{stream, TryStreamExt};
 use parking_lot::RwLock;
 use peri_agent::agent::workflow::WorkflowAgentContext;
 use peri_agent::{
@@ -45,6 +45,17 @@ use crate::{
     tools::TodoItem,
 };
 use peri_acp_types::agents::AgentOverrides;
+use peri_acp_types::execution_admission::{
+    AdmissionOutcome, AdmissionRequest, EntryOutcome, EntryReceipt, EntryRequest,
+    ExecutionAdmissionError, ExecutionAdmissionPort, SettlementOutcome, SettlementReceipt,
+    SettlementRequest,
+};
+use peri_acp_types::session_resources::{
+    work::{WorkAction, WorkAdmission, WorkCommand, WorkDecision, WorkQuery},
+    ControlAttempt, FrozenSnapshotBytes, NewSession, NewSessionMeta, SessionResources,
+};
+use peri_acp_types::workspace::SessionBinding;
+use peri_resources::sessions::SessionResourcesImpl;
 
 // ── fakes ─────────────────────────────────────────────────────────────────────
 
@@ -187,10 +198,42 @@ impl Model for FakeModel {
 }
 
 struct CancelGateModel {
-    entered: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    entered: Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
 }
 
+impl Clone for CancelGateModel {
+    fn clone(&self) -> Self {
+        Self {
+            entered: self.entered.clone(),
+        }
+    }
+}
+
+#[derive(Clone)]
 struct CompletedWorkflowModel;
+
+fn prepared_workflow_model_call<M: Model + Clone + 'static>(
+    model: M,
+    request: ModelRequest,
+) -> ModelResult<peri_model::PreparedModelCall> {
+    let checkpoint = serde_json::json!({
+        "provider": "workflow-test",
+        "model": "workflow-fixture",
+        "endpoint": "https://workflow.test.invalid/stream",
+        "credentialRef": "fixture:no-credential",
+        "body": serde_json::to_value(&request).unwrap(),
+    });
+    Ok(peri_model::PreparedModelCall::new(
+        checkpoint,
+        move |cancellation| {
+            let stream_cancellation = cancellation.clone();
+            let events =
+                stream::once(async move { model.stream(request, stream_cancellation).await })
+                    .try_flatten();
+            Ok(ModelStream::with_parent_cancellation(events, cancellation))
+        },
+    ))
+}
 
 #[async_trait]
 impl Model for CompletedWorkflowModel {
@@ -199,6 +242,10 @@ impl Model for CompletedWorkflowModel {
             supports_streaming: true,
             ..ModelCapabilities::default()
         }
+    }
+
+    fn prepare_stream(&self, request: ModelRequest) -> ModelResult<peri_model::PreparedModelCall> {
+        prepared_workflow_model_call(self.clone(), request)
     }
 
     async fn stream(
@@ -226,6 +273,10 @@ impl Model for CancelGateModel {
             supports_streaming: true,
             ..ModelCapabilities::default()
         }
+    }
+
+    fn prepare_stream(&self, request: ModelRequest) -> ModelResult<peri_model::PreparedModelCall> {
+        prepared_workflow_model_call(self.clone(), request)
     }
 
     async fn stream(
@@ -470,6 +521,151 @@ fn workflow_context_with_disabled(disabled: &[&str]) -> WorkflowAgentContext {
         langfuse_hooks: None,
         langfuse_event_handler: None,
         meta_harness_disabled: disabled.iter().map(|s| s.to_string()).collect(),
+    }
+}
+
+struct WorkflowExecutionFixture {
+    _directory: tempfile::TempDir,
+    resources: Arc<dyn SessionResources>,
+    cwd: String,
+    parent_id: String,
+}
+
+impl WorkflowExecutionFixture {
+    async fn new(parent_id: &str) -> Self {
+        let directory = tempfile::tempdir().unwrap();
+        let resources: Arc<dyn SessionResources> = Arc::new(
+            SessionResourcesImpl::open(directory.path().join("threads.db"))
+                .await
+                .unwrap(),
+        );
+        let workspace = resources.resolve_workspace(directory.path()).await.unwrap();
+        let cwd = workspace.cwd.to_string_lossy().into_owned();
+        resources
+            .create_session(&NewSession {
+                thread_id: parent_id.to_owned(),
+                created_at: peri_time::now_utc_rfc3339(),
+                meta: NewSessionMeta {
+                    title: None,
+                    cwd: cwd.clone(),
+                    parent_thread_id: None,
+                    hidden: false,
+                    cancel_policy: Default::default(),
+                    snapshot_at_message_id: None,
+                },
+                binding: SessionBinding::from_workspace(&workspace),
+                frozen: FrozenSnapshotBytes::new("{\"version\":1}"),
+            })
+            .await
+            .unwrap();
+        let snapshot = resources
+            .load_session_work(&WorkQuery {
+                session_id: parent_id.to_owned(),
+                limit: 1,
+            })
+            .await
+            .unwrap();
+        let receipt = resources
+            .apply_work_mutation(&WorkCommand {
+                session_id: parent_id.to_owned(),
+                recipient_lifecycle: snapshot.control.lifecycle,
+                mutation_id: format!("fixture-workflow-owners:{parent_id}"),
+                action: WorkAction::BindResourceOwners {
+                    expected_revision: snapshot.state.revision,
+                    connections_json:
+                        "{\"workspace\":{\"url\":\"https://workspace.test.invalid/mcp\"}}".into(),
+                    authorization_ref: "fixture-workflow-authorization".into(),
+                },
+            })
+            .await
+            .unwrap();
+        assert_eq!(receipt.decision, WorkDecision::Accepted);
+        Self {
+            _directory: directory,
+            resources,
+            cwd,
+            parent_id: parent_id.to_owned(),
+        }
+    }
+
+    fn bind(&self, context: &mut WorkflowAgentContext) {
+        context.cwd = self.cwd.clone();
+        context.session_id = Some(self.parent_id.clone());
+        context.session_resources = Some(self.resources.clone());
+        context.execution_admission_port =
+            Some(Arc::new(WorkflowFixtureAdmission(self.resources.clone())));
+    }
+}
+
+struct WorkflowFixtureAdmission(Arc<dyn SessionResources>);
+
+#[async_trait]
+impl ExecutionAdmissionPort for WorkflowFixtureAdmission {
+    async fn admit(
+        &self,
+        request: AdmissionRequest,
+    ) -> Result<AdmissionOutcome, ExecutionAdmissionError> {
+        let snapshot = request.snapshot;
+        let Some(candidate) = snapshot.candidates.first() else {
+            return Ok(AdmissionOutcome::Blocked {
+                reason: "fixture has no durable work".into(),
+            });
+        };
+        Ok(AdmissionOutcome::Admitted {
+            admission: WorkAdmission {
+                session_id: snapshot.session_id,
+                admission_id: request.request_id,
+                instance_id: "fixture-sdk-instance".into(),
+                generation_id: "fixture-sdk-generation".into(),
+                lifecycle: snapshot.control.lifecycle,
+                control_generation: snapshot.control.control_generation,
+                work_id: candidate.work_id.clone(),
+                work_revision: candidate.work_revision,
+                execution: ControlAttempt {
+                    turn_id: peri_acp_types::session::TurnId::new(),
+                    attempt_id: peri_acp_types::identity::AttemptId::new(),
+                },
+            },
+        })
+    }
+
+    async fn entered(
+        &self,
+        request: EntryRequest,
+    ) -> Result<EntryOutcome, ExecutionAdmissionError> {
+        let snapshot = self
+            .0
+            .load_session_work(&WorkQuery {
+                session_id: request.admission.session_id.clone(),
+                limit: 1,
+            })
+            .await
+            .map_err(|error| ExecutionAdmissionError::Protocol(error.to_string()))?;
+        let registration = &snapshot.state.admissions[&request.admission.admission_id];
+        assert_eq!(registration.admission, request.admission);
+        assert_eq!(
+            registration.entering_receipt.as_ref().unwrap().mutation_id,
+            request.entry_evidence_id
+        );
+        Ok(EntryOutcome::Applied {
+            receipt: EntryReceipt {
+                admission: request.admission,
+                entry_evidence_id: request.entry_evidence_id,
+            },
+        })
+    }
+
+    async fn settle(
+        &self,
+        request: SettlementRequest,
+    ) -> Result<SettlementOutcome, ExecutionAdmissionError> {
+        assert!(request.proof.validates(&request.admission));
+        Ok(SettlementOutcome::Applied {
+            receipt: SettlementReceipt {
+                admission: request.admission,
+                evidence_id: request.proof.evidence_id().to_owned(),
+            },
+        })
     }
 }
 

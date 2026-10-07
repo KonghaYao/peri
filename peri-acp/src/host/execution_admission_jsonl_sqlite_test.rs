@@ -15,6 +15,7 @@ use std::sync::Arc;
 struct JoinedDomainFixture {
     dispatcher: std::sync::OnceLock<std::sync::Weak<JsonlSdkDispatcher>>,
     stopped: AtomicBool,
+    settled_reply: std::sync::OnceLock<Value>,
     fail_after_confirmation: bool,
 }
 
@@ -152,11 +153,20 @@ impl RequestTransport for JoinedDomainFixture {
                 tokio::spawn(async { tokio::task::yield_now().await })
                     .await
                     .unwrap();
-                self.stopped.store(true, Ordering::SeqCst);
-                Ok(json!({"status":"settled","ticket":admission,"proof":{
+                let reply = json!({"status":"settled","ticket":admission,"proof":{
                     "kind":"attemptStopped","instanceId":admission.instance_id,"generationId":admission.generation_id,
                     "execution":admission.execution,"evidenceId":"joined-domain-fixture",
-                }}))
+                }});
+                self.settled_reply.set(reply.clone()).unwrap();
+                self.stopped.store(true, Ordering::SeqCst);
+                Ok(reply)
+            }
+            "session/execute/resolve" => {
+                let Some(reply) = self.settled_reply.get() else {
+                    return Ok(json!({"status":"unknown"}));
+                };
+                assert_eq!(params["ticket"], reply["ticket"]);
+                Ok(json!({"status":"applied","reply":reply}))
             }
             _ => Err(AcpError::new(-32601, "fixture method unsupported")),
         }
@@ -202,6 +212,7 @@ async fn real_sdk_sqlite_full_duplex_activation_confirms_existing_slot_with_join
     let reverse = Arc::new(JoinedDomainFixture {
         dispatcher: std::sync::OnceLock::new(),
         stopped: AtomicBool::new(false),
+        settled_reply: std::sync::OnceLock::new(),
         fail_after_confirmation: false,
     });
     let dispatcher = Arc::new(
@@ -247,6 +258,7 @@ async fn real_sdk_sqlite_unknown_execution_keeps_slot_and_blocks_duplicate_with_
     let reverse = Arc::new(JoinedDomainFixture {
         dispatcher: std::sync::OnceLock::new(),
         stopped: AtomicBool::new(false),
+        settled_reply: std::sync::OnceLock::new(),
         fail_after_confirmation: true,
     });
     let dispatcher = Arc::new(

@@ -1,7 +1,13 @@
 //! 独立对抗审查：Full 失败必须阻止未恢复预算的 Reason，并保全真实持久化历史。
 
+use peri_acp_types::execution_admission::{
+    AdmissionOutcome, AdmissionRequest, AdmissionSnapshot, EntryOutcome, EntryReceipt,
+    EntryRequest, ExecutionAdmissionError, ExecutionAdmissionPort, SettlementOutcome,
+    SettlementRequest,
+};
 use peri_acp_types::session_resources::{
-    FrozenSnapshotBytes, NewSession, NewSessionMeta, SessionResources,
+    work::{WorkAdmission, WorkDecision, WorkQuery},
+    ControlAttempt, FrozenSnapshotBytes, NewSession, NewSessionMeta, SessionResources,
 };
 use peri_acp_types::workspace::{SessionBinding, SESSION_BINDING_VERSION};
 use peri_agent::agent::compact_v2::CompactConfig;
@@ -29,6 +35,97 @@ struct BoundSession {
     thread_id: String,
     db: tempfile::TempDir,
     repo: tempfile::TempDir,
+}
+
+struct CompactAdmission {
+    resources: Arc<dyn SessionResources>,
+    execution: ControlAttempt,
+}
+
+#[async_trait::async_trait]
+impl ExecutionAdmissionPort for CompactAdmission {
+    async fn admit(
+        &self,
+        request: AdmissionRequest,
+    ) -> Result<AdmissionOutcome, ExecutionAdmissionError> {
+        let snapshot = self
+            .resources
+            .load_session_work(&WorkQuery {
+                session_id: request.snapshot.session_id.clone(),
+                limit: 1,
+            })
+            .await
+            .map_err(|error| ExecutionAdmissionError::Protocol(error.to_string()))?;
+        if AdmissionSnapshot::from(&snapshot) != request.snapshot
+            || snapshot.blocked
+            || !snapshot.pending_commands.is_empty()
+        {
+            return Err(ExecutionAdmissionError::Protocol(
+                "stale or blocked compact fixture work".into(),
+            ));
+        }
+        let candidate = snapshot.candidates.first().ok_or_else(|| {
+            ExecutionAdmissionError::Protocol("no durable compact work candidate".into())
+        })?;
+        let admission = WorkAdmission {
+            session_id: snapshot.session_id,
+            admission_id: format!("compact-fixture:{}", request.request_id),
+            instance_id: "compact-fixture-instance".into(),
+            generation_id: uuid::Uuid::now_v7().to_string(),
+            lifecycle: snapshot.control.lifecycle,
+            control_generation: snapshot.control.control_generation,
+            work_id: candidate.work_id.clone(),
+            work_revision: candidate.work_revision,
+            execution: self.execution.clone(),
+        };
+        Ok(AdmissionOutcome::Admitted { admission })
+    }
+
+    async fn entered(
+        &self,
+        request: EntryRequest,
+    ) -> Result<EntryOutcome, ExecutionAdmissionError> {
+        let snapshot = self
+            .resources
+            .load_session_work(&WorkQuery {
+                session_id: request.admission.session_id.clone(),
+                limit: 1,
+            })
+            .await
+            .map_err(|error| ExecutionAdmissionError::Protocol(error.to_string()))?;
+        let registered = snapshot
+            .state
+            .admissions
+            .get(&request.admission.admission_id)
+            .is_some_and(|record| {
+                record.admission == request.admission
+                    && record.settled_receipt.is_none()
+                    && record.entering_receipt.as_ref().is_some_and(|receipt| {
+                        receipt.decision == WorkDecision::Accepted
+                            && receipt.mutation_id == request.entry_evidence_id
+                    })
+            });
+        if !registered || snapshot.control.attempt.as_ref() != Some(&request.admission.execution) {
+            return Err(ExecutionAdmissionError::Protocol(
+                "compact fixture SDK entry is not durably registered".into(),
+            ));
+        }
+        Ok(EntryOutcome::Applied {
+            receipt: EntryReceipt {
+                admission: request.admission,
+                entry_evidence_id: request.entry_evidence_id,
+            },
+        })
+    }
+
+    async fn settle(
+        &self,
+        _: SettlementRequest,
+    ) -> Result<SettlementOutcome, ExecutionAdmissionError> {
+        Err(ExecutionAdmissionError::Protocol(
+            "compact stage loop cannot settle SDK execution".into(),
+        ))
+    }
 }
 
 impl BoundSession {
@@ -214,6 +311,36 @@ impl peri_model::Model for SummaryText {
 
 #[async_trait::async_trait]
 impl ReactLLM for ReasonModel {
+    fn prepare_reasoning(
+        &self,
+        messages: &[BaseMessage],
+        _: &[&dyn BaseTool],
+    ) -> AgentResult<peri_model::PreparedModelCall> {
+        let checkpoint = serde_json::json!({"messages": messages});
+        Ok(peri_model::PreparedModelCall::new(checkpoint, |_| {
+            Ok(ModelStream::new(futures::stream::empty()))
+        }))
+    }
+
+    async fn generate_prepared_reasoning(
+        &self,
+        prepared: peri_model::PreparedModelCall,
+        streaming: Option<StreamingContext>,
+    ) -> AgentResult<Reasoning> {
+        let messages =
+            serde_json::from_value::<Vec<BaseMessage>>(prepared.checkpoint()["messages"].clone())
+                .map_err(|error| AgentError::LlmError(error.to_string()))?;
+        prepared
+            .start(
+                streaming
+                    .as_ref()
+                    .map(|context| context.cancel.clone())
+                    .unwrap_or_default(),
+            )
+            .map_err(AgentError::ModelError)?;
+        self.generate_reasoning(&messages, &[], streaming).await
+    }
+
     async fn generate_reasoning(
         &self,
         messages: &[BaseMessage],
@@ -274,7 +401,16 @@ async fn make_case(
     });
     let reason = Arc::new(ReasonModel::default());
     let (bus, handles) = EventBus::new(Default::default());
+    let execution = turn.execution_binding();
     let ctx = StageContext::builder(turn, session.transcript(), session.queue().clone())
+        .with_recipient_lifecycle(1)
+        .with_execution_admission_port(Arc::new(CompactAdmission {
+            resources: bound.resources.clone(),
+            execution: ControlAttempt {
+                turn_id: execution.turn_id,
+                attempt_id: execution.attempt_id,
+            },
+        }))
         .with_llm(reason.clone())
         .with_compact_llm(summary.clone())
         .with_context_budget(ContextBudget::new(100_000))
@@ -488,7 +624,7 @@ async fn test_analysis_only_recovers_at_last_attempt_and_preserves_canonical() {
 
 #[tokio::test]
 async fn test_cancel_on_last_empty_attempt_wins_over_exhaustion() {
-    let (_, ctx, reason, summary, _) =
+    let (_bound, ctx, reason, summary, _) =
         make_case(Failure::AnalysisOnly, usize::MAX, false, Some(3)).await;
     let result = run_react_loop(ctx, 4).await;
     assert!(
@@ -583,7 +719,7 @@ async fn test_cancel_after_micro_preserves_projection_without_reason() {
 
 #[tokio::test]
 async fn test_missing_summary_model_blocks_high_pressure_reason() {
-    let (_, mut ctx, reason, summary, _) = make_case(Failure::Success, 0, false, None).await;
+    let (_bound, mut ctx, reason, summary, _) = make_case(Failure::Success, 0, false, None).await;
     ctx.compact.compact_llm = None;
     let result = run_react_loop(ctx, 4).await;
     assert!(

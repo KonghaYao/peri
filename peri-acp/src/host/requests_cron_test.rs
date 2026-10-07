@@ -1,21 +1,154 @@
 //! Deployment → session/new → MCP → session scheduler → continuation regression.
 use super::*;
+use peri_acp_types::execution_admission::{
+    AdmissionOutcome, AdmissionRequest, AdmissionSnapshot, EntryOutcome, EntryReceipt,
+    EntryRequest, ExecutionAdmissionError, ExecutionAdmissionPort, SettlementOutcome,
+    SettlementReceipt, SettlementRequest,
+};
+use peri_acp_types::identity::AttemptId;
+use peri_acp_types::session::TurnId;
+use peri_acp_types::session_resources::{work::WorkQuery, ControlAttempt};
 use peri_mcp_cron::CronSchedulerPortHandle;
 use peri_middlewares::mcp::McpClientPool;
 use peri_model::{
-    Model, ModelCapabilities, ModelMessage, ModelRequest, ModelResponse, ModelResult, ModelStream,
-    ModelStreamEvent, StopReason,
+    Model, ModelCapabilities, ModelError, ModelMessage, ModelRequest, ModelResponse, ModelResult,
+    ModelStream, ModelStreamEvent, PreparedModelCall, PreparedModelRequest, ProtocolErrorKind,
+    ProviderProtocol, StopReason,
 };
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 #[path = "requests/cron_endpoint_test.rs"]
 mod endpoint_tests;
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct CronModel {
-    prompts: parking_lot::Mutex<Vec<String>>,
-    first_request_tools: parking_lot::Mutex<Vec<String>>,
-    first_request_system: parking_lot::Mutex<Option<String>>,
+    prompts: Arc<parking_lot::Mutex<Vec<String>>>,
+    first_request_tools: Arc<parking_lot::Mutex<Vec<String>>>,
+    first_request_system: Arc<parking_lot::Mutex<Option<String>>>,
+}
+
+struct CronPromptAdmission {
+    resources: Arc<dyn peri_acp_types::session_resources::SessionResources>,
+}
+
+#[async_trait]
+impl ExecutionAdmissionPort for CronPromptAdmission {
+    async fn admit(
+        &self,
+        request: AdmissionRequest,
+    ) -> Result<AdmissionOutcome, ExecutionAdmissionError> {
+        let snapshot = self
+            .resources
+            .load_session_work(&WorkQuery {
+                session_id: request.snapshot.session_id.clone(),
+                limit: 1,
+            })
+            .await
+            .map_err(|error| ExecutionAdmissionError::Protocol(error.to_string()))?;
+        if AdmissionSnapshot::from(&snapshot) != request.snapshot
+            || snapshot.blocked
+            || !snapshot.pending_commands.is_empty()
+        {
+            return Err(ExecutionAdmissionError::Protocol(
+                "stale work snapshot".into(),
+            ));
+        }
+        let candidate = snapshot
+            .candidates
+            .first()
+            .ok_or_else(|| ExecutionAdmissionError::Protocol("no durable work candidate".into()))?;
+        let admission = peri_acp_types::session_resources::work::WorkAdmission {
+            session_id: snapshot.session_id,
+            admission_id: format!("cron-prompt:{}", request.request_id),
+            instance_id: "cron-prompt-fixture".into(),
+            generation_id: uuid::Uuid::now_v7().to_string(),
+            lifecycle: snapshot.control.lifecycle,
+            control_generation: snapshot.control.control_generation,
+            work_id: candidate.work_id.clone(),
+            work_revision: candidate.work_revision,
+            execution: ControlAttempt {
+                turn_id: TurnId::new(),
+                attempt_id: AttemptId::new(),
+            },
+        };
+        Ok(AdmissionOutcome::Admitted { admission })
+    }
+
+    async fn entered(
+        &self,
+        request: EntryRequest,
+    ) -> Result<EntryOutcome, ExecutionAdmissionError> {
+        let snapshot = self
+            .resources
+            .load_session_work(&WorkQuery {
+                session_id: request.admission.session_id.clone(),
+                limit: 1,
+            })
+            .await
+            .map_err(|error| ExecutionAdmissionError::Protocol(error.to_string()))?;
+        let valid = snapshot
+            .state
+            .admissions
+            .get(&request.admission.admission_id)
+            .is_some_and(|record| {
+                record.admission == request.admission
+                    && record.settled_receipt.is_none()
+                    && record.entering_receipt.as_ref().is_some_and(|receipt| {
+                        receipt.decision
+                            == peri_acp_types::session_resources::work::WorkDecision::Accepted
+                            && receipt.mutation_id == request.entry_evidence_id
+                    })
+            })
+            && snapshot.control.attempt.as_ref() == Some(&request.admission.execution);
+        if !valid {
+            return Err(ExecutionAdmissionError::Protocol(
+                "entry not registered".into(),
+            ));
+        }
+        Ok(EntryOutcome::Applied {
+            receipt: EntryReceipt {
+                admission: request.admission,
+                entry_evidence_id: request.entry_evidence_id,
+            },
+        })
+    }
+
+    async fn settle(
+        &self,
+        request: SettlementRequest,
+    ) -> Result<SettlementOutcome, ExecutionAdmissionError> {
+        if !request.proof.validates(&request.admission) {
+            return Err(ExecutionAdmissionError::Protocol(
+                "invalid stopped proof".into(),
+            ));
+        }
+        let snapshot = self
+            .resources
+            .load_session_work(&WorkQuery {
+                session_id: request.admission.session_id.clone(),
+                limit: 1,
+            })
+            .await
+            .map_err(|error| ExecutionAdmissionError::Protocol(error.to_string()))?;
+        if snapshot.control.attempt.is_some()
+            || !snapshot
+                .state
+                .admissions
+                .get(&request.admission.admission_id)
+                .is_some_and(|record| {
+                    record.admission == request.admission && record.settled_receipt.is_some()
+                })
+        {
+            return Err(ExecutionAdmissionError::Protocol("work not settled".into()));
+        }
+        Ok(SettlementOutcome::Applied {
+            receipt: SettlementReceipt {
+                admission: request.admission,
+                evidence_id: request.proof.evidence_id().into(),
+            },
+        })
+    }
 }
 
 #[async_trait]
@@ -26,6 +159,36 @@ impl Model for CronModel {
             supports_streaming: true,
             ..Default::default()
         }
+    }
+    fn prepare_stream(&self, request: ModelRequest) -> ModelResult<PreparedModelCall> {
+        let body = serde_json::to_value(&request)
+            .map_err(|_| ModelError::protocol(ProtocolErrorKind::Provider))?;
+        let model = self.clone();
+        Ok(PreparedModelCall::new(
+            json!({"provider":"cron-fixture", "model":"scripted", "endpoint":"https://scripted.test.invalid/stream", "credentialRef":"fixture:no-credential", "body":body}),
+            move |cancellation| {
+                let stream_cancellation = cancellation.clone();
+                let events = futures::stream::once(async move {
+                    model.stream(request, stream_cancellation).await
+                });
+                Ok(ModelStream::with_parent_cancellation(
+                    futures::TryStreamExt::try_flatten(events),
+                    cancellation,
+                ))
+            },
+        ))
+    }
+    fn prepare_request(&self, request: &ModelRequest) -> ModelResult<PreparedModelRequest> {
+        PreparedModelRequest::observe(
+            ProviderProtocol::Other {
+                value: "cron-fixture".into(),
+            },
+            "scripted",
+            "https://scripted.test.invalid/stream".parse().unwrap(),
+            serde_json::to_value(request)
+                .map_err(|_| ModelError::protocol(ProtocolErrorKind::Provider))?,
+            BTreeMap::new(),
+        )
     }
     async fn stream(
         &self,
@@ -124,7 +287,10 @@ async fn restricted_deployment_omits_local_optional_capabilities_in_session() {
         plugins: false,
         settings_hooks: false,
     };
-    let cfg = deployment_with_capabilities(&tmp, true, capabilities).await;
+    let mut cfg = deployment_with_capabilities(&tmp, true, capabilities).await;
+    cfg.execution_admission_port = Some(Arc::new(CronPromptAdmission {
+        resources: cfg.session_resources.clone(),
+    }));
     assert!(cfg.cron_scheduler.is_none());
     assert!(cfg.hook_groups.is_empty());
     assert_eq!(

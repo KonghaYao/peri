@@ -470,7 +470,7 @@ async fn push_event_emits_only_safe_activity_when_cap_is_declared() {
     assert_eq!(notifications[0].1["activity"]["kind"], "subagent");
     let serialized = notifications[0].1.to_string();
     assert!(!serialized.contains("SECRET_RESULT_SENTINEL"));
-    assert!(!serialized.contains("raw-instance-id"));
+    assert!(serialized.contains("raw-instance-id"));
 }
 
 #[tokio::test]
@@ -512,8 +512,8 @@ async fn test_subagent_completion_keeps_activity_safe_before_legacy_output() {
         "摘要不得携带结果正文"
     );
     assert!(
-        !activity.contains("private-instance-id"),
-        "摘要不得携带原始实例标识"
+        activity.contains("private-instance-id"),
+        "摘要必须保留与启动事件配对的实例标识"
     );
     let event: AcpEvent =
         serde_json::from_str(notifications[1].1["event_json"].as_str().unwrap()).unwrap();

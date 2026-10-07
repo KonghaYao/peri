@@ -371,7 +371,7 @@ pub(super) fn handle_panel_event(
                 if let Some(action) = ai.and_then(|index| actions.get(index)) {
                     super::operation::installed_action(
                         action,
-                        &p,
+                        p,
                         operation,
                         confirm_action,
                         detail_plugin_idx,

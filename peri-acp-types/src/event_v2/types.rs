@@ -193,7 +193,7 @@ pub enum StateEvent {
     ProtocolEvent {
         turn_id: TurnId,
         agent_id: AgentId,
-        event: ExecutorEvent,
+        event: Box<ExecutorEvent>,
     },
     /// 状态快照（轻量级元数据，用于状态同步与 UI 刷新）
     ///

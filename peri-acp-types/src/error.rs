@@ -269,7 +269,7 @@ pub struct SafeSubagentFailure {
     category: String,
     message: String,
     causes: Vec<String>,
-    diagnostic: Option<SafeModelErrorDiagnostic>,
+    diagnostic: Option<Box<SafeModelErrorDiagnostic>>,
 }
 
 impl SafeSubagentFailure {
@@ -294,7 +294,7 @@ impl SafeSubagentFailure {
                 2_000,
             ),
             causes: diagnostic.causes().to_vec(),
-            diagnostic: Some(diagnostic),
+            diagnostic: Some(Box::new(diagnostic)),
         })
     }
 
@@ -313,7 +313,9 @@ impl SafeSubagentFailure {
         }
         let diagnostic = match error {
             AgentError::ModelError(source) | AgentError::StreamRecoveryExhausted { source, .. } => {
-                Some(SafeModelErrorDiagnostic::from_model(source.diagnostic()))
+                Some(Box::new(SafeModelErrorDiagnostic::from_model(
+                    source.diagnostic(),
+                )))
             }
             _ => None,
         };
@@ -339,7 +341,7 @@ impl SafeSubagentFailure {
     }
 
     pub fn diagnostic(&self) -> Option<&SafeModelErrorDiagnostic> {
-        self.diagnostic.as_ref()
+        self.diagnostic.as_deref()
     }
 
     pub fn render_model_summary(&self) -> String {
@@ -442,7 +444,7 @@ impl<'de> serde::Deserialize<'de> for SafeSubagentFailure {
             category: wire.category,
             message: wire.message,
             causes: wire.causes,
-            diagnostic: wire.diagnostic,
+            diagnostic: wire.diagnostic.map(Box::new),
         })
     }
 }

@@ -1,4 +1,5 @@
 use super::*;
+use crate::mcp::client::output_store::tests::durable_invocation_fixture::DurableInvocationFixture;
 use crate::mcp::client::output_store::tests::Wire;
 use peri_acp_types::mcp::McpSubscriptionPort;
 use peri_acp_types::session::{MessageQueue, QueuedPayload, SessionInbox};
@@ -12,6 +13,7 @@ use rmcp::{
 struct RecoveryOwner {
     initiator: Option<String>,
     working: bool,
+    catalog: Option<serde_json::Value>,
 }
 
 fn terminal_task() -> DetailedTask {
@@ -42,6 +44,9 @@ impl ServerHandler for RecoveryOwner {
         request: CustomRequest,
         _: RequestContext<RoleServer>,
     ) -> Result<CustomResult, ErrorData> {
+        if request.method == "workspace/invocationSnapshot" {
+            return Ok(CustomResult(self.catalog.clone().expect("owner catalog")));
+        }
         assert_eq!(request.method, "workspace/taskSnapshot");
         let task = if self.working {
             DetailedTask::new(
@@ -87,15 +92,29 @@ fn bind_session(pool: &McpClientPool, session: &str) -> (Arc<dyn TaskManager>, S
 #[tokio::test]
 async fn cold_recovery_rebuilds_child_catalog_without_parent_runtime() {
     for working in [false, true] {
+        let fixture = DurableInvocationFixture::new(
+            "child",
+            "mcp__workspace__Bash",
+            &[json!({"command":"fixture"})],
+        )
+        .await;
         let wire = Wire::connect(RecoveryOwner {
             initiator: Some("child".into()),
             working,
+            catalog: Some(fixture.owner_catalog(0, "recovered-task")),
         })
         .await;
         let (mut owner, spawner) = crate::mcp::task_scope::McpTaskOwner::new();
         let pool = Arc::new(McpClientPool::new_pending_with_spawner(spawner));
         wire.install(&pool, "workspace", true);
         let (manager, inbox) = bind_session(&pool, "child");
+        peri_acp_types::ports::McpPoolPort::bind_agent_session_resources(
+            pool.as_ref(),
+            "child",
+            1,
+            fixture.resources.clone(),
+        )
+        .unwrap();
         pool.recover_workspace_tasks("child").await.unwrap();
         tokio::time::timeout(Duration::from_secs(2), async {
             while manager
@@ -135,6 +154,7 @@ async fn unknown_or_conflicting_owner_origin_stays_unroutable() {
         let wire = Wire::connect(RecoveryOwner {
             initiator,
             working: false,
+            catalog: None,
         })
         .await;
         let pool = Arc::new(McpClientPool::new_empty());
@@ -156,20 +176,31 @@ async fn unknown_or_conflicting_owner_origin_stays_unroutable() {
 
 #[tokio::test]
 async fn unloaded_child_terminal_retries_same_delivery_without_root_fallback() {
+    let fixture = DurableInvocationFixture::new(
+        "child",
+        "mcp__workspace__Bash",
+        &[json!({"command":"fixture"})],
+    )
+    .await;
     let wire = Wire::connect(RecoveryOwner {
         initiator: Some("child".into()),
         working: false,
+        catalog: Some(fixture.owner_catalog(0, "recovered-task")),
     })
     .await;
     let pool = Arc::new(McpClientPool::new_empty());
     wire.install(&pool, "workspace", true);
     let (_, root_inbox) = bind_session(&pool, "root");
     let (manager, child_inbox) = bind_session(&pool, "child");
+    peri_acp_types::ports::McpPoolPort::bind_agent_session_resources(
+        pool.as_ref(),
+        "child",
+        1,
+        fixture.resources.clone(),
+    )
+    .unwrap();
     pool.session_bindings.write().unregister("child");
-    assert_eq!(
-        pool.recover_workspace_tasks("child").await.unwrap_err(),
-        "session inbox unavailable"
-    );
+    pool.recover_workspace_tasks("child").await.unwrap();
     assert!(root_inbox.queue().drain_all().is_empty());
     pool.register_inbox("child", child_inbox.handle());
     pool.recover_workspace_tasks("child").await.unwrap();

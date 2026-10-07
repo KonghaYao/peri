@@ -654,7 +654,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
                 let line = materialized.as_ref().unwrap().1.line(local_idx).unwrap();
                 let mut out = if in_sel {
                     let (_, _, sr, sc, er, ec) = sel_bounds.unwrap();
-                    highlight_line_in_selection(&line, &entry, sr, er, sc, ec, vis_width, sel_bg)
+                    highlight_line_in_selection(line, &entry, sr, er, sc, ec, vis_width, sel_bg)
                 } else {
                     line.clone()
                 };

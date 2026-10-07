@@ -372,8 +372,8 @@ impl ModelErrorDiagnostic {
 /// 模型调用失败的结构化、有界错误。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelError(
-    ModelErrorInner,
-    Option<(ModelErrorDiagnostic, bool)>,
+    Box<ModelErrorInner>,
+    Option<Box<(ModelErrorDiagnostic, bool)>>,
     ErrorDetails,
 );
 
@@ -415,7 +415,7 @@ fn bounded_causes(values: impl IntoIterator<Item = String>) -> Vec<String> {
 
 impl ModelError {
     fn new(inner: ModelErrorInner) -> Self {
-        Self(inner, None, ErrorDetails::default())
+        Self(Box::new(inner), None, ErrorDetails::default())
     }
 
     pub fn with_message(mut self, message: impl AsRef<str>) -> Self {
@@ -448,11 +448,11 @@ impl ModelError {
 
     /// 中断降级前的有界诊断及 observer 是否已负责记录；不改变错误分类。
     pub fn interruption_diagnostic(&self) -> Option<&ModelErrorDiagnostic> {
-        self.1.as_ref().map(|(diagnostic, _)| diagnostic)
+        self.1.as_deref().map(|(diagnostic, _)| diagnostic)
     }
 
     pub fn interruption_logged(&self) -> bool {
-        self.1.as_ref().is_some_and(|(_, logged)| *logged)
+        self.1.as_deref().is_some_and(|(_, logged)| *logged)
     }
 
     pub(crate) fn with_interruption_diagnostic(
@@ -460,7 +460,7 @@ impl ModelError {
         diagnostic: ModelErrorDiagnostic,
         logged: bool,
     ) -> Self {
-        self.1 = Some((diagnostic, logged));
+        self.1 = Some(Box::new((diagnostic, logged)));
         self
     }
 
@@ -534,15 +534,15 @@ impl ModelError {
     }
 
     pub fn is_cancelled(&self) -> bool {
-        matches!(self.0, ModelErrorInner::Cancelled)
+        matches!(&*self.0, ModelErrorInner::Cancelled)
     }
 
     pub fn is_stream_interrupted(&self) -> bool {
-        matches!(self.0, ModelErrorInner::StreamInterrupted { .. })
+        matches!(&*self.0, ModelErrorInner::StreamInterrupted { .. })
     }
 
     pub fn transport_kind(&self) -> Option<TransportErrorKind> {
-        match &self.0 {
+        match &*self.0 {
             ModelErrorInner::Transport { kind, .. } => Some(*kind),
             ModelErrorInner::RetryExhausted { diagnostic, .. } => {
                 diagnostic.as_ref().and_then(|value| value.transport)
@@ -552,7 +552,7 @@ impl ModelError {
     }
 
     pub fn http_status_code(&self) -> Option<u16> {
-        match &self.0 {
+        match &*self.0 {
             ModelErrorInner::HttpStatus { status, .. } => Some(*status),
             ModelErrorInner::RetryExhausted { diagnostic, .. } => {
                 diagnostic.as_ref().and_then(|value| value.status)
@@ -562,7 +562,7 @@ impl ModelError {
     }
 
     pub fn protocol_error(&self) -> Option<ProtocolError> {
-        match &self.0 {
+        match &*self.0 {
             ModelErrorInner::Protocol(error) => Some(error.clone()),
             ModelErrorInner::RetryExhausted { diagnostic, .. } => diagnostic
                 .as_ref()
@@ -573,14 +573,14 @@ impl ModelError {
     }
 
     pub fn retry_error_kind(&self) -> Option<RetryErrorKind> {
-        match &self.0 {
+        match &*self.0 {
             ModelErrorInner::RetryExhausted { last_error, .. } => Some(*last_error),
             _ => None,
         }
     }
 
     pub fn provider(&self) -> Option<&str> {
-        match &self.0 {
+        match &*self.0 {
             ModelErrorInner::Transport { provider, .. }
             | ModelErrorInner::StreamInterrupted { provider, .. } => {
                 provider.as_ref().map(SafeErrorContext::as_str)
@@ -596,7 +596,7 @@ impl ModelError {
     }
 
     pub fn request_id(&self) -> Option<&str> {
-        match &self.0 {
+        match &*self.0 {
             ModelErrorInner::HttpStatus { request_id, .. }
             | ModelErrorInner::StreamInterrupted { request_id, .. } => {
                 request_id.as_ref().map(SafeErrorContext::as_str)
@@ -611,7 +611,7 @@ impl ModelError {
     /// Return the bounded diagnostic projection. Invalid or absent provider and
     /// request identities are represented as `None`, never as a sentinel.
     pub fn diagnostic(&self) -> ModelErrorDiagnostic {
-        let mut diagnostic = match &self.0 {
+        let mut diagnostic = match &*self.0 {
             ModelErrorInner::Transport { kind, provider } => ModelErrorDiagnostic {
                 category: ModelErrorCategory::Transport,
                 status: None,
@@ -717,7 +717,7 @@ impl ModelError {
 
 impl fmt::Display for ModelError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.0 {
+        match &*self.0 {
             ModelErrorInner::Transport { kind, provider } => {
                 write!(formatter, "model transport error ({kind})")?;
                 write_provider_suffix(formatter, provider.as_ref())

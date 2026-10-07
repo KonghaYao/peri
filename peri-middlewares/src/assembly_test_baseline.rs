@@ -359,12 +359,14 @@ async fn workflow_agent_definition_requires_the_resource_face() {
 /// 必须返回 interrupted，不得将 stage-local cancel 降级成 runagent-threw。
 #[tokio::test]
 async fn test_workflow_executor_cancel_during_model_stream_is_interrupted() {
+    let fixture = WorkflowExecutionFixture::new("cancel-workflow-parent").await;
     let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
     let model: Arc<dyn Model> = Arc::new(CancelGateModel {
-        entered: std::sync::Mutex::new(Some(entered_tx)),
+        entered: Arc::new(std::sync::Mutex::new(Some(entered_tx))),
     });
     let cancel = tokio_util::sync::CancellationToken::new();
     let mut ctx = workflow_context_with_disabled(&[]);
+    fixture.bind(&mut ctx);
     ctx.cancel = Some(cancel.clone());
     ctx.model_factory = Arc::new(move |_model, _max_tokens, _observer| {
         peri_agent::agent::workflow::WorkflowModel {
@@ -374,7 +376,7 @@ async fn test_workflow_executor_cancel_during_model_stream_is_interrupted() {
         }
     });
     let executor = peri_agent::agent::workflow::WorkflowAgentExecutor::new(ctx);
-    let task = tokio::spawn(async move {
+    let mut task = tokio::spawn(async move {
         executor
             .execute(AgentRunParams {
                 run_id: "cancel-workflow-run".to_string(),
@@ -391,7 +393,12 @@ async fn test_workflow_executor_cancel_during_model_stream_is_interrupted() {
             })
             .await
     });
-    entered_rx.await.expect("workflow model stream 必须已返回");
+    tokio::select! {
+        entered = entered_rx => if entered.is_err() {
+            panic!("workflow 在模型流前退出: {:?}", task.await);
+        },
+        result = &mut task => panic!("workflow 在模型流前退出: {result:?}"),
+    }
 
     cancel.cancel();
     let result = task.await.expect("workflow executor task 不得 panic");
@@ -412,10 +419,12 @@ async fn test_workflow_executor_cancel_during_model_stream_is_interrupted() {
 
 #[tokio::test]
 async fn test_workflow_executor_forwarder_join_error_is_dead_and_failed_telemetry() {
+    let fixture = WorkflowExecutionFixture::new("forwarder-workflow-parent").await;
     let model: Arc<dyn Model> = Arc::new(CompletedWorkflowModel);
     let telemetry = Arc::new(std::sync::Mutex::new(Vec::new()));
     let telemetry_for_hook = Arc::clone(&telemetry);
     let mut ctx = workflow_context_with_disabled(&[]);
+    fixture.bind(&mut ctx);
     ctx.model_factory = Arc::new(move |_model, _max_tokens, _observer| {
         peri_agent::agent::workflow::WorkflowModel {
             model: Arc::clone(&model),

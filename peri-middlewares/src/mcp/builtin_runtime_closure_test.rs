@@ -208,7 +208,6 @@ async fn four_close_sources_are_distinct() {
     let pool = Arc::clone(&fixture.pool);
     let cron_task = fixture.register_cron_task("0 3 * * *", "mw-four-sources");
     let policy_disabled = ["CronMiddleware"];
-    let call_cwd = fixture.project.to_string_lossy().to_string();
     {
         // ② 投影归零，但 handler / pool / tick / readiness 全部保留。
         let projection = fixture.projections(&policy_disabled);
@@ -247,11 +246,13 @@ async fn four_close_sources_are_distinct() {
         fixture
             .await_armed_trigger(&cron_task, "mw-four-sources")
             .await;
+        let invocation_fixture =
+            invocation_fixture::InvocationFixture::new("mcp__cron__cron_list", &[json!({})]).await;
         let cron_text = tokio::time::timeout(
             MW_BOUND,
             fixture
                 .typed_bridge("mcp__cron__cron_list")
-                .invoke(json!({}), fixture_tool_context(&call_cwd)),
+                .invoke(json!({}), invocation_fixture.context(0)),
         )
         .await
         .expect("策略关闭后 cron 工具调用必须有界返回")

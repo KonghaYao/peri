@@ -149,7 +149,7 @@ fn public_dynamic_action_summary_preserves_url_and_request_data() {
 
     // This public projection is consumed by DynamicMcpTool's approval input.
     let serialized = serde_json::to_string(&request.config.safe_summary()).unwrap();
-    assert!(serialized.contains("https://example.invalid/mcp"));
+    assert!(serialized.contains("https://inline-user:inline-password@example.invalid/mcp?token=inline-query#inline-fragment"));
     for secret in [
         "inline-user",
         "inline-password",

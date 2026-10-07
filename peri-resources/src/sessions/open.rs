@@ -173,7 +173,7 @@ impl fmt::Display for AccessIntent {
 
 /// 打开请求里的 locator：延迟解析，直到真正打开时才读环境变量。
 ///
-/// `Debug` 手写：远程 locator 原文含主机与库名，解析前也不进日志。
+/// `Debug` 不输出远程 locator 原文，避免日志泄露主机、库名或 URL 凭证。
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) enum StorageLocator {
     /// 未指定：使用默认本机库（`~/.peri/threads/threads.db`）。
@@ -209,6 +209,9 @@ impl fmt::Debug for StorageLocator {
         match self {
             Self::Default => formatter.write_str("Default"),
             Self::LocalPath(path) => formatter.debug_tuple("LocalPath").field(path).finish(),
+            Self::Literal(raw) if looks_like_remote_url(raw) => {
+                formatter.write_str("Literal(Remote)")
+            }
             Self::Literal(raw) => formatter.debug_tuple("Literal").field(raw).finish(),
             Self::EnvVar(name) => formatter.debug_tuple("EnvVar").field(name).finish(),
         }
@@ -226,8 +229,8 @@ pub(crate) enum ResolvedLocator {
 
 /// 打开请求：locator + 凭证来源 + 访问意图。
 ///
-/// `Debug` 可以安全打印：远程端点的 `Debug` 只给 scheme/引擎/主机家族，凭证来源只给
-/// 变量名，凭证值从不进入本结构（只在打开时按需解析）。
+/// `Debug` 不输出远程 locator 原文；凭证值不进入本结构
+/// （只在打开时按需解析）。
 #[derive(Clone, Debug)]
 pub(crate) struct SessionStoreOpenRequest {
     input: StorageLocator,

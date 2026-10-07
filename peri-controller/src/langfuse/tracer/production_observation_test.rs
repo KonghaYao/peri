@@ -365,7 +365,9 @@ async fn failed_turn_closes_cached_subagent_once_with_full_start_record() {
     tracer.on_tool_end("main", "invocation", "deferred tool output", false);
     tracer
         .on_turn_end(TurnTelemetryOutcome::Failed {
-            failure: peri_acp_types::session::ExecutionFailure::internal("protected error"),
+            failure: Box::new(peri_acp_types::session::ExecutionFailure::internal(
+                "protected error",
+            )),
         })
         .await
         .unwrap();

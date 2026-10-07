@@ -565,7 +565,6 @@ fn test_subagent_completed_shows_tool_lines_only() {
 
 /// 构造带 diff 的 Edit 卡片（fold=Expanded 展示展开体）。
 /// output_summary 设为 diff 文本本身（真实形态——Edit 输出即 diff 文本）。
-
 pub(super) const EDIT_DIFF: &str = "\
 diff --git a/src/main.rs b/src/main.rs
 index 1234567..89abcde 100644

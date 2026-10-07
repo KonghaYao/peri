@@ -12,7 +12,9 @@ use peri_acp_types::{
     },
     workspace::SessionBinding,
 };
-use peri_agent::session::user_input_mailbox::UserInputMailbox;
+use peri_agent::session::user_input_mailbox::{
+    UserInputAttemptOutcome, UserInputMailbox, UserInputRunTicket,
+};
 use peri_model::{
     Model, ModelCapabilities, ModelError, ModelRequest, ModelResult, ModelStream,
     PreparedModelCall, PreparedModelRequest, ProtocolErrorKind, ProviderProtocol,
@@ -25,6 +27,13 @@ pub(in crate::host) async fn run_session_loop(
     mut ctx: SessionContext,
     mut turn: TurnInput,
 ) -> PromptResult {
+    let mailbox = ctx.user_input_mailbox.as_ref().unwrap().clone();
+    let initial_ticket = mailbox
+        .attach_external_attempt(
+            ctx.cancel.clone(),
+            !turn.continuation && turn.content.is_empty(),
+        )
+        .expect("fixture prompt must attach its execution before Receive");
     let observed = Arc::new(std::sync::OnceLock::new());
     let publish = ctx.sdk_admission_observed.clone();
     let capture = observed.clone();
@@ -46,30 +55,54 @@ pub(in crate::host) async fn run_session_loop(
     let resources = ctx.session_resources.clone();
     let sdk = ctx.execution_admission_port.clone();
     let result = crate::session::executor::run_session_loop(ctx, turn).await;
+    let outcome = if result.failure.is_some() || result.persistence_inconsistent {
+        UserInputAttemptOutcome::Failed
+    } else if result.ok {
+        UserInputAttemptOutcome::Completed
+    } else {
+        UserInputAttemptOutcome::Interrupted
+    };
+    mailbox.finish_attempt(&initial_ticket, outcome);
+    if let Some(admission) = observed.get() {
+        mailbox.finish_attempt(
+            &UserInputRunTicket {
+                id: admission.admission_id.clone(),
+            },
+            outcome,
+        );
+    }
     if !result.persistence_inconsistent {
         if let Some(admission) = observed.get() {
-            let evidence_id = super::super::execution::finish_admission(
-                resources.as_ref().unwrap().as_ref(),
-                admission,
-            )
-            .await
-            .expect("fixture root must durably finish its exact returned execution");
-            let outcome = sdk
-                .unwrap()
-                .settle(SettlementRequest {
-                    admission: admission.clone(),
-                    proof: AttemptStoppedProof::AttemptStopped {
-                        instance_id: admission.instance_id.clone(),
-                        generation_id: admission.generation_id.clone(),
-                        execution: admission.execution.clone(),
-                        evidence_id,
-                    },
+            let resources = resources.as_ref().unwrap();
+            let snapshot = resources
+                .load_session_work(&WorkQuery {
+                    session_id: admission.session_id.clone(),
+                    limit: 1,
                 })
                 .await
-                .expect("fixture SDK must acknowledge the exact stopped execution");
-            assert!(
-                matches!(outcome, SettlementOutcome::Applied { receipt } if receipt.admission == *admission)
-            );
+                .expect("fixture must inspect the exact returned execution");
+            if snapshot.pending_commands.is_empty() {
+                let evidence_id =
+                    super::super::execution::finish_admission(resources.as_ref(), admission)
+                        .await
+                        .expect("fixture root must durably finish its exact returned execution");
+                let outcome = sdk
+                    .unwrap()
+                    .settle(SettlementRequest {
+                        admission: admission.clone(),
+                        proof: AttemptStoppedProof::AttemptStopped {
+                            instance_id: admission.instance_id.clone(),
+                            generation_id: admission.generation_id.clone(),
+                            execution: admission.execution.clone(),
+                            evidence_id,
+                        },
+                    })
+                    .await
+                    .expect("fixture SDK must acknowledge the exact stopped execution");
+                assert!(
+                    matches!(outcome, SettlementOutcome::Applied { receipt } if receipt.admission == *admission)
+                );
+            }
         }
     }
     result

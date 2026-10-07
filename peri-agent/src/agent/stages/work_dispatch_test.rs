@@ -10,8 +10,7 @@ use peri_acp_types::workspace::{ResolvedWorkspace, ScopedThreadPage, ScopedThrea
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::Mutex;
 
-#[path = "work_budget_test_support.rs"]
-mod budget_support;
+use super::super::work_budget_test_support as budget_support;
 
 struct BudgetProbe(Arc<AtomicUsize>);
 

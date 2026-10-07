@@ -54,18 +54,18 @@ impl RemoteSessionData {
                 .iter()
                 .all(|value| matches!(value, Value::Null | Value::Text(_))) =>
             {
-                work::resource_owner_facts(
-                    *exists != 0,
-                    text_at(&row, 1),
-                    *state_exists != 0,
-                    text_at(&row, 3),
-                    text_at(&row, 4),
-                    text_at(&row, 5),
-                    text_at(&row, 6),
-                    text_at(&row, 7),
-                    text_at(&row, 8),
-                    text_at(&row, 9),
-                )
+                work::resource_owner_facts(work::ResourceOwnerRow {
+                    session_exists: *exists != 0,
+                    control_json: text_at(&row, 1),
+                    state_exists: *state_exists != 0,
+                    revision_json: text_at(&row, 3),
+                    current_owner_json: text_at(&row, 4),
+                    previous_owner_json: text_at(&row, 5),
+                    current_child_json: text_at(&row, 6),
+                    previous_child_json: text_at(&row, 7),
+                    owners_type: text_at(&row, 8),
+                    child_metadata_type: text_at(&row, 9),
+                })
             }
             _ => Err(corrupt("resource owner facts are not readable")),
         }
@@ -84,9 +84,7 @@ impl RemoteSessionData {
             .await?
             .ok_or_else(|| corrupt("work revision row is not readable"))?;
         match row.as_slice() {
-            [Value::Integer(session_exists), Value::Integer(control_exists), Value::Integer(state_exists), revision_json]
-                if matches!(revision_json, Value::Null | Value::Text(_)) =>
-            {
+            [Value::Integer(session_exists), Value::Integer(control_exists), Value::Integer(state_exists), Value::Null | Value::Text(_)] => {
                 work::revision(
                     *session_exists,
                     *control_exists,
