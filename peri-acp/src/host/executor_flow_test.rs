@@ -793,6 +793,9 @@ fn frozen_with_dynamic_prompt_policy(
 #[path = "executor_flow_dynamic_test.rs"]
 mod dynamic_tests;
 
+#[path = "executor_flow_child_chain_test.rs"]
+mod child_chain_tests;
+
 #[path = "executor_flow_continuation_test.rs"]
 mod continuation_tests;
 

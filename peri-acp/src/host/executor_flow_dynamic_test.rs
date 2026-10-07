@@ -182,7 +182,7 @@ impl peri_acp_types::execution_admission::ExecutionAdmissionPort for ChildFixtur
     }
 }
 
-async fn bind_child_fixture_resources(
+pub(super) async fn bind_child_fixture_resources(
     context: &mut SessionContext,
     cwd: &std::path::Path,
     frozen: &FrozenSessionData,
@@ -234,7 +234,7 @@ async fn bind_child_fixture_resources(
     directory
 }
 
-async fn prepare_child_fixture_intent(context: &SessionContext) -> String {
+pub(super) async fn prepare_child_fixture_intent(context: &SessionContext) -> String {
     use peri_acp_types::session_resources::work::*;
     use sha2::{Digest, Sha256};
     let resources = context.session_resources.as_ref().unwrap();
