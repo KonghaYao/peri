@@ -600,6 +600,9 @@ mod workspace_cases;
 #[path = "requests_meta_resources_test.rs"]
 mod meta_resources;
 
+#[path = "requests_agent_catalog_test.rs"]
+mod agent_catalog;
+
 #[path = "requests_skill_resources_test.rs"]
 mod skill_resources;
 

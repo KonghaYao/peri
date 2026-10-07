@@ -574,6 +574,53 @@ impl peri_acp_types::ports::AgentCatalogPort for AgentCatalogProvider {
     }
 }
 
+/// 会话创建期的**定点绑定**：把池还原成 registry 并绑到目录端口上（W5 / P0）。
+///
+/// 存在理由是渲染与装配的时序差：冻结 system prompt 的 `{{available_agents}}`
+/// 段在会话创建期渲染（`session/frozen.rs` 经端口读候选），而 turn 级装配点
+/// （`assembly/preparation.rs::resolve_ports`）要等首轮装配才 bind——不在这里
+/// 补齐，新建会话的目录恒为空。调用点见
+/// `peri-acp` 的 `host/workspace.rs::assemble_with_frozen`（new / load / resume /
+/// fork 的共同装配点，冻结渲染发生在其返回之后）。
+///
+/// 与 turn 级 bind 共用**同一构造入口**
+/// [`crate::mcp::McpAgentRegistry::for_session`]（会话过滤 + 关闭集派生的本地面
+/// 关闭位，两侧同源），覆盖式（最后一次生效）：先绑不改变可见性，只让渲染面提前
+/// 看到目录。ACP 侧仍只持 `Arc<dyn AgentCatalogPort>`，不感知 registry 类型
+/// （§0 依赖方向）。
+///
+/// 返回 `false` 仅表示本函数不适用：池或端口不是本 crate 的具体实现（两条早退各
+/// 留一条可区分原因的 `debug` 记录）。此处**不回落** `McpClientPool::new_pending()`
+/// 等装配降级实例——那是装配路径的兜底，不是本函数的职责；调用方按「面未装配 ⇒
+/// 空目录」的既有语义静默跳过（X4/J5：不回落磁盘）。
+pub fn bind_agent_catalog_from_pool(
+    agent_catalog: &Arc<dyn peri_acp_types::ports::AgentCatalogPort>,
+    pool: &Arc<dyn peri_acp_types::ports::McpPoolPort>,
+    session_id: &str,
+    disabled_middlewares: &std::collections::HashSet<String>,
+) -> bool {
+    let Ok(pool) = Arc::clone(pool).downcast_arc::<crate::mcp::McpClientPool>() else {
+        tracing::debug!(
+            session_id,
+            "冻结目录定点绑定不适用：pool 不是本 crate 的 McpClientPool 实现"
+        );
+        return false;
+    };
+    let Ok(port) = Arc::clone(agent_catalog).downcast_arc::<AgentCatalogProvider>() else {
+        tracing::debug!(
+            session_id,
+            "冻结目录定点绑定不适用：目录端口不是本 crate 的 AgentCatalogProvider 实现"
+        );
+        return false;
+    };
+    port.bind(Arc::new(crate::mcp::McpAgentRegistry::for_session(
+        pool,
+        session_id,
+        disabled_middlewares,
+    )));
+    true
+}
+
 #[cfg(test)]
 /// 测试用空候选目录端口（无 registry 绑定 ⇒ 空目录，不触碰文件系统）。
 #[derive(Default)]
@@ -589,3 +636,7 @@ impl peri_acp_types::ports::AgentCatalogPort for NoopAgentCatalog {
         Vec::new()
     }
 }
+
+#[cfg(test)]
+#[path = "host_ports_test.rs"]
+mod host_ports_tests;

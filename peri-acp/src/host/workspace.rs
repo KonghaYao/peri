@@ -343,6 +343,24 @@ impl SessionEnvironment {
                 }}
             });
         }
+        // ── W5 / P0：冻结目录的**定点绑定**（此处而不是别处）──
+        //
+        // 本函数是 new / load / resume / fork 的**共同装配点**，而冻结渲染发生在
+        // 它返回之后（`session_lifecycle.rs` 在装配后取 `env.cfg` 调
+        // `prepared.rs::build_frozen_after_activation` → `session/frozen.rs` 经
+        // 目录端口渲染 `{{available_agents}}`）：不在这里补齐，会话创建期的目录
+        // 恒为空。turn 级装配 bind（`assembly/preparation.rs`）要等首轮才发生，
+        // 两者是同一份 registry 形状、覆盖式（最后一次生效）。恢复路径复用持久
+        // blob 的渲染结果，提前绑定只是同形覆盖，不改变可见性。
+        // 池不适用 = 面未装配 ⇒ 静默跳过（既有语义：空目录，X4/J5 不回落磁盘）。
+        if let Some(pool) = cfg.mcp_pool.as_ref() {
+            let _ = peri_middlewares::host_ports::bind_agent_catalog_from_pool(
+                &cfg.agent_catalog,
+                pool,
+                session_id,
+                &disabled_middlewares,
+            );
+        }
         Ok(Some(Arc::new(Self {
             cfg,
             activation,

@@ -150,6 +150,34 @@ impl McpAgentRegistry {
         self
     }
 
+    /// **会话级 Agent registry 的唯一构造入口**：会话归属过滤与链槽关闭位一次成形。
+    ///
+    /// 关闭位与关闭集**同源**——判据是 [`crate::assembly::SUB_AGENT_FACE_CLOSED_KEY`]
+    /// 在 `disabled_middlewares` 中的命中与否，与链装配跳过 `SubAgentMiddleware`
+    /// 槽位（`crate::assembly::ProductionChainAssembler::assemble`）用的是同一份集合。
+    /// 关闭位若在此处派生错（恒 false / 恒 true），就会出现「工具面已关闭、目录面仍
+    /// 可见」的裂缝（X4/J5），故不做第二处派生。
+    ///
+    /// 两个 bind 点都经此构造、共用同一形状：会话创建期的定点绑定（`peri-acp` 的
+    /// `host/workspace.rs::assemble_with_frozen`，经由
+    /// [`crate::host_ports::bind_agent_catalog_from_pool`]）与 turn 级装配
+    /// （`crate::assembly::preparation::resolve_ports`）。
+    ///
+    /// 不经此入口的构造点**有意不同形**，不要为统一而改：`assembly/workflow.rs` 的
+    /// workflow agent 面不做会话过滤（部署面视图），`mcp/middleware.rs` 的
+    /// DiscoverMCP 投影取自链上既有实例字段。
+    pub fn for_session(
+        pool: Arc<McpClientPool>,
+        session_id: &str,
+        disabled_middlewares: &std::collections::HashSet<String>,
+    ) -> Self {
+        Self::new(pool)
+            .with_session(Some(session_id.to_owned()))
+            .with_local_face_closed(
+                disabled_middlewares.contains(crate::assembly::SUB_AGENT_FACE_CLOSED_KEY),
+            )
+    }
+
     pub fn entries(&self) -> Vec<McpAgentMetadata> {
         let mut entries = Vec::new();
         for handle in self

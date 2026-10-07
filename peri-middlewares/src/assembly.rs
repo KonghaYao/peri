@@ -71,7 +71,7 @@ pub use peri_agent::session::factory::ChainAssembly;
 /// `SubAgentMiddleware` 链槽关闭键（A24 关闭集的 MetaHarness 键之一）。
 ///
 /// **单一事实源**（W5）：链装配的跳过判据、Agent registry 的本地面关闭位
-/// （`McpAgentRegistry::with_local_face_closed`）与宿主装配的派生都引用本常量，
+/// （`McpAgentRegistry::for_session` 内派生）与宿主装配的派生都引用本常量，
 /// 不在别处第三次写字面量。
 pub const SUB_AGENT_FACE_CLOSED_KEY: &str = "SubAgentMiddleware";
 

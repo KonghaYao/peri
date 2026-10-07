@@ -37,17 +37,16 @@ pub(super) fn resolve_ports(ctx: &AssemblyContext) -> ResolvedPorts {
             .downcast_arc::<McpClientPool>()
             .unwrap_or_else(|_| Arc::new(McpClientPool::new_pending()))
     });
-    // W5：Agent registry 的会话/关闭集过滤与链槽关闭位（`SubAgentMiddleware`，
-    // 与 A24 关闭集同一份 `disabled_middlewares` 派生——不得第二事实源）。
-    let local_agent_face_closed = ctx
-        .meta_harness_disabled
-        .contains(crate::assembly::SUB_AGENT_FACE_CLOSED_KEY);
+    // W5：Agent registry（会话可见性过滤 + 链槽关闭位）经**唯一构造入口**
+    // `McpAgentRegistry::for_session` 成型——关闭位在入口内由同一份
+    // `meta_harness_disabled` 派生（`SubAgentMiddleware`，与 A24 关闭集同源），
+    // 本文件不留第二事实源。
     let mcp_agent_registry = mcp_pool_concrete.as_ref().map(|pool| {
-        Arc::new(
-            crate::mcp::McpAgentRegistry::new(Arc::clone(pool))
-                .with_session(Some(ctx.session_id.clone()))
-                .with_local_face_closed(local_agent_face_closed),
-        )
+        Arc::new(crate::mcp::McpAgentRegistry::for_session(
+            Arc::clone(pool),
+            &ctx.session_id,
+            &ctx.meta_harness_disabled,
+        ))
     });
     // 候选目录端口绑定（W5）：ACP 只持 `Arc<dyn AgentCatalogPort>`，具体实现的
     // 绑定在装配点单次完成——registry 与 SubAgent 消费面是**同一份**（`Arc::ptr_eq`
