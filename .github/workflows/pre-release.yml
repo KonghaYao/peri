@@ -17,10 +17,10 @@ env:
 
 jobs:
     build:
-        name: Build (${{ matrix.platform }})
+        name: Build (${{ matrix.target }})
         if: github.ref == 'refs/heads/pre-release/main'
         runs-on: ${{ matrix.os }}
-        timeout-minutes: 60
+        timeout-minutes: 90
         defaults:
             run:
                 shell: bash
@@ -28,66 +28,73 @@ jobs:
             fail-fast: false
             matrix:
                 include:
-                    - os: ubuntu-24.04
+                    - os: ubuntu-latest
                       target: x86_64-unknown-linux-gnu
                       platform: linux-x86_64
-                    - os: macos-14
+                    - os: macos-latest
                       target: aarch64-apple-darwin
                       platform: macos-aarch64
 
         steps:
             - name: Checkout repository
               uses: actions/checkout@v7
+
+            - name: Install Rust toolchain
+              uses: dtolnay/rust-toolchain@stable
               with:
-                  persist-credentials: false
+                  targets: ${{ matrix.target }}
 
-            - name: Install build tools
-              uses: jdx/mise-action@v4
+            - name: Cache cargo registry
+              uses: actions/cache@v4
               with:
-                  cache: false
+                  path: |
+                      ~/.cargo/registry/index
+                      ~/.cargo/registry/cache
+                      ~/.cargo/git/db
+                  key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+                  restore-keys: ${{ runner.os }}-cargo-
 
-            - name: Cache Rust build
-              uses: Swatinem/rust-cache@v2
+            - name: Cache build artifacts
+              uses: actions/cache@v4
               with:
-                  key: next-major-${{ matrix.target }}
+                  path: target
+                  key: ${{ runner.os }}-${{ matrix.target }}-build-${{ hashFiles('**/Cargo.lock') }}
+                  restore-keys: |
+                      ${{ runner.os }}-${{ matrix.target }}-build-
+                      ${{ runner.os }}-${{ matrix.target }}-
 
-            - name: Build peri
-              run: mise exec -- ./scripts/cargo-rmcp-patched.sh build --locked -p peri-tui --bin peri --release --target ${{ matrix.target }}
+            - name: Install cross
+              if: runner.os == 'Linux'
+              run: cargo install cross
 
-            - name: Smoke test binary
-              run: |
-                  mkdir -p dist/package
-                  cp target/${{ matrix.target }}/release/peri dist/package/peri-beta
-                  mise exec -- dist/package/peri-beta --version
+            - name: Build agent-tui (Linux)
+              if: runner.os == 'Linux'
+              run: ./scripts/cargo-rmcp-patched.sh --cross build --locked -p peri-tui --release --target ${{ matrix.target }}
+
+            - name: Build agent-tui (non-Linux)
+              if: runner.os != 'Linux'
+              run: ./scripts/cargo-rmcp-patched.sh build --locked -p peri-tui --release --target ${{ matrix.target }}
 
             - name: Package binary
               env:
                   PLATFORM: ${{ matrix.platform }}
                   TARGET: ${{ matrix.target }}
               run: |
+                  mkdir -p dist/package
+                  cp "target/${TARGET}/release/peri" dist/package/peri-beta
+                  chmod +x dist/package/peri-beta
                   tar -czf "dist/peri-beta-${PLATFORM}.tar.gz" -C dist/package peri-beta
                   (
                       cd dist
                       shasum -a 256 "peri-beta-${PLATFORM}.tar.gz" > "peri-beta-${PLATFORM}.tar.gz.sha256"
                   )
-                  {
-                      echo "Branch: $GITHUB_REF_NAME"
-                      echo "Commit: $GITHUB_SHA"
-                      echo "Run: $GITHUB_RUN_ID (attempt $GITHUB_RUN_ATTEMPT)"
-                      echo "Target: $TARGET"
-                      mise exec -- dist/package/peri-beta --version
-                      mise exec -- rustc --version
-                  } > "dist/build-info-${PLATFORM}.txt"
                   rm -rf dist/package
 
-            - name: Upload artifact
+            - name: Upload artifacts
               uses: actions/upload-artifact@v4
               with:
                   name: peri-beta-${{ matrix.platform }}-${{ github.sha }}
-                  path: |
-                      dist/*.tar.gz
-                      dist/*.sha256
-                      dist/build-info-*.txt
+                  path: dist/
                   if-no-files-found: error
                   compression-level: 0
                   retention-days: 14
@@ -129,14 +136,6 @@ jobs:
                   mkdir -p dist
                   tar -czf dist/peri-beta-wasm32-unknown-emscripten.tar.gz -C "$output" peri-wasm.js peri_wasm.wasm
                   (cd dist && sha256sum peri-beta-wasm32-unknown-emscripten.tar.gz > peri-beta-wasm32-unknown-emscripten.tar.gz.sha256)
-                  {
-                      echo "Branch: $GITHUB_REF_NAME"
-                      echo "Commit: $GITHUB_SHA"
-                      echo "Run: $GITHUB_RUN_ID (attempt $GITHUB_RUN_ATTEMPT)"
-                      echo "Target: wasm32-unknown-emscripten"
-                      mise exec -- rustc --version
-                      mise exec -- emcc --version | head -n 1
-                  } > dist/build-info-wasm32-unknown-emscripten.txt
 
             - name: Upload WASM artifact
               uses: actions/upload-artifact@v4
@@ -145,7 +144,6 @@ jobs:
                   path: |
                       dist/peri-beta-wasm32-unknown-emscripten.tar.gz
                       dist/peri-beta-wasm32-unknown-emscripten.tar.gz.sha256
-                      dist/build-info-wasm32-unknown-emscripten.txt
                   if-no-files-found: error
                   compression-level: 0
                   retention-days: 14
