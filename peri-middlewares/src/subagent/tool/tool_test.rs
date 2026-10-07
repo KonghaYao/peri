@@ -1241,6 +1241,71 @@ fn build_parent_session(
     session
 }
 
+/// resume 用例的调用上下文：携带 preset 子会话对应的受信 invocation
+/// （`preset_resumable_child` 以 `fixture-resume-invocation:{child}` 登记）。
+pub(crate) fn preset_child_ctx(
+    child_id: &str,
+    cwd: &str,
+) -> peri_agent::tools::ToolContext<'static> {
+    static EMPTY: [BaseMessage; 0] = [];
+    // cwd 由调用方给出（通常为 `"."`，静态字面量），与空消息切片一样拥有 'static。
+    let cwd: &'static str = Box::leak(cwd.to_string().into_boxed_str());
+    let mut ctx = peri_agent::tools::ToolContext::new(&EMPTY, cwd);
+    ctx.invocation_id = Some(format!("fixture-resume-invocation:{child_id}"));
+    ctx
+}
+
+/// 给 resume 用例自有的父 session 挂生产 host（资源门面 + SDK 端口 + 父线程 id）。
+///
+/// 子链宿主来自 owning parent session（`parent.subagent_host()`），因此端口与
+/// 资源必须装在父 session 上；工具的 host 字段只在父 session 无 host 时生效。
+pub(crate) fn install_parent_host(
+    store: &SessionFixture,
+    parent: &std::sync::Arc<peri_agent::session::Session>,
+) {
+    use peri_agent::session::subagent::SubagentHost;
+    let mut host = parent
+        .subagent_host()
+        .as_deref()
+        .cloned()
+        .unwrap_or_default();
+    host.session_resources = Some(store.facade());
+    host.execution_admission_port = Some(Arc::new(TestAdmissionPort(store.facade())));
+    if host.task_manager.is_none() {
+        host.task_manager = Some(Arc::new(peri_agent::agent::async_tasks::TaskManager::new()));
+    }
+    host.parent_thread_id = parent.store().thread_id.clone();
+    parent.set_subagent_host(host);
+}
+
+/// 给 resume 用例自有父 session 挂生产 host，并使用调用方的后台通道。
+pub(crate) fn install_parent_host_with_channels(
+    store: &SessionFixture,
+    parent: &std::sync::Arc<peri_agent::session::Session>,
+    task_manager: std::sync::Arc<peri_agent::agent::async_tasks::TaskManager>,
+    bg_event_sender: tokio::sync::mpsc::UnboundedSender<peri_agent::agent::events::ExecutorEvent>,
+) {
+    use peri_agent::session::subagent::SubagentHost;
+    let mut host = parent
+        .subagent_host()
+        .as_deref()
+        .cloned()
+        .unwrap_or_default();
+    host.session_resources = Some(store.facade());
+    host.execution_admission_port = Some(Arc::new(TestAdmissionPort(store.facade())));
+    host.task_manager = Some(task_manager);
+    host.bg_event_sender = Some(bg_event_sender);
+    host.parent_thread_id = parent.store().thread_id.clone();
+    parent.set_subagent_host(host);
+}
+
+/// 给工具宿主补 SDK admission 端口（父 session 未挂 host 时的回退路径）。
+pub(crate) fn install_admission_port(tool: SubAgentTool, fixture: &SessionFixture) -> SubAgentTool {
+    let mut tool = tool;
+    tool.host.execution_admission_port = Some(Arc::new(TestAdmissionPort(fixture.facade())));
+    tool
+}
+
 /// 把门面与父会话 id 一次装到工具上。
 ///
 /// child 保存/认领要求父会话真实存在、调用 cwd 与父会话 cwd 一致；

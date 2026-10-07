@@ -11,20 +11,17 @@ async fn test_resume_thread_id_placeholder_ignored_and_spawns_new() {
         let dir = tempdir().unwrap();
         write_test_agent(&dir);
         let fixture = SessionFixture::open_in(dir.path()).await;
-        let (t, cwd) = install_parent_session(
-            with_agent_face(make_subagent_tool(vec![]), dir.path()).await,
-            &fixture,
-        )
-        .await;
+        let host = DurableHost::open_in(dir.path(), "fixture-resume-placeholder").await;
+        let t = host.bind(with_agent_face(make_subagent_tool(vec![]), dir.path()).await);
         let result = t
             .invoke(
                 serde_json::json!({
                     "resume_thread_id": placeholder,
                     "subagent_type": "test-agent",
-                    "cwd": cwd,
+                    "cwd": host.cwd.clone(),
                     "prompt": "do it",
                 }),
-                peri_agent::tools::ToolContext::new(&[], "."),
+                host.context(&[]),
             )
             .await;
         assert!(
@@ -64,6 +61,7 @@ async fn test_resume_thread_id_ignores_fork_field() {
         peri_agent::session::FrozenContext::builder().build(),
         Some(parent_id.clone()),
     );
+    install_parent_host(&store, &parent);
     let id = uuid::Uuid::now_v7().to_string();
     preset_resumable_thread(
         &store,
@@ -86,7 +84,7 @@ async fn test_resume_thread_id_ignores_fork_field() {
                 "fork": true,
                 "cwd": cwd.clone(),
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            preset_child_ctx(&id, "."),
         )
         .await
         .expect("resume+fork 应容错恢复而非报互斥错误");
@@ -115,6 +113,7 @@ async fn test_resume_thread_id_ignores_subagent_type_field() {
         peri_agent::session::FrozenContext::builder().build(),
         Some(parent_id.clone()),
     );
+    install_parent_host(&store, &parent);
     let id = uuid::Uuid::now_v7().to_string();
     preset_resumable_thread(
         &store,
@@ -137,7 +136,7 @@ async fn test_resume_thread_id_ignores_subagent_type_field() {
                 "subagent_type": "test-agent",
                 "cwd": cwd.clone(),
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            preset_child_ctx(&id, "."),
         )
         .await
         .expect("resume+subagent_type 应容错恢复而非报互斥错误");
@@ -269,16 +268,19 @@ async fn test_resume_thread_id_active_rejected() {
     meta.id = id.clone();
     meta.title = Some("fork".to_string());
     store.create_thread(meta).await.unwrap(); // ThreadMeta 默认 agent_status = Active
-    let t = make_subagent_tool(vec![])
-        .with_session_resources(store.facade())
-        .with_parent_thread_id(parent_id.clone())
-        .with_parent_session(parent.clone());
+    let t = install_admission_port(
+        make_subagent_tool(vec![])
+            .with_session_resources(store.facade())
+            .with_parent_thread_id(parent_id.clone())
+            .with_parent_session(parent.clone()),
+        &store,
+    );
     let result = t
         .invoke(
             serde_json::json!({
                 "resume_thread_id": id,
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            preset_child_ctx(&id, "."),
         )
         .await;
     let error = result.unwrap_err();
@@ -349,7 +351,7 @@ async fn test_resume_thread_id_parent_mismatch_is_rejected_by_root_ownership() {
                 "resume_thread_id": id.clone(),
                 "cwd": cwd.clone(),
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            preset_child_ctx(&id, "."),
         )
         .await
         .expect_err("跨根恢复必须被拒绝");
@@ -387,6 +389,7 @@ async fn test_resume_thread_id_background_combination() {
         peri_agent::session::FrozenContext::builder().build(),
         Some(parent_id.clone()),
     );
+    install_parent_host(&store, &parent);
     let id = uuid::Uuid::now_v7().to_string();
     preset_resumable_thread(&store, &id, "fork", Some(parent_id.as_str()), Vec::new()).await;
 
@@ -405,7 +408,7 @@ async fn test_resume_thread_id_background_combination() {
                 "resume_thread_id": id.clone(),
                 "run_in_background": true,
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            preset_child_ctx(&id, "."),
         )
         .await
         .expect("resume+bg 应启动后台任务");
@@ -463,6 +466,7 @@ async fn test_resume_thread_id_success_replays_and_completes() {
         peri_agent::session::FrozenContext::builder().build(),
         Some(parent_id.clone()),
     );
+    install_parent_host(&store, &parent);
     let id = uuid::Uuid::now_v7().to_string();
     preset_resumable_thread(
         &store,
@@ -484,7 +488,7 @@ async fn test_resume_thread_id_success_replays_and_completes() {
                 "resume_thread_id": id.clone(),
                 "cwd": cwd.clone(),
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            preset_child_ctx(&id, "."),
         )
         .await
         .expect("resume 应成功");
@@ -515,6 +519,7 @@ async fn test_resume_thread_id_fork_title_uses_parent_tools_and_200_iterations()
         peri_agent::session::FrozenContext::builder().build(),
         Some(parent_id.clone()),
     );
+    install_parent_host(&store, &parent);
     let id = uuid::Uuid::now_v7().to_string();
     preset_resumable_thread(
         &store,
@@ -583,7 +588,7 @@ async fn test_resume_thread_id_fork_title_uses_parent_tools_and_200_iterations()
             serde_json::json!({
                 "resume_thread_id": id.clone(),
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            preset_child_ctx(&id, "."),
         )
         .await;
     // 迭代上限耗尽 → MaxIterationsExceeded 错误（fork resume 上限 = 200）
@@ -633,6 +638,7 @@ async fn test_resume_thread_id_agent_def_refilters_tools() {
         peri_agent::session::FrozenContext::builder().build(),
         Some(parent_id.clone()),
     );
+    install_parent_host(&store, &parent);
     let id = uuid::Uuid::now_v7().to_string();
     preset_resumable_thread(
         &store,
@@ -693,7 +699,7 @@ async fn test_resume_thread_id_agent_def_refilters_tools() {
                 "resume_thread_id": id.clone(),
                 "cwd": cwd.clone(),
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            preset_child_ctx(&id, "."),
         )
         .await
         .expect("agent-def resume 应成功");
@@ -733,6 +739,7 @@ async fn test_resume_trimmed_id_wins_over_mcp_fork_and_invalid_model() {
         peri_agent::session::FrozenContext::builder().build(),
         Some(parent_id.clone()),
     );
+    install_parent_host(&store, &parent);
     let id = uuid::Uuid::now_v7().to_string();
     preset_resumable_thread(&store, &id, "test-agent", Some(parent_id.as_str()), vec![]).await;
     let tool = with_agent_face(make_subagent_tool(vec![]), dir.path())
@@ -750,7 +757,7 @@ async fn test_resume_trimmed_id_wins_over_mcp_fork_and_invalid_model() {
                 "prompt": null,
                 "cwd": cwd.clone()
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            preset_child_ctx(&id, "."),
         )
         .await
         .unwrap();
