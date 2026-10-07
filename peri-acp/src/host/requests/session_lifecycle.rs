@@ -26,7 +26,7 @@ use crate::dispatch::config_update::make_config_options;
 use crate::{dispatch, transport::types::AcpError};
 
 #[path = "session_restore.rs"]
-mod restore;
+pub(crate) mod restore;
 pub(crate) use restore::{handle_context, handle_load, handle_metadata, handle_resume};
 use restore::{identity_response, prepare_existing, response_identity};
 

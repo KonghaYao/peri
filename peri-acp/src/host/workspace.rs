@@ -37,6 +37,21 @@ pub(crate) struct SessionEnvironment {
     builtin_closed: std::collections::BTreeSet<String>,
 }
 
+/// 测试观察面：会话环境 shutdown 事件（session_id）。
+///
+/// 环境在失败路径上被排空后即丢弃，外部无法再读到它；这里记录「哪个会话的环境
+/// 被 shutdown」，供生命周期守卫测试断言（与 `builtin_closed` 同类测试观察面）。
+#[cfg(test)]
+static SHUTDOWN_OBSERVATIONS: std::sync::OnceLock<std::sync::Mutex<Vec<String>>> =
+    std::sync::OnceLock::new();
+
+/// 读取并清空 shutdown 观察记录（测试用）。
+#[cfg(test)]
+pub(crate) fn take_shutdown_observations() -> Vec<String> {
+    let mutex = SHUTDOWN_OBSERVATIONS.get_or_init(|| std::sync::Mutex::new(Vec::new()));
+    std::mem::take(&mut *mutex.lock().unwrap())
+}
+
 impl SessionEnvironment {
     /// 冻结期技能清单快照（W4b / F3，J1）：内容准入期从 **system 来源**
     /// （builtin `workspace` 实例）取一次技能元数据，供冻结 system prompt 的
@@ -437,6 +452,12 @@ impl SessionEnvironment {
     }
 
     pub(crate) async fn shutdown(&self) -> bool {
+        #[cfg(test)]
+        SHUTDOWN_OBSERVATIONS
+            .get_or_init(|| std::sync::Mutex::new(Vec::new()))
+            .lock()
+            .unwrap()
+            .push(self.session_id.clone());
         // 会话终结即断开本会话声明的 MCP-over-ACP 连接：连接由 client 侧的
         // ACP 通道承载，会话不再存活后既没有归属也不会有入站消息；处置必须在
         // 池关闭之前完成，否则 `mcp/disconnect` 已无出站通道可用。实现幂等，
