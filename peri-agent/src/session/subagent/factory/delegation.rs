@@ -182,6 +182,8 @@ pub(in crate::session::subagent) async fn publish_work_delegation(
                     fingerprint: u64::from_be_bytes(fingerprint_bytes),
                 },
             };
+            let stage =
+                peri_acp_types::session_resources::work::PreparedWorkCommand::try_new(stage)?;
             barrier.commit(&stage).await?;
             let current = barrier
                 .snapshot(&WorkQuery {
@@ -204,6 +206,7 @@ pub(in crate::session::subagent) async fn publish_work_delegation(
         mutation_id: format!("child-delegation-input:{identity}"),
         action,
     };
+    let command = peri_acp_types::session_resources::work::PreparedWorkCommand::try_new(command)?;
     barrier.commit(&command).await?;
     let child = resources
         .load_session_work(&WorkQuery {
@@ -228,6 +231,7 @@ pub(in crate::session::subagent) async fn publish_work_delegation(
         },
     };
     command.mutation_id = format!("child-work-delegation:{}", command.digest()?);
+    let command = peri_acp_types::session_resources::work::PreparedWorkCommand::try_new(command)?;
     barrier.commit(&command).await?;
     queue.push(message);
     Ok(binding)

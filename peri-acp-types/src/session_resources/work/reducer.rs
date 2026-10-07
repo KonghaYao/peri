@@ -43,11 +43,11 @@ impl WorkReduction {
 /// `WorkState`), so no copy of the state — which embeds historical
 /// `works[].reasonRequest.serializedRequest` payloads — is made here.
 pub fn reduce_work(
-    command: &WorkCommand,
+    command: &PreparedWorkCommand,
     control: &ControlState,
     current: WorkState,
 ) -> SessionResourceResult<WorkReduction> {
-    command.digest()?;
+    let command = command.command();
     if let Ok(Some(receipt)) = super::admission::prior_receipt(command, &current) {
         let accepted = receipt.decision == WorkDecision::Accepted;
         return Ok(WorkReduction {

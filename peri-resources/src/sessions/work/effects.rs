@@ -17,28 +17,31 @@ const REFRESH_COUNTS: &str = "UPDATE threads SET updated_at=?1,message_count=(SE
 /// in-flight terminal obligation, read from the pre-command state when (and only
 /// when) the command acknowledges one.
 pub(in crate::sessions) fn mutation_effects(
-    command: &WorkCommand,
-    digest: &str,
+    command: &PreparedWorkCommand,
     initial_json: String,
-    parent_command: Option<&WorkCommand>,
+    parent_command: Option<&PreparedWorkCommand>,
     control: &ControlState,
     reduction: &WorkReduction,
 ) -> SessionResourceResult<Vec<WorkEffect>> {
     // Rejected reductions carry no state: `apply` may have partially mutated it.
     let accepted_state = reduction.accepted_state()?;
-    let mut effects = command_effects_with_digest(command, digest)?;
+    let mut effects = command_effects(command)?;
+    let initial_json: Arc<str> = initial_json.into();
     effects.extend([
-        WorkEffect::texts(
+        WorkEffect::shared(
             INSERT_STATE,
-            [command.session_id.clone(), initial_json.clone()],
+            [
+                Arc::from(command.session_id.as_str()),
+                Arc::clone(&initial_json),
+            ],
         ),
-        WorkEffect::texts(
+        WorkEffect::shared(
             GUARD_STATE,
             [
-                command.session_id.clone(),
+                Arc::from(command.session_id.as_str()),
                 initial_json,
-                encode(&ControlState::default())?,
-                encode(control)?,
+                Arc::from(encode(&ControlState::default())?),
+                Arc::from(encode(control)?),
             ],
         ),
     ]);
@@ -54,26 +57,30 @@ pub(in crate::sessions) fn mutation_effects(
         if let WorkAction::AcknowledgeTerminalObligation { receipt, .. } = &command.action {
             let parent_command =
                 parent_command.ok_or_else(|| corrupt("missing terminal obligation"))?;
-            effects.push(WorkEffect::texts("INSERT INTO session_work_state(session_id,state_json) SELECT NULL,NULL WHERE NOT EXISTS(SELECT 1 FROM session_work_receipts WHERE mutation_id=?1 AND session_id=?2 AND digest=?3 AND resolution_json=?4)", [parent_command.mutation_id.clone(),parent_command.session_id.clone(),parent_command.digest()?,encode(&WorkResolution::Applied { receipt: receipt.clone() })?]));
+            effects.push(WorkEffect::texts("INSERT INTO session_work_state(session_id,state_json) SELECT NULL,NULL WHERE NOT EXISTS(SELECT 1 FROM session_work_receipts WHERE mutation_id=?1 AND session_id=?2 AND digest=?3 AND resolution_json=?4)", [parent_command.mutation_id.clone(),parent_command.session_id.clone(),parent_command.digest().to_owned(),encode(&WorkResolution::Applied { receipt: receipt.clone() })?]));
         }
         if let Some(next_control) = &reduction.control {
             effects.push(WorkEffect::texts("INSERT INTO session_control_state(session_id,state_json) VALUES (?1,?2) ON CONFLICT(session_id) DO UPDATE SET state_json=excluded.state_json", [command.session_id.clone(), encode(next_control)?]));
         }
         for event in &reduction.events {
-            let key = encode(&(event.producer_namespace.as_str(), event.event_id.as_str()))?;
-            let json = encode(event)?;
-            effects.push(WorkEffect::texts(INSERT_EVENT, [key.clone(), json.clone()]));
-            effects.push(WorkEffect::texts(GUARD_EVENT, [key, json]));
+            let key: Arc<str> =
+                encode(&(event.producer_namespace.as_str(), event.event_id.as_str()))?.into();
+            let json: Arc<str> = encode(event)?.into();
+            effects.push(WorkEffect::shared(
+                INSERT_EVENT,
+                [key.clone(), json.clone()],
+            ));
+            effects.push(WorkEffect::shared(GUARD_EVENT, [key, json]));
         }
         for projection in &reduction.projections {
             let params = [
-                projection.message_id.as_uuid().to_string(),
-                command.session_id.clone(),
-                projection.role.clone(),
-                projection.serialized.clone(),
+                Arc::from(projection.message_id.as_uuid().to_string()),
+                Arc::from(command.session_id.as_str()),
+                Arc::from(projection.role.as_str()),
+                Arc::from(projection.serialized.as_str()),
             ];
-            effects.push(WorkEffect::texts(INSERT_PROJECTION, params.clone()));
-            effects.push(WorkEffect::texts(GUARD_PROJECTION, params));
+            effects.push(WorkEffect::shared(INSERT_PROJECTION, params.clone()));
+            effects.push(WorkEffect::shared(GUARD_PROJECTION, params));
         }
         if !reduction.projections.is_empty() {
             effects.push(WorkEffect::texts(
@@ -88,12 +95,11 @@ pub(in crate::sessions) fn mutation_effects(
                 })
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|_| corrupt("work projection is not readable"))?;
-            let messages: Vec<_> = payloads
-                .iter()
-                .filter_map(peri_acp_types::store::PersistedPayload::as_message)
-                .cloned()
-                .collect();
-            if let Some(title) = crate::sessions::canonical::extract_title(&messages) {
+            if let Some(title) = crate::sessions::canonical::extract_title(
+                payloads
+                    .iter()
+                    .filter_map(peri_acp_types::store::PersistedPayload::as_message),
+            ) {
                 effects.push(WorkEffect::texts(
                     "UPDATE threads SET title=?1 WHERE id=?2 AND title IS NULL",
                     [title, command.session_id.clone()],
@@ -113,7 +119,7 @@ pub(in crate::sessions) fn mutation_effects(
         [
             command.mutation_id.clone(),
             command.session_id.clone(),
-            digest.to_owned(),
+            command.digest().to_owned(),
             encode(&resolution)?,
         ],
     ));

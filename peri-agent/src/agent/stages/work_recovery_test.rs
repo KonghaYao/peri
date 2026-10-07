@@ -17,7 +17,7 @@ fn claimed_snapshot() -> WorkSnapshot {
     control.attempt = Some(execution.clone());
     let payload = PersistedPayload::Message(BaseMessage::human("pending input"));
     let published = reduce_work(
-        &WorkCommand {
+        &peri_acp_types::session_resources::work::PreparedWorkCommand::try_new(WorkCommand {
             session_id: "session".into(),
             recipient_lifecycle: control.lifecycle,
             mutation_id: "publish".into(),
@@ -35,7 +35,8 @@ fn claimed_snapshot() -> WorkSnapshot {
                     policy: MessagePolicy::ensure_processing(),
                 },
             },
-        },
+        })
+        .unwrap(),
         &control,
         WorkState::default(),
     )
@@ -43,7 +44,7 @@ fn claimed_snapshot() -> WorkSnapshot {
     assert_eq!(published.receipt.decision, WorkDecision::Accepted);
     let published_state = published.state.unwrap();
     let claimed = reduce_work(
-        &WorkCommand {
+        &peri_acp_types::session_resources::work::PreparedWorkCommand::try_new(WorkCommand {
             session_id: "session".into(),
             recipient_lifecycle: control.lifecycle,
             mutation_id: "claim".into(),
@@ -56,7 +57,8 @@ fn claimed_snapshot() -> WorkSnapshot {
                 batch_id: "work".into(),
                 delivery_ids: vec!["delivery".into()],
             },
-        },
+        })
+        .unwrap(),
         &control,
         published_state,
     )

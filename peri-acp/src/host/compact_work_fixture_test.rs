@@ -1,4 +1,5 @@
 use super::*;
+use peri_acp_types::session_resources::work::PreparedWorkCommand;
 
 pub(super) async fn assert_blocked_preserves_summary(
     mut ctx: SessionContext,
@@ -473,7 +474,7 @@ async fn test_full_compact_preclaim_journal_unknown_blocks_before_model() {
 pub(super) async fn assert_unknown_command(
     ctx: &SessionContext,
     store: &RecoveryStore,
-) -> peri_acp_types::session_resources::work::WorkCommand {
+) -> PreparedWorkCommand {
     use peri_acp_types::session_resources::work::{WorkQuery, WorkResolution};
     let original = store
         .uncertain
@@ -489,7 +490,7 @@ pub(super) async fn assert_unknown_command(
         .await
         .unwrap();
     assert!(snapshot.blocked);
-    assert!(snapshot.pending_commands.contains(&original));
+    assert!(snapshot.pending_commands.contains(original.command()));
     let entry = store
         .load_work_command(&peri_acp_types::session_resources::work::WorkCommandQuery {
             session_id: original.session_id.clone(),
@@ -498,7 +499,7 @@ pub(super) async fn assert_unknown_command(
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(entry.command, original);
+    assert_eq!(&entry.command, original.command());
     assert!(entry.pending);
     assert_eq!(
         store.resolve_work_mutation(&original).await.unwrap(),
@@ -514,6 +515,6 @@ pub(super) async fn assert_unknown_command(
     .await
     .unwrap();
     assert!(recovered.blocked);
-    assert!(recovered.pending_commands.contains(&original));
+    assert!(recovered.pending_commands.contains(original.command()));
     original
 }

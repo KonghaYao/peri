@@ -3,6 +3,18 @@ use crate::identity::AttemptId;
 use crate::messages::{BaseMessage, MessageContent};
 use crate::session::TurnId;
 
+fn reduce_work(
+    command: &WorkCommand,
+    control: &ControlState,
+    state: WorkState,
+) -> SessionResourceResult<WorkReduction> {
+    super::reduce_work(
+        &PreparedWorkCommand::try_new(command.clone())?,
+        control,
+        state,
+    )
+}
+
 fn attempt() -> ControlAttempt {
     ControlAttempt {
         turn_id: TurnId::new(),

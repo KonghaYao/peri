@@ -15,12 +15,15 @@ enum Failure {
     Read,
     NotApplied,
     Unknown,
+    Replay,
+    Pending,
 }
 
 struct PublicationResources {
     backend: Arc<dyn SessionResources>,
     queries: Mutex<Vec<WorkDeliveryQuery>>,
-    commands: Mutex<Vec<WorkCommand>>,
+    commands: Mutex<Vec<peri_acp_types::session_resources::work::PreparedWorkCommand>>,
+    resolved_commands: Mutex<Vec<PreparedWorkCommand>>,
     snapshots: AtomicUsize,
     resolutions: AtomicUsize,
     failure: Mutex<Failure>,
@@ -32,6 +35,7 @@ impl PublicationResources {
             backend,
             queries: Mutex::new(Vec::new()),
             commands: Mutex::new(Vec::new()),
+            resolved_commands: Mutex::new(Vec::new()),
             snapshots: AtomicUsize::new(0),
             resolutions: AtomicUsize::new(0),
             failure: Mutex::new(Failure::None),
@@ -59,7 +63,7 @@ macro_rules! publication_resources {
                 self.backend.load_work_delivery(query).await
             }
 
-            async fn apply_work_mutation(&self, command: &WorkCommand) -> SessionResourceResult<WorkReceipt> {
+            async fn apply_work_mutation(&self, command: &peri_acp_types::session_resources::work::PreparedWorkCommand) -> SessionResourceResult<WorkReceipt> {
                 self.commands.lock().unwrap().push(command.clone());
                 let failure = *self.failure.lock().unwrap();
                 match failure {
@@ -67,13 +71,19 @@ macro_rules! publication_resources {
                         detail: "injected unapplied publication".into(),
                     })),
                     Failure::Unknown => Err(SessionResourceError::persistence_uncertain(Some(command.session_id.clone()))),
+                    Failure::Pending => std::future::pending().await,
                     _ => self.backend.apply_work_mutation(command).await,
                 }
             }
 
-            async fn resolve_work_mutation(&self, _: &WorkCommand) -> SessionResourceResult<WorkResolution> {
+            async fn resolve_work_mutation(&self, command: &peri_acp_types::session_resources::work::PreparedWorkCommand) -> SessionResourceResult<WorkResolution> {
                 self.resolutions.fetch_add(1, Ordering::SeqCst);
-                Ok(WorkResolution::Unknown)
+                self.resolved_commands.lock().unwrap().push(command.clone());
+                Ok(if matches!(*self.failure.lock().unwrap(), Failure::Replay) {
+                    WorkResolution::NotApplied
+                } else {
+                    WorkResolution::Unknown
+                })
             }
 
             $(async fn $method(&self, $($argument: $argument_type),*) -> $result {
@@ -83,6 +93,10 @@ macro_rules! publication_resources {
         }
     };
 }
+
+#[cfg(test)]
+#[path = "work_receive_shared_test.rs"]
+mod shared_command_tests;
 
 publication_resources! {
     fn inspect_availability(session: Option<&ThreadId>) -> SessionResourceResult<SessionAvailability>;

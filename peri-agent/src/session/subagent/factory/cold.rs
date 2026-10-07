@@ -34,6 +34,8 @@ pub(super) async fn persist_child_resume_metadata(
             },
         };
         command.mutation_id = format!("child-resume:{}", command.digest()?);
+        let command =
+            peri_acp_types::session_resources::work::PreparedWorkCommand::try_new(command)?;
         let receipt = match resources.apply_work_mutation(&command).await {
             Ok(receipt) => receipt,
             Err(error)
@@ -95,6 +97,7 @@ pub(super) async fn copy_child_resource_owners(
         },
     };
     command.mutation_id = format!("child-owners:{}", command.digest()?);
+    let command = peri_acp_types::session_resources::work::PreparedWorkCommand::try_new(command)?;
     let receipt = match resources.apply_work_mutation(&command).await {
         Ok(receipt) => receipt,
         Err(error)
@@ -153,6 +156,7 @@ pub(super) async fn bind_delegation_task(
         },
     };
     command.mutation_id = format!("child-delegation:{}", command.digest()?);
+    let command = peri_acp_types::session_resources::work::PreparedWorkCommand::try_new(command)?;
     let receipt = match resources.apply_work_mutation(&command).await {
         Ok(receipt) => receipt,
         Err(error)

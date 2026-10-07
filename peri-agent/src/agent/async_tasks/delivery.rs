@@ -187,13 +187,18 @@ impl TaskTerminalDelivery for SessionTerminalDelivery {
                 reminder.clone(),
                 delivery_id,
             );
+            let command =
+                peri_acp_types::session_resources::work::PreparedWorkCommand::try_new(command)
+                    .map_err(|error| error.to_string())?;
+            let recipient_matches = snapshot.control.lifecycle == self.recipient_lifecycle;
+            drop(snapshot);
             crate::agent::stages::work_ledger::WorkMutationBarrier::new(Arc::clone(
                 &self.resources,
             ))
             .commit(&command)
             .await
             .map_err(|error| error.to_string())?;
-            if snapshot.control.lifecycle == self.recipient_lifecycle {
+            if recipient_matches {
                 self.queue.push(queued);
             }
             tracing::debug!(

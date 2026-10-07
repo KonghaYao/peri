@@ -1,4 +1,5 @@
 use super::*;
+use peri_acp_types::session_resources::work::PreparedWorkCommand;
 use peri_acp_types::{
     identity::AttemptId,
     messages::{BaseMessage, ToolCallRequest},
@@ -114,12 +115,15 @@ async fn load(resources: &dyn SessionResources) -> WorkSnapshot {
 
 async fn apply(resources: &dyn SessionResources, action: WorkAction) -> WorkReceipt {
     let receipt = resources
-        .apply_work_mutation(&WorkCommand {
-            session_id: "stop-session".into(),
-            recipient_lifecycle: 1,
-            mutation_id: uuid::Uuid::now_v7().to_string(),
-            action,
-        })
+        .apply_work_mutation(
+            &PreparedWorkCommand::try_new(WorkCommand {
+                session_id: "stop-session".into(),
+                recipient_lifecycle: 1,
+                mutation_id: uuid::Uuid::now_v7().to_string(),
+                action,
+            })
+            .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(receipt.decision, WorkDecision::Accepted);
@@ -447,6 +451,7 @@ async fn stop_replays_known_rejected_original_receipt_without_new_revision() {
     {
         *expected_revision = expected_revision.saturating_sub(1);
     }
+    let original = PreparedWorkCommand::try_new(original).unwrap();
     let rejected = fixture
         .resources
         .apply_work_mutation(&original)
@@ -466,7 +471,7 @@ async fn stop_replays_known_rejected_original_receipt_without_new_revision() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(owned.command, original);
+    assert_eq!(&owned.command, original.command());
     assert_eq!(
         owned.resolution,
         Some(WorkResolution::Applied { receipt: rejected })

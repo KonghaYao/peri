@@ -91,7 +91,15 @@ async fn apply_fixture_mutation(resources: &dyn SessionResources, mut command: W
             _ => panic!("unexpected delegation fixture action"),
         }
         command.mutation_id = format!("{identity}:{}", command.digest().unwrap());
-        let receipt = resources.apply_work_mutation(&command).await.unwrap();
+        let receipt = resources
+            .apply_work_mutation(
+                &peri_acp_types::session_resources::work::PreparedWorkCommand::try_new(
+                    command.clone(),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(receipt.session_id, command.session_id);
         assert_eq!(receipt.mutation_id, command.mutation_id);
         match receipt.decision {

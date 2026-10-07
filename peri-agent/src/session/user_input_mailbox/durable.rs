@@ -21,7 +21,7 @@ pub(super) struct DurableMailbox {
 
 struct FrozenOperation {
     fingerprint: u64,
-    commands: Vec<WorkCommand>,
+    commands: Vec<PreparedWorkCommand>,
     receipt: Option<UserInputQueueReceipt>,
     attempted: bool,
     uncertain: bool,
@@ -198,7 +198,7 @@ impl UserInputMailbox {
                 request.command_id.clone(),
                 FrozenOperation {
                     fingerprint,
-                    commands,
+                    commands: prepare_commands(commands)?,
                     receipt: None,
                     attempted: was_pending,
                     uncertain: was_pending,
@@ -526,7 +526,7 @@ impl DurableMailbox {
 
     async fn commit(
         &self,
-        command: &WorkCommand,
+        command: &PreparedWorkCommand,
         reconcile: bool,
     ) -> Result<WorkReceipt, UserInputQueueError> {
         if reconcile {
@@ -551,6 +551,18 @@ impl DurableMailbox {
             },
         }
     }
+}
+
+fn prepare_commands(
+    commands: Vec<WorkCommand>,
+) -> Result<Vec<PreparedWorkCommand>, UserInputQueueError> {
+    commands
+        .into_iter()
+        .map(|command| {
+            PreparedWorkCommand::try_new(command)
+                .map_err(|error| UserInputQueueError::DurableRejected(error.to_string()))
+        })
+        .collect()
 }
 
 fn accepted(receipt: WorkReceipt) -> Result<WorkReceipt, UserInputQueueError> {
@@ -711,7 +723,7 @@ fn ensure_not_frozen(
 
 fn project_withdrawn_results(
     receipt: &mut UserInputQueueReceipt,
-    commands: &[WorkCommand],
+    commands: &[PreparedWorkCommand],
     snapshot: &WorkSnapshot,
 ) {
     for command in commands {

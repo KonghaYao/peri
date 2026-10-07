@@ -1,4 +1,5 @@
 use super::*;
+use peri_acp_types::session_resources::work::PreparedWorkCommand;
 
 // ── 用例 8：cron 端到端（§8 第 6 行 / H04 / V 子计划 `[W2 cron-e2e]`）──────────
 
@@ -29,16 +30,19 @@ async fn cron_register_tick_approval_continuation() {
         .await
         .unwrap();
     let receipt = resources
-        .apply_work_mutation(&peri_acp_types::session_resources::work::WorkCommand {
-            session_id: register_ctx.session_id.clone(),
-            recipient_lifecycle: snapshot.control.lifecycle,
-            mutation_id: "w2-cron-e2e-owner-setup".into(),
-            action: peri_acp_types::session_resources::work::WorkAction::BindResourceOwners {
-                expected_revision: snapshot.state.revision,
-                connections_json: "{}".into(),
-                authorization_ref: "trusted-w2-cron-e2e-setup".into(),
-            },
-        })
+        .apply_work_mutation(
+            &PreparedWorkCommand::try_new(peri_acp_types::session_resources::work::WorkCommand {
+                session_id: register_ctx.session_id.clone(),
+                recipient_lifecycle: snapshot.control.lifecycle,
+                mutation_id: "w2-cron-e2e-owner-setup".into(),
+                action: peri_acp_types::session_resources::work::WorkAction::BindResourceOwners {
+                    expected_revision: snapshot.state.revision,
+                    connections_json: "{}".into(),
+                    authorization_ref: "trusted-w2-cron-e2e-setup".into(),
+                },
+            })
+            .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(

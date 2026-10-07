@@ -3,8 +3,8 @@ use std::sync::Arc;
 use peri_acp_types::interaction::UserInteractionBroker;
 use peri_acp_types::permission::SharedPermissionMode;
 use peri_acp_types::session_resources::work::{
-    WorkAction, WorkAdmission, WorkCommand, WorkDecision, WorkGuard, WorkQuery, WorkReceipt,
-    WorkResolution, WorkSnapshot, WorkStage, WorkTarget,
+    PreparedWorkCommand, WorkAction, WorkAdmission, WorkCommand, WorkDecision, WorkGuard,
+    WorkQuery, WorkReceipt, WorkResolution, WorkSnapshot, WorkStage, WorkTarget,
 };
 use peri_acp_types::session_resources::{ControlStatus, SessionResources};
 use peri_acp_types::store::{deserialize_persisted_payload, PersistedPayload};
@@ -162,11 +162,12 @@ async fn approve_work(
 
 async fn commit_original(
     resources: &dyn SessionResources,
-    command: &WorkCommand,
+    command: WorkCommand,
 ) -> anyhow::Result<WorkReceipt> {
-    let receipt = match resources.apply_work_mutation(command).await {
+    let command = PreparedWorkCommand::try_new(command)?;
+    let receipt = match resources.apply_work_mutation(&command).await {
         Ok(receipt) => receipt,
-        Err(_) => match resources.resolve_work_mutation(command).await? {
+        Err(_) => match resources.resolve_work_mutation(&command).await? {
             WorkResolution::Applied { receipt } => receipt,
             WorkResolution::Unknown | WorkResolution::NotApplied => {
                 anyhow::bail!("scheduled decision mutation remains unconfirmed");
@@ -209,7 +210,7 @@ async fn abandon_work(
                     anyhow::anyhow!("rejected scheduled work is not the exact SDK work")
                 })?;
             if batch.delivery_ids != denied_delivery_ids {
-                commit_original(resources, &WorkCommand {
+                commit_original(resources, WorkCommand {
                     session_id: admission.session_id.clone(), recipient_lifecycle: admission.lifecycle,
                     mutation_id: format!("scheduled-rejection-block:{}:{delivery_id}", admission.admission_id),
                     action: WorkAction::BlockWork {
@@ -253,7 +254,7 @@ async fn abandon_work(
         };
         commit_original(
             resources,
-            &WorkCommand {
+            WorkCommand {
                 session_id: admission.session_id.clone(),
                 recipient_lifecycle: admission.lifecycle,
                 mutation_id: format!(

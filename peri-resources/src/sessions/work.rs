@@ -1,11 +1,12 @@
 use peri_acp_types::session_resources::work::{
-    DeliveryRecord, ResourceOwnerBinding, ResourceOwnerFacts, WorkAction, WorkCommand,
-    WorkDeliveryQuery, WorkReceipt, WorkReduction, WorkResolution, WorkState,
+    DeliveryRecord, PreparedWorkCommand, ResourceOwnerBinding, ResourceOwnerFacts, WorkAction,
+    WorkCommand, WorkDeliveryQuery, WorkReceipt, WorkReduction, WorkResolution, WorkState,
 };
 use peri_acp_types::session_resources::{
     ControlState, SessionResourceError, SessionResourceResult,
 };
 use serde::{de::DeserializeOwned, Serialize};
+use std::sync::Arc;
 
 use super::failure::corrupt;
 
@@ -119,30 +120,23 @@ pub(super) const READ_PENDING: &str = "WITH RECURSIVE scope(id) AS (SELECT ?1 UN
 pub(super) const HAS_PENDING: &str = "WITH RECURSIVE scope(id) AS (SELECT ?1 UNION ALL SELECT threads.id FROM threads JOIN scope ON threads.parent_thread_id=scope.id) SELECT EXISTS (SELECT 1 FROM session_work_commands NOT INDEXED WHERE reconciled=0 AND session_id IN (SELECT id FROM scope))";
 pub(super) const ACK_COMMAND: &str = "UPDATE session_work_commands SET reconciled=1 WHERE mutation_id=?1 AND digest=?2 AND EXISTS(SELECT 1 FROM session_work_receipts WHERE mutation_id=?1 AND digest=?2)";
 
-pub(super) fn command_effects(command: &WorkCommand) -> SessionResourceResult<Vec<WorkEffect>> {
-    command_effects_with_digest(command, &command.digest()?)
-}
-
-pub(super) fn command_effects_with_digest(
-    command: &WorkCommand,
-    digest: &str,
+pub(super) fn command_effects(
+    command: &PreparedWorkCommand,
 ) -> SessionResourceResult<Vec<WorkEffect>> {
     let params = [
-        command.mutation_id.clone(),
-        command.session_id.clone(),
-        digest.to_owned(),
-        encode(command)?,
+        Arc::from(command.mutation_id.as_str()),
+        Arc::from(command.session_id.as_str()),
+        Arc::from(command.digest()),
+        Arc::clone(command.encoded()),
     ];
     Ok(vec![
-        WorkEffect::texts(INSERT_COMMAND, params.clone()),
-        WorkEffect::texts(GUARD_COMMAND, params),
+        WorkEffect::shared(INSERT_COMMAND, params.clone()),
+        WorkEffect::shared(GUARD_COMMAND, params),
     ])
 }
 
 pub(super) fn original_command(json: &str) -> SessionResourceResult<WorkCommand> {
-    let command: WorkCommand = decode(json)?;
-    command.digest()?;
-    Ok(command)
+    Ok(PreparedWorkCommand::try_new(decode(json)?)?.into_command())
 }
 
 pub(super) fn owned_command(
@@ -151,18 +145,20 @@ pub(super) fn owned_command(
     resolution: Option<&str>,
     reconciled: bool,
 ) -> SessionResourceResult<peri_acp_types::session_resources::work::OwnedWorkCommand> {
-    let command = original_command(json)?;
-    if command.digest()? != digest {
+    let command = PreparedWorkCommand::try_new(decode(json)?)?;
+    if command.digest() != digest {
         return Err(corrupt("owned command digest conflicts"));
     }
     let resolution = resolution
-        .map(|resolution| replay(&command, digest, resolution))
+        .map(|resolution| {
+            replay_with_digest(command.command(), command.digest(), digest, resolution)
+        })
         .transpose()?;
     if reconciled && resolution.is_none() {
         return Err(corrupt("reconciled command lacks original receipt"));
     }
     Ok(peri_acp_types::session_resources::work::OwnedWorkCommand {
-        command,
+        command: command.into_command(),
         resolution,
         pending: !reconciled,
     })
@@ -201,13 +197,19 @@ pub(super) const INSERT_RECEIPT: &str = "INSERT INTO session_work_receipts(mutat
 
 pub(super) struct WorkEffect {
     pub sql: &'static str,
-    pub params: Vec<String>,
+    pub params: Vec<Arc<str>>,
 }
 impl WorkEffect {
-    pub(super) fn texts(sql: &'static str, params: impl IntoIterator<Item = String>) -> Self {
+    pub(super) fn shared(sql: &'static str, params: impl IntoIterator<Item = Arc<str>>) -> Self {
         Self {
             sql,
             params: params.into_iter().collect(),
+        }
+    }
+    pub(super) fn texts(sql: &'static str, params: impl IntoIterator<Item = String>) -> Self {
+        Self {
+            sql,
+            params: params.into_iter().map(Arc::from).collect(),
         }
     }
 }
@@ -251,21 +253,16 @@ pub(super) fn pre_state_json(
 pub(super) fn terminal_parent_command(
     command: &WorkCommand,
     current: &WorkState,
-) -> Option<WorkCommand> {
+) -> SessionResourceResult<Option<PreparedWorkCommand>> {
     match &command.action {
-        WorkAction::AcknowledgeTerminalObligation { admission_id, .. } => {
-            current.terminal_obligations.get(admission_id).cloned()
-        }
-        _ => None,
+        WorkAction::AcknowledgeTerminalObligation { admission_id, .. } => current
+            .terminal_obligations
+            .get(admission_id)
+            .cloned()
+            .map(PreparedWorkCommand::try_new)
+            .transpose(),
+        _ => Ok(None),
     }
-}
-
-pub(super) fn replay(
-    command: &WorkCommand,
-    digest: &str,
-    json: &str,
-) -> SessionResourceResult<WorkResolution> {
-    replay_with_digest(command, &command.digest()?, digest, json)
 }
 
 pub(super) fn replay_with_digest(

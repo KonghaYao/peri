@@ -121,13 +121,13 @@ impl SessionDataPort for SqliteSessionData {
     }
     async fn apply_work_mutation(
         &self,
-        command: &peri_acp_types::session_resources::work::WorkCommand,
+        command: &peri_acp_types::session_resources::work::PreparedWorkCommand,
     ) -> SessionResourceResult<peri_acp_types::session_resources::work::WorkReceipt> {
         self.write_work(command).await
     }
     async fn resolve_work_mutation(
         &self,
-        command: &peri_acp_types::session_resources::work::WorkCommand,
+        command: &peri_acp_types::session_resources::work::PreparedWorkCommand,
     ) -> SessionResourceResult<peri_acp_types::session_resources::work::WorkResolution> {
         self.resolve_work(command).await
     }

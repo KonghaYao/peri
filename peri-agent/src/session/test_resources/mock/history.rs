@@ -66,18 +66,21 @@ pub(crate) async fn seed_saved_fixture_runtime(
         .await
         .unwrap();
     let receipt = resources
-        .apply_work_mutation(&WorkCommand {
-            session_id: child_id.into(),
-            recipient_lifecycle: work.control.lifecycle,
-            mutation_id: format!(
-                "fixture-saved-runtime:{child_id}:{}",
-                work.control.lifecycle
-            ),
-            action: WorkAction::BindChildResumeMetadata {
-                expected_revision: work.state.revision,
-                metadata_json: serde_json::to_string(&saved).unwrap(),
-            },
-        })
+        .apply_work_mutation(
+            &peri_acp_types::session_resources::work::PreparedWorkCommand::try_new(WorkCommand {
+                session_id: child_id.into(),
+                recipient_lifecycle: work.control.lifecycle,
+                mutation_id: format!(
+                    "fixture-saved-runtime:{child_id}:{}",
+                    work.control.lifecycle
+                ),
+                action: WorkAction::BindChildResumeMetadata {
+                    expected_revision: work.state.revision,
+                    metadata_json: serde_json::to_string(&saved).unwrap(),
+                },
+            })
+            .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(receipt.decision, WorkDecision::Accepted);

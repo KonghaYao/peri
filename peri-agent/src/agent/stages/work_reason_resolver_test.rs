@@ -244,24 +244,26 @@ async fn completed_unknown_tool_response_cannot_commit_without_a_dispatch_intent
     let state = fixture.context.work.state.lock().await;
     let session = state.session.clone().unwrap();
     let before = session.snapshot().await.unwrap();
-    let command = session.command(WorkAction::CommitReasonResponseAndDispatchIntent {
-        guard: session.guard(&before).unwrap(),
-        target: WorkSession::target(&before, state.work_id.as_deref().unwrap()).unwrap(),
-        request_id: state.request_id.clone().unwrap(),
-        response: WorkPayload::from_payload(&PersistedPayload::Message(
-            BaseMessage::ai_with_tool_calls(
-                "unknown tool",
-                vec![ToolCallRequest::new(
-                    "missing-call",
-                    "missing",
-                    serde_json::json!({}),
-                )],
-            ),
-        ))
-        .unwrap(),
-        dispatch_intents: Vec::new(),
-        next_work_id: Some(uuid::Uuid::now_v7().to_string()),
-    });
+    let command = session
+        .command(WorkAction::CommitReasonResponseAndDispatchIntent {
+            guard: session.guard(&before).unwrap(),
+            target: WorkSession::target(&before, state.work_id.as_deref().unwrap()).unwrap(),
+            request_id: state.request_id.clone().unwrap(),
+            response: WorkPayload::from_payload(&PersistedPayload::Message(
+                BaseMessage::ai_with_tool_calls(
+                    "unknown tool",
+                    vec![ToolCallRequest::new(
+                        "missing-call",
+                        "missing",
+                        serde_json::json!({}),
+                    )],
+                ),
+            ))
+            .unwrap(),
+            dispatch_intents: Vec::new(),
+            next_work_id: Some(uuid::Uuid::now_v7().to_string()),
+        })
+        .unwrap();
     drop(state);
     let receipt = fixture
         .bound

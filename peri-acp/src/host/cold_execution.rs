@@ -3,7 +3,8 @@ use std::sync::Arc;
 
 use peri_acp_types::event::{BackgroundTaskResult, EventSink};
 use peri_acp_types::session_resources::work::{
-    WorkAction, WorkAdmission, WorkCommand, WorkDecision, WorkQuery, WorkTarget,
+    PreparedWorkCommand, WorkAction, WorkAdmission, WorkCommand, WorkDecision, WorkQuery,
+    WorkTarget,
 };
 use peri_agent::agent::stages::{run_react_loop, LoopResult};
 use peri_agent::session::subagent::{
@@ -337,7 +338,7 @@ pub(super) async fn block(
         .ok_or_else(|| blocked("original child work unavailable"))?;
     let receipt = cfg
         .session_resources
-        .apply_work_mutation(&WorkCommand {
+        .apply_work_mutation(&PreparedWorkCommand::try_new(WorkCommand {
             session_id: admission.session_id.clone(),
             recipient_lifecycle: admission.lifecycle,
             mutation_id: format!("cold-child-block:{}", admission.admission_id),
@@ -352,7 +353,7 @@ pub(super) async fn block(
                     "restore the original frozen child authorization and resource owner capability"
                         .into(),
             },
-        })
+        }).map_err(super::workspace::resource_error)?)
         .await
         .map_err(super::workspace::resource_error)?;
     if receipt.decision != WorkDecision::Accepted {

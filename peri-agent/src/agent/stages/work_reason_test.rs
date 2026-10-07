@@ -141,12 +141,14 @@ async fn reason_budget_reducer_blocks_before_request_and_maps_exact_limit() {
         "auth".into(),
     )
     .unwrap();
-    let command = session.command(WorkAction::BeginReason {
-        guard: session.guard(&snapshot).unwrap(),
-        target,
-        request_id: "must-not-send".into(),
-        request,
-    });
+    let command = session
+        .command(WorkAction::BeginReason {
+            guard: session.guard(&snapshot).unwrap(),
+            target,
+            request_id: "must-not-send".into(),
+            request,
+        })
+        .unwrap();
     let mut state = snapshot.state.clone();
     state.limits.reason_requests = 64;
     let budget_id = state.works[&work_id].budget_id.clone();

@@ -120,14 +120,17 @@ pub(super) async fn fixture_with_input(
     };
     let receipt = bound
         .resources
-        .apply_work_mutation(&WorkCommand {
-            session_id: bound.thread_id(),
-            recipient_lifecycle: admission.lifecycle,
-            mutation_id: format!("register:{}", admission.admission_id),
-            action: WorkAction::RegisterAdmission {
-                admission: admission.clone(),
-            },
-        })
+        .apply_work_mutation(
+            &peri_acp_types::session_resources::work::PreparedWorkCommand::try_new(WorkCommand {
+                session_id: bound.thread_id(),
+                recipient_lifecycle: admission.lifecycle,
+                mutation_id: format!("register:{}", admission.admission_id),
+                action: WorkAction::RegisterAdmission {
+                    admission: admission.clone(),
+                },
+            })
+            .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(receipt.decision, WorkDecision::Accepted);

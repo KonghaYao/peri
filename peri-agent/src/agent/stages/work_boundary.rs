@@ -151,6 +151,8 @@ impl WorkBoundary {
                     admission: admission.clone(),
                 },
             };
+            let command =
+                peri_acp_types::session_resources::work::PreparedWorkCommand::try_new(command)?;
             super::work_ledger::WorkMutationBarrier::new(Arc::clone(resources))
                 .commit(&command)
                 .await?;
@@ -260,6 +262,7 @@ impl WorkBoundary {
                 .observe_sdk_run_from_snapshot(&session.admission, &snapshot)
                 .await
                 .map_err(anyhow::Error::new)?;
+            drop(snapshot);
             if !mailbox.attach_sdk_attempt(
                 &session.admission,
                 ctx.session.turn.cancel_token.as_ref().clone(),
@@ -275,6 +278,8 @@ impl WorkBoundary {
             started(session.admission.clone())
                 .await
                 .map_err(anyhow::Error::msg)?;
+        } else {
+            drop(snapshot);
         }
         state.work_id = Some(session.admission.work_id.clone());
         state.session = Some(Arc::clone(&session));

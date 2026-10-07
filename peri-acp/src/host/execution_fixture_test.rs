@@ -1,3 +1,4 @@
+use peri_acp_types::session_resources::work::PreparedWorkCommand;
 use std::{collections::BTreeMap, sync::Arc};
 
 use async_trait::async_trait;
@@ -427,31 +428,34 @@ pub(in crate::host) async fn publish_continuation(ctx: &SessionContext) {
         .session_resources
         .as_ref()
         .unwrap()
-        .apply_work_mutation(&WorkCommand {
-            session_id: ctx.session_id.clone(),
-            recipient_lifecycle: ctx.recipient_lifecycle,
-            mutation_id: format!("fixture-continuation:{event_id}"),
-            action: WorkAction::PublishDelivery {
-                delivery: PublishDelivery {
-                    delivery_id: event_id.clone(),
-                    purpose: DeliveryPurpose::Continuation,
-                    policy: peri_acp_types::session::MessagePolicy::ensure_processing(),
-                    event: WorkEvent {
-                        producer_namespace: "execution-fixture".into(),
-                        event_id,
-                        event_kind: "continuation".into(),
-                        causation_id: None,
-                        content: WorkPayload::from_payload(
-                            &peri_acp_types::store::PersistedPayload::SystemReminder {
-                                id: peri_acp_types::messages::MessageId::new(),
-                                reminder,
-                            },
-                        )
-                        .unwrap(),
+        .apply_work_mutation(
+            &PreparedWorkCommand::try_new(WorkCommand {
+                session_id: ctx.session_id.clone(),
+                recipient_lifecycle: ctx.recipient_lifecycle,
+                mutation_id: format!("fixture-continuation:{event_id}"),
+                action: WorkAction::PublishDelivery {
+                    delivery: PublishDelivery {
+                        delivery_id: event_id.clone(),
+                        purpose: DeliveryPurpose::Continuation,
+                        policy: peri_acp_types::session::MessagePolicy::ensure_processing(),
+                        event: WorkEvent {
+                            producer_namespace: "execution-fixture".into(),
+                            event_id,
+                            event_kind: "continuation".into(),
+                            causation_id: None,
+                            content: WorkPayload::from_payload(
+                                &peri_acp_types::store::PersistedPayload::SystemReminder {
+                                    id: peri_acp_types::messages::MessageId::new(),
+                                    reminder,
+                                },
+                            )
+                            .unwrap(),
+                        },
                     },
                 },
-            },
-        })
+            })
+            .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(receipt.decision, WorkDecision::Accepted);
@@ -697,14 +701,17 @@ mod tests {
             .await
             .is_err());
         let receipt = resources
-            .apply_work_mutation(&WorkCommand {
-                session_id: ctx.session_id.clone(),
-                recipient_lifecycle: admission.lifecycle,
-                mutation_id: "fixture-register-sdk".into(),
-                action: WorkAction::RegisterAdmission {
-                    admission: admission.clone(),
-                },
-            })
+            .apply_work_mutation(
+                &PreparedWorkCommand::try_new(WorkCommand {
+                    session_id: ctx.session_id.clone(),
+                    recipient_lifecycle: admission.lifecycle,
+                    mutation_id: "fixture-register-sdk".into(),
+                    action: WorkAction::RegisterAdmission {
+                        admission: admission.clone(),
+                    },
+                })
+                .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(receipt.decision, WorkDecision::Accepted);

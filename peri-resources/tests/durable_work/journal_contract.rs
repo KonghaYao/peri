@@ -39,7 +39,10 @@ async fn owned_command_crash_child() {
     let command: WorkCommand =
         serde_json::from_slice(&std::fs::read(command_path).unwrap()).unwrap();
     let resources = SessionResourcesImpl::open(database).await.unwrap();
-    assert!(resources.apply_work_mutation(&command).await.is_err());
+    assert!(resources
+        .apply_work_mutation(&prepare_command(&command))
+        .await
+        .is_err());
     std::fs::write(ready_path, b"original command durable").unwrap();
     std::future::pending::<()>().await;
 }
@@ -143,12 +146,12 @@ async fn sqlite_owned_command_journal_survives_process_crash_before_and_after_ef
             }
         );
         assert!(reopened
-            .apply_work_mutation(&command(
+            .apply_work_mutation(&prepare_command(&command(
                 "replacement",
                 WorkAction::PublishDelivery {
                     delivery: publication("replacement", MessagePolicy::ensure_processing()),
                 }
-            ))
+            )))
             .await
             .unwrap_err()
             .is_persistence_uncertain());
@@ -160,7 +163,7 @@ async fn sqlite_owned_command_journal_survives_process_crash_before_and_after_ef
             PersistenceRecovery::StillBlocked
         );
         let resolution = reopened
-            .resolve_work_mutation(&loaded.pending_commands[0])
+            .resolve_work_mutation(&prepare_command(&loaded.pending_commands[0]))
             .await
             .unwrap();
         if applied {
@@ -169,7 +172,10 @@ async fn sqlite_owned_command_journal_survives_process_crash_before_and_after_ef
             assert_eq!(resolution, WorkResolution::NotApplied);
         }
         assert_eq!(
-            reopened.resolve_work_mutation(&original).await.unwrap(),
+            reopened
+                .resolve_work_mutation(&prepare_command(&original))
+                .await
+                .unwrap(),
             resolution
         );
         assert!(snapshot(&reopened).await.pending_commands.is_empty());

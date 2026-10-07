@@ -566,17 +566,23 @@ impl WorkflowExecutionFixture {
             .await
             .unwrap();
         let receipt = resources
-            .apply_work_mutation(&WorkCommand {
-                session_id: parent_id.to_owned(),
-                recipient_lifecycle: snapshot.control.lifecycle,
-                mutation_id: format!("fixture-workflow-owners:{parent_id}"),
-                action: WorkAction::BindResourceOwners {
-                    expected_revision: snapshot.state.revision,
-                    connections_json:
-                        "{\"workspace\":{\"url\":\"https://workspace.test.invalid/mcp\"}}".into(),
-                    authorization_ref: "fixture-workflow-authorization".into(),
-                },
-            })
+            .apply_work_mutation(
+                &peri_acp_types::session_resources::work::PreparedWorkCommand::try_new(
+                    WorkCommand {
+                        session_id: parent_id.to_owned(),
+                        recipient_lifecycle: snapshot.control.lifecycle,
+                        mutation_id: format!("fixture-workflow-owners:{parent_id}"),
+                        action: WorkAction::BindResourceOwners {
+                            expected_revision: snapshot.state.revision,
+                            connections_json:
+                                "{\"workspace\":{\"url\":\"https://workspace.test.invalid/mcp\"}}"
+                                    .into(),
+                            authorization_ref: "fixture-workflow-authorization".into(),
+                        },
+                    },
+                )
+                .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(receipt.decision, WorkDecision::Accepted);

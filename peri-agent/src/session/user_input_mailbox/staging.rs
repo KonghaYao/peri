@@ -221,7 +221,7 @@ impl UserInputMailbox {
                     fingerprint,
                     if was_pending { pending } else { vec![command] },
                     was_pending,
-                ),
+                )?,
             );
         }
         let stage_started = std::time::Instant::now();
@@ -297,7 +297,10 @@ impl UserInputMailbox {
         );
         if receipt.publication_generations.is_empty() {
             if let Some(command) = snapshot.state.user_input_publications.get(&mutation) {
-                let publication_receipt = match durable.store.resolve_work_mutation(command).await {
+                let command = PreparedWorkCommand::try_new(command.clone())
+                    .map_err(|error| UserInputQueueError::DurableRejected(error.to_string()))?;
+                let publication_receipt = match durable.store.resolve_work_mutation(&command).await
+                {
                     Ok(WorkResolution::Applied { receipt }) => accepted(receipt)?,
                     _ => return Err(UserInputQueueError::OutcomeUnknown),
                 };
@@ -305,7 +308,7 @@ impl UserInputMailbox {
                 receipt
                     .publication_generations
                     .insert(request.input_id.clone(), idle_id);
-                project_withdrawn_results(&mut receipt, std::slice::from_ref(command), &snapshot);
+                project_withdrawn_results(&mut receipt, std::slice::from_ref(&command), &snapshot);
             }
         }
         // 暂停期间提交、且此刻仍未发布的输入携带恢复授权：
@@ -730,7 +733,7 @@ impl UserInputMailbox {
             let reconcile = saved.is_some() || !snapshot.pending_commands.is_empty();
             operations.insert(
                 command_id.into(),
-                frozen_operation(fingerprint, commands, reconcile),
+                frozen_operation(fingerprint, commands, reconcile)?,
             );
         }
         self.finish_operation(
@@ -803,13 +806,13 @@ fn frozen_operation(
     fingerprint: u64,
     commands: Vec<WorkCommand>,
     reconcile: bool,
-) -> FrozenOperation {
-    FrozenOperation {
+) -> Result<FrozenOperation, UserInputQueueError> {
+    Ok(FrozenOperation {
         fingerprint,
-        commands,
+        commands: prepare_commands(commands)?,
         receipt: None,
         attempted: reconcile,
         uncertain: reconcile,
         rejection: None,
-    }
+    })
 }

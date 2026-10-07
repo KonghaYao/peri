@@ -171,7 +171,7 @@ struct AbandonRaceResources {
     inner: Arc<dyn SessionResources>,
     work_revision_only: bool,
     harmless_revision_only: bool,
-    attempts: Mutex<Vec<WorkCommand>>,
+    attempts: Mutex<Vec<peri_acp_types::session_resources::work::PreparedWorkCommand>>,
 }
 
 macro_rules! race_resources {
@@ -184,7 +184,7 @@ macro_rules! race_resources {
             async fn load_session_control(&self, id: &ThreadId) -> SessionResourceResult<ControlState> {
                 self.inner.load_session_control(id).await
             }
-            async fn apply_work_mutation(&self, command: &WorkCommand) -> SessionResourceResult<WorkReceipt> {
+            async fn apply_work_mutation(&self, command: &peri_acp_types::session_resources::work::PreparedWorkCommand) -> SessionResourceResult<WorkReceipt> {
                 let WorkAction::CommitAct { target, .. } = &command.action else {
                     return self.inner.apply_work_mutation(command).await;
                 };
@@ -192,7 +192,7 @@ macro_rules! race_resources {
                 attempts.push(command.clone());
                 if attempts.len() == 1 {
                     if self.harmless_revision_only {
-                        let published = self.inner.apply_work_mutation(&WorkCommand {
+                        let published = self.inner.apply_work_mutation(&peri_acp_types::session_resources::work::PreparedWorkCommand::try_new(WorkCommand {
                             session_id: command.session_id.clone(),
                             recipient_lifecycle: command.recipient_lifecycle,
                             mutation_id: uuid::Uuid::now_v7().to_string(),
@@ -208,14 +208,14 @@ macro_rules! race_resources {
                                 purpose: DeliveryPurpose::UserInput,
                                 policy: peri_acp_types::session::MessagePolicy::ensure_processing(),
                             } },
-                        }).await?;
+                        }).unwrap()).await?;
                         assert_eq!(published.decision, WorkDecision::Accepted);
                         return self.inner.apply_work_mutation(command).await;
                     }
                     let before = self.inner.load_session_work(&WorkQuery {
                         session_id: command.session_id.clone(), limit: 1,
                     }).await?;
-                    let abandoned = self.inner.apply_work_mutation(&WorkCommand {
+                    let abandoned = self.inner.apply_work_mutation(&peri_acp_types::session_resources::work::PreparedWorkCommand::try_new(WorkCommand {
                         session_id: command.session_id.clone(),
                         recipient_lifecycle: command.recipient_lifecycle,
                         mutation_id: uuid::Uuid::now_v7().to_string(),
@@ -225,21 +225,21 @@ macro_rules! race_resources {
                             target: target.clone(), reason: "racing user abandonment".into(),
                             authorization_ref: "explicit-user-authorization".into(),
                         },
-                    }).await?;
+                    }).unwrap()).await?;
                     assert_eq!(abandoned.decision, WorkDecision::Accepted);
                     replace_current_execution(&self.inner, &command.session_id).await;
                     if self.work_revision_only {
                         let after = self.inner.load_session_work(&WorkQuery {
                             session_id: command.session_id.clone(), limit: 1,
                         }).await?;
-                        let mut stale_target = command.clone();
+                        let mut stale_target = command.clone().into_command();
                         let WorkAction::CommitAct { guard, .. } = &mut stale_target.action else {
                             unreachable!();
                         };
                         guard.expected_revision = after.state.revision;
                         guard.expected_control_generation = after.control.control_generation;
                         guard.execution = after.control.attempt.clone().unwrap();
-                        let reduction = reduce_work(&stale_target, &after.control, after.state)?;
+                        let reduction = reduce_work(&peri_acp_types::session_resources::work::PreparedWorkCommand::try_new(stale_target.clone()).unwrap(), &after.control, after.state)?;
                         assert_eq!(reduction.receipt.decision,
                             WorkDecision::Rejected { reason: WorkRejection::StaleWorkRevision });
                         return Ok(reduction.receipt);
@@ -511,20 +511,22 @@ async fn settlement_ledger_stale_revision_retry_preserves_original_execution_acr
     replace_current_execution(&resources, &session.admission.session_id).await;
     let mut guard = session.guard(&snapshot).unwrap();
     guard.expected_revision -= 1;
-    let command = session.command(WorkAction::CommitAct {
-        guard,
-        target: binding.target,
-        results: vec![InvocationResult {
-            invocation_id: binding.intent.invocation_id.clone(),
-            outcome: InvocationOutcome::Completed {
-                result: WorkPayload::from_payload(&PersistedPayload::Message(
-                    BaseMessage::tool_result("race-call", "original owner result"),
-                ))
-                .unwrap(),
-            },
-        }],
-        next_work_id: None,
-    });
+    let command = session
+        .command(WorkAction::CommitAct {
+            guard,
+            target: binding.target,
+            results: vec![InvocationResult {
+                invocation_id: binding.intent.invocation_id.clone(),
+                outcome: InvocationOutcome::Completed {
+                    result: WorkPayload::from_payload(&PersistedPayload::Message(
+                        BaseMessage::tool_result("race-call", "original owner result"),
+                    ))
+                    .unwrap(),
+                },
+            }],
+            next_work_id: None,
+        })
+        .unwrap();
     let receipt = session
         .ledger
         .commit_execution_transition(&command)

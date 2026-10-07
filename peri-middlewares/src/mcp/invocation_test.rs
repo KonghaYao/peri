@@ -210,12 +210,15 @@ impl Fixture {
     async fn apply(&self, mutation_id: &str, action: WorkAction) {
         let receipt = self
             .resources
-            .apply_work_mutation(&WorkCommand {
-                session_id: "mcp-session".into(),
-                recipient_lifecycle: 1,
-                mutation_id: mutation_id.into(),
-                action,
-            })
+            .apply_work_mutation(
+                &PreparedWorkCommand::try_new(WorkCommand {
+                    session_id: "mcp-session".into(),
+                    recipient_lifecycle: 1,
+                    mutation_id: mutation_id.into(),
+                    action,
+                })
+                .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(receipt.decision, WorkDecision::Accepted);

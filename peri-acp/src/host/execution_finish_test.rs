@@ -1,5 +1,6 @@
 use super::*;
 use crate::host::executor_flow_tests::execution_fixture::new_resources;
+use peri_acp_types::session_resources::work::PreparedWorkCommand;
 use peri_acp_types::{
     identity::AttemptId,
     messages::BaseMessage,
@@ -52,6 +53,7 @@ async fn registered_admission() -> (
             },
         },
     };
+    let publication = PreparedWorkCommand::try_new(publication).unwrap();
     assert_eq!(
         resources
             .apply_work_mutation(&publication)
@@ -91,6 +93,7 @@ async fn registered_admission() -> (
             admission: admission.clone(),
         },
     };
+    let registration = PreparedWorkCommand::try_new(registration).unwrap();
     assert_eq!(
         resources
             .apply_work_mutation(&registration)
@@ -138,7 +141,7 @@ async fn finish_admission_commits_attempt_clear_and_settlement_evidence_and_repl
     assert_eq!(settled.mutation_id, command(&admission, 0).mutation_id);
     assert_eq!(
         resources
-            .resolve_work_mutation(&command(&admission, 0))
+            .resolve_work_mutation(&PreparedWorkCommand::try_new(command(&admission, 0)).unwrap())
             .await
             .unwrap(),
         WorkResolution::Applied { receipt: settled }
@@ -171,7 +174,7 @@ async fn finish_admission_commits_attempt_clear_and_settlement_evidence_and_repl
 #[tokio::test]
 async fn reconcile_finish_retries_known_not_applied_with_new_stable_mutation() {
     let (resources, _directory, admission) = registered_admission().await;
-    let original = command(&admission, 0);
+    let original = PreparedWorkCommand::try_new(command(&admission, 0)).unwrap();
     let before = snapshot(resources.as_ref(), &admission).await;
     assert_eq!(
         resources.resolve_work_mutation(&original).await.unwrap(),
@@ -185,7 +188,7 @@ async fn reconcile_finish_retries_known_not_applied_with_new_stable_mutation() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(journal.command, original);
+    assert_eq!(&journal.command, original.command());
     assert_eq!(journal.resolution, Some(WorkResolution::NotApplied));
     let unresolved = snapshot(resources.as_ref(), &admission).await;
     assert_eq!(unresolved.control, before.control);
@@ -194,7 +197,7 @@ async fn reconcile_finish_retries_known_not_applied_with_new_stable_mutation() {
     assert!(reconcile_finish(resources.as_ref(), &admission)
         .await
         .unwrap());
-    let retry = command(&admission, 1);
+    let retry = PreparedWorkCommand::try_new(command(&admission, 1)).unwrap();
     assert_ne!(retry.mutation_id, original.mutation_id);
     assert_eq!(retry.action, original.action);
     let finished = snapshot(resources.as_ref(), &admission).await;
@@ -280,7 +283,7 @@ async fn finish_admission_rejects_original_execution_after_another_attempt_is_ob
         assert!(record.evidence_id.is_none());
     }
     assert!(matches!(
-        resources.resolve_work_mutation(&command(&admission, 0)).await.unwrap(),
+        resources.resolve_work_mutation(&PreparedWorkCommand::try_new(command(&admission, 0)).unwrap()).await.unwrap(),
         WorkResolution::Applied { receipt }
             if matches!(receipt.decision, WorkDecision::Rejected { .. })
     ));
@@ -292,7 +295,9 @@ async fn reconcile_finish_can_progress_past_previous_known_not_applied_retries()
     for retry in 0..5 {
         assert_eq!(
             resources
-                .resolve_work_mutation(&command(&admission, retry))
+                .resolve_work_mutation(
+                    &PreparedWorkCommand::try_new(command(&admission, retry)).unwrap()
+                )
                 .await
                 .unwrap(),
             WorkResolution::NotApplied

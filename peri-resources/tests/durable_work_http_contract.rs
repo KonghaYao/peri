@@ -1,5 +1,9 @@
 use std::{net::TcpListener, path::Path, process::Child, sync::Arc, time::Duration};
 
+fn prepare_command(command: &WorkCommand) -> PreparedWorkCommand {
+    PreparedWorkCommand::try_new(command.clone()).unwrap()
+}
+
 use peri_acp_types::{
     messages::BaseMessage,
     session::MessagePolicy,
@@ -113,7 +117,10 @@ async fn real_http_libsql_fresh_open_retains_original_commands_across_facade_res
             },
         },
     };
-    let receipt = store.apply_work_mutation(&original).await.unwrap();
+    let receipt = store
+        .apply_work_mutation(&prepare_command(&original))
+        .await
+        .unwrap();
     assert_eq!(receipt.decision, WorkDecision::Accepted);
     shutdown.shutdown().await.unwrap();
     drop(store);
@@ -125,7 +132,10 @@ async fn real_http_libsql_fresh_open_retains_original_commands_across_facade_res
         ..original.clone()
     };
     assert_eq!(
-        reopened.resolve_work_mutation(&never_sent).await.unwrap(),
+        reopened
+            .resolve_work_mutation(&prepare_command(&never_sent))
+            .await
+            .unwrap(),
         WorkResolution::NotApplied
     );
     let saved = reopened
@@ -174,9 +184,18 @@ async fn verify_original(
         })
     );
     assert!(!saved.pending);
-    assert_eq!(store.apply_work_mutation(original).await.unwrap(), *receipt);
     assert_eq!(
-        store.resolve_work_mutation(original).await.unwrap(),
+        store
+            .apply_work_mutation(&prepare_command(original))
+            .await
+            .unwrap(),
+        *receipt
+    );
+    assert_eq!(
+        store
+            .resolve_work_mutation(&prepare_command(original))
+            .await
+            .unwrap(),
         WorkResolution::Applied {
             receipt: receipt.clone()
         }
@@ -185,5 +204,8 @@ async fn verify_original(
         recipient_lifecycle: 2,
         ..original.clone()
     };
-    assert!(store.apply_work_mutation(&conflicting).await.is_err());
+    assert!(store
+        .apply_work_mutation(&prepare_command(&conflicting))
+        .await
+        .is_err());
 }

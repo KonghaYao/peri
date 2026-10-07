@@ -155,6 +155,8 @@ impl McpClientPool {
                     "owner-reconcile:{}",
                     command.digest().map_err(|error| error.to_string())?
                 );
+                let command =
+                    PreparedWorkCommand::try_new(command).map_err(|error| error.to_string())?;
                 match crate::mcp::invocation::commit(resources.as_ref(), &command).await {
                     Ok(_) => {
                         acknowledged = true;

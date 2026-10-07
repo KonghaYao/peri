@@ -31,7 +31,7 @@ async fn reopen_retains_old_ready_and_blocked_work_without_admitting_it_into_new
         if blocked {
             let loaded = snapshot(resources.as_ref()).await;
             resources
-                .apply_work_mutation(&command(
+                .apply_work_mutation(&prepare_command(&command(
                     "block-D1",
                     WorkAction::BlockWork {
                         expected_revision: loaded.state.revision,
@@ -39,7 +39,7 @@ async fn reopen_retains_old_ready_and_blocked_work_without_admitting_it_into_new
                         reason: "old paused responsibility".into(),
                         recovery_condition: "old scope evidence".into(),
                     },
-                ))
+                )))
                 .await
                 .unwrap();
         }
@@ -75,12 +75,12 @@ async fn reopen_retains_old_ready_and_blocked_work_without_admitting_it_into_new
         };
         assert_eq!(
             resources
-                .apply_work_mutation(&life2(
+                .apply_work_mutation(&prepare_command(&life2(
                     "publish-D2",
                     WorkAction::PublishDelivery {
                         delivery: next_publication
                     }
-                ))
+                )))
                 .await
                 .unwrap()
                 .decision,
@@ -96,10 +96,10 @@ async fn reopen_retains_old_ready_and_blocked_work_without_admitting_it_into_new
         assert!(loaded.validate_admission(&stale).is_err());
         assert!(matches!(
             resources
-                .apply_work_mutation(&life2(
+                .apply_work_mutation(&prepare_command(&life2(
                     "reject-old-work-admission",
                     WorkAction::RegisterAdmission { admission: stale }
-                ))
+                )))
                 .await
                 .unwrap()
                 .decision,
@@ -107,12 +107,12 @@ async fn reopen_retains_old_ready_and_blocked_work_without_admitting_it_into_new
         ));
         assert_eq!(
             resources
-                .apply_work_mutation(&life2(
+                .apply_work_mutation(&prepare_command(&life2(
                     "enter-new-life",
                     WorkAction::RegisterAdmission {
                         admission: ticket.clone()
                     }
-                ))
+                )))
                 .await
                 .unwrap()
                 .decision,
@@ -121,14 +121,14 @@ async fn reopen_retains_old_ready_and_blocked_work_without_admitting_it_into_new
         let loaded = snapshot(resources.as_ref()).await;
         assert_eq!(
             resources
-                .apply_work_mutation(&life2(
+                .apply_work_mutation(&prepare_command(&life2(
                     "claim-new-life",
                     WorkAction::ClaimBatch {
                         guard: guard(&loaded),
                         batch_id: ticket.work_id.clone(),
                         delivery_ids: vec!["D2".into()]
                     }
-                ))
+                )))
                 .await
                 .unwrap()
                 .decision,
@@ -146,7 +146,7 @@ async fn reopen_retains_old_ready_and_blocked_work_without_admitting_it_into_new
         );
         assert_eq!(
             resources
-                .apply_work_mutation(&old_reason)
+                .apply_work_mutation(&prepare_command(&old_reason))
                 .await
                 .unwrap()
                 .decision,
@@ -164,7 +164,7 @@ async fn reopen_retains_old_ready_and_blocked_work_without_admitting_it_into_new
         };
         assert_eq!(
             resources
-                .apply_work_mutation(&life2(
+                .apply_work_mutation(&prepare_command(&life2(
                     "reason-new-life",
                     WorkAction::BeginReason {
                         guard: guard(&loaded),
@@ -172,7 +172,7 @@ async fn reopen_retains_old_ready_and_blocked_work_without_admitting_it_into_new
                         request_id: "new-reason".into(),
                         request: reason
                     }
-                ))
+                )))
                 .await
                 .unwrap()
                 .decision,

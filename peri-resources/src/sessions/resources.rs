@@ -297,13 +297,13 @@ impl SessionResources for SessionResourcesImpl {
     }
     async fn apply_work_mutation(
         &self,
-        command: &peri_acp_types::session_resources::work::WorkCommand,
+        command: &peri_acp_types::session_resources::work::PreparedWorkCommand,
     ) -> SessionResourceResult<peri_acp_types::session_resources::work::WorkReceipt> {
         self.write_work_mutation(command).await
     }
     async fn resolve_work_mutation(
         &self,
-        command: &peri_acp_types::session_resources::work::WorkCommand,
+        command: &peri_acp_types::session_resources::work::PreparedWorkCommand,
     ) -> SessionResourceResult<peri_acp_types::session_resources::work::WorkResolution> {
         self.reconcile_work_mutation(command).await
     }

@@ -1,6 +1,6 @@
 use super::*;
 use peri_acp_types::session_resources::work::{
-    WorkCommand, WorkQuery, WorkReceipt, WorkResolution, WorkSnapshot,
+    PreparedWorkCommand, WorkQuery, WorkReceipt, WorkResolution, WorkSnapshot,
 };
 
 impl SessionResourcesImpl {
@@ -20,13 +20,13 @@ impl SessionResourcesImpl {
     }
     pub(super) async fn write_work_mutation(
         &self,
-        command: &WorkCommand,
+        command: &PreparedWorkCommand,
     ) -> SessionResourceResult<WorkReceipt> {
         self.gate.apply_work(command).await
     }
     pub(super) async fn reconcile_work_mutation(
         &self,
-        command: &WorkCommand,
+        command: &PreparedWorkCommand,
     ) -> SessionResourceResult<WorkResolution> {
         self.gate.resolve_work(command).await
     }

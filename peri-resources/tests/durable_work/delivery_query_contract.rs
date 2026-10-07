@@ -20,12 +20,12 @@ async fn setup() -> (
 ) {
     let (directory, resources) = fixture().await;
     resources
-        .apply_work_mutation(&command(
+        .apply_work_mutation(&prepare_command(&command(
             "delivery-query-publication",
             WorkAction::PublishDelivery {
                 delivery: publication(DELIVERY_ID, MessagePolicy::ensure_processing()),
             },
-        ))
+        )))
         .await
         .unwrap();
     let record = snapshot(resources.as_ref()).await.state.deliveries[DELIVERY_ID].clone();

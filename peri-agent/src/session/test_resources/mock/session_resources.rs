@@ -68,7 +68,7 @@ impl SessionResources for MockSessionResources {
     }
     async fn apply_work_mutation(
         &self,
-        command: &peri_acp_types::session_resources::work::WorkCommand,
+        command: &peri_acp_types::session_resources::work::PreparedWorkCommand,
     ) -> SessionResourceResult<peri_acp_types::session_resources::work::WorkReceipt> {
         self.ensure_writable()?;
         let backend = self.durable_backend(&command.session_id).await;
@@ -89,7 +89,7 @@ impl SessionResources for MockSessionResources {
     }
     async fn resolve_work_mutation(
         &self,
-        command: &peri_acp_types::session_resources::work::WorkCommand,
+        command: &peri_acp_types::session_resources::work::PreparedWorkCommand,
     ) -> SessionResourceResult<peri_acp_types::session_resources::work::WorkResolution> {
         self.durable_backend(&command.session_id)
             .await

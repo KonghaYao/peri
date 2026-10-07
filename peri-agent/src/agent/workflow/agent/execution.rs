@@ -112,16 +112,21 @@ impl WorkflowExecution {
             .await
             .map_err(|error| error.to_string())?;
         WorkMutationBarrier::new(resources.clone())
-            .commit(&WorkCommand {
-                session_id: session_id.clone(),
-                recipient_lifecycle: child.control.lifecycle,
-                mutation_id: format!("workflow-child-owners:{session_id}"),
-                action: WorkAction::BindResourceOwners {
-                    expected_revision: child.state.revision,
-                    connections_json: owners.connections_json.clone(),
-                    authorization_ref: owners.authorization_ref.clone(),
-                },
-            })
+            .commit(
+                &peri_acp_types::session_resources::work::PreparedWorkCommand::try_new(
+                    WorkCommand {
+                        session_id: session_id.clone(),
+                        recipient_lifecycle: child.control.lifecycle,
+                        mutation_id: format!("workflow-child-owners:{session_id}"),
+                        action: WorkAction::BindResourceOwners {
+                            expected_revision: child.state.revision,
+                            connections_json: owners.connections_json.clone(),
+                            authorization_ref: owners.authorization_ref.clone(),
+                        },
+                    },
+                )
+                .map_err(|error| error.to_string())?,
+            )
             .await
             .map_err(|error| error.to_string())?;
         Ok(Self {
@@ -159,15 +164,23 @@ impl WorkflowExecution {
         self.reconcile_terminal(admission).await?;
         let evidence_id = format!("workflow-execution-exit:{}", admission.admission_id);
         WorkMutationBarrier::new(self.resources.clone())
-            .commit(&WorkCommand {
-                session_id: self.session_id.clone(),
-                recipient_lifecycle: admission.lifecycle,
-                mutation_id: format!("workflow-execution-finish:{}", admission.admission_id),
-                action: WorkAction::FinishAdmission {
-                    admission: admission.clone(),
-                    evidence_id: evidence_id.clone(),
-                },
-            })
+            .commit(
+                &peri_acp_types::session_resources::work::PreparedWorkCommand::try_new(
+                    WorkCommand {
+                        session_id: self.session_id.clone(),
+                        recipient_lifecycle: admission.lifecycle,
+                        mutation_id: format!(
+                            "workflow-execution-finish:{}",
+                            admission.admission_id
+                        ),
+                        action: WorkAction::FinishAdmission {
+                            admission: admission.clone(),
+                            evidence_id: evidence_id.clone(),
+                        },
+                    },
+                )
+                .map_err(|error| error.to_string())?,
+            )
             .await
             .map_err(|error| error.to_string())?;
         match self
@@ -215,7 +228,12 @@ impl WorkflowExecution {
                     if admission_id == &admission.admission_id
             ) {
                 barrier
-                    .commit(command)
+                    .commit(
+                        &peri_acp_types::session_resources::work::PreparedWorkCommand::try_new(
+                            command.clone(),
+                        )
+                        .map_err(|error| error.to_string())?,
+                    )
                     .await
                     .map_err(|error| error.to_string())?;
             }
@@ -233,7 +251,12 @@ impl WorkflowExecution {
             return Ok(());
         };
         let parent_receipt = barrier
-            .commit(command)
+            .commit(
+                &peri_acp_types::session_resources::work::PreparedWorkCommand::try_new(
+                    command.clone(),
+                )
+                .map_err(|error| error.to_string())?,
+            )
             .await
             .map_err(|error| error.to_string())?;
         if let Some(receipt) = child
@@ -253,16 +276,21 @@ impl WorkflowExecution {
             .await
             .map_err(|error| error.to_string())?;
         barrier
-            .commit(&WorkCommand {
-                session_id: self.session_id.clone(),
-                recipient_lifecycle: admission.lifecycle,
-                mutation_id: format!("workflow-terminal-ack:{}", admission.admission_id),
-                action: WorkAction::AcknowledgeTerminalObligation {
-                    expected_revision: revision,
-                    admission_id: admission.admission_id.clone(),
-                    receipt: parent_receipt,
-                },
-            })
+            .commit(
+                &peri_acp_types::session_resources::work::PreparedWorkCommand::try_new(
+                    WorkCommand {
+                        session_id: self.session_id.clone(),
+                        recipient_lifecycle: admission.lifecycle,
+                        mutation_id: format!("workflow-terminal-ack:{}", admission.admission_id),
+                        action: WorkAction::AcknowledgeTerminalObligation {
+                            expected_revision: revision,
+                            admission_id: admission.admission_id.clone(),
+                            receipt: parent_receipt,
+                        },
+                    },
+                )
+                .map_err(|error| error.to_string())?,
+            )
             .await
             .map_err(|error| error.to_string())?;
         Ok(())

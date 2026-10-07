@@ -243,16 +243,19 @@ async fn prepare_child_fixture_intent(context: &SessionContext) -> String {
     let mut snapshot = resources.load_session_work(&query).await.unwrap();
     let authorization_ref = "explicit-dynamic-fixture:no-external-tools".to_owned();
     let receipt = resources
-        .apply_work_mutation(&WorkCommand {
-            session_id: context.session_id.clone(),
-            recipient_lifecycle: snapshot.control.lifecycle,
-            mutation_id: uuid::Uuid::now_v7().to_string(),
-            action: WorkAction::BindResourceOwners {
-                expected_revision: snapshot.state.revision,
-                connections_json: "[]".into(),
-                authorization_ref: authorization_ref.clone(),
-            },
-        })
+        .apply_work_mutation(
+            &PreparedWorkCommand::try_new(WorkCommand {
+                session_id: context.session_id.clone(),
+                recipient_lifecycle: snapshot.control.lifecycle,
+                mutation_id: uuid::Uuid::now_v7().to_string(),
+                action: WorkAction::BindResourceOwners {
+                    expected_revision: snapshot.state.revision,
+                    connections_json: "[]".into(),
+                    authorization_ref: authorization_ref.clone(),
+                },
+            })
+            .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(receipt.decision, WorkDecision::Accepted);
@@ -261,29 +264,32 @@ async fn prepare_child_fixture_intent(context: &SessionContext) -> String {
     let arguments_json = serde_json::json!({"prompt":"finish"}).to_string();
     let arguments_digest = format!("{:x}", Sha256::digest(arguments_json.as_bytes()));
     let receipt = resources
-        .apply_work_mutation(&WorkCommand {
-            session_id: context.session_id.clone(),
-            recipient_lifecycle: snapshot.control.lifecycle,
-            mutation_id: format!("dynamic-child-intent:{invocation_id}"),
-            action: WorkAction::PrepareInvocation {
-                expected_revision: snapshot.state.revision,
-                intent: InvocationIntent {
-                    invocation_id: invocation_id.clone(),
-                    tool_call_id: uuid::Uuid::now_v7().to_string(),
-                    tool_name: "Subagent".into(),
-                    arguments_json: arguments_json.clone(),
-                    arguments_digest: arguments_digest.clone(),
-                    effective_tool_name: "Subagent".into(),
-                    effective_arguments_json: arguments_json,
-                    effective_arguments_digest: arguments_digest,
-                    owner_identity: "explicit-dynamic-fixture-local-owner".into(),
-                    scope_id: context.session_id.clone(),
-                    scope_epoch: None,
-                    authorization_ref,
-                    recovery_locator: format!("dynamic-child:{invocation_id}"),
+        .apply_work_mutation(
+            &PreparedWorkCommand::try_new(WorkCommand {
+                session_id: context.session_id.clone(),
+                recipient_lifecycle: snapshot.control.lifecycle,
+                mutation_id: format!("dynamic-child-intent:{invocation_id}"),
+                action: WorkAction::PrepareInvocation {
+                    expected_revision: snapshot.state.revision,
+                    intent: InvocationIntent {
+                        invocation_id: invocation_id.clone(),
+                        tool_call_id: uuid::Uuid::now_v7().to_string(),
+                        tool_name: "Subagent".into(),
+                        arguments_json: arguments_json.clone(),
+                        arguments_digest: arguments_digest.clone(),
+                        effective_tool_name: "Subagent".into(),
+                        effective_arguments_json: arguments_json,
+                        effective_arguments_digest: arguments_digest,
+                        owner_identity: "explicit-dynamic-fixture-local-owner".into(),
+                        scope_id: context.session_id.clone(),
+                        scope_epoch: None,
+                        authorization_ref,
+                        recovery_locator: format!("dynamic-child:{invocation_id}"),
+                    },
                 },
-            },
-        })
+            })
+            .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(receipt.decision, WorkDecision::Accepted);

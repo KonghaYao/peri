@@ -171,6 +171,7 @@ fn observer_floor_requires_unprocessed_new_required_delivery() {
                 },
             },
         };
+        let command = PreparedWorkCommand::try_new(command).unwrap();
         let reduction = reduce_work(&command, &control, state.clone()).unwrap();
         assert_eq!(reduction.receipt.decision, WorkDecision::Accepted);
         state = reduction.state.unwrap();

@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::host::{prompt::finish_prompt_turn, SessionState, SharedSessions};
+use peri_acp_types::session_resources::work::PreparedWorkCommand;
 use peri_acp_types::{
     messages::MessageId,
     session_resources::{
@@ -64,7 +65,7 @@ enum AfterCommitAction {
 struct RecoveryStore {
     inner: Arc<dyn SessionResources>,
     database: std::path::PathBuf,
-    uncertain: Mutex<Option<peri_acp_types::session_resources::work::WorkCommand>>,
+    uncertain: Mutex<Option<PreparedWorkCommand>>,
     compact_commits: AtomicUsize,
     fail_claim: AtomicBool,
     fail_after_full: bool,
@@ -106,7 +107,7 @@ impl SessionResources for RecoveryStore {
 
     async fn apply_work_mutation(
         &self,
-        command: &peri_acp_types::session_resources::work::WorkCommand,
+        command: &PreparedWorkCommand,
     ) -> SessionResourceResult<peri_acp_types::session_resources::work::WorkReceipt> {
         use peri_acp_types::session_resources::work::WorkAction;
         let before_effect = self.fail_claim.load(Ordering::SeqCst)
@@ -132,7 +133,7 @@ impl SessionResources for RecoveryStore {
             } else {
                 sqlx::query("INSERT INTO session_work_commands(mutation_id,session_id,digest,command_json,reconciled) VALUES (?1,?2,?3,?4,0)")
                     .bind(&command.mutation_id).bind(&command.session_id)
-                    .bind(command.digest().unwrap()).bind(serde_json::to_string(command).unwrap())
+                    .bind(command.digest()).bind(command.encoded().as_ref())
                     .execute(&connection).await.unwrap();
             }
             *self.uncertain.lock().unwrap() = Some(command.clone());
@@ -143,7 +144,7 @@ impl SessionResources for RecoveryStore {
 
     async fn resolve_work_mutation(
         &self,
-        command: &peri_acp_types::session_resources::work::WorkCommand,
+        command: &PreparedWorkCommand,
     ) -> SessionResourceResult<peri_acp_types::session_resources::work::WorkResolution> {
         if self.uncertain.lock().unwrap().as_ref() == Some(command) {
             return Ok(peri_acp_types::session_resources::work::WorkResolution::Unknown);

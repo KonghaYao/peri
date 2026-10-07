@@ -1,7 +1,7 @@
 use peri_acp_types::session_resources::{
     work::{
-        WorkAction, WorkCommand, WorkCommandQuery, WorkDecision, WorkQuery, WorkReceipt,
-        WorkResolution, WorkSnapshot, WorkStage, WorkTarget,
+        PreparedWorkCommand, WorkAction, WorkCommand, WorkCommandQuery, WorkDecision, WorkQuery,
+        WorkReceipt, WorkResolution, WorkSnapshot, WorkStage, WorkTarget,
     },
     ControlAction, ControlCommand, ControlDecision, ControlReceipt, ControlStatus,
     SessionResources,
@@ -43,8 +43,9 @@ pub(super) async fn abandon_owned_work(
     }
     let mut receipts = Vec::new();
     for frozen in &pending.pending_commands {
+        let frozen = PreparedWorkCommand::try_new(frozen.clone()).map_err(resource_error)?;
         let resolution = resources
-            .resolve_work_mutation(frozen)
+            .resolve_work_mutation(&frozen)
             .await
             .map_err(resource_error)?;
         match resolution {
@@ -102,7 +103,10 @@ pub(super) async fn abandon_owned_work(
             let resolution = match owned_command.resolution {
                 Some(resolution) if !owned_command.pending => resolution,
                 _ => resources
-                    .resolve_work_mutation(&owned_command.command)
+                    .resolve_work_mutation(
+                        &PreparedWorkCommand::try_new(owned_command.command)
+                            .map_err(resource_error)?,
+                    )
                     .await
                     .map_err(resource_error)?,
             };
@@ -130,6 +134,7 @@ pub(super) async fn abandon_owned_work(
                 authorization_ref: command.command_id.clone(),
             },
         };
+        let mutation = PreparedWorkCommand::try_new(mutation).map_err(resource_error)?;
         let receipt = match resources.apply_work_mutation(&mutation).await {
             Ok(receipt) => receipt,
             Err(_) => match resources

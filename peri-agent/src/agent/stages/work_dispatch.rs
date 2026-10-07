@@ -56,7 +56,13 @@ pub(crate) async fn begin(
         guard: session.guard(&snapshot)?,
         target: target.clone(),
         invocation_id: intent.invocation_id.clone(),
-    });
+    })?;
+    let budget_error = super::work_reason::budget_exhaustion(
+        &snapshot.state,
+        &target.work_id,
+        peri_acp_types::error::WorkBudgetKind::Dispatches,
+    );
+    drop(snapshot);
     let receipt = match session.ledger.commit_execution_transition(&command).await {
         Ok(receipt) => receipt,
         Err(error) => {
@@ -67,11 +73,7 @@ pub(crate) async fn begin(
     if receipt.stage != Some(WorkStage::ActReady) {
         state.frozen = true;
         if receipt.stage == Some(WorkStage::Blocked) {
-            if let Some(error) = super::work_reason::budget_exhaustion(
-                &snapshot.state,
-                &target.work_id,
-                peri_acp_types::error::WorkBudgetKind::Dispatches,
-            ) {
+            if let Some(error) = budget_error {
                 return Err(anyhow::Error::new(error));
             }
         }
@@ -121,8 +123,9 @@ pub(crate) async fn unknown(ctx: &StageContext, call_id: &str, reason: &str) -> 
         target,
         invocation_id: invocation.intent.invocation_id.clone(),
         reason: reason.into(),
-    });
+    })?;
     state.frozen = true;
+    drop(snapshot);
     session.ledger.commit(&command).await?;
     Ok(())
 }
@@ -234,12 +237,13 @@ pub(crate) async fn commit_results(
         target: target.clone(),
         results: outcomes.clone(),
         next_work_id: next_work_id.clone(),
-    });
+    })?;
     let mut expected_stage = if complete && source.stage == WorkStage::ActReady {
         WorkStage::Settled
     } else {
         source.stage
     };
+    drop(snapshot);
     let mut committed_receipt = None;
     for attempt in 0..8 {
         match session.ledger.commit(&command).await {
@@ -300,7 +304,7 @@ pub(crate) async fn commit_results(
                     target: refreshed_target,
                     results: outcomes.clone(),
                     next_work_id: next_work_id.clone(),
-                });
+                })?;
             }
             Err(error) => {
                 state.frozen = true;

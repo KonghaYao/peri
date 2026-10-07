@@ -30,7 +30,8 @@ pub(super) fn begin_reason(
     request: &ReasonRequest,
     receipt: &mut WorkReceipt,
 ) -> Result<(), WorkRejection> {
-    let work = work_mut(state, target)?.clone();
+    work_mut(state, target)?;
+    let work = &state.works[&target.work_id];
     if work.stage != WorkStage::ReasonReady
         || request_id.is_empty()
         || state
@@ -69,9 +70,25 @@ pub(super) fn begin_reason(
     bump(work, receipt)
 }
 
+struct SuccessorSource {
+    work_id: String,
+    budget_id: String,
+    batch_id: String,
+}
+
+impl From<&WorkRecord> for SuccessorSource {
+    fn from(work: &WorkRecord) -> Self {
+        Self {
+            work_id: work.work_id.clone(),
+            budget_id: work.budget_id.clone(),
+            batch_id: work.batch_id.clone(),
+        }
+    }
+}
+
 fn successor(
     state: &mut WorkState,
-    source: &WorkRecord,
+    source: &SuccessorSource,
     next_work_id: &str,
     stage: WorkStage,
     invocation_ids: Vec<String>,
@@ -120,7 +137,8 @@ pub(super) fn commit_reason(
         return Err(WorkRejection::InvalidTransition);
     };
     let next_work_id = next_work_id.as_deref();
-    let source = work_mut(state, target)?.clone();
+    work_mut(state, target)?;
+    let source = &state.works[&target.work_id];
     if source.stage != WorkStage::ReasonInFlight
         || source.request_id.as_deref() != Some(request_id.as_str())
         || response.role != "assistant"
@@ -129,6 +147,7 @@ pub(super) fn commit_reason(
     {
         return Err(WorkRejection::InvalidTransition);
     }
+    let source = SuccessorSource::from(source);
     let payload = deserialize_persisted_payload(&response.serialized)
         .map_err(|_| WorkRejection::InvalidTransition)?;
     let message = payload
@@ -216,7 +235,8 @@ pub(super) fn begin_dispatch(
     invocation_id: &str,
     receipt: &mut WorkReceipt,
 ) -> Result<(), WorkRejection> {
-    let source = work_mut(state, target)?.clone();
+    work_mut(state, target)?;
+    let source = &state.works[&target.work_id];
     if source.stage != WorkStage::ActReady
         || !source
             .invocation_ids
@@ -262,7 +282,8 @@ pub(super) fn commit_act(
     receipt: &mut WorkReceipt,
     projections: &mut Vec<WorkPayload>,
 ) -> Result<(), WorkRejection> {
-    let source = work_mut(state, target)?.clone();
+    work_mut(state, target)?;
+    let source = &state.works[&target.work_id];
     if !matches!(
         source.stage,
         WorkStage::ActReady | WorkStage::Blocked | WorkStage::Abandoned
@@ -335,8 +356,10 @@ pub(super) fn commit_act(
     if !complete && next_work_id.is_some() {
         return Err(WorkRejection::InvalidTransition);
     }
+    let source_stage = source.stage;
     if complete {
         if let Some(next_work_id) = next_work_id {
+            let source = SuccessorSource::from(source);
             successor(
                 state,
                 &source,
@@ -347,7 +370,7 @@ pub(super) fn commit_act(
         }
     }
     let work = work_mut(state, target)?;
-    if complete && source.stage == WorkStage::ActReady {
+    if complete && source_stage == WorkStage::ActReady {
         work.stage = WorkStage::Settled;
         work.reason = None;
         work.recovery_condition = None;
@@ -403,7 +426,8 @@ pub(super) fn unknown(
     reason: &str,
     receipt: &mut WorkReceipt,
 ) -> Result<(), WorkRejection> {
-    let work = work_mut(state, target)?.clone();
+    work_mut(state, target)?;
+    let work = &state.works[&target.work_id];
     if reason.is_empty() {
         return Err(WorkRejection::InvalidTransition);
     }
@@ -443,7 +467,8 @@ pub(super) fn resume(
     evidence: &str,
     receipt: &mut WorkReceipt,
 ) -> Result<(), WorkRejection> {
-    let source = work_mut(state, target)?.clone();
+    work_mut(state, target)?;
+    let source = &state.works[&target.work_id];
     if source.stage != WorkStage::Blocked
         || evidence.is_empty()
         || source.invocation_ids.iter().any(|invocation_id| {
@@ -528,7 +553,8 @@ pub(super) fn settle(
     target: &WorkTarget,
     receipt: &mut WorkReceipt,
 ) -> Result<(), WorkRejection> {
-    let source = work_mut(state, target)?.clone();
+    work_mut(state, target)?;
+    let source = &state.works[&target.work_id];
     if source.stage != WorkStage::ActReady
         || !source.invocation_ids.iter().all(|invocation_id| {
             state

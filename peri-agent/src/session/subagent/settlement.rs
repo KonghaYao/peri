@@ -95,13 +95,15 @@ impl OwnedSubagentExecution {
             action: WorkAction::BindTerminalObligation {
                 expected_revision: child.state.revision,
                 admission_id: admission.admission_id.clone(),
-                command: Box::new(command.clone()),
+                command: Box::new(command),
             },
         };
         owned.mutation_id = format!(
             "child-terminal-obligation:{}",
             owned.digest().map_err(|error| error.to_string())?
         );
+        let owned = peri_acp_types::session_resources::work::PreparedWorkCommand::try_new(owned)
+            .map_err(|error| error.to_string())?;
         barrier
             .commit(&owned)
             .await
@@ -128,8 +130,12 @@ impl OwnedSubagentExecution {
             .get(&admission.admission_id)
             .ok_or("Incomplete: durable child terminal obligation unavailable")?;
         let barrier = WorkMutationBarrier::new(resources.clone());
+        let command =
+            peri_acp_types::session_resources::work::PreparedWorkCommand::try_new(command.clone())
+                .map_err(|error| error.to_string())?;
+        drop(child);
         let receipt = barrier
-            .commit(command)
+            .commit(&command)
             .await
             .map_err(|error| error.to_string())?;
         let child = resources
@@ -153,6 +159,8 @@ impl OwnedSubagentExecution {
             "child-terminal-ack:{}",
             ack.digest().map_err(|error| error.to_string())?
         );
+        let ack = peri_acp_types::session_resources::work::PreparedWorkCommand::try_new(ack)
+            .map_err(|error| error.to_string())?;
         barrier
             .commit(&ack)
             .await
@@ -213,6 +221,9 @@ impl OwnedSubagentExecution {
                 evidence_id: evidence_id.clone(),
             },
         };
+        let command =
+            peri_acp_types::session_resources::work::PreparedWorkCommand::try_new(command)
+                .map_err(|error| error.to_string())?;
         WorkMutationBarrier::new(resources)
             .commit(&command)
             .await

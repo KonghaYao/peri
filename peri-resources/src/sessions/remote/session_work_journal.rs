@@ -1,13 +1,13 @@
 use super::*;
 
 pub(super) fn owned_identity(
-    command: &WorkCommand,
+    command: &PreparedWorkCommand,
     phase: &str,
 ) -> SessionResourceResult<OperationIdentity> {
     Ok(OperationIdentity::with_digest(
         OperationId::from_record(&format!("session-work-{phase}.{}", command.mutation_id)),
         &format!("session_work_{phase}"),
-        command.digest()?,
+        command.digest().to_owned(),
     ))
 }
 
@@ -17,7 +17,11 @@ fn specifications(effects: Vec<work::WorkEffect>) -> Vec<StatementSpec> {
         .map(|effect| {
             StatementSpec::new(
                 effect.sql,
-                effect.params.into_iter().map(Value::Text).collect(),
+                effect
+                    .params
+                    .into_iter()
+                    .map(|value| Value::Text(value.to_string()))
+                    .collect(),
             )
         })
         .collect()
@@ -53,7 +57,7 @@ impl RemoteSessionData {
     }
     pub(super) async fn begin_owned_work(
         &self,
-        command: &WorkCommand,
+        command: &PreparedWorkCommand,
     ) -> SessionResourceResult<()> {
         let store = self.store().await?;
         if let Some(row) = store
@@ -66,7 +70,7 @@ impl RemoteSessionData {
             let original = work::original_command(
                 text_at(&row, 0).ok_or_else(|| corrupt("owned command is not readable"))?,
             )?;
-            if original != *command {
+            if original != *command.command() {
                 return Err(SessionResourceError::conflict(
                     "work original command identity conflicts",
                 ));
@@ -75,10 +79,16 @@ impl RemoteSessionData {
                 command.session_id.clone(),
             )));
         }
+        let effects = work::command_effects(command)?;
+        let mut phase = work::WorkPhase::new("remote", "journal_begin");
+        phase.command_bytes = command.encoded().len();
+        phase.query_count = effects.len();
+        phase.transaction_count = 1;
+        phase.record_effects(&effects);
         let outcome = store
             .apply_qualified(&QualifiedMutation {
                 identity: owned_identity(command, "begin")?,
-                effects: specifications(work::command_effects(command)?),
+                effects: specifications(effects),
             })
             .await?;
         match outcome {
@@ -93,7 +103,7 @@ impl RemoteSessionData {
 
     pub(super) async fn acknowledge_work(
         &self,
-        command: &WorkCommand,
+        command: &PreparedWorkCommand,
     ) -> SessionResourceResult<()> {
         let store = self.store().await?;
         let outcome = store
@@ -103,7 +113,7 @@ impl RemoteSessionData {
                     work::ACK_COMMAND,
                     vec![
                         Value::Text(command.mutation_id.clone()),
-                        Value::Text(command.digest()?),
+                        Value::Text(command.digest().to_owned()),
                     ],
                 )],
             })
@@ -116,20 +126,23 @@ impl RemoteSessionData {
         }
     }
 
-    pub(super) async fn seal_owned_work(&self, command: &WorkCommand) -> SessionResourceResult<()> {
+    pub(super) async fn seal_owned_work(
+        &self,
+        command: &PreparedWorkCommand,
+    ) -> SessionResourceResult<()> {
         let mut effects = work::command_effects(command)?;
         effects.push(work::WorkEffect::texts(
             work::INSERT_RECEIPT,
             [
                 command.mutation_id.clone(),
                 command.session_id.clone(),
-                command.digest()?,
+                command.digest().to_owned(),
                 work::encode(&WorkResolution::NotApplied)?,
             ],
         ));
         effects.push(work::WorkEffect::texts(
             work::ACK_COMMAND,
-            [command.mutation_id.clone(), command.digest()?],
+            [command.mutation_id.clone(), command.digest().to_owned()],
         ));
         let store = self.store().await?;
         let outcome = store

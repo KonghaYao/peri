@@ -12,10 +12,10 @@ async fn abandon_exact_pending_delivery_preserves_user_first_and_terminal_obliga
         delivery.purpose = purpose;
         assert_eq!(
             resources
-                .apply_work_mutation(&command(
+                .apply_work_mutation(&prepare_command(&command(
                     &format!("publish-{delivery_id}"),
                     WorkAction::PublishDelivery { delivery }
-                ))
+                )))
                 .await
                 .unwrap()
                 .decision,
@@ -25,10 +25,10 @@ async fn abandon_exact_pending_delivery_preserves_user_first_and_terminal_obliga
     let loaded = snapshot(resources.as_ref()).await;
     let ticket = admission(&loaded, "mixed-ticket");
     resources
-        .apply_work_mutation(&command(
+        .apply_work_mutation(&prepare_command(&command(
             "mixed-enter",
             WorkAction::RegisterAdmission { admission: ticket },
-        ))
+        )))
         .await
         .unwrap();
     let before = snapshot(resources.as_ref()).await;
@@ -41,7 +41,10 @@ async fn abandon_exact_pending_delivery_preserves_user_first_and_terminal_obliga
             evidence: "trusted-scheduled-decision:mixed-ticket".into(),
         },
     );
-    let receipt = resources.apply_work_mutation(&abandon).await.unwrap();
+    let receipt = resources
+        .apply_work_mutation(&prepare_command(&abandon))
+        .await
+        .unwrap();
     assert_eq!(receipt.decision, WorkDecision::Accepted);
     let after = snapshot(resources.as_ref()).await;
     assert_eq!(
@@ -74,7 +77,10 @@ async fn abandon_exact_pending_delivery_preserves_user_first_and_terminal_obliga
         vec!["user-first", "task-terminal"]
     );
     assert_eq!(
-        resources.apply_work_mutation(&abandon).await.unwrap(),
+        resources
+            .apply_work_mutation(&prepare_command(&abandon))
+            .await
+            .unwrap(),
         receipt
     );
     let missing = command(
@@ -88,7 +94,7 @@ async fn abandon_exact_pending_delivery_preserves_user_first_and_terminal_obliga
     );
     assert_eq!(
         resources
-            .apply_work_mutation(&missing)
+            .apply_work_mutation(&prepare_command(&missing))
             .await
             .unwrap()
             .decision,
@@ -97,14 +103,14 @@ async fn abandon_exact_pending_delivery_preserves_user_first_and_terminal_obliga
         }
     );
     let claimed = resources
-        .apply_work_mutation(&command(
+        .apply_work_mutation(&prepare_command(&command(
             "claim-unrelated",
             WorkAction::ClaimBatch {
                 guard: guard(&after),
                 batch_id: "user-first".into(),
                 delivery_ids: after.candidates[0].delivery_ids.clone(),
             },
-        ))
+        )))
         .await
         .unwrap();
     assert_eq!(claimed.decision, WorkDecision::Accepted);
@@ -120,7 +126,7 @@ async fn abandon_exact_pending_delivery_preserves_user_first_and_terminal_obliga
     );
     assert_eq!(
         resources
-            .apply_work_mutation(&forbidden)
+            .apply_work_mutation(&prepare_command(&forbidden))
             .await
             .unwrap()
             .decision,
@@ -142,7 +148,10 @@ async fn child_resume_metadata_is_immutable_and_retained_per_lifecycle() {
             metadata_json: metadata.into(),
         },
     );
-    let receipt = resources.apply_work_mutation(&original).await.unwrap();
+    let receipt = resources
+        .apply_work_mutation(&prepare_command(&original))
+        .await
+        .unwrap();
     assert_eq!(receipt.decision, WorkDecision::Accepted);
     let same = command(
         "child-metadata-same",
@@ -154,7 +163,10 @@ async fn child_resume_metadata_is_immutable_and_retained_per_lifecycle() {
             .unwrap(),
         },
     );
-    let same_receipt = resources.apply_work_mutation(&same).await.unwrap();
+    let same_receipt = resources
+        .apply_work_mutation(&prepare_command(&same))
+        .await
+        .unwrap();
     assert_eq!(same_receipt.decision, WorkDecision::Accepted);
     let conflict = command(
         "child-metadata-conflict",
@@ -165,7 +177,7 @@ async fn child_resume_metadata_is_immutable_and_retained_per_lifecycle() {
     );
     assert_eq!(
         resources
-            .apply_work_mutation(&conflict)
+            .apply_work_mutation(&prepare_command(&conflict))
             .await
             .unwrap()
             .decision,
@@ -194,7 +206,7 @@ async fn child_resume_metadata_is_immutable_and_retained_per_lifecycle() {
     };
     assert_eq!(
         resources
-            .apply_work_mutation(&second)
+            .apply_work_mutation(&prepare_command(&second))
             .await
             .unwrap()
             .decision,
@@ -211,7 +223,10 @@ async fn child_resume_metadata_is_immutable_and_retained_per_lifecycle() {
         serde_json::from_str::<serde_json::Value>(metadata).unwrap()
     );
     assert_eq!(
-        reopened.apply_work_mutation(&original).await.unwrap(),
+        reopened
+            .apply_work_mutation(&prepare_command(&original))
+            .await
+            .unwrap(),
         receipt
     );
 }
@@ -250,7 +265,7 @@ async fn prepared_invocation_can_only_settle_with_before_effect_rejection() {
         )))
         .unwrap();
     let committed = resources
-        .apply_work_mutation(&command(
+        .apply_work_mutation(&prepare_command(&command(
             "intent-before-hitl",
             WorkAction::CommitReasonResponseAndDispatchIntent {
                 guard: guard(&loaded),
@@ -260,7 +275,7 @@ async fn prepared_invocation_can_only_settle_with_before_effect_rejection() {
                 dispatch_intents: vec![intent],
                 next_work_id: Some("act-work".into()),
             },
-        ))
+        )))
         .await
         .unwrap();
     assert_eq!(committed.decision, WorkDecision::Accepted);
@@ -298,7 +313,7 @@ async fn prepared_invocation_can_only_settle_with_before_effect_rejection() {
     ] {
         assert_eq!(
             resources
-                .apply_work_mutation(&act_command(id, outcome))
+                .apply_work_mutation(&prepare_command(&act_command(id, outcome)))
                 .await
                 .unwrap()
                 .decision,
@@ -314,7 +329,10 @@ async fn prepared_invocation_can_only_settle_with_before_effect_rejection() {
             evidence: "trusted-hook: user rejected before effect".into(),
         },
     );
-    let receipt = resources.apply_work_mutation(&cancelled).await.unwrap();
+    let receipt = resources
+        .apply_work_mutation(&prepare_command(&cancelled))
+        .await
+        .unwrap();
     assert_eq!(receipt.decision, WorkDecision::Accepted);
     let after = snapshot(resources.as_ref()).await;
     assert_eq!(
@@ -348,7 +366,10 @@ async fn prepared_invocation_can_only_settle_with_before_effect_rejection() {
         .await
         .unwrap();
     assert_eq!(
-        reopened.apply_work_mutation(&cancelled).await.unwrap(),
+        reopened
+            .apply_work_mutation(&prepare_command(&cancelled))
+            .await
+            .unwrap(),
         receipt
     );
     let restored = reopened
@@ -382,7 +403,10 @@ async fn withdrawal_optional_generation_does_not_bypass_exact_claim() {
         },
     );
     control_action(resources.as_ref(), "resume", ControlAction::Resume).await;
-    let receipt = resources.apply_work_mutation(&reclaim).await.unwrap();
+    let receipt = resources
+        .apply_work_mutation(&prepare_command(&reclaim))
+        .await
+        .unwrap();
     assert_eq!(
         receipt.decision,
         WorkDecision::Rejected {
@@ -401,7 +425,7 @@ async fn withdrawal_optional_generation_does_not_bypass_exact_claim() {
     );
     assert_eq!(
         resources
-            .apply_work_mutation(&direct)
+            .apply_work_mutation(&prepare_command(&direct))
             .await
             .unwrap()
             .decision,
@@ -421,7 +445,7 @@ async fn withdrawal_optional_generation_does_not_bypass_exact_claim() {
     );
     assert!(matches!(
         resources
-            .apply_work_mutation(&claimed)
+            .apply_work_mutation(&prepare_command(&claimed))
             .await
             .unwrap()
             .decision,
@@ -479,7 +503,10 @@ async fn stop_cleanup_generation_is_atomic_with_resume_and_original_receipt() {
     );
     control_action(resources.as_ref(), "resume", ControlAction::Resume).await;
     let before = snapshot(resources.as_ref()).await;
-    let rejected = resources.apply_work_mutation(&cleanup).await.unwrap();
+    let rejected = resources
+        .apply_work_mutation(&prepare_command(&cleanup))
+        .await
+        .unwrap();
     assert_eq!(
         rejected.decision,
         WorkDecision::Rejected {
@@ -497,7 +524,10 @@ async fn stop_cleanup_generation_is_atomic_with_resume_and_original_receipt() {
             authorization_ref: "trusted-new-decision".into(),
         },
     );
-    let accepted = resources.apply_work_mutation(&fresh).await.unwrap();
+    let accepted = resources
+        .apply_work_mutation(&prepare_command(&fresh))
+        .await
+        .unwrap();
     assert_eq!(accepted.decision, WorkDecision::Accepted);
     control_action(
         resources.as_ref(),
@@ -506,11 +536,17 @@ async fn stop_cleanup_generation_is_atomic_with_resume_and_original_receipt() {
     )
     .await;
     assert_eq!(
-        resources.apply_work_mutation(&fresh).await.unwrap(),
+        resources
+            .apply_work_mutation(&prepare_command(&fresh))
+            .await
+            .unwrap(),
         accepted
     );
     assert_eq!(
-        resources.apply_work_mutation(&cleanup).await.unwrap(),
+        resources
+            .apply_work_mutation(&prepare_command(&cleanup))
+            .await
+            .unwrap(),
         rejected
     );
 }
@@ -535,13 +571,13 @@ async fn late_terminal_retains_original_lifecycle_settlement_after_reopen() {
         recovery_locator: "original-invocation".into(),
     };
     let prepared = resources
-        .apply_work_mutation(&command(
+        .apply_work_mutation(&prepare_command(&command(
             "prepare-terminal",
             WorkAction::PrepareInvocation {
                 expected_revision: 0,
                 intent,
             },
-        ))
+        )))
         .await
         .unwrap();
     assert_eq!(prepared.decision, WorkDecision::Accepted);
@@ -555,13 +591,13 @@ async fn late_terminal_retains_original_lifecycle_settlement_after_reopen() {
         authorization_ref: "trusted-owner-auth".into(),
     };
     let bound = resources
-        .apply_work_mutation(&command(
+        .apply_work_mutation(&prepare_command(&command(
             "bind-terminal",
             WorkAction::ReconcileTaskBinding {
                 expected_revision: prepared.revision,
                 binding: binding.clone(),
             },
-        ))
+        )))
         .await
         .unwrap();
     assert_eq!(bound.decision, WorkDecision::Accepted);
@@ -575,12 +611,12 @@ async fn late_terminal_retains_original_lifecycle_settlement_after_reopen() {
     let mut delivery = publication("late-terminal", MessagePolicy::ensure_processing());
     delivery.purpose = DeliveryPurpose::TaskTerminal;
     let ordinary = resources
-        .apply_work_mutation(&command(
+        .apply_work_mutation(&prepare_command(&command(
             "ordinary-late",
             WorkAction::PublishDelivery {
                 delivery: delivery.clone(),
             },
-        ))
+        )))
         .await
         .unwrap();
     assert_eq!(
@@ -592,13 +628,13 @@ async fn late_terminal_retains_original_lifecycle_settlement_after_reopen() {
     let mut forged = binding.clone();
     forged.owner_task_id = "unproved-task".into();
     let rejected = resources
-        .apply_work_mutation(&command(
+        .apply_work_mutation(&prepare_command(&command(
             "forged-late",
             WorkAction::PublishTaskSettlement {
                 delivery: delivery.clone(),
                 binding: forged,
             },
-        ))
+        )))
         .await
         .unwrap();
     assert_eq!(
@@ -611,7 +647,10 @@ async fn late_terminal_retains_original_lifecycle_settlement_after_reopen() {
         "original-terminal",
         WorkAction::PublishTaskSettlement { delivery, binding },
     );
-    let receipt = resources.apply_work_mutation(&original).await.unwrap();
+    let receipt = resources
+        .apply_work_mutation(&prepare_command(&original))
+        .await
+        .unwrap();
     assert_eq!(receipt.decision, WorkDecision::Accepted);
     let loaded = snapshot(resources.as_ref()).await;
     assert_eq!(loaded.control.lifecycle, 2);
@@ -635,13 +674,19 @@ async fn late_terminal_retains_original_lifecycle_settlement_after_reopen() {
         .await
         .unwrap();
     assert_eq!(
-        reopened.resolve_work_mutation(&original).await.unwrap(),
+        reopened
+            .resolve_work_mutation(&prepare_command(&original))
+            .await
+            .unwrap(),
         WorkResolution::Applied {
             receipt: receipt.clone()
         }
     );
     assert_eq!(
-        reopened.apply_work_mutation(&original).await.unwrap(),
+        reopened
+            .apply_work_mutation(&prepare_command(&original))
+            .await
+            .unwrap(),
         receipt
     );
     assert_eq!(snapshot(&reopened).await.state, loaded.state);

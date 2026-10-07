@@ -19,13 +19,13 @@ async fn terminal_handoff_requires_real_parent_receipt_before_child_finish() {
         recovery_locator: "child-original-call".into(),
     };
     let prepared = resources
-        .apply_work_mutation(&command(
+        .apply_work_mutation(&prepare_command(&command(
             "prepare-child",
             WorkAction::PrepareInvocation {
                 expected_revision: 0,
                 intent,
             },
-        ))
+        )))
         .await
         .unwrap();
     let binding = TaskBinding {
@@ -38,13 +38,13 @@ async fn terminal_handoff_requires_real_parent_receipt_before_child_finish() {
         authorization_ref: "trusted-delegation".into(),
     };
     let parent_binding_receipt = resources
-        .apply_work_mutation(&command(
+        .apply_work_mutation(&prepare_command(&command(
             "bind-child",
             WorkAction::ReconcileTaskBinding {
                 expected_revision: prepared.revision,
                 binding: binding.clone(),
             },
-        ))
+        )))
         .await
         .unwrap();
     let workspace = resources.resolve_workspace(directory.path()).await.unwrap();
@@ -76,12 +76,12 @@ async fn terminal_handoff_requires_real_parent_receipt_before_child_finish() {
         limit: 64,
     };
     resources
-        .apply_work_mutation(&child_command(
+        .apply_work_mutation(&prepare_command(&child_command(
             "child-input",
             WorkAction::PublishDelivery {
                 delivery: publication("child-input", MessagePolicy::ensure_processing()),
             },
-        ))
+        )))
         .await
         .unwrap();
     let loaded = resources.load_session_work(&child_query).await.unwrap();
@@ -97,19 +97,19 @@ async fn terminal_handoff_requires_real_parent_receipt_before_child_finish() {
     );
     assert_eq!(
         resources
-            .apply_work_mutation(&bind_pointer)
+            .apply_work_mutation(&prepare_command(&bind_pointer))
             .await
             .unwrap()
             .decision,
         WorkDecision::Accepted
     );
     resources
-        .apply_work_mutation(&child_command(
+        .apply_work_mutation(&prepare_command(&child_command(
             "child-enter",
             WorkAction::RegisterAdmission {
                 admission: ticket.clone(),
             },
-        ))
+        )))
         .await
         .unwrap();
     let control = resources
@@ -142,7 +142,10 @@ async fn terminal_handoff_requires_real_parent_receipt_before_child_finish() {
             command: Box::new(parent_command.clone()),
         },
     );
-    let binding_receipt = resources.apply_work_mutation(&bind).await.unwrap();
+    let binding_receipt = resources
+        .apply_work_mutation(&prepare_command(&bind))
+        .await
+        .unwrap();
     assert_eq!(binding_receipt.decision, WorkDecision::Accepted);
     let finish_action = WorkAction::FinishAdmission {
         admission: ticket.clone(),
@@ -150,7 +153,10 @@ async fn terminal_handoff_requires_real_parent_receipt_before_child_finish() {
     };
     assert_eq!(
         resources
-            .apply_work_mutation(&child_command("finish-too-early", finish_action.clone()))
+            .apply_work_mutation(&prepare_command(&child_command(
+                "finish-too-early",
+                finish_action.clone()
+            )))
             .await
             .unwrap()
             .decision,
@@ -217,7 +223,10 @@ async fn terminal_handoff_requires_real_parent_receipt_before_child_finish() {
             receipt: forged_receipt,
         },
     );
-    assert!(resources.apply_work_mutation(&forged).await.is_err());
+    assert!(resources
+        .apply_work_mutation(&prepare_command(&forged))
+        .await
+        .is_err());
     assert!(resources
         .load_session_work(&child_query)
         .await
@@ -226,11 +235,14 @@ async fn terminal_handoff_requires_real_parent_receipt_before_child_finish() {
         .terminal_acknowledgements
         .is_empty());
     assert_eq!(
-        resources.resolve_work_mutation(&forged).await.unwrap(),
+        resources
+            .resolve_work_mutation(&prepare_command(&forged))
+            .await
+            .unwrap(),
         WorkResolution::NotApplied
     );
     let parent_receipt = resources
-        .apply_work_mutation(&parent_command)
+        .apply_work_mutation(&prepare_command(&parent_command))
         .await
         .unwrap();
     assert_eq!(parent_receipt.decision, WorkDecision::Accepted);
@@ -245,14 +257,17 @@ async fn terminal_handoff_requires_real_parent_receipt_before_child_finish() {
     );
     assert_eq!(
         resources
-            .apply_work_mutation(&acknowledge)
+            .apply_work_mutation(&prepare_command(&acknowledge))
             .await
             .unwrap()
             .decision,
         WorkDecision::Accepted
     );
     let finished = resources
-        .apply_work_mutation(&child_command("child-settled", finish_action))
+        .apply_work_mutation(&prepare_command(&child_command(
+            "child-settled",
+            finish_action,
+        )))
         .await
         .unwrap();
     assert_eq!(finished.decision, WorkDecision::Accepted);
@@ -275,7 +290,10 @@ async fn terminal_handoff_requires_real_parent_receipt_before_child_finish() {
     );
     assert!(!loaded.state.has_pending_terminal_obligations());
     assert_eq!(
-        reopened.apply_work_mutation(&bind).await.unwrap(),
+        reopened
+            .apply_work_mutation(&prepare_command(&bind))
+            .await
+            .unwrap(),
         binding_receipt
     );
 }

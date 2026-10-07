@@ -1,6 +1,6 @@
 use super::*;
 use peri_acp_types::session_resources::work::{
-    WorkCommand, WorkQuery, WorkReceipt, WorkResolution, WorkSnapshot,
+    PreparedWorkCommand, WorkQuery, WorkReceipt, WorkResolution, WorkSnapshot,
 };
 
 impl MutationGate {
@@ -126,8 +126,8 @@ impl MutationGate {
         }
         let mut snapshot = self.data.load_session_work(query).await?;
         if let Some(original) = original {
-            if !snapshot.pending_commands.contains(&original) {
-                snapshot.pending_commands.push(original);
+            if !snapshot.pending_commands.contains(original.command()) {
+                snapshot.pending_commands.push(original.into_command());
             }
             snapshot.blocked = true;
             snapshot.candidates.clear();
@@ -137,9 +137,8 @@ impl MutationGate {
 
     pub(in crate::sessions::resources) async fn apply_work(
         &self,
-        command: &WorkCommand,
+        command: &PreparedWorkCommand,
     ) -> SessionResourceResult<WorkReceipt> {
-        command.digest()?;
         self.ensure_session_write()?;
         let root = self.work_root(&command.session_id).await?;
         let scope = self.scope(&root, true).await?;
@@ -167,23 +166,23 @@ impl MutationGate {
 
     pub(in crate::sessions::resources) async fn resolve_work(
         &self,
-        command: &WorkCommand,
+        command: &PreparedWorkCommand,
     ) -> SessionResourceResult<WorkResolution> {
-        command.digest()?;
         self.ensure_recovery_write()?;
         let root = self.work_root(&command.session_id).await?;
         let pending = self.pending_for(&root);
         let _barrier = pending.barrier.write().await;
-        let snapshot = self
+        let pending_commands = self
             .data
             .load_session_work(&WorkQuery {
                 session_id: root.clone(),
                 limit: 64,
             })
-            .await;
-        if let Ok(snapshot) = snapshot {
-            if !snapshot.pending_commands.is_empty()
-                && !snapshot.pending_commands.contains(command)
+            .await
+            .map(|snapshot| snapshot.pending_commands);
+        if let Ok(pending_commands) = pending_commands {
+            if !pending_commands.is_empty()
+                && !pending_commands.contains(command.command())
                 && self
                     .data
                     .load_work_command(&peri_acp_types::session_resources::work::WorkCommandQuery {
@@ -191,7 +190,7 @@ impl MutationGate {
                         mutation_id: command.mutation_id.clone(),
                     })
                     .await?
-                    .is_none_or(|owned| owned.command != *command)
+                    .is_none_or(|owned| owned.command != *command.command())
             {
                 return Err(SessionResourceError::conflict(
                     "resolve the original owned work mutation",

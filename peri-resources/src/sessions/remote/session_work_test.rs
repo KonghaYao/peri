@@ -1,5 +1,9 @@
 use std::sync::Arc;
 
+fn prepare_command(command: &WorkCommand) -> PreparedWorkCommand {
+    PreparedWorkCommand::try_new(command.clone()).unwrap()
+}
+
 use async_trait::async_trait;
 use peri_acp_types::{
     messages::BaseMessage,
@@ -304,18 +308,24 @@ async fn remote_work_publish_lost_ack_keeps_one_delivery_and_resolves_original_r
         })
         .await;
     assert!(adapter
-        .apply_work_mutation(&command)
+        .apply_work_mutation(&prepare_command(&command))
         .await
         .unwrap_err()
         .is_persistence_uncertain());
     let reopened = fixture.adapter().await;
-    let resolution = reopened.resolve_work_mutation(&command).await.unwrap();
+    let resolution = reopened
+        .resolve_work_mutation(&prepare_command(&command))
+        .await
+        .unwrap();
     let WorkResolution::Applied { receipt } = resolution else {
         panic!("missing committed work receipt")
     };
     assert_eq!(receipt.decision, WorkDecision::Accepted);
     assert_eq!(
-        reopened.apply_work_mutation(&command).await.unwrap(),
+        reopened
+            .apply_work_mutation(&prepare_command(&command))
+            .await
+            .unwrap(),
         receipt
     );
     let loaded = reopened.load_session_work(&query()).await.unwrap();
@@ -343,18 +353,21 @@ async fn remote_work_unknown_before_send_is_sealed_and_cannot_late_apply() {
         })
         .await;
     assert!(adapter
-        .apply_work_mutation(&command)
+        .apply_work_mutation(&prepare_command(&command))
         .await
         .unwrap_err()
         .is_persistence_uncertain());
     assert_eq!(
-        adapter.resolve_work_mutation(&command).await.unwrap(),
+        adapter
+            .resolve_work_mutation(&prepare_command(&command))
+            .await
+            .unwrap(),
         WorkResolution::NotApplied
     );
     assert!(fixture
         .adapter()
         .await
-        .apply_work_mutation(&command)
+        .apply_work_mutation(&prepare_command(&command))
         .await
         .is_err());
     assert!(adapter
@@ -375,8 +388,12 @@ async fn remote_work_concurrent_publish_uses_domain_cas_and_monotonic_admission_
     let second_command = publication("second", "second-delivery");
     // 同一 session 只允许一条未对账的 work 命令（work::GUARD_COMMAND 拒绝并发的 begin），
     // 因此这里顺序提交：本测试验证的是 domain CAS 与 admission_sequence 单调，不是并发准入。
-    let first_result = first.apply_work_mutation(&first_command).await;
-    let second_result = second.apply_work_mutation(&second_command).await;
+    let first_result = first
+        .apply_work_mutation(&prepare_command(&first_command))
+        .await;
+    let second_result = second
+        .apply_work_mutation(&prepare_command(&second_command))
+        .await;
     assert_eq!(first_result.unwrap().decision, WorkDecision::Accepted);
     assert_eq!(second_result.unwrap().decision, WorkDecision::Accepted);
     let loaded = first.load_session_work(&query()).await.unwrap();
@@ -395,12 +412,24 @@ async fn remote_work_conflicting_mutation_id_never_overwrites_content() {
     let fixture = Fixture::new().await;
     let adapter = fixture.adapter().await;
     let command = publication("same-id", "terminal");
-    let receipt = adapter.apply_work_mutation(&command).await.unwrap();
+    let receipt = adapter
+        .apply_work_mutation(&prepare_command(&command))
+        .await
+        .unwrap();
     let conflict = publication("same-id", "different");
-    assert!(adapter.apply_work_mutation(&conflict).await.is_err());
-    assert!(adapter.resolve_work_mutation(&conflict).await.is_err());
+    assert!(adapter
+        .apply_work_mutation(&prepare_command(&conflict))
+        .await
+        .is_err());
+    assert!(adapter
+        .resolve_work_mutation(&prepare_command(&conflict))
+        .await
+        .is_err());
     assert_eq!(
-        adapter.apply_work_mutation(&command).await.unwrap(),
+        adapter
+            .apply_work_mutation(&prepare_command(&command))
+            .await
+            .unwrap(),
         receipt
     );
     assert_eq!(
@@ -439,7 +468,7 @@ async fn remote_work_unknown_freezes_control_and_cannot_be_cleared_by_generic_re
         SessionResourcesImpl::from_ports(adapter, Arc::new(local), SessionDataHome::RemoteStore);
     let command = publication("freeze", "terminal");
     assert!(resources
-        .apply_work_mutation(&command)
+        .apply_work_mutation(&prepare_command(&command))
         .await
         .unwrap_err()
         .is_persistence_uncertain());
@@ -467,9 +496,15 @@ async fn remote_work_unknown_freezes_control_and_cannot_be_cleared_by_generic_re
         .unwrap_err()
         .is_persistence_uncertain());
     let replacement = publication("replacement", "replacement");
-    assert!(resources.resolve_work_mutation(&replacement).await.is_err());
+    assert!(resources
+        .resolve_work_mutation(&prepare_command(&replacement))
+        .await
+        .is_err());
     assert!(matches!(
-        resources.resolve_work_mutation(&command).await.unwrap(),
+        resources
+            .resolve_work_mutation(&prepare_command(&command))
+            .await
+            .unwrap(),
         WorkResolution::Applied { .. }
     ));
     assert_eq!(
@@ -500,7 +535,10 @@ async fn owned_original_command_survives_fresh_facade_begin_and_effect_ack_loss(
         if let WorkAction::PublishDelivery { delivery } = &mut user_input.action {
             delivery.purpose = DeliveryPurpose::UserInput;
         }
-        let initial = adapter.apply_work_mutation(&user_input).await.unwrap();
+        let initial = adapter
+            .apply_work_mutation(&prepare_command(&user_input))
+            .await
+            .unwrap();
         let command = WorkCommand {
             session_id: "work-session".into(),
             recipient_lifecycle: 1,
@@ -526,7 +564,7 @@ async fn owned_original_command_survives_fresh_facade_begin_and_effect_ack_loss(
             SessionDataHome::RemoteStore,
         );
         assert!(resources
-            .apply_work_mutation(&command)
+            .apply_work_mutation(&prepare_command(&command))
             .await
             .unwrap_err()
             .is_persistence_uncertain());
@@ -549,7 +587,10 @@ async fn owned_original_command_survives_fresh_facade_begin_and_effect_ack_loss(
             }
         );
         assert!(reopened
-            .apply_work_mutation(&publication("replacement", "new-delivery"))
+            .apply_work_mutation(&prepare_command(&publication(
+                "replacement",
+                "new-delivery"
+            )))
             .await
             .unwrap_err()
             .is_persistence_uncertain());
@@ -580,9 +621,12 @@ async fn owned_original_command_survives_fresh_facade_begin_and_effect_ack_loss(
         {
             *expected_revision += 1;
         }
-        assert!(reopened.resolve_work_mutation(&forged).await.is_err());
+        assert!(reopened
+            .resolve_work_mutation(&prepare_command(&forged))
+            .await
+            .is_err());
         let resolution = reopened
-            .resolve_work_mutation(&loaded.pending_commands[0])
+            .resolve_work_mutation(&prepare_command(&loaded.pending_commands[0]))
             .await
             .unwrap();
         if applied {
@@ -591,7 +635,10 @@ async fn owned_original_command_survives_fresh_facade_begin_and_effect_ack_loss(
             assert_eq!(resolution, WorkResolution::NotApplied);
         }
         assert_eq!(
-            reopened.resolve_work_mutation(&command).await.unwrap(),
+            reopened
+                .resolve_work_mutation(&prepare_command(&command))
+                .await
+                .unwrap(),
             resolution
         );
         let owned = reopened

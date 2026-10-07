@@ -2,7 +2,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use peri_acp_types::plugin::{ConfigSource, McpServerConfig};
-use peri_acp_types::session_resources::work::{WorkAction, WorkCommand, WorkDecision};
+use peri_acp_types::session_resources::work::{
+    PreparedWorkCommand, WorkAction, WorkCommand, WorkDecision,
+};
 use peri_acp_types::session_resources::FrozenState;
 
 use crate::host::{prepared::PreparedSessionInputs, AcpServerConfig};
@@ -33,19 +35,22 @@ pub(super) async fn bind(
     }
     let receipt = cfg
         .session_resources
-        .apply_work_mutation(&WorkCommand {
-            session_id: session_id.to_owned(),
-            recipient_lifecycle: snapshot.control.lifecycle,
-            mutation_id: format!(
-                "resource-owners:{session_id}:{}",
-                snapshot.control.lifecycle
-            ),
-            action: WorkAction::BindResourceOwners {
-                expected_revision: snapshot.revision,
-                connections_json,
-                authorization_ref: format!("trusted-session-setup:{session_id}"),
-            },
-        })
+        .apply_work_mutation(
+            &PreparedWorkCommand::try_new(WorkCommand {
+                session_id: session_id.to_owned(),
+                recipient_lifecycle: snapshot.control.lifecycle,
+                mutation_id: format!(
+                    "resource-owners:{session_id}:{}",
+                    snapshot.control.lifecycle
+                ),
+                action: WorkAction::BindResourceOwners {
+                    expected_revision: snapshot.revision,
+                    connections_json,
+                    authorization_ref: format!("trusted-session-setup:{session_id}"),
+                },
+            })
+            .map_err(crate::host::workspace::resource_error)?,
+        )
         .await
         .map_err(crate::host::workspace::resource_error)?;
     if !matches!(receipt.decision, WorkDecision::Accepted) {
@@ -255,6 +260,8 @@ pub(super) async fn copy_for_reopen(
 
 async fn persist(cfg: &AcpServerConfig, command: WorkCommand) -> Result<(), AcpError> {
     use peri_acp_types::session_resources::work::WorkResolution;
+    let command =
+        PreparedWorkCommand::try_new(command).map_err(crate::host::workspace::resource_error)?;
     let receipt = match cfg.session_resources.apply_work_mutation(&command).await {
         Ok(receipt) => receipt,
         Err(error) if error.is_persistence_uncertain() => {

@@ -1,5 +1,6 @@
 use super::*;
 use crate::host::requests::resource_owners;
+use peri_acp_types::session_resources::work::PreparedWorkCommand;
 use peri_acp_types::session_resources::work::{WorkAction, WorkCommand, WorkDecision, WorkQuery};
 use peri_acp_types::session_resources::{ControlDecision, ControlResolution};
 
@@ -48,15 +49,18 @@ async fn bind_child(cfg: &AcpServerConfig, id: &str) -> String {
     let snapshot = work(cfg, id).await;
     let receipt = cfg
         .session_resources
-        .apply_work_mutation(&WorkCommand {
-            session_id: id.into(),
-            recipient_lifecycle: 1,
-            mutation_id: "original-child-metadata".into(),
-            action: WorkAction::BindChildResumeMetadata {
-                expected_revision: snapshot.state.revision,
-                metadata_json: metadata_json.clone(),
-            },
-        })
+        .apply_work_mutation(
+            &PreparedWorkCommand::try_new(WorkCommand {
+                session_id: id.into(),
+                recipient_lifecycle: 1,
+                mutation_id: "original-child-metadata".into(),
+                action: WorkAction::BindChildResumeMetadata {
+                    expected_revision: snapshot.state.revision,
+                    metadata_json: metadata_json.clone(),
+                },
+            })
+            .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(receipt.decision, WorkDecision::Accepted);

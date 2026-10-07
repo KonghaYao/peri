@@ -75,14 +75,17 @@ async fn admit(fixture: &TestSession) -> WorkAdmission {
     };
     let receipt = fixture
         .resources
-        .apply_work_mutation(&WorkCommand {
-            session_id: fixture.thread_id(),
-            recipient_lifecycle: 1,
-            mutation_id: uuid::Uuid::now_v7().to_string(),
-            action: WorkAction::RegisterAdmission {
-                admission: admission.clone(),
-            },
-        })
+        .apply_work_mutation(
+            &peri_acp_types::session_resources::work::PreparedWorkCommand::try_new(WorkCommand {
+                session_id: fixture.thread_id(),
+                recipient_lifecycle: 1,
+                mutation_id: uuid::Uuid::now_v7().to_string(),
+                action: WorkAction::RegisterAdmission {
+                    admission: admission.clone(),
+                },
+            })
+            .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(receipt.decision, WorkDecision::Accepted);
@@ -260,7 +263,12 @@ async fn durable_claim_blocks_withdrawal_and_keeps_canonical_message_identity() 
     assert_eq!(
         fixture
             .resources
-            .apply_work_mutation(&command)
+            .apply_work_mutation(
+                &peri_acp_types::session_resources::work::PreparedWorkCommand::try_new(
+                    command.clone()
+                )
+                .unwrap()
+            )
             .await
             .unwrap()
             .decision,
@@ -327,7 +335,10 @@ async fn withdrawal_wins_before_claim_cas_without_processing_projection() {
         .unwrap();
     let receipt = fixture
         .resources
-        .apply_work_mutation(&command)
+        .apply_work_mutation(
+            &peri_acp_types::session_resources::work::PreparedWorkCommand::try_new(command.clone())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert!(matches!(receipt.decision, WorkDecision::Rejected { .. }));

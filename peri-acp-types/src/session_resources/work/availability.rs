@@ -1,6 +1,11 @@
 use super::*;
 use crate::session::MessageRequirement;
 
+#[cfg(test)]
+std::thread_local! {
+    pub(super) static OWNED_PROJECTION_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 /// 仅供内部通知查询使用，不属于 ACP wire 协议。
 #[derive(Clone, Debug)]
 pub struct WorkAvailability {
@@ -77,6 +82,8 @@ pub struct AvailabilityAdmission {
 
 impl From<&WorkState> for WorkAvailabilityState {
     fn from(state: &WorkState) -> Self {
+        #[cfg(test)]
+        OWNED_PROJECTION_COUNT.with(|count| count.set(count.get() + 1));
         Self {
             revision: state.revision,
             max_batch_size: state.limits.max_batch_size,

@@ -145,7 +145,10 @@ async fn legacy_queued_enqueue_replay_without_authorization_remains_queued() {
     };
     let original = fixture
         .resources()
-        .apply_work_mutation(&stage)
+        .apply_work_mutation(
+            &peri_acp_types::session_resources::work::PreparedWorkCommand::try_new(stage.clone())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(original.decision, WorkDecision::Accepted);
@@ -277,34 +280,40 @@ async fn fresh_enqueue_supersedes_exited_blocked_work_without_history_activation
     };
     let registered = fixture
         .resources()
-        .apply_work_mutation(&WorkCommand {
-            session_id: fixture.thread_id(),
-            recipient_lifecycle: admission.lifecycle,
-            mutation_id: "register-old-task".into(),
-            action: WorkAction::RegisterAdmission {
-                admission: admission.clone(),
-            },
-        })
+        .apply_work_mutation(
+            &peri_acp_types::session_resources::work::PreparedWorkCommand::try_new(WorkCommand {
+                session_id: fixture.thread_id(),
+                recipient_lifecycle: admission.lifecycle,
+                mutation_id: "register-old-task".into(),
+                action: WorkAction::RegisterAdmission {
+                    admission: admission.clone(),
+                },
+            })
+            .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(registered.decision, WorkDecision::Accepted);
     let snapshot = load(&fixture).await;
     let claimed = fixture
         .resources()
-        .apply_work_mutation(&WorkCommand {
-            session_id: fixture.thread_id(),
-            recipient_lifecycle: admission.lifecycle,
-            mutation_id: "claim-old-task".into(),
-            action: WorkAction::ClaimBatch {
-                guard: WorkGuard {
-                    expected_revision: snapshot.state.revision,
-                    expected_control_generation: snapshot.control.control_generation,
-                    execution: admission.execution.clone(),
+        .apply_work_mutation(
+            &peri_acp_types::session_resources::work::PreparedWorkCommand::try_new(WorkCommand {
+                session_id: fixture.thread_id(),
+                recipient_lifecycle: admission.lifecycle,
+                mutation_id: "claim-old-task".into(),
+                action: WorkAction::ClaimBatch {
+                    guard: WorkGuard {
+                        expected_revision: snapshot.state.revision,
+                        expected_control_generation: snapshot.control.control_generation,
+                        execution: admission.execution.clone(),
+                    },
+                    batch_id: "old-batch".into(),
+                    delivery_ids: snapshot.candidates[0].delivery_ids.clone(),
                 },
-                batch_id: "old-batch".into(),
-                delivery_ids: snapshot.candidates[0].delivery_ids.clone(),
-            },
-        })
+            })
+            .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(claimed.decision, WorkDecision::Accepted);
@@ -312,20 +321,23 @@ async fn fresh_enqueue_supersedes_exited_blocked_work_without_history_activation
     let work_id = claimed.work_id.unwrap();
     let blocked = fixture
         .resources()
-        .apply_work_mutation(&WorkCommand {
-            session_id: fixture.thread_id(),
-            recipient_lifecycle: admission.lifecycle,
-            mutation_id: "block-old-task".into(),
-            action: WorkAction::BlockWork {
-                expected_revision: snapshot.state.revision,
-                target: WorkTarget {
-                    work_id: work_id.clone(),
-                    expected_work_revision: snapshot.state.works[&work_id].revision,
+        .apply_work_mutation(
+            &peri_acp_types::session_resources::work::PreparedWorkCommand::try_new(WorkCommand {
+                session_id: fixture.thread_id(),
+                recipient_lifecycle: admission.lifecycle,
+                mutation_id: "block-old-task".into(),
+                action: WorkAction::BlockWork {
+                    expected_revision: snapshot.state.revision,
+                    target: WorkTarget {
+                        work_id: work_id.clone(),
+                        expected_work_revision: snapshot.state.works[&work_id].revision,
+                    },
+                    reason: "reason budget exhausted".into(),
+                    recovery_condition: "explicit user authorization".into(),
                 },
-                reason: "reason budget exhausted".into(),
-                recovery_condition: "explicit user authorization".into(),
-            },
-        })
+            })
+            .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(blocked.decision, WorkDecision::Accepted);
@@ -685,18 +697,21 @@ async fn withdrawn_member_rejects_whole_selection_without_publishing_first_membe
         .collect();
     let receipt = fixture
         .resources()
-        .apply_work_mutation(&WorkCommand {
-            session_id: fixture.thread_id(),
-            recipient_lifecycle: 1,
-            mutation_id: selection_id,
-            action: WorkAction::PublishStagedUserInputs {
-                expected_revision: snapshot.state.revision,
-                expected_control_generation: snapshot.control.control_generation,
-                expected_attempt: snapshot.control.attempt,
-                interrupt_current: true,
-                deliveries,
-            },
-        })
+        .apply_work_mutation(
+            &peri_acp_types::session_resources::work::PreparedWorkCommand::try_new(WorkCommand {
+                session_id: fixture.thread_id(),
+                recipient_lifecycle: 1,
+                mutation_id: selection_id,
+                action: WorkAction::PublishStagedUserInputs {
+                    expected_revision: snapshot.state.revision,
+                    expected_control_generation: snapshot.control.control_generation,
+                    expected_attempt: snapshot.control.attempt,
+                    interrupt_current: true,
+                    deliveries,
+                },
+            })
+            .unwrap(),
+        )
         .await
         .unwrap();
     assert!(matches!(receipt.decision, WorkDecision::Rejected { .. }));
@@ -743,14 +758,17 @@ async fn selection_replay_after_restart_preserves_receipt_and_does_not_cancel_ne
     };
     let registered = fixture
         .resources()
-        .apply_work_mutation(&WorkCommand {
-            session_id: fixture.thread_id(),
-            recipient_lifecycle: admission.lifecycle,
-            mutation_id: uuid::Uuid::now_v7().to_string(),
-            action: WorkAction::RegisterAdmission {
-                admission: admission.clone(),
-            },
-        })
+        .apply_work_mutation(
+            &peri_acp_types::session_resources::work::PreparedWorkCommand::try_new(WorkCommand {
+                session_id: fixture.thread_id(),
+                recipient_lifecycle: admission.lifecycle,
+                mutation_id: uuid::Uuid::now_v7().to_string(),
+                action: WorkAction::RegisterAdmission {
+                    admission: admission.clone(),
+                },
+            })
+            .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(registered.decision, WorkDecision::Accepted);
@@ -807,18 +825,21 @@ async fn stale_control_generation_rejects_frozen_selection_without_any_publicati
     };
     let receipt = fixture
         .resources()
-        .apply_work_mutation(&WorkCommand {
-            session_id: fixture.thread_id(),
-            recipient_lifecycle: 1,
-            mutation_id: uuid::Uuid::now_v7().to_string(),
-            action: WorkAction::PublishStagedUserInputs {
-                expected_revision: before.state.revision,
-                expected_control_generation: before.control.control_generation,
-                expected_attempt: before.control.attempt,
-                interrupt_current: true,
-                deliveries: vec![delivery],
-            },
-        })
+        .apply_work_mutation(
+            &peri_acp_types::session_resources::work::PreparedWorkCommand::try_new(WorkCommand {
+                session_id: fixture.thread_id(),
+                recipient_lifecycle: 1,
+                mutation_id: uuid::Uuid::now_v7().to_string(),
+                action: WorkAction::PublishStagedUserInputs {
+                    expected_revision: before.state.revision,
+                    expected_control_generation: before.control.control_generation,
+                    expected_attempt: before.control.attempt,
+                    interrupt_current: true,
+                    deliveries: vec![delivery],
+                },
+            })
+            .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(

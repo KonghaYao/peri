@@ -33,7 +33,7 @@ macro_rules! budget_resources {
                 Ok(saved.control.clone())
             }
 
-            async fn apply_work_mutation(&self, command: &WorkCommand) -> SessionResourceResult<WorkReceipt> {
+            async fn apply_work_mutation(&self, command: &peri_acp_types::session_resources::work::PreparedWorkCommand) -> SessionResourceResult<WorkReceipt> {
                 let mut saved = self.snapshot.lock().await;
                 assert_eq!(command.session_id, saved.session_id);
                 // Mirrors `SqliteSessionData::write_work`: a rejected reduction

@@ -80,25 +80,28 @@ async fn durable_scan_notifies_required_work_without_a_queue_wake_hint() {
     .unwrap();
     let receipt = cfg
         .session_resources
-        .apply_work_mutation(&WorkCommand {
-            session_id: sid.clone(),
-            recipient_lifecycle: 1,
-            mutation_id: "lost-hint-publication".into(),
-            action: WorkAction::PublishDelivery {
-                delivery: PublishDelivery {
-                    delivery_id: "lost-hint-delivery".into(),
-                    event: WorkEvent {
-                        producer_namespace: "inbox-notification-test".into(),
-                        event_id: "lost-hint-event".into(),
-                        event_kind: "lateInput".into(),
-                        causation_id: None,
-                        content,
+        .apply_work_mutation(
+            &PreparedWorkCommand::try_new(WorkCommand {
+                session_id: sid.clone(),
+                recipient_lifecycle: 1,
+                mutation_id: "lost-hint-publication".into(),
+                action: WorkAction::PublishDelivery {
+                    delivery: PublishDelivery {
+                        delivery_id: "lost-hint-delivery".into(),
+                        event: WorkEvent {
+                            producer_namespace: "inbox-notification-test".into(),
+                            event_id: "lost-hint-event".into(),
+                            event_kind: "lateInput".into(),
+                            causation_id: None,
+                            content,
+                        },
+                        purpose: DeliveryPurpose::UserInput,
+                        policy: peri_acp_types::session::MessagePolicy::ensure_processing(),
                     },
-                    purpose: DeliveryPurpose::UserInput,
-                    policy: peri_acp_types::session::MessagePolicy::ensure_processing(),
                 },
-            },
-        })
+            })
+            .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(receipt.decision, WorkDecision::Accepted);
@@ -162,25 +165,28 @@ async fn observer_scan_suppresses_history_but_not_new_or_explicit_publication() 
         .unwrap();
         let receipt = cfg
             .session_resources
-            .apply_work_mutation(&WorkCommand {
-                session_id: sid.clone(),
-                recipient_lifecycle: lifecycle,
-                mutation_id: delivery_id.into(),
-                action: WorkAction::PublishDelivery {
-                    delivery: PublishDelivery {
-                        delivery_id: delivery_id.into(),
-                        event: WorkEvent {
-                            producer_namespace: "observer-history-test".into(),
-                            event_id: delivery_id.into(),
-                            event_kind: "input".into(),
-                            causation_id: None,
-                            content,
+            .apply_work_mutation(
+                &PreparedWorkCommand::try_new(WorkCommand {
+                    session_id: sid.clone(),
+                    recipient_lifecycle: lifecycle,
+                    mutation_id: delivery_id.into(),
+                    action: WorkAction::PublishDelivery {
+                        delivery: PublishDelivery {
+                            delivery_id: delivery_id.into(),
+                            event: WorkEvent {
+                                producer_namespace: "observer-history-test".into(),
+                                event_id: delivery_id.into(),
+                                event_kind: "input".into(),
+                                causation_id: None,
+                                content,
+                            },
+                            purpose: DeliveryPurpose::UserInput,
+                            policy: peri_acp_types::session::MessagePolicy::ensure_processing(),
                         },
-                        purpose: DeliveryPurpose::UserInput,
-                        policy: peri_acp_types::session::MessagePolicy::ensure_processing(),
                     },
-                },
-            })
+                })
+                .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(receipt.decision, WorkDecision::Accepted);

@@ -576,7 +576,7 @@ pub trait SessionResources: Send + Sync {
     }
     async fn apply_work_mutation(
         &self,
-        _command: &work::WorkCommand,
+        _command: &work::PreparedWorkCommand,
     ) -> SessionResourceResult<work::WorkReceipt> {
         Err(SessionResourceError::new(
             SessionResourceErrorKind::Unsupported,
@@ -584,7 +584,7 @@ pub trait SessionResources: Send + Sync {
     }
     async fn resolve_work_mutation(
         &self,
-        _command: &work::WorkCommand,
+        _command: &work::PreparedWorkCommand,
     ) -> SessionResourceResult<work::WorkResolution> {
         Err(SessionResourceError::new(
             SessionResourceErrorKind::Unsupported,

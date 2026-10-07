@@ -122,12 +122,15 @@ struct Fixture {
 
 async fn mutate(resources: &dyn SessionResources, session_id: &str, action: WorkAction) {
     let receipt = resources
-        .apply_work_mutation(&WorkCommand {
-            session_id: session_id.into(),
-            recipient_lifecycle: 1,
-            mutation_id: uuid::Uuid::now_v7().to_string(),
-            action,
-        })
+        .apply_work_mutation(
+            &peri_acp_types::session_resources::work::PreparedWorkCommand::try_new(WorkCommand {
+                session_id: session_id.into(),
+                recipient_lifecycle: 1,
+                mutation_id: uuid::Uuid::now_v7().to_string(),
+                action,
+            })
+            .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(receipt.decision, WorkDecision::Accepted, "{receipt:?}");
@@ -580,7 +583,12 @@ async fn run_cold_child(current_delegation: bool) {
         assert_eq!(binding.owner_task_id, "current-task");
         let receipt = fixture
             .resources
-            .apply_work_mutation(&terminal_command)
+            .apply_work_mutation(
+                &peri_acp_types::session_resources::work::PreparedWorkCommand::try_new(
+                    terminal_command.clone(),
+                )
+                .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(receipt.decision, WorkDecision::Accepted);

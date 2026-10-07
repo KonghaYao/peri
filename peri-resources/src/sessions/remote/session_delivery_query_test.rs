@@ -15,7 +15,10 @@ async fn setup() -> (Fixture, RemoteSessionData, DeliveryRecord) {
     let fixture = Fixture::new().await;
     let adapter = fixture.adapter().await;
     adapter
-        .apply_work_mutation(&publication("delivery-query-publication", DELIVERY_ID))
+        .apply_work_mutation(&prepare_command(&publication(
+            "delivery-query-publication",
+            DELIVERY_ID,
+        )))
         .await
         .unwrap();
     let expected = adapter
@@ -450,7 +453,7 @@ async fn availability_remote_root_barrier_allows_pending_work_but_rejects_pendin
             SessionDataHome::RemoteStore,
         );
         resources
-            .apply_work_mutation(&publication("initial", "initial"))
+            .apply_work_mutation(&prepare_command(&publication("initial", "initial")))
             .await
             .unwrap();
         if work_pending {
@@ -461,7 +464,7 @@ async fn availability_remote_root_barrier_allows_pending_work_but_rejects_pendin
                 })
                 .await;
             assert!(resources
-                .apply_work_mutation(&publication("pending", "pending"))
+                .apply_work_mutation(&prepare_command(&publication("pending", "pending")))
                 .await
                 .unwrap_err()
                 .is_persistence_uncertain());

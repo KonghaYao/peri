@@ -225,14 +225,17 @@ async fn durable_parent_completes_after_real_agent_resume_missing_thread() {
     };
     let receipt = fixture
         .resources
-        .apply_work_mutation(&WorkCommand {
-            session_id: parent_id.clone(),
-            recipient_lifecycle: admission.lifecycle,
-            mutation_id: format!("register:{}", admission.admission_id),
-            action: WorkAction::RegisterAdmission {
-                admission: admission.clone(),
-            },
-        })
+        .apply_work_mutation(
+            &peri_acp_types::session_resources::work::PreparedWorkCommand::try_new(WorkCommand {
+                session_id: parent_id.clone(),
+                recipient_lifecycle: admission.lifecycle,
+                mutation_id: format!("register:{}", admission.admission_id),
+                action: WorkAction::RegisterAdmission {
+                    admission: admission.clone(),
+                },
+            })
+            .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(receipt.decision, WorkDecision::Accepted);

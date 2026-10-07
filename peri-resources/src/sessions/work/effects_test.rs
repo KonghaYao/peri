@@ -9,8 +9,8 @@ use peri_acp_types::{
 };
 use sqlx::{sqlite::SqlitePoolOptions, SqlitePool};
 
-fn command() -> WorkCommand {
-    WorkCommand {
+fn command() -> PreparedWorkCommand {
+    PreparedWorkCommand::try_new(WorkCommand {
         session_id: "raw-state-session".into(),
         recipient_lifecycle: 1,
         mutation_id: "raw-state-mutation".into(),
@@ -31,7 +31,8 @@ fn command() -> WorkCommand {
                 policy: MessagePolicy::ensure_processing(),
             },
         },
-    }
+    })
+    .unwrap()
 }
 
 fn noncanonical_state() -> String {
@@ -46,11 +47,10 @@ fn effects(json: Option<String>, has_history: bool) -> Vec<WorkEffect> {
     let control = ControlState::default();
     let command = command();
     let initial_json = pre_state_json(json, &state).unwrap();
-    let parent_command = terminal_parent_command(&command, &state);
+    let parent_command = terminal_parent_command(&command, &state).unwrap();
     let reduction = reduce_work(&command, &control, state).unwrap();
     mutation_effects(
         &command,
-        &command.digest().unwrap(),
         initial_json,
         parent_command.as_ref(),
         &control,
@@ -67,15 +67,7 @@ fn noncanonical_json_is_reused_byte_for_byte_for_insert_and_guard() {
     let current = state(Some(&raw), false).unwrap();
     let control = ControlState::default();
     let reduction = reduce_work(&command, &control, current).unwrap();
-    let effects = mutation_effects(
-        &command,
-        &command.digest().unwrap(),
-        raw.clone(),
-        None,
-        &control,
-        &reduction,
-    )
-    .unwrap();
+    let effects = mutation_effects(&command, raw.clone(), None, &control, &reduction).unwrap();
     assert_eq!(effects[2].sql, INSERT_STATE);
     assert_eq!(effects[2].params[1].as_bytes(), raw.as_bytes());
     assert_eq!(effects[3].sql, GUARD_STATE);
@@ -84,14 +76,17 @@ fn noncanonical_json_is_reused_byte_for_byte_for_insert_and_guard() {
         .iter()
         .find(|effect| effect.sql == UPDATE_STATE)
         .unwrap();
-    assert_eq!(next.params[1], encode(&reduction.state.unwrap()).unwrap());
+    assert_eq!(
+        next.params[1].as_ref(),
+        encode(&reduction.state.unwrap()).unwrap()
+    );
 }
 
 fn assert_missing_state_initialization(has_history: bool) {
     let effects = effects(None, has_history);
     let initial = state(None, has_history).unwrap();
     assert_eq!(effects[2].sql, INSERT_STATE);
-    assert_eq!(effects[2].params[1], encode(&initial).unwrap());
+    assert_eq!(effects[2].params[1].as_ref(), encode(&initial).unwrap());
     assert_eq!(effects[3].params[1], effects[2].params[1]);
     assert_eq!(initial.legacy_unknown.is_empty(), !has_history);
 }
@@ -134,8 +129,8 @@ async fn apply(pool: &SqlitePool, effects: Vec<WorkEffect>) -> Result<(), sqlx::
     let mut transaction = pool.begin().await?;
     for effect in effects {
         let mut query = sqlx::query(effect.sql);
-        for value in effect.params {
-            query = query.bind(value);
+        for value in &effect.params {
+            query = query.bind(value.as_ref());
         }
         if let Err(error) = query.execute(&mut *transaction).await {
             transaction.rollback().await?;
@@ -352,3 +347,6 @@ async fn snapshot_sql_preserves_missing_legacy_and_raw_json_facts() {
         assert_eq!(!current.legacy_unknown.is_empty(), session == "legacy");
     }
 }
+
+#[path = "prepared_effects_test.rs"]
+mod prepared_effects;

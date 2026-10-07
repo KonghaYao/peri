@@ -282,23 +282,27 @@ pub(in crate::sessions) fn role_of(msg: &BaseMessage) -> &'static str {
     }
 }
 
-pub(crate) fn extract_title(msgs: &[BaseMessage]) -> Option<String> {
+pub(crate) fn extract_title<'message>(
+    msgs: impl IntoIterator<Item = &'message BaseMessage>,
+) -> Option<String> {
     use peri_acp_types::messages::{ContentBlock, MessageContent};
     for msg in msgs {
         if let BaseMessage::Human { content, .. } = msg {
             let text = match content {
-                MessageContent::Text(t) => t.clone(),
-                MessageContent::Blocks(blocks) => blocks
-                    .iter()
-                    .filter_map(|b| {
-                        if let ContentBlock::Text { text } = b {
-                            Some(text.as_str())
-                        } else {
-                            None
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" "),
+                MessageContent::Text(text) => std::borrow::Cow::Borrowed(text.as_str()),
+                MessageContent::Blocks(blocks) => std::borrow::Cow::Owned(
+                    blocks
+                        .iter()
+                        .filter_map(|b| {
+                            if let ContentBlock::Text { text } = b {
+                                Some(text.as_str())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                ),
                 MessageContent::Raw(_) => continue,
             };
             let title: String = text.chars().take(50).collect();

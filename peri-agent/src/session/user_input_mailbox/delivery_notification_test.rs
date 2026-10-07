@@ -11,7 +11,12 @@ async fn refresh_after_claim_before_receive_notifies_once() {
     let snapshot = load(&fixture).await;
     let receipt = fixture
         .resources
-        .apply_work_mutation(&claim_command(&fixture, &snapshot, &admission))
+        .apply_work_mutation(
+            &peri_acp_types::session_resources::work::PreparedWorkCommand::try_new(claim_command(
+                &fixture, &snapshot, &admission,
+            ))
+            .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(receipt.decision, WorkDecision::Accepted);
@@ -36,7 +41,12 @@ async fn receive_before_refresh_and_recovery_each_notify_once() {
     let snapshot = load(&fixture).await;
     let receipt = fixture
         .resources
-        .apply_work_mutation(&claim_command(&fixture, &snapshot, &admission))
+        .apply_work_mutation(
+            &peri_acp_types::session_resources::work::PreparedWorkCommand::try_new(claim_command(
+                &fixture, &snapshot, &admission,
+            ))
+            .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(receipt.decision, WorkDecision::Accepted);
@@ -88,7 +98,12 @@ async fn notifications_are_scoped_to_publication_generation() {
     let snapshot = load(&fixture).await;
     fixture
         .resources
-        .apply_work_mutation(&claim_command(&fixture, &snapshot, &admission))
+        .apply_work_mutation(
+            &peri_acp_types::session_resources::work::PreparedWorkCommand::try_new(claim_command(
+                &fixture, &snapshot, &admission,
+            ))
+            .unwrap(),
+        )
         .await
         .unwrap();
     mailbox.refresh_durable().await.unwrap();
@@ -141,7 +156,12 @@ async fn invalidated_mailbox_cannot_notify_old_lifecycle() {
     let snapshot = load(&fixture).await;
     fixture
         .resources
-        .apply_work_mutation(&claim_command(&fixture, &snapshot, &admission))
+        .apply_work_mutation(
+            &peri_acp_types::session_resources::work::PreparedWorkCommand::try_new(claim_command(
+                &fixture, &snapshot, &admission,
+            ))
+            .unwrap(),
+        )
         .await
         .unwrap();
     mailbox.refresh_durable().await.unwrap();

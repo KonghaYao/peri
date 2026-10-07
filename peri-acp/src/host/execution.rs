@@ -3,7 +3,8 @@ use std::sync::Arc;
 use peri_acp_types::execution_admission::{AdmissionOutcome, AdmissionRequest};
 
 use peri_acp_types::session_resources::work::{
-    AdmissionRecord, WorkAction, WorkAdmission, WorkCommand, WorkDecision, WorkQuery,
+    AdmissionRecord, PreparedWorkCommand, WorkAction, WorkAdmission, WorkCommand, WorkDecision,
+    WorkQuery,
 };
 use serde_json::{json, Value};
 
@@ -99,6 +100,8 @@ pub(super) async fn resolve_work(params: &Value, cfg: &AcpServerConfig) -> Resul
             ));
         }
     }
+    let command =
+        PreparedWorkCommand::try_new(command).map_err(super::workspace::resource_error)?;
     let resolution = cfg
         .session_resources
         .resolve_work_mutation(&command)
@@ -145,7 +148,8 @@ pub(super) async fn resolve(params: &Value, cfg: &AcpServerConfig) -> Result<Val
             "execution admission identity conflict",
         )),
         None => {
-            let command = admission_command(&ticket);
+            let command = PreparedWorkCommand::try_new(admission_command(&ticket))
+                .map_err(super::workspace::resource_error)?;
             match cfg.session_resources.resolve_work_mutation(&command).await {
                 Ok(peri_acp_types::session_resources::work::WorkResolution::NotApplied) => {
                     Ok(json!({"status": "notApplied"}))
@@ -217,8 +221,10 @@ pub(super) async fn execute(
             "SDK execution admission remains unconfirmed",
         ));
     }
+    let command = PreparedWorkCommand::try_new(admission_command(&admission))
+        .map_err(super::workspace::resource_error)?;
     let receipt = resources
-        .apply_work_mutation(&admission_command(&admission))
+        .apply_work_mutation(&command)
         .await
         .map_err(super::workspace::resource_error)?;
     if !matches!(receipt.decision, WorkDecision::Accepted) {

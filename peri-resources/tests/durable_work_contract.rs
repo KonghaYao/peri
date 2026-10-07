@@ -1,5 +1,9 @@
 use std::sync::Arc;
 
+fn prepare_command(command: &WorkCommand) -> PreparedWorkCommand {
+    PreparedWorkCommand::try_new(command.clone()).unwrap()
+}
+
 use peri_acp_types::{
     identity::AttemptId,
     messages::{BaseMessage, ToolCallRequest},
@@ -29,6 +33,9 @@ mod reopen_contract;
 
 #[path = "durable_work/delivery_query_contract.rs"]
 mod delivery_query_contract;
+
+#[path = "durable_work/request_retention_contract.rs"]
+mod request_retention_contract;
 
 async fn fixture() -> (TempDir, Arc<dyn SessionResources>) {
     let directory = tempfile::tempdir().unwrap();
@@ -94,12 +101,12 @@ fn publication(delivery_id: &str, policy: MessagePolicy) -> PublishDelivery {
 }
 async fn publish(resources: &dyn SessionResources, delivery_id: &str) -> WorkReceipt {
     resources
-        .apply_work_mutation(&command(
+        .apply_work_mutation(&prepare_command(&command(
             &format!("publish-{delivery_id}"),
             WorkAction::PublishDelivery {
                 delivery: publication(delivery_id, MessagePolicy::ensure_processing()),
             },
-        ))
+        )))
         .await
         .unwrap()
 }
@@ -147,25 +154,25 @@ async fn claim(resources: &dyn SessionResources) -> WorkAdmission {
     let loaded = snapshot(resources).await;
     let admission = admission(&loaded, "admission");
     let receipt = resources
-        .apply_work_mutation(&command(
+        .apply_work_mutation(&prepare_command(&command(
             "enter",
             WorkAction::RegisterAdmission {
                 admission: admission.clone(),
             },
-        ))
+        )))
         .await
         .unwrap();
     assert_eq!(receipt.decision, WorkDecision::Accepted);
     let loaded = snapshot(resources).await;
     let receipt = resources
-        .apply_work_mutation(&command(
+        .apply_work_mutation(&prepare_command(&command(
             "claim",
             WorkAction::ClaimBatch {
                 guard: guard(&loaded),
                 batch_id: admission.work_id.clone(),
                 delivery_ids: loaded.candidates[0].delivery_ids.clone(),
             },
-        ))
+        )))
         .await
         .unwrap();
     assert_eq!(receipt.decision, WorkDecision::Accepted);
@@ -174,7 +181,7 @@ async fn claim(resources: &dyn SessionResources) -> WorkAdmission {
 async fn begin_reason(resources: &dyn SessionResources, work_id: &str) {
     let loaded = snapshot(resources).await;
     let receipt = resources
-        .apply_work_mutation(&command(
+        .apply_work_mutation(&prepare_command(&command(
             "reason-begin",
             WorkAction::BeginReason {
                 guard: guard(&loaded),
@@ -182,7 +189,7 @@ async fn begin_reason(resources: &dyn SessionResources, work_id: &str) {
                 request_id: "request".into(),
                 request: request(),
             },
-        ))
+        )))
         .await
         .unwrap();
     assert_eq!(receipt.decision, WorkDecision::Accepted);
@@ -232,7 +239,10 @@ async fn durable_publish_projection_and_response_are_distinct_commitments() {
             next_work_id: None,
         },
     );
-    let original = resources.apply_work_mutation(&response).await.unwrap();
+    let original = resources
+        .apply_work_mutation(&prepare_command(&response))
+        .await
+        .unwrap();
     assert_eq!(original.decision, WorkDecision::Accepted);
     assert_eq!(
         snapshot(resources.as_ref()).await.state.obligations["delivery"].status,
@@ -242,11 +252,17 @@ async fn durable_publish_projection_and_response_are_distinct_commitments() {
         .await
         .unwrap();
     assert_eq!(
-        reopened.apply_work_mutation(&response).await.unwrap(),
+        reopened
+            .apply_work_mutation(&prepare_command(&response))
+            .await
+            .unwrap(),
         original
     );
     assert_eq!(
-        reopened.resolve_work_mutation(&response).await.unwrap(),
+        reopened
+            .resolve_work_mutation(&prepare_command(&response))
+            .await
+            .unwrap(),
         WorkResolution::Applied { receipt: original }
     );
     assert_eq!(publish_receipt.admission_sequence, Some(1));
@@ -287,7 +303,10 @@ async fn durable_admission_preserves_original_ticket_receipt_and_requires_finish
             admission: ticket.clone(),
         },
     );
-    let original = resources.apply_work_mutation(&enter).await.unwrap();
+    let original = resources
+        .apply_work_mutation(&prepare_command(&enter))
+        .await
+        .unwrap();
     assert_eq!(original.decision, WorkDecision::Accepted);
     let settlement = WorkAction::FinishAdmission {
         admission: ticket.clone(),
@@ -300,13 +319,13 @@ async fn durable_admission_preserves_original_ticket_receipt_and_requires_finish
     // 缺证据被拒 → attempt 归属他者时被拒 → 持有票面 attempt 时一次 finish 完成结算。
     assert_eq!(
         resources
-            .apply_work_mutation(&command(
+            .apply_work_mutation(&prepare_command(&command(
                 "ticket-finish-without-proof",
                 WorkAction::FinishAdmission {
                     admission: ticket.clone(),
                     evidence_id: String::new(),
                 },
-            ))
+            )))
             .await
             .unwrap()
             .decision,
@@ -354,7 +373,7 @@ async fn durable_admission_preserves_original_ticket_receipt_and_requires_finish
     // attempt 已归属另一次执行：对原 ticket 的 finish 属于未授权结算，必须被拒。
     assert_eq!(
         resources
-            .apply_work_mutation(&unauthorized)
+            .apply_work_mutation(&prepare_command(&unauthorized))
             .await
             .unwrap()
             .decision,
@@ -401,7 +420,10 @@ async fn durable_admission_preserves_original_ticket_receipt_and_requires_finish
     let before = snapshot(resources.as_ref()).await;
     assert_eq!(before.control.attempt, Some(ticket.execution.clone()));
     let settled = command("ticket-settle", settlement.clone());
-    let finished = resources.apply_work_mutation(&settled).await.unwrap();
+    let finished = resources
+        .apply_work_mutation(&prepare_command(&settled))
+        .await
+        .unwrap();
     assert_eq!(finished.decision, WorkDecision::Accepted);
     let after = snapshot(resources.as_ref()).await;
     assert!(after.control.attempt.is_none());
@@ -420,7 +442,10 @@ async fn durable_admission_preserves_original_ticket_receipt_and_requires_finish
     );
     // 换 mutation_id 幂等重放同一 finish：返回原始结算回执，且不再改动 control/state。
     let replayed = resources
-        .apply_work_mutation(&command("ticket-settle-replay", settlement.clone()))
+        .apply_work_mutation(&prepare_command(&command(
+            "ticket-settle-replay",
+            settlement.clone(),
+        )))
         .await
         .unwrap();
     assert_eq!(replayed, finished);
@@ -430,13 +455,13 @@ async fn durable_admission_preserves_original_ticket_receipt_and_requires_finish
     // 结算证据由首次认领固定：换证据重新认领同一张 ticket 触发冲突。
     assert_eq!(
         resources
-            .apply_work_mutation(&command(
+            .apply_work_mutation(&prepare_command(&command(
                 "ticket-reclaim",
                 WorkAction::FinishAdmission {
                     admission: ticket.clone(),
                     evidence_id: "other-exit".into(),
                 },
-            ))
+            )))
             .await
             .unwrap()
             .decision,
@@ -445,19 +470,22 @@ async fn durable_admission_preserves_original_ticket_receipt_and_requires_finish
         }
     );
     assert_eq!(
-        resources.apply_work_mutation(&enter).await.unwrap(),
+        resources
+            .apply_work_mutation(&prepare_command(&enter))
+            .await
+            .unwrap(),
         original
     );
     let mut conflict = ticket.clone();
     conflict.generation_id = "other-generation".into();
     assert!(matches!(
         resources
-            .apply_work_mutation(&command(
+            .apply_work_mutation(&prepare_command(&command(
                 "conflicting-ticket",
                 WorkAction::RegisterAdmission {
                     admission: conflict
                 }
-            ))
+            )))
             .await
             .unwrap()
             .decision,
@@ -485,7 +513,10 @@ async fn durable_resource_owners_are_immutable_and_survive_close_reopen() {
             authorization_ref: "trusted-acp-config".into(),
         },
     );
-    let original = resources.apply_work_mutation(&binding).await.unwrap();
+    let original = resources
+        .apply_work_mutation(&prepare_command(&binding))
+        .await
+        .unwrap();
     assert_eq!(original.decision, WorkDecision::Accepted);
     let conflict = command(
         "owner-conflict",
@@ -497,7 +528,7 @@ async fn durable_resource_owners_are_immutable_and_survive_close_reopen() {
     );
     assert_eq!(
         resources
-            .apply_work_mutation(&conflict)
+            .apply_work_mutation(&prepare_command(&conflict))
             .await
             .unwrap()
             .decision,
@@ -541,7 +572,7 @@ async fn durable_resource_owners_are_immutable_and_survive_close_reopen() {
     };
     assert_eq!(
         resources
-            .apply_work_mutation(&second)
+            .apply_work_mutation(&prepare_command(&second))
             .await
             .unwrap()
             .decision,
@@ -556,7 +587,10 @@ async fn durable_resource_owners_are_immutable_and_survive_close_reopen() {
         2
     );
     assert_eq!(
-        resources.apply_work_mutation(&binding).await.unwrap(),
+        resources
+            .apply_work_mutation(&prepare_command(&binding))
+            .await
+            .unwrap(),
         original
     );
 }
@@ -571,17 +605,26 @@ async fn durable_resolve_seals_original_id_and_conflicting_parameters_are_reject
         },
     );
     assert_eq!(
-        resources.resolve_work_mutation(&publish).await.unwrap(),
+        resources
+            .resolve_work_mutation(&prepare_command(&publish))
+            .await
+            .unwrap(),
         WorkResolution::NotApplied
     );
-    assert!(resources.apply_work_mutation(&publish).await.is_err());
+    assert!(resources
+        .apply_work_mutation(&prepare_command(&publish))
+        .await
+        .is_err());
     let conflicting = command(
         "original",
         WorkAction::PublishDelivery {
             delivery: publication("different", MessagePolicy::ensure_processing()),
         },
     );
-    assert!(resources.resolve_work_mutation(&conflicting).await.is_err());
+    assert!(resources
+        .resolve_work_mutation(&prepare_command(&conflicting))
+        .await
+        .is_err());
     assert!(snapshot(resources.as_ref())
         .await
         .state
@@ -617,7 +660,10 @@ async fn durable_reason_barrier_rolls_back_projection_obligation_and_intents_tog
             next_work_id: None,
         },
     );
-    assert!(resources.apply_work_mutation(&response).await.is_err());
+    assert!(resources
+        .apply_work_mutation(&prepare_command(&response))
+        .await
+        .is_err());
     let after = snapshot(resources.as_ref()).await;
     assert_eq!(after.state, loaded.state);
     assert_eq!(
@@ -625,14 +671,20 @@ async fn durable_reason_barrier_rolls_back_projection_obligation_and_intents_tog
         ObligationStatus::InProgress
     );
     assert_eq!(
-        resources.resolve_work_mutation(&response).await.unwrap(),
+        resources
+            .resolve_work_mutation(&prepare_command(&response))
+            .await
+            .unwrap(),
         WorkResolution::NotApplied
     );
     sqlx::query("DROP TRIGGER reject_response")
         .execute(&connection)
         .await
         .unwrap();
-    assert!(resources.apply_work_mutation(&response).await.is_err());
+    assert!(resources
+        .apply_work_mutation(&prepare_command(&response))
+        .await
+        .is_err());
 }
 
 #[tokio::test]
@@ -681,7 +733,7 @@ async fn durable_act_handoff_has_full_intent_and_never_blindly_redispatches_unkn
     );
     assert_eq!(
         resources
-            .apply_work_mutation(&commit)
+            .apply_work_mutation(&prepare_command(&commit))
             .await
             .unwrap()
             .decision,
@@ -692,13 +744,13 @@ async fn durable_act_handoff_has_full_intent_and_never_blindly_redispatches_unkn
     assert_eq!(loaded.state.works["act-work"].budget_id, ticket.work_id);
     assert_eq!(
         resources
-            .apply_work_mutation(&command(
+            .apply_work_mutation(&prepare_command(&command(
                 "bridge-prepare",
                 WorkAction::PrepareInvocation {
                     expected_revision: loaded.state.revision,
                     intent
                 }
-            ))
+            )))
             .await
             .unwrap()
             .decision,
@@ -715,7 +767,7 @@ async fn durable_act_handoff_has_full_intent_and_never_blindly_redispatches_unkn
     );
     assert_eq!(
         resources
-            .apply_work_mutation(&dispatch)
+            .apply_work_mutation(&prepare_command(&dispatch))
             .await
             .unwrap()
             .decision,
@@ -733,7 +785,7 @@ async fn durable_act_handoff_has_full_intent_and_never_blindly_redispatches_unkn
     );
     assert_eq!(
         resources
-            .apply_work_mutation(&unknown)
+            .apply_work_mutation(&prepare_command(&unknown))
             .await
             .unwrap()
             .decision,
@@ -755,7 +807,7 @@ async fn durable_act_handoff_has_full_intent_and_never_blindly_redispatches_unkn
     );
     assert!(matches!(
         resources
-            .apply_work_mutation(&again)
+            .apply_work_mutation(&prepare_command(&again))
             .await
             .unwrap()
             .decision,
@@ -782,7 +834,7 @@ async fn durable_act_handoff_has_full_intent_and_never_blindly_redispatches_unkn
     );
     assert_eq!(
         resources
-            .apply_work_mutation(&commit_act)
+            .apply_work_mutation(&prepare_command(&commit_act))
             .await
             .unwrap()
             .decision,
@@ -827,7 +879,7 @@ async fn durable_act_ready_commit_hands_off_successor_reason_work() {
     let loaded = snapshot(resources.as_ref()).await;
     assert_eq!(
         resources
-            .apply_work_mutation(&command(
+            .apply_work_mutation(&prepare_command(&command(
                 "prepare-act",
                 WorkAction::CommitReasonResponseAndDispatchIntent {
                     guard: guard(&loaded),
@@ -837,7 +889,7 @@ async fn durable_act_ready_commit_hands_off_successor_reason_work() {
                     dispatch_intents: vec![intent],
                     next_work_id: Some("act-work".into()),
                 }
-            ))
+            )))
             .await
             .unwrap()
             .decision,
@@ -863,7 +915,7 @@ async fn durable_act_ready_commit_hands_off_successor_reason_work() {
     );
     assert_eq!(
         resources
-            .apply_work_mutation(&commit_act)
+            .apply_work_mutation(&prepare_command(&commit_act))
             .await
             .unwrap()
             .decision,

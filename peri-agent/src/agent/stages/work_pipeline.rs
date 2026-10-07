@@ -1,9 +1,10 @@
 use std::sync::Arc;
 
 use peri_acp_types::session_resources::work::{
-    ReasonRequest, WorkAction, WorkAdmission, WorkCommand, WorkGuard, WorkSnapshot,
+    PreparedWorkCommand, ReasonRequest, WorkAction, WorkAdmission, WorkCommand, WorkGuard,
+    WorkSnapshot,
 };
-use peri_acp_types::session_resources::SessionResources;
+use peri_acp_types::session_resources::{SessionResourceError, SessionResources};
 use sha2::{Digest, Sha256};
 
 use super::work_ledger::WorkMutationBarrier;
@@ -82,18 +83,21 @@ impl WorkSession {
         })
     }
 
-    pub(crate) fn command(&self, action: WorkAction) -> WorkCommand {
-        WorkCommand {
+    pub(crate) fn command(
+        &self,
+        action: WorkAction,
+    ) -> Result<PreparedWorkCommand, SessionResourceError> {
+        PreparedWorkCommand::try_new(WorkCommand {
             session_id: self.admission.session_id.clone(),
             recipient_lifecycle: self.admission.lifecycle,
             mutation_id: uuid::Uuid::now_v7().to_string(),
             action,
-        }
+        })
     }
 }
 
-pub(crate) fn request_checkpoint(
-    request: &serde_json::Value,
+pub(crate) fn request_checkpoint<Request: serde::Serialize + ?Sized>(
+    request: &Request,
     model_ref: String,
     authorization_ref: String,
 ) -> Result<ReasonRequest, WorkSetupError> {

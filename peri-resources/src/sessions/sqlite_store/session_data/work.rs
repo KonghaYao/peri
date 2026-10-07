@@ -1,7 +1,7 @@
 use super::*;
 use crate::sessions::work;
 use peri_acp_types::session_resources::work::{
-    reduce_work, DeliveryRecord, WorkCommand, WorkDeliveryQuery, WorkQuery, WorkReceipt,
+    reduce_work, DeliveryRecord, PreparedWorkCommand, WorkDeliveryQuery, WorkQuery, WorkReceipt,
     WorkResolution, WorkSnapshot,
 };
 
@@ -138,12 +138,14 @@ impl SqliteSessionData {
 
     pub(super) async fn write_work(
         &self,
-        command: &WorkCommand,
+        command: &PreparedWorkCommand,
     ) -> SessionResourceResult<WorkReceipt> {
         self.writable()?;
-        let digest = command.digest()?;
-        let command_effects = work::command_effects_with_digest(command, &digest)?;
+        let digest = command.digest();
+        let command_effects = work::command_effects(command)?;
         let mut journal_phase = work::WorkPhase::new("sqlite", "journal_begin");
+        journal_phase.command_bytes = command.encoded().len();
+        journal_phase.record_effects(&command_effects);
         let mut tx = self.begin_work_transaction().await?;
         journal_phase.transaction_count = 1;
         journal_phase.query_count += 1;
@@ -162,7 +164,7 @@ impl SqliteSessionData {
             .await
             .map_err(|error| map_sqlx(&error))?
         {
-            if work::original_command(&json)? != *command {
+            if work::original_command(&json)? != *command.command() {
                 return Err(SessionResourceError::conflict(
                     "work original command identity conflicts",
                 ));
@@ -180,31 +182,32 @@ impl SqliteSessionData {
         let mut tx = self.begin_work_transaction().await?;
         let (control, state, state_json) = read_snapshot(&mut tx, &command.session_id).await?;
         let initial_json = work::pre_state_json(state_json, &state)?;
-        let parent_command = work::terminal_parent_command(command, &state);
+        let parent_command = work::terminal_parent_command(command, &state)?;
         let mut reduction_phase = work::WorkPhase::new("sqlite", "reduce_encode");
         reduction_phase.state_bytes = initial_json.len();
         let reduction = reduce_work(command, &control, state)?;
         let effects = work::mutation_effects(
             command,
-            &digest,
             initial_json,
             parent_command.as_ref(),
             &control,
             &reduction,
         )?;
+        reduction_phase.command_bytes = command.encoded().len();
+        reduction_phase.record_effects(&effects);
+        let receipt = reduction.receipt;
+        drop(reduction.state);
+        drop(reduction.events);
+        drop(reduction.projections);
+        drop(reduction.control);
+        drop(parent_command);
+        drop(control);
         drop(reduction_phase);
         let mut mutation_phase = work::WorkPhase::new("sqlite", "mutation_sql_commit");
         mutation_phase.transaction_count = 1;
         for effect in effects {
             mutation_phase.query_count += 1;
-            let mut query = sqlx::query(effect.sql);
-            for value in effect.params {
-                query = query.bind(value);
-            }
-            query
-                .execute(&mut *tx)
-                .await
-                .map_err(|error| map_sqlx(&error))?;
+            execute_effect(&mut tx, effect).await?;
         }
         tx.commit()
             .await
@@ -218,7 +221,7 @@ impl SqliteSessionData {
         tx.commit()
             .await
             .map_err(|_| commit_failure(Some(command.session_id.clone())))?;
-        Ok(reduction.receipt)
+        Ok(receipt)
     }
 
     async fn begin_work_transaction(
@@ -235,10 +238,10 @@ impl SqliteSessionData {
 
     pub(super) async fn resolve_work(
         &self,
-        command: &WorkCommand,
+        command: &PreparedWorkCommand,
     ) -> SessionResourceResult<WorkResolution> {
         self.writable()?;
-        let digest = command.digest()?;
+        let digest = command.digest();
         let mut tx = self
             .database
             .pool
@@ -252,7 +255,7 @@ impl SqliteSessionData {
                 .map_err(|_| commit_failure(Some(command.session_id.clone())))?;
             return Ok(resolution);
         }
-        for effect in work::command_effects_with_digest(command, &digest)? {
+        for effect in work::command_effects(command)? {
             execute_effect(&mut tx, effect).await?;
         }
         let resolution = WorkResolution::NotApplied;
@@ -277,8 +280,8 @@ async fn execute_effect(
     effect: work::WorkEffect,
 ) -> SessionResourceResult<()> {
     let mut query = sqlx::query(effect.sql);
-    for value in effect.params {
-        query = query.bind(value);
+    for value in &effect.params {
+        query = query.bind(value.as_ref());
     }
     query
         .execute(connection)
@@ -289,7 +292,7 @@ async fn execute_effect(
 
 async fn acknowledge(
     connection: &mut SqliteConnection,
-    command: &WorkCommand,
+    command: &PreparedWorkCommand,
     digest: &str,
 ) -> SessionResourceResult<()> {
     sqlx::query(work::ACK_COMMAND)
@@ -303,7 +306,7 @@ async fn acknowledge(
 
 async fn saved_resolution(
     connection: &mut SqliteConnection,
-    command: &WorkCommand,
+    command: &PreparedWorkCommand,
     digest: &str,
 ) -> SessionResourceResult<Option<WorkResolution>> {
     let row: Option<(String, String)> = sqlx::query_as(work::READ_RECEIPT)

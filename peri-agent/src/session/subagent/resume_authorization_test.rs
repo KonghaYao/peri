@@ -120,29 +120,32 @@ async fn prepare_resume_invocation_for(
     let arguments = "{}".to_owned();
     let digest = format!("{:x}", Sha256::digest(arguments.as_bytes()));
     let receipt = store
-        .apply_work_mutation(&WorkCommand {
-            session_id: parent_id,
-            recipient_lifecycle: snapshot.control.lifecycle,
-            mutation_id: format!("authorization-resume:{invocation_id}"),
-            action: WorkAction::PrepareInvocation {
-                expected_revision: snapshot.state.revision,
-                intent: InvocationIntent {
-                    invocation_id: invocation_id.into(),
-                    tool_call_id: invocation_id.into(),
-                    tool_name: "Agent".into(),
-                    arguments_json: arguments.clone(),
-                    arguments_digest: digest.clone(),
-                    effective_tool_name: "Agent".into(),
-                    effective_arguments_json: arguments,
-                    effective_arguments_digest: digest,
-                    owner_identity: "fixture-agent-owner".into(),
-                    scope_id: scope.into(),
-                    scope_epoch: None,
-                    authorization_ref: authorization_ref.into(),
-                    recovery_locator: format!("fixture-delegation:{invocation_id}"),
+        .apply_work_mutation(
+            &peri_acp_types::session_resources::work::PreparedWorkCommand::try_new(WorkCommand {
+                session_id: parent_id,
+                recipient_lifecycle: snapshot.control.lifecycle,
+                mutation_id: format!("authorization-resume:{invocation_id}"),
+                action: WorkAction::PrepareInvocation {
+                    expected_revision: snapshot.state.revision,
+                    intent: InvocationIntent {
+                        invocation_id: invocation_id.into(),
+                        tool_call_id: invocation_id.into(),
+                        tool_name: "Agent".into(),
+                        arguments_json: arguments.clone(),
+                        arguments_digest: digest.clone(),
+                        effective_tool_name: "Agent".into(),
+                        effective_arguments_json: arguments,
+                        effective_arguments_digest: digest,
+                        owner_identity: "fixture-agent-owner".into(),
+                        scope_id: scope.into(),
+                        scope_epoch: None,
+                        authorization_ref: authorization_ref.into(),
+                        recovery_locator: format!("fixture-delegation:{invocation_id}"),
+                    },
                 },
-            },
-        })
+            })
+            .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(receipt.decision, WorkDecision::Accepted);
@@ -373,15 +376,20 @@ async fn test_resume_saved_ceiling_requires_original_authorization_evidence() {
             .await
             .unwrap();
         let receipt = store
-            .apply_work_mutation(&WorkCommand {
-                session_id: child_id.clone(),
-                recipient_lifecycle: work.control.lifecycle,
-                mutation_id: format!("corrupt-metadata:{corruption}"),
-                action: WorkAction::BindChildResumeMetadata {
-                    expected_revision: work.state.revision,
-                    metadata_json: serde_json::to_string(&metadata).unwrap(),
-                },
-            })
+            .apply_work_mutation(
+                &peri_acp_types::session_resources::work::PreparedWorkCommand::try_new(
+                    WorkCommand {
+                        session_id: child_id.clone(),
+                        recipient_lifecycle: work.control.lifecycle,
+                        mutation_id: format!("corrupt-metadata:{corruption}"),
+                        action: WorkAction::BindChildResumeMetadata {
+                            expected_revision: work.state.revision,
+                            metadata_json: serde_json::to_string(&metadata).unwrap(),
+                        },
+                    },
+                )
+                .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(receipt.decision, WorkDecision::Accepted);

@@ -134,7 +134,7 @@ async fn registered_cron_fixture(
     };
     let entering = commit_original(
         resources.as_ref(),
-        &WorkCommand {
+        WorkCommand {
             session_id,
             recipient_lifecycle: admission.lifecycle,
             mutation_id: format!("register-admission:{}", admission.admission_id),
@@ -364,7 +364,7 @@ async fn claim_reason_ready_fixture(
         .unwrap();
     commit_original(
         resources,
-        &WorkCommand {
+        WorkCommand {
             session_id: admission.session_id.clone(),
             recipient_lifecycle: admission.lifecycle,
             mutation_id: format!("restored-claim-fixture:{}", admission.admission_id),

@@ -62,11 +62,11 @@ pub(crate) trait SessionDataPort: Send + Sync {
     ) -> SessionResourceResult<peri_acp_types::session_resources::work::WorkSnapshot>;
     async fn apply_work_mutation(
         &self,
-        command: &peri_acp_types::session_resources::work::WorkCommand,
+        command: &peri_acp_types::session_resources::work::PreparedWorkCommand,
     ) -> SessionResourceResult<peri_acp_types::session_resources::work::WorkReceipt>;
     async fn resolve_work_mutation(
         &self,
-        command: &peri_acp_types::session_resources::work::WorkCommand,
+        command: &peri_acp_types::session_resources::work::PreparedWorkCommand,
     ) -> SessionResourceResult<peri_acp_types::session_resources::work::WorkResolution>;
     async fn load_session_control(
         &self,

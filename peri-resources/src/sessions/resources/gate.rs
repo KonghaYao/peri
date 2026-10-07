@@ -32,7 +32,7 @@ struct PendingWrites {
     barrier: Arc<RwLock<()>>,
     uncertain: AtomicBool,
     control: Mutex<Option<peri_acp_types::session_resources::ControlCommand>>,
-    work: Mutex<Option<peri_acp_types::session_resources::work::WorkCommand>>,
+    work: Mutex<Option<peri_acp_types::session_resources::work::PreparedWorkCommand>>,
 }
 
 pub(super) struct WriteScope {

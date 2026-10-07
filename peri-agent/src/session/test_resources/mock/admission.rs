@@ -92,15 +92,20 @@ impl ExecutionAdmissionPort for FixtureAdmission {
         } else {
             let receipt = self
                 .0
-                .apply_work_mutation(&WorkCommand {
-                    session_id: request.admission.session_id.clone(),
-                    recipient_lifecycle: request.admission.lifecycle,
-                    mutation_id: format!("sdk-finish:{}", request.admission.admission_id),
-                    action: WorkAction::FinishAdmission {
-                        admission: request.admission.clone(),
-                        evidence_id: request.proof.evidence_id().into(),
-                    },
-                })
+                .apply_work_mutation(
+                    &peri_acp_types::session_resources::work::PreparedWorkCommand::try_new(
+                        WorkCommand {
+                            session_id: request.admission.session_id.clone(),
+                            recipient_lifecycle: request.admission.lifecycle,
+                            mutation_id: format!("sdk-finish:{}", request.admission.admission_id),
+                            action: WorkAction::FinishAdmission {
+                                admission: request.admission.clone(),
+                                evidence_id: request.proof.evidence_id().into(),
+                            },
+                        },
+                    )
+                    .unwrap(),
+                )
                 .await
                 .map_err(|error| ExecutionAdmissionError::Protocol(error.to_string()))?;
             assert_eq!(receipt.decision, WorkDecision::Accepted);

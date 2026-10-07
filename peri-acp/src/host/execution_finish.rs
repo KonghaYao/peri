@@ -1,6 +1,7 @@
 use peri_acp_types::session_resources::{
     work::{
-        WorkAction, WorkAdmission, WorkCommand, WorkCommandQuery, WorkDecision, WorkResolution,
+        PreparedWorkCommand, WorkAction, WorkAdmission, WorkCommand, WorkCommandQuery,
+        WorkDecision, WorkResolution,
     },
     SessionResources,
 };
@@ -56,7 +57,8 @@ pub(super) async fn finish_admission(
     let mut retry = 0;
     let mut new_attempts = 0;
     loop {
-        let original = command(admission, retry);
+        let original = PreparedWorkCommand::try_new(command(admission, retry))
+            .map_err(super::super::workspace::resource_error)?;
         let owned = resources
             .load_work_command(&WorkCommandQuery {
                 session_id: original.session_id.clone(),
@@ -66,7 +68,7 @@ pub(super) async fn finish_admission(
             .map_err(super::super::workspace::resource_error)?;
         let resolution = match owned {
             Some(owned) => {
-                if owned.command != original {
+                if owned.command != *original.command() {
                     return Err(AcpError::new(
                         -32010,
                         "execution finish journal identity conflict",

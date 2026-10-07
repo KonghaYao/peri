@@ -19,6 +19,9 @@ pub use availability::{WorkAvailability, WorkAvailabilityState};
 mod admission;
 #[path = "work/bindings.rs"]
 mod bindings;
+#[path = "work/command.rs"]
+mod command;
+pub use command::PreparedWorkCommand;
 #[path = "work/delivery.rs"]
 mod delivery;
 #[path = "work/policy.rs"]
@@ -357,7 +360,7 @@ pub struct WorkCommand {
 }
 
 impl WorkCommand {
-    pub fn digest(&self) -> SessionResourceResult<String> {
+    fn validate_identity(&self) -> SessionResourceResult<()> {
         if self.session_id.is_empty()
             || self.mutation_id.is_empty()
             || self.mutation_id.len() > 256
@@ -365,6 +368,11 @@ impl WorkCommand {
         {
             return Err(invalid("invalid work mutation identity"));
         }
+        Ok(())
+    }
+
+    pub fn digest(&self) -> SessionResourceResult<String> {
+        self.validate_identity()?;
         let bytes = serde_json::to_vec(self).map_err(|_| invalid("invalid work command"))?;
         Ok(format!("{:x}", Sha256::digest(bytes)))
     }

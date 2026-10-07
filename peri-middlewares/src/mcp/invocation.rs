@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use peri_acp_types::session_resources::work::{
-    InvocationIntent, InvocationStatus, TaskBinding, WorkAction, WorkCommand, WorkDecision,
-    WorkQuery, WorkReceipt, WorkRejection, WorkResolution, WorkSnapshot, WorkTarget,
+    InvocationIntent, InvocationStatus, PreparedWorkCommand, TaskBinding, WorkAction, WorkCommand,
+    WorkDecision, WorkQuery, WorkReceipt, WorkRejection, WorkResolution, WorkSnapshot, WorkTarget,
 };
 use peri_acp_types::session_resources::{
     ControlStatus, MutationOutcome, SessionResourceError, SessionResources,
@@ -27,7 +27,7 @@ pub(crate) enum InvocationError {
     #[error("MCP invocation mutation was rejected: {0:?}")]
     Rejected(WorkRejection),
     #[error("MCP invocation mutation ACK is unconfirmed")]
-    Unconfirmed { command: Box<WorkCommand> },
+    Unconfirmed { command: Box<PreparedWorkCommand> },
     #[error("MCP invocation mutation receipt does not match its command")]
     InvalidReceipt,
     #[error(transparent)]
@@ -243,7 +243,7 @@ impl McpInvocation {
         }
     }
 
-    fn command(&self, action: WorkAction) -> Result<WorkCommand, InvocationError> {
+    fn command(&self, action: WorkAction) -> Result<PreparedWorkCommand, InvocationError> {
         let mut command = WorkCommand {
             session_id: self.session_id.clone(),
             recipient_lifecycle: self.lifecycle,
@@ -251,13 +251,13 @@ impl McpInvocation {
             action,
         };
         command.mutation_id = format!("mcp-invocation:{}", command.digest()?);
-        Ok(command)
+        Ok(PreparedWorkCommand::try_new(command)?)
     }
 }
 
 pub(crate) async fn commit(
     resources: &dyn SessionResources,
-    command: &WorkCommand,
+    command: &PreparedWorkCommand,
 ) -> Result<WorkReceipt, InvocationError> {
     let receipt = match resources.apply_work_mutation(command).await {
         Ok(receipt) => receipt,

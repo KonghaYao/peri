@@ -1,5 +1,7 @@
 # peri-agent 代码索引
 
+Work 热路径：`agent/stages/work_pipeline.rs::WorkSession::command` 准备不可变命令，`work_ledger.rs::WorkMutationBarrier` 以共享 Prepared 持有未决命令；只有确认 stale rejection 后才重签，Unknown 保留原 identity/qualifiers。`work_reason.rs` 用借用式 checkpoint 包装保留旧 JSON 字节及工具顺序；`work_reason_checkpoint_test.rs`、`work_receive_shared_test.rs` 验证大正文 golden、pending 共享、Unknown 与取消。无关全量快照在写入前释放，真正 SDK observation/恢复需要的快照仍保留到最后使用。
+
 输入交付回归：`session/user_input_mailbox/delivery_notification_test.rs` 覆盖 Claim 后快照抢先投影、重复 Receive、publication generation、恢复与失效。Mailbox 的通知去重身份独立于状态投影；`mark_committed_deliveries` 核对实际 delivery，恢复仍由已持久事实重放，不新增持久“客户端已收到”记录。
 
 快照复用入口：`user_input_mailbox/{staging,durable,sdk_run}.rs` 复用已确认操作的快照；重复 SDK observation 以窄 control 读取重验完整 admission。`agent/stages/work_receive.rs` 从已确认快照验证 inbox hint，缺失才窄读；Receive 独立串行 gate 保留，业务 state 锁不跨 Store IO。

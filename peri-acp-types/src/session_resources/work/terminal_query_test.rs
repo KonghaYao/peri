@@ -3,6 +3,18 @@ use crate::identity::AttemptId;
 use crate::messages::{BaseMessage, MessageContent};
 use crate::session::TurnId;
 
+fn reduce_work(
+    command: &WorkCommand,
+    control: &ControlState,
+    state: WorkState,
+) -> SessionResourceResult<WorkReduction> {
+    super::reduce_work(
+        &PreparedWorkCommand::try_new(command.clone())?,
+        control,
+        state,
+    )
+}
+
 fn attempt() -> ControlAttempt {
     ControlAttempt {
         turn_id: TurnId::new(),
@@ -117,6 +129,16 @@ fn snapshot(state: WorkState) -> WorkSnapshot {
         ControlState::default(),
         state,
     )
+}
+
+#[test]
+fn snapshot_builds_availability_projection_only_once() {
+    let before = super::super::availability::OWNED_PROJECTION_COUNT.with(|count| count.get());
+    let snapshot = snapshot(WorkState::default());
+    let after = super::super::availability::OWNED_PROJECTION_COUNT.with(|count| count.get());
+    assert_eq!(after - before, 1);
+    assert!(!snapshot.blocked);
+    assert!(snapshot.candidates.is_empty());
 }
 
 fn recovered_terminal_state() -> WorkState {

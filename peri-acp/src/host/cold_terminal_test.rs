@@ -1,3 +1,4 @@
+use peri_acp_types::session_resources::work::PreparedWorkCommand;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -315,12 +316,15 @@ async fn apply(
     action: WorkAction,
 ) -> WorkReceipt {
     let receipt = resources
-        .apply_work_mutation(&WorkCommand {
-            session_id: session_id.into(),
-            recipient_lifecycle: 1,
-            mutation_id: mutation_id.into(),
-            action,
-        })
+        .apply_work_mutation(
+            &PreparedWorkCommand::try_new(WorkCommand {
+                session_id: session_id.into(),
+                recipient_lifecycle: 1,
+                mutation_id: mutation_id.into(),
+                action,
+            })
+            .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(receipt.decision, WorkDecision::Accepted);
@@ -438,7 +442,7 @@ macro_rules! unsupported_facade_operations {
                 Ok(owned)
             }
 
-            async fn apply_work_mutation(&self, command: &WorkCommand) -> SessionResourceResult<WorkReceipt> {
+            async fn apply_work_mutation(&self, command: &PreparedWorkCommand) -> SessionResourceResult<WorkReceipt> {
                 let receipt = self.inner.apply_work_mutation(command).await?;
                 if matches!(command.action, WorkAction::PublishTaskSettlement { .. }) && self.unavailable.load(Ordering::SeqCst) {
                     return Err(SessionResourceError::persistence_uncertain(Some(command.session_id.clone())));
@@ -446,7 +450,7 @@ macro_rules! unsupported_facade_operations {
                 Ok(receipt)
             }
 
-            async fn resolve_work_mutation(&self, command: &WorkCommand) -> SessionResourceResult<WorkResolution> {
+            async fn resolve_work_mutation(&self, command: &PreparedWorkCommand) -> SessionResourceResult<WorkResolution> {
                 if matches!(command.action, WorkAction::PublishTaskSettlement { .. }) && self.unavailable.load(Ordering::SeqCst) {
                     return Ok(WorkResolution::Unknown);
                 }

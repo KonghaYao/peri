@@ -128,6 +128,8 @@ async fn publish_session_inbox_with_snapshot(
                 },
             },
         };
+        let command =
+            peri_acp_types::session_resources::work::PreparedWorkCommand::try_new(command)?;
         receipts.push(ledger.commit(&command).await?);
     }
     batch.messages = None;
@@ -196,7 +198,8 @@ impl WorkBoundary {
                 guard: session.guard(&snapshot)?,
                 batch_id: work_id.clone(),
                 delivery_ids: candidate.delivery_ids.clone(),
-            });
+            })?;
+            drop(snapshot);
             session.ledger.commit_execution_transition(&command).await?;
             snapshot = session.snapshot().await?;
         }

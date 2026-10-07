@@ -1,6 +1,6 @@
 use peri_acp_types::session_resources::work::{
-    reduce_work, DeliveryRecord, WorkCommand, WorkDeliveryQuery, WorkQuery, WorkReceipt,
-    WorkResolution, WorkSnapshot, WorkState,
+    reduce_work, DeliveryRecord, PreparedWorkCommand, WorkCommand, WorkDeliveryQuery, WorkQuery,
+    WorkReceipt, WorkResolution, WorkSnapshot, WorkState,
 };
 use peri_acp_types::session_resources::{
     ControlState, SessionResourceError, SessionResourceResult,
@@ -15,7 +15,7 @@ use super::{
 };
 use crate::sessions::{failure::corrupt, work};
 
-fn identity(command: &WorkCommand, digest: &str) -> OperationIdentity {
+fn identity(command: &PreparedWorkCommand, digest: &str) -> OperationIdentity {
     OperationIdentity::with_digest(
         OperationId::from_record(&format!("session-work.{}", command.mutation_id)),
         "session_work",
@@ -237,7 +237,7 @@ impl RemoteSessionData {
 
     pub(super) async fn work_resolution(
         &self,
-        command: &WorkCommand,
+        command: &PreparedWorkCommand,
     ) -> SessionResourceResult<Option<WorkResolution>> {
         let store = self.store().await?;
         let row = store
@@ -249,16 +249,16 @@ impl RemoteSessionData {
         row.map(|row| {
             let digest = text_at(&row, 0).ok_or_else(|| corrupt("work digest is not readable"))?;
             let json = text_at(&row, 1).ok_or_else(|| corrupt("work receipt is not readable"))?;
-            work::replay(command, digest, json)
+            work::replay_with_digest(command.command(), command.digest(), digest, json)
         })
         .transpose()
     }
 
     pub(super) async fn write_work(
         &self,
-        command: &WorkCommand,
+        command: &PreparedWorkCommand,
     ) -> SessionResourceResult<WorkReceipt> {
-        let digest = command.digest()?;
+        let digest = command.digest();
         let identity = identity(command, &digest);
         if let Some(resolution) = self.work_resolution(command).await? {
             self.acknowledge_work(command).await?;
@@ -275,24 +275,33 @@ impl RemoteSessionData {
             let initial_json = work::pre_state_json(state_json, &state)?;
             let mut phase = work::WorkPhase::new("remote", "reduce_encode");
             phase.state_bytes = initial_json.len();
-            let parent_command = work::terminal_parent_command(command, &state);
+            let parent_command = work::terminal_parent_command(command, &state)?;
             let reduction = reduce_work(command, &control, state)?;
             let effects = work::mutation_effects(
                 command,
-                &digest,
                 initial_json,
                 parent_command.as_ref(),
                 &control,
                 &reduction,
-            )?
-            .into_iter()
-            .map(|effect| {
-                StatementSpec::new(
-                    effect.sql,
-                    effect.params.into_iter().map(Value::Text).collect(),
-                )
-            })
-            .collect::<Vec<_>>();
+            )?;
+            phase.command_bytes = command.encoded().len();
+            phase.record_effects(&effects);
+            drop(reduction);
+            drop(parent_command);
+            drop(control);
+            let effects = effects
+                .into_iter()
+                .map(|effect| {
+                    StatementSpec::new(
+                        effect.sql,
+                        effect
+                            .params
+                            .into_iter()
+                            .map(|value| Value::Text(value.to_string()))
+                            .collect(),
+                    )
+                })
+                .collect::<Vec<_>>();
             drop(phase);
             let store = self.store().await?;
             let mut phase = work::WorkPhase::new("remote", "qualified_mutation");
@@ -355,9 +364,9 @@ impl RemoteSessionData {
 
     pub(super) async fn resolve_work(
         &self,
-        command: &WorkCommand,
+        command: &PreparedWorkCommand,
     ) -> SessionResourceResult<WorkResolution> {
-        let identity = identity(command, &command.digest()?);
+        let identity = identity(command, command.digest());
         if let Some(resolution) = self.work_resolution(command).await? {
             self.acknowledge_work(command).await?;
             return Ok(resolution);
@@ -372,7 +381,7 @@ impl RemoteSessionData {
         {
             if work::original_command(
                 text_at(&row, 0).ok_or_else(|| corrupt("owned command is not readable"))?,
-            )? != *command
+            )? != *command.command()
             {
                 return Err(SessionResourceError::conflict(
                     "work original command identity conflicts",

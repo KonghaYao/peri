@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use peri_acp_types::session_resources::work::{
-    WorkAction, WorkCommand, WorkDecision, WorkQuery, WorkReceipt, WorkRejection, WorkResolution,
-    WorkSnapshot,
+    PreparedWorkCommand, WorkAction, WorkDecision, WorkQuery, WorkReceipt, WorkRejection,
+    WorkResolution, WorkSnapshot,
 };
 use peri_acp_types::session_resources::{MutationOutcome, SessionResourceError, SessionResources};
 use tokio::sync::Mutex;
@@ -12,18 +12,18 @@ pub(crate) enum WorkCommitError {
     #[error("work mutation was rejected")]
     Rejected { receipt: Box<WorkReceipt> },
     #[error("work mutation outcome is unknown")]
-    Unknown { command: Box<WorkCommand> },
+    Unknown { command: PreparedWorkCommand },
     #[error("another work mutation is awaiting resolution")]
-    Frozen { command: Box<WorkCommand> },
+    Frozen { command: PreparedWorkCommand },
     #[error("work receipt does not match the original mutation")]
-    InvalidReceipt { command: Box<WorkCommand> },
+    InvalidReceipt { command: PreparedWorkCommand },
     #[error(transparent)]
     Resource(#[from] SessionResourceError),
 }
 
 pub(crate) struct WorkMutationBarrier {
     resources: Arc<dyn SessionResources>,
-    unconfirmed: Mutex<Option<WorkCommand>>,
+    unconfirmed: Mutex<Option<PreparedWorkCommand>>,
 }
 
 impl WorkMutationBarrier {
@@ -48,23 +48,23 @@ impl WorkMutationBarrier {
         Ok(snapshot)
     }
 
-    pub(crate) async fn pending_command(&self) -> Option<WorkCommand> {
+    pub(crate) async fn pending_command(&self) -> Option<PreparedWorkCommand> {
         self.unconfirmed.lock().await.clone()
     }
 
     pub(crate) async fn commit(
         &self,
-        command: &WorkCommand,
+        command: &PreparedWorkCommand,
     ) -> Result<WorkReceipt, WorkCommitError> {
-        command.digest()?;
         let mut unconfirmed = self.unconfirmed.lock().await;
         if let Some(original) = unconfirmed.as_ref() {
             if original != command {
                 return Err(WorkCommitError::Frozen {
-                    command: Box::new(original.clone()),
+                    command: original.clone(),
                 });
             }
-            return self.resolve_original(command, &mut unconfirmed).await;
+            let original = original.clone();
+            return self.resolve_original(&original, &mut unconfirmed).await;
         }
         *unconfirmed = Some(command.clone());
         match self.resources.apply_work_mutation(command).await {
@@ -79,7 +79,7 @@ impl WorkMutationBarrier {
 
     pub(crate) async fn commit_execution_transition(
         &self,
-        original: &WorkCommand,
+        original: &PreparedWorkCommand,
     ) -> Result<WorkReceipt, WorkCommitError> {
         let mut command = original.clone();
         for attempt in 0..8 {
@@ -102,7 +102,7 @@ impl WorkMutationBarrier {
                             ..
                         }
                     );
-                    let guard = match &mut command.action {
+                    let guard = match &command.action {
                         WorkAction::ClaimBatch { guard, .. }
                         | WorkAction::BeginReason { guard, .. }
                         | WorkAction::CommitReasonResponseAndDispatchIntent { guard, .. }
@@ -118,8 +118,18 @@ impl WorkMutationBarrier {
                     {
                         return Err(WorkCommitError::Rejected { receipt });
                     }
+                    let mut raw = command.into_command();
+                    let guard = match &mut raw.action {
+                        WorkAction::ClaimBatch { guard, .. }
+                        | WorkAction::BeginReason { guard, .. }
+                        | WorkAction::CommitReasonResponseAndDispatchIntent { guard, .. }
+                        | WorkAction::BeginDispatch { guard, .. }
+                        | WorkAction::CommitAct { guard, .. } => guard,
+                        _ => unreachable!(),
+                    };
                     guard.expected_revision = availability.state.revision;
-                    command.mutation_id = uuid::Uuid::now_v7().to_string();
+                    raw.mutation_id = uuid::Uuid::now_v7().to_string();
+                    command = PreparedWorkCommand::try_new(raw)?;
                 }
                 result => return result,
             }
@@ -129,8 +139,8 @@ impl WorkMutationBarrier {
 
     async fn resolve_original(
         &self,
-        command: &WorkCommand,
-        unconfirmed: &mut Option<WorkCommand>,
+        command: &PreparedWorkCommand,
+        unconfirmed: &mut Option<PreparedWorkCommand>,
     ) -> Result<WorkReceipt, WorkCommitError> {
         match self.resources.resolve_work_mutation(command).await {
             Ok(WorkResolution::Applied { receipt }) => Self::confirm(command, receipt, unconfirmed),
@@ -142,24 +152,24 @@ impl WorkMutationBarrier {
                         Err(error.into())
                     }
                     Err(_) => Err(WorkCommitError::Unknown {
-                        command: Box::new(command.clone()),
+                        command: command.clone(),
                     }),
                 }
             }
             Ok(WorkResolution::Unknown) | Err(_) => Err(WorkCommitError::Unknown {
-                command: Box::new(command.clone()),
+                command: command.clone(),
             }),
         }
     }
 
     fn confirm(
-        command: &WorkCommand,
+        command: &PreparedWorkCommand,
         receipt: WorkReceipt,
-        unconfirmed: &mut Option<WorkCommand>,
+        unconfirmed: &mut Option<PreparedWorkCommand>,
     ) -> Result<WorkReceipt, WorkCommitError> {
         if receipt.session_id != command.session_id || receipt.mutation_id != command.mutation_id {
             return Err(WorkCommitError::InvalidReceipt {
-                command: Box::new(command.clone()),
+                command: command.clone(),
             });
         }
         *unconfirmed = None;

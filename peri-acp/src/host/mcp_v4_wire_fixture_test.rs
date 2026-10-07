@@ -370,16 +370,19 @@ impl WireFixtureHarness {
             .unwrap();
         let ordered: std::collections::BTreeMap<_, _> = connections.iter().collect();
         let receipt = resources
-            .apply_work_mutation(&WorkCommand {
-                session_id: session_id.into(),
-                recipient_lifecycle: snapshot.control.lifecycle,
-                mutation_id: format!("fixture-resource-owners:{session_id}"),
-                action: WorkAction::BindResourceOwners {
-                    expected_revision: snapshot.state.revision,
-                    connections_json: serde_json::to_string(&ordered).unwrap(),
-                    authorization_ref: format!("trusted-fixture-setup:{session_id}"),
-                },
-            })
+            .apply_work_mutation(
+                &PreparedWorkCommand::try_new(WorkCommand {
+                    session_id: session_id.into(),
+                    recipient_lifecycle: snapshot.control.lifecycle,
+                    mutation_id: format!("fixture-resource-owners:{session_id}"),
+                    action: WorkAction::BindResourceOwners {
+                        expected_revision: snapshot.state.revision,
+                        connections_json: serde_json::to_string(&ordered).unwrap(),
+                        authorization_ref: format!("trusted-fixture-setup:{session_id}"),
+                    },
+                })
+                .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(receipt.decision, WorkDecision::Accepted);

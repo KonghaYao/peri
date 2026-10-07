@@ -15,6 +15,42 @@ use crate::session::tool_catalog::SessionToolCatalogSnapshot;
 use crate::tools::{BaseTool, CanonicalToolInvocation};
 use peri_acp_types::error::WorkBudgetKind;
 
+#[derive(serde::Serialize)]
+struct RequestCheckpoint<'request> {
+    #[serde(rename = "authorizationRef")]
+    authorization_ref: &'request str,
+    request: &'request serde_json::Value,
+    #[serde(
+        rename = "toolDefinitions",
+        serialize_with = "serialize_tool_definitions"
+    )]
+    tool_definitions: &'request [peri_acp_types::tools::ToolDefinition],
+}
+
+fn serialize_tool_definitions<Serializer: serde::Serializer>(
+    definitions: &[peri_acp_types::tools::ToolDefinition],
+    serializer: Serializer,
+) -> Result<Serializer::Ok, Serializer::Error> {
+    use serde::ser::SerializeSeq;
+
+    #[derive(serde::Serialize)]
+    struct Definition<'definition> {
+        description: &'definition str,
+        name: &'definition str,
+        parameters: &'definition serde_json::Value,
+    }
+
+    let mut sequence = serializer.serialize_seq(Some(definitions.len()))?;
+    for definition in definitions {
+        sequence.serialize_element(&Definition {
+            description: &definition.description,
+            name: &definition.name,
+            parameters: &definition.parameters,
+        })?;
+    }
+    sequence.end()
+}
+
 pub(crate) async fn prepare(
     ctx: &StageContext,
     messages: &[BaseMessage],
@@ -24,15 +60,20 @@ pub(crate) async fn prepare(
         return Ok(None);
     };
     let prepared = ctx.runtime.llm.prepare_reasoning(messages, tools)?;
+    let tool_definitions = tools
+        .iter()
+        .map(|tool| tool.definition())
+        .collect::<Vec<_>>();
     let checkpoint = request_checkpoint(
-        &serde_json::json!({
-            "request": prepared.checkpoint(),
-            "authorizationRef": session.admission.admission_id,
-            "toolDefinitions": tools.iter().map(|tool| tool.definition()).collect::<Vec<_>>(),
-        }),
+        &RequestCheckpoint {
+            authorization_ref: &session.admission.admission_id,
+            request: prepared.checkpoint(),
+            tool_definitions: &tool_definitions,
+        },
         ctx.runtime.llm.model_name(),
         session.admission.admission_id.clone(),
     )?;
+    drop(tool_definitions);
     let mut state = ctx.work.state.lock().await;
     let snapshot = session.snapshot().await?;
     let target = WorkSession::target(
@@ -48,15 +89,17 @@ pub(crate) async fn prepare(
         target: target.clone(),
         request_id: request_id.clone(),
         request: checkpoint,
-    });
+    })?;
+    let budget_error = budget_exhaustion(
+        &snapshot.state,
+        &target.work_id,
+        WorkBudgetKind::ReasonRequests,
+    );
+    drop(snapshot);
     let receipt = session.ledger.commit_execution_transition(&command).await?;
     if receipt.stage != Some(WorkStage::ReasonInFlight) {
         if receipt.stage == Some(WorkStage::Blocked) {
-            if let Some(error) = budget_exhaustion(
-                &snapshot.state,
-                &target.work_id,
-                WorkBudgetKind::ReasonRequests,
-            ) {
+            if let Some(error) = budget_error {
                 return Err(anyhow::Error::new(error));
             }
         }
@@ -240,7 +283,8 @@ pub(crate) async fn commit_response(
         response: WorkPayload::from_payload(&PersistedPayload::Message(source.clone()))?,
         dispatch_intents: intents,
         next_work_id: next_work_id.clone(),
-    });
+    })?;
+    drop(snapshot);
     session.ledger.commit_execution_transition(&command).await?;
     if let Some(next_work_id) = next_work_id {
         state.work_id = Some(next_work_id);
@@ -275,6 +319,7 @@ pub(crate) async fn recover_reasoning(
     else {
         return Ok(None);
     };
+    drop(snapshot);
     if !settled.is_empty() {
         return Err(anyhow::anyhow!(
             "partially settled Act requires explicit recovery"
@@ -383,7 +428,8 @@ pub(crate) async fn block_uncertain_model(ctx: &StageContext) -> anyhow::Result<
         recovery_condition: format!(
             "reconcile original model request {request_id}; do not regenerate"
         ),
-    });
+    })?;
+    drop(snapshot);
     session.ledger.commit(&command).await?;
     Ok(())
 }
@@ -395,3 +441,7 @@ mod tests;
 #[cfg(test)]
 #[path = "work_reason_resolver_test.rs"]
 mod resolver_tests;
+
+#[cfg(test)]
+#[path = "work_reason_checkpoint_test.rs"]
+mod checkpoint_tests;

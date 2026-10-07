@@ -28,7 +28,8 @@ struct BindingResources {
     writes: AtomicUsize,
     resolutions: AtomicUsize,
     resolution_pause: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
-    unknown_command: parking_lot::Mutex<Option<WorkCommand>>,
+    unknown_command:
+        parking_lot::Mutex<Option<peri_acp_types::session_resources::work::PreparedWorkCommand>>,
 }
 
 impl BindingResources {
@@ -74,7 +75,7 @@ impl SessionResources for BindingResources {
 
     async fn apply_work_mutation(
         &self,
-        command: &WorkCommand,
+        command: &peri_acp_types::session_resources::work::PreparedWorkCommand,
     ) -> SessionResourceResult<WorkReceipt> {
         self.writes.fetch_add(1, Ordering::SeqCst);
         if matches!(
@@ -106,7 +107,15 @@ impl SessionResources for BindingResources {
             };
             external.mutation_id = format!("external-writer:{}", external.digest()?);
             assert_eq!(
-                self.inner.apply_work_mutation(&external).await?.decision,
+                self.inner
+                    .apply_work_mutation(
+                        &peri_acp_types::session_resources::work::PreparedWorkCommand::try_new(
+                            external.clone()
+                        )
+                        .unwrap()
+                    )
+                    .await?
+                    .decision,
                 WorkDecision::Accepted
             );
         }
@@ -130,7 +139,7 @@ impl SessionResources for BindingResources {
 
     async fn resolve_work_mutation(
         &self,
-        command: &WorkCommand,
+        command: &peri_acp_types::session_resources::work::PreparedWorkCommand,
     ) -> SessionResourceResult<WorkResolution> {
         self.resolutions.fetch_add(1, Ordering::SeqCst);
         assert_eq!(self.unknown_command.lock().as_ref(), Some(command));
@@ -347,29 +356,34 @@ async fn prepare_invocations(session: &TestSession, count: usize) -> Vec<Invocat
         let arguments = "{}".to_owned();
         let digest = format!("{:x}", Sha256::digest(arguments.as_bytes()));
         let receipt = resources
-            .apply_work_mutation(&WorkCommand {
-                session_id: session_id.clone(),
-                recipient_lifecycle: 1,
-                mutation_id: format!("prepare-{index}"),
-                action: WorkAction::PrepareInvocation {
-                    expected_revision: snapshot.state.revision,
-                    intent: InvocationIntent {
-                        invocation_id: format!("invocation-{index}"),
-                        tool_call_id: format!("call-{index}"),
-                        tool_name: "subagent".into(),
-                        arguments_json: arguments.clone(),
-                        arguments_digest: digest.clone(),
-                        effective_tool_name: "subagent".into(),
-                        effective_arguments_json: arguments,
-                        effective_arguments_digest: digest,
-                        owner_identity: "child-owner".into(),
-                        scope_id: session_id.clone(),
-                        scope_epoch: Some(1),
-                        authorization_ref: "child-authorization".into(),
-                        recovery_locator: format!("child-{index}"),
+            .apply_work_mutation(
+                &peri_acp_types::session_resources::work::PreparedWorkCommand::try_new(
+                    WorkCommand {
+                        session_id: session_id.clone(),
+                        recipient_lifecycle: 1,
+                        mutation_id: format!("prepare-{index}"),
+                        action: WorkAction::PrepareInvocation {
+                            expected_revision: snapshot.state.revision,
+                            intent: InvocationIntent {
+                                invocation_id: format!("invocation-{index}"),
+                                tool_call_id: format!("call-{index}"),
+                                tool_name: "subagent".into(),
+                                arguments_json: arguments.clone(),
+                                arguments_digest: digest.clone(),
+                                effective_tool_name: "subagent".into(),
+                                effective_arguments_json: arguments,
+                                effective_arguments_digest: digest,
+                                owner_identity: "child-owner".into(),
+                                scope_id: session_id.clone(),
+                                scope_epoch: Some(1),
+                                authorization_ref: "child-authorization".into(),
+                                recovery_locator: format!("child-{index}"),
+                            },
+                        },
                     },
-                },
-            })
+                )
+                .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(receipt.decision, WorkDecision::Accepted);

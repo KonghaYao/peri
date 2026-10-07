@@ -1,5 +1,16 @@
 use super::*;
-use crate::session_resources::work::reduce_work;
+
+fn reduce_work(
+    command: &WorkCommand,
+    control: &ControlState,
+    state: WorkState,
+) -> SessionResourceResult<WorkReduction> {
+    super::reduce_work(
+        &PreparedWorkCommand::try_new(command.clone())?,
+        control,
+        state,
+    )
+}
 
 fn fixture(count: usize) -> (WorkState, Vec<TaskBinding>) {
     let mut state = WorkState::default();

@@ -1,6 +1,6 @@
 use peri_acp_types::session_resources::work::{
-    WorkAction, WorkAdmission, WorkCommand, WorkCommandQuery, WorkDecision, WorkQuery, WorkReceipt,
-    WorkRejection, WorkResolution,
+    PreparedWorkCommand, WorkAction, WorkAdmission, WorkCommand, WorkCommandQuery, WorkDecision,
+    WorkQuery, WorkReceipt, WorkRejection, WorkResolution,
 };
 use peri_acp_types::session_resources::{MutationOutcome, SessionResources};
 
@@ -44,6 +44,8 @@ pub(super) async fn persist(
             "child-terminal-obligation:{}",
             command.digest().map_err(super::workspace::resource_error)?
         );
+        let command =
+            PreparedWorkCommand::try_new(command).map_err(super::workspace::resource_error)?;
         let receipt = commit(resources, &command).await?;
         match receipt.decision {
             WorkDecision::Accepted => return Ok(()),
@@ -73,13 +75,15 @@ pub(super) async fn reconcile(
     for command in &child.pending_commands {
         if matches!(&command.action, WorkAction::BindTerminalObligation { admission_id, .. } if admission_id == &admission.admission_id)
         {
+            let command = PreparedWorkCommand::try_new(command.clone())
+                .map_err(super::workspace::resource_error)?;
             let receipt = match resources
-                .resolve_work_mutation(command)
+                .resolve_work_mutation(&command)
                 .await
                 .map_err(super::workspace::resource_error)?
             {
                 WorkResolution::Applied { receipt } => receipt,
-                WorkResolution::NotApplied => commit(resources, command).await?,
+                WorkResolution::NotApplied => commit(resources, &command).await?,
                 WorkResolution::Unknown => {
                     return Err(incomplete(
                         "original child terminal obligation remains unknown",
@@ -114,6 +118,8 @@ pub(super) async fn reconcile(
             "terminal obligation has no exact stopped execution proof",
         ));
     }
+    let command =
+        PreparedWorkCommand::try_new(command.clone()).map_err(super::workspace::resource_error)?;
     let owned = resources
         .load_work_command(&WorkCommandQuery {
             session_id: command.session_id.clone(),
@@ -122,19 +128,19 @@ pub(super) async fn reconcile(
         .await
         .map_err(super::workspace::resource_error)?;
     let receipt = match owned {
-        Some(owned) if owned.command != *command => {
+        Some(owned) if owned.command != *command.command() => {
             return Err(incomplete("parent terminal journal identity conflict"))
         }
         Some(owned) => match owned.resolution {
             Some(WorkResolution::Applied { receipt }) => receipt,
-            Some(WorkResolution::NotApplied) => commit(resources, command).await?,
+            Some(WorkResolution::NotApplied) => commit(resources, &command).await?,
             _ => match resources
-                .resolve_work_mutation(command)
+                .resolve_work_mutation(&command)
                 .await
                 .map_err(super::workspace::resource_error)?
             {
                 WorkResolution::Applied { receipt } => receipt,
-                WorkResolution::NotApplied => commit(resources, command).await?,
+                WorkResolution::NotApplied => commit(resources, &command).await?,
                 WorkResolution::Unknown => {
                     return Err(incomplete(
                         "original parent terminal command remains unknown",
@@ -142,7 +148,7 @@ pub(super) async fn reconcile(
                 }
             },
         },
-        None => commit(resources, command).await?,
+        None => commit(resources, &command).await?,
     };
     if receipt.session_id != command.session_id
         || receipt.mutation_id != command.mutation_id
@@ -192,6 +198,8 @@ async fn acknowledge(
             "child-terminal-ack:{}",
             command.digest().map_err(super::workspace::resource_error)?
         );
+        let command =
+            PreparedWorkCommand::try_new(command).map_err(super::workspace::resource_error)?;
         let receipt = commit(resources, &command).await?;
         match receipt.decision {
             WorkDecision::Accepted => return Ok(()),
@@ -210,7 +218,7 @@ async fn acknowledge(
 
 async fn commit(
     resources: &dyn SessionResources,
-    command: &WorkCommand,
+    command: &PreparedWorkCommand,
 ) -> Result<WorkReceipt, AcpError> {
     let receipt = match resources.apply_work_mutation(command).await {
         Ok(receipt) => receipt,

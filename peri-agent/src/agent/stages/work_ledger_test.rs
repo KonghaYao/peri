@@ -3,8 +3,8 @@ use crate::session::test_resources::TestSession;
 use peri_acp_types::messages::BaseMessage;
 use peri_acp_types::session::MessagePolicy;
 use peri_acp_types::session_resources::work::{
-    DeliveryPurpose, ObligationStatus, PublishDelivery, WorkAction, WorkCommandQuery, WorkEvent,
-    WorkGuard, WorkPayload, WorkStage, WorkTarget,
+    DeliveryPurpose, ObligationStatus, PublishDelivery, WorkAction, WorkCommand, WorkCommandQuery,
+    WorkEvent, WorkGuard, WorkPayload, WorkStage, WorkTarget,
 };
 use peri_acp_types::session_resources::{
     ControlAction, ControlAttempt, ControlCommand, ControlDecision,
@@ -56,7 +56,13 @@ async fn paused_recipient_still_accepts_durable_publication() {
         .unwrap();
     let barrier = WorkMutationBarrier::new(session.resources.clone());
     let command = publication(session.thread_id.as_str(), control.lifecycle);
-    let receipt = barrier.commit(&command).await.unwrap();
+    let receipt = barrier
+        .commit(
+            &peri_acp_types::session_resources::work::PreparedWorkCommand::try_new(command.clone())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     let snapshot = barrier
         .snapshot(&WorkQuery {
             session_id: command.session_id,
@@ -84,8 +90,20 @@ async fn publication_retry_returns_original_receipt_and_one_obligation() {
         .unwrap();
     let barrier = WorkMutationBarrier::new(session.resources.clone());
     let command = publication(session.thread_id.as_str(), control.lifecycle);
-    let original = barrier.commit(&command).await.unwrap();
-    let repeated = barrier.commit(&command).await.unwrap();
+    let original = barrier
+        .commit(
+            &peri_acp_types::session_resources::work::PreparedWorkCommand::try_new(command.clone())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let repeated = barrier
+        .commit(
+            &peri_acp_types::session_resources::work::PreparedWorkCommand::try_new(command.clone())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(original, repeated);
     let snapshot = barrier
         .snapshot(&WorkQuery {
@@ -110,7 +128,13 @@ async fn stale_lifecycle_rejection_does_not_create_an_obligation() {
         .unwrap();
     let barrier = WorkMutationBarrier::new(session.resources.clone());
     let command = publication(session.thread_id.as_str(), control.lifecycle + 1);
-    let error = barrier.commit(&command).await.unwrap_err();
+    let error = barrier
+        .commit(
+            &peri_acp_types::session_resources::work::PreparedWorkCommand::try_new(command.clone())
+                .unwrap(),
+        )
+        .await
+        .unwrap_err();
     assert!(matches!(error, WorkCommitError::Rejected { .. }));
     let snapshot = barrier
         .snapshot(&WorkQuery {
@@ -152,16 +176,19 @@ async fn entered_reason_command() -> (
         execution: fixture.admission.execution.clone(),
     };
     barrier
-        .commit(&WorkCommand {
-            session_id: fixture.bound.thread_id(),
-            recipient_lifecycle: fixture.admission.lifecycle,
-            mutation_id: uuid::Uuid::now_v7().to_string(),
-            action: WorkAction::ClaimBatch {
-                guard,
-                batch_id: fixture.admission.work_id.clone(),
-                delivery_ids: vec![fixture.delivery_id.clone()],
-            },
-        })
+        .commit(
+            &peri_acp_types::session_resources::work::PreparedWorkCommand::try_new(WorkCommand {
+                session_id: fixture.bound.thread_id(),
+                recipient_lifecycle: fixture.admission.lifecycle,
+                mutation_id: uuid::Uuid::now_v7().to_string(),
+                action: WorkAction::ClaimBatch {
+                    guard,
+                    batch_id: fixture.admission.work_id.clone(),
+                    delivery_ids: vec![fixture.delivery_id.clone()],
+                },
+            })
+            .unwrap(),
+        )
         .await
         .unwrap();
     let snapshot = barrier
@@ -202,7 +229,14 @@ async fn entered_reason_command() -> (
 }
 
 async fn rejected_receipt(barrier: &WorkMutationBarrier, command: &WorkCommand) -> WorkReceipt {
-    let WorkCommitError::Rejected { receipt } = barrier.commit(command).await.unwrap_err() else {
+    let WorkCommitError::Rejected { receipt } = barrier
+        .commit(
+            &peri_acp_types::session_resources::work::PreparedWorkCommand::try_new(command.clone())
+                .unwrap(),
+        )
+        .await
+        .unwrap_err()
+    else {
         panic!("expected a definite rejection");
     };
     *receipt
@@ -212,10 +246,13 @@ async fn rejected_receipt(barrier: &WorkMutationBarrier, command: &WorkCommand) 
 async fn execution_transition_refreshes_only_global_revision_and_preserves_old_rejection() {
     let (fixture, barrier, original) = entered_reason_command().await;
     let publication_receipt = barrier
-        .commit(&publication(
-            &original.session_id,
-            original.recipient_lifecycle,
-        ))
+        .commit(
+            &peri_acp_types::session_resources::work::PreparedWorkCommand::try_new(publication(
+                &original.session_id,
+                original.recipient_lifecycle,
+            ))
+            .unwrap(),
+        )
         .await
         .unwrap();
     let rejected = rejected_receipt(&barrier, &original).await;
@@ -226,7 +263,12 @@ async fn execution_transition_refreshes_only_global_revision_and_preserves_old_r
         }
     );
     let accepted = barrier
-        .commit_execution_transition(&original)
+        .commit_execution_transition(
+            &peri_acp_types::session_resources::work::PreparedWorkCommand::try_new(
+                original.clone(),
+            )
+            .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(accepted.decision, WorkDecision::Accepted);
@@ -278,7 +320,12 @@ async fn execution_transition_refreshes_only_global_revision_and_preserves_old_r
         fixture
             .bound
             .resources()
-            .resolve_work_mutation(&original)
+            .resolve_work_mutation(
+                &peri_acp_types::session_resources::work::PreparedWorkCommand::try_new(
+                    original.clone()
+                )
+                .unwrap()
+            )
             .await
             .unwrap(),
         WorkResolution::Applied {
@@ -302,7 +349,15 @@ async fn execution_transition_never_refreshes_changed_target_work_revision() {
     let (fixture, barrier, original) = entered_reason_command().await;
     let mut competing = original.clone();
     competing.mutation_id = uuid::Uuid::now_v7().to_string();
-    barrier.commit(&competing).await.unwrap();
+    barrier
+        .commit(
+            &peri_acp_types::session_resources::work::PreparedWorkCommand::try_new(
+                competing.clone(),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
     let old_rejection = rejected_receipt(&barrier, &original).await;
     assert_eq!(
         old_rejection.decision,
@@ -318,7 +373,12 @@ async fn execution_transition_never_refreshes_changed_target_work_revision() {
         .await
         .unwrap();
     let WorkCommitError::Rejected { receipt } = barrier
-        .commit_execution_transition(&original)
+        .commit_execution_transition(
+            &peri_acp_types::session_resources::work::PreparedWorkCommand::try_new(
+                original.clone(),
+            )
+            .unwrap(),
+        )
         .await
         .unwrap_err()
     else {
@@ -361,7 +421,12 @@ async fn execution_transition_never_refreshes_changed_target_work_revision() {
         fixture
             .bound
             .resources()
-            .resolve_work_mutation(&original)
+            .resolve_work_mutation(
+                &peri_acp_types::session_resources::work::PreparedWorkCommand::try_new(
+                    original.clone()
+                )
+                .unwrap()
+            )
             .await
             .unwrap(),
         WorkResolution::Applied {
@@ -377,10 +442,12 @@ async fn execution_transition_keeps_original_rejection_when_control_generation_o
     for change_generation in [true, false] {
         let (fixture, barrier, original) = entered_reason_command().await;
         barrier
-            .commit(&publication(
-                &original.session_id,
-                original.recipient_lifecycle,
-            ))
+            .commit(
+                &peri_acp_types::session_resources::work::PreparedWorkCommand::try_new(
+                    publication(&original.session_id, original.recipient_lifecycle),
+                )
+                .unwrap(),
+            )
             .await
             .unwrap();
         let old_rejection = rejected_receipt(&barrier, &original).await;
@@ -444,7 +511,12 @@ async fn execution_transition_keeps_original_rejection_when_control_generation_o
             .await
             .unwrap();
         let WorkCommitError::Rejected { receipt } = barrier
-            .commit_execution_transition(&original)
+            .commit_execution_transition(
+                &peri_acp_types::session_resources::work::PreparedWorkCommand::try_new(
+                    original.clone(),
+                )
+                .unwrap(),
+            )
             .await
             .unwrap_err()
         else {

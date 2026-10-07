@@ -55,14 +55,17 @@ async fn fixture() -> (TestSession, Arc<UserInputMailbox>, WorkAdmission) {
 async fn register(fixture: &TestSession, admission: &WorkAdmission) {
     let receipt = fixture
         .resources
-        .apply_work_mutation(&WorkCommand {
-            session_id: fixture.thread_id(),
-            recipient_lifecycle: 1,
-            mutation_id: "register-sdk-ticket".into(),
-            action: WorkAction::RegisterAdmission {
-                admission: admission.clone(),
-            },
-        })
+        .apply_work_mutation(
+            &peri_acp_types::session_resources::work::PreparedWorkCommand::try_new(WorkCommand {
+                session_id: fixture.thread_id(),
+                recipient_lifecycle: 1,
+                mutation_id: "register-sdk-ticket".into(),
+                action: WorkAction::RegisterAdmission {
+                    admission: admission.clone(),
+                },
+            })
+            .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(receipt.decision, WorkDecision::Accepted);
@@ -159,20 +162,23 @@ async fn sdk_observation_recovers_input_ids_only_from_exact_durable_batch() {
         .unwrap();
     let receipt = fixture
         .resources
-        .apply_work_mutation(&WorkCommand {
-            session_id: fixture.thread_id(),
-            recipient_lifecycle: 1,
-            mutation_id: "claim-sdk-exact-batch".into(),
-            action: WorkAction::ClaimBatch {
-                guard: WorkGuard {
-                    expected_revision: snapshot.state.revision,
-                    expected_control_generation: snapshot.control.control_generation,
-                    execution: admission.execution.clone(),
+        .apply_work_mutation(
+            &peri_acp_types::session_resources::work::PreparedWorkCommand::try_new(WorkCommand {
+                session_id: fixture.thread_id(),
+                recipient_lifecycle: 1,
+                mutation_id: "claim-sdk-exact-batch".into(),
+                action: WorkAction::ClaimBatch {
+                    guard: WorkGuard {
+                        expected_revision: snapshot.state.revision,
+                        expected_control_generation: snapshot.control.control_generation,
+                        execution: admission.execution.clone(),
+                    },
+                    batch_id: admission.work_id.clone(),
+                    delivery_ids: snapshot.candidates[0].delivery_ids.clone(),
                 },
-                batch_id: admission.work_id.clone(),
-                delivery_ids: snapshot.candidates[0].delivery_ids.clone(),
-            },
-        })
+            })
+            .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(receipt.decision, WorkDecision::Accepted);

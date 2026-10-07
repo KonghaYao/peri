@@ -49,6 +49,10 @@ typed schema、默认值、领域合并、scope/revision/explain/update 归
 
 ### 持久 RCRA（src/session_resources/work/）
 
+`command.rs::PreparedWorkCommand` 消费原 `WorkCommand`，以不可变共享对象持有唯一 canonical 编码与摘要；`SessionResources::{apply_work_mutation,resolve_work_mutation}` 及 reducer 统一接收 Prepared，重试/Unknown 不修改已冻结命令。持久 DTO、pending snapshot 与原 journal wire 不变；冷读取仍严格解码并核对 canonical digest。`command_test.rs` 覆盖字节/摘要 golden、共享指针与真实编码/哈希计数。准备诊断 target 为 `peri_acp_types::work_prepare`，`elapsed_wall_us` 是 wall time，不是 CPU。
+
+`query.rs::WorkSnapshot::from_state` 的 blocked / unknown / claimable 判定复用一份 availability 元数据投影，规则仍由 `availability.rs` 维护；`terminal_query_test.rs` 通过真实构造计数防止重复投影回归。`processing.rs` 只借用 WorkRecord 元数据，不为推进阶段深拷贝请求/响应正文。
+
 `reducer.rs` 区分 CommitAct 的当前执行推进与原身份无 successor 结算；`processing.rs` 在 Blocked/Abandoned 下只记录真实结果、不恢复 processing。`query.rs::admission_batch` 通过 admission work/delivery 与 batch lineage 关联恢复执行，供显式中断及终态隔离共用。`admission.rs::finish` 与原 admission settlement 同一 reduction 清除精确当前 attempt，拒绝清除其他执行。
 
 `WorkDeliveryQuery` 显式携带 session / delivery 身份；`SessionResources::load_work_delivery` 返回单个 `DeliveryRecord`，只用于逐消息身份去重，不等价于完整 WorkSnapshot、候选判定或 Unknown 提交结论。未实现的后端默认返回 Unsupported，不回落全量读取。契约测试：`session_resources/work/delivery_query_test.rs`。

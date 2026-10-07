@@ -8,9 +8,10 @@ mod terminal_query_test;
 
 impl WorkSnapshot {
     pub fn from_state(query: &WorkQuery, control: ControlState, state: WorkState) -> Self {
+        let availability = WorkAvailabilityState::from(&state);
         let blocked = control.status != ControlStatus::Active
-            || state.has_pending_terminal_obligations_for(control.lifecycle)
-            || state.has_unknown_live_work_lifecycle()
+            || availability.has_pending_terminal_obligations_for(control.lifecycle)
+            || availability.has_unknown_live_work_lifecycle()
             || !state.legacy_unknown.is_empty()
             || state.works.values().any(|work| {
                 work.stage == WorkStage::Blocked
@@ -49,7 +50,7 @@ impl WorkSnapshot {
                     });
                 }
             } else {
-                let selected = state.claimable_deliveries(control.lifecycle);
+                let selected = availability.claimable_deliveries(control.lifecycle);
                 if let Some(work_id) = selected.iter().find(|delivery_id| {
                     state.deliveries[*delivery_id]
                         .publication

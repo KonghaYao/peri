@@ -34,15 +34,18 @@ pub(crate) async fn bind_fixture_task(
         recovery_locator: format!("fixture-task:{task_id}"),
     };
     let receipt = resources
-        .apply_work_mutation(&WorkCommand {
-            session_id: session_id.into(),
-            recipient_lifecycle: lifecycle,
-            mutation_id: format!("fixture-prepare:{}", intent.invocation_id),
-            action: WorkAction::PrepareInvocation {
-                expected_revision: snapshot.state.revision,
-                intent: intent.clone(),
-            },
-        })
+        .apply_work_mutation(
+            &peri_acp_types::session_resources::work::PreparedWorkCommand::try_new(WorkCommand {
+                session_id: session_id.into(),
+                recipient_lifecycle: lifecycle,
+                mutation_id: format!("fixture-prepare:{}", intent.invocation_id),
+                action: WorkAction::PrepareInvocation {
+                    expected_revision: snapshot.state.revision,
+                    intent: intent.clone(),
+                },
+            })
+            .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(receipt.decision, WorkDecision::Accepted);
@@ -54,23 +57,26 @@ pub(crate) async fn bind_fixture_task(
         .await
         .unwrap();
     let receipt = resources
-        .apply_work_mutation(&WorkCommand {
-            session_id: session_id.into(),
-            recipient_lifecycle: lifecycle,
-            mutation_id: format!("fixture-bind:{}", intent.invocation_id),
-            action: WorkAction::ReconcileTaskBinding {
-                expected_revision: snapshot.state.revision,
-                binding: TaskBinding {
-                    invocation_id: intent.invocation_id.clone(),
-                    owner_identity: intent.owner_identity.clone(),
-                    owner_task_id: task_id.into(),
-                    initiator_session_id: session_id.into(),
-                    recipient_lifecycle: lifecycle,
-                    recovery_locator: intent.recovery_locator.clone(),
-                    authorization_ref: intent.authorization_ref.clone(),
+        .apply_work_mutation(
+            &peri_acp_types::session_resources::work::PreparedWorkCommand::try_new(WorkCommand {
+                session_id: session_id.into(),
+                recipient_lifecycle: lifecycle,
+                mutation_id: format!("fixture-bind:{}", intent.invocation_id),
+                action: WorkAction::ReconcileTaskBinding {
+                    expected_revision: snapshot.state.revision,
+                    binding: TaskBinding {
+                        invocation_id: intent.invocation_id.clone(),
+                        owner_identity: intent.owner_identity.clone(),
+                        owner_task_id: task_id.into(),
+                        initiator_session_id: session_id.into(),
+                        recipient_lifecycle: lifecycle,
+                        recovery_locator: intent.recovery_locator.clone(),
+                        authorization_ref: intent.authorization_ref.clone(),
+                    },
                 },
-            },
-        })
+            })
+            .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(receipt.decision, WorkDecision::Accepted);

@@ -1,6 +1,18 @@
 use super::*;
 use crate::messages::BaseMessage;
 
+fn reduce_work(
+    command: &WorkCommand,
+    control: &ControlState,
+    state: WorkState,
+) -> SessionResourceResult<WorkReduction> {
+    super::super::reduce_work(
+        &PreparedWorkCommand::try_new(command.clone())?,
+        control,
+        state,
+    )
+}
+
 fn fixture(stage: WorkStage) -> (WorkState, WorkCommand, WorkTarget, WorkReceipt) {
     let target = WorkTarget {
         work_id: "original".into(),
@@ -84,6 +96,56 @@ fn result() -> InvocationResult {
             .unwrap(),
         },
     }
+}
+
+fn large_request() -> ReasonRequest {
+    let serialized_request = format!("{{\"payload\":\"{}\"}}", "x".repeat(1024 * 1024));
+    ReasonRequest {
+        request_digest: format!("{:x}", Sha256::digest(serialized_request.as_bytes())),
+        serialized_request,
+        model_ref: "model".into(),
+        authorization_ref: "auth".into(),
+    }
+}
+
+#[test]
+fn large_request_metadata_transitions_reuse_body_and_preserve_recovery() {
+    let (mut state, _, mut target, mut receipt) = fixture(WorkStage::ActReady);
+    state.budgets.insert("budget".into(), WorkBudget::default());
+    state.invocations.get_mut("invocation").unwrap().status = InvocationStatus::Prepared;
+    state.works.get_mut("original").unwrap().reason_request = Some(large_request());
+    let request = state.works["original"].reason_request.as_ref().unwrap();
+    let body_pointer = request.serialized_request.as_ptr();
+    let body_len = request.serialized_request.len();
+
+    begin_dispatch(&mut state, &target, "invocation", &mut receipt).unwrap();
+    assert_eq!(state.budgets["budget"].dispatches, 1);
+    target.expected_work_revision = 1;
+    unknown(
+        &mut state,
+        &target,
+        "invocation",
+        "owner lost",
+        &mut receipt,
+    )
+    .unwrap();
+    assert_eq!(state.works["original"].stage, WorkStage::Blocked);
+    target.expected_work_revision = 2;
+    assert_eq!(
+        resume(&mut state, &target, "evidence", &mut receipt),
+        Err(WorkRejection::InvalidTransition)
+    );
+    state.invocations.get_mut("invocation").unwrap().status = InvocationStatus::Settled;
+    resume(&mut state, &target, "evidence", &mut receipt).unwrap();
+    assert_eq!(state.works["original"].stage, WorkStage::ActReady);
+    assert_eq!(state.budgets["budget"].recoveries, 1);
+    let request = state.works["original"].reason_request.as_ref().unwrap();
+    assert_eq!(request.serialized_request.as_ptr(), body_pointer);
+    assert_eq!(request.serialized_request.len(), body_len);
+    target.expected_work_revision = 3;
+    settle(&mut state, &target, &mut receipt).unwrap();
+    assert_eq!(state.works["original"].stage, WorkStage::Settled);
+    assert!(state.works["original"].reason_request.is_none());
 }
 
 #[test]
@@ -390,12 +452,7 @@ fn terminal_abandon_trims_request_evidence_and_keeps_identity() {
     {
         let work = state.works.get_mut("original").unwrap();
         work.request_id = Some("request".into());
-        work.reason_request = Some(ReasonRequest {
-            serialized_request: "{\"request\":{\"provider\":\"test\"}}".into(),
-            request_digest: "digest".into(),
-            model_ref: "model".into(),
-            authorization_ref: "auth".into(),
-        });
+        work.reason_request = Some(large_request());
     }
     super::abandon(
         &mut state,
@@ -417,12 +474,7 @@ fn terminal_commit_reason_trims_request_evidence_and_keeps_response() {
     {
         let work = state.works.get_mut("original").unwrap();
         work.request_id = Some("request".into());
-        work.reason_request = Some(ReasonRequest {
-            serialized_request: "{\"request\":{\"provider\":\"test\"}}".into(),
-            request_digest: "digest".into(),
-            model_ref: "model".into(),
-            authorization_ref: "auth".into(),
-        });
+        work.reason_request = Some(large_request());
     }
     state.batches.insert(
         "batch".into(),
@@ -474,12 +526,7 @@ fn terminal_commit_act_trims_request_evidence_and_keeps_identity() {
     let work = state.works.get_mut("original").unwrap();
     work.request_id = Some("request".into());
     work.response = Some(response.clone());
-    work.reason_request = Some(ReasonRequest {
-        serialized_request: "{}".into(),
-        request_digest: "digest".into(),
-        model_ref: "model".into(),
-        authorization_ref: "auth".into(),
-    });
+    work.reason_request = Some(large_request());
 
     commit_act(
         &command,
@@ -504,12 +551,7 @@ fn terminal_settle_trims_only_current_work_and_preserves_historical_evidence() {
     let (mut state, _, target, mut receipt) = fixture(WorkStage::ActReady);
     let work = state.works.get_mut("original").unwrap();
     work.request_id = Some("request".into());
-    work.reason_request = Some(ReasonRequest {
-        serialized_request: "{}".into(),
-        request_digest: "digest".into(),
-        model_ref: "model".into(),
-        authorization_ref: "auth".into(),
-    });
+    work.reason_request = Some(large_request());
     let mut historical = work.clone();
     historical.work_id = "historical".into();
     historical.stage = WorkStage::Settled;
