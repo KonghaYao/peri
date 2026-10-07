@@ -119,7 +119,7 @@ Windows 挂起进程，attach 后提供终止请求与实际退出证据。它�
   - Workspace 级 OAuth 凭据的持久存储；MCP 连接由 Middleware 持有，交互 broker
     由 ACP 宿主提供，不归 Resources。
 - adapter 保存和适配状态，共用领域 reducer，不维护第二份业务规则；访问模式与
-  存储完整性不构成执行所有权，执行唯一性由 SDK 管理。
+  存储完整性不构成执行所有权；跨实例唯一性由外部部署协调，不依赖 SDK admission。
 - 以 context 形式提供给 Agent / Middleware / Controller
 
 ## 6. Peri Controller 层
