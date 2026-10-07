@@ -191,53 +191,109 @@ async fn test_frozen_subagent_prompt_identical_to_main() {
         !frozen.system_prompt().contains("Workflow Orchestration"),
         "16_workflow 段落已删除：冻结 prompt 不得声明 Workflow"
     );
-    // 子面向 prompt 字段已随 C5 移除：子 agent / fork / workflow agent
-    // 直接复用主冻结 prompt（16_workflow 删除后两版字节相同的语义固化）。
+    // 子面向 prompt 字段已随 C5 移除：子 Agent / fork / workflow 的 prompt
+    // 在各自装配点按能力投影重建（H2），主冻结 prompt 只服务主链。
     assert!(
         !frozen.system_prompt().is_empty(),
         "主冻结 prompt 非空（子面向唯一复用来源）"
     );
 }
 
-/// [回归测试] advisor 裁决 B（2026-08-14）：workflow agent 链不装配审批
-/// middleware（broker: None → PermissionMiddleware::disabled()），10_hitl
-/// 描述的是主会话审批机制，对 workflow 模型是误导性指令——workflow 渲染
-/// 路径（fallback + agentType builder）必须排除 10_hitl，兑现
-/// presence-is-the-gate 契约（C3 D5 决策修订，design §3.1.1 契约 3 /
-/// §3.5 语义边界；2026-08-15 拆分：10_hitl 持有者改为 PermissionMiddleware，
-/// 过滤目标段落不变）。
+/// [回归测试] H2：workflow agent 链不装配审批 / 提问 / 子代理持有者
+/// （broker: None → `PermissionMiddleware::disabled()`），因此其渲染路径
+/// （生产 `system_prompt` 投影 + fallback + agentType builder）必须按
+/// **workflow 能力事实**排除 10_hitl / 11_subagent / 12_ask_user，同时保留
+/// 基础段与 13_skills（presence-is-the-gate 契约；2026-08-15 拆分后
+/// 10_hitl 持有者为 PermissionMiddleware）。
 #[tokio::test]
 async fn test_workflow_prompt_excludes_hitl_section() {
     let tmp = tempfile::TempDir::new().unwrap();
     let mgr = make_manager(&tmp).await;
     let frozen = mgr.build_frozen_data("/tmp");
 
-    // 主链冻结 prompt 保留 10_hitl（PermissionMiddleware 默认装配）
+    // 主链冻结 prompt 保留 gated 段（Permission/HITL/SubAgent 默认装配）
     assert!(
         frozen.system_prompt().contains("Human-in-the-Loop (HITL)"),
         "主链冻结 prompt 应保留 10_hitl（PermissionMiddleware 默认装配）"
     );
+    assert!(
+        frozen.system_prompt().contains("AskUserQuestion"),
+        "主链冻结 prompt 应保留 12_ask_user（HumanInTheLoop 默认装配）"
+    );
 
     let skills: Arc<dyn peri_acp_types::ports::AgentCatalogPort> =
         Arc::new(AgentCatalogProvider::new());
+    let capabilities = crate::host::workflow_agent::workflow_capabilities(
+        &frozen.meta_harness().disabled_middlewares,
+        false,
+        false,
+    );
+
+    // 生产路径：workflow agent 的 system prompt 由冻结输入按 workflow 能力投影
+    // 重建（不是主冻结字节的复制）。
+    let projected = crate::host::workflow_agent::project_workflow_system_prompt(
+        &frozen,
+        &capabilities,
+        skills.as_ref(),
+        "/tmp",
+    );
+    assert!(
+        !projected.contains("Human-in-the-Loop (HITL)"),
+        "workflow 链审批通道无效：生产 prompt 不得包含 10_hitl"
+    );
+    assert!(
+        !projected.contains("AskUserQuestion"),
+        "workflow 链无提问持有者：生产 prompt 不得包含 12_ask_user"
+    );
+    assert!(
+        projected.contains("# Doing tasks"),
+        "基础段（03_doing_tasks）随冻结决策继承"
+    );
+    assert!(
+        projected.contains("SkillTool"),
+        "13_skills 随 workflow 链 SkillsMiddleware 保留"
+    );
+
     let fallback = crate::host::workflow_agent::build_workflow_system_prompt_fallback(
         Arc::clone(&skills),
         frozen.meta_harness().clone(),
+        capabilities,
+        frozen.runtime_env().cloned(),
     );
     let prompt = fallback("/tmp", Some("2026-01-01"), frozen.language());
     assert!(
         !prompt.contains("Human-in-the-Loop (HITL)"),
         "workflow 链无审批 middleware：提示词不得包含 10_hitl"
     );
+    assert!(prompt.contains("# Doing tasks"), "fallback 保留基础段");
 
-    // agentType builder（workflow 子 agent）同样排除
+    // agentType builder（workflow 子 agent）同样按能力投影
     let builder = crate::host::workflow_agent::build_workflow_agent_prompt_builder(
         Arc::clone(&skills),
         frozen.meta_harness().clone(),
+        capabilities,
+        frozen.runtime_env().cloned(),
     );
     let agent_prompt = builder(None, "/tmp", Some("2026-01-01"), frozen.language());
     assert!(
         !agent_prompt.contains("Human-in-the-Loop (HITL)"),
         "workflow agentType builder 同样不得包含 10_hitl"
+    );
+
+    // 有效模式反证：审批通道有效时不因「执行类型」而删除 10_hitl
+    let approval_capabilities = crate::host::workflow_agent::workflow_capabilities(
+        &frozen.meta_harness().disabled_middlewares,
+        true,
+        true,
+    );
+    let with_approval = crate::host::workflow_agent::project_workflow_system_prompt(
+        &frozen,
+        &approval_capabilities,
+        skills.as_ref(),
+        "/tmp",
+    );
+    assert!(
+        with_approval.contains("Human-in-the-Loop (HITL)"),
+        "审批通道有效时 workflow prompt 保留 10_hitl（按有效模式而非执行类型判定）"
     );
 }

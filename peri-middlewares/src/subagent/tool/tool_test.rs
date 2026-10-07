@@ -785,6 +785,8 @@ mod resume_failure_test;
 mod resume_integration_test;
 #[path = "tool_test/resume_test.rs"]
 mod resume_test;
+#[path = "tool_test/sections_parity_test.rs"]
+mod sections_parity_test;
 #[path = "tool_test/session_isolation_test.rs"]
 mod session_isolation_test;
 

@@ -363,6 +363,15 @@ impl PermissionMiddleware {
         }
     }
 
+    /// 审批通道是否有效（H2 有效模式判定）。
+    ///
+    /// `disabled()`（无 broker、无 mode）为 false：工具调用直接放行，声明
+    /// 10_hitl 会让模型等待永不到来的审批，因此不声明该段——「存在不等于需要
+    /// 审批说明」，装配事实之外还要看持有者的有效模式。
+    pub fn approval_active(&self) -> bool {
+        self.broker.is_some() || self.mode.is_some()
+    }
+
     /// 创建带共享权限模式的 HITL 中间件
     pub fn with_shared_mode(
         broker: Arc<dyn UserInteractionBroker>,
@@ -640,7 +649,14 @@ impl Middleware for PermissionMiddleware {
     }
 
     /// 声明持有的系统提示词段落（10_hitl，内容载体；装配期收集，契约 2）。
+    ///
+    /// 有效模式判定（H2）：审批通道无效（`disabled()`——无 broker、无 mode）
+    /// 时不声明 10_hitl，与 `prompt_policy::collect_prompt_sections` 的能力
+    /// 投影同源；workflow 链的 disabled 实例因此不会向模型声明审批机制。
     fn prompt_sections(&self) -> Vec<PromptSection> {
+        if !self.approval_active() {
+            return Vec::new();
+        }
         Self::sections_for_disabled(&self.prompt_disabled_builtin)
     }
 

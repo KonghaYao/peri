@@ -414,6 +414,9 @@ pub(super) async fn resume_subagent_impl(
             disabled_middlewares: saved.disabled_middlewares.iter().cloned().collect(),
             built_in_subagents_enabled: saved.built_in_subagents_enabled,
         },
+        // 子 resume metadata 目前不携带运行环境快照（M3 归组）；恢复不重探
+        // 本地值冒充，派生新 prompt 时按 unavailable 显式标记（H3）。
+        runtime_env: None,
     };
     let ceiling = saved.tool_ceiling.clone();
     let configured_filter = tool_filter;

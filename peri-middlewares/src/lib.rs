@@ -39,6 +39,8 @@ pub mod permission;
 /// 部署能力平面（唯一事实源）：MCP 装配与本地进程能力查询入口。
 pub(crate) mod platform;
 pub mod plugin;
+/// 段落能力策略（H2 单一权威）：由实际装配事实派生系统提示词段落集合。
+pub mod prompt_policy;
 pub mod workspace_io;
 pub use plugin::{
     AvailablePlugin, ClaudeSettings, CommandEntry, CommandProvider, CommandSource, InstallScope,

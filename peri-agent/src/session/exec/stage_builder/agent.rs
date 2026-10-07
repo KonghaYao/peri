@@ -65,8 +65,9 @@ pub(crate) fn build_agent(
     retry_events.set(Some(Arc::clone(&event_handler)));
 
     // Capture system_prompt before it may be overridden below (for SubAgent fork reuse).
-    // 16_workflow 已删除（C2）：子面向 prompt 与主 prompt 字节相同（无二次
-    // 渲染版本），直接复用主 prompt。
+    // 16_workflow 已删除（C2）：不再有独立子面向版本；ACP 注入的
+    // `system_builder` 会按子链能力投影重建 prompt（H2），本字段是
+    // overrides 未命中时的基础来源。
     let system_prompt_for_sub = system_prompt.clone();
 
     // 应用 agent overrides 到系统提示词

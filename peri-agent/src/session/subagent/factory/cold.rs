@@ -508,6 +508,9 @@ impl super::SessionFactory {
                 disabled_middlewares: metadata.disabled_middlewares.iter().cloned().collect(),
                 built_in_subagents_enabled: metadata.built_in_subagents_enabled,
             },
+            // 冷恢复 metadata 不携带运行环境快照（M3 归组）；恢复不重探本地值
+            // 冒充历史环境，派生新 prompt 时按 unavailable 显式标记（H3）。
+            runtime_env: None,
         };
         let mut inherited = snapshot.inherited;
         inherited.flags.extend(snapshot.flags);

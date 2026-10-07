@@ -16,6 +16,12 @@ fn make_frozen() -> FrozenSessionData {
             disabled_middlewares,
             built_in_subagents_enabled: false,
         },
+        // H3：冻结运行环境随快照持久化。
+        runtime_env: Some(peri_acp_types::frozen::FrozenRuntimeEnv {
+            platform: "macos".to_string(),
+            os_version: "macOS 26.5.1".to_string(),
+            is_git_repo: true,
+        }),
     };
     FrozenSessionData::from_frozen_parts(context, Some(Arc::from("local-v1")))
 }
@@ -35,6 +41,31 @@ fn test_frozen_snapshot_roundtrip_preserves_all_fields() {
     assert_eq!(restored.date(), original.date());
     assert_eq!(restored.language(), original.language());
     assert_eq!(restored.meta_harness(), original.meta_harness());
+    // H3：运行环境快照逐字段往返（platform / os_version / is_git_repo）。
+    assert_eq!(restored.runtime_env(), original.runtime_env());
+}
+
+/// H3 旧数据策略：V1 旧 blob（无 `runtime_env` 键）仍可解码，结构化环境值
+/// 标记 unavailable（`None`），不得重探本地值冒充。
+#[test]
+fn test_frozen_snapshot_v1_without_runtime_env_decodes_as_unavailable() {
+    let raw = r#"{"version":1,"data":{
+        "system_prompt":"system-v1",
+        "claude_md":"claude-v1",
+        "claude_local_md":null,
+        "skill_summary":"skills-v1",
+        "date":"2026-09-01",
+        "language":null,
+        "meta_harness":{"section_overrides":{},"disabled_middlewares":[],"built_in_subagents_enabled":true}
+    }}"#;
+    let restored = decode_frozen_snapshot(raw).expect("旧 V1 blob 必须可读");
+    assert_eq!(
+        restored.runtime_env(),
+        None,
+        "缺少结构化环境值 = unavailable"
+    );
+    assert_eq!(restored.date(), "2026-09-01");
+    assert_eq!(restored.system_prompt(), "system-v1");
 }
 
 #[test]

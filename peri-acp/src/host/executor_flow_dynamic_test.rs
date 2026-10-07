@@ -524,7 +524,9 @@ async fn test_production_stage_keeps_empty_frozen_prompt_inputs_after_late_files
     .expect("真实 loop 不得挂起");
 
     assert!(matches!(loop_result, LoopResult::Completed));
-    let contributions = chain.collect_prompt_contributions();
+    let contributions = chain
+        .collect_prompt_contributions()
+        .expect("contributions 收集不得因 reserved marker 失败");
     assert!(
         !contributions.contains("LATE_CLAUDE_MARKER"),
         "{contributions}"

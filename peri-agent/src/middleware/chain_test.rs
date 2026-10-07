@@ -1252,3 +1252,79 @@ async fn test_first_turn_reminder_error_short_circuits() {
     let result = chain.run_first_turn_reminders(&mut state).await;
     assert!(result.is_err(), "应返回错误");
 }
+
+// ─── M1：prompt contribution 收集（分隔符 + reserved marker 校验）──────────
+
+/// 贡献中间件：按名返回固定 prompt_contribution。
+struct ContributionStub {
+    name: &'static str,
+    contribution: Option<String>,
+}
+
+#[async_trait]
+impl Middleware for ContributionStub {
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    fn prompt_contribution(&self) -> Option<String> {
+        self.contribution.clone()
+    }
+}
+
+/// M1：非空贡献统一以空行连接（调用方不再补分隔符）；空贡献被跳过。
+#[test]
+fn contributions_are_joined_with_blank_line() {
+    let mut chain = MiddlewareChain::new();
+    chain.add(Box::new(ContributionStub {
+        name: "First",
+        contribution: Some("FIRST-BODY".to_string()),
+    }));
+    chain.add(Box::new(ContributionStub {
+        name: "Empty",
+        contribution: Some(String::new()),
+    }));
+    chain.add(Box::new(ContributionStub {
+        name: "Second",
+        contribution: Some("SECOND-BODY".to_string()),
+    }));
+    chain.add(Box::new(ContributionStub {
+        name: "None",
+        contribution: None,
+    }));
+
+    let collected = chain.collect_prompt_contributions().expect("合法贡献");
+    assert_eq!(collected, "FIRST-BODY\n\nSECOND-BODY");
+}
+
+/// M1：单个贡献原样返回（无前导/尾随分隔符）。
+#[test]
+fn single_contribution_has_no_added_separator() {
+    let mut chain = MiddlewareChain::new();
+    chain.add(Box::new(ContributionStub {
+        name: "Only",
+        contribution: Some("ONLY-BODY".to_string()),
+    }));
+    assert_eq!(
+        chain.collect_prompt_contributions().expect("合法贡献"),
+        "ONLY-BODY"
+    );
+}
+
+/// M1：含 reserved boundary token 的贡献返回带来源的错误——不静默剥离内容，
+/// 也不继续构造歧义请求。
+#[test]
+fn contribution_with_reserved_boundary_token_fails_with_source() {
+    let token = peri_model::prompt_cache::SYSTEM_PROMPT_DYNAMIC_BOUNDARY;
+    let mut chain = MiddlewareChain::new();
+    chain.add(Box::new(ContributionStub {
+        name: "Poisoned",
+        contribution: Some(format!("BEFORE{token}AFTER")),
+    }));
+
+    let error = chain
+        .collect_prompt_contributions()
+        .expect_err("非法贡献必须显式失败");
+    assert_eq!(error.middleware(), "Poisoned");
+    assert!(error.to_string().contains("Poisoned"));
+}

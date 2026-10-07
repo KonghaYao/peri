@@ -269,3 +269,43 @@ async fn workflow_shell_tool_face_is_the_workspace_bridge() {
         1
     );
 }
+
+/// H2 对拍：**workflow 链能力事实与真实装配结果一致**（含有效模式）。
+///
+/// 装配点 broker / permission_mode 恒 None ⇒ 链上 `PermissionMiddleware::disabled()`
+/// ⇒ 真实链的段落声明里没有 10_hitl；policy 必须给出同样的审批无效事实，且
+/// 关闭任一持有者后两侧同步消失。
+#[test]
+fn workflow_capability_policy_matches_real_assembly() {
+    use crate::prompt_policy::workflow_chain_capabilities;
+    use peri_agent::middleware::prompt_sections::SectionCapabilities;
+
+    let factory = default_workflow_middleware_factory();
+    for disabled in [
+        Vec::<&str>::new(),
+        vec!["SkillsMiddleware"],
+        vec!["PermissionMiddleware"],
+        vec!["AgentsMdMiddleware", "GitAttributionMiddleware"],
+    ] {
+        let set: std::collections::HashSet<String> =
+            disabled.iter().map(|key| key.to_string()).collect();
+        let ctx = workflow_context_with_disabled(&disabled);
+        let broker_present = ctx.broker.is_some();
+        let permission_mode_present = ctx.permission_mode.is_some();
+        let mut chain = peri_agent::middleware::chain::MiddlewareChain::new();
+        for middleware in factory.build_middlewares(&ctx, "contract-model", &[], None) {
+            chain.add(middleware);
+        }
+
+        let facts = SectionCapabilities::from_sections(&chain.collect_prompt_sections());
+        let expected = workflow_chain_capabilities(&set, broker_present, permission_mode_present);
+        assert_eq!(facts.approval, expected.approval, "disabled={disabled:?}");
+        assert_eq!(facts.ask_user, expected.ask_user, "disabled={disabled:?}");
+        assert_eq!(facts.subagent, expected.subagent, "disabled={disabled:?}");
+        assert_eq!(facts.skills, expected.skills, "disabled={disabled:?}");
+        assert!(
+            !facts.approval,
+            "workflow 装配点无 broker/mode：disabled 实例不得声明审批段（disabled={disabled:?}）"
+        );
+    }
+}

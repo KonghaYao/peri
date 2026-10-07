@@ -217,6 +217,9 @@ pub(super) fn inherited_frozen_context(
         meta_harness: parent
             .map(|p| p.store().frozen.meta_harness.clone())
             .unwrap_or_default(),
+        // 冻结运行环境同样随父 session 复制：子 Agent 只消费继承的冻结输入，
+        // 不在恢复/派生时重探（H3）。
+        runtime_env: parent.and_then(|p| p.store().frozen.runtime_env.clone()),
     }
 }
 

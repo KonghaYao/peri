@@ -63,9 +63,9 @@ pub(super) fn attach_subagent_host(
             frozen_claude_local_md: frozen_session
                 .claude_local_md()
                 .map(|s| Arc::new(s.to_string())),
-            // 16_workflow 已删除（C2）：子面向 prompt 与主 prompt 字节相同；
-            // 主 session 挂载 host 时恒 None（spawn 主路径从 parent session
-            // 直接读取 frozen system_prompt，不经本字段）。
+            // 16_workflow 已删除（C2）：不再有独立子面向 prompt 字段；
+            // 主 session 挂载 host 时恒 None——子 Agent / fork 的 prompt 由
+            // 注入的 `system_builder` 按子链能力投影重建（H2），不复制父字节。
             frozen_system_prompt: None,
             parent_thread_id: thread_persistence.parent_thread_id.clone(),
             frozen_claude_md: Some(Arc::new(frozen_session.v2_frozen().claude_md.to_string())),

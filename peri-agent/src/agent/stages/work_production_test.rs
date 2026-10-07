@@ -65,7 +65,7 @@ async fn production_full_store_and_native_http_checkpoint_before_model_send_and_
     let reads_for_model = Arc::clone(&reads);
     let model = model.with_system_contribution_provider(Arc::new(move || {
         let sequence = reads_for_model.fetch_add(1, Ordering::SeqCst);
-        format!("dynamic system {sequence}")
+        Ok(format!("dynamic system {sequence}"))
     }));
     let fixture = fixture(Arc::new(model), Vec::new()).await;
     let server = serve(

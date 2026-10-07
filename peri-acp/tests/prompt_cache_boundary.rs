@@ -23,7 +23,7 @@ fn prompt_template_to_anthropic_preserves_cache_seam_and_dynamic_order() {
         ),
     ];
     let rendered = PromptTemplate::new(&MetaHarnessState::default(), &sections).render(
-        &PromptEnv::with_frozen_date("/tmp", "2026-01-01"),
+        &PromptEnv::local_probe("/tmp", "2026-01-01"),
         &AgentCatalogProvider::new(),
     );
     let request = ModelRequest::new(vec![

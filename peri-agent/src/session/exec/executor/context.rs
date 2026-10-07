@@ -102,6 +102,14 @@ impl FrozenSessionData {
     pub fn meta_harness(&self) -> &peri_acp_types::meta_harness::MetaHarnessState {
         &self.v2_frozen.meta_harness
     }
+
+    /// 冻结运行环境快照（H3）；`None` = 旧快照缺少结构化环境值（unavailable）。
+    ///
+    /// 单一事实源为 `v2_frozen.runtime_env`——渲染面只消费该快照，不在调用时
+    /// 重新探测（ARC-FROZEN-001）。
+    pub fn runtime_env(&self) -> Option<&peri_acp_types::frozen::FrozenRuntimeEnv> {
+        self.v2_frozen.runtime_env.as_ref()
+    }
 }
 
 /// Langfuse 遥测注入面（L5：ACP 宿主从 `LangfuseSession` 构造；None = 禁用）。

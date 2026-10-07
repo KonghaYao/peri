@@ -433,8 +433,20 @@ impl AgentExecutor for WorkflowAgentExecutor {
             .map(|t| Arc::from(t) as Arc<dyn crate::tools::BaseTool>)
             .collect();
 
-        // 收集中间件 prompt_contribution，合并到 system_prompt
-        let contributions = chain.collect_prompt_contributions();
+        // 收集中间件 prompt_contribution，合并到 system_prompt。
+        // M1：收集器统一分隔符并校验 reserved boundary token；非法贡献在组合
+        // 边界显式失败（带来源），不静默剥离。
+        // 注：workflow 的手工拼接与请求时 provider 化归 M4（B 组）——本次只做
+        // 准入错误处理，保持字节语义不变。
+        let contributions = match chain.collect_prompt_contributions() {
+            Ok(contributions) => contributions,
+            Err(error) => {
+                return AgentRunResult::Dead {
+                    reason: Some("contribution-invalid".into()),
+                    detail: Some(error.to_string()),
+                };
+            }
+        };
         let system_prompt = if contributions.is_empty() {
             system_prompt
         } else {

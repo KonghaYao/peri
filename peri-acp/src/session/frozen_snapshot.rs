@@ -35,6 +35,10 @@ struct FrozenSnapshotV1 {
     date: String,
     language: Option<String>,
     meta_harness: MetaHarnessSnapshotV1,
+    /// 冻结运行环境（H3）。V1 的可选加性字段：旧 blob 没有该键 → `None`
+    /// （unavailable，不重探本地值冒充）；新 blob 写入结构化环境快照。
+    #[serde(default)]
+    runtime_env: Option<peri_acp_types::frozen::FrozenRuntimeEnv>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -66,6 +70,7 @@ pub(crate) fn encode_frozen_snapshot(
                 disabled_middlewares: meta.disabled_middlewares.iter().cloned().collect(),
                 built_in_subagents_enabled: meta.built_in_subagents_enabled,
             },
+            runtime_env: frozen.runtime_env().cloned(),
         },
     };
     serde_json::to_string(&envelope).map_err(FrozenSnapshotError::Invalid)
@@ -103,6 +108,9 @@ pub(crate) fn decode_frozen_snapshot(raw: &str) -> Result<FrozenSessionData, Fro
         date: Arc::from(data.date),
         language: data.language.map(Arc::from),
         meta_harness,
+        // 旧 blob 缺该键（`#[serde(default)]`）→ None = unavailable；不重探
+        // 本地环境冒充历史快照（H3 旧数据策略）。
+        runtime_env: data.runtime_env,
     };
     Ok(FrozenSessionData::from_frozen_parts(
         frozen,

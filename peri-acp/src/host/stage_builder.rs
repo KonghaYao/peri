@@ -53,7 +53,10 @@ use peri_agent::session::factory::{
 // 渲染面收集（middlewares 段声明）位于 ACP 宿主装配面 session/mod.rs
 // （§0 边 2 豁免），本模块只消费收集结果，不触碰 middlewares
 use crate::prompt::{PromptEnv, PromptTemplate};
-use crate::session::build_collected_sections;
+use crate::session::{
+    build_collected_sections, build_collected_sections_with_capabilities,
+    subagent_chain_capabilities,
+};
 
 /// 从投影型 [`SessionContext`] 构造 [`StageBuildInput`] 并调用 peri_agent 正式
 /// `build_stage_context`（stage 装配本体，`peri-agent/src/session/exec/stage_builder.rs`）。
@@ -158,13 +161,16 @@ pub(crate) fn build_stage_context(
         // 同源注入；修复 --agent override 路径语言段丢失的历史不一致）
         let language = frozen.language.as_ref().map(|s| s.to_string());
         let frozen_date = frozen.date.to_string();
+        // 冻结运行环境（H3）：重渲染只消费快照；旧快照缺失时标记 unavailable，
+        // 不在调用点重新探测（`.git` 状态/平台探测不得漂移）。
+        let frozen_runtime_env = frozen.runtime_env.clone();
         Arc::new(move |ov: Option<&AgentOverrides>, cwd: &str| {
-            // 波 4 演进（C2/C3）：收集结果 = 渲染面静态声明（冻结 disabled
-            // 集合 + overrides + 冻结语言驱动）——与链收集同一事实源，禁止
-            // 双轨。
+            // 波 4 演进（C2/C3）：收集结果 = 能力事实（冻结 disabled
+            // 集合 + 主链装配条件）驱动的段落集合——与链收集同一事实源，
+            // 禁止双轨。
             let collected = build_collected_sections(&meta_harness, ov, language.as_deref());
             let template = PromptTemplate::new(&meta_harness, &collected);
-            let env = PromptEnv::with_frozen_date(cwd, &frozen_date);
+            let env = PromptEnv::frozen(cwd, &frozen_date, frozen_runtime_env.as_ref());
             template.render(&env, agent_catalog.as_ref())
         })
     };
@@ -177,16 +183,28 @@ pub(crate) fn build_stage_context(
         let agent_catalog_for_sub = Arc::clone(&ctx.agent_catalog);
         // 冻结期 MetaHarness 状态（与主重渲染同源；禁止回退默认空状态）。
         let meta_harness_for_sub = frozen.meta_harness.clone();
+        // 子链能力事实（H2）：子链不装配审批 / 提问 / 子代理持有者——子 Agent
+        // （定义型 / fork）不得收到 10_hitl / 12_ask_user / 11_subagent 声明；
+        // 基础段与语言段继承会话冻结决策，13_skills 按子链 SkillsMiddleware。
+        let capabilities_for_sub =
+            subagent_chain_capabilities(&meta_harness_for_sub.disabled_middlewares);
+        // 冻结运行环境（H3）：子 Agent 重渲染同样只消费快照。
+        let frozen_runtime_env_for_sub = frozen.runtime_env.clone();
         Arc::new(move |overrides: Option<&AgentOverrides>, cwd_dir: &str| {
             // C2：收集结果在调用期按 overrides 计算（persona 段内容依赖
             // overrides；与主重渲染同一事实源）。
-            let collected = build_collected_sections(
+            let collected = build_collected_sections_with_capabilities(
                 &meta_harness_for_sub,
                 overrides,
                 frozen_language_for_sub.as_deref(),
+                &capabilities_for_sub,
             );
             let t = PromptTemplate::new(&meta_harness_for_sub, &collected);
-            let env = PromptEnv::with_frozen_date(cwd_dir, &frozen_date_for_sub);
+            let env = PromptEnv::frozen(
+                cwd_dir,
+                &frozen_date_for_sub,
+                frozen_runtime_env_for_sub.as_ref(),
+            );
             t.render(&env, agent_catalog_for_sub.as_ref())
         })
     };

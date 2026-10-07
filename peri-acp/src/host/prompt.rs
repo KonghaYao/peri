@@ -302,6 +302,20 @@ pub(crate) async fn run_prompt(
     // MetaHarness：从会话冻结数据投影（ARC-FROZEN-001——禁止从每 turn 的
     // 当前配置重建）。设计 §2.5-2.6：装配与 workflow 渲染统一消费冻结状态。
     let meta_harness = frozen.meta_harness().clone();
+    // H2：workflow agent 链能力事实 + 按能力投影的 system prompt（本 turn 级
+    // 构造点的 broker/permission_mode 恒 None ⇒ 审批通道无效）。基础段 / 语言
+    // 与冻结决策同源，运行环境消费冻结快照（H3）。
+    let workflow_capabilities = crate::host::workflow_agent::workflow_capabilities(
+        &meta_harness.disabled_middlewares,
+        false,
+        false,
+    );
+    let workflow_system_prompt = crate::host::workflow_agent::project_workflow_system_prompt(
+        &frozen,
+        &workflow_capabilities,
+        agent_catalog.as_ref(),
+        &cwd,
+    );
 
     // Create workflow executor (enables Workflow tool for multi-agent orchestration)
     // GAP-05: inject frozen data so workflow agents reuse SubAgent infra
@@ -331,8 +345,8 @@ pub(crate) async fn run_prompt(
             cancel: Some(cancel.clone()),
             // 无 16_workflow 版本（P2-2026-08-02）：workflow agent 链不
             // 注册 WorkflowTool，不得复用带 workflow 声明的主 prompt。
-            // （16_workflow 已删除（C2），主 prompt 即子面向唯一版本。）
-            system_prompt: Some(frozen.system_prompt().to_string()),
+            // （16_workflow 已删除（C2）；H2：按 workflow 能力投影重建。）
+            system_prompt: Some(workflow_system_prompt.clone()),
             broker: None,
             permission_mode: None,
             frozen_date: Some(frozen.date().to_string()),
@@ -342,6 +356,8 @@ pub(crate) async fn run_prompt(
             agent_prompt_builder: crate::host::workflow_agent::build_workflow_agent_prompt_builder(
                 Arc::clone(&agent_catalog),
                 meta_harness.clone(),
+                workflow_capabilities,
+                frozen.runtime_env().cloned(),
             ),
             model_factory: crate::host::workflow_agent::build_model_factory(provider, peri_config),
             middleware_factory: Arc::clone(workflow_middleware_factory),
@@ -349,6 +365,8 @@ pub(crate) async fn run_prompt(
                 crate::host::workflow_agent::build_workflow_system_prompt_fallback(
                     Arc::clone(&agent_catalog),
                     meta_harness.clone(),
+                    workflow_capabilities,
+                    frozen.runtime_env().cloned(),
                 ),
             forwarder_launcher: crate::host::workflow_agent::build_workflow_forwarder_launcher(),
             publish_hook: Some(crate::host::workflow_agent::build_publish_hook(controller)),

@@ -20,6 +20,7 @@ use crate::{
         BaseMessage, ContentBlock, DocumentSource, ImageSource, MessageContent, MessageId,
         ToolCallRequest,
     },
+    middleware::PromptContributionError,
     tools::BaseTool,
 };
 
@@ -32,7 +33,11 @@ pub struct AgentModelBridge {
 }
 
 /// 构造模型请求时同步读取当前 middleware prompt contribution 的 provider。
-pub(crate) type SystemContributionProvider = Arc<dyn Fn() -> String + Send + Sync>;
+///
+/// 返回当前贡献（非空贡献已按 `\n\n` 连接）或带来源的准入错误——provider
+/// 边界负责把错误显式上抛，不静默剥离非法内容（M1）。
+pub(crate) type SystemContributionProvider =
+    Arc<dyn Fn() -> Result<String, PromptContributionError> + Send + Sync>;
 
 impl AgentModelBridge {
     pub fn new(model: Arc<dyn Model>) -> Self {
@@ -154,10 +159,13 @@ impl AgentModelBridge {
         tools: &[&dyn BaseTool],
     ) -> AgentResult<ModelRequest> {
         let mut messages = Self::convert_messages(messages)?;
-        let dynamic = self
-            .system_contribution_provider
-            .as_ref()
-            .map(|provider| provider());
+        let dynamic = match self.system_contribution_provider.as_ref() {
+            Some(provider) => Some(provider().map_err(|error| AgentError::MiddlewareError {
+                middleware: error.middleware().to_string(),
+                reason: error.to_string(),
+            })?),
+            None => None,
+        };
         let system = match dynamic.as_deref() {
             Some(dynamic) => combine_system_prompt_with_dynamic(self.system.as_deref(), dynamic),
             None => self.system.clone(),
