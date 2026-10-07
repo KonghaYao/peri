@@ -55,9 +55,6 @@ impl ShellExecutor for LocalShellExecutor {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        #[cfg(unix)]
-        cmd.process_group(0);
-
         execution.prepare(&mut cmd)?;
         let mut child = match cmd.spawn() {
             Ok(c) => c,

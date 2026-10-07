@@ -97,6 +97,12 @@
   审批判定必须依据已绑定的工具来源和原始工具身份：builtin 权限只适用于对应 builtin 绑定；外部或未知 MCP 即使原名恰为 `Read`、`Write`、`Bash` 等也不能继承 builtin 权限，并继续使用保守审批。`system_mcp_tools` 选中项以原始名作为模型可见名。历史 builtin 前缀名可供持久历史显示及配置/过滤匹配归一，但不是可调用别名；新请求只注册当前模型可见名。归一不得改写事件载荷、transcript 与 MCP wire 上的原始名字。
 - **Verify**：`cargo test -p peri-middlewares --lib permission`；`cargo test -p peri-middlewares --lib hitl`；`cargo test -p peri-middlewares --lib assembly::tests`；`cargo test -p peri-acp --lib -- broker::transport_broker`；`cargo test -p peri-middlewares --lib -- tools::ask_user_tool`；`cargo test -p peri-tui --lib -- acp_client::interaction_response`；`cargo test -p peri-tui --test print_exit -- ask_user_unanswered`；`cargo test -p peri-tui --lib -- acp_client::client::reverse_tests`；`cargo test -p peri-tui --bin peri -- cli_print`；`cargo test -p peri-tui --lib acp_notifier`；`cargo test -p peri-tui --lib acp_bridge`；`cargo test -p peri-tui --lib acp_events`；检查 `peri-acp-types/src/meta_harness.rs` 的 section holder、两张名单（`MIDDLEWARE_NAMES` / `BUILTIN_INSTANCE_POLICY_KEYS`）与 tool 清单（`MIDDLEWARE_TOOL_NAMES`）、`peri-agent/src/session/factory.rs` 的 `[Permission, AskUser, SubAgent]` 蓝本，并检查 `AcpTransportBroker::request` 的 AutoApprove 锁前返回与完整转发 context guard。
 
+### ARC-PROCESS-TERMINAL-001
+
+- **Scope**：Unix 非交互工具、command hook、MCP stdio 与 JavaScript runtime 的受管理子进程。
+- **Rule**：受管理子进程在执行用户命令及 broker 登记前建立独立 OS session 和专属进程组，不继承宿主控制终端；仅重定向 stdin/stdout/stderr 或调用 `setpgid` 不满足该隔离。隔离与 broker 登记失败须使启动失败，不得回落到共享控制终端，也不得通过忽略宿主 `SIGTTIN` 掩盖前台身份错误。标准 IO 仍由协议/tool adapter 显式配置；该隔离不禁止子进程主动创建终端或脱组，不构成安全沙箱。进程组所有权、broker anchor 与实际退出证明保留既有生命周期语义，发送终止信号不等于已停止。真正交互执行须使用独立 PTY，不把宿主 TUI 控制终端交给非交互子进程。
+- **Verify**：`./scripts/cargo-rmcp-patched.sh test --locked -p peri-process`；`peri-process/tests/pty_isolation.rs` 验证同步/异步准备及 broker 路径下子进程不能打开宿主 `/dev/tty`、前台 PGID 保持、宿主仍可读 PTY，并在可用时执行不读取用户配置的交互式 zsh；相关 Shell、hook 与 MCP owner 的取消/关闭回归同步验证。Windows Job 生命周期保持原契约；非本机目标的交叉编译不能替代运行验收。
+
 ### ARC-STDIO-001
 
 - **Scope**：ACP stdio/IDE transport 与统一 host。

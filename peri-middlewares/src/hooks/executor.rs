@@ -107,8 +107,6 @@ pub async fn execute_command_hook_owned(
             cmd.env(env_key, value.to_string());
         }
 
-        #[cfg(unix)]
-        cmd.process_group(0);
         execution.prepare(&mut cmd)?;
         let mut child = cmd.spawn()?;
         if let Err(error) = execution.attach(&child) {

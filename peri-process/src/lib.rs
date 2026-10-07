@@ -1,5 +1,7 @@
 //! OS subprocess ownership shared by shell, MCP and JavaScript transports.
 //! A termination request is not completion; owners must wait for actual group/job exit.
+//! Unix commands start in a new session without an inherited controlling terminal.
+//! Stdio descriptors remain the caller's responsibility; session isolation is not FD isolation.
 //! Unix descendants that deliberately leave the group are outside this ownership boundary.
 
 use std::io;
@@ -8,10 +10,12 @@ use tokio::process::{Child, Command};
 
 #[cfg(unix)]
 mod broker;
+#[cfg(unix)]
+mod unix;
 #[cfg(windows)]
 mod windows;
 
-/// One dedicated Unix process group or Windows Job, prepared before child execution.
+/// One dedicated Unix session/process group or Windows Job, prepared before child execution.
 /// Keep this owner until `wait_for_exit` completes; Drop only requests termination.
 /// This is a lifecycle primitive, not a sandbox preventing Unix setsid/setpgid.
 pub struct ProcessTree {
@@ -39,23 +43,23 @@ impl ProcessTree {
         })
     }
 
+    /// Prepare non-interactive execution without changing the caller's stdio configuration.
+    /// Unix session isolation precedes broker registration and preserves a dedicated PGID.
+    /// Call once per command: repeated preparation is not idempotent and fails at spawn on Unix.
+    /// Use a new owner for each attached process tree.
     pub fn prepare(&self, command: &mut Command) {
         command.kill_on_drop(true);
         #[cfg(unix)]
-        command.process_group(0);
-        #[cfg(unix)]
-        if let Some(broker) = &self.broker {
-            broker.prepare(command);
-        }
+        self.prepare_std(command.as_std_mut());
         #[cfg(windows)]
         command.creation_flags(windows_sys::Win32::System::Threading::CREATE_SUSPENDED);
     }
 
     /// Prepare a synchronous Unix subprocess through the same broker protocol.
+    /// Session isolation, stdio ownership and single-preparation rules match [`Self::prepare`].
     #[cfg(unix)]
     pub fn prepare_std(&self, command: &mut std::process::Command) {
-        use std::os::unix::process::CommandExt;
-        command.process_group(0);
+        unix::prepare(command);
         if let Some(broker) = &self.broker {
             broker.prepare_std(command);
         }

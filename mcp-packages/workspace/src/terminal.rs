@@ -489,9 +489,6 @@ impl BashTool {
             .stderr(Stdio::piped());
         // Promotion moves the Child; cancellation drops it and must stop the leader.
         cmd.kill_on_drop(true);
-        #[cfg(unix)]
-        cmd.process_group(0);
-
         execution.prepare(&mut cmd)?;
         let child = match cmd.spawn() {
             Ok(c) => c,

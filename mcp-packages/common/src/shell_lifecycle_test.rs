@@ -179,6 +179,41 @@ async fn test_timed_out_shell_can_close_cleanly() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn test_shell_guard_detaches_session_before_command_execution() {
+    use std::os::unix::process::CommandExt;
+
+    let manager = crate::create_local_task_manager();
+    let mut execution =
+        ShellExecutionGuard::new(Some(manager.begin_external_execution("workspace").unwrap()));
+    let mut command = shell_command("printf isolated", &[]);
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    execution.prepare(&mut command).unwrap();
+    let host_session = unsafe { libc::getsid(0) };
+    unsafe {
+        command.as_std_mut().pre_exec(move || {
+            let session = libc::getsid(0);
+            if session == host_session || session != libc::getpgrp() {
+                return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
+            }
+            Ok(())
+        });
+    }
+    let child = command.spawn().unwrap();
+    execution.attach(&child).unwrap();
+    let output = child.wait_with_output().await.unwrap();
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"isolated");
+    execution.wait_for_exit().await;
+    execution.confirm_stopped();
+    drop(execution);
+    assert_eq!(manager.shutdown().await, TaskShutdownReport::Complete);
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn test_shutdown_reaps_child_owned_by_dropped_shell_guard() {
     let manager = crate::create_local_task_manager();
     let mut execution =
@@ -216,7 +251,7 @@ async fn test_rejected_promoted_task_settles_registered_process_after_cleanup() 
     let mut execution =
         ShellExecutionGuard::new(Some(manager.begin_external_execution("workspace").unwrap()));
     let mut command = shell_command("sleep 60", &[]);
-    command.process_group(0).kill_on_drop(true);
+    command.kill_on_drop(true);
     execution.prepare(&mut command).unwrap();
     let mut child = command.spawn().unwrap();
     execution.attach(&child).unwrap();

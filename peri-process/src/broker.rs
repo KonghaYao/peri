@@ -6,8 +6,6 @@ use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::time::Duration;
 
-use tokio::process::Command;
-
 const SOCKET_ENV: &str = "PERI_PROCESS_BROKER_SOCKET";
 const TOKEN_ENV: &str = "PERI_PROCESS_BROKER_TOKEN";
 const ACK: u8 = 0x06;
@@ -45,10 +43,6 @@ impl Registration {
             return Err(io::Error::other("process broker rejected registration"));
         }
         Ok(Self { stream })
-    }
-
-    pub(super) fn prepare(&self, command: &mut Command) {
-        self.prepare_std(command.as_std_mut());
     }
 
     pub(super) fn prepare_std(&self, command: &mut std::process::Command) {
@@ -184,46 +178,5 @@ fn read_exact_fd(fd: libc::c_int, mut bytes: &mut [u8]) -> io::Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::os::unix::net::UnixListener;
-
-    #[tokio::test]
-    async fn child_registers_before_exec_and_uses_dedicated_group() {
-        let directory = tempfile::tempdir().unwrap();
-        let socket = directory.path().join("broker.sock");
-        let listener = UnixListener::bind(&socket).unwrap();
-        let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut hello = [0_u8; 65];
-            stream.read_exact(&mut hello).unwrap();
-            assert_eq!(hello[0], b'B');
-            stream.write_all(&[ACK]).unwrap();
-            let mut registered = [0_u8; 5];
-            stream.read_exact(&mut registered).unwrap();
-            assert_eq!(registered[0], b'P');
-            let pid = u32::from_le_bytes(registered[1..].try_into().unwrap());
-            assert_eq!(unsafe { libc::getpgid(pid as i32) }, pid as i32);
-            stream.write_all(&[ACK]).unwrap();
-            let mut settled = [0_u8; 1];
-            stream.read_exact(&mut settled).unwrap();
-            assert_eq!(settled[0], b'E');
-            assert_eq!(
-                unsafe { libc::kill(-(pid as i32), 0) },
-                0,
-                "anchor must reserve PGID until broker releases it"
-            );
-            stream.write_all(&[ACK]).unwrap();
-            pid
-        });
-        let registration = Registration::connect(&socket, &"a".repeat(64)).unwrap();
-        let mut command = Command::new("sh");
-        command.arg("-c").arg("exit 0");
-        command.process_group(0);
-        registration.prepare(&mut command);
-        let mut child = command.spawn().unwrap();
-        let pid = child.id().unwrap();
-        assert_eq!(server.join().unwrap(), pid);
-        assert!(child.wait().await.unwrap().success());
-    }
-}
+#[path = "broker_test.rs"]
+mod tests;
