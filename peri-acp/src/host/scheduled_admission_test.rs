@@ -93,7 +93,7 @@ async fn registered_cron_fixture(
         .unwrap();
     let executable = std::env::split_paths(&std::env::var_os("PATH").unwrap())
         .filter(|path| path.is_absolute())
-        .map(|path| path.join("bun"))
+        .map(|path| path.join(if cfg!(windows) { "bun.exe" } else { "bun" }))
         .find(|path| path.is_file())
         .expect("real scheduled SDK gate requires Bun");
     let module = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

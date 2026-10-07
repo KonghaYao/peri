@@ -299,7 +299,7 @@ async fn real_sdk_sqlite_unknown_execution_keeps_slot_and_blocks_duplicate_with_
 fn launcher(database: PathBuf, generation: &str) -> SdkDispatcherLaunch {
     let executable = std::env::split_paths(&std::env::var_os("PATH").unwrap())
         .filter(|directory| directory.is_absolute())
-        .map(|directory| directory.join("bun"))
+        .map(|directory| directory.join(if cfg!(windows) { "bun.exe" } else { "bun" }))
         .find(|candidate| candidate.is_file())
         .expect("real SDK JSONL gate requires Bun");
     let module = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
