@@ -857,6 +857,8 @@ mod resume_dispatch_cases;
 #[path = "subagent/close_lifecycle_test.rs"]
 mod close_lifecycle_cases;
 
+#[path = "subagent/child_wire_capture_test.rs"]
+mod child_wire_capture_test;
 #[path = "subagent/provenance_test.rs"]
 mod provenance_tests;
 async fn create_bound_root(
