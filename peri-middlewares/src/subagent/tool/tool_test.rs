@@ -368,22 +368,25 @@ async fn invoke_resolves_agent_from_argument_cwd_before_starting_factory() {
     .unwrap();
     let factory_calls = Arc::new(AtomicUsize::new(0));
     let factory_calls_clone = Arc::clone(&factory_calls);
-    let tool = with_agent_face(
-        SubAgentTool::new(
-            Arc::new(Vec::new()),
-            None,
-            Arc::new(move |_| {
-                factory_calls_clone.fetch_add(1, Ordering::SeqCst);
-                crate::subagent::test_support::fixture_source(
-                    std::sync::Arc::new(EchoLLM),
-                    "fixture-scripted",
-                )
-            }),
-            dir.path().to_str().unwrap().to_string(),
-        ),
-        dir.path(),
-    )
-    .await;
+    let host = DurableHost::open_in(dir.path(), "fixture-tool-test-resolve").await;
+    let tool = host.bind(
+        with_agent_face(
+            SubAgentTool::new(
+                Arc::new(Vec::new()),
+                None,
+                Arc::new(move |_| {
+                    factory_calls_clone.fetch_add(1, Ordering::SeqCst);
+                    crate::subagent::test_support::fixture_source(
+                        std::sync::Arc::new(EchoLLM),
+                        "fixture-scripted",
+                    )
+                }),
+                dir.path().to_str().unwrap().to_string(),
+            ),
+            dir.path(),
+        )
+        .await,
+    );
     let cwd = dir.path().to_str().unwrap();
 
     // 1) 资源面命中的定义：即使 `cwd` 参数指向别处也能解析（来源由会话绑定）。
@@ -394,7 +397,7 @@ async fn invoke_resolves_agent_from_argument_cwd_before_starting_factory() {
                 "prompt": "from bound face",
                 "cwd": cwd,
             }),
-            peri_agent::tools::ToolContext::new(&[], cwd),
+            host.context(&[]),
         )
         .await
         .unwrap();
@@ -409,7 +412,7 @@ async fn invoke_resolves_agent_from_argument_cwd_before_starting_factory() {
                 "prompt": "typo",
                 "cwd": cwd,
             }),
-            peri_agent::tools::ToolContext::new(&[], cwd),
+            host.context(&[]),
         )
         .await
         .unwrap_err()
@@ -439,22 +442,34 @@ async fn background_invoke_uses_argument_cwd_for_loader_failure() {
     .unwrap();
     let factory_calls = Arc::new(AtomicUsize::new(0));
     let factory_calls_clone = Arc::clone(&factory_calls);
-    let tool = with_agent_face(
-        SubAgentTool::new(
-            Arc::new(Vec::new()),
-            None,
-            Arc::new(move |_| {
-                factory_calls_clone.fetch_add(1, Ordering::SeqCst);
-                crate::subagent::test_support::fixture_source(
-                    std::sync::Arc::new(EchoLLM),
-                    "fixture-scripted",
-                )
-            }),
-            dir.path().to_str().unwrap().to_string(),
-        ),
+    let (bg_tx, _bg_rx) =
+        tokio::sync::mpsc::unbounded_channel::<peri_agent::agent::events::ExecutorEvent>();
+    let registry = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
+    let host = DurableHost::open_in_with_background(
         dir.path(),
+        "fixture-tool-test-bg",
+        Arc::clone(&registry),
+        bg_tx,
     )
     .await;
+    let tool = host.bind(
+        with_agent_face(
+            SubAgentTool::new(
+                Arc::new(Vec::new()),
+                None,
+                Arc::new(move |_| {
+                    factory_calls_clone.fetch_add(1, Ordering::SeqCst);
+                    crate::subagent::test_support::fixture_source(
+                        std::sync::Arc::new(EchoLLM),
+                        "fixture-scripted",
+                    )
+                }),
+                dir.path().to_str().unwrap().to_string(),
+            ),
+            dir.path(),
+        )
+        .await,
+    );
 
     let result = tool
         .invoke(
@@ -464,7 +479,7 @@ async fn background_invoke_uses_argument_cwd_for_loader_failure() {
                 "run_in_background": true,
                 "cwd": dir.path().to_str().unwrap(),
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            host.context(&[]),
         )
         .await
         .unwrap();
@@ -484,7 +499,7 @@ async fn background_invoke_uses_argument_cwd_for_loader_failure() {
                 "run_in_background": true,
                 "cwd": dir.path().to_str().unwrap(),
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            host.context(&[]),
         )
         .await
         .unwrap_err()
@@ -662,6 +677,52 @@ impl SessionFixture {
                 }
             }
         }
+    }
+
+    /// 生命周期变更（close→Reopen）后把子运行时 metadata 重新绑定到新生命周期。
+    ///
+    /// 生产由宿主在重新绑定执行时为新生命周期持久化子身份/授权事实；夹具按同一
+    /// 契约复制既有 metadata，不改写内容、不伪造身份。
+    pub(crate) async fn rebind_child_resume_metadata(
+        &self,
+        child_id: &str,
+        from_lifecycle: u64,
+        to_lifecycle: u64,
+    ) {
+        use peri_acp_types::session_resources::work::{
+            WorkAction, WorkCommand, WorkDecision, WorkQuery,
+        };
+        let snapshot = self
+            .resources
+            .load_session_work(&WorkQuery {
+                session_id: child_id.to_string(),
+                limit: 1,
+            })
+            .await
+            .unwrap();
+        let raw = snapshot
+            .state
+            .child_resume_metadata
+            .get(&from_lifecycle)
+            .cloned()
+            .expect("fixture child resume metadata present for previous lifecycle");
+        // metadata 是生命周期作用域数据：新生命周期必须携带自己的 recipient_lifecycle
+        // （生产由宿主在新绑定时写入同一身份的当轮记录）。
+        let mut metadata: peri_agent::session::subagent::ChildResumeMetadata =
+            serde_json::from_str(&raw).expect("fixture child resume metadata decodes");
+        metadata.recipient_lifecycle = to_lifecycle;
+        let raw = serde_json::to_string(&metadata).unwrap();
+        let command = WorkCommand {
+            session_id: child_id.to_string(),
+            recipient_lifecycle: to_lifecycle,
+            mutation_id: format!("fixture-rebind-child-metadata:{child_id}:{to_lifecycle}"),
+            action: WorkAction::BindChildResumeMetadata {
+                expected_revision: snapshot.state.revision,
+                metadata_json: raw,
+            },
+        };
+        let receipt = self.resources.apply_work_mutation(&command).await.unwrap();
+        assert!(matches!(receipt.decision, WorkDecision::Accepted));
     }
 
     /// 门面句柄（`.with_session_resources(...)` / `SubagentHost` 注入用）。

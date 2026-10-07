@@ -45,12 +45,17 @@ async fn nested_delegation_uses_direct_parent_catalog_and_inbox() {
     );
     let parent_manager = Arc::new(TaskManager::new());
     let pool = Arc::new(crate::mcp::McpClientPool::new_pending());
+    // 生产要件：父 host 需要资源门面、任务通道与 SDK admission 端口；
+    // 委派需要父会话上的可信 invocation。
     parent.set_subagent_host(SubagentHost {
         session_resources: Some(store.facade()),
         task_manager: Some(parent_manager.clone()),
         mcp_pool: Some(pool.clone()),
+        execution_admission_port: Some(Arc::new(TestAdmissionPort(store.facade()))),
         ..Default::default()
     });
+    let outer_invocation = "fixture-isolation-outer";
+    store.prepare_invocation(&root_id, outer_invocation).await;
     let observed_tools = Arc::new(RwLock::new(Vec::new()));
     let captured_tools = observed_tools.clone();
     let tool = SubAgentTool::new(
@@ -82,7 +87,7 @@ async fn nested_delegation_uses_direct_parent_catalog_and_inbox() {
         None,
         Vec::new(),
         cwd.clone(),
-        None,
+        Some(outer_invocation.to_string()),
     );
     let child = tool.spawn(config).await.unwrap();
     let child_manager = child
@@ -103,10 +108,16 @@ async fn nested_delegation_uses_direct_parent_catalog_and_inbox() {
         vec![Arc::new(tool.clone()), make_tool("Probe")],
         Arc::new(|tool| tool.name() != "Probe"),
     );
+    let nested_invocation = "fixture-isolation-nested";
+    store
+        .prepare_invocation(&child.child_thread_id, nested_invocation)
+        .await;
+    let mut nested_ctx = ToolContext::new(&[], &cwd);
+    nested_ctx.invocation_id = Some(nested_invocation.to_string());
     let output = bound[0]
         .invoke(
             serde_json::json!({"prompt": "nested", "fork": true, "run_in_background": true}),
-            ToolContext::new(&[], &cwd),
+            nested_ctx,
         )
         .await
         .unwrap();
@@ -133,7 +144,13 @@ async fn nested_delegation_uses_direct_parent_catalog_and_inbox() {
     .unwrap();
     assert!(parent.queue().is_empty());
     assert!(child.session.queue().drain_all()[0].delivery_id.is_some());
-    assert!(observed_tools.read().iter().any(|name| name == "Agent"));
+    // 单一继承策略（与工具描述同一契约）：fork 子链不继承 `Agent`（防递归）
+    // 与其它子链无持有者能力；工作区/元工具以外的父工具仍按策略过滤。
+    assert!(
+        !observed_tools.read().iter().any(|name| name == "Agent"),
+        "fork 子链不得继承 Agent 工具: {:?}",
+        observed_tools.read()
+    );
     assert!(!observed_tools.read().iter().any(|name| name == "Probe"));
 
     drop(bound);
@@ -142,15 +159,19 @@ async fn nested_delegation_uses_direct_parent_catalog_and_inbox() {
     let replacement_parent = Session::new(
         Arc::from(cwd.as_str()),
         FrozenContext::builder().build(),
-        Some(root_id),
+        Some(root_id.clone()),
     );
     replacement_parent.set_subagent_host(SubagentHost {
         session_resources: Some(store.facade()),
         task_manager: Some(Arc::new(TaskManager::new())),
         mcp_pool: Some(pool.clone()),
+        execution_admission_port: Some(Arc::new(TestAdmissionPort(store.facade()))),
         ..Default::default()
     });
     let tool = make_subagent_tool(Vec::new()).with_parent_session(replacement_parent);
+    // resume 的当前可信 invocation 必须登记在 owning parent（root）上。
+    let resume_invocation = "fixture-isolation-nested-resume";
+    store.prepare_invocation(&root_id, resume_invocation).await;
 
     let config = tool.resume_config_base(
         child.child_thread_id.clone(),
@@ -161,11 +182,12 @@ async fn nested_delegation_uses_direct_parent_catalog_and_inbox() {
             std::sync::Arc::new(EchoLLM),
             "fixture-scripted",
         ),
-        Vec::new(),
+        // 恢复必须重建保存的工具上限（spawn 时 ceiling = [Agent]）。
+        vec![Arc::new(tool.clone())],
         Arc::new(|_| true),
         store.facade(),
         cwd,
-        None,
+        Some(resume_invocation.to_string()),
     );
     let resumed = tool.resume(config).await.unwrap();
     assert!(Arc::ptr_eq(
@@ -249,10 +271,19 @@ async fn completed_child_shell_blocks_shared_close_and_reopen_rebuilds_binding()
         .create_thread(ThreadMeta::new_at(cwd.clone(), peri_time::now_wall()))
         .await
         .unwrap();
-    let mut meta = ThreadMeta::new_at(cwd.clone(), peri_time::now_wall());
-    meta.parent_thread_id = Some(root_id.clone());
-    let child_id = store.create_thread(meta).await.unwrap();
-    store.update_thread_status(&child_id, "done").await.unwrap();
+    // 生产 resume 要件：子线程带版本化 ChildResumeMetadata、父会话登记可信
+    // invocation（resume 按同一契约校验 frozen digest 与授权引用）。
+    let child_id = uuid::Uuid::now_v7().to_string();
+    let resume_invocation = "fixture-isolation-resume";
+    preset_resumable_child(
+        &store,
+        &child_id,
+        "fixture-agent",
+        Some(root_id.as_str()),
+        Some(resume_invocation),
+        Vec::new(),
+    )
+    .await;
     let pool = Arc::new(crate::mcp::McpClientPool::new_empty());
     pool.initialized
         .store(true, std::sync::atomic::Ordering::Release);
@@ -273,6 +304,7 @@ async fn completed_child_shell_blocks_shared_close_and_reopen_rebuilds_binding()
     parent.set_subagent_host(SubagentHost {
         session_resources: Some(store.facade()),
         mcp_pool: Some(pool.clone()),
+        execution_admission_port: Some(Arc::new(TestAdmissionPort(store.facade()))),
         ..Default::default()
     });
     let tool = make_subagent_tool(Vec::new()).with_parent_session(parent);
@@ -289,7 +321,7 @@ async fn completed_child_shell_blocks_shared_close_and_reopen_rebuilds_binding()
         Arc::new(|_| true),
         store.facade(),
         cwd.clone(),
-        None,
+        Some(resume_invocation.to_string()),
     );
     let shell = Arc::new(std::sync::Mutex::new(None));
     let captured_shell = shell.clone();
@@ -357,6 +389,15 @@ async fn completed_child_shell_blocks_shared_close_and_reopen_rebuilds_binding()
         .await
         .unwrap();
     assert_eq!(receipt.decision, ControlDecision::Accepted);
+    // 新生命周期需要宿主重新绑定的子运行时 metadata（夹具按生产契约复制）。
+    let reopened_control = store
+        .resources
+        .load_session_control(&child_id)
+        .await
+        .unwrap();
+    store
+        .rebind_child_resume_metadata(&child_id, closed.lifecycle, reopened_control.lifecycle)
+        .await;
     let config = tool.resume_config_base(
         child_id.clone(),
         Some("new lifecycle".into()),
@@ -370,7 +411,7 @@ async fn completed_child_shell_blocks_shared_close_and_reopen_rebuilds_binding()
         Arc::new(|_| true),
         store.facade(),
         cwd,
-        None,
+        Some(resume_invocation.to_string()),
     );
     let reopened = tool.resume(config).await.unwrap();
     let new_manager = reopened
