@@ -4,6 +4,7 @@
 代码、`docs/standards/` 与 `docs/design/`。
 
 - [mcp-ecosystem.md](mcp-ecosystem.md)：MCP 生态背景与外部互通参考。
+- [wasm-host-ecosystem.md](wasm-host-ecosystem.md)：Peri WASM 生态接入调查，涵盖协调、鉴权、实时同步、对象存储、模型网关与队列；候选方案不构成已批准设计。
 - [artifact-remote-storage.md](artifact-remote-storage.md)：artifact 上传的远程存储配置与对接契约（使用者视角）。
 - [langfuse-data-integrity.md](langfuse-data-integrity.md)：Langfuse 数据检查手册。
 - [tui-manual-verification.md](tui-manual-verification.md)：可重复执行的 TUI 手工验证清单。

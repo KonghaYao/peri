@@ -167,7 +167,7 @@ pub(super) fn owned_command(
 pub(super) const READ_STATE: &str =
     "SELECT state_json FROM session_work_state WHERE session_id = ?1";
 pub(super) const READ_SNAPSHOT: &str = "SELECT EXISTS(SELECT 1 FROM threads WHERE id=?1),control.state_json,state.state_json,CASE WHEN state.state_json IS NULL THEN EXISTS(SELECT 1 FROM messages WHERE thread_id=?1) ELSE 0 END FROM (SELECT 1) LEFT JOIN session_control_state AS control ON control.session_id=?1 LEFT JOIN session_work_state AS state ON state.session_id=?1";
-pub(super) const READ_DELIVERY: &str = "SELECT EXISTS(SELECT 1 FROM threads WHERE id=?1 UNION ALL SELECT 1 FROM session_control_state WHERE session_id=?1 UNION ALL SELECT 1 FROM session_work_state WHERE session_id=?1),entry.type,entry.value FROM (SELECT 1) LEFT JOIN session_work_state AS state ON state.session_id=?1 LEFT JOIN json_each(state.state_json,'$.deliveries') AS entry ON entry.key=?2";
+pub(super) const READ_DELIVERY: &str = "SELECT (EXISTS(SELECT 1 FROM threads WHERE id=?1) OR EXISTS(SELECT 1 FROM session_control_state WHERE session_id=?1) OR EXISTS(SELECT 1 FROM session_work_state WHERE session_id=?1)),entry.type,entry.value FROM (SELECT 1) LEFT JOIN session_work_state AS state ON state.session_id=?1 LEFT JOIN json_each(state.state_json,'$.deliveries') AS entry ON entry.key=?2";
 
 pub(super) fn delivery(
     query: &WorkDeliveryQuery,
