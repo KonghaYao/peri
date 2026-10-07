@@ -99,4 +99,9 @@ jobs:
 
             - name: Clippy
               shell: bash
-              run: ./scripts/cargo-rmcp-patched.sh clippy --locked --workspace --all-targets -- -D warnings
+              run: |
+                  if [[ "$RUNNER_OS" == "Windows" ]]; then
+                      ./scripts/cargo-rmcp-patched.sh clippy --locked --workspace --lib --bins -- -D warnings
+                  else
+                      ./scripts/cargo-rmcp-patched.sh clippy --locked --workspace --all-targets -- -D warnings
+                  fi
