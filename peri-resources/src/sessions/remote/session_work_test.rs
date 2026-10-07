@@ -234,6 +234,61 @@ fn query() -> WorkQuery {
 }
 
 #[tokio::test]
+async fn remote_resource_owner_projection_reads_only_selected_lifecycles() {
+    let fixture = Fixture::new().await;
+    let adapter = fixture.adapter().await;
+    let id = "work-session".to_owned();
+    let empty = adapter.load_resource_owner_facts(&id, 0).await.unwrap();
+    assert_eq!(empty.control.lifecycle, 1);
+    assert!(empty.current_owner.is_none());
+    assert!(adapter
+        .load_resource_owner_facts(&"absent".into(), 0)
+        .await
+        .is_err());
+    let mut state = WorkState::default();
+    state.revision = 3;
+    state.resource_owners.insert(
+        1,
+        ResourceOwnerBinding {
+            recipient_lifecycle: 1,
+            connections_json: "{}".into(),
+            authorization_ref: "trusted".into(),
+        },
+    );
+    sqlx::query("INSERT INTO session_work_state(session_id,state_json) VALUES (?1,?2)")
+        .bind(&id)
+        .bind(serde_json::to_string(&state).unwrap())
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    let facts = adapter.load_resource_owner_facts(&id, 2).await.unwrap();
+    assert_eq!(facts.revision, 3);
+    assert_eq!(facts.current_owner.unwrap().authorization_ref, "trusted");
+    assert!(facts.previous_owner.is_none());
+    let mut control = peri_acp_types::session_resources::ControlState::default();
+    control.lifecycle = 2;
+    sqlx::query("INSERT INTO session_control_state(session_id,state_json) VALUES (?1,?2)")
+        .bind(&id)
+        .bind(serde_json::to_string(&control).unwrap())
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    let reopened = adapter.load_resource_owner_facts(&id, 1).await.unwrap();
+    assert_eq!(reopened.control.lifecycle, 2);
+    assert!(reopened.current_owner.is_none());
+    assert_eq!(
+        reopened.previous_owner.unwrap().authorization_ref,
+        "trusted"
+    );
+    sqlx::query("UPDATE session_work_state SET state_json='broken' WHERE session_id=?1")
+        .bind(&id)
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    assert!(adapter.load_resource_owner_facts(&id, 0).await.is_err());
+}
+
+#[tokio::test]
 async fn remote_work_publish_lost_ack_keeps_one_delivery_and_resolves_original_receipt() {
     let fixture = Fixture::new().await;
     let adapter = fixture.adapter().await;

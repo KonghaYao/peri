@@ -1,6 +1,6 @@
 use peri_acp_types::session_resources::work::{
-    DeliveryRecord, WorkAction, WorkCommand, WorkDeliveryQuery, WorkReceipt, WorkReduction,
-    WorkResolution, WorkState,
+    DeliveryRecord, ResourceOwnerBinding, ResourceOwnerFacts, WorkAction, WorkCommand,
+    WorkDeliveryQuery, WorkReceipt, WorkReduction, WorkResolution, WorkState,
 };
 use peri_acp_types::session_resources::{
     ControlState, SessionResourceError, SessionResourceResult,
@@ -19,6 +19,62 @@ pub(super) use effects::mutation_effects;
 
 pub(super) const CREATE_STATE: &str = "CREATE TABLE IF NOT EXISTS session_work_state (session_id TEXT PRIMARY KEY NOT NULL, state_json TEXT NOT NULL)";
 pub(super) const READ_REVISION: &str = "SELECT EXISTS(SELECT 1 FROM threads WHERE id=?1), EXISTS(SELECT 1 FROM session_control_state WHERE session_id=?1), state.state_json IS NOT NULL, state.state_json -> '$.revision' FROM (SELECT 1) LEFT JOIN session_work_state AS state ON state.session_id=?1";
+pub(super) const READ_RESOURCE_OWNER_FACTS: &str = r#"
+SELECT EXISTS(SELECT 1 FROM threads WHERE id=?1), control.state_json,
+       1, state.state_json -> '$.revision',
+       state.state_json -> ('$.resourceOwners.' || COALESCE(json_extract(control.state_json,'$.lifecycle'),1)),
+       state.state_json -> ('$.resourceOwners.' || ?2),
+       state.state_json -> ('$.childResumeMetadata.' || COALESCE(json_extract(control.state_json,'$.lifecycle'),1)),
+       state.state_json -> ('$.childResumeMetadata.' || ?2),
+       json_type(state.state_json,'$.resourceOwners'),
+       json_type(state.state_json,'$.childResumeMetadata')
+FROM session_work_state AS state
+LEFT JOIN session_control_state AS control ON control.session_id=state.session_id
+WHERE state.session_id=?1
+UNION ALL
+SELECT EXISTS(SELECT 1 FROM threads WHERE id=?1), control.state_json,
+       0, NULL, NULL, NULL, NULL, NULL, NULL, NULL
+FROM (SELECT 1)
+LEFT JOIN session_control_state AS control ON control.session_id=?1
+WHERE NOT EXISTS(SELECT 1 FROM session_work_state WHERE session_id=?1)
+"#;
+
+pub(super) fn resource_owner_facts(
+    session_exists: bool,
+    control_json: Option<&str>,
+    state_exists: bool,
+    revision_json: Option<&str>,
+    current_owner_json: Option<&str>,
+    previous_owner_json: Option<&str>,
+    current_child_json: Option<&str>,
+    previous_child_json: Option<&str>,
+    owners_type: Option<&str>,
+    child_metadata_type: Option<&str>,
+) -> SessionResourceResult<ResourceOwnerFacts> {
+    let revision = revision(
+        i64::from(session_exists),
+        i64::from(control_json.is_some()),
+        i64::from(state_exists),
+        revision_json,
+    )?;
+    if state_exists
+        && (owners_type != Some("object") || !matches!(child_metadata_type, None | Some("object")))
+    {
+        return Err(corrupt("resource owner state is not readable"));
+    }
+    Ok(ResourceOwnerFacts {
+        control: crate::sessions::control::state(control_json)?,
+        revision,
+        current_owner: current_owner_json
+            .map(decode::<ResourceOwnerBinding>)
+            .transpose()?,
+        previous_owner: previous_owner_json
+            .map(decode::<ResourceOwnerBinding>)
+            .transpose()?,
+        current_child_metadata: current_child_json.map(decode::<String>).transpose()?,
+        previous_child_metadata: previous_child_json.map(decode::<String>).transpose()?,
+    })
+}
 
 pub(super) fn revision(
     session_exists: i64,
@@ -53,10 +109,17 @@ pub(super) const HAS_PENDING: &str = "WITH RECURSIVE scope(id) AS (SELECT ?1 UNI
 pub(super) const ACK_COMMAND: &str = "UPDATE session_work_commands SET reconciled=1 WHERE mutation_id=?1 AND digest=?2 AND EXISTS(SELECT 1 FROM session_work_receipts WHERE mutation_id=?1 AND digest=?2)";
 
 pub(super) fn command_effects(command: &WorkCommand) -> SessionResourceResult<Vec<WorkEffect>> {
+    command_effects_with_digest(command, &command.digest()?)
+}
+
+pub(super) fn command_effects_with_digest(
+    command: &WorkCommand,
+    digest: &str,
+) -> SessionResourceResult<Vec<WorkEffect>> {
     let params = [
         command.mutation_id.clone(),
         command.session_id.clone(),
-        command.digest()?,
+        digest.to_owned(),
         encode(command)?,
     ];
     Ok(vec![
@@ -189,7 +252,16 @@ pub(super) fn replay(
     digest: &str,
     json: &str,
 ) -> SessionResourceResult<WorkResolution> {
-    if command.digest()? != digest {
+    replay_with_digest(command, &command.digest()?, digest, json)
+}
+
+pub(super) fn replay_with_digest(
+    command: &WorkCommand,
+    command_digest: &str,
+    stored_digest: &str,
+    json: &str,
+) -> SessionResourceResult<WorkResolution> {
+    if command_digest != stored_digest {
         return Err(SessionResourceError::conflict(
             "work mutation identity conflicts",
         ));

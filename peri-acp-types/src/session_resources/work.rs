@@ -702,6 +702,16 @@ pub struct ResourceOwnerBinding {
     pub authorization_ref: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResourceOwnerFacts {
+    pub control: ControlState,
+    pub revision: u64,
+    pub current_owner: Option<ResourceOwnerBinding>,
+    pub previous_owner: Option<ResourceOwnerBinding>,
+    pub current_child_metadata: Option<String>,
+    pub previous_child_metadata: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorkSnapshot {

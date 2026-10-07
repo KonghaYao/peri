@@ -6,6 +6,41 @@ use peri_acp_types::session_resources::work::{
 };
 
 impl SqliteSessionData {
+    pub(super) async fn read_resource_owner_facts(
+        &self,
+        id: &ThreadId,
+        previous_lifecycle: u64,
+    ) -> SessionResourceResult<peri_acp_types::session_resources::work::ResourceOwnerFacts> {
+        let row: (
+            bool,
+            Option<String>,
+            bool,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ) = sqlx::query_as(work::READ_RESOURCE_OWNER_FACTS)
+            .bind(id)
+            .bind(previous_lifecycle.to_string())
+            .fetch_one(&self.database.pool)
+            .await
+            .map_err(|error| map_sqlx(&error))?;
+        work::resource_owner_facts(
+            row.0,
+            row.1.as_deref(),
+            row.2,
+            row.3.as_deref(),
+            row.4.as_deref(),
+            row.5.as_deref(),
+            row.6.as_deref(),
+            row.7.as_deref(),
+            row.8.as_deref(),
+            row.9.as_deref(),
+        )
+    }
     pub(super) async fn read_work_revision(&self, id: &ThreadId) -> SessionResourceResult<u64> {
         let (session_exists, control_exists, state_exists, revision_json): (
             i64,
@@ -102,15 +137,15 @@ impl SqliteSessionData {
         command: &WorkCommand,
     ) -> SessionResourceResult<WorkReceipt> {
         self.writable()?;
-        command.digest()?;
+        let digest = command.digest()?;
         let mut tx = self
             .database
             .pool
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(|error| map_sqlx(&error))?;
-        if let Some(resolution) = saved_resolution(&mut tx, command).await? {
-            acknowledge(&mut tx, command).await?;
+        if let Some(resolution) = saved_resolution(&mut tx, command, &digest).await? {
+            acknowledge(&mut tx, command, &digest).await?;
             tx.commit()
                 .await
                 .map_err(|_| commit_failure(Some(command.session_id.clone())))?;
@@ -129,7 +164,7 @@ impl SqliteSessionData {
             }
             return Err(commit_failure(Some(command.session_id.clone())));
         }
-        for effect in work::command_effects(command)? {
+        for effect in work::command_effects_with_digest(command, &digest)? {
             execute_effect(&mut tx, effect).await?;
         }
         tx.commit()
@@ -147,6 +182,7 @@ impl SqliteSessionData {
         let reduction = reduce_work(command, &control, state)?;
         for effect in work::mutation_effects(
             command,
+            &digest,
             initial_json,
             parent_command.as_ref(),
             &control,
@@ -170,7 +206,7 @@ impl SqliteSessionData {
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(|error| map_sqlx(&error))?;
-        acknowledge(&mut tx, command).await?;
+        acknowledge(&mut tx, command, &digest).await?;
         tx.commit()
             .await
             .map_err(|_| commit_failure(Some(command.session_id.clone())))?;
@@ -189,26 +225,26 @@ impl SqliteSessionData {
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(|error| map_sqlx(&error))?;
-        if let Some(resolution) = saved_resolution(&mut tx, command).await? {
-            acknowledge(&mut tx, command).await?;
+        if let Some(resolution) = saved_resolution(&mut tx, command, &digest).await? {
+            acknowledge(&mut tx, command, &digest).await?;
             tx.commit()
                 .await
                 .map_err(|_| commit_failure(Some(command.session_id.clone())))?;
             return Ok(resolution);
         }
-        for effect in work::command_effects(command)? {
+        for effect in work::command_effects_with_digest(command, &digest)? {
             execute_effect(&mut tx, effect).await?;
         }
         let resolution = WorkResolution::NotApplied;
         sqlx::query(work::INSERT_RECEIPT)
             .bind(&command.mutation_id)
             .bind(&command.session_id)
-            .bind(digest)
+            .bind(&digest)
             .bind(work::encode(&resolution)?)
             .execute(&mut *tx)
             .await
             .map_err(|error| map_sqlx(&error))?;
-        acknowledge(&mut tx, command).await?;
+        acknowledge(&mut tx, command, &digest).await?;
         tx.commit()
             .await
             .map_err(|_| commit_failure(Some(command.session_id.clone())))?;
@@ -234,10 +270,11 @@ async fn execute_effect(
 async fn acknowledge(
     connection: &mut SqliteConnection,
     command: &WorkCommand,
+    digest: &str,
 ) -> SessionResourceResult<()> {
     sqlx::query(work::ACK_COMMAND)
         .bind(&command.mutation_id)
-        .bind(command.digest()?)
+        .bind(digest)
         .execute(connection)
         .await
         .map_err(|_| commit_failure(Some(command.session_id.clone())))?;
@@ -247,14 +284,17 @@ async fn acknowledge(
 async fn saved_resolution(
     connection: &mut SqliteConnection,
     command: &WorkCommand,
+    digest: &str,
 ) -> SessionResourceResult<Option<WorkResolution>> {
     let row: Option<(String, String)> = sqlx::query_as(work::READ_RECEIPT)
         .bind(&command.mutation_id)
         .fetch_optional(connection)
         .await
         .map_err(|error| map_sqlx(&error))?;
-    row.map(|(digest, json)| work::replay(command, &digest, &json))
-        .transpose()
+    row.map(|(stored_digest, json)| {
+        work::replay_with_digest(command, digest, &stored_digest, &json)
+    })
+    .transpose()
 }
 
 async fn read_snapshot(

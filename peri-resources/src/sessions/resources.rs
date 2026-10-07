@@ -257,6 +257,15 @@ impl SessionResourcesImpl {
 
 #[async_trait]
 impl SessionResources for SessionResourcesImpl {
+    async fn load_resource_owner_facts(
+        &self,
+        id: &ThreadId,
+        previous_lifecycle: u64,
+    ) -> SessionResourceResult<peri_acp_types::session_resources::work::ResourceOwnerFacts> {
+        self.gate
+            .load_resource_owner_facts(id, previous_lifecycle)
+            .await
+    }
     async fn load_work_revision(&self, id: &ThreadId) -> SessionResourceResult<u64> {
         self.gate.load_work_revision(id).await
     }

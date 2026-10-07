@@ -1,5 +1,77 @@
 use super::*;
-use peri_acp_types::session_resources::work::WorkQuery;
+use peri_acp_types::session_resources::work::{ResourceOwnerBinding, WorkQuery, WorkState};
+
+#[tokio::test]
+async fn resource_owner_projection_preserves_missing_and_corrupt_facts() {
+    let fixture = Fixture::new().await;
+    fixture.create("owner-facts").await;
+    let id = "owner-facts".to_owned();
+    let missing = fixture
+        .facade
+        .load_resource_owner_facts(&id, 2)
+        .await
+        .unwrap();
+    assert_eq!(missing.control.lifecycle, 1);
+    assert_eq!(missing.revision, 0);
+    assert!(missing.current_owner.is_none());
+    assert!(matches!(
+        fixture
+            .facade
+            .load_resource_owner_facts(&"absent".into(), 0)
+            .await
+            .unwrap_err()
+            .kind(),
+        SessionResourceErrorKind::NotFound
+    ));
+
+    let mut state = WorkState::default();
+    state.revision = 7;
+    let owner = ResourceOwnerBinding {
+        recipient_lifecycle: 1,
+        connections_json: "{}".into(),
+        authorization_ref: "trusted".into(),
+    };
+    state.resource_owners.insert(1, owner.clone());
+    state
+        .child_resume_metadata
+        .insert(1, "{\"version\":1}".into());
+    sqlx::query("INSERT OR REPLACE INTO session_work_state(session_id,state_json) VALUES (?1,?2)")
+        .bind(&id)
+        .bind(serde_json::to_string(&state).unwrap())
+        .execute(fixture.facade.local_pool())
+        .await
+        .unwrap();
+    let facts = fixture
+        .facade
+        .load_resource_owner_facts(&id, 1)
+        .await
+        .unwrap();
+    assert_eq!(facts.revision, 7);
+    assert_eq!(facts.current_owner, Some(owner.clone()));
+    assert_eq!(facts.previous_owner, Some(owner));
+    assert_eq!(
+        facts.previous_child_metadata.as_deref(),
+        Some("{\"version\":1}")
+    );
+
+    for corrupt_json in [
+        "not json",
+        r#"{"revision":7,"resourceOwners":{"1":{"recipientLifecycle":"bad"}}}"#,
+        r#"{"revision":7,"resourceOwners":[]}"#,
+    ] {
+        sqlx::query("UPDATE session_work_state SET state_json=?2 WHERE session_id=?1")
+            .bind(&id)
+            .bind(corrupt_json)
+            .execute(fixture.facade.local_pool())
+            .await
+            .unwrap();
+        assert!(fixture
+            .facade
+            .load_resource_owner_facts(&id, 0)
+            .await
+            .is_err());
+    }
+}
 
 async fn pending(fixture: &Fixture, session: &str) {
     sqlx::query("INSERT INTO session_work_commands(mutation_id,session_id,digest,command_json) VALUES (?1,?1,'digest','undecodable command')")
@@ -81,6 +153,12 @@ async fn pending_work_gate_skips_large_undecodable_state_but_keeps_unknown_block
         .with_mutation(&root, || async { Err(commit_failure(Some(root.clone()))) })
         .await;
     assert!(unknown.unwrap_err().is_persistence_uncertain());
+    assert!(fixture
+        .facade
+        .load_resource_owner_facts(&root, 0)
+        .await
+        .unwrap_err()
+        .is_persistence_uncertain());
     assert!(!fixture
         .facade
         .gate

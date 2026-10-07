@@ -18,6 +18,7 @@ const REFRESH_COUNTS: &str = "UPDATE threads SET updated_at=?1,message_count=(SE
 /// when) the command acknowledges one.
 pub(in crate::sessions) fn mutation_effects(
     command: &WorkCommand,
+    digest: &str,
     initial_json: String,
     parent_command: Option<&WorkCommand>,
     control: &ControlState,
@@ -25,7 +26,7 @@ pub(in crate::sessions) fn mutation_effects(
 ) -> SessionResourceResult<Vec<WorkEffect>> {
     // Rejected reductions carry no state: `apply` may have partially mutated it.
     let accepted_state = reduction.accepted_state()?;
-    let mut effects = command_effects(command)?;
+    let mut effects = command_effects_with_digest(command, digest)?;
     effects.extend([
         WorkEffect::texts(
             INSERT_STATE,
@@ -112,7 +113,7 @@ pub(in crate::sessions) fn mutation_effects(
         [
             command.mutation_id.clone(),
             command.session_id.clone(),
-            command.digest()?,
+            digest.to_owned(),
             encode(&resolution)?,
         ],
     ));

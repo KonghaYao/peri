@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use peri_acp_types::plugin::{ConfigSource, McpServerConfig};
-use peri_acp_types::session_resources::work::{WorkAction, WorkCommand, WorkDecision, WorkQuery};
+use peri_acp_types::session_resources::work::{WorkAction, WorkCommand, WorkDecision};
 use peri_acp_types::session_resources::FrozenState;
 
 use crate::host::{prepared::PreparedSessionInputs, AcpServerConfig};
@@ -15,20 +15,13 @@ pub(super) async fn bind(
 ) -> Result<(), AcpError> {
     let snapshot = cfg
         .session_resources
-        .load_session_work(&WorkQuery {
-            session_id: session_id.to_owned(),
-            limit: 1,
-        })
+        .load_resource_owner_facts(&session_id.to_owned(), 0)
         .await
         .map_err(crate::host::workspace::resource_error)?;
     let ordered: std::collections::BTreeMap<_, _> = connections.iter().collect();
     let connections_json = serde_json::to_string(&ordered)
         .map_err(|error| AcpError::new(-32603, error.to_string()))?;
-    if let Some(existing) = snapshot
-        .state
-        .resource_owners
-        .get(&snapshot.control.lifecycle)
-    {
+    if let Some(existing) = &snapshot.current_owner {
         return if existing.connections_json == connections_json {
             Ok(())
         } else {
@@ -48,7 +41,7 @@ pub(super) async fn bind(
                 snapshot.control.lifecycle
             ),
             action: WorkAction::BindResourceOwners {
-                expected_revision: snapshot.state.revision,
+                expected_revision: snapshot.revision,
                 connections_json,
                 authorization_ref: format!("trusted-session-setup:{session_id}"),
             },
@@ -70,22 +63,15 @@ pub(crate) async fn load(
 ) -> Result<HashMap<String, McpServerConfig>, AcpError> {
     let snapshot = cfg
         .session_resources
-        .load_session_work(&WorkQuery {
-            session_id: session_id.to_owned(),
-            limit: 1,
-        })
+        .load_resource_owner_facts(&session_id.to_owned(), 0)
         .await
         .map_err(crate::host::workspace::resource_error)?;
-    let binding = snapshot
-        .state
-        .resource_owners
-        .get(&snapshot.control.lifecycle)
-        .ok_or_else(|| {
-            AcpError::new(
-                -32010,
-                "resource owner declarations require explicit migration",
-            )
-        })?;
+    let binding = snapshot.current_owner.ok_or_else(|| {
+        AcpError::new(
+            -32010,
+            "resource owner declarations require explicit migration",
+        )
+    })?;
     let mut connections: HashMap<String, McpServerConfig> =
         serde_json::from_str(&binding.connections_json)
             .map_err(|_| AcpError::new(-32010, "resource owner declarations are unreadable"))?;
@@ -107,17 +93,10 @@ pub(crate) async fn load_for_restore(
 ) -> Result<HashMap<String, McpServerConfig>, AcpError> {
     let work = cfg
         .session_resources
-        .load_session_work(&WorkQuery {
-            session_id: session_id.to_owned(),
-            limit: 1,
-        })
+        .load_resource_owner_facts(&session_id.to_owned(), 0)
         .await
         .map_err(crate::host::workspace::resource_error)?;
-    if work
-        .state
-        .resource_owners
-        .contains_key(&work.control.lifecycle)
-    {
+    if work.current_owner.is_some() {
         return load(cfg, session_id).await;
     }
     let history = cfg
@@ -150,14 +129,11 @@ pub(crate) async fn quarantine(
 ) -> Result<(), AcpError> {
     let work = cfg
         .session_resources
-        .load_session_work(&WorkQuery {
-            session_id: session_id.to_owned(),
-            limit: 1,
-        })
+        .load_work_availability(&session_id.to_owned())
         .await
         .map_err(crate::host::workspace::resource_error)?;
     let record_id = format!("{kind}:{session_id}:{lifecycle}");
-    if work.state.legacy_unknown.contains_key(&record_id) {
+    if work.state.legacy_unknown.contains(&record_id) {
         return Ok(());
     }
     persist(
@@ -184,10 +160,7 @@ pub(super) async fn copy_for_reopen(
 ) -> Result<(), AcpError> {
     let work = cfg
         .session_resources
-        .load_session_work(&WorkQuery {
-            session_id: session_id.to_owned(),
-            limit: 1,
-        })
+        .load_resource_owner_facts(&session_id.to_owned(), previous_lifecycle)
         .await
         .map_err(crate::host::workspace::resource_error)?;
     if work.control.lifecycle != lifecycle || previous_lifecycle.checked_add(1) != Some(lifecycle) {
@@ -196,14 +169,14 @@ pub(super) async fn copy_for_reopen(
             "Reopen lifecycle changed before owner binding",
         ));
     }
-    let Some(previous) = work.state.resource_owners.get(&previous_lifecycle) else {
+    let Some(previous) = &work.previous_owner else {
         load_for_restore(cfg, session_id).await?;
         return Err(AcpError::new(
             -32010,
             "Reopen Blocked: previous persistent resource owners are missing",
         ));
     };
-    if let Some(current) = work.state.resource_owners.get(&lifecycle) {
+    if let Some(current) = &work.current_owner {
         if current.connections_json != previous.connections_json
             || current.authorization_ref != previous.authorization_ref
         {
@@ -220,7 +193,7 @@ pub(super) async fn copy_for_reopen(
                 recipient_lifecycle: lifecycle,
                 mutation_id: format!("reopen-resource-owners:{session_id}:{lifecycle}"),
                 action: WorkAction::BindResourceOwners {
-                    expected_revision: work.state.revision,
+                    expected_revision: work.revision,
                     connections_json: previous.connections_json.clone(),
                     authorization_ref: previous.authorization_ref.clone(),
                 },
@@ -228,7 +201,7 @@ pub(super) async fn copy_for_reopen(
         )
         .await?;
     }
-    if let Some(metadata) = work.state.child_resume_metadata.get(&previous_lifecycle) {
+    if let Some(metadata) = &work.previous_child_metadata {
         let mut metadata: peri_agent::session::subagent::ChildResumeMetadata =
             serde_json::from_str(metadata).map_err(|_| {
                 AcpError::new(
@@ -249,13 +222,10 @@ pub(super) async fn copy_for_reopen(
             .map_err(|error| AcpError::new(-32603, error.to_string()))?;
         let current = cfg
             .session_resources
-            .load_session_work(&WorkQuery {
-                session_id: session_id.to_owned(),
-                limit: 1,
-            })
+            .load_resource_owner_facts(&session_id.to_owned(), previous_lifecycle)
             .await
             .map_err(crate::host::workspace::resource_error)?;
-        if let Some(existing) = current.state.child_resume_metadata.get(&lifecycle) {
+        if let Some(existing) = &current.current_child_metadata {
             if serde_json::from_str::<serde_json::Value>(existing).ok()
                 != serde_json::from_str::<serde_json::Value>(&metadata_json).ok()
             {
@@ -272,7 +242,7 @@ pub(super) async fn copy_for_reopen(
                     recipient_lifecycle: lifecycle,
                     mutation_id: format!("reopen-child-metadata:{session_id}:{lifecycle}"),
                     action: WorkAction::BindChildResumeMetadata {
-                        expected_revision: current.state.revision,
+                        expected_revision: current.revision,
                         metadata_json,
                     },
                 },
@@ -320,18 +290,15 @@ pub(crate) async fn cold_environment(
 ) -> Result<Option<Arc<crate::host::workspace::SessionEnvironment>>, AcpError> {
     let connections = load(cfg, session_id).await?;
     if connections.is_empty() {
-        let work = cfg
+        let control = cfg
             .session_resources
-            .load_session_work(&WorkQuery {
-                session_id: session_id.to_owned(),
-                limit: 1,
-            })
+            .load_session_control(&session_id.to_owned())
             .await
             .map_err(crate::host::workspace::resource_error)?;
         quarantine(
             cfg,
             session_id,
-            work.control.lifecycle,
+            control.lifecycle,
             "unknownBuiltin",
             "prior builtin resource owner has no persistent recoverable capability".into(),
         )

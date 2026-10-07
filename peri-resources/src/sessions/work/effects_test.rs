@@ -50,6 +50,7 @@ fn effects(json: Option<String>, has_history: bool) -> Vec<WorkEffect> {
     let reduction = reduce_work(&command, &control, state).unwrap();
     mutation_effects(
         &command,
+        &command.digest().unwrap(),
         initial_json,
         parent_command.as_ref(),
         &control,
@@ -66,7 +67,15 @@ fn noncanonical_json_is_reused_byte_for_byte_for_insert_and_guard() {
     let current = state(Some(&raw), false).unwrap();
     let control = ControlState::default();
     let reduction = reduce_work(&command, &control, current).unwrap();
-    let effects = mutation_effects(&command, raw.clone(), None, &control, &reduction).unwrap();
+    let effects = mutation_effects(
+        &command,
+        &command.digest().unwrap(),
+        raw.clone(),
+        None,
+        &control,
+        &reduction,
+    )
+    .unwrap();
     assert_eq!(effects[2].sql, INSERT_STATE);
     assert_eq!(effects[2].params[1].as_bytes(), raw.as_bytes());
     assert_eq!(effects[3].sql, GUARD_STATE);
@@ -81,6 +90,7 @@ fn noncanonical_json_is_reused_byte_for_byte_for_insert_and_guard() {
 fn assert_missing_state_initialization(has_history: bool) {
     let effects = effects(None, has_history);
     let initial = state(None, has_history).unwrap();
+    assert_eq!(effects[2].sql, INSERT_STATE);
     assert_eq!(effects[2].params[1], encode(&initial).unwrap());
     assert_eq!(effects[3].params[1], effects[2].params[1]);
     assert_eq!(initial.legacy_unknown.is_empty(), !has_history);

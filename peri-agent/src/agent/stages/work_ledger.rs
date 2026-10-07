@@ -91,11 +91,9 @@ impl WorkMutationBarrier {
                                 reason: WorkRejection::StaleRevision,
                             }) =>
                 {
-                    let snapshot = self
-                        .snapshot(&WorkQuery {
-                            session_id: command.session_id.clone(),
-                            limit: 1,
-                        })
+                    let availability = self
+                        .resources
+                        .load_work_availability(&command.session_id)
                         .await?;
                     let settlement_only = matches!(
                         &command.action,
@@ -112,15 +110,15 @@ impl WorkMutationBarrier {
                         | WorkAction::CommitAct { guard, .. } => guard,
                         _ => return Err(WorkCommitError::Rejected { receipt }),
                     };
-                    if snapshot.control.lifecycle != command.recipient_lifecycle
+                    if availability.control.lifecycle != command.recipient_lifecycle
                         || (!settlement_only
-                            && (snapshot.control.control_generation
+                            && (availability.control.control_generation
                                 != guard.expected_control_generation
-                                || snapshot.control.attempt.as_ref() != Some(&guard.execution)))
+                                || availability.control.attempt.as_ref() != Some(&guard.execution)))
                     {
                         return Err(WorkCommitError::Rejected { receipt });
                     }
-                    guard.expected_revision = snapshot.state.revision;
+                    guard.expected_revision = availability.state.revision;
                     command.mutation_id = uuid::Uuid::now_v7().to_string();
                 }
                 result => return result,

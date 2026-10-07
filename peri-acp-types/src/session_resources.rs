@@ -506,6 +506,39 @@ pub trait ChildResumeClaim: Send + Sync {
 /// - 结果不确定时返回 [`SessionResourceError::persistence_uncertain`]，不得重试后伪装成功。
 #[async_trait]
 pub trait SessionResources: Send + Sync {
+    async fn load_resource_owner_facts(
+        &self,
+        id: &ThreadId,
+        previous_lifecycle: u64,
+    ) -> SessionResourceResult<work::ResourceOwnerFacts> {
+        let snapshot = self
+            .load_session_work(&work::WorkQuery {
+                session_id: id.clone(),
+                limit: 1,
+            })
+            .await?;
+        let lifecycle = snapshot.control.lifecycle;
+        Ok(work::ResourceOwnerFacts {
+            control: snapshot.control,
+            revision: snapshot.state.revision,
+            current_owner: snapshot.state.resource_owners.get(&lifecycle).cloned(),
+            previous_owner: snapshot
+                .state
+                .resource_owners
+                .get(&previous_lifecycle)
+                .cloned(),
+            current_child_metadata: snapshot
+                .state
+                .child_resume_metadata
+                .get(&lifecycle)
+                .cloned(),
+            previous_child_metadata: snapshot
+                .state
+                .child_resume_metadata
+                .get(&previous_lifecycle)
+                .cloned(),
+        })
+    }
     async fn load_work_revision(&self, id: &ThreadId) -> SessionResourceResult<u64> {
         Ok(self.load_work_availability(id).await?.state.revision)
     }

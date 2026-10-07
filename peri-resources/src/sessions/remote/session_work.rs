@@ -13,15 +13,63 @@ use super::{
 };
 use crate::sessions::{failure::corrupt, work};
 
-fn identity(command: &WorkCommand) -> SessionResourceResult<OperationIdentity> {
-    Ok(OperationIdentity::with_digest(
+fn identity(command: &WorkCommand, digest: &str) -> OperationIdentity {
+    OperationIdentity::with_digest(
         OperationId::from_record(&format!("session-work.{}", command.mutation_id)),
         "session_work",
-        command.digest()?,
-    ))
+        digest.to_owned(),
+    )
 }
 
 impl RemoteSessionData {
+    pub(super) async fn read_resource_owner_facts(
+        &self,
+        id: &peri_acp_types::thread::ThreadId,
+        previous_lifecycle: u64,
+    ) -> SessionResourceResult<peri_acp_types::session_resources::work::ResourceOwnerFacts> {
+        let row = self
+            .store()
+            .await?
+            .fetch_row(&StatementSpec::new(
+                work::READ_RESOURCE_OWNER_FACTS,
+                vec![
+                    Value::Text(id.clone()),
+                    Value::Text(previous_lifecycle.to_string()),
+                ],
+            ))
+            .await?
+            .ok_or_else(|| corrupt("resource owner facts are not readable"))?;
+        match row.as_slice() {
+            [Value::Integer(exists), control, Value::Integer(state_exists), revision, current_owner, previous_owner, current_child, previous_child, owners_type, child_type]
+                if [
+                    control,
+                    revision,
+                    current_owner,
+                    previous_owner,
+                    current_child,
+                    previous_child,
+                    owners_type,
+                    child_type,
+                ]
+                .iter()
+                .all(|value| matches!(value, Value::Null | Value::Text(_))) =>
+            {
+                work::resource_owner_facts(
+                    *exists != 0,
+                    text_at(&row, 1),
+                    *state_exists != 0,
+                    text_at(&row, 3),
+                    text_at(&row, 4),
+                    text_at(&row, 5),
+                    text_at(&row, 6),
+                    text_at(&row, 7),
+                    text_at(&row, 8),
+                    text_at(&row, 9),
+                )
+            }
+            _ => Err(corrupt("resource owner facts are not readable")),
+        }
+    }
     pub(super) async fn read_work_revision(
         &self,
         id: &peri_acp_types::thread::ThreadId,
@@ -196,7 +244,8 @@ impl RemoteSessionData {
         &self,
         command: &WorkCommand,
     ) -> SessionResourceResult<WorkReceipt> {
-        let identity = identity(command)?;
+        let digest = command.digest()?;
+        let identity = identity(command, &digest);
         if let Some(resolution) = self.work_resolution(command).await? {
             self.acknowledge_work(command).await?;
             return work::receipt(resolution);
@@ -221,6 +270,7 @@ impl RemoteSessionData {
             let reduction = reduce_work(command, &snapshot.control, snapshot.state)?;
             let effects = work::mutation_effects(
                 command,
+                &digest,
                 initial_json,
                 parent_command.as_ref(),
                 &snapshot.control,
@@ -293,7 +343,7 @@ impl RemoteSessionData {
         &self,
         command: &WorkCommand,
     ) -> SessionResourceResult<WorkResolution> {
-        let identity = identity(command)?;
+        let identity = identity(command, &command.digest()?);
         if let Some(resolution) = self.work_resolution(command).await? {
             self.acknowledge_work(command).await?;
             return Ok(resolution);

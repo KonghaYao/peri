@@ -40,9 +40,17 @@
 //! - 不解析本机目录、不发执行资格、不判定 legacy：`LegacyConfirmed` 与执行准入由门面与
 //!   执行面按本机证据判定（这也是 `load_binding` 只回答绑定事实的原因）；
 
-use std::collections::HashMap;
-use std::sync::Arc;
-
+use super::credentials::SessionStoreCredential;
+use super::endpoint::RemoteEndpoint;
+use super::generation::{ConnectionFactory, ConnectionGate, RemoteConnectionFactory};
+use super::mutation::{RemoteStore, StoreAccess};
+#[cfg(test)]
+use super::schema;
+use super::schema::{StoreId, StoreIdentityRead};
+use super::schema_upgrade;
+use super::session_schema;
+use super::sql::StatementSpec;
+use crate::sessions::data::{ChildResumeRecord, SessionDataPort};
 use async_trait::async_trait;
 use peri_acp_types::messages::MessageId;
 use peri_acp_types::session_resources::{
@@ -56,22 +64,10 @@ use peri_acp_types::thread::{ThreadId, ThreadMeta};
 use peri_acp_types::workspace::{
     ResolvedWorkspace, ScopedThreadPage, ScopedThreadQuery, SessionBinding,
 };
+use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::sync::{RwLock, RwLockReadGuard};
-
-use crate::sessions::data::{ChildResumeRecord, SessionDataPort};
-
-use super::credentials::SessionStoreCredential;
-use super::endpoint::RemoteEndpoint;
-use super::generation::{ConnectionFactory, ConnectionGate, RemoteConnectionFactory};
-use super::mutation::{RemoteStore, StoreAccess};
-#[cfg(test)]
-use super::schema;
-use super::schema::{StoreId, StoreIdentityRead};
-use super::schema_upgrade;
-use super::session_schema;
-use super::sql::StatementSpec;
 use turso_serverless::Value;
-
 #[path = "session_close.rs"]
 mod session_close;
 
@@ -518,7 +514,6 @@ fn retired_connection() -> SessionResourceError {
 pub(super) fn not_found() -> SessionResourceError {
     SessionResourceError::new(SessionResourceErrorKind::NotFound)
 }
-
 pub(super) fn invalid_input(detail: &str) -> SessionResourceError {
     SessionResourceError::new(SessionResourceErrorKind::InvalidInput {
         detail: detail.to_owned(),
@@ -533,6 +528,13 @@ pub(super) fn unsupported_behavior(behavior: &'static str) -> SessionResourceErr
 
 #[async_trait]
 impl SessionDataPort for RemoteSessionData {
+    async fn load_resource_owner_facts(
+        &self,
+        id: &ThreadId,
+        previous_lifecycle: u64,
+    ) -> SessionResourceResult<peri_acp_types::session_resources::work::ResourceOwnerFacts> {
+        self.read_resource_owner_facts(id, previous_lifecycle).await
+    }
     async fn load_work_revision(&self, id: &ThreadId) -> SessionResourceResult<u64> {
         self.read_work_revision(id).await
     }

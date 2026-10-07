@@ -2,6 +2,20 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use super::database::SqliteSessionDatabase;
+use super::failure::{
+    commit_failure, corrupt, execution_failure, invalid_input, map_sqlx, not_found, read_failure,
+    unavailable, write_failure,
+};
+use super::row_mapping::extract_title;
+use super::session_rows::{
+    delete_thread_child_rows, insert_binding_row, insert_thread_row, ThreadRowInsert,
+};
+use super::{compaction, context, session_rows, workspace as workspace_store};
+use crate::sessions::canonical::payload_role;
+use crate::sessions::data::ensure_child_relation;
+use crate::sessions::data::ChildResumeRecord;
+use crate::sessions::data::SessionDataPort;
 use async_trait::async_trait;
 use peri_acp_types::messages::MessageId;
 use peri_acp_types::session_resources::{
@@ -19,21 +33,6 @@ use peri_acp_types::workspace::{
     SESSION_BINDING_VERSION,
 };
 use sqlx::SqliteConnection;
-
-use super::database::SqliteSessionDatabase;
-use super::failure::{
-    commit_failure, corrupt, execution_failure, invalid_input, map_sqlx, not_found, read_failure,
-    unavailable, write_failure,
-};
-use super::row_mapping::extract_title;
-use super::session_rows::{
-    delete_thread_child_rows, insert_binding_row, insert_thread_row, ThreadRowInsert,
-};
-use super::{compaction, context, session_rows, workspace as workspace_store};
-use crate::sessions::canonical::payload_role;
-use crate::sessions::data::ensure_child_relation;
-use crate::sessions::data::ChildResumeRecord;
-use crate::sessions::data::SessionDataPort;
 
 #[path = "session_data/async_task.rs"]
 mod async_task;
@@ -77,6 +76,13 @@ pub(super) use helpers::{new_session_draft_row, new_session_row, validate_unboun
 
 #[async_trait]
 impl SessionDataPort for SqliteSessionData {
+    async fn load_resource_owner_facts(
+        &self,
+        id: &ThreadId,
+        previous_lifecycle: u64,
+    ) -> SessionResourceResult<peri_acp_types::session_resources::work::ResourceOwnerFacts> {
+        self.read_resource_owner_facts(id, previous_lifecycle).await
+    }
     async fn load_work_revision(&self, id: &ThreadId) -> SessionResourceResult<u64> {
         self.read_work_revision(id).await
     }
