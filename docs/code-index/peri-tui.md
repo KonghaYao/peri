@@ -22,6 +22,13 @@ query/execute/resolve；精确 existing ticket 确认不再次准入，Unknown �
 Queued 与未 claim 的 Dispatching 可以请求权威 withdraw receipt；Claimed 不可以。
 Unknown enqueue/dispatch/withdraw 保留原命令，禁止同时重发、撤回或恢复编辑器内容。
 视图 `src/kit/steer_queue/view.rs` 不把 Claimed 当作可撤回的 Dispatching。
+空闲直接提交在 enqueue 回执未落定时保持直接发送投影，中间暂存 `Queued`
+通知不使输入闪入待发送区；回执落定后最新快照仍为 `Queued` 才显示真实排队。
+超时、拒绝与重载仍恢复既有可见状态；正式聊天气泡保持由 Delivered 确认。
+投影收敛入口为 `SessionSteers::reconcile_direct_submissions`，回归见
+`test_steer_idle_submission_snapshot_without_receipt_stays_direct`、
+`test_steer_idle_submission_queued_receipt_exposes_real_queue` 与
+`test_steer_idle_submission_staged_snapshot_then_dispatch_skips_queue`。
 回归入口：`sdk_execution::tests`、`kit::steer_state::tests`、`kit::steer_queue::tests`；
 JSONL/SQLite transport 的协议与故障测试见 `peri-acp/src/host/execution_admission*_test.rs`。
 

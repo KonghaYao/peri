@@ -42,6 +42,23 @@ struct SessionSteers {
     direct_submissions: HashSet<String>,
 }
 
+impl SessionSteers {
+    fn reconcile_direct_submissions(&mut self) {
+        if let Some(snapshot) = &self.snapshot {
+            for item in &snapshot.items {
+                if item.state == UserInputState::Queued
+                    && !self.pending.iter().any(|command| {
+                        matches!(&command.kind, SteerCommandKind::Enqueue(input)
+                            if input.input_id == item.input_id)
+                    })
+                {
+                    self.direct_submissions.remove(&item.input_id);
+                }
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct RecoveredInput {
     epoch: u64,
@@ -94,12 +111,8 @@ impl SteerState {
             None if !establish => return false,
             _ => {}
         }
-        for item in &snapshot.items {
-            if item.state == UserInputState::Queued {
-                session.direct_submissions.remove(&item.input_id);
-            }
-        }
         session.snapshot = Some(snapshot);
+        session.reconcile_direct_submissions();
         true
     }
 
@@ -181,6 +194,7 @@ impl SteerState {
         session
             .pending
             .retain(|pending| pending.command_id != command.command_id);
+        session.reconcile_direct_submissions();
         if let Some(input) = receipt.taken_back
             && matches!(
                 command.kind,
