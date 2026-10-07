@@ -106,10 +106,13 @@ pub(crate) async fn prepare_existing(
         .drain_persistence(&id.to_owned())
         .await
         .map_err(crate::host::workspace::resource_error)?;
-    // ── 有效 servers：持久 owner 声明 + 本次请求声明的一致性校验 ──
+    // ── 有效 servers 候选（只读）：持久 owner 声明 + 本次请求声明的一致性校验 ──
     // legacy 首次接纳的 bootstrap 会建立会话 MCP 池，而池只在装配时消费一次
-    // servers（OnceLock）；因此必须在接纳/装配之前解析并交给 prepared，
+    // servers（OnceLock）；因此候选必须在接纳/装配之前解析并交给 prepared，
     // 不能事后写入（那样环境里的 MCP 面会缺失）。
+    // 但**持久绑定不能在这里发生**：本请求随后还要过 cwd/frozen 校验，失败请求
+    // 不得把不可变 owner 声明写进会话事实（否则该会话后续不同的合法声明会被
+    // 误判为篡改）。候选先只在内存里消费，校验全部通过后才定稿为持久声明。
     let owner_state = cfg
         .session_resources
         .load_session_work(&peri_acp_types::session_resources::work::WorkQuery {
@@ -124,14 +127,15 @@ pub(crate) async fn prepare_existing(
         .contains_key(&owner_state.control.lifecycle);
     let mut effective_servers = super::super::resource_owners::load_for_restore(cfg, id).await?;
     let supplied = super::session_mcp_servers(params)?;
+    // 既有声明已经存在时，本次声明只是复核（相等才算合法）；无声明时候选为
+    // 请求声明本身，等到校验通过再绑定。
+    let commit_owner_declaration = !supplied.is_empty() && !owner_known;
     if !supplied.is_empty() {
-        if owner_known {
-            super::super::resource_owners::bind(cfg, id, &supplied).await?;
-            // 绑定后的持久声明是权威有效集合（既有 owner + 本次声明）。
-            effective_servers = super::super::resource_owners::load(cfg, id).await?;
+        effective_servers = if owner_known {
+            super::super::resource_owners::resolve_without_binding(cfg, id, &supplied).await?
         } else {
-            effective_servers = supplied;
-        }
+            supplied
+        };
     }
 
     let legacy_adoption =
@@ -165,6 +169,13 @@ pub(crate) async fn prepare_existing(
                 state.history_payloads = payloads;
             }
             return Ok(RestoreOutcome::AlreadyLive { identity });
+        }
+        // cwd/frozen/identity 校验已全部通过，且本次请求将发布会话（AlreadyLive
+        // 不在此列：live 环境已经定稿，声明不再回写）：把请求声明的有效 servers
+        // 候选定稿为持久不可变声明。此前任何一步失败都不会走到这里，失败请求
+        // （错误的 cwd、读不懂的 frozen 等）不写 owner。
+        if commit_owner_declaration {
+            super::super::resource_owners::bind(cfg, id, &effective_servers).await?;
         }
         let payloads = dispatch::load_session_payloads(cfg.controller.as_ref(), id).await?;
         let cwd = workspace

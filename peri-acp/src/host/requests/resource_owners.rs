@@ -57,6 +57,38 @@ pub(super) async fn bind(
     Ok(())
 }
 
+/// 只读复核既有声明与本次请求声明是否一致，返回**既有**声明解析出的有效集合。
+///
+/// 与 [`bind`] 的判据同源（同一 canonical JSON 比较），但绝不写持久状态：恢复
+/// 请求的 cwd/frozen 校验尚未通过时，候选只能停在内存里；`bind` 是唯一的持久
+/// 写入口，且必须在校验通过后才调用。
+pub(crate) async fn resolve_without_binding(
+    cfg: &AcpServerConfig,
+    session_id: &str,
+    supplied: &HashMap<String, McpServerConfig>,
+) -> Result<HashMap<String, McpServerConfig>, AcpError> {
+    let snapshot = cfg
+        .session_resources
+        .load_resource_owner_facts(&session_id.to_owned(), 0)
+        .await
+        .map_err(crate::host::workspace::resource_error)?;
+    match &snapshot.current_owner {
+        None => Ok(supplied.clone()),
+        Some(existing) => {
+            let ordered: std::collections::BTreeMap<_, _> = supplied.iter().collect();
+            let supplied_json = serde_json::to_string(&ordered)
+                .map_err(|error| AcpError::new(-32603, error.to_string()))?;
+            if existing.connections_json != supplied_json {
+                return Err(AcpError::new(
+                    -32010,
+                    "resource owner declaration is immutable",
+                ));
+            }
+            load(cfg, session_id).await
+        }
+    }
+}
+
 pub(crate) async fn load(
     cfg: &AcpServerConfig,
     session_id: &str,

@@ -16,7 +16,7 @@ use peri_acp_types::workspace::{ResolvedWorkspace, ScopedThreadPage, ScopedThrea
 ///
 /// 用裸句柄按原表构造——门面没有「无 binding 无 frozen」的创建入口；`bridge` 与 `cfg`
 /// 的门面出自同一次打开（同一库句柄），后续经协议/门面读到的是同一份事实。
-async fn old_thread(bridge: &SqliteThreadStore, cwd: &Path) -> String {
+pub(super) async fn old_thread(bridge: &SqliteThreadStore, cwd: &Path) -> String {
     let id = bridge
         .create_thread(ThreadMeta::new_at(
             cwd.to_str().unwrap(),

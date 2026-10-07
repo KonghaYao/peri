@@ -38,6 +38,9 @@ mod session_control_tests;
 #[path = "requests_legacy_test.rs"]
 mod legacy_tests;
 
+#[path = "requests_legacy_owner_test.rs"]
+mod legacy_owner_tests;
+
 #[path = "requests_update_config_test.rs"]
 mod update_config_tests;
 
