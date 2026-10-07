@@ -20,6 +20,7 @@ use super::*;
 /// - mock LLM 收到的 messages 包含全部 3 条父消息（按顺序透传，验证 BUG-C）
 #[tokio::test]
 async fn test_integration_fork_parent_messages_passthrough() {
+    let host = DurableHost::open("fixture-iv2-passthrough").await;
     // Arrange: 3 条父消息（Human/AI 交替 + 1 条 system context）
     let parent_messages: Arc<RwLock<Vec<BaseMessage>>> = Arc::new(RwLock::new(Vec::new()));
     parent_messages
@@ -35,19 +36,24 @@ async fn test_integration_fork_parent_messages_passthrough() {
     // H1 生产装配捕获：模型来源经子链装配点装 bridge，捕获真实 ModelRequest。
     let model = super::mock_model::RecordingModel::new("fork integration done");
 
-    let t = SubAgentTool::new(
-        Arc::new(vec![]),
-        None,
-        Arc::new({
-            let model = Arc::clone(&model);
-            move |_: Option<&str>| {
-                SubagentLlmSource::model(model.clone() as Arc<dyn peri_model::Model>, "mock-model")
-            }
-        }),
-        "/tmp".to_string(),
-    )
-    .with_parent_messages(Arc::clone(&parent_messages))
-    .with_system_builder(Arc::new(|_ov, _cwd| "FORK-CONTEXT-SP".to_string()));
+    let t = host.bind(
+        SubAgentTool::new(
+            Arc::new(vec![]),
+            None,
+            Arc::new({
+                let model = Arc::clone(&model);
+                move |_: Option<&str>| {
+                    SubagentLlmSource::model(
+                        model.clone() as Arc<dyn peri_model::Model>,
+                        "mock-model",
+                    )
+                }
+            }),
+            "/tmp".to_string(),
+        )
+        .with_parent_messages(Arc::clone(&parent_messages))
+        .with_system_builder(Arc::new(|_ov, _cwd| "FORK-CONTEXT-SP".to_string())),
+    );
 
     // Act: fork 模式触发端到端路径
     let result = t
@@ -56,7 +62,7 @@ async fn test_integration_fork_parent_messages_passthrough() {
                 "fork": true,
                 "prompt": "continue from parent context"
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            host.context(&[]),
         )
         .await
         .unwrap();
@@ -96,9 +102,12 @@ async fn test_integration_fork_parent_messages_passthrough() {
         system.contains("FORK-CONTEXT-SP"),
         "bridge system should contain system_builder projection, got: {system}"
     );
+    // 身份恰一次：只出现在 bridge base system；非 system 消息不得再出现
+    // （`conversation_texts` 以 "[system]" 前缀标记 system 条目）。
     assert_eq!(
         texts
             .iter()
+            .filter(|t| !t.starts_with("[system]"))
             .filter(|t| t.contains("FORK-CONTEXT-SP"))
             .count(),
         0,
@@ -126,6 +135,7 @@ async fn test_integration_fork_parent_messages_passthrough() {
 
 #[tokio::test]
 async fn test_fork_prefers_tool_context_messages_over_parent_snapshot() {
+    let host = DurableHost::open("fixture-iv2-prefer").await;
     let parent_messages: Arc<RwLock<Vec<BaseMessage>>> = Arc::new(RwLock::new(Vec::new()));
     parent_messages
         .write()
@@ -161,20 +171,22 @@ async fn test_fork_prefers_tool_context_messages_over_parent_snapshot() {
     }
     crate::subagent::test_support::fixture_model_impl!(CaptureContentLLM);
 
-    let t = SubAgentTool::new(
-        Arc::new(vec![]),
-        None,
-        Arc::new(move |_: Option<&str>| {
-            crate::subagent::test_support::fixture_source(
-                std::sync::Arc::new(CaptureContentLLM {
-                    captured: Arc::clone(&captured_clone),
-                }),
-                "fixture-scripted",
-            )
-        }),
-        "/tmp".to_string(),
-    )
-    .with_parent_messages(Arc::clone(&parent_messages));
+    let t = host.bind(
+        SubAgentTool::new(
+            Arc::new(vec![]),
+            None,
+            Arc::new(move |_: Option<&str>| {
+                crate::subagent::test_support::fixture_source(
+                    std::sync::Arc::new(CaptureContentLLM {
+                        captured: Arc::clone(&captured_clone),
+                    }),
+                    "fixture-scripted",
+                )
+            }),
+            "/tmp".to_string(),
+        )
+        .with_parent_messages(Arc::clone(&parent_messages)),
+    );
 
     let result = t
         .invoke(
@@ -182,7 +194,7 @@ async fn test_fork_prefers_tool_context_messages_over_parent_snapshot() {
                 "fork": true,
                 "prompt": "review current turn"
             }),
-            peri_agent::tools::ToolContext::new(&ctx_messages, "."),
+            host.context(&ctx_messages),
         )
         .await
         .unwrap();
@@ -208,6 +220,7 @@ async fn test_fork_prefers_tool_context_messages_over_parent_snapshot() {
 
 #[tokio::test]
 async fn test_fork_falls_back_to_parent_messages_when_tool_context_empty() {
+    let host = DurableHost::open("fixture-iv2-fallback").await;
     let parent_messages: Arc<RwLock<Vec<BaseMessage>>> = Arc::new(RwLock::new(Vec::new()));
     parent_messages
         .write()
@@ -238,20 +251,22 @@ async fn test_fork_falls_back_to_parent_messages_when_tool_context_empty() {
     }
     crate::subagent::test_support::fixture_model_impl!(FallbackCaptureLLM);
 
-    let t = SubAgentTool::new(
-        Arc::new(vec![]),
-        None,
-        Arc::new(move |_: Option<&str>| {
-            crate::subagent::test_support::fixture_source(
-                std::sync::Arc::new(FallbackCaptureLLM {
-                    captured: Arc::clone(&captured_clone),
-                }),
-                "fixture-scripted",
-            )
-        }),
-        "/tmp".to_string(),
-    )
-    .with_parent_messages(Arc::clone(&parent_messages));
+    let t = host.bind(
+        SubAgentTool::new(
+            Arc::new(vec![]),
+            None,
+            Arc::new(move |_: Option<&str>| {
+                crate::subagent::test_support::fixture_source(
+                    std::sync::Arc::new(FallbackCaptureLLM {
+                        captured: Arc::clone(&captured_clone),
+                    }),
+                    "fixture-scripted",
+                )
+            }),
+            "/tmp".to_string(),
+        )
+        .with_parent_messages(Arc::clone(&parent_messages)),
+    );
 
     let result = t
         .invoke(
@@ -259,7 +274,7 @@ async fn test_fork_falls_back_to_parent_messages_when_tool_context_empty() {
                 "fork": true,
                 "prompt": "review fallback"
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            host.context(&[]),
         )
         .await
         .unwrap();
@@ -280,6 +295,7 @@ async fn test_fork_falls_back_to_parent_messages_when_tool_context_empty() {
 
 #[tokio::test]
 async fn test_fork_drops_trailing_tool_call_message_from_tool_context() {
+    let host = DurableHost::open("fixture-iv2-drop").await;
     let ctx_messages = vec![
         BaseMessage::human("stable context before tool call"),
         BaseMessage::ai_with_tool_calls(
@@ -317,7 +333,7 @@ async fn test_fork_drops_trailing_tool_call_message_from_tool_context() {
     }
     crate::subagent::test_support::fixture_model_impl!(DropToolCallCaptureLLM);
 
-    let t = SubAgentTool::new(
+    let t = host.bind(SubAgentTool::new(
         Arc::new(vec![]),
         None,
         Arc::new(move |_: Option<&str>| {
@@ -329,7 +345,7 @@ async fn test_fork_drops_trailing_tool_call_message_from_tool_context() {
             )
         }),
         "/tmp".to_string(),
-    );
+    ));
 
     let result = t
         .invoke(
@@ -337,7 +353,7 @@ async fn test_fork_drops_trailing_tool_call_message_from_tool_context() {
                 "fork": true,
                 "prompt": "review without dangling tool call"
             }),
-            peri_agent::tools::ToolContext::new(&ctx_messages, "."),
+            host.context(&ctx_messages),
         )
         .await
         .unwrap();
@@ -385,24 +401,28 @@ async fn test_integration_background_independent_survives_parent_cancel() {
     #[derive(Clone)]
     struct CountingLLM {
         count: Arc<std::sync::atomic::AtomicUsize>,
+        release: Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>>,
     }
     impl CountingLLM {
         async fn respond(
             &self,
-            request: peri_model::ModelRequest,
-            cancellation: tokio_util::sync::CancellationToken,
+            _request: peri_model::ModelRequest,
+            _cancellation: tokio_util::sync::CancellationToken,
         ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
             use crate::subagent::test_support::*;
-            let _ = &cancellation;
-            let messages = base_messages(&request);
-            let defined = defined_tools(&request);
-            let tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
-
+            let receiver = self.release.lock().unwrap().take();
+            if let Some(receiver) = receiver {
+                let _ = receiver.await;
+            }
             self.count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             text_events("bg done independent")
         }
     }
     crate::subagent::test_support::fixture_model_impl!(CountingLLM);
+
+    // 门控：任务必须保持 active 直到测试断言（父 cancel 之后），再放行完成。
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let release = Arc::new(std::sync::Mutex::new(Some(release_rx)));
 
     // 父 cancel token（Independent policy 下不应传播到 background task）
     let parent_cancel = AgentCancellationToken::new();
@@ -419,23 +439,32 @@ async fn test_integration_background_independent_survives_parent_cancel() {
         .write()
         .push(BaseMessage::human("parent ctx"));
 
-    let t = SubAgentTool::new(
-        Arc::new(vec![]),
-        None,
-        Arc::new(move |_: Option<&str>| {
-            crate::subagent::test_support::fixture_source(
-                std::sync::Arc::new(CountingLLM {
-                    count: Arc::clone(&llm_call_count_clone),
-                }),
-                "fixture-scripted",
-            )
-        }),
-        "/tmp".to_string(),
+    let host = DurableHost::open_with_background(
+        "fixture-iv2-independent",
+        Arc::clone(&registry),
+        bg_tx.clone(),
     )
-    .with_parent_messages(parent_messages)
-    .with_cancel(parent_cancel.clone())
-    .with_task_manager(Arc::clone(&registry))
-    .with_bg_event_sender(bg_tx);
+    .await;
+    let t = host.bind(
+        SubAgentTool::new(
+            Arc::new(vec![]),
+            None,
+            Arc::new(move |_: Option<&str>| {
+                crate::subagent::test_support::fixture_source(
+                    std::sync::Arc::new(CountingLLM {
+                        count: Arc::clone(&llm_call_count_clone),
+                        release: Arc::clone(&release),
+                    }),
+                    "fixture-scripted",
+                )
+            }),
+            "/tmp".to_string(),
+        )
+        .with_parent_messages(parent_messages)
+        .with_cancel(parent_cancel.clone())
+        .with_task_manager(Arc::clone(&registry))
+        .with_bg_event_sender(bg_tx),
+    );
 
     // Act 1: 启动 background fork
     let invoke_result = t
@@ -445,7 +474,7 @@ async fn test_integration_background_independent_survives_parent_cancel() {
                 "run_in_background": true,
                 "prompt": "long running bg task"
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            host.context(&[]),
         )
         .await;
     assert!(
@@ -464,12 +493,15 @@ async fn test_integration_background_independent_survives_parent_cancel() {
     // 注意：Independent policy = background task 使用独立 CancellationToken（spawner.rs:177），
     // 不与 parent_cancel 形成 child_token 关系，所以 cancel 不会传播。
     parent_cancel.cancel();
+    host.cancel_parent();
 
     // Assert 1: background task 仍在运行（active_count >= 1，未被父 cancel 移除）
     assert!(
         registry.active_count() >= 1,
         "independent background task should survive parent cancel"
     );
+    // 放行门控：任务在父 cancel 之后仍继续执行到完成。
+    let _ = release_tx.send(());
 
     // Act 3: 等待 background task 完整执行（消耗所有事件直到 BackgroundTaskCompleted）
     // Independent policy 下 task 应运行到完成，不应被 cancel 中断。
@@ -550,6 +582,7 @@ async fn test_integration_background_independent_survives_parent_cancel() {
 #[tokio::test]
 async fn test_integration_sync_cascade_cancel_returns_interrupted_marker() {
     let dir = tempdir().unwrap();
+    let host = DurableHost::open_in(dir.path(), "fixture-iv2-cascade").await;
     let agents_dir = dir.path().join(".claude").join("agents");
     std::fs::create_dir_all(&agents_dir).unwrap();
     std::fs::write(
@@ -592,21 +625,24 @@ async fn test_integration_sync_cascade_cancel_returns_interrupted_marker() {
     let cancel = AgentCancellationToken::new();
     // 关键：在 SubAgent 执行**之前** cancel（模拟父 Agent 收到 Ctrl+C 后才 spawn SubAgent）
     cancel.cancel();
+    host.cancel_parent();
 
-    let t = SubAgentTool::new(
-        Arc::new(vec![]),
-        None,
-        Arc::new(move |_: Option<&str>| {
-            crate::subagent::test_support::fixture_source(
-                std::sync::Arc::new(LoopingLLM {
-                    count: Arc::clone(&llm_call_count_clone),
-                }),
-                "fixture-scripted",
-            )
-        }),
-        dir.path().to_str().unwrap().to_string(),
-    )
-    .with_cancel(cancel);
+    let t = host.bind(
+        SubAgentTool::new(
+            Arc::new(vec![]),
+            None,
+            Arc::new(move |_: Option<&str>| {
+                crate::subagent::test_support::fixture_source(
+                    std::sync::Arc::new(LoopingLLM {
+                        count: Arc::clone(&llm_call_count_clone),
+                    }),
+                    "fixture-scripted",
+                )
+            }),
+            dir.path().to_str().unwrap().to_string(),
+        )
+        .with_cancel(cancel),
+    );
     let t = with_agent_face(t, dir.path()).await;
 
     let result = t
@@ -616,7 +652,7 @@ async fn test_integration_sync_cascade_cancel_returns_interrupted_marker() {
                 "prompt": "run",
                 "cwd": dir.path().to_str().unwrap()
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            host.context(&[]),
         )
         .await
         .unwrap();
@@ -702,24 +738,33 @@ async fn test_p0_2_background_defined_skill_preload_once_after_parent_cancel() {
     let parent_cancel = AgentCancellationToken::new();
     let registry = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
     let (bg_tx, mut bg_rx) = mpsc::unbounded_channel::<ExecutorEvent>();
-    let tool = SubAgentTool::new(
-        Arc::new(vec![]),
-        None,
-        Arc::new(move |_: Option<&str>| {
-            crate::subagent::test_support::fixture_source(
-                std::sync::Arc::new(BackgroundSkillLLM {
-                    calls: Arc::clone(&llm_calls_clone),
-                    preload_count: Arc::clone(&preload_count_clone),
-                }),
-                "fixture-scripted",
-            )
-        }),
-        dir.path().to_str().unwrap().to_string(),
+    let host = DurableHost::open_in_with_background(
+        dir.path(),
+        "fixture-iv2-skillpreload",
+        Arc::clone(&registry),
+        bg_tx.clone(),
     )
-    .with_cancel(parent_cancel.clone())
-    .with_task_manager(registry)
-    .with_bg_event_sender(bg_tx);
-    let tool = with_agent_face(tool, dir.path()).await;
+    .await;
+    let tool = host.bind(
+        SubAgentTool::new(
+            Arc::new(vec![]),
+            None,
+            Arc::new(move |_: Option<&str>| {
+                crate::subagent::test_support::fixture_source(
+                    std::sync::Arc::new(BackgroundSkillLLM {
+                        calls: Arc::clone(&llm_calls_clone),
+                        preload_count: Arc::clone(&preload_count_clone),
+                    }),
+                    "fixture-scripted",
+                )
+            }),
+            dir.path().to_str().unwrap().to_string(),
+        )
+        .with_cancel(parent_cancel.clone())
+        .with_task_manager(registry)
+        .with_bg_event_sender(bg_tx),
+    );
+    let tool = host.bind(with_agent_face(tool, dir.path()).await);
     let tool = super::with_skill_registry(
         tool,
         "workspace",
@@ -734,12 +779,13 @@ async fn test_p0_2_background_defined_skill_preload_once_after_parent_cancel() {
                 "prompt": "p0-2 background prompt",
                 "cwd": dir.path().to_str().unwrap(),
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            host.context(&[]),
         )
         .await
         .expect("background defined subagent should start");
     assert!(started.contains("Background task"));
     parent_cancel.cancel();
+    host.cancel_parent();
 
     let mut lifecycle = Vec::new();
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -827,22 +873,30 @@ async fn test_integration_fork_plus_background_priority() {
         .write()
         .push(BaseMessage::human("ctx for bg fork"));
 
-    let t = SubAgentTool::new(
-        Arc::new(vec![]),
-        None,
-        Arc::new(move |_: Option<&str>| {
-            crate::subagent::test_support::fixture_source(
-                std::sync::Arc::new(PromptCaptureLLM {
-                    captured: Arc::clone(&prompt_capture_clone),
-                }),
-                "fixture-scripted",
-            )
-        }),
-        "/tmp".to_string(),
+    let host = DurableHost::open_with_background(
+        "fixture-iv2-independent",
+        Arc::clone(&registry),
+        bg_tx.clone(),
     )
-    .with_parent_messages(parent_messages)
-    .with_task_manager(Arc::clone(&registry))
-    .with_bg_event_sender(bg_tx);
+    .await;
+    let t = host.bind(
+        SubAgentTool::new(
+            Arc::new(vec![]),
+            None,
+            Arc::new(move |_: Option<&str>| {
+                crate::subagent::test_support::fixture_source(
+                    std::sync::Arc::new(PromptCaptureLLM {
+                        captured: Arc::clone(&prompt_capture_clone),
+                    }),
+                    "fixture-scripted",
+                )
+            }),
+            "/tmp".to_string(),
+        )
+        .with_parent_messages(parent_messages)
+        .with_task_manager(Arc::clone(&registry))
+        .with_bg_event_sender(bg_tx),
+    );
 
     // Act: 同时 fork=true + run_in_background=true（优先级测试）
     let result = t
@@ -852,7 +906,7 @@ async fn test_integration_fork_plus_background_priority() {
                 "run_in_background": true,
                 "prompt": "do both"
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            host.context(&[]),
         )
         .await
         .unwrap();

@@ -906,6 +906,53 @@ pub(crate) struct DurableHost {
 }
 
 impl DurableHost {
+    /// 带调用方后台通道的宿主（父 host 的 TaskManager/bg 事件发送端）。
+    ///
+    /// `set_subagent_host` 是 write-once：通道必须在父 session 装配时给定，
+    /// 不能事后替换（`use_background_channels` 只对未装配的 session 有效）。
+    pub(crate) async fn open_with_background(
+        invocation_id: &str,
+        task_manager: std::sync::Arc<peri_agent::agent::async_tasks::TaskManager>,
+        bg_event_sender: tokio::sync::mpsc::UnboundedSender<
+            peri_agent::agent::events::ExecutorEvent,
+        >,
+    ) -> Self {
+        let mut host = Self::open(invocation_id).await;
+        let mut session = Arc::clone(&host.parent_session);
+        let mut sub_host = session
+            .subagent_host()
+            .as_deref()
+            .cloned()
+            .unwrap_or_default();
+        sub_host.task_manager = Some(task_manager);
+        sub_host.bg_event_sender = Some(bg_event_sender);
+        session = rebuild_with_host(&host.cwd, &host.parent_id, &host.fixture, sub_host);
+        host.parent_session = session;
+        host
+    }
+
+    pub(crate) async fn open_in_with_background(
+        dir: &std::path::Path,
+        invocation_id: &str,
+        task_manager: std::sync::Arc<peri_agent::agent::async_tasks::TaskManager>,
+        bg_event_sender: tokio::sync::mpsc::UnboundedSender<
+            peri_agent::agent::events::ExecutorEvent,
+        >,
+    ) -> Self {
+        let mut host = Self::open_in(dir, invocation_id).await;
+        let mut sub_host = host
+            .parent_session
+            .subagent_host()
+            .as_deref()
+            .cloned()
+            .unwrap_or_default();
+        sub_host.task_manager = Some(task_manager);
+        sub_host.bg_event_sender = Some(bg_event_sender);
+        host.parent_session =
+            rebuild_with_host(&host.cwd, &host.parent_id, &host.fixture, sub_host);
+        host
+    }
+
     pub(crate) async fn open(invocation_id: &str) -> Self {
         let dir = tempdir().unwrap();
         let fixture = SessionFixture::open_in(dir.path()).await;
@@ -960,6 +1007,32 @@ impl DurableHost {
         // 工具默认 cwd 与父会话绑定工作区一致，避免 ExecutionBindingMismatch。
         tool.parent_cwd = self.cwd.clone();
         tool
+    }
+
+    /// 让父会话 host 使用调用方的后台通道（**仅当父 session 尚未装配 host**；
+    /// 已装配时 write-once 语义会忽略，改用 `open_with_background`）。
+    ///
+    /// 保留该方法用于尚未装配 host 的自有 session（如 resume 用例的 owning parent）。
+    #[allow(dead_code)]
+    ///
+    /// 后台子链的 TaskManager/bg 事件来自父 session 的 `SubagentHost`，测试要观察
+    /// 注册与事件就必须把同一通道装到父 host 上（工具字段级设置会被父 host 覆盖）。
+    pub(crate) fn use_background_channels(
+        &self,
+        task_manager: std::sync::Arc<peri_agent::agent::async_tasks::TaskManager>,
+        bg_event_sender: tokio::sync::mpsc::UnboundedSender<
+            peri_agent::agent::events::ExecutorEvent,
+        >,
+    ) {
+        let mut host = self
+            .parent_session
+            .subagent_host()
+            .as_deref()
+            .cloned()
+            .unwrap_or_default();
+        host.task_manager = Some(task_manager);
+        host.bg_event_sender = Some(bg_event_sender);
+        self.parent_session.set_subagent_host(host);
     }
 
     /// 取消父会话 token（Cascade 子链随父取消；spawn/resume 的取消来源）。
@@ -1017,6 +1090,30 @@ impl DurableHost {
             .await;
         invocation_id
     }
+}
+
+/// 用给定 SubagentHost 重建 session（Write-once host 需要在装配前定稿通道）。
+fn rebuild_with_host(
+    cwd: &str,
+    parent_id: &str,
+    fixture: &SessionFixture,
+    mut host: peri_agent::session::subagent::SubagentHost,
+) -> std::sync::Arc<peri_agent::session::Session> {
+    host.session_resources = Some(fixture.facade());
+    if host.execution_admission_port.is_none() {
+        host.execution_admission_port = Some(Arc::new(TestAdmissionPort(fixture.facade())));
+    }
+    if host.task_manager.is_none() {
+        host.task_manager = Some(Arc::new(peri_agent::agent::async_tasks::TaskManager::new()));
+    }
+    host.parent_thread_id = Some(parent_id.to_string());
+    let session = peri_agent::session::Session::new(
+        std::sync::Arc::from(cwd),
+        peri_agent::session::FrozenContext::builder().build(),
+        Some(parent_id.to_string()),
+    );
+    session.set_subagent_host(host);
+    session
 }
 
 /// 构造夹具父 session：cwd/父线程 id + 生产 SubagentHost（资源/端口/任务通道）。
