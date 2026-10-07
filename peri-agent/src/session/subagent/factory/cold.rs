@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 
 use super::super::{SubagentChainAssembler, SubagentHost, SubagentLlmSource};
 use super::context::build_subagent_session_v2;
-use crate::session::{FrozenContext, Session};
+use crate::session::Session;
 use crate::tools::{BaseTool, ToolInvocationResolver};
 
 pub(super) async fn persist_child_resume_metadata(
@@ -243,46 +243,63 @@ impl ChildResumeMetadata {
         Self::SUPPORTED_VERSIONS.contains(&self.version)
     }
 
-    /// 版本意识身份归一化（M3）：
-    /// - v2：`identity_system`（非空白才有效；None/空 = 创建时无身份，按"无
-    ///   身份"恢复而不是拒绝）。
-    /// - v1：优先 `persona`；缺失时回退调用方从子 transcript **首条 own 载荷**
-    ///   提取的旧身份（`legacy_transcript_identity`）——旧写入器把身份同时写进
-    ///   transcript，`persona` 只是同一字节的镜像。`system_prompt` 是父冻结
-    ///   字节，**不参与**身份判定（不得把父能力声明当子身份）。
-    /// - 未知版本：None（调用方拒绝执行恢复；历史读取不受影响）。
-    pub fn resolved_identity<'a>(
-        &'a self,
-        legacy_transcript_identity: Option<&'a str>,
-    ) -> Option<&'a str> {
-        let non_blank = |value: &str| !value.trim().is_empty();
+    /// 版本锚定的身份归一化（M3）：身份只从**写入方的确定字段**取，不做
+    /// transcript 位置推断（首条 own System 不是来源锚；`system_prompt` 是父冻结
+    /// 字节，**不参与**身份判定）。
+    ///
+    /// - v2：`identity_system`（None/空白 = 创建时确实无身份，按"无身份"恢复）。
+    /// - v1：写入方每次创建都写 `persona`（= 子身份 System 字节）；字段缺失/空白
+    ///   不属于可解释数据 ⇒ `Unavailable`，调用方必须阻止执行恢复（历史读取与
+    ///   只读投影不受影响）。
+    /// - 未知版本：`Unavailable`（同样只阻止执行恢复）。
+    pub fn resolved_identity(&self) -> ChildIdentityResolution {
         match self.version {
-            2 => self
-                .identity_system
-                .as_deref()
-                .filter(|value| non_blank(value)),
-            1 => self
-                .persona
-                .as_deref()
-                .filter(|value| non_blank(value))
-                .or_else(|| legacy_transcript_identity.filter(|value| non_blank(value))),
-            _ => None,
+            2 => ChildIdentityResolution::Determined(
+                self.identity_system.clone().unwrap_or_default(),
+            ),
+            1 => match self.persona.as_deref() {
+                Some(value) if !value.trim().is_empty() => {
+                    ChildIdentityResolution::Determined(value.to_owned())
+                }
+                _ => ChildIdentityResolution::Unavailable,
+            },
+            _ => ChildIdentityResolution::Unavailable,
+        }
+    }
+
+    /// 由子 metadata 的确定身份 + 冻结内容构造执行/内存投影共用 `FrozenContext`。
+    ///
+    /// 冷恢复、live resume 与宿主内存 frozen（命令 / 再次 prompt 路径）共用本映射，
+    /// 避免出现第二份身份来源；`runtime_env` 只消费 metadata 快照（v1 无该字段 =
+    /// unavailable，不重探宿主，H3）。
+    pub fn frozen_context(&self, identity: String) -> crate::session::FrozenContext {
+        crate::session::FrozenContext {
+            system_prompt: std::sync::Arc::from(identity.as_str()),
+            claude_md: std::sync::Arc::from(self.claude_md.as_str()),
+            skill_summary: std::sync::Arc::from(self.skill_summary.as_str()),
+            date: std::sync::Arc::from(self.date.as_str()),
+            language: self.language.as_deref().map(std::sync::Arc::from),
+            meta_harness: peri_acp_types::meta_harness::MetaHarnessState {
+                section_overrides: self
+                    .section_overrides
+                    .iter()
+                    .map(|(key, value)| (key.clone(), std::sync::Arc::from(value.as_str())))
+                    .collect(),
+                disabled_middlewares: self.disabled_middlewares.iter().cloned().collect(),
+                built_in_subagents_enabled: self.built_in_subagents_enabled,
+            },
+            runtime_env: self.runtime_env.clone(),
         }
     }
 }
 
-/// 从子 own transcript 载荷提取旧身份（v1 归一化输入）。
-///
-/// 规则：**首条 own 载荷**且为 System 时才视为旧身份——旧 spawn 的身份注入
-/// 发生在会话起始、parent_messages 之前；其它位置的 System（命令反馈 / 预测
-/// 指令等）不参与，不做泛化过滤。
-pub fn legacy_transcript_identity(
-    payloads: &[peri_acp_types::store::PersistedPayload],
-) -> Option<String> {
-    match payloads.first()?.as_message()? {
-        crate::messages::BaseMessage::System { content, .. } => Some(content.text_content()),
-        _ => None,
-    }
+/// [`ChildResumeMetadata::resolved_identity`] 的结果。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ChildIdentityResolution {
+    /// 确定的子身份字节（空串 = 写入方确定该子会话无身份）。
+    Determined(String),
+    /// 没有可解释的身份来源：调用方阻止执行恢复，历史与只读投影保持可读。
+    Unavailable,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -478,21 +495,19 @@ impl super::SessionFactory {
         let FrozenState::Present(bytes) = snapshot.frozen else {
             return Err(ColdChildBlocked::new("persisted frozen snapshot missing"));
         };
-        // M3：版本意识身份归一化——v2 用 identity_system，v1 优先 persona、
-        // 回退子 transcript 首条 own System（旧写入器的身份载体）。未知版本仅
-        // 拒绝**执行恢复**（历史与只读投影不受影响）；不重新读取已变化的
-        // agent 定义猜身份。创建时确实无身份（无 system_builder）的子会话按
-        // “无身份”恢复，而不是把父冻结字节当身份。
-        if !metadata.is_supported_version() {
-            return Err(ColdChildBlocked::new(
-                "child identity unavailable for this metadata version; execution restore refused",
-            ));
-        }
-        let legacy_transcript_identity = legacy_transcript_identity(&snapshot.payloads);
-        let identity_system = metadata
-            .resolved_identity(legacy_transcript_identity.as_deref())
-            .unwrap_or_default()
-            .to_owned();
+        // M3：版本锚定的身份来源——v2 用 identity_system，v1 用写入方确定的
+        // persona 字段。没有可解释的身份来源（v1 persona 缺失 / 未知版本）时
+        // **阻止执行恢复**（历史与只读投影保持可读）：不用 transcript 位置启发式
+        // 猜身份，也不把父冻结字节当子身份。创建时确实无身份（v2 None/空）按
+        // “无身份”恢复。不重新读取已变化的 agent 定义猜身份。
+        let identity_system = match metadata.resolved_identity() {
+            ChildIdentityResolution::Determined(identity) => identity,
+            ChildIdentityResolution::Unavailable => {
+                return Err(ColdChildBlocked::new(
+                    "child identity unavailable: persisted metadata has no explainable identity source; execution restore refused",
+                ))
+            }
+        };
         // v1 身份曾持久在 transcript System 里：模型投影吸收与身份逐字相同的
         // 那一条（恰一条；v2 起身份只经 bridge 注入）。
         let normalize_persisted_identity =
@@ -582,27 +597,10 @@ impl super::SessionFactory {
         let ceiling = metadata.tool_ceiling.clone();
         let tool_filter: crate::session::tool_catalog::ToolFilter =
             Arc::new(move |tool| ceiling.contains(tool.name()));
-        let frozen = FrozenContext {
-            // M3：子身份 = 归一化后的确定身份投影（v1 persona / v2 identity_system），
-            // 不再是创建时的父冻结字节。
-            system_prompt: Arc::from(identity_system.as_str()),
-            claude_md: Arc::from(metadata.claude_md.as_str()),
-            skill_summary: Arc::from(metadata.skill_summary.as_str()),
-            date: Arc::from(metadata.date.as_str()),
-            language: metadata.language.as_deref().map(Arc::from),
-            meta_harness: peri_acp_types::meta_harness::MetaHarnessState {
-                section_overrides: metadata
-                    .section_overrides
-                    .iter()
-                    .map(|(key, value)| (key.clone(), Arc::from(value.as_str())))
-                    .collect(),
-                disabled_middlewares: metadata.disabled_middlewares.iter().cloned().collect(),
-                built_in_subagents_enabled: metadata.built_in_subagents_enabled,
-            },
-            // M3：v2 metadata 携带子冻结运行环境快照（随父 frozen 继承）——恢复
-            // 只消费它；v1 无该字段 = unavailable，不重探本地值冒充历史环境（H3）。
-            runtime_env: metadata.runtime_env.clone(),
-        };
+        // M3：子身份 = 版本锚定归一化后的确定身份投影（v1 persona / v2
+        // identity_system），不再是创建时的父冻结字节；其余冻结内容经 metadata
+        // 的同一映射（宿主内存 frozen 共用，避免第二份身份来源）。
+        let frozen = metadata.frozen_context(identity_system);
         let mut inherited = snapshot.inherited;
         inherited.flags.extend(snapshot.flags);
         let (session, context) = build_subagent_session_v2(
@@ -658,3 +656,97 @@ mod cold_tests;
 #[cfg(test)]
 #[path = "cold_binding_test.rs"]
 mod cold_binding_tests;
+
+/// M3：身份归一化的来源锚（v1 写入方字段 / v2 结构化字段）与共用冻结映射。
+#[cfg(test)]
+mod identity_anchor_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn metadata(
+        version: u32,
+        persona: Option<&str>,
+        identity_system: Option<&str>,
+    ) -> ChildResumeMetadata {
+        ChildResumeMetadata {
+            version,
+            child_session_id: "child".into(),
+            recipient_lifecycle: 1,
+            agent_name: "child-agent".into(),
+            model_name: "model".into(),
+            direct_initiator_session_id: "parent".into(),
+            direct_initiator_lifecycle: 1,
+            delegation_invocation_id: "invocation".into(),
+            delegation_task_id: "task".into(),
+            authorization_ref: "auth".into(),
+            frozen_digest: "0".repeat(64),
+            tool_ceiling: Default::default(),
+            tool_origins: Default::default(),
+            skill_names: Vec::new(),
+            max_iterations: 1,
+            persona: persona.map(str::to_owned),
+            system_prompt: "parent frozen bytes".into(),
+            identity_system: identity_system.map(str::to_owned),
+            runtime_env: None,
+            claude_md: "child instructions".into(),
+            claude_local_md: None,
+            skill_summary: String::new(),
+            date: "2026-10-07".into(),
+            language: None,
+            section_overrides: BTreeMap::new(),
+            disabled_middlewares: Default::default(),
+            built_in_subagents_enabled: false,
+        }
+    }
+
+    #[test]
+    fn v1_identity_requires_the_writer_recorded_persona() {
+        assert_eq!(
+            metadata(1, Some("child identity"), None).resolved_identity(),
+            ChildIdentityResolution::Determined("child identity".into())
+        );
+        // persona 缺失/空白：不可解释的旧记录 ⇒ 阻止执行恢复，不猜身份。
+        assert_eq!(
+            metadata(1, None, None).resolved_identity(),
+            ChildIdentityResolution::Unavailable
+        );
+        assert_eq!(
+            metadata(1, Some("   "), None).resolved_identity(),
+            ChildIdentityResolution::Unavailable
+        );
+        // 父冻结字节（system_prompt）不参与身份判定。
+        assert_eq!(
+            metadata(1, None, Some("parent-lookalike")).resolved_identity(),
+            ChildIdentityResolution::Unavailable
+        );
+    }
+
+    #[test]
+    fn v2_identity_is_structured_and_absent_identity_is_determined_empty() {
+        assert_eq!(
+            metadata(2, None, Some("projected child identity")).resolved_identity(),
+            ChildIdentityResolution::Determined("projected child identity".into())
+        );
+        assert_eq!(
+            metadata(2, None, None).resolved_identity(),
+            ChildIdentityResolution::Determined(String::new())
+        );
+        // 未知版本：只拒绝执行恢复。
+        assert_eq!(
+            metadata(3, Some("child identity"), Some("identity")).resolved_identity(),
+            ChildIdentityResolution::Unavailable
+        );
+    }
+
+    #[test]
+    fn frozen_context_uses_the_resolved_identity_and_metadata_runtime_env() {
+        let metadata = metadata(2, None, Some("identity-bytes"));
+        let ChildIdentityResolution::Determined(identity) = metadata.resolved_identity() else {
+            panic!("v2 identity is structured")
+        };
+        let frozen = metadata.frozen_context(identity);
+        assert_eq!(&*frozen.system_prompt, "identity-bytes");
+        assert_eq!(&*frozen.claude_md, "child instructions");
+        assert!(frozen.runtime_env.is_none());
+    }
+}

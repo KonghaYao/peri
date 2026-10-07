@@ -7,9 +7,7 @@
 
 use super::*;
 use crate::host::requests::resource_owners;
-use peri_acp_types::session_resources::{
-    work::WorkQuery, BindingState, FrozenState, SessionResources,
-};
+use peri_acp_types::session_resources::{work::WorkQuery, BindingState, FrozenState};
 
 fn declared_http(name: &str, url: &str) -> Value {
     serde_json::to_value(agent_client_protocol_schema::v1::McpServer::Http(

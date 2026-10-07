@@ -144,9 +144,35 @@ pub(super) async fn run(
     // 不再单独 bake 父 system 字节。
     let llm = peri_agent::session::subagent::SubagentLlmSource::model(model, model_name)
         .with_session_id(admission.session_id.clone());
-    let frozen =
-        super::requests::resource_owners::load_frozen_for_environment(cfg, &admission.session_id)
-            .await?;
+    // M3：宿主内存 frozen（命令 / 再次 prompt 路径消费）必须与执行路径同源——
+    // 身份取 metadata 的版本锚定归一化结果，其余冻结内容走同一映射；**不得**
+    // 直接把持久 blob 的解码视图当会话 frozen（那是创建时烘焙的父冻结 system，
+    // 会让子会话的命令 / 再次 prompt 用父身份）。没有可解释身份来源时在执行
+    // 之前阻止（历史与只读投影不受影响）；原 blob 只作 digest 锚（其摘要由
+    // `prepare_cold_child_execution` 校验），本路径不改写任何持久数据。
+    let identity_system = match metadata.resolved_identity() {
+        peri_agent::session::subagent::ChildIdentityResolution::Determined(identity) => identity,
+        peri_agent::session::subagent::ChildIdentityResolution::Unavailable => {
+            return Err(blocked(
+                "child identity unavailable: persisted metadata has no explainable identity source; execution restore refused",
+            ))
+        }
+    };
+    let mut child_frozen = metadata.frozen_context(identity_system);
+    if child_frozen.runtime_env.is_none() {
+        // v1 metadata 没有 runtime_env 字段：从该子会话自己的持久冻结快照取
+        // （合法冻结来源）；仍不重探宿主本地值冒充历史环境（H3）。
+        let persisted = super::requests::resource_owners::load_frozen_for_environment(
+            cfg,
+            &admission.session_id,
+        )
+        .await?;
+        child_frozen.runtime_env = persisted.v2_frozen().runtime_env.clone();
+    }
+    let frozen = crate::session::executor::FrozenSessionData::from_frozen_parts(
+        child_frozen,
+        metadata.claude_local_md.clone().map(Arc::from),
+    );
     {
         let mut states = sessions.lock().await;
         states

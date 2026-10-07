@@ -150,8 +150,14 @@ impl Fixture {
             corrupt_origin,
             true,
             false,
+            Some("child-only persona"),
         )
         .await
+    }
+
+    /// v1 metadata 但写入方身份字段缺失：不可解释的旧记录（不得猜身份）。
+    async fn without_persona() -> Self {
+        Self::with_delegation(true, false, false, true, false, None).await
     }
 
     async fn with_delegation(
@@ -160,6 +166,7 @@ impl Fixture {
         corrupt_origin: bool,
         bind_pointer: bool,
         current_delegation: bool,
+        persona: Option<&str>,
     ) -> Self {
         let parent = TestSession::open().await;
         let resources = parent.resources();
@@ -224,7 +231,7 @@ impl Fixture {
             max_iterations: 5,
             // v1 语义：persona = 子身份（旧 transcript System 消息字节）；
             // system_prompt = 创建时父冻结字节（审计用，不作身份）。
-            persona: Some("child-only persona".into()),
+            persona: persona.map(str::to_owned),
             system_prompt: "child-only system".into(),
             identity_system: None,
             runtime_env: None,
@@ -439,7 +446,15 @@ async fn serve(listener: tokio::net::TcpListener) -> Value {
 }
 
 async fn run_cold_child(current_delegation: bool) {
-    let fixture = Fixture::with_delegation(true, false, false, true, current_delegation).await;
+    let fixture = Fixture::with_delegation(
+        true,
+        false,
+        false,
+        true,
+        current_delegation,
+        Some("child-only persona"),
+    )
+    .await;
     let parent_before = load(fixture.resources.as_ref(), &fixture.parent.thread_id()).await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let runtime = fixture.runtime(&format!("http://{}", listener.local_addr().unwrap()));
@@ -696,7 +711,9 @@ async fn missing_resume_metadata_blocks_cold_child_before_model_or_task_creation
 
 #[tokio::test]
 async fn missing_current_work_delegation_blocks_without_metadata_fallback() {
-    let fixture = Fixture::with_delegation(true, false, false, false, false).await;
+    let fixture =
+        Fixture::with_delegation(true, false, false, false, false, Some("child-only persona"))
+            .await;
     let child = load(fixture.resources.as_ref(), &fixture.admission.session_id).await;
     assert!(child.state.child_resume_metadata.contains_key(&1));
     assert!(!child
@@ -713,6 +730,21 @@ async fn missing_current_work_delegation_blocks_without_metadata_fallback() {
         fixture,
         runtime,
         "current immutable work delegation reference missing",
+    )
+    .await;
+}
+
+/// M3：v1 metadata 缺少写入方身份字段（persona）时不得用 transcript 位置启发式
+/// 猜身份、也不得用父冻结字节冒充：明确阻止执行恢复（上述阻断断言同时确认没有
+/// 创建模型或任务；历史与只读投影另由 resume / 列表路径保持可读）。
+#[tokio::test]
+async fn missing_v1_persona_blocks_cold_child_without_identity_guessing() {
+    let fixture = Fixture::without_persona().await;
+    let runtime = fixture.runtime("http://127.0.0.1:1");
+    assert_blocked(
+        fixture,
+        runtime,
+        "no explainable identity source; execution restore refused",
     )
     .await;
 }

@@ -33,7 +33,8 @@ mod v2_bridge;
 
 pub use directives::{build_bg_fork_directive, build_fork_directive, build_prediction_directive};
 pub use factory::{
-    ChildResumeMetadata, ColdChildBlocked, ColdChildExecution, ColdChildRuntime, SessionFactory,
+    ChildIdentityResolution, ChildResumeMetadata, ColdChildBlocked, ColdChildExecution,
+    ColdChildRuntime, SessionFactory,
 };
 pub(crate) use lifecycle::{
     on_subagent_stop_handler, BgCleanupGuard, BgStopEmitV2, DeregisterGuard,

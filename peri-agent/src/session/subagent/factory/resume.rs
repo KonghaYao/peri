@@ -407,34 +407,21 @@ pub(super) async fn resume_subagent_impl(
 
     let frozen_claude_md = Some(saved.claude_md.clone());
     let frozen_skill_summary = Some(saved.skill_summary.clone());
-    // M3：身份 = 版本归一化后的确定身份（v2 `identity_system`；v1 `persona`，
-    // 缺失时回退子 transcript 首条 own System——旧写入器的身份载体）。v1 的
+    // M3：身份 = 版本锚定的确定身份（v2 `identity_system`；v1 写入方字段
+    // `persona`）。没有可解释身份来源（v1 persona 缺失 / 未知版本）时阻止执行
+    // 恢复：不用 transcript 位置启发式猜身份，也不把父冻结字节当子身份。v1 的
     // 身份还在旧 transcript System 消息里，模型投影需定向吸收那一条。
-    let legacy_transcript_identity = super::cold::legacy_transcript_identity(&loaded);
-    let identity_system = saved
-        .resolved_identity(legacy_transcript_identity.as_deref())
-        .unwrap_or_default()
-        .to_owned();
-    let normalize_persisted_identity = saved.version == 1 && !identity_system.trim().is_empty();
-    let frozen = crate::session::FrozenContext {
-        system_prompt: Arc::from(identity_system.as_str()),
-        claude_md: Arc::from(saved.claude_md.as_str()),
-        skill_summary: Arc::from(saved.skill_summary.as_str()),
-        date: Arc::from(saved.date.as_str()),
-        language: saved.language.as_deref().map(Arc::from),
-        meta_harness: peri_acp_types::meta_harness::MetaHarnessState {
-            section_overrides: saved
-                .section_overrides
-                .iter()
-                .map(|(key, value)| (key.clone(), Arc::from(value.as_str())))
-                .collect(),
-            disabled_middlewares: saved.disabled_middlewares.iter().cloned().collect(),
-            built_in_subagents_enabled: saved.built_in_subagents_enabled,
-        },
-        // M3：v2 metadata 携带子冻结运行环境快照；v1 无该字段 = unavailable，
-        // 恢复不重探本地值冒充历史环境（H3）。
-        runtime_env: saved.runtime_env.clone(),
+    let identity_system = match saved.resolved_identity() {
+        super::cold::ChildIdentityResolution::Determined(identity) => identity,
+        super::cold::ChildIdentityResolution::Unavailable => {
+            return Err(
+                "resume_subagent: persisted child metadata has no explainable identity source; execution restore refused"
+                    .into(),
+            )
+        }
     };
+    let normalize_persisted_identity = saved.version == 1 && !identity_system.trim().is_empty();
+    let frozen = saved.frozen_context(identity_system);
     let ceiling = saved.tool_ceiling.clone();
     let configured_filter = tool_filter;
     let tool_filter: crate::session::tool_catalog::ToolFilter =
