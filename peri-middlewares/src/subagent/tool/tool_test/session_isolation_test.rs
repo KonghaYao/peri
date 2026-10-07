@@ -50,7 +50,9 @@ async fn nested_delegation_uses_direct_parent_catalog_and_inbox() {
     let tool = SubAgentTool::new(
         Arc::new(Vec::new()),
         None,
-        Arc::new(move |_| Box::new(ObservedToolsLlm(captured_tools.clone()))),
+        Arc::new(move |_| {
+            SubagentLlmSource::prebuilt(Box::new(ObservedToolsLlm(captured_tools.clone())))
+        }),
         cwd.clone(),
     )
     .with_parent_session(parent.clone());
@@ -62,7 +64,7 @@ async fn nested_delegation_uses_direct_parent_catalog_and_inbox() {
         20,
         None,
         SubagentRunMode::Sync,
-        Box::new(EchoLLM),
+        SubagentLlmSource::prebuilt(Box::new(EchoLLM)),
         vec![Arc::new(tool.clone())],
         Arc::new(|_| true),
         None,
@@ -143,7 +145,7 @@ async fn nested_delegation_uses_direct_parent_catalog_and_inbox() {
         Some("resume".into()),
         SubagentRunMode::Sync,
         20,
-        Box::new(EchoLLM),
+        SubagentLlmSource::prebuilt(Box::new(EchoLLM)),
         Vec::new(),
         Arc::new(|_| true),
         store.facade(),
@@ -264,7 +266,7 @@ async fn completed_child_shell_blocks_shared_close_and_reopen_rebuilds_binding()
         Some("complete naturally".into()),
         SubagentRunMode::Sync,
         20,
-        Box::new(EchoLLM),
+        SubagentLlmSource::prebuilt(Box::new(EchoLLM)),
         Vec::new(),
         Arc::new(|_| true),
         store.facade(),
@@ -342,7 +344,7 @@ async fn completed_child_shell_blocks_shared_close_and_reopen_rebuilds_binding()
         Some("new lifecycle".into()),
         SubagentRunMode::Sync,
         20,
-        Box::new(EchoLLM),
+        SubagentLlmSource::prebuilt(Box::new(EchoLLM)),
         Vec::new(),
         Arc::new(|_| true),
         store.facade(),

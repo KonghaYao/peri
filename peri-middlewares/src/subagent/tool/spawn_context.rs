@@ -3,10 +3,10 @@ use super::fire_subagent_lifecycle_hooks_static;
 use crate::tool_search::ExecuteExtraToolResolver;
 use peri_acp_types::session_resources::SessionResources;
 use peri_agent::session::subagent::{
-    SessionFactory, SubagentLifecycleStart, SubagentLifecycleStop, SubagentResumeConfig,
-    SubagentRunMode, SubagentSpawnConfig, SubagentSpawned,
+    SessionFactory, SubagentLifecycleStart, SubagentLifecycleStop, SubagentLlmSource,
+    SubagentResumeConfig, SubagentRunMode, SubagentSpawnConfig, SubagentSpawned,
 };
-use peri_agent::{agent::react::ReactLLM, messages::BaseMessage, tools::BaseTool};
+use peri_agent::{messages::BaseMessage, tools::BaseTool};
 use std::sync::Arc;
 
 impl super::SubAgentTool {
@@ -72,7 +72,7 @@ impl super::SubAgentTool {
         max_iterations: usize,
         fork_directive_kind: Option<peri_agent::session::subagent::ForkDirectiveKind>,
         run_mode: peri_agent::session::subagent::SubagentRunMode,
-        llm: Box<dyn ReactLLM + Send + Sync>,
+        llm: SubagentLlmSource,
         tools: Vec<Arc<dyn BaseTool>>,
         tool_filter: peri_agent::session::tool_catalog::ToolFilter,
         system_prompt: Option<String>,
@@ -151,7 +151,7 @@ impl super::SubAgentTool {
         prompt: Option<String>,
         run_mode: SubagentRunMode,
         max_iterations: usize,
-        llm: Box<dyn ReactLLM + Send + Sync>,
+        llm: SubagentLlmSource,
         tools: Vec<Arc<dyn BaseTool>>,
         tool_filter: peri_agent::session::tool_catalog::ToolFilter,
         session_resources: Arc<dyn SessionResources>,

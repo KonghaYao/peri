@@ -86,7 +86,7 @@ async fn test_resume_subagent_legacy_thread_identity_does_not_authorize_executio
     let config = resume_config_with(
         store.clone(),
         id.clone(),
-        Box::new(llm),
+        SubagentLlmSource::prebuilt(Box::new(llm)),
         SubagentRunMode::Sync,
         None,
         None,
@@ -283,7 +283,7 @@ async fn test_resume_subagent_pops_unpaired_tool_call_ai() {
     let config = resume_config_with(
         store.clone(),
         thread_id.clone(),
-        Box::new(llm.clone()),
+        SubagentLlmSource::prebuilt(Box::new(llm.clone())),
         SubagentRunMode::Sync,
         None,
         None,
@@ -431,7 +431,7 @@ async fn test_resume_subagent_interrupted_then_reopen_preserves_blocked_reason_r
     let config = resume_config_with(
         store.clone(),
         thread_id.clone(),
-        Box::new(gate),
+        SubagentLlmSource::prebuilt(Box::new(gate)),
         SubagentRunMode::Sync,
         None,
         Some(token.clone()),
@@ -482,7 +482,7 @@ async fn test_resume_subagent_interrupted_then_reopen_preserves_blocked_reason_r
     let config = resume_config_with(
         store.clone(),
         thread_id.clone(),
-        Box::new(llm),
+        SubagentLlmSource::prebuilt(Box::new(llm)),
         SubagentRunMode::Sync,
         None,
         None,
@@ -538,7 +538,7 @@ async fn test_resume_subagent_concurrent_resume_mutex() {
         let config = resume_config_with(
             store1.clone(),
             thread_id1,
-            Box::new(gate1.clone()),
+            SubagentLlmSource::prebuilt(Box::new(gate1.clone())),
             SubagentRunMode::Sync,
             None,
             None,
@@ -672,7 +672,7 @@ async fn test_resume_subagent_background_mode_done() {
     let config = resume_config_with(
         store.clone(),
         thread_id.clone(),
-        Box::new(gate.clone()),
+        SubagentLlmSource::prebuilt(Box::new(gate.clone())),
         SubagentRunMode::Background,
         Some(Arc::clone(&task_manager)),
         None,
@@ -738,7 +738,7 @@ async fn test_resume_subagent_background_mode_cancelled() {
     let mut config = resume_config_with(
         store.clone(),
         thread_id.clone(),
-        Box::new(gate),
+        SubagentLlmSource::prebuilt(Box::new(gate)),
         SubagentRunMode::Background,
         Some(Arc::clone(&task_manager)),
         Some(token.clone()),
@@ -786,7 +786,7 @@ async fn test_resume_subagent_bg_registration_failure_rolls_back() {
     let config = resume_config_with(
         store.clone(),
         thread_id.clone(),
-        Box::new(EchoLLM),
+        SubagentLlmSource::prebuilt(Box::new(EchoLLM)),
         SubagentRunMode::Background,
         None,
         None,
@@ -821,7 +821,7 @@ async fn test_resume_subagent_bg_registration_failure_rolls_back() {
     let config = resume_config_with(
         store.clone(),
         thread_id.clone(),
-        Box::new(EchoLLM),
+        SubagentLlmSource::prebuilt(Box::new(EchoLLM)),
         SubagentRunMode::Background,
         Some(Arc::clone(&task_manager)),
         None,
@@ -884,7 +884,7 @@ async fn test_resume_subagent_bg_beyond_previous_agent_cap() {
     let config = resume_config_with(
         store.clone(),
         thread_id.clone(),
-        Box::new(EchoLLM),
+        SubagentLlmSource::prebuilt(Box::new(EchoLLM)),
         SubagentRunMode::Background,
         Some(Arc::clone(&task_manager)),
         None,
@@ -949,7 +949,7 @@ async fn test_resume_subagent_bg_scope_closed_rejected_before_claim() {
     let config = resume_config_with(
         store.clone(),
         thread_id.clone(),
-        Box::new(EchoLLM),
+        SubagentLlmSource::prebuilt(Box::new(EchoLLM)),
         SubagentRunMode::Background,
         Some(Arc::clone(&task_manager)),
         None,

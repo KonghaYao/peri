@@ -61,7 +61,7 @@ fn make_parity_context(
     let shared_tools: Arc<RwLock<BTreeMap<String, Arc<dyn BaseTool>>>> =
         Arc::new(RwLock::new(BTreeMap::new()));
     let llm_factory = Arc::new(|_model_alias: Option<&str>| {
-        Box::new(ParityFakeLlm) as Box<dyn peri_agent::agent::react::ReactLLM + Send + Sync>
+        peri_agent::session::subagent::SubagentLlmSource::prebuilt(Box::new(ParityFakeLlm))
     });
 
     peri_agent::session::factory::AssemblyContext {

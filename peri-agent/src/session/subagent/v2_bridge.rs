@@ -238,7 +238,7 @@ pub(super) fn forward_subagent_stop_v1(
 pub fn build_v2_subagent_context(
     session: Option<Arc<Session>>,
     llm: Box<dyn ReactLLM + Send + Sync>,
-    chain: MiddlewareChain,
+    chain: Arc<MiddlewareChain>,
     tools: Vec<Arc<dyn BaseTool>>,
     tool_filter: crate::session::tool_catalog::ToolFilter,
     session_mcp_capability: Option<Arc<dyn peri_acp_types::ports::SessionMcpCapabilityPort>>,
@@ -311,7 +311,7 @@ pub fn build_v2_subagent_context(
         .with_tool_invocation_resolver(tool_invocation_resolver.unwrap_or_else(|| {
             Arc::new(DirectToolInvocationResolver) as Arc<dyn ToolInvocationResolver>
         }))
-        .with_middleware_chain(Arc::new(chain))
+        .with_middleware_chain(chain)
         .with_event_bus(Arc::clone(&event_bus_arc))
         .with_session_context(session_context);
 
@@ -389,7 +389,7 @@ pub trait SubagentV2ContextBuilder: Send + Sync {
         &self,
         session: Option<Arc<Session>>,
         llm: Box<dyn ReactLLM + Send + Sync>,
-        chain: MiddlewareChain,
+        chain: Arc<MiddlewareChain>,
         tools: Vec<Arc<dyn BaseTool>>,
         cwd: &str,
         cancel_token: CancellationToken,
@@ -410,7 +410,7 @@ impl SubagentV2ContextBuilder for DefaultSubagentV2ContextBuilder {
         &self,
         session: Option<Arc<Session>>,
         llm: Box<dyn ReactLLM + Send + Sync>,
-        chain: MiddlewareChain,
+        chain: Arc<MiddlewareChain>,
         tools: Vec<Arc<dyn BaseTool>>,
         cwd: &str,
         cancel_token: CancellationToken,

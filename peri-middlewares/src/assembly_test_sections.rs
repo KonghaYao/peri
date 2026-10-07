@@ -312,7 +312,7 @@ async fn test_stage_completion_reminders_share_assembled_task_manager() {
                 auto_classifier_factory: Arc::new(|| {
                     Arc::new(tokio::sync::Mutex::new(Box::new(FakeModel)))
                 }),
-                llm_factory: Arc::new(|_| Box::new(FakeLlm)),
+                llm_factory: Arc::new(|_| SubagentLlmSource::prebuilt(Box::new(FakeLlm))),
                 provider_fp: "test".into(),
                 render_system_prompt: Arc::new(|_, _| String::new()),
                 system_builder: Arc::new(|_, _| String::new()),

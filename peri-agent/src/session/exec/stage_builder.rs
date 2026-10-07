@@ -49,6 +49,7 @@ use crate::agent::{
 };
 use crate::middleware::chain::MiddlewareChain;
 use crate::session::exec::executor::FrozenSessionData;
+use crate::session::exec::executor::SubagentLlmFactory;
 use crate::session::factory::{
     AssemblyContext, ChainAssembly, MiddlewareChainAssembler, OnBgCompleteFn,
     SubAgentMiddlewarePort, SystemPromptBuilder,
@@ -146,8 +147,8 @@ pub struct StageBuildInput {
     /// auto-classifier 模型构造工厂（cached 缺失时调用）
     pub auto_classifier_factory:
         Arc<dyn Fn() -> Arc<tokio::sync::Mutex<Box<dyn peri_model::Model>>> + Send + Sync>,
-    /// 子 agent LLM 工厂（支持 SubAgent LLM 缓存复用）
-    pub llm_factory: Arc<dyn Fn(Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync>,
+    /// 子 agent 模型工厂（支持 SubAgent LLM 缓存复用；H1：只产出模型来源）
+    pub llm_factory: SubagentLlmFactory,
     /// provider fingerprint（CachedLlmInstances 缓存键）
     pub provider_fp: String,
     /// agent overrides 渲染（主 prompt 覆盖；含 workflow feature 判定）

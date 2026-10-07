@@ -18,6 +18,90 @@ use peri_acp_types::session_resources::SessionResources;
 
 // ─── 意图类型 ────────────────────────────────────────────────────────────────
 
+/// 子 Agent 模型来源（H1）：ACP 模型工厂只负责模型解析与创建。
+///
+/// `AgentModelBridge` 的统一装配点在有子链可用的 Agent 层 session factory
+/// （[`build_subagent_session_v2`](super::factory::context)）——身份 system 与
+/// 请求时 `collect_prompt_contributions()` provider 在那里一次装上，定义型 /
+/// fork、前台 / 后台、live resume 与冷恢复共用，不再由工厂预先封装 bridge。
+///
+/// [`SubagentLlmSource::Prebuilt`] 是**已装配 ReactLLM 的嵌入/测试**接缝
+/// （不参与身份与请求时贡献装配；生产 ACP 工厂必须使用
+/// [`SubagentLlmSource::model`]）。
+pub enum SubagentLlmSource {
+    /// 生产：模型 + 名称 + session id；bridge 在子链装配点构造。
+    Model {
+        model: Arc<dyn peri_model::Model>,
+        model_name: String,
+        session_id: Option<String>,
+    },
+    /// 嵌入/测试：调用方已提供完整 ReactLLM（例如 durable 夹具的 prepared 路径）。
+    Prebuilt(Box<dyn ReactLLM + Send + Sync>),
+}
+
+impl SubagentLlmSource {
+    /// 生产构造：只做模型解析结果投影；`model_name` 由工厂从解析出的 provider
+    /// 提供（`peri_model::Model` 无名称接口），供持久化 metadata 与恢复核对。
+    pub fn model(model: Arc<dyn peri_model::Model>, model_name: impl Into<String>) -> Self {
+        Self::Model {
+            model,
+            model_name: model_name.into(),
+            session_id: None,
+        }
+    }
+
+    pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
+        if let Self::Model {
+            session_id: slot, ..
+        } = &mut self
+        {
+            *slot = Some(session_id.into());
+        }
+        self
+    }
+
+    /// 嵌入/测试构造：已装配 ReactLLM（不参与身份与请求时贡献装配）。
+    pub fn prebuilt(llm: Box<dyn ReactLLM + Send + Sync>) -> Self {
+        Self::Prebuilt(llm)
+    }
+
+    pub fn model_name(&self) -> String {
+        match self {
+            Self::Model { model_name, .. } => model_name.clone(),
+            Self::Prebuilt(llm) => llm.model_name(),
+        }
+    }
+
+    /// 在子链装配点转成最终 ReactLLM：`Model` 变体装 bridge（身份 +
+    /// 请求时贡献 provider）；`Prebuilt` 变体原样透传。
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn into_react_llm(
+        self,
+        identity_system: &str,
+        provider: crate::agent::model_bridge::SystemContributionProvider,
+        normalize_persisted_identity: bool,
+    ) -> Box<dyn ReactLLM + Send + Sync> {
+        match self {
+            Self::Model {
+                model, session_id, ..
+            } => {
+                let mut bridge = crate::agent::model_bridge::AgentModelBridge::new(model)
+                    .with_system_contribution_provider(provider);
+                if let Some(session_id) = session_id {
+                    bridge = bridge.with_session_id(session_id);
+                }
+                if !identity_system.trim().is_empty() {
+                    bridge = bridge
+                        .with_system(identity_system)
+                        .with_absorbed_system_message(normalize_persisted_identity);
+                }
+                Box::new(bridge)
+            }
+            Self::Prebuilt(llm) => llm,
+        }
+    }
+}
+
 /// Fork 指令类型，决定 fork agent 使用的 system directive 模板
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ForkDirectiveKind {
@@ -124,8 +208,6 @@ pub struct SubagentHost {
     pub langfuse_bridge: Option<Arc<dyn LangfuseBridgeLike>>,
     /// Frozen CLAUDE.local.md（父 session 冻结数据中唯一不在 FrozenContext 的字段）
     pub frozen_claude_local_md: Option<Arc<String>>,
-    /// Frozen system prompt（fork 路径复用以避免重建；父 session 冻结的 subagent 版本）
-    pub frozen_system_prompt: Option<Arc<String>>,
     /// 父线程 ID 回退值：被 [`parent_thread_id_of`] 在 spawn 写盘读取
     /// （主 session `store().thread_id` 恒 None 时是本链的权威值，由 executor
     /// 以 `ctx.thread_id` 注入；生产路径为 spawn_subagent 从 parent session
@@ -166,15 +248,18 @@ pub struct SubagentSpawnConfig {
     /// agent 定义声明的 skills（SkillPreload 装配输入）
     pub skill_names: Vec<String>,
     // ── 装配产物 ──
-    /// SubAgent LLM（ReactLLM 实现/装饰器）
-    pub llm: Box<dyn ReactLLM + Send + Sync>,
+    /// SubAgent 模型来源（H1）：bridge（身份 + 请求时贡献）由 Agent 层
+    /// session factory 在子链装配点构造，工厂不预先封装。
+    pub llm: SubagentLlmSource,
     /// 子 agent 中间件链装配器（middlewares 实现，链序契约 ARC-MIDDLEWARE-001）
     pub chain_assembler: Arc<dyn SubagentChainAssembler>,
     /// 过滤后的工具集（agent 定义路径按 tools/disallowed_tools 过滤）
     pub tools: Vec<Arc<dyn BaseTool>>,
     /// Canonical child policy, reapplied after every capability generation refresh.
     pub tool_filter: crate::session::tool_catalog::ToolFilter,
-    /// SubAgent system prompt（注入 transcript 起始处）
+    /// SubAgent 身份 system（H1/M3）：子能力投影后的身份字节，装配时随子
+    /// `FrozenContext.system_prompt` 定格，由 bridge base system 注入——
+    /// **不再写入 transcript**（身份恰一次；旧持久 System 由 M3 版本意识归一化）。
     pub system_prompt: Option<String>,
     /// deferred 工具解析器（None = DirectToolInvocationResolver；middlewares 传
     /// ExecuteExtraToolResolver 保持包装层语义）
@@ -366,8 +451,9 @@ pub struct SubagentResumeConfig {
     /// 最大 ReAct 迭代次数
     pub max_iterations: usize,
     // ── 装配产物 ──
-    /// SubAgent LLM（ReactLLM 实现/装饰器）
-    pub llm: Box<dyn ReactLLM + Send + Sync>,
+    /// SubAgent 模型来源（H1）：bridge（身份 + 请求时贡献）由 Agent 层
+    /// session factory 在子链装配点构造，工厂不预先封装。
+    pub llm: SubagentLlmSource,
     /// 子 agent 中间件链装配器（middlewares 实现，链序契约 ARC-MIDDLEWARE-001）
     pub chain_assembler: Arc<dyn SubagentChainAssembler>,
     /// 过滤后的工具集（恢复路径由 tool 层按 title 重新应用过滤）

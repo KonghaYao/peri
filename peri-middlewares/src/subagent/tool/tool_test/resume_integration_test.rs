@@ -64,10 +64,10 @@ fn make_interrupt_tool(
         Arc::new(vec![]),
         None,
         Arc::new(move |_: Option<&str>| {
-            Box::new(InterruptThenEchoLLM {
+            SubagentLlmSource::prebuilt(Box::new(InterruptThenEchoLLM {
                 calls: Arc::clone(&calls),
                 interrupt_rounds,
-            }) as Box<dyn ReactLLM + Send + Sync>
+            }))
         }),
         "/tmp".to_string(),
     )
@@ -472,10 +472,10 @@ async fn test_resume_emits_new_start_stop_pair_per_execution() {
         Arc::new(vec![]),
         None,
         Arc::new(move |_: Option<&str>| {
-            Box::new(InterruptThenEchoLLM {
+            SubagentLlmSource::prebuilt(Box::new(InterruptThenEchoLLM {
                 calls: Arc::clone(&calls_clone),
                 interrupt_rounds: 1,
-            }) as Box<dyn ReactLLM + Send + Sync>
+            }))
         }),
         "/tmp".to_string(),
     )
@@ -723,9 +723,9 @@ async fn test_resume_keeps_completed_tool_round_no_duplicate_execution() {
         Arc::new(vec![]),
         None,
         Arc::new(move |_: Option<&str>| {
-            Box::new(ToolRoundCheckLLM {
+            SubagentLlmSource::prebuilt(Box::new(ToolRoundCheckLLM {
                 seen: Arc::clone(&seen_clone),
-            }) as Box<dyn ReactLLM + Send + Sync>
+            }))
         }),
         "/tmp".to_string(),
     )

@@ -137,12 +137,13 @@ pub(super) async fn run(
     }
     tools.retain(|tool| metadata.tool_ceiling.contains(tool.name()));
     let provider = trusted_child_provider(local, &metadata.model_name)?;
+    let model_name = provider.model_name().to_owned();
     let model: Arc<dyn peri_acp_types::model::Model> = Arc::from(provider.into_model());
-    let llm = Box::new(
-        peri_agent::agent::model_bridge::AgentModelBridge::new(model)
-            .with_system(metadata.system_prompt.clone())
-            .with_session_id(admission.session_id.clone()),
-    );
+    // H1/M3：只给模型来源；身份（按 metadata 版本归一化）与请求时 contribution
+    // provider 由 `prepare_cold_child_execution` 在子链装配点统一装上——冷恢复
+    // 不再单独 bake 父 system 字节。
+    let llm = peri_agent::session::subagent::SubagentLlmSource::model(model, model_name)
+        .with_session_id(admission.session_id.clone());
     let frozen =
         super::requests::resource_owners::load_frozen_for_environment(cfg, &admission.session_id)
             .await?;

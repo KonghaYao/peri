@@ -258,7 +258,7 @@ pub(super) async fn resume_subagent_impl(
         let FrozenState::Present(bytes) = &snapshot.frozen else {
             return Err(preparation_failed("Blocked: saved child frozen snapshot unavailable").into());
         };
-        if saved.version != 1
+        if !saved.is_supported_version()
             || saved.child_session_id != thread_id
             || saved.recipient_lifecycle != work.control.lifecycle
             || saved.frozen_digest != format!("{:x}", Sha256::digest(bytes.as_str().as_bytes()))
@@ -275,6 +275,14 @@ pub(super) async fn resume_subagent_impl(
                 != saved.tool_ceiling
         {
             return Err(preparation_failed("Blocked: saved child runtime identity or authorization unavailable").into());
+        }
+        // M3：未知 metadata 版本仅拒绝执行恢复（历史仍可读），不重新读取
+        // 已变化的 agent 定义猜身份。已知版本的身份归一化在恢复装配处完成。
+        if !saved.is_supported_version() {
+            return Err(preparation_failed(
+                "Blocked: child identity unavailable for this metadata version; execution restore refused",
+            )
+            .into());
         }
         let initiator = super::spawn::parent_thread_id_of(parent)
             .ok_or_else(|| authorization_denied("current delegation initiator unavailable"))?;
@@ -399,8 +407,17 @@ pub(super) async fn resume_subagent_impl(
 
     let frozen_claude_md = Some(saved.claude_md.clone());
     let frozen_skill_summary = Some(saved.skill_summary.clone());
+    // M3：身份 = 版本归一化后的确定身份（v2 `identity_system`；v1 `persona`，
+    // 缺失时回退子 transcript 首条 own System——旧写入器的身份载体）。v1 的
+    // 身份还在旧 transcript System 消息里，模型投影需定向吸收那一条。
+    let legacy_transcript_identity = super::cold::legacy_transcript_identity(&loaded);
+    let identity_system = saved
+        .resolved_identity(legacy_transcript_identity.as_deref())
+        .unwrap_or_default()
+        .to_owned();
+    let normalize_persisted_identity = saved.version == 1 && !identity_system.trim().is_empty();
     let frozen = crate::session::FrozenContext {
-        system_prompt: Arc::from(saved.system_prompt.as_str()),
+        system_prompt: Arc::from(identity_system.as_str()),
         claude_md: Arc::from(saved.claude_md.as_str()),
         skill_summary: Arc::from(saved.skill_summary.as_str()),
         date: Arc::from(saved.date.as_str()),
@@ -414,9 +431,9 @@ pub(super) async fn resume_subagent_impl(
             disabled_middlewares: saved.disabled_middlewares.iter().cloned().collect(),
             built_in_subagents_enabled: saved.built_in_subagents_enabled,
         },
-        // 子 resume metadata 目前不携带运行环境快照（M3 归组）；恢复不重探
-        // 本地值冒充，派生新 prompt 时按 unavailable 显式标记（H3）。
-        runtime_env: None,
+        // M3：v2 metadata 携带子冻结运行环境快照；v1 无该字段 = unavailable，
+        // 恢复不重探本地值冒充历史环境（H3）。
+        runtime_env: saved.runtime_env.clone(),
     };
     let ceiling = saved.tool_ceiling.clone();
     let configured_filter = tool_filter;
@@ -436,7 +453,9 @@ pub(super) async fn resume_subagent_impl(
 
     // 6. 重建 session（thread_id 固定 = config.thread_id；ancestor/own 显式分区，
     //    两区 flags 均恢复后绑定持久化——helper 内）
-    //    不注入 parent_messages / identity System / skill_names（F4 / R-H1）
+    //    不注入 parent_messages / identity System / skill_names（F4 / R-H1）：
+    //    身份经子 `FrozenContext.system_prompt` + bridge 注入（H1/M3），旧 v1
+    //    transcript 身份由模型投影定向吸收。
     let (session, v2_ctx) = build_subagent_session_v2(
         cwd.clone(),
         frozen,
@@ -462,6 +481,7 @@ pub(super) async fn resume_subagent_impl(
         context_budget,
         compact_llm,
         Some(agent_id_from_child_thread(&thread_id)),
+        normalize_persisted_identity,
     )
     .await?;
 

@@ -35,6 +35,8 @@ async fn bind_child(cfg: &AcpServerConfig, id: &str) -> String {
         max_iterations: 13,
         persona: Some("original-persona".into()),
         system_prompt: "original-system".into(),
+        identity_system: None,
+        runtime_env: None,
         claude_md: "original-instructions".into(),
         claude_local_md: None,
         skill_summary: "original-summary".into(),

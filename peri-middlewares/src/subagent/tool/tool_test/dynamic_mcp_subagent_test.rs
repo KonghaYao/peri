@@ -177,9 +177,9 @@ fn production_tool(
         Arc::new(vec![make_tool("Read")]),
         None,
         Arc::new(move |_| {
-            Box::new(CatalogLLM {
+            SubagentLlmSource::prebuilt(Box::new(CatalogLLM {
                 seen: Arc::clone(&seen),
-            }) as Box<dyn ReactLLM + Send + Sync>
+            }))
         }),
         "/tmp".to_string(),
     )
@@ -249,11 +249,11 @@ async fn existing_fork_child_refreshes_across_load_and_unload_reason_boundaries(
             let capability = Arc::clone(&capability);
             let seen = Arc::clone(&seen);
             Arc::new(move |_| {
-                Box::new(RefreshingLLM {
+                SubagentLlmSource::prebuilt(Box::new(RefreshingLLM {
                     capability: Arc::clone(&capability),
                     seen: Arc::clone(&seen),
                     calls: std::sync::atomic::AtomicUsize::new(0),
-                }) as Box<dyn ReactLLM + Send + Sync>
+                }))
             })
         },
         "/tmp".to_string(),
@@ -321,11 +321,11 @@ async fn generation_n_dispatch_stays_pinned_after_n_plus_one_is_published() {
             let capability = Arc::clone(&capability);
             let observed_result = Arc::clone(&observed_result);
             Arc::new(move |_| {
-                Box::new(PinningLLM {
+                SubagentLlmSource::prebuilt(Box::new(PinningLLM {
                     capability: Arc::clone(&capability),
                     calls: std::sync::atomic::AtomicUsize::new(0),
                     observed_result: Arc::clone(&observed_result),
-                }) as Box<dyn ReactLLM + Send + Sync>
+                }))
             })
         },
         "/tmp".to_string(),

@@ -74,12 +74,12 @@ impl MessageFixture {
             None,
             Arc::new(move |_| {
                 factory_calls.fetch_add(1, Ordering::SeqCst);
-                Box::new(GatedMessageLlm {
+                SubagentLlmSource::prebuilt(Box::new(GatedMessageLlm {
                     calls: llm_calls.clone(),
                     release: llm_release.clone(),
                     snapshots: snapshots_tx.clone(),
                     first_answer: first_answer.clone(),
-                })
+                }))
             }),
             cwd.clone(),
         )
@@ -93,8 +93,7 @@ impl MessageFixture {
             Some(Arc::new(String::new())),
             None,
             Some(Arc::new(String::new())),
-        )
-        .with_frozen_system_prompt(Arc::new("Frozen test system".into()));
+        );
         let tool = with_agent_face(tool, dir.path()).await;
         Self {
             dir,
@@ -374,7 +373,7 @@ async fn test_active_message_panic_revokes_before_runtime_deregistration() {
     let tool = SubAgentTool::new(
         Arc::new(Vec::new()),
         None,
-        Arc::new(|_| Box::new(PanicLlm)),
+        Arc::new(|_| SubagentLlmSource::prebuilt(Box::new(PanicLlm))),
         dir.path().to_str().unwrap().into(),
     )
     .with_task_manager(manager.clone())

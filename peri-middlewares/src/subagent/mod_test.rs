@@ -10,6 +10,7 @@ use peri_agent::{
 };
 
 use super::*;
+use peri_agent::session::subagent::SubagentLlmSource;
 use peri_mcp_core::agent_definition::parse_agent_file;
 
 struct EchoLLM;
@@ -32,7 +33,7 @@ fn test_middleware_name() {
     let m = SubAgentMiddleware::new(
         vec![],
         None,
-        Arc::new(|_: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
+        Arc::new(|_: Option<&str>| SubagentLlmSource::prebuilt(Box::new(EchoLLM))),
     );
     // Call via Middleware, explicit trait path
     assert_eq!(
@@ -46,7 +47,7 @@ fn test_middleware_collect_tools() {
     let m = SubAgentMiddleware::new(
         vec![],
         None,
-        Arc::new(|_: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
+        Arc::new(|_: Option<&str>| SubagentLlmSource::prebuilt(Box::new(EchoLLM))),
     );
     let tools = <SubAgentMiddleware as Middleware>::collect_tools(&m, "/tmp");
     assert_eq!(tools.len(), 1);
@@ -58,7 +59,7 @@ fn test_build_tool_returns_subagent_tool() {
     let m = SubAgentMiddleware::new(
         vec![],
         None,
-        Arc::new(|_: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
+        Arc::new(|_: Option<&str>| SubagentLlmSource::prebuilt(Box::new(EchoLLM))),
     );
     let tool = m.build_tool("/tmp");
     assert_eq!(tool.name(), "Agent");
@@ -79,7 +80,7 @@ async fn test_before_agent_no_longer_injects_summary() {
     let m = SubAgentMiddleware::new(
         vec![],
         None,
-        Arc::new(|_: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
+        Arc::new(|_: Option<&str>| SubagentLlmSource::prebuilt(Box::new(EchoLLM))),
     );
     let mut state = AgentState::new(dir.path().to_str().unwrap());
     <SubAgentMiddleware as Middleware>::before_agent(&m, &mut state)
@@ -99,7 +100,7 @@ async fn test_before_agent_no_agents_no_op() {
     let m = SubAgentMiddleware::new(
         vec![],
         None,
-        Arc::new(|_: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
+        Arc::new(|_: Option<&str>| SubagentLlmSource::prebuilt(Box::new(EchoLLM))),
     );
     let mut state = AgentState::new("/nonexistent");
     <SubAgentMiddleware as Middleware>::before_agent(&m, &mut state)
@@ -116,7 +117,7 @@ async fn test_before_agent_snapshots_messages() {
     let m = SubAgentMiddleware::new(
         vec![],
         None,
-        Arc::new(|_: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
+        Arc::new(|_: Option<&str>| SubagentLlmSource::prebuilt(Box::new(EchoLLM))),
     )
     .with_parent_messages(Arc::clone(&parent_messages));
 
@@ -146,7 +147,7 @@ fn test_build_tool_receives_parent_messages() {
     let m = SubAgentMiddleware::new(
         vec![],
         None,
-        Arc::new(|_: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
+        Arc::new(|_: Option<&str>| SubagentLlmSource::prebuilt(Box::new(EchoLLM))),
     )
     .with_parent_messages(Arc::clone(&parent_messages));
 
@@ -186,7 +187,7 @@ fn test_build_tool_after_set_parent_session_reads_runtime_host() {
     let m = SubAgentMiddleware::new(
         vec![],
         None,
-        Arc::new(|_: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
+        Arc::new(|_: Option<&str>| SubagentLlmSource::prebuilt(Box::new(EchoLLM))),
     );
     // 先注入 parent_session（模拟 set_parent_session 先于 collect_tools）
     m.set_parent_session(Arc::clone(&session));

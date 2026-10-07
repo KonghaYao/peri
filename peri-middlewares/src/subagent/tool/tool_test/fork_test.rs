@@ -32,9 +32,9 @@ async fn test_fork_inherits_parent_messages() {
         Arc::new(vec![]),
         None,
         Arc::new(move |_: Option<&str>| {
-            Box::new(ForkTestLLM {
+            SubagentLlmSource::prebuilt(Box::new(ForkTestLLM {
                 msg_count: Arc::clone(&msg_capture_clone),
-            }) as Box<dyn ReactLLM + Send + Sync>
+            }))
         }),
         "/tmp".to_string(),
     )
@@ -96,9 +96,9 @@ async fn test_fork_registers_all_tools_including_agent() {
         Arc::new(parent_tools),
         None,
         Arc::new(move |_: Option<&str>| {
-            Box::new(ToolsCheckLLM {
+            SubagentLlmSource::prebuilt(Box::new(ToolsCheckLLM {
                 captured: Arc::clone(&tools_capture_clone),
-            }) as Box<dyn ReactLLM + Send + Sync>
+            }))
         }),
         "/tmp".to_string(),
     )
@@ -150,42 +150,21 @@ async fn test_fork_without_parent_messages_returns_error() {
     );
 }
 
-/// Fork system prompt is consistent with system_builder
+/// Fork system prompt is consistent with system_builder（H1：经生产装配的
+/// bridge base system 捕获最终请求面）
 #[tokio::test]
 async fn test_fork_system_prompt_consistent() {
     let parent_messages: Arc<RwLock<Vec<BaseMessage>>> = Arc::new(RwLock::new(Vec::new()));
 
-    let sys_capture: Arc<std::sync::Mutex<String>> = Arc::new(std::sync::Mutex::new(String::new()));
-    let sys_capture_clone = Arc::clone(&sys_capture);
-
-    struct SystemCheckLLM {
-        captured: Arc<std::sync::Mutex<String>>,
-    }
-    #[async_trait::async_trait]
-    impl ReactLLM for SystemCheckLLM {
-        async fn generate_reasoning(
-            &self,
-            messages: &[BaseMessage],
-            _tools: &[&dyn BaseTool],
-            _streaming: Option<StreamingContext>,
-        ) -> peri_agent::error::AgentResult<Reasoning> {
-            let sys = messages
-                .iter()
-                .find(|m| matches!(m, BaseMessage::System { .. }))
-                .map(|m| m.content())
-                .unwrap_or_default();
-            *self.captured.lock().unwrap() = sys;
-            Ok(Reasoning::with_answer("", "sys-check"))
-        }
-    }
-
+    let model = super::mock_model::RecordingModel::new("sys-check");
     let t = SubAgentTool::new(
         Arc::new(vec![]),
         None,
-        Arc::new(move |_: Option<&str>| {
-            Box::new(SystemCheckLLM {
-                captured: Arc::clone(&sys_capture_clone),
-            }) as Box<dyn ReactLLM + Send + Sync>
+        Arc::new({
+            let model = Arc::clone(&model);
+            move |_: Option<&str>| {
+                SubagentLlmSource::model(model.clone() as Arc<dyn peri_model::Model>, "mock-model")
+            }
         }),
         "/tmp".to_string(),
     )
@@ -202,84 +181,68 @@ async fn test_fork_system_prompt_consistent() {
     .await
     .unwrap();
 
-    let captured = sys_capture.lock().unwrap();
+    let captured = model.last_system();
     assert!(
         captured.contains("FORK-TEST-SYSTEM"),
         "Fork system prompt should contain builder output, got: {}",
-        *captured
+        captured
     );
 }
 
-/// [回归测试] SubAgent fork 复用父冻结 system prompt，不回退 system_builder。
+/// [回归测试] SubAgent fork 的身份来自 `system_builder` 的子能力投影，
+/// **不复制父冻结字节**（H1/M3）。
 ///
-/// 历史背景（ARC-FROZEN-001 / 审计 prompt-sections-audit.md 条目 7）：fork
-/// 生产路径继承父**冻结** system prompt（execute_fork.rs frozen_system_prompt
-/// 优先），与主 agent 前缀保持一致；若改为无条件走 system_builder 或每轮
-/// 重渲染，会破坏会话内前缀一致性。本测试固定两个输入（frozen 与 builder），
-/// 断言 frozen 优先——即"同一 FrozenSessionData 输入下主 agent 与 subagent
-/// 复用稳定 prompt"的外部结果。
+/// 历史（审计 prompt-sections-audit.md 条目 7）fork 曾优先复用父冻结
+/// system prompt；H2/H3 起父冻结输入只能作为投影输入，逐字继承会把父能力
+/// （HITL/子代理声明）带进子请求面。本测试经生产 bridge 捕获最终请求面：
+/// 身份恰一次（base system），且不含父字节。
 #[tokio::test]
-async fn test_fork_prefers_frozen_system_prompt_over_builder() {
+async fn test_fork_identity_is_projected_not_parent_bytes() {
     let parent_messages: Arc<RwLock<Vec<BaseMessage>>> = Arc::new(RwLock::new(Vec::new()));
 
-    let sys_capture: Arc<std::sync::Mutex<String>> = Arc::new(std::sync::Mutex::new(String::new()));
-    let sys_capture_clone = Arc::clone(&sys_capture);
-
-    struct FrozenCheckLLM {
-        captured: Arc<std::sync::Mutex<String>>,
-    }
-    #[async_trait::async_trait]
-    impl ReactLLM for FrozenCheckLLM {
-        async fn generate_reasoning(
-            &self,
-            messages: &[BaseMessage],
-            _tools: &[&dyn BaseTool],
-            _streaming: Option<StreamingContext>,
-        ) -> peri_agent::error::AgentResult<Reasoning> {
-            let sys = messages
-                .iter()
-                .find(|m| matches!(m, BaseMessage::System { .. }))
-                .map(|m| m.content())
-                .unwrap_or_default();
-            *self.captured.lock().unwrap() = sys;
-            Ok(Reasoning::with_answer("", "frozen-check"))
-        }
-    }
-
+    let model = super::mock_model::RecordingModel::new("frozen-check");
     let t = SubAgentTool::new(
         Arc::new(vec![]),
         None,
-        Arc::new(move |_: Option<&str>| {
-            Box::new(FrozenCheckLLM {
-                captured: Arc::clone(&sys_capture_clone),
-            }) as Box<dyn ReactLLM + Send + Sync>
+        Arc::new({
+            let model = Arc::clone(&model);
+            move |_: Option<&str>| {
+                SubagentLlmSource::model(model.clone() as Arc<dyn peri_model::Model>, "mock-model")
+            }
         }),
         "/tmp".to_string(),
     )
     .with_parent_messages(parent_messages)
-    .with_frozen_system_prompt(Arc::new("FROZEN-PARENT-SYSTEM-PROMPT".to_string()))
     .with_system_builder(Arc::new(|_ov, _cwd| "BUILDER-SYSTEM-PROMPT".to_string()));
 
     t.invoke(
         serde_json::json!({
             "fork": true,
-            "prompt": "check frozen prefix"
+            "prompt": "check projected prefix"
         }),
         peri_agent::tools::ToolContext::new(&[], "."),
     )
     .await
     .unwrap();
 
-    let captured = sys_capture.lock().unwrap();
+    let system = model.last_system();
     assert!(
-        captured.contains("FROZEN-PARENT-SYSTEM-PROMPT"),
-        "Fork 应复用父冻结 system prompt, got: {}",
-        *captured
+        system.contains("BUILDER-SYSTEM-PROMPT"),
+        "fork 身份应来自 system_builder 投影, got: {system}"
     );
     assert!(
-        !captured.contains("BUILDER-SYSTEM-PROMPT"),
-        "frozen 存在时不应回退 system_builder, got: {}",
-        *captured
+        !system.contains("FROZEN-PARENT-SYSTEM-PROMPT"),
+        "不能继承父冻结字节, got: {system}"
+    );
+    // 身份恰一次：对话体不应再出现身份文本（H1 起不写 transcript）。
+    let texts = super::mock_model::conversation_texts(&model.last_messages());
+    assert_eq!(
+        texts
+            .iter()
+            .filter(|text| text.contains("BUILDER-SYSTEM-PROMPT"))
+            .count(),
+        0,
+        "identity must appear exactly once (base system only): {texts:?}"
     );
 }
 
@@ -313,9 +276,9 @@ async fn test_fork_directive_includes_rules() {
         Arc::new(vec![]),
         None,
         Arc::new(move |_: Option<&str>| {
-            Box::new(DirectiveCheckLLM {
+            SubagentLlmSource::prebuilt(Box::new(DirectiveCheckLLM {
                 last: Arc::clone(&last_capture_clone),
-            }) as Box<dyn ReactLLM + Send + Sync>
+            }))
         }),
         "/tmp".to_string(),
     )

@@ -1,9 +1,8 @@
 use super::*;
 use crate::agent::async_tasks::TaskManager;
-use crate::agent::model_bridge::AgentModelBridge;
 use crate::agent::stages::{run_react_loop, LoopResult};
 use crate::middleware::MiddlewareChain;
-use crate::session::subagent::SubagentChainContext;
+use crate::session::subagent::{SubagentChainContext, SubagentLlmSource};
 use crate::session::test_resources::mock::admission::FixtureAdmission;
 use crate::session::test_resources::TestSession;
 use crate::session::{MessageQueue, MessageSource, QueuedMessage};
@@ -223,8 +222,12 @@ impl Fixture {
             )]),
             skill_names: vec![],
             max_iterations: 5,
+            // v1 语义：persona = 子身份（旧 transcript System 消息字节）；
+            // system_prompt = 创建时父冻结字节（审计用，不作身份）。
             persona: Some("child-only persona".into()),
             system_prompt: "child-only system".into(),
+            identity_system: None,
+            runtime_env: None,
             claude_md: "child-only instructions".into(),
             claude_local_md: None,
             skill_summary: String::new(),
@@ -382,13 +385,14 @@ impl Fixture {
         ));
         ColdChildRuntime {
             resources: self.resources.clone(),
-            llm: Box::new(AgentModelBridge::new(Arc::new(model)).with_system("child-only system")),
+            // H1：只给模型来源；身份（M3 归一化）与请求时贡献由
+            // prepare_cold_child_execution 在子链装配点装上。
+            llm: SubagentLlmSource::model(Arc::new(model), "frozen-model"),
             chain_assembler: Arc::new(ChildChain),
             tools: vec![Arc::new(ProbeTool)],
             host: Arc::new(SubagentHost {
                 mcp_pool: Some(self.pool.clone()),
                 execution_admission_port: Some(Arc::new(FixtureAdmission(self.resources.clone()))),
-                frozen_system_prompt: Some(Arc::new("root persona must not leak".into())),
                 frozen_claude_md: Some(Arc::new("root instructions must not leak".into())),
                 ..Default::default()
             }),
@@ -446,9 +450,10 @@ async fn run_cold_child(current_delegation: bool) {
     )
     .await
     .unwrap();
+    // M3：子身份 = metadata 归一化后的身份（v1 persona），不是父冻结字节。
     assert_eq!(
         execution.session.store().frozen.system_prompt.as_ref(),
-        "child-only system"
+        "child-only persona"
     );
     assert_eq!(
         execution.session.store().frozen.claude_md.as_ref(),
@@ -508,7 +513,7 @@ async fn run_cold_child(current_delegation: bool) {
     ));
     let body = server.await.unwrap();
     assert!(body.to_string().contains("saved child input"));
-    assert!(body.to_string().contains("child-only system"));
+    assert!(body.to_string().contains("child-only persona"));
     assert!(!body.to_string().contains("root persona"));
     assert!(!body.to_string().contains("root instructions"));
     let child = load(fixture.resources.as_ref(), &fixture.admission.session_id).await;

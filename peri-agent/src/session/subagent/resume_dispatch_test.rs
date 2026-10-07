@@ -131,7 +131,7 @@ async fn test_resume_load_cancelled_by_dispatch_restores_previous_status() {
     let config = resume_config_with(
         store.clone(),
         thread_id.clone(),
-        Box::new(llm),
+        SubagentLlmSource::prebuilt(Box::new(llm)),
         SubagentRunMode::Sync,
         None,
         Some(cancel.clone()),
@@ -175,7 +175,7 @@ async fn test_resume_active_write_cancelled_by_dispatch_finishes_before_rollback
     let config = resume_config_with(
         store.clone(),
         thread_id.clone(),
-        Box::new(llm),
+        SubagentLlmSource::prebuilt(Box::new(llm)),
         SubagentRunMode::Sync,
         None,
         Some(cancel.clone()),
@@ -243,7 +243,7 @@ async fn test_resume_cancelled_during_assembly_never_starts_execution() {
     let mut config = resume_config_with(
         store.clone(),
         thread_id.clone(),
-        Box::new(llm),
+        SubagentLlmSource::prebuilt(Box::new(llm)),
         SubagentRunMode::Sync,
         None,
         Some(cancel.clone()),
@@ -334,11 +334,13 @@ async fn test_resume_running_cancelled_by_dispatch_finalizes_claim() {
     let mut config = resume_config_with(
         store.clone(),
         thread_id.clone(),
-        Box::new(GatedLLM(std::sync::Mutex::new(Some(ResumeLoadGate {
-            entered: entered_tx,
-            release: release_rx,
-            dropped: llm_dropped.clone(),
-        })))),
+        SubagentLlmSource::prebuilt(Box::new(GatedLLM(std::sync::Mutex::new(Some(
+            ResumeLoadGate {
+                entered: entered_tx,
+                release: release_rx,
+                dropped: llm_dropped.clone(),
+            },
+        ))))),
         SubagentRunMode::Sync,
         None,
         Some(cancel.clone()),
@@ -386,7 +388,7 @@ async fn test_resume_running_cancelled_by_dispatch_finalizes_claim() {
     let config = resume_config_with(
         store.clone(),
         thread_id.clone(),
-        Box::new(llm),
+        SubagentLlmSource::prebuilt(Box::new(llm)),
         SubagentRunMode::Sync,
         None,
         None,
@@ -433,7 +435,7 @@ async fn test_resume_precancelled_background_still_registers_and_completes() {
     let mut config = resume_config_with(
         store.clone(),
         thread_id.clone(),
-        Box::new(llm),
+        SubagentLlmSource::prebuilt(Box::new(llm)),
         SubagentRunMode::Background,
         Some(task_manager),
         Some(token),
@@ -509,7 +511,7 @@ async fn test_resume_provenance_read_cancelled_by_dispatch_restores_previous_sta
         let mut config = resume_config_with(
             store.clone(),
             thread_id.clone(),
-            Box::new(llm),
+            SubagentLlmSource::prebuilt(Box::new(llm)),
             SubagentRunMode::Sync,
             None,
             Some(cancel.clone()),

@@ -4,11 +4,7 @@ use async_trait::async_trait;
 use parking_lot::RwLock;
 use peri_acp_types::identity::AgentId;
 use peri_agent::session::subagent::SubagentHost;
-use peri_agent::{
-    agent::{events::AgentEventHandler, react::ReactLLM},
-    messages::BaseMessage,
-    tools::BaseTool,
-};
+use peri_agent::{agent::events::AgentEventHandler, messages::BaseMessage, tools::BaseTool};
 use tokio_util::sync::CancellationToken as AgentCancellationToken;
 
 use super::invocation::InvocationArgs;
@@ -35,10 +31,11 @@ pub struct SubAgentTool {
     pub(crate) event_handler: Option<Arc<dyn AgentEventHandler>>,
     /// Parent agent working directory (inherited when LLM does not specify cwd)
     pub(crate) parent_cwd: String,
-    /// LLM factory function, creates independent LLM instance for each sub-agent (no system, injected via with_system_prompt())
+    /// 子模型工厂（H1）：只产出模型来源；身份 system 与请求时 contribution
+    /// provider 由 Agent 层 session factory 在子链装配点统一装上。
     #[allow(clippy::type_complexity)]
     pub(crate) llm_factory:
-        Arc<dyn Fn(Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync>,
+        Arc<dyn Fn(Option<&str>) -> peri_agent::session::subagent::SubagentLlmSource + Send + Sync>,
     /// System prompt builder: (agent overrides, cwd) -> system prompt string
     #[allow(clippy::type_complexity)]
     pub(crate) system_builder:

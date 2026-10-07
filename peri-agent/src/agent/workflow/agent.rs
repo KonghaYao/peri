@@ -499,7 +499,7 @@ impl AgentExecutor for WorkflowAgentExecutor {
         let mut v2_ctx = ctx_builder.build(
             Some(session),
             llm,
-            chain,
+            Arc::new(chain),
             tools_arc,
             &self.ctx.cwd,
             cancel_token.clone(),

@@ -232,7 +232,7 @@ fn tail_spawn_config(
         fork_directive_kind: None,
         run_mode: SubagentRunMode::Sync,
         skill_names: Vec::new(),
-        llm: Box::new(TailChunkLLM(outcome)),
+        llm: SubagentLlmSource::prebuilt(Box::new(TailChunkLLM(outcome))),
         chain_assembler: Arc::new(EmptyChainAssembler),
         tools: Vec::new(),
         tool_filter: Arc::new(|_| true),

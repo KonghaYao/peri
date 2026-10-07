@@ -36,7 +36,7 @@ fn make_recording_subagent_tool(
                 .lock()
                 .unwrap()
                 .push(alias.map(|s| s.to_string()));
-            Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>
+            SubagentLlmSource::prebuilt(Box::new(EchoLLM))
         }),
         "/tmp".to_string(),
     )

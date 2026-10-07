@@ -561,10 +561,10 @@ async fn test_resume_thread_id_fork_title_uses_parent_tools_and_200_iterations()
         Arc::new(parent_tools),
         None,
         Arc::new(move |_: Option<&str>| {
-            Box::new(ForkLoopLLM {
+            SubagentLlmSource::prebuilt(Box::new(ForkLoopLLM {
                 calls: Arc::clone(&calls_clone),
                 captured: Arc::clone(&tools_clone),
-            }) as Box<dyn ReactLLM + Send + Sync>
+            }))
         }),
         "/tmp".to_string(),
     )
@@ -661,9 +661,9 @@ async fn test_resume_thread_id_agent_def_refilters_tools() {
         Arc::new(parent_tools),
         None,
         Arc::new(move |_: Option<&str>| {
-            Box::new(ResumeFilterLLM {
+            SubagentLlmSource::prebuilt(Box::new(ResumeFilterLLM {
                 captured: Arc::clone(&tools_capture_clone),
-            }) as Box<dyn ReactLLM + Send + Sync>
+            }))
         }),
         "/tmp".to_string(),
     )

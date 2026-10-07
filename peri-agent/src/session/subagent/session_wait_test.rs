@@ -47,7 +47,7 @@ async fn run_child(child: Arc<Session>, calls: Arc<AtomicUsize>) {
                 Vec::new(),
             ),
         ),
-        MiddlewareChain::new(),
+        Arc::new(MiddlewareChain::new()),
         Vec::new(),
         Arc::new(|_| true),
         None,

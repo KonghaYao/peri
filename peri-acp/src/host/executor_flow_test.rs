@@ -387,9 +387,14 @@ pub(super) async fn make_session_context(session_id: &str) -> SessionContext {
                             .into_model(),
                     },
                 );
-            let mut llm = peri_agent::agent::model_bridge::AgentModelBridge::from_arc(model);
-            llm = llm.with_session_id(sid.clone());
-            Box::new(llm)
+            // H1：只产出模型来源（bridge 由 Agent 层子链装配点构造）。
+            let model_name = p
+                .as_ref()
+                .map(|resolved| resolved.model_name())
+                .unwrap_or_else(|| provider.model_name())
+                .to_owned();
+            peri_agent::session::subagent::SubagentLlmSource::model(model, model_name)
+                .with_session_id(sid.clone())
         }))
     };
 

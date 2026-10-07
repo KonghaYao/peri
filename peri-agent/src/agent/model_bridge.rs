@@ -30,6 +30,9 @@ pub struct AgentModelBridge {
     system: Option<String>,
     system_contribution_provider: Option<SystemContributionProvider>,
     session_id: Option<String>,
+    /// M3 旧持久子会话归一化：模型投影中吸收与 base system 逐字相同的第一条
+    /// System 消息（历史本体与持久化不变；仅影响请求投影）。
+    absorb_system_message: bool,
 }
 
 /// 构造模型请求时同步读取当前 middleware prompt contribution 的 provider。
@@ -46,6 +49,7 @@ impl AgentModelBridge {
             system: None,
             system_contribution_provider: None,
             session_id: None,
+            absorb_system_message: false,
         }
     }
 
@@ -75,6 +79,18 @@ impl AgentModelBridge {
         self
     }
 
+    /// M3 旧持久子会话归一化：开启后，模型投影丢弃与 base system 逐字相同的
+    /// 第一条 System 消息（恰一条）。
+    ///
+    /// v1 子会话 metadata 的 identity 曾以 `BaseMessage::System` 写入 transcript
+    /// 起始处；H1 起身份只经 bridge base system 注入。该规则按**内容相等**定向
+    /// 吸收，不过滤其它 System 消息（命令反馈 / 预测指令等保持原样），也不修改
+    /// transcript 本体与持久化数据（历史仍可读）。
+    pub(crate) fn with_absorbed_system_message(mut self, enabled: bool) -> Self {
+        self.absorb_system_message = enabled;
+        self
+    }
+
     /// 测试与过渡期调用方使用的单条消息转换入口。
     #[cfg(test)]
     pub(crate) fn convert_message(message: &BaseMessage) -> AgentResult<ModelMessage> {
@@ -101,6 +117,14 @@ impl AgentModelBridge {
     }
 
     pub(crate) fn convert_messages(messages: &[BaseMessage]) -> AgentResult<Vec<ModelMessage>> {
+        Self::convert_messages_skipping(messages, None)
+    }
+
+    /// 转换消息；`skip` 为需要在投影中吸收（丢弃）的下标（M3 归一化，至多一条）。
+    fn convert_messages_skipping(
+        messages: &[BaseMessage],
+        skip: Option<usize>,
+    ) -> AgentResult<Vec<ModelMessage>> {
         let mut tool_names = BTreeMap::new();
         for message in messages {
             if let BaseMessage::Ai { tool_calls, .. } = message {
@@ -112,7 +136,9 @@ impl AgentModelBridge {
 
         messages
             .iter()
-            .map(|message| match message {
+            .enumerate()
+            .filter(|(index, _)| Some(*index) != skip)
+            .map(|(_, message)| match message {
                 BaseMessage::System { content, .. } => Ok(ModelMessage::System {
                     content: convert_content(content)?,
                 }),
@@ -158,7 +184,17 @@ impl AgentModelBridge {
         messages: &[BaseMessage],
         tools: &[&dyn BaseTool],
     ) -> AgentResult<ModelRequest> {
-        let mut messages = Self::convert_messages(messages)?;
+        // M3：吸收与 base system 逐字相同的第一条 System 消息（旧持久子身份）。
+        let absorbed = if self.absorb_system_message {
+            self.system.as_deref().and_then(|system| {
+                messages.iter().position(|message| {
+                    matches!(message, BaseMessage::System { .. }) && message.content() == system
+                })
+            })
+        } else {
+            None
+        };
+        let mut messages = Self::convert_messages_skipping(messages, absorbed)?;
         let dynamic = match self.system_contribution_provider.as_ref() {
             Some(provider) => Some(provider().map_err(|error| AgentError::MiddlewareError {
                 middleware: error.middleware().to_string(),

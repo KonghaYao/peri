@@ -25,7 +25,26 @@ pub(super) fn add_hooks(ctx: &AssemblyContext, chain: &mut MiddlewareChain) {
         let hook_llm_factory: Arc<dyn Fn() -> Box<dyn ReactLLM + Send + Sync> + Send + Sync> =
             Arc::new({
                 let factory = llm_factory.clone();
-                move || factory(None)
+                move || {
+                    // H1：工厂只产出模型来源；hook LLM 不装身份/贡献（与迁移前
+                    // 的 bridge 语义一致：仅 session id）。
+                    let source = factory(None);
+                    match source {
+                        peri_agent::session::subagent::SubagentLlmSource::Prebuilt(llm) => llm,
+                        peri_agent::session::subagent::SubagentLlmSource::Model {
+                            model,
+                            session_id,
+                            ..
+                        } => {
+                            let mut bridge =
+                                peri_agent::agent::model_bridge::AgentModelBridge::new(model);
+                            if let Some(session_id) = session_id {
+                                bridge = bridge.with_session_id(session_id);
+                            }
+                            Box::new(bridge)
+                        }
+                    }
+                }
             });
         for (i, group) in hook_groups.iter().enumerate() {
             if group.is_empty() {

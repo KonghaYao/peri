@@ -40,11 +40,9 @@ impl super::SubAgentTool {
             // fork 路径（bg fork）：父消息注入 + fork directive 包装；
             // model 参数忽略——fork 恒继承父模型（与同步 fork 路径一致）
             let llm = (self.llm_factory)(None);
-            let system_prompt = host
-                .frozen_system_prompt
-                .clone()
-                .map(|sp| sp.as_ref().to_string())
-                .or_else(|| self.system_builder.as_ref().map(|b| b(None, &cwd)));
+            // 子身份 system（H2 子能力投影）：fork 无定义 overrides，由
+            // system_builder 重建；不复制父冻结字节。
+            let system_prompt = self.system_builder.as_ref().map(|b| b(None, &cwd));
             let tools: Vec<Arc<dyn BaseTool>> = self.parent_tools.iter().cloned().collect();
             let config = self.spawn_config_base(
                 "fork".to_string(),

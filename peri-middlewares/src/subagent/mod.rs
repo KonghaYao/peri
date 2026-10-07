@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use peri_agent::{
-    agent::{events::AgentEventHandler, react::ReactLLM, AgentCancellationToken},
+    agent::{events::AgentEventHandler, AgentCancellationToken},
     error::AgentResult,
     messages::BaseMessage,
     middleware::{
@@ -136,8 +136,9 @@ impl SubAgentMiddlewareConfig {
 /// let parent_tools: Vec<Box<dyn BaseTool>> = vec![
 ///     Box::new(ReadFileTool::new(cwd)),
 /// ];
+/// // H1：工厂只产出模型来源；bridge（身份 + 请求时贡献）由 Agent 层子链装配点构造
 /// let llm_factory = Arc::new(move |_: Option<&str>| {
-///     Box::new(AgentModelBridge::new(model.clone())) as Box<dyn ReactLLM + Send + Sync>
+///     SubagentLlmSource::model(model.clone(), "model-name")
 /// });
 /// // Optional: system prompt builder, making sub-agent's tone/proactiveness visible in Langfuse
 /// let system_builder = Arc::new(|overrides: Option<&AgentOverrides>, cwd: &str| {
@@ -153,10 +154,12 @@ pub struct SubAgentMiddleware {
     parent_tools: Arc<Vec<Arc<dyn BaseTool>>>,
     /// Parent agent event handler (transparent forwarding of child agent events)
     event_handler: Option<Arc<dyn AgentEventHandler>>,
-    /// LLM factory function, creates independent LLM instance for each child agent
-    /// Parameter is optional model alias (e.g., "haiku"/"sonnet"/"opus"), None means use parent model
+    /// 子模型工厂（H1）：只产出 [`SubagentLlmSource`]；参数是可选 model alias
+    /// （"haiku"/"sonnet"/"opus"），None 表示父模型。身份 system 与请求时贡献
+    /// provider 由 Agent 层 session factory 在子链装配点统一装上。
     #[allow(clippy::type_complexity)]
-    llm_factory: Arc<dyn Fn(Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync>,
+    llm_factory:
+        Arc<dyn Fn(Option<&str>) -> peri_agent::session::subagent::SubagentLlmSource + Send + Sync>,
     /// System prompt builder: (agent overrides, cwd) -> system prompt string
     #[allow(clippy::type_complexity)]
     system_builder: Option<Arc<dyn Fn(Option<&AgentOverrides>, &str) -> String + Send + Sync>>,
@@ -193,7 +196,9 @@ impl SubAgentMiddleware {
     pub fn new(
         parent_tools: Vec<Box<dyn BaseTool>>,
         event_handler: Option<Arc<dyn AgentEventHandler>>,
-        llm_factory: Arc<dyn Fn(Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync>,
+        llm_factory: Arc<
+            dyn Fn(Option<&str>) -> peri_agent::session::subagent::SubagentLlmSource + Send + Sync,
+        >,
     ) -> Self {
         let tools: Vec<Arc<dyn BaseTool>> = parent_tools
             .into_iter()

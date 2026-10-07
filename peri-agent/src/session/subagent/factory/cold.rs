@@ -6,9 +6,8 @@ use peri_acp_types::session_resources::{ControlStatus, FrozenState, SessionResou
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::super::{SubagentChainAssembler, SubagentHost};
+use super::super::{SubagentChainAssembler, SubagentHost, SubagentLlmSource};
 use super::context::build_subagent_session_v2;
-use crate::agent::react::ReactLLM;
 use crate::session::{FrozenContext, Session};
 use crate::tools::{BaseTool, ToolInvocationResolver};
 
@@ -185,6 +184,18 @@ pub(super) async fn bind_delegation_task(
     }
 }
 
+/// 子会话恢复 metadata（cold / live resume 共用，版本化）。
+///
+/// 版本语义（M3）：
+/// - **v1**（历史记录）：`persona` 是创建时写入 transcript 的子身份 System
+///   消息字节（durable 生产路径恒为 Some）；`system_prompt` 是创建时的父冻结
+///   system 字节，**不是**子身份——恢复不得把它当身份（否则父能力声明进入
+///   子请求面）。读取方按内容等价归一化，未知身份拒绝执行恢复。
+/// - **v2**：`identity_system` 是子身份投影的确定字节（与 transcript 身份
+///   注入已解耦，身份只经 bridge 注入）；`runtime_env` 为子冻结运行环境快照
+///   （随父 frozen 继承，恢复不重探宿主）。
+///
+/// 版本字段不双写：v2 不再用 `persona` 承载身份，`persona` 只为 v1 解释保留。
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ChildResumeMetadata {
@@ -203,8 +214,17 @@ pub struct ChildResumeMetadata {
     pub tool_origins: BTreeMap<String, Option<String>>,
     pub skill_names: Vec<String>,
     pub max_iterations: usize,
+    /// v1 身份载体（子身份 System 消息字节）；v2 恒 None（身份在
+    /// `identity_system`，不双写）。
     pub persona: Option<String>,
+    /// 创建时的父冻结 system 字节（审计/解释用；**不是**子身份）。
     pub system_prompt: String,
+    /// v2：子身份投影字节（子能力投影后的确定身份）。
+    #[serde(default)]
+    pub identity_system: Option<String>,
+    /// v2：子冻结运行环境快照（随父 frozen 继承；None = unavailable）。
+    #[serde(default)]
+    pub runtime_env: Option<peri_acp_types::frozen::FrozenRuntimeEnv>,
     pub claude_md: String,
     pub claude_local_md: Option<String>,
     pub skill_summary: String,
@@ -213,6 +233,56 @@ pub struct ChildResumeMetadata {
     pub section_overrides: BTreeMap<String, String>,
     pub disabled_middlewares: BTreeSet<String>,
     pub built_in_subagents_enabled: bool,
+}
+
+impl ChildResumeMetadata {
+    /// 当前构建可执行的 metadata 版本集合（v1 = 历史记录，v2 = 身份结构化）。
+    pub const SUPPORTED_VERSIONS: [u32; 2] = [1, 2];
+
+    pub fn is_supported_version(&self) -> bool {
+        Self::SUPPORTED_VERSIONS.contains(&self.version)
+    }
+
+    /// 版本意识身份归一化（M3）：
+    /// - v2：`identity_system`（非空白才有效；None/空 = 创建时无身份，按"无
+    ///   身份"恢复而不是拒绝）。
+    /// - v1：优先 `persona`；缺失时回退调用方从子 transcript **首条 own 载荷**
+    ///   提取的旧身份（`legacy_transcript_identity`）——旧写入器把身份同时写进
+    ///   transcript，`persona` 只是同一字节的镜像。`system_prompt` 是父冻结
+    ///   字节，**不参与**身份判定（不得把父能力声明当子身份）。
+    /// - 未知版本：None（调用方拒绝执行恢复；历史读取不受影响）。
+    pub fn resolved_identity<'a>(
+        &'a self,
+        legacy_transcript_identity: Option<&'a str>,
+    ) -> Option<&'a str> {
+        let non_blank = |value: &str| !value.trim().is_empty();
+        match self.version {
+            2 => self
+                .identity_system
+                .as_deref()
+                .filter(|value| non_blank(value)),
+            1 => self
+                .persona
+                .as_deref()
+                .filter(|value| non_blank(value))
+                .or_else(|| legacy_transcript_identity.filter(|value| non_blank(value))),
+            _ => None,
+        }
+    }
+}
+
+/// 从子 own transcript 载荷提取旧身份（v1 归一化输入）。
+///
+/// 规则：**首条 own 载荷**且为 System 时才视为旧身份——旧 spawn 的身份注入
+/// 发生在会话起始、parent_messages 之前；其它位置的 System（命令反馈 / 预测
+/// 指令等）不参与，不做泛化过滤。
+pub fn legacy_transcript_identity(
+    payloads: &[peri_acp_types::store::PersistedPayload],
+) -> Option<String> {
+    match payloads.first()?.as_message()? {
+        crate::messages::BaseMessage::System { content, .. } => Some(content.text_content()),
+        _ => None,
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -231,7 +301,8 @@ impl ColdChildBlocked {
 
 pub struct ColdChildRuntime {
     pub resources: Arc<dyn SessionResources>,
-    pub llm: Box<dyn ReactLLM + Send + Sync>,
+    /// 子模型来源（H1）：bridge（身份 + 请求时贡献）由 session factory 装配。
+    pub llm: SubagentLlmSource,
     pub chain_assembler: Arc<dyn SubagentChainAssembler>,
     pub tools: Vec<Arc<dyn BaseTool>>,
     pub host: Arc<SubagentHost>,
@@ -407,8 +478,26 @@ impl super::SessionFactory {
         let FrozenState::Present(bytes) = snapshot.frozen else {
             return Err(ColdChildBlocked::new("persisted frozen snapshot missing"));
         };
-        if metadata.version != 1
-            || metadata.child_session_id != admission.session_id
+        // M3：版本意识身份归一化——v2 用 identity_system，v1 优先 persona、
+        // 回退子 transcript 首条 own System（旧写入器的身份载体）。未知版本仅
+        // 拒绝**执行恢复**（历史与只读投影不受影响）；不重新读取已变化的
+        // agent 定义猜身份。创建时确实无身份（无 system_builder）的子会话按
+        // “无身份”恢复，而不是把父冻结字节当身份。
+        if !metadata.is_supported_version() {
+            return Err(ColdChildBlocked::new(
+                "child identity unavailable for this metadata version; execution restore refused",
+            ));
+        }
+        let legacy_transcript_identity = legacy_transcript_identity(&snapshot.payloads);
+        let identity_system = metadata
+            .resolved_identity(legacy_transcript_identity.as_deref())
+            .unwrap_or_default()
+            .to_owned();
+        // v1 身份曾持久在 transcript System 里：模型投影吸收与身份逐字相同的
+        // 那一条（恰一条；v2 起身份只经 bridge 注入）。
+        let normalize_persisted_identity =
+            metadata.version == 1 && !identity_system.trim().is_empty();
+        if metadata.child_session_id != admission.session_id
             || metadata.recipient_lifecycle != admission.lifecycle
             || snapshot.meta.parent_thread_id.as_deref()
                 != Some(metadata.direct_initiator_session_id.as_str())
@@ -494,7 +583,9 @@ impl super::SessionFactory {
         let tool_filter: crate::session::tool_catalog::ToolFilter =
             Arc::new(move |tool| ceiling.contains(tool.name()));
         let frozen = FrozenContext {
-            system_prompt: Arc::from(metadata.system_prompt.as_str()),
+            // M3：子身份 = 归一化后的确定身份投影（v1 persona / v2 identity_system），
+            // 不再是创建时的父冻结字节。
+            system_prompt: Arc::from(identity_system.as_str()),
             claude_md: Arc::from(metadata.claude_md.as_str()),
             skill_summary: Arc::from(metadata.skill_summary.as_str()),
             date: Arc::from(metadata.date.as_str()),
@@ -508,9 +599,9 @@ impl super::SessionFactory {
                 disabled_middlewares: metadata.disabled_middlewares.iter().cloned().collect(),
                 built_in_subagents_enabled: metadata.built_in_subagents_enabled,
             },
-            // 冷恢复 metadata 不携带运行环境快照（M3 归组）；恢复不重探本地值
-            // 冒充历史环境，派生新 prompt 时按 unavailable 显式标记（H3）。
-            runtime_env: None,
+            // M3：v2 metadata 携带子冻结运行环境快照（随父 frozen 继承）——恢复
+            // 只消费它；v1 无该字段 = unavailable，不重探本地值冒充历史环境（H3）。
+            runtime_env: metadata.runtime_env.clone(),
         };
         let mut inherited = snapshot.inherited;
         inherited.flags.extend(snapshot.flags);
@@ -539,6 +630,9 @@ impl super::SessionFactory {
             Some(super::super::agent_id_from_child_thread(
                 &admission.session_id,
             )),
+            // M3：v1 记录的身份经旧 transcript System 消息持久化——模型投影
+            // 定向吸收与身份逐字相同的那一条，身份只经 bridge 注入一次。
+            normalize_persisted_identity,
         )
         .await
         .map_err(|error| ColdChildBlocked::new(error.to_string()))?;

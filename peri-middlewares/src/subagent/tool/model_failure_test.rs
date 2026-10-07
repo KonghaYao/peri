@@ -23,6 +23,7 @@ use peri_agent::agent::stages::{run_react_loop, LoopResult, StageContext};
 use peri_agent::messages::BaseMessage;
 use peri_agent::session::queue::{MessageSource, QueuedMessage};
 use peri_agent::session::store::FrozenContext;
+use peri_agent::session::subagent::SubagentLlmSource;
 use peri_agent::session::Session;
 use peri_agent::tools::BaseTool;
 use peri_model::{
@@ -237,8 +238,9 @@ async fn run_sync_fixture(fixture: FailureFixture, status: Option<u16>) -> SyncF
             Arc::new(Vec::new()),
             Some(child_handler),
             Arc::new(move |_| {
-                Box::new(AgentModelBridge::from_arc(Arc::clone(&model_for_factory)))
-                    as Box<dyn ReactLLM + Send + Sync>
+                SubagentLlmSource::prebuilt(Box::new(AgentModelBridge::from_arc(Arc::clone(
+                    &model_for_factory,
+                ))))
             }),
             cwd.clone(),
         )
@@ -514,8 +516,9 @@ async fn background_http_429_consumes_typed_result_and_safe_notification() {
         Arc::new(Vec::new()),
         None,
         Arc::new(move |_| {
-            Box::new(AgentModelBridge::from_arc(Arc::clone(&model_for_factory)))
-                as Box<dyn ReactLLM + Send + Sync>
+            SubagentLlmSource::prebuilt(Box::new(AgentModelBridge::from_arc(Arc::clone(
+                &model_for_factory,
+            ))))
         }),
         cwd.clone(),
     )

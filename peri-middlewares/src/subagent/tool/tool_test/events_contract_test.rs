@@ -15,7 +15,7 @@ fn make_tool_with_bridge() -> (SubAgentTool, Arc<RecordingBridge>) {
     let t = SubAgentTool::new(
         Arc::new(vec![]),
         None,
-        Arc::new(|_: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
+        Arc::new(|_: Option<&str>| SubagentLlmSource::prebuilt(Box::new(EchoLLM))),
         "/tmp".to_string(),
     )
     .with_parent_agent_id(Arc::new(RwLock::new(Some(AgentId::new()))))

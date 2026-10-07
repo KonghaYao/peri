@@ -46,8 +46,11 @@ pub(crate) async fn seed_saved_fixture_runtime(
             tool_origins: Default::default(),
             skill_names: Vec::new(),
             max_iterations: 200,
-            persona: None,
+            // v1 语义：persona = 子身份（fixture 身份；M3 恢复据此确定身份）。
+            persona: Some("fixture-child-identity".into()),
             system_prompt: String::new(),
+            identity_system: None,
+            runtime_env: None,
             claude_md: "frozen-claude".into(),
             claude_local_md: None,
             skill_summary: "frozen-skills".into(),

@@ -2,6 +2,7 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use async_trait::async_trait;
 use parking_lot::RwLock;
+use peri_agent::session::subagent::SubagentLlmSource;
 use peri_agent::{
     agent::{
         react::{ReactLLM, Reasoning, StreamingContext, ToolCall},
@@ -134,7 +135,12 @@ async fn fork_inherits_late_static_mcp_tools_and_discovers_then_executes_them() 
     let middleware = SubAgentMiddleware::new(
         vec![],
         None,
-        Arc::new(|_| Box::new(LookupLLM(std::sync::atomic::AtomicUsize::new(0), true))),
+        Arc::new(|_| {
+            SubagentLlmSource::prebuilt(Box::new(LookupLLM(
+                std::sync::atomic::AtomicUsize::new(0),
+                true,
+            )))
+        }),
     );
     middleware.set_parent_session(parent);
     let tools: BTreeMap<String, Arc<dyn BaseTool>> = middleware
@@ -177,7 +183,7 @@ fn filtered_child(
     build_v2_subagent_context(
         None,
         Box::new(LookupLLM(std::sync::atomic::AtomicUsize::new(0), true)),
-        chain,
+        Arc::new(chain),
         vec![Arc::new(LookupTool)],
         ToolFilterPolicy::canonical(allowed, disallowed),
         None,
@@ -222,7 +228,12 @@ async fn unloaded_dynamic_tools_are_not_frozen_into_static_child_inheritance() {
     let middleware = SubAgentMiddleware::new(
         vec![],
         None,
-        Arc::new(|_| Box::new(LookupLLM(std::sync::atomic::AtomicUsize::new(0), false))),
+        Arc::new(|_| {
+            SubagentLlmSource::prebuilt(Box::new(LookupLLM(
+                std::sync::atomic::AtomicUsize::new(0),
+                false,
+            )))
+        }),
     );
     middleware.set_parent_session(parent);
     let tools = middleware

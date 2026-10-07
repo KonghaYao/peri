@@ -51,7 +51,7 @@ async fn authorization_fixture(
         fork_directive_kind: None,
         run_mode: SubagentRunMode::Sync,
         skill_names: Vec::new(),
-        llm: Box::new(EchoLLM),
+        llm: SubagentLlmSource::prebuilt(Box::new(EchoLLM)),
         chain_assembler: Arc::new(EmptyChainAssembler),
         tools,
         tool_filter: Arc::new(|_| true),
@@ -156,7 +156,10 @@ fn current_resume_config(
 ) -> SubagentResumeConfig {
     let mut config = resume_config(store, child_id);
     config.parent_invocation_id = Some(invocation_id.into());
-    config.llm = Box::new(PreparedFixtureLlm::new(Box::new(EchoLLM), tools.clone()));
+    config.llm = SubagentLlmSource::prebuilt(Box::new(PreparedFixtureLlm::new(
+        Box::new(EchoLLM),
+        tools.clone(),
+    )));
     config.tools = tools;
     config
 }

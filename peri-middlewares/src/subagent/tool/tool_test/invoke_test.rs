@@ -97,7 +97,7 @@ async fn test_subagent_type_fork_treated_as_fork_mode() {
     let t = SubAgentTool::new(
         Arc::new(vec![]),
         None,
-        Arc::new(|_: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
+        Arc::new(|_: Option<&str>| SubagentLlmSource::prebuilt(Box::new(EchoLLM))),
         "/tmp".to_string(),
     )
     .with_parent_messages(parent_messages);
@@ -230,33 +230,17 @@ async fn test_system_builder_injects_system_message() {
     )
     .unwrap();
 
-    // LLM echoes system message content
-    struct SystemEchoLLM;
-    #[async_trait::async_trait]
-    impl ReactLLM for SystemEchoLLM {
-        async fn generate_reasoning(
-            &self,
-            messages: &[BaseMessage],
-            _tools: &[&dyn BaseTool],
-            _streaming: Option<StreamingContext>,
-        ) -> peri_agent::error::AgentResult<Reasoning> {
-            // Find system message and return its content
-            let system_content = messages
-                .iter()
-                .find(|m| matches!(m, BaseMessage::System { .. }))
-                .map(|m| m.content())
-                .unwrap_or_else(|| "no-system".to_string());
-            Ok(Reasoning::with_answer(
-                "",
-                format!("system={system_content}"),
-            ))
-        }
-    }
-
+    // H1：经生产 bridge 捕获最终请求 system（身份投影）。
+    let model = super::mock_model::RecordingModel::new("system-check");
     let t = SubAgentTool::new(
         Arc::new(vec![]),
         None,
-        Arc::new(|_: Option<&str>| Box::new(SystemEchoLLM) as Box<dyn ReactLLM + Send + Sync>),
+        Arc::new({
+            let model = Arc::clone(&model);
+            move |_: Option<&str>| {
+                SubagentLlmSource::model(model.clone() as Arc<dyn peri_model::Model>, "mock-model")
+            }
+        }),
         dir.path().to_str().unwrap().to_string(),
     )
     .with_system_builder(Arc::new(|_overrides, _cwd| "tone: be concise".to_string()));
@@ -273,10 +257,14 @@ async fn test_system_builder_injects_system_message() {
         )
         .await
         .unwrap();
+    let system = model.last_system();
     assert!(
-        result.contains("tone: be concise"),
-        "System prompt should be injected: {}",
-        result
+        system.contains("tone: be concise"),
+        "System prompt should be injected via bridge base system: {system}"
+    );
+    assert!(
+        result.contains("system-check"),
+        "subagent should complete: {result}"
     );
 }
 
@@ -342,9 +330,9 @@ async fn test_skill_preload_registered() {
             Arc::new(vec![]),
             None,
             Arc::new(move |_: Option<&str>| {
-                Box::new(SkillPreloadCheckLLM {
+                SubagentLlmSource::prebuilt(Box::new(SkillPreloadCheckLLM {
                     preload_count: Arc::clone(&preload_count_clone),
-                }) as Box<dyn ReactLLM + Send + Sync>
+                }))
             }),
             dir.path().to_str().unwrap().to_string(),
         ),
@@ -450,7 +438,7 @@ async fn test_cancel_token_interrupts_subagent() {
     let t = SubAgentTool::new(
         Arc::new(vec![]),
         None,
-        Arc::new(|_: Option<&str>| Box::new(ToolNotFoundLLM) as Box<dyn ReactLLM + Send + Sync>),
+        Arc::new(|_: Option<&str>| SubagentLlmSource::prebuilt(Box::new(ToolNotFoundLLM))),
         dir.path().to_str().unwrap().to_string(),
     )
     .with_cancel(cancel);

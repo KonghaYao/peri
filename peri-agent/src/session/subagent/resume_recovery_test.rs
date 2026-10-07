@@ -39,7 +39,7 @@ async fn failed_child() -> (Arc<MockSessionResources>, String, WorkSnapshot) {
     let config = resume_config_with(
         store.clone(),
         child_id.clone(),
-        Box::new(UnknownToolReasonLlm),
+        SubagentLlmSource::prebuilt(Box::new(UnknownToolReasonLlm)),
         SubagentRunMode::Sync,
         None,
         None,
@@ -76,7 +76,7 @@ async fn explicit_resume_supersedes_failed_reason_without_replaying_or_erasing_i
     let mut config = resume_config_with(
         store.clone(),
         child_id.clone(),
-        Box::new(llm),
+        SubagentLlmSource::prebuilt(Box::new(llm)),
         SubagentRunMode::Sync,
         None,
         None,
@@ -130,7 +130,7 @@ async fn implicit_resume_refuses_failed_reason_without_publishing_an_orphan_inpu
     let config = resume_config_with(
         store.clone(),
         child_id.clone(),
-        Box::new(llm),
+        SubagentLlmSource::prebuilt(Box::new(llm)),
         SubagentRunMode::Sync,
         None,
         None,
@@ -164,7 +164,7 @@ async fn completed_child_failure_returns_a_tool_error_without_aborting_parent_di
     let mut config = resume_config_with(
         store,
         child_id.clone(),
-        Box::new(UnknownToolReasonLlm),
+        SubagentLlmSource::prebuilt(Box::new(UnknownToolReasonLlm)),
         SubagentRunMode::Sync,
         None,
         None,

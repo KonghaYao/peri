@@ -93,13 +93,13 @@ async fn test_bg_register_failure_does_not_execute_task() {
         }
     }
 
-    let llm_factory: Arc<dyn Fn(Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync> =
+    let llm_factory: Arc<dyn Fn(Option<&str>) -> SubagentLlmSource + Send + Sync> =
         Arc::new(move |_: Option<&str>| {
             // 4 个 invoke 在此同步汇合（全部进入装配窗口后才放行）
             gate_clone.wait();
-            Box::new(GateLLM {
+            SubagentLlmSource::prebuilt(Box::new(GateLLM {
                 calls: Arc::clone(&llm_calls_clone),
-            }) as Box<dyn ReactLLM + Send + Sync>
+            }))
         });
 
     // register_runtime / deregister_runtime mock：记录调用
@@ -268,12 +268,12 @@ async fn test_bg_cancel_trigger_token_and_cleanup() {
         }
     }
 
-    let llm_factory: Arc<dyn Fn(Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync> =
+    let llm_factory: Arc<dyn Fn(Option<&str>) -> SubagentLlmSource + Send + Sync> =
         Arc::new(move |_: Option<&str>| {
-            Box::new(BlockingLLM {
+            SubagentLlmSource::prebuilt(Box::new(BlockingLLM {
                 gate: Arc::clone(&gate_clone),
                 calls: Arc::clone(&llm_calls_clone),
-            }) as Box<dyn ReactLLM + Send + Sync>
+            }))
         });
 
     let registry = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
@@ -438,12 +438,12 @@ async fn test_bg_more_than_three_concurrent_tasks_start_complete_cancel() {
         }
     }
 
-    let llm_factory: Arc<dyn Fn(Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync> =
+    let llm_factory: Arc<dyn Fn(Option<&str>) -> SubagentLlmSource + Send + Sync> =
         Arc::new(move |_: Option<&str>| {
-            Box::new(BulkLLM {
+            SubagentLlmSource::prebuilt(Box::new(BulkLLM {
                 calls: Arc::clone(&llm_calls_clone),
                 release: Arc::clone(&release_clone),
-            }) as Box<dyn ReactLLM + Send + Sync>
+            }))
         });
 
     let deregistered: Arc<std::sync::Mutex<Vec<String>>> =

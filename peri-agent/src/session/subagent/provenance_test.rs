@@ -71,7 +71,7 @@ fn spawn_config(
         fork_directive_kind: Some(ForkDirectiveKind::Fork),
         run_mode: SubagentRunMode::Sync,
         skill_names: vec![],
-        llm: Box::new(EchoLLM),
+        llm: SubagentLlmSource::prebuilt(Box::new(EchoLLM)),
         chain_assembler: Arc::new(EmptyChainAssembler),
         tools: vec![],
         tool_filter: Arc::new(|_| true),
@@ -258,7 +258,7 @@ async fn test_sqlite_subagent_spawn_full_micro_cold_resume_preserves_provenance(
     let config = resume_config_with(
         Arc::clone(&reopened),
         child_id.clone(),
-        Box::new(recording),
+        SubagentLlmSource::prebuilt(Box::new(recording)),
         SubagentRunMode::Sync,
         None,
         None,

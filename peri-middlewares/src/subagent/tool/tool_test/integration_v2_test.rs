@@ -32,34 +32,17 @@ async fn test_integration_fork_parent_messages_passthrough() {
         .write()
         .push(BaseMessage::human("parent Q2 followup"));
 
-    // 捕获 mock LLM 收到的完整消息列表
-    let captured: Arc<std::sync::Mutex<Vec<BaseMessage>>> =
-        Arc::new(std::sync::Mutex::new(Vec::new()));
-    let captured_clone = Arc::clone(&captured);
-
-    struct CaptureLLM {
-        captured: Arc<std::sync::Mutex<Vec<BaseMessage>>>,
-    }
-    #[async_trait::async_trait]
-    impl ReactLLM for CaptureLLM {
-        async fn generate_reasoning(
-            &self,
-            messages: &[BaseMessage],
-            _tools: &[&dyn BaseTool],
-            _streaming: Option<StreamingContext>,
-        ) -> peri_agent::error::AgentResult<Reasoning> {
-            *self.captured.lock().unwrap() = messages.to_vec();
-            Ok(Reasoning::with_answer("", "fork integration done"))
-        }
-    }
+    // H1 生产装配捕获：模型来源经子链装配点装 bridge，捕获真实 ModelRequest。
+    let model = super::mock_model::RecordingModel::new("fork integration done");
 
     let t = SubAgentTool::new(
         Arc::new(vec![]),
         None,
-        Arc::new(move |_: Option<&str>| {
-            Box::new(CaptureLLM {
-                captured: Arc::clone(&captured_clone),
-            }) as Box<dyn ReactLLM + Send + Sync>
+        Arc::new({
+            let model = Arc::clone(&model);
+            move |_: Option<&str>| {
+                SubagentLlmSource::model(model.clone() as Arc<dyn peri_model::Model>, "mock-model")
+            }
         }),
         "/tmp".to_string(),
     )
@@ -85,48 +68,46 @@ async fn test_integration_fork_parent_messages_passthrough() {
         result
     );
 
-    let msgs = captured.lock().unwrap().clone();
+    let messages = model.last_messages();
+    let texts = super::mock_model::conversation_texts(&messages);
 
-    // Assert 1: 消息数量 >= 4（3 父 + 1 system + 1 fork_directive prompt）
+    // Assert 1: 请求消息 >= 4（3 父 + 1 system + 1 fork_directive prompt）
     assert!(
-        msgs.len() >= 4,
+        messages.len() >= 4,
         "fork should receive parent messages + system + directive (got {})",
-        msgs.len()
+        messages.len()
     );
 
-    // Assert 2: 最后一条是 Human，且包含 <fork_directive>（BUG-A）
-    let last = msgs.last().expect("messages non-empty");
+    // Assert 2: 最后一条是 User，且包含 <fork_directive>（BUG-A）
+    let last = texts.last().expect("messages non-empty");
     assert!(
-        matches!(last, BaseMessage::Human { .. }),
-        "last message should be Human (fork directive)"
-    );
-    let last_content = last.content();
-    assert!(
-        last_content.contains("<fork_directive>"),
+        last.contains("<fork_directive>"),
         "last message should contain <fork_directive> (BUG-A), got: {}",
-        last_content
+        last
     );
     assert!(
-        last_content.contains("continue from parent context"),
+        last.contains("continue from parent context"),
         "fork directive should wrap original prompt"
     );
 
-    // Assert 3: messages 中包含 System 消息，内容含 "FORK-CONTEXT-SP"（BUG-B）
-    let sys_msg = msgs
-        .iter()
-        .find(|m| matches!(m, BaseMessage::System { .. }));
+    // Assert 3: 身份经 bridge base system 注入（恰一次，不再写 transcript）
+    let system = model.last_system();
     assert!(
-        sys_msg.is_some(),
-        "fork path should inject System message (BUG-B)"
+        system.contains("FORK-CONTEXT-SP"),
+        "bridge system should contain system_builder projection, got: {system}"
     );
-    assert!(
-        sys_msg.unwrap().content().contains("FORK-CONTEXT-SP"),
-        "System message should contain system_builder output (BUG-B)"
+    assert_eq!(
+        texts
+            .iter()
+            .filter(|t| t.contains("FORK-CONTEXT-SP"))
+            .count(),
+        0,
+        "identity must not be duplicated into conversation messages: {texts:?}"
     );
 
     // Assert 4: 父消息按顺序透传（BUG-C）
-    // 验证三条父消息的 content 都在 LLM 收到的 messages 中
-    let contents: Vec<String> = msgs.iter().map(|m| m.content()).collect();
+    // 验证三条父消息的 content 都在请求消息中
+    let contents: Vec<String> = texts.clone();
     assert!(
         contents.iter().any(|c| c.contains("parent Q1")),
         "first parent message should pass through (BUG-C)"
@@ -178,9 +159,9 @@ async fn test_fork_prefers_tool_context_messages_over_parent_snapshot() {
         Arc::new(vec![]),
         None,
         Arc::new(move |_: Option<&str>| {
-            Box::new(CaptureContentLLM {
+            SubagentLlmSource::prebuilt(Box::new(CaptureContentLLM {
                 captured: Arc::clone(&captured_clone),
-            }) as Box<dyn ReactLLM + Send + Sync>
+            }))
         }),
         "/tmp".to_string(),
     )
@@ -246,9 +227,9 @@ async fn test_fork_falls_back_to_parent_messages_when_tool_context_empty() {
         Arc::new(vec![]),
         None,
         Arc::new(move |_: Option<&str>| {
-            Box::new(FallbackCaptureLLM {
+            SubagentLlmSource::prebuilt(Box::new(FallbackCaptureLLM {
                 captured: Arc::clone(&captured_clone),
-            }) as Box<dyn ReactLLM + Send + Sync>
+            }))
         }),
         "/tmp".to_string(),
     )
@@ -316,9 +297,9 @@ async fn test_fork_drops_trailing_tool_call_message_from_tool_context() {
         Arc::new(vec![]),
         None,
         Arc::new(move |_: Option<&str>| {
-            Box::new(DropToolCallCaptureLLM {
+            SubagentLlmSource::prebuilt(Box::new(DropToolCallCaptureLLM {
                 captured: Arc::clone(&captured_clone),
-            }) as Box<dyn ReactLLM + Send + Sync>
+            }))
         }),
         "/tmp".to_string(),
     );
@@ -409,9 +390,9 @@ async fn test_integration_background_independent_survives_parent_cancel() {
         Arc::new(vec![]),
         None,
         Arc::new(move |_: Option<&str>| {
-            Box::new(CountingLLM {
+            SubagentLlmSource::prebuilt(Box::new(CountingLLM {
                 count: Arc::clone(&llm_call_count_clone),
-            }) as Box<dyn ReactLLM + Send + Sync>
+            }))
         }),
         "/tmp".to_string(),
     )
@@ -577,9 +558,9 @@ async fn test_integration_sync_cascade_cancel_returns_interrupted_marker() {
         Arc::new(vec![]),
         None,
         Arc::new(move |_: Option<&str>| {
-            Box::new(LoopingLLM {
+            SubagentLlmSource::prebuilt(Box::new(LoopingLLM {
                 count: Arc::clone(&llm_call_count_clone),
-            }) as Box<dyn ReactLLM + Send + Sync>
+            }))
         }),
         dir.path().to_str().unwrap().to_string(),
     )
@@ -677,10 +658,10 @@ async fn test_p0_2_background_defined_skill_preload_once_after_parent_cancel() {
         Arc::new(vec![]),
         None,
         Arc::new(move |_: Option<&str>| {
-            Box::new(BackgroundSkillLLM {
+            SubagentLlmSource::prebuilt(Box::new(BackgroundSkillLLM {
                 calls: Arc::clone(&llm_calls_clone),
                 preload_count: Arc::clone(&preload_count_clone),
-            }) as Box<dyn ReactLLM + Send + Sync>
+            }))
         }),
         dir.path().to_str().unwrap().to_string(),
     )
@@ -793,9 +774,9 @@ async fn test_integration_fork_plus_background_priority() {
         Arc::new(vec![]),
         None,
         Arc::new(move |_: Option<&str>| {
-            Box::new(PromptCaptureLLM {
+            SubagentLlmSource::prebuilt(Box::new(PromptCaptureLLM {
                 captured: Arc::clone(&prompt_capture_clone),
-            }) as Box<dyn ReactLLM + Send + Sync>
+            }))
         }),
         "/tmp".to_string(),
     )

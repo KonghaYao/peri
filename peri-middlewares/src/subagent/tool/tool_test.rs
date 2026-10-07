@@ -22,6 +22,7 @@ use peri_agent::{
 use tempfile::tempdir;
 
 use super::*;
+use peri_agent::session::subagent::SubagentLlmSource;
 
 // Mock LLM: returns final answer directly
 struct EchoLLM;
@@ -72,7 +73,7 @@ fn make_subagent_tool(parent_tools: Vec<Arc<dyn BaseTool>>) -> SubAgentTool {
     SubAgentTool::new(
         Arc::new(parent_tools),
         None,
-        Arc::new(|_: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
+        Arc::new(|_: Option<&str>| SubagentLlmSource::prebuilt(Box::new(EchoLLM))),
         "/tmp".to_string(),
     )
 }
@@ -362,7 +363,7 @@ async fn invoke_resolves_agent_from_argument_cwd_before_starting_factory() {
             None,
             Arc::new(move |_| {
                 factory_calls_clone.fetch_add(1, Ordering::SeqCst);
-                Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>
+                SubagentLlmSource::prebuilt(Box::new(EchoLLM))
             }),
             dir.path().to_str().unwrap().to_string(),
         ),
@@ -430,7 +431,7 @@ async fn background_invoke_uses_argument_cwd_for_loader_failure() {
             None,
             Arc::new(move |_| {
                 factory_calls_clone.fetch_add(1, Ordering::SeqCst);
-                Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>
+                SubagentLlmSource::prebuilt(Box::new(EchoLLM))
             }),
             dir.path().to_str().unwrap().to_string(),
         ),
@@ -777,6 +778,8 @@ mod integration_v2_test;
 mod invoke_test;
 #[path = "tool_test/middleware_chain_test.rs"]
 mod middleware_chain_test;
+#[path = "tool_test/mock_model.rs"]
+mod mock_model;
 #[path = "tool_test/model_tier_test.rs"]
 mod model_tier_test;
 #[path = "tool_test/resume_failure_test.rs"]

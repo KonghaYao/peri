@@ -256,10 +256,12 @@ pub(super) async fn spawn_subagent_impl(
 
     // 5. 构造子 session + 链装配 + v2_ctx（共享 helper [build_subagent_session_v2]：
     //    frozen 从父 copy 不重读磁盘，transcript 恢复只读 inherited snapshot 后绑定存储）
-    //    注入 parent_messages / system_prompt / prompt 留在本函数——spawn 与
-    //    resume 的消息注入差异大，不进 helper（D1）
+    //    身份（H1/M3）：子 `FrozenContext.system_prompt` = system_builder 的子能力
+    //    投影字节（定义型带 overrides / fork 无 overrides）——不复制父字节；
+    //    注入 prompt 留在本函数，不进 helper（D1）
     let frozen = inherited_frozen_context(
         parent,
+        system_prompt.as_deref(),
         &frozen_claude_md,
         &frozen_skill_summary,
         &frozen_date,
@@ -285,11 +287,14 @@ pub(super) async fn spawn_subagent_impl(
                 return Err("Incomplete: child frozen snapshot missing".into());
             };
             let metadata = super::cold::ChildResumeMetadata {
-                version: 1,
+                // v2（M3）：身份结构化持久化——`identity_system` 是确定身份投影，
+                // `runtime_env` 是子冻结运行环境；不再用 v1 的 `persona`
+                // （该字段仅为解释历史记录保留，不双写身份）。
+                version: 2,
                 child_session_id: child_thread_id.clone(),
                 recipient_lifecycle: 1,
                 agent_name: agent_name.clone(),
-                model_name: llm.model_name(),
+                model_name: llm.model_name().to_owned(),
                 direct_initiator_session_id: initiator.clone(),
                 direct_initiator_lifecycle: delegation.recipient_lifecycle,
                 delegation_invocation_id: invocation_id.clone(),
@@ -317,8 +322,16 @@ pub(super) async fn spawn_subagent_impl(
                     .collect(),
                 skill_names: skill_names.clone(),
                 max_iterations,
-                persona: system_prompt.clone(),
-                system_prompt: frozen.system_prompt.to_string(),
+                persona: None,
+                // 父冻结字节（审计/解释用），不参与子身份判定（M3）。
+                system_prompt: parent
+                    .map(|p| p.store().frozen.system_prompt.to_string())
+                    .unwrap_or_default(),
+                // 空身份（无 system_builder 的嵌入路径）持久为 None = 该子会话
+                // 确实无身份，恢复按“无身份”继续而不是把父字节当身份。
+                identity_system: Some(frozen.system_prompt.to_string())
+                    .filter(|value| !value.trim().is_empty()),
+                runtime_env: frozen.runtime_env.clone(),
                 claude_md: frozen.claude_md.to_string(),
                 claude_local_md: frozen_claude_local_md.clone(),
                 skill_summary: frozen.skill_summary.to_string(),
@@ -374,24 +387,16 @@ pub(super) async fn spawn_subagent_impl(
         context_budget,
         compact_llm,
         Some(agent_id_from_child_thread(&child_thread_id)),
+        // 新建子会话：身份不经 transcript 持久化（v2 起），无需归一化吸收。
+        false,
     )
     .await?;
 
-    let transcript = session.transcript();
-
     // 父上下文已作为只读 ancestor 装载；不可用原 ID append 到 child messages。
-
-    // 6b. SubAgent system_prompt（身份构建）注入到 transcript 开头位置：
-    // - fork 路径：在 parent_messages 之后（让身份提示词位于对话上下文之后、
-    //   prompt 之前——SubAgent 的 prompt 由下方 push 到 queue，Receive 阶段追加）
-    // - 非 fork 路径：parent_messages 为空，直接 append 到 transcript 开头
     //
-    // 注意：这是 session 起始身份构建（在 run_react_loop 调用前注入），不是中途纠正，
-    // 用 BaseMessage::System 合法（CLAUDE.md TRAP 仅禁止中途纠正用 System）。
-    if let Some(sp) = system_prompt {
-        let mut tx = transcript.write();
-        tx.append(BaseMessage::system(sp));
-    }
+    // 6b（H1/M3）：身份 system **不再写入 transcript**——子身份已随子
+    // `FrozenContext.system_prompt` 定格，由 bridge base system 在每次模型请求
+    // 注入恰好一次。transcript 只保留对话本体（parent_messages 为 ancestor）。
 
     // 6c. push prompt 到 queue（fork 路径套 fork directive 模板）
     let prompt_message = match fork_directive_kind {
