@@ -1,10 +1,11 @@
 use super::*;
 use crate::mcp::client::{ClientStatus, McpClientHandle, McpClientPool};
 use peri_acp_types::mcp_apps::{
-    McpAppInvokeRequest, MCP_APPS_ENVELOPE_VERSION, MCP_APPS_PROTOCOL_VERSION,
+    McpAppInvokeRequest, McpAppsRelayPort, MCP_APPS_ENVELOPE_VERSION, MCP_APPS_PROTOCOL_VERSION,
 };
 use rmcp::model::Tool;
 use serde_json::json;
+use std::sync::Arc;
 
 fn invoke_request(server_id: &str, tool_name: &str, session: &str) -> McpAppInvokeRequest {
     McpAppInvokeRequest {
@@ -184,44 +185,46 @@ impl rmcp::ServerHandler for AppTaskOwner {
 }
 
 #[tokio::test]
-async fn host_app_dispatcher_binds_followup_task_to_its_authorized_session() {
-    use peri_acp_types::tasks::TaskManager as TaskManagerPort;
+async fn host_invoke_without_canonical_approval_denies_before_server_call() {
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let wire = crate::mcp::client::output_store::tests::Wire::connect(AppTaskOwner {
         calls: calls.clone(),
     })
     .await;
-    let (mut owner, spawner) = crate::mcp::task_scope::McpTaskOwner::new();
-    let pool = Arc::new(McpClientPool::new_pending_with_spawner(spawner));
-    wire.install(&pool, "app-owner", false);
-    let root: Arc<dyn TaskManagerPort> =
-        Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
-    let child: Arc<dyn TaskManagerPort> =
-        Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
-    pool.bind_session_task_manager("root", &root);
-    pool.bind_session_task_manager("child", &child);
-    let dispatcher = PoolAppToolDispatcher::new(pool.clone(), "child".into(), "host-turn".into());
-    let output = dispatcher
-        .dispatch(
-            EffectiveToolCall {
-                invocation_id: "followup".into(),
-                tool_name: effective_mcp_tool_name("app-owner", "large"),
-                input: json!({"session_id":"root", "mcp_task_owner_session_id":"root"}),
-                parent_invocation_id: None,
-            },
-            CancellationToken::new(),
-        )
-        .await
-        .unwrap();
-    assert!(output.contains("Background task started"), "{output}");
-    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
-    assert!(root.snapshot().tasks.is_empty());
-    assert_eq!(child.snapshot().tasks.len(), 1);
-    assert_eq!(
-        child.snapshot().tasks[0].initiator_session_id.as_deref(),
-        Some("child")
+    let pool = Arc::new(McpClientPool::new_empty());
+    insert_server(
+        &pool,
+        "app-owner",
+        vec![ui_tool("large", Some("ui://app"), &["app"])],
     );
-    owner.shutdown().await;
+    {
+        let mut clients = pool.clients.write();
+        Arc::get_mut(clients.get_mut("app-owner").unwrap())
+            .unwrap()
+            .peer = Some(wire.client.peer().clone());
+    }
+    let relay = PoolMcpAppsRelay::new(pool.clone());
+    let mut request = invoke_request("app-owner", "large", "child");
+    request.arguments.insert("session_id".into(), json!("root"));
+    let error = relay
+        .invoke_app(&request, CancellationToken::new())
+        .await
+        .unwrap_err();
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(error.kind, McpAppsErrorKind::PolicyDenied);
+    assert_eq!(pool.app_binding_leases.current_turn("child"), None);
     pool.clients.write().clear();
     wire.close().await;
+}
+
+#[tokio::test]
+async fn cancelled_host_invoke_fails_before_admission() {
+    let relay = PoolMcpAppsRelay::new(Arc::new(McpClientPool::new_empty()));
+    let cancellation = CancellationToken::new();
+    cancellation.cancel();
+    let error = relay
+        .invoke_app(&invoke_request("app-owner", "large", "child"), cancellation)
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind, McpAppsErrorKind::Cancelled);
 }

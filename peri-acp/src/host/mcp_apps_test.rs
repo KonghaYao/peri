@@ -200,6 +200,27 @@ async fn invoke_while_session_is_closing_is_policy_denied() {
 }
 
 #[tokio::test]
+async fn invoke_relay_policy_denial_does_not_project_success() {
+    let connection = enabled_connection();
+    let relay: Arc<dyn McpAppsRelayPort> = Arc::new(StubRelay {
+        invoke: std::sync::Mutex::new(Some(Err(McpAppsErrorKind::PolicyDenied))),
+    });
+    let error = handle_invoke(
+        &invoke_params(),
+        &connection,
+        Some(&relay),
+        InvokeSessionGate {
+            known: true,
+            open: true,
+            prompt_in_flight: false,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.data.unwrap()["kind"], "policy_denied");
+}
+
+#[tokio::test]
 async fn invoke_success_projects_completed_tool_call_and_returns_tool_call_id() {
     let connection = enabled_connection();
     let relay: Arc<dyn McpAppsRelayPort> = Arc::new(StubRelay::invoke_ok());
