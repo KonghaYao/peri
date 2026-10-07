@@ -1,6 +1,6 @@
 # 执行恢复机制剥离计划
 
-- 状态：**四个 worker 已完成，整合与定向验证完成；准备提交并对提交快照轻量复验**。
+- 状态：**四个 worker 已完成，代码已整合提交，提交后轻量复验通过**。
 - 授权：2026-10-07 用户要求文档 → 充分计划 → 多 subagent → 完成/提交/整合 → 轻量验证；全部在独立 worktree。
 - 工作树：`/Users/konghayao/code/ai/peri-remove-execution-recovery-20261007`。
 - 分支：`refactor/remove-execution-recovery-20261007`；基线 `01c0efecff74427ca563a77a57de6188be256646`。
@@ -121,7 +121,7 @@ worker完成后协调者统一暂存/提交，避免并发操作git index。
 - [x] 文档基线提交：`0dbfb386`。
 - [x] A/B/C/D并行完成，均已关闭。
 - [x] review、整合、路由与验证更新。
-- [ ] 整合提交及提交后轻量确认。
+- [x] 整合提交及提交后轻量确认：代码提交 `b9d09430`；下列命令均在该提交后通过。
 
 ### 实施与整合
 
@@ -151,4 +151,19 @@ worker完成后协调者统一暂存/提交，避免并发操作git index。
 
 ignored 不算通过。日志保存在隔离工作树 `target/removal-*.log` 和 A 的 `/tmp/peri-a-*-test.log`，不提交构建产物。
 schema18 远端验证采用 SQLite-backed RemoteTransport，不是实际 Turso 网络验证；未执行真实用户库、WASM、UI E2E、跨进程故障注入或性能收益 benchmark。
-提交后的命令和实际 OID 在复验完成后补充，不预填通过。
+
+### 提交快照复验
+
+2026-10-07 对 `b9d09430` 执行，统一命令前缀仍为 patched Cargo；以下均为实际完成结果。
+
+| 命令参数 | 结果 |
+| --- | --- |
+| `check --locked --offline -p peri-tui` | 通过，无新警告 |
+| `test --locked --offline -p peri-resources --lib schema_v18 -- --test-threads=1` | 10 passed |
+| `test --locked --offline -p peri-tui --lib requests::cancel_tests -- --test-threads=1` | 2 passed |
+| `test --locked --offline -p peri-tui --lib load_by_id_has_no_recovery_popup_or_reset_request -- --test-threads=1` | 1 passed |
+
+日志：`target/removal-postcommit-{entry-check,schema18-test,cancel-test,history-test}.log`。
+修改源码≤1000行、根 CLAUDE 5892字节/70行、修改 Markdown 本地链接及 `git diff --check` 均通过。
+恢复符号残留仅为迁移识别数据、历史文档及明确验证旧协议已撤销的测试；生产依赖已移除。
+本记录提交仅改文档，不改变上述复验代码快照；工作树交付保持干净，无 upstream/push/原树合并。
