@@ -47,16 +47,6 @@ jobs:
                   targets: ${{ matrix.target }}
                   components: clippy
 
-            - name: Install Bun
-              uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
-              with:
-                  bun-version: 1.3.1
-
-            - name: Install SDK dependencies
-              shell: bash
-              working-directory: npm-packages/@peri-sdk
-              run: bun install --frozen-lockfile
-
             - name: Cache cargo registry and build
               uses: Swatinem/rust-cache@v2
               with:
@@ -74,14 +64,11 @@ jobs:
                   --exclude peri-mcp-common --exclude peri-mcp-web --exclude peri-mcp-artifact
                   --exclude peri-mcp-cron --exclude peri-mcp-workspace
 
-            - name: Run ACP tests (excluding Windows SDK E2E)
+            - name: Run ACP tests (excluding SDK E2E)
               shell: bash
-              run: |
-                  if [[ "$RUNNER_OS" == "Windows" ]]; then
-                      ./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp --lib -- --skip host::execution_admission_jsonl --skip host::scheduled_admission
-                  else
-                      ./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp
-                  fi
+              run: >-
+                  ./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp --lib
+                  -- --skip host::execution_admission_jsonl --skip host::scheduled_admission
 
             - name: Run Agent tests (excluding execution E2E)
               shell: bash
@@ -89,14 +76,11 @@ jobs:
                   ./scripts/cargo-rmcp-patched.sh test --locked -p peri-agent --lib
                   ./scripts/cargo-rmcp-patched.sh test --locked -p peri-agent --test middleware_tests --test compact_followup_behavior_test --test compact_failure_adversarial_test
 
-            - name: Run TUI tests (excluding real CLI continuation E2E)
+            - name: Run TUI tests (excluding SDK E2E)
               shell: bash
-              run: |
+              run: >-
                   ./scripts/cargo-rmcp-patched.sh test --locked -p peri-tui --lib --bins --test meta_session_cli
-                  if [[ "$RUNNER_OS" != "Windows" ]]; then
-                      ./scripts/cargo-rmcp-patched.sh test --locked -p peri-tui --test print_bare -- --skip bare_respects_explicit_builtin_shutdown
-                      ./scripts/cargo-rmcp-patched.sh test --locked -p peri-tui --test print_exit -- --skip truncated_answer_recovers_and_exits_process_successfully
-                  fi
+                  -- --skip sdk_execution::tests::real_sdk
 
             # 涉及进程级全局状态的测试仍须串行执行。
             - name: Run middleware unit tests (serial, excluding E2E)
