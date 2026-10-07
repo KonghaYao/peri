@@ -125,6 +125,9 @@ fn render_tool_plan(
         status_symbol
     };
     let mut spans = first_prefix(grid, &symbol, Style::default().fg(symbol_color));
+    if data.is_error {
+        spans[1] = Span::styled(sym().error, Style::default().fg(symbol_color));
+    }
     let label = truncate_by_width(&plan.label, grid.content_width().max(1));
     let label_width = label.width();
     spans.push(Span::styled(
@@ -181,6 +184,16 @@ fn render_tool_plan(
     fit_summary_to_content(&mut spans, grid);
 
     let mut lines = vec![Line::from(spans)];
+    if data.is_error {
+        if data.fold != FoldState::Collapsed {
+            for text in super::error::preview_lines(&data.output_summary, grid.content_width(), 2) {
+                let mut spans = cont_prefix(grid, sem.accents.tool);
+                spans.push(Span::styled(text, Style::default().fg(sem.status.error)));
+                lines.push(Line::from(spans));
+            }
+        }
+        return lines;
+    }
     if data.fold != FoldState::Collapsed {
         for detail in plan.details {
             let mut spans = cont_prefix(grid, sem.accents.tool);

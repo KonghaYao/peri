@@ -22,6 +22,7 @@ pub(super) struct CopyButtonHit {
     /// 渲染时该 VM 的 content_hash——点击时校验索引仍指向同一 VM
     /// （Rewind / Reset 可能增删 items 导致索引错位）。
     pub(super) vm_hash: u64,
+    pub(super) logical_idx: usize,
 }
 
 /// [Slice 4 §6.8] interaction option 的屏幕点击区域（每帧由渲染 body 构建，
@@ -102,6 +103,7 @@ pub(super) fn update_copy_button_hits(
     vis_height: u16,
     scroll_y: usize,
     index: &super::selection::SlotIndex,
+    grid: GridSpec,
 ) {
     let mut hits: Vec<CopyButtonHit> = Vec::new();
     if let Some(area) = area_rect {
@@ -115,33 +117,38 @@ pub(super) fn update_copy_button_hits(
         let vms_guard = view_models.read();
         for slot_index in index.visible_slots(scroll_y, vis_height as usize) {
             let slot = &caches_read[slot_index];
-            let Some(btn) = &slot.copy_button else {
-                continue;
-            };
-            let Some(entry) = slot.wrap_map.get(btn.logical_idx) else {
-                continue;
-            };
-            let vis_row = index
-                .slot_visual_start(slot_index)
-                .unwrap_or(0)
-                .saturating_add(entry.visual_start);
-            let row = area.y as i64 + vis_row as i64 - scroll_y as i64;
-            if row < area.y as i64 || row >= vp_end as i64 {
-                continue;
-            }
-            let hit_hash = match vms_guard.items.get(slot_index) {
-                Some(TuiRenderUnit::TuiAssistantBubble(b)) => {
-                    TuiAssistantBubble::stable_identity_hash(&b.text, b.reasoning.as_ref())
+            let extra = vms_guard
+                .items
+                .get(slot_index)
+                .map(|vm| super::render::subagent_error_buttons(vm, &grid))
+                .unwrap_or_default();
+            for btn in slot.copy_button.iter().chain(extra.iter()) {
+                let Some(entry) = slot.wrap_map.get(btn.logical_idx) else {
+                    continue;
+                };
+                let vis_row = index
+                    .slot_visual_start(slot_index)
+                    .unwrap_or(0)
+                    .saturating_add(entry.visual_start);
+                let row = area.y as i64 + vis_row as i64 - scroll_y as i64;
+                if row < area.y as i64 || row >= vp_end as i64 {
+                    continue;
                 }
-                _ => slot.content_hash,
-            };
-            hits.push(CopyButtonHit {
-                row: row as u16,
-                x_start: area.x.saturating_add(btn.x_start),
-                x_end: area.x.saturating_add(btn.x_end),
-                slot_index,
-                vm_hash: hit_hash,
-            });
+                let hit_hash = match vms_guard.items.get(slot_index) {
+                    Some(TuiRenderUnit::TuiAssistantBubble(b)) => {
+                        TuiAssistantBubble::stable_identity_hash(&b.text, b.reasoning.as_ref())
+                    }
+                    _ => slot.content_hash,
+                };
+                hits.push(CopyButtonHit {
+                    row: row as u16,
+                    x_start: area.x.saturating_add(btn.x_start),
+                    x_end: area.x.saturating_add(btn.x_end),
+                    slot_index,
+                    vm_hash: hit_hash,
+                    logical_idx: btn.logical_idx,
+                });
+            }
         }
     }
     *copy_buttons.write_no_update() = Arc::new(hits);

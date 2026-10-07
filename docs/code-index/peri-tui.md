@@ -13,6 +13,8 @@ Markdown 高亮预算在 `kit/markdown/code_block.rs`，超限保留原文，仅
 
 ## 架构速览
 
+错误预览在 `src/kit/message_area/render/error.rs` 按显示列宽与 grapheme 折行，有界读取并最多保留三行；超出显示省略号，完整 VM 原文不修改。系统错误、工具错误与子任务错误的 ×/x 点击热区复用 `message_area/{hits,handlers}.rs` 的复制链，按 slot/hash 校验身份后复制完整错误原文（不从三行预览重建）。工具折叠态仍为单行，展开态含标题最多三行；子任务原因预览最多三行。复制反馈沿用既有字符计数提示，弹窗遮挡与陈旧点击不复制。
+
 嵌入式 TUI 与 print 由 `src/launch.rs`、`src/cli_print.rs` 创建普通 ACP host/client pump，
 不启动 Bun SDK sidecar，不依赖持久 execution registry 或 reverse admission。
 history 加载保留原 session load、事件重放和 load reservation；不恢复旧执行。
@@ -110,7 +112,7 @@ core `ConfigSource::save(expected_revision, &PeriConfig)` 返回 accepted snapsh
 | 共享 entry 缓存与内存计量 | `src/kit/entry_render_cache.rs` + `src/kit/markdown/{memory.rs,memory_test.rs}` | 真实主消息/详情共享内容、布局、主题、语言、occurrence 与 surface 失效；retained_bytes 递归容量计量、同 cache Arc 去重，非 RSS 指标 |
 | Subagent 详情缓存 | `src/kit/panels/{subagent_detail.rs,subagent_detail_cache.rs,subagent_detail_cache_test.rs}` + `src/kit/panel_scroll.rs` | 自定义 viewport 绘制、完整 usize 高度、既有鼠标节流中的虚拟滚动目标；8 MiB 派生预算，不物化全历史 ScrollView buffer |
 | 后台 subagent 文本合帧 | `src/kit/{bg_task_live.rs,bg_task_live_test.rs,bg_publication_test.rs,acp_bridge.rs}` | BgStream 独占累积正文/推理并维护增量 hash；独立 50ms deadline 发布 BG_LIVE_DETAIL，不受主流 Streaming/Block/None 与主 turn 结束影响；工具/终态/接收关闭 flush，会话边界清空，同会话 replay 保留 dirty stream 并重新安排 deadline |
-| subagent 工具行 | `message_area/render/group.rs` | `render_subagent_group_lines`（:29）、`subagent_tool_line`（:92，固定 2 格缩进 `SUBAGENT_TOOL_INDENT` :22、label 无 bold）、`subagent_error_reason_line`（:168，错误不弱化） |
+| subagent 工具行 | `message_area/render/group.rs` | `render_subagent_group_lines`（:29）、`subagent_tool_line`（:92，固定 2 格缩进 `SUBAGENT_TOOL_INDENT` :22、label 无 bold）、`subagent_error_reason_lines`（错误预览最多三行，× 复制完整原文） |
 | InputArea（输入区） | `input_area.rs` + `input_area/image.rs` | 编辑、@mention、slash 补全、提交分发（`input_area/submit.rs::dispatch_submit_request` :21）；图片粘贴由 `PasteGate` 限制为单任务；macOS `save_native_clipboard_png` 优先原样保存 ≤20 MiB PNG（只读 IHDR、不解码像素、不套用预览尺寸限制），仅 PNG 缺席回退 arboard owned RGBA + 流式编码；`image_test.rs` 覆盖独立 NSPasteboard 与手动性能对比；多行渲染按显示宽度 |
 | input_history（输入历史） | `input_history.rs` | `push_history`（:23）/`history_up`（:54）；持久化 `~/.peri/input-history.json`（唯一存储，`load_history` :119） |
 | StatusBar（状态栏） | `status_bar.rs` | `StatusBarProps`（:366）/`StatusBar`（:374）：Row1/Row2/NotifRow、模型点击区、权限模式显示、会话建立中的准备提示（`preparing_label`）；组件顶部应用 `CenterBandHook`，与 transcript / composer 同宽（Row1 折行与点击列随之派生） |
