@@ -991,6 +991,28 @@ impl DurableHost {
         ctx
     }
 
+    /// 给调用方自有的父会话挂生产 `SubagentHost`（资源门面 / admission 端口 /
+    /// 任务通道 / 父线程 id）。resume 等路径必须以 owning parent session 为父，
+    /// 不能换成夹具自己的 session；此时用本方法注入同一份耐久承载。
+    pub(crate) fn attach_session_host(
+        &self,
+        session: &std::sync::Arc<peri_agent::session::Session>,
+    ) {
+        use peri_agent::session::subagent::SubagentHost;
+        let mut host = SubagentHost {
+            session_resources: Some(self.fixture.facade()),
+            execution_admission_port: Some(Arc::new(TestAdmissionPort(self.fixture.facade()))),
+            task_manager: Some(Arc::new(peri_agent::agent::async_tasks::TaskManager::new())),
+            ..Default::default()
+        };
+        host.parent_thread_id = session
+            .store()
+            .thread_id
+            .clone()
+            .or_else(|| Some(self.parent_id.clone()));
+        session.set_subagent_host(host);
+    }
+
     /// 在父会话登记一个新的可信 invocation（多次委派用例；id 唯一）。
     pub(crate) async fn fresh_invocation(&self, label: &str) -> String {
         let invocation_id = format!("{}-{label}-{}", self.invocation_id, uuid::Uuid::now_v7());
@@ -1086,6 +1108,13 @@ async fn preset_resumable_child(
     meta.parent_thread_id = parent_thread_id.map(|s| s.to_string());
     meta.hidden = true;
     fixture.create_thread(meta).await.unwrap();
+    // 先初始化子会话的 work ledger，再写历史：真实门面只有在「已有 canonical
+    // 历史但还没有 durable 处理检查点」时才标记 legacy_unknown（pre-ledger-history），
+    // 该标记会让后续委派按生产规则要求显式 reconciliation。夹具按生产顺序建立
+    // 事实（ledger 先于历史），而不是放宽该门。
+    fixture
+        .prepare_invocation(&id, &format!("fixture-child-ledger:{id}"))
+        .await;
     if !msgs.is_empty() {
         fixture.append_messages(&id, &msgs).await.unwrap();
     }

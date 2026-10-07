@@ -374,7 +374,10 @@ async fn test_resume_thread_id_ignores_model_field() {
     )
     .await;
     t.parent_cwd = cwd.clone();
-    t.host.execution_admission_port = Some(std::sync::Arc::new(TestAdmissionPort(store.facade())));
+    // resume 的子链宿主来自 owning parent session：给该 session 挂生产 host。
+    // （与 store 共享同一 SQLite 文件；此处只需耐久承载面。）
+    let durable_face = DurableHost::open_in(dir.path(), "fixture-model-tier-resume").await;
+    durable_face.attach_session_host(&parent);
     let mut ctx = peri_agent::tools::ToolContext::new(&[], &cwd);
     ctx.invocation_id = Some(invocation_id.to_string());
     let result = t
