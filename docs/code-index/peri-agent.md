@@ -75,7 +75,7 @@ Inbox 去重入口 `agent/stages/work_receive.rs` 使用 `SessionResources::load
 
 `session/subagent/background.rs::local_other_diagnostic` 将后台本地失败映射为 allowlist 静态诊断码；不输出任意错误文本、模型请求或凭据。work mutation 拒绝另记录结构化 decision/revision，诊断不改变执行、授权或恢复裁决。
 
-`session/user_input_mailbox.rs` 及其子模块负责持久发布、withdraw 与 SDK run 的精确观察；它不再是执行准入者。`session/subagent/factory/cold.rs` 根据子会话自己的 frozen 数据、保存的委托身份和授权上限重建运行环境，不依赖活跃父 runtime 或根会话 persona。`agent/model_bridge.rs` 与 `peri-model` prepared-stream 端口将检查点和实际 HTTP 请求绑定，不能用脱敏诊断快照代替发送正文。
+`session/user_input_mailbox.rs` 及其子模块负责持久发布、withdraw 与 SDK run 的精确观察；它不再是执行准入者。`session/subagent/factory/cold.rs` 根据子会话自己的 frozen 数据、保存的委托身份和授权上限重建运行环境，不依赖活跃父 runtime 或根会话 persona；身份来源按 metadata 版本锚定（v2 `identity_system`；v1 写入方 `persona`，缺失/空白 = 不可解释 ⇒ 阻止执行恢复而历史可读，不猜身份也不把父冻结字节当身份），执行 / resume / 宿主内存投影共用 `ChildResumeMetadata::frozen_context` 同一映射（宿主侧 `peri-acp/src/host/cold_execution.rs` 的 `SessionState.frozen` 不再解持久 blob，blob 仅作 digest 锚）。`agent/model_bridge.rs` 与 `peri-model` prepared-stream 端口将检查点和实际 HTTP 请求绑定，不能用脱敏诊断快照代替发送正文。
 
 ### RCRA 阶段（src/agent/stages/）
 

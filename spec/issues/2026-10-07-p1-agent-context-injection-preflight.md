@@ -196,3 +196,13 @@
 - **L1（本组相关）：完成**。段落/frozen 注释、`docs/code-index/peri-acp.md`、`docs/design/system-prompt.md` 同步。
 
 验证（`./scripts/cargo-rmcp-patched.sh test --locked ...`，日志与退出码见交接）：`peri-acp --lib`、`peri-agent --lib`、`peri-acp-types --lib`、`peri-model --lib` 全绿；`peri-middlewares --lib` 存在基线既有失败（子代理委派/workspace fixture 的 `Blocked: child resources …`，与本次改动前后失败集合逐条一致）；定向过滤器（prompt / frozen_snapshot / prompt_cache_boundary / middleware chain / system_cache / parity / runtime_env / capability matrix）均非零命中且通过。
+
+## B 组实施状态（2026-10-07，分支 fix/context-preflight-b-children-20261007）
+
+本组范围：H1/M3/M4/M5。**不代表本 issue 25 条完成**；A/C/D/E/F 组未动；18 条旧 middleware subagent fixture 仍失败（不在本组宣称修复；hook/permission 工作不属于本组）。
+
+- **H1：关键矩阵已捕获（ACP cold 仍在途）**。实现：子 Agent bridge 在 session factory 的子链装配点构造（身份 + 请求时 provider 读 `collect_prompt_contributions`），`SubagentLlmSource::Prebuilt` 旁路删除；定义型/fork/前台/后台/live resume 共用该入口。验收：`peri-acp/src/host/executor_flow_child_chain_test.rs`（真实 `assemble::child_chain_assembler` → `SubagentChainAssemblerImpl` + 真实 durable 子会话 + `CapturePromptModel`，非空链替身）——定义型首请求中项目指令/技能摘要/延迟工具目录/子身份各恰一次、模型面工具目录含延迟入口而 `Agent`/`AskUserQuestion`/`Workflow` 不在、fork 前台携带父上下文且身份仍恰一次、定义型与 fork 后台同契约、关闭 `AgentsMdMiddleware`/`SkillsMiddleware`/`ToolSearch` 后对应贡献与入口缺席、live resume（父侧新委派 invocation）保持契约并携带子会话历史与追加指令。**未完成**：ACP 层冷恢复（进程重启）请求捕获仍缺；现有冷恢复证据是 peri-agent `cold_test` 的真实 HTTP 请求体捕获（v1 persona 身份、父字节不冒充）与宿主内存 frozen 同源修复，命令 / 再次 prompt 路径的请求断言待该 cold 夹具补齐后并入。
+- **M3：完成**。`ChildResumeMetadata::resolved_identity` 版本锚定（v2 `identity_system`，None = 写入方确定无身份；v1 必须写入方 `persona`，缺失/空白 = 不可解释 ⇒ 阻止执行恢复而历史可读；删除首 own System 位置启发式；父 `system_prompt` 不参与身份判定；不引入「与父字节相等即拒绝」判据）。`ChildResumeMetadata::frozen_context` 成为执行 / resume / 宿主内存投影唯一映射；`host/cold_execution.rs` 的 `SessionState.frozen` 不再解持久 blob 当会话 frozen（blob 仅 digest 锚），v1 `runtime_env` 取该子会话自己的冻结快照，不探本地、不重写持久数据。
+- **M4：完成**（本分支前序提交）：workflow/AgentsMd 请求时贡献与 main/local 独立输入。
+- **M5：完成**。legacy 首次接纳顺序为「执行资格 → 仅资源 bootstrap（有效 servers 候选在池 OnceLock 前定格）→ 内容读取 → 定稿 frozen → write-once 原子接纳（winner 语义）→ 失败统一排空」；owner 声明的持久绑定移到 cwd/frozen/identity 校验通过之后（AlreadyLive 排空候选环境且不回写），失败请求不污染不可变声明、成功请求不再丢失声明。
+- **验证**：`./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp --lib child_chain_tests`、`... -p peri-acp --lib "host::requests"`、`... -p peri-agent --lib "subagent::factory::cold"`、`... -p peri-agent --lib resume` 均非零命中且通过；日志见 `/tmp/b-recovery-final-20261007/logs/`。
