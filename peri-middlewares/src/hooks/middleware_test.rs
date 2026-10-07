@@ -771,7 +771,7 @@ async fn test_post_tool_batch_block_stops() {
     let hook = make_registered(
         HookEvent::PostToolBatch,
         HookType::Command {
-            command: "echo '{\"action\": \"block\", \"reason\": \"test block\"}' && exit 2"
+            command: "echo '{\"action\": \"block\", \"reason\": \"test block\"}'; exit 2"
                 .to_string(),
             shell: None,
             timeout: Some(1000),
@@ -809,7 +809,7 @@ async fn test_stop_block_continue_sets_block_continue_field() {
     let hook = make_registered(
         HookEvent::Stop,
         HookType::Command {
-            command: "echo '{\"action\": \"block\", \"reason\": \"needs more work\"}' && exit 2"
+            command: "echo '{\"action\": \"block\", \"reason\": \"needs more work\"}'; exit 2"
                 .to_string(),
             shell: None,
             timeout: Some(1000),
@@ -871,7 +871,7 @@ async fn stop_block_without_execution_identity_is_rejected() {
     let hook = make_registered(
         HookEvent::Stop,
         HookType::Command {
-            command: "echo '{\"action\": \"block\", \"reason\": \"needs more work\"}' && exit 2"
+            command: "echo '{\"action\": \"block\", \"reason\": \"needs more work\"}'; exit 2"
                 .into(),
             shell: None,
             timeout: Some(1000),
@@ -940,7 +940,7 @@ async fn test_stop_block_prevent_continuation_returns_error() {
     let hook = make_registered(
         HookEvent::Stop,
         HookType::Command {
-            command: "echo '{\"action\": \"prevent_continuation\", \"stop_reason\": \"bad output\"}' && exit 3"
+            command: "echo '{\"action\": \"prevent_continuation\", \"stop_reason\": \"bad output\"}'; exit 3"
                 .to_string(),
             shell: None,
             timeout: Some(1000),

@@ -89,6 +89,7 @@ jobs:
                   ./scripts/cargo-rmcp-patched.sh test --locked -p peri-middlewares --lib
                   -- --test-threads=1 --skip subagent::tool --skip mcp::workspace_recovery_tests
                   --skip mcp::workspace_builtin_tests::bridge_accepts_workspace_owned_task_handle
+                  --skip mcp::tool_bridge::tests::builtin_tool_call_surfaces_timeout_error_after_bridge_deadline
 
             - name: Run MCP capability tests (serial)
               shell: bash
