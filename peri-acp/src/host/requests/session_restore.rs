@@ -106,7 +106,7 @@ pub(super) async fn prepare_existing(
         .drain_persistence(&id.to_owned())
         .await
         .map_err(crate::host::workspace::resource_error)?;
-    let legacy_prepared = legacy_session::prepare_for_restore(cfg, id, None).await?;
+    let legacy_adoption = legacy_session::prepare_for_restore(cfg, id, None).await?;
     let workspace = crate::host::workspace::validate_expected(
         cfg,
         id,
@@ -140,12 +140,13 @@ pub(super) async fn prepare_existing(
             .to_str()
             .ok_or_else(|| AcpError::new(-32602, "Execution directory is not UTF-8"))?
             .to_owned();
-        let mut prepared = match legacy_prepared {
-            Some(mut inputs) => {
-                let winner = decode_frozen_snapshot(&persisted).map_err(workspace_error)?;
-                inputs.inject_frozen(winner, persisted)?;
-                inputs
-            }
+        // M5：legacy 首次接纳已在准备阶段以定稿 frozen 完成原子接纳；这里只消费
+        // 其结果（已按接纳/winner 字节定格），不再二次注入或重建。
+        let legacy_environment = legacy_adoption
+            .as_ref()
+            .and_then(|adoption| adoption.environment.clone());
+        let mut prepared = match legacy_adoption {
+            Some(adoption) => adoption.prepared,
             None => PreparedSessionInputs::prepare_restore(cfg, &cwd, &persisted)?,
         };
         let owner_state = cfg
@@ -174,9 +175,14 @@ pub(super) async fn prepare_existing(
             .frozen
             .clone()
             .ok_or_else(|| AcpError::new(-32603, "Restored frozen snapshot is missing"))?;
-        let environment =
-            crate::host::workspace::SessionEnvironment::assemble_prepared(cfg, &prepared, id)
-                .await?;
+        let environment = match legacy_environment {
+            // 阶段一已装配（bootstrap）且与接纳字节同源：复用，不第二次装配。
+            Some(environment) => Some(environment),
+            None => {
+                crate::host::workspace::SessionEnvironment::assemble_prepared(cfg, &prepared, id)
+                    .await?
+            }
+        };
         let frozen = Some(frozen);
         let local = environment.as_ref().map(|env| &env.cfg).unwrap_or(cfg);
         // AW3-11：登记会话时交出**装配时已送进 builtin 上下文的那一份** manager

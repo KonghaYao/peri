@@ -100,7 +100,7 @@ pub(crate) fn handle_initialize(params: &Value, cfg: &AcpServerConfig) -> Result
     serde_json::to_value(resp).map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
 }
 
-fn enabled_meta_sections(cfg: &AcpServerConfig) -> std::collections::HashSet<String> {
+pub(super) fn enabled_meta_sections(cfg: &AcpServerConfig) -> std::collections::HashSet<String> {
     cfg.peri_config
         .read()
         .config

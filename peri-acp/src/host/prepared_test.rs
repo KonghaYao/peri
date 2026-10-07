@@ -303,7 +303,8 @@ async fn prepare_legacy_records_saved_cwd_and_builds_from_workspace() {
     let host = prepared_test_host(&tmp, None).await;
 
     let legacy =
-        PreparedSessionInputs::prepare_legacy(&host, &registered_raw, &workspace_cwd).unwrap();
+        PreparedSessionInputs::prepare_legacy_deferred(&host, &registered_raw, &workspace_cwd)
+            .unwrap();
 
     assert_eq!(legacy.cwd, workspace_cwd);
     assert_eq!(
@@ -311,7 +312,12 @@ async fn prepare_legacy_records_saved_cwd_and_builds_from_workspace() {
         PathBuf::from(&registered_raw),
         "legacy 必须记录保存的绝对 cwd（不是调用方终端的 cwd）"
     );
-    assert!(decode_frozen_snapshot(legacy.frozen_encoded.as_ref().unwrap()).is_ok());
+    // M5 阶段一不构建 frozen：候选必须等资源 bootstrap 与内容读取后才定稿，
+    // 由接纳事务一次性写入（不得先写空 frozen 再替换）。
+    assert!(
+        legacy.frozen.is_none() && legacy.frozen_encoded.is_none(),
+        "legacy deferred 准备不得提前构建 frozen"
+    );
 }
 
 /// new 路径的持久化属性：frozen 字节与发布到 live state 的冻结状态同源（一次写入），
