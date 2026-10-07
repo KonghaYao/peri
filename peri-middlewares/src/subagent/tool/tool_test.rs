@@ -897,7 +897,7 @@ impl peri_acp_types::execution_admission::ExecutionAdmissionPort for TestAdmissi
 /// 父 work state 中存在受信 invocation，且子会话 work state 可接纳——本夹具按真实
 /// 门面（SQLite）建立这些事实，不放宽生产准入、不引入测试替身绕过。
 pub(crate) struct DurableHost {
-    pub(crate) _dir: tempfile::TempDir,
+    pub(crate) _dir: Option<tempfile::TempDir>,
     pub(crate) fixture: SessionFixture,
     pub(crate) parent_id: ThreadId,
     pub(crate) invocation_id: String,
@@ -915,7 +915,26 @@ impl DurableHost {
             .expect("建立父会话失败");
         fixture.prepare_invocation(&parent_id, invocation_id).await;
         Self {
-            _dir: dir,
+            _dir: Some(dir),
+            fixture,
+            parent_id,
+            invocation_id: invocation_id.to_string(),
+            cwd,
+        }
+    }
+
+    /// 在调用方已有的工作区目录上建立耐久宿主（agent 定义查找路径与调用 cwd 一致，
+    /// 目录生命周期由调用方持有）。
+    pub(crate) async fn open_in(dir: &std::path::Path, invocation_id: &str) -> Self {
+        let fixture = SessionFixture::open_in(dir).await;
+        let cwd = fixture.workspace_cwd();
+        let parent_id = fixture
+            .create_thread(ThreadMeta::new_at(cwd.clone(), peri_time::now_wall()))
+            .await
+            .expect("建立父会话失败");
+        fixture.prepare_invocation(&parent_id, invocation_id).await;
+        Self {
+            _dir: None,
             fixture,
             parent_id,
             invocation_id: invocation_id.to_string(),
@@ -957,9 +976,28 @@ impl DurableHost {
         &'a self,
         messages: &'a [BaseMessage],
     ) -> peri_agent::tools::ToolContext<'a> {
+        self.context_with(messages, self.invocation_id.clone())
+    }
+
+    /// 指定 invocation 的调用上下文（同一父会话内多次委派必须使用各自的
+    /// 可信 invocation：一个 invocation 只能绑定一个委派任务）。
+    pub(crate) fn context_with<'a>(
+        &'a self,
+        messages: &'a [BaseMessage],
+        invocation_id: String,
+    ) -> peri_agent::tools::ToolContext<'a> {
         let mut ctx = peri_agent::tools::ToolContext::new(messages, &self.cwd);
-        ctx.invocation_id = Some(self.invocation_id.clone());
+        ctx.invocation_id = Some(invocation_id);
         ctx
+    }
+
+    /// 在父会话登记一个新的可信 invocation（多次委派用例；id 唯一）。
+    pub(crate) async fn fresh_invocation(&self, label: &str) -> String {
+        let invocation_id = format!("{}-{label}-{}", self.invocation_id, uuid::Uuid::now_v7());
+        self.fixture
+            .prepare_invocation(&self.parent_id, &invocation_id)
+            .await;
+        invocation_id
     }
 }
 
@@ -1025,6 +1063,22 @@ async fn preset_resumable_thread(
     parent_thread_id: Option<&str>,
     msgs: Vec<BaseMessage>,
 ) {
+    preset_resumable_child(fixture, id, title, parent_thread_id, None, msgs).await;
+}
+
+/// 预置可恢复子线程：绑定/frozen 会话 + 已登记父 invocation + v1 运行时 metadata。
+///
+/// production resume 要求保存的 `ChildResumeMetadata` 与父会话可信 invocation 同时
+/// 存在（frozen digest、授权引用、任务绑定都按真实事实校验）；夹具按同一契约写入，
+/// 不跳过任何生产校验。
+async fn preset_resumable_child(
+    fixture: &SessionFixture,
+    id: &str,
+    title: &str,
+    parent_thread_id: Option<&str>,
+    invocation_id: Option<&str>,
+    msgs: Vec<BaseMessage>,
+) {
     let id = id.to_string();
     let mut meta = peri_agent::thread::ThreadMeta::new_at("/tmp/work", peri_time::now_wall());
     meta.id = id.clone();
@@ -1036,6 +1090,109 @@ async fn preset_resumable_thread(
         fixture.append_messages(&id, &msgs).await.unwrap();
     }
     fixture.update_thread_status(&id, "done").await.unwrap();
+
+    if let Some(parent_id) = parent_thread_id {
+        use peri_acp_types::session_resources::work::{
+            WorkAction, WorkCommand, WorkDecision, WorkQuery, WorkStage, WorkTarget,
+        };
+        use sha2::{Digest, Sha256};
+        let invocation_id = invocation_id
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("fixture-resume-invocation:{id}"));
+        fixture.prepare_invocation(parent_id, &invocation_id).await;
+        let metadata = peri_agent::session::subagent::ChildResumeMetadata {
+            version: 1,
+            child_session_id: id.clone(),
+            recipient_lifecycle: 1,
+            agent_name: title.to_string(),
+            model_name: "fixture-scripted".into(),
+            direct_initiator_session_id: parent_id.to_string(),
+            direct_initiator_lifecycle: 1,
+            delegation_invocation_id: invocation_id,
+            delegation_task_id: id.clone(),
+            authorization_ref: "fixture-delegation-authorization".into(),
+            frozen_digest: format!("{:x}", Sha256::digest(b"{\"version\":1,\"fixture\":true}")),
+            tool_ceiling: Default::default(),
+            tool_origins: Default::default(),
+            skill_names: Vec::new(),
+            max_iterations: 200,
+            persona: Some("fixture-child-identity".into()),
+            system_prompt: String::new(),
+            identity_system: None,
+            runtime_env: None,
+            claude_md: "frozen-claude".into(),
+            claude_local_md: None,
+            skill_summary: "frozen-skills".into(),
+            date: "2026-08-05".into(),
+            language: None,
+            section_overrides: Default::default(),
+            disabled_middlewares: Default::default(),
+            built_in_subagents_enabled: true,
+        };
+        // 可恢复子会话的历史处理已结清：未结算的 work 会让 FollowUp 委派按
+        // 生产规则拒绝（requires reconciliation）。夹具按真实 SettleWork 命令结清。
+        loop {
+            let snapshot = fixture
+                .resources
+                .load_session_work(&WorkQuery {
+                    session_id: id.clone(),
+                    limit: 64,
+                })
+                .await
+                .unwrap();
+            let unresolved = snapshot
+                .state
+                .works
+                .values()
+                .find(|work| {
+                    !matches!(work.stage, WorkStage::Settled | WorkStage::Abandoned)
+                        && snapshot.state.work_lifecycle(&work.work_id) == Some(1)
+                })
+                .cloned();
+            let Some(work) = unresolved else { break };
+            let command = WorkCommand {
+                session_id: id.clone(),
+                recipient_lifecycle: 1,
+                mutation_id: format!("fixture-child-settle:{}", work.work_id),
+                action: WorkAction::SettleWork {
+                    expected_revision: snapshot.state.revision,
+                    target: WorkTarget {
+                        work_id: work.work_id.clone(),
+                        expected_work_revision: work.revision,
+                    },
+                },
+            };
+            let receipt = fixture
+                .resources
+                .apply_work_mutation(&command)
+                .await
+                .unwrap();
+            assert!(matches!(receipt.decision, WorkDecision::Accepted));
+        }
+        let snapshot = fixture
+            .resources
+            .load_session_work(&WorkQuery {
+                session_id: id.clone(),
+                limit: 1,
+            })
+            .await
+            .unwrap();
+        let command = WorkCommand {
+            session_id: id.clone(),
+            recipient_lifecycle: snapshot.control.lifecycle,
+            mutation_id: format!("fixture-child-metadata:{id}"),
+            action: WorkAction::BindChildResumeMetadata {
+                expected_revision: snapshot.state.revision,
+                metadata_json: serde_json::to_string(&metadata).unwrap(),
+            },
+        };
+        let receipt = fixture
+            .resources
+            .apply_work_mutation(&command)
+            .await
+            .unwrap();
+        assert!(matches!(receipt.decision, WorkDecision::Accepted));
+    }
 }
 
 // 本文件经 mod.rs 的 `#[path = "tool_test.rs"]` 挂载；此路径加载方式下，
