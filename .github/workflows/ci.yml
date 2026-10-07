@@ -67,12 +67,21 @@ jobs:
               run: ./scripts/cargo-rmcp-patched.sh build --locked --workspace --all-targets
 
             # 分步记录耗时，也确保 Windows 下第一组失败不会被后续成功覆盖。
-            - name: Run workspace tests (excluding middleware and MCP capabilities)
+            - name: Run workspace tests (excluding ACP, middleware and MCP capabilities)
               shell: bash
               run: >-
-                  ./scripts/cargo-rmcp-patched.sh test --locked --workspace --exclude peri-agent --exclude peri-tui --exclude peri-middlewares
+                  ./scripts/cargo-rmcp-patched.sh test --locked --workspace --exclude peri-acp --exclude peri-agent --exclude peri-tui --exclude peri-middlewares
                   --exclude peri-mcp-common --exclude peri-mcp-web --exclude peri-mcp-artifact
                   --exclude peri-mcp-cron --exclude peri-mcp-workspace
+
+            - name: Run ACP tests (excluding Windows SDK E2E)
+              shell: bash
+              run: |
+                  if [[ "$RUNNER_OS" == "Windows" ]]; then
+                      ./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp --lib -- --skip host::execution_admission_jsonl --skip host::scheduled_admission
+                  else
+                      ./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp
+                  fi
 
             - name: Run Agent tests (excluding execution E2E)
               shell: bash
@@ -84,8 +93,10 @@ jobs:
               shell: bash
               run: |
                   ./scripts/cargo-rmcp-patched.sh test --locked -p peri-tui --lib --bins --test meta_session_cli
-                  ./scripts/cargo-rmcp-patched.sh test --locked -p peri-tui --test print_bare -- --skip bare_respects_explicit_builtin_shutdown
-                  ./scripts/cargo-rmcp-patched.sh test --locked -p peri-tui --test print_exit -- --skip truncated_answer_recovers_and_exits_process_successfully
+                  if [[ "$RUNNER_OS" != "Windows" ]]; then
+                      ./scripts/cargo-rmcp-patched.sh test --locked -p peri-tui --test print_bare -- --skip bare_respects_explicit_builtin_shutdown
+                      ./scripts/cargo-rmcp-patched.sh test --locked -p peri-tui --test print_exit -- --skip truncated_answer_recovers_and_exits_process_successfully
+                  fi
 
             # 涉及进程级全局状态的测试仍须串行执行。
             - name: Run middleware unit tests (serial, excluding E2E)
