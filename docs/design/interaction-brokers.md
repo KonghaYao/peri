@@ -26,7 +26,7 @@ pub trait UserInteractionBroker: Send + Sync {
 }
 ```
 
-实现方：`AcpTransportBroker`、`StdioBroker`。
+生产实现为 `AcpTransportBroker`，TUI 与 stdio 宿主共用同一交互语义。
 
 #### 统一交互类型
 
@@ -55,12 +55,10 @@ pub trait UserInteractionBroker: Send + Sync {
 - `Approval` → 转为 `session/request_permission` RPC，每个 `ApprovalItem` 发送独立的 `RequestPermission` 请求
 - `Questions` → 转为 `elicitation/create` RPC，聚合所有 `QuestionItem` 为单个表单 schema
 
-#### StdioBroker（stdio 自动审批 broker）
-
-`peri-acp/src/host/stdio/context.rs:85`（stdio 宿主随 L5 迁入 peri-acp，原 `peri-tui/src/acp_stdio/` 目录已不存在）— stdio 传输模式下的默认 broker：
-
-- 对所有 `Approval` 自动返回 `Approve`
-- 对 `Questions` 返回空答案
+默认审批模式为 `Forward`，stdio 不自动批准全部工具。`AutoApprove` 必须显式选择，
+是 broker 的本地决策模式，不是另一套 stdio 实现。问答取消携带
+`peri.elicitationUnanswered` 原因时返回 `Unanswered`；无该声明的生命周期取消
+按既有空答案结算，不把无人可作答当作用户回答。
 
 ### 2.3 Builder 构造逻辑
 

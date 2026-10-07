@@ -205,7 +205,7 @@ TUI 生产时间入口统一经 `peri-time`：`kit/entry.rs` 的每日主题以�
 - ARC-KEEPGOING-001：空白 user prompt（`MessageContent::is_empty()` 判空）是「继续跑 loop」指令，唯一生产者是 TUI keepgoing 按钮；空历史 + 空白 prompt 时服务端短路且必须 push_done
 - ARC-CANCEL-001：cancel 按 (session_id, turn_id, attempt_id) 三元组定位；TUI 只经 ACP 发送 cancel，幂等判定与终态归 Agent 层
 - ARC-HITL-001：Permission 与 AskUser 独立能力；TUI reverse interaction 由 semantic owner registry、operation gate、prompt/transition leases 与 token-aware UI terminalization 共同 first-claim
-- ARC-SECRET-001：真实密钥/token/连接串不得写入界面、日志、错误响应或测试 fixture
+- ARC-SECRET-001：界面错误、日志和诊断响应保留实际内容，不做内容脱敏；认证、受众与控制字符约束独立有效，真实凭据不得主动写入源码或 fixture
 - ARC-HOST-SHUTDOWN-001：TUI MCP panel 保留 external task owner，OAuth-event reconnect 经 owner 准入并按固定顺序 teardown
 
 并发子 Agent 展示归属遵守 `ARC-SUBAGENT-IDENTITY-001`：启动事件 `parent_tool_call_id` 必须是模型工具调用 ID，而非持久化 invocation UUID；TUI 不转换执行身份。三组同名、六种启动顺序与父卡片先到/后到的发布快照回归见 `acp_events_test/subagent_identity_test.rs::three_same_named_subagents_keep_distinct_owners_across_arrival_orders`。

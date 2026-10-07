@@ -256,11 +256,11 @@ HITL 通过后立即创建异步 operation 并返回：
 
 必须保证：
 
-- config hash 基于规范化配置和 secret reference identity，不包含 secret value。
+- config hash 基于规范化配置（含已支持的 literal 值）和 secret reference identity，不包含 resolver 在批准后解析出的 secret value。
 - Debug、tracing 和错误诊断不做内容脱敏；控制面持久化仍保存规范化配置及 reference，不要求额外持久化 resolver 输出。
 - 连接失败保留实际错误与原因链进入 operation、通知或 UI，不替换为固定安全摘要。
 - server env 必须先 `env_clear`，再显式加入运行所需的最小非秘密环境和已批准 secret；禁止默认继承整个宿主环境。
-- secret 可由 transport 或 stdio child 在连接生命周期内持有，但不得进入长期可序列化控制面状态。
+- resolver 解析出的 secret 可由 transport 或 stdio child 在连接生命周期内持有，但不额外写入长期可序列化控制面状态；既有 literal 输入仍属于实际批准配置。
 - secret 缺失进入 `failed(SECRET_NOT_FOUND)`，不得要求 Agent 在下一次 tool call 中提交明文。
 
 MCP server/process 的环境与连接参数属于审批时必须展示的执行边界。运行时输出按完整数据管理访问，当前契约不提供内容脱敏或结果防泄漏保证；权限、secret reference 解析和生命周期约束仍独立有效。
@@ -476,7 +476,7 @@ Open → Draining → Closed
 1. `DynamicMCP.status`：权威的 session-local 内存状态查询。
 2. 现有 MCP status/inbox 流程：向 Agent 推送阶段变化，促使后续 Reason 发生。
 
-通知可能合并、延迟或丢失，不能作为状态机存储、幂等依据或目录刷新触发的唯一来源。动态状态禁止复用 host-global `pending_changes` 或 pool singleton notifier；必须投递到 checked session-specific inbox，并携带 session/instance identity。session close 后发送失败即丢弃，不得降级广播。通知文本不得含 secret、完整 URL query、Authorization header 或 process 原始输出。
+通知可能合并、延迟或丢失，不能作为状态机存储、幂等依据或目录刷新触发的唯一来源。动态状态禁止复用 host-global `pending_changes` 或 pool singleton notifier；必须投递到 checked session-specific inbox，并携带 session/instance identity。session close 后发送失败即丢弃，不得降级广播。通知诊断按 ARC-SECRET-001 保留实际内容；是否采集 process 输出与长度约束按出口契约，不主动广播完整成功业务输出，也不承诺通知不含凭据。
 
 ### 9.2 Resources 与 Skills
 
@@ -566,7 +566,7 @@ ACP 只负责 deployment 装配、端口注入、session 定位和协议化投�
 ### 12.1 P0 契约测试
 
 1. `DynamicMCP.load/unload` 经 `ExecuteExtraTool` 时，broker 观察到的 effective name 严格为 `DynamicMCP.load` / `DynamicMCP.unload`；`status` 的只读策略不能批准同一 wrapper 下的 mutate method，拒绝后零副作用。
-2. 审批文本、operation、通知、tracing 和平台生成错误不包含 secret value；文档和审批明确 MCP server 可主动回显其已获 secret 的信任边界。
+2. 审批保留实际批准配置，operation、通知、tracing 和错误保留诊断与原因链，不按凭据形状遮蔽或拒绝；secretRef 仍在批准后解析，resolver 输出不扩大长期控制面存储范围。使用合成凭据验证保真与受众隔离，不提供 MCP server 回显或诊断内容的防泄漏保证。
 3. 两个 session 可加载同名不同配置 server，tool/resource/cache/OAuth callback/通知与状态互不可见。
 4. 同 session 同名同 canonical config 并发 load 只启动一个 process/connection；不同配置返回 `CONFIG_CONFLICT`。
 5. `a.b`/`a_b` 等 server/tool 名称不会经 sanitizer 静默碰撞；任何 catalog collision 均使 load 失败。
@@ -613,7 +613,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 | 动态连接完成后立即原地修改任意 Agent 的工具 map | 破坏 Reason/dispatch 快照一致性，收益有限 |
 | 扩展 `DiscoverMCP` 承担 load/unload | 破坏现有只读发现契约 |
 | load 审批同时授权全部 MCP tools | server 工具列表和行为可变化，授权范围失真 |
-| 允许明文 env/header secret 出现在 tool arguments | secret 会进入模型内容、transcript 与潜在遥测 |
+| 因 literal 字段被识别为 secret 而拒绝既有有效输入 | 违反诊断保真与既有 literal 支持；推荐 secretRef 但不以内容形状改变批准对象，resolver 输出仍按生命周期隔离 |
 | unload 直接取消所有在途工具 | 外部副作用可能已发生，取消会制造未知结果 |
 | 每个 session 建立完整静态 MCP pool | 重复静态连接，破坏现有 host 级复用与关闭模型 |
 | 将动态配置自动写入 settings 或 session store | 违反本设计的进程内临时能力语义 |

@@ -153,6 +153,12 @@
 - **Rule**：hook 只接收其阶段真实支持的能力组合，不得继承完整 `MiddlewareState` 或通过 no-op 写方法、不可回写快照模拟能力。`StateView` 只读消息与 turn 元数据，不得暴露可写 queue/catalog 句柄；队列与目录操作分别由 `QueueState`、`CatalogState` 显式提供；`AfterAgentState` 的 `BackgroundActivity` 只读能力复用 Receive 的 session 后台活动事实，不暴露任务管理写权限。输入替换仅在 `before_agent` / `before_input` 按已有稳定 MessageId 进行，不增删或重排；整链成功或 Err 后均须 reconcile，追加消息同步写入 transcript 与本次视图。首次 Receive 按中间件链序交错执行初始化与输入准备，保证后续初始化看见已转换的附件；后续非空用户批次仅运行 `before_input`，不得重复初始化或扫描历史附件。`before_model` 追加对后续 `after_model` 可见；工具审批通过 ToolCall 返回修改，after-tool/after-agent 反馈通过队列保留原唤醒语义。目录重绑仍遵守 ARC-TOOLS-001 的 Reason 发布顺序；不得持 transcript、queue 或 catalog guard 跨外部 await。启动闸门 `before_react_start` 是独立阶段：在首批 `before_agent` / `before_input` 之后、Compact 之前只执行一次，其能力面 `StartupState` 只提供候选工具的暂存与取出（不暴露可写 transcript/queue），该阶段 Err 不降级（`Interrupted` 仍按中断分类），既有 `before_agent` 的软失败处理不变。
 - **Verify**：`cargo test -p peri-agent --doc`（不支持能力的 compile-fail，含 `StartupState`）；`cargo test -p peri-agent --lib middleware::capabilities`（model/目录/工具与队列的生产 runner）；`cargo test -p peri-agent --lib before_agent_reconciles`（成功与 Err 回写）；`cargo test -p peri-agent --lib test_before_input`（首批顺序、后续批次、空批次与错误回写）；`cargo test -p peri-agent --lib -- startup_gate`（候选的提交、丢弃与中断分类）；`cargo test -p peri-middlewares --lib middleware::image`；检查 `peri-agent/src/middleware/{capabilities,trait}.rs` 与 `peri-agent/src/agent/stages/middleware_runner.rs`。
 
+### ARC-MCP-APPS-001
+
+- **Scope**：ACP MCP Apps relay、binding lease 与工具分派。
+- **Rule**：App 工具调用必须持有 connection-owned binding lease，进入 canonical invocation 与 Permission/HITL；lease 归属、工具白名单、generation 或会话空闲不替代审批。宿主发起调用缺少 canonical 审批上下文时返回 `PolicyDenied`，不调用 MCP server、不签发新 lease，不回落 pool/peer 直调。模型签发 lease 保留当前 canonical dispatcher；关闭、取消与换代仍按既有 lease 生命周期撤销。协议与部署语义见 [MCP Apps relay](../design/mcp-multiplexing.md)。
+- **Verify**：`./scripts/cargo-rmcp-patched.sh test --locked -p peri-middlewares --lib -- mcp::apps`；`./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp --lib -- host::mcp_apps::tests`；拒绝须断言 server 零调用且未签发 lease，ACP 不发布工具成功投影。
+
 ### ARC-SECRET-001
 
 - **Scope**：配置加载、日志、错误、遥测、测试与提交。

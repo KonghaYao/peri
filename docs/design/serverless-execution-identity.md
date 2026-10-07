@@ -123,7 +123,8 @@ workspace root，不要求也不校验真实文件系统事实：项目与工作
 - 只读打开只提供历史：可读、可回放，执行与写入按存储访问模式及绑定校验拒绝；本机
   locator 在 WASM 直接失败，不静默落回本机库。
 
-执行所有权唯一由 SDK 管理。schema 当前为 14，Store 的 `epoch + nonce` owner、
+执行所有权唯一由 SDK 管理。当前 schema 由 Resources 的 canonical 常量定义，
+版本与迁移入口见 [Resources 索引](../code-index/peri-resources.md)。schema14 已移除 Store 的 `epoch + nonce` owner、
 Peri 执行 lease 与 Workspace fencing 均已删除；binding/path 校验、事务与任务资源
 关闭不构成另一层执行权。实例消失不能从 Store 中有历史推断上次执行已完成，也不能
 自动重放结果未知的工具调用；跨实例接管的证据链由
@@ -144,21 +145,28 @@ SDK 的 `SessionDocs` 把 ACP 通知（含冷 `session/load` 的历史重放）�
 视图：`agent.docs` 与 `session.docs` 指向同一对象，含 `chat` 与 `session` 两个
 `Y.Doc`。它是进程内实时投影，不是持久权威——重启后应重新 start Session 以从 ACP
 历史重建；文档可能包含会话私密内容，Web／Hub 传输需要自己的授权、版本化投影，
-不能转发原始 Yjs 更新；跨实例同步协议不在本次交付内。该投影目前是 `refactor/wasm`
-工作树内的未提交工作，接口与语义可能调整。
+不能转发原始 Yjs 更新；跨实例同步协议不在本设计的现行保证内。接口与验证入口见
+[SDK 代码索引](../code-index/peri-ts-sdk.md)，不以某个分支的提交状态描述当前能力。
 
 SDK 的 ManagedAgents 使用共享 `AtomicManagedAgentKv` 原子 claim 并按 owner 释放，
-作为执行权协调权威。契约要求 Session key 仅含 Session ID，共享 keyspace 即协调域，
+负责 SDK 对象与会话占位，不是 RCRA 执行准入的完整权威。契约要求 Session key 仅含 Session ID，共享 keyspace 即占位协调域，
 不含 `Sandbox.id`；Agent key 保持 Sandbox + Agent。部署必须共享 KV 覆盖可能执行同一
 Session 的全部实例；不同数据库的相同 ID 共 KV 时保守拒绝，可按业务隔离 KV，不能
 通过不同 Sandbox 绕过同 Session 占位。启动失败若 transport 清理未确认，SDK 保留
 claim 与 transport，进入 `cleanup-pending`，以 `AggregateError` 保留原错误和清理错误；
 `close` 共享可重试的清理事务，确认清理后释放，以免仍存活的旧执行与新实例重叠。
 
-KV claim 不改变 Peri 的机器归属、binding/path 校验或「上次工具是否完成」的结论。
-Yjs 是实时投影；transcript 与持久工具结果仍以 Store 为准。上述占位与清理契约已实现，
-验证路由见 [SDK 代码索引](../code-index/peri-ts-sdk.md)。跨实例进程接管与生产崩溃恢复
-仍未实现；未知 process proof 即使永久为 false，也保留 claims，不自动接管。
+RCRA 执行准入由 SDK 的持久 `ExecutionRegistry`、`ExecutionAdmissionService` 和
+`ExecutionCoordinator` 管理；现行 adapter 为 `SqliteExecutionRegistry`。实例身份、
+dispatcher generation、attempt、entered evidence 与 stopped proof 参与准入、收尾和
+替换裁决；共享 ManagedAgents KV 不能代替 registry，也不能证明旧执行已经停止。
+部署须明确 registry 协调域和 proof provider，不能把进程内默认配置解释为跨宿主保证。
+
+KV claim 与执行 registry 都不改变 Peri 的机器归属、binding/path 校验或「上次工具
+是否完成」的事实；SDK 执行准入不是 Peri Store owner/lease。Yjs 是实时投影，
+transcript 与持久工具结果仍以 Peri Store 为准。实现与测试路由见
+[SDK 代码索引](../code-index/peri-ts-sdk.md)。跨实例进程接管与生产崩溃恢复仍未验收；
+无法证明旧执行停止时保留不确定性，不从 claim 或历史存在推断可安全接管。
 
 ## 5. 与现有设计的关系
 

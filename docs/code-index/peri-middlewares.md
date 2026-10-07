@@ -50,8 +50,10 @@ MQ/收件箱只做唤醒；冷恢复从可信 Workspace snapshot/changes 的 `in
 未加载时也不改道。wire 回归见 `client/subscription_task_recovery_test.rs`，持久 Inbox 和
 owner 重启恢复仍属 RCRA 第 5 步。订阅在 owner 连续不可观测超过
 `LOST_ABANDON_ATTEMPTS` 次轮询后调用 `abandon_external` 产出终态并明确标注远端副作用未知；
-host-issued MCP Apps lease 的续调用由 `src/mcp/apps_invoke.rs::PoolAppToolDispatcher`
-保留该 lease 的发起会话/turn，按会话过滤工具并通过同一 MCP 准入，不能退回无身份调用。
+MCP Apps 模型签发 lease 保留 canonical dispatcher 与发起会话/turn；宿主
+`src/mcp/apps_invoke.rs::PoolMcpAppsRelay::invoke_app_inner` 在缺少 canonical 审批
+上下文时返回 `PolicyDenied`，不调用 server 或签发 lease。不存在 pool 直调 dispatcher；
+回归见 `mcp::apps_invoke::tests`，拒绝与取消不产生工具副作用。
 Workspace scope 快照完整应用即视为该 owner 的对账证据，清除对应执行 scope 的不确定记录。
 `tasks/get` 轮询与 Workspace
 `workspace/taskSnapshot`/`workspace/taskChanges` cursor 对账将终态交给 Manager，

@@ -187,8 +187,9 @@ SubAgent、后台 task、Cron、Workflow 和 plugin 数据不应混入 `CurrentT
 5. **终态完整**：完成、失败、取消、挂起和 transport terminal 均清理 loading 与 transient owner。
 6. **live/replay 等价**：同一语义经相同 reducer 收敛；重放不恢复失效的可执行 interaction。
 7. **前端隔离**：Agent/ACP 不依赖 `TuiRenderUnit`、atom、layout 或渲染缓存。
-8. **安全显示**：协议 payload 按不可信输入处理；不显示 secret，不把任意结构化数据直接 dump
-   到 transcript。
+8. **安全显示**：协议 payload 按不可信输入处理，不把任意成功业务数据直接 dump 到
+   transcript；运行时诊断按 ARC-SECRET-001 保留实际内容，不承诺界面无凭据数据。
+   认证、受众授权、限长和终端控制字符处理独立有效。
 9. **增量渲染**：流式更新只失效变化 slot；viewport 外内容不做无界重复 wrap/clone。
 10. **可验证变更**：跨层事件修改同步更新协议、mapper、TUI decoder/reducer、caps 和测试。
 

@@ -1,6 +1,6 @@
 # P0：dev Peri 进程 CPU 与内存占用异常
 
-**状态**：Open（2026-10-06）。根因机制已定位于 `ce4c9b37` 引入的全量 WorkState 读写；两轮窄读取止血已提交，用户现场反馈 CPU 暴涨明显减少（2026-10-06，非受控对比）；账本根治未批准，内存归因未闭环。复核：两个已知回归失败在当前工作树仍复现。
+**状态**：Open（2026-10-06）。根因机制已定位于 `ce4c9b37` 引入的全量 WorkState 读写；三轮窄读取止血已提交（含 `b7c6770d`），用户现场反馈 CPU 暴涨明显减少（非受控对比）；实测锁定主成本为 encode/decode（≈2.2 s/mutation，由 `state_json` 体积驱动），方案 T 已批准并在当前工作树实施，方案 C 未获批准；内存归因与现场验收未闭环。两个已知回归失败已判定为测试侧问题并按新语义修正（`5e3d7866`、`02d71bf4`）。
 **优先级**：P0（用户指定）。**范围**：本仓库 dev TUI 进程资源异常；不做 schema 迁移，不删历史证据。
 
 ## 问题
@@ -20,14 +20,34 @@
 
 ## 当前状态
 
+- 安全收口（2026-10-06）：撤回工作树中未闭环的 TUI `interrupted` / `Unconfirmed` 状态机及 epoch 回执过滤，恢复原有队列语义；补充换实例后的迟到取回回执恢复测试。保留已批准的终态裁剪与 owned reducer，补齐 `commit_act` / `settle` 裁剪、非终态正文保留和历史记录不变测试。定向验证：TUI steer 70、Work reducer 38、持久化契约 26 passed / 1 ignored，TUI 编译检查通过。未迁移或清理现场数据库；不据此宣称 CPU / 内存事故已闭环。上一轮 Subagent tool 套件 72 项失败仍需独立归因与修复，本轮不扩展该范围。
 - 事故进程 14:03 前自行消失，退出原因未知，**不视为恢复**。
 - 用户现场反馈（2026-10-06）：CPU 暴涨现象明显减少；未按验收步骤做同负载对比采样，不作为闭环验收，内存侧无现场结论。
 - 源码复核（2026-10-06）：两轮止血已移除 gate 的全量状态读取（`work.rs::HAS_PENDING` 递归 EXISTS）、消息级去重对整份 WorkState 的反序列化（`READ_DELIVERY` 单条 delivery）与提交时的旧状态重编码（`effects.rs` 复用 `current_json`）。
 - 两轮止血已提交（见归档）；无受控 CPU / RSS 收益测量、无 Turso 网络验收、未跑完整 workspace 测试。
 - 失败归属已判定（只读排查 + lldb 运行时证据，均指向测试侧）：`remote_work_concurrent_publish_...`（`session_work_test.rs:322`）为 fixture 问题——同 session 并发未对账命令与 `work.rs::GUARD_COMMAND` 不变量冲突，`session_work_journal.rs::begin_owned_work` 把确定性 `NotApplied` 折叠为 `PersistenceUncertain` 且不重试，测试自 `ce4c9b37` 起 flaky（8 跑 7 败，无争抢时 8/8 通过）；`durable_act_handoff_...`（`durable_work_contract.rs:666`）为过期断言——`44309b13` 有意收紧停止态交棒（`processing.rs:262`）并同步了单测与 `work_dispatch.rs` 调用方，漏改该集成测试。两者修测试，不改生产语义。
-- 本轮免迁移窄化（进行中，用户已定范围：不做 schema 迁移）：Wave 1 后台 inbox 通知路径改窄查询（`continuation.rs:152` 的 `load_session_work(limit=1)` 不再反序列化整份状态）；Wave 2 提交路径去掉 `reducer.rs` 对 `WorkState` 的整份深拷贝。
+- 本轮免迁移窄化（用户已定范围：不做 schema 迁移）：Wave 1 后台 inbox 通知路径改窄查询已提交 `b7c6770d`（`continuation.rs` 的 `load_session_work(limit=1)` 不再反序列化整份状态；本地 / 远端共用 `WorkAvailability` 投影，`peri-resources` 定向 9/9 通过）。Wave 2（提交路径去掉 `reducer.rs` 对 `WorkState` 的整份深拷贝）**经实测否决**：真实样本 clone 仅 8 ms，占单次 mutation 成本 <0.5%，见下节。
 - 基线已绿（`peri-resources` 侧四类失败全部判定为测试侧问题并修正，见归档）。
 - 内存告警埋点已提交 `30a4942f`（`peri-tui/src/app/service_registry.rs` + `service_registry_test.rs`）。
+
+## 实测成本画像（2026-10-06 20:31–20:41）
+
+样本：会话 `01a110cb-…` 的真实 `state_json`，从 `~/.peri/threads/threads.db` 只读导出，debug profile（与 `./dev.sh` 的 `target/debug/peri` 一致）。样本含本机会话内容，不随仓库保存。
+
+| 环节 | 原始 82.2 MB | 清空 settled 请求正文后 2.85 MB |
+| --- | --- | --- |
+| decode（快照反序列化） | 493 ms | 31 ms |
+| clone（reducer 旧状态深拷贝） | 8 ms | 0.5 ms |
+| encode（新状态序列化） | 1699 ms | 53 ms |
+| SQLite 写同尺寸（/tmp WAL 基准） | 44–268 ms | 未测（按比例） |
+
+体积构成（同一快照）：`works` 334 条，settled 的 `reasonRequest.serializedRequest` 合计 70.0 MB、`response.serialized` 1.2 MB；请求正文占整份状态 96.5%（清空后实测 82.2 MB → 2.85 MB）。该正文为完整 provider 请求（含 system/tools 渲染），`messages` 表无等价副本（该会话仅 0.98 MB），不可由历史重建。
+
+结论：
+
+- 单次 mutation 主成本是 **encode + decode（合计 ≈2.2 s）**，由 `state_json` 体积驱动；SQLite I/O 与 clone 均非瓶颈，降低轮询频率或扩大缓存只省常数因子。
+- 状态随每轮推理线性增长（观测：约 7 分钟内 +7.6 MB），账号越用越慢；一次用户提交 ≥2 个 mutation，单次提交成本约 5 s。
+- 根治必须让终态 work 的请求正文离开高频整体读写路径：或裁剪（有损）、或外置（无损，需迁移）。两者均待批准，见下。
 
 ## 未完成
 
@@ -35,7 +55,7 @@
 - [ ] 观测空闲、流式、历史加载与切换会话的 CPU 时间差分及 RSS / footprint 走势，确认可复现触发条件。
 - [ ] 量化存储中间副本、TUI 缓存与队列内存，区分正常驻留、峰值放大与泄漏。
 - [ ] 用户现场验收：同负载重采样，报告改善与局限。
-- [ ] 两轮止血未覆盖的根治项（2026-10-06 复核仍成立）：reducer 全量 clone（`work/reducer.rs`）、新状态全量编码（`work/effects.rs::UPDATE_STATE`）、事务 guard 仍以整份旧 JSON 作参数比较（`GUARD_STATE`）、后台 wake 与 2 s 定时全量读取（`continuation.rs` → `read_work` → `READ_STATE`）、`load_session_work(limit=1)` 先读整份状态、每条命令整份编码入库（`work.rs::command_effects`）。
+- [ ] 两轮止血未覆盖的根治项（2026-10-06 复核仍成立）：新状态全量编码（`work/effects.rs::UPDATE_STATE`）、事务 guard 仍以整份旧 JSON 作参数比较（`GUARD_STATE`）、每条命令整份编码入库（`work.rs::command_effects`）。reducer 全量 clone 已在实测中降级（8 ms，不做专项改造）；后台 wake 与 2 s 定时全量读取、`load_session_work(limit=1)` 先读整份状态已在 Wave 1（`b7c6770d`）消除。
 - [ ] 阶段 2–5：载荷与事务切片、增量账本、窄通知与执行隔离闭环、迁移与事故验收。
 - [ ] 根因确认后按 `docs/standards/testing.md` 补行为与生命周期回归；修复一类问题而非压低当前指标。
 - [ ] 评审本轮排查发现的邻近问题：`session_work_journal.rs:84-91` 把确定性 `NotApplied` 折叠为 `PersistenceUncertain`，而该错误会冻结会话热态并阻塞续写，与 `mutation.rs` 自述的「未决才是不确定」矛盾。属本 issue 范围外，需单独决策。
@@ -44,6 +64,8 @@
 
 ## 待批准
 
+- 根治方案已裁决（2026-10-06，AskUserQuestion）：采用**方案 T 终态裁剪**；**存量记录保留现场、只清新数据**；不做清理前备份。实施落在"进入终态的动作内清除当前 work"（`processing.rs` 的 `commit_reason` / `commit_act` / `abandon` / `settle` 四处），不做全量扫描，因此既有存量字节不变、后续新增不再累积。终态语义：`reason_request` 置 `None`，`request_id` 与 `response` 保留；`ReasonInFlight` / `Blocked` / `ActReady` 不裁剪（对账与恢复依赖正文）。
+- 方案 C（payload 外置，无损）保留为日后需要复盘终态请求正文时的升级路径（需新增表与结构字段，属"记录级结构 / payload 引用 / 接口调整"；`deny_unknown_fields` 下旧版本读新数据会拒绝）。
 - 记录级结构 / payload 引用 / 接口调整。
 - wire 协议版本与两端升级；旧未知 work 与新准入的冲突规则；旧 Required 义务的履行路径。
 - 排他停写迁移窗口与回滚边界（迁移未获授权，不得开始）。

@@ -301,7 +301,7 @@ provenance，不能据其正文提升信任或改变权限、OAuth、cancel 等�
 2. `Required`、`source`、`kind` 和安全 metadata 只能由受信任生产边界设置。
 3. 外部 MCP、channel、hook 和 workflow 内容默认是不可信 payload，必须转义和限长。
 4. 筛选只能减少可配置投递，不能关闭授权、取消、HITL 或执行安全检查本身。
-5. reminder 不得携带、记录或回显 secret；结构化 metadata 同样受 secret policy 约束。
+5. 不主动收集或向无权受众投递凭据；诊断 reminder 的正文与 metadata 按 ARC-SECRET-001 保真，不作内容脱敏。来源信任、受众授权及长度约束独立有效，不提供结果防泄漏保证。
 6. transport 和 TUI 不根据自然语言正文执行工具、改变权限或触发控制操作。
 
 ## 10. 验证要求

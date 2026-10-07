@@ -4,7 +4,7 @@
 
 ## 职责
 
-MCP 响应缓存是客户端的可丢弃加速层，不是持久会话状态或资源提供方。定义与来源合并由 Peri 内部 MCP loader 持有，`McpClientPool` 持有运行期不可变使用策略；配置 MCP 数据面只提供输入 I/O。MetaHarness 控制能力消费，不负责缓存策略。
+MCP 响应缓存是客户端的可丢弃加速层，不是持久会话状态或资源提供方。typed 配置、来源合并与关闭优先规则由 `peri-config` 持有；Middleware loader 消费配置快照并适配插件与运行 overlay，`McpClientPool` 持有运行期不可变使用策略。配置 MCP 数据面只提供输入 I/O。MetaHarness 控制能力消费，不负责缓存策略。
 
 总开关同时约束 Peri 的持久化响应缓存和 rmcp peer 的内存响应缓存。关闭不影响连接、工具权限、当前实例能力目录、技能注册表、输出归档、会话冻结数据、Apps relay、资源订阅或模型 prompt cache；也无法禁止远端 server 自身缓存。
 
@@ -47,7 +47,8 @@ PERI_MCP_CACHE=false cargo run -p peri-tui
 
 ```text
 配置数据面提供文件/环境输入
-  → MCP loader 校验与关闭优先合并
+  → peri-config 校验、关闭优先合并与 scoped snapshot
+  → Middleware loader 消费快照、适配运行 overlay
   → initialize_config 安装不可变 pool 策略
   → peer 握手后、能力发现前配置 SDK 缓存
   → pool 缓存准入 / 实时 RPC
@@ -59,7 +60,7 @@ pending pool 的缓存准入 fail-closed。初始化在空 server map、Ready �
 
 关闭时绕过响应读取和新响应保存，相关 RPC 失败照常返回错误，不能从磁盘或 SDK 旧响应兜底。System MCP readiness 保留真实发现要求，不用历史持久缓存证明可用。
 
-文件或环境修改不热变更既有 pool；下一次创建 pool 时生效。bare 模式不读用户、插件或项目文件，但接受环境总开关。第一版不增加运行时 setter。
+文件或环境修改不热变更既有 pool；配置源显式 reload 并重新取得快照后，新建 pool 消费新策略，旧 pool 仍绑定旧快照。bare 模式不读用户、插件或项目文件，但接受环境总开关。不提供修改既有 pool 策略的运行时 setter。
 
 ## 安全、历史文件与观测
 
@@ -76,4 +77,4 @@ pending pool 的缓存准入 fail-closed。初始化在空 server map、Ready �
 - `peri-middlewares/src/mcp/cache_policy_initialize_test.rs`：Ready 前安装策略及禁止重新开启。
 - `mcp-packages/config/src/tests.rs`：环境来源经真实 MCP 通道读取，远端部署不回落计算宿主来源。
 
-本设计不声称已建立全系统有效配置权威快照；现有配置数据面仍提供输入 I/O，MCP loader 持有该领域的解析与合并规则。
+本领域规则归 [配置权威面](configuration-authority.md)。独立 pool 未注入快照时仍委托 core 解析，不能由此声称所有部署 pool 共用同一 revision；配置数据面不持有解析或合并权威。

@@ -178,7 +178,7 @@ ACP `requests/session_restore.rs::prepare_existing` 按 ID 读取会话，检查
 
 执行准入复核保存的执行目录，而不是以请求或期望 cwd 重新决定归属：一次准入执行一次完整发现复核（`validate_expected`），准入内后续检查只复核已记录证据（`reassert_expected`）。相对目录重新 canonicalize 后必须仍属于原工作区，并复核最近 Git 仓库；目录组件变为 symlink 或新嵌套仓库时不能只凭字符串前缀通过。请求环境与保存绑定的环境不匹配时返回 `ExecutionBindingMismatch`，不因项目相同就放行。
 
-显式 load/resume/fork 可接纳未绑定根会话：从保存的绝对 `ThreadMeta.cwd` 发现并验证当前工作区，请求 cwd 仍只作期望校验，不使用当前终端目录兜底。接纳在写事务中重读 cwd、根关系与绑定，验证解析结果仍有效，原子插入 binding 并只在 frozen 缺失时保存兼容快照；缺失快照的配置、语言、MetaHarness 与插件目录均从保存 cwd 发现，不沿用启动项目，也不提前装配执行资源。已有快照先校验并保持原样，并发竞争复用赢家，失败或中断不得只提交其中一项。旧数据未保存目录对象身份，接纳以保存 cwd 和当前可验证身份为依据；缺目录或非绝对 cwd 保留只读历史。
+显式 load/resume/fork 可接纳未绑定根会话：从保存的绝对 `ThreadMeta.cwd` 发现并验证当前工作区，请求 cwd 不参与恢复认领或期望路径比对，也不使用当前终端目录兜底。接纳在写事务中重读 cwd、根关系与绑定，验证解析结果仍有效，原子插入 binding 并只在 frozen 缺失时保存兼容快照；缺失快照的配置、语言、MetaHarness 与插件目录均从保存 cwd 发现，不沿用启动项目，也不提前装配执行资源。已有快照先校验并保持原样，并发竞争复用赢家，失败或中断不得只提交其中一项。旧数据未保存目录对象身份，接纳以保存 cwd 和当前可验证身份为依据；缺目录或非绝对 cwd 保留只读历史。
 
 执行加载仍校验环境与工作区绑定，不能悄悄在当前机器同名绝对路径执行或自动迁移会话；这些环境约束不是执行所有权。Peri 不获取 lease、Store owner 或工具 fencing 凭证。
 
@@ -234,7 +234,7 @@ Host 可以共享 transport、全局配置来源与确定可共享的服务；�
 
 ## 8. 存储打开与版本边界
 
-默认读写使用 `~/.peri/threads/threads.db`，`--db-path` 可选择显式路径；schema 版本记录在 `PRAGMA user_version`，当前为 14（v12 建立 Machine/Workspace/Session 归属，v14 删除持久执行所有权），版本与迁移细节以 [存储 v2 设计](storage-v2-machine-workspace-session.md) 与代码索引为准。
+默认读写使用 `~/.peri/threads/threads.db`，`--db-path` 可选择显式路径；schema 版本记录在 `PRAGMA user_version`，当前版本由 `peri-resources/src/sessions/canonical.rs::CURRENT_SCHEMA_VERSION` 定义（schema17；v12 建立 Machine/Workspace/Session 归属，v14 删除持久执行所有权）。版本与迁移入口见 [Resources 代码索引](../code-index/peri-resources.md)，历史归属设计见 [存储 v2](storage-v2-machine-workspace-session.md)；阶段迁移版本不等于当前版本。
 
 只读 metadata 打开不创建数据库、不升级 schema、不登记或绑定；缺失的默认库按空历史处理，损坏与不兼容 shape 返回错误。启动时写打开失败（schema 锁被占、库文件或 WAL 不可写）降级为只读打开并记 warning：进入与历史浏览不受影响，但降级不假装可写——新会话与目录登记在进入 SQL 前按 `ReadOnlyStore` 失败。写打开走到版本判定时，本构建不认识的 schema 与 `user_version` 返回 `UnsupportedDatabaseSchema` / `UnsupportedSchemaVersion`，且不降级；升级前必须停止所有旧 writer，不支持新旧二进制混用同一库。schema 版本号不是对不遵守协议的旧 writer 或外部 SQLite writer 的访问控制。
 

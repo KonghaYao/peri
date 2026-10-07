@@ -24,11 +24,11 @@ TUI 的所有主动行为通过标准 ACP JSON-RPC 方法调用。不定义自�
 
 | 方法 | 参数 | 返回值 | 语义 |
 |------|------|--------|------|
-| `session/new` | `{ cwd?, model?, permission_mode? }` | `{ session_id }` | 创建新会话 |
-| `session/load` | `{ session_id }` | `{ session_id }` | 恢复历史会话（历史经 `session/update` 重放） |
+| `session/new` | `{ cwd?, mcpServers? }` | `{ sessionId, ... }` | 创建新会话；可返回 modes、models、configOptions 等协商字段 |
+| `session/load` | `{ sessionId, cwd?, mcpServers? }` | `{ ... }` | 加载指定会话并重放历史；响应可含 modes、models、configOptions，不创建新身份 |
 | `session/resume` | `{ sessionId, cwd? }` | `{}` | 复用已有 session_id 继续会话；经统一 host lifecycle handler 处理 |
-| `session/close` | `{ session_id }` | `{}` | 关闭会话 |
-| `session/fork` | `{ source_session_id }` | `{ new_session_id }` | 复制当前会话到新线程 |
+| `session/close` | `{ sessionId }` | `{}` | 关闭会话 |
+| `session/fork` | `{ sessionId, cwd?, mcpServers? }` | `{ sessionId, ... }` | 指定源会话并复制到新线程；返回值中的 sessionId 是新身份 |
 | `session/list` | `{ cwd? }` | `{ sessions: SessionInfo[] }` | 列出会话（可按 cwd 过滤） |
 | `session/rename` | `{ sessionId, title }` | `{ sessionId, title }` | 重命名会话并持久化标题 |
 
@@ -39,8 +39,9 @@ TUI 的所有主动行为通过标准 ACP JSON-RPC 方法调用。不定义自�
 - `session/list` 的 `_meta["peri.sessionWorkspaceV1"]` 承载 `ScopedThreadQuery`，
   返回相同扩展键中的 `threads` 与 `nextCursor`。scope 支持项目、工作区、精确目录
   和全局；普通 `cwd` 字段仍表示精确目录。
-- new/load/resume/fork 的响应扩展投影绑定；请求 cwd 与保存的 binding 不符时拒绝。
-  能力未协商不改变旧标准字段解释，也不能允许错误目录执行。
+- new/load/resume/fork 的响应扩展投影绑定。按 ID load/resume 使用保存的 binding，
+  请求 cwd 不作为路径认领或 mismatch 拒绝门槛；保存目录、机器环境与绑定完整性
+  仍参与执行准入，不能在当前宿主同名目录静默装配另一环境。
 - `session/load` / `session/resume` 不取得或校验执行所有权，不返回所有权只读准入或前任 owner 警告。唯一执行者与跨实例协调由 `peri-sdk` 管理；Peri 保留环境、绑定、frozen 与持久化完整性检查，历史通过独立只读入口查询。
 
 类型事实源为 `peri-acp-types::workspace`；身份、恢复与执行准入约束见

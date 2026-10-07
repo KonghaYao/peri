@@ -105,25 +105,27 @@ TurnGroup #2:
 
 ### 4.1 投影粒度
 
-压缩不是"一条消息截不截"这么粗。同一条 AI 消息里可能有一个 Bash 调用（参数很长，可以压缩）和一个 AskUserQuestion（工具调用，必须保留）。新版用三级粒度区分：
+压缩按工具结果消息与媒体 block 分别投影，不连带改变同消息的其他内容。
+历史 `ToolCallRequest.arguments` 与 `ContentBlock::ToolUse.input` 是 canonical
+执行数据，Micro 在模型可见视图中也不得修改；长 Bash 参数不是可压缩对象。
 
 | 粒度 | 什么时候用 | 例子 |
 |------|-----------|------|
 | 整条消息 | 工具输出（ToolResult）——整条消息做 head/tail 截断 | Bash 的 stdout 输出 |
 | 消息内的一个 block | Image/Document 类型的 ContentBlock——把 Base64 替换成文本占位符 | 用户发的截图 |
-| 消息内的一个工具调用 | AI 消息中的某个 tool_call——只压缩这个调用的参数 | Bash 的 command 参数 |
+| 消息内的一个工具调用 | 仅保留 legacy directive 的可解码形状；当前 planner 不生成、renderer 不应用输入投影 | ToolCall/ToolUse 输入保持原值 |
 
-三级粒度由 `ProjectionTarget` 枚举表示。
+目标形状由 `ProjectionTarget` 枚举表示；可解码的历史形状不等于当前允许的投影行为。
 
 ### 4.2 投影动作
 
-`ProjectionAction` 枚举定义了六种投影方式：
+`ProjectionAction` 保留以下形状，历史输入 action 不参与当前执行：
 
 | 动作 | 对什么用 | 效果 |
 |------|---------|------|
 | **Keep** | Human 消息、System 消息、错误输出、受保护的工具 | 原样保留 |
 | **CompactToolResult** | 普通工具的输出 | 保留前 N 个字符和后 N 个字符，中间省略 |
-| **CompactToolInput** | 工具的输入参数 | 替换为 `{"_compact_note": "已压缩"}`，保持 JSON object 格式 |
+| **CompactToolInput** | legacy 输入投影 directive | 可解码但忽略；输入保持 canonical transcript 原值 |
 | **CompactText** | 普通文本 | 截断到 max_chars 字符，追加 `[内容已压缩]` |
 | **ReplaceMedia** | Image / Document block | 移除 Base64 payload，换成 `[图片已压缩: ...]` 文本 |
 | **Exclude** | 整块内容 | 替换为 `[已排除]` |
@@ -171,8 +173,7 @@ sequenceDiagram
         else ContentBlock 级 action
             R->>R: Image→ReplaceMedia<br/>Document→ReplaceMedia
         else ToolCall 级 action
-            R->>R: 压缩 tool input · 保持 JSON object 根
-            R->>R: 同步 ToolUse block 内容
+            R->>R: 忽略 legacy input action<br/>保留 ToolCall/ToolUse canonical 输入
         end
     end
 
@@ -340,7 +341,7 @@ SQLite 的 `projection TEXT` 列通过幂等迁移添加。恢复时 `load_messa
 
 | 模块 | 文件 | 测试数 | 重点 |
 |------|------|--------|------|
-| projection | `projection_test.rs` | 8 | Image/Document 移除、ToolInput 根类型、head/tail 截断、CJK 安全、signed reasoning |
+| projection | `projection_test.rs` | 8 | Image/Document 移除、legacy directive 下 ToolInput 保真、head/tail 截断、CJK 安全、signed reasoning |
 | planner | `planner_test.rs` | 8 | token 估算、TurnGroup 分组、retention map、并行 tool exchange |
 | micro | `micro_test.rs` | 9 | 基本截断、错误保护、retention 排除 |
 | trigger | `trigger_test.rs` | 9 | estimated_tokens_saved 反映、多轮次增长、完整 pipeline |
@@ -358,8 +359,8 @@ SQLite 的 `projection TEXT` 列通过幂等迁移添加。恢复时 `load_messa
 |------|------|---------|
 | P0-1 | Blocks/Raw 打了标记但不投影 | `project_content()` 处理所有 ContentBlock 类型，`render_llm_view()` 替换 `truncated_content(100)` |
 | P0-2 | `affected_count` 不是真实收益 | `estimate_tokens()` + `estimated_tokens_saved` 决策 |
-| P0-3 | 同一条 AI 消息的工具调用被连带 | `ProjectionTarget::ToolCall { tool_call_id }` 粒度 |
-| P0-4 | Tool input 的 JSON 结构被破坏 | `project_tool_input()` 保持 `Value::Object` 根类型 |
+| P0-3 | 同一条 AI 消息的工具调用被连带 | 结果投影按 tool exchange 判断，所有历史输入均保留 |
+| P0-4 | Tool input 的 JSON 结构被破坏 | planner 不生成输入投影，renderer 忽略 legacy 输入 action；遵循 ARC-MICRO-TOOL-INPUT-001 |
 | P1-1 | 100 字符截断丢失恢复信息 | `apply_head_tail()` head+tail+省略提示 |
 | P1-2 | round 分组太简化 | `TurnGroup::collect()` + `ToolExchange` 配对 |
 | P1-3 | Micro 后跑 Full 白写标记 | dry-run → 不足时跳过 Micro apply |

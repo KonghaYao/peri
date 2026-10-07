@@ -133,7 +133,7 @@ pub struct WorkflowRunner {
 
 1. 生成 `run_id` (UUID v7)
 2. `journal_store.init_run(run_id)` — 创建 `.claude/workflow-runs/{run_id}/script.js`
-3. 检测 bun 环境 → 优先 `bunx @peri-code/workflow@<version>`，否则 `npx -y @peri-code/workflow@<version>`（npx 兜底带显式版本，避免全局旧版被静默复用）
+3. 校验本地固定版本 artifact，成功后使用 `node` 启动；生产缺少有效 artifact 时返回 `SpawnFailed`。仅测试或显式 `PERI_WORKFLOW_ALLOW_NPX_FALLBACK=1` 允许固定版本 `npx -y @peri-code/workflow@<version>`，不自动选择 bunx 或联网兜底。
 4. 启动子进程，继承 cwd 和 PATH
 5. 创建 `RpcChannel`（绑定 child stdin/stdout，启动 `spawn_stdout_reader()` 线程）
 6. `send_request("workflow/start")`，**15 秒超时** — Node runner.js 开始执行
@@ -560,8 +560,9 @@ tool view，并经 `SearchExtraTools → ExecuteExtraTool` 发现和调用。关
 常驻复制完整 workflow 教程。复杂、全生命周期交付另由 `ultra-adlc` skill 与
 [Ultra-ADLC 设计](ultra-adlc.md)约束。
 
-Workflow host 优先使用本地固定版本 bundle；不可用时按实现契约使用精确版本的
-`npx` fallback。运行需要 Node.js，但不要求用户全局安装 `@peri-code/workflow`。
+Workflow host 使用经校验的本地固定版本 bundle；不可用时生产默认 fail-closed，
+仅测试或显式 `PERI_WORKFLOW_ALLOW_NPX_FALLBACK=1` 允许精确版本的 `npx` fallback。
+运行需要 Node.js，但不要求用户全局安装 `@peri-code/workflow`。
 artifact identity、handshake、环境清理与失败语义以代码和相邻测试为准。
 
 用户可通过 `/workflows` 查看运行快照。面板是运行状态投影，不拥有 workflow

@@ -80,4 +80,4 @@ Emscripten 路径：`src/transport/http.rs` 复用 reqwest native/Hyper HTTP/SSE
 
 - ARC-EVENT-001：`ModelStreamEvent` 由 model_bridge 消费并直发 v2 事件；改流式事件须覆盖 发射 → ACP 映射 → TUI 全链路，禁止 v1 中间态
 - ARC-SERIAL-001：`JsonObject` 基于 `BTreeMap`（types.rs:11），provider payload 与 tools 序列化顺序须确定，不得依赖 `HashMap` 迭代序
-- ARC-SECRET-001：api_key 只存于 config/模型内部；观测投影（`ObservedProviderBody`）与 config Debug 永不输出凭据；runtime 不读环境变量
+- ARC-SECRET-001：诊断、观测投影与 config Debug 不做内容脱敏；按完整运行数据管理访问，不主动向源码或 fixture 写入真实凭据；runtime 不读环境变量
