@@ -48,10 +48,9 @@ pub fn build_subagent_middlewares(config: SubAgentMiddlewareConfig) -> Vec<Box<d
     // [TRAP] SubAgent 复用 main agent 在 session/new 时捕获的 frozen CLAUDE.md，
     // 避免文件中途变更导致 system prompt 漂移（第一优先级不变量）。
     if !disabled.contains("AgentsMdMiddleware") {
-        let mut agents_md = AgentsMdMiddleware::new();
-        if let Some(main) = config.frozen_claude_md {
-            agents_md = agents_md.with_frozen_content(main, config.frozen_claude_local_md);
-        }
+        // M4：main / local 独立贡献（local-only 有效）。
+        let agents_md = AgentsMdMiddleware::new()
+            .with_frozen_parts(config.frozen_claude_md, config.frozen_claude_local_md);
         middlewares.push(Box::new(agents_md));
     }
 

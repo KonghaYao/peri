@@ -6,7 +6,7 @@
 //! - **不再读盘**：正文由会话创建期的内容准入（P4）从 builtin `workspace`
 //!   实例的 `peri-instruction://workspace/{main|local}` 资源读取（provider 负责
 //!   候选优先级、`@import` 深度 3 展开与环防护、越界拒绝），随冻结数据注入
-//!   （`FrozenInstructions` → `with_frozen_content`）；
+//!   （`FrozenInstructions` → `with_frozen_parts`）；
 //! - 本中间件只保留「贡献字符串的持有与注入」：`prompt_contribution()` 返回
 //!   main + 空行 + local 的合成文本；`before_agent` 是无副作用空 hook；
 //! - 找不到内容（无冻结正文 / 指令面被关闭 / 未装配）⇒ 不贡献，
@@ -39,18 +39,19 @@ impl AgentsMdMiddleware {
 
     /// 注入冻结的指令正文（main 已含 `@import` 展开；local 为 `CLAUDE.local.md`）。
     ///
-    /// 与迁移前的合成口径逐字一致：main 与 local 之间以空行分隔；local 为空白
-    /// 时不追加；合成结果全为空白时整体不贡献。
-    pub fn with_frozen_content(self, main: String, local: Option<String>) -> Self {
-        let mut combined = main.clone();
-        if let Some(ref local) = local {
-            if !local.trim().is_empty() {
-                combined.push_str("\n\n");
-                combined.push_str(local);
+    /// M4：main 与 local 是**独立输入**，任一非空都应贡献——`None`（该来源
+    /// 不可得）与 `Some("")`（显式空快照）语义不同但都不贡献，且**不授权重新
+    /// 扫描**（本中间件无任何文件系统回落）。合成口径：非空白部分按
+    /// main → local 顺序以空行连接；全为空白时整体不贡献。
+    pub fn with_frozen_parts(self, main: Option<String>, local: Option<String>) -> Self {
+        let mut parts: Vec<String> = Vec::new();
+        for part in [main, local].into_iter().flatten() {
+            if !part.trim().is_empty() {
+                parts.push(part);
             }
         }
-        if !combined.trim().is_empty() {
-            *self.cached_contribution.write().unwrap() = Some(combined);
+        if !parts.is_empty() {
+            *self.cached_contribution.write().unwrap() = Some(parts.join("\n\n"));
         }
         self
     }

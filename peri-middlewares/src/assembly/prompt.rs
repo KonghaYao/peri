@@ -12,10 +12,10 @@ pub(super) fn add_agents_md(ctx: &AssemblyContext, chain: &mut MiddlewareChain) 
     // W5（plan §6.3）：纯贡献 adapter——正文只来自会话冻结快照（P4 内容准入期
     // 经 builtin `workspace` 实例的 `peri-instruction://` 读取）；excludes 与
     // 候选选择归 provider 输入，本中间件无读盘/搜索路径。
-    let mut mw = AgentsMdMiddleware::new();
-    if let Some(main) = frozen_claude_md {
-        mw = mw.with_frozen_content(main.clone(), frozen_claude_local_md.clone());
-    }
+    // M4：main / local 是独立输入，任一非空都贡献（local-only 也要贡献）；
+    // None（不可得）与 Some("")（显式空快照）都不贡献，但不是「重新扫描」的授权。
+    let mw = AgentsMdMiddleware::new()
+        .with_frozen_parts(frozen_claude_md.clone(), frozen_claude_local_md.clone());
     chain.add(Box::new(mw));
 }
 

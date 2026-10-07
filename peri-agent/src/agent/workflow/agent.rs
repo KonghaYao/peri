@@ -433,26 +433,11 @@ impl AgentExecutor for WorkflowAgentExecutor {
             .map(|t| Arc::from(t) as Arc<dyn crate::tools::BaseTool>)
             .collect();
 
-        // 收集中间件 prompt_contribution，合并到 system_prompt。
-        // M1：收集器统一分隔符并校验 reserved boundary token；非法贡献在组合
-        // 边界显式失败（带来源），不静默剥离。
-        // 注：workflow 的手工拼接与请求时 provider 化归 M4（B 组）——本次只做
-        // 准入错误处理，保持字节语义不变。
-        let contributions = match chain.collect_prompt_contributions() {
-            Ok(contributions) => contributions,
-            Err(error) => {
-                return AgentRunResult::Dead {
-                    reason: Some("contribution-invalid".into()),
-                    detail: Some(error.to_string()),
-                };
-            }
-        };
-        let system_prompt = if contributions.is_empty() {
-            system_prompt
-        } else {
-            format!("{system_prompt}\n\n{contributions}")
-        };
-
+        // M4：贡献改由请求时 provider 读取（`before_agent` 已填充链内缓存后
+        // 才在 ModelRequest 构造时收集）——与主链/子链同一语义：统一
+        // `combine_system_prompt_with_dynamic` 组合、分隔符与 reserved marker
+        // 校验由收集器/组合边界负责，不再手工拼接；Skills 在 `before_agent`
+        // 生成的贡献因此不再被提前收集漏掉。
         let execution = match execution::WorkflowExecution::prepare(&self.ctx, &params).await {
             Ok(execution) => execution,
             Err(detail) => {
@@ -462,11 +447,14 @@ impl AgentExecutor for WorkflowAgentExecutor {
                 };
             }
         };
-        // 构造 AgentModelBridge（现在 system_prompt 已就绪）
-        let mut base_llm =
-            AgentModelBridge::from_arc(base_model).with_system(system_prompt.clone());
-        base_llm = base_llm.with_session_id(&execution.session_id);
-        let llm: Box<dyn crate::agent::react::ReactLLM + Send + Sync> = Box::new(base_llm);
+        // bridge 与 StageContext 共享同一条链：请求时 provider 读取当前贡献。
+        let chain = Arc::new(chain);
+        let llm = workflow_model_bridge(
+            base_model,
+            system_prompt.clone(),
+            Arc::clone(&chain),
+            &execution.session_id,
+        );
 
         // 构造 v2 StageContext（workflow agent 无 parent_messages）
         // agent_id=None：workflow 无 child_thread_id，内部 AgentId::new() 兜底（C1）
@@ -499,7 +487,7 @@ impl AgentExecutor for WorkflowAgentExecutor {
         let mut v2_ctx = ctx_builder.build(
             Some(session),
             llm,
-            Arc::new(chain),
+            Arc::clone(&chain),
             tools_arc,
             &self.ctx.cwd,
             cancel_token.clone(),
@@ -634,6 +622,29 @@ fn tool_name_in(names: &[String], tool_name: &str) -> bool {
                     .unwrap_or(name)
                     .eq_ignore_ascii_case(original)
         })
+}
+
+/// 构造 workflow agent 的模型边界（M4）。
+///
+/// base system 为按 workflow 能力投影后的冻结输入；动态贡献**在每次
+/// `ModelRequest` 构造时**从同一条链读取（`before_agent` 已填充缓存），组合
+/// 统一走 `combine_system_prompt_with_dynamic`（M1 权威，分隔符与 reserved
+/// marker 校验不在此重复实现）。
+pub(crate) fn workflow_model_bridge(
+    base_model: Arc<dyn peri_model::Model>,
+    system_prompt: String,
+    chain: Arc<MiddlewareChain>,
+    session_id: &str,
+) -> Box<dyn crate::agent::react::ReactLLM + Send + Sync> {
+    let contribution_chain = Arc::clone(&chain);
+    Box::new(
+        AgentModelBridge::from_arc(base_model)
+            .with_system(system_prompt)
+            .with_system_contribution_provider(Arc::new(move || {
+                contribution_chain.collect_prompt_contributions()
+            }))
+            .with_session_id(session_id),
+    )
 }
 
 #[cfg(test)]

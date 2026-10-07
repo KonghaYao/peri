@@ -66,11 +66,11 @@ fn build_workflow_middlewares(
     let disabled = &ctx.meta_harness_disabled;
 
     if !disabled.contains("AgentsMdMiddleware") {
-        let mut agents_md = AgentsMdMiddleware::new();
-        if let Some(ref md) = ctx.frozen_claude_md {
-            agents_md =
-                agents_md.with_frozen_content(md.clone(), ctx.frozen_claude_local_md.clone());
-        }
+        // M4：main / local 独立贡献（local-only 有效）。
+        let agents_md = AgentsMdMiddleware::new().with_frozen_parts(
+            ctx.frozen_claude_md.clone(),
+            ctx.frozen_claude_local_md.clone(),
+        );
         middlewares.push(Box::new(agents_md));
     }
 
