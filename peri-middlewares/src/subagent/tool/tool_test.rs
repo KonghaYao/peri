@@ -902,6 +902,7 @@ pub(crate) struct DurableHost {
     pub(crate) parent_id: ThreadId,
     pub(crate) invocation_id: String,
     pub(crate) cwd: String,
+    parent_session: std::sync::Arc<peri_agent::session::Session>,
 }
 
 impl DurableHost {
@@ -914,12 +915,14 @@ impl DurableHost {
             .await
             .expect("建立父会话失败");
         fixture.prepare_invocation(&parent_id, invocation_id).await;
+        let parent_session = build_parent_session(&cwd, &parent_id, &fixture);
         Self {
             _dir: Some(dir),
             fixture,
             parent_id,
             invocation_id: invocation_id.to_string(),
             cwd,
+            parent_session,
         }
     }
 
@@ -933,42 +936,35 @@ impl DurableHost {
             .await
             .expect("建立父会话失败");
         fixture.prepare_invocation(&parent_id, invocation_id).await;
+        let parent_session = build_parent_session(&cwd, &parent_id, &fixture);
         Self {
             _dir: None,
             fixture,
             parent_id,
             invocation_id: invocation_id.to_string(),
             cwd,
+            parent_session,
         }
     }
 
     /// 把真门面、父会话（含 SubagentHost）、SDK admission 端口装到工具上。
     ///
-    /// 生产子链的宿主来自父 session 的 `SubagentHost`（`attach_subagent_host`
-    /// 注入的资源门面 / admission 端口 / 任务通道），因此夹具按同一装配面建立
-    /// 父 session 并注入 host，而不是只在工具字段上兜底。
+    /// 生产子链的宿主来自父 session 的 `SubagentHost`；夹具的父 session 在
+    /// `open/open_in` 时建立一次并挂生产 host，多个工具共享同一父会话 token
+    /// （取消语义与生产一致）。
     pub(crate) fn bind(&self, tool: SubAgentTool) -> SubAgentTool {
-        use peri_agent::session::subagent::SubagentHost;
-        let session = peri_agent::session::Session::new(
-            std::sync::Arc::from(self.cwd.as_str()),
-            peri_agent::session::FrozenContext::builder().build(),
-            Some(self.parent_id.clone()),
-        );
-        let mut host = SubagentHost {
-            session_resources: Some(self.fixture.facade()),
-            execution_admission_port: Some(Arc::new(TestAdmissionPort(self.fixture.facade()))),
-            task_manager: Some(Arc::new(peri_agent::agent::async_tasks::TaskManager::new())),
-            ..Default::default()
-        };
-        host.parent_thread_id = Some(self.parent_id.clone());
-        session.set_subagent_host(host);
         let mut tool = tool
             .with_session_resources(self.fixture.facade())
             .with_parent_thread_id(self.parent_id.clone())
-            .with_parent_session(session);
+            .with_parent_session(std::sync::Arc::clone(&self.parent_session));
         // 工具默认 cwd 与父会话绑定工作区一致，避免 ExecutionBindingMismatch。
         tool.parent_cwd = self.cwd.clone();
         tool
+    }
+
+    /// 取消父会话 token（Cascade 子链随父取消；spawn/resume 的取消来源）。
+    pub(crate) fn cancel_parent(&self) {
+        self.parent_session.config().cancel_token.cancel();
     }
 
     /// 带可信 invocation 的调用上下文（durable dispatch 语义）。
@@ -1021,6 +1017,29 @@ impl DurableHost {
             .await;
         invocation_id
     }
+}
+
+/// 构造夹具父 session：cwd/父线程 id + 生产 SubagentHost（资源/端口/任务通道）。
+fn build_parent_session(
+    cwd: &str,
+    parent_id: &str,
+    fixture: &SessionFixture,
+) -> std::sync::Arc<peri_agent::session::Session> {
+    use peri_agent::session::subagent::SubagentHost;
+    let session = peri_agent::session::Session::new(
+        std::sync::Arc::from(cwd),
+        peri_agent::session::FrozenContext::builder().build(),
+        Some(parent_id.to_string()),
+    );
+    let mut host = SubagentHost {
+        session_resources: Some(fixture.facade()),
+        execution_admission_port: Some(Arc::new(TestAdmissionPort(fixture.facade()))),
+        task_manager: Some(Arc::new(peri_agent::agent::async_tasks::TaskManager::new())),
+        ..Default::default()
+    };
+    host.parent_thread_id = Some(parent_id.to_string());
+    session.set_subagent_host(host);
+    session
 }
 
 /// 把门面与父会话 id 一次装到工具上。

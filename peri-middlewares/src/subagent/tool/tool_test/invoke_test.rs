@@ -91,21 +91,24 @@ async fn test_agent_subagent_type_missing_returns_error() {
 /// Verify subagent_type="fork" is treated as fork:true (common LLM mistake)
 #[tokio::test]
 async fn test_subagent_type_fork_treated_as_fork_mode() {
+    let host = DurableHost::open("fixture-invoke-fork").await;
     let parent_messages: Arc<RwLock<Vec<BaseMessage>>> = Arc::new(RwLock::new(Vec::new()));
     parent_messages.write().push(BaseMessage::human("Hello"));
 
-    let t = SubAgentTool::new(
-        Arc::new(vec![]),
-        None,
-        Arc::new(|_: Option<&str>| {
-            crate::subagent::test_support::fixture_source(
-                std::sync::Arc::new(EchoLLM),
-                "fixture-scripted",
-            )
-        }),
-        "/tmp".to_string(),
-    )
-    .with_parent_messages(parent_messages);
+    let t = host.bind(
+        SubAgentTool::new(
+            Arc::new(vec![]),
+            None,
+            Arc::new(|_: Option<&str>| {
+                crate::subagent::test_support::fixture_source(
+                    std::sync::Arc::new(EchoLLM),
+                    "fixture-scripted",
+                )
+            }),
+            host.cwd.clone(),
+        )
+        .with_parent_messages(parent_messages),
+    );
 
     // subagent_type: "fork" should trigger fork mode, NOT try to load an agent named "fork"
     let result = t
@@ -114,7 +117,7 @@ async fn test_subagent_type_fork_treated_as_fork_mode() {
                 "subagent_type": "fork",
                 "prompt": "do something"
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            host.context(&[]),
         )
         .await
         .unwrap();
@@ -150,6 +153,7 @@ async fn test_tool_agent_not_found() {
 #[tokio::test]
 async fn test_tool_executes_with_valid_agent_file() {
     let dir = tempdir().unwrap();
+    let host = DurableHost::open_in(dir.path(), "fixture-invoke-valid").await;
     let agents_dir = dir.path().join(".claude").join("agents");
     std::fs::create_dir_all(&agents_dir).unwrap();
     std::fs::write(
@@ -158,7 +162,7 @@ async fn test_tool_executes_with_valid_agent_file() {
     )
     .unwrap();
 
-    let t = with_agent_face(make_subagent_tool(vec![]), dir.path()).await;
+    let t = host.bind(with_agent_face(make_subagent_tool(vec![]), dir.path()).await);
     let result = t
         .invoke(
             serde_json::json!({
@@ -166,7 +170,7 @@ async fn test_tool_executes_with_valid_agent_file() {
                 "prompt": "hello",
                 "cwd": dir.path().to_str().unwrap()
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            host.context(&[]),
         )
         .await
         .unwrap();
@@ -182,6 +186,7 @@ async fn test_tool_executes_with_valid_agent_file() {
 #[tokio::test]
 async fn test_agent_reserved_fields_parsed() {
     let dir = tempdir().unwrap();
+    let host = DurableHost::open_in(dir.path(), "fixture-invoke-reserved").await;
     let agents_dir = dir.path().join(".claude").join("agents");
     std::fs::create_dir_all(&agents_dir).unwrap();
     std::fs::write(
@@ -190,7 +195,7 @@ async fn test_agent_reserved_fields_parsed() {
     )
     .unwrap();
 
-    let t = with_agent_face(make_subagent_tool(vec![]), dir.path()).await;
+    let t = host.bind(with_agent_face(make_subagent_tool(vec![]), dir.path()).await);
     let result = t
         .invoke(
             serde_json::json!({
@@ -202,14 +207,15 @@ async fn test_agent_reserved_fields_parsed() {
                 "run_in_background": true,
                 "cwd": dir.path().to_str().unwrap()
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            host.context(&[]),
         )
         .await
         .unwrap();
-    // Reserved fields don't affect execution, should still return normal result
+    // 保留字段不影响执行：durable 后台路径返回可恢复的启动回执
+    // （child_thread_id 可继续，任务立即注册）。
     assert!(
-        result.contains("echo"),
-        "Should execute normally: {}",
+        result.contains("Background task bg-") && result.contains("thread:"),
+        "Should start normally: {}",
         result
     );
 }
@@ -227,6 +233,7 @@ async fn test_agent_tool_in_list() {
 #[tokio::test]
 async fn test_system_builder_injects_system_message() {
     let dir = tempdir().unwrap();
+    let host = DurableHost::open_in(dir.path(), "fixture-invoke-system").await;
     let agents_dir = dir.path().join(".claude").join("agents");
     std::fs::create_dir_all(&agents_dir).unwrap();
     std::fs::write(
@@ -249,7 +256,7 @@ async fn test_system_builder_injects_system_message() {
         dir.path().to_str().unwrap().to_string(),
     )
     .with_system_builder(Arc::new(|_overrides, _cwd| "tone: be concise".to_string()));
-    let t = with_agent_face(t, dir.path()).await;
+    let t = host.bind(with_agent_face(t, dir.path()).await);
 
     let result = t
         .invoke(
@@ -258,7 +265,7 @@ async fn test_system_builder_injects_system_message() {
                 "prompt": "hello",
                 "cwd": dir.path().to_str().unwrap()
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            host.context(&[]),
         )
         .await
         .unwrap();
@@ -278,6 +285,7 @@ async fn test_system_builder_injects_system_message() {
 #[tokio::test]
 async fn test_skill_preload_registered() {
     let dir = tempdir().unwrap();
+    let host = DurableHost::open_in(dir.path(), "fixture-invoke-skill").await;
     let agents_dir = dir.path().join(".claude").join("agents");
     let skills_dir = dir.path().join(".claude").join("skills").join("test-skill");
     std::fs::create_dir_all(&agents_dir).unwrap();
@@ -353,7 +361,7 @@ async fn test_skill_preload_registered() {
         "workspace",
         &[("test-skill", "This is the test skill content.\n")],
     );
-    let t = with_agent_face(t, dir.path()).await;
+    let t = host.bind(with_agent_face(t, dir.path()).await);
 
     let result = t
         .invoke(
@@ -362,7 +370,7 @@ async fn test_skill_preload_registered() {
                 "prompt": "test task",
                 "cwd": dir.path().to_str().unwrap()
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            host.context(&[]),
         )
         .await
         .unwrap();
@@ -409,6 +417,7 @@ fn test_agent_description_extended() {
 #[tokio::test]
 async fn test_cancel_token_interrupts_subagent() {
     let dir = tempdir().unwrap();
+    let host = DurableHost::open_in(dir.path(), "fixture-invoke-cancel").await;
     let agents_dir = dir.path().join(".claude").join("agents");
     std::fs::create_dir_all(&agents_dir).unwrap();
     std::fs::write(
@@ -449,7 +458,9 @@ async fn test_cancel_token_interrupts_subagent() {
     crate::subagent::test_support::fixture_model_impl!(ToolNotFoundLLM);
 
     let cancel = AgentCancellationToken::new();
-    // Trigger cancellation before sub-agent execution
+    // Trigger cancellation before sub-agent execution（Cascade 语义下子链取消
+    // 来自父会话 token）
+    host.cancel_parent();
     cancel.cancel();
 
     let t = SubAgentTool::new(
@@ -464,7 +475,7 @@ async fn test_cancel_token_interrupts_subagent() {
         dir.path().to_str().unwrap().to_string(),
     )
     .with_cancel(cancel);
-    let t = with_agent_face(t, dir.path()).await;
+    let t = host.bind(with_agent_face(t, dir.path()).await);
 
     let result = t
         .invoke(
@@ -473,7 +484,7 @@ async fn test_cancel_token_interrupts_subagent() {
                 "prompt": "run",
                 "cwd": dir.path().to_str().unwrap()
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            host.context(&[]),
         )
         .await
         .unwrap();
@@ -488,7 +499,8 @@ async fn test_cancel_token_interrupts_subagent() {
 #[tokio::test]
 async fn test_agent_invoke_mcp_background_rejection_precedes_fork_fallback() {
     let dir = tempdir().unwrap();
-    let tool = make_subagent_tool(vec![]);
+    let host = DurableHost::open_in(dir.path(), "fixture-invoke-mcp-bg").await;
+    let tool = host.bind(make_subagent_tool(vec![]));
     let messages = vec![BaseMessage::human("parent context")];
     let mut input = serde_json::json!({
         "subagent_type": "mcp__missing__agent",
@@ -498,10 +510,7 @@ async fn test_agent_invoke_mcp_background_rejection_precedes_fork_fallback() {
         "cwd": dir.path().to_str().unwrap()
     });
     let error = tool
-        .invoke(
-            input.clone(),
-            peri_agent::tools::ToolContext::new(&messages, "."),
-        )
+        .invoke(input.clone(), host.context(&messages))
         .await
         .unwrap_err();
     assert_eq!(
@@ -509,10 +518,7 @@ async fn test_agent_invoke_mcp_background_rejection_precedes_fork_fallback() {
         "Error: MCP Agents currently support synchronous activation only"
     );
     input["run_in_background"] = serde_json::json!(false);
-    let result = tool
-        .invoke(input, peri_agent::tools::ToolContext::new(&messages, "."))
-        .await
-        .unwrap();
+    let result = tool.invoke(input, host.context(&messages)).await.unwrap();
     assert!(
         result.contains("fork task"),
         "同步 fork 不应尝试远端 definition 激活：{result}"
@@ -523,6 +529,7 @@ async fn test_agent_invoke_mcp_background_rejection_precedes_fork_fallback() {
 #[tokio::test]
 async fn test_agent_invoke_parent_host_masks_fallback_runtime_and_store() {
     let dir = tempdir().unwrap();
+    let host = DurableHost::open_in(dir.path(), "fixture-invoke-parent-host").await;
     let fallback_dir = tempdir().unwrap();
     let store = SessionFixture::open_in(dir.path()).await;
     let fallback_store = SessionFixture::open_in(fallback_dir.path()).await;
@@ -540,16 +547,23 @@ async fn test_agent_invoke_parent_host_masks_fallback_runtime_and_store() {
     parent.set_subagent_host(peri_agent::session::subagent::SubagentHost {
         session_resources: Some(store.facade()),
         parent_thread_id: Some(parent_id.clone()),
+        execution_admission_port: Some(Arc::new(TestAdmissionPort(store.facade()))),
         ..Default::default()
     });
+    // 委派的可信 invocation 必须登记在该父会话上（与父 host 同一门面）。
+    let invocation_id = "fixture-mask-invocation";
+    store.prepare_invocation(&parent_id, invocation_id).await;
     let fallback_manager = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
     let tool = make_subagent_tool(vec![])
         .with_session_resources(fallback_store.facade())
         .with_task_manager(fallback_manager.clone())
+        .with_parent_thread_id(parent_id.clone())
         .with_parent_session(parent);
+    let mut ctx = peri_agent::tools::ToolContext::new(&[], &cwd);
+    ctx.invocation_id = Some(invocation_id.to_string());
     let result = tool.invoke(
         serde_json::json!({"fork": true, "run_in_background": true, "prompt": "sync fallback", "cwd": cwd.clone()}),
-        peri_agent::tools::ToolContext::new(&[], "."),
+        ctx,
     ).await.unwrap();
     let thread_id = result
         .lines()
