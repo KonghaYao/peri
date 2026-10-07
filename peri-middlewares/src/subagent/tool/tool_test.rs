@@ -967,6 +967,26 @@ pub(crate) struct DurableHost {
 }
 
 impl DurableHost {
+    /// 在既有工作区目录上建立耐久宿主，并在装配前定制父 host（write-once：
+    /// 通道 / langfuse bridge 等必须在装配时给定）。
+    pub(crate) async fn open_in_with_host(
+        dir: &std::path::Path,
+        invocation_id: &str,
+        configure: impl FnOnce(&mut peri_agent::session::subagent::SubagentHost),
+    ) -> Self {
+        let mut host = DurableHost::open_in(dir, invocation_id).await;
+        let mut sub_host = host
+            .parent_session
+            .subagent_host()
+            .as_deref()
+            .cloned()
+            .unwrap_or_default();
+        configure(&mut sub_host);
+        host.parent_session =
+            rebuild_with_host(&host.cwd, &host.parent_id, &host.fixture, sub_host);
+        host
+    }
+
     /// 带调用方后台通道的宿主（父 host 的 TaskManager/bg 事件发送端）。
     ///
     /// `set_subagent_host` 是 write-once：通道必须在父 session 装配时给定，
@@ -1094,6 +1114,22 @@ impl DurableHost {
         host.task_manager = Some(task_manager);
         host.bg_event_sender = Some(bg_event_sender);
         self.parent_session.set_subagent_host(host);
+    }
+
+    /// 取父会话当前 host 副本（用于在装配后重建宿主时定制字段）。
+    pub(crate) fn parent_session_host(
+        &self,
+    ) -> Option<peri_agent::session::subagent::SubagentHost> {
+        self.parent_session.subagent_host().as_deref().cloned()
+    }
+
+    /// 用给定 host 重建父会话（write-once host 的装配后定制入口）。
+    pub(crate) fn with_rebuilt_host(
+        mut self,
+        host: peri_agent::session::subagent::SubagentHost,
+    ) -> Self {
+        self.parent_session = rebuild_with_host(&self.cwd, &self.parent_id, &self.fixture, host);
+        self
     }
 
     /// 取消父会话 token（Cascade 子链随父取消；spawn/resume 的取消来源）。
