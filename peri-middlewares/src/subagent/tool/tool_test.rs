@@ -1137,6 +1137,11 @@ impl DurableHost {
         self.parent_session.config().cancel_token.cancel();
     }
 
+    /// 父 session 句柄（同库第二个工具/断言用）。
+    pub(crate) fn parent_session(&self) -> std::sync::Arc<peri_agent::session::Session> {
+        std::sync::Arc::clone(&self.parent_session)
+    }
+
     /// 带可信 invocation 的调用上下文（durable dispatch 语义）。
     pub(crate) fn context<'a>(
         &'a self,
