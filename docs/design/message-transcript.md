@@ -2,7 +2,7 @@
 
 > BaseMessage、ContentBlock 枚举、MessageTranscript 与 staging 事务写
 >
-> 状态：现行设计。本文的易失 MessageQueue 与 Prompt/Defer/Info 描述现状；已批准的可靠 Inbox、处理义务、会话隔离、类型驱动的 MQ 消费语义与激活目标由 [RCRA 消息权威](rcra-message-activation.md) 定义，本文不覆盖其目标契约。
+> 状态：现行内容模型；2026-10-07 已批准撤销持久执行恢复。MessageQueue 属于当前进程，canonical 历史继续持久化；会话隔离、类型化消费和历史加载边界由 [RCRA 权威](rcra-message-activation.md) 定义，剥离进度见 active spec。
 >
 > 运行时事实源为 `peri-agent/src/session/transcript.rs`、消息契约类型与相邻测试。
 

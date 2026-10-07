@@ -17,7 +17,6 @@ use crate::agent::compact_v2::planner::ContextPressure;
 /// 运行 Compact 阶段
 pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<CompactOutput> {
     let ctx = &input.context;
-    super::execution_control::validate(ctx).await?;
 
     // PreCompact 插件 hook 回调（fire-and-forget）
     if let Some(ref hook) = ctx.compact.compact_pre_hook {
@@ -56,7 +55,6 @@ pub(super) mod context_pressure;
 pub(crate) async fn run_compact_core(
     input: CompactInput,
 ) -> crate::error::AgentResult<CompactOutput> {
-    super::execution_control::validate(&input.context).await?;
     compact_core(input).await.0
 }
 
@@ -468,7 +466,7 @@ async fn compact_core(input: CompactInput) -> (crate::error::AgentResult<Compact
 }
 
 // An unacknowledged durable commit must stop the loop before Reason can consume the
-// old in-memory history. Phase 8 carries this state to the host for cold recovery.
+// old in-memory history. Phase 8 reports this state for explicit history reload.
 fn uncertain_compaction_error(ctx: &super::StageContext) -> crate::error::AgentError {
     ctx.runtime
         .event_bus

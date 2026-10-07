@@ -337,7 +337,7 @@ async fn test_production_dispatch_persists_outer_cancel_result() {
         peri_acp_types::tasks::TaskShutdownReport::Complete
     );
     assert!(
-        error.to_string().contains("frozen for reconciliation"),
+        matches!(error, peri_agent::error::AgentError::Interrupted),
         "unexpected cancellation result: {error:?}"
     );
     let (resources, session_id, _) = context
@@ -346,35 +346,25 @@ async fn test_production_dispatch_persists_outer_cancel_result() {
         .read()
         .idempotent_reminder_port()
         .unwrap();
-    let snapshot = resources
-        .load_session_work(&peri_acp_types::session_resources::work::WorkQuery {
-            session_id,
-            limit: 1,
-        })
-        .await
+    let writer = context
+        .session
+        .transcript
+        .read()
+        .persist_tx_handle()
         .unwrap();
-    let invocation = snapshot
-        .state
-        .invocations
-        .values()
-        .find(|record| record.intent.tool_call_id == "bash-call")
-        .unwrap();
-    assert_eq!(
-        invocation.status,
-        peri_acp_types::session_resources::work::InvocationStatus::Settled
-    );
+    MessageTranscript::flush_via_tx(&writer).await.unwrap();
+    let history = resources.load_session_history(&session_id).await.unwrap();
     assert!(
-        matches!(
-            &invocation.outcome,
-            Some(peri_acp_types::session_resources::work::InvocationOutcome::Failed { result })
-                if result.serialized.contains(r#""status":"cancelled""#)
-        ),
-        "cancelled Bash must persist a failed tool result: {invocation:?}"
-    );
-    let work = &snapshot.state.works[invocation.work_id.as_ref().unwrap()];
-    assert_eq!(
-        work.stage,
-        peri_acp_types::session_resources::work::WorkStage::Blocked
+        history.iter().any(|payload| matches!(
+            payload,
+            peri_acp_types::store::PersistedPayload::Message(BaseMessage::Tool {
+                tool_call_id,
+                is_error: true,
+                execution: Some(evidence),
+                ..
+            }) if tool_call_id == "bash-call" && evidence.status == ToolExecutionStatus::Cancelled
+        )),
+        "cancelled Bash must persist its typed failed tool result"
     );
     assert!(
         context

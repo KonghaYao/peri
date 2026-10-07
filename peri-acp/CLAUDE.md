@@ -22,7 +22,7 @@
 
 ## 稳定不变量
 
-- 会话执行所有权与唯一执行者由 `peri-sdk` 管理；ACP 不保存执行 owner、续租、writer lease 或 owner catalog，不向工具继承执行 token，不验证接管 proof、不提供 ownership 只读准入。session/load 与 resume 仍校验 Store 访问模式、持久化状态、binding、保存目录与 frozen；不能执行的环境明确失败，独立 history RPC 保持可读。显式 close intent、prompt 排空、SessionEnd、MCP/task 资源生命周期 owner 与持久化结清保持独立。
+- ACP 只驱动当前进程内执行，不提供持久 execution admission、Work/control 协议或冷恢复，不要求 SDK reverse admission，不向工具继承执行 token。session/load 与 resume 仍校验 Store 访问模式、持久化状态、binding、保存目录与 frozen；不能执行的环境明确失败，独立 history RPC 保持可读。显式 close intent、prompt 排空、SessionEnd、MCP/task 当前资源生命周期与普通关闭的持久化结清保持独立。
 
 - 配置定义、typed 解析、provider/profile 默认值、分层合并与差异保存归 `peri-config`；`provider/{config,store}.rs` 仅 re-export。正常 `peri_config::settings::ConfigSource` 持有 `ConfigurationSystem`，固定 scope/layout，并提供 snapshot、显式 reload 与 CAS 保存；布局或校验失败不得误写全局层。见 `../peri-config/CLAUDE.md`。
 - 配置输入经独立 bootstrap `peri-mcp-config` 采集，不依赖待配置的 session 工具池，不新增 daemon/model 工具；环境来自选中的 source provider，不读计算宿主 fallback。核心不反向依赖 ACP 业务实现。

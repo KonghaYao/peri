@@ -26,15 +26,13 @@ mod factory;
 mod lifecycle;
 pub use close::{close_subagent_session_scope, SubagentCloseState};
 mod run_sync;
-mod settlement;
 mod types;
 mod util;
 mod v2_bridge;
 
 pub use directives::{build_bg_fork_directive, build_fork_directive, build_prediction_directive};
-pub use factory::{
-    ChildResumeMetadata, ColdChildBlocked, ColdChildExecution, ColdChildRuntime, SessionFactory,
-};
+pub use factory::SessionFactory;
+pub(crate) use lifecycle::flush_session_history;
 pub(crate) use lifecycle::{
     on_subagent_stop_handler, BgCleanupGuard, BgStopEmitV2, DeregisterGuard,
 };

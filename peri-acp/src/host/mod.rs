@@ -5,9 +5,7 @@
 //! back through the transport. ACP Host = 部署单元（`docs/top-level.md` §7/§19）：
 //! 由 cli/TUI 作为部署装配点启动，TUI 进程不再持有控制面。
 //!
-//! Admitted execution is owned by a background task so the server remains
-//! responsive to precise `session/control` requests. Unqualified legacy
-//! cancellation does not authorize execution control. Sessions are shared via
+//! Prompt execution is owned by a background task. Sessions are shared via
 //! `Arc<tokio::sync::Mutex<HashMap>>`.
 //!
 use std::{
@@ -35,11 +33,7 @@ use crate::provider::{LlmProvider, PeriConfig};
 pub mod assemble;
 pub(crate) mod compact_config;
 mod connection;
-pub mod execution_admission;
-#[cfg(not(target_os = "emscripten"))]
-pub mod execution_admission_jsonl;
 mod lifecycle;
-mod work_recovery;
 mod workspace;
 #[cfg(not(target_os = "emscripten"))]
 mod workspace_resources;
@@ -51,7 +45,6 @@ mod diagnostics;
 #[path = "executor_flow_test.rs"]
 mod executor_flow_tests;
 mod mcp_apps;
-pub(crate) mod scheduled_admission;
 // V-02（W4）的 host seam 断言：首个 LLM 请求的三个冻结 effective name、能力关闭的
 // 首个请求面、`PERI_MCP_BUILTIN=off` 语义、启动 fatal 投影、BLOCKED 缺口复证。
 // 模块名参与 `cargo test` 过滤（`host::mcp_v4_builtin`），故不沿用 `mod tests`。
@@ -74,9 +67,6 @@ mod mcp_v4_wire_fixture;
 // `BuiltinInstanceContext` 注入 → `run_initialize`（A33 的顺序），并驱动真实装配面
 // （`assemble_server_config`）验证配置合并早于 handler 构造、多 cwd 退化登记与
 // host shutdown 有界关闭。
-mod cold_execution;
-mod cold_terminal;
-mod execution;
 #[cfg(test)]
 #[path = "mcp_v4_wave2_test.rs"]
 mod mcp_v4_wave2;
@@ -134,6 +124,10 @@ pub(crate) struct SessionState {
     /// Canonical persisted history; `history` is a compatibility projection for legacy commands.
     pub(crate) history_payloads: Vec<peri_acp_types::store::PersistedPayload>,
     pub(crate) cancel_token: Option<CancellationToken>,
+    pub(crate) continuation_armed: bool,
+    pub(crate) continuation_epoch: u64,
+    pub(crate) continuation_in_flight: bool,
+    pub(crate) continuation_mq_steering_pending: bool,
     // ── Frozen session data (populated at creation, immutable thereafter) ──
     pub(crate) frozen: Option<crate::session::executor::FrozenSessionData>,
     /// Recall items from previous turn (injected as <system-reminder> in next user message).
@@ -153,8 +147,6 @@ pub(crate) struct SessionState {
 
 /// All cross-session configuration needed by the ACP server.
 pub struct AcpServerConfig {
-    pub execution_admission_port:
-        Option<Arc<dyn peri_acp_types::execution_admission::ExecutionAdmissionPort>>,
     pub(crate) workspace_assembly: Option<assemble::WorkspaceAssembly>,
     pub(crate) host_task_owner: Option<task_scope::HostTaskOwner>,
     pub(crate) host_task_spawner: task_scope::HostTaskSpawner,
@@ -334,6 +326,9 @@ async fn run_acp_server_inner(
         run_cron_continuation_scheduler(
             cron_cont_rx,
             CronContinuationContext {
+                sessions: sessions.clone(),
+                prompt_locks: prompt_locks.clone(),
+                cont_tx: Arc::clone(&cont_tx),
                 cfg: Arc::clone(&cfg),
                 transport: Arc::clone(&transport),
                 task_spawner: continuation_spawner,

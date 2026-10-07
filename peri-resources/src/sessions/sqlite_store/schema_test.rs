@@ -77,7 +77,7 @@ async fn v13_upgrade_drops_execution_owner_tables_and_preserves_close_intent() {
 
 /// [回归测试] 实际旧库包含 thread_goals，不能因额外业务表而拒绝启动。
 #[tokio::test]
-async fn test_legacy_with_goals_upgrades_removing_goals_and_preserving_extensions() {
+async fn test_legacy_with_goals_upgrades_preserving_goals_and_extensions() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("threads.db");
     let mut connection = SqliteConnection::connect_with(
@@ -133,7 +133,7 @@ async fn test_legacy_with_goals_upgrades_removing_goals_and_preserving_extension
             .fetch_one(&mut connection)
             .await
             .unwrap();
-    assert_eq!(goals, 0);
+    assert_eq!(goals, 1);
     let after_schema: Vec<(String, Option<String>)> = sqlx::query_as(
         "SELECT name, sql FROM sqlite_schema WHERE name IN ('extension_state', 'idx_threads_parent_thread_id') ORDER BY name",
     ).fetch_all(&mut connection).await.unwrap();

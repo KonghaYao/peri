@@ -49,7 +49,6 @@ pub mod error;
 pub mod event;
 pub mod event_data;
 pub mod event_v2;
-pub mod execution_admission;
 pub mod frozen;
 pub mod goal;
 pub mod hooks;

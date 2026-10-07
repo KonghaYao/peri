@@ -1,8 +1,8 @@
-//! Frozen, durable background-completion publication routes.
+//! Frozen, current-process background-completion publication routes.
 //!
 //! Synchronous owners retain a terminal result while publication is Pending.
-//! Only a confirmed reliable Inbox receipt permits acknowledgment; route
-//! identity is captured once and cannot follow a reopened session lifecycle.
+//! Only current queue acceptance permits acknowledgment; route
+//! identity is captured once and never discovers old delegations.
 
 use std::sync::Arc;
 
@@ -16,7 +16,7 @@ use crate::session::factory::OnBgCompleteFn;
 /// 由 `(SessionAccessPort, session_id)` 构造 **session 级** `on_bg_complete` 回调。
 ///
 /// 构造时冻结可靠投递路由；缺失路由不得转到未来生命周期。
-/// Pending 返回 Err，owner 必须保留原结果并重试；持久回执确认后才返回 Ok。
+/// Pending 返回 Err，owner 必须保留原结果并重试；当前队列接纳后才返回 Ok。
 pub fn session_bg_complete_callback(
     session_access: Arc<dyn SessionAccessPort>,
     session_id: String,
@@ -24,12 +24,12 @@ pub fn session_bg_complete_callback(
     let delivery = session_access.task_terminal_delivery(&session_id);
     publication_callback(Arc::new(move || {
         delivery.clone().ok_or_else(|| {
-            format!("frozen durable terminal delivery unavailable for session {session_id}")
+            format!("frozen current terminal delivery unavailable for session {session_id}")
         })
     }))
 }
 
-pub fn durable_bg_complete_callback(
+pub fn task_bg_complete_callback(
     delivery: Arc<dyn peri_acp_types::tasks::TaskTerminalDelivery>,
 ) -> OnBgCompleteFn {
     publication_callback(Arc::new(move || Ok(Arc::clone(&delivery))))
@@ -71,7 +71,7 @@ fn publication_callback(resolve: DeliveryResolver) -> OnBgCompleteFn {
                 PublicationStatus::Accepted => return Ok(()),
                 PublicationStatus::Pending => {
                     return Err(
-                        "terminal publication Pending: durable receipt not confirmed".into(),
+                        "terminal publication Pending: queue acceptance not confirmed".into(),
                     )
                 }
                 PublicationStatus::Failed(error) => {
@@ -123,7 +123,7 @@ fn publication_callback(resolve: DeliveryResolver) -> OnBgCompleteFn {
             }
         });
         Err(
-            "terminal publication Pending: owner must retain and retry until durable receipt"
+            "terminal publication Pending: owner must retain and retry until queue acceptance"
                 .into(),
         )
     })

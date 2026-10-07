@@ -38,7 +38,6 @@ pub(crate) enum HostTaskKind {
     McpOverAcp,
     UserInputEvents,
     SessionRequest,
-    InboxWorkNotifications,
     CompactHook,
 }
 

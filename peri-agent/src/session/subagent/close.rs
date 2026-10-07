@@ -1,9 +1,6 @@
 use std::sync::Arc;
 
 use futures::FutureExt;
-use peri_acp_types::session_resources::{
-    ControlAction, ControlAttempt, ControlCommand, ControlDecision, ControlStatus, SessionResources,
-};
 use peri_acp_types::tasks::{BgTaskKind, TaskManager as _};
 use tokio::sync::watch;
 
@@ -15,10 +12,6 @@ type CloseReceiver = watch::Receiver<Option<CloseResult>>;
 #[derive(Default)]
 pub struct SubagentCloseState {
     attempt: parking_lot::Mutex<Option<CloseReceiver>>,
-    lifecycle: parking_lot::Mutex<Option<u64>>,
-    intent: parking_lot::Mutex<Option<ControlCommand>>,
-    finish: parking_lot::Mutex<Option<ControlCommand>>,
-    stopped_attempt: parking_lot::Mutex<Option<ControlAttempt>>,
 }
 
 impl SubagentCloseState {
@@ -66,17 +59,6 @@ pub async fn close_subagent_session_scope(session: Arc<Session>) -> CloseResult 
     }
 }
 
-pub(super) async fn close_stopped_subagent_session_scope(
-    session: Arc<Session>,
-    stopped_attempt: ControlAttempt,
-) -> CloseResult {
-    let host = session
-        .subagent_host()
-        .ok_or("Incomplete: child session host unavailable")?;
-    *host.close_state.stopped_attempt.lock() = Some(stopped_attempt);
-    close_subagent_session_scope(session).await
-}
-
 async fn drain_child_scope(session: Arc<Session>) -> CloseResult {
     let host = session
         .subagent_host()
@@ -85,14 +67,6 @@ async fn drain_child_scope(session: Arc<Session>) -> CloseResult {
         .task_manager
         .as_ref()
         .ok_or("Incomplete: child task directory unavailable")?;
-    if let Some(resources) = &host.session_resources {
-        let session_id = session
-            .store()
-            .thread_id
-            .as_deref()
-            .ok_or("Incomplete: child session identity unavailable")?;
-        persist_close_control(resources.as_ref(), session_id, &host.close_state, false).await?;
-    }
     manager.begin_session_close();
     session.config().cancel_token.cancel();
     let mut failures = Vec::new();
@@ -123,87 +97,10 @@ async fn drain_child_scope(session: Arc<Session>) -> CloseResult {
         );
     }
     if failures.is_empty() {
-        if let Some(resources) = &host.session_resources {
-            let session_id = session
-                .store()
-                .thread_id
-                .as_deref()
-                .ok_or("Incomplete: child session identity unavailable")?;
-            let stopped_attempt = host.close_state.stopped_attempt.lock().clone();
-            if let Some(stopped_attempt) = stopped_attempt {
-                super::factory::clear_stopped_attempt(
-                    resources.as_ref(),
-                    &session_id.to_owned(),
-                    &stopped_attempt,
-                )
-                .await?;
-            }
-            persist_close_control(resources.as_ref(), session_id, &host.close_state, true).await?;
-        }
         Ok(())
     } else {
         Err(failures.join("; "))
     }
-}
-
-async fn persist_close_control(
-    resources: &dyn SessionResources,
-    session_id: &str,
-    close: &SubagentCloseState,
-    finish: bool,
-) -> CloseResult {
-    let session_id = session_id.to_owned();
-    let current = resources
-        .load_session_control(&session_id)
-        .await
-        .map_err(|error| format!("Incomplete: child close control unavailable: {error}"))?;
-    {
-        let mut lifecycle = close.lifecycle.lock();
-        if lifecycle.is_some_and(|expected| expected != current.lifecycle) {
-            return Err("Incomplete: child close lifecycle changed".into());
-        }
-        *lifecycle = Some(current.lifecycle);
-    }
-    if current.status == ControlStatus::Closed {
-        return Ok(());
-    }
-    if !finish && current.status == ControlStatus::Closing {
-        return Ok(());
-    }
-    if finish && (current.status != ControlStatus::Closing || current.attempt.is_some()) {
-        return Err("Incomplete: child model execution quiescence unconfirmed".into());
-    }
-    let stored = if finish { &close.finish } else { &close.intent };
-    let command = stored
-        .lock()
-        .get_or_insert_with(|| ControlCommand {
-            session_id: session_id.clone(),
-            command_id: format!(
-                "child-close-{}:{}:{}",
-                if finish { "finish" } else { "intent" },
-                session_id,
-                current.lifecycle
-            ),
-            expected_lifecycle: current.lifecycle,
-            expected_revision: current.revision,
-            expected_control_generation: current.control_generation,
-            action: if finish {
-                ControlAction::FinishClose
-            } else {
-                ControlAction::Close
-            },
-        })
-        .clone();
-    let receipt = resources
-        .apply_session_control(&command)
-        .await
-        .map_err(|error| {
-            format!("Incomplete: child close control mutation unconfirmed: {error}")
-        })?;
-    if receipt.decision != ControlDecision::Accepted {
-        return Err("Incomplete: child close control mutation rejected".into());
-    }
-    Ok(())
 }
 
 pub(super) async fn settle_explicit_close(

@@ -222,9 +222,6 @@ async fn agent_binding_retains_task_directory_and_routes_only_to_child() {
 async fn completed_child_shell_blocks_shared_close_and_reopen_rebuilds_binding() {
     use peri_acp_types::ports::McpPoolPort;
     use peri_acp_types::session::{MessageSource, SessionInbox};
-    use peri_acp_types::session_resources::{
-        ControlAction, ControlCommand, ControlDecision, ControlStatus,
-    };
     let dir = tempdir().unwrap();
     let store = SessionFixture::open_in(dir.path()).await;
     let cwd = store.workspace_cwd();
@@ -241,13 +238,11 @@ async fn completed_child_shell_blocks_shared_close_and_reopen_rebuilds_binding()
         .store(true, std::sync::atomic::Ordering::Release);
     let old_manager = Arc::new(peri_mcp_common::create_local_task_manager());
     let old_queue = Arc::new(peri_agent::session::MessageQueue::new());
-    pool.bind_agent_session_for_lifecycle(
+    pool.bind_agent_session(
         &child_id,
-        1,
         SessionInbox::new(old_queue.clone()).handle(),
         old_manager.clone(),
-    )
-    .unwrap();
+    );
     let parent = Session::new(
         Arc::from(cwd.as_str()),
         FrozenContext::builder().build(),
@@ -287,15 +282,6 @@ async fn completed_child_shell_blocks_shared_close_and_reopen_rebuilds_binding()
         store.load_meta(&child_id).await.unwrap().agent_status,
         peri_agent::thread::AgentStatus::Done
     );
-    assert_eq!(
-        store
-            .resources
-            .load_session_control(&child_id)
-            .await
-            .unwrap()
-            .status,
-        ControlStatus::Active
-    );
     assert!(pool
         .verify_shared_environment_close(&root_id)
         .unwrap_err()
@@ -316,30 +302,11 @@ async fn completed_child_shell_blocks_shared_close_and_reopen_rebuilds_binding()
     assert!(old_manager.session_close_settled());
     old_queue.push(peri_agent::session::QueuedMessage::defer(
         MessageSource::SystemInjected,
-        BaseMessage::human("old lifecycle pending"),
+        BaseMessage::human("closed runtime pending"),
     ));
-    let closed = store
-        .resources
-        .load_session_control(&child_id)
-        .await
-        .unwrap();
-    assert_eq!(closed.status, ControlStatus::Closed);
-    let receipt = store
-        .resources
-        .apply_session_control(&ControlCommand {
-            session_id: child_id.clone(),
-            command_id: "fixture-explicit-lifecycle-reopen".into(),
-            expected_lifecycle: closed.lifecycle,
-            expected_revision: closed.revision,
-            expected_control_generation: closed.control_generation,
-            action: ControlAction::Reopen,
-        })
-        .await
-        .unwrap();
-    assert_eq!(receipt.decision, ControlDecision::Accepted);
     let config = tool.resume_config_base(
         child_id.clone(),
-        Some("new lifecycle".into()),
+        Some("new conversation turn".into()),
         SubagentRunMode::Sync,
         20,
         Box::new(EchoLLM),
@@ -360,6 +327,6 @@ async fn completed_child_shell_blocks_shared_close_and_reopen_rebuilds_binding()
     assert!(!Arc::ptr_eq(&old_manager, &new_manager));
     assert_eq!(old_queue.len(), 1);
     assert!(reopened.session.queue().is_empty());
-    assert!(pool.verify_shared_environment_close(&root_id).is_err());
+    assert!(pool.verify_shared_environment_close(&root_id).is_ok());
     assert!(old_manager.spawn_owned(Box::pin(async {})).is_err());
 }

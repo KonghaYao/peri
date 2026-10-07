@@ -31,6 +31,7 @@ pub(super) enum SchemaState {
     Version14,
     Version15,
     Version16,
+    Version17,
     Current,
 }
 
@@ -50,6 +51,7 @@ pub(super) async fn inspect(connection: &mut SqliteConnection) -> Result<SchemaS
         .await?;
     match version {
         v if v == CURRENT_SCHEMA_VERSION => return Ok(SchemaState::Current),
+        17 => return Ok(SchemaState::Version17),
         16 => return Ok(SchemaState::Version16),
         15 => return Ok(SchemaState::Version15),
         14 => return Ok(SchemaState::Version14),
@@ -168,6 +170,7 @@ impl SqliteSessionDatabase {
                 | SchemaState::Version14
                 | SchemaState::Version15
                 | SchemaState::Version16
+                | SchemaState::Version17
         ) {
             return Self::remove_execution_owner_schema(&mut connection).await;
         }
@@ -201,41 +204,25 @@ impl SqliteSessionDatabase {
 
     async fn remove_execution_owner_schema(connection: &mut SqliteConnection) -> Result<()> {
         let mut tx = connection.begin_with("BEGIN IMMEDIATE").await?;
-        sqlx::query(canonical::CREATE_SESSION_CLOSE_INTENTS_TABLE_SQL)
-            .execute(&mut *tx)
+        let removals = super::schema_cleanup::execution_recovery_removal_plan(&mut tx).await?;
+        let version: i64 = sqlx::query_scalar("PRAGMA user_version")
+            .fetch_one(&mut *tx)
             .await?;
-        sqlx::query("DROP TABLE IF EXISTS session_execution_workspace_descriptors")
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query("DROP TABLE IF EXISTS session_execution_owners")
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query(crate::sessions::control::CREATE_STATE)
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query(crate::sessions::control::CREATE_RECEIPTS)
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query(crate::sessions::control::SEED_STATE)
-            .execute(&mut *tx)
-            .await?;
-        for statement in [
-            crate::sessions::work::CREATE_STATE,
-            crate::sessions::work::CREATE_EVENTS,
-            crate::sessions::work::CREATE_RECEIPTS,
-            crate::sessions::work::CREATE_COMMANDS,
-        ] {
-            sqlx::query(statement).execute(&mut *tx).await?;
+        if version != 17 {
+            sqlx::query(canonical::CREATE_SESSION_CLOSE_INTENTS_TABLE_SQL)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("DROP TABLE IF EXISTS session_execution_workspace_descriptors")
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("DROP TABLE IF EXISTS session_execution_owners")
+                .execute(&mut *tx)
+                .await?;
         }
-        sqlx::query(crate::sessions::work::SEED_STATE)
-            .bind(crate::sessions::work::legacy_state_json()?)
-            .bind(crate::sessions::work::initial_state_json()?)
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query(crate::sessions::work::QUARANTINE_UNOWNED_COMMANDS)
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query("PRAGMA user_version = 17")
+        for statement in removals {
+            sqlx::query(*statement).execute(&mut *tx).await?;
+        }
+        sqlx::query("PRAGMA user_version = 18")
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
@@ -585,3 +572,7 @@ async fn migrate_identity_values(connection: &mut SqliteConnection) -> Result<()
 #[cfg(test)]
 #[path = "schema_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "schema_v18_test.rs"]
+mod v18_tests;

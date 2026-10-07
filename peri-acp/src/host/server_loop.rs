@@ -30,9 +30,8 @@ impl ServerLoop<'_> {
             match msg {
                 IncomingMessage::Request { id, method, params } => match method.as_str() {
                     "session/prompt" => self.spawn_prompt(id, params).await,
-                    "session/execute" => self.spawn_execution(id, params),
                     "mcp/message" => self.spawn_acp_mcp_request(id, params).await,
-                    "session/input/snapshot" | "session/work/query" => {
+                    "session/input/snapshot" => {
                         self.spawn_session_io(id, method, params).await;
                     }
                     "peri/mcp/open" | "peri/mcp/app" | "peri/mcp/resource" | "peri/mcp/invoke" => {
@@ -91,51 +90,6 @@ impl ServerLoop<'_> {
         }
     }
 
-    fn spawn_execution(&self, id: RequestId, params: Value) {
-        let rejected_id = id.clone();
-        let cfg = Arc::clone(self.cfg);
-        let transport = Arc::clone(self.transport);
-        let sessions = Arc::clone(self.sessions);
-        let prompt_locks = Arc::clone(self.prompt_locks);
-        let continuation = Arc::clone(self.cont_tx);
-        let rejected_transport = Arc::clone(self.transport);
-        let spawned = self.cfg.host_task_spawner.spawn(
-            task_scope::HostTaskOwnerKind::Session,
-            task_scope::HostTaskKind::Prompt,
-            async move {
-                let result = super::execution::execute(
-                    params,
-                    super::execution::ExecutionContext {
-                        cfg: &cfg,
-                        transport: &transport,
-                        sessions: &sessions,
-                        prompt_locks: &prompt_locks,
-                        continuation: &continuation,
-                    },
-                )
-                .await;
-                let _ = transport.send_response(id, result).await;
-            },
-        );
-        if spawned.is_err() {
-            let _ = self.cfg.host_task_spawner.spawn(
-                task_scope::HostTaskOwnerKind::Host,
-                task_scope::HostTaskKind::Prompt,
-                async move {
-                    let _ = rejected_transport
-                        .send_response(
-                            rejected_id,
-                            Err(crate::transport::types::AcpError::new(
-                                -32800,
-                                "execution host is closing",
-                            )),
-                        )
-                        .await;
-                },
-            );
-        }
-    }
-
     async fn spawn_prompt(&self, id: RequestId, params: Value) {
         let diagnostics = ResponseDiagnostics::new(id, "session/prompt", &params);
         let sessions = self.sessions;
@@ -173,6 +127,7 @@ impl ServerLoop<'_> {
                 let result = dispatch_prompt_turn(
                     params,
                     false,
+                    None,
                     &sessions,
                     &prompt_locks,
                     &transport,

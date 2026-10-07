@@ -15,7 +15,7 @@ fn make_context() -> StageContext {
     let frozen = FrozenContext::builder().build();
     let session = Session::new(cwd, frozen, None);
     let turn = session.start_turn();
-    StageContext::new_best_effort_fixture(turn, session.transcript(), session.queue().clone())
+    StageContext::new(turn, session.transcript(), session.queue().clone())
 }
 
 /// 验证 run_reason 在多步 turn 中 emit 的 LlmCallEnd.step 与 turn.current_step() 一致
@@ -33,13 +33,9 @@ async fn test_run_reason_emits_llm_call_end_with_correct_step() {
     let frozen = FrozenContext::builder().build();
     let session = Session::new(cwd, frozen, None);
     let turn = session.start_turn();
-    let ctx = StageContext::best_effort_fixture_builder(
-        turn,
-        session.transcript(),
-        session.queue().clone(),
-    )
-    .with_event_bus(event_bus)
-    .build();
+    let ctx = StageContext::builder(turn, session.transcript(), session.queue().clone())
+        .with_event_bus(event_bus)
+        .build();
 
     // Act 1：step=0（turn 初始）→ NullReactLLM 触发错误路径 emit
     assert_eq!(ctx.session.turn.current_step(), 0);
@@ -134,13 +130,9 @@ async fn test_run_reason_emits_turn_error_interrupted_on_null_llm() {
     let frozen = FrozenContext::builder().build();
     let session = Session::new(cwd, frozen, None);
     let turn = session.start_turn();
-    let ctx = StageContext::best_effort_fixture_builder(
-        turn,
-        session.transcript(),
-        session.queue().clone(),
-    )
-    .with_event_bus(event_bus)
-    .build();
+    let ctx = StageContext::builder(turn, session.transcript(), session.queue().clone())
+        .with_event_bus(event_bus)
+        .build();
 
     let _ = run_reason(ReasonInput {
         context: ctx,
@@ -223,14 +215,10 @@ async fn test_run_reason_interrupted_runs_on_error_with_interrupted() {
     let frozen = FrozenContext::builder().build();
     let session = Session::new(cwd, frozen, None);
     let turn = session.start_turn();
-    let ctx = StageContext::best_effort_fixture_builder(
-        turn,
-        session.transcript(),
-        session.queue().clone(),
-    )
-    .with_event_bus(event_bus)
-    .with_middleware_chain(Arc::new(chain))
-    .build();
+    let ctx = StageContext::builder(turn, session.transcript(), session.queue().clone())
+        .with_event_bus(event_bus)
+        .with_middleware_chain(Arc::new(chain))
+        .build();
     // builder 默认 NullReactLLM → generate_reasoning 直接返回 Err(AgentError::Interrupted)
 
     let result = run_reason(ReasonInput {

@@ -70,14 +70,6 @@ impl TestSession {
         self.thread_id.clone()
     }
 
-    pub(crate) async fn reopened_resources(&self) -> Arc<dyn SessionResources> {
-        Arc::new(
-            SessionResourcesImpl::open(self._db.path().join("threads.db"))
-                .await
-                .unwrap(),
-        )
-    }
-
     pub(crate) async fn read_only_resources(&self) -> Arc<dyn SessionResources> {
         Arc::new(
             SessionResourcesImpl::open_existing_read_only(self._db.path().join("threads.db"))

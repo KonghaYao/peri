@@ -318,7 +318,6 @@ impl SessionEnvironment {
         cfg.session_manager
             .share_registry_with(&host.session_manager);
         cfg.controller = host.controller.clone();
-        cfg.execution_admission_port = host.execution_admission_port.clone();
         cfg.langfuse_session = host.langfuse_session.clone();
         cfg.stdio_command_filter = host.stdio_command_filter;
         let task_owner = cfg.host_task_owner.take().expect("session resource owner");

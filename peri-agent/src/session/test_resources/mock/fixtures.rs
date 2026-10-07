@@ -15,7 +15,6 @@ impl MockSessionResources {
         meta: ThreadMeta,
     ) -> Result<ThreadId, anyhow::Error> {
         let id = self.create_legacy_thread(meta).await?;
-        self.initialize_historical_fixture(&id).await;
         Ok(id)
     }
 
@@ -24,7 +23,6 @@ impl MockSessionResources {
         meta: ThreadMeta,
     ) -> Result<ThreadId, anyhow::Error> {
         let id = self.create_thread(meta).await?;
-        self.durable_backend(&id).await;
         Ok(id)
     }
 

@@ -139,7 +139,7 @@ async fn local_migration_preserves_session_and_execution_registration() {
 async fn late_migration_failure_keeps_v11_tables_and_credentials() {
     let (_directory, path, id) = old_database().await;
     let mut connection = connect(&path).await;
-    sqlx::query("ALTER TABLE threads ADD COLUMN extension_value TEXT")
+    sqlx::query("ALTER TABLE session_bindings ADD COLUMN evidence_origin TEXT")
         .execute(&mut connection)
         .await
         .unwrap();

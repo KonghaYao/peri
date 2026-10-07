@@ -11,6 +11,67 @@ struct CountingFinalAnswerLLM {
     answer: &'static str,
 }
 
+#[tokio::test]
+async fn loaded_history_never_replays_old_tools_and_new_input_starts_a_fresh_run() {
+    let session = Session::new(Arc::from("/tmp"), FrozenContext::builder().build(), None);
+    session
+        .transcript()
+        .write()
+        .append(BaseMessage::ai_with_tool_calls(
+            "old answer",
+            vec![crate::messages::ToolCallRequest::new(
+                "old-model-call",
+                "OldDelegate",
+                serde_json::json!({}),
+            )],
+        ));
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let context = StageContext::builder(
+        session.start_turn(),
+        session.transcript(),
+        session.queue().clone(),
+    )
+    .with_llm(Arc::new(CountingFinalAnswerLLM {
+        calls: calls.clone(),
+        answer: "fresh answer",
+    }))
+    .build();
+    assert!(matches!(
+        run_react_loop(context, 10).await,
+        LoopResult::Completed
+    ));
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    session.queue().push(QueuedMessage::prompt(
+        MessageSource::UserInput,
+        BaseMessage::human("new input"),
+    ));
+    let context = StageContext::builder(
+        session.start_turn(),
+        session.transcript(),
+        session.queue().clone(),
+    )
+    .with_llm(Arc::new(CountingFinalAnswerLLM {
+        calls: calls.clone(),
+        answer: "fresh answer",
+    }))
+    .build();
+    assert!(matches!(
+        run_react_loop(context, 10).await,
+        LoopResult::Completed
+    ));
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(
+        session
+            .transcript()
+            .read()
+            .visible_messages()
+            .last()
+            .unwrap()
+            .content(),
+        "fresh answer"
+    );
+}
+
 #[async_trait::async_trait]
 impl ReactLLM for CountingFinalAnswerLLM {
     async fn generate_reasoning(
@@ -167,17 +228,13 @@ async fn test_run_react_loop_final_answer_at_iteration_limit_completes() {
     );
     let turn = session.start_turn();
     let (bus, mut handles) = crate::agent::events_v2::EventBus::new(Default::default());
-    let context = StageContext::best_effort_fixture_builder(
-        turn,
-        session.transcript(),
-        session.queue().clone(),
-    )
-    .with_llm(Arc::new(CountingFinalAnswerLLM {
-        calls: Arc::clone(&calls),
-        answer: "done at the limit",
-    }))
-    .with_event_bus(Arc::new(bus))
-    .build();
+    let context = StageContext::builder(turn, session.transcript(), session.queue().clone())
+        .with_llm(Arc::new(CountingFinalAnswerLLM {
+            calls: Arc::clone(&calls),
+            answer: "done at the limit",
+        }))
+        .with_event_bus(Arc::new(bus))
+        .build();
     context.session.queue.push(QueuedMessage::prompt(
         MessageSource::UserInput,
         BaseMessage::human("final prompt"),
@@ -213,16 +270,12 @@ async fn test_run_react_loop_info_only_does_not_wake_model() {
         None,
     );
     let turn = session.start_turn();
-    let context = StageContext::best_effort_fixture_builder(
-        turn,
-        session.transcript(),
-        session.queue().clone(),
-    )
-    .with_llm(Arc::new(CountingFinalAnswerLLM {
-        calls: Arc::clone(&calls),
-        answer: "must not run",
-    }))
-    .build();
+    let context = StageContext::builder(turn, session.transcript(), session.queue().clone())
+        .with_llm(Arc::new(CountingFinalAnswerLLM {
+            calls: Arc::clone(&calls),
+            answer: "must not run",
+        }))
+        .build();
     context.session.queue.push(QueuedMessage::info(
         MessageSource::SystemInjected,
         BaseMessage::human("micro compact state update"),
@@ -248,16 +301,12 @@ async fn test_run_react_loop_defer_still_continues_to_model() {
         None,
     );
     let turn = session.start_turn();
-    let context = StageContext::best_effort_fixture_builder(
-        turn,
-        session.transcript(),
-        session.queue().clone(),
-    )
-    .with_llm(Arc::new(CountingFinalAnswerLLM {
-        calls: Arc::clone(&calls),
-        answer: "continued",
-    }))
-    .build();
+    let context = StageContext::builder(turn, session.transcript(), session.queue().clone())
+        .with_llm(Arc::new(CountingFinalAnswerLLM {
+            calls: Arc::clone(&calls),
+            answer: "continued",
+        }))
+        .build();
     context.session.queue.push(QueuedMessage::defer(
         MessageSource::SubAgentComplete,
         BaseMessage::human("real deferred result"),
@@ -284,17 +333,13 @@ async fn test_run_react_loop_empty_queue_with_zero_budget_completes_in_receive()
     );
     let turn = session.start_turn();
     let (bus, mut handles) = crate::agent::events_v2::EventBus::new(Default::default());
-    let context = StageContext::best_effort_fixture_builder(
-        turn,
-        session.transcript(),
-        session.queue().clone(),
-    )
-    .with_llm(Arc::new(CountingFinalAnswerLLM {
-        calls: Arc::clone(&calls),
-        answer: "must not run",
-    }))
-    .with_event_bus(Arc::new(bus))
-    .build();
+    let context = StageContext::builder(turn, session.transcript(), session.queue().clone())
+        .with_llm(Arc::new(CountingFinalAnswerLLM {
+            calls: Arc::clone(&calls),
+            answer: "must not run",
+        }))
+        .with_event_bus(Arc::new(bus))
+        .build();
 
     let result = run_react_loop(context.clone(), 0).await;
 
@@ -338,19 +383,15 @@ async fn test_run_react_loop_prompt_with_zero_budget_returns_max_iterations() {
     );
     let turn = session.start_turn();
     let (bus, mut handles) = crate::agent::events_v2::EventBus::new(Default::default());
-    let context = StageContext::best_effort_fixture_builder(
-        turn,
-        session.transcript(),
-        session.queue().clone(),
-    )
-    .with_llm(Arc::new(CountingFinalAnswerLLM {
-        calls: Arc::clone(&llm_calls),
-        answer: "must not run",
-    }))
-    .with_tools(tools)
-    .with_middleware_chain(Arc::new(chain))
-    .with_event_bus(Arc::new(bus))
-    .build();
+    let context = StageContext::builder(turn, session.transcript(), session.queue().clone())
+        .with_llm(Arc::new(CountingFinalAnswerLLM {
+            calls: Arc::clone(&llm_calls),
+            answer: "must not run",
+        }))
+        .with_tools(tools)
+        .with_middleware_chain(Arc::new(chain))
+        .with_event_bus(Arc::new(bus))
+        .build();
     context.session.queue.push(QueuedMessage::prompt(
         MessageSource::UserInput,
         BaseMessage::human("zero budget prompt"),
@@ -397,15 +438,11 @@ async fn test_run_react_loop_required_reason_beyond_limit_returns_max_iterations
     );
     let turn = session.start_turn();
     let (bus, mut handles) = crate::agent::events_v2::EventBus::new(Default::default());
-    let context = StageContext::best_effort_fixture_builder(
-        turn,
-        session.transcript(),
-        session.queue().clone(),
-    )
-    .with_llm(Arc::new(OneToolCallLLM(Arc::clone(&llm_calls))))
-    .with_tools(tools)
-    .with_event_bus(Arc::new(bus))
-    .build();
+    let context = StageContext::builder(turn, session.transcript(), session.queue().clone())
+        .with_llm(Arc::new(OneToolCallLLM(Arc::clone(&llm_calls))))
+        .with_tools(tools)
+        .with_event_bus(Arc::new(bus))
+        .build();
     context.session.queue.push(QueuedMessage::prompt(
         MessageSource::UserInput,
         BaseMessage::human("use one tool"),
@@ -465,24 +502,20 @@ async fn test_run_react_loop_idle_wake_does_not_consume_iteration_budget() {
     let handle = inbox.handle();
     let turn = session.start_turn();
     let (bus, mut handles) = crate::agent::events_v2::EventBus::new(Default::default());
-    let context = StageContext::best_effort_fixture_builder(
-        turn,
-        session.transcript(),
-        session.queue().clone(),
-    )
-    .with_llm(Arc::new(CountingFinalAnswerLLM {
-        calls: Arc::clone(&llm_calls),
-        answer: "done after wake",
-    }))
-    .with_middleware_chain(Arc::new(chain))
-    .with_event_bus(Arc::new(bus))
-    .with_idle_waiting()
-    .with_idle_should_wait({
-        let should_wait = Arc::clone(&should_wait);
-        Arc::new(move || should_wait.load(Ordering::Acquire))
-    })
-    .with_idle_suspended_flag(Arc::clone(&suspended))
-    .build();
+    let context = StageContext::builder(turn, session.transcript(), session.queue().clone())
+        .with_llm(Arc::new(CountingFinalAnswerLLM {
+            calls: Arc::clone(&llm_calls),
+            answer: "done after wake",
+        }))
+        .with_middleware_chain(Arc::new(chain))
+        .with_event_bus(Arc::new(bus))
+        .with_idle_waiting()
+        .with_idle_should_wait({
+            let should_wait = Arc::clone(&should_wait);
+            Arc::new(move || should_wait.load(Ordering::Acquire))
+        })
+        .with_idle_suspended_flag(Arc::clone(&suspended))
+        .build();
     let loop_context = context.clone();
     let loop_task = tokio::spawn(async move { run_react_loop(loop_context, 1).await });
     tokio::time::timeout(std::time::Duration::from_secs(1), async {

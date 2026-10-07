@@ -9,7 +9,6 @@ use super::*;
 async fn test_continuation_bypasses_keepgoing_short_circuit() {
     // Arrange：预取消 token，保证进入管线后快速中断（不触发真实 LLM 调用）
     let ctx = make_session_context("test-continuation").await;
-    execution_fixture::publish_continuation(&ctx).await;
     ctx.cancel.cancel();
     let stage_build = make_stage_build(&ctx);
     let mock_sink = Arc::new(MockEventSink::new());
@@ -46,7 +45,6 @@ async fn test_turn_terminal_state_unique_and_last() {
     // Arrange：预取消 token，进入管线后立即中断（不触发真实 LLM 调用）
     let mock_sink = Arc::new(MockEventSink::new());
     let ctx = make_session_context("test-turn-terminal").await;
-    execution_fixture::publish_continuation(&ctx).await;
     ctx.cancel.cancel();
     let stage_build = make_stage_build(&ctx);
     let turn = make_turn_input(

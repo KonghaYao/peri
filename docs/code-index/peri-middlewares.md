@@ -45,16 +45,14 @@ Workspace scope capability 和 owner 连接。可信 `ToolContext.session_id` �
 直接任务目录与发现 scope 的唯一地址；模型参数或 bridge 捕获的输出地址不能替换发起者。
 `client/subscription_task_binding.rs` 封装任务登记、取消及终态投递：提醒经发起会话的
 `TaskTerminalDelivery` 原子提交到其 canonical transcript（稳定投递 ID，幂等、可重投），
-MQ/收件箱只做唤醒；冷恢复从可信 Workspace snapshot/changes 的 `initiatorSessionId`
-重建直接归属。缺失或与发现 scope 冲突即 `Unroutable`，保持重试，不投父/root；收件箱
-未加载时也不改道。wire 回归见 `client/subscription_task_recovery_test.rs`，持久 Inbox 和
-owner 重启恢复仍属 RCRA 第 5 步。订阅在 owner 连续不可观测超过
-`LOST_ABANDON_ATTEMPTS` 次轮询后调用 `abandon_external` 产出终态并明确标注远端副作用未知；
+当前任务投递使用可信 session 归属；不在加载历史或进程启动时发现、接管旧调用。
+持久 invocation/owner 恢复已撤销，当前 task subscription/通知、cancel 与结果投递保留。
+实施及验证见 [active plan](../../spec/issues/2026-10-07-remove-execution-recovery-plan.md)。
 MCP Apps 模型签发 lease 保留 canonical dispatcher 与发起会话/turn；宿主
 `src/mcp/apps_invoke.rs::PoolMcpAppsRelay::invoke_app_inner` 在缺少 canonical 审批
 上下文时返回 `PolicyDenied`，不调用 server 或签发 lease。不存在 pool 直调 dispatcher；
 回归见 `mcp::apps_invoke::tests`，拒绝与取消不产生工具副作用。
-Workspace scope 快照完整应用即视为该 owner 的对账证据，清除对应执行 scope 的不确定记录。
+当前 scope 仅用于本进程任务权限与关联，不作为恢复旧执行的证据。
 `tasks/get` 轮询与 Workspace
 `workspace/taskSnapshot`/`workspace/taskChanges` cursor 对账将终态交给 Manager，
 Manager 先投递带稳定 delivery ID 的 Defer，再发布终态。订阅只有在结算成功，或 `false` 同时有同任务的终态快照证据时才结束；缺失条目与竞争中的结算必须重试。monitor 准入失败沿工具错误返回已存在的 opaque ID，并明确不保证通知、禁止盲目重跑；同键已有 monitor 可复用。回归入口为 `client/subscription_tasks_test.rs` 与 `client/output_store_test.rs`。
@@ -182,7 +180,6 @@ scope 快照携 epoch；`taskClose`/`taskOpen` 按该 epoch 做 owner 端 CAS，
 | System 启动准入 | client/readiness.rs（SystemReadinessTracker :239、DiscoveryEvidence :75、SystemReadinessError :159、await_system_connections :385）；middleware.rs（await_system_ready :401、before_react_start :774、startup_tool_update :499、prepared_static_bridges :558） |
 | **Builtin 实例（默认层 / 运行时 / 关闭集）** | 宿主 overlay：`builtin/mod.rs`（注入策略与关闭集；`workspace` 默认订阅 `workspace://git/ref` 的唯一声明在 `builtin/workspace_subscription.rs`）；runtime：`builtin/runtime.rs`（transport task、`TickGuard`、`BuiltinInstanceSupervisor`）；dispatch：`builtin/dispatch.rs`（`BuiltinServerHandler`、`builtin_server_handler`）；实例 handler 与共享映射 helper 已迁入独立 package，见 [MCP packages 代码索引](mcp-packages.md)。实例池入口为 `McpClientPool::spawn_builtin_transport`；订阅建立门 = `McpClientPool::subscription_allowed`（A24 关闭集命中 ⇒ 不建立 `subscriptions/listen`，零服务端副作用）；订阅面线路证据见 `builtin_subscription_wire_test.rs` |
 | MCP 调用失败 / 期限 / 取消 | 通用 `ToolFailure` 与 IF-D14 result mapping 归 `peri-mcp-common`；`tool_bridge.rs` 在发出可能创建 MCP Task 的调用前经 `client.rs::begin_external_task_execution` 取得会话执行 guard：完整响应或已登记 Task 才移交所有权，响应丢失、Future 丢弃、取消后未见终态均使关闭保持 Incomplete。`tool_request.rs` 管理请求期限；`client/output_store_test.rs::lost_mcp_task_receipt_keeps_session_shutdown_incomplete` 验证远端已创建 Task 但回执丢失的竞态。workspace 的 context 注入、恢复与 host 生命周期测试仍在 `builtin/{context,workspace_test.rs,workspace_recovery_test.rs}`。package 侧测试与入口见 [MCP packages 代码索引](mcp-packages.md) |
-| MCP invocation 准入 | `src/mcp/invocation.rs`：`McpInvocation::prepare` 只读校验 Agent 已提交的 `DispatchAccepted` intent、生命周期与 control 状态，不重复提交 `PrepareInvocation`，避免并发工具争用 session revision。Task binding 与未知结果仍经持久 mutation 结算；回归入口 `mcp::invocation::tests` |
 | Builtin 运行时回归 | host transport、dispatch、overlay、policy 与取消测试位于 `src/mcp/builtin*_test.rs` 和 `src/mcp/builtin/*_test.rs`；Workspace client/recovery 集成测试通过 package handler 验证真实桥接；Cron tick lifecycle 测试在 `builtin_cron_runtime_test.rs`。用 `cargo test -p peri-middlewares --lib -- mcp::builtin_runtime_tests --test-threads=1` 跑运行时套件，用 `cargo test -p peri-middlewares --lib -- mcp::builtin_cron_runtime_tests --test-threads=1` 跑 tick 生命周期 |
 | System 必需工具注入 | system_tools.rs（prepare_system_tools :61、SystemToolError :24）；tool_bridge.rs（build_typed_tool_bridges :422、with_direct :192、original_tool_name :204） |
 | Dynamic registry | dynamic/registry.rs（RegistryState 所有权、deployment port 与公开 re-export）；registry/connector.rs（ProductionDynamicMcpConnector）；registry/load.rs / unload.rs / lifecycle.rs（操作与关闭）；registry/operations.rs（查询与通知）；registry/capability.rs（collision、snapshot 与 projection lease） |

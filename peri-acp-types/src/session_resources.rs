@@ -18,12 +18,6 @@
 //! 旧 `ThreadStore`（[`crate::store::ThreadStore`]）是迁移桥，见其模块文档。
 
 use std::collections::HashMap;
-pub mod control;
-pub mod work;
-pub use control::{
-    ControlAction, ControlAttempt, ControlCommand, ControlDecision, ControlReceipt,
-    ControlRejection, ControlResolution, ControlState, ControlStatus,
-};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -506,113 +500,6 @@ pub trait ChildResumeClaim: Send + Sync {
 /// - 结果不确定时返回 [`SessionResourceError::persistence_uncertain`]，不得重试后伪装成功。
 #[async_trait]
 pub trait SessionResources: Send + Sync {
-    async fn load_resource_owner_facts(
-        &self,
-        id: &ThreadId,
-        previous_lifecycle: u64,
-    ) -> SessionResourceResult<work::ResourceOwnerFacts> {
-        let snapshot = self
-            .load_session_work(&work::WorkQuery {
-                session_id: id.clone(),
-                limit: 1,
-            })
-            .await?;
-        let lifecycle = snapshot.control.lifecycle;
-        Ok(work::ResourceOwnerFacts {
-            control: snapshot.control,
-            revision: snapshot.state.revision,
-            current_owner: snapshot.state.resource_owners.get(&lifecycle).cloned(),
-            previous_owner: snapshot
-                .state
-                .resource_owners
-                .get(&previous_lifecycle)
-                .cloned(),
-            current_child_metadata: snapshot
-                .state
-                .child_resume_metadata
-                .get(&lifecycle)
-                .cloned(),
-            previous_child_metadata: snapshot
-                .state
-                .child_resume_metadata
-                .get(&previous_lifecycle)
-                .cloned(),
-        })
-    }
-    async fn load_work_revision(&self, id: &ThreadId) -> SessionResourceResult<u64> {
-        Ok(self.load_work_availability(id).await?.state.revision)
-    }
-    async fn load_work_availability(
-        &self,
-        _id: &ThreadId,
-    ) -> SessionResourceResult<work::WorkAvailability> {
-        Err(SessionResourceError::new(
-            SessionResourceErrorKind::Unsupported,
-        ))
-    }
-    async fn load_work_delivery(
-        &self,
-        _query: &work::WorkDeliveryQuery,
-    ) -> SessionResourceResult<Option<work::DeliveryRecord>> {
-        Err(SessionResourceError::new(
-            SessionResourceErrorKind::Unsupported,
-        ))
-    }
-    async fn load_work_command(
-        &self,
-        _query: &work::WorkCommandQuery,
-    ) -> SessionResourceResult<Option<work::OwnedWorkCommand>> {
-        Err(SessionResourceError::new(
-            SessionResourceErrorKind::Unsupported,
-        ))
-    }
-    async fn load_session_work(
-        &self,
-        _query: &work::WorkQuery,
-    ) -> SessionResourceResult<work::WorkSnapshot> {
-        Err(SessionResourceError::new(
-            SessionResourceErrorKind::Unsupported,
-        ))
-    }
-    async fn apply_work_mutation(
-        &self,
-        _command: &work::PreparedWorkCommand,
-    ) -> SessionResourceResult<work::WorkReceipt> {
-        Err(SessionResourceError::new(
-            SessionResourceErrorKind::Unsupported,
-        ))
-    }
-    async fn resolve_work_mutation(
-        &self,
-        _command: &work::PreparedWorkCommand,
-    ) -> SessionResourceResult<work::WorkResolution> {
-        Err(SessionResourceError::new(
-            SessionResourceErrorKind::Unsupported,
-        ))
-    }
-    async fn load_session_control(&self, _id: &ThreadId) -> SessionResourceResult<ControlState> {
-        Err(SessionResourceError::new(
-            SessionResourceErrorKind::Unsupported,
-        ))
-    }
-
-    async fn apply_session_control(
-        &self,
-        _command: &ControlCommand,
-    ) -> SessionResourceResult<ControlReceipt> {
-        Err(SessionResourceError::new(
-            SessionResourceErrorKind::Unsupported,
-        ))
-    }
-
-    async fn resolve_session_control(
-        &self,
-        _command: &ControlCommand,
-    ) -> SessionResourceResult<ControlResolution> {
-        Err(SessionResourceError::new(
-            SessionResourceErrorKind::Unsupported,
-        ))
-    }
     fn oauth_credentials(
         &self,
     ) -> Option<std::sync::Arc<dyn crate::oauth_credentials::OAuthCredentialPort>> {

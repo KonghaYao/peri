@@ -1,30 +1,24 @@
 # peri-tui 代码索引
 
-输入延迟入口：`kit/steer_consumer.rs` 合并后台 Refresh，用户 Enqueue 不等待慢刷新；`acp_client/client/steer.rs` 在身份绑定/请求登记边界持 gate，普通回执等待在锁外，snapshot 回包用 typed identity 重验。`client/pump.rs` 分离接收与有序投影，work 通知及执行准入不被投影 gate 阻挡；回归见 `client/latency_test.rs`。
+输入延迟入口：`kit/steer_consumer.rs` 合并后台 Refresh，用户 Enqueue 不等待慢刷新；`acp_client/client/steer.rs` 在身份绑定/请求登记边界持 gate，普通回执等待在锁外，snapshot 回包用 typed identity 重验。`client/pump.rs` 接收普通 ACP 响应与通知，不再转发 SDK 执行准入；回归见 `client/latency_test.rs`。
 
 输入反馈仍遵循 [待发送队列设计](../design/user-input-queue.md)：`kit/steer_state.rs::direct_submitting` 驱动 composer “正在提交…”，不是 Delivered 气泡。消息区用 `message_area/vm_cache.rs::read_render_snapshot` 短锁复制一致 VM/publication 后锁外派生；Transcript 跳代只重建实际变化的内容键，冷历史、布局和复制回归见 `transcript_test.rs`。
 
 Markdown 高亮预算在 `kit/markdown/code_block.rs`，超限保留原文，仅不做语法着色；`markdown/workload_test.rs` 与 `code_block_test.rs` 覆盖复杂结构及预算边界。`perf.render` 的 `message-body-total` 只覆盖消息组件准备，不能当作终端 draw/flush 或 Enter 端到端计时。
 
-显式停止入口 `src/acp_client/client/requests.rs::cancel` 先读取持久控制状态，有当前 attempt 时提交精确 Stop，无 attempt 时提交 Pause；稳定 command ID 的 Unknown 按原命令对账，不改投后来的 attempt。接纳控制意图不等于已静止，loading/交互终结仍等待执行结束通知；回归见 `src/acp_client/client/cancel_test.rs`。
+显式停止入口 `src/acp_client/client/requests.rs::cancel` 在当前交互 gate 内读取会话与 managed run，结清本地待处理交互后发送 `session/cancel` 通知。通知发送不等于执行已静止，loading/交互终结仍等待执行结束通知；回归见 `src/acp_client/client/cancel_test.rs`。
 
 > 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-30（Session ID/environment：删除 dirty 恢复风险弹窗、RecoverDirty 和 reset 交互；保留 load reservation、只读准入投影与普通确认）。
 > 依据：peri-tui/CLAUDE.md、docs/standards/architecture-contracts.md、docs/design/tui-acp-data-flow.md、源码
 
 ## 架构速览
 
-嵌入式 TUI 与 print 的 SDK 执行部署入口是 `src/sdk_execution.rs::launch_sdk_dispatcher_for_client`，
-由 `src/launch.rs`、`src/cli_print.rs` 注入。安装布局要求可执行文件同目录下的
-`peri-sdk/execution/sidecar.js`（SDK build 产物 `dist/execution/sidecar.js`，安装器必须复制到该可信布局）；开发布局只读取编译时仓库路径
-`npm-packages/@peri-sdk/src/execution/sidecar.ts`，不从用户工作区寻找模块。
-launcher 从绝对 PATH 目录定位 Bun，以模块目录为工作目录启动 JSONL sidecar，
-持久 SQLite registry 位于 `~/.peri/execution/registry.db`。缺 Bun、模块、持久存储
-或协议能力时启动报错；没有 Rust scheduler、Rust lease/CAS 或默认内存准入回落。
-`src/acp_client/client/pump.rs` 转发 admit/entered/settle reverse RPC，收到
-`session/work/available` 只向 SDK 发 activate hint。SDK 经全双工 JSONL 请求 ACP
-query/execute/resolve；精确 existing ticket 确认不再次准入，Unknown 不推断 ownership 已释放。
+嵌入式 TUI 与 print 由 `src/launch.rs`、`src/cli_print.rs` 创建普通 ACP host/client pump，
+不启动 Bun SDK sidecar，不依赖持久 execution registry 或 reverse admission。
+history 加载保留原 session load、事件重放和 load reservation；不恢复旧执行。
+SDK alpha 源码未修改，其旧执行恢复协议不再由该后端支持。
 
-持久输入撤回入口 `src/kit/steer_state.rs` 以原 snapshot 与 pending command 共同校验：
+当前进程输入撤回入口 `src/kit/steer_state.rs` 以原 snapshot 与 pending command 共同校验：
 Queued 与未 claim 的 Dispatching 可以请求权威 withdraw receipt；Claimed 不可以。
 Unknown enqueue/dispatch/withdraw 保留原命令，禁止同时重发、撤回或恢复编辑器内容。
 视图 `src/kit/steer_queue/view.rs` 不把 Claimed 当作可撤回的 Dispatching。
@@ -35,8 +29,8 @@ Unknown enqueue/dispatch/withdraw 保留原命令，禁止同时重发、撤回�
 `test_steer_idle_submission_snapshot_without_receipt_stays_direct`、
 `test_steer_idle_submission_queued_receipt_exposes_real_queue` 与
 `test_steer_idle_submission_staged_snapshot_then_dispatch_skips_queue`。
-回归入口：`sdk_execution::tests`、`kit::steer_state::tests`、`kit::steer_queue::tests`；
-JSONL/SQLite transport 的协议与故障测试见 `peri-acp/src/host/execution_admission*_test.rs`。
+回归入口：`client::cancel_tests`、`client::recovery_tests`、`kit::steer_state::tests`、`kit::steer_queue::tests`；
+后端历史与已删除协议回归见 `peri-acp/src/host/{requests_history_lifecycle_test,session_io_test}.rs`。
 
 设置类型和配置源见 [`peri-config`](peri-config.md)：`src/config/mod.rs` 保留公共
 re-export，`tui_config.rs` 只 re-export core `ui::TuiConfig`。`kit/entry.rs` 优先从

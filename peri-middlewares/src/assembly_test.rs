@@ -45,14 +45,8 @@ use crate::{
     tools::TodoItem,
 };
 use peri_acp_types::agents::AgentOverrides;
-use peri_acp_types::execution_admission::{
-    AdmissionOutcome, AdmissionRequest, EntryOutcome, EntryReceipt, EntryRequest,
-    ExecutionAdmissionError, ExecutionAdmissionPort, SettlementOutcome, SettlementReceipt,
-    SettlementRequest,
-};
 use peri_acp_types::session_resources::{
-    work::{WorkAction, WorkAdmission, WorkCommand, WorkDecision, WorkQuery},
-    ControlAttempt, FrozenSnapshotBytes, NewSession, NewSessionMeta, SessionResources,
+    FrozenSnapshotBytes, NewSession, NewSessionMeta, SessionResources,
 };
 use peri_acp_types::workspace::SessionBinding;
 use peri_resources::sessions::SessionResourcesImpl;
@@ -502,7 +496,6 @@ fn workflow_context_with_disabled(disabled: &[&str]) -> WorkflowAgentContext {
         mcp_skill_registry: None,
         session_id: None,
         session_resources: None,
-        execution_admission_port: None,
         compact_config: None,
         cancel: None,
         system_prompt: None,
@@ -558,34 +551,6 @@ impl WorkflowExecutionFixture {
             })
             .await
             .unwrap();
-        let snapshot = resources
-            .load_session_work(&WorkQuery {
-                session_id: parent_id.to_owned(),
-                limit: 1,
-            })
-            .await
-            .unwrap();
-        let receipt = resources
-            .apply_work_mutation(
-                &peri_acp_types::session_resources::work::PreparedWorkCommand::try_new(
-                    WorkCommand {
-                        session_id: parent_id.to_owned(),
-                        recipient_lifecycle: snapshot.control.lifecycle,
-                        mutation_id: format!("fixture-workflow-owners:{parent_id}"),
-                        action: WorkAction::BindResourceOwners {
-                            expected_revision: snapshot.state.revision,
-                            connections_json:
-                                "{\"workspace\":{\"url\":\"https://workspace.test.invalid/mcp\"}}"
-                                    .into(),
-                            authorization_ref: "fixture-workflow-authorization".into(),
-                        },
-                    },
-                )
-                .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(receipt.decision, WorkDecision::Accepted);
         Self {
             _directory: directory,
             resources,
@@ -598,80 +563,6 @@ impl WorkflowExecutionFixture {
         context.cwd = self.cwd.clone();
         context.session_id = Some(self.parent_id.clone());
         context.session_resources = Some(self.resources.clone());
-        context.execution_admission_port =
-            Some(Arc::new(WorkflowFixtureAdmission(self.resources.clone())));
-    }
-}
-
-struct WorkflowFixtureAdmission(Arc<dyn SessionResources>);
-
-#[async_trait]
-impl ExecutionAdmissionPort for WorkflowFixtureAdmission {
-    async fn admit(
-        &self,
-        request: AdmissionRequest,
-    ) -> Result<AdmissionOutcome, ExecutionAdmissionError> {
-        let snapshot = request.snapshot;
-        let Some(candidate) = snapshot.candidates.first() else {
-            return Ok(AdmissionOutcome::Blocked {
-                reason: "fixture has no durable work".into(),
-            });
-        };
-        Ok(AdmissionOutcome::Admitted {
-            admission: WorkAdmission {
-                session_id: snapshot.session_id,
-                admission_id: request.request_id,
-                instance_id: "fixture-sdk-instance".into(),
-                generation_id: "fixture-sdk-generation".into(),
-                lifecycle: snapshot.control.lifecycle,
-                control_generation: snapshot.control.control_generation,
-                work_id: candidate.work_id.clone(),
-                work_revision: candidate.work_revision,
-                execution: ControlAttempt {
-                    turn_id: peri_acp_types::session::TurnId::new(),
-                    attempt_id: peri_acp_types::identity::AttemptId::new(),
-                },
-            },
-        })
-    }
-
-    async fn entered(
-        &self,
-        request: EntryRequest,
-    ) -> Result<EntryOutcome, ExecutionAdmissionError> {
-        let snapshot = self
-            .0
-            .load_session_work(&WorkQuery {
-                session_id: request.admission.session_id.clone(),
-                limit: 1,
-            })
-            .await
-            .map_err(|error| ExecutionAdmissionError::Protocol(error.to_string()))?;
-        let registration = &snapshot.state.admissions[&request.admission.admission_id];
-        assert_eq!(registration.admission, request.admission);
-        assert_eq!(
-            registration.entering_receipt.as_ref().unwrap().mutation_id,
-            request.entry_evidence_id
-        );
-        Ok(EntryOutcome::Applied {
-            receipt: EntryReceipt {
-                admission: request.admission,
-                entry_evidence_id: request.entry_evidence_id,
-            },
-        })
-    }
-
-    async fn settle(
-        &self,
-        request: SettlementRequest,
-    ) -> Result<SettlementOutcome, ExecutionAdmissionError> {
-        assert!(request.proof.validates(&request.admission));
-        Ok(SettlementOutcome::Applied {
-            receipt: SettlementReceipt {
-                admission: request.admission,
-                evidence_id: request.proof.evidence_id().to_owned(),
-            },
-        })
     }
 }
 

@@ -271,6 +271,3 @@ mod fork;
 
 #[path = "resources_composition_test.rs"]
 mod composition;
-
-#[path = "resources_pending_work_test.rs"]
-mod pending_work;

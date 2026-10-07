@@ -1,10 +1,7 @@
 use std::sync::Arc;
 
 mod claim;
-mod cold;
 mod context;
-mod delegation;
-pub use cold::{ChildResumeMetadata, ColdChildBlocked, ColdChildExecution, ColdChildRuntime};
 mod resume;
 mod spawn;
 
@@ -14,7 +11,7 @@ mod completion_delivery_tests;
 
 use super::types::{SubagentResumeConfig, SubagentSpawnConfig, SubagentSpawned};
 use crate::session::Session;
-pub(super) use claim::{clear_stopped_attempt, ResumeClaim};
+pub(super) use claim::ResumeClaim;
 use resume::resume_subagent_impl;
 use spawn::spawn_subagent_impl;
 

@@ -1,14 +1,12 @@
 use super::*;
-use crate::agent::async_tasks::durable_task_terminal_delivery;
-use crate::session::test_resources::{mock::work::bind_fixture_task, TestSession};
+use crate::agent::async_tasks::delivery::SessionTerminalDelivery;
 use peri_acp_types::session::MessageQueue;
-use peri_acp_types::session_resources::work::WorkQuery;
 
 fn shell_result(task_id: &str) -> BackgroundTaskResult {
     BackgroundTaskResult {
         task_id: task_id.into(),
         agent_name: "Bash".into(),
-        prompt_summary: "durable shell".into(),
+        prompt_summary: "shell".into(),
         success: true,
         output: "terminal output".into(),
         tool_calls_count: 0,
@@ -22,15 +20,50 @@ fn shell_result(task_id: &str) -> BackgroundTaskResult {
 
 async fn wait_for_ack(callback: &OnBgCompleteFn, result: &BackgroundTaskResult) {
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        loop {
-            if callback(result, BgTaskKind::Shell).is_ok() {
-                break;
-            }
+        while callback(result, BgTaskKind::Shell).is_err() {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     })
     .await
-    .expect("durable terminal publication never acknowledged");
+    .unwrap();
+}
+
+struct FailedDelivery;
+impl peri_acp_types::tasks::TaskTerminalDelivery for FailedDelivery {
+    fn deliver<'a>(
+        &'a self,
+        _: peri_acp_types::messages::MessageId,
+        _: &'a peri_acp_types::system_reminder::TrustedSystemReminder,
+        _: peri_acp_types::session::MessageSource,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async { Err("current terminal delivery unavailable".into()) })
+    }
+}
+fn failed_terminal_callback() -> OnBgCompleteFn {
+    task_bg_complete_callback(Arc::new(FailedDelivery))
+}
+
+#[tokio::test]
+async fn current_terminal_delivery_is_accepted_once_without_a_ledger() {
+    let queue = MessageQueue::new();
+    let callback = task_bg_complete_callback(SessionTerminalDelivery::for_queue(queue.clone()));
+    let result = shell_result("shell-current");
+    wait_for_ack(&callback, &result).await;
+    callback(&result, BgTaskKind::Shell).unwrap();
+    assert_eq!(queue.drain_batch(64).len(), 1);
+}
+
+#[tokio::test]
+async fn same_terminal_identity_cannot_acknowledge_changed_payload() {
+    let queue = MessageQueue::new();
+    let callback = task_bg_complete_callback(SessionTerminalDelivery::for_queue(queue.clone()));
+    let mut result = shell_result("shell-conflict");
+    wait_for_ack(&callback, &result).await;
+    result.output = "changed".into();
+    assert!(callback(&result, BgTaskKind::Shell)
+        .unwrap_err()
+        .contains("conflicting"));
+    assert_eq!(queue.drain_batch(64).len(), 1);
 }
 
 // ─── Inline log capture ──────────────────────────────────────────────────────
@@ -142,113 +175,11 @@ async fn wait_for_log_lines(logs: &CapturedLogs, needle: &str, expected: usize) 
     });
 }
 
-/// 未绑定 task binding 的投递：必然在 `delivery.rs` 的 binding 查找处失败。
-fn unbound_terminal_callback(bound: &TestSession) -> OnBgCompleteFn {
-    durable_bg_complete_callback(durable_task_terminal_delivery(
-        bound.resources(),
-        bound.thread_id(),
-        1,
-        MessageQueue::new(),
-    ))
-}
-
-#[tokio::test]
-async fn owner_ack_requires_confirmed_reliable_inbox_not_queue_or_transcript() {
-    let bound = TestSession::open().await;
-    bind_fixture_task(bound.resources(), &bound.thread_id(), 1, "shell-durable").await;
-    let queue = MessageQueue::new();
-    let delivery =
-        durable_task_terminal_delivery(bound.resources(), bound.thread_id(), 1, queue.clone());
-    let callback = durable_bg_complete_callback(delivery);
-    let result = shell_result("shell-durable");
-    assert!(callback(&result, BgTaskKind::Shell).is_err());
-    wait_for_ack(&callback, &result).await;
-    assert!(callback(&result, BgTaskKind::Shell).is_ok());
-    let snapshot = bound
-        .resources
-        .load_session_work(&WorkQuery {
-            session_id: bound.thread_id(),
-            limit: 1,
-        })
-        .await
-        .unwrap();
-    assert_eq!(snapshot.state.deliveries.len(), 1);
-    assert_eq!(snapshot.state.task_bindings.len(), 1);
-    assert!(bound
-        .resources
-        .load_session_history(&bound.thread_id())
-        .await
-        .unwrap()
-        .is_empty());
-}
-
-#[tokio::test]
-async fn missing_immutable_task_binding_never_acknowledges_or_falls_back_to_queue() {
-    let bound = TestSession::open().await;
-    let queue = MessageQueue::new();
-    let callback = durable_bg_complete_callback(durable_task_terminal_delivery(
-        bound.resources(),
-        bound.thread_id(),
-        1,
-        queue.clone(),
-    ));
-    let result = shell_result("unbound-shell");
-    for _ in 0..10 {
-        assert!(callback(&result, BgTaskKind::Shell).is_err());
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-    assert!(queue.is_empty());
-    let snapshot = bound
-        .resources
-        .load_session_work(&WorkQuery {
-            session_id: bound.thread_id(),
-            limit: 1,
-        })
-        .await
-        .unwrap();
-    assert!(snapshot.state.deliveries.is_empty());
-    assert!(bound
-        .resources
-        .load_session_history(&bound.thread_id())
-        .await
-        .unwrap()
-        .is_empty());
-}
-
-#[tokio::test]
-async fn same_terminal_identity_cannot_acknowledge_changed_payload() {
-    let bound = TestSession::open().await;
-    bind_fixture_task(bound.resources(), &bound.thread_id(), 1, "shell-conflict").await;
-    let callback = durable_bg_complete_callback(durable_task_terminal_delivery(
-        bound.resources(),
-        bound.thread_id(),
-        1,
-        MessageQueue::new(),
-    ));
-    let mut result = shell_result("shell-conflict");
-    assert!(callback(&result, BgTaskKind::Shell).is_err());
-    wait_for_ack(&callback, &result).await;
-    result.output = "different terminal output".into();
-    assert!(callback(&result, BgTaskKind::Shell)
-        .unwrap_err()
-        .contains("conflicting"));
-    let snapshot = bound
-        .resources
-        .load_session_work(&WorkQuery {
-            session_id: bound.thread_id(),
-            limit: 1,
-        })
-        .await
-        .unwrap();
-    assert_eq!(snapshot.state.deliveries.len(), 1);
-}
-
 #[tokio::test]
 async fn terminal_publication_failure_reason_is_visible_at_default_log_level() {
-    let bound = TestSession::open().await;
     let logs = CapturedLogs::default();
     let _capture = capture_logs(&logs);
-    let callback = unbound_terminal_callback(&bound);
+    let callback = failed_terminal_callback();
     let result = shell_result("unbound-shell");
 
     // 同步返回值仍是 Pending 契约；真实原因只能由异步结果回写路径记录。
@@ -267,7 +198,7 @@ async fn terminal_publication_failure_reason_is_visible_at_default_log_level() {
         logs.text()
     );
     assert!(
-        failure_line.contains("terminal publication has no durable invocation/task binding"),
+        failure_line.contains("current terminal delivery unavailable"),
         "captured:\n{}",
         logs.text()
     );
@@ -275,10 +206,9 @@ async fn terminal_publication_failure_reason_is_visible_at_default_log_level() {
 
 #[tokio::test]
 async fn terminal_publication_retry_keeps_reason_visible_without_log_flooding() {
-    let bound = TestSession::open().await;
     let logs = CapturedLogs::default();
     let _capture = capture_logs(&logs);
-    let callback = unbound_terminal_callback(&bound);
+    let callback = failed_terminal_callback();
     let result = shell_result("unbound-shell");
 
     assert!(callback(&result, BgTaskKind::Shell).is_err());
@@ -316,7 +246,7 @@ async fn terminal_publication_retry_keeps_reason_visible_without_log_flooding() 
         logs.text()
     );
     assert!(
-        retry_line.contains("terminal publication has no durable invocation/task binding"),
+        retry_line.contains("current terminal delivery unavailable"),
         "captured:\n{}",
         logs.text()
     );

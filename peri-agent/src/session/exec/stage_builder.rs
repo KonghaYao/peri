@@ -76,11 +76,6 @@ use tools::build_session_tool_view;
 ///   的参数化入口——ACP 侧保留实现，本模块只消费。
 #[allow(clippy::type_complexity)]
 pub struct StageBuildInput {
-    pub recipient_lifecycle: u64,
-    pub execution_admission_port:
-        Option<Arc<dyn peri_acp_types::execution_admission::ExecutionAdmissionPort>>,
-    pub sdk_run_started: Option<crate::agent::stages::SdkRunStartedFn>,
-    pub sdk_admission_observed: Option<crate::agent::stages::SdkAdmissionObservedFn>,
     // ── 会话数据 ──
     /// 工作目录
     pub cwd: String,
@@ -501,7 +496,6 @@ pub fn build_stage_context(
         builder,
         input,
         dependencies::StageDependencies {
-            task_manager: task_manager.clone(),
             goal_controller,
             context_budget,
             compact_config,

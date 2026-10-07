@@ -77,7 +77,6 @@ impl SessionManager {
         let task_manager = task_manager.unwrap_or_else(|| self.new_session_task_manager());
 
         AcpSession {
-            recipient_lifecycle: 1,
             session_id: session_id.to_string(),
             thread_id,
             cwd: cwd.to_string(),
@@ -103,7 +102,6 @@ impl SessionManager {
             session_inbox: None,
             user_input_mailbox: None,
             user_input_events_cancel: CancellationToken::new(),
-            inbox_work_notifications: None,
             cron_bridge: None,
             task_manager,
             task_events_started: std::sync::atomic::AtomicBool::new(false),

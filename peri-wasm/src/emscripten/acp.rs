@@ -9,12 +9,11 @@ use parking_lot::RwLock;
 use peri_acp::{
     host::{
         assemble::{assemble_wasm_server_config, WasmHostAssemblyInput},
-        execution_admission::ReverseExecutionAdmission,
         spawn_acp_server, AcpHostHandle,
     },
     provider::{ConfigSource, LlmProvider},
     transport::{
-        mpsc::mpsc_transport_pair, wire_bridge::WireBridge, AcpRequestBridge, AcpTransport,
+        mpsc::mpsc_transport_pair, wire_bridge::WireBridge, AcpTransport,
     },
 };
 use peri_acp_types::permission::{PermissionMode, SharedPermissionMode};
@@ -83,7 +82,7 @@ impl PeriWasmAcp {
         .await
         .map_err(js_error)?;
         let (session_resources, session_store_shutdown) = resources.into_parts();
-        let mut host_config = assemble_wasm_server_config(WasmHostAssemblyInput {
+        let host_config = assemble_wasm_server_config(WasmHostAssemblyInput {
             provider,
             peri_config: Arc::new(RwLock::new(config)),
             config_source: source,
@@ -97,9 +96,6 @@ impl PeriWasmAcp {
         let (client, server) = mpsc_transport_pair();
         let bridge = WireBridge::new(client);
         let transport: Arc<dyn AcpTransport> = Arc::new(server);
-        host_config.execution_admission_port = Some(Arc::new(ReverseExecutionAdmission::new(
-            Arc::new(AcpRequestBridge(transport.clone())),
-        )));
         let host = spawn_acp_server(transport, host_config);
         Ok(Self {
             bridge,

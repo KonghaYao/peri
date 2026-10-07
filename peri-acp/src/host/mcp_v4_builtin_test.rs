@@ -526,8 +526,6 @@ async fn closed_web_tool_call_never_reaches_approval_or_wire() {
     let ctx =
         session_context_with_broker(&harness, "mcp-v4-builtin-closed-diff", Arc::clone(&broker))
             .await;
-    let resources = ctx.session_resources.clone().unwrap();
-    let session_id = ctx.session_id.clone();
     let result = run_wire_prompt_with_frozen(
         ctx,
         &sink,
@@ -577,20 +575,6 @@ async fn closed_web_tool_call_never_reaches_approval_or_wire() {
         closed_ends.is_empty(),
         "不得虚构未 dispatch 工具的结算: {all_ends:?}"
     );
-    let work = resources
-        .load_session_work(&peri_acp_types::session_resources::work::WorkQuery {
-            session_id,
-            limit: 100,
-        })
-        .await
-        .unwrap();
-    assert!(!work.blocked, "未知工具错误不应伪造持久 Work 阻塞");
-    assert!(!work
-        .state
-        .invocations
-        .values()
-        .any(|record| record.intent.tool_name == CLOSED_NAME));
-
     // ④ wire 面：关闭名 0 次；available 工具恰一条（同一 turn 内的正控制）。
     let calls = wire_tool_calls(&harness);
     assert!(

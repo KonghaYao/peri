@@ -6,7 +6,6 @@
 //! peri-acp-types（接口契约归 peri-acp-types），本模块仅实现，不解释业务语义。
 
 mod canonical;
-mod control;
 mod data;
 #[cfg(not(target_os = "emscripten"))]
 mod discovery;
@@ -15,7 +14,6 @@ mod failure;
 mod filesystem;
 mod local_port;
 mod machine;
-mod work;
 #[cfg(not(target_os = "emscripten"))]
 pub use machine::adopt_file_identity;
 pub use machine::current as current_machine_id;

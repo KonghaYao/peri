@@ -809,7 +809,6 @@ impl McpClientPool {
     }
 }
 
-mod invocation_owner_recovery;
 mod ports;
 mod session_bindings;
 

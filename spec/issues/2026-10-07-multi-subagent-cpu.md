@@ -1,5 +1,7 @@
 # 多 Subagent 并发期间 CPU 偏高：现场调查
 
+> 2026-10-07 后续裁决：本 issue 中持久执行恢复/WorkState 优化部分被[完整剥离计划](2026-10-07-remove-execution-recovery-plan.md)取代；既有历史观察与验证记录保留，不作为保留执行账本的要求。
+
 **状态**：Open / 阶段 A 已交付，待性能验收（2026-10-07）。未完成受控单 Agent / 多 Agent 对比，不宣布 CPU 已根治。
 
 ## 观察

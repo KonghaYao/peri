@@ -90,12 +90,6 @@ impl StageContextBuilder {
 
     pub fn build(self) -> StageContext {
         StageContext {
-            sdk_run_started: self.sdk_run_started,
-            sdk_admission_observed: self.sdk_admission_observed,
-            recipient_lifecycle: self.recipient_lifecycle,
-            mcp_work_binding: self.mcp_work_binding,
-            work: self.work,
-            execution_admission_port: self.execution_admission_port,
             session: self.session,
             runtime: self.runtime,
             compact: self.compact,

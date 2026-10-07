@@ -104,8 +104,6 @@ pub trait SubagentChainAssembler: Send + Sync {
 #[derive(Clone, Default)]
 #[allow(clippy::type_complexity)]
 pub struct SubagentHost {
-    pub execution_admission_port:
-        Option<Arc<dyn peri_acp_types::execution_admission::ExecutionAdmissionPort>>,
     pub close_state: Arc<super::close::SubagentCloseState>,
     pub mcp_pool: Option<Arc<dyn peri_acp_types::ports::McpPoolPort>>,
     /// 会话资源门面（生产路径非 None；None 仅测试/遗留路径，跳过落库）
@@ -209,11 +207,11 @@ pub struct SubagentSpawnConfig {
     /// 父 agent 事件侧 AgentId（v2 SubagentStart/Stop 的 agent_id 字段；
     /// None = /bg 命令等无 Langfuse tracer 路径 → 不 emit v2 Start/Stop）
     pub parent_agent_id: Option<AgentId>,
-    /// 发起本次子 agent 的父 Agent 持久化执行身份（InvocationIntent.invocation_id）。
+    /// 发起本次子 agent 的父 Agent 模型 tool-call 身份。
     ///
-    /// 来源是父侧 `ToolContext.invocation_id`，用于委派授权与任务绑定。
-    /// 启动事件独立读取该 intent 的 tool_call_id，禁止把执行身份当作卡片身份。
-    pub parent_invocation_id: Option<String>,
+    /// 来源是父侧 `ToolContext.tool_call_id`；不查询旧执行账本。
+    /// 不能以当前工具 invocation_id 替代模型卡片身份。
+    pub parent_tool_call_id: Option<String>,
     // ── 父侧数据回退（parent 为 None 时使用；parent 存在时被覆盖） ──
     /// 父 cancel token（Cascade 时取其 child_token；parent 存在时从 parent 读取）
     pub cancel_token: Option<CancellationToken>,
@@ -410,9 +408,9 @@ pub struct SubagentResumeConfig {
     /// 父 agent 事件侧 AgentId（v2 SubagentStart/Stop 的 agent_id 字段；
     /// None = /bg 命令等无 Langfuse tracer 路径 → 不 emit v2 Start/Stop）
     pub parent_agent_id: Option<AgentId>,
-    /// 发起本次恢复的父 Agent 持久化执行身份。语义同
-    /// [`SubagentSpawnConfig::parent_invocation_id`]，不是模型 tool_call_id。
-    pub parent_invocation_id: Option<String>,
+    /// 发起本次恢复的父 Agent 模型 tool-call 身份。语义同
+    /// [`SubagentSpawnConfig::parent_tool_call_id`]，不是工具运行 invocation_id。
+    pub parent_tool_call_id: Option<String>,
     // ── 父侧数据回退（parent 为 None 时使用；parent 存在时被覆盖） ──
     /// 父 cancel token（Cascade 时取其 child_token；parent 存在时从 parent 读取）
     pub cancel_token: Option<CancellationToken>,

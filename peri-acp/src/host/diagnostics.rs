@@ -63,7 +63,7 @@ impl ResponseDiagnostics {
             }
         }
         let sent = transport.send_response(self.id.clone(), result).await;
-        if self.method.starts_with("session/input/") || self.method.starts_with("session/work/") {
+        if self.method.starts_with("session/input/") {
             tracing::info!(target: "perf.input", method = %self.method, rpc_id = %self.id,
                 session_id = self.session_id.as_deref(), command_id = self.command_id.as_deref(),
                 input_id = self.input_id.as_deref(), elapsed_us = peri_time::elapsed_since(self.started).as_micros() as u64,

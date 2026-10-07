@@ -24,7 +24,7 @@
 use peri_acp_types::{messages::BaseMessage, store::PersistedPayload};
 
 /// 两种会话数据 adapter 的同一 schema 版本。
-pub(super) const CURRENT_SCHEMA_VERSION: i64 = 17;
+pub(super) const CURRENT_SCHEMA_VERSION: i64 = 18;
 
 /// 会话事实表。
 pub(super) const THREADS_TABLE: &str = "threads";
@@ -84,12 +84,6 @@ pub(super) const BACKFILL_ENVIRONMENTS_SQL: &str = "WITH RECURSIVE tree(thread_i
 
 /// canonical 表清单（父表在前，与 [`CREATE_TABLES_SQL`] 的顺序一致）。
 pub(super) const CANONICAL_TABLES: &[&str] = &[
-    "session_work_commands",
-    "session_work_state",
-    "session_work_events",
-    "session_work_receipts",
-    "session_control_state",
-    "session_control_receipts",
     THREADS_TABLE,
     MESSAGES_TABLE,
     PROJECTS_TABLE,
@@ -182,7 +176,6 @@ macro_rules! v2_threads_table_sql {
 )") };
 }
 pub(super) const CREATE_V2_THREADS_TABLE_SQL: &str = v2_threads_table_sql!("threads");
-pub(super) const CREATE_V2_TEMP_THREADS_TABLE_SQL: &str = v2_threads_table_sql!("threads_v12");
 pub(super) const CREATE_V2_OAUTH_CREDENTIALS_TABLE_SQL: &str =
     "CREATE TABLE IF NOT EXISTS mcp_oauth_credentials (
     principal_id TEXT NOT NULL,
@@ -313,3 +306,12 @@ pub(crate) fn extract_title<'message>(
     }
     None
 }
+
+pub(super) const REMOVE_EXECUTION_RECOVERY_TABLES: &[&str] = &[
+    "DROP TABLE IF EXISTS session_work_commands",
+    "DROP TABLE IF EXISTS session_work_receipts",
+    "DROP TABLE IF EXISTS session_work_events",
+    "DROP TABLE IF EXISTS session_work_state",
+    "DROP TABLE IF EXISTS session_control_receipts",
+    "DROP TABLE IF EXISTS session_control_state",
+];

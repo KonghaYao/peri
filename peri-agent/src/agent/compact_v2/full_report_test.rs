@@ -141,7 +141,7 @@ async fn test_full_report_long_session_releases_reports_before_next_reason_reque
         .with_own_payloads(payloads)
         .with_persistence(bound.resources(), bound.thread_id.clone());
     let model = Arc::new(ReportModel::new());
-    let context = StageContext::best_effort_fixture_builder(
+    let context = StageContext::builder(
         session.start_turn(),
         session.transcript(),
         session.queue().clone(),
