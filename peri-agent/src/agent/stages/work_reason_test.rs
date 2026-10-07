@@ -16,18 +16,38 @@ fn budget_state(kind: WorkBudgetKind, used: u64) -> Processing {
         WorkBudgetKind::Dispatches => budget.dispatches = used,
         WorkBudgetKind::Recoveries => budget.recoveries = used,
     }
-    Processing { processing_id: "work".into(), recipient_lifecycle: 1, revision: 489,
+    Processing {
+        processing_id: "work".into(),
+        recipient_lifecycle: 1,
+        revision: 489,
         execution: peri_acp_types::session_resources::ControlAttempt {
-            turn_id: peri_acp_types::session::TurnId::new(), attempt_id: peri_acp_types::identity::AttemptId::new() },
-        stage: WorkStage::Blocked, phase_sequence: 1, budget, checkpoint: None,
-        request_id: None, request: None, response: None, remaining_effects: 0,
-        resume_stage: Some(WorkStage::ReasonReady), blocked_evidence: Some(reason.into()),
-        recovery_condition: Some("explicit budget reset authorization".into()), delegation: None,
-        delivery_count: 1, reason_delivery_count: 1 }
+            turn_id: peri_acp_types::session::TurnId::new(),
+            attempt_id: peri_acp_types::identity::AttemptId::new(),
+        },
+        stage: WorkStage::Blocked,
+        phase_sequence: 1,
+        budget,
+        checkpoint: None,
+        request_id: None,
+        request: None,
+        response: None,
+        remaining_effects: 0,
+        resume_stage: Some(WorkStage::ReasonReady),
+        blocked_evidence: Some(reason.into()),
+        recovery_condition: Some("explicit budget reset authorization".into()),
+        delegation: None,
+        delivery_count: 1,
+        reason_delivery_count: 1,
+    }
 }
 
 fn limits() -> WorkLimits {
-    WorkLimits { reason_requests: 64, dispatches: 256, recoveries: 8, ..WorkLimits::default() }
+    WorkLimits {
+        reason_requests: 64,
+        dispatches: 256,
+        recoveries: 8,
+        ..WorkLimits::default()
+    }
 }
 
 #[test]
@@ -115,27 +135,62 @@ async fn reason_budget_reducer_blocks_before_request_and_maps_exact_limit() {
         .unwrap()
         .unwrap();
     let snapshot = session.inspect_head().await.unwrap();
-    let mut processing = session.processing(&session.admission.work_id).await.unwrap();
+    let mut processing = session
+        .processing(&session.admission.work_id)
+        .await
+        .unwrap();
     processing.budget.reason_requests = 64;
-    let request = request_checkpoint(&session, &serde_json::json!({"messages": []}),
-        "model".into(), "auth".into()).await.unwrap();
-    let command = session.command(WorkAction::BeginReason { guard: session.guard(&snapshot).unwrap(),
-        target: WorkSession::target(&processing), request_id: "must-not-send".into(), request });
+    let request = request_checkpoint(
+        &session,
+        &serde_json::json!({"messages": []}),
+        "model".into(),
+        "auth".into(),
+    )
+    .await
+    .unwrap();
+    let command = session.command(WorkAction::BeginReason {
+        guard: session.guard(&snapshot).unwrap(),
+        target: WorkSession::target(&processing),
+        request_id: "must-not-send".into(),
+        request,
+    });
     let mut head = snapshot.head;
     head.limits = limits();
-    let facts = WorkFacts { session_id: session.admission.session_id.clone(), control: snapshot.control,
-        head, processing: Some(processing.clone()), deliveries: session.deliveries(&processing.processing_id).await.unwrap(),
-        effects: Vec::new(), drafts: Vec::new(), admission: None, recovery_descriptor: None,
-        terminal_obligation: None, legacy_evidence: None, parent_binding_receipt: None, parent_effect: None };
+    let facts = WorkFacts {
+        session_id: session.admission.session_id.clone(),
+        control: snapshot.control,
+        head,
+        processing: Some(processing.clone()),
+        deliveries: session.deliveries(&processing.processing_id).await.unwrap(),
+        effects: Vec::new(),
+        drafts: Vec::new(),
+        admission: None,
+        recovery_descriptor: None,
+        terminal_obligation: None,
+        legacy_evidence: None,
+        parent_binding_receipt: None,
+        parent_effect: None,
+    };
     let transition = transition_work(&command, &facts).unwrap();
     assert_eq!(transition.receipt.stage, Some(WorkStage::Blocked));
-    let accepted = transition.writes.iter().find_map(|write| match write {
-        WorkWrite::Processing { record, .. } => Some(record), _ => None,
-    }).unwrap();
+    let accepted = transition
+        .writes
+        .iter()
+        .find_map(|write| match write {
+            WorkWrite::Processing { record, .. } => Some(record),
+            _ => None,
+        })
+        .unwrap();
     assert!(accepted.request_id.is_none());
     assert_eq!(accepted.budget.reason_requests, 64);
-    assert!(matches!(budget_exhaustion(&processing, &limits(), WorkBudgetKind::ReasonRequests),
-        Some(AgentError::WorkBudgetExhausted { used: 64, limit: 64, .. })));
+    assert!(matches!(
+        budget_exhaustion(&processing, &limits(), WorkBudgetKind::ReasonRequests),
+        Some(AgentError::WorkBudgetExhausted {
+            used: 64,
+            limit: 64,
+            ..
+        })
+    ));
 }
 
 struct NeverInvokedTool;
@@ -269,13 +324,31 @@ async fn dispatch_budget_denial_survives_frozen_boundary_and_result_commit_witho
     assert_eq!(after.head, before.head);
     assert_eq!(after.control, before.control);
     assert_eq!(
-        session.effects(&session.processing(&session.admission.work_id).await.unwrap()).await.unwrap().iter()
+        session
+            .effects(
+                &session
+                    .processing(&session.admission.work_id)
+                    .await
+                    .unwrap()
+            )
+            .await
+            .unwrap()
+            .iter()
             .filter(|record| record.status == InvocationStatus::DispatchAccepted)
             .count(),
         3
     );
     assert_eq!(
-        session.effects(&session.processing(&session.admission.work_id).await.unwrap()).await.unwrap().iter()
+        session
+            .effects(
+                &session
+                    .processing(&session.admission.work_id)
+                    .await
+                    .unwrap()
+            )
+            .await
+            .unwrap()
+            .iter()
             .filter(|record| record.status == InvocationStatus::Prepared)
             .count(),
         1
@@ -379,5 +452,4 @@ async fn reason_budget_denial_survives_prepare_and_cold_boundary_without_reset()
     let after = session.inspect_head().await.unwrap();
     assert_eq!(after.head, before.head);
     assert_eq!(after.control, before.control);
-
 }

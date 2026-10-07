@@ -278,13 +278,9 @@ impl ColdChildExecution {
         let registered = crate::session::work_access::admission(resources.as_ref(), admission)
             .await
             .map_err(|error| ColdChildBlocked::new(error.to_string()))?;
-        let delegation = crate::session::work_access::delegation(
-            resources.as_ref(),
-            &admission.session_id,
-            &admission.work_id,
-        )
-        .await
-        .map_err(|error| ColdChildBlocked::new(error.to_string()))?;
+        let delegation = crate::session::work_access::delegation(resources.as_ref(), admission)
+            .await
+            .map_err(|error| ColdChildBlocked::new(error.to_string()))?;
         if result.task_id != self.delegation_binding.owner_task_id
             || delegation != self.delegation_binding
             || registered.entering_mutation_id.is_empty()
@@ -399,15 +395,14 @@ impl super::SessionFactory {
             })?;
         let metadata: ChildResumeMetadata = serde_json::from_str(raw)
             .map_err(|error| ColdChildBlocked::new(format!("invalid child metadata: {error}")))?;
-        let delegation_binding = crate::session::work_access::delegation(
-            runtime.resources.as_ref(),
-            &admission.session_id,
-            &admission.work_id,
-        )
-        .await
-        .map_err(|error| ColdChildBlocked::new(error.to_string()))?;
+        let delegation_binding =
+            crate::session::work_access::delegation(runtime.resources.as_ref(), &admission)
+                .await
+                .map_err(|error| ColdChildBlocked::new(error.to_string()))?;
         let FrozenState::Present(bytes) = &snapshot.frozen else {
-            return Err(ColdChildBlocked::new("child frozen authorization snapshot unavailable"));
+            return Err(ColdChildBlocked::new(
+                "child frozen authorization snapshot unavailable",
+            ));
         };
         if metadata.version != 1
             || metadata.child_session_id != admission.session_id

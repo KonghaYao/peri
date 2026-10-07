@@ -6,10 +6,10 @@ use peri_acp_types::session_resources::work::{
     AdmissionRecord, WorkAction, WorkAdmission, WorkCommand, WorkDecision, WorkPage, WorkQuery,
     WorkSelector,
 };
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use super::{AcpServerConfig, PromptLocks, SharedSessions};
-use crate::transport::{AcpTransport, types::AcpError};
+use crate::transport::{types::AcpError, AcpTransport};
 
 #[path = "execution_finish.rs"]
 mod finishing;
@@ -220,7 +220,9 @@ pub(super) async fn execute(
         WorkSelector::Availability,
     )
     .await?;
-    peri_acp_types::execution_admission::AdmissionSnapshot::from(available)
+    let admission_snapshot =
+        peri_acp_types::execution_admission::AdmissionSnapshot::from(available);
+    admission_snapshot
         .validate_admission(&admission)
         .map_err(super::workspace::resource_error)?;
     let sdk = context
@@ -231,7 +233,7 @@ pub(super) async fn execute(
     let confirmed = sdk
         .admit(AdmissionRequest {
             request_id: admission.admission_id.clone(),
-            snapshot: (&snapshot).into(),
+            snapshot: admission_snapshot,
             existing_admission: Some(admission.clone()),
         })
         .await

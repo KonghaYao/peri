@@ -1,8 +1,8 @@
-use peri_acp_types::session_resources::SessionResourceResult;
 use peri_acp_types::session_resources::work::*;
+use peri_acp_types::session_resources::SessionResourceResult;
 use serde::Serialize;
 
-use super::{SqlParam, SqlStatement, payload};
+use super::{payload, SqlParam, SqlStatement};
 use crate::sessions::{failure::corrupt, work::encode};
 
 fn text(value: impl Into<String>) -> SqlParam {

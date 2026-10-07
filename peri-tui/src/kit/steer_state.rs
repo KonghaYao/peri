@@ -36,6 +36,7 @@ struct SessionSteers {
     epoch: u64,
     snapshot: Option<UserInputQueueSnapshot>,
     pending: Vec<SteerCommand>,
+    unconfirmed: HashSet<String>,
     recovered: Vec<RecoveredInput>,
     delivered: HashSet<String>,
     // 仅影响待发送区展示；正式聊天气泡仍由 Delivered 确认。
@@ -181,6 +182,7 @@ impl SteerState {
         session
             .pending
             .retain(|pending| pending.command_id != command.command_id);
+        session.unconfirmed.remove(&command.command_id);
         if let Some(input) = receipt.taken_back
             && matches!(
                 command.kind,
@@ -232,6 +234,7 @@ impl SteerState {
             session.direct_submissions.remove(&input.input_id);
         }
         if definitely_rejected {
+            session.unconfirmed.remove(&command.command_id);
             session
                 .pending
                 .retain(|pending| pending.command_id != command.command_id);
@@ -242,6 +245,13 @@ impl SteerState {
                     preserve_if_occupied: true,
                 });
             }
+        } else if matches!(command.kind, SteerCommandKind::Enqueue(_))
+            && session
+                .pending
+                .iter()
+                .any(|pending| pending.command_id == command.command_id)
+        {
+            session.unconfirmed.insert(command.command_id.clone());
         }
         // 结果不明确时仍保留原请求和输入身份；不改走旧 prompt 或重新生成 ID。
     }
@@ -251,7 +261,11 @@ impl SteerState {
         let inserted = session.delivered.insert(input_id.to_owned());
         session.direct_submissions.remove(input_id);
         session.pending.retain(|command| {
-            !matches!(&command.kind, SteerCommandKind::Enqueue(input) if input.input_id == input_id)
+            let delivered = matches!(&command.kind, SteerCommandKind::Enqueue(input) if input.input_id == input_id);
+            if delivered {
+                session.unconfirmed.remove(&command.command_id);
+            }
+            !delivered
         });
         if let Some(snapshot) = &mut session.snapshot {
             snapshot.items.retain(|item| item.input_id != input_id);
@@ -330,15 +344,20 @@ impl SteerState {
         {
             match &command.kind {
                 SteerCommandKind::Enqueue(input) => {
+                    let state = if session.unconfirmed.contains(&command.command_id) {
+                        SteerItemState::Unconfirmed
+                    } else {
+                        SteerItemState::Submitting
+                    };
                     if let Some(row) = rows.iter_mut().find(|row| row.id == input.input_id) {
-                        row.state = SteerItemState::Submitting;
+                        row.state = state;
                     } else if !session.delivered.contains(&input.input_id)
                         && !session.direct_submissions.contains(&input.input_id)
                     {
                         rows.push(SteerQueueItem {
                             id: input.input_id.clone(),
                             text: input.original_draft.clone(),
-                            state: SteerItemState::Submitting,
+                            state,
                         });
                     }
                 }

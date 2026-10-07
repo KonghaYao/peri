@@ -8,7 +8,7 @@ use peri_acp_types::{
     runtime::UnstampedEvent,
     session::{MessageQueue, SessionAccessPort, SessionInbox, TurnId},
     session_resources::{
-        ControlAttempt, FrozenSnapshotBytes, NewSession, NewSessionMeta, SessionResources, work::*,
+        work::*, ControlAttempt, FrozenSnapshotBytes, NewSession, NewSessionMeta, SessionResources,
     },
     workspace::SessionBinding,
 };
@@ -25,6 +25,16 @@ pub(in crate::host) async fn run_session_loop(
     mut ctx: SessionContext,
     mut turn: TurnInput,
 ) -> PromptResult {
+    let mut input_guard = if !turn.continuation && !turn.content.is_empty() {
+        ctx.user_input_mailbox.as_ref().map(|mailbox| {
+            let ticket = mailbox
+                .attach_external_attempt(ctx.cancel.clone(), false)
+                .expect("fixture initial prompt must own its execution attachment");
+            crate::host::user_input::InputAttemptGuard::new(mailbox.clone(), ticket)
+        })
+    } else {
+        None
+    };
     let observed = Arc::new(std::sync::OnceLock::new());
     let publish = ctx.sdk_admission_observed.clone();
     let capture = observed.clone();
@@ -46,8 +56,24 @@ pub(in crate::host) async fn run_session_loop(
     let resources = ctx.session_resources.clone();
     let sdk = ctx.execution_admission_port.clone();
     let result = crate::session::executor::run_session_loop(ctx, turn).await;
+    if let Some(guard) = &mut input_guard {
+        guard.finish(&result);
+    }
     if !result.persistence_inconsistent {
         if let Some(admission) = observed.get() {
+            let snapshot = resources
+                .as_ref()
+                .unwrap()
+                .inspect_work(&WorkQuery::new(
+                    &admission.session_id,
+                    WorkSelector::Availability,
+                ))
+                .await
+                .expect("fixture root must inspect durable work before settlement");
+            if matches!(snapshot.page, WorkPage::Availability(ref availability) if availability.pending)
+            {
+                return result;
+            }
             let evidence_id = super::super::execution::finish_admission(
                 resources.as_ref().unwrap().as_ref(),
                 admission,
@@ -614,13 +640,11 @@ mod tests {
         assert_eq!(*requests.lock().unwrap(), vec![frozen]);
         let cancelled = CancellationToken::new();
         cancelled.cancel();
-        assert!(
-            model
-                .prepare_stream(request)
-                .unwrap()
-                .start(cancelled)
-                .is_err()
-        );
+        assert!(model
+            .prepare_stream(request)
+            .unwrap()
+            .start(cancelled)
+            .is_err());
         assert_eq!(requests.lock().unwrap().len(), 1);
     }
 
@@ -659,23 +683,20 @@ mod tests {
         else {
             panic!("actual Store candidate must be admitted by mock SDK")
         };
-        assert!(
-            resources
-                .inspect_work(&query)
-                .await
-                .unwrap()
-                .head
-                .current_admission_id
-                .is_none()
-        );
-        assert!(
-            sdk.entered(EntryRequest {
+        assert!(resources
+            .inspect_work(&query)
+            .await
+            .unwrap()
+            .head
+            .current_admission_id
+            .is_none());
+        assert!(sdk
+            .entered(EntryRequest {
                 admission: admission.clone(),
                 entry_evidence_id: "unregistered".into()
             })
             .await
-            .is_err()
-        );
+            .is_err());
         let receipt = resources
             .apply_work_mutation(&WorkCommand {
                 session_id: ctx.session_id.clone(),

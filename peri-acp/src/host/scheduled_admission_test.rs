@@ -180,12 +180,10 @@ async fn real_sdk_durable_cron_rejection_abandons_exact_work_after_started_ack_w
         SharedPermissionMode::new(PermissionMode::Default),
         broker.clone(),
     );
-    assert!(
-        callback(admission.clone())
-            .await
-            .unwrap_err()
-            .contains("explicitly abandoned")
-    );
+    assert!(callback(admission.clone())
+        .await
+        .unwrap_err()
+        .contains("explicitly abandoned"));
     let snapshot = resources
         .inspect_work(&WorkQuery {
             session_id: admission.session_id.clone(),
@@ -259,16 +257,14 @@ async fn real_sdk_durable_cron_cannot_prompt_without_started_ack_with_broker_fix
     });
     let ack: SdkRunStartedFn =
         Arc::new(|_| Box::pin(async { Err("RunStarted ACK unknown".into()) }));
-    assert!(
-        after_run_started(
-            ack,
-            resources.clone(),
-            SharedPermissionMode::new(PermissionMode::Default),
-            broker.clone()
-        )(admission.clone())
-        .await
-        .is_err()
-    );
+    assert!(after_run_started(
+        ack,
+        resources.clone(),
+        SharedPermissionMode::new(PermissionMode::Default),
+        broker.clone()
+    )(admission.clone())
+    .await
+    .is_err());
     assert_eq!(broker.requests.load(Ordering::SeqCst), 0);
     let snapshot = resources
         .inspect_work(&WorkQuery {
@@ -298,17 +294,15 @@ async fn real_sdk_mixed_cron_rejection_preserves_earlier_user_delivery_with_brok
         started.store(true, Ordering::SeqCst);
         Box::pin(async { Ok(()) })
     });
-    assert!(
-        after_run_started(
-            ack,
-            resources.clone(),
-            SharedPermissionMode::new(PermissionMode::Default),
-            broker
-        )(admission.clone())
-        .await
-        .unwrap_err()
-        .contains("explicitly abandoned")
-    );
+    assert!(after_run_started(
+        ack,
+        resources.clone(),
+        SharedPermissionMode::new(PermissionMode::Default),
+        broker
+    )(admission.clone())
+    .await
+    .unwrap_err()
+    .contains("explicitly abandoned"));
     let snapshot = resources
         .inspect_work(&WorkQuery {
             session_id: admission.session_id,
@@ -350,13 +344,11 @@ async fn real_sdk_mixed_cron_rejection_preserves_earlier_user_delivery_with_brok
     assert!(user.processing_id.is_none());
     assert_eq!(cron.obligation, ObligationStatus::Abandoned);
     assert!(snapshot.head.current_processing_id.is_none());
-    assert!(
-        crate::host::work_query::availability(&snapshot)
-            .unwrap()
-            .candidates
-            .iter()
-            .any(|candidate| candidate.delivery_ids == vec![user.delivery_id.clone()])
-    );
+    assert!(crate::host::work_query::availability(&snapshot)
+        .unwrap()
+        .candidates
+        .iter()
+        .any(|candidate| candidate.delivery_ids == vec![user.delivery_id.clone()]));
 }
 
 async fn claim_reason_ready_fixture(
@@ -439,8 +431,8 @@ async fn real_store_restored_reason_ready_reapproval_keeps_original_delivery_wit
 }
 
 #[tokio::test]
-async fn real_store_claimed_mixed_cron_rejection_blocks_without_abandoning_user_with_broker_fixture()
- {
+async fn real_store_claimed_mixed_cron_rejection_blocks_without_abandoning_user_with_broker_fixture(
+) {
     let (_directory, resources, _dispatcher, admission) = registered_cron_fixture(true).await;
     claim_reason_ready_fixture(resources.as_ref(), &admission).await;
     let original_deliveries = deliveries(
@@ -459,17 +451,15 @@ async fn real_store_claimed_mixed_cron_rejection_blocks_without_abandoning_user_
         started.store(true, Ordering::SeqCst);
         Box::pin(async { Ok(()) })
     });
-    assert!(
-        after_run_started(
-            ack,
-            resources.clone(),
-            SharedPermissionMode::new(PermissionMode::Default),
-            broker
-        )(admission.clone())
-        .await
-        .unwrap_err()
-        .contains("durably blocked")
-    );
+    assert!(after_run_started(
+        ack,
+        resources.clone(),
+        SharedPermissionMode::new(PermissionMode::Default),
+        broker
+    )(admission.clone())
+    .await
+    .unwrap_err()
+    .contains("durably blocked"));
     let snapshot = resources
         .inspect_work(&WorkQuery {
             session_id: admission.session_id.clone(),

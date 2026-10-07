@@ -62,10 +62,8 @@ async fn pending_work_remote_database_error_is_not_treated_as_empty() {
         .execute(&fixture.pool)
         .await
         .unwrap();
-    assert!(
-        adapter
-            .has_pending_work_mutations(&"work-session".into())
-            .await
-            .is_err()
-    );
+    assert!(adapter
+        .has_pending_work_mutations(&"work-session".into())
+        .await
+        .is_err());
 }

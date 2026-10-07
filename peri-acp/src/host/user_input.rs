@@ -1,8 +1,8 @@
 //! User input events report durable Work facts; SDK owns admission and scheduling.
 
 use std::sync::{
-    Arc,
     atomic::{AtomicBool, Ordering},
+    Arc,
 };
 
 use peri_acp_types::event::{EventSink, ExecutorEvent};
@@ -11,9 +11,9 @@ use peri_agent::session::user_input_mailbox::{
     UserInputAttemptOutcome, UserInputMailbox, UserInputRunTicket,
 };
 
-use super::{AcpServerConfig, PromptLocks, SharedSessions, task_scope};
+use super::{task_scope, AcpServerConfig, PromptLocks, SharedSessions};
 use crate::session::event_sink::TransportEventSink;
-use crate::transport::{AcpTransport, types::AcpError};
+use crate::transport::{types::AcpError, AcpTransport};
 
 #[derive(Clone)]
 pub(crate) struct UserInputRun {

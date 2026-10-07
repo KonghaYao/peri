@@ -4,12 +4,12 @@ use async_trait::async_trait;
 use peri_acp_types::{
     messages::BaseMessage,
     session::MessagePolicy,
-    session_resources::{SessionResourceResult, work::*},
+    session_resources::{work::*, SessionResourceResult},
     store::PersistedPayload,
 };
 use sqlx::{
-    Arguments, Row, Sqlite, SqlitePool, TypeInfo, ValueRef,
     sqlite::{SqliteArguments, SqlitePoolOptions, SqliteRow},
+    Arguments, Row, Sqlite, SqlitePool, TypeInfo, ValueRef,
 };
 use turso_serverless::{Error as SdkError, Value};
 
@@ -215,5 +215,7 @@ impl Fixture {
         RemoteSessionData::with_connection_for_test(self.id.clone(), store, factory, gate)
     }
 }
+#[path = "work_records/barrier_contract_test.rs"]
+mod barrier_contracts;
 #[path = "work_records/contracts_test.rs"]
 mod contracts;

@@ -1,8 +1,8 @@
 //! Durable notification bridge: approval, frozen recipient, and owned shutdown.
 
 use std::sync::{
-    Arc,
     atomic::{AtomicBool, Ordering},
+    Arc,
 };
 
 use peri_acp_types::interaction::{
@@ -80,11 +80,9 @@ async fn test_scheduler_does_not_own_its_ingress_sender() {
     drop(root);
 
     assert!(scheduler_ingress.upgrade().is_none());
-    assert!(
-        recv_until_shutdown(&mut rx, &CancellationToken::new())
-            .await
-            .is_none()
-    );
+    assert!(recv_until_shutdown(&mut rx, &CancellationToken::new())
+        .await
+        .is_none());
 }
 
 #[tokio::test]
@@ -93,17 +91,15 @@ async fn test_continuation_child_is_rejected_after_admission_closes() {
     owner.begin_shutdown();
     let started = Arc::new(AtomicBool::new(false));
     let started_task = started.clone();
-    assert!(
-        spawner
-            .spawn(
-                crate::host::task_scope::HostTaskOwnerKind::Session,
-                crate::host::task_scope::HostTaskKind::ContinuationTurn,
-                async move {
-                    started_task.store(true, Ordering::SeqCst);
-                },
-            )
-            .is_err()
-    );
+    assert!(spawner
+        .spawn(
+            crate::host::task_scope::HostTaskOwnerKind::Session,
+            crate::host::task_scope::HostTaskKind::ContinuationTurn,
+            async move {
+                started_task.store(true, Ordering::SeqCst);
+            },
+        )
+        .is_err());
     tokio::task::yield_now().await;
     assert!(!started.load(Ordering::SeqCst));
 }
@@ -146,6 +142,7 @@ fn observer_floor_requires_new_pending_required_delivery() {
         recipient_lifecycle: 1,
         revision: 0,
         admission_sequence: 9,
+        delegation: None,
         publication: PublishDelivery {
             delivery_id: "new".into(),
             purpose: DeliveryPurpose::UserInput,

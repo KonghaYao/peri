@@ -4,7 +4,7 @@ use peri_acp_types::session_resources::{
 };
 use serde::de::DeserializeOwned;
 
-use super::{SqlParam, SqlRows, SqlStatement, payload::integer};
+use super::{payload::integer, SqlParam, SqlRows, SqlStatement};
 use crate::sessions::{failure::corrupt, work::decode};
 
 const READ_HEAD: &str = "SELECT EXISTS(SELECT 1 FROM threads WHERE id=?1 UNION ALL SELECT 1 FROM session_control_state WHERE session_id=?1),c.state_json,h.record_json,EXISTS(WITH RECURSIVE scope(id) AS (SELECT ?1 UNION ALL SELECT threads.id FROM threads JOIN scope ON threads.parent_thread_id=scope.id) SELECT 1 FROM session_work_commands WHERE session_id IN(SELECT id FROM scope) AND kind='mutation' AND reconciled=0),EXISTS(SELECT 1 FROM session_processing WHERE session_id=?1 AND phase='blocked') FROM (SELECT 1) LEFT JOIN session_control_state c ON c.session_id=?1 LEFT JOIN session_work_head h ON h.session_id=?1 AND h.lifecycle=COALESCE(json_extract(c.state_json,'$.lifecycle'),1)";
@@ -26,6 +26,10 @@ fn bounded(sql: &'static str, query: &WorkQuery, extra: Vec<SqlParam>) -> SqlSta
     ];
     params.extend(extra);
     SqlStatement::new(sql, params)
+}
+
+fn candidate_deliveries(query: &WorkQuery, processing_id: Option<&str>) -> SqlStatement {
+    bounded("SELECT 'delivery',record_json,delivery_id FROM session_deliveries WHERE session_id=?1 AND lifecycle=COALESCE((SELECT json_extract(state_json,'$.lifecycle') FROM session_control_state WHERE session_id=?1),1) AND status='pending' AND delivery_id>?2 AND (?4 IS NULL OR NOT EXISTS(SELECT 1 FROM session_processing WHERE session_id=?1 AND processing_id=?4)) ORDER BY sequence,delivery_id LIMIT MIN(?3,COALESCE((SELECT json_extract(record_json,'$.limits.maxBatchSize') FROM session_work_head WHERE session_id=?1 AND lifecycle=COALESCE((SELECT json_extract(state_json,'$.lifecycle') FROM session_control_state WHERE session_id=?1),1)),64))", query, vec![processing_id.map(text).unwrap_or(SqlParam::Null)])
 }
 
 fn auxiliary(
@@ -57,7 +61,7 @@ pub(crate) fn inspection_plan(query: &WorkQuery) -> SessionResourceResult<Vec<Sq
         WorkSelector::Head => return Ok(statements),
         WorkSelector::Availability => {
             statements.push(bounded("SELECT 'availabilityProcessing',p.record_json,p.processing_id FROM session_processing p WHERE p.session_id=?1 AND p.phase NOT IN ('settled','abandoned') AND p.processing_id>?2 ORDER BY p.processing_id LIMIT ?3",query,vec![]));
-            statements.push(bounded("SELECT 'availabilityDelivery',delivery_id,delivery_id FROM session_deliveries WHERE session_id=?1 AND lifecycle=COALESCE((SELECT json_extract(state_json,'$.lifecycle') FROM session_control_state WHERE session_id=?1),1) AND status='pending' AND delivery_id>?2 ORDER BY sequence,delivery_id LIMIT MIN(?3,COALESCE((SELECT json_extract(record_json,'$.limits.maxBatchSize') FROM session_work_head WHERE session_id=?1 AND lifecycle=COALESCE((SELECT json_extract(state_json,'$.lifecycle') FROM session_control_state WHERE session_id=?1),1)),64))",query,vec![]));
+            statements.push(candidate_deliveries(query, None));
             return Ok(statements);
         }
         WorkSelector::Inbox => bounded(
@@ -183,7 +187,7 @@ pub(crate) fn inspection_plan(query: &WorkQuery) -> SessionResourceResult<Vec<Sq
             vec![text(mutation_id)],
         ),
         WorkSelector::PendingCommands => bounded(
-            "SELECT 'command',CAST(p.bytes AS TEXT),c.mutation_id,c.digest,r.resolution_json,c.reconciled FROM session_work_commands c JOIN session_payloads p ON p.storage_scope=c.command_scope AND p.payload_id=c.command_payload_id LEFT JOIN session_work_receipts r ON r.mutation_id=c.mutation_id AND r.session_id=c.session_id AND r.digest=c.digest WHERE c.session_id=?1 AND c.reconciled=0 AND c.kind='mutation' AND c.mutation_id>?2 ORDER BY c.mutation_id LIMIT ?3",
+            "WITH RECURSIVE scope(id) AS (SELECT ?1 UNION ALL SELECT threads.id FROM threads JOIN scope ON threads.parent_thread_id=scope.id) SELECT 'command',CAST(p.bytes AS TEXT),c.mutation_id,c.digest,r.resolution_json,c.reconciled FROM session_work_commands c JOIN session_payloads p ON p.storage_scope=c.command_scope AND p.payload_id=c.command_payload_id LEFT JOIN session_work_receipts r ON r.mutation_id=c.mutation_id AND r.session_id=c.session_id AND r.digest=c.digest WHERE c.session_id IN (SELECT id FROM scope) AND c.reconciled=0 AND c.kind='mutation' AND c.mutation_id>?2 ORDER BY c.mutation_id LIMIT ?3",
             query,
             vec![],
         ),
@@ -197,13 +201,8 @@ pub(crate) fn head(rows: &[SqlRows]) -> SessionResourceResult<(ControlState, Ses
         .first()
         .and_then(|rows| rows.first())
         .ok_or_else(|| corrupt("missing work head result"))?;
-    let [
-        SqlParam::Integer(exists),
-        control,
-        head,
-        SqlParam::Integer(_),
-        SqlParam::Integer(_),
-    ] = row.as_slice()
+    let [SqlParam::Integer(exists), control, head, SqlParam::Integer(_), SqlParam::Integer(_)] =
+        row.as_slice()
     else {
         return Err(corrupt("invalid work head row"));
     };
@@ -278,17 +277,19 @@ pub(crate) fn decode_inspection(
                         ),
                         delivery_ids: vec![],
                     });
-                } else if kind == "availabilityDelivery" {
-                    delivery_ids.push(json.clone());
+                } else if kind == "delivery" {
+                    let delivery: Delivery = decode(json)?;
+                    delivery_ids.push(delivery.delivery_id);
                 } else {
                     return Err(corrupt("invalid availability kind"));
                 }
             }
             if !delivery_ids.is_empty() && candidates.len() < query.limit as usize {
                 candidates.push(WorkCandidate {
-                    work_id: format!(
-                        "batch:{}:{}:{}",
-                        query.session_id, head.lifecycle, head.next_delivery_seq
+                    work_id: pending_processing_id(
+                        &query.session_id,
+                        head.lifecycle,
+                        head.next_delivery_seq,
                     ),
                     work_revision: 0,
                     stage: WorkStage::ReasonReady,
@@ -493,19 +494,31 @@ pub(crate) fn read_set(command: &WorkCommand) -> SessionResourceResult<Vec<SqlSt
                 phase_sequence: None,
             });
         }
-        WorkAction::RegisterAdmission { admission }
-        | WorkAction::FinishAdmission { admission, .. } => {
+        WorkAction::RegisterAdmission { admission } => {
             selectors.push(WorkSelector::Admission {
                 admission_id: admission.admission_id.clone(),
-            })
+            });
+            selectors.push(WorkSelector::Processing {
+                processing_id: admission.work_id.clone(),
+            });
         }
+        WorkAction::FinishAdmission { admission, .. } => selectors.push(WorkSelector::Admission {
+            admission_id: admission.admission_id.clone(),
+        }),
         WorkAction::BindResourceOwners { .. } | WorkAction::BindChildResumeMetadata { .. } => {
             selectors.push(WorkSelector::RecoveryDescriptor {
                 lifecycle: command.recipient_lifecycle,
             })
         }
-        WorkAction::BindTerminalObligation { admission_id, .. }
-        | WorkAction::AcknowledgeTerminalObligation { admission_id, .. } => {
+        WorkAction::BindTerminalObligation { admission_id, .. } => {
+            selectors.push(WorkSelector::Admission {
+                admission_id: admission_id.clone(),
+            });
+            selectors.push(WorkSelector::TerminalCommand {
+                admission_id: admission_id.clone(),
+            });
+        }
+        WorkAction::AcknowledgeTerminalObligation { admission_id, .. } => {
             selectors.push(WorkSelector::TerminalCommand {
                 admission_id: admission_id.clone(),
             })
@@ -582,8 +595,30 @@ pub(crate) fn read_set(command: &WorkCommand) -> SessionResourceResult<Vec<SqlSt
     if let WorkAction::StageUserInput { input_id, .. } = &command.action {
         statements.push(SqlStatement::new("SELECT 'delivery',delivery.record_json,delivery.delivery_id FROM session_inputs draft JOIN session_deliveries delivery ON delivery.delivery_id=json_extract(draft.record_json,'$.publicationId') AND delivery.session_id=draft.session_id AND delivery.lifecycle=draft.lifecycle WHERE draft.session_id=?1 AND draft.lifecycle=?2 AND draft.input_id=?3 LIMIT 1",vec![text(&command.session_id),integer(command.recipient_lifecycle)?,text(input_id)]));
     }
-    if let WorkAction::BindWorkDelegation { binding, .. } = &command.action {
+    if let WorkAction::BindWorkDelegation {
+        binding, work_id, ..
+    } = &command.action
+    {
         statements.push(SqlStatement::new("SELECT 'parentEffect',record_json,invocation_id FROM session_effects WHERE session_id=?1 AND invocation_id=?2 LIMIT 1",vec![text(&binding.initiator_session_id),text(&binding.invocation_id)]));
+        statements.push(candidate_deliveries(
+            &WorkQuery::new(&command.session_id, WorkSelector::Availability),
+            Some(work_id),
+        ));
+    }
+    if let WorkAction::RegisterAdmission { admission } = &command.action {
+        statements.push(candidate_deliveries(
+            &WorkQuery::new(&command.session_id, WorkSelector::Availability),
+            Some(&admission.work_id),
+        ));
+    }
+    if matches!(
+        command.action,
+        WorkAction::PublishStagedUserInputs {
+            interrupt_current: true,
+            ..
+        }
+    ) {
+        statements.push(SqlStatement::new("SELECT 'delivery',d.record_json,d.delivery_id FROM session_deliveries d JOIN session_work_head h ON h.session_id=d.session_id AND h.lifecycle=d.lifecycle WHERE d.session_id=?1 AND h.lifecycle=?2 AND d.processing_id=json_extract(h.record_json,'$.currentProcessingId') ORDER BY d.batch_ordinal,d.delivery_id LIMIT ?3", vec![text(&command.session_id), integer(command.recipient_lifecycle)?, SqlParam::Integer(i64::from(MAX_WORK_PAGE_SIZE) + 1)]));
     }
     if let WorkAction::AcknowledgeTerminalObligation { receipt, .. } = &command.action {
         statements.push(SqlStatement::new("SELECT 'parentReceipt',resolution_json,mutation_id FROM session_work_receipts WHERE session_id=?1 AND mutation_id=?2 LIMIT 1",vec![text(&receipt.session_id),text(&receipt.mutation_id)]));

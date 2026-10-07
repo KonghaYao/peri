@@ -9,6 +9,7 @@ use crate::sessions::failure::corrupt;
 pub(crate) const READ_PAYLOAD: &str = "SELECT version,byte_length,sha256,bytes FROM session_payloads WHERE storage_scope=?1 AND payload_id=?2";
 const INSERT_PAYLOAD: &str = "INSERT OR IGNORE INTO session_payloads(storage_scope,payload_id,kind,codec,version,byte_length,sha256,bytes,retention_class) VALUES (?1,?2,?3,'json',?4,?5,?6,?7,'evidence')";
 const GUARD_PAYLOAD: &str = "INSERT INTO session_payloads(storage_scope) SELECT NULL WHERE NOT EXISTS(SELECT 1 FROM session_payloads WHERE storage_scope=?1 AND payload_id=?2 AND version=?3 AND byte_length=?4 AND sha256=?5 AND bytes=?6)";
+const GUARD_EVIDENCE: &str = "INSERT INTO session_payloads(storage_scope) SELECT NULL WHERE EXISTS(SELECT 1 FROM session_payloads WHERE storage_scope=?1 AND payload_id=?2 AND (codec<>'json' OR version<>?3 OR byte_length<>?4 OR sha256<>?5 OR bytes<>?6)) OR NOT EXISTS(SELECT 1 FROM session_payloads WHERE storage_scope=?1 AND codec='json' AND version=?3 AND byte_length=?4 AND sha256=?5 AND bytes=?6 AND (payload_id=?2 OR kind='evidence'))";
 pub(crate) const GUARD_REFERENCE: &str = "INSERT INTO session_payloads(storage_scope) SELECT NULL WHERE NOT EXISTS(SELECT 1 FROM session_payloads WHERE storage_scope=?1 AND payload_id=?2 AND version=?3 AND byte_length=?4 AND sha256=?5)";
 
 pub(crate) fn integer(value: u64) -> SessionResourceResult<SqlParam> {
@@ -48,7 +49,7 @@ pub(crate) fn prepare_write(
         reference,
         vec![
             SqlStatement::new(INSERT_PAYLOAD, params),
-            SqlStatement::new(GUARD_PAYLOAD, guard_params),
+            SqlStatement::new(GUARD_EVIDENCE, guard_params),
         ],
     ))
 }
@@ -68,7 +69,39 @@ pub(crate) fn prepare_bytes(
     };
     let (reference, mut statements) = prepare_write(&write)?;
     statements[0].params[2] = SqlParam::Text(kind.into());
+    statements[1].sql = GUARD_PAYLOAD;
     Ok((reference, statements))
+}
+
+pub(crate) fn prepared_evidence_plan(write: &EvidenceWrite) -> SessionResourceResult<SqlStatement> {
+    let reference = write.reference()?;
+    Ok(SqlStatement::new("SELECT storage_scope,payload_id,codec,version,byte_length,sha256,bytes FROM session_payloads WHERE storage_scope=?1 AND version=?3 AND byte_length=?4 AND sha256=?5 AND (payload_id=?2 OR (kind='evidence' AND codec='json')) ORDER BY payload_id=?2 DESC LIMIT 1", reference_params(&reference)?))
+}
+
+pub(crate) fn prepared_evidence_reference(
+    write: &EvidenceWrite,
+    rows: &SqlRows,
+) -> SessionResourceResult<PayloadRef> {
+    let row = rows
+        .first()
+        .ok_or_else(|| corrupt("prepared immutable evidence is missing"))?;
+    let (Some(SqlParam::Text(scope)), Some(SqlParam::Text(identity))) = (row.first(), row.get(1))
+    else {
+        return Err(corrupt("prepared immutable evidence identity is invalid"));
+    };
+    if scope != &write.storage_scope {
+        return Err(corrupt("prepared immutable evidence scope conflicts"));
+    }
+    if row.get(2) != Some(&SqlParam::Text("json".into())) {
+        return Err(corrupt("prepared immutable evidence codec conflicts"));
+    }
+    let mut reference = write.reference()?;
+    reference.payload_id = identity.clone();
+    let evidence = decode_evidence(&reference, &vec![row.iter().skip(3).cloned().collect()])?;
+    if evidence.bytes != write.bytes {
+        return Err(corrupt("prepared immutable evidence bytes conflict"));
+    }
+    Ok(reference)
 }
 
 pub(crate) fn prepare(
@@ -116,3 +149,7 @@ pub(crate) fn decode_evidence(
     evidence.validate()?;
     Ok(evidence)
 }
+
+#[cfg(test)]
+#[path = "payload_test.rs"]
+mod tests;

@@ -2,12 +2,12 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use peri_acp_types::execution_admission::{
-    ADMIT_METHOD, AdmissionOutcome, AdmissionRequest, ExecutionAdmissionError,
-    ExecutionAdmissionPort, SETTLE_METHOD, SettlementOutcome, SettlementRequest,
+    AdmissionOutcome, AdmissionRequest, ExecutionAdmissionError, ExecutionAdmissionPort,
+    SettlementOutcome, SettlementRequest, ADMIT_METHOD, SETTLE_METHOD,
 };
 
 use crate::transport::RequestTransport;
-use peri_acp_types::execution_admission::{ENTERED_METHOD, EntryOutcome, EntryRequest};
+use peri_acp_types::execution_admission::{EntryOutcome, EntryRequest, ENTERED_METHOD};
 
 pub const EXECUTION_PROTOCOL_VERSION: u32 = 2;
 

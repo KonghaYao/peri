@@ -1,9 +1,15 @@
 use super::*;
 
 #[test]
-fn idle_session_records_sdk_admission_without_granting_new_ownership() {
+fn queued_input_records_sdk_admission_without_claiming_or_granting_new_ownership() {
     let mut facts = facts();
     let execution = facts.control.attempt.take().unwrap();
+    apply(
+        &mut facts,
+        command(WorkAction::PublishDelivery {
+            delivery: publication("delivery"),
+        }),
+    );
     let admission = WorkAdmission {
         session_id: "session".into(),
         admission_id: "sdk-ticket".into(),
@@ -11,7 +17,7 @@ fn idle_session_records_sdk_admission_without_granting_new_ownership() {
         generation_id: "generation".into(),
         lifecycle: 1,
         control_generation: 0,
-        work_id: "processing".into(),
+        work_id: work_id(&facts),
         work_revision: 0,
         execution: execution.clone(),
     };
@@ -25,6 +31,12 @@ fn idle_session_records_sdk_admission_without_granting_new_ownership() {
         Some("sdk-ticket")
     );
     assert_eq!(facts.control.control_generation, 0);
+    assert!(facts.processing.is_none());
+    assert_eq!(facts.deliveries[0].obligation, ObligationStatus::Pending);
+    assert_eq!(
+        facts.admission.unwrap().initial_delivery_ids,
+        Some(vec!["delivery".into()])
+    );
 }
 
 #[test]
@@ -79,7 +91,7 @@ fn unacknowledged_terminal_outbox_does_not_block_explicit_new_input() {
             command: Box::new(terminal),
         }),
     );
-    let delivery = publication("new-input");
+    let mut delivery = publication("new-input");
     apply(
         &mut facts,
         command(WorkAction::StageUserInput {
@@ -88,6 +100,20 @@ fn unacknowledged_terminal_outbox_does_not_block_explicit_new_input() {
             command_id: "new-stage".into(),
             fingerprint: 11,
         }),
+    );
+    delivery.event.causation_id = Some(
+        serde_json::to_string(&UserInputPublicationIdentity {
+            input_id: "new-input".into(),
+            publication_generation: "new-publication".into(),
+            fingerprint: 12,
+            command_id: "new-publish".into(),
+            draft_binding: StagedUserInputPublicationBinding {
+                draft_revision: facts.drafts[0].revision,
+                draft_fingerprint: facts.drafts[0].fingerprint,
+                canonical_content: delivery.event.content.content.clone(),
+            },
+        })
+        .unwrap(),
     );
     let action = WorkAction::PublishStagedUserInputs {
         expected_revision: 0,
@@ -110,6 +136,25 @@ fn unacknowledged_terminal_outbox_does_not_block_explicit_new_input() {
         WorkStage::Abandoned
     );
     assert_eq!(facts.deliveries.len(), 2);
+    assert_eq!(facts.head.required_count, 1);
+    assert_eq!(
+        facts
+            .deliveries
+            .iter()
+            .find(|delivery| delivery.delivery_id == "delivery")
+            .unwrap()
+            .obligation,
+        ObligationStatus::Abandoned,
+    );
+    assert_eq!(
+        facts
+            .deliveries
+            .iter()
+            .find(|delivery| delivery.delivery_id == "new-input")
+            .unwrap()
+            .obligation,
+        ObligationStatus::Pending,
+    );
 }
 
 #[test]
@@ -126,7 +171,7 @@ fn result_with_another_tool_call_identity_cannot_advance_phase() {
             guard: guard(&facts),
             target: target(&facts),
             results: vec![outcome],
-            next_work_id: Some("processing".into()),
+            next_work_id: Some(work_id(&facts)),
         },
         WorkRejection::InvalidTransition,
     );
@@ -167,7 +212,7 @@ fn task_binding_is_write_once_and_delegation_requires_exact_parent_binding() {
     child.parent_binding_receipt = Some(bound.receipt.clone());
     let action = WorkAction::BindWorkDelegation {
         expected_revision: 0,
-        work_id: "processing".into(),
+        work_id: work_id(&child),
         binding: binding.clone(),
         parent_binding_receipt: bound.receipt.clone(),
     };

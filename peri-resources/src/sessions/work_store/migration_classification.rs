@@ -83,6 +83,13 @@ pub(crate) fn classify_legacy(json: &str) -> SessionResourceResult<bool> {
     {
         return Ok(true);
     }
+    if keys
+        .iter()
+        .skip(3)
+        .any(|key| source.get(*key).is_some_and(|value| !value.is_object()))
+    {
+        return Ok(true);
+    }
     let Some(unknown) = records(&source, "legacyUnknown") else {
         return Ok(true);
     };
@@ -157,12 +164,16 @@ pub(crate) fn classify_legacy(json: &str) -> SessionResourceResult<bool> {
         }
     }
     if let Some(drafts) = records(&source, "stagedUserInputs") {
-        if drafts.values().any(|record| {
-            !matches!(
-                record.get("status").and_then(Value::as_str),
-                Some("published" | "withdrawn")
-            )
-        }) {
+        if drafts.values().any(
+            |record| match record.get("status").and_then(Value::as_str) {
+                Some("withdrawn") => false,
+                Some("published") => record
+                    .get("publicationId")
+                    .and_then(Value::as_str)
+                    .is_none_or(|identity| !deliveries.contains_key(identity)),
+                _ => true,
+            },
+        ) {
             return Ok(true);
         }
     }
@@ -175,11 +186,14 @@ pub(crate) fn classify_legacy(json: &str) -> SessionResourceResult<bool> {
     {
         return Ok(true);
     }
-    if let Some(terminal) = records(&source, "terminalObligations") {
-        let acknowledgements = records(&source, "terminalAcknowledgements");
-        if !terminal.is_empty() || acknowledgements.is_some_and(|records| !records.is_empty()) {
+    for field in ["terminalObligations", "terminalAcknowledgements"] {
+        if records(&source, field).is_some_and(|records| !records.is_empty()) {
             return Ok(true);
         }
     }
     Ok(false)
 }
+
+#[cfg(test)]
+#[path = "migration_classification_test.rs"]
+mod tests;

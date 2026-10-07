@@ -43,7 +43,8 @@ impl SqliteSessionData {
         evidence: &EvidenceWrite,
     ) -> SessionResourceResult<PayloadRef> {
         self.writable()?;
-        let (reference, statements) = work_store::prepare_evidence_plan(evidence)?;
+        let (_, statements) = work_store::prepare_evidence_plan(evidence)?;
+        let read_statement = work_store::payload::prepared_evidence_plan(evidence)?;
         let mut transaction = self
             .database
             .pool
@@ -53,6 +54,15 @@ impl SqliteSessionData {
         if let Err(error) = execute_plan(&mut transaction, &statements).await {
             return Err(rollback(transaction, error, &evidence.session_id).await);
         }
+        let prepared = async {
+            let rows = read_plan(&mut transaction, &[read_statement]).await?;
+            work_store::payload::prepared_evidence_reference(evidence, &rows[0])
+        }
+        .await;
+        let reference = match prepared {
+            Ok(reference) => reference,
+            Err(error) => return Err(rollback(transaction, error, &evidence.session_id).await),
+        };
         transaction.commit().await.map_err(|error| {
             tracing::error!(%error, "SQLite immutable evidence commit outcome unknown");
             commit_failure(Some(evidence.session_id.clone()))
@@ -151,7 +161,11 @@ async fn apply_original(
     let statements = work_store::read_set(command)?;
     let rows = read_plan(connection, &statements).await?;
     let facts = work_store::decode_facts(command, &rows)?;
-    let transition = transition_work(command, &facts)?;
+    let mut transition = transition_work(command, &facts)?;
+    if let Some(statement) = work_store::response_validation_plan(command, &transition)? {
+        let validation = read_plan(connection, &[statement]).await?;
+        work_store::validate_response_transition(command, &mut transition, &validation[0])?;
+    }
     let statements = work_store::sql_plan(command, &facts, &transition)?;
     execute_plan(connection, &statements).await?;
     sqlx::query(journal::INSERT_RECEIPT)

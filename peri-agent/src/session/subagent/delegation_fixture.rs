@@ -15,7 +15,13 @@ pub(super) async fn prepare_delegation(
         .await
         .unwrap();
     let arguments = "{}".to_owned();
-    let arguments_ref = crate::agent::stages::prepare_work_evidence(resources, initiator, arguments.as_bytes().to_vec()).await.unwrap();
+    let arguments_ref = crate::agent::stages::prepare_work_evidence(
+        resources,
+        initiator,
+        arguments.as_bytes().to_vec(),
+    )
+    .await
+    .unwrap();
     let digest = format!("{:x}", Sha256::digest(arguments.as_bytes()));
     apply_fixture_mutation(
         resources,
@@ -44,6 +50,12 @@ pub(super) async fn prepare_delegation(
         },
     )
     .await;
+    crate::session::test_resources::mock::work::dispatch_fixture_invocation(
+        resources,
+        initiator,
+        invocation_id,
+    )
+    .await;
     let snapshot = resources
         .inspect_work(&WorkQuery::new(initiator, WorkSelector::Head))
         .await
@@ -68,7 +80,10 @@ async fn apply_fixture_mutation(resources: &dyn SessionResources, mut command: W
     let identity = command.mutation_id.clone();
     loop {
         let snapshot = resources
-            .inspect_work(&WorkQuery::new(command.session_id.clone(), WorkSelector::Head))
+            .inspect_work(&WorkQuery::new(
+                command.session_id.clone(),
+                WorkSelector::Head,
+            ))
             .await
             .unwrap();
         match &mut command.action {

@@ -192,22 +192,18 @@ async fn reopen_copies_exact_owner_and_child_authority_and_replaces_lifecycle() 
 async fn legacy_restore_quarantines_owner_evidence_without_scanning_history() {
     let tmp = tempfile::tempdir().unwrap();
     let (cfg, _sessions, id) = fixture(&tmp).await;
-    assert!(
-        resource_owners::load_for_restore(&cfg, &id)
-            .await
-            .unwrap()
-            .is_empty()
-    );
-    let snapshot = work(&cfg, &id).await;
-    assert!(
-        crate::host::work_query::test_descriptor(
-            cfg.session_resources.as_ref(),
-            &id,
-            snapshot.control.lifecycle
-        )
+    assert!(resource_owners::load_for_restore(&cfg, &id)
         .await
-        .is_none_or(|descriptor| descriptor.resource_owners.is_none())
-    );
+        .unwrap()
+        .is_empty());
+    let snapshot = work(&cfg, &id).await;
+    assert!(crate::host::work_query::test_descriptor(
+        cfg.session_resources.as_ref(),
+        &id,
+        snapshot.control.lifecycle
+    )
+    .await
+    .is_none_or(|descriptor| descriptor.resource_owners.is_none()));
     assert!(
         crate::host::work_query::availability(&snapshot)
             .unwrap()
@@ -258,12 +254,10 @@ async fn fork_persists_trusted_owners_under_the_new_id() {
             .authorization_ref,
         format!("trusted-session-setup:{new_id}")
     );
-    assert!(
-        resource_owners::load(&cfg, new_id)
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    assert!(resource_owners::load(&cfg, new_id)
+        .await
+        .unwrap()
+        .is_empty());
 }
 
 /// [回归测试] A closed legacy session cannot acquire current-root owners through Reopen.
@@ -280,26 +274,22 @@ async fn reopen_without_previous_owner_is_durably_blocked_without_publication() 
     let error = handle_request("session/control", &reopen, &cfg, &mut sessions, &transport)
         .await
         .unwrap_err();
-    assert!(
-        error
-            .message
-            .contains("previous persistent resource owners are missing")
-    );
+    assert!(error
+        .message
+        .contains("previous persistent resource owners are missing"));
     let snapshot = work(&cfg, &id).await;
     assert!(
         crate::host::work_query::availability(&snapshot)
             .unwrap()
             .blocked
     );
-    assert!(
-        crate::host::work_query::test_descriptor(
-            cfg.session_resources.as_ref(),
-            &id,
-            snapshot.control.lifecycle
-        )
-        .await
-        .is_none_or(|descriptor| descriptor.resource_owners.is_none())
-    );
+    assert!(crate::host::work_query::test_descriptor(
+        cfg.session_resources.as_ref(),
+        &id,
+        snapshot.control.lifecycle
+    )
+    .await
+    .is_none_or(|descriptor| descriptor.resource_owners.is_none()));
     assert!(legacy_evidence(&cfg, &id, 2).await.is_some());
     assert!(!sessions.contains_key(&id));
     assert!(cfg.session_manager.get_session(&id).is_none());
@@ -528,24 +518,20 @@ async fn cold_load_closed_then_reopen_replaces_the_idle_view_environment() {
         &idle_manager,
         &fresh_environment.task_manager()
     ));
-    assert!(
-        idle_manager
-            .as_any()
-            .downcast_ref::<peri_agent::agent::async_tasks::TaskManager>()
-            .unwrap()
-            .session_close_settled()
-    );
+    assert!(idle_manager
+        .as_any()
+        .downcast_ref::<peri_agent::agent::async_tasks::TaskManager>()
+        .unwrap()
+        .session_close_settled());
     let fresh_session = fresh_environment
         .cfg
         .session_manager
         .get_session(&id)
         .unwrap();
     assert_eq!(fresh_session.recipient_lifecycle, 2);
-    assert!(
-        fresh_session
-            .task_events_started
-            .load(std::sync::atomic::Ordering::Acquire)
-    );
+    assert!(fresh_session
+        .task_events_started
+        .load(std::sync::atomic::Ordering::Acquire));
     assert!(fresh_session.v2_message_queue.is_empty());
     assert_eq!(loaded_sessions[&id].cwd, cwd.to_str().unwrap());
     assert_eq!(loaded_sessions[&id].history.len(), 1);
@@ -636,23 +622,19 @@ async fn reopen_preserves_actual_owned_futures_and_independent_children() {
         let error = handle_request("session/control", &reopen, &cfg, &mut sessions, &transport)
             .await
             .unwrap_err();
-        assert!(
-            error
-                .message
-                .contains("previous live execution is not closed")
-        );
+        assert!(error
+            .message
+            .contains("previous live execution is not closed"));
         assert!(!token.is_cancelled());
         assert!(Arc::ptr_eq(
             &previous_manager,
             &cfg.session_manager.get_session(&id).unwrap().task_manager
         ));
-        assert!(
-            !previous_manager
-                .as_any()
-                .downcast_ref::<peri_agent::agent::async_tasks::TaskManager>()
-                .unwrap()
-                .session_close_settled()
-        );
+        assert!(!previous_manager
+            .as_any()
+            .downcast_ref::<peri_agent::agent::async_tasks::TaskManager>()
+            .unwrap()
+            .session_close_settled());
         assert!(sessions.contains_key(&id));
     }
 }

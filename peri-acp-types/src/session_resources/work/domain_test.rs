@@ -5,6 +5,21 @@ use crate::session_resources::ControlStatus;
 #[path = "lifecycle_test.rs"]
 mod lifecycle;
 
+#[path = "admission_effect_test.rs"]
+mod admission_effect;
+
+#[path = "effect_settlement_test.rs"]
+mod effect_settlement;
+
+#[path = "response_test.rs"]
+mod response;
+
+#[path = "processing_contract_test.rs"]
+mod processing_contract;
+
+#[path = "mailbox_delegation_test.rs"]
+mod mailbox_delegation;
+
 fn payload_ref(identity: &str) -> PayloadRef {
     EvidenceWrite {
         session_id: "session".into(),
@@ -153,11 +168,28 @@ fn admit(facts: &mut WorkFacts) {
         generation_id: "generation".into(),
         lifecycle: 1,
         control_generation: 0,
-        work_id: "processing".into(),
-        work_revision: 0,
+        work_id: work_id(facts),
+        work_revision: facts
+            .processing
+            .as_ref()
+            .map_or(0, |processing| processing.revision),
         execution: facts.control.attempt.clone().unwrap(),
     };
     apply(facts, command(WorkAction::RegisterAdmission { admission }));
+}
+
+fn work_id(facts: &WorkFacts) -> String {
+    if let Some(processing) = &facts.processing {
+        processing.processing_id.clone()
+    } else if let Some(admission) = &facts.admission {
+        admission.admission.work_id.clone()
+    } else {
+        pending_processing_id(
+            &facts.session_id,
+            facts.control.lifecycle,
+            facts.head.next_delivery_seq,
+        )
+    }
 }
 
 fn claimed() -> WorkFacts {
@@ -171,7 +203,7 @@ fn claimed() -> WorkFacts {
     admit(&mut facts);
     let action = WorkAction::ClaimBatch {
         guard: guard(&facts),
-        batch_id: "processing".into(),
+        batch_id: work_id(&facts),
         delivery_ids: vec!["delivery".into()],
     };
     apply(&mut facts, command(action));
@@ -406,7 +438,10 @@ fn publication_selection_conflicts_with_take_back_and_does_not_publish_subset() 
 fn claimed_delivery_cannot_be_withdrawn_and_membership_is_single_authority() {
     let facts = claimed();
     let delivery = &facts.deliveries[0];
-    assert_eq!(delivery.processing_id.as_deref(), Some("processing"));
+    assert_eq!(
+        delivery.processing_id.as_deref(),
+        Some(facts.admission.as_ref().unwrap().admission.work_id.as_str())
+    );
     assert_eq!(delivery.batch_ordinal, Some(0));
     assert!(delivery.participates_in_reason);
     assert_eq!(facts.processing.as_ref().unwrap().reason_delivery_count, 1);
@@ -486,7 +521,7 @@ fn prepared_effect_does_not_settle_without_dispatch_acceptance_barrier() {
             guard: guard(&facts),
             target: target(&facts),
             results: vec![result(&facts, "first")],
-            next_work_id: Some("processing".into()),
+            next_work_id: Some(work_id(&facts)),
         },
         WorkRejection::InvalidTransition,
     );
@@ -555,7 +590,7 @@ fn results_commit_independently_last_result_advances_same_processing_without_res
         guard: guard(&facts),
         target: target(&facts),
         results: vec![result(&facts, "first")],
-        next_work_id: Some("processing".into()),
+        next_work_id: Some(work_id(&facts)),
     };
     let first = apply(&mut facts, command(action));
     assert_eq!(facts.processing.as_ref().unwrap().remaining_effects, 1);
@@ -575,11 +610,14 @@ fn results_commit_independently_last_result_advances_same_processing_without_res
         guard: guard(&facts),
         target: target(&facts),
         results: vec![result(&facts, "second")],
-        next_work_id: Some("processing".into()),
+        next_work_id: Some(work_id(&facts)),
     };
     apply(&mut facts, command(action));
     let processing = facts.processing.as_ref().unwrap();
-    assert_eq!(processing.processing_id, "processing");
+    assert_eq!(
+        processing.processing_id,
+        facts.admission.as_ref().unwrap().admission.work_id
+    );
     assert_eq!(processing.stage, WorkStage::ReasonReady);
     assert_eq!(processing.phase_sequence, 1);
     assert_eq!(processing.budget.reason_requests, 1);
@@ -602,7 +640,7 @@ fn cancelled_result_must_still_project_a_paired_tool_response() {
                 result: payload("first", "tool"),
             },
         }],
-        next_work_id: Some("processing".into()),
+        next_work_id: Some(work_id(&facts)),
     };
     let transition = apply(&mut facts, command(action));
     assert!(transition
@@ -678,6 +716,12 @@ fn blocked_reason_resume_keeps_exact_request_and_does_not_repeat_begin() {
 #[test]
 fn finish_admission_is_exact_even_after_lifecycle_changed() {
     let mut facts = facts();
+    apply(
+        &mut facts,
+        command(WorkAction::PublishDelivery {
+            delivery: publication("delivery"),
+        }),
+    );
     admit(&mut facts);
     let admission = facts.admission.as_ref().unwrap().admission.clone();
     facts.control.lifecycle = 2;

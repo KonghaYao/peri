@@ -28,19 +28,34 @@ fn unsupported(behavior: &str) -> SessionResourceError {
 
 #[async_trait]
 impl SessionResources for MockSessionResources {
-async fn inspect_work(&self, query: &peri_acp_types::session_resources::work::WorkQuery)
-    -> SessionResourceResult<peri_acp_types::session_resources::work::WorkInspection> {
-    self.durable_backend(&query.session_id).await.inspect_work(query).await
-}
-async fn read_evidence(&self, query: &peri_acp_types::session_resources::work::EvidenceQuery)
-    -> SessionResourceResult<peri_acp_types::session_resources::work::EvidenceRecord> {
-    self.durable_backend(&query.session_id).await.read_evidence(query).await
-}
-async fn prepare_evidence(&self, evidence: &peri_acp_types::session_resources::work::EvidenceWrite)
-    -> SessionResourceResult<peri_acp_types::session_resources::work::PayloadRef> {
-    self.ensure_writable()?;
-    self.durable_backend(&evidence.session_id).await.prepare_evidence(evidence).await
-}
+    async fn inspect_work(
+        &self,
+        query: &peri_acp_types::session_resources::work::WorkQuery,
+    ) -> SessionResourceResult<peri_acp_types::session_resources::work::WorkInspection> {
+        self.durable_backend(&query.session_id)
+            .await
+            .inspect_work(query)
+            .await
+    }
+    async fn read_evidence(
+        &self,
+        query: &peri_acp_types::session_resources::work::EvidenceQuery,
+    ) -> SessionResourceResult<peri_acp_types::session_resources::work::EvidenceRecord> {
+        self.durable_backend(&query.session_id)
+            .await
+            .read_evidence(query)
+            .await
+    }
+    async fn prepare_evidence(
+        &self,
+        evidence: &peri_acp_types::session_resources::work::EvidenceWrite,
+    ) -> SessionResourceResult<peri_acp_types::session_resources::work::PayloadRef> {
+        self.ensure_writable()?;
+        self.durable_backend(&evidence.session_id)
+            .await
+            .prepare_evidence(evidence)
+            .await
+    }
     async fn apply_work_mutation(
         &self,
         command: &peri_acp_types::session_resources::work::WorkCommand,

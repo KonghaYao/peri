@@ -129,13 +129,6 @@ pub(crate) async fn receive(ctx: &StageContext) -> AgentResult<Option<ReceiveOut
         return Ok(None);
     };
     super::execution_control::validate(ctx).await?;
-    publish_session_inbox(
-        session.ledger.resources(),
-        &session.admission.session_id,
-        session.admission.lifecycle,
-        &ctx.session.queue,
-    )
-    .await?;
     let result = ctx.work.receive_batch(ctx, &session).await;
     result.map(Some).map_err(Into::into)
 }
@@ -151,7 +144,7 @@ impl WorkBoundary {
             .ledger
             .inspect(&WorkQuery::new(
                 &session.admission.session_id,
-                WorkSelector::Availability,
+                WorkSelector::Head,
             ))
             .await?;
         let work_id = state
@@ -167,31 +160,61 @@ impl WorkBoundary {
                 },
             ))
             .await?;
-        let exists =
-            matches!(processing.page, WorkPage::Processings(ref records) if !records.is_empty());
+        let WorkPage::Processings(records) = &processing.page else {
+            return Err(anyhow::anyhow!(
+                "SDK processing query returned a different page"
+            ));
+        };
+        let exists = !records.is_empty();
         if !exists {
-            let WorkPage::Availability(availability) = &snapshot.page else {
+            let registration = session
+                .ledger
+                .inspect(&WorkQuery::new(
+                    &session.admission.session_id,
+                    WorkSelector::Admission {
+                        admission_id: session.admission.admission_id.clone(),
+                    },
+                ))
+                .await?;
+            let WorkPage::Admissions(records) = registration.page else {
                 return Err(anyhow::anyhow!(
-                    "SDK availability query returned a different page"
+                    "SDK admission query returned a different page"
                 ));
             };
-            let candidate = availability
-                .candidates
-                .iter()
-                .find(|candidate| {
-                    candidate.work_id == work_id
-                        && candidate.work_revision == session.admission.work_revision
+            let record = records
+                .first()
+                .filter(|record| {
+                    records.len() == 1
+                        && record.admission == session.admission
+                        && record.admission.work_id == work_id
+                        && record.leaving_evidence_id.is_none()
+                })
+                .ok_or_else(|| anyhow::anyhow!("exact active SDK admission is unavailable"))?;
+            let delivery_ids = record
+                .initial_delivery_ids
+                .as_ref()
+                .filter(|delivery_ids| {
+                    !delivery_ids.is_empty() && delivery_ids.len() <= MAX_WORK_PAGE_SIZE as usize
                 })
                 .ok_or_else(|| {
-                    anyhow::anyhow!("SDK admitted exact batch is no longer claimable")
+                    anyhow::anyhow!(
+                        "SDK admitted initial batch has no bounded frozen delivery membership"
+                    )
                 })?;
             let command = session.command(WorkAction::ClaimBatch {
                 guard: session.guard(&snapshot)?,
                 batch_id: work_id.clone(),
-                delivery_ids: candidate.delivery_ids.clone(),
+                delivery_ids: delivery_ids.clone(),
             });
             session.ledger.commit_execution_transition(&command).await?;
         }
+        publish_session_inbox(
+            session.ledger.resources(),
+            &session.admission.session_id,
+            session.admission.lifecycle,
+            &ctx.session.queue,
+        )
+        .await?;
         let recovered = recover_work(session, &work_id).await?;
         let live = match recovered.stage {
             RecoveredStage::ReasonReady | RecoveredStage::ActReady { .. } => true,
@@ -228,6 +251,13 @@ impl WorkBoundary {
         tracing::trace!(work_id = %recovered.target.work_id,
     work_revision = recovered.target.expected_work_revision,
     delivery_count = recovered.deliveries.len(), "durable Receive recovery");
+        if !live || recovered.phase_sequence != 0 {
+            return Ok(ReceiveOutput {
+                consumed_count: 0,
+                wake_up_count: usize::from(live),
+                input_message_ids: Vec::new(),
+            });
+        }
         let mut input_message_ids = Vec::new();
         let mut delivered_inputs = Vec::new();
         for delivery in &recovered.deliveries {

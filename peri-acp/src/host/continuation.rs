@@ -1,8 +1,8 @@
 //! Durable inbox publication and SDK work-availability hints; never executes RCRA.
 
 use super::{
-    AcpServerConfig, PromptLocks, SharedSessions,
     task_scope::{HostTaskKind, HostTaskOwnerKind, HostTaskSpawner},
+    AcpServerConfig, PromptLocks, SharedSessions,
 };
 use crate::session::executor::ContinuationRequest;
 #[cfg(test)]
@@ -12,7 +12,7 @@ use peri_acp_types::session::{MessageKind, MessageQueue, MessageSource, QueuedMe
 use peri_acp_types::session_resources::ControlState;
 use peri_acp_types::system_reminder::{
     ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
-    ReminderSource, SYSTEM_REMINDER_VERSION, SystemReminder, TrustedSystemReminderFactory,
+    ReminderSource, SystemReminder, TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
 };
 use std::sync::Arc;
 use tokio::sync::mpsc;

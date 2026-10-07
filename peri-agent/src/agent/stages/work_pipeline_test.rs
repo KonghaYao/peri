@@ -61,8 +61,13 @@ async fn checkpoint_retains_full_request_and_digests_its_exact_bytes() {
     let fixture = crate::session::test_resources::TestSession::open().await;
     let mut admission = admission();
     admission.session_id = fixture.thread_id();
-    let session = WorkSession { admission, ledger: WorkMutationBarrier::new(fixture.resources()) };
-    let checkpoint = request_checkpoint(&session, &request, "model".into(), "authorization".into()).await.unwrap();
+    let session = WorkSession {
+        admission,
+        ledger: WorkMutationBarrier::new(fixture.resources()),
+    };
+    let checkpoint = request_checkpoint(&session, &request, "model".into(), "authorization".into())
+        .await
+        .unwrap();
     let bytes = session.evidence(&checkpoint.payload).await.unwrap();
     assert_eq!(
         serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
@@ -70,10 +75,7 @@ async fn checkpoint_retains_full_request_and_digests_its_exact_bytes() {
     );
     assert_eq!(
         checkpoint.request_digest,
-        format!(
-            "{:x}",
-            Sha256::digest(&bytes)
-        )
+        format!("{:x}", Sha256::digest(&bytes))
     );
     assert_eq!(checkpoint.model_ref, "model");
     assert_eq!(checkpoint.authorization_ref, "authorization");

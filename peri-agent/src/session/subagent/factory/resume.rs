@@ -24,6 +24,20 @@ fn authorization_denied(message: &str) -> EffectiveToolError {
     EffectiveToolError::new(EffectiveToolErrorCode::PermissionDenied, message)
 }
 
+async fn authorization_effect(
+    resources: &dyn peri_acp_types::session_resources::SessionResources,
+    session_id: &str,
+    invocation_id: &str,
+) -> Result<peri_acp_types::session_resources::work::Effect, EffectiveToolError> {
+    crate::session::work_access::effect(resources, session_id, invocation_id)
+        .await
+        .map_err(|error| {
+            authorization_denied(&format!(
+                "delegation authorization evidence unavailable: {error}"
+            ))
+        })
+}
+
 fn preparation_failed(message: impl Into<String>) -> EffectiveToolError {
     EffectiveToolError::new(EffectiveToolErrorCode::ApplicationFailed, message)
 }
@@ -244,19 +258,25 @@ pub(super) async fn resume_subagent_impl(
             return Err(preparation_failed("Incomplete: child control is not Active; explicit Reopen required").into());
         }
 if prompt.is_none() {
-    if let Some(processing_id) = &work.head.current_processing_id {
-        let processing = crate::session::work_access::processing(session_resources.as_ref(),
-            &thread_id, processing_id).await?;
-        if matches!(processing.stage, peri_acp_types::session_resources::work::WorkStage::ReasonInFlight
+    let active = session_resources.inspect_work(&WorkQuery::new(
+        &thread_id,
+        WorkSelector::ActiveProcessing,
+    )).await?;
+    let peri_acp_types::session_resources::work::WorkPage::Processings(processings) = active.page else {
+        return Err(preparation_failed("active child processing query returned a different page").into());
+    };
+    if processings.iter().any(|processing| {
+        matches!(processing.stage, peri_acp_types::session_resources::work::WorkStage::ReasonInFlight
             | peri_acp_types::session_resources::work::WorkStage::Blocked)
             && processing.request.is_some() && processing.response.is_none()
-        {
-            return Err(preparation_failed("Blocked: original model request requires reconciliation before implicit continuation").into());
-        }
+    }) {
+        return Err(preparation_failed("Blocked: original model request requires reconciliation before implicit continuation").into());
     }
 }
 let descriptor = crate::session::work_access::descriptor(session_resources.as_ref(),
-    &thread_id, work.control.lifecycle).await?;
+    &thread_id, work.control.lifecycle).await.map_err(|error| preparation_failed(format!(
+        "Blocked: saved child runtime metadata unavailable: {error}"
+    )))?;
 let raw = descriptor.child_resume_metadata_json.as_deref()
     .ok_or_else(|| preparation_failed("Blocked: saved child runtime metadata unavailable"))?;
         let saved: super::cold::ChildResumeMetadata = serde_json::from_str(raw)
@@ -296,7 +316,7 @@ let raw = descriptor.child_resume_metadata_json.as_deref()
         if original_parent_work.control.lifecycle != saved.direct_initiator_lifecycle {
             return Err(authorization_denied("saved child initiator lifecycle differs from owning parent").into());
         }
-        let original = crate::session::work_access::effect(session_resources.as_ref(), &saved.direct_initiator_session_id, &saved.delegation_invocation_id).await?;
+        let original = authorization_effect(session_resources.as_ref(), &saved.direct_initiator_session_id, &saved.delegation_invocation_id).await?;
         if original.recipient_lifecycle != saved.direct_initiator_lifecycle
             || original.intent.authorization_ref != saved.authorization_ref
             || original.intent.scope_id != saved.direct_initiator_session_id
@@ -309,7 +329,7 @@ let raw = descriptor.child_resume_metadata_json.as_deref()
         let parent_work = session_resources
             .inspect_work(&WorkQuery::new(initiator.clone(), WorkSelector::Head))
             .await?;
-        let current = crate::session::work_access::effect(session_resources.as_ref(), &initiator, invocation_id).await?;
+        let current = authorization_effect(session_resources.as_ref(), &initiator, invocation_id).await?;
         if current.recipient_lifecycle != parent_work.control.lifecycle
             || current.intent.scope_id != initiator
             || current.intent.authorization_ref.is_empty()

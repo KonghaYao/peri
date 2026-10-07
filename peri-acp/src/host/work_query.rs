@@ -1,8 +1,8 @@
-use peri_acp_types::session_resources::SessionResources;
 use peri_acp_types::session_resources::work::{
     AdmissionRecord, OwnedWorkCommand, Processing, RecoveryDescriptor, TerminalObligation,
     WorkAvailability, WorkInspection, WorkPage, WorkQuery, WorkSelector,
 };
+use peri_acp_types::session_resources::SessionResources;
 
 use crate::transport::types::AcpError;
 
@@ -124,7 +124,7 @@ pub(super) async fn test_payload(
 ) -> peri_acp_types::session_resources::work::WorkPayload {
     use peri_acp_types::messages::BaseMessage;
     use peri_acp_types::session_resources::work::{EvidenceWrite, WorkPayload};
-    use peri_acp_types::store::{PersistedPayload, serialize_persisted_payload};
+    use peri_acp_types::store::{serialize_persisted_payload, PersistedPayload};
     let role = match payload {
         PersistedPayload::Message(BaseMessage::Human { .. }) => "user",
         PersistedPayload::Message(BaseMessage::Ai { .. }) => "assistant",

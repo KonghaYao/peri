@@ -119,6 +119,219 @@ async fn guard_and_target(resources: &dyn SessionResources) -> (WorkGuard, WorkT
 }
 
 #[tokio::test]
+async fn registered_candidate_claim_keeps_original_members_after_another_publication() {
+    let (_directory, resources) = fixture().await;
+    publish_unclaimed_draft(&resources).await;
+    let WorkPage::Availability(availability) =
+        inspect(&resources, WorkSelector::Availability).await.page
+    else {
+        panic!("expected availability page");
+    };
+    let candidate = availability.candidates.first().unwrap().clone();
+    let admission = WorkAdmission {
+        session_id: SESSION.into(),
+        admission_id: "frozen-candidate".into(),
+        instance_id: "instance".into(),
+        generation_id: "generation".into(),
+        lifecycle: 1,
+        control_generation: 0,
+        work_id: candidate.work_id.clone(),
+        work_revision: candidate.work_revision,
+        execution: serde_json::from_value(serde_json::json!({
+            "turnId": "00000000-0000-4000-8000-000000000003",
+            "attemptId": "freeze-attempt"
+        }))
+        .unwrap(),
+    };
+    let register = command(
+        "freeze-register",
+        WorkAction::RegisterAdmission {
+            admission: admission.clone(),
+        },
+    );
+    let registered = resources.apply_work_mutation(&register).await.unwrap();
+    assert_eq!(registered.decision, WorkDecision::Accepted);
+    let later = payload(
+        &resources,
+        "later-payload",
+        BaseMessage::human("later producer"),
+        "user",
+    )
+    .await;
+    accept(
+        &resources,
+        "later-producer",
+        WorkAction::PublishDelivery {
+            delivery: PublishDelivery {
+                delivery_id: "later-delivery".into(),
+                event: WorkEvent {
+                    producer_namespace: "other-producer".into(),
+                    event_id: "later-event".into(),
+                    event_kind: "input".into(),
+                    causation_id: None,
+                    content: later,
+                },
+                purpose: DeliveryPurpose::UserInput,
+                policy: MessagePolicy::ensure_processing(),
+            },
+        },
+    )
+    .await;
+    assert_eq!(
+        resources.apply_work_mutation(&register).await.unwrap(),
+        registered
+    );
+    let WorkPage::Admissions(admissions) = inspect(
+        &resources,
+        WorkSelector::Admission {
+            admission_id: admission.admission_id.clone(),
+        },
+    )
+    .await
+    .page
+    else {
+        panic!("expected admission page");
+    };
+    assert_eq!(
+        admissions[0].initial_delivery_ids.as_ref(),
+        Some(&candidate.delivery_ids)
+    );
+    let snapshot = inspect(&resources, WorkSelector::Head).await;
+    accept(
+        &resources,
+        "frozen-claim",
+        WorkAction::ClaimBatch {
+            guard: WorkGuard {
+                expected_revision: snapshot.head.change_seq,
+                expected_control_generation: snapshot.control.control_generation,
+                execution: admission.execution,
+            },
+            batch_id: candidate.work_id.clone(),
+            delivery_ids: candidate.delivery_ids.clone(),
+        },
+    )
+    .await;
+    let WorkPage::Deliveries(deliveries) = inspect(
+        &resources,
+        WorkSelector::ProcessingDeliveries {
+            processing_id: candidate.work_id,
+        },
+    )
+    .await
+    .page
+    else {
+        panic!("expected delivery page");
+    };
+    assert_eq!(
+        deliveries
+            .iter()
+            .map(|delivery| delivery.delivery_id.clone())
+            .collect::<Vec<_>>(),
+        candidate.delivery_ids
+    );
+    let WorkPage::Deliveries(later) = inspect(
+        &resources,
+        WorkSelector::Delivery {
+            delivery_id: "later-delivery".into(),
+        },
+    )
+    .await
+    .page
+    else {
+        panic!("expected later delivery page");
+    };
+    assert_eq!(later[0].obligation, ObligationStatus::Pending);
+    assert!(later[0].processing_id.is_none());
+}
+
+#[tokio::test]
+async fn terminal_obligation_loads_exact_admission_and_replays_once() {
+    let (_directory, resources) = fixture().await;
+    publish_unclaimed_draft(&resources).await;
+    let WorkPage::Availability(availability) =
+        inspect(&resources, WorkSelector::Availability).await.page
+    else {
+        panic!("expected availability page");
+    };
+    let candidate = availability.candidates.first().unwrap();
+    let admission = WorkAdmission {
+        session_id: SESSION.into(),
+        admission_id: "terminal-admission".into(),
+        instance_id: "instance".into(),
+        generation_id: "generation".into(),
+        lifecycle: 1,
+        control_generation: 0,
+        work_id: candidate.work_id.clone(),
+        work_revision: candidate.work_revision,
+        execution: serde_json::from_value(serde_json::json!({
+            "turnId": "00000000-0000-4000-8000-000000000003",
+            "attemptId": "terminal-attempt"
+        }))
+        .unwrap(),
+    };
+    accept(
+        &resources,
+        "enter-terminal",
+        WorkAction::RegisterAdmission {
+            admission: admission.clone(),
+        },
+    )
+    .await;
+    let content = payload(
+        &resources,
+        "terminal-payload",
+        BaseMessage::human("terminal"),
+        "user",
+    )
+    .await;
+    let terminal = command(
+        "terminal-publication",
+        WorkAction::PublishDelivery {
+            delivery: PublishDelivery {
+                delivery_id: "terminal-delivery".into(),
+                event: WorkEvent {
+                    producer_namespace: "terminal-contract".into(),
+                    event_id: "terminal-event".into(),
+                    event_kind: "terminal".into(),
+                    causation_id: None,
+                    content,
+                },
+                purpose: DeliveryPurpose::TaskTerminal,
+                policy: MessagePolicy::ensure_processing(),
+            },
+        },
+    );
+    let head = inspect(&resources, WorkSelector::Head).await;
+    let binding = command(
+        "bind-terminal",
+        WorkAction::BindTerminalObligation {
+            expected_revision: head.head.change_seq,
+            admission_id: admission.admission_id.clone(),
+            command: Box::new(terminal.clone()),
+        },
+    );
+    let receipt = resources.apply_work_mutation(&binding).await.unwrap();
+    assert_eq!(receipt.decision, WorkDecision::Accepted);
+    assert_eq!(
+        resources.apply_work_mutation(&binding).await.unwrap(),
+        receipt
+    );
+    let stored = inspect(
+        &resources,
+        WorkSelector::TerminalCommand {
+            admission_id: admission.admission_id,
+        },
+    )
+    .await;
+    let WorkPage::TerminalCommands(records) = stored.page else {
+        panic!("expected terminal obligation page");
+    };
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].command.as_ref(), &terminal);
+    assert_eq!(stored.head.terminal_obligations, 1);
+}
+
+#[tokio::test]
 async fn fresh_database_publish_claim_and_synthetic_response_settle_once() {
     let (_directory, resources) = fixture().await;
     let input = payload(

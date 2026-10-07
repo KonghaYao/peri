@@ -28,6 +28,7 @@ pub(crate) enum RecoveredStage {
 #[derive(Debug)]
 pub(crate) struct RecoveredWork {
     pub(crate) target: WorkTarget,
+    pub(crate) phase_sequence: u64,
     pub(crate) deliveries: Vec<Delivery>,
     pub(crate) stage: RecoveredStage,
 }
@@ -120,6 +121,7 @@ pub(crate) async fn recover_work(
     };
     Ok(RecoveredWork {
         target: WorkSession::target(&processing),
+        phase_sequence: processing.phase_sequence,
         deliveries,
         stage,
     })

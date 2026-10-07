@@ -132,7 +132,12 @@ pub(super) fn apply(
                 .find(|effect| effect.invocation_id == binding.invocation_id)
                 .ok_or(WorkRejection::Conflict)?;
             if effect.binding.as_ref() != Some(binding)
-                || effect.status != InvocationStatus::Settled
+                || !matches!(
+                    effect.status,
+                    InvocationStatus::DispatchAccepted
+                        | InvocationStatus::OutcomeUnknown
+                        | InvocationStatus::Settled
+                )
                 || effect.recipient_lifecycle != binding.recipient_lifecycle
             {
                 return Err(WorkRejection::InvalidTransition);
@@ -225,6 +230,9 @@ pub(super) fn apply(
                         let mut abandoned = processing.clone();
                         abandoned.stage = WorkStage::Abandoned;
                         abandoned.blocked_evidence = Some(command.mutation_id.clone());
+                        super::processing::abandon_processing_inputs(
+                            facts, &abandoned, &mut head, writes,
+                        )?;
                         super::transition::write_processing(abandoned, receipt, writes)?;
                     }
                 } else if head.current_processing_id.is_some() {
@@ -268,13 +276,32 @@ pub(super) fn apply(
                 || admission.admission.execution != execution_guard.execution
                 || admission.admission.session_id != command.session_id
                 || admission.admission.lifecycle != command.recipient_lifecycle
+                || admission.admission.work_id != *batch_id
+                || admission.admission.work_revision != 0
+                || facts.head.current_admission_id.as_ref()
+                    != Some(&admission.admission.admission_id)
             {
                 return Err(WorkRejection::StaleExecution);
+            }
+            let initial_delivery_ids = admission
+                .initial_delivery_ids
+                .as_ref()
+                .filter(|identities| !identities.is_empty())
+                .ok_or(WorkRejection::LegacyUnknown)?;
+            if initial_delivery_ids != delivery_ids {
+                return Err(WorkRejection::Conflict);
             }
             let execution = ExecutionBinding {
                 turn_id: execution_guard.execution.turn_id,
                 attempt_id: execution_guard.execution.attempt_id.clone(),
             };
+            let delegation = facts
+                .deliveries
+                .iter()
+                .find(|delivery| delivery.delivery_id == delivery_ids[0])
+                .ok_or(WorkRejection::Conflict)?
+                .delegation
+                .clone();
             let mut seen = Vec::new();
             let mut participates = false;
             let mut head = facts.head.clone();
@@ -294,11 +321,15 @@ pub(super) fn apply(
                 {
                     return Err(WorkRejection::InvalidTransition);
                 }
+                if prior.delegation != delegation {
+                    return Err(WorkRejection::Conflict);
+                }
                 let mut delivery = prior.clone();
                 delivery.revision = next(delivery.revision)?;
                 delivery.projection_version = next(delivery.projection_version)?;
                 delivery.processing_id = Some(batch_id.clone());
                 delivery.batch_ordinal = Some(ordinal as u32);
+                delivery.delegation = None;
                 match delivery.publication.policy.disposition(&execution) {
                     MessageDisposition::Process => {
                         participates = true;
@@ -339,7 +370,7 @@ pub(super) fn apply(
                 reason_delivery_count: writes.iter().filter(|write| matches!(write, WorkWrite::Delivery { record, .. } if record.participates_in_reason)).count() as u32,
                 budget: WorkBudget::default(), checkpoint: Some(command.mutation_id.clone()), request_id: None,
                 request: None, response: None, remaining_effects: 0, resume_stage: None, blocked_evidence: None,
-                recovery_condition: None, delegation: None };
+                recovery_condition: None, delegation };
             if participates {
                 head.current_processing_id = Some(batch_id.clone());
             }
@@ -495,6 +526,7 @@ fn accept(
             participates_in_reason: false,
             obligation: ObligationStatus::Pending,
             disposition: None,
+            delegation: None,
         },
     });
     Ok(())

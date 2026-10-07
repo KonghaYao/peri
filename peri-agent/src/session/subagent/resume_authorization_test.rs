@@ -150,6 +150,14 @@ async fn prepare_resume_invocation_for(
         .await
         .unwrap();
     assert_eq!(receipt.decision, WorkDecision::Accepted);
+    if scope == initiator {
+        crate::session::test_resources::mock::work::dispatch_fixture_invocation(
+            store,
+            initiator,
+            invocation_id,
+        )
+        .await;
+    }
 }
 
 fn current_resume_config(

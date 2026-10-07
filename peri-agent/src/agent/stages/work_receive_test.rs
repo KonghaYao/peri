@@ -162,9 +162,12 @@ async fn new_delivery_commits_once_and_duplicate_never_loads_history_or_rewrites
     assert_eq!(
         resources.queries.lock().unwrap().as_slice(),
         &vec![
-            WorkQuery::new(bound.thread_id.clone(), WorkSelector::Delivery {
-                delivery_id: delivery_id.as_uuid().to_string(),
-            });
+            WorkQuery::new(
+                bound.thread_id.clone(),
+                WorkSelector::Delivery {
+                    delivery_id: delivery_id.as_uuid().to_string(),
+                }
+            );
             3
         ]
     );

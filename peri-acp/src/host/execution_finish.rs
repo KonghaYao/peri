@@ -1,6 +1,6 @@
 use peri_acp_types::session_resources::{
-    SessionResources,
     work::{WorkAction, WorkAdmission, WorkCommand, WorkDecision, WorkResolution},
+    SessionResources,
 };
 
 use crate::transport::types::AcpError;

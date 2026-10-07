@@ -17,7 +17,7 @@ impl RemoteSessionData {
         action: ControlAction,
     ) -> SessionResourceResult<()> {
         let current = self.read_control(id).await?;
-        if action == ControlAction::Close && current.status == ControlStatus::Closing {
+        if action == ControlAction::Close && control::close_request_already_recorded(&current) {
             return Ok(());
         }
         let command = control::close_command(id, &current, action)?;

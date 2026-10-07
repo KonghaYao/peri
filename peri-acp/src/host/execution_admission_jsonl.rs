@@ -5,16 +5,16 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
 use crate::transport::{
-    RequestTransport,
     router::RequestRouter,
     types::{AcpError, IncomingMessage, RequestId},
+    RequestTransport,
 };
 
 const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;

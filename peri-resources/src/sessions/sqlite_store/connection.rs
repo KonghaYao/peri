@@ -126,7 +126,7 @@ pub(super) fn classify_shape_probe_failure(error: &sqlx::Error) -> ReadOnlyThrea
 }
 
 impl SqliteSessionDatabase {
-    /// 打开或创建会话数据库，原地升级已知旧 schema 并保留历史数据。
+    /// 打开或创建当前工作记录形状的会话数据库；旧形状须显式停写迁移。
     pub(super) async fn open(db_path: impl Into<PathBuf>) -> Result<Self> {
         let db_path = db_path.into();
         // 确保父目录存在

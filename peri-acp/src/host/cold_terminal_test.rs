@@ -1,6 +1,6 @@
 use std::sync::{
-    Arc,
     atomic::{AtomicBool, Ordering},
+    Arc,
 };
 
 use async_trait::async_trait;
@@ -103,22 +103,14 @@ impl Fixture {
             recovery_locator: intent.recovery_locator.clone(),
             authorization_ref: intent.authorization_ref.clone(),
         };
-        apply(
-            resources.as_ref(),
-            "original-parent",
-            "prepare",
-            WorkAction::PrepareInvocation {
-                expected_revision: 0,
-                intent,
-            },
-        )
-        .await;
+        prepare_parent_dispatch(resources.as_ref(), intent).await;
+        let parent = snapshot(resources.as_ref(), "original-parent").await;
         let parent_binding_receipt = apply(
             resources.as_ref(),
             "original-parent",
             "bind",
             WorkAction::ReconcileTaskBinding {
-                expected_revision: 1,
+                expected_revision: parent.head.change_seq,
                 binding: binding.clone(),
             },
         )
@@ -373,6 +365,168 @@ async fn snapshot(resources: &dyn SessionResources, session_id: &str) -> WorkIns
         .unwrap()
 }
 
+async fn prepare_parent_dispatch(resources: &dyn SessionResources, intent: InvocationIntent) {
+    let session_id = "original-parent";
+    let delivery = publication(
+        resources,
+        session_id,
+        "parent-input",
+        "delegate to child",
+        DeliveryPurpose::UserInput,
+    )
+    .await;
+    apply(
+        resources,
+        session_id,
+        "parent-input",
+        WorkAction::PublishDelivery { delivery },
+    )
+    .await;
+    let available = snapshot(resources, session_id).await;
+    let candidate = &crate::host::work_query::availability(&available)
+        .unwrap()
+        .candidates[0];
+    let admission = WorkAdmission {
+        session_id: session_id.into(),
+        admission_id: "parent-admission".into(),
+        instance_id: "sdk-instance".into(),
+        generation_id: "sdk-generation".into(),
+        lifecycle: available.control.lifecycle,
+        control_generation: available.control.control_generation,
+        work_id: candidate.work_id.clone(),
+        work_revision: candidate.work_revision,
+        execution: ControlAttempt {
+            turn_id: TurnId::new(),
+            attempt_id: AttemptId::new(),
+        },
+    };
+    let delivery_ids = candidate.delivery_ids.clone();
+    apply(
+        resources,
+        session_id,
+        "parent-enter",
+        WorkAction::RegisterAdmission {
+            admission: admission.clone(),
+        },
+    )
+    .await;
+    let work = snapshot(resources, session_id).await;
+    apply(
+        resources,
+        session_id,
+        "parent-claim",
+        WorkAction::ClaimBatch {
+            guard: WorkGuard {
+                expected_revision: work.head.change_seq,
+                expected_control_generation: work.control.control_generation,
+                execution: admission.execution.clone(),
+            },
+            batch_id: admission.work_id.clone(),
+            delivery_ids,
+        },
+    )
+    .await;
+    let work = snapshot(resources, session_id).await;
+    let processing =
+        crate::host::work_query::test_processing(resources, session_id, &admission.work_id).await;
+    apply(
+        resources,
+        session_id,
+        "parent-reason",
+        WorkAction::BeginReason {
+            guard: WorkGuard {
+                expected_revision: work.head.change_seq,
+                expected_control_generation: work.control.control_generation,
+                execution: admission.execution.clone(),
+            },
+            target: WorkTarget {
+                work_id: admission.work_id.clone(),
+                expected_work_revision: processing.revision,
+            },
+            request_id: "parent-request".into(),
+            request: ReasonRequest {
+                payload: intent.arguments.clone(),
+                request_digest: intent.arguments_digest.clone(),
+                model_ref: "saved-parent-model".into(),
+                authorization_ref: intent.authorization_ref.clone(),
+            },
+        },
+    )
+    .await;
+    let work = snapshot(resources, session_id).await;
+    let processing =
+        crate::host::work_query::test_processing(resources, session_id, &admission.work_id).await;
+    let response = crate::host::work_query::test_payload(
+        resources,
+        session_id,
+        &PersistedPayload::Message(BaseMessage::ai_with_tool_calls(
+            "delegate to child",
+            vec![peri_acp_types::messages::ToolCallRequest::new(
+                &intent.tool_call_id,
+                &intent.tool_name,
+                serde_json::json!({}),
+            )],
+        )),
+    )
+    .await;
+    apply(
+        resources,
+        session_id,
+        "parent-response",
+        WorkAction::CommitReasonResponseAndDispatchIntent {
+            guard: WorkGuard {
+                expected_revision: work.head.change_seq,
+                expected_control_generation: work.control.control_generation,
+                execution: admission.execution.clone(),
+            },
+            target: WorkTarget {
+                work_id: admission.work_id.clone(),
+                expected_work_revision: processing.revision,
+            },
+            request_id: "parent-request".into(),
+            response,
+            dispatch_intents: vec![intent.clone()],
+            next_work_id: None,
+        },
+    )
+    .await;
+    let work = snapshot(resources, session_id).await;
+    let processing =
+        crate::host::work_query::test_processing(resources, session_id, &admission.work_id).await;
+    let effect = crate::host::work_query::inspect(
+        resources,
+        session_id,
+        WorkSelector::Effect {
+            invocation_id: intent.invocation_id.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    let WorkPage::Effects(effects) = effect.page else {
+        panic!("expected invocation page")
+    };
+    assert_eq!(effects[0].status, InvocationStatus::Prepared);
+    apply(
+        resources,
+        session_id,
+        "parent-dispatch",
+        WorkAction::BeginDispatch {
+            guard: WorkGuard {
+                expected_revision: work.head.change_seq,
+                expected_control_generation: work.control.control_generation,
+                execution: admission.execution,
+            },
+            target: WorkTarget {
+                work_id: admission.work_id,
+                expected_work_revision: processing.revision,
+            },
+            invocation_id: intent.invocation_id,
+            expected_effect_revision: effects[0].revision,
+        },
+    )
+    .await;
+}
+
 async fn apply(
     resources: &dyn SessionResources,
     session_id: &str,
@@ -388,7 +542,11 @@ async fn apply(
         })
         .await
         .unwrap();
-    assert_eq!(receipt.decision, WorkDecision::Accepted);
+    assert_eq!(
+        receipt.decision,
+        WorkDecision::Accepted,
+        "{session_id}:{mutation_id}"
+    );
     receipt
 }
 
@@ -466,16 +624,14 @@ async fn conflicting_terminal_payload_cannot_replace_unfinished_obligation() {
         .command,
         fixture.terminal
     );
-    assert!(
-        crate::host::work_query::test_admission(
-            fixture.resources.as_ref(),
-            "child",
-            "owned-admission"
-        )
-        .await
-        .leaving_evidence_id
-        .is_none()
-    );
+    assert!(crate::host::work_query::test_admission(
+        fixture.resources.as_ref(),
+        "child",
+        "owned-admission"
+    )
+    .await
+    .leaving_evidence_id
+    .is_none());
 }
 
 struct LostTerminalAck {
@@ -589,16 +745,14 @@ async fn lost_parent_ack_keeps_child_admission_running_until_cold_original_comma
         .stage,
         WorkStage::Settled
     );
-    assert!(
-        crate::host::work_query::test_admission(
-            fixture.resources.as_ref(),
-            "child",
-            "owned-admission"
-        )
-        .await
-        .leaving_evidence_id
-        .is_none()
-    );
+    assert!(crate::host::work_query::test_admission(
+        fixture.resources.as_ref(),
+        "child",
+        "owned-admission"
+    )
+    .await
+    .leaving_evidence_id
+    .is_none());
     assert_eq!(
         *crate::host::work_query::test_terminal(
             fixture.resources.as_ref(),

@@ -12,6 +12,10 @@ SessionResources 是消费 seam，SessionDataPort 的 SQLite/Turso adapter 提�
 - Transcript 是 canonical 内容权威；Control 是生命周期权威；稳定命令与回执负责幂等及 Unknown 对账。
 - 请求、内容与结果按不可变引用保存于选定存储后端；不建立上层文件系统依赖或本地 fallback。
 
+委托输入在 SDK 准入与 Receive 领取前，关联的 queued Delivery 暂存精确 DelegationRef。Claim 同事务将一致的委托引用转移到 Processing 并清除 Delivery 上的临时引用；领取后 Processing 是子侧关联权威，父侧 Effect 与绑定回执仍是关系证明，不复制完整任务绑定或提前生成执行身份。
+
+新批次登记 SDK 关联时，AdmissionRecord 在同事务冻结初始候选的有界 Delivery 身份集合。Receive 按原票据与原成员领取，不因登记后的新投递重建候选或替换准入；后来的投递保留自己的待处理责任。既有 Processing 的恢复准入不重新领取初始批次，缺失初始成员证据也不从当前队列猜测。
+
 ## 性能与生命周期
 
 普通状态转移只读取和更新本次关联记录；查询必须在存储层直接限量。历史内容不得参与普通状态更新的重新编码，禁止把分表记录重组成全会话聚合状态。

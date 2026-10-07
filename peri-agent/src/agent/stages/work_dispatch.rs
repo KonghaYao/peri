@@ -119,7 +119,9 @@ pub(crate) async fn commit_results(
     ctx: &StageContext,
     results: &[(ToolCall, ToolResult)],
 ) -> anyhow::Result<Option<Vec<BaseMessage>>> {
-    if results.is_empty() { ctx.work.ensure(ctx).await?; }
+    if results.is_empty() {
+        ctx.work.ensure(ctx).await?;
+    }
     let Some(session) = ctx.work.settlement_session(ctx).await? else {
         return Ok(None);
     };
@@ -148,6 +150,14 @@ pub(crate) async fn commit_results(
                     projections.push(message);
                 }
             }
+            continue;
+        }
+        if effect.status != InvocationStatus::Prepared
+            && result
+                .effective_error_code
+                .is_some_and(super::tool_dispatch::requires_outcome_reconciliation)
+        {
+            state.frozen = true;
             continue;
         }
         let stopped_before_effect = processing.stage == WorkStage::Abandoned

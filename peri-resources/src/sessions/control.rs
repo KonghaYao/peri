@@ -1,6 +1,6 @@
 use peri_acp_types::session_resources::{
     ControlAction, ControlCommand, ControlDecision, ControlReceipt, ControlResolution,
-    ControlState, SessionResourceError, SessionResourceResult,
+    ControlState, ControlStatus, SessionResourceError, SessionResourceResult,
 };
 use serde::{de::DeserializeOwned, Serialize};
 use sha2::{Digest, Sha256};
@@ -77,6 +77,13 @@ pub(super) fn close_command(
 
 pub(super) fn encode(value: &impl Serialize) -> SessionResourceResult<String> {
     serde_json::to_string(value).map_err(|_| corrupt("control record is not serializable"))
+}
+
+pub(super) fn close_request_already_recorded(current: &ControlState) -> bool {
+    matches!(
+        current.status,
+        ControlStatus::Closing | ControlStatus::Closed
+    )
 }
 
 pub(super) fn decode<Value: DeserializeOwned>(json: &str) -> SessionResourceResult<Value> {

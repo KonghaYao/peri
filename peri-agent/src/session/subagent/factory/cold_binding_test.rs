@@ -387,6 +387,12 @@ async fn prepare_invocations(session: &TestSession, count: usize) -> Vec<Effect>
             .await
             .unwrap();
         assert_eq!(receipt.decision, WorkDecision::Accepted);
+        crate::session::test_resources::mock::work::dispatch_fixture_invocation(
+            resources.as_ref(),
+            &session_id,
+            &format!("invocation-{index}"),
+        )
+        .await;
     }
     let mut effects = Vec::new();
     for index in 0..count {
