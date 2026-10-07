@@ -131,7 +131,10 @@ async fn test_resume_load_cancelled_by_dispatch_restores_previous_status() {
     let config = resume_config_with(
         store.clone(),
         thread_id.clone(),
-        SubagentLlmSource::prebuilt(Box::new(llm)),
+        crate::session::test_resources::mock::model::fixture_source(
+            std::sync::Arc::new(llm),
+            "fixture-scripted",
+        ),
         SubagentRunMode::Sync,
         None,
         Some(cancel.clone()),
@@ -175,7 +178,10 @@ async fn test_resume_active_write_cancelled_by_dispatch_finishes_before_rollback
     let config = resume_config_with(
         store.clone(),
         thread_id.clone(),
-        SubagentLlmSource::prebuilt(Box::new(llm)),
+        crate::session::test_resources::mock::model::fixture_source(
+            std::sync::Arc::new(llm),
+            "fixture-scripted",
+        ),
         SubagentRunMode::Sync,
         None,
         Some(cancel.clone()),
@@ -243,7 +249,10 @@ async fn test_resume_cancelled_during_assembly_never_starts_execution() {
     let mut config = resume_config_with(
         store.clone(),
         thread_id.clone(),
-        SubagentLlmSource::prebuilt(Box::new(llm)),
+        crate::session::test_resources::mock::model::fixture_source(
+            std::sync::Arc::new(llm),
+            "fixture-scripted",
+        ),
         SubagentRunMode::Sync,
         None,
         Some(cancel.clone()),
@@ -297,31 +306,27 @@ async fn test_resume_running_cancelled_by_dispatch_finalizes_claim() {
         SessionResources,
     };
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    struct GatedLLM(std::sync::Mutex<Option<ResumeLoadGate>>);
-    #[async_trait::async_trait]
-    impl crate::agent::react::ReactLLM for GatedLLM {
-        async fn generate_reasoning(
+    #[derive(Clone)]
+    struct GatedLLM(std::sync::Arc<std::sync::Mutex<Option<ResumeLoadGate>>>);
+
+    impl GatedLLM {
+        async fn respond(
             &self,
-            _messages: &[BaseMessage],
-            _tools: &[&dyn crate::tools::BaseTool],
-            _streaming: Option<crate::agent::react::StreamingContext>,
-        ) -> crate::error::AgentResult<crate::agent::react::Reasoning> {
+            _request: peri_model::ModelRequest,
+            cancellation: tokio_util::sync::CancellationToken,
+        ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
             let gate = { self.0.lock().unwrap().take() }.expect("one LLM call");
-            gate.wait().await;
-            Ok(crate::agent::react::Reasoning::with_answer(
-                "",
-                "unreachable",
-            ))
-        }
-        fn model_name(&self) -> String {
-            "gated-resume".into()
-        }
-        fn provider_capabilities(
-            &self,
-        ) -> crate::agent::compact_v2::projection::ProviderCapabilities {
-            crate::agent::compact_v2::projection::ProviderCapabilities::default()
+            tokio::select! {
+                _ = gate.wait() => {}
+                _ = cancellation.cancelled() => {
+                    return vec![Err(peri_model::ModelError::cancelled())];
+                }
+            }
+            crate::session::test_resources::mock::model::text_events("unreachable")
         }
     }
+    crate::fixture_model_impl!(GatedLLM);
+
     let store = MockSessionResources::new();
     let thread_id = uuid::Uuid::now_v7().to_string();
     preset_resumable_thread(&store, &thread_id, None).await;
@@ -334,13 +339,16 @@ async fn test_resume_running_cancelled_by_dispatch_finalizes_claim() {
     let mut config = resume_config_with(
         store.clone(),
         thread_id.clone(),
-        SubagentLlmSource::prebuilt(Box::new(GatedLLM(std::sync::Mutex::new(Some(
-            ResumeLoadGate {
-                entered: entered_tx,
-                release: release_rx,
-                dropped: llm_dropped.clone(),
-            },
-        ))))),
+        crate::session::test_resources::mock::model::fixture_source(
+            std::sync::Arc::new(GatedLLM(std::sync::Arc::new(std::sync::Mutex::new(Some(
+                ResumeLoadGate {
+                    entered: entered_tx,
+                    release: release_rx,
+                    dropped: llm_dropped.clone(),
+                },
+            ))))),
+            "fixture-scripted",
+        ),
         SubagentRunMode::Sync,
         None,
         Some(cancel.clone()),
@@ -388,7 +396,10 @@ async fn test_resume_running_cancelled_by_dispatch_finalizes_claim() {
     let config = resume_config_with(
         store.clone(),
         thread_id.clone(),
-        SubagentLlmSource::prebuilt(Box::new(llm)),
+        crate::session::test_resources::mock::model::fixture_source(
+            std::sync::Arc::new(llm),
+            "fixture-scripted",
+        ),
         SubagentRunMode::Sync,
         None,
         None,
@@ -435,7 +446,10 @@ async fn test_resume_precancelled_background_still_registers_and_completes() {
     let mut config = resume_config_with(
         store.clone(),
         thread_id.clone(),
-        SubagentLlmSource::prebuilt(Box::new(llm)),
+        crate::session::test_resources::mock::model::fixture_source(
+            std::sync::Arc::new(llm),
+            "fixture-scripted",
+        ),
         SubagentRunMode::Background,
         Some(task_manager),
         Some(token),
@@ -511,7 +525,10 @@ async fn test_resume_provenance_read_cancelled_by_dispatch_restores_previous_sta
         let mut config = resume_config_with(
             store.clone(),
             thread_id.clone(),
-            SubagentLlmSource::prebuilt(Box::new(llm)),
+            crate::session::test_resources::mock::model::fixture_source(
+                std::sync::Arc::new(llm),
+                "fixture-scripted",
+            ),
             SubagentRunMode::Sync,
             None,
             Some(cancel.clone()),

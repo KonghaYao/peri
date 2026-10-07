@@ -25,25 +25,19 @@ use peri_acp_types::session_resources::SessionResources;
 /// 请求时 `collect_prompt_contributions()` provider 在那里一次装上，定义型 /
 /// fork、前台 / 后台、live resume 与冷恢复共用，不再由工厂预先封装 bridge。
 ///
-/// [`SubagentLlmSource::Prebuilt`] 是**已装配 ReactLLM 的嵌入/测试**接缝
-/// （不参与身份与请求时贡献装配；生产 ACP 工厂必须使用
-/// [`SubagentLlmSource::model`]）。
-pub enum SubagentLlmSource {
-    /// 生产：模型 + 名称 + session id；bridge 在子链装配点构造。
-    Model {
-        model: Arc<dyn peri_model::Model>,
-        model_name: String,
-        session_id: Option<String>,
-    },
-    /// 嵌入/测试：调用方已提供完整 ReactLLM（例如 durable 夹具的 prepared 路径）。
-    Prebuilt(Box<dyn ReactLLM + Send + Sync>),
+/// 没有旁路变体：所有调用方（生产与测试）都提供 `peri_model::Model`，身份与
+/// 请求时 contribution provider 的装配对二者一致。
+pub struct SubagentLlmSource {
+    model: Arc<dyn peri_model::Model>,
+    model_name: String,
+    session_id: Option<String>,
 }
 
 impl SubagentLlmSource {
     /// 生产构造：只做模型解析结果投影；`model_name` 由工厂从解析出的 provider
     /// 提供（`peri_model::Model` 无名称接口），供持久化 metadata 与恢复核对。
     pub fn model(model: Arc<dyn peri_model::Model>, model_name: impl Into<String>) -> Self {
-        Self::Model {
+        Self {
             model,
             model_name: model_name.into(),
             session_id: None,
@@ -51,29 +45,28 @@ impl SubagentLlmSource {
     }
 
     pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
-        if let Self::Model {
-            session_id: slot, ..
-        } = &mut self
-        {
-            *slot = Some(session_id.into());
-        }
+        self.session_id = Some(session_id.into());
         self
     }
 
-    /// 嵌入/测试构造：已装配 ReactLLM（不参与身份与请求时贡献装配）。
-    pub fn prebuilt(llm: Box<dyn ReactLLM + Send + Sync>) -> Self {
-        Self::Prebuilt(llm)
+    pub fn model_name(&self) -> &str {
+        &self.model_name
     }
 
-    pub fn model_name(&self) -> String {
-        match self {
-            Self::Model { model_name, .. } => model_name.clone(),
-            Self::Prebuilt(llm) => llm.model_name(),
+    /// hook 槽位等**无子链**的消费方入口：只做 plain bridge（仅 session id），
+    /// 不参与子身份 / 请求时 contribution 装配。
+    ///
+    /// 这**不是**子 Agent 装配旁路：子链一律经 [`Self::into_react_llm`] 装身份与
+    /// provider；本入口仅服务 hook 的独立 LLM 消费者。
+    pub fn into_plain_bridge(self) -> Box<dyn ReactLLM + Send + Sync> {
+        let mut bridge = crate::agent::model_bridge::AgentModelBridge::new(self.model);
+        if let Some(session_id) = self.session_id {
+            bridge = bridge.with_session_id(session_id);
         }
+        Box::new(bridge)
     }
 
-    /// 在子链装配点转成最终 ReactLLM：`Model` 变体装 bridge（身份 +
-    /// 请求时贡献 provider）；`Prebuilt` 变体原样透传。
+    /// 在子链装配点转成最终 ReactLLM：装 bridge（身份 + 请求时贡献 provider）。
     #[allow(clippy::type_complexity)]
     pub(crate) fn into_react_llm(
         self,
@@ -81,24 +74,17 @@ impl SubagentLlmSource {
         provider: crate::agent::model_bridge::SystemContributionProvider,
         normalize_persisted_identity: bool,
     ) -> Box<dyn ReactLLM + Send + Sync> {
-        match self {
-            Self::Model {
-                model, session_id, ..
-            } => {
-                let mut bridge = crate::agent::model_bridge::AgentModelBridge::new(model)
-                    .with_system_contribution_provider(provider);
-                if let Some(session_id) = session_id {
-                    bridge = bridge.with_session_id(session_id);
-                }
-                if !identity_system.trim().is_empty() {
-                    bridge = bridge
-                        .with_system(identity_system)
-                        .with_absorbed_system_message(normalize_persisted_identity);
-                }
-                Box::new(bridge)
-            }
-            Self::Prebuilt(llm) => llm,
+        let mut bridge = crate::agent::model_bridge::AgentModelBridge::new(self.model)
+            .with_system_contribution_provider(provider);
+        if let Some(session_id) = self.session_id {
+            bridge = bridge.with_session_id(session_id);
         }
+        if !identity_system.trim().is_empty() {
+            bridge = bridge
+                .with_system(identity_system)
+                .with_absorbed_system_message(normalize_persisted_identity);
+        }
+        Box::new(bridge)
     }
 }
 

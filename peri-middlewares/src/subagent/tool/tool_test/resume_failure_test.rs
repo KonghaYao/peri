@@ -66,50 +66,25 @@ impl ExecutionAdmissionPort for ExplicitSdkFixture {
     }
 }
 
+#[derive(Clone)]
 struct MissingThreadParent {
     resources: Arc<dyn SessionResources>,
     parent_id: String,
-    requests: Mutex<Vec<Vec<BaseMessage>>>,
+    requests: Arc<Mutex<Vec<Vec<BaseMessage>>>>,
 }
 
-#[async_trait::async_trait]
-impl ReactLLM for MissingThreadParent {
-    fn prepare_reasoning(
+impl MissingThreadParent {
+    async fn respond(
         &self,
-        messages: &[BaseMessage],
-        tools: &[&dyn BaseTool],
-    ) -> peri_agent::error::AgentResult<peri_model::PreparedModelCall> {
-        Ok(peri_model::PreparedModelCall::new(
-            serde_json::json!({
-                "provider": "resume-regression",
-                "model": "parent-fixture",
-                "endpoint": "http://127.0.0.1:1",
-                "credentialRef": "fixture-no-credentials",
-                "body": {
-                    "messages": messages,
-                    "tools": tools.iter().map(|tool| tool.definition()).collect::<Vec<_>>(),
-                },
-            }),
-            |_| panic!("fixture reasoning has no network send"),
-        ))
-    }
+        request: peri_model::ModelRequest,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
+        use crate::subagent::test_support::*;
+        let _ = &cancellation;
+        let messages = base_messages(&request);
+        let defined = defined_tools(&request);
+        let tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
 
-    async fn generate_prepared_reasoning(
-        &self,
-        prepared: peri_model::PreparedModelCall,
-        streaming: Option<StreamingContext>,
-    ) -> peri_agent::error::AgentResult<Reasoning> {
-        let messages: Vec<BaseMessage> =
-            serde_json::from_value(prepared.checkpoint()["body"]["messages"].clone()).unwrap();
-        self.generate_reasoning(&messages, &[], streaming).await
-    }
-
-    async fn generate_reasoning(
-        &self,
-        messages: &[BaseMessage],
-        _: &[&dyn BaseTool],
-        _: Option<StreamingContext>,
-    ) -> peri_agent::error::AgentResult<Reasoning> {
         let snapshot = self
             .resources
             .load_session_work(&WorkQuery {
@@ -124,17 +99,14 @@ impl ReactLLM for MissingThreadParent {
         let mut requests = self.requests.lock().unwrap();
         requests.push(messages.to_vec());
         match requests.len() {
-            1 => Ok(Reasoning::with_tools(
-                "resume missing child",
-                vec![ToolCall::new(
-                    "missing-thread-resume",
-                    "Agent",
-                    serde_json::json!({
-                        "resume_thread_id": MISSING_THREAD,
-                        "prompt": "continue the child",
-                    }),
-                )],
-            )),
+            1 => tool_events_from_react(vec![ToolCall::new(
+                "missing-thread-resume",
+                "Agent",
+                serde_json::json!({
+                    "resume_thread_id": MISSING_THREAD,
+                    "prompt": "continue the child",
+                }),
+            )]),
             2 => {
                 let tool_result = messages
                     .iter()
@@ -154,15 +126,13 @@ impl ReactLLM for MissingThreadParent {
                     Some(InvocationOutcome::Failed { .. })
                 ));
                 assert!(invocation.unknown_reason.is_none());
-                Ok(Reasoning::with_answer(
-                    "",
-                    "parent continues after missing child",
-                ))
+                text_events("parent continues after missing child")
             }
             _ => panic!("parent should finish on its second Reason"),
         }
     }
 }
+crate::subagent::test_support::fixture_model_impl!(MissingThreadParent);
 
 #[tokio::test]
 async fn durable_parent_completes_after_real_agent_resume_missing_thread() {
@@ -245,7 +215,7 @@ async fn durable_parent_completes_after_real_agent_resume_missing_thread() {
     let model = Arc::new(MissingThreadParent {
         resources: fixture.facade(),
         parent_id: parent_id.clone(),
-        requests: Mutex::new(Vec::new()),
+        requests: Arc::new(Mutex::new(Vec::new())),
     });
     let tool: Arc<dyn BaseTool> = Arc::new(
         SubAgentTool::new(
@@ -260,7 +230,11 @@ async fn durable_parent_completes_after_real_agent_resume_missing_thread() {
     let context = StageContext::builder(turn, parent.transcript(), parent.queue().clone())
         .with_recipient_lifecycle(admission.lifecycle)
         .with_execution_admission_port(sdk.clone())
-        .with_llm(model.clone())
+        .with_llm(Arc::new(
+            peri_agent::agent::model_bridge::AgentModelBridge::new(
+                Arc::clone(&model) as Arc<dyn peri_model::Model>
+            ),
+        ))
         .with_tools(Arc::new(RwLock::new(BTreeMap::from([(
             "Agent".into(),
             tool,

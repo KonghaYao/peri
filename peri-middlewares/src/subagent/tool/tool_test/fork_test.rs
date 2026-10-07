@@ -12,29 +12,38 @@ async fn test_fork_inherits_parent_messages() {
     let msg_capture: Arc<std::sync::Mutex<usize>> = Arc::new(std::sync::Mutex::new(0));
     let msg_capture_clone = Arc::clone(&msg_capture);
 
+    #[derive(Clone)]
     struct ForkTestLLM {
         msg_count: Arc<std::sync::Mutex<usize>>,
     }
-    #[async_trait::async_trait]
-    impl ReactLLM for ForkTestLLM {
-        async fn generate_reasoning(
+    impl ForkTestLLM {
+        async fn respond(
             &self,
-            messages: &[BaseMessage],
-            _tools: &[&dyn BaseTool],
-            _streaming: Option<StreamingContext>,
-        ) -> peri_agent::error::AgentResult<Reasoning> {
+            request: peri_model::ModelRequest,
+            cancellation: tokio_util::sync::CancellationToken,
+        ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
+            use crate::subagent::test_support::*;
+            let _ = &cancellation;
+            let messages = base_messages(&request);
+            let defined = defined_tools(&request);
+            let tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
+
             *self.msg_count.lock().unwrap() = messages.len();
-            Ok(Reasoning::with_answer("", "fork-done"))
+            text_events("fork-done")
         }
     }
+    crate::subagent::test_support::fixture_model_impl!(ForkTestLLM);
 
     let t = SubAgentTool::new(
         Arc::new(vec![]),
         None,
         Arc::new(move |_: Option<&str>| {
-            SubagentLlmSource::prebuilt(Box::new(ForkTestLLM {
-                msg_count: Arc::clone(&msg_capture_clone),
-            }))
+            crate::subagent::test_support::fixture_source(
+                std::sync::Arc::new(ForkTestLLM {
+                    msg_count: Arc::clone(&msg_capture_clone),
+                }),
+                "fixture-scripted",
+            )
         }),
         "/tmp".to_string(),
     )
@@ -74,21 +83,27 @@ async fn test_fork_registers_all_tools_including_agent() {
         Arc::new(std::sync::Mutex::new(Vec::new()));
     let tools_capture_clone = Arc::clone(&tools_capture);
 
+    #[derive(Clone)]
     struct ToolsCheckLLM {
         captured: Arc<std::sync::Mutex<Vec<String>>>,
     }
-    #[async_trait::async_trait]
-    impl ReactLLM for ToolsCheckLLM {
-        async fn generate_reasoning(
+    impl ToolsCheckLLM {
+        async fn respond(
             &self,
-            _messages: &[BaseMessage],
-            tools: &[&dyn BaseTool],
-            _streaming: Option<StreamingContext>,
-        ) -> peri_agent::error::AgentResult<Reasoning> {
+            request: peri_model::ModelRequest,
+            cancellation: tokio_util::sync::CancellationToken,
+        ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
+            use crate::subagent::test_support::*;
+            let _ = &cancellation;
+            let messages = base_messages(&request);
+            let defined = defined_tools(&request);
+            let tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
+
             *self.captured.lock().unwrap() = tools.iter().map(|t| t.name().to_string()).collect();
-            Ok(Reasoning::with_answer("", "tools-check"))
+            text_events("tools-check")
         }
     }
+    crate::subagent::test_support::fixture_model_impl!(ToolsCheckLLM);
 
     let parent_tools = vec![make_tool("Read"), make_tool("Agent")];
 
@@ -96,9 +111,12 @@ async fn test_fork_registers_all_tools_including_agent() {
         Arc::new(parent_tools),
         None,
         Arc::new(move |_: Option<&str>| {
-            SubagentLlmSource::prebuilt(Box::new(ToolsCheckLLM {
-                captured: Arc::clone(&tools_capture_clone),
-            }))
+            crate::subagent::test_support::fixture_source(
+                std::sync::Arc::new(ToolsCheckLLM {
+                    captured: Arc::clone(&tools_capture_clone),
+                }),
+                "fixture-scripted",
+            )
         }),
         "/tmp".to_string(),
     )
@@ -255,30 +273,39 @@ async fn test_fork_directive_includes_rules() {
         Arc::new(std::sync::Mutex::new(String::new()));
     let last_capture_clone = Arc::clone(&last_capture);
 
+    #[derive(Clone)]
     struct DirectiveCheckLLM {
         last: Arc<std::sync::Mutex<String>>,
     }
-    #[async_trait::async_trait]
-    impl ReactLLM for DirectiveCheckLLM {
-        async fn generate_reasoning(
+    impl DirectiveCheckLLM {
+        async fn respond(
             &self,
-            messages: &[BaseMessage],
-            _tools: &[&dyn BaseTool],
-            _streaming: Option<StreamingContext>,
-        ) -> peri_agent::error::AgentResult<Reasoning> {
+            request: peri_model::ModelRequest,
+            cancellation: tokio_util::sync::CancellationToken,
+        ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
+            use crate::subagent::test_support::*;
+            let _ = &cancellation;
+            let messages = base_messages(&request);
+            let defined = defined_tools(&request);
+            let tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
+
             let last = messages.last().map(|m| m.content()).unwrap_or_default();
             *self.last.lock().unwrap() = last;
-            Ok(Reasoning::with_answer("", "directive-check"))
+            text_events("directive-check")
         }
     }
+    crate::subagent::test_support::fixture_model_impl!(DirectiveCheckLLM);
 
     let t = SubAgentTool::new(
         Arc::new(vec![]),
         None,
         Arc::new(move |_: Option<&str>| {
-            SubagentLlmSource::prebuilt(Box::new(DirectiveCheckLLM {
-                last: Arc::clone(&last_capture_clone),
-            }))
+            crate::subagent::test_support::fixture_source(
+                std::sync::Arc::new(DirectiveCheckLLM {
+                    last: Arc::clone(&last_capture_clone),
+                }),
+                "fixture-scripted",
+            )
         }),
         "/tmp".to_string(),
     )

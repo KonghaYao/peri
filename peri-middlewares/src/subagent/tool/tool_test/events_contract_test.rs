@@ -15,7 +15,12 @@ fn make_tool_with_bridge() -> (SubAgentTool, Arc<RecordingBridge>) {
     let t = SubAgentTool::new(
         Arc::new(vec![]),
         None,
-        Arc::new(|_: Option<&str>| SubagentLlmSource::prebuilt(Box::new(EchoLLM))),
+        Arc::new(|_: Option<&str>| {
+            crate::subagent::test_support::fixture_source(
+                std::sync::Arc::new(EchoLLM),
+                "fixture-scripted",
+            )
+        }),
         "/tmp".to_string(),
     )
     .with_parent_agent_id(Arc::new(RwLock::new(Some(AgentId::new()))))

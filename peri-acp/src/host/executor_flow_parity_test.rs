@@ -61,7 +61,11 @@ fn make_parity_context(
     let shared_tools: Arc<RwLock<BTreeMap<String, Arc<dyn BaseTool>>>> =
         Arc::new(RwLock::new(BTreeMap::new()));
     let llm_factory = Arc::new(|_model_alias: Option<&str>| {
-        peri_agent::session::subagent::SubagentLlmSource::prebuilt(Box::new(ParityFakeLlm))
+        // 对拍只关心持有者槽位：模型来源为统一入口（本测试不触发模型调用）。
+        peri_agent::session::subagent::SubagentLlmSource::model(
+            Arc::new(ParityFakeModel),
+            "parity-model",
+        )
     });
 
     peri_agent::session::factory::AssemblyContext {

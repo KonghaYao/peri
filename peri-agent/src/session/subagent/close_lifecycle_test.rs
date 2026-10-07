@@ -109,7 +109,10 @@ async fn background_close_resource_failure_keeps_delegation_unfinished() {
     let mut config = resume_config_with(
         store.clone(),
         thread_id.clone(),
-        SubagentLlmSource::prebuilt(Box::new(llm)),
+        crate::session::test_resources::mock::model::fixture_source(
+            std::sync::Arc::new(llm),
+            "fixture-scripted",
+        ),
         SubagentRunMode::Background,
         Some(manager.clone()),
         Some(token.clone()),
@@ -165,7 +168,10 @@ async fn running_caller_drop_resource_failure_keeps_close_and_claim_unfinished()
     let config = resume_config_with(
         store.clone(),
         thread_id.clone(),
-        SubagentLlmSource::prebuilt(Box::new(llm)),
+        crate::session::test_resources::mock::model::fixture_source(
+            std::sync::Arc::new(llm),
+            "fixture-scripted",
+        ),
         SubagentRunMode::Sync,
         None,
         None,

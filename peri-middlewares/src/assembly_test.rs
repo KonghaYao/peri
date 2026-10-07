@@ -162,16 +162,27 @@ impl AgentEventHandler for FakeEventHandler {
     fn on_event(&self, _event: ExecutorEvent) {}
 }
 
+#[derive(Clone)]
 struct FakeLlm;
 
 #[async_trait]
-impl ReactLLM for FakeLlm {
-    async fn generate_reasoning(
+impl peri_model::Model for FakeLlm {
+    fn capabilities(&self) -> peri_model::ModelCapabilities {
+        peri_model::ModelCapabilities::default()
+    }
+
+    fn prepare_stream(
         &self,
-        _messages: &[peri_agent::messages::BaseMessage],
-        _tools: &[&dyn BaseTool],
-        _streaming: Option<peri_agent::agent::react::StreamingContext>,
-    ) -> peri_agent::error::AgentResult<peri_agent::agent::react::Reasoning> {
+        _request: peri_model::ModelRequest,
+    ) -> peri_model::ModelResult<peri_model::PreparedModelCall> {
+        unimplemented!("契约测试不调用 LLM")
+    }
+
+    async fn stream(
+        &self,
+        _request: peri_model::ModelRequest,
+        _cancellation: tokio_util::sync::CancellationToken,
+    ) -> peri_model::ModelResult<peri_model::ModelStream> {
         unimplemented!("契约测试不调用 LLM")
     }
 }
@@ -334,7 +345,12 @@ fn base_context() -> AssemblyContext {
     let shared_tools: Arc<RwLock<BTreeMap<String, Arc<dyn BaseTool>>>> =
         Arc::new(RwLock::new(BTreeMap::new()));
     let llm_factory: Arc<dyn Fn(Option<&str>) -> SubagentLlmSource + Send + Sync> =
-        Arc::new(|_model_alias| SubagentLlmSource::prebuilt(Box::new(FakeLlm)));
+        Arc::new(|_model_alias| {
+            crate::subagent::test_support::fixture_source(
+                std::sync::Arc::new(FakeLlm),
+                "fixture-scripted",
+            )
+        });
     let system_builder: SystemPromptBuilder =
         Arc::new(|_overrides: Option<&AgentOverrides>, _cwd: &str| String::new());
     let on_bg_complete: Option<OnBgCompleteFn> = None;

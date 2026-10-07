@@ -63,6 +63,7 @@ impl BaseTool for NamedTool {
     }
 }
 
+#[derive(Clone)]
 struct CatalogLLM {
     seen: Arc<Mutex<Vec<Vec<String>>>>,
 }
@@ -90,19 +91,24 @@ async fn discover_names(tools: &[&dyn BaseTool], messages: &[BaseMessage]) -> Ve
     names
 }
 
-#[async_trait]
-impl ReactLLM for CatalogLLM {
-    async fn generate_reasoning(
+impl CatalogLLM {
+    async fn respond(
         &self,
-        messages: &[BaseMessage],
-        tools: &[&dyn BaseTool],
-        _streaming: Option<StreamingContext>,
-    ) -> peri_agent::error::AgentResult<Reasoning> {
-        let names = discover_names(tools, messages).await;
+        request: peri_model::ModelRequest,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
+        use crate::subagent::test_support::*;
+        let _ = &cancellation;
+        let messages = base_messages(&request);
+        let defined = defined_tools(&request);
+        let tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
+
+        let names = discover_names(&tools, &messages).await;
         self.seen.lock().unwrap().push(names);
-        Ok(Reasoning::with_answer("", "done"))
+        text_events("done")
     }
 }
+crate::subagent::test_support::fixture_model_impl!(CatalogLLM);
 
 fn capability_snapshot_with_result(
     generation: u64,
@@ -177,9 +183,12 @@ fn production_tool(
         Arc::new(vec![make_tool("Read")]),
         None,
         Arc::new(move |_| {
-            SubagentLlmSource::prebuilt(Box::new(CatalogLLM {
-                seen: Arc::clone(&seen),
-            }))
+            crate::subagent::test_support::fixture_source(
+                std::sync::Arc::new(CatalogLLM {
+                    seen: Arc::clone(&seen),
+                }),
+                "fixture-scripted",
+            )
         }),
         "/tmp".to_string(),
     )
@@ -197,21 +206,26 @@ async fn invoke_fork(tool: &SubAgentTool) {
 
 #[tokio::test]
 async fn existing_fork_child_refreshes_across_load_and_unload_reason_boundaries() {
+    #[derive(Clone)]
     struct RefreshingLLM {
         capability: Arc<MutableCapability>,
         seen: Arc<Mutex<Vec<Vec<String>>>>,
-        calls: std::sync::atomic::AtomicUsize,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
     }
 
-    #[async_trait]
-    impl ReactLLM for RefreshingLLM {
-        async fn generate_reasoning(
+    impl RefreshingLLM {
+        async fn respond(
             &self,
-            messages: &[BaseMessage],
-            tools: &[&dyn BaseTool],
-            _streaming: Option<StreamingContext>,
-        ) -> peri_agent::error::AgentResult<Reasoning> {
-            let names = discover_names(tools, messages).await;
+            request: peri_model::ModelRequest,
+            cancellation: tokio_util::sync::CancellationToken,
+        ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
+            use crate::subagent::test_support::*;
+            let _ = &cancellation;
+            let messages = base_messages(&request);
+            let defined = defined_tools(&request);
+            let tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
+
+            let names = discover_names(&tools, &messages).await;
             self.seen.lock().unwrap().push(names);
             let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             match call {
@@ -222,18 +236,16 @@ async fn existing_fork_child_refreshes_across_load_and_unload_reason_boundaries(
                 1 => {
                     *self.capability.0.write() = Arc::new(capability_snapshot(2, None));
                 }
-                _ => return Ok(Reasoning::with_answer("", "done")),
+                _ => return text_events("done"),
             }
-            Ok(Reasoning::with_tools(
-                "continue",
-                vec![peri_agent::agent::react::ToolCall::new(
-                    format!("call-{call}"),
-                    "Read",
-                    serde_json::json!({}),
-                )],
-            ))
+            tool_events_from_react(vec![peri_agent::agent::react::ToolCall::new(
+                format!("call-{call}"),
+                "Read",
+                serde_json::json!({}),
+            )])
         }
     }
+    crate::subagent::test_support::fixture_model_impl!(RefreshingLLM);
 
     let capability = Arc::new(MutableCapability::default());
     let seen = Arc::new(Mutex::new(Vec::new()));
@@ -249,11 +261,14 @@ async fn existing_fork_child_refreshes_across_load_and_unload_reason_boundaries(
             let capability = Arc::clone(&capability);
             let seen = Arc::clone(&seen);
             Arc::new(move |_| {
-                SubagentLlmSource::prebuilt(Box::new(RefreshingLLM {
-                    capability: Arc::clone(&capability),
-                    seen: Arc::clone(&seen),
-                    calls: std::sync::atomic::AtomicUsize::new(0),
-                }))
+                crate::subagent::test_support::fixture_source(
+                    std::sync::Arc::new(RefreshingLLM {
+                        capability: Arc::clone(&capability),
+                        seen: Arc::clone(&seen),
+                        calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                    }),
+                    "fixture-scripted",
+                )
             })
         },
         "/tmp".to_string(),
@@ -270,40 +285,43 @@ async fn existing_fork_child_refreshes_across_load_and_unload_reason_boundaries(
 
 #[tokio::test]
 async fn generation_n_dispatch_stays_pinned_after_n_plus_one_is_published() {
+    #[derive(Clone)]
     struct PinningLLM {
         capability: Arc<MutableCapability>,
-        calls: std::sync::atomic::AtomicUsize,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
         observed_result: Arc<Mutex<Option<String>>>,
     }
 
-    #[async_trait]
-    impl ReactLLM for PinningLLM {
-        async fn generate_reasoning(
+    impl PinningLLM {
+        async fn respond(
             &self,
-            messages: &[BaseMessage],
-            _tools: &[&dyn BaseTool],
-            _streaming: Option<StreamingContext>,
-        ) -> peri_agent::error::AgentResult<Reasoning> {
+            request: peri_model::ModelRequest,
+            cancellation: tokio_util::sync::CancellationToken,
+        ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
+            use crate::subagent::test_support::*;
+            let _ = &cancellation;
+            let messages = base_messages(&request);
+            let defined = defined_tools(&request);
+            let tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
+
             if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
                 *self.capability.0.write() = Arc::new(capability_snapshot_with_result(
                     2,
                     Some("mcp__dynamic__lookup"),
                     "generation-n-plus-one",
                 ));
-                return Ok(Reasoning::with_tools(
-                    "use pinned tool",
-                    vec![peri_agent::agent::react::ToolCall::new(
-                        "call-1",
-                        "ExecuteExtraTool",
-                        serde_json::json!({"tool_name": "mcp__dynamic__lookup", "params": {}}),
-                    )],
-                ));
+                return tool_events_from_react(vec![peri_agent::agent::react::ToolCall::new(
+                    "call-1",
+                    "ExecuteExtraTool",
+                    serde_json::json!({"tool_name": "mcp__dynamic__lookup", "params": {}}),
+                )]);
             }
             *self.observed_result.lock().unwrap() =
                 messages.last().map(|message| message.content());
-            Ok(Reasoning::with_answer("", "done"))
+            text_events("done")
         }
     }
+    crate::subagent::test_support::fixture_model_impl!(PinningLLM);
 
     let capability = Arc::new(MutableCapability(RwLock::new(Arc::new(
         capability_snapshot_with_result(1, Some("mcp__dynamic__lookup"), "generation-n"),
@@ -321,11 +339,14 @@ async fn generation_n_dispatch_stays_pinned_after_n_plus_one_is_published() {
             let capability = Arc::clone(&capability);
             let observed_result = Arc::clone(&observed_result);
             Arc::new(move |_| {
-                SubagentLlmSource::prebuilt(Box::new(PinningLLM {
-                    capability: Arc::clone(&capability),
-                    calls: std::sync::atomic::AtomicUsize::new(0),
-                    observed_result: Arc::clone(&observed_result),
-                }))
+                crate::subagent::test_support::fixture_source(
+                    std::sync::Arc::new(PinningLLM {
+                        capability: Arc::clone(&capability),
+                        calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                        observed_result: Arc::clone(&observed_result),
+                    }),
+                    "fixture-scripted",
+                )
             })
         },
         "/tmp".to_string(),

@@ -97,7 +97,12 @@ async fn test_subagent_type_fork_treated_as_fork_mode() {
     let t = SubAgentTool::new(
         Arc::new(vec![]),
         None,
-        Arc::new(|_: Option<&str>| SubagentLlmSource::prebuilt(Box::new(EchoLLM))),
+        Arc::new(|_: Option<&str>| {
+            crate::subagent::test_support::fixture_source(
+                std::sync::Arc::new(EchoLLM),
+                "fixture-scripted",
+            )
+        }),
         "/tmp".to_string(),
     )
     .with_parent_messages(parent_messages);
@@ -296,17 +301,22 @@ async fn test_skill_preload_registered() {
     // LLM 验证 prompt 已由 Receive 写入、并精确统计显式 skill 的 fake ToolResult。
     let preload_count: Arc<std::sync::Mutex<usize>> = Arc::new(std::sync::Mutex::new(0));
     let preload_count_clone = Arc::clone(&preload_count);
+    #[derive(Clone)]
     struct SkillPreloadCheckLLM {
         preload_count: Arc<std::sync::Mutex<usize>>,
     }
-    #[async_trait::async_trait]
-    impl ReactLLM for SkillPreloadCheckLLM {
-        async fn generate_reasoning(
+    impl SkillPreloadCheckLLM {
+        async fn respond(
             &self,
-            messages: &[BaseMessage],
-            _tools: &[&dyn BaseTool],
-            _streaming: Option<StreamingContext>,
-        ) -> peri_agent::error::AgentResult<Reasoning> {
+            request: peri_model::ModelRequest,
+            cancellation: tokio_util::sync::CancellationToken,
+        ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
+            use crate::subagent::test_support::*;
+            let _ = &cancellation;
+            let messages = base_messages(&request);
+            let defined = defined_tools(&request);
+            let tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
+
             assert!(
                 messages
                     .iter()
@@ -321,18 +331,22 @@ async fn test_skill_preload_registered() {
                         .contains("This is the test skill content.")
                 })
                 .count();
-            Ok(Reasoning::with_answer("", "skill_preload_found"))
+            text_events("skill_preload_found")
         }
     }
+    crate::subagent::test_support::fixture_model_impl!(SkillPreloadCheckLLM);
 
     let t = super::with_skill_registry(
         SubAgentTool::new(
             Arc::new(vec![]),
             None,
             Arc::new(move |_: Option<&str>| {
-                SubagentLlmSource::prebuilt(Box::new(SkillPreloadCheckLLM {
-                    preload_count: Arc::clone(&preload_count_clone),
-                }))
+                crate::subagent::test_support::fixture_source(
+                    std::sync::Arc::new(SkillPreloadCheckLLM {
+                        preload_count: Arc::clone(&preload_count_clone),
+                    }),
+                    "fixture-scripted",
+                )
             }),
             dir.path().to_str().unwrap().to_string(),
         ),
@@ -404,32 +418,35 @@ async fn test_cancel_token_interrupts_subagent() {
     .unwrap();
 
     // LLM always calls a never-registered tool, causing ToolNotFound but no infinite loop
+    #[derive(Clone)]
     struct ToolNotFoundLLM;
-    #[async_trait::async_trait]
-    impl ReactLLM for ToolNotFoundLLM {
-        async fn generate_reasoning(
+    impl ToolNotFoundLLM {
+        async fn respond(
             &self,
-            messages: &[BaseMessage],
-            _tools: &[&dyn BaseTool],
-            _streaming: Option<StreamingContext>,
-        ) -> peri_agent::error::AgentResult<Reasoning> {
+            request: peri_model::ModelRequest,
+            cancellation: tokio_util::sync::CancellationToken,
+        ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
+            use crate::subagent::test_support::*;
+            let _ = &cancellation;
+            let messages = base_messages(&request);
+            let defined = defined_tools(&request);
+            let tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
+
             if messages
                 .iter()
                 .any(|m| matches!(m, BaseMessage::Tool { .. }))
             {
-                Ok(Reasoning::with_answer("", "done"))
+                text_events("done")
             } else {
-                Ok(Reasoning::with_tools(
-                    "call missing",
-                    vec![peri_agent::agent::react::ToolCall::new(
-                        "id1",
-                        "nonexistent",
-                        serde_json::json!({}),
-                    )],
-                ))
+                tool_events_from_react(vec![peri_agent::agent::react::ToolCall::new(
+                    "id1",
+                    "nonexistent",
+                    serde_json::json!({}),
+                )])
             }
         }
     }
+    crate::subagent::test_support::fixture_model_impl!(ToolNotFoundLLM);
 
     let cancel = AgentCancellationToken::new();
     // Trigger cancellation before sub-agent execution
@@ -438,7 +455,12 @@ async fn test_cancel_token_interrupts_subagent() {
     let t = SubAgentTool::new(
         Arc::new(vec![]),
         None,
-        Arc::new(|_: Option<&str>| SubagentLlmSource::prebuilt(Box::new(ToolNotFoundLLM))),
+        Arc::new(|_: Option<&str>| {
+            crate::subagent::test_support::fixture_source(
+                std::sync::Arc::new(ToolNotFoundLLM),
+                "fixture-scripted",
+            )
+        }),
         dir.path().to_str().unwrap().to_string(),
     )
     .with_cancel(cancel);

@@ -374,18 +374,15 @@ async fn reason_refresh_rebinds_search_and_execute_to_same_dynamic_catalog() {
         }
     }
 
+    #[derive(Clone)]
     struct CatalogObservingLlm {
         search_result: Arc<StdRwLock<Option<String>>>,
         execute_result: Arc<StdRwLock<Option<String>>>,
     }
-    #[async_trait]
-    impl ReactLLM for CatalogObservingLlm {
-        async fn generate_reasoning(
-            &self,
-            _messages: &[BaseMessage],
-            tools: &[&dyn BaseTool],
-            _streaming: Option<StreamingContext>,
-        ) -> peri_agent::error::AgentResult<Reasoning> {
+
+    impl CatalogObservingLlm {
+        /// 测试直驱入口：用真实工具实例调用中间件注册的两个元工具。
+        async fn run(&self, tools: &[&dyn BaseTool]) {
             let search = tools
                 .iter()
                 .find(|tool| tool.name() == "SearchExtraTools")
@@ -413,7 +410,29 @@ async fn reason_refresh_rebinds_search_and_execute_to_same_dynamic_catalog() {
                     .await
                     .unwrap(),
             );
-            Ok(Reasoning::with_answer("", "done"))
+        }
+    }
+
+    // 本夹具只在测试内直驱（`run`）；不参与子链模型装配。
+    #[async_trait]
+    impl peri_model::Model for CatalogObservingLlm {
+        fn capabilities(&self) -> peri_model::ModelCapabilities {
+            peri_model::ModelCapabilities::default()
+        }
+
+        fn prepare_stream(
+            &self,
+            _request: peri_model::ModelRequest,
+        ) -> peri_model::ModelResult<peri_model::PreparedModelCall> {
+            unimplemented!("本夹具只在测试内直驱")
+        }
+
+        async fn stream(
+            &self,
+            _request: peri_model::ModelRequest,
+            _cancellation: tokio_util::sync::CancellationToken,
+        ) -> peri_model::ModelResult<peri_model::ModelStream> {
+            unimplemented!("本夹具只在测试内直驱")
         }
     }
 
@@ -482,13 +501,8 @@ async fn reason_refresh_rebinds_search_and_execute_to_same_dynamic_catalog() {
     };
     let tools: Vec<_> = working.read().values().cloned().collect();
     model
-        .generate_reasoning(
-            &[],
-            &tools.iter().map(|tool| tool.as_ref()).collect::<Vec<_>>(),
-            None,
-        )
-        .await
-        .unwrap();
+        .run(&tools.iter().map(|tool| tool.as_ref()).collect::<Vec<_>>())
+        .await;
 
     let search_result = search_result.read().unwrap().clone().unwrap();
     assert!(search_result.contains("mcp__echo__echo"), "{search_result}");

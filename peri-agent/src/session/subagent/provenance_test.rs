@@ -71,7 +71,10 @@ fn spawn_config(
         fork_directive_kind: Some(ForkDirectiveKind::Fork),
         run_mode: SubagentRunMode::Sync,
         skill_names: vec![],
-        llm: SubagentLlmSource::prebuilt(Box::new(EchoLLM)),
+        llm: crate::session::test_resources::mock::model::fixture_source(
+            std::sync::Arc::new(EchoLLM),
+            "fixture-scripted",
+        ),
         chain_assembler: Arc::new(EmptyChainAssembler),
         tools: vec![],
         tool_filter: Arc::new(|_| true),
@@ -258,7 +261,10 @@ async fn test_sqlite_subagent_spawn_full_micro_cold_resume_preserves_provenance(
     let config = resume_config_with(
         Arc::clone(&reopened),
         child_id.clone(),
-        SubagentLlmSource::prebuilt(Box::new(recording)),
+        crate::session::test_resources::mock::model::fixture_source(
+            std::sync::Arc::new(recording),
+            "fixture-scripted",
+        ),
         SubagentRunMode::Sync,
         None,
         None,
@@ -288,17 +294,19 @@ async fn test_sqlite_subagent_spawn_full_micro_cold_resume_preserves_provenance(
         assert!(request
             .iter()
             .any(|message| message.content().contains("child durable summary")));
+        // Model 请求面不含 transcript message id：按内容锚定同一批消息
+        // （parent_tool / own_tool 各自带唯一前缀标记）。
         assert!(request
             .iter()
-            .all(|message| message.id() != parent_hidden.id()));
+            .all(|message| !message.content().contains("old parent excluded")));
         let parent_view = request
             .iter()
-            .find(|message| message.id() == parent_tool.id())
-            .unwrap();
+            .find(|message| message.content().contains("parent-output-"))
+            .expect("frozen ancestor projection must be present");
         let own_view = request
             .iter()
-            .find(|message| message.id() == own_tool.id())
-            .unwrap();
+            .find(|message| message.content().contains("child-output-"))
+            .expect("child own projection must be present");
         assert!(
             parent_view.content().len() < 500,
             "冻结的 ancestor projection 必须仍渲染"

@@ -11,42 +11,43 @@ use crate::session::test_resources::{
 use peri_acp_types::session_resources::work::WorkQuery;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+#[derive(Clone)]
 struct ResultLlm(Arc<AtomicUsize>);
 
-#[async_trait::async_trait]
-impl ReactLLM for ResultLlm {
-    async fn generate_reasoning(
+impl ResultLlm {
+    async fn respond(
         &self,
-        messages: &[crate::messages::BaseMessage],
-        _tools: &[&dyn BaseTool],
-        _streaming: Option<StreamingContext>,
-    ) -> crate::error::AgentResult<Reasoning> {
-        if messages
+        request: peri_model::ModelRequest,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
+        let _ = cancellation;
+        use crate::session::test_resources::mock::model as fixture;
+        let messages = fixture::base_messages(&request);
+        let text = if messages
             .iter()
             .any(|message| message.content().contains("child-result"))
         {
             self.0.fetch_add(1, Ordering::SeqCst);
-            Ok(Reasoning::with_answer("", "processed"))
+            "processed"
         } else {
             assert!(messages
                 .iter()
                 .any(|message| message.content().contains("initial child work")));
-            Ok(Reasoning::with_answer("", "initial work done"))
-        }
+            "initial work done"
+        };
+        fixture::text_events(text)
     }
 }
+crate::fixture_model_impl!(ResultLlm);
 
 async fn run_child(child: Arc<Session>, calls: Arc<AtomicUsize>) {
     let child_id = child.store().thread_id.clone().unwrap();
     let child_owner = child.clone();
     let mut built = build_v2_subagent_context(
         Some(child),
-        Box::new(
-            crate::session::test_resources::mock::model::PreparedFixtureLlm::new(
-                Box::new(ResultLlm(calls)),
-                Vec::new(),
-            ),
-        ),
+        Box::new(crate::agent::model_bridge::AgentModelBridge::new(
+            std::sync::Arc::new(ResultLlm(calls)),
+        )),
         Arc::new(MiddlewareChain::new()),
         Vec::new(),
         Arc::new(|_| true),

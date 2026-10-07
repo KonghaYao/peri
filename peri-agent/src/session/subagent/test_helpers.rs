@@ -11,17 +11,7 @@ impl AdmittedSessionFactory {
         parent: Option<&Arc<Session>>,
         mut config: SubagentSpawnConfig,
     ) -> Result<SubagentSpawned, Box<dyn std::error::Error + Send + Sync>> {
-        // H1：模型来源可携带已装配 ReactLLM（Prebuilt）——durable 夹具把
-        // prepared 语义包在它外面，保持 prepare_reasoning 断言面不变。
-        config.llm = match config.llm {
-            SubagentLlmSource::Prebuilt(llm) => SubagentLlmSource::prebuilt(Box::new(
-                crate::session::test_resources::mock::model::PreparedFixtureLlm::new(
-                    llm,
-                    config.tools.clone(),
-                ),
-            )),
-            source @ SubagentLlmSource::Model { .. } => source,
-        };
+        // H1：模型来源统一（无旁路）——假模型直接实现 Model（prepare_stream/stream）。
         let resources = config
             .session_resources
             .as_ref()
@@ -68,17 +58,7 @@ impl AdmittedSessionFactory {
         parent: Option<&Arc<Session>>,
         mut config: SubagentResumeConfig,
     ) -> Result<SubagentSpawned, Box<dyn std::error::Error + Send + Sync>> {
-        // H1：模型来源可携带已装配 ReactLLM（Prebuilt）——durable 夹具把
-        // prepared 语义包在它外面，保持 prepare_reasoning 断言面不变。
-        config.llm = match config.llm {
-            SubagentLlmSource::Prebuilt(llm) => SubagentLlmSource::prebuilt(Box::new(
-                crate::session::test_resources::mock::model::PreparedFixtureLlm::new(
-                    llm,
-                    config.tools.clone(),
-                ),
-            )),
-            source @ SubagentLlmSource::Model { .. } => source,
-        };
+        // H1：模型来源统一（无旁路）——假模型直接实现 Model（prepare_stream/stream）。
         let fixture_parent = parent.map(copy_fixture_parent).unwrap_or_else(|| {
             Session::new_with_cancel(
                 Arc::from(config.cwd.as_deref().unwrap_or("/tmp")),

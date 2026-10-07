@@ -36,7 +36,10 @@ fn make_recording_subagent_tool(
                 .lock()
                 .unwrap()
                 .push(alias.map(|s| s.to_string()));
-            SubagentLlmSource::prebuilt(Box::new(EchoLLM))
+            crate::subagent::test_support::fixture_source(
+                std::sync::Arc::new(EchoLLM),
+                "fixture-scripted",
+            )
         }),
         "/tmp".to_string(),
     )

@@ -34,26 +34,32 @@ async fn reopen_closed_child(store: &SessionFixture, session_id: &str) {
 /// 前 `interrupt_rounds` 次 LLM 调用返回 `AgentError::Interrupted`（模拟中断），
 /// 之后回显最后一条消息（模拟正常完成）。共享计数跨 tool 实例 / 跨恢复生效
 /// ——每次 subagent 执行都会经 llm_factory 创建新实例，计数保持连续。
+#[derive(Clone)]
 struct InterruptThenEchoLLM {
     calls: Arc<std::sync::atomic::AtomicUsize>,
     interrupt_rounds: usize,
 }
 
-#[async_trait::async_trait]
-impl ReactLLM for InterruptThenEchoLLM {
-    async fn generate_reasoning(
+impl InterruptThenEchoLLM {
+    async fn respond(
         &self,
-        messages: &[BaseMessage],
-        _tools: &[&dyn BaseTool],
-        _streaming: Option<StreamingContext>,
-    ) -> peri_agent::error::AgentResult<Reasoning> {
+        request: peri_model::ModelRequest,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
+        use crate::subagent::test_support::*;
+        let _ = &cancellation;
+        let messages = base_messages(&request);
+        let defined = defined_tools(&request);
+        let tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
+
         if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < self.interrupt_rounds {
-            return Err(peri_agent::error::AgentError::Interrupted);
+            return vec![Err(peri_model::ModelError::cancelled())];
         }
         let last = messages.last().map(|m| m.content()).unwrap_or_default();
-        Ok(Reasoning::with_answer("", format!("echo: {}", last)))
+        text_events(format!("echo: {}", last))
     }
 }
+crate::subagent::test_support::fixture_model_impl!(InterruptThenEchoLLM);
 
 /// 构造带「前 N 次 Interrupted、之后回显」LLM 的 SubAgentTool（无 bridge/parent）
 fn make_interrupt_tool(
@@ -64,10 +70,13 @@ fn make_interrupt_tool(
         Arc::new(vec![]),
         None,
         Arc::new(move |_: Option<&str>| {
-            SubagentLlmSource::prebuilt(Box::new(InterruptThenEchoLLM {
-                calls: Arc::clone(&calls),
-                interrupt_rounds,
-            }))
+            crate::subagent::test_support::fixture_source(
+                std::sync::Arc::new(InterruptThenEchoLLM {
+                    calls: Arc::clone(&calls),
+                    interrupt_rounds,
+                }),
+                "fixture-scripted",
+            )
         }),
         "/tmp".to_string(),
     )
@@ -472,10 +481,13 @@ async fn test_resume_emits_new_start_stop_pair_per_execution() {
         Arc::new(vec![]),
         None,
         Arc::new(move |_: Option<&str>| {
-            SubagentLlmSource::prebuilt(Box::new(InterruptThenEchoLLM {
-                calls: Arc::clone(&calls_clone),
-                interrupt_rounds: 1,
-            }))
+            crate::subagent::test_support::fixture_source(
+                std::sync::Arc::new(InterruptThenEchoLLM {
+                    calls: Arc::clone(&calls_clone),
+                    interrupt_rounds: 1,
+                }),
+                "fixture-scripted",
+            )
         }),
         "/tmp".to_string(),
     )
@@ -700,32 +712,41 @@ async fn test_resume_keeps_completed_tool_round_no_duplicate_execution() {
 
     let seen = Arc::new(std::sync::Mutex::new(0usize));
     let seen_clone = Arc::clone(&seen);
+    #[derive(Clone)]
     struct ToolRoundCheckLLM {
         seen: Arc<std::sync::Mutex<usize>>,
     }
-    #[async_trait::async_trait]
-    impl ReactLLM for ToolRoundCheckLLM {
-        async fn generate_reasoning(
+    impl ToolRoundCheckLLM {
+        async fn respond(
             &self,
-            messages: &[BaseMessage],
-            _tools: &[&dyn BaseTool],
-            _streaming: Option<StreamingContext>,
-        ) -> peri_agent::error::AgentResult<Reasoning> {
+            request: peri_model::ModelRequest,
+            cancellation: tokio_util::sync::CancellationToken,
+        ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
+            use crate::subagent::test_support::*;
+            let _ = &cancellation;
+            let messages = base_messages(&request);
+            let defined = defined_tools(&request);
+            let tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
+
             let n = messages
                 .iter()
                 .filter(|m| m.content().contains("tool-result-1"))
                 .count();
             *self.seen.lock().unwrap() = n;
-            Ok(Reasoning::with_answer("", "round-preserved"))
+            text_events("round-preserved")
         }
     }
+    crate::subagent::test_support::fixture_model_impl!(ToolRoundCheckLLM);
     let t = SubAgentTool::new(
         Arc::new(vec![]),
         None,
         Arc::new(move |_: Option<&str>| {
-            SubagentLlmSource::prebuilt(Box::new(ToolRoundCheckLLM {
-                seen: Arc::clone(&seen_clone),
-            }))
+            crate::subagent::test_support::fixture_source(
+                std::sync::Arc::new(ToolRoundCheckLLM {
+                    seen: Arc::clone(&seen_clone),
+                }),
+                "fixture-scripted",
+            )
         }),
         "/tmp".to_string(),
     )

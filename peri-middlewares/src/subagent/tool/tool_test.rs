@@ -25,20 +25,26 @@ use super::*;
 use peri_agent::session::subagent::SubagentLlmSource;
 
 // Mock LLM: returns final answer directly
+#[derive(Clone)]
 struct EchoLLM;
 
-#[async_trait::async_trait]
-impl ReactLLM for EchoLLM {
-    async fn generate_reasoning(
+impl EchoLLM {
+    async fn respond(
         &self,
-        messages: &[BaseMessage],
-        _tools: &[&dyn BaseTool],
-        _streaming: Option<StreamingContext>,
-    ) -> peri_agent::error::AgentResult<Reasoning> {
+        request: peri_model::ModelRequest,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
+        use crate::subagent::test_support::*;
+        let _ = &cancellation;
+        let messages = base_messages(&request);
+        let defined = defined_tools(&request);
+        let tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
+
         let last = messages.last().map(|m| m.content()).unwrap_or_default();
-        Ok(Reasoning::with_answer("", format!("echo: {}", last)))
+        text_events(format!("echo: {}", last))
     }
 }
+crate::subagent::test_support::fixture_model_impl!(EchoLLM);
 
 fn make_tool(name: &'static str) -> Arc<dyn BaseTool> {
     struct DummyTool(&'static str);
@@ -73,7 +79,12 @@ fn make_subagent_tool(parent_tools: Vec<Arc<dyn BaseTool>>) -> SubAgentTool {
     SubAgentTool::new(
         Arc::new(parent_tools),
         None,
-        Arc::new(|_: Option<&str>| SubagentLlmSource::prebuilt(Box::new(EchoLLM))),
+        Arc::new(|_: Option<&str>| {
+            crate::subagent::test_support::fixture_source(
+                std::sync::Arc::new(EchoLLM),
+                "fixture-scripted",
+            )
+        }),
         "/tmp".to_string(),
     )
 }
@@ -363,7 +374,10 @@ async fn invoke_resolves_agent_from_argument_cwd_before_starting_factory() {
             None,
             Arc::new(move |_| {
                 factory_calls_clone.fetch_add(1, Ordering::SeqCst);
-                SubagentLlmSource::prebuilt(Box::new(EchoLLM))
+                crate::subagent::test_support::fixture_source(
+                    std::sync::Arc::new(EchoLLM),
+                    "fixture-scripted",
+                )
             }),
             dir.path().to_str().unwrap().to_string(),
         ),
@@ -431,7 +445,10 @@ async fn background_invoke_uses_argument_cwd_for_loader_failure() {
             None,
             Arc::new(move |_| {
                 factory_calls_clone.fetch_add(1, Ordering::SeqCst);
-                SubagentLlmSource::prebuilt(Box::new(EchoLLM))
+                crate::subagent::test_support::fixture_source(
+                    std::sync::Arc::new(EchoLLM),
+                    "fixture-scripted",
+                )
             }),
             dir.path().to_str().unwrap().to_string(),
         ),

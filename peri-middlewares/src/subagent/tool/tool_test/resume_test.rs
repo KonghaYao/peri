@@ -531,40 +531,46 @@ async fn test_resume_thread_id_fork_title_uses_parent_tools_and_200_iterations()
         Arc::new(std::sync::Mutex::new(Vec::new()));
     let calls_clone = Arc::clone(&llm_calls);
     let tools_clone = Arc::clone(&tools_capture);
+    #[derive(Clone)]
     struct ForkLoopLLM {
         calls: Arc<std::sync::atomic::AtomicUsize>,
         captured: Arc<std::sync::Mutex<Vec<String>>>,
     }
-    #[async_trait::async_trait]
-    impl ReactLLM for ForkLoopLLM {
-        async fn generate_reasoning(
+    impl ForkLoopLLM {
+        async fn respond(
             &self,
-            _messages: &[BaseMessage],
-            tools: &[&dyn BaseTool],
-            _streaming: Option<StreamingContext>,
-        ) -> peri_agent::error::AgentResult<Reasoning> {
+            request: peri_model::ModelRequest,
+            cancellation: tokio_util::sync::CancellationToken,
+        ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
+            use crate::subagent::test_support::*;
+            let _ = &cancellation;
+            let messages = base_messages(&request);
+            let defined = defined_tools(&request);
+            let tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
+
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             *self.captured.lock().unwrap() = tools.iter().map(|t| t.name().to_string()).collect();
-            Ok(Reasoning::with_tools(
-                "keep looping",
-                vec![peri_agent::agent::react::ToolCall::new(
-                    "id1",
-                    "nonexistent",
-                    serde_json::json!({}),
-                )],
-            ))
+            tool_events_from_react(vec![peri_agent::agent::react::ToolCall::new(
+                "id1",
+                "nonexistent",
+                serde_json::json!({}),
+            )])
         }
     }
+    crate::subagent::test_support::fixture_model_impl!(ForkLoopLLM);
 
     let parent_tools = vec![make_tool("Read"), make_tool("Agent")];
     let t = SubAgentTool::new(
         Arc::new(parent_tools),
         None,
         Arc::new(move |_: Option<&str>| {
-            SubagentLlmSource::prebuilt(Box::new(ForkLoopLLM {
-                calls: Arc::clone(&calls_clone),
-                captured: Arc::clone(&tools_clone),
-            }))
+            crate::subagent::test_support::fixture_source(
+                std::sync::Arc::new(ForkLoopLLM {
+                    calls: Arc::clone(&calls_clone),
+                    captured: Arc::clone(&tools_clone),
+                }),
+                "fixture-scripted",
+            )
         }),
         "/tmp".to_string(),
     )
@@ -640,30 +646,39 @@ async fn test_resume_thread_id_agent_def_refilters_tools() {
     let tools_capture: Arc<std::sync::Mutex<Vec<String>>> =
         Arc::new(std::sync::Mutex::new(Vec::new()));
     let tools_capture_clone = Arc::clone(&tools_capture);
+    #[derive(Clone)]
     struct ResumeFilterLLM {
         captured: Arc<std::sync::Mutex<Vec<String>>>,
     }
-    #[async_trait::async_trait]
-    impl ReactLLM for ResumeFilterLLM {
-        async fn generate_reasoning(
+    impl ResumeFilterLLM {
+        async fn respond(
             &self,
-            _messages: &[BaseMessage],
-            tools: &[&dyn BaseTool],
-            _streaming: Option<StreamingContext>,
-        ) -> peri_agent::error::AgentResult<Reasoning> {
+            request: peri_model::ModelRequest,
+            cancellation: tokio_util::sync::CancellationToken,
+        ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
+            use crate::subagent::test_support::*;
+            let _ = &cancellation;
+            let messages = base_messages(&request);
+            let defined = defined_tools(&request);
+            let tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
+
             *self.captured.lock().unwrap() = tools.iter().map(|t| t.name().to_string()).collect();
-            Ok(Reasoning::with_answer("", "resume-filter-done"))
+            text_events("resume-filter-done")
         }
     }
+    crate::subagent::test_support::fixture_model_impl!(ResumeFilterLLM);
 
     let parent_tools = vec![make_tool("Read"), make_tool("Write"), make_tool("Agent")];
     let t = SubAgentTool::new(
         Arc::new(parent_tools),
         None,
         Arc::new(move |_: Option<&str>| {
-            SubagentLlmSource::prebuilt(Box::new(ResumeFilterLLM {
-                captured: Arc::clone(&tools_capture_clone),
-            }))
+            crate::subagent::test_support::fixture_source(
+                std::sync::Arc::new(ResumeFilterLLM {
+                    captured: Arc::clone(&tools_capture_clone),
+                }),
+                "fixture-scripted",
+            )
         }),
         "/tmp".to_string(),
     )

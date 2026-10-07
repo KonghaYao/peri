@@ -24,6 +24,9 @@ mod agent_result;
 mod fork;
 mod skill_preload;
 mod tool;
+
+#[cfg(test)]
+pub(crate) mod test_support;
 pub use agent_result::AgentResultTool;
 pub use fork::{build_bg_fork_directive, build_fork_directive, build_prediction_directive};
 use parking_lot::RwLock;

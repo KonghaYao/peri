@@ -4,6 +4,7 @@ use peri_agent::agent::react::ToolCall;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::{mpsc, Semaphore};
 
+#[derive(Clone)]
 struct GatedMessageLlm {
     calls: Arc<AtomicUsize>,
     release: Arc<Semaphore>,
@@ -11,23 +12,28 @@ struct GatedMessageLlm {
     first_answer: Reasoning,
 }
 
-#[async_trait::async_trait]
-impl ReactLLM for GatedMessageLlm {
-    async fn generate_reasoning(
+impl GatedMessageLlm {
+    async fn respond(
         &self,
-        messages: &[BaseMessage],
-        _tools: &[&dyn BaseTool],
-        _streaming: Option<StreamingContext>,
-    ) -> peri_agent::error::AgentResult<Reasoning> {
+        request: peri_model::ModelRequest,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
+        use crate::subagent::test_support::*;
+        let _ = &cancellation;
+        let messages = base_messages(&request);
+        let defined = defined_tools(&request);
+        let tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
+
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
         self.snapshots.send(messages.to_vec()).unwrap();
         if call == 0 {
             self.release.acquire().await.unwrap().forget();
-            return Ok(self.first_answer.clone());
+            return events_from_reasoning(self.first_answer.clone());
         }
-        Ok(Reasoning::with_answer("", "finished"))
+        text_events("finished")
     }
 }
+crate::subagent::test_support::fixture_model_impl!(GatedMessageLlm);
 
 struct MessageFixture {
     dir: tempfile::TempDir,
@@ -74,12 +80,15 @@ impl MessageFixture {
             None,
             Arc::new(move |_| {
                 factory_calls.fetch_add(1, Ordering::SeqCst);
-                SubagentLlmSource::prebuilt(Box::new(GatedMessageLlm {
-                    calls: llm_calls.clone(),
-                    release: llm_release.clone(),
-                    snapshots: snapshots_tx.clone(),
-                    first_answer: first_answer.clone(),
-                }))
+                crate::subagent::test_support::fixture_source(
+                    std::sync::Arc::new(GatedMessageLlm {
+                        calls: llm_calls.clone(),
+                        release: llm_release.clone(),
+                        snapshots: snapshots_tx.clone(),
+                        first_answer: first_answer.clone(),
+                    }),
+                    "fixture-scripted",
+                )
             }),
             cwd.clone(),
         )
@@ -354,18 +363,24 @@ async fn test_active_message_cross_session_is_rejected_without_spawning() {
 /// [回归测试] panic 的逆序 Drop 必须先撤销收件箱，再发布注销/停止事件。
 #[tokio::test]
 async fn test_active_message_panic_revokes_before_runtime_deregistration() {
+    #[derive(Clone)]
     struct PanicLlm;
-    #[async_trait::async_trait]
-    impl ReactLLM for PanicLlm {
-        async fn generate_reasoning(
+    impl PanicLlm {
+        async fn respond(
             &self,
-            _messages: &[BaseMessage],
-            _tools: &[&dyn BaseTool],
-            _streaming: Option<StreamingContext>,
-        ) -> peri_agent::error::AgentResult<Reasoning> {
+            request: peri_model::ModelRequest,
+            cancellation: tokio_util::sync::CancellationToken,
+        ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
+            use crate::subagent::test_support::*;
+            let _ = &cancellation;
+            let messages = base_messages(&request);
+            let defined = defined_tools(&request);
+            let tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
+
             panic!("模拟后台执行崩溃");
         }
     }
+    crate::subagent::test_support::fixture_model_impl!(PanicLlm);
     let dir = tempdir().unwrap();
     let manager = Arc::new(TaskManager::new());
     let (tx, mut rx) = mpsc::unbounded_channel();
@@ -373,7 +388,12 @@ async fn test_active_message_panic_revokes_before_runtime_deregistration() {
     let tool = SubAgentTool::new(
         Arc::new(Vec::new()),
         None,
-        Arc::new(|_| SubagentLlmSource::prebuilt(Box::new(PanicLlm))),
+        Arc::new(|_| {
+            crate::subagent::test_support::fixture_source(
+                std::sync::Arc::new(PanicLlm),
+                "fixture-scripted",
+            )
+        }),
         dir.path().to_str().unwrap().into(),
     )
     .with_task_manager(manager.clone())

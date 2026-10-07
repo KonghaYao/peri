@@ -1,26 +1,25 @@
 use super::super::*;
 use peri_acp_types::session_resources::{work::*, SessionResources};
 
+#[derive(Clone)]
 struct UnknownToolReasonLlm;
 
-#[async_trait::async_trait]
-impl crate::agent::react::ReactLLM for UnknownToolReasonLlm {
-    async fn generate_reasoning(
+impl UnknownToolReasonLlm {
+    async fn respond(
         &self,
-        _messages: &[BaseMessage],
-        _tools: &[&dyn crate::tools::BaseTool],
-        _streaming: Option<crate::agent::react::StreamingContext>,
-    ) -> crate::error::AgentResult<crate::agent::react::Reasoning> {
-        Ok(crate::agent::react::Reasoning::with_tools(
-            "completed model response",
-            vec![crate::agent::react::ToolCall::new(
+        _request: peri_model::ModelRequest,
+        _cancellation: tokio_util::sync::CancellationToken,
+    ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
+        crate::session::test_resources::mock::model::tool_events(vec![
+            crate::messages::ToolCallRequest::new(
                 "unknown-call",
                 "missing-tool",
                 serde_json::json!({}),
-            )],
-        ))
+            ),
+        ])
     }
 }
+crate::fixture_model_impl!(UnknownToolReasonLlm);
 
 async fn failed_child() -> (Arc<MockSessionResources>, String, WorkSnapshot) {
     let store = MockSessionResources::new();
@@ -29,17 +28,29 @@ async fn failed_child() -> (Arc<MockSessionResources>, String, WorkSnapshot) {
     store
         .append_messages(
             &child_id,
-            &[BaseMessage::tool_result(
-                "completed-read",
-                "retained read result",
-            )],
+            &[
+                // Tool 结果必须与其 Ai tool_call 配对（bridge 转换要求），
+                // 同时保留“失败前已完成的读取结果”这一夹具语义。
+                BaseMessage::ai_with_tool_calls(
+                    "prior read",
+                    vec![crate::messages::ToolCallRequest::new(
+                        "completed-read",
+                        "Read",
+                        serde_json::json!({"path": "fixture"}),
+                    )],
+                ),
+                BaseMessage::tool_result("completed-read", "retained read result"),
+            ],
         )
         .await
         .unwrap();
     let config = resume_config_with(
         store.clone(),
         child_id.clone(),
-        SubagentLlmSource::prebuilt(Box::new(UnknownToolReasonLlm)),
+        crate::session::test_resources::mock::model::fixture_source(
+            std::sync::Arc::new(UnknownToolReasonLlm),
+            "fixture-scripted",
+        ),
         SubagentRunMode::Sync,
         None,
         None,
@@ -76,7 +87,10 @@ async fn explicit_resume_supersedes_failed_reason_without_replaying_or_erasing_i
     let mut config = resume_config_with(
         store.clone(),
         child_id.clone(),
-        SubagentLlmSource::prebuilt(Box::new(llm)),
+        crate::session::test_resources::mock::model::fixture_source(
+            std::sync::Arc::new(llm),
+            "fixture-scripted",
+        ),
         SubagentRunMode::Sync,
         None,
         None,
@@ -130,7 +144,10 @@ async fn implicit_resume_refuses_failed_reason_without_publishing_an_orphan_inpu
     let config = resume_config_with(
         store.clone(),
         child_id.clone(),
-        SubagentLlmSource::prebuilt(Box::new(llm)),
+        crate::session::test_resources::mock::model::fixture_source(
+            std::sync::Arc::new(llm),
+            "fixture-scripted",
+        ),
         SubagentRunMode::Sync,
         None,
         None,
@@ -164,7 +181,10 @@ async fn completed_child_failure_returns_a_tool_error_without_aborting_parent_di
     let mut config = resume_config_with(
         store,
         child_id.clone(),
-        SubagentLlmSource::prebuilt(Box::new(UnknownToolReasonLlm)),
+        crate::session::test_resources::mock::model::fixture_source(
+            std::sync::Arc::new(UnknownToolReasonLlm),
+            "fixture-scripted",
+        ),
         SubagentRunMode::Sync,
         None,
         None,

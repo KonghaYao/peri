@@ -30,47 +30,20 @@ async fn test_image_later_input_reaches_model_after_micro_compact() {
         tools::BaseTool,
     };
     use std::sync::Mutex;
+    #[derive(Clone)]
     struct CapturingLlm {
         requests: Arc<Mutex<Vec<Vec<BaseMessage>>>>,
-        pending_messages: Mutex<Vec<BaseMessage>>,
+        pending_messages: Arc<Mutex<Vec<BaseMessage>>>,
         queue: MessageQueue,
         next_input: BaseMessage,
     }
-    #[async_trait::async_trait]
-    impl ReactLLM for CapturingLlm {
-        fn prepare_reasoning(
-            &self,
-            messages: &[BaseMessage],
-            tools: &[&dyn BaseTool],
-        ) -> peri_agent::error::AgentResult<peri_model::PreparedModelCall> {
-            *self.pending_messages.lock().unwrap() = messages.to_vec();
-            peri_agent::agent::model_bridge::AgentModelBridge::new(Arc::new(
-                peri_model::OpenAiModel::new(peri_model::OpenAiConfig::new(
-                    "http://127.0.0.1:1".parse().unwrap(),
-                    "fixture-unused-key",
-                    "fixture-model",
-                )),
-            ))
-            .prepare_reasoning(messages, tools)
-        }
-
-        async fn generate_prepared_reasoning(
-            &self,
-            _prepared: peri_model::PreparedModelCall,
-            streaming: Option<StreamingContext>,
-        ) -> peri_agent::error::AgentResult<Reasoning> {
-            let messages = std::mem::take(&mut *self.pending_messages.lock().unwrap());
-            self.generate_reasoning(&messages, &[], streaming).await
-        }
-
-        async fn generate_reasoning(
-            &self,
-            messages: &[BaseMessage],
-            _tools: &[&dyn BaseTool],
-            _streaming: Option<StreamingContext>,
-        ) -> peri_agent::error::AgentResult<Reasoning> {
+    // 本夹具由 `StageContext::with_llm`（ReactLLM 消费面）直接驱动，且断言
+    // 依赖 transcript message id——保留 ReactLLM 形态并实现 durable prepared
+    // 路径（work fixture 要求 prepared 调用）。
+    impl CapturingLlm {
+        fn record(&self, messages: Vec<BaseMessage>) -> peri_agent::error::AgentResult<Reasoning> {
             let mut requests = self.requests.lock().unwrap();
-            requests.push(messages.to_vec());
+            requests.push(messages);
             if requests.len() == 1 {
                 self.queue.push(QueuedMessage::prompt(
                     MessageSource::UserInput,
@@ -82,6 +55,41 @@ async fn test_image_later_input_reaches_model_after_micro_compact() {
             Ok(reasoning)
         }
     }
+
+    #[async_trait::async_trait]
+    impl ReactLLM for CapturingLlm {
+        fn prepare_reasoning(
+            &self,
+            messages: &[BaseMessage],
+            _tools: &[&dyn BaseTool],
+        ) -> peri_agent::error::AgentResult<peri_model::PreparedModelCall> {
+            let checkpoint = serde_json::json!({ "messages": messages });
+            Ok(peri_model::PreparedModelCall::new(checkpoint, |_| {
+                Ok(peri_model::ModelStream::new(futures::stream::empty()))
+            }))
+        }
+
+        async fn generate_prepared_reasoning(
+            &self,
+            prepared: peri_model::PreparedModelCall,
+            _streaming: Option<StreamingContext>,
+        ) -> peri_agent::error::AgentResult<Reasoning> {
+            let messages: Vec<BaseMessage> =
+                serde_json::from_value(prepared.checkpoint()["messages"].clone())
+                    .map_err(|error| peri_agent::error::AgentError::LlmError(error.to_string()))?;
+            self.record(messages)
+        }
+
+        async fn generate_reasoning(
+            &self,
+            messages: &[BaseMessage],
+            _tools: &[&dyn BaseTool],
+            _streaming: Option<StreamingContext>,
+        ) -> peri_agent::error::AgentResult<Reasoning> {
+            self.record(messages.to_vec())
+        }
+    }
+
     let dir = tempfile::tempdir().unwrap();
     let image_path = dir.path().join("input.png");
     image::RgbImage::new(1, 1).save(&image_path).unwrap();
@@ -130,7 +138,7 @@ async fn test_image_later_input_reaches_model_after_micro_compact() {
     .with_middleware_chain(Arc::new(chain))
     .with_llm(Arc::new(CapturingLlm {
         requests: Arc::clone(&requests),
-        pending_messages: Mutex::new(Vec::new()),
+        pending_messages: Arc::new(Mutex::new(Vec::new())),
         queue: session.queue().clone(),
         next_input: later.clone(),
     }))

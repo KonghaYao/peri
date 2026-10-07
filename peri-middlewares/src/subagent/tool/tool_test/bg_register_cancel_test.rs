@@ -77,29 +77,38 @@ async fn test_bg_register_failure_does_not_execute_task() {
     let llm_calls_clone = Arc::clone(&llm_calls);
     let gate_clone = Arc::clone(&gate);
 
+    #[derive(Clone)]
     struct GateLLM {
         calls: Arc<AtomicUsize>,
     }
-    #[async_trait::async_trait]
-    impl ReactLLM for GateLLM {
-        async fn generate_reasoning(
+    impl GateLLM {
+        async fn respond(
             &self,
-            _messages: &[BaseMessage],
-            _tools: &[&dyn BaseTool],
-            _streaming: Option<StreamingContext>,
-        ) -> peri_agent::error::AgentResult<Reasoning> {
+            request: peri_model::ModelRequest,
+            cancellation: tokio_util::sync::CancellationToken,
+        ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
+            use crate::subagent::test_support::*;
+            let _ = &cancellation;
+            let messages = base_messages(&request);
+            let defined = defined_tools(&request);
+            let tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
+
             self.calls.fetch_add(1, Ordering::SeqCst);
-            Ok(Reasoning::with_answer("", "bg gate done"))
+            text_events("bg gate done")
         }
     }
+    crate::subagent::test_support::fixture_model_impl!(GateLLM);
 
     let llm_factory: Arc<dyn Fn(Option<&str>) -> SubagentLlmSource + Send + Sync> =
         Arc::new(move |_: Option<&str>| {
             // 4 个 invoke 在此同步汇合（全部进入装配窗口后才放行）
             gate_clone.wait();
-            SubagentLlmSource::prebuilt(Box::new(GateLLM {
-                calls: Arc::clone(&llm_calls_clone),
-            }))
+            crate::subagent::test_support::fixture_source(
+                std::sync::Arc::new(GateLLM {
+                    calls: Arc::clone(&llm_calls_clone),
+                }),
+                "fixture-scripted",
+            )
         });
 
     // register_runtime / deregister_runtime mock：记录调用
@@ -249,31 +258,40 @@ async fn test_bg_cancel_trigger_token_and_cleanup() {
     let llm_calls_clone = Arc::clone(&llm_calls);
     let gate_clone = Arc::clone(&gate);
 
+    #[derive(Clone)]
     struct BlockingLLM {
         gate: Arc<tokio::sync::Notify>,
         calls: Arc<AtomicUsize>,
     }
-    #[async_trait::async_trait]
-    impl ReactLLM for BlockingLLM {
-        async fn generate_reasoning(
+    impl BlockingLLM {
+        async fn respond(
             &self,
-            _messages: &[BaseMessage],
-            _tools: &[&dyn BaseTool],
-            _streaming: Option<StreamingContext>,
-        ) -> peri_agent::error::AgentResult<Reasoning> {
+            request: peri_model::ModelRequest,
+            cancellation: tokio_util::sync::CancellationToken,
+        ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
+            use crate::subagent::test_support::*;
+            let _ = &cancellation;
+            let messages = base_messages(&request);
+            let defined = defined_tools(&request);
+            let tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
+
             self.calls.fetch_add(1, Ordering::SeqCst);
             // 阻塞直到被取消（select 放弃本 future）
             self.gate.notified().await;
-            Ok(Reasoning::with_answer("", "never"))
+            text_events("never")
         }
     }
+    crate::subagent::test_support::fixture_model_impl!(BlockingLLM);
 
     let llm_factory: Arc<dyn Fn(Option<&str>) -> SubagentLlmSource + Send + Sync> =
         Arc::new(move |_: Option<&str>| {
-            SubagentLlmSource::prebuilt(Box::new(BlockingLLM {
-                gate: Arc::clone(&gate_clone),
-                calls: Arc::clone(&llm_calls_clone),
-            }))
+            crate::subagent::test_support::fixture_source(
+                std::sync::Arc::new(BlockingLLM {
+                    gate: Arc::clone(&gate_clone),
+                    calls: Arc::clone(&llm_calls_clone),
+                }),
+                "fixture-scripted",
+            )
         });
 
     let registry = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
@@ -420,30 +438,39 @@ async fn test_bg_more_than_three_concurrent_tasks_start_complete_cancel() {
     let llm_calls_clone = Arc::clone(&llm_calls);
     let release_clone = Arc::clone(&release);
 
+    #[derive(Clone)]
     struct BulkLLM {
         calls: Arc<AtomicUsize>,
         release: Arc<tokio::sync::Semaphore>,
     }
-    #[async_trait::async_trait]
-    impl ReactLLM for BulkLLM {
-        async fn generate_reasoning(
+    impl BulkLLM {
+        async fn respond(
             &self,
-            _messages: &[BaseMessage],
-            _tools: &[&dyn BaseTool],
-            _streaming: Option<StreamingContext>,
-        ) -> peri_agent::error::AgentResult<Reasoning> {
+            request: peri_model::ModelRequest,
+            cancellation: tokio_util::sync::CancellationToken,
+        ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
+            use crate::subagent::test_support::*;
+            let _ = &cancellation;
+            let messages = base_messages(&request);
+            let defined = defined_tools(&request);
+            let tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
+
             self.calls.fetch_add(1, Ordering::SeqCst);
             let _ = self.release.acquire().await;
-            Ok(Reasoning::with_answer("", "bulk done"))
+            text_events("bulk done")
         }
     }
+    crate::subagent::test_support::fixture_model_impl!(BulkLLM);
 
     let llm_factory: Arc<dyn Fn(Option<&str>) -> SubagentLlmSource + Send + Sync> =
         Arc::new(move |_: Option<&str>| {
-            SubagentLlmSource::prebuilt(Box::new(BulkLLM {
-                calls: Arc::clone(&llm_calls_clone),
-                release: Arc::clone(&release_clone),
-            }))
+            crate::subagent::test_support::fixture_source(
+                std::sync::Arc::new(BulkLLM {
+                    calls: Arc::clone(&llm_calls_clone),
+                    release: Arc::clone(&release_clone),
+                }),
+                "fixture-scripted",
+            )
         });
 
     let deregistered: Arc<std::sync::Mutex<Vec<String>>> =

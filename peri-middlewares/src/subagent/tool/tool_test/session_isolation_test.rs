@@ -8,20 +8,26 @@ use peri_agent::session::subagent::{
 use peri_agent::session::{FrozenContext, Session};
 use peri_agent::tools::ToolContext;
 
+#[derive(Clone)]
 struct ObservedToolsLlm(Arc<RwLock<Vec<String>>>);
 
-#[async_trait::async_trait]
-impl ReactLLM for ObservedToolsLlm {
-    async fn generate_reasoning(
+impl ObservedToolsLlm {
+    async fn respond(
         &self,
-        _messages: &[BaseMessage],
-        tools: &[&dyn BaseTool],
-        _streaming: Option<StreamingContext>,
-    ) -> peri_agent::error::AgentResult<Reasoning> {
+        request: peri_model::ModelRequest,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
+        use crate::subagent::test_support::*;
+        let _ = &cancellation;
+        let messages = base_messages(&request);
+        let defined = defined_tools(&request);
+        let tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
+
         *self.0.write() = tools.iter().map(|tool| tool.name().to_owned()).collect();
-        Ok(Reasoning::with_answer("", "nested-complete"))
+        text_events("nested-complete")
     }
 }
+crate::subagent::test_support::fixture_model_impl!(ObservedToolsLlm);
 
 #[tokio::test]
 async fn nested_delegation_uses_direct_parent_catalog_and_inbox() {
@@ -51,7 +57,10 @@ async fn nested_delegation_uses_direct_parent_catalog_and_inbox() {
         Arc::new(Vec::new()),
         None,
         Arc::new(move |_| {
-            SubagentLlmSource::prebuilt(Box::new(ObservedToolsLlm(captured_tools.clone())))
+            crate::subagent::test_support::fixture_source(
+                std::sync::Arc::new(ObservedToolsLlm(captured_tools.clone())),
+                "fixture-scripted",
+            )
         }),
         cwd.clone(),
     )
@@ -64,7 +73,10 @@ async fn nested_delegation_uses_direct_parent_catalog_and_inbox() {
         20,
         None,
         SubagentRunMode::Sync,
-        SubagentLlmSource::prebuilt(Box::new(EchoLLM)),
+        crate::subagent::test_support::fixture_source(
+            std::sync::Arc::new(EchoLLM),
+            "fixture-scripted",
+        ),
         vec![Arc::new(tool.clone())],
         Arc::new(|_| true),
         None,
@@ -145,7 +157,10 @@ async fn nested_delegation_uses_direct_parent_catalog_and_inbox() {
         Some("resume".into()),
         SubagentRunMode::Sync,
         20,
-        SubagentLlmSource::prebuilt(Box::new(EchoLLM)),
+        crate::subagent::test_support::fixture_source(
+            std::sync::Arc::new(EchoLLM),
+            "fixture-scripted",
+        ),
         Vec::new(),
         Arc::new(|_| true),
         store.facade(),
@@ -266,7 +281,10 @@ async fn completed_child_shell_blocks_shared_close_and_reopen_rebuilds_binding()
         Some("complete naturally".into()),
         SubagentRunMode::Sync,
         20,
-        SubagentLlmSource::prebuilt(Box::new(EchoLLM)),
+        crate::subagent::test_support::fixture_source(
+            std::sync::Arc::new(EchoLLM),
+            "fixture-scripted",
+        ),
         Vec::new(),
         Arc::new(|_| true),
         store.facade(),
@@ -344,7 +362,10 @@ async fn completed_child_shell_blocks_shared_close_and_reopen_rebuilds_binding()
         Some("new lifecycle".into()),
         SubagentRunMode::Sync,
         20,
-        SubagentLlmSource::prebuilt(Box::new(EchoLLM)),
+        crate::subagent::test_support::fixture_source(
+            std::sync::Arc::new(EchoLLM),
+            "fixture-scripted",
+        ),
         Vec::new(),
         Arc::new(|_| true),
         store.facade(),

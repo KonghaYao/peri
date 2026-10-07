@@ -1,12 +1,14 @@
-//! 测试夹具：`peri_model::Model` 形态的假模型助手。
+//! 测试夹具：`peri_model::Model` 形态的假模型助手（middlewares 本地副本，
+//! 与 peri-agent test resources 同语义；跨 crate 无法复用 cfg(test) 模块）。
 //!
 //! H1 起子链统一消费模型来源（`SubagentLlmSource::Model`）并由生产装配点自建
 //! bridge（身份 + 请求时贡献 + 流式事件）。测试的假模型因此直接实现
 //! [`peri_model::Model`]：`prepare_stream`（durable checkpoint）+ `stream`
 //! （Started 语义由真实事件流表达：`TextDelta` → `Completed`），并保留取消语义。
-use crate::messages::{BaseMessage, ToolCallRequest};
-use crate::tools::BaseTool;
 use futures::StreamExt;
+use peri_agent::agent::react::ToolCall as ReactToolCall;
+use peri_agent::messages::{BaseMessage, ToolCallRequest};
+use peri_agent::tools::BaseTool;
 use peri_model::{
     JsonObject, Model, ModelRequest, ModelResponse, ModelResult, ModelStream, ModelStreamEvent,
     StopReason,
@@ -73,7 +75,7 @@ impl BaseTool for DefinedTool {
     async fn invoke(
         &self,
         _input: serde_json::Value,
-        _ctx: crate::tools::ToolContext<'_>,
+        _ctx: peri_agent::tools::ToolContext<'_>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         Err("fixture tool is not executable".into())
     }
@@ -160,11 +162,67 @@ pub(crate) fn tool_events(calls: Vec<ToolCallRequest>) -> Vec<ModelResult<ModelS
 }
 
 /// 先发可见增量，再以错误终止（保留已发出的增量）。
+/// React 层 ToolCall → 事件序列（旧假 LLM 直接构造 `Reasoning::with_tools`）。
+pub(crate) fn tool_events_from_react(
+    calls: Vec<ReactToolCall>,
+) -> Vec<ModelResult<ModelStreamEvent>> {
+    tool_events(
+        calls
+            .into_iter()
+            .map(|call| ToolCallRequest::new(call.id, call.name, call.input))
+            .collect(),
+    )
+}
+
 pub(crate) fn error_events(
     mut events: Vec<ModelResult<ModelStreamEvent>>,
     error: peri_model::ModelError,
 ) -> Vec<ModelResult<ModelStreamEvent>> {
     events.push(Err(error));
+    events
+}
+
+/// 旧假 LLM 的 `Reasoning` 结果 → 事件序列（保留文本与 usage）。
+pub(crate) fn events_from_reasoning(
+    reasoning: peri_agent::agent::react::Reasoning,
+) -> Vec<ModelResult<ModelStreamEvent>> {
+    let text = reasoning
+        .final_answer
+        .clone()
+        .unwrap_or_else(|| reasoning.thought.clone());
+    let mut events: Vec<ModelResult<ModelStreamEvent>> = Vec::new();
+    if !text.is_empty() {
+        events.push(Ok(ModelStreamEvent::TextDelta { text: text.clone() }));
+    }
+    if let Some(usage) = reasoning.usage.clone() {
+        events.push(Ok(ModelStreamEvent::Usage(usage)));
+    }
+    if reasoning.tool_calls.is_empty() {
+        events.push(Ok(ModelStreamEvent::Completed(response_with_text(text))));
+    } else {
+        events.push(Ok(ModelStreamEvent::Completed(
+            ModelResponse::new(
+                peri_model::ModelMessage::Assistant {
+                    content: vec![peri_model::ContentBlock::text(text)],
+                    tool_calls: reasoning
+                        .tool_calls
+                        .iter()
+                        .map(|call| {
+                            peri_model::ToolCall::new(
+                                call.id.clone(),
+                                call.name.clone(),
+                                JsonObject::from_value(call.input.clone()).unwrap_or_default(),
+                            )
+                        })
+                        .collect(),
+                },
+                StopReason::ToolUse,
+                reasoning.usage.clone(),
+                reasoning.request_id.clone(),
+            )
+            .expect("fixture reasoning response"),
+        )));
+    }
     events
 }
 
@@ -191,7 +249,9 @@ pub(crate) fn response_with_text(text: impl Into<String>) -> ModelResponse {
 
 /// 为假模型生成 `Model` 实现：`respond` 持有全部测试行为（可 await 门控）并返回
 /// 事件序列；`prepare_stream` 冻结请求、在 start 时惰性执行（取消可中断）。
-#[macro_export]
+///
+/// 本 crate 测试模块本地宏（`pub(crate) use` 暴露为 `crate::subagent::test_support::fixture_model_impl!`），
+/// 不作为生产 API 导出。
 macro_rules! fixture_model_impl {
     ($ty:ty) => {
         #[async_trait::async_trait]
@@ -250,6 +310,7 @@ macro_rules! fixture_model_impl {
 pub(crate) fn fixture_source(
     model: Arc<dyn Model>,
     name: &str,
-) -> crate::session::subagent::SubagentLlmSource {
-    crate::session::subagent::SubagentLlmSource::model(model, name)
+) -> peri_agent::session::subagent::SubagentLlmSource {
+    peri_agent::session::subagent::SubagentLlmSource::model(model, name)
 }
+pub(crate) use fixture_model_impl;

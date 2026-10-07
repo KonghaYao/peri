@@ -1,6 +1,5 @@
 use super::super::*;
 use crate::session::test_resources::mock::admission::FixtureAdmission;
-use crate::session::test_resources::mock::model::PreparedFixtureLlm;
 use crate::tools::{BaseTool, EffectiveToolError, EffectiveToolErrorCode, ToolContext};
 use peri_acp_types::session_resources::{work::*, SessionResources};
 use sha2::{Digest, Sha256};
@@ -51,7 +50,10 @@ async fn authorization_fixture(
         fork_directive_kind: None,
         run_mode: SubagentRunMode::Sync,
         skill_names: Vec::new(),
-        llm: SubagentLlmSource::prebuilt(Box::new(EchoLLM)),
+        llm: crate::session::test_resources::mock::model::fixture_source(
+            std::sync::Arc::new(EchoLLM),
+            "fixture-scripted",
+        ),
         chain_assembler: Arc::new(EmptyChainAssembler),
         tools,
         tool_filter: Arc::new(|_| true),
@@ -156,10 +158,11 @@ fn current_resume_config(
 ) -> SubagentResumeConfig {
     let mut config = resume_config(store, child_id);
     config.parent_invocation_id = Some(invocation_id.into());
-    config.llm = SubagentLlmSource::prebuilt(Box::new(PreparedFixtureLlm::new(
-        Box::new(EchoLLM),
-        tools.clone(),
-    )));
+    config.llm = crate::session::test_resources::mock::model::fixture_source(
+        std::sync::Arc::new(EchoLLM),
+        "fixture-scripted",
+    );
+
     config.tools = tools;
     config
 }
