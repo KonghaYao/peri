@@ -108,9 +108,12 @@ pub fn workflow_chain_capabilities(
     SectionCapabilities {
         base_prompt: !disabled.contains("DefaultSystemPromptMiddleware"),
         language: !disabled.contains("LangMiddleware"),
+        // 有效模式规则来自 `PermissionMiddleware`（D3 单一权威：装配与投影同源）。
         approval: !disabled.contains("PermissionMiddleware")
-            && broker_present
-            && permission_mode_present,
+            && PermissionMiddleware::workflow_approval_active(
+                broker_present,
+                permission_mode_present,
+            ),
         ask_user: !disabled.contains("HumanInTheLoopMiddleware") && broker_present,
         subagent: false,
         skills: !disabled.contains("SkillsMiddleware"),

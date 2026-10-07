@@ -183,3 +183,16 @@
 - 排查期间工作树在飞，符号位置可能已位移。
 - 本次补方案仅做静态复核与文档检查，未运行 Rust 测试、真实 provider 请求或攻击复现；上述历史测试结果不代表本次工作树通过。后续验收统一按 `docs/standards/testing.md`，Cargo 使用 `./scripts/cargo-rmcp-patched.sh` 入口，并确认过滤器实际命中测试。
 - 实施依赖：H1/M3/M4 共用模型装配；H2/M11 共用能力与段落事实源；H7/M8 共用输入批次处理；H8/M13 共用投递边界；M1/L3 共用 prompt 控制标记校验。H4、H5 的安全阻断可先独立落地，不必等待全部重构。
+
+## A 组实施状态（2026-10-07，分支 fix/context-preflight-a-prompt-20261007）
+
+本组范围：H2/H3/M1/M11/L3 + L1 相关段落/frozen 注释与权威文档。**不代表本 issue 25 条完成**；B/C/D/E/F 组未动。
+
+- **H2：部分完成（子侧未闭环）**。已完成：段落可见性由执行面能力事实投影（`peri-agent::middleware::SectionCapabilities` + `peri-middlewares::prompt_policy` 单一权威；主/子/workflow 三条链与真实装配由 parity 测试对拍）；`PermissionMiddleware` 有效模式参与判定（`disabled()` 实例不声明 10_hitl，workflow 装配与投影共用 `for_workflow` / `workflow_approval_active` 同一规则）；workflow 生产 system prompt 两处构造点改为按能力投影重建；子 Agent 渲染面（ACP `system_builder`，定义型/fork 生产路径）按子链能力投影，10_hitl/12_ask_user/11_subagent 缺席。**未完成（属 B）**：子 Agent 最终请求面（`FrozenContext.system_prompt` 仍继承父字节，bridge/消息组合的最终 system）与子身份恰好一次装配，须由 H1/M3 在生产子链上捕获 wire 请求证明——修复前不得宣称 H2 全完成。
+- **H3：完成**。`platform`/`os_version`/`is_git_repo` 冻结为 `FrozenRuntimeEnv`（`FrozenContext` + snapshot V1 可选加性字段）；内容准入按**有效 Workspace 来源**判定（`McpClientPool::workspace_source` 覆盖会话声明含持久 owner 装载与部署/全局/项目/插件合并配置；准备输入的会话声明同时参与）：显式远端 Workspace ⇒ `None`（unavailable，显式标记 + warn，不探测宿主，探测计数为 0 的证据见 `prepared_test.rs`）；本地执行环境 ⇒ 准入恰好探测一次并随冻结持久化；重渲染只消费快照，旧快照缺字段 = unavailable。
+- **M1：完成**。`MiddlewareChain::collect_prompt_contributions` 统一空行分隔并校验 reserved boundary token（带来源错误），provider 边界显式失败；GitAttribution 去掉自带前导分隔符；workflow 手工拼接仅补准入错误处理（请求时 provider 化归 B/M4）。
+- **M11：完成**。section id 与 `(zone, order)` 唯一、`Cached` 段纯静态在构造期显式失败并指出来源；移除「重复 ID 后者覆盖 / 同序号稳定排序」兜底（测试改为显式失败断言 + Cached 前缀字节稳定断言）。
+- **L3：完成**。覆盖文本在冻结准入统一校验单段/总字节预算、reserved marker、未知占位符、空覆盖与 Cached 动态占位符，非法项拒绝应用并保留内置段（结构化诊断、不入持久快照）；字面量 `\{{`/`\}}` 转义，渲染与校验共用占位符表；旧快照正文不自动改写，超总预算只诊断（`audit_total_override_budget`，解码路径 warn）。
+- **L1（本组相关）：完成**。段落/frozen 注释、`docs/code-index/peri-acp.md`、`docs/design/system-prompt.md` 同步。
+
+验证（`./scripts/cargo-rmcp-patched.sh test --locked ...`，日志与退出码见交接）：`peri-acp --lib`、`peri-agent --lib`、`peri-acp-types --lib`、`peri-model --lib` 全绿；`peri-middlewares --lib` 存在基线既有失败（子代理委派/workspace fixture 的 `Blocked: child resources …`，与本次改动前后失败集合逐条一致）；定向过滤器（prompt / frozen_snapshot / prompt_cache_boundary / middleware chain / system_cache / parity / runtime_env / capability matrix）均非零命中且通过。

@@ -270,13 +270,15 @@ async fn workflow_shell_tool_face_is_the_workspace_bridge() {
     );
 }
 
-/// H2 对拍：**workflow 链能力事实与真实装配结果一致**（含有效模式）。
+/// H2/D3 对拍：**workflow 链能力事实与真实装配结果一致**（broker × mode 全矩阵）。
 ///
-/// 装配点 broker / permission_mode 恒 None ⇒ 链上 `PermissionMiddleware::disabled()`
-/// ⇒ 真实链的段落声明里没有 10_hitl；policy 必须给出同样的审批无效事实，且
-/// 关闭任一持有者后两侧同步消失。
+/// 有效审批规则唯一事实源是 `PermissionMiddleware`：`for_workflow`（装配）与
+/// `workflow_approval_active`（投影）同源。四组 (broker, mode) 下，真实链上
+/// 实例的段落声明（`facts.approval`）必须等于策略投影，且等于同源判定函数；
+/// 仅 (Some, Some) 才是有效审批（其余为 `disabled()`，不得声明 10_hitl）。
 #[test]
 fn workflow_capability_policy_matches_real_assembly() {
+    use crate::permission::PermissionMiddleware;
     use crate::prompt_policy::workflow_chain_capabilities;
     use peri_agent::middleware::prompt_sections::SectionCapabilities;
 
@@ -289,23 +291,31 @@ fn workflow_capability_policy_matches_real_assembly() {
     ] {
         let set: std::collections::HashSet<String> =
             disabled.iter().map(|key| key.to_string()).collect();
-        let ctx = workflow_context_with_disabled(&disabled);
-        let broker_present = ctx.broker.is_some();
-        let permission_mode_present = ctx.permission_mode.is_some();
-        let mut chain = peri_agent::middleware::chain::MiddlewareChain::new();
-        for middleware in factory.build_middlewares(&ctx, "contract-model", &[], None) {
-            chain.add(middleware);
-        }
+        for (broker_present, mode_present) in
+            [(false, false), (true, false), (false, true), (true, true)]
+        {
+            let ctx = workflow_context_with_approval(&disabled, broker_present, mode_present);
+            let mut chain = peri_agent::middleware::chain::MiddlewareChain::new();
+            for middleware in factory.build_middlewares(&ctx, "contract-model", &[], None) {
+                chain.add(middleware);
+            }
 
-        let facts = SectionCapabilities::from_sections(&chain.collect_prompt_sections());
-        let expected = workflow_chain_capabilities(&set, broker_present, permission_mode_present);
-        assert_eq!(facts.approval, expected.approval, "disabled={disabled:?}");
-        assert_eq!(facts.ask_user, expected.ask_user, "disabled={disabled:?}");
-        assert_eq!(facts.subagent, expected.subagent, "disabled={disabled:?}");
-        assert_eq!(facts.skills, expected.skills, "disabled={disabled:?}");
-        assert!(
-            !facts.approval,
-            "workflow 装配点无 broker/mode：disabled 实例不得声明审批段（disabled={disabled:?}）"
-        );
+            let facts = SectionCapabilities::from_sections(&chain.collect_prompt_sections());
+            let expected = workflow_chain_capabilities(&set, broker_present, mode_present);
+            let same_rule =
+                PermissionMiddleware::workflow_approval_active(broker_present, mode_present);
+            assert_eq!(
+                facts.approval, expected.approval,
+                "disabled={disabled:?} broker={broker_present} mode={mode_present}"
+            );
+            assert_eq!(
+                facts.approval,
+                !set.contains("PermissionMiddleware") && same_rule,
+                "策略投影与装配同源规则一致（D3）"
+            );
+            assert_eq!(facts.ask_user, expected.ask_user, "ask_user 对拍");
+            assert_eq!(facts.subagent, expected.subagent, "subagent 对拍");
+            assert_eq!(facts.skills, expected.skills, "skills 对拍");
+        }
     }
 }

@@ -92,3 +92,54 @@ fn test_frozen_snapshot_missing_version_is_invalid() {
     assert!(matches!(error, FrozenSnapshotError::Invalid(_)));
     assert!(error.to_string().contains("missing unsigned version"));
 }
+
+/// D5：旧快照的覆盖集合可能只满足单段预算而超出**总**预算——按「只诊断、
+/// 不改写」处理：审计命中，原正文与持久字节逐字保持（不回写、不裁剪、不改
+/// 语义），旧会话仍可读。
+#[test]
+fn snapshot_over_total_override_budget_is_diagnosed_without_rewrite() {
+    use crate::prompt::section_validation::{
+        audit_total_override_budget, MAX_SECTION_OVERRIDE_BYTES, MAX_TOTAL_OVERRIDE_BYTES,
+    };
+
+    let chunk = "x".repeat(MAX_SECTION_OVERRIDE_BYTES);
+    let mut overrides = serde_json::Map::new();
+    for id in ["s1", "s2", "s3", "s4", "s5"] {
+        overrides.insert(id.to_string(), serde_json::Value::String(chunk.clone()));
+    }
+    let raw = serde_json::json!({
+        "version": 1,
+        "data": {
+            "system_prompt": "system-v1",
+            "claude_md": "",
+            "claude_local_md": null,
+            "skill_summary": "",
+            "date": "2026-09-01",
+            "language": null,
+            "meta_harness": {
+                "section_overrides": overrides,
+                "disabled_middlewares": [],
+                "built_in_subagents_enabled": true,
+            },
+        }
+    })
+    .to_string();
+
+    let decoded = decode_frozen_snapshot(&raw).expect("旧快照必须仍可读");
+    let audit = audit_total_override_budget(decoded.meta_harness())
+        .expect("累计超总预算必须被诊断（只诊断，不改写）");
+    assert_eq!(audit.sections, 5);
+    assert!(audit.total_bytes > MAX_TOTAL_OVERRIDE_BYTES);
+
+    // 不改写：正文逐字保留（不裁剪、不落空、不重编码为新语义）
+    assert_eq!(decoded.meta_harness().section_overrides.len(), 5);
+    for value in decoded.meta_harness().section_overrides.values() {
+        assert_eq!(value.len(), MAX_SECTION_OVERRIDE_BYTES);
+        assert!(value.chars().all(|c| c == 'x'));
+    }
+    let re_encoded = encode_frozen_snapshot(&decoded).expect("re-encode");
+    assert!(
+        re_encoded.contains(&chunk),
+        "再编码仍逐字保留原覆盖正文（只诊断不改写）"
+    );
+}

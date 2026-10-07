@@ -363,13 +363,46 @@ impl PermissionMiddleware {
         }
     }
 
-    /// 审批通道是否有效（H2 有效模式判定）。
+    /// 审批通道是否有效（H2 有效模式判定；实例级）。
     ///
     /// `disabled()`（无 broker、无 mode）为 false：工具调用直接放行，声明
     /// 10_hitl 会让模型等待永不到来的审批，因此不声明该段——「存在不等于需要
     /// 审批说明」，装配事实之外还要看持有者的有效模式。
+    ///
+    /// 规则唯一事实源是 [`Self::approval_active_from`]：装配面（`for_workflow` /
+    /// 主链 `with_shared_mode`）与段落投影（`prompt_policy`）都消费同一函数，
+    /// 不允许出现两份漂移的判定。
     pub fn approval_active(&self) -> bool {
-        self.broker.is_some() || self.mode.is_some()
+        Self::approval_active_from(self.broker.is_some(), self.mode.is_some())
+    }
+
+    /// 有效审批判定（构造输入级）：broker 或共享 mode **任一存在** ⇒ 审批通道
+    /// 有效；两者皆无 ⇒ 放行（disabled）。
+    pub fn approval_active_from(broker_present: bool, mode_present: bool) -> bool {
+        broker_present || mode_present
+    }
+
+    /// workflow 链的审批装配与判定（**同一规则的两个出口**）：
+    ///
+    /// `broker` 与共享 `permission_mode` **齐备**才构造启用共享模式的实例
+    /// （自主后台 agent 的既有语义：缺任一即 Bypass）；否则 `disabled()`
+    /// （无审批通道，段落投影随之为 10_hitl 缺席）。
+    pub fn for_workflow(
+        broker: Option<Arc<dyn UserInteractionBroker>>,
+        mode: Option<Arc<SharedPermissionMode>>,
+    ) -> Self {
+        match (broker, mode) {
+            (Some(broker), Some(mode)) => {
+                Self::with_shared_mode(broker, default_requires_approval, mode, None)
+            }
+            _ => Self::disabled(),
+        }
+    }
+
+    /// workflow 链的有效审批事实（与 [`Self::for_workflow`] 同一规则；
+    /// 段落投影在无链构造点消费它）。
+    pub fn workflow_approval_active(broker_present: bool, mode_present: bool) -> bool {
+        matches!((broker_present, mode_present), (true, true))
     }
 
     /// 创建带共享权限模式的 HITL 中间件

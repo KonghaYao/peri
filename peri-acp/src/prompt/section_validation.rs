@@ -160,6 +160,48 @@ pub(crate) fn sanitize_section_overrides(
     rejected
 }
 
+/// 覆盖总预算审计结果（D5）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OverrideBudgetAudit {
+    /// 覆盖段落数。
+    pub sections: usize,
+    /// 覆盖文本累计 UTF-8 字节。
+    pub total_bytes: usize,
+    /// 总预算上限。
+    pub limit: usize,
+}
+
+/// 审计全部覆盖的累计字节（只读）。
+///
+/// 用途（D5）：**旧 snapshot** 的覆盖集合可能只满足单段预算而超出总预算——
+/// 冻结准入路径按 L3 拒绝新增，但已持久化的旧正文按「只诊断、不改写」策略
+/// 处理：`Some` = 超总预算，调用方记录结构化诊断，**不回写、不裁剪、不重编码**
+/// 原 blob（旧会话仍可读，语义保持逐字不变）。
+pub(crate) fn audit_total_override_budget(state: &MetaHarnessState) -> Option<OverrideBudgetAudit> {
+    let total_bytes: usize = state
+        .section_overrides
+        .values()
+        .map(|text| text.len())
+        .sum();
+    (total_bytes > MAX_TOTAL_OVERRIDE_BYTES).then_some(OverrideBudgetAudit {
+        sections: state.section_overrides.len(),
+        total_bytes,
+        limit: MAX_TOTAL_OVERRIDE_BYTES,
+    })
+}
+
+/// 记录旧快照的覆盖总预算诊断（只诊断，不改写原 blob；不输出正文）。
+pub(crate) fn log_override_budget_audit(state: &MetaHarnessState) {
+    if let Some(audit) = audit_total_override_budget(state) {
+        tracing::warn!(
+            sections = audit.sections,
+            total_bytes = audit.total_bytes,
+            limit = audit.limit,
+            "冻结快照的段落覆盖累计超出总预算：仅诊断，不改写原快照正文"
+        );
+    }
+}
+
 /// 记录覆盖拒绝诊断（段落 + 类别 + 有界细节；不输出正文）。
 pub(crate) fn log_rejections(rejections: &[(String, OverrideRejection)]) {
     for (section, reason) in rejections {

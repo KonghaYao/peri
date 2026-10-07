@@ -485,6 +485,22 @@ fn assemble_tool_names(ctx: &AssemblyContext) -> Vec<String> {
         .collect()
 }
 
+/// workflow 上下文（可注入 broker / permission_mode 的矩阵变体，D3 对拍用）。
+fn workflow_context_with_approval(
+    disabled: &[&str],
+    broker_present: bool,
+    mode_present: bool,
+) -> WorkflowAgentContext {
+    let mut ctx = workflow_context_with_disabled(disabled);
+    if broker_present {
+        ctx.broker = Some(Arc::new(FakeBroker));
+    }
+    if mode_present {
+        ctx.permission_mode = Some(SharedPermissionMode::new(PermissionMode::Default));
+    }
+    ctx
+}
+
 fn workflow_context_with_disabled(disabled: &[&str]) -> WorkflowAgentContext {
     let model_factory: peri_agent::agent::workflow::factory::WorkflowModelFactory =
         Arc::new(|_model, _max_tokens, _observer| unimplemented!("契约测试不调用"));

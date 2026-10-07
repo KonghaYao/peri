@@ -534,6 +534,44 @@ impl SessionEnvironment {
     }
 }
 
+/// 内容准入期的冻结运行环境（H3 / D1）。
+///
+/// 判定基于**有效 Workspace 来源**（`McpClientPool::workspace_source`：会话声明
+/// 含持久 owner 装载的结果，以及部署/全局/项目/插件合并配置与 builtin overlay）
+/// 并叠加准备输入的会话声明（initialize 前也可见）：
+/// - 显式远端 Workspace（[`peri_acp_types::plugin::ConfigSource::WorkspaceRemote`]）
+///   ⇒ `None`：工具在远端执行，计算宿主探测值不是它的运行环境——冻结为
+///   unavailable 并显式标记，**不冒充**；
+/// - builtin `workspace`（同进程实例）或无 `workspace` 面 ⇒ 计算宿主即选定执行
+///   环境：准入期探测一次，随后随冻结持久化（ARC-FROZEN-001）。
+pub(crate) fn frozen_runtime_env(
+    host: &AcpServerConfig,
+    session_mcp_servers: &std::collections::HashMap<
+        String,
+        peri_acp_types::plugin::McpServerConfig,
+    >,
+    cwd: &str,
+) -> Option<crate::prompt::PromptRuntimeEnv> {
+    use peri_acp_types::plugin::ConfigSource;
+    let remote = matches!(
+        session_mcp_servers
+            .get("workspace")
+            .and_then(|config| config.source.as_ref()),
+        Some(ConfigSource::WorkspaceRemote)
+    ) || host
+        .mcp_pool
+        .as_ref()
+        .is_some_and(|pool| pool.workspace_source() == Some(ConfigSource::WorkspaceRemote));
+    if remote {
+        tracing::warn!(
+            cwd = %cwd,
+            "显式远端 Workspace：宿主探测值不是该执行环境，冻结运行环境标记为 unavailable"
+        );
+        return None;
+    }
+    Some(crate::prompt::PromptRuntimeEnv::detect(cwd))
+}
+
 pub(crate) fn workspace_error(error: impl Into<anyhow::Error>) -> AcpError {
     let error = error.into();
     AcpError::new(-32010, error.to_string())

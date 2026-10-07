@@ -14,7 +14,6 @@ use std::{
 use peri_acp_types::plugin::PluginLoadResult;
 use peri_acp_types::skills::SkillRoot;
 
-use crate::prompt::PromptRuntimeEnv;
 use crate::provider::{ConfigSource, LlmProvider, PeriConfig};
 use crate::session::executor::FrozenSessionData;
 use crate::session::frozen_snapshot::{decode_frozen_snapshot, encode_frozen_snapshot};
@@ -87,13 +86,7 @@ impl PreparedSessionInputs {
     #[cfg(test)]
     pub(crate) fn prepare_new(host: &AcpServerConfig, cwd: &str) -> Result<Self, AcpError> {
         let mut inputs = Self::prepare_scope(host, cwd, FrozenSource::Build)?;
-        inputs.build_frozen_after_activation(
-            host,
-            &PromptRuntimeEnv::detect(cwd),
-            HashMap::new(),
-            &[],
-            &Default::default(),
-        )?;
+        inputs.build_frozen_after_activation(host, HashMap::new(), &[], &Default::default())?;
         Ok(inputs)
     }
 
@@ -126,13 +119,7 @@ impl PreparedSessionInputs {
             cwd = %workspace_cwd,
             "legacy 首次接纳无执行环境：项目指令与技能摘要不可得（不回落磁盘）"
         );
-        inputs.build_frozen_after_activation(
-            host,
-            &PromptRuntimeEnv::detect(workspace_cwd),
-            HashMap::new(),
-            &[],
-            &Default::default(),
-        )?;
+        inputs.build_frozen_after_activation(host, HashMap::new(), &[], &Default::default())?;
         Ok(inputs)
     }
 
@@ -182,13 +169,16 @@ impl PreparedSessionInputs {
         Ok(())
     }
 
+    /// 内容准入的冻结构建：运行环境在本函数内按**有效 Workspace 来源**定格
+    /// （H3/D1，`workspace::frozen_runtime_env`）——调用方不再各自传入探测值，
+    /// 避免远端 Workspace 会话冻结宿主环境冒充远端执行环境。
+    ///
     /// `skill_catalog` = P4 内容准入期从 system 来源（builtin `workspace` 实例）
     /// 取到的技能元数据快照（W4b/F3）：空快照 = 技能面为空/不适用，不是错误。
     /// legacy 首次接纳等无执行环境的构造点传空快照（J5：不回落磁盘）。
     pub(crate) fn build_frozen_after_activation(
         &mut self,
         host: &AcpServerConfig,
-        runtime_env: &PromptRuntimeEnv,
         docs: HashMap<String, String>,
         skill_catalog: &[peri_acp_types::skills::SkillMetadata],
         instructions: &crate::session::executor::FrozenInstructions,
@@ -196,6 +186,8 @@ impl PreparedSessionInputs {
         if self.frozen.is_some() {
             return Ok(());
         }
+        let runtime_env =
+            super::workspace::frozen_runtime_env(host, &self.session_mcp_servers, &self.cwd);
         let mut deployment_closed = std::collections::HashSet::new();
         let capabilities = self.deployment_capabilities;
         for instance in peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES {
@@ -208,7 +200,7 @@ impl PreparedSessionInputs {
             .build_frozen_data_with_deployment_closure(
                 &self.configuration.config,
                 &self.cwd,
-                runtime_env,
+                runtime_env.as_ref(),
                 docs,
                 skill_catalog,
                 instructions,

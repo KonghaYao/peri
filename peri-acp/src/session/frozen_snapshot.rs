@@ -101,6 +101,8 @@ pub(crate) fn decode_frozen_snapshot(raw: &str) -> Result<FrozenSessionData, Fro
             .collect::<HashSet<_>>(),
         built_in_subagents_enabled: data.meta_harness.built_in_subagents_enabled,
     };
+    // D5：旧快照的覆盖总预算只诊断、不改写（返回值与正文逐字保持）。
+    crate::prompt::section_validation::log_override_budget_audit(&meta_harness);
     let frozen = peri_agent::session::FrozenContext {
         system_prompt: Arc::from(data.system_prompt),
         claude_md: Arc::from(data.claude_md),

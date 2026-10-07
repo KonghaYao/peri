@@ -218,12 +218,4 @@ impl SectionCapabilities {
             skills: has("13_skills"),
         }
     }
-
-    /// 基础段是否可用（子链/workflow 链无基础段持有者时由冻结模板继承，
-    /// 该标志仍表达「本执行面继承的基础段决策」）。
-    pub fn with_inherited_base(mut self, base_prompt: bool, language: bool) -> Self {
-        self.base_prompt = base_prompt;
-        self.language = language;
-        self
-    }
 }

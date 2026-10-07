@@ -118,7 +118,7 @@ async fn test_frozen_system_prompt_immune_to_disk_changes() {
     let frozen = mgr.build_frozen_data_with_config_and_runtime_and_docs(
         mgr.peri_config(),
         cwd,
-        &crate::prompt::PromptRuntimeEnv::detect(cwd),
+        Some(&crate::prompt::PromptRuntimeEnv::detect(cwd)),
         std::collections::HashMap::new(),
         &snapshot,
         &Default::default(),
@@ -177,25 +177,59 @@ async fn test_frozen_prompt_never_claims_workflow() {
     );
 }
 
-/// [回归测试] 子 agent / fork / workflow agent 复用的冻结 prompt 与主
-/// prompt 字节相同（16_workflow 已删除，无子面向 feature 差异）。
+/// [回归测试] H2：子 Agent 的 system 由同一冻结输入按**子链能力事实**重建，
+/// 不再是主冻结字节的复制——主链声明而子链不具备的能力（10_hitl /
+/// 12_ask_user / 11_subagent）在子面向缺席，基础段与 13_skills 保留。
 #[tokio::test]
-async fn test_frozen_subagent_prompt_identical_to_main() {
+async fn test_subagent_projection_drops_abilities_the_child_chain_lacks() {
     let tmp = tempfile::TempDir::new().unwrap();
     let mgr = make_manager(&tmp).await;
     let cwd = "/tmp";
-
     let frozen = mgr.build_frozen_data(cwd);
+    let catalog = AgentCatalogProvider::new();
 
-    assert!(
-        !frozen.system_prompt().contains("Workflow Orchestration"),
-        "16_workflow 段落已删除：冻结 prompt 不得声明 Workflow"
+    // 控制组：主冻结 prompt 声明 gated 能力（Permission/HITL/SubAgent 默认装配）
+    for claimed in [
+        "Human-in-the-Loop (HITL)",
+        "AskUserQuestion",
+        "# SubAgent Delegation",
+    ] {
+        assert!(
+            frozen.system_prompt().contains(claimed),
+            "主链冻结 prompt 应声明 {claimed}"
+        );
+    }
+
+    // 子链投影（与 ACP `system_builder` 同一收集入口与能力事实）
+    let capabilities =
+        crate::session::subagent_chain_capabilities(&frozen.meta_harness().disabled_middlewares);
+    let collected = crate::session::build_collected_sections_with_capabilities(
+        frozen.meta_harness(),
+        None,
+        frozen.language(),
+        &capabilities,
     );
-    // 子面向 prompt 字段已随 C5 移除：子 Agent / fork / workflow 的 prompt
-    // 在各自装配点按能力投影重建（H2），主冻结 prompt 只服务主链。
-    assert!(
-        !frozen.system_prompt().is_empty(),
-        "主冻结 prompt 非空（子面向唯一复用来源）"
+    let projected = crate::prompt::PromptTemplate::new(frozen.meta_harness(), &collected).render(
+        &crate::prompt::PromptEnv::frozen(cwd, frozen.date(), frozen.runtime_env()),
+        &catalog,
+    );
+
+    for absent in [
+        "Human-in-the-Loop (HITL)",
+        "AskUserQuestion",
+        "# SubAgent Delegation",
+    ] {
+        assert!(
+            !projected.contains(absent),
+            "子链不具备该能力，投影后不得声明 {absent}"
+        );
+    }
+    assert!(projected.contains("# Doing tasks"), "基础段随冻结决策继承");
+    assert!(projected.contains("SkillTool"), "13_skills 随子链保留");
+    assert_ne!(
+        projected,
+        frozen.system_prompt(),
+        "子面向不是主冻结字节的复制（能力投影必须实际发生）"
     );
 }
 

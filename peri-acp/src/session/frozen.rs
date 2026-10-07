@@ -30,16 +30,20 @@ impl SessionManager {
         config: &crate::provider::PeriConfig,
         cwd: &str,
     ) -> crate::session::executor::FrozenSessionData {
-        // 调用点未准备运行环境：在此探测一次并委托冻结渲染，装配期不再各自取一份。
+        // 无准备输入的调用点（测试夹具 / 无执行环境的构建点）：本地探测一次并
+        // 委托冻结渲染；生产准入走 `PreparedSessionInputs::build_frozen_after_activation`
+        // 的有效 Workspace 来源判定（H3/D1）。
         let runtime_env = crate::prompt::PromptRuntimeEnv::detect(cwd);
-        self.build_frozen_data_with_config_and_runtime(config, cwd, &runtime_env)
+        self.build_frozen_data_with_config_and_runtime(config, cwd, Some(&runtime_env))
     }
 
+    /// `runtime_env = None` = 有效 Workspace 为显式远端（执行环境未知）：
+    /// 冻结标记 unavailable，不重探本地值（H3/D1）。
     pub(crate) fn build_frozen_data_with_config_and_runtime(
         &self,
         config: &crate::provider::PeriConfig,
         cwd: &str,
-        runtime_env: &crate::prompt::PromptRuntimeEnv,
+        runtime_env: Option<&crate::prompt::PromptRuntimeEnv>,
     ) -> crate::session::executor::FrozenSessionData {
         self.build_frozen_data_with_config_and_runtime_and_docs(
             config,
@@ -60,7 +64,7 @@ impl SessionManager {
         &self,
         config: &crate::provider::PeriConfig,
         cwd: &str,
-        runtime_env: &crate::prompt::PromptRuntimeEnv,
+        runtime_env: Option<&crate::prompt::PromptRuntimeEnv>,
         docs: HashMap<String, String>,
         skill_catalog: &[peri_acp_types::skills::SkillMetadata],
         instructions: &crate::session::executor::FrozenInstructions,
@@ -83,7 +87,7 @@ impl SessionManager {
         &self,
         config: &crate::provider::PeriConfig,
         cwd: &str,
-        runtime_env: &crate::prompt::PromptRuntimeEnv,
+        runtime_env: Option<&crate::prompt::PromptRuntimeEnv>,
         docs: HashMap<String, String>,
         skill_catalog: &[peri_acp_types::skills::SkillMetadata],
         instructions: &crate::session::executor::FrozenInstructions,
@@ -130,9 +134,11 @@ impl SessionManager {
         );
         crate::prompt::section_validation::log_rejections(&rejected);
         let template = crate::prompt::PromptTemplate::new(&meta_harness_state, &collected);
-        // 冻结运行环境随快照持久化（H3）：准入期探测一次，此后重渲染只消费它。
-        let frozen_runtime_env = runtime_env.freeze();
-        let env = crate::prompt::PromptEnv::frozen(cwd, &frozen_date, Some(&frozen_runtime_env));
+        // 冻结运行环境随快照持久化（H3）：准入期按有效 Workspace 来源定格一次
+        // ——显式远端 Workspace 为 `None`（unavailable，不冒充），此后重渲染只
+        // 消费该快照。
+        let frozen_runtime_env = runtime_env.map(crate::prompt::PromptRuntimeEnv::freeze);
+        let env = crate::prompt::PromptEnv::frozen(cwd, &frozen_date, frozen_runtime_env.as_ref());
         let system_prompt = template.render(&env, self.inner.agent_catalog.as_ref());
 
         // 16_workflow 已删除（C2）：`FrozenSessionData` 无子面向字段（C5 移除），
@@ -148,7 +154,7 @@ impl SessionManager {
             date: Arc::from(frozen_date),
             language: frozen_language.map(|l| Arc::from(l.to_string())),
             meta_harness: meta_harness_state,
-            runtime_env: Some(frozen_runtime_env),
+            runtime_env: frozen_runtime_env,
         };
 
         crate::session::executor::FrozenSessionData::from_frozen_parts(

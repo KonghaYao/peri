@@ -28,6 +28,26 @@ fn detect_is_git_repo(cwd: &str) -> bool {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// 本线程的探测次数（测试证据：准入判定不得在远端 Workspace 会话探测宿主）。
+    /// thread-local 使并发测试互不干扰（`#[tokio::test]` 默认单线程运行时，
+    /// 被测准入路径与断言同线程）。
+    static DETECT_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// 测试用：本线程累计探测次数（断言后自行归零）。
+#[cfg(test)]
+pub(crate) fn detect_call_count() -> usize {
+    DETECT_CALLS.with(std::cell::Cell::get)
+}
+
+/// 测试用：归零本线程探测计数。
+#[cfg(test)]
+pub(crate) fn reset_detect_call_count() {
+    DETECT_CALLS.with(|calls| calls.set(0));
+}
+
 /// 运行环境取值（平台 / OS 版本 / 是否 Git 仓库）——**实时探测快照**。
 ///
 /// 仅在内容准入点（会话冻结 / legacy 首次接纳）探测一次，随后经
@@ -44,7 +64,12 @@ pub struct PromptRuntimeEnv {
 impl PromptRuntimeEnv {
     /// 从**选定执行环境**探测一次（本地会话即计算宿主；远端执行环境必须由
     /// 其自身提供，宿主不得以本地探测值冒充）。
+    ///
+    /// 生产准入点：`workspace::frozen_runtime_env`（按有效 Workspace 来源判定）；
+    /// 显式远端 Workspace 不调用本函数（H3/D1）。
     pub fn detect(cwd: &str) -> Self {
+        #[cfg(test)]
+        DETECT_CALLS.with(|calls| calls.set(calls.get() + 1));
         Self {
             is_git_repo: detect_is_git_repo(cwd),
             platform: std::env::consts::OS.to_string(),

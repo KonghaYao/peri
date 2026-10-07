@@ -291,13 +291,9 @@ pub(crate) async fn new_session_from_prepared(
         },
         None => Default::default(),
     };
-    if let Err(error) = prepared.build_frozen_after_activation(
-        cfg,
-        &crate::prompt::PromptRuntimeEnv::detect(&prepared.cwd),
-        docs,
-        &skill_catalog,
-        &instructions,
-    ) {
+    if let Err(error) =
+        prepared.build_frozen_after_activation(cfg, docs, &skill_catalog, &instructions)
+    {
         drain_and_abandon(environment.as_ref(), &initialization).await?;
         return Err(error);
     }
