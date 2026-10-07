@@ -3,7 +3,7 @@
 > 状态：现行设计；核心路径已实施，并发与端到端验收仍有未完成项。
 >
 > Scope：会话身份、机器环境分区、工作区发现与登记、执行绑定与恢复入口。
-> 进度与验收见 [核心改动清单](../../spec/issues/2026-09-30-session-id-environment-core-change.md)。
+> 进度与验收见 [2026-09 月志](../../spec/history/2026-09.md)（2026-09-30 条目）。
 > Machine → Workspace → Session 归属与 schema 14 迁移见 [存储 v2 设计](storage-v2-machine-workspace-session.md)；
 > SDK 执行所有权与任务恢复边界见 [Session 异步任务统一入口](session-async-tasks.md)。
 > 术语见 [领域语言](../../CONTEXT.md)；冻结与生命周期约束遵循 [架构契约](../standards/architecture-contracts.md)（ARC-WORKSPACE-001）。

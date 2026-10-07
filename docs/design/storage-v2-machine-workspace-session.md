@@ -2,7 +2,7 @@
 
 > 状态：已批准目标设计；schema 12 已接入，真实远端验收待执行。当前行为以代码、契约测试和
 > [Session ID / 机器环境设计](session-id-environment.md)为准。实施与验收记录见
-> [active issue](../../spec/issues/2026-10-02-storage-v2-machine-workspace-session.md)。
+> 进度与验收记录：[2026-10 月志](../../spec/history/2026-10.md)（2026-10-02 条目）。
 >
 > Scope：会话数据的机器分区、工作区身份、会话归属与归档。本文是 v2 数据结构的
 > 目标权威；不改变按 Session ID 读取历史与执行准入分离的现行原则。Session

@@ -1,7 +1,7 @@
 # 配置权威面
 
 > 状态：现行设计。Peri 内部核心权威面已实现；专属领域扩展与部署验收见
-> [active issue](../../spec/issues/2026-10-01-configuration-authority.md)。
+> 进度与验收记录：[2026-10 月志](../../spec/history/2026-10.md)（2026-10-01 条目）。
 > 本文定义稳定边界，代码入口见 [peri-config 索引](../code-index/peri-config.md)。
 
 ## 权威与依赖

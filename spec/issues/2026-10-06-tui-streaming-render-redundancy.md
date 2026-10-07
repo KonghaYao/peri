@@ -23,7 +23,7 @@
 | E5 | 历史折叠缓存 | `kit/acp_events/fold.rs`（源未变即 O(1) 短路） | 每 chunk 不重跑历史 |
 | E6 | 工具分组切点复用 | `kit/acp_events/render.rs`（`GroupCut` / `stable_cut`） | 只重建变化后缀 |
 
-已修 P0（`2026-09-27-p0-tui-streaming-view-rebuild-cpu.md`）的机制在当前代码中成立，本文件不重复登记。
+已修 P0（`../history/2026-09.md` 2026-09-27 条目）的机制在当前代码中成立，本文件不重复登记。
 
 ## 二、发现清单
 

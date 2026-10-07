@@ -162,7 +162,7 @@ F5 增量索引/动画分离及 F10 共享缓存/详情聚合余项。本审计�
 | 工作 | 唯一实施/验收权威 | 本审计如何使用 |
 | --- | --- | --- |
 | backend WorkState/进程资源事故 | [进程 P0](2026-10-06-p0-dev-peri-high-cpu-memory.md) | 样本热点旁证；不归 TUI 绘制，不沿用已失效的全量 clone/窄查询描述 |
-| replay fold、主子合帧、发布与 dirty 分离 | [9/27 发布链 issue](2026-09-27-p0-tui-streaming-view-rebuild-cpu.md) | 修复机制已有，现场验收未闭环；不重报逐 chunk 必发布 |
+| replay fold、主子合帧、发布与 dirty 分离 | [9/27 发布链记录](../history/2026-09.md)（2026-09-27 条目） | 修复机制已有，现场验收未闭环；不重报逐 chunk 必发布 |
 | 原有流式修复、未迁出余项与原现场验收 | [流式冗余 issue](2026-10-06-tui-streaming-render-redundancy.md) 的“裁决与实施” | 不按历史发现清单重开已修项；F10 测试 oracle 清理仍归原 issue |
 | F4 重型历史缓存预算、F5 增量索引/动画分离、F10 共享缓存/详情聚合余项 | [架构 P0](2026-10-06-p0-tui-architecture-optimization.md) A–C | 唯一实施入口，不在原 issue 另开清单 |
 | reasoning 全量折行、稳定 slot S 级搬运 | CPU-1 / CPU-2 | 分别新增计量；与架构 A/B 的共同依赖不重复认领收益 |

@@ -2,7 +2,7 @@
 
 > 状态：已批准目标设计。Emscripten 目标及 Node、Bun 与本地 `workerd` 宿主已在
 > `refactor/wasm` 实现并验收；Cloudflare 托管部署与跨实例接管仍未验收，进度与验收
-> 证据见该分支 `spec/issues/2026-10-02-wasm-feasibility-plan.md`。
+> 证据见该分支 `spec/history/2026-10.md`（2026-10-02 条目）。
 >
 > Scope：可替换计算实例中运行 Peri 的 Machine、Workspace 与 Session 身份，以及远端
 > Store 与工具环境的执行准入。归属结构以 [存储 v2](storage-v2-machine-workspace-session.md)
@@ -170,7 +170,7 @@ Yjs 是实时投影；transcript 与持久工具结果仍以 Store 为准。上�
 - [Session 异步任务统一入口](session-async-tasks.md)：SDK 执行协调、关闭接管与恢复
   证据链；不恢复 Peri/Store owner 或 Workspace fencing，这些接管能力未由本设计承诺。
 - 实现入口与验收脚本见 `refactor/wasm` 分支的 `docs/code-index/peri-wasm.md`、
-  `docs/code-index/peri-ts-sdk.md` 与 `spec/issues/2026-10-02-wasm-feasibility-plan.md`。
+  `docs/code-index/peri-ts-sdk.md` 与 `spec/history/2026-10.md`（2026-10-02 条目）。
 
 ## 6. 保证边界
 

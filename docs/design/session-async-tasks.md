@@ -2,7 +2,7 @@
 
 > 状态：已批准目标设计，**待重构**（作为代码重构基线）。本文负责 Subagent、Workflow 与 MCP 后台任务的注册、观察、取消和恢复；消息可靠接纳、分级和激活统一服从 [RCRA 消息权威](rcra-message-activation.md)。现行实现入口见 `docs/code-index/`，不把目标描述为已经实现。
 >
-> Scope：每个一等公民 Agent 会话的异步任务控制面，以及独立驻留的任务执行面。RCRA 循环借用这些领域，不拥有跨 turn 状态。实施见 [消息与激活任务](../../spec/issues/2026-10-05-rcra-message-activation.md)。
+> Scope：每个一等公民 Agent 会话的异步任务控制面，以及独立驻留的任务执行面。RCRA 循环借用这些领域，不拥有跨 turn 状态。实施见 [消息与激活任务](../../spec/history/2026-10.md)（2026-10-05 条目）。
 
 ## 1. 领域与所有权
 

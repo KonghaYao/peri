@@ -59,7 +59,7 @@ Backend 问题继续由 [已有资源异常 issue](2026-10-06-p0-dev-peri-high-c
 - [事件循环与后台任务](2026-10-06-tui-perf-runtime-scan.md)
 - [Astra 独立裁决](2026-10-06-tui-perf-astra-audit.md)（本批发现的定级与去重路由）
 - 已有 [流式渲染冗余](2026-10-06-tui-streaming-render-redundancy.md) 与
-  [历史发布链问题](2026-09-27-p0-tui-streaming-view-rebuild-cpu.md) 为去重依据；已修项不重新登记。
+  [历史发布链问题](../history/2026-09.md)（2026-09-27 条目）为去重依据；已修项不重新登记。
 
 ## Astra 审计要求
 

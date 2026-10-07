@@ -153,7 +153,7 @@ git diff --check
 | 事项 | 唯一实施/验收入口 |
 | --- | --- |
 | 原流式 issue F4 重型历史缓存预算、F5 增量索引/动画分离、F10 共享缓存/详情聚合余项 | **本 issue A–C**；原 issue 保留已实施记录和原现场验收，不保留迁出项的第二套实施清单 |
-| 工具 accumulator 完成规则、Plugin 操作权威、限定的宿主/客户端职责收口 | **本 issue D–E**；既有 [kit 提取论证](2026-10-05-peri-tui-kit-extraction-design.md)保留为背景，不并行推动机械 crate 提取 |
+| 工具 accumulator 完成规则、Plugin 操作权威、限定的宿主/客户端职责收口 | **本 issue D–E**；既有 [kit 提取论证](../history/2026-10.md)（2026-10-05 条目）保留为背景，不并行推动机械 crate 提取 |
 | 原 F1/F2/F3/F6/F7/F8/F9、F10 测试 oracle 清理及原修复现场验收 | [流式冗余 issue](2026-10-06-tui-streaming-render-redundancy.md)；不自动迁入 |
 | reasoning 全量折行、其他稳定分片搬运、static reset root、后台保留/整表 clone、预览、恢复预算、poll/task owner/队列背压等 | [既有 Astra 审计](2026-10-06-tui-perf-astra-audit.md)及其 CPU/M/R 路由；不批量升 P0，不重复认领收益 |
 | backend WorkState/进程事故、Agent 执行/恢复故障 | 原[进程 P0](2026-10-06-p0-dev-peri-high-cpu-memory.md)与[执行故障 issue](2026-10-06-tui-execution-failures.md) |

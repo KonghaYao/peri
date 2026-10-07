@@ -1,6 +1,6 @@
 # TUI 环境变量控制表
 
-本表是 [Peri 环境变量控制表](environment-variables.md)的 TUI 专属部分，记录当前已实现行为。新增、删除或改变 TUI 变量时，按 [ENV-CATALOG-001](environment-variables.md#env-catalog-001) 同步更新；待实施的清理目标见[环境变量使用清理 issue](../../spec/issues/2026-10-01-environment-variable-usage-cleanup.md)。
+本表是 [Peri 环境变量控制表](environment-variables.md)的 TUI 专属部分，记录当前已实现行为。新增、删除或改变 TUI 变量时，按 [ENV-CATALOG-001](environment-variables.md#env-catalog-001) 同步更新；待实施的清理目标见[2026-10 月志](../../spec/history/2026-10.md)（2026-10-01 条目）。
 
 | 变量 | 控制什么；有效值与缺省行为 | 消费入口 |
 | --- | --- | --- |

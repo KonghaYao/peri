@@ -23,7 +23,7 @@
 | 既有 issue | 当前复核与本 issue 边界 |
 | --- | --- |
 | `2026-10-06-p0-dev-peri-high-cpu-memory.md` | 主要跟踪 runtime/store 工作账本与载荷读取。本 issue 只登记 TUI 的轮询生产端、调度/生命周期边界，不重报存储全量读取为 TUI 根因，也不因该 issue 标为 P0 就继承其优先级。 |
-| `2026-09-27-p0-tui-streaming-view-rebuild-cpu.md` | 当前 bridge 有 single-pending publication scheduler，不能再用旧的逐 chunk 全树发布描述现状。 |
+| `../history/2026-09.md`（2026-09-27 条目） | 当前 bridge 有 single-pending publication scheduler，不能再用旧的逐 chunk 全树发布描述现状。 |
 | `2026-10-06-tui-streaming-render-redundancy.md` | 按其“已实施/未完成”章节复核；不重复登记正文/推理 COW、Markdown 尾部解析、缓存拷贝、逐 VM 全帧扫描和 running slot content/chrome 分离。这里登记的是让这些成本在无内容变化时发生的 **触发源**。 |
 
 具体纠正：`kit/acp_bridge.rs:529`、`:545` 是 deadline 驱动；`:564` 的秒级分支只在 running Bash 时请求刷新，静止时不无条件发布 VM。`kit/message_area/mod.rs:265` 使用逐帧缓冲复用，`:351` 使用当前 `build_slot_wrap_map`；不沿用旧 issue 的已失效行号或“每帧总是重新构建所有 wrap map”结论。`kit/service_snapshot.rs:382`、`:456` 已有 equality-gated atom publication，不能说所有服务 atoms 每 2 秒都写入。

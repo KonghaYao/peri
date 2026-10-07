@@ -11,7 +11,7 @@ RCRA 控制入口见 `agent/stages/execution_control.rs`：持久登记精确 tu
 
 Emscripten 最小入口见 [`peri-wasm`](peri-wasm.md)：复用本 crate 的 `run_react_loop` 和 `AgentModelBridge`；`resources` 模块及其 Native 存储依赖在目标平台不编入。
 
-消息与激活的已批准目标见 [RCRA 消息权威](../design/rcra-message-activation.md)，实施与验收边界见 [active issue](../../spec/issues/2026-10-05-rcra-message-activation.md)。下表与持久 RCRA 子系统说明提供现行实现入口，不表示完整发布矩阵已经通过。
+消息与激活的已批准目标见 [RCRA 消息权威](../design/rcra-message-activation.md)，实施与验收边界见 [2026-10 月志](../../spec/history/2026-10.md)（2026-10-05 条目）。下表与持久 RCRA 子系统说明提供现行实现入口，不表示完整发布矩阵已经通过。
 
 ## 架构速览
 

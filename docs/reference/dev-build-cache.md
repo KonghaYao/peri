@@ -111,7 +111,7 @@ sccache 以 `rustc` 为包装单位，以下编译单元**不可缓存**：
   缓存；代价是同一 worktree 内失去 incremental 加速。本轮未复测该组合。
   建议：**不要全局关闭 incremental**。
 - CI 场景（`Swatinem/rust-cache@v2` 会隐式设 `CARGO_INCREMENTAL=0`）与本文档无关，见
-  `spec/issues/2026-10-05-ci-sccache-evaluation.md`。
+  `spec/history/2026-10.md`（2026-10-05 条目）。
 
 ## 与 build 脚本 / CI 的关系
 

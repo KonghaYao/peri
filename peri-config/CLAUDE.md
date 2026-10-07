@@ -9,7 +9,7 @@ Langfuse、UI 与资源开关的类型、默认值、解析、领域合并及有
 开始任务时显式读 `../docs/standards/{architecture-contracts,rust,testing,documentation}.md`。
 现行设计见 `../docs/design/configuration-authority.md`；入口见
 `../docs/code-index/peri-config.md`；扩展与验收缺口见
-`../spec/issues/2026-10-01-configuration-authority.md`。
+`../spec/history/2026-10.md`（2026-10-01 条目）。
 
 ## 数据流
 

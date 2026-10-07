@@ -3,7 +3,7 @@
 > 速查表：把「我想做什么」映射到文件。细节以代码为准。schema 17 增加持久原 WorkCommand journal；schema 16 增加 durable work；schema 15 增加领域控制与命令回执；schema 14 删除会话执行 owner 表；schema 12 的 Machine → Workspace → Session 归属仍保留。
 > 依据：peri-resources/src 源码、lib.rs 模块注释（伞形 PRD 决策 20）
 
-Emscripten target 只编译 Turso adapter，排除 SQLx、workflow 与 `sqlite_store` 源码；Native target 同时编译 SQLite 与 Turso adapter，由 `context` 按 locator 选择。`sessions::failure` 与 `canonical` 提供共用领域规则。Turso 会话数据存于远端；WASM 复用 `RemoteExecution` 的虚拟工作区观测，通过远端组合工厂接入主线。会话执行唯一性、进程代际协调与接管由 `peri-sdk` 负责，Resources 不持有执行 registry、租约或 Store owner CAS。旧 WASM 身份与快照格式的会话只读历史，不能继续执行。Node/Bun 的可写会话、ACP、模型调用与恢复验收见 [`WASM 接入验收`](../../spec/issues/2026-10-02-wasm-feasibility-plan.md)。
+Emscripten target 只编译 Turso adapter，排除 SQLx、workflow 与 `sqlite_store` 源码；Native target 同时编译 SQLite 与 Turso adapter，由 `context` 按 locator 选择。`sessions::failure` 与 `canonical` 提供共用领域规则。Turso 会话数据存于远端；WASM 复用 `RemoteExecution` 的虚拟工作区观测，通过远端组合工厂接入主线。会话执行唯一性、进程代际协调与接管由 `peri-sdk` 负责，Resources 不持有执行 registry、租约或 Store owner CAS。旧 WASM 身份与快照格式的会话只读历史，不能继续执行。Node/Bun 的可写会话、ACP、模型调用与恢复验收见 [`WASM 接入验收`](../../spec/history/2026-10.md)（2026-10-02 条目）。
 
 `SessionResourcesImpl::inspect_availability` 检查存储访问模式、持久化状态及保存的执行环境，不查询或签发会话执行 owner；恢复不依赖旧进程停止 proof。关闭意图、持久化排空与任务资源生命周期仍独立保留。
 
@@ -46,7 +46,7 @@ Emscripten target 只编译 Turso adapter，排除 SQLx、workflow 与 `sqlite_s
 - 已完成数据流：部署注入 Resources provider → `mcp-packages/credentials/src/{lib,server,client}.rs` 受信 bootstrap MCP `CustomRequest` → `peri-acp/src/host/assemble.rs` 注入 `credentialsClient` → OAuth pool；凭证通道独立于等待授权的 tool pool，避免授权依赖自身。bootstrap 集成与 middleware 定向回归通过；实际云端、真实 OAuth 网络授权及多实例 refresh 未验证，结果统一见 active assessment。
 - 不引入私有数据库、HOME 路径、额外开库、文件锁、迁移、兼容层、旧 JSON 或文件 fallback；删除 `FileCredentialStore`，旧凭证不导入，用户重新授权。持久 MCP 响应缓存按 Workspace ID 隔离；插件持久化与日志不在此凭证通道内。
 - 默认逻辑 scope 为 principal `local` + Workspace ID；server key 绑定 endpoint/授权配置，动态连接还须绑定 incarnation。Workspace ID 从受信 Session 归属取得，同一 Workspace 的 thread 共享授权，异 Workspace 隔离。
-- 任务与验收事实源：[active assessment](../../spec/issues/2026-09-30-p2-filesystem-implementation-assessment.md)；宿主调用侧见 [middlewares 索引](peri-middlewares.md)。
+- 任务与验收记录：[2026-09 月志](../../spec/history/2026-09.md)（2026-09-30 条目）；宿主调用侧见 [middlewares 索引](peri-middlewares.md)。
 
 | 我想做什么 | 主文件 | 入口/关键函数 | 关键逻辑 |
 | --- | --- | --- | --- |

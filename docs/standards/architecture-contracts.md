@@ -12,7 +12,7 @@
 
 - **Scope**：`peri-acp-types`、`peri-resources`、`peri-process`、ACP session lifecycle、Agent、TUI。
 - **Rule**：Session ID 是会话身份，父子关系由 parent ID 与父链确定；cwd、ProjectId / WorkspaceId / SessionBinding 用于定位、展示与 scoped 查询，不作为按 ID 恢复的路径/owner 认领门槛。v2 机器归属由 `threads.workspace_id → workspaces.machine_id` 推导；Session 即现有 thread，`archived` 为独立展示状态。`ThreadScope::Environment` 显式过滤列表，按 ID 读取不追加当前 Machine/cwd 条件；本地与远端旧库经 schema 12 的机器归属迁移、schema 14 的执行所有权移除迁移，未知远端来源保留占位 Machine，不因打开而迁移归属。默认机器身份是 `$HOME/.peri/machine-id` 的持久 UUIDv4，`PERI_MACHINE_ID` 接受 UUID override，不用硬件指纹；Unix 新建临时文件 `0600`、hardlink 原子发布只保护身份创建，不扩展为目录/既有文件权限、崩溃持久性或全系统并发保证。load/resume 按 ID 恢复历史，不以请求 cwd、执行 sidecar 锁或 dirty reset 为条件；先判 env/执行资格，仅可执行才 legacy 冻结/接纳并读取 frozen，避免读异机路径；只读历史查询不要求 frozen 存在，可执行路径与存储完整性检查保留。保存 cwd 实际目录检查属于执行/工具准入，不阻断历史读取；跨 env 或缺目录时执行加载明确失败，历史仍可独立查询，不在本机同名路径装配可执行环境。session 文件锁、`peri/session_reset_dirty` 路由及相应 TUI 恢复确认已移除，`peri.sessionRecoveryV1` 保留 caps/wire 键但置 false、不再启用协商。会话执行唯一性、Agent 持有关系、跨实例协调与替换均由 `peri-sdk` 负责。Peri 不持有执行租约、不续租、不认领或校验执行 owner，不以 Store token 或 Workspace fencing 限制加载、写入和工具执行。存储仍负责访问模式、事务、绑定完整性、未决持久化与显式关闭意图；这些约束不构成执行所有权。Session ID 与 env 不是认证凭证，外部访问授权独立。
-- **Verify**：检查 `peri-resources/src/sessions/machine.rs`、`canonical.rs`、`sqlite_store/{schema,session_rows,workspace,execution}.rs`、`remote/{session_data,session_sql}.rs` 与 `resources.rs`；检查 ACP `host/workspace.rs`、`host/requests/session_restore.rs` 和 TUI `acp_client/client/session.rs` 没有路径认领/dirty reset 交互。针对性验证入口为 `machine_test.rs`、`sqlite_store/session_id_environment_test.rs` 与 TUI `client/recovery_test.rs`；实际执行结果及尚未完成的跨层/远端/并发验收见[active spec](../../spec/issues/2026-09-30-session-id-environment-core-change.md)，不得把存在测试等同于通过。
+- **Verify**：检查 `peri-resources/src/sessions/machine.rs`、`canonical.rs`、`sqlite_store/{schema,session_rows,workspace,execution}.rs`、`remote/{session_data,session_sql}.rs` 与 `resources.rs`；检查 ACP `host/workspace.rs`、`host/requests/session_restore.rs` 和 TUI `acp_client/client/session.rs` 没有路径认领/dirty reset 交互。针对性验证入口为 `machine_test.rs`、`sqlite_store/session_id_environment_test.rs` 与 TUI `client/recovery_test.rs`；实际执行结果及尚未完成的跨层/远端/并发验收见[2026-09 月志](../../spec/history/2026-09.md)（2026-09-30 条目），不得把存在测试等同于通过。
 
 任务执行 owner 与会话执行唯一性分离：会话执行管理归 SDK，不以 Store 租约或 owner CAS 恢复可写身份。任务发现、关闭与独立恢复见[Session 异步任务架构](../design/session-async-tasks.md)，消息与激活目标见 [RCRA 消息权威](../design/rcra-message-activation.md)。
 
@@ -31,7 +31,7 @@
 ### ARC-RCRA-MESSAGE-001
 
 - **Scope**：Agent 会话、Task/MQ、异步生产者、SDK 激活与 ACP 适配；适用于主/子/嵌套/Workflow Agent。
-- **Rule**：已批准目标以 [RCRA 消息权威](../design/rcra-message-activation.md) 为准：每会话独立 Task/Inbox/处理义务，父子关系不决定默认收件人；共享基础设施不得共享含混的会话回调。可靠接纳、canonical 投影与处理检查点分别确认，禁止 root fallback 或以历史去重抹除待处理义务。激活由会话领域统一判定，执行唯一性归 SDK，ACP 不另设业务调度权威。现行实现尚未完成，重构以该设计为基线，状态见 [active issue](../../spec/issues/2026-10-05-rcra-message-activation.md)，不得把旧代码或测试当作降低目标的理由。
+- **Rule**：已批准目标以 [RCRA 消息权威](../design/rcra-message-activation.md) 为准：每会话独立 Task/Inbox/处理义务，父子关系不决定默认收件人；共享基础设施不得共享含混的会话回调。可靠接纳、canonical 投影与处理检查点分别确认，禁止 root fallback 或以历史去重抹除待处理义务。激活由会话领域统一判定，执行唯一性归 SDK，ACP 不另设业务调度权威。现行实现尚未完成，重构以该设计为基线，状态见 [2026-10 月志](../../spec/history/2026-10.md)（2026-10-05 条目），不得把旧代码或测试当作降低目标的理由。
 - **Verify**：核对消息权威的主/子同构、乱序、崩溃、退出交接、暂停/关闭和副作用恢复矩阵；实现变更须提供行为证据，文档变更检查链接与 `git diff --check`。
 
 ### ARC-SUBAGENT-IDENTITY-001

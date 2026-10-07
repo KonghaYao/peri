@@ -2,7 +2,7 @@
 
 > 状态：已批准目标设计，**实施验收中**。所有 Agent（含主 Agent、Subagent、Workflow 内 Agent）都是一等公民，适用同一会话、消息和激活契约；具体实现及验证证据以 active issue、代码和契约测试为准，本文件不声明发布门槛已经通过。
 >
-> Scope：会话级 Task/MQ 隔离、可靠消息接纳、消息分级、RCRA 消费和执行激活。实施与验收见 [active issue](../../spec/issues/2026-10-05-rcra-message-activation.md)。任务执行与关闭细则见 [Session 异步任务](session-async-tasks.md)。
+> Scope：会话级 Task/MQ 隔离、可靠消息接纳、消息分级、RCRA 消费和执行激活。实施与验收见 [2026-10 月志](../../spec/history/2026-10.md)（2026-10-05 条目）。任务执行与关闭细则见 [Session 异步任务](session-async-tasks.md)。
 
 ## 1. 权威范围与替代关系
 
@@ -204,7 +204,7 @@ SDK 负责唯一执行者、部署实例和恢复调度；Peri 提供可枚举�
 
 ## 7. 可观测性与契约验证
 
-P0 审查与证据账本见 [active issue](../../spec/issues/2026-10-05-rcra-message-activation.md)。用户已裁决 best-effort 默认允许、重复执行可接受，且不引入控制域合并政策；实施仍须逐项满足本文件契约。
+P0 审查与证据账本见 [2026-10 月志](../../spec/history/2026-10.md)（2026-10-05 条目）。用户已裁决 best-effort 默认允许、重复执行可接受，且不引入控制域合并政策；实施仍须逐项满足本文件契约。
 
 诊断链路必须可按 invocation、task、event、delivery、session、batch 和 attempt 关联，记录各阶段时间、重试次数、路由证据、阻塞/放弃原因；不记录凭证或默认暴露完整消息正文。展示成功与模型处理成功独立。
 

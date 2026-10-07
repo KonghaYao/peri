@@ -70,7 +70,7 @@ scope 快照携 epoch；`taskClose`/`taskOpen` 按该 epoch 做 owner 端 CAS，
 - SDK 原始凭据载荷日志隔离位于 `mcp-packages/credentials/src/client.rs`：原生 credentials 独立 worker runtime、WASM 事件循环 worker 的每次 poll 均在 `NoSubscriber` 作用域内执行，避免 rmcp service debug 打印 `CustomRequest`/Result；production main runtime 日志不受影响。
 - 已落地数据流由部署注入 Resources provider，经 `mcp-packages/credentials/` 受信 bootstrap MCP `CustomRequest` 消费；host assembly 把 `credentialsClient` 注入 OAuth pool，独立于尚未授权的 tool pool。契约归 `peri-acp-types/src/oauth_credentials.rs`，数据库 provider 与 scope 规则见 [Resources 索引](peri-resources.md)。
 - 删除 `FileCredentialStore`，用户重新授权；不保留旧 JSON/文件 fallback、兼容层或迁移，不新增私有 DB、HOME 路径、额外开库或锁；复用已配置 DB 与缓存 machine ID，`mcp_oauth_credentials` 不增加 schema version。MCP cache/plugins 不变，日志文件豁免仍须遵守 secret 脱敏要求。
-- principal `local` + machine ID 是逻辑 scope，不是用户认证；server key 须绑定 endpoint/授权配置，动态连接还绑定 incarnation。bootstrap 授权、共享库暴露与 refresh 风险仍需验收，不宣称安全多租户或 CAS refresh。验收状态见 [active assessment](../../spec/issues/2026-09-30-p2-filesystem-implementation-assessment.md)。
+- principal `local` + machine ID 是逻辑 scope，不是用户认证；server key 须绑定 endpoint/授权配置，动态连接还绑定 incarnation。bootstrap 授权、共享库暴露与 refresh 风险仍需验收，不宣称安全多租户或 CAS refresh。验收状态见 [2026-09 月志](../../spec/history/2026-09.md)（2026-09-30 条目）。
 
 | 我想做什么 | 主文件 | 入口/关键函数 | 关键逻辑 |
 | --- | --- | --- | --- |

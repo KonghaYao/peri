@@ -34,7 +34,7 @@ draft、proposal、可行性探查、审计报告和未采纳方案不进入本�
 | 工具系统 | [tool-system.md](tool-system.md) | session-local 可见性、ToolSearch 与执行边界 |
 | 交互 broker | [interaction-brokers.md](interaction-brokers.md) | Approval/Questions broker 与 transport 交互 |
 | 消息存储 | [message-transcript.md](message-transcript.md) | Transcript、MessageQueue、staging 与持久化 |
-| 会话身份、工作区归属与恢复 | [session-id-environment.md](session-id-environment.md) | Session ID 与机器归属、工作区发现与登记、执行绑定与恢复入口；进度与验收见 [核心改动清单](../../spec/issues/2026-09-30-session-id-environment-core-change.md) |
+| 会话身份、工作区归属与恢复 | [session-id-environment.md](session-id-environment.md) | Session ID 与机器归属、工作区发现与登记、执行绑定与恢复入口；进度与验收见 [2026-09 月志](../../spec/history/2026-09.md)（2026-09-30 条目） |
 | 用户待发送队列 | [user-input-queue.md](user-input-queue.md) | Mailbox、单条/全部投递、取回与运行身份 |
 | Compact | [micro-compact.md](micro-compact.md) | 压缩计划与 LLM projection |
 | Dynamic MCP | [dynamic-mcp.md](dynamic-mcp.md) | session 动态加载、目录发布与关闭 |
@@ -52,10 +52,10 @@ draft、proposal、可行性探查、审计报告和未采纳方案不进入本�
 
 | 主题 | 文档 | 进度事实源 |
 | --- | --- | --- |
-| 时间能力边界 | [time-runtime.md](time-runtime.md) | [时间模块边界实施](../../spec/issues/2026-10-04-time-runtime-boundary.md)；原生边界已落地，WASM 完整验收与既有公开 Chrono 契约范围仍待核实 |
-| RCRA 消息、任务归属与激活 | [rcra-message-activation.md](rcra-message-activation.md) | 一等公民 Agent 独立 Task/MQ、类型驱动的 MQ 消费语义、可靠接纳与处理义务；**实施验收中**，范围与证据见 [active issue](../../spec/issues/2026-10-05-rcra-message-activation.md) |
+| 时间能力边界 | [time-runtime.md](time-runtime.md) | [时间模块边界实施](../../spec/history/2026-10.md)（2026-10-04 条目）；原生边界已落地，WASM 完整验收与既有公开 Chrono 契约范围仍待核实 |
+| RCRA 消息、任务归属与激活 | [rcra-message-activation.md](rcra-message-activation.md) | 一等公民 Agent 独立 Task/MQ、类型驱动的 MQ 消费语义、可靠接纳与处理义务；**实施验收中**，范围与证据见 [2026-10 月志](../../spec/history/2026-10.md)（2026-10-05 条目） |
 | Session 异步任务统一入口 | [session-async-tasks.md](session-async-tasks.md) | 每会话独立任务领域、执行 owner、发现/取消/关闭；消息与激活服从 RCRA 权威，执行唯一性归 SDK；**待重构** |
-| 存储 v2：Machine → Workspace → Session | [storage-v2-machine-workspace-session.md](storage-v2-machine-workspace-session.md) | `spec/issues/2026-10-02-storage-v2-machine-workspace-session.md`；schema 版本以代码索引为准，Git 使用 worktree 根、非 Git 使用启动 cwd；验收状态见 active issue |
+| 存储 v2：Machine → Workspace → Session | [storage-v2-machine-workspace-session.md](storage-v2-machine-workspace-session.md) | `spec/history/2026-10.md`（2026-10-02 条目）；schema 版本以代码索引为准，Git 使用 worktree 根、非 Git 使用启动 cwd；验收状态见该条目 |
 | Command 系统 | [command-system.md](command-system.md) | 对应 command active issue 与代码 |
 | TUI Chat Workbench | [tui-chat-workbench.md](tui-chat-workbench.md) | `spec/history/2026-08.md`（2026-08-10 条目） |
 | SubAgent 活动行 | [tui-subagent-activity.md](tui-subagent-activity.md) | TUI redesign active issue |

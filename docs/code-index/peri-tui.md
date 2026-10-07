@@ -35,7 +35,7 @@ re-export，`tui_config.rs` 只 re-export core `ui::TuiConfig`。`kit/entry.rs` 
 core `ConfigSource::save(expected_revision, &PeriConfig)` 返回 accepted snapshot；延迟
 编辑器必须在编辑开始保存 token，远程 wire 也须传递该基线，不能提交时换最新值。
 这一审计尚未闭环；独立 panel pool 接线及 draft token followup 见
-[配置 active issue](../../spec/issues/2026-10-01-configuration-authority.md)。
+[2026-10 月志](../../spec/history/2026-10.md)（2026-10-01 条目）。
 
 - 数据流：`ACP transport → acp_client pump（interaction_lifecycle 在 forward 前分配 semantic owner；ordinary notification 按 Stable/Transitioning/NoSession 路由）→ acp_notifier（owner + RequestId debug JSON + payload；同步发布 commands/plan/spinner/context 后转发）→ acp_bridge（publish_if_owned 持 operation gate 完成 final owner/projection check；bridge-local 50 ms single-pending scheduler 合并主/子 Agent Streaming publication，发布状态独立于 projection dirty，reset/terminal/receiver-close/shutdown 失效 pending）→ dispatch_for_bridge（canonical ingest + PublicationIntent）→ VIEW_MODELS/ACP_STATE → components；CurrentTurn mutation lazy projection，response action 只能按 owner first-claim，terminal cleanup compare-and-clear 同 owner surface`
 - 提交链路：`InputArea → SubmitRequest → SUBMIT_TX → submit_consumer → AcpTuiClient::ensure_session（acp_client/client/session.rs）/ prompt（acp_client/client/requests.rs）→ ACP transport`；取消经 `CANCEL_TX → spawn_cancel_consumer → AcpTuiClient::cancel`

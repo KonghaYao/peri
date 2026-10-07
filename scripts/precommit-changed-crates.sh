@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # precommit-changed-crates.sh — pre-commit clippy 收窄：把改动文件映射为 cargo -p 参数
 #
-# 背景：spec/issues/2026-10-05-rust-build-performance-diagnosis.md §四 A3。
+# 背景：spec/history/2026-10.md（2026-10-05 条目，原 §四 A3）。
 # pre-commit 原先每次提交对全 workspace 跑 clippy，缓存冷时成本接近一次全量；
 # 全量 clippy 已由 CI（.github/workflows/ci.yml）覆盖，pre-commit 只需覆盖
 # 「本次改动直接涉及的 crate」。check 保持全量（类型门不放松）。

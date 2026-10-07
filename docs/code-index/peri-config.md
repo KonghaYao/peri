@@ -75,7 +75,7 @@ fallback。纯 resolver 只使用输入值；system 管发布和更新。模块�
 
 典型命令：`cargo test -p peri-config --lib -- system::tests`。
 实际验收记录及独立 pool 接线、跨进程/远端矩阵见
-[active issue](../../spec/issues/2026-10-01-configuration-authority.md)。输入读取非跨文件
+[2026-10 月志](../../spec/history/2026-10.md)（2026-10-01 条目）。输入读取非跨文件
 事务，CAS 不保护不合作编辑器；旧 pool 与 session prefix 不会自动热更新。
 
 ## 配置 I/O 适配

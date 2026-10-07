@@ -177,7 +177,7 @@ MCP 响应缓存由 MCP 配置顶层 `mcpCache` 与环境变量 `PERI_MCP_CACHE`
 不能成为覆盖来源。channel 已退役，`15_channel` 按未知键告警并忽略。
 
 上述是现行职责与契约。关闭闭包、可选覆盖失败降级及跨 cwd 配置同源的已知缺口
-由 `spec/issues/2026-10-01-metaharness-v4-cleanup.md` 跟踪，不能将契约表述当作全部已验收。
+由 `spec/history/2026-10.md`（2026-10-01 条目）记录，不能将契约表述当作全部已验收。
 
 ## 相关文档
 
