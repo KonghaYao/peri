@@ -28,6 +28,228 @@ fn snapshot(count: usize) -> ViewModelsSnapshot {
 
 #[test]
 #[serial_test::serial]
+fn skipped_publications_do_not_rebuild_evicted_unchanged_history() {
+    let mut snapshot = snapshot(256);
+    let mut transcript = Transcript::default();
+    let mut caches = Vec::new();
+    let grid = GridSpec::grid_for(80);
+    let context = context();
+    transcript.prepare(
+        &snapshot,
+        &TranscriptPublication::default(),
+        &mut caches,
+        grid,
+        grid.line_width(),
+        context.clone(),
+        10,
+        0,
+        0,
+        2,
+    );
+    transcript.evict_to_budget(&mut caches, &(0..1), 0);
+    assert!(caches[1..].iter().all(|cache| cache.lines.is_none()));
+    snapshot.items.set(
+        128,
+        TuiRenderUnit::TuiUserBubble(TuiUserBubble::new("changed in skipped generation".into())),
+    );
+    snapshot.items.set(
+        255,
+        TuiRenderUnit::TuiUserBubble(TuiUserBubble::new("latest 中文🙂".into())),
+    );
+    snapshot.generation = 4;
+    let publication = TranscriptPublication {
+        generation: 4,
+        previous_generation: 3,
+        changed_from: 255,
+    };
+    let index = transcript.prepare(
+        &snapshot,
+        &publication,
+        &mut caches,
+        grid,
+        grid.line_width(),
+        context,
+        10,
+        0,
+        0,
+        2,
+    );
+    assert_eq!(transcript.scanned_slots, 256);
+    assert_eq!(transcript.updated_slots, 2);
+    assert_eq!(transcript.evictions, 0);
+    assert!(caches[1..128].iter().all(|cache| cache.lines.is_none()));
+    assert!(caches[129..255].iter().all(|cache| cache.lines.is_none()));
+    let copied = extract_visual_range_index(
+        &index,
+        (0, 0),
+        (index.total_visual().saturating_sub(1), 80),
+        grid.line_width(),
+        Some(&snapshot.items),
+        Some(grid),
+    )
+    .unwrap();
+    assert!(copied.contains("row-129 中文🙂"));
+    assert!(copied.contains("changed in skipped generation"));
+    assert!(copied.contains("latest 中文🙂"));
+}
+
+#[test]
+#[serial_test::serial]
+fn cold_history_layout_changes_match_fresh_height_and_semantic_copy() {
+    let mut snapshot = snapshot(32);
+    snapshot.items.set(
+        16,
+        TuiRenderUnit::TuiUserBubble(TuiUserBubble::new("布局 中文🙂 words ".repeat(40))),
+    );
+    let mut transcript = Transcript::default();
+    let mut caches = Vec::new();
+    let initial_grid = GridSpec::grid_for(80);
+    let initial_context = context();
+    transcript.prepare(
+        &snapshot,
+        &TranscriptPublication::default(),
+        &mut caches,
+        initial_grid,
+        initial_grid.line_width(),
+        initial_context.clone(),
+        10,
+        0,
+        0,
+        2,
+    );
+    for grid in [GridSpec::grid_for(40), GridSpec::grid_for(40)] {
+        transcript.evict_to_budget(&mut caches, &(0..0), 0);
+        let mut changed_context = initial_context.clone();
+        changed_context.theme = Arc::new((*initial_context.theme).clone());
+        let current = transcript.prepare(
+            &snapshot,
+            &TranscriptPublication::default(),
+            &mut caches,
+            grid,
+            grid.line_width(),
+            changed_context.clone(),
+            10,
+            0,
+            0,
+            2,
+        );
+        assert_eq!(transcript.updated_slots, snapshot.items.len());
+        let mut fresh = Transcript::default();
+        let expected = fresh.prepare(
+            &snapshot,
+            &TranscriptPublication::default(),
+            &mut Vec::new(),
+            grid,
+            grid.line_width(),
+            changed_context,
+            10,
+            0,
+            0,
+            2,
+        );
+        assert_eq!(current.total_visual(), expected.total_visual());
+        assert_eq!(current.total_logical(), expected.total_logical());
+        let copied = extract_visual_range_index(
+            &current,
+            (0, 0),
+            (current.total_visual().saturating_sub(1), 80),
+            grid.line_width(),
+            Some(&snapshot.items),
+            Some(grid),
+        );
+        let expected_copy = extract_visual_range_index(
+            &expected,
+            (0, 0),
+            (expected.total_visual().saturating_sub(1), 80),
+            grid.line_width(),
+            Some(&snapshot.items),
+            Some(grid),
+        );
+        assert_eq!(copied, expected_copy);
+        assert!(copied.unwrap().contains("布局 中文🙂"));
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn immutable_render_snapshot_allows_publication_before_derivation() {
+    use crate::kit::acp_events::{
+        BridgeState, SessionPhase, push_view_models, push_view_models_for_reset,
+    };
+    use crate::kit::message_area::vm_cache::read_render_snapshot;
+
+    let context = context();
+    push_view_models_for_reset();
+    let mut bridge = BridgeState {
+        variant: 0,
+        committed: snapshot(64).items,
+        current_turn: crate::kit::acp_types::CurrentTurn::new(),
+        phase: SessionPhase::Idle,
+        popup_kind: None,
+        generation: 0,
+        active_session_id: String::new(),
+        compact_just_completed: false,
+        last_submitted_text: None,
+        last_pushed_text_len: 0,
+        last_pushed_reasoning_len: 0,
+        last_successful_todos: None,
+        last_successful_todo_sequence: None,
+        next_todo_sequence: 0,
+        todo_call_inputs: Default::default(),
+        turn_generation: 0,
+        last_prompt_generation: 0,
+        current_request_id: None,
+        pending_cache_usage: None,
+        publication_intent: Default::default(),
+        folded_history: Default::default(),
+    };
+    push_view_models(&mut bridge);
+    let (captured, publication) = read_render_snapshot();
+    let captured_generation = captured.generation;
+    let writer = std::thread::spawn(move || {
+        bridge
+            .committed
+            .push_back(TuiRenderUnit::TuiUserBubble(TuiUserBubble::new(
+                "published while deriving".into(),
+            )));
+        push_view_models(&mut bridge);
+    });
+    writer.join().unwrap();
+    let (current, current_publication) = read_render_snapshot();
+    assert_eq!(captured.generation, publication.generation);
+    assert_eq!(captured.items.len(), 64);
+    assert_eq!(current.generation, current_publication.generation);
+    assert!(current.generation > captured_generation);
+    assert_eq!(current.items.len(), 65);
+    let grid = GridSpec::grid_for(80);
+    let mut transcript = Transcript::default();
+    let mut caches = Vec::new();
+    let old_index = transcript.prepare(
+        &captured,
+        &publication,
+        &mut caches,
+        grid,
+        grid.line_width(),
+        context,
+        10,
+        0,
+        0,
+        2,
+    );
+    assert_eq!(old_index.slot_count(), 64);
+    push_view_models_for_reset();
+    let (reset, reset_publication) = read_render_snapshot();
+    assert!(reset.items.is_empty());
+    assert_eq!(reset.generation, reset_publication.generation);
+    transcript.evict_to_budget(&mut caches, &(0..0), 0);
+    let warmed = transcript.warm_visible(&captured, &mut caches, 0, 2);
+    assert_eq!(warmed.slot_count(), captured.items.len());
+    assert_eq!(caches[0].content_hash, captured.items[0].content_hash());
+    assert!(caches[0].lines.is_some());
+}
+
+#[test]
+#[serial_test::serial]
 fn warm_frames_skip_history_and_reuse_index_for_growing_histories() {
     for count in [64, 256] {
         let snapshot = snapshot(count);

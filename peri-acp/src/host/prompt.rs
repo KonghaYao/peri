@@ -257,36 +257,15 @@ pub(crate) async fn run_prompt(
         )
         .await?;
     }
-    {
+    // Read session data under lock, then release immediately.
+    let (cwd, history_payloads, is_empty, thread_id, frozen, incoming_recalls, workflow_middleware) = {
         let mut sessions = sessions.lock().await;
         let state = sessions
             .get_mut(&session_id)
             .ok_or_else(|| AcpError::new(-32602, "session not found"))?;
         state.cancel_token = Some(cancel.clone());
-    }
-
-    // Read session data under lock, then release immediately.
-    let (
-        cwd,
-        history,
-        history_payloads,
-        is_empty,
-        thread_id,
-        frozen,
-        incoming_recalls,
-        workflow_middleware,
-    ) = {
-        let mut sessions = sessions.lock().await;
-        let state = sessions
-            .get_mut(&session_id)
-            .ok_or_else(|| AcpError::new(-32602, "session not found"))?;
         (
             state.cwd.clone(),
-            state
-                .history_payloads
-                .iter()
-                .filter_map(|payload| payload.as_message().cloned())
-                .collect::<Vec<_>>(),
             state.history_payloads.clone(),
             state.history_payloads.is_empty(),
             state.thread_id.clone(),
@@ -296,6 +275,10 @@ pub(crate) async fn run_prompt(
             state.workflow_middleware.clone(),
         )
     };
+    let history = history_payloads
+        .iter()
+        .filter_map(|payload| payload.as_message().cloned())
+        .collect::<Vec<_>>();
     let broker = build_transport_broker(transport, &session_id);
     let event_sink = Arc::new(TransportEventSink::new(
         Arc::clone(transport),

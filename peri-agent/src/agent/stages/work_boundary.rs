@@ -34,6 +34,7 @@ pub(crate) struct BoundaryState {
 pub(crate) struct WorkBoundary {
     mode: WorkMode,
     pub(crate) state: Mutex<BoundaryState>,
+    pub(super) receive_gate: Mutex<()>,
     admission_request_id: String,
 }
 
@@ -54,6 +55,7 @@ impl WorkBoundary {
                 request_id: None,
                 invocations: HashMap::new(),
             }),
+            receive_gate: Mutex::new(()),
             admission_request_id: uuid::Uuid::now_v7().to_string(),
         }
     }
@@ -255,7 +257,7 @@ impl WorkBoundary {
         }
         if let Some(mailbox) = &ctx.session.user_input_mailbox {
             mailbox
-                .observe_sdk_run(&session.admission)
+                .observe_sdk_run_from_snapshot(&session.admission, &snapshot)
                 .await
                 .map_err(anyhow::Error::new)?;
             if !mailbox.attach_sdk_attempt(

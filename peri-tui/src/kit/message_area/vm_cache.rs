@@ -7,6 +7,27 @@ use super::render;
 use super::render::ImageLineInfo;
 use super::scroll;
 use super::selection::WrappedLineInfo;
+pub(super) fn read_render_snapshot() -> (
+    crate::kit::atoms::ViewModelsSnapshot,
+    crate::kit::atoms::TranscriptPublication,
+) {
+    let wait_start = peri_time::monotonic_now();
+    let view_models = crate::kit::atoms::VIEW_MODELS.state();
+    let guard = view_models.read();
+    let acquired = peri_time::monotonic_now();
+    let snapshot = guard.clone();
+    let publication = crate::kit::atoms::TRANSCRIPT_PUBLICATION.get();
+    drop(guard);
+    let released = peri_time::monotonic_now();
+    trace_elapsed("vm-read-wait", acquired.duration_since(wait_start), None);
+    trace_elapsed(
+        "vm-snapshot",
+        released.duration_since(acquired),
+        Some("persistent-clone-and-publication"),
+    );
+    (snapshot, publication)
+}
+
 /// 计算 palette 中影响 markdown 渲染的关键字段哈希。
 /// 当主题切换时，hash 变化 → 触发 vm_caches 重建 → markdown 色值更新。
 #[cfg(test)]
@@ -59,10 +80,14 @@ pub(super) fn render_timing_enabled() -> bool {
 /// 如果启用诊断，打印阶段耗时。
 #[track_caller]
 pub(super) fn trace_phase(phase: &str, start: Instant, detail: Option<&str>) {
+    trace_elapsed(phase, peri_time::elapsed_since(start), detail);
+}
+
+pub(super) fn trace_elapsed(phase: &str, elapsed: std::time::Duration, detail: Option<&str>) {
     if render_timing_enabled() {
-        let elapsed_us = peri_time::elapsed_since(start).as_micros();
-        let extra = detail.map(|d| format!(" | {d}")).unwrap_or_default();
-        tracing::info!(target: "perf.render", "[{phase}] {elapsed_us}μs{extra}");
+        tracing::info!(target: "perf.render", phase, elapsed_us = elapsed.as_micros() as u64,
+            process_id = std::process::id(), thread = ?std::thread::current().id(),
+            detail = detail.unwrap_or_default(), "message-render-phase");
     }
 }
 
@@ -82,6 +107,7 @@ pub(crate) use crate::kit::entry_render_cache::MarkdownLineCache;
 #[derive(Default)]
 pub(super) struct VmCacheSlot {
     pub(super) content_hash: u64,
+    pub(super) variant: Option<std::mem::Discriminant<crate::kit::tui_render_unit::TuiRenderUnit>>,
     pub(super) entry: crate::kit::entry_render_cache::EntryRenderCache,
     pub(super) lines: Option<Arc<super::selection::SlotLines>>,
     pub(super) wrap_map: Arc<Vec<WrappedLineInfo>>,
@@ -92,6 +118,10 @@ pub(super) struct VmCacheSlot {
 }
 
 impl VmCacheSlot {
+    pub(super) fn matches_content(&self, vm: &crate::kit::tui_render_unit::TuiRenderUnit) -> bool {
+        self.variant == Some(std::mem::discriminant(vm)) && self.content_hash == vm.content_hash()
+    }
+
     pub(super) fn retained_bytes(&self) -> usize {
         self.entry.retained_bytes()
             + self

@@ -1,6 +1,6 @@
 use super::*;
 use peri_acp_types::session_resources::work::{
-    DeliveryPurpose, WorkAdmission, WorkDecision, WorkQuery,
+    DeliveryPurpose, WorkAdmission, WorkDecision, WorkSnapshot,
 };
 
 pub(super) struct SdkRunObservation {
@@ -40,14 +40,83 @@ impl UserInputMailbox {
         admission: &WorkAdmission,
     ) -> Result<UserInputRunTicket, UserInputQueueError> {
         let durable = self.durable.as_ref().ok_or(UserInputQueueError::Closed)?;
-        let snapshot = durable
-            .store
-            .load_session_work(&WorkQuery {
-                session_id: self.session_id.clone(),
-                limit: 1,
+        if self.observed_sdk_ticket(admission).is_some() {
+            self.validate_sdk_control(admission).await?;
+            return self
+                .observed_sdk_ticket(admission)
+                .ok_or(UserInputQueueError::Closed);
+        }
+        let snapshot = durable.load(&self.session_id).await?;
+        self.observe_sdk_snapshot(admission, &snapshot)
+    }
+
+    pub(crate) async fn observe_sdk_run_from_snapshot(
+        &self,
+        admission: &WorkAdmission,
+        snapshot: &WorkSnapshot,
+    ) -> Result<UserInputRunTicket, UserInputQueueError> {
+        self.validate_sdk_control(admission).await?;
+        self.observe_sdk_snapshot(admission, snapshot)
+    }
+
+    fn observed_sdk_ticket(&self, admission: &WorkAdmission) -> Option<UserInputRunTicket> {
+        let durable = self.durable.as_ref()?;
+        let state = self.state.lock();
+        if !state.valid
+            || admission.session_id != self.session_id
+            || admission.lifecycle != durable.lifecycle
+        {
+            return None;
+        }
+        state
+            .active
+            .as_ref()
+            .filter(|active| {
+                active.outcome.is_none()
+                    && active
+                        .sdk
+                        .as_ref()
+                        .is_some_and(|sdk| sdk.admission == *admission)
             })
+            .map(|active| active.ticket.clone())
+    }
+
+    async fn validate_sdk_control(
+        &self,
+        admission: &WorkAdmission,
+    ) -> Result<(), UserInputQueueError> {
+        let durable = self.durable.as_ref().ok_or(UserInputQueueError::Closed)?;
+        let started = std::time::Instant::now();
+        #[cfg(test)]
+        durable
+            .control_loads
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let control = durable
+            .store
+            .load_session_control(&self.session_id)
             .await
             .map_err(|_| UserInputQueueError::OutcomeUnknown)?;
+        tracing::debug!(session_id = %self.session_id, admission_id = %admission.admission_id,
+            duration_us = started.elapsed().as_micros() as u64, "mailbox SDK control validated");
+        if admission.session_id != self.session_id
+            || admission.lifecycle != durable.lifecycle
+            || admission.lifecycle != control.lifecycle
+            || admission.control_generation != control.control_generation
+            || control.attempt.as_ref() != Some(&admission.execution)
+        {
+            return Err(UserInputQueueError::DurableRejected(
+                "SDK observation no longer matches exact execution control".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn observe_sdk_snapshot(
+        &self,
+        admission: &WorkAdmission,
+        snapshot: &WorkSnapshot,
+    ) -> Result<UserInputRunTicket, UserInputQueueError> {
+        let durable = self.durable.as_ref().ok_or(UserInputQueueError::Closed)?;
         let registered = snapshot
             .state
             .admissions
@@ -60,7 +129,8 @@ impl UserInputMailbox {
                         .as_ref()
                         .is_some_and(|receipt| receipt.decision == WorkDecision::Accepted)
             });
-        if admission.session_id != self.session_id
+        if snapshot.session_id != self.session_id
+            || admission.session_id != self.session_id
             || admission.lifecycle != durable.lifecycle
             || admission.lifecycle != snapshot.control.lifecycle
             || admission.control_generation != snapshot.control.control_generation
@@ -71,7 +141,7 @@ impl UserInputMailbox {
                 "SDK admission is not durably registered for this exact execution".into(),
             ));
         }
-        self.project_publications(&snapshot);
+        self.project_publications(snapshot);
         let batch_id = snapshot
             .state
             .works

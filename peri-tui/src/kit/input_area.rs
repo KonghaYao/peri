@@ -695,6 +695,10 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
     };
     let steer_enabled = steers.read().enabled;
     let steer_session_id = steer_session.read().clone();
+    let direct_submitting = steers.read().direct_submitting(
+        &steer_session_id,
+        crate::kit::atoms::BRIDGE_RESET_COUNTER.get(),
+    );
     let steer_items = steers.read().rows(&steer_session_id);
     let steer_budget = props
         .max_total_height
@@ -807,7 +811,18 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
     // 当前会话标题：service_snapshot 周期性派生；空标题或 §11 高度降级
     // （h<12，session_title_visible=false）时上边栏不渲染标签。
     let session_title = hooks.use_atom(&CURRENT_SESSION_TITLE).read().clone();
-    let shown_session_title = if props.session_title_visible {
+    let submitting_title = crate::truncate::truncate_by_width(
+        &i18n::tr("composer-submitting"),
+        usize::from(
+            composer_area
+                .map(|area| area.width)
+                .unwrap_or(80)
+                .saturating_sub(3),
+        ),
+    );
+    let shown_session_title = if direct_submitting {
+        submitting_title.as_str()
+    } else if props.session_title_visible {
         session_title.as_str()
     } else {
         ""
@@ -819,7 +834,7 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
         shown_session_title,
         files_label.as_deref(),
         footer_right,
-        props.session_title_visible,
+        props.session_title_visible || direct_submitting,
         props.max_lines.is_none(),
         composer_area.map(|a| a.width).unwrap_or(80),
     ));

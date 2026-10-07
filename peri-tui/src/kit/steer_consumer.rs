@@ -13,8 +13,6 @@ use super::steer_state::{STEERS, SteerCommand, SteerCommandKind};
 use crate::acp_client::AcpTuiClient;
 
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(5);
-/// 受理回执期限：只覆盖已发出请求的等待。
-const RECEIPT_TIMEOUT: Duration = Duration::from_secs(10);
 /// 准备阶段期限：会话创建包含工作区发现与服务端准入，比回执预算宽松。
 ///
 /// 两个阶段不共用期限：准备慢于回执预算时输入尚未发出，
@@ -54,11 +52,18 @@ pub(crate) fn spawn_steer_consumer(
     tokio::spawn(async move {
         let mut retries: VecDeque<SteerCommand> = VecDeque::new();
         let mut warned = HashSet::new();
+        let mut refresh_tasks = tokio::task::JoinSet::new();
         let mut retry_tick = peri_time::interval(RECONCILE_INTERVAL);
         retry_tick.set_missed_tick_behavior(peri_time::MissedTickBehavior::Delay);
         loop {
             let mut command = tokio::select! {
                 _ = shutdown.cancelled() => break,
+                result = refresh_tasks.join_next(), if !refresh_tasks.is_empty() => {
+                    if let Some(Err(error)) = result {
+                        tracing::error!(%error, "user input refresh task failed");
+                    }
+                    continue;
+                },
                 _ = retry_tick.tick() => {
                     let Some(command) = retries.pop_front().or_else(refresh_command) else {
                         continue;
@@ -70,6 +75,23 @@ pub(crate) fn spawn_steer_consumer(
                     None => break,
                 },
             };
+            if let Some(wait) = STEERS.state().write().take_queue_wait(&command) {
+                tracing::debug!(command_id = %command.command_id, stage = "queue", elapsed_ms = wait.as_millis() as u64, "user input timing");
+            }
+            if matches!(command.kind, SteerCommandKind::Refresh) {
+                if refresh_tasks.is_empty() {
+                    let refresh_client = client.clone();
+                    let refresh_cwd = cwd.clone();
+                    refresh_tasks.spawn(async move {
+                        if let Err(failure) =
+                            execute(&refresh_client, &mut command, &refresh_cwd).await
+                        {
+                            tracing::warn!(error = %failure.error, "user input refresh failed");
+                        }
+                    });
+                }
+                continue;
+            }
             let result = tokio::select! {
                 _ = shutdown.cancelled() => break,
                 result = execute(&client, &mut command, &cwd) => result,
@@ -163,10 +185,11 @@ async fn execute(
     command: &mut SteerCommand,
     cwd: &str,
 ) -> Result<(), SteerFailure> {
-    prepare(client, command, cwd).await?;
-    peri_time::timeout(RECEIPT_TIMEOUT, admit(client, command))
-        .await
-        .unwrap_or_else(|_| Err(AcpError::new(-32603, "user input receipt timed out")))?;
+    let prepare_started = peri_time::monotonic_now();
+    let prepared = prepare(client, command, cwd).await;
+    tracing::debug!(command_id = %command.command_id, stage = "prepare", elapsed_ms = prepare_started.elapsed().as_millis() as u64, "user input timing");
+    prepared?;
+    admit(client, command).await?;
     Ok(())
 }
 
@@ -243,6 +266,14 @@ async fn admit(client: &AcpTuiClient, command: &mut SteerCommand) -> Result<(), 
         _ => {
             let snapshot = client.user_input_snapshot(&command.session_id).await?;
             let generation = snapshot.generation.clone();
+            if atoms::ACTIVE_SESSION_ID.state().read().as_str() != command.session_id
+                || atoms::BRIDGE_RESET_COUNTER.get() != command.epoch
+            {
+                return Err(AcpError::new(
+                    -32602,
+                    "user input session changed during snapshot",
+                ));
+            }
             super::steer_state::establish_session_snapshot(snapshot);
             generation
         }
@@ -292,6 +323,14 @@ async fn admit(client: &AcpTuiClient, command: &mut SteerCommand) -> Result<(), 
                 .await?
         }
     };
+    if atoms::ACTIVE_SESSION_ID.state().read().as_str() != command.session_id
+        || atoms::BRIDGE_RESET_COUNTER.get() != command.epoch
+    {
+        return Err(AcpError::new(
+            -32603,
+            "user input session changed during receipt",
+        ));
+    }
     STEERS.state().write().settle(command, receipt);
     Ok(())
 }

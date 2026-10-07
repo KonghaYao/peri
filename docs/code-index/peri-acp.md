@@ -1,5 +1,9 @@
 # peri-acp 代码索引
 
+输入提交性能入口：`host/requests/session_io.rs` 在短会话锁内选择已绑定环境，队列与 work IO 在锁外执行；`host/server_loop.rs::spawn_session_io` 将输入快照与 work query 放入 host-owned 请求任务，普通变更与生命周期操作保留原有接收顺序。`host/session_io_test.rs` 覆盖挂起 work query 时快照继续推进、全局会话锁可用与关闭拒绝。
+
+`host/diagnostics.rs::ResponseDiagnostics` 的 `perf.input` 记录 RPC、session、command/input 身份与响应发送完成耗时，不记录正文；该耗时不是键盘到终端绘制的完整延迟。`host/prompt.rs` 在短锁内取得 canonical payload 快照，消息过滤复制在锁外执行。
+
 执行失败协议出口：`host/prompt.rs::execution_failure_to_acp_error` 保留 `kind/status`、`error_category/causes` 与完整有界 Model `diagnostic`；`host/diagnostics.rs::ResponseDiagnostics` 记录 method/rpc/session 和错误内容。日志、ACP message/data 与遥测不做内容脱敏；分类、权限和终止语义保持独立，规则见 ARC-SECRET-001。
 
 > 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-10-01（ACP 会话级 HTTP/stdio MCP 声明与 Peri instructions 扩展）。

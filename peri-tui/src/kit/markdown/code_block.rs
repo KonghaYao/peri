@@ -30,13 +30,28 @@ pub(crate) static THEME_SET: LazyLock<ThemeSet> = LazyLock::new(ThemeSet::load_d
 // async 上下文会编译报错（CLAUDE.md 已记录）。
 type CacheValue = Option<Arc<Vec<Line<'static>>>>;
 
+#[cfg(test)]
+thread_local! {
+    static HIGHLIGHTED_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static MEASURED_SPANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+const MAX_HIGHLIGHT_BYTES: usize = 256 * 1024;
+const MAX_HIGHLIGHT_LINE_BYTES: usize = 16 * 1024;
+const MAX_HIGHLIGHT_LINES: usize = 4096;
+
+struct CacheEntry {
+    value: CacheValue,
+    bytes: usize,
+}
+
 static HIGHLIGHT_CACHE: LazyLock<RwLock<HlCache>> = LazyLock::new(|| RwLock::new(HlCache::new()));
 
 struct HlCache {
     cap: usize,
     byte_cap: usize,
     bytes: usize,
-    entries: HashMap<(String, u64), CacheValue>,
+    entries: HashMap<(String, u64), CacheEntry>,
     /// LRU 顺序：末尾为最近访问，头部为最旧。
     order: Vec<(String, u64)>,
 }
@@ -54,38 +69,55 @@ impl HlCache {
 
     /// 查询并将 key 提升到 LRU 末尾。返回 Some(Clone) 表示命中，None 表示未命中。
     fn get(&mut self, key: &(String, u64)) -> Option<CacheValue> {
-        if let Some(v) = self.entries.get(key).cloned() {
+        if let Some(entry) = self.entries.get(key) {
+            let value = entry.value.clone();
             self.order.retain(|k| k != key);
             self.order.push(key.clone());
-            Some(v)
+            Some(value)
         } else {
             None
         }
     }
 
     /// 插入新条目；若已满则淘汰 order 头部最旧条目。
+    #[cfg(test)]
     fn insert(&mut self, key: (String, u64), val: CacheValue) {
-        if let Some(previous) = self.entries.remove(&key) {
-            self.bytes = self.bytes.saturating_sub(cache_value_bytes(&previous));
-            self.order.retain(|cached| cached != &key);
-        }
         let bytes = cache_value_bytes(&val);
+        self.insert_measured(key, val, bytes);
+    }
+
+    fn insert_measured(
+        &mut self,
+        key: (String, u64),
+        val: CacheValue,
+        bytes: usize,
+    ) -> Vec<CacheEntry> {
+        let mut retired = Vec::new();
+        if let Some(previous) = self.entries.remove(&key) {
+            self.bytes = self.bytes.saturating_sub(previous.bytes);
+            self.order.retain(|cached| cached != &key);
+            retired.push(previous);
+        }
         if bytes > self.byte_cap {
-            return;
+            retired.push(CacheEntry { value: val, bytes });
+            return retired;
         }
         while self.entries.len() >= self.cap || self.bytes.saturating_add(bytes) > self.byte_cap {
             let Some(evicted) = self.order.first().cloned() else {
                 break;
             };
             if let Some(previous) = self.entries.remove(&evicted) {
-                self.bytes = self.bytes.saturating_sub(cache_value_bytes(&previous));
+                self.bytes = self.bytes.saturating_sub(previous.bytes);
+                retired.push(previous);
             }
             self.order.remove(0);
         }
         self.bytes += bytes;
-        self.entries.insert(key.clone(), val);
+        self.entries
+            .insert(key.clone(), CacheEntry { value: val, bytes });
         self.order.retain(|k| k != &key);
         self.order.push(key);
+        retired
     }
 
     /// 清空缓存（测试辅助）。
@@ -107,7 +139,14 @@ fn cache_value_bytes(value: &CacheValue) -> usize {
                         + line
                             .spans
                             .iter()
-                            .map(|span| span.content.len())
+                            .map(|span| {
+                                #[cfg(test)]
+                                MEASURED_SPANS.with(|count| count.set(count.get() + 1));
+                                match &span.content {
+                                    std::borrow::Cow::Owned(text) => text.capacity(),
+                                    std::borrow::Cow::Borrowed(_) => 0,
+                                }
+                            })
                             .sum::<usize>()
                 })
                 .sum::<usize>()
@@ -117,18 +156,85 @@ fn cache_value_bytes(value: &CacheValue) -> usize {
 // ── 代码块高亮 ──────────────────────────────────────────────────────
 
 pub(crate) fn highlight_code_block(lang: &str, raw_lines: &[String]) -> CacheValue {
+    if !within_highlight_budget(raw_lines) {
+        return None;
+    }
     let key_hash = hash_raw_lines(raw_lines);
     let key = (lang.to_string(), key_hash);
 
     // 1. 查缓存：命中则直接 clone 返回
-    if let Some(cached) = HIGHLIGHT_CACHE.write().get(&key) {
+    let cached = HIGHLIGHT_CACHE.write().get(&key);
+    if let Some(cached) = cached {
+        tracing::trace!(
+            event = "cache-work",
+            cache = "markdown-highlight",
+            outcome = "hit",
+            input_lines = raw_lines.len(),
+        );
         return cached;
     }
 
     // 2. miss → 跑 syntect
     let result = highlight_code_block_inner(lang, raw_lines).map(Arc::new);
-    HIGHLIGHT_CACHE.write().insert(key, result.clone());
+    let bytes = cache_value_bytes(&result);
+    let retired = HIGHLIGHT_CACHE
+        .write()
+        .insert_measured(key, result.clone(), bytes);
+    tracing::trace!(
+        event = "cache-work",
+        cache = "markdown-highlight",
+        outcome = "miss",
+        input_lines = raw_lines.len(),
+        measured_result_bytes = bytes,
+        retired_entries = retired.len(),
+    );
+    drop(retired);
     result
+}
+
+fn within_highlight_budget(raw_lines: &[String]) -> bool {
+    if raw_lines.len() > MAX_HIGHLIGHT_LINES {
+        tracing::debug!(
+            event = "skipped-budget",
+            work = "markdown-highlight",
+            cache_work = "bypassed",
+            reason = "line-count",
+            input_lines = raw_lines.len(),
+            max_lines = MAX_HIGHLIGHT_LINES,
+        );
+        return false;
+    }
+    let mut bytes = 0usize;
+    for (index, line) in raw_lines.iter().enumerate() {
+        if line.len() > MAX_HIGHLIGHT_LINE_BYTES {
+            tracing::debug!(
+                event = "skipped-budget",
+                work = "markdown-highlight",
+                cache_work = "bypassed",
+                reason = "line-bytes",
+                input_lines = raw_lines.len(),
+                inspected_lines = index + 1,
+                line_bytes = line.len(),
+                max_line_bytes = MAX_HIGHLIGHT_LINE_BYTES,
+            );
+            return false;
+        }
+        bytes = bytes.saturating_add(line.len());
+        if bytes > MAX_HIGHLIGHT_BYTES {
+            tracing::debug!(
+                event = "skipped-budget",
+                work = "markdown-highlight",
+                cache_work = "bypassed",
+                reason = "block-bytes",
+                input_lines = raw_lines.len(),
+                inspected_lines = index + 1,
+                inspected_bytes = bytes,
+                max_bytes = MAX_HIGHLIGHT_BYTES,
+            );
+            return false;
+        }
+    }
+    true
 }
 
 /// 与 `highlight_code_block` 同逻辑，但额外返回是否命中缓存（仅供测试断言）。
@@ -137,6 +243,9 @@ pub(crate) fn highlight_code_block_with_hit(
     lang: &str,
     raw_lines: &[String],
 ) -> (CacheValue, bool) {
+    if !within_highlight_budget(raw_lines) {
+        return (None, false);
+    }
     let key_hash = hash_raw_lines(raw_lines);
     let key = (lang.to_string(), key_hash);
 
@@ -144,7 +253,11 @@ pub(crate) fn highlight_code_block_with_hit(
         return (cached, true);
     }
     let result = highlight_code_block_inner(lang, raw_lines).map(Arc::new);
-    HIGHLIGHT_CACHE.write().insert(key, result.clone());
+    let bytes = cache_value_bytes(&result);
+    let retired = HIGHLIGHT_CACHE
+        .write()
+        .insert_measured(key, result.clone(), bytes);
+    drop(retired);
     (result, false)
 }
 
@@ -160,6 +273,8 @@ fn highlight_code_block_inner(lang: &str, raw_lines: &[String]) -> Option<Vec<Li
 
     let mut result = Vec::with_capacity(raw_lines.len());
     for line_text in raw_lines {
+        #[cfg(test)]
+        HIGHLIGHTED_BYTES.with(|count| count.set(count.get() + line_text.len()));
         let ranges = highlighter.highlight_line(line_text, ss).ok()?;
         let spans: Vec<Span<'static>> = ranges
             .iter()

@@ -19,6 +19,17 @@ pub(super) async fn handle_user_input(
     sessions: &HashMap<String, SessionState>,
     transport: &Arc<dyn AcpTransport>,
 ) -> Result<Value, AcpError> {
+    let session_id = negotiated_session_id(params, cfg)?;
+    sessions
+        .get(session_id)
+        .ok_or_else(|| AcpError::new(-32602, "session not found"))?;
+    handle_prepared_user_input(method, params, cfg, transport).await
+}
+
+fn negotiated_session_id<'params>(
+    params: &'params Value,
+    cfg: &AcpServerConfig,
+) -> Result<&'params str, AcpError> {
     let session_id = params
         .get("sessionId")
         .and_then(Value::as_str)
@@ -30,9 +41,16 @@ pub(super) async fn handle_user_input(
             "user input queue capability not negotiated",
         ));
     }
-    sessions
-        .get(session_id)
-        .ok_or_else(|| AcpError::new(-32602, "session not found"))?;
+    Ok(session_id)
+}
+
+pub(super) async fn handle_prepared_user_input(
+    method: &str,
+    params: &Value,
+    cfg: &AcpServerConfig,
+    transport: &Arc<dyn AcpTransport>,
+) -> Result<Value, AcpError> {
+    let session_id = negotiated_session_id(params, cfg)?;
     let mailbox = super::super::user_input::ensure_mailbox(session_id, cfg, transport).await?;
     let rejected = |error: String| {
         AcpError::new(-32602, error).with_data(serde_json::json!({

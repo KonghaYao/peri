@@ -10,6 +10,9 @@ pub(super) struct ResponseDiagnostics {
     id: RequestId,
     method: String,
     session_id: Option<String>,
+    command_id: Option<String>,
+    input_id: Option<String>,
+    started: std::time::Instant,
 }
 
 impl ResponseDiagnostics {
@@ -23,6 +26,15 @@ impl ResponseDiagnostics {
                 .or_else(|| params.get("ownerSessionId"))
                 .and_then(Value::as_str)
                 .map(str::to_owned),
+            command_id: params
+                .get("commandId")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            input_id: params
+                .get("inputId")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            started: peri_time::monotonic_now(),
         }
     }
 
@@ -51,6 +63,12 @@ impl ResponseDiagnostics {
             }
         }
         let sent = transport.send_response(self.id.clone(), result).await;
+        if self.method.starts_with("session/input/") || self.method.starts_with("session/work/") {
+            tracing::info!(target: "perf.input", method = %self.method, rpc_id = %self.id,
+                session_id = self.session_id.as_deref(), command_id = self.command_id.as_deref(),
+                input_id = self.input_id.as_deref(), elapsed_us = peri_time::elapsed_since(self.started).as_micros() as u64,
+                response_sent = sent.is_ok(), "ACP input request completed");
+        }
         if let Err(error) = &sent {
             tracing::warn!(method = %self.method, rpc_id = %self.id,
                 session_id = self.session_id.as_deref(), code = error.code,

@@ -36,6 +36,7 @@ struct SessionSteers {
     epoch: u64,
     snapshot: Option<UserInputQueueSnapshot>,
     pending: Vec<SteerCommand>,
+    queued_at: HashMap<String, peri_time::Instant>,
     recovered: Vec<RecoveredInput>,
     delivered: HashSet<String>,
     // 仅影响待发送区展示；正式聊天气泡仍由 Delivered 确认。
@@ -73,10 +74,28 @@ pub(crate) struct SteerState {
 }
 
 impl SteerState {
+    pub(crate) fn take_queue_wait(
+        &mut self,
+        command: &SteerCommand,
+    ) -> Option<std::time::Duration> {
+        self.sessions
+            .get_mut(&command.session_id)?
+            .queued_at
+            .remove(&command.command_id)
+            .map(|queued| queued.elapsed())
+    }
+
+    pub(crate) fn direct_submitting(&self, session_id: &str, epoch: u64) -> bool {
+        self.sessions
+            .get(session_id)
+            .is_some_and(|session| session.epoch == epoch && !session.direct_submissions.is_empty())
+    }
+
     pub(crate) fn reset_session(&mut self, session_id: &str, epoch: u64) {
         let session = self.sessions.entry(session_id.to_owned()).or_default();
         session.epoch = epoch;
         session.snapshot = None;
+        session.queued_at.clear();
         session.direct_submissions.clear();
         for recovered in &mut session.recovered {
             recovered.epoch = epoch;
@@ -136,6 +155,10 @@ impl SteerState {
         {
             session.direct_submissions.insert(input.input_id.clone());
         }
+        session
+            .queued_at
+            .entry(command.command_id.clone())
+            .or_insert_with(peri_time::monotonic_now);
         session.pending.push(command);
     }
 
@@ -191,6 +214,7 @@ impl SteerState {
     pub(crate) fn settle(&mut self, command: &SteerCommand, receipt: UserInputQueueReceipt) {
         self.accept_snapshot(receipt.snapshot, command.epoch, true);
         let session = self.sessions.entry(command.session_id.clone()).or_default();
+        session.queued_at.remove(&command.command_id);
         session
             .pending
             .retain(|pending| pending.command_id != command.command_id);
@@ -219,6 +243,7 @@ impl SteerState {
     pub(crate) fn rebind_initial(&mut self, command: &SteerCommand, session_id: &str, epoch: u64) {
         let mut direct = false;
         if let Some(previous) = self.sessions.get_mut(&command.session_id) {
+            previous.queued_at.remove(&command.command_id);
             if let SteerCommandKind::Enqueue(input) = &command.kind {
                 direct = previous.direct_submissions.remove(&input.input_id);
             }
@@ -241,6 +266,7 @@ impl SteerState {
 
     pub(crate) fn reject(&mut self, command: &SteerCommand, definitely_rejected: bool) {
         let session = self.sessions.entry(command.session_id.clone()).or_default();
+        session.queued_at.remove(&command.command_id);
         if let SteerCommandKind::Enqueue(input) = &command.kind {
             // 超时/未知结果必须重新可见；明确拒绝则交给原稿恢复。
             session.direct_submissions.remove(&input.input_id);

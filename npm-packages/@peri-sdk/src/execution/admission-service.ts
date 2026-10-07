@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import { SqliteExecutionRegistry } from "./sqlite-registry";
+import { retrySqliteBusy, sqliteImmediate } from "./sqlite-busy";
 import { provesInstance, sameTicket, validateTicket } from "./registry-model";
 import type { AdmissionResult } from "./coordinator";
 import type { ControlState } from "../agent/session-control";
@@ -44,6 +45,7 @@ export class ExecutionAdmissionService {
         this.ledger.exec("PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL");
         this.ledger.exec("CREATE TABLE IF NOT EXISTS sdk_admission_requests (request_id TEXT PRIMARY KEY, digest TEXT NOT NULL, ticket TEXT NOT NULL)");
         this.ledger.exec("CREATE TABLE IF NOT EXISTS sdk_admission_steps (step_id TEXT PRIMARY KEY, command TEXT NOT NULL)");
+        this.ledger.exec("PRAGMA busy_timeout=0");
     }
     private serialize<Result>(sessionId: string, operation: () => Promise<Result>): Promise<Result> {
         const result = (this.pending.get(sessionId) ?? Promise.resolve()).catch(() => {}).then(operation);
@@ -54,8 +56,11 @@ export class ExecutionAdmissionService {
     private async step(sessionId: string, stepId: string, action: ExecutionAction): Promise<ExecutionResolution> {
         const current = await this.registry.read(sessionId);
         const proposed: ExecutionMutation = { sessionId, mutationId: stepId, expectedRevision: current.revision, action };
-        const inserted = this.ledger.query("INSERT OR IGNORE INTO sdk_admission_steps VALUES (?,?)").run(stepId, JSON.stringify(proposed));
-        const row = this.ledger.query<{ command: string }, [string]>("SELECT command FROM sdk_admission_steps WHERE step_id=?").get(stepId)!;
+        const { inserted, row } = await sqliteImmediate(this.ledger, () => {
+            const inserted = this.ledger.query("INSERT OR IGNORE INTO sdk_admission_steps VALUES (?,?)").run(stepId, JSON.stringify(proposed));
+            const row = this.ledger.query<{ command: string }, [string]>("SELECT command FROM sdk_admission_steps WHERE step_id=?").get(stepId)!;
+            return { inserted, row };
+        });
         const original = JSON.parse(row.command) as ExecutionMutation;
         if (original.sessionId !== sessionId || stable(original.action) !== stable(action)) throw new TypeError("Stable admission step identity conflict");
         return inserted.changes === 1 ? this.registry.apply(original) : this.registry.resolve(original);
@@ -95,7 +100,7 @@ export class ExecutionAdmissionService {
             return { status: "admitted", admission: ticket };
         }
         const key = digest({ sessionId: snapshot.sessionId, requestId });
-        const existing = this.ledger.query<{ digest: string; ticket: string }, [string]>("SELECT digest,ticket FROM sdk_admission_requests WHERE request_id=?").get(key);
+        const existing = await retrySqliteBusy(() => this.ledger.query<{ digest: string; ticket: string }, [string]>("SELECT digest,ticket FROM sdk_admission_requests WHERE request_id=?").get(key));
         if (existing && existing.digest !== digest(request)) throw new TypeError("Admission requestId payload conflict");
         const candidate = snapshot.candidates?.[0];
         if (!existing && (snapshot.blocked || snapshot.control?.status !== "active" || !candidate))
@@ -108,8 +113,10 @@ export class ExecutionAdmissionService {
             execution: { turnId: digest({ key, kind: "turn" }).slice(0, 32).replace(/(.{8})(.{4})(.{4})(.{4})(.{12})/, "$1-$2-$3-$4-$5"), attemptId: digest({ key, kind: "attempt" }) },
         };
         validateTicket(proposed);
-        this.ledger.query("INSERT OR IGNORE INTO sdk_admission_requests VALUES (?,?,?)").run(key, digest(request), JSON.stringify(proposed));
-        const saved = this.ledger.query<{ digest: string; ticket: string }, [string]>("SELECT digest,ticket FROM sdk_admission_requests WHERE request_id=?").get(key)!;
+        const saved = await sqliteImmediate(this.ledger, () => {
+            this.ledger.query("INSERT OR IGNORE INTO sdk_admission_requests VALUES (?,?,?)").run(key, digest(request), JSON.stringify(proposed));
+            return this.ledger.query<{ digest: string; ticket: string }, [string]>("SELECT digest,ticket FROM sdk_admission_requests WHERE request_id=?").get(key)!;
+        });
         if (saved.digest !== digest(request)) throw new TypeError("Admission requestId payload conflict");
         const ticket = JSON.parse(saved.ticket) as ExecutionTicket;
         if (ticket.instanceId !== this.options.instance.instanceId || ticket.generationId !== this.options.instance.generationId)

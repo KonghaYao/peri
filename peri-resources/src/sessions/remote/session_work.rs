@@ -1,8 +1,10 @@
 use peri_acp_types::session_resources::work::{
     reduce_work, DeliveryRecord, WorkCommand, WorkDeliveryQuery, WorkQuery, WorkReceipt,
-    WorkResolution, WorkSnapshot,
+    WorkResolution, WorkSnapshot, WorkState,
 };
-use peri_acp_types::session_resources::{SessionResourceError, SessionResourceResult};
+use peri_acp_types::session_resources::{
+    ControlState, SessionResourceError, SessionResourceResult,
+};
 use turso_serverless::Value;
 
 use super::{
@@ -155,68 +157,82 @@ impl RemoteSessionData {
     }
 
     pub(super) async fn read_work(&self, query: &WorkQuery) -> SessionResourceResult<WorkSnapshot> {
-        self.read_work_snapshot(query, false)
-            .await
-            .map(|(snapshot, _)| snapshot)
-    }
-
-    async fn read_work_snapshot(
-        &self,
-        query: &WorkQuery,
-        retain_state_json: bool,
-    ) -> SessionResourceResult<(WorkSnapshot, Option<String>)> {
-        let store = self.store().await?;
-        let mut results = store.read_batch(vec![
-            StatementSpec::new(crate::sessions::control::READ_STATE,vec![Value::Text(query.session_id.clone())]),
-            StatementSpec::new(work::READ_STATE,vec![Value::Text(query.session_id.clone())]),
-            StatementSpec::new("SELECT EXISTS(SELECT 1 FROM threads WHERE id=?1),EXISTS(SELECT 1 FROM messages WHERE thread_id=?1)",vec![Value::Text(query.session_id.clone())]),
-            StatementSpec::new(work::READ_PENDING, vec![Value::Text(query.session_id.clone())]),
-        ]).await?;
-        let control = results[0]
-            .first()
-            .map(|row| text_at(row, 0).ok_or_else(|| corrupt("work control is not readable")))
-            .transpose()?;
-        let state = results[1]
-            .first()
-            .map(|row| text_at(row, 0).ok_or_else(|| corrupt("work state is not readable")))
-            .transpose()?;
-        let facts = results[2]
-            .first()
-            .ok_or_else(|| corrupt("work session facts are not readable"))?;
-        let exists =
-            int_at(facts, 0).ok_or_else(|| corrupt("work session facts are not readable"))? != 0;
-        let has_history =
-            int_at(facts, 1).ok_or_else(|| corrupt("work session facts are not readable"))? != 0;
-        if !exists && state.is_none() && control.is_none() {
-            return Err(super::session_data::not_found());
-        }
-        let mut snapshot = WorkSnapshot::from_state(
-            query,
-            crate::sessions::control::state(control)?,
-            work::state(state, has_history)?,
-        );
-        snapshot.pending_commands = results[3]
-            .iter()
-            .map(|row| {
-                work::original_command(
-                    text_at(row, 0).ok_or_else(|| corrupt("owned command is not readable"))?,
-                )
-            })
-            .collect::<SessionResourceResult<_>>()?;
+        let (control, state, _, pending) = self.read_work_state(&query.session_id, true).await?;
+        let mut snapshot = WorkSnapshot::from_state(query, control, state);
+        snapshot.pending_commands = pending;
         if !snapshot.pending_commands.is_empty() {
             snapshot.blocked = true;
             snapshot.candidates.clear();
         }
-        let state_json = if retain_state_json {
-            match results[1].pop().and_then(|row| row.into_iter().next()) {
-                Some(Value::Text(json)) => Some(json),
-                None => None,
-                _ => return Err(corrupt("work state is not readable")),
-            }
+        Ok(snapshot)
+    }
+
+    async fn read_work_state(
+        &self,
+        session_id: &str,
+        include_pending: bool,
+    ) -> SessionResourceResult<(ControlState, WorkState, Option<String>, Vec<WorkCommand>)> {
+        let mut phase = work::WorkPhase::new("remote", "snapshot_query_decode");
+        let store = self.store().await?;
+        let mut statements = vec![StatementSpec::new(
+            work::READ_SNAPSHOT,
+            vec![Value::Text(session_id.to_owned())],
+        )];
+        if include_pending {
+            statements.push(StatementSpec::new(
+                work::READ_PENDING,
+                vec![Value::Text(session_id.to_owned())],
+            ));
+        }
+        phase.query_count = statements.len();
+        let mut results = store.read_batch(statements).await?;
+        let facts = results
+            .first()
+            .and_then(|rows| rows.first())
+            .ok_or_else(|| corrupt("work session facts are not readable"))?;
+        if !matches!(
+            facts.as_slice(),
+            [
+                Value::Integer(_),
+                Value::Null | Value::Text(_),
+                Value::Null | Value::Text(_),
+                Value::Integer(_)
+            ]
+        ) {
+            return Err(corrupt("work session facts are not readable"));
+        }
+        let exists =
+            int_at(facts, 0).ok_or_else(|| corrupt("work session facts are not readable"))? != 0;
+        let has_history =
+            int_at(facts, 3).ok_or_else(|| corrupt("work session facts are not readable"))? != 0;
+        let control = text_at(facts, 1);
+        let state = text_at(facts, 2);
+        if !exists && state.is_none() && control.is_none() {
+            return Err(super::session_data::not_found());
+        }
+        phase.state_bytes = state.map_or(0, str::len);
+        let control = crate::sessions::control::state(control)?;
+        let state = work::state(state, has_history)?;
+        let pending = if include_pending {
+            results
+                .get(1)
+                .ok_or_else(|| corrupt("work pending commands are not readable"))?
+                .iter()
+                .map(|row| {
+                    work::original_command(
+                        text_at(row, 0).ok_or_else(|| corrupt("owned command is not readable"))?,
+                    )
+                })
+                .collect::<SessionResourceResult<_>>()?
         } else {
-            None
+            Vec::new()
         };
-        Ok((snapshot, state_json))
+        let state_json = match results[0].pop().and_then(|row| row.into_iter().nth(2)) {
+            Some(Value::Text(json)) => Some(json),
+            Some(Value::Null) => None,
+            _ => return Err(corrupt("work state is not readable")),
+        };
+        Ok((control, state, state_json, pending))
     }
 
     pub(super) async fn work_resolution(
@@ -254,24 +270,19 @@ impl RemoteSessionData {
                 self.acknowledge_work(command).await?;
                 return work::receipt(resolution);
             }
-            let (snapshot, state_json) = self
-                .read_work_snapshot(
-                    &WorkQuery {
-                        session_id: command.session_id.clone(),
-                        limit: 64,
-                    },
-                    true,
-                )
-                .await?;
-            let initial_json = work::pre_state_json(state_json, &snapshot.state)?;
-            let parent_command = work::terminal_parent_command(command, &snapshot.state);
-            let reduction = reduce_work(command, &snapshot.control, snapshot.state)?;
+            let (control, state, state_json, _) =
+                self.read_work_state(&command.session_id, false).await?;
+            let initial_json = work::pre_state_json(state_json, &state)?;
+            let mut phase = work::WorkPhase::new("remote", "reduce_encode");
+            phase.state_bytes = initial_json.len();
+            let parent_command = work::terminal_parent_command(command, &state);
+            let reduction = reduce_work(command, &control, state)?;
             let effects = work::mutation_effects(
                 command,
                 &digest,
                 initial_json,
                 parent_command.as_ref(),
-                &snapshot.control,
+                &control,
                 &reduction,
             )?
             .into_iter()
@@ -281,14 +292,19 @@ impl RemoteSessionData {
                     effect.params.into_iter().map(Value::Text).collect(),
                 )
             })
-            .collect();
+            .collect::<Vec<_>>();
+            drop(phase);
             let store = self.store().await?;
+            let mut phase = work::WorkPhase::new("remote", "qualified_mutation");
+            phase.query_count = effects.len();
+            phase.transaction_count = 1;
             let outcome = store
                 .apply_qualified(&QualifiedMutation {
                     identity: identity.clone(),
                     effects,
                 })
                 .await?;
+            drop(phase);
             drop(store);
             match outcome {
                 MutationOutcome::Applied { .. } => {

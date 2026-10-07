@@ -102,6 +102,24 @@ async fn sdk_observation_starts_exact_ticket_and_settles_only_matching_terminal(
     let ticket = mailbox.observe_sdk_run(&admission).await.unwrap();
     assert_eq!(ticket.id, admission.admission_id);
     assert_eq!(mailbox.observe_sdk_run(&admission).await.unwrap(), ticket);
+    assert_eq!(
+        mailbox
+            .durable
+            .as_ref()
+            .unwrap()
+            .snapshot_loads
+            .load(std::sync::atomic::Ordering::SeqCst),
+        4
+    );
+    assert_eq!(
+        mailbox
+            .durable
+            .as_ref()
+            .unwrap()
+            .control_loads
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
     assert!(
         mailbox.sdk_run_input_ids(&ticket).is_empty(),
         "publication is not a claim"
@@ -287,6 +305,108 @@ async fn sdk_attach_first_binding_starts_once_and_rejects_foreign_admission() {
     assert!(mailbox.stop_attempt(&ticket.id, mailbox.generation()));
     assert!(parent.is_cancelled());
     assert!(!mailbox.attach_sdk_attempt(&admission, CancellationToken::new()));
+}
+
+#[tokio::test]
+async fn repeated_sdk_observation_rejects_changed_store_control() {
+    use peri_acp_types::session_resources::{ControlAction, ControlCommand, ControlDecision};
+    let (fixture, mailbox, admission) = fixture().await;
+    register(&fixture, &admission).await;
+    mailbox.observe_sdk_run(&admission).await.unwrap();
+    let control = fixture
+        .resources
+        .load_session_control(&fixture.thread_id())
+        .await
+        .unwrap();
+    let receipt = fixture
+        .resources
+        .apply_session_control(&ControlCommand {
+            session_id: fixture.thread_id(),
+            command_id: "stop-observed-run".into(),
+            expected_lifecycle: control.lifecycle,
+            expected_revision: control.revision,
+            expected_control_generation: control.control_generation,
+            action: ControlAction::Stop {
+                target: admission.execution.clone(),
+            },
+        })
+        .await
+        .unwrap();
+    assert_eq!(receipt.decision, ControlDecision::Accepted);
+    assert!(matches!(
+        mailbox.observe_sdk_run(&admission).await,
+        Err(UserInputQueueError::DurableRejected(_))
+    ));
+    assert_eq!(
+        mailbox
+            .durable
+            .as_ref()
+            .unwrap()
+            .snapshot_loads
+            .load(std::sync::atomic::Ordering::SeqCst),
+        4
+    );
+    assert_eq!(
+        mailbox
+            .durable
+            .as_ref()
+            .unwrap()
+            .control_loads
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+}
+
+#[tokio::test]
+async fn sdk_observation_reuses_registered_snapshot_but_rechecks_store_control() {
+    let (fixture, mailbox, admission) = fixture().await;
+    register(&fixture, &admission).await;
+    let snapshot = fixture
+        .resources
+        .load_session_work(&WorkQuery {
+            session_id: fixture.thread_id(),
+            limit: 1,
+        })
+        .await
+        .unwrap();
+    let mut foreign = snapshot.clone();
+    foreign.session_id = "different-session".into();
+    assert!(matches!(
+        mailbox
+            .observe_sdk_run_from_snapshot(&admission, &foreign)
+            .await,
+        Err(UserInputQueueError::DurableRejected(_))
+    ));
+    let ticket = mailbox
+        .observe_sdk_run_from_snapshot(&admission, &snapshot)
+        .await
+        .unwrap();
+    assert_eq!(ticket.id, admission.admission_id);
+    assert_eq!(
+        mailbox
+            .durable
+            .as_ref()
+            .unwrap()
+            .snapshot_loads
+            .load(std::sync::atomic::Ordering::SeqCst),
+        3
+    );
+    assert_eq!(
+        mailbox
+            .durable
+            .as_ref()
+            .unwrap()
+            .control_loads
+            .load(std::sync::atomic::Ordering::SeqCst),
+        2
+    );
+    mailbox.invalidate();
+    assert_eq!(
+        mailbox
+            .observe_sdk_run_from_snapshot(&admission, &snapshot)
+            .await,
+        Err(UserInputQueueError::Closed)
+    );
 }
 
 #[tokio::test]

@@ -27,6 +27,7 @@ mod plugin;
 pub(crate) mod resource_owners;
 mod rewind;
 mod session_control;
+pub(super) mod session_io;
 pub(crate) mod session_lifecycle;
 mod storage_v2;
 mod user_input;

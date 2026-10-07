@@ -11,6 +11,127 @@ use peri_acp_types::{
 };
 use serde_json::json;
 
+const RECEIPT_TIMEOUT: Duration = AcpTuiClient::USER_INPUT_RECEIPT_TIMEOUT;
+
+async fn expect_rpc(
+    server: &MpscServerTransport,
+    expected: &str,
+) -> (RequestId, serde_json::Value) {
+    let incoming = tokio::time::timeout(Duration::from_secs(2), server.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let IncomingMessage::Request { id, method, params } = incoming else {
+        panic!("expected {expected}, got {incoming:?}");
+    };
+    assert_eq!(method, expected);
+    (id, params)
+}
+
+/// [回归测试] Refresh 等待 snapshot 回包时曾占满 consumer，使后来输入无法发送。
+#[tokio::test]
+#[serial_test::serial]
+async fn test_slow_refresh_does_not_queue_new_enqueue() {
+    let _restore = RestoreProjection {
+        steers: STEERS.state().read().clone(),
+        session: atoms::ACTIVE_SESSION_ID.state().read().clone(),
+        epoch: atoms::BRIDGE_RESET_COUNTER.get(),
+    };
+    atoms::ACTIVE_SESSION_ID.set("s".into());
+    atoms::BRIDGE_RESET_COUNTER.set(7);
+    let mut state = SteerState::default();
+    state.reset_session("s", 7);
+    state.accept_snapshot(
+        UserInputQueueSnapshot {
+            session_id: "s".into(),
+            generation: "g".into(),
+            revision: 1,
+            active_request_id: None,
+            items: vec![],
+        },
+        7,
+        true,
+    );
+    let enqueue = first_input_command(7, "command", "input", "synthetic input");
+    state.begin(enqueue.clone());
+    STEERS.set(state);
+    let (transport, server) = mpsc_transport_pair();
+    let (client, _, _) = AcpTuiClient::new(transport);
+    client.force_stable_for_test("s", false);
+    let binding_client = client.clone();
+    let binding = tokio::spawn(async move { binding_client.user_input_snapshot("s").await });
+    let (binding_id, _) = expect_rpc(&server, "session/input/snapshot").await;
+    server
+        .send_response(
+            binding_id,
+            Ok(json!({
+                "sessionId":"s","generation":"g","revision":1,"items":[]
+            })),
+        )
+        .await
+        .unwrap();
+    binding.await.unwrap().unwrap();
+    let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+    let shutdown = CancellationToken::new();
+    let consumer = spawn_steer_consumer(client.clone(), receiver, "/tmp".into(), shutdown.clone());
+    sender
+        .send(SteerCommand {
+            session_id: "s".into(),
+            epoch: 7,
+            command_id: "refresh".into(),
+            generation: None,
+            kind: SteerCommandKind::Refresh,
+        })
+        .unwrap();
+    let (snapshot_id, _) = expect_rpc(&server, "session/input/snapshot").await;
+    sender.send(enqueue).unwrap();
+    let (enqueue_id, params) = expect_rpc(&server, "session/input/enqueue").await;
+    assert_eq!(params["commandId"], "command");
+    assert_eq!(params["inputId"], "input");
+    assert_eq!(params["generation"], "g");
+    server
+        .send_response(
+            enqueue_id,
+            Ok(json!({
+                "snapshot":{"sessionId":"s","generation":"g","revision":2,"items":[{
+                    "inputId":"input","originalDraft":"synthetic input",
+                    "content":MessageContent::text("synthetic input"),"state":"queued"
+                }]},"results":[]
+            })),
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while STEERS
+            .state()
+            .read()
+            .pending_command("s", "command")
+            .is_some()
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        STEERS.state().read().snapshot("s", 7).unwrap().revision,
+        2,
+        "刷新未回包时输入必须已经受理"
+    );
+    server
+        .send_response(
+            snapshot_id,
+            Ok(json!({
+                "sessionId":"s","generation":"g","revision":1,"items":[]
+            })),
+        )
+        .await
+        .unwrap();
+    shutdown.cancel();
+    consumer.await.unwrap();
+    client.close();
+}
+
 struct RestoreProjection {
     steers: SteerState,
     session: String,

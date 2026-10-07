@@ -524,6 +524,11 @@ fn test_steer_idle_submission_skips_queue_until_delivery() {
     let command = make_command(SteerCommandKind::Enqueue(make_input("b")));
     state.begin(command.clone());
     assert!(state.rows("s").is_empty(), "空闲提交不应闪过待发送区");
+    assert!(state.direct_submitting("s", 1), "提交立即提供明确反馈");
+    assert!(
+        !state.direct_submitting("s", 2),
+        "旧 epoch 不能投影提交反馈"
+    );
     let input = make_input("b");
     snapshot.revision = 3;
     snapshot.active_request_id = Some("run".into());
@@ -544,7 +549,9 @@ fn test_steer_idle_submission_skips_queue_until_delivery() {
         },
     );
     assert!(state.rows("s").is_empty(), "直接投递回执也不应产生队列行");
+    assert!(state.direct_submitting("s", 1), "受理不等于正式送达");
     assert!(state.claim_delivery("s", "b"), "确认后仍须生成正式聊天气泡");
+    assert!(!state.direct_submitting("s", 1), "送达后立即撤掉反馈");
     assert!(!state.claim_delivery("s", "b"), "重复确认不得重复生成气泡");
 }
 

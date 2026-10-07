@@ -70,7 +70,7 @@ use self::image_action::{
     OpenImageError, build_open_command, build_open_command_with, try_open_image,
 };
 use self::no_color::strip_line_colors;
-use self::vm_cache::{VmCacheSlot, render_timing_enabled, total_visual_rows, trace_phase};
+use self::vm_cache::{VmCacheSlot, read_render_snapshot, total_visual_rows, trace_phase};
 #[cfg(test)]
 use footer::KeepGoingLayout;
 use footer::build_footer_lines;
@@ -87,6 +87,7 @@ use selection::{WrappedLineInfo, build_wrap_map, highlight_line_in_selection};
 
 #[component]
 pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+    let frame_t0 = peri_time::monotonic_now();
     tracing::trace!(target: "frozen_diag", "MessageArea: update/body called");
     let view_models = hooks.use_atom(&VIEW_MODELS);
     let acp_state = hooks.use_atom(&crate::kit::atoms::ACP_STATE);
@@ -105,7 +106,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     // 绝对路径显示/清除）。读取仍在渲染 body 视口循环（读副本，G3 视口级）。
     hooks.use_atom(&IMAGE_HOVER);
 
-    let snapshot = view_models.read();
+    let (snapshot, publication) = read_render_snapshot();
     let todo_items = todo_atom.read().clone();
     let is_loading = acp_state.read().is_loading;
 
@@ -131,13 +132,6 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         let band = hooks.use_hook(|| CenterBandHook::new(grid));
         band.set_grid(grid);
     }
-
-    // [PERI_RENDER_TIMING] 帧计时起点
-    let frame_t0 = if render_timing_enabled() {
-        Some(peri_time::monotonic_now())
-    } else {
-        None
-    };
 
     let vm_generation = snapshot.generation;
 
@@ -232,17 +226,31 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         .map(|duration| duration.as_millis() as u64 / 100)
         .unwrap_or(0);
     let items_len = snapshot.items.len();
-    let publication = crate::kit::atoms::TRANSCRIPT_PUBLICATION.get();
     let context = crate::kit::entry_render_cache::EntryRenderContext {
         theme: Arc::clone(&theme.read()),
         language: LANG_VERSION.get(),
         surface: crate::kit::entry_render_cache::EntrySurface::Message,
         occurrence: BRIDGE_RESET_COUNTER.get(),
     };
-    let slot_index = transcript.write_no_update().prepare(
+    trace_phase(
+        "preparation",
+        frame_t0,
+        Some("body-before-prepare-including-vm-read"),
+    );
+    let prepare_wait = peri_time::monotonic_now();
+    let mut transcript_guard = transcript.write_no_update();
+    let mut caches_guard = vm_caches.write_no_update();
+    let prepare_acquired = peri_time::monotonic_now();
+    vm_cache::trace_elapsed(
+        "prepare-lock-wait",
+        prepare_acquired.duration_since(prepare_wait),
+        None,
+    );
+    let prepare_start = peri_time::monotonic_now();
+    let slot_index = transcript_guard.prepare(
         &snapshot,
         &publication,
-        &mut vm_caches.write_no_update(),
+        &mut caches_guard,
         grid,
         vis_width,
         context,
@@ -251,10 +259,16 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         scroll_state.read().offset(),
         vis_height as usize,
     );
-    *anchor_slot_state.write_no_update() = transcript.read().anchor();
-    drop(snapshot);
+    let prepare_end = peri_time::monotonic_now();
+    *anchor_slot_state.write_no_update() = transcript_guard.anchor();
+    drop(caches_guard);
+    drop(transcript_guard);
     let t_rebuild = peri_time::monotonic_now();
-    trace_phase("transcript", frame_t0.unwrap_or(t_rebuild), None);
+    vm_cache::trace_elapsed(
+        "prepare",
+        prepare_end.duration_since(prepare_start),
+        Some("synchronous-transcript-derivation"),
+    );
     let total_logical_lines = slot_index.total_logical();
     let core_total_visual_rows = slot_index.total_visual();
     let num_slots = slot_index.slot_count();
@@ -509,12 +523,26 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         );
     }
 
+    let warm_start = peri_time::monotonic_now();
     let slot_index = transcript.write_no_update().warm_visible(
-        &view_models.read(),
+        &snapshot,
         &mut vm_caches.write_no_update(),
         scroll_y,
         vis_height as usize,
     );
+    trace_phase(
+        "viewport-warm",
+        warm_start,
+        Some("includes-local-cache-locks"),
+    );
+    drop(snapshot);
+    if vm_cache::render_timing_enabled() {
+        let transcript_guard = transcript.read();
+        tracing::info!(target: "perf.render", generation = vm_generation,
+            scanned = transcript_guard.scanned_slots, updated = transcript_guard.updated_slots,
+            evicted = transcript_guard.evictions, retained_bytes = transcript_guard.retained_bytes(),
+            invalidation = transcript_guard.invalidation, "transcript-work");
+    }
 
     hits::update_copy_button_hits(
         copy_buttons,
@@ -747,7 +775,6 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         }
     }
     // [PERI_RENDER_TIMING] 视口裁剪耗时
-    let t_viewport = peri_time::monotonic_now();
     trace_phase(
         "viewport",
         t_concat,
@@ -772,11 +799,12 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     // View 的 area.width（= band 宽），内部 wrap 宽度 = band - 1 = vis_width，与
     // `total_visual_rows` / `wrap_map_cache` / `line_count(vis_width)` 的估算一致；
     // 带内最右 1 列为正文留白（滚动条另在窗口最右列，见 ScrollbarHook）。
-    // [PERI_RENDER_TIMING] 帧总耗时
     trace_phase(
-        "frame-total",
-        frame_t0.unwrap_or(t_viewport),
-        Some(&format!("gen={vm_generation}")),
+        "message-body-total",
+        frame_t0,
+        Some(&format!(
+            "gen={vm_generation}, excludes-widget-draw-and-terminal-flush"
+        )),
     );
     element!(
         View(

@@ -104,6 +104,7 @@ struct MailboxState {
     /// 它们携带"有明确恢复语义的发送"授权：执行条件成立后可建立新任务并自动 Resume；
     /// 暂停之前入队的旧待办不在其中，不会被自动带动。
     resume_intents: HashSet<String>,
+    delivered_notifications: HashSet<(String, Option<String>)>,
 }
 
 /// 由宿主持有跨 turn 实例，Agent 独占队列状态、取消原因和执行准入判定。
@@ -148,6 +149,7 @@ impl UserInputMailbox {
                 suspended: false,
                 valid: true,
                 resume_intents: HashSet::new(),
+                delivered_notifications: HashSet::new(),
             }),
             emit,
             control_turn: TurnId::new(),
@@ -642,10 +644,49 @@ impl UserInputMailbox {
 
     /// 返回本次首次接纳的注册输入 ID，调用方在本轮 render FIFO 发聊天事件。
     pub(crate) fn mark_delivered(&self, ids: &[MessageId]) -> Vec<String> {
+        self.mark_delivery_notifications(ids, None)
+    }
+
+    pub(crate) fn mark_committed_deliveries(
+        &self,
+        deliveries: &[(MessageId, String)],
+    ) -> Vec<String> {
+        let ids: Vec<_> = deliveries.iter().map(|(id, _)| *id).collect();
+        self.mark_delivery_notifications(&ids, Some(deliveries))
+    }
+
+    fn mark_delivery_notifications(
+        &self,
+        ids: &[MessageId],
+        publications: Option<&[(MessageId, String)]>,
+    ) -> Vec<String> {
         let mut state = self.state.lock();
+        if !state.valid {
+            return Vec::new();
+        }
         let mut delivered = Vec::new();
-        for record in &mut state.records {
-            if record.state == UserInputState::Claimed && matches_id(record, ids) {
+        let MailboxState {
+            records,
+            delivered_notifications,
+            ..
+        } = &mut *state;
+        for record in records {
+            let publication_matches = publications.is_none_or(|publications| {
+                publications.iter().any(|(id, publication_id)| {
+                    matches_id(record, &[*id])
+                        && record.publication_id.as_ref() == Some(publication_id)
+                })
+            });
+            if matches!(
+                record.state,
+                UserInputState::Claimed | UserInputState::Delivered
+            ) && matches_id(record, ids)
+                && publication_matches
+                && delivered_notifications.insert((
+                    record.input.input_id.clone(),
+                    record.publication_generation.clone(),
+                ))
+            {
                 record.state = UserInputState::Delivered;
                 delivered.push(record.input.input_id.clone());
                 discard_payload(record);

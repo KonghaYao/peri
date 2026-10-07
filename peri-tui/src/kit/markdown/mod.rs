@@ -58,8 +58,7 @@ pub fn parse_markdown(
     // [图片前置扫描] sanitize 之后、rk_parse 之前：`![alt](url)` → 占位 token
     // （S1 §4 管线硬性约束）。Options 与 rk_parse 逐位一致（scan::md_options，
     // S3 §3.5 漂移风险）；side table 供 T3 convert 查表（token → ImageInfo）。
-    let (placeholder, image_infos) =
-        scan::replace_images(&sanitized, &scan::scan_images(&sanitized));
+    let (placeholder, image_infos) = preprocess_images(&sanitized);
     let parsed = rk_parse(&placeholder);
     #[cfg(test)]
     {
@@ -104,8 +103,7 @@ fn parse_markdown_piece(
         return (Vec::new(), Vec::new());
     }
     let sanitized = ensure_closed_code_fences(input);
-    let (placeholder, image_infos) =
-        scan::replace_images(&sanitized, &scan::scan_images(&sanitized));
+    let (placeholder, image_infos) = preprocess_images(&sanitized);
     let parsed = rk_parse(&placeholder);
     let theme = MarkdownTheme::from_palette(&palette);
     let lookup = convert::image_lookup(&image_infos);
@@ -118,6 +116,25 @@ fn parse_markdown_piece(
         &lookup,
     );
     (segments, parsed.blocks)
+}
+
+#[cfg(test)]
+thread_local! {
+    static IMAGE_SCANNED_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn preprocess_images(input: &str) -> (Cow<'_, str>, Vec<scan::ImageInfo>) {
+    if !input.contains("![") {
+        return (Cow::Borrowed(input), Vec::new());
+    }
+    #[cfg(test)]
+    IMAGE_SCANNED_BYTES.with(|count| count.set(count.get() + input.len()));
+    let images = scan::scan_images(input);
+    if images.is_empty() {
+        return (Cow::Borrowed(input), Vec::new());
+    }
+    let (placeholder, images) = scan::replace_images(input, &images);
+    (Cow::Owned(placeholder), images)
 }
 
 fn convert_parsed_piece(
@@ -545,3 +562,7 @@ mod boundary_tests;
 #[cfg(test)]
 #[path = "memory_test.rs"]
 mod memory_tests;
+
+#[cfg(test)]
+#[path = "workload_test.rs"]
+mod workload_tests;

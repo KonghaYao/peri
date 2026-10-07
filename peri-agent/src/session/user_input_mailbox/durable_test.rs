@@ -4,6 +4,9 @@ use peri_acp_types::identity::AttemptId;
 use peri_acp_types::session::{MessageQueue, MessageRequirement};
 use peri_acp_types::session_resources::ControlAttempt;
 
+#[path = "delivery_notification_test.rs"]
+mod delivery_notification_test;
+
 fn mailbox(
     fixture: &TestSession,
     store: Arc<dyn SessionResources>,

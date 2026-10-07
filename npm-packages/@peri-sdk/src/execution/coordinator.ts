@@ -27,7 +27,7 @@ class RegistryUnavailableError extends Error {
 }
 
 export class ExecutionCoordinator {
-    private readonly active = new Map<string, Promise<AdmissionResult>>();
+    private readonly active = new Map<string, { dirty: boolean; operation: Promise<AdmissionResult> }>();
     private readonly unresolved = new Map<string, ExecutionMutation>();
     private readonly instance: InstanceDescriptor;
     private sealed = false;
@@ -95,17 +95,32 @@ export class ExecutionCoordinator {
     ensureProcessing(request: { sessionId: string; source: ActivationSource }): Promise<AdmissionResult> {
         if (this.sealed) return Promise.resolve({ status: "blocked", reason: "dispatcherGenerationSealed" });
         const pending = this.active.get(request.sessionId);
-        if (pending) return pending;
-        const operation = Promise.resolve().then(async () => {
-            for (let drained = 0; drained < 128; drained++) {
-                const result = await this.ensureOnce(request.sessionId);
-                if (result.status !== "settled") return result;
-            }
-            return { status: "blocked" as const, reason: "activationDrainLimit" };
-        }).catch((error) => this.failure(error))
-            .finally(() => { this.active.delete(request.sessionId); });
-        this.active.set(request.sessionId, operation);
-        return operation;
+        if (pending) {
+            pending.dirty = true;
+            return pending.operation;
+        }
+        const activation: { dirty: boolean; operation: Promise<AdmissionResult> } = {
+            dirty: false,
+            operation: Promise.resolve().then(async (): Promise<AdmissionResult> => {
+                try {
+                    for (let drained = 0; drained < 128; drained++) {
+                        activation.dirty = false;
+                        const result = await this.ensureOnce(request.sessionId);
+                        const refreshable = result.status === "idle" || (result.status === "blocked" &&
+                            (result.reason.startsWith("domain:") || result.reason === "domainWorkBlocked" ||
+                                result.reason === "entryQualificationChanged"));
+                        if (result.status !== "settled" && !(activation.dirty && refreshable)) return result;
+                    }
+                    return { status: "blocked" as const, reason: "activationDrainLimit" };
+                } catch (error) {
+                    return this.failure(error);
+                } finally {
+                    this.active.delete(request.sessionId);
+                }
+            }),
+        };
+        this.active.set(request.sessionId, activation);
+        return activation.operation;
     }
 
     private failure(error: unknown): AdmissionResult {

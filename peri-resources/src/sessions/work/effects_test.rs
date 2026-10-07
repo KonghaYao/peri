@@ -206,3 +206,149 @@ async fn concurrent_change_rejects_stale_raw_guard_and_rolls_back_effects() {
         assert_eq!(count, 0);
     }
 }
+
+#[tokio::test]
+async fn pending_sql_preserves_subtree_order_and_uses_table_scan() {
+    let pool = database(&noncanonical_state()).await;
+    sqlx::query("CREATE TABLE threads(id TEXT PRIMARY KEY, parent_thread_id TEXT)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO threads VALUES ('root',NULL),('child','root'),('grandchild','child'),('other',NULL)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    for (mutation, owner, reconciled) in [
+        ("z-root", "root", 0),
+        ("a-child", "child", 0),
+        ("m-grandchild", "grandchild", 0),
+        ("b-done", "root", 1),
+        ("unrelated", "other", 0),
+    ] {
+        sqlx::query("INSERT INTO session_work_commands VALUES (?1,?2,'digest',?1,?3)")
+            .bind(mutation)
+            .bind(owner)
+            .bind(reconciled)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    for (owner, expected) in [
+        ("root", vec!["a-child", "m-grandchild", "z-root"]),
+        ("child", vec!["a-child", "m-grandchild"]),
+        ("grandchild", vec!["m-grandchild"]),
+        ("missing", vec![]),
+    ] {
+        let pending: Vec<String> = sqlx::query_scalar(READ_PENDING)
+            .bind(owner)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(pending, expected);
+        let has_pending: bool = sqlx::query_scalar(HAS_PENDING)
+            .bind(owner)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(has_pending, !expected.is_empty());
+    }
+    let plan: Vec<(i64, i64, i64, String)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "EXPLAIN QUERY PLAN {READ_PENDING}"
+    )))
+    .bind("root")
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert!(plan.iter().any(|row| row.3 == "SCAN session_work_commands"));
+    assert!(plan.iter().any(|row| row.3.contains("TEMP B-TREE")));
+    assert!(!plan
+        .iter()
+        .any(|row| row.3.contains("sqlite_autoindex_session_work_commands")));
+}
+
+#[tokio::test]
+async fn command_guard_preserves_same_session_pending_and_identity_barriers() {
+    let pool = database(&noncanonical_state()).await;
+    sqlx::query(INSERT_COMMAND)
+        .bind("current")
+        .bind("root")
+        .bind("digest")
+        .bind("command")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(INSERT_COMMAND)
+        .bind("other")
+        .bind("child")
+        .bind("digest")
+        .bind("command")
+        .execute(&pool)
+        .await
+        .unwrap();
+    for (digest, allowed) in [("digest", true), ("conflicting", false)] {
+        let result = sqlx::query(GUARD_COMMAND)
+            .bind("current")
+            .bind("root")
+            .bind(digest)
+            .bind("command")
+            .execute(&pool)
+            .await;
+        assert_eq!(result.is_ok(), allowed);
+    }
+    sqlx::query("UPDATE session_work_commands SET session_id='root' WHERE mutation_id='other'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    for (reconciled, allowed) in [(0, false), (1, true)] {
+        sqlx::query("UPDATE session_work_commands SET reconciled=?1 WHERE mutation_id='other'")
+            .bind(reconciled)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let result = sqlx::query(GUARD_COMMAND)
+            .bind("current")
+            .bind("root")
+            .bind("digest")
+            .bind("command")
+            .execute(&pool)
+            .await;
+        assert_eq!(result.is_ok(), allowed);
+    }
+}
+
+#[tokio::test]
+async fn snapshot_sql_preserves_missing_legacy_and_raw_json_facts() {
+    let raw = noncanonical_state();
+    let pool = database(&raw).await;
+    for statement in [
+        "CREATE TABLE threads(id TEXT PRIMARY KEY)",
+        "CREATE TABLE messages(thread_id TEXT)",
+        "INSERT INTO threads VALUES ('empty'),('legacy')",
+        "INSERT INTO messages VALUES ('legacy'),('raw-state-session')",
+    ] {
+        sqlx::query(statement).execute(&pool).await.unwrap();
+    }
+    for (session, expected_exists, expected_history) in [
+        ("empty", true, false),
+        ("legacy", true, true),
+        ("missing", false, false),
+        ("raw-state-session", false, false),
+    ] {
+        let (exists, control, state_json, history): (bool, Option<String>, Option<String>, bool) =
+            sqlx::query_as(READ_SNAPSHOT)
+                .bind(session)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(exists, expected_exists);
+        assert_eq!(history, expected_history);
+        assert!(control.is_none());
+        if session == "raw-state-session" {
+            assert_eq!(state_json.as_deref(), Some(raw.as_str()));
+        } else {
+            assert!(state_json.is_none());
+        }
+        let current = state(state_json.as_deref(), history).unwrap();
+        assert_eq!(!current.legacy_unknown.is_empty(), session == "legacy");
+    }
+}

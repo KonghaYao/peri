@@ -29,6 +29,17 @@ pub async fn publish_session_inbox(
     recipient_lifecycle: u64,
     inbox: &crate::session::MessageQueue,
 ) -> anyhow::Result<Vec<WorkReceipt>> {
+    publish_session_inbox_with_snapshot(resources, session_id, recipient_lifecycle, inbox, None)
+        .await
+}
+
+async fn publish_session_inbox_with_snapshot(
+    resources: Arc<dyn SessionResources>,
+    session_id: &str,
+    recipient_lifecycle: u64,
+    inbox: &crate::session::MessageQueue,
+    snapshot: Option<&WorkSnapshot>,
+) -> anyhow::Result<Vec<WorkReceipt>> {
     if session_id.is_empty() || recipient_lifecycle == 0 {
         return Err(anyhow::anyhow!(
             "inbox publication requires frozen recipient identity"
@@ -63,13 +74,22 @@ pub async fn publish_session_inbox(
             },
         };
         let content = WorkPayload::from_payload(&payload)?;
-        let prior = ledger
-            .resources()
-            .load_work_delivery(&WorkDeliveryQuery {
-                session_id: session_id.into(),
-                delivery_id: identity.clone(),
-            })
-            .await?;
+        let known = snapshot
+            .filter(|snapshot| snapshot.session_id == session_id)
+            .and_then(|snapshot| snapshot.state.deliveries.get(&identity));
+        let loaded;
+        let prior = if let Some(known) = known {
+            Some(known)
+        } else {
+            loaded = ledger
+                .resources()
+                .load_work_delivery(&WorkDeliveryQuery {
+                    session_id: session_id.into(),
+                    delivery_id: identity.clone(),
+                })
+                .await?;
+            loaded.as_ref()
+        };
         if let Some(prior) = prior {
             if prior.recipient_lifecycle != recipient_lifecycle
                 || prior.publication.event.content != content
@@ -123,13 +143,6 @@ pub(crate) async fn receive(ctx: &StageContext) -> AgentResult<Option<ReceiveOut
         return Ok(None);
     };
     super::execution_control::validate(ctx).await?;
-    publish_session_inbox(
-        session.ledger.resources(),
-        &session.admission.session_id,
-        session.admission.lifecycle,
-        &ctx.session.queue,
-    )
-    .await?;
     let result = ctx.work.receive_batch(ctx, &session).await;
     result.map(Some).map_err(Into::into)
 }
@@ -140,12 +153,33 @@ impl WorkBoundary {
         ctx: &StageContext,
         session: &super::work_pipeline::WorkSession,
     ) -> anyhow::Result<ReceiveOutput> {
-        let mut state = self.state.lock().await;
-        let mut snapshot = session.snapshot().await?;
-        let work_id = state
+        let _receive_guard = self.receive_gate.lock().await;
+        let work_id = self
+            .state
+            .lock()
+            .await
             .work_id
             .clone()
             .ok_or_else(|| anyhow::anyhow!("SDK work identity is missing"))?;
+        let mut snapshot = session.snapshot().await?;
+        let publication_started = std::time::Instant::now();
+        let receipts = publish_session_inbox_with_snapshot(
+            session.ledger.resources(),
+            &session.admission.session_id,
+            session.admission.lifecycle,
+            &ctx.session.queue,
+            Some(&snapshot),
+        )
+        .await?;
+        tracing::debug!(
+            work_id,
+            duration_us = publication_started.elapsed().as_micros() as u64,
+            publication_count = receipts.len(),
+            "Receive inbox publication checked"
+        );
+        if !receipts.is_empty() {
+            snapshot = session.snapshot().await?;
+        }
         if !snapshot.state.works.contains_key(&work_id) {
             let candidate = snapshot
                 .candidates
@@ -207,6 +241,7 @@ impl WorkBoundary {
             .ok_or_else(|| anyhow::anyhow!("claimed exact batch is missing"))?;
         let mut input_message_ids = Vec::new();
         let mut delivered_inputs = Vec::new();
+        let mut committed_deliveries = Vec::new();
         for delivery_id in &recovered.delivery_ids {
             if !batch.projection_versions.contains_key(delivery_id) {
                 continue;
@@ -217,6 +252,7 @@ impl WorkBoundary {
                 if recovered.processing_delivery_ids.contains(delivery_id) {
                     input_message_ids.push(*id);
                     delivered_inputs.push((*id, content.clone()));
+                    committed_deliveries.push((*id, delivery_id.clone()));
                 }
             }
             let payload = persisted_projection(&delivery.projection)?;
@@ -227,7 +263,7 @@ impl WorkBoundary {
         }
         if let Some(mailbox) = &ctx.session.user_input_mailbox {
             mailbox.mark_claimed(&input_message_ids);
-            let delivered = mailbox.mark_delivered(&input_message_ids);
+            let delivered = mailbox.mark_committed_deliveries(&committed_deliveries);
             for (id, content) in delivered_inputs {
                 let input_id = id.as_uuid().to_string();
                 if delivered.contains(&input_id) {
@@ -243,7 +279,6 @@ impl WorkBoundary {
                 }
             }
         }
-        state.work_id = Some(work_id);
         Ok(ReceiveOutput {
             consumed_count: batch.delivery_ids.len(),
             wake_up_count: usize::from(live),

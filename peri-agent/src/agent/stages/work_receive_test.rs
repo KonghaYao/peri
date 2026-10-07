@@ -362,3 +362,54 @@ async fn empty_queue_does_not_touch_store() {
     assert_eq!(resources.snapshots.load(Ordering::SeqCst), 0);
     assert_eq!(resources.resolutions.load(Ordering::SeqCst), 0);
 }
+
+#[tokio::test]
+async fn confirmed_snapshot_hint_skips_reads_but_still_validates_payload() {
+    let bound = TestSession::open().await;
+    let resources = Arc::new(PublicationResources::new(bound.resources()));
+    let queue = crate::session::MessageQueue::new();
+    let mut hint = QueuedMessage::prompt(
+        MessageSource::UserInput,
+        BaseMessage::human("snapshot hint"),
+    );
+    hint.delivery_id = Some(MessageId::new());
+    queue.push(hint.clone());
+    publish_session_inbox(resources.clone(), &bound.thread_id, 1, &queue)
+        .await
+        .unwrap();
+    let snapshot = bound
+        .resources
+        .load_session_work(&WorkQuery {
+            session_id: bound.thread_id.clone(),
+            limit: 1,
+        })
+        .await
+        .unwrap();
+    let reads = resources.queries.lock().unwrap().len();
+    queue.push(hint.clone());
+    assert!(publish_session_inbox_with_snapshot(
+        resources.clone(),
+        &bound.thread_id,
+        1,
+        &queue,
+        Some(&snapshot)
+    )
+    .await
+    .unwrap()
+    .is_empty());
+    assert_eq!(resources.queries.lock().unwrap().len(), reads);
+    hint.payload = QueuedPayload::Message(BaseMessage::human("conflicting snapshot hint"));
+    queue.push(hint.clone());
+    assert!(publish_session_inbox_with_snapshot(
+        resources.clone(),
+        &bound.thread_id,
+        1,
+        &queue,
+        Some(&snapshot)
+    )
+    .await
+    .is_err());
+    assert_eq!(queue.drain_batch(64)[0].delivery_id, hint.delivery_id);
+    assert_eq!(resources.queries.lock().unwrap().len(), reads);
+    assert_eq!(resources.commands.lock().unwrap().len(), 1);
+}

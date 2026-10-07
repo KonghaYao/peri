@@ -118,6 +118,8 @@ impl SqliteSessionData {
             .map_err(|error| map_sqlx(&error))?;
         let (control, state, _) = read_snapshot(&mut tx, &query.session_id).await?;
         let mut snapshot = WorkSnapshot::from_state(query, control, state);
+        let mut phase = work::WorkPhase::new("sqlite", "pending_query_decode");
+        phase.query_count = 1;
         let rows: Vec<(String,)> = sqlx::query_as(work::READ_PENDING)
             .bind(&query.session_id)
             .fetch_all(&mut *tx)
@@ -140,19 +142,20 @@ impl SqliteSessionData {
     ) -> SessionResourceResult<WorkReceipt> {
         self.writable()?;
         let digest = command.digest()?;
-        let mut tx = self
-            .database
-            .pool
-            .begin_with("BEGIN IMMEDIATE")
-            .await
-            .map_err(|error| map_sqlx(&error))?;
+        let command_effects = work::command_effects_with_digest(command, &digest)?;
+        let mut journal_phase = work::WorkPhase::new("sqlite", "journal_begin");
+        let mut tx = self.begin_work_transaction().await?;
+        journal_phase.transaction_count = 1;
+        journal_phase.query_count += 1;
         if let Some(resolution) = saved_resolution(&mut tx, command, &digest).await? {
+            journal_phase.query_count += 1;
             acknowledge(&mut tx, command, &digest).await?;
             tx.commit()
                 .await
                 .map_err(|_| commit_failure(Some(command.session_id.clone())))?;
             return work::receipt(resolution);
         }
+        journal_phase.query_count += 1;
         if let Some((json,)) = sqlx::query_as::<_, (String,)>(work::READ_COMMAND)
             .bind(&command.mutation_id)
             .fetch_optional(&mut *tx)
@@ -166,30 +169,34 @@ impl SqliteSessionData {
             }
             return Err(commit_failure(Some(command.session_id.clone())));
         }
-        for effect in work::command_effects_with_digest(command, &digest)? {
+        for effect in command_effects {
+            journal_phase.query_count += 1;
             execute_effect(&mut tx, effect).await?;
         }
         tx.commit()
             .await
             .map_err(|_| commit_failure(Some(command.session_id.clone())))?;
-        let mut tx = self
-            .database
-            .pool
-            .begin_with("BEGIN IMMEDIATE")
-            .await
-            .map_err(|error| map_sqlx(&error))?;
+        drop(journal_phase);
+        let mut tx = self.begin_work_transaction().await?;
         let (control, state, state_json) = read_snapshot(&mut tx, &command.session_id).await?;
         let initial_json = work::pre_state_json(state_json, &state)?;
         let parent_command = work::terminal_parent_command(command, &state);
+        let mut reduction_phase = work::WorkPhase::new("sqlite", "reduce_encode");
+        reduction_phase.state_bytes = initial_json.len();
         let reduction = reduce_work(command, &control, state)?;
-        for effect in work::mutation_effects(
+        let effects = work::mutation_effects(
             command,
             &digest,
             initial_json,
             parent_command.as_ref(),
             &control,
             &reduction,
-        )? {
+        )?;
+        drop(reduction_phase);
+        let mut mutation_phase = work::WorkPhase::new("sqlite", "mutation_sql_commit");
+        mutation_phase.transaction_count = 1;
+        for effect in effects {
+            mutation_phase.query_count += 1;
             let mut query = sqlx::query(effect.sql);
             for value in effect.params {
                 query = query.bind(value);
@@ -202,17 +209,28 @@ impl SqliteSessionData {
         tx.commit()
             .await
             .map_err(|_| commit_failure(Some(command.session_id.clone())))?;
-        let mut tx = self
-            .database
-            .pool
-            .begin_with("BEGIN IMMEDIATE")
-            .await
-            .map_err(|error| map_sqlx(&error))?;
+        drop(mutation_phase);
+        let mut acknowledge_phase = work::WorkPhase::new("sqlite", "journal_acknowledge");
+        let mut tx = self.begin_work_transaction().await?;
+        acknowledge_phase.transaction_count = 1;
+        acknowledge_phase.query_count = 1;
         acknowledge(&mut tx, command, &digest).await?;
         tx.commit()
             .await
             .map_err(|_| commit_failure(Some(command.session_id.clone())))?;
         Ok(reduction.receipt)
+    }
+
+    async fn begin_work_transaction(
+        &self,
+    ) -> SessionResourceResult<sqlx::Transaction<'_, sqlx::Sqlite>> {
+        let mut phase = work::WorkPhase::new("sqlite", "transaction_begin_wait");
+        phase.transaction_count = 1;
+        self.database
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(|error| map_sqlx(&error))
     }
 
     pub(super) async fn resolve_work(
@@ -307,31 +325,21 @@ async fn read_snapshot(
     peri_acp_types::session_resources::work::WorkState,
     Option<String>,
 )> {
-    let control: Option<(String,)> = sqlx::query_as(crate::sessions::control::READ_STATE)
-        .bind(id)
-        .fetch_optional(&mut *connection)
-        .await
-        .map_err(|error| map_sqlx(&error))?;
-    let state: Option<(String,)> = sqlx::query_as(work::READ_STATE)
-        .bind(id)
-        .fetch_optional(&mut *connection)
-        .await
-        .map_err(|error| map_sqlx(&error))?;
-    let exists = thread_exists_on(connection, &id.to_owned())
-        .await
-        .map_err(read_failure)?;
-    if !exists && control.is_none() && state.is_none() {
-        return Err(not_found());
-    }
-    let has_history: bool =
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM messages WHERE thread_id=?1)")
+    let mut phase = work::WorkPhase::new("sqlite", "snapshot_query_decode");
+    phase.query_count = 1;
+    let (exists, control, state, has_history): (bool, Option<String>, Option<String>, bool) =
+        sqlx::query_as(work::READ_SNAPSHOT)
             .bind(id)
             .fetch_one(&mut *connection)
             .await
             .map_err(|error| map_sqlx(&error))?;
+    if !exists && control.is_none() && state.is_none() {
+        return Err(not_found());
+    }
+    phase.state_bytes = state.as_ref().map_or(0, String::len);
     Ok((
-        crate::sessions::control::state(control.as_ref().map(|row| row.0.as_str()))?,
-        work::state(state.as_ref().map(|row| row.0.as_str()), has_history)?,
-        state.map(|row| row.0),
+        crate::sessions::control::state(control.as_deref())?,
+        work::state(state.as_deref(), has_history)?,
+        state,
     ))
 }

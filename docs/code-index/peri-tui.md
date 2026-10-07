@@ -1,5 +1,11 @@
 # peri-tui 代码索引
 
+输入延迟入口：`kit/steer_consumer.rs` 合并后台 Refresh，用户 Enqueue 不等待慢刷新；`acp_client/client/steer.rs` 在身份绑定/请求登记边界持 gate，普通回执等待在锁外，snapshot 回包用 typed identity 重验。`client/pump.rs` 分离接收与有序投影，work 通知及执行准入不被投影 gate 阻挡；回归见 `client/latency_test.rs`。
+
+输入反馈仍遵循 [待发送队列设计](../design/user-input-queue.md)：`kit/steer_state.rs::direct_submitting` 驱动 composer “正在提交…”，不是 Delivered 气泡。消息区用 `message_area/vm_cache.rs::read_render_snapshot` 短锁复制一致 VM/publication 后锁外派生；Transcript 跳代只重建实际变化的内容键，冷历史、布局和复制回归见 `transcript_test.rs`。
+
+Markdown 高亮预算在 `kit/markdown/code_block.rs`，超限保留原文，仅不做语法着色；`markdown/workload_test.rs` 与 `code_block_test.rs` 覆盖复杂结构及预算边界。`perf.render` 的 `message-body-total` 只覆盖消息组件准备，不能当作终端 draw/flush 或 Enter 端到端计时。
+
 显式停止入口 `src/acp_client/client/requests.rs::cancel` 先读取持久控制状态，有当前 attempt 时提交精确 Stop，无 attempt 时提交 Pause；稳定 command ID 的 Unknown 按原命令对账，不改投后来的 attempt。接纳控制意图不等于已静止，loading/交互终结仍等待执行结束通知；回归见 `src/acp_client/client/cancel_test.rs`。
 
 > 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-30（Session ID/environment：删除 dirty 恢复风险弹窗、RecoverDirty 和 reset 交互；保留 load reservation、只读准入投影与普通确认）。

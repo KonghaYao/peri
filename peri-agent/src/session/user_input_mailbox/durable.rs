@@ -13,6 +13,10 @@ pub(super) struct DurableMailbox {
     pub(super) lifecycle: u64,
     operations: tokio::sync::Mutex<HashMap<String, FrozenOperation>>,
     publication_block: Mutex<Option<staging::PublicationBlock>>,
+    #[cfg(test)]
+    pub(super) snapshot_loads: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    pub(super) control_loads: std::sync::atomic::AtomicUsize,
 }
 
 struct FrozenOperation {
@@ -56,6 +60,10 @@ impl UserInputMailbox {
             lifecycle,
             operations: tokio::sync::Mutex::new(HashMap::new()),
             publication_block: Mutex::new(None),
+            #[cfg(test)]
+            snapshot_loads: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            control_loads: std::sync::atomic::AtomicUsize::new(0),
         });
         mailbox
     }
@@ -207,6 +215,7 @@ impl UserInputMailbox {
             true,
         )
         .await
+        .map(|(receipt, _)| receipt)
     }
 
     pub async fn reclaim_unclaimed_durable(
@@ -266,7 +275,7 @@ impl UserInputMailbox {
         fingerprint: u64,
         input_ids: &[String],
         withdrawing: bool,
-    ) -> Result<UserInputQueueReceipt, UserInputQueueError> {
+    ) -> Result<(UserInputQueueReceipt, WorkSnapshot), UserInputQueueError> {
         let operation = operations
             .get_mut(command_id)
             .ok_or(UserInputQueueError::IdentityConflict)?;
@@ -282,7 +291,7 @@ impl UserInputMailbox {
             self.project_publications(&snapshot);
             project_withdrawn_results(&mut receipt, &operation.commands, &snapshot);
             receipt.snapshot = self.snapshot();
-            return Ok(receipt);
+            return Ok((receipt, snapshot));
         }
         let reconcile = operation.attempted;
         operation.attempted = true;
@@ -290,6 +299,7 @@ impl UserInputMailbox {
         let mut receipts = Vec::new();
         let mut generations = std::collections::BTreeMap::new();
         for command in &operation.commands {
+            let started = std::time::Instant::now();
             let receipt = match durable.commit(command, reconcile).await {
                 Ok(receipt) => receipt,
                 Err(error) => {
@@ -300,6 +310,8 @@ impl UserInputMailbox {
                     return Err(error);
                 }
             };
+            tracing::debug!(command_id, mutation_id = %command.mutation_id,
+                duration_us = started.elapsed().as_micros() as u64, "mailbox operation confirmed");
             let deliveries = match &command.action {
                 WorkAction::PublishDelivery { delivery } => std::slice::from_ref(delivery),
                 WorkAction::PublishStagedUserInputs { deliveries, .. } => deliveries.as_slice(),
@@ -361,7 +373,7 @@ impl UserInputMailbox {
         operation.uncertain = false;
         drop(state);
         self.publish(receipt.snapshot.clone());
-        Ok(receipt)
+        Ok((receipt, snapshot))
     }
 
     pub(super) fn project_publications(&self, snapshot: &WorkSnapshot) {
@@ -441,7 +453,10 @@ impl UserInputMailbox {
                 });
                 state.records.last_mut().expect("record inserted")
             };
-            if record.state == UserInputState::Delivered && status == UserInputState::Claimed {
+            if record.state == UserInputState::Delivered
+                && status == UserInputState::Claimed
+                && record.publication_id.as_deref() == Some(&delivery.publication.delivery_id)
+            {
                 continue;
             }
             if record.state == UserInputState::Queued
@@ -485,7 +500,11 @@ impl UserInputMailbox {
 }
 
 impl DurableMailbox {
-    async fn load(&self, session_id: &str) -> Result<WorkSnapshot, UserInputQueueError> {
+    pub(super) async fn load(&self, session_id: &str) -> Result<WorkSnapshot, UserInputQueueError> {
+        #[cfg(test)]
+        self.snapshot_loads
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let started = std::time::Instant::now();
         let snapshot = self
             .store
             .load_session_work(&WorkQuery {
@@ -494,6 +513,11 @@ impl DurableMailbox {
             })
             .await
             .map_err(|_| UserInputQueueError::OutcomeUnknown)?;
+        tracing::debug!(
+            session_id,
+            duration_us = started.elapsed().as_micros() as u64,
+            "mailbox snapshot loaded"
+        );
         if snapshot.control.lifecycle != self.lifecycle {
             return Err(UserInputQueueError::StaleSession);
         }

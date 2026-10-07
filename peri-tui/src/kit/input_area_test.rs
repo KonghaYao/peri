@@ -239,6 +239,28 @@ fn test_build_composer_block_titles_and_degrades() {
     );
 }
 
+/// [回归测试] 空闲直接输入保持隐藏 Pending 行，但 composer 必须显示真实提交状态。
+#[test]
+#[serial]
+fn test_composer_shows_submitting_without_delivery_or_session_title() {
+    crate::kit::atoms::init_atoms();
+    for language in ["en", "zh-CN"] {
+        i18n::init(Some(language));
+        let title = i18n::tr("composer-submitting");
+        let block = build_composer_block(false, &title, None, None, true, false, 80);
+        let rows = render_block_text(&block, 80, 3);
+        assert!(rows[0].replace(' ', "").contains(&title));
+        let narrow_title = crate::truncate::truncate_by_width(&title, 5);
+        let narrow = build_composer_block(false, &narrow_title, None, None, true, false, 8);
+        let rows = render_block_text(&narrow, 8, 3);
+        assert!(
+            rows[0].replace(' ', "").contains(&narrow_title),
+            "{language}: title={narrow_title:?}, rendered={:?}",
+            rows[0]
+        );
+    }
+}
+
 #[test]
 #[serial]
 fn test_filter_files_empty_prefix_returns_top_20() {

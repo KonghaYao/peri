@@ -17,6 +17,10 @@ pub(super) use availability::{availability, READ_AVAILABILITY};
 mod effects;
 pub(super) use effects::mutation_effects;
 
+#[path = "work/diagnostics.rs"]
+mod diagnostics;
+pub(super) use diagnostics::WorkPhase;
+
 pub(super) const CREATE_STATE: &str = "CREATE TABLE IF NOT EXISTS session_work_state (session_id TEXT PRIMARY KEY NOT NULL, state_json TEXT NOT NULL)";
 pub(super) const READ_REVISION: &str = "SELECT EXISTS(SELECT 1 FROM threads WHERE id=?1), EXISTS(SELECT 1 FROM session_control_state WHERE session_id=?1), state.state_json IS NOT NULL, state.state_json -> '$.revision' FROM (SELECT 1) LEFT JOIN session_work_state AS state ON state.session_id=?1";
 pub(super) const READ_RESOURCE_OWNER_FACTS: &str = r#"
@@ -107,12 +111,12 @@ pub(super) const CREATE_EVENTS: &str = "CREATE TABLE IF NOT EXISTS session_work_
 pub(super) const CREATE_RECEIPTS: &str = "CREATE TABLE IF NOT EXISTS session_work_receipts (mutation_id TEXT PRIMARY KEY NOT NULL, session_id TEXT NOT NULL, digest TEXT NOT NULL, resolution_json TEXT NOT NULL)";
 pub(super) const CREATE_COMMANDS: &str = "CREATE TABLE IF NOT EXISTS session_work_commands (mutation_id TEXT PRIMARY KEY NOT NULL, session_id TEXT NOT NULL, digest TEXT NOT NULL, command_json TEXT NOT NULL, reconciled INTEGER NOT NULL DEFAULT 0 CHECK(reconciled IN (0,1)))";
 pub(super) const INSERT_COMMAND: &str = "INSERT OR IGNORE INTO session_work_commands(mutation_id,session_id,digest,command_json) VALUES (?1,?2,?3,?4)";
-pub(super) const GUARD_COMMAND: &str = "INSERT INTO session_work_commands(mutation_id,session_id,digest,command_json) SELECT NULL,NULL,NULL,NULL WHERE NOT EXISTS (SELECT 1 FROM session_work_commands WHERE mutation_id=?1 AND session_id=?2 AND digest=?3 AND command_json=?4) OR EXISTS (SELECT 1 FROM session_work_commands WHERE session_id=?2 AND mutation_id<>?1 AND reconciled=0)";
+pub(super) const GUARD_COMMAND: &str = "INSERT INTO session_work_commands(mutation_id,session_id,digest,command_json) SELECT NULL,NULL,NULL,NULL WHERE NOT EXISTS (SELECT 1 FROM session_work_commands WHERE mutation_id=?1 AND session_id=?2 AND digest=?3 AND command_json=?4) OR EXISTS (SELECT 1 FROM session_work_commands NOT INDEXED WHERE reconciled=0 AND session_id=?2 AND mutation_id<>?1)";
 pub(super) const READ_COMMAND: &str =
     "SELECT command_json FROM session_work_commands WHERE mutation_id=?1";
 pub(super) const READ_OWNED_COMMAND: &str = "SELECT c.command_json,c.digest,r.resolution_json,c.reconciled FROM session_work_commands c LEFT JOIN session_work_receipts r ON r.mutation_id=c.mutation_id AND r.session_id=c.session_id AND r.digest=c.digest WHERE c.mutation_id=?1 AND c.session_id=?2";
-pub(super) const READ_PENDING: &str = "WITH RECURSIVE scope(id) AS (SELECT ?1 UNION ALL SELECT threads.id FROM threads JOIN scope ON threads.parent_thread_id=scope.id) SELECT command_json FROM session_work_commands WHERE session_id IN (SELECT id FROM scope) AND reconciled=0 ORDER BY mutation_id";
-pub(super) const HAS_PENDING: &str = "WITH RECURSIVE scope(id) AS (SELECT ?1 UNION ALL SELECT threads.id FROM threads JOIN scope ON threads.parent_thread_id=scope.id) SELECT EXISTS (SELECT 1 FROM session_work_commands WHERE session_id IN (SELECT id FROM scope) AND reconciled=0)";
+pub(super) const READ_PENDING: &str = "WITH RECURSIVE scope(id) AS (SELECT ?1 UNION ALL SELECT threads.id FROM threads JOIN scope ON threads.parent_thread_id=scope.id) SELECT command_json FROM session_work_commands NOT INDEXED WHERE reconciled=0 AND session_id IN (SELECT id FROM scope) ORDER BY mutation_id";
+pub(super) const HAS_PENDING: &str = "WITH RECURSIVE scope(id) AS (SELECT ?1 UNION ALL SELECT threads.id FROM threads JOIN scope ON threads.parent_thread_id=scope.id) SELECT EXISTS (SELECT 1 FROM session_work_commands NOT INDEXED WHERE reconciled=0 AND session_id IN (SELECT id FROM scope))";
 pub(super) const ACK_COMMAND: &str = "UPDATE session_work_commands SET reconciled=1 WHERE mutation_id=?1 AND digest=?2 AND EXISTS(SELECT 1 FROM session_work_receipts WHERE mutation_id=?1 AND digest=?2)";
 
 pub(super) fn command_effects(command: &WorkCommand) -> SessionResourceResult<Vec<WorkEffect>> {
@@ -163,8 +167,10 @@ pub(super) fn owned_command(
         pending: !reconciled,
     })
 }
+#[cfg(test)]
 pub(super) const READ_STATE: &str =
     "SELECT state_json FROM session_work_state WHERE session_id = ?1";
+pub(super) const READ_SNAPSHOT: &str = "SELECT EXISTS(SELECT 1 FROM threads WHERE id=?1),control.state_json,state.state_json,CASE WHEN state.state_json IS NULL THEN EXISTS(SELECT 1 FROM messages WHERE thread_id=?1) ELSE 0 END FROM (SELECT 1) LEFT JOIN session_control_state AS control ON control.session_id=?1 LEFT JOIN session_work_state AS state ON state.session_id=?1";
 pub(super) const READ_DELIVERY: &str = "SELECT EXISTS(SELECT 1 FROM threads WHERE id=?1 UNION ALL SELECT 1 FROM session_control_state WHERE session_id=?1 UNION ALL SELECT 1 FROM session_work_state WHERE session_id=?1),entry.type,entry.value FROM (SELECT 1) LEFT JOIN session_work_state AS state ON state.session_id=?1 LEFT JOIN json_each(state.state_json,'$.deliveries') AS entry ON entry.key=?2";
 
 pub(super) fn delivery(

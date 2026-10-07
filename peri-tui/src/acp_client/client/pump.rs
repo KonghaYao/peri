@@ -168,12 +168,14 @@ impl AcpTuiClient {
         user_input_queue: Arc<std::sync::atomic::AtomicBool>,
         dispatcher: Option<Arc<dyn peri_acp::transport::RequestTransport>>,
     ) {
-        let mut event_count: u64 = 0;
-        loop {
-            let msg = transport.recv().await;
-            match msg {
-                Some(IncomingMessage::Notification { method, params }) => {
-                    if method == "session/work/available" {
+        let (projection_tx, projection_rx) = mpsc::unbounded_channel();
+        let incoming_transport = transport.clone();
+        let reception = async move {
+            while let Some(message) = incoming_transport.recv().await {
+                match message {
+                    IncomingMessage::Notification { method, params }
+                        if method == "session/work/available" =>
+                    {
                         let dispatcher = dispatcher.clone();
                         tokio::spawn(async move {
                             let Some(dispatcher) = dispatcher else {
@@ -189,7 +191,58 @@ impl AcpTuiClient {
                                 warn!(?error, "SDK activation outcome remains unconfirmed");
                             }
                         });
-                    } else if method == "peri/agent_event" {
+                    }
+                    IncomingMessage::Request { id, method, params }
+                        if method == peri_acp_types::execution_admission::ADMIT_METHOD
+                            || method == peri_acp_types::execution_admission::SETTLE_METHOD
+                            || method == peri_acp_types::execution_admission::ENTERED_METHOD =>
+                    {
+                        let transport = incoming_transport.clone();
+                        let dispatcher = dispatcher.clone();
+                        tokio::spawn(async move {
+                            let result = match dispatcher {
+                                Some(dispatcher) => dispatcher.send_request(&method, params).await,
+                                None => Err(peri_acp::transport::types::AcpError::new(
+                                    -32601,
+                                    "SDK persistent execution admission capability unavailable",
+                                )),
+                            };
+                            let _ = transport.send_response(id, result).await;
+                        });
+                    }
+                    message => {
+                        if projection_tx.send(message).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        };
+        tokio::join!(
+            reception,
+            Self::run_projection_pump(
+                transport,
+                notification_tx,
+                lifecycle,
+                user_input_queue,
+                projection_rx,
+            )
+        );
+    }
+
+    async fn run_projection_pump(
+        transport: Arc<MpscClientTransport>,
+        notification_tx: mpsc::UnboundedSender<AcpNotification>,
+        lifecycle: InteractionLifecycle,
+        user_input_queue: Arc<std::sync::atomic::AtomicBool>,
+        mut incoming: mpsc::UnboundedReceiver<IncomingMessage>,
+    ) {
+        let mut event_count: u64 = 0;
+        loop {
+            let msg = incoming.recv().await;
+            match msg {
+                Some(IncomingMessage::Notification { method, params }) => {
+                    if method == "peri/agent_event" {
                         event_count += 1;
                         let session_id = params
                             .get("sessionId")
@@ -414,24 +467,6 @@ impl AcpTuiClient {
                     }
                 }
                 Some(IncomingMessage::Request { id, method, params }) => {
-                    if method == peri_acp_types::execution_admission::ADMIT_METHOD
-                        || method == peri_acp_types::execution_admission::SETTLE_METHOD
-                        || method == peri_acp_types::execution_admission::ENTERED_METHOD
-                    {
-                        let transport = transport.clone();
-                        let dispatcher = dispatcher.clone();
-                        tokio::spawn(async move {
-                            let result = match dispatcher {
-                                Some(dispatcher) => dispatcher.send_request(&method, params).await,
-                                None => Err(peri_acp::transport::types::AcpError::new(
-                                    -32601,
-                                    "SDK persistent execution admission capability unavailable",
-                                )),
-                            };
-                            let _ = transport.send_response(id, result).await;
-                        });
-                        continue;
-                    }
                     let _gate = if user_input_queue.load(std::sync::atomic::Ordering::Acquire) {
                         Some(lifecycle.operation_gate().lock().await)
                     } else {

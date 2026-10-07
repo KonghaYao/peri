@@ -774,12 +774,14 @@ pub fn push_view_models_for_reset() {
     // 都依赖旧会话索引/身份，残留会让新会话焦点/免疫错误指向）。
     *crate::kit::atoms::FOCUSED_ENTRY.state().write() = None;
     *TRANSCRIPT_HISTORY.lock().unwrap() = None;
-    *crate::kit::atoms::TRANSCRIPT_PUBLICATION.state().write() = Default::default();
     let snapshot = ViewModelsSnapshot {
         items: im::Vector::new(),
         generation: 0,
     };
-    *VIEW_MODELS.state().write() = snapshot;
+    let view_models = VIEW_MODELS.state();
+    let mut published_snapshot = view_models.write();
+    *crate::kit::atoms::TRANSCRIPT_PUBLICATION.state().write() = Default::default();
+    *published_snapshot = snapshot;
 }
 
 /// 将 BridgeState 中的状态快照写入 ACP_STATE Atom。

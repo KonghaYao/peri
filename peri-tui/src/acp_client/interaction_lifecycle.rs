@@ -97,6 +97,16 @@ pub struct PromptMarker {
     pub request_id: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct UserInputSnapshotIdentity {
+    client_instance_id: u64,
+    session_id: String,
+    local_generation: u64,
+    generation: String,
+    prompt_epoch: u64,
+    active_prompt: Option<PromptMarker>,
+}
+
 #[derive(Debug)]
 struct PendingInteractionEntry {
     owner: InteractionOwner,
@@ -584,6 +594,34 @@ impl InteractionLifecycle {
                 runs.local_generation == *local && runs.generation == generation))
     }
 
+    pub(crate) fn user_input_snapshot_identity(
+        &self,
+        session_id: &str,
+    ) -> Option<UserInputSnapshotIdentity> {
+        let state = self.state.lock().unwrap();
+        let SessionRoute::Stable {
+            session_id: current,
+            generation: local,
+            prompt_epoch,
+            ..
+        } = &state.route
+        else {
+            return None;
+        };
+        let runs = state.user_input_runs.get(session_id)?;
+        (current == session_id
+            && runs.local_generation == *local
+            && !state.deleted_session_ids.contains(session_id))
+        .then(|| UserInputSnapshotIdentity {
+            client_instance_id: state.client_instance_id,
+            session_id: session_id.to_owned(),
+            local_generation: *local,
+            generation: runs.generation.clone(),
+            prompt_epoch: *prompt_epoch,
+            active_prompt: state.active_prompt.clone(),
+        })
+    }
+
     /// 服务端已开始的 run 由 done/Stop/会话边界结束，无短 RPC 的 RAII lease。
     /// 返回 None 表示重复或陈旧事件，调用方不能再次发布 loading 状态。
     pub(crate) fn open_user_input_run(
@@ -742,9 +780,14 @@ impl InteractionLifecycle {
 
     pub fn cancel_active_prompt(&self) -> Vec<ClaimedInteraction> {
         let marker = self.state.lock().unwrap().active_prompt.clone();
-        marker
+        let claims = marker
             .map(|marker| self.close_prompt_exact(&marker, ClaimCause::TurnTerminal))
-            .unwrap_or_default()
+            .unwrap_or_default();
+        let mut state = self.state.lock().unwrap();
+        if let SessionRoute::Stable { prompt_epoch, .. } = &mut state.route {
+            *prompt_epoch = prompt_epoch.checked_add(1).expect("prompt epoch exhausted");
+        }
+        claims
     }
 
     pub fn transport_terminal(&self) -> Vec<ClaimedInteraction> {

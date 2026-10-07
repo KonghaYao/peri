@@ -131,13 +131,19 @@ impl UserInputMailbox {
         Ok(())
     }
 
+    #[tracing::instrument(skip_all, fields(input_id = %request.input_id, command_id = %request.command_id))]
     pub async fn enqueue_durable(
         &self,
         request: &EnqueueUserInputRequest,
     ) -> Result<UserInputQueueReceipt, UserInputQueueError> {
         let durable = self.durable.as_ref().ok_or(UserInputQueueError::Closed)?;
         let fingerprint = compute_fingerprint(("enqueue", request));
+        let lock_started = std::time::Instant::now();
         let mut operations = durable.operations.lock().await;
+        tracing::debug!(
+            duration_us = lock_started.elapsed().as_micros() as u64,
+            "mailbox enqueue operation lock acquired"
+        );
         self.validate_request(
             &request.session_id,
             &request.generation,
@@ -218,7 +224,8 @@ impl UserInputMailbox {
                 ),
             );
         }
-        let mut receipt = self
+        let stage_started = std::time::Instant::now();
+        let (mut receipt, mut snapshot) = self
             .finish_operation(
                 durable,
                 &mut operations,
@@ -228,8 +235,11 @@ impl UserInputMailbox {
                 false,
             )
             .await?;
+        tracing::debug!(
+            duration_us = stage_started.elapsed().as_micros() as u64,
+            "mailbox enqueue stage confirmed"
+        );
         drop(operations);
-        let snapshot = durable.load(&self.session_id).await?;
         if let Some(record) = snapshot
             .state
             .staged_user_inputs
@@ -245,13 +255,27 @@ impl UserInputMailbox {
             if let Some(command) = staged.enqueue_publication {
                 let command_id = format!("idle:{}:{}:0", request.command_id, record.sequence);
                 let input_ids = vec![request.input_id.clone()];
-                self.publish_selection(
-                    &command_id,
-                    compute_fingerprint(("idle", &command_id, &input_ids)),
-                    &input_ids,
-                    InputSelection::Authorized(Box::new(command)),
-                )
-                .await?;
+                let publication_started = std::time::Instant::now();
+                let (publication_receipt, publication_snapshot) = self
+                    .publish_selection_with_snapshot(
+                        &command_id,
+                        compute_fingerprint(("idle", &command_id, &input_ids)),
+                        &input_ids,
+                        InputSelection::Authorized(Box::new(command)),
+                        Some(snapshot),
+                    )
+                    .await?;
+                tracing::debug!(
+                    duration_us = publication_started.elapsed().as_micros() as u64,
+                    "mailbox enqueue publication confirmed"
+                );
+                snapshot = publication_snapshot;
+                receipt
+                    .work_receipts
+                    .extend(publication_receipt.work_receipts);
+                receipt
+                    .publication_generations
+                    .extend(publication_receipt.publication_generations);
                 let mut state = self.state.lock();
                 state.suspended = false;
                 if resume_intent_candidate {
@@ -262,7 +286,6 @@ impl UserInputMailbox {
         }
         receipt.snapshot = self.snapshot();
         receipt.results = results_for(&self.state.lock(), std::slice::from_ref(&request.input_id));
-        let snapshot = durable.load(&self.session_id).await?;
         let idle_id = format!(
             "idle:{}:{}:0",
             request.command_id, receipt.work_receipts[0].revision
@@ -272,16 +295,18 @@ impl UserInputMailbox {
             "selection",
             "publish",
         );
-        if let Some(command) = snapshot.state.user_input_publications.get(&mutation) {
-            let publication_receipt = match durable.store.resolve_work_mutation(command).await {
-                Ok(WorkResolution::Applied { receipt }) => accepted(receipt)?,
-                _ => return Err(UserInputQueueError::OutcomeUnknown),
-            };
-            receipt.work_receipts.push(publication_receipt);
-            receipt
-                .publication_generations
-                .insert(request.input_id.clone(), idle_id);
-            project_withdrawn_results(&mut receipt, std::slice::from_ref(command), &snapshot);
+        if receipt.publication_generations.is_empty() {
+            if let Some(command) = snapshot.state.user_input_publications.get(&mutation) {
+                let publication_receipt = match durable.store.resolve_work_mutation(command).await {
+                    Ok(WorkResolution::Applied { receipt }) => accepted(receipt)?,
+                    _ => return Err(UserInputQueueError::OutcomeUnknown),
+                };
+                receipt.work_receipts.push(publication_receipt);
+                receipt
+                    .publication_generations
+                    .insert(request.input_id.clone(), idle_id);
+                project_withdrawn_results(&mut receipt, std::slice::from_ref(command), &snapshot);
+            }
         }
         // 暂停期间提交、且此刻仍未发布的输入携带恢复授权：
         // 收尾完成后由 publish_next_durable 按新任务发布并自动解除暂停。
@@ -507,11 +532,12 @@ impl UserInputMailbox {
         } else {
             InputSelection::Automatic
         };
-        self.publish_selection(
+        self.publish_selection_with_snapshot(
             &command_id,
             compute_fingerprint(("idle", &command_id, &ids)),
             &ids,
             selection,
+            Some(snapshot),
         )
         .await?;
         {
@@ -520,7 +546,7 @@ impl UserInputMailbox {
             if resuming {
                 // 发布事务已按新任务恢复会话：解除暂停位与恢复授权。
                 state.paused = false;
-                state.resume_intents.remove(&record.input_id);
+                state.resume_intents.remove(&ids[0]);
             }
         }
         *durable.publication_block.lock() = None;
@@ -579,11 +605,27 @@ impl UserInputMailbox {
         input_ids: &[String],
         selection: InputSelection,
     ) -> Result<UserInputQueueReceipt, UserInputQueueError> {
+        self.publish_selection_with_snapshot(command_id, fingerprint, input_ids, selection, None)
+            .await
+            .map(|(receipt, _)| receipt)
+    }
+
+    async fn publish_selection_with_snapshot(
+        &self,
+        command_id: &str,
+        fingerprint: u64,
+        input_ids: &[String],
+        selection: InputSelection,
+        confirmed_snapshot: Option<WorkSnapshot>,
+    ) -> Result<(UserInputQueueReceipt, WorkSnapshot), UserInputQueueError> {
         let durable = self.durable.as_ref().ok_or(UserInputQueueError::Closed)?;
         let mut operations = durable.operations.lock().await;
         if !operations.contains_key(command_id) {
             ensure_not_frozen(&operations, input_ids)?;
-            let snapshot = durable.load(&self.session_id).await?;
+            let snapshot = match confirmed_snapshot {
+                Some(snapshot) => snapshot,
+                None => durable.load(&self.session_id).await?,
+            };
             self.project_publications(&snapshot);
             let pending = recover_pending(&snapshot, command_id, fingerprint, input_ids)?;
             let mutation = mutation_id(

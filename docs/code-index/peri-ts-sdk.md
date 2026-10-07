@@ -1,5 +1,7 @@
 # Peri TS SDK 代码索引
 
+唤醒合并回归：`src/execution/coordinator.ts::ensureProcessing` 为同会话 active operation 保留 dirty wake，旧查询返回 idle 时继续检查新工作；单执行、Unknown、退役与 drain 上界保持。`test/execution-wake.test.ts` 用屏障覆盖重叠 notification、Stop/Resume、预算与封闭边界。`execution/sqlite-busy.ts` 将 registry/admission ledger 的运行期 busy 等待改为有界异步退避，仅在写事务 callback 尚未开始时重试获取锁；callback/commit 后失败保留 Unknown/原错误，不重放。`test/execution-sqlite-busy.test.ts` 覆盖独立 writer、事件循环让出、deadline、关闭与禁止不安全重试。连接级 pragma 不改变 schema；构造期初始化、SQL/JSON/落盘仍同步，不承诺事件循环完全无阻塞。
+
 状态：SDK 的 stdio/WASM transport 共用 ACP；`SessionDocs` 只投影展示状态。RCRA 执行准入的单一权威为 SDK 持久 ExecutionRegistry，Rust Store 持有消息、工作义务、领域控制、处理阶段、invocation 与资源 owner 声明及回执；Rust 不建立执行 owner/lease/fencing。协议版本 `peri.executionProtocol=1` 已接入 SDK Session、反向准入和 Bun JSONL dispatcher。生产路径与验收结果必须分别核对：完整 native/WASM、冷 child runtime 和分布式 owner 恢复以 active spec 及对应真实生命周期测试为准，不从 SQL/JSONL fixture 推导全部 E2E 已完成。权威语义见 [RCRA 设计](../design/rcra-message-activation.md)，部署接口见 [SDK README](../../npm-packages/@peri-sdk/README.md)。
 
 | 职责 | 入口 | 行为 |

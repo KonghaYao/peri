@@ -29,6 +29,7 @@ pub(super) struct Transcript {
     pub(super) scanned_slots: usize,
     pub(super) updated_slots: usize,
     pub(super) evictions: usize,
+    pub(super) invalidation: &'static str,
 }
 
 impl Transcript {
@@ -48,6 +49,7 @@ impl Transcript {
     ) -> Arc<SlotIndex> {
         self.scanned_slots = 0;
         self.updated_slots = 0;
+        self.evictions = 0;
         let global = self.reset != reset
             || self.grid != Some(grid)
             || self.width != width
@@ -56,6 +58,26 @@ impl Transcript {
                     || !Arc::ptr_eq(&previous.theme, &context.theme)
             });
         let changed = self.generation != Some(snapshot.generation) || self.reset != reset;
+        self.invalidation = if self.reset != reset {
+            "reset"
+        } else if self.generation.is_none() {
+            "initial"
+        } else if self.grid != Some(grid) {
+            "grid"
+        } else if self.width != width {
+            "width"
+        } else if global {
+            "theme-or-language"
+        } else if changed
+            && publication.generation == snapshot.generation
+            && self.generation == Some(publication.previous_generation)
+        {
+            "adjacent-publication"
+        } else if changed {
+            "generation-gap-or-unmatched-publication"
+        } else {
+            "none"
+        };
         let changed_from = if global || self.generation.is_none() {
             0
         } else if changed
@@ -70,6 +92,7 @@ impl Transcript {
         };
         if global || changed {
             let length = snapshot.items.len();
+            let previous_length = caches.len();
             for slot in length..caches.len() {
                 self.remove_accounting(slot);
             }
@@ -99,8 +122,10 @@ impl Transcript {
                 if matches!(vm, TuiRenderUnit::TuiAskUserBlock(block) if block.pending) {
                     self.anchors.insert(slot);
                 }
-                self.ensure_slot(slot, vm, caches, grid, width, &context, frame);
-                self.enforce_budget(caches, &pinned);
+                if global || slot >= previous_length || !caches[slot].matches_content(vm) {
+                    self.ensure_slot(slot, vm, caches, grid, width, &context, frame);
+                    self.enforce_budget(caches, &pinned);
+                }
             }
         }
         let scroll_y = scroll_y.min(self.index.total_visual().saturating_sub(height));
@@ -173,6 +198,7 @@ impl Transcript {
             cache.wrap_map = Arc::new(map);
         }
         cache.content_hash = vm.content_hash();
+        cache.variant = Some(std::mem::discriminant(vm));
         cache.copy_button = cache.entry.copy_button().cloned();
         cache.interaction = cache.entry.interaction().cloned();
         cache.image_lines = cache.entry.image_lines().to_vec();
@@ -210,6 +236,10 @@ impl Transcript {
         if self.bytes[slot] != 0 {
             self.recency.insert((self.clock, slot));
         }
+    }
+
+    pub(super) fn retained_bytes(&self) -> usize {
+        self.retained_bytes
     }
 
     fn remove_accounting(&mut self, slot: usize) {

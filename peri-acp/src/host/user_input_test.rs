@@ -2,6 +2,9 @@
 
 use super::*;
 
+#[path = "session_io_test.rs"]
+mod session_io_tests;
+
 async fn make_user_input_session(
     tmp: &tempfile::TempDir,
 ) -> (AcpServerConfig, HashMap<String, SessionState>, String) {

@@ -1,4 +1,4 @@
-use std::sync::atomic::Ordering;
+use std::{future::Future, sync::atomic::Ordering, task::Poll};
 
 use peri_acp::{
     event::AcpEvent,
@@ -13,6 +13,8 @@ use serde::{Serialize, de::DeserializeOwned};
 use super::{AcpNotification, AcpTuiClient};
 
 impl AcpTuiClient {
+    pub(crate) const USER_INPUT_RECEIPT_TIMEOUT: std::time::Duration =
+        std::time::Duration::from_secs(10);
     pub fn supports_user_input_queue(&self) -> bool {
         self.user_input_queue.load(Ordering::Acquire)
     }
@@ -24,6 +26,7 @@ impl AcpTuiClient {
         params: &P,
     ) -> Result<R, AcpError> {
         let mut epoch = self.session_load_reservations.epoch_tx.subscribe();
+        let gate_started = peri_time::monotonic_now();
         loop {
             let operation = self.lifecycle.operation_gate().lock().await;
             let pending = *self.session_load_reservations.pending.lock().unwrap() > 0;
@@ -33,9 +36,52 @@ impl AcpTuiClient {
                 continue;
             }
             self.check_restore_error()?;
-            return self
-                .input_request_under_gate(method, session_id, params)
-                .await;
+            tracing::debug!(
+                method,
+                session_id,
+                stage = "gate",
+                elapsed_ms = gate_started.elapsed().as_millis() as u64,
+                "user input timing"
+            );
+            let identity = self.lifecycle.stable_identity();
+            if identity.as_ref().map(|identity| identity.0.as_str()) != Some(session_id) {
+                return Err(AcpError::new(-32602, "user input session changed"));
+            }
+            let params = serde_json::to_value(params)
+                .map_err(|error| AcpError::new(-32602, error.to_string()))?;
+            let request_started = peri_time::monotonic_now();
+            let mut request = Box::pin(self.transport.send_request(method, params));
+            let first_poll =
+                std::future::poll_fn(|context| Poll::Ready(request.as_mut().poll(context))).await;
+            drop(operation);
+            tracing::debug!(
+                method,
+                session_id,
+                stage = "request",
+                elapsed_ms = request_started.elapsed().as_millis() as u64,
+                "user input timing"
+            );
+            let receipt_started = peri_time::monotonic_now();
+            let result = match first_poll {
+                Poll::Ready(result) => result,
+                Poll::Pending => peri_time::timeout(Self::USER_INPUT_RECEIPT_TIMEOUT, request)
+                    .await
+                    .unwrap_or_else(|_| Err(AcpError::new(-32603, "user input receipt timed out"))),
+            };
+            tracing::debug!(
+                method,
+                session_id,
+                stage = "receipt",
+                elapsed_ms = receipt_started.elapsed().as_millis() as u64,
+                "user input timing"
+            );
+            let result = result?;
+            if self.lifecycle.stable_identity() != identity {
+                return Err(AcpError::new(-32603, "user input receipt owner changed"));
+            }
+            return serde_json::from_value(result).map_err(|error| {
+                AcpError::new(-32603, format!("invalid user input receipt: {error}"))
+            });
         }
     }
 
@@ -59,8 +105,54 @@ impl AcpTuiClient {
         &self,
         session_id: &str,
     ) -> Result<UserInputQueueSnapshot, AcpError> {
+        let mut epoch = self.session_load_reservations.epoch_tx.subscribe();
+        let operation = loop {
+            let operation = self.lifecycle.operation_gate().lock().await;
+            if *self.session_load_reservations.pending.lock().unwrap() == 0 {
+                break operation;
+            }
+            drop(operation);
+            self.wait_for_session_load(&mut epoch).await?;
+        };
+        self.check_restore_error()?;
+        let identity = self
+            .lifecycle
+            .stable_identity()
+            .ok_or_else(|| AcpError::new(-32602, "no stable user input session"))?;
+        let snapshot_identity = self.lifecycle.user_input_snapshot_identity(session_id);
+        if snapshot_identity.is_none() {
+            return peri_time::timeout(
+                Self::USER_INPUT_RECEIPT_TIMEOUT,
+                self.user_input_snapshot_under_gate(session_id),
+            )
+            .await
+            .unwrap_or_else(|_| Err(AcpError::new(-32603, "user input snapshot timed out")));
+        }
+        drop(operation);
+        let snapshot_started = peri_time::monotonic_now();
+        let snapshot: UserInputQueueSnapshot = self
+            .input_request(
+                "session/input/snapshot",
+                session_id,
+                &UserInputQueueSnapshotRequest {
+                    session_id: session_id.to_owned(),
+                    generation: None,
+                },
+            )
+            .await?;
+        tracing::debug!(
+            stage = "snapshot",
+            elapsed_ms = snapshot_started.elapsed().as_millis() as u64,
+            "user input timing"
+        );
         let _operation = self.lifecycle.operation_gate().lock().await;
-        self.user_input_snapshot_under_gate(session_id).await
+        self.accept_user_input_snapshot(
+            session_id,
+            identity.1,
+            snapshot,
+            self.lifecycle.user_input_snapshot_identity(session_id) == snapshot_identity,
+        )
+        .await
     }
 
     pub(super) async fn user_input_snapshot_under_gate(
@@ -84,6 +176,17 @@ impl AcpTuiClient {
                 },
             )
             .await?;
+        self.accept_user_input_snapshot(session_id, local_generation, snapshot, true)
+            .await
+    }
+
+    async fn accept_user_input_snapshot(
+        &self,
+        session_id: &str,
+        local_generation: u64,
+        snapshot: UserInputQueueSnapshot,
+        restore_run: bool,
+    ) -> Result<UserInputQueueSnapshot, AcpError> {
         if snapshot.session_id != session_id {
             return Err(AcpError::new(
                 -32603,
@@ -97,7 +200,8 @@ impl AcpTuiClient {
         ) {
             return Err(AcpError::new(-32602, "user input snapshot owner changed"));
         }
-        if let Some(request_id) = &snapshot.active_request_id
+        if restore_run
+            && let Some(request_id) = &snapshot.active_request_id
             && let Some(claims) =
                 self.lifecycle
                     .open_user_input_run(session_id, &snapshot.generation, request_id)
@@ -162,3 +266,7 @@ fn validate_receipt(
 #[cfg(test)]
 #[path = "steer_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "latency_test.rs"]
+mod latency_tests;

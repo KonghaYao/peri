@@ -32,6 +32,9 @@ impl ServerLoop<'_> {
                     "session/prompt" => self.spawn_prompt(id, params).await,
                     "session/execute" => self.spawn_execution(id, params),
                     "mcp/message" => self.spawn_acp_mcp_request(id, params).await,
+                    "session/input/snapshot" | "session/work/query" => {
+                        self.spawn_session_io(id, method, params).await;
+                    }
                     "peri/mcp/open" | "peri/mcp/app" | "peri/mcp/resource" | "peri/mcp/invoke" => {
                         self.spawn_mcp_apps_request(id, method, params).await;
                     }
@@ -44,6 +47,47 @@ impl ServerLoop<'_> {
                     // Responses are routed internally by the transport's pending map.
                 }
             }
+        }
+    }
+
+    async fn spawn_session_io(&self, id: RequestId, method: String, params: Value) {
+        let diagnostics = ResponseDiagnostics::new(id, &method, &params);
+        let rejected_diagnostics = diagnostics.clone();
+        let cfg = Arc::clone(self.cfg);
+        let transport = Arc::clone(self.transport);
+        let rejected_transport = Arc::clone(&transport);
+        let sessions = Arc::clone(self.sessions);
+        let cancellation = self.connection_cancellation.clone();
+        let spawned = self.cfg.host_task_spawner.spawn(
+            task_scope::HostTaskOwnerKind::Session,
+            task_scope::HostTaskKind::SessionRequest,
+            async move {
+                let request = async {
+                    let prepared = {
+                        let sessions = sessions.lock().await;
+                        requests::session_io::prepare(&method, &params, &sessions)?
+                    };
+                    let local = prepared.as_ref().map(|environment| &environment.cfg).unwrap_or(&cfg);
+                    requests::session_io::handle(&method, &params, local, &transport).await
+                };
+                let result = tokio::select! {
+                    biased;
+                    _ = cancellation.cancelled() => Err(crate::transport::types::AcpError::new(-32800, "request cancelled")),
+                    result = request => result,
+                };
+                let _ = diagnostics.send(transport.as_ref(), result).await;
+            },
+        );
+        if spawned.is_err() {
+            let _ = rejected_diagnostics
+                .send(
+                    rejected_transport.as_ref(),
+                    Err(crate::transport::types::AcpError::new(
+                        -32800,
+                        "session request host is closing",
+                    )),
+                )
+                .await;
         }
     }
 
@@ -438,7 +482,22 @@ impl ServerLoop<'_> {
         } else {
             None
         };
-        let result = {
+        let result = if requests::session_io::handles(&method) {
+            let prepared = {
+                let sessions = sessions.lock().await;
+                requests::session_io::prepare(&method, &params, &sessions)
+            };
+            match prepared {
+                Ok(prepared) => {
+                    let local = prepared
+                        .as_ref()
+                        .map(|environment| &environment.cfg)
+                        .unwrap_or(cfg);
+                    requests::session_io::handle(&method, &params, local, transport).await
+                }
+                Err(error) => Err(error),
+            }
+        } else {
             let mut sessions = sessions.lock().await;
             handle_request(&method, &params, cfg, &mut sessions, transport).await
         };

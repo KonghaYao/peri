@@ -1,5 +1,9 @@
 # peri-agent 代码索引
 
+输入交付回归：`session/user_input_mailbox/delivery_notification_test.rs` 覆盖 Claim 后快照抢先投影、重复 Receive、publication generation、恢复与失效。Mailbox 的通知去重身份独立于状态投影；`mark_committed_deliveries` 核对实际 delivery，恢复仍由已持久事实重放，不新增持久“客户端已收到”记录。
+
+快照复用入口：`user_input_mailbox/{staging,durable,sdk_run}.rs` 复用已确认操作的快照；重复 SDK observation 以窄 control 读取重验完整 admission。`agent/stages/work_receive.rs` 从已确认快照验证 inbox hint，缺失才窄读；Receive 独立串行 gate 保留，业务 state 锁不跨 Store IO。
+
 错误诊断入口：`peri-acp-types/src/error.rs` 的 `AgentError::category_name` / `cause_chain` 保留实际错误；`session/exec/executor_helpers/v2_execute.rs` 的 fatal 漏斗记录 session/turn、分类与原因链。`ExecutionFailure` 将 `error_category`、`causes` 及 Model diagnostic 显式交给 ACP/遥测，不以通用公开提示替代诊断。重试与中断由 `session/retry_events.rs` / `agent/model_bridge.rs` 保留底层原因；内容不脱敏，长度与终止语义仍按 ARC-SECRET-001 和原执行契约约束。
 
 会话执行唯一性与接管由 `peri-sdk` 负责；Agent 不申请会话执行 lease、不继承 owner token、不执行 Store owner CAS 或 fencing。以下 task/cron/MCP owner 与 projection lease 均属资源或 capability 生命周期，不是会话执行所有权。
