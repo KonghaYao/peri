@@ -825,3 +825,7 @@ mod tests;
 #[cfg(test)]
 #[path = "staging_test.rs"]
 mod staging_tests;
+
+#[cfg(test)]
+#[path = "staging_resume_test.rs"]
+mod staging_resume_tests;

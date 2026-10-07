@@ -320,4 +320,20 @@ describe("smoke: 正式待发送队列", () => {
     await waitPending(0);
     await takePeriSnapshot(tester!, "steer-live-takeback-stop-resume");
   });
+
+  it("Stop 后直接提交新消息按新任务发送，无需显式单发", async () => {
+    await submit("STEER_RESUME_SEED");
+    const first = await waitRequest(1);
+    await tester!.sendKey("c", { ctrl: true });
+    await expect.poll(() => first.closed, { timeout: 10_000 }).toBe(true);
+    await waitPending(0);
+    await submit("STEER_AFTER_STOP");
+    const second = await waitRequest(2);
+    const content = userContent(second);
+    expect(content).toContain("STEER_AFTER_STOP");
+    expect(content.split("STEER_AFTER_STOP").length - 1).toBe(1);
+    finish(second);
+    await waitPending(0);
+    await takePeriSnapshot(tester!, "steer-live-resume-after-stop");
+  });
 });

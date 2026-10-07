@@ -2,7 +2,7 @@ use super::*;
 use crate::session::test_resources::TestSession;
 use peri_acp_types::session::MessageQueue;
 
-fn mailbox(
+pub(super) fn mailbox(
     fixture: &TestSession,
     store: Arc<dyn SessionResources>,
 ) -> (Arc<UserInputMailbox>, Arc<SessionInbox>) {
@@ -19,7 +19,7 @@ fn mailbox(
     )
 }
 
-fn input(mailbox: &UserInputMailbox, text: &str) -> EnqueueUserInputRequest {
+pub(super) fn input(mailbox: &UserInputMailbox, text: &str) -> EnqueueUserInputRequest {
     EnqueueUserInputRequest {
         session_id: mailbox.session_id.clone(),
         generation: mailbox.generation().into(),
@@ -30,7 +30,7 @@ fn input(mailbox: &UserInputMailbox, text: &str) -> EnqueueUserInputRequest {
     }
 }
 
-fn dispatch(mailbox: &UserInputMailbox, ids: Vec<String>) -> DispatchUserInputsRequest {
+pub(super) fn dispatch(mailbox: &UserInputMailbox, ids: Vec<String>) -> DispatchUserInputsRequest {
     DispatchUserInputsRequest {
         session_id: mailbox.session_id.clone(),
         generation: mailbox.generation().into(),
@@ -39,7 +39,7 @@ fn dispatch(mailbox: &UserInputMailbox, ids: Vec<String>) -> DispatchUserInputsR
     }
 }
 
-async fn load(fixture: &TestSession) -> WorkSnapshot {
+pub(super) async fn load(fixture: &TestSession) -> WorkSnapshot {
     fixture
         .resources()
         .load_session_work(&WorkQuery {
@@ -834,45 +834,5 @@ async fn stale_control_generation_rejects_frozen_selection_without_any_publicati
         StagedUserInputStatus::Queued
     );
     assert!(current.state.deliveries.is_empty());
-    assert!(inbox.queue().drain_all().is_empty());
-}
-
-#[tokio::test]
-async fn explicit_selection_after_pause_resumes_atomically_without_fabricating_attempt() {
-    use peri_acp_types::session_resources::{
-        ControlAction, ControlCommand, ControlDecision, ControlStatus,
-    };
-    let fixture = TestSession::open().await;
-    let (mailbox, inbox) = mailbox(&fixture, fixture.resources());
-    let snapshot = load(&fixture).await;
-    let paused = fixture
-        .resources()
-        .apply_session_control(&ControlCommand {
-            session_id: fixture.thread_id(),
-            command_id: uuid::Uuid::now_v7().to_string(),
-            expected_lifecycle: snapshot.control.lifecycle,
-            expected_revision: snapshot.control.revision,
-            expected_control_generation: snapshot.control.control_generation,
-            action: ControlAction::Pause,
-        })
-        .await
-        .unwrap();
-    assert_eq!(paused.decision, ControlDecision::Accepted);
-    let request = input(&mailbox, "STOP_PRESERVED");
-    assert_eq!(
-        mailbox.enqueue_durable(&request).await.unwrap().results[0].state,
-        UserInputState::Queued
-    );
-    assert!(load(&fixture).await.state.deliveries.is_empty());
-    let selection = dispatch(&mailbox, vec![request.input_id]);
-    mailbox.dispatch_durable(&selection).await.unwrap();
-    let resumed = load(&fixture).await;
-    assert_eq!(resumed.control.status, ControlStatus::Active);
-    assert!(resumed.control.attempt.is_none());
-    assert!(resumed.control.control_generation > paused.state.control_generation);
-    assert_eq!(resumed.state.deliveries.len(), 1);
-    assert_eq!(inbox.queue().drain_all().len(), 1);
-    mailbox.dispatch_durable(&selection).await.unwrap();
-    assert_eq!(load(&fixture).await.control, resumed.control);
     assert!(inbox.queue().drain_all().is_empty());
 }

@@ -1,7 +1,7 @@
 //! 用户待发区与执行准入的会话级 owner，普通待办在 idle 时逐条交接给 MQ。
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     hash::{Hash, Hasher},
     sync::Arc,
 };
@@ -100,6 +100,10 @@ struct MailboxState {
     paused: bool,
     suspended: bool,
     valid: bool,
+    /// 暂停（Stop/Pause/失败）期间用户明确提交、且当时未能立即发布的输入。
+    /// 它们携带"有明确恢复语义的发送"授权：执行条件成立后可建立新任务并自动 Resume；
+    /// 暂停之前入队的旧待办不在其中，不会被自动带动。
+    resume_intents: HashSet<String>,
 }
 
 /// 由宿主持有跨 turn 实例，Agent 独占队列状态、取消原因和执行准入判定。
@@ -143,6 +147,7 @@ impl UserInputMailbox {
                 paused: false,
                 suspended: false,
                 valid: true,
+                resume_intents: HashSet::new(),
             }),
             emit,
             control_turn: TurnId::new(),

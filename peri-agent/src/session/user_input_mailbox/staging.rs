@@ -65,6 +65,8 @@ impl PublicationBlock {
 enum InputSelection {
     Automatic,
     InterruptCurrent,
+    /// 暂停后的用户新输入：固定无 attempt 预期，由发布事务自动 Resume 控制状态。
+    ResumeNewTask,
     Authorized(Box<WorkCommand>),
 }
 
@@ -145,9 +147,14 @@ impl UserInputMailbox {
         if request.content.is_empty() {
             return Err(UserInputQueueError::EmptyContent);
         }
+        // 首次接纳时是否已处于暂停：决定这条输入是"暂停后的新提交"还是"暂停前的旧待办"。
+        // 重放同一 command 不重新取得该授权。
+        let mut resume_intent_candidate = false;
         if !operations.contains_key(&request.command_id) {
             ensure_not_frozen(&operations, std::slice::from_ref(&request.input_id))?;
             let snapshot = durable.load(&self.session_id).await?;
+            resume_intent_candidate =
+                self.state.lock().paused || snapshot.control.status == ControlStatus::Paused;
             let staged = snapshot
                 .state
                 .staged_user_inputs
@@ -245,7 +252,12 @@ impl UserInputMailbox {
                     InputSelection::Authorized(Box::new(command)),
                 )
                 .await?;
-                self.state.lock().suspended = false;
+                let mut state = self.state.lock();
+                state.suspended = false;
+                if resume_intent_candidate {
+                    // 发布事务已按新任务恢复会话，暂停位随之解除。
+                    state.paused = false;
+                }
             }
         }
         receipt.snapshot = self.snapshot();
@@ -271,6 +283,31 @@ impl UserInputMailbox {
                 .insert(request.input_id.clone(), idle_id);
             project_withdrawn_results(&mut receipt, std::slice::from_ref(command), &snapshot);
         }
+        // 暂停期间提交、且此刻仍未发布的输入携带恢复授权：
+        // 收尾完成后由 publish_next_durable 按新任务发布并自动解除暂停。
+        if resume_intent_candidate
+            && receipt
+                .results
+                .first()
+                .is_some_and(|result| result.state == UserInputState::Queued)
+        {
+            self.state
+                .lock()
+                .resume_intents
+                .insert(request.input_id.clone());
+            // 收尾可能在本次写入前后恰好结束，宿主收尾任务不会为此再被唤醒；
+            // 这里立即尝试一次发布。失败时授权与待发记录都保留，等待后续唤醒。
+            match self.publish_next_durable().await {
+                Ok(_) => {
+                    receipt.snapshot = self.snapshot();
+                    receipt.results =
+                        results_for(&self.state.lock(), std::slice::from_ref(&request.input_id));
+                }
+                Err(error) => {
+                    tracing::warn!(session_id = %self.session_id, %error, "resume publication unconfirmed");
+                }
+            }
+        }
         Ok(receipt)
     }
 
@@ -293,16 +330,22 @@ impl UserInputMailbox {
             )
         });
         if !state.valid
-            || state.paused
-            || snapshot.control.status != ControlStatus::Active
+            || !matches!(
+                snapshot.control.status,
+                ControlStatus::Active | ControlStatus::Paused
+            )
             || !snapshot.pending_commands.is_empty()
         {
             return Ok(None);
         }
+        let paused = state.paused || snapshot.control.status == ControlStatus::Paused;
         let new_task = state.active.is_none()
             && snapshot.control.attempt.is_none()
             && (has_inactive_work || !has_processing_input);
-        let automatic = !snapshot.blocked
+        // 显式停止、暂停或执行失败之后的用户新提交是"有明确恢复语义的发送"：
+        // 空闲新输入按新任务发布，由发布事务自动 Resume；旧待办与自动路径保持暂停。
+        let automatic = !paused
+            && !snapshot.blocked
             && !has_processing_input
             && state.active.as_ref().is_some_and(|active| {
                 state.suspended
@@ -433,10 +476,14 @@ impl UserInputMailbox {
         let durable = self.durable.as_ref().ok_or(UserInputQueueError::Closed)?;
         let snapshot = durable.load(&self.session_id).await?;
         self.project_publications(&snapshot);
-        let blocked = PublicationBlock::detect(&self.state.lock(), &snapshot);
-        if let Some(reason) = blocked {
-            return Ok(self.record_publication_block(reason, &snapshot));
+        let resuming = self.resuming_new_task(&snapshot);
+        if !resuming {
+            let blocked = PublicationBlock::detect(&self.state.lock(), &snapshot);
+            if let Some(reason) = blocked {
+                return Ok(self.record_publication_block(reason, &snapshot));
+            }
         }
+        let resume_intents = self.state.lock().resume_intents.clone();
         let Some(record) = snapshot
             .state
             .staged_user_inputs
@@ -444,6 +491,7 @@ impl UserInputMailbox {
             .filter(|record| {
                 record.recipient_lifecycle == durable.lifecycle
                     && record.status == StagedUserInputStatus::Queued
+                    && (!resuming || resume_intents.contains(&record.input_id))
             })
             .min_by_key(|record| record.sequence)
         else {
@@ -454,16 +502,52 @@ impl UserInputMailbox {
             record.command_id, record.sequence, record.publication_generation
         );
         let ids = vec![record.input_id.clone()];
+        let selection = if resuming {
+            InputSelection::ResumeNewTask
+        } else {
+            InputSelection::Automatic
+        };
         self.publish_selection(
             &command_id,
             compute_fingerprint(("idle", &command_id, &ids)),
             &ids,
-            InputSelection::Automatic,
+            selection,
         )
         .await?;
-        self.state.lock().suspended = false;
+        {
+            let mut state = self.state.lock();
+            state.suspended = false;
+            if resuming {
+                // 发布事务已按新任务恢复会话：解除暂停位与恢复授权。
+                state.paused = false;
+                state.resume_intents.remove(&record.input_id);
+            }
+        }
         *durable.publication_block.lock() = None;
         Ok(true)
+    }
+
+    /// 暂停（Stop/Pause/失败）之后用户明确提交的输入，在无活跃执行时按新任务恢复。
+    /// 暂停之前入队的旧待办不获得该授权，保持等待显式发送。
+    fn resuming_new_task(&self, snapshot: &WorkSnapshot) -> bool {
+        let state = self.state.lock();
+        if !state.valid
+            || state.active.is_some()
+            || snapshot.control.attempt.is_some()
+            || !matches!(
+                snapshot.control.status,
+                ControlStatus::Active | ControlStatus::Paused
+            )
+            || (!state.paused && snapshot.control.status != ControlStatus::Paused)
+            || state.resume_intents.is_empty()
+        {
+            return false;
+        }
+        snapshot.state.staged_user_inputs.values().any(|record| {
+            record.recipient_lifecycle == snapshot.control.lifecycle
+                && record.status == StagedUserInputStatus::Queued
+                && state.resume_intents.contains(&record.input_id)
+        })
     }
 
     fn record_publication_block(&self, reason: PublicationBlock, snapshot: &WorkSnapshot) -> bool {
@@ -583,6 +667,9 @@ impl UserInputMailbox {
                             snapshot.control.attempt.clone(),
                             true,
                         ),
+                        InputSelection::ResumeNewTask => {
+                            (snapshot.control.control_generation, None, true)
+                        }
                         InputSelection::Authorized(_) => unreachable!(),
                     };
                 vec![WorkCommand {
@@ -626,8 +713,14 @@ impl UserInputMailbox {
         for staged in staged {
             let status = match staged.status {
                 StagedUserInputStatus::Queued => UserInputState::Queued,
-                StagedUserInputStatus::Published => continue,
-                StagedUserInputStatus::Withdrawn => UserInputState::Withdrawn,
+                StagedUserInputStatus::Published => {
+                    state.resume_intents.remove(&staged.input_id);
+                    continue;
+                }
+                StagedUserInputStatus::Withdrawn => {
+                    state.resume_intents.remove(&staged.input_id);
+                    UserInputState::Withdrawn
+                }
             };
             let Ok(input) = serde_json::from_str::<UserInput>(&staged.input_json) else {
                 continue;
