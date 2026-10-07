@@ -34,20 +34,23 @@ async fn test_fork_inherits_parent_messages() {
     }
     crate::subagent::test_support::fixture_model_impl!(ForkTestLLM);
 
-    let t = SubAgentTool::new(
-        Arc::new(vec![]),
-        None,
-        Arc::new(move |_: Option<&str>| {
-            crate::subagent::test_support::fixture_source(
-                std::sync::Arc::new(ForkTestLLM {
-                    msg_count: Arc::clone(&msg_capture_clone),
-                }),
-                "fixture-scripted",
-            )
-        }),
-        "/tmp".to_string(),
-    )
-    .with_parent_messages(Arc::clone(&parent_messages));
+    let host = DurableHost::open("fixture-fork-inherit").await;
+    let t = host.bind(
+        SubAgentTool::new(
+            Arc::new(vec![]),
+            None,
+            Arc::new(move |_: Option<&str>| {
+                crate::subagent::test_support::fixture_source(
+                    std::sync::Arc::new(ForkTestLLM {
+                        msg_count: Arc::clone(&msg_capture_clone),
+                    }),
+                    "fixture-scripted",
+                )
+            }),
+            host.cwd.clone(),
+        )
+        .with_parent_messages(Arc::clone(&parent_messages)),
+    );
 
     let result = t
         .invoke(
@@ -55,7 +58,7 @@ async fn test_fork_inherits_parent_messages() {
                 "fork": true,
                 "prompt": "do the thing"
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            host.context(&[]),
         )
         .await
         .unwrap();
@@ -76,7 +79,7 @@ async fn test_fork_inherits_parent_messages() {
 
 /// Fork registers all tools including Agent (no hard-coded exclusion)
 #[tokio::test]
-async fn test_fork_registers_all_tools_including_agent() {
+async fn test_fork_tool_surface_excludes_child_absent_capabilities() {
     let parent_messages: Arc<RwLock<Vec<BaseMessage>>> = Arc::new(RwLock::new(Vec::new()));
 
     let tools_capture: Arc<std::sync::Mutex<Vec<String>>> =
@@ -95,52 +98,74 @@ async fn test_fork_registers_all_tools_including_agent() {
         ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
             use crate::subagent::test_support::*;
             let _ = &cancellation;
-            let messages = base_messages(&request);
             let defined = defined_tools(&request);
             let tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
-
             *self.captured.lock().unwrap() = tools.iter().map(|t| t.name().to_string()).collect();
             text_events("tools-check")
         }
     }
     crate::subagent::test_support::fixture_model_impl!(ToolsCheckLLM);
 
-    let parent_tools = vec![make_tool("Read"), make_tool("Agent")];
-
-    let t = SubAgentTool::new(
-        Arc::new(parent_tools),
-        None,
-        Arc::new(move |_: Option<&str>| {
-            crate::subagent::test_support::fixture_source(
-                std::sync::Arc::new(ToolsCheckLLM {
-                    captured: Arc::clone(&tools_capture_clone),
-                }),
-                "fixture-scripted",
-            )
+    // 父工具面包含子链不具备的扩展面（Agent/AskUser/Workflow/builtin cron）与工作区工具。
+    // cron 依可信 builtin 实例身份排除（不按名字猜）：夹具声明 `builtin_mcp_instance`。
+    let parent_tools: Vec<Arc<dyn BaseTool>> = vec![
+        make_tool("Read"),
+        make_tool("Agent"),
+        make_tool("AskUserQuestion"),
+        make_tool("Workflow"),
+        Arc::new(CapabilityTool {
+            name: "cron_list",
+            builtin_instance: Some("cron"),
         }),
-        "/tmp".to_string(),
-    )
-    .with_parent_messages(parent_messages);
+    ];
+
+    let host = DurableHost::open("fixture-fork-tools").await;
+    let t = host.bind(
+        SubAgentTool::new(
+            Arc::new(parent_tools),
+            None,
+            Arc::new(move |_: Option<&str>| {
+                crate::subagent::test_support::fixture_source(
+                    std::sync::Arc::new(ToolsCheckLLM {
+                        captured: Arc::clone(&tools_capture_clone),
+                    }),
+                    "fixture-scripted",
+                )
+            }),
+            host.cwd.clone(),
+        )
+        .with_parent_messages(parent_messages),
+    );
 
     t.invoke(
         serde_json::json!({
             "fork": true,
             "prompt": "check tools"
         }),
-        peri_agent::tools::ToolContext::new(&[], "."),
+        host.context(&[]),
     )
     .await
     .unwrap();
 
     let captured = tools_capture.lock().unwrap();
+    // 子链能力收缩（H1/fork 继承策略）：扩展面不得进入子请求工具面，
+    // 而 deferred 元工具与工作区工具保持可用（同一 tool_filter 派生）。
+    for excluded in ["Agent", "AskUserQuestion", "Workflow", "cron_list"] {
+        assert!(
+            !captured.iter().any(|name| name == excluded),
+            "{excluded} 不得进入 fork 工具面, got: {:?}",
+            *captured
+        );
+    }
     assert!(
-        captured.contains(&"Agent".to_string()),
-        "Fork should register Agent tool (no exclusion), got: {:?}",
+        captured.contains(&"Read".to_string()),
+        "Fork 应保留工作区工具, got: {:?}",
         *captured
     );
     assert!(
-        captured.contains(&"Read".to_string()),
-        "Fork should register Read tool, got: {:?}",
+        captured.contains(&"SearchExtraTools".to_string())
+            && captured.contains(&"ExecuteExtraTool".to_string()),
+        "Fork 应保留 deferred 元工具, got: {:?}",
         *captured
     );
 }
@@ -148,7 +173,8 @@ async fn test_fork_registers_all_tools_including_agent() {
 /// Fork without parent_messages succeeds with empty ToolContext messages
 #[tokio::test]
 async fn test_fork_without_parent_messages_returns_error() {
-    let t = make_subagent_tool(vec![]);
+    let host = DurableHost::open("fixture-fork-empty").await;
+    let t = host.bind(make_subagent_tool(vec![]));
 
     // Fork 现在从 ToolContext 获取消息（而非 self.parent_messages），
     // 空消息也是合法输入。
@@ -158,7 +184,7 @@ async fn test_fork_without_parent_messages_returns_error() {
                 "fork": true,
                 "prompt": "do something"
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            host.context(&[]),
         )
         .await;
     assert!(
@@ -175,26 +201,32 @@ async fn test_fork_system_prompt_consistent() {
     let parent_messages: Arc<RwLock<Vec<BaseMessage>>> = Arc::new(RwLock::new(Vec::new()));
 
     let model = super::mock_model::RecordingModel::new("sys-check");
-    let t = SubAgentTool::new(
-        Arc::new(vec![]),
-        None,
-        Arc::new({
-            let model = Arc::clone(&model);
-            move |_: Option<&str>| {
-                SubagentLlmSource::model(model.clone() as Arc<dyn peri_model::Model>, "mock-model")
-            }
-        }),
-        "/tmp".to_string(),
-    )
-    .with_parent_messages(parent_messages)
-    .with_system_builder(Arc::new(|_ov, _cwd| "FORK-TEST-SYSTEM".to_string()));
+    let host = DurableHost::open("fixture-fork-system").await;
+    let t = host.bind(
+        SubAgentTool::new(
+            Arc::new(vec![]),
+            None,
+            Arc::new({
+                let model = Arc::clone(&model);
+                move |_: Option<&str>| {
+                    SubagentLlmSource::model(
+                        model.clone() as Arc<dyn peri_model::Model>,
+                        "mock-model",
+                    )
+                }
+            }),
+            host.cwd.clone(),
+        )
+        .with_parent_messages(parent_messages)
+        .with_system_builder(Arc::new(|_ov, _cwd| "FORK-TEST-SYSTEM".to_string())),
+    );
 
     t.invoke(
         serde_json::json!({
             "fork": true,
             "prompt": "check system"
         }),
-        peri_agent::tools::ToolContext::new(&[], "."),
+        host.context(&[]),
     )
     .await
     .unwrap();
@@ -219,26 +251,32 @@ async fn test_fork_identity_is_projected_not_parent_bytes() {
     let parent_messages: Arc<RwLock<Vec<BaseMessage>>> = Arc::new(RwLock::new(Vec::new()));
 
     let model = super::mock_model::RecordingModel::new("frozen-check");
-    let t = SubAgentTool::new(
-        Arc::new(vec![]),
-        None,
-        Arc::new({
-            let model = Arc::clone(&model);
-            move |_: Option<&str>| {
-                SubagentLlmSource::model(model.clone() as Arc<dyn peri_model::Model>, "mock-model")
-            }
-        }),
-        "/tmp".to_string(),
-    )
-    .with_parent_messages(parent_messages)
-    .with_system_builder(Arc::new(|_ov, _cwd| "BUILDER-SYSTEM-PROMPT".to_string()));
+    let host = DurableHost::open("fixture-fork-identity").await;
+    let t = host.bind(
+        SubAgentTool::new(
+            Arc::new(vec![]),
+            None,
+            Arc::new({
+                let model = Arc::clone(&model);
+                move |_: Option<&str>| {
+                    SubagentLlmSource::model(
+                        model.clone() as Arc<dyn peri_model::Model>,
+                        "mock-model",
+                    )
+                }
+            }),
+            host.cwd.clone(),
+        )
+        .with_parent_messages(parent_messages)
+        .with_system_builder(Arc::new(|_ov, _cwd| "BUILDER-SYSTEM-PROMPT".to_string())),
+    );
 
     t.invoke(
         serde_json::json!({
             "fork": true,
             "prompt": "check projected prefix"
         }),
-        peri_agent::tools::ToolContext::new(&[], "."),
+        host.context(&[]),
     )
     .await
     .unwrap();
@@ -252,14 +290,17 @@ async fn test_fork_identity_is_projected_not_parent_bytes() {
         !system.contains("FROZEN-PARENT-SYSTEM-PROMPT"),
         "不能继承父冻结字节, got: {system}"
     );
-    // 身份恰一次：对话体不应再出现身份文本（H1 起不写 transcript）。
+    // 身份恰一次：只出现在 bridge base system；非 system 消息（对话体）不得再出现
+    // 身份文本（H1 起不写 transcript）。`conversation_texts` 以 "[system]" 前缀
+    // 标记 system 条目，这里显式排除后计数。
     let texts = super::mock_model::conversation_texts(&model.last_messages());
+    let non_system_identity = texts
+        .iter()
+        .filter(|text| !text.starts_with("[system]"))
+        .filter(|text| text.contains("BUILDER-SYSTEM-PROMPT"))
+        .count();
     assert_eq!(
-        texts
-            .iter()
-            .filter(|text| text.contains("BUILDER-SYSTEM-PROMPT"))
-            .count(),
-        0,
+        non_system_identity, 0,
         "identity must appear exactly once (base system only): {texts:?}"
     );
 }
@@ -296,27 +337,30 @@ async fn test_fork_directive_includes_rules() {
     }
     crate::subagent::test_support::fixture_model_impl!(DirectiveCheckLLM);
 
-    let t = SubAgentTool::new(
-        Arc::new(vec![]),
-        None,
-        Arc::new(move |_: Option<&str>| {
-            crate::subagent::test_support::fixture_source(
-                std::sync::Arc::new(DirectiveCheckLLM {
-                    last: Arc::clone(&last_capture_clone),
-                }),
-                "fixture-scripted",
-            )
-        }),
-        "/tmp".to_string(),
-    )
-    .with_parent_messages(parent_messages);
+    let host = DurableHost::open("fixture-fork-directive").await;
+    let t = host.bind(
+        SubAgentTool::new(
+            Arc::new(vec![]),
+            None,
+            Arc::new(move |_: Option<&str>| {
+                crate::subagent::test_support::fixture_source(
+                    std::sync::Arc::new(DirectiveCheckLLM {
+                        last: Arc::clone(&last_capture_clone),
+                    }),
+                    "fixture-scripted",
+                )
+            }),
+            host.cwd.clone(),
+        )
+        .with_parent_messages(parent_messages),
+    );
 
     t.invoke(
         serde_json::json!({
             "fork": true,
             "prompt": "my directive task"
         }),
-        peri_agent::tools::ToolContext::new(&[], "."),
+        host.context(&[]),
     )
     .await
     .unwrap();

@@ -109,6 +109,36 @@ impl Model for RecordingModel {
         }
     }
 
+    /// v2 stages 走 durable prepared 路径：冻结请求（捕获于此）并在 start 时
+    /// 惰性产出 Completed 流（取消可中断）。
+    fn prepare_stream(&self, request: ModelRequest) -> ModelResult<peri_model::PreparedModelCall> {
+        *self.calls.lock().unwrap() += 1;
+        self.requests.lock().unwrap().push(request.clone());
+        let answer = self.answer.clone();
+        let checkpoint = serde_json::json!({
+            "provider": "fixture-capture",
+            "model": "capture-model",
+            "endpoint": "https://fixture.invalid/messages",
+            "credentialRef": "fixture:no-credentials",
+            "body": request,
+        });
+        Ok(peri_model::PreparedModelCall::new(
+            checkpoint,
+            move |cancellation| {
+                let response = ModelResponse::new(
+                    ModelMessage::assistant_text(answer),
+                    StopReason::EndTurn,
+                    None,
+                    None,
+                )?;
+                Ok(ModelStream::with_parent_cancellation(
+                    futures::stream::iter(vec![Ok(ModelStreamEvent::Completed(response))]),
+                    cancellation,
+                ))
+            },
+        ))
+    }
+
     async fn stream(
         &self,
         request: ModelRequest,

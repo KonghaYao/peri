@@ -587,6 +587,83 @@ impl SessionFixture {
         }
     }
 
+    /// 在父会话 work state 登记一条受信 invocation（durable 委派的前置事实）。
+    ///
+    /// 与生产同源的 WorkAction：`PrepareInvocation` 建立 intent，`BindResourceOwners`
+    /// 记录授权引用；revision 冲突按真实语义重试。
+    pub(crate) async fn prepare_invocation(&self, parent_id: &str, invocation_id: &str) {
+        use peri_acp_types::session_resources::work::{
+            InvocationIntent, WorkAction, WorkCommand, WorkDecision, WorkQuery, WorkRejection,
+        };
+        use sha2::{Digest, Sha256};
+
+        let mut commands = Vec::new();
+        let arguments = "{}".to_owned();
+        let digest = format!("{:x}", Sha256::digest(arguments.as_bytes()));
+        commands.push(WorkAction::PrepareInvocation {
+            expected_revision: 0,
+            intent: InvocationIntent {
+                invocation_id: invocation_id.into(),
+                tool_call_id: format!("model-call:{invocation_id}"),
+                tool_name: "Agent".into(),
+                arguments_json: arguments.clone(),
+                arguments_digest: digest.clone(),
+                effective_tool_name: "Agent".into(),
+                effective_arguments_json: arguments,
+                effective_arguments_digest: digest,
+                owner_identity: "fixture-agent-owner".into(),
+                scope_id: parent_id.into(),
+                scope_epoch: None,
+                authorization_ref: "fixture-delegation-authorization".into(),
+                recovery_locator: format!("fixture-delegation:{invocation_id}"),
+            },
+        });
+        commands.push(WorkAction::BindResourceOwners {
+            expected_revision: 0,
+            connections_json: "{}".into(),
+            authorization_ref: "fixture-delegation-authorization".into(),
+        });
+
+        for (index, mut action) in commands.into_iter().enumerate() {
+            loop {
+                let snapshot = self
+                    .resources
+                    .load_session_work(&WorkQuery {
+                        session_id: parent_id.to_owned(),
+                        limit: 1,
+                    })
+                    .await
+                    .unwrap();
+                match &mut action {
+                    WorkAction::PrepareInvocation {
+                        expected_revision, ..
+                    }
+                    | WorkAction::BindResourceOwners {
+                        expected_revision, ..
+                    } => *expected_revision = snapshot.state.revision,
+                    _ => unreachable!("fixture invocation actions"),
+                }
+                let mut command = WorkCommand {
+                    session_id: parent_id.to_owned(),
+                    recipient_lifecycle: snapshot.control.lifecycle,
+                    mutation_id: format!("fixture-invocation:{invocation_id}:{index}"),
+                    action: action.clone(),
+                };
+                command.mutation_id =
+                    format!("{}:{}", command.mutation_id, command.digest().unwrap());
+                let receipt = self.resources.apply_work_mutation(&command).await.unwrap();
+                assert_eq!(receipt.session_id, command.session_id);
+                match receipt.decision {
+                    WorkDecision::Accepted => break,
+                    WorkDecision::Rejected {
+                        reason: WorkRejection::StaleRevision,
+                    } => continue,
+                    decision => panic!("fixture invocation mutation rejected: {decision:?}"),
+                }
+            }
+        }
+    }
+
     /// 门面句柄（`.with_session_resources(...)` / `SubagentHost` 注入用）。
     pub(crate) fn facade(&self) -> Arc<dyn SessionResources> {
         Arc::clone(&self.resources)
@@ -698,6 +775,191 @@ impl SessionFixture {
             .list_session_tree(id)
             .await
             .map_err(|error| anyhow::anyhow!("{error}"))
+    }
+}
+
+/// 测试用 SDK admission 端口：从子会话真实 work snapshot 签发一次性 ticket
+/// （与生产 `ExecutionAdmissionPort` 契约同形；不预置 admission、不绕过登记）。
+pub(crate) struct TestAdmissionPort(pub(crate) Arc<dyn SessionResources>);
+
+#[async_trait::async_trait]
+impl peri_acp_types::execution_admission::ExecutionAdmissionPort for TestAdmissionPort {
+    async fn admit(
+        &self,
+        request: peri_acp_types::execution_admission::AdmissionRequest,
+    ) -> Result<
+        peri_acp_types::execution_admission::AdmissionOutcome,
+        peri_acp_types::execution_admission::ExecutionAdmissionError,
+    > {
+        use peri_acp_types::execution_admission::AdmissionOutcome;
+        use peri_acp_types::session_resources::work::WorkAdmission;
+        let snapshot = request.snapshot;
+        if snapshot.control.attempt.is_some() {
+            return Ok(AdmissionOutcome::Busy);
+        }
+        let Some(candidate) = snapshot.candidates.first() else {
+            return Ok(AdmissionOutcome::Blocked {
+                reason: "fixture has no actionable durable work".into(),
+            });
+        };
+        Ok(AdmissionOutcome::Admitted {
+            admission: WorkAdmission {
+                session_id: snapshot.session_id,
+                admission_id: request.request_id,
+                instance_id: "fixture-sdk-instance".into(),
+                generation_id: "fixture-sdk-generation".into(),
+                lifecycle: snapshot.control.lifecycle,
+                control_generation: snapshot.control.control_generation,
+                work_id: candidate.work_id.clone(),
+                work_revision: candidate.work_revision,
+                execution: peri_acp_types::session_resources::ControlAttempt {
+                    turn_id: peri_acp_types::session::TurnId::new(),
+                    attempt_id: peri_acp_types::identity::AttemptId::new(),
+                },
+            },
+        })
+    }
+
+    async fn entered(
+        &self,
+        request: peri_acp_types::execution_admission::EntryRequest,
+    ) -> Result<
+        peri_acp_types::execution_admission::EntryOutcome,
+        peri_acp_types::execution_admission::ExecutionAdmissionError,
+    > {
+        use peri_acp_types::execution_admission::{EntryOutcome, EntryReceipt};
+        use peri_acp_types::session_resources::work::WorkQuery;
+        // 协作式 SDK 夹具：以真实 work state 校验 admission 身份与 entry 证据，
+        // 合法时确认进入（相当于 SDK 侧 ACK），不预置状态、不跳过生产登记。
+        let snapshot = self
+            .0
+            .load_session_work(&WorkQuery {
+                session_id: request.admission.session_id.clone(),
+                limit: 1,
+            })
+            .await
+            .map_err(|error| {
+                peri_acp_types::execution_admission::ExecutionAdmissionError::Protocol(
+                    error.to_string(),
+                )
+            })?;
+        let Some(registration) = snapshot
+            .state
+            .admissions
+            .get(&request.admission.admission_id)
+        else {
+            return Ok(EntryOutcome::NotApplied);
+        };
+        if registration.admission != request.admission {
+            return Err(
+                peri_acp_types::execution_admission::ExecutionAdmissionError::Protocol(
+                    "entry admission identity mismatch".into(),
+                ),
+            );
+        }
+        if let Some(receipt) = &registration.entering_receipt {
+            if receipt.mutation_id != request.entry_evidence_id {
+                return Err(
+                    peri_acp_types::execution_admission::ExecutionAdmissionError::Protocol(
+                        "entry evidence does not match registered admission".into(),
+                    ),
+                );
+            }
+        }
+        Ok(EntryOutcome::Applied {
+            receipt: EntryReceipt {
+                admission: request.admission,
+                entry_evidence_id: request.entry_evidence_id,
+            },
+        })
+    }
+
+    async fn settle(
+        &self,
+        request: peri_acp_types::execution_admission::SettlementRequest,
+    ) -> Result<
+        peri_acp_types::execution_admission::SettlementOutcome,
+        peri_acp_types::execution_admission::ExecutionAdmissionError,
+    > {
+        use peri_acp_types::execution_admission::{SettlementOutcome, SettlementReceipt};
+        Ok(SettlementOutcome::Applied {
+            receipt: SettlementReceipt {
+                admission: request.admission,
+                evidence_id: request.proof.evidence_id().to_string(),
+            },
+        })
+    }
+}
+
+/// 耐久宿主：真门面 + 已绑定/frozen 的父会话 + 已登记的可信 invocation。
+///
+/// 生产 `publish_work_delegation` 要求：父工具有会话资源、父工作区有 Active 控制记录、
+/// 父 work state 中存在受信 invocation，且子会话 work state 可接纳——本夹具按真实
+/// 门面（SQLite）建立这些事实，不放宽生产准入、不引入测试替身绕过。
+pub(crate) struct DurableHost {
+    pub(crate) _dir: tempfile::TempDir,
+    pub(crate) fixture: SessionFixture,
+    pub(crate) parent_id: ThreadId,
+    pub(crate) invocation_id: String,
+    pub(crate) cwd: String,
+}
+
+impl DurableHost {
+    pub(crate) async fn open(invocation_id: &str) -> Self {
+        let dir = tempdir().unwrap();
+        let fixture = SessionFixture::open_in(dir.path()).await;
+        let cwd = fixture.workspace_cwd();
+        let parent_id = fixture
+            .create_thread(ThreadMeta::new_at(cwd.clone(), peri_time::now_wall()))
+            .await
+            .expect("建立父会话失败");
+        fixture.prepare_invocation(&parent_id, invocation_id).await;
+        Self {
+            _dir: dir,
+            fixture,
+            parent_id,
+            invocation_id: invocation_id.to_string(),
+            cwd,
+        }
+    }
+
+    /// 把真门面、父会话（含 SubagentHost）、SDK admission 端口装到工具上。
+    ///
+    /// 生产子链的宿主来自父 session 的 `SubagentHost`（`attach_subagent_host`
+    /// 注入的资源门面 / admission 端口 / 任务通道），因此夹具按同一装配面建立
+    /// 父 session 并注入 host，而不是只在工具字段上兜底。
+    pub(crate) fn bind(&self, tool: SubAgentTool) -> SubAgentTool {
+        use peri_agent::session::subagent::SubagentHost;
+        let session = peri_agent::session::Session::new(
+            std::sync::Arc::from(self.cwd.as_str()),
+            peri_agent::session::FrozenContext::builder().build(),
+            Some(self.parent_id.clone()),
+        );
+        let mut host = SubagentHost {
+            session_resources: Some(self.fixture.facade()),
+            execution_admission_port: Some(Arc::new(TestAdmissionPort(self.fixture.facade()))),
+            task_manager: Some(Arc::new(peri_agent::agent::async_tasks::TaskManager::new())),
+            ..Default::default()
+        };
+        host.parent_thread_id = Some(self.parent_id.clone());
+        session.set_subagent_host(host);
+        let mut tool = tool
+            .with_session_resources(self.fixture.facade())
+            .with_parent_thread_id(self.parent_id.clone())
+            .with_parent_session(session);
+        // 工具默认 cwd 与父会话绑定工作区一致，避免 ExecutionBindingMismatch。
+        tool.parent_cwd = self.cwd.clone();
+        tool
+    }
+
+    /// 带可信 invocation 的调用上下文（durable dispatch 语义）。
+    pub(crate) fn context<'a>(
+        &'a self,
+        messages: &'a [BaseMessage],
+    ) -> peri_agent::tools::ToolContext<'a> {
+        let mut ctx = peri_agent::tools::ToolContext::new(messages, &self.cwd);
+        ctx.invocation_id = Some(self.invocation_id.clone());
+        ctx
     }
 }
 
