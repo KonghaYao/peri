@@ -27,4 +27,4 @@ WASM 依赖图按平台排除 SQLx、进程执行、stdio 和本地工具 MCP pa
 
 Peri CF 独立构建 `peri-wasm --features cloudflare`，限制线性内存最大 64 MiB 并记录源码/锁文件/工具链/参数/产物 provenance，SDK 默认构建不变。模型 Fetch adapter 只更换传输，不更换提供商与 ACP 规则；Store 网络仍走既有路径。Emscripten 不支持命令 hook，显式失败而非放行；Skill preload registry 查询避免 `spawn_blocking`。应用 isolate 准入、实际退出证明及 WASM 资源查询见 Peri CF 索引，不以超时或账本存在代替退出证明。
 
-此前合入 CF 的目标构建、链接与 smoke 记录仅覆盖当时的恢复协议，不能替代删除恢复后的验收。2026-10-07 合并复验时，Emscripten check 被目标分支既有的锁文件阻断：解析到 registry `mio 1.2.4`，而 `1.2.3` Emscripten patch 未使用；失败发生在依赖，未验证当前 WASM crate 或链接。本轮不修改该无关锁文件。`scripts/cargo-wasm.sh` 使用 Emscripten 平台补丁；构建条件见 [`peri-wasm/README.md`](../../peri-wasm/README.md)，后续须修正依赖后重跑目标构建及消费端测试。Hosted Workers 尚未部署验收。
+此前合入 CF 的目标构建、链接与 smoke 记录仅覆盖当时的恢复协议，不能替代删除恢复后的验收。2026-10-07 合并复验曾被锁文件的 registry `mio 1.2.4` 阻断，其 Git `1.2.3` Emscripten patch 未使用。后续用户授权补丁修复，已定向锁回固定 Git tag，补丁解析回归及 `scripts/cargo-wasm.sh check --locked --offline --target wasm32-unknown-emscripten -p peri-wasm --features cloudflare` 通过；存在平台条件下的 unused/dead-code 警告。此次只验证目标类型检查，未验证 release 链接、JS 产物或 SDK/CF 消费端 E2E，不推断旧恢复协议兼容。构建条件见 [`peri-wasm/README.md`](../../peri-wasm/README.md)。Hosted Workers 尚未部署验收。

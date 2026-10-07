@@ -203,3 +203,22 @@ schema18 远端验证采用 SQLite-backed RemoteTransport，不是实际 Turso �
 - 日志为隔离工作树 `target/removal-merge-{native-check,history-test,schema18-test,cancel-test,wasm-check}.log`，不提交构建产物；格式、源码大小、根 CLAUDE 6006字节/71行及修改 Markdown 本地链接检查通过。
 - WASM check 使用 `scripts/cargo-wasm.sh check --locked --offline --target wasm32-unknown-emscripten -p peri-wasm --features cloudflare`，在 `mio` 依赖失败；目标分支原 HEAD 已锁定 registry `mio 1.2.4`，其 `1.2.3` Emscripten patch 未使用。本轮未修改该无关锁文件，未到达当前 WASM crate 或链接验收。
 - 未访问真实用户库，未push；备份分支和stash保留，不做全库迁移、WASM E2E或SDK兼容修复。
+
+## 8. 后续授权：补丁失效修复
+
+用户要求处理上述补丁问题；仍在隔离 worktree 修复并验证，再同步原分支。
+
+- 根因是锁文件选择 registry `mio 1.2.4`，而固定 Git `1.2.3-cf.emscripten` 留在 `patch.unused`；原补丁回归在仓库内外两个 cwd 均复现失败。
+- 经 `./scripts/cargo-rmcp-patched.sh update --offline -p mio@1.2.4 --precise 1.2.3` 定向修正；Mio 固定到 Git commit `0788dbb67883cb6191503af999471def54e3fb77`，移除闲置补丁项。
+- 固定 Mio 的传递依赖引入 Git libc `0.2.190`（`7b0ab5528dc7f361f3a0b4c06c2cad9971617f75`），保留原 registry libc `0.2.189`；Cargo 重新规范依赖引用，核对 package identities 无其他包版本升级。
+- `scripts/test-cargo-patches.py` 扩展为本机/Emscripten × 仓库内外 cwd 四种解析场景；检查版本、Git/local 来源、实际 resolve nodes、无 unused-patch 警告，以及 `--locked` 不改锁文件。
+- 补丁修复说明与 WASM code-index 已同步；未修改 SDK/CF 消费端协议、数据库结构或业务代码，不删除缓存或移除 `--locked` 绕过错误。
+
+| 验证命令 | 实际结果 |
+| --- | --- |
+| `python3 scripts/test-cargo-patches.py` | 1 test，4 subtest 场景全部通过 |
+| `./scripts/cargo-wasm.sh check --locked --offline --target wasm32-unknown-emscripten -p peri-wasm --features cloudflare` | 通过，到达 peri-wasm；保留平台 unused/dead-code 警告，无闲置补丁警告 |
+| `./scripts/cargo-rmcp-patched.sh check --locked --offline -p peri-tui -p peri-resources --tests` | 通过，无闲置补丁警告 |
+
+日志：隔离树 `target/patch-lock-regression-{before,after}.log`、`target/patch-fixed-{wasm,native}-check.log`；不提交构建产物。
+WASM 结果为目标编译检查，不是 release 链接、JS 产物、SDK 兼容或 CF E2E 验收。
