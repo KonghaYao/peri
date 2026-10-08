@@ -168,38 +168,37 @@ pub(crate) async fn run_cron_continuation_scheduler(
         let cfg = Arc::clone(&cfg);
         let transport = Arc::clone(&transport);
         let cont_tx = Arc::clone(&cont_tx);
-        let _ = task_spawner.spawn(
+        let spawn_session = req.session_id.clone();
+        let admitted = task_spawner.spawn(
             HostTaskOwnerKind::Session,
             HostTaskKind::ContinuationTurn,
             async move {
-                let Ok(permission_mode) = scheduled_permission_mode(&cfg, &sessions, &req.session_id).await else {
-                    return;
-                };
-                let broker = super::prompt::build_transport_broker(&transport, &req.session_id);
-                if !super::prompt::approve_scheduled_trigger(
-                    permission_mode.as_ref(),
-                    Some(&broker),
-                    &req.trigger.task_id,
-                    &req.trigger.prompt,
-                )
-                .await
-                {
-                    info!(session_id = %req.session_id, task_id = %req.trigger.task_id, "cron trigger rejected");
-                    return;
+                let environment = sessions.lock().await.get(&req.session_id).and_then(|state| state.environment.clone());
+                let deployment = environment.as_ref().map(|env| &env.cfg).unwrap_or(&cfg);
+                match super::execution::approve_schedule(&req, &sessions, &locks, deployment, &transport).await {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        info!(session_id = %req.session_id, task_id = %req.trigger.task_id, "cron trigger rejected or cancelled");
+                        return;
+                    }
+                    Err(error) => {
+                        tracing::error!(session_id = %req.session_id, code = error.code, error = %error.message, "cron approval failed");
+                        return;
+                    }
                 }
                 let epoch = {
                     let mut sessions = sessions.lock().await;
                     let Some(state) = sessions.get_mut(&req.session_id) else { return };
-                    let Some(current_inbox) = cfg.session_manager.v2_queue_for(&req.session_id) else { return };
+                    let Some(current_inbox) = deployment.session_manager.v2_queue_for(&req.session_id) else { return };
                     if !current_inbox.subscribe_wake().same_channel(&req.inbox.subscribe_wake()) { return; }
-                    if state.closing || !enqueue_cron_trigger(&cfg, &req.session_id, &req.trigger)
+                    if state.closing || !enqueue_cron_trigger(deployment, &req.session_id, &req.trigger)
                     {
                         return;
                     }
                     state.continuation_mq_steering_pending = true;
                     state.continuation_epoch
                 };
-                let _ = dispatch_prompt_turn(
+                let result = dispatch_prompt_turn(
                     continuation_params(&req.session_id),
                     super::PromptOrigin::Scheduled,
                     Some(epoch),
@@ -210,6 +209,9 @@ pub(crate) async fn run_cron_continuation_scheduler(
                     cont_tx.as_ref(),
                 )
                 .await;
+                if let Err(error) = result {
+                    tracing::error!(session_id = %req.session_id, code = error.code, error = %error.message, "cron dispatch failed");
+                }
                 super::user_input::schedule_mailbox(
                     &req.session_id,
                     &sessions,
@@ -220,6 +222,9 @@ pub(crate) async fn run_cron_continuation_scheduler(
                 );
             },
         );
+        if let Err(error) = admitted {
+            tracing::error!(session_id = %spawn_session, error = ?error, "cron task admission failed");
+        }
     }
 }
 

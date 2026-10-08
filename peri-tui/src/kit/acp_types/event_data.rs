@@ -78,6 +78,9 @@ pub enum AcpEventData {
     PromptSubmitted {
         request_id: Option<String>,
     },
+    ExecutionStarted {
+        request_id: String,
+    },
 
     /// Root-agent usage observation for one model request. Auxiliary agent updates
     /// are filtered by the notifier. `Some` includes an explicit zero cache read;
@@ -92,6 +95,11 @@ pub enum AcpEventData {
 
     /// `"turn-done"` -- agent finished this turn (Streaming -> Idle).
     TurnDone,
+
+    /// `peri/agent_event_done` retains the execution identity for bridge settlement.
+    AgentDone {
+        request_id: Option<String>,
+    },
 
     /// `"turn-interrupted"` -- agent was interrupted (user cancel / timeout).
     /// `request_id` 为被中断 turn 的 prompt requestId（服务器经
@@ -112,14 +120,19 @@ pub enum AcpEventData {
         text: String,
     },
 
-    /// TUI 内部事件：本地 loading 复位请求（cancel / /clear / prompt 失败
-    /// 兜底时由 submit_consumer 发出）。仅 TUI 内部使用，不走 ACP 协议。
+    /// TUI 内部事件：`/clear` 失败后的 loading 复位请求。
+    /// 仅 TUI 内部使用，不走 ACP 协议。
     /// bridge 收到后若 phase == PromptRunning 则复位为 Idle 并重推 ACP_STATE
     /// ——与直接写 ACP_STATE.is_loading 的兜底互补：兜底覆盖 bridge 已退出的
-    /// shutdown 路径，本事件覆盖 bridge 存活时 phase 派生覆盖（cancel 后迟到
+    /// shutdown 路径，本事件覆盖 bridge 存活时 phase 派生覆盖（复位后迟到
     /// 事件触发 push_acp_state 会用 phase 重算 is_loading=true，造成闪回）。
     /// 幂等：phase 非 PromptRunning 时 no-op（Issue 2026-08-05 S4.2）。
     LocalLoadingReset,
+
+    /// A failed local prompt RPC may only reset its own execution.
+    PromptFailed {
+        request_id: String,
+    },
 
     /// bg agent 完成回调 user bubble——要求先 flush current_turn 到 committed，
     /// 再 push 自身。与 LocalUserBubble 的纯追加不同，此变体主动切分视觉 turn：

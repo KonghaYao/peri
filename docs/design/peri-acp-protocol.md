@@ -150,6 +150,8 @@ ACP 事件映射 / EventSink
 
 ## 4. 事件目录
 
+`peri/agent_event` 的 `ExecutionStarted` DTO 包含 `generation`（当前 session mailbox 代际）与 `request_id`（实际宿主 attempt 的非空身份）。它先于该 attempt 的权限请求与提问送达；对应 `peri/agent_event_done.requestId` 只关闭相同身份。该开始事件不要求用户输入队列能力开启，不代表输入已 claim。内部 continuation 与定时审批也遵循此契约；定时审批和之后执行各有独立身份。managed 用户输入仍使用原有 `UserInputRunStarted`，两者归约到同一客户端执行生命周期。
+
 ### 4.1 流式事件（高频，每秒数十次）
 
 > **已迁移至标准 ACP `session/update` 通道**。以下事件不再走 `peri/unstable_event`，改由 `map_event()` Category ① 映射为标准 ACP `SessionUpdate` 通知（`ContentChunk` / `ToolCall` / `ToolCallUpdate`）。TUI 侧通过 `acp_notifier.rs` 的 `handle_session_update` 处理。

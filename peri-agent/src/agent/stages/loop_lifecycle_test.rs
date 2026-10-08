@@ -196,6 +196,13 @@ async fn test_run_react_loop_idle_dispatches_queued_prompts_one_at_a_time() {
     assert!(mailbox.snapshot().items.is_empty());
     let mut delivered = Vec::new();
     while let Ok(event) = handles.render_rx.try_recv() {
+        assert!(
+            !matches!(
+                event,
+                crate::agent::events_v2::RenderEvent::TurnSuspended { .. }
+            ),
+            "已有可执行 prompt 时不发布虚假的挂起状态"
+        );
         if let crate::agent::events_v2::RenderEvent::UserInputDelivered { input_id, .. } = event {
             delivered.push(input_id);
         }
@@ -204,15 +211,6 @@ async fn test_run_react_loop_idle_dispatches_queued_prompts_one_at_a_time() {
         delivered, input_ids,
         "聊天投递事件按稳定输入 ID 顺序发射且无重复"
     );
-    while let Ok(event) = handles.state_rx.try_recv() {
-        assert!(
-            !matches!(
-                event,
-                crate::agent::events_v2::StateEvent::TurnSuspended { .. }
-            ),
-            "已有可执行 prompt 时不发布虚假的挂起状态"
-        );
-    }
 }
 
 #[tokio::test]

@@ -392,28 +392,6 @@ async fn assert_background_tail_completion(outcome: TailOutcome, panic_forwarder
     let spawned = SessionFactory::spawn_subagent(None, config)
         .await
         .expect("后台注册成功");
-    if panic_forwarder {
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_secs(5), complete_rx)
-                .await
-                .unwrap()
-                .is_err()
-        );
-        assert_eq!(manager.active_count(), 1);
-        assert!(matches!(
-            manager.list_tasks()[0].1,
-            BackgroundTaskStatus::Running
-        ));
-        assert_eq!(bridge_stops.load(std::sync::atomic::Ordering::SeqCst), 0);
-        let mut receiver = event_rx.lock();
-        while let Ok(event) = receiver.try_recv() {
-            assert!(!matches!(
-                event,
-                ExecutorEvent::SubagentStopped { .. } | ExecutorEvent::BackgroundTaskCompleted(_)
-            ));
-        }
-        return;
-    }
     let (result, events, active_at_callback) =
         tokio::time::timeout(std::time::Duration::from_secs(5), complete_rx)
             .await
@@ -422,11 +400,13 @@ async fn assert_background_tail_completion(outcome: TailOutcome, panic_forwarder
     assert_eq!(active_at_callback, 1, "通知先于 TaskManager 终态");
     assert_eq!(manager.active_count(), 0, "真实执行收尾后任务结束");
     let turns = lifecycle_turns.lock();
-    assert_eq!(turns.len(), 2);
-    assert_eq!(
-        turns[0], turns[1],
-        "Started/Stopped use the same current turn"
-    );
+    assert_eq!(turns.len(), if panic_forwarder { 1 } else { 2 });
+    if !panic_forwarder {
+        assert_eq!(
+            turns[0], turns[1],
+            "Started/Stopped use the same current turn"
+        );
+    }
     drop(turns);
     assert_eq!(
         result.child_thread_id.as_deref(),
@@ -506,7 +486,21 @@ async fn assert_background_tail_completion(outcome: TailOutcome, panic_forwarder
         );
     }
     if panic_forwarder && matches!(outcome, TailOutcome::Completed) {
-        assert!(result.output.contains("An internal error occurred"));
+        assert!(result.output.contains("Subagent event forwarding failed"));
+        assert_eq!(
+            result
+                .subagent_failure
+                .as_ref()
+                .map(|failure| failure.child_thread_id()),
+            Some(spawned.child_thread_id.as_str())
+        );
+        assert!(matches!(
+            &events[stop_index],
+            ExecutorEvent::SubagentStopped {
+                subagent_failure: Some(failure),
+                ..
+            } if failure.child_thread_id() == spawned.child_thread_id
+        ));
     }
 }
 
@@ -535,6 +529,11 @@ async fn test_spawn_subagent_background_forwarder_panic_is_failure() {
 #[tokio::test(flavor = "current_thread")]
 async fn test_spawn_subagent_background_forwarder_panic_preserves_model_failure() {
     assert_background_tail_completion(TailOutcome::ModelError, true).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_spawn_subagent_background_forwarder_panic_preserves_cancellation() {
+    assert_background_tail_completion(TailOutcome::Cancelled, true).await;
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -570,16 +569,18 @@ async fn test_spawn_subagent_sync_forwarder_panic_is_failure() {
         events
             .lock()
             .iter()
-            .filter(|event| matches!(event, ExecutorEvent::SubagentStopped { .. }))
+            .filter(|event| matches!(event, ExecutorEvent::SubagentStopped { is_error: true, .. }))
             .count(),
-        0
+        1
     );
-    assert!(store
-        .load_meta(&child_id.to_owned())
-        .await
-        .unwrap()
-        .agent_status
-        .is_active());
+    assert_eq!(
+        store
+            .load_meta(&child_id.to_owned())
+            .await
+            .unwrap()
+            .agent_status,
+        AgentStatus::Error
+    );
 }
 
 struct TerminalPanicBridge;
@@ -615,18 +616,24 @@ async fn test_spawn_subagent_terminal_bridge_panic_is_failure() {
         .to_string()
         .contains("Subagent terminal event forwarding failed"));
     assert!(error.to_string().contains("child_thread_id:"));
-    assert!(!events
-        .lock()
-        .iter()
-        .any(|event| matches!(event, ExecutorEvent::SubagentStopped { .. })));
+    assert_eq!(
+        events
+            .lock()
+            .iter()
+            .filter(|event| matches!(event, ExecutorEvent::SubagentStopped { is_error: true, .. }))
+            .count(),
+        1
+    );
     let child_id = error
         .downcast_ref::<crate::session::subagent::SubagentFailure>()
         .unwrap()
         .child_thread_id();
-    assert!(store
-        .load_meta(&child_id.to_owned())
-        .await
-        .unwrap()
-        .agent_status
-        .is_active());
+    assert_eq!(
+        store
+            .load_meta(&child_id.to_owned())
+            .await
+            .unwrap()
+            .agent_status,
+        AgentStatus::Error
+    );
 }

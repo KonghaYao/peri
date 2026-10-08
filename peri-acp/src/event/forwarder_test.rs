@@ -20,6 +20,32 @@ use peri_controller::langfuse::tracer::LangfuseTracer;
 
 use crate::event::spawn_eventbus_forwarder;
 
+#[tokio::test]
+async fn test_suspended_then_resumed_output_remains_fifo_when_forwarder_is_delayed() {
+    let (bus, handles) = EventBus::new(EventBusConfig::default());
+    let turn_id = peri_acp_types::session::TurnId::new();
+    let agent_id = AgentId::new();
+    bus.emit_render(RenderEvent::TurnSuspended { turn_id, agent_id });
+    bus.emit_render(RenderEvent::TextChunk {
+        turn_id,
+        agent_id,
+        message_id: peri_acp_types::messages::MessageId::new(),
+        chunk: "resumed".into(),
+    });
+    drop(bus);
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let captured = events.clone();
+    let forwarder =
+        spawn_eventbus_forwarder(handles, move |_, event| captured.lock().push(event), None);
+    tokio::time::timeout(Duration::from_secs(3), forwarder)
+        .await
+        .unwrap()
+        .unwrap();
+    let events = events.lock();
+    assert!(matches!(&events[0], ExecutorEvent::TurnSuspended { .. }));
+    assert!(matches!(&events[1], ExecutorEvent::TextChunk { chunk, .. } if chunk == "resumed"));
+}
+
 /// 轮询等待条件成立（forwarder 是 fire-and-forget task，无 JoinHandle 可 await）。
 async fn wait_until(mut cond: impl FnMut() -> bool) -> bool {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);

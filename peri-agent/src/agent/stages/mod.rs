@@ -566,8 +566,8 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                     if let Some(flag) = &context.async_ctx.idle_suspended_flag {
                         flag.store(true, Ordering::Release);
                     }
-                    context.runtime.event_bus.emit_state(
-                        crate::agent::events_v2::StateEvent::TurnSuspended {
+                    context.runtime.event_bus.emit_render(
+                        crate::agent::events_v2::RenderEvent::TurnSuspended {
                             turn_id: context.turn_id(),
                             agent_id: context.session.agent_id,
                         },

@@ -9,6 +9,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 struct ActivationHarness {
+    recorded: Arc<MockTransport>,
     cfg: Arc<AcpServerConfig>,
     sessions: SharedSessions,
     session_id: String,
@@ -46,11 +47,13 @@ impl ActivationHarness {
             .ensure_session(&session_id, directory.path().to_str().unwrap());
         cfg.session_manager.ensure_session_caps(&session_id);
         let (sender, receiver) = mpsc::unbounded_channel();
+        let recorded = Arc::new(MockTransport::default());
         Self {
             cfg,
             sessions: Arc::new(tokio::sync::Mutex::new(sessions)),
             session_id,
-            transport: Arc::new(MockTransport::default()),
+            transport: recorded.clone(),
+            recorded,
             locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             sender: Arc::new(sender),
             receiver: Some(receiver),
@@ -120,6 +123,9 @@ impl ActivationHarness {
         assert_eq!(tasks.active_count(), 0);
     }
 }
+
+#[path = "execution_test.rs"]
+mod execution_tests;
 
 #[tokio::test]
 #[serial]

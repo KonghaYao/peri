@@ -174,10 +174,11 @@ struct BufferedOrdinaryNotification {
 }
 
 #[derive(Debug)]
-struct UserInputRuns {
+struct ExecutionRuns {
     generation: String,
     local_generation: u64,
     latest_request: Option<String>,
+    managed_input: bool,
     retired: HashSet<String>,
 }
 
@@ -189,7 +190,7 @@ struct InteractionLifecycleState {
     deleted_session_ids: HashSet<String>,
     pending: BTreeMap<u64, PendingInteractionEntry>,
     active_prompt: Option<PromptMarker>,
-    user_input_runs: HashMap<String, UserInputRuns>,
+    execution_runs: HashMap<String, ExecutionRuns>,
     new_buffer: VecDeque<BufferedOrdinaryNotification>,
     warned_buffer_full: bool,
 }
@@ -222,7 +223,7 @@ impl InteractionLifecycle {
                 deleted_session_ids: HashSet::new(),
                 pending: BTreeMap::new(),
                 active_prompt: None,
-                user_input_runs: HashMap::new(),
+                execution_runs: HashMap::new(),
                 new_buffer: VecDeque::new(),
                 warned_buffer_full: false,
             })),
@@ -563,12 +564,13 @@ impl InteractionLifecycle {
             return false;
         }
         let runs = state
-            .user_input_runs
+            .execution_runs
             .entry(session_id.to_owned())
-            .or_insert_with(|| UserInputRuns {
+            .or_insert_with(|| ExecutionRuns {
                 generation: generation.to_owned(),
                 local_generation,
                 latest_request: None,
+                managed_input: false,
                 retired: HashSet::new(),
             });
         if runs.generation != generation {
@@ -590,7 +592,7 @@ impl InteractionLifecycle {
             return false;
         }
         matches!(&state.route, SessionRoute::Stable { session_id: current, generation: local, .. }
-            if current == session_id && state.user_input_runs.get(session_id).is_some_and(|runs|
+            if current == session_id && state.execution_runs.get(session_id).is_some_and(|runs|
                 runs.local_generation == *local && runs.generation == generation))
     }
 
@@ -608,7 +610,7 @@ impl InteractionLifecycle {
         else {
             return None;
         };
-        let runs = state.user_input_runs.get(session_id)?;
+        let runs = state.execution_runs.get(session_id)?;
         (current == session_id
             && runs.local_generation == *local
             && !state.deleted_session_ids.contains(session_id))
@@ -622,13 +624,14 @@ impl InteractionLifecycle {
         })
     }
 
-    /// 服务端已开始的 run 由 done/Stop/会话边界结束，无短 RPC 的 RAII lease。
+    /// 服务端已开始的 execution 由 done/Stop/会话边界结束，无短 RPC 的 RAII lease。
     /// 返回 None 表示重复或陈旧事件，调用方不能再次发布 loading 状态。
-    pub(crate) fn open_user_input_run(
+    pub(crate) fn open_execution(
         &self,
         session_id: &str,
         generation: &str,
         request_id: &str,
+        managed_input: bool,
     ) -> Option<Vec<ClaimedInteraction>> {
         let mut state = self.state.lock().unwrap();
         if request_id.is_empty() || state.deleted_session_ids.contains(session_id) {
@@ -643,14 +646,23 @@ impl InteractionLifecycle {
             } if current == session_id => (*generation, prompt_epoch.checked_add(1)?),
             _ => return None,
         };
-        let runs = state.user_input_runs.get(session_id)?;
+        let runs = state.execution_runs.get(session_id)?;
         if runs.generation != generation
             || runs.local_generation != local_generation
             || runs.retired.contains(request_id)
-            || state.active_prompt.as_ref().is_some_and(|marker| {
-                marker.session_id == session_id && marker.request_id.as_deref() == Some(request_id)
-            })
         {
+            return None;
+        }
+        if state.active_prompt.as_ref().is_some_and(|marker| {
+            marker.session_id == session_id && marker.request_id.as_deref() == Some(request_id)
+        }) {
+            let runs = state.execution_runs.get_mut(session_id)?;
+            runs.managed_input = managed_input;
+            if let Some(previous) = runs.latest_request.replace(request_id.to_owned())
+                && previous != request_id
+            {
+                runs.retired.insert(previous);
+            }
             return None;
         }
         let old_marker = state.active_prompt.take();
@@ -661,7 +673,8 @@ impl InteractionLifecycle {
                     && owner.prompt_epoch == marker.prompt_epoch
             })
         });
-        let runs = state.user_input_runs.get_mut(session_id)?;
+        let runs = state.execution_runs.get_mut(session_id)?;
+        runs.managed_input = managed_input;
         if let Some(previous) = runs.latest_request.replace(request_id.to_owned())
             && previous != request_id
         {
@@ -686,12 +699,13 @@ impl InteractionLifecycle {
         Some(claims)
     }
 
-    pub(crate) fn active_user_input_run(&self) -> Option<(String, String, String)> {
+    pub(crate) fn active_execution(&self, managed_only: bool) -> Option<(String, String, String)> {
         let state = self.state.lock().unwrap();
         let marker = state.active_prompt.as_ref()?;
-        let runs = state.user_input_runs.get(&marker.session_id)?;
+        let runs = state.execution_runs.get(&marker.session_id)?;
         let request_id = marker.request_id.as_ref()?;
-        (runs.local_generation == marker.generation
+        ((!managed_only || runs.managed_input)
+            && runs.local_generation == marker.generation
             && runs.latest_request.as_ref() == Some(request_id)
             && !runs.retired.contains(request_id))
         .then(|| {
@@ -713,7 +727,7 @@ impl InteractionLifecycle {
             return Vec::new();
         }
         state.active_prompt = None;
-        retire_user_input_run(&mut state, &marker.session_id, marker.request_id.as_deref());
+        retire_execution(&mut state, &marker.session_id, marker.request_id.as_deref());
         if let SessionRoute::Stable {
             session_id,
             generation,
@@ -744,7 +758,7 @@ impl InteractionLifecycle {
         };
         let marker = {
             let mut state = self.state.lock().unwrap();
-            retire_user_input_run(&mut state, session_id, Some(request_id));
+            retire_execution(&mut state, session_id, Some(request_id));
             state.active_prompt.as_ref().and_then(|marker| {
                 (marker.session_id == session_id
                     && marker.request_id.as_deref() == Some(request_id))
@@ -763,18 +777,16 @@ impl InteractionLifecycle {
         request_id: Option<&str>,
     ) -> bool {
         let state = self.state.lock().unwrap();
-        let Some(runs) = state.user_input_runs.get(session_id) else {
-            return true;
-        };
         if let Some(marker) = &state.active_prompt
             && marker.session_id == session_id
-            && marker.request_id == runs.latest_request
+            && marker.request_id.is_some()
         {
             return marker.request_id.as_deref() == request_id;
         }
-        !request_id.is_some_and(|request_id| {
-            runs.retired.contains(request_id) && runs.latest_request.as_deref() != Some(request_id)
-        })
+        let Some(runs) = state.execution_runs.get(session_id) else {
+            return true;
+        };
+        !request_id.is_some_and(|request_id| runs.retired.contains(request_id))
     }
 
     pub fn cancel_active_prompt(&self) -> Vec<ClaimedInteraction> {
@@ -820,12 +832,12 @@ impl InteractionLifecycle {
     }
 }
 
-fn retire_user_input_run(
+fn retire_execution(
     state: &mut InteractionLifecycleState,
     session_id: &str,
     request_id: Option<&str>,
 ) {
-    if let Some(runs) = state.user_input_runs.get_mut(session_id)
+    if let Some(runs) = state.execution_runs.get_mut(session_id)
         && let Some(request_id) = request_id
         && runs.latest_request.as_deref() == Some(request_id)
     {

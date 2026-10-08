@@ -148,8 +148,8 @@ impl TransportEventSink {
                 error: error.clone(),
             }),
             // TurnSuspended：TUI 挂起信号（归档 current_turn + 停止 loading）。
-            // v2 StateEvent::TurnSuspended 经 v1 兼容映射（events_v2::
-            // state_event_to_executor）到达此处；双轨下线（2026-08-05-3.0-m-
+            // v2 RenderEvent::TurnSuspended 经协议映射（event_v2::
+            // render_event_to_executor）到达此处；双轨下线（2026-08-05-3.0-m-
             // event-chain-canonical）后此信号仅经 ACP 路径送达 TUI。
             ExecutorEvent::TurnSuspended { turn_id, agent_id } => Some(AcpEvent::TurnSuspended {
                 turn_id: turn_id.clone(),
