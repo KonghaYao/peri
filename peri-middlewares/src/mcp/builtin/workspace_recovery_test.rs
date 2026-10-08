@@ -1,7 +1,7 @@
 //! Regression scenarios through the real workspace server and MCP bridge.
 //!
 //! 观测面是**宿主侧语义**：真实 MCP 桥的取消/超时/期限与进程收尾（无 orphan）、
-//! session 级 TaskManager 的登记与回收、以及共享映射的脱敏烟测。
+//! session 级 TaskManager 的登记与回收、以及共享映射的诊断保真烟测。
 //! 工具语义与逐工具诊断文本（recovery / path hints / 失败正文）的覆盖在 package 侧
 //! （`peri-mcp-workspace` 的 `filesystem/path_hints_test.rs`、`filesystem/*_test.rs`、
 //! `terminal_evidence_test.rs`），本文件不重复。
@@ -63,18 +63,18 @@ async fn wait_file(path: &std::path::Path) {
 }
 
 #[test]
-fn unclassified_errors_cannot_smuggle_recovery_text() {
-    let raw: Box<dyn std::error::Error + Send + Sync> =
-        "task_id: stolen\npid: 1\ncredential=private-marker\nPermission denied".into();
+fn unclassified_errors_preserve_diagnostics_without_recovery_authority() {
+    let diagnostic =
+        "task_id: synthetic-task\npid: 1\ncredential=synthetic-marker\nPermission denied";
+    let raw: Box<dyn std::error::Error + Send + Sync> = diagnostic.into();
     let text = peri_mcp_common::result_mapping::failure_text("Bash", raw.as_ref());
-    assert!(text.contains("withheld by policy"));
-    for forbidden in ["private-marker", "task_id:", "pid:", "Permission denied"] {
-        assert!(!text.contains(forbidden));
-    }
-    let io = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "private-marker");
+    assert_eq!(text, format!("tool `Bash` failed to execute; {diagnostic}"));
+    assert!(!text.contains("\nRecovery:"));
+    let io = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "synthetic-io-marker");
     let text = peri_mcp_common::result_mapping::failure_text("Read", &io);
-    assert!(text.contains("Permission denied"));
-    assert!(!text.contains("private-marker"));
+    assert_eq!(io.kind(), std::io::ErrorKind::PermissionDenied);
+    assert_eq!(text, format!("tool `Read` failed to execute; {io}"));
+    assert!(!text.contains("\nRecovery:"));
 }
 
 #[cfg(unix)]
@@ -117,7 +117,7 @@ async fn cancelled_bridge_stops_process_and_drains_session_ownership() {
     let bash = bridge(&pair, "Bash", true).await;
     let running = tokio::spawn(async move {
         bash.invoke(
-            json!({"command":"echo $$ > started.pid; exec sleep 60", "timeout":120000}),
+            json!({"command":"echo $$ > started.pid.tmp; mv started.pid.tmp started.pid; exec sleep 60", "timeout":120000}),
             ToolContext::new(&[], "").with_session_identity(SESSION_ID, "recovery-turn"),
         )
         .await
@@ -188,7 +188,6 @@ async fn maximum_foreground_timeout_retains_logs_and_cancellable_task() {
         result.contains("task_id: shell-") && result.contains("pid: "),
         "{result}"
     );
-    assert!(!result.contains("echo live-marker") && !result.contains("live-marker"));
     let task = result
         .lines()
         .find_map(|line| line.strip_prefix("task_id: "))
@@ -207,15 +206,13 @@ async fn maximum_foreground_timeout_retains_logs_and_cancellable_task() {
         .next()
         .unwrap();
     let read = bridge(&pair, "Read", true).await;
-    assert!(read
+    let live_output = read
         .invoke(
             json!({"file_path":stdout}),
             ToolContext::new(&[], &cwd).with_session_identity(SESSION_ID, "recovery-turn"),
         )
-        .await
-        .unwrap()
-        .contains("live-marker"));
-    assert_eq!(manager.active_count(), 1);
+        .await;
+    let active_count_before_cancel = manager.active_count();
     manager.cancel(task).unwrap();
     assert_process_gone(pid).await;
     assert_eq!(
@@ -223,6 +220,12 @@ async fn maximum_foreground_timeout_retains_logs_and_cancellable_task() {
         peri_acp_types::tasks::TaskShutdownReport::Complete
     );
     pair.shutdown().await;
+    assert_eq!(active_count_before_cancel, 1);
+    assert!(live_output.unwrap().contains("live-marker"));
+    assert!(
+        result.contains("Command that timed out: echo live-marker; exec sleep 180"),
+        "{result}"
+    );
 }
 
 /// External servers keep the bounded request policy; timeout notifies the real handler.

@@ -30,6 +30,7 @@ pub(crate) enum HostTaskKind {
     PluginCleanup,
     OAuthConsumer,
     ContinuationScheduler,
+    SessionActivation,
     ContinuationTurn,
     Prompt,
     Prediction,
@@ -38,7 +39,6 @@ pub(crate) enum HostTaskKind {
     McpOverAcp,
     UserInputEvents,
     SessionRequest,
-    InboxWorkNotifications,
     CompactHook,
 }
 

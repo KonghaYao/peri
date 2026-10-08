@@ -61,6 +61,7 @@ use std::{
 };
 
 pub(crate) use cache::cache_scope_allows_persistence;
+pub(crate) use cache::ConnectionResourceCache;
 pub use oauth::OAuthStartDisposition;
 // System MCP 启动准入（IF-M3）：证据、等待与类型化错误；子模块声明留在本文件，
 // 不占 `mcp/mod.rs`（其 owner 为 C-INJ-02 / D-02）。消费方：B-02（证据提交 /
@@ -84,7 +85,7 @@ use status::{mcp_error_summary, mcp_status_label};
 pub(crate) use subscription::build_subscription_filter;
 pub(crate) use subscription::setup_subscription;
 pub(crate) use transport::{build_authed_transport, build_http_transport, serve_client_auto};
-pub(crate) use types::McpConnectionKey;
+pub(crate) use types::{AcpConnectionIdentity, McpConnectionKey};
 pub use types::{
     ClientStatus, McpClientHandle, McpInitStatus, McpPoolError, OAuthStatus, ServerInfo,
 };
@@ -99,6 +100,9 @@ pub struct McpClientPool {
     pub(super) builtin_available: std::sync::atomic::AtomicBool,
     pub(super) stdio_available: std::sync::atomic::AtomicBool,
     pub(super) plugin_discovery_available: std::sync::atomic::AtomicBool,
+    /// 插件来源闭合位（M6）：会话装配从冻结/session-local 策略派生后注入，
+    /// 与 `plugin_discovery_available`（部署是否具备插件能力）是两个事实。
+    pub(super) plugin_face_closed: std::sync::atomic::AtomicBool,
     shared_services: parking_lot::Mutex<Vec<Arc<McpServiceOwner>>>,
     /// Includes failed handshakes until their actual process tree and stderr have drained.
     #[cfg(not(target_os = "emscripten"))]
@@ -180,6 +184,18 @@ pub struct McpClientPool {
     /// 无条目的 server 对所有会话可见（配置来源与 dynamic 投影的既有语义）；
     /// 有条目的仅在归属会话内可见（工具桥接与状态面据此过滤）。
     pub(crate) acp_owners: parking_lot::RwLock<HashMap<String, String>>,
+    /// 会话级 ACP 连接的**声明身份**（M7）：池内 server name → 连接 ID + 归属。
+    /// 与 `acp_owners` 同批写入、同批移除；持久化 cache 只按它 + 当前句柄代号
+    /// 计算 origin，凭据从不进入本结构。
+    pub(crate) acp_connections: parking_lot::RwLock<HashMap<String, AcpConnectionDeclaration>>,
+}
+
+/// 会话级 ACP 连接的声明事实（非凭据）：`connection_id` 是 ACP `mcp/connect`
+/// 返回的 opaque 连接句柄，随会话关闭失效。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AcpConnectionDeclaration {
+    pub(crate) session_id: String,
+    pub(crate) connection_id: String,
 }
 
 /// builtin 实例上下文槽（A33）：上下文与「initialize 已开始」标志由**同一短锁**保护
@@ -199,6 +215,37 @@ pub(crate) struct BuiltinContextSlot {
 pub(crate) const STDIO_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 pub(crate) const HTTP_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 pub(crate) const SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// 有界重采集（M9，list→read TOCTOU）：首次采集失败后**只**重采集一次。
+///
+/// 仍不一致时返回显式的内容准入错误（可重试），调用方据此 fail-closed——
+/// 不把半套采集结果当作冻结数据提交。`context` 是错误文案里的面名称，
+/// 不含正文与主机路径。
+async fn collect_with_single_recollect<T, F, Fut>(
+    context: &str,
+    mut collect: F,
+) -> Result<T, String>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, String>>,
+{
+    match collect().await {
+        Ok(value) => Ok(value),
+        Err(first) => {
+            tracing::warn!(
+                error = %first,
+                face = context,
+                "首次采集不一致，有界重采集一次（list→read TOCTOU）"
+            );
+            collect().await.map_err(|second| {
+                format!(
+                    "{context} stayed inconsistent after one re-collection ({second}); \
+                     retry the session admission"
+                )
+            })
+        }
+    }
+}
 
 impl McpClientPool {
     pub fn new_pending() -> Self {
@@ -225,6 +272,8 @@ impl McpClientPool {
             builtin_available: std::sync::atomic::AtomicBool::new(true),
             stdio_available: std::sync::atomic::AtomicBool::new(crate::platform::STDIO_TRANSPORT),
             plugin_discovery_available: std::sync::atomic::AtomicBool::new(true),
+            // 默认不关闭：只有会话装配注入的冻结策略才置真（M6）。
+            plugin_face_closed: std::sync::atomic::AtomicBool::new(false),
             shared_services: parking_lot::Mutex::new(Vec::new()),
             #[cfg(not(target_os = "emscripten"))]
             processes: parking_lot::Mutex::new(Vec::new()),
@@ -260,6 +309,7 @@ impl McpClientPool {
             app_binding_leases: Arc::new(super::apps::McpAppBindingLeaseRegistry::default()),
             system_readiness: SystemReadinessTracker::new(),
             acp_owners: parking_lot::RwLock::new(HashMap::new()),
+            acp_connections: parking_lot::RwLock::new(HashMap::new()),
         }
     }
 
@@ -293,6 +343,47 @@ impl McpClientPool {
         pool.bind_cache_policy(policy).unwrap();
         pool.resource_cache = super::resource_cache::McpResourceCache::isolated_for_test();
         pool
+    }
+
+    /// 测试夹具：登记一条会话级 ACP 连接（真连接 / service 不参与）。
+    ///
+    /// 只做 `commit_acp_connection` 的身份记账：归属、声明身份、句柄与句柄代号。
+    /// 返回句柄，供测试模拟「同会话换代」时登记第二条句柄。
+    #[cfg(test)]
+    pub(crate) fn install_acp_connection_for_test(
+        self: &Arc<Self>,
+        session_id: &str,
+        connection_id: &str,
+        name: &str,
+    ) -> Arc<McpClientHandle> {
+        let handle = Arc::new(McpClientHandle {
+            name: name.to_string(),
+            version: None,
+            cache_version: None,
+            peer: None,
+            tools: Vec::new(),
+            resources: Vec::new(),
+            status: ClientStatus::Connected,
+            oauth_status: OAuthStatus::default(),
+            source: Some(crate::mcp::config::ConfigSource::Acp),
+            url: None,
+            skills_capable: false,
+        });
+        self.acp_owners
+            .write()
+            .insert(name.to_string(), session_id.to_string());
+        self.acp_connections.write().insert(
+            name.to_string(),
+            AcpConnectionDeclaration {
+                session_id: session_id.to_string(),
+                connection_id: connection_id.to_string(),
+            },
+        );
+        self.advance_handle_generation(&handle);
+        self.clients
+            .write()
+            .insert(name.to_string(), Arc::clone(&handle));
+        handle
     }
 
     pub fn set_configuration_snapshot(
@@ -648,9 +739,6 @@ impl McpClientPool {
     pub async fn read_builtin_workspace_instructions(
         &self,
     ) -> Result<(Option<String>, Option<String>), String> {
-        use peri_acp_types::workspace_resources::{
-            parse_instruction_uri, INSTRUCTION_LOCAL_URI, INSTRUCTION_MAIN_URI,
-        };
         let closed = self
             .builtin_instance_context()
             .map(|context| context.closed.clone())
@@ -675,8 +763,25 @@ impl McpClientPool {
                     .to_string(),
             );
         };
+        // M9：`resources/list` 只是发现提示，**不证明正文已锁定**。首次采集
+        // 出现不一致（已列出的指令资源读取失败）时只做一次有界重采集；仍不一致
+        // 就返回明确的可重试准入错误，不提交半套冻结数据。
+        collect_with_single_recollect("workspace instruction face", || {
+            self.collect_instruction_documents(&peer)
+        })
+        .await
+    }
+
+    /// 一次 list→read 采集（main / local）；任一已列出资源读取失败即返回 `Err`。
+    async fn collect_instruction_documents(
+        &self,
+        peer: &rmcp::service::Peer<rmcp::service::RoleClient>,
+    ) -> Result<(Option<String>, Option<String>), String> {
+        use peri_acp_types::workspace_resources::{
+            parse_instruction_uri, INSTRUCTION_LOCAL_URI, INSTRUCTION_MAIN_URI,
+        };
         let resources = self
-            .list_all_resources_cached("workspace", &peer)
+            .list_all_resources_cached("workspace", peer)
             .await
             .map_err(|error| format!("resources/list failed: {error}"))?;
         let mut main: Option<String> = None;
@@ -693,9 +798,11 @@ impl McpClientPool {
                 continue;
             }
             let (result, ticket) = self
-                .read_resource_cached("workspace", uri, &peer)
+                .read_resource_cached("workspace", uri, peer)
                 .await
-                .map_err(|error| format!("resources/read failed: {error}"))?;
+                .map_err(|error| {
+                    format!("listed instruction resource {uri} could not be read: {error}")
+                })?;
             self.cache_verified_resource("workspace", ticket, &result)
                 .await;
             let Some(text) = result.contents.iter().find_map(|content| match content {
@@ -837,7 +944,6 @@ impl McpClientPool {
     }
 }
 
-mod invocation_owner_recovery;
 mod ports;
 mod session_bindings;
 

@@ -2,6 +2,16 @@
 
 use super::*;
 
+/// [回归测试] @f#L5-5 必须保留含端点的单行范围并传给 Workspace。
+#[test]
+fn equal_range_endpoints_are_preserved() {
+    let mentions = extract_at_mentions("@f#L5-5");
+    assert_eq!(mentions.len(), 1);
+    assert_eq!(mentions[0].path, "f");
+    assert_eq!(mentions[0].line_start, Some(5));
+    assert_eq!(mentions[0].line_end, Some(5));
+}
+
 #[test]
 fn test_extract_plain_path() {
     // 普通路径提取

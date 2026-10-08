@@ -164,6 +164,7 @@ async fn forward_subagent_events(
                     &ev,
                     crate::agent::events_v2::RenderEvent::TurnCompleted { .. }
                     | crate::agent::events_v2::RenderEvent::HitlPending { .. }
+                    | crate::agent::events_v2::RenderEvent::TurnSuspended { .. }
                 );
                 if should_forward {
                     // Langfuse bridge 调用必须在 ev 被 render_event_to_executor move 之前
@@ -197,7 +198,6 @@ async fn forward_subagent_events(
                 let should_forward = !matches!(
                     &ev,
                     crate::agent::events_v2::StateEvent::StateSnapshot { .. }
-                        | crate::agent::events_v2::StateEvent::TurnSuspended { .. }
                 );
                 if should_forward {
                     if let Some(exec_ev) = state_event_to_executor(ev) {

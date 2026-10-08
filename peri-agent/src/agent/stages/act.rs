@@ -46,7 +46,6 @@ fn emit_goal_snapshot(ctx: &StageContext) {
 
 /// 运行 Act 阶段
 pub async fn run_act(input: ActInput) -> AgentResult<ActOutput> {
-    super::execution_control::validate(&input.context).await?;
     let ctx = &input.context;
     let has_tool_calls = input.reasoning.needs_tool_call();
 
@@ -135,9 +134,7 @@ pub async fn run_act(input: ActInput) -> AgentResult<ActOutput> {
         // 空内容不写入规范历史：中断无正文时只保留续跑提醒，不制造空 assistant
         // 消息——空 text block 会被 provider 拒绝（Anthropic 400），使本可续跑的
         // 断流变成下一轮硬失败。判空沿用 `MessageContent::is_empty()`（不 trim）。
-        if !ai_msg.message_content().is_empty()
-            && !super::work_reason::mirror_response(ctx, ai_msg.clone()).await?
-        {
+        if !ai_msg.message_content().is_empty() {
             ctx.session.transcript.write().append(ai_msg);
         }
 

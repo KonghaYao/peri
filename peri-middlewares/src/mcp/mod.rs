@@ -16,10 +16,8 @@ pub mod dynamic;
 #[allow(clippy::result_large_err)]
 pub mod initialize;
 mod invocation;
-mod invocation_recovery;
 pub mod middleware;
 pub mod oauth_flow;
-mod owner_capabilities;
 pub mod reconnect;
 pub mod resource_cache;
 pub mod resource_tool;

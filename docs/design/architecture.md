@@ -82,9 +82,8 @@ Windows 挂起进程，attach 后提供终止请求与实际退出证据。它�
   - 建 thread：经 Resources 存储，parent_thread_id 挂父子链
   - 建 session：transcript 绑定存储（with_persistence）
   - 运行 + 结束：更新 agent_status
-- 内存任务运行句柄与持久任务绑定、交付责任分开；独立 Task 目录、跨实例任务恢复
-  和关闭的已批准目标见 [Session 异步任务架构](session-async-tasks.md)，该设计
-  明确标为待重构，不表示全部目标已实现。
+- Task 目录、调用关联和交付属于当前进程运行态；跨实例执行恢复目标已撤销。
+  当前任务与关闭边界见 [Session 异步任务架构](session-async-tasks.md)，剥离状态见 active spec。
 - 消息统一：MessageType（Human/Ai/Tool/SystemReminder，v2 BaseMessage 更名；协议转换在 Reason 阶段）
 - MQ 消息管理：MessageQueue（Prompt/Defer/Info + MessageSource）
 - RCRA 循环：Receive -> Compact -> Reason -> Act，Receive 为唯一退出口
@@ -107,8 +106,8 @@ Windows 挂起进程，attach 后提供终止请求与实际退出证据。它�
   文件系统与终端工具由 builtin Workspace MCP 实例提供，不再是独立链槽位。
 - MCP 客户端连接池、连接生命周期与工具桥接在 Middleware 层；宿主装配并注入 pool，
   不把连接状态误归 Resources。输入 I/O 与工具提供方经各自 MCP 能力边界消费。
-- 任务发起、登记和工具桥接的现行入口见代码索引；独立任务目录与 owner 恢复的
-  目标职责见 [Session 异步任务架构](session-async-tasks.md)，不能据此声称已完成。
+- 任务发起、登记和工具桥接的现行入口见代码索引；当前任务目录不提供 owner 冷恢复，
+  目标职责见 [Session 异步任务架构](session-async-tasks.md)。
 - 切面 = hook 挂载 + 工具声明 + prompt 贡献 + 条件守卫
 
 ## 5. Peri Resources 层
@@ -116,11 +115,11 @@ Windows 挂起进程，attach 后提供终止请求与实际退出证据。它�
 - 外部系统门面：抽象外部数据，对上提供抓手
   - 配置来源 I/O：由独立 `peri-mcp-config` bootstrap 能力提供文件正文、具名环境与字节 CAS；有效配置规则归 `peri-config`，不归 Resources 或输入 provider
   - 会话持久化：SessionResources 契约与本地 SQLite、远端 Turso adapter，保存身份、
-    transcript、绑定、Work 事实及事务回执。
+    transcript、配置、frozen/inherited、环境绑定；不保存 Agent 执行恢复账本。
   - Workspace 级 OAuth 凭据的持久存储；MCP 连接由 Middleware 持有，交互 broker
     由 ACP 宿主提供，不归 Resources。
 - adapter 保存和适配状态，共用领域 reducer，不维护第二份业务规则；访问模式与
-  存储完整性不构成执行所有权，执行唯一性由 SDK 管理。
+  存储完整性不构成执行所有权；跨实例唯一性由外部部署协调，不依赖 SDK admission。
 - 以 context 形式提供给 Agent / Middleware / Controller
 
 ## 6. Peri Controller 层
@@ -201,23 +200,22 @@ session 销毁顺序：
 
 持久真相：
 
-- Thread/transcript 与持久 Work 记录是事实源；任务绑定、委托、invocation、交付义务
-  和控制回执可持久化，不能概括为“所有 Task 不持久化”。
-- 内存 TaskManager、运行句柄、MQ 和 callback 是运行期能力或投影，不因加载历史
-  而复活旧 execution；未知副作用和未结清义务保留身份并对账，不伪造中断或完成。
+- Thread/transcript、配置与 frozen/inherited 是历史事实源；持久 Work、任务恢复绑定、
+  处理义务与 control 回执目标已撤销，不建立替代执行账本。
+- TaskManager、运行句柄、MQ 和 callback 是当前进程能力，不因加载历史复活旧 execution。
+  外部副作用未知时如实报告，不伪造完成、取消或跨进程恢复保证。
 
 异步完成与激活（已批准目标边界，实施状态见 RCRA 消息权威）：
 
 ```mermaid
 flowchart LR
-    Bg[owner 完成事实] --> I[明确收件会话的 Durable Inbox]
-    I --> P[会话领域判定激活资格]
-    P --> SDK[SDK 执行准入]
-    SDK --> A[RCRA 推进合法工作]
+    Bg[当前任务完成] --> I[明确收件会话的内存 MQ]
+    I --> P[当前运行资格与取消检查]
+    P --> A[RCRA 处理并写入 canonical history]
 ```
 
-结果到达不是恢复已取消 turn 的授权；暂停、关闭及控制代际须参与准入判断。
-历史 load 本身不是执行请求，具体可靠接纳与恢复目标见
+结果到达不是复活已取消 turn 的授权；当前运行、暂停和关闭状态须参与判断。
+历史 load 本身不是执行请求，具体运行与历史边界见
 [RCRA 消息权威](rcra-message-activation.md)。
 
 错误模型：边界类型化，层内 anyhow

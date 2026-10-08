@@ -31,6 +31,8 @@ pub(super) enum SchemaState {
     Version14,
     Version15,
     Version16,
+    Version17,
+    Version18,
     Current,
 }
 
@@ -50,6 +52,8 @@ pub(super) async fn inspect(connection: &mut SqliteConnection) -> Result<SchemaS
         .await?;
     match version {
         v if v == CURRENT_SCHEMA_VERSION => return Ok(SchemaState::Current),
+        18 => return Ok(SchemaState::Version18),
+        17 => return Ok(SchemaState::Version17),
         16 => return Ok(SchemaState::Version16),
         15 => return Ok(SchemaState::Version15),
         14 => return Ok(SchemaState::Version14),
@@ -161,6 +165,9 @@ impl SqliteSessionDatabase {
                 .await?;
             return Ok(());
         }
+        if state == SchemaState::Version18 {
+            return Self::remove_legacy_registrations_schema(&mut connection).await;
+        }
         if matches!(
             state,
             SchemaState::Version12
@@ -168,12 +175,15 @@ impl SqliteSessionDatabase {
                 | SchemaState::Version14
                 | SchemaState::Version15
                 | SchemaState::Version16
+                | SchemaState::Version17
         ) {
-            return Self::remove_execution_owner_schema(&mut connection).await;
+            Self::remove_execution_owner_schema(&mut connection).await?;
+            return Self::remove_legacy_registrations_schema(&mut connection).await;
         }
         if state == SchemaState::Version11 {
             super::storage_v2_migration::migrate_local_v2(&mut connection).await?;
-            return Self::remove_execution_owner_schema(&mut connection).await;
+            Self::remove_execution_owner_schema(&mut connection).await?;
+            return Self::remove_legacy_registrations_schema(&mut connection).await;
         }
         // 登记表重建要对被引用的父表执行 DROP TABLE：SQLite 对父表做隐式删除时会
         // 立即检查外键，`defer_foreign_keys` 也挡不住。该 PRAGMA 只在事务外生效，
@@ -196,46 +206,37 @@ impl SqliteSessionDatabase {
             migrated?;
         }
         super::storage_v2_migration::migrate_local_v2(&mut connection).await?;
-        Self::remove_execution_owner_schema(&mut connection).await
+        Self::remove_execution_owner_schema(&mut connection).await?;
+        Self::remove_legacy_registrations_schema(&mut connection).await
+    }
+
+    /// v18 → v19：把执行登记并入 `workspaces` 并删除登记表。`user_version` 与全部
+    /// DDL 在同一事务内提交；失败回滚后库仍是 18，可由上一版二进制打开。
+    async fn remove_legacy_registrations_schema(connection: &mut SqliteConnection) -> Result<()> {
+        super::storage_v19_migration::migrate_local_v19(connection).await
     }
 
     async fn remove_execution_owner_schema(connection: &mut SqliteConnection) -> Result<()> {
         let mut tx = connection.begin_with("BEGIN IMMEDIATE").await?;
-        sqlx::query(canonical::CREATE_SESSION_CLOSE_INTENTS_TABLE_SQL)
-            .execute(&mut *tx)
+        let removals = super::schema_cleanup::execution_recovery_removal_plan(&mut tx).await?;
+        let version: i64 = sqlx::query_scalar("PRAGMA user_version")
+            .fetch_one(&mut *tx)
             .await?;
-        sqlx::query("DROP TABLE IF EXISTS session_execution_workspace_descriptors")
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query("DROP TABLE IF EXISTS session_execution_owners")
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query(crate::sessions::control::CREATE_STATE)
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query(crate::sessions::control::CREATE_RECEIPTS)
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query(crate::sessions::control::SEED_STATE)
-            .execute(&mut *tx)
-            .await?;
-        for statement in [
-            crate::sessions::work::CREATE_STATE,
-            crate::sessions::work::CREATE_EVENTS,
-            crate::sessions::work::CREATE_RECEIPTS,
-            crate::sessions::work::CREATE_COMMANDS,
-        ] {
-            sqlx::query(statement).execute(&mut *tx).await?;
+        if version != 17 {
+            sqlx::query(canonical::CREATE_SESSION_CLOSE_INTENTS_TABLE_SQL)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("DROP TABLE IF EXISTS session_execution_workspace_descriptors")
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("DROP TABLE IF EXISTS session_execution_owners")
+                .execute(&mut *tx)
+                .await?;
         }
-        sqlx::query(crate::sessions::work::SEED_STATE)
-            .bind(crate::sessions::work::legacy_state_json()?)
-            .bind(crate::sessions::work::initial_state_json()?)
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query(crate::sessions::work::QUARANTINE_UNOWNED_COMMANDS)
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query("PRAGMA user_version = 17")
+        for statement in removals {
+            sqlx::query(*statement).execute(&mut *tx).await?;
+        }
+        sqlx::query("PRAGMA user_version = 18")
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
@@ -585,3 +586,7 @@ async fn migrate_identity_values(connection: &mut SqliteConnection) -> Result<()
 #[cfg(test)]
 #[path = "schema_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "schema_v18_test.rs"]
+mod v18_tests;

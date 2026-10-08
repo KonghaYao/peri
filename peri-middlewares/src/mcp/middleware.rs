@@ -321,6 +321,11 @@ pub(crate) fn run_ensure_discovery(
         let cmd_connected: Vec<(String, HandleToken)> = connected
             .iter()
             .filter(|(name, _)| !crate::mcp::skill_discovery::mcp_namespace_reserved(name))
+            .filter(|(name, token)| {
+                !matches!(registry.discovery_state(name),
+                    Some(peri_acp_types::mcp_skills::ServerDiscoveryState::Failed { handle })
+                        if Arc::ptr_eq(&handle, token))
+            })
             .map(|(name, token)| {
                 (
                     crate::mcp::skill_discovery::mcp_source_key(name),
@@ -356,22 +361,28 @@ pub(crate) fn run_ensure_discovery(
         if !registry.mark_discovery_started(&name, handle_token.clone()) {
             continue;
         }
-        // mark 与取 handle 之间可能断连/重连，两者都自愈，无需显式补偿：
-        // - get_client 返回 None（断连）：Started 残留由下轮 before_agent 的
-        //   project_connected 移除清理（server 已不在 connected 列表）；
-        // - get_client 返回新 Arc（重连）：Started 中仍是旧 token，自愈触发
-        //   源是下轮 project_connected 的 token 不一致检测（新 handle 与
-        //   Started 旧 token 的 Arc::ptr_eq 不相等）→ 重新 to_discover +
-        //   重新 Started，触发重扫。旧发现任务的完成回写被
-        //   mark_discovery_completed 的 Arc::ptr_eq 拒绝，但那只发生在
-        //   "下轮已用新 token 重新 Started" 的交错下——ptr_eq 拒绝是防御
-        //   （旧任务不得覆盖新状态），不是重扫触发源。
+        // mark 后取到的 handle 必须仍是投影时的同一代；换代则清理旧 Started。
+        // cache 可选，缺失不代表跳过发现；无 peer 的当前连接须发布 Failed。
         let Some(handle) = pool.get_client(&name) else {
             continue;
         };
-        let cache = pool
-            .persistent_cache_allowed(&handle.name)
-            .then(|| (pool.resource_cache(), pool.cache_origin(&handle.name)));
+        let cache = pool.resource_cache_for_handle(&handle);
+        let current_token: HandleToken = handle.clone();
+        if !pool.is_open()
+            || !Arc::ptr_eq(&current_token, &handle_token)
+            || !pool
+                .get_client(&name)
+                .is_some_and(|current| Arc::ptr_eq(&current, &handle))
+        {
+            registry.clear_discovery_started(&name, handle_token.clone());
+            if let Some(commands) = command_registry {
+                commands.clear_source_started(
+                    &crate::mcp::skill_discovery::mcp_source_key(&name),
+                    handle_token,
+                );
+            }
+            continue;
+        }
         let reg = Arc::clone(registry);
         let cmd_reg = command_registry.cloned();
         let cancel = cancel.clone();

@@ -26,7 +26,7 @@ async fn test_fork_inherits_parent_messages() {
             let _ = &cancellation;
             let messages = base_messages(&request);
             let defined = defined_tools(&request);
-            let tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
+            let _tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
 
             *self.msg_count.lock().unwrap() = messages.len();
             text_events("fork-done")
@@ -34,7 +34,7 @@ async fn test_fork_inherits_parent_messages() {
     }
     crate::subagent::test_support::fixture_model_impl!(ForkTestLLM);
 
-    let host = DurableHost::open("fixture-fork-inherit").await;
+    let host = HostFixture::open("fixture-fork-inherit").await;
     let t = host.bind(
         SubAgentTool::new(
             Arc::new(vec![]),
@@ -119,7 +119,7 @@ async fn test_fork_tool_surface_excludes_child_absent_capabilities() {
         }),
     ];
 
-    let host = DurableHost::open("fixture-fork-tools").await;
+    let host = HostFixture::open("fixture-fork-tools").await;
     let t = host.bind(
         SubAgentTool::new(
             Arc::new(parent_tools),
@@ -173,7 +173,7 @@ async fn test_fork_tool_surface_excludes_child_absent_capabilities() {
 /// Fork without parent_messages succeeds with empty ToolContext messages
 #[tokio::test]
 async fn test_fork_without_parent_messages_returns_error() {
-    let host = DurableHost::open("fixture-fork-empty").await;
+    let host = HostFixture::open("fixture-fork-empty").await;
     let t = host.bind(make_subagent_tool(vec![]));
 
     // Fork 现在从 ToolContext 获取消息（而非 self.parent_messages），
@@ -201,7 +201,7 @@ async fn test_fork_system_prompt_consistent() {
     let parent_messages: Arc<RwLock<Vec<BaseMessage>>> = Arc::new(RwLock::new(Vec::new()));
 
     let model = super::mock_model::RecordingModel::new("sys-check");
-    let host = DurableHost::open("fixture-fork-system").await;
+    let host = HostFixture::open("fixture-fork-system").await;
     let t = host.bind(
         SubAgentTool::new(
             Arc::new(vec![]),
@@ -251,7 +251,7 @@ async fn test_fork_identity_is_projected_not_parent_bytes() {
     let parent_messages: Arc<RwLock<Vec<BaseMessage>>> = Arc::new(RwLock::new(Vec::new()));
 
     let model = super::mock_model::RecordingModel::new("frozen-check");
-    let host = DurableHost::open("fixture-fork-identity").await;
+    let host = HostFixture::open("fixture-fork-identity").await;
     let t = host.bind(
         SubAgentTool::new(
             Arc::new(vec![]),
@@ -328,7 +328,7 @@ async fn test_fork_directive_includes_rules() {
             let _ = &cancellation;
             let messages = base_messages(&request);
             let defined = defined_tools(&request);
-            let tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
+            let _tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
 
             let last = messages.last().map(|m| m.content()).unwrap_or_default();
             *self.last.lock().unwrap() = last;
@@ -337,7 +337,7 @@ async fn test_fork_directive_includes_rules() {
     }
     crate::subagent::test_support::fixture_model_impl!(DirectiveCheckLLM);
 
-    let host = DurableHost::open("fixture-fork-directive").await;
+    let host = HostFixture::open("fixture-fork-directive").await;
     let t = host.bind(
         SubAgentTool::new(
             Arc::new(vec![]),

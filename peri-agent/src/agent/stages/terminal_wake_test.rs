@@ -62,19 +62,15 @@ async fn test_idle_loop_exits_when_registry_completes_without_queue_message() {
     );
     let suspended = Arc::new(TestAtomicBool::new(false));
     let turn = session.start_turn();
-    let context = StageContext::best_effort_fixture_builder(
-        turn,
-        session.transcript(),
-        session.queue().clone(),
-    )
-    .with_idle_waiting()
-    .with_idle_should_wait({
-        let manager = Arc::clone(&manager);
-        Arc::new(move || manager.active_count() > 0)
-    })
-    .with_idle_registry(manager.registry().subscribe_activity())
-    .with_idle_suspended_flag(Arc::clone(&suspended))
-    .build();
+    let context = StageContext::builder(turn, session.transcript(), session.queue().clone())
+        .with_idle_waiting()
+        .with_idle_should_wait({
+            let manager = Arc::clone(&manager);
+            Arc::new(move || manager.active_count() > 0)
+        })
+        .with_idle_registry(manager.registry().subscribe_activity())
+        .with_idle_suspended_flag(Arc::clone(&suspended))
+        .build();
     let task = tokio::spawn(run_react_loop(context, 0));
 
     tokio::time::timeout(std::time::Duration::from_secs(1), async {
@@ -120,19 +116,15 @@ async fn test_idle_loop_cancel_returns_interrupted_and_clears_suspended() {
     );
     let suspended = Arc::new(TestAtomicBool::new(false));
     let turn = session.start_turn();
-    let context = StageContext::best_effort_fixture_builder(
-        turn,
-        session.transcript(),
-        session.queue().clone(),
-    )
-    .with_idle_waiting()
-    .with_idle_should_wait({
-        let manager = Arc::clone(&manager);
-        Arc::new(move || manager.active_count() > 0)
-    })
-    .with_idle_registry(manager.registry().subscribe_activity())
-    .with_idle_suspended_flag(Arc::clone(&suspended))
-    .build();
+    let context = StageContext::builder(turn, session.transcript(), session.queue().clone())
+        .with_idle_waiting()
+        .with_idle_should_wait({
+            let manager = Arc::clone(&manager);
+            Arc::new(move || manager.active_count() > 0)
+        })
+        .with_idle_registry(manager.registry().subscribe_activity())
+        .with_idle_suspended_flag(Arc::clone(&suspended))
+        .build();
     let cancel = context.session.turn.cancel_token.clone();
     let task = tokio::spawn(run_react_loop(context, 0));
     tokio::time::timeout(std::time::Duration::from_secs(1), async {
@@ -170,33 +162,29 @@ async fn test_idle_loop_consumes_queued_completion_before_terminal_registry_chec
     let injected = Arc::new(TestAtomicBool::new(false));
     let llm_called = Arc::new(TestAtomicBool::new(false));
     let turn = session.start_turn();
-    let context = StageContext::best_effort_fixture_builder(
-        turn,
-        session.transcript(),
-        session.queue().clone(),
-    )
-    .with_llm(Arc::new(FinalAnswerLlm {
-        calls: Arc::clone(&llm_called),
-    }))
-    .with_idle_waiting()
-    .with_idle_should_wait({
-        let manager = Arc::clone(&manager);
-        let handle = handle.clone();
-        let injected = Arc::clone(&injected);
-        Arc::new(move || {
-            if !injected.swap(true, AtomicOrdering::SeqCst) {
-                handle.push_defer(
-                    MessageSource::SubAgentComplete,
-                    BaseMessage::human("background done"),
-                );
-                assert!(manager.complete("bg-queued", completion_result("bg-queued")));
-            }
-            manager.active_count() > 0
+    let context = StageContext::builder(turn, session.transcript(), session.queue().clone())
+        .with_llm(Arc::new(FinalAnswerLlm {
+            calls: Arc::clone(&llm_called),
+        }))
+        .with_idle_waiting()
+        .with_idle_should_wait({
+            let manager = Arc::clone(&manager);
+            let handle = handle.clone();
+            let injected = Arc::clone(&injected);
+            Arc::new(move || {
+                if !injected.swap(true, AtomicOrdering::SeqCst) {
+                    handle.push_defer(
+                        MessageSource::SubAgentComplete,
+                        BaseMessage::human("background done"),
+                    );
+                    assert!(manager.complete("bg-queued", completion_result("bg-queued")));
+                }
+                manager.active_count() > 0
+            })
         })
-    })
-    .with_idle_registry(manager.registry().subscribe_activity())
-    .with_idle_suspended_flag(Arc::clone(&suspended))
-    .build();
+        .with_idle_registry(manager.registry().subscribe_activity())
+        .with_idle_suspended_flag(Arc::clone(&suspended))
+        .build();
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(1),
         run_react_loop(context, 1),

@@ -243,19 +243,15 @@ async fn test_react_start_gate_publishes_candidate_before_first_reason_and_runs_
         None,
     );
     let turn = session.start_turn();
-    let context = StageContext::best_effort_fixture_builder(
-        turn,
-        session.transcript(),
-        session.queue().clone(),
-    )
-    .with_llm(Arc::new(StartupGateLLM {
-        calls: Arc::clone(&llm_calls),
-        seen_tools: Arc::clone(&seen_tools),
-    }))
-    .with_tools(working)
-    .with_tool_catalog(Arc::clone(&catalog))
-    .with_middleware_chain(Arc::new(chain))
-    .build();
+    let context = StageContext::builder(turn, session.transcript(), session.queue().clone())
+        .with_llm(Arc::new(StartupGateLLM {
+            calls: Arc::clone(&llm_calls),
+            seen_tools: Arc::clone(&seen_tools),
+        }))
+        .with_tools(working)
+        .with_tool_catalog(Arc::clone(&catalog))
+        .with_middleware_chain(Arc::new(chain))
+        .build();
     context.session.queue.push(QueuedMessage::prompt(
         MessageSource::UserInput,
         BaseMessage::human("startup gate prompt"),
@@ -324,20 +320,16 @@ async fn test_react_start_gate_error_stops_before_compact_without_publishing_can
         None,
     );
     let turn = session.start_turn();
-    let context = StageContext::best_effort_fixture_builder(
-        turn,
-        session.transcript(),
-        session.queue().clone(),
-    )
-    .with_llm(Arc::new(StartupGateLLM {
-        calls: Arc::clone(&llm_calls),
-        seen_tools: Arc::clone(&seen_tools),
-    }))
-    .with_tools(working)
-    .with_tool_catalog(Arc::clone(&catalog))
-    .with_middleware_chain(Arc::new(chain))
-    .with_event_bus(Arc::new(bus))
-    .build();
+    let context = StageContext::builder(turn, session.transcript(), session.queue().clone())
+        .with_llm(Arc::new(StartupGateLLM {
+            calls: Arc::clone(&llm_calls),
+            seen_tools: Arc::clone(&seen_tools),
+        }))
+        .with_tools(working)
+        .with_tool_catalog(Arc::clone(&catalog))
+        .with_middleware_chain(Arc::new(chain))
+        .with_event_bus(Arc::new(bus))
+        .build();
     let published_before = catalog.snapshot();
     context.session.queue.push(QueuedMessage::prompt(
         MessageSource::UserInput,
@@ -395,19 +387,15 @@ async fn test_react_start_gate_interrupted_maps_to_interrupted_not_fatal() {
         None,
     );
     let turn = session.start_turn();
-    let context = StageContext::best_effort_fixture_builder(
-        turn,
-        session.transcript(),
-        session.queue().clone(),
-    )
-    .with_llm(Arc::new(StartupGateLLM {
-        calls: Arc::clone(&llm_calls),
-        seen_tools: Arc::clone(&seen_tools),
-    }))
-    .with_tools(working)
-    .with_tool_catalog(Arc::clone(&catalog))
-    .with_middleware_chain(Arc::new(chain))
-    .build();
+    let context = StageContext::builder(turn, session.transcript(), session.queue().clone())
+        .with_llm(Arc::new(StartupGateLLM {
+            calls: Arc::clone(&llm_calls),
+            seen_tools: Arc::clone(&seen_tools),
+        }))
+        .with_tools(working)
+        .with_tool_catalog(Arc::clone(&catalog))
+        .with_middleware_chain(Arc::new(chain))
+        .build();
     let published_before = catalog.snapshot();
     context.session.queue.push(QueuedMessage::prompt(
         MessageSource::UserInput,
@@ -453,19 +441,15 @@ async fn test_before_agent_soft_failure_still_reaches_reason_after_startup_gate(
         None,
     );
     let turn = session.start_turn();
-    let context = StageContext::best_effort_fixture_builder(
-        turn,
-        session.transcript(),
-        session.queue().clone(),
-    )
-    .with_llm(Arc::new(StartupGateLLM {
-        calls: Arc::clone(&llm_calls),
-        seen_tools: Arc::clone(&seen_tools),
-    }))
-    .with_tools(working)
-    .with_tool_catalog(Arc::clone(&catalog))
-    .with_middleware_chain(Arc::new(chain))
-    .build();
+    let context = StageContext::builder(turn, session.transcript(), session.queue().clone())
+        .with_llm(Arc::new(StartupGateLLM {
+            calls: Arc::clone(&llm_calls),
+            seen_tools: Arc::clone(&seen_tools),
+        }))
+        .with_tools(working)
+        .with_tool_catalog(Arc::clone(&catalog))
+        .with_middleware_chain(Arc::new(chain))
+        .build();
     context.session.queue.push(QueuedMessage::prompt(
         MessageSource::UserInput,
         BaseMessage::human("startup gate prompt"),
@@ -516,19 +500,15 @@ async fn test_react_start_gate_skipped_when_loop_exits_at_receive() {
         None,
     );
     let turn = session.start_turn();
-    let context = StageContext::best_effort_fixture_builder(
-        turn,
-        session.transcript(),
-        session.queue().clone(),
-    )
-    .with_llm(Arc::new(StartupGateLLM {
-        calls: Arc::clone(&llm_calls),
-        seen_tools: Arc::clone(&seen_tools),
-    }))
-    .with_tools(working)
-    .with_tool_catalog(Arc::clone(&catalog))
-    .with_middleware_chain(Arc::new(chain))
-    .build();
+    let context = StageContext::builder(turn, session.transcript(), session.queue().clone())
+        .with_llm(Arc::new(StartupGateLLM {
+            calls: Arc::clone(&llm_calls),
+            seen_tools: Arc::clone(&seen_tools),
+        }))
+        .with_tools(working)
+        .with_tool_catalog(Arc::clone(&catalog))
+        .with_middleware_chain(Arc::new(chain))
+        .build();
 
     assert!(matches!(
         run_react_loop(context.clone(), 10).await,

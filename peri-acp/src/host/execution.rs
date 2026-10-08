@@ -1,376 +1,160 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use peri_acp_types::execution_admission::{AdmissionOutcome, AdmissionRequest};
+use peri_acp_types::event::EventSink;
+use serde_json::Value;
 
-use peri_acp_types::session_resources::work::{
-    AdmissionRecord, WorkAction, WorkAdmission, WorkCommand, WorkDecision, WorkQuery,
-};
-use serde_json::{json, Value};
-
-use super::{AcpServerConfig, PromptLocks, SharedSessions};
+use super::AcpServerConfig;
+use crate::session::event_sink::TransportEventSink;
 use crate::transport::{types::AcpError, AcpTransport};
 
-#[path = "execution_finish.rs"]
-mod finishing;
-
-pub(super) async fn query(params: &Value, cfg: &AcpServerConfig) -> Result<Value, AcpError> {
-    let session_id = session_id(params)?;
-    if let Some(mailbox) = cfg.session_manager.user_input_mailbox_for(session_id) {
-        mailbox.publish_next_durable().await.map_err(|error| {
-            AcpError::new(
-                -32010,
-                format!("pending input publication unconfirmed: {error}"),
-            )
-        })?;
-    }
-    let control = cfg
-        .session_resources
-        .load_session_control(&session_id.to_owned())
-        .await
-        .map_err(super::workspace::resource_error)?;
-    if let Some(pool) = &cfg.mcp_pool {
-        if let Some((inbox, _)) = Arc::clone(pool)
-            .agent_session_binding_for_lifecycle(session_id, control.lifecycle)
-            .await
-            .map_err(|error| AcpError::new(-32010, error))?
-        {
-            peri_agent::agent::stages::publish_session_inbox(
-                Arc::clone(&cfg.session_resources),
-                session_id,
-                control.lifecycle,
-                inbox.queue(),
-            )
-            .await
-            .map_err(|error| {
-                AcpError::new(
-                    -32010,
-                    format!("inbox publication remains unconfirmed: {error}"),
-                )
-            })?;
-        }
-    }
-    let snapshot = super::work_recovery::resolve_pending(
-        cfg.session_resources.as_ref(),
-        &WorkQuery {
-            session_id: session_id.to_owned(),
-            limit: 1,
-        },
-    )
-    .await
-    .map_err(super::workspace::resource_error)?;
-    let work = snapshot.candidates.first().map(|candidate| {
-        json!({
-            "workId": candidate.work_id,
-            "revision": candidate.work_revision,
-            "lifecycle": snapshot.control.lifecycle,
-            "controlGeneration": snapshot.control.control_generation,
-        })
-    });
-    Ok(
-        json!({"control": snapshot.control, "work": work, "blocked": snapshot.blocked,
-        "pendingCommands": snapshot.pending_commands}),
-    )
-}
-
-pub(super) async fn resolve_work(params: &Value, cfg: &AcpServerConfig) -> Result<Value, AcpError> {
-    let command: WorkCommand = serde_json::from_value(
-        params
-            .get("command")
-            .cloned()
-            .ok_or_else(|| AcpError::new(-32602, "original work command is required"))?,
-    )
-    .map_err(|error| AcpError::new(-32602, format!("invalid original work command: {error}")))?;
-    if command.session_id != session_id(params)? {
-        return Err(AcpError::new(-32602, "work command recipient conflict"));
-    }
-    if matches!(&command.action, WorkAction::FinishAdmission { .. }) {
-        let owned = cfg
-            .session_resources
-            .load_work_command(&peri_acp_types::session_resources::work::WorkCommandQuery {
-                session_id: command.session_id.clone(),
-                mutation_id: command.mutation_id.clone(),
-            })
-            .await
-            .map_err(super::workspace::resource_error)?;
-        if owned.is_none_or(|owned| owned.command != command) {
-            return Err(AcpError::new(
-                -32010,
-                "original execution finish journal is required",
-            ));
-        }
-    }
-    let resolution = cfg
-        .session_resources
-        .resolve_work_mutation(&command)
-        .await
-        .map_err(super::workspace::resource_error)?;
-    serde_json::to_value(resolution).map_err(|error| AcpError::new(-32603, error.to_string()))
-}
-
-pub(super) async fn resolve(params: &Value, cfg: &AcpServerConfig) -> Result<Value, AcpError> {
-    let ticket = ticket(params)?;
-    let snapshot = cfg
-        .session_resources
-        .load_session_work(&WorkQuery {
-            session_id: ticket.session_id.clone(),
-            limit: 1,
-        })
-        .await
-        .map_err(super::workspace::resource_error)?;
-    match snapshot.state.admissions.get(&ticket.admission_id) {
-        Some(record) if record.admission == ticket => {
-            if finishing::reconcile_finish(cfg.session_resources.as_ref(), &ticket).await?
-                || super::cold_terminal::reconcile(cfg.session_resources.as_ref(), &ticket).await?
-            {
-                finish_admission(cfg.session_resources.as_ref(), &ticket).await?;
-                let updated = cfg
-                    .session_resources
-                    .load_session_work(&WorkQuery {
-                        session_id: ticket.session_id.clone(),
-                        limit: 1,
-                    })
-                    .await
-                    .map_err(super::workspace::resource_error)?;
-                let record = updated
-                    .state
-                    .admissions
-                    .get(&ticket.admission_id)
-                    .ok_or_else(|| AcpError::new(-32010, "terminal admission disappeared"))?;
-                return Ok(json!({"status": "applied", "reply": reply(record)}));
-            }
-            Ok(json!({"status": "applied", "reply": reply(record)}))
-        }
-        Some(_) => Err(AcpError::new(
-            -32010,
-            "execution admission identity conflict",
-        )),
-        None => {
-            let command = admission_command(&ticket);
-            match cfg.session_resources.resolve_work_mutation(&command).await {
-                Ok(peri_acp_types::session_resources::work::WorkResolution::NotApplied) => {
-                    Ok(json!({"status": "notApplied"}))
-                }
-                Ok(_) => Ok(json!({"status": "unknown"})),
-                Err(error) => Err(super::workspace::resource_error(error)),
-            }
-        }
-    }
-}
-
-pub(super) struct ExecutionContext<'a> {
-    pub(super) sessions: &'a SharedSessions,
-    pub(super) prompt_locks: &'a PromptLocks,
-    pub(super) cfg: &'a Arc<AcpServerConfig>,
-    pub(super) transport: &'a Arc<dyn AcpTransport>,
-    pub(super) continuation:
-        &'a Arc<tokio::sync::mpsc::UnboundedSender<crate::session::executor::ContinuationRequest>>,
-}
-
-pub(super) async fn execute(
-    params: Value,
-    context: ExecutionContext<'_>,
-) -> Result<Value, AcpError> {
-    let admission = ticket(&params)?;
-    let resources = &context.cfg.session_resources;
-    let snapshot = resources
-        .load_session_work(&WorkQuery {
-            session_id: admission.session_id.clone(),
-            limit: 1,
-        })
-        .await
-        .map_err(super::workspace::resource_error)?;
-    if let Some(record) = snapshot.state.admissions.get(&admission.admission_id) {
-        if record.admission != admission {
-            return Err(AcpError::new(
-                -32010,
-                "execution admission identity conflict",
-            ));
-        }
-        if finishing::reconcile_finish(resources.as_ref(), &admission).await?
-            || super::cold_terminal::reconcile(resources.as_ref(), &admission).await?
-        {
-            let evidence_id = finish_admission(resources.as_ref(), &admission).await?;
-            return Ok(settled_reply(&admission, &evidence_id));
-        }
-        return Ok(reply(record));
-    }
-    snapshot
-        .validate_admission(&admission)
-        .map_err(super::workspace::resource_error)?;
-    let sdk = context
-        .cfg
-        .execution_admission_port
-        .as_ref()
-        .ok_or_else(|| AcpError::new(-32010, "SDK admission capability is unavailable"))?;
-    let confirmed = sdk
-        .admit(AdmissionRequest {
-            request_id: admission.admission_id.clone(),
-            snapshot: (&snapshot).into(),
-            existing_admission: Some(admission.clone()),
-        })
-        .await
-        .map_err(|error| AcpError::new(-32010, error.to_string()))?;
-    if !matches!(confirmed, AdmissionOutcome::Admitted { admission: confirmed } if confirmed == admission)
+pub(super) async fn approve_schedule(
+    request: &peri_acp_types::cron::CronContinuationRequest,
+    sessions: &super::SharedSessions,
+    locks: &super::PromptLocks,
+    cfg: &AcpServerConfig,
+    transport: &Arc<dyn AcpTransport>,
+) -> Result<bool, AcpError> {
+    let permission =
+        super::continuation::scheduled_permission_mode(cfg, sessions, &request.session_id).await?;
+    let lock = {
+        let mut locks = locks.lock().await;
+        Arc::clone(
+            locks
+                .entry(request.session_id.clone())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+        )
+    };
+    let _guard = lock.lock().await;
+    super::workspace::validate_expected(cfg, &request.session_id, None).await?;
+    let runtime = cfg
+        .session_manager
+        .get_session(&request.session_id)
+        .ok_or_else(|| AcpError::new(-32602, "scheduled session runtime missing"))?;
+    if runtime.cancel_token.is_cancelled()
+        || !runtime
+            .v2_message_queue
+            .subscribe_wake()
+            .same_channel(&request.inbox.subscribe_wake())
     {
         return Err(AcpError::new(
-            -32010,
-            "SDK execution admission remains unconfirmed",
+            -32800,
+            "scheduled session runtime superseded",
         ));
     }
-    let receipt = resources
-        .apply_work_mutation(&admission_command(&admission))
-        .await
-        .map_err(super::workspace::resource_error)?;
-    if !matches!(receipt.decision, WorkDecision::Accepted) {
-        return Ok(
-            json!({"status": "notApplied", "ticket": admission, "reason": "stale domain association"}),
+    let runtime_cancel = runtime.cancel_token.clone();
+    drop(runtime);
+    let mailbox = super::user_input::ensure_mailbox(&request.session_id, cfg, transport)?;
+    let mut params = serde_json::json!({});
+    let notifications = ExecutionNotifications::from_params(&mut params)?;
+    let cancel = tokio_util::sync::CancellationToken::new();
+    {
+        let mut sessions = sessions.lock().await;
+        let state = sessions
+            .get_mut(&request.session_id)
+            .ok_or_else(|| AcpError::new(-32602, "scheduled session missing"))?;
+        if state.closing {
+            return Err(AcpError::new(-32800, "scheduled session is closing"));
+        }
+        state.cancel_token = Some(cancel.clone());
+        state.continuation_in_flight = true;
+    }
+    let shutdown = cfg.host_task_spawner.shutdown_token();
+    let result = async {
+        notifications
+            .start(&request.session_id, mailbox.generation(), cfg, transport)
+            .await?;
+        let broker = super::prompt::build_transport_broker(transport, &request.session_id);
+        let approval = super::prompt::approve_scheduled_trigger(
+            permission.as_ref(),
+            Some(&broker),
+            &request.trigger.task_id,
+            &request.trigger.prompt,
         );
-    }
-    let meta = resources
-        .load_session_meta(&admission.session_id)
-        .await
-        .map_err(super::workspace::resource_error)?;
-    let mut child_run = None;
-    let result = if meta.parent_thread_id.is_some() {
-        match super::cold_execution::run(
-            &admission,
-            context.cfg,
-            context.sessions,
-            context.transport,
-        )
-        .await
-        {
-            Ok(run) => {
-                child_run = Some(run);
-                Ok(json!({"childSessionId": admission.session_id}))
-            }
-            Err(error) => {
-                super::cold_execution::block(&admission, context.cfg, &error).await?;
-                Err(error)
-            }
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => Ok(false),
+            _ = runtime_cancel.cancelled() => Ok(false),
+            _ = shutdown.cancelled() => Ok(false),
+            approved = approval => Ok(approved),
         }
-    } else {
-        let prompt = json!({
-            "sessionId": admission.session_id,
-            "executionAdmission": admission,
-            "requestId": admission.admission_id,
-            "message": {"role": "user", "content": []},
-        });
-        let environment = context
-            .sessions
-            .lock()
-            .await
-            .get(&admission.session_id)
-            .and_then(|state| state.environment.clone());
-        let cfg = environment
-            .as_ref()
-            .map(|environment| &environment.cfg)
-            .unwrap_or(context.cfg);
-        let mailbox =
-            super::user_input::ensure_mailbox(&admission.session_id, cfg, context.transport)
-                .await?;
-        let ticket = mailbox
-            .observe_sdk_run(&admission)
-            .await
-            .map_err(|error| AcpError::new(-32010, error.to_string()))?;
-        super::prompt_dispatch::dispatch_prompt_turn_with_input(
-            prompt,
-            true,
-            context.sessions,
-            context.prompt_locks,
-            context.transport,
-            context.cfg,
-            context.continuation,
-            Some(super::user_input::UserInputRun::new(ticket)),
-        )
-        .await
-    };
-    if let Some(child_run) = child_run {
-        let command = child_run
-            .execution
-            .terminal_command(&child_run.result)
-            .await
-            .map_err(|error| {
-                AcpError::new(
-                    -32010,
-                    format!("child terminal delivery remains unfinished: {error}"),
-                )
-            })?;
-        super::cold_terminal::persist(resources.as_ref(), &admission, command).await?;
-        if !super::cold_terminal::reconcile(resources.as_ref(), &admission).await? {
-            return Err(AcpError::new(
-                -32010,
-                "child terminal obligation is missing",
-            ));
+    }
+    .await;
+    let reason =
+        if cancel.is_cancelled() || runtime_cancel.is_cancelled() || shutdown.is_cancelled() {
+            "cancelled"
+        } else if result.is_err() {
+            "error"
+        } else {
+            "end_turn"
+        };
+    notifications
+        .finish_early(&request.session_id, reason, cfg, transport)
+        .await;
+    {
+        let mut sessions = sessions.lock().await;
+        if let Some(state) = sessions.get_mut(&request.session_id) {
+            state.cancel_token = None;
+            state.continuation_in_flight = false;
         }
-    } else if meta.parent_thread_id.is_some() {
-        return result;
     }
-    let evidence_id = finish_admission(resources.as_ref(), &admission).await?;
-    let mut response = settled_reply(&admission, &evidence_id);
-    if let Err(error) = result {
-        if meta.parent_thread_id.is_some() {
-            return Err(error);
+    result
+}
+
+pub(super) struct ExecutionNotifications {
+    pub(super) request_id: String,
+    started: AtomicBool,
+    terminal: AtomicBool,
+}
+
+impl ExecutionNotifications {
+    pub(super) fn from_params(params: &mut Value) -> Result<Self, AcpError> {
+        let params = params
+            .as_object_mut()
+            .ok_or_else(|| AcpError::new(-32602, "prompt params must be an object"))?;
+        let request_id = params
+            .get("requestId")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
+        params.insert("requestId".into(), Value::String(request_id.clone()));
+        Ok(Self {
+            request_id,
+            started: AtomicBool::new(false),
+            terminal: AtomicBool::new(false),
+        })
+    }
+
+    pub(super) async fn start(
+        &self,
+        session_id: &str,
+        generation: &str,
+        cfg: &AcpServerConfig,
+        transport: &Arc<dyn AcpTransport>,
+    ) -> Result<(), AcpError> {
+        TransportEventSink::new(Arc::clone(transport), cfg.session_manager.caps_registry())
+            .push_execution_started(session_id, generation.to_owned(), self.request_id.clone())
+            .await?;
+        self.started.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    pub(super) fn mark_terminal(&self) {
+        self.terminal.store(true, Ordering::Release);
+    }
+
+    pub(super) async fn finish_early(
+        &self,
+        session_id: &str,
+        reason: &str,
+        cfg: &AcpServerConfig,
+        transport: &Arc<dyn AcpTransport>,
+    ) {
+        if self.started.load(Ordering::Acquire) && !self.terminal.swap(true, Ordering::AcqRel) {
+            TransportEventSink::new(Arc::clone(transport), cfg.session_manager.caps_registry())
+                .push_done(session_id, reason, Some(&self.request_id))
+                .await;
         }
-        tracing::warn!(session_id = admission.session_id, %error, "admitted execution ended with an error");
-        response["executionError"] = json!({"code": error.code, "message": error.message});
     }
-    Ok(response)
-}
-
-pub(super) async fn finish_admission(
-    resources: &dyn peri_acp_types::session_resources::SessionResources,
-    admission: &WorkAdmission,
-) -> Result<String, AcpError> {
-    finishing::finish_admission(resources, admission).await
-}
-
-fn admission_command(admission: &WorkAdmission) -> WorkCommand {
-    WorkCommand {
-        session_id: admission.session_id.clone(),
-        recipient_lifecycle: admission.lifecycle,
-        mutation_id: format!("execution-admit:{}", admission.admission_id),
-        action: WorkAction::RegisterAdmission {
-            admission: admission.clone(),
-        },
-    }
-}
-
-fn reply(record: &AdmissionRecord) -> Value {
-    match &record.evidence_id {
-        Some(evidence_id) => settled_reply(&record.admission, evidence_id),
-        None => json!({"status": "running", "ticket": record.admission}),
-    }
-}
-
-fn settled_reply(admission: &WorkAdmission, evidence_id: &str) -> Value {
-    json!({"status": "settled", "ticket": admission, "proof": {
-        "kind": "attemptStopped",
-        "instanceId": admission.instance_id,
-        "generationId": admission.generation_id,
-        "execution": admission.execution,
-        "evidenceId": evidence_id,
-    }})
-}
-
-fn session_id(params: &Value) -> Result<&str, AcpError> {
-    params
-        .get("sessionId")
-        .and_then(Value::as_str)
-        .filter(|session_id| !session_id.is_empty())
-        .ok_or_else(|| AcpError::new(-32602, "missing sessionId"))
-}
-
-fn ticket(params: &Value) -> Result<WorkAdmission, AcpError> {
-    let ticket: WorkAdmission = serde_json::from_value(
-        params
-            .get("ticket")
-            .cloned()
-            .ok_or_else(|| AcpError::new(-32602, "missing execution ticket"))?,
-    )
-    .map_err(|error| AcpError::new(-32602, format!("invalid execution ticket: {error}")))?;
-    if session_id(params)? != ticket.session_id {
-        return Err(AcpError::new(-32602, "execution ticket session mismatch"));
-    }
-    Ok(ticket)
 }

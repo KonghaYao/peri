@@ -393,18 +393,56 @@ fn insert_skill_handle(
     name: &str,
     resources: Vec<Resource>,
 ) -> Arc<McpClientHandle> {
+    let (client_io, server_io) = tokio::io::duplex(8192);
+    tokio::spawn(async move {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let (reader, mut writer) = tokio::io::split(server_io);
+        let mut lines = BufReader::new(reader).lines();
+        while let Some(line) = lines.next_line().await.unwrap() {
+            let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+            if let Some(id) = request.get("id") {
+                let result = match request["method"].as_str().unwrap() {
+                    "skills/list" => serde_json::json!({"skills": []}),
+                    "resources/templates/list" => serde_json::json!({"resourceTemplates": []}),
+                    method => panic!("unexpected empty skill fixture request: {method}"),
+                };
+                let reply = serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result});
+                writer
+                    .write_all(serde_json::to_string(&reply).unwrap().as_bytes())
+                    .await
+                    .unwrap();
+                writer.write_all(b"\n").await.unwrap();
+            }
+        }
+    });
+    let running = rmcp::service::serve_directly::<rmcp::RoleClient, _, _, _, _>(
+        rmcp::model::InitializeRequestParams::new(
+            rmcp::model::ClientCapabilities::default(),
+            rmcp::model::Implementation::from_build_env(),
+        ),
+        client_io,
+        None::<rmcp::model::ServerPeerInfo>,
+    );
+    let service = crate::mcp::client::McpServiceWrapper::Default(running);
+    let service = pool.retain_service(service);
+    let peer = service.peer().clone();
+    peer.set_peer_info(rmcp::model::ServerPeerInfo::new(
+        rmcp::model::ProtocolVersion::default(),
+        rmcp::model::ServerCapabilities::default(),
+    ));
+    pool.services.lock().insert(name.to_string(), service);
     let handle = Arc::new(McpClientHandle {
         name: name.to_string(),
         version: None,
         cache_version: None,
-        peer: None,
+        peer: Some(peer),
         tools: vec![],
         resources,
         status: ClientStatus::Connected,
         oauth_status: OAuthStatus::default(),
         source: None,
         url: None,
-        skills_capable: false,
+        skills_capable: true,
     });
     pool.clients
         .write()
@@ -412,7 +450,7 @@ fn insert_skill_handle(
     handle
 }
 
-/// 轮询等待发现任务完成（peer=None 时任务体无 await，一旦被调度立即完成）。
+/// 轮询等待真实空清单 peer 的发现任务完成。
 async fn wait_discovered(reg: &McpSkillRegistry, server: &str) {
     for _ in 0..200 {
         if matches!(
@@ -426,7 +464,7 @@ async fn wait_discovered(reg: &McpSkillRegistry, server: &str) {
     panic!("等待 Discovered 超时: {:?}", reg.discovery_state(server));
 }
 
-/// 投影 → Started 置位；同 handle 第二轮不重复 spawn；peer=None 任务完成后
+/// 投影 → Started 置位；同 handle 第二轮不重复 spawn；真实空清单任务完成后
 /// 变 Discovered{[]}；全程 state 无消息推送（验收 13 半边）。
 #[tokio::test]
 async fn before_agent_marks_started_then_completes_silently() {
@@ -466,11 +504,11 @@ async fn before_agent_marks_started_then_completes_silently() {
     }
     assert_eq!(state.messages().len(), 0);
 
-    // peer=None → 发现任务完成后 Discovered{[]}（失败=空条目，不重试）
+    // 真实 peer 返回 skills:[] → 发现任务完成后 Discovered{[]}
     wait_discovered(&reg, "srv").await;
     match reg.discovery_state("srv") {
         Some(ServerDiscoveryState::Discovered { entries, .. }) => {
-            assert!(entries.is_empty(), "peer 缺失 → 空条目");
+            assert!(entries.is_empty(), "真实 peer 返回合法空清单");
         }
         other => panic!("应 Discovered(空): {other:?}"),
     }
@@ -590,6 +628,10 @@ mod command_tests {
 
 mod system_tests {
     include!("middleware_system_test.rs");
+}
+
+mod discovery_state_tests {
+    include!("middleware_discovery_state_test.rs");
 }
 
 // ─── F11/W5：DiscoverMCP 的 agent 投影随链槽关闭位（真实线路，管道级差分） ──────

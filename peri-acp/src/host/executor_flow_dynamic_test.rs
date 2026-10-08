@@ -110,76 +110,9 @@ impl peri_model::Model for FixedAnswerModel {
 /// H1：子链装配点接收模型来源（bridge 由 Agent 层构造）。
 fn prepared_child_model() -> peri_agent::session::subagent::SubagentLlmSource {
     peri_agent::session::subagent::SubagentLlmSource::model(
-        execution_fixture::wrap_model(Arc::new(FixedAnswerModel)),
+        Arc::new(FixedAnswerModel),
         "fixed-answer-model",
     )
-}
-
-struct ChildFixtureSdk {
-    template: SessionContext,
-    sessions: Mutex<
-        std::collections::BTreeMap<
-            String,
-            Arc<dyn peri_acp_types::execution_admission::ExecutionAdmissionPort>,
-        >,
-    >,
-}
-
-impl ChildFixtureSdk {
-    fn port(
-        &self,
-        session_id: &str,
-    ) -> Arc<dyn peri_acp_types::execution_admission::ExecutionAdmissionPort> {
-        let mut sessions = self.sessions.lock().unwrap();
-        sessions
-            .entry(session_id.into())
-            .or_insert_with(|| {
-                let mut context = self.template.clone();
-                context.session_id = session_id.into();
-                context.thread_id = Some(session_id.into());
-                context.session_access = None;
-                execution_fixture::bind_execution(&mut context, None);
-                context.execution_admission_port.unwrap()
-            })
-            .clone()
-    }
-}
-
-#[async_trait]
-impl peri_acp_types::execution_admission::ExecutionAdmissionPort for ChildFixtureSdk {
-    async fn admit(
-        &self,
-        request: peri_acp_types::execution_admission::AdmissionRequest,
-    ) -> Result<
-        peri_acp_types::execution_admission::AdmissionOutcome,
-        peri_acp_types::execution_admission::ExecutionAdmissionError,
-    > {
-        self.port(&request.snapshot.session_id).admit(request).await
-    }
-
-    async fn entered(
-        &self,
-        request: peri_acp_types::execution_admission::EntryRequest,
-    ) -> Result<
-        peri_acp_types::execution_admission::EntryOutcome,
-        peri_acp_types::execution_admission::ExecutionAdmissionError,
-    > {
-        self.port(&request.admission.session_id)
-            .entered(request)
-            .await
-    }
-
-    async fn settle(
-        &self,
-        request: peri_acp_types::execution_admission::SettlementRequest,
-    ) -> Result<
-        peri_acp_types::execution_admission::SettlementOutcome,
-        peri_acp_types::execution_admission::ExecutionAdmissionError,
-    > {
-        self.port(&request.admission.session_id)
-            .settle(request)
-            .await
-    }
 }
 
 pub(super) async fn bind_child_fixture_resources(
@@ -222,74 +155,8 @@ pub(super) async fn bind_child_fixture_resources(
     context.session_resources = Some(resources);
     context.thread_id = Some(context.session_id.clone());
     context.session_access = None;
-    execution_fixture::bind_execution(context, None);
-    let root = context.execution_admission_port.as_ref().unwrap().clone();
-    context.execution_admission_port = Some(Arc::new(ChildFixtureSdk {
-        template: context.clone(),
-        sessions: Mutex::new(std::collections::BTreeMap::from([(
-            context.session_id.clone(),
-            root,
-        )])),
-    }));
+    execution_fixture::initialize_runtime(context, None);
     directory
-}
-
-pub(super) async fn prepare_child_fixture_intent(context: &SessionContext) -> String {
-    use peri_acp_types::session_resources::work::*;
-    use sha2::{Digest, Sha256};
-    let resources = context.session_resources.as_ref().unwrap();
-    let query = WorkQuery {
-        session_id: context.session_id.clone(),
-        limit: 1,
-    };
-    let mut snapshot = resources.load_session_work(&query).await.unwrap();
-    let authorization_ref = "explicit-dynamic-fixture:no-external-tools".to_owned();
-    let receipt = resources
-        .apply_work_mutation(&WorkCommand {
-            session_id: context.session_id.clone(),
-            recipient_lifecycle: snapshot.control.lifecycle,
-            mutation_id: uuid::Uuid::now_v7().to_string(),
-            action: WorkAction::BindResourceOwners {
-                expected_revision: snapshot.state.revision,
-                connections_json: "[]".into(),
-                authorization_ref: authorization_ref.clone(),
-            },
-        })
-        .await
-        .unwrap();
-    assert_eq!(receipt.decision, WorkDecision::Accepted);
-    snapshot = resources.load_session_work(&query).await.unwrap();
-    let invocation_id = uuid::Uuid::now_v7().to_string();
-    let arguments_json = serde_json::json!({"prompt":"finish"}).to_string();
-    let arguments_digest = format!("{:x}", Sha256::digest(arguments_json.as_bytes()));
-    let receipt = resources
-        .apply_work_mutation(&WorkCommand {
-            session_id: context.session_id.clone(),
-            recipient_lifecycle: snapshot.control.lifecycle,
-            mutation_id: format!("dynamic-child-intent:{invocation_id}"),
-            action: WorkAction::PrepareInvocation {
-                expected_revision: snapshot.state.revision,
-                intent: InvocationIntent {
-                    invocation_id: invocation_id.clone(),
-                    tool_call_id: uuid::Uuid::now_v7().to_string(),
-                    tool_name: "Subagent".into(),
-                    arguments_json: arguments_json.clone(),
-                    arguments_digest: arguments_digest.clone(),
-                    effective_tool_name: "Subagent".into(),
-                    effective_arguments_json: arguments_json,
-                    effective_arguments_digest: arguments_digest,
-                    owner_identity: "explicit-dynamic-fixture-local-owner".into(),
-                    scope_id: context.session_id.clone(),
-                    scope_epoch: None,
-                    authorization_ref,
-                    recovery_locator: format!("dynamic-child:{invocation_id}"),
-                },
-            },
-        })
-        .await
-        .unwrap();
-    assert_eq!(receipt.decision, WorkDecision::Accepted);
-    invocation_id
 }
 
 /// [回归测试] production stage 创建的主 Session 必须保存 session/new 的完整
@@ -305,7 +172,7 @@ async fn test_production_stage_propagates_frozen_snapshot_to_main_and_child() {
     let sentinel = make_sentinel_frozen();
     let workspace = tempfile::tempdir().unwrap();
     let _resources = bind_child_fixture_resources(&mut ctx, workspace.path(), &sentinel).await;
-    let invocation_id = prepare_child_fixture_intent(&ctx).await;
+    let invocation_id = uuid::Uuid::now_v7().to_string();
     let stage_build = make_stage_build(&ctx);
     let (out, _) = stage_build(make_stage_request(sentinel.clone(), None)).unwrap();
     let parent_frozen = &out.session.store().frozen;
@@ -359,7 +226,7 @@ async fn test_production_stage_propagates_frozen_snapshot_to_main_and_child() {
             register_runtime: None,
             deregister_runtime: None,
             parent_agent_id: None,
-            parent_invocation_id: Some(invocation_id),
+            parent_tool_call_id: Some(invocation_id),
             cancel_token: None,
             cwd: None,
             parent_thread_id: Some(ctx.session_id.clone()),
@@ -515,7 +382,7 @@ async fn test_production_stage_keeps_empty_frozen_prompt_inputs_after_late_files
     }) as Arc<dyn Model>;
     let mut ctx = make_session_context("late-frozen-files").await;
     let _resources = bind_child_fixture_resources(&mut ctx, &cwd, &frozen).await;
-    let invocation_id = prepare_child_fixture_intent(&ctx).await;
+    let invocation_id = uuid::Uuid::now_v7().to_string();
     ctx.primary_llm_factory = Some(Arc::new(move || Arc::clone(&model)));
     let stage_build = make_stage_build(&ctx);
     let (out, _) = stage_build(make_stage_request(frozen, None)).unwrap();
@@ -586,7 +453,7 @@ async fn test_production_stage_keeps_empty_frozen_prompt_inputs_after_late_files
             register_runtime: None,
             deregister_runtime: None,
             parent_agent_id: None,
-            parent_invocation_id: Some(invocation_id),
+            parent_tool_call_id: Some(invocation_id),
             cancel_token: None,
             cwd: None,
             parent_thread_id: Some(ctx.session_id.clone()),

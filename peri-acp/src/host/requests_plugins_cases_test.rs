@@ -317,3 +317,90 @@ async fn test_plugin_uninstall_removes_stale_plugin_entries() {
         "install/uninstall 各触发一次投影推送（首发 + 2 次重发）"
     );
 }
+
+/// M6：插件来源闭合位下，install / uninstall RPC **不得**让命令域重新出现
+/// 可执行插件命令（注册表是真实执行面，见
+/// `peri-agent/src/session/exec/executor_helpers/intercept.rs`）。
+///
+/// 关闭位随装配注入（`AcpServerConfig::plugin_face_closed`，取自 frozen）；
+/// 本测试固定为关闭，断言两次管理 RPC 之后 plugin 域仍为空。
+#[tokio::test]
+#[serial]
+async fn closed_plugin_face_keeps_the_command_registry_empty_across_plugin_rpcs() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let _home_guard = HomeDirGuard::set(&home);
+    seed_plugin_ecc(&home);
+
+    let peri_config = make_peri_config_with_provider(make_provider_config(
+        "a",
+        "openai",
+        "sk-openai-test",
+        "gpt-4o",
+    ));
+    let provider = LlmProvider::from_config(&peri_config).unwrap();
+    let mut cfg = make_server_config(peri_config, provider, &tmp).await;
+    cfg.plugin_manager = Arc::new(MockPluginManager::install_ok("ecc"));
+    cfg.plugin_face_closed = true;
+    let mut sessions = HashMap::new();
+    let transport: Arc<MockTransport> = Arc::new(MockTransport::default());
+    let transport_dyn: Arc<dyn crate::transport::AcpTransport> = transport.clone();
+
+    let result = handle_request(
+        "session/new",
+        &json!({ "cwd": tmp.path().to_str().unwrap() }),
+        &cfg,
+        &mut sessions,
+        &transport_dyn,
+    )
+    .await
+    .unwrap();
+    let sid = result["sessionId"].as_str().unwrap().to_string();
+    super::session_lifecycle::after_new_response(&cfg, &transport_dyn, &sid).await;
+    let registry = cfg
+        .session_manager
+        .command_registry_for(&sid)
+        .expect("session 应持有命令注册表");
+    assert!(
+        plugin_entries(&registry).is_empty(),
+        "前置：plugin 域初始为空"
+    );
+
+    // install：RPC 仍成功（管理面保留），但命令域不得出现可执行插件命令。
+    let resp = handle_request(
+        "plugin/install",
+        &json!({ "sessionId": sid, "name": "ecc", "marketplace": "test-mkt" }),
+        &cfg,
+        &mut sessions,
+        &transport_dyn,
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp["success"], true, "管理面 RPC 不受插件来源闭合位影响");
+    assert!(
+        plugin_entries(&registry).is_empty(),
+        "关闭位下 install 后 plugin 域必须仍为空: {:?}",
+        plugin_entries(&registry)
+    );
+
+    // uninstall：同样不得注册（只允许注销 stale）。
+    let resp = handle_request(
+        "plugin/uninstall",
+        &json!({
+            "sessionId": sid,
+            "pluginId": "ecc@test-mkt",
+        }),
+        &cfg,
+        &mut sessions,
+        &transport_dyn,
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp["success"], true);
+    assert!(
+        plugin_entries(&registry).is_empty(),
+        "关闭位下 uninstall 后 plugin 域必须仍为空: {:?}",
+        plugin_entries(&registry)
+    );
+}

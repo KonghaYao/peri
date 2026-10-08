@@ -85,7 +85,7 @@ pub(super) async fn spawn_subagent_impl(
         register_runtime,
         deregister_runtime,
         parent_agent_id,
-        parent_invocation_id,
+        parent_tool_call_id,
         cancel_token: cancel_token_cfg,
         cwd: cwd_cfg,
         parent_thread_id: parent_thread_id_cfg,
@@ -109,12 +109,6 @@ pub(super) async fn spawn_subagent_impl(
         .or(cwd_cfg)
         .ok_or("spawn_subagent: cwd 未提供（parent 缺失且 config.cwd 为 None）")?;
     let parent_thread_id = parent_thread_id_of(parent).or(parent_thread_id_cfg);
-    let parent_tool_call_id = super::delegation::parent_tool_call_id(
-        session_resources.as_deref(),
-        parent_thread_id.as_deref(),
-        parent_invocation_id.as_deref(),
-    )
-    .await?;
     let frozen_claude_md = parent
         .map(|p| p.store().frozen.claude_md.to_string())
         .or(frozen_claude_md_cfg);
@@ -266,102 +260,6 @@ pub(super) async fn spawn_subagent_impl(
         &frozen_skill_summary,
         &frozen_date,
     );
-    if let (Some(resources), Some(initiator), Some(invocation_id)) = (
-        session_resources.as_ref(),
-        parent_thread_id.as_ref(),
-        parent_invocation_id.as_ref(),
-    ) {
-        use peri_acp_types::session_resources::work::WorkQuery;
-        use sha2::{Digest, Sha256};
-        let parent_work = resources
-            .load_session_work(&WorkQuery {
-                session_id: initiator.clone(),
-                limit: 1,
-            })
-            .await?;
-        if let Some(delegation) = parent_work.state.invocations.get(invocation_id) {
-            let child_snapshot = resources.load_session_snapshot(&child_thread_id).await?;
-            let peri_acp_types::session_resources::FrozenState::Present(bytes) =
-                child_snapshot.frozen
-            else {
-                return Err("Incomplete: child frozen snapshot missing".into());
-            };
-            let metadata = super::cold::ChildResumeMetadata {
-                // v2（M3）：身份结构化持久化——`identity_system` 是确定身份投影，
-                // `runtime_env` 是子冻结运行环境；不再用 v1 的 `persona`
-                // （该字段仅为解释历史记录保留，不双写身份）。
-                version: 2,
-                child_session_id: child_thread_id.clone(),
-                recipient_lifecycle: 1,
-                agent_name: agent_name.clone(),
-                model_name: llm.model_name().to_owned(),
-                direct_initiator_session_id: initiator.clone(),
-                direct_initiator_lifecycle: delegation.recipient_lifecycle,
-                delegation_invocation_id: invocation_id.clone(),
-                authorization_ref: delegation.intent.authorization_ref.clone(),
-                delegation_task_id: if run_mode == SubagentRunMode::Background {
-                    task_id.clone()
-                } else {
-                    child_thread_id.clone()
-                },
-                frozen_digest: format!("{:x}", Sha256::digest(bytes.as_str().as_bytes())),
-                tool_ceiling: tools
-                    .iter()
-                    .filter(|tool| tool_filter(tool.as_ref()))
-                    .map(|tool| tool.name().to_owned())
-                    .collect(),
-                tool_origins: tools
-                    .iter()
-                    .filter(|tool| tool_filter(tool.as_ref()))
-                    .map(|tool| {
-                        (
-                            tool.name().to_owned(),
-                            tool.mcp_server_name().map(str::to_owned),
-                        )
-                    })
-                    .collect(),
-                skill_names: skill_names.clone(),
-                max_iterations,
-                persona: None,
-                // 父冻结字节（审计/解释用），不参与子身份判定（M3）。
-                system_prompt: parent
-                    .map(|p| p.store().frozen.system_prompt.to_string())
-                    .unwrap_or_default(),
-                // 空身份（无 system_builder 的嵌入路径）持久为 None = 该子会话
-                // 确实无身份，恢复按“无身份”继续而不是把父字节当身份。
-                identity_system: Some(frozen.system_prompt.to_string())
-                    .filter(|value| !value.trim().is_empty()),
-                runtime_env: frozen.runtime_env.clone(),
-                claude_md: frozen.claude_md.to_string(),
-                claude_local_md: frozen_claude_local_md.clone(),
-                skill_summary: frozen.skill_summary.to_string(),
-                date: frozen.date.to_string(),
-                language: frozen.language.as_ref().map(ToString::to_string),
-                section_overrides: frozen
-                    .meta_harness
-                    .section_overrides
-                    .iter()
-                    .map(|(key, value)| (key.clone(), value.to_string()))
-                    .collect(),
-                disabled_middlewares: frozen
-                    .meta_harness
-                    .disabled_middlewares
-                    .iter()
-                    .cloned()
-                    .collect(),
-                built_in_subagents_enabled: frozen.meta_harness.built_in_subagents_enabled,
-            };
-            super::cold::copy_child_resource_owners(resources.as_ref(), &metadata).await?;
-            super::cold::persist_child_resume_metadata(resources.as_ref(), &metadata).await?;
-            super::cold::bind_delegation_task(
-                resources.as_ref(),
-                initiator,
-                delegation,
-                &metadata.delegation_task_id,
-            )
-            .await?;
-        }
-    }
     let (session, v2_ctx) = build_subagent_session_v2(
         cwd.clone(),
         frozen,
@@ -387,16 +285,27 @@ pub(super) async fn spawn_subagent_impl(
         context_budget,
         compact_llm,
         Some(agent_id_from_child_thread(&child_thread_id)),
-        // 新建子会话：身份不经 transcript 持久化（v2 起），无需归一化吸收。
-        false,
+        // 身份随 transcript 持久化（见 6b），故开启定向吸收：请求投影按内容相等
+        // 丢弃该条，身份在请求面只由 bridge base system 出现一次。
+        true,
     )
     .await?;
 
     // 父上下文已作为只读 ancestor 装载；不可用原 ID append 到 child messages。
     //
-    // 6b（H1/M3）：身份 system **不再写入 transcript**——子身份已随子
-    // `FrozenContext.system_prompt` 定格，由 bridge base system 在每次模型请求
-    // 注入恰好一次。transcript 只保留对话本体（parent_messages 为 ancestor）。
+    // 6b（H1/M3 + 身份持久化）：子身份同时落在两处，各司其职——
+    // - `FrozenContext.system_prompt`：bridge base system，负责**每次请求**的注入；
+    // - transcript 起始处的 System 消息：负责**持久化**。执行恢复 metadata 通道
+    //   已随 recovery 移除，transcript 是本分支上身份唯一的持久事实；恢复路径
+    //   （见 `resume.rs`）不再注入身份，而是读回这条历史，避免重注入。
+    //   归一化吸收（上方 `normalize_persisted_identity`）保证请求面仍恰一次，
+    //   transcript 本体不被改写、历史保持可读。
+    // - fork 路径：位于 parent_messages/ancestor 之后（身份在对话上下文之后）。
+    if let Some(identity) = system_prompt.as_deref() {
+        let transcript = session.transcript();
+        let mut guard = transcript.write();
+        guard.append(BaseMessage::system(identity));
+    }
 
     // 6c. push prompt 到 queue（fork 路径套 fork directive 模板）
     let prompt_message = match fork_directive_kind {
@@ -409,31 +318,7 @@ pub(super) async fn spawn_subagent_impl(
         MessageSource::UserInput,
         BaseMessage::human(prompt_message),
     );
-    super::delegation::publish_work_delegation(
-        session_resources
-            .clone()
-            .ok_or("Blocked: child resources unavailable")?,
-        &child_thread_id,
-        v2_ctx
-            .context
-            .recipient_lifecycle
-            .ok_or("Blocked: child lifecycle unavailable")?,
-        &v2_ctx.context.session.queue,
-        queued,
-        parent_thread_id
-            .as_deref()
-            .ok_or("Blocked: current delegation initiator unavailable")?,
-        parent_invocation_id
-            .as_deref()
-            .ok_or("Blocked: current delegation invocation unavailable")?,
-        if matches!(run_mode, SubagentRunMode::Background) {
-            &task_id
-        } else {
-            &child_thread_id
-        },
-        super::delegation::DelegationInputMode::FollowUp,
-    )
-    .await?;
+    v2_ctx.context.session.queue.push(queued);
 
     match run_mode {
         SubagentRunMode::Sync => {

@@ -1,9 +1,7 @@
 //! PermissionRequest hook 拒绝语义契约（红→绿）。
 //!
-//! PermissionRequest 的 `permissionDecision: deny` 归并为
-//! [`HookAction::PermissionOverride`]（不是 Block），`resolve_action_to_toolcall`
-//! 不认识该变体——若不显式处理，hook 拒绝了权限但工具仍然放行。本文件固化：
-//! deny/非法判定零执行，并触发 PermissionDenied；allow 不得被连坐拒绝。
+//! 本地 PermissionRequest 输出使用顶层 decision=block/approve。
+//! 未定义的事件特定输出须拒绝；拒绝触发 PermissionDenied，approve 仍交宿主。
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -32,6 +30,7 @@ fn hook_with_command(event: HookEvent, command: &str) -> RegisteredHook {
         matcher: None,
         plugin_name: "permission-deny-plugin".to_string(),
         plugin_id: "permission-deny-plugin-id".to_string(),
+        plugin_source: None,
         plugin_root: PathBuf::from("/tmp/permission-deny-plugin"),
         plugin_data_dir: PathBuf::from("/tmp/permission-deny-plugin-data"),
         plugin_options: HashMap::new(),
@@ -79,11 +78,9 @@ async fn before_tool(mw: &HookMiddleware, call: &ToolCall) -> AgentResult<ToolCa
 #[tokio::test]
 async fn permission_request_deny_is_zero_execution_and_fires_permission_denied() {
     let marker = unique_marker("deny");
-    // PO 形状的 PermissionOverride（output_parser 只为 PreToolUse 形状产出该变体）；
-    // 归并结果到达 PermissionRequest 分支时同样必须零执行。
     let deny = json_hook(
         HookEvent::PermissionRequest,
-        r#"{"hook_specific_output":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"hook says no"}}"#,
+        r#"{"decision":"block","reason":"hook says no"}"#,
     );
     let denied_watch = hook_with_command(
         HookEvent::PermissionDenied,
@@ -99,10 +96,7 @@ async fn permission_request_deny_is_zero_execution_and_fires_permission_denied()
 
     match result {
         Err(AgentError::ToolRejected { reason, .. }) => {
-            assert!(
-                !reason.contains("hook says no"),
-                "拒绝反馈不得透传 hook 自述文本: {reason}"
-            );
+            assert_eq!(reason, "hook says no");
         }
         other => panic!("PermissionRequest deny 必须零执行，got {other:?}"),
     }
@@ -123,10 +117,7 @@ async fn permission_request_deny_is_zero_execution_and_fires_permission_denied()
 #[cfg(unix)]
 #[tokio::test]
 async fn permission_request_allow_still_proceeds_to_host() {
-    let allow = json_hook(
-        HookEvent::PermissionRequest,
-        r#"{"hook_specific_output":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}"#,
-    );
+    let allow = json_hook(HookEvent::PermissionRequest, r#"{"decision":"approve"}"#);
     let mw = make_middleware(vec![allow]);
 
     let result = before_tool(

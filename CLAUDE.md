@@ -7,13 +7,13 @@ Peri 是终端 AI 编程助手：用户交付任务，Agent 推进工作，过�
 v4 分阶段推进存算分离。阶段状态以代码、契约测试及 active spec 为准。
 
 - **单机本地：已完成。** 本地 Agent、会话与工具形成可用闭环。
-- **单机服务化：未完成。** TS SDK 负责服务入口、进程与跨主 Agent 管理；Peri 负责 ACP 后端、Agent 执行、Store 直连和 MCP Client。补齐进程重启后的执行与成果恢复。
+- **单机服务化：未完成。** TS SDK 负责服务入口、进程与跨主 Agent 管理；Peri 负责 ACP 后端、Agent 执行、Store 直连和 MCP Client。进程重启后保留历史会话加载与正常续聊，不恢复旧 Agent 执行。
 - **集群化 / Serverless 化：未完成。** 推进多实例协调与接管、工具环境独立驻留及云端部署；计算核心减少重型依赖，支持实例替换，Agent 决策、模型推理和工具执行可分开部署。
 
 1. **Harness**：RCRA（Receive → Compact → Reason → Act）循环执行，hook 扩展生命周期，Middleware 承载业务能力。
-2. **Sessions**：存储会话、消息及执行恢复状态，后端可替换；会话、任务运行与计算实例具有独立生命周期。
+2. **Sessions**：存储会话、消息、配置及冻结上下文，不持久化 Agent 执行恢复状态；后端可替换；会话、任务运行与计算实例具有独立生命周期。
 3. **Resources**：文件系统工具、Skill、Cron 等能力经 MCP Middleware 接入；工作区与工具环境可独立于计算实例驻留。
-4. **Orchestration**：基于同构 Agent，管理 Subagent、Multitask 与 Workflow 的任务关系、协调、等待和恢复；Middleware 提供接入，编排生命周期不绑定某个活跃 Harness 实例。
+4. **Orchestration**：基于同构 Agent，管理 Subagent、Multitask 与 Workflow 的任务关系、协调与当前运行期等待；不恢复旧执行。Middleware 提供接入，编排生命周期不绑定某个活跃 Harness 实例。
 5. **Endpoint**：ACP 是统一出口协议，stdio 是本地传输方式；传输层可自定义，客户端复用同一业务语义。
 
 **内部依赖走 MCP，外部出口走 ACP**：依赖按能力消费方向定义，与部署位置无关；MCP 能力边界不强制对应独立进程，部署隔离按信任边界和生命周期确定。
@@ -32,6 +32,7 @@ v4 分阶段推进存算分离。阶段状态以代码、契约测试及 active 
 9. **在授权范围内主动闭环。** 依据仓库证据处理常规选择；澄清目标、权限或不可逆结果的歧义。异议须说明代价和替代方案。
 10. **修复一类问题，而不是一个问题**
 11. **暴露异常优于简单掩盖**：如果没有任何说明，默认的错误处理方式都是抛出，并在日志中留下记录。
+12. **数据库表结构须经用户明确批准**：变更前说明表及结构的合理性，由用户裁决。
 
 ## 行事风格
 
@@ -41,17 +42,17 @@ v4 分阶段推进存算分离。阶段状态以代码、契约测试及 active 
 
 先读 [标准索引](docs/standards/index.md)，区分现状与目标。按 `docs/code-index/` 核实入口、同步变更。Peri loader 不继承父目录，须显式读取模块指引。
 
-| 任务                                                         | 先读                                                        |
+| 任务 | 先读 |
 | ------------------------------------------------------------ | ----------------------------------------------------------- |
-| Agent loop、Compact、provider、session                       | `peri-agent/CLAUDE.md` + architecture/rust                  |
-| ACP host、stdio、prompt、event、caps                         | `peri-acp/CLAUDE.md` + architecture/rust                    |
-| Controller/Runtime、cancel、Langfuse                         | architecture/rust + 对应 code-index                         |
+| Agent loop、Compact、provider、session | `peri-agent/CLAUDE.md` + architecture/rust |
+| ACP host、stdio、prompt、event、caps | `peri-acp/CLAUDE.md` + architecture/rust |
+| Controller/Runtime、cancel、Langfuse | architecture/rust + 对应 code-index |
 | MCP（含内置实例）、plugin、skills、subagent、HITL、工具 | middlewares 与 `mcp-packages/CLAUDE.md` + architecture/rust |
-| Workflow                                                     | middleware guide + `docs/code-index/peri-workflow.md`       |
-| TUI                                                          | `peri-tui/CLAUDE.md` + tui/rust                             |
-| E2E                                                          | `e2e/CLAUDE.md` + testing                                   |
-| 文档站                                                       | `peri-cool/CLAUDE.md` + documentation                       |
-| 历史学习                                                     | `.claude/skills/learn-from-history/SKILL.md`                |
+| Workflow | middleware guide + `docs/code-index/peri-workflow.md` |
+| TUI | `peri-tui/CLAUDE.md` + tui/rust |
+| E2E | `e2e/CLAUDE.md` + testing |
+| 文档站 | `peri-cool/CLAUDE.md` + documentation |
+| 历史学习 | `.claude/skills/learn-from-history/SKILL.md` |
 
 简称指同名标准文件，architecture 指 `architecture-contracts.md`；跨层、prompt、事件、工具、链序或安全变更读 architecture，Git 操作读 `git.md`，指引维护读 `documentation.md`。
 

@@ -115,6 +115,26 @@ async fn mention_reads_workspace_range_and_limits_directory_entries() {
     assert!(!result.0["content"].as_str().unwrap().contains("file100"));
 }
 
+/// [回归测试] H7 的含端点范围曾因 start >= end 将单行读成空正文。
+#[tokio::test]
+async fn mention_equal_range_endpoints_returns_requested_line() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("f"), "one\ntwo\nthree\nfour\n五").unwrap();
+    for line in [1, 5] {
+        let result = super::read_mention(
+            root.path().to_str().unwrap(),
+            CustomRequest::new(
+                "workspace/readMention",
+                Some(serde_json::json!({"path": "f", "lineStart": line, "lineEnd": line})),
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.0["content"], if line == 1 { "one" } else { "五" });
+        assert_eq!(result.0["truncated"], false);
+    }
+}
+
 #[tokio::test]
 async fn mention_rejects_traversal_and_symlink_escape() {
     let root = tempfile::tempdir().unwrap();
@@ -162,10 +182,69 @@ async fn mention_caps_long_file_at_2000_lines() {
     .await
     .unwrap();
     assert_eq!(result.0["truncated"], true);
-    assert!(result.0["content"]
-        .as_str()
-        .unwrap()
-        .ends_with("... (truncated)"));
+    // 截断必须带显式说明与**可继续读取的位置**（H7），不能无标记裁掉内容。
+    let content = result.0["content"].as_str().unwrap();
+    assert!(content.ends_with("... (truncated; continue with lineStart=2001)"));
+    assert_eq!(content.lines().count(), 2001, "2000 行正文 + 1 行截断说明");
+}
+
+/// [H7] 单行超大文件：模型可见正文按 UTF-8 字节预算截断（不再整段进入上下文），
+/// 截断处给出显式说明与续读位置。
+#[tokio::test]
+async fn mention_bounds_single_line_output_by_utf8_bytes() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("wide.txt"), "x".repeat(200 * 1024)).unwrap();
+    let result = super::read_mention(
+        root.path().to_str().unwrap(),
+        CustomRequest::new(
+            "workspace/readMention",
+            Some(serde_json::json!({"path": "wide.txt"})),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.0["truncated"], true);
+    let content = result.0["content"].as_str().unwrap();
+    assert!(
+        content.len() < 64 * 1024,
+        "模型可见正文必须落在字节预算内：{}",
+        content.len()
+    );
+    assert!(content.starts_with("xxx"), "必须保留有界前缀，不能空手而归");
+    assert!(content.contains("... (truncated; this line exceeds the"));
+    assert!(
+        !content.contains("continue with lineStart="),
+        "单行超预算不得编造无效的行号续读位置：{content}"
+    );
+}
+
+/// [H7] 多字节边界：字节预算截断不切断 UTF-8 字符（行内截断仍产生合法文本）。
+#[tokio::test]
+async fn mention_byte_budget_never_splits_a_utf8_character() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(
+        root.path().join("cjk.txt"),
+        format!("{}\n", "中".repeat(40 * 1024)),
+    )
+    .unwrap();
+    let result = super::read_mention(
+        root.path().to_str().unwrap(),
+        CustomRequest::new(
+            "workspace/readMention",
+            Some(serde_json::json!({"path": "cjk.txt"})),
+        ),
+    )
+    .await
+    .unwrap();
+    let content = result.0["content"].as_str().unwrap();
+    assert!(
+        content.len() < 64 * 1024,
+        "正文必须落在字节预算内：{}",
+        content.len()
+    );
+    // 截断点落在整字符边界：首行长度是 3 的整数倍（"中" = 3 字节）。
+    let first_line = content.lines().next().unwrap();
+    assert_eq!(first_line.len() % 3, 0, "不得切断多字节字符");
 }
 
 #[tokio::test]

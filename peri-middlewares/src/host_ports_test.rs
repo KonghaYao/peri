@@ -183,3 +183,210 @@ fn global_source_view_is_not_gated_by_workspace_trust() {
     // global 是用户机器级配置：本测试只要求接口可用且不因项目未授权而报错/panic。
     let _ = port.global();
 }
+
+// ── M6/H4：插件来源 hooks 的信任准入 ─────────────────────────────────────────
+
+mod plugin_hook_trust {
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    use peri_acp_types::hooks::{HookEvent, HooksConfig, RegisteredHook};
+    use peri_acp_types::plugin::{
+        InstallScope, LoadedPlugin, PluginManifest, PluginOrigin, PluginScope,
+    };
+    use serial_test::serial;
+
+    use super::super::{admit_plugin_hooks, plugin_hook_binding};
+
+    struct Fixture {
+        _home: tempfile::TempDir,
+        workspace: tempfile::TempDir,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            let home = tempfile::tempdir().unwrap();
+            let workspace = tempfile::tempdir().unwrap();
+            // 信任文件跟随选中 global 配置：<temp>/peri/settings.json → <temp>/peri/hook-trust.json
+            peri_config::io::set_global_config_path(Some(home.path().join("peri/settings.json")));
+            Self {
+                _home: home,
+                workspace,
+            }
+        }
+
+        fn cwd(&self) -> String {
+            self.workspace.path().to_string_lossy().into_owned()
+        }
+    }
+
+    fn hooks_config(command: &str) -> HooksConfig {
+        let rule: peri_acp_types::hooks::HookMatchRule =
+            serde_json::from_value(serde_json::json!({
+                "matcher": "*",
+                "hooks": [{"type": "command", "command": command}],
+            }))
+            .unwrap();
+        HashMap::from([(HookEvent::PreToolUse, vec![rule])])
+    }
+
+    fn plugin(root: &std::path::Path, command: &str) -> LoadedPlugin {
+        LoadedPlugin {
+            name: "sample".to_string(),
+            version: "1.0.0".to_string(),
+            install_path: root.to_path_buf(),
+            manifest: PluginManifest {
+                name: "sample".to_string(),
+                version: "1.0.0".to_string(),
+                description: String::new(),
+                author: None,
+                commands: None,
+                agents: None,
+                skills: None,
+                hooks: None,
+                mcp_servers: None,
+                output_styles: None,
+                options: None,
+                settings: None,
+                extra: serde_json::json!({}),
+            },
+            commands: vec![],
+            skills_roots: vec![],
+            agents_dirs: vec![],
+            mcp_servers: HashMap::new(),
+            data_path: root.join("data"),
+            hooks_config: Some(hooks_config(command)),
+            marketplace: "market".to_string(),
+            scope: PluginScope {
+                plugin_id: "sample@market".to_string(),
+                origin: PluginOrigin::PeriInstalled,
+                install_scope: InstallScope::User,
+                project_path: None,
+            },
+        }
+    }
+
+    fn registered(root: &std::path::Path) -> RegisteredHook {
+        RegisteredHook {
+            hook: serde_json::from_str(r#"{"type":"command","command":"echo hi"}"#).unwrap(),
+            event: HookEvent::PreToolUse,
+            matcher: None,
+            plugin_name: "sample".to_string(),
+            plugin_id: "sample@market".to_string(),
+            plugin_source: Some(PluginScope {
+                plugin_id: "sample@market".to_string(),
+                origin: PluginOrigin::PeriInstalled,
+                install_scope: InstallScope::User,
+                project_path: None,
+            }),
+            plugin_root: root.to_path_buf(),
+            plugin_data_dir: PathBuf::from("/tmp/sample-data"),
+            plugin_options: HashMap::new(),
+        }
+    }
+
+    /// 默认拒绝 → 显式授权放行 → hooks 配置变化后授权失效（同一 workspace）。
+    #[test]
+    #[serial]
+    fn plugin_hooks_are_denied_by_default_and_invalidated_by_config_change() {
+        let fixture = Fixture::new();
+        let root = fixture.workspace.path().join("plugin-root");
+        std::fs::create_dir_all(&root).unwrap();
+        let cwd = fixture.cwd();
+
+        let untrusted = plugin(&root, "echo first");
+        assert_eq!(
+            admit_plugin_hooks(
+                &cwd,
+                std::slice::from_ref(&untrusted),
+                vec![registered(&root)]
+            )
+            .len(),
+            0,
+            "未授权来源的插件 hooks 必须整组不执行"
+        );
+
+        let binding = plugin_hook_binding(std::path::Path::new(&cwd), &untrusted)
+            .unwrap()
+            .expect("workspace 可规范化");
+        assert!(
+            binding
+                .source
+                .starts_with("plugin-hooks:plugin:peri-installed/user/sample@market"),
+            "来源身份必须取自安装记录: {}",
+            binding.source
+        );
+        peri_config::trust::grant(&binding).unwrap();
+        assert_eq!(
+            admit_plugin_hooks(
+                &cwd,
+                std::slice::from_ref(&untrusted),
+                vec![registered(&root)]
+            )
+            .len(),
+            1,
+            "显式授权后同一来源必须放行"
+        );
+
+        // hooks 配置变化（摘要变化）⇒ 既有授权失效，回到默认拒绝。
+        let mutated = plugin(&root, "echo changed");
+        assert_eq!(
+            admit_plugin_hooks(
+                &cwd,
+                std::slice::from_ref(&mutated),
+                vec![registered(&root)]
+            )
+            .len(),
+            0,
+            "插件 hooks 内容变化后授权必须失效"
+        );
+
+        // 撤销同样立即生效。
+        let rebinding = plugin_hook_binding(std::path::Path::new(&cwd), &mutated)
+            .unwrap()
+            .unwrap();
+        peri_config::trust::grant(&rebinding).unwrap();
+        assert_eq!(
+            admit_plugin_hooks(
+                &cwd,
+                std::slice::from_ref(&mutated),
+                vec![registered(&root)]
+            )
+            .len(),
+            1
+        );
+        assert!(peri_config::trust::revoke(&rebinding.workspace, &rebinding.source).unwrap());
+        assert_eq!(
+            admit_plugin_hooks(
+                &cwd,
+                std::slice::from_ref(&mutated),
+                vec![registered(&root)]
+            )
+            .len(),
+            0,
+            "revoke 后必须回到默认拒绝"
+        );
+    }
+
+    /// 来源身份不可得的 hook（plugin_root 不在本批插件里）必须 fail-closed。
+    #[test]
+    #[serial]
+    fn hook_without_known_source_identity_is_denied() {
+        let fixture = Fixture::new();
+        let root = fixture.workspace.path().join("plugin-root");
+        std::fs::create_dir_all(&root).unwrap();
+        let cwd = fixture.cwd();
+        let known = plugin(&root, "echo");
+        let binding = plugin_hook_binding(std::path::Path::new(&cwd), &known)
+            .unwrap()
+            .unwrap();
+        peri_config::trust::grant(&binding).unwrap();
+
+        let foreign = registered(&fixture.workspace.path().join("unknown-root"));
+        assert_eq!(
+            admit_plugin_hooks(&cwd, &[known], vec![foreign]).len(),
+            0,
+            "无来源身份的 hook 不得静默放行"
+        );
+    }
+}

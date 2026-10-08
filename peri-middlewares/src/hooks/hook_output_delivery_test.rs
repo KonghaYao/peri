@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use super::*;
+use crate::hooks::hook_output_delivery::MAX_HOOK_OUTPUT_BYTES;
 use crate::permission::{PermissionMode, SharedPermissionMode};
 use peri_acp_types::session::QueuedPayload;
 use peri_acp_types::system_reminder::ReminderAudience;
@@ -31,6 +32,7 @@ fn registered(event: HookEvent, stdout_json: &str) -> RegisteredHook {
         matcher: None,
         plugin_name: "delivery-plugin".to_string(),
         plugin_id: "delivery-plugin-id".to_string(),
+        plugin_source: None,
         plugin_root: PathBuf::from("/tmp/delivery-plugin"),
         plugin_data_dir: PathBuf::from("/tmp/delivery-plugin-data"),
         plugin_options: HashMap::new(),

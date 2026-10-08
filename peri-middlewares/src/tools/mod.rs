@@ -22,15 +22,6 @@ pub struct BoxToolWrapper(pub Box<dyn BaseTool + Send + Sync>);
 
 #[async_trait]
 impl BaseTool for BoxToolWrapper {
-    async fn invocation_target(
-        &self,
-        session_id: &str,
-        session_lifecycle: u64,
-    ) -> Result<Option<peri_acp_types::tools::InvocationTargetMetadata>, String> {
-        self.0
-            .invocation_target(session_id, session_lifecycle)
-            .await
-    }
     fn name(&self) -> &str {
         self.0.name()
     }
@@ -96,15 +87,6 @@ impl BaseTool for BoxToolWrapper {
 
 #[async_trait]
 impl BaseTool for ArcToolWrapper {
-    async fn invocation_target(
-        &self,
-        session_id: &str,
-        session_lifecycle: u64,
-    ) -> Result<Option<peri_acp_types::tools::InvocationTargetMetadata>, String> {
-        self.0
-            .invocation_target(session_id, session_lifecycle)
-            .await
-    }
     fn name(&self) -> &str {
         self.0.name()
     }

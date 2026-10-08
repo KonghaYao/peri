@@ -222,7 +222,13 @@ async fn cached_skill_discovery_reads_no_bodies() {
     );
     let cache_dir = tempfile::tempdir().unwrap();
     let cache = crate::mcp::resource_cache::McpResourceCache::at(cache_dir.path().to_path_buf());
-    let origin = "test-skill-origin".to_string();
+    let handle = make_spec_handle(&running);
+    let (cache, origin) = super::cache_fixture::scoped_cache(
+        handle.clone(),
+        cache,
+        peri_acp_types::workspace::WorkspaceId::new(),
+        None,
+    );
 
     let first = Arc::new(McpSkillRegistry::new());
     let first_token: HandleToken = Arc::new(41u32);
@@ -230,7 +236,7 @@ async fn cached_skill_discovery_reads_no_bodies() {
     run_discovery_with_cache(
         first.clone(),
         None,
-        make_spec_handle(&running),
+        handle.clone(),
         first_token,
         AgentCancellationToken::new(),
         Some((cache.clone(), origin.clone())),
@@ -256,7 +262,7 @@ async fn cached_skill_discovery_reads_no_bodies() {
     run_discovery_with_cache(
         second.clone(),
         None,
-        make_spec_handle(&running),
+        handle,
         second_token,
         AgentCancellationToken::new(),
         Some((cache, origin)),

@@ -328,6 +328,22 @@ impl MessageQueue {
             .any(|message| message.policy.ensures_processing())
     }
 
+    /// Returns the last admission sequence published before this snapshot.
+    pub fn admission_watermark(&self) -> u64 {
+        let _messages = self.state.messages.lock();
+        self.state.next_sequence.load(Ordering::Relaxed) - 1
+    }
+
+    /// Checks for model-visible processing obligations admitted after a failed attempt's inputs.
+    pub fn has_ensure_processing_after(&self, watermark: u64) -> bool {
+        self.state.messages.lock().iter().any(|message| {
+            message.policy.ensures_processing()
+                && message
+                    .admission_sequence
+                    .is_some_and(|sequence| sequence > watermark)
+        })
+    }
+
     pub fn has_required(&self) -> bool {
         self.state
             .messages

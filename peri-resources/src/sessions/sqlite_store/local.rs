@@ -1,4 +1,4 @@
-//! 本机工作区发现、登记与绑定复核；执行所有权由上层管理。
+//! 本机工作区发现、归属与绑定复核；执行所有权由上层管理。
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -58,9 +58,9 @@ impl LocalExecution {
         &self.database.pool
     }
 
-    // ── 发现与登记 ────────────────────────────────────────────────────────────
+    // ── 发现与归属 ────────────────────────────────────────────────────────────
 
-    /// 解析并登记本机执行目录（只读打开时按 `WorkspaceError::ReadOnlyStore` 失败）。
+    /// 解析本机执行目录并刷新它的归属证据（只读打开时按 `WorkspaceError::ReadOnlyStore` 失败）。
     pub(in crate::sessions) async fn resolve_workspace(
         &self,
         cwd: &Path,
@@ -84,11 +84,11 @@ impl LocalExecution {
             .await
     }
 
-    /// legacy 来源证据：无绑定、无父会话、无 frozen，且保存的绝对 cwd 落在本机已登记
-    /// 工作区内。
+    /// legacy 来源证据：无绑定、无父会话、无 frozen，且保存的绝对 cwd 落在本机已知的
+    /// 工作区路径内。
     ///
-    /// 这是「这条历史来自本机某个已登记目录」的证据，不是「可以执行」的许可；接纳本身
-    /// 仍由数据面在写事务内复核（保存路径一致、登记关系一致、既有绑定只校验不覆盖）。
+    /// 这是「这条历史来自本机某个已知目录」的证据，不是「可以执行」的许可；接纳本身
+    /// 仍由数据面在写事务内复核（保存路径一致、归属关系一致、既有绑定只校验不覆盖）。
     pub(in crate::sessions) async fn legacy_confirmed(&self, id: &ThreadId) -> Result<bool> {
         let row: Option<(String, Option<String>, Option<String>)> = sqlx::query_as(
             "SELECT cwd, parent_thread_id, frozen_context FROM threads WHERE id = ?1",
@@ -118,10 +118,9 @@ impl LocalExecution {
         let Ok(cwd) = cwd.canonicalize() else {
             return Ok(false);
         };
-        let roots: Vec<(String,)> =
-            sqlx::query_as("SELECT root FROM legacy_execution_registrations")
-                .fetch_all(&self.database.pool)
-                .await?;
+        let roots: Vec<(String,)> = sqlx::query_as("SELECT path FROM workspaces")
+            .fetch_all(&self.database.pool)
+            .await?;
         Ok(roots.iter().any(|(root,)| {
             Path::new(root)
                 .canonicalize()

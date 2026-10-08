@@ -68,7 +68,6 @@ pub(super) fn create_session_workflow_middleware(
         // （会话已登记时取到；未登记/print 模式为 None → 技能工具为空面）。
         cfg.session_manager.mcp_skill_registry_for(session_id),
         cfg.session_resources.clone(),
-        cfg.execution_admission_port.clone(),
     );
     if let (Some(middleware), Some(session)) =
         (&middleware, cfg.session_manager.get_session(session_id))
@@ -340,8 +339,6 @@ pub(crate) async fn new_session_from_prepared(
         }
     }
 
-    super::resource_owners::bind(cfg, &session_id, &prepared.session_mcp_servers).await?;
-
     // ── P6 之前的同一任务内登记（非对外可见点）──
     // 通过 SessionManager 统一构造路径，并登记 AcpSession 记录以支撑
     // cascade cancel 子 agent 与 goal_state（见 SessionManager::ensure_session）。
@@ -372,6 +369,10 @@ pub(crate) async fn new_session_from_prepared(
             history: Vec::new(),
             history_payloads: Vec::new(),
             cancel_token: None,
+            continuation_armed: false,
+            continuation_epoch: 0,
+            continuation_in_flight: false,
+            continuation_mq_steering_pending: false,
             frozen: Some(frozen_data),
             recall_items: Vec::new(),
             agent_pool: crate::session::agent_pool::AgentPool::new(),
@@ -639,13 +640,7 @@ pub(crate) async fn handle_fork(
     let source = sessions
         .get(source_id)
         .ok_or_else(|| AcpError::new(-32602, "Load the source session before forking"))?;
-    let source_control = cfg
-        .session_resources
-        .load_session_control(&source_id.to_owned())
-        .await
-        .map_err(super::super::workspace::resource_error)?;
-    if source_control.attempt.is_some()
-        || source.cancel_token.is_some()
+    if source.cancel_token.is_some()
         || cfg
             .session_manager
             .get_session(source_id)
@@ -691,7 +686,7 @@ pub(crate) async fn handle_fork(
     )
     .await
     .map_err(fork_source_error)?;
-    super::resource_owners::bind(cfg, &new_thread_id, &prepared.session_mcp_servers).await?;
+
     let identity = match response_identity(cfg, &new_thread_id).await {
         Ok(identity) => identity,
         Err(error) => {
@@ -746,6 +741,10 @@ pub(crate) async fn handle_fork(
                 .collect(),
             history_payloads: copied_payloads,
             cancel_token: None,
+            continuation_armed: false,
+            continuation_epoch: 0,
+            continuation_in_flight: false,
+            continuation_mq_steering_pending: false,
             frozen: Some(frozen_data),
             recall_items: Vec::new(),
             agent_pool: crate::session::agent_pool::AgentPool::new(),

@@ -33,24 +33,10 @@ impl std::ops::Deref for DispatchFixture {
 
 #[async_trait::async_trait]
 impl peri_agent::agent::react::ReactLLM for DispatchLlm {
-    fn prepare_reasoning(
+    async fn generate_reasoning(
         &self,
-        messages: &[BaseMessage],
-        tools: &[&dyn BaseTool],
-    ) -> peri_agent::error::AgentResult<peri_model::PreparedModelCall> {
-        peri_agent::agent::model_bridge::AgentModelBridge::new(Arc::new(
-            peri_model::OpenAiModel::new(peri_model::OpenAiConfig::new(
-                "http://127.0.0.1:1".parse().unwrap(),
-                "fixture-unused-key",
-                "fixture-model",
-            )),
-        ))
-        .prepare_reasoning(messages, tools)
-    }
-
-    async fn generate_prepared_reasoning(
-        &self,
-        _prepared: peri_model::PreparedModelCall,
+        _messages: &[BaseMessage],
+        _tools: &[&dyn BaseTool],
         _streaming: Option<peri_agent::agent::react::StreamingContext>,
     ) -> peri_agent::error::AgentResult<Reasoning> {
         Ok(Reasoning::with_tools(
@@ -61,15 +47,6 @@ impl peri_agent::agent::react::ReactLLM for DispatchLlm {
                 self.0.clone(),
             )],
         ))
-    }
-
-    async fn generate_reasoning(
-        &self,
-        _messages: &[BaseMessage],
-        _tools: &[&dyn BaseTool],
-        _streaming: Option<peri_agent::agent::react::StreamingContext>,
-    ) -> peri_agent::error::AgentResult<Reasoning> {
-        panic!("durable dispatch fixture must use prepared reasoning")
     }
 }
 

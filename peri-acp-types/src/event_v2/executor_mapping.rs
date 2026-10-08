@@ -14,6 +14,10 @@ use crate::{
 /// 将 v2 `RenderEvent` 转换为 0 或 1 个 `ExecutorEvent`（穷尽匹配）。
 pub fn render_event_to_executor(event: RenderEvent) -> Option<ExecutorEvent> {
     match event {
+        RenderEvent::TurnSuspended { turn_id, agent_id } => Some(ExecutorEvent::TurnSuspended {
+            turn_id: turn_id.to_string(),
+            agent_id: agent_id.to_string(),
+        }),
         RenderEvent::UserInputDelivered {
             generation,
             input_id,
@@ -148,12 +152,6 @@ pub fn state_event_to_executor(event: StateEvent) -> Option<ExecutorEvent> {
         StateEvent::SyntheticUserMessage { text, .. } => Some(ExecutorEvent::MessageAdded(
             crate::messages::BaseMessage::human(crate::messages::MessageContent::text(text)),
         )),
-        // TurnSuspended：TUI 挂起信号（归档 current_turn + 停止 loading），
-        // 经 ExecutorEvent::TurnSuspended 透传 turn_id/agent_id 身份。
-        StateEvent::TurnSuspended { turn_id, agent_id } => Some(ExecutorEvent::TurnSuspended {
-            turn_id: turn_id.to_string(),
-            agent_id: agent_id.to_string(),
-        }),
     }
 }
 

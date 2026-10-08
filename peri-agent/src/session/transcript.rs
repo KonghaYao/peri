@@ -984,3 +984,7 @@ impl Drop for MessageTranscript {
 #[cfg(test)]
 #[path = "transcript_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "transcript_projection_test.rs"]
+mod projection_tests;

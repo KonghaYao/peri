@@ -1,7 +1,7 @@
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 use peri_acp_types::event::BackgroundTaskResult;
-use peri_acp_types::tasks::{BgTaskKind, TaskManager};
+use peri_acp_types::tasks::TaskManager;
 use rmcp::{
     model::{
         CancelTaskParams, ClientRequest, CustomRequest, DetailedTask, GetTaskParams,
@@ -12,27 +12,12 @@ use rmcp::{
 use serde::Deserialize;
 use serde_json::json;
 
-use super::super::{McpClientHandle, McpClientPool, McpInitStatus};
+use super::super::McpClientPool;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ScopeTaskRow {
     task: DetailedTask,
-    summary: String,
-    initiator_session_id: Option<String>,
-    terminal_transition_id: Option<String>,
-}
-
-impl ScopeTaskRow {
-    fn initiator_for_scope(&self, session_id: &str) -> Result<&str, String> {
-        match self.initiator_session_id.as_deref() {
-            Some(initiator) if !initiator.is_empty() && initiator == session_id => Ok(initiator),
-            Some(_) => {
-                Err("Unroutable: workspace task initiator conflicts with discovery scope".into())
-            }
-            None => Err("Unroutable: workspace task initiator missing".into()),
-        }
-    }
 }
 
 /// Bounded give-up for an unobservable task owner: after this many consecutive
@@ -49,12 +34,6 @@ struct ScopeTaskSnapshot {
     #[serde(default, rename = "resourcesSettled")]
     resources_settled: Option<bool>,
     tasks: Vec<ScopeTaskRow>,
-}
-
-#[derive(Deserialize)]
-struct ScopeTaskChanges {
-    cursor: u64,
-    changes: Vec<ScopeTaskRow>,
 }
 
 fn pending_tasks_for_closed_epoch(
@@ -81,39 +60,6 @@ fn pending_tasks_for_closed_epoch(
 }
 
 impl McpClientPool {
-    /// Rebuild a trusted remote Workspace connection for an unloaded close.
-    /// Endpoint must come from the deployment, never
-    /// from a close request or the model's MCP server declaration.
-    pub async fn connect_trusted_workspace_for_close(
-        cwd: &std::path::Path,
-        url: &str,
-    ) -> Result<Arc<Self>, String> {
-        let mut workspace: peri_acp_types::plugin::McpServerConfig =
-            serde_json::from_value(json!({"url":url,"systemMcp":true}))
-                .map_err(|error| format!("trusted Workspace config invalid: {error}"))?;
-        workspace.source = Some(crate::mcp::config::ConfigSource::WorkspaceRemote);
-        let pool = Arc::new(Self::new_pending());
-        pool.set_session_servers(HashMap::from([("workspace".to_owned(), workspace)]))
-            .map_err(|error| error.to_string())?;
-        let (status, received) = tokio::sync::watch::channel(McpInitStatus::Pending);
-        Self::run_initialize_bare(pool.clone(), cwd, status).await;
-        if !matches!(&*received.borrow(), McpInitStatus::Ready { .. }) {
-            return Err(format!(
-                "trusted Workspace reconnect failed: {:?}",
-                *received.borrow()
-            ));
-        }
-        if pool
-            .clients
-            .read()
-            .get("workspace")
-            .and_then(|client| client.peer.as_ref())
-            .is_none()
-        {
-            return Err("trusted Workspace owner disconnected".into());
-        }
-        Ok(pool)
-    }
     async fn wait_for_task_owner_catalog(&self) -> Result<(), String> {
         let until = peri_time::monotonic_now() + Duration::from_secs(10);
         while self.configs.read().is_empty()
@@ -161,15 +107,6 @@ impl McpClientPool {
             .collect()
     }
 
-    fn workspace_task_clients(&self) -> Vec<Arc<McpClientHandle>> {
-        self.clients.read().values().filter(|client| matches!(
-            client.source.as_ref(),
-            Some(crate::mcp::config::ConfigSource::Builtin { instance }) if instance == "workspace"
-        ) || matches!(client.source.as_ref(),
-            Some(crate::mcp::config::ConfigSource::WorkspaceRemote)))
-            .cloned().collect()
-    }
-
     /// Conclusive scope reconciliation clears the execution evidence recorded by
     /// cancelled or timed-out calls to that same owner, so a single interruption
     /// cannot lock the session permanently. Without evidence nothing is cleared.
@@ -181,151 +118,6 @@ impl McpClientPool {
         if cleared > 0 {
             tracing::info!(session = %session_id, scope, cleared,
                 "cleared external execution uncertainty after conclusive reconciliation");
-        }
-    }
-
-    async fn apply_scope_row(
-        self: &Arc<Self>,
-        session_id: &str,
-        client: &McpClientHandle,
-        peer: &Peer<RoleClient>,
-        row: ScopeTaskRow,
-    ) -> Result<(), String> {
-        let initiator = row.initiator_for_scope(session_id)?;
-        let raw_id = row.task.task.task_id.clone();
-        let (binding, manager, delivery) = self
-            .recover_immutable_task_owner(session_id, &client.name, &raw_id, peer)
-            .await?;
-        let (_, registration) = self.external_task_registration_for_lifecycle(
-            session_id,
-            binding.recipient_lifecycle,
-            Some(initiator),
-            Some(delivery),
-            &client.name,
-            &raw_id,
-            BgTaskKind::Shell,
-            &row.summary,
-            true,
-            &row.task.task.created_at,
-        )?;
-        if row.task.status().is_terminal() {
-            let transition_id = row
-                .terminal_transition_id
-                .as_deref()
-                .ok_or_else(|| "workspace terminal transition ID missing".to_owned())?;
-            manager
-                .restore_external_terminal(
-                    registration,
-                    transition_id,
-                    Self::map_task_result(&client.name, &raw_id, &row.task, true),
-                )
-                .await?;
-        } else {
-            let task_id = manager.register_external(registration)?;
-            match self.spawn_managed_task_subscription_for_lifecycle(
-                client.name.clone(),
-                session_id.to_owned(),
-                raw_id,
-                task_id,
-                true,
-                peer.clone(),
-                binding.recipient_lifecycle,
-            ) {
-                Ok(()) | Err(crate::mcp::task_scope::TaskAdmissionError::DuplicateKey) => {}
-                Err(error) => return Err(error.to_string()),
-            }
-        }
-        Ok(())
-    }
-
-    /// Keep a scoped cursor after the initial snapshot. Expired cursors and
-    /// disconnected owners cause a fresh snapshot, so response-loss tasks are rediscovered.
-    pub async fn watch_workspace_tasks(
-        self: &Arc<Self>,
-        session_id: &str,
-        cancel: tokio_util::sync::CancellationToken,
-    ) {
-        let mut cursors: HashMap<String, u64> = HashMap::new();
-        loop {
-            if cancel.is_cancelled() {
-                break;
-            }
-            let clients = self.workspace_task_clients();
-            for client in clients {
-                let Some(peer) = client.peer.clone() else {
-                    cursors.remove(&client.name);
-                    continue;
-                };
-                let Some(meta) = self.task_scope_meta_for(&client.name, session_id) else {
-                    continue;
-                };
-                if let Some(cursor) = cursors.get(&client.name).copied() {
-                    let response = peri_time::timeout(
-                        Duration::from_secs(5),
-                        peer.send_request(ClientRequest::CustomRequest(CustomRequest::new(
-                            "workspace/taskChanges",
-                            Some(json!({"_meta": meta, "cursor":cursor,"waitMs":1000})),
-                        ))),
-                    )
-                    .await;
-                    let changes = match response {
-                        Ok(Ok(ServerResult::CustomResult(result))) => {
-                            serde_json::from_value::<ScopeTaskChanges>(result.0).ok()
-                        }
-                        _ => None,
-                    };
-                    if let Some(changes) = changes {
-                        let mut applied = true;
-                        for row in changes.changes {
-                            if let Err(error) =
-                                self.apply_scope_row(session_id, &client, &peer, row).await
-                            {
-                                tracing::warn!(server = %client.name, %error, "Workspace task change pending reconciliation");
-                                applied = false;
-                                break;
-                            }
-                        }
-                        if applied {
-                            cursors.insert(client.name.clone(), changes.cursor);
-                        } else {
-                            cursors.remove(&client.name);
-                        }
-                    } else {
-                        cursors.remove(&client.name);
-                    }
-                } else {
-                    match Self::workspace_scope_snapshot(&peer, meta)
-                        .await
-                        .and_then(|value| {
-                            serde_json::from_value::<ScopeTaskSnapshot>(value).map_err(|error| {
-                                format!("invalid Workspace scope snapshot: {error}")
-                            })
-                        }) {
-                        Ok(snapshot) => {
-                            let mut applied = true;
-                            for row in snapshot.tasks {
-                                if let Err(error) =
-                                    self.apply_scope_row(session_id, &client, &peer, row).await
-                                {
-                                    tracing::warn!(server = %client.name, %error, "Workspace task snapshot pending reconciliation");
-                                    applied = false;
-                                    break;
-                                }
-                            }
-                            if applied {
-                                cursors.insert(client.name.clone(), snapshot.cursor);
-                                self.resolve_execution_evidence(session_id, &client.name);
-                            }
-                        }
-                        Err(error) => tracing::debug!(server = %client.name, %error,
-                            "Workspace task scope unavailable; retrying"),
-                    }
-                }
-            }
-            tokio::select! {
-                _ = cancel.cancelled() => break,
-                _ = peri_time::sleep(Duration::from_secs(2)) => {},
-            }
         }
     }
 
@@ -346,9 +138,6 @@ impl McpClientPool {
             // reconciled above, and SessionManager closes its own tasks.
             return Ok(());
         };
-        if !self.workspace_task_clients().is_empty() {
-            self.recover_workspace_tasks(session_id).await?;
-        }
         for task_id in manager.external_task_ids() {
             manager.cancel_async(&task_id).await?;
         }
@@ -362,10 +151,7 @@ impl McpClientPool {
         Ok(())
     }
 
-    /// Resume an explicit close after the Agent process has restarted. The
-    /// trusted host derives scope credentials from the session identity; this
-    /// path does not require a live Agent projection or inbox, because the
-    /// session is being deleted after the owner confirms every task terminal.
+    /// Close resources on the currently connected, trusted Workspace scope.
     pub async fn reconcile_closing_workspace_scope(&self, session_id: &str) -> Result<(), String> {
         self.wait_for_task_owner_catalog().await?;
         for server in self.configured_workspace_task_owners() {
@@ -449,7 +235,7 @@ impl McpClientPool {
     }
 
     /// Admit work into a previously closed scope only after Store has cleared
-    /// the durable closing intent. Epoch CAS fences delayed taskClose replays.
+    /// closing the owner scope. Epoch CAS fences delayed taskClose replays.
     pub async fn open_workspace_task_scope(&self, session_id: &str) -> Result<(), String> {
         self.wait_for_task_owner_catalog().await?;
         for server in self.configured_workspace_task_owners() {
@@ -516,33 +302,8 @@ impl McpClientPool {
         }
     }
 
-    /// Rebuild the disposable Agent projection from the Workspace owner.
-    pub async fn recover_workspace_tasks(self: &Arc<Self>, session_id: &str) -> Result<(), String> {
-        let clients = self.workspace_task_clients();
-        if clients.is_empty() {
-            return Err("workspace task owner unavailable".into());
-        }
-        for client in clients {
-            let meta = self
-                .task_scope_meta_for(&client.name, session_id)
-                .ok_or_else(|| "workspace task scope unavailable".to_owned())?;
-            let peer = client
-                .peer
-                .clone()
-                .ok_or_else(|| "workspace disconnected".to_owned())?;
-            let snapshot: ScopeTaskSnapshot =
-                serde_json::from_value(Self::workspace_scope_snapshot(&peer, meta).await?)
-                    .map_err(|error| format!("invalid workspace task snapshot: {error}"))?;
-            for row in snapshot.tasks {
-                self.apply_scope_row(session_id, &client, &peer, row)
-                    .await?;
-            }
-            self.resolve_execution_evidence(session_id, &client.name);
-        }
-        Ok(())
-    }
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn spawn_managed_task_subscription_for_lifecycle(
+    pub(crate) fn spawn_managed_task_subscription(
         self: &Arc<Self>,
         server: String,
         session_id: String,
@@ -550,14 +311,9 @@ impl McpClientPool {
         task_id: String,
         is_workspace_shell: bool,
         initial_peer: Peer<RoleClient>,
-        lifecycle: u64,
     ) -> Result<(), crate::mcp::task_scope::TaskAdmissionError> {
         let weak_pool = Arc::downgrade(self);
-        let manager = self
-            .session_bindings
-            .read()
-            .binding_at(&session_id, lifecycle)
-            .map(|(_, manager)| manager);
+        let manager = self.session_bindings.read().manager(&session_id);
         let key = crate::mcp::McpTaskKey::TaskStatus {
             server: server.clone(),
             task_id: task_id.clone(),
@@ -580,46 +336,15 @@ impl McpClientPool {
                 }
                 match peer.get_task(params).await {
                     Ok(snapshot) if snapshot.task.status().is_terminal() => {
-                        let transition_id = if is_workspace_shell {
-                            match pool.task_scope_meta_for(&server, &session_id) {
-                                Some(meta) => Self::workspace_scope_snapshot(&peer, meta)
-                                    .await
-                                    .ok()
-                                    .and_then(|value| {
-                                        value
-                                            .get("tasks")?
-                                            .as_array()?
-                                            .iter()
-                                            .find(|row| {
-                                                row.pointer("/task/taskId")
-                                                    .and_then(serde_json::Value::as_str)
-                                                    == Some(raw_task_id.as_str())
-                                            })
-                                            .and_then(|row| serde_json::from_value::<ScopeTaskRow>(row.clone()).ok())
-                                            .and_then(|row| {
-                                                row.initiator_for_scope(&session_id).ok()?;
-                                                row.terminal_transition_id
-                                            })
-                                    }),
-                                None => None,
-                            }
-                        } else {
-                            Some(format!("{raw_task_id}:terminal"))
-                        };
-                        let result = match transition_id.as_deref() {
-                            Some(transition_id) => {
-                                pool.deliver_managed_task_status(
-                                    &server,
-                                    &task_id,
-                                    transition_id,
-                                    &snapshot.task,
-                                    is_workspace_shell,
-                                    manager.as_ref(),
-                                )
-                                .await
-                            }
-                            None => Err("workspace terminal transition ID unavailable".to_owned()),
-                        };
+                        let transition_id = format!("{raw_task_id}:terminal");
+                        let result = pool.deliver_managed_task_status(
+                            &server,
+                            &task_id,
+                            &transition_id,
+                            &snapshot.task,
+                            is_workspace_shell,
+                            manager.as_ref(),
+                        ).await;
                         if let Err(error) = result {
                             // Bounded give-up: an owner that stays unobservable
                             // must not keep the task active forever.
@@ -775,7 +500,3 @@ mod binding;
 #[cfg(test)]
 #[path = "subscription_tasks_test.rs"]
 mod task_projection_tests;
-
-#[cfg(test)]
-#[path = "subscription_task_recovery_test.rs"]
-mod task_recovery_tests;

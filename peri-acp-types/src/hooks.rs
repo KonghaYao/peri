@@ -287,6 +287,7 @@ pub struct RegisteredHook {
     pub matcher: Option<String>,
     pub plugin_name: String,
     pub plugin_id: String,
+    pub plugin_source: Option<crate::plugin::PluginScope>,
     pub plugin_root: PathBuf,
     pub plugin_data_dir: PathBuf,
     /// 插件选项（userConfig 值，用于 CLAUDE_PLUGIN_OPTION_* 环境变量）

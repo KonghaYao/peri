@@ -4,6 +4,8 @@
 //!
 //! HTTP seam 仅供 crate 内 adapter 使用；公共协议 API 不暴露 client、headers 或原始请求。
 
+#[cfg(all(target_os = "emscripten", feature = "cloudflare"))]
+mod cloudflare;
 pub(crate) mod http;
 pub(crate) mod sse;
 

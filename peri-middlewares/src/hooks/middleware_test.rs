@@ -10,6 +10,7 @@ fn make_registered(event: HookEvent, hook: HookType) -> RegisteredHook {
         matcher: None,
         plugin_name: "test-plugin".to_string(),
         plugin_id: "test-plugin-id".to_string(),
+        plugin_source: None,
         plugin_root: PathBuf::from("/tmp/test-plugin"),
         plugin_data_dir: PathBuf::from("/tmp/test-plugin-data"),
         plugin_options: HashMap::new(),
@@ -533,44 +534,54 @@ async fn test_permission_request_fires_in_default_mode() {
 #[cfg(unix)]
 #[tokio::test]
 async fn test_async_hook_receives_correct_event_name() {
-    let marker_path = "/tmp/peri_async_hook_event_marker";
-    let _ = std::fs::remove_file(marker_path);
-
-    // Hook that writes hook_event_name from stdin JSON to a file
-    let marker = marker_path.to_string();
+    let directory = tempfile::tempdir().unwrap();
+    let marker_path = directory.path().join("hook-input.json");
+    let pending_path = directory.path().join("hook-input.pending");
     let hook: HookType = serde_json::from_value(serde_json::json!({
-            "type": "command",
-            "command": format!("python3 -c \"import json,sys; d=json.load(sys.stdin); open('{}','w').write(d['hook_event_name'])\"", marker),
-            "async": true
-        }))
-        .unwrap();
+        "type": "command",
+        "command": format!(
+            "cat > '{}' && mv '{}' '{}'",
+            pending_path.display(), pending_path.display(), marker_path.display()
+        ),
+        "async": true
+    }))
+    .unwrap();
 
     let registered = make_registered(HookEvent::PermissionRequest, hook);
     let mw = make_middleware_hitl(vec![registered]);
 
     let tool_call = ToolCall::new("c1", "Write", serde_json::json!({"path": "/tmp/test"}));
 
-    let _ = mw
+    let result = mw
         .before_tool(
             &mut peri_agent::agent::state::AgentState::new(std::env::temp_dir().to_str().unwrap()),
             &tool_call,
         )
         .await;
+    assert!(
+        result.is_ok(),
+        "Async hook must not reject the tool: {result:?}"
+    );
 
-    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+    let completed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !marker_path.exists() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await;
 
     assert!(
-        std::path::Path::new(marker_path).exists(),
+        completed.is_ok() && marker_path.exists(),
         "Async hook should have created marker file"
     );
-    let content = std::fs::read_to_string(marker_path).unwrap_or_default();
+    let received: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&marker_path).unwrap()).unwrap();
+    let content = received["hook_event_name"].as_str().unwrap();
     assert_eq!(
         content, "PermissionRequest",
         "hook_event_name should be PermissionRequest, got: {}",
         content
     );
-
-    let _ = std::fs::remove_file(marker_path);
 }
 
 /// Verify PermissionRequest does NOT fire in Bypass (YOLO) mode,

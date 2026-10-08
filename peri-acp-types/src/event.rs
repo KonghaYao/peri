@@ -589,7 +589,7 @@ pub enum ExecutorEvent {
     MessageAdded(crate::messages::BaseMessage),
     /// Turn 已挂起等待异步事件（bg agent/cron/workflow）。
     ///
-    /// v2 `StateEvent::TurnSuspended` 经 v1 兼容映射（`events_v2::state_event_to_executor`）
+    /// v2 `RenderEvent::TurnSuspended` 经协议映射（`event_v2::render_event_to_executor`）
     /// 转换为本变体；TUI 收到后归档 current_turn、停止 loading spinner。
     ///
     /// `turn_id` / `agent_id` 为 v2 事件透传的身份字段（v1 其余变体无身份字段，

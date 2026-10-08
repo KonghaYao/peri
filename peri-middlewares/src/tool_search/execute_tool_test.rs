@@ -505,6 +505,33 @@ fn resolver_rejects_app_only_target_after_resolution() {
     assert_eq!(hidden_calls.load(Ordering::SeqCst), 0);
 }
 
+#[test]
+fn model_resolver_rejects_direct_app_only_names_but_preserves_app_calls() {
+    use peri_agent::{agent::react::ToolCall, tools::ToolInvocationResolver};
+
+    let (registry, hidden_calls) = build_app_only_registry();
+    let tools = registry.read().clone();
+    let resolver = ExecuteExtraToolResolver::default();
+    for name in ["CronRegister", "cronregister", "CronCreate", "CRONCREATE"] {
+        let call = ToolCall::new("hidden", name, json!({}));
+        assert!(matches!(
+            resolver.resolve_model(&call, &tools),
+            Err(peri_agent::error::AgentError::ToolExecutionFailed { reason, .. })
+                if reason.contains("not available to the model")
+        ));
+        let invocation = resolver.resolve(&call, &tools).unwrap();
+        assert_eq!(invocation.target.name(), "CronRegister");
+    }
+    assert_eq!(hidden_calls.load(Ordering::SeqCst), 0);
+    let visible = resolver
+        .resolve_model(
+            &ToolCall::new("visible", "mcp__slack__send_message", json!({})),
+            &tools,
+        )
+        .unwrap();
+    assert_eq!(visible.target.name(), "mcp__slack__send_message");
+}
+
 /// 正向用例：模型可见的 deferred 目标不受影响（同名工具可见时照常执行）。
 #[tokio::test]
 async fn model_visible_target_still_executes_after_visibility_check() {

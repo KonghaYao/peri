@@ -30,25 +30,20 @@ use serial_test::serial;
 use super::*;
 use crate::provider::LlmProvider;
 
-#[path = "requests_recovery_test.rs"]
-mod recovery_tests;
-#[path = "requests/session_control_test.rs"]
-mod session_control_tests;
+#[path = "requests_history_lifecycle_test.rs"]
+mod history_lifecycle_tests;
 
 #[path = "requests_legacy_test.rs"]
 mod legacy_tests;
-
-#[path = "requests_cold_child_test.rs"]
-mod cold_child_tests;
-
-#[path = "requests_legacy_owner_test.rs"]
-mod legacy_owner_tests;
 
 #[path = "requests_update_config_test.rs"]
 mod update_config_tests;
 
 #[path = "requests/acp_mcp_loop_test.rs"]
 mod acp_mcp_loop_tests;
+
+#[path = "activation_test.rs"]
+mod activation_tests;
 
 // ── Mock AcpTransport ─────────────────────────────────────────────────────────
 
@@ -175,7 +170,6 @@ async fn build_server_config(
     let (host_task_owner, host_task_spawner) = crate::host::task_scope::HostTaskOwner::new();
     let (mcp_task_owner, _mcp_task_spawner) = peri_middlewares::mcp::McpTaskOwner::new();
     AcpServerConfig {
-        execution_admission_port: None,
         workspace_assembly: None,
         host_task_owner: Some(host_task_owner),
         host_task_spawner,
@@ -192,6 +186,7 @@ async fn build_server_config(
         oauth_event_rx: None,
         plugin_skill_roots: Vec::new(),
         plugin_command_entries: Vec::new(),
+        plugin_face_closed: false,
         plugin_hooks: Vec::new(),
         plugin_hooks_only: Vec::new(),
         plugin_loaded: Vec::new(),
@@ -354,6 +349,10 @@ async fn register_session_with_history(
             history,
             history_payloads,
             cancel_token: None,
+            continuation_armed: false,
+            continuation_epoch: 0,
+            continuation_in_flight: false,
+            continuation_mq_steering_pending: false,
             frozen: None,
             recall_items: Vec::new(),
             agent_pool: crate::session::agent_pool::AgentPool::new(),
@@ -716,6 +715,10 @@ async fn register_session_with_workflow(
             history: Vec::new(),
             history_payloads: Vec::new(),
             cancel_token: None,
+            continuation_armed: false,
+            continuation_epoch: 0,
+            continuation_in_flight: false,
+            continuation_mq_steering_pending: false,
             frozen: None,
             recall_items: Vec::new(),
             agent_pool: crate::session::agent_pool::AgentPool::new(),

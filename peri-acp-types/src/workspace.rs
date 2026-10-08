@@ -99,7 +99,7 @@ impl SessionBinding {
             schema_version: SESSION_BINDING_VERSION,
             revision: 1,
             project_id: workspace.project_id,
-            workspace_id: workspace.execution_registration_id,
+            workspace_id: workspace.workspace_id,
             cwd_relative_to_workspace: workspace.relative_cwd.clone(),
         }
     }
@@ -109,10 +109,9 @@ impl SessionBinding {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolvedWorkspace {
     pub project_id: ProjectId,
-    /// Stable Machine/path ownership identity for Session grouping.
+    /// Machine/path ownership identity: the session binding and the session row both
+    /// name this one Workspace, and its recorded evidence is what rechecks execution.
     pub workspace_id: WorkspaceId,
-    /// Local filesystem discovery registration used only to recheck execution evidence.
-    pub execution_registration_id: WorkspaceId,
     pub cwd: PathBuf,
     pub root: PathBuf,
     pub relative_cwd: PathBuf,

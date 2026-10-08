@@ -65,7 +65,8 @@ pub(super) async fn list_discovered_tools(
     if config.system_mcp == Some(true) {
         peer.list_all_tools().await
     } else {
-        pool.list_all_tools_cached(server_name, peer).await
+        pool.list_all_tools_cached_for_startup(server_name, peer, config)
+            .await
     }
 }
 
@@ -189,6 +190,34 @@ impl McpClientPool {
         Ok(())
     }
 
+    /// 绑定插件来源闭合位（M6）：会话装配从**冻结/session-local** 的
+    /// `meta_harness` 派生后在这里注入，必须早于 MCP 初始化（注入窗口与其余
+    /// 能力位同一条规则）。
+    ///
+    /// `true` ⇒ 本会话不合并插件 MCP 配置，且**不读插件目录**——关闭位的判定
+    /// 必须先于任何插件来源读取（含严格路径的清单解析）。
+    pub fn set_plugin_face_closed(&self, closed: bool) -> std::io::Result<()> {
+        let context = self.builtin_context.lock();
+        if context.initialize_started || !self.is_open() {
+            // fail-closed：注入窗口已关闭（池关闭或已开始初始化）时不得按「开」继续
+            // ——先把位强制置为关闭，再报错给调用方（调用方记录错误；此后本池也不会
+            // 再合并插件来源）。装配路径的绑定早于 `run_initialize`，正常不可达。
+            self.plugin_face_closed
+                .store(true, std::sync::atomic::Ordering::Release);
+            return Err(std::io::Error::other(
+                "MCP capability injection window is closed",
+            ));
+        }
+        self.plugin_face_closed
+            .store(closed, std::sync::atomic::Ordering::Release);
+        Ok(())
+    }
+
+    pub(crate) fn plugin_face_closed(&self) -> bool {
+        self.plugin_face_closed
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
     /// Initialize only builtin workspace tools, without loading user integrations.
     /// Uses the normal discovery, readiness and owned shutdown lifecycle.
     pub async fn run_initialize_bare(
@@ -252,6 +281,7 @@ impl McpClientPool {
                     .load(std::sync::atomic::Ordering::Acquire),
                 pool.plugin_discovery_available
                     .load(std::sync::atomic::Ordering::Acquire),
+                pool.plugin_face_closed(),
             ),
             None => super::config::load_merged_config_full_with_capabilities(
                 cwd,
@@ -260,6 +290,7 @@ impl McpClientPool {
                     .load(std::sync::atomic::Ordering::Acquire),
                 pool.plugin_discovery_available
                     .load(std::sync::atomic::Ordering::Acquire),
+                pool.plugin_face_closed(),
             ),
         };
         let (mut config, plugin_sources) = match loaded {
@@ -578,6 +609,16 @@ impl McpClientPool {
                     let peer = rs.peer().clone();
                     pool.configure_peer_cache(&peer).await;
                     let cache_version = pool.install_peer_cache_version(name, &peer);
+                    let startup =
+                        match pool.capture_startup_cache_connection(name, &peer, server_config) {
+                            Ok(startup) => startup,
+                            Err(error) => {
+                                let mut service = rs;
+                                let _ = service.close_with_timeout(SHUTDOWN_TIMEOUT).await;
+                                fail_tool_discovery(&pool, name, &error.to_string());
+                                continue;
+                            }
+                        };
                     // 严格发现（契约 2 / 主 plan IF-M3）：`tools/list` 的 `Err` 既不是
                     // 「服务器没有工具」，也不是 ready 证据。只有真实成功的 round-trip
                     // 才允许提交 `Connected`；失败必须显式失败并释放已建立的 service，
@@ -592,7 +633,10 @@ impl McpClientPool {
                             continue;
                         }
                     };
-                    let resources = match pool.list_all_resources_cached(name, &peer).await {
+                    let resources = match pool
+                        .list_all_resources_cached_for_startup(name, &peer, server_config)
+                        .await
+                    {
                         Ok(resources) => resources,
                         Err(error) => {
                             if matches!(server_config.source, Some(ConfigSource::WorkspaceRemote)) {
@@ -625,6 +669,11 @@ impl McpClientPool {
                         skills_capable,
                     });
                     let committed = Arc::clone(&handle);
+                    if pool.require_cache_connection_current(&startup).is_err() {
+                        let mut service = rs;
+                        let _ = service.close_with_timeout(SHUTDOWN_TIMEOUT).await;
+                        continue;
+                    }
                     if let Err(mut service) = pool.try_commit_connection(name.clone(), handle, rs) {
                         let _ = service.close_with_timeout(SHUTDOWN_TIMEOUT).await;
                         // 提交被拒（pool 关闭）：不留任何可被读成成功的证据。

@@ -1,13 +1,7 @@
 //! 独立对抗审查：Full 失败必须阻止未恢复预算的 Reason，并保全真实持久化历史。
 
-use peri_acp_types::execution_admission::{
-    AdmissionOutcome, AdmissionRequest, AdmissionSnapshot, EntryOutcome, EntryReceipt,
-    EntryRequest, ExecutionAdmissionError, ExecutionAdmissionPort, SettlementOutcome,
-    SettlementRequest,
-};
 use peri_acp_types::session_resources::{
-    work::{WorkAdmission, WorkDecision, WorkQuery},
-    ControlAttempt, FrozenSnapshotBytes, NewSession, NewSessionMeta, SessionResources,
+    FrozenSnapshotBytes, NewSession, NewSessionMeta, SessionResources,
 };
 use peri_acp_types::workspace::{SessionBinding, SESSION_BINDING_VERSION};
 use peri_agent::agent::compact_v2::CompactConfig;
@@ -35,97 +29,6 @@ struct BoundSession {
     thread_id: String,
     db: tempfile::TempDir,
     repo: tempfile::TempDir,
-}
-
-struct CompactAdmission {
-    resources: Arc<dyn SessionResources>,
-    execution: ControlAttempt,
-}
-
-#[async_trait::async_trait]
-impl ExecutionAdmissionPort for CompactAdmission {
-    async fn admit(
-        &self,
-        request: AdmissionRequest,
-    ) -> Result<AdmissionOutcome, ExecutionAdmissionError> {
-        let snapshot = self
-            .resources
-            .load_session_work(&WorkQuery {
-                session_id: request.snapshot.session_id.clone(),
-                limit: 1,
-            })
-            .await
-            .map_err(|error| ExecutionAdmissionError::Protocol(error.to_string()))?;
-        if AdmissionSnapshot::from(&snapshot) != request.snapshot
-            || snapshot.blocked
-            || !snapshot.pending_commands.is_empty()
-        {
-            return Err(ExecutionAdmissionError::Protocol(
-                "stale or blocked compact fixture work".into(),
-            ));
-        }
-        let candidate = snapshot.candidates.first().ok_or_else(|| {
-            ExecutionAdmissionError::Protocol("no durable compact work candidate".into())
-        })?;
-        let admission = WorkAdmission {
-            session_id: snapshot.session_id,
-            admission_id: format!("compact-fixture:{}", request.request_id),
-            instance_id: "compact-fixture-instance".into(),
-            generation_id: uuid::Uuid::now_v7().to_string(),
-            lifecycle: snapshot.control.lifecycle,
-            control_generation: snapshot.control.control_generation,
-            work_id: candidate.work_id.clone(),
-            work_revision: candidate.work_revision,
-            execution: self.execution.clone(),
-        };
-        Ok(AdmissionOutcome::Admitted { admission })
-    }
-
-    async fn entered(
-        &self,
-        request: EntryRequest,
-    ) -> Result<EntryOutcome, ExecutionAdmissionError> {
-        let snapshot = self
-            .resources
-            .load_session_work(&WorkQuery {
-                session_id: request.admission.session_id.clone(),
-                limit: 1,
-            })
-            .await
-            .map_err(|error| ExecutionAdmissionError::Protocol(error.to_string()))?;
-        let registered = snapshot
-            .state
-            .admissions
-            .get(&request.admission.admission_id)
-            .is_some_and(|record| {
-                record.admission == request.admission
-                    && record.settled_receipt.is_none()
-                    && record.entering_receipt.as_ref().is_some_and(|receipt| {
-                        receipt.decision == WorkDecision::Accepted
-                            && receipt.mutation_id == request.entry_evidence_id
-                    })
-            });
-        if !registered || snapshot.control.attempt.as_ref() != Some(&request.admission.execution) {
-            return Err(ExecutionAdmissionError::Protocol(
-                "compact fixture SDK entry is not durably registered".into(),
-            ));
-        }
-        Ok(EntryOutcome::Applied {
-            receipt: EntryReceipt {
-                admission: request.admission,
-                entry_evidence_id: request.entry_evidence_id,
-            },
-        })
-    }
-
-    async fn settle(
-        &self,
-        _: SettlementRequest,
-    ) -> Result<SettlementOutcome, ExecutionAdmissionError> {
-        Err(ExecutionAdmissionError::Protocol(
-            "compact stage loop cannot settle SDK execution".into(),
-        ))
-    }
 }
 
 impl BoundSession {
@@ -182,7 +85,7 @@ impl BoundSession {
                     schema_version: SESSION_BINDING_VERSION,
                     revision: 1,
                     project_id: workspace.project_id,
-                    workspace_id: workspace.execution_registration_id,
+                    workspace_id: workspace.workspace_id,
                     cwd_relative_to_workspace: workspace.relative_cwd,
                 },
                 frozen: FrozenSnapshotBytes::new("{\"version\":1,\"test\":true}"),
@@ -401,16 +304,7 @@ async fn make_case(
     });
     let reason = Arc::new(ReasonModel::default());
     let (bus, handles) = EventBus::new(Default::default());
-    let execution = turn.execution_binding();
     let ctx = StageContext::builder(turn, session.transcript(), session.queue().clone())
-        .with_recipient_lifecycle(1)
-        .with_execution_admission_port(Arc::new(CompactAdmission {
-            resources: bound.resources.clone(),
-            execution: ControlAttempt {
-                turn_id: execution.turn_id,
-                attempt_id: execution.attempt_id,
-            },
-        }))
         .with_llm(reason.clone())
         .with_compact_llm(summary.clone())
         .with_context_budget(ContextBudget::new(100_000))

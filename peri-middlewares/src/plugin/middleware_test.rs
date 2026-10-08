@@ -5,7 +5,7 @@ use std::{collections::HashMap, path::PathBuf};
 use peri_agent::{agent::state::AgentState, middleware::r#trait::Middleware};
 
 use super::*;
-use crate::plugin::loader::tests::make_manifest_with_commands;
+use crate::plugin::loader::tests::{make_manifest_with_commands, test_plugin_scope};
 
 fn make_loaded_plugin(name: &str) -> LoadedPlugin {
     LoadedPlugin {
@@ -20,6 +20,7 @@ fn make_loaded_plugin(name: &str) -> LoadedPlugin {
         data_path: PathBuf::new(),
         hooks_config: None,
         marketplace: String::new(),
+        scope: test_plugin_scope(),
     }
 }
 

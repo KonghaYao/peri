@@ -534,6 +534,10 @@ pub fn run_plugin_search(query: &str) -> Result<()> {
 // 项目 / local settings hooks 默认不执行；显式 grant 后绑定
 // `canonical workspace + 来源身份 + 来源摘要`。授权/撤销只走配置数据面
 // （`peri_config::trust`），本层不直接读写信任文件。
+//
+// M6：**插件来源** hooks 走同一条信任门（来源身份取自
+// `PluginLoadResult.scope`/`LoadedPlugin::scope` 的安装记录事实，不按插件名或
+// 路径猜）。信任只约束执行来源，不等于插件整体功能授权。
 
 use peri_config::trust::{self, SettingsSourceKind};
 
@@ -564,7 +568,57 @@ fn trust_binding(scope: &str) -> Result<trust::HookTrustEntry> {
         .ok_or_else(|| anyhow::anyhow!("workspace 路径无法规范化：{}", cwd.display()))
 }
 
-pub fn run_plugin_trust_grant(scope: &str) -> Result<()> {
+/// 当前 workspace 已启用插件（严格只读发现；失败即报错，不降级为空清单）。
+fn enabled_plugins_for_trust(cwd: &Path) -> Result<Vec<peri_middlewares::plugin::LoadedPlugin>> {
+    let claude_dir = peri_middlewares::plugin::claude_home();
+    peri_middlewares::plugin::load_enabled_plugins(&claude_dir, Some(cwd))
+        .map_err(|error| anyhow::anyhow!("插件清单读取失败：{error}"))
+}
+
+/// 按安装记录 id 或插件名定位唯一插件（歧义必须报错，不猜）。
+fn resolve_plugin_for_trust(
+    cwd: &Path,
+    selector: &str,
+) -> Result<peri_middlewares::plugin::LoadedPlugin> {
+    let plugins = enabled_plugins_for_trust(cwd)?;
+    let matched: Vec<peri_middlewares::plugin::LoadedPlugin> = plugins
+        .into_iter()
+        .filter(|plugin| plugin.scope.plugin_id == selector || plugin.name == selector)
+        .collect();
+    match matched.as_slice() {
+        [plugin] => Ok(plugin.clone()),
+        [] => Err(anyhow::anyhow!(
+            "当前 workspace 没有匹配 '{selector}' 的已启用插件（可用 `peri plugin list` 查看 id）"
+        )),
+        many => Err(anyhow::anyhow!(
+            "'{selector}' 匹配到 {} 个来源，请用安装记录 id 指定：{}",
+            many.len(),
+            many.iter()
+                .map(|plugin| plugin.scope.source_identity())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+}
+
+fn plugin_trust_binding(cwd: &Path, selector: &str) -> Result<trust::HookTrustEntry> {
+    let plugin = resolve_plugin_for_trust(cwd, selector)?;
+    peri_middlewares::host_ports::plugin_hook_binding(cwd, &plugin)?
+        .ok_or_else(|| anyhow::anyhow!("workspace 路径无法规范化：{}", cwd.display()))
+}
+
+pub fn run_plugin_trust_grant(scope: &str, plugin: Option<&str>) -> Result<()> {
+    if let Some(selector) = plugin {
+        let cwd = trust_workspace()?;
+        let binding = plugin_trust_binding(&cwd, selector)?;
+        trust::grant(&binding)?;
+        println!("已授权插件 hooks 来源在当前 workspace 执行：");
+        println!("  workspace: {}", binding.workspace);
+        println!("  source:    {}", binding.source);
+        println!("  digest:    {}", binding.digest);
+        println!("提示：来源身份或插件 hooks 内容变化后授权自动失效，需重新 grant。");
+        return Ok(());
+    }
     let binding = trust_binding(scope)?;
     trust::grant(&binding)?;
     println!(
@@ -578,7 +632,17 @@ pub fn run_plugin_trust_grant(scope: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn run_plugin_trust_revoke(scope: &str) -> Result<()> {
+pub fn run_plugin_trust_revoke(scope: &str, plugin: Option<&str>) -> Result<()> {
+    if let Some(selector) = plugin {
+        let cwd = trust_workspace()?;
+        let binding = plugin_trust_binding(&cwd, selector)?;
+        if trust::revoke(&binding.workspace, &binding.source)? {
+            println!("已撤销插件 hooks 来源 {} 的授权。", binding.source);
+        } else {
+            println!("当前 workspace 上没有该插件来源的授权记录（无需撤销）。");
+        }
+        return Ok(());
+    }
     let binding = trust_binding(scope)?;
     if trust::revoke(&binding.workspace, &binding.source)? {
         println!(
@@ -603,6 +667,31 @@ pub fn run_plugin_trust_status() -> Result<()> {
             None => "workspace 不可规范化",
         };
         println!("{} settings hooks: {state}", kind.scope());
+    }
+    // 插件来源：列出当前已启用插件中有 hooks 声明的来源及其授权状态。
+    let plugins = enabled_plugins_for_trust(&cwd)?;
+    let with_hooks: Vec<peri_middlewares::plugin::LoadedPlugin> = plugins
+        .into_iter()
+        .filter(|plugin| plugin.hooks_config.is_some())
+        .collect();
+    if with_hooks.is_empty() {
+        println!("已启用插件中没有 hooks 声明。");
+    } else {
+        println!("插件 hooks 来源（{} 个）：", with_hooks.len());
+        for plugin in with_hooks {
+            let state = match peri_middlewares::host_ports::plugin_hook_binding(&cwd, &plugin)? {
+                Some(binding) if trust::is_trusted(&binding)? => "已授权",
+                Some(_) => "未授权（默认拒绝执行）",
+                None => "workspace 不可规范化",
+            };
+            println!(
+                "  {} [{} / {}]: {state}",
+                plugin.scope.plugin_id,
+                plugin.scope.origin.as_str(),
+                plugin.scope.install_scope.as_str()
+            );
+            println!("    source: {}", plugin.scope.source_identity());
+        }
     }
     let entries = trust::list(&workspace)?;
     if entries.is_empty() {

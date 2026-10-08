@@ -263,7 +263,7 @@ async fn make_bound_session() -> BoundSession {
                 schema_version: SESSION_BINDING_VERSION,
                 revision: 1,
                 project_id: workspace.project_id,
-                workspace_id: workspace.execution_registration_id,
+                workspace_id: workspace.workspace_id,
                 cwd_relative_to_workspace: workspace.relative_cwd,
             },
             frozen: FrozenSnapshotBytes::new("{\"version\":1,\"test\":true}"),

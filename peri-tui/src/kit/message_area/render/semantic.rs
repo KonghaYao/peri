@@ -95,12 +95,7 @@ pub(crate) fn semantic_line_text(
                 }
             }
             // 原因行：剥 2 格缩进 → 纯错误正文（§8）。
-            Some(
-                stripped
-                    .strip_prefix(&" ".repeat(SUBAGENT_TOOL_INDENT))
-                    .unwrap_or(&stripped)
-                    .to_string(),
-            )
+            Some(stripped.chars().skip(SUBAGENT_TOOL_INDENT + 2).collect())
         }
         _ => Some(stripped),
     }

@@ -1,5 +1,7 @@
 # peri-acp 协议设计
 
+> 已批准变更（2026-10-07，实施中）：移除持久执行恢复及 Work query/resolve、SDK admission/entered/settlement 和 durable control 协议。普通 prompt、输入队列与取消不依赖这些能力；history list/load/resume/replay 保留。状态见[剥离计划](../../spec/issues/2026-10-07-remove-execution-recovery-plan.md)，撤销接口明确 method-not-found，不保留成功 shim。
+
 > 状态：现行设计
 >
 > 本文是 wire 语义说明；当前实现入口以 `docs/code-index/peri-acp.md` 为准，跨层不变量以 `docs/standards/architecture-contracts.md` 为准。
@@ -147,6 +149,8 @@ ACP 事件映射 / EventSink
 ---
 
 ## 4. 事件目录
+
+`peri/agent_event` 的 `ExecutionStarted` DTO 包含 `generation`（当前 session mailbox 代际）与 `request_id`（实际宿主 attempt 的非空身份）。它先于该 attempt 的权限请求与提问送达；对应 `peri/agent_event_done.requestId` 只关闭相同身份。该开始事件不要求用户输入队列能力开启，不代表输入已 claim。内部 continuation 与定时审批也遵循此契约；定时审批和之后执行各有独立身份。managed 用户输入仍使用原有 `UserInputRunStarted`，两者归约到同一客户端执行生命周期。
 
 ### 4.1 流式事件（高频，每秒数十次）
 

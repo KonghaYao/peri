@@ -17,13 +17,10 @@ use peri_acp_types::event::{
 };
 use peri_acp_types::event_v2::{ObserveEvent, RenderEvent};
 use peri_acp_types::identity::AgentId;
-use peri_agent::agent::model_bridge::AgentModelBridge;
-use peri_agent::agent::react::{ReactLLM, Reasoning, StreamingContext};
 use peri_agent::agent::stages::{run_react_loop, LoopResult, StageContext};
 use peri_agent::messages::BaseMessage;
 use peri_agent::session::queue::{MessageSource, QueuedMessage};
 use peri_agent::session::store::FrozenContext;
-use peri_agent::session::subagent::SubagentLlmSource;
 use peri_agent::session::Session;
 use peri_agent::tools::BaseTool;
 use peri_model::{
@@ -194,7 +191,7 @@ impl ParentDriver {
         let _ = &cancellation;
         let messages = base_messages(&request);
         let defined = defined_tools(&request);
-        let tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
+        let _tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
 
         self.seen.lock().unwrap().push(messages.to_vec());
         if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {

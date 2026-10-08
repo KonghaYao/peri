@@ -89,9 +89,9 @@ async fn test_bg_register_failure_does_not_execute_task() {
         ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
             use crate::subagent::test_support::*;
             let _ = &cancellation;
-            let messages = base_messages(&request);
+            let _messages = base_messages(&request);
             let defined = defined_tools(&request);
-            let tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
+            let _tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
 
             self.calls.fetch_add(1, Ordering::SeqCst);
             text_events("bg gate done")
@@ -128,7 +128,7 @@ async fn test_bg_register_failure_does_not_execute_task() {
 
     let (bg_tx, mut bg_rx) = mpsc::unbounded_channel::<ExecutorEvent>();
     // 关闭的 registry 必须就是父 host 的 TaskManager（后台注册走父 host 通道）。
-    let host = DurableHost::open_in_with_background(
+    let host = HostFixture::open_in_with_background(
         dir.path(),
         "fixture-bg-register-failure",
         Arc::clone(&registry),
@@ -158,9 +158,7 @@ async fn test_bg_register_failure_does_not_execute_task() {
     let tool = Arc::new(tool);
     let mut handles = Vec::new();
     for index in 0..4 {
-        let invocation = host
-            .fresh_invocation(&format!("register-failure-{index}"))
-            .await;
+        let invocation = host.fresh_tool_call_id(&format!("register-failure-{index}"));
         let tool = Arc::clone(&tool);
         let cwd = dir.path().to_str().unwrap().to_string();
         let invocation = Some(invocation);
@@ -290,9 +288,9 @@ async fn test_bg_cancel_trigger_token_and_cleanup() {
         ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
             use crate::subagent::test_support::*;
             let _ = &cancellation;
-            let messages = base_messages(&request);
+            let _messages = base_messages(&request);
             let defined = defined_tools(&request);
-            let tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
+            let _tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
 
             self.calls.fetch_add(1, Ordering::SeqCst);
             // 阻塞直到被取消（select 放弃本 future）
@@ -326,7 +324,7 @@ async fn test_bg_cancel_trigger_token_and_cleanup() {
         deregistered_clone.lock().unwrap().push(tid.to_string());
     });
 
-    let host = DurableHost::open_in_with_background(
+    let host = HostFixture::open_in_with_background(
         dir.path(),
         "fixture-bg-cancel",
         Arc::clone(&registry),
@@ -480,9 +478,9 @@ async fn test_bg_more_than_three_concurrent_tasks_start_complete_cancel() {
         ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
             use crate::subagent::test_support::*;
             let _ = &cancellation;
-            let messages = base_messages(&request);
+            let _messages = base_messages(&request);
             let defined = defined_tools(&request);
-            let tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
+            let _tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
 
             self.calls.fetch_add(1, Ordering::SeqCst);
             let _ = self.release.acquire().await;
@@ -510,7 +508,7 @@ async fn test_bg_more_than_three_concurrent_tasks_start_complete_cancel() {
     });
 
     let (bg_tx, mut bg_rx) = mpsc::unbounded_channel::<ExecutorEvent>();
-    let host = DurableHost::open_in_with_background(
+    let host = HostFixture::open_in_with_background(
         dir.path(),
         "fixture-bg-bulk",
         Arc::clone(&registry),
@@ -534,7 +532,7 @@ async fn test_bg_more_than_three_concurrent_tasks_start_complete_cancel() {
     // 启动 6 个后台任务：全部必须成功返回（不再有并发上限拦截）
     let mut task_ids = Vec::new();
     for i in 0..6 {
-        let invocation = host.fresh_invocation(&format!("bulk-{i}")).await;
+        let invocation = host.fresh_tool_call_id(&format!("bulk-{i}"));
         let msg = tool
             .invoke(
                 serde_json::json!({

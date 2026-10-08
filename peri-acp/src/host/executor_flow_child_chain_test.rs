@@ -1,7 +1,7 @@
 //! H1/H2：真实生产子链请求捕获（ACP 装配 + 真实 middlewares + bridge）。
 //!
 //! 与 `executor_flow_dynamic_test.rs` 的差别：本模块用**真实**生产子链装配器
-//! （`assemble::child_chain_assembler` → `SubagentChainAssemblerImpl` +
+//! （`child_chain_assembler` → `SubagentChainAssemblerImpl` +
 //! `build_subagent_middlewares`：AgentsMd→Skills→[SkillPreload]→Todo→[ToolSearch]）
 //! 与真实 durable 子会话，捕获子 Agent 的最终 `ModelRequest`，覆盖 H1
 //! （`before_agent` 之后的真实贡献到达请求）与 H2（按子链真实装配的能力声明）。
@@ -21,6 +21,24 @@ mod captured {
 
     const IDENTITY: &str = "CHILD_PROJECTED_IDENTITY_SENTINEL";
     const PARENT_ANCHOR: &str = "PARENT_TURN_MARKER";
+
+    /// 生产子链装配器（与 `requests/session_lifecycle.rs` 的接线同源：子链技能面
+    /// 来自会话级 MCP registry；无 registry 时技能面为空，不回落磁盘）。
+    fn child_chain_assembler(
+        manager: &crate::session::SessionManager,
+        session_id: &str,
+    ) -> Arc<dyn peri_agent::session::subagent::SubagentChainAssembler> {
+        Arc::new(
+            peri_middlewares::subagent::SubagentChainAssemblerImpl::with_registry(
+                manager.mcp_skill_registry_for(session_id),
+            ),
+        )
+    }
+
+    /// 子链 deferred 工具执行入口（生产同源：`ExecuteExtraToolResolver`）。
+    fn child_tool_invocation_resolver() -> Arc<dyn peri_agent::tools::ToolInvocationResolver> {
+        Arc::new(peri_middlewares::ExecuteExtraToolResolver::default())
+    }
 
     /// 冻结输入 sentinel：父身份 + 项目指令 + 技能摘要；`disabled` 决定子链关闭位。
     fn chain_frozen(disabled: &[&str]) -> FrozenSessionData {
@@ -107,11 +125,10 @@ mod captured {
         let _resources =
             dynamic_tests::bind_child_fixture_resources(&mut ctx, workspace.path(), &sentinel)
                 .await;
-        let invocation_id = dynamic_tests::prepare_child_fixture_intent(&ctx).await;
         let (out, _) = make_stage_build(&ctx)(make_stage_request(sentinel.clone(), None)).unwrap();
-        // 真实生产子链装配器（cold 路径经同一 `child_chain_assembler` 工厂）。
-        let chain_assembler =
-            crate::host::assemble::child_chain_assembler(&manager, &ctx.session_id);
+        // 真实子链装配器（与生产同型：`SubagentChainAssemblerImpl::with_registry`；
+        // 生产接线在 middlewares 侧 `assembly.rs`，本层不引用）。
+        let chain_assembler = child_chain_assembler(&manager, &ctx.session_id);
         let mut config = SubagentSpawnConfig {
             agent_name: "captured-child".into(),
             prompt: "finish".into(),
@@ -124,15 +141,12 @@ mod captured {
             fork_directive_kind: options.fork.then_some(ForkDirectiveKind::Fork),
             run_mode: SubagentRunMode::Sync,
             skill_names: vec![],
-            llm: SubagentLlmSource::model(
-                execution_fixture::wrap_model(Arc::clone(&child_model) as Arc<dyn Model>),
-                "capture-model",
-            ),
+            llm: child_llm(&child_model),
             chain_assembler,
             tools: vec![Arc::new(DeferredFixtureTool) as Arc<dyn BaseTool>],
             tool_filter: Arc::new(|_| true),
             system_prompt: Some(IDENTITY.into()),
-            tool_invocation_resolver: Some(crate::host::assemble::child_tool_invocation_resolver()),
+            tool_invocation_resolver: Some(child_tool_invocation_resolver()),
             compact_config: None,
             context_budget: None,
             compact_llm: None,
@@ -147,7 +161,7 @@ mod captured {
             register_runtime: None,
             deregister_runtime: None,
             parent_agent_id: None,
-            parent_invocation_id: Some(invocation_id),
+            parent_tool_call_id: None,
             cancel_token: None,
             cwd: None,
             parent_thread_id: Some(ctx.session_id.clone()),
@@ -184,9 +198,48 @@ mod captured {
         captured
     }
 
+    /// 请求面 system 平面聚合：provider 适配器把**任意位置**的 System 消息提升为
+    /// 请求级 system 段（anthropic `messages_to_anthropic` / openai-compatible
+    /// `extract_system_message`），故断言按整个 system 平面而不是仅 `messages[0]`。
+    ///
+    /// 合并后两条路径的身份投递点不同、语义相同（恰一次、不丢失）：
+    /// - spawn：bridge base system（`messages[0]` 首段）；
+    /// - live resume：子会话持久历史起始的 System 消息（spawn 6b 写入），按消息
+    ///   顺序出现在 system 平面。
+    fn system_plane_text(request: &ModelRequest) -> String {
+        request
+            .messages
+            .iter()
+            .filter_map(|message| match message {
+                ModelMessage::System { .. } => message.text_content(),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// spawn 路径（定义型 / fork / 前后台）的**位置**约束：身份与请求时贡献必须
+    /// 合并在 `messages[0]` 的 base system 段（缓存前缀语义由 bridge 保证）。
+    /// resume 面的身份来自持久历史、位置不固定，故只有该路径豁免本断言。
+    fn assert_base_system_first(request: &ModelRequest) {
+        let first = request.messages.first();
+        assert!(
+            matches!(first, Some(ModelMessage::System { .. })),
+            "首条必须是 base system: {first:?}"
+        );
+        let text = first
+            .and_then(ModelMessage::text_content)
+            .unwrap_or_default();
+        assert_eq!(
+            text.matches(IDENTITY).count(),
+            1,
+            "身份必须落在 base system 恰一次: {text}"
+        );
+    }
+
     /// 断言冻结输入 / 身份 / 延迟目录在请求面各自恰一次（H1）。
     fn assert_single_contributions(request: &ModelRequest) {
-        let system = system_text(request);
+        let system = system_plane_text(request);
         assert_eq!(
             system.matches(IDENTITY).count(),
             1,
@@ -251,6 +304,7 @@ mod captured {
     async fn real_child_chain_first_request_carries_instructions_skills_deferred_and_identity_once()
     {
         let captured = run_captured_child(&[], ChildOptions::DEFINED).await;
+        assert_base_system_first(&captured[0]);
         assert_single_contributions(&captured[0]);
         assert_child_tool_surface(&captured[0]);
     }
@@ -260,6 +314,7 @@ mod captured {
     #[serial]
     async fn fork_child_chain_request_keeps_parent_ancestors_and_single_identity() {
         let captured = run_captured_child(&[], ChildOptions::FORK).await;
+        assert_base_system_first(&captured[0]);
         assert_single_contributions(&captured[0]);
         let conversation = captured[0]
             .messages
@@ -288,6 +343,7 @@ mod captured {
             ChildOptions::FORK_BACKGROUND,
         ] {
             let captured = run_captured_child(&[], options).await;
+            assert_base_system_first(&captured[0]);
             assert_single_contributions(&captured[0]);
         }
     }
@@ -334,11 +390,10 @@ mod captured {
         );
     }
 
+    /// 子模型来源：夹具模型直接进生产 bridge（恢复路径移除后 bridge 只经
+    /// `Model::stream` 发请求，捕获面与断言不变）。
     fn child_llm(model: &Arc<CapturePromptModel>) -> SubagentLlmSource {
-        SubagentLlmSource::model(
-            execution_fixture::wrap_model(Arc::clone(model) as Arc<dyn Model>),
-            "capture-model",
-        )
+        SubagentLlmSource::model(Arc::clone(model) as Arc<dyn Model>, "capture-model")
     }
 
     /// 真实 durable 宿主夹具（spawn + resume 共用；与既有动态夹具同源步骤）。
@@ -383,10 +438,6 @@ mod captured {
     async fn live_resume_child_request_keeps_single_identity_and_contributions() {
         let fixture = resume_fixture().await;
         let ctx = &fixture.ctx;
-        let spawn_invocation = dynamic_tests::prepare_child_fixture_intent(ctx).await;
-        // resume 是父侧新一次可信委派：在 spawn 之前登记，避免与子会话
-        // 收尾期的数据库写入竞争（夹具前提，不改变生产路径）。
-        let resume_invocation = dynamic_tests::prepare_child_fixture_intent(ctx).await;
         let spawn_requests = Arc::new(Mutex::new(Vec::new()));
         let spawn_model = Arc::new(CapturePromptModel {
             requests: Arc::clone(&spawn_requests),
@@ -403,16 +454,11 @@ mod captured {
                 run_mode: SubagentRunMode::Sync,
                 skill_names: vec![],
                 llm: child_llm(&spawn_model),
-                chain_assembler: crate::host::assemble::child_chain_assembler(
-                    &fixture.manager,
-                    &ctx.session_id,
-                ),
+                chain_assembler: child_chain_assembler(&fixture.manager, &ctx.session_id),
                 tools: vec![Arc::new(DeferredFixtureTool) as Arc<dyn BaseTool>],
                 tool_filter: Arc::new(|_| true),
                 system_prompt: Some(IDENTITY.into()),
-                tool_invocation_resolver: Some(
-                    crate::host::assemble::child_tool_invocation_resolver(),
-                ),
+                tool_invocation_resolver: Some(child_tool_invocation_resolver()),
                 compact_config: None,
                 context_budget: None,
                 compact_llm: None,
@@ -427,7 +473,7 @@ mod captured {
                 register_runtime: None,
                 deregister_runtime: None,
                 parent_agent_id: None,
-                parent_invocation_id: Some(spawn_invocation),
+                parent_tool_call_id: None,
                 cancel_token: None,
                 cwd: None,
                 parent_thread_id: Some(ctx.session_id.clone()),
@@ -472,15 +518,10 @@ mod captured {
                 run_mode: SubagentRunMode::Sync,
                 max_iterations: 1,
                 llm: child_llm(&resume_model),
-                chain_assembler: crate::host::assemble::child_chain_assembler(
-                    &fixture.manager,
-                    &ctx.session_id,
-                ),
+                chain_assembler: child_chain_assembler(&fixture.manager, &ctx.session_id),
                 tools: vec![Arc::new(DeferredFixtureTool) as Arc<dyn BaseTool>],
                 tool_filter: Arc::new(|_| true),
-                tool_invocation_resolver: Some(
-                    crate::host::assemble::child_tool_invocation_resolver(),
-                ),
+                tool_invocation_resolver: Some(child_tool_invocation_resolver()),
                 compact_config: None,
                 context_budget: None,
                 compact_llm: None,
@@ -495,7 +536,7 @@ mod captured {
                 register_runtime: None,
                 deregister_runtime: None,
                 parent_agent_id: None,
-                parent_invocation_id: Some(resume_invocation),
+                parent_tool_call_id: None,
                 cancel_token: None,
                 cwd: None,
                 frozen_claude_md: None,

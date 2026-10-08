@@ -178,6 +178,7 @@ pub fn load_global_settings_hooks() -> Vec<RegisteredHook> {
                         .or_else(|| hook_def.get_matcher().cloned()),
                     plugin_name: "settings.json".to_string(),
                     plugin_id: "settings.global".to_string(),
+                    plugin_source: None,
                     plugin_root: claude_dir.clone(),
                     plugin_data_dir: claude_dir.clone(),
                     plugin_options: std::collections::HashMap::new(),
@@ -242,6 +243,7 @@ pub fn load_settings_local_hooks(cwd: &str) -> Vec<RegisteredHook> {
                         .or_else(|| hook_def.get_matcher().cloned()),
                     plugin_name: "settings.local.json".to_string(),
                     plugin_id: "settings.local".to_string(),
+                    plugin_source: None,
                     plugin_root: Path::new(cwd).to_path_buf(),
                     plugin_data_dir: Path::new(cwd).join(".claude"),
                     plugin_options: std::collections::HashMap::new(),
@@ -267,8 +269,13 @@ pub fn load_settings_local_hooks(cwd: &str) -> Vec<RegisteredHook> {
 /// 用户级 `~/.claude/settings.json` 本身：该场景不存在「用户级 + 项目级」两层，
 /// 直接跳过——否则同一份 hooks 会注册成 global 与 project 两组而重复执行。
 pub fn load_settings_project_hooks(cwd: &str) -> Vec<RegisteredHook> {
+    let home = peri_config::io::home_dir();
+    load_settings_project_hooks_under(cwd, home.as_deref())
+}
+
+fn load_settings_project_hooks_under(cwd: &str, home: Option<&Path>) -> Vec<RegisteredHook> {
     let settings_path = Path::new(cwd).join(".claude").join("settings.json");
-    if is_user_settings_path(&settings_path) {
+    if is_user_settings_path(&settings_path, home) {
         tracing::debug!(
             "Skipping project hooks: {} is not a confirmed distinct project settings file",
             settings_path.display()
@@ -317,6 +324,7 @@ pub fn load_settings_project_hooks(cwd: &str) -> Vec<RegisteredHook> {
                         .or_else(|| hook_def.get_matcher().cloned()),
                     plugin_name: "project-settings.json".to_string(),
                     plugin_id: "settings.project".to_string(),
+                    plugin_source: None,
                     plugin_root: Path::new(cwd).to_path_buf(),
                     plugin_data_dir: Path::new(cwd).join(".claude"),
                     plugin_options: std::collections::HashMap::new(),
@@ -338,8 +346,8 @@ pub fn load_settings_project_hooks(cwd: &str) -> Vec<RegisteredHook> {
 ///
 /// 主目录解析须与 `load_global_settings_hooks` 同源（配置数据面），
 /// 否则排除会认错文件。
-fn is_user_settings_path(path: &Path) -> bool {
-    peri_config::io::home_dir().is_some_and(|home| is_user_settings_path_under(path, &home))
+fn is_user_settings_path(path: &Path, home: Option<&Path>) -> bool {
+    home.is_some_and(|home| is_user_settings_path_under(path, home))
 }
 
 /// P3 配置来源身份判定（不是工具执行环境文件读取）：字面相同，或经符号链接指向同一文件

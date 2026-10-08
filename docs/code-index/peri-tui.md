@@ -1,30 +1,30 @@
 # peri-tui 代码索引
 
-输入延迟入口：`kit/steer_consumer.rs` 合并后台 Refresh，用户 Enqueue 不等待慢刷新；`acp_client/client/steer.rs` 在身份绑定/请求登记边界持 gate，普通回执等待在锁外，snapshot 回包用 typed identity 重验。`client/pump.rs` 分离接收与有序投影，work 通知及执行准入不被投影 gate 阻挡；回归见 `client/latency_test.rs`。
+输入延迟入口：`kit/steer_consumer.rs` 合并后台 Refresh，用户 Enqueue 不等待慢刷新；`acp_client/client/steer.rs` 在身份绑定/请求登记边界持 gate，普通回执等待在锁外，snapshot 回包用 typed identity 重验。`client/pump.rs` 接收普通 ACP 响应与通知，不再转发 SDK 执行准入；回归见 `client/latency_test.rs`。
 
 输入反馈仍遵循 [待发送队列设计](../design/user-input-queue.md)：`kit/steer_state.rs::direct_submitting` 驱动 composer “正在提交…”，不是 Delivered 气泡。消息区用 `message_area/vm_cache.rs::read_render_snapshot` 短锁复制一致 VM/publication 后锁外派生；Transcript 跳代只重建实际变化的内容键，冷历史、布局和复制回归见 `transcript_test.rs`。
 
+待发送鼠标入口：`kit/steer_queue.rs` 按最近绘制帧命中控件；正文点击只选择发送动作（下划线），按钮命中才触发提交。持续中文流式输出与长中文队列的真实点击回归见 `e2e/tests/smoke/steer-queue-live.test.ts`。
+
 Markdown 高亮预算在 `kit/markdown/code_block.rs`，超限保留原文，仅不做语法着色；`markdown/workload_test.rs` 与 `code_block_test.rs` 覆盖复杂结构及预算边界。`perf.render` 的 `message-body-total` 只覆盖消息组件准备，不能当作终端 draw/flush 或 Enter 端到端计时。
 
-显式停止入口 `src/acp_client/client/requests.rs::cancel` 先读取持久控制状态，有当前 attempt 时提交精确 Stop，无 attempt 时提交 Pause；稳定 command ID 的 Unknown 按原命令对账，不改投后来的 attempt。接纳控制意图不等于已静止，loading/交互终结仍等待执行结束通知；回归见 `src/acp_client/client/cancel_test.rs`。
+显式停止入口 `src/acp_client/client/requests.rs::cancel` 在当前交互 gate 内读取会话与 managed run，结清本地待处理交互后发送 `session/cancel` 通知。通知发送不等于执行已静止，loading/交互终结仍等待执行结束通知；回归见 `src/acp_client/client/cancel_test.rs`。
 
 > 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-30（Session ID/environment：删除 dirty 恢复风险弹窗、RecoverDirty 和 reset 交互；保留 load reservation、只读准入投影与普通确认）。
 > 依据：peri-tui/CLAUDE.md、docs/standards/architecture-contracts.md、docs/design/tui-acp-data-flow.md、源码
 
 ## 架构速览
 
-嵌入式 TUI 与 print 的 SDK 执行部署入口是 `src/sdk_execution.rs::launch_sdk_dispatcher_for_client`，
-由 `src/launch.rs`、`src/cli_print.rs` 注入。安装布局要求可执行文件同目录下的
-`peri-sdk/execution/sidecar.js`（SDK build 产物 `dist/execution/sidecar.js`，安装器必须复制到该可信布局）；开发布局只读取编译时仓库路径
-`npm-packages/@peri-sdk/src/execution/sidecar.ts`，不从用户工作区寻找模块。
-launcher 从绝对 PATH 目录定位 Bun，以模块目录为工作目录启动 JSONL sidecar，
-持久 SQLite registry 位于 `~/.peri/execution/registry.db`。缺 Bun、模块、持久存储
-或协议能力时启动报错；没有 Rust scheduler、Rust lease/CAS 或默认内存准入回落。
-`src/acp_client/client/pump.rs` 转发 admit/entered/settle reverse RPC，收到
-`session/work/available` 只向 SDK 发 activate hint。SDK 经全双工 JSONL 请求 ACP
-query/execute/resolve；精确 existing ticket 确认不再次准入，Unknown 不推断 ownership 已释放。
+内部续跑与定时审批通过 `ExecutionStarted` 建立真实 execution 身份及 HITL 许可；`acp_client/interaction_lifecycle.rs` 对 managed 输入与 external execution 共用代际、重复和终态归属规则，但仅 managed 输入的 Stop 携带 mailbox 票据身份。`kit/acp_notifier.rs` 保留终态 request ID；bridge 不让陈旧结束或迟到提交失败清除新执行。`kit/acp_events/mod.rs::SubmittedInputRollback` 将 composer 回滚文本绑定提交请求，`turn.rs` 只允许所属请求取消回滚，internal execution 开始不重绑它。日常提交失败只发布原会话/请求所属事件，不直接写全局 loading。定向入口 `acp_client::client::pump::user_input_run_tests` 与 `kit::acp_events::acp_events_test`；批次验证见 `spec/issues/2026-10-08-async-execution-chain-fixes.md`。
 
-持久输入撤回入口 `src/kit/steer_state.rs` 以原 snapshot 与 pending command 共同校验：
+错误预览在 `src/kit/message_area/render/error.rs` 按显示列宽与 grapheme 折行，有界读取并最多保留三行；超出显示省略号，完整 VM 原文不修改。系统错误、工具错误与子任务错误的 ×/x 点击热区复用 `message_area/{hits,handlers}.rs` 的复制链，按 slot/hash 校验身份后复制完整错误原文（不从三行预览重建）。工具折叠态仍为单行，展开态含标题最多三行；子任务原因预览最多三行。复制反馈沿用既有字符计数提示，弹窗遮挡与陈旧点击不复制。
+
+嵌入式 TUI 与 print 由 `src/launch.rs`、`src/cli_print.rs` 创建普通 ACP host/client pump，
+不启动 Bun SDK sidecar，不依赖持久 execution registry 或 reverse admission。
+history 加载保留原 session load、事件重放和 load reservation；不恢复旧执行。
+SDK alpha 源码未修改，其旧执行恢复协议不再由该后端支持。
+
+当前进程输入撤回入口 `src/kit/steer_state.rs` 以原 snapshot 与 pending command 共同校验：
 Queued 与未 claim 的 Dispatching 可以请求权威 withdraw receipt；Claimed 不可以。
 Unknown enqueue/dispatch/withdraw 保留原命令，禁止同时重发、撤回或恢复编辑器内容。
 视图 `src/kit/steer_queue/view.rs` 不把 Claimed 当作可撤回的 Dispatching。
@@ -35,8 +35,8 @@ Unknown enqueue/dispatch/withdraw 保留原命令，禁止同时重发、撤回�
 `test_steer_idle_submission_snapshot_without_receipt_stays_direct`、
 `test_steer_idle_submission_queued_receipt_exposes_real_queue` 与
 `test_steer_idle_submission_staged_snapshot_then_dispatch_skips_queue`。
-回归入口：`sdk_execution::tests`、`kit::steer_state::tests`、`kit::steer_queue::tests`；
-JSONL/SQLite transport 的协议与故障测试见 `peri-acp/src/host/execution_admission*_test.rs`。
+回归入口：`client::cancel_tests`、`client::recovery_tests`、`kit::steer_state::tests`、`kit::steer_queue::tests`；
+后端历史与已删除协议回归见 `peri-acp/src/host/{requests_history_lifecycle_test,session_io_test}.rs`。
 
 设置类型和配置源见 [`peri-config`](peri-config.md)：`src/config/mod.rs` 保留公共
 re-export，`tui_config.rs` 只 re-export core `ui::TuiConfig`。`kit/entry.rs` 优先从
@@ -116,7 +116,7 @@ core `ConfigSource::save(expected_revision, &PeriConfig)` 返回 accepted snapsh
 | 共享 entry 缓存与内存计量 | `src/kit/entry_render_cache.rs` + `src/kit/markdown/{memory.rs,memory_test.rs}` | 真实主消息/详情共享内容、布局、主题、语言、occurrence 与 surface 失效；retained_bytes 递归容量计量、同 cache Arc 去重，非 RSS 指标 |
 | Subagent 详情缓存 | `src/kit/panels/{subagent_detail.rs,subagent_detail_cache.rs,subagent_detail_cache_test.rs}` + `src/kit/panel_scroll.rs` | 自定义 viewport 绘制、完整 usize 高度、既有鼠标节流中的虚拟滚动目标；8 MiB 派生预算，不物化全历史 ScrollView buffer |
 | 后台 subagent 文本合帧 | `src/kit/{bg_task_live.rs,bg_task_live_test.rs,bg_publication_test.rs,acp_bridge.rs}` | BgStream 独占累积正文/推理并维护增量 hash；独立 50ms deadline 发布 BG_LIVE_DETAIL，不受主流 Streaming/Block/None 与主 turn 结束影响；工具/终态/接收关闭 flush，会话边界清空，同会话 replay 保留 dirty stream 并重新安排 deadline |
-| subagent 工具行 | `message_area/render/group.rs` | `render_subagent_group_lines`（:29）、`subagent_tool_line`（:92，固定 2 格缩进 `SUBAGENT_TOOL_INDENT` :22、label 无 bold）、`subagent_error_reason_line`（:168，错误不弱化） |
+| subagent 工具行 | `message_area/render/group.rs` | `render_subagent_group_lines`（:29）、`subagent_tool_line`（:92，固定 2 格缩进 `SUBAGENT_TOOL_INDENT` :22、label 无 bold）、`subagent_error_reason_lines`（错误预览最多三行，× 复制完整原文） |
 | InputArea（输入区） | `input_area.rs` + `input_area/image.rs` | 编辑、@mention、slash 补全、提交分发（`input_area/submit.rs::dispatch_submit_request` :21）；图片粘贴由 `PasteGate` 限制为单任务；macOS `save_native_clipboard_png` 优先原样保存 ≤20 MiB PNG（只读 IHDR、不解码像素、不套用预览尺寸限制），仅 PNG 缺席回退 arboard owned RGBA + 流式编码；`image_test.rs` 覆盖独立 NSPasteboard 与手动性能对比；多行渲染按显示宽度 |
 | input_history（输入历史） | `input_history.rs` | `push_history`（:23）/`history_up`（:54）；持久化 `~/.peri/input-history.json`（唯一存储，`load_history` :119） |
 | StatusBar（状态栏） | `status_bar.rs` | `StatusBarProps`（:366）/`StatusBar`（:374）：Row1/Row2/NotifRow、模型点击区、权限模式显示、会话建立中的准备提示（`preparing_label`）；组件顶部应用 `CenterBandHook`，与 transcript / composer 同宽（Row1 折行与点击列随之派生） |
@@ -193,6 +193,7 @@ core `ConfigSource::save(expected_revision, &PeriConfig)` 返回 accepted snapsh
 | ACP 请求封装 | src/acp_client/client/requests.rs | `register_ui_commands` / `prompt` / `prompt_with_bg_results` / `cancel` / `set_config_option` / `send_raw_request`；prompt 持 lease，返回后在 gate 内结算 |
 | Interaction response 与 UI publication | src/acp_client/client/interaction.rs | `respond_interaction` / `publish_if_owned` / `reject_interaction` / `settle_claims_owned`；owner first-claim 与同步 UI publication 共用 gate，通知仅升级 weak sender |
 | ACP client 契约测试 | src/acp_client/client_test.rs + client_reverse_test.rs + client/recovery_test.rs | `client::tests` 验证 done identity / 删除过滤；`client::reverse_tests` 覆盖 interaction owner、gate、startup/load reservation 与 Drop；`client::recovery_tests` 验证按 ID load 无 recovery 弹窗/reset 请求及失败传播，不维护 ownership 只读投影。全局 atom 用局部 RAII 快照恢复；测试名称需随最终实现核对 |
+| 改 hook 执行来源信任 CLI | `src/cli_plugin.rs` + `src/main.rs`（`TrustAction`） | `run_plugin_trust_{grant,revoke,status}`；`resolve_plugin_for_trust` | `peri plugin trust` 覆盖 settings 来源（project/local）与**插件来源**（`--plugin <安装记录 id 或唯一插件名>`）：插件绑定经 `peri_middlewares::host_ports::plugin_hook_binding` 计算（身份取自 `PluginScope`，摘要覆盖插件根与 hooks 配置），歧义/未匹配必须报错不猜；status 列出有 hooks 声明的插件来源及其授权状态；本层只经 `peri_config::trust` 读写信任文件 |
 | 启动/CLI | src/main.rs、launch.rs、cli_args.rs、cli_plugin.rs、update.rs | `main`（main.rs:670）/`run_tui`（main.rs:767 调用，定义 cli_tui.rs:31）；`build_app_and_acp`（launch.rs:41）/`teardown_app`（:199）；`run_kit_fullscreen`（kit/entry.rs:52）；插件/更新 CLI 子命令 |
 
 ### 线程存储与通用组件（src/thread/ src/components/）

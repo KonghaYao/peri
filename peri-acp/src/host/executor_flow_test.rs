@@ -278,7 +278,7 @@ impl UserInteractionBroker for NoopBroker {
 
 // ── Helper 工厂函数 ─────────────────────────────────────────────────────────
 
-/// 构造可靠 Store 与显式 mock SDK 的 SessionContext（stage 装配桥经
+/// 构造可靠 Store 与当前运行态的 SessionContext（stage 装配桥经
 /// 真实 ACP 桥注入——与生产 host/prompt.rs 同模式；LLM 工厂从测试
 /// LlmProvider + AgentPool 烘焙，装配路径实际调用）。
 ///
@@ -286,7 +286,7 @@ impl UserInteractionBroker for NoopBroker {
 pub(super) async fn make_session_context(session_id: &str) -> SessionContext {
     // 事件广播宿主：发射端（EventPublisher 适配）与订阅端（subscribe 工厂）
     // 共享同一 Controller 实例，保持迁移前「publish/subscribe 同一广播」语义。
-    // Controller 与 durable execution 共享同一次打开的真实 SQLite 门面。
+    // Controller 与历史持久化共享同一次打开的真实 SQLite 门面。
     let (resources, directory) = execution_fixture::new_resources(session_id).await;
     let controller = Arc::new(peri_controller::Controller::new(resources.clone()));
     // 测试 LlmProvider + AgentPool + PeriConfig（与迁移前 executor_test 同源）
@@ -456,17 +456,12 @@ pub(super) async fn make_session_context(session_id: &str) -> SessionContext {
         ),
         session_start_source: None,
         request_id: None,
-        execution_admission: None,
-        recipient_lifecycle: 1,
-        execution_admission_port: None,
-        sdk_run_started: None,
-        sdk_admission_observed: None,
         allow_await_wake: false,
         continuation_notify: None,
         user_input_mailbox: None,
         frozen_fallback_builder: None,
     };
-    execution_fixture::bind_execution(&mut context, Some(directory));
+    execution_fixture::initialize_runtime(&mut context, Some(directory));
     context
 }
 
@@ -548,7 +543,7 @@ async fn make_session_context_with_manager(
     ctx.session_access =
         Some(Arc::new(sm.clone()) as Arc<dyn peri_acp_types::session::SessionAccessPort>);
     ctx.session_resources = Some(sm.session_resources().clone());
-    execution_fixture::bind_execution(&mut ctx, None);
+    execution_fixture::initialize_runtime(&mut ctx, None);
     (ctx, sm)
 }
 
@@ -556,11 +551,7 @@ async fn make_session_context_with_manager(
 /// ProductionChainAssembler + build_compact_hooks（测试 ctx hook_groups 为空
 /// → (None, None)）；测试无 Langfuse → bridge factory None）。
 pub(super) fn make_stage_build(ctx: &SessionContext) -> StageBuildFn {
-    let mut ctx_for_stage = ctx.clone();
-    if let Some(factory) = ctx.primary_llm_factory.clone() {
-        ctx_for_stage.primary_llm_factory =
-            Some(Arc::new(move || execution_fixture::wrap_model(factory())));
-    }
+    let ctx_for_stage = ctx.clone();
     Arc::new(move |sbr| {
         let (compact_pre_hook, compact_post_hook) = crate::host::prompt::build_compact_hooks(
             &ctx_for_stage.hook_groups,
@@ -806,5 +797,5 @@ mod frozen_tests;
 mod parity_tests;
 
 #[cfg(not(windows))]
-#[path = "compact_recovery_test.rs"]
-mod compact_recovery_tests;
+#[path = "compact_history_fixture_test.rs"]
+mod compact_history_tests;

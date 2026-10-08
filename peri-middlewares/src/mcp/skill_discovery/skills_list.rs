@@ -1,7 +1,7 @@
 // ─── SEP-2640 规范路径：skills/list ───────────────────────────────────────
 
 use super::super::client::cache_scope_allows_persistence;
-use super::super::resource_cache::McpResourceCache;
+use super::super::client::ConnectionResourceCache;
 use peri_acp_types::skills::{SkillMetadata, SkillResource};
 use rmcp::{
     model::{
@@ -21,7 +21,6 @@ use super::{MAX_LIST_PAGES, RESOURCE_READ_TIMEOUT, SKILLS_LIST_TIMEOUT};
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct SkillListResponse {
-    #[serde(default)]
     pub(super) skills: Vec<SkillListEntryDto>,
     #[serde(default)]
     pub(super) next_cursor: Option<String>,
@@ -74,13 +73,44 @@ pub(super) struct SkillListEntry {
     pub(super) resources: Option<Vec<SkillResource>>,
 }
 
-/// 纯函数：DTO → 条目。frontmatter 缺 name/description（Agent Skills
-/// 规范要求必填，缺失即非规范）→ None（该条目跳过）；frontmatter map
-/// 原样移入（verbatim，不 clone 消耗）。
-pub(super) fn entry_from_dto(dto: SkillListEntryDto) -> Option<SkillListEntry> {
-    dto.frontmatter.get("name")?.as_str()?;
-    dto.frontmatter.get("description")?.as_str()?;
-    Some(SkillListEntry {
+/// 条目级结构缺陷（诊断用）：只带来源、字段与错误类别，**不含原始字段正文**。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct EntryDefect {
+    /// 出错字段（frontmatter 字段名）。
+    pub(super) field: &'static str,
+    /// 错误类别（`missing` / `wrong-type`）。
+    pub(super) category: &'static str,
+}
+
+impl EntryDefect {
+    fn missing(field: &'static str) -> Self {
+        Self {
+            field,
+            category: "missing",
+        }
+    }
+
+    fn wrong_type(field: &'static str) -> Self {
+        Self {
+            field,
+            category: "wrong-type",
+        }
+    }
+}
+
+/// 纯函数：DTO → 条目。frontmatter `name` / `description` 必填且必须是字符串
+/// （Agent Skills 规范要求；缺失或类型不符即非规范条目，M8：隔离该条目并给出
+/// 字段与类别诊断，不回显字段正文）；frontmatter map 原样移入（verbatim，
+/// 不 clone 消耗）。
+pub(super) fn entry_from_dto(dto: SkillListEntryDto) -> Result<SkillListEntry, EntryDefect> {
+    for field in ["name", "description"] {
+        match dto.frontmatter.get(field) {
+            None => return Err(EntryDefect::missing(field)),
+            Some(value) if value.as_str().is_none() => return Err(EntryDefect::wrong_type(field)),
+            Some(_) => {}
+        }
+    }
+    Ok(SkillListEntry {
         uri: dto.uri,
         frontmatter: dto.frontmatter,
         resources: dto.resources.map(|rs| {
@@ -94,17 +124,56 @@ pub(super) fn entry_from_dto(dto: SkillListEntryDto) -> Option<SkillListEntry> {
     })
 }
 
+/// 逐条转换并**隔离**非法条目：坏条目单独记来源 / 字段 / 错误类别（不回显字段
+/// 正文），好条目照常进入发现结果；有隔离时另记汇总 warn——部分失败不得被
+/// 呈现成完整成功（M8）。返回 `(entries, rejected)`。
+pub(super) fn collect_entries(
+    server: &str,
+    dto_entries: Vec<SkillListEntryDto>,
+    context: &str,
+) -> (Vec<SkillListEntry>, usize) {
+    let total = dto_entries.len();
+    let mut entries = Vec::with_capacity(total);
+    let mut rejected = 0usize;
+    for dto in dto_entries {
+        let uri = dto.uri.clone();
+        match entry_from_dto(dto) {
+            Ok(entry) => entries.push(entry),
+            Err(defect) => {
+                rejected += 1;
+                tracing::warn!(
+                    server,
+                    uri = %uri,
+                    field = defect.field,
+                    category = defect.category,
+                    "MCP skill 发现：条目字段非法，隔离该条目（不回显字段正文）"
+                );
+            }
+        }
+    }
+    if rejected > 0 {
+        tracing::warn!(
+            server,
+            context,
+            rejected,
+            total,
+            "MCP skill 发现：部分条目被隔离，本次结果不是完整成功"
+        );
+    }
+    (entries, rejected)
+}
+
 /// 规范路径：`skills/list` 分页枚举 → 每条目 `resources/read` 读 SKILL.md →
 /// digest 校验 → frontmatter 逐字段比对 → 注册。
 ///
 /// 返回 `(need_summary_warn, entries)`：条目非空时恒为 `(false, _)`；
-/// 空列表/调用失败 → `(false, 空)`（空列表合法——listing 可为空/部分，
-/// 调用失败已各自 warn）；候选非空但全部校验失败 → `(true, 空)`。
+/// 合法空列表 → `Ok((false, 空))`；读取失败 → `Err`，不得发布合法空目录。
+/// 候选非空但全部校验失败 → `Ok((true, 空))`。
 pub(super) async fn collect_via_skills_list(
     peer: Peer<RoleClient>,
     server: &str,
     cancel: AgentCancellationToken,
-) -> (bool, Vec<SkillMetadata>) {
+) -> Result<(bool, Vec<SkillMetadata>), String> {
     collect_via_skills_list_inner(peer, server, cancel, None).await
 }
 
@@ -112,9 +181,9 @@ pub(super) async fn collect_via_skills_list_cached(
     peer: Peer<RoleClient>,
     server: &str,
     cancel: AgentCancellationToken,
-    cache: McpResourceCache,
+    cache: ConnectionResourceCache,
     origin: String,
-) -> (bool, Vec<SkillMetadata>) {
+) -> Result<(bool, Vec<SkillMetadata>), String> {
     collect_via_skills_list_inner(peer, server, cancel, Some((cache, origin))).await
 }
 
@@ -122,13 +191,19 @@ async fn collect_via_skills_list_inner(
     peer: Peer<RoleClient>,
     server: &str,
     cancel: AgentCancellationToken,
-    cache_context: Option<(McpResourceCache, String)>,
-) -> (bool, Vec<SkillMetadata>) {
+    cache_context: Option<(ConnectionResourceCache, String)>,
+) -> Result<(bool, Vec<SkillMetadata>), String> {
     let mut dto_entries: Vec<SkillListEntryDto> = Vec::new();
     let mut cursor: Option<String> = None;
     for _page in 0..MAX_LIST_PAGES {
         if cancel.is_cancelled() {
-            return (false, Vec::new());
+            return Err("skills/list discovery cancelled".to_string());
+        }
+        if cache_context
+            .as_ref()
+            .is_some_and(|(cache, _)| !cache.is_current())
+        {
+            return Err("skills/list connection changed".to_string());
         }
         let params = cursor.as_ref().map(|c| serde_json::json!({ "cursor": c }));
         let params_key = serde_json::to_string(&params).unwrap_or_default();
@@ -140,10 +215,10 @@ async fn collect_via_skills_list_inner(
                 // 响应随后不得重新写入持久化缓存。
                 cache.mark_live_fetch(origin, "skills/list");
                 let ticket = cache.ticket(origin, "skills/list", &params_key).await;
-                let page = fetch_skill_list_page(&peer, server, params).await;
-                let Some(page) = page else {
-                    return (false, Vec::new());
-                };
+                let page = fetch_skill_list_page_checked(&peer, server, params).await?;
+                if !cache.is_current() {
+                    return Err("skills/list connection changed".to_string());
+                }
                 if cache_scope_allows_persistence(page.cache_scope)
                     || (page.cache_scope.is_none() && page.ttl_ms.is_some())
                 {
@@ -160,43 +235,51 @@ async fn collect_via_skills_list_inner(
                 page
             }
         } else {
-            let Some(page) = fetch_skill_list_page(&peer, server, params).await else {
-                return (false, Vec::new());
-            };
+            let page = fetch_skill_list_page_checked(&peer, server, params).await?;
             page
         };
+        if cache_context
+            .as_ref()
+            .is_some_and(|(cache, _)| !cache.is_current())
+        {
+            return Err("skills/list connection changed".to_string());
+        }
+        if cancel.is_cancelled() {
+            return Err("skills/list discovery cancelled".to_string());
+        }
         dto_entries.extend(page.skills);
         let next = page.next_cursor;
         if next.as_ref().is_some() && next.as_ref() == cursor.as_ref() {
             tracing::warn!(server, "MCP skill 发现：skills/list 游标不前进，终止分页");
-            break;
+            return Err("skills/list cursor did not advance".to_string());
         }
         match next {
             Some(c) => cursor = Some(c),
-            None => break,
+            None => {
+                cursor = None;
+                break;
+            }
         }
     }
-    if dto_entries.is_empty() {
-        return (false, Vec::new());
+    if cursor.is_some() {
+        return Err("skills/list exceeded the pagination limit".to_string());
     }
-    let entries: Vec<SkillListEntry> = dto_entries.into_iter().filter_map(entry_from_dto).collect();
+    if dto_entries.is_empty() {
+        return Ok((false, Vec::new()));
+    }
+    let (entries, _rejected) = collect_entries(server, dto_entries, "skills/list 发现");
     if entries.is_empty() {
         tracing::warn!(
             server,
             "MCP skill 发现：skills/list 条目全部缺 frontmatter name/description"
         );
-        return (false, Vec::new());
+        return Err("skills/list contained no valid frontmatter entries".to_string());
     }
     // W2：发现只发布 metadata——**不读正文**（正文与完整性校验归统一 activation）。
-    entries_to_metadata(server, entries)
+    Ok(entries_to_metadata(server, entries))
 }
 
-/// 保留错误的 `skills/list` 单页读取（F3 冻结快照用）。
-///
-/// 与 [`fetch_skill_list_page`] 是**同一实现**：发现路径把错误吞成
-/// `None`（best-effort，不进首轮阻塞），而冻结期快照按 X5 需要区分「空技能集」
-/// 与「读取失败」（后者 fail-closed），因此错误在这里以 `Err(String)` 上抛，
-/// 文案不含主机路径与正文。
+/// 保留错误的 `skills/list` 单页读取，发现与冻结快照共用。
 async fn fetch_skill_list_page_checked(
     peer: &Peer<RoleClient>,
     server: &str,
@@ -240,57 +323,20 @@ async fn fetch_skill_list_page_inner(
     }
 }
 
-/// 发现路径的单页读取（best-effort：错误记日志后吞成 `None`，既有语义不变）。
-async fn fetch_skill_list_page(
-    peer: &Peer<RoleClient>,
-    server: &str,
-    params: Option<serde_json::Value>,
-) -> Option<SkillListResponse> {
-    fetch_skill_list_page_inner(peer, server, params).await.ok()
-}
-
 /// 冻结期技能清单快照（F3）：分页读完 `skills/list`，**不读正文**、不写注册表、
 /// 不落任何缓存，错误原样上抛（调用方按 X5 决定 fail-closed 或降级）。
 ///
-/// 与 [`collect_via_skills_list`] 的差别只有失败语义：发现是 best-effort
-/// （空结果 + 日志），冻结快照必须能区分「技能集为空」（正常）与「读取失败」
-/// （system 已声明且被选中的投递失败 ⇒ fail-closed）。
+/// 复用发现的有界收集与校验；合法空目录和读取失败保持不同终态。
 pub(crate) async fn snapshot_via_skills_list(
     peer: Peer<RoleClient>,
     server: &str,
     cancel: AgentCancellationToken,
 ) -> Result<Vec<SkillMetadata>, String> {
-    let mut dto_entries: Vec<SkillListEntryDto> = Vec::new();
-    let mut cursor: Option<String> = None;
-    for _page in 0..MAX_LIST_PAGES {
-        if cancel.is_cancelled() {
-            return Err("skills/list 读取被取消".to_string());
-        }
-        let params = cursor.as_ref().map(|c| serde_json::json!({ "cursor": c }));
-        let page = fetch_skill_list_page_checked(&peer, server, params).await?;
-        dto_entries.extend(page.skills);
-        let next = page.next_cursor;
-        if next.as_ref().is_some() && next.as_ref() == cursor.as_ref() {
-            tracing::warn!(server, "MCP skill 快照：skills/list 游标不前进，终止分页");
-            break;
-        }
-        match next {
-            Some(c) => cursor = Some(c),
-            None => break,
-        }
+    let (rejected_all, entries) = collect_via_skills_list(peer, server, cancel).await?;
+    if rejected_all && entries.is_empty() {
+        return Err("skills/list contained no valid metadata entries".to_string());
     }
-    if dto_entries.is_empty() {
-        return Ok(Vec::new());
-    }
-    let entries: Vec<SkillListEntry> = dto_entries.into_iter().filter_map(entry_from_dto).collect();
-    if entries.is_empty() {
-        tracing::warn!(
-            server,
-            "MCP skill 快照：skills/list 条目全部缺 frontmatter name/description"
-        );
-        return Ok(Vec::new());
-    }
-    Ok(entries_to_metadata(server, entries).1)
+    Ok(entries)
 }
 
 /// 共享恢复流程：`skills/get` 拉取当前条目快照（W2：**不读正文**）。
@@ -499,7 +545,18 @@ async fn fetch_skill_entry(peer: &Peer<RoleClient>, uri: &str) -> Option<SkillLi
             return None;
         }
     };
-    entry_from_dto(parsed.skill)
+    match entry_from_dto(parsed.skill) {
+        Ok(entry) => Some(entry),
+        Err(defect) => {
+            tracing::warn!(
+                %uri,
+                field = defect.field,
+                category = defect.category,
+                "MCP skill skills/get 条目字段非法，隔离该条目（不回显字段正文）"
+            );
+            None
+        }
+    }
 }
 
 /// 条目 → metadata（W2：**发现期不读正文**）。

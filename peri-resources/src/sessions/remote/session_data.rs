@@ -68,6 +68,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{RwLock, RwLockReadGuard};
 use turso_serverless::Value;
+#[cfg(test)]
+#[path = "session_data_fixture.rs"]
+mod fixtures;
 #[path = "session_close.rs"]
 mod session_close;
 
@@ -97,9 +100,8 @@ use session_open::{refuse_legacy_shape, resolve_open_machine_id};
 /// 与否）再没有重连：槽里没有可服务的连接时如实返回关闭错误，绝不用一次重连把关闭事实盖掉。
 ///
 /// 本机**不再**持有远端操作的日志（v10 删除了 `session_remote_operations`）：远端账本
-/// （`peri_op_ledger`）仍按「资格先于效果」写，但它是**远端**事实，本机不复制。跨进程重启
-/// WorkCommand 的完整原命令与回执留在同一远端 Store，跨进程恢复可按原 ID 查询并对账；
-/// 其他通用 mutation 不因此获得完整原命令恢复能力，不能把内存 gate 当成持久日志。
+/// （`peri_op_ledger`）仍按「资格先于效果」写，但它是**远端**事实，本机不复制。
+/// 普通 mutation 的写入确认保留；它不提供 Agent 执行恢复，不能把内存 gate 当成持久日志。
 pub(super) struct RemoteSessionData {
     pub(super) machine_id: String,
     /// 连接的生命周期槽位：服务中，或关闭中（含已确认关闭）。
@@ -316,61 +318,6 @@ impl RemoteSessionData {
             )),
         }
     }
-
-    /// 装载故障计划（仅测试构建）：把「响应丢失」「发出前丢弃」变成可控观察点，
-    /// 走的是同一套真实批、真实账本与真实恢复路径。
-    #[cfg(test)]
-    pub(super) async fn inject_faults(&self, plan: super::mutation::FaultPlan) {
-        if let Some(store) = self.slot.read().await.serving_store() {
-            store.inject_faults(plan);
-        }
-    }
-
-    /// 测试装配：连接已关闭的 adapter（不连网，与 `close` 之后的状态同一个形状）。
-    ///
-    /// 这种装配下任何一次 store 访问都只会失败，所以「输入不自洽时仍然拿到 `InvalidInput`」
-    /// 就证明判定发生在取连接之前、也没有写下任何本机记录。
-    ///
-    /// 注意这与「关闭过一次但没成功」**不同**：那种情况下连接仍被保留在关闭句柄里，
-    /// 关闭可以重试（见 [`RemoteSessionData::close`]）；这里从来没有过连接可关。
-    #[cfg(test)]
-    pub(super) fn closed_for_test(store_id: StoreId) -> Self {
-        Self {
-            machine_id: crate::sessions::machine::current()
-                .unwrap_or_default()
-                .to_owned(),
-            slot: RwLock::new(ConnectionSlot::default()),
-            factory: Arc::new(NoConnectionFactory),
-            gate: Arc::new(ConnectionGate::default()),
-            store_id,
-            schema_version: schema::REMOTE_SCHEMA_VERSION,
-            roots: RwLock::new(HashMap::new()),
-        }
-    }
-
-    /// 测试装配：连接由调用方给定的工厂与首条连接构成（故障可控，不连网）。
-    ///
-    /// 首条连接与工厂共用同一份代际门禁：失效、重建与「迟到任务不碰新连接」的判定与生产
-    /// 完全一致，测试只是把传输面换成能确定复现故障的实现。
-    #[cfg(test)]
-    pub(super) fn with_connection_for_test(
-        store_id: StoreId,
-        connection: RemoteStore,
-        factory: Arc<dyn ConnectionFactory>,
-        gate: Arc<ConnectionGate>,
-    ) -> Self {
-        Self {
-            machine_id: crate::sessions::machine::current()
-                .unwrap_or_default()
-                .to_owned(),
-            slot: RwLock::new(ConnectionSlot::serving(connection)),
-            factory,
-            gate,
-            store_id,
-            schema_version: schema::REMOTE_SCHEMA_VERSION,
-            roots: RwLock::new(HashMap::new()),
-        }
-    }
 }
 
 /// 关闭态装配用的连接工厂：任何一次重建都明确失败（关闭的实例不重连）。
@@ -528,89 +475,6 @@ pub(super) fn unsupported_behavior(behavior: &'static str) -> SessionResourceErr
 
 #[async_trait]
 impl SessionDataPort for RemoteSessionData {
-    async fn load_resource_owner_facts(
-        &self,
-        id: &ThreadId,
-        previous_lifecycle: u64,
-    ) -> SessionResourceResult<peri_acp_types::session_resources::work::ResourceOwnerFacts> {
-        self.read_resource_owner_facts(id, previous_lifecycle).await
-    }
-    async fn load_work_revision(&self, id: &ThreadId) -> SessionResourceResult<u64> {
-        self.read_work_revision(id).await
-    }
-    async fn has_pending_work_mutations(&self, id: &ThreadId) -> SessionResourceResult<bool> {
-        let row = self
-            .store()
-            .await?
-            .fetch_row(&StatementSpec::new(
-                crate::sessions::work::HAS_PENDING,
-                vec![Value::Text(id.clone())],
-            ))
-            .await?;
-        match row.as_deref().and_then(|row| super::sql::int_at(row, 0)) {
-            Some(0) => Ok(false),
-            Some(1) => Ok(true),
-            _ => Err(crate::sessions::failure::corrupt(
-                "pending work existence is not readable",
-            )),
-        }
-    }
-    async fn load_work_availability(
-        &self,
-        id: &ThreadId,
-    ) -> SessionResourceResult<peri_acp_types::session_resources::work::WorkAvailability> {
-        self.read_work_availability(id).await
-    }
-    async fn load_work_delivery(
-        &self,
-        query: &peri_acp_types::session_resources::work::WorkDeliveryQuery,
-    ) -> SessionResourceResult<Option<peri_acp_types::session_resources::work::DeliveryRecord>>
-    {
-        self.read_delivery(query).await
-    }
-    async fn load_work_command(
-        &self,
-        query: &peri_acp_types::session_resources::work::WorkCommandQuery,
-    ) -> SessionResourceResult<Option<peri_acp_types::session_resources::work::OwnedWorkCommand>>
-    {
-        self.read_work_command(query).await
-    }
-    async fn load_session_work(
-        &self,
-        query: &peri_acp_types::session_resources::work::WorkQuery,
-    ) -> SessionResourceResult<peri_acp_types::session_resources::work::WorkSnapshot> {
-        self.read_work(query).await
-    }
-    async fn apply_work_mutation(
-        &self,
-        command: &peri_acp_types::session_resources::work::WorkCommand,
-    ) -> SessionResourceResult<peri_acp_types::session_resources::work::WorkReceipt> {
-        self.write_work(command).await
-    }
-    async fn resolve_work_mutation(
-        &self,
-        command: &peri_acp_types::session_resources::work::WorkCommand,
-    ) -> SessionResourceResult<peri_acp_types::session_resources::work::WorkResolution> {
-        self.resolve_work(command).await
-    }
-    async fn load_session_control(
-        &self,
-        id: &ThreadId,
-    ) -> SessionResourceResult<peri_acp_types::session_resources::ControlState> {
-        self.read_control(id).await
-    }
-    async fn apply_session_control(
-        &self,
-        command: &peri_acp_types::session_resources::ControlCommand,
-    ) -> SessionResourceResult<peri_acp_types::session_resources::ControlReceipt> {
-        self.write_control(command).await
-    }
-    async fn resolve_session_control(
-        &self,
-        command: &peri_acp_types::session_resources::ControlCommand,
-    ) -> SessionResourceResult<peri_acp_types::session_resources::ControlResolution> {
-        self.resolve_control(command).await
-    }
     async fn finish_close(&self, id: &ThreadId) -> SessionResourceResult<()> {
         self.finish_session_close(id).await
     }

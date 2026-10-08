@@ -15,6 +15,8 @@ pub use peri_config::mcp::{McpCachePolicy, McpConfigFile, MCP_CACHE_ENV};
 // 本模块保留 re-export 保兼容。
 pub use peri_acp_types::plugin::{ConfigSource, McpServerConfig, OAuthConfig};
 
+use crate::plugin::PluginSourceAdmission;
+
 /// MCP 配置加载错误
 #[derive(Debug, Error)]
 pub enum McpConfigError {
@@ -292,7 +294,7 @@ pub(crate) fn load_merged_config_full(
     cwd: &Path,
     claude_home: &Path,
 ) -> Result<(McpConfigFile, HashMap<String, String>), McpConfigError> {
-    load_merged_config_full_with_capabilities(cwd, claude_home, true, true)
+    load_merged_config_full_with_capabilities(cwd, claude_home, true, true, false)
 }
 
 pub(crate) fn load_merged_config_full_with_capabilities(
@@ -300,6 +302,7 @@ pub(crate) fn load_merged_config_full_with_capabilities(
     claude_home: &Path,
     builtin_available: bool,
     plugin_discovery_available: bool,
+    plugin_face_closed: bool,
 ) -> Result<(McpConfigFile, HashMap<String, String>), McpConfigError> {
     let global_path = peri_config::io::global_config_path();
     let policy = if builtin_available {
@@ -315,6 +318,7 @@ pub(crate) fn load_merged_config_full_with_capabilities(
         &policy,
         &environment,
         plugin_discovery_available,
+        plugin_face_closed,
     )
 }
 
@@ -366,6 +370,7 @@ pub(crate) fn load_merged_config_full_with_paths(
         policy,
         &BTreeMap::new(),
         true,
+        false,
     )
 }
 
@@ -386,6 +391,7 @@ fn load_merged_config_with_environment(
     policy: &super::builtin::BuiltinInjectionPolicy,
     environment: &BTreeMap<String, String>,
     plugin_discovery_available: bool,
+    plugin_face_closed: bool,
 ) -> Result<(McpConfigFile, HashMap<String, String>), McpConfigError> {
     let mut plugin_sources: HashMap<String, String> = HashMap::new();
 
@@ -397,8 +403,10 @@ fn load_merged_config_with_environment(
 
     // 2. 加载插件 MCP 配置（claude_home 目录下的已启用插件）
     // 每插件独立上下文展开 env 变量，同时构建 plugin_sources（marketplace 追踪）
+    // M6：与快照路径同一闭合位——关闭时不读插件目录。
     let plugin_servers = if plugin_discovery_available {
-        let plugins = crate::plugin::loader::load_enabled_plugins_for_mcp(claude_home, None)
+        let plugins = PluginSourceAdmission::from_closed(plugin_face_closed)
+            .load_for_mcp(claude_home, None)
             .map_err(|source| McpConfigError::PluginLoadError { source })?;
         collect_plugin_mcp_servers(&plugins, &mut plugin_sources)
     } else {
@@ -426,7 +434,14 @@ pub(crate) fn load_merged_config_from_snapshot(
     claude_home: &Path,
     snapshot: &peri_config::ConfigurationSnapshot,
 ) -> Result<(McpConfigFile, HashMap<String, String>), McpConfigError> {
-    load_merged_config_from_snapshot_with_capabilities(cwd, claude_home, snapshot, true, true)
+    load_merged_config_from_snapshot_with_capabilities(
+        cwd,
+        claude_home,
+        snapshot,
+        true,
+        true,
+        false,
+    )
 }
 
 pub(crate) fn load_merged_config_from_snapshot_with_capabilities(
@@ -435,6 +450,7 @@ pub(crate) fn load_merged_config_from_snapshot_with_capabilities(
     snapshot: &peri_config::ConfigurationSnapshot,
     builtin_available: bool,
     plugin_discovery_available: bool,
+    plugin_face_closed: bool,
 ) -> Result<(McpConfigFile, HashMap<String, String>), McpConfigError> {
     let snapshot_cwd = &snapshot.scope().cwd;
     if snapshot_cwd != cwd
@@ -449,7 +465,11 @@ pub(crate) fn load_merged_config_from_snapshot_with_capabilities(
 
     let mut plugin_sources = HashMap::new();
     let plugin_servers = if plugin_discovery_available {
-        let plugins = crate::plugin::loader::load_enabled_plugins_for_mcp(claude_home, None)
+        // M6：插件来源闭合位来自**本会话冻结/session-local 策略**（装配期一次
+        // 派生后注入 pool），在读取插件目录之前判定——关闭的会话既不合并插件
+        // MCP，也不因插件的非法 MCP 配置让会话启动失败（严格路径不被触发）。
+        let plugins = PluginSourceAdmission::from_closed(plugin_face_closed)
+            .load_for_mcp(claude_home, None)
             .map_err(|source| McpConfigError::PluginLoadError { source })?;
         collect_plugin_mcp_servers(&plugins, &mut plugin_sources)
     } else {
@@ -475,6 +495,16 @@ pub(crate) fn load_bare_config_from_snapshot(
     config.mcp_servers.retain(|name, _| name == "workspace");
     validate_config(&config)?;
     Ok(config)
+}
+
+/// 插件 MCP 声明 → 合并输入（M6：输入必须来自 `PluginSourceAdmission` 准入后的
+/// 插件列表；本函数不自行读插件目录，因此不存在第二条旁路）。
+#[cfg(test)]
+pub(crate) fn collect_plugin_mcp_servers_for_test(
+    plugins: &[crate::plugin::loader::LoadedPlugin],
+    plugin_sources: &mut HashMap<String, String>,
+) -> HashMap<String, McpServerConfig> {
+    collect_plugin_mcp_servers(plugins, plugin_sources)
 }
 
 fn collect_plugin_mcp_servers(
@@ -685,6 +715,23 @@ pub fn set_server_disabled(
     set_server_disabled_with_paths(cwd, &global_path, server_name, disabled)
 }
 
+/// 写回前置校验（M7）：`disabled = true` 不得与既有 `system_mcp = true` 组合。
+///
+/// 写回路径不得成为绕过配置契约的通道，也不得静默去掉其中一个开关：直接以
+/// typed 错误拒绝本次写入，既有文件保持原样（下一个会话仍能正常加载）。
+fn ensure_disable_allowed(
+    server_name: &str,
+    entry: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(), McpConfigError> {
+    if entry.get("system_mcp").and_then(serde_json::Value::as_bool) == Some(true) {
+        return Err(McpConfigError::InvalidServer {
+            server_name: server_name.to_string(),
+            source: peri_acp_types::plugin::McpServerConfigValidationError::DisabledWithSystemMcp,
+        });
+    }
+    Ok(())
+}
+
 /// 内部实现：允许注入全局路径（便于测试）
 pub(crate) fn set_server_disabled_with_paths(
     cwd: &Path,
@@ -716,6 +763,7 @@ pub(crate) fn set_server_disabled_with_paths(
             .and_then(|s| s.as_object_mut())
         {
             if disabled {
+                ensure_disable_allowed(server_name, server_obj)?;
                 server_obj.insert("disabled".to_string(), serde_json::Value::Bool(true));
             } else {
                 server_obj.remove("disabled");
@@ -755,6 +803,7 @@ pub(crate) fn set_server_disabled_with_paths(
                 if let Some(server_val) = servers.get_mut(server_name) {
                     if let Some(obj) = server_val.as_object_mut() {
                         if disabled {
+                            ensure_disable_allowed(server_name, obj)?;
                             obj.insert("disabled".to_string(), serde_json::Value::Bool(true));
                         } else {
                             obj.remove("disabled");
@@ -771,6 +820,7 @@ pub(crate) fn set_server_disabled_with_paths(
                 if let Some(server_val) = servers.get_mut(server_name) {
                     if let Some(obj) = server_val.as_object_mut() {
                         if disabled {
+                            ensure_disable_allowed(server_name, obj)?;
                             obj.insert("disabled".to_string(), serde_json::Value::Bool(true));
                         } else {
                             obj.remove("disabled");

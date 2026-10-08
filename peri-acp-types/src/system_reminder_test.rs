@@ -118,6 +118,20 @@ fn dto_rule_matches_trusted_rule_and_required_is_not_a_broadcast() {
         "Tui-only 提醒不进入模型"
     );
 
+    // H8：投递 `Required` 与队列调度 `Required` 分别建模，`Required` 不是广播。
+    // 合法的 Tui-only `Required` 提醒必须在声明受众内可投递，不得被当成非法而
+    // 要求扩大受众；模型面仍然收不到它。
+    let mut required_client_only = client_only.clone();
+    required_client_only.delivery = ReminderDelivery::Required;
+    assert!(
+        reminder_delivered_to(&required_client_only, ReminderAudience::Tui),
+        "Tui-only 的 Required 提醒是合法投递，不得要求扩大受众"
+    );
+    assert!(
+        !reminder_delivered_to(&required_client_only, ReminderAudience::Model),
+        "Required 只在声明受众内不可屏蔽，不因 Required 进入模型"
+    );
+
     let mut model_only = reminder.clone();
     model_only.delivery = ReminderDelivery::Configurable;
     model_only.audiences = ReminderAudiences(vec![ReminderAudience::Model]);

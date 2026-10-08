@@ -22,7 +22,7 @@ impl GatedMessageLlm {
         let _ = &cancellation;
         let messages = base_messages(&request);
         let defined = defined_tools(&request);
-        let tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
+        let _tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
 
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
         self.snapshots.send(messages.to_vec()).unwrap();
@@ -37,7 +37,7 @@ crate::subagent::test_support::fixture_model_impl!(GatedMessageLlm);
 
 struct MessageFixture {
     dir: tempfile::TempDir,
-    host: DurableHost,
+    host: HostFixture,
     tool: SubAgentTool,
     manager: Arc<TaskManager>,
     calls: Arc<AtomicUsize>,
@@ -64,7 +64,7 @@ impl MessageFixture {
         // set_subagent_host write-once，必须在装配时一次给定。
         let manager_for_host = Arc::clone(&manager);
         let host =
-            DurableHost::open_in_with_host(dir.path(), "fixture-active-message", move |host| {
+            HostFixture::open_in_with_host(dir.path(), "fixture-active-message", move |host| {
                 host.task_manager = Some(manager_for_host);
                 host.bg_event_sender = Some(events_tx);
             })
@@ -110,7 +110,9 @@ impl MessageFixture {
         input: serde_json::Value,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let mut ctx = peri_agent::tools::ToolContext::new(&[], self.dir.path().to_str().unwrap());
-        ctx.invocation_id = Some(self.host.invocation_id.clone());
+        let tool_call = self.host.fresh_tool_call_id("active-message");
+        ctx.invocation_id = Some(tool_call.clone());
+        ctx.tool_call_id = Some(tool_call);
         self.tool.invoke(input, ctx).await
     }
 
@@ -148,10 +150,10 @@ impl MessageFixture {
                     .host
                     .fixture
                     .resources
-                    .load_session_control(&id)
+                    .load_session_meta(&id)
                     .await
-                    .map(|control| format!("{:?}", control.status))
-                    .unwrap_or_else(|error| format!("control-error:{error}"));
+                    .map(|meta| format!("{:?}", meta.agent_status))
+                    .unwrap_or_else(|error| format!("meta-error:{error}"));
                 panic!(
                     "后台子会话未发出模型请求: invoke={result}; events={drained:?}; control={control}; messages={messages:?}"
                 );
@@ -305,12 +307,11 @@ async fn test_active_message_resumed_background_execution_accepts_defer() {
     .await;
     let id = uuid::Uuid::now_v7().to_string();
     // 被恢复的 thread 必须属于夹具父会话的同一执行根，否则 resume 会被归属校验拒绝。
-    preset_resumable_child(
+    preset_resumable_thread(
         &fixture.host.fixture,
         &id,
         "fork",
         Some(fixture.host.parent_id.as_str()),
-        None,
         Vec::new(),
     )
     .await;
@@ -368,11 +369,13 @@ async fn test_active_message_cross_session_is_rejected_without_spawning() {
     let id = fixture.start(serde_json::json!({"fork": true})).await;
     // 同库、同父会话的第二个工具实例：被拒绝的原因必须是「无活跃接收者」，
     // 而不是缺父身份——否则测不到 cross-session 拒绝本身。
-    let stranger_host = DurableHost::open_in(fixture.dir.path(), "fixture-active-stranger").await;
+    let stranger_host = HostFixture::open_in(fixture.dir.path(), "fixture-active-stranger").await;
     let _ = &fixture;
     let stranger = stranger_host.bind(make_subagent_tool(Vec::new()));
     let mut stranger_ctx = peri_agent::tools::ToolContext::new(&[], ".");
-    stranger_ctx.invocation_id = Some(stranger_host.invocation_id.clone());
+    let stranger_tool_call = stranger_host.fresh_tool_call_id("stranger");
+    stranger_ctx.invocation_id = Some(stranger_tool_call.clone());
+    stranger_ctx.tool_call_id = Some(stranger_tool_call);
     let error = stranger
         .invoke(
             serde_json::json!({"resume_thread_id": id, "prompt": "other session"}),
@@ -411,9 +414,9 @@ async fn test_active_message_panic_revokes_before_runtime_deregistration() {
         ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
             use crate::subagent::test_support::*;
             let _ = &cancellation;
-            let messages = base_messages(&request);
+            let _messages = base_messages(&request);
             let defined = defined_tools(&request);
-            let tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
+            let _tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
 
             panic!("模拟后台执行崩溃");
         }
@@ -440,7 +443,7 @@ async fn test_active_message_panic_revokes_before_runtime_deregistration() {
         })
     };
     let host =
-        DurableHost::open_in_with_host(dir.path(), "fixture-active-message-panic", move |host| {
+        HostFixture::open_in_with_host(dir.path(), "fixture-active-message-panic", move |host| {
             host.task_manager = Some(host_manager);
             host.bg_event_sender = Some(host_tx);
             host.deregister_runtime = Some(deregister_for_host);

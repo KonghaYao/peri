@@ -75,6 +75,22 @@ pub use peri_agent::session::factory::ChainAssembly;
 /// 不在别处第三次写字面量。
 pub const SUB_AGENT_FACE_CLOSED_KEY: &str = "SubAgentMiddleware";
 
+/// `PluginMiddleware` 链槽关闭键（M6 插件来源闭合位）。
+///
+/// **单一事实源**：链槽跳过判据（`ChainSlot::Plugin` 分支）、宿主装配的资源
+/// roots / 命令 / hooks / MCP 合并 / 继承面派生与插件来源准入
+/// （`plugin::PluginSourceAdmission`）都引用本常量，不在别处重复字面量。
+pub const PLUGIN_FACE_CLOSED_KEY: &str = "PluginMiddleware";
+
+/// 插件来源注入是否关闭（M6）：`PLUGIN_FACE_CLOSED_KEY ∈ disabled_middlewares`。
+///
+/// 语义 = 关闭**插件来源注入面**（skill/agent roots、commands、hooks、MCP 配置
+/// 贡献与子 Agent 继承）。插件管理面（安装 / 卸载 / marketplace / 面板）不受影响
+/// ——那是管理权，不是执行注入面。
+pub fn plugin_face_closed(disabled_middlewares: &std::collections::HashSet<String>) -> bool {
+    disabled_middlewares.contains(PLUGIN_FACE_CLOSED_KEY)
+}
+
 /// A24 关闭集：`policy_key ∈ disabled_middlewares` 的实例名（BTreeSet，稳定顺序）。
 ///
 /// **只委托、不复制逻辑**：唯一实现是 `crate::mcp::builtin::closed_instances`，本函数让
@@ -248,7 +264,9 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
                 ChainSlot::AgentsMd => {
                     prompt::add_agents_md(ctx, &mut chain);
                 }
-                ChainSlot::Plugin if disabled.contains("PluginMiddleware") => {}
+                // M6：关闭位与插件来源准入同一常量（`plugin_face_closed`），
+                // 装配面不再重复字面量。
+                ChainSlot::Plugin if plugin_face_closed(disabled) => {}
                 ChainSlot::Plugin => {
                     chain.add(Box::new(PluginMiddleware::new(plugin_loaded.clone())));
                 }

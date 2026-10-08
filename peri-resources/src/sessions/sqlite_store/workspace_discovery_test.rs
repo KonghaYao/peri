@@ -97,9 +97,9 @@ async fn assert_only_history(store: &SqliteThreadStore, project: ProjectId, thre
 
 /// [回归测试] 目录对象被替换后，新会话仍必须可建立。
 ///
-/// 登记键是 (canonical root, 该目录的文件对象证据) 组合：同一路径上的新对象不命中
-/// 原登记，但它仍是可访问的目录，必须得到新的项目与工作区登记；旧绑定按各自登记
-/// 证据复核，继续失败关闭，历史不被改绑或隐藏。
+/// 归属键是 `(machine_id, 路径)`：同一路径上的新文件对象仍然落在同一条归属行上，只是
+/// 该行的执行证据（项目、对象身份、发现快照）被更新为本次观测。旧绑定按**自己创建时**
+/// 记录的证据复核，继续失败关闭，历史不被改绑或隐藏。
 ///
 /// 文件对象证据只有 device/inode，删除后重建时文件系统可能复用刚释放的 inode，
 /// 那种情况下新旧对象在证据上等同（设计 §8：不依赖 creation time）。所以这里让
@@ -132,17 +132,17 @@ async fn test_worktree_replaced_directory_registers_new_workspace_keeps_old_hist
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(binding.workspace_id, registered.execution_registration_id);
+    assert_eq!(binding.workspace_id, registered.workspace_id);
     assert_eq!(binding.project_id, registered.project_id);
 
-    // 新对象得到独立登记，新会话可建，执行目录就是该路径。
+    // 同一路径上的新对象复用同一条归属行：归属不变，执行证据换成新对象的。
     let (replacement_thread, replacement) = bound(&store, &root).await;
     assert_eq!(replacement.workspace_id, registered.workspace_id);
-    assert_ne!(
-        replacement.execution_registration_id,
-        registered.execution_registration_id
-    );
     assert_ne!(replacement.project_id, registered.project_id);
+    assert_ne!(
+        replacement.discovery_snapshot, registered.discovery_snapshot,
+        "同一路径的新对象必须把该行的执行证据更新为本次观测"
+    );
     assert_eq!(
         replacement.cwd,
         tokio::fs::canonicalize(&root).await.unwrap()
@@ -249,7 +249,7 @@ async fn test_worktree_moved_linked_worktree_reuses_project_registers_new_worksp
     );
 }
 
-/// [回归测试] 同一文件对象在同一路径只登记一次，冲突仍由唯一约束挡住。
+/// [回归测试] 同一路径只登记一次，冲突仍由唯一约束挡住。
 #[tokio::test]
 async fn test_worktree_registration_reuses_exact_object_and_keeps_rows_unique() {
     let directory = tempfile::tempdir().unwrap();
@@ -260,16 +260,14 @@ async fn test_worktree_registration_reuses_exact_object_and_keeps_rows_unique() 
     let resolved = store.resolve_workspace(&root).await.unwrap();
     assert_eq!(resolved, registered);
     let duplicate = sqlx::query(
-        "INSERT INTO workspaces (id, project_id, root, root_identity, discovery)
-         SELECT 'duplicate', project_id, root, root_identity, discovery FROM workspaces WHERE id = ?",
+        "INSERT INTO workspaces (id, machine_id, path, path_source, project_id, identity, discovery)
+         SELECT 'duplicate', machine_id, path, path_source, project_id, identity, discovery
+         FROM workspaces WHERE id = ?",
     )
     .bind(registered.workspace_id.to_string())
     .execute(&store.database.pool)
     .await;
-    assert!(
-        duplicate.is_err(),
-        "同一 (root, root_identity) 不得重复登记"
-    );
+    assert!(duplicate.is_err(), "同一 (machine_id, path) 不得重复登记");
 }
 
 #[tokio::test]

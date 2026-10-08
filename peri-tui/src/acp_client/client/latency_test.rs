@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 
 use peri_acp::transport::{
     mpsc::{MpscServerTransport, mpsc_transport_pair},
@@ -160,7 +160,7 @@ async fn test_late_snapshot_does_not_reopen_stopped_or_newer_run() {
     assert!(
         client
             .lifecycle
-            .open_user_input_run("s", "g", "old")
+            .open_execution("s", "g", "old", true)
             .is_some()
     );
     for stop in [false, true] {
@@ -180,7 +180,7 @@ async fn test_late_snapshot_does_not_reopen_stopped_or_newer_run() {
             assert!(
                 client
                     .lifecycle
-                    .open_user_input_run("s", "g", "new")
+                    .open_execution("s", "g", "new", true)
                     .is_some()
             );
         }
@@ -195,7 +195,7 @@ async fn test_late_snapshot_does_not_reopen_stopped_or_newer_run() {
         assert_eq!(
             client
                 .lifecycle
-                .active_user_input_run()
+                .active_execution(false)
                 .map(|identity| identity.2),
             if stop { None } else { Some("new".into()) }
         );
@@ -229,54 +229,6 @@ async fn test_snapshot_identity_invalidates_after_pause_without_local_run() {
         .await
         .unwrap();
     refreshing.await.unwrap().unwrap();
-    assert!(client.lifecycle.active_user_input_run().is_none());
+    assert!(client.lifecycle.active_execution(false).is_none());
     client.close();
-}
-
-/// [回归测试] 有序通知投影等待 gate 时，后续 work/available 必须仍能唤醒 SDK。
-#[tokio::test]
-async fn test_gated_delivery_does_not_block_work_available() {
-    let (transport, server) = mpsc_transport_pair();
-    let (dispatcher, dispatch_server) = mpsc_transport_pair();
-    let (client, notification_tx, mut notifications) = AcpTuiClient::new(transport);
-    client.force_stable_for_test("s", false);
-    client.user_input_queue.store(true, Ordering::Release);
-    assert!(client.lifecycle.bind_user_input_generation("s", 1, "g"));
-    let gate = client.lifecycle.operation_gate().lock().await;
-    client.spawn_pump_with_execution_dispatcher(notification_tx, Some(Arc::new(dispatcher)));
-    for session_id in ["s", "other"] {
-        server.send_notification("peri/agent_event", json!({
-            "sessionId":session_id,
-            "event_json":serde_json::to_string(&AcpEvent::UserInputDelivered {
-                generation:"g".into(), input_id:session_id.into(), content:MessageContent::text("synthetic input"),
-            }).unwrap(),
-        })).await.unwrap();
-        if session_id == "s" {
-            server
-                .send_notification("session/work/available", json!({"sessionId":"other"}))
-                .await
-                .unwrap();
-        }
-    }
-    let activation_id = next_request(&dispatch_server, "peri/execution/activate").await;
-    assert!(notifications.try_recv().is_err());
-    dispatch_server
-        .send_response(activation_id, Ok(json!({"status":"idle"})))
-        .await
-        .unwrap();
-    drop(gate);
-    let delivered = tokio::time::timeout(Duration::from_secs(2), notifications.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(matches!(delivered, AcpNotification::AgentEvent {
-        session_id, event:AcpEvent::UserInputDelivered { .. },
-    } if session_id == "s"));
-    client.close();
-    assert!(
-        tokio::time::timeout(Duration::from_secs(2), notifications.recv())
-            .await
-            .unwrap()
-            .is_none()
-    );
 }

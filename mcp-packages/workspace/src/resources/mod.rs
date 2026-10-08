@@ -88,6 +88,13 @@ pub struct ResourceBudget {
     pub max_file_bytes: u64,
     /// 项目指令 `@import` 的数量上限。
     pub max_imports: usize,
+    /// 项目指令 `@import` 展开树的**累计读取字节**上限（含根正文与每一层被导入
+    /// 文件，递归共享同一预算；M9）。达到上限后不再读取后续 import，保留有界
+    /// 占位符并记 warn。
+    pub max_instruction_total_bytes: u64,
+    /// 项目指令最终文本的字节上限（main 展开结果与 local 正文各自适用；M9）。
+    /// 超限时保留有界前缀 + 显式截断说明，不先生成巨串再截。
+    pub max_instruction_text_bytes: usize,
 }
 
 impl Default for ResourceBudget {
@@ -99,6 +106,8 @@ impl Default for ResourceBudget {
             max_files_per_skill: 256,
             max_file_bytes: 1024 * 1024,
             max_imports: 64,
+            max_instruction_total_bytes: 4 * 1024 * 1024,
+            max_instruction_text_bytes: 1024 * 1024,
         }
     }
 }

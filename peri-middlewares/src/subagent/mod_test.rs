@@ -1,16 +1,9 @@
 use peri_acp_types::builtin_mcp::{original_tool_name_of_effective, BUILTIN_MCP_INSTANCES};
 use peri_agent::{
-    agent::{
-        react::{ReactLLM, Reasoning, StreamingContext},
-        state::AgentState,
-    },
-    messages::BaseMessage,
-    middleware::r#trait::Middleware,
-    session,
+    agent::state::AgentState, messages::BaseMessage, middleware::r#trait::Middleware, session,
 };
 
 use super::*;
-use peri_agent::session::subagent::SubagentLlmSource;
 use peri_mcp_core::agent_definition::parse_agent_file;
 
 #[derive(Clone)]
@@ -26,7 +19,7 @@ impl EchoLLM {
         let _ = &cancellation;
         let messages = base_messages(&request);
         let defined = defined_tools(&request);
-        let tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
+        let _tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
 
         let last = messages.last().map(|m| m.content()).unwrap_or_default();
         text_events(format!("echo: {}", last))

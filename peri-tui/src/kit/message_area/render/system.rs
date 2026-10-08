@@ -17,6 +17,33 @@ pub(super) fn render_system_note_lines(
     grid: &GridSpec,
 ) -> Vec<Line<'static>> {
     let sem = THEME_ATOM.state().read().semantic;
+    if data.level == TuiNoteLevel::Error {
+        return super::error::preview_lines(&data.text, grid.content_width(), 3)
+            .into_iter()
+            .enumerate()
+            .map(|(index, text)| {
+                let mut spans = if index == 0 {
+                    let style = Style::default()
+                        .fg(sem.status.error)
+                        .add_modifier(Modifier::BOLD);
+                    let mut spans = first_prefix(grid, sym().error, style);
+                    spans[1] = Span::styled(sym().error, style);
+                    spans
+                } else {
+                    cont_prefix(grid, sem.text.dim)
+                };
+                spans.push(Span::styled(
+                    text,
+                    Style::default().fg(if index == 0 {
+                        sem.status.error
+                    } else {
+                        sem.text.muted
+                    }),
+                ));
+                Line::from(spans)
+            })
+            .collect();
+    }
     // 剥离旧版 ✻/⏿ 前缀标记，统一走新符号层
     let clean: Vec<String> = data
         .text

@@ -180,7 +180,6 @@ fn make_recording_cancelled_stage(
         turn.cancel_token.cancel();
         let (bus, handles) = EventBus::new(Default::default());
         let context = StageContext::builder(turn, session.transcript(), session.queue().clone())
-            .with_best_effort_work_fixture()
             .with_event_bus(Arc::new(bus))
             .build();
         let (_todo_tx, todo_rx) = tokio::sync::mpsc::channel(8);
@@ -245,11 +244,6 @@ fn make_session_context(session_id: &str) -> SessionContext {
         tool_invocation_resolver: Arc::new(DirectToolInvocationResolver),
         session_start_source: None,
         request_id: None,
-        execution_admission: None,
-        recipient_lifecycle: 1,
-        execution_admission_port: None,
-        sdk_run_started: None,
-        sdk_admission_observed: None,
         allow_await_wake: false,
         continuation_notify: None,
         frozen_fallback_builder: None,
@@ -749,7 +743,6 @@ async fn test_run_session_loop_intercept_inject_enters_agent_pipeline() {
             session_for_build.transcript(),
             session_for_build.queue().clone(),
         )
-        .with_best_effort_work_fixture()
         .with_event_bus(Arc::new(bus))
         .build();
         let (_todo_tx, todo_rx) = tokio::sync::mpsc::channel(8);
@@ -823,7 +816,6 @@ async fn test_main_agent_history_is_seeded_as_compactable_own_region() {
         turn.cancel_token.cancel();
         let (bus, handles) = EventBus::new(Default::default());
         let context = StageContext::builder(turn, session.transcript(), session.queue().clone())
-            .with_best_effort_work_fixture()
             .with_event_bus(Arc::new(bus))
             .build();
         let (_todo_tx, todo_rx) = tokio::sync::mpsc::channel(8);

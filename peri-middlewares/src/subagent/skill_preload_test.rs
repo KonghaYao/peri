@@ -21,6 +21,79 @@ use peri_acp_types::{
     skills::{SkillMetadata, SkillOrigin, SkillSource},
 };
 
+/// 测试用批次适配器：`AgentState` + 本批输入身份。
+///
+/// 生产由 `AgentContext` 提供批次身份（`input_message_ids`）；`AgentState` 作为
+/// legacy 适配器恒返回 `None`（等价「本次没有新输入」），因此主 Agent 启发式
+/// 路径的用例统一用本适配器显式声明本批身份（H7：不扫描历史最后一条 Human）。
+struct BatchState {
+    inner: AgentState,
+    ids: Vec<peri_agent::messages::MessageId>,
+}
+
+impl BatchState {
+    /// 全部给定消息都算作本批输入。
+    fn new(cwd: &str, messages: Vec<BaseMessage>) -> Self {
+        let mut inner = AgentState::new(cwd);
+        let mut ids = Vec::new();
+        for message in messages {
+            ids.push(message.id());
+            inner.add_message(message);
+        }
+        Self { inner, ids }
+    }
+
+    fn messages(&self) -> &[BaseMessage] {
+        self.inner.messages()
+    }
+}
+
+impl std::ops::Deref for BatchState {
+    type Target = AgentState;
+    fn deref(&self) -> &AgentState {
+        &self.inner
+    }
+}
+
+impl peri_agent::middleware::state::MiddlewareState for BatchState {
+    fn cwd(&self) -> &str {
+        self.inner.cwd()
+    }
+    fn messages(&self) -> &[BaseMessage] {
+        self.inner.messages()
+    }
+    fn input_message_ids(&self) -> Option<&[peri_agent::messages::MessageId]> {
+        Some(&self.ids)
+    }
+    fn add_message(&mut self, message: BaseMessage) {
+        self.inner.add_message(message);
+    }
+    fn replace_message(&mut self, message: BaseMessage) -> bool {
+        let Some(existing) = self
+            .inner
+            .messages_mut()
+            .iter_mut()
+            .find(|existing| existing.id() == message.id())
+        else {
+            return false;
+        };
+        *existing = message;
+        true
+    }
+    fn current_step(&self) -> usize {
+        self.inner.current_step()
+    }
+    fn push_recall(&mut self, item: String) {
+        self.inner.push_recall(item);
+    }
+    fn drain_recall(&mut self) -> Vec<String> {
+        self.inner.drain_recall()
+    }
+    fn v2_queue(&self) -> &peri_agent::session::MessageQueue {
+        self.inner.v2_queue()
+    }
+}
+
 /// seed registry：同一 server 下多个技能（Started + Completed 造 Discovered 条目，
 /// 模拟发现任务完成态）。条目无 resources 绑定 ⇒ activation 走 legacy 正文路径。
 fn seed_registry_with_skills(server: &str, skills: &[&str]) -> Arc<McpSkillRegistry> {
@@ -107,10 +180,12 @@ fn test_extract_skill_names_rejects_path_like() {
 async fn test_no_op_when_empty_names_and_no_token() {
     let dir = tempdir().unwrap();
     let mw = middleware(seed_registry_with_skill("demo", "hello"));
-    let mut state = AgentState::new(dir.path().to_str().unwrap());
-    state.add_message(BaseMessage::human("hello there"));
+    let mut state = BatchState::new(
+        dir.path().to_str().unwrap(),
+        vec![BaseMessage::human("hello there")],
+    );
 
-    mw.before_agent(&mut state).await.unwrap();
+    mw.before_input(&mut state).await.unwrap();
 
     assert_eq!(state.messages().len(), 1, "无 skill token 时不注入");
 }
@@ -119,9 +194,9 @@ async fn test_no_op_when_empty_names_and_no_token() {
 async fn test_no_op_when_no_human_message() {
     let dir = tempdir().unwrap();
     let mw = middleware(seed_registry_with_skill("demo", "hello"));
-    let mut state = AgentState::new(dir.path().to_str().unwrap());
+    let mut state = BatchState::new(dir.path().to_str().unwrap(), vec![]);
 
-    mw.before_agent(&mut state).await.unwrap();
+    mw.before_input(&mut state).await.unwrap();
 
     assert!(state.messages().is_empty());
 }
@@ -132,10 +207,12 @@ async fn test_no_op_when_no_human_message() {
 async fn test_preload_mcp_skill_injects_annotated_content() {
     let dir = tempdir().unwrap();
     let mw = middleware(seed_registry_with_skill("demo", "hello"));
-    let mut state = AgentState::new(dir.path().to_str().unwrap());
-    state.add_message(BaseMessage::human("use /mcp__demo__hello"));
+    let mut state = BatchState::new(
+        dir.path().to_str().unwrap(),
+        vec![BaseMessage::human("use /mcp__demo__hello")],
+    );
 
-    mw.before_agent(&mut state).await.unwrap();
+    mw.before_input(&mut state).await.unwrap();
 
     assert_eq!(state.messages().len(), 3, "registry 命中应注入 Ai + Tool");
     let tool_content = state.messages()[2].content();
@@ -155,10 +232,12 @@ async fn test_preload_mcp_skill_injects_annotated_content() {
 async fn test_preload_bare_name_hits_registry() {
     let dir = tempdir().unwrap();
     let mw = middleware(seed_registry_with_skill("workspace", "brainstorming"));
-    let mut state = AgentState::new(dir.path().to_str().unwrap());
-    state.add_message(BaseMessage::human("/brainstorming 帮我"));
+    let mut state = BatchState::new(
+        dir.path().to_str().unwrap(),
+        vec![BaseMessage::human("/brainstorming 帮我")],
+    );
 
-    mw.before_agent(&mut state).await.unwrap();
+    mw.before_input(&mut state).await.unwrap();
 
     assert_eq!(state.messages().len(), 3, "裸名应命中 registry");
     assert!(state.messages()[2]
@@ -172,10 +251,12 @@ async fn test_system_skill_old_prefixed_token_is_not_auto_preloaded() {
     let reg = seed_registry_with_skill("workspace", "brainstorming");
     reg.mark_system_origins(&["workspace".to_string()]);
     let mw = middleware(Arc::clone(&reg));
-    let mut state = AgentState::new(dir.path().to_str().unwrap());
-    state.add_message(BaseMessage::human("/workspace:brainstorming"));
+    let mut state = BatchState::new(
+        dir.path().to_str().unwrap(),
+        vec![BaseMessage::human("/workspace:brainstorming")],
+    );
 
-    mw.before_agent(&mut state).await.unwrap();
+    mw.before_input(&mut state).await.unwrap();
 
     assert_eq!(state.messages().len(), 1, "旧前缀 token 不得激活系统 skill");
 }
@@ -224,10 +305,12 @@ async fn test_preload_injects_multiple_skills_in_input_order() {
             .collect(),
     );
     let mw = middleware(reg);
-    let mut state = AgentState::new(dir.path().to_str().unwrap());
-    state.add_message(BaseMessage::human("/beta /alpha"));
+    let mut state = BatchState::new(
+        dir.path().to_str().unwrap(),
+        vec![BaseMessage::human("/beta /alpha")],
+    );
 
-    mw.before_agent(&mut state).await.unwrap();
+    mw.before_input(&mut state).await.unwrap();
 
     assert_eq!(state.messages().len(), 4, "两个命中 = Ai + 2 Tool");
     let calls = state.messages()[1].tool_calls();
@@ -245,10 +328,12 @@ async fn test_preload_injects_multiple_skills_in_input_order() {
 async fn test_preload_preserves_input_order_with_miss_in_between() {
     let dir = tempdir().unwrap();
     let mw = middleware(seed_registry_with_skill("demo", "hello"));
-    let mut state = AgentState::new(dir.path().to_str().unwrap());
-    state.add_message(BaseMessage::human("/miss-a /mcp__demo__hello /miss-b"));
+    let mut state = BatchState::new(
+        dir.path().to_str().unwrap(),
+        vec![BaseMessage::human("/miss-a /mcp__demo__hello /miss-b")],
+    );
 
-    mw.before_agent(&mut state).await.unwrap();
+    mw.before_input(&mut state).await.unwrap();
 
     assert_eq!(state.messages().len(), 3, "仅 1 个命中（Ai + Tool）");
     let calls = state.messages()[1].tool_calls();
@@ -265,10 +350,12 @@ async fn test_preload_preserves_input_order_with_miss_in_between() {
 async fn test_preload_mcp_skill_by_alias() {
     let dir = tempdir().unwrap();
     let mw = middleware(seed_registry_with_skill("demo", "hello"));
-    let mut state = AgentState::new(dir.path().to_str().unwrap());
-    state.add_message(BaseMessage::human("/demo:hello 帮我"));
+    let mut state = BatchState::new(
+        dir.path().to_str().unwrap(),
+        vec![BaseMessage::human("/demo:hello 帮我")],
+    );
 
-    mw.before_agent(&mut state).await.unwrap();
+    mw.before_input(&mut state).await.unwrap();
 
     assert_eq!(state.messages().len(), 3, "别名命中应注入 Ai + Tool");
     assert!(state.messages()[2].content().contains("Body of hello."));
@@ -280,10 +367,12 @@ async fn test_preload_mcp_skill_by_alias() {
 async fn test_preload_plugin_server_via_trailing_segment() {
     let dir = tempdir().unwrap();
     let mw = middleware(seed_registry_with_skill("plugin:p1:demosrv", "beta"));
-    let mut state = AgentState::new(dir.path().to_str().unwrap());
-    state.add_message(BaseMessage::human("/demosrv:beta 帮我"));
+    let mut state = BatchState::new(
+        dir.path().to_str().unwrap(),
+        vec![BaseMessage::human("/demosrv:beta 帮我")],
+    );
 
-    mw.before_agent(&mut state).await.unwrap();
+    mw.before_input(&mut state).await.unwrap();
 
     assert_eq!(state.messages().len(), 3, "末段形态应命中");
     let tool_content = state.messages()[2].content();
@@ -301,10 +390,12 @@ async fn test_preload_plugin_server_via_trailing_segment() {
 async fn test_missing_registry_reports_gap_without_injection() {
     let dir = tempdir().unwrap();
     let mw = SkillPreloadMiddleware::new(vec![]);
-    let mut state = AgentState::new(dir.path().to_str().unwrap());
-    state.add_message(BaseMessage::human("/anything 帮我"));
+    let mut state = BatchState::new(
+        dir.path().to_str().unwrap(),
+        vec![BaseMessage::human("/anything 帮我")],
+    );
 
-    mw.before_agent(&mut state).await.unwrap();
+    mw.before_input(&mut state).await.unwrap();
 
     assert_eq!(state.messages().len(), 1, "未装配 registry ⇒ 只保留 Human");
 }
@@ -314,10 +405,12 @@ async fn test_missing_registry_reports_gap_without_injection() {
 async fn test_registry_miss_injects_nothing() {
     let dir = tempdir().unwrap();
     let mw = middleware(seed_registry_with_skill("demo", "hello"));
-    let mut state = AgentState::new(dir.path().to_str().unwrap());
-    state.add_message(BaseMessage::human("/nonexistent 不存在"));
+    let mut state = BatchState::new(
+        dir.path().to_str().unwrap(),
+        vec![BaseMessage::human("/nonexistent 不存在")],
+    );
 
-    mw.before_agent(&mut state).await.unwrap();
+    mw.before_input(&mut state).await.unwrap();
 
     assert_eq!(state.messages().len(), 1, "miss 应静默跳过（缺口）");
 }
@@ -348,10 +441,12 @@ async fn test_preload_ambiguous_origin_rejects_injection() {
         reg.mark_discovery_completed(server, handle, vec![meta]);
     }
     let mw = middleware(reg);
-    let mut state = AgentState::new(dir.path().to_str().unwrap());
-    state.add_message(BaseMessage::human("/beta 歧义命令"));
+    let mut state = BatchState::new(
+        dir.path().to_str().unwrap(),
+        vec![BaseMessage::human("/beta 歧义命令")],
+    );
 
-    mw.before_agent(&mut state).await.unwrap();
+    mw.before_input(&mut state).await.unwrap();
 
     assert_eq!(
         state.messages().len(),
@@ -578,4 +673,157 @@ async fn test_explicit_list_path_activation_failure_receipt_carries_reason() {
         receipts[0].1,
         "SkillTool: cannot activate 'detached' (skill entry has no content binding)"
     );
+}
+
+// ─── M8：批内去重与预载预算 ───────────────────────────────────────────────
+
+/// 同一 canonical skill（全名 + 别名）批内只加载一次，保持首次出现顺序。
+#[tokio::test]
+async fn test_explicit_list_path_dedupes_same_canonical_skill() {
+    let dir = tempdir().unwrap();
+    let reg = Arc::new(McpSkillRegistry::new());
+    let handle: HandleToken = Arc::new(1u32);
+    let meta = SkillMetadata {
+        name: mcp_skill_name("demo", "alpha"),
+        aliases: vec!["alpha".to_string()],
+        description: "Alpha skill".to_string(),
+        path: std::path::PathBuf::new(),
+        source: SkillSource::Mcp,
+        plugin_name: None,
+        origin: Some(SkillOrigin::Mcp {
+            server: "demo".to_string(),
+            uri: "skill://demo/alpha/SKILL.md".to_string(),
+        }),
+        content: Some("alpha body\n".to_string()),
+        resources: Vec::new(),
+        frontmatter: None,
+    };
+    reg.mark_discovery_started("demo", handle.clone());
+    reg.mark_discovery_completed("demo", handle, vec![meta]);
+    let mw = SkillPreloadMiddleware::new(vec!["mcp__demo__alpha".to_string(), "alpha".to_string()])
+        .with_mcp_registry(Some(reg));
+    let mut state = AgentState::new(dir.path().to_str().unwrap());
+    state.add_message(BaseMessage::human("普通消息（无 token）"));
+
+    mw.before_agent(&mut state).await.unwrap();
+
+    let calls = state.messages()[1].tool_calls();
+    assert_eq!(
+        calls.len(),
+        1,
+        "同一 canonical 身份只读一次、只注入一次：{calls:?}"
+    );
+    let receipts = tool_receipts(&state);
+    assert_eq!(receipts.len(), 1);
+    assert!(receipts[0].1.contains("alpha body"));
+}
+
+/// 条数超限：超出部分**不读正文**，改为一一配对的缺口回执（不静默丢弃）。
+#[tokio::test]
+async fn test_explicit_list_path_item_budget_yields_paired_gap_receipts() {
+    let dir = tempdir().unwrap();
+    let skills: Vec<String> = (0..18).map(|index| format!("s{index:02}")).collect();
+    let refs: Vec<&str> = skills.iter().map(String::as_str).collect();
+    let mw = SkillPreloadMiddleware::new(skills.clone())
+        .with_mcp_registry(Some(seed_registry_with_skills("demo", &refs)));
+    let mut state = AgentState::new(dir.path().to_str().unwrap());
+    state.add_message(BaseMessage::human("普通消息（无 token）"));
+
+    mw.before_agent(&mut state).await.unwrap();
+
+    let receipts = tool_receipts(&state);
+    assert_eq!(receipts.len(), 18, "18 条声明各一对回执（含超限项）");
+    let errors = receipts.iter().filter(|(_, _, is_error)| *is_error).count();
+    assert_eq!(errors, 2, "仅超限的 2 项是缺口：{receipts:?}");
+    assert!(
+        receipts[17].1.contains("batch item limit"),
+        "超限回执必须说明原因：{}",
+        receipts[17].1
+    );
+    assert!(
+        receipts[0].1.contains("Body of s00."),
+        "预算内条目正文完整（不加载截断正文）：{}",
+        receipts[0].1
+    );
+}
+
+/// 单项字节超预算：不加载截断正文冒充完整指令，改为缺口回执。
+#[tokio::test]
+async fn test_explicit_list_path_item_bytes_yield_gap_receipt() {
+    let dir = tempdir().unwrap();
+    let reg = Arc::new(McpSkillRegistry::new());
+    let handle: HandleToken = Arc::new(1u32);
+    let meta = SkillMetadata {
+        name: mcp_skill_name("demo", "huge"),
+        aliases: Vec::new(),
+        description: "Huge skill".to_string(),
+        path: std::path::PathBuf::new(),
+        source: SkillSource::Mcp,
+        plugin_name: None,
+        origin: Some(SkillOrigin::Mcp {
+            server: "demo".to_string(),
+            uri: "skill://demo/huge/SKILL.md".to_string(),
+        }),
+        content: Some("x".repeat(MAX_PRELOAD_ITEM_BYTES + 1)),
+        resources: Vec::new(),
+        frontmatter: None,
+    };
+    reg.mark_discovery_started("demo", handle.clone());
+    reg.mark_discovery_completed("demo", handle, vec![meta]);
+    let mw = SkillPreloadMiddleware::new(vec!["huge".to_string()]).with_mcp_registry(Some(reg));
+    let mut state = AgentState::new(dir.path().to_str().unwrap());
+    state.add_message(BaseMessage::human("普通消息（无 token）"));
+
+    mw.before_agent(&mut state).await.unwrap();
+
+    let receipts = tool_receipts(&state);
+    assert_eq!(receipts.len(), 1);
+    assert!(receipts[0].2, "超预算必须是缺口回执");
+    assert!(
+        receipts[0].1.contains("exceeds byte budget"),
+        "回执必须说明是字节预算：{}",
+        receipts[0].1
+    );
+    assert!(
+        !receipts[0].1.contains("xxxx"),
+        "不得注入截断正文冒充完整指令"
+    );
+}
+
+/// 启发式路径：已识别但被预算挡下的技能必须显式提示（不假装未声明）；
+/// 未识别 token 仍零注入（不制造未知技能错误）。
+#[tokio::test]
+async fn test_heuristic_path_reports_budget_gaps_but_not_unknown_tokens() {
+    let dir = tempdir().unwrap();
+    let skills: Vec<String> = (0..18).map(|index| format!("h{index:02}")).collect();
+    let refs: Vec<&str> = skills.iter().map(String::as_str).collect();
+    let mut tokens: Vec<String> = skills.iter().map(|name| format!("/{name}")).collect();
+    tokens.push("/never-declared".to_string());
+    let mw = middleware(seed_registry_with_skills("demo", &refs));
+    let mut state = BatchState::new(
+        dir.path().to_str().unwrap(),
+        vec![BaseMessage::human(tokens.join(" "))],
+    );
+
+    mw.before_input(&mut state).await.unwrap();
+
+    let calls: Vec<String> = state
+        .messages()
+        .iter()
+        .flat_map(|message| message.tool_calls())
+        .map(|call| call.arguments["skill_name"].as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        !calls.iter().any(|name| name == "never-declared"),
+        "未识别 token 不得注入（不制造未知技能错误）：{calls:?}"
+    );
+    assert!(
+        calls.iter().any(|name| name == "h17"),
+        "已识别但被预算挡下的技能必须显式提示：{calls:?}"
+    );
+    let receipts = tool_receipts(&state);
+    let budget_gap = receipts
+        .iter()
+        .find(|(_, text, _)| text.contains("batch item limit"));
+    assert!(budget_gap.is_some(), "预算缺口回执必须存在：{receipts:?}");
 }

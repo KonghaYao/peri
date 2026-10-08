@@ -4,11 +4,15 @@ version.workspace = true
 edition.workspace = true
 description = "Emscripten ACP Host deployment"
 
+[features]
+cloudflare = ["peri-model/cloudflare"]
+
 [[bin]]
 name = "peri-wasm"
 path = "src/main.rs"
 
 [target.'cfg(target_os = "emscripten")'.dependencies]
+peri-model = { path = "../peri-model" }
 peri-acp = { path = "../peri-acp" }
 peri-resources = { path = "../peri-resources" }
 peri-acp-types = { path = "../peri-acp-types" }

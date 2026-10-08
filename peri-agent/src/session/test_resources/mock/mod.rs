@@ -114,7 +114,6 @@ fn child_meta(id: &ThreadId, meta: &NewSessionMeta, hidden: bool) -> ThreadMeta 
 }
 
 pub(crate) struct MockSessionResources {
-    work_backend: tokio::sync::OnceCell<work_backend::WorkBackend>,
     /// 每个会话 id 的独立数据区：测试替身也按会话隔离（不同 thread 不串扰）。
     ///
     /// `Arc` 共享给认领 handle：`mark_running` 等写入在 trait 方法返回后仍要落回同一份事实。
@@ -155,7 +154,6 @@ pub(crate) struct MockSessionResources {
 impl MockSessionResources {
     pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
-            work_backend: tokio::sync::OnceCell::new(),
             regions: Arc::new(Mutex::new(HashMap::new())),
             closing: Mutex::new(HashSet::new()),
             order: Mutex::new(Vec::new()),
@@ -387,14 +385,11 @@ impl MockResumeClaim {
 }
 
 // ── 子模块（按职责拆分；内部细节见各自文件头）────────────────────────────
-pub(crate) mod admission;
 /// 夹具便利方法：镜像迁移前 `ThreadStore` 的常用测试调用形态。
 mod fixtures;
-pub(crate) mod history;
+/// `peri_model::Model` 形态的假模型助手（生产 bridge 装配的测试入口）。
 pub(crate) mod model;
 /// 故障注入与观察入口（只覆盖被测试的行为）。
 mod observe;
 /// `SessionResources` 门面替身：逐个方法实现契约语义。
 mod session_resources;
-pub(crate) mod work;
-mod work_backend;

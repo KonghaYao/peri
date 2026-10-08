@@ -89,6 +89,145 @@ fn pool_with(handles: Vec<(String, Arc<McpClientHandle>)>) -> Arc<McpClientPool>
 const LIST_AGENT: &str = r#"{"name":"local","description":"Local agent","tools":"Read, Grep"}"#;
 const BUILTIN_AGENT: &str = r#"{"name":"coder","description":"Builtin coder","model":"sonnet"}"#;
 
+#[tokio::test]
+async fn invalid_project_model_blocks_same_name_builtin_and_plugin_activation() {
+    let pool = pool_with(vec![(
+        "workspace".to_string(),
+        workspace_handle(vec![
+            agent_resource(ResourceScope::Project, None, "coder", UNKNOWN_MODEL_AGENT),
+            agent_resource(ResourceScope::Builtin, None, "coder", BUILTIN_AGENT),
+            agent_resource(
+                ResourceScope::Plugin,
+                Some("fixture"),
+                "coder",
+                BUILTIN_AGENT,
+            ),
+            agent_resource(ResourceScope::Project, None, "local", LIST_AGENT),
+        ]),
+    )]);
+    let registry = McpAgentRegistry::new(pool);
+    for include_builtin in [true, false] {
+        assert!(!registry
+            .local_catalog(include_builtin)
+            .iter()
+            .any(|entry| entry.id == "coder"));
+        let error = registry
+            .resolve_local("coder", include_builtin)
+            .unwrap_err();
+        assert!(error.contains("unsupported model tier"), "{error}");
+        assert!(
+            error.contains("coder") && error.contains("Project"),
+            "{error}"
+        );
+        assert!(error.contains("agent://project/coder/agent.md"), "{error}");
+        assert!(!error.contains("turbo"), "{error}");
+        assert_eq!(
+            registry.resolve_local("local", include_builtin).unwrap().id,
+            "local"
+        );
+        let error = registry
+            .activate("coder", include_builtin)
+            .await
+            .unwrap_err();
+        assert!(error.contains("unsupported model tier"), "{error}");
+    }
+}
+
+#[test]
+fn invalid_builtin_model_blocks_plugin_only_when_builtin_is_enabled() {
+    let registry = McpAgentRegistry::new(pool_with(vec![(
+        "workspace".to_string(),
+        workspace_handle(vec![
+            agent_resource(ResourceScope::Builtin, None, "coder", UNKNOWN_MODEL_AGENT),
+            agent_resource(
+                ResourceScope::Plugin,
+                Some("fixture"),
+                "coder",
+                BUILTIN_AGENT,
+            ),
+        ]),
+    )]));
+    let error = registry.resolve_local("coder", true).unwrap_err();
+    assert!(
+        error.contains("unsupported model tier") && error.contains("Builtin"),
+        "{error}"
+    );
+    assert!(registry.local_catalog(true).is_empty());
+    assert_eq!(
+        registry
+            .resolve_local("coder", false)
+            .unwrap()
+            .source
+            .local_scope(),
+        Some(ResourceScope::Plugin)
+    );
+    assert_eq!(registry.local_catalog(false).len(), 1);
+}
+
+#[test]
+fn invalid_lower_priority_model_does_not_hide_valid_project_definition() {
+    let registry = McpAgentRegistry::new(pool_with(vec![(
+        "workspace".to_string(),
+        workspace_handle(vec![
+            agent_resource(ResourceScope::Project, None, "coder", BUILTIN_AGENT),
+            agent_resource(ResourceScope::Builtin, None, "coder", UNKNOWN_MODEL_AGENT),
+            agent_resource(
+                ResourceScope::Plugin,
+                Some("fixture"),
+                "coder",
+                UNKNOWN_MODEL_AGENT,
+            ),
+        ]),
+    )]));
+    for include_builtin in [true, false] {
+        let selected = registry.resolve_local("coder", include_builtin).unwrap();
+        assert_eq!(selected.source.local_scope(), Some(ResourceScope::Project));
+        let catalog = registry.local_catalog(include_builtin);
+        assert_eq!(catalog.len(), 1);
+        assert_eq!(
+            catalog[0].source.local_scope(),
+            Some(ResourceScope::Project)
+        );
+    }
+}
+
+#[test]
+fn isolated_model_error_tracks_current_resources_and_face_closure() {
+    let pool = pool_with(vec![(
+        "workspace".to_string(),
+        workspace_handle(vec![
+            agent_resource(ResourceScope::Project, None, "coder", UNKNOWN_MODEL_AGENT),
+            agent_resource(ResourceScope::Builtin, None, "coder", BUILTIN_AGENT),
+        ]),
+    )]);
+    let registry = McpAgentRegistry::new(Arc::clone(&pool));
+    assert!(registry
+        .resolve_local("coder", true)
+        .unwrap_err()
+        .contains("unsupported model tier"));
+    pool.clients.write().insert(
+        "workspace".to_string(),
+        workspace_handle(vec![agent_resource(
+            ResourceScope::Project,
+            None,
+            "coder",
+            BUILTIN_AGENT,
+        )]),
+    );
+    assert_eq!(
+        registry
+            .resolve_local("coder", true)
+            .unwrap()
+            .source
+            .local_scope(),
+        Some(ResourceScope::Project)
+    );
+    let closed = McpAgentRegistry::new(pool).with_local_face_closed(true);
+    let error = closed.resolve_local("coder", true).unwrap_err();
+    assert!(error.contains("cannot find agent definition"), "{error}");
+    assert!(closed.local_catalog(true).is_empty());
+}
+
 #[test]
 fn local_entries_come_only_from_the_host_bound_workspace_instance() {
     let trusted = workspace_handle(vec![agent_resource(
