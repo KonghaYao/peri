@@ -252,7 +252,7 @@ async fn test_resume_cancelled_during_assembly_never_starts_execution() {
         assembled: assembled.clone(),
     });
     let starts_hook = starts.clone();
-    config.on_subagent_start = Some(Arc::new(move |_, _| {
+    config.on_subagent_start = Some(Arc::new(move |_, _, _| {
         starts_hook.fetch_add(1, Ordering::SeqCst);
     }));
     let result = tokio::time::timeout(
@@ -335,11 +335,11 @@ async fn test_resume_running_cancelled_by_dispatch_finalizes_claim() {
         Some(cancel.clone()),
     );
     let starts_hook = starts.clone();
-    config.on_subagent_start = Some(Arc::new(move |_, _| {
+    config.on_subagent_start = Some(Arc::new(move |_, _, _| {
         starts_hook.fetch_add(1, Ordering::SeqCst);
     }));
     let stops_hook = stops.clone();
-    config.on_subagent_stop = Some(Arc::new(move |_, _, _, _| {
+    config.on_subagent_stop = Some(Arc::new(move |_, _, _, _, _| {
         stops_hook.fetch_add(1, Ordering::SeqCst);
     }));
     cancel_resume_at_gate(config, &cancel, entered_rx, &store, &thread_id).await;
@@ -456,7 +456,7 @@ async fn test_resume_provenance_read_cancelled_by_dispatch_restores_previous_sta
             None,
             Some(cancel.clone()),
         );
-        config.on_subagent_start = Some(Arc::new(move |_, _| {
+        config.on_subagent_start = Some(Arc::new(move |_, _, _| {
             start_counter.fetch_add(1, Ordering::SeqCst);
         }));
         cancel_resume_at_gate(config, &cancel, entered_rx, &store, &thread_id).await;
@@ -505,7 +505,7 @@ async fn test_resume_provenance_overlap_rolls_back_claim_before_retry() {
     let starts = Arc::new(AtomicUsize::new(0));
     let counter = starts.clone();
     let mut config = resume_config(store.clone(), thread_id.clone());
-    config.on_subagent_start = Some(Arc::new(move |_, _| {
+    config.on_subagent_start = Some(Arc::new(move |_, _, _| {
         counter.fetch_add(1, Ordering::SeqCst);
     }));
     let error = resume_err(None, config).await;

@@ -69,8 +69,9 @@ pub(super) async fn run_sync_subagent(
         session_resources
     };
 
+    // 真实子会话身份：hook 载荷 agent_id 的来源（不是 agent 名）。
     if let Some(on_start) = &on_subagent_start {
-        on_start(&agent_name, &cwd);
+        on_start(child_thread_id, &agent_name, &cwd);
     }
     emit_subagent_start_v2(
         &v2_ctx.event_bus,

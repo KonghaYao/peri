@@ -125,8 +125,13 @@ pub(super) async fn spawn_background_subagent(
             });
         let bg_stop_handler = bg_forwarder_handler.clone();
 
+        // 真实子会话身份：hook 载荷 agent_id 的来源（不是 agent 名）。
         if let Some(on_start) = &on_subagent_start {
-            on_start(&agent_name_for_task, &cwd_for_task);
+            on_start(
+                &child_thread_id_for_task,
+                &agent_name_for_task,
+                &cwd_for_task,
+            );
         }
         emit_subagent_start_v2(
             &event_bus_for_emit,
@@ -276,6 +281,7 @@ pub(super) async fn spawn_background_subagent(
         cleanup_guard.disarm_stop();
         if let Some(ref on_stop) = on_subagent_stop {
             on_stop(
+                &child_thread_id_for_task,
                 &agent_name_for_task,
                 &cwd_for_task,
                 &output_summary,

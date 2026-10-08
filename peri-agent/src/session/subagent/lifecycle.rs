@@ -158,7 +158,7 @@ pub(crate) async fn on_subagent_stop_handler(
 ) {
     // 1. lifecycle hook（闭包由 middlewares 构造，内部触发 RegisteredHook）
     if let Some(ref on_stop) = on_subagent_stop {
-        on_stop(agent_id, cwd, output_summary, is_error);
+        on_stop(child_thread_id, agent_id, cwd, output_summary, is_error);
     }
     // 3. 终态状态（仅 sync 路径有此步骤）：定向 patch 只写状态，不覆盖并发标题/计数。
     if let Some(ref store) = session_resources {

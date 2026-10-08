@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::hooks::types::{HookEvent, HookType, RegisteredHook};
+use peri_agent::tools::BaseTool;
 
 fn subagent_hook(
     event: HookEvent,
@@ -218,7 +219,11 @@ async fn subagent_start_once_hook_is_shared_across_spawns() {
 
     // 第一次 spawn：等 hook 命令真正落盘（模拟一次真实的子 agent 启动完成）。
     let (on_start, _) = tool.lifecycle_closures();
-    on_start.expect("非空 hook 列表必须构造 SubagentStart 闭包")("explore", "/tmp");
+    on_start.expect("非空 hook 列表必须构造 SubagentStart 闭包")(
+        "fixture-child-thread",
+        "explore",
+        "/tmp",
+    );
     for _ in 0..200 {
         if fired_lines(&log_path) >= 1 {
             break;
@@ -226,16 +231,185 @@ async fn subagent_start_once_hook_is_shared_across_spawns() {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
     assert_eq!(fired_lines(&log_path), 1, "首次 spawn 必须触发一次");
+    // 稳定窗口：dispatcher 在 hook 进程结束后才写 once 标记；日志出现不代表
+    // 标记已落。并行负载下若立刻发第二次，标记可能尚未写入（夹具竞态，非被
+    // 测语义）。等待计数在连续窗口内不再增长后再发第二次。
+    for _ in 0..30 {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        assert_eq!(
+            fired_lines(&log_path),
+            1,
+            "等待首个 once hook 稳定期间不得再次触发"
+        );
+    }
 
     // 第二次 spawn（同一会话、同一工具）：共享 once tracker 必须让 hook 不再触发。
     let (on_start, _) = tool.lifecycle_closures();
-    on_start.expect("非空 hook 列表必须构造 SubagentStart 闭包")("explore", "/tmp");
+    on_start.expect("非空 hook 列表必须构造 SubagentStart 闭包")(
+        "fixture-child-thread",
+        "explore",
+        "/tmp",
+    );
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     assert_eq!(
         fired_lines(&log_path),
         1,
         "once:true 的 SubagentStart 必须跨 spawn 只触发一次"
     );
+}
+
+/// 证据（C 组 agent_id 真值）：真实 spawn 路径下，SubagentStart **与**
+/// SubagentStop hook 载荷的 `agent_id` 必须是子会话 thread id（= v2
+/// `child_agent_id` / 工具返回的 `child_thread_id`），不是 agent 名，也不是空/占位；
+/// `agent_type` 才是 agent 名，Stop 载荷另带结果摘要。
+///
+/// 夹具不直接调用闭包：经 `SubAgentTool::invoke` 走生产 spawn → 生命周期闭包
+/// → HookDispatcher → 真实 command hook，由 hook 自己把 stdin JSON 写到文件
+/// （载荷唯一通道，逐字节落盘）。
+#[derive(Clone)]
+struct LifecycleEchoModel;
+
+impl LifecycleEchoModel {
+    async fn respond(
+        &self,
+        request: peri_model::ModelRequest,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
+        let _ = (&request, &cancellation);
+        crate::subagent::test_support::text_events("lifecycle-echo")
+    }
+}
+crate::subagent::test_support::fixture_model_impl!(LifecycleEchoModel);
+
+#[cfg(unix)]
+#[tokio::test]
+async fn subagent_lifecycle_hook_payloads_carry_real_child_agent_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let agents_dir = dir.path().join(".claude").join("agents");
+    std::fs::create_dir_all(&agents_dir).unwrap();
+    std::fs::write(
+        agents_dir.join("test-agent.md"),
+        "---\nname: test-agent\ndescription: A test agent\n---\n\nYou are a test agent.\n",
+    )
+    .unwrap();
+    let host = crate::subagent::tool::tests::HostFixture::open_in(
+        dir.path(),
+        "fixture-lifecycle-agent-id",
+    )
+    .await;
+
+    let unique = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let out_start = std::env::temp_dir().join(format!("peri-lifecycle-start-{unique}.json"));
+    let out_stop = std::env::temp_dir().join(format!("peri-lifecycle-stop-{unique}.json"));
+    let _ = std::fs::remove_file(&out_start);
+    let _ = std::fs::remove_file(&out_stop);
+    let registered_hook = |event: HookEvent, out: &std::path::Path| {
+        let mut registered = subagent_hook(
+            event,
+            r#"cat > "$CLAUDE_PLUGIN_OPTION_OUT""#,
+            None,
+            None,
+            false,
+        );
+        registered
+            .plugin_options
+            .insert("out".to_string(), serde_json::json!(out.to_str().unwrap()));
+        registered
+    };
+    let registered_start = registered_hook(HookEvent::SubagentStart, &out_start);
+    let registered_stop = registered_hook(HookEvent::SubagentStop, &out_stop);
+
+    let tool = crate::subagent::tool::tests::with_agent_face(
+        super::SubAgentTool::new(
+            std::sync::Arc::new(Vec::new()),
+            None,
+            std::sync::Arc::new(|_: Option<&str>| {
+                crate::subagent::test_support::fixture_source(
+                    std::sync::Arc::new(LifecycleEchoModel),
+                    "fixture-scripted",
+                )
+            }),
+            "/tmp".to_string(),
+        ),
+        dir.path(),
+    )
+    .await;
+    let tool = host
+        .bind(tool)
+        .with_registered_hooks(vec![registered_start, registered_stop]);
+
+    let result = tool
+        .invoke(
+            serde_json::json!({
+                "subagent_type": "test-agent",
+                "cwd": host.cwd.clone(),
+                "prompt": "identity probe",
+            }),
+            host.context(&[]),
+        )
+        .await
+        .expect("spawn 应成功");
+    let child_thread_id = result
+        .split("child_thread_id: ")
+        .nth(1)
+        .and_then(|rest| rest.lines().next())
+        .expect("工具返回文本应带 child_thread_id")
+        .trim()
+        .to_string();
+    assert!(
+        uuid::Uuid::parse_str(&child_thread_id).is_ok(),
+        "child_thread_id 必须是真实 thread id: {child_thread_id}"
+    );
+
+    let read_payload = |path: &std::path::Path, event: &str| -> serde_json::Value {
+        let payload: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(path)
+                .unwrap_or_else(|error| panic!("{event} hook 未在超时内落盘 stdin JSON: {error}")),
+        )
+        .expect("hook 载荷必须是合法 JSON");
+        assert_eq!(payload["hook_event_name"], event, "载荷事件名: {payload}");
+        assert_eq!(
+            payload["agent_id"].as_str(),
+            Some(child_thread_id.as_str()),
+            "{event} 载荷 agent_id 必须是真实 child_thread_id（不得为空/占位/agent 名）: {payload}"
+        );
+        assert_eq!(
+            payload["agent_type"].as_str(),
+            Some("test-agent"),
+            "agent_type 才是 agent 名: {payload}"
+        );
+        payload
+    };
+    // `cat > file` 先建空文件再写入：只等 exists 会读到半截内容，等两侧都能解析。
+    for _ in 0..300 {
+        let parsed = |path: &std::path::Path| {
+            std::fs::read_to_string(path)
+                .ok()
+                .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        };
+        if parsed(&out_start).is_some() && parsed(&out_stop).is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let start_payload = read_payload(&out_start, "SubagentStart");
+    let stop_payload = read_payload(&out_stop, "SubagentStop");
+    assert!(
+        stop_payload["subagent_result"]
+            .as_str()
+            .is_some_and(|result| !result.is_empty()),
+        "SubagentStop 载荷必须带子执行结果摘要: {stop_payload}"
+    );
+    let _ = std::fs::remove_file(&out_start);
+    let _ = std::fs::remove_file(&out_stop);
+    let _ = start_payload;
 }
 
 /// 并发触发（两个子 agent 背靠背启动、互不等待）：once hook 必须在"预留"阶段
@@ -271,8 +445,16 @@ async fn subagent_start_once_hook_is_atomic_under_concurrent_triggers() {
 
     let (on_start_a, _) = tool.lifecycle_closures();
     let (on_start_b, _) = tool.lifecycle_closures();
-    on_start_a.expect("非空 hook 列表必须构造 SubagentStart 闭包")("explore", "/tmp");
-    on_start_b.expect("非空 hook 列表必须构造 SubagentStart 闭包")("explore", "/tmp");
+    on_start_a.expect("非空 hook 列表必须构造 SubagentStart 闭包")(
+        "fixture-child-thread",
+        "explore",
+        "/tmp",
+    );
+    on_start_b.expect("非空 hook 列表必须构造 SubagentStart 闭包")(
+        "fixture-child-thread",
+        "explore",
+        "/tmp",
+    );
 
     let log_path = format!("{}.log", marker.display());
     let fired_lines = || {

@@ -88,7 +88,11 @@ async fn once_scope_is_per_assembled_chain_not_session() {
         .expect("链上的具体 SubAgentMiddleware");
         let tool = subagent_mw.build_tool(&ctx.cwd);
         let (on_start, _) = tool.lifecycle_closures();
-        on_start.expect("非空 hook 列表必须构造 SubagentStart 闭包")("explore", &ctx.cwd);
+        on_start.expect("非空 hook 列表必须构造 SubagentStart 闭包")(
+            "fixture-child-thread",
+            "explore",
+            &ctx.cwd,
+        );
 
         // 主 hook 路径：装配点每轮同样新建 HookMiddleware 实例（assembly::hooks）。
         let hook_llm_factory: Arc<dyn Fn() -> Box<dyn ReactLLM + Send + Sync> + Send + Sync> =
@@ -173,7 +177,11 @@ async fn once_scope_is_stable_within_one_assembled_chain() {
     // 同一次装配内两次 spawn（各取一组闭包）只允许触发一次。
     for _ in 0..2 {
         let (on_start, _) = tool.lifecycle_closures();
-        on_start.expect("非空 hook 列表必须构造闭包")("explore", &ctx.cwd);
+        on_start.expect("非空 hook 列表必须构造闭包")(
+            "fixture-child-thread",
+            "explore",
+            &ctx.cwd,
+        );
     }
 
     for _ in 0..200 {

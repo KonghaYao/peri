@@ -304,7 +304,7 @@ async fn completed_child_shell_blocks_shared_close_and_reopen_rebuilds_binding()
     let captured_shell = shell.clone();
     let captured_manager = old_manager.clone();
     let shell_cwd = cwd.clone();
-    config.on_subagent_stop = Some(Arc::new(move |_, _, _, _| {
+    config.on_subagent_stop = Some(Arc::new(move |_, _, _, _, _| {
         let handle = captured_manager
             .spawn_shell("sleep 30".into(), shell_cwd.clone(), None, None)
             .unwrap();
