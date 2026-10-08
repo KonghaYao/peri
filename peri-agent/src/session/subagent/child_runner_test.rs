@@ -80,7 +80,7 @@ fn child_with_nested_task() -> (
             initial_calls: initial_calls.clone(),
             result_calls: result_calls.clone(),
         }),
-        MiddlewareChain::new(),
+        Arc::new(MiddlewareChain::new()),
         Vec::new(),
         Arc::new(|_| true),
         None,

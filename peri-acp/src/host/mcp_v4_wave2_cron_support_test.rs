@@ -313,6 +313,7 @@ impl UserInteractionBroker for ToolApprovalBroker {
 pub(super) struct ApprovalTransport {
     pub(super) approve: std::sync::atomic::AtomicBool,
     pub(super) approvals: std::sync::atomic::AtomicUsize,
+    response_gate: parking_lot::Mutex<Option<Arc<tokio::sync::Notify>>>,
     pub(super) requests: parking_lot::Mutex<Vec<serde_json::Value>>,
     pub(super) notifications: parking_lot::Mutex<Vec<String>>,
 }
@@ -322,6 +323,7 @@ impl ApprovalTransport {
         Self {
             approve: std::sync::atomic::AtomicBool::new(approve),
             approvals: std::sync::atomic::AtomicUsize::new(0),
+            response_gate: parking_lot::Mutex::new(None),
             requests: parking_lot::Mutex::new(Vec::new()),
             notifications: parking_lot::Mutex::new(Vec::new()),
         }
@@ -334,6 +336,12 @@ impl ApprovalTransport {
 
     pub(super) fn approvals(&self) -> usize {
         self.approvals.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub(super) fn hold_next_response(&self) -> Arc<tokio::sync::Notify> {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        *self.response_gate.lock() = Some(gate.clone());
+        gate
     }
 
     pub(super) fn requests(&self) -> Vec<serde_json::Value> {
@@ -356,9 +364,13 @@ impl AcpTransport for ApprovalTransport {
             method, "session/request_permission",
             "本替身只应答审批请求（其它服务端请求属于断言面之外的意外）"
         );
+        let response_gate = self.response_gate.lock().take();
         self.approvals
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.requests.lock().push(params);
+        if let Some(gate) = response_gate {
+            gate.notified().await;
+        }
         let option = if self.approve.load(std::sync::atomic::Ordering::SeqCst) {
             "allow_once"
         } else {

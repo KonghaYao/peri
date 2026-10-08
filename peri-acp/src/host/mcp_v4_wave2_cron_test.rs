@@ -8,6 +8,8 @@ use super::*;
 const W2_SPARSE_CRON: &str = "*/5 * * * *";
 
 /// Actual MCP registration/tick requires approval before the current runtime consumes a trigger.
+/// Scheduled approval holds the prompt lock throughout its cancellable execution window
+/// (2026-10-08 async execution contract), before enqueueing and model dispatch.
 #[cfg(not(windows))]
 #[tokio::test]
 #[serial]
@@ -30,6 +32,36 @@ async fn cron_register_tick_approval_continuation() {
     let cfg = Arc::new(cfg);
     // 调度触发审批只在非 Bypass 模式下发生（Bypass 在 `approve_scheduled_trigger` 早退）。
     cfg.permission_mode.store(PermissionMode::Default);
+
+    let (cron_cont_tx, cron_cont_rx) = tokio::sync::mpsc::unbounded_channel();
+    cfg.session_manager.bind_cron_continuation(cron_cont_tx);
+    let transport = Arc::new(ApprovalTransport::new(false));
+    let dyn_transport: Arc<dyn AcpTransport> = Arc::clone(&transport) as Arc<dyn AcpTransport>;
+    let mut sessions = HashMap::new();
+    let created = crate::host::requests::handle_request(
+        "session/new",
+        &json!({ "cwd": dirs.workspace_str() }),
+        &cfg,
+        &mut sessions,
+        &dyn_transport,
+    )
+    .await
+    .expect("session/new 必须成功");
+    let session_id = created["sessionId"]
+        .as_str()
+        .expect("sessionId")
+        .to_string();
+    register_ctx.session_id = session_id.clone();
+    assert!(
+        cfg.session_manager
+            .get_session(&session_id)
+            .is_some_and(|session| session.cron_bridge.is_some()),
+        "session 发布边界必须启动 cron bridge"
+    );
+    let queue = cfg
+        .session_manager
+        .v2_queue_for(&session_id)
+        .expect("session 必须有 v2 队列");
 
     // ── ① effective name 注册（真实 turn + 工具级审批）────────────────────────
     let register_broker = Arc::new(ToolApprovalBroker::new(true));
@@ -101,7 +133,7 @@ async fn cron_register_tick_approval_continuation() {
     assert_eq!(
         tasks.len(),
         1,
-        "注册后组合根 scheduler 必须恰有一条任务（工具面与宿主端口同源）: {tasks:?}"
+        "注册后共享 host scheduler 必须恰有一条任务（工具面与 session bridge 同源）: {tasks:?}"
     );
     assert_eq!(tasks[0].1, W2_SPARSE_CRON, "注册的表达式必须逐字保留");
     assert_eq!(tasks[0].2, CRON_PROMPT, "注册的 prompt 必须逐字保留");
@@ -111,39 +143,9 @@ async fn cron_register_tick_approval_continuation() {
         "工具结果必须回带该 task_id（模型可见面与组合根状态互相印证）: {registered:?}"
     );
     println!(
-        "[W2 cron-e2e] register_approval=1 name={register_name} input={:?} → tick_enabled=true 的一代 mounted；组合根任务 task_id={task_id}",
+        "[W2 cron-e2e] register_approval=1 name={register_name} input={:?} → tick_enabled=true 的一代 mounted；共享 host 任务 task_id={task_id}",
         register_seen[0].1
     );
-
-    // ── ② 生产 session 装配（session/new ⇒ bridge 订阅 + v2 队列）─────────────
-    let (cron_cont_tx, cron_cont_rx) = tokio::sync::mpsc::unbounded_channel();
-    cfg.session_manager.bind_cron_continuation(cron_cont_tx);
-    let transport = Arc::new(ApprovalTransport::new(false));
-    let dyn_transport: Arc<dyn AcpTransport> = Arc::clone(&transport) as Arc<dyn AcpTransport>;
-    let mut sessions = HashMap::new();
-    let created = crate::host::requests::handle_request(
-        "session/new",
-        &json!({ "cwd": dirs.workspace_str() }),
-        &cfg,
-        &mut sessions,
-        &dyn_transport,
-    )
-    .await
-    .expect("session/new 必须成功");
-    let session_id = created["sessionId"]
-        .as_str()
-        .expect("sessionId")
-        .to_string();
-    assert!(
-        cfg.session_manager
-            .get_session(&session_id)
-            .is_some_and(|session| session.cron_bridge.is_some()),
-        "session 发布边界必须启动 cron bridge（A3 路线 B：对 scheduler `subscribe()` 一次）"
-    );
-    let queue = cfg
-        .session_manager
-        .v2_queue_for(&session_id)
-        .expect("session 必须有 v2 队列");
 
     // 会话级脚本化模型：生产 turn 从会话池的 `subagent_llm_cache` 取主模型（零网络）。
     let turn_model = Arc::new(TurnRecordingModel::new());
@@ -155,7 +157,6 @@ async fn cron_register_tick_approval_continuation() {
         .subagent_llm_cache
         .insert(model_fingerprint, Arc::clone(&turn_model) as Arc<dyn Model>);
 
-    // prompt lock 闸门：测试先持锁 ⇒ 入队事实可见，而 dispatch 阻塞在锁上。
     let gate = Arc::new(tokio::sync::Mutex::new(()));
     let gate_guard = gate.lock().await;
     let shared: SharedSessions = Arc::new(tokio::sync::Mutex::new(sessions));
@@ -188,7 +189,18 @@ async fn cron_register_tick_approval_continuation() {
         "continuation scheduler 必须被 task owner 接受"
     );
 
+    let mut triggers = scheduler.lock().subscribe();
     assert!(scheduler.lock().force_next_fire_to_past(&task_id));
+    let trigger = tokio::time::timeout(std::time::Duration::from_secs(15), triggers.recv())
+        .await
+        .expect("真实 tick 必须触发会话任务")
+        .expect("scheduler 必须仍在运行");
+    assert_eq!(trigger.task_id, task_id);
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert_eq!(transport.approvals(), 0);
+    assert!(queue.is_empty());
+    assert_eq!(turn_model.calls(), 0);
+    drop(gate_guard);
     assert!(
         wait_until(
             "rejected scheduled approval",
@@ -199,18 +211,55 @@ async fn cron_register_tick_approval_continuation() {
     );
     assert!(queue.is_empty());
     assert_eq!(turn_model.calls(), 0);
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            let state = shared.lock().await;
+            if !state[&session_id].continuation_in_flight {
+                assert!(state[&session_id].cancel_token.is_none());
+                break;
+            }
+            drop(state);
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("拒绝审批必须清理当前执行窗口");
     transport.set_approve(true);
+    let response_gate = transport.hold_next_response();
+    let gate_guard = gate.lock().await;
     assert!(scheduler.lock().force_next_fire_to_past(&task_id));
+    let trigger = tokio::time::timeout(std::time::Duration::from_secs(15), triggers.recv())
+        .await
+        .expect("第二次真实 tick 必须触发")
+        .expect("scheduler 必须仍在运行");
+    assert_eq!(trigger.task_id, task_id);
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert_eq!(transport.approvals(), 1);
+    assert!(queue.is_empty());
+    assert_eq!(turn_model.calls(), 0);
+    drop(gate_guard);
     assert!(
         wait_until(
-            "approved trigger queued before prompt lock",
+            "approved scheduled permission awaiting response",
+            std::time::Duration::from_secs(15),
+            || transport.approvals() == 2
+        )
+        .await
+    );
+    let mut next_lock = Box::pin(gate.lock());
+    assert!(futures::poll!(next_lock.as_mut()).is_pending());
+    response_gate.notify_one();
+    let gate_guard = tokio::time::timeout(std::time::Duration::from_secs(15), next_lock)
+        .await
+        .expect("审批结束必须释放 prompt lock");
+    assert!(
+        wait_until(
+            "approved trigger queued before model dispatch",
             std::time::Duration::from_secs(15),
             || queue.has_pending_defer(&MessageSource::CronTrigger)
         )
         .await
     );
-    assert_eq!(transport.approvals(), 2);
-    assert_eq!(transport.requests().len(), 2);
     assert_eq!(turn_model.calls(), 0);
     drop(gate_guard);
     assert!(
@@ -221,6 +270,8 @@ async fn cron_register_tick_approval_continuation() {
         )
         .await
     );
+    assert_eq!(transport.approvals(), 2);
+    assert_eq!(transport.requests().len(), 2);
     assert!(turn_model
         .requests()
         .iter()

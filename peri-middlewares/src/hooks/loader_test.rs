@@ -305,6 +305,12 @@ fn test_load_local_hooks_known_events() {
 
 // ===== load_settings_project_hooks 测试 =====
 
+fn load_project_hooks(cwd: &str) -> Vec<RegisteredHook> {
+    let home = tempdir().unwrap();
+    write_hooks_settings(home.path());
+    load_settings_project_hooks_under(cwd, Some(home.path()))
+}
+
 #[test]
 fn test_load_settings_project_hooks_basic() {
     let dir = tempdir().unwrap();
@@ -335,7 +341,7 @@ fn test_load_settings_project_hooks_basic() {
     )
     .unwrap();
 
-    let hooks = load_settings_project_hooks(dir.path().to_str().unwrap());
+    let hooks = load_project_hooks(dir.path().to_str().unwrap());
     assert_eq!(hooks.len(), 2);
 
     // 验证插件来源标识
@@ -359,7 +365,7 @@ fn test_load_settings_project_hooks_basic() {
 
 #[test]
 fn test_load_settings_project_hooks_no_file() {
-    let hooks = load_settings_project_hooks("/nonexistent/path");
+    let hooks = load_project_hooks("/nonexistent/path");
     assert!(hooks.is_empty());
 }
 
@@ -370,7 +376,7 @@ fn test_load_settings_project_hooks_no_hooks_field() {
     std::fs::create_dir_all(&claude_dir).unwrap();
     std::fs::write(claude_dir.join("settings.json"), "{}").unwrap();
 
-    let hooks = load_settings_project_hooks(dir.path().to_str().unwrap());
+    let hooks = load_project_hooks(dir.path().to_str().unwrap());
     assert!(hooks.is_empty());
 }
 
@@ -381,7 +387,7 @@ fn test_settings_hooks_read_failure_returns_empty() {
     std::fs::create_dir_all(claude_dir.join("settings.json")).unwrap();
     std::fs::create_dir_all(claude_dir.join("settings.local.json")).unwrap();
 
-    assert!(load_settings_project_hooks(dir.path().to_str().unwrap()).is_empty());
+    assert!(load_project_hooks(dir.path().to_str().unwrap()).is_empty());
     assert!(load_settings_local_hooks(dir.path().to_str().unwrap()).is_empty());
 }
 
@@ -409,7 +415,7 @@ fn test_load_settings_project_hooks_with_matcher() {
     )
     .unwrap();
 
-    let hooks = load_settings_project_hooks(dir.path().to_str().unwrap());
+    let hooks = load_project_hooks(dir.path().to_str().unwrap());
     assert_eq!(hooks.len(), 1);
     assert_eq!(hooks[0].matcher.as_deref(), Some(".env|.env.local"));
 }
@@ -489,11 +495,13 @@ fn test_project_hooks_skipped_when_cwd_is_home() {
 
     let _guard = HomeGuard::set(&home);
 
+    assert_eq!(peri_config::io::home_dir().as_deref(), Some(home.as_path()));
     // 同一文件：项目级为空，用户级仍加载（hooks 只保留一份）
     assert!(
         load_settings_project_hooks(home.to_str().unwrap()).is_empty(),
         "用户主目录下不得把用户级 hooks 再注册为项目级"
     );
+    assert_eq!(load_project_hooks(home.to_str().unwrap()).len(), 1);
     let global_hooks = load_global_settings_hooks();
     assert_eq!(global_hooks.len(), 1, "用户级 hooks 应照常加载");
     assert_eq!(global_hooks[0].plugin_name, "settings.json");
@@ -519,10 +527,8 @@ fn test_project_hooks_skipped_when_home_reached_via_symlink() {
     let link = tmp.path().join("home-link");
     std::os::unix::fs::symlink(&home, &link).unwrap();
 
-    let _guard = HomeGuard::set(&home);
-
     assert!(
-        load_settings_project_hooks(link.to_str().unwrap()).is_empty(),
+        load_settings_project_hooks_under(link.to_str().unwrap(), Some(&home)).is_empty(),
         "符号链接指向用户级文件时不得重复注册"
     );
 }
@@ -579,8 +585,7 @@ fn test_project_settings_file_alias_is_user_source() {
         project.join(".claude/settings.json"),
     )
     .unwrap();
-    let _guard = HomeGuard::set(&home);
-    assert!(load_settings_project_hooks(project.to_str().unwrap()).is_empty());
+    assert!(load_settings_project_hooks_under(project.to_str().unwrap(), Some(&home)).is_empty());
 }
 
 #[cfg(unix)]
@@ -610,13 +615,24 @@ fn test_project_hooks_skipped_when_user_source_identity_fails() {
     std::os::unix::fs::symlink(&user_path, &user_path).unwrap();
     let project_dir = tmp.path().join("project");
     write_hooks_settings(&project_dir);
-    let _guard = HomeGuard::set(&home);
-
     assert!(is_user_settings_path_under(
         &project_dir.join(".claude/settings.json"),
         &home,
     ));
-    assert!(load_settings_project_hooks(project_dir.to_str().unwrap()).is_empty());
+    assert!(
+        load_settings_project_hooks_under(project_dir.to_str().unwrap(), Some(&home)).is_empty()
+    );
+}
+
+#[test]
+fn test_project_hooks_without_home_load_project_source() {
+    let project = tempdir().unwrap();
+    write_hooks_settings(project.path());
+
+    assert_eq!(
+        load_settings_project_hooks_under(project.path().to_str().unwrap(), None).len(),
+        1
+    );
 }
 
 // ===== 宽松解析测试 (P0-2) =====
@@ -653,7 +669,7 @@ fn test_tolerant_mixed_valid_and_invalid_events() {
     )
     .unwrap();
 
-    let hooks = load_settings_project_hooks(dir.path().to_str().unwrap());
+    let hooks = load_project_hooks(dir.path().to_str().unwrap());
     // 只有 PreToolUse 有效
     assert_eq!(hooks.len(), 1);
     assert!(matches!(&hooks[0].event, HookEvent::PreToolUse));
@@ -690,7 +706,7 @@ fn test_tolerant_unknown_event_skipped() {
     )
     .unwrap();
 
-    let hooks = load_settings_project_hooks(dir.path().to_str().unwrap());
+    let hooks = load_project_hooks(dir.path().to_str().unwrap());
     assert!(hooks.is_empty(), "unknown events should be skipped");
 }
 
@@ -719,7 +735,7 @@ fn test_tolerant_non_array_rules_skipped() {
     )
     .unwrap();
 
-    let hooks = load_settings_project_hooks(dir.path().to_str().unwrap());
+    let hooks = load_project_hooks(dir.path().to_str().unwrap());
     // 只有 Notification 有效
     assert_eq!(hooks.len(), 1);
     assert!(matches!(&hooks[0].event, HookEvent::Notification));
@@ -745,7 +761,7 @@ fn test_tolerant_all_invalid_returns_empty() {
     )
     .unwrap();
 
-    let hooks = load_settings_project_hooks(dir.path().to_str().unwrap());
+    let hooks = load_project_hooks(dir.path().to_str().unwrap());
     assert!(hooks.is_empty());
 }
 
@@ -765,6 +781,6 @@ fn test_tolerant_hooks_not_object_returns_empty() {
     )
     .unwrap();
 
-    let hooks = load_settings_project_hooks(dir.path().to_str().unwrap());
+    let hooks = load_project_hooks(dir.path().to_str().unwrap());
     assert!(hooks.is_empty());
 }

@@ -296,16 +296,10 @@ async fn test_resume_thread_id_active_rejected() {
     );
 }
 
-/// parent 链归属：child 的 `parent_thread_id` 指向**另一个真实根会话**时，即使持有
-/// child_thread_id 且绑定同一工作区，恢复仍被拒绝
-/// （`bound subagent belongs to another root session`）。
+/// [回归测试] 同工作区绑定不能越过执行根归属；拒绝不得启动 child 或修改历史。
 ///
-/// 本用例的前身断言「parent 链不匹配不再拒绝」，那是在存储替身下成立的行为：
-/// 替身不校验父链，也允许 `parent_thread_id` 指向不存在的 thread。换成真门面后
-/// 两个方向都必须给出一致结论——指向不存在的父会让祖先链读不出快照
-/// （`load_inherited_context_on` 对链上成员 `fetch_one`），指向另一个真实根则被
-/// 归属校验拒绝。要保护的契约是后者：child_thread_id 不是执行权凭证
-/// （见母 issue §4.1「不得仅持有 child_thread_id 推断新执行权」）。
+/// 历史背景：旧断言绑定整句错误文案，未区分执行根归属与 SDK 的执行唯一性。
+/// 显式 resume 只加载历史并开始新 run，不恢复旧执行，也不因持有 child ID 获权。
 #[tokio::test]
 async fn test_resume_thread_id_parent_mismatch_is_rejected_by_root_ownership() {
     let dir = tempdir().unwrap();
@@ -337,11 +331,23 @@ async fn test_resume_thread_id_parent_mismatch_is_rejected_by_root_ownership() {
         peri_agent::session::FrozenContext::builder().build(),
         Some(parent_id.clone()),
     );
-    let t = with_agent_face(make_subagent_tool(vec![]), dir.path())
-        .await
-        .with_session_resources(store.facade())
-        .with_parent_thread_id(parent_id.clone())
-        .with_parent_session(parent);
+    install_parent_host(&store, &parent);
+    let history_before = store.resources.load_session_history(&id).await.unwrap();
+    let model = mock_model::RecordingModel::new("must not run across roots");
+    let child_model = Arc::clone(&model);
+    let t = with_agent_face(
+        SubAgentTool::new(
+            Arc::new(vec![]),
+            None,
+            Arc::new(move |_| SubagentLlmSource::model(child_model.clone(), "root-ownership")),
+            cwd.clone(),
+        ),
+        dir.path(),
+    )
+    .await
+    .with_session_resources(store.facade())
+    .with_parent_thread_id(parent_id.clone())
+    .with_parent_session(parent);
     let error = t
         .invoke(
             serde_json::json!({
@@ -352,10 +358,27 @@ async fn test_resume_thread_id_parent_mismatch_is_rejected_by_root_ownership() {
         )
         .await
         .expect_err("跨根恢复必须被拒绝");
+    assert!(
+        error
+            .to_string()
+            .contains("belongs to another root session"),
+        "拒绝原因应为执行根归属，而不是「不存在」或「仍处于运行态」: {error}"
+    );
+    assert_eq!(model.call_count(), 0, "跨根拒绝不得启动新的 child run");
     assert_eq!(
-        error.to_string(),
-        "bound subagent belongs to another root session",
-        "拒绝原因应为执行根归属，而不是「不存在」或「仍处于运行态」"
+        store
+            .resources
+            .load_session_history(&id)
+            .await
+            .unwrap()
+            .iter()
+            .map(|payload| peri_acp_types::store::serialize_persisted_payload(payload).unwrap())
+            .collect::<Vec<_>>(),
+        history_before
+            .iter()
+            .map(|payload| peri_acp_types::store::serialize_persisted_payload(payload).unwrap())
+            .collect::<Vec<_>>(),
+        "跨根拒绝不得写入 continue 或重放历史工具调用"
     );
     // 拒绝发生在任何写入之前：thread 保持原收尾状态，不留 active 残留。
     let meta = store.load_meta(&id).await.unwrap();
@@ -366,8 +389,9 @@ async fn test_resume_thread_id_parent_mismatch_is_rejected_by_root_ownership() {
     );
 }
 
-/// 组合：resume + run_in_background → bg 启动确认文本（task_id + thread_id）+
-/// 完成通知 BackgroundTaskResult 携带 child_thread_id（issue 决策 8 + 验收）
+/// [回归测试] 后台 resume 的新任务必须在直接父 host 结算并投递完成结果。
+///
+/// 历史背景：给工具 fallback 配置通道不会覆盖已经装配的父 host。
 #[tokio::test]
 async fn test_resume_thread_id_background_combination() {
     use peri_agent::agent::events::ExecutorEvent;
@@ -386,18 +410,25 @@ async fn test_resume_thread_id_background_combination() {
         peri_agent::session::FrozenContext::builder().build(),
         Some(parent_id.clone()),
     );
-    install_parent_host(&store, &parent);
     let id = uuid::Uuid::now_v7().to_string();
     preset_resumable_thread(&store, &id, "fork", Some(parent_id.as_str()), Vec::new()).await;
 
     let registry = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
     let (bg_tx, mut bg_rx) = mpsc::unbounded_channel::<ExecutorEvent>();
+    parent.set_subagent_host(peri_agent::session::subagent::SubagentHost {
+        session_resources: Some(store.facade()),
+        parent_thread_id: Some(parent_id.clone()),
+        task_manager: Some(Arc::clone(&registry)),
+        bg_event_sender: Some(bg_tx),
+        on_bg_complete: Some(peri_agent::session::bg_complete::task_bg_complete_callback(
+            peri_agent::session::bg_complete::queue_terminal_delivery(parent.queue().clone()),
+        )),
+        ..Default::default()
+    });
     let t = make_subagent_tool(vec![])
         .with_session_resources(store.facade())
         .with_parent_thread_id(parent_id.clone())
-        .with_parent_session(parent.clone())
-        .with_task_manager(Arc::clone(&registry))
-        .with_bg_event_sender(bg_tx);
+        .with_parent_session(parent.clone());
 
     let result = t
         .invoke(
@@ -438,10 +469,36 @@ async fn test_resume_thread_id_background_combination() {
     .await
     .expect("bg resume 应在超时内完成");
     assert!(completed.success);
+    assert!(result.contains(&completed.task_id));
+    assert!(completed
+        .output
+        .contains("Continue your previous task where you left off."));
     assert_eq!(
         completed.child_thread_id.as_deref(),
         Some(id.as_str()),
         "BackgroundTaskResult 必须携带 child_thread_id"
+    );
+    assert_eq!(registry.active_count(), 0, "父任务目录必须已结算新任务");
+    let delivered = parent.queue().drain_all();
+    assert_eq!(delivered.len(), 1, "完成结果必须投递给直接发起的父会话");
+    assert_eq!(
+        delivered[0].source,
+        peri_agent::session::MessageSource::SubAgentComplete
+    );
+    assert!(delivered[0].delivery_id.is_some());
+    let peri_agent::session::QueuedPayload::SystemReminder(reminder) = &delivered[0].payload else {
+        panic!("terminal delivery must be a trusted system reminder");
+    };
+    assert_eq!(
+        reminder.as_reminder().metadata["task_id"],
+        completed.task_id
+    );
+    assert_eq!(reminder.as_reminder().metadata["child_thread_id"], id);
+    assert_eq!(reminder.as_reminder().metadata["success"], true);
+    assert!(reminder.as_reminder().body.contains(&completed.output));
+    assert_eq!(
+        store.load_meta(&id).await.unwrap().agent_status,
+        AgentStatus::Done
     );
 }
 
@@ -498,9 +555,10 @@ async fn test_resume_thread_id_success_replays_and_completes() {
     assert!(result.contains("echo"), "完成文本应含执行结果: {}", result);
 }
 
-/// fork resume：title == "fork" → 父工具集 clone（无过滤，含 Agent）+
-/// 200 迭代上限（与 execute_fork.rs:48 一致）——循环 LLM 恰好耗尽 200 次
-/// 后返回 MaxIterationsExceeded 错误（错误文本带 child_thread_id 前缀，可恢复）
+/// [回归测试] fork resume 继承父工具，并因耗尽新 run 的语义预算而失败。
+///
+/// 历史背景：旧夹具固定调用 ID 并持续请求不存在工具，基线提前报执行错误而非耗尽预算。
+/// 每轮改为有效工具及唯一调用身份，并核对 typed 失败原因，避免只按模型调用数猜测预算。
 #[tokio::test]
 async fn test_resume_thread_id_fork_title_uses_parent_tools_and_200_iterations() {
     let dir = tempdir().unwrap();
@@ -527,7 +585,7 @@ async fn test_resume_thread_id_fork_title_uses_parent_tools_and_200_iterations()
     )
     .await;
 
-    // 计数 + 工具捕获 LLM：恒请求调用不存在工具 → 循环持续到迭代上限
+    // 计数 + 工具捕获 LLM：每轮调用继承的工具 → 循环持续到迭代上限
     let llm_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let tools_capture: Arc<std::sync::Mutex<Vec<String>>> =
         Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -550,11 +608,11 @@ async fn test_resume_thread_id_fork_title_uses_parent_tools_and_200_iterations()
             let defined = defined_tools(&request);
             let tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
 
-            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let call_index = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             *self.captured.lock().unwrap() = tools.iter().map(|t| t.name().to_string()).collect();
             tool_events_from_react(vec![peri_agent::agent::react::ToolCall::new(
-                "id1",
-                "nonexistent",
+                format!("fork-resume-{call_index}"),
+                "Read",
                 serde_json::json!({}),
             )])
         }
@@ -589,7 +647,15 @@ async fn test_resume_thread_id_fork_title_uses_parent_tools_and_200_iterations()
         )
         .await;
     // 迭代上限耗尽 → MaxIterationsExceeded 错误（fork resume 上限 = 200）
-    let err = result.unwrap_err().to_string();
+    let error = result.unwrap_err();
+    let failure = error
+        .downcast_ref::<peri_agent::session::subagent::SubagentFailure>()
+        .expect("fork resume must fail at the execution budget, not preflight or tool dispatch");
+    assert_eq!(failure.child_thread_id(), id);
+    let peri_agent::error::AgentError::MaxIterationsExceeded(budget) = failure.error() else {
+        panic!("expected iteration budget exhaustion, got: {failure:?}");
+    };
+    let err = error.to_string();
     assert!(
         err.contains("child_thread_id") && err.contains("execution failed"),
         "错误文本应带 child_thread_id 前缀（可恢复）: {}",
@@ -597,9 +663,10 @@ async fn test_resume_thread_id_fork_title_uses_parent_tools_and_200_iterations()
     );
     assert_eq!(
         llm_calls.load(std::sync::atomic::Ordering::SeqCst),
-        200,
-        "fork resume 迭代上限应为 200（与 execute_fork.rs 一致）"
+        *budget,
+        "fork resume 必须耗尽配置预算，不能因无效工具调用提前退出"
     );
+    assert_eq!(*budget, 200, "fork resume 的当前默认预算必须与 fork 一致");
     let captured = tools_capture.lock().unwrap();
     assert!(
         captured.contains(&"Agent".to_string()),

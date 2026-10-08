@@ -86,6 +86,9 @@ impl ReactLLM for MissingThreadParent {
     }
 }
 
+/// [回归测试] 不存在的 child 是工具失败，父 Agent 仍完成且失败结果真实落库。
+///
+/// 历史背景：直接运行 RCRA 不包含宿主的 post-run flush；读取历史须等待 writer barrier。
 #[tokio::test]
 async fn parent_completes_after_real_agent_resume_missing_thread() {
     let directory = tempdir().unwrap();
@@ -138,6 +141,10 @@ async fn parent_completes_after_real_agent_resume_missing_thread() {
         "parent loop result: {result:?}"
     );
     assert_eq!(model.requests.lock().unwrap().len(), 2);
+    let persistence = parent.transcript().read().persist_tx_handle().unwrap();
+    MessageTranscript::flush_via_tx(&persistence)
+        .await
+        .expect("parent transcript must be persisted before reading history");
     let history = fixture
         .resources
         .load_session_history(&parent_id)
@@ -152,5 +159,14 @@ async fn parent_completes_after_real_agent_resume_missing_thread() {
         .collect();
     let history_json = serde_json::to_string(&history_messages).unwrap();
     assert!(history_json.contains("thread not found"));
+    let persisted_tools: Vec<_> = history_messages
+        .iter()
+        .map(|message| serde_json::to_value(message).unwrap())
+        .filter(|message| message["role"] == "tool")
+        .collect();
+    assert_eq!(persisted_tools.len(), 1);
+    assert_eq!(persisted_tools[0]["tool_call_id"], "missing-thread-resume");
+    assert_eq!(persisted_tools[0]["is_error"], true);
+    assert!(persisted_tools[0].to_string().contains(MISSING_THREAD));
     assert!(history_json.contains("parent continues after missing child"));
 }

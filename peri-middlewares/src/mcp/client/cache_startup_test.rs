@@ -4,7 +4,7 @@ use std::sync::{
 };
 
 use rmcp::{
-    model::{ListToolsResult, PaginatedRequestParams, ServerPeerInfo, Tool},
+    model::{InitializeResult, ListToolsResult, PaginatedRequestParams, Tool},
     service::{RequestContext, RoleServer},
     ServerHandler,
 };
@@ -19,8 +19,8 @@ struct StartupProvider {
 }
 
 impl ServerHandler for StartupProvider {
-    fn get_info(&self) -> ServerPeerInfo {
-        let mut info = ServerPeerInfo::from(rmcp::model::InitializeResult::default());
+    fn get_info(&self) -> InitializeResult {
+        let mut info = InitializeResult::default();
         info.capabilities.extensions = Some(
             serde_json::from_value(serde_json::json!({
                 "io.mcpp/server-cache-version": {"cacheVersion": "startup-v1"}
