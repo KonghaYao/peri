@@ -806,3 +806,7 @@ mod tests;
 #[cfg(test)]
 #[path = "post_tool_batch_test.rs"]
 mod post_tool_batch_tests;
+
+#[cfg(test)]
+#[path = "async_diagnostic_test.rs"]
+mod async_diagnostic_tests;

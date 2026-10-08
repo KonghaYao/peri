@@ -468,6 +468,121 @@ pub async fn fire_standalone_lifecycle_hooks_owned(
     }
 }
 
+/// 异步 hook 输出的字段摘要（**非决策**：不生效、不投递、不追溯授权）。
+///
+/// 只保留字段名与长度，不携带 hook 正文。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct AsyncHookOutputSummary {
+    /// 决策类输出（异步路径不会应用）：block / prevent_continuation / modify_input /
+    /// permission_override。
+    pub decision: Option<&'static str>,
+    /// 需要投递但异步路径没有定义的字段名（systemMessage / additionalContext /
+    /// initialUserMessage）。
+    pub undelivered: Vec<&'static str>,
+    /// 未投递字段的字节数合计（诊断用，不含正文）。
+    pub undelivered_bytes: usize,
+}
+
+/// 分类异步 hook 的归并结果：完成（无输出）/ 决策被忽略 / 未定义投递。
+pub(crate) fn async_hook_output_summary(action: &HookAction) -> AsyncHookOutputSummary {
+    let mut summary = AsyncHookOutputSummary::default();
+    match action {
+        HookAction::Allow => {}
+        HookAction::Block { .. } => summary.decision = Some("block"),
+        HookAction::PreventContinuation { .. } => {
+            summary.decision = Some("prevent_continuation");
+        }
+        HookAction::ModifyInput { .. } => summary.decision = Some("modify_input"),
+        HookAction::PermissionOverride {
+            additional_context,
+            system_message,
+            ..
+        } => {
+            summary.decision = Some("permission_override");
+            if let Some(context) = additional_context {
+                summary.undelivered.push("additionalContext");
+                summary.undelivered_bytes += context.len();
+            }
+            if let Some(message) = system_message {
+                summary.undelivered.push("systemMessage");
+                summary.undelivered_bytes += message.len();
+            }
+        }
+        HookAction::SystemMessage { message } => {
+            summary.undelivered.push("systemMessage");
+            summary.undelivered_bytes += message.len();
+        }
+        HookAction::AdditionalContext { context } => {
+            summary.undelivered.push("additionalContext");
+            summary.undelivered_bytes += context.len();
+        }
+        HookAction::InitialUserMessage { message } => {
+            summary.undelivered.push("initialUserMessage");
+            summary.undelivered_bytes += message.len();
+        }
+    }
+    summary
+}
+
+fn async_hook_kind(hook: &HookType) -> &'static str {
+    match hook {
+        HookType::Command { .. } => "command",
+        HookType::Prompt { .. } => "prompt",
+        HookType::Http { .. } => "http",
+        HookType::Agent { .. } => "agent",
+    }
+}
+
+/// 记录异步 hook 终态：完成走 debug，决策忽略 / 未定义投递 / 取消走 warn。
+///
+/// 诊断只含字段名与长度，不含 hook 正文。
+fn record_async_hook_outcome(
+    event: &HookEvent,
+    plugin: &str,
+    hook_kind: &'static str,
+    outcome: Result<HookAction, ()>,
+) {
+    let action = match outcome {
+        Ok(action) => action,
+        Err(()) => {
+            tracing::warn!(
+                event = ?event,
+                plugin,
+                hook_kind,
+                outcome = "cancelled",
+                "Async hook cancelled by session scope; result is not applied (non-decision hook)"
+            );
+            return;
+        }
+    };
+    let summary = async_hook_output_summary(&action);
+    if summary.decision.is_none() && summary.undelivered.is_empty() {
+        tracing::debug!(
+            event = ?event,
+            plugin,
+            hook_kind,
+            outcome = "completed",
+            "Async hook completed without output"
+        );
+        return;
+    }
+    let outcome = if summary.decision.is_some() {
+        "decision_ignored"
+    } else {
+        "undelivered_output"
+    };
+    tracing::warn!(
+        event = ?event,
+        plugin,
+        hook_kind,
+        outcome,
+        decision = summary.decision,
+        undelivered_fields = ?summary.undelivered,
+        undelivered_bytes = summary.undelivered_bytes,
+        "Async hook output is not applied on the async path (non-decision hook; no delivery defined)"
+    );
+}
+
 /// Async completion stays in the session scope while its command owner drains
 /// the process tree independently of the ignored HookAction result.
 fn spawn_async_hook(
@@ -479,6 +594,9 @@ fn spawn_async_hook(
     let cancellation = manager
         .as_ref()
         .and_then(|manager| manager.execution_cancel_token());
+    let event = input.hook_event_name.clone();
+    let plugin = registered.plugin_name.clone();
+    let hook_kind = async_hook_kind(&registered.hook);
     let task = async move {
         let execute = async {
             match &registered.hook {
@@ -495,15 +613,16 @@ fn spawn_async_hook(
                 _ => HookAction::Allow,
             }
         };
-        if let Some(token) = cancellation {
+        let outcome = if let Some(token) = cancellation {
             tokio::select! {
                 biased;
-                _ = token.cancelled() => {}
-                _ = execute => {}
+                _ = token.cancelled() => Err(()),
+                action = execute => Ok(action),
             }
         } else {
-            let _ = execute.await;
-        }
+            Ok(execute.await)
+        };
+        record_async_hook_outcome(&event, &plugin, hook_kind, outcome);
     };
     match task_manager {
         Some(manager) => {
