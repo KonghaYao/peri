@@ -2,7 +2,7 @@
 //!
 //! 由 `loader.rs` 迁出（STD-SIZE-001）；`plugin/mod.rs` 保留 re-export。
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::Path;
 
 use super::loader::{load_enabled_plugins_aggregated_readonly, load_enabled_plugins_for_mcp};
