@@ -389,18 +389,17 @@ async fn test_resume_thread_id_background_combination() {
         peri_agent::session::FrozenContext::builder().build(),
         Some(parent_id.clone()),
     );
-    install_parent_host(&store, &parent);
+    let registry = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
+    let (bg_tx, mut bg_rx) = mpsc::unbounded_channel::<ExecutorEvent>();
+    // 后台通道装在 owning parent session 的宿主上（工具字段会被父 host 遮蔽）。
+    install_parent_host_with_channels(&store, &parent, Arc::clone(&registry), bg_tx);
     let id = uuid::Uuid::now_v7().to_string();
     preset_resumable_thread(&store, &id, "fork", Some(parent_id.as_str()), Vec::new()).await;
 
-    let registry = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
-    let (bg_tx, mut bg_rx) = mpsc::unbounded_channel::<ExecutorEvent>();
     let t = make_subagent_tool(vec![])
         .with_session_resources(store.facade())
         .with_parent_thread_id(parent_id.clone())
-        .with_parent_session(parent.clone())
-        .with_task_manager(Arc::clone(&registry))
-        .with_bg_event_sender(bg_tx);
+        .with_parent_session(parent.clone());
 
     let result = t
         .invoke(
@@ -558,9 +557,12 @@ async fn test_resume_thread_id_fork_title_uses_parent_tools_and_200_iterations()
 
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             *self.captured.lock().unwrap() = tools.iter().map(|t| t.name().to_string()).collect();
+            // durable Reason 会先提交工具调用意图并要求工具真实存在（不存在的
+            // 名称在 Reason 阶段即 Err，不会进入迭代）。这里调用真实存在但不可
+            // 执行的夹具工具：错误结果按数据回流，循环持续到迭代上限。
             tool_events_from_react(vec![peri_agent::agent::react::ToolCall::new(
                 "id1",
-                "nonexistent",
+                "Read",
                 serde_json::json!({}),
             )])
         }
