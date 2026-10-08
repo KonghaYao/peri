@@ -575,9 +575,16 @@ impl Middleware for HookMiddleware {
                 )
                 .await;
 
-            // P1-5: PermissionDenied —— 当 hook 拒绝权限时触发
+            // P1-5: PermissionDenied —— 当 hook 拒绝权限时触发。
+            // deny 也可能以 PermissionOverride（permissionDecision: deny/无法识别）
+            // 归并而来，判定必须同时看两个形状。
+            let override_denies = matches!(
+                &action,
+                HookAction::PermissionOverride { decision, .. } if decision.is_deny_like()
+            );
             let is_denied = matches!(&action, HookAction::Block { .. })
-                || matches!(&action, HookAction::PreventContinuation { .. });
+                || matches!(&action, HookAction::PreventContinuation { .. })
+                || override_denies;
             if is_denied {
                 self.fire_event(
                     HookEvent::PermissionDenied,
@@ -596,6 +603,15 @@ impl Middleware for HookMiddleware {
                 Some(&effective_call.input),
             )
             .await;
+
+            // PermissionOverride 的 deny/非法判定不经过 resolve_action_to_toolcall
+            // （该归约只认 Block/PreventContinuation）：必须显式零执行，绝不放行。
+            if override_denies {
+                return Err(AgentError::ToolRejected {
+                    tool: effective_call.name.clone(),
+                    reason: HOOK_PERMISSION_DENY_REASON.to_string(),
+                });
+            }
 
             return action_resolver::resolve_action_to_toolcall(
                 &action,
@@ -777,6 +793,9 @@ impl Middleware for HookMiddleware {
 /// PreToolUse `deny` 的固定安全反馈：不透传 hook 自述文本。
 const HOOK_DENY_REASON: &str = "PreToolUse hook denied this tool call";
 
+/// PermissionRequest `permissionDecision: deny` 的固定安全反馈：不透传 hook 自述文本。
+const HOOK_PERMISSION_DENY_REASON: &str = "PermissionRequest hook denied this tool call";
+
 /// PreToolUse `ask` 无审批端口时的固定反馈。
 const HOOK_ASK_UNAVAILABLE_REASON: &str =
     "PreToolUse hook requested approval, but no approval channel is available";
@@ -838,3 +857,7 @@ mod ask_host_path_tests;
 #[cfg(test)]
 #[path = "undelivered_output_test.rs"]
 mod undelivered_output_tests;
+
+#[cfg(test)]
+#[path = "permission_request_deny_test.rs"]
+mod permission_request_deny_tests;
