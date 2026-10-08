@@ -23,7 +23,8 @@
 //!    批准后 wire 上恰好一条 `tools/call`（`params.name` 为**裸名**），拒绝后 **0** 条。
 //! 6. **关闭态差分**（acceptance §7 第 9 条的运行时证伪面 / §4 关闭面矩阵第 3、4 面）：
 //!    `WebMiddleware=false` 下模型编造的 web 工具调用不触达审批、不触达 wire，以
-//!    「未知工具」结算；同一 turn 内的可用工具是正控制（证明审批面/wire 面已装配）。
+//!    「未知工具」工具级 error 结算、turn 正常收束；同一 turn 内的可用工具是正控制
+//!    （证明审批面/wire 面已装配）。
 //! 7. **off 的判定面**（§7 第 4 条的运行时证伪面）：`PERI_MCP_BUILTIN=off` 只关注入，
 //!    不改变 effective name ↔ 原始名的判定 parity（`default_requires_approval` /
 //!    `is_edit_tool`；`is_mutation_tool` 是 crate 内私有 fn，由 peri-middlewares 侧覆盖）。
@@ -489,7 +490,7 @@ async fn mcp_middleware_closure_removes_every_mcp_tool_from_first_model_request(
 /// `WebMiddleware=false` 时模型**编造**一个 web 工具调用，链路既不触达审批、也不触达
 /// wire，而是以「未知工具」结算；关闭是**调用面的真事实**，不是「事件流里没有该名字」。
 ///
-/// 三条口径（避免把本用例读成它不证明的东西）：
+/// 四条口径（避免把本用例读成它不证明的东西）：
 ///
 /// 1. **差分形态**：正面对照是同文件 `promoted_direct_tool_approval_calls_wire_exactly_once`
 ///    （同一夹具、同一 broker、同一脚本化模型，工具**可用** ⇒ 审批恰 1 次 + wire 恰 1 条）。
@@ -497,11 +498,20 @@ async fn mcp_middleware_closure_removes_every_mcp_tool_from_first_model_request(
 ///    —— 否则「未触达」是空断言），随后再调被关闭的 `WebSearch`。
 /// 2. 「事件流中不出现该名 `ToolStart`」**不可能成立**，本用例不这样断言：模型编造的调用
 ///    经 model bridge 的 `ToolCallDelta` 直接发 `ToolStarted`
-///    （`peri-agent/src/agent/model_bridge.rs:316-337`），解析失败后 tool dispatch 还会补发
-///    成对的 Started/Ended（`peri-agent/src/agent/stages/tool_dispatch.rs:153-157`）。
+///    （`peri-agent/src/agent/model_bridge.rs:341-358`），解析失败后 tool dispatch 还会补发
+///    成对的 Started/Ended（`peri-agent/src/agent/stages/tool_dispatch.rs:163-165`）。
 ///    因此本用例断言的是「不触达审批 / 不触达 wire / 以未知工具结算」。
-/// 3. TUI 侧「关闭后无卡片」**不构成独立证据**：TUI 对任意 `ToolStarted` 都建卡（含本条
-///    的失败结算），卡片面的证据价值来自第 3 条断言（结算为 error）而非「无事件」。
+/// 3. **未知名是工具级结算，不是 turn fatal**（本条的单一权威在 Agent 层）：解析失败
+///    （`peri-agent/src/tools/invocation.rs:99` 的 `AgentError::ToolNotFound`）在
+///    `dispatch_tools` 内结算为模型可见的 error 结果（`tool_dispatch.rs:146-151`），随
+///    同批结果写入 transcript（`tool_dispatch.rs:220-225`）并触发收尾 Reason，turn 以
+///    `ok == true` 正常收束、Reason 恰 3 次。请求级拒绝（整条响应作废、turn 冻结、不提交
+///    不续跑）的**唯一**来源是持久执行账本的 target binding 校验，已随账本在
+///    `spec/issues/2026-10-07-remove-execution-recovery-plan.md` §3-B 的剥离中删除；本用例
+///    以「恰一条 `ToolEnd(WebSearch, error)`」锁死结算面，不把「整轮失败」当作关闭语义
+///    （关闭是调用面真事实：该名既不可见、也不进审批/wire，而不是让用户 turn 死掉）。
+/// 4. TUI 侧「关闭后无卡片」**不构成独立证据**：TUI 对任意 `ToolStarted` 都建卡（含本条
+///    的失败结算），卡片面的证据价值来自断言 ③（结算为 error）而非「无事件」。
 #[cfg(not(windows))]
 #[tokio::test]
 #[serial]
@@ -535,14 +545,14 @@ async fn closed_web_tool_call_never_reaches_approval_or_wire() {
     .await;
 
     assert!(
-        !result.ok,
-        "模型编造无可信 target 的工具必须冻结原 Reason: {:?}",
+        result.ok,
+        "模型编造未知名只能结算为工具级错误，不得 fatal: {:?}",
         result.failure
     );
     assert_eq!(
         model.call_count(),
-        2,
-        "无可信 target 的响应不得提交或触发第三次 Reason"
+        3,
+        "两条脚本调用 + 收尾必须都在**同一条 turn** 内跑完（Reason ×3）"
     );
 
     // ① 正控制：可用工具确实触达审批恰 1 次 ⇒ 审批面已装配（下面的「未触达」才非空）。
@@ -571,9 +581,21 @@ async fn closed_web_tool_call_never_reaches_approval_or_wire() {
         .filter(|(name, _, _)| name == CLOSED_NAME)
         .cloned()
         .collect();
+    assert_eq!(
+        closed_ends.len(),
+        1,
+        "编造的关闭名调用必须恰有一条结算（未知工具的模型可见结果，不是「无结算」）: {all_ends:?}"
+    );
     assert!(
-        closed_ends.is_empty(),
-        "不得虚构未 dispatch 工具的结算: {all_ends:?}"
+        closed_ends[0].2,
+        "未知工具结算必须是 error 结果: {closed_ends:?}"
+    );
+    assert!(
+        closed_ends[0]
+            .1
+            .contains(&format!("Tool not found: {CLOSED_NAME}")),
+        "结算文案必须是「未知工具」（不是审批拒绝 / 不是 server 侧失败）: {:?}",
+        closed_ends[0].1
     );
     // ④ wire 面：关闭名 0 次；available 工具恰一条（同一 turn 内的正控制）。
     let calls = wire_tool_calls(&harness);
