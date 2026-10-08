@@ -83,24 +83,25 @@ impl Middleware for ImageMiddleware {
     }
 
     async fn before_input(&self, state: &mut dyn hook_state::BeforeInputState) -> AgentResult<()> {
-        let inputs: Vec<BaseMessage> = match state.input_message_ids() {
-            Some(ids) => state
-                .messages()
-                .iter()
-                .filter(|message| {
-                    matches!(message, BaseMessage::Human { .. }) && ids.contains(&message.id())
-                })
-                .cloned()
-                .collect(),
-            None => state
-                .messages()
-                .iter()
-                .rev()
-                .find(|message| matches!(message, BaseMessage::Human { .. }))
-                .cloned()
-                .into_iter()
-                .collect(),
+        // H7：只消费本批输入身份，不扫描历史最后一条 Human 充当新输入；空批次
+        // （含没有批次身份的 legacy 适配器）不注入。
+        let Some(ids) = state.input_message_ids() else {
+            tracing::debug!(
+                "ImageMiddleware: 本次输入没有批次身份（legacy 适配器），跳过附件转换且不扫描历史 Human"
+            );
+            return Ok(());
         };
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let inputs: Vec<BaseMessage> = state
+            .messages()
+            .iter()
+            .filter(|message| {
+                matches!(message, BaseMessage::Human { .. }) && ids.contains(&message.id())
+            })
+            .cloned()
+            .collect();
         let re = match Regex::new(r"@image\s+(\S+)") {
             Ok(r) => r,
             Err(_) => return Ok(()),
