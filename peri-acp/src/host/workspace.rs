@@ -297,13 +297,15 @@ impl SessionEnvironment {
             peri_middlewares::assembly::builtin_closed_instances(&disabled_middlewares);
         // ── beta flag（设计 §消费契约）──
         //
-        // 唯一来源是**会话冻结值**：新建会话由准备期从配置快照投影一次（`prepared.rs`
-        // → `frozen.rs`），恢复 / fork 复用持久 blob 的字节；本层不重读配置，也不
-        // 回退到当轮 config。生效项在这里记录一次（flag id + 来源层），供诊断。
+        // 恢复 / fork 复用持久 blob 的字节；**新建**会话此时 frozen 尚未构建
+        // （`prepared.build_frozen_after_activation` 在本环境装配之后），投影取自
+        // 同一份选中的配置来源——它与随后冻结的值同源，装配期只读一次。
+        // 本层不回退当轮 `peri_config`。生效项在这里记录一次（flag id + 来源层），供诊断。
         #[cfg(not(target_os = "emscripten"))]
-        let beta_flags = frozen
-            .map(|frozen| frozen.v2_frozen().beta_flags.clone())
-            .unwrap_or_default();
+        let beta_flags = match frozen {
+            Some(frozen) => frozen.v2_frozen().beta_flags.clone(),
+            None => configuration.config_source.beta_flags(),
+        };
         #[cfg(not(target_os = "emscripten"))]
         for (id, origin) in beta_flags.enabled() {
             tracing::info!(flag = %id, origin = ?origin, "beta flag enabled for session");
