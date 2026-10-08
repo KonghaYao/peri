@@ -181,3 +181,25 @@ async fn initial_user_message_is_admitted_once_per_session() {
         "同一会话第二次 SessionStart 不得重复准入"
     );
 }
+
+/// PostToolBatch 的 systemMessage 也必须投递（该事件另有 Block 语义，
+/// 不能因此把已解析字段丢掉）。
+#[cfg(unix)]
+#[tokio::test]
+async fn post_tool_batch_system_message_is_delivered_as_a_client_notice() {
+    let hook = registered(
+        HookEvent::PostToolBatch,
+        r#"{"systemMessage":"batch note"}"#,
+    );
+    let mw = make_middleware(vec![hook], None);
+    let mut state = state_with_prompt();
+
+    mw.fire_post_tool_batch(&mut state).await.unwrap();
+
+    let reminders = reminders(&state);
+    assert_eq!(reminders.len(), 1);
+    assert_eq!(reminders[0].kind, "post_tool_batch_system_message");
+    assert!(reminders[0].audiences.contains(ReminderAudience::Tui));
+    assert!(!reminders[0].audiences.contains(ReminderAudience::Model));
+    assert!(reminders[0].body.contains("batch note"));
+}

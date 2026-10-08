@@ -364,8 +364,10 @@ impl HookMiddleware {
             state.messages().len(),
         );
 
+        // PostToolBatch 的 additionalContext / systemMessage 同样必须按受众投递，
+        // 不能因为该事件另有 Block 语义就被"解析成功即假装生效"。
         let action = self
-            .fire_event(HookEvent::PostToolBatch, &input, None, None)
+            .fire_event_with_delivery(Some(&*state), HookEvent::PostToolBatch, &input, None, None)
             .await;
 
         match action_resolver::resolve_post_tool_batch_action(&action) {
