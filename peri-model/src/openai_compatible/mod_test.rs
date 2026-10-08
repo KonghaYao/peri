@@ -928,3 +928,20 @@ async fn stream_tool_arguments_type_error_is_diagnosed_without_partial_delta() {
         );
     }
 }
+
+/// [回归测试] 只读输出预算接口与 wire 解析同源（H6）。
+#[test]
+fn output_token_limit_matches_the_resolved_wire_budget() {
+    let model = OpenAiModel::new(
+        config("deepseek-r1")
+            .with_max_tokens(4_096)
+            .with_reasoning_effort("high"),
+    );
+    assert_eq!(model.output_token_limit(), Some(4_096));
+    let body = body_for_test(
+        &model.config,
+        &ModelRequest::new(vec![ModelMessage::user_text("summarize")]),
+    );
+    assert_eq!(body["max_tokens"], 4_096);
+    assert_eq!(body["reasoning_effort"], "high");
+}

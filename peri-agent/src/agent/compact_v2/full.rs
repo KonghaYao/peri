@@ -18,7 +18,7 @@ use crate::agent::{
     events::CompactStrategy,
     model_bridge::{map_model_error, AgentModelBridge},
 };
-use crate::error::AgentResult;
+use crate::error::{AgentError, AgentResult};
 use crate::messages::BaseMessage;
 use crate::session::transcript::MessageTranscript;
 use crate::session::MessageFlags;
@@ -92,15 +92,16 @@ pub(super) async fn full_compact_inner(
             .iter()
             .any(|message| !matches!(message, BaseMessage::System { .. }));
     let summary = if has_history {
+        let budget = SummaryBudget::resolve(llm, config)?;
         // 保留历史的角色、工具配对和完整正文；摘要指令只追加到派生请求，
         // 不回写原 transcript，也不提供可执行工具。
         let mut messages = AgentModelBridge::convert_messages(&visible)?;
         messages.insert(0, ModelMessage::system_text(SUMMARY_SYSTEM_PROMPT));
         messages.push(ModelMessage::user_text(SUMMARY_USER_PROMPT.replace(
             "{summary_target_tokens}",
-            &(config.summary_max_tokens / 2).max(1).to_string(),
+            &(budget.target_tokens / 2).max(1).to_string(),
         )));
-        let request = ModelRequest::new(messages).with_max_tokens(config.summary_max_tokens);
+        let request = budget.apply(ModelRequest::new(messages));
         complete_summary(llm, request).await?
     } else {
         // 全 System / 空历史仍保持命令输出 Human-first 的既有契约。
@@ -140,6 +141,55 @@ pub(super) async fn full_compact_inner(
         changed_fields: 0,
         no_op_candidates: 0,
     })
+}
+
+/// Full Compact 派生请求的输出预算（H6）。
+///
+/// 单一来源是**当前模型已解析的单次输出上限**（`Model::output_token_limit`），
+/// 不是 `summary_max_tokens`：后者是长度目标上限，只影响提示词里的目标字数，
+/// 并受有效输出预算约束。这样：
+/// - 低输出预算的模型不会收到超过自身上限的 `max_tokens`（旧行为会在摘要请求上
+///   覆写成 16000 而失败）；
+/// - thinking 配置与上限由 provider 解析，摘要路径不改写；
+/// - 续写复用同一 `ModelRequest`，因此预算与首轮一致。
+struct SummaryBudget {
+    /// 模型已解析的单次输出上限；`None` = provider 未声明，请求沿用 provider 默认。
+    output_limit: Option<u32>,
+    /// 提示词中声明的长度目标（受有效输出预算约束）。
+    target_tokens: u32,
+}
+
+impl SummaryBudget {
+    fn resolve(llm: &dyn peri_model::Model, config: &CompactConfig) -> AgentResult<Self> {
+        if config.summary_max_tokens == 0 {
+            // 零值不是「不限」：既不能成为长度目标，也不允许被代填成任意常量。
+            return Err(AgentError::CompactSummaryBudgetInvalid {
+                reason: "summary_max_tokens must be greater than zero",
+            });
+        }
+        let output_limit = match llm.output_token_limit() {
+            Some(0) => {
+                return Err(AgentError::CompactSummaryBudgetInvalid {
+                    reason: "resolved model output limit is zero",
+                })
+            }
+            limit => limit,
+        };
+        Ok(Self {
+            output_limit,
+            target_tokens: output_limit.map_or(config.summary_max_tokens, |limit| {
+                config.summary_max_tokens.min(limit)
+            }),
+        })
+    }
+
+    /// 把有效预算应用到请求上：只沿用已解析上限，不写入 `summary_max_tokens`。
+    fn apply(&self, request: ModelRequest) -> ModelRequest {
+        match self.output_limit {
+            Some(limit) => request.with_max_tokens(limit),
+            None => request,
+        }
+    }
 }
 
 async fn complete_summary(

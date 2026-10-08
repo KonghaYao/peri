@@ -147,9 +147,6 @@ fn default_summary_max_tokens() -> u32 {
 fn default_max_consecutive_failures() -> u32 {
     3
 }
-fn default_ptl_max_retries() -> u32 {
-    3
-}
 fn default_smart_keep_recent_msgs() -> usize {
     5
 }
@@ -198,6 +195,13 @@ where
 ///
 /// 反序列化时自动 clamp 阈值到 [0.0, 1.0] 并 warn，防止配置错误导致
 /// budget 检查被静默绕过。
+/// 已删除的 compact 配置键（旧配置文件仍可能携带）。
+///
+/// `ptl_max_retries` 从不参与运行，已从配置模型、默认值与文档中删除。类型化模型
+/// 不再认识该键，serde 会静默忽略它——所以调用方必须在**原始文档**上核对并给出
+/// 显式迁移诊断，不能让它悄悄换语义。
+pub const LEGACY_COMPACT_KEYS: [&str; 1] = ["ptl_max_retries"];
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CompactConfig {
     #[serde(default = "default_true")]
@@ -216,12 +220,16 @@ pub struct CompactConfig {
     /// 默认保留 AskUserQuestion、goal、TodoWrite（对话/任务状态不可恢复），其余工具全部截断。
     #[serde(default = "default_excluded_tools")]
     pub micro_excluded_tools: Vec<String>,
+    /// Full Compact 摘要的**长度目标上限**（不是 provider 输出上限的覆写）。
+    ///
+    /// 有效目标 = `min(summary_max_tokens, 当前模型已解析的单次输出上限)`；目标只
+    /// 影响提示词中的长度说明，实际请求预算仍来自同一已解析上限，二者同源（H6）。
+    /// 模型上限无法解析时目标取本值，请求沿用 provider 默认。零值不是「不限」，
+    /// 而是明确的配置错误（`CompactSummaryBudgetInvalid`）。
     #[serde(default = "default_summary_max_tokens")]
     pub summary_max_tokens: u32,
     #[serde(default = "default_max_consecutive_failures")]
     pub max_consecutive_failures: u32,
-    #[serde(default = "default_ptl_max_retries")]
-    pub ptl_max_retries: u32,
 
     // ── Smart Compact 配置 ──────────────────────────────────────────────
     /// [DEPRECATED] 不再使用。Smart Compact 已计划废弃并收敛为 Micro Compact。
@@ -276,7 +284,6 @@ impl Default for CompactConfig {
             micro_excluded_tools: default_excluded_tools(),
             summary_max_tokens: default_summary_max_tokens(),
             max_consecutive_failures: default_max_consecutive_failures(),
-            ptl_max_retries: default_ptl_max_retries(),
             smart_compact_enabled: default_false(),
             smart_keep_recent_msgs: default_smart_keep_recent_msgs(),
             smart_keep_recent_tools: default_smart_keep_recent_tools(),

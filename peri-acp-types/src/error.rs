@@ -80,6 +80,9 @@ pub enum AgentError {
     #[error("Full Compact failed: LLM returned empty summary")]
     CompactEmptyResponse,
 
+    #[error("Full Compact has no usable summary output budget: {reason}")]
+    CompactSummaryBudgetInvalid { reason: &'static str },
+
     #[error("Full Compact failed: summary response did not complete")]
     CompactIncompleteResponse { stop_reason: peri_model::StopReason },
 
@@ -467,6 +470,7 @@ impl AgentError {
             Self::Interrupted => "interrupted",
             Self::CompactNoLlm => "compact_no_llm",
             Self::CompactEmptyResponse => "compact_empty_response",
+            Self::CompactSummaryBudgetInvalid { .. } => "compact_summary_budget_invalid",
             Self::CompactIncompleteResponse { .. } => "compact_incomplete_response",
             Self::CompactRetriesExhausted { .. } => "compact_retries_exhausted",
             Self::CompactBudgetUnrecovered { .. } => "compact_budget_unrecovered",

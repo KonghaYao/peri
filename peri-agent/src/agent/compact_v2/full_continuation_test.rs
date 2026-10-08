@@ -12,13 +12,23 @@ use std::sync::Mutex;
 struct SummaryModel {
     requests: Mutex<Vec<ModelRequest>>,
     responses: Mutex<VecDeque<ModelResult<ModelResponse>>>,
+    /// 模型已解析的单次输出上限；`None` = provider 不声明（H6 的只读预算接口）。
+    output_limit: Option<u32>,
 }
 
 impl SummaryModel {
     fn new(responses: impl IntoIterator<Item = ModelResult<ModelResponse>>) -> Self {
+        Self::with_output_limit(responses, None)
+    }
+
+    fn with_output_limit(
+        responses: impl IntoIterator<Item = ModelResult<ModelResponse>>,
+        output_limit: Option<u32>,
+    ) -> Self {
         Self {
             requests: Mutex::new(Vec::new()),
             responses: Mutex::new(responses.into_iter().collect()),
+            output_limit,
         }
     }
 }
@@ -27,6 +37,10 @@ impl SummaryModel {
 impl Model for SummaryModel {
     fn capabilities(&self) -> ModelCapabilities {
         ModelCapabilities::default()
+    }
+
+    fn output_token_limit(&self) -> Option<u32> {
+        self.output_limit
     }
 
     async fn stream(&self, _: ModelRequest, _: CancellationToken) -> ModelResult<ModelStream> {
@@ -80,7 +94,8 @@ async fn full_continuation_preserves_chunks_and_commits_complete_summary() {
         let requests = model.requests.lock().unwrap();
         assert_eq!(requests.len(), 2);
         for request in requests.iter() {
-            assert_eq!(request.max_tokens, Some(16_000));
+            // 夹具不声明输出上限：摘要请求不得代填 16000，也不得覆写 provider 上限。
+            assert_eq!(request.max_tokens, None);
             assert!(request.tools.is_empty());
             assert!(serde_json::to_string(request)
                 .unwrap()
@@ -286,7 +301,10 @@ async fn full_continuation_omits_reasoning_from_next_request() {
         .unwrap();
     assert!(result.summary.unwrap().ends_with("first and last"));
     let requests = model.requests.lock().unwrap();
-    assert_eq!(requests[0].max_tokens, Some(2048));
+    assert_eq!(
+        requests[0].max_tokens, None,
+        "夹具未声明模型输出上限时沿用 provider 默认，不写请求预算"
+    );
     assert!(requests[0]
         .messages
         .last()
@@ -294,6 +312,10 @@ async fn full_continuation_omits_reasoning_from_next_request() {
         .text_content()
         .unwrap()
         .contains("1024 output tokens"));
+    assert_eq!(
+        requests[1].max_tokens, requests[0].max_tokens,
+        "续写必须沿用首轮预算"
+    );
     let serialized = serde_json::to_string(&requests[1]).unwrap();
     assert!(!serialized.contains("PRIVATE_REASONING"));
     assert!(!serialized.contains("{summary_target_tokens}"));
@@ -367,4 +389,176 @@ async fn full_continuation_rejects_tools_in_response() {
         assert_eq!(model.requests.lock().unwrap().len(), 1);
         assert!(!transcript.flags(original).excluded);
     }
+}
+
+// ─── H6：摘要请求预算与长度目标同源 ─────────────────────────────────────────────
+
+/// 捕获低/高输出预算、显式摘要配置与首轮/续写请求。
+///
+/// 断言：请求预算始终等于模型已解析上限（不写成 `summary_max_tokens`）、续写不变、
+/// 提示词中的长度目标受同一上限约束。触发条件用假 provider 记录请求验证，不靠
+/// 「配置值大于 profile 值」的静态比较推断远端必然失败。
+async fn budget_case(output_limit: Option<u32>, summary_max_tokens: u32) -> Vec<ModelRequest> {
+    let bound = TestSession::open().await;
+    let mut transcript =
+        MessageTranscript::new().with_persistence(bound.resources(), bound.thread_id.clone());
+    transcript.append(BaseMessage::human("ORIGINAL_TASK"));
+    let model = SummaryModel::with_output_limit(
+        [
+            response("<summary>first", StopReason::MaxTokens),
+            response(" and last</summary>", StopReason::EndTurn),
+        ],
+        output_limit,
+    );
+    let config = CompactConfig {
+        summary_max_tokens,
+        ..Default::default()
+    };
+    let result = full_compact_inner(&mut transcript, Some(&model), &config, "/tmp")
+        .await
+        .expect("夹具摘要必须完成");
+    assert!(result.summary.unwrap().ends_with("first and last"));
+    let requests = model.requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 2, "截断后只允许一次续写");
+    requests
+}
+
+/// 提示词中声明的长度目标（提示词模板写死 `Target at most N output tokens`）。
+///
+/// 续写请求的最后一条是续写指令，因此按内容定位摘要指令，而不是取最后一条。
+fn summary_target_of(request: &ModelRequest) -> u32 {
+    let prompt = request
+        .messages
+        .iter()
+        .filter_map(ModelMessage::text_content)
+        .find(|text| text.contains("Target at most "))
+        .expect("摘要指令必须声明目标");
+    let after = prompt
+        .split("Target at most ")
+        .nth(1)
+        .expect("模板必须声明目标");
+    after
+        .split_whitespace()
+        .next()
+        .expect("目标数值")
+        .parse()
+        .expect("目标必须是数字")
+}
+
+#[tokio::test]
+async fn summary_request_keeps_low_resolved_output_limit() {
+    let requests = budget_case(Some(4_096), 16_000).await;
+    for request in &requests {
+        assert_eq!(
+            request.max_tokens,
+            Some(4_096),
+            "低输出预算模型上请求预算必须等于已解析上限，不能被 16000 覆写"
+        );
+    }
+    assert_eq!(
+        requests[1].max_tokens, requests[0].max_tokens,
+        "续写沿用首轮预算"
+    );
+    assert_eq!(
+        summary_target_of(&requests[0]),
+        4_096 / 2,
+        "长度目标受有效输出预算约束（min(summary_max_tokens, 上限) 的一半）"
+    );
+}
+
+#[tokio::test]
+async fn summary_request_uses_resolved_limit_when_target_is_smaller() {
+    let requests = budget_case(Some(64_000), 16_000).await;
+    for request in &requests {
+        assert_eq!(
+            request.max_tokens,
+            Some(64_000),
+            "目标更小时也不改写请求预算：预算是 provider 解析值的沿用"
+        );
+    }
+    assert_eq!(
+        summary_target_of(&requests[0]),
+        16_000 / 2,
+        "长度目标取 min(summary_max_tokens, 有效预算) 的一半"
+    );
+    assert_eq!(summary_target_of(&requests[1]), 16_000 / 2);
+}
+
+#[tokio::test]
+async fn summary_request_without_resolved_limit_leaves_provider_default() {
+    let requests = budget_case(None, 16_000).await;
+    for request in &requests {
+        assert_eq!(
+            request.max_tokens, None,
+            "无法解析上限时沿用 provider 默认，不代填 16000"
+        );
+    }
+    assert_eq!(summary_target_of(&requests[0]), 8_000);
+}
+
+/// [回归测试] 零值不是「不限」：明确报配置错误，不静默代填任意常量。
+#[tokio::test]
+async fn summary_request_rejects_zero_budget() {
+    for (output_limit, summary_max_tokens) in [(Some(4_096), 0), (Some(0), 16_000)] {
+        let mut transcript = MessageTranscript::new();
+        let original = transcript.append(BaseMessage::human("ORIGINAL_TASK"));
+        let model = SummaryModel::with_output_limit(
+            [response("<summary>unused</summary>", StopReason::EndTurn)],
+            output_limit,
+        );
+        let config = CompactConfig {
+            summary_max_tokens,
+            ..Default::default()
+        };
+        let error = full_compact_inner(&mut transcript, Some(&model), &config, "/tmp")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, AgentError::CompactSummaryBudgetInvalid { .. }),
+            "零值必须是显式配置错误；实际 {error:?}"
+        );
+        assert!(
+            model.requests.lock().unwrap().is_empty(),
+            "配置错误不得先发出摘要请求"
+        );
+        assert!(!transcript.flags(original).excluded);
+    }
+}
+
+/// [回归测试] provider 拒绝摘要请求时保留既有 Full 错误语义，不无限重试。
+#[tokio::test]
+async fn summary_request_provider_rejection_stops_after_the_continuation_budget() {
+    let mut transcript = MessageTranscript::new();
+    let original = transcript.append(BaseMessage::human("ORIGINAL_TASK"));
+    let model = SummaryModel::with_output_limit(
+        [
+            response("<summary>first", StopReason::MaxTokens),
+            Err(peri_model::ModelError::http_status(
+                400,
+                "fixture",
+                Some("req-compact-over-limit"),
+            )),
+        ],
+        Some(4_096),
+    );
+    let error = full_compact_inner(
+        &mut transcript,
+        Some(&model),
+        &CompactConfig::default(),
+        "/tmp",
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(error, AgentError::ModelError(_)));
+    let requests = model.requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 2, "provider 拒绝不触发第三轮");
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.max_tokens == Some(4_096)),
+        "两次请求都必须在不超出自身上限的预算内"
+    );
+    assert_eq!(model.responses.lock().unwrap().len(), 0, "不重放已失败请求");
+    assert!(!transcript.flags(original).excluded);
+    assert_eq!(transcript.len(), 1);
 }
