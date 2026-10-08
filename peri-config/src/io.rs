@@ -3,8 +3,8 @@
 
 #[cfg(not(target_os = "emscripten"))]
 pub use peri_mcp_config::{
-    current_dir, exists, global_config_path, home_dir, read_environment, read_text, same_file,
-    set_global_config_path, write_text_atomic, write_text_if_unchanged,
+    canonicalize, current_dir, exists, global_config_path, home_dir, read_environment, read_text,
+    same_file, set_global_config_path, write_text_atomic, write_text_if_unchanged,
 };
 
 #[cfg(target_os = "emscripten")]

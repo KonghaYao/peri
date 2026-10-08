@@ -92,6 +92,9 @@ impl ConfigurationMcpServer {
                 let same = first.is_some() && first == second;
                 Ok(ConfigurationValue::Bool(same))
             }
+            ConfigurationRequest::Canonicalize { path } => {
+                canonical_path(&path).map(ConfigurationValue::CanonicalPath)
+            }
             ConfigurationRequest::Paths => {
                 let home = std::env::var_os("HOME")
                     .map(PathBuf::from)

@@ -8,6 +8,7 @@ pub mod resources;
 pub mod settings;
 pub mod source;
 mod system;
+pub mod trust;
 pub mod ui;
 
 pub use system::{

@@ -265,8 +265,31 @@ enum PluginAction {
         /// 搜索关键词
         query: String,
     },
+    /// 管理 hook 执行来源信任（项目/local settings hooks 默认不执行）
+    Trust {
+        #[command(subcommand)]
+        action: TrustAction,
+    },
     /// 清理 7 天未使用的孤儿插件文件
     Cleanup,
+}
+
+#[derive(Subcommand)]
+enum TrustAction {
+    /// 显式授权当前 workspace 的来源 hooks
+    Grant {
+        /// 来源范围：project / local
+        #[arg(long, default_value = "project")]
+        scope: String,
+    },
+    /// 撤销来源 hooks 的授权
+    Revoke {
+        /// 来源范围：project / local
+        #[arg(long, default_value = "project")]
+        scope: String,
+    },
+    /// 查看当前 workspace 的授权状态
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -858,6 +881,13 @@ fn main() -> Result<()> {
                     }
                     PluginAction::Info { plugin } => cli_plugin::run_plugin_info(&plugin),
                     PluginAction::Search { query } => cli_plugin::run_plugin_search(&query),
+                    PluginAction::Trust { action } => match action {
+                        TrustAction::Grant { scope } => cli_plugin::run_plugin_trust_grant(&scope),
+                        TrustAction::Revoke { scope } => {
+                            cli_plugin::run_plugin_trust_revoke(&scope)
+                        }
+                        TrustAction::Status => cli_plugin::run_plugin_trust_status(),
+                    },
                     PluginAction::Cleanup => {
                         let claude_dir = dirs_next::home_dir()
                             .unwrap_or_else(|| std::path::PathBuf::from("."))

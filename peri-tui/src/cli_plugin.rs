@@ -528,3 +528,90 @@ pub fn run_plugin_search(query: &str) -> Result<()> {
     }
     Ok(())
 }
+
+// ─── hook 执行来源信任（H4）────────────────────────────────────────────────
+//
+// 项目 / local settings hooks 默认不执行；显式 grant 后绑定
+// `canonical workspace + 来源身份 + 来源摘要`。授权/撤销只走配置数据面
+// （`peri_config::trust`），本层不直接读写信任文件。
+
+use peri_config::trust::{self, SettingsSourceKind};
+
+/// 信任切片只覆盖项目 / local settings hooks；global 是用户机器级配置，不参与。
+fn settings_trust_scope(scope: &str) -> Result<SettingsSourceKind> {
+    match scope {
+        "project" => Ok(SettingsSourceKind::Project),
+        "local" => Ok(SettingsSourceKind::Local),
+        other => Err(anyhow::anyhow!(
+            "无效的信任 scope '{other}'：仅支持 project / local（global 为用户机器级配置，不参与信任判定）"
+        )),
+    }
+}
+
+fn trust_workspace() -> Result<PathBuf> {
+    let cwd = std::env::current_dir()?;
+    anyhow::ensure!(
+        cwd.is_absolute() && cwd.is_dir(),
+        "信任绑定要求已存在的绝对 workspace 路径"
+    );
+    Ok(cwd)
+}
+
+fn trust_binding(scope: &str) -> Result<trust::HookTrustEntry> {
+    let kind = settings_trust_scope(scope)?;
+    let cwd = trust_workspace()?;
+    trust::settings_binding(&cwd, kind)?
+        .ok_or_else(|| anyhow::anyhow!("workspace 路径无法规范化：{}", cwd.display()))
+}
+
+pub fn run_plugin_trust_grant(scope: &str) -> Result<()> {
+    let binding = trust_binding(scope)?;
+    trust::grant(&binding)?;
+    println!(
+        "已授权 {} settings hooks 在当前 workspace 执行：",
+        settings_trust_scope(scope)?.scope()
+    );
+    println!("  workspace: {}", binding.workspace);
+    println!("  source:    {}", binding.source);
+    println!("  digest:    {}", binding.digest);
+    println!("提示：来源或摘要变化后授权自动失效，需重新 grant。");
+    Ok(())
+}
+
+pub fn run_plugin_trust_revoke(scope: &str) -> Result<()> {
+    let binding = trust_binding(scope)?;
+    if trust::revoke(&binding.workspace, &binding.source)? {
+        println!(
+            "已撤销 {} settings hooks 的授权。",
+            settings_trust_scope(scope)?.scope()
+        );
+    } else {
+        println!("当前 workspace 上没有该来源的授权记录（无需撤销）。");
+    }
+    Ok(())
+}
+
+pub fn run_plugin_trust_status() -> Result<()> {
+    let cwd = trust_workspace()?;
+    let workspace = trust::canonical_workspace(&cwd)?
+        .ok_or_else(|| anyhow::anyhow!("workspace 路径无法规范化：{}", cwd.display()))?;
+    println!("workspace: {workspace}");
+    for kind in [SettingsSourceKind::Project, SettingsSourceKind::Local] {
+        let state = match trust::settings_binding(&cwd, kind)? {
+            Some(binding) if trust::is_trusted(&binding)? => "已授权",
+            Some(_) => "未授权（默认拒绝执行）",
+            None => "workspace 不可规范化",
+        };
+        println!("{} settings hooks: {state}", kind.scope());
+    }
+    let entries = trust::list(&workspace)?;
+    if entries.is_empty() {
+        println!("无授权记录：来源 hooks 不会执行。");
+    } else {
+        println!("授权记录（{} 条）：", entries.len());
+        for entry in entries {
+            println!("  {}  digest={}", entry.source, entry.digest);
+        }
+    }
+    Ok(())
+}
