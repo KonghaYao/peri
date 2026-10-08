@@ -286,3 +286,19 @@ write set 之间共享编译错误由协调者整合，不保留被删除字段�
 | e2e `workspace-slow-git`（发现 8 次 > 上限 3） | 把 `target/debug/peri` 指向主树二进制、并用主树版本的用例文件（查 `legacy_execution_registrations`）复跑：**同样失败**，窗口内发现 9 次、调用 10 次 | 基线既存红（工作区被重复解析），非本次改动 |
 
 分支侧 `peri-middlewares` 非测试源码零改动（`git status` 只列夹具与 `subagent/tool/tool_test.rs`），故上述失败不进入本次变更的收敛范围；上游修复不在本分支摘取，以保持变更聚焦。
+
+### 9.9 合并回主树与合并后验证（2026-10-08）
+
+分支 `refactor/remove-legacy-registrations-20261008`（`ee312ae9`）以 `git merge --no-commit --no-ff` 合入 `pre-release/main`（`d25f7e15`），自动合并无冲突；唯一两侧共同改动文件 `peri-resources/src/sessions/sqlite_store/schema_v18_test.rs` 的合并结果正确（保留主树 `absolute_test_path` 与分支 v19 用例），暂存集与分支改动集一致（59 文件 / +2251 / −424）。合并提交 `02df0f7c`（双亲 `d25f7e15` + `ee312ae9`），pre-commit 全绿：fmt、全量 `cargo check --locked`、clippy（命中 crate）、typos、layer-imports，合计 169.5 s。**未 push。**
+
+合并后复跑（主树自身 target，`env -u CARGO_TARGET_DIR`）：
+
+| 范围 | 结果 | 与 §9.2 对比 |
+| --- | --- | --- |
+| `check --locked --workspace --all-targets` | 通过 | 一致 |
+| `-p peri-resources --lib` | 447 passed / 0 failed / 21 ignored（首跑 1 项失败，隔离复跑通过） | 一致（首跑为并发 cargo 负载 flake） |
+| `-p peri-middlewares --lib --no-fail-fast` | 1582 passed / 9 failed | `workflow::mcp_owner` 5 项在主树 `d25f7e15` 已修复，本次复跑不再失败；hooks 3 项（`test_tolerant_mixed_valid_and_invalid_events`、`test_tolerant_non_array_rules_skipped`、`test_async_hook_receives_correct_event_name`）隔离复跑全过（并发 cargo 负载 flake）；`workspace_recovery_tests` 2、`bridge_accepts_workspace_owned_task_handle` 1、`resume_test::...parent_mismatch` 1、`resume_failure_test` 1 与 §9.2 一致，仍为基线既存红 |
+
+`resume_test::test_resume_thread_id_fork_title_uses_parent_tools_and_200_iterations` 是合并树上新出现的失败项（`tool_test/resume_test.rs:590` 断言 `left: 2, right: 200`）：在**不含本次合并**的 `d25f7e15` 上建临时 detached worktree 复跑**同样失败**，且该用例代码在分支与主树相同 → 由主树侧（`9aace572`/`d25f7e15`）引入或暴露的基线既存红，非本次合并引入，未在本次修复。
+
+收尾：对照用临时 worktree、v19 演练库（§9.4 的 3.2 GB 副本）与草稿备份已清理；已合并的本地分支 ref 保留。
