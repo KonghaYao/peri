@@ -11,6 +11,397 @@ struct CountingFinalAnswerLLM {
     answer: &'static str,
 }
 
+struct CompletionDuringReasonLlm {
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+    queue: crate::session::MessageQueue,
+    passive_prefix: usize,
+}
+
+struct StopDuringReasonLlm {
+    completion: CompletionDuringReasonLlm,
+    stop_first: bool,
+}
+
+struct FailingFollowupLlm(Arc<std::sync::atomic::AtomicUsize>);
+
+#[async_trait::async_trait]
+impl ReactLLM for FailingFollowupLlm {
+    async fn generate_reasoning(
+        &self,
+        messages: &[BaseMessage],
+        _tools: &[&dyn crate::tools::BaseTool],
+        _streaming: Option<crate::agent::react::StreamingContext>,
+    ) -> crate::error::AgentResult<crate::agent::react::Reasoning> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| message
+                    .content()
+                    .contains("background result awaiting parent reasoning"))
+                .count(),
+            1
+        );
+        Err(anyhow::anyhow!("followup model failed").into())
+    }
+}
+
+#[async_trait::async_trait]
+impl ReactLLM for StopDuringReasonLlm {
+    async fn generate_reasoning(
+        &self,
+        messages: &[BaseMessage],
+        tools: &[&dyn crate::tools::BaseTool],
+        streaming: Option<crate::agent::react::StreamingContext>,
+    ) -> crate::error::AgentResult<crate::agent::react::Reasoning> {
+        let stop = QueuedMessage::info(MessageSource::HookStopIntent, BaseMessage::human("stop"));
+        if self.stop_first {
+            self.completion.queue.push(stop.clone());
+        }
+        let answer = self
+            .completion
+            .generate_reasoning(messages, tools, streaming)
+            .await?;
+        if !self.stop_first {
+            self.completion.queue.push(stop);
+        }
+        Ok(answer)
+    }
+}
+
+#[tokio::test]
+async fn hook_stop_in_budget_boundary_batch_wins_without_followup_activation() {
+    for stop_first in [true, false] {
+        let session = Session::new(
+            Arc::from("/tmp/stop-budget-boundary"),
+            FrozenContext::builder().build(),
+            None,
+        );
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        session.queue().push(QueuedMessage::prompt(
+            MessageSource::UserInput,
+            BaseMessage::human("initial work"),
+        ));
+        let context = StageContext::builder(
+            session.start_turn(),
+            session.transcript(),
+            session.queue().clone(),
+        )
+        .with_llm(Arc::new(StopDuringReasonLlm {
+            completion: CompletionDuringReasonLlm {
+                calls: calls.clone(),
+                queue: session.queue().clone(),
+                passive_prefix: 0,
+            },
+            stop_first,
+        }))
+        .build();
+        assert!(matches!(
+            run_react_loop(context, 1).await,
+            LoopResult::Completed
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(session.queue().is_empty());
+        let delivery_id = crate::agent::async_tasks::delivery::terminal_delivery_id(
+            "bg-budget-boundary",
+            "terminal",
+        );
+        assert!(session.transcript().read().get(delivery_id).is_some());
+    }
+}
+
+#[async_trait::async_trait]
+impl ReactLLM for CompletionDuringReasonLlm {
+    async fn generate_reasoning(
+        &self,
+        messages: &[BaseMessage],
+        _tools: &[&dyn crate::tools::BaseTool],
+        _streaming: Option<crate::agent::react::StreamingContext>,
+    ) -> crate::error::AgentResult<crate::agent::react::Reasoning> {
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            for _ in 0..self.passive_prefix {
+                self.queue.push(QueuedMessage::info(
+                    MessageSource::SystemInjected,
+                    BaseMessage::human("passive batch filler"),
+                ));
+            }
+            let complete = crate::session::bg_complete::task_bg_complete_callback(
+                crate::session::bg_complete::queue_terminal_delivery(self.queue.clone()),
+            );
+            complete(
+                &crate::agent::events::BackgroundTaskResult {
+                    task_id: "bg-budget-boundary".to_string(),
+                    agent_name: "budget-boundary-child".to_string(),
+                    prompt_summary: "complete during parent reasoning".to_string(),
+                    success: true,
+                    output: "background result awaiting parent reasoning".to_string(),
+                    tool_calls_count: 0,
+                    duration_ms: 1,
+                    child_thread_id: None,
+                    timed_out: false,
+                    subagent_failure: None,
+                    shell_output: None,
+                },
+                peri_acp_types::tasks::BgTaskKind::Agent,
+            )
+            .expect("production completion callback must accept the result");
+            assert!(self.queue.has_ensure_processing());
+        } else {
+            assert_eq!(
+                messages
+                    .iter()
+                    .filter(|message| message
+                        .content()
+                        .contains("background result awaiting parent reasoning"))
+                    .count(),
+                1,
+                "the followup model request must contain the canonical result exactly once"
+            );
+        }
+        Ok(crate::agent::react::Reasoning::with_answer("", "done"))
+    }
+}
+
+async fn completion_during_reason_fixture(
+    max_iterations: usize,
+) -> (
+    Arc<Session>,
+    Arc<std::sync::atomic::AtomicUsize>,
+    LoopResult,
+) {
+    completion_during_reason_with_prefix(max_iterations, 0).await
+}
+
+async fn completion_during_reason_with_prefix(
+    max_iterations: usize,
+    passive_prefix: usize,
+) -> (
+    Arc<Session>,
+    Arc<std::sync::atomic::AtomicUsize>,
+    LoopResult,
+) {
+    let session = Session::new(
+        Arc::from("/tmp/background-budget-boundary"),
+        FrozenContext::builder().build(),
+        None,
+    );
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    session.queue().push(QueuedMessage::prompt(
+        MessageSource::UserInput,
+        BaseMessage::human("start parent reasoning"),
+    ));
+    let context = StageContext::builder(
+        session.start_turn(),
+        session.transcript(),
+        session.queue().clone(),
+    )
+    .with_llm(Arc::new(CompletionDuringReasonLlm {
+        calls: Arc::clone(&calls),
+        queue: session.queue().clone(),
+        passive_prefix,
+    }))
+    .build();
+    let result = run_react_loop(context, max_iterations).await;
+    (session, calls, result)
+}
+
+#[tokio::test]
+async fn background_completion_at_budget_boundary_retains_followup_eligibility() {
+    let (session, calls, result) = completion_during_reason_fixture(1).await;
+    assert!(matches!(
+        result,
+        LoopResult::Error(crate::error::AgentError::MaxIterationsExceeded(1))
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let delivery_id =
+        crate::agent::async_tasks::delivery::terminal_delivery_id("bg-budget-boundary", "terminal");
+    assert!(session.transcript().read().get(delivery_id).is_none());
+    assert!(session.queue().has_ensure_processing_after(1));
+    assert!(session
+        .queue()
+        .has_pending_defer(&MessageSource::SubAgentComplete));
+    let pending = session.queue().drain_all();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].delivery_id, Some(delivery_id));
+    assert_eq!(pending[0].admission_sequence, Some(2));
+    session.queue().push_batch(pending);
+    let context = StageContext::builder(
+        session.start_turn(),
+        session.transcript(),
+        session.queue().clone(),
+    )
+    .with_llm(Arc::new(CompletionDuringReasonLlm {
+        calls: Arc::clone(&calls),
+        queue: session.queue().clone(),
+        passive_prefix: 0,
+    }))
+    .build();
+    assert!(matches!(
+        run_react_loop(context, 10).await,
+        LoopResult::Completed
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert!(session.transcript().read().get(delivery_id).is_some());
+    assert!(session.queue().is_empty());
+}
+
+#[tokio::test]
+async fn background_completion_during_reason_runs_followup_with_remaining_budget() {
+    let (_, calls, result) = completion_during_reason_fixture(2).await;
+    assert!(matches!(result, LoopResult::Completed));
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn deferred_result_that_reaches_failed_reason_is_not_requeued() {
+    let (session, calls, _) = completion_during_reason_fixture(1).await;
+    let watermark = session.queue().admission_watermark();
+    let context = StageContext::builder(
+        session.start_turn(),
+        session.transcript(),
+        session.queue().clone(),
+    )
+    .with_llm(Arc::new(FailingFollowupLlm(calls.clone())))
+    .build();
+    assert!(matches!(
+        run_react_loop(context, 1).await,
+        LoopResult::Error(crate::error::AgentError::Other(_))
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert!(session.queue().is_empty());
+    assert_eq!(session.queue().admission_watermark(), watermark);
+    assert!(!session.queue().has_ensure_processing_after(watermark));
+    let context = StageContext::builder(
+        session.start_turn(),
+        session.transcript(),
+        session.queue().clone(),
+    )
+    .with_llm(Arc::new(FailingFollowupLlm(calls.clone())))
+    .build();
+    assert!(matches!(
+        run_react_loop(context, 1).await,
+        LoopResult::Completed
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn background_completion_after_receive_batch_boundary_retains_original_admission() {
+    let (session, calls, result) = completion_during_reason_with_prefix(1, 64).await;
+    assert!(matches!(
+        result,
+        LoopResult::Error(crate::error::AgentError::MaxIterationsExceeded(1))
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let pending = session.queue().drain_all();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].admission_sequence, Some(66));
+    assert_eq!(
+        pending[0].delivery_id,
+        Some(crate::agent::async_tasks::delivery::terminal_delivery_id(
+            "bg-budget-boundary",
+            "terminal"
+        ))
+    );
+}
+
+#[tokio::test]
+async fn deferred_result_in_zero_budget_followup_does_not_reactivate_itself() {
+    let (session, calls, _) = completion_during_reason_fixture(1).await;
+    let watermark = session.queue().admission_watermark();
+    assert!(session.queue().has_ensure_processing_after(1));
+    let context = StageContext::builder(
+        session.start_turn(),
+        session.transcript(),
+        session.queue().clone(),
+    )
+    .with_llm(Arc::new(CompletionDuringReasonLlm {
+        calls: Arc::clone(&calls),
+        queue: session.queue().clone(),
+        passive_prefix: 0,
+    }))
+    .build();
+    assert!(matches!(
+        run_react_loop(context, 0).await,
+        LoopResult::Error(crate::error::AgentError::MaxIterationsExceeded(0))
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(session.queue().admission_watermark(), watermark);
+    assert!(!session.queue().has_ensure_processing_after(watermark));
+    assert!(session.queue().is_empty());
+    let context = StageContext::builder(
+        session.start_turn(),
+        session.transcript(),
+        session.queue().clone(),
+    )
+    .with_llm(Arc::new(CompletionDuringReasonLlm {
+        calls: Arc::clone(&calls),
+        queue: session.queue().clone(),
+        passive_prefix: 0,
+    }))
+    .build();
+    assert!(matches!(
+        run_react_loop(context, 1).await,
+        LoopResult::Completed
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn exhausted_budget_idle_wake_retains_new_required_message() {
+    let session = Session::new(
+        Arc::from("/tmp/idle-budget-boundary"),
+        FrozenContext::builder().build(),
+        None,
+    );
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let suspended = Arc::new(AtomicBool::new(false));
+    session.queue().push(QueuedMessage::prompt(
+        MessageSource::UserInput,
+        BaseMessage::human("initial work"),
+    ));
+    let context = StageContext::builder(
+        session.start_turn(),
+        session.transcript(),
+        session.queue().clone(),
+    )
+    .with_llm(Arc::new(CountingFinalAnswerLLM {
+        calls: Arc::clone(&calls),
+        answer: "done",
+    }))
+    .with_idle_waiting()
+    .with_idle_should_wait(Arc::new(|| true))
+    .with_idle_suspended_flag(Arc::clone(&suspended))
+    .build();
+    let owner = tokio::spawn(run_react_loop(context, 1));
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while !suspended.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the first answer must enter idle before result arrival");
+    let message = BaseMessage::human("late idle result");
+    let message_id = message.id();
+    session.queue().push(QueuedMessage::defer(
+        MessageSource::SubAgentComplete,
+        message,
+    ));
+    assert!(matches!(
+        tokio::time::timeout(std::time::Duration::from_secs(2), owner)
+            .await
+            .unwrap()
+            .unwrap(),
+        LoopResult::Error(crate::error::AgentError::MaxIterationsExceeded(1))
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(session.transcript().read().get(message_id).is_none());
+    let pending = session.queue().drain_all();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].admission_sequence, Some(2));
+    assert_eq!(pending[0].message().unwrap().id(), message_id);
+}
+
 #[tokio::test]
 async fn loaded_history_never_replays_old_tools_and_new_input_starts_a_fresh_run() {
     let session = Session::new(Arc::from("/tmp"), FrozenContext::builder().build(), None);

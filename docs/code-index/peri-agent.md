@@ -77,7 +77,7 @@ Inbox 去重入口 `agent/stages/work_receive.rs` 使用 `SessionResources::load
 | 功能 | 文件 | 入口/关键点 |
 | --- | --- | --- |
 | 阶段循环入口/StageContext | stages/mod.rs + stages/queue_to_transcript.rs | `run_react_loop`；`run_stage`；`StageContext::builder()`；`append_messages_to_transcript`。普通队列 payload 的 transcript 映射在 `queue_to_transcript.rs`；稳定投递 ID 的终态提醒只走 Receive 的持久判重路径。`run_stage` 先成对发射 `StageEnded`，再将 stage-local `AgentError::Interrupted` 规范化为 `LoopResult::Interrupted`；其他错误保持 `LoopResult::Error` |
-| Receive（排空队列 + 退出判定） | stages/receive.rs | `run_receive`；`drain_all` + `consumed_count` |
+| Receive（有限批次 + 退出判定） | stages/receive.rs | `run_receive` / `run_receive_with_budget`；`drain_batch(64)` + `consumed_count`。预算耗尽时按 loop 入口 watermark 将后续 EnsureProcessing 原始输入留在 MQ，不提交历史、不刷新身份；`budget_deferred_count` 将循环引向预算错误而非 idle 空转。首批零预算及同批 HookStopIntent 保持原消费语义。回归 `loop_iteration_test.rs` 的预算边界、批次边界、idle、失败续跑与 Stop 测试；child 累计预算见 `session/subagent/child_runner_test.rs` |
 | Compact（预算检查 + 触发压缩） | stages/compact.rs | `run_compact`；PreCompact/PostCompact hook |
 | Reason（LLM 推理） | stages/reason.rs | `run_reason`；只恢复已提交 projection（与自动 compact 开关独立），无 directive 使用 canonical；准备阶段新增压力时补检 Compact，绑定最终请求预算；验证 Full 后真实 usage |
 | Act（工具执行或回答） | stages/act.rs | `run_act`；emit TurnCompleted |

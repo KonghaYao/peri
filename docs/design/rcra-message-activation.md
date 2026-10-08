@@ -20,6 +20,8 @@ RCRA 主路径为 `MessageQueue → Receive → Compact → Reason → Act → M
 
 用户输入和当前异步结果通过内存队列进入 Receive，再追加 Transcript。queue 接收不是磁盘持久接纳，不再使用 durable delivery/obligation/ACK 证明跨重启处理。当前进程可为重复通知去重，但不建立永久执行 journal。
 
+语义迭代预算耗尽时，Receive 按本次 loop 入口的接纳序号边界区分首批输入与后续新增输入：后续模型可见 Required / EnsureProcessing 原始消息保留在 MQ，不先提交 Transcript，保持 delivery ID、接纳序号及顺序，由宿主现有失败边界准入下一次执行。当前 run 仍返回 `MaxIterationsExceeded`；首批零预算输入仍提交历史后超限，空队列零预算正常结束。当前 run 绑定输入和工具结果不因此获得跨 run 重试，模型、Compact 或工具失败也不泛化回队。child 的累计预算不重置，耗尽后明确失败。同一 Receive 批次包含 HookStopIntent 时仍消费整批并优先停止，不因本机制保留消息触发额外续跑；显式用户 Stop、关闭及过期执行限制保持独立。
+
 当前执行的调用身份与模型 tool-call 身份保持可区分；子 Agent 展示归属使用模型 tool-call ID，不把临时调用身份当作历史恢复凭证。任务取消绑定当前调用/执行，不误取消后续独立调用。
 
 ## 3. 执行入口与控制
