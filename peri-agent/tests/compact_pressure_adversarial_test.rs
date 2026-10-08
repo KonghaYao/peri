@@ -11,12 +11,13 @@ use peri_acp_types::thread::CancelPolicy;
 use peri_acp_types::workspace::{SessionBinding, SESSION_BINDING_VERSION};
 use peri_agent::agent::compact_v2::CompactConfig;
 use peri_agent::agent::react::{ReactLLM, Reasoning, StreamingContext, ToolCall};
-use peri_agent::agent::stages::{run_react_loop, LoopResult, StageContext};
+use peri_agent::agent::stages::{run_react_loop, LoopResult, StageContextBuilder};
 use peri_agent::agent::token::ContextBudget;
 use peri_agent::error::{AgentError, AgentResult};
 use peri_agent::messages::BaseMessage;
 use peri_agent::session::{
-    FrozenContext, MessageKind, MessageQueue, MessageSource, QueuedMessage, Session,
+    FrozenContext, MessageKind, MessageQueue, MessageSource, MessageTranscript, QueuedMessage,
+    Session, TurnContext,
 };
 use peri_agent::tools::{BaseTool, ToolContext};
 use peri_model::{
@@ -28,6 +29,32 @@ use std::sync::{
     Arc,
 };
 use tokio_util::sync::CancellationToken;
+
+/// 夹具：Compact 对抗套件的循环装配（当前契约）。
+///
+/// 本套件只考察预算与投影，使用 crate 自身的 best-effort 装配（无 durable 执行）。
+/// 生产装配要求 SDK 准入端口，且 Reason 必须走 `prepare_reasoning`；这里的脚本
+/// `ReactLLM` 替身不实现该路径，用生产装配驱动只会得到环境错误而非被测结论。
+/// 该 seam 默认不进入生产构建（`test-fixtures` feature）。
+#[cfg(feature = "test-fixtures")]
+fn loop_builder(
+    turn: TurnContext,
+    transcript: Arc<parking_lot::RwLock<MessageTranscript>>,
+    queue: MessageQueue,
+) -> StageContextBuilder {
+    peri_agent::agent::stages::StageContext::best_effort_fixture_builder(turn, transcript, queue)
+}
+
+/// 缺少 `test-fixtures` 时立即失败：静默退回生产装配只会让整套用例以错误的
+/// 夹具环境运行（durable 路径缺少 SDK 端口），掩盖真实结论。
+#[cfg(not(feature = "test-fixtures"))]
+fn loop_builder(
+    _: TurnContext,
+    _: Arc<parking_lot::RwLock<MessageTranscript>>,
+    _: MessageQueue,
+) -> StageContextBuilder {
+    panic!("peri-agent compact 对抗测试需要 --features test-fixtures")
+}
 
 #[derive(Clone, Copy)]
 enum Growth {
@@ -306,7 +333,7 @@ async fn assert_growth_compacted_before_next_reason(growth: Growth) {
     if matches!(growth, Growth::BeforeModel) {
         chain.add(Box::new(LateInput(late_calls.clone())));
     }
-    let ctx = StageContext::builder(
+    let ctx = loop_builder(
         bound.session.start_turn(),
         bound.session.transcript(),
         bound.session.queue().clone(),
@@ -376,7 +403,7 @@ async fn test_compact_accounts_for_before_model_growth() {
 
 async fn assert_usable_summary_commits(raw: &'static str) {
     let bound = make_bound_session().await;
-    let ctx = StageContext::builder(
+    let ctx = loop_builder(
         bound.session.start_turn(),
         bound.session.transcript(),
         bound.session.queue().clone(),
@@ -514,7 +541,7 @@ async fn assert_binary_attachment_reaches_first_reason(cold_document: bool) {
     };
     let model = Arc::new(AttachmentReasoner::default());
     let summary = Arc::new(SummaryModel(AtomicUsize::new(0)));
-    let ctx = StageContext::builder(
+    let ctx = loop_builder(
         session.start_turn(),
         session.transcript(),
         session.queue().clone(),
@@ -595,7 +622,7 @@ impl peri_model::Model for ScriptedMarkupSummary {
 #[tokio::test]
 async fn test_nested_analysis_only_response_cannot_replace_history() {
     let bound = make_bound_session().await;
-    let ctx = StageContext::builder(
+    let ctx = loop_builder(
         bound.session.start_turn(),
         bound.session.transcript(),
         bound.session.queue().clone(),

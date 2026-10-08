@@ -60,12 +60,12 @@ impl WorkBoundary {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-fixtures"))]
     pub(crate) fn fixture() -> Self {
         Self::new(WorkMode::BestEffortFixture)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-fixtures"))]
     pub(crate) fn is_best_effort_fixture(&self) -> bool {
         self.mode == WorkMode::BestEffortFixture
     }
@@ -74,7 +74,7 @@ impl WorkBoundary {
         &self,
         ctx: &StageContext,
     ) -> anyhow::Result<Option<Arc<WorkSession>>> {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-fixtures"))]
         if self.mode == WorkMode::BestEffortFixture {
             return Ok(None);
         }
@@ -159,9 +159,9 @@ impl WorkBoundary {
             }
         }
         let runtime = WorkRuntime::bind(self.mode, ctx.session.turn.work_admission(), resources)?;
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "test-fixtures")))]
         let WorkRuntime::Durable(session) = runtime;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-fixtures"))]
         let session = match runtime {
             WorkRuntime::Durable(session) => session,
             WorkRuntime::BestEffortFixture => return Ok(None),
@@ -317,7 +317,7 @@ impl WorkSession {
 }
 
 impl StageContext {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-fixtures"))]
     pub fn best_effort_fixture_builder(
         turn: crate::session::turn::TurnContext,
         transcript: Arc<parking_lot::RwLock<crate::session::MessageTranscript>>,
@@ -362,7 +362,7 @@ impl StageContextBuilder {
         self
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-fixtures"))]
     pub fn with_best_effort_work_fixture(mut self) -> Self {
         self.work = Arc::new(WorkBoundary::fixture());
         self

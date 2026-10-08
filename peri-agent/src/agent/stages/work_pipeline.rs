@@ -12,7 +12,7 @@ use super::work_ledger::WorkMutationBarrier;
 pub(crate) enum WorkMode {
     #[default]
     Required,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-fixtures"))]
     BestEffortFixture,
 }
 
@@ -34,7 +34,7 @@ pub(crate) enum WorkSetupError {
 
 pub(crate) enum WorkRuntime {
     Durable(Arc<WorkSession>),
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-fixtures"))]
     BestEffortFixture,
 }
 
@@ -49,7 +49,7 @@ impl WorkRuntime {
         admission: Option<&WorkAdmission>,
         resources: Option<Arc<dyn SessionResources>>,
     ) -> Result<Self, WorkSetupError> {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-fixtures"))]
         if mode == WorkMode::BestEffortFixture {
             return Ok(Self::BestEffortFixture);
         }

@@ -18,14 +18,14 @@ use peri_agent::{
     agent::{
         compact_v2::CompactConfig,
         react::{ReactLLM, Reasoning, StreamingContext},
-        stages::{run_react_loop, LoopResult, StageContext},
+        stages::{run_react_loop, LoopResult, StageContext, StageContextBuilder},
         token::ContextBudget,
     },
     error::{AgentError, AgentResult},
     messages::BaseMessage,
     session::{
-        exec::compact_pipeline::execute_compact, FrozenContext, MessageSource, MessageTranscript,
-        QueuedMessage, Session,
+        exec::compact_pipeline::execute_compact, FrozenContext, MessageQueue, MessageSource,
+        MessageTranscript, QueuedMessage, Session, TurnContext,
     },
     tools::BaseTool,
 };
@@ -34,6 +34,32 @@ use peri_model::{
     StopReason, TokenUsage,
 };
 use tokio_util::sync::CancellationToken;
+
+/// 夹具：Compact 对抗套件的循环装配（当前契约）。
+///
+/// 本套件只考察预算与投影，使用 crate 自身的 best-effort 装配（无 durable 执行）。
+/// 生产装配要求 SDK 准入端口，且 Reason 必须走 `prepare_reasoning`；这里的脚本
+/// `ReactLLM` 替身不实现该路径，用生产装配驱动只会得到环境错误而非被测结论。
+/// 该 seam 默认不进入生产构建（`test-fixtures` feature）。
+#[cfg(feature = "test-fixtures")]
+fn loop_builder(
+    turn: TurnContext,
+    transcript: Arc<parking_lot::RwLock<MessageTranscript>>,
+    queue: MessageQueue,
+) -> StageContextBuilder {
+    StageContext::best_effort_fixture_builder(turn, transcript, queue)
+}
+
+/// 缺少 `test-fixtures` 时立即失败：静默退回生产装配只会让整套用例以错误的
+/// 夹具环境运行（durable 路径缺少 SDK 端口），掩盖真实结论。
+#[cfg(not(feature = "test-fixtures"))]
+fn loop_builder(
+    _: TurnContext,
+    _: Arc<parking_lot::RwLock<MessageTranscript>>,
+    _: MessageQueue,
+) -> StageContextBuilder {
+    panic!("peri-agent compact 对抗测试需要 --features test-fixtures")
+}
 
 struct BoundSession {
     resources: Arc<dyn SessionResources>,
@@ -191,7 +217,7 @@ fn make_context(
     model: Arc<PrimaryModel>,
     summary: Arc<SummaryModel>,
 ) -> StageContext {
-    StageContext::builder(
+    loop_builder(
         session.start_turn(),
         session.transcript(),
         session.queue().clone(),
@@ -458,9 +484,13 @@ impl Model for RejectedSummary {
     }
 }
 
-/// [回归测试] 手动 compact 必须保留安全的 HTTP 诊断，并保全原历史。
+/// [回归测试] 手动 compact 必须保留逐字分类诊断（含 provider 标识），并保全原历史。
+///
+/// 现行权威 ARC-SECRET-001（2026-10-06 修订，见 `2026-10-06-p0-agent-internal-error-diagnostic-loss`）：
+/// 运行时诊断不因 token/URL/路径形状遮蔽或替换实际错误信息，因此这里锁定
+/// 「分类事实 + provider 标识」逐字存在，而不是旧版的脱敏后措辞。
 #[tokio::test]
-async fn test_compact_session_manual_http_failure_reports_safe_cause() {
+async fn test_compact_session_manual_http_failure_reports_classified_cause() {
     let (bound, result, _, history) = manual_with_model(
         Arc::new(RejectedSummary {
             protocol: false,
@@ -473,7 +503,7 @@ async fn test_compact_session_manual_http_failure_reports_safe_cause() {
     assert!(matches!(feedback.level, FeedbackLevel::Error));
     assert_eq!(
         feedback.message,
-        "An LLM API error occurred (HTTP 401, request id: req-compact-401). Please try again."
+        "An LLM API error occurred (HTTP 401, request id: req-compact-401, provider: fixture). Please try again."
     );
     assert_eq!(
         serde_json::to_value(result.messages).unwrap(),
@@ -487,9 +517,13 @@ async fn test_compact_session_manual_http_failure_reports_safe_cause() {
     assert!(snapshot.flags.values().all(|flag| !flag.excluded));
 }
 
-/// [回归测试] 协议诊断只显示 allowlist 分类，不透出 provider 原文。
+/// [回归测试] 协议诊断保留 allowlist 事实集合与逐字实际错误文本。
+///
+/// 同 ARC-SECRET-001（2026-10-06 修订）：协议分类与 `message` 事实并存，
+/// 不以上下文形状替换底层原因；旧用例断言的「遮蔽 provider 正文」已不是
+/// 现行契约。这里换成更明确的锁定：分类事实与有界实际文本都必须出现。
 #[tokio::test]
-async fn test_compact_session_manual_protocol_failure_redacts_provider_body() {
+async fn test_compact_session_manual_protocol_failure_preserves_classified_cause() {
     let (_, result, _, _) = manual_with_model(
         Arc::new(RejectedSummary {
             protocol: true,
@@ -502,7 +536,7 @@ async fn test_compact_session_manual_protocol_failure_redacts_provider_body() {
     assert!(matches!(feedback.level, FeedbackLevel::Error));
     assert_eq!(
         feedback.message,
-        "An LLM API error occurred (protocol failure: invalid JSON object). Please try again."
+        "An LLM API error occurred (protocol failure: invalid JSON object, message: fixture-private-body: sk-not-a-real-key https://private.example/path). Please try again."
     );
 }
 
@@ -762,7 +796,7 @@ async fn test_compact_session_micro_shrink_does_not_hide_new_before_model_growth
     let mut chain = peri_agent::middleware::MiddlewareChain::new();
     chain.add(Box::new(AppendAfterMicro(AtomicUsize::new(0))));
     let (bus, mut events) = peri_agent::agent::events_v2::EventBus::new(Default::default());
-    let context = StageContext::builder(
+    let context = loop_builder(
         session.start_turn(),
         session.transcript(),
         session.queue().clone(),
@@ -848,7 +882,7 @@ async fn test_compact_session_zero_usage_keeps_growth_and_valid_usage_settles_it
         .write()
         .append(BaseMessage::human("base"));
     let (_, summary) = make_models(false);
-    let context = StageContext::builder(
+    let context = loop_builder(
         session.start_turn(),
         session.transcript(),
         session.queue().clone(),
@@ -944,7 +978,7 @@ async fn test_compact_session_repeated_micro_view_does_not_add_pressure() {
     ] {
         session.transcript().write().append(message);
     }
-    let context = StageContext::builder(
+    let context = loop_builder(
         session.start_turn(),
         session.transcript(),
         session.queue().clone(),
