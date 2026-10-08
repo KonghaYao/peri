@@ -25,8 +25,14 @@ apply_directory=()
 if [[ "$git_root" != "$frontend" ]]; then
     apply_directory=("--directory=${frontend#"$git_root"/}")
 fi
+# Bash 3.2 with `set -u` exits on "${empty[@]}", so the directory
+# argument is passed only when emsdk's Git root is above the frontend.
 apply_patch() {
-    git -C "$git_root" apply "${apply_directory[@]}" "$@"
+    if [[ ${#apply_directory[@]} -gt 0 ]]; then
+        git -C "$git_root" apply "${apply_directory[@]}" "$@"
+    else
+        git -C "$git_root" apply "$@"
+    fi
 }
 
 lock="$frontend/.peri-patch-lock"
