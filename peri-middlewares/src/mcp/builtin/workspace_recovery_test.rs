@@ -111,7 +111,6 @@ async fn cancelled_bridge_stops_process_and_drains_session_ownership() {
         Some(WorkspaceInstanceInput {
             task_manager: Some(manager.clone()),
             on_bg_complete: None,
-            default_run_in_background: false,
         }),
     )
     .await;
@@ -168,7 +167,6 @@ async fn maximum_foreground_timeout_retains_logs_and_cancellable_task() {
         Some(WorkspaceInstanceInput {
             task_manager: Some(manager.clone()),
             on_bg_complete: None,
-            default_run_in_background: false,
         }),
     )
     .await;
@@ -241,7 +239,6 @@ async fn request_timeout_stops_server_shell() {
         Some(WorkspaceInstanceInput {
             task_manager: Some(manager.clone()),
             on_bg_complete: None,
-            default_run_in_background: false,
         }),
     )
     .await;

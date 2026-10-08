@@ -46,6 +46,10 @@ mod execution;
 #[cfg(test)]
 #[path = "executor_flow_test.rs"]
 mod executor_flow_tests;
+
+#[cfg(test)]
+#[path = "executor_flow_beta_flag_test.rs"]
+mod executor_flow_beta_flag_tests;
 mod mcp_apps;
 // V-02（W4）的 host seam 断言：首个 LLM 请求的三个冻结 effective name、能力关闭的
 // 首个请求面、`PERI_MCP_BUILTIN=off` 语义、启动 fatal 投影、BLOCKED 缺口复证。

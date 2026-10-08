@@ -279,14 +279,14 @@ impl ConfigSource {
 
     /// Beta flag 有效值投影 from this selected source.
     ///
-    /// 有已发布快照时用快照投影；lenient 源（无 authority）用内存中的
-    /// global/merged 视图投影——两者都是 typed 值，不重读文件。配置面不可用时投影
-    /// 为空（一切按 false，不意外开启能力）。
+    /// **只**从已发布快照投影：没有快照（lenient / authority 不可用 / scope 未解析）
+    /// 时返回空投影（一切按 false）——设计「快照缺失、未覆盖与未知 id 一律按 false，
+    /// 配置面不可用不得导致能力意外开启」的字面口径，不按内存草稿视图回升。
+    /// 有快照时不重读文件。
     pub fn beta_flags(&self) -> crate::betas::BetaFlags {
-        if let Some(snapshot) = self.snapshot() {
-            return snapshot.flags().clone();
-        }
-        crate::betas::resolve(&self.global, &self.merged)
+        self.snapshot()
+            .map(|snapshot| snapshot.flags().clone())
+            .unwrap_or_default()
     }
 
     pub fn is_workspace(&self) -> bool {

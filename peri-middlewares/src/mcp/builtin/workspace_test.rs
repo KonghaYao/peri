@@ -137,7 +137,6 @@ async fn workspace_handler_bash_run_in_background_uses_injected_task_manager_ove
         Some(WorkspaceInstanceInput {
             task_manager: Some(Arc::clone(&manager)),
             on_bg_complete: Some(on_bg_complete),
-            default_run_in_background: false,
         }),
     )
     .await;
@@ -258,7 +257,6 @@ async fn workspace_handler_lingering_child_is_registered_only_with_injected_task
         Some(WorkspaceInstanceInput {
             task_manager: Some(Arc::clone(&manager)),
             on_bg_complete: None,
-            default_run_in_background: false,
         }),
     )
     .await;

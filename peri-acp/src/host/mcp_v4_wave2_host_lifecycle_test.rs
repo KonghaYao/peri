@@ -38,7 +38,6 @@ async fn wave3_one_to_n_root_never_injects_per_session_workspace_input() {
         Some(peri_mcp_workspace::WorkspaceInstanceInput {
             task_manager: Some(Arc::clone(&root_manager)),
             on_bg_complete: None,
-            default_run_in_background: false,
         }),
     )
     .await;

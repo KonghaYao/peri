@@ -109,10 +109,10 @@ impl WorkspaceMcpServer {
     /// 的顺序参照随之失效）：本段顺序的**唯一**事实源是注册表声明顺序，两处由
     /// `workspace_test.rs` 的声明段用例锁定。
     ///
-    /// `input` 的三名成员各自独立生效（`task_manager` 与 `on_bg_complete` 由不同装配面产出，
+    /// `input` 的两名成员各自独立生效（`task_manager` 与 `on_bg_complete` 由不同装配面产出，
     /// 本构造不假定它们同时到位）：`None` 时对应字段保持 `BashTool::new` 的缺省 `None`
-    /// （退化分支见模块头），其余 6 个工具不受 `input` 影响。`default_run_in_background`
-    /// 是 beta flag 的会话装配投影，`false` 与既有行为逐位一致。
+    /// （退化分支见模块头），其余 6 个工具不受 `input` 影响。`run_in_background` 的有效
+    /// 缺省不在本构造注入（只经 [`Self::standalone`]，见 `input.rs`），此处恒为前台缺省。
     pub fn new(cwd: impl Into<String>, input: Option<WorkspaceInstanceInput>) -> Self {
         let cwd = cwd.into();
         let mut bash = BashTool::new(cwd.as_str());
@@ -123,7 +123,6 @@ impl WorkspaceMcpServer {
             if let Some(on_bg_complete) = input.on_bg_complete {
                 bash = bash.with_on_bg_complete(on_bg_complete);
             }
-            bash = bash.with_default_run_in_background(input.default_run_in_background);
         }
         let bash = Arc::new(bash);
         let tools: Vec<Arc<dyn BaseTool>> = vec![

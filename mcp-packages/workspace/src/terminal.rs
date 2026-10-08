@@ -427,6 +427,10 @@ impl BashTool {
 
         // ── 后台执行路径 ──
         // 缺省来自装配期注入的有效缺省（beta flag 投影）；显式 false 仍走前台。
+        //
+        // [TRAP] 语义不对称（与 Agent 工具有意不同，勿"修平"）：缺省 true 且无
+        // task_manager 时本工具报既有错误（`run_in_background is not available`），
+        // Agent 工具则静默落回同步路径——两者各自维持各自引入前的语义。
         let run_in_background = input["run_in_background"]
             .as_bool()
             .unwrap_or(self.default_run_in_background);

@@ -187,6 +187,8 @@ setup-language-press-enter = 按 Enter 确认
 
 config-panel-title =  /config — 配置
 config-beta-section = Beta · 新会话生效
+# Beta flag 描述（key = beta-desc-<flag id>；缺失回退注册表 canonical 文本）
+beta-desc-full-async-tools = Bash 与 Agent 在调用未显式给出 run_in_background 时缺省后台执行（显式 false 仍前台）
 config-field-autocompact = Autocompact
 config-field-compact-threshold = Compact 阈值
 config-field-language = 语言

@@ -1,9 +1,10 @@
 # Beta Flag 系统
 
-> 状态：已批准目标设计。flag 注册表、配置面投影、消费注入与 TUI 管理面尚未实现；
-> 实施范围、拆分与验收见 [2026-10-08 实施 issue](../../spec/issues/2026-10-08-beta-flags-implementation.md)。
+> 状态：现行设计（已实现：注册表、`config.betas` 配置面投影、装配期消费注入与
+> ConfigPanel 管理区块）。实施记录与剩余跟进项见
+> [2026-10-08 实施 issue](../../spec/issues/2026-10-08-beta-flags-implementation.md)。
 >
-> 事实源：settings 占位类型 `peri-config/src/app.rs::BetasConfig`；配置权威、快照、
+> 事实源：settings 类型 `peri-config/src/app.rs::BetasConfig`（bool 稀疏覆盖表）；配置权威、快照、
 > CAS 与 explain 的通用规则见 [configuration-authority.md](configuration-authority.md)；
 > 消费点 `mcp-packages/workspace/src/terminal.rs`（Bash）、
 > `peri-middlewares/src/subagent/tool/`（Agent）；管理面板
@@ -106,9 +107,8 @@ flowchart LR
 静态表扩展为「基础行 + 注册表驱动行」，滚动沿用面板既有能力。
 
 - 切换写当前生效层的 `config.betas[id]`，经 `save_effective`（CAS）持久化；保存
-  失败保持内存视图不变并提示错误，与既有配置行一致。
-- 面板显示当前生效层的覆盖值；未设置与显式 false 均显示为关闭。有效值仍由权威面
-  按合并规则计算。
+  失败回滚本次内存写入（视图保持持久化前的值）并提示错误。
+- 面板显示**合并后的有效值**；未设置与显式 false 均显示为关闭。
 - 区块标注**新会话生效**；已运行会话不受切换影响。
 - 描述优先 i18n key `beta-desc-<id>`，缺失回退注册表 canonical 文本。
 - BetasPanel（Ctrl+B / `/betas`，当前为 mock 列表）退役：flag 列表的单一权威是
@@ -122,7 +122,7 @@ flowchart LR
 | 效果 | `Bash` 与 `Agent` 在调用未显式给出 `run_in_background` 时，缺省由 false 变为 true |
 | 显式优先 | 显式 `run_in_background: false` 仍走前台；flag 只改缺省，不覆盖显式意图。`Agent` 的 resume 调用（携带 `resume_thread_id`）不受影响 |
 | 模型可见 | 工具 schema 中 `run_in_background` 的 `default` 与描述随有效缺省同步；schema 只影响模型倾向，硬缺省由执行路径执行 |
-| 依赖前提 | 缺省转后台要求任务管理器就绪；缺失时维持既有报错语义，flag 不创造未装配的能力 |
+| 依赖前提 | 缺省转后台要求任务管理器就绪；缺失时维持既有报错语义，flag 不创造未装配的能力。**语义不对称**：缺省 true 且无任务管理器时 `Bash` 报既有错误（`run_in_background is not available`），`Agent` 静默落回前台——两者各自维持引入前的语义 |
 | 不变项 | 任务注册、完成回传、取消、并发上限、前台超时 promote 与输出落盘链均不因 flag 改变 |
 
 ## 治理

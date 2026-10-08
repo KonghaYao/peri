@@ -231,7 +231,18 @@ impl BaseTool for SubAgentTool {
             return Err("Error: MCP Agents currently support synchronous activation only".into());
         }
         // 有效缺省由装配期注入（middleware 装配参数，会话内冻结）：显式意图优先。
-        let run_in_background = run_in_background.unwrap_or(self.default_run_in_background);
+        //
+        // [TRAP] 缺省**不对 MCP Agent 生效**：它们的定义准入必须经审批门
+        // （`load_and_approve_mcp_agent`），而后台路径（`invoke_background` →
+        // `load_agent_def` → `registry.activate`）**不经**该门；缺省若在这里生效，
+        // 一次省略 `run_in_background` 的调用就会让远端定义无用户审批即执行。
+        // 显式 true 的既有报错语义见上（保持一致：能力未装配不得借 flag 开启）。
+        //
+        // [TRAP] 语义不对称（与 Bash 有意不同，勿"修平"）：缺省 true 且无
+        // task_manager 时，Bash 报既有错误（`run_in_background is not available`），
+        // 本工具静默落回同步路径——两者各自维持各自引入前的语义。
+        let run_in_background =
+            run_in_background.unwrap_or(self.default_run_in_background && !is_mcp_agent);
 
         // 后台路径需要 task_manager（L3：经 parent_session 的 host 或 tool host 回退）。
         // resume_thread_id.is_none() 为双保险（R-M2）：resume 分支已先返回，此处不可能

@@ -379,9 +379,10 @@ fn toggle_styles(theme_def: &peri_theme::theme::ThemeDefinition, val: bool) -> (
     (on_style, off_style)
 }
 
-/// beta flag 行的显示值：**当前生效层**的覆盖值（未设置与显式 false 均显示为关闭）。
+/// beta flag 行的显示值：**合并后**的有效值（未设置与显式 false 均显示为关闭）。
 ///
-/// 有效值仍由权威面按合并规则计算——面板只显示生效层写回的那个键。
+/// 有效值由权威面按合并规则计算；`PERI_CONFIG_HANDLE` 持有的就是该合并视图，
+/// 面板只按 id 读它，不自行合并来源层。
 fn read_beta_toggle(id: &str) -> bool {
     PERI_CONFIG_HANDLE
         .get()

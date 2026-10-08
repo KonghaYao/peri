@@ -635,3 +635,31 @@ mod once_scope;
 mod sections;
 #[path = "assembly_test_workflow.rs"]
 mod workflow;
+
+// ─── beta flag `full-async-tools`（装配面 → Agent 工具 schema）──────────────
+
+/// 装配参数 → 链装配产物：`AssemblyContext::agent_default_run_in_background`
+/// 必须到达链上 `Agent` 工具的 schema（`run_in_background.default`），
+/// 且缺省注入与否只改这一项。
+///
+/// 接线断掉（例如 `ProductionChainAssembler` 不再把它交给 `SubAgentMiddleware`、
+/// 或 `build_tool` 不再下传）时本用例报红——工具级用例直接调
+/// `with_default_run_in_background` 绕过装配，覆盖不到这段。
+#[test]
+fn agent_default_run_in_background_reaches_chain_tool_schema() {
+    fn agent_tool_default(ctx: &AssemblyContext) -> serde_json::Value {
+        let out = build_middleware_chain(&ProductionChainAssembler, ctx);
+        let tools = out.chain.collect_tools(&ctx.cwd);
+        let agent = tools
+            .iter()
+            .find(|tool| tool.name() == "Agent")
+            .expect("生产链必须提供 Agent 工具");
+        agent.parameters()["properties"]["run_in_background"]["default"].clone()
+    }
+
+    let mut ctx = base_context();
+    assert_eq!(agent_tool_default(&ctx), serde_json::json!(false));
+
+    ctx.agent_default_run_in_background = true;
+    assert_eq!(agent_tool_default(&ctx), serde_json::json!(true));
+}

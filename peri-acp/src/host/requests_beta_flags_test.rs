@@ -21,7 +21,6 @@
 
 use super::*;
 use peri_acp_types::beta_flags::FULL_ASYNC_TOOLS;
-use peri_acp_types::ports::McpPoolPort as _;
 
 /// 夹具：`startup`（装配起点）与 `target`（会话 cwd，含 settings）。
 ///
@@ -34,6 +33,16 @@ fn beta_fixture(betas: &str) -> (tempfile::TempDir, String, String) {
     let target = tmp.path().join("target");
     std::fs::create_dir(&startup).unwrap();
     std::fs::create_dir_all(target.join(".peri")).unwrap();
+    write_betas(&target, betas);
+    (
+        tmp,
+        startup.to_string_lossy().into_owned(),
+        target.to_string_lossy().into_owned(),
+    )
+}
+
+/// 写会话目录的 settings（provider 自带 + 指定的 `config.betas` 覆盖）。
+fn write_betas(target: &std::path::Path, betas: &str) {
     std::fs::write(
         target.join(".peri/settings.json"),
         format!(
@@ -41,11 +50,6 @@ fn beta_fixture(betas: &str) -> (tempfile::TempDir, String, String) {
         ),
     )
     .unwrap();
-    (
-        tmp,
-        startup.to_string_lossy().into_owned(),
-        target.to_string_lossy().into_owned(),
-    )
 }
 
 /// 生产装配的宿主配置（bare：只建 workspace 池 + 指定启动目录）。
@@ -154,5 +158,70 @@ async fn new_session_without_beta_flag_keeps_foreground_default() {
         bash["properties"]["run_in_background"]["default"],
         json!(false),
         "未配置时 Bash 缺省必须与 flag 引入前一致（前台）"
+    );
+}
+
+/// 既有会话保持冻结值：新建（flag 未配置）→ **磁盘改成开启** → `session/load` 恢复
+/// → 恢复会话仍用持久 blob 的冻结值（Bash 缺省仍是前台，不按当前配置重建）。
+///
+/// 这一条覆盖 `SessionEnvironment::assemble_with_frozen` 的 `Some(frozen)` 分支
+/// （恢复 / fork 路径）；新建路径见上面两个用例。
+#[tokio::test]
+#[serial]
+async fn restored_session_keeps_frozen_beta_flag() {
+    let (tmp, startup, target) = beta_fixture("");
+    let cfg = beta_server_config(&tmp, startup).await;
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
+    let mut sessions = HashMap::new();
+    let created = handle_request(
+        "session/new",
+        &json!({"cwd": target}),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .expect("session/new 必须成功");
+    let id = created["sessionId"].as_str().unwrap().to_string();
+    assert!(
+        !sessions[&id]
+            .frozen
+            .as_ref()
+            .expect("创建必须发布 frozen")
+            .v2_frozen()
+            .beta_flags
+            .is_enabled(FULL_ASYNC_TOOLS),
+        "前置：新建会话说 flag 未开启"
+    );
+
+    // 会话创建之后改设置：新会话会读到 true，**既有会话**必须不受影响。
+    write_betas(std::path::Path::new(&target), r#""full-async-tools":true"#);
+
+    // 冷恢复形态：会话不在本 host 的活跃表里（`sessions` 为空）——
+    // `prepare_existing` 因此走 `Publish` 分支，环境按**持久 blob** 重新装配
+    // （活跃表命中只补历史、不重装配，覆盖不到 `Some(frozen)` 分支）。
+    let mut restored_sessions = HashMap::new();
+    handle_request(
+        "session/load",
+        &json!({"sessionId": id, "cwd": target}),
+        &cfg,
+        &mut restored_sessions,
+        &transport,
+    )
+    .await
+    .expect("session/load 必须成功");
+    let restored = restored_sessions.get(&id).expect("恢复后的会话必须登记");
+    let frozen = restored.frozen.as_ref().expect("恢复必须载入 frozen");
+    assert!(
+        !frozen.v2_frozen().beta_flags.is_enabled(FULL_ASYNC_TOOLS),
+        "既有会话必须保持冻结值（frozen 只接受持久 blob，不按当前配置重建）：{:?}",
+        frozen.v2_frozen().beta_flags
+    );
+    let bash = workspace_bash_schema(restored.environment.as_ref())
+        .expect("builtin workspace 实例必须暴露 Bash");
+    assert_eq!(
+        bash["properties"]["run_in_background"]["default"],
+        json!(false),
+        "恢复会话的 Bash 缺省必须仍是前台（冻结值胜出）"
     );
 }

@@ -148,6 +148,9 @@ async fn default_background_absent_stays_synchronous() {
 
 /// 缺省 = true 但 MCP Agent 只支持同步激活：缺省不得把它们推进报错路径
 /// （flag 不创造未装配的能力）；显式 `true` 仍按既有语义报错。
+///
+/// 本用例无 task_manager——它锁的是「不因缺省报错」这一半；后台路径本身是否被
+/// 阻断见 [`default_background_never_bypasses_mcp_agent_approval_gate`]。
 #[tokio::test]
 async fn default_background_does_not_break_mcp_agents() {
     use crate::mcp::client::McpClientPool;
@@ -194,5 +197,74 @@ async fn default_background_does_not_break_mcp_agents() {
     assert!(
         explicit.contains("synchronous activation only"),
         "显式 true 的既有报错必须保留：{explicit}"
+    );
+}
+
+/// [回归] 缺省后台**不得**把 MCP Agent 推进后台路径（生产组合：task_manager 在场）。
+///
+/// 后台路径（`invoke_background` → `load_agent_def` → `registry.activate`）不经过
+/// MCP Agent 的内容绑定审批门（`load_and_approve_mcp_agent`）——缺省若在那里生效，
+/// 一次省略 `run_in_background` 的调用就会让远端定义无用户审批即后台执行。
+/// 断言强度：必须报同步路径的「定义不可得」，且**没有任何后台任务被登记**。
+#[tokio::test]
+async fn default_background_never_bypasses_mcp_agent_approval_gate() {
+    use crate::mcp::client::McpClientPool;
+    use crate::mcp::McpAgentRegistry;
+
+    let dir = tempfile::tempdir().unwrap();
+    let (bg_tx, _bg_rx) =
+        tokio::sync::mpsc::unbounded_channel::<peri_agent::agent::events::ExecutorEvent>();
+    let manager = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
+    // 生产常态：会话级 task_manager 在场（缺省后台本来会经由它进入后台路径）。
+    let host = HostFixture::open_in_with_background(
+        dir.path(),
+        "beta-bg-mcp-approval",
+        Arc::clone(&manager),
+        bg_tx,
+    )
+    .await;
+    let empty_registry = Arc::new(McpAgentRegistry::new(Arc::new(McpClientPool::new_empty())));
+    let tool = host.bind(
+        SubAgentTool::new(
+            Arc::new(Vec::new()),
+            None,
+            Arc::new(|_| {
+                crate::subagent::test_support::fixture_source(Arc::new(EchoLLM), "fixture-scripted")
+            }),
+            dir.path().to_str().unwrap().to_string(),
+        )
+        .with_default_run_in_background(true)
+        .with_mcp_agents(Some(empty_registry), None),
+    );
+
+    assert!(
+        tool.host().task_manager.is_some(),
+        "前置（生产常态）：会话任务管理器在场——缺省后台若生效就会进入后台路径"
+    );
+    let error = tool
+        .invoke(
+            serde_json::json!({"subagent_type": "mcp__offline__review", "prompt": "remote"}),
+            host.context(&[]),
+        )
+        .await
+        .expect_err("未激活的 MCP Agent 仍必须走同步路径报定义不可得")
+        .to_string();
+    assert!(
+        error.contains("MCP agent definition"),
+        "必须走同步路径（审批门）报「MCP agent definition」不可得，而不是后台路径的 \
+         `load_agent_def` 报错：{error}"
+    );
+    assert!(
+        !error.contains("Background task"),
+        "缺省后台不得让 MCP Agent 进入后台路径：{error}"
+    );
+    assert_eq!(
+        manager.active_count(),
+        0,
+        "后台路径若被触达就会登记 bg 任务（审批门旁路）：不得有任何登记"
+    );
+    assert!(
+        !error.contains("Check .claude/agents/"),
+        "不得出现后台/本地加载路径的包裹文本（load_agent_def 的错误格式）：{error}"
     );
 }

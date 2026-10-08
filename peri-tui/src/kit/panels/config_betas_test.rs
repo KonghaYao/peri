@@ -50,6 +50,10 @@ fn test_activate_section_row_is_inert() {
 }
 
 /// 描述优先 i18n key `beta-desc-<id>`，缺失回退注册表 canonical 文本。
+///
+/// 断言只用**缺失 key** 的形状（`beta-desc-definitely-missing-flag`）：翻译内容与
+/// 语言无关，把它锁进期望会让「补/改翻译」变成测试失败。当前 `beta-desc-<id>` 的
+/// 翻译覆盖不进入本用例（`fl`-bundle 命中路径由 i18n 自身测试覆盖）。
 #[test]
 fn test_beta_description_falls_back_to_canonical() {
     assert_eq!(
@@ -57,12 +61,9 @@ fn test_beta_description_falls_back_to_canonical() {
         "canonical text",
         "未命中 i18n key 时必须原样回退 canonical 文本"
     );
+    // 注册表条目的 id 必须能作为 key 参与查找（不得 panic / 不得返回空）。
     let flag: &BetaFlag = &BETA_FLAGS[0];
-    assert_eq!(
-        beta_description(flag.id, flag.description),
-        flag.description,
-        "当前未提供 beta-desc-<id> 翻译：回退 canonical 文本"
-    );
+    assert!(!beta_description(flag.id, flag.description).is_empty());
 }
 
 /// 面板显示生效层覆盖值：未设置与显式 false 均显示为关闭。
