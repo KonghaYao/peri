@@ -4,6 +4,8 @@
 
 输入反馈仍遵循 [待发送队列设计](../design/user-input-queue.md)：`kit/steer_state.rs::direct_submitting` 驱动 composer “正在提交…”，不是 Delivered 气泡。消息区用 `message_area/vm_cache.rs::read_render_snapshot` 短锁复制一致 VM/publication 后锁外派生；Transcript 跳代只重建实际变化的内容键，冷历史、布局和复制回归见 `transcript_test.rs`。
 
+待发送鼠标入口：`kit/steer_queue.rs` 按最近绘制帧命中控件；正文点击只选择发送动作（下划线），按钮命中才触发提交。持续中文流式输出与长中文队列的真实点击回归见 `e2e/tests/smoke/steer-queue-live.test.ts`。
+
 Markdown 高亮预算在 `kit/markdown/code_block.rs`，超限保留原文，仅不做语法着色；`markdown/workload_test.rs` 与 `code_block_test.rs` 覆盖复杂结构及预算边界。`perf.render` 的 `message-body-total` 只覆盖消息组件准备，不能当作终端 draw/flush 或 Enter 端到端计时。
 
 显式停止入口 `src/acp_client/client/requests.rs::cancel` 在当前交互 gate 内读取会话与 managed run，结清本地待处理交互后发送 `session/cancel` 通知。通知发送不等于执行已静止，loading/交互终结仍等待执行结束通知；回归见 `src/acp_client/client/cancel_test.rs`。
