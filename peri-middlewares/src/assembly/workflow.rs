@@ -288,9 +288,9 @@ impl WorkflowAgentMiddlewareFactory {
     /// 已无消费点（原 `TerminalMiddleware::build_tools_with_registry` 是唯一消费者）；
     /// 形参保留以维持端口签名（`WorkflowMiddlewareFactory::build_tools`）不变。
     ///
-    /// W4b（F4/J5）：**本地扫描已删除**——两个技能工具共享的 `cached_skills`
-    /// 改由会话级 MCP skill registry 投影填充（`registry` 形参；workflow agent
-    /// 与主链消费同一份目录，不再只看 project-level）。
+    /// W4b（F4/J5）：**本地扫描已删除**——两个技能工具在调用时直接读会话级
+    /// MCP skill registry 的当前投影（`registry` 形参；workflow agent 与主链
+    /// 消费同一份目录，不再只看 project-level，也不再经过 before_agent 快照）。
     fn workflow_tools(
         _cwd: &str,
         disabled: &std::collections::HashSet<String>,
@@ -302,18 +302,11 @@ impl WorkflowAgentMiddlewareFactory {
         // D3：统一模型可见协议为 SkillTool(skill_name) + DiscoverSkillsTool，
         // 与主 agent / subagent 链一致，不再注册旧 Skill(skill, args)。
         if !disabled.contains("SkillsMiddleware") {
-            let cached = std::sync::Arc::new(std::sync::RwLock::new(
-                mcp_skill_registry
-                    .as_ref()
-                    .map(|registry| registry.all_skills())
-                    .filter(|skills| !skills.is_empty()),
-            ));
             tools.push(Box::new(crate::skills::tools::SkillTool::new(
-                Arc::clone(&cached),
-                mcp_skill_registry,
+                mcp_skill_registry.clone(),
             )));
             tools.push(Box::new(crate::skills::tools::DiscoverSkillsTool::new(
-                cached,
+                mcp_skill_registry,
             )));
         }
         tools

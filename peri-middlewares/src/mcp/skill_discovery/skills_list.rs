@@ -74,13 +74,44 @@ pub(super) struct SkillListEntry {
     pub(super) resources: Option<Vec<SkillResource>>,
 }
 
-/// 纯函数：DTO → 条目。frontmatter 缺 name/description（Agent Skills
-/// 规范要求必填，缺失即非规范）→ None（该条目跳过）；frontmatter map
-/// 原样移入（verbatim，不 clone 消耗）。
-pub(super) fn entry_from_dto(dto: SkillListEntryDto) -> Option<SkillListEntry> {
-    dto.frontmatter.get("name")?.as_str()?;
-    dto.frontmatter.get("description")?.as_str()?;
-    Some(SkillListEntry {
+/// 条目级结构缺陷（诊断用）：只带来源、字段与错误类别，**不含原始字段正文**。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct EntryDefect {
+    /// 出错字段（frontmatter 字段名）。
+    pub(super) field: &'static str,
+    /// 错误类别（`missing` / `wrong-type`）。
+    pub(super) category: &'static str,
+}
+
+impl EntryDefect {
+    fn missing(field: &'static str) -> Self {
+        Self {
+            field,
+            category: "missing",
+        }
+    }
+
+    fn wrong_type(field: &'static str) -> Self {
+        Self {
+            field,
+            category: "wrong-type",
+        }
+    }
+}
+
+/// 纯函数：DTO → 条目。frontmatter `name` / `description` 必填且必须是字符串
+/// （Agent Skills 规范要求；缺失或类型不符即非规范条目，M8：隔离该条目并给出
+/// 字段与类别诊断，不回显字段正文）；frontmatter map 原样移入（verbatim，
+/// 不 clone 消耗）。
+pub(super) fn entry_from_dto(dto: SkillListEntryDto) -> Result<SkillListEntry, EntryDefect> {
+    for field in ["name", "description"] {
+        match dto.frontmatter.get(field) {
+            None => return Err(EntryDefect::missing(field)),
+            Some(value) if value.as_str().is_none() => return Err(EntryDefect::wrong_type(field)),
+            Some(_) => {}
+        }
+    }
+    Ok(SkillListEntry {
         uri: dto.uri,
         frontmatter: dto.frontmatter,
         resources: dto.resources.map(|rs| {
@@ -92,6 +123,45 @@ pub(super) fn entry_from_dto(dto: SkillListEntryDto) -> Option<SkillListEntry> {
                 .collect()
         }),
     })
+}
+
+/// 逐条转换并**隔离**非法条目：坏条目单独记来源 / 字段 / 错误类别（不回显字段
+/// 正文），好条目照常进入发现结果；有隔离时另记汇总 warn——部分失败不得被
+/// 呈现成完整成功（M8）。返回 `(entries, rejected)`。
+pub(super) fn collect_entries(
+    server: &str,
+    dto_entries: Vec<SkillListEntryDto>,
+    context: &str,
+) -> (Vec<SkillListEntry>, usize) {
+    let total = dto_entries.len();
+    let mut entries = Vec::with_capacity(total);
+    let mut rejected = 0usize;
+    for dto in dto_entries {
+        let uri = dto.uri.clone();
+        match entry_from_dto(dto) {
+            Ok(entry) => entries.push(entry),
+            Err(defect) => {
+                rejected += 1;
+                tracing::warn!(
+                    server,
+                    uri = %uri,
+                    field = defect.field,
+                    category = defect.category,
+                    "MCP skill 发现：条目字段非法，隔离该条目（不回显字段正文）"
+                );
+            }
+        }
+    }
+    if rejected > 0 {
+        tracing::warn!(
+            server,
+            context,
+            rejected,
+            total,
+            "MCP skill 发现：部分条目被隔离，本次结果不是完整成功"
+        );
+    }
+    (entries, rejected)
 }
 
 /// 规范路径：`skills/list` 分页枚举 → 每条目 `resources/read` 读 SKILL.md →
@@ -179,7 +249,7 @@ async fn collect_via_skills_list_inner(
     if dto_entries.is_empty() {
         return (false, Vec::new());
     }
-    let entries: Vec<SkillListEntry> = dto_entries.into_iter().filter_map(entry_from_dto).collect();
+    let (entries, _rejected) = collect_entries(server, dto_entries, "skills/list 发现");
     if entries.is_empty() {
         tracing::warn!(
             server,
@@ -282,7 +352,7 @@ pub(crate) async fn snapshot_via_skills_list(
     if dto_entries.is_empty() {
         return Ok(Vec::new());
     }
-    let entries: Vec<SkillListEntry> = dto_entries.into_iter().filter_map(entry_from_dto).collect();
+    let (entries, _rejected) = collect_entries(server, dto_entries, "skills/list 冻结快照");
     if entries.is_empty() {
         tracing::warn!(
             server,
@@ -499,7 +569,18 @@ async fn fetch_skill_entry(peer: &Peer<RoleClient>, uri: &str) -> Option<SkillLi
             return None;
         }
     };
-    entry_from_dto(parsed.skill)
+    match entry_from_dto(parsed.skill) {
+        Ok(entry) => Some(entry),
+        Err(defect) => {
+            tracing::warn!(
+                %uri,
+                field = defect.field,
+                category = defect.category,
+                "MCP skill skills/get 条目字段非法，隔离该条目（不回显字段正文）"
+            );
+            None
+        }
+    }
 }
 
 /// 条目 → metadata（W2：**发现期不读正文**）。

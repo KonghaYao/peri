@@ -390,6 +390,18 @@ impl McpSkillRegistry {
             .unwrap_or_default()
     }
 
+    /// 是否仍有 server 的发现任务在进行（`Started` 未收口）。
+    ///
+    /// 「目录为空」与「目录尚未就绪」的唯一区分依据：**空投影不等于读失败**，
+    /// 而发现未收口时的空投影不能当成功返回（L2：未就绪不返回假空成功）。
+    pub fn discovery_in_progress(&self) -> bool {
+        let guard = self.inner.read();
+        guard
+            .servers
+            .values()
+            .any(|state| matches!(state, ServerDiscoveryState::Started { .. }))
+    }
+
     /// 按全名查找（小写精确匹配 `mcp__<server>__<skill>`）；未命中再试
     /// `<server>:<skill>` 别名（rsplit_once(':')，后缀非空才拼全名）。
     ///

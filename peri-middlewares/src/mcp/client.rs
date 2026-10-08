@@ -215,6 +215,37 @@ pub(crate) const STDIO_CONNECT_TIMEOUT: std::time::Duration = std::time::Duratio
 pub(crate) const HTTP_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 pub(crate) const SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// 有界重采集（M9，list→read TOCTOU）：首次采集失败后**只**重采集一次。
+///
+/// 仍不一致时返回显式的内容准入错误（可重试），调用方据此 fail-closed——
+/// 不把半套采集结果当作冻结数据提交。`context` 是错误文案里的面名称，
+/// 不含正文与主机路径。
+async fn collect_with_single_recollect<T, F, Fut>(
+    context: &str,
+    mut collect: F,
+) -> Result<T, String>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, String>>,
+{
+    match collect().await {
+        Ok(value) => Ok(value),
+        Err(first) => {
+            tracing::warn!(
+                error = %first,
+                face = context,
+                "首次采集不一致，有界重采集一次（list→read TOCTOU）"
+            );
+            collect().await.map_err(|second| {
+                format!(
+                    "{context} stayed inconsistent after one re-collection ({second}); \
+                     retry the session admission"
+                )
+            })
+        }
+    }
+}
+
 impl McpClientPool {
     pub fn new_pending() -> Self {
         Self::new_pending_with_spawner(super::task_scope::McpTaskSpawner::closed())
@@ -707,9 +738,6 @@ impl McpClientPool {
     pub async fn read_builtin_workspace_instructions(
         &self,
     ) -> Result<(Option<String>, Option<String>), String> {
-        use peri_acp_types::workspace_resources::{
-            parse_instruction_uri, INSTRUCTION_LOCAL_URI, INSTRUCTION_MAIN_URI,
-        };
         let closed = self
             .builtin_instance_context()
             .map(|context| context.closed.clone())
@@ -734,8 +762,25 @@ impl McpClientPool {
                     .to_string(),
             );
         };
+        // M9：`resources/list` 只是发现提示，**不证明正文已锁定**。首次采集
+        // 出现不一致（已列出的指令资源读取失败）时只做一次有界重采集；仍不一致
+        // 就返回明确的可重试准入错误，不提交半套冻结数据。
+        collect_with_single_recollect("workspace instruction face", || {
+            self.collect_instruction_documents(&peer)
+        })
+        .await
+    }
+
+    /// 一次 list→read 采集（main / local）；任一已列出资源读取失败即返回 `Err`。
+    async fn collect_instruction_documents(
+        &self,
+        peer: &rmcp::service::Peer<rmcp::service::RoleClient>,
+    ) -> Result<(Option<String>, Option<String>), String> {
+        use peri_acp_types::workspace_resources::{
+            parse_instruction_uri, INSTRUCTION_LOCAL_URI, INSTRUCTION_MAIN_URI,
+        };
         let resources = self
-            .list_all_resources_cached("workspace", &peer)
+            .list_all_resources_cached("workspace", peer)
             .await
             .map_err(|error| format!("resources/list failed: {error}"))?;
         let mut main: Option<String> = None;
@@ -752,9 +797,11 @@ impl McpClientPool {
                 continue;
             }
             let (result, ticket) = self
-                .read_resource_cached("workspace", uri, &peer)
+                .read_resource_cached("workspace", uri, peer)
                 .await
-                .map_err(|error| format!("resources/read failed: {error}"))?;
+                .map_err(|error| {
+                    format!("listed instruction resource {uri} could not be read: {error}")
+                })?;
             self.cache_verified_resource("workspace", ticket, &result)
                 .await;
             let Some(text) = result.contents.iter().find_map(|content| match content {
