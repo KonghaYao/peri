@@ -1,7 +1,7 @@
 //! Hook 分发引擎 + standalone 路径。
 //!
 //! 把原本分散在 `HookMiddleware::fire_event` 与 `fire_standalone_lifecycle_hooks`
-//! 中重复的"hook 查找 / matcher 过滤 / async spawn / 同步执行 / once 标记"
+//! 中重复的"hook 查找 / matcher 过滤 / async spawn / 同步执行 / once 预留"
 //! 收敛到一个 [`HookDispatcher`]。Standalone 路径通过相同的分发逻辑执行
 //! （差异：无 LLM factory，因此 Prompt/Agent hook 被跳过）。
 
@@ -116,7 +116,7 @@ impl HookDispatcher {
     /// 流程：
     /// 1. 修正 `hook_event_name`（见下方 [TRAP]）
     /// 2. 查找匹配 hooks
-    /// 3. 对每个 hook：once check → matcher check → if-condition check → 执行
+    /// 3. 对每个 hook：matcher check → if-condition check → once 原子预留 → 执行
     /// 4. 归约 action，Block/PreventContinuation 短路
     pub async fn fire_event(
         &self,
@@ -167,13 +167,6 @@ impl HookDispatcher {
         let mut final_action = HookAction::Allow;
 
         for registered in &hooks {
-            // once check
-            if OnceTracker::is_once_hook(&registered.hook)
-                && self.once_tracker.was_fired(registered)
-            {
-                continue;
-            }
-
             // matcher check
             if let Some(name) = tool_name {
                 let matcher_str = registered.matcher.as_deref().unwrap_or_else(|| {
@@ -197,6 +190,16 @@ impl HookDispatcher {
                 }
             }
 
+            // once 原子预留（在 matcher / if 之后：不匹配的触发不得消耗预留）。
+            // [TRAP] 预留与执行之间不得再插入"查-标记"两步：生命周期闭包经
+            // `tokio::spawn` 分离触发，重叠触发必须在这里被单锁去重，否则 once
+            // hook 会执行多次；预留即消费，执行失败/取消不重试。
+            if OnceTracker::is_once_hook(&registered.hook)
+                && !self.once_tracker.try_reserve(registered)
+            {
+                continue;
+            }
+
             // Execute hook (async hooks are spawned in background, result ignored)
             if let Some(ref msg) = registered.hook.get_status_message() {
                 tracing::info!(
@@ -217,11 +220,6 @@ impl HookDispatcher {
                 self.execute_sync(&registered.hook, &input, registered)
                     .await
             };
-
-            // once mark
-            if OnceTracker::is_once_hook(&registered.hook) {
-                self.once_tracker.mark_fired(registered);
-            }
 
             // Block / PreventContinuation 保持 fail-closed 短路
             if matches!(
