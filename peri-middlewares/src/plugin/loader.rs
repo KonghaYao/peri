@@ -245,15 +245,20 @@ fn process_command_file(
     });
 }
 
-/// 插件命令占位 handler（Phase 6 B2；设计「正交维度」：外部系统命令不改变
-/// 执行通路，仅要求路由表支持运行时注册 / 注销）。
+/// 插件命令 handler（Phase 6 B2；设计「正交维度」：外部系统命令不改变执行
+/// 通路，仅要求路由表支持运行时注册 / 注销）。
 ///
-/// 占位实现（执行语义未定）：返回 [`CommandOutcome::Inject`] 空串——拦截
-/// 路径对 Inject 的既有处理为 warn + fall-through（原文进 agent 管线，
-/// 命令不被吞，与 `mcp/skill_discovery.rs` 的 `McpSkillPlaceholder` /
-/// `peri-acp` 的 `PassthroughPlaceholder` 同构）。UI-only 反馈「插件命令
-/// 执行待后续版本」与正式执行体留待 Phase 5+ 补齐（注册 / 注销 / 投影
-/// 链路本 Phase 全量生效）。
+/// 执行体是**真实透传**（与 `peri-acp` 的 `AgentPassthrough`、MCP skill
+/// 占位同语义）：把用户原文整段 [`CommandOutcome::Inject`] 回 agent 管线，
+/// 命令不被吞。历史缺陷：占位实现返回 `Inject(String::new())`，拦截路径据此用
+/// 空串替换用户消息——原文整体丢失且不报错（与 2026-08-16 `AgentPassthrough`
+/// 同款回归；skill 面已修，插件面本次跟进）。
+///
+/// RPC 路径（`dispatch/execute_command.rs`）无 agent 管线：plugin 属第二等级
+/// （`CommandLevel::Level2`，按 provenance 判定），在 handler 执行前即被显式
+/// 拒绝，不伪报执行。
+///
+/// 命令正文的完整执行语义（插件 IPC / prompt 模板展开）留待后续版本。
 #[derive(Clone)]
 pub struct PluginCommandHandler {
     /// 命令来源（插件命令文件路径；占位期仅承载来源信息）。
@@ -262,9 +267,10 @@ pub struct PluginCommandHandler {
 
 #[async_trait]
 impl CommandHandler for PluginCommandHandler {
-    async fn execute(&self, _ctx: CommandContext) -> CommandOutcome {
-        // 占位：Inject 空串 → 拦截路径 fall-through，原文进 agent 管线。
-        CommandOutcome::Inject(String::new())
+    async fn execute(&self, ctx: CommandContext) -> CommandOutcome {
+        // 原文整段交还 agent 管线（含 `/plugin:{plugin}:{cmd}` token 与 args）；
+        // 原文不可重建，故只能随上下文携带（空串会吞掉用户输入）。
+        CommandOutcome::Inject(ctx.raw_text)
     }
 }
 
