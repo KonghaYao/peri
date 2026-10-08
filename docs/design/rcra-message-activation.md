@@ -16,6 +16,8 @@ RCRA 主路径为 `MessageQueue → Receive → Compact → Reason → Act → M
 
 每个主/子/Workflow Agent 的队列归属明确，生产者根据可信会话地址路由，不以 root fallback 吞掉其他会话的结果。类型化消息策略、受众和当前 run 关联继续决定模型消费、展示和唤醒；不从正文或严重程度猜测消费语义。
 
+失败尝试不能永久撤销新消息的激活资格：仅封锁尝试开始时已接纳输入的自动重试，之后接纳的模型可见 Required / EnsureProcessing 消息仍可激活。显式 Stop、关闭与过期执行身份的限制不被此规则覆盖；详见 [Session 异步任务](session-async-tasks.md)。
+
 用户输入和当前异步结果通过内存队列进入 Receive，再追加 Transcript。queue 接收不是磁盘持久接纳，不再使用 durable delivery/obligation/ACK 证明跨重启处理。当前进程可为重复通知去重，但不建立永久执行 journal。
 
 当前执行的调用身份与模型 tool-call 身份保持可区分；子 Agent 展示归属使用模型 tool-call ID，不把临时调用身份当作历史恢复凭证。任务取消绑定当前调用/执行，不误取消后续独立调用。

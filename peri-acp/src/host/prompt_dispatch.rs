@@ -232,12 +232,6 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
     )
     .await;
 
-    if result.is_err() {
-        if let Some(runtime) = cfg.session_manager.get_session(&prompt_session_id) {
-            runtime.activation.suppress();
-        }
-    }
-
     // Prediction remains admitted before pool restoration and while the prompt lock is held.
     if !is_continuation && result.is_ok() {
         super::prediction::spawn_prediction(transport, &prompt_session_id, sessions, cfg);

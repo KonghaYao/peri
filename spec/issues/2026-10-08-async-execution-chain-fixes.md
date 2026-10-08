@@ -1,7 +1,7 @@
 # 当前进程异步执行链独立修复
 
 - 日期：2026-10-08
-- 状态：实现及轻量验证完成，待用户真实使用验收
+- 状态：实现及轻量验证完成；已于 2026-10-08 合并主树为 `9df55f5c`，待用户真实使用验收
 - 基线：`554b324d`
 - 工作区：`/Users/konghayao/code/ai/peri-async-chain-fixes-20261008`
 - 权威契约：`docs/design/session-async-tasks.md`、`docs/design/rcra-message-activation.md`
@@ -102,4 +102,4 @@
 - 原 explicit close 资源关闭失败仍保留 active 并暂不发布委派终态；本批次不新增关闭重试 owner，也不伪造资源已停止。
 - 同一 session 离开后再选回，若旧 `ExecutionStarted` 比任何 snapshot 更早到达，仅 mailbox generation 不能证明它属于本次选中；若需严格排除，宿主选中响应还需提供期望 generation，本批次未扩展该响应。
 - 用户验收：实际嵌套异步任务超过单轮 bound 后仍续跑；内部首步 permission/ask 可响应；空闲定时审批及 Stop 可收尾；切换会话后旧失败不清除新 loading；history 会话加载与普通输入保持可用。
-- 本工作树单独提交、不自动合并主树。独立修复基线为 `554b324d`；开始检查时主树有 152 个其他任务修改路径，本批次未操作这些改动。收尾时另一任务已将主树推进至 `45a7a5d6`（context preflight C 整合），主树状态干净；两树公共基线仍是 `554b324d`，本修复未合并其中。
+- 本工作树最初单独提交为 `a838cc15`，独立修复基线为 `554b324d`；开始检查时主树有 152 个其他任务修改路径，本批次未操作这些改动。另一任务随后将主树推进至 `45a7a5d6`（context preflight C 整合）。2026-10-08 按用户后续要求合并主树，合并提交 `9df55f5c`，并将独立 worktree 快进同步到此基线；无文本冲突。新的 Error 通知激活缺陷另见 `2026-10-08-async-error-notification-activation.md`。

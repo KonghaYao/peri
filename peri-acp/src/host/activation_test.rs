@@ -74,6 +74,10 @@ impl ActivationHarness {
     }
 
     fn complete_child(&self, task_id: &str) {
+        self.complete_task(task_id, BgTaskKind::Agent, true);
+    }
+
+    fn complete_task(&self, task_id: &str, kind: BgTaskKind, success: bool) {
         let tasks = self
             .cfg
             .session_manager
@@ -90,7 +94,7 @@ impl ActivationHarness {
             tasks
                 .register(BgTaskRegistration {
                     task_id: task_id.into(),
-                    kind: BgTaskKind::Agent,
+                    kind,
                     summary: "child".into(),
                     pid: None,
                     kill: None,
@@ -108,8 +112,12 @@ impl ActivationHarness {
                     task_id: task_id.into(),
                     agent_name: "child".into(),
                     prompt_summary: "child".into(),
-                    success: true,
-                    output: "late child result".into(),
+                    success,
+                    output: if success {
+                        "late child result".into()
+                    } else {
+                        "late task error".into()
+                    },
                     tool_calls_count: 0,
                     duration_ms: 1,
                     child_thread_id: None,
@@ -126,6 +134,9 @@ impl ActivationHarness {
 
 #[path = "execution_test.rs"]
 mod execution_tests;
+
+#[path = "error_activation_test.rs"]
+mod error_activation_tests;
 
 #[tokio::test]
 #[serial]

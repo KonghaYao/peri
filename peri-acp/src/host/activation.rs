@@ -81,7 +81,12 @@ pub(super) fn ensure_listener(
                     if !Arc::ptr_eq(&runtime.activation, &listener_activation) {
                         return;
                     }
-                    pending_request(&session_id, state, &queue, listener_activation.is_allowed())
+                    pending_request(
+                        &session_id,
+                        state,
+                        &queue,
+                        listener_activation.can_activate(&queue),
+                    )
                 };
                 if let Some(request) = request {
                     if sender.send(request).is_err() {
@@ -114,6 +119,7 @@ pub(super) fn mq_allowed(cfg: &AcpServerConfig, session_id: &str) -> bool {
     cfg.session_manager
         .get_session(session_id)
         .is_some_and(|runtime| {
-            !runtime.cancel_token.is_cancelled() && runtime.activation.is_allowed()
+            !runtime.cancel_token.is_cancelled()
+                && runtime.activation.can_activate(&runtime.v2_message_queue)
         })
 }

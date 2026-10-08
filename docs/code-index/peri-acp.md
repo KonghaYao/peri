@@ -13,7 +13,7 @@
 
 当前进程内部执行的交互身份由 `host/execution.rs` 与 `host/prompt.rs` 管理，`ExecutionStarted` 经 `session/event_sink.rs` 可靠发送，正常终态及装配早退匹配同一 request ID。定时审批持有同一会话 prompt lock，在独立交互作用域内批准、拒绝、取消并收尾；之后实际执行不复用审批身份。完整宿主测试在 `activation_tests::execution_tests`，挂起/恢复 FIFO 验证在 `event::forwarder_test`；批次范围与验证见 `spec/issues/2026-10-08-async-execution-chain-fixes.md`。
 
-当前进程的晚到异步结果由 `host/activation.rs` 监听会话队列的 retained wake 信号；`session/activation.rs` 将监听与自动续跑许可绑定运行时。主 run 正常结束不撤销监听，订阅及 dispatch 结束都复查队列，续跑统一经过 `host/continuation.rs` 与 `prompt_dispatch.rs` 的序列化和代际校验。取消 continuation 抑制再次激活，关闭取消监听；失败不自动重复。定向宿主回归入口 `host::requests::tests::activation_tests`。
+当前进程的晚到异步结果由 `host/activation.rs` 监听会话队列的 retained wake 信号；`session/activation.rs` 将监听与自动续跑许可绑定运行时。主 run 正常结束不撤销监听，订阅及 dispatch 结束都复查队列，续跑统一经过 `host/continuation.rs` 与 `prompt_dispatch.rs` 的序列化和代际校验。取消 continuation 抑制再次激活，关闭取消监听；`run_prompt` 捕获尝试开始的队列接纳边界，失败仅禁止边界内输入自动重试，边界后的 Required / EnsureProcessing 消息仍通过统一 `can_activate` 准入。定向宿主回归入口 `host::requests::tests::activation_tests`，边界状态回归 `session::activation::tests`。
 
 续跑 MQ pending 不是排队准入锁：空跑或早退不能阻塞下一次结果；重复通知在 prompt lock 内复核真实待处理消息。回归 `activation_tests::empty_queued_continuation_does_not_block_the_next_child_result` 覆盖旧请求排队后消息被消费、空跑退出、下一子任务结果仍能启动续跑。
 

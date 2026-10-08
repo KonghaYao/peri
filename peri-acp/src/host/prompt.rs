@@ -187,6 +187,15 @@ pub(crate) async fn run_prompt(
 ) -> Result<Value, AcpError> {
     let notifications = super::execution::ExecutionNotifications::from_params(&mut params)?;
     let session_id = super::extract_session_id(&params, "").to_owned();
+    let attempt_activation = deployment
+        .session_manager
+        .get_session(&session_id)
+        .map(|runtime| {
+            (
+                Arc::clone(&runtime.activation),
+                runtime.v2_message_queue.admission_watermark(),
+            )
+        });
     let result = run_prompt_attempt(
         params,
         sessions,
@@ -197,9 +206,13 @@ pub(crate) async fn run_prompt(
         continuation,
         input_ticket,
         &notifications,
+        attempt_activation.as_ref(),
     )
     .await;
     if result.is_err() {
+        if let Some((activation, watermark)) = &attempt_activation {
+            activation.record_failed_attempt(*watermark);
+        }
         notifications
             .finish_early(&session_id, "error", deployment, transport)
             .await;
@@ -218,6 +231,7 @@ async fn run_prompt_attempt(
     continuation: bool,
     input_ticket: Option<super::user_input::UserInputRun>,
     notifications: &super::execution::ExecutionNotifications,
+    attempt_activation: Option<&(Arc<crate::session::SessionActivation>, u64)>,
 ) -> Result<Value, AcpError> {
     // Borrow deployment services; turn-owned callbacks clone only their existing handles.
     // Provider/config snapshots remain below, after the session snapshot is captured.
@@ -614,8 +628,12 @@ async fn run_prompt_attempt(
     let result = handle.take_result();
     notifications.mark_terminal();
     if !result.ok || result.failure.is_some() {
-        if let Some(runtime) = session_manager.get_session(&session_id) {
-            runtime.activation.suppress();
+        if let Some((activation, watermark)) = attempt_activation {
+            if result.stop_reason == executor::PromptStopReason::Cancelled {
+                activation.suppress();
+            } else {
+                activation.record_failed_attempt(*watermark);
+            }
         }
     }
     if let Some(run) = &input_ticket {
