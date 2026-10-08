@@ -110,15 +110,33 @@ pub(crate) fn effective_mcp_tool_name(server_name: &str, tool_name: &str) -> Str
     )
 }
 
+/// 单个外部 MCP 工具 description 的字节预算（M7）。
+///
+/// 描述来自外部 server（不受本仓库控制），无预算时一条巨型描述会挤占每次
+/// 请求的 tools 参数。超预算按 UTF-8 边界截断，并在**预算内**追加截断标记
+/// （标记计入预算，模型看到的是有界文本且知道被截断）。
+const MAX_TOOL_DESCRIPTION_BYTES: usize = 8 * 1024;
+
+/// 构造模型可见的工具描述：`[MCP:{server}] {description}`，超预算时截断。
+fn bounded_tool_description(server_name: &str, description: Option<&str>) -> String {
+    let text = format!("[MCP:{}] {}", server_name, description.unwrap_or(""));
+    if text.len() <= MAX_TOOL_DESCRIPTION_BYTES {
+        return text;
+    }
+    let total = text.len();
+    let marker = format!("… [description truncated: {total} bytes total]");
+    let budget = MAX_TOOL_DESCRIPTION_BYTES.saturating_sub(marker.len());
+    let mut truncated = peri_agent::agent::async_tasks::truncate_bytes(&text, budget);
+    truncated.push_str(&marker);
+    truncated
+}
+
 impl McpToolBridge {
     pub fn new(server_name: &str, tool: &Tool, client: Arc<McpClientHandle>) -> Self {
         let tool_name = tool.name.to_string();
         let full_name = effective_mcp_tool_name(server_name, &tool_name);
-        let description = format!(
-            "[MCP:{}] {}",
-            server_name,
-            tool.description.as_ref().map(|d| d.as_ref()).unwrap_or("")
-        );
+        let description =
+            bounded_tool_description(server_name, tool.description.as_ref().map(|d| d.as_ref()));
         let input_schema = serde_json::to_value(&*tool.input_schema)
             .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
         Self {
@@ -150,13 +168,9 @@ impl McpToolBridge {
                 server: server_name.to_string(),
             });
         }
-        let description = format!(
-            "[MCP:{}] {}",
+        let description = bounded_tool_description(
             server_name,
-            tool.description
-                .as_ref()
-                .map(|value| value.as_ref())
-                .unwrap_or("")
+            tool.description.as_ref().map(|value| value.as_ref()),
         );
         Ok(Self {
             server_name: server_name.to_string(),

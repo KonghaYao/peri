@@ -193,6 +193,7 @@ core `ConfigSource::save(expected_revision, &PeriConfig)` 返回 accepted snapsh
 | ACP 请求封装 | src/acp_client/client/requests.rs | `register_ui_commands` / `prompt` / `prompt_with_bg_results` / `cancel` / `set_config_option` / `send_raw_request`；prompt 持 lease，返回后在 gate 内结算 |
 | Interaction response 与 UI publication | src/acp_client/client/interaction.rs | `respond_interaction` / `publish_if_owned` / `reject_interaction` / `settle_claims_owned`；owner first-claim 与同步 UI publication 共用 gate，通知仅升级 weak sender |
 | ACP client 契约测试 | src/acp_client/client_test.rs + client_reverse_test.rs + client/recovery_test.rs | `client::tests` 验证 done identity / 删除过滤；`client::reverse_tests` 覆盖 interaction owner、gate、startup/load reservation 与 Drop；`client::recovery_tests` 验证按 ID load 无 recovery 弹窗/reset 请求及失败传播，不维护 ownership 只读投影。全局 atom 用局部 RAII 快照恢复；测试名称需随最终实现核对 |
+| 改 hook 执行来源信任 CLI | `src/cli_plugin.rs` + `src/main.rs`（`TrustAction`） | `run_plugin_trust_{grant,revoke,status}`；`resolve_plugin_for_trust` | `peri plugin trust` 覆盖 settings 来源（project/local）与**插件来源**（`--plugin <安装记录 id 或唯一插件名>`）：插件绑定经 `peri_middlewares::host_ports::plugin_hook_binding` 计算（身份取自 `PluginScope`，摘要覆盖插件根与 hooks 配置），歧义/未匹配必须报错不猜；status 列出有 hooks 声明的插件来源及其授权状态；本层只经 `peri_config::trust` 读写信任文件 |
 | 启动/CLI | src/main.rs、launch.rs、cli_args.rs、cli_plugin.rs、update.rs | `main`（main.rs:670）/`run_tui`（main.rs:767 调用，定义 cli_tui.rs:31）；`build_app_and_acp`（launch.rs:41）/`teardown_app`（:199）；`run_kit_fullscreen`（kit/entry.rs:52）；插件/更新 CLI 子命令 |
 
 ### 线程存储与通用组件（src/thread/ src/components/）
