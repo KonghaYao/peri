@@ -19,6 +19,8 @@ mod schema;
 mod schema_cleanup;
 mod session_data;
 mod session_rows;
+#[path = "storage_v19_migration.rs"]
+mod storage_v19_migration;
 #[path = "storage_v2_migration.rs"]
 mod storage_v2_migration;
 mod workspace;

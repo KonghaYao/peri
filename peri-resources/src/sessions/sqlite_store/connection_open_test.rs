@@ -108,8 +108,8 @@ async fn concurrent_migration_rebuilds_registration_tables_only_once() {
             .unwrap();
         assert_eq!(cookie, expected_cookie, "DDL must run only once");
         let row: (String, String, String, String) = sqlx::query_as(
-            "SELECT projects.id, projects.object_identity, r.id, r.discovery
-             FROM projects JOIN legacy_execution_registrations r ON r.project_id = projects.id",
+            "SELECT projects.id, projects.object_identity, w.id, w.discovery
+             FROM projects JOIN workspaces w ON w.project_id = projects.id",
         )
         .fetch_one(&store.database.pool)
         .await

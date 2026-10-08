@@ -170,14 +170,14 @@ fn schema_ddl_matches_the_canonical_shape() {
             spec.sql
         );
     }
-    // 远端建的是本机那一份 canonical 表（清单来自同一处，不另抄一遍）。
+    // 远端建的是本机那一份 canonical 表（清单来自同一处，不另抄一遍）。v19 起
+    // `legacy_execution_registrations` 不在其中：它只作为升级入参存在，不由新库建出。
     for table in [
         "machines",
         "workspaces",
         "threads",
         "messages",
         "projects",
-        "legacy_execution_registrations",
         "session_bindings",
         "mcp_oauth_credentials",
     ] {

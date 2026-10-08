@@ -1,7 +1,7 @@
-//! v2 Machine/path 归属键。执行登记保存在另一张表，二者不能混用。
+//! Machine/path 归属键：同机同路径只有一个 Workspace，归属行的执行证据由写路径刷新。
 
 use anyhow::{bail, Result};
-use peri_acp_types::workspace::WorkspaceId;
+use peri_acp_types::workspace::{WorkspaceError, WorkspaceId};
 use sqlx::SqliteConnection;
 
 use super::discovery::Discovery;
@@ -57,7 +57,7 @@ pub(super) async fn resolve_identity(
 pub(super) async fn identity_for_new_thread(
     connection: &mut SqliteConnection,
     parent_id: Option<&str>,
-    execution_registration_id: Option<&WorkspaceId>,
+    owner_workspace_id: Option<&WorkspaceId>,
     saved_cwd: &str,
 ) -> Result<WorkspaceId> {
     if let Some(parent_id) = parent_id {
@@ -68,23 +68,27 @@ pub(super) async fn identity_for_new_thread(
         return Ok(owner.parse()?);
     }
     let machine = ensure_current_machine(connection).await?;
-    if let Some(execution_registration_id) = execution_registration_id {
-        let row: (String, String) = sqlx::query_as(
-            "SELECT root, discovery FROM legacy_execution_registrations WHERE id = ?1",
-        )
-        .bind(execution_registration_id.to_string())
-        .fetch_one(&mut *connection)
-        .await?;
-        let discovery: Discovery = serde_json::from_str(&row.1)?;
-        if discovery.root != std::path::Path::new(&row.0) {
-            bail!("execution registration root differs from snapshot");
+    if let Some(owner_workspace_id) = owner_workspace_id {
+        // 调用方手上的归属 id 必须能读回路径与执行证据：路径决定归属键，证据决定
+        // 这条路径是「已验证的 Git 根」还是「未验证目录」。
+        let row: Option<(String, Option<String>)> =
+            sqlx::query_as("SELECT path, discovery FROM workspaces WHERE id = ?1")
+                .bind(owner_workspace_id.to_string())
+                .fetch_optional(&mut *connection)
+                .await?;
+        let (path, snapshot) = row.ok_or(WorkspaceError::InvalidBinding)?;
+        let discovery: Discovery =
+            serde_json::from_str(snapshot.as_deref().ok_or(WorkspaceError::InvalidBinding)?)
+                .map_err(|_| WorkspaceError::InvalidBinding)?;
+        if discovery.root != std::path::Path::new(&path) {
+            bail!("workspace evidence root differs from its path");
         }
         let source = if discovery.common_dir.is_some() || discovery.private_dir.is_some() {
             "discovered"
         } else {
             "unverified"
         };
-        resolve_identity(connection, &machine, &row.0, source).await
+        resolve_identity(connection, &machine, &path, source).await
     } else {
         resolve_identity(connection, &machine, saved_cwd, "unverified").await
     }

@@ -24,7 +24,7 @@
 use peri_acp_types::{messages::BaseMessage, store::PersistedPayload};
 
 /// 两种会话数据 adapter 的同一 schema 版本。
-pub(super) const CURRENT_SCHEMA_VERSION: i64 = 18;
+pub(super) const CURRENT_SCHEMA_VERSION: i64 = 19;
 
 /// 会话事实表。
 pub(super) const THREADS_TABLE: &str = "threads";
@@ -157,11 +157,18 @@ pub(super) const CREATE_V2_MACHINES_TABLE_SQL: &str = "CREATE TABLE IF NOT EXIST
     name TEXT NOT NULL CHECK(length(trim(name)) > 0),
     identity_kind TEXT NOT NULL CHECK(identity_kind IN ('known', 'legacy_unknown'))
 )";
+/// v2 的 Project 表：与 [`CREATE_TABLES`] 里的同形，是 `workspaces.project_id` 的引用目标。
+pub(super) const CREATE_V2_PROJECTS_TABLE_SQL: &str = CREATE_TABLES[2];
+/// v2 的 Machine/path 归属表。v19 起同时承载「该路径最近一次观测」的执行证据：
+/// 归属键仍是 `(machine_id, path)`，证据列只描述**当前占用该路径的对象**，不参与身份。
 pub(super) const CREATE_V2_WORKSPACES_TABLE_SQL: &str = "CREATE TABLE IF NOT EXISTS workspaces (
     id TEXT PRIMARY KEY,
     machine_id TEXT NOT NULL REFERENCES machines(id),
     path TEXT NOT NULL,
     path_source TEXT NOT NULL CHECK(path_source IN ('discovered', 'derived_legacy', 'unverified')),
+    project_id TEXT REFERENCES projects(id),
+    identity TEXT,
+    discovery TEXT,
     UNIQUE(machine_id, path)
 )";
 macro_rules! v2_threads_table_sql {
@@ -185,32 +192,106 @@ pub(super) const CREATE_V2_OAUTH_CREDENTIALS_TABLE_SQL: &str =
     updated_at TEXT NOT NULL,
     PRIMARY KEY(principal_id, workspace_id, server_key)
 )";
-pub(super) const CREATE_V2_LEGACY_REGISTRATIONS_TABLE_SQL: &str =
-    "CREATE TABLE IF NOT EXISTS legacy_execution_registrations (
-    id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
-    root TEXT NOT NULL, root_identity TEXT NOT NULL, discovery TEXT NOT NULL,
-    UNIQUE(root, root_identity), UNIQUE(id, project_id)
-)";
+/// v19 的绑定表：workspace 归属由 `threads.workspace_id` 唯一表达，绑定行只保存
+/// 自己的不可变执行证据。不再有指向登记表的外键——那张表在 v19 起不存在。
 pub(super) const CREATE_V2_BINDINGS_TABLE_SQL: &str =
     "CREATE TABLE IF NOT EXISTS session_bindings (
     thread_id TEXT PRIMARY KEY REFERENCES threads(id) ON DELETE CASCADE,
     schema_version INTEGER NOT NULL,
     project_id TEXT NOT NULL, workspace_id TEXT NOT NULL, relative_cwd TEXT NOT NULL,
     discovery_snapshot TEXT,
-    evidence_origin TEXT NOT NULL,
-    FOREIGN KEY(workspace_id, project_id) REFERENCES legacy_execution_registrations(id, project_id)
+    evidence_origin TEXT NOT NULL
 )";
 pub(super) const CREATE_V2_TABLES: &[&str] = &[
     CREATE_V2_MACHINES_TABLE_SQL,
     CREATE_V2_WORKSPACES_TABLE_SQL,
     CREATE_V2_THREADS_TABLE_SQL,
     CREATE_TABLES[1],
-    CREATE_TABLES[2],
-    CREATE_V2_LEGACY_REGISTRATIONS_TABLE_SQL,
+    CREATE_V2_PROJECTS_TABLE_SQL,
     CREATE_V2_BINDINGS_TABLE_SQL,
     CREATE_V2_OAUTH_CREDENTIALS_TABLE_SQL,
     CREATE_SESSION_CLOSE_INTENTS_TABLE_SQL,
 ];
+
+/// v18 → v19：执行登记并入 `workspaces`，删除执行登记表。
+///
+/// 顺序即依赖顺序：补证据列 → 回填 → 并入无归属的登记 → 前置校验 → 重建绑定（去掉指向
+/// 登记表的外键并把 `workspace_id` 收敛到归属行）→ 删表 → 重建绑定索引。两端执行同一批
+/// 语句文本；本机在事务内逐条执行，远端作为一次受管批次下发。证据列的存在性由调用方先行
+/// 探测，已存在时跳过对应 ALTER（远端批次从 v18 一次性推进，无需探测）。
+pub(super) const ADD_WORKSPACES_PROJECT_COLUMN_SQL: &str =
+    "ALTER TABLE workspaces ADD COLUMN project_id TEXT REFERENCES projects(id)";
+pub(super) const ADD_WORKSPACES_IDENTITY_COLUMN_SQL: &str =
+    "ALTER TABLE workspaces ADD COLUMN identity TEXT";
+pub(super) const ADD_WORKSPACES_DISCOVERY_COLUMN_SQL: &str =
+    "ALTER TABLE workspaces ADD COLUMN discovery TEXT";
+/// 回填已存在的归属行：同一路径的登记证据整体搬到该行。同路径多条登记（目录对象被
+/// 替换过）按 `id` 取一条作为该路径的最近观测，不伪造先后顺序。
+pub(super) const BACKFILL_WORKSPACES_EVIDENCE_SQL: &str = "UPDATE workspaces SET
+    project_id = COALESCE(project_id, (SELECT r.project_id FROM legacy_execution_registrations r WHERE r.root = workspaces.path ORDER BY r.id LIMIT 1)),
+    identity = COALESCE(identity, (SELECT r.root_identity FROM legacy_execution_registrations r WHERE r.root = workspaces.path ORDER BY r.id LIMIT 1)),
+    discovery = COALESCE(discovery, (SELECT r.discovery FROM legacy_execution_registrations r WHERE r.root = workspaces.path ORDER BY r.id LIMIT 1))
+    WHERE EXISTS (SELECT 1 FROM legacy_execution_registrations r WHERE r.root = workspaces.path)";
+/// 回填没有归属行的登记：为本机已有的登记新建归属行，id 沿用旧登记 UUID（空闲时）。
+/// 机器归属取引用该登记的会话所属机器；没有会话引用时取该库的第一台机器。
+///
+/// 同路径只并入一条（`id` 最小的登记），否则 `UNIQUE(machine_id, path)` 会让整个升级
+/// 失败：同路径多条登记是「目录对象被替换过」的历史残留，归属行只能有一条。
+/// `id` 已被别的路径占用时跳过该行——这是手工改库才可能出现的形状，跳过只影响
+/// 该路径的展示分组，不阻塞升级。
+pub(super) const BACKFILL_MISSING_WORKSPACES_SQL: &str = "INSERT INTO workspaces(id, machine_id, path, path_source, project_id, identity, discovery)
+    SELECT r.id, COALESCE(
+        (SELECT w.machine_id FROM session_bindings b JOIN threads t ON t.id = b.thread_id JOIN workspaces w ON w.id = t.workspace_id WHERE b.workspace_id = r.id ORDER BY w.id LIMIT 1),
+        (SELECT id FROM machines ORDER BY id LIMIT 1)), r.root, 'unverified', r.project_id, r.root_identity, r.discovery
+    FROM legacy_execution_registrations r
+    WHERE r.id = (SELECT r2.id FROM legacy_execution_registrations r2 WHERE r2.root = r.root ORDER BY r2.id LIMIT 1)
+      AND NOT EXISTS (SELECT 1 FROM workspaces w WHERE w.path = r.root)
+      AND NOT EXISTS (SELECT 1 FROM workspaces w WHERE w.id = r.id)
+      AND EXISTS (SELECT 1 FROM machines)";
+/// 迁移前置校验 1：每条绑定都要能落到**会话的**归属行（`threads.workspace_id`）。
+/// 落不到就没有可搬运的归属，升级必须停在原版本而不是丢掉绑定。
+pub(super) const COUNT_BINDINGS_WITHOUT_OWNER_SQL: &str = "SELECT COUNT(*) FROM session_bindings b
+    LEFT JOIN threads t ON t.id = b.thread_id
+    LEFT JOIN workspaces owner ON owner.id = t.workspace_id
+    WHERE t.id IS NULL OR owner.id IS NULL";
+/// 迁移前置校验 2：绑定自己记录的根必须就是会话归属行的路径。
+///
+/// 绑定记录的是它创建时的执行根：v19 之前它指向执行登记（`legacy_execution_registrations`），
+/// 也可能已经指向归属行（远端写入的形状）。两种来源都用，结论必须与归属行同路径——
+/// 不同路径说明「绑定」与「会话归属」本来就不一致，改写成归属行会静默改绑，因此拒绝升级。
+pub(super) const COUNT_BINDINGS_AT_FOREIGN_ROOT_SQL: &str =
+    "SELECT COUNT(*) FROM session_bindings b
+    LEFT JOIN legacy_execution_registrations r ON r.id = b.workspace_id
+    LEFT JOIN workspaces recorded ON recorded.id = b.workspace_id
+    JOIN threads t ON t.id = b.thread_id
+    JOIN workspaces owner ON owner.id = t.workspace_id
+    WHERE COALESCE(r.root, recorded.path) IS NULL
+       OR COALESCE(r.root, recorded.path) <> owner.path";
+/// 重建绑定表去掉登记表外键：SQLite 不能删除约束，只能建新表搬运。
+/// 索引随旧表一起消失，随后由 [`CREATE_V2_INDEXES`] 的两条绑定索引重建。
+///
+/// 搬运同时把 `workspace_id` 收敛到归属行：v19 之前它指向执行登记，而登记 id 与
+/// 归属行 id 只在本机老库上恰好相同（v12 计划沿用旧 UUID）。收敛之后
+/// 「`threads.workspace_id` = `session_bindings.workspace_id`」成为不变式，绑定不再需要
+/// 二次查询才知道自己的归属；其余列（含 `discovery_snapshot`、`evidence_origin`）原样搬运。
+pub(super) const REBUILD_BINDINGS_WITHOUT_REGISTRATIONS_SQL: &[&str] = &[
+    "CREATE TABLE session_bindings_v19 (
+    thread_id TEXT PRIMARY KEY REFERENCES threads(id) ON DELETE CASCADE,
+    schema_version INTEGER NOT NULL,
+    project_id TEXT NOT NULL, workspace_id TEXT NOT NULL, relative_cwd TEXT NOT NULL,
+    discovery_snapshot TEXT,
+    evidence_origin TEXT NOT NULL
+)",
+    "INSERT INTO session_bindings_v19(thread_id, schema_version, project_id, workspace_id, relative_cwd, discovery_snapshot, evidence_origin)
+    SELECT b.thread_id, b.schema_version, b.project_id, t.workspace_id, b.relative_cwd, b.discovery_snapshot, b.evidence_origin
+    FROM session_bindings b JOIN threads t ON t.id = b.thread_id",
+    "DROP TABLE session_bindings",
+    "ALTER TABLE session_bindings_v19 RENAME TO session_bindings",
+    CREATE_V2_INDEXES[1],
+    CREATE_V2_INDEXES[2],
+];
+/// v19 删除的登记表。删除前必须已并入 `workspaces` 且绑定表已重建。
+pub(super) const DROP_LEGACY_REGISTRATIONS_SQL: &str = "DROP TABLE legacy_execution_registrations";
 /// 显式关闭已接纳的持久事实；不保存异步任务目录。
 pub(super) const CREATE_SESSION_CLOSE_INTENTS_TABLE_SQL: &str =
     "CREATE TABLE IF NOT EXISTS session_close_intents (

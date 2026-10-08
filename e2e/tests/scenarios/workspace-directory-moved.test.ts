@@ -156,10 +156,11 @@ describe("已登记目录搬迁到新位置", () => {
       schema_version: number; relative_cwd: string; discovery_snapshot: string | null;
       evidence_origin: string; current_path: string;
     }>(
-      `SELECT b.*, r.root, p.locator, w.path AS current_path FROM session_bindings b
-       JOIN legacy_execution_registrations r ON r.id = b.workspace_id
-       JOIN projects p ON p.id = b.project_id JOIN threads t ON t.id = b.thread_id
-       JOIN workspaces w ON w.id = t.workspace_id`,
+      // v19 起绑定的归属就是会话行自己的 workspace_id（没有独立的执行登记表），
+      // 绑定记录的根与归属行的路径都从归属行读。
+      `SELECT b.*, w.path AS root, p.locator, w.path AS current_path FROM session_bindings b
+       JOIN threads t ON t.id = b.thread_id JOIN workspaces w ON w.id = t.workspace_id
+       JOIN projects p ON p.id = b.project_id`,
     );
     expect(before, "首个会话已登记绑定").toHaveLength(1);
 
@@ -175,7 +176,7 @@ describe("已登记目录搬迁到新位置", () => {
     // ④ 新位置得到独立登记，执行目录是搬迁后的真实路径。
     const projects = await query<{ id: string }>("SELECT id FROM projects");
     const workspaces = await query<{ id: string; project_id: string; discovery: string }>(
-      "SELECT id, project_id, discovery FROM legacy_execution_registrations",
+      "SELECT id, project_id, discovery FROM workspaces",
     );
     expect(projects, "旧登记保持原样、新位置单独登记").toHaveLength(2);
     expect(workspaces).toHaveLength(2);
@@ -200,19 +201,18 @@ describe("已登记目录搬迁到新位置", () => {
       binding.project_id === before[0].project_id
       && binding.workspace_id === before[0].workspace_id)).toBe(true);
     const preserved = await query<typeof before[number]>(
-      `SELECT b.*, r.root, p.locator, w.path AS current_path FROM session_bindings b
-       JOIN legacy_execution_registrations r ON r.id = b.workspace_id
-       JOIN projects p ON p.id = b.project_id JOIN threads t ON t.id = b.thread_id
-       JOIN workspaces w ON w.id = t.workspace_id`,
+      `SELECT b.*, w.path AS root, p.locator, w.path AS current_path FROM session_bindings b
+       JOIN threads t ON t.id = b.thread_id JOIN workspaces w ON w.id = t.workspace_id
+       JOIN projects p ON p.id = b.project_id`,
     );
     expect(preserved.find((binding) => binding.thread_id === before[0].thread_id)).toEqual(before[0]);
     const oldWorkspace = (await query<{ id: string; root: string }>(
-      "SELECT id, root FROM legacy_execution_registrations",
+      "SELECT id, path AS root FROM workspaces",
     )).find((workspace) => workspace.id === before[0].workspace_id);
     const oldProject = (await query<{ id: string; locator: string }>(
       "SELECT id, locator FROM projects",
     )).find((project) => project.id === before[0].project_id);
-    expect(oldWorkspace?.root, "旧登记仍指向原位置").toBe(before[0].root);
+    expect(oldWorkspace?.root, "旧归属行仍指向原位置").toBe(before[0].root);
     expect(oldProject?.locator, "旧项目定位不被改写").toBe(before[0].locator);
     const history = await query<{ cwd: string; message_count: number }>(
       "SELECT cwd, message_count FROM threads ORDER BY created_at LIMIT 1",

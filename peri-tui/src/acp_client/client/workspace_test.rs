@@ -11,7 +11,6 @@ fn context(cwd: &str) -> Value {
     json!({"version":1,"workspace":{
         "project_id":"00000000-0000-0000-0000-000000000001",
         "workspace_id":"00000000-0000-0000-0000-000000000002",
-        "execution_registration_id":"00000000-0000-0000-0000-000000000002",
         "cwd":cwd,"root":"/worktrees/feature","relative_cwd":"src"
     },"binding":{
         "schema_version":1,"revision":1,

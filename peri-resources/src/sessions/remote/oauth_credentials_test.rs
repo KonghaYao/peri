@@ -49,6 +49,11 @@ async fn database() -> SqliteConnection {
     .await;
     execute(
         &mut connection,
+        StatementSpec::bare(crate::sessions::canonical::CREATE_V2_PROJECTS_TABLE_SQL),
+    )
+    .await;
+    execute(
+        &mut connection,
         StatementSpec::bare(crate::sessions::canonical::CREATE_V2_WORKSPACES_TABLE_SQL),
     )
     .await;
@@ -57,7 +62,7 @@ async fn database() -> SqliteConnection {
         .await
         .unwrap();
     for id in ["machine", "first", "second"] {
-        sqlx::query("INSERT INTO workspaces VALUES (?1, 'test-machine', ?2, 'unverified')")
+        sqlx::query("INSERT INTO workspaces (id, machine_id, path, path_source) VALUES (?1, 'test-machine', ?2, 'unverified')")
             .bind(id)
             .bind(format!("/test/{id}"))
             .execute(&mut connection)

@@ -369,7 +369,7 @@ async fn run_case(mode: CommitMode, pause: HandlerPause, pre_cancel: bool) -> Ca
             schema_version: SESSION_BINDING_VERSION,
             revision: 1,
             project_id: workspace.project_id,
-            workspace_id: workspace.execution_registration_id,
+            workspace_id: workspace.workspace_id,
             cwd_relative_to_workspace: workspace.relative_cwd.clone(),
         },
         frozen: FrozenSnapshotBytes::new("{\"version\":1,\"manual\":true}"),

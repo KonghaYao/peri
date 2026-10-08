@@ -17,7 +17,9 @@ pub(super) async fn upgrade(
     store: &RemoteStore,
     snapshot: &StoreSnapshot,
 ) -> SessionResourceResult<()> {
-    if !matches!(snapshot.schema_version, 12..=17) || snapshot.contract != schema::STORE_CONTRACT {
+    if !matches!(snapshot.schema_version, 12..=17)
+        || snapshot.contract != schema::PREVIOUS_STORE_CONTRACT
+    {
         return Err(SessionResourceError::new(
             SessionResourceErrorKind::Unsupported,
         ));

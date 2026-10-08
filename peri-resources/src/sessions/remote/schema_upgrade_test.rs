@@ -35,9 +35,9 @@ async fn remote_v13_upgrade_drops_owner_tables_and_preserves_session_facts() {
         .await
         .unwrap();
     let pool = &fixture.transport.pool;
+    fixture.declare_previous_generation(13).await;
     sqlx::raw_sql(
-        "UPDATE peri_store_meta SET schema_version = 13;
-        CREATE TABLE session_execution_owners(root_id TEXT PRIMARY KEY REFERENCES threads(id), epoch INTEGER NOT NULL, nonce TEXT NOT NULL, expires_at_unix INTEGER NOT NULL, released INTEGER NOT NULL);
+        "CREATE TABLE session_execution_owners(root_id TEXT PRIMARY KEY REFERENCES threads(id), epoch INTEGER NOT NULL, nonce TEXT NOT NULL, expires_at_unix INTEGER NOT NULL, released INTEGER NOT NULL);
         CREATE TABLE session_execution_workspace_descriptors(root_id TEXT PRIMARY KEY REFERENCES session_execution_owners(root_id), owner_epoch INTEGER NOT NULL, endpoint TEXT NOT NULL, key_identity TEXT NOT NULL, agent_generation_id TEXT NOT NULL, unsupported_async_owners INTEGER NOT NULL);
         INSERT INTO session_execution_owners VALUES ('session', 7, 'retired', 0, 0);
         INSERT INTO session_execution_workspace_descriptors VALUES ('session', 7, 'retired', 'retired', 'retired', 0);
@@ -85,13 +85,11 @@ async fn remote_v13_owner_removal_respects_read_only_and_reports_lost_commit() {
     schema_upgrade::upgrade(&writable, &fixture.snapshot)
         .await
         .unwrap();
-    sqlx::raw_sql(
-        "UPDATE peri_store_meta SET schema_version = 13;
-        CREATE TABLE session_execution_owners(root_id TEXT PRIMARY KEY)",
-    )
-    .execute(&fixture.transport.pool)
-    .await
-    .unwrap();
+    fixture.declare_previous_generation(13).await;
+    sqlx::raw_sql("CREATE TABLE session_execution_owners(root_id TEXT PRIMARY KEY)")
+        .execute(&fixture.transport.pool)
+        .await
+        .unwrap();
     let StoreIdentityRead::Present(snapshot) = writable.read_identity().await.unwrap() else {
         panic!("missing identity")
     };
@@ -109,6 +107,21 @@ async fn remote_v13_owner_removal_respects_read_only_and_reports_lost_commit() {
         .await
         .unwrap_err()
         .is_persistence_uncertain());
+    // 12..=18 → 19 是两步：丢失的回复属于第一步，已提交的版本停在 18，重开读到的就是
+    // 这个一致的中间态——再升级一次（带上重新读到的快照）就走完。
+    assert_eq!(fixture.version().await, 18);
+    assert!(matches!(
+        open_step(
+            writable.read_identity().await.unwrap(),
+            StoreAccess::ReadWrite
+        )
+        .unwrap(),
+        OpenStep::Upgrade(_)
+    ));
+    let StoreIdentityRead::Present(snapshot) = writable.read_identity().await.unwrap() else {
+        panic!("missing identity")
+    };
+    schema_upgrade::upgrade(&writable, &snapshot).await.unwrap();
     assert_eq!(fixture.version().await, schema::REMOTE_SCHEMA_VERSION);
     assert!(matches!(
         open_step(
@@ -270,6 +283,15 @@ struct Fixture {
     transport: Arc<SqliteTransport>,
     snapshot: StoreSnapshot,
 }
+
+/// v19 之前的执行登记表：v12 迁移由旧 `workspaces` 改名而来，v19 并入 `workspaces` 后删除。
+///
+/// 夹具的升级链会一路走到本构建的版本，而要构造「上一代的库」就得把这张表补回来——
+/// 形状必须与 v12 的输出一致（列名、唯一键），否则测的就不是 v12..=18 的库。
+const LEGACY_REGISTRATIONS_TABLE_SQL: &str = "CREATE TABLE legacy_execution_registrations (
+    id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
+    root TEXT NOT NULL, root_identity TEXT NOT NULL, discovery TEXT NOT NULL,
+    UNIQUE(root, root_identity), UNIQUE(id, project_id))";
 
 #[tokio::test]
 async fn v11_to_v12_remote_batch_preserves_history_and_clears_machine_credentials() {
@@ -477,6 +499,21 @@ impl Fixture {
         Self::store_for(&self.transport, access)
     }
 
+    /// 把夹具退回上一代代数：真实 v12..=18 的库是「版本 12..=18 的元数据 + 执行登记表」，
+    /// 契约是 [`schema::PREVIOUS_STORE_CONTRACT`]。
+    async fn declare_previous_generation(&self, version: i64) {
+        sqlx::raw_sql(LEGACY_REGISTRATIONS_TABLE_SQL)
+            .execute(&self.transport.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE peri_store_meta SET schema_version = ?1, contract = ?2")
+            .bind(version)
+            .bind(schema::PREVIOUS_STORE_CONTRACT)
+            .execute(&self.transport.pool)
+            .await
+            .unwrap();
+    }
+
     async fn version(&self) -> i64 {
         sqlx::query_scalar("SELECT schema_version FROM peri_store_meta")
             .fetch_one(&self.transport.pool)
@@ -584,7 +621,8 @@ async fn remote_schema_upgrade_preserves_identity_ledger_config_and_rowid_histor
         open_step(store.read_identity().await.unwrap(), StoreAccess::ReadWrite).unwrap(),
         OpenStep::Existing(_)
     ));
-    assert_eq!(fixture.transport.writes.load(Ordering::SeqCst), 3);
+    // 一次升级链的四段写批次各发一次：v10 → 11、11 → 12、12..=17 → 18、18 → 19。
+    assert_eq!(fixture.transport.writes.load(Ordering::SeqCst), 4);
 }
 
 #[tokio::test]

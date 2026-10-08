@@ -22,7 +22,7 @@ async fn assert_no_recovery_tables(pool: &sqlx::SqlitePool) {
 }
 
 #[tokio::test]
-async fn schema_v18_new_store_has_nine_business_tables_and_normal_history() {
+async fn schema_v19_new_store_has_eight_business_tables_and_normal_history() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("threads.db");
     let store = SqliteThreadStore::new(&path).await.unwrap();
@@ -33,7 +33,15 @@ async fn schema_v18_new_store_has_nine_business_tables_and_normal_history() {
     .fetch_one(&store.database.pool)
     .await
     .unwrap();
-    assert_eq!(count, 9);
+    // v19 起执行登记并入 `workspaces`，新建库不再有登记表。
+    assert_eq!(count, 8);
+    let registrations: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = 'legacy_execution_registrations'",
+    )
+    .fetch_one(&store.database.pool)
+    .await
+    .unwrap();
+    assert_eq!(registrations, 0);
     let session = store
         .create_thread(ThreadMeta::new_at("/tmp", peri_time::now_wall()))
         .await
@@ -77,7 +85,13 @@ async fn schema_v18_from_v17_preserves_business_pages_extensions_goals_and_rowid
             .unwrap();
     }
     sqlx::raw_sql(
-        "CREATE TABLE thread_goals (thread_id TEXT, objective TEXT, extension TEXT);
+        // v17 的形状里还有执行登记表（v12 起由旧 `workspaces` 改名而来，v19 删除）；
+        // 夹具从新建的库里出发，必须把它补回来，否则「声明为 17 的库」并不具备 v17 形状。
+        "CREATE TABLE legacy_execution_registrations (
+            id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
+            root TEXT NOT NULL, root_identity TEXT NOT NULL, discovery TEXT NOT NULL,
+            UNIQUE(root, root_identity), UNIQUE(id, project_id));
+         CREATE TABLE thread_goals (thread_id TEXT, objective TEXT, extension TEXT);
          INSERT INTO thread_goals VALUES ('session', 'goal', 'keep');
          CREATE TABLE extension_data (id TEXT REFERENCES threads(id), payload TEXT);
          CREATE INDEX extension_message_index ON messages(role);
@@ -91,7 +105,9 @@ async fn schema_v18_from_v17_preserves_business_pages_extensions_goals_and_rowid
     .unwrap();
     let before: Vec<(String, i64, Option<String>)> = sqlx::query_as(
         "SELECT name, rootpage, sql FROM sqlite_schema WHERE tbl_name NOT LIKE 'session_work_%'
-         AND tbl_name NOT LIKE 'session_control_%' ORDER BY name",
+         AND tbl_name NOT LIKE 'session_control_%'
+         AND tbl_name NOT IN ('legacy_execution_registrations', 'session_bindings')
+         ORDER BY name",
     )
     .fetch_all(&store.database.pool)
     .await
@@ -99,12 +115,33 @@ async fn schema_v18_from_v17_preserves_business_pages_extensions_goals_and_rowid
     store.close().await;
     let reopened = SqliteThreadStore::new(&path).await.unwrap();
     assert_no_recovery_tables(&reopened.database.pool).await;
-    let after: Vec<(String, i64, Option<String>)> =
-        sqlx::query_as("SELECT name, rootpage, sql FROM sqlite_schema ORDER BY name")
-            .fetch_all(&reopened.database.pool)
-            .await
-            .unwrap();
+    // v19 有意动两张表：登记表整体删除，`session_bindings` 重建以去掉指向它的外键
+    // （`workspace_id` 同时收敛到归属行）。其余对象的页面与 SQL 必须原样保留。
+    let after: Vec<(String, i64, Option<String>)> = sqlx::query_as(
+        "SELECT name, rootpage, sql FROM sqlite_schema WHERE tbl_name NOT IN ('legacy_execution_registrations', 'session_bindings')
+         ORDER BY name",
+    )
+    .fetch_all(&reopened.database.pool)
+    .await
+    .unwrap();
     assert_eq!(before, after);
+    let registrations: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_schema WHERE tbl_name = 'legacy_execution_registrations'",
+    )
+    .fetch_one(&reopened.database.pool)
+    .await
+    .unwrap();
+    assert_eq!(registrations, 0);
+    let (bindings,): (String,) = sqlx::query_as(
+        "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'session_bindings'",
+    )
+    .fetch_one(&reopened.database.pool)
+    .await
+    .unwrap();
+    assert!(
+        !bindings.contains("legacy_execution_registrations"),
+        "{bindings}"
+    );
     let rowid: i64 = sqlx::query_scalar("SELECT rowid FROM messages")
         .fetch_one(&reopened.database.pool)
         .await
@@ -128,7 +165,7 @@ async fn schema_v18_from_v17_preserves_business_pages_extensions_goals_and_rowid
         .fetch_one(&reopened.database.pool)
         .await
         .unwrap();
-    assert_eq!(version, 18);
+    assert_eq!(version, CURRENT_SCHEMA_VERSION);
 }
 
 #[tokio::test]
