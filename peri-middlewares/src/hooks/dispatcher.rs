@@ -32,7 +32,9 @@ use crate::hooks::{
 /// 共享（如 future 的 standalone 复用同 tracker 的场景）。
 pub struct HookDispatcher {
     hooks: Arc<RwLock<HashMap<HookEvent, Vec<RegisteredHook>>>>,
-    llm_factory: Arc<dyn Fn() -> Box<dyn ReactLLM + Send + Sync> + Send + Sync>,
+    /// `None` = 无 LLM 工厂（standalone / 子 agent 生命周期路径）：
+    /// Prompt / Agent hook 被显式跳过（与 standalone 既有语义一致）。
+    llm_factory: Option<Arc<dyn Fn() -> Box<dyn ReactLLM + Send + Sync> + Send + Sync>>,
     once_tracker: Arc<OnceTracker>,
     /// Agent hook 执行时的工作目录（对齐原 HookMiddleware.cwd）。
     cwd: String,
@@ -48,7 +50,26 @@ impl HookDispatcher {
     ) -> Self {
         Self {
             hooks,
-            llm_factory,
+            llm_factory: Some(llm_factory),
+            once_tracker,
+            cwd,
+            task_manager: None,
+        }
+    }
+
+    /// 无 LLM 工厂的构造（standalone / 子 agent 生命周期）：Prompt / Agent hook 跳过。
+    pub fn new_without_llm(
+        registered_hooks: Vec<RegisteredHook>,
+        once_tracker: Arc<OnceTracker>,
+        cwd: String,
+    ) -> Self {
+        let mut map: HashMap<HookEvent, Vec<RegisteredHook>> = HashMap::new();
+        for hook in registered_hooks {
+            map.entry(hook.event.clone()).or_default().push(hook);
+        }
+        Self {
+            hooks: Arc::new(RwLock::new(map)),
+            llm_factory: None,
             once_tracker,
             cwd,
             task_manager: None,
@@ -58,6 +79,36 @@ impl HookDispatcher {
     pub fn with_task_manager(mut self, task_manager: Arc<dyn TaskManager>) -> Self {
         self.task_manager = Some(task_manager);
         self
+    }
+
+    /// 可选注入会话 task manager（子 agent 生命周期路径按 host 是否有 manager 传入）。
+    pub fn with_task_manager_opt(mut self, task_manager: Option<Arc<dyn TaskManager>>) -> Self {
+        self.task_manager = task_manager;
+        self
+    }
+
+    /// 子 agent 生命周期事件（SubagentStart / SubagentStop）的唯一分发入口。
+    ///
+    /// 复用完整分发语义：matcher 以子 agent 名为匹配目标、once、async spawn（含超时 /
+    /// 取消 / 进程树 owner）、执行前查找与事件一致。
+    ///
+    /// 生命周期事件没有工具输入：带 `if` 条件的 hook 按 (子 agent 名, 空输入) 求值，
+    /// 工具条件不满足即跳过，不允许"条件无效但静默执行"。
+    ///
+    /// **默认非阻断**：返回 action 仅供诊断；调用方不得据此阻断子 agent。
+    pub async fn fire_subagent_lifecycle(
+        &self,
+        event: HookEvent,
+        input: &HookInput,
+        subagent_name: &str,
+    ) -> HookAction {
+        debug_assert!(
+            matches!(event, HookEvent::SubagentStart | HookEvent::SubagentStop),
+            "fire_subagent_lifecycle 仅服务子 agent 生命周期事件"
+        );
+        let empty_input = serde_json::Value::Object(Default::default());
+        self.fire_event(event, input, Some(subagent_name), Some(&empty_input))
+            .await
     }
 
     /// 分发一次 hook 事件。
@@ -199,11 +250,27 @@ impl HookDispatcher {
                 execute_command_hook_owned(hook, input, registered, self.task_manager.as_deref())
                     .await
             }
-            HookType::Prompt { .. } => execute_prompt_hook(hook, input, &self.llm_factory).await,
+            HookType::Prompt { .. } => match &self.llm_factory {
+                Some(factory) => execute_prompt_hook(hook, input, factory).await,
+                None => {
+                    tracing::debug!(
+                        event = ?input.hook_event_name,
+                        "Prompt hook skipped: dispatcher has no LLM factory"
+                    );
+                    HookAction::Allow
+                }
+            },
             HookType::Http { .. } => execute_http_hook(hook, input).await,
-            HookType::Agent { .. } => {
-                execute_agent_hook(hook, input, &self.llm_factory, &self.cwd).await
-            }
+            HookType::Agent { .. } => match &self.llm_factory {
+                Some(factory) => execute_agent_hook(hook, input, factory, &self.cwd).await,
+                None => {
+                    tracing::debug!(
+                        event = ?input.hook_event_name,
+                        "Agent hook skipped: dispatcher has no LLM factory"
+                    );
+                    HookAction::Allow
+                }
+            },
         }
     }
 }

@@ -37,7 +37,7 @@ use crate::{
 ///
 /// | 中间件 | 注入方式 |
 /// |--------|----------|
-/// | `Hook` (生命周期) | 通过 `fire_subagent_lifecycle_hooks_static()` 独立触发 |
+/// | `Hook` (生命周期) | 经 `HookDispatcher::fire_subagent_lifecycle()` 分发（默认非阻断） |
 pub fn build_subagent_middlewares(config: SubAgentMiddlewareConfig) -> Vec<Box<dyn Middleware>> {
     let mut middlewares: Vec<Box<dyn Middleware>> = Vec::new();
 
@@ -87,50 +87,6 @@ pub fn build_subagent_middlewares(config: SubAgentMiddlewareConfig) -> Vec<Box<d
     middlewares
 }
 
-/// 独立（非方法）版本的 SubagentStart/SubagentStop hook 触发逻辑
-pub(crate) async fn fire_subagent_lifecycle_hooks_static(
-    registered_hooks: &[RegisteredHook],
-    event: HookEvent,
-    cwd: &str,
-    subagent_name: &str,
-    result: Option<&str>,
-) {
-    let matching: Vec<&RegisteredHook> = registered_hooks
-        .iter()
-        .filter(|h| h.event == event)
-        .collect();
-    if matching.is_empty() {
-        return;
-    }
-
-    let input = match &event {
-        HookEvent::SubagentStart => {
-            crate::hooks::types::HookInput::subagent_start("", "", cwd, subagent_name)
-        }
-        HookEvent::SubagentStop => crate::hooks::types::HookInput::subagent_stop(
-            "",
-            "",
-            cwd,
-            subagent_name,
-            result.unwrap_or(""),
-        ),
-        _ => return,
-    };
-
-    for registered in &matching {
-        let _action = match &registered.hook {
-            crate::hooks::types::HookType::Command { .. } => {
-                crate::hooks::executor::execute_command_hook(&registered.hook, &input, registered)
-                    .await
-            }
-            crate::hooks::types::HookType::Http { .. } => {
-                crate::hooks::executor::execute_http_hook(&registered.hook, &input).await
-            }
-            _ => crate::hooks::types::HookAction::Allow,
-        };
-    }
-}
-
 mod build_agent;
 mod configuration;
 mod define;
@@ -141,6 +97,11 @@ mod execute_resume;
 mod invocation;
 mod mcp_activation;
 mod spawn_context;
+
+#[cfg(test)]
+#[path = "subagent_lifecycle_test.rs"]
+mod subagent_lifecycle_tests;
+
 pub use define::SubAgentTool;
 
 mod session_binding;
