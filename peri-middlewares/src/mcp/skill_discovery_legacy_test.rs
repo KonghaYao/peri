@@ -14,18 +14,23 @@ async fn legacy_private_zero_ttl_cache_survives_cache_recreation() {
         None::<rmcp::model::ServerPeerInfo>,
     );
     let cache_dir = tempfile::tempdir().unwrap();
-    let origin = "legacy-private-origin";
+    let workspace = peri_acp_types::workspace::WorkspaceId::new();
     let version = "sha256:test-cache-version";
     let first_cache =
         crate::mcp::resource_cache::McpResourceCache::at(cache_dir.path().to_path_buf());
-    first_cache.set_cache_version(origin, Some(version));
+    let (first_scoped, origin) = super::cache_fixture::scoped_cache(
+        make_spec_handle(&running),
+        first_cache.clone(),
+        workspace,
+        Some(version),
+    );
     let resources = vec![resource("skill://srv/cached/SKILL.md")];
     let (_, first_entries) = collect_skill_entries(
         running.peer().clone(),
         "srv",
         resources.clone(),
         AgentCancellationToken::new(),
-        Some((first_cache.clone(), origin.to_string())),
+        Some((first_scoped, origin.clone())),
     )
     .await;
     assert_eq!(first_entries.len(), 1);
@@ -40,13 +45,19 @@ async fn legacy_private_zero_ttl_cache_survives_cache_recreation() {
     // 丢弃第一个 cache 实例后，用同一磁盘根目录重建，模拟重启/新 pool。
     let second_cache =
         crate::mcp::resource_cache::McpResourceCache::at(cache_dir.path().to_path_buf());
-    second_cache.set_cache_version(origin, Some(version));
+    let (second_scoped, second_origin) = super::cache_fixture::scoped_cache(
+        make_spec_handle(&running),
+        second_cache.clone(),
+        workspace,
+        Some(version),
+    );
+    assert_eq!(origin, second_origin);
     let (_, second_entries) = collect_skill_entries(
         running.peer().clone(),
         "srv",
         resources,
         AgentCancellationToken::new(),
-        Some((second_cache.clone(), origin.to_string())),
+        Some((second_scoped, second_origin)),
     )
     .await;
     assert_eq!(second_entries.len(), 1);
@@ -56,7 +67,7 @@ async fn legacy_private_zero_ttl_cache_survives_cache_recreation() {
         "匹配 cacheVersion 的 private + ttlMs:0 条目应直接从新 cache 实例读取"
     );
     assert_eq!(
-        second_cache.recent_status(origin),
+        second_cache.recent_status(&origin),
         Some(crate::mcp::resource_cache::CacheLoadStatus::VersionHit),
         "第二次读取必须记录 VersionHit，而不是 LiveFetch"
     );
@@ -64,13 +75,19 @@ async fn legacy_private_zero_ttl_cache_survives_cache_recreation() {
     // 版本变化必须拒绝旧的零 TTL 内容，恢复远程读取。
     let third_cache =
         crate::mcp::resource_cache::McpResourceCache::at(cache_dir.path().to_path_buf());
-    third_cache.set_cache_version(origin, Some("sha256:changed-cache-version"));
+    let (third_scoped, third_origin) = super::cache_fixture::scoped_cache(
+        make_spec_handle(&running),
+        third_cache,
+        workspace,
+        Some("sha256:changed-cache-version"),
+    );
+    assert_eq!(origin, third_origin);
     let (_, third_entries) = collect_skill_entries(
         running.peer().clone(),
         "srv",
         vec![resource("skill://srv/cached/SKILL.md")],
         AgentCancellationToken::new(),
-        Some((third_cache, origin.to_string())),
+        Some((third_scoped, third_origin)),
     )
     .await;
     assert_eq!(third_entries.len(), 1);
@@ -132,7 +149,7 @@ async fn collect_skill_entries_sorts_by_name_despite_completion_order() {
     );
 }
 
-/// candidates 非空 + 全部 read 失败 → 汇总 warn（回写空条目 Discovered）。
+/// candidates 非空 + 全部 read 失败 → 汇总 warn，回写 Failed 而非成功空目录。
 #[test]
 fn run_discovery_all_reads_fail_emits_warn() {
     let warns = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -178,10 +195,9 @@ fn run_discovery_all_reads_fail_emits_warn() {
                 assert!(
                     matches!(
                         reg.discovery_state("srv"),
-                        Some(ServerDiscoveryState::Discovered { entries, .. })
-                            if entries.is_empty()
+                        Some(ServerDiscoveryState::Failed { .. })
                     ),
-                    "全部 read 失败应回写空条目 Discovered"
+                    "全部 read 失败应回写 Failed，不得发布合法空目录"
                 );
             });
         },

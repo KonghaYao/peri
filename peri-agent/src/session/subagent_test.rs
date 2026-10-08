@@ -22,10 +22,6 @@ use peri_acp_types::session_resources::{
 };
 use peri_acp_types::workspace::{SessionBinding, SESSION_BINDING_VERSION};
 
-#[path = "subagent/test_helpers.rs"]
-mod test_helpers;
-use test_helpers::AdmittedSessionFactory;
-
 #[test]
 fn subagent_failure_keeps_child_identity_and_typed_model_diagnostic() {
     let failure = crate::session::subagent::SubagentFailure::new(
@@ -316,7 +312,7 @@ async fn test_spawn_subagent_creates_child_thread_with_parent_link() {
         register_runtime: None,
         deregister_runtime: None,
         parent_agent_id: None,
-        parent_invocation_id: None,
+        parent_tool_call_id: None,
         cancel_token: None,
         cwd: None,
         parent_thread_id: None,
@@ -326,7 +322,7 @@ async fn test_spawn_subagent_creates_child_thread_with_parent_link() {
         frozen_date: None,
     };
 
-    let spawned = AdmittedSessionFactory::spawn_subagent(Some(&parent), config)
+    let spawned = SessionFactory::spawn_subagent(Some(&parent), config)
         .await
         .expect("spawn ok");
 
@@ -424,7 +420,7 @@ async fn test_spawn_subagent_main_agent_via_host_writes_parent_link() {
         register_runtime: None,
         deregister_runtime: None,
         parent_agent_id: None,
-        parent_invocation_id: None,
+        parent_tool_call_id: None,
         cancel_token: None,
         cwd: None,
         parent_thread_id: None, // 生产路径 host 注入；cfg 为 None 时不得影响
@@ -434,7 +430,7 @@ async fn test_spawn_subagent_main_agent_via_host_writes_parent_link() {
         frozen_date: None,
     };
 
-    let _ = AdmittedSessionFactory::spawn_subagent(Some(&parent), config)
+    let _ = SessionFactory::spawn_subagent(Some(&parent), config)
         .await
         .expect("spawn ok");
 
@@ -507,7 +503,7 @@ async fn test_spawn_subagent_copies_frozen_from_parent() {
         register_runtime: None,
         deregister_runtime: None,
         parent_agent_id: None,
-        parent_invocation_id: None,
+        parent_tool_call_id: None,
         cancel_token: None,
         cwd: None,
         parent_thread_id: None,
@@ -517,7 +513,7 @@ async fn test_spawn_subagent_copies_frozen_from_parent() {
         frozen_date: None,
     };
 
-    let spawned = AdmittedSessionFactory::spawn_subagent(Some(&parent), config)
+    let spawned = SessionFactory::spawn_subagent(Some(&parent), config)
         .await
         .expect("spawn ok");
 
@@ -586,7 +582,7 @@ async fn test_spawn_subagent_without_parent_uses_config_fallback() {
         register_runtime: None,
         deregister_runtime: None,
         parent_agent_id: None,
-        parent_invocation_id: None,
+        parent_tool_call_id: None,
         cancel_token: None,
         cwd: Some("/tmp/bg".to_string()),
         parent_thread_id: Some("bg-parent".to_string()),
@@ -596,7 +592,7 @@ async fn test_spawn_subagent_without_parent_uses_config_fallback() {
         frozen_date: Some("2026-08-05".to_string()),
     };
 
-    let spawned = AdmittedSessionFactory::spawn_subagent(None, config)
+    let spawned = SessionFactory::spawn_subagent(None, config)
         .await
         .expect("spawn ok");
 
@@ -684,7 +680,7 @@ fn resume_config_with(
         register_runtime: None,
         deregister_runtime: None,
         parent_agent_id: None,
-        parent_invocation_id: None,
+        parent_tool_call_id: None,
         cancel_token,
         cwd: None,
         frozen_claude_md: None,
@@ -824,7 +820,7 @@ async fn preset_resumable_thread(
 /// 断言 resume_subagent 返回 Err 并取回错误文本（SubagentSpawned 无 Debug，
 /// 不能直接用 unwrap_err）
 async fn resume_err(parent: Option<&Arc<Session>>, config: SubagentResumeConfig) -> String {
-    match AdmittedSessionFactory::resume_subagent(parent, config).await {
+    match SessionFactory::resume_subagent(parent, config).await {
         Err(e) => e.to_string(),
         Ok(_) => panic!("resume_subagent 应返回 Err（校验失败或重建失败）"),
     }
@@ -885,13 +881,6 @@ async fn save_bound_child(
         )
         .await
         .unwrap();
-    crate::session::test_resources::mock::history::seed_saved_fixture_runtime(
-        store.clone(),
-        &child_id,
-        frozen.clone(),
-        root,
-    )
-    .await;
     child_id
 }
 
@@ -916,7 +905,7 @@ fn bound_session(
             schema_version: SESSION_BINDING_VERSION,
             revision: 1,
             project_id: workspace.project_id,
-            workspace_id: workspace.execution_registration_id,
+            workspace_id: workspace.workspace_id,
             cwd_relative_to_workspace: workspace.relative_cwd.clone(),
         },
         frozen: frozen.unwrap_or_else(|| FrozenSnapshotBytes::new("{\"version\":1,\"root\":true}")),

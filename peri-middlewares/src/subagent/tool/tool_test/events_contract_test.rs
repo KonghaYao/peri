@@ -73,13 +73,13 @@ fn start_child_agent_id(evs: &[ObserveEvent]) -> peri_acp_types::identity::Agent
 ///
 /// child 保存要求父会话存在、调用 cwd 与父会话 cwd 一致、owner 存活；三者一次建好。
 /// 夹具本体随返回值存活（drop 即释放 owner），调用方必须持有到 invoke 结束。
-async fn install_parent_session(dir: &std::path::Path, invocation_id: &str) -> DurableHost {
-    DurableHost::open_in(dir, invocation_id).await
+async fn install_parent_session(dir: &std::path::Path, invocation_id: &str) -> HostFixture {
+    HostFixture::open_in(dir, invocation_id).await
 }
 
 /// 带父身份 + 记录 bridge 的绑定工具（durable host 提供资源/父会话/端口）。
 async fn make_durable_tool(
-    host: &DurableHost,
+    host: &HostFixture,
     dir: &std::path::Path,
 ) -> (SubAgentTool, Arc<RecordingBridge>) {
     let bridge = make_bridge();
@@ -92,9 +92,9 @@ async fn durable_host_with_bridge(
     dir: &std::path::Path,
     invocation_id: &str,
     bridge: &Arc<RecordingBridge>,
-) -> DurableHost {
+) -> HostFixture {
     let bridge = Arc::clone(bridge) as Arc<dyn peri_agent::agent::LangfuseBridgeLike>;
-    DurableHost::open_in_with_host(dir, invocation_id, move |host| {
+    HostFixture::open_in_with_host(dir, invocation_id, move |host| {
         host.langfuse_bridge = Some(bridge);
     })
     .await
@@ -184,7 +184,7 @@ async fn test_background_path_emits_v2_start_stop_exactly_once() {
     let registry = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
     let bridge = make_bridge();
     let bridge_for_host = Arc::clone(&bridge);
-    let host = DurableHost::open_in_with_background(
+    let host = HostFixture::open_in_with_background(
         dir.path(),
         "fixture-events-bg",
         Arc::clone(&registry),
@@ -242,7 +242,7 @@ async fn test_bg_fork_path_emits_v2_start_stop_exactly_once() {
     let bridge = make_bridge();
     let bridge_for_host = Arc::clone(&bridge);
     let host =
-        DurableHost::open_with_background("fixture-events-bg-fork", Arc::clone(&registry), bg_tx)
+        HostFixture::open_with_background("fixture-events-bg-fork", Arc::clone(&registry), bg_tx)
             .await;
     let host = {
         let mut sub_host = host.parent_session_host().unwrap_or_default();

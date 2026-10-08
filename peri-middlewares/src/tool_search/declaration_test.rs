@@ -273,12 +273,11 @@ fn build_real_direct_tools() -> Vec<Arc<dyn BaseTool>> {
     use std::collections::BTreeMap;
 
     use crate::skills::tools::{DiscoverSkillsTool, SkillTool};
-    use crate::skills::SkillMetadata;
     use crate::subagent::SubAgentTool;
     use crate::tool_search::{ExecuteExtraTool, SearchExtraTools, ToolSearchIndex};
     use crate::tools::{AskUserTool, TodoWriteTool};
     use parking_lot::RwLock as PLRwLock;
-    use peri_agent::agent::react::ReactLLM;
+
     use peri_agent::interaction::{InteractionContext, InteractionResponse, UserInteractionBroker};
 
     /// 声明测试不触发交互——request 永不调用。
@@ -313,11 +312,9 @@ fn build_real_direct_tools() -> Vec<Arc<dyn BaseTool>> {
         tx,
         Arc::new(tokio::sync::Mutex::new(crate::tools::TodoState::default())),
     )));
-    // 2 skills：SkillTool/DiscoverSkillsTool
-    let cached: Arc<std::sync::RwLock<Option<Vec<SkillMetadata>>>> =
-        Arc::new(std::sync::RwLock::new(None));
-    tools.push(Arc::new(SkillTool::new(Arc::clone(&cached), None)));
-    tools.push(Arc::new(DiscoverSkillsTool::new(cached)));
+    // 2 skills：SkillTool/DiscoverSkillsTool（M8：调用时读 registry 当前投影）
+    tools.push(Arc::new(SkillTool::new(None)));
+    tools.push(Arc::new(DiscoverSkillsTool::new(None)));
     // 3 meta：SearchExtraTools/ExecuteExtraTool（artifact 由 builtin 桥提供，见上）
     let index = Arc::new(ToolSearchIndex::new());
     let shared: Arc<PLRwLock<BTreeMap<String, Arc<dyn BaseTool>>>> =

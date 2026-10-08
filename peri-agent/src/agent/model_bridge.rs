@@ -30,7 +30,7 @@ pub struct AgentModelBridge {
     system: Option<String>,
     system_contribution_provider: Option<SystemContributionProvider>,
     session_id: Option<String>,
-    /// M3 旧持久子会话归一化：模型投影中吸收与 base system 逐字相同的第一条
+    /// M3/H1 子身份归一化：模型投影中吸收与 base system 逐字相同的第一条
     /// System 消息（历史本体与持久化不变；仅影响请求投影）。
     absorb_system_message: bool,
 }
@@ -79,13 +79,13 @@ impl AgentModelBridge {
         self
     }
 
-    /// M3 旧持久子会话归一化：开启后，模型投影丢弃与 base system 逐字相同的
-    /// 第一条 System 消息（恰一条）。
+    /// M3/H1 子身份归一化：开启后，模型投影丢弃与 base system 逐字相同的第一条
+    /// System 消息（恰一条）。
     ///
-    /// v1 子会话 metadata 的 identity 曾以 `BaseMessage::System` 写入 transcript
-    /// 起始处；H1 起身份只经 bridge base system 注入。该规则按**内容相等**定向
-    /// 吸收，不过滤其它 System 消息（命令反馈 / 预测指令等保持原样），也不修改
-    /// transcript 本体与持久化数据（历史仍可读）。
+    /// 子会话的 own history 起始处持久化一条身份 System（spawn 写入；v1 子会话
+    /// 的历史同形），而 H1 起的身份由 bridge base system 注入。该规则按**内容
+    /// 相等**定向吸收，不过滤其它 System 消息（命令反馈 / 预测指令等保持原样），
+    /// 也不修改 transcript 本体与持久化数据（历史仍可读）。
     pub(crate) fn with_absorbed_system_message(mut self, enabled: bool) -> Self {
         self.absorb_system_message = enabled;
         self
@@ -184,7 +184,7 @@ impl AgentModelBridge {
         messages: &[BaseMessage],
         tools: &[&dyn BaseTool],
     ) -> AgentResult<ModelRequest> {
-        // M3：吸收与 base system 逐字相同的第一条 System 消息（旧持久子身份）。
+        // M3/H1：吸收与 base system 逐字相同的第一条 System 消息（持久子身份）。
         let absorbed = if self.absorb_system_message {
             self.system.as_deref().and_then(|system| {
                 messages.iter().position(|message| {

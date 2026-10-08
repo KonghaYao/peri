@@ -12,9 +12,6 @@ pub(in crate::host) fn handles(method: &str) -> bool {
             | "session/input/dispatch"
             | "session/input/takeback"
             | "session/input/snapshot"
-            | "session/work/query"
-            | "session/work/resolve"
-            | "session/execute/resolve"
     )
 }
 
@@ -50,9 +47,6 @@ pub(in crate::host) async fn handle(
         | "session/input/snapshot" => {
             super::user_input::handle_prepared_user_input(method, params, cfg, transport).await
         }
-        "session/work/query" => super::super::execution::query(params, cfg).await,
-        "session/work/resolve" => super::super::execution::resolve_work(params, cfg).await,
-        "session/execute/resolve" => super::super::execution::resolve(params, cfg).await,
         _ => Err(AcpError::new(-32601, "unknown session IO method")),
     }
 }

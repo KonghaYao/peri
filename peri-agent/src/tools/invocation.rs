@@ -65,6 +65,29 @@ pub trait ToolInvocationResolver: Send + Sync {
         raw_call: &ToolCall,
         tools: &BTreeMap<String, Arc<dyn BaseTool>>,
     ) -> AgentResult<CanonicalToolInvocation>;
+
+    fn resolve_model(
+        &self,
+        raw_call: &ToolCall,
+        tools: &BTreeMap<String, Arc<dyn BaseTool>>,
+    ) -> AgentResult<CanonicalToolInvocation> {
+        let invocation = self.resolve(raw_call, tools)?;
+        ensure_model_visible(invocation.target.as_ref())?;
+        Ok(invocation)
+    }
+}
+
+fn ensure_model_visible(target: &dyn BaseTool) -> AgentResult<()> {
+    if !target.visible_to_model() {
+        return Err(AgentError::ToolExecutionFailed {
+            tool: target.name().to_string(),
+            reason: format!(
+                "tool '{}' is not available to the model in this session",
+                target.name()
+            ),
+        });
+    }
+    Ok(())
 }
 
 /// 默认解析器：精确 key、canonical 名称、大小写折叠 key 和 alias 必须唯一。
@@ -72,6 +95,16 @@ pub trait ToolInvocationResolver: Send + Sync {
 pub struct DirectToolInvocationResolver;
 
 impl DirectToolInvocationResolver {
+    pub fn resolve_model_target(
+        &self,
+        name: &str,
+        tools: &BTreeMap<String, Arc<dyn BaseTool>>,
+    ) -> AgentResult<Arc<dyn BaseTool>> {
+        let target = self.resolve_target(name, tools)?;
+        ensure_model_visible(target.as_ref())?;
+        Ok(target)
+    }
+
     pub fn resolve_target(
         &self,
         name: &str,

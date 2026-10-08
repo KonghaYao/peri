@@ -351,38 +351,7 @@ impl WireFixtureHarness {
     /// 同时按生产语义绑定本会话的任务管理器（`bind_session_tasks` 的会话侧一半）：
     /// 本节用例经 `run_wire_prompt` 直连 `run_session_loop`，未经 host 请求路径。
     pub(super) async fn session_context(&self, session_id: &str) -> SessionContext {
-        use peri_acp_types::session_resources::work::*;
         let mut ctx = make_session_context(session_id).await;
-        let workspace = self._tmp.path().join("workspace");
-        let connections = peri_middlewares::mcp::config::load_merged_config(
-            &workspace,
-            &self._tmp.path().join("claude"),
-        )
-        .unwrap()
-        .mcp_servers;
-        let resources = ctx.session_resources.as_ref().unwrap();
-        let snapshot = resources
-            .load_session_work(&WorkQuery {
-                session_id: session_id.into(),
-                limit: 1,
-            })
-            .await
-            .unwrap();
-        let ordered: std::collections::BTreeMap<_, _> = connections.iter().collect();
-        let receipt = resources
-            .apply_work_mutation(&WorkCommand {
-                session_id: session_id.into(),
-                recipient_lifecycle: snapshot.control.lifecycle,
-                mutation_id: format!("fixture-resource-owners:{session_id}"),
-                action: WorkAction::BindResourceOwners {
-                    expected_revision: snapshot.state.revision,
-                    connections_json: serde_json::to_string(&ordered).unwrap(),
-                    authorization_ref: format!("trusted-fixture-setup:{session_id}"),
-                },
-            })
-            .await
-            .unwrap();
-        assert_eq!(receipt.decision, WorkDecision::Accepted);
         ctx.mcp_pool = Some(Arc::clone(&self.pool) as Arc<dyn McpPoolPort>);
         self.session_tasks.bind(&self.pool, &ctx);
         ctx

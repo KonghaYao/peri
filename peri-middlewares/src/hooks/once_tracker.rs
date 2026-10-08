@@ -40,16 +40,16 @@ impl OnceTracker {
         )
     }
 
-    /// 该 once hook 是否已经触发过。
-    pub fn was_fired(&self, registered: &RegisteredHook) -> bool {
+    /// 原子预留该 once hook：单锁内"查 + 插入"，返回 `true` 表示本次调用拿到了
+    /// 执行权（首次触发），`false` 表示已被其它触发预留过、必须跳过。
+    ///
+    /// [TRAP] 禁止拆成 `was_fired()`（查）+ 执行后 `mark_fired()`（标记）：
+    /// 两步之间锁已释放，生命周期闭包经 `tokio::spawn` 分离触发时，两次触发
+    /// 会同时通过检查并各执行一次（once 失效）。预留即消费——即使本次执行
+    /// 失败或被取消也不重试，符合 once 语义。
+    pub fn try_reserve(&self, registered: &RegisteredHook) -> bool {
         let key = Self::once_key(registered);
-        self.fired.lock().contains(&key)
-    }
-
-    /// 标记该 once hook 已触发。
-    pub fn mark_fired(&self, registered: &RegisteredHook) {
-        let key = Self::once_key(registered);
-        self.fired.lock().insert(key);
+        self.fired.lock().insert(key)
     }
 }
 

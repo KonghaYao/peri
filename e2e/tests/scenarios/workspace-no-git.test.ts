@@ -207,7 +207,7 @@ describe("无 Git 环境的工作区", () => {
     await prompt("NO_GIT_FIRST_INPUT", 1);
 
     // 普通目录模式：没有 Git 布局证据，不猜测父目录归属。
-    const workspaces = await query<{ discovery: string }>("SELECT discovery FROM legacy_execution_registrations");
+    const workspaces = await query<{ discovery: string }>("SELECT discovery FROM workspaces");
     expect(workspaces, "登记后应恰好有一个工作区").toHaveLength(1);
     const discovery = JSON.parse(workspaces[0].discovery) as {
       root: string; common_dir: string | null; private_dir: string | null;
@@ -251,7 +251,7 @@ describe("无 Git 环境的工作区", () => {
 
     const projects = await query<{ id: string }>("SELECT id FROM projects");
     const workspaces = await query<{ id: string; project_id: string }>(
-      "SELECT id, project_id FROM legacy_execution_registrations",
+      "SELECT id, project_id FROM workspaces",
     );
     expect(projects).toHaveLength(1);
     expect(workspaces).toHaveLength(1);
@@ -274,7 +274,7 @@ describe("无 Git 环境的工作区", () => {
     await launch(nested);
     await prompt("NO_GIT_REPO_INPUT", 1);
 
-    const workspaces = await query<{ discovery: string }>("SELECT discovery FROM legacy_execution_registrations");
+    const workspaces = await query<{ discovery: string }>("SELECT discovery FROM workspaces");
     expect(workspaces, "登记后应恰好有一个工作区").toHaveLength(1);
     const discovery = JSON.parse(workspaces[0].discovery) as {
       root: string; common_dir: string | null; private_dir: string | null;

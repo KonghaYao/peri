@@ -326,3 +326,147 @@ fn unknown_frontmatter_fields_are_ignored_and_definition_still_loads() {
     let bundle = scan(dir.path(), &budget(), &[]);
     assert!(bundle.main.is_some(), "未知 frontmatter 字段不得导致拒载");
 }
+
+// ─── M9：读取预算与失败分类 ──────────────────────────────────────────────────
+
+/// 读取失败分类：正常不存在是 `NotFound`（不记诊断），其余类别各自可辨。
+#[test]
+fn read_failure_classification_separates_absence_from_errors() {
+    let dir = tempdir();
+    assert_eq!(
+        read_bounded_text(&dir.path().join("missing.md"), 1024),
+        Err(ReadFailure::NotFound),
+        "缺失文件是正常不存在，不是读取错误"
+    );
+    assert_eq!(
+        read_bounded_text(dir.path(), 1024),
+        Err(ReadFailure::NotFound),
+        "目录不是文件，按不存在处理"
+    );
+
+    write(&dir.path().join("big.md"), &"x".repeat(64));
+    assert_eq!(
+        read_bounded_text(&dir.path().join("big.md"), 16),
+        Err(ReadFailure::OverBudget)
+    );
+
+    std::fs::write(dir.path().join("binary.md"), [0xff, 0xfe]).unwrap();
+    assert_eq!(
+        read_bounded_text(&dir.path().join("binary.md"), 1024),
+        Err(ReadFailure::NotUtf8),
+        "非 UTF-8 是编码错误，不是不存在"
+    );
+
+    // 类别名稳定（诊断字段）。
+    assert_eq!(ReadFailure::NotFound.category(), "not-found");
+    assert_eq!(ReadFailure::ReadError.category(), "read-error");
+    assert_eq!(ReadFailure::NotUtf8.category(), "not-utf8");
+    assert_eq!(ReadFailure::OverBudget.category(), "over-budget");
+}
+
+/// `@import` 累计读取预算：整棵展开树共享；用尽后不再读后续 import，
+/// 保留原始占位符（不静默截断成半棵内容）。
+#[test]
+fn import_total_read_budget_is_shared_across_the_expansion_tree() {
+    let dir = tempdir();
+    // 根正文 3 条占位符（各 22 字节）+ 根后仅剩 34 字节预算：a.md 单项超出剩余
+    // 预算（跳过），b.md 装得下（30 字节），c.md 时剩余只有 4 字节（累计生效）。
+    let root = "<!-- @import a.md -->\n<!-- @import b.md -->\n<!-- @import c.md -->\n";
+    write(&dir.path().join("a.md"), &"a".repeat(200));
+    write(&dir.path().join("b.md"), &"b".repeat(30));
+    write(&dir.path().join("c.md"), &"c".repeat(30));
+    write(&dir.path().join("CLAUDE.md"), root);
+
+    let tiny = ResourceBudget {
+        max_instruction_total_bytes: root.len() as u64 + 34,
+        ..ResourceBudget::default()
+    };
+    let bundle = scan(dir.path(), &tiny, &[]);
+    let main = bundle.main.expect("main");
+    assert!(
+        !main.text.contains("aaa") && !main.text.contains("ccc"),
+        "超预算的 import 不得把正文拼进结果：{}",
+        main.text
+    );
+    assert!(
+        main.text.contains(&"b".repeat(30)),
+        "装得下的 import 仍应展开：{}",
+        main.text
+    );
+    let imported: Vec<&str> = bundle
+        .index
+        .imports
+        .iter()
+        .map(|record| record.relative.as_str())
+        .collect();
+    assert_eq!(
+        imported,
+        vec!["b.md"],
+        "只登记实际读取的依赖（累计预算生效）"
+    );
+}
+
+/// 保留既有语义：预算充裕时 import 正常展开并登记依赖。
+#[test]
+fn import_total_read_budget_allows_normal_expansion() {
+    let dir = tempdir();
+    write(&dir.path().join("CLAUDE.md"), "<!-- @import a.md -->\n");
+    write(&dir.path().join("a.md"), "imported body");
+    let bundle = scan(dir.path(), &budget(), &[]);
+    assert_eq!(bundle.main.expect("main").text, "imported body\n");
+    assert_eq!(bundle.index.imports.len(), 1);
+}
+
+/// 最终文本预算：超限保留有界前缀 + 显式截断说明，且 digest 按最终文本计算
+/// （list 与 read 一致）。
+#[test]
+fn final_text_budget_keeps_bounded_prefix_and_marks_truncation() {
+    let dir = tempdir();
+    write(&dir.path().join("AGENTS.md"), &"y".repeat(4096));
+    let tiny = ResourceBudget {
+        max_instruction_text_bytes: 256,
+        ..ResourceBudget::default()
+    };
+    let bundle = scan(dir.path(), &tiny, &[]);
+    let main = bundle.main.expect("main");
+    assert!(
+        main.text.len() < 4096,
+        "最终文本必须落在预算内：{}",
+        main.text.len()
+    );
+    assert!(
+        main.text
+            .contains("instruction text truncated at 256 bytes"),
+        "截断必须有显式说明：{}",
+        &main.text[..main.text.len().min(120)]
+    );
+    assert_eq!(main.digest, digest_bytes(main.text.as_bytes()));
+}
+
+/// 多字节边界：截断不切断 UTF-8 字符。
+#[test]
+fn final_text_budget_never_splits_a_utf8_character() {
+    let dir = tempdir();
+    write(&dir.path().join("AGENTS.md"), &"中".repeat(200));
+    let tiny = ResourceBudget {
+        max_instruction_text_bytes: 101,
+        ..ResourceBudget::default()
+    };
+    let bundle = scan(dir.path(), &tiny, &[]);
+    let main = bundle.main.expect("main");
+    // 截断点落在字符边界（字符串本身已是合法 UTF-8；再断言前缀是整字符倍数）。
+    let prefix = main.text.split('\n').next().unwrap();
+    assert_eq!(prefix.len() % 3, 0, "前缀必须是整字符（多字节不切断）");
+}
+
+/// local 读取失败（非 UTF-8）不静默：local 不贡献，但 main 照常可用。
+#[test]
+fn local_document_read_failure_is_isolated_from_main() {
+    let dir = tempdir();
+    write(&dir.path().join("AGENTS.md"), "main body");
+    std::fs::write(dir.path().join("CLAUDE.local.md"), [0xff, 0xfe]).unwrap();
+    let bundle = scan(dir.path(), &budget(), &[]);
+    assert_eq!(bundle.main.expect("main").text, "main body");
+    assert!(bundle.local.is_none(), "编码非法的 local 不贡献正文");
+    assert_eq!(bundle.index.documents[1].present, false);
+}

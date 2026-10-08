@@ -23,6 +23,7 @@ fn hook(command: &str, event: HookEvent, asynchronous: bool, timeout: u64) -> Re
         matcher: None,
         plugin_name: "fixture".into(),
         plugin_id: "fixture".into(),
+        plugin_source: None,
         plugin_root: PathBuf::new(),
         plugin_data_dir: PathBuf::new(),
         plugin_options: HashMap::new(),

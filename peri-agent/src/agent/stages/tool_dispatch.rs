@@ -76,7 +76,6 @@ pub async fn dispatch_tools(
     catalog: &Arc<SessionToolCatalogSnapshot>,
     cancel: &CancellationToken,
 ) -> AgentResult<DispatchOutcome> {
-    super::execution_control::validate(ctx).await?;
     let turn_id = ctx.turn_id();
     let agent_id = ctx.session.agent_id;
 
@@ -138,16 +137,10 @@ pub async fn dispatch_tools(
             ));
             continue;
         }
-        let resolved = match ctx.work.bound_invocation(&call.id).await {
-            Some(invocation) => Ok(invocation),
-            None if ctx.work.ensure(ctx).await?.is_some() => {
-                return Err(anyhow::anyhow!("Act missing pinned durable target binding").into());
-            }
-            None => ctx
-                .runtime
-                .tool_invocation_resolver
-                .resolve(call, &all_tools),
-        };
+        let resolved = ctx
+            .runtime
+            .tool_invocation_resolver
+            .resolve_model(call, &all_tools);
         match resolved {
             Ok(invocation) => invocations.push(invocation),
             Err(error) => resolution_errors.push((
@@ -161,21 +154,6 @@ pub async fn dispatch_tools(
         // `tool call failed`（tool_dispatch/execution.rs）覆盖不到它们，只能在
         // 这里补齐，否则错误只以事件（ToolEnded{is_error:true}）离开进程。
         //
-        // 静态可达性（2026-10-06 核实，见
-        // spec/issues/2026-10-06-error-path-logging-gaps-p1.md P1-8）：本分支当前为
-        // test-only。`resolution_errors` 的两条来源在生产路径上均被上游拦截——
-        // 畸形/重复 ID 与 resolver 失败已由 Reason 阶段的
-        // `work_reason::commit_response` 校验并返回 Err（`reason.rs` 以 `?` 传播，
-        // dispatch 不会执行）；且 resolver 兜底分支要求 `ensure()` 返回 `Ok(None)`，
-        // 而生产装配下 `ctx.work` 恒为 `Durable`（`work_boundary.rs` 的
-        // `#[cfg(not(test))] let WorkRuntime::Durable(session) = runtime`），
-        // 仅 `BestEffortFixture` 测试装配会走到。
-        //
-        // 保留该日志的意图：非 durable 装配、或上游校验放宽/调整时，这里是唯一的
-        // 逐条错误记录。请勿因“当前不可达”而按死代码删除。
-        //
-        // 脱敏：只记录 id、工具名与解析失败原因，与 `v2_execute.rs` 的 wire 投影同
-        // 一约束——不得写入 provider body、凭据或完整 cause chain。
         tracing::warn!(
             tool_call_id = %call.id,
             tool = %call.name,
@@ -221,19 +199,12 @@ pub async fn dispatch_tools(
         cancel,
         ai_msg_id,
         &ai_msg,
+        None,
     )
     .await?;
 
     // 阶段 B：原子写入 transcript（staging 模式）
-    let mut durable_results = collect_outcome.results.clone();
-    durable_results.extend(resolution_errors.clone());
-    if let Some(projections) = super::work_dispatch::commit_results(ctx, &durable_results).await? {
-        let mut tx = ctx.session.transcript.write();
-        tx.mirror_committed_payload(peri_acp_types::store::PersistedPayload::Message(ai_msg));
-        for message in projections {
-            tx.mirror_committed_payload(peri_acp_types::store::PersistedPayload::Message(message));
-        }
-    } else {
+    {
         let mut tx = ctx.session.transcript.write();
         tx.stage_ai_message(ai_msg);
         for (_, result) in &collect_outcome.results {
@@ -263,9 +234,6 @@ pub async fn dispatch_tools(
             tracker.add_estimated_tool_tokens(&result.output);
         }
     }
-
-    super::execution_control::validate(ctx).await?;
-    ctx.work.ensure(ctx).await?;
 
     // 阶段 C：仅已进入 policy 的调用触发 after_tools_batch。
     // Resolution 错误在 middleware 前结算，不能产生任何 hook 副作用。

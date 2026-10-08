@@ -387,7 +387,7 @@ fn make_bridge_harness() -> BridgeHarness {
     let completions = Arc::new(AtomicUsize::new(0));
     let mut chain = MiddlewareChain::new();
     chain.add(Box::new(CompletionCounter(completions.clone())));
-    let ctx = StageContext::best_effort_fixture_builder(
+    let ctx = StageContext::builder(
         session.start_turn(),
         session.transcript(),
         session.queue().clone(),
@@ -501,7 +501,7 @@ fn make_context(
     let completions = Arc::new(AtomicUsize::new(0));
     let mut chain = MiddlewareChain::new();
     chain.add(Box::new(CompletionCounter(completions.clone())));
-    let ctx = StageContext::best_effort_fixture_builder(
+    let ctx = StageContext::builder(
         session.start_turn(),
         session.transcript(),
         session.queue().clone(),

@@ -14,9 +14,7 @@ use peri_acp_types::{
     ports::SessionMcpCapabilityPort,
 };
 use peri_agent::{
-    agent::react::{ReactLLM, Reasoning, StreamingContext},
     messages::BaseMessage,
-    session::{subagent::SubagentHost, FrozenContext, Session},
     tools::{BaseTool, ToolContext},
 };
 
@@ -209,8 +207,8 @@ fn capability_snapshot(
 async fn production_tool(
     capability: Arc<MutableCapability>,
     seen: Arc<Mutex<Vec<Vec<String>>>>,
-) -> (SubAgentTool, DurableHost) {
-    let host = DurableHost::open("fixture-dynamic-tool").await;
+) -> (SubAgentTool, HostFixture) {
+    let host = HostFixture::open("fixture-dynamic-tool").await;
     let host = durable_host_with_capability(host, capability);
     let tool = host.bind(SubAgentTool::new(
         Arc::new(vec![make_tool("Read")]),
@@ -230,18 +228,18 @@ async fn production_tool(
 
 /// 把会话级 MCP capability 发布面装到父 host（生产子链从父 host 读取）。
 fn durable_host_with_capability(
-    host: DurableHost,
+    host: HostFixture,
     capability: Arc<MutableCapability>,
-) -> DurableHost {
+) -> HostFixture {
     let mut sub_host = host.parent_session_host().unwrap_or_default();
     sub_host.session_mcp_capability =
         Some(Arc::clone(&capability) as Arc<dyn SessionMcpCapabilityPort>);
     host.with_rebuilt_host(sub_host)
 }
 
-async fn invoke_fork(tool: &SubAgentTool, host: &DurableHost) {
+async fn invoke_fork(tool: &SubAgentTool, host: &HostFixture) {
     // 每次委派使用各自的受信 invocation（一个 invocation 只绑定一个任务）。
-    let invocation = host.fresh_invocation("fork").await;
+    let invocation = host.fresh_tool_call_id("fork");
     tool.invoke(
         serde_json::json!({"fork": true, "prompt": "inspect"}),
         host.context_with(&[], invocation),
@@ -267,7 +265,7 @@ async fn existing_fork_child_refreshes_across_load_and_unload_reason_boundaries(
         ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
             use crate::subagent::test_support::*;
             let _ = &cancellation;
-            let messages = base_messages(&request);
+            let _messages = base_messages(&request);
             let defined = defined_tools(&request);
             let tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
 
@@ -305,7 +303,7 @@ async fn existing_fork_child_refreshes_across_load_and_unload_reason_boundaries(
 
     let capability = Arc::new(MutableCapability::default());
     let seen = Arc::new(Mutex::new(Vec::new()));
-    let host = DurableHost::open("fixture-dynamic-refresh").await;
+    let host = HostFixture::open("fixture-dynamic-refresh").await;
     let host = durable_host_with_capability(host, Arc::clone(&capability));
     let tool = host.bind(SubAgentTool::new(
         Arc::new(vec![make_tool("Read")]),
@@ -363,7 +361,7 @@ async fn generation_n_dispatch_stays_pinned_after_n_plus_one_is_published() {
             let _ = &cancellation;
             let messages = base_messages(&request);
             let defined = defined_tools(&request);
-            let tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
+            let _tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
 
             if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
                 *self.capability.0.write() = Arc::new(capability_snapshot_with_result(
@@ -388,7 +386,7 @@ async fn generation_n_dispatch_stays_pinned_after_n_plus_one_is_published() {
         capability_snapshot_with_result(1, Some("mcp__dynamic__lookup"), "generation-n"),
     ))));
     let observed_result = Arc::new(Mutex::new(None));
-    let host = DurableHost::open("fixture-dynamic-pinning").await;
+    let host = HostFixture::open("fixture-dynamic-pinning").await;
     let host = durable_host_with_capability(host, Arc::clone(&capability));
     let tool = host.bind(SubAgentTool::new(
         Arc::new(vec![make_tool("Read")]),

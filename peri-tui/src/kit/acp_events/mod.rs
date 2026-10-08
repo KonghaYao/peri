@@ -114,6 +114,12 @@ pub enum SessionPhase {
     ReplayingHistory,
 }
 
+/// Composer rollback text is owned by its submitted request, not the active execution.
+pub struct SubmittedInputRollback {
+    pub text: String,
+    pub request_id: Option<String>,
+}
+
 /// 桥接任务维护的内部状态，每个 ACP 事件到达时同步更新。
 ///
 /// 定义在 acp_events.rs 中以避免 acp_bridge ↔ acp_events 循环依赖。
@@ -140,9 +146,9 @@ pub struct BridgeState {
     /// 命令 compact 后无流事件，标志保持；agent 内部 auto-compact 后标志被
     /// 后续流事件清掉（无需知道 compact 触发来源）。
     pub compact_just_completed: bool,
-    /// 本轮用户提交的文本——TurnInterrupted 零产出回滚时用于恢复输入框。
+    /// 本地用户提交的文本及身份——仅所属请求的零产出取消可恢复输入框。
     /// LocalUserBubble 到达时写入，TurnInterrupted 零产出时消费并清空。
-    pub last_submitted_text: Option<String>,
+    pub last_submitted_text: Option<SubmittedInputRollback>,
     /// streaming_mode=block 时追踪上次推送后主 agent 文本的字节数。
     /// 用于 `has_md_block_boundary_since` 的比较基点。
     pub last_pushed_text_len: usize,
@@ -329,10 +335,14 @@ pub(crate) fn dispatch_for_bridge(
         // ── §4.2 Boundary events ──
         PromptStarted => turn::handle_prompt_started(state),
         PromptSubmitted { request_id } => turn::handle_prompt_submitted(state, request_id),
+        ExecutionStarted { request_id } => {
+            turn::handle_execution_started(state, &Some(request_id.clone()))
+        }
         CacheUsageUpdated(sample) => turn::handle_cache_usage_updated(state, sample),
         SessionReplayStarted => turn::handle_session_replay_started(state),
         SessionReplayDone => turn::handle_session_replay_done(state),
         TurnDone => turn::handle_turn_done(state),
+        AgentDone { request_id } => turn::handle_agent_done(state, request_id),
         TurnInterrupted { reason, request_id } => {
             turn::handle_turn_interrupted(state, reason, request_id)
         }
@@ -485,6 +495,7 @@ pub(crate) fn dispatch_for_bridge(
             turn::handle_local_user_bubble(state, text);
         }
         LocalLoadingReset => turn::handle_loading_reset(state),
+        PromptFailed { request_id } => turn::handle_prompt_failed(state, request_id),
         BgCallbackBubble { .. } => turn::handle_bg_callback_bubble(state),
         CommittedAssistantText { text, reasoning } => {
             turn::handle_committed_assistant_text(state, text, reasoning)

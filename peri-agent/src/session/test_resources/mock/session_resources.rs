@@ -12,7 +12,6 @@ fn doubled_workspace(cwd: &str) -> ResolvedWorkspace {
     ResolvedWorkspace {
         project_id: peri_acp_types::workspace::ProjectId::new(),
         workspace_id,
-        execution_registration_id: workspace_id,
         cwd: cwd.clone(),
         root: cwd,
         relative_cwd: std::path::PathBuf::new(),
@@ -28,102 +27,6 @@ fn unsupported(behavior: &str) -> SessionResourceError {
 
 #[async_trait]
 impl SessionResources for MockSessionResources {
-    async fn load_work_availability(
-        &self,
-        id: &ThreadId,
-    ) -> SessionResourceResult<peri_acp_types::session_resources::work::WorkAvailability> {
-        self.durable_backend(id)
-            .await
-            .load_work_availability(id)
-            .await
-    }
-    async fn load_work_delivery(
-        &self,
-        query: &peri_acp_types::session_resources::work::WorkDeliveryQuery,
-    ) -> SessionResourceResult<Option<peri_acp_types::session_resources::work::DeliveryRecord>>
-    {
-        self.durable_backend(&query.session_id)
-            .await
-            .load_work_delivery(query)
-            .await
-    }
-    async fn load_work_command(
-        &self,
-        query: &peri_acp_types::session_resources::work::WorkCommandQuery,
-    ) -> SessionResourceResult<Option<peri_acp_types::session_resources::work::OwnedWorkCommand>>
-    {
-        self.durable_backend(&query.session_id)
-            .await
-            .load_work_command(query)
-            .await
-    }
-    async fn load_session_work(
-        &self,
-        query: &peri_acp_types::session_resources::work::WorkQuery,
-    ) -> SessionResourceResult<peri_acp_types::session_resources::work::WorkSnapshot> {
-        self.durable_backend(&query.session_id)
-            .await
-            .load_session_work(query)
-            .await
-    }
-    async fn apply_work_mutation(
-        &self,
-        command: &peri_acp_types::session_resources::work::WorkCommand,
-    ) -> SessionResourceResult<peri_acp_types::session_resources::work::WorkReceipt> {
-        self.ensure_writable()?;
-        let backend = self.durable_backend(&command.session_id).await;
-        let receipt = backend.apply_work_mutation(command).await?;
-        let snapshot = backend.load_session_snapshot(&command.session_id).await?;
-        self.with_region(&command.session_id, |region| {
-            for payload in snapshot.payloads {
-                if !region
-                    .payloads
-                    .iter()
-                    .any(|existing| existing.id() == payload.id())
-                {
-                    region.payloads.push(payload);
-                }
-            }
-        });
-        Ok(receipt)
-    }
-    async fn resolve_work_mutation(
-        &self,
-        command: &peri_acp_types::session_resources::work::WorkCommand,
-    ) -> SessionResourceResult<peri_acp_types::session_resources::work::WorkResolution> {
-        self.durable_backend(&command.session_id)
-            .await
-            .resolve_work_mutation(command)
-            .await
-    }
-    async fn load_session_control(
-        &self,
-        id: &ThreadId,
-    ) -> SessionResourceResult<peri_acp_types::session_resources::ControlState> {
-        self.durable_backend(id)
-            .await
-            .load_session_control(id)
-            .await
-    }
-    async fn apply_session_control(
-        &self,
-        command: &peri_acp_types::session_resources::ControlCommand,
-    ) -> SessionResourceResult<peri_acp_types::session_resources::ControlReceipt> {
-        self.ensure_writable()?;
-        self.durable_backend(&command.session_id)
-            .await
-            .apply_session_control(command)
-            .await
-    }
-    async fn resolve_session_control(
-        &self,
-        command: &peri_acp_types::session_resources::ControlCommand,
-    ) -> SessionResourceResult<peri_acp_types::session_resources::ControlResolution> {
-        self.durable_backend(&command.session_id)
-            .await
-            .resolve_session_control(command)
-            .await
-    }
     async fn inspect_availability(
         &self,
         _session: Option<&ThreadId>,

@@ -25,9 +25,6 @@ use serde::Serialize;
 
 const CHANGE_LIMIT: usize = 512;
 
-#[path = "shell_tasks_invocations.rs"]
-mod invocations;
-
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ScopedTask {
@@ -64,7 +61,6 @@ pub(crate) struct ScopeOpened {
 
 #[derive(Default)]
 struct ShellState {
-    invocations: HashMap<(String, String), invocations::OwnerInvocation>,
     resources_settled: HashSet<String>,
     records: HashMap<String, DetailedTask>,
     scopes: HashMap<String, String>,
@@ -120,7 +116,6 @@ impl ShellState {
 
 #[derive(Clone)]
 pub(crate) struct ShellTasks {
-    owner_identity: Arc<str>,
     manager: Arc<dyn TaskManager>,
     state: Arc<Mutex<ShellState>>,
     changed: Arc<tokio::sync::Notify>,
@@ -134,7 +129,6 @@ impl ShellTasks {
     pub(crate) fn new() -> Self {
         let (updates, _) = tokio::sync::broadcast::channel(64);
         Self {
-            owner_identity: Arc::from(uuid::Uuid::now_v7().to_string()),
             manager: Arc::new(peri_mcp_common::create_local_task_manager()),
             state: Arc::new(Mutex::new(ShellState::default())),
             changed: Arc::new(tokio::sync::Notify::new()),
@@ -147,16 +141,6 @@ impl ShellTasks {
 
     pub(crate) fn subscribe(&self) -> tokio::sync::broadcast::Receiver<DetailedTask> {
         self.updates.subscribe()
-    }
-
-    pub(crate) fn owner_capabilities(&self, scope: &str) -> serde_json::Value {
-        serde_json::json!({
-            "version": 1, "ownerIdentity": self.owner_identity,
-            "scopeId": scope, "scopeEpoch": self.snapshot(scope).epoch,
-            "invocationDiscovery": true, "retainedTasks": true,
-            "scopeCloseBarrier": true, "resourceSettlement": true,
-            "invocationIdempotency": false
-        })
     }
 
     pub(crate) fn manager(&self) -> Arc<dyn TaskManager> {
@@ -277,25 +261,12 @@ impl ShellTasks {
         self.spawn_scoped(command, cwd, timeout_ms, None).await
     }
 
-    #[cfg(test)]
     pub(crate) async fn spawn_scoped(
         &self,
         command: String,
         cwd: String,
         timeout_ms: Option<u64>,
         scope: Option<&str>,
-    ) -> Result<Task, McpError> {
-        self.spawn_scoped_for_invocation(command, cwd, timeout_ms, scope, None)
-            .await
-    }
-
-    pub(crate) async fn spawn_scoped_for_invocation(
-        &self,
-        command: String,
-        cwd: String,
-        timeout_ms: Option<u64>,
-        scope: Option<&str>,
-        invocation_id: Option<&str>,
     ) -> Result<Task, McpError> {
         // The MCP request may be cancelled while spawn_blocking is running.
         // Admission and registration must outlive that request future so a
@@ -306,7 +277,6 @@ impl ShellTasks {
         }
         let owner = self.clone();
         let scope = scope.map(str::to_owned);
-        let invocation_id = invocation_id.map(str::to_owned);
         let (reply, receive) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
             let mut admission = admission;
@@ -314,11 +284,6 @@ impl ShellTasks {
                 .spawn_scoped_owned(command, cwd, timeout_ms, scope.as_deref())
                 .await;
             if result.is_ok() {
-                if let (Some(scope), Some(invocation_id), Ok(task)) =
-                    (&scope, &invocation_id, &result)
-                {
-                    owner.bind_invocation_task(scope, invocation_id, &task.task_id);
-                }
                 if let Some(admission) = &mut admission {
                     admission.creation_unconfirmed = false;
                 }

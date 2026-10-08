@@ -172,6 +172,9 @@ pub struct SubAgentMiddleware {
     parent_messages: Option<Arc<RwLock<Vec<BaseMessage>>>>,
     /// Registered hooks for SubagentStart/SubagentStop lifecycle events
     registered_hooks: Arc<Vec<crate::hooks::types::RegisteredHook>>,
+    /// 父链装配期共享；Reason 目录重绑及 middleware clone 不重置 lifecycle once。
+    lifecycle_dispatcher:
+        Arc<std::sync::OnceLock<Option<Arc<crate::hooks::dispatcher::HookDispatcher>>>>,
     /// Per-child agent event handler factory: takes agent_id → returns handler for that child.
     #[allow(clippy::type_complexity)]
     child_handler_factory: Option<Arc<dyn Fn(String) -> Arc<dyn AgentEventHandler> + Send + Sync>>,
@@ -215,6 +218,7 @@ impl SubAgentMiddleware {
             cancel: None,
             parent_messages: None,
             registered_hooks: Arc::new(Vec::new()),
+            lifecycle_dispatcher: Arc::new(std::sync::OnceLock::new()),
             child_handler_factory: None,
             parent_agent_id: Arc::new(RwLock::new(None)),
             parent_session: Arc::new(RwLock::new(None)),
@@ -336,6 +340,7 @@ impl SubAgentMiddleware {
             Arc::clone(&self.llm_factory),
             cwd.to_string(),
         );
+        tool.lifecycle_dispatcher = Arc::clone(&self.lifecycle_dispatcher);
         if let Some(ref builder) = self.system_builder {
             tool = tool.with_system_builder(Arc::clone(builder));
         }
@@ -566,3 +571,7 @@ impl Middleware for SubAgentMiddleware {
 #[cfg(test)]
 #[path = "mod_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "reason_lifecycle_test.rs"]
+mod reason_lifecycle_tests;

@@ -176,7 +176,7 @@ async fn make_scenario(cancel_on_third: bool) -> BudgetScenario {
         queue: session.queue().clone(),
     }));
     let (bus, handles) = crate::agent::events_v2::EventBus::new(Default::default());
-    let context = StageContext::best_effort_fixture_builder(
+    let context = StageContext::builder(
         session.start_turn(),
         session.transcript(),
         session.queue().clone(),

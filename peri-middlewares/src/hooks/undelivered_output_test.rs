@@ -61,6 +61,7 @@ fn hook_with_command(event: HookEvent, json: &str) -> RegisteredHook {
         matcher: None,
         plugin_name: "undelivered-plugin".to_string(),
         plugin_id: "undelivered-plugin-id".to_string(),
+        plugin_source: None,
         plugin_root: PathBuf::from("/tmp/undelivered-plugin"),
         plugin_data_dir: PathBuf::from("/tmp/undelivered-plugin-data"),
         plugin_options: HashMap::new(),

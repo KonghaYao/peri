@@ -65,6 +65,7 @@ fn ask_hook() -> RegisteredHook {
         matcher: None,
         plugin_name: "ask-host-path-plugin".to_string(),
         plugin_id: "ask-host-path-plugin-id".to_string(),
+        plugin_source: None,
         plugin_root: std::path::PathBuf::from("/tmp/ask-host-path-plugin"),
         plugin_data_dir: std::path::PathBuf::from("/tmp/ask-host-path-plugin-data"),
         plugin_options: std::collections::HashMap::new(),

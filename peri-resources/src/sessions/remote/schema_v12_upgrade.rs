@@ -42,15 +42,6 @@ const GUARD_ROW_SQL: &str = "INSERT INTO peri_store_meta(singleton) SELECT 0 WHE
     LEFT JOIN session_bindings b ON b.thread_id = t.id
     WHERE t.id = ?1 AND t.parent_thread_id IS ?2 AND t.cwd = ?3
       AND e.machine_id IS ?4 AND b.workspace_id IS ?5 AND b.relative_cwd IS ?6)";
-const COPY_THREAD_SQL: &str = "INSERT INTO threads_v12 (
-    id, title, cwd, created_at, updated_at, message_count, parent_thread_id,
-    snapshot_at_message_id, hidden, cancel_policy, config, frozen_context,
-    inherited_context, agent_status, workspace_id, archived)
-    SELECT id, title, cwd, created_at, updated_at, message_count, parent_thread_id,
-    snapshot_at_message_id, hidden, cancel_policy, config, frozen_context,
-    inherited_context, agent_status, ?2, 0 FROM threads WHERE id = ?1";
-const GUARD_TARGET_COUNT_SQL: &str = "INSERT INTO peri_store_meta(singleton) SELECT 0 WHERE
-    (SELECT COUNT(*) FROM threads_v12) <> ?1";
 const INSERT_MACHINE_SQL: &str =
     "INSERT INTO machines(id, name, identity_kind) VALUES (?1, ?2, ?3)";
 const INSERT_WORKSPACE_SQL: &str =
@@ -86,27 +77,15 @@ pub(super) async fn upgrade(
         ])
         .await?;
     let old_columns: BTreeSet<_> = canonical::THREAD_COLUMN_NAMES.iter().copied().collect();
+    let objects = super::schema_upgrade::decode_objects(&results[3])?;
+    crate::sessions::schema_cleanup::execution_recovery_removal_plan(&objects)
+        .map_err(|_| unsupported())?;
     let actual_columns: BTreeSet<_> = results[2]
         .iter()
         .map(|row| text_at(row, 0).ok_or_else(unsupported))
         .collect::<SessionResourceResult<_>>()?;
-    if actual_columns != old_columns {
+    if !old_columns.is_subset(&actual_columns) {
         return Err(unsupported());
-    }
-    for object in &results[3] {
-        let kind = text_at(object, 0).ok_or_else(unsupported)?;
-        let name = text_at(object, 1).ok_or_else(unsupported)?;
-        let table = text_at(object, 2).ok_or_else(unsupported)?;
-        let sql = optional_text(object, 3)?;
-        if (kind == "index" && table == "threads" && name != "idx_threads_updated")
-            || (kind == "table"
-                && !["messages", "session_bindings", "session_environments"].contains(&name)
-                && sql
-                    .as_deref()
-                    .is_some_and(|sql| sql.to_ascii_lowercase().contains("references threads")))
-        {
-            return Err(unsupported());
-        }
     }
     let mut registrations = Vec::new();
     for row in &results[1] {
@@ -252,30 +231,22 @@ pub(super) async fn upgrade(
         ));
     }
     statements.push(StatementSpec::bare(
-        canonical::CREATE_V2_TEMP_THREADS_TABLE_SQL,
+        "ALTER TABLE threads ADD COLUMN workspace_id TEXT REFERENCES workspaces(id)",
     ));
+    statements.push(StatementSpec::bare("ALTER TABLE threads ADD COLUMN archived BOOLEAN NOT NULL DEFAULT 0 CHECK(archived IN (0, 1))"));
     for session in &sessions {
         let workspace_id = plan
             .session_workspace_ids
             .get(&session.id)
             .ok_or_else(unsupported)?;
         statements.push(StatementSpec::new(
-            COPY_THREAD_SQL,
+            "UPDATE threads SET workspace_id = ?2 WHERE id = ?1",
             vec![
                 Value::Text(session.id.clone()),
                 Value::Text(workspace_id.to_string()),
             ],
         ));
     }
-    statements.push(StatementSpec::new(
-        GUARD_TARGET_COUNT_SQL,
-        vec![Value::Integer(sessions.len() as i64)],
-    ));
-    statements.push(StatementSpec::bare("DROP TABLE threads"));
-    statements.push(StatementSpec::bare(
-        "ALTER TABLE threads_v12 RENAME TO threads",
-    ));
-    statements.push(StatementSpec::bare(canonical::CREATE_INDEXES[3]));
     statements.push(StatementSpec::bare(canonical::CREATE_V2_INDEXES[4]));
     statements.push(StatementSpec::bare(
         "ALTER TABLE session_bindings ADD COLUMN discovery_snapshot TEXT",

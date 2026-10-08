@@ -147,26 +147,15 @@ fn bigger_projections_extend_the_same_meta_source() {
 fn schema_ddl_matches_the_canonical_shape() {
     let plan = super::session_schema::initialization_plan();
     // 一条语句一个 spec：远端执行器的语句单元就是一条语句，多句拼一个请求只会执行第一条。
-    // plan = canonical v2 建表段 + canonical 索引段 + control/work 机制表段。后 6 条不在
-    // CREATE_V2_* 里，但新建（本函数）与迁移（schema_v14_upgrade / sqlite_store::schema）
-    // 两条路径都会创建它们，因此逐条比对完整序列，而不是只比 canonical 的计数。
     let expected: Vec<&str> = crate::sessions::canonical::CREATE_V2_TABLES
         .iter()
         .chain(crate::sessions::canonical::CREATE_V2_INDEXES.iter())
         .copied()
-        .chain([
-            crate::sessions::control::CREATE_STATE,
-            crate::sessions::control::CREATE_RECEIPTS,
-            crate::sessions::work::CREATE_STATE,
-            crate::sessions::work::CREATE_EVENTS,
-            crate::sessions::work::CREATE_RECEIPTS,
-            crate::sessions::work::CREATE_COMMANDS,
-        ])
         .collect();
     let actual: Vec<&str> = plan.iter().map(|spec| spec.sql).collect();
     assert_eq!(
         actual, expected,
-        "远端 DDL：canonical 建表段 + canonical 索引段 + control/work 机制表段"
+        "远端 DDL：canonical 建表段 + canonical 索引段"
     );
     for spec in &plan {
         assert!(
@@ -181,14 +170,14 @@ fn schema_ddl_matches_the_canonical_shape() {
             spec.sql
         );
     }
-    // 远端建的是本机那一份 canonical 表（清单来自同一处，不另抄一遍）。
+    // 远端建的是本机那一份 canonical 表（清单来自同一处，不另抄一遍）。v19 起
+    // `legacy_execution_registrations` 不在其中：它只作为升级入参存在，不由新库建出。
     for table in [
         "machines",
         "workspaces",
         "threads",
         "messages",
         "projects",
-        "legacy_execution_registrations",
         "session_bindings",
         "mcp_oauth_credentials",
     ] {

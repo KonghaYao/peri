@@ -135,7 +135,7 @@ pub(in crate::sessions) fn new_session_row<'a>(
         config: None,
         agent_status: AgentStatus::Active.as_str(),
         frozen_context: frozen,
-        execution_registration_id: Some(&input.binding.workspace_id),
+        owner_workspace_id: Some(&input.binding.workspace_id),
     }
 }
 
@@ -160,7 +160,7 @@ pub(in crate::sessions) fn new_session_draft_row<'a>(
         config: None,
         agent_status: AgentStatus::Active.as_str(),
         frozen_context: None,
-        execution_registration_id: Some(&draft.binding.workspace_id),
+        owner_workspace_id: Some(&draft.binding.workspace_id),
     }
 }
 

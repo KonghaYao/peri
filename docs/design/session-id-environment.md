@@ -5,7 +5,7 @@
 > Scope：会话身份、机器环境分区、工作区发现与登记、执行绑定与恢复入口。
 > 进度与验收见 [2026-09 月志](../../spec/history/2026-09.md)（2026-09-30 条目）。
 > Machine → Workspace → Session 归属与 schema 14 迁移见 [存储 v2 设计](storage-v2-machine-workspace-session.md)；
-> SDK 执行所有权与任务恢复边界见 [Session 异步任务统一入口](session-async-tasks.md)。
+> 当前执行与任务生命周期边界见 [Session 异步任务统一入口](session-async-tasks.md)。
 > 术语见 [领域语言](../../CONTEXT.md)；冻结与生命周期约束遵循 [架构契约](../standards/architecture-contracts.md)（ARC-WORKSPACE-001）。
 > 本设计取代旧工作区设计中以目录绑定、文件锁和根执行 owner 限制恢复的规则；父子关系与运行资源生命周期保持。
 
@@ -37,9 +37,9 @@ Session ID 是唯一会话身份，不改为路径、机器地址或 env + path 
 | 执行工作区 | `WorkspaceId`，opaque ID | 一份主工作树、linked worktree 或非 Git 文件树；归属键为 Machine + path |
 | 会话 | 现有 `ThreadId` | 历史、消息、目标与运行归属继续使用原 ID |
 | 执行绑定 | `SessionBinding` | 项目、工作区、工作区内相对目录与绑定版本 |
-| 执行所有者 | `peri-sdk` 的共享 `AtomicManagedAgentKv` claim | SDK 唯一管理执行权；Peri 仅校验 binding/path 并管理任务资源生命周期 |
+| 执行协调 | 当前进程 runtime 与外部部署编排 | Peri 校验 binding/path 并管理任务资源生命周期，不保证跨实例唯一执行 |
 
-不再增加与 `ProjectId` 重叠的 RepositoryId。身份范围限于同一台主机的同一 Peri 存储；跨主机、跨数据库合并和仓库克隆身份传播不在本设计范围。`WorkspaceInfo` 携带 machine ID、路径与路径来源（discovered / derived_legacy / unverified），`ResolvedWorkspace` 区分归属身份与本机发现登记；存储侧约束见 [存储 v2 设计](storage-v2-machine-workspace-session.md)。
+不再增加与 `ProjectId` 重叠的 RepositoryId。身份范围限于同一台主机的同一 Peri 存储；跨主机、跨数据库合并和仓库克隆身份传播不在本设计范围。`WorkspaceInfo` 携带 machine ID、路径与路径来源（discovered / derived_legacy / unverified），`ResolvedWorkspace` 只带一个工作区归属身份（`(machine_id, canonical path)`）与本次准入的执行目录，执行证据（项目、文件对象、发现快照）另行存放在归属行上并按其复核；存储侧约束见 [存储 v2 设计](storage-v2-machine-workspace-session.md)。
 
 `SessionBinding` 的持久化字段为：
 
@@ -50,7 +50,7 @@ workspace_id
 cwd_relative_to_workspace
 ```
 
-binding 不可变，协议中的 `revision` 保持常量 `1` 以兼容已有客户端，不作为数据库字段或并发控制依据。schema 14 已删除 Store 的 `epoch + nonce` 执行所有权；Peri 不维护执行 lease 或 Workspace fencing。执行唯一性与计算实例替换由 SDK 协调，任务资源关闭与未决持久化仍由各自生命周期约束。
+binding 不可变，协议中的 `revision` 保持常量 `1` 以兼容已有客户端，不作为数据库字段或并发控制依据。schema 14 已删除 Store 的 `epoch + nonce` 执行所有权；Peri 不维护执行 lease 或 Workspace fencing。跨实例执行唯一性与计算实例替换由部署方外部协调，任务资源关闭与未决持久化仍由各自生命周期约束。
 
 `ThreadMeta.cwd` 保留为创建时目录和 legacy 证据，禁止通过普通 metadata 更新改写绑定。有效执行目录由绑定与已验证位置派生；兼容协议中的 `cwd` 是这个结果的投影。项目/工作区登记、位置更新和 binding 写入由存储模块统一管理，通过专用事务接口维护项目与工作区的关系，不能散落在 metadata JSON 中各自解释。
 
@@ -102,32 +102,31 @@ linked worktree 的这两者不同，主工作树通常相同。这些 Git 语�
 
 ### 3.2 登记裁决
 
-由 `peri-resources` 持有本地登记表，分配 opaque ID。Git 路径是发现线索，不是
-ID 本身；不把路径 hash 永久当成项目 ID，也不往受版本控制文件或 Git 管理目录
-写 Peri 身份标记。
+由 `peri-resources` 持有本机工作区归属表（`workspaces`），分配 opaque ID。Git 路径是
+发现线索，不是 ID 本身；不把路径 hash 永久当成项目 ID，也不往受版本控制文件或
+Git 管理目录写 Peri 身份标记。
 
-登记记录保存 canonical locator、平台文件对象识别信息和登记代际。登记键是
-(canonical locator, 该位置的文件对象证据) 组合，两者同时命中才复用原登记：
-路径相同而文件对象已被替换，或同一文件对象出现在新路径，都不是同一次登记。
-inode / file ID 只能作为一致性证据，不能证明任意复制、重建或历史路径复用。
-文件对象身份使用 Unix device/inode 或 Windows volume/file index；不依赖 creation
-time，也不降级为 mtime/ctime 或路径等同。
+归属键是 `(machine_id, canonical path)`：同一台机器同一路径只有一个 Workspace，
+`WorkspaceId` 不随该路径上的文件对象变化重新分配——目录删除后重建、或换成另一个
+对象，都仍落在同一归属行上。行上另存该路径当前观测到的项目（canonical locator 加
+文件对象识别信息）与发现快照：它们描述**当前占用这个路径的对象**，用于项目复用与
+执行证据复核，不参与工作区身份。inode / file ID 只能作为一致性证据，不能证明任意
+复制、重建或历史路径复用。文件对象身份使用 Unix device/inode 或 Windows
+volume/file index；不依赖 creation time，也不降级为 mtime/ctime 或路径等同。
 
-新对象或新位置不继承旧身份，也不被旧登记挡住：登记表允许同一路径有多个文件
-对象、同一对象出现在多个路径，各自得到新的 `ProjectId` 与 `WorkspaceId`，
-执行 cwd 就是用户实际打开的目录。旧登记、旧绑定与历史保持原样，引用它们的
-会话继续按各自登记证据复核并失败关闭，不静默改绑、不隐藏历史。项目（而非
-工作区）只在定位与对象证据同时一致时复用，例如 Git linked worktree 换位后
-common directory 未变仍属原项目；不相关的同名副本各自成项目。证据不足返回
-`NeedsRelink`，不自动合并。
+同一对象出现在多个路径时各自是独立工作区（归属键含路径）：新路径不继承旧身份，也
+不被旧行挡住。旧绑定与历史保持原样，引用它们的会话继续按各自创建时的证据复核并
+失败关闭，不静默改绑、不隐藏历史。项目（而非工作区）只在定位与对象证据同时一致时
+复用，例如 Git linked worktree 换位后 common directory 未变仍属原项目；不相关的
+同名副本各自成项目。证据不足返回 `NeedsRelink`，不自动合并。
 
-工作区身份取 canonical root 路径加上该目录自身的文件对象证据；Git 布局是同一
-目录的派生观测，`git init`、移除 `.git` 或重建其管理目录都属于正常演进。同一
-目录对象在同一路径再次解析时复用原项目与工作区 ID，只在原行内刷新观测快照：
-执行 cwd、项目归属和已有绑定都不移动。可以覆盖已登记快照的观测必须来自 Git 的
-真实回答；Git 不可用时得到的是不完整目录观测，仍按证据不足拒绝。
+路径上的对象被替换时，行上的项目证据随新对象更新，工作区身份与已有绑定都不移动：
+旧绑定记录的是旧对象的证据，复核不匹配即失败关闭。同一对象在同一路径再次解析时
+复用原项目与工作区 ID，只在原行内刷新观测快照；Git 布局是同一目录的派生观测，
+`git init`、移除 `.git` 或重建其管理目录都属于正常演进。可以覆盖已记录快照的观测
+必须来自 Git 的真实回答；Git 不可用时得到的是不完整目录观测，仍按证据不足拒绝。
 
-第一次登记与 binding 写入使用唯一约束、事务和竞争失败后重读 winner，避免
+第一次归属登记与 binding 写入使用唯一约束、事务和竞争失败后重读 winner，避免
 两个宿主同时为同一已验证工作区分配不同有效身份。Git 探测在事务外进行，提交
 前复核关键文件对象与关联关系；期间发生变化则放弃该次结果。
 
@@ -145,7 +144,7 @@ Git 发现，其余检查复用已记录证据——SQL 关系加关键文件对
 | --- | --- |
 | 主树与 linked worktree | 同项目，不同工作区 |
 | 同 worktree 的不同子目录 | 同项目、同工作区，各会话保留原子目录 |
-| 指向同目录的符号链接 | canonicalize 后复用登记；保留原路径用于展示/诊断 |
+| 指向同目录的符号链接 | canonicalize 后复用归属行；保留原路径用于展示/诊断 |
 | 相同 remote、branch 或 commit 的独立 clone | 分别登记项目，不推断同一身份 |
 | 嵌套仓库、submodule | 使用 cwd 所属的最近 Git 仓库，不上卷到 superproject |
 | 非 Git 目录 | 创建目录项目与工作区；不猜测任意父目录是项目根 |
@@ -154,9 +153,9 @@ Git 发现，其余检查复用已记录证据——SQL 关系加关键文件对
 | Git 权限不足、unsafe repository、损坏或探测中途失效 | 类型化探测错误，不能伪装为非 Git 项目 |
 | bare repository | 可作为 linked worktree 的仓库锚点；bare 目录本身不可作为执行工作区 |
 | worktree 删除或目录暂时不可用 | 保留身份和历史，位置标记不可用，阻止执行 |
-| 删除后同路径重新创建 | 不继承旧会话绑定；新对象单独登记，可在该目录建立新会话 |
-| 目录（含仓库）整体搬迁到新路径 | 旧绑定按原登记证据复核并失败关闭，历史保留；新路径单独登记，不自动改绑或改指旧 ID |
-| 整仓复制、导入或 Git 管理目录重建 | 不承诺透明识别，不以 remote 相同证明身份；新位置单独登记并可建立新会话，旧绑定保留历史 |
+| 删除后同路径重新创建 | 同路径仍是同一归属行（同一 `WorkspaceId`），项目证据随新对象更新；旧会话绑定不继承，按原证据复核失败关闭，可在该目录建立新会话 |
+| 目录（含仓库）整体搬迁到新路径 | 旧绑定按原登记证据复核并失败关闭，历史保留；新路径单独归属，不自动改绑或改指旧 ID |
+| 整仓复制、导入或 Git 管理目录重建 | 不承诺透明识别，不以 remote 相同证明身份；新位置单独归属并可建立新会话，旧绑定保留历史 |
 
 发现结果区分 Git 工作区、目录工作区、不可用、需重关联与探测错误；失败经
 `WorkspaceError` 的类型化分支（`DiscoveryError` / `Unavailable` / `NeedsRelink`）
@@ -174,7 +173,7 @@ Git 探测一旦开始成功，后续失败不能降级为目录模式。
 
 ## 4. 恢复与执行分开
 
-ACP `requests/session_restore.rs::prepare_existing` 按 ID 读取会话，检查环境、绑定、持久化与 frozen 完整性。执行加载不认领所有权或检查旧 Agent 是否停止；唯一执行者由 `peri-sdk` 管理。环境不可用时明确拒绝执行加载，历史仍可独立查询。legacy 使用保存 cwd，不借当前终端路径改绑。
+ACP `requests/session_restore.rs::prepare_existing` 按 ID 读取会话，检查环境、绑定、持久化与 frozen 完整性。执行加载不认领所有权或检查旧 Agent 是否停止；Peri 不保证跨实例唯一执行者。环境不可用时明确拒绝执行加载，历史仍可独立查询。legacy 使用保存 cwd，不借当前终端路径改绑。
 
 执行准入复核保存的执行目录，而不是以请求或期望 cwd 重新决定归属：一次准入执行一次完整发现复核（`validate_expected`），准入内后续检查只复核已记录证据（`reassert_expected`）。相对目录重新 canonicalize 后必须仍属于原工作区，并复核最近 Git 仓库；目录组件变为 symlink 或新嵌套仓库时不能只凭字符串前缀通过。请求环境与保存绑定的环境不匹配时返回 `ExecutionBindingMismatch`，不因项目相同就放行。
 
@@ -186,9 +185,9 @@ ACP `requests/session_restore.rs::prepare_existing` 按 ID 读取会话，检查
 
 目录缺失时，历史通过只读查询/回放路径仍可访问。这条路径不得创建执行资源、回填 frozen、启动 continuation 或认领执行所有权；标准可执行 load 则明确失败。
 
-Peri 不维护 session 执行锁、租约、owner token、续租或接管证明；跨实例执行唯一性由 `peri-sdk` 负责。同 ID 创建重试仍校验不可变的绑定、冻结快照及父链，不覆盖已有内容。未决持久化不能因重开被视为结清；取消、子任务关系、MCP 关闭与事务仍遵守自身生命周期。
+Peri 不维护 session 执行锁、租约、owner token、续租或接管证明；跨实例执行唯一性须由部署方外部协调。同 ID 创建重试仍校验不可变的绑定、冻结快照及父链，不覆盖已有内容。未决持久化不能因重开被视为结清；取消、子任务关系、MCP 关闭与事务仍遵守自身生命周期。
 
-SDK 占位契约已实现：共享 `AtomicManagedAgentKv` keyspace 是协调域，Session key 仅含 Session ID，不含 `Sandbox.id`；Agent key 保持 Sandbox + Agent。部署必须让可能执行同一 Session 的全部实例共享该 KV；不同数据库的相同 ID 共用 KV 时保守拒绝，可按业务隔离 KV，不能换 Sandbox 绕过同 Session 的占位。启动失败且 transport 清理未确认时进入 `cleanup-pending`，保留 claim 与 transport，以含原错误和清理错误的 `AggregateError` 报告；`close` 共享可重试的清理事务，确认清理后按 owner 释放，避免旧执行未停就放行新实例。验证路由与接管边界见 [SDK 代码索引](../code-index/peri-ts-sdk.md)。
+SDK alpha 的独立 claim/KV 实现不在本次修改范围，不构成当前 Peri 普通执行或 history 加载的验收前提。旧 admission、entered、settle 和 work query 协议已从后端撤销；不得以旧 SDK 测试推断当前协议兼容或跨实例执行保证。SDK 源码的独立状态见 [SDK 代码索引](../code-index/peri-ts-sdk.md)。
 
 ## 5. 执行环境装配
 
@@ -208,7 +207,7 @@ Host 可以共享 transport、全局配置来源与确定可共享的服务；�
 
 ### 6.2 fork 与跨工作区续作
 
-普通 fork 仅在 source 的已提交历史达到完整工具往返边界、且没有未完成执行时复制；SDK 负责排除并发执行，Peri 在会话生命周期 gate 下给出一致性快照，不能边执行边复制当前 Vec。它保持 source binding，产生新 `ThreadId`，并精确继承 source frozen snapshot，继续满足 `ARC-FROZEN-001`。请求不同 cwd 不得偷偷创建“旧前缀、新目录”的会话；返回 binding mismatch。
+普通 fork 仅在 source 的已提交历史达到完整工具往返边界、且没有未完成执行时复制；部署方须排除跨实例并发执行；Peri 仅在当前会话生命周期 gate 下给出一致性快照，不能边执行边复制当前 Vec。它保持 source binding，产生新 `ThreadId`，并精确继承 source frozen snapshot，继续满足 `ARC-FROZEN-001`。请求不同 cwd 不得偷偷创建“旧前缀、新目录”的会话；返回 binding mismatch。
 
 跨工作区续作定义为独立、显式的新环境操作：新 `ThreadId`、新 binding、目标环境重新冻结，历史以带来源和截止点的快照复制；不得改写旧消息中的绝对路径，亦不得把旧工具结果当作目标工作区已执行的事实。跨环境的说明持久化为可信上下文。它不继承进行中的工具、审批、队列、cron、Workflow、子 Agent 或旧运行句柄。
 
@@ -216,7 +215,7 @@ Host 可以共享 transport、全局配置来源与确定可共享的服务；�
 
 ### 6.3 位置重定位
 
-初始交付不提供重定位或重关联操作：没有把已有 binding 改指到新位置或新对象的入口。目录移动、移除后重建、Git 管理目录身份变化让原绑定返回 `NeedsRelink` 或 `Unavailable`，保留历史，不自动修改 binding 或 frozen。用户可完成的前进路径是在当前可访问目录建立新会话：该目录按 §3.2 得到新登记，旧会话与历史保持只读可查。该绑定失败的原因与这条前进路径随错误一并呈现，不提示产品中不存在的操作；会话未能建立的失败发生在输入受理之前，其提示不得表述为输入被拒。后续显式重定位若要保留 `WorkspaceId`，必须由上层停止执行后校验 Git 关联和文件对象证据，并让位置更新与执行准入共享线性化点。
+初始交付不提供重定位或重关联操作：没有把已有 binding 改指到新位置或新对象的入口。目录移动、移除后重建、Git 管理目录身份变化让原绑定返回 `NeedsRelink` 或 `Unavailable`，保留历史，不自动修改 binding 或 frozen。用户可完成的前进路径是在当前可访问目录建立新会话：该目录按 §3.2 归属（同路径复用原归属行，新路径新建），旧会话与历史保持只读可查。该绑定失败的原因与这条前进路径随错误一并呈现，不提示产品中不存在的操作；会话未能建立的失败发生在输入受理之前，其提示不得表述为输入被拒。后续显式重定位若要保留 `WorkspaceId`，必须由上层停止执行后校验 Git 关联和文件对象证据，并让位置更新与执行准入共享线性化点。
 
 当前在 new/load/resume/fork 和新 prompt 准入时验证目录。运行中的外部 `git worktree move/remove` 不触发自动迁移，也不承诺隔离任意外部文件系统改动。因此活动执行期间应保持其工作区位置稳定；下一次准入发现变化必须拒绝。
 
@@ -234,13 +233,13 @@ Host 可以共享 transport、全局配置来源与确定可共享的服务；�
 
 ## 8. 存储打开与版本边界
 
-默认读写使用 `~/.peri/threads/threads.db`，`--db-path` 可选择显式路径；schema 版本记录在 `PRAGMA user_version`，当前版本由 `peri-resources/src/sessions/canonical.rs::CURRENT_SCHEMA_VERSION` 定义（schema17；v12 建立 Machine/Workspace/Session 归属，v14 删除持久执行所有权）。版本与迁移入口见 [Resources 代码索引](../code-index/peri-resources.md)，历史归属设计见 [存储 v2](storage-v2-machine-workspace-session.md)；阶段迁移版本不等于当前版本。
+默认读写使用 `~/.peri/threads/threads.db`，`--db-path` 可选择显式路径；schema 版本记录在 `PRAGMA user_version`，当前版本由 `peri-resources/src/sessions/canonical.rs::CURRENT_SCHEMA_VERSION` 定义（v12 建立 Machine/Workspace/Session 归属，v14 删除持久执行所有权，v18 删除执行恢复账本，v19 删除执行登记表并把绑定收敛到归属行；执行恢复表移除见 active plan）。版本与迁移入口见 [Resources 代码索引](../code-index/peri-resources.md)，历史归属设计见 [存储 v2](storage-v2-machine-workspace-session.md)；阶段迁移版本不等于当前版本。
 
 只读 metadata 打开不创建数据库、不升级 schema、不登记或绑定；缺失的默认库按空历史处理，损坏与不兼容 shape 返回错误。启动时写打开失败（schema 锁被占、库文件或 WAL 不可写）降级为只读打开并记 warning：进入与历史浏览不受影响，但降级不假装可写——新会话与目录登记在进入 SQL 前按 `ReadOnlyStore` 失败。写打开走到版本判定时，本构建不认识的 schema 与 `user_version` 返回 `UnsupportedDatabaseSchema` / `UnsupportedSchemaVersion`，且不降级；升级前必须停止所有旧 writer，不支持新旧二进制混用同一库。schema 版本号不是对不遵守协议的旧 writer 或外部 SQLite writer 的访问控制。
 
 ## 9. 保证边界
 
 - hardlink 发布只解决初次身份文件的完整可见性与竞争创建，不代表整个系统全面并发安全。文件系统须支持同目录 hardlink；目录创建未强制私有权限，已有身份文件权限/符号链接未额外校验，非 Unix 不提供 `0600` 保证。未同步父目录，也未保证崩溃后无残留临时文件或身份目录项持久性。
-- 执行所有权与跨实例协调归 `peri-sdk`；Peri 的事务、访问模式、关闭意图与持久化恢复不提供单执行者或工具副作用去重保证。部署入口必须先由 SDK 建立执行唯一性，再开放 Peri 的 ACP 调用。
+- 执行所有权与跨实例协调由部署方外部处理；Peri 的事务、访问模式和关闭意图不提供跨实例单执行者或工具副作用去重保证。普通 ACP 执行不要求 SDK 持久 admission；跨实例部署的唯一性由其外部编排管理，Peri 不恢复旧 Agent 执行。
 - Session ID 可查找性不是认证，env 分区不是多用户权限隔离；机器 ID 文件与 override 都不是安全凭证。数据库/服务访问授权独立，不能仅靠列表过滤或执行只读标记宣称安全。
 - 本设计不承诺任意缺路径/缺快照/坏库均能完整恢复，也不宣称只读界面替代所有存储写权限检查。全面 URI/VFS、插件与 MCP 缓存迁移不是本次前置条件。

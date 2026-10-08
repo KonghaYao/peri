@@ -87,6 +87,7 @@ fn peer_of(registry: &McpSkillRegistry, server: &str) -> Option<(HandleToken, Pe
     let handle = match &state {
         ServerDiscoveryState::Started { handle }
         | ServerDiscoveryState::Discovered { handle, .. } => handle.clone(),
+        ServerDiscoveryState::Failed { .. } => return None,
     };
     let client = handle.clone().downcast::<McpClientHandle>().ok()?;
     let peer = client.peer.clone()?;

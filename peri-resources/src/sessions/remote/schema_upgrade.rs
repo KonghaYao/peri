@@ -9,10 +9,11 @@ use super::sql::{int_at, text_at, StatementSpec};
 use crate::sessions::canonical;
 use crate::sessions::schema_cleanup::{self, ColumnShape, SchemaObject};
 
-const GUARD_SNAPSHOT_SQL: &str = "INSERT INTO peri_store_meta(singleton) SELECT 0 WHERE
+pub(super) const GUARD_SNAPSHOT_SQL: &str = "INSERT INTO peri_store_meta(singleton) SELECT 0 WHERE
     (SELECT COUNT(*) FROM sqlite_master WHERE substr(lower(name), 1, 7) <> 'sqlite_') <> ?1
     OR NOT EXISTS (SELECT 1 FROM peri_store_meta WHERE singleton = 0 AND schema_version = ?2 AND store_id = ?3 AND contract = ?4)";
-const GUARD_OBJECT_SQL: &str = "INSERT INTO peri_store_meta(singleton) SELECT 0 WHERE NOT EXISTS
+pub(super) const GUARD_OBJECT_SQL: &str =
+    "INSERT INTO peri_store_meta(singleton) SELECT 0 WHERE NOT EXISTS
     (SELECT 1 FROM sqlite_master WHERE type = ?1 AND name = ?2 AND tbl_name = ?3 AND sql IS ?4)";
 const ADVANCE_VERSION_SQL: &str = "UPDATE peri_store_meta SET schema_version = ?1 WHERE singleton = 0 AND schema_version = ?2 AND store_id = ?3 AND contract = ?4";
 
@@ -20,8 +21,18 @@ pub(super) async fn upgrade(
     store: &RemoteStore,
     snapshot: &StoreSnapshot,
 ) -> SessionResourceResult<()> {
-    if matches!(snapshot.schema_version, 12..=16) && snapshot.contract == schema::STORE_CONTRACT {
-        return super::schema_v14_upgrade::upgrade(store, snapshot).await;
+    if snapshot.schema_version == 18 && snapshot.contract == schema::PREVIOUS_STORE_CONTRACT {
+        return super::schema_v19_upgrade::upgrade(store, snapshot).await;
+    }
+    if matches!(snapshot.schema_version, 12..=17)
+        && snapshot.contract == schema::PREVIOUS_STORE_CONTRACT
+    {
+        super::schema_v14_upgrade::upgrade(store, snapshot).await?;
+        let super::schema::StoreIdentityRead::Present(upgraded) = store.read_identity().await?
+        else {
+            return Err(invalid_schema());
+        };
+        return super::schema_v19_upgrade::upgrade(store, &upgraded).await;
     }
     if snapshot.schema_version == 11 && snapshot.contract == "peri.session.store/v2" {
         super::schema_v12_upgrade::upgrade(store, snapshot).await?;
@@ -38,15 +49,7 @@ pub(super) async fn upgrade(
             StatementSpec::bare(schema_cleanup::MESSAGE_COLUMNS_SQL),
         ])
         .await?;
-    let mut objects = Vec::new();
-    for row in &results[0] {
-        objects.push(SchemaObject {
-            kind: text_at(row, 0).ok_or_else(invalid_schema)?.to_owned(),
-            name: text_at(row, 1).ok_or_else(invalid_schema)?.to_owned(),
-            table: text_at(row, 2).ok_or_else(invalid_schema)?.to_owned(),
-            sql: optional_string(row, 3)?,
-        });
-    }
+    let objects = decode_objects(&results[0])?;
     let columns = decode_columns(&results[1])?;
     let messages = decode_columns(&results[2])?;
     if !columns.is_empty()
@@ -68,7 +71,24 @@ pub(super) async fn upgrade(
     let super::schema::StoreIdentityRead::Present(upgraded) = store.read_identity().await? else {
         return Err(invalid_schema());
     };
-    super::schema_v14_upgrade::upgrade(store, &upgraded).await
+    super::schema_v14_upgrade::upgrade(store, &upgraded).await?;
+    let super::schema::StoreIdentityRead::Present(upgraded) = store.read_identity().await? else {
+        return Err(invalid_schema());
+    };
+    super::schema_v19_upgrade::upgrade(store, &upgraded).await
+}
+
+pub(super) fn decode_objects(rows: &[Vec<Value>]) -> SessionResourceResult<Vec<SchemaObject>> {
+    rows.iter()
+        .map(|row| {
+            Ok(SchemaObject {
+                kind: text_at(row, 0).ok_or_else(invalid_schema)?.to_owned(),
+                name: text_at(row, 1).ok_or_else(invalid_schema)?.to_owned(),
+                table: text_at(row, 2).ok_or_else(invalid_schema)?.to_owned(),
+                sql: optional_string(row, 3)?,
+            })
+        })
+        .collect()
 }
 
 fn decode_columns(rows: &[Vec<Value>]) -> SessionResourceResult<Vec<ColumnShape>> {

@@ -62,6 +62,36 @@ fn merge_deny_then_allow_keeps_deny() {
     );
 }
 
+#[test]
+fn merge_deny_then_initial_user_message_keeps_deny() {
+    let merged = merge_hook_actions(
+        override_action(PermissionDecision::Deny, None, None, None),
+        HookAction::InitialUserMessage {
+            message: "foreign output".to_string(),
+        },
+    );
+    assert_override(
+        &merged,
+        PermissionDecision::Deny,
+        "deny must survive foreign output",
+    );
+}
+
+#[test]
+fn merge_ask_then_initial_user_message_keeps_ask() {
+    let merged = merge_hook_actions(
+        override_action(PermissionDecision::Ask, None, None, None),
+        HookAction::InitialUserMessage {
+            message: "foreign output".to_string(),
+        },
+    );
+    assert_override(
+        &merged,
+        PermissionDecision::Ask,
+        "ask must survive foreign output",
+    );
+}
+
 /// [allow, deny]：对称方向，deny 同样胜出。
 #[test]
 fn merge_allow_then_deny_keeps_deny() {
@@ -208,6 +238,7 @@ fn hook_with_command(event: HookEvent, command: &str) -> RegisteredHook {
         matcher: None,
         plugin_name: "merge-contract-plugin".to_string(),
         plugin_id: "merge-contract-plugin-id".to_string(),
+        plugin_source: None,
         plugin_root: PathBuf::from("/tmp/merge-contract-plugin"),
         plugin_data_dir: PathBuf::from("/tmp/merge-contract-plugin-data"),
         plugin_options: HashMap::new(),

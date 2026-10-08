@@ -82,6 +82,16 @@ pub(crate) struct CacheTicket {
     epoch: u64,
 }
 
+impl CacheTicket {
+    pub(crate) fn method(&self) -> &'static str {
+        self.method
+    }
+
+    pub(crate) fn params(&self) -> &str {
+        &self.params
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 struct CacheEntry {
     epoch: u64,
@@ -177,6 +187,7 @@ impl McpResourceCache {
         }
     }
 
+    #[cfg(test)]
     pub(crate) async fn get<T: DeserializeOwned>(
         &self,
         origin: &str,
@@ -234,6 +245,7 @@ impl McpResourceCache {
         value
     }
 
+    #[cfg(test)]
     pub(crate) async fn get_json<T: DeserializeOwned>(
         &self,
         origin: &str,
@@ -279,6 +291,7 @@ impl McpResourceCache {
         })
     }
 
+    #[cfg(test)]
     pub(crate) async fn put_ticket<T: Serialize>(
         &self,
         ticket: &CacheTicket,

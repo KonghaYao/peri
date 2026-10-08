@@ -35,51 +35,6 @@ pub struct ChildResumeRecord {
 /// 「未生效」报告成成功，也不得在失败后遗留部分写入。
 #[async_trait]
 pub(crate) trait SessionDataPort: Send + Sync {
-    async fn load_resource_owner_facts(
-        &self,
-        id: &ThreadId,
-        previous_lifecycle: u64,
-    ) -> SessionResourceResult<peri_acp_types::session_resources::work::ResourceOwnerFacts>;
-    async fn load_work_revision(&self, id: &ThreadId) -> SessionResourceResult<u64> {
-        Ok(self.load_work_availability(id).await?.state.revision)
-    }
-    async fn load_work_availability(
-        &self,
-        id: &ThreadId,
-    ) -> SessionResourceResult<peri_acp_types::session_resources::work::WorkAvailability>;
-    async fn load_work_delivery(
-        &self,
-        query: &peri_acp_types::session_resources::work::WorkDeliveryQuery,
-    ) -> SessionResourceResult<Option<peri_acp_types::session_resources::work::DeliveryRecord>>;
-    async fn has_pending_work_mutations(&self, id: &ThreadId) -> SessionResourceResult<bool>;
-    async fn load_work_command(
-        &self,
-        query: &peri_acp_types::session_resources::work::WorkCommandQuery,
-    ) -> SessionResourceResult<Option<peri_acp_types::session_resources::work::OwnedWorkCommand>>;
-    async fn load_session_work(
-        &self,
-        query: &peri_acp_types::session_resources::work::WorkQuery,
-    ) -> SessionResourceResult<peri_acp_types::session_resources::work::WorkSnapshot>;
-    async fn apply_work_mutation(
-        &self,
-        command: &peri_acp_types::session_resources::work::WorkCommand,
-    ) -> SessionResourceResult<peri_acp_types::session_resources::work::WorkReceipt>;
-    async fn resolve_work_mutation(
-        &self,
-        command: &peri_acp_types::session_resources::work::WorkCommand,
-    ) -> SessionResourceResult<peri_acp_types::session_resources::work::WorkResolution>;
-    async fn load_session_control(
-        &self,
-        id: &ThreadId,
-    ) -> SessionResourceResult<peri_acp_types::session_resources::ControlState>;
-    async fn apply_session_control(
-        &self,
-        command: &peri_acp_types::session_resources::ControlCommand,
-    ) -> SessionResourceResult<peri_acp_types::session_resources::ControlReceipt>;
-    async fn resolve_session_control(
-        &self,
-        command: &peri_acp_types::session_resources::ControlCommand,
-    ) -> SessionResourceResult<peri_acp_types::session_resources::ControlResolution>;
     async fn finish_close(&self, id: &ThreadId) -> SessionResourceResult<()>;
     async fn close_settlement(
         &self,

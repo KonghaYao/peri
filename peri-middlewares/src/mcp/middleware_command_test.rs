@@ -39,7 +39,7 @@ async fn before_agent_command_registry_projection_and_disconnect() {
     );
     assert!(
         cmd_reg.snapshot().is_empty(),
-        "无条目注册（peer 缺失空结果）"
+        "无条目注册（真实 peer 返回空清单）"
     );
 }
 
@@ -74,8 +74,8 @@ async fn before_agent_without_command_registry_noop() {
 /// `{server}:` 前缀条目从 snapshot 消失 + on_change 恰一次（决策 1：
 /// server 名即词法首段域，无 `mcp:` 域前缀）。
 ///
-/// 发现回写模拟说明：测试 handle 无 rmcp peer（`run_discovery` 立即以空
-/// 条目完成），非空条目经 `mcp_route_entries` 转换后手动
+/// 发现回写模拟说明：测试 handle 持有真实 rmcp peer（返回 skills:[]
+/// 并完成合法空目录），非空条目经 `mcp_route_entries` 转换后手动
 /// `mark_source_completed`——与 A3 生产回写同构；先 `wait_discovered` 让
 /// spawn 的空回写落定再手动回写，避免空回写注销覆盖。
 #[tokio::test]
@@ -94,7 +94,7 @@ async fn before_agent_command_registry_disconnect_removes_namespace_and_fires_on
         .with_command_registry(Some(Arc::clone(&cmd_reg)));
     let mut state = AgentState::new("/tmp");
 
-    // 连接 → 命令面 Started；发现任务（peer=None）空回写落定
+    // 连接 → 命令面 Started；发现任务（真实空清单 peer）空回写落定
     Middleware::before_agent(&mw, &mut state).await.unwrap();
     wait_discovered(&reg, "srv").await;
 
@@ -153,7 +153,7 @@ async fn prewarm_discovery_triggers_idempotent_discovery() {
     })));
 
     // 模拟 session/new 路径（无 middleware 实例）：预热 → 发现任务
-    // （peer=None）空回写落定。
+    // （真实空清单 peer）空回写落定。
     prewarm_discovery(
         &pool,
         &reg,
@@ -367,7 +367,7 @@ async fn before_agent_command_registry_reconnect_sequence_no_aba() {
     let snapshot_has_hello =
         |reg: &CommandRegistry| reg.snapshot().iter().any(|e| e.fullname == "demo:hello");
 
-    // 1) 连接 → 命令面 Started；发现任务（peer=None）空回写落定
+    // 1) 连接 → 命令面 Started；发现任务（真实空清单 peer）空回写落定
     let h1 = insert_skill_handle(&pool, "demo", vec![]);
     let token1: HandleToken = h1.clone();
     Middleware::before_agent(&mw, &mut state).await.unwrap();
@@ -418,7 +418,7 @@ async fn before_agent_command_registry_reconnect_sequence_no_aba() {
         "重扫完成前不得占位注册（Started → Discovered 不占位）"
     );
 
-    // 5) 重扫（peer=None 空回写）落定后，新 handle 回写 → 投影复现 + 路由一致
+    // 5) 重扫（真实空清单 peer 空回写）落定后，新 handle 回写 → 投影复现 + 路由一致
     wait_discovered(&reg, "demo").await;
     assert_eq!(
         cmd_reg.mark_source_completed("demo", token2.clone(), route_entries()),
@@ -495,7 +495,7 @@ async fn before_agent_command_registry_plugin_server_disconnect_reconnect() {
     let snapshot_has_beta =
         |reg: &CommandRegistry| reg.snapshot().iter().any(|e| e.fullname == "demosrv:beta");
 
-    // 1) 连接 → 命令面以末段来源键置 Started；发现任务（peer=None）空回写落定
+    // 1) 连接 → 命令面以末段来源键置 Started；发现任务（真实空清单 peer）空回写落定
     let h1 = insert_skill_handle(&pool, server, vec![]);
     let token1: HandleToken = h1.clone();
     Middleware::before_agent(&mw, &mut state).await.unwrap();

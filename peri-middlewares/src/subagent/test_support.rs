@@ -10,11 +10,9 @@ use peri_agent::agent::react::ToolCall as ReactToolCall;
 use peri_agent::messages::{BaseMessage, ToolCallRequest};
 use peri_agent::tools::BaseTool;
 use peri_model::{
-    JsonObject, Model, ModelRequest, ModelResponse, ModelResult, ModelStream, ModelStreamEvent,
-    StopReason,
+    JsonObject, Model, ModelRequest, ModelResponse, ModelResult, ModelStreamEvent, StopReason,
 };
 use std::sync::Arc;
-use tokio_util::sync::CancellationToken;
 
 /// 请求 → 会话消息（假模型据此断言/回显）。
 pub(crate) fn base_messages(request: &ModelRequest) -> Vec<BaseMessage> {

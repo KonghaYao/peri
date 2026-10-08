@@ -156,23 +156,19 @@ async fn make_scenario(
         cancel: cancel_retry.then(|| turn.cancel_token.clone()),
     });
     let (bus, handles) = EventBus::new(Default::default());
-    let ctx = StageContext::best_effort_fixture_builder(
-        turn,
-        session.transcript(),
-        session.queue().clone(),
-    )
-    .with_llm(model.clone())
-    .with_compact_llm(summary.clone())
-    .with_context_budget(ContextBudget::new(100_000))
-    .with_compact_config(CompactConfig::default())
-    .with_tools(Arc::new(parking_lot::RwLock::new(
-        std::collections::BTreeMap::from([(
-            "Work".into(),
-            Arc::new(WorkTool(order)) as Arc<dyn BaseTool>,
-        )]),
-    )))
-    .with_event_bus(Arc::new(bus))
-    .build();
+    let ctx = StageContext::builder(turn, session.transcript(), session.queue().clone())
+        .with_llm(model.clone())
+        .with_compact_llm(summary.clone())
+        .with_context_budget(ContextBudget::new(100_000))
+        .with_compact_config(CompactConfig::default())
+        .with_tools(Arc::new(parking_lot::RwLock::new(
+            std::collections::BTreeMap::from([(
+                "Work".into(),
+                Arc::new(WorkTool(order)) as Arc<dyn BaseTool>,
+            )]),
+        )))
+        .with_event_bus(Arc::new(bus))
+        .build();
     ctx.session.queue.push(QueuedMessage::prompt(
         MessageSource::UserInput,
         BaseMessage::human("original task"),

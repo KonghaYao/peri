@@ -1,3 +1,5 @@
+use crate::session::config::DEFAULT_AGENT_MAX_ITERATIONS;
+
 use std::sync::Arc;
 
 use peri_acp_types::{
@@ -11,7 +13,7 @@ use peri_acp_types::{
     messages::BaseMessage,
     runtime::UnstampedEvent,
     session::ExecutionFailure,
-    session_resources::{work::DEFAULT_AGENT_MAX_ITERATIONS, SessionResources},
+    session_resources::SessionResources,
     tasks::{BgTaskKind, TaskManager},
 };
 use tokio_util::sync::CancellationToken;
@@ -88,7 +90,6 @@ pub struct V2ExecuteRequest {
     pub session_resources: Option<Arc<dyn SessionResources>>,
     pub thread_id: Option<String>,
     pub agent_input: AgentInput,
-    pub execution_admission: Option<peri_acp_types::session_resources::work::WorkAdmission>,
     pub history_payloads: Vec<peri_acp_types::store::PersistedPayload>,
     pub history: Vec<BaseMessage>,
     pub cached_llm: Option<CachedLlmInstances>,
@@ -182,7 +183,7 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
     ) {
         Ok(output) => output,
         Err(error) => {
-            error!(session_id = %req.session_id, turn_id = ?req.execution_admission.as_ref().map(|admission| &admission.execution.turn_id), stage = "stage_build", error = %format_args!("{error:#}"), causes = ?error.chain().map(ToString::to_string).collect::<Vec<_>>(), "[v2] stage build failed");
+            error!(session_id = %req.session_id, stage = "stage_build", error = %format_args!("{error:#}"), causes = ?error.chain().map(ToString::to_string).collect::<Vec<_>>(), "[v2] stage build failed");
             let failure =
                 ExecutionFailure::internal(format!("Agent stage initialization failed: {error:#}"));
             let source = UnstampedEvent::new(
@@ -209,23 +210,6 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
             };
         }
     };
-    if let Some(admission) = req.execution_admission {
-        if admission.session_id != req.session_id
-            || !v2_out.context.session.turn.bind_work_admission(admission)
-        {
-            return ExecOutcome {
-                ok: false,
-                stop_reason: PromptStopReason::EndTurn,
-                failure: Some(ExecutionFailure::internal(
-                    "Execution admission identity conflict",
-                )),
-                history_replaced_by_compaction: false,
-                persisted_payloads: req.history_payloads,
-                persistence_inconsistent: false,
-                agent_state: AgentState::new(&req.cwd),
-            };
-        }
-    }
     v2_out.context.session.user_input_mailbox = req.user_input_mailbox.clone();
     if let Some(mailbox) = &req.user_input_mailbox {
         v2_out.session.set_user_input_mailbox(mailbox.clone());
@@ -234,74 +218,13 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
         (req.store_llm)(cache);
     }
 
-    let preflight = async {
-        #[cfg(test)]
-        if v2_out.context.work.is_best_effort_fixture() {
-            if !req.continuation && !req.agent_input.content.is_empty() {
-                v2_out.context.session.queue.push(QueuedMessage::prompt(
-                    V2MessageSource::UserInput,
-                    BaseMessage::human(req.agent_input.content.clone()),
-                ));
-            }
-            v2_out.context.work.ensure(&v2_out.context).await?;
-            return Ok::<_, anyhow::Error>(());
-        }
-        if !req.continuation && !req.agent_input.content.is_empty() {
-            let mailbox = req
-                .user_input_mailbox
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("required initial input has no durable mailbox"))?;
-            let command_id = req
-                .agent_input
-                .params
-                .get("request_id")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_owned)
-                .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
-            let input_id = req
-                .agent_input
-                .params
-                .get("input_id")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_owned)
-                .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
-            let ticket = mailbox.active_run_ticket().ok_or_else(|| {
-                anyhow::anyhow!("initial prompt execution attachment unavailable")
-            })?;
-            mailbox
-                .publish_prompt_durable(
-                    &peri_acp_types::session::EnqueueUserInputRequest {
-                        session_id: req.session_id.clone(),
-                        generation: mailbox.generation().to_owned(),
-                        command_id,
-                        input_id,
-                        content: req.agent_input.content.clone(),
-                        original_draft: req.agent_input.content.text_content(),
-                    },
-                    &ticket,
-                )
-                .await
-                .map_err(anyhow::Error::new)?;
-        }
-        v2_out.context.work.ensure(&v2_out.context).await?;
-        Ok::<_, anyhow::Error>(())
-    }
-    .await;
-    if let Err(error) = preflight {
-        return ExecOutcome {
-            ok: false,
-            stop_reason: PromptStopReason::EndTurn,
-            failure: Some(ExecutionFailure::internal(format!(
-                "Required execution preflight failed: {error}"
-            ))),
-            history_replaced_by_compaction: false,
-            persisted_payloads: req.history_payloads,
-            persistence_inconsistent: false,
-            agent_state: AgentState::new(&req.cwd),
-        };
+    if !req.continuation && !req.agent_input.content.is_empty() {
+        v2_out.context.session.queue.push(QueuedMessage::prompt(
+            V2MessageSource::UserInput,
+            BaseMessage::human(req.agent_input.content.clone()),
+        ));
     }
 
-    let executing_admission = v2_out.context.session.turn.work_admission().cloned();
     let input_ticket = req
         .user_input_mailbox
         .as_ref()
@@ -626,11 +549,7 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
         } else {
             UserInputAttemptOutcome::Failed
         };
-        if let Some(admission) = &executing_admission {
-            mailbox.finish_sdk_run(admission, outcome);
-        } else {
-            mailbox.record_attempt_outcome(ticket, outcome);
-        }
+        mailbox.record_attempt_outcome(ticket, outcome);
         if persistence_inconsistent {
             mailbox.invalidate();
         }

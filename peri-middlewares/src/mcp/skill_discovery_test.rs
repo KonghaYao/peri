@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::mcp::client::{McpClientHandle, OAuthStatus};
+use crate::mcp::skill_discovery::skills_list::collect_entries;
 use crate::mcp::ClientStatus;
 use peri_acp_types::mcp_skills::ServerDiscoveryState;
 use std::sync::Arc;
@@ -324,13 +325,38 @@ fn entry_from_dto_resources_omitted_vs_empty_distinguished() {
 }
 
 #[test]
-fn entry_from_dto_missing_name_returns_none() {
+fn entry_from_dto_missing_name_reports_field_and_category() {
     let dto: SkillListEntryDto = serde_json::from_value(serde_json::json!({
         "uri": "skill://a/SKILL.md",
         "frontmatter": { "description": "no name" },
     }))
     .unwrap();
-    assert!(entry_from_dto(dto).is_none());
+    let defect = entry_from_dto(dto).unwrap_err();
+    assert_eq!(defect.field, "name");
+    assert_eq!(defect.category, "missing");
+}
+
+/// M8：非字符串 name/description 同样在 discovery 边界隔离（类别 wrong-type），
+/// 诊断只带字段与类别，不回显字段正文。
+#[test]
+fn entry_from_dto_non_string_field_is_isolated() {
+    let dto: SkillListEntryDto = serde_json::from_value(serde_json::json!({
+        "uri": "skill://a/SKILL.md",
+        "frontmatter": { "name": 7, "description": { "nested": "value" } },
+    }))
+    .unwrap();
+    let defect = entry_from_dto(dto).unwrap_err();
+    assert_eq!(defect.field, "name");
+    assert_eq!(defect.category, "wrong-type");
+
+    let dto: SkillListEntryDto = serde_json::from_value(serde_json::json!({
+        "uri": "skill://a/SKILL.md",
+        "frontmatter": { "name": "a", "description": 7 },
+    }))
+    .unwrap();
+    let defect = entry_from_dto(dto).unwrap_err();
+    assert_eq!(defect.field, "description");
+    assert_eq!(defect.category, "wrong-type");
 }
 
 #[test]
@@ -946,6 +972,9 @@ fn make_spec_handle(
 #[path = "skill_discovery_legacy_test.rs"]
 mod legacy_discovery_tests;
 
+#[path = "skill_discovery/cache_fixture_test.rs"]
+mod cache_fixture;
+
 #[path = "skill_discovery_spec_test.rs"]
 mod spec_discovery_tests;
 
@@ -954,3 +983,9 @@ mod command_projection_tests;
 
 #[path = "skill_discovery_releaser_test.rs"]
 mod releaser_tests;
+
+#[path = "skill_discovery/entry_validation_test.rs"]
+mod entry_validation_tests;
+
+#[path = "skill_discovery/catalog_state_test.rs"]
+mod catalog_state_tests;

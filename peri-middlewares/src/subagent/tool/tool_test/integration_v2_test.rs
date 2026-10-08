@@ -20,7 +20,7 @@ use super::*;
 /// - mock LLM 收到的 messages 包含全部 3 条父消息（按顺序透传，验证 BUG-C）
 #[tokio::test]
 async fn test_integration_fork_parent_messages_passthrough() {
-    let host = DurableHost::open("fixture-iv2-passthrough").await;
+    let host = HostFixture::open("fixture-iv2-passthrough").await;
     // Arrange: 3 条父消息（Human/AI 交替 + 1 条 system context）
     let parent_messages: Arc<RwLock<Vec<BaseMessage>>> = Arc::new(RwLock::new(Vec::new()));
     parent_messages
@@ -135,7 +135,7 @@ async fn test_integration_fork_parent_messages_passthrough() {
 
 #[tokio::test]
 async fn test_fork_prefers_tool_context_messages_over_parent_snapshot() {
-    let host = DurableHost::open("fixture-iv2-prefer").await;
+    let host = HostFixture::open("fixture-iv2-prefer").await;
     let parent_messages: Arc<RwLock<Vec<BaseMessage>>> = Arc::new(RwLock::new(Vec::new()));
     parent_messages
         .write()
@@ -163,7 +163,7 @@ async fn test_fork_prefers_tool_context_messages_over_parent_snapshot() {
             let _ = &cancellation;
             let messages = base_messages(&request);
             let defined = defined_tools(&request);
-            let tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
+            let _tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
 
             *self.captured.lock().unwrap() = messages.iter().map(|m| m.content()).collect();
             text_events("ctx-preferred")
@@ -220,7 +220,7 @@ async fn test_fork_prefers_tool_context_messages_over_parent_snapshot() {
 
 #[tokio::test]
 async fn test_fork_falls_back_to_parent_messages_when_tool_context_empty() {
-    let host = DurableHost::open("fixture-iv2-fallback").await;
+    let host = HostFixture::open("fixture-iv2-fallback").await;
     let parent_messages: Arc<RwLock<Vec<BaseMessage>>> = Arc::new(RwLock::new(Vec::new()));
     parent_messages
         .write()
@@ -243,7 +243,7 @@ async fn test_fork_falls_back_to_parent_messages_when_tool_context_empty() {
             let _ = &cancellation;
             let messages = base_messages(&request);
             let defined = defined_tools(&request);
-            let tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
+            let _tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
 
             *self.captured.lock().unwrap() = messages.iter().map(|m| m.content()).collect();
             text_events("fallback-used")
@@ -295,7 +295,7 @@ async fn test_fork_falls_back_to_parent_messages_when_tool_context_empty() {
 
 #[tokio::test]
 async fn test_fork_drops_trailing_tool_call_message_from_tool_context() {
-    let host = DurableHost::open("fixture-iv2-drop").await;
+    let host = HostFixture::open("fixture-iv2-drop").await;
     let ctx_messages = vec![
         BaseMessage::human("stable context before tool call"),
         BaseMessage::ai_with_tool_calls(
@@ -325,7 +325,7 @@ async fn test_fork_drops_trailing_tool_call_message_from_tool_context() {
             let _ = &cancellation;
             let messages = base_messages(&request);
             let defined = defined_tools(&request);
-            let tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
+            let _tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
 
             *self.captured.lock().unwrap() = messages.iter().map(|m| m.content()).collect();
             text_events("tool-call-dropped")
@@ -439,7 +439,7 @@ async fn test_integration_background_independent_survives_parent_cancel() {
         .write()
         .push(BaseMessage::human("parent ctx"));
 
-    let host = DurableHost::open_with_background(
+    let host = HostFixture::open_with_background(
         "fixture-iv2-independent",
         Arc::clone(&registry),
         bg_tx.clone(),
@@ -582,7 +582,7 @@ async fn test_integration_background_independent_survives_parent_cancel() {
 #[tokio::test]
 async fn test_integration_sync_cascade_cancel_returns_interrupted_marker() {
     let dir = tempdir().unwrap();
-    let host = DurableHost::open_in(dir.path(), "fixture-iv2-cascade").await;
+    let host = HostFixture::open_in(dir.path(), "fixture-iv2-cascade").await;
     let agents_dir = dir.path().join(".claude").join("agents");
     std::fs::create_dir_all(&agents_dir).unwrap();
     std::fs::write(
@@ -608,9 +608,9 @@ async fn test_integration_sync_cascade_cancel_returns_interrupted_marker() {
         ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
             use crate::subagent::test_support::*;
             let _ = &cancellation;
-            let messages = base_messages(&request);
+            let _messages = base_messages(&request);
             let defined = defined_tools(&request);
-            let tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
+            let _tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
 
             self.count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             tool_events_from_react(vec![peri_agent::agent::react::ToolCall::new(
@@ -717,7 +717,7 @@ async fn test_p0_2_background_defined_skill_preload_once_after_parent_cancel() {
             let _ = &cancellation;
             let messages = base_messages(&request);
             let defined = defined_tools(&request);
-            let tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
+            let _tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
 
             self.calls.fetch_add(1, Ordering::SeqCst);
             assert!(
@@ -738,7 +738,7 @@ async fn test_p0_2_background_defined_skill_preload_once_after_parent_cancel() {
     let parent_cancel = AgentCancellationToken::new();
     let registry = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
     let (bg_tx, mut bg_rx) = mpsc::unbounded_channel::<ExecutorEvent>();
-    let host = DurableHost::open_in_with_background(
+    let host = HostFixture::open_in_with_background(
         dir.path(),
         "fixture-iv2-skillpreload",
         Arc::clone(&registry),
@@ -850,7 +850,7 @@ async fn test_integration_fork_plus_background_priority() {
             let _ = &cancellation;
             let messages = base_messages(&request);
             let defined = defined_tools(&request);
-            let tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
+            let _tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
 
             // 找到最后一条 Human 消息（fork directive 在 prompt queue 里）
             if let Some(last_human) = messages
@@ -873,7 +873,7 @@ async fn test_integration_fork_plus_background_priority() {
         .write()
         .push(BaseMessage::human("ctx for bg fork"));
 
-    let host = DurableHost::open_with_background(
+    let host = HostFixture::open_with_background(
         "fixture-iv2-independent",
         Arc::clone(&registry),
         bg_tx.clone(),

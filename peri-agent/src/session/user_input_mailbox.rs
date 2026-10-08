@@ -21,11 +21,6 @@ use tokio_util::sync::CancellationToken;
 
 const PENDING_CAPACITY: usize = 32;
 
-#[path = "user_input_mailbox/durable.rs"]
-mod durable;
-#[path = "user_input_mailbox/sdk_run.rs"]
-mod sdk_run;
-
 /// 预留的单次执行身份；失效 ticket 不能启动或结算后来的一次执行。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserInputRunTicket {
@@ -53,10 +48,6 @@ pub enum UserInputQueueError {
     Capacity,
     #[error("Identity was already used for a different operation")]
     IdentityConflict,
-    #[error("Durable user input outcome is unknown; reconcile the original command")]
-    OutcomeUnknown,
-    #[error("Durable user input was rejected: {0}")]
-    DurableRejected(String),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -72,7 +63,6 @@ struct ActiveRun {
     reason: InterruptReason,
     outcome: Option<UserInputAttemptOutcome>,
     managed: bool,
-    sdk: Option<sdk_run::SdkRunObservation>,
 }
 
 struct InputRecord {
@@ -80,8 +70,6 @@ struct InputRecord {
     fingerprint: u64,
     state: UserInputState,
     handed_off: bool,
-    publication_id: Option<String>,
-    publication_generation: Option<String>,
 }
 
 struct CommandReceipt {
@@ -92,7 +80,6 @@ struct CommandReceipt {
 
 struct MailboxState {
     revision: u64,
-    projected_revision: u64,
     records: Vec<InputRecord>,
     ready: Vec<String>,
     commands: HashMap<String, CommandReceipt>,
@@ -100,11 +87,7 @@ struct MailboxState {
     paused: bool,
     suspended: bool,
     valid: bool,
-    /// 暂停（Stop/Pause/失败）期间用户明确提交、且当时未能立即发布的输入。
-    /// 它们携带"有明确恢复语义的发送"授权：执行条件成立后可建立新任务并自动 Resume；
-    /// 暂停之前入队的旧待办不在其中，不会被自动带动。
-    resume_intents: HashSet<String>,
-    delivered_notifications: HashSet<(String, Option<String>)>,
+    delivered_notifications: HashSet<String>,
 }
 
 /// 由宿主持有跨 turn 实例，Agent 独占队列状态、取消原因和执行准入判定。
@@ -116,20 +99,10 @@ pub struct UserInputMailbox {
     emit: Arc<dyn Fn(StateEvent) + Send + Sync>,
     control_turn: TurnId,
     control_agent: AgentId,
-    durable: Option<durable::DurableMailbox>,
 }
 
 impl UserInputMailbox {
-    #[cfg(test)]
     pub fn new(
-        session_id: String,
-        inbox: Arc<SessionInbox>,
-        emit: Arc<dyn Fn(StateEvent) + Send + Sync>,
-    ) -> Arc<Self> {
-        Self::new_unbound(session_id, inbox, emit)
-    }
-
-    fn new_unbound(
         session_id: String,
         inbox: Arc<SessionInbox>,
         emit: Arc<dyn Fn(StateEvent) + Send + Sync>,
@@ -140,7 +113,6 @@ impl UserInputMailbox {
             inbox,
             state: Mutex::new(MailboxState {
                 revision: 0,
-                projected_revision: 0,
                 records: Vec::new(),
                 ready: Vec::new(),
                 commands: HashMap::new(),
@@ -148,13 +120,11 @@ impl UserInputMailbox {
                 paused: false,
                 suspended: false,
                 valid: true,
-                resume_intents: HashSet::new(),
                 delivered_notifications: HashSet::new(),
             }),
             emit,
             control_turn: TurnId::new(),
             control_agent: AgentId::new(),
-            durable: None,
         })
     }
 
@@ -186,9 +156,6 @@ impl UserInputMailbox {
         &self,
         request: &EnqueueUserInputRequest,
     ) -> Result<UserInputQueueReceipt, UserInputQueueError> {
-        if self.durable.is_some() {
-            return Err(UserInputQueueError::OutcomeUnknown);
-        }
         let fingerprint = compute_fingerprint(("enqueue", request));
         let mut state = self.state.lock();
         self.validate(
@@ -233,8 +200,6 @@ impl UserInputMailbox {
                 fingerprint: input_fingerprint,
                 state: UserInputState::Queued,
                 handed_off: false,
-                publication_id: None,
-                publication_generation: None,
             });
             state.revision += 1;
             if state.active.is_none() || state.paused {
@@ -255,9 +220,6 @@ impl UserInputMailbox {
         &self,
         request: &DispatchUserInputsRequest,
     ) -> Result<UserInputQueueReceipt, UserInputQueueError> {
-        if self.durable.is_some() {
-            return Err(UserInputQueueError::OutcomeUnknown);
-        }
         let fingerprint = compute_fingerprint(("dispatch", request));
         let mut state = self.state.lock();
         self.validate(
@@ -302,9 +264,6 @@ impl UserInputMailbox {
         &self,
         request: &TakeBackUserInputRequest,
     ) -> Result<UserInputQueueReceipt, UserInputQueueError> {
-        if self.durable.is_some() {
-            return Err(UserInputQueueError::OutcomeUnknown);
-        }
         let fingerprint = compute_fingerprint(("takeback", request));
         let mut state = self.state.lock();
         self.validate(
@@ -347,9 +306,6 @@ impl UserInputMailbox {
 
     /// 只预留一次执行，不交接消息；宿主取得既有 prompt lock 后再 attach。
     pub fn reserve_run(&self) -> Option<UserInputRunTicket> {
-        if self.durable.is_some() {
-            return None;
-        }
         let mut state = self.state.lock();
         if !state.valid || state.paused || state.active.is_some() || state.ready.is_empty() {
             return None;
@@ -361,7 +317,6 @@ impl UserInputMailbox {
             reason: InterruptReason::None,
             outcome: None,
             managed: true,
-            sdk: None,
         });
         Some(ticket)
     }
@@ -407,10 +362,9 @@ impl UserInputMailbox {
             reason: InterruptReason::None,
             outcome: None,
             managed: false,
-            sdk: None,
         });
         state.revision += 1;
-        if resume_pending && self.durable.is_none() {
+        if resume_pending {
             state.paused = false;
             promote_next(&mut state);
             self.handoff_locked(&mut state);
@@ -441,11 +395,7 @@ impl UserInputMailbox {
             return None;
         }
         Some(StateEvent::UserInputRunStarted {
-            turn_id: state
-                .active
-                .as_ref()
-                .and_then(|active| active.sdk.as_ref())
-                .map_or(self.control_turn, |sdk| sdk.admission.execution.turn_id),
+            turn_id: self.control_turn,
             agent_id: self.control_agent,
             generation: self.generation.clone(),
             request_id: ticket.id.clone(),
@@ -499,8 +449,7 @@ impl UserInputMailbox {
             self.reclaim_locked(&mut state);
         } else if state.paused {
             self.reclaim_locked(&mut state);
-        } else if self.durable.is_none()
-            && active.reason == InterruptReason::None
+        } else if active.reason == InterruptReason::None
             && outcome == UserInputAttemptOutcome::Completed
         {
             // 已接受的立即发送优先；普通待办每次只释放队首一条。
@@ -592,9 +541,6 @@ impl UserInputMailbox {
     }
 
     fn wake_suspended_locked(&self, state: &mut MailboxState) -> bool {
-        if self.durable.is_some() {
-            return false;
-        }
         // 迟到的 idle 不能恢复 Stop、立即发送收尾或已经取消的旧 attempt。
         if !state.valid
             || state.paused
@@ -619,13 +565,6 @@ impl UserInputMailbox {
     /// Receive 已从 MQ 独占取走这些 ID；任何 Stop 都不得再将它们恢复 queued。
     pub(crate) fn mark_claimed(&self, ids: &[MessageId]) {
         let mut state = self.state.lock();
-        if let Some(sdk) = state.active.as_mut().and_then(|active| active.sdk.as_mut()) {
-            for id in ids {
-                if !sdk.input_ids.contains(id) {
-                    sdk.input_ids.push(*id);
-                }
-            }
-        }
         let mut changed = false;
         for record in &mut state.records {
             if record.state == UserInputState::Dispatching && matches_id(record, ids) {
@@ -644,22 +583,10 @@ impl UserInputMailbox {
 
     /// 返回本次首次接纳的注册输入 ID，调用方在本轮 render FIFO 发聊天事件。
     pub(crate) fn mark_delivered(&self, ids: &[MessageId]) -> Vec<String> {
-        self.mark_delivery_notifications(ids, None)
+        self.mark_delivery_notifications(ids)
     }
 
-    pub(crate) fn mark_committed_deliveries(
-        &self,
-        deliveries: &[(MessageId, String)],
-    ) -> Vec<String> {
-        let ids: Vec<_> = deliveries.iter().map(|(id, _)| *id).collect();
-        self.mark_delivery_notifications(&ids, Some(deliveries))
-    }
-
-    fn mark_delivery_notifications(
-        &self,
-        ids: &[MessageId],
-        publications: Option<&[(MessageId, String)]>,
-    ) -> Vec<String> {
+    fn mark_delivery_notifications(&self, ids: &[MessageId]) -> Vec<String> {
         let mut state = self.state.lock();
         if !state.valid {
             return Vec::new();
@@ -671,21 +598,11 @@ impl UserInputMailbox {
             ..
         } = &mut *state;
         for record in records {
-            let publication_matches = publications.is_none_or(|publications| {
-                publications.iter().any(|(id, publication_id)| {
-                    matches_id(record, &[*id])
-                        && record.publication_id.as_ref() == Some(publication_id)
-                })
-            });
             if matches!(
                 record.state,
                 UserInputState::Claimed | UserInputState::Delivered
             ) && matches_id(record, ids)
-                && publication_matches
-                && delivered_notifications.insert((
-                    record.input.input_id.clone(),
-                    record.publication_generation.clone(),
-                ))
+                && delivered_notifications.insert(record.input.input_id.clone())
             {
                 record.state = UserInputState::Delivered;
                 delivered.push(record.input.input_id.clone());
@@ -703,9 +620,6 @@ impl UserInputMailbox {
     }
 
     fn handoff_locked(&self, state: &mut MailboxState) {
-        if self.durable.is_some() {
-            return;
-        }
         let ready = std::mem::take(&mut state.ready);
         let messages = ready
             .into_iter()
@@ -732,9 +646,6 @@ impl UserInputMailbox {
     }
 
     fn reclaim_locked(&self, state: &mut MailboxState) {
-        if self.durable.is_some() {
-            return;
-        }
         let ids: Vec<_> = state
             .records
             .iter()
@@ -829,8 +740,6 @@ impl UserInputMailbox {
             snapshot: self.snapshot_locked(state),
             results,
             taken_back,
-            work_receipts: Vec::new(),
-            publication_generations: Default::default(),
         }
     }
 
@@ -850,8 +759,6 @@ impl UserInputMailbox {
             snapshot: self.snapshot_locked(state),
             results: receipt.results.clone(),
             taken_back: receipt.taken_back.clone(),
-            work_receipts: Vec::new(),
-            publication_generations: Default::default(),
         }))
     }
 

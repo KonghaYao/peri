@@ -117,57 +117,6 @@ async fn test_cancel_consumer_failure_does_not_claim_execution_stopped() {
     shutdown.cancel();
 }
 
-#[tokio::test]
-#[serial]
-async fn test_cancel_consumer_rejection_preserves_loading() {
-    use peri_acp::transport::{AcpTransport, types::IncomingMessage};
-    use serde_json::json;
-
-    crate::kit::atoms::init_atoms();
-    ACP_STATE.state().write().is_loading = true;
-    let (client, server) = make_client_without_pump();
-    client.force_stable_for_test("s", false);
-    let (tx, rx) = mpsc::unbounded_channel();
-    let handle = spawn_cancel_consumer(client, rx, CancellationToken::new());
-    tx.send(()).unwrap();
-    let IncomingMessage::Request { id, method, .. } = server.recv().await.unwrap() else {
-        panic!("expected state RPC");
-    };
-    assert_eq!(method, "session/control/state");
-    let mut state = json!({"lifecycle":1,"revision":0,"controlGeneration":0,"status":"active",
-        "attempt":{"turnId":peri_acp_types::session::TurnId::new(),
-        "attemptId":peri_acp_types::identity::AttemptId::new()}});
-    server
-        .send_response(id, Ok(json!({"state":state,"settlement":null})))
-        .await
-        .unwrap();
-    let IncomingMessage::Request { id, method, params } = server.recv().await.unwrap() else {
-        panic!("expected stop RPC");
-    };
-    assert_eq!(method, "session/control");
-    state["attempt"]["turnId"] = json!(peri_acp_types::session::TurnId::new());
-    let receipt = peri_acp_types::session_resources::control::decide_control(
-        &serde_json::from_value(params).unwrap(),
-        &serde_json::from_value(state).unwrap(),
-    );
-    assert!(matches!(
-        receipt.decision,
-        peri_acp_types::session_resources::ControlDecision::Rejected {
-            reason: peri_acp_types::session_resources::ControlRejection::StaleAttempt
-        }
-    ));
-    server
-        .send_response(id, Ok(serde_json::to_value(receipt).unwrap()))
-        .await
-        .unwrap();
-    drop(tx);
-    tokio::time::timeout(std::time::Duration::from_secs(2), handle)
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(ACP_STATE.state().read().is_loading);
-}
-
 /// S4.2: clear_loading_state 双保险——直接写 ACP_STATE（bridge 已退出的
 /// shutdown 路径兜底）+ 注入 LocalLoadingReset 内部事件（bridge 存活时同步
 /// 复位 phase，防止后续 push_acp_state 用 phase 重算 is_loading=true 闪回）。

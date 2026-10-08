@@ -2,12 +2,6 @@
 
 use super::*;
 
-#[path = "resume_authorization_test.rs"]
-mod authorization_cases;
-
-#[path = "resume_recovery_test.rs"]
-mod recovery_cases;
-
 async fn dispatch_resume_fixture(
     config: SubagentResumeConfig,
     cancel: &CancellationToken,
@@ -37,13 +31,13 @@ async fn dispatch_resume_fixture(
             _ctx: ToolContext<'_>,
         ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
             let config = { self.0.lock().unwrap().take() }.expect("one invocation");
-            let resumed = AdmittedSessionFactory::resume_subagent(None, config).await?;
+            let resumed = SessionFactory::resume_subagent(None, config).await?;
             Ok(resumed.child_thread_id)
         }
     }
     let turn = TurnContext::new(Arc::from("/tmp/work"), Arc::new(cancel.clone()));
     let transcript = Arc::new(parking_lot::RwLock::new(MessageTranscript::new()));
-    let ctx = StageContext::new_best_effort_fixture(turn, transcript, MessageQueue::new());
+    let ctx = StageContext::new(turn, transcript, MessageQueue::new());
     ctx.runtime.tools.write().insert(
         "ResumeFixture".into(),
         Arc::new(ResumeTool(std::sync::Mutex::new(Some(config)))),
@@ -132,7 +126,7 @@ async fn test_resume_load_cancelled_by_dispatch_restores_previous_status() {
         store.clone(),
         thread_id.clone(),
         crate::session::test_resources::mock::model::fixture_source(
-            std::sync::Arc::new(llm),
+            Arc::new(llm),
             "fixture-scripted",
         ),
         SubagentRunMode::Sync,
@@ -149,12 +143,10 @@ async fn test_resume_load_cancelled_by_dispatch_restores_previous_status() {
         "execution must not start during preparation"
     );
     wait_for_resume_status(&store, &thread_id, AgentStatus::Done).await;
-    let resumed = AdmittedSessionFactory::resume_subagent(
-        None,
-        resume_config(store.clone(), thread_id.clone()),
-    )
-    .await
-    .expect("the same thread must remain resumable");
+    let resumed =
+        SessionFactory::resume_subagent(None, resume_config(store.clone(), thread_id.clone()))
+            .await
+            .expect("the same thread must remain resumable");
     assert_eq!(resumed.child_thread_id, thread_id);
 }
 
@@ -179,7 +171,7 @@ async fn test_resume_active_write_cancelled_by_dispatch_finishes_before_rollback
         store.clone(),
         thread_id.clone(),
         crate::session::test_resources::mock::model::fixture_source(
-            std::sync::Arc::new(llm),
+            Arc::new(llm),
             "fixture-scripted",
         ),
         SubagentRunMode::Sync,
@@ -213,12 +205,10 @@ async fn test_resume_active_write_cancelled_by_dispatch_finishes_before_rollback
         ["done", "active", "done"],
         "rollback follows completion of the active write exactly once"
     );
-    let resumed = AdmittedSessionFactory::resume_subagent(
-        None,
-        resume_config(store.clone(), thread_id.clone()),
-    )
-    .await
-    .unwrap();
+    let resumed =
+        SessionFactory::resume_subagent(None, resume_config(store.clone(), thread_id.clone()))
+            .await
+            .unwrap();
     assert_eq!(resumed.child_thread_id, thread_id);
 }
 
@@ -250,7 +240,7 @@ async fn test_resume_cancelled_during_assembly_never_starts_execution() {
         store.clone(),
         thread_id.clone(),
         crate::session::test_resources::mock::model::fixture_source(
-            std::sync::Arc::new(llm),
+            Arc::new(llm),
             "fixture-scripted",
         ),
         SubagentRunMode::Sync,
@@ -267,7 +257,7 @@ async fn test_resume_cancelled_during_assembly_never_starts_execution() {
     }));
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(2),
-        AdmittedSessionFactory::resume_subagent(None, config),
+        SessionFactory::resume_subagent(None, config),
     )
     .await
     .unwrap()
@@ -290,43 +280,34 @@ async fn test_resume_cancelled_during_assembly_never_starts_execution() {
     );
     assert!(received.read().is_empty());
     wait_for_resume_status(&store, &thread_id, AgentStatus::Done).await;
-    let resumed = AdmittedSessionFactory::resume_subagent(
-        None,
-        resume_config(store.clone(), thread_id.clone()),
-    )
-    .await
-    .unwrap();
+    let resumed =
+        SessionFactory::resume_subagent(None, resume_config(store.clone(), thread_id.clone()))
+            .await
+            .unwrap();
     assert_eq!(resumed.child_thread_id, thread_id);
 }
 
 #[tokio::test]
 async fn test_resume_running_cancelled_by_dispatch_finalizes_claim() {
-    use peri_acp_types::session_resources::{
-        work::{ObligationStatus, WorkQuery, WorkStage},
-        SessionResources,
-    };
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    /// 门控共享（`fixture_model_impl!` 要求 `Clone`，门控本体不可克隆）。
     #[derive(Clone)]
-    struct GatedLLM(std::sync::Arc<std::sync::Mutex<Option<ResumeLoadGate>>>);
-
+    struct GatedLLM(Arc<std::sync::Mutex<Option<ResumeLoadGate>>>);
     impl GatedLLM {
+        /// 模型形态的假模型：门控在 `respond` 内等待，取消时该 future 被丢弃
+        /// （`ResumeLoadGate::wait` 的 DropProbe 据此置位）。
         async fn respond(
             &self,
             _request: peri_model::ModelRequest,
             cancellation: tokio_util::sync::CancellationToken,
         ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
+            let _ = cancellation;
             let gate = { self.0.lock().unwrap().take() }.expect("one LLM call");
-            tokio::select! {
-                _ = gate.wait() => {}
-                _ = cancellation.cancelled() => {
-                    return vec![Err(peri_model::ModelError::cancelled())];
-                }
-            }
+            gate.wait().await;
             crate::session::test_resources::mock::model::text_events("unreachable")
         }
     }
     crate::fixture_model_impl!(GatedLLM);
-
     let store = MockSessionResources::new();
     let thread_id = uuid::Uuid::now_v7().to_string();
     preset_resumable_thread(&store, &thread_id, None).await;
@@ -340,7 +321,7 @@ async fn test_resume_running_cancelled_by_dispatch_finalizes_claim() {
         store.clone(),
         thread_id.clone(),
         crate::session::test_resources::mock::model::fixture_source(
-            std::sync::Arc::new(GatedLLM(std::sync::Arc::new(std::sync::Mutex::new(Some(
+            Arc::new(GatedLLM(Arc::new(std::sync::Mutex::new(Some(
                 ResumeLoadGate {
                     entered: entered_tx,
                     release: release_rx,
@@ -374,61 +355,6 @@ async fn test_resume_running_cancelled_by_dispatch_finalizes_claim() {
         0,
         "claim cleanup must not invent or duplicate the normal Stop hook"
     );
-    let query = WorkQuery {
-        session_id: thread_id.clone(),
-        limit: 1,
-    };
-    let cancelled = store.load_session_work(&query).await.unwrap();
-    assert!(cancelled.control.attempt.is_none());
-    let original = cancelled.state.works.values().next().unwrap();
-    assert_eq!(original.stage, WorkStage::ReasonInFlight);
-    assert!(original.request_id.is_some());
-    assert!(original.reason_request.is_some());
-    assert!(original.response.is_none());
-    assert!(cancelled
-        .state
-        .obligations
-        .values()
-        .all(|obligation| obligation.status != ObligationStatus::Satisfied));
-    super::close_lifecycle_cases::reopen_closed_child_fixture(&store, &thread_id).await;
-    let llm = RecordingLLM::new();
-    let calls = llm.received.clone();
-    let config = resume_config_with(
-        store.clone(),
-        thread_id.clone(),
-        crate::session::test_resources::mock::model::fixture_source(
-            std::sync::Arc::new(llm),
-            "fixture-scripted",
-        ),
-        SubagentRunMode::Sync,
-        None,
-        None,
-    );
-    let error = match AdmittedSessionFactory::resume_subagent(None, config).await {
-        Err(error) => error,
-        Ok(_) => panic!("unknown in-flight model request must require reconciliation"),
-    };
-    assert!(
-        error.to_string().contains(
-            "Blocked: original model request requires reconciliation before implicit continuation"
-        ),
-        "{error}"
-    );
-    assert!(calls.read().is_empty());
-    let recovered = store.load_session_work(&query).await.unwrap();
-    assert_eq!(recovered.state.works.get(&original.work_id), Some(original));
-    assert_eq!(recovered.state.budgets, cancelled.state.budgets);
-    for (delivery_id, obligation) in &cancelled.state.obligations {
-        assert_eq!(
-            recovered.state.obligations.get(delivery_id),
-            Some(obligation)
-        );
-    }
-    assert!(recovered
-        .state
-        .obligations
-        .values()
-        .all(|obligation| obligation.status != ObligationStatus::Satisfied));
 }
 
 #[tokio::test]
@@ -447,7 +373,7 @@ async fn test_resume_precancelled_background_still_registers_and_completes() {
         store.clone(),
         thread_id.clone(),
         crate::session::test_resources::mock::model::fixture_source(
-            std::sync::Arc::new(llm),
+            Arc::new(llm),
             "fixture-scripted",
         ),
         SubagentRunMode::Background,
@@ -460,7 +386,7 @@ async fn test_resume_precancelled_background_still_registers_and_completes() {
         }
         Ok(())
     }));
-    let spawned = AdmittedSessionFactory::resume_subagent(None, config)
+    let spawned = SessionFactory::resume_subagent(None, config)
         .await
         .expect("background cancellation retains real registration and completion");
     assert_eq!(spawned.child_thread_id, thread_id);
@@ -486,13 +412,10 @@ async fn test_resume_precancelled_background_still_registers_and_completes() {
         store.load_meta(&thread_id).await.unwrap().agent_status,
         AgentStatus::Cancelled
     );
-    super::close_lifecycle_cases::reopen_closed_child_fixture(&store, &thread_id).await;
-    let resumed = AdmittedSessionFactory::resume_subagent(
-        None,
-        resume_config(store.clone(), thread_id.clone()),
-    )
-    .await
-    .unwrap();
+    let resumed =
+        SessionFactory::resume_subagent(None, resume_config(store.clone(), thread_id.clone()))
+            .await
+            .unwrap();
     assert_eq!(resumed.child_thread_id, thread_id);
 }
 
@@ -526,7 +449,7 @@ async fn test_resume_provenance_read_cancelled_by_dispatch_restores_previous_sta
             store.clone(),
             thread_id.clone(),
             crate::session::test_resources::mock::model::fixture_source(
-                std::sync::Arc::new(llm),
+                Arc::new(llm),
                 "fixture-scripted",
             ),
             SubagentRunMode::Sync,
@@ -547,12 +470,10 @@ async fn test_resume_provenance_read_cancelled_by_dispatch_restores_previous_sta
         );
         assert_eq!(starts.load(Ordering::SeqCst), 0);
         wait_for_resume_status(&store, &thread_id, AgentStatus::Done).await;
-        let resumed = AdmittedSessionFactory::resume_subagent(
-            None,
-            resume_config(store.clone(), thread_id.clone()),
-        )
-        .await
-        .expect("the same thread must remain resumable");
+        let resumed =
+            SessionFactory::resume_subagent(None, resume_config(store.clone(), thread_id.clone()))
+                .await
+                .expect("the same thread must remain resumable");
         assert_eq!(resumed.child_thread_id, thread_id);
     }
 }
@@ -607,11 +528,9 @@ async fn test_resume_provenance_overlap_rolls_back_claim_before_retry() {
     );
     // Repair the corrupt fixture and exercise the same thread's real resume.
     store.clear_inherited();
-    let resumed = AdmittedSessionFactory::resume_subagent(
-        None,
-        resume_config(store.clone(), thread_id.clone()),
-    )
-    .await
-    .unwrap();
+    let resumed =
+        SessionFactory::resume_subagent(None, resume_config(store.clone(), thread_id.clone()))
+            .await
+            .unwrap();
     assert_eq!(resumed.child_thread_id, thread_id);
 }

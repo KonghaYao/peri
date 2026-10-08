@@ -132,43 +132,9 @@ impl McpClientPool {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[cfg(test)]
-    pub(super) fn external_task_registration(
+    pub(crate) fn external_task_registration(
         self: &Arc<Self>,
         session_id: &str,
-        initiator_session_id: Option<&str>,
-        delivery: Option<Arc<dyn peri_acp_types::tasks::TaskTerminalDelivery>>,
-        server: &str,
-        raw_task_id: &str,
-        kind: BgTaskKind,
-        summary: &str,
-        scoped_workspace: bool,
-        started_at: &str,
-    ) -> Result<(Arc<dyn TaskManager>, ExternalTaskRegistration), String> {
-        let lifecycle = self
-            .session_bindings
-            .read()
-            .lifecycle(session_id)
-            .ok_or("Incomplete: external task lifecycle unavailable")?;
-        self.external_task_registration_for_lifecycle(
-            session_id,
-            lifecycle,
-            initiator_session_id,
-            delivery,
-            server,
-            raw_task_id,
-            kind,
-            summary,
-            scoped_workspace,
-            started_at,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn external_task_registration_for_lifecycle(
-        self: &Arc<Self>,
-        session_id: &str,
-        lifecycle: u64,
         initiator_session_id: Option<&str>,
         delivery: Option<Arc<dyn peri_acp_types::tasks::TaskTerminalDelivery>>,
         server: &str,
@@ -187,8 +153,7 @@ impl McpClientPool {
         let manager = self
             .session_bindings
             .read()
-            .binding_at(session_id, lifecycle)
-            .map(|(_, manager)| manager)
+            .manager(session_id)
             .ok_or_else(|| "session task manager unavailable".to_owned())?;
         let raw_id_for_cancel = raw_task_id.to_owned();
         let meta = scoped_workspace

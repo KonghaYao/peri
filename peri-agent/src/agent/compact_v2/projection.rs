@@ -292,7 +292,7 @@ pub(crate) fn render_persisted_llm_view(
 ) -> AgentResult<Vec<BaseMessage>> {
     match plan_from_persisted_directives(transcript, PROJECTION_POLICY_VERSION) {
         PersistedDirectiveRestore::Valid(plan) => match render_llm_view(transcript, &plan, caps) {
-            Ok(view) => return Ok(view),
+            Ok(view) => return crate::messages::tool_pairing::repair_model_tool_pairing(view),
             Err(error) => tracing::warn!(%error, "已提交投影渲染失败，保留 canonical 内容"),
         },
         PersistedDirectiveRestore::Invalid => {
@@ -300,7 +300,7 @@ pub(crate) fn render_persisted_llm_view(
         }
         PersistedDirectiveRestore::Absent => {}
     }
-    Ok(transcript.visible_model_messages()?)
+    crate::messages::tool_pairing::repair_model_tool_pairing(transcript.visible_model_messages()?)
 }
 
 // ─── render_llm_view ──────────────────────────────────────────────────────────

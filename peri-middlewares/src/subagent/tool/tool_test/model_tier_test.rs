@@ -64,7 +64,7 @@ async fn test_agent_model_override_replaces_frontmatter() {
     let dir = tempdir().unwrap();
     write_test_agent_with_model(&dir, "sonnet");
     let aliases: Arc<std::sync::Mutex<Vec<Option<String>>>> = Arc::default();
-    let host = DurableHost::open_in(dir.path(), "fixture-model-tier").await;
+    let host = HostFixture::open_in(dir.path(), "fixture-model-tier").await;
     let t = with_agent_face(
         make_recording_subagent_tool(vec![], Arc::clone(&aliases)),
         dir.path(),
@@ -98,7 +98,7 @@ async fn test_agent_model_inherit_uses_parent_model() {
     let dir = tempdir().unwrap();
     write_test_agent_with_model(&dir, "sonnet");
     let aliases: Arc<std::sync::Mutex<Vec<Option<String>>>> = Arc::default();
-    let host = DurableHost::open_in(dir.path(), "fixture-model-tier").await;
+    let host = HostFixture::open_in(dir.path(), "fixture-model-tier").await;
     let t = with_agent_face(
         make_recording_subagent_tool(vec![], Arc::clone(&aliases)),
         dir.path(),
@@ -128,7 +128,7 @@ async fn test_agent_model_omitted_keeps_frontmatter() {
     let dir = tempdir().unwrap();
     write_test_agent_with_model(&dir, "sonnet");
     let aliases: Arc<std::sync::Mutex<Vec<Option<String>>>> = Arc::default();
-    let host = DurableHost::open_in(dir.path(), "fixture-model-tier").await;
+    let host = HostFixture::open_in(dir.path(), "fixture-model-tier").await;
     let t = with_agent_face(
         make_recording_subagent_tool(vec![], Arc::clone(&aliases)),
         dir.path(),
@@ -144,7 +144,7 @@ async fn test_agent_model_omitted_keeps_frontmatter() {
         if let Some(m) = model {
             input["model"] = serde_json::Value::String(m.to_string());
         }
-        let invocation = host.fresh_invocation("omitted").await;
+        let invocation = host.fresh_tool_call_id("omitted");
         let result = t
             .invoke(input, host.context_with(&[], invocation))
             .await
@@ -170,7 +170,7 @@ async fn test_agent_model_omitted_inherit_or_empty_frontmatter() {
     for fm in ["inherit", ""] {
         let dir = tempdir().unwrap();
         write_test_agent_with_model(&dir, fm);
-        let host = DurableHost::open_in(dir.path(), "fixture-model-tier").await;
+        let host = HostFixture::open_in(dir.path(), "fixture-model-tier").await;
         let t = host.bind(
             with_agent_face(
                 make_recording_subagent_tool(vec![], Arc::clone(&aliases)),
@@ -178,7 +178,7 @@ async fn test_agent_model_omitted_inherit_or_empty_frontmatter() {
             )
             .await,
         );
-        let invocation = host.fresh_invocation("inherit").await;
+        let invocation = host.fresh_tool_call_id("inherit");
         let result = t
             .invoke(
                 serde_json::json!({
@@ -206,7 +206,7 @@ async fn test_agent_model_case_insensitive() {
     let dir = tempdir().unwrap();
     write_test_agent(&dir);
     let aliases: Arc<std::sync::Mutex<Vec<Option<String>>>> = Arc::default();
-    let host = DurableHost::open_in(dir.path(), "fixture-model-tier").await;
+    let host = HostFixture::open_in(dir.path(), "fixture-model-tier").await;
     let t = with_agent_face(
         make_recording_subagent_tool(vec![], Arc::clone(&aliases)),
         dir.path(),
@@ -214,7 +214,7 @@ async fn test_agent_model_case_insensitive() {
     .await;
     let t = host.bind(t);
     for model in ["HAIKU", "InHerit"] {
-        let invocation = host.fresh_invocation("case").await;
+        let invocation = host.fresh_tool_call_id("case");
         let result = t
             .invoke(
                 serde_json::json!({
@@ -243,7 +243,7 @@ async fn test_agent_model_unknown_ignored_on_fork() {
     let parent_messages: Arc<RwLock<Vec<BaseMessage>>> = Arc::new(RwLock::new(Vec::new()));
     parent_messages.write().push(BaseMessage::human("Hello"));
     let aliases: Arc<std::sync::Mutex<Vec<Option<String>>>> = Arc::default();
-    let host = DurableHost::open("fixture-model-tier-fork").await;
+    let host = HostFixture::open("fixture-model-tier-fork").await;
     let t = host.bind(
         make_recording_subagent_tool(vec![], Arc::clone(&aliases))
             .with_parent_messages(parent_messages),
@@ -270,7 +270,7 @@ async fn test_agent_model_unknown_rejected() {
     let dir = tempdir().unwrap();
     write_test_agent(&dir);
     let aliases: Arc<std::sync::Mutex<Vec<Option<String>>>> = Arc::default();
-    let host = DurableHost::open_in(dir.path(), "fixture-model-tier").await;
+    let host = HostFixture::open_in(dir.path(), "fixture-model-tier").await;
     let t = with_agent_face(
         make_recording_subagent_tool(vec![], Arc::clone(&aliases)),
         dir.path(),
@@ -311,7 +311,7 @@ async fn test_agent_model_ignored_on_fork() {
     let parent_messages: Arc<RwLock<Vec<BaseMessage>>> = Arc::new(RwLock::new(Vec::new()));
     parent_messages.write().push(BaseMessage::human("Hello"));
     let aliases: Arc<std::sync::Mutex<Vec<Option<String>>>> = Arc::default();
-    let host = DurableHost::open("fixture-model-tier-fork").await;
+    let host = HostFixture::open("fixture-model-tier-fork").await;
     let t = host.bind(
         make_recording_subagent_tool(vec![], Arc::clone(&aliases))
             .with_parent_messages(parent_messages),
@@ -352,14 +352,11 @@ async fn test_resume_thread_id_ignores_model_field() {
         Some(parent_id.clone()),
     );
     let id = uuid::Uuid::now_v7().to_string();
-    // resume 的可信 invocation 必须登记在 owning parent 上（夹具按同一契约写入）。
-    let invocation_id = "resume-model-tier-invocation";
-    preset_resumable_child(
+    preset_resumable_thread(
         &store,
         &id,
         "test-agent",
         Some(parent_id.as_str()),
-        Some(invocation_id),
         vec![BaseMessage::human("旧消息 1"), BaseMessage::ai("旧回答 1")],
     )
     .await;
@@ -376,10 +373,12 @@ async fn test_resume_thread_id_ignores_model_field() {
     t.parent_cwd = cwd.clone();
     // resume 的子链宿主来自 owning parent session：给该 session 挂生产 host。
     // （与 store 共享同一 SQLite 文件；此处只需耐久承载面。）
-    let durable_face = DurableHost::open_in(dir.path(), "fixture-model-tier-resume").await;
+    let durable_face = HostFixture::open_in(dir.path(), "fixture-model-tier-resume").await;
     durable_face.attach_session_host(&parent);
     let mut ctx = peri_agent::tools::ToolContext::new(&[], &cwd);
-    ctx.invocation_id = Some(invocation_id.to_string());
+    let tool_call = durable_face.fresh_tool_call_id("resume-model");
+    ctx.invocation_id = Some(tool_call.clone());
+    ctx.tool_call_id = Some(tool_call);
     let result = t
         .invoke(
             serde_json::json!({
@@ -419,7 +418,7 @@ async fn test_agent_model_override_applies_to_background() {
     let t = make_recording_subagent_tool(vec![], Arc::clone(&aliases))
         .with_task_manager(Arc::clone(&registry))
         .with_bg_event_sender(bg_tx);
-    let host = DurableHost::open_in(dir.path(), "fixture-model-tier").await;
+    let host = HostFixture::open_in(dir.path(), "fixture-model-tier").await;
     let t = host.bind(with_agent_face(t, dir.path()).await);
 
     let invoke_msg = t
@@ -471,7 +470,7 @@ async fn test_agent_invoke_wrong_optional_types_keep_definition_and_parent_cwd()
     let dir = tempdir().unwrap();
     write_test_agent_with_model(&dir, "sonnet");
     let aliases = Arc::default();
-    let host = DurableHost::open_in(dir.path(), "fixture-model-tier-optional").await;
+    let host = HostFixture::open_in(dir.path(), "fixture-model-tier-optional").await;
     let mut tool = host.bind(
         with_agent_face(
             make_recording_subagent_tool(vec![], Arc::clone(&aliases)),
@@ -522,7 +521,7 @@ async fn test_agent_frontmatter_unknown_tier_is_rejected_on_pointed_launch() {
     let dir = tempdir().unwrap();
     write_test_agent_with_model(&dir, "turbo");
     let aliases: Arc<std::sync::Mutex<Vec<Option<String>>>> = Arc::default();
-    let host = DurableHost::open_in(dir.path(), "fixture-model-tier-invalid").await;
+    let host = HostFixture::open_in(dir.path(), "fixture-model-tier-invalid").await;
     let t = with_agent_face(
         make_recording_subagent_tool(vec![], Arc::clone(&aliases)),
         dir.path(),
@@ -559,7 +558,7 @@ async fn test_agent_frontmatter_tier_case_normalized_on_launch() {
     let dir = tempdir().unwrap();
     write_test_agent_with_model(&dir, "SONNET");
     let aliases: Arc<std::sync::Mutex<Vec<Option<String>>>> = Arc::default();
-    let host = DurableHost::open_in(dir.path(), "fixture-model-tier-case").await;
+    let host = HostFixture::open_in(dir.path(), "fixture-model-tier-case").await;
     let t = with_agent_face(
         make_recording_subagent_tool(vec![], Arc::clone(&aliases)),
         dir.path(),

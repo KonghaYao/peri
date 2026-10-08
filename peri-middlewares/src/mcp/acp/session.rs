@@ -354,7 +354,13 @@ async fn connect_server(
         source: Some(ConfigSource::Acp),
         url: None,
     };
-    match pool.commit_acp_connection(&spec.session_id, &spec.name, Arc::new(client), service) {
+    match pool.commit_acp_connection(
+        &spec.session_id,
+        &connection_id,
+        &spec.name,
+        Arc::new(client),
+        service,
+    ) {
         Ok(pool_name) => {
             mark_ready(&state, &spec.session_id, &spec.server_id);
             tracing::info!(

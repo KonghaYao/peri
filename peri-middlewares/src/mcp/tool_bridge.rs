@@ -110,15 +110,33 @@ pub(crate) fn effective_mcp_tool_name(server_name: &str, tool_name: &str) -> Str
     )
 }
 
+/// 单个外部 MCP 工具 description 的字节预算（M7）。
+///
+/// 描述来自外部 server（不受本仓库控制），无预算时一条巨型描述会挤占每次
+/// 请求的 tools 参数。超预算按 UTF-8 边界截断，并在**预算内**追加截断标记
+/// （标记计入预算，模型看到的是有界文本且知道被截断）。
+const MAX_TOOL_DESCRIPTION_BYTES: usize = 8 * 1024;
+
+/// 构造模型可见的工具描述：`[MCP:{server}] {description}`，超预算时截断。
+fn bounded_tool_description(server_name: &str, description: Option<&str>) -> String {
+    let text = format!("[MCP:{}] {}", server_name, description.unwrap_or(""));
+    if text.len() <= MAX_TOOL_DESCRIPTION_BYTES {
+        return text;
+    }
+    let total = text.len();
+    let marker = format!("… [description truncated: {total} bytes total]");
+    let budget = MAX_TOOL_DESCRIPTION_BYTES.saturating_sub(marker.len());
+    let mut truncated = peri_agent::agent::async_tasks::truncate_bytes(&text, budget);
+    truncated.push_str(&marker);
+    truncated
+}
+
 impl McpToolBridge {
     pub fn new(server_name: &str, tool: &Tool, client: Arc<McpClientHandle>) -> Self {
         let tool_name = tool.name.to_string();
         let full_name = effective_mcp_tool_name(server_name, &tool_name);
-        let description = format!(
-            "[MCP:{}] {}",
-            server_name,
-            tool.description.as_ref().map(|d| d.as_ref()).unwrap_or("")
-        );
+        let description =
+            bounded_tool_description(server_name, tool.description.as_ref().map(|d| d.as_ref()));
         let input_schema = serde_json::to_value(&*tool.input_schema)
             .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
         Self {
@@ -150,13 +168,9 @@ impl McpToolBridge {
                 server: server_name.to_string(),
             });
         }
-        let description = format!(
-            "[MCP:{}] {}",
+        let description = bounded_tool_description(
             server_name,
-            tool.description
-                .as_ref()
-                .map(|value| value.as_ref())
-                .unwrap_or("")
+            tool.description.as_ref().map(|value| value.as_ref()),
         );
         Ok(Self {
             server_name: server_name.to_string(),
@@ -208,10 +222,8 @@ impl McpToolBridge {
 
     /// The explicitly selected HTTP Workspace publishes its complete model tool
     /// surface through the live tools/list response.
-    pub(crate) fn with_workspace_direct(mut self) -> Self {
-        self = self.with_system_direct();
-        self.model_visible = true;
-        self
+    pub(crate) fn with_workspace_direct(self) -> Self {
+        self.with_system_direct()
     }
 
     /// MCP 声明的原始工具名（未净化、未加 server 前缀）。
@@ -274,107 +286,6 @@ impl BaseTool for McpToolBridge {
         self.direct
     }
 
-    async fn invocation_target(
-        &self,
-        session_id: &str,
-        session_lifecycle: u64,
-    ) -> Result<Option<peri_acp_types::tools::InvocationTargetMetadata>, String> {
-        use sha2::{Digest, Sha256};
-        let pool = self
-            .output_pool
-            .as_ref()
-            .and_then(std::sync::Weak::upgrade)
-            .ok_or("Blocked: MCP lifecycle owner unavailable")?;
-        let resources = pool
-            .session_bindings
-            .read()
-            .resources(session_id, session_lifecycle)
-            .ok_or("Blocked: exact MCP lifecycle resources unavailable")?;
-        let snapshot = resources
-            .load_session_work(&peri_acp_types::session_resources::work::WorkQuery {
-                session_id: session_id.into(),
-                limit: 1,
-            })
-            .await
-            .map_err(|error| error.to_string())?;
-        let builtin = matches!(
-            self.client.source.as_ref(),
-            Some(super::config::ConfigSource::Builtin { .. })
-        );
-        let (canonical, authorization_ref) = if builtin {
-            let owners = snapshot
-                .state
-                .resource_owners
-                .get(&session_lifecycle)
-                .ok_or("Blocked: durable trusted owner authorization missing")?;
-            if owners.authorization_ref.is_empty() {
-                return Err("Blocked: durable owner authorization missing".into());
-            }
-            (
-                self.server_name.as_bytes().to_vec(),
-                owners.authorization_ref.clone(),
-            )
-        } else {
-            let (configuration, authorization_ref) =
-                super::owner_capabilities::trusted_owner_configuration(
-                    &snapshot,
-                    session_lifecycle,
-                    &self.server_name,
-                )?;
-            (
-                serde_json::to_vec(&configuration).map_err(|error| error.to_string())?,
-                authorization_ref,
-            )
-        };
-        let workspace = matches!(self.client.source.as_ref(), Some(super::config::ConfigSource::Builtin { instance }) if instance == "workspace")
-            || matches!(
-                self.client.source.as_ref(),
-                Some(super::config::ConfigSource::WorkspaceRemote)
-            );
-        let (owner_identity, scope_epoch) = if workspace {
-            let peer = self
-                .client
-                .peer
-                .as_ref()
-                .ok_or("Blocked: MCP owner disconnected")?;
-            let meta = pool
-                .task_scope_meta_for(&self.server_name, session_id)
-                .ok_or("Blocked: trusted MCP scope unavailable")?;
-            let response = peri_time::timeout(
-                std::time::Duration::from_secs(10),
-                peer.send_request(rmcp::model::ClientRequest::CustomRequest(
-                    rmcp::model::CustomRequest::new(
-                        "workspace/taskCapabilities",
-                        Some(serde_json::json!({"_meta": meta})),
-                    ),
-                )),
-            )
-            .await
-            .map_err(|_| "Blocked: owner discovery timeout")?
-            .map_err(|error| format!("Blocked: owner discovery failed: {error}"))?;
-            let rmcp::model::ServerResult::CustomResult(result) = response else {
-                return Err("Blocked: invalid owner capability response".into());
-            };
-            let capabilities: super::owner_capabilities::OwnerCapabilities =
-                serde_json::from_value(result.0)
-                    .map_err(|error| format!("Blocked: invalid owner capabilities: {error}"))?;
-            capabilities.validate_scope(session_id)?;
-            capabilities.require_close_barrier()?;
-            tracing::debug!(server = %self.server_name, recovery = ?capabilities.recovery_guarantee(),
-                idempotent = capabilities.invocation_idempotency, "verified owner recovery capability");
-            (capabilities.owner_identity, Some(capabilities.scope_epoch))
-        } else {
-            (format!("best-effort:{:x}", Sha256::digest(canonical)), None)
-        };
-        Ok(Some(peri_acp_types::tools::InvocationTargetMetadata {
-            owner_identity,
-            scope_id: session_id.into(),
-            scope_epoch,
-            authorization_ref,
-            recovery_locator: self.server_name.clone(),
-        }))
-    }
-
     async fn invoke(
         &self,
         input: serde_json::Value,
@@ -429,20 +340,6 @@ impl BaseTool for McpToolBridge {
             })?;
 
         let delivery = ctx.task_terminal_delivery.clone();
-        let owner_identity = ctx
-            .invocation_intent
-            .as_ref()
-            .ok_or(super::invocation::InvocationError::MissingIdentity)?
-            .owner_identity
-            .clone();
-        let invocation = super::invocation::McpInvocation::from_context(
-            &ctx,
-            &input,
-            &self.full_name,
-            &owner_identity,
-        )?;
-        invocation.prepare().await?;
-
         // 2. 构建 rmcp 请求参数
         let arguments = input.as_object().cloned().unwrap_or_default();
         let mut request = rmcp::model::CallToolRequestParams::new(self.tool_name.clone())
@@ -455,7 +352,7 @@ impl BaseTool for McpToolBridge {
         {
             request.meta = pool.task_scope_meta_for(&self.server_name, session_id);
         }
-        request.meta = Some(invocation.request_meta(request.meta)?);
+        request.meta = Some(super::invocation::request_meta(&ctx, request.meta)?);
 
         // Workspace tools retain their own deadlines (Bash promotes at <=120s).
         // Source identity, not a spoofable server name, grants this behavior.
@@ -467,7 +364,6 @@ impl BaseTool for McpToolBridge {
         let response = match super::tool_request::call_tool(peer, request, timeout).await {
             Ok(response) => response,
             Err(error) => {
-                invocation.record_outcome_unknown().await?;
                 let e = error;
                 return Err(Box::new(
                     if let rmcp::ServiceError::Timeout { timeout } = e {
@@ -494,13 +390,6 @@ impl BaseTool for McpToolBridge {
             rmcp::model::CallToolResponse::Task(created) => {
                 let task_created_at = created.task.created_at;
                 let task_id = created.task.task_id;
-                let binding = match invocation.bind_task(&task_id).await {
-                    Ok(binding) => binding,
-                    Err(error) => {
-                        invocation.record_outcome_unknown().await?;
-                        return Err(Box::new(error));
-                    }
-                };
                 let is_shell = self.tool_name == "Bash"
                     && (matches!(
                         self.client.source.as_ref(),
@@ -523,9 +412,8 @@ impl BaseTool for McpToolBridge {
                 } else {
                     peri_acp_types::tasks::BgTaskKind::Mcp
                 };
-                let (manager, registration) = pool.external_task_registration_for_lifecycle(
+                let (manager, registration) = pool.external_task_registration(
                     session_id,
-                    binding.recipient_lifecycle,
                     Some(session_id),
                     delivery.clone(),
                     &self.server_name,
@@ -541,22 +429,20 @@ impl BaseTool for McpToolBridge {
                         task_id
                     }
                     Err(reason) => {
-                        invocation.record_outcome_unknown().await?;
                         return Err(Box::new(ToolCallError::CallFailed {
                             server: self.server_name.clone(),
                             tool: self.tool_name.clone(),
-                            reason: format!("{reason}; immutable owner task {task_id} retained for reconciliation; do not repeat the invocation"),
+                            reason: format!("{reason}; remote task {task_id} started but local registration failed; do not repeat the invocation"),
                         }));
                     }
                 };
-                if let Err(error) = pool.spawn_managed_task_subscription_for_lifecycle(
+                if let Err(error) = pool.spawn_managed_task_subscription(
                     self.server_name.clone(),
                     session_id.to_owned(),
                     task_id.clone(),
                     public_id.clone(),
                     is_shell,
                     peer.clone(),
-                    binding.recipient_lifecycle,
                 ) {
                     if error != super::task_scope::TaskAdmissionError::DuplicateKey {
                         return Err(Box::new(ToolCallError::CallFailed {
@@ -577,17 +463,8 @@ impl BaseTool for McpToolBridge {
                     "Its completion reminder is delivered to the initiating session \
                              while that session is live."
                 };
-                let recovery_note = if ctx
-                    .invocation_intent
-                    .as_ref()
-                    .is_some_and(|intent| intent.scope_epoch.is_none())
-                {
-                    " Recovery is best-effort at-least-once; a lost owner response is OutcomeUnknown, not proof of success."
-                } else {
-                    " Recovery discovery is available only while this resource owner remains alive."
-                };
                 return Ok(format!(
-                    "Background task started: {public_id}. {delivery_note}{recovery_note}"
+                    "Background task started: {public_id}. {delivery_note}"
                 ));
             }
             _ => {

@@ -267,7 +267,7 @@ pub trait ReactLLM: Send + Sync {
         _tools: &[&dyn BaseTool],
     ) -> crate::error::AgentResult<peri_model::PreparedModelCall> {
         Err(crate::error::AgentError::LlmError(
-            "durable prepared model call is unsupported".into(),
+            "prepared model call is unsupported".into(),
         ))
     }
 
@@ -277,7 +277,7 @@ pub trait ReactLLM: Send + Sync {
         _streaming: Option<StreamingContext>,
     ) -> crate::error::AgentResult<Reasoning> {
         Err(crate::error::AgentError::LlmError(
-            "durable prepared model call is unsupported".into(),
+            "prepared model call is unsupported".into(),
         ))
     }
     async fn generate_reasoning(

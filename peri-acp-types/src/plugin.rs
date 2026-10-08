@@ -193,7 +193,7 @@ impl<'de> Deserialize<'de> for McpServerConfig {
             source: None,
         };
         // 非法组合在解析期拒绝，错误正文为固定契约文本。
-        config.validate().map_err(serde::de::Error::custom)?;
+        config.validate_wire().map_err(serde::de::Error::custom)?;
         Ok(config)
     }
 }
@@ -206,12 +206,31 @@ impl McpServerConfig {
     /// `system_mcp_timeout` 合法区间上界（毫秒，10 分钟）。
     pub const MAX_SYSTEM_MCP_TIMEOUT_MS: u64 = 600_000;
 
-    /// 纯数据不变量校验：System key 与 `system_mcp = true` 的组合、timeout 区间。
+    /// 纯数据不变量校验：System key 与 `system_mcp = true` 的组合、timeout 区间，
+    /// 以及 `disabled = true` 与 `system_mcp = true` 的组合（M7）。
     ///
     /// 无副作用、无 namespace / transport / I/O 依赖；`disabled = true` 也照常校验。
-    /// 确定性优先级：先组合错误（`system_mcp_tools` 先于 `system_mcp_timeout`），
-    /// 再 timeout 区间。
+    /// 确定性优先级：先组合错误（`disabled && system_mcp` → `system_mcp_tools` →
+    /// `system_mcp_timeout`），再 timeout 区间。
+    ///
+    /// `disabled && system_mcp` 覆盖**全部来源**（builtin / 普通 / global / project /
+    /// plugin 与配置更新）：两种开关语义互斥（既要关闭又要作为系统前置），
+    /// **合并/加载准入**一次失败并定位到 server 名，不再每轮 Reason 才在 readiness
+    /// 报 fatal，也不静默选择其中一个开关。
     pub fn validate(&self) -> Result<(), McpServerConfigValidationError> {
+        if self.disabled == Some(true) && self.system_mcp == Some(true) {
+            return Err(McpServerConfigValidationError::DisabledWithSystemMcp);
+        }
+        self.validate_wire()
+    }
+
+    /// wire 解析期可判定的规则（`system_mcp` 三个字段的自洽与 timeout 区间）。
+    ///
+    /// 与 [`Self::validate`] 的唯一差别是**不含** `disabled && system_mcp`：该组合的
+    /// 可操作诊断需要来源名字（配置键 / 插件 server 键），因此由配置文件级与合并级
+    /// 准入（`peri_config::mcp::validate_servers`、插件严格路径、写回前置校验）报出，
+    /// 解析期先按来源无关的规则拒绝，避免退化成「整份文件解析失败」的无名错误。
+    fn validate_wire(&self) -> Result<(), McpServerConfigValidationError> {
         if self.system_mcp != Some(true) {
             if self.system_mcp_tools.is_some() {
                 return Err(McpServerConfigValidationError::SystemMcpToolsRequiresSystemMcp);
@@ -234,6 +253,9 @@ impl McpServerConfig {
 /// MCP 服务器配置的纯校验错误（固定规则文本，不携带配置内容）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum McpServerConfigValidationError {
+    /// 同时声明了 `disabled = true` 与 `system_mcp = true`（任一来源都不合法）。
+    #[error("disabled = true cannot be combined with system_mcp = true")]
+    DisabledWithSystemMcp,
     /// 声明了 `system_mcp_tools` 却没有 `system_mcp = true`（含显式 `[]`）。
     #[error("system_mcp_tools requires system_mcp = true")]
     SystemMcpToolsRequiresSystemMcp,
@@ -484,15 +506,8 @@ pub enum PluginOrigin {
     ProjectClaude,
 }
 
-impl PluginOrigin {
-    /// 是否由外部工具（Claude Code）安装，非 Peri 管理
-    pub fn is_external(&self) -> bool {
-        matches!(
-            self,
-            Self::ClaudeCodeInstalled | Self::UserClaude | Self::ProjectClaude
-        )
-    }
-}
+/// 来源作用域身份（M6，实现见 `plugin_scope.rs`）。
+pub use crate::plugin_scope::PluginScope;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstalledPlugin {
@@ -546,12 +561,20 @@ pub struct LoadedPlugin {
     pub hooks_config: Option<HooksConfig>,
     /// 插件来源 marketplace（如 "claude-plugins-official"），用于追踪插件来源
     pub marketplace: String,
+    /// 来源作用域身份（M6）：显式元数据，供「用户全局 vs 项目声明」区分与
+    /// hook 信任门控使用；不靠名称或路径猜。
+    pub scope: PluginScope,
 }
 
 /// 插件聚合加载结果（`load_enabled_plugins_aggregated` 返回值）。
 #[derive(Debug, Clone)]
 pub struct PluginLoadResult {
     pub plugins: Vec<LoadedPlugin>,
+    /// 本聚合覆盖的来源作用域（M6），顺序与 `plugins` 一一对应。
+    ///
+    /// 与 `LoadedPlugin::scope` 同源：由 [`Self::plugins`] 投影生成，不是第二份
+    /// 事实（消费方按 `plugin_id` 关联；`plugins` 顺序即事实源顺序）。
+    pub scope: Vec<PluginScope>,
     pub all_skill_roots: Vec<SkillRoot>,
     pub all_mcp_servers: HashMap<String, McpServerConfig>,
     pub all_agent_dirs: Vec<PathBuf>,

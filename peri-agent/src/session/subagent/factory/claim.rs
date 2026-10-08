@@ -15,8 +15,7 @@ use tokio::task::JoinHandle;
 
 use crate::tools::{EffectiveToolError, EffectiveToolErrorCode};
 use peri_acp_types::session_resources::{
-    ControlAction, ControlAttempt, ControlCommand, ControlDecision, SessionMetaPatch,
-    SessionResourceErrorKind, SessionResources,
+    SessionMetaPatch, SessionResourceErrorKind, SessionResources,
 };
 use peri_acp_types::thread::{AgentStatus, ThreadId, ThreadMeta};
 
@@ -26,7 +25,7 @@ enum ClaimDecision {
     HandOff,
     /// 同步收尾：先结清认领，再写领域终态。
     Finish(AgentStatus),
-    CancelRunning(ControlAttempt, Arc<crate::session::Session>),
+    CancelRunning(Arc<crate::session::Session>),
 }
 
 pub(in crate::session::subagent) struct ResumeClaim {
@@ -34,10 +33,7 @@ pub(in crate::session::subagent) struct ResumeClaim {
     decision: Option<oneshot::Sender<ClaimDecision>>,
     /// worker 的写入不能被调用方取消：只 detach（不 abort）。
     worker: JoinHandle<Result<(), String>>,
-    running: Option<(
-        Arc<crate::session::TurnContext>,
-        Arc<crate::session::Session>,
-    )>,
+    running: Option<Arc<crate::session::Session>>,
 }
 
 impl ResumeClaim {
@@ -71,17 +67,18 @@ impl ResumeClaim {
     }
 
     /// 成功移交给后台执行：终态状态此后由后台执行持有。
-    pub(in crate::session::subagent) async fn release(mut self) {
+    pub(in crate::session::subagent) async fn release(mut self) -> Result<(), String> {
         self.decide(ClaimDecision::HandOff);
-        Self::await_worker(&mut self.worker).await;
+        (&mut self.worker)
+            .await
+            .map_err(|error| format!("resume hand-off worker failed: {error}"))?
     }
 
     pub(in crate::session::subagent) fn mark_running(
         &mut self,
-        turn: Arc<crate::session::TurnContext>,
         session: Arc<crate::session::Session>,
     ) {
-        self.running = Some((turn, session));
+        self.running = Some(session);
     }
 
     /// 同步 Stop 已运行 hook：把领域终态交给 worker，由它先结清认领再写入。
@@ -109,28 +106,16 @@ impl ResumeClaim {
             let _ = decision_tx.send(decision);
         }
     }
-
-    /// 等待 worker 完成本决定对应的写入。这里被取消只会 detach worker，不会取消写入；
-    /// worker 自身已记录失败原因。
-    async fn await_worker(worker: &mut JoinHandle<Result<(), String>>) {
-        let _ = worker.await;
-    }
 }
 
 impl Drop for ResumeClaim {
     fn drop(&mut self) {
         // 运行中被取消 → 领域终态「取消」；准备阶段被取消 → 直接关闭决定通道，
         // 由 worker 恢复认领前的记录。两者都不取消资源侧正在进行的写入。
-        let Some((turn, session)) = self.running.take() else {
-            return;
-        };
-        let Some(admission) = turn.work_admission() else {
-            self.decision = None;
-            return;
-        };
-        let attempt = admission.execution.clone();
-        if let Some(decision_tx) = self.decision.take() {
-            let _ = decision_tx.send(ClaimDecision::CancelRunning(attempt, session));
+        if let Some(session) = self.running.take() {
+            if let Some(decision_tx) = self.decision.take() {
+                let _ = decision_tx.send(ClaimDecision::CancelRunning(session));
+            }
         }
     }
 }
@@ -159,10 +144,10 @@ async fn own_claim(
         Ok(meta) => meta,
         Err(error) => {
             tracing::warn!(%thread_id, %error, "resume claim validation failed");
+            let _ = meta_tx.send(Err(error));
             if let Some(owner) = ownership.as_mut() {
                 owner.confirm_stopped();
             }
-            let _ = meta_tx.send(Err(error));
             return Ok(());
         }
     };
@@ -183,14 +168,7 @@ async fn own_claim(
     };
     // 调用方已消失时发送失败，但认领证据已落库：下面的决定分支会给出补偿。
     let _ = meta_tx.send(Ok(meta));
-    let decision = match decision.await {
-        Ok(ClaimDecision::CancelRunning(attempt, session)) => {
-            super::super::close::close_stopped_subagent_session_scope(session, attempt).await?;
-            Ok(ClaimDecision::Finish(AgentStatus::Cancelled))
-        }
-        other => other,
-    };
-    match decision {
+    match decision.await {
         Ok(ClaimDecision::HandOff) => {
             handle
                 .hand_off_to_background()
@@ -214,7 +192,23 @@ async fn own_claim(
                 .await
                 .map_err(|error| format!("resume terminal status write failed: {error}"))?;
         }
-        Ok(ClaimDecision::CancelRunning(_, _)) => unreachable!(),
+        Ok(ClaimDecision::CancelRunning(session)) => {
+            super::super::close::close_subagent_session_scope(session).await?;
+            handle
+                .mark_terminated()
+                .await
+                .map_err(|error| error.to_string())?;
+            store
+                .update_session_meta(
+                    &thread_id,
+                    &SessionMetaPatch {
+                        status: Some(AgentStatus::Cancelled),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+        }
         // 准备阶段调用方消失：恢复到认领前的状态，不留 active 残留。
         Err(_) => {
             handle
@@ -228,54 +222,6 @@ async fn own_claim(
     }
     Ok(())
 }
-
-pub(in crate::session::subagent) async fn clear_stopped_attempt(
-    store: &dyn SessionResources,
-    thread_id: &ThreadId,
-    attempt: &ControlAttempt,
-) -> Result<(), String> {
-    for _ in 0..3 {
-        let current = store
-            .load_session_control(thread_id)
-            .await
-            .map_err(|error| format!("resume abort observation read unconfirmed: {error}"))?;
-        match current.attempt.as_ref() {
-            None => return Ok(()),
-            Some(observed) if observed == attempt => {}
-            Some(_) => return Err(
-                "resume abort observation belongs to another execution; claim remains unfinished"
-                    .into(),
-            ),
-        }
-        let receipt = store
-            .apply_session_control(&ControlCommand {
-                session_id: thread_id.clone(),
-                command_id: format!(
-                    "resume-abort-exit:{}:{}",
-                    attempt.attempt_id.as_str(),
-                    current.revision
-                ),
-                expected_lifecycle: current.lifecycle,
-                expected_revision: current.revision,
-                expected_control_generation: current.control_generation,
-                action: ControlAction::ObserveAttempt { target: None },
-            })
-            .await
-            .map_err(|error| format!("resume abort observation cleanup unconfirmed: {error}"))?;
-        if receipt.decision == ControlDecision::Accepted {
-            return Ok(());
-        }
-    }
-    Err("resume abort observation cleanup conflicted; claim remains unfinished".into())
-}
-
-#[cfg(test)]
-#[path = "claim_control_test.rs"]
-mod control_tests;
-
-#[cfg(test)]
-#[path = "claim_preflight_test.rs"]
-mod preflight_tests;
 
 async fn validate_thread(
     store: &dyn SessionResources,
@@ -309,3 +255,7 @@ async fn validate_thread(
     }
     Ok(meta)
 }
+
+#[cfg(test)]
+#[path = "claim_preflight_test.rs"]
+mod preflight_tests;

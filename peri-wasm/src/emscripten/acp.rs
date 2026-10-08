@@ -93,7 +93,8 @@ impl PeriWasmAcp {
 
         let (client, server) = mpsc_transport_pair();
         let bridge = WireBridge::new(client);
-        let host = spawn_acp_server(Arc::new(server) as Arc<dyn AcpTransport>, host_config);
+        let transport: Arc<dyn AcpTransport> = Arc::new(server);
+        let host = spawn_acp_server(transport, host_config);
         Ok(Self {
             bridge,
             host: Mutex::new(host),

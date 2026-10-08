@@ -466,21 +466,18 @@ pub struct ToolContext<'a> {
     pub cwd: &'a str,
     /// 当前 canonical dispatch 能力；仅 dispatch 中调用工具时存在。
     pub effective_tool_dispatcher: Option<std::sync::Arc<dyn EffectiveToolDispatcher>>,
-    /// 当前执行 invocation ID；durable dispatch 使用 InvocationIntent.invocation_id。
-    /// 模型工具卡片身份独立存放在 invocation_intent.tool_call_id。
+    /// 当前执行 invocation ID。
     pub invocation_id: Option<String>,
+    pub tool_call_id: Option<String>,
     /// 当前外层调用的取消令牌。
     pub cancellation: tokio_util::sync::CancellationToken,
     /// 当前 Agent session identity；仅 canonical dispatch 中存在。
     pub session_id: Option<String>,
     /// Trusted terminal-reminder route into this (initiating) session's
-    /// canonical transcript. `None` = no durable route available.
+    /// canonical transcript. `None` = no current delivery route available.
     pub task_terminal_delivery: Option<std::sync::Arc<dyn crate::tasks::TaskTerminalDelivery>>,
     /// 当前 turn generation；用于撤销跨 turn 的宿主调用租约。
     pub turn_generation: Option<String>,
-    pub session_lifecycle: Option<u64>,
-    pub invocation_intent: Option<std::sync::Arc<crate::session_resources::work::InvocationIntent>>,
-    pub invocation_work_target: Option<crate::session_resources::work::WorkTarget>,
     pub session_resources: Option<std::sync::Arc<dyn crate::session_resources::SessionResources>>,
 }
 
@@ -491,13 +488,11 @@ impl<'a> ToolContext<'a> {
             cwd,
             effective_tool_dispatcher: None,
             invocation_id: None,
+            tool_call_id: None,
             cancellation: tokio_util::sync::CancellationToken::new(),
             session_id: None,
             task_terminal_delivery: None,
             turn_generation: None,
-            session_lifecycle: None,
-            invocation_intent: None,
-            invocation_work_target: None,
             session_resources: None,
         }
     }
@@ -511,6 +506,11 @@ impl<'a> ToolContext<'a> {
         self.effective_tool_dispatcher = Some(dispatcher);
         self.invocation_id = Some(invocation_id.into());
         self.cancellation = cancellation;
+        self
+    }
+
+    pub fn with_tool_call_id(mut self, tool_call_id: impl Into<String>) -> Self {
+        self.tool_call_id = Some(tool_call_id.into());
         self
     }
 
@@ -532,29 +532,6 @@ impl<'a> ToolContext<'a> {
         self.task_terminal_delivery = Some(delivery);
         self
     }
-
-    pub fn with_work_invocation(
-        mut self,
-        lifecycle: u64,
-        intent: std::sync::Arc<crate::session_resources::work::InvocationIntent>,
-        target: crate::session_resources::work::WorkTarget,
-        resources: std::sync::Arc<dyn crate::session_resources::SessionResources>,
-    ) -> Self {
-        self.session_lifecycle = Some(lifecycle);
-        self.invocation_intent = Some(intent);
-        self.invocation_work_target = Some(target);
-        self.session_resources = Some(resources);
-        self
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct InvocationTargetMetadata {
-    pub owner_identity: String,
-    pub scope_id: String,
-    pub scope_epoch: Option<u64>,
-    pub authorization_ref: String,
-    pub recovery_locator: String,
 }
 
 /// A target-specific canonical action bound before middleware/HITL.
@@ -576,14 +553,6 @@ pub trait BaseTool: Send + Sync {
     fn name(&self) -> &str;
     fn description(&self) -> &str;
     fn parameters(&self) -> serde_json::Value;
-
-    async fn invocation_target(
-        &self,
-        _session_id: &str,
-        _session_lifecycle: u64,
-    ) -> Result<Option<InvocationTargetMetadata>, String> {
-        Ok(None)
-    }
 
     /// 返回完整工具定义（默认实现，组合 name/description/parameters）
     fn definition(&self) -> ToolDefinition {

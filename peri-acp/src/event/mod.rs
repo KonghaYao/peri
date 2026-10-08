@@ -41,6 +41,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum AcpEvent {
+    ExecutionStarted {
+        generation: String,
+        request_id: String,
+    },
     UserInputRunStarted {
         generation: String,
         request_id: String,
@@ -103,7 +107,7 @@ pub enum AcpEvent {
     },
     /// Turn 已挂起等待异步事件（bg agent/cron/workflow）。
     ///
-    /// v2 `StateEvent::TurnSuspended` → ExecutorEvent::TurnSuspended → 本 DTO。
+    /// v2 `RenderEvent::TurnSuspended` → ExecutorEvent::TurnSuspended → 本 DTO。
     /// TUI 收到后归档 current_turn、停止 loading spinner。
     ///
     /// `turn_id` / `agent_id` 为 v2 事件透传的身份（v1 兼容层最小身份载体）。

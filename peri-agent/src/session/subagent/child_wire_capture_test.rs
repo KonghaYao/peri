@@ -229,7 +229,7 @@ fn child_config(
         register_runtime: None,
         deregister_runtime: None,
         parent_agent_id: None,
-        parent_invocation_id: None,
+        parent_tool_call_id: None,
         cancel_token: None,
         cwd: Some(cwd.into()),
         parent_thread_id: None,
@@ -282,7 +282,7 @@ async fn defined_child_request_carries_identity_and_contributions_exactly_once()
         false,
         &cwd,
     );
-    let spawned = AdmittedSessionFactory::spawn_subagent(Some(&parent), config)
+    let spawned = SessionFactory::spawn_subagent(Some(&parent), config)
         .await
         .unwrap();
     assert!(spawned.interrupted == false);
@@ -335,7 +335,7 @@ async fn fork_child_request_keeps_single_identity_with_parent_ancestors() {
         true,
         &cwd,
     );
-    let spawned = AdmittedSessionFactory::spawn_subagent(Some(&parent), config)
+    let spawned = SessionFactory::spawn_subagent(Some(&parent), config)
         .await
         .unwrap();
     assert!(!spawned.interrupted);
@@ -362,7 +362,7 @@ async fn fork_child_request_keeps_single_identity_with_parent_ancestors() {
     );
 }
 
-/// live resume：身份从持久 metadata（v2 identity_system）归一化读回，贡献仍由
+/// live resume：身份从子会话持久历史读回（spawn 写入的起始 System），贡献仍由
 /// 恢复后的子链在请求时提供。
 #[tokio::test]
 async fn resumed_child_request_reads_persisted_identity_and_fresh_contributions() {
@@ -378,7 +378,7 @@ async fn resumed_child_request_reads_persisted_identity_and_fresh_contributions(
         false,
         &cwd,
     );
-    let spawned = AdmittedSessionFactory::spawn_subagent(Some(&parent), config)
+    let spawned = SessionFactory::spawn_subagent(Some(&parent), config)
         .await
         .unwrap();
 
@@ -399,7 +399,7 @@ async fn resumed_child_request_reads_persisted_identity_and_fresh_contributions(
     resume.chain_assembler = Arc::new(ContributionAssembler {
         contribution: Arc::clone(&resume_contribution),
     });
-    let resumed = AdmittedSessionFactory::resume_subagent(Some(&parent), resume)
+    let resumed = SessionFactory::resume_subagent(Some(&parent), resume)
         .await
         .unwrap();
     assert!(!resumed.interrupted);
@@ -408,7 +408,7 @@ async fn resumed_child_request_reads_persisted_identity_and_fresh_contributions(
     assert_eq!(
         system.matches("CHILD_IDENTITY_SENTINEL").count(),
         1,
-        "恢复身份恰一次（来自 metadata identity_system）: {system}"
+        "恢复身份恰一次（来自持久历史）: {system}"
     );
     assert_eq!(
         system.matches("CHILD_SKILLS_AND_DEFERRED").count(),
@@ -442,7 +442,7 @@ async fn background_child_request_carries_single_identity_and_contributions() {
     config.task_manager = Some(Arc::new(crate::agent::async_tasks::TaskManager::new()));
     let (bg_tx, _bg_rx) = tokio::sync::mpsc::unbounded_channel();
     config.bg_event_sender = Some(bg_tx);
-    let spawned = AdmittedSessionFactory::spawn_subagent(Some(&parent), config)
+    let spawned = SessionFactory::spawn_subagent(Some(&parent), config)
         .await
         .unwrap();
     assert_eq!(spawned.task_id.is_some(), true);

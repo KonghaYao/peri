@@ -1,14 +1,13 @@
 # peri-agent 代码索引
 
+
 输入交付回归：`session/user_input_mailbox/delivery_notification_test.rs` 覆盖 Claim 后快照抢先投影、重复 Receive、publication generation、恢复与失效。Mailbox 的通知去重身份独立于状态投影；`mark_committed_deliveries` 核对实际 delivery，恢复仍由已持久事实重放，不新增持久“客户端已收到”记录。
 
-快照复用入口：`user_input_mailbox/{staging,durable,sdk_run}.rs` 复用已确认操作的快照；重复 SDK observation 以窄 control 读取重验完整 admission。`agent/stages/work_receive.rs` 从已确认快照验证 inbox hint，缺失才窄读；Receive 独立串行 gate 保留，业务 state 锁不跨 Store IO。
 
 错误诊断入口：`peri-acp-types/src/error.rs` 的 `AgentError::category_name` / `cause_chain` 保留实际错误；`session/exec/executor_helpers/v2_execute.rs` 的 fatal 漏斗记录 session/turn、分类与原因链。`ExecutionFailure` 将 `error_category`、`causes` 及 Model diagnostic 显式交给 ACP/遥测，不以通用公开提示替代诊断。重试与中断由 `session/retry_events.rs` / `agent/model_bridge.rs` 保留底层原因；内容不脱敏，长度与终止语义仍按 ARC-SECRET-001 和原执行契约约束。
 
 会话执行唯一性与接管由 `peri-sdk` 负责；Agent 不申请会话执行 lease、不继承 owner token、不执行 Store owner CAS 或 fencing。以下 task/cron/MCP owner 与 projection lease 均属资源或 capability 生命周期，不是会话执行所有权。
 
-RCRA 控制入口见 `agent/stages/execution_control.rs`：持久登记精确 turn/attempt 观察，固定本次控制代际，并在 Receive、Reason、Act 及每次工具发送前验证；Pause 后旧模型响应不能借 Resume 新代际提交。观察不是 attempt 调度准入。子会话显式关闭见 `session/subagent/close.rs`：关闭任务独立持有，调用者 Future 丢弃不撤销关闭；资源屏障未确认保留 Closing/Incomplete，不投递伪造的完成结果。`session/subagent/factory/claim.rs` 只在证明自身执行退出后清除对应观察；旧生命周期的 Inbox/任务事实保留，新生命周期采用新目录绑定。
 
 > 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-30（metrics 出口改为宿主装配注入的 `MetricsSink`（生产为 Langfuse event），本地 `~/.peri/metrics/*.jsonl` 落盘删除；未安装出口时指标丢弃）。此前：2026-09-29（W5：`ChainSlot::AgentDefine` 删除、蓝本槽位 21→20，agent 定义改由 `McpAgentRegistry` 的 `agent://` 资源提供、`{{available_agents}}` 经 `AgentCatalogPort`）。此前：2026-09-28（system MCP 选中工具使用原始模型名；工具来源绑定与 first-wins 冲突准入，见 ARC-TOOLS-001 / ARC-HITL-001）。此前：2026-09-27（v4-part-4 wave 3：`ChainSlot::Filesystem` / `ChainSlot::Terminal` 删除、`ChainSlot` 变体 22 个（7 个文件/终端工具改由 builtin `workspace` 实例提供，模型面为 workspace 原始工具名）；剔除面再覆盖 7 个裸名（`Read` / `Write` / `Edit` / `Glob` / `Grep` / `folder_operations` / `Bash`）——未选中 system 工具仍沿原 deferred 路径；新增模块 `session/bg_complete.rs`（AW3-11 的 session 级 `on_bg_complete` 构造器）；`agent/compact_v2/full.rs` 的最近文件 / 技能路径提取按 effective name 归一）。此前：2026-09-26（v4-part-3 wave 2：`ChainSlot::Cron` 删除，`ChainSlot` 变体 24 个；链内裸名剔除面覆盖四个已迁移工具名。此前：builtin 一等工具的生效名归一：`TOOL_PARAM_ALIASES` 与 `ToolFilterPolicy::canonical` 改「原样优先、未命中再用原始名」；`stage_builder/tools.rs` 谓词覆盖边界更新；链内删去 Web / Artifact 槽位。此前：启动闸门 hook `before_react_start` 与 System MCP 工具 static base 提交；Bash 同步执行有界化）
 > 依据：peri-agent/CLAUDE.md、docs/standards/architecture-contracts.md、源码
@@ -18,6 +17,12 @@ Emscripten 最小入口见 [`peri-wasm`](peri-wasm.md)：复用本 crate 的 `ru
 消息与激活的已批准目标见 [RCRA 消息权威](../design/rcra-message-activation.md)，实施与验收边界见 [2026-10 月志](../../spec/history/2026-10.md)（2026-10-05 条目）。下表与持久 RCRA 子系统说明提供现行实现入口，不表示完整发布矩阵已经通过。
 
 ## 架构速览
+
+Child 当前进程的晚到任务结果由 `session/subagent/child_runner.rs` 保留消费责任，后台与前台委派共享该 runner；bounded idle 退出不直接等价于委派成果完成。`background.rs` 对事件转发失败继续可靠发布失败终态并结算，不保留已退出 worker 的假 Running。挂起事件在 `RenderEvent` FIFO 中，与恢复后的输出保持顺序；子 Agent forwarder 不将自己的挂起投影到父 Agent。定向入口 `session::subagent::child_runner::tests`、`session::subagent::tests::bound_and_tail_cases` 与 `agent::subagent_event_forwarder`。
+
+后台完成回调 `session/bg_complete.rs` 使用 `TaskTerminalDelivery::accept` 同步确认当前队列接纳，成功后 TaskManager 立即结算，不再启动 detached 投递任务并保留虚假的 Completing。异步 delivery 仍由其 owner await，不能通过同步回调伪造成功；失败保留原结果供重试。回归入口 `session::bg_complete::tests`；宿主晚到激活见 ACP 代码索引。
+
+历史工具配对的模型视图修补在 `src/messages/tool_pairing.rs`；`compact_v2/projection.rs::render_persisted_llm_view` 统一供 Reason、Full 摘要与预算估算调用。缺失结果只在请求视图补充未知执行状态的错误占位，错位真实结果保持身份和内容并移到调用后；不改 canonical、不重跑工具。紧随调用的用户内容块内已有真实结果时保留内容，仅在结果块位于文本等内容之后时将结果块移到请求视图前部；内嵌结果不完整、错位、重复或孤立时发送前报错。`Raw` 内容在 `AgentModelBridge::convert_content` 直接报错，不进入 Anthropic 请求。回归入口 `messages::tool_pairing::tests`。
 
 - 数据流：`MessageQueue → Receive → Compact → Reason → Act → MessageQueue`
 - 循环入口：`src/agent/stages/mod.rs:612` 的 `run_react_loop(StageContext, max_iterations) -> LoopResult`；Receive 是正常队列耗尽退出判定点与 keepgoing 队列语义入口，cancel 与 stage error/interruption 也可在其他控制流位置结束循环
@@ -33,7 +38,7 @@ Emscripten 最小入口见 [`peri-wasm`](peri-wasm.md)：复用本 crate 的 `ru
 | 改外部任务结算、投递与重试 | `src/agent/async_tasks/{manager,registry,delivery,scope}.rs` + `external_settlement_test.rs`、`src/agent/external_initiator_test.rs`、`delivery_test.rs` | `settle_external`、`restore_external_terminal`、`abandon_external`、`SessionTerminalDelivery`、`ExecutionScope::resolve_external_evidence` | 登记/恢复共用不可变 initiator 守卫，未知发现不得覆盖已知路由，冲突先于回调/终态修改拒绝；首次恢复在投递等待前保留绑定，未知归属不结算。缺失投递路由、并发结算尚未提交及终态投影提交失败均返回错误；只有已存在终态投影的重放返回 `Ok(false)`，回调失败保持任务 active 并允许重试；终态提醒经 `TaskTerminalDelivery` 原子写入发起会话 canonical transcript，持久提交后向 queue-owned mailbox 发布 Defer，直接 queue 与 handle 具有同一唤醒语义，无可选句柄旁路；执行不确定按 scope 记录，仅由该 scope 的对账证据清除 |
 | 改会话有界等待与未结算交接 | `src/agent/async_tasks/handoff.rs` + `src/session/exec/stage_builder.rs` + `src/agent/stages/mod.rs` | `HANDOFF_MAX_WAIT`、`BoundedWait::{should_wait,take_due,deadline}`、`write_pending_handoff`、`TaskManager::pending_handoff_tasks` | 从本会话首次出现未结算任务起算（tokio 时钟域）；idle 挂起 `select!` 带 `sleep_until(deadline)` 定时器分支——界本身唤醒 loop，不依赖任务注册/终态/取消等偶发唤醒；到点回退出判断，把 `pending: N`+任务身份+scope owner 写入归属会话 canonical transcript（稳定投递 ID、幂等），结果由 scope owner 对账补投（resume 可见）。回归：`stages::bounded_wait_exit_tests`（paused 时间下证明无外部唤醒到点退出） |
 | 改后台 Bash 输出与完成唤醒 | `mcp-packages/common/src/{shell_output,shell_executor,shell}.rs` + `src/agent/async_tasks/{shell,manager,registry}.rs` + `src/session/async_router.rs` + `src/agent/stages/mod.rs` | `ShellOutputCapture`、`finalize_bg_shell`、`subscribe_activity`、`run_react_loop` | 工具执行环境两路输出从采集开始落盘；成功交给后台任务后保留文件供 Read，未发布文件在最后一个采集 owner 释放时回收；短 reminder 只引用文件并按**模型面名字**（`Read`，依据 builtin 来源与原名生成）提示读取；回调拒绝或 panic 保留 delivery_pending，不提前发布终态；registry 派生 watch 唤醒 idle 重查状态，通知先入队再提交终态 |
-| 改用户待发送、立即发送与停止恢复 | `src/session/user_input_mailbox.rs` + `src/session/user_input_mailbox/{durable,staging,sdk_run}.rs` + `src/agent/stages/{mod,receive}.rs` | `UserInputMailbox::{enqueue_durable,dispatch_durable,take_back_durable,publish_next_durable,enter_idle_durable,observe_sdk_run,finish_sdk_run}` | loading 仅持久草稿，不产生 Inbox delivery/required obligation；显式选择整批原子发布，idle 按 FIFO 发布一条；暂停后的新提交按新任务自动恢复，暂停前的旧待办保持等待；稳定 input ID 与发布代际分离，撤回与 Claim 持久裁决，未知回执冻结原命令；SDK 独占执行准入，TUI 只投影状态 |
+| 改用户待发送、立即发送与停止 | `src/session/user_input_mailbox.rs` + `src/session/user_input_mailbox/staging.rs` + `src/agent/stages/{mod,receive}.rs` | 当前进程输入队列和 run ticket | 保留发送、取回、steer、stop 与取消身份，不恢复旧发布代际或 SDK ticket。 |
 | 改 compact 失败后的历史恢复 | `src/session/transcript.rs` + `src/session/exec/executor_helpers/{v2_execute,intercept}.rs` + `peri-acp/src/host/prompt.rs` | `CompactionCommitState`；Phase 8 flush；`intercept_immediate_command`；`finish_prompt_turn` | 取消/模型错误仍返回可信 canonical snapshot；writer 失败或 compact commit uncertain 停止使用热状态、保留已提交磁盘内容供冷恢复，禁止按新增 ID 回滚已提交摘要；ARC-COMPACT-001 |
 | 改输出截断恢复与未完成终态 | `src/agent/stages/{mod,act}.rs` + `src/agent/{model_bridge,react}.rs` + `src/session/exec/executor_helpers/{v2_execute,event_pump}.rs` | `run_react_loop`（mod.rs:677）、`enqueue_truncation_continuation`、`enqueue_stream_interruption_continuation`（:573）、`run_act`、`classify_loop_terminal` | 无工具 MaxTokens 保留响应并跳过完成 hook，经 Defer 最多续跑两次；连续第三次截断映射 PromptStopReason::MaxTokens。流中断保留部分正文与流式 message_id，不回灌未签名思考/半截工具、不重发文本；同样跳过完成 hook，经可信 stream_interrupted Defer 续跑；正文为空时不写空 assistant 消息（provider 拒收空 text block，判空用 `MessageContent::is_empty`）。中断预算取事件的 RetryConfig::max_attempts（含首次，累计不重置），耗尽返回 StreamRecoveryExhausted，ACP 保留底层 allowlist diagnostic；完整工具照常执行。`truncation_test.rs` 覆盖两类恢复、工具不重放、预算及取消，契约 ARC-OUTPUT-COMPLETION-001 |
 | 改 Full 后预算恢复判定 | `src/agent/stages/compact_progress.rs` + `src/agent/stages/reason.rs` | `CompactBudgetRecovery::{record_full_applied,begin_request,observe_response}` | 无新 Human/Tool 工作时，两次成功 Full 后的对应实际请求 usage 仍高压则返回 `CompactBudgetUnrecovered`；Reminder/AI 不重置次数，缺失/零/过期 usage 不作证据；cancel 优先；ARC-COMPACT-001 |
@@ -55,27 +60,17 @@ Emscripten 最小入口见 [`peri-wasm`](peri-wasm.md)：复用本 crate 的 `ru
 | /compact 命令路径 | `src/session/exec/compact_pipeline.rs` + `src/session/exec/executor_helpers/{intercept,event_pump}.rs` | `run_compact(force=true)` → Full 摘要；`executor_helpers::done_stop_reason` | 输入与 Host 同为 canonical 消息历史：普通消息 ID/顺序与持久化快照一致性校验后，恢复完整 payload（含 reminder）、flags 和 ancestor/own 边界选择可见内容；仅 reminder 历史也可压缩；命令与普通执行共用 done 终态投影，取消返回及通知均为 cancelled，Full 失败保留脱敏的类型诊断，不确定提交仍按 Internal/reload 收尾 |
 | 改 LLM 调用链路 | `src/agent/stages/reason.rs` + `src/agent/model_bridge.rs` | `run_reason`；`AgentModelBridge::build_request`；model_bridge 流式事件 v2 直发 | Reason：catalog → before_model → 压力补检 → snapshot → LlmCallStart → generate（与 cancel 竞争）→ LlmCallEnd → after_model；bridge 每个 ModelRequest 同步读取一次当前 middleware prompt contribution，与 frozen base request-local 组合且不累加；事件契约 ARC-EVENT-001 |
 | 改工具执行分发 | `src/agent/stages/act.rs` + `src/agent/stages/tool_dispatch.rs` + `tool_dispatch/execution.rs` | `run_act`；`dispatch_tools`；`collect_tool_results`；`ToolResult::execution`；`ToolOutput::projected_text` | 外层一次 staging/commit 后计入含解析失败结果的 tool-growth，再执行 after_tools_batch；typed execution evidence 随统一 bounded projection 进入 live `ToolEnded`、`ToolResult` 与 `BaseMessage::Tool` 持久化；`SubagentFailure` 经 boxed error downcast 保留 child identity 与 SafeSubagentFailure，诊断 facts 同步进入模型可见 tool content；cancel/timeout error 保留 typed status，普通 legacy error 保持 unknown；`before_tools_batch` 返回数量必须与当前未拒绝调用一致，错配按 MiddlewareError fail closed 并停止后续中间件、阻止该批后续批准与 invoke；私有执行管线保持审批 → yield → 并发完成即发 ToolEnded → after_tool → 后处理顺序，after_tool 看不到本轮待提交消息；ToolStarted 与实际执行均使用审批后参数，transcript 保留模型原始调用用于配对 |
-| 改 middleware 状态能力 / 消息修改 | `src/middleware/{capabilities,state}.rs` + `src/agent/agent_context.rs` + `src/agent/stages/middleware_runner.rs` | `BeforeAgentState` / `BeforeInputState` / `InputBatchState::input_message_ids` / `BeforeToolState` / `AfterToolState` / `AfterAgentState`；`MiddlewareState::replace_message`；`AgentContext::from_stage` / `reconcile_to_transcript`；`run_before_agent` / `run_before_input` | hook 不再暴露 cwd/step setter、store/thread 或无法回写的 token/context 快照；首次 Receive 按链序交错执行 before_agent / before_input，后续用户批次只执行 before_input；空批次不重读历史；替换按稳定 MessageId 查找，不增删/重排，输入准备成功或 Err 后均 reconcile；StateView 无可变 queue/catalog；队列和目录分别由 QueueState/CatalogState 提供，before_model 保留消息追加，其他 hook 无输入替换能力 |
+| 改 middleware 状态能力 / 消息修改 | `src/middleware/{capabilities,state}.rs` + `src/agent/agent_context.rs` + `src/agent/stages/middleware_runner.rs` | `BeforeAgentState` / `BeforeInputState`（含 `InputBatchAppend::append_input_message` 输入批次注入窄能力） / `InputBatchState::input_message_ids` / `BeforeToolState` / `AfterToolState` / `AfterAgentState`；`MiddlewareState::replace_message`；`AgentContext::from_stage` / `reconcile_to_transcript`；`run_before_agent` / `run_before_input` | hook 不再暴露 cwd/step setter、store/thread 或无法回写的 token/context 快照；首次 Receive 按链序交错执行 before_agent / before_input，后续用户批次只执行 before_input；空批次不重读历史；替换按稳定 MessageId 查找，不增删/重排，输入准备成功或 Err 后均 reconcile；StateView 无可变 queue/catalog；队列和目录分别由 QueueState/CatalogState 提供，before_model 保留消息追加，其他 hook 无输入替换能力；输入批次注入只经 `InputBatchAppend`，输入准备钩子按 `input_message_ids` 取本批身份（空批次 / 无批次身份不回落扫描历史） |
 
 ## 子系统
 
 Inbox 去重入口 `agent/stages/work_receive.rs` 使用 `SessionResources::load_work_delivery` 读取单条交付；保留 lifecycle / content / policy 冲突校验、稳定提交身份和失败后批次回队。不修改候选发现或 Unknown 写屏障；回归入口 `agent/stages/work_receive_test.rs`。
 
-### 持久 RCRA 与 SDK 准入
+### 普通执行与历史加载
 
-工具停止与成果结算分离：`tool_dispatch/execution.rs` 收集结果后先经 `work_dispatch.rs` 提交原 invocation outcome，再检查继续执行资格。Blocked/Abandoned 保留停止状态且不生成 successor；无 successor 的结算按原 batch 或真实恢复 admission 校验，不能借新 attempt 重放工具。邮箱 `staging.rs` 在首次 enqueue 的 staged JSON 内固定完整发布授权；原 Queued 重放不重新取得 NewTask 授权，已授权未完成的发布沿用原命令与控制代际。暂停（Stop/Pause/失败）期间提交、首次接纳时已处于暂停的输入另取得恢复授权：无活跃执行时按新任务发布（无 attempt 预期，由发布事务自动 Resume 并解除暂停位），暂停之前入队的旧待办不因此自动发布，仍按 idle FIFO 逐条交接。
+`agent/stages/{receive,reason,act,tool_dispatch}.rs` 使用当前进程队列及 Transcript；持久 Work checkpoint 和 SDK reverse admission 已撤销。`session/user_input_mailbox.rs` 管理当前输入交互；`session/subagent/factory.rs` 负责当前子 Agent 和显式历史续聊，不冷恢复旧委托。工具上下文的 invocation_id 与 model tool_call_id 分开传递。实施与验证见 [active plan](../../spec/issues/2026-10-07-remove-execution-recovery-plan.md)。
 
-`agent/stages/work_boundary.rs` 在首个 hook 或模型调用前确认完整 SDK admission、领域登记和真实 entered ACK；`session/turn.rs` 固定该 ticket 的 turn/attempt 与控制代际。`work_ledger.rs` 保存 Unknown 的完整原命令并冻结副作用；仅对已有确定拒绝回执的 `StaleRevision` 阶段提交，在原生命周期/控制代际/attempt 仍一致时有界重读全局 revision 并创建新提交身份，保留目标工作 revision、完整响应/结果与所有其余 guard，不重跑模型或工具。`work_receive.rs` 原子接纳/领取/投影，`work_reason.rs` 保存实际发送的完整模型请求及响应到 Act 的责任交接，`work_dispatch.rs` 保存工具意图和结果。`work_recovery.rs` 仅使用持久证据恢复阶段，不把 Transcript 存在当作处理完成，不盲重放 OutcomeUnknown 调用。
-
-`tool_dispatch/execution.rs` 保留工具返回的 typed `UserRejected`；MCP Agent 在批准前拒绝明确表示未启动子代理，拒绝理由作为 error tool result 继续交给模型，不能被 boxed 字符串误分类为未知副作用。没有可信分类的普通工具失败仍冻结并保留 OutcomeUnknown。
-
-`work_reason.rs`、`work_dispatch.rs`、`work_receive.rs` 和 `work_boundary.rs` 对已确认的持久预算阻塞提取预算类别、已用量与上限，经 `peri-acp-types/src/error.rs` 的 `WorkBudgetExhausted` 保留至安全失败投影，不公开任意内部原因。预算策略与默认语义循环上限统一引用 `peri-acp-types/src/session_resources/work/policy.rs`，错误投影本身仍不自动重置或解阻。
-
-`session/user_input_mailbox/staging.rs` 将真实新输入的空闲新任务发布与自动历史扫描分开；新任务发布固定无 attempt 预期和控制代际，不接管并发新执行。`peri-acp-types/src/session_resources/work/user_input.rs` 在显式选择中放弃已退出的当前生命周期旧 processing，并按完整指纹升级旧默认预算；`work/query.rs` 不让已被放弃批次的旧终态交付责任绑架新任务。未知 mutation、原 invocation 和终态 ACK 证据不被清除。用户最终验收见 [active P0](../../spec/issues/2026-10-06-p0-agent-budget-interruption.md)。
-
-`session/subagent/background.rs::local_other_diagnostic` 将后台本地失败映射为 allowlist 静态诊断码；不输出任意错误文本、模型请求或凭据。work mutation 拒绝另记录结构化 decision/revision，诊断不改变执行、授权或恢复裁决。
-
-`session/user_input_mailbox.rs` 及其子模块负责持久发布、withdraw 与 SDK run 的精确观察；它不再是执行准入者。`session/subagent/factory/cold.rs` 根据子会话自己的 frozen 数据、保存的委托身份和授权上限重建运行环境，不依赖活跃父 runtime 或根会话 persona；身份来源按 metadata 版本锚定（v2 `identity_system`；v1 写入方 `persona`，缺失/空白 = 不可解释 ⇒ 阻止执行恢复而历史可读，不猜身份也不把父冻结字节当身份），执行 / resume / 宿主内存投影共用 `ChildResumeMetadata::frozen_context` 同一映射（宿主侧 `peri-acp/src/host/cold_execution.rs` 的 `SessionState.frozen` 不再解持久 blob，blob 仅作 digest 锚）。`agent/model_bridge.rs` 与 `peri-model` prepared-stream 端口将检查点和实际 HTTP 请求绑定，不能用脱敏诊断快照代替发送正文。
+`tool_dispatch/execution.rs` 保留工具返回的 typed `UserRejected`；拒绝理由作为 error tool result 继续交给模型，不能被 boxed 字符串误分类为未知副作用。
 
 ### RCRA 阶段（src/agent/stages/）
 
@@ -87,6 +82,7 @@ Inbox 去重入口 `agent/stages/work_receive.rs` 使用 `SessionResources::load
 | Reason（LLM 推理） | stages/reason.rs | `run_reason`；只恢复已提交 projection（与自动 compact 开关独立），无 directive 使用 canonical；准备阶段新增压力时补检 Compact，绑定最终请求预算；验证 Full 后真实 usage |
 | Act（工具执行或回答） | stages/act.rs | `run_act`；emit TurnCompleted |
 | 工具批次提交 | stages/tool_dispatch.rs | `dispatch_tools`（:73）；ID/target 解析、原子转录、batch hook 与错误收敛 |
+| 模型工具准入 | `tools/invocation.rs` + `stages/tool_dispatch.rs` | Act 经 `ToolInvocationResolver::resolve_model` 在绑定真实目标后拒绝 app-only 工具；可信 App effective dispatch 保留 `resolve`。direct 与模型 visibility 正交，大小写、alias 与包装调用均不能降低目标准入。wire 回归：`peri-middlewares/tests/mcp_host_policy_contract/app_visibility.rs`。 |
 | 共享调用执行 | stages/tool_dispatch/execution.rs | `collect_tool_results`（:51）；审批/并发/结算，参数复用 `tools::normalize_params` |
 | 阶段中间件 runner | stages/middleware_runner.rs + agent_context.rs | `run_before_agent` 结束后（含 Err）drain recall；它与后续批次的 `run_before_input` 均将稳定 ID replacement reconcile；`run_before_model`/`run_after_model` 保留追加消息双写路径 |
 | 启动闸门（首个 Reason 前的准入） | stages/mod.rs + stages/middleware_runner.rs | `run_before_react_start`（middleware_runner.rs:84；`run_react_loop` 首批 `before_agent`/`before_input` 之后、Compact 之前只执行一次）；`StartupGateState` 只持本次候选，Err 不降级——`Interrupted` → `LoopResult::Interrupted`，其它 Err → `LoopResult::Error`；既有 `before_agent` 的 warn 软失败语义不变 |
@@ -120,7 +116,7 @@ Full 摘要不改变模型思考配置和单次输出上限。首轮正文截断
 | 工具视图与目录注册 | session/exec/stage_builder/tools.rs | `build_session_tool_view` / `register_tool_catalog`；disabled 剔除后 merge 当前链工具，同名有状态工具覆盖本地条目，不写宿主共享表；动态 catalog 注册失败沿 `StageBuildError` 返回；剔除面只认仍在 `MIDDLEWARE_TOOL_NAMES` 内的名字——已迁移裸名（web 2 + artifact 1 + cron 3 + workspace 7，共 13 项）不在表内，因此**不再被剔除**（builtin 能力以 `mcp__*` 存在于 MCP 目录，从不进 `shared_tools`；覆盖边界与反向断言见该文件模块注释与 `tools_test.rs::migrated_naked_names_are_no_longer_excluded`） |
 | Stage 可选依赖 | session/exec/stage_builder/dependencies.rs | `configure_stage` / `StageDependencies`；按原顺序注入 goal/error/compact/idle/hook；只启用 idle waiting；实际等待固定为 StageContext.session.queue，不注入另一 receiver 或 producer wake 句柄 |
 | 子 Agent 创建入口与新 thread 注入 | session/subagent/factory.rs + factory/spawn.rs | `SessionFactory::spawn_subagent` / `spawn_subagent_impl`；公开入口不变，spawn 在新 thread 执行前持久化所选父 canonical payload/flags 快照；identity 和 fork prompt 仍属 child own |
-| 子 Agent 恢复与状态 claim | session/subagent/factory/resume.rs + factory/{claim,delegation}.rs | `resume_subagent_impl` / `ResumeClaim`；保存的授权引用核对原委托与冻结权限上限，本次可信恢复调用独立核对当前发起者、生命周期与 scope，不要求跨 admission 的授权引用相等；显式 prompt 走 staged user-input 的替换处理规则，保留旧 Reason 请求和预算证据；隐式 continue 在未结清处理时拒绝且不发布孤立 input；同一 worker 顺序完成 active 与终态写入，sync 等待并传播 claim 结算失败；准备取消恢复旧状态（sync 返回原线程中断结果），sync 执行 Drop 写 cancelled，bg 注册成功后移交；继承快照/own payload/flags 的恢复与交叠校验全部受 claim 保护；保持 thread 身份与 own 尾部 tool-call 截断；回归见 `subagent/{resume_authorization,resume_recovery}_test.rs` |
+| 子 Agent 手动历史续聊与状态 claim | `session/subagent/factory/resume.rs` + `factory/claim.rs` | `resume_subagent_impl` / `ResumeClaim` | 读取历史/frozen/inherited，装配新的当前运行；不对账旧委托、Reason 检查点或执行预算。准备取消与终态 status 写入仍报告真实失败。 |
 | 子 Agent 冻结派生与共享装配 | session/subagent/factory/context.rs | `inherited_frozen_context` / `derive_cancel_token` / `build_subagent_session_v2`；父值优先与 Cascade/Independent 派生一致，按 ancestor → own → flags 装载，再绑定 persistence；消息注入归调用流程 |
 | 子 Agent 委托绑定并发裁决 | `session/subagent/factory/cold.rs` + `peri-acp-types/src/session_resources/work/{bindings,reducer}.rs` | `bind_delegation_task` / `bindings::reconcile`；`ReconcileTaskBinding.expected_revision` 保留原观测值，按 `expected_revision <= current_revision` 作未来版本上界校验，不再要求全局 revision 相等；持久 reducer 原子核对 invocation 身份、生命周期、授权、恢复定位与不可变 binding，同 owner/task 不得绑定不同 invocation；无关 writer 或兄弟绑定推进全局 revision 不否决绑定，无进程内 gate 或 stale 重试；明确拒绝返回 typed `ApplicationFailed` 并 WARN，未知 ACK 只解析原命令并严格核对 receipt 身份，不降级；原字段、命令序列化及 digest 保留，历史 ACK/持久命令可继续读取；回归见 `factory/cold_binding_test.rs` 与 `work/bindings_test.rs` |
 | 后台任务管理（session 内存投影） | agent/async_tasks/{manager,registry}.rs + `peri-acp-types/src/tasks.rs` | Agent `TaskManager` 是同一 session 跨 turn 的任务入口；`snapshot` 与 `subscribe_events` 提供 revision 水位，终态显示记录保留在内存投影而不计入 active count；外部 MCP 任务以可信 owner identity 与原 task ID 派生 opaque ID，`register_external`/`settle_external`/`cancel_async` 负责准入、通知先于终态、owner 取消；执行与结果权威仍归 owner。详细目标契约见 `docs/design/session-async-tasks.md`。旧本地 shell 执行端口及输出逻辑仍位于 `mcp-packages/common/src/{shell,shell_executor,shell_output}.rs`。|
@@ -148,7 +144,7 @@ Full 摘要不改变模型思考配置和单次输出上限。首轮正文截断
 
 ## 跨模块契约（指向 architecture-contracts.md，不复制正文）
 
-- ARC-COMPACT-001：visible own 收益、真实 usage、durable compact 恢复与 inherited provenance
+- ARC-COMPACT-001：visible own 收益、真实 usage、已提交 compact 历史与当前预算恢复与 inherited provenance
 - ARC-BOUNDARY-001：TUI 交互主路径经 ACP，不得直驱 Agent 运行时
 - ARC-CANCEL-001：cancel 三元组定位，Agent 持有终态判定
 - ARC-EVENT-001：事件链路单事实源 Agent 发射 → ACP 映射 → TUI 消费；禁止 v1 中间态

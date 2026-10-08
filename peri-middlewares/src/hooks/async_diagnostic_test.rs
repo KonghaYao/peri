@@ -55,6 +55,7 @@ fn registered(event: HookEvent, hook: HookType) -> RegisteredHook {
         matcher: None,
         plugin_name: "async-test-plugin".to_string(),
         plugin_id: "async-test-plugin-id".to_string(),
+        plugin_source: None,
         plugin_root: PathBuf::from("/tmp/async-test-plugin"),
         plugin_data_dir: PathBuf::from("/tmp/async-test-plugin-data"),
         plugin_options: HashMap::new(),

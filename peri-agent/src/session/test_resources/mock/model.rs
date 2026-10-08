@@ -5,14 +5,8 @@
 //! [`peri_model::Model`]：`prepare_stream`（durable checkpoint）+ `stream`
 //! （Started 语义由真实事件流表达：`TextDelta` → `Completed`），并保留取消语义。
 use crate::messages::{BaseMessage, ToolCallRequest};
-use crate::tools::BaseTool;
-use futures::StreamExt;
-use peri_model::{
-    JsonObject, Model, ModelRequest, ModelResponse, ModelResult, ModelStream, ModelStreamEvent,
-    StopReason,
-};
+use peri_model::{Model, ModelRequest, ModelResponse, ModelResult, ModelStreamEvent, StopReason};
 use std::sync::Arc;
-use tokio_util::sync::CancellationToken;
 
 /// 请求 → 会话消息（假模型据此断言/回显）。
 pub(crate) fn base_messages(request: &ModelRequest) -> Vec<BaseMessage> {
@@ -52,56 +46,6 @@ pub(crate) fn base_messages(request: &ModelRequest) -> Vec<BaseMessage> {
         .collect()
 }
 
-/// 由请求工具定义合成的只读工具：假模型看到与真实请求一致的工具名/描述/参数。
-pub(crate) struct DefinedTool {
-    pub(crate) name: String,
-    description: String,
-    parameters: serde_json::Value,
-}
-
-#[async_trait::async_trait]
-impl BaseTool for DefinedTool {
-    fn name(&self) -> &str {
-        &self.name
-    }
-    fn description(&self) -> &str {
-        &self.description
-    }
-    fn parameters(&self) -> serde_json::Value {
-        self.parameters.clone()
-    }
-    async fn invoke(
-        &self,
-        _input: serde_json::Value,
-        _ctx: crate::tools::ToolContext<'_>,
-    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        Err("fixture tool is not executable".into())
-    }
-}
-
-pub(crate) fn defined_tools(request: &ModelRequest) -> Vec<DefinedTool> {
-    request
-        .tools
-        .iter()
-        .map(|definition| DefinedTool {
-            name: definition.name.clone(),
-            description: definition.description.clone().unwrap_or_default(),
-            parameters: serde_json::Value::Object(
-                definition
-                    .input_schema
-                    .as_map()
-                    .clone()
-                    .into_iter()
-                    .collect(),
-            ),
-        })
-        .collect()
-}
-
-pub(crate) fn tool_names(request: &ModelRequest) -> Vec<String> {
-    request.tools.iter().map(|tool| tool.name.clone()).collect()
-}
-
 fn text_of(content: &[peri_model::ContentBlock]) -> String {
     content
         .iter()
@@ -120,42 +64,6 @@ pub(crate) fn text_events(text: impl Into<String>) -> Vec<ModelResult<ModelStrea
         events.push(Ok(ModelStreamEvent::TextDelta { text: text.clone() }));
     }
     events.push(Ok(ModelStreamEvent::Completed(response_with_text(text))));
-    events
-}
-
-/// 工具调用事件：`ToolCallDelta` → `Completed`（assistant tool_calls）。
-pub(crate) fn tool_events(calls: Vec<ToolCallRequest>) -> Vec<ModelResult<ModelStreamEvent>> {
-    let tool_calls = calls
-        .into_iter()
-        .map(|call| {
-            peri_model::ToolCall::new(
-                call.id,
-                call.name,
-                JsonObject::from_value(call.arguments).unwrap_or_default(),
-            )
-        })
-        .collect::<Vec<_>>();
-    let mut events: Vec<ModelResult<ModelStreamEvent>> = Vec::new();
-    for (index, call) in tool_calls.iter().enumerate() {
-        events.push(Ok(ModelStreamEvent::ToolCallDelta {
-            index,
-            id: Some(call.id().to_string()),
-            name: Some(call.name().to_string()),
-            arguments_delta: serde_json::to_string(call.arguments()).unwrap_or_default(),
-        }));
-    }
-    events.push(Ok(ModelStreamEvent::Completed(
-        ModelResponse::new(
-            peri_model::ModelMessage::Assistant {
-                content: Vec::new(),
-                tool_calls,
-            },
-            StopReason::ToolUse,
-            None,
-            None,
-        )
-        .expect("fixture tool response"),
-    )));
     events
 }
 

@@ -27,9 +27,6 @@ fn close_reconciliation_rejects_reopened_epoch_before_selecting_cancel_targets()
                 ),
                 TaskPayload::Working,
             ),
-            summary: "new execution".into(),
-            initiator_session_id: Some("session".into()),
-            terminal_transition_id: None,
         }],
     };
     assert!(pending_tasks_for_closed_epoch("workspace", 0, snapshot(1, false)).is_err());

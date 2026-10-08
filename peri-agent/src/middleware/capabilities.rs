@@ -67,8 +67,30 @@ pub trait InputBatchState: Send + Sync {
     fn input_message_ids(&self) -> Option<&[MessageId]>;
 }
 
-/// 每批输入准备：读取本批身份并按稳定 ID 替换附件，不暴露工具目录或队列。
-pub trait BeforeInputState: StateView + InputBatchState + MessageReplace {}
+/// 输入批次注入能力：向本次输入准备追加注入消息（附件 / 预载的假工具调用与结果）。
+///
+/// 与 [`MessageAppend`] 同形（底层同为 `MiddlewareState::add_message` 的双写
+/// 路径），单独成型是为了让「追加」只出现在输入准备阶段：`before_agent`（首批）
+/// 与 `before_input`（中途批次）都能用，其它阶段仍须显式声明 [`MessageAppend`]
+/// 才具备该能力。方法名与 `MessageAppend::add_message` 不同，避免同一类型同时
+/// 具备两种能力时的解析歧义。
+///
+/// ```compile_fail
+/// use peri_agent::middleware::capabilities::AfterToolState;
+/// fn cannot_append_input(state: &mut dyn AfterToolState, message: peri_agent::messages::BaseMessage) {
+///     state.append_input_message(message);
+/// }
+/// ```
+pub trait InputBatchAppend: Send + Sync {
+    fn append_input_message(&mut self, message: BaseMessage);
+}
+
+/// 每批输入准备：读取本批身份、按稳定 ID 替换附件并注入本批内容，
+/// 不暴露工具目录或队列。
+pub trait BeforeInputState:
+    StateView + InputBatchState + MessageReplace + InputBatchAppend
+{
+}
 
 /// 首次输入准备与初始化：另提供追加消息及初始工具目录重绑能力。
 pub trait BeforeAgentState: BeforeInputState + MessageAppend + CatalogState {}
@@ -296,7 +318,16 @@ impl<T: MiddlewareState + ?Sized> InputBatchState for T {
     }
 }
 
-impl<T: StateView + InputBatchState + MessageReplace + ?Sized> BeforeInputState for T {}
+impl<T: MiddlewareState + ?Sized> InputBatchAppend for T {
+    fn append_input_message(&mut self, message: BaseMessage) {
+        MiddlewareState::add_message(self, message)
+    }
+}
+
+impl<T: StateView + InputBatchState + MessageReplace + InputBatchAppend + ?Sized> BeforeInputState
+    for T
+{
+}
 impl<T: BeforeInputState + MessageAppend + CatalogState + ?Sized> BeforeAgentState for T {}
 impl<T: MiddlewareState + ?Sized> BeforeToolState for T {}
 impl<T: StateView + QueueState + ?Sized> AfterToolState for T {}

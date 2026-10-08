@@ -124,7 +124,7 @@ pub(super) fn register_keepgoing_click(
 // [Why 每次渲染重建] ratatui-kit 的 use_event_handler 闭包每帧重新注册（当帧值），
 // copy_buttons State 由渲染 body 后部 write_no_update 更新——事件分发时读到的
 // 是最近一帧的按钮位置（与 keepgoing 一致）。
-pub(super) fn register_md_copy_click(
+pub(super) fn register_copy_click(
     hooks: &mut Hooks,
     copy_buttons: State<Arc<Vec<CopyButtonHit>>>,
     view_models: AtomState<ViewModelsSnapshot>,
@@ -153,24 +153,7 @@ pub(super) fn register_md_copy_click(
         // 运行中 bubble 的 content_hash 每秒漂移，跨秒点击偶发拒绝）；
         // 其余类型沿用 content_hash。
         let snapshot = view_models.read();
-        let matched = snapshot
-            .items
-            .get(hit.slot_index)
-            .is_some_and(|vm| match vm {
-                TuiRenderUnit::TuiAssistantBubble(b) => {
-                    TuiAssistantBubble::stable_identity_hash(&b.text, b.reasoning.as_ref())
-                        == hit.vm_hash
-                }
-                _ => vm.content_hash() == hit.vm_hash,
-            });
-        let text = if matched {
-            match &snapshot.items[hit.slot_index] {
-                TuiRenderUnit::TuiAssistantBubble(d) => Some(d.text.clone()),
-                _ => None,
-            }
-        } else {
-            None
-        };
+        let text = copy_text_for_hit(&snapshot, hit);
         drop(snapshot);
         if let Some(text) = text {
             copy_to_clipboard(text.clone());
@@ -180,6 +163,24 @@ pub(super) fn register_md_copy_click(
         EventResult::Consumed
     });
 }
+
+fn copy_text_for_hit(snapshot: &ViewModelsSnapshot, hit: &CopyButtonHit) -> Option<String> {
+    let vm = snapshot.items.get(hit.slot_index)?;
+    let identity = match vm {
+        TuiRenderUnit::TuiAssistantBubble(data) => {
+            TuiAssistantBubble::stable_identity_hash(&data.text, data.reasoning.as_ref())
+        }
+        _ => vm.content_hash(),
+    };
+    if identity != hit.vm_hash {
+        return None;
+    }
+    super::render::copy_text_at(vm, hit.logical_idx)
+}
+
+#[cfg(test)]
+#[path = "handlers_copy_test.rs"]
+mod copy_tests;
 
 // ── `↓ New output` 指示器点击（§8.1：滚回底部并恢复跟随）──
 // [Why 注册顺序] 必须注册在 scroll handler（下方）之前：scroll::handle_event

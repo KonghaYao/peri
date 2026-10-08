@@ -296,6 +296,11 @@ impl SessionEnvironment {
         let builtin_closed =
             peri_middlewares::assembly::builtin_closed_instances(&disabled_middlewares);
         let skills_face_closed = disabled_middlewares.contains("SkillsMiddleware");
+        // M6：插件来源闭合位与上面两个是同**一份** disabled 集合的投影（链槽
+        // 装配的跳过判据、资源 roots / 命令 / hooks / MCP 合并 / 继承面的派生
+        // 与 `PluginSourceAdmission` 引用同一常量，不在别处第三次读配置）。
+        let plugin_face_closed =
+            peri_middlewares::assembly::plugin_face_closed(&disabled_middlewares);
         #[cfg(test)]
         let closed_for_test = builtin_closed.clone();
         let input = assemble::HostAssemblyInput {
@@ -318,6 +323,7 @@ impl SessionEnvironment {
             workspace_resources: Some(workspace_resources),
             builtin_closed,
             skills_face_closed,
+            plugin_face_closed,
             prepared_plugins: Some(plugins.clone()),
             session_mcp_servers: Some(session_mcp_servers.clone()),
         };
@@ -333,7 +339,6 @@ impl SessionEnvironment {
         cfg.session_manager
             .share_registry_with(&host.session_manager);
         cfg.controller = host.controller.clone();
-        cfg.execution_admission_port = host.execution_admission_port.clone();
         cfg.langfuse_session = host.langfuse_session.clone();
         cfg.stdio_command_filter = host.stdio_command_filter;
         let task_owner = cfg.host_task_owner.take().expect("session resource owner");

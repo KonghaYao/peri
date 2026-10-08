@@ -176,6 +176,52 @@ pub(crate) async fn approve_scheduled_trigger(
 
 #[allow(clippy::too_many_arguments)] // Shared host execution wiring plus optional Agent-owned input ticket.
 pub(crate) async fn run_prompt(
+    mut params: Value,
+    sessions: &SharedSessions,
+    deployment: &super::AcpServerConfig,
+    transport: &Arc<dyn crate::transport::AcpTransport>,
+    pool: Arc<parking_lot::Mutex<crate::session::agent_pool::AgentPool>>,
+    cont_tx: Option<tokio::sync::mpsc::UnboundedSender<executor::ContinuationRequest>>,
+    continuation: bool,
+    input_ticket: Option<super::user_input::UserInputRun>,
+) -> Result<Value, AcpError> {
+    let notifications = super::execution::ExecutionNotifications::from_params(&mut params)?;
+    let session_id = super::extract_session_id(&params, "").to_owned();
+    let attempt_activation = deployment
+        .session_manager
+        .get_session(&session_id)
+        .map(|runtime| {
+            (
+                Arc::clone(&runtime.activation),
+                runtime.v2_message_queue.admission_watermark(),
+            )
+        });
+    let result = run_prompt_attempt(
+        params,
+        sessions,
+        deployment,
+        transport,
+        pool,
+        cont_tx,
+        continuation,
+        input_ticket,
+        &notifications,
+        attempt_activation.as_ref(),
+    )
+    .await;
+    if result.is_err() {
+        if let Some((activation, watermark)) = &attempt_activation {
+            activation.record_failed_attempt(*watermark);
+        }
+        notifications
+            .finish_early(&session_id, "error", deployment, transport)
+            .await;
+    }
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_prompt_attempt(
     params: Value,
     sessions: &SharedSessions,
     deployment: &super::AcpServerConfig,
@@ -184,6 +230,8 @@ pub(crate) async fn run_prompt(
     cont_tx: Option<tokio::sync::mpsc::UnboundedSender<executor::ContinuationRequest>>,
     continuation: bool,
     input_ticket: Option<super::user_input::UserInputRun>,
+    notifications: &super::execution::ExecutionNotifications,
+    attempt_activation: Option<&(Arc<crate::session::SessionActivation>, u64)>,
 ) -> Result<Value, AcpError> {
     // Borrow deployment services; turn-owned callbacks clone only their existing handles.
     // Provider/config snapshots remain below, after the session snapshot is captured.
@@ -224,8 +272,7 @@ pub(crate) async fn run_prompt(
         .and_then(|v| v.as_str())
         .map(String::from);
 
-    let user_input_mailbox =
-        super::user_input::ensure_mailbox(&session_id, deployment, transport).await?;
+    let user_input_mailbox = super::user_input::ensure_mailbox(&session_id, deployment, transport)?;
 
     // Create cancel token and register in sessions.
     // `AgentCancellationToken` 即 `tokio_util::sync::CancellationToken` 别名
@@ -256,6 +303,15 @@ pub(crate) async fn run_prompt(
             transport,
         )
         .await?;
+    } else {
+        notifications
+            .start(
+                &session_id,
+                user_input_mailbox.generation(),
+                deployment,
+                transport,
+            )
+            .await?;
     }
     // Read session data under lock, then release immediately.
     let (cwd, history_payloads, is_empty, thread_id, frozen, incoming_recalls, workflow_middleware) = {
@@ -279,6 +335,14 @@ pub(crate) async fn run_prompt(
         .iter()
         .filter_map(|payload| payload.as_message().cloned())
         .collect::<Vec<_>>();
+    if let Some(sender) = &cont_tx {
+        if !continuation || managed_input {
+            if let Some(runtime) = session_manager.get_session(&session_id) {
+                runtime.activation.allow();
+            }
+        }
+        super::activation::ensure_listener(&session_id, sessions, deployment, sender)?;
+    }
     let broker = build_transport_broker(transport, &session_id);
     let event_sink = Arc::new(TransportEventSink::new(
         Arc::clone(transport),
@@ -332,7 +396,6 @@ pub(crate) async fn run_prompt(
             mcp_skill_registry: session_manager.mcp_skill_registry_for(&session_id),
             session_id: Some(session_id.clone()),
             session_resources: Some(deployment.session_resources.clone()),
-            execution_admission_port: deployment.execution_admission_port.clone(),
             compact_config: {
                 let mut cc = peri_config_snapshot
                     .config
@@ -466,26 +529,6 @@ pub(crate) async fn run_prompt(
         .map(|session| Arc::clone(&session.dynamic_mcp_projection))
         .unwrap_or_else(|| Arc::new(parking_lot::Mutex::new(None)));
 
-    let recipient_lifecycle = deployment
-        .session_resources
-        .load_session_control(&session_id)
-        .await
-        .map_err(super::workspace::resource_error)?
-        .lifecycle;
-    let observed_admission = Arc::new(std::sync::OnceLock::new());
-    let observe_admission = Arc::clone(&observed_admission);
-    let sdk_run_started = super::scheduled_admission::after_run_started(
-        super::user_input::sdk_run_started_publisher(
-            session_id.clone(),
-            Arc::clone(&user_input_mailbox),
-            deployment,
-            Arc::clone(transport),
-            input_ticket.as_ref().map(|run| run.ticket.id.clone()),
-        ),
-        Arc::clone(&deployment.session_resources),
-        Arc::clone(permission_mode),
-        Arc::clone(&broker),
-    );
     let ctx = executor::SessionContext {
         cwd,
         provider_name,
@@ -505,9 +548,8 @@ pub(crate) async fn run_prompt(
         cancel,
         broker,
         permission_mode: permission_mode.clone(),
-        session_access: Some(
-            Arc::new(session_manager) as Arc<dyn peri_acp_types::session::SessionAccessPort>
-        ),
+        session_access: Some(Arc::new(session_manager.clone())
+            as Arc<dyn peri_acp_types::session::SessionAccessPort>),
         session_resources: Some(session_resources.clone()),
         thread_id: Some(thread_id.clone()),
         plugin_skill_roots: plugin_skill_roots.to_vec(),
@@ -534,19 +576,6 @@ pub(crate) async fn run_prompt(
             None
         },
         request_id,
-        execution_admission: params
-            .get("executionAdmission")
-            .map(|value| serde_json::from_value(value.clone()))
-            .transpose()
-            .map_err(|error| {
-                AcpError::new(-32602, format!("invalid execution admission: {error}"))
-            })?,
-        execution_admission_port: deployment.execution_admission_port.clone(),
-        sdk_admission_observed: Some(Arc::new(move |admission| {
-            let _ = observe_admission.set(admission);
-        })),
-        sdk_run_started: Some(sdk_run_started),
-        recipient_lifecycle,
         allow_await_wake: true,
         continuation_notify: cont_tx,
         user_input_mailbox: Some(Arc::clone(&user_input_mailbox)),
@@ -597,6 +626,16 @@ pub(crate) async fn run_prompt(
         .await
         .map_err(|e| AcpError::new(-32603, format!("run_session failed: {e}")))?;
     let result = handle.take_result();
+    notifications.mark_terminal();
+    if !result.ok || result.failure.is_some() {
+        if let Some((activation, watermark)) = attempt_activation {
+            if result.stop_reason == executor::PromptStopReason::Cancelled {
+                activation.suppress();
+            } else {
+                activation.record_failed_attempt(*watermark);
+            }
+        }
+    }
     if let Some(run) = &input_ticket {
         run.mark_terminal_delivered();
     }
@@ -608,57 +647,15 @@ pub(crate) async fn run_prompt(
     }
     input_attempt_guard.finish(&result);
 
-    let response = finish_prompt_turn(
+    finish_prompt_turn(
         sessions,
         &session_id,
         continuation && !managed_input,
         result,
     )
-    .await;
-    if !params
-        .as_object()
-        .is_some_and(|params| params.contains_key("executionAdmission"))
-    {
-        if let Some(admission) = observed_admission.get() {
-            let evidence_id = super::execution::finish_admission(
-                deployment.session_resources.as_ref(),
-                admission,
-            )
-            .await?;
-            let port = deployment
-                .execution_admission_port
-                .as_ref()
-                .ok_or_else(|| AcpError::new(-32010, "SDK settlement capability is unavailable"))?;
-            use peri_acp_types::execution_admission::{
-                AttemptStoppedProof, SettlementOutcome, SettlementRequest,
-            };
-            let outcome = port
-                .settle(SettlementRequest {
-                    admission: admission.clone(),
-                    proof: AttemptStoppedProof::AttemptStopped {
-                        instance_id: admission.instance_id.clone(),
-                        generation_id: admission.generation_id.clone(),
-                        execution: admission.execution.clone(),
-                        evidence_id: evidence_id.clone(),
-                    },
-                })
-                .await
-                .map_err(|error| AcpError::new(-32010, error.to_string()))?;
-            if !matches!(outcome, SettlementOutcome::Applied { receipt }
-                if receipt.admission == *admission && receipt.evidence_id == evidence_id)
-            {
-                return Err(AcpError::new(
-                    -32010,
-                    "SDK execution settlement remains unconfirmed",
-                ));
-            }
-        }
-    }
-    response
+    .await
 }
 
-// Durable progress is independent of the terminal status. This boundary also owns wire
-// projection so that cancellation/error responses can never bypass canonical state adoption.
 pub(super) async fn finish_prompt_turn(
     sessions: &SharedSessions,
     session_id: &str,

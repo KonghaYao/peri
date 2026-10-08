@@ -314,7 +314,7 @@ describe("慢 Git 的工作区发现", () => {
     }
 
     // 慢 Git 仍然是 Git：观测是仓库模式，不是降级出来的目录模式。
-    const workspaces = await query<{ discovery: string }>("SELECT discovery FROM legacy_execution_registrations");
+    const workspaces = await query<{ discovery: string }>("SELECT discovery FROM workspaces");
     expect(workspaces, "登记后应恰好有一个工作区").toHaveLength(1);
     const observed = JSON.parse(workspaces[0].discovery) as {
       root: string; common_dir: string | null; private_dir: string | null;

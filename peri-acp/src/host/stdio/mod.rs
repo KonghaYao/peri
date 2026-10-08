@@ -117,18 +117,10 @@ pub async fn run_acp_stdio(input: StdioInput) -> anyhow::Result<()> {
     } else {
         None
     };
-    let mut cfg = assemble_stdio_config(input, injected_settings.as_deref()).await?;
+    let cfg = assemble_stdio_config(input, injected_settings.as_deref()).await?;
     let sessions: super::SharedSessions = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
-    let transport = StdioTransport::from_reader_writer(stdin, tokio::io::stdout())
-        .with_cancel_hook(Some(Arc::new(|_line| {
-            tracing::warn!("identity-free cancel ignored; use a stable session/control command");
-        })));
+    let transport = StdioTransport::from_reader_writer(stdin, tokio::io::stdout());
     let transport: Arc<dyn AcpTransport> = Arc::new(transport);
-    cfg.execution_admission_port = Some(Arc::new(
-        super::execution_admission::ReverseExecutionAdmission::new(Arc::new(
-            crate::transport::AcpRequestBridge(transport.clone()),
-        )),
-    ));
     super::run_acp_server_with_sessions(transport, cfg, sessions).await;
     Ok(())
 }
@@ -240,6 +232,7 @@ async fn assemble_stdio_config(
             // 宿主技能面关闭位与关闭集同源（会话级 frozen policy 的投影）：顶层装配
             // 无会话上下文、不建池，恒为假（发现管线在本层无对象）。
             skills_face_closed: false,
+            plugin_face_closed: false,
             // host 级装配：无准备路径提供的插件聚合，按既有语义自行加载。
             prepared_plugins: None,
             session_mcp_servers: None,

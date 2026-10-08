@@ -174,7 +174,9 @@ async fn four_close_sources_are_distinct() {
         match status {
             McpInitStatus::Failed(message) => {
                 assert!(
-                    message.contains("artifact") && message.contains("关闭片段非法"),
+                    message.contains("artifact")
+                        && message
+                            .contains("disabled = true cannot be combined with system_mcp = true"),
                     "非法组合必须在加载期以固定文本报错（只含实例名），实际: {message}"
                 );
             }

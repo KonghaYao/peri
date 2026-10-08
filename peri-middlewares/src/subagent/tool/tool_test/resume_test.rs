@@ -10,8 +10,8 @@ async fn test_resume_thread_id_placeholder_ignored_and_spawns_new() {
     for placeholder in ["", "new", "__omit__"] {
         let dir = tempdir().unwrap();
         write_test_agent(&dir);
-        let fixture = SessionFixture::open_in(dir.path()).await;
-        let host = DurableHost::open_in(dir.path(), "fixture-resume-placeholder").await;
+        let _fixture = SessionFixture::open_in(dir.path()).await;
+        let host = HostFixture::open_in(dir.path(), "fixture-resume-placeholder").await;
         let t = host.bind(with_agent_face(make_subagent_tool(vec![]), dir.path()).await);
         let result = t
             .invoke(
@@ -268,13 +268,10 @@ async fn test_resume_thread_id_active_rejected() {
     meta.id = id.clone();
     meta.title = Some("fork".to_string());
     store.create_thread(meta).await.unwrap(); // ThreadMeta 默认 agent_status = Active
-    let t = install_admission_port(
-        make_subagent_tool(vec![])
-            .with_session_resources(store.facade())
-            .with_parent_thread_id(parent_id.clone())
-            .with_parent_session(parent.clone()),
-        &store,
-    );
+    let t = make_subagent_tool(vec![])
+        .with_session_resources(store.facade())
+        .with_parent_thread_id(parent_id.clone())
+        .with_parent_session(parent.clone());
     let result = t
         .invoke(
             serde_json::json!({
@@ -389,17 +386,18 @@ async fn test_resume_thread_id_background_combination() {
         peri_agent::session::FrozenContext::builder().build(),
         Some(parent_id.clone()),
     );
-    let registry = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
-    let (bg_tx, mut bg_rx) = mpsc::unbounded_channel::<ExecutorEvent>();
-    // 后台通道装在 owning parent session 的宿主上（工具字段会被父 host 遮蔽）。
-    install_parent_host_with_channels(&store, &parent, Arc::clone(&registry), bg_tx);
+    install_parent_host(&store, &parent);
     let id = uuid::Uuid::now_v7().to_string();
     preset_resumable_thread(&store, &id, "fork", Some(parent_id.as_str()), Vec::new()).await;
 
+    let registry = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
+    let (bg_tx, mut bg_rx) = mpsc::unbounded_channel::<ExecutorEvent>();
     let t = make_subagent_tool(vec![])
         .with_session_resources(store.facade())
         .with_parent_thread_id(parent_id.clone())
-        .with_parent_session(parent.clone());
+        .with_parent_session(parent.clone())
+        .with_task_manager(Arc::clone(&registry))
+        .with_bg_event_sender(bg_tx);
 
     let result = t
         .invoke(
@@ -520,14 +518,11 @@ async fn test_resume_thread_id_fork_title_uses_parent_tools_and_200_iterations()
     );
     install_parent_host(&store, &parent);
     let id = uuid::Uuid::now_v7().to_string();
-    // 原委派工具面 = fork 的父工具集（无过滤，含 Agent）；恢复按保存的 ceiling
-    // 求交，因此夹具必须写入与 spawn 一致的事实（factory/spawn.rs）。
-    preset_resumable_thread_with_ceiling(
+    preset_resumable_thread(
         &store,
         &id,
         "fork",
         Some(parent_id.as_str()),
-        &["Read", "Agent"],
         vec![BaseMessage::human("task")],
     )
     .await;
@@ -551,18 +546,15 @@ async fn test_resume_thread_id_fork_title_uses_parent_tools_and_200_iterations()
         ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
             use crate::subagent::test_support::*;
             let _ = &cancellation;
-            let messages = base_messages(&request);
+            let _messages = base_messages(&request);
             let defined = defined_tools(&request);
             let tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
 
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             *self.captured.lock().unwrap() = tools.iter().map(|t| t.name().to_string()).collect();
-            // durable Reason 会先提交工具调用意图并要求工具真实存在（不存在的
-            // 名称在 Reason 阶段即 Err，不会进入迭代）。这里调用真实存在但不可
-            // 执行的夹具工具：错误结果按数据回流，循环持续到迭代上限。
             tool_events_from_react(vec![peri_agent::agent::react::ToolCall::new(
                 "id1",
-                "Read",
+                "nonexistent",
                 serde_json::json!({}),
             )])
         }
@@ -645,14 +637,11 @@ async fn test_resume_thread_id_agent_def_refilters_tools() {
     );
     install_parent_host(&store, &parent);
     let id = uuid::Uuid::now_v7().to_string();
-    // 原委派工具面 = agent 定义白名单 ∧ 父工具集（`Read`；`Agent` 被定义排除），
-    // 与 spawn 记录的事实一致；恢复在 ceiling 之上还要重新应用定义过滤。
-    preset_resumable_thread_with_ceiling(
+    preset_resumable_thread(
         &store,
         &id,
         "resume-agent",
         Some(parent_id.as_str()),
-        &["Read"],
         Vec::new(),
     )
     .await;
@@ -672,7 +661,7 @@ async fn test_resume_thread_id_agent_def_refilters_tools() {
         ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
             use crate::subagent::test_support::*;
             let _ = &cancellation;
-            let messages = base_messages(&request);
+            let _messages = base_messages(&request);
             let defined = defined_tools(&request);
             let tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
 

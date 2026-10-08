@@ -194,13 +194,13 @@ describe("仓库布局下的执行目录与项目归属", () => {
       cwd: string;
       current_path: string;
     }>(
-      `SELECT b.project_id, b.workspace_id, b.relative_cwd, r.root, p.locator, t.cwd,
+      // v19 起工作区根与归属路径是同一行上的同一列：绑定的归属就是会话行的 workspace_id。
+      `SELECT b.project_id, b.workspace_id, b.relative_cwd, w.path AS root, p.locator, t.cwd,
               w.path AS current_path
        FROM session_bindings b
-       JOIN legacy_execution_registrations r ON r.id = b.workspace_id
-       JOIN projects p ON p.id = b.project_id
        JOIN threads t ON t.id = b.thread_id
        JOIN workspaces w ON w.id = t.workspace_id
+       JOIN projects p ON p.id = b.project_id
        ORDER BY t.created_at DESC, t.rowid DESC LIMIT 1`,
     );
     expect(rows, "每次进入都应有新建的绑定").toHaveLength(1);
@@ -212,7 +212,7 @@ describe("仓库布局下的执行目录与项目归属", () => {
     workspaceId: string,
   ): Promise<{ root: string; common_dir: string | null }> {
     const rows = await query<{ id: string; discovery: string }>(
-      "SELECT id, discovery FROM legacy_execution_registrations",
+      "SELECT id, discovery FROM workspaces",
     );
     const row = rows.find((workspace) => workspace.id === workspaceId);
     expect(row, "工作区登记应存在").toBeDefined();
@@ -284,7 +284,7 @@ describe("仓库布局下的执行目录与项目归属", () => {
       // ⑤ 三个会话各自登记，历史都在：项目 2 个（仓库 + clone），工作区 3 个。
       const projects = await query<{ id: string }>("SELECT id FROM projects");
       expect(projects, "仓库与 clone 各一个项目").toHaveLength(2);
-      const workspaces = await query<{ id: string }>("SELECT id FROM legacy_execution_registrations");
+      const workspaces = await query<{ id: string }>("SELECT id FROM workspaces");
       expect(workspaces, "子目录与 worktree 各占一个工作区，clone 是第三个").toHaveLength(3);
       const currentWorkspaces = await query<{ path: string }>("SELECT path FROM workspaces");
       expect(currentWorkspaces).toHaveLength(3);

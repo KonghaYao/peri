@@ -8,7 +8,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use super::*;
 use crate::hooks::types::{HookEvent, HookType, RegisteredHook};
 use peri_agent::tools::BaseTool;
 
@@ -35,6 +34,7 @@ fn subagent_hook(
         matcher: matcher.map(str::to_string),
         plugin_name: "subagent-test-plugin".to_string(),
         plugin_id: "subagent-test-plugin-id".to_string(),
+        plugin_source: None,
         plugin_root: PathBuf::from("/tmp/subagent-test-plugin"),
         plugin_data_dir: PathBuf::from("/tmp/subagent-test-plugin-data"),
         plugin_options: HashMap::new(),
@@ -263,9 +263,9 @@ async fn subagent_start_once_hook_is_shared_across_spawns() {
 /// `child_agent_id` / 工具返回的 `child_thread_id`），不是 agent 名，也不是空/占位；
 /// `agent_type` 才是 agent 名，Stop 载荷另带结果摘要。
 ///
-/// 夹具不直接调用闭包：经 `SubAgentTool::invoke` 走生产 spawn → SDK 观察点
-/// （`sdk_admission_observed`）→ 生命周期闭包 → HookDispatcher → 真实 command
-/// hook，由 hook 自己把 stdin JSON 写到文件（载荷唯一通道，逐字节落盘）。
+/// 夹具不直接调用闭包：经 `SubAgentTool::invoke` 走生产 spawn → 生命周期闭包
+/// → HookDispatcher → 真实 command hook，由 hook 自己把 stdin JSON 写到文件
+/// （载荷唯一通道，逐字节落盘）。
 #[derive(Clone)]
 struct LifecycleEchoModel;
 
@@ -292,7 +292,7 @@ async fn subagent_lifecycle_hook_payloads_carry_real_child_agent_id() {
         "---\nname: test-agent\ndescription: A test agent\n---\n\nYou are a test agent.\n",
     )
     .unwrap();
-    let host = crate::subagent::tool::tests::DurableHost::open_in(
+    let host = crate::subagent::tool::tests::HostFixture::open_in(
         dir.path(),
         "fixture-lifecycle-agent-id",
     )
@@ -410,4 +410,81 @@ async fn subagent_lifecycle_hook_payloads_carry_real_child_agent_id() {
     let _ = std::fs::remove_file(&out_start);
     let _ = std::fs::remove_file(&out_stop);
     let _ = start_payload;
+}
+
+/// 并发触发（两个子 agent 背靠背启动、互不等待）：once hook 必须在"预留"阶段
+/// 原子去重，只能执行一次。
+///
+/// [TRAP] 该用例不得用"等第一个执行完再触发第二个"的方式串行化：那会把
+/// `was_fired`（查）与执行后 `mark_fired`（标记）之间的竞态掩盖成必过。
+/// 两个闭包各自经 `tokio::spawn` 分离触发，第二次触发在第一次的命令尚未返回
+/// 时进入 dispatcher——这正是生命周期路径的真实并发窗口。
+#[tokio::test]
+async fn subagent_start_once_hook_is_atomic_under_concurrent_triggers() {
+    let marker = unique_marker("once-concurrent");
+    let command = format!(
+        "touch {}; echo run >> {}.log",
+        marker.display(),
+        marker.display()
+    );
+    let hooks = vec![subagent_hook(
+        HookEvent::SubagentStart,
+        &command,
+        None,
+        None,
+        true,
+    )];
+
+    let tool = super::SubAgentTool::new(
+        std::sync::Arc::new(Vec::new()),
+        None,
+        std::sync::Arc::new(|_: Option<&str>| unimplemented!("no child is spawned in this test")),
+        "/tmp".to_string(),
+    )
+    .with_registered_hooks(hooks);
+
+    let (on_start_a, _) = tool.lifecycle_closures();
+    let (on_start_b, _) = tool.lifecycle_closures();
+    on_start_a.expect("非空 hook 列表必须构造 SubagentStart 闭包")(
+        "fixture-child-thread",
+        "explore",
+        "/tmp",
+    );
+    on_start_b.expect("非空 hook 列表必须构造 SubagentStart 闭包")(
+        "fixture-child-thread",
+        "explore",
+        "/tmp",
+    );
+
+    let log_path = format!("{}.log", marker.display());
+    let fired_lines = || {
+        std::fs::read_to_string(&log_path)
+            .map(|log| log.lines().count())
+            .unwrap_or(0)
+    };
+
+    // 有界观察窗口：一出现第二次执行就立即结束等待（不掩盖竞态）；否则等
+    // 单次执行的状态稳定 300ms（命令已落盘且无后续写入）后收口。
+    let mut stable_since: Option<std::time::Instant> = None;
+    for _ in 0..300 {
+        if fired_lines() >= 2 {
+            break;
+        }
+        if fired_lines() == 1 {
+            match stable_since {
+                Some(since) if since.elapsed() >= std::time::Duration::from_millis(300) => break,
+                Some(_) => {}
+                None => stable_since = Some(std::time::Instant::now()),
+            }
+        } else {
+            stable_since = None;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    assert_eq!(
+        fired_lines(),
+        1,
+        "并发触发的 once:true SubagentStart 只能执行一次（原子预留）"
+    );
 }

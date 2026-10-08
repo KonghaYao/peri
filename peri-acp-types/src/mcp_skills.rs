@@ -18,7 +18,9 @@ pub type HandleToken = std::sync::Arc<dyn std::any::Any + Send + Sync>;
 pub enum ServerDiscoveryState {
     /// 发现任务已 spawn（防每轮重复 spawn）
     Started { handle: HandleToken },
-    /// 已发现（或已尝试失败——失败置空条目，不重试；重连才重扫）
+    /// 发现失败；不自动重试，重连才重扫。
+    Failed { handle: HandleToken },
+    /// 已发现（空条目表示合法空目录）。
     Discovered {
         handle: HandleToken,
         entries: Vec<SkillMetadata>,
@@ -29,6 +31,7 @@ impl ServerDiscoveryState {
     fn handle(&self) -> &HandleToken {
         match self {
             ServerDiscoveryState::Started { handle }
+            | ServerDiscoveryState::Failed { handle }
             | ServerDiscoveryState::Discovered { handle, .. } => handle,
         }
     }
@@ -207,7 +210,9 @@ impl McpSkillRegistry {
                 ServerDiscoveryState::Discovered { entries, .. } => {
                     entries.iter().map(|e| e.name.to_lowercase()).collect()
                 }
-                ServerDiscoveryState::Started { .. } => Default::default(),
+                ServerDiscoveryState::Started { .. } | ServerDiscoveryState::Failed { .. } => {
+                    Default::default()
+                }
             };
             let new_names: std::collections::BTreeSet<String> =
                 entries.iter().map(|e| e.name.to_lowercase()).collect();
@@ -224,6 +229,26 @@ impl McpSkillRegistry {
         if let Some(cb) = cb {
             cb();
         }
+    }
+
+    /// 仅当前正在发现的同代连接可发布失败；旧任务不得覆盖重连结果。
+    pub fn mark_discovery_failed(&self, server: &str, handle: HandleToken) {
+        let mut guard = self.inner.write();
+        if matches!(guard.servers.get(server), Some(ServerDiscoveryState::Started { handle: current }) if std::sync::Arc::ptr_eq(current, &handle))
+        {
+            guard
+                .servers
+                .insert(server.to_string(), ServerDiscoveryState::Failed { handle });
+        }
+    }
+
+    /// 目录是否含读取失败的来源；不得将其空投影当作合法空目录。
+    pub fn discovery_failed(&self) -> bool {
+        self.inner
+            .read()
+            .servers
+            .values()
+            .any(|state| matches!(state, ServerDiscoveryState::Failed { .. }))
     }
 
     /// 读取面热更新回写（resource_tool 恢复成功后调用）：仅当该 server
@@ -390,6 +415,18 @@ impl McpSkillRegistry {
             .unwrap_or_default()
     }
 
+    /// 是否仍有 server 的发现任务在进行（`Started` 未收口）。
+    ///
+    /// 区分「目录为空」与「目录尚未就绪」；失败另由 `discovery_failed` 表达。
+    /// 而发现未收口时的空投影不能当成功返回（L2：未就绪不返回假空成功）。
+    pub fn discovery_in_progress(&self) -> bool {
+        let guard = self.inner.read();
+        guard
+            .servers
+            .values()
+            .any(|state| matches!(state, ServerDiscoveryState::Started { .. }))
+    }
+
     /// 按全名查找（小写精确匹配 `mcp__<server>__<skill>`）；未命中再试
     /// `<server>:<skill>` 别名（rsplit_once(':')，后缀非空才拼全名）。
     ///
@@ -489,7 +526,7 @@ impl Default for McpSkillRegistry {
 fn entries_of(state: &ServerDiscoveryState) -> Vec<SkillMetadata> {
     match state {
         ServerDiscoveryState::Discovered { entries, .. } => entries.clone(),
-        ServerDiscoveryState::Started { .. } => Vec::new(),
+        ServerDiscoveryState::Started { .. } | ServerDiscoveryState::Failed { .. } => Vec::new(),
     }
 }
 
@@ -600,3 +637,7 @@ pub fn mcp_skill_name(server: &str, skill: &str) -> String {
 #[cfg(test)]
 #[path = "mcp_skills_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "mcp_skills_failure_test.rs"]
+mod failure_tests;

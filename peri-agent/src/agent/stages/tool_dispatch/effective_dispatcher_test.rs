@@ -76,13 +76,9 @@ async fn nested_dispatch_keeps_pinned_target_and_does_not_commit_outer_batch() {
     let original_id = transcript
         .write()
         .append(BaseMessage::human("parent history"));
-    let mut ctx = StageContext::best_effort_fixture_builder(
-        turn,
-        Arc::clone(&transcript),
-        MessageQueue::new(),
-    )
-    .with_event_bus(Arc::new(bus))
-    .build();
+    let mut ctx = StageContext::builder(turn, Arc::clone(&transcript), MessageQueue::new())
+        .with_event_bus(Arc::new(bus))
+        .build();
     let trace: HookTrace = Arc::new(parking_lot::Mutex::new(Vec::new()));
     let mut chain = MiddlewareChain::new();
     chain.add(Box::new(Hooks(Arc::clone(&trace))));
