@@ -727,3 +727,25 @@ fn extract_overrides_global_only_roundtrip() {
     };
     assert_eq!(extracted, expected);
 }
+
+/// [回归测试] 旧配置里已删除的 compact 键必须被识别（本次 L4 迁移诊断），
+/// 新配置与无关文档保持静默——不静默换语义，也不误报。
+#[test]
+fn removed_compact_keys_are_reported_once_and_only_when_present() {
+    let legacy = serde_json::json!({
+        "config": { "compact": { "ptl_max_retries": 5, "summary_max_tokens": 8000 } }
+    });
+    assert_eq!(legacy_compact_keys_in(&legacy), vec!["ptl_max_retries"]);
+
+    for silent in [
+        serde_json::json!({ "config": { "compact": { "summary_max_tokens": 8000 } } }),
+        serde_json::json!({ "config": {} }),
+        serde_json::json!({}),
+        serde_json::json!({ "config": { "compact": 7 } }),
+    ] {
+        assert!(
+            legacy_compact_keys_in(&silent).is_empty(),
+            "无旧键的文档不得产生迁移诊断：{silent}"
+        );
+    }
+}

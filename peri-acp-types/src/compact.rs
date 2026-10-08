@@ -195,13 +195,6 @@ where
 ///
 /// 反序列化时自动 clamp 阈值到 [0.0, 1.0] 并 warn，防止配置错误导致
 /// budget 检查被静默绕过。
-/// 已删除的 compact 配置键（旧配置文件仍可能携带）。
-///
-/// `ptl_max_retries` 从不参与运行，已从配置模型、默认值与文档中删除。类型化模型
-/// 不再认识该键，serde 会静默忽略它——所以调用方必须在**原始文档**上核对并给出
-/// 显式迁移诊断，不能让它悄悄换语义。
-pub const LEGACY_COMPACT_KEYS: [&str; 1] = ["ptl_max_retries"];
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CompactConfig {
     #[serde(default = "default_true")]
@@ -298,6 +291,13 @@ impl Default for CompactConfig {
         }
     }
 }
+
+/// 已删除的 compact 配置键（旧配置文件仍可能携带）。
+///
+/// `ptl_max_retries` 从不参与运行，已从配置模型、默认值与文档中删除。类型化模型
+/// 不再认识该键，serde 会静默忽略它——所以调用方必须在**原始文档**上核对并给出
+/// 显式迁移诊断，不能让它悄悄换语义。
+pub const LEGACY_COMPACT_KEYS: [&str; 1] = ["ptl_max_retries"];
 
 impl CompactConfig {
     pub fn has_valid_micro_field_limits(&self) -> bool {

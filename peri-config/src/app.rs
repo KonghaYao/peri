@@ -149,20 +149,26 @@ impl BetasConfig {
     }
 }
 
-/// 对原始配置文档中已删除的 compact 键给出显式迁移诊断（当前无运行作用）。
+/// 原始配置文档里仍存在的已删除 compact 键（判定与诊断分离，判定可测）。
 ///
 /// 在**解析类型之前**调用：类型化模型已不认识这些键，只靠反序列化无法发现它们。
-pub fn warn_legacy_compact_keys(document: &serde_json::Value) {
+pub fn legacy_compact_keys_in(document: &serde_json::Value) -> Vec<&'static str> {
     let Some(compact) = document.pointer("/config/compact") else {
-        return;
+        return Vec::new();
     };
-    for key in peri_acp_types::compact::LEGACY_COMPACT_KEYS {
-        if compact.get(key).is_some() {
-            tracing::warn!(
-                key,
-                "compact 配置键已移除：{key} 从未参与运行，直接删除即可（本次按默认值继续，不静默换语义）"
-            );
-        }
+    peri_acp_types::compact::LEGACY_COMPACT_KEYS
+        .into_iter()
+        .filter(|key| compact.get(*key).is_some())
+        .collect()
+}
+
+/// 对原始配置文档中已删除的 compact 键给出显式迁移诊断（当前无运行作用）。
+pub fn warn_legacy_compact_keys(document: &serde_json::Value) {
+    for key in legacy_compact_keys_in(document) {
+        tracing::warn!(
+            key,
+            "compact 配置键已移除：{key} 从未参与运行，直接删除即可（本次按默认值继续，不静默换语义）"
+        );
     }
 }
 
