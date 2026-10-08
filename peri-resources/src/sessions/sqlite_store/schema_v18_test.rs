@@ -1,3 +1,4 @@
+use super::super::absolute_test_path;
 use super::*;
 use peri_acp_types::{messages::BaseMessage, store::ThreadStore, thread::ThreadMeta};
 
@@ -35,7 +36,10 @@ async fn schema_v18_new_store_has_nine_business_tables_and_normal_history() {
     .unwrap();
     assert_eq!(count, 9);
     let session = store
-        .create_thread(ThreadMeta::new_at("/tmp", peri_time::now_wall()))
+        .create_thread(ThreadMeta::new_at(
+            absolute_test_path("tmp"),
+            peri_time::now_wall(),
+        ))
         .await
         .unwrap();
     store
@@ -63,7 +67,10 @@ async fn schema_v18_from_v17_preserves_business_pages_extensions_goals_and_rowid
     let path = directory.path().join("threads.db");
     let store = SqliteThreadStore::new(&path).await.unwrap();
     let session = store
-        .create_thread(ThreadMeta::new_at("/tmp", peri_time::now_wall()))
+        .create_thread(ThreadMeta::new_at(
+            absolute_test_path("tmp"),
+            peri_time::now_wall(),
+        ))
         .await
         .unwrap();
     store
