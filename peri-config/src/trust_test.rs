@@ -163,12 +163,17 @@ fn regrant_updates_digest_without_duplicate_entries() {
 fn missing_settings_file_has_no_digest_collision_with_empty_file() {
     let scope = TestScope::new();
     let missing = scope.binding(SettingsSourceKind::Project);
+    grant(&missing).unwrap();
+    assert!(is_trusted(&missing).unwrap());
     scope.write_settings(SettingsSourceKind::Project, "");
     let empty = scope.binding(SettingsSourceKind::Project);
     assert_ne!(
         missing.digest, empty.digest,
         "缺失文件与空文件是不同来源状态，不得共享授权"
     );
+    assert!(!is_trusted(&empty).unwrap());
+    grant(&empty).unwrap();
+    assert!(is_trusted(&empty).unwrap());
 }
 
 #[test]

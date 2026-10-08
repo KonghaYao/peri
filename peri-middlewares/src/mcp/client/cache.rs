@@ -419,6 +419,7 @@ impl McpClientPool {
     /// 策略允许持久化时，跨进程复用磁盘上的 `tools/list` schema；否则保持原始
     /// 网络行为（每次回源）。命中以协商的 cache_version 为准：同版本命中跳过
     /// 网络，版本缺失/变化必定回源。
+    #[cfg(test)]
     pub(crate) async fn list_all_tools_cached(
         &self,
         server_name: &str,

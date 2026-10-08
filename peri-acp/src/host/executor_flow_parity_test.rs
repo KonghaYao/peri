@@ -2,21 +2,6 @@ use super::*;
 
 // ── P2-1（实施质量审查）：链收集 vs 渲染面静态声明直接对拍 ─────────────────
 
-/// 最小 ReactLLM fake（装配路径不调用 LLM）。
-struct ParityFakeLlm;
-
-#[async_trait]
-impl peri_agent::agent::react::ReactLLM for ParityFakeLlm {
-    async fn generate_reasoning(
-        &self,
-        _messages: &[peri_agent::messages::BaseMessage],
-        _tools: &[&dyn peri_agent::tools::BaseTool],
-        _streaming: Option<peri_agent::agent::react::StreamingContext>,
-    ) -> peri_agent::error::AgentResult<peri_agent::agent::react::Reasoning> {
-        unimplemented!("对拍测试不调用 LLM")
-    }
-}
-
 /// 最小 Model fake（HITL auto-classifier 构造消费，不调用）。
 struct ParityFakeModel;
 

@@ -33,7 +33,6 @@ async fn test_image_later_input_reaches_model_after_micro_compact() {
     #[derive(Clone)]
     struct CapturingLlm {
         requests: Arc<Mutex<Vec<Vec<BaseMessage>>>>,
-        pending_messages: Arc<Mutex<Vec<BaseMessage>>>,
         queue: MessageQueue,
         next_input: BaseMessage,
     }
@@ -138,7 +137,6 @@ async fn test_image_later_input_reaches_model_after_micro_compact() {
     .with_middleware_chain(Arc::new(chain))
     .with_llm(Arc::new(CapturingLlm {
         requests: Arc::clone(&requests),
-        pending_messages: Arc::new(Mutex::new(Vec::new())),
         queue: session.queue().clone(),
         next_input: later.clone(),
     }))

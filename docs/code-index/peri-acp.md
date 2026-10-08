@@ -1,5 +1,9 @@
 # peri-acp 代码索引
 
+Legacy 首次接纳在 `host/requests/legacy_session.rs` 消费
+`PreparedSessionInputs.legacy.saved_cwd` 作为保存目录事实源；配置与 frozen
+仍按准备阶段解析出的 workspace 构建，回归见 `host/requests_legacy_test.rs`。
+
 输入提交性能入口：`host/requests/session_io.rs` 在短会话锁内选择已绑定环境，队列 IO 在锁外执行；`host/server_loop.rs::spawn_session_io` 将输入快照 放入 host-owned 请求任务，普通变更与生命周期操作保留原有接收顺序。`host/session_io_test.rs` 覆盖挂起输入操作时快照继续推进、全局会话锁可用与关闭拒绝。
 
 `host/diagnostics.rs::ResponseDiagnostics` 的 `perf.input` 记录 RPC、session、command/input 身份与响应发送完成耗时，不记录正文；该耗时不是键盘到终端绘制的完整延迟。`host/prompt.rs` 在短锁内取得 canonical payload 快照，消息过滤复制在锁外执行。

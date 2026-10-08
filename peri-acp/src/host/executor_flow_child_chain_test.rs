@@ -132,10 +132,11 @@ mod captured {
         let mut config = SubagentSpawnConfig {
             agent_name: "captured-child".into(),
             prompt: "finish".into(),
-            parent_messages: options
-                .fork
-                .then(|| vec![BaseMessage::human(PARENT_ANCHOR)])
-                .unwrap_or_default(),
+            parent_messages: if options.fork {
+                vec![BaseMessage::human(PARENT_ANCHOR)]
+            } else {
+                Vec::new()
+            },
             cancel_policy: SubagentCancelPolicy::Independent,
             max_iterations: 1,
             fork_directive_kind: options.fork.then_some(ForkDirectiveKind::Fork),
@@ -401,6 +402,7 @@ mod captured {
         ctx: SessionContext,
         parent: Arc<peri_agent::session::Session>,
         manager: SessionManager,
+        _resources: tempfile::TempDir,
         _tmp: tempfile::TempDir,
         _workspace: tempfile::TempDir,
     }
@@ -426,6 +428,7 @@ mod captured {
             ctx,
             parent: out.session,
             manager,
+            _resources,
             _tmp: tmp,
             _workspace: workspace,
         }

@@ -5,7 +5,6 @@
 //! bridge（身份 + 请求时贡献 + 流式事件）。测试的假模型因此直接实现
 //! [`peri_model::Model`]：`prepare_stream`（durable checkpoint）+ `stream`
 //! （Started 语义由真实事件流表达：`TextDelta` → `Completed`），并保留取消语义。
-use futures::StreamExt;
 use peri_agent::agent::react::ToolCall as ReactToolCall;
 use peri_agent::messages::{BaseMessage, ToolCallRequest};
 use peri_agent::tools::BaseTool;
@@ -98,10 +97,6 @@ pub(crate) fn defined_tools(request: &ModelRequest) -> Vec<DefinedTool> {
         .collect()
 }
 
-pub(crate) fn tool_names(request: &ModelRequest) -> Vec<String> {
-    request.tools.iter().map(|tool| tool.name.clone()).collect()
-}
-
 fn text_of(content: &[peri_model::ContentBlock]) -> String {
     content
         .iter()
@@ -172,14 +167,6 @@ pub(crate) fn tool_events_from_react(
     )
 }
 
-pub(crate) fn error_events(
-    mut events: Vec<ModelResult<ModelStreamEvent>>,
-    error: peri_model::ModelError,
-) -> Vec<ModelResult<ModelStreamEvent>> {
-    events.push(Err(error));
-    events
-}
-
 /// 旧假 LLM 的 `Reasoning` 结果 → 事件序列（保留文本与 usage）。
 pub(crate) fn events_from_reasoning(
     reasoning: peri_agent::agent::react::Reasoning,
@@ -222,17 +209,6 @@ pub(crate) fn events_from_reasoning(
         )));
     }
     events
-}
-
-pub(crate) fn lead_chunk(text: &str) -> ModelResult<ModelStreamEvent> {
-    Ok(ModelStreamEvent::TextDelta {
-        text: text.to_string(),
-    })
-}
-
-pub(crate) fn completed_event(text: impl Into<String>) -> ModelResult<ModelStreamEvent> {
-    let text = text.into();
-    Ok(ModelStreamEvent::Completed(response_with_text(text)))
 }
 
 pub(crate) fn response_with_text(text: impl Into<String>) -> ModelResponse {

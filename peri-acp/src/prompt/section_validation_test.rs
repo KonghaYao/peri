@@ -84,7 +84,7 @@ fn unknown_placeholder_is_rejected_known_one_accepted_in_uncached() {
 
 #[test]
 fn cached_section_rejects_dynamic_placeholders() {
-    let text = format!("date={{{{date}}}}");
+    let text = "date={{date}}".to_string();
     assert_eq!(
         validate_section_override(PromptSectionZone::Cached, &text),
         Err(OverrideRejection::CachedDynamicPlaceholder(

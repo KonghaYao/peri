@@ -69,24 +69,6 @@ fn start_child_agent_id(evs: &[ObserveEvent]) -> peri_acp_types::identity::Agent
         .expect("事件流中应有 SubagentStart")
 }
 
-/// 安装父会话：真实门面 + 已建立会话（父 id 即会话 id）+ root owner + canonical cwd。
-///
-/// child 保存要求父会话存在、调用 cwd 与父会话 cwd 一致、owner 存活；三者一次建好。
-/// 夹具本体随返回值存活（drop 即释放 owner），调用方必须持有到 invoke 结束。
-async fn install_parent_session(dir: &std::path::Path, invocation_id: &str) -> HostFixture {
-    HostFixture::open_in(dir, invocation_id).await
-}
-
-/// 带父身份 + 记录 bridge 的绑定工具（durable host 提供资源/父会话/端口）。
-async fn make_durable_tool(
-    host: &HostFixture,
-    dir: &std::path::Path,
-) -> (SubAgentTool, Arc<RecordingBridge>) {
-    let bridge = make_bridge();
-    let t = host.bind(with_agent_face(make_tool_with_bridge(&bridge), dir).await);
-    (t, bridge)
-}
-
 /// 父 host 携带记录 bridge 的 durable 宿主（host() 以父 session host 为准）。
 async fn durable_host_with_bridge(
     dir: &std::path::Path,

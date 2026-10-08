@@ -130,12 +130,12 @@ pub fn settings_binding(
     let settings_path = cwd.join(kind.settings_relative_path());
     let source_path = normalized_source_path(&settings_path)?;
     let source = format!("{}-settings:{}", kind.scope(), source_path);
-    let content = match crate::io::read_text(&settings_path) {
-        Ok(content) => content,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
+    let (state, content) = match crate::io::read_text(&settings_path) {
+        Ok(content) => ("present", content),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => ("missing", String::new()),
         Err(error) => return Err(error),
     };
-    let digest = content_digest(&[&workspace, &source, &content]);
+    let digest = content_digest(&[&workspace, &source, state, &content]);
     Ok(Some(HookTrustEntry {
         workspace,
         source,
@@ -188,8 +188,7 @@ fn mutate_store(mut mutate: impl FnMut(&mut HookTrustFile) -> bool) -> io::Resul
             return Ok(());
         }
     }
-    Err(io::Error::new(
-        io::ErrorKind::Other,
+    Err(io::Error::other(
         "hook trust store changed concurrently; retry",
     ))
 }

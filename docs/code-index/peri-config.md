@@ -36,6 +36,10 @@ fallback。纯 resolver 只使用输入值；system 管发布和更新。模块�
 
 ## 更新接纳边界
 
+- Hook trust 的 settings 摘要在 `trust.rs::settings_binding` 覆盖来源存在状态，
+  缺失与空文件不共享授权；此摘要格式修复使旧 settings 授权失效，须显式重新授权。
+  回归入口为 `trust_test.rs::missing_settings_file_has_no_digest_collision_with_empty_file`。
+
 - settings 更新保留目标原文 nested `config.mcpServers` / `config.mcpCache`，
   only-provider 请求不能删除；workspace 不从 effective global 导入这些键，
   已有 workspace `$schema` 优先。提交后使用 accepted snapshot，不能发布候选草稿。

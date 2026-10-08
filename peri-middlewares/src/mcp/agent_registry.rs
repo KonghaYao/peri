@@ -105,7 +105,7 @@ impl McpAgentMetadata {
     pub fn catalog_entry(&self) -> peri_acp_types::agents::AgentCatalogEntry {
         peri_acp_types::agents::AgentCatalogEntry {
             id: self.id.clone(),
-            model_tier: self.model_tier.clone(),
+            model_tier: self.model_tier,
             can_mutate: self.can_mutate,
         }
     }
@@ -413,7 +413,7 @@ impl McpAgentRegistry {
                         || rejection.source.local_scope() != Some(ResourceScope::Builtin))
                     && selected
                         .as_ref()
-                        .map_or(true, |entry| rejection.blocks(entry, include_builtin))
+                        .is_none_or(|entry| rejection.blocks(entry, include_builtin))
             })
             .min_by_key(|rejection| (rejection.priority(), &rejection.origin, &rejection.uri))
         {

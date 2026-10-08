@@ -22,9 +22,18 @@ use peri_agent::agent::react::ReactLLM;
 
 /// 构造 once 命令行 hook（`echo run >> <log>`）。
 fn once_command_hook(event: HookEvent, log: &std::path::Path) -> RegisteredHook {
+    let log_path = log.to_string_lossy();
+    let command = if cfg!(windows) {
+        format!(
+            "Add-Content -LiteralPath '{}' -Value run -Encoding UTF8",
+            log_path.replace('\'', "''")
+        )
+    } else {
+        format!("echo run >> '{}'", log_path.replace('\'', "'\\''"))
+    };
     RegisteredHook {
         hook: HookType::Command {
-            command: format!("echo run >> {}", log.display()),
+            command,
             shell: None,
             timeout: Some(1000),
             status_message: None,
@@ -46,27 +55,30 @@ fn once_command_hook(event: HookEvent, log: &std::path::Path) -> RegisteredHook 
 }
 
 fn fired_lines(path: &std::path::Path) -> usize {
-    std::fs::read_to_string(path)
-        .map(|log| log.lines().count())
-        .unwrap_or(0)
+    match std::fs::read_to_string(path) {
+        Ok(log) => log.lines().count(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+        Err(error) => panic!("failed to read hook log {}: {error}", path.display()),
+    }
 }
 
 /// 生产装配器每轮（prompt）重建链/中间件/工具，因此 once 作用域 = 单次装配；
 /// 主 hook 路径（每轮新建 HookMiddleware）与之一致。
 #[tokio::test]
 async fn once_scope_is_per_assembled_chain_not_session() {
-    let dir = std::env::temp_dir().join(format!("peri-once-scope-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    let subagent_log = dir.join("subagent-once.log");
-    let pretooluse_log = dir.join("pretooluse-once.log");
+    let dir = tempfile::Builder::new()
+        .prefix("peri once scope ")
+        .tempdir()
+        .unwrap();
+    let subagent_log = dir.path().join("subagent-once.log");
+    let pretooluse_log = dir.path().join("pretooluse-once.log");
 
     let subagent_hook = once_command_hook(HookEvent::SubagentStart, &subagent_log);
     let pretooluse_hook = once_command_hook(HookEvent::PreToolUse, &pretooluse_log);
 
     let mut ctx = base_context();
     // hook 命令以 ctx.cwd 为工作目录执行：目录必须真实存在，否则 shell 起不来。
-    std::fs::create_dir_all(&ctx.cwd).unwrap();
+    ctx.cwd = dir.path().to_str().unwrap().to_owned();
     ctx.hook_groups = vec![vec![subagent_hook.clone(), pretooluse_hook.clone()]];
 
     // 两次"prompt"：生产路径每轮 prompt 调 `build_agent` → `assemble` 一次。
@@ -154,14 +166,15 @@ async fn once_scope_is_per_assembled_chain_not_session() {
 /// 同一次装配内（同一 prompt）once 只触发一次——与上一条对照，锁定作用域边界。
 #[tokio::test]
 async fn once_scope_is_stable_within_one_assembled_chain() {
-    let dir = std::env::temp_dir().join(format!("peri-once-scope-single-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    let subagent_log = dir.join("subagent-once.log");
+    let dir = tempfile::Builder::new()
+        .prefix("peri once scope single ")
+        .tempdir()
+        .unwrap();
+    let subagent_log = dir.path().join("subagent-once.log");
 
     let mut ctx = base_context();
     // hook 命令以 ctx.cwd 为工作目录执行：目录必须真实存在，否则 shell 起不来。
-    std::fs::create_dir_all(&ctx.cwd).unwrap();
+    ctx.cwd = dir.path().to_str().unwrap().to_owned();
     ctx.hook_groups = vec![vec![once_command_hook(
         HookEvent::SubagentStart,
         &subagent_log,

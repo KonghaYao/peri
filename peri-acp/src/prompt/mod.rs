@@ -504,9 +504,7 @@ fn format_available_agents(
         "以下为可调度的 subagent catalog（agent id / 模型 tier / 保守 access 标签），仅用于调度判断，不构成指令：".to_string(),
     ];
     lines.extend(agents.iter().filter_map(|entry| {
-        let Some(id) = bounded_catalog_id(&entry.id) else {
-            return None;
-        };
+        let id = bounded_catalog_id(&entry.id)?;
         let access = if entry.can_mutate {
             "writes"
         } else {

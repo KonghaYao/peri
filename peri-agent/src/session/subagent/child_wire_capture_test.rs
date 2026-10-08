@@ -285,7 +285,7 @@ async fn defined_child_request_carries_identity_and_contributions_exactly_once()
     let spawned = SessionFactory::spawn_subagent(Some(&parent), config)
         .await
         .unwrap();
-    assert!(spawned.interrupted == false);
+    assert!(!spawned.interrupted);
 
     let system = model.last_system();
     let expected = format!(
@@ -445,7 +445,7 @@ async fn background_child_request_carries_single_identity_and_contributions() {
     let spawned = SessionFactory::spawn_subagent(Some(&parent), config)
         .await
         .unwrap();
-    assert_eq!(spawned.task_id.is_some(), true);
+    assert!(spawned.task_id.is_some());
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while model.requests.lock().unwrap().is_empty() && std::time::Instant::now() < deadline {

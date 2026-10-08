@@ -189,10 +189,16 @@ pub(super) async fn prepare_for_restore(
                     AcpError::new(-32603, "Legacy frozen candidate bytes are missing")
                 })?;
                 let candidate_bytes = FrozenSnapshotBytes::new(candidate);
+                let legacy = prepared.legacy.as_ref().ok_or_else(|| {
+                    AcpError::new(-32603, "Legacy adoption inputs are missing")
+                })?;
+                let saved_cwd = legacy.saved_cwd.to_str().ok_or_else(|| {
+                    AcpError::new(-32603, "Legacy saved cwd is not valid UTF-8")
+                })?;
                 // 原子 write-once 接纳：frozen 与 binding 一起成立；已有绑定/字节的
                 // 竞争输家不改写 winner。
                 resources
-                    .adopt_legacy_session(&id, &meta.cwd, &workspace, &candidate_bytes)
+                    .adopt_legacy_session(&id, saved_cwd, &workspace, &candidate_bytes)
                     .await
                     .map_err(resource_error)?;
                 let persisted = persisted_frozen_bytes(&resources, &id).await?;

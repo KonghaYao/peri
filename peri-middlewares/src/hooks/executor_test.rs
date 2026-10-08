@@ -46,7 +46,12 @@ async fn test_command_hook_echo_plain_text() {
 
 #[tokio::test]
 async fn test_command_hook_echo_input_json_is_rejected() {
-    let hook = make_command_hook("cat");
+    let command = if cfg!(windows) {
+        "[Console]::Out.Write([Console]::In.ReadToEnd())"
+    } else {
+        "cat"
+    };
+    let hook = make_command_hook(command);
     let input = make_hook_input();
     let registered = make_registered();
     let action = execute_command_hook(&hook, &input, &registered).await;

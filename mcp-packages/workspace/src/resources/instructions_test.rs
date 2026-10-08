@@ -468,5 +468,5 @@ fn local_document_read_failure_is_isolated_from_main() {
     let bundle = scan(dir.path(), &budget(), &[]);
     assert_eq!(bundle.main.expect("main").text, "main body");
     assert!(bundle.local.is_none(), "编码非法的 local 不贡献正文");
-    assert_eq!(bundle.index.documents[1].present, false);
+    assert!(!bundle.index.documents[1].present);
 }

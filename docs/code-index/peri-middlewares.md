@@ -232,6 +232,10 @@ scope 快照携 epoch；`taskClose`/`taskOpen` 按该 epoch 做 owner 端 CAS，
 
 ### Hooks（src/hooks/）
 
+CI 回归：`assembly_once_scope_test.rs` 用原生 shell 与 UTF-8 日志验证 once 作用域，
+临时工作目录覆盖含空格路径；SubAgent 宿主夹具位于
+`src/subagent/tool/tool_test/host_fixture.rs`，由 `tool_test.rs` 聚合导出。
+
 | 功能 | 入口/关键点 |
 | --- | --- |
 | 中间件 / 加载 | middleware.rs（HookMiddleware :46 / with_session_start :91）；loader.rs（:84/:176/:245） |

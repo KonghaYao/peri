@@ -369,30 +369,31 @@ async fn mid_loop_batch_prepares_only_new_inputs() {
     ctx.session.transcript.write().append(steering.clone());
     run_before_input(&ctx, &[steering.id()]).await.unwrap();
 
-    let transcript = ctx.session.transcript.read();
-    let messages = transcript.visible_messages();
-    assert_eq!(
-        reads.load(Ordering::SeqCst),
-        2,
-        "首批与中途批次各读一次，历史不重读"
-    );
-    assert!(
-        messages
-            .iter()
-            .any(|message| message.content().contains("first body")),
-        "首批内容仍在会话里"
-    );
-    assert_eq!(
-        messages
-            .iter()
-            .filter(|message| message.content().contains("steered body"))
-            .count(),
-        1,
-        "中途批次内容必须注入"
-    );
-    // 纯工具续跑（空批次）不再注入。
-    let before = messages.len();
-    drop(transcript);
+    let before = {
+        let transcript = ctx.session.transcript.read();
+        let messages = transcript.visible_messages();
+        assert_eq!(
+            reads.load(Ordering::SeqCst),
+            2,
+            "首批与中途批次各读一次，历史不重读"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.content().contains("first body")),
+            "首批内容仍在会话里"
+        );
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| message.content().contains("steered body"))
+                .count(),
+            1,
+            "中途批次内容必须注入"
+        );
+        // 纯工具续跑（空批次）不再注入。
+        messages.len()
+    };
     run_before_input(&ctx, &[]).await.unwrap();
     assert_eq!(
         ctx.session.transcript.read().visible_messages().len(),

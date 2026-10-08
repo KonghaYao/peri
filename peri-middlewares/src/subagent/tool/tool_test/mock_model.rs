@@ -52,16 +52,6 @@ impl RecordingModel {
             .map(|request| request.messages.clone())
             .unwrap_or_default()
     }
-
-    /// 最后一次请求的工具定义名集合。
-    pub(crate) fn last_tool_names(&self) -> Vec<String> {
-        self.requests
-            .lock()
-            .unwrap()
-            .last()
-            .map(|request| request.tools.iter().map(|tool| tool.name.clone()).collect())
-            .unwrap_or_default()
-    }
 }
 
 /// 提取请求中的 system 文本（按消息顺序拼接 `System` 段）。
