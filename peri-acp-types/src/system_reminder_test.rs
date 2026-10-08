@@ -73,6 +73,107 @@ fn filter_is_audience_aware_and_required_bypasses_preferences_only_in_declared_a
     assert!(!filter.allows(&trusted(reminder.clone()), ReminderAudience::Automation));
 }
 
+/// H8：出口（模型投影 / 客户端 wire / fallback / replay）使用的 DTO 规则必须与
+/// 生产侧 [`ReminderFilter::allows`] 完全一致，且 Required 不是广播。
+#[test]
+fn dto_rule_matches_trusted_rule_and_required_is_not_a_broadcast() {
+    let filter = ReminderFilter {
+        default_include: false,
+        exclude_sources: vec![ReminderSource("permission".into())],
+        ..Default::default()
+    };
+    let reminder = sample();
+    for audience in [
+        ReminderAudience::Model,
+        ReminderAudience::Tui,
+        ReminderAudience::Diagnostics,
+        ReminderAudience::Automation,
+    ] {
+        assert_eq!(
+            filter.allows(&trusted(reminder.clone()), audience),
+            filter.allows_dto(&reminder, audience),
+            "生产过滤与出口 DTO 规则必须同为一条规则"
+        );
+        assert_eq!(
+            filter.allows_dto(&reminder, audience),
+            reminder_delivered_to(&reminder, audience),
+            "出口便捷函数不得另立规则"
+        );
+    }
+    assert!(
+        !reminder_delivered_to(&reminder, ReminderAudience::Automation),
+        "未声明的受众即使 Required 也不得收到"
+    );
+    assert!(
+        reminder_delivered_to(&reminder, ReminderAudience::Model),
+        "Required 在声明受众内不被普通偏好屏蔽"
+    );
+
+    let mut client_only = reminder.clone();
+    client_only.delivery = ReminderDelivery::Configurable;
+    client_only.audiences = ReminderAudiences(vec![ReminderAudience::Tui]);
+    assert!(reminder_delivered_to(&client_only, ReminderAudience::Tui));
+    assert!(
+        !reminder_delivered_to(&client_only, ReminderAudience::Model),
+        "Tui-only 提醒不进入模型"
+    );
+
+    let mut model_only = reminder.clone();
+    model_only.delivery = ReminderDelivery::Configurable;
+    model_only.audiences = ReminderAudiences(vec![ReminderAudience::Model]);
+    assert!(!reminder_delivered_to(&model_only, ReminderAudience::Tui));
+
+    let mut diagnostic_only = reminder.clone();
+    diagnostic_only.delivery = ReminderDelivery::DiagnosticOnly;
+    diagnostic_only.audiences = ReminderAudiences(vec![
+        ReminderAudience::Model,
+        ReminderAudience::Tui,
+        ReminderAudience::Diagnostics,
+    ]);
+    assert!(!reminder_delivered_to(
+        &diagnostic_only,
+        ReminderAudience::Model
+    ));
+    assert!(!reminder_delivered_to(
+        &diagnostic_only,
+        ReminderAudience::Tui
+    ));
+    assert!(
+        !reminder_delivered_to(&diagnostic_only, ReminderAudience::Diagnostics),
+        "DiagnosticOnly 需要显式 allow_diagnostic_only，默认不进任何出口"
+    );
+}
+
+/// H8：出口只额外放行「引擎在出口就地投影的 Legacy 显示通知」，生产者过滤与
+/// 文本解析路径保持 fail closed。
+#[test]
+fn egress_rule_only_admits_locally_projected_legacy_display_notices() {
+    let legacy = crate::compact_reminder::legacy_compact_reminders(
+        &crate::messages::BaseMessage::human("[最近读取的文件: /a.rs]\n正文"),
+    );
+    let legacy = legacy.into_iter().next().expect("legacy projection");
+    assert_eq!(legacy.category, ReminderCategory::Legacy);
+
+    assert!(
+        !reminder_delivered_to(&legacy, ReminderAudience::Tui),
+        "生产者过滤仍然拒绝 Legacy"
+    );
+    assert!(
+        reminder_egress_allowed(&legacy, ReminderAudience::Tui),
+        "出口必须保留旧 Compact 文本回放的显示投影"
+    );
+    assert!(
+        !reminder_egress_allowed(&legacy, ReminderAudience::Diagnostics),
+        "出口放行不等于广播：未声明受众仍然拒绝"
+    );
+    assert!(
+        TrustedSystemReminderFactory::for_producer()
+            .construct(legacy.clone())
+            .is_err(),
+        "生产者永远不能构造 Legacy 可信提醒"
+    );
+}
+
 #[test]
 fn filter_applies_exact_source_category_and_severity_rules() {
     let mut reminder = sample();

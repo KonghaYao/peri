@@ -703,6 +703,21 @@ impl ReplaySender for TuiReplaySender<'_> {
         reminder: &peri_acp_types::system_reminder::SystemReminder,
         caps: &peri_acp_types::PeriCaps,
     ) -> Result<(), crate::dispatch::ReplayError> {
+        // H8：replay 与 live 共用同一条受众投递规则；未声明客户端受众的
+        // reminder（例如 Model-only recall）不得因回放而出现在 wire 上。
+        if !peri_acp_types::system_reminder::reminder_egress_allowed(
+            reminder,
+            peri_acp_types::system_reminder::ReminderAudience::Tui,
+        ) {
+            tracing::debug!(
+                session_id = %session_id,
+                source = %reminder.source,
+                kind = %reminder.kind,
+                delivery = ?reminder.delivery,
+                "replay: system reminder is not addressed to the client audience; nothing is sent"
+            );
+            return Ok(());
+        }
         let (event, data) = if caps.system_reminder {
             (
                 "system-reminder",

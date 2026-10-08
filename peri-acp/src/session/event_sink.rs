@@ -130,6 +130,22 @@ impl EventSink for TransportEventSink {
         reminder: &peri_acp_types::system_reminder::SystemReminder,
         replay: bool,
     ) {
+        // H8：客户端出口必须先按目标受众过滤；结构化事件与文本 fallback 使用
+        // 同一条规则，fallback 不得绕过过滤下发 Model-only 内容。
+        if !peri_acp_types::system_reminder::reminder_egress_allowed(
+            reminder,
+            peri_acp_types::system_reminder::ReminderAudience::Tui,
+        ) {
+            tracing::debug!(
+                session_id = %session_id,
+                source = %reminder.source,
+                kind = %reminder.kind,
+                delivery = ?reminder.delivery,
+                replay,
+                "system reminder is not addressed to the client audience; nothing is sent"
+            );
+            return;
+        }
         let caps = self
             .caps_registry
             .get(session_id)

@@ -85,6 +85,16 @@ async fn test_replay_persisted_history_publishes_final_assistant_in_order() {
                 .unwrap();
             Ok(())
         }
+
+        async fn send_system_reminder(
+            &self,
+            _session_id: &str,
+            _reminder: &peri_acp_types::system_reminder::SystemReminder,
+            _caps: &PeriCaps,
+        ) -> Result<(), ReplayError> {
+            // 本 fixture 只走标准 SessionUpdate 通道（历史里没有 canonical reminder）。
+            Ok(())
+        }
     }
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("history.db");

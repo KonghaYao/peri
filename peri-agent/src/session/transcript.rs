@@ -22,7 +22,9 @@ use crate::thread::ThreadId;
 use peri_acp_types::session_resources::{RewindBoundary, SessionResources};
 use peri_acp_types::store::history;
 use peri_acp_types::store::{MessageFlags, PersistedPayload};
-use peri_acp_types::system_reminder::{encode_system_reminder, TrustedSystemReminder};
+use peri_acp_types::system_reminder::{
+    encode_system_reminder, reminder_egress_allowed, ReminderAudience, TrustedSystemReminder,
+};
 
 use persistence::{PersistenceBudget, Reservation};
 
@@ -88,6 +90,20 @@ impl TranscriptEntry {
     pub fn message(&self) -> &BaseMessage {
         self.as_message()
             .expect("canonical reminder has no stored BaseMessage")
+    }
+
+    /// 该条目是否应向目标受众投递。
+    ///
+    /// 普通消息恒可见；canonical reminder 一律经 [`reminder_egress_allowed`] 的单一
+    /// 投递规则判定（`Required` 只在声明受众内不可被屏蔽，`DiagnosticOnly`
+    /// 默认只进 Diagnostics）。持久化保留 canonical reminder，过滤只发生在出口。
+    pub fn visible_to(&self, audience: ReminderAudience) -> bool {
+        match self {
+            Self::Message(_) => true,
+            Self::Reminder { reminder, .. } => {
+                reminder_egress_allowed(reminder.as_reminder(), audience)
+            }
+        }
     }
 
     /// Canonical model projection shared by normal Reason and compact rendering.
@@ -395,10 +411,14 @@ impl MessageTranscript {
     }
 
     /// Projects visible transcript entries for the model. Canonical reminders are encoded only here.
+    ///
+    /// 只有声明 [`ReminderAudience::Model`] 的 canonical reminder 进入模型请求；
+    /// Tui-only / Diagnostics-only / DiagnosticOnly 提醒既不编码也不投递。
     pub fn visible_model_messages(&self) -> anyhow::Result<Vec<BaseMessage>> {
         self.entries
             .iter()
             .filter(|entry| !self.flags(entry.id()).excluded)
+            .filter(|entry| entry.visible_to(ReminderAudience::Model))
             .map(TranscriptEntry::project_message)
             .collect()
     }
@@ -450,7 +470,9 @@ impl MessageTranscript {
     /// 获取所有**可见**消息的 owned Arc 快照（跳过 excluded 标记的消息）
     ///
     /// 用于在事件边界（如 `RenderEvent::TurnCompleted`）向 TUI/ACP 消费方传递
-    /// 权威 transcript 快照。
+    /// 权威 transcript 快照。这是客户端出口：只有声明
+    /// [`ReminderAudience::Tui`] 的 canonical reminder 进入快照，Model-only 内容
+    /// （如 recall）不得出现在客户端 wire 上。
     ///
     /// **注意**：构建快照时仍会逐条深拷贝消息本体（需要过滤 excluded 并取得
     /// 独立所有权，无法与内部 `entries` 直接共享）；Arc 只保证快照在后续
@@ -466,6 +488,7 @@ impl MessageTranscript {
                     Some(flags) => !flags.excluded,
                 }
             })
+            .filter(|entry| entry.visible_to(ReminderAudience::Tui))
             .map(|entry| entry.project_message().expect("validated transcript entry"))
             .collect();
         Arc::new(filtered)
