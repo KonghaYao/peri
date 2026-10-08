@@ -2,6 +2,18 @@ use super::*;
 use crate::session::{ExecutionBinding, MessageActivation, MessageDisposition, MessageRequirement};
 use crate::session_resources::ControlStatus;
 
+/// 调度要求与激活语义是否自洽。
+///
+/// 队列调度的 `Required` 与 reminder delivery 的 `Required` 分别建模：
+/// `model_visible` 只是"这条内容是否进入模型上下文"的受众事实，**不**参与本判定——
+/// 合法 Tui-only 的 Required 提醒（也必须经持久化投递）不得被当成非法转换拒绝，
+/// 也不得靠扩大受众绕过校验。真正矛盾的是"必须处理"却声明 `Passive`：
+/// 这样的投递等不到任何处理机会，工具结果/提醒会永久挂起。
+pub(super) fn disposition_is_consistent(policy: &MessagePolicy) -> bool {
+    !(policy.requirement == MessageRequirement::Required
+        && policy.activation == MessageActivation::Passive)
+}
+
 pub(super) fn publish(
     command: &WorkCommand,
     control: &ControlState,
@@ -18,10 +30,7 @@ pub(super) fn publish(
     {
         return Err(WorkRejection::InvalidTransition);
     }
-    if delivery.policy.requirement == MessageRequirement::Required
-        && (!delivery.policy.model_visible
-            || delivery.policy.activation == MessageActivation::Passive)
-    {
+    if !disposition_is_consistent(&delivery.policy) {
         return Err(WorkRejection::InvalidTransition);
     }
     for (delivery_id, prior) in &state.deliveries {
