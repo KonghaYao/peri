@@ -319,7 +319,7 @@ fn make_session() -> std::sync::Arc<session::Session> {
 fn capability_from_yaml(yaml: &str) -> AgentCapability {
     let content = format!("---\n{}\n---\n\nbody", yaml);
     let agent = parse_agent_file(&content).expect("agent frontmatter 应能解析");
-    infer_agent_capability(&agent.frontmatter)
+    infer_agent_capability(&agent.frontmatter).expect("夹具档位必须合法")
 }
 
 /// [回归测试] D5：omitted tools（继承父工具）+ 仅 disallow Write/Edit，
@@ -638,4 +638,34 @@ fn subagent_section_declaration_shape() {
             && content.contains("verify the loaded definition before choosing parallelism"),
         "缺少 metadata 时必须验证定义或保守执行"
     );
+}
+
+/// [M2] frontmatter `model` 未知档位必须 typed 拒绝（不静默回退父模型）。
+#[test]
+fn test_capability_rejects_unknown_model_tier() {
+    let content = "---\nname: a\ndescription: d\nmodel: turbo\n---\n\nbody";
+    let agent = parse_agent_file(content).expect("agent frontmatter 应能解析");
+    assert_eq!(
+        infer_agent_capability(&agent.frontmatter).unwrap_err(),
+        InvalidModelTier,
+        "未知档位必须 typed 拒绝"
+    );
+}
+
+/// [M2] 档位大小写归一：`SoNnEt` → `sonnet`；`InHerit`/空串 → inherit。
+#[test]
+fn test_capability_normalizes_known_tiers_case_insensitively() {
+    for (raw, expected) in [
+        ("SoNnEt", "sonnet"),
+        ("HAIKU", "haiku"),
+        ("InHerit", "inherit"),
+        ("", "inherit"),
+    ] {
+        let capability = capability_from_yaml(&format!("name: a\ndescription: d\nmodel: {raw}\n"));
+        assert_eq!(
+            capability.model_tier.catalog_label(),
+            expected,
+            "档位 {raw:?} 应归一为 {expected}"
+        );
+    }
 }

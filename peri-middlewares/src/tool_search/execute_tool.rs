@@ -36,6 +36,15 @@ fn resolve_extra_tool_target(
             reason,
         })?;
     let target = DirectToolInvocationResolver.resolve_target(&target_name, tools)?;
+    // H5：解析成功不等于可派发。`visible_to_model()` 是所有模型面入口的统一否决，
+    // 在目标解析后、实际 invoke 前复检——覆盖猜名 / 别名 / 大小写变体与陈旧索引
+    // （索引构建已过滤，但索引不是执行授权）。App 合法调用不经本元工具。
+    if !target.visible_to_model() {
+        return Err(AgentError::ToolExecutionFailed {
+            tool: EXECUTE_EXTRA_TOOL_NAME.to_string(),
+            reason: format!("tool '{target_name}' is not available to the model in this session"),
+        });
+    }
     let normalized = peri_agent::tools::normalize_params(params, Some(target.as_ref()));
     Ok((target, normalized))
 }

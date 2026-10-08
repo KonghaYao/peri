@@ -129,11 +129,22 @@ impl super::SubAgentTool {
                 }
                 Some(tier)
             }
-            None => agent_def
-                .frontmatter
-                .model
-                .clone()
-                .filter(|m| !m.is_empty() && *m != "inherit"),
+            // M2：定义侧档位必须已验证（registry 激活已校验；此处是执行边界的
+            // 防御性复检，杜绝绕过注册表的定义把未知值交给工厂静默回退父模型）。
+            None => {
+                let selection =
+                    peri_acp_types::agents::AgentModelSelection::parse(
+                        agent_def.frontmatter.model.as_deref(),
+                    )
+                    .map_err(|_| {
+                        format!(
+                            "Error: agent definition '{}' declares an unsupported model tier. Available: inherit, {}",
+                            agent_name,
+                            MODEL_TIERS.join(", ")
+                        )
+                    })?;
+                selection.tier_alias().map(str::to_string)
+            }
         };
         let llm = (self.llm_factory)(model_alias.as_deref());
 

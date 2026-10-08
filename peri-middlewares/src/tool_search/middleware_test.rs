@@ -13,6 +13,7 @@ struct MockTool {
     name_str: String,
     desc_str: String,
     direct: bool,
+    model_visible: bool,
     decl: Option<String>,
     mcp_source: Option<&'static str>,
     namespace: Option<&'static str>,
@@ -24,6 +25,7 @@ impl MockTool {
             name_str: name.to_string(),
             desc_str: desc.to_string(),
             direct: false,
+            model_visible: true,
             decl: None,
             mcp_source: None,
             namespace: None,
@@ -33,6 +35,12 @@ impl MockTool {
     /// 标记为 LLM 可见（direct）工具。
     fn with_direct(mut self) -> Self {
         self.direct = true;
+        self
+    }
+
+    /// app-only：宿主可调用（dispatch/HITL 面不变），但不得投影给模型。
+    fn with_model_invisible(mut self) -> Self {
+        self.model_visible = false;
         self
     }
 
@@ -66,6 +74,9 @@ impl BaseTool for MockTool {
     }
     fn is_direct(&self) -> bool {
         self.direct
+    }
+    fn visible_to_model(&self) -> bool {
+        self.model_visible
     }
     fn mcp_server_name(&self) -> Option<&str> {
         self.mcp_source
@@ -660,5 +671,114 @@ async fn test_before_agent_no_declarations_without_prompt_declaration() {
     assert!(
         !contribution.contains("Read a file"),
         "未声明工具不得出现在声明段"
+    );
+}
+
+/// [回归测试] H5：`visible_to_model() == false`（app-only）的工具不得进入
+/// 任何模型面投影——deferred 索引 / deferred 列表 / direct 声明段 / 元工具描述。
+///
+/// 历史背景：direct 面已按 `is_direct() && visible_to_model()` 排除，但
+/// ToolSearch 索引与元工具描述只按 `is_direct()` 分界，server 声明的
+/// 「仅 app 可用」能力仍可被检索并执行（`tool_search/middleware.rs`）。
+/// app-only 工具在宿主注册表中保持可派发（App 合法调用路径不由本修复改变），
+/// 本用例只锁模型面不可见。
+#[tokio::test]
+async fn app_only_tools_are_absent_from_index_lists_and_declarations() {
+    let index = Arc::new(ToolSearchIndex::new());
+    let mut shared = BTreeMap::new();
+    // app-only deferred：索引与 deferred 列表都必须看不到。
+    shared.insert(
+        "AppOnlyDeferred".to_string(),
+        Arc::new(
+            MockTool::new("AppOnlyDeferred", "app only deferred capability").with_model_invisible(),
+        ) as Arc<dyn BaseTool>,
+    );
+    // app-only direct：direct 名单与声明段都必须看不到。
+    shared.insert(
+        "AppOnlyDirect".to_string(),
+        Arc::new(
+            MockTool::new("AppOnlyDirect", "app only direct capability")
+                .with_direct()
+                .with_model_invisible()
+                .with_prompt_declaration("app-only-directive {{name}} AppOnlyDirectMarker"),
+        ) as Arc<dyn BaseTool>,
+    );
+    // 正向对照：模型可见的 deferred / direct 必须照旧出现。
+    shared.insert(
+        "VisibleDeferred".to_string(),
+        Arc::new(MockTool::new("VisibleDeferred", "model visible deferred")) as Arc<dyn BaseTool>,
+    );
+    shared.insert(
+        "VisibleDirect".to_string(),
+        Arc::new(
+            MockTool::new("VisibleDirect", "model visible direct")
+                .with_direct()
+                .with_prompt_declaration("visible-directive {{name}} VisibleDirectMarker"),
+        ) as Arc<dyn BaseTool>,
+    );
+    let shared = Arc::new(RwLock::new(shared));
+    let mw = ToolSearchMiddleware::new(Arc::clone(&index), Arc::clone(&shared));
+    // 生产顺序：宿主先 merge `collect_tools` 的 meta 工具，再在 rebind 时替换。
+    for tool in <ToolSearchMiddleware as Middleware>::collect_tools(&mw, "/tmp") {
+        let name = tool.name().to_string();
+        shared.write().insert(name, Arc::from(tool));
+    }
+
+    let mut state = peri_agent::agent::state::AgentState::new("/tmp");
+    mw.before_agent(&mut state).await.unwrap();
+
+    // 1) 检索投影：精确名（select:）不得命中 app-only 工具；关键词查询即使
+    // 匹配其描述/正文也不得返回（关键词面按分数排序返回候选，不保证空集）。
+    for query in ["select:AppOnlyDeferred", "select:AppOnlyDirect"] {
+        assert!(
+            index.search(query, 10).is_empty(),
+            "app-only 工具不得进入检索投影（query={query}）"
+        );
+    }
+    let keyword_hits: Vec<String> = index
+        .search("app only capability", 10)
+        .into_iter()
+        .map(|result| result.name)
+        .collect();
+    assert!(
+        !keyword_hits
+            .iter()
+            .any(|name| name == "AppOnlyDeferred" || name == "AppOnlyDirect"),
+        "关键词检索不得返回 app-only 工具: {keyword_hits:?}"
+    );
+    assert_eq!(
+        index.search("select:VisibleDeferred", 10).len(),
+        1,
+        "模型可见的 deferred 工具必须保持可检索（正向用例）"
+    );
+
+    // 2) deferred 列表与 direct 声明段：app-only 名字一律不出现。
+    let prompt = contribution(&mw).expect("模型可见工具存在时必须有贡献");
+    assert!(
+        prompt.contains("VisibleDeferred") && prompt.contains("VisibleDirectMarker"),
+        "正向对照工具必须仍在投影内: {prompt}"
+    );
+    for hidden in ["AppOnlyDeferred", "AppOnlyDirectMarker"] {
+        assert!(
+            !prompt.contains(hidden),
+            "app-only 工具 {hidden} 不得出现在模型面投影: {prompt}"
+        );
+    }
+
+    // 3) 元工具描述：direct 工具清单只含模型可见项。
+    let search_description = shared.read()["SearchExtraTools"].description().to_string();
+    assert!(
+        search_description.contains("VisibleDirect"),
+        "模型可见 direct 工具应出现在 SearchExtraTools 描述: {search_description}"
+    );
+    assert!(
+        !search_description.contains("AppOnlyDirect"),
+        "app-only direct 工具不得出现在元工具描述: {search_description}"
+    );
+
+    // 4) app-only 工具仍在宿主注册表内（App 合法调用路径不被本修复删除）。
+    assert!(
+        shared.read().contains_key("AppOnlyDeferred"),
+        "app-only 工具必须保留在共享注册表中，不得从底层注册删除"
     );
 }
