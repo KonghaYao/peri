@@ -47,6 +47,7 @@ draft、proposal、可行性探查、审计报告和未采纳方案不进入本�
 | TUI 流式 Markdown 性能 | [tui-streaming-markdown-performance.md](tui-streaming-markdown-performance.md) | publication scheduler、lazy projection、增量 Markdown 与 slot index |
 | Git Watch 中间件 | [git-watch-middleware.md](git-watch-middleware.md) | 分支/HEAD 变化 Info 注入（异步采样 + 60s 节流） |
 | System Reminder | [system-reminder.md](system-reminder.md) | canonical DTO、可信生产、队列/持久化、ACP/TUI 投影与 legacy fallback |
+| Beta Flag 系统 | [beta-flags.md](beta-flags.md) | 注册表、`config.betas` 配置面投影与装配期消费注入；不做远程下发、灰度与会话内热生效，安全与兼容语义不使用 flag；验收记录与剩余跟进项见 [2026-10-08 实施 issue](../../spec/issues/2026-10-08-beta-flags-implementation.md) |
 
 ## 已批准目标设计
 
@@ -59,7 +60,6 @@ draft、proposal、可行性探查、审计报告和未采纳方案不进入本�
 | Command 系统 | [command-system.md](command-system.md) | 对应 command active issue 与代码 |
 | TUI Chat Workbench | [tui-chat-workbench.md](tui-chat-workbench.md) | `spec/history/2026-08.md`（2026-08-10 条目） |
 | SubAgent 活动行 | [tui-subagent-activity.md](tui-subagent-activity.md) | TUI redesign active issue |
-| Beta Flag 系统 | [beta-flags.md](beta-flags.md) | [实施 issue](../../spec/issues/2026-10-08-beta-flags-implementation.md)；注册表、配置面接入与消费注入尚未落地 |
 
 ## 维护要求
 
