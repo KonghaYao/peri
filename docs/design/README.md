@@ -59,6 +59,7 @@ draft、proposal、可行性探查、审计报告和未采纳方案不进入本�
 | Command 系统 | [command-system.md](command-system.md) | 对应 command active issue 与代码 |
 | TUI Chat Workbench | [tui-chat-workbench.md](tui-chat-workbench.md) | `spec/history/2026-08.md`（2026-08-10 条目） |
 | SubAgent 活动行 | [tui-subagent-activity.md](tui-subagent-activity.md) | TUI redesign active issue |
+| Beta Flag 系统 | [beta-flags.md](beta-flags.md) | [实施 issue](../../spec/issues/2026-10-08-beta-flags-implementation.md)；注册表、配置面接入与消费注入尚未落地 |
 
 ## 维护要求
 
