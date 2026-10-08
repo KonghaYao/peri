@@ -59,7 +59,7 @@ async fn background_subagent_panic_settles_and_logs() {
         let mut config = tail_spawn_config(MockSessionResources::new(), TailOutcome::Completed);
         config.run_mode = SubagentRunMode::Background;
         config.task_manager = Some(manager.clone());
-        config.on_subagent_start = Some(Arc::new(|_, _| panic!("后台执行测试 panic")));
+        config.on_subagent_start = Some(Arc::new(|_, _, _| panic!("后台执行测试 panic")));
         let results = Arc::new(parking_lot::Mutex::new(Vec::new()));
         if with_callback {
             let results = results.clone();
@@ -107,7 +107,7 @@ async fn subagent_terminal_write_failure_logs_and_continues() {
         let manager = Arc::new(TaskManager::new());
         let mut config = tail_spawn_config(store.clone(), TailOutcome::Completed);
         let stopped_store = store.clone();
-        config.on_subagent_stop = Some(Arc::new(move |_, _, _, _| {
+        config.on_subagent_stop = Some(Arc::new(move |_, _, _, _, _| {
             // 只在最后的状态 patch 前注入失败，不干扰执行与持久化结算。
             stopped_store.restrict_to_history_read_only();
         }));
