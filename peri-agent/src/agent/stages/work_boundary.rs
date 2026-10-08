@@ -65,7 +65,7 @@ impl WorkBoundary {
         Self::new(WorkMode::BestEffortFixture)
     }
 
-    #[cfg(any(test, feature = "test-fixtures"))]
+    #[cfg(test)]
     pub(crate) fn is_best_effort_fixture(&self) -> bool {
         self.mode == WorkMode::BestEffortFixture
     }
