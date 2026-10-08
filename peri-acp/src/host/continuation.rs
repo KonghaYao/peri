@@ -81,9 +81,6 @@ pub(crate) fn take_continuation_for_request(
             state.continuation_mq_steering_pending = true;
             return None;
         }
-        if state.continuation_mq_steering_pending {
-            return None;
-        }
         state.continuation_mq_steering_pending = true;
         return Some(state.continuation_epoch);
     }
@@ -348,7 +345,7 @@ pub(crate) async fn run_continuation_scheduler(
         let cfg2 = Arc::clone(&cfg);
         let transport2 = Arc::clone(&transport);
         let cont_tx2 = cont_tx.clone();
-        let _ = task_spawner.spawn(
+        let admitted = task_spawner.spawn(
             HostTaskOwnerKind::Session,
             HostTaskKind::ContinuationTurn,
             async move {
@@ -358,7 +355,7 @@ pub(crate) async fn run_continuation_scheduler(
                 // dispatch_prompt_turn 在获取同一把 prompt lock 后校验 epoch 和
                 // SubAgentComplete Defer，避免本处预先持锁后再次获取导致死锁。
                 let params = continuation_params(&session_id);
-                let _ = dispatch_prompt_turn(
+                let result = dispatch_prompt_turn(
                     params,
                     super::PromptOrigin::Continuation {
                         mq_steering: req.mq_steering,
@@ -371,6 +368,9 @@ pub(crate) async fn run_continuation_scheduler(
                     cont_tx2.as_ref(),
                 )
                 .await;
+                if let Err(error) = result {
+                    tracing::error!(session_id = %session_id, code = error.code, error = %error.message, "continuation dispatch failed");
+                }
                 super::user_input::schedule_mailbox(
                     &session_id,
                     &sessions2,
@@ -381,6 +381,9 @@ pub(crate) async fn run_continuation_scheduler(
                 );
             },
         );
+        if let Err(error) = admitted {
+            tracing::error!(session_id = %req.session_id, error = ?error, "continuation task admission failed");
+        }
     }
 }
 

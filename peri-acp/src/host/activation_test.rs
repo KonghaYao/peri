@@ -270,6 +270,81 @@ async fn listener_rechecks_existing_work_and_does_not_activate_info() {
 
 #[tokio::test]
 #[serial]
+async fn empty_queued_continuation_does_not_block_the_next_child_result() {
+    let harness = ActivationHarness::new().await;
+    let queue = harness
+        .cfg
+        .session_manager
+        .v2_queue_for(&harness.session_id)
+        .unwrap();
+    harness
+        .cfg
+        .session_manager
+        .get_session(&harness.session_id)
+        .unwrap()
+        .activation
+        .allow();
+    harness.complete_child("first-child");
+    let request = crate::session::executor::ContinuationRequest {
+        session_id: harness.session_id.clone(),
+        kind: BgTaskKind::Agent,
+        mq_steering: true,
+    };
+    let epoch = {
+        let mut sessions = harness.sessions.lock().await;
+        crate::host::continuation::take_continuation_for_request(
+            sessions.get_mut(&harness.session_id).unwrap(),
+            &request,
+        )
+        .unwrap()
+    };
+    assert_eq!(queue.drain_all().len(), 1);
+    let params =
+        json!({"sessionId": harness.session_id, "message": {"role": "user", "content": []}});
+    let empty = crate::host::dispatch_prompt_turn(
+        params.clone(),
+        crate::host::PromptOrigin::Continuation { mq_steering: true },
+        Some(epoch),
+        &harness.sessions,
+        &harness.locks,
+        &harness.transport,
+        &harness.cfg,
+        &harness.sender,
+    )
+    .await
+    .unwrap();
+    assert!(empty.is_null());
+    harness.complete_child("next-child");
+    let next_epoch = {
+        let mut sessions = harness.sessions.lock().await;
+        crate::host::continuation::take_continuation_for_request(
+            sessions.get_mut(&harness.session_id).unwrap(),
+            &request,
+        )
+    };
+    assert_eq!(next_epoch, Some(epoch), "空跑不能永久占用下一次续跑准入");
+    let response = crate::host::dispatch_prompt_turn(
+        params,
+        crate::host::PromptOrigin::Continuation { mq_steering: true },
+        next_epoch,
+        &harness.sessions,
+        &harness.locks,
+        &harness.transport,
+        &harness.cfg,
+        &harness.sender,
+    )
+    .await
+    .unwrap();
+    assert_eq!(response["stopReason"], "end_turn");
+    assert!(queue.is_empty());
+    harness
+        .cfg
+        .session_manager
+        .pre_close_session(&harness.session_id);
+}
+
+#[tokio::test]
+#[serial]
 async fn cancellation_allows_one_child_continuation_but_never_restarts_cancelled_continuation() {
     let mut harness = ActivationHarness::new().await;
     harness
