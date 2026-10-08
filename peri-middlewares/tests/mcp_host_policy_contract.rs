@@ -62,7 +62,7 @@ use peri_agent::{
     },
     middleware::{capabilities as hook_state, r#trait::Middleware, MiddlewareChain},
     session::{tool_catalog::SessionToolCatalog, FrozenContext, Session},
-    tools::{BaseTool, ToolContext},
+    tools::{BaseTool, ToolContext, ToolInvocationResolver},
 };
 use peri_middlewares::{
     mcp::{ClientStatus, McpClientHandle, McpClientPool, McpToolBridge, OAuthStatus},
@@ -70,13 +70,16 @@ use peri_middlewares::{
         default_requires_approval, PermissionMiddleware, PermissionMode, SharedPermissionMode,
     },
     tool_search::{
-        SearchExtraTools, ToolSearchIndex, ToolSearchMiddleware, EXECUTE_EXTRA_TOOL_NAME,
-        SEARCH_EXTRA_TOOLS_NAME,
+        ExecuteExtraTool, SearchExtraTools, ToolSearchIndex, ToolSearchMiddleware,
+        EXECUTE_EXTRA_TOOL_NAME, SEARCH_EXTRA_TOOLS_NAME,
     },
     ExecuteExtraToolResolver,
 };
 use rmcp::{
-    model::{ClientCapabilities, Implementation, InitializeRequestParams},
+    model::{
+        CallToolRequestParams, ClientCapabilities, Implementation, InitializeRequestParams,
+        JsonObject,
+    },
     service::{serve_client_with_lifecycle, ClientLifecycleMode, RoleClient, RunningService},
     transport::async_rw::AsyncRwTransport,
 };
@@ -90,6 +93,8 @@ const FIXTURE_SERVER: &str = "host-fixture";
 const FIXTURE_SESSION: &str = "host-policy-session";
 const REQUIRED_TOOL: &str = "write_note";
 const DEFERRED_TOOL: &str = "read_note";
+/// `_meta.ui.visibility = ["app"]`：server 声明的「仅 App 可用」工具（H5）。
+const APP_ONLY_TOOL: &str = "app_only_note";
 
 fn effective_name(tool: &str) -> String {
     format!("mcp__{FIXTURE_SERVER}__{tool}")
@@ -133,7 +138,7 @@ struct Fixture {
     log: Arc<WireLog>,
     pool: Arc<McpClientPool>,
     _task_manager: Arc<dyn peri_acp_types::tasks::TaskManager>,
-    _service: RunningService<RoleClient, InitializeRequestParams>,
+    service: RunningService<RoleClient, InitializeRequestParams>,
 }
 
 impl Fixture {
@@ -174,6 +179,15 @@ async fn spawn_fixture(blocking_call: bool) -> Fixture {
                 "properties": {"id": {"type": "string"}}
             }),
         ),
+        json!({
+            "name": APP_ONLY_TOOL,
+            "description": "App 专用笔记面板（server 声明仅 app 可见）",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"id": {"type": "string"}}
+            },
+            "_meta": {"ui": {"visibility": ["app"]}}
+        }),
     ];
     let release = blocking_call.then(|| Arc::new(tokio::sync::Notify::new()));
     let log = Arc::new(WireLog {
@@ -223,7 +237,7 @@ async fn spawn_fixture(blocking_call: bool) -> Fixture {
         log,
         pool,
         _task_manager: task_manager,
-        _service: service,
+        service,
     }
 }
 
@@ -867,6 +881,96 @@ async fn deferred_mcp_bridge_is_reachable_only_through_tool_search() {
         fixture.log.called_tool_names(),
         vec![DEFERRED_TOOL.to_string()],
         "deferred 调用必须落到所属 namespace 的裸 MCP 工具名上，且只有一次"
+    );
+}
+
+/// 能力：H5 app-only 否决（wire 记账 + 模型面）。
+///
+/// server 以 `_meta.ui.visibility = ["app"]` 声明的工具：不进模型直连表；
+/// 经 `ExecuteExtraTool` 按名（含大小写变体）强行调用在解析阶段失败且 wire
+/// 零 `tools/call`；同 fixture 的模型可见 deferred 目标解析成功，wire 记账通路
+/// 以一次对照调用自证存活（索引/列表/元工具描述面由 tool_search 单元用例覆盖）。
+#[tokio::test]
+async fn app_only_mcp_bridge_is_invisible_and_rejected_before_any_wire_call() {
+    let fixture = spawn_fixture(false).await;
+    let app_only = fixture.bridge(APP_ONLY_TOOL);
+    let visible = fixture.bridge(DEFERRED_TOOL);
+    assert!(!app_only.visible_to_model(), "fixture 自检：app-only 生效");
+    assert!(visible.visible_to_model(), "fixture 自检：对照工具模型可见");
+
+    let app_only_effective = effective_name(APP_ONLY_TOOL);
+    let visible_effective = effective_name(DEFERRED_TOOL);
+    let mut tools = bridge_tools(&[app_only, visible]);
+    tools.insert(
+        EXECUTE_EXTRA_TOOL_NAME.to_string(),
+        Arc::new(ExecuteExtraTool::new(Arc::new(RwLock::new(tools.clone())))),
+    );
+
+    // (a) direct 面（Reason 阶段同一谓词）不含 app-only。
+    let direct = direct_definition_names(
+        &SessionToolCatalog::try_new(tools.clone(), None)
+            .expect("fixture catalog must build")
+            .snapshot(),
+    );
+    assert!(
+        !direct.contains(&app_only_effective),
+        "app-only 工具不得进入模型直连工具列表: {direct:?}"
+    );
+
+    // (b) 按名强行调用（含大小写变体）必须在解析阶段失败，且 wire 零调用。
+    let resolver = ExecuteExtraToolResolver::default();
+    let resolve_call = |name: &str| {
+        resolver.resolve(
+            &ToolCall::new(
+                "call-target",
+                EXECUTE_EXTRA_TOOL_NAME,
+                json!({"tool_name": name, "params": {"id": "n1"}}),
+            ),
+            &tools,
+        )
+    };
+    assert!(
+        resolve_call(&app_only_effective).is_err()
+            && resolve_call(&app_only_effective.to_uppercase()).is_err(),
+        "app-only 工具必须在解析阶段被拒绝（精确名与大小写变体）"
+    );
+    assert!(
+        fixture.log.calls().is_empty(),
+        "app-only 工具不得触发任何真实 MCP tools/call: {:?}",
+        fixture.log.calls()
+    );
+
+    // (c) 正向对照：模型可见 deferred 目标解析成功。
+    let invocation = resolve_call(&visible_effective).expect("模型可见 deferred 目标必须解析成功");
+    assert_eq!(invocation.policy_call.name, visible_effective);
+
+    // (d) wire 记账通路存活证明：(b) 的零调用是「否决生效」而非「通路坏了」。
+    let params = CallToolRequestParams::new(DEFERRED_TOOL.to_string())
+        .with_arguments(JsonObject::from_iter([("id".to_string(), json!("n1"))]));
+    fixture
+        .service
+        .call_tool_once(params)
+        .await
+        .expect("control wire call must succeed");
+    assert_eq!(
+        fixture.log.called_tool_names(),
+        vec![DEFERRED_TOOL.to_string()],
+        "对照调用必须恰好记账一次"
+    );
+
+    // (e) app-only 持续被拒绝、不追加 wire 调用，bridge 仍在注册表内。
+    assert!(
+        resolve_call(&app_only_effective).is_err(),
+        "app-only 目标必须持续被拒绝"
+    );
+    assert_eq!(
+        fixture.log.called_tool_names(),
+        vec![DEFERRED_TOOL.to_string()],
+        "app-only 解析失败不得追加 wire 调用"
+    );
+    assert!(
+        tools.contains_key(&app_only_effective),
+        "app-only bridge 必须保留在共享注册表中（App 合法调用路径）"
     );
 }
 
