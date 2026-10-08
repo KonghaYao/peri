@@ -51,6 +51,22 @@ pub(crate) fn skill_registry_unwired_message(name: &str) -> String {
     format!("SkillTool: MCP skill registry is not wired; cannot activate '{name}'")
 }
 
+/// 技能目录不可用（registry 未装配）：稳定、可操作，不泄露内部实现串
+/// （L2：不再暴露 `before_agent may not have run` 之类的装配细节）。
+pub(crate) fn skill_catalog_unavailable_message() -> String {
+    "The skill catalog is not available in this session (no skill provider is connected), \
+     so skills cannot be discovered or loaded. Continue without skills, or start the session \
+     with a Workspace connection that serves skills."
+        .to_string()
+}
+
+/// 技能目录尚未就绪（发现任务未收口）：**不**把空投影当空目录（L2）。
+pub(crate) fn skill_catalog_initializing_message() -> String {
+    "The skill catalog is still initializing for this session (skill discovery is in \
+     progress), so the catalog is not ready yet. Retry later, or continue without skills."
+        .to_string()
+}
+
 /// 名称未命中（含别名/全名/裸名全部形态）。
 pub(crate) fn skill_not_found_message(name: &str) -> String {
     format!("Skill '{name}' not found. Use DiscoverSkillsTool to see available skills.")
@@ -71,6 +87,15 @@ pub(crate) fn skill_activation_failed_message(name: &str, reason: &str) -> Strin
     format!("SkillTool: cannot activate '{name}' ({reason})")
 }
 
+/// 预载预算（条数 / 单项 / 整批字节）挡下：**不加载截断正文冒充完整指令**，
+/// 改为可操作的缺口回执——模型可以按需用 `SkillTool` 重新加载。
+pub(crate) fn skill_preload_budget_message(name: &str, reason: &str) -> String {
+    format!(
+        "SkillTool: '{name}' was not preloaded ({reason}). \
+         Call SkillTool('{name}') to load it on demand."
+    )
+}
+
 /// SkillsMiddleware — 渐进式 Skills 摘要注入（J5：零文件系统依赖）。
 ///
 /// 数据源只有一个：会话级 [`McpSkillRegistry`]（workspace 实例承担本地三根 /
@@ -88,8 +113,6 @@ pub struct SkillsMiddleware {
     frozen_summary: Option<String>,
     /// Cached prompt contribution (populated in before_agent, returned by prompt_contribution).
     cached_contribution: Arc<RwLock<Option<String>>>,
-    /// Session 级 skills 列表缓存：由 before_agent 从 MCP registry 投影填充。
-    cached_skills: Arc<RwLock<Option<Vec<SkillMetadata>>>>,
     /// MCP 远端技能注册表（None = 未装配技能面：投影为空，不回退任何本地来源）。
     mcp_registry: Option<Arc<McpSkillRegistry>>,
 }
@@ -146,7 +169,6 @@ impl SkillsMiddleware {
         Self {
             frozen_summary: None,
             cached_contribution: Arc::new(RwLock::new(None)),
-            cached_skills: Arc::new(RwLock::new(None)),
             mcp_registry: None,
         }
     }
@@ -161,20 +183,14 @@ impl SkillsMiddleware {
     /// 注入 session/new 时冻结的 skills 摘要（system 来源的元数据快照渲染）。
     /// 设置后 summary contribution 在会话内保持稳定（ARC-FROZEN-001 的投递面）。
     ///
-    /// 注意：仅填充 cached_contribution，不填充 cached_skills——后者每轮由
-    /// registry 投影刷新（工具面看到的始终是当前目录）。
+    /// 只影响 prompt 贡献；工具面（`SkillTool` / `DiscoverSkillsTool`）在调用时
+    /// 直接读 registry 的当前投影，不经过任何中间缓存。
     pub fn with_frozen_summary(mut self, summary: String) -> Self {
         self.frozen_summary = Some(summary.clone());
         if !summary.trim().is_empty() {
             *self.cached_contribution.write().unwrap() = Some(summary);
         }
         self
-    }
-
-    /// 获取 skills 缓存的 Arc 引用，供本中间件提供的 SkillTool /
-    /// DiscoverSkillsTool 及调用方共享。
-    pub fn skills_cache(&self) -> Arc<RwLock<Option<Vec<SkillMetadata>>>> {
-        Arc::clone(&self.cached_skills)
     }
 
     /// skill 来源标签（build_summary / DiscoverSkillsTool 共用）。
@@ -267,33 +283,18 @@ impl Middleware for SkillsMiddleware {
 
     fn collect_tools(&self, _cwd: &str) -> Vec<Box<dyn BaseTool>> {
         vec![
-            Box::new(tools::SkillTool::new(
-                Arc::clone(&self.cached_skills),
-                self.mcp_registry.clone(),
-            )),
-            Box::new(tools::DiscoverSkillsTool::new(Arc::clone(
-                &self.cached_skills,
-            ))),
+            Box::new(tools::SkillTool::new(self.mcp_registry.clone())),
+            Box::new(tools::DiscoverSkillsTool::new(self.mcp_registry.clone())),
         ]
     }
 
     async fn before_agent(&self, _state: &mut dyn hook_state::BeforeAgentState) -> AgentResult<()> {
-        // W4b（F2）：本地扫描与合并调用点已全部删除——目录**只**由 MCP registry
-        // 投影填充（workspace 实例承担本地来源，外部 origin 原样）。未装配
-        // registry 时投影为空，不回退磁盘（J5：无 FS fallback）。
-        let projected = self
-            .mcp_registry
-            .as_ref()
-            .map(|registry| registry.all_skills())
-            .unwrap_or_default();
-        *self.cached_skills.write().unwrap() = if projected.is_empty() {
-            None
-        } else {
-            Some(projected)
-        };
-
         // 投递面（J1）：冻结摘要优先（会话内不变）；未冻结时只用系统来源的当前
         // 投影渲染——非 system 来源保持既有延迟发现语义，不自动改 prompt。
+        //
+        // M8/L2：工具面不再消费 before_agent 时刻的目录副本——`SkillTool` /
+        // `DiscoverSkillsTool` 在调用时读取 registry 的当前投影，因此这里只维护
+        // prompt 贡献（「空投影 → None」的歧义缓存一并删除）。
         if let Some(ref summary) = self.frozen_summary {
             *self.cached_contribution.write().unwrap() = if summary.trim().is_empty() {
                 None

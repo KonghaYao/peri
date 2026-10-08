@@ -1,7 +1,7 @@
 //! `SkillsMiddleware` 测试（W4b 后：零文件系统依赖，目录只来自 MCP registry）。
 //!
 //! 覆盖：配置位读取（F12）、摘要渲染与来源标签（J1/D4）、系统来源投递规则
-//! （冻结优先 / 未冻结只用 system）、registry 投影进 `cached_skills`、
+//! （冻结优先 / 未冻结只用 system）、工具面在调用时读取 registry 当前投影、
 //! 工具面形状、13_skills 段落声明。
 //!
 //! **已删除**（对应的本地扫描机制在 W4b 移除）：临时 skills 目录/插件根的
@@ -108,35 +108,67 @@ fn source_label_falls_back_to_mcp_for_foreign_uri_shapes() {
 
 #[tokio::test]
 async fn without_registry_cache_and_contribution_stay_empty() {
-    // 未装配技能面：没有投影、没有摘要，也不回落任何本地来源（J5）
+    // 未装配技能面：没有摘要，也不回落任何本地来源（J5）；工具面在调用时
+    // 读取 registry，未装配 ⇒ 目录不可用的稳定错误（见 tools_test）。
     let dir = tempdir().unwrap();
     let mw = SkillsMiddleware::new();
     let mut state = AgentState::new(dir.path().to_str().unwrap());
     mw.before_agent(&mut state).await.unwrap();
 
-    assert!(mw.skills_cache().read().unwrap().is_none());
+    assert!(mw.mcp_registry.is_none());
     assert!(contribution(&mw).is_none());
 }
 
+/// 经 `DiscoverSkillsTool` 读取工具面当前目录（调用时投影 → 名称列表）。
+async fn tool_face_catalog(mw: &SkillsMiddleware) -> Vec<String> {
+    let tools = mw.collect_tools(".");
+    let discover = tools
+        .iter()
+        .find(|tool| tool.name() == "DiscoverSkillsTool")
+        .expect("SkillsMiddleware 必须提供 DiscoverSkillsTool");
+    let output = discover
+        .invoke(
+            serde_json::json!({}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap();
+    serde_json::from_str::<Vec<serde_json::Value>>(&output)
+        .unwrap()
+        .iter()
+        .map(|skill| skill["name"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// M8：工具面按调用时的 registry 投影工作——`before_agent` 只维护 prompt
+/// 贡献，不再把目录复制进任何中间缓存（避免「空投影 → None」的歧义）。
 #[tokio::test]
-async fn registry_projection_fills_cache_every_turn() {
-    let dir = tempdir().unwrap();
+async fn tool_face_reads_registry_projection_at_call_time() {
     let reg = registry_with("demo", vec![fake_skill("demo", "user", "hello")]);
     let mw = SkillsMiddleware::new().with_mcp_registry(Some(Arc::clone(&reg)));
-    let mut state = AgentState::new(dir.path().to_str().unwrap());
-    for _ in 0..2 {
-        mw.before_agent(&mut state).await.unwrap();
-    }
+    assert_eq!(
+        tool_face_catalog(&mw).await,
+        vec!["mcp__demo__hello"],
+        "工具面读取 registry 当前投影"
+    );
+}
 
-    let cache = mw.skills_cache();
-    let skills = cache.read().unwrap();
-    let names: Vec<&str> = skills
-        .as_ref()
-        .expect("投影后缓存非空")
-        .iter()
-        .map(|s| s.name.as_str())
-        .collect();
-    assert_eq!(names, vec!["mcp__demo__hello"], "条目逐轮重建: {names:?}");
+/// 目录增删在调用时可见（frozen 摘要不随之变化，由 contribution 用例锚定）。
+#[tokio::test]
+async fn tool_face_reflects_catalog_changes() {
+    use peri_acp_types::mcp_skills::HandleToken;
+    let reg = registry_with("demo", vec![fake_skill("demo", "user", "alpha")]);
+    let mw = SkillsMiddleware::new().with_mcp_registry(Some(Arc::clone(&reg)));
+    assert_eq!(tool_face_catalog(&mw).await, vec!["mcp__demo__alpha"]);
+
+    let handle: HandleToken = Arc::new(2u32);
+    reg.mark_discovery_started("demo", handle.clone());
+    reg.mark_discovery_completed("demo", handle, vec![fake_skill("demo", "user", "beta")]);
+    assert_eq!(
+        tool_face_catalog(&mw).await,
+        vec!["mcp__demo__beta"],
+        "工具面必须反映调用时投影，不依赖 before_agent 副本"
+    );
 }
 
 /// 未冻结（legacy/无冻结面）时：只有**系统来源**进 contribution，

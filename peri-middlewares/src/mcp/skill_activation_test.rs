@@ -505,8 +505,7 @@ async fn skill_tool_activates_mcp_skill_through_registry() {
     )
     .await;
 
-    let cached = Arc::new(std::sync::RwLock::new(Some(fx.registry.all_skills())));
-    let tool = crate::skills::tools::SkillTool::new(cached, Some(Arc::clone(&fx.registry)));
+    let tool = crate::skills::tools::SkillTool::new(Some(Arc::clone(&fx.registry)));
     let output = tool
         .invoke(
             serde_json::json!({ "skill_name": "mcp__srv__alpha" }),
@@ -613,8 +612,7 @@ mod real_workspace_provider {
             )
             .await;
 
-            let cached = Arc::new(std::sync::RwLock::new(Some(registry.all_skills())));
-            let tool = SkillTool::new(cached, Some(Arc::clone(&registry)));
+            let tool = SkillTool::new(Some(Arc::clone(&registry)));
             Self {
                 registry,
                 tool,
