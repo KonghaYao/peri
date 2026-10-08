@@ -189,6 +189,23 @@ impl SectionContent {
     }
 }
 
+/// 允许「有意为空」的可选段落（L2）。
+///
+/// `persona` / `language` 由持有者**恒声明**（保证 MetaHarness 覆盖
+/// `.peri/meta/persona.md` / `language.md` 可注入），无对应配置时内容本来就是
+/// 空串——这是正常状态，不是异常：只记 debug，不刷 warn。
+pub(crate) const OPTIONAL_EMPTY_SECTIONS: [&str; 2] = ["persona", "language"];
+
+/// 空段落的来源标签（L2 日志字段）：已知持有者映射取 middleware 名，
+/// 其余归链上收集（日志只带 id/source/状态，不带段落正文）。
+fn section_source(section_id: &str) -> &'static str {
+    peri_acp_types::meta_harness::SECTION_HOLDER_MIDDLEWARE
+        .iter()
+        .find(|(id, _)| *id == section_id)
+        .map(|(_, holder)| *holder)
+        .unwrap_or("chain")
+}
+
 /// 构造期解析后的段落（`id` 为段落覆盖与持有权迁移的定位键，渲染只消费
 /// zone/order/content）。
 #[derive(Debug, Clone)]
@@ -260,6 +277,31 @@ impl PromptTemplate {
         }
         // 4. 空内容过滤（契约 4）+ 按"位置 + 段内序号"排序（契约 2；id 与
         //    (zone, order) 已在构造期校验唯一，排序结果确定）
+        //
+        // L2：区分「有意为空的可选段」与「必需段异常为空」——前者记 debug
+        // （persona / language 恒声明、无 overrides 时本来就为空，不刷 warn），
+        // 后者显式诊断并指出段落与来源；日志只含 section id / source / 状态，
+        // 不输出段落正文。
+        for section in &sections {
+            if !section.content.as_str().is_empty() {
+                continue;
+            }
+            if OPTIONAL_EMPTY_SECTIONS.contains(&section.id) {
+                tracing::debug!(
+                    section = section.id,
+                    source = section_source(section.id),
+                    status = "intentionally-empty",
+                    "可选段落内容为空：跳过渲染（不是异常）"
+                );
+            } else {
+                tracing::warn!(
+                    section = section.id,
+                    source = section_source(section.id),
+                    status = "empty-required",
+                    "必需段落内容为空：跳过渲染并把该段按缺失处理（不伪造正文；检查持有 middleware 的投递条件）"
+                );
+            }
+        }
         sections.retain(|s| !s.content.as_str().is_empty());
         sections.sort_by_key(|s| (s.zone, s.order));
 
