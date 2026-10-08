@@ -182,3 +182,58 @@ async fn subagent_start_hook_once_fires_only_once() {
     let log = std::fs::read_to_string(format!("{}.log", marker.display())).unwrap_or_default();
     assert_eq!(log.lines().count(), 1, "once hook 只能在首次触发执行一次");
 }
+
+/// 跨 spawn 的 once 语义：同一工具（同一会话）多次 `lifecycle_closures()` 必须
+/// 共享同一个 dispatcher/OnceTracker；每次 spawn 新建会让 once:true 随每个子触发。
+#[tokio::test]
+async fn subagent_start_once_hook_is_shared_across_spawns() {
+    let marker = unique_marker("once-across-spawns");
+    let command = format!(
+        "touch {}; echo run >> {}.log",
+        marker.display(),
+        marker.display()
+    );
+    let hooks = vec![subagent_hook(
+        HookEvent::SubagentStart,
+        &command,
+        None,
+        None,
+        true,
+    )];
+
+    let tool = super::SubAgentTool::new(
+        std::sync::Arc::new(Vec::new()),
+        None,
+        std::sync::Arc::new(|_: Option<&str>| unimplemented!("no child is spawned in this test")),
+        "/tmp".to_string(),
+    )
+    .with_registered_hooks(hooks);
+
+    let log_path = format!("{}.log", marker.display());
+    let fired_lines = |path: &str| {
+        std::fs::read_to_string(path)
+            .map(|log| log.lines().count())
+            .unwrap_or(0)
+    };
+
+    // 第一次 spawn：等 hook 命令真正落盘（模拟一次真实的子 agent 启动完成）。
+    let (on_start, _) = tool.lifecycle_closures();
+    on_start.expect("非空 hook 列表必须构造 SubagentStart 闭包")("explore", "/tmp");
+    for _ in 0..200 {
+        if fired_lines(&log_path) >= 1 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(fired_lines(&log_path), 1, "首次 spawn 必须触发一次");
+
+    // 第二次 spawn（同一会话、同一工具）：共享 once tracker 必须让 hook 不再触发。
+    let (on_start, _) = tool.lifecycle_closures();
+    on_start.expect("非空 hook 列表必须构造 SubagentStart 闭包")("explore", "/tmp");
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert_eq!(
+        fired_lines(&log_path),
+        1,
+        "once:true 的 SubagentStart 必须跨 spawn 只触发一次"
+    );
+}

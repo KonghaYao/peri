@@ -29,6 +29,7 @@ impl super::SubAgentTool {
             cancel: None,
             parent_messages: None,
             registered_hooks: Arc::new(Vec::new()),
+            lifecycle_dispatcher: Arc::new(std::sync::OnceLock::new()),
             child_handler_factory: None,
             parent_agent_id: Arc::new(RwLock::new(None)),
             parent_session: Arc::new(RwLock::new(None)),

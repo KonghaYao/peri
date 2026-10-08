@@ -34,6 +34,36 @@ fn record_subagent_lifecycle_action(
 }
 
 impl super::SubAgentTool {
+    /// 生命周期 hook 分发器（懒建、按工具/会话共享一次）。
+    ///
+    /// [TRAP] 共享是 once 语义的前提：`once:true` 的 SubagentStart/Stop 必须跨
+    /// 同一工具的多次 spawn/resume 只触发一次；按 spawn 新建 dispatcher 会让
+    /// once 随每个子 agent 重新触发。
+    pub(crate) fn lifecycle_dispatcher(
+        &self,
+    ) -> Option<Arc<crate::hooks::dispatcher::HookDispatcher>> {
+        self.lifecycle_dispatcher
+            .get_or_init(|| {
+                if self.registered_hooks.is_empty() {
+                    return None;
+                }
+                Some(Arc::new(
+                    crate::hooks::dispatcher::HookDispatcher::new_without_llm(
+                        self.registered_hooks.to_vec(),
+                        Arc::new(crate::hooks::once_tracker::OnceTracker::new()),
+                        self.parent_cwd.clone(),
+                    )
+                    .with_task_manager_opt(
+                        self.host()
+                            .task_manager
+                            .clone()
+                            .map(|manager| manager as Arc<dyn peri_acp_types::tasks::TaskManager>),
+                    ),
+                ))
+            })
+            .clone()
+    }
+
     /// 生命周期 hook 闭包（middlewares 构造）：统一经 [`HookDispatcher`] 分发
     /// （matcher / if 条件 / once / async spawn / 超时 / 取消 / 进程树 owner）。
     /// registered_hooks 为空时不构造闭包。
@@ -46,22 +76,9 @@ impl super::SubAgentTool {
         Option<SubagentLifecycleStart>,
         Option<SubagentLifecycleStop>,
     ) {
-        if self.registered_hooks.is_empty() {
+        let Some(dispatcher) = self.lifecycle_dispatcher() else {
             return (None, None);
-        }
-        let dispatcher = Arc::new(
-            crate::hooks::dispatcher::HookDispatcher::new_without_llm(
-                self.registered_hooks.to_vec(),
-                Arc::new(crate::hooks::once_tracker::OnceTracker::new()),
-                self.parent_cwd.clone(),
-            )
-            .with_task_manager_opt(
-                self.host()
-                    .task_manager
-                    .clone()
-                    .map(|manager| manager as Arc<dyn peri_acp_types::tasks::TaskManager>),
-            ),
-        );
+        };
         let start_dispatcher = Arc::clone(&dispatcher);
         let on_subagent_start: Option<SubagentLifecycleStart> =
             Some(Arc::new(move |name: &str, cwd: &str| {

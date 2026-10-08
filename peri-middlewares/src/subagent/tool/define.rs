@@ -46,6 +46,14 @@ pub struct SubAgentTool {
     pub(crate) parent_messages: Option<Arc<RwLock<Vec<BaseMessage>>>>,
     /// 子 agent 生命周期 hook（SubagentStart/SubagentStop；构造 lifecycle 闭包用）
     pub(crate) registered_hooks: Arc<Vec<RegisteredHook>>,
+    /// 生命周期 hook 分发器（懒建、按工具/会话共享一次）。
+    ///
+    /// [TRAP] 不能按 spawn 新建：`once:true` 的 SubagentStart/Stop 依赖共享
+    /// [`OnceTracker`](crate::hooks::once_tracker::OnceTracker)，每次 spawn 新建
+    /// dispatcher 会让 once 随每个子 agent 重新触发。
+    /// `None` = 无非生命周期 hook（registered_hooks 为空）。
+    pub(crate) lifecycle_dispatcher:
+        Arc<std::sync::OnceLock<Option<Arc<crate::hooks::dispatcher::HookDispatcher>>>>,
     /// Per-child event handler factory
     #[allow(clippy::type_complexity)]
     pub(crate) child_handler_factory:
