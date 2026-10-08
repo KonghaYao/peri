@@ -7,12 +7,15 @@ use super::{
 use crate::session::executor::ContinuationRequest;
 #[cfg(test)]
 use crate::transport::types::AcpError;
-use peri_acp_types::cron::{CronContinuationRequest, CronTrigger};
+use peri_acp_types::cron::{
+    cron_trigger_reminder, CronContinuationRequest, CronTrigger, CronTriggerReminderError,
+};
 use peri_acp_types::session::{MessageKind, MessageQueue, MessageSource, QueuedMessage};
 use peri_acp_types::session_resources::ControlState;
 use peri_acp_types::system_reminder::{
     ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
-    ReminderSource, SystemReminder, TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
+    ReminderSource, SystemReminder, TrustedSystemReminder, TrustedSystemReminderFactory,
+    SYSTEM_REMINDER_VERSION,
 };
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -47,7 +50,10 @@ pub(crate) async fn run_cron_continuation_scheduler(
         let _ = task_spawner.spawn(HostTaskOwnerKind::Session, HostTaskKind::ContinuationTurn, async move {
             let Ok(current) = cfg.session_resources.load_session_control(&req.session_id).await else { return };
             if !same_recipient(&current, &req.recipient_control) { return; }
-            enqueue_cron_trigger(&req.inbox, &req.trigger);
+            let admission = enqueue_cron_trigger(&req.inbox, &req.trigger);
+            if let CronTriggerAdmission::Rejected { reason } = &admission {
+                warn!(session_id = %req.session_id, reason = %reason, "cron trigger was rejected before publication");
+            }
             if let Err(error) = publish_and_notify(&cfg, &transport, &req.session_id,
                 req.recipient_control.lifecycle, &req.inbox).await {
                 warn!(session_id = %req.session_id, %error, "cron publication remains unconfirmed");
@@ -85,34 +91,91 @@ pub(crate) async fn scheduled_permission_mode(
     Ok(permission_mode)
 }
 
-pub(super) fn enqueue_cron_trigger(queue: &MessageQueue, trigger: &CronTrigger) {
-    let reminder = TrustedSystemReminderFactory::for_producer()
+/// 一次 cron 触发的准入结果；调用方必须能观察到拒绝（不得静默丢触发）。
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum CronTriggerAdmission {
+    Delivered,
+    Rejected { reason: String },
+}
+
+/// 把一次 cron 触发投递进会话队列。
+///
+/// - delivery_id 由 task + 本次 firing 身份派生：同一 firing 的重试/重复发布
+///   只投递一次，新触发（新 firing_id）即使文案相同也各自投递一次。
+/// - 超出可承载预算的历史任务不会 panic，也不会被静默截断后照常执行：
+///   改为投递一条可观察的失败通知（Tui/Automation 受众，不唤醒模型推理），
+///   失败证据随持久化投递保留。
+pub(super) fn enqueue_cron_trigger(
+    queue: &MessageQueue,
+    trigger: &CronTrigger,
+) -> CronTriggerAdmission {
+    match cron_trigger_reminder(&trigger.task_id, &trigger.firing_id, &trigger.prompt) {
+        Ok(reminder) => {
+            let delivery_id =
+                peri_acp_types::cron::cron_firing_delivery_id(&trigger.task_id, &trigger.firing_id);
+            queue.push(QueuedMessage::system_reminder_with_delivery_id(
+                MessageKind::Defer,
+                MessageSource::CronTrigger,
+                reminder,
+                delivery_id,
+            ));
+            CronTriggerAdmission::Delivered
+        }
+        Err(error) => {
+            let notice = undeliverable_cron_reminder(trigger, &error);
+            match notice {
+                Some(notice) => queue.push(QueuedMessage::system_reminder(
+                    MessageKind::Info,
+                    MessageSource::CronTrigger,
+                    notice,
+                )),
+                None => warn!(
+                    task_id = %trigger.task_id,
+                    firing_id = %trigger.firing_id,
+                    %error,
+                    "cron trigger is undeliverable and its failure notice could not be built"
+                ),
+            }
+            warn!(
+                task_id = %trigger.task_id,
+                firing_id = %trigger.firing_id,
+                prompt_bytes = trigger.prompt.len(),
+                %error,
+                "cron trigger rejected: task instruction was not executed"
+            );
+            CronTriggerAdmission::Rejected {
+                reason: error.to_string(),
+            }
+        }
+    }
+}
+
+/// 可观察的投递失败通知：正文只含事件身份与限制摘要，不含原始（可能超长）指令。
+fn undeliverable_cron_reminder(
+    trigger: &CronTrigger,
+    error: &CronTriggerReminderError,
+) -> Option<TrustedSystemReminder> {
+    TrustedSystemReminderFactory::for_producer()
         .construct(SystemReminder {
             version: SYSTEM_REMINDER_VERSION,
-            category: ReminderCategory::Task,
+            category: ReminderCategory::Lifecycle,
             source: ReminderSource("cron".into()),
-            kind: "triggered".into(),
-            severity: ReminderSeverity::Info,
+            kind: "trigger_undeliverable".into(),
+            severity: ReminderSeverity::Warning,
             delivery: ReminderDelivery::Required,
-            audiences: ReminderAudiences(vec![
-                ReminderAudience::Model,
-                ReminderAudience::Tui,
-                ReminderAudience::Automation,
-                ReminderAudience::Diagnostics,
-            ]),
+            audiences: ReminderAudiences(vec![ReminderAudience::Tui, ReminderAudience::Automation]),
             body: format!(
-                "<goal-message>Cron task {} triggered: {}</goal-message>",
-                trigger.task_id, trigger.prompt
+                "Cron task {} could not be delivered and was not executed: {}",
+                trigger.task_id, error
             ),
-            summary: Some(format!("Cron task {} triggered", trigger.task_id)),
-            metadata: serde_json::json!({ "task_id": trigger.task_id, "prompt": trigger.prompt }),
+            summary: Some(format!("Cron task {} undeliverable", trigger.task_id)),
+            metadata: serde_json::json!({
+                "task_id": trigger.task_id,
+                "firing_id": trigger.firing_id,
+                "prompt_bytes": trigger.prompt.len(),
+            }),
         })
-        .expect("cron reminder mapping must be valid");
-    queue.push(QueuedMessage::system_reminder(
-        MessageKind::Defer,
-        MessageSource::CronTrigger,
-        reminder,
-    ));
+        .ok()
 }
 
 async fn publish_and_notify(

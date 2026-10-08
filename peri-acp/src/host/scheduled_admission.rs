@@ -120,15 +120,14 @@ fn scheduled_triggers(
             .and_then(serde_json::Value::as_str)
             .filter(|value| !value.is_empty())
             .ok_or_else(|| anyhow::anyhow!("scheduled task identity missing"))?;
-        let prompt = reminder
-            .metadata
-            .get("prompt")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| anyhow::anyhow!("scheduled original prompt missing"))?;
+        // 原始指令由正文的唯一编解码权威还原（metadata 只保留身份与长度摘要）。
+        let prompt = peri_acp_types::cron::cron_trigger_prompt(reminder).ok_or_else(|| {
+            anyhow::anyhow!("scheduled task instruction is not recoverable from its body")
+        })?;
         triggers.push(ScheduledTrigger {
             delivery_id: delivery_id.clone(),
             task_id: task_id.into(),
-            prompt: prompt.into(),
+            prompt: prompt.clone(),
         });
     }
     Ok(triggers)

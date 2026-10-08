@@ -194,3 +194,95 @@ fn observer_floor_requires_unprocessed_new_required_delivery() {
         ObligationStatus::Pending
     );
 }
+
+// ── M13：cron 触发承载预算与稳定身份 ──────────────────────────────────────────
+
+fn cron_queue() -> peri_acp_types::session::MessageQueue {
+    peri_acp_types::session::MessageQueue::default()
+}
+
+fn drain_reminders(
+    queue: &peri_acp_types::session::MessageQueue,
+) -> Vec<peri_acp_types::system_reminder::SystemReminder> {
+    queue
+        .drain_all()
+        .into_iter()
+        .filter_map(|message| match message.payload {
+            peri_acp_types::session::QueuedPayload::SystemReminder(reminder) => {
+                Some(reminder.into_inner())
+            }
+            peri_acp_types::session::QueuedPayload::Message(_) => None,
+        })
+        .collect()
+}
+
+/// 可承载预算内的触发按 task + firing 身份投递，且 metadata 不重复保存完整 prompt。
+#[tokio::test]
+async fn cron_trigger_is_delivered_with_stable_identity_and_identity_only_metadata() {
+    let queue = cron_queue();
+    let trigger = peri_acp_types::cron::CronTrigger {
+        task_id: "task-1".into(),
+        firing_id: "2026-10-07T00:00:00+00:00".into(),
+        prompt: "检查构建状态".into(),
+    };
+
+    let first = super::enqueue_cron_trigger(&queue, &trigger);
+    assert_eq!(first, super::CronTriggerAdmission::Delivered);
+    let delivered_again = super::enqueue_cron_trigger(&queue, &trigger);
+    assert_eq!(delivered_again, super::CronTriggerAdmission::Delivered);
+
+    let reminders = drain_reminders(&queue);
+    assert_eq!(reminders.len(), 2, "两次投递都进入队列");
+    for reminder in &reminders {
+        assert_eq!(reminder.kind, "triggered");
+        assert!(reminder.metadata.get("prompt").is_none());
+        assert_eq!(reminder.metadata["task_id"], "task-1");
+        assert_eq!(reminder.metadata["firing_id"], "2026-10-07T00:00:00+00:00");
+        assert_eq!(reminder.metadata["prompt_bytes"], "检查构建状态".len());
+        assert_eq!(
+            peri_acp_types::cron::cron_trigger_prompt(reminder).as_deref(),
+            Some("检查构建状态")
+        );
+    }
+    assert_eq!(
+        peri_acp_types::cron::cron_firing_delivery_id("task-1", "2026-10-07T00:00:00+00:00"),
+        peri_acp_types::cron::cron_firing_delivery_id("task-1", "2026-10-07T00:00:00+00:00"),
+        "同一 firing 的重试必须复用同一 delivery_id"
+    );
+}
+
+/// 历史超长任务不得 panic、不得截断后照常执行；必须留下可观察的投递失败。
+#[tokio::test]
+async fn oversized_historical_cron_trigger_fails_observably_without_truncated_execution() {
+    let queue = cron_queue();
+    let prompt = "汉".repeat(peri_acp_types::cron::MAX_CRON_PROMPT_BYTES / 3 + 1);
+    let trigger = peri_acp_types::cron::CronTrigger {
+        task_id: "legacy-task".into(),
+        firing_id: "2026-10-07T00:00:00+00:00".into(),
+        prompt: prompt.clone(),
+    };
+
+    match super::enqueue_cron_trigger(&queue, &trigger) {
+        super::CronTriggerAdmission::Rejected { reason } => {
+            assert!(
+                reason.contains(&peri_acp_types::cron::MAX_CRON_PROMPT_BYTES.to_string()),
+                "拒绝必须给出承载限制: {reason}"
+            );
+        }
+        super::CronTriggerAdmission::Delivered => panic!("超长任务不得被静默接纳"),
+    }
+
+    let reminders = drain_reminders(&queue);
+    assert_eq!(reminders.len(), 1, "必须留下恰好一条失败证据");
+    let notice = &reminders[0];
+    assert_eq!(notice.kind, "trigger_undeliverable");
+    assert!(!notice.body.contains(&prompt), "失败证据不得回放超长原文");
+    assert!(!notice
+        .audiences
+        .contains(peri_acp_types::system_reminder::ReminderAudience::Model));
+    assert!(peri_acp_types::system_reminder::reminder_egress_allowed(
+        notice,
+        peri_acp_types::system_reminder::ReminderAudience::Tui
+    ));
+    assert_eq!(notice.metadata["prompt_bytes"], prompt.len());
+}

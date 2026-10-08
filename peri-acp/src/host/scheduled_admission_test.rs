@@ -85,6 +85,7 @@ async fn registered_cron_fixture(
         &queue,
         &peri_acp_types::cron::CronTrigger {
             task_id: "scheduled-task-fixture".into(),
+            firing_id: "scheduled-task-fixture-firing-1".into(),
             prompt: "frozen original cron prompt".into(),
         },
     );

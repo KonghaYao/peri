@@ -21,6 +21,8 @@ pub enum CronError {
     InvalidExpression(String),
     #[error("已达到定时任务上限（{0}）")]
     TaskLimitReached(usize),
+    #[error(transparent)]
+    PromptTooLong(#[from] peri_acp_types::cron::CronPromptRejection),
 }
 
 /// 定时任务
@@ -67,10 +69,16 @@ impl CronScheduler {
     }
 
     /// 注册新任务
+    ///
+    /// prompt 必须落在触发提醒可承载的预算内：超长任务在创建端显式拒绝并给出
+    /// 限制，不允许"创建成功、触发时才失败"。
     pub fn register(&mut self, expression: &str, prompt: &str) -> Result<String, CronError> {
         // 解析 cron 表达式（验证）
         let _cron = croner::Cron::from_str(expression)
             .map_err(|e| CronError::InvalidExpression(e.to_string()))?;
+
+        // 承载预算准入（与触发消费端同一常量）
+        peri_acp_types::cron::validate_cron_prompt(prompt)?;
 
         // 检查上限
         if self.tasks.len() >= MAX_CRON_TASKS {
@@ -123,8 +131,10 @@ impl CronScheduler {
             }
             if let Some(next) = task.next_fire {
                 if now >= next {
+                    // firing 身份 = 本次计划触发时间（重试复用、新触发必新）。
                     let trigger = CronTrigger {
                         task_id: task.id.clone(),
+                        firing_id: next.to_rfc3339(),
                         prompt: task.prompt.clone(),
                     };
                     // Send to primary trigger_tx (TUI polling path)

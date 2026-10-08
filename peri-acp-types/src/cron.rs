@@ -9,13 +9,134 @@ use std::any::Any;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
+use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
+
+/// 单条 cron 触发提醒可承载的 prompt 预算（UTF-8 字节）。
+///
+/// 触发提醒的正文形如 `<goal-message>Cron task {task_id} triggered: {prompt}</goal-message>`，
+/// 上限来自 canonical reminder 正文预算；这里再留出任务身份与信封余量，创建端与
+/// 消费端共用同一常量，避免"创建放行、触发 panic"。
+pub const MAX_CRON_PROMPT_BYTES: usize =
+    crate::system_reminder::MAX_REMINDER_BODY_BYTES - MAX_CRON_PROMPT_ENVELOPE_BYTES;
+
+/// 触发提醒信封（固定前缀/后缀 + task_id 与字段名的实际余量）预留字节。
+const MAX_CRON_PROMPT_ENVELOPE_BYTES: usize = 4 * 1024;
 
 /// 触发事件（由 CronScheduler 发送到 App）
 #[derive(Debug, Clone)]
 pub struct CronTrigger {
     pub task_id: String,
+    /// 本次 firing 的稳定身份（调度器按计划触发时间派生）。
+    ///
+    /// 重试/重复投递复用同一身份，新的触发必须换新身份；不得用正文派生。
+    pub firing_id: String,
     pub prompt: String,
+}
+
+/// cron prompt 超出可承载预算时的显式拒绝事实（不截断、不丢触发）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum CronPromptRejection {
+    #[error("cron prompt is {actual} bytes; the limit is {MAX_CRON_PROMPT_BYTES} bytes")]
+    PromptTooLong { actual: usize },
+}
+
+/// 触发提醒正文的唯一编码权威（创建端与消费端共用）。
+pub fn cron_trigger_body(task_id: &str, prompt: &str) -> String {
+    format!("<goal-message>Cron task {task_id} triggered: {prompt}</goal-message>")
+}
+
+const CRON_TRIGGER_BODY_PREFIX: &str = "<goal-message>Cron task ";
+const CRON_TRIGGER_BODY_MIDDLE: &str = " triggered: ";
+const CRON_TRIGGER_BODY_SUFFIX: &str = "</goal-message>";
+
+/// 从 canonical 触发提醒里还原原始 prompt（[`cron_trigger_body`] 的逆映射）。
+///
+/// 返回 `None` 表示这不是一条可解释的 cron 触发提醒；调用方必须显式失败，
+/// 不得用猜出的残缺指令继续执行。
+pub fn cron_trigger_prompt(reminder: &crate::system_reminder::SystemReminder) -> Option<String> {
+    let remainder = reminder
+        .body
+        .strip_prefix(CRON_TRIGGER_BODY_PREFIX)?
+        .strip_suffix(CRON_TRIGGER_BODY_SUFFIX)?;
+    let (_, prompt) = remainder.split_once(CRON_TRIGGER_BODY_MIDDLE)?;
+    Some(prompt.to_owned())
+}
+
+/// 校验 prompt 是否在可承载预算内（创建端准入与消费端复核共用）。
+pub fn validate_cron_prompt(prompt: &str) -> Result<(), CronPromptRejection> {
+    if prompt.len() > MAX_CRON_PROMPT_BYTES {
+        return Err(CronPromptRejection::PromptTooLong {
+            actual: prompt.len(),
+        });
+    }
+    Ok(())
+}
+
+/// 从 task + 本次 firing 身份派生稳定 delivery_id。
+///
+/// 同一 firing 的重复发布（重试、同一触发再次入队）复用同一身份而只投递一次；
+/// 新的触发（新 `firing_id`）必然得到新身份，即使文案完全相同也各投递一次。
+pub fn cron_firing_delivery_id(task_id: &str, firing_id: &str) -> crate::messages::MessageId {
+    let mut hasher = Sha256::new();
+    for part in ["peri-cron-trigger", task_id, firing_id] {
+        hasher.update((part.len() as u64).to_be_bytes());
+        hasher.update(part.as_bytes());
+    }
+    let digest = hasher.finalize();
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    crate::messages::MessageId::from(uuid::Uuid::from_bytes(bytes))
+}
+
+/// cron 触发提醒构造失败的事实；两种原因都必须可观察，不得回退成截断指令。
+#[derive(Debug, thiserror::Error)]
+pub enum CronTriggerReminderError {
+    #[error(transparent)]
+    Prompt(#[from] CronPromptRejection),
+    #[error("cron trigger reminder failed validation: {0}")]
+    Invalid(#[from] crate::system_reminder::ReminderValidationError),
+}
+
+/// 构造 canonical cron 触发提醒（生产端唯一权威）。
+///
+/// - 正文承载完整 prompt（[`cron_trigger_body`]），超预算直接拒绝而不是截断；
+/// - metadata 只放事件身份与长度摘要，不重复保存完整 prompt；
+/// - 受众为 Model / Tui / Automation：Diagnostics 只接收诊断 DTO，不接收正文。
+pub fn cron_trigger_reminder(
+    task_id: &str,
+    firing_id: &str,
+    prompt: &str,
+) -> Result<crate::system_reminder::TrustedSystemReminder, CronTriggerReminderError> {
+    use crate::system_reminder::{
+        ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
+        ReminderSource, SystemReminder, TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
+    };
+    validate_cron_prompt(prompt)?;
+    Ok(
+        TrustedSystemReminderFactory::for_producer().construct(SystemReminder {
+            version: SYSTEM_REMINDER_VERSION,
+            category: ReminderCategory::Task,
+            source: ReminderSource("cron".into()),
+            kind: "triggered".into(),
+            severity: ReminderSeverity::Info,
+            delivery: ReminderDelivery::Required,
+            audiences: ReminderAudiences(vec![
+                ReminderAudience::Model,
+                ReminderAudience::Tui,
+                ReminderAudience::Automation,
+            ]),
+            body: cron_trigger_body(task_id, prompt),
+            summary: Some(format!("Cron task {task_id} triggered")),
+            metadata: serde_json::json!({
+                "task_id": task_id,
+                "firing_id": firing_id,
+                "prompt_bytes": prompt.len(),
+            }),
+        })?,
+    )
 }
 
 /// Cron 任务信息（`CronScheduler::list_tasks` 的契约镜像，供 cron/list 命令面
@@ -88,3 +209,7 @@ impl dyn CronSchedulerPort {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "cron_test.rs"]
+mod tests;
