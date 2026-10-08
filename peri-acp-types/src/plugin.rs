@@ -206,12 +206,20 @@ impl McpServerConfig {
     /// `system_mcp_timeout` 合法区间上界（毫秒，10 分钟）。
     pub const MAX_SYSTEM_MCP_TIMEOUT_MS: u64 = 600_000;
 
-    /// 纯数据不变量校验：System key 与 `system_mcp = true` 的组合、timeout 区间。
+    /// 纯数据不变量校验：System key 与 `system_mcp = true` 的组合、timeout 区间，
+    /// 以及 `disabled = true` 与 `system_mcp = true` 的组合（M7）。
     ///
     /// 无副作用、无 namespace / transport / I/O 依赖；`disabled = true` 也照常校验。
-    /// 确定性优先级：先组合错误（`system_mcp_tools` 先于 `system_mcp_timeout`），
-    /// 再 timeout 区间。
+    /// 确定性优先级：先组合错误（`disabled && system_mcp` → `system_mcp_tools` →
+    /// `system_mcp_timeout`），再 timeout 区间。
+    ///
+    /// `disabled && system_mcp` 覆盖**全部来源**（builtin / 普通 / global / project /
+    /// plugin 与配置更新）：两种开关语义互斥（既要关闭又要作为系统前置），
+    /// 合并准入期一次失败，不再每轮 Reason 才在 readiness 报 fatal。
     pub fn validate(&self) -> Result<(), McpServerConfigValidationError> {
+        if self.disabled == Some(true) && self.system_mcp == Some(true) {
+            return Err(McpServerConfigValidationError::DisabledWithSystemMcp);
+        }
         if self.system_mcp != Some(true) {
             if self.system_mcp_tools.is_some() {
                 return Err(McpServerConfigValidationError::SystemMcpToolsRequiresSystemMcp);
@@ -234,6 +242,9 @@ impl McpServerConfig {
 /// MCP 服务器配置的纯校验错误（固定规则文本，不携带配置内容）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum McpServerConfigValidationError {
+    /// 同时声明了 `disabled = true` 与 `system_mcp = true`（任一来源都不合法）。
+    #[error("disabled = true cannot be combined with system_mcp = true")]
+    DisabledWithSystemMcp,
     /// 声明了 `system_mcp_tools` 却没有 `system_mcp = true`（含显式 `[]`）。
     #[error("system_mcp_tools requires system_mcp = true")]
     SystemMcpToolsRequiresSystemMcp,
@@ -492,6 +503,74 @@ impl PluginOrigin {
             Self::ClaudeCodeInstalled | Self::UserClaude | Self::ProjectClaude
         )
     }
+
+    /// 稳定标签（来源身份 / 诊断用；不是 wire 值）。
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::PeriInstalled => "peri-installed",
+            Self::ClaudeCodeInstalled => "claude-installed",
+            Self::UserClaude => "claude-user",
+            Self::ProjectClaude => "claude-project",
+        }
+    }
+}
+
+impl InstallScope {
+    /// 稳定标签（来源身份 / 诊断用；不是 wire 值）。
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Project => "project",
+            Self::Local => "local",
+        }
+    }
+}
+
+/// 插件来源作用域身份（M6）。
+///
+/// 身份取自安装记录（`installed_plugins.json` 的 id / scope / projectPath /
+/// origin）与启用选择事实，**不靠插件名或安装路径前缀推断**：同名插件在不同
+/// 范围安装或由不同项目声明时是不同来源。消费方是「用户全局安装 vs 项目声明」
+/// 的区分（用户级 `/ 项目级` 层选择规则见 `select_enabled_plugins`）与 hook
+/// 执行来源信任门控（H4）。
+///
+/// 字段全部非敏感：不含 env / headers / OAuth 内容，也不含插件文件内容
+/// （摘要另由消费方按需计算，ARC-SECRET-001）。
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct PluginScope {
+    /// 安装记录 id（`name@marketplace`）。
+    pub plugin_id: String,
+    /// 来源机制（Peri 安装 / Claude Code CLI 安装）。
+    pub origin: PluginOrigin,
+    /// 安装/启用范围：user（用户全局安装）/ project / local（项目声明）。
+    pub install_scope: InstallScope,
+    /// project / local 范围对应的项目路径（安装记录事实，不由当轮 cwd 反推）。
+    pub project_path: Option<String>,
+}
+
+impl PluginScope {
+    /// 归一化来源身份：`plugin:{origin}/{scope}/{plugin_id}[@{project_path}]`。
+    ///
+    /// 信任绑定与诊断共用同一串；调用方（hook 信任）在其前加来源类别前缀，
+    /// 不在此处拼装信任文件格式。
+    pub fn source_identity(&self) -> String {
+        let mut identity = format!(
+            "plugin:{}/{}/{}",
+            self.origin.as_str(),
+            self.install_scope.as_str(),
+            self.plugin_id
+        );
+        if let Some(project) = self
+            .project_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+        {
+            identity.push('@');
+            identity.push_str(project);
+        }
+        identity
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -546,12 +625,20 @@ pub struct LoadedPlugin {
     pub hooks_config: Option<HooksConfig>,
     /// 插件来源 marketplace（如 "claude-plugins-official"），用于追踪插件来源
     pub marketplace: String,
+    /// 来源作用域身份（M6）：显式元数据，供「用户全局 vs 项目声明」区分与
+    /// hook 信任门控使用；不靠名称或路径猜。
+    pub scope: PluginScope,
 }
 
 /// 插件聚合加载结果（`load_enabled_plugins_aggregated` 返回值）。
 #[derive(Debug, Clone)]
 pub struct PluginLoadResult {
     pub plugins: Vec<LoadedPlugin>,
+    /// 本聚合覆盖的来源作用域（M6），顺序与 `plugins` 一一对应。
+    ///
+    /// 与 `LoadedPlugin::scope` 同源：由 [`Self::plugins`] 投影生成，不是第二份
+    /// 事实（消费方按 `plugin_id` 关联；`plugins` 顺序即事实源顺序）。
+    pub scope: Vec<PluginScope>,
     pub all_skill_roots: Vec<SkillRoot>,
     pub all_mcp_servers: HashMap<String, McpServerConfig>,
     pub all_agent_dirs: Vec<PathBuf>,
@@ -715,6 +802,42 @@ mod tests {
         let legacy = parse(r#"{"command":"npx","disabled":true,"args":["-y"]}"#).unwrap();
         assert_eq!(legacy.disabled, Some(true));
         assert_eq!(legacy.args, Some(vec!["-y".to_string()]));
+    }
+
+    /// M7：`disabled = true` 与 `system_mcp = true` 的组合对**任何** server 名都非法
+    /// （不限于 builtin 实例），wire 与 typed 两条入口都在此一次失败。
+    #[test]
+    fn test_disabled_with_system_mcp_is_rejected_by_shared_validation() {
+        for json in [
+            r#"{"command":"npx","disabled":true,"system_mcp":true}"#,
+            r#"{"command":"npx","disabled":true,"system_mcp":true,"system_mcp_tools":[]}"#,
+            r#"{"command":"plain","url":"https://example.invalid/mcp","disabled":true,"system_mcp":true}"#,
+        ] {
+            let err = parse(json).expect_err("非法组合必须解析失败");
+            assert!(
+                err.to_string()
+                    .contains("disabled = true cannot be combined with system_mcp = true"),
+                "固定规则正文必须保留: {json} -> {err}"
+            );
+        }
+
+        let typed = McpServerConfig {
+            disabled: Some(true),
+            system_mcp: Some(true),
+            ..empty_config()
+        };
+        assert_eq!(
+            typed.validate().unwrap_err(),
+            McpServerConfigValidationError::DisabledWithSystemMcp
+        );
+
+        // 只写其中一个开关仍然合法：唯一合法的用户关闭写法是只写 disabled。
+        assert!(McpServerConfig {
+            disabled: Some(true),
+            ..empty_config()
+        }
+        .validate()
+        .is_ok());
     }
 
     /// 契约 1：`system_mcp_tools` 没有 `system_mcp = true` 一律非法，含显式 `[]`。

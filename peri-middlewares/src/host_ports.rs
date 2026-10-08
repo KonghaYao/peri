@@ -591,6 +591,138 @@ fn admit_settings_hooks(
     }
 }
 
+/// 插件来源 hooks 的来源身份与摘要绑定（M6/H4）。
+///
+/// 身份取自 [`peri_acp_types::plugin::PluginScope`]（安装记录事实：id / origin /
+/// scope / projectPath），**不按插件名或安装路径前缀猜**；摘要覆盖来源身份、插件
+/// 根目录与该插件的 hooks 配置正文——授权后插件 hooks 被修改即失效，需要重新
+/// `peri plugin trust grant`。
+///
+/// `Ok(None)` = workspace 不可规范化（调用方按未信任收口）。字段只含路径与配置
+/// 结构，不含 env / headers / OAuth 内容（ARC-SECRET-001）。
+pub fn plugin_hook_binding(
+    cwd: &Path,
+    plugin: &peri_acp_types::plugin::LoadedPlugin,
+) -> std::io::Result<Option<peri_config::trust::HookTrustEntry>> {
+    let Some(workspace) = peri_config::trust::canonical_workspace(cwd)? else {
+        return Ok(None);
+    };
+    let source = format!("plugin-hooks:{}", plugin.scope.source_identity());
+    let hooks_body = plugin
+        .hooks_config
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("plugin hooks config cannot be canonicalized: {error}"),
+            )
+        })?
+        .unwrap_or_default();
+    let digest = peri_config::trust::content_digest(&[
+        &workspace,
+        &source,
+        &plugin.install_path.to_string_lossy(),
+        &hooks_body,
+    ]);
+    Ok(Some(peri_config::trust::HookTrustEntry {
+        workspace,
+        source,
+        digest,
+    }))
+}
+
+/// 插件来源 hooks 的**唯一装配准入**（`assemble_hook_groups` 的插件来源视图）。
+///
+/// 与 settings 来源共用同一条信任门与同一信任文件：逐插件按
+/// [`plugin_hook_binding`] 判定，未信任 / 身份或摘要不可得的插件，其 hooks 整组
+/// 不执行并留下可操作诊断（warn 只含来源身份与 workspace，不含 hook 正文）。
+///
+/// **语义边界**：`trust` 只约束**执行来源**（hooks 是否运行），不等于插件整体
+/// 功能授权——插件的 skills / commands / agents / MCP 面不因未信任而被禁用。
+pub fn admit_plugin_hooks(
+    cwd: &str,
+    plugins: &[peri_acp_types::plugin::LoadedPlugin],
+    hooks: Vec<peri_acp_types::hooks::RegisteredHook>,
+) -> Vec<peri_acp_types::hooks::RegisteredHook> {
+    if hooks.is_empty() {
+        return hooks;
+    }
+    // 逐个**有 hooks 声明**的插件判定；键取插件根目录（与 RegisteredHook 记的
+    // `plugin_root` 是同一个值，不重新解析路径）。
+    let mut decisions: std::collections::HashMap<PathBuf, bool> = std::collections::HashMap::new();
+    for plugin in plugins {
+        if plugin.hooks_config.is_none() {
+            continue;
+        }
+        let trusted = match plugin_hook_binding(Path::new(cwd), plugin) {
+            Ok(Some(binding)) => match peri_config::trust::is_trusted(&binding) {
+                Ok(trusted) => trusted,
+                Err(error) => {
+                    tracing::warn!(
+                        plugin = %plugin.name,
+                        source = %binding.source,
+                        error = %error,
+                        "plugin hooks skipped: trust store unavailable"
+                    );
+                    false
+                }
+            },
+            Ok(None) => {
+                tracing::warn!(
+                    plugin = %plugin.name,
+                    "plugin hooks skipped: workspace path cannot be canonicalized"
+                );
+                false
+            }
+            Err(error) => {
+                tracing::warn!(
+                    plugin = %plugin.name,
+                    error = %error,
+                    "plugin hooks skipped: trust binding unavailable"
+                );
+                false
+            }
+        };
+        if !trusted {
+            tracing::warn!(
+                plugin = %plugin.name,
+                plugin_id = %plugin.scope.plugin_id,
+                scope = plugin.scope.install_scope.as_str(),
+                source = %plugin.scope.source_identity(),
+                "untrusted plugin hooks skipped; run `peri plugin trust grant --plugin <id>` \
+                 in this workspace to allow them to run"
+            );
+        }
+        decisions.insert(plugin.install_path.clone(), trusted);
+    }
+    let mut admitted = Vec::new();
+    let mut unknown = 0usize;
+    for hook in hooks {
+        match decisions.get(&hook.plugin_root) {
+            Some(true) => admitted.push(hook),
+            Some(false) => {}
+            None => {
+                // 来源身份不可得 ⇒ 不执行（fail-closed），且必须可见。
+                unknown += 1;
+                tracing::warn!(
+                    plugin = %hook.plugin_name,
+                    root = %hook.plugin_root.display(),
+                    "plugin hook skipped: no plugin source identity for this hook"
+                );
+            }
+        }
+    }
+    if unknown > 0 {
+        tracing::warn!(
+            skipped = unknown,
+            "plugin hooks skipped without source identity"
+        );
+    }
+    admitted
+}
+
 /// Agent 候选目录端口实现（W5）：对会话级 MCP Agent registry 的只读投影。
 ///
 /// 唯一数据源是 builtin `workspace` 实例的 `resources/list`（本地三来源
