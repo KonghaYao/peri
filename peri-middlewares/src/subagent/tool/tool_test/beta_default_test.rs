@@ -205,7 +205,13 @@ async fn default_background_does_not_break_mcp_agents() {
 /// 后台路径（`invoke_background` → `load_agent_def` → `registry.activate`）不经过
 /// MCP Agent 的内容绑定审批门（`load_and_approve_mcp_agent`）——缺省若在那里生效，
 /// 一次省略 `run_in_background` 的调用就会让远端定义无用户审批即后台执行。
-/// 断言强度：必须报同步路径的「定义不可得」，且**没有任何后台任务被登记**。
+///
+/// 断言强度（实测口径，勿高估）：本用例触碰的是「未激活的远端条目」，后台路径在
+/// `load_agent_def` 阶段就失败，因此**唯一**判别位是最后一条
+/// 「`Check .claude/agents/` 缺席」——去掉修复后只有它会红（此时错误文本带后台
+/// loader 的包裹与目录提示）。其余三条分别覆盖：不泄漏报错路径（`MCP agent
+/// definition`）、不出现后台回执文本、不登记后台任务；它们在修复前后都成立，
+/// 是回归护栏而非判别位。
 #[tokio::test]
 async fn default_background_never_bypasses_mcp_agent_approval_gate() {
     use crate::mcp::client::McpClientPool;

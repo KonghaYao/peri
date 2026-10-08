@@ -61,9 +61,9 @@
 | 未配置行为不变 / flag 开启走后台 / 显式 false 前台 / schema 与执行缺省一致 | `cargo test -p peri-mcp-workspace --lib -- default_run_in_background`（5 passed）；`cargo test -p peri-middlewares --lib -- beta_default`（5 passed）；`cargo test -p peri-middlewares --lib -- workspace_dispatch_propagates_bash_default_run_in_background`（1 passed） |
 | 配置面合并、未知键、类型错误、投影、explain、CAS | `cargo test -p peri-config --lib -- betas`（15 passed） |
 | 新会话使用新值（配置面 → 冻结值 → builtin Bash / Agent 工具 schema） | `cargo test -p peri-acp --lib -- beta_flag`（4 passed：Bash 差分对照 + Agent 工具 schema + 恢复分支） |
-| 既有会话保持冻结值 | 同上 `restored_session_keeps_frozen_beta_flag`；`cargo test -p peri-acp --lib -- frozen`（33 passed，blob 往返含 `beta_flags`） |
+| 既有会话保持冻结值 | 同上 `restored_session_keeps_frozen_beta_flag`；`cargo test -p peri-acp --lib -- frozen`（35 passed，blob 往返含 `beta_flags`） |
 | TUI 区块渲染/切换/失败路径 | `cargo test -p peri-tui --lib -- kit::panels::config`（16 passed）；`-- kit::panel_registry`（28 passed） |
-| 回归 | `peri-config` 149 passed；`peri-acp-types` 537 passed；`peri-mcp-workspace` 442 passed；`peri-middlewares -- subagent::tool` 120 passed；`peri-acp -- mcp_v4 / host::requests` 32 / 155 passed |
+| 回归 | `peri-config` 149 passed；`peri-acp-types` 537 passed；`peri-mcp-workspace` 442 passed；`peri-middlewares -- subagent::tool` 121 passed；`peri-acp -- mcp_v4 / host::requests` 32 / 156 passed |
 
 未验证项（不声称已闭合）：TUI 视觉布局未眼测；进程重启后的恢复链路未做真实重启实测
 （覆盖为 blob 往返 + 恢复路径装配用例）；Agent 侧未做真实模型调用的端到端后台执行实测。
@@ -72,8 +72,11 @@
 
 - `peri-cool` 文档站（submodule）仍列 `/betas` 与 `"betas": {}`：`features/cli-reference.mdx`、
   `reference/keyboard-shortcuts.mdx`、`reference/settings.mdx` 需随 `BetasPanel` 退役更新。
-- `peri-middlewares --lib -- mcp::builtin_runtime_tests` 并行运行存在既有 HOME 重定向与
-  machine-identity 发布的交互失败（串行运行通过），与本 flag 无关，属既有测试卫生缺口。
+- 并行运行的两处既有测试卫生缺口（与本 flag 无关，均已单独/串行复验通过）：
+  `peri-middlewares --lib -- mcp::builtin_runtime_tests` 的 HOME 重定向与
+  machine-identity 发布交互失败；`peri-middlewares --lib -- subagent::tool` 中
+  `resume_test::test_resume_thread_id_background_combination` 的同类偶发失败。
+  上表计数为干净运行的名义值。
 
 ## 边界
 
