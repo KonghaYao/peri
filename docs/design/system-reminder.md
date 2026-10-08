@@ -191,6 +191,32 @@ TUI 从 canonical DTO 构建 reminder view model，不扫描正文关键词。�
 `Required` reminder 可以折叠，但不得因普通展示偏好被完全丢弃；`Security` 的 warning、
 error 和 critical 状态默认保持可见。legacy history 可经兼容 parser 生成降级 view model。
 
+### 5.2.1 出口强制过滤
+
+模型投影、结构化客户端（TUI / ACP）出口、stdio 出口与历史回放共用同一条判定
+（`ReminderFilter` 的 audience 规则，出口入口为 `reminder_egress_allowed`）：先判
+目标 audience 是否声明，再判版本与投递级别，最后才是 kind / source / category /
+severity 偏好。文本 fallback 位于过滤之后，不得绕过过滤下发 Model-only 内容。
+
+- 持久化保留 canonical reminder，过滤只发生在出口；不得因为某个 audience 不可见
+  就删除其它受众需要的记录。
+- Model-only 内容（例如 recall）不得出现在任何客户端 wire；Tui-only 提醒不进入
+  模型请求，也不触发模型推理。
+- 引擎在出口就地投影的 Legacy 显示通知可经出口放行（恒 `Configurable`，且生产者
+  构造期禁止 `Legacy`），但未声明受众仍然拒绝。
+- Diagnostics 只接收诊断 DTO（category / source / kind / severity），不随附正文或
+  任意 metadata。
+
+### 5.2.2 客户端承载能力
+
+| 客户端类 | 承载 | 未声明能力时的行为 |
+| --- | --- | --- |
+| TUI / ACP `peri/unstable_event` | `system-reminder`（canonical DTO）或 `system-reminder-fallback`（有界文本） | 由 `peri.systemReminder` 能力决定形态，二者都不是默认 no-op |
+| stdio（SDK 类型化连接） | `peri/systemReminder` Peri 扩展通知 | 显式声明不承载并留下可诊断事实，不得静默成功 |
+| 历史回放 | 与 live 同一出口与同一过滤 | `ReplaySender` 无默认实现，实现方必须显式决定 |
+
+标准 `session/update` 不投影 reminder，因此不存在标准事件与专用 push 双发。
+
 ### 5.3 诊断与遥测
 
 诊断记录使用结构化字段：

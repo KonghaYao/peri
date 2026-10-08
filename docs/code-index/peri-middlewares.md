@@ -232,6 +232,7 @@ scope 快照携 epoch；`taskClose`/`taskOpen` 按该 epoch 做 owner 端 CAS，
 | 功能 | 入口/关键点 |
 | --- | --- |
 | 中间件 / 加载 | middleware.rs（HookMiddleware :46 / with_session_start :91）；loader.rs（:84/:176/:245） |
+| Hook 输出字段路由 | middleware.rs（`fire_event_with_delivery`、`route_hook_output`、`hook_output_reminder`、`admit_session_start_message`） | `additionalContext` → 有界（32 KiB，截断显式标记）带 `source=hook` 的 Model reminder；`systemMessage` → Tui 受众客户端提示；`initialUserMessage` → SessionStart 会话级准入一次（AtomicBool 闸门，保留 hook 来源，不伪装用户输入）；无投递面的调用点（直接 `fire_event`、只读 `StateView` 阶段如 StopFailure）保留字段名+长度诊断，构造失败显式 warn，不静默丢弃 |
 | 执行 / 匹配 / 护栏 | executor.rs（:19/:151/:211/:318）；matcher.rs（`matches_matcher` :38 / `matches_if_condition` :68 / `any_candidate_match` :11，匹配型归一）；action_resolver.rs（:20）；once_tracker.rs（:16）；stage_firing.rs（:12/:37）；stop_block_guard.rs（:28）；permission_gate.rs（:21）；types.rs（HookInput :14） |
 
 ### Workflow / Cron / Workspace
