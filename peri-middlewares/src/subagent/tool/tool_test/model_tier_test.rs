@@ -513,3 +513,75 @@ async fn test_agent_invoke_wrong_optional_types_keep_definition_and_parent_cwd()
         &[Some("sonnet".to_string())]
     );
 }
+
+/// [M2] frontmatter 未知档位 + 点名启动：定义被隔离出可执行目录，点名启动
+/// 必须显式失败且不调用 llm_factory（不得静默回退父模型；坏定义只影响自身，
+/// 不阻断会话其余能力）。
+#[tokio::test]
+async fn test_agent_frontmatter_unknown_tier_is_rejected_on_pointed_launch() {
+    let dir = tempdir().unwrap();
+    write_test_agent_with_model(&dir, "turbo");
+    let aliases: Arc<std::sync::Mutex<Vec<Option<String>>>> = Arc::default();
+    let host = DurableHost::open_in(dir.path(), "fixture-model-tier-invalid").await;
+    let t = with_agent_face(
+        make_recording_subagent_tool(vec![], Arc::clone(&aliases)),
+        dir.path(),
+    )
+    .await;
+    let t = host.bind(t);
+
+    let error = t
+        .invoke(
+            serde_json::json!({
+                "subagent_type": "test-agent",
+                "prompt": "hello",
+                "cwd": dir.path().to_str().unwrap()
+            }),
+            host.context(&[]),
+        )
+        .await
+        .expect_err("未知 frontmatter 档位必须显式失败");
+
+    let message = error.to_string();
+    assert!(
+        message.contains("test-agent"),
+        "错误必须可定位到被点名的定义（隔离而非静默）: {message}"
+    );
+    assert!(
+        aliases.lock().unwrap().is_empty(),
+        "非法档位不得调用 llm_factory（不静默回退父模型）"
+    );
+}
+
+/// [M2] frontmatter 档位大小写归一后仍可点名启动（`SONNET` → sonnet）。
+#[tokio::test]
+async fn test_agent_frontmatter_tier_case_normalized_on_launch() {
+    let dir = tempdir().unwrap();
+    write_test_agent_with_model(&dir, "SONNET");
+    let aliases: Arc<std::sync::Mutex<Vec<Option<String>>>> = Arc::default();
+    let host = DurableHost::open_in(dir.path(), "fixture-model-tier-case").await;
+    let t = with_agent_face(
+        make_recording_subagent_tool(vec![], Arc::clone(&aliases)),
+        dir.path(),
+    )
+    .await;
+    let t = host.bind(t);
+
+    let result = t
+        .invoke(
+            serde_json::json!({
+                "subagent_type": "test-agent",
+                "prompt": "hello",
+                "cwd": dir.path().to_str().unwrap()
+            }),
+            host.context(&[]),
+        )
+        .await
+        .expect("合法档位（大小写变体）应正常启动");
+    assert!(result.contains("echo"), "应正常执行: {result}");
+    assert_eq!(
+        aliases.lock().unwrap().as_slice(),
+        &[Some("sonnet".to_string())],
+        "frontmatter 档位应小写归一后交给工厂"
+    );
+}

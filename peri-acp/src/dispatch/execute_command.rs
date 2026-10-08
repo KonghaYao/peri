@@ -291,3 +291,7 @@ pub fn extract_execute_command_params(params: &Value) -> Result<(String, String,
 
     Ok((session_id, command, args))
 }
+
+#[cfg(test)]
+#[path = "execute_command_test.rs"]
+mod tests;

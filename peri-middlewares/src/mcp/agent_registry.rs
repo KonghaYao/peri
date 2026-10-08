@@ -31,6 +31,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use parking_lot::RwLock;
+use peri_acp_types::agents::{AgentModelSelection, InvalidModelTier};
 use peri_acp_types::workspace_resources::{
     ResourceScope, META_KEY_FRONTMATTER, META_KEY_PLUGIN, META_KEY_SCOPE,
 };
@@ -93,8 +94,8 @@ pub struct McpAgentMetadata {
     pub name: String,
     pub description: String,
     pub uri: String,
-    /// 目录展示的模型档位（`haiku` / `sonnet` / `opus` / `fable` / `inherit`）。
-    pub model_tier: String,
+    /// 目录展示的模型档位（typed 已验证值；渲染只经 `catalog_label()`）。
+    pub model_tier: AgentModelSelection,
     /// 目录展示的写能力标签（保守调度提示，不是授权）。
     pub can_mutate: bool,
 }
@@ -220,7 +221,7 @@ impl McpAgentRegistry {
                         name,
                         description: resource.description.clone().unwrap_or_default(),
                         uri: resource.uri.clone(),
-                        model_tier: "inherit".to_string(),
+                        model_tier: AgentModelSelection::Inherit,
                         can_mutate: true,
                     });
                     continue;
@@ -472,6 +473,19 @@ impl McpAgentRegistry {
             if definition.frontmatter.name.trim().is_empty() {
                 definition.frontmatter.name = metadata.id.clone();
             }
+            // M2：本地/插件 frontmatter `model` 与远端共用 typed 校验与归一。
+            // 激活读到的正文与目录投影的 `_meta.frontmatter` 是两个来源一致性
+            // 缝隙，故以正文为**启动权威**再校验：非法档位在点名启动处明确失败
+            // ——不静默 inherit，也不阻断会话内其他定义；错误只报错误类别，
+            // 不回显可疑原始值。
+            let selection = AgentModelSelection::parse(definition.frontmatter.model.as_deref())
+                .map_err(|InvalidModelTier| {
+                    format!(
+                        "agent '{}' declares an unsupported model tier; fix the definition before use",
+                        metadata.id
+                    )
+                })?;
+            definition.frontmatter.model = selection.normalized_value().map(str::to_string);
         } else {
             if definition.frontmatter.name != metadata_id_name(&metadata) {
                 return Err(format!(
@@ -591,7 +605,7 @@ fn metadata_id_name(metadata: &McpAgentMetadata) -> String {
 struct LocalCatalogFields {
     display_name: String,
     description: String,
-    model_tier: String,
+    model_tier: AgentModelSelection,
     can_mutate: bool,
 }
 
@@ -602,7 +616,19 @@ fn local_catalog_fields(
 ) -> Option<LocalCatalogFields> {
     let frontmatter: ClaudeAgentFrontmatter =
         serde_json::from_value(serde_json::Value::Object(frontmatter?.clone())).ok()?;
-    let capability = crate::subagent::infer_agent_capability(&frontmatter);
+    // M2：非法档位隔离该条目——既不进候选目录，也不进可执行解析面（点名启动
+    // 因此显式失败，而不是拿着未知档位静默走父模型）。其余条目照常投影：单条
+    // 坏定义不阻断会话。诊断只记 agent id 与错误类别，不回显可疑原始值。
+    let capability = match crate::subagent::infer_agent_capability(&frontmatter) {
+        Ok(capability) => capability,
+        Err(InvalidModelTier) => {
+            tracing::warn!(
+                agent = %agent_id,
+                "本地 agent 定义的 model 档位非法，已从候选目录隔离"
+            );
+            return None;
+        }
+    };
     let display_name = if frontmatter.name.trim().is_empty() {
         agent_id.to_string()
     } else {
@@ -629,12 +655,12 @@ fn normalize_remote_definition(definition: &mut ClaudeAgent) -> Result<(), Strin
     if definition.frontmatter.max_turns == Some(0) {
         return Err("MCP agent maxTurns must be a positive integer".to_string());
     }
-    if let Some(model) = definition.frontmatter.model.as_deref() {
-        let model = model.to_ascii_lowercase();
-        if model != "inherit" && !["haiku", "sonnet", "opus", "fable"].contains(&model.as_str()) {
-            return Err(format!("unsupported MCP agent model suggestion '{model}'"));
-        }
-        definition.frontmatter.model = Some(model);
+    if let Some(raw) = definition.frontmatter.model.clone() {
+        // 复用契约层 typed 解析（与本地/插件来源同一名单与归一规则）；
+        // 错误文本不回显可疑原始值。
+        let selection = AgentModelSelection::parse(Some(&raw))
+            .map_err(|InvalidModelTier| "unsupported MCP agent model suggestion".to_string())?;
+        definition.frontmatter.model = selection.normalized_value().map(str::to_string);
     }
 
     // MCPP v1：这些本地扩展字段具有执行/持久化语义，远端配置默认忽略。

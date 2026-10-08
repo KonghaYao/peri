@@ -220,31 +220,41 @@ fn test_plugin_route_entries_full() {
     assert_eq!(r.provenance.source.namespace(), Some("ecc"));
 }
 
-/// 占位 handler 语义：execute → `Inject` 空串（fall-through 进 agent 管线，
-/// 命令不被吞——与 McpSkillPlaceholder / PassthroughPlaceholder 同构）。
+/// [回归测试] L1：插件命令 handler 必须把用户原文整段 `Inject` 回 agent 管线。
+///
+/// 历史缺陷：占位实现返回 `Inject(String::new())`，拦截路径据此把用户消息整体
+/// 替换为空文本——命令被吞且不报错（与 2026-08-16 `AgentPassthrough` 空串回归
+/// 同款；skill 面已修，插件面本次跟进）。断言两层语义：原文不被吞（逐字回传）、
+/// 不以 `Done` 伪报执行。
 #[tokio::test]
-async fn test_plugin_route_entries_handler_is_placeholder_inject() {
+async fn test_plugin_route_entries_handler_injects_original_text() {
     let entries = vec![CommandEntry {
         name: "plugin:ecc:deploy".into(),
         description: String::new(),
         source: CommandSource::Builtin,
     }];
     let routes = plugin_route_entries(&entries);
-    let outcome = routes[0]
-        .handler
-        .execute(CommandContext::new(
-            "test-session".into(),
-            vec![],
-            "/tmp".into(),
-            Arc::new(NoopEventSink),
-            tokio_util::sync::CancellationToken::new(),
-            Default::default(),
-        ))
-        .await;
-    assert!(
-        matches!(&outcome, CommandOutcome::Inject(s) if s.is_empty()),
-        "占位 handler 应 Inject 空串，实际 outcome 非 Inject"
+    let raw = "/plugin:ecc:deploy --env prod";
+    let mut ctx = CommandContext::new(
+        "test-session".into(),
+        vec![],
+        "/tmp".into(),
+        Arc::new(NoopEventSink),
+        tokio_util::sync::CancellationToken::new(),
+        Default::default(),
     );
+    ctx.raw_text = raw.to_string();
+    ctx.args = "--env prod".to_string();
+
+    let outcome = routes[0].handler.execute(ctx).await;
+    match outcome {
+        CommandOutcome::Inject(payload) => assert_eq!(
+            payload, raw,
+            "用户原文必须逐字回传（含命令 token 与 args），不得被空串吞掉"
+        ),
+        CommandOutcome::Done(_) => panic!("插件命令不得以 Done 伪报执行"),
+        CommandOutcome::Delegate(_) => panic!("插件命令本 Phase 无 Delegate 语义"),
+    }
 }
 
 /// 词法异常 name 全量跳过：单层 `plugin:x`（缺末段 cmd）、非 plugin 域
