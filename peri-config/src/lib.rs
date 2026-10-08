@@ -1,5 +1,6 @@
 pub mod app;
 mod assembly;
+pub mod betas;
 pub mod io;
 pub mod mcp;
 pub mod observability;

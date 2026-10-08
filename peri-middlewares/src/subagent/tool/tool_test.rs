@@ -1124,6 +1124,8 @@ async fn preset_resumable_thread(
 // rustc 不会为聚合根派生 `tool_test/` 子目录，子模块需显式 `#[path]` 指向。
 #[path = "tool_test/active_message_test.rs"]
 mod active_message_test;
+#[path = "tool_test/beta_default_test.rs"]
+mod beta_default_test;
 
 #[path = "tool_test/bg_register_cancel_test.rs"]
 mod bg_register_cancel_test;

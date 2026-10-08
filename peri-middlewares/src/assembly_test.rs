@@ -395,6 +395,8 @@ fn base_context() -> AssemblyContext {
         todo_tx,
         goal_controller: None,
         meta_harness_disabled: std::collections::HashSet::new(),
+        // 契约夹具不消费 beta flag 语义：缺省（前台）与 flag 引入前一致。
+        agent_default_run_in_background: false,
         agent_overrides: None,
         language: None,
     }

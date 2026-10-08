@@ -177,6 +177,12 @@ pub struct HostAssemblyInput {
     /// 遗留测试输入槽；生产传 `None`，Workspace Bash 在 MCP 侧自持任务。
     #[cfg(not(target_os = "emscripten"))]
     pub workspace_input: Option<peri_mcp_workspace::WorkspaceInstanceInput>,
+    /// builtin `workspace` 实例 Bash 的有效 `run_in_background` 缺省（beta flag 投影）。
+    ///
+    /// 会话装配从**会话冻结**的 flag 值派生后随 builtin 实例上下文一次注入 pool；
+    /// 顶层三路径（无会话上下文）恒为 `false`（与 flag 引入前一致）。
+    #[cfg(not(target_os = "emscripten"))]
+    pub workspace_bash_default_run_in_background: bool,
     /// builtin `workspace` 实例的**资源面**输入（资源根 / builtin 关闭位 / 预算），
     /// 随 builtin 实例上下文一次注入 pool，早于
     /// `McpClientPool::run_initialize`（A33）。
@@ -412,6 +418,8 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         #[cfg(not(target_os = "emscripten"))]
         workspace_input,
         #[cfg(not(target_os = "emscripten"))]
+        workspace_bash_default_run_in_background,
+        #[cfg(not(target_os = "emscripten"))]
         workspace_resources,
         prepared_plugins,
         session_mcp_servers,
@@ -558,6 +566,12 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         if let Some(workspace_resources) = workspace_resources {
             builtin_context = builtin_context.with_workspace_resources(workspace_resources);
         }
+        // beta flag 投影（会话冻结）：Bash 的 `run_in_background` 有效缺省随本上下文
+        // 一次注入；装配面只传值，dispatch 不读配置、不解析 flag 语义。
+        #[cfg(not(target_os = "emscripten"))]
+        let builtin_context = builtin_context.with_workspace_bash_default_run_in_background(
+            workspace_bash_default_run_in_background,
+        );
         let builtin_context = builtin_context
             .with_closed(builtin_closed)
             // W4b 收口：宿主技能面关闭位与关闭集同源（同一份 disabled 集合），

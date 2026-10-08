@@ -37,7 +37,16 @@ impl super::SubAgentTool {
             mcp_agent_registry: None,
             broker: None,
             chain_assembler: Arc::new(SubagentChainAssemblerImpl::new()),
+            default_run_in_background: false,
         }
+    }
+
+    /// 注入 `run_in_background` 的有效缺省（middleware 装配参数；会话内冻结）。
+    ///
+    /// 未注入 = `false`：与 flag 引入前逐位一致。
+    pub(crate) fn with_default_run_in_background(mut self, default: bool) -> Self {
+        self.default_run_in_background = default;
+        self
     }
 
     pub(crate) fn with_mcp_agents(

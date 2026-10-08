@@ -15,6 +15,7 @@ use crate::kit::atoms::{
 use crate::kit::list_nav::{next_selection, previous_selection};
 use crate::kit::panel_mouse::{AreaTracker, ListLayout, hit_item, is_scrollbar_column};
 use fluent_bundle::FluentValue;
+use peri_acp_types::beta_flags::BETA_FLAGS;
 use peri_acp_types::permission::PermissionMode;
 use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::{
@@ -72,6 +73,51 @@ const CONFIG_ROWS: &[(&str, RowType)] = &[
     ("config-field-scroll-fps", RowType::Cycle(FPS_OPTS)),
 ];
 
+// ─── 行模型：基础行 + 注册表驱动的 beta flag 区块 ────────────────────────────
+//
+// 基础行仍是静态表；beta flag 区块按注册表顺序（`BETA_FLAGS`）逐条渲染 Toggle 行。
+// 区块标题行也是行模型的一员（不可激活），使「每项一行」的命中契约（滚动 / 鼠标点击）
+// 与既有面板能力保持一致。
+
+/// 行模型的单行。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ConfigRow {
+    /// 基础行（`CONFIG_ROWS` 索引）。
+    Base(usize),
+    /// beta 区块标题行：承载「新会话生效」标注，不可激活。
+    BetaSection,
+    /// 注册表条目（索引指向 `BETA_FLAGS`）：Toggle 行。
+    BetaFlag(usize),
+}
+
+/// 当前行模型（注册表为空时不渲染空区块）。
+fn config_rows() -> Vec<ConfigRow> {
+    let mut rows: Vec<ConfigRow> = (0..CONFIG_ROWS.len()).map(ConfigRow::Base).collect();
+    if !BETA_FLAGS.is_empty() {
+        rows.push(ConfigRow::BetaSection);
+        rows.extend((0..BETA_FLAGS.len()).map(ConfigRow::BetaFlag));
+    }
+    rows
+}
+
+/// 面板行数（鼠标命中反推与上下键导航共用）。
+fn row_count() -> usize {
+    config_rows().len()
+}
+
+/// beta flag 行的描述：优先 i18n key `beta-desc-<id>`，缺失回退注册表 canonical 文本。
+///
+/// `i18n::tr` 未命中时原样返回 key（见 `i18n::format_key`），据此判定缺失。
+fn beta_description(id: &str, canonical: &str) -> String {
+    let key = format!("beta-desc-{id}");
+    let translated = i18n::tr(&key);
+    if translated == key {
+        canonical.to_string()
+    } else {
+        translated
+    }
+}
+
 #[component]
 pub fn ConfigPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     hooks.use_atom(&crate::kit::atoms::SERVICE_SNAPSHOT);
@@ -90,7 +136,8 @@ pub fn ConfigPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         let tracker = hooks.use_hook(AreaTracker::new);
         area = tracker.rect;
     }
-    let row_count = CONFIG_ROWS.len();
+    let rows = config_rows();
+    let row_count = rows.len();
 
     hooks.use_event_handler_with_options(
         EventScope::Current,
@@ -177,7 +224,7 @@ pub fn ConfigPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     )]));
     lines.push(Line::from(""));
 
-    for (i, (label, row_type)) in CONFIG_ROWS.iter().enumerate() {
+    for (i, row) in rows.iter().enumerate() {
         let is_active = i == sel;
         let cursor_mark = if is_active { "> " } else { "  " };
         let label_style = if is_active {
@@ -188,30 +235,54 @@ pub fn ConfigPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             Style::new().fg(theme_def.read().semantic.text.primary)
         };
 
+        // beta 区块标题行：不可激活，只承载「新会话生效」标注。
+        if let ConfigRow::BetaSection = row {
+            lines.push(Line::from(vec![
+                Span::styled(cursor_mark, Style::new()),
+                Span::styled(
+                    i18n::tr("config-beta-section"),
+                    Style::new()
+                        .fg(theme_def.read().semantic.text.muted)
+                        .italic(),
+                ),
+            ]));
+            continue;
+        }
+
+        // beta flag 行：注册表 id + 当前生效层覆盖值 + 描述（i18n 优先）。
+        if let ConfigRow::BetaFlag(flag_index) = row {
+            let flag = &BETA_FLAGS[*flag_index];
+            let val = read_beta_toggle(flag.id);
+            let (on_text, off_text) = toggle_texts(val);
+            let (on_style, off_style) = toggle_styles(&theme_def.read(), val);
+            lines.push(Line::from(vec![
+                Span::styled(
+                    cursor_mark,
+                    Style::new().fg(theme_def.read().component.panel.title),
+                ),
+                Span::styled(format!("{:<22}", flag.id), label_style),
+                Span::styled(on_text, on_style),
+                Span::styled(" ", Style::new()),
+                Span::styled(off_text, off_style),
+                Span::styled(
+                    format!("  {}", beta_description(flag.id, flag.description)),
+                    Style::new().fg(theme_def.read().semantic.text.dim),
+                ),
+            ]));
+            continue;
+        }
+
+        let ConfigRow::Base(base_row) = row else {
+            continue;
+        };
+        let (label, row_type) = &CONFIG_ROWS[*base_row];
+        let i = *base_row;
+
         let value_line = match row_type {
             RowType::Toggle => {
                 let val = read_toggle(i);
-                let on_label = i18n::tr("config-value-on");
-                let off_label = i18n::tr("config-value-off");
-                let (on_text, off_text) = if val {
-                    (format!("[{}]", on_label), format!(" {}", off_label))
-                } else {
-                    (format!(" {}", on_label), format!("[{}]", off_label))
-                };
-                let on_style = if val {
-                    Style::new()
-                        .fg(theme_def.read().semantic.status.success)
-                        .bold()
-                } else {
-                    Style::new().fg(theme_def.read().semantic.text.muted)
-                };
-                let off_style = if val {
-                    Style::new().fg(theme_def.read().semantic.text.muted)
-                } else {
-                    Style::new()
-                        .fg(theme_def.read().semantic.status.error)
-                        .bold()
-                };
+                let (on_text, off_text) = toggle_texts(val);
+                let (on_style, off_style) = toggle_styles(&theme_def.read(), val);
                 Line::from(vec![
                     Span::styled(
                         cursor_mark,
@@ -286,6 +357,89 @@ pub fn ConfigPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 // ---------------------------------------------------------------------------
 // 真实读写：通过 PERI_CONFIG_HANDLE / PERMISSION_MODE_HANDLE 操作
 // ---------------------------------------------------------------------------
+
+/// ON / OFF 文本对（`[ON] OFF` / ` ON [OFF]`）。
+fn toggle_texts(val: bool) -> (String, String) {
+    let on_label = i18n::tr("config-value-on");
+    let off_label = i18n::tr("config-value-off");
+    if val {
+        (format!("[{}]", on_label), format!(" {}", off_label))
+    } else {
+        (format!(" {}", on_label), format!("[{}]", off_label))
+    }
+}
+
+/// ON / OFF 样式对（生效项高亮绿色，未生效项红色 / 灰）。
+fn toggle_styles(theme_def: &peri_theme::theme::ThemeDefinition, val: bool) -> (Style, Style) {
+    let on_style = if val {
+        Style::new().fg(theme_def.semantic.status.success).bold()
+    } else {
+        Style::new().fg(theme_def.semantic.text.muted)
+    };
+    let off_style = if val {
+        Style::new().fg(theme_def.semantic.text.muted)
+    } else {
+        Style::new().fg(theme_def.semantic.status.error).bold()
+    };
+    (on_style, off_style)
+}
+
+/// beta flag 行的显示值：**当前生效层**的覆盖值（未设置与显式 false 均显示为关闭）。
+///
+/// 有效值仍由权威面按合并规则计算——面板只显示生效层写回的那个键。
+fn read_beta_toggle(id: &str) -> bool {
+    PERI_CONFIG_HANDLE
+        .get()
+        .map(|handle| handle.read().config.betas.get(id).unwrap_or(false))
+        .unwrap_or(false)
+}
+
+/// 切换 beta flag：写当前生效层的 `config.betas[id]` 并经 `save_effective`（CAS）持久化。
+///
+/// 保存失败保持内存视图不变（回滚本次写入）并提示错误——面板始终显示已持久化的值；
+/// 已运行会话不受影响（值随装配冻结，新区块标注「新会话生效」）。
+fn toggle_beta_flag(id: &str) {
+    toggle_beta_flag_with(id, crate::config::save_effective);
+}
+
+/// 切换与持久化本体（保存入口注入，便于测试失败路径）。
+fn toggle_beta_flag_with(
+    id: &str,
+    save: impl FnOnce(&crate::config::PeriConfig) -> anyhow::Result<()>,
+) {
+    let Some(handle) = PERI_CONFIG_HANDLE.get() else {
+        return;
+    };
+    let previous = {
+        let mut cfg = handle.write();
+        let current = cfg.config.betas.get(id).unwrap_or(false);
+        cfg.config.betas.set(id, !current);
+        current
+    };
+    let snapshot = handle.read().clone();
+    match save(&snapshot) {
+        Ok(()) => {
+            *NOTIFICATION.state().write() = Some(Notification {
+                message: i18n::tr("config-saved").to_string(),
+                until: peri_time::monotonic_now() + Duration::from_secs(1),
+            });
+        }
+        Err(error) => {
+            // 保存失败：内存视图回滚到上一次的值（不发布未持久化的开关）。
+            handle.write().config.betas.set(id, previous);
+            *NOTIFICATION.state().write() = Some(Notification {
+                message: i18n::tr_args(
+                    "config-save-failed",
+                    &[(
+                        "error".to_string(),
+                        FluentValue::from(error.to_string().as_str()),
+                    )],
+                ),
+                until: peri_time::monotonic_now() + Duration::from_secs(2),
+            });
+        }
+    }
+}
 
 /// 读取 toggle 字段当前值（true=ON / false=OFF）。
 fn read_toggle(row: usize) -> bool {
@@ -385,7 +539,19 @@ fn read_cycle_idx(row: usize, options: &[&str]) -> usize {
 }
 
 /// 激活某行：toggle 反转，cycle forward=true 前进 / forward=false 后退。
+///
+/// 行模型分发：基础行沿用既有逐字段写入；beta flag 行写 `config.betas[id]` 并经
+/// `save_effective`（CAS）持久化；区块标题行不可激活。
 fn activate_row(row: usize, forward: bool) {
+    match config_rows().get(row) {
+        Some(ConfigRow::BetaFlag(flag_index)) => toggle_beta_flag(BETA_FLAGS[*flag_index].id),
+        Some(ConfigRow::BetaSection) | None => {}
+        Some(ConfigRow::Base(base_row)) => activate_base_row(*base_row, forward),
+    }
+}
+
+/// 基础行激活（索引 = `CONFIG_ROWS`）。
+fn activate_base_row(row: usize, forward: bool) {
     let Some(handle) = PERI_CONFIG_HANDLE.get() else {
         return;
     };
@@ -750,3 +916,7 @@ fn apply_cycle_row_tui(cfg: &mut TuiConfig, row: usize, forward: bool) -> Option
 #[cfg(test)]
 #[path = "config_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "config_betas_test.rs"]
+mod beta_tests;

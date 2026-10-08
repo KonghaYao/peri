@@ -256,7 +256,13 @@ pub(crate) fn builtin_server_handler_with_env(
         "workspace" => {
             // The MCP instance owns its Bash tasks. Session state is never
             // injected into the capability server.
-            let mut server = WorkspaceMcpServer::standalone(ctx.cwd.clone());
+            //
+            // Bash 的有效 `run_in_background` 缺省经上下文一次注入（beta flag 投影，
+            // 装配期从会话冻结值派生）：本工厂不读配置、不解析 flag 语义。
+            let mut server = WorkspaceMcpServer::standalone(
+                ctx.cwd.clone(),
+                ctx.workspace_bash_default_run_in_background,
+            );
             if let Some(authority) = ctx.task_scope_authority.get() {
                 server = server.with_task_scope_authority(authority.clone());
             }

@@ -35,6 +35,11 @@ struct FrozenSnapshotV1 {
     date: String,
     language: Option<String>,
     meta_harness: MetaHarnessSnapshotV1,
+    /// beta flag 冻结值（设计 §消费契约）。V1 的可选加性字段：旧 blob 没有该键 →
+    /// 空投影（一切按 false，与 flag 引入前的行为一致），不按当前配置重建
+    /// （ARC-FROZEN-001）。
+    #[serde(default)]
+    beta_flags: BetaFlagsSnapshotV1,
     /// 冻结运行环境（H3）。V1 的可选加性字段：旧 blob 没有该键 → `None`
     /// （unavailable，不重探本地值冒充）；新 blob 写入结构化环境快照。
     #[serde(default)]
@@ -46,6 +51,24 @@ struct MetaHarnessSnapshotV1 {
     section_overrides: BTreeMap<String, String>,
     disabled_middlewares: BTreeSet<String>,
     built_in_subagents_enabled: bool,
+}
+
+/// beta flag 冻结值的持久化形状（与 `BetaFlags` 同构；只存已覆盖条目）。
+#[derive(Serialize, Deserialize, Default)]
+struct BetaFlagsSnapshotV1 {
+    overrides: BTreeMap<String, BetaFlagValueSnapshotV1>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct BetaFlagValueSnapshotV1 {
+    enabled: bool,
+    origin: BetaFlagOriginSnapshotV1,
+}
+
+#[derive(Serialize, Deserialize)]
+enum BetaFlagOriginSnapshotV1 {
+    Global,
+    Workspace,
 }
 
 pub(crate) fn encode_frozen_snapshot(
@@ -69,6 +92,29 @@ pub(crate) fn encode_frozen_snapshot(
                     .collect(),
                 disabled_middlewares: meta.disabled_middlewares.iter().cloned().collect(),
                 built_in_subagents_enabled: meta.built_in_subagents_enabled,
+            },
+            beta_flags: BetaFlagsSnapshotV1 {
+                overrides: frozen
+                    .v2_frozen()
+                    .beta_flags
+                    .overrides()
+                    .map(|(id, value)| {
+                        (
+                            id.to_string(),
+                            BetaFlagValueSnapshotV1 {
+                                enabled: value.enabled,
+                                origin: match value.origin {
+                                    peri_acp_types::beta_flags::BetaFlagOrigin::Global => {
+                                        BetaFlagOriginSnapshotV1::Global
+                                    }
+                                    peri_acp_types::beta_flags::BetaFlagOrigin::Workspace => {
+                                        BetaFlagOriginSnapshotV1::Workspace
+                                    }
+                                },
+                            },
+                        )
+                    })
+                    .collect(),
             },
             runtime_env: frozen.runtime_env().cloned(),
         },
@@ -110,6 +156,26 @@ pub(crate) fn decode_frozen_snapshot(raw: &str) -> Result<FrozenSessionData, Fro
         date: Arc::from(data.date),
         language: data.language.map(Arc::from),
         meta_harness,
+        // 旧 blob 缺该键（`#[serde(default)]`）→ 空投影：历史会话保持「全部按 false」，
+        // 不按当前配置重建。
+        beta_flags: peri_acp_types::beta_flags::BetaFlags::from_values(
+            data.beta_flags.overrides.into_iter().map(|(id, value)| {
+                (
+                    id,
+                    peri_acp_types::beta_flags::BetaFlagValue {
+                        enabled: value.enabled,
+                        origin: match value.origin {
+                            BetaFlagOriginSnapshotV1::Global => {
+                                peri_acp_types::beta_flags::BetaFlagOrigin::Global
+                            }
+                            BetaFlagOriginSnapshotV1::Workspace => {
+                                peri_acp_types::beta_flags::BetaFlagOrigin::Workspace
+                            }
+                        },
+                    },
+                )
+            }),
+        ),
         // 旧 blob 缺该键（`#[serde(default)]`）→ None = unavailable；不重探
         // 本地环境冒充历史快照（H3 旧数据策略）。
         runtime_env: data.runtime_env,

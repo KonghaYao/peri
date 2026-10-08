@@ -12,6 +12,7 @@ use thiserror::Error;
 use crate::{
     app::PeriConfig,
     assembly::{self, parse_document},
+    betas::BetaFlags,
     mcp::{McpCachePolicy, McpConfigFile},
     observability::LangfuseConfig,
     provider::ResolvedProvider,
@@ -96,6 +97,7 @@ pub enum ConfigurationField {
     Observability,
     Ui,
     Resources,
+    Betas,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -139,6 +141,7 @@ pub struct ConfigurationSnapshot {
     observability: LangfuseConfig,
     ui: TuiConfig,
     resources: ResourceConfiguration,
+    betas: BetaFlags,
 }
 
 impl fmt::Debug for ConfigurationSnapshot {
@@ -155,6 +158,7 @@ impl fmt::Debug for ConfigurationSnapshot {
             .field("observability", &self.observability)
             .field("ui", &self.ui)
             .field("resources", &self.resources)
+            .field("betas", &self.betas)
             .finish()
     }
 }
@@ -178,6 +182,7 @@ impl ConfigurationSnapshot {
             observability: resolved.observability,
             ui: resolved.ui,
             resources: resolved.resources,
+            betas: resolved.betas,
         })
     }
 
@@ -244,6 +249,11 @@ impl ConfigurationSnapshot {
 
     pub fn resources(&self) -> &ResourceConfiguration {
         &self.resources
+    }
+
+    /// Beta flag 有效值投影（由合并后 settings 派生；未覆盖与未知 id 按 false）。
+    pub fn flags(&self) -> &BetaFlags {
+        &self.betas
     }
 
     pub fn builtin_mcp_enabled(&self) -> bool {

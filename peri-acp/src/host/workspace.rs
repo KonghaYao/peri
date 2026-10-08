@@ -295,6 +295,24 @@ impl SessionEnvironment {
         };
         let builtin_closed =
             peri_middlewares::assembly::builtin_closed_instances(&disabled_middlewares);
+        // ── beta flag（设计 §消费契约）──
+        //
+        // 唯一来源是**会话冻结值**：新建会话由准备期从配置快照投影一次（`prepared.rs`
+        // → `frozen.rs`），恢复 / fork 复用持久 blob 的字节；本层不重读配置，也不
+        // 回退到当轮 config。生效项在这里记录一次（flag id + 来源层），供诊断。
+        #[cfg(not(target_os = "emscripten"))]
+        let beta_flags = frozen
+            .map(|frozen| frozen.v2_frozen().beta_flags.clone())
+            .unwrap_or_default();
+        #[cfg(not(target_os = "emscripten"))]
+        for (id, origin) in beta_flags.enabled() {
+            tracing::info!(flag = %id, origin = ?origin, "beta flag enabled for session");
+        }
+        // Bash 的有效 `run_in_background` 缺省：flag 语义只在此处解析一次，工具侧
+        // 收到语义化布尔值。
+        #[cfg(not(target_os = "emscripten"))]
+        let workspace_bash_default_run_in_background =
+            beta_flags.is_enabled(peri_acp_types::beta_flags::FULL_ASYNC_TOOLS);
         let skills_face_closed = disabled_middlewares.contains("SkillsMiddleware");
         // M6：插件来源闭合位与上面两个是同**一份** disabled 集合的投影（链槽
         // 装配的跳过判据、资源 roots / 命令 / hooks / MCP 合并 / 继承面的派生
@@ -319,6 +337,8 @@ impl SessionEnvironment {
             drive_cron_tick: source.drive_cron_tick,
             #[cfg(not(target_os = "emscripten"))]
             workspace_input: None,
+            #[cfg(not(target_os = "emscripten"))]
+            workspace_bash_default_run_in_background,
             #[cfg(not(target_os = "emscripten"))]
             workspace_resources: Some(workspace_resources),
             builtin_closed,

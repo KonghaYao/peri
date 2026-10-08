@@ -67,6 +67,11 @@ pub struct FrozenContext {
     /// MetaHarness 冻结状态（段落覆盖 + middleware 关闭集合；会话内不可变，
     /// SubAgent/fork 复用——见 `docs/design/meta-harness-design.md` §2.3）。
     pub meta_harness: peri_acp_types::meta_harness::MetaHarnessState,
+    /// Beta flag 冻结值（覆盖 id → 有效值 + 来源层；会话创建时从配置快照投影一次，
+    /// 会话内不可变，SubAgent/fork 复用——见 `docs/design/beta-flags.md` §消费契约）。
+    ///
+    /// 装配面（工具池 / middleware）只消费它，不回读配置源；空投影 = 全部按 false。
+    pub beta_flags: peri_acp_types::beta_flags::BetaFlags,
     /// 冻结运行环境（平台 / OS 版本 / 是否 Git 仓库；H3）。
     ///
     /// 内容准入期由选定执行环境探测一次后随冻结持久化；主/子/workflow 的
@@ -97,6 +102,7 @@ pub struct FrozenContextBuilder {
     date: Option<String>,
     language: Option<Option<String>>,
     meta_harness: Option<peri_acp_types::meta_harness::MetaHarnessState>,
+    beta_flags: Option<peri_acp_types::beta_flags::BetaFlags>,
     runtime_env: Option<peri_acp_types::frozen::FrozenRuntimeEnv>,
 }
 
@@ -132,6 +138,12 @@ impl FrozenContextBuilder {
         self
     }
 
+    /// 设置 beta flag 冻结值；未设置时空投影（一切按 false）。
+    pub fn beta_flags(mut self, flags: peri_acp_types::beta_flags::BetaFlags) -> Self {
+        self.beta_flags = Some(flags);
+        self
+    }
+
     /// 设置冻结运行环境快照（H3）；未设置时保持 `None`（unavailable）。
     pub fn runtime_env(mut self, env: Option<peri_acp_types::frozen::FrozenRuntimeEnv>) -> Self {
         self.runtime_env = env;
@@ -146,6 +158,7 @@ impl FrozenContextBuilder {
             date: self.date.unwrap_or_default().into(),
             language: self.language.flatten().map(Into::into),
             meta_harness: self.meta_harness.unwrap_or_default(),
+            beta_flags: self.beta_flags.unwrap_or_default(),
             runtime_env: self.runtime_env,
         }
     }

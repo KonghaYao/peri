@@ -181,6 +181,9 @@ pub struct StageBuildInput {
     /// `v2_frozen.meta_harness.disabled_middlewares` 投影；
     /// 顶层链过滤——设计 §2.5）。
     pub meta_harness_disabled: HashSet<String>,
+    /// `Agent` 工具 `run_in_background` 的有效缺省（源自会话冻结的 beta flag 投影，
+    /// 由 ACP 装配面投影为语义值；`false` = 既有行为）。
+    pub agent_default_run_in_background: bool,
 }
 
 /// 后台任务完成事件的独立发送端（跨 turn 存活；L3：注入 SubagentHost）

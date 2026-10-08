@@ -223,6 +223,7 @@ async fn assemble_stdio_config(
             // session 级输入（AW3-11）由每 session 的 `SessionEnvironment::assemble`
             // 产生，此处恒为 `None`。
             workspace_input: None,
+            workspace_bash_default_run_in_background: false,
             // 资源面输入与 session 级输入同源（见上）：顶层装配无会话消费者，恒为
             // `None`（资源面未接线），不改变任何既有行为。
             workspace_resources: None,

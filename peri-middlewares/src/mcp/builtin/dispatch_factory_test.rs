@@ -8,6 +8,8 @@ fn workspace_input() -> WorkspaceInstanceInput {
     WorkspaceInstanceInput {
         task_manager: Some(Arc::new(ConcreteTaskManager::new()) as Arc<dyn TaskManager>),
         on_bg_complete: Some(Arc::new(|_: &BackgroundTaskResult, _: BgTaskKind| Ok(()))),
+        // 既有行为：未显式传参走前台（beta flag 未开启）。
+        default_run_in_background: false,
     }
 }
 

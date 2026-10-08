@@ -17,7 +17,6 @@ pub enum PanelKind {
     Status,
     Memory,
     Tasks,
-    Betas,
     Workflow,
     AskUser,
     Theme,

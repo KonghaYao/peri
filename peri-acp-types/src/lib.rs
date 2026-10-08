@@ -26,6 +26,7 @@
 //! - `command` — slash 命令契约（PromptStopReason/CommandHandler/CommandContext）
 //! - `skills` — skill 契约（SkillSource/SkillRoot/SkillMetadata）
 //! - `meta_harness` — MetaHarness 契约（MetaHarnessState + SECTION_IDS/MIDDLEWARE_NAMES）
+//! - `beta_flags` — Beta flag 注册表与投影/冻结值契约（BETA_FLAGS + BetaFlags）
 //! - `cron` — cron 契约（CronTrigger + CronSchedulerPort）
 //! - `workflow` — workflow 协议契约（AgentRunParams/ProgressEvent/AgentExecutor/...）
 //! - `hooks` — hook 契约（HookEvent/HookType/RegisteredHook/...）
@@ -35,6 +36,7 @@
 
 pub mod acp_mcp;
 pub mod agents;
+pub mod beta_flags;
 pub mod builtin_mcp;
 pub mod command;
 // 注册表顶层 re-export（Phase 2 消费方路径 `peri_acp_types::command_registry::*`，

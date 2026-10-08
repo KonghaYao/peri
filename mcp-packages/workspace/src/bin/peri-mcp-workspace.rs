@@ -179,7 +179,9 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     let workspace = canonical_directory(&args.workspace, "workspace")?;
     let resources = resource_input(&args, &workspace)?;
-    let server = WorkspaceMcpServer::standalone(workspace.to_string_lossy().into_owned())
+    // 独立 CLI 不消费 Peri 配置面（beta flag 只经会话装配注入）：缺省恒为前台，
+    // 与 flag 引入前的行为一致。
+    let server = WorkspaceMcpServer::standalone(workspace.to_string_lossy().into_owned(), false)
         .with_resources(resources)
         .with_task_scope_authority(TaskScopeAuthority::trusted_connection());
     let task_owner = server.clone();

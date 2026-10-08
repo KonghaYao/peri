@@ -25,11 +25,11 @@ use crate::app::panel_types::PanelKind;
 use crate::i18n;
 use crate::kit::atoms::{ACTIVE_PANEL, OPEN_PANELS};
 use crate::kit::panels::{
-    agent::AgentPanel, ask_user::AskUserPanel, betas::BetasPanel, config::ConfigPanel,
-    cron::CronPanel, goal::GoalPanel, hooks::HooksPanel, login::LoginPanel, mcp::McpPanel,
-    memory::MemoryPanel, model::ModelPanel, plugin::PluginPanel, shell_detail::ShellDetailPanel,
-    status::StatusPanel, subagent_detail::SubAgentDetailPanel, tasks::TasksPanel,
-    theme::ThemePanel, thread_browser::ThreadBrowserPanel, workflow::WorkflowPanel,
+    agent::AgentPanel, ask_user::AskUserPanel, config::ConfigPanel, cron::CronPanel,
+    goal::GoalPanel, hooks::HooksPanel, login::LoginPanel, mcp::McpPanel, memory::MemoryPanel,
+    model::ModelPanel, plugin::PluginPanel, shell_detail::ShellDetailPanel, status::StatusPanel,
+    subagent_detail::SubAgentDetailPanel, tasks::TasksPanel, theme::ThemePanel,
+    thread_browser::ThreadBrowserPanel, workflow::WorkflowPanel,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,10 +132,6 @@ fn render_tasks_panel() -> AnyElement<'static> {
     element!(TasksPanel()).into()
 }
 
-fn render_betas_panel() -> AnyElement<'static> {
-    element!(BetasPanel()).into()
-}
-
 fn render_workflow_panel() -> AnyElement<'static> {
     element!(WorkflowPanel()).into()
 }
@@ -170,7 +166,6 @@ fn render_goal_panel() -> AnyElement<'static> {
 /// - Ctrl+L = Login
 /// - Ctrl+H = Hooks
 /// - Ctrl+J = Tasks
-/// - Ctrl+B = Betas
 /// - Ctrl+P = Plugin
 /// - Ctrl+G = Agent
 /// - Ctrl+F = Config
@@ -323,18 +318,6 @@ pub const PANELS: &[PanelMeta] = &[
         render: render_tasks_panel,
     },
     PanelMeta {
-        kind: PanelKind::Betas,
-        title: "Betas",
-        shortcut_letter: 'b',
-        slash_command: "betas",
-        description: "Feature flags",
-        priority: 12,
-        mutex_group: MutexGroup::Info,
-        scope: PanelScope::Global,
-        layout: PanelLayout::fixed(60, 18),
-        render: render_betas_panel,
-    },
-    PanelMeta {
         kind: PanelKind::Workflow,
         title: "Workflow",
         shortcut_letter: 'w',
@@ -422,7 +405,6 @@ pub fn panel_title(kind: PanelKind) -> String {
         PanelKind::Status => "panel-title-status",
         PanelKind::Memory => "panel-title-memory",
         PanelKind::Tasks => "panel-title-tasks",
-        PanelKind::Betas => "panel-title-betas",
         PanelKind::Workflow => "panel-title-workflow",
         PanelKind::AskUser => "panel-title-ask-user",
         PanelKind::Theme => "panel-title-theme",
@@ -432,11 +414,7 @@ pub fn panel_title(kind: PanelKind) -> String {
     };
     if matches!(
         kind,
-        PanelKind::Config
-            | PanelKind::Model
-            | PanelKind::Login
-            | PanelKind::Betas
-            | PanelKind::Theme
+        PanelKind::Config | PanelKind::Model | PanelKind::Login | PanelKind::Theme
     ) {
         format!(" {} · {} ", i18n::tr(key), i18n::tr("panel-host-settings"))
     } else {
@@ -447,11 +425,7 @@ pub fn panel_title(kind: PanelKind) -> String {
 pub fn panel_config_source(kind: PanelKind) -> String {
     if !matches!(
         kind,
-        PanelKind::Config
-            | PanelKind::Model
-            | PanelKind::Login
-            | PanelKind::Betas
-            | PanelKind::Theme
+        PanelKind::Config | PanelKind::Model | PanelKind::Login | PanelKind::Theme
     ) {
         return String::new();
     }
@@ -480,7 +454,6 @@ pub fn panel_description(kind: PanelKind) -> String {
         PanelKind::Status => "panel-desc-status",
         PanelKind::Memory => "panel-desc-memory",
         PanelKind::Tasks => "panel-desc-tasks",
-        PanelKind::Betas => "panel-desc-betas",
         PanelKind::Workflow => "panel-desc-workflow",
         PanelKind::AskUser => "panel-desc-ask-user",
         PanelKind::Theme => "panel-desc-theme",

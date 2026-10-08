@@ -277,6 +277,18 @@ impl ConfigSource {
         self.raw_workspace.as_deref()
     }
 
+    /// Beta flag 有效值投影 from this selected source.
+    ///
+    /// 有已发布快照时用快照投影；lenient 源（无 authority）用内存中的
+    /// global/merged 视图投影——两者都是 typed 值，不重读文件。配置面不可用时投影
+    /// 为空（一切按 false，不意外开启能力）。
+    pub fn beta_flags(&self) -> crate::betas::BetaFlags {
+        if let Some(snapshot) = self.snapshot() {
+            return snapshot.flags().clone();
+        }
+        crate::betas::resolve(&self.global, &self.merged)
+    }
+
     pub fn is_workspace(&self) -> bool {
         self.workspace_path.is_some()
     }
@@ -343,7 +355,7 @@ fn load_with_raw(path: &Path) -> Result<(PeriConfig, Option<String>)> {
         return Err(SettingsError::InvalidJson);
     }
     let mut config: PeriConfig = serde_json::from_value(document).map_err(SettingsError::Json)?;
-    config.config.validate_meta_harness();
+    config.config.validate_overrides();
     Ok((config, Some(content)))
 }
 

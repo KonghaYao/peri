@@ -186,6 +186,7 @@ setup-language-press-enter = 按 Enter 确认
 # ---- Config Panel ----
 
 config-panel-title =  /config — 配置
+config-beta-section = Beta · 新会话生效
 config-field-autocompact = Autocompact
 config-field-compact-threshold = Compact 阈值
 config-field-language = 语言
@@ -829,7 +830,6 @@ panel-title-cron = Cron
 panel-title-status = Status
 panel-title-memory = Memory
 panel-title-tasks = Tasks
-panel-title-betas = Betas
 panel-title-workflow = Workflow
 panel-title-ask-user = Ask User
 panel-title-theme = Theme
@@ -850,7 +850,6 @@ panel-desc-cron = 定时任务
 panel-desc-status = 服务快照
 panel-desc-memory = 持久化记忆
 panel-desc-tasks = 后台任务
-panel-desc-betas = 功能开关
 panel-desc-workflow = Workflow 运行
 panel-desc-ask-user = Agent 用户提问（自动打开）
 panel-desc-theme = 配色方案选择
@@ -878,10 +877,6 @@ bg-task-status-lost = 连接中断
 bg-task-status-reconciling = 正在重连
 workflow-run-not-synced = 所选 Workflow 运行不在当前快照中（可能已结束或尚未同步）。
 
-# ---- Betas Panel ----
-panel-betas-readonly-hint =   (只读 — 功能开关在构建时配置)
-panel-betas-empty =   暂无可用的 Beta 功能
-panel-betas-nav-hint =   ↑/↓::navigate  Enter::open  Esc::close
 
 # ---- Cron Panel ----
 panel-cron-stats =   { $configured } 个已配置，{ $enabled } 个已启用

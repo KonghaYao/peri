@@ -329,6 +329,7 @@ async fn test_stage_completion_reminders_share_assembled_task_manager() {
                 compact_pre_hook: None,
                 compact_post_hook: None,
                 meta_harness_disabled: Default::default(),
+                agent_default_run_in_background: Default::default(),
             };
             let assembler = CaptureAssembler(parking_lot::Mutex::new(None));
             let manager = supplied.then(|| Arc::new(TaskManager::new()));
