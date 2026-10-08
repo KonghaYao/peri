@@ -474,12 +474,23 @@ impl AgentExecutor for WorkflowAgentExecutor {
             *transcript = std::mem::take(&mut *transcript)
                 .with_persistence(execution.resources.clone(), session_id.clone());
         }
+        let mcp_pool = self.ctx.middleware_factory.mcp_pool();
         session.set_subagent_host(crate::session::subagent::SubagentHost {
             task_manager: Some(task_manager.clone()),
-            mcp_pool: self.ctx.middleware_factory.mcp_pool(),
+            mcp_pool: mcp_pool.clone(),
             session_resources: Some(execution.resources.clone()),
             ..Default::default()
         });
+        // 在线 admission + 订阅收件：本会话的工具任务由自己的 TaskManager 拥有，
+        // 必须在首次 MCP 工具调用前按自身地址登记 Inbox/TaskManager（与子会话
+        // `subagent/factory/context.rs` 同一步）。未登记时
+        // `begin_external_task_execution` 会以 "session task manager unavailable"
+        // 拒绝每个工具调用，scope 也无从签发。
+        if let Some(pool) = &mcp_pool {
+            let inbox =
+                peri_acp_types::session::SessionInbox::new(Arc::new(session.queue().clone()));
+            pool.bind_agent_session(&session_id, inbox.handle(), task_manager.clone());
+        }
         let v2_ctx = ctx_builder.build(
             Some(session),
             llm,
