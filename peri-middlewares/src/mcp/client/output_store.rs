@@ -10,6 +10,11 @@ use super::{ClientStatus, McpClientPool};
 
 const STORE_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_LINES: usize = 2000;
+/// 模型面可见文本的字节预算（M7）。与仓库既有工具输出的「2000 行 / 100 KB」
+/// 双层约定一致（`mcp-packages/web/src/web_fetch.rs`）：行数上限挡不住单行巨量
+/// 输出或多字节正文，字节预算兜住它们。**预算包含截断提示**（提示计入总长，
+/// 正文按剩余额度截断），因此模型看到的文本有硬上界。
+const MAX_BYTES: usize = 100_000;
 
 struct PendingOutput {
     peer: Peer<RoleClient>,
@@ -136,7 +141,9 @@ pub(crate) async fn format_output(
     error: bool,
 ) -> String {
     let lines: Vec<&str> = formatted.lines().collect();
-    if lines.len() <= MAX_LINES {
+    let exceeds_lines = lines.len() > MAX_LINES;
+    let exceeds_bytes = formatted.len() > MAX_BYTES;
+    if !exceeds_lines && !exceeds_bytes {
         return formatted;
     }
     let saved = match pool {
@@ -150,6 +157,7 @@ pub(crate) async fn format_output(
             serde_json::json!(stored.path),
             stored.byte_length
         ),
+        // 落存失败必须明说：不得给出任何看似可回查的地址。
         Err(reason) => format!("\nFull output NOT saved: {reason}. No host filesystem fallback."),
     };
     let label = if error {
@@ -157,11 +165,24 @@ pub(crate) async fn format_output(
     } else {
         "MCP output"
     };
-    format!(
-        "{}\n\n[{label} truncated: {} total lines]{hint}",
-        lines[..MAX_LINES].join("\n"),
-        lines.len()
-    )
+    // 触发原因（行数 / 字节数）必须在提示里说清，二者可同时命中。
+    let reason = match (exceeds_lines, exceeds_bytes) {
+        (true, true) => format!("{} total lines, {} bytes", lines.len(), formatted.len()),
+        (true, false) => format!("{} total lines", lines.len()),
+        (false, true) => format!("{} bytes", formatted.len()),
+        (false, false) => unreachable!("至少一层预算已超限"),
+    };
+    let notice = format!("\n\n[{label} truncated: {reason}]{hint}");
+    // 预算包含截断提示：正文额度 = 总预算 - 提示长度（按 UTF-8 边界截断，
+    // 不产生半个字符）。
+    let body_budget = MAX_BYTES.saturating_sub(notice.len());
+    let head = lines[..lines.len().min(MAX_LINES)].join("\n");
+    let body = if head.len() > body_budget {
+        peri_agent::agent::async_tasks::truncate_bytes(&head, body_budget)
+    } else {
+        head
+    };
+    format!("{body}{notice}")
 }
 
 #[cfg(test)]

@@ -109,6 +109,7 @@ async fn prepared_test_host(
         oauth_event_rx: None,
         plugin_skill_roots: Vec::new(),
         plugin_command_entries: Vec::new(),
+        plugin_face_closed: false,
         plugin_hooks: Vec::new(),
         plugin_hooks_only: Vec::new(),
         plugin_loaded: Vec::new(),
@@ -640,4 +641,188 @@ async fn local_workspace_freezes_host_runtime_env_with_single_probe() {
             .contains(crate::prompt::RUNTIME_ENV_UNAVAILABLE),
         "本地会话不得标记 unavailable"
     );
+}
+
+// ── M6：准备面的插件准入必须与装配面同一份决定 ───────────────────────────────
+//
+// 装配面（`workspace.rs` → `assemble.rs`）用 **frozen** 的 disabled 集合派生
+// `plugin_face_closed`，同一位随 `HostAssemblyInput` 进 MCP 合并（pool）与命令面。
+// 准备面必须在同样的事实上决定「读不读插件目录」，否则恢复 / fork 会出现两份
+// 决定：能力面部分闭合，或先读插件内容再藏目录。
+
+/// 进程级 HOME 覆盖（与 `requests_test` 的守卫同形；`#[serial]` 串行化）。
+struct PreparedHomeGuard {
+    home: Option<std::ffi::OsString>,
+}
+
+impl PreparedHomeGuard {
+    fn set(path: &Path) -> Self {
+        let home = std::env::var_os("HOME");
+        std::env::set_var("HOME", path);
+        Self { home }
+    }
+}
+
+impl Drop for PreparedHomeGuard {
+    fn drop(&mut self) {
+        match self.home.take() {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+}
+
+/// 会话级装配（含插件能力）：`startup_cwd` 取会话 cwd 的规范化形态 ⇒ 准备面
+/// 复用 host 内存配置（当轮 session-local config 由测试直接控制）。
+fn plugin_workspace_assembly(cwd: &str) -> WorkspaceAssembly {
+    WorkspaceAssembly {
+        startup_cwd: cwd.to_owned(),
+        bare: false,
+        drive_cron_tick: false,
+        mcp_profile: peri_middlewares::mcp::apps::McpCapabilityProfile::disabled(),
+        capabilities: super::assemble::HostCapabilities {
+            plugins: true,
+            ..Default::default()
+        },
+    }
+}
+
+fn peri_config_with_plugin_face(closed: bool) -> crate::provider::PeriConfig {
+    let mut config = crate::provider::PeriConfig::default();
+    config.config.meta_harness = Some(HashMap::from([("PluginMiddleware".to_string(), !closed)]));
+    config
+}
+
+async fn host_with_plugin_face(tmp: &TempDir, cwd: &str, closed: bool) -> AcpServerConfig {
+    let mut host = prepared_test_host(tmp, Some(plugin_workspace_assembly(cwd))).await;
+    host.peri_config = Arc::new(parking_lot::RwLock::new(peri_config_with_plugin_face(
+        closed,
+    )));
+    host
+}
+
+/// 在 HOME/.claude 下装一个已启用插件（含命令与技能根）。
+fn seed_enabled_plugin(home: &Path) -> PathBuf {
+    let plugin_dir = home.join(".claude/plugins/cache/market/sample/1.0.0");
+    std::fs::create_dir_all(plugin_dir.join(".claude-plugin")).unwrap();
+    std::fs::create_dir_all(plugin_dir.join("commands")).unwrap();
+    std::fs::create_dir_all(plugin_dir.join("skills/demo")).unwrap();
+    std::fs::write(
+        plugin_dir.join("commands/hello.md"),
+        "---\ndescription: demo command\n---\nBody\n",
+    )
+    .unwrap();
+    std::fs::write(
+        plugin_dir.join("skills/demo/SKILL.md"),
+        "---\nname: demo\ndescription: demo skill\n---\nBody\n",
+    )
+    .unwrap();
+    write_plugin_manifest(&plugin_dir, r#"{"srv":{"command":"run-srv"}}"#);
+    std::fs::create_dir_all(home.join(".claude/plugins")).unwrap();
+    std::fs::write(
+        home.join(".claude/plugins/installed_plugins.json"),
+        serde_json::json!({
+            "version": 2,
+            "plugins": [{
+                "id": "sample@market",
+                "name": "sample",
+                "version": "1.0.0",
+                "marketplace": "market",
+                "install_path": plugin_dir,
+                "scope": "User",
+            }],
+        })
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        home.join(".claude/settings.json"),
+        r#"{"enabledPlugins":["sample@market"]}"#,
+    )
+    .unwrap();
+    plugin_dir
+}
+
+fn write_plugin_manifest(plugin_dir: &Path, mcp_servers: &str) {
+    std::fs::write(
+        plugin_dir.join(".claude-plugin/plugin.json"),
+        format!(
+            r#"{{"name":"sample","version":"1.0.0","skills":["./skills"],"commands":["./commands"],"mcpServers":{mcp_servers}}}"#
+        ),
+    )
+    .unwrap();
+}
+
+/// 非法插件 MCP 声明：严格只读路径会失败——准备面读插件目录就会被发现。
+fn poison_plugin_manifest(plugin_dir: &Path) {
+    write_plugin_manifest(plugin_dir, r#"{"broken":{"system_mcp_tools":["Read"]}}"#);
+}
+
+#[tokio::test]
+#[serial]
+async fn restore_and_fork_take_the_plugin_decision_from_the_frozen_snapshot() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let _home = PreparedHomeGuard::set(&home);
+    let plugin_dir = seed_enabled_plugin(&home);
+    let cwd = canonical_workspace_dir(&tmp, "workspace");
+
+    let host_closed = host_with_plugin_face(&tmp, &cwd, true).await;
+    let host_open = host_with_plugin_face(&tmp, &cwd, false).await;
+
+    // 方向 A：frozen=关 + 当轮=开 ⇒ 准备面不得读插件目录（先读再藏即被 poison 抓到）。
+    let closed_prepared = PreparedSessionInputs::prepare_new(&host_closed, &cwd).unwrap();
+    assert!(
+        closed_prepared.plugins().data.is_none(),
+        "新建（frozen 缺席）按 session-local 配置判关闭"
+    );
+    let closed_snapshot = closed_prepared.frozen_encoded.clone().unwrap();
+    poison_plugin_manifest(&plugin_dir);
+
+    let restored = PreparedSessionInputs::prepare_restore(&host_open, &cwd, &closed_snapshot)
+        .expect("frozen=关 时准备面不得读插件目录（非法清单不得让恢复失败）");
+    assert!(
+        restored.plugins().data.is_none() && restored.plugins().skill_roots.is_empty(),
+        "frozen=关 必须胜过当轮 config=开"
+    );
+    assert!(
+        restored
+            .frozen
+            .as_ref()
+            .unwrap()
+            .meta_harness()
+            .disabled_middlewares
+            .contains("PluginMiddleware"),
+        "同一位也是装配面派生 plugin_face_closed / pool.set_plugin_face_closed 的来源"
+    );
+    let forked = PreparedSessionInputs::prepare_fork(&host_open, &cwd, &closed_snapshot).unwrap();
+    assert!(
+        forked.plugins().data.is_none(),
+        "fork 与 restore 必须消费同一份 frozen 决定"
+    );
+
+    // 方向 B：frozen=开 + 当轮=关 ⇒ 准备面仍按 frozen 取来源（不得被当轮 config 关掉）。
+    write_plugin_manifest(&plugin_dir, r#"{"srv":{"command":"run-srv"}}"#);
+    let open_prepared = PreparedSessionInputs::prepare_new(&host_open, &cwd).unwrap();
+    assert!(
+        open_prepared.plugins().data.is_some(),
+        "前置：开启位的宿主必须真的加载到插件聚合"
+    );
+    let open_snapshot = open_prepared.frozen_encoded.clone().unwrap();
+
+    let restored_open =
+        PreparedSessionInputs::prepare_restore(&host_closed, &cwd, &open_snapshot).unwrap();
+    assert!(
+        restored_open.plugins().data.is_some(),
+        "frozen=开 必须胜过当轮 config=关（否则 MCP 合并与技能/命令面会分裂）"
+    );
+    assert!(!restored_open.plugins().skill_roots.is_empty());
+    assert!(!restored_open
+        .frozen
+        .as_ref()
+        .unwrap()
+        .meta_harness()
+        .disabled_middlewares
+        .contains("PluginMiddleware"));
 }

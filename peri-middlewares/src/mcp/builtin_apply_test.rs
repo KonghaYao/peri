@@ -444,9 +444,20 @@ fn disabled_with_system_mcp_is_rejected_at_load_time() {
         &BuiltinInjectionPolicy::all(),
     )
     .expect_err("`disabled + system_mcp` 必须在加载期被拒绝，不得落到 readiness 的 fatal");
+    // M7 后拒绝位置前移到**共享** `McpServerConfig::validate`（覆盖 builtin/普通/
+    // global/project/plugin 与配置更新），因此这里报的是该规则的 typed 错误；
+    // overlay 的 `BuiltinClosureFragmentInvalid` 保留为同一规则的实例级第二道防线。
     match &error {
+        McpConfigError::InvalidServer {
+            server_name,
+            source: peri_acp_types::plugin::McpServerConfigValidationError::DisabledWithSystemMcp,
+        } => assert_eq!(server_name, "web"),
         McpConfigError::BuiltinClosureFragmentInvalid { name } => assert_eq!(name, "web"),
-        other => panic!("应报 BuiltinClosureFragmentInvalid，实际: {other}"),
+        // 全局 settings 在解析期即拒绝（共享 validate），错误文本仍是固定规则正文。
+        McpConfigError::ParseError { source, .. } => assert!(source
+            .to_string()
+            .contains("disabled = true cannot be combined with system_mcp = true")),
+        other => panic!("应报 disabled+system_mcp 的加载期拒绝，实际: {other}"),
     }
     // 错误文本只含实例名，不含路径 / env / 凭据。
     let text = error.to_string();
@@ -470,10 +481,24 @@ fn illegal_closure_fragment_is_rejected_even_when_injection_is_off() {
         &BuiltinInjectionPolicy::none(),
     )
     .expect_err("off 策略下非法关闭片段仍必须被拒绝");
-    assert!(matches!(
-        error,
-        McpConfigError::BuiltinClosureFragmentInvalid { ref name } if name == "artifact"
-    ));
+    let rejected = match &error {
+        McpConfigError::InvalidServer {
+            server_name,
+            source: peri_acp_types::plugin::McpServerConfigValidationError::DisabledWithSystemMcp,
+        } => server_name.clone(),
+        McpConfigError::BuiltinClosureFragmentInvalid { name } => name.clone(),
+        McpConfigError::ParseError { source, .. } => {
+            assert!(
+                source
+                    .to_string()
+                    .contains("disabled = true cannot be combined with system_mcp = true"),
+                "非法关闭片段必须在加载期被拒绝，实际: {error}"
+            );
+            "artifact".to_string()
+        }
+        other => panic!("非法关闭片段必须在加载期被拒绝，实际: {other}"),
+    };
+    assert_eq!(rejected, "artifact", "实际错误: {error}");
 }
 
 // ── 规则 3（A3）：保留名不得被 command/url 接管 ───────────────────────────────

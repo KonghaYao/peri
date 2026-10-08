@@ -115,10 +115,26 @@ fn disabled_policy_does_not_bypass_builtin_admission() {
             &BuiltinInjectionPolicy::none(),
         )
         .unwrap_err();
-        assert!(matches!(error,
+        // M7 后 `disabled + system_mcp` 由共享 `validate` 在解析期先拒绝（覆盖
+        // builtin/普通/各来源与配置更新），保留名接管仍由 overlay 报原变体。
+        match &error {
             McpConfigError::ReservedBuiltinInstanceName { name }
-            | McpConfigError::BuiltinClosureFragmentInvalid { name }
-            if name == "workspace"
-        ));
+            | McpConfigError::BuiltinClosureFragmentInvalid { name } => {
+                assert_eq!(name, "workspace", "实际错误: {error}");
+            }
+            McpConfigError::InvalidServer {
+                server_name,
+                source:
+                    peri_acp_types::plugin::McpServerConfigValidationError::DisabledWithSystemMcp,
+            } => assert_eq!(server_name, "workspace", "实际错误: {error}"),
+            // 全局 settings 在解析期即拒绝（M7）：错误文本只含固定规则正文。
+            McpConfigError::ParseError { source, .. } => assert!(
+                source
+                    .to_string()
+                    .contains("disabled = true cannot be combined with system_mcp = true"),
+                "实际错误: {error}"
+            ),
+            other => panic!("实际错误: {other}"),
+        }
     }
 }

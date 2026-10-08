@@ -186,6 +186,7 @@ async fn build_server_config(
         oauth_event_rx: None,
         plugin_skill_roots: Vec::new(),
         plugin_command_entries: Vec::new(),
+        plugin_face_closed: false,
         plugin_hooks: Vec::new(),
         plugin_hooks_only: Vec::new(),
         plugin_loaded: Vec::new(),

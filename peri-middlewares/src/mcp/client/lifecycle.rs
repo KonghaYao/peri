@@ -130,6 +130,9 @@ impl McpClientPool {
         // builtin 实例的 server 半边是本进程 task：随 `services` 一并收口，不留 orphan。
         self.close_builtin_task(server_name).await;
         self.configs.write().remove(server_name);
+        // 会话级 ACP 声明身份随连接一并消失（M7）：此后该名不再有可证明的
+        // cache 身份，任何持久化 cache 准入都按 fail-closed 拒绝。
+        self.acp_connections.write().remove(server_name);
         // 句柄与配置同时消失：本代发现证据一律失效，等待方立即重读事实。
         self.system_readiness.clear_evidence(server_name);
     }
@@ -150,9 +153,14 @@ impl McpClientPool {
     ///
     /// 池内名优先取 client 声明的 `name`；被其他归属（或本会话的上一代）占用时
     /// 追加 `_2`、`_3`…，避免覆盖既有条目。返回值是实际使用的池内名。
+    ///
+    /// `connection_id` 与归属会话同批登记为连接的**声明身份**（M7）：持久化
+    /// cache origin 只按「声明会话 + 连接 ID + 当前句柄代号」计算，换代即失效
+    /// 且不跨会话命中（凭据不进入该身份）。
     pub(crate) fn commit_acp_connection(
         self: &Arc<Self>,
         session_id: &str,
+        connection_id: &str,
         preferred_name: &str,
         mut handle: Arc<McpClientHandle>,
         service: McpServiceWrapper,
@@ -166,6 +174,13 @@ impl McpClientPool {
         self.acp_owners
             .write()
             .insert(name.clone(), session_id.to_string());
+        self.acp_connections.write().insert(
+            name.clone(),
+            super::AcpConnectionDeclaration {
+                session_id: session_id.to_string(),
+                connection_id: connection_id.to_string(),
+            },
+        );
         self.advance_handle_generation(&handle);
         self.services.lock().insert(name.clone(), service);
         self.clients.write().insert(name.clone(), handle);
@@ -229,6 +244,7 @@ impl McpClientPool {
             .collect();
         for name in &names {
             self.acp_owners.write().remove(name);
+            self.acp_connections.write().remove(name);
             self.remove_server(name).await;
         }
         names

@@ -15,6 +15,7 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use super::{McpCachePolicy, McpClientPool};
+use crate::mcp::config::McpServerConfig;
 
 const RESOURCE_URI: &str = "test://data";
 const VERSION: &str = "cache-policy-test-v1";
@@ -412,4 +413,123 @@ async fn disabled_policy_bypasses_skill_discovery_caches_and_keeps_registry_live
             .unwrap()
             .unwrap();
     }
+}
+
+/// M7：会话级 ACP 连接的 cache origin 纳入「声明会话 + 连接身份 + 连接代」。
+///
+/// 三条不变量：同会话同代稳定复用；同会话换代（重连）失效；不同会话同名
+/// server 不撞 origin。凭据（URL query / header）不进入 origin。
+#[test]
+fn acp_cache_origin_is_scoped_by_session_connection_and_generation() {
+    use std::sync::Arc;
+
+    let pool = Arc::new(McpClientPool::new_empty_with_cache_policy(
+        McpCachePolicy::Enabled,
+    ));
+    let first = pool.install_acp_connection_for_test("session-a", "conn-1", "acp-srv");
+    let origin_first = pool.cache_origin("acp-srv");
+    assert!(
+        pool.persistent_cache_allowed("acp-srv"),
+        "同代内必须允许持久化 cache 复用"
+    );
+    assert_eq!(
+        origin_first,
+        pool.cache_origin("acp-srv"),
+        "同代 origin 必须稳定（合法命中）"
+    );
+
+    // 同会话换代：新句柄 + 新连接 ID ⇒ 不同 origin，旧缓存不可命中。
+    let _second = pool.install_acp_connection_for_test("session-a", "conn-2", "acp-srv");
+    let origin_second = pool.cache_origin("acp-srv");
+    assert_ne!(origin_first, origin_second, "重连换代必须失效");
+    assert!(pool.persistent_cache_allowed("acp-srv"));
+
+    // 不同会话的同名 server：池内名相同但声明会话不同 ⇒ 不撞 origin。
+    let other = Arc::new(McpClientPool::new_empty_with_cache_policy(
+        McpCachePolicy::Enabled,
+    ));
+    other.install_acp_connection_for_test("session-b", "conn-1", "acp-srv");
+    assert_ne!(
+        other.cache_origin("acp-srv"),
+        origin_first,
+        "不同会话不得按同名 server 命中同一 origin"
+    );
+
+    // 声明的连接 ID 不同而会话 / 代号相同也必须是不同 origin（更换声明失效）。
+    let renamed = Arc::new(McpClientPool::new_empty_with_cache_policy(
+        McpCachePolicy::Enabled,
+    ));
+    renamed.install_acp_connection_for_test("session-a", "conn-9", "acp-srv");
+    assert_ne!(renamed.cache_origin("acp-srv"), origin_first);
+    drop(first);
+}
+
+/// M7：ACP 连接的持久化 cache 只按可证明的连接身份放行，且凭据不进 origin。
+#[test]
+fn acp_cache_identity_fails_closed_and_excludes_credentials() {
+    use std::sync::Arc;
+
+    let pool = Arc::new(McpClientPool::new_empty_with_cache_policy(
+        McpCachePolicy::Enabled,
+    ));
+    pool.install_acp_connection_for_test("session-a", "conn-1", "acp-srv");
+
+    // 请求代与当前代不一致（例如上一代的缓存读取）：拒绝。
+    let stale = super::McpConnectionKey::acp(
+        "acp-srv",
+        super::AcpConnectionIdentity {
+            session_id: "session-a".to_string(),
+            connection_id: "conn-1".to_string(),
+            generation: 0,
+        },
+    );
+    assert!(!pool.persistent_cache_allowed_for(&stale));
+
+    // 换会话的请求代同样拒绝。
+    let foreign = super::McpConnectionKey::acp(
+        "acp-srv",
+        super::AcpConnectionIdentity {
+            session_id: "session-b".to_string(),
+            connection_id: "conn-1".to_string(),
+            generation: 1,
+        },
+    );
+    assert!(!pool.persistent_cache_allowed_for(&foreign));
+
+    // 归属与声明不一致（半登记状态）⇒ 身份不可证明，按 fail-closed 拒绝。
+    pool.acp_owners
+        .write()
+        .insert("acp-srv".into(), "session-b".into());
+    assert!(!pool.persistent_cache_allowed("acp-srv"));
+
+    // 凭据不参与 origin：配置里的 header / URL query 只影响非 ACP 的 transport
+    // 身份，ACP 连接走会话身份段。
+    pool.acp_owners
+        .write()
+        .insert("acp-srv".into(), "session-a".into());
+    let with_credentials = {
+        let config = McpServerConfig {
+            command: None,
+            args: None,
+            env: None,
+            url: Some("https://example.invalid/mcp?token=s3cr3t-token".to_string()),
+            headers: Some(HashMap::from([(
+                "Authorization".to_string(),
+                "Bearer s3cr3t-token".to_string(),
+            )])),
+            oauth: None,
+            disabled: None,
+            subscriptions: None,
+            system_mcp: None,
+            system_mcp_tools: None,
+            system_mcp_timeout: None,
+            source: None,
+        };
+        pool.configs.write().insert("acp-srv".to_string(), config);
+        pool.cache_origin("acp-srv")
+    };
+    assert!(
+        !with_credentials.contains("s3cr3t-token"),
+        "凭据不得进入 cache origin: {with_credentials}"
+    );
 }

@@ -48,7 +48,7 @@ pub use plugin::{
     MarketplaceEntry, MarketplaceError, MarketplaceManager, MarketplaceManifest, MarketplacePlugin,
     MarketplaceRefreshEvent, MarketplaceSource, PluginAgent, PluginAuthor, PluginCommand,
     PluginCommandEntry, PluginCommandProvider, PluginConfigError, PluginManifest, PluginMiddleware,
-    PluginOption,
+    PluginOption, PluginSourceAdmission,
 };
 pub mod at_mention;
 pub mod skills;

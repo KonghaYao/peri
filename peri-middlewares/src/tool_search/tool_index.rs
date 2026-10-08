@@ -13,6 +13,45 @@ use peri_agent::tools::BaseTool;
 
 use super::keyword_search;
 
+/// deferred 列表总量预算（M7，UTF-8 字节）：提示段 + 全部条目 + 末尾省略提示。
+///
+/// 列表进的是每轮 system prompt，外部 MCP / cron 工具的 description 与参数说明
+/// 不受本仓库控制，没有总量预算时它们可无限撑大贡献文本。
+const MAX_DEFERRED_LIST_BYTES: usize = 32 * 1024;
+
+/// 末尾省略提示的预留额度（含计数位）：保证追加提示后总量仍在预算内。
+const OMITTED_NOTICE_RESERVE_BYTES: usize = 256;
+
+/// 渲染单条 deferred 条目（名称 + 描述 + 参数段）。
+///
+/// 条目要么整体进入列表，要么被省略——绝不按字符串裁切，因此参数段
+/// （来自 JSON schema）不会出现半截结构。
+fn render_deferred_entry(name: &str, tool: &std::sync::Arc<dyn BaseTool>) -> String {
+    let mut entry = format!("- {}: {}\n", name, tool.description());
+    let params = tool.parameters();
+    let props = params.get("properties");
+    if let Some(props) = props.and_then(|p| p.as_object()) {
+        if !props.is_empty() {
+            entry.push_str("  Parameters:\n");
+            for (param_name, param_schema) in props {
+                let desc = param_schema
+                    .get("description")
+                    .and_then(|d| d.as_str())
+                    .unwrap_or("");
+                let param_type = param_schema
+                    .get("type")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("any");
+                entry.push_str(&format!(
+                    "    - `{}` ({}): {}\n",
+                    param_name, param_type, desc
+                ));
+            }
+        }
+    }
+    entry
+}
+
 /// 搜索结果
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SearchResult {
@@ -300,6 +339,11 @@ impl ToolSearchIndex {
     }
 
     /// 返回 Markdown 格式的延迟工具列表（按名称排序，保证跨进程稳定）
+    ///
+    /// M7：列表总量有字节预算。超预算时**结构化省略**——整条条目不入列表，
+    /// 或（单条自身超预算时）只保留工具名与省略原因；绝不按字符串裁切，因此
+    /// JSON schema（参数段）不会出现半截结构。省略数量与原因对模型可见，
+    /// 被省略的工具仍可经 `SearchExtraTools` 关键词检索得到。
     pub fn format_deferred_list(&self) -> String {
         let tools = self.tools.read();
         if tools.is_empty() {
@@ -318,29 +362,38 @@ impl ToolSearchIndex {
 
         let mut lines = String::from("## Deferred Tools\n\n");
         lines.push_str("The following tools are not in your direct tool list. Use `SearchExtraTools` to search for them, then `ExecuteExtraTool` to invoke.\n\n");
+        // 省略提示的预留额度：最后一行提示也计入总量预算。
+        let budget = MAX_DEFERRED_LIST_BYTES.saturating_sub(OMITTED_NOTICE_RESERVE_BYTES);
+        let mut omitted = 0usize;
+        let mut oversized = 0usize;
         for (name, tool) in entries {
-            lines.push_str(&format!("- {}: {}\n", name, tool.description()));
-            let params = tool.parameters();
-            let props = params.get("properties");
-            if let Some(props) = props.and_then(|p| p.as_object()) {
-                if !props.is_empty() {
-                    lines.push_str("  Parameters:\n");
-                    for (param_name, param_schema) in props {
-                        let desc = param_schema
-                            .get("description")
-                            .and_then(|d| d.as_str())
-                            .unwrap_or("");
-                        let param_type = param_schema
-                            .get("type")
-                            .and_then(|t| t.as_str())
-                            .unwrap_or("any");
-                        lines.push_str(&format!(
-                            "    - `{}` ({}): {}\n",
-                            param_name, param_type, desc
-                        ));
-                    }
+            let entry = render_deferred_entry(name, tool);
+            if entry.len() > budget {
+                // 单条自身超预算：整条参数段省略，但名字必须可见（可被检索指定）。
+                // 该省略行同样计入总量预算（极端情况下连它也放不下就按普通省略计数）。
+                let placeholder = format!(
+                    "- {name}: [entry omitted: exceeds the {} byte deferred list budget]\n",
+                    MAX_DEFERRED_LIST_BYTES
+                );
+                if lines.len() + placeholder.len() > budget {
+                    omitted += 1;
+                    continue;
                 }
+                lines.push_str(&placeholder);
+                oversized += 1;
+                continue;
             }
+            if lines.len() + entry.len() > budget {
+                omitted += 1;
+                continue;
+            }
+            lines.push_str(&entry);
+        }
+        if omitted > 0 || oversized > 0 {
+            lines.push_str(&format!(
+                "- … {omitted} more deferred tool(s) omitted ({oversized} oversized): deferred list byte budget ({} bytes) exhausted; search them by keyword with SearchExtraTools.\n",
+                MAX_DEFERRED_LIST_BYTES
+            ));
         }
         lines
     }
