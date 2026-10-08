@@ -49,9 +49,11 @@ impl StopBlockGuard {
             *count = 0;
             return GuardDecision::ForceFinish;
         }
+        // 只记录次数与字节数：Block 正文会作为 system-reminder 反馈给模型，
+        // 但不属于诊断日志内容。
         tracing::info!(
             count = *count,
-            reason = %reason,
+            reason_bytes = reason.len(),
             "Stop hook blocked: injecting reason as system-reminder (Human) and continuing"
         );
         GuardDecision::Block {
@@ -76,6 +78,10 @@ impl Default for StopBlockGuard {
         Self::new()
     }
 }
+
+#[cfg(test)]
+#[path = "stop_block_guard_test.rs"]
+mod tests;
 
 /// 构造 Stop hook block 的反馈正文。
 ///
