@@ -76,6 +76,16 @@ jobs:
                   ./scripts/cargo-rmcp-patched.sh test --locked -p peri-agent --lib
                   ./scripts/cargo-rmcp-patched.sh test --locked -p peri-agent --test middleware_tests --test compact_followup_behavior_test --test compact_failure_adversarial_test
 
+            # ARC-COMPACT-001 Verify：Compact 三套对抗套件必须真实执行且命中非零用例。
+            # `test-fixtures` 提供 best-effort 循环装配（无 durable 执行）——这些套件用脚本
+            # `ReactLLM` 替身考察预算/投影，不实现 durable Reason 所需的 `prepare_reasoning`。
+            - name: Run Compact adversarial suites (ARC-COMPACT-001)
+              shell: bash
+              run: >-
+                  ./scripts/cargo-rmcp-patched.sh test --locked -p peri-agent --features test-fixtures
+                  --test compact_pressure_adversarial_test --test compact_session_adversarial_test
+                  --test compact_authority_projection_test
+
             - name: Run TUI tests (excluding SDK E2E)
               shell: bash
               run: >-
