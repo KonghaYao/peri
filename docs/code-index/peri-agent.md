@@ -18,6 +18,8 @@ Emscripten 最小入口见 [`peri-wasm`](peri-wasm.md)：复用本 crate 的 `ru
 
 ## 架构速览
 
+历史工具配对的模型视图修补在 `src/messages/tool_pairing.rs`；`compact_v2/projection.rs::render_persisted_llm_view` 统一供 Reason、Full 摘要与预算估算调用。缺失结果只在请求视图补充未知执行状态的错误占位，错位真实结果保持身份和内容并移到调用后；不改 canonical、不重跑工具。紧随调用的用户内容块内已有真实结果时保留内容，仅在结果块位于文本等内容之后时将结果块移到请求视图前部；内嵌结果不完整、错位、重复或孤立时发送前报错。`Raw` 内容在 `AgentModelBridge::convert_content` 直接报错，不进入 Anthropic 请求。回归入口 `messages::tool_pairing::tests`。
+
 - 数据流：`MessageQueue → Receive → Compact → Reason → Act → MessageQueue`
 - 循环入口：`src/agent/stages/mod.rs:612` 的 `run_react_loop(StageContext, max_iterations) -> LoopResult`；Receive 是正常队列耗尽退出判定点与 keepgoing 队列语义入口，cancel 与 stage error/interruption 也可在其他控制流位置结束循环
 - 稳定不变量：`FrozenContext` 会话内不可漂移（ARC-FROZEN-001）；`BaseTool::is_direct()` 是工具可见性事实源（ARC-TOOLS-001）；`CompactConfig` 是 compact 阈值唯一事实源；中间件链序蓝本 `production_blueprint`（ARC-MIDDLEWARE-001）

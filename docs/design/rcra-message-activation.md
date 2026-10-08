@@ -34,6 +34,8 @@ Pause/Stop 和输入取回依据当前 runtime/队列裁决；取消与关闭仍
 
 加载创建新的 live runtime，只回放 canonical 内容，不恢复旧执行、owner invocation、Work 阶段或 cold child。History 读取和普通续聊不查询已删除的 Work/control 表。环境缺失时独立历史读取仍可用，不能伪造执行准入。
 
+模型请求使用独立派生视图校验工具调用与结果配对：已有真实结果保持正文与身份，错位的独立结果在请求视图中移到对应调用之后；缺失结果补充明确说明“历史结果缺失，执行状态与外部副作用未知”的协议错误结果。该占位不代表工具执行失败、取消或未执行，不触发重跑，不写入 canonical 历史或数据库。紧随调用的用户消息若以内嵌内容块承载完整真实结果，保留内容；若结果块位于文本等内容之后，仅在请求视图中将结果块前移。其结果不完整或错位时明确报错，避免重复补位。重复调用身份、重复结果、无对应调用的结果以及结果早于调用同属无法安全修补的完整性错误，发送前明确报错并记录。`Raw` 内容在模型桥接处报错，不会形成 Anthropic 请求。普通 Reason、Full 摘要与预算估算共用这一视图，覆盖加载、fork、rewind 和当前进程中断后的续聊。
+
 ## 5. 存储与故障
 
 删除 `session_work_state/events/receipts/commands` 和 `session_control_state/receipts`。保留会话、消息、环境绑定、OAuth、普通显式关闭及远端存储身份/普通 operation ledger。表结构与版本迁移以 active spec 和 canonical DDL 为准，不复建 main 的旧 dirty/lease 表。
