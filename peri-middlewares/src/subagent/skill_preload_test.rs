@@ -674,3 +674,156 @@ async fn test_explicit_list_path_activation_failure_receipt_carries_reason() {
         "SkillTool: cannot activate 'detached' (skill entry has no content binding)"
     );
 }
+
+// ─── M8：批内去重与预载预算 ───────────────────────────────────────────────
+
+/// 同一 canonical skill（全名 + 别名）批内只加载一次，保持首次出现顺序。
+#[tokio::test]
+async fn test_explicit_list_path_dedupes_same_canonical_skill() {
+    let dir = tempdir().unwrap();
+    let reg = Arc::new(McpSkillRegistry::new());
+    let handle: HandleToken = Arc::new(1u32);
+    let meta = SkillMetadata {
+        name: mcp_skill_name("demo", "alpha"),
+        aliases: vec!["alpha".to_string()],
+        description: "Alpha skill".to_string(),
+        path: std::path::PathBuf::new(),
+        source: SkillSource::Mcp,
+        plugin_name: None,
+        origin: Some(SkillOrigin::Mcp {
+            server: "demo".to_string(),
+            uri: "skill://demo/alpha/SKILL.md".to_string(),
+        }),
+        content: Some("alpha body\n".to_string()),
+        resources: Vec::new(),
+        frontmatter: None,
+    };
+    reg.mark_discovery_started("demo", handle.clone());
+    reg.mark_discovery_completed("demo", handle, vec![meta]);
+    let mw = SkillPreloadMiddleware::new(vec!["mcp__demo__alpha".to_string(), "alpha".to_string()])
+        .with_mcp_registry(Some(reg));
+    let mut state = AgentState::new(dir.path().to_str().unwrap());
+    state.add_message(BaseMessage::human("普通消息（无 token）"));
+
+    mw.before_agent(&mut state).await.unwrap();
+
+    let calls = state.messages()[1].tool_calls();
+    assert_eq!(
+        calls.len(),
+        1,
+        "同一 canonical 身份只读一次、只注入一次：{calls:?}"
+    );
+    let receipts = tool_receipts(&state);
+    assert_eq!(receipts.len(), 1);
+    assert!(receipts[0].1.contains("alpha body"));
+}
+
+/// 条数超限：超出部分**不读正文**，改为一一配对的缺口回执（不静默丢弃）。
+#[tokio::test]
+async fn test_explicit_list_path_item_budget_yields_paired_gap_receipts() {
+    let dir = tempdir().unwrap();
+    let skills: Vec<String> = (0..18).map(|index| format!("s{index:02}")).collect();
+    let refs: Vec<&str> = skills.iter().map(String::as_str).collect();
+    let mw = SkillPreloadMiddleware::new(skills.clone())
+        .with_mcp_registry(Some(seed_registry_with_skills("demo", &refs)));
+    let mut state = AgentState::new(dir.path().to_str().unwrap());
+    state.add_message(BaseMessage::human("普通消息（无 token）"));
+
+    mw.before_agent(&mut state).await.unwrap();
+
+    let receipts = tool_receipts(&state);
+    assert_eq!(receipts.len(), 18, "18 条声明各一对回执（含超限项）");
+    let errors = receipts.iter().filter(|(_, _, is_error)| *is_error).count();
+    assert_eq!(errors, 2, "仅超限的 2 项是缺口：{receipts:?}");
+    assert!(
+        receipts[17].1.contains("batch item limit"),
+        "超限回执必须说明原因：{}",
+        receipts[17].1
+    );
+    assert!(
+        receipts[0].1.contains("Body of s00."),
+        "预算内条目正文完整（不加载截断正文）：{}",
+        receipts[0].1
+    );
+}
+
+/// 单项字节超预算：不加载截断正文冒充完整指令，改为缺口回执。
+#[tokio::test]
+async fn test_explicit_list_path_item_bytes_yield_gap_receipt() {
+    let dir = tempdir().unwrap();
+    let reg = Arc::new(McpSkillRegistry::new());
+    let handle: HandleToken = Arc::new(1u32);
+    let meta = SkillMetadata {
+        name: mcp_skill_name("demo", "huge"),
+        aliases: Vec::new(),
+        description: "Huge skill".to_string(),
+        path: std::path::PathBuf::new(),
+        source: SkillSource::Mcp,
+        plugin_name: None,
+        origin: Some(SkillOrigin::Mcp {
+            server: "demo".to_string(),
+            uri: "skill://demo/huge/SKILL.md".to_string(),
+        }),
+        content: Some("x".repeat(MAX_PRELOAD_ITEM_BYTES + 1)),
+        resources: Vec::new(),
+        frontmatter: None,
+    };
+    reg.mark_discovery_started("demo", handle.clone());
+    reg.mark_discovery_completed("demo", handle, vec![meta]);
+    let mw = SkillPreloadMiddleware::new(vec!["huge".to_string()]).with_mcp_registry(Some(reg));
+    let mut state = AgentState::new(dir.path().to_str().unwrap());
+    state.add_message(BaseMessage::human("普通消息（无 token）"));
+
+    mw.before_agent(&mut state).await.unwrap();
+
+    let receipts = tool_receipts(&state);
+    assert_eq!(receipts.len(), 1);
+    assert!(receipts[0].2, "超预算必须是缺口回执");
+    assert!(
+        receipts[0].1.contains("exceeds byte budget"),
+        "回执必须说明是字节预算：{}",
+        receipts[0].1
+    );
+    assert!(
+        !receipts[0].1.contains("xxxx"),
+        "不得注入截断正文冒充完整指令"
+    );
+}
+
+/// 启发式路径：已识别但被预算挡下的技能必须显式提示（不假装未声明）；
+/// 未识别 token 仍零注入（不制造未知技能错误）。
+#[tokio::test]
+async fn test_heuristic_path_reports_budget_gaps_but_not_unknown_tokens() {
+    let dir = tempdir().unwrap();
+    let skills: Vec<String> = (0..18).map(|index| format!("h{index:02}")).collect();
+    let refs: Vec<&str> = skills.iter().map(String::as_str).collect();
+    let mut tokens: Vec<String> = skills.iter().map(|name| format!("/{name}")).collect();
+    tokens.push("/never-declared".to_string());
+    let mw = middleware(seed_registry_with_skills("demo", &refs));
+    let mut state = BatchState::new(
+        dir.path().to_str().unwrap(),
+        vec![BaseMessage::human(tokens.join(" "))],
+    );
+
+    mw.before_input(&mut state).await.unwrap();
+
+    let calls: Vec<String> = state
+        .messages()
+        .iter()
+        .flat_map(|message| message.tool_calls())
+        .map(|call| call.arguments["skill_name"].as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        !calls.iter().any(|name| name == "never-declared"),
+        "未识别 token 不得注入（不制造未知技能错误）：{calls:?}"
+    );
+    assert!(
+        calls.iter().any(|name| name == "h17"),
+        "已识别但被预算挡下的技能必须显式提示：{calls:?}"
+    );
+    let receipts = tool_receipts(&state);
+    let budget_gap = receipts
+        .iter()
+        .find(|(_, text, _)| text.contains("batch item limit"));
+    assert!(budget_gap.is_some(), "预算缺口回执必须存在：{receipts:?}");
+}
