@@ -283,6 +283,8 @@ impl WorkBoundary {
             consumed_count: batch.delivery_ids.len(),
             wake_up_count: usize::from(live),
             input_message_ids,
+            // SDK/durable 路径不消费 hook 停止意图（该意图由本地 RCRA 队列投递）。
+            stop_requested: false,
         })
     }
 }

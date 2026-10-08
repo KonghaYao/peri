@@ -67,21 +67,30 @@ pub fn resolve_action_to_toolcall(
     }
 }
 
-/// PostToolBatch 专用：返回 `()`，PreventContinuation 的兜底文案
-/// 使用 `"PostToolBatch hook prevented continuation"`，与历史实现一致。
-pub fn resolve_post_tool_batch_action(action: &HookAction) -> AgentResult<()> {
+/// PostToolBatch 的阻断语义决策。
+///
+/// 工具结果此时已提交：Block 不是拒绝（不得伪装 `ToolRejected`），而是回注有界
+/// 反馈让模型修正；`continue:false` 是显式停止意图，经 Receive 唯一退出口停止。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PostToolBatchDecision {
+    /// 无阻断动作：正常继续。
+    Continue,
+    /// Block：回注有界反馈（防循环计数由调用方复用 stop_block_guard）。
+    Feedback { reason: String },
+    /// continue:false：显式停止意图，不发起额外模型请求。
+    Stop { stop_reason: Option<String> },
+}
+
+/// 把 PostToolBatch hook 的归并 action 映射成执行语义决策。
+pub fn resolve_post_tool_batch_action(action: &HookAction) -> PostToolBatchDecision {
     match action {
-        HookAction::Block { reason } => Err(AgentError::ToolRejected {
-            tool: "PostToolBatch".to_string(),
+        HookAction::Block { reason } => PostToolBatchDecision::Feedback {
             reason: reason.clone(),
-        }),
-        HookAction::PreventContinuation { stop_reason } => Err(AgentError::ToolRejected {
-            tool: "PostToolBatch".to_string(),
-            reason: stop_reason
-                .clone()
-                .unwrap_or_else(|| "PostToolBatch hook prevented continuation".to_string()),
-        }),
-        _ => Ok(()),
+        },
+        HookAction::PreventContinuation { stop_reason } => PostToolBatchDecision::Stop {
+            stop_reason: stop_reason.clone(),
+        },
+        _ => PostToolBatchDecision::Continue,
     }
 }
 

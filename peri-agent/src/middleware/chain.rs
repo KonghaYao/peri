@@ -227,7 +227,7 @@ impl MiddlewareChain {
     /// 每个中间件按注册顺序依次执行，遇错即停。
     pub async fn run_after_tools_batch(
         &self,
-        state: &mut dyn hook_state::StateView,
+        state: &mut dyn hook_state::AfterToolsBatchState,
         results: &[(ToolCall, ToolResult)],
     ) -> AgentResult<()> {
         for middleware in &self.middlewares {

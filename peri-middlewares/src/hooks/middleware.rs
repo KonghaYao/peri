@@ -47,7 +47,10 @@ use crate::hooks::{
     input_builder,
     once_tracker::OnceTracker,
     permission_gate,
-    stop_block_guard::{format_stop_block_feedback_no_wrapper, GuardDecision, StopBlockGuard},
+    stop_block_guard::{
+        format_post_tool_batch_feedback_no_wrapper, format_post_tool_batch_stop_intent,
+        format_stop_block_feedback_no_wrapper, GuardDecision, StopBlockGuard,
+    },
     types::{HookAction, HookEvent, HookInput, HookType, PermissionDecision, RegisteredHook},
 };
 
@@ -257,9 +260,13 @@ impl HookMiddleware {
 
     /// 在一批并行工具调用全部完成后触发 PostToolBatch hook。
     /// 由 dispatch_tools 在所有 tool_result 写入后调用。
+    ///
+    /// 工具结果已提交，因此这里不存在「拒绝」语义：
+    /// - Block ⇒ 回注有界反馈（复用 stop_block_guard 防循环计数，模型下一请求可见）；
+    /// - `continue:false` ⇒ 投递显式停止意图，经 Receive 唯一退出口停止，不发起额外请求。
     pub async fn fire_post_tool_batch(
         &self,
-        state: &mut dyn hook_state::StateView,
+        state: &mut dyn hook_state::AfterToolsBatchState,
     ) -> AgentResult<()> {
         let prompt_text = state
             .messages()
@@ -283,7 +290,69 @@ impl HookMiddleware {
             .fire_event(HookEvent::PostToolBatch, &input, None, None)
             .await;
 
-        action_resolver::resolve_post_tool_batch_action(&action)
+        match action_resolver::resolve_post_tool_batch_action(&action) {
+            action_resolver::PostToolBatchDecision::Continue => {
+                self.stop_block_guard.on_non_block();
+                Ok(())
+            }
+            action_resolver::PostToolBatchDecision::Feedback { reason } => {
+                match self.stop_block_guard.on_block(&reason) {
+                    // 防循环上限：忽略 block，正常继续（不再回注）
+                    GuardDecision::ForceFinish | GuardDecision::Pass => Ok(()),
+                    GuardDecision::Block { count, reason } => {
+                        let feedback = format_post_tool_batch_feedback_no_wrapper(&reason, count);
+                        let reminder = TrustedSystemReminderFactory::for_producer()
+                            .construct(SystemReminder {
+                                version: SYSTEM_REMINDER_VERSION,
+                                category: ReminderCategory::Guidance,
+                                source: ReminderSource("hook".into()),
+                                kind: "post_tool_batch_blocked".into(),
+                                severity: ReminderSeverity::Warning,
+                                delivery: ReminderDelivery::Required,
+                                audiences: ReminderAudiences(vec![
+                                    ReminderAudience::Model,
+                                    ReminderAudience::Automation,
+                                ]),
+                                body: feedback,
+                                summary: Some(format!("PostToolBatch hook 阻止继续（{count}/8）")),
+                                metadata: json!({ "block_count": count }),
+                            })
+                            .map_err(|error| AgentError::MiddlewareError {
+                                middleware: self.name().to_string(),
+                                reason: error.to_string(),
+                            })?;
+                        state.enqueue_batch_feedback(reminder);
+                        Ok(())
+                    }
+                }
+            }
+            action_resolver::PostToolBatchDecision::Stop { stop_reason } => {
+                self.stop_block_guard.on_non_block();
+                let body = format_post_tool_batch_stop_intent(stop_reason.as_deref());
+                let reminder = TrustedSystemReminderFactory::for_producer()
+                    .construct(SystemReminder {
+                        version: SYSTEM_REMINDER_VERSION,
+                        category: ReminderCategory::Lifecycle,
+                        source: ReminderSource("hook".into()),
+                        kind: "post_tool_batch_stop".into(),
+                        severity: ReminderSeverity::Info,
+                        delivery: ReminderDelivery::Configurable,
+                        audiences: ReminderAudiences(vec![
+                            ReminderAudience::Tui,
+                            ReminderAudience::Automation,
+                        ]),
+                        body,
+                        summary: Some("PostToolBatch hook 请求停止本轮".into()),
+                        metadata: json!({}),
+                    })
+                    .map_err(|error| AgentError::MiddlewareError {
+                        middleware: self.name().to_string(),
+                        reason: error.to_string(),
+                    })?;
+                state.enqueue_stop_intent(reminder);
+                Ok(())
+            }
+        }
     }
 }
 
@@ -559,7 +628,7 @@ impl Middleware for HookMiddleware {
 
     async fn after_tools_batch(
         &self,
-        state: &mut dyn hook_state::StateView,
+        state: &mut dyn hook_state::AfterToolsBatchState,
         _results: &[(ToolCall, ToolResult)],
     ) -> AgentResult<()> {
         self.fire_post_tool_batch(state).await
@@ -733,3 +802,7 @@ fn diagnose_undelivered_output(
 #[cfg(test)]
 #[path = "middleware_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "post_tool_batch_test.rs"]
+mod post_tool_batch_tests;

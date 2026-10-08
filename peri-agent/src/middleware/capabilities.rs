@@ -8,7 +8,10 @@ use crate::{
     agent::stages::SharedToolMap,
     error::AgentResult,
     messages::{BaseMessage, MessageId},
-    session::{tool_catalog::StartupToolUpdate, MessageQueue, QueuedMessage},
+    session::{
+        tool_catalog::StartupToolUpdate, MessageKind, MessagePolicy, MessageQueue, MessageSource,
+        QueuedMessage,
+    },
 };
 
 /// 只读消息与 turn 元数据，不暴露队列或工具目录。
@@ -109,6 +112,35 @@ pub struct BoundToolOrigin {
 /// ```
 pub trait AfterToolState: StateView + QueueState {}
 
+/// 批次完成（工具结果已提交）后的窄反馈能力：只回注有界反馈 / 显式停止意图，
+/// 由 Receive 唯一消费；不提供 transcript 追加、消息替换或目录写访问。
+///
+/// ```compile_fail
+/// use peri_agent::{messages::BaseMessage, middleware::capabilities::AfterToolsBatchState};
+/// fn cannot_append_history(state: &mut dyn AfterToolsBatchState, message: BaseMessage) {
+///     state.add_message(message);
+/// }
+/// ```
+/// ```compile_fail
+/// use peri_agent::middleware::capabilities::AfterToolsBatchState;
+/// fn cannot_edit_cached_input(state: &mut dyn AfterToolsBatchState, message: peri_agent::messages::BaseMessage) {
+///     state.replace_message(message);
+/// }
+/// ```
+pub trait AfterToolsBatchState: StateView {
+    /// Block：回注有界修正反馈，驱动下一次模型请求看到问题并修正。
+    fn enqueue_batch_feedback(
+        &mut self,
+        reminder: peri_acp_types::system_reminder::TrustedSystemReminder,
+    );
+
+    /// continue:false：投递显式停止意图（不唤醒、不发起额外模型请求）。
+    fn enqueue_stop_intent(
+        &mut self,
+        reminder: peri_acp_types::system_reminder::TrustedSystemReminder,
+    );
+}
+
 /// Agent 结束：观察结果并经队列投递 goal/stop/todo 反馈。
 ///
 /// ```compile_fail
@@ -204,6 +236,45 @@ impl<T: MiddlewareState + ?Sized> QueueState for T {
     }
     fn enqueue_v2_message(&self, msg: QueuedMessage) {
         MiddlewareState::enqueue_v2_message(self, msg)
+    }
+}
+
+impl<T: MiddlewareState + ?Sized> AfterToolsBatchState for T {
+    fn enqueue_batch_feedback(
+        &mut self,
+        reminder: peri_acp_types::system_reminder::TrustedSystemReminder,
+    ) {
+        let message = match MiddlewareState::execution_binding(self) {
+            Some(execution) => QueuedMessage::system_reminder(
+                MessageKind::Defer,
+                MessageSource::SystemInjected,
+                reminder,
+            )
+            .with_policy(MessagePolicy::continue_current_run(execution)),
+            // legacy/测试适配器没有执行绑定：退化为 EnsureProcessing（反馈仍然投递，
+            // 不静默丢弃）；生产 v2 适配器始终返回 Some。
+            None => QueuedMessage::system_reminder(
+                MessageKind::Defer,
+                MessageSource::SystemInjected,
+                reminder,
+            ),
+        };
+        MiddlewareState::enqueue_v2_message(self, message);
+    }
+
+    fn enqueue_stop_intent(
+        &mut self,
+        reminder: peri_acp_types::system_reminder::TrustedSystemReminder,
+    ) {
+        MiddlewareState::enqueue_v2_message(
+            self,
+            QueuedMessage::system_reminder(
+                MessageKind::Info,
+                MessageSource::HookStopIntent,
+                reminder,
+            )
+            .with_policy(MessagePolicy::passive()),
+        );
     }
 }
 

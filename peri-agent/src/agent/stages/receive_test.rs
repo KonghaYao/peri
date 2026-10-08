@@ -410,3 +410,47 @@ async fn test_receive_exit_on_empty_queue() {
     let output = run_receive(input).await.unwrap();
     assert_eq!(output.consumed_count, 0);
 }
+
+/// M10：hook 的显式停止意图（`continue:false`）经 Receive 唯一出口停止：
+/// 消费必须置位 `stop_requested`，且不得按可唤醒消息驱动额外模型请求。
+#[tokio::test]
+async fn hook_stop_intent_requests_stop_without_waking_the_run() {
+    use peri_acp_types::system_reminder::{
+        ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
+        ReminderSource, SystemReminder, TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
+    };
+    let reminder = TrustedSystemReminderFactory::for_producer()
+        .construct(SystemReminder {
+            version: SYSTEM_REMINDER_VERSION,
+            category: ReminderCategory::Lifecycle,
+            source: ReminderSource("hook".into()),
+            kind: "post_tool_batch_stop".into(),
+            severity: ReminderSeverity::Info,
+            delivery: ReminderDelivery::Configurable,
+            audiences: ReminderAudiences(vec![ReminderAudience::Tui]),
+            body: "hook requested stop".into(),
+            summary: None,
+            metadata: serde_json::json!({}),
+        })
+        .unwrap();
+    let context = make_context();
+    context.session.queue.push(
+        QueuedMessage::system_reminder(MessageKind::Info, MessageSource::HookStopIntent, reminder)
+            .with_policy(crate::session::MessagePolicy::passive()),
+    );
+
+    let output = run_receive(ReceiveInput {
+        context: context.clone(),
+    })
+    .await
+    .expect("receive must consume the stop intent");
+
+    assert!(
+        output.stop_requested,
+        "消费到 HookStopIntent 必须置位停止请求（Receive 是唯一退出口）"
+    );
+    assert_eq!(
+        output.wake_up_count, 0,
+        "停止意图不得作为可唤醒消息驱动额外模型请求"
+    );
+}

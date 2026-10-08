@@ -355,6 +355,9 @@ pub struct ReceiveOutput {
     pub wake_up_count: usize,
     /// 本次消费的非空用户 Human 消息身份，供首次输入准备精准处理。
     pub input_message_ids: Vec<crate::messages::MessageId>,
+    /// 本轮消费到 hook 的显式停止意图（`continue:false`）：循环必须经 Receive
+    /// 唯一退出口结束，不得再发起额外模型请求。
+    pub stop_requested: bool,
 }
 
 // ─── Reason 阶段类型 ─────────────────────────────────────────────────────────
@@ -563,6 +566,16 @@ async fn run_react_loop_inner(context: StageContext, max_iterations: usize) -> L
                     Ok(None) => {}
                     Err(error) => return LoopResult::Error(error.into()),
                 }
+            }
+
+            // Hook 显式停止意图（PostToolBatch `continue:false`）：Receive 是循环的
+            // 唯一退出口；消费到停止意图直接以 Completed 结束，不再发起模型请求。
+            if receive_out.stop_requested {
+                tracing::info!(
+                    consumed = receive_out.consumed_count,
+                    "Receive: hook stop intent consumed; exiting run without further model request"
+                );
+                return LoopResult::Completed;
             }
 
             // 退出判断：本轮没有可唤醒消息且上一轮无工具调用 → 检查是否该退出。
