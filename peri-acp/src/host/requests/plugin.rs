@@ -51,19 +51,31 @@ fn refresh_plugin_command_entries(
         .filter(|e| e.fullname.to_lowercase().starts_with("plugin:"))
         .map(|e| e.fullname.clone())
         .collect();
-    // 重载：与装配面同源（`enabled_plugin_commands` → all_commands 聚合）；
-    // 无 session 上下文（session_cwd = None）时仅用户级 enabledPlugins。
-    let fresh_commands = match cfg
-        .plugin_manager
-        .enabled_plugin_commands(claude_dir, session_cwd.map(Path::new))
-    {
-        Ok(commands) => commands,
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                "插件重载失败：plugin 域清空（保留空 plugin 域），不阻塞 RPC 回包"
-            );
-            Vec::new()
+    // M6：插件来源闭合位取自冻结/session-local 策略（装配期随
+    // `AcpServerConfig` 注入）——关闭的会话不得经一次 install/uninstall RPC
+    // 重新拿到可执行插件命令。关闭时只走「注销 stale、注册空」，
+    // **不读插件目录**，RPC 回包与快照形状不变。
+    let fresh_commands = if cfg.plugin_face_closed {
+        tracing::info!(
+            session_id,
+            "插件来源注入面已关闭：install/uninstall 后命令域保持为空（注销 stale，不注册）"
+        );
+        Vec::new()
+    } else {
+        // 重载：与装配面同源（`enabled_plugin_commands` → all_commands 聚合）；
+        // 无 session 上下文（session_cwd = None）时仅用户级 enabledPlugins。
+        match cfg
+            .plugin_manager
+            .enabled_plugin_commands(claude_dir, session_cwd.map(Path::new))
+        {
+            Ok(commands) => commands,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "插件重载失败：plugin 域清空（保留空 plugin 域），不阻塞 RPC 回包"
+                );
+                Vec::new()
+            }
         }
     };
     let (removed, added) = command_registry.reconcile(

@@ -370,10 +370,16 @@ impl ToolSearchIndex {
             let entry = render_deferred_entry(name, tool);
             if entry.len() > budget {
                 // 单条自身超预算：整条参数段省略，但名字必须可见（可被检索指定）。
-                lines.push_str(&format!(
+                // 该省略行同样计入总量预算（极端情况下连它也放不下就按普通省略计数）。
+                let placeholder = format!(
                     "- {name}: [entry omitted: exceeds the {} byte deferred list budget]\n",
                     MAX_DEFERRED_LIST_BYTES
-                ));
+                );
+                if lines.len() + placeholder.len() > budget {
+                    omitted += 1;
+                    continue;
+                }
+                lines.push_str(&placeholder);
                 oversized += 1;
                 continue;
             }

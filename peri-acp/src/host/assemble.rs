@@ -86,7 +86,7 @@ impl Default for HostCapabilities {
     }
 }
 
-/// 准备阶段的严格只读插件发现（无合成清单、无插件缓存写）。
+/// 会话准备面的严格只读插件发现（无合成清单、无插件缓存写）。
 ///
 /// 会话准备面（`host/prepared.rs`）经本函数调用：具体实现与插件装配同属宿主
 /// 装配面，准备面不新建越层引用（§0 依赖门边 2）。
@@ -95,10 +95,25 @@ impl Default for HostCapabilities {
 /// 是 HOME 优先的唯一权威（Windows 的 `dirs_next::home_dir()` 读 Profile
 /// known-folder、忽略 HOME/USERPROFILE，自带一份解析会与其余插件入口取到
 /// 不同目录）。准备面因此只提供执行目录。
-pub(crate) fn discover_enabled_plugins_readonly(
+///
+/// **M6（唯一闭合位）**：准入由 `PluginSourceAdmission` 单点决定，且与装配面
+/// **同一份决定**——`frozen` 存在（恢复 / fork / legacy 复用）时用持久快照的
+/// 关闭位（ARC-FROZEN-001：禁止回退当轮 config），不存在（新建，快照本次才产出）
+/// 时用即将冻结的 session-local 配置。关闭时不读插件目录、不返回聚合。
+pub(crate) fn discover_prepared_plugins(
     cwd: &str,
-) -> Result<PluginLoadResult, peri_middlewares::plugin::LoaderError> {
-    peri_middlewares::plugin::load_enabled_plugins_aggregated_readonly(
+    frozen: Option<&crate::session::executor::FrozenSessionData>,
+    config: &PeriConfig,
+) -> Result<Option<PluginLoadResult>, peri_middlewares::plugin::LoaderError> {
+    let admission = match frozen {
+        Some(frozen) => peri_middlewares::plugin::PluginSourceAdmission::from_disabled(
+            &frozen.meta_harness().disabled_middlewares,
+        ),
+        None => peri_middlewares::plugin::PluginSourceAdmission::from_meta_harness(
+            config.config.meta_harness.as_ref(),
+        ),
+    };
+    admission.load_aggregated_readonly(
         &peri_middlewares::plugin::claude_home(),
         Some(std::path::Path::new(cwd)),
     )
@@ -302,18 +317,6 @@ pub(super) fn build_session_end_task(
 /// 组装 settings hook 组（实现见 `host/hook_groups.rs`：plugin → global →
 /// project → local，顺序即迁移前 TUI/print/stdio 三处一致的既有顺序）。
 pub use hook_groups::assemble_hook_groups;
-
-/// 插件来源闭合位（M6）：从本次定格的 session-local 配置派生。
-///
-/// ACP 侧的**唯一**入口——准备面（`prepared.rs`，装配之前）与装配面都经它判定，
-/// 判定实现仍在 `peri_middlewares::plugin::PluginSourceAdmission`（唯一闭合位），
-/// 本函数只做「配置 → 布尔」的投影，不复制键名或策略。
-pub(crate) fn plugin_face_closed(config: &PeriConfig) -> bool {
-    peri_middlewares::plugin::PluginSourceAdmission::from_meta_harness(
-        config.config.meta_harness.as_ref(),
-    )
-    .is_closed()
-}
 
 /// 构造共享 SessionManager（支撑 cascade cancel 子 agent 与 goal_state）。
 ///
@@ -834,6 +837,8 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         .as_ref()
         .map(|pd| pd.plugins.clone())
         .unwrap_or_default();
+    // M6：命令面的运行期刷新（install/uninstall RPC）与本装配共用同一闭合位。
+    let plugin_face_closed_bit = plugin_admission.is_closed();
     // M6/H4：插件来源 hooks 过与 settings 同一条信任门（默认拒绝）。
     // 只约束执行来源——插件 skills / commands / agents / MCP 面不受影响。
     // 关闭位下 `plugin_loaded` 与 `plugin_hooks` 已同批为空（上面的闭合位）。
@@ -930,6 +935,7 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         oauth_event_rx: Some(oauth_event_rx),
         plugin_skill_roots,
         plugin_command_entries,
+        plugin_face_closed: plugin_face_closed_bit,
         plugin_hooks: flat_hooks,
         // 仅插件 hooks（hooks 面板数据源；plugin/list 命令面返回，TUI 不再
         // 直读 plugin_data）

@@ -187,6 +187,12 @@ pub struct AcpServerConfig {
     /// `plugin_route_entries` 预转；会话创建时 register_all，注册顺序 =
     /// 内置 → 本地 skills（C1）→ 插件（本字段）→ 动态注入（发现管线异步））。
     pub plugin_command_entries: Vec<RouteEntry>,
+    /// 插件来源闭合位（M6）：由 frozen/session-local 策略派生，随装配注入。
+    ///
+    /// 消费面是**命令面的运行期刷新**（`requests/plugin.rs` 的 install /
+    /// uninstall RPC）——关闭的会话不得经一次管理 RPC 重新拿到可执行插件命令；
+    /// 与 `plugin_command_entries` 同批决定，不在 RPC 里回读配置。
+    pub plugin_face_closed: bool,
     pub plugin_hooks: Vec<peri_acp_types::hooks::RegisteredHook>,
     /// 仅插件 hooks（不含 settings hooks；`plugin/list` 命令面数据源——
     /// TUI hooks 面板经 ACP 拿数据，M-TUI 收口）。

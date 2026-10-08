@@ -198,6 +198,11 @@ impl McpClientPool {
     pub fn set_plugin_face_closed(&self, closed: bool) -> std::io::Result<()> {
         let context = self.builtin_context.lock();
         if context.initialize_started || !self.is_open() {
+            // fail-closed：注入窗口已关闭（池关闭或已开始初始化）时不得按「开」继续
+            // ——先把位强制置为关闭，再报错给调用方（调用方记录错误；此后本池也不会
+            // 再合并插件来源）。装配路径的绑定早于 `run_initialize`，正常不可达。
+            self.plugin_face_closed
+                .store(true, std::sync::atomic::Ordering::Release);
             return Err(std::io::Error::other(
                 "MCP capability injection window is closed",
             ));

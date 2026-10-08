@@ -207,8 +207,9 @@ impl PreparedSessionInputs {
         cwd: &str,
         frozen_source: FrozenSource<'_>,
     ) -> Result<Self, AcpError> {
-        let (configuration, (plugin_data, skill_roots)) =
-            Self::prepare_configuration_and_plugins(host, cwd)?;
+        let configuration = Self::resolve_configuration(host, cwd)?;
+        // 先定格 frozen：恢复 / fork / legacy 复用路径的插件准入必须取自**同一份**
+        // 持久决定，不能先按当轮 config 决定读不读插件目录（M6；ARC-FROZEN-001）。
         let (frozen, frozen_encoded) = match frozen_source {
             FrozenSource::Build => (None, None),
             FrozenSource::Reuse(snapshot) => {
@@ -216,6 +217,8 @@ impl PreparedSessionInputs {
                 (Some(frozen), Some(snapshot.to_owned()))
             }
         };
+        let (plugin_data, skill_roots) =
+            Self::discover_plugins(host, cwd, frozen.as_ref(), configuration.config.as_ref())?;
         Ok(Self {
             cwd: cwd.to_owned(),
             deployment_capabilities: host
@@ -232,17 +235,6 @@ impl PreparedSessionInputs {
             frozen_encoded,
             legacy: None,
         })
-    }
-
-    /// 一次读出配置与插件（准备面唯一的只读入口）：同一 cwd 复用 host 已装配视图，
-    /// 不同 cwd 只读一次 `ConfigSource::load_at`；provider 由该视图解析，失败即准备失败。
-    fn prepare_configuration_and_plugins(
-        host: &AcpServerConfig,
-        cwd: &str,
-    ) -> Result<(PreparedConfiguration, DiscoveredPlugins), AcpError> {
-        let configuration = Self::resolve_configuration(host, cwd)?;
-        let (plugin_data, skill_roots) = Self::discover_plugins(host, cwd, &configuration)?;
-        Ok((configuration, (plugin_data, skill_roots)))
     }
 
     fn resolve_configuration(
@@ -277,34 +269,34 @@ impl PreparedSessionInputs {
     /// （缺失/非法清单定位到具体插件，不生成合成清单、不写插件缓存）；
     /// host 级与 bare 沿用既有形状（无插件聚合）。
     ///
-    /// M6：插件来源闭合位在本会话的准备期**先于任何读取**判定（取自本次定格的
-    /// session-local 配置 `meta_harness`，与冻结渲染的 `build_meta_harness_state`
-    /// 同源）——关闭的会话不读插件目录，也就不存在「先读进来再藏目录」的窗口。
+    /// M6：插件来源闭合位在本会话的准备期**先于任何读取**判定，且与装配面取
+    /// **同一份决定**：`frozen` 存在（恢复 / fork / legacy 复用）时用持久快照的
+    /// 关闭位（ARC-FROZEN-001：禁止回退当轮 config），不存在（新建，快照本次才
+    /// 产出）时用即将冻结的 session-local 配置 `meta_harness`。关闭的会话不读
+    /// 插件目录，也就不存在「先读进来再藏目录」的窗口。
     fn discover_plugins(
         host: &AcpServerConfig,
         cwd: &str,
-        configuration: &PreparedConfiguration,
+        frozen: Option<&crate::session::executor::FrozenSessionData>,
+        config: &PeriConfig,
     ) -> Result<DiscoveredPlugins, AcpError> {
         match host.workspace_assembly.as_ref() {
             None => Ok((None, host.plugin_skill_roots.clone())),
             Some(source) if source.bare || !source.capabilities.plugins => Ok((None, Vec::new())),
             Some(_) => {
-                if super::assemble::plugin_face_closed(configuration.config.as_ref()) {
-                    tracing::debug!(
-                        cwd,
-                        "插件来源注入面已关闭（meta_harness PluginMiddleware=false）：跳过插件发现"
-                    );
-                    return Ok((None, Vec::new()));
-                }
                 // 严格只读发现：用户级 `.claude` 由装配面解析（HOME 优先的唯一
                 // 权威在 `plugin::claude_home`，见 `assemble` 函数 doc），
-                // 准备面只提供执行目录。
-                let data =
-                    super::assemble::discover_enabled_plugins_readonly(cwd).map_err(|error| {
+                // 准备面只提供执行目录；准入（含「关闭 ⇒ 不读」）在装配面单点决定，
+                // `frozen` 优先于当轮 config。
+                let data = super::assemble::discover_prepared_plugins(cwd, frozen, config)
+                    .map_err(|error| {
                         AcpError::new(-32603, format!("Plugin discovery failed: {error}"))
                     })?;
-                let skill_roots = data.all_skill_roots.clone();
-                Ok((Some(data), skill_roots))
+                let skill_roots = data
+                    .as_ref()
+                    .map(|data| data.all_skill_roots.clone())
+                    .unwrap_or_default();
+                Ok((data, skill_roots))
             }
         }
     }
