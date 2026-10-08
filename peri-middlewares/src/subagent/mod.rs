@@ -370,7 +370,9 @@ impl SubAgentMiddleware {
 /// 主 Agent 在 Prompt 中看到此信息后可以判断能否并行调度（readonly/writes）与
 /// 期望档位；3.0 批 2 波 1 起协议类型归契约层（定义见
 /// `peri_acp_types::agents::AgentCapability`）。
-pub use peri_acp_types::agents::AgentCapability;
+pub use peri_acp_types::agents::{
+    AgentCapability, AgentModelSelection, InvalidModelTier, ModelTier,
+};
 
 /// 按名匹配的候选集合（A4 ⑦ 匹配型归一）：原样（小写化）恒在其中，命中归一表
 /// （[`original_tool_name_of_effective`]，IF-D15 唯一入口）时再补一个原始工具名候选。
@@ -450,13 +452,14 @@ fn core_mutation_tools_fully_disallowed(disallowed: &[String]) -> bool {
 /// - `Empty`（字段省略）= 继承父工具（含 Bash）→ 默认 writes；
 /// - `NoTools`（显式 `tools: []`）= 零工具 → readonly；
 /// - `List` = 白名单，含 `*` 等价继承全部。
-pub fn infer_agent_capability(fm: &ClaudeAgentFrontmatter) -> AgentCapability {
-    let model_tier = fm
-        .model
-        .as_deref()
-        .filter(|m| !m.is_empty() && *m != "inherit")
-        .unwrap_or("inherit")
-        .to_string();
+///
+/// `model` 经 [`AgentModelSelection::parse`] typed 校验（M2）：未指定/`inherit`
+/// 归一为继承语义，合法档位大小写归一；未知值返回 [`InvalidModelTier`]，
+/// 由调用方隔离该定义并诊断——不静默回退父模型。
+pub fn infer_agent_capability(
+    fm: &ClaudeAgentFrontmatter,
+) -> Result<AgentCapability, InvalidModelTier> {
+    let model_tier = AgentModelSelection::parse(fm.model.as_deref())?;
 
     let disallowed = fm.disallowed_tools.to_vec();
     let can_mutate = match &fm.tools {
@@ -470,10 +473,10 @@ pub fn infer_agent_capability(fm: &ClaudeAgentFrontmatter) -> AgentCapability {
             .any(|tool| is_mutation_tool(tool) && !declared_names_cover(&disallowed, tool)),
     };
 
-    AgentCapability {
+    Ok(AgentCapability {
         model_tier,
         can_mutate,
-    }
+    })
 }
 
 // L5：SubAgent 中间件端口实现（stage 装配经端口注入主 agent 身份，
