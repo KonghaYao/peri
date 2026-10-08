@@ -1,5 +1,16 @@
 use super::*;
 
+/// 恢复活执行被中断的子委派时必须携带的显式输入。
+///
+/// durable 语义：模型请求在途时被中断会留下「结果未知」的请求，未对账前禁止
+/// 隐式继续（`resume.rs`「original model request requires reconciliation before
+/// implicit continuation」），否则等于重新生成一个未知结果的请求。显式输入是
+/// 授权的替代路径：旧请求被 abandon（不重放、不擦除，见 peri-agent
+/// `resume_recovery_test::explicit_resume_supersedes_failed_reason_without_replaying_or_erasing_it`）。
+/// 隐式 continue 的可满足前态（已正常收尾、无未知请求的 thread）由
+/// `resume_test::test_resume_thread_id_success_replays_and_completes` 覆盖。
+const RESUME_EXPLICIT_INPUT: &str = "Provide explicit input to replace the unknown request";
+
 async fn reopen_closed_child(store: &SessionFixture, session_id: &str) {
     use peri_acp_types::session_resources::{
         ControlAction, ControlCommand, ControlDecision, ControlStatus,
@@ -27,6 +38,11 @@ async fn reopen_closed_child(store: &SessionFixture, session_id: &str) {
     assert_eq!(receipt.decision, ControlDecision::Accepted);
     assert_eq!(receipt.state.status, ControlStatus::Active);
     assert_eq!(receipt.state.lifecycle, control.lifecycle + 1);
+    // 新生命周期需要宿主重新绑定的子运行时 metadata（夹具按生产契约复制，
+    // 与 session_isolation 的同一重开流程一致）。
+    store
+        .rebind_child_resume_metadata(&session_id, control.lifecycle, control.lifecycle + 1)
+        .await;
 }
 
 // ─── Slice 7:集成测试(中断 → 恢复 → 完成 / 跨实例 / 多次恢复 / 事件配对) ─────
@@ -191,6 +207,8 @@ async fn test_resume_interrupted_then_resumed_across_instances() {
         peri_agent::session::FrozenContext::builder().build(),
         Some(parent_id.clone()),
     );
+    // 子链宿主/端口装在 owning parent session 上（工具字段只在父 session 无 host 时生效）
+    install_parent_host(&store, &parent);
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
     // 实例 A：spawn → LLM 首轮 Interrupted → Ok 可恢复文本带 child_thread_id 前缀
@@ -206,7 +224,13 @@ async fn test_resume_interrupted_then_resumed_across_instances() {
                 "cwd": cwd.clone(),
                 "prompt": "first task"
             }),
-            peri_agent::tools::ToolContext::new(&[], cwd.as_str()),
+            preset_delegation_ctx(
+                &store,
+                &parent_id,
+                "resume-interrupted-across",
+                cwd.as_str(),
+            )
+            .await,
         )
         .await
         .expect("首次执行应返回可恢复的 Interrupted 文本");
@@ -226,13 +250,43 @@ async fn test_resume_interrupted_then_resumed_across_instances() {
         .with_parent_thread_id(parent_id.clone())
         .with_parent_session(parent);
     let t_b = with_agent_face(t_b, dir.path()).await;
-    let result = t_b
+    // durable 语义先行断言：被中断的模型请求结果未知，未对账前隐式继续必须被
+    // 拒绝（不得重新生成未知请求），且拒绝不改变 thread 归属与状态。
+    let refused = t_b
         .invoke(
             serde_json::json!({
                 "resume_thread_id": id.clone(),
                 "cwd": cwd.clone(),
             }),
-            peri_agent::tools::ToolContext::new(&[], cwd.as_str()),
+            preset_delegation_ctx(
+                &store,
+                &parent_id,
+                "resume-interrupted-refused",
+                cwd.as_str(),
+            )
+            .await,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        refused.contains("requires reconciliation before implicit continuation"),
+        "未知模型请求未对账前不得隐式继续: {refused}"
+    );
+    let result = t_b
+        .invoke(
+            serde_json::json!({
+                "resume_thread_id": id.clone(),
+                "prompt": RESUME_EXPLICIT_INPUT,
+                "cwd": cwd.clone(),
+            }),
+            preset_delegation_ctx(
+                &store,
+                &parent_id,
+                "resume-interrupted-across",
+                cwd.as_str(),
+            )
+            .await,
         )
         .await
         .expect("resume 应成功完成（thread_id 即恢复凭证）");
@@ -243,7 +297,7 @@ async fn test_resume_interrupted_then_resumed_across_instances() {
     );
     assert!(
         result.contains("echo:"),
-        "完成文本应含执行结果（隐式 continue 后的回显）: {}",
+        "完成文本应含执行结果（显式输入的替代执行回显）: {}",
         result
     );
 
@@ -276,6 +330,8 @@ async fn test_resume_across_instances_replays_transcript_in_order() {
         peri_agent::session::FrozenContext::builder().build(),
         Some(parent_id.clone()),
     );
+    // 子链宿主/端口装在 owning parent session 上（工具字段只在父 session 无 host 时生效）
+    install_parent_host(&store, &parent);
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
     let id = {
@@ -292,7 +348,7 @@ async fn test_resume_across_instances_replays_transcript_in_order() {
                     "cwd": cwd.clone(),
                     "prompt": "first task"
                 }),
-                peri_agent::tools::ToolContext::new(&[], "."),
+                preset_delegation_ctx(&store, &parent_id, "resume-replay-order", ".").await,
             )
             .await
             .expect("首次执行应返回可恢复的 Interrupted 文本");
@@ -317,9 +373,10 @@ async fn test_resume_across_instances_replays_transcript_in_order() {
         .invoke(
             serde_json::json!({
                 "resume_thread_id": id.clone(),
+                "prompt": RESUME_EXPLICIT_INPUT,
                 "cwd": cwd.clone(),
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            preset_delegation_ctx(&store, &parent_id, "resume-replay-order", ".").await,
         )
         .await
         .unwrap();
@@ -330,17 +387,17 @@ async fn test_resume_across_instances_replays_transcript_in_order() {
     );
     assert!(result.contains("echo:"), "resume 应完成: {}", result);
 
-    // transcript 重放：旧消息（spawn prompt）→ 隐式 continue → 新 AI（顺序不变）
+    // transcript 重放：旧消息（spawn prompt）→ 本次显式输入 → 新 AI（顺序不变）
     let msgs = wait_for_messages(&store, &id, 3, 3000).await;
     let contents: Vec<String> = msgs.iter().map(|m| m.content()).collect();
     assert_eq!(
         contents,
         vec![
-            "first task",
-            "Continue your previous task where you left off.",
-            "echo: Continue your previous task where you left off.",
+            "first task".to_string(),
+            RESUME_EXPLICIT_INPUT.to_string(),
+            format!("echo: {RESUME_EXPLICIT_INPUT}"),
         ],
-        "transcript 必须按 旧消息 → continue → 新 AI 顺序重放"
+        "transcript 必须按 旧消息 → 恢复输入 → 新 AI 顺序重放"
     );
 }
 
@@ -371,11 +428,13 @@ async fn test_resume_multiple_times_keeps_thread_id_and_completes() {
         )
     };
     let mk_interrupted = || async {
+        let parent = mk_parent(false);
+        install_parent_host(&store, &parent);
         with_agent_face(
             make_interrupt_tool(calls.clone(), 2)
                 .with_session_resources(store.facade())
                 .with_parent_thread_id(parent_id.clone())
-                .with_parent_session(mk_parent(false)),
+                .with_parent_session(parent),
             dir.path(),
         )
         .await
@@ -390,7 +449,7 @@ async fn test_resume_multiple_times_keeps_thread_id_and_completes() {
                 "cwd": cwd.clone(),
                 "prompt": "task"
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            preset_delegation_ctx(&store, &parent_id, "resume-multiple-times", ".").await,
         )
         .await
         .expect("第一次应返回（中断文本）");
@@ -408,9 +467,10 @@ async fn test_resume_multiple_times_keeps_thread_id_and_completes() {
         .invoke(
             serde_json::json!({
                 "resume_thread_id": id1.clone(),
+                "prompt": RESUME_EXPLICIT_INPUT,
                 "cwd": cwd.clone(),
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            preset_delegation_ctx(&store, &parent_id, "resume-multiple-times", ".").await,
         )
         .await
         .expect("第二次应返回（中断文本）");
@@ -424,18 +484,21 @@ async fn test_resume_multiple_times_keeps_thread_id_and_completes() {
 
     // 3) resume → 完成（新实例：父会话换回未取消的 token，归属不变）
     reopen_closed_child(&store, &id1).await;
+    let parent3 = mk_parent(false);
+    install_parent_host(&store, &parent3);
     let t3 = make_subagent_tool(vec![])
         .with_session_resources(store.facade())
         .with_parent_thread_id(parent_id.clone())
-        .with_parent_session(mk_parent(false));
+        .with_parent_session(parent3);
     let t3 = with_agent_face(t3, dir.path()).await;
     let r3 = t3
         .invoke(
             serde_json::json!({
                 "resume_thread_id": id1.clone(),
+                "prompt": RESUME_EXPLICIT_INPUT,
                 "cwd": cwd,
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            preset_delegation_ctx(&store, &parent_id, "resume-multiple-times", ".").await,
         )
         .await
         .unwrap();
@@ -472,9 +535,16 @@ async fn test_resume_emits_new_start_stop_pair_per_execution() {
         peri_agent::session::FrozenContext::builder().build(),
         Some(parent_id.clone()),
     );
+    // 子链宿主/端口装在 owning parent session 上（工具字段只在父 session 无 host 时生效）
     let bridge = Arc::new(RecordingBridge {
         observes: Arc::new(std::sync::Mutex::new(Vec::new())),
     });
+    // v2 Start/Stop 观测同样来自父 host（工具上的 bridge 会被父 host 遮蔽）
+    install_parent_host_with_bridge(
+        &store,
+        &parent,
+        Arc::clone(&bridge) as Arc<dyn peri_agent::agent::LangfuseBridgeLike>,
+    );
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let calls_clone = Arc::clone(&calls);
     let t = SubAgentTool::new(
@@ -507,7 +577,7 @@ async fn test_resume_emits_new_start_stop_pair_per_execution() {
                 "cwd": cwd.clone(),
                 "prompt": "task"
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            preset_delegation_ctx(&store, &parent_id, "resume-start-stop-pair", ".").await,
         )
         .await
         .expect("首次执行应返回可恢复的 Interrupted 文本");
@@ -528,9 +598,10 @@ async fn test_resume_emits_new_start_stop_pair_per_execution() {
         .invoke(
             serde_json::json!({
                 "resume_thread_id": id.clone(),
+                "prompt": RESUME_EXPLICIT_INPUT,
                 "cwd": cwd,
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            preset_delegation_ctx(&store, &parent_id, "resume-start-stop-pair", ".").await,
         )
         .await
         .unwrap();
@@ -616,6 +687,8 @@ async fn test_resume_skill_preload_not_duplicated() {
         peri_agent::session::FrozenContext::builder().build(),
         Some(parent_id.clone()),
     );
+    // 子链宿主/端口装在 owning parent session 上（工具字段只在父 session 无 host 时生效）
+    install_parent_host(&store, &parent);
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let t = super::with_skill_registry(
         make_interrupt_tool(Arc::clone(&calls), 1)
@@ -635,7 +708,7 @@ async fn test_resume_skill_preload_not_duplicated() {
                 "cwd": cwd.clone(),
                 "prompt": "test task"
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            preset_delegation_ctx(&store, &parent_id, "resume-skill-preload", ".").await,
         )
         .await
         .expect("首次执行应返回可恢复的 Interrupted 文本");
@@ -654,9 +727,10 @@ async fn test_resume_skill_preload_not_duplicated() {
         .invoke(
             serde_json::json!({
                 "resume_thread_id": id.clone(),
+                "prompt": RESUME_EXPLICIT_INPUT,
                 "cwd": cwd,
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            preset_delegation_ctx(&store, &parent_id, "resume-skill-preload", ".").await,
         )
         .await
         .unwrap();
@@ -691,6 +765,8 @@ async fn test_resume_keeps_completed_tool_round_no_duplicate_execution() {
         peri_agent::session::FrozenContext::builder().build(),
         Some(parent_id.clone()),
     );
+    // 子链宿主/端口装在 owning parent session 上（工具字段只在父 session 无 host 时生效）
+    install_parent_host(&store, &parent);
     let id = uuid::Uuid::now_v7().to_string();
     // 完整工具轮次：Ai[ToolUse] + Tool[result] 配对，末条 = Tool → 不 pop
     preset_resumable_thread(
@@ -761,7 +837,7 @@ async fn test_resume_keeps_completed_tool_round_no_duplicate_execution() {
                 "resume_thread_id": id.clone(),
                 "cwd": cwd.clone(),
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            preset_delegation_ctx(&store, &parent_id, "resume-tool-round", ".").await,
         )
         .await
         .unwrap();
@@ -831,6 +907,8 @@ async fn test_resume_skill_token_in_prompt_reinjects_once() {
         peri_agent::session::FrozenContext::builder().build(),
         Some(parent_id.clone()),
     );
+    // 子链宿主/端口装在 owning parent session 上（工具字段只在父 session 无 host 时生效）
+    install_parent_host(&store, &parent);
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let t = super::with_skill_registry(
         make_interrupt_tool(Arc::clone(&calls), 1)
@@ -850,7 +928,7 @@ async fn test_resume_skill_token_in_prompt_reinjects_once() {
                 "cwd": cwd.clone(),
                 "prompt": "test task"
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            preset_delegation_ctx(&store, &parent_id, "resume-skill-token", ".").await,
         )
         .await
         .expect("首次执行应返回可恢复的 Interrupted 文本");
@@ -872,7 +950,7 @@ async fn test_resume_skill_token_in_prompt_reinjects_once() {
                 "cwd": cwd,
                 "prompt": "/test-skill continue",
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            preset_delegation_ctx(&store, &parent_id, "resume-skill-token", ".").await,
         )
         .await
         .unwrap();

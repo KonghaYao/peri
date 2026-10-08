@@ -1255,6 +1255,29 @@ pub(crate) fn preset_child_ctx(
     ctx
 }
 
+/// 委派（spawn / resume）用例的调用上下文：在父会话登记一个新的可信委派
+/// invocation，并把它作为本次调用的 invocation 传入。
+///
+/// 生产路径的 invocation 来自 SDK 准入的委派意图（tool_call_id/authorization_ref/
+/// scope 一起登记）；夹具按同一契约登记后再调用，不构造未登记的 id。
+pub(crate) async fn preset_delegation_ctx(
+    store: &SessionFixture,
+    parent_id: &str,
+    label: &str,
+    cwd: &str,
+) -> peri_agent::tools::ToolContext<'static> {
+    static EMPTY: [BaseMessage; 0] = [];
+    let invocation_id = format!(
+        "fixture-delegation-invocation:{label}:{}",
+        uuid::Uuid::now_v7()
+    );
+    store.prepare_invocation(parent_id, &invocation_id).await;
+    let cwd: &'static str = Box::leak(cwd.to_string().into_boxed_str());
+    let mut ctx = peri_agent::tools::ToolContext::new(&EMPTY, cwd);
+    ctx.invocation_id = Some(invocation_id);
+    ctx
+}
+
 /// 给 resume 用例自有的父 session 挂生产 host（资源门面 + SDK 端口 + 父线程 id）。
 ///
 /// 子链宿主来自 owning parent session（`parent.subagent_host()`），因此端口与
@@ -1262,6 +1285,29 @@ pub(crate) fn preset_child_ctx(
 pub(crate) fn install_parent_host(
     store: &SessionFixture,
     parent: &std::sync::Arc<peri_agent::session::Session>,
+) {
+    build_parent_host(store, parent, |_| {});
+}
+
+/// 同 [`install_parent_host`]，并附加观测 bridge。
+///
+/// bridge 与资源/端口一样属于父 session host（`set_subagent_host` write-once），
+/// 工具的 bridge 字段在父 session 已有 host 时被遮蔽；v2 Start/Stop 观测必须
+/// 装在父 host 上（与 `DurableHost::open_in_with_host` 同一契约）。
+pub(crate) fn install_parent_host_with_bridge(
+    store: &SessionFixture,
+    parent: &std::sync::Arc<peri_agent::session::Session>,
+    bridge: Arc<dyn peri_agent::agent::LangfuseBridgeLike>,
+) {
+    build_parent_host(store, parent, move |host| {
+        host.langfuse_bridge = Some(bridge)
+    });
+}
+
+fn build_parent_host(
+    store: &SessionFixture,
+    parent: &std::sync::Arc<peri_agent::session::Session>,
+    customize: impl FnOnce(&mut peri_agent::session::subagent::SubagentHost),
 ) {
     use peri_agent::session::subagent::SubagentHost;
     let mut host = parent
@@ -1275,6 +1321,7 @@ pub(crate) fn install_parent_host(
         host.task_manager = Some(Arc::new(peri_agent::agent::async_tasks::TaskManager::new()));
     }
     host.parent_thread_id = parent.store().thread_id.clone();
+    customize(&mut host);
     parent.set_subagent_host(host);
 }
 
