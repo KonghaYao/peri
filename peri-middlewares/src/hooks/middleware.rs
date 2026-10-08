@@ -36,6 +36,9 @@ use peri_agent::{
 use serde_json::json;
 
 use crate::permission::SharedPermissionMode;
+use peri_agent::interaction::{
+    ApprovalDecision, ApprovalItem, InteractionContext, InteractionResponse, UserInteractionBroker,
+};
 // HookType 仅 `middleware_test.rs` 通过 `use super::*` 使用。保留以维持测试不变。
 #[allow(unused_imports)]
 use crate::hooks::{
@@ -45,7 +48,7 @@ use crate::hooks::{
     once_tracker::OnceTracker,
     permission_gate,
     stop_block_guard::{format_stop_block_feedback_no_wrapper, GuardDecision, StopBlockGuard},
-    types::{HookAction, HookEvent, HookInput, HookType, RegisteredHook},
+    types::{HookAction, HookEvent, HookInput, HookType, PermissionDecision, RegisteredHook},
 };
 
 /// Plugin hook middleware — fires registered hooks at lifecycle events.
@@ -69,6 +72,11 @@ pub struct HookMiddleware {
     requires_approval: fn(&str) -> bool,
     /// Stop hook block 连续次数计数器（最多 8 次，超过后忽略）
     stop_block_guard: Arc<StopBlockGuard>,
+    /// PreToolUse `ask` 的审批端口（与 PermissionMiddleware 同源 broker）。
+    /// None = 无审批通道：宿主也不会弹窗时，ask 必须拒绝而不是放行。
+    broker: Option<Arc<dyn UserInteractionBroker>>,
+    /// broker.request 超时（与 PermissionMiddleware 同源常量）
+    broker_timeout: std::time::Duration,
 }
 
 impl HookMiddleware {
@@ -136,7 +144,84 @@ impl HookMiddleware {
             session_start_source,
             requires_approval: crate::permission::default_requires_approval,
             stop_block_guard,
+            broker: None,
+            broker_timeout: crate::permission::BROKER_TIMEOUT,
         }
+    }
+
+    /// 注入审批端口（PreToolUse `ask` 落实用）。
+    ///
+    /// 与 `PermissionMiddleware` 使用同一 broker 源；未注入时，宿主权限路径不会
+    /// 弹窗的场景下 ask 必须拒绝（见 [`Self::resolve_ask_approval`]）。
+    pub fn with_broker(mut self, broker: Arc<dyn UserInteractionBroker>) -> Self {
+        self.broker = Some(broker);
+        self
+    }
+
+    /// 设置 ask 审批超时（测试用）
+    pub fn with_broker_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.broker_timeout = timeout;
+        self
+    }
+
+    /// 落实 PreToolUse `ask`。
+    ///
+    /// - 宿主权限路径本来就会弹窗（`should_fire_permission_request_*`）→ 返回 `None`
+    ///   交给宿主审批，避免同一次调用出现双重审批；
+    /// - 宿主不会弹窗（Bypass、豁免工具等）→ 必须经既有 `UserInteractionBroker`
+    ///   有界审批；无 broker、超时、拒绝都返回固定反馈的 `ToolRejected`，绝不放行。
+    async fn resolve_ask_approval(
+        &self,
+        state: &mut dyn hook_state::BeforeToolState,
+        tool_call: &ToolCall,
+    ) -> AgentResult<Option<ToolCall>> {
+        let origin = state.tool_origin(&tool_call.id);
+        let host_will_ask = permission_gate::should_fire_permission_request_for_origin(
+            self.permission_mode.load(),
+            &tool_call.name,
+            self.requires_approval,
+            origin.as_ref(),
+        );
+        if host_will_ask {
+            return Ok(None);
+        }
+
+        let Some(broker) = &self.broker else {
+            return Err(AgentError::ToolRejected {
+                tool: tool_call.name.clone(),
+                reason: HOOK_ASK_UNAVAILABLE_REASON.to_string(),
+            });
+        };
+
+        let ctx = InteractionContext::Approval {
+            items: vec![ApprovalItem {
+                tool_call_id: tool_call.id.clone(),
+                tool_name: tool_call.name.clone(),
+                tool_input: tool_call.input.clone(),
+            }],
+        };
+        let response = match peri_time::timeout(self.broker_timeout, broker.request(ctx)).await {
+            Ok(response) => response,
+            Err(_) => {
+                return Err(AgentError::ToolRejected {
+                    tool: tool_call.name.clone(),
+                    reason: HOOK_ASK_TIMEOUT_REASON.to_string(),
+                });
+            }
+        };
+        let decision = match response {
+            InteractionResponse::Decisions(mut decisions) => {
+                decisions.pop().unwrap_or_else(|| ApprovalDecision::Reject {
+                    reason: "用户拒绝".to_string(),
+                    source: None,
+                })
+            }
+            _ => ApprovalDecision::Reject {
+                reason: "用户拒绝".to_string(),
+                source: None,
+            },
+        };
+        crate::permission::apply_decision(tool_call, decision).map(Some)
     }
 
     /// Keep asynchronous hooks and command processes in the session execution scope.
@@ -237,13 +322,18 @@ impl Middleware for HookMiddleware {
             )?;
             match &action {
                 HookAction::SystemMessage { message } => {
-                    tracing::info!("SessionStart hook system message: {}", message);
+                    diagnose_undelivered_output(None, Some(message), "SessionStart");
                 }
                 HookAction::AdditionalContext { context } => {
-                    tracing::info!("SessionStart hook additional context: {}", context);
+                    diagnose_undelivered_output(Some(context), None, "SessionStart");
                 }
                 HookAction::InitialUserMessage { message } => {
-                    tracing::info!("SessionStart hook initial user message: {}", message);
+                    tracing::debug!(
+                        event = "SessionStart",
+                        field = "initialUserMessage",
+                        bytes = message.len(),
+                        "hook output parsed but delivery is not wired yet (M10 → F)"
+                    );
                 }
                 _ => {}
             }
@@ -304,7 +394,7 @@ impl Middleware for HookMiddleware {
         tool_call: &ToolCall,
     ) -> AgentResult<ToolCall> {
         let permission_mode_str = format!("{:?}", self.permission_mode.load());
-        let input = HookInput::tool_call(
+        let mut input = HookInput::tool_call(
             &self.session_id,
             &self.transcript_path,
             &self.cwd,
@@ -327,6 +417,8 @@ impl Middleware for HookMiddleware {
         // 原实现的 `_ => {}`：只有 Block / PreventContinuation / ModifyInput 会
         // 提前 return，其余（Allow / Notification / SystemMessage / ...）继续走
         // PermissionRequest 门控。
+        // PreToolUse 归并结果：deny 零执行 > updatedInput > allow/passthrough 交宿主。
+        let mut effective_call = tool_call.clone();
         match &action {
             HookAction::Block { .. }
             | HookAction::PreventContinuation { .. }
@@ -338,6 +430,39 @@ impl Middleware for HookMiddleware {
                     "Hook prevented continuation",
                 );
             }
+            HookAction::PermissionOverride {
+                decision,
+                updated_input,
+                additional_context,
+                system_message,
+                ..
+            } => {
+                if let Some(new_input) = updated_input {
+                    effective_call.input = new_input.clone();
+                }
+                // M10 字段路由：已解析但投递尚未接线的字段必须可诊断，不记录正文
+                diagnose_undelivered_output(
+                    additional_context.as_deref(),
+                    system_message.as_deref(),
+                    "PreToolUse",
+                );
+
+                // deny（含无法识别的判定）优先于 updatedInput：零工具执行 + 固定安全反馈
+                if decision.is_deny_like() {
+                    return Err(AgentError::ToolRejected {
+                        tool: effective_call.name.clone(),
+                        reason: HOOK_DENY_REASON.to_string(),
+                    });
+                }
+
+                if matches!(decision, PermissionDecision::Ask) {
+                    if let Some(approved) =
+                        self.resolve_ask_approval(state, &effective_call).await?
+                    {
+                        effective_call = approved;
+                    }
+                }
+            }
             _ => {}
         }
 
@@ -348,10 +473,13 @@ impl Middleware for HookMiddleware {
         //
         // 使用 hitl::default_requires_approval 判断工具是否需要审批（Bash/Write/Edit/Agent/
         // mcp__*/WebFetch/WebSearch 等）。非敏感工具（Read/Glob/Grep 等）不触发。
-        let origin = state.tool_origin(&tool_call.id);
+        if effective_call.input != tool_call.input {
+            input.tool_input = Some(effective_call.input.clone());
+        }
+        let origin = state.tool_origin(&effective_call.id);
         let should_fire = permission_gate::should_fire_permission_request_for_origin(
             self.permission_mode.load(),
-            &tool_call.name,
+            &effective_call.name,
             self.requires_approval,
             origin.as_ref(),
         );
@@ -361,8 +489,8 @@ impl Middleware for HookMiddleware {
                 .fire_event(
                     HookEvent::PermissionRequest,
                     &input,
-                    Some(&tool_call.name),
-                    Some(&tool_call.input),
+                    Some(&effective_call.name),
+                    Some(&effective_call.input),
                 )
                 .await;
 
@@ -373,8 +501,8 @@ impl Middleware for HookMiddleware {
                 self.fire_event(
                     HookEvent::PermissionDenied,
                     &input,
-                    Some(&tool_call.name),
-                    Some(&tool_call.input),
+                    Some(&effective_call.name),
+                    Some(&effective_call.input),
                 )
                 .await;
             }
@@ -383,19 +511,19 @@ impl Middleware for HookMiddleware {
             self.fire_event(
                 HookEvent::Notification,
                 &input,
-                Some(&tool_call.name),
-                Some(&tool_call.input),
+                Some(&effective_call.name),
+                Some(&effective_call.input),
             )
             .await;
 
             return action_resolver::resolve_action_to_toolcall(
                 &action,
-                tool_call,
+                &effective_call,
                 "Hook prevented continuation",
             );
         }
 
-        Ok(tool_call.clone())
+        Ok(effective_call)
     }
 
     async fn after_tool(
@@ -562,6 +690,43 @@ impl Middleware for HookMiddleware {
             .await;
 
         Ok(())
+    }
+}
+
+/// PreToolUse `deny` 的固定安全反馈：不透传 hook 自述文本。
+const HOOK_DENY_REASON: &str = "PreToolUse hook denied this tool call";
+
+/// PreToolUse `ask` 无审批端口时的固定反馈。
+const HOOK_ASK_UNAVAILABLE_REASON: &str =
+    "PreToolUse hook requested approval, but no approval channel is available";
+
+/// PreToolUse `ask` 审批超时的固定反馈。
+const HOOK_ASK_TIMEOUT_REASON: &str = "PreToolUse hook approval request timed out";
+
+/// 已解析但投递尚未接线的 hook 输出：只记录字段名与长度，绝不记录正文。
+///
+/// M10 字段路由（additionalContext / systemMessage）在 C 组只完成类型与可诊断
+/// 状态，实际投递由 F 组接线；未接线期间不得静默丢弃，也不得“解析成功即假装生效”。
+fn diagnose_undelivered_output(
+    additional_context: Option<&str>,
+    system_message: Option<&str>,
+    event: &str,
+) {
+    if let Some(context) = additional_context {
+        tracing::debug!(
+            event,
+            field = "additionalContext",
+            bytes = context.len(),
+            "hook output parsed but delivery is not wired yet (M10 → F)"
+        );
+    }
+    if let Some(message) = system_message {
+        tracing::debug!(
+            event,
+            field = "systemMessage",
+            bytes = message.len(),
+            "hook output parsed but delivery is not wired yet (M10 → F)"
+        );
     }
 }
 

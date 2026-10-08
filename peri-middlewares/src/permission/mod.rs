@@ -22,7 +22,7 @@ use crate::tool_search::core_tools::{
 };
 
 /// broker.request 超时（秒）：防止挂起 broker 导致 before_tool 永久阻塞
-const BROKER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+pub(crate) const BROKER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
 pub mod auto_classifier;
 pub mod shared_mode;
@@ -438,7 +438,7 @@ impl PermissionMiddleware {
 }
 
 /// 将 `ApprovalDecision` 映射为 `AgentResult<ToolCall>`
-fn apply_decision(call: &ToolCall, decision: ApprovalDecision) -> AgentResult<ToolCall> {
+pub(crate) fn apply_decision(call: &ToolCall, decision: ApprovalDecision) -> AgentResult<ToolCall> {
     match decision {
         ApprovalDecision::Approve { .. } => Ok(call.clone()),
         ApprovalDecision::Edit { new_input } => {

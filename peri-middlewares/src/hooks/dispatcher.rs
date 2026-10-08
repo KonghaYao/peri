@@ -172,28 +172,16 @@ impl HookDispatcher {
                 self.once_tracker.mark_fired(registered);
             }
 
-            // Short-circuit on Block / PreventContinuation
-            match &action {
-                HookAction::Block { .. } | HookAction::PreventContinuation { .. } => return action,
-                HookAction::ModifyInput { new_input } => {
-                    final_action = HookAction::ModifyInput {
-                        new_input: new_input.clone(),
-                    };
-                }
-                HookAction::PermissionOverride { decision, reason } => {
-                    // Phase 2: 权限覆盖决策暂不改变实际权限行为，仅记录
-                    tracing::debug!(
-                        "PermissionOverride from hook: {:?} (reason: {:?})",
-                        decision,
-                        reason
-                    );
-                    final_action = HookAction::PermissionOverride {
-                        decision: decision.clone(),
-                        reason: reason.clone(),
-                    };
-                }
-                _ => {}
+            // Block / PreventContinuation 保持 fail-closed 短路
+            if matches!(
+                action,
+                HookAction::Block { .. } | HookAction::PreventContinuation { .. }
+            ) {
+                return action;
             }
+
+            // 其余结果按字段归并：deny/updatedInput/context/messages 互不吞并
+            final_action = merge_hook_actions(final_action, action);
         }
 
         final_action
@@ -216,6 +204,103 @@ impl HookDispatcher {
             HookType::Agent { .. } => {
                 execute_agent_hook(hook, input, &self.llm_factory, &self.cwd).await
             }
+        }
+    }
+}
+
+/// 归并多个 hook 的结果：字段级合并，任何字段都不得被其它 hook 的结果吞掉。
+///
+/// - 判定取 [`HookAction::PermissionOverride`] 中 `merge_rank` 更高者：
+///   deny/非法 > ask > allow > passthrough（deny 优先于 updatedInput）
+/// - `updated_input` / `system_message` 后者覆盖前者；
+///   `additional_context` 按顺序拼接并有界截断
+/// - Block / PreventContinuation 已在调用点短路，不会进入本函数
+fn merge_hook_actions(acc: HookAction, next: HookAction) -> HookAction {
+    match (acc, next) {
+        (HookAction::Allow, other) => other,
+        (
+            HookAction::ModifyInput { new_input },
+            HookAction::PermissionOverride {
+                decision,
+                reason,
+                additional_context,
+                system_message,
+                ..
+            },
+        ) => HookAction::PermissionOverride {
+            decision,
+            reason,
+            updated_input: Some(new_input),
+            additional_context,
+            system_message,
+        },
+        (
+            HookAction::PermissionOverride {
+                decision,
+                reason,
+                additional_context,
+                system_message,
+                ..
+            },
+            HookAction::ModifyInput { new_input },
+        ) => HookAction::PermissionOverride {
+            decision,
+            reason,
+            updated_input: Some(new_input),
+            additional_context,
+            system_message,
+        },
+        (
+            HookAction::PermissionOverride {
+                decision: prev_decision,
+                reason: prev_reason,
+                updated_input: prev_input,
+                additional_context: prev_context,
+                system_message: prev_message,
+            },
+            HookAction::PermissionOverride {
+                decision,
+                reason,
+                updated_input,
+                additional_context,
+                system_message,
+            },
+        ) => {
+            let (decision, reason) = if decision.merge_rank() > prev_decision.merge_rank() {
+                (decision, reason)
+            } else {
+                (prev_decision, prev_reason)
+            };
+            HookAction::PermissionOverride {
+                decision,
+                reason,
+                updated_input: updated_input.or(prev_input),
+                additional_context: merge_additional_context(prev_context, additional_context),
+                system_message: system_message.or(prev_message),
+            }
+        }
+        // 其余单值 action 沿用「后者覆盖」语义
+        (_, other) => other,
+    }
+}
+
+/// additionalContext 归并上限：多个 hook 叠加也不产生无界上下文。
+const MAX_ADDITIONAL_CONTEXT_BYTES: usize = 16 * 1024;
+
+fn merge_additional_context(existing: Option<String>, incoming: Option<String>) -> Option<String> {
+    match (existing, incoming) {
+        (None, None) => None,
+        (Some(existing), None) => Some(existing),
+        (None, Some(incoming)) => Some(incoming),
+        (Some(mut existing), Some(incoming)) => {
+            if !existing.is_empty() {
+                existing.push('\n');
+            }
+            existing.push_str(&incoming);
+            if existing.len() > MAX_ADDITIONAL_CONTEXT_BYTES {
+                existing.truncate(existing.floor_char_boundary(MAX_ADDITIONAL_CONTEXT_BYTES));
+            }
+            Some(existing)
         }
     }
 }

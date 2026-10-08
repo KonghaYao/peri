@@ -258,3 +258,100 @@ async fn test_agent_hook_wrong_type_returns_allow() {
     let action = execute_agent_hook(&hook, &input, &llm_factory, "/tmp").await;
     assert!(matches!(action, HookAction::Allow));
 }
+
+// === H4：Command hook 数据隔离（stdin JSON 唯一通道） ===
+
+fn unique_test_dir(tag: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "peri-hook-{tag}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_command_hook_arguments_substitution_is_migration_error_with_zero_process() {
+    let dir = unique_test_dir("migrate");
+    let marker = dir.join("spawned");
+    // 旧写法：命令依赖 $ARGUMENTS 文本替换。新契约禁止替换，
+    // 必须给迁移错误且不把命令交给 shell（否则 bash 会展开成空串）。
+    let hook = make_command_hook(&format!("touch {}; echo $ARGUMENTS", marker.display()));
+    let input = make_hook_input();
+    let registered = make_registered();
+    let action = execute_command_hook(&hook, &input, &registered).await;
+
+    match action {
+        HookAction::Block { ref reason } => {
+            assert!(
+                reason.contains("$ARGUMENTS"),
+                "迁移错误必须指向 $ARGUMENTS: {reason}"
+            );
+            assert!(
+                reason.contains("stdin"),
+                "迁移错误必须说明 stdin JSON 数据通道: {reason}"
+            );
+        }
+        other => panic!("旧 $ARGUMENTS 命令必须迁移错误（不得 shell 空展开），got {other:?}"),
+    }
+    assert!(
+        !marker.exists(),
+        "迁移错误必须零进程：命令不得被 shell 执行"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_command_hook_braced_arguments_is_migration_error() {
+    let dir = unique_test_dir("migrate-brace");
+    let marker = dir.join("spawned");
+    let hook = make_command_hook(&format!("touch {}; echo ${{ARGUMENTS}}", marker.display()));
+    let input = make_hook_input();
+    let registered = make_registered();
+    let action = execute_command_hook(&hook, &input, &registered).await;
+
+    assert!(
+        matches!(action, HookAction::Block { ref reason } if reason.contains("${ARGUMENTS}") || reason.contains("$ARGUMENTS")),
+        "花括号写法同样必须迁移错误，got {action:?}"
+    );
+    assert!(!marker.exists(), "迁移错误必须零进程");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_command_hook_stdin_json_is_byte_exact_with_benign_special_chars() {
+    let dir = unique_test_dir("stdin");
+    let out = dir.join("stdin.json");
+    let mut registered = make_registered();
+    registered
+        .plugin_options
+        .insert("out".to_string(), serde_json::json!(out.to_str().unwrap()));
+
+    // 良性特殊字符：引号/换行/反斜杠/Unicode/$ 字面量。命令只做 stdin → 文件，
+    // 不做任何文本替换；写出的内容必须与序列化输入逐字节一致。
+    let hook = make_command_hook(r#"cat > "$CLAUDE_PLUGIN_OPTION_OUT""#);
+    let mut input = make_hook_input();
+    input.prompt = Some(
+        "quote \" and ' and \\ and newline\nsecond line $ARGUMENTS ${HOME} $(id) 中文—emoji"
+            .to_string(),
+    );
+    input.tool_input = Some(serde_json::json!({"pattern": "a\"b\\c\n d"}));
+
+    let action = execute_command_hook(&hook, &input, &registered).await;
+    assert!(matches!(action, HookAction::Allow), "got {action:?}");
+
+    let written = std::fs::read_to_string(&out).expect("hook 应把 stdin 原样写入文件");
+    let expected = serde_json::to_string(&input).unwrap();
+    assert_eq!(
+        written, expected,
+        "HookInput 必须经 stdin JSON 逐字节一致，不得被 shell 展开或改写"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

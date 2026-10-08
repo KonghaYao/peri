@@ -976,3 +976,6 @@ async fn test_stop_block_prevent_continuation_returns_error() {
         }
     }
 }
+
+#[path = "pretooluse_ask_test.rs"]
+mod pretooluse_ask_test;

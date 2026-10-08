@@ -1,17 +1,15 @@
 use std::{collections::HashSet, path::Path};
 
-/// 替换插件路径变量和 $ARGUMENTS
+/// 替换插件路径变量
 ///
 /// 支持的变量：
 /// - `${CLAUDE_PLUGIN_ROOT}` / `$CLAUDE_PLUGIN_ROOT` → 插件安装路径
 /// - `${CLAUDE_PLUGIN_DATA}` / `$CLAUDE_PLUGIN_DATA` → 插件数据路径
-/// - `${ARGUMENTS}` / `$ARGUMENTS` → 参数值
-pub fn resolve_hook_variables(
-    input: &str,
-    plugin_root: &Path,
-    plugin_data_dir: &Path,
-    arguments: &str,
-) -> String {
+///
+/// [TRAP] 不再支持 `$ARGUMENTS` / `${ARGUMENTS}` 文本替换（H4 参数隔离）：
+/// HookInput 数据只经 stdin JSON 传递，command 字符串里的旧写法由 executor
+/// 报迁移错误；这里绝不能悄悄把数据拼回命令文本。
+pub fn resolve_hook_variables(input: &str, plugin_root: &Path, plugin_data_dir: &Path) -> String {
     let mut result = input.to_string();
 
     // 替换 ${CLAUDE_PLUGIN_ROOT} 和 $CLAUDE_PLUGIN_ROOT
@@ -24,10 +22,6 @@ pub fn resolve_hook_variables(
     result = result.replace("${CLAUDE_PLUGIN_DATA}", &data_str);
     result = result.replace("$CLAUDE_PLUGIN_DATA", &data_str);
 
-    // 替换 ${ARGUMENTS} 和 $ARGUMENTS
-    result = result.replace("${ARGUMENTS}", arguments);
-    result = result.replace("$ARGUMENTS", arguments);
-
     result
 }
 
@@ -39,11 +33,10 @@ pub fn resolve_hook_variables_with_env(
     input: &str,
     plugin_root: &Path,
     plugin_data_dir: &Path,
-    arguments: &str,
     allowed_env_vars: &HashSet<String>,
 ) -> String {
-    // 先完成插件路径和 ARGUMENTS 替换
-    let intermediate = resolve_hook_variables(input, plugin_root, plugin_data_dir, arguments);
+    // 先完成插件路径替换
+    let intermediate = resolve_hook_variables(input, plugin_root, plugin_data_dir);
 
     // 使用 shellexpand 进行 env var 展开，白名单限制
     let allowed = allowed_env_vars.clone();
