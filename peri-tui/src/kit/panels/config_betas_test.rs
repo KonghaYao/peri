@@ -31,7 +31,8 @@ fn test_row_model_appends_registry_driven_section() {
         };
         assert_eq!(BETA_FLAGS[index].id, flag.id, "区块顺序 = 注册表顺序");
     }
-    assert_eq!(row_count(), rows.len());
+    // 鼠标命中与上下键导航都以行数为界：行数 = 行模型长度。
+    assert_eq!(config_rows().len(), rows.len());
 }
 
 /// 区块标题行不可激活（光标/点击不改变任何配置）。
@@ -44,7 +45,7 @@ fn test_activate_section_row_is_inert() {
     activate_row(section_index, true);
     assert_eq!(*handle.read(), before, "区块标题行不得改写任何配置字段");
     // 越界行同样无副作用。
-    activate_row(row_count() + 10, true);
+    activate_row(config_rows().len() + 10, true);
     assert_eq!(*handle.read(), before);
 }
 

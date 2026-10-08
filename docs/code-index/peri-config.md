@@ -21,11 +21,12 @@ fallback。纯 resolver 只使用输入值；system 管发布和更新。模块�
 | 纯 typed 快照 | `system.rs`：`ConfigurationSnapshot::resolve`、`settings`、`mcp`、`provider`、`observability`、`ui` | 多项目隔离，字段只读；Langfuse 使用 global settings，UI 使用合并后的 settings extra |
 | 发布、解释与更新 | `system.rs`：`ConfigurationSystem::{resolve,current,explain,update,update_mcp}` | 校验、来源 revision 与目标文件字节 CAS 成功才 publish；失败保留 current |
 | 来源输入 | `source.rs`：`ConfigurationSource`、`McpConfigurationSource`、`read_environment`、`collect_with_layout` | 独立 bootstrap；可注入其他 adapter，不委托 provider 决定领域规则 |
-| settings schema 与合并 | `app.rs`：`PeriConfig`、`AppConfig`、`Profiles`、`ProfileConfig`、`ProviderConfig` | `merge_overrides`、`extract_overrides`；profile 整体替换、MetaHarness 逐 key 合并 |
+| settings schema 与合并 | `app.rs`：`PeriConfig`、`AppConfig`、`Profiles`、`ProfileConfig`、`ProviderConfig`、`BetasConfig` | `merge_overrides`、`extract_overrides`；profile 整体替换、MetaHarness 与 beta flag 逐 key 合并 |
 | 固定加载/保存布局 | `settings.rs`：`ConfigSource::{load_at,load_standalone,load_lenient,snapshot,reload_merged}`、`save(expected_revision, &PeriConfig) -> Result<Arc<ConfigurationSnapshot>>` | 编辑开始捕获 revision 随草稿提交；保存返回 accepted snapshot。正常持有 system、同文件不拆层；lenient 临时可读/不可写 |
 | 受信启动器的内存配置 | `settings.rs`：`ConfigSource::load_injected_at`；`source.rs::collect_with_layout_and_global` | 以内部启动帧提供完整 global settings 正文；不读取或写入 global/workspace settings 文件，仍使用同一 typed snapshot 与 provider/MCP 规则；该来源拒绝持久保存 |
 | 单文件 helpers | `settings.rs`：`load_from`、`save_to` | `save_to` 显式路径也用字节 CAS 保留其他顶层领域；不发布 scoped snapshot，不等同于 system revision 更新。lenient source 无 authority 时临时可读、不可写 |
 | 资源配置投影 | `resources.rs`：`ResourceConfiguration`、`resolve`；`system.rs::resources` | global `config.disableBundledSkills` 优先于旧顶层键，默认 false；workspace 资源 consumer 使用 snapshot 开关 |
+| Beta flag 投影 | `betas.rs`：`BetaFlags`（re-export 契约层 `peri_acp_types::beta_flags`）、`resolve`、`from_merged`；`system.rs::flags`；`settings.rs::beta_flags` | `config.betas` 稀疏 bool 覆盖表由**合并后 settings** 派生，global→workspace 逐 key 覆盖（workspace 显式 false 可关闭 global true）；未覆盖与未知 id 恒 false；未知键解析后剔除并 warn，非 bool 使该来源解析失败；保存沿用 `ConfigSource::save`（CAS），不新增写路径 |
 | Provider 解析 | `provider.rs`：`resolve`、`resolve_for_alias`、`ResolvedProvider`、`ENVIRONMENT_KEYS` | `MODEL_PROVIDER` + `MODEL_TYPE` 选择配置的 provider ID 和档位；缺省用 active profile；消费者负责 Model adapter 构造 |
 | MCP 基础配置 | `mcp.rs`：`parse_global`、`parse_project`、`resolve_from_files`、`validate_config`、`server_config_hash` | global/plugin/project 合并、插件手动去重、typed 准入与 cache 关闭优先 |
 | Builtin 环境策略 | `mcp.rs`：`builtin_enabled` | `PERI_MCP_BUILTIN` 解释规则归 core；旧 builtin adapter 只采集 env，不复制规则 |

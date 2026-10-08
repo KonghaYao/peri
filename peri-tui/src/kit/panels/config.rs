@@ -100,11 +100,6 @@ fn config_rows() -> Vec<ConfigRow> {
     rows
 }
 
-/// 面板行数（鼠标命中反推与上下键导航共用）。
-fn row_count() -> usize {
-    config_rows().len()
-}
-
 /// beta flag 行的描述：优先 i18n key `beta-desc-<id>`，缺失回退注册表 canonical 文本。
 ///
 /// `i18n::tr` 未命中时原样返回 key（见 `i18n::format_key`），据此判定缺失。
