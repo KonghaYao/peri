@@ -292,9 +292,6 @@ async fn frozen_snapshot_bytes(cfg: &AcpServerConfig, id: &str) -> Option<String
     {
         FrozenState::Present(bytes) => Some(bytes.into_string()),
         FrozenState::LegacyAbsent => None,
-        FrozenState::Unsupported => {
-            panic!("fixture frozen snapshot must be readable by this build")
-        }
     }
 }
 

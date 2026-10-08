@@ -149,6 +149,23 @@ impl BetasConfig {
     }
 }
 
+/// 对原始配置文档中已删除的 compact 键给出显式迁移诊断（当前无运行作用）。
+///
+/// 在**解析类型之前**调用：类型化模型已不认识这些键，只靠反序列化无法发现它们。
+pub fn warn_legacy_compact_keys(document: &serde_json::Value) {
+    let Some(compact) = document.pointer("/config/compact") else {
+        return;
+    };
+    for key in peri_acp_types::compact::LEGACY_COMPACT_KEYS {
+        if compact.get(key).is_some() {
+            tracing::warn!(
+                key,
+                "compact 配置键已移除：{key} 从未参与运行，直接删除即可（本次按默认值继续，不静默换语义）"
+            );
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AppConfig {
     #[serde(default = "default_alias", skip_serializing_if = "String::is_empty")]

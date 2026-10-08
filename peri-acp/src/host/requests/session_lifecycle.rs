@@ -419,12 +419,6 @@ async fn committed_frozen_state(
     match snapshot.frozen {
         FrozenState::Present(_) => Ok(true),
         FrozenState::LegacyAbsent => Ok(false),
-        // 有字节但本构建读不懂：判据存在但不能证明「已提交的是本次内容」，
-        // 按不可得处理（不删除、不冒充发布）。
-        FrozenState::Unsupported => Err(AcpError::new(
-            -32603,
-            "session frozen snapshot is present but not readable by this build",
-        )),
     }
 }
 

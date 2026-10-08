@@ -23,7 +23,6 @@ fn test_default_values() {
     );
     assert_eq!(config.summary_max_tokens, 16000);
     assert_eq!(config.max_consecutive_failures, 3);
-    assert_eq!(config.ptl_max_retries, 3);
 }
 
 #[test]

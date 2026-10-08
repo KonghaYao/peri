@@ -198,7 +198,6 @@ impl SkillsMiddleware {
         }
         match skill.source {
             SkillSource::User => "user",
-            SkillSource::Global => "global",
             SkillSource::Project => "project",
             SkillSource::Plugin => "plugin",
             SkillSource::Builtin => "builtin",
