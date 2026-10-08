@@ -24,8 +24,29 @@ fn synthetic_defer_text(message: &QueuedMessage) -> Option<String> {
 /// 对 Defer 消息 emit `SyntheticUserMessage` 事件（TUI bridge 刷新 committed 视图用）。
 /// 消费后通过共享 helper `append_messages_to_transcript` 写入 Transcript。
 pub async fn run_receive(input: ReceiveInput) -> crate::error::AgentResult<ReceiveOutput> {
+    run_receive_with_budget(input, None).await
+}
+
+pub(super) async fn run_receive_with_budget(
+    input: ReceiveInput,
+    exhausted_after: Option<u64>,
+) -> crate::error::AgentResult<ReceiveOutput> {
     let execution = input.context.session.turn.execution_binding();
     let consumed = input.context.session.queue.drain_batch(64);
+    let stop_requested = consumed
+        .iter()
+        .any(|message| message.source == MessageSource::HookStopIntent);
+    let (deferred, consumed): (Vec<_>, Vec<_>) = consumed.into_iter().partition(|message| {
+        !stop_requested
+            && exhausted_after.is_some_and(|watermark| {
+                message.policy.ensures_processing()
+                    && message
+                        .admission_sequence
+                        .is_some_and(|sequence| sequence > watermark)
+            })
+    });
+    let budget_deferred_count = deferred.len();
+    input.context.session.queue.push_batch(deferred);
     let user_inputs: Vec<_> = consumed
         .iter()
         .filter(|message| message.source == MessageSource::UserInput)
@@ -199,11 +220,10 @@ pub async fn run_receive(input: ReceiveInput) -> crate::error::AgentResult<Recei
     Ok(ReceiveOutput {
         consumed_count: count,
         wake_up_count,
+        budget_deferred_count,
         input_message_ids: user_ids,
         // hook 的显式停止意图：本轮消费到就必须经 Receive 唯一退出口结束。
-        stop_requested: consumed
-            .iter()
-            .any(|message| message.source == MessageSource::HookStopIntent),
+        stop_requested,
     })
 }
 

@@ -303,6 +303,8 @@ pub struct ReceiveOutput {
     pub consumed_count: usize,
     /// 本轮消费的可驱动语义续跑消息数量（Prompt / Defer）
     pub wake_up_count: usize,
+    /// 预算不足而保留在队列中的后续新增 EnsureProcessing 输入数量。
+    pub budget_deferred_count: usize,
     /// 本次消费的非空用户 Human 消息身份，供首次输入准备精准处理。
     pub input_message_ids: Vec<crate::messages::MessageId>,
     /// 本轮消费到 hook 的显式停止意图（`continue:false`）：循环必须经 Receive
@@ -484,6 +486,7 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
     let mut loop_state = LoopState::default();
     let mut semantic_iterations = 0usize;
     let execution = context.session.turn.execution_binding();
+    let initial_input_watermark = context.session.queue.admission_watermark();
     // Keep one receiver for the lifetime of this loop so its observed version
     // advances across idle retries. StageContext clones are short-lived stage
     // inputs and must not own the receive cursor.
@@ -499,9 +502,12 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
 
             // ── Receive（循环入口，也是退出判断点）──
             let receive_out = match run_stage(&context, Stage::Receive, || async {
-                receive::run_receive(ReceiveInput {
-                    context: context.clone(),
-                })
+                receive::run_receive_with_budget(
+                    ReceiveInput {
+                        context: context.clone(),
+                    },
+                    (semantic_iterations >= max_iterations).then_some(initial_input_watermark),
+                )
                 .await
             })
             .await
@@ -524,7 +530,10 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
             // Info 只做状态维护，虽被 Receive 消费，但不能单独驱动 Compact → Reason → Act。
             // 工具调用结果写入 transcript 而非队列：has_tool_calls=true 时
             // wake_up_count=0 是正常状态——继续循环让 LLM 处理工具结果。
-            if receive_out.wake_up_count == 0 && !loop_state.has_tool_calls {
+            if receive_out.wake_up_count == 0
+                && receive_out.budget_deferred_count == 0
+                && !loop_state.has_tool_calls
+            {
                 // 竞态保护：退出前再检查一次队列是否有新消息到达
                 if context.session.queue.has_required_for_run(&execution) {
                     tracing::debug!("Receive: consumed=0 but queue has wake-up, continue");
@@ -715,6 +724,8 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                 tracing::warn!(
                     max_iterations,
                     semantic_iterations,
+                    budget_deferred_count = receive_out.budget_deferred_count,
+                    initial_input_watermark,
                     "ReAct v2 循环达到最大语义迭代次数"
                 );
                 return LoopResult::Error(crate::error::AgentError::MaxIterationsExceeded(

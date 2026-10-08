@@ -120,6 +120,28 @@ fn settle_nested_task(child: &Session, manager: &TaskManager) {
 }
 
 #[tokio::test(start_paused = true)]
+async fn child_budget_is_not_reset_after_bounded_idle_handoff() {
+    let (child, manager, built, initial_calls, result_calls) = child_with_nested_task();
+    let owner_child = child.clone();
+    let turn = built.context.session.turn.clone();
+    let mut owner =
+        tokio::spawn(async move { run_child_until_terminal(built.context, 1, &owner_child).await });
+    assert!(tokio::time::timeout(Duration::from_secs(121), &mut owner)
+        .await
+        .is_err());
+    assert_eq!(initial_calls.load(Ordering::SeqCst), 1);
+    settle_nested_task(&child, &manager);
+    assert!(matches!(
+        owner.await.unwrap(),
+        LoopResult::Error(crate::error::AgentError::MaxIterationsExceeded(0))
+    ));
+    assert_eq!(turn.current_step(), 1);
+    assert_eq!(initial_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(result_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(manager.active_count(), 0);
+}
+
+#[tokio::test(start_paused = true)]
 async fn nested_child_late_result_is_processed_before_delegation_completes() {
     let (child, manager, built, initial_calls, result_calls) = child_with_nested_task();
     let owner_child = child.clone();

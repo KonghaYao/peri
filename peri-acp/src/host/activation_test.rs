@@ -138,6 +138,9 @@ mod execution_tests;
 #[path = "error_activation_test.rs"]
 mod error_activation_tests;
 
+#[path = "budget_activation_test.rs"]
+mod budget_activation_tests;
+
 #[tokio::test]
 #[serial]
 async fn late_child_result_restarts_completed_host_run_and_commits_result() {

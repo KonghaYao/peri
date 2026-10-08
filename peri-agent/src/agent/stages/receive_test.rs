@@ -47,6 +47,79 @@ fn make_context() -> StageContext {
 }
 
 #[tokio::test]
+async fn exhausted_receive_preserves_only_fresh_ensure_processing_inputs() {
+    use peri_acp_types::session::MessagePolicy;
+    let context = make_context();
+    let execution = context.session.turn.execution_binding();
+    let initial = BaseMessage::human("initial input");
+    let initial_id = initial.id();
+    context
+        .session
+        .queue
+        .push(QueuedMessage::prompt(MessageSource::UserInput, initial));
+    let watermark = context.session.queue.admission_watermark();
+    let passive = BaseMessage::human("passive input");
+    let passive_id = passive.id();
+    context
+        .session
+        .queue
+        .push(QueuedMessage::info(MessageSource::SystemInjected, passive));
+    let continuation = BaseMessage::human("current run only");
+    let continuation_id = continuation.id();
+    context.session.queue.push(
+        QueuedMessage::defer(MessageSource::SystemInjected, continuation)
+            .with_policy(MessagePolicy::continue_current_run(execution)),
+    );
+    let stale_execution = make_context().session.turn.execution_binding();
+    context.session.queue.push(
+        QueuedMessage::defer(
+            MessageSource::SystemInjected,
+            BaseMessage::human("stale run input"),
+        )
+        .with_policy(MessagePolicy::continue_current_run(stale_execution)),
+    );
+    for body in ["first fresh result", "second fresh result"] {
+        context.session.queue.push(QueuedMessage::defer(
+            MessageSource::SubAgentComplete,
+            BaseMessage::human(body),
+        ));
+    }
+    let output = run_receive_with_budget(
+        ReceiveInput {
+            context: context.clone(),
+        },
+        Some(watermark),
+    )
+    .await
+    .unwrap();
+    assert_eq!(output.budget_deferred_count, 2);
+    assert_eq!(output.consumed_count, 4);
+    assert_eq!(output.wake_up_count, 2);
+    let transcript = context.session.transcript.read();
+    assert!(transcript.get(initial_id).is_some());
+    assert!(transcript.get(passive_id).is_some());
+    assert!(transcript.get(continuation_id).is_some());
+    assert_eq!(transcript.len(), 3);
+    assert_eq!(context.session.queue.suppressed_messages().len(), 1);
+    let pending = context.session.queue.drain_all();
+    assert_eq!(
+        pending
+            .iter()
+            .map(|message| message.admission_sequence.unwrap())
+            .collect::<Vec<_>>(),
+        vec![5, 6]
+    );
+    assert_eq!(
+        pending
+            .iter()
+            .map(|message| message.message().unwrap().content().to_string())
+            .collect::<Vec<_>>(),
+        ["first fresh result", "second fresh result"]
+    );
+    assert_eq!(context.session.queue.admission_watermark(), 6);
+}
+
+#[tokio::test]
 async fn stable_terminal_delivery_id_is_recorded_once_across_receive_runs() {
     use peri_acp_types::system_reminder::{
         ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
