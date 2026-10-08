@@ -156,6 +156,13 @@ impl Model for RuntimeFailureModel {
         self.inner.prepare_request(request)
     }
 
+    /// durable Reason 在发出请求前冻结完整请求（checkpoint）；默认实现按设计
+    /// 拒绝（`Provider` 协议错误）。夹具转交真实 OpenAI 适配器，保持「只经公开
+    /// 模型 API」的边界，不绕过 durable 边界。
+    fn prepare_stream(&self, request: ModelRequest) -> ModelResult<peri_model::PreparedModelCall> {
+        self.inner.prepare_stream(request)
+    }
+
     async fn stream(
         &self,
         request: ModelRequest,
@@ -216,6 +223,85 @@ struct SyncFixture {
     child_events: Vec<ExecutorEvent>,
 }
 
+/// 把父会话变成真实 durable 执行：transcript 绑定持久 store、入箱消息发布为
+/// 持久 delivery、按真实候选登记 SDK 准入并绑定到 turn。
+///
+/// 与 peri-agent `work_test_support` 的同一契约：准入 ticket 的 execution 必须
+/// 等于本 turn 的 execution binding（否则投递判定会按「原执行已非当前」抑制）。
+/// 这里不构造未登记的 ticket——`work_id/work_revision/lifecycle/control_generation`
+/// 全部取自持久快照的真实候选。
+async fn durable_parent_turn(
+    parent: &std::sync::Arc<Session>,
+    store: &crate::subagent::tool::tests::SessionFixture,
+    parent_id: &str,
+    prompt: &str,
+) -> (
+    peri_agent::session::turn::TurnContext,
+    Arc<parking_lot::RwLock<peri_agent::session::MessageTranscript>>,
+    peri_agent::session::MessageQueue,
+) {
+    use peri_acp_types::session_resources::work::{
+        WorkAction, WorkAdmission, WorkCommand, WorkDecision, WorkQuery,
+    };
+    use peri_acp_types::session_resources::ControlAttempt;
+
+    *parent.transcript().write() = peri_agent::session::MessageTranscript::new()
+        .with_persistence(store.facade(), parent_id.to_string());
+    let queue = parent.queue().clone();
+    queue.push(QueuedMessage::prompt(
+        MessageSource::UserInput,
+        BaseMessage::human(prompt),
+    ));
+    peri_agent::agent::stages::publish_session_inbox(store.facade(), parent_id, 1, &queue)
+        .await
+        .expect("durable inbox publication");
+
+    let turn = parent.start_turn();
+    let execution = turn.execution_binding();
+    let snapshot = store
+        .facade()
+        .load_session_work(&WorkQuery {
+            session_id: parent_id.to_string(),
+            limit: 1,
+        })
+        .await
+        .expect("durable work snapshot");
+    let candidate = snapshot
+        .candidates
+        .first()
+        .expect("durable inbox publication must expose a real candidate");
+    let admission = WorkAdmission {
+        session_id: parent_id.to_string(),
+        admission_id: uuid::Uuid::now_v7().to_string(),
+        instance_id: "fixture-model-failure-sdk-instance".into(),
+        generation_id: "fixture-model-failure-sdk-generation".into(),
+        lifecycle: snapshot.control.lifecycle,
+        control_generation: snapshot.control.control_generation,
+        work_id: candidate.work_id.clone(),
+        work_revision: candidate.work_revision,
+        execution: ControlAttempt {
+            turn_id: execution.turn_id,
+            attempt_id: execution.attempt_id,
+        },
+    };
+    let receipt = store
+        .facade()
+        .apply_work_mutation(&WorkCommand {
+            session_id: parent_id.to_string(),
+            recipient_lifecycle: admission.lifecycle,
+            mutation_id: format!("fixture-register-admission:{}", admission.admission_id),
+            action: WorkAction::RegisterAdmission {
+                admission: admission.clone(),
+            },
+        })
+        .await
+        .expect("register admission");
+    assert_eq!(receipt.decision, WorkDecision::Accepted);
+    assert!(turn.bind_work_admission(admission.clone()));
+    assert!(turn.bind_control_generation(admission.control_generation));
+    (turn, parent.transcript(), queue)
+}
+
 async fn run_sync_fixture(fixture: FailureFixture, status: Option<u16>) -> SyncFixture {
     let dir = tempfile::tempdir().expect("fixture directory");
     write_agent(&dir);
@@ -236,7 +322,20 @@ async fn run_sync_fixture(fixture: FailureFixture, status: Option<u16>) -> SyncF
     let bridge = Arc::new(RecordingBridge {
         observes: Arc::new(Mutex::new(Vec::new())),
     });
-    let child_tool: Arc<dyn BaseTool> = Arc::new(
+    // 生产 durable 装配：父会话宿主（资源门面 / SDK admission 端口 / 任务通道 /
+    // bridge）一次装好；子链宿主来自父 session，工具字段会被遮蔽。
+    let bridge_for_host = Arc::clone(&bridge) as Arc<dyn peri_agent::agent::LangfuseBridgeLike>;
+    let durable = crate::subagent::tool::tests::DurableHost::open_in_with_host(
+        dir.path(),
+        "fixture-model-failure",
+        move |host| {
+            host.langfuse_bridge = Some(bridge_for_host);
+        },
+    )
+    .await;
+    let store = &durable.fixture;
+    let parent_id = durable.parent_id.clone();
+    let child_tool = durable.bind(
         SubAgentTool::new(
             Arc::new(Vec::new()),
             Some(child_handler),
@@ -249,9 +348,9 @@ async fn run_sync_fixture(fixture: FailureFixture, status: Option<u16>) -> SyncF
             cwd.clone(),
         )
         .with_parent_agent_id(Arc::new(RwLock::new(Some(AgentId::new()))))
-        .with_langfuse_bridge(Arc::clone(&bridge) as Arc<dyn peri_agent::agent::LangfuseBridgeLike>)
         .with_mcp_agents(Some(std::sync::Arc::clone(&agent_registry)), None),
     );
+    let child_tool: Arc<dyn BaseTool> = Arc::new(child_tool);
 
     let input = serde_json::json!({
         "subagent_type": "fixture-agent",
@@ -259,20 +358,16 @@ async fn run_sync_fixture(fixture: FailureFixture, status: Option<u16>) -> SyncF
         "cwd": cwd,
     });
     let seen = Arc::new(Mutex::new(Vec::new()));
-    let parent = Session::new(
-        Arc::from(cwd.as_str()),
-        FrozenContext::builder().build(),
-        None,
-    );
-    let turn = parent.start_turn();
-    let transcript = parent.transcript();
-    let queue = parent.queue().clone();
+    // 父 loop 与子链共享同一 owning parent session（父会话身份 = 委派 initiator）。
+    let parent = durable.parent_session();
     let shared_tools = Arc::new(RwLock::new(BTreeMap::from([(
         "Agent".to_string(),
         child_tool,
     )])));
     let (event_bus, mut event_handles) =
         peri_agent::agent::events_v2::EventBus::new(Default::default());
+    let (turn, transcript, queue) =
+        durable_parent_turn(&parent, store, &parent_id, "parent request").await;
     let context = StageContext::builder(turn, transcript, queue.clone())
         .with_llm(Arc::new(
             peri_agent::agent::model_bridge::AgentModelBridge::new(Arc::new(ParentDriver {
@@ -283,11 +378,11 @@ async fn run_sync_fixture(fixture: FailureFixture, status: Option<u16>) -> SyncF
         ))
         .with_tools(shared_tools)
         .with_event_bus(Arc::new(event_bus))
+        .with_recipient_lifecycle(1)
+        .with_execution_admission_port(std::sync::Arc::new(
+            crate::subagent::tool::tests::TestAdmissionPort(store.facade()),
+        ))
         .build();
-    queue.push(QueuedMessage::prompt(
-        MessageSource::UserInput,
-        BaseMessage::human("parent request"),
-    ));
 
     assert!(matches!(
         run_react_loop(context.clone(), 3).await,
@@ -529,17 +624,28 @@ async fn background_http_429_consumes_typed_result_and_safe_notification() {
         }),
         cwd.clone(),
     )
-    .with_task_manager(Arc::new(peri_agent::agent::async_tasks::TaskManager::new()))
-    .with_bg_event_sender(bg_event_tx)
-    .with_mcp_agents(Some(Arc::clone(&bg_agent_registry)), None)
-    .with_on_bg_complete(Arc::new(move |result, _kind| {
+    .with_mcp_agents(Some(Arc::clone(&bg_agent_registry)), None);
+    // 生产 durable 装配：任务通道/完成回调装在父会话宿主上（工具字段会被遮蔽），
+    // 资源门面与父线程身份由 `bind` 提供。
+    let on_bg_complete: peri_acp_types::tasks::OnBgCompleteFn = Arc::new(move |result, _kind| {
         if let Some(sender) = completed_tx_for_callback.lock().unwrap().take() {
             let _ = sender.send(result.clone());
         }
         Ok(())
-    }));
+    });
+    let durable = crate::subagent::tool::tests::DurableHost::open_in_with_host(
+        dir.path(),
+        "fixture-model-failure-bg",
+        move |host| {
+            host.task_manager = Some(Arc::new(peri_agent::agent::async_tasks::TaskManager::new()));
+            host.bg_event_sender = Some(bg_event_tx);
+            host.on_bg_complete = Some(on_bg_complete);
+        },
+    )
+    .await;
 
-    let launch = tool
+    let launch = durable
+        .bind(tool)
         .invoke(
             serde_json::json!({
                 "subagent_type": "fixture-agent",
@@ -547,7 +653,7 @@ async fn background_http_429_consumes_typed_result_and_safe_notification() {
                 "run_in_background": true,
                 "cwd": cwd,
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            durable.context(&[]),
         )
         .await
         .expect("background task should register before model execution");

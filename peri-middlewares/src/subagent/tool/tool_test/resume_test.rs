@@ -521,11 +521,14 @@ async fn test_resume_thread_id_fork_title_uses_parent_tools_and_200_iterations()
     );
     install_parent_host(&store, &parent);
     let id = uuid::Uuid::now_v7().to_string();
-    preset_resumable_thread(
+    // 原委派工具面 = fork 的父工具集（无过滤，含 Agent）；恢复按保存的 ceiling
+    // 求交，因此夹具必须写入与 spawn 一致的事实（factory/spawn.rs）。
+    preset_resumable_thread_with_ceiling(
         &store,
         &id,
         "fork",
         Some(parent_id.as_str()),
+        &["Read", "Agent"],
         vec![BaseMessage::human("task")],
     )
     .await;
@@ -640,11 +643,14 @@ async fn test_resume_thread_id_agent_def_refilters_tools() {
     );
     install_parent_host(&store, &parent);
     let id = uuid::Uuid::now_v7().to_string();
-    preset_resumable_thread(
+    // 原委派工具面 = agent 定义白名单 ∧ 父工具集（`Read`；`Agent` 被定义排除），
+    // 与 spawn 记录的事实一致；恢复在 ceiling 之上还要重新应用定义过滤。
+    preset_resumable_thread_with_ceiling(
         &store,
         &id,
         "resume-agent",
         Some(parent_id.as_str()),
+        &["Read"],
         Vec::new(),
     )
     .await;

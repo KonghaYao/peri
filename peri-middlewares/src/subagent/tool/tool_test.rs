@@ -1408,6 +1408,12 @@ pub(crate) fn git_init(directory: &std::path::Path) {
 }
 
 /// 预置可恢复 thread：创建（title 决定工具集恢复路径）+ 写消息 + 置非 active。
+///
+/// 空 `tool_ceiling` 表示「该委派当年没有工具面」——生产 spawn 记录的是
+/// 过滤后工具名集合（`factory/spawn.rs` 的 `tool_ceiling`/`tool_origins`），
+/// 恢复时按 `ceiling ∩ 本次重建工具` 求交（`factory/resume.rs`）。因此要断言
+/// 恢复工具面的用例必须用 [`preset_resumable_thread_with_ceiling`] 传入与原
+/// 委派一致的工具面，不能依赖空集（空集恢复出来的工具面必然为空）。
 async fn preset_resumable_thread(
     fixture: &SessionFixture,
     id: &str,
@@ -1416,6 +1422,20 @@ async fn preset_resumable_thread(
     msgs: Vec<BaseMessage>,
 ) {
     preset_resumable_child(fixture, id, title, parent_thread_id, None, msgs).await;
+}
+
+/// 预置可恢复 thread，并按生产事实写入原委派的工具面（`tool_ceiling` +
+/// `tool_origins`，本地工具 origin 为 null，与 spawn 写入一致）。
+async fn preset_resumable_thread_with_ceiling(
+    fixture: &SessionFixture,
+    id: &str,
+    title: &str,
+    parent_thread_id: Option<&str>,
+    ceiling: &[&str],
+    msgs: Vec<BaseMessage>,
+) {
+    preset_resumable_child_with_ceiling(fixture, id, title, parent_thread_id, None, ceiling, msgs)
+        .await;
 }
 
 /// 预置可恢复子线程：绑定/frozen 会话 + 已登记父 invocation + v1 运行时 metadata。
@@ -1429,6 +1449,27 @@ async fn preset_resumable_child(
     title: &str,
     parent_thread_id: Option<&str>,
     invocation_id: Option<&str>,
+    msgs: Vec<BaseMessage>,
+) {
+    preset_resumable_child_with_ceiling(
+        fixture,
+        id,
+        title,
+        parent_thread_id,
+        invocation_id,
+        &[],
+        msgs,
+    )
+    .await;
+}
+
+async fn preset_resumable_child_with_ceiling(
+    fixture: &SessionFixture,
+    id: &str,
+    title: &str,
+    parent_thread_id: Option<&str>,
+    invocation_id: Option<&str>,
+    ceiling: &[&str],
     msgs: Vec<BaseMessage>,
 ) {
     let id = id.to_string();
@@ -1471,8 +1512,11 @@ async fn preset_resumable_child(
             delegation_task_id: id.clone(),
             authorization_ref: "fixture-delegation-authorization".into(),
             frozen_digest: format!("{:x}", Sha256::digest(b"{\"version\":1,\"fixture\":true}")),
-            tool_ceiling: Default::default(),
-            tool_origins: Default::default(),
+            tool_ceiling: ceiling.iter().map(|name| name.to_string()).collect(),
+            tool_origins: ceiling
+                .iter()
+                .map(|name| (name.to_string(), None))
+                .collect(),
             skill_names: Vec::new(),
             max_iterations: 200,
             persona: Some("fixture-child-identity".into()),
