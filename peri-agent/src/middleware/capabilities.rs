@@ -71,7 +71,10 @@ pub trait InputBatchState: Send + Sync {
 pub trait BeforeInputState: StateView + InputBatchState + MessageReplace {}
 
 /// 首次输入准备与初始化：另提供追加消息及初始工具目录重绑能力。
-pub trait BeforeAgentState: BeforeInputState + MessageAppend + CatalogState {}
+pub trait BeforeAgentState:
+    BeforeInputState + MessageAppend + CatalogState + HookOutputState
+{
+}
 
 /// 工具审批仅观察状态，工具参数修改通过 ToolCall 返回值表达。
 ///
@@ -87,7 +90,7 @@ pub trait BeforeAgentState: BeforeInputState + MessageAppend + CatalogState {}
 ///     state.set_current_step(99);
 /// }
 /// ```
-pub trait BeforeToolState: StateView {
+pub trait BeforeToolState: StateView + HookOutputState {
     /// Identity of the pinned execution target, indexed by immutable call ID.
     fn tool_origin(&self, _call_id: &str) -> Option<BoundToolOrigin> {
         None
@@ -110,7 +113,7 @@ pub struct BoundToolOrigin {
 ///     state.add_message(message);
 /// }
 /// ```
-pub trait AfterToolState: StateView + QueueState {}
+pub trait AfterToolState: StateView + QueueState + HookOutputState {}
 
 /// 批次完成（工具结果已提交）后的窄反馈能力：只回注有界反馈 / 显式停止意图，
 /// 由 Receive 唯一消费；不提供 transcript 追加、消息替换或目录写访问。
@@ -127,7 +130,7 @@ pub trait AfterToolState: StateView + QueueState {}
 ///     state.replace_message(message);
 /// }
 /// ```
-pub trait AfterToolsBatchState: StateView {
+pub trait AfterToolsBatchState: StateView + HookOutputState {
     /// Block：回注有界修正反馈，驱动下一次模型请求看到问题并修正。
     fn enqueue_batch_feedback(
         &mut self,
@@ -141,6 +144,45 @@ pub trait AfterToolsBatchState: StateView {
     );
 }
 
+/// Hook 输出的投递面（M10 字段路由）：只接受 hook 来源的 canonical reminder，
+/// 不暴露 transcript 追加、消息替换、队列 drain 或目录写权限。
+///
+/// 三种字段各有确定受众：`additionalContext` → 模型；`systemMessage` → 客户端；
+/// `initialUserMessage` → SessionStart 受控准入。投递偏好不决定任务是否执行。
+///
+/// ```compile_fail
+/// use peri_agent::middleware::capabilities::HookOutputState;
+/// fn cannot_append_history(state: &dyn HookOutputState, message: peri_agent::messages::BaseMessage) {
+///     state.add_message(message);
+/// }
+/// ```
+/// ```compile_fail
+/// use peri_agent::middleware::capabilities::HookOutputState;
+/// fn cannot_drain_queue(state: &dyn HookOutputState) {
+///     state.v2_queue().drain_all();
+/// }
+/// ```
+pub trait HookOutputState: Send + Sync {
+    /// `additionalContext`：有界、带 hook 来源的 Model reminder（不唤醒新一轮）。
+    fn enqueue_hook_model_reminder(
+        &self,
+        reminder: peri_acp_types::system_reminder::TrustedSystemReminder,
+    );
+
+    /// `systemMessage`：客户端提示（Tui 受众，不进模型上下文）。
+    fn enqueue_hook_client_notice(
+        &self,
+        reminder: peri_acp_types::system_reminder::TrustedSystemReminder,
+    );
+
+    /// `initialUserMessage`：SessionStart 初始消息准入。调用方（hook 中间件）
+    /// 负责「每个会话至多一次」；投递保留 hook 来源，不伪装成用户亲自输入。
+    fn enqueue_session_start_message(
+        &self,
+        reminder: peri_acp_types::system_reminder::TrustedSystemReminder,
+    );
+}
+
 /// Agent 结束：观察结果并经队列投递 goal/stop/todo 反馈。
 ///
 /// ```compile_fail
@@ -149,7 +191,7 @@ pub trait AfterToolsBatchState: StateView {
 ///     state.replace_message(message);
 /// }
 /// ```
-pub trait AfterAgentState: StateView + QueueState + BackgroundActivity {}
+pub trait AfterAgentState: StateView + QueueState + BackgroundActivity + HookOutputState {}
 
 /// 只读后台活动判断，复用 Receive 等待的 session task 事实，不暴露管理器写权限。
 pub trait BackgroundActivity: Send + Sync {
@@ -296,12 +338,60 @@ impl<T: MiddlewareState + ?Sized> InputBatchState for T {
     }
 }
 
+impl<T: MiddlewareState + ?Sized> HookOutputState for T {
+    fn enqueue_hook_model_reminder(
+        &self,
+        reminder: peri_acp_types::system_reminder::TrustedSystemReminder,
+    ) {
+        // Info + Passive：进入 canonical transcript 供下一次模型请求看到，但不唤醒新一轮。
+        MiddlewareState::enqueue_v2_message(
+            self,
+            QueuedMessage::system_reminder(
+                MessageKind::Info,
+                MessageSource::SystemInjected,
+                reminder,
+            )
+            .with_policy(MessagePolicy::passive()),
+        );
+    }
+
+    fn enqueue_hook_client_notice(
+        &self,
+        reminder: peri_acp_types::system_reminder::TrustedSystemReminder,
+    ) {
+        MiddlewareState::enqueue_v2_message(
+            self,
+            QueuedMessage::system_reminder(
+                MessageKind::Info,
+                MessageSource::SystemInjected,
+                reminder,
+            )
+            .with_policy(MessagePolicy::passive()),
+        );
+    }
+
+    fn enqueue_session_start_message(
+        &self,
+        reminder: peri_acp_types::system_reminder::TrustedSystemReminder,
+    ) {
+        MiddlewareState::enqueue_v2_message(
+            self,
+            QueuedMessage::system_reminder(
+                MessageKind::Info,
+                MessageSource::SystemInjected,
+                reminder,
+            )
+            .with_policy(MessagePolicy::passive()),
+        );
+    }
+}
+
 impl<T: StateView + InputBatchState + MessageReplace + ?Sized> BeforeInputState for T {}
-impl<T: BeforeInputState + MessageAppend + CatalogState + ?Sized> BeforeAgentState for T {}
+impl<T: MiddlewareState + ?Sized> BeforeAgentState for T {}
 impl<T: MiddlewareState + ?Sized> BeforeToolState for T {}
-impl<T: StateView + QueueState + ?Sized> AfterToolState for T {}
-impl<T: StateView + QueueState + BackgroundActivity + ?Sized> AfterAgentState for T {}
-impl<T: StateView + MessageAppend + QueueState + ?Sized> BeforeModelState for T {}
+impl<T: MiddlewareState + ?Sized> AfterToolState for T {}
+impl<T: MiddlewareState + ?Sized> AfterAgentState for T {}
+impl<T: MiddlewareState + ?Sized> BeforeModelState for T {}
 
 #[cfg(test)]
 #[path = "capabilities_test.rs"]

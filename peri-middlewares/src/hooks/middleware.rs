@@ -24,7 +24,8 @@ use async_trait::async_trait;
 use parking_lot::RwLock;
 use peri_acp_types::system_reminder::{
     ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
-    ReminderSource, SystemReminder, TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
+    ReminderSource, SystemReminder, TrustedSystemReminder, TrustedSystemReminderFactory,
+    SYSTEM_REMINDER_VERSION,
 };
 use peri_agent::{
     agent::react::{AgentOutput, ReactLLM, ToolCall, ToolResult},
@@ -86,6 +87,8 @@ pub struct HookMiddleware {
     host_approval_path: bool,
     /// broker.request 超时（与 PermissionMiddleware 同源常量）
     broker_timeout: std::time::Duration,
+    /// SessionStart `initialUserMessage` 的会话级准入闸门：每个会话至多投递一次。
+    session_start_message_admitted: std::sync::atomic::AtomicBool,
 }
 
 impl HookMiddleware {
@@ -157,6 +160,7 @@ impl HookMiddleware {
             // fail-closed 默认：未显式声明宿主审批面在链上时，ask 不得交宿主。
             host_approval_path: false,
             broker_timeout: crate::permission::BROKER_TIMEOUT,
+            session_start_message_admitted: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -255,6 +259,37 @@ impl HookMiddleware {
         self
     }
 
+    /// SessionStart `initialUserMessage`：受控准入一次，保留 hook 来源。
+    ///
+    /// 走 canonical reminder（source=hook）而不是伪造用户消息，因此不会被当成
+    /// "用户亲自输入"；重复的 SessionStart 输出在会话内被抑制并可诊断。
+    fn admit_session_start_message(&self, state: &dyn hook_state::HookOutputState, message: &str) {
+        if self
+            .session_start_message_admitted
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            tracing::debug!(
+                field = "initialUserMessage",
+                bytes = message.len(),
+                "SessionStart initialUserMessage already admitted for this session"
+            );
+            return;
+        }
+        match hook_output_reminder(
+            "session_start",
+            "initial_user_message",
+            message,
+            &[ReminderAudience::Model],
+        ) {
+            Ok(reminder) => state.enqueue_session_start_message(reminder),
+            Err(error) => tracing::warn!(
+                field = "initialUserMessage",
+                %error,
+                "SessionStart initialUserMessage could not be delivered"
+            ),
+        }
+    }
+
     // -----------------------------------------------------------------------
     // fire_event — Facade 委托给 dispatcher，保留 pub(crate) 接口供测试与
     // middleware trait 方法调用。
@@ -272,13 +307,32 @@ impl HookMiddleware {
         tool_name: Option<&str>,
         tool_input: Option<&serde_json::Value>,
     ) -> HookAction {
+        self.fire_event_with_delivery(None, event, input, tool_name, tool_input)
+            .await
+    }
+
+    /// 带投递面的 `fire_event`：M10 字段路由在唯一出口完成。
+    ///
+    /// 有投递面时按受众投递 `additionalContext` / `systemMessage`；没有投递面
+    /// （例如直接调用 `fire_event` 的测试或只读阶段）时用可诊断状态记录，
+    /// 不得静默丢弃，也不得"解析成功即假装生效"。
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn fire_event_with_delivery(
+        &self,
+        delivery: Option<&dyn hook_state::HookOutputState>,
+        event: HookEvent,
+        input: &HookInput,
+        tool_name: Option<&str>,
+        tool_input: Option<&serde_json::Value>,
+    ) -> HookAction {
         let action = self
             .dispatcher
             .fire_event(event.clone(), input, tool_name, tool_input)
             .await;
-        // M10 字段路由的唯一出口诊断：任何事件归并出的 additionalContext /
-        // systemMessage 都必须可诊断一次（投递由 F 组接线），不得静默丢弃。
-        diagnose_undelivered_output(&event, &action);
+        match delivery {
+            Some(state) => route_hook_output(state, &event, &action),
+            None => diagnose_undelivered_output(&event, &action),
+        }
         action
     }
 
@@ -406,23 +460,15 @@ impl Middleware for HookMiddleware {
                 &self.current_model,
             );
             let action = self
-                .fire_event(HookEvent::SessionStart, &input, None, None)
+                .fire_event_with_delivery(Some(state), HookEvent::SessionStart, &input, None, None)
                 .await;
             action_resolver::resolve_action_to_result(
                 &action,
                 "SessionStart",
                 "SessionStart hook prevented continuation",
             )?;
-            match &action {
-                HookAction::InitialUserMessage { message } => {
-                    tracing::debug!(
-                        event = "SessionStart",
-                        field = "initialUserMessage",
-                        bytes = message.len(),
-                        "hook output parsed but delivery is not wired yet (M10 → F)"
-                    );
-                }
-                _ => {}
+            if let HookAction::InitialUserMessage { message } = &action {
+                self.admit_session_start_message(state, message);
             }
         }
 
@@ -434,7 +480,7 @@ impl Middleware for HookMiddleware {
             &prompt,
         );
         let action = self
-            .fire_event(HookEvent::UserPromptSubmit, &input, None, None)
+            .fire_event_with_delivery(Some(state), HookEvent::UserPromptSubmit, &input, None, None)
             .await;
 
         action_resolver::resolve_action_to_result(
@@ -464,7 +510,8 @@ impl Middleware for HookMiddleware {
             message_count: None,
             additional_data: None,
         };
-        self.fire_event(
+        self.fire_event_with_delivery(
+            Some(state),
             HookEvent::InstructionsLoaded,
             &instructions_input,
             None,
@@ -493,7 +540,8 @@ impl Middleware for HookMiddleware {
 
         // Fire PreToolUse
         let action = self
-            .fire_event(
+            .fire_event_with_delivery(
+                Some(state),
                 HookEvent::PreToolUse,
                 &input,
                 Some(&tool_call.name),
@@ -625,7 +673,7 @@ impl Middleware for HookMiddleware {
 
     async fn after_tool(
         &self,
-        _state: &mut dyn hook_state::AfterToolState,
+        state: &mut dyn hook_state::AfterToolState,
         tool_call: &ToolCall,
         result: &ToolResult,
     ) -> AgentResult<()> {
@@ -648,7 +696,13 @@ impl Middleware for HookMiddleware {
         );
 
         let _action = self
-            .fire_event(event, &input, Some(&tool_call.name), Some(&tool_call.input))
+            .fire_event_with_delivery(
+                Some(state),
+                event,
+                &input,
+                Some(&tool_call.name),
+                Some(&tool_call.input),
+            )
             .await;
 
         Ok(())
@@ -676,7 +730,9 @@ impl Middleware for HookMiddleware {
             output,
         );
 
-        let action = self.fire_event(HookEvent::Stop, &input, None, None).await;
+        let action = self
+            .fire_event_with_delivery(Some(state), HookEvent::Stop, &input, None, None)
+            .await;
 
         match &action {
             HookAction::Block { reason } => match self.stop_block_guard.on_block(reason) {
@@ -744,7 +800,7 @@ impl Middleware for HookMiddleware {
         }
 
         // Fire Notification (agent done, waiting for user input)
-        self.fire_event(HookEvent::Notification, &input, None, None)
+        self.fire_event_with_delivery(Some(state), HookEvent::Notification, &input, None, None)
             .await;
 
         Ok(output.clone())
@@ -803,12 +859,155 @@ const HOOK_ASK_UNAVAILABLE_REASON: &str =
 /// PreToolUse `ask` 审批超时的固定反馈。
 const HOOK_ASK_TIMEOUT_REASON: &str = "PreToolUse hook approval request timed out";
 
+/// hook 输出正文的承载预算（UTF-8 字节）：超限按字符边界截断并显式标记，
+/// 不静默裁掉内容。
+const MAX_HOOK_OUTPUT_BYTES: usize = 32 * 1024;
+
+/// 按字符边界把 hook 输出限制在承载预算内，并在截断时留下显式说明。
+fn bounded_hook_output(text: &str) -> String {
+    if text.len() <= MAX_HOOK_OUTPUT_BYTES {
+        return text.to_owned();
+    }
+    let mut end = MAX_HOOK_OUTPUT_BYTES;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!(
+        "{}\n[hook output truncated: {} of {} bytes kept]",
+        &text[..end],
+        end,
+        text.len()
+    )
+}
+
+/// 事件名 → 稳定的 kind 片段（程序路由匹配 source + kind，不用展示文本）。
+///
+/// kind 是程序路由事实源，因此逐事件显式枚举：新增事件必须在此声明，未知事件
+/// 也保留带原始事件名的可路由身份，不允许悄悄落进兜底分支。
+fn event_kind(event: &HookEvent) -> String {
+    match event {
+        HookEvent::PreToolUse => "pre_tool_use",
+        HookEvent::PostToolUse => "post_tool_use",
+        HookEvent::PostToolUseFailure => "post_tool_use_failure",
+        HookEvent::PostToolBatch => "post_tool_batch",
+        HookEvent::PermissionRequest => "permission_request",
+        HookEvent::PermissionDenied => "permission_denied",
+        HookEvent::UserPromptSubmit => "user_prompt_submit",
+        HookEvent::SessionStart => "session_start",
+        HookEvent::SessionEnd => "session_end",
+        HookEvent::Stop => "stop",
+        HookEvent::StopFailure => "stop_failure",
+        HookEvent::SubagentStart => "subagent_start",
+        HookEvent::SubagentStop => "subagent_stop",
+        HookEvent::PreCompact => "pre_compact",
+        HookEvent::PostCompact => "post_compact",
+        HookEvent::Notification => "notification",
+        HookEvent::Setup => "setup",
+        HookEvent::TeammateIdle => "teammate_idle",
+        HookEvent::TaskCreated => "task_created",
+        HookEvent::TaskCompleted => "task_completed",
+        HookEvent::ConfigChange => "config_change",
+        HookEvent::WorktreeCreate => "worktree_create",
+        HookEvent::WorktreeRemove => "worktree_remove",
+        HookEvent::InstructionsLoaded => "instructions_loaded",
+        HookEvent::Elicitation => "elicitation",
+        HookEvent::ElicitationResult => "elicitation_result",
+        HookEvent::CwdChanged => "cwd_changed",
+        HookEvent::FileChanged => "file_changed",
+        HookEvent::Unknown(name) => return format!("unknown:{name}"),
+    }
+    .to_string()
+}
+
+/// M10 字段路由：把 hook 输出投递到其声明受众（单一实现，供各阶段共用）。
+///
+/// - `additionalContext` → 有界、带 hook 来源的 Model reminder（不唤醒新一轮）；
+/// - `systemMessage` → 客户端提示（Tui 受众，不进模型上下文）；
+/// - 无法在可承载预算内构造的字段：显式诊断，不静默丢弃、不假装生效。
+fn route_hook_output(
+    state: &dyn hook_state::HookOutputState,
+    event: &HookEvent,
+    action: &HookAction,
+) {
+    let (additional_context, system_message) = match action {
+        HookAction::AdditionalContext { context } => (Some(context.as_str()), None),
+        HookAction::SystemMessage { message } => (None, Some(message.as_str())),
+        HookAction::PermissionOverride {
+            additional_context,
+            system_message,
+            ..
+        } => (additional_context.as_deref(), system_message.as_deref()),
+        _ => (None, None),
+    };
+    let kind = event_kind(event);
+
+    if let Some(context) = additional_context {
+        match hook_output_reminder(
+            &kind,
+            "additional_context",
+            context,
+            &[ReminderAudience::Model],
+        ) {
+            Ok(reminder) => state.enqueue_hook_model_reminder(reminder),
+            Err(error) => tracing::warn!(
+                event = ?event,
+                field = "additionalContext",
+                %error,
+                "hook additionalContext could not be delivered as a model reminder"
+            ),
+        }
+    }
+
+    if let Some(message) = system_message {
+        match hook_output_reminder(&kind, "system_message", message, &[ReminderAudience::Tui]) {
+            Ok(reminder) => state.enqueue_hook_client_notice(reminder),
+            Err(error) => tracing::warn!(
+                event = ?event,
+                field = "systemMessage",
+                %error,
+                "hook systemMessage could not be delivered as a client notice"
+            ),
+        }
+    }
+}
+
+/// 构造一条 hook 输出 reminder：正文有界、来源为 hook、受众显式声明。
+fn hook_output_reminder(
+    kind: &str,
+    field: &str,
+    text: &str,
+    audiences: &[ReminderAudience],
+) -> Result<TrustedSystemReminder, AgentError> {
+    let body = bounded_hook_output(text);
+    TrustedSystemReminderFactory::for_producer()
+        .construct(SystemReminder {
+            version: SYSTEM_REMINDER_VERSION,
+            category: ReminderCategory::Guidance,
+            source: ReminderSource("hook".into()),
+            kind: format!("{kind}_{field}"),
+            severity: ReminderSeverity::Info,
+            delivery: ReminderDelivery::Configurable,
+            audiences: ReminderAudiences(audiences.to_vec()),
+            body,
+            summary: Some(format!("hook {kind} {field}")),
+            metadata: json!({
+                "event": kind,
+                "field": field,
+                "bytes": text.len(),
+            }),
+        })
+        .map_err(|error| AgentError::MiddlewareError {
+            middleware: "HookMiddleware".to_string(),
+            reason: format!("hook output reminder rejected: {error}"),
+        })
+}
+
 /// 已解析但投递尚未接线的 hook 输出：只记录事件、字段名与长度，绝不记录正文。
 ///
-/// M10 字段路由（additionalContext / systemMessage）在 C 组只完成类型与可诊断
-/// 状态，实际投递由 F 组接线；未接线期间不得静默丢弃，也不得"解析成功即假装生效"。
-/// 在 [`HookMiddleware::fire_event`] 唯一出口诊断一次，覆盖所有事件与
-/// [`HookAction::PermissionOverride`] 携带的字段。
+/// 仅在**没有投递面**的调用点使用（直接调用 `fire_event` 的用法、或只读阶段
+/// 如 StopFailure）。生产阶段方法必须经
+/// [`HookMiddleware::fire_event_with_delivery`] 走真实投递；未接线期间不得静默
+/// 丢弃，也不得"解析成功即假装生效"。
 fn diagnose_undelivered_output(event: &HookEvent, action: &HookAction) {
     let (additional_context, system_message) = match action {
         HookAction::AdditionalContext { context } => (Some(context.as_str()), None),
@@ -857,6 +1056,10 @@ mod ask_host_path_tests;
 #[cfg(test)]
 #[path = "undelivered_output_test.rs"]
 mod undelivered_output_tests;
+
+#[cfg(test)]
+#[path = "hook_output_delivery_test.rs"]
+mod hook_output_delivery_tests;
 
 #[cfg(test)]
 #[path = "permission_request_deny_test.rs"]

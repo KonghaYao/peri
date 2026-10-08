@@ -266,6 +266,29 @@ impl hook_state::StateView for BoundApprovalState<'_, '_> {
     }
 }
 
+impl hook_state::HookOutputState for BoundApprovalState<'_, '_> {
+    fn enqueue_hook_model_reminder(
+        &self,
+        reminder: peri_acp_types::system_reminder::TrustedSystemReminder,
+    ) {
+        hook_state::HookOutputState::enqueue_hook_model_reminder(self.context, reminder)
+    }
+
+    fn enqueue_hook_client_notice(
+        &self,
+        reminder: peri_acp_types::system_reminder::TrustedSystemReminder,
+    ) {
+        hook_state::HookOutputState::enqueue_hook_client_notice(self.context, reminder)
+    }
+
+    fn enqueue_session_start_message(
+        &self,
+        reminder: peri_acp_types::system_reminder::TrustedSystemReminder,
+    ) {
+        hook_state::HookOutputState::enqueue_session_start_message(self.context, reminder)
+    }
+}
+
 impl hook_state::BeforeToolState for BoundApprovalState<'_, '_> {
     fn tool_origin(&self, call_id: &str) -> Option<hook_state::BoundToolOrigin> {
         self.targets

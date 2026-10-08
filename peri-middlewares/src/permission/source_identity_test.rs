@@ -60,6 +60,31 @@ impl BeforeToolState for BoundState {
     }
 }
 
+/// 本 fixture 只驱动审批判定，没有 hook 投递路径；被调用即显式失败，
+/// 不允许静默丢弃 hook 输出。
+impl peri_agent::middleware::capabilities::HookOutputState for BoundState {
+    fn enqueue_hook_model_reminder(
+        &self,
+        _reminder: peri_acp_types::system_reminder::TrustedSystemReminder,
+    ) {
+        panic!("BoundState fixture has no hook delivery path");
+    }
+
+    fn enqueue_hook_client_notice(
+        &self,
+        _reminder: peri_acp_types::system_reminder::TrustedSystemReminder,
+    ) {
+        panic!("BoundState fixture has no hook delivery path");
+    }
+
+    fn enqueue_session_start_message(
+        &self,
+        _reminder: peri_acp_types::system_reminder::TrustedSystemReminder,
+    ) {
+        panic!("BoundState fixture has no hook delivery path");
+    }
+}
+
 /// [回归测试] 外部 MCP 的原名 Read 不得继承内置 Read 的免审批规则。
 #[tokio::test]
 async fn test_external_raw_read_requires_approval() {
