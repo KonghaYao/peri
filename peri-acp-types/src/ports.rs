@@ -323,6 +323,15 @@ pub trait McpPoolPort: Send + Sync {
     // 默认实现同「替换前 `downcast_ref` 失败 ⇒ 立即返回空」：状态为
     // `Unavailable`，读取方法返回错误（调用点先看状态，不会走到读取）。
 
+    /// 有效 `workspace` 声明的来源身份（H3/D1：执行环境的唯一事实源）。
+    ///
+    /// 实现方语义（`McpClientPool`）：覆盖会话声明（含恢复/reopen 由持久 owner
+    /// 装载的结果）与合并配置（部署/全局/项目/插件层 + builtin overlay）；
+    /// `None` = 无 `workspace` 条目。默认 `None`（实现方不暴露来源面）。
+    fn workspace_source(&self) -> Option<crate::plugin::ConfigSource> {
+        None
+    }
+
     /// builtin `workspace` 实例的连接态。默认 `Unavailable`（实现方不提供）。
     fn builtin_workspace_state(&self) -> McpBuiltinWorkspaceState {
         McpBuiltinWorkspaceState::Unavailable

@@ -4,7 +4,9 @@
 
 use std::sync::Arc;
 
-use peri_acp_types::{model::SYSTEM_PROMPT_DYNAMIC_BOUNDARY, ports::AgentCatalogPort};
+use peri_acp_types::{
+    frozen::FrozenRuntimeEnv, model::SYSTEM_PROMPT_DYNAMIC_BOUNDARY, ports::AgentCatalogPort,
+};
 use peri_agent::middleware::{PromptSection, PromptSectionContent, PromptSectionZone};
 
 /// 向上查找 Git 仓库根（与 `git` 命令的发现语义一致，P2-12）。
@@ -26,10 +28,32 @@ fn detect_is_git_repo(cwd: &str) -> bool {
     }
 }
 
-/// 运行环境取值（平台 / OS 版本 / 是否 Git 仓库）。
+#[cfg(test)]
+thread_local! {
+    /// 本线程的探测次数（测试证据：准入判定不得在远端 Workspace 会话探测宿主）。
+    /// thread-local 使并发测试互不干扰（`#[tokio::test]` 默认单线程运行时，
+    /// 被测准入路径与断言同线程）。
+    static DETECT_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// 测试用：本线程累计探测次数（断言后自行归零）。
+#[cfg(test)]
+pub(crate) fn detect_call_count() -> usize {
+    DETECT_CALLS.with(std::cell::Cell::get)
+}
+
+/// 测试用：归零本线程探测计数。
+#[cfg(test)]
+pub(crate) fn reset_detect_call_count() {
+    DETECT_CALLS.with(|calls| calls.set(0));
+}
+
+/// 运行环境取值（平台 / OS 版本 / 是否 Git 仓库）——**实时探测快照**。
 ///
-/// 会话准备阶段探测一次，随后由冻结输入携带；装配与渲染消费同一份，
-/// 不在调用时各自 `detect`（两处取值不一致即准备结构缺陷）。
+/// 仅在内容准入点（会话冻结 / legacy 首次接纳）探测一次，随后经
+/// [`PromptRuntimeEnv::freeze`] 转为 [`FrozenRuntimeEnv`] 随冻结数据与版本化
+/// snapshot 持久化；装配与渲染消费冻结快照，不在调用时各自 `detect`
+/// （两处取值不一致即准备结构缺陷）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PromptRuntimeEnv {
     pub is_git_repo: bool,
@@ -38,24 +62,49 @@ pub struct PromptRuntimeEnv {
 }
 
 impl PromptRuntimeEnv {
+    /// 从**选定执行环境**探测一次（本地会话即计算宿主；远端执行环境必须由
+    /// 其自身提供，宿主不得以本地探测值冒充）。
+    ///
+    /// 生产准入点：`workspace::frozen_runtime_env`（按有效 Workspace 来源判定）；
+    /// 显式远端 Workspace 不调用本函数（H3/D1）。
     pub fn detect(cwd: &str) -> Self {
+        #[cfg(test)]
+        DETECT_CALLS.with(|calls| calls.set(calls.get() + 1));
         Self {
             is_git_repo: detect_is_git_repo(cwd),
             platform: std::env::consts::OS.to_string(),
             os_version: os_version_string(),
         }
     }
+
+    /// 转为可持久化冻结快照（H3）。
+    pub fn freeze(&self) -> FrozenRuntimeEnv {
+        FrozenRuntimeEnv {
+            platform: self.platform.clone(),
+            os_version: self.os_version.clone(),
+            is_git_repo: self.is_git_repo,
+        }
+    }
 }
+
+/// 冻结快照缺少运行环境值时的显式占位符渲染值（H3 旧数据策略）。
+///
+/// 旧 snapshot 没有结构化环境字段时不得重探本地值冒充历史/远端环境；派生新
+/// prompt 时以本标记显式暴露限制（并 warn），不伪造也不静默留空。
+pub const RUNTIME_ENV_UNAVAILABLE: &str =
+    "unknown (frozen runtime environment unavailable in this session snapshot)";
 
 pub struct PromptEnv {
     pub cwd: String,
-    pub is_git_repo: bool,
-    pub platform: String,
-    pub os_version: String,
     pub date: String,
+    /// 冻结运行环境快照；`None` = 该快照缺少结构化环境值（unavailable）。
+    runtime: Option<PromptRuntimeEnv>,
 }
 
 impl PromptEnv {
+    /// 实时探测构造（**内容准入点与测试**）：日期与运行环境都在调用点探测。
+    ///
+    /// 生产重渲染路径必须使用 [`PromptEnv::frozen`]（消费冻结快照）。
     pub fn detect(cwd: &str) -> Self {
         let runtime = PromptRuntimeEnv::detect(cwd);
         let date = peri_time::calendar_date(
@@ -63,28 +112,43 @@ impl PromptEnv {
             peri_time::CalendarConvention::deployment_default(),
         )
         .to_string();
-        Self::frozen(cwd, &date, &runtime)
+        Self::frozen(cwd, &date, Some(&runtime.freeze()))
     }
 
-    /// 使用冻结日期与冻结运行环境构造（跳过实时日期读取与运行环境探测）。
+    /// 冻结输入构造（**生产重渲染唯一入口**）。
     ///
-    /// 会话准备路径经 [`PromptRuntimeEnv`] 一次性定格；`with_frozen_date`
-    /// 保留给既有调用点（其内部等价于对同一 cwd 探测一次）。
-    pub fn frozen(cwd: &str, frozen_date: &str, runtime: &PromptRuntimeEnv) -> Self {
+    /// 日期与运行环境都来自冻结数据：`runtime = None` 表示旧快照缺少结构化
+    /// 环境值，占位符渲染为 [`RUNTIME_ENV_UNAVAILABLE`] 并 warn——绝不回退
+    /// 本地探测（H3）。
+    pub fn frozen(cwd: &str, frozen_date: &str, runtime: Option<&FrozenRuntimeEnv>) -> Self {
         Self {
             cwd: cwd.to_string(),
-            is_git_repo: runtime.is_git_repo,
-            platform: runtime.platform.clone(),
-            os_version: runtime.os_version.clone(),
             date: frozen_date.to_string(),
+            runtime: runtime.map(|runtime| PromptRuntimeEnv {
+                is_git_repo: runtime.is_git_repo,
+                platform: runtime.platform.clone(),
+                os_version: runtime.os_version.clone(),
+            }),
         }
     }
 
-    /// 使用冻结日期构造（跳过实时日期读取）。
-    /// `is_git_repo` / `platform` / `os_version` 仍在调用时探测一次；
-    /// 需要与冻结输入同源的调用方应改用 [`PromptEnv::frozen`]。
-    pub fn with_frozen_date(cwd: &str, frozen_date: &str) -> Self {
-        Self::frozen(cwd, frozen_date, &PromptRuntimeEnv::detect(cwd))
+    /// 指定日期 + 本地实时探测（**仅测试与本地诊断**）。
+    ///
+    /// 生产渲染路径禁止使用：重渲染必须消费冻结快照，否则 `.git` 状态与
+    /// 平台探测会在会话中途漂移（ARC-FROZEN-001 / H3）。
+    #[doc(hidden)]
+    pub fn local_probe(cwd: &str, frozen_date: &str) -> Self {
+        let runtime = PromptRuntimeEnv::detect(cwd).freeze();
+        Self::frozen(cwd, frozen_date, Some(&runtime))
+    }
+
+    /// 运行环境是否可用（冻结快照携带结构化环境值）。
+    pub fn runtime_env_available(&self) -> bool {
+        self.runtime.is_some()
+    }
+
+    fn runtime_env(&self) -> Option<&PromptRuntimeEnv> {
+        self.runtime.as_ref()
     }
 }
 
@@ -140,13 +204,36 @@ impl PromptTemplate {
     ///
     /// 从持有 middleware 的段落声明构建模板，按 ID 应用冻结覆盖，
     /// 过滤空内容并按位置与段内序号排序；未装配持有者的段落不会被覆盖创建。
+    ///
+    /// 装配守护（H2/M11）：section id 与 `(zone, order)` 必须唯一——冲突是
+    /// 装配错误，构造期显式失败并指出来源段落（不再有「重复 ID 后者覆盖」
+    /// 或「同序号按声明顺序」的兜底语义）；`Cached` 段不得含模板占位符
+    /// （缓存区只接收纯静态模板）。
+    ///
+    /// 覆盖边界（L3）：非法覆盖（空 / 超预算 / reserved token / 未知占位符 /
+    /// Cached 动态占位符）**拒绝应用并保留内置段** + 结构化 warn；旧 snapshot
+    /// 里的非法覆盖因此也不会破坏渲染（旧正文不被自动改写）。
     pub fn new(
         state: &peri_acp_types::meta_harness::MetaHarnessState,
         collected: &[PromptSection],
     ) -> Self {
-        let mut sections: Vec<ResolvedSection> = Vec::with_capacity(collected.len());
-        for section in collected {
-            let resolved = ResolvedSection {
+        if let Err(conflict) = peri_agent::middleware::validate_section_layout(collected) {
+            panic!("PromptTemplate 段落装配冲突：{conflict}");
+        }
+        for section in collected
+            .iter()
+            .filter(|section| section.zone == PromptSectionZone::Cached)
+        {
+            if let Some(token) = placeholder_tokens(section.content.as_str()).first() {
+                panic!(
+                    "PromptTemplate Cached 段落 '{}' 含动态占位符 '{}'：缓存区只接收纯静态模板",
+                    section.id, token
+                );
+            }
+        }
+        let mut sections: Vec<ResolvedSection> = collected
+            .iter()
+            .map(|section| ResolvedSection {
                 id: section.id,
                 zone: section.zone,
                 order: section.order,
@@ -154,20 +241,25 @@ impl PromptTemplate {
                     PromptSectionContent::Builtin(s) => SectionContent::Builtin(s),
                     PromptSectionContent::Dynamic(s) => SectionContent::Dynamic(s.clone()),
                 },
-            };
-            match sections.iter_mut().find(|s| s.id == section.id) {
-                Some(existing) => *existing = resolved,
-                None => sections.push(resolved),
-            }
-        }
-        // 3. MetaHarness 覆盖合并（覆盖 = 替换持有者对应段落贡献，覆盖优先）
+            })
+            .collect();
+        // 3. MetaHarness 覆盖合并（覆盖 = 替换持有者对应段落贡献，覆盖优先）；
+        //    非法覆盖拒绝应用（保留内置）并记录来源 + 错误类别。
         for section in &mut sections {
             if let Some(overridden) = state.section_overrides.get(section.id) {
-                section.content = SectionContent::Override(Arc::clone(overridden));
+                match section_validation::validate_section_override(section.zone, overridden) {
+                    Ok(()) => section.content = SectionContent::Override(Arc::clone(overridden)),
+                    Err(reason) => tracing::warn!(
+                        section = section.id,
+                        category = reason.category(),
+                        detail = %reason.detail(),
+                        "meta_harness 段落覆盖被拒绝：保留内置段（L3 准入规则，旧快照不自动改写）"
+                    ),
+                }
             }
         }
-        // 4. 空内容过滤（契约 4）+ 按"位置 + 段内序号"排序（契约 2；stable
-        //    排序保持同位置同序号的声明顺序）
+        // 4. 空内容过滤（契约 4）+ 按"位置 + 段内序号"排序（契约 2；id 与
+        //    (zone, order) 已在构造期校验唯一，排序结果确定）
         sections.retain(|s| !s.content.as_str().is_empty());
         sections.sort_by_key(|s| (s.zone, s.order));
 
@@ -231,20 +323,23 @@ impl PromptTemplate {
             (true, true) => String::new(),
         };
 
-        // 占位符替换（顺序与全部构造点一致）
-        result
-            .replace("{{cwd}}", &env.cwd)
-            .replace(
-                "{{is_git_repo}}",
-                if env.is_git_repo { "Yes" } else { "No" },
-            )
-            .replace("{{platform}}", &env.platform)
-            .replace("{{os_version}}", &env.os_version)
-            .replace("{{date}}", &env.date)
-            .replace(
-                "{{available_agents}}",
-                &format_available_agents(agent_catalog, self.built_in_subagents_enabled),
-            )
+        // 占位符替换：已知占位符表是渲染与覆盖校验的同一事实源
+        // （`KNOWN_PLACEHOLDERS`，L3）；字面量转义先落 sentinel，替换后还原。
+        if !env.runtime_env_available() {
+            tracing::warn!(
+                cwd = %env.cwd,
+                "prompt 重渲染缺少冻结运行环境快照：运行环境占位符标记为 unavailable（不重探本地值）"
+            );
+        }
+        let agents = format_available_agents(agent_catalog, self.built_in_subagents_enabled);
+        let mut rendered = escape_literal_braces(&result);
+        for name in KNOWN_PLACEHOLDERS {
+            let Some(value) = placeholder_value(name, env, &agents) else {
+                continue;
+            };
+            rendered = rendered.replace(&format!("{{{{{name}}}}}"), &value);
+        }
+        restore_literal_braces(&rendered)
     }
 }
 
@@ -254,6 +349,87 @@ impl Default for PromptTemplate {
             &peri_acp_types::meta_harness::MetaHarnessState::default(),
             &[],
         )
+    }
+}
+
+/// 系统提示词模板的已知占位符表（渲染与覆盖校验的**同一事实源**，L3）。
+///
+/// `PromptTemplate::render` 按本表替换；meta 覆盖准入校验按本表判定未知
+/// `{{name}}`（模板错误）——两份名单漂移会让合法占位符被拒或未知占位符静默
+/// 进入 prompt。
+pub(crate) const KNOWN_PLACEHOLDERS: [&str; 6] = [
+    "cwd",
+    "is_git_repo",
+    "platform",
+    "os_version",
+    "date",
+    "available_agents",
+];
+
+/// 字面量花括号转义的 sentinel（私有区码位，正常 prompt 文本不会出现）。
+const LITERAL_OPEN_BRACE: &str = "\u{E000}";
+const LITERAL_CLOSE_BRACE: &str = "\u{E001}";
+
+/// 扫描文本中的 `{{name}}` 模板占位符（跳过 `\{{` / `\}}` 转义）。
+///
+/// 返回未转义 token 的内部文本（未闭合的 `{{` 返回 `"<unterminated>"`）；
+/// `PromptTemplate::render` 的替换表与覆盖校验（M11/L3）共用本函数与
+/// [`KNOWN_PLACEHOLDERS`]，避免两份名单漂移。
+fn placeholder_tokens(text: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find("{{") {
+        let escaped = start > 0 && rest.as_bytes()[start - 1] == b'\\';
+        let after = &rest[start + 2..];
+        match after.find("}}") {
+            Some(end) => {
+                if !escaped {
+                    tokens.push(after[..end].to_string());
+                }
+                rest = &after[end + 2..];
+            }
+            None => {
+                if !escaped {
+                    tokens.push("<unterminated>".to_string());
+                }
+                break;
+            }
+        }
+    }
+    tokens
+}
+
+/// 覆盖文本的字面量花括号转义：`\{{` → 字面 `{{`，`\}}` → 字面 `}}`（L3）。
+fn escape_literal_braces(text: &str) -> String {
+    text.replace("\\{{", LITERAL_OPEN_BRACE)
+        .replace("\\}}", LITERAL_CLOSE_BRACE)
+}
+
+fn restore_literal_braces(text: &str) -> String {
+    text.replace(LITERAL_OPEN_BRACE, "{{")
+        .replace(LITERAL_CLOSE_BRACE, "}}")
+}
+
+/// 单个占位符的渲染值；`None` = 该值在冻结输入中不可用（保持原文并 warn）。
+fn placeholder_value(name: &str, env: &PromptEnv, agents: &str) -> Option<String> {
+    match name {
+        "cwd" => Some(env.cwd.clone()),
+        "is_git_repo" => Some(runtime_scalar(env, |runtime| {
+            if runtime.is_git_repo { "Yes" } else { "No" }.to_string()
+        })),
+        "platform" => Some(runtime_scalar(env, |runtime| runtime.platform.clone())),
+        "os_version" => Some(runtime_scalar(env, |runtime| runtime.os_version.clone())),
+        "date" => Some(env.date.clone()),
+        "available_agents" => Some(agents.to_string()),
+        _ => None,
+    }
+}
+
+/// 运行环境占位符取值：缺失冻结快照时显式标记 unavailable，不重探本地值。
+fn runtime_scalar(env: &PromptEnv, read: impl Fn(&PromptRuntimeEnv) -> String) -> String {
+    match env.runtime_env() {
+        Some(runtime) => read(runtime),
+        None => RUNTIME_ENV_UNAVAILABLE.to_string(),
     }
 }
 
@@ -326,3 +502,9 @@ fn os_version_string() -> String {
 #[cfg(test)]
 #[path = "prompt_test.rs"]
 mod tests;
+
+pub(crate) mod section_validation;
+
+#[cfg(test)]
+#[path = "section_validation_test.rs"]
+mod section_validation_tests;

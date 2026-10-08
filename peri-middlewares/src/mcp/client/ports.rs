@@ -194,6 +194,10 @@ impl peri_acp_types::ports::McpPoolPort for McpClientPool {
         );
     }
 
+    fn workspace_source(&self) -> Option<peri_acp_types::plugin::ConfigSource> {
+        McpClientPool::workspace_source(self)
+    }
+
     fn builtin_workspace_state(&self) -> McpBuiltinWorkspaceState {
         match McpClientPool::get_client(self, "workspace") {
             None => McpBuiltinWorkspaceState::Absent,

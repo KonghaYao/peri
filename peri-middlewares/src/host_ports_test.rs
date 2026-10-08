@@ -8,9 +8,12 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use peri_acp_types::hooks::SettingsHooksPort;
 use peri_acp_types::ports::{AgentCatalogPort, McpPoolPort};
 
-use super::{bind_agent_catalog_from_pool, AgentCatalogProvider, NoopAgentCatalog};
+use super::{
+    bind_agent_catalog_from_pool, AgentCatalogProvider, NoopAgentCatalog, SettingsHooksLoader,
+};
 use crate::mcp::agent_face_fixture::AgentFaceFixture;
 
 /// 正例：池与端口都是本 crate 实现 ⇒ 绑定成立，且绑定后目录非空。
@@ -78,4 +81,105 @@ fn bind_agent_catalog_from_pool_rejects_foreign_port() {
         foreign.catalog(true).is_empty(),
         "不适用路径不得产生任何目录内容"
     );
+}
+
+// === H4 信任准入（项目 / local settings hooks） ===
+
+/// 全局配置路径 guard：测试结束还原（与 `settings_test.rs` 同形）。
+struct GlobalConfigGuard(std::path::PathBuf);
+
+impl Drop for GlobalConfigGuard {
+    fn drop(&mut self) {
+        peri_config::io::set_global_config_path(Some(self.0.clone()));
+    }
+}
+
+const PROJECT_HOOK: &str =
+    r#"{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"echo hook"}]}]}}"#;
+const PROJECT_HOOK_CHANGED: &str =
+    r#"{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"echo changed"}]}]}}"#;
+
+fn write_project_settings(workspace: &std::path::Path, content: &str) {
+    let path = workspace.join(".claude/settings.json");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, content).unwrap();
+}
+
+/// 非交互默认拒绝 → 显式授权放行 → 来源变化失效 → 撤销回到拒绝。
+#[test]
+#[serial_test::serial]
+fn settings_hooks_admission_requires_explicit_workspace_bound_trust() {
+    use peri_config::trust::SettingsSourceKind;
+
+    let _lock = peri_mcp_common::process_env::lock().expect("process env lock");
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let _guard = GlobalConfigGuard(peri_config::io::global_config_path());
+    peri_config::io::set_global_config_path(Some(home.path().join("peri").join("settings.json")));
+
+    let cwd = workspace.path().to_str().unwrap();
+    write_project_settings(workspace.path(), PROJECT_HOOK);
+    let port = SettingsHooksLoader;
+
+    assert!(
+        port.project(cwd).is_empty(),
+        "非交互默认拒绝：未授权项目 hooks 不得进入装配"
+    );
+
+    let binding =
+        peri_config::trust::settings_binding(workspace.path(), SettingsSourceKind::Project)
+            .unwrap()
+            .unwrap();
+    peri_config::trust::grant(&binding).unwrap();
+    assert_eq!(port.project(cwd).len(), 1, "显式授权后项目 hooks 进入装配");
+
+    // local 来源不得借用 project 授权（来源身份含 scope）
+    let local_path = workspace.path().join(".claude/settings.local.json");
+    std::fs::write(&local_path, PROJECT_HOOK).unwrap();
+    assert!(
+        port.local(cwd).is_empty(),
+        "project 授权不得被 local 来源借用"
+    );
+
+    // 来源摘要变化（项目改写 settings.json）⇒ 旧授权失效
+    write_project_settings(workspace.path(), PROJECT_HOOK_CHANGED);
+    assert!(
+        port.project(cwd).is_empty(),
+        "来源变化后旧授权必须失效，不得继续装配"
+    );
+
+    let rebound =
+        peri_config::trust::settings_binding(workspace.path(), SettingsSourceKind::Project)
+            .unwrap()
+            .unwrap();
+    peri_config::trust::grant(&rebound).unwrap();
+    assert_eq!(port.project(cwd).len(), 1, "重新授权新摘要后放行");
+
+    assert!(
+        peri_config::trust::revoke(&rebound.workspace, &rebound.source).unwrap(),
+        "撤销命中已授权记录"
+    );
+    assert!(
+        port.project(cwd).is_empty(),
+        "撤销后必须立即回到拒绝（未信任不执行）"
+    );
+}
+
+/// 未信任来源不阻断 port 的其余来源视图接口（global 不参与信任判定）。
+#[test]
+#[serial_test::serial]
+fn global_source_view_is_not_gated_by_workspace_trust() {
+    let _lock = peri_mcp_common::process_env::lock().expect("process env lock");
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let _guard = GlobalConfigGuard(peri_config::io::global_config_path());
+    peri_config::io::set_global_config_path(Some(home.path().join("peri").join("settings.json")));
+
+    write_project_settings(workspace.path(), PROJECT_HOOK);
+    let port = SettingsHooksLoader;
+    let cwd = workspace.path().to_str().unwrap();
+    assert!(port.project(cwd).is_empty());
+
+    // global 是用户机器级配置：本测试只要求接口可用且不因项目未授权而报错/panic。
+    let _ = port.global();
 }

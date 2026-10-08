@@ -65,12 +65,12 @@ async fn load_frozen_bytes(cfg: &AcpServerConfig, session_id: &str) -> Result<St
 }
 
 /// 一次恢复准入的结果。
-pub(super) struct PreparedSession {
+pub(crate) struct PreparedSession {
     pub(super) id: String,
     pub(super) identity: Option<Value>,
 }
 
-pub(super) async fn prepare_existing(
+pub(crate) async fn prepare_existing(
     params: &Value,
     cfg: &AcpServerConfig,
     sessions: &mut HashMap<String, SessionState>,
@@ -106,56 +106,72 @@ pub(super) async fn prepare_existing(
         .drain_persistence(&id.to_owned())
         .await
         .map_err(crate::host::workspace::resource_error)?;
-    let legacy_prepared = legacy_session::prepare_for_restore(cfg, id, None).await?;
-    let workspace = crate::host::workspace::validate_expected(
-        cfg,
-        id,
-        params.get("cwd").and_then(Value::as_str),
-    )
-    .await?;
-    let persisted = load_frozen_bytes(cfg, id).await?;
-    decode_frozen_snapshot(&persisted).map_err(workspace_error)?;
-    let identity = response_identity(cfg, id).await?;
-    if let Some(state) = sessions.get_mut(id) {
-        if state.closing {
-            return Err(AcpError::new(-32010, "Session is closing"));
+    // ── 有效 servers（只读候选）──
+    // 本分支不再有持久 owner 声明（随工作账本移除）：请求声明即本次候选，且
+    // **接纳前只作内存候选**，不写任何会话事实。
+    // 候选必须在 legacy 首次接纳的 bootstrap 之前定格：会话 MCP 池只在装配时
+    // 消费一次 servers（OnceLock），事后写入 prepared 不会再生效。
+    let effective_servers = super::session_mcp_servers(params)?;
+
+    let legacy_adoption =
+        legacy_session::prepare_for_restore(cfg, id, None, effective_servers.clone()).await?;
+    // 已激活的候选环境由本作用域唯一持有：成功路径把所有权交给 SessionState，
+    // 之后的任何失败都必须排空（保留原错误原因，清理失败显式上报，不吞）。
+    let mut environment_slot = legacy_adoption
+        .as_ref()
+        .and_then(|adoption| adoption.environment.clone());
+
+    let outcome: Result<RestoreOutcome, AcpError> = async {
+        let workspace = crate::host::workspace::validate_expected(
+            cfg,
+            id,
+            params.get("cwd").and_then(Value::as_str),
+        )
+        .await?;
+        let persisted = load_frozen_bytes(cfg, id).await?;
+        decode_frozen_snapshot(&persisted).map_err(workspace_error)?;
+        let identity = response_identity(cfg, id).await?;
+        if let Some(state) = sessions.get_mut(id) {
+            if state.closing {
+                return Err(AcpError::new(-32010, "Session is closing"));
+            }
+            if state.history_payloads.is_empty() {
+                let payloads = dispatch::load_session_payloads(cfg.controller.as_ref(), id).await?;
+                state.history = payloads
+                    .iter()
+                    .filter_map(|payload| payload.as_message().cloned())
+                    .collect();
+                state.history_payloads = payloads;
+            }
+            return Ok(RestoreOutcome::AlreadyLive { identity });
         }
-        if state.history_payloads.is_empty() {
-            let payloads = dispatch::load_session_payloads(cfg.controller.as_ref(), id).await?;
-            state.history = payloads
-                .iter()
-                .filter_map(|payload| payload.as_message().cloned())
-                .collect();
-            state.history_payloads = payloads;
-        }
-        return Ok(PreparedSession {
-            id: id.to_owned(),
-            identity,
-        });
-    }
-    let prepared = async {
         let payloads = dispatch::load_session_payloads(cfg.controller.as_ref(), id).await?;
         let cwd = workspace
             .cwd
             .to_str()
             .ok_or_else(|| AcpError::new(-32602, "Execution directory is not UTF-8"))?
             .to_owned();
-        let mut prepared = match legacy_prepared {
-            Some(mut inputs) => {
-                let winner = decode_frozen_snapshot(&persisted).map_err(workspace_error)?;
-                inputs.inject_frozen(winner, persisted)?;
-                inputs
-            }
+        // M5：legacy 首次接纳已在准备阶段以定稿 frozen 完成原子接纳；这里只消费
+        // 其结果（已按接纳/winner 字节定格），不再二次注入或重建。
+        let mut prepared = match legacy_adoption {
+            Some(adoption) => adoption.prepared,
             None => PreparedSessionInputs::prepare_restore(cfg, &cwd, &persisted)?,
         };
-        prepared.session_mcp_servers = super::session_mcp_servers(params)?;
+        prepared.session_mcp_servers = effective_servers;
         let frozen = prepared
             .frozen
             .clone()
             .ok_or_else(|| AcpError::new(-32603, "Restored frozen snapshot is missing"))?;
-        let environment =
-            crate::host::workspace::SessionEnvironment::assemble_prepared(cfg, &prepared, id)
-                .await?;
+        // 环境定稿是最后一步可失败操作（take 已有候选或现场装配）；此后只做
+        // 不可失败的登记与投影，成功路径才 move 环境进 SessionState。
+        let environment = match environment_slot.take() {
+            // 阶段一已装配（bootstrap）且与接纳字节同源：复用，不第二次装配。
+            Some(environment) => Some(environment),
+            None => {
+                crate::host::workspace::SessionEnvironment::assemble_prepared(cfg, &prepared, id)
+                    .await?
+            }
+        };
         let frozen = Some(frozen);
         let local = environment.as_ref().map(|env| &env.cfg).unwrap_or(cfg);
         // AW3-11：登记会话时交出**装配时已送进 builtin 上下文的那一份** manager
@@ -174,44 +190,95 @@ pub(super) async fn prepare_existing(
             Some(frozen) => create_session_workflow_middleware(local, &cwd, id, frozen),
             None => None,
         };
-        Ok::<_, AcpError>(SessionState {
-            session_id: id.to_owned(),
-            thread_id: id.to_owned(),
-            cwd,
-            environment,
-            closing: false,
-            history: payloads
-                .iter()
-                .filter_map(|p| p.as_message().cloned())
-                .collect(),
-            history_payloads: payloads,
-            cancel_token: None,
-            continuation_armed: false,
-            continuation_epoch: 0,
-            continuation_in_flight: false,
-            continuation_mq_steering_pending: false,
-            frozen,
-            recall_items: Vec::new(),
-            agent_pool: crate::session::agent_pool::AgentPool::new(),
-            workflow_middleware,
-            title: None,
-            tags: Vec::new(),
+        Ok(RestoreOutcome::Publish {
+            state: Box::new(SessionState {
+                session_id: id.to_owned(),
+                thread_id: id.to_owned(),
+                cwd,
+                environment,
+                closing: false,
+                history: payloads
+                    .iter()
+                    .filter_map(|p| p.as_message().cloned())
+                    .collect(),
+                history_payloads: payloads,
+                cancel_token: None,
+                // 本分支无持久执行恢复：恢复准入一律以「无续跑」状态发布。
+                continuation_armed: false,
+                continuation_epoch: 0,
+                continuation_in_flight: false,
+                continuation_mq_steering_pending: false,
+                frozen,
+                recall_items: Vec::new(),
+                agent_pool: crate::session::agent_pool::AgentPool::new(),
+                workflow_middleware,
+                title: None,
+                tags: Vec::new(),
+            }),
+            identity,
         })
     }
     .await;
-    match prepared {
-        Ok(state) => {
+
+    match outcome {
+        Ok(RestoreOutcome::Publish { state, identity }) => {
+            let state = *state;
             if let Some(environment) = &state.environment {
                 environment.activate();
             }
             sessions.insert(id.to_owned(), state);
+            Ok(PreparedSession {
+                id: id.to_owned(),
+                identity,
+            })
         }
-        Err(error) => return Err(error),
+        Ok(RestoreOutcome::AlreadyLive { identity }) => {
+            // 采纳的候选环境不会被使用：显式排空；清理失败必须上报，不静默泄漏。
+            if let Some(environment) = environment_slot.take() {
+                if !environment.shutdown().await {
+                    return Err(AcpError::new(
+                        -32603,
+                        "unused legacy bootstrap environment did not confirm shutdown",
+                    ));
+                }
+            }
+            Ok(PreparedSession {
+                id: id.to_owned(),
+                identity,
+            })
+        }
+        Err(error) => Err(shutdown_bootstrapped_environment(environment_slot.take(), error).await),
     }
-    Ok(PreparedSession {
-        id: id.to_owned(),
-        identity,
-    })
+}
+
+/// 恢复准备的结果：既可能发布新会话状态，也可能是会话已在 live 表内（补历史）。
+enum RestoreOutcome {
+    AlreadyLive {
+        identity: Option<Value>,
+    },
+    Publish {
+        state: Box<SessionState>,
+        identity: Option<Value>,
+    },
+}
+
+/// 失败路径统一排空已激活的候选环境；保留原始原因，清理失败显式并入错误。
+async fn shutdown_bootstrapped_environment(
+    environment: Option<Arc<crate::host::workspace::SessionEnvironment>>,
+    error: AcpError,
+) -> AcpError {
+    if let Some(environment) = environment {
+        if !environment.shutdown().await {
+            return AcpError::new(
+                -32603,
+                format!(
+                    "{}; additionally the bootstrapped session environment did not confirm shutdown",
+                    error.message
+                ),
+            );
+        }
+    }
+    error
 }
 
 pub(super) fn identity_response(

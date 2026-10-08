@@ -22,14 +22,14 @@ fn fresh_middleware_is_not_contributed() {
 
 #[test]
 fn frozen_main_only_is_contributed_verbatim() {
-    let mw = AgentsMdMiddleware::new().with_frozen_content("# Project rules".to_string(), None);
+    let mw = AgentsMdMiddleware::new().with_frozen_parts(Some("# Project rules".to_string()), None);
     assert_eq!(contribution(&mw).as_deref(), Some("# Project rules"));
 }
 
 #[test]
 fn frozen_local_is_appended_after_blank_line() {
-    let mw = AgentsMdMiddleware::new().with_frozen_content(
-        "main body".to_string(),
+    let mw = AgentsMdMiddleware::new().with_frozen_parts(
+        Some("main body".to_string()),
         Some("local body".to_string()),
     );
     assert_eq!(
@@ -42,21 +42,37 @@ fn frozen_local_is_appended_after_blank_line() {
 #[test]
 fn blank_local_is_not_appended() {
     let mw = AgentsMdMiddleware::new()
-        .with_frozen_content("main body".to_string(), Some("   \n\t ".to_string()));
+        .with_frozen_parts(Some("main body".to_string()), Some("   \n\t ".to_string()));
     assert_eq!(contribution(&mw).as_deref(), Some("main body"));
 }
 
 #[test]
 fn blank_main_with_local_contributes_local_only() {
+    // M4：空白部分不贡献（也不再输出前导空行噪声），local 单独贡献。
     let mw = AgentsMdMiddleware::new()
-        .with_frozen_content("   ".to_string(), Some("local body".to_string()));
-    assert_eq!(contribution(&mw).as_deref(), Some("   \n\nlocal body"));
+        .with_frozen_parts(Some("   ".to_string()), Some("local body".to_string()));
+    assert_eq!(contribution(&mw).as_deref(), Some("local body"));
+}
+
+#[test]
+fn unavailable_main_with_local_contributes_local_only() {
+    // M4：main 不可得（None）不等于显式空快照，local-only 仍须贡献。
+    let mw = AgentsMdMiddleware::new().with_frozen_parts(None, Some("local body".to_string()));
+    assert_eq!(contribution(&mw).as_deref(), Some("local body"));
+}
+
+#[test]
+fn explicit_empty_snapshot_contributes_nothing() {
+    // None（不可得）与 Some("")（显式空快照）都不贡献；空值不是重新扫描的授权。
+    let mw = AgentsMdMiddleware::new()
+        .with_frozen_parts(Some(String::new()), Some(String::new()));
+    assert_eq!(contribution(&mw), None);
 }
 
 #[test]
 fn all_blank_content_contributes_nothing() {
     let mw = AgentsMdMiddleware::new()
-        .with_frozen_content("  \n".to_string(), Some(" \t".to_string()));
+        .with_frozen_parts(Some("  \n".to_string()), Some(" \t".to_string()));
     assert_eq!(contribution(&mw), None);
 }
 

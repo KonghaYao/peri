@@ -37,7 +37,7 @@ async fn run_child(child: Arc<Session>, calls: Arc<AtomicUsize>) {
     let built = build_v2_subagent_context(
         Some(child),
         Box::new(ResultLlm(calls)),
-        MiddlewareChain::new(),
+        Arc::new(MiddlewareChain::new()),
         Vec::new(),
         Arc::new(|_| true),
         None,

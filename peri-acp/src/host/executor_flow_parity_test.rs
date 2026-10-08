@@ -61,7 +61,11 @@ fn make_parity_context(
     let shared_tools: Arc<RwLock<BTreeMap<String, Arc<dyn BaseTool>>>> =
         Arc::new(RwLock::new(BTreeMap::new()));
     let llm_factory = Arc::new(|_model_alias: Option<&str>| {
-        Box::new(ParityFakeLlm) as Box<dyn peri_agent::agent::react::ReactLLM + Send + Sync>
+        // 对拍只关心持有者槽位：模型来源为统一入口（本测试不触发模型调用）。
+        peri_agent::session::subagent::SubagentLlmSource::model(
+            Arc::new(ParityFakeModel),
+            "parity-model",
+        )
     });
 
     peri_agent::session::factory::AssemblyContext {
@@ -224,6 +228,18 @@ fn chain_collection_parity_with_build_collected_sections() {
         assert_eq!(
             chain_sections, declared,
             "case [{name}]：链收集与静态声明必须一致（同一 disabled 状态）"
+        );
+
+        // H2/D3：**能力事实**同样对拍——真实主链（broker/mode 恒齐备）派生的
+        // 事实必须等于 `main_chain_capabilities` 投影（含审批有效模式）。
+        let facts = peri_agent::middleware::SectionCapabilities::from_sections(
+            &out.chain.collect_prompt_sections(),
+        );
+        let projected =
+            peri_middlewares::prompt_policy::main_chain_capabilities(&state.disabled_middlewares);
+        assert_eq!(
+            facts, projected,
+            "case [{name}]：主链能力事实与策略投影必须一致（D3 单一权威）"
         );
     }
 }

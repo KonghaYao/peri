@@ -168,10 +168,10 @@ use peri_acp_types::workflow::AgentExecutor;
 use peri_acp_types::{identity::AgentId, permission::SharedPermissionMode};
 
 use crate::agent::async_tasks::TaskManager;
-use crate::agent::react::ReactLLM;
 use crate::agent::LangfuseBridgeLike;
 use crate::agent::{AgentCancellationToken, ExecutorEvent};
 use crate::middleware::chain::MiddlewareChain;
+use crate::session::exec::executor::SubagentLlmFactory;
 use crate::session::Session;
 use crate::tools::BaseTool;
 
@@ -317,8 +317,8 @@ pub struct AssemblyContext {
     /// C5 移除，本字段由 stage 装配直接填入主 prompt）
     pub system_prompt_for_sub: String,
     // ── 工厂 ──
-    /// 子 agent LLM 工厂（支持 SubAgent LLM 缓存复用）
-    pub llm_factory: Arc<dyn Fn(Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync>,
+    /// 子 agent 模型工厂（支持 SubAgent LLM 缓存复用；H1：只产出模型来源）
+    pub llm_factory: SubagentLlmFactory,
     /// System prompt 构建器（SubAgent 用）
     pub system_builder: SystemPromptBuilder,
     /// Todo 更新通道发送端（todo_rx 由上层持有）

@@ -147,13 +147,62 @@ pub enum HookSpecificOutput {
 }
 
 /// 权限决策枚举（用于 PreToolUse hook 的 permissionDecision）
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "lowercase")]
+///
+/// [TRAP] 未知取值保留为 [`PermissionDecision::Invalid`]，而不是让整份
+/// `SyncHookResponse` 反序列化失败：后者会把「写错 decision 的 hook」静默降级为
+/// Allow（fail-open）。消费方必须把 Invalid 按拒绝处理（fail-closed）。
+#[derive(Debug, Clone, PartialEq)]
 pub enum PermissionDecision {
     Ask,
     Deny,
     Allow,
     Passthrough,
+    /// 无法识别的 decision 原文（保留用于诊断与回显，不参与放行判断）
+    Invalid(String),
+}
+
+impl PermissionDecision {
+    /// 归并优先级：deny 必须压过 updatedInput 与放行；passthrough 最弱。
+    pub fn merge_rank(&self) -> u8 {
+        match self {
+            Self::Deny => 4,
+            // 非法取值与 deny 同权：不得因为无法识别而放行
+            Self::Invalid(_) => 4,
+            Self::Ask => 3,
+            Self::Allow => 2,
+            Self::Passthrough => 1,
+        }
+    }
+
+    /// deny 或无法识别的判定：必须零工具执行。
+    pub fn is_deny_like(&self) -> bool {
+        matches!(self, Self::Deny | Self::Invalid(_))
+    }
+}
+
+impl Serialize for PermissionDecision {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(match self {
+            Self::Ask => "ask",
+            Self::Deny => "deny",
+            Self::Allow => "allow",
+            Self::Passthrough => "passthrough",
+            Self::Invalid(raw) => raw.as_str(),
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for PermissionDecision {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        Ok(match raw.as_str() {
+            "ask" => Self::Ask,
+            "deny" => Self::Deny,
+            "allow" => Self::Allow,
+            "passthrough" => Self::Passthrough,
+            _ => Self::Invalid(raw),
+        })
+    }
 }
 
 /// 内部处理后的 hook 动作
@@ -163,12 +212,17 @@ pub enum HookAction {
     Allow,
     /// 阻止操作（decision=block / exit code 2 / continue=false）
     Block { reason: String },
-    /// 修改工具输入（PreToolUse hook 的 updatedInput）
+    /// 修改工具输入（PreToolUse hook 的 updatedInput，且无判定字段）
     ModifyInput { new_input: serde_json::Value },
-    /// 修改权限行为（permissionDecision）
+    /// PreToolUse 判定与组合输出：判定、修改输入、附加上下文、客户端提示并存，
+    /// 任何字段都不得吞掉其它字段。消费方按
+    /// `deny > ask > allow > passthrough` 归并，deny 优先于 modifiedInput。
     PermissionOverride {
         decision: PermissionDecision,
         reason: Option<String>,
+        updated_input: Option<serde_json::Value>,
+        additional_context: Option<String>,
+        system_message: Option<String>,
     },
     /// 阻止 agent 继续执行（continue=false + stopReason）
     PreventContinuation { stop_reason: Option<String> },

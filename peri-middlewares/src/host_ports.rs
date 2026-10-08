@@ -511,6 +511,11 @@ impl PluginManagerPort for PluginManager {
 }
 
 /// Settings hooks 加载端口实现：包装 `hooks::loader::load_*_settings_hooks`。
+///
+/// 项目 / local 两级带 H4 信任准入：只有显式授权（canonical workspace + 来源身份 +
+/// 来源摘要，见 `peri_config::trust`）命中时才返回 hooks；未信任来源被关闭且可诊断
+/// （warn 不含 hook 正文），不阻断普通会话。global 是用户自己的机器级配置，不参与
+/// workspace 信任判定；信任模块按来源 kind 区分身份，global 授权不会外溢。
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SettingsHooksLoader;
 
@@ -520,11 +525,69 @@ impl SettingsHooksPort for SettingsHooksLoader {
     }
 
     fn project(&self, cwd: &str) -> Vec<peri_acp_types::hooks::RegisteredHook> {
-        crate::hooks::loader::load_settings_project_hooks(cwd)
+        admit_settings_hooks(
+            cwd,
+            peri_config::trust::SettingsSourceKind::Project,
+            crate::hooks::loader::load_settings_project_hooks(cwd),
+        )
     }
 
     fn local(&self, cwd: &str) -> Vec<peri_acp_types::hooks::RegisteredHook> {
-        crate::hooks::loader::load_settings_local_hooks(cwd)
+        admit_settings_hooks(
+            cwd,
+            peri_config::trust::SettingsSourceKind::Local,
+            crate::hooks::loader::load_settings_local_hooks(cwd),
+        )
+    }
+}
+
+/// 唯一装配准入（本端口是 `assemble_hook_groups` 的 settings 来源视图）：
+/// 未信任来源在此被排除；无法判定信任时按拒绝收口（fail-closed）。
+fn admit_settings_hooks(
+    cwd: &str,
+    kind: peri_config::trust::SettingsSourceKind,
+    hooks: Vec<peri_acp_types::hooks::RegisteredHook>,
+) -> Vec<peri_acp_types::hooks::RegisteredHook> {
+    if hooks.is_empty() {
+        return hooks;
+    }
+    let binding = match peri_config::trust::settings_binding(Path::new(cwd), kind) {
+        Ok(Some(binding)) => binding,
+        Ok(None) => {
+            tracing::warn!(
+                scope = kind.scope(),
+                "settings hooks skipped: workspace path cannot be canonicalized"
+            );
+            return Vec::new();
+        }
+        Err(error) => {
+            tracing::warn!(
+                scope = kind.scope(),
+                error = %error,
+                "settings hooks skipped: trust binding unavailable"
+            );
+            return Vec::new();
+        }
+    };
+    match peri_config::trust::is_trusted(&binding) {
+        Ok(true) => hooks,
+        Ok(false) => {
+            tracing::warn!(
+                scope = kind.scope(),
+                workspace = %binding.workspace,
+                source = %binding.source,
+                "untrusted settings hooks skipped; grant explicitly before they can run"
+            );
+            Vec::new()
+        }
+        Err(error) => {
+            tracing::warn!(
+                scope = kind.scope(),
+                error = %error,
+                "settings hooks skipped: trust store unavailable"
+            );
+            Vec::new()
+        }
     }
 }
 

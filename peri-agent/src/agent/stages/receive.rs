@@ -200,6 +200,10 @@ pub async fn run_receive(input: ReceiveInput) -> crate::error::AgentResult<Recei
         consumed_count: count,
         wake_up_count,
         input_message_ids: user_ids,
+        // hook 的显式停止意图：本轮消费到就必须经 Receive 唯一退出口结束。
+        stop_requested: consumed
+            .iter()
+            .any(|message| message.source == MessageSource::HookStopIntent),
     })
 }
 

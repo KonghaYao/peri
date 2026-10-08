@@ -250,10 +250,12 @@ pub(super) async fn spawn_subagent_impl(
 
     // 5. 构造子 session + 链装配 + v2_ctx（共享 helper [build_subagent_session_v2]：
     //    frozen 从父 copy 不重读磁盘，transcript 恢复只读 inherited snapshot 后绑定存储）
-    //    注入 parent_messages / system_prompt / prompt 留在本函数——spawn 与
-    //    resume 的消息注入差异大，不进 helper（D1）
+    //    身份（H1/M3）：子 `FrozenContext.system_prompt` = system_builder 的子能力
+    //    投影字节（定义型带 overrides / fork 无 overrides）——不复制父字节；
+    //    注入 prompt 留在本函数，不进 helper（D1）
     let frozen = inherited_frozen_context(
         parent,
+        system_prompt.as_deref(),
         &frozen_claude_md,
         &frozen_skill_summary,
         &frozen_date,
@@ -283,23 +285,26 @@ pub(super) async fn spawn_subagent_impl(
         context_budget,
         compact_llm,
         Some(agent_id_from_child_thread(&child_thread_id)),
+        // 身份随 transcript 持久化（见 6b），故开启定向吸收：请求投影按内容相等
+        // 丢弃该条，身份在请求面只由 bridge base system 出现一次。
+        true,
     )
     .await?;
 
-    let transcript = session.transcript();
-
     // 父上下文已作为只读 ancestor 装载；不可用原 ID append 到 child messages。
-
-    // 6b. SubAgent system_prompt（身份构建）注入到 transcript 开头位置：
-    // - fork 路径：在 parent_messages 之后（让身份提示词位于对话上下文之后、
-    //   prompt 之前——SubAgent 的 prompt 由下方 push 到 queue，Receive 阶段追加）
-    // - 非 fork 路径：parent_messages 为空，直接 append 到 transcript 开头
     //
-    // 注意：这是 session 起始身份构建（在 run_react_loop 调用前注入），不是中途纠正，
-    // 用 BaseMessage::System 合法（CLAUDE.md TRAP 仅禁止中途纠正用 System）。
-    if let Some(sp) = system_prompt {
-        let mut tx = transcript.write();
-        tx.append(BaseMessage::system(sp));
+    // 6b（H1/M3 + 身份持久化）：子身份同时落在两处，各司其职——
+    // - `FrozenContext.system_prompt`：bridge base system，负责**每次请求**的注入；
+    // - transcript 起始处的 System 消息：负责**持久化**。执行恢复 metadata 通道
+    //   已随 recovery 移除，transcript 是本分支上身份唯一的持久事实；恢复路径
+    //   （见 `resume.rs`）不再注入身份，而是读回这条历史，避免重注入。
+    //   归一化吸收（上方 `normalize_persisted_identity`）保证请求面仍恰一次，
+    //   transcript 本体不被改写、历史保持可读。
+    // - fork 路径：位于 parent_messages/ancestor 之后（身份在对话上下文之后）。
+    if let Some(identity) = system_prompt.as_deref() {
+        let transcript = session.transcript();
+        let mut guard = transcript.write();
+        guard.append(BaseMessage::system(identity));
     }
 
     // 6c. push prompt 到 queue（fork 路径套 fork directive 模板）

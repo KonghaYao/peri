@@ -205,3 +205,124 @@ fn test_sync_response_decision_approve_is_allow() {
     // Approve is not Block, so falls through to Allow
     assert!(matches!(sync_response_to_action(&resp), HookAction::Allow));
 }
+
+// === H4：PreToolUse 组合输出不互吞 ===
+
+#[test]
+fn test_pretooluse_deny_with_updated_input_keeps_all_fields() {
+    let resp = SyncHookResponse {
+        system_message: Some("client hint".into()),
+        hook_specific_output: Some(HookSpecificOutput::PreToolUse {
+            permission_decision: Some(PermissionDecision::Deny),
+            permission_decision_reason: Some("hook reason".into()),
+            updated_input: Some(serde_json::json!({"command": "safe-ls"})),
+            additional_context: Some("extra ctx".into()),
+        }),
+        ..Default::default()
+    };
+    match sync_response_to_action(&resp) {
+        HookAction::PermissionOverride {
+            decision,
+            reason,
+            updated_input,
+            additional_context,
+            system_message,
+        } => {
+            assert_eq!(decision, PermissionDecision::Deny);
+            assert_eq!(reason.as_deref(), Some("hook reason"));
+            assert_eq!(
+                updated_input.expect("updatedInput 不得被 deny 吞掉")["command"],
+                "safe-ls"
+            );
+            assert_eq!(additional_context.as_deref(), Some("extra ctx"));
+            assert_eq!(system_message.as_deref(), Some("client hint"));
+        }
+        other => panic!("expected combined PermissionOverride, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_pretooluse_allow_with_updated_input_keeps_both() {
+    let resp = SyncHookResponse {
+        hook_specific_output: Some(HookSpecificOutput::PreToolUse {
+            permission_decision: Some(PermissionDecision::Allow),
+            permission_decision_reason: None,
+            updated_input: Some(serde_json::json!({"command": "echo ok"})),
+            additional_context: None,
+        }),
+        ..Default::default()
+    };
+    match sync_response_to_action(&resp) {
+        HookAction::PermissionOverride {
+            decision,
+            updated_input,
+            ..
+        } => {
+            assert_eq!(decision, PermissionDecision::Allow);
+            assert_eq!(
+                updated_input.expect("updatedInput 不得被 allow 吞掉")["command"],
+                "echo ok"
+            );
+        }
+        other => panic!("expected combined PermissionOverride, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_pretooluse_additional_context_only_is_not_swallowed() {
+    let resp = SyncHookResponse {
+        hook_specific_output: Some(HookSpecificOutput::PreToolUse {
+            permission_decision: None,
+            permission_decision_reason: None,
+            updated_input: None,
+            additional_context: Some("ctx only".into()),
+        }),
+        ..Default::default()
+    };
+    match sync_response_to_action(&resp) {
+        HookAction::PermissionOverride {
+            decision,
+            additional_context,
+            updated_input,
+            ..
+        } => {
+            assert_eq!(decision, PermissionDecision::Passthrough);
+            assert_eq!(additional_context.as_deref(), Some("ctx only"));
+            assert!(updated_input.is_none());
+        }
+        other => panic!("expected PermissionOverride carrying context, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_pretooluse_invalid_decision_is_not_allow() {
+    let resp = SyncHookResponse {
+        hook_specific_output: Some(HookSpecificOutput::PreToolUse {
+            permission_decision: Some(PermissionDecision::Invalid("explode".into())),
+            permission_decision_reason: None,
+            updated_input: None,
+            additional_context: None,
+        }),
+        ..Default::default()
+    };
+    match sync_response_to_action(&resp) {
+        HookAction::PermissionOverride { decision, .. } => {
+            assert_eq!(decision, PermissionDecision::Invalid("explode".into()));
+        }
+        other => panic!("非法 decision 不得静默 Allow，got {other:?}"),
+    }
+}
+
+#[test]
+fn test_pretooluse_invalid_decision_in_raw_json_is_not_allow() {
+    // 端到端：未知 permissionDecision 取值不得让整份输出 fail-open 成 Allow
+    let action = parse_command_hook_output(
+        r#"{"hook_specific_output":{"hookEventName":"PreToolUse","permissionDecision":"explode"}}"#,
+    );
+    match action {
+        HookAction::PermissionOverride { decision, .. } => {
+            assert_eq!(decision, PermissionDecision::Invalid("explode".into()));
+        }
+        other => panic!("非法 permissionDecision 不得静默 Allow，got {other:?}"),
+    }
+}

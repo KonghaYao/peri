@@ -51,6 +51,22 @@ pub async fn execute_command_hook_owned(
         }
     };
 
+    // H4 参数隔离：`$ARGUMENTS` / `${ARGUMENTS}` 文本替换已移除。旧命令必须在任何
+    // 进程启动前得到可定位的迁移错误（零进程），不能交给 shell 静默展开成空串。
+    if let Some(token) = legacy_arguments_token(&command) {
+        tracing::error!(
+            hook_event = ?input.hook_event_name,
+            token,
+            "Command hook uses removed $ARGUMENTS substitution; migrate to HookInput stdin JSON"
+        );
+        return HookAction::Block {
+            reason: format!(
+                "Command hook uses removed {token} substitution and was not executed. \
+                 Pass hook data via the HookInput JSON on stdin instead."
+            ),
+        };
+    }
+
     let input_json = match serde_json::to_string(input) {
         Ok(json) => json,
         Err(e) => {
@@ -59,12 +75,11 @@ pub async fn execute_command_hook_owned(
         }
     };
 
-    // Resolve ${CLAUDE_PLUGIN_ROOT}, ${CLAUDE_PLUGIN_DATA}, ${ARGUMENTS} in command string
+    // 只替换插件路径变量；HookInput 数据只经 stdin JSON 传递（H4 参数隔离）
     let command = resolve_hook_variables(
         &command,
         &registered.plugin_root,
         &registered.plugin_data_dir,
-        &input_json,
     );
 
     let plugin_root_str = registered.plugin_root.to_string_lossy().to_string();
@@ -101,10 +116,16 @@ pub async fn execute_command_hook_owned(
             .env("CLAUDE_HOOK_EVENT_NAME", &hook_event_str)
             .kill_on_drop(true);
 
-        // Inject CLAUDE_PLUGIN_OPTION_* env vars
+        // Inject CLAUDE_PLUGIN_OPTION_* env vars。userConfig 的字符串值按原始字符串注入
+        // （与 MCP `${user_config.X}` 展开语义一致），不把 JSON 引号带进环境变量；
+        // 非字符串值没有原始文本形态，保留 JSON 表示。
         for (key, value) in &registered.plugin_options {
             let env_key = format!("CLAUDE_PLUGIN_OPTION_{}", key.to_uppercase());
-            cmd.env(env_key, value.to_string());
+            let env_value = match value {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            cmd.env(env_key, env_value);
         }
 
         execution.prepare(&mut cmd)?;
@@ -149,9 +170,12 @@ pub async fn execute_command_hook_owned(
                     parse_command_hook_output(&stdout)
                 }
                 Some(1) => {
-                    // Exit code 1 → Allow with warning
+                    // Exit code 1 → Allow with warning（不记录 stderr 正文）
                     if !stderr.is_empty() {
-                        tracing::warn!("Command hook exited with code 1: {}", stderr);
+                        tracing::warn!(
+                            stderr_bytes = stderr.len(),
+                            "Command hook exited with code 1"
+                        );
                     }
                     HookAction::Allow
                 }
@@ -168,9 +192,9 @@ pub async fn execute_command_hook_owned(
                 }
                 Some(code) => {
                     tracing::warn!(
-                        "Command hook exited with unexpected code {}: stderr={}",
                         code,
-                        stderr
+                        stderr_bytes = stderr.len(),
+                        "Command hook exited with unexpected code"
                     );
                     HookAction::Allow
                 }
@@ -185,12 +209,8 @@ pub async fn execute_command_hook_owned(
             HookAction::Allow
         }
         Err(_) => {
-            // Timeout
-            tracing::warn!(
-                "Command hook timed out after {}s: {}",
-                timeout_secs,
-                command
-            );
+            // Timeout：不记录 command 正文
+            tracing::warn!(timeout_secs, "Command hook timed out");
             HookAction::Allow
         }
     }
@@ -352,14 +372,11 @@ pub async fn execute_http_hook(hook: &HookType, input: &HookInput) -> HookAction
             let body = response.text().await.unwrap_or_default();
 
             if !status.is_success() {
+                // 只记录状态与长度，不记录 body 正文（H4：日志不得携带 hook 原文）
                 tracing::warn!(
-                    "HTTP hook returned non-success status {}: {}",
-                    status,
-                    if body.len() > 200 {
-                        format!("{}...", &body[..body.floor_char_boundary(200)])
-                    } else {
-                        body
-                    }
+                    status = %status,
+                    body_bytes = body.len(),
+                    "HTTP hook returned non-success status"
                 );
                 return HookAction::Allow;
             }
@@ -455,6 +472,20 @@ pub async fn execute_agent_hook(
             tracing::warn!("Hook agent: timed out ({}s), allowing", timeout_secs);
             HookAction::Allow
         }
+    }
+}
+
+/// 检测已移除的 `$ARGUMENTS` / `${ARGUMENTS}` 命令文本替换写法。
+///
+/// 命中即返回可定位的 token，由 command hook 在执行前转成迁移错误（零进程）。
+#[cfg(not(target_os = "emscripten"))]
+fn legacy_arguments_token(command: &str) -> Option<&'static str> {
+    if command.contains("${ARGUMENTS}") {
+        Some("${ARGUMENTS}")
+    } else if command.contains("$ARGUMENTS") {
+        Some("$ARGUMENTS")
+    } else {
+        None
     }
 }
 

@@ -63,7 +63,7 @@ async fn nested_dispatch_keeps_pinned_target_and_does_not_commit_outer_batch() {
         }
         async fn after_tools_batch(
             &self,
-            state: &mut dyn hook_state::StateView,
+            state: &mut dyn hook_state::AfterToolsBatchState,
             _results: &[(ToolCall, crate::agent::react::ToolResult)],
         ) -> crate::error::AgentResult<()> {
             self.0.lock().push(("after_batch", state.messages().len()));

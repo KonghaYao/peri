@@ -151,9 +151,13 @@ pub trait Middleware: Send + Sync {
 
     /// 一批并行工具调用全部写入 state 后触发（每个 batch 一次）。
     /// 可用于聚合检查、批量日志等。
+    ///
+    /// 工具结果已提交：本钩子只能经窄反馈能力回注有界反馈或停止意图
+    /// （[`hook_state::AfterToolsBatchState`]），不能追加/替换 transcript，
+    /// 也不能把已执行的工具伪装成拒绝。
     async fn after_tools_batch(
         &self,
-        _state: &mut dyn hook_state::StateView,
+        _state: &mut dyn hook_state::AfterToolsBatchState,
         _results: &[(ToolCall, ToolResult)],
     ) -> AgentResult<()> {
         Ok(())

@@ -278,7 +278,7 @@ fn build_real_direct_tools() -> Vec<Arc<dyn BaseTool>> {
     use crate::tool_search::{ExecuteExtraTool, SearchExtraTools, ToolSearchIndex};
     use crate::tools::{AskUserTool, TodoWriteTool};
     use parking_lot::RwLock as PLRwLock;
-    use peri_agent::agent::react::ReactLLM;
+
     use peri_agent::interaction::{InteractionContext, InteractionResponse, UserInteractionBroker};
 
     /// 声明测试不触发交互——request 永不调用。
@@ -300,9 +300,11 @@ fn build_real_direct_tools() -> Vec<Arc<dyn BaseTool>> {
     tools.push(Arc::new(SubAgentTool::new(
         Arc::new(vec![]),
         None,
-        Arc::new(|_: Option<&str>| -> Box<dyn ReactLLM + Send + Sync> {
-            unreachable!("声明测试不触发子 agent")
-        }),
+        Arc::new(
+            |_: Option<&str>| -> peri_agent::session::subagent::SubagentLlmSource {
+                unreachable!("声明测试不触发子 agent")
+            },
+        ),
         "/tmp".to_string(),
     )));
     tools.push(Arc::new(AskUserTool::new(Arc::new(NoopBroker))));

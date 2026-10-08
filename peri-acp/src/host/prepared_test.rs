@@ -3,7 +3,7 @@
 //! 发布段只消费给定的准备对象（不重读外部输入）。
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -302,7 +302,8 @@ async fn prepare_legacy_records_saved_cwd_and_builds_from_workspace() {
     let host = prepared_test_host(&tmp, None).await;
 
     let legacy =
-        PreparedSessionInputs::prepare_legacy(&host, &registered_raw, &workspace_cwd).unwrap();
+        PreparedSessionInputs::prepare_legacy_deferred(&host, &registered_raw, &workspace_cwd)
+            .unwrap();
 
     assert_eq!(legacy.cwd, workspace_cwd);
     assert_eq!(
@@ -310,7 +311,12 @@ async fn prepare_legacy_records_saved_cwd_and_builds_from_workspace() {
         PathBuf::from(&registered_raw),
         "legacy 必须记录保存的绝对 cwd（不是调用方终端的 cwd）"
     );
-    assert!(decode_frozen_snapshot(legacy.frozen_encoded.as_ref().unwrap()).is_ok());
+    // M5 阶段一不构建 frozen：候选必须等资源 bootstrap 与内容读取后才定稿，
+    // 由接纳事务一次性写入（不得先写空 frozen 再替换）。
+    assert!(
+        legacy.frozen.is_none() && legacy.frozen_encoded.is_none(),
+        "legacy deferred 准备不得提前构建 frozen"
+    );
 }
 
 /// new 路径的持久化属性：frozen 字节与发布到 live state 的冻结状态同源（一次写入），
@@ -506,5 +512,132 @@ async fn new_session_from_prepared_does_not_reread_external_frozen_inputs() {
     assert_eq!(
         persisted_after, persisted,
         "创建后改写外部输入不得改变持久化快照"
+    );
+}
+
+// ─── H3/D1：准入期冻结运行环境按**有效 Workspace 来源**判定 ────────────────
+
+/// 远端 Workspace 声明（`load_for_restore` 与新会话声明产出的同一形状：
+/// `ConfigSource::WorkspaceRemote`）⇒ 冻结运行环境 unavailable，且准入路径
+/// **不探测**宿主（探测计数 0，不冒充远端执行环境）。
+#[tokio::test]
+async fn remote_workspace_declaration_freezes_unavailable_runtime_env_without_probe() {
+    use peri_acp_types::plugin::ConfigSource;
+
+    let tmp = TempDir::new().unwrap();
+    let cwd = canonical_workspace_dir(&tmp, "remote-ws");
+    let host = prepared_test_host(&tmp, None).await;
+    // 会话声明（持久 owner 装载同样落到这里：`resource_owners::load_for_restore`
+    // 对 workspace 连接写入 WorkspaceRemote 来源）。
+    let mut workspace: peri_acp_types::plugin::McpServerConfig =
+        serde_json::from_value(serde_json::json!({"url": "https://remote.example.test/mcp"}))
+            .unwrap();
+    workspace.source = Some(ConfigSource::WorkspaceRemote);
+
+    crate::prompt::reset_detect_call_count();
+    let mut inputs = PreparedSessionInputs::prepare_new_deferred(&host, &cwd).unwrap();
+    inputs.session_mcp_servers = HashMap::from([("workspace".to_string(), workspace)]);
+    inputs
+        .build_frozen_after_activation(&host, HashMap::new(), &[], &Default::default())
+        .unwrap();
+
+    assert_eq!(
+        crate::prompt::detect_call_count(),
+        0,
+        "显式远端 Workspace 会话不得探测宿主运行环境"
+    );
+    let frozen = inputs.frozen.clone().expect("frozen built");
+    assert_eq!(
+        frozen.runtime_env(),
+        None,
+        "执行环境未知 ⇒ 冻结运行环境 unavailable（不冒充）"
+    );
+    assert!(
+        frozen
+            .system_prompt()
+            .contains(crate::prompt::RUNTIME_ENV_UNAVAILABLE),
+        "渲染显式标记 unavailable"
+    );
+    assert!(
+        !frozen
+            .system_prompt()
+            .contains(&format!("Platform: {}", std::env::consts::OS)),
+        "不得用宿主平台冒充远端执行环境"
+    );
+    // 持久化后仍为 unavailable（解码视图一致）
+    let decoded = decode_frozen_snapshot(inputs.frozen_encoded.as_ref().unwrap()).unwrap();
+    assert_eq!(decoded.runtime_env(), None);
+}
+
+/// 池中合并配置（部署/全局配置接管等，initialize 后可见）为显式远端
+/// Workspace ⇒ 同样 unavailable + 不探测（池来源路径，不依赖准备输入声明）。
+#[tokio::test]
+async fn remote_workspace_pool_source_freezes_unavailable_runtime_env_without_probe() {
+    use peri_acp_types::plugin::ConfigSource;
+
+    let tmp = TempDir::new().unwrap();
+    let cwd = canonical_workspace_dir(&tmp, "remote-pool-ws");
+    let mut host = prepared_test_host(&tmp, None).await;
+    let pool = Arc::new(peri_middlewares::mcp::McpClientPool::new_pending());
+    let mut workspace: peri_acp_types::plugin::McpServerConfig =
+        serde_json::from_value(serde_json::json!({"url": "https://remote.example.test/mcp"}))
+            .unwrap();
+    workspace.source = Some(ConfigSource::WorkspaceRemote);
+    pool.set_session_servers(HashMap::from([("workspace".to_string(), workspace)]))
+        .unwrap();
+    host.mcp_pool = Some(Arc::clone(&pool) as Arc<dyn peri_acp_types::ports::McpPoolPort>);
+    assert_eq!(
+        pool.workspace_source(),
+        Some(ConfigSource::WorkspaceRemote),
+        "池来源事实必须暴露显式远端身份"
+    );
+
+    crate::prompt::reset_detect_call_count();
+    let mut inputs = PreparedSessionInputs::prepare_new_deferred(&host, &cwd).unwrap();
+    inputs
+        .build_frozen_after_activation(&host, HashMap::new(), &[], &Default::default())
+        .unwrap();
+
+    assert_eq!(
+        crate::prompt::detect_call_count(),
+        0,
+        "池来源为远端时不得探测宿主"
+    );
+    assert_eq!(inputs.frozen.as_ref().unwrap().runtime_env(), None);
+}
+
+/// 本地执行环境（无远端接管）⇒ 准入期**恰好探测一次**，宿主值随冻结持久化
+/// 并在渲染中出现（H3 正向面）。
+#[tokio::test]
+async fn local_workspace_freezes_host_runtime_env_with_single_probe() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = canonical_workspace_dir(&tmp, "local-ws");
+    let host = prepared_test_host(&tmp, Some(workspace_assembly(&cwd))).await;
+
+    crate::prompt::reset_detect_call_count();
+    let mut inputs = PreparedSessionInputs::prepare_new_deferred(&host, &cwd).unwrap();
+    inputs
+        .build_frozen_after_activation(&host, HashMap::new(), &[], &Default::default())
+        .unwrap();
+
+    assert_eq!(
+        crate::prompt::detect_call_count(),
+        1,
+        "本地准入恰好探测一次（不在渲染期重探）"
+    );
+    let frozen = inputs.frozen.clone().expect("frozen built");
+    let runtime_env = frozen.runtime_env().expect("本地执行环境可冻结");
+    assert_eq!(runtime_env.platform, std::env::consts::OS);
+    assert!(
+        frozen
+            .system_prompt()
+            .contains(&format!("Platform: {}", std::env::consts::OS)),
+        "渲染消费冻结的宿主环境"
+    );
+    assert!(
+        !frozen
+            .system_prompt()
+            .contains(crate::prompt::RUNTIME_ENV_UNAVAILABLE),
+        "本地会话不得标记 unavailable"
     );
 }

@@ -62,10 +62,6 @@ pub(super) fn attach_subagent_host(
             frozen_claude_local_md: frozen_session
                 .claude_local_md()
                 .map(|s| Arc::new(s.to_string())),
-            // 16_workflow 已删除（C2）：子面向 prompt 与主 prompt 字节相同；
-            // 主 session 挂载 host 时恒 None（spawn 主路径从 parent session
-            // 直接读取 frozen system_prompt，不经本字段）。
-            frozen_system_prompt: None,
             parent_thread_id: thread_persistence.parent_thread_id.clone(),
             frozen_claude_md: Some(Arc::new(frozen_session.v2_frozen().claude_md.to_string())),
             frozen_skill_summary: Some(Arc::new(

@@ -39,7 +39,7 @@ pub(crate) use lifecycle::{
 pub use types::{
     ForkDirectiveKind, SubagentCancelPolicy, SubagentChainAssembler, SubagentChainContext,
     SubagentFailure, SubagentHost, SubagentLifecycleStart, SubagentLifecycleStop,
-    SubagentResumeConfig, SubagentRunMode, SubagentSpawnConfig, SubagentSpawned,
+    SubagentLlmSource, SubagentResumeConfig, SubagentRunMode, SubagentSpawnConfig, SubagentSpawned,
 };
 pub use util::{count_tool_calls_from_session, extract_last_ai_text, format_subagent_result};
 pub use v2_bridge::{
@@ -55,8 +55,6 @@ pub(crate) use v2_bridge::{
 use crate::agent::async_tasks::{
     BackgroundTask, BackgroundTaskStatus, BgCancelHandle, BgTaskKind, TaskManager,
 };
-#[cfg(test)]
-use crate::agent::react::ReactLLM;
 #[cfg(test)]
 use crate::messages::BaseMessage;
 #[cfg(test)]

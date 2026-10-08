@@ -183,3 +183,26 @@
 - 排查期间工作树在飞，符号位置可能已位移。
 - 本次补方案仅做静态复核与文档检查，未运行 Rust 测试、真实 provider 请求或攻击复现；上述历史测试结果不代表本次工作树通过。后续验收统一按 `docs/standards/testing.md`，Cargo 使用 `./scripts/cargo-rmcp-patched.sh` 入口，并确认过滤器实际命中测试。
 - 实施依赖：H1/M3/M4 共用模型装配；H2/M11 共用能力与段落事实源；H7/M8 共用输入批次处理；H8/M13 共用投递边界；M1/L3 共用 prompt 控制标记校验。H4、H5 的安全阻断可先独立落地，不必等待全部重构。
+
+## A 组实施状态（2026-10-07，分支 fix/context-preflight-a-prompt-20261007）
+
+本组范围：H2/H3/M1/M11/L3 + L1 相关段落/frozen 注释与权威文档。**不代表本 issue 25 条完成**；B/C/D/E/F 组未动。
+
+- **H2：部分完成（子侧未闭环）**。已完成：段落可见性由执行面能力事实投影（`peri-agent::middleware::SectionCapabilities` + `peri-middlewares::prompt_policy` 单一权威；主/子/workflow 三条链与真实装配由 parity 测试对拍）；`PermissionMiddleware` 有效模式参与判定（`disabled()` 实例不声明 10_hitl，workflow 装配与投影共用 `for_workflow` / `workflow_approval_active` 同一规则）；workflow 生产 system prompt 两处构造点改为按能力投影重建；子 Agent 渲染面（ACP `system_builder`，定义型/fork 生产路径）按子链能力投影，10_hitl/12_ask_user/11_subagent 缺席。**未完成（属 B）**：子 Agent 最终请求面（`FrozenContext.system_prompt` 仍继承父字节，bridge/消息组合的最终 system）与子身份恰好一次装配，须由 H1/M3 在生产子链上捕获 wire 请求证明——修复前不得宣称 H2 全完成。
+- **H3：完成**。`platform`/`os_version`/`is_git_repo` 冻结为 `FrozenRuntimeEnv`（`FrozenContext` + snapshot V1 可选加性字段）；内容准入按**有效 Workspace 来源**判定（`McpClientPool::workspace_source` 覆盖会话声明含持久 owner 装载与部署/全局/项目/插件合并配置；准备输入的会话声明同时参与）：显式远端 Workspace ⇒ `None`（unavailable，显式标记 + warn，不探测宿主，探测计数为 0 的证据见 `prepared_test.rs`）；本地执行环境 ⇒ 准入恰好探测一次并随冻结持久化；重渲染只消费快照，旧快照缺字段 = unavailable。
+- **M1：完成**。`MiddlewareChain::collect_prompt_contributions` 统一空行分隔并校验 reserved boundary token（带来源错误），provider 边界显式失败；GitAttribution 去掉自带前导分隔符；workflow 手工拼接仅补准入错误处理（请求时 provider 化归 B/M4）。
+- **M11：完成**。section id 与 `(zone, order)` 唯一、`Cached` 段纯静态在构造期显式失败并指出来源；移除「重复 ID 后者覆盖 / 同序号稳定排序」兜底（测试改为显式失败断言 + Cached 前缀字节稳定断言）。
+- **L3：完成**。覆盖文本在冻结准入统一校验单段/总字节预算、reserved marker、未知占位符、空覆盖与 Cached 动态占位符，非法项拒绝应用并保留内置段（结构化诊断、不入持久快照）；字面量 `\{{`/`\}}` 转义，渲染与校验共用占位符表；旧快照正文不自动改写，超总预算只诊断（`audit_total_override_budget`，解码路径 warn）。
+- **L1（本组相关）：完成**。段落/frozen 注释、`docs/code-index/peri-acp.md`、`docs/design/system-prompt.md` 同步。
+
+验证（`./scripts/cargo-rmcp-patched.sh test --locked ...`，日志与退出码见交接）：`peri-acp --lib`、`peri-agent --lib`、`peri-acp-types --lib`、`peri-model --lib` 全绿；`peri-middlewares --lib` 存在基线既有失败（子代理委派/workspace fixture 的 `Blocked: child resources …`，与本次改动前后失败集合逐条一致）；定向过滤器（prompt / frozen_snapshot / prompt_cache_boundary / middleware chain / system_cache / parity / runtime_env / capability matrix）均非零命中且通过。
+
+## B 组实施状态（2026-10-07，分支 fix/context-preflight-b-children-20261007）
+
+本组范围：H1/M3/M4/M5。**不代表本 issue 25 条完成**；A/C/D/E/F 组未动；18 条旧 middleware subagent fixture 仍失败（不在本组宣称修复；hook/permission 工作不属于本组）。
+
+- **H1：关键矩阵已捕获（ACP cold 仍在途）**。实现：子 Agent bridge 在 session factory 的子链装配点构造（身份 + 请求时 provider 读 `collect_prompt_contributions`），`SubagentLlmSource::Prebuilt` 旁路删除；定义型/fork/前台/后台/live resume 共用该入口。验收：`peri-acp/src/host/executor_flow_child_chain_test.rs`（真实 `assemble::child_chain_assembler` → `SubagentChainAssemblerImpl` + 真实 durable 子会话 + `CapturePromptModel`，非空链替身）——定义型首请求中项目指令/技能摘要/延迟工具目录/子身份各恰一次、模型面工具目录含延迟入口而 `Agent`/`AskUserQuestion`/`Workflow` 不在、fork 前台携带父上下文且身份仍恰一次、定义型与 fork 后台同契约、关闭 `AgentsMdMiddleware`/`SkillsMiddleware`/`ToolSearch` 后对应贡献与入口缺席、live resume（父侧新委派 invocation）保持契约并携带子会话历史与追加指令。**冷恢复（宿主态重建层级）**：`peri-acp/src/host/requests_cold_child_test.rs`（模块 `host::requests::tests::cold_child_tests`）在**同一持久 store**上丢弃全部内存 `sessions`/环境/父 Session（非 OS 进程重启，模块文档已标明该验证层级），走真实 `host::cold_execution::run` 并断言发布会话状态（命令 / 再次 prompt 路径消费的同一上下文）：v2 身份取 metadata `identity_system`、冻结项目指令/技能摘要（贡献输入）与 runtime 快照同源，持久 blob 烘焙的父系统字节不成为身份；v1 有写入方 `persona` 锚时可解释生效；v1 缺锚时在登记任何状态前以 `no explainable identity source` 拒绝执行，历史与元数据保持可读。**未完成**：冷恢复的最终 model request 捕获（该夹具的同步子会话 admission 已结清，冷执行越过状态发布后按设计阻断于持久准入事实）；真实进程崩溃语义与其它崩溃期持久事实不在本轮声明范围；真实 hook/permission 亦不在本组。
+- **M3：完成**。`ChildResumeMetadata::resolved_identity` 版本锚定（v2 `identity_system`，None = 写入方确定无身份；v1 必须写入方 `persona`，缺失/空白 = 不可解释 ⇒ 阻止执行恢复而历史可读；删除首 own System 位置启发式；父 `system_prompt` 不参与身份判定；不引入「与父字节相等即拒绝」判据）。`ChildResumeMetadata::frozen_context` 成为执行 / resume / 宿主内存投影唯一映射；`host/cold_execution.rs` 的 `SessionState.frozen` 不再解持久 blob 当会话 frozen（blob 仅 digest 锚），v1 `runtime_env` 取该子会话自己的冻结快照，不探本地、不重写持久数据。
+- **M4：完成**（本分支前序提交）：workflow/AgentsMd 请求时贡献与 main/local 独立输入。
+- **M5：完成**。legacy 首次接纳顺序为「执行资格 → 仅资源 bootstrap（有效 servers 候选在池 OnceLock 前定格）→ 内容读取 → 定稿 frozen → write-once 原子接纳（winner 语义）→ 失败统一排空」；owner 声明的持久绑定移到 cwd/frozen/identity 校验通过之后（AlreadyLive 排空候选环境且不回写），失败请求不污染不可变声明、成功请求不再丢失声明。
+- **验证**：`./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp --lib child_chain_tests`、`... -p peri-acp --lib cold_child_tests`、`... -p peri-acp --lib "host::requests"`、`... -p peri-agent --lib "subagent::factory::cold"`、`... -p peri-agent --lib resume` 均非零命中且通过；日志见 `/tmp/b-recovery-final-20261007/logs/`（`part3-child-chain-tests-final.log`、`part3-cold-child-tests.log`）。

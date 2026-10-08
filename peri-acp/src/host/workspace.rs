@@ -37,6 +37,21 @@ pub(crate) struct SessionEnvironment {
     builtin_closed: std::collections::BTreeSet<String>,
 }
 
+/// 测试观察面：会话环境 shutdown 事件（session_id）。
+///
+/// 环境在失败路径上被排空后即丢弃，外部无法再读到它；这里记录「哪个会话的环境
+/// 被 shutdown」，供生命周期守卫测试断言（与 `builtin_closed` 同类测试观察面）。
+#[cfg(test)]
+static SHUTDOWN_OBSERVATIONS: std::sync::OnceLock<std::sync::Mutex<Vec<String>>> =
+    std::sync::OnceLock::new();
+
+/// 读取并清空 shutdown 观察记录（测试用）。
+#[cfg(test)]
+pub(crate) fn take_shutdown_observations() -> Vec<String> {
+    let mutex = SHUTDOWN_OBSERVATIONS.get_or_init(|| std::sync::Mutex::new(Vec::new()));
+    std::mem::take(&mut *mutex.lock().unwrap())
+}
+
 impl SessionEnvironment {
     /// 冻结期技能清单快照（W4b / F3，J1）：内容准入期从 **system 来源**
     /// （builtin `workspace` 实例）取一次技能元数据，供冻结 system prompt 的
@@ -436,6 +451,12 @@ impl SessionEnvironment {
     }
 
     pub(crate) async fn shutdown(&self) -> bool {
+        #[cfg(test)]
+        SHUTDOWN_OBSERVATIONS
+            .get_or_init(|| std::sync::Mutex::new(Vec::new()))
+            .lock()
+            .unwrap()
+            .push(self.session_id.clone());
         // 会话终结即断开本会话声明的 MCP-over-ACP 连接：连接由 client 侧的
         // ACP 通道承载，会话不再存活后既没有归属也不会有入站消息；处置必须在
         // 池关闭之前完成，否则 `mcp/disconnect` 已无出站通道可用。实现幂等，
@@ -531,6 +552,44 @@ impl SessionEnvironment {
         let cleanup = self.cleanup_tasks.shutdown().await;
         joined && cleanup == peri_acp_types::tasks::TaskShutdownReport::Complete
     }
+}
+
+/// 内容准入期的冻结运行环境（H3 / D1）。
+///
+/// 判定基于**有效 Workspace 来源**（`McpClientPool::workspace_source`：会话声明
+/// 含持久 owner 装载的结果，以及部署/全局/项目/插件合并配置与 builtin overlay）
+/// 并叠加准备输入的会话声明（initialize 前也可见）：
+/// - 显式远端 Workspace（[`peri_acp_types::plugin::ConfigSource::WorkspaceRemote`]）
+///   ⇒ `None`：工具在远端执行，计算宿主探测值不是它的运行环境——冻结为
+///   unavailable 并显式标记，**不冒充**；
+/// - builtin `workspace`（同进程实例）或无 `workspace` 面 ⇒ 计算宿主即选定执行
+///   环境：准入期探测一次，随后随冻结持久化（ARC-FROZEN-001）。
+pub(crate) fn frozen_runtime_env(
+    host: &AcpServerConfig,
+    session_mcp_servers: &std::collections::HashMap<
+        String,
+        peri_acp_types::plugin::McpServerConfig,
+    >,
+    cwd: &str,
+) -> Option<crate::prompt::PromptRuntimeEnv> {
+    use peri_acp_types::plugin::ConfigSource;
+    let remote = matches!(
+        session_mcp_servers
+            .get("workspace")
+            .and_then(|config| config.source.as_ref()),
+        Some(ConfigSource::WorkspaceRemote)
+    ) || host
+        .mcp_pool
+        .as_ref()
+        .is_some_and(|pool| pool.workspace_source() == Some(ConfigSource::WorkspaceRemote));
+    if remote {
+        tracing::warn!(
+            cwd = %cwd,
+            "显式远端 Workspace：宿主探测值不是该执行环境，冻结运行环境标记为 unavailable"
+        );
+        return None;
+    }
+    Some(crate::prompt::PromptRuntimeEnv::detect(cwd))
 }
 
 pub(crate) fn workspace_error(error: impl Into<anyhow::Error>) -> AcpError {

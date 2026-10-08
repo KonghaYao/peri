@@ -11,9 +11,11 @@ impl SessionManager {
     /// 构建会话级 frozen 数据（统一构造入口，消除 TUI/stdio 重复 5 处）。
     ///
     /// 波 4 演进（C2/C5）：16_workflow 已整段删除（ultracode skill 完整覆盖，
-    /// 设计 §3.1.2），子面向 prompt 与主 prompt 字节相同——不再二次渲染；
-    /// `subagent_system_prompt` 字段已随 C5 移除，子面向直接复用
-    /// `system_prompt()`；`workflow_enabled` 参数随 gate 清理删除。
+    /// 设计 §3.1.2），不再有独立子面向字段（`subagent_system_prompt` 随 C5
+    /// 移除）；子 Agent / fork / workflow 的 prompt 由同一份冻结输入按各自
+    /// **执行面能力投影**重建（H2，`prompt_policy`），不再复制主冻结字节——
+    /// 主链有审批 / 提问 / 子代理声明，而子链与 workflow 链没有这些持有者。
+    /// `workflow_enabled` 参数随 gate 清理删除。
     ///
     /// L5：渲染面（CLAUDE.md 解析 / skills 摘要 / prompt 模板）随
     /// `FrozenSessionData::build` 留在 ACP（§0 渲染是 ACP 协议面职责），
@@ -28,16 +30,20 @@ impl SessionManager {
         config: &crate::provider::PeriConfig,
         cwd: &str,
     ) -> crate::session::executor::FrozenSessionData {
-        // 调用点未准备运行环境：在此探测一次并委托冻结渲染，装配期不再各自取一份。
+        // 无准备输入的调用点（测试夹具 / 无执行环境的构建点）：本地探测一次并
+        // 委托冻结渲染；生产准入走 `PreparedSessionInputs::build_frozen_after_activation`
+        // 的有效 Workspace 来源判定（H3/D1）。
         let runtime_env = crate::prompt::PromptRuntimeEnv::detect(cwd);
-        self.build_frozen_data_with_config_and_runtime(config, cwd, &runtime_env)
+        self.build_frozen_data_with_config_and_runtime(config, cwd, Some(&runtime_env))
     }
 
+    /// `runtime_env = None` = 有效 Workspace 为显式远端（执行环境未知）：
+    /// 冻结标记 unavailable，不重探本地值（H3/D1）。
     pub(crate) fn build_frozen_data_with_config_and_runtime(
         &self,
         config: &crate::provider::PeriConfig,
         cwd: &str,
-        runtime_env: &crate::prompt::PromptRuntimeEnv,
+        runtime_env: Option<&crate::prompt::PromptRuntimeEnv>,
     ) -> crate::session::executor::FrozenSessionData {
         self.build_frozen_data_with_config_and_runtime_and_docs(
             config,
@@ -58,7 +64,7 @@ impl SessionManager {
         &self,
         config: &crate::provider::PeriConfig,
         cwd: &str,
-        runtime_env: &crate::prompt::PromptRuntimeEnv,
+        runtime_env: Option<&crate::prompt::PromptRuntimeEnv>,
         docs: HashMap<String, String>,
         skill_catalog: &[peri_acp_types::skills::SkillMetadata],
         instructions: &crate::session::executor::FrozenInstructions,
@@ -81,7 +87,7 @@ impl SessionManager {
         &self,
         config: &crate::provider::PeriConfig,
         cwd: &str,
-        runtime_env: &crate::prompt::PromptRuntimeEnv,
+        runtime_env: Option<&crate::prompt::PromptRuntimeEnv>,
         docs: HashMap<String, String>,
         skill_catalog: &[peri_acp_types::skills::SkillMetadata],
         instructions: &crate::session::executor::FrozenInstructions,
@@ -112,20 +118,33 @@ impl SessionManager {
             .disabled_middlewares
             .extend(deployment_closed.iter().cloned());
 
-        // 波 4 演进（C2）：收集结果 = 渲染面静态声明（冻结 disabled 集合 +
-        // overrides + 冻结语言驱动，`build_collected_sections`）——基础段
-        // （01-06 / 07_runtime / persona）与 language 段由
-        // DefaultSystemPromptMiddleware / LangMiddleware 持有，链未装配的
-        // 冻结渲染经同一事实源获得与装配一致的段落（决策记录 D3）。
+        // 波 4 演进（C2）：收集结果 = 执行面能力事实驱动的段落集合
+        // （`prompt_policy`）——基础段（01-06 / 07_runtime / persona）与
+        // language 段由 DefaultSystemPromptMiddleware / LangMiddleware 持有，
+        // 链未装配的冻结渲染经同一事实源获得与装配一致的段落（决策记录 D3）；
+        // 主会话能力事实来自主链装配条件投影（H2）。
         let collected =
             build_collected_sections(&meta_harness_state, None, frozen_language.as_deref());
+        // L3 覆盖准入：预算 / reserved boundary token / 未知占位符 / 空覆盖 /
+        // Cached 动态占位符一律拒绝应用并保留内置段（拒绝项不进入持久快照），
+        // 按段落 + 错误类别记录结构化诊断。
+        let rejected = crate::prompt::section_validation::sanitize_section_overrides(
+            &mut meta_harness_state,
+            &collected,
+        );
+        crate::prompt::section_validation::log_rejections(&rejected);
         let template = crate::prompt::PromptTemplate::new(&meta_harness_state, &collected);
-        let env = crate::prompt::PromptEnv::frozen(cwd, &frozen_date, runtime_env);
+        // 冻结运行环境随快照持久化（H3）：准入期按有效 Workspace 来源定格一次
+        // ——显式远端 Workspace 为 `None`（unavailable，不冒充），此后重渲染只
+        // 消费该快照。
+        let frozen_runtime_env = runtime_env.map(crate::prompt::PromptRuntimeEnv::freeze);
+        let env = crate::prompt::PromptEnv::frozen(cwd, &frozen_date, frozen_runtime_env.as_ref());
         let system_prompt = template.render(&env, self.inner.agent_catalog.as_ref());
 
-        // 16_workflow 已删除（C2）：子面向 prompt 与主 prompt 字节相同，
-        // 不再二次渲染——`FrozenSessionData` 无子面向字段（C5 移除），
-        // 子 agent / fork / workflow agent 直接复用 `system_prompt()`。
+        // 16_workflow 已删除（C2）：`FrozenSessionData` 无子面向字段（C5 移除），
+        // 子 Agent / fork / workflow 的 prompt 在各自装配点按能力投影重建
+        // （H2：`build_collected_sections_with_capabilities` +
+        // `PromptEnv::frozen`），本函数只产出主链冻结 prompt。
 
         // 构建 v2 FrozenContext
         let v2_frozen = peri_agent::session::FrozenContext {
@@ -135,6 +154,7 @@ impl SessionManager {
             date: Arc::from(frozen_date),
             language: frozen_language.map(|l| Arc::from(l.to_string())),
             meta_harness: meta_harness_state,
+            runtime_env: frozen_runtime_env,
         };
 
         crate::session::executor::FrozenSessionData::from_frozen_parts(
@@ -143,23 +163,20 @@ impl SessionManager {
         )
     }
 }
-/// 渲染面收集结果静态声明（波 4 演进 2，决策记录 D3 / C3 D4）。
+/// 渲染面段落收集：按**执行面能力事实**投影段落集合（H2 单一权威）。
 ///
 /// 全部 `PromptTemplate` 构造点（冻结渲染 / 主重渲染 / SubAgent builder /
-/// workflow fallback / workflow agent builder / 测试 helper）统一经本函数
-/// 计算收集结果：`DefaultSystemPromptMiddleware` / `LangMiddleware` 与
-/// gated 段持有者（`HumanInTheLoopMiddleware` / `SubAgentMiddleware` /
-/// `SkillsMiddleware`）不在 `state.disabled_middlewares` 时收集对应段落。
-/// 与链侧 `MiddlewareChain::collect_prompt_sections()` 调用同一段声明函数
-/// （`peri_middlewares` 各持有者）——**单一事实源，禁止双轨**；冻结状态
-/// 驱动使链未装配的构造点（如 session/new 冻结渲染）也能得到与装配一致
-/// 的段落（ARC-FROZEN-001 语义保持）。
+/// workflow fallback / workflow agent builder / 测试 helper）统一经本模块的
+/// 收集入口计算收集结果，能力事实由 `peri_middlewares::prompt_policy` 的装配
+/// 条件投影提供（主链 / 子链 / workflow 链各自的 `*_chain_capabilities`），与
+/// 各链的真实装配结果由 parity 测试对拍。**单一事实源，禁止双轨**：这里不再
+/// 有「按执行类型排除某段」的第二份名单。
 ///
-/// 契约 3（gate 原子迁移，C2/C3 落地）：全部迁移段 gate = 持有 middleware
-/// 是否在链上——本函数按冻结 disabled 集合判定装配面，收集即装配。
+/// 契约 3（gate 原子迁移，C2/C3 落地）：段落可见性 = 持有 middleware 是否在
+/// 装配面且有效（例如 PermissionMiddleware 的 disabled 实例不声明 10_hitl）。
 ///
-/// 落点说明（layer-imports 依赖门）：函数体直接引用 `peri_middlewares`
-/// 各持有者的段声明——本模块为 §0 边 2 豁免的 ACP 宿主装配面
+/// 落点说明（layer-imports 依赖门）：函数体直接引用 `peri_middlewares` 的
+/// 策略模块——本模块为 §0 边 2 豁免的 ACP 宿主装配面
 /// （`scripts/import-exemptions.conf`），渲染核心 `prompt/mod.rs` 不持有
 /// middlewares 引用。
 pub(crate) fn build_collected_sections(
@@ -167,41 +184,54 @@ pub(crate) fn build_collected_sections(
     overrides: Option<&AgentOverrides>,
     language: Option<&str>,
 ) -> Vec<peri_agent::middleware::PromptSection> {
-    let mut collected = Vec::new();
-    if !state
-        .disabled_middlewares
-        .contains("DefaultSystemPromptMiddleware")
-    {
-        collected.extend(
-            peri_middlewares::default_system_prompt::DefaultSystemPromptMiddleware::sections(
-                overrides,
-            ),
-        );
-    }
-    if !state.disabled_middlewares.contains("LangMiddleware") {
-        collected
-            .extend(peri_middlewares::default_system_prompt::LangMiddleware::sections(language));
-    }
-    if !state.disabled_middlewares.contains("PermissionMiddleware") {
-        collected.extend(
-            peri_middlewares::permission::PermissionMiddleware::sections_for_disabled(
-                &state.disabled_middlewares,
-            ),
-        );
-    }
-    if !state
-        .disabled_middlewares
-        .contains("HumanInTheLoopMiddleware")
-    {
-        collected.extend(peri_middlewares::hitl::HumanInTheLoopMiddleware::sections());
-    }
-    if !state.disabled_middlewares.contains("SubAgentMiddleware") {
-        collected.extend(peri_middlewares::subagent::SubAgentMiddleware::sections());
-    }
-    if !state.disabled_middlewares.contains("SkillsMiddleware") {
-        collected.extend(peri_middlewares::skills::SkillsMiddleware::sections());
-    }
-    collected
+    let capabilities = main_chain_capabilities(&state.disabled_middlewares);
+    build_collected_sections_with_capabilities(state, overrides, language, &capabilities)
+}
+
+/// 主链能力事实（H2）：ACP 宿主装配面对 `prompt_policy` 的薄包装。
+///
+/// 单一权威仍在 `peri_middlewares::prompt_policy`（与真实装配对拍）；
+/// 本文件是 §0 边 2 豁免的宿主装配面，middlewares 引用集中在此，
+/// `host/stage_builder.rs` / `host/workflow_agent.rs` 只调用本模块。
+pub(crate) fn main_chain_capabilities(
+    disabled: &std::collections::HashSet<String>,
+) -> peri_agent::middleware::SectionCapabilities {
+    peri_middlewares::prompt_policy::main_chain_capabilities(disabled)
+}
+
+/// 子链能力事实（H2）：子链不装配审批 / 提问 / 子代理持有者等装配事实投影。
+pub(crate) fn subagent_chain_capabilities(
+    disabled: &std::collections::HashSet<String>,
+) -> peri_agent::middleware::SectionCapabilities {
+    peri_middlewares::prompt_policy::subagent_chain_capabilities(disabled)
+}
+
+/// workflow 链能力事实（H2）：含审批有效模式（broker + permission_mode 齐备）。
+pub(crate) fn workflow_chain_capabilities(
+    disabled: &std::collections::HashSet<String>,
+    broker_present: bool,
+    permission_mode_present: bool,
+) -> peri_agent::middleware::SectionCapabilities {
+    peri_middlewares::prompt_policy::workflow_chain_capabilities(
+        disabled,
+        broker_present,
+        permission_mode_present,
+    )
+}
+
+/// 指定执行面能力事实的段落收集（子链 / workflow 链；能力来自其装配条件投影）。
+pub(crate) fn build_collected_sections_with_capabilities(
+    state: &peri_acp_types::meta_harness::MetaHarnessState,
+    overrides: Option<&AgentOverrides>,
+    language: Option<&str>,
+    capabilities: &peri_agent::middleware::SectionCapabilities,
+) -> Vec<peri_agent::middleware::PromptSection> {
+    peri_middlewares::prompt_policy::collect_prompt_sections(
+        state,
+        overrides,
+        language,
+        capabilities,
+    )
 }
 
 /// 由合并后的 meta_harness 配置与扫描结果构建冻结期 MetaHarnessState

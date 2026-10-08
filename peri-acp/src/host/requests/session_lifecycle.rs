@@ -26,7 +26,7 @@ use crate::dispatch::config_update::make_config_options;
 use crate::{dispatch, transport::types::AcpError};
 
 #[path = "session_restore.rs"]
-mod restore;
+pub(crate) mod restore;
 pub(crate) use restore::{handle_context, handle_load, handle_metadata, handle_resume};
 use restore::{identity_response, prepare_existing, response_identity};
 
@@ -99,7 +99,7 @@ pub(crate) fn handle_initialize(params: &Value, cfg: &AcpServerConfig) -> Result
     serde_json::to_value(resp).map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
 }
 
-fn enabled_meta_sections(cfg: &AcpServerConfig) -> std::collections::HashSet<String> {
+pub(super) fn enabled_meta_sections(cfg: &AcpServerConfig) -> std::collections::HashSet<String> {
     cfg.peri_config
         .read()
         .config
@@ -290,13 +290,9 @@ pub(crate) async fn new_session_from_prepared(
         },
         None => Default::default(),
     };
-    if let Err(error) = prepared.build_frozen_after_activation(
-        cfg,
-        &crate::prompt::PromptRuntimeEnv::detect(&prepared.cwd),
-        docs,
-        &skill_catalog,
-        &instructions,
-    ) {
+    if let Err(error) =
+        prepared.build_frozen_after_activation(cfg, docs, &skill_catalog, &instructions)
+    {
         drain_and_abandon(environment.as_ref(), &initialization).await?;
         return Err(error);
     }

@@ -119,6 +119,7 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
             agent_overrides,
             language,
             shared_tools,
+            hook_groups,
             ..
         } = ctx;
 
@@ -176,6 +177,22 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
         // MetaHarness：SubAgentMiddleware 关闭 → 关联构造联动置空
         // （parent_tools 不注入、subagent_mw 槽位 None、链上不注册——禁止半开
         // 状态，设计 §2.5"联动清理"）。
+        // 子 agent 生命周期 hook（SubagentStart/Stop）：唯一装配准入下按事件过滤，
+        // 经 HookDispatcher 分发（matcher/if/once/async/超时/取消/进程树 owner），
+        // 默认非阻断。空组保持空（不造半开接线）。
+        let subagent_lifecycle_hooks: Vec<crate::hooks::types::RegisteredHook> = hook_groups
+            .iter()
+            .flatten()
+            .filter(|hook| {
+                matches!(
+                    hook.event,
+                    crate::hooks::types::HookEvent::SubagentStart
+                        | crate::hooks::types::HookEvent::SubagentStop
+                )
+            })
+            .cloned()
+            .collect();
+
         let mut subagent: Option<SubAgentMiddleware> =
             if disabled.contains(SUB_AGENT_FACE_CLOSED_KEY) {
                 None
@@ -191,7 +208,7 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
                     .with_system_builder(system_builder.clone())
                     .with_cancel(cancel.clone())
                     .with_parent_messages(Arc::new(RwLock::new(Vec::<BaseMessage>::new())))
-                    .with_registered_hooks(vec![]),
+                    .with_registered_hooks(subagent_lifecycle_hooks),
                 )
             };
         if let Some(ref mut mw) = subagent {

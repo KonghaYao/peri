@@ -8,7 +8,8 @@
 //! SandboxWrite 注入等 middlewares 能力。
 
 use peri_agent::{
-    agent::react::ReactLLM, session::subagent::SubagentCancelPolicy, tools::BaseTool,
+    session::subagent::{SubagentCancelPolicy, SubagentLlmSource},
+    tools::BaseTool,
 };
 
 use super::super::fork::allows_injected_tools;
@@ -20,8 +21,8 @@ pub(crate) const MODEL_TIERS: [&str; 4] = peri_acp_types::agents::MODEL_TIERS;
 
 /// v2-ready SubAgent 装配产物（L3 简化：创建/运行/收尾移入 Agent 层统一入口）
 pub(crate) struct AgentBuildResult {
-    /// SubAgent LLM（ReactLLM 实现/装饰器）
-    pub llm: Box<dyn ReactLLM + Send + Sync>,
+    /// SubAgent 模型来源（H1：bridge 由 Agent 层子链装配点构造）
+    pub llm: SubagentLlmSource,
     /// 过滤后的工具集（按 agent_def.tools/disallowed_tools）
     pub tools: Vec<Box<dyn BaseTool>>,
     /// Canonical allow/disallow policy retained for every generation refresh.

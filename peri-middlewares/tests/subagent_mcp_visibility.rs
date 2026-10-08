@@ -3,11 +3,7 @@ use std::{collections::BTreeMap, sync::Arc};
 use async_trait::async_trait;
 use parking_lot::RwLock;
 use peri_agent::{
-    agent::{
-        react::{ReactLLM, Reasoning, StreamingContext, ToolCall},
-        stages::SharedToolMap,
-    },
-    messages::BaseMessage,
+    agent::{react::ToolCall, stages::SharedToolMap},
     middleware::{capabilities::CatalogState, r#trait::Middleware},
     session::{
         subagent::{build_v2_subagent_context, SubagentChainAssembler, SubagentChainContext},
@@ -50,16 +46,231 @@ impl BaseTool for LookupTool {
     }
 }
 
-struct LookupLLM(std::sync::atomic::AtomicUsize, bool);
+// ─── 集成测试本地 Model 夹具（不跨 crate 共享 test_helpers） ──────────────
+mod inline_fixture {
+    use peri_agent::messages::{BaseMessage, ToolCallRequest};
+    use peri_agent::tools::BaseTool;
+    use peri_model::{JsonObject, ModelResponse, ModelResult, ModelStreamEvent, StopReason};
+    use std::sync::Arc;
 
-#[async_trait]
-impl ReactLLM for LookupLLM {
-    async fn generate_reasoning(
+    pub(super) fn base_messages(request: &peri_model::ModelRequest) -> Vec<BaseMessage> {
+        request
+            .messages
+            .iter()
+            .map(|message| match message {
+                peri_model::ModelMessage::System { content } => {
+                    BaseMessage::system(text_of(content))
+                }
+                peri_model::ModelMessage::User { content } => BaseMessage::human(text_of(content)),
+                peri_model::ModelMessage::Assistant {
+                    content,
+                    tool_calls,
+                } => BaseMessage::ai_with_tool_calls(
+                    text_of(content),
+                    tool_calls
+                        .iter()
+                        .map(|call| {
+                            ToolCallRequest::new(
+                                call.id().to_string(),
+                                call.name().to_string(),
+                                serde_json::Value::Object(
+                                    call.arguments().as_map().clone().into_iter().collect(),
+                                ),
+                            )
+                        })
+                        .collect(),
+                ),
+                peri_model::ModelMessage::ToolResult { result } => {
+                    let text = text_of(&result.content);
+                    if result.is_error {
+                        BaseMessage::tool_error(result.tool_call_id.clone(), text)
+                    } else {
+                        BaseMessage::tool_result(result.tool_call_id.clone(), text)
+                    }
+                }
+            })
+            .collect()
+    }
+
+    fn text_of(content: &[peri_model::ContentBlock]) -> String {
+        content
+            .iter()
+            .filter_map(|block| match block {
+                peri_model::ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub(super) struct DefinedTool {
+        pub(super) name: String,
+        description: String,
+        parameters: serde_json::Value,
+    }
+
+    #[async_trait::async_trait]
+    impl BaseTool for DefinedTool {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn description(&self) -> &str {
+            &self.description
+        }
+        fn parameters(&self) -> serde_json::Value {
+            self.parameters.clone()
+        }
+        async fn invoke(
+            &self,
+            _input: serde_json::Value,
+            _ctx: peri_agent::tools::ToolContext<'_>,
+        ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+            Err("fixture tool is not executable".into())
+        }
+    }
+
+    pub(super) fn defined_tools(request: &peri_model::ModelRequest) -> Vec<DefinedTool> {
+        request
+            .tools
+            .iter()
+            .map(|definition| DefinedTool {
+                name: definition.name.clone(),
+                description: definition.description.clone().unwrap_or_default(),
+                parameters: serde_json::Value::Object(
+                    definition
+                        .input_schema
+                        .as_map()
+                        .clone()
+                        .into_iter()
+                        .collect(),
+                ),
+            })
+            .collect()
+    }
+
+    pub(super) fn text_events(text: impl Into<String>) -> Vec<ModelResult<ModelStreamEvent>> {
+        let text = text.into();
+        let mut events: Vec<ModelResult<ModelStreamEvent>> = Vec::new();
+        if !text.is_empty() {
+            events.push(Ok(ModelStreamEvent::TextDelta { text: text.clone() }));
+        }
+        events.push(Ok(ModelStreamEvent::Completed(
+            ModelResponse::new(
+                peri_model::ModelMessage::assistant_text(text),
+                StopReason::EndTurn,
+                None,
+                None,
+            )
+            .expect("fixture response"),
+        )));
+        events
+    }
+
+    pub(super) fn tool_events_from_react(
+        calls: Vec<peri_agent::agent::react::ToolCall>,
+    ) -> Vec<ModelResult<ModelStreamEvent>> {
+        let tool_calls = calls
+            .into_iter()
+            .map(|call| {
+                peri_model::ToolCall::new(
+                    call.id,
+                    call.name,
+                    JsonObject::from_value(call.input).unwrap_or_default(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut events: Vec<ModelResult<ModelStreamEvent>> = Vec::new();
+        for (index, call) in tool_calls.iter().enumerate() {
+            events.push(Ok(ModelStreamEvent::ToolCallDelta {
+                index,
+                id: Some(call.id().to_string()),
+                name: Some(call.name().to_string()),
+                arguments_delta: serde_json::to_string(call.arguments()).unwrap_or_default(),
+            }));
+        }
+        events.push(Ok(ModelStreamEvent::Completed(
+            ModelResponse::new(
+                peri_model::ModelMessage::Assistant {
+                    content: Vec::new(),
+                    tool_calls,
+                },
+                StopReason::ToolUse,
+                None,
+                None,
+            )
+            .expect("fixture tool response"),
+        )));
+        events
+    }
+
+    macro_rules! fixture_model_impl_local {
+        ($ty:ty) => {
+            #[async_trait::async_trait]
+            impl peri_model::Model for $ty {
+                fn capabilities(&self) -> peri_model::ModelCapabilities {
+                    peri_model::ModelCapabilities {
+                        supports_streaming: true,
+                        supports_tools: true,
+                        ..peri_model::ModelCapabilities::default()
+                    }
+                }
+                fn prepare_stream(
+                    &self,
+                    request: peri_model::ModelRequest,
+                ) -> peri_model::ModelResult<peri_model::PreparedModelCall> {
+                    let this = self.clone();
+                    let checkpoint = serde_json::json!({
+                        "provider": "inline-fixture",
+                        "model": "fixture-scripted",
+                        "endpoint": "https://fixture.invalid/messages",
+                        "credentialRef": "fixture:no-credentials",
+                        "body": &request,
+                    });
+                    Ok(peri_model::PreparedModelCall::new(checkpoint, move |cancellation| {
+                        let this = this.clone();
+                        let token = cancellation.clone();
+                        let stream = futures::StreamExt::flatten(futures::stream::once(async move {
+                            futures::stream::iter(this.respond(request, cancellation).await)
+                        }));
+                        Ok(peri_model::ModelStream::with_parent_cancellation(stream, token))
+                    }))
+                }
+                async fn stream(
+                    &self,
+                    request: peri_model::ModelRequest,
+                    cancellation: tokio_util::sync::CancellationToken,
+                ) -> peri_model::ModelResult<peri_model::ModelStream> {
+                    let events = self.respond(request, cancellation.clone()).await;
+                    Ok(peri_model::ModelStream::with_parent_cancellation(
+                        futures::stream::iter(events),
+                        cancellation,
+                    ))
+                }
+            }
+        };
+    }
+    pub(super) use fixture_model_impl_local as fixture_model_impl;
+    pub(super) fn fixture_source(
+        model: Arc<dyn peri_model::Model>,
+    ) -> peri_agent::session::subagent::SubagentLlmSource {
+        peri_agent::session::subagent::SubagentLlmSource::model(model, "fixture-scripted")
+    }
+}
+
+#[derive(Clone)]
+struct LookupLLM(Arc<std::sync::atomic::AtomicUsize>, bool);
+
+impl LookupLLM {
+    async fn respond(
         &self,
-        messages: &[BaseMessage],
-        tools: &[&dyn BaseTool],
-        _streaming: Option<StreamingContext>,
-    ) -> peri_agent::error::AgentResult<Reasoning> {
+        request: peri_model::ModelRequest,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
+        use crate::inline_fixture::*;
+        let _ = &cancellation;
+        let messages = base_messages(&request);
+        let defined = defined_tools(&request);
+        let tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
+
         assert!(!tools.iter().any(|tool| tool.name() == "mcp__late__lookup"));
         assert!(tools.iter().any(|tool| tool.name() == "SearchExtraTools"));
         assert!(tools.iter().any(|tool| tool.name() == "ExecuteExtraTool"));
@@ -70,34 +281,25 @@ impl ReactLLM for LookupLLM {
                 .unwrap()
                 .content()
                 .contains("mcp__late__lookup"));
-            return Ok(Reasoning::with_answer(
-                "",
-                "verified dynamic tool revocation",
-            ));
+            return text_events("verified dynamic tool revocation");
         }
         match step {
-            0 => Ok(Reasoning::with_tools(
-                "discover",
-                vec![ToolCall::new(
-                    "search",
-                    "SearchExtraTools",
-                    serde_json::json!({"query": "select:mcp__late__lookup"}),
-                )],
-            )),
+            0 => tool_events_from_react(vec![ToolCall::new(
+                "search",
+                "SearchExtraTools",
+                serde_json::json!({"query": "select:mcp__late__lookup"}),
+            )]),
             1 => {
                 assert!(messages
                     .last()
                     .unwrap()
                     .content()
                     .contains("mcp__late__lookup"));
-                Ok(Reasoning::with_tools(
+                tool_events_from_react(vec![ToolCall::new(
                     "execute",
-                    vec![ToolCall::new(
-                        "execute",
-                        "ExecuteExtraTool",
-                        serde_json::json!({"tool_name": "mcp__late__lookup", "params": {}}),
-                    )],
-                ))
+                    "ExecuteExtraTool",
+                    serde_json::json!({"tool_name": "mcp__late__lookup", "params": {}}),
+                )])
             }
             _ => {
                 assert!(messages
@@ -105,14 +307,12 @@ impl ReactLLM for LookupLLM {
                     .unwrap()
                     .content()
                     .contains("late capability executed"));
-                Ok(Reasoning::with_answer(
-                    "",
-                    "verified deferred MCP execution",
-                ))
+                text_events("verified deferred MCP execution")
             }
         }
     }
 }
+inline_fixture::fixture_model_impl!(LookupLLM);
 
 struct CatalogProbe(SharedToolMap, Option<ToolSource>);
 
@@ -134,7 +334,12 @@ async fn fork_inherits_late_static_mcp_tools_and_discovers_then_executes_them() 
     let middleware = SubAgentMiddleware::new(
         vec![],
         None,
-        Arc::new(|_| Box::new(LookupLLM(std::sync::atomic::AtomicUsize::new(0), true))),
+        Arc::new(|_| {
+            inline_fixture::fixture_source(std::sync::Arc::new(LookupLLM(
+                std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                true,
+            )))
+        }),
     );
     middleware.set_parent_session(parent);
     let tools: BTreeMap<String, Arc<dyn BaseTool>> = middleware
@@ -176,8 +381,13 @@ fn filtered_child(
     });
     build_v2_subagent_context(
         None,
-        Box::new(LookupLLM(std::sync::atomic::AtomicUsize::new(0), true)),
-        chain,
+        Box::new(peri_agent::agent::model_bridge::AgentModelBridge::new(
+            std::sync::Arc::new(LookupLLM(
+                std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                true,
+            )),
+        )),
+        Arc::new(chain),
         vec![Arc::new(LookupTool)],
         ToolFilterPolicy::canonical(allowed, disallowed),
         None,
@@ -222,7 +432,12 @@ async fn unloaded_dynamic_tools_are_not_frozen_into_static_child_inheritance() {
     let middleware = SubAgentMiddleware::new(
         vec![],
         None,
-        Arc::new(|_| Box::new(LookupLLM(std::sync::atomic::AtomicUsize::new(0), false))),
+        Arc::new(|_| {
+            inline_fixture::fixture_source(std::sync::Arc::new(LookupLLM(
+                std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                false,
+            )))
+        }),
     );
     middleware.set_parent_session(parent);
     let tools = middleware

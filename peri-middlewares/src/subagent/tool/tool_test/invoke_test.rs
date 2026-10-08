@@ -91,16 +91,24 @@ async fn test_agent_subagent_type_missing_returns_error() {
 /// Verify subagent_type="fork" is treated as fork:true (common LLM mistake)
 #[tokio::test]
 async fn test_subagent_type_fork_treated_as_fork_mode() {
+    let host = HostFixture::open("fixture-invoke-fork").await;
     let parent_messages: Arc<RwLock<Vec<BaseMessage>>> = Arc::new(RwLock::new(Vec::new()));
     parent_messages.write().push(BaseMessage::human("Hello"));
 
-    let t = SubAgentTool::new(
-        Arc::new(vec![]),
-        None,
-        Arc::new(|_: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
-        "/tmp".to_string(),
-    )
-    .with_parent_messages(parent_messages);
+    let t = host.bind(
+        SubAgentTool::new(
+            Arc::new(vec![]),
+            None,
+            Arc::new(|_: Option<&str>| {
+                crate::subagent::test_support::fixture_source(
+                    std::sync::Arc::new(EchoLLM),
+                    "fixture-scripted",
+                )
+            }),
+            host.cwd.clone(),
+        )
+        .with_parent_messages(parent_messages),
+    );
 
     // subagent_type: "fork" should trigger fork mode, NOT try to load an agent named "fork"
     let result = t
@@ -109,7 +117,7 @@ async fn test_subagent_type_fork_treated_as_fork_mode() {
                 "subagent_type": "fork",
                 "prompt": "do something"
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            host.context(&[]),
         )
         .await
         .unwrap();
@@ -145,6 +153,7 @@ async fn test_tool_agent_not_found() {
 #[tokio::test]
 async fn test_tool_executes_with_valid_agent_file() {
     let dir = tempdir().unwrap();
+    let host = HostFixture::open_in(dir.path(), "fixture-invoke-valid").await;
     let agents_dir = dir.path().join(".claude").join("agents");
     std::fs::create_dir_all(&agents_dir).unwrap();
     std::fs::write(
@@ -153,7 +162,7 @@ async fn test_tool_executes_with_valid_agent_file() {
     )
     .unwrap();
 
-    let t = with_agent_face(make_subagent_tool(vec![]), dir.path()).await;
+    let t = host.bind(with_agent_face(make_subagent_tool(vec![]), dir.path()).await);
     let result = t
         .invoke(
             serde_json::json!({
@@ -161,7 +170,7 @@ async fn test_tool_executes_with_valid_agent_file() {
                 "prompt": "hello",
                 "cwd": dir.path().to_str().unwrap()
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            host.context(&[]),
         )
         .await
         .unwrap();
@@ -177,6 +186,7 @@ async fn test_tool_executes_with_valid_agent_file() {
 #[tokio::test]
 async fn test_agent_reserved_fields_parsed() {
     let dir = tempdir().unwrap();
+    let host = HostFixture::open_in(dir.path(), "fixture-invoke-reserved").await;
     let agents_dir = dir.path().join(".claude").join("agents");
     std::fs::create_dir_all(&agents_dir).unwrap();
     std::fs::write(
@@ -185,7 +195,7 @@ async fn test_agent_reserved_fields_parsed() {
     )
     .unwrap();
 
-    let t = with_agent_face(make_subagent_tool(vec![]), dir.path()).await;
+    let t = host.bind(with_agent_face(make_subagent_tool(vec![]), dir.path()).await);
     let result = t
         .invoke(
             serde_json::json!({
@@ -197,14 +207,15 @@ async fn test_agent_reserved_fields_parsed() {
                 "run_in_background": true,
                 "cwd": dir.path().to_str().unwrap()
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            host.context(&[]),
         )
         .await
         .unwrap();
-    // Reserved fields don't affect execution, should still return normal result
+    // 保留字段不影响执行：durable 后台路径返回可恢复的启动回执
+    // （child_thread_id 可继续，任务立即注册）。
     assert!(
-        result.contains("echo"),
-        "Should execute normally: {}",
+        result.contains("Background task bg-") && result.contains("thread:"),
+        "Should start normally: {}",
         result
     );
 }
@@ -222,6 +233,7 @@ async fn test_agent_tool_in_list() {
 #[tokio::test]
 async fn test_system_builder_injects_system_message() {
     let dir = tempdir().unwrap();
+    let host = HostFixture::open_in(dir.path(), "fixture-invoke-system").await;
     let agents_dir = dir.path().join(".claude").join("agents");
     std::fs::create_dir_all(&agents_dir).unwrap();
     std::fs::write(
@@ -230,37 +242,21 @@ async fn test_system_builder_injects_system_message() {
     )
     .unwrap();
 
-    // LLM echoes system message content
-    struct SystemEchoLLM;
-    #[async_trait::async_trait]
-    impl ReactLLM for SystemEchoLLM {
-        async fn generate_reasoning(
-            &self,
-            messages: &[BaseMessage],
-            _tools: &[&dyn BaseTool],
-            _streaming: Option<StreamingContext>,
-        ) -> peri_agent::error::AgentResult<Reasoning> {
-            // Find system message and return its content
-            let system_content = messages
-                .iter()
-                .find(|m| matches!(m, BaseMessage::System { .. }))
-                .map(|m| m.content())
-                .unwrap_or_else(|| "no-system".to_string());
-            Ok(Reasoning::with_answer(
-                "",
-                format!("system={system_content}"),
-            ))
-        }
-    }
-
+    // H1：经生产 bridge 捕获最终请求 system（身份投影）。
+    let model = super::mock_model::RecordingModel::new("system-check");
     let t = SubAgentTool::new(
         Arc::new(vec![]),
         None,
-        Arc::new(|_: Option<&str>| Box::new(SystemEchoLLM) as Box<dyn ReactLLM + Send + Sync>),
+        Arc::new({
+            let model = Arc::clone(&model);
+            move |_: Option<&str>| {
+                SubagentLlmSource::model(model.clone() as Arc<dyn peri_model::Model>, "mock-model")
+            }
+        }),
         dir.path().to_str().unwrap().to_string(),
     )
     .with_system_builder(Arc::new(|_overrides, _cwd| "tone: be concise".to_string()));
-    let t = with_agent_face(t, dir.path()).await;
+    let t = host.bind(with_agent_face(t, dir.path()).await);
 
     let result = t
         .invoke(
@@ -269,14 +265,18 @@ async fn test_system_builder_injects_system_message() {
                 "prompt": "hello",
                 "cwd": dir.path().to_str().unwrap()
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            host.context(&[]),
         )
         .await
         .unwrap();
+    let system = model.last_system();
     assert!(
-        result.contains("tone: be concise"),
-        "System prompt should be injected: {}",
-        result
+        system.contains("tone: be concise"),
+        "System prompt should be injected via bridge base system: {system}"
+    );
+    assert!(
+        result.contains("system-check"),
+        "subagent should complete: {result}"
     );
 }
 
@@ -285,6 +285,7 @@ async fn test_system_builder_injects_system_message() {
 #[tokio::test]
 async fn test_skill_preload_registered() {
     let dir = tempdir().unwrap();
+    let host = HostFixture::open_in(dir.path(), "fixture-invoke-skill").await;
     let agents_dir = dir.path().join(".claude").join("agents");
     let skills_dir = dir.path().join(".claude").join("skills").join("test-skill");
     std::fs::create_dir_all(&agents_dir).unwrap();
@@ -308,17 +309,22 @@ async fn test_skill_preload_registered() {
     // LLM 验证 prompt 已由 Receive 写入、并精确统计显式 skill 的 fake ToolResult。
     let preload_count: Arc<std::sync::Mutex<usize>> = Arc::new(std::sync::Mutex::new(0));
     let preload_count_clone = Arc::clone(&preload_count);
+    #[derive(Clone)]
     struct SkillPreloadCheckLLM {
         preload_count: Arc<std::sync::Mutex<usize>>,
     }
-    #[async_trait::async_trait]
-    impl ReactLLM for SkillPreloadCheckLLM {
-        async fn generate_reasoning(
+    impl SkillPreloadCheckLLM {
+        async fn respond(
             &self,
-            messages: &[BaseMessage],
-            _tools: &[&dyn BaseTool],
-            _streaming: Option<StreamingContext>,
-        ) -> peri_agent::error::AgentResult<Reasoning> {
+            request: peri_model::ModelRequest,
+            cancellation: tokio_util::sync::CancellationToken,
+        ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
+            use crate::subagent::test_support::*;
+            let _ = &cancellation;
+            let messages = base_messages(&request);
+            let defined = defined_tools(&request);
+            let _tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
+
             assert!(
                 messages
                     .iter()
@@ -333,25 +339,29 @@ async fn test_skill_preload_registered() {
                         .contains("This is the test skill content.")
                 })
                 .count();
-            Ok(Reasoning::with_answer("", "skill_preload_found"))
+            text_events("skill_preload_found")
         }
     }
+    crate::subagent::test_support::fixture_model_impl!(SkillPreloadCheckLLM);
 
     let t = super::with_skill_registry(
         SubAgentTool::new(
             Arc::new(vec![]),
             None,
             Arc::new(move |_: Option<&str>| {
-                Box::new(SkillPreloadCheckLLM {
-                    preload_count: Arc::clone(&preload_count_clone),
-                }) as Box<dyn ReactLLM + Send + Sync>
+                crate::subagent::test_support::fixture_source(
+                    std::sync::Arc::new(SkillPreloadCheckLLM {
+                        preload_count: Arc::clone(&preload_count_clone),
+                    }),
+                    "fixture-scripted",
+                )
             }),
             dir.path().to_str().unwrap().to_string(),
         ),
         "workspace",
         &[("test-skill", "This is the test skill content.\n")],
     );
-    let t = with_agent_face(t, dir.path()).await;
+    let t = host.bind(with_agent_face(t, dir.path()).await);
 
     let result = t
         .invoke(
@@ -360,7 +370,7 @@ async fn test_skill_preload_registered() {
                 "prompt": "test task",
                 "cwd": dir.path().to_str().unwrap()
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            host.context(&[]),
         )
         .await
         .unwrap();
@@ -407,6 +417,7 @@ fn test_agent_description_extended() {
 #[tokio::test]
 async fn test_cancel_token_interrupts_subagent() {
     let dir = tempdir().unwrap();
+    let host = HostFixture::open_in(dir.path(), "fixture-invoke-cancel").await;
     let agents_dir = dir.path().join(".claude").join("agents");
     std::fs::create_dir_all(&agents_dir).unwrap();
     std::fs::write(
@@ -416,45 +427,55 @@ async fn test_cancel_token_interrupts_subagent() {
     .unwrap();
 
     // LLM always calls a never-registered tool, causing ToolNotFound but no infinite loop
+    #[derive(Clone)]
     struct ToolNotFoundLLM;
-    #[async_trait::async_trait]
-    impl ReactLLM for ToolNotFoundLLM {
-        async fn generate_reasoning(
+    impl ToolNotFoundLLM {
+        async fn respond(
             &self,
-            messages: &[BaseMessage],
-            _tools: &[&dyn BaseTool],
-            _streaming: Option<StreamingContext>,
-        ) -> peri_agent::error::AgentResult<Reasoning> {
+            request: peri_model::ModelRequest,
+            cancellation: tokio_util::sync::CancellationToken,
+        ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
+            use crate::subagent::test_support::*;
+            let _ = &cancellation;
+            let messages = base_messages(&request);
+            let defined = defined_tools(&request);
+            let _tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
+
             if messages
                 .iter()
                 .any(|m| matches!(m, BaseMessage::Tool { .. }))
             {
-                Ok(Reasoning::with_answer("", "done"))
+                text_events("done")
             } else {
-                Ok(Reasoning::with_tools(
-                    "call missing",
-                    vec![peri_agent::agent::react::ToolCall::new(
-                        "id1",
-                        "nonexistent",
-                        serde_json::json!({}),
-                    )],
-                ))
+                tool_events_from_react(vec![peri_agent::agent::react::ToolCall::new(
+                    "id1",
+                    "nonexistent",
+                    serde_json::json!({}),
+                )])
             }
         }
     }
+    crate::subagent::test_support::fixture_model_impl!(ToolNotFoundLLM);
 
     let cancel = AgentCancellationToken::new();
-    // Trigger cancellation before sub-agent execution
+    // Trigger cancellation before sub-agent execution（Cascade 语义下子链取消
+    // 来自父会话 token）
+    host.cancel_parent();
     cancel.cancel();
 
     let t = SubAgentTool::new(
         Arc::new(vec![]),
         None,
-        Arc::new(|_: Option<&str>| Box::new(ToolNotFoundLLM) as Box<dyn ReactLLM + Send + Sync>),
+        Arc::new(|_: Option<&str>| {
+            crate::subagent::test_support::fixture_source(
+                std::sync::Arc::new(ToolNotFoundLLM),
+                "fixture-scripted",
+            )
+        }),
         dir.path().to_str().unwrap().to_string(),
     )
     .with_cancel(cancel);
-    let t = with_agent_face(t, dir.path()).await;
+    let t = host.bind(with_agent_face(t, dir.path()).await);
 
     let result = t
         .invoke(
@@ -463,7 +484,7 @@ async fn test_cancel_token_interrupts_subagent() {
                 "prompt": "run",
                 "cwd": dir.path().to_str().unwrap()
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            host.context(&[]),
         )
         .await
         .unwrap();
@@ -478,7 +499,8 @@ async fn test_cancel_token_interrupts_subagent() {
 #[tokio::test]
 async fn test_agent_invoke_mcp_background_rejection_precedes_fork_fallback() {
     let dir = tempdir().unwrap();
-    let tool = make_subagent_tool(vec![]);
+    let host = HostFixture::open_in(dir.path(), "fixture-invoke-mcp-bg").await;
+    let tool = host.bind(make_subagent_tool(vec![]));
     let messages = vec![BaseMessage::human("parent context")];
     let mut input = serde_json::json!({
         "subagent_type": "mcp__missing__agent",
@@ -488,10 +510,7 @@ async fn test_agent_invoke_mcp_background_rejection_precedes_fork_fallback() {
         "cwd": dir.path().to_str().unwrap()
     });
     let error = tool
-        .invoke(
-            input.clone(),
-            peri_agent::tools::ToolContext::new(&messages, "."),
-        )
+        .invoke(input.clone(), host.context(&messages))
         .await
         .unwrap_err();
     assert_eq!(
@@ -499,10 +518,7 @@ async fn test_agent_invoke_mcp_background_rejection_precedes_fork_fallback() {
         "Error: MCP Agents currently support synchronous activation only"
     );
     input["run_in_background"] = serde_json::json!(false);
-    let result = tool
-        .invoke(input, peri_agent::tools::ToolContext::new(&messages, "."))
-        .await
-        .unwrap();
+    let result = tool.invoke(input, host.context(&messages)).await.unwrap();
     assert!(
         result.contains("fork task"),
         "同步 fork 不应尝试远端 definition 激活：{result}"
@@ -513,6 +529,7 @@ async fn test_agent_invoke_mcp_background_rejection_precedes_fork_fallback() {
 #[tokio::test]
 async fn test_agent_invoke_parent_host_masks_fallback_runtime_and_store() {
     let dir = tempdir().unwrap();
+    let _host = HostFixture::open_in(dir.path(), "fixture-invoke-parent-host").await;
     let fallback_dir = tempdir().unwrap();
     let store = SessionFixture::open_in(dir.path()).await;
     let fallback_store = SessionFixture::open_in(fallback_dir.path()).await;
@@ -532,14 +549,20 @@ async fn test_agent_invoke_parent_host_masks_fallback_runtime_and_store() {
         parent_thread_id: Some(parent_id.clone()),
         ..Default::default()
     });
+    // 本次委派的 tool-call 身份（父侧 provenance 来源）。
+    let invocation_id = "fixture-mask-invocation";
     let fallback_manager = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
     let tool = make_subagent_tool(vec![])
         .with_session_resources(fallback_store.facade())
         .with_task_manager(fallback_manager.clone())
+        .with_parent_thread_id(parent_id.clone())
         .with_parent_session(parent);
+    let mut ctx = peri_agent::tools::ToolContext::new(&[], &cwd);
+    ctx.invocation_id = Some(invocation_id.to_string());
+    ctx.tool_call_id = Some(invocation_id.to_string());
     let result = tool.invoke(
         serde_json::json!({"fork": true, "run_in_background": true, "prompt": "sync fallback", "cwd": cwd.clone()}),
-        peri_agent::tools::ToolContext::new(&[], "."),
+        ctx,
     ).await.unwrap();
     let thread_id = result
         .lines()

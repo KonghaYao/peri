@@ -7,14 +7,9 @@
 //! 不提供 `Read` / `Write` / `Edit` / `Glob` / `Grep` / `folder_operations` / `Bash`
 //! （与 Web/Artifact 的 A6 面③语义同构，见 [`WorkflowAgentMiddlewareFactory`]）。
 use crate::{
-    hitl::HumanInTheLoopMiddleware,
-    mcp::McpClientPool,
-    middleware::TodoMiddleware,
-    permission::{default_requires_approval, PermissionMiddleware},
-    skills::SkillsMiddleware,
-    subagent::SkillPreloadMiddleware,
-    workflow::WorkflowMiddleware,
-    AgentsMdMiddleware, GitAttributionMiddleware,
+    hitl::HumanInTheLoopMiddleware, mcp::McpClientPool, middleware::TodoMiddleware,
+    permission::PermissionMiddleware, skills::SkillsMiddleware, subagent::SkillPreloadMiddleware,
+    workflow::WorkflowMiddleware, AgentsMdMiddleware, GitAttributionMiddleware,
 };
 use peri_acp_types::{
     ports::WorkflowMiddlewarePort,
@@ -71,11 +66,11 @@ fn build_workflow_middlewares(
     let disabled = &ctx.meta_harness_disabled;
 
     if !disabled.contains("AgentsMdMiddleware") {
-        let mut agents_md = AgentsMdMiddleware::new();
-        if let Some(ref md) = ctx.frozen_claude_md {
-            agents_md =
-                agents_md.with_frozen_content(md.clone(), ctx.frozen_claude_local_md.clone());
-        }
+        // M4：main / local 独立贡献（local-only 有效）。
+        let agents_md = AgentsMdMiddleware::new().with_frozen_parts(
+            ctx.frozen_claude_md.clone(),
+            ctx.frozen_claude_local_md.clone(),
+        );
         middlewares.push(Box::new(agents_md));
     }
 
@@ -124,16 +119,12 @@ fn build_workflow_middlewares(
     // broker + permission_mode 均 Some 时启用审批（遵循 session 权限模式）；
     // 否则 Bypass（自主后台 agent 默认行为）。
     if !disabled.contains("PermissionMiddleware") {
-        let permission = match (&ctx.broker, &ctx.permission_mode) {
-            (Some(broker), Some(mode)) => PermissionMiddleware::with_shared_mode(
-                Arc::clone(broker),
-                default_requires_approval,
-                Arc::clone(mode),
-                None, // auto_classifier: workflow agent 不需要 LLM 分类器
-            ),
-            _ => PermissionMiddleware::disabled(),
-        };
-        middlewares.push(Box::new(permission));
+        // 有效模式规则归 `PermissionMiddleware`（H2/D3）：broker + 共享 mode 齐备
+        // ⇒ 共享模式审批；否则 disabled。段落投影消费同一规则。
+        middlewares.push(Box::new(PermissionMiddleware::for_workflow(
+            ctx.broker.clone(),
+            ctx.permission_mode.clone(),
+        )));
     }
     // 提问通道（新 HumanInTheLoopMiddleware，含 AskUserQuestion）：
     // workflow agent 的 broker 恒 None（advisor 裁决 B：workflow 链不

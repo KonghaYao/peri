@@ -273,6 +273,13 @@ impl ConfigurationClient {
         }
     }
 
+    pub fn canonicalize(&self, path: &Path) -> io::Result<Option<PathBuf>> {
+        match self.request(ConfigurationRequest::Canonicalize { path: path.into() })? {
+            ConfigurationValue::CanonicalPath(path) => Ok(path),
+            _ => Err(invalid_response()),
+        }
+    }
+
     pub fn paths(&self) -> io::Result<ConfigurationPaths> {
         match self.request(ConfigurationRequest::Paths)? {
             ConfigurationValue::Paths(paths) => Ok(paths),

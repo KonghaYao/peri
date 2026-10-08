@@ -14,7 +14,6 @@ use std::{
 use peri_acp_types::plugin::PluginLoadResult;
 use peri_acp_types::skills::SkillRoot;
 
-use crate::prompt::PromptRuntimeEnv;
 use crate::provider::{ConfigSource, LlmProvider, PeriConfig};
 use crate::session::executor::FrozenSessionData;
 use crate::session::frozen_snapshot::{decode_frozen_snapshot, encode_frozen_snapshot};
@@ -28,7 +27,7 @@ use super::AcpServerConfig;
 ///
 /// 顶层字段（`configuration` / `plugin_data` / `frozen` / `frozen_encoded`）就是按
 /// `saved_cwd` 构建的结果——不重复存第二份，避免同源双写；接纳竞争后 `frozen` 由
-/// winner 的持久字节注入（[`PreparedSessionInputs::inject_frozen`]），其余字段不变。
+/// 接纳后按 winner 的持久字节重新定格（`prepare_restore`），其余字段不变。
 #[derive(Debug, Clone)]
 pub(crate) struct LegacyAdoptionInputs {
     /// 保存的绝对执行目录（不是调用方终端的 cwd）。
@@ -87,13 +86,7 @@ impl PreparedSessionInputs {
     #[cfg(test)]
     pub(crate) fn prepare_new(host: &AcpServerConfig, cwd: &str) -> Result<Self, AcpError> {
         let mut inputs = Self::prepare_scope(host, cwd, FrozenSource::Build)?;
-        inputs.build_frozen_after_activation(
-            host,
-            &PromptRuntimeEnv::detect(cwd),
-            HashMap::new(),
-            &[],
-            &Default::default(),
-        )?;
+        inputs.build_frozen_after_activation(host, HashMap::new(), &[], &Default::default())?;
         Ok(inputs)
     }
 
@@ -104,13 +97,13 @@ impl PreparedSessionInputs {
         Self::prepare_scope(host, cwd, FrozenSource::Build)
     }
 
-    /// frozen 按本次解析出的执行目录 `workspace_cwd` 构建（现有兼容语义）。
-    /// legacy 恢复准备：`saved_cwd` 是登记事实（保存的绝对 cwd），配置/插件/
-    /// frozen 按本次解析出的执行目录 `workspace_cwd` 构建（既有兼容语义）。
+    /// legacy 首次接纳的**阶段一**：配置/插件/执行目录一次定格，**不构建 frozen**。
     ///
-    /// 该构建发生在接纳事务之前，彼时没有执行环境与 MCP 资源面，覆盖文档不可得
-    /// （X8：保持内置并 warn，不回落磁盘）。
-    pub(crate) fn prepare_legacy(
+    /// `saved_cwd` 是登记事实（保存的绝对 cwd），配置/插件按本次解析出的执行目录
+    /// `workspace_cwd` 定格（既有兼容语义）。frozen 必须等资源环境 bootstrap 并
+    /// 读到内容后再定稿（`build_frozen_after_activation`），由接纳事务一次性写入
+    /// —— 不允许先写空 frozen 再替换（write-once 语义）。
+    pub(crate) fn prepare_legacy_deferred(
         host: &AcpServerConfig,
         saved_cwd: &str,
         workspace_cwd: &str,
@@ -119,20 +112,6 @@ impl PreparedSessionInputs {
         inputs.legacy = Some(LegacyAdoptionInputs {
             saved_cwd: PathBuf::from(saved_cwd),
         });
-        // legacy 首次接纳发生在内容准入之前：没有执行环境 ⇒ 没有 workspace 资源面
-        // ⇒ 技能摘要与项目指令都不可得（J2 §3.1；X4/J5：零磁盘兜底）。这里显式
-        // warn，避免「永久为空且无任何信号」。
-        tracing::warn!(
-            cwd = %workspace_cwd,
-            "legacy 首次接纳无执行环境：项目指令与技能摘要不可得（不回落磁盘）"
-        );
-        inputs.build_frozen_after_activation(
-            host,
-            &PromptRuntimeEnv::detect(workspace_cwd),
-            HashMap::new(),
-            &[],
-            &Default::default(),
-        )?;
         Ok(inputs)
     }
 
@@ -159,36 +138,16 @@ impl PreparedSessionInputs {
         Self::prepare_scope(host, cwd, FrozenSource::Reuse(persisted_snapshot))
     }
 
-    /// 把 winner 的持久字节注入为唯一 frozen 事实源（legacy 接纳竞争后重读的判据）。
+    /// 内容准入的冻结构建：运行环境在本函数内按**有效 Workspace 来源**定格
+    /// （H3/D1，`workspace::frozen_runtime_env`）——调用方不再各自传入探测值，
+    /// 避免远端 Workspace 会话冻结宿主环境冒充远端执行环境。
     ///
-    /// 本方法与 `frozen_encoded` 一起替换，保证「解码视图」与「字节」不出现两个真相；
-    /// 只用于恢复路径（装配是消费者，不再构建第二份候选）。
-    pub(crate) fn inject_frozen(
-        &mut self,
-        frozen: FrozenSessionData,
-        encoded: String,
-    ) -> Result<(), AcpError> {
-        // 注入的视图与字节必须互相解码一致：两者只能有一个真相，不一致是内部错误。
-        let decoded_date = decode_frozen_snapshot(&encoded)
-            .map(|decoded| decoded.date().to_owned())
-            .unwrap_or_default();
-        debug_assert_eq!(
-            decoded_date,
-            frozen.date(),
-            "injected frozen view and bytes must decode consistently"
-        );
-        self.frozen = Some(frozen);
-        self.frozen_encoded = Some(encoded);
-        Ok(())
-    }
-
     /// `skill_catalog` = P4 内容准入期从 system 来源（builtin `workspace` 实例）
     /// 取到的技能元数据快照（W4b/F3）：空快照 = 技能面为空/不适用，不是错误。
     /// legacy 首次接纳等无执行环境的构造点传空快照（J5：不回落磁盘）。
     pub(crate) fn build_frozen_after_activation(
         &mut self,
         host: &AcpServerConfig,
-        runtime_env: &PromptRuntimeEnv,
         docs: HashMap<String, String>,
         skill_catalog: &[peri_acp_types::skills::SkillMetadata],
         instructions: &crate::session::executor::FrozenInstructions,
@@ -196,6 +155,8 @@ impl PreparedSessionInputs {
         if self.frozen.is_some() {
             return Ok(());
         }
+        let runtime_env =
+            super::workspace::frozen_runtime_env(host, &self.session_mcp_servers, &self.cwd);
         let mut deployment_closed = std::collections::HashSet::new();
         let capabilities = self.deployment_capabilities;
         for instance in peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES {
@@ -208,7 +169,7 @@ impl PreparedSessionInputs {
             .build_frozen_data_with_deployment_closure(
                 &self.configuration.config,
                 &self.cwd,
-                runtime_env,
+                runtime_env.as_ref(),
                 docs,
                 skill_catalog,
                 instructions,

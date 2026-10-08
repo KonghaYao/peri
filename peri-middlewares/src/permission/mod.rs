@@ -22,7 +22,7 @@ use crate::tool_search::core_tools::{
 };
 
 /// broker.request 超时（秒）：防止挂起 broker 导致 before_tool 永久阻塞
-const BROKER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+pub(crate) const BROKER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
 pub mod auto_classifier;
 pub mod shared_mode;
@@ -363,6 +363,48 @@ impl PermissionMiddleware {
         }
     }
 
+    /// 审批通道是否有效（H2 有效模式判定；实例级）。
+    ///
+    /// `disabled()`（无 broker、无 mode）为 false：工具调用直接放行，声明
+    /// 10_hitl 会让模型等待永不到来的审批，因此不声明该段——「存在不等于需要
+    /// 审批说明」，装配事实之外还要看持有者的有效模式。
+    ///
+    /// 规则唯一事实源是 [`Self::approval_active_from`]：装配面（`for_workflow` /
+    /// 主链 `with_shared_mode`）与段落投影（`prompt_policy`）都消费同一函数，
+    /// 不允许出现两份漂移的判定。
+    pub fn approval_active(&self) -> bool {
+        Self::approval_active_from(self.broker.is_some(), self.mode.is_some())
+    }
+
+    /// 有效审批判定（构造输入级）：broker 或共享 mode **任一存在** ⇒ 审批通道
+    /// 有效；两者皆无 ⇒ 放行（disabled）。
+    pub fn approval_active_from(broker_present: bool, mode_present: bool) -> bool {
+        broker_present || mode_present
+    }
+
+    /// workflow 链的审批装配与判定（**同一规则的两个出口**）：
+    ///
+    /// `broker` 与共享 `permission_mode` **齐备**才构造启用共享模式的实例
+    /// （自主后台 agent 的既有语义：缺任一即 Bypass）；否则 `disabled()`
+    /// （无审批通道，段落投影随之为 10_hitl 缺席）。
+    pub fn for_workflow(
+        broker: Option<Arc<dyn UserInteractionBroker>>,
+        mode: Option<Arc<SharedPermissionMode>>,
+    ) -> Self {
+        match (broker, mode) {
+            (Some(broker), Some(mode)) => {
+                Self::with_shared_mode(broker, default_requires_approval, mode, None)
+            }
+            _ => Self::disabled(),
+        }
+    }
+
+    /// workflow 链的有效审批事实（与 [`Self::for_workflow`] 同一规则；
+    /// 段落投影在无链构造点消费它）。
+    pub fn workflow_approval_active(broker_present: bool, mode_present: bool) -> bool {
+        matches!((broker_present, mode_present), (true, true))
+    }
+
     /// 创建带共享权限模式的 HITL 中间件
     pub fn with_shared_mode(
         broker: Arc<dyn UserInteractionBroker>,
@@ -396,7 +438,7 @@ impl PermissionMiddleware {
 }
 
 /// 将 `ApprovalDecision` 映射为 `AgentResult<ToolCall>`
-fn apply_decision(call: &ToolCall, decision: ApprovalDecision) -> AgentResult<ToolCall> {
+pub(crate) fn apply_decision(call: &ToolCall, decision: ApprovalDecision) -> AgentResult<ToolCall> {
     match decision {
         ApprovalDecision::Approve { .. } => Ok(call.clone()),
         ApprovalDecision::Edit { new_input } => {
@@ -640,7 +682,14 @@ impl Middleware for PermissionMiddleware {
     }
 
     /// 声明持有的系统提示词段落（10_hitl，内容载体；装配期收集，契约 2）。
+    ///
+    /// 有效模式判定（H2）：审批通道无效（`disabled()`——无 broker、无 mode）
+    /// 时不声明 10_hitl，与 `prompt_policy::collect_prompt_sections` 的能力
+    /// 投影同源；workflow 链的 disabled 实例因此不会向模型声明审批机制。
     fn prompt_sections(&self) -> Vec<PromptSection> {
+        if !self.approval_active() {
+            return Vec::new();
+        }
         Self::sections_for_disabled(&self.prompt_disabled_builtin)
     }
 

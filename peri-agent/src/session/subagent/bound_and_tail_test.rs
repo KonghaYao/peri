@@ -206,7 +206,10 @@ fn tail_spawn_config(
         fork_directive_kind: None,
         run_mode: SubagentRunMode::Sync,
         skill_names: Vec::new(),
-        llm: Box::new(TailChunkLLM(outcome)),
+        llm: crate::session::test_resources::mock::model::fixture_source(
+            std::sync::Arc::new(TailChunkLLM(outcome)),
+            "fixture-scripted",
+        ),
         chain_assembler: Arc::new(EmptyChainAssembler),
         tools: Vec::new(),
         tool_filter: Arc::new(|_| true),

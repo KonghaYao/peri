@@ -13,6 +13,7 @@ pub(super) fn add_hooks(ctx: &AssemblyContext, chain: &mut MiddlewareChain) {
         permission_mode,
         provider_name,
         task_manager,
+        broker,
         ..
     } = ctx;
     tracing::info!(
@@ -25,7 +26,11 @@ pub(super) fn add_hooks(ctx: &AssemblyContext, chain: &mut MiddlewareChain) {
         let hook_llm_factory: Arc<dyn Fn() -> Box<dyn ReactLLM + Send + Sync> + Send + Sync> =
             Arc::new({
                 let factory = llm_factory.clone();
-                move || factory(None)
+                move || {
+                    // H1：工厂只产出模型来源；hook LLM 不装身份/贡献（与迁移前
+                    // 的 bridge 语义一致：仅 session id）。
+                    factory(None).into_plain_bridge()
+                }
             });
         for (i, group) in hook_groups.iter().enumerate() {
             if group.is_empty() {
@@ -42,7 +47,10 @@ pub(super) fn add_hooks(ctx: &AssemblyContext, chain: &mut MiddlewareChain) {
                 provider_name.clone(),
                 session_start_source.clone(),
             )
-            .with_task_manager(task_manager.clone());
+            .with_task_manager(task_manager.clone())
+            // PreToolUse `ask` 与 PermissionMiddleware 共用同一 broker 源：
+            // 宿主会弹窗时交宿主，宿主不会弹窗时由 hook 层有界审批，避免双通道
+            .with_broker(Arc::clone(broker));
             tracing::info!(
                 group_index = i,
                 group_size,

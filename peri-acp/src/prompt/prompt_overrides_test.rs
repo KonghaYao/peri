@@ -62,11 +62,27 @@ fn meta_harness_override_not_trimmed() {
 
 #[test]
 fn meta_harness_override_placeholders_still_substituted() {
-    // override 内容中的占位符参与渲染期替换（与内置段落同一通道）
-    let state = override_state("01_intro", "cwd={{cwd}} platform={{platform}}");
+    // Uncached 段的覆盖内容中，已知占位符参与渲染期替换（与内置段落同一通道）
+    let state = override_state("13_skills", "cwd={{cwd}} platform={{platform}}");
     let result = render_with_state(&state);
     assert!(result.contains("cwd=/tmp"), "{{cwd}} 被替换");
     assert!(result.contains("platform="), "{{platform}} 被替换");
+}
+
+/// M11/L3：Cached 段覆盖含动态占位符 → 拒绝应用并保留内置段（缓存区只接收
+/// 纯静态模板；不再把动态值注入缓存前缀）。
+#[test]
+fn meta_harness_cached_override_with_placeholder_is_rejected() {
+    let state = override_state("01_intro", "cwd={{cwd}}");
+    let result = render_with_state(&state);
+    assert!(
+        result.contains("Assist with defensive security tasks"),
+        "Cached 段非法覆盖 → 内置 01_intro 保留"
+    );
+    assert!(
+        !result.contains("cwd=/tmp"),
+        "Cached 段不得注入动态占位符值"
+    );
 }
 
 #[test]
@@ -187,7 +203,7 @@ fn meta_harness_build_and_template_byte_identical() {
         Some("2026-01-01"),
         Some("zh"),
     );
-    let env = PromptEnv::with_frozen_date("/tmp", "2026-01-01");
+    let env = PromptEnv::local_probe("/tmp", "2026-01-01");
     let collected = crate::session::build_collected_sections(&state, Some(&overrides), Some("zh"));
     let via_template =
         PromptTemplate::new(&state, &collected).render(&env, &AgentCatalogProvider::new());
@@ -332,9 +348,10 @@ fn meta_harness_override_language_without_config() {
 
 /// 契约 2：收集段落按"位置 + 段内序号"排序渲染，**不依赖链序**。
 ///
-/// collected 以乱序传入（zz order=9 在前、aa order=8 在后），渲染必须按
+/// collected 以乱序传入（zz order=10 在前、aa order=9 在后），渲染必须按
 /// 段内序号升序输出；非缓存区段落在 07_runtime 之后、Language 段之前
-/// （language order=7 < aa order=8 < zz order=9）。
+/// （language order=8 < aa order=9 < zz order=10；空闲序号，不与
+/// `(zone, order)` 唯一性守护冲突）。
 #[test]
 fn collected_sections_render_in_position_order() {
     let mut collected =
@@ -343,17 +360,17 @@ fn collected_sections_render_in_position_order() {
     collected.push(collected_section(
         "zz_collected",
         PromptSectionZone::Uncached,
-        9,
+        10,
         "ZZ-COLLECTED-LATE",
     ));
     collected.push(collected_section(
         "aa_collected",
         PromptSectionZone::Uncached,
-        8,
+        9,
         "AA-COLLECTED-EARLY",
     ));
 
-    let env = PromptEnv::with_frozen_date("/tmp", "2026-01-01");
+    let env = PromptEnv::local_probe("/tmp", "2026-01-01");
     let result = PromptTemplate::new(&MetaHarnessState::default(), &collected)
         .render(&env, &AgentCatalogProvider::new());
     let pos_runtime = result.find("## System Reminders").unwrap();
@@ -389,7 +406,7 @@ fn collected_section_overrides_builtin_by_id() {
         "COLLECTED-INTRO",
     ));
 
-    let env = PromptEnv::with_frozen_date("/tmp", "2026-01-01");
+    let env = PromptEnv::local_probe("/tmp", "2026-01-01");
     let result = PromptTemplate::new(&MetaHarnessState::default(), &collected)
         .render(&env, &AgentCatalogProvider::new());
     assert!(result.contains("COLLECTED-INTRO"), "收集段落内容渲染");
@@ -414,11 +431,11 @@ fn collected_empty_content_skipped() {
     collected.push(collected_section(
         "zz_empty",
         PromptSectionZone::Uncached,
-        8,
+        9,
         "",
     ));
 
-    let env = PromptEnv::with_frozen_date("/tmp", "2026-01-01");
+    let env = PromptEnv::local_probe("/tmp", "2026-01-01");
     let result = PromptTemplate::new(&MetaHarnessState::default(), &collected)
         .render(&env, &AgentCatalogProvider::new());
     assert!(!result.contains("zz_empty"), "空内容段落不渲染");
@@ -433,11 +450,11 @@ fn collected_dynamic_content_rendered() {
     collected.push(PromptSection::dynamic(
         "zz_dyn",
         PromptSectionZone::Uncached,
-        8,
+        9,
         "DYNAMIC-COLLECTED".to_string(),
     ));
 
-    let env = PromptEnv::with_frozen_date("/tmp", "2026-01-01");
+    let env = PromptEnv::local_probe("/tmp", "2026-01-01");
     let result = PromptTemplate::new(&MetaHarnessState::default(), &collected)
         .render(&env, &AgentCatalogProvider::new());
     assert!(result.contains("DYNAMIC-COLLECTED"), "动态内容段落渲染");
@@ -458,7 +475,7 @@ fn collected_content_merged_with_meta_harness_override() {
     ));
     let state = override_state("05_using_tools", "OVERRIDE-TOOLS");
 
-    let env = PromptEnv::with_frozen_date("/tmp", "2026-01-01");
+    let env = PromptEnv::local_probe("/tmp", "2026-01-01");
     let result = PromptTemplate::new(&state, &collected).render(&env, &AgentCatalogProvider::new());
     assert!(result.contains("OVERRIDE-TOOLS"), "覆盖全文替换持有者段落");
     assert!(
@@ -475,11 +492,11 @@ fn collected_sections_are_rendered() {
     collected.push(collected_section(
         "zz_collected",
         PromptSectionZone::Uncached,
-        8,
+        9,
         "GATE-FREE-COLLECTED",
     ));
 
-    let env = PromptEnv::with_frozen_date("/tmp", "2026-01-01");
+    let env = PromptEnv::local_probe("/tmp", "2026-01-01");
     let result = PromptTemplate::new(&MetaHarnessState::default(), &collected)
         .render(&env, &AgentCatalogProvider::new());
     assert!(result.contains("GATE-FREE-COLLECTED"), "收集段恒渲染");
@@ -487,15 +504,25 @@ fn collected_sections_are_rendered() {
 
 // ─── C 扩展 / E 补测试（2026-08-14 advisor 矩阵缺口）───────────────────────
 
-/// 覆盖语义边界（empty 定义，C 项裁定）：空串覆盖 → `is_empty()` 过滤 →
-/// 段落整体消失（与契约 4"未提供内容 = 跳过渲染"同一路径）。
+/// 覆盖语义边界（L3 修订）：空串覆盖是**非法控制输入**——拒绝应用并保留
+/// 内置段（不再有「空覆盖把段落整体删掉」的静默路径）；拒绝结果可诊断
+/// （sanitize 返回段落 + 类别）。
 #[test]
-fn meta_harness_override_empty_removes_section() {
-    let state = override_state("01_intro", "");
+fn meta_harness_override_empty_is_rejected_builtin_kept() {
+    let sections =
+        crate::session::build_collected_sections(&MetaHarnessState::default(), None, None);
+    let mut state = override_state("01_intro", "");
+    let rejected =
+        crate::prompt::section_validation::sanitize_section_overrides(&mut state, &sections);
+    assert_eq!(rejected.len(), 1);
+    assert_eq!(rejected[0].0, "01_intro");
+    assert_eq!(rejected[0].1.category(), "empty");
+    assert!(state.section_overrides.is_empty(), "非法覆盖不入冻结状态");
+
     let result = render_with_state(&state);
     assert!(
-        !result.contains("Assist with defensive security tasks"),
-        "空串覆盖 → 01_intro 经 is_empty 过滤从输出消失"
+        result.contains("Assist with defensive security tasks"),
+        "空覆盖被拒绝 → 内置 01_intro 保留"
     );
     assert!(result.contains("Following conventions"), "其余段落不受影响");
 }
@@ -504,25 +531,33 @@ fn meta_harness_override_empty_removes_section() {
 /// 原样渲染，不 trim 也不消失（与 `meta_harness_override_not_trimmed`
 /// 既定不 trim 语义一致；空白段落保留原位）。
 #[test]
-fn meta_harness_override_whitespace_renders_as_is() {
+fn meta_harness_override_whitespace_only_is_rejected() {
+    // 纯空白视同空覆盖：显式拒绝并保留内置段（不 trim 后照常渲染）。
     let state = override_state("01_intro", "   ");
     let result = render_with_state(&state);
-    // 01_intro 为缓存区首段，渲染结果以其内容开头（无前缀分隔符）
     assert!(
-        result.starts_with("   "),
-        "空白覆盖原样渲染（不 trim）：{:?}",
+        !result.starts_with("   "),
+        "空白覆盖不得进入渲染：{:?}",
         &result[..result.len().min(24)]
     );
     assert!(
-        result.contains("Following conventions"),
-        "空白覆盖不触发空过滤，段落保留"
+        result.contains("Assist with defensive security tasks"),
+        "内置 01_intro 保留"
+    );
+    assert!(result.contains("Following conventions"), "其余段落不受影响");
+    // 合法非空白覆盖仍原样渲染（不 trim）
+    let padded = override_state("01_intro", "\n  # Padded  \n\nbody  \n");
+    assert!(
+        render_with_state(&padded).contains("\n  # Padded  \n\nbody  \n"),
+        "非空覆盖不被 trim"
     );
 }
 
-/// 收集契约（C 项矩阵）：collected 中重复 ID → 后者覆盖前者（位置属性随
-/// 后者声明），渲染恰好一次。
+/// 收集契约（M11 修订）：collected 中重复 ID 是装配冲突——构造期显式失败
+/// 并指出来源段落；渲染面不再有「重复 ID 后者覆盖前者」的兜底语义。
 #[test]
-fn collected_duplicate_id_last_wins() {
+#[should_panic(expected = "段落装配冲突")]
+fn collected_duplicate_id_fails_at_construction() {
     let mut collected =
         crate::session::build_collected_sections(&MetaHarnessState::default(), None, None);
     collected.push(collected_section(
@@ -538,24 +573,16 @@ fn collected_duplicate_id_last_wins() {
         "DUP-SECOND",
     ));
 
-    let env = PromptEnv::with_frozen_date("/tmp", "2026-01-01");
-    let result = PromptTemplate::new(&MetaHarnessState::default(), &collected)
+    let env = PromptEnv::local_probe("/tmp", "2026-01-01");
+    let _ = PromptTemplate::new(&MetaHarnessState::default(), &collected)
         .render(&env, &AgentCatalogProvider::new());
-    assert!(
-        result.contains("DUP-SECOND") && !result.contains("DUP-FIRST"),
-        "重复 ID 后者覆盖前者"
-    );
-    assert_eq!(
-        result.matches("DUP-SECOND").count(),
-        1,
-        "重复 ID 段渲染恰好一次"
-    );
 }
 
-/// 收集契约（C 项矩阵）：同 (zone, order) 的收集段 → stable 排序保持
-/// 收集声明顺序（`sort_by_key` 稳定，不依赖链序的兜底语义）。
+/// 收集契约（M11 修订）：同 (zone, order) 是装配冲突——渲染顺序不再有
+/// 「按声明顺序稳定排序」的兜底；冲突在构造期显式失败。
 #[test]
-fn collected_same_zone_order_stable() {
+#[should_panic(expected = "段落装配冲突")]
+fn collected_same_zone_order_fails_at_construction() {
     let mut collected =
         crate::session::build_collected_sections(&MetaHarnessState::default(), None, None);
     collected.push(collected_section(
@@ -571,13 +598,7 @@ fn collected_same_zone_order_stable() {
         "STABLE-SECOND",
     ));
 
-    let env = PromptEnv::with_frozen_date("/tmp", "2026-01-01");
-    let result = PromptTemplate::new(&MetaHarnessState::default(), &collected)
+    let env = PromptEnv::local_probe("/tmp", "2026-01-01");
+    let _ = PromptTemplate::new(&MetaHarnessState::default(), &collected)
         .render(&env, &AgentCatalogProvider::new());
-    let pos_first = result.find("STABLE-FIRST").unwrap();
-    let pos_second = result.find("STABLE-SECOND").unwrap();
-    assert!(
-        pos_first < pos_second,
-        "同 (zone, order) 稳定排序保持声明顺序：{pos_first} < {pos_second}"
-    );
 }

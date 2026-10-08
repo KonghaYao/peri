@@ -10,21 +10,18 @@ async fn test_resume_thread_id_placeholder_ignored_and_spawns_new() {
     for placeholder in ["", "new", "__omit__"] {
         let dir = tempdir().unwrap();
         write_test_agent(&dir);
-        let fixture = SessionFixture::open_in(dir.path()).await;
-        let (t, cwd) = install_parent_session(
-            with_agent_face(make_subagent_tool(vec![]), dir.path()).await,
-            &fixture,
-        )
-        .await;
+        let _fixture = SessionFixture::open_in(dir.path()).await;
+        let host = HostFixture::open_in(dir.path(), "fixture-resume-placeholder").await;
+        let t = host.bind(with_agent_face(make_subagent_tool(vec![]), dir.path()).await);
         let result = t
             .invoke(
                 serde_json::json!({
                     "resume_thread_id": placeholder,
                     "subagent_type": "test-agent",
-                    "cwd": cwd,
+                    "cwd": host.cwd.clone(),
                     "prompt": "do it",
                 }),
-                peri_agent::tools::ToolContext::new(&[], "."),
+                host.context(&[]),
             )
             .await;
         assert!(
@@ -64,6 +61,7 @@ async fn test_resume_thread_id_ignores_fork_field() {
         peri_agent::session::FrozenContext::builder().build(),
         Some(parent_id.clone()),
     );
+    install_parent_host(&store, &parent);
     let id = uuid::Uuid::now_v7().to_string();
     preset_resumable_thread(
         &store,
@@ -86,7 +84,7 @@ async fn test_resume_thread_id_ignores_fork_field() {
                 "fork": true,
                 "cwd": cwd.clone(),
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            preset_child_ctx(&id, "."),
         )
         .await
         .expect("resume+fork 应容错恢复而非报互斥错误");
@@ -115,6 +113,7 @@ async fn test_resume_thread_id_ignores_subagent_type_field() {
         peri_agent::session::FrozenContext::builder().build(),
         Some(parent_id.clone()),
     );
+    install_parent_host(&store, &parent);
     let id = uuid::Uuid::now_v7().to_string();
     preset_resumable_thread(
         &store,
@@ -137,7 +136,7 @@ async fn test_resume_thread_id_ignores_subagent_type_field() {
                 "subagent_type": "test-agent",
                 "cwd": cwd.clone(),
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            preset_child_ctx(&id, "."),
         )
         .await
         .expect("resume+subagent_type 应容错恢复而非报互斥错误");
@@ -278,7 +277,7 @@ async fn test_resume_thread_id_active_rejected() {
             serde_json::json!({
                 "resume_thread_id": id,
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            preset_child_ctx(&id, "."),
         )
         .await;
     let error = result.unwrap_err();
@@ -349,7 +348,7 @@ async fn test_resume_thread_id_parent_mismatch_is_rejected_by_root_ownership() {
                 "resume_thread_id": id.clone(),
                 "cwd": cwd.clone(),
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            preset_child_ctx(&id, "."),
         )
         .await
         .expect_err("跨根恢复必须被拒绝");
@@ -387,6 +386,7 @@ async fn test_resume_thread_id_background_combination() {
         peri_agent::session::FrozenContext::builder().build(),
         Some(parent_id.clone()),
     );
+    install_parent_host(&store, &parent);
     let id = uuid::Uuid::now_v7().to_string();
     preset_resumable_thread(&store, &id, "fork", Some(parent_id.as_str()), Vec::new()).await;
 
@@ -405,7 +405,7 @@ async fn test_resume_thread_id_background_combination() {
                 "resume_thread_id": id.clone(),
                 "run_in_background": true,
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            preset_child_ctx(&id, "."),
         )
         .await
         .expect("resume+bg 应启动后台任务");
@@ -463,6 +463,7 @@ async fn test_resume_thread_id_success_replays_and_completes() {
         peri_agent::session::FrozenContext::builder().build(),
         Some(parent_id.clone()),
     );
+    install_parent_host(&store, &parent);
     let id = uuid::Uuid::now_v7().to_string();
     preset_resumable_thread(
         &store,
@@ -484,7 +485,7 @@ async fn test_resume_thread_id_success_replays_and_completes() {
                 "resume_thread_id": id.clone(),
                 "cwd": cwd.clone(),
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            preset_child_ctx(&id, "."),
         )
         .await
         .expect("resume 应成功");
@@ -515,6 +516,7 @@ async fn test_resume_thread_id_fork_title_uses_parent_tools_and_200_iterations()
         peri_agent::session::FrozenContext::builder().build(),
         Some(parent_id.clone()),
     );
+    install_parent_host(&store, &parent);
     let id = uuid::Uuid::now_v7().to_string();
     preset_resumable_thread(
         &store,
@@ -531,40 +533,46 @@ async fn test_resume_thread_id_fork_title_uses_parent_tools_and_200_iterations()
         Arc::new(std::sync::Mutex::new(Vec::new()));
     let calls_clone = Arc::clone(&llm_calls);
     let tools_clone = Arc::clone(&tools_capture);
+    #[derive(Clone)]
     struct ForkLoopLLM {
         calls: Arc<std::sync::atomic::AtomicUsize>,
         captured: Arc<std::sync::Mutex<Vec<String>>>,
     }
-    #[async_trait::async_trait]
-    impl ReactLLM for ForkLoopLLM {
-        async fn generate_reasoning(
+    impl ForkLoopLLM {
+        async fn respond(
             &self,
-            _messages: &[BaseMessage],
-            tools: &[&dyn BaseTool],
-            _streaming: Option<StreamingContext>,
-        ) -> peri_agent::error::AgentResult<Reasoning> {
+            request: peri_model::ModelRequest,
+            cancellation: tokio_util::sync::CancellationToken,
+        ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
+            use crate::subagent::test_support::*;
+            let _ = &cancellation;
+            let _messages = base_messages(&request);
+            let defined = defined_tools(&request);
+            let tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
+
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             *self.captured.lock().unwrap() = tools.iter().map(|t| t.name().to_string()).collect();
-            Ok(Reasoning::with_tools(
-                "keep looping",
-                vec![peri_agent::agent::react::ToolCall::new(
-                    "id1",
-                    "nonexistent",
-                    serde_json::json!({}),
-                )],
-            ))
+            tool_events_from_react(vec![peri_agent::agent::react::ToolCall::new(
+                "id1",
+                "nonexistent",
+                serde_json::json!({}),
+            )])
         }
     }
+    crate::subagent::test_support::fixture_model_impl!(ForkLoopLLM);
 
     let parent_tools = vec![make_tool("Read"), make_tool("Agent")];
     let t = SubAgentTool::new(
         Arc::new(parent_tools),
         None,
         Arc::new(move |_: Option<&str>| {
-            Box::new(ForkLoopLLM {
-                calls: Arc::clone(&calls_clone),
-                captured: Arc::clone(&tools_clone),
-            }) as Box<dyn ReactLLM + Send + Sync>
+            crate::subagent::test_support::fixture_source(
+                std::sync::Arc::new(ForkLoopLLM {
+                    calls: Arc::clone(&calls_clone),
+                    captured: Arc::clone(&tools_clone),
+                }),
+                "fixture-scripted",
+            )
         }),
         "/tmp".to_string(),
     )
@@ -577,7 +585,7 @@ async fn test_resume_thread_id_fork_title_uses_parent_tools_and_200_iterations()
             serde_json::json!({
                 "resume_thread_id": id.clone(),
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            preset_child_ctx(&id, "."),
         )
         .await;
     // 迭代上限耗尽 → MaxIterationsExceeded 错误（fork resume 上限 = 200）
@@ -627,6 +635,7 @@ async fn test_resume_thread_id_agent_def_refilters_tools() {
         peri_agent::session::FrozenContext::builder().build(),
         Some(parent_id.clone()),
     );
+    install_parent_host(&store, &parent);
     let id = uuid::Uuid::now_v7().to_string();
     preset_resumable_thread(
         &store,
@@ -640,30 +649,39 @@ async fn test_resume_thread_id_agent_def_refilters_tools() {
     let tools_capture: Arc<std::sync::Mutex<Vec<String>>> =
         Arc::new(std::sync::Mutex::new(Vec::new()));
     let tools_capture_clone = Arc::clone(&tools_capture);
+    #[derive(Clone)]
     struct ResumeFilterLLM {
         captured: Arc<std::sync::Mutex<Vec<String>>>,
     }
-    #[async_trait::async_trait]
-    impl ReactLLM for ResumeFilterLLM {
-        async fn generate_reasoning(
+    impl ResumeFilterLLM {
+        async fn respond(
             &self,
-            _messages: &[BaseMessage],
-            tools: &[&dyn BaseTool],
-            _streaming: Option<StreamingContext>,
-        ) -> peri_agent::error::AgentResult<Reasoning> {
+            request: peri_model::ModelRequest,
+            cancellation: tokio_util::sync::CancellationToken,
+        ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
+            use crate::subagent::test_support::*;
+            let _ = &cancellation;
+            let _messages = base_messages(&request);
+            let defined = defined_tools(&request);
+            let tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
+
             *self.captured.lock().unwrap() = tools.iter().map(|t| t.name().to_string()).collect();
-            Ok(Reasoning::with_answer("", "resume-filter-done"))
+            text_events("resume-filter-done")
         }
     }
+    crate::subagent::test_support::fixture_model_impl!(ResumeFilterLLM);
 
     let parent_tools = vec![make_tool("Read"), make_tool("Write"), make_tool("Agent")];
     let t = SubAgentTool::new(
         Arc::new(parent_tools),
         None,
         Arc::new(move |_: Option<&str>| {
-            Box::new(ResumeFilterLLM {
-                captured: Arc::clone(&tools_capture_clone),
-            }) as Box<dyn ReactLLM + Send + Sync>
+            crate::subagent::test_support::fixture_source(
+                std::sync::Arc::new(ResumeFilterLLM {
+                    captured: Arc::clone(&tools_capture_clone),
+                }),
+                "fixture-scripted",
+            )
         }),
         "/tmp".to_string(),
     )
@@ -678,7 +696,7 @@ async fn test_resume_thread_id_agent_def_refilters_tools() {
                 "resume_thread_id": id.clone(),
                 "cwd": cwd.clone(),
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            preset_child_ctx(&id, "."),
         )
         .await
         .expect("agent-def resume 应成功");
@@ -718,6 +736,7 @@ async fn test_resume_trimmed_id_wins_over_mcp_fork_and_invalid_model() {
         peri_agent::session::FrozenContext::builder().build(),
         Some(parent_id.clone()),
     );
+    install_parent_host(&store, &parent);
     let id = uuid::Uuid::now_v7().to_string();
     preset_resumable_thread(&store, &id, "test-agent", Some(parent_id.as_str()), vec![]).await;
     let tool = with_agent_face(make_subagent_tool(vec![]), dir.path())
@@ -735,7 +754,7 @@ async fn test_resume_trimmed_id_wins_over_mcp_fork_and_invalid_model() {
                 "prompt": null,
                 "cwd": cwd.clone()
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            preset_child_ctx(&id, "."),
         )
         .await
         .unwrap();

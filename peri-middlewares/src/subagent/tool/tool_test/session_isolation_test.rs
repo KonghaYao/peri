@@ -8,20 +8,27 @@ use peri_agent::session::subagent::{
 use peri_agent::session::{FrozenContext, Session};
 use peri_agent::tools::ToolContext;
 
+/// 记录子链收到的工具目录的假模型（H1 起子链消费 `peri_model::Model`，
+/// 生产装配点自建 bridge）。
+#[derive(Clone)]
 struct ObservedToolsLlm(Arc<RwLock<Vec<String>>>);
 
-#[async_trait::async_trait]
-impl ReactLLM for ObservedToolsLlm {
-    async fn generate_reasoning(
+impl ObservedToolsLlm {
+    async fn respond(
         &self,
-        _messages: &[BaseMessage],
-        tools: &[&dyn BaseTool],
-        _streaming: Option<StreamingContext>,
-    ) -> peri_agent::error::AgentResult<Reasoning> {
+        request: peri_model::ModelRequest,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
+        use crate::subagent::test_support::*;
+        let _ = &cancellation;
+        let defined = defined_tools(&request);
+        let tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
+
         *self.0.write() = tools.iter().map(|tool| tool.name().to_owned()).collect();
-        Ok(Reasoning::with_answer("", "nested-complete"))
+        text_events("nested-complete")
     }
 }
+crate::subagent::test_support::fixture_model_impl!(ObservedToolsLlm);
 
 #[tokio::test]
 async fn nested_delegation_uses_direct_parent_catalog_and_inbox() {
@@ -50,7 +57,12 @@ async fn nested_delegation_uses_direct_parent_catalog_and_inbox() {
     let tool = SubAgentTool::new(
         Arc::new(Vec::new()),
         None,
-        Arc::new(move |_| Box::new(ObservedToolsLlm(captured_tools.clone()))),
+        Arc::new(move |_| {
+            crate::subagent::test_support::fixture_source(
+                std::sync::Arc::new(ObservedToolsLlm(captured_tools.clone())),
+                "fixture-scripted",
+            )
+        }),
         cwd.clone(),
     )
     .with_parent_session(parent.clone());
@@ -62,7 +74,10 @@ async fn nested_delegation_uses_direct_parent_catalog_and_inbox() {
         20,
         None,
         SubagentRunMode::Sync,
-        Box::new(EchoLLM),
+        crate::subagent::test_support::fixture_source(
+            std::sync::Arc::new(EchoLLM),
+            "fixture-scripted",
+        ),
         vec![Arc::new(tool.clone())],
         Arc::new(|_| true),
         None,
@@ -89,10 +104,14 @@ async fn nested_delegation_uses_direct_parent_catalog_and_inbox() {
         vec![Arc::new(tool.clone()), make_tool("Probe")],
         Arc::new(|tool| tool.name() != "Probe"),
     );
+    let mut nested_ctx = ToolContext::new(&[], &cwd);
+    let nested_tool_call = format!("fixture-nested-tool-call:{}", uuid::Uuid::now_v7());
+    nested_ctx.invocation_id = Some(nested_tool_call.clone());
+    nested_ctx.tool_call_id = Some(nested_tool_call);
     let output = bound[0]
         .invoke(
             serde_json::json!({"prompt": "nested", "fork": true, "run_in_background": true}),
-            ToolContext::new(&[], &cwd),
+            nested_ctx,
         )
         .await
         .unwrap();
@@ -119,7 +138,13 @@ async fn nested_delegation_uses_direct_parent_catalog_and_inbox() {
     .unwrap();
     assert!(parent.queue().is_empty());
     assert!(child.session.queue().drain_all()[0].delivery_id.is_some());
-    assert!(observed_tools.read().iter().any(|name| name == "Agent"));
+    // 单一继承策略（与工具描述同一契约）：fork 子链不继承 `Agent`（防递归）
+    // 与其它子链无持有者能力；工作区/元工具以外的父工具仍按策略过滤。
+    assert!(
+        !observed_tools.read().iter().any(|name| name == "Agent"),
+        "fork 子链不得继承 Agent 工具: {:?}",
+        observed_tools.read()
+    );
     assert!(!observed_tools.read().iter().any(|name| name == "Probe"));
 
     drop(bound);
@@ -128,7 +153,7 @@ async fn nested_delegation_uses_direct_parent_catalog_and_inbox() {
     let replacement_parent = Session::new(
         Arc::from(cwd.as_str()),
         FrozenContext::builder().build(),
-        Some(root_id),
+        Some(root_id.clone()),
     );
     replacement_parent.set_subagent_host(SubagentHost {
         session_resources: Some(store.facade()),
@@ -137,18 +162,24 @@ async fn nested_delegation_uses_direct_parent_catalog_and_inbox() {
         ..Default::default()
     });
     let tool = make_subagent_tool(Vec::new()).with_parent_session(replacement_parent);
+    // resume 携带本次工具调用身份（父侧 provenance 来源）。
+    let resume_invocation = "fixture-isolation-nested-resume";
 
     let config = tool.resume_config_base(
         child.child_thread_id.clone(),
         Some("resume".into()),
         SubagentRunMode::Sync,
         20,
-        Box::new(EchoLLM),
-        Vec::new(),
+        crate::subagent::test_support::fixture_source(
+            std::sync::Arc::new(EchoLLM),
+            "fixture-scripted",
+        ),
+        // 恢复必须重建保存的工具上限（spawn 时 ceiling = [Agent]）。
+        vec![Arc::new(tool.clone())],
         Arc::new(|_| true),
         store.facade(),
         cwd,
-        None,
+        Some(resume_invocation.to_string()),
     );
     let resumed = tool.resume(config).await.unwrap();
     assert!(Arc::ptr_eq(
@@ -259,7 +290,10 @@ async fn completed_child_shell_blocks_shared_close_and_reopen_rebuilds_binding()
         Some("complete naturally".into()),
         SubagentRunMode::Sync,
         20,
-        Box::new(EchoLLM),
+        crate::subagent::test_support::fixture_source(
+            std::sync::Arc::new(EchoLLM),
+            "fixture-scripted",
+        ),
         Vec::new(),
         Arc::new(|_| true),
         store.facade(),
@@ -309,7 +343,10 @@ async fn completed_child_shell_blocks_shared_close_and_reopen_rebuilds_binding()
         Some("new conversation turn".into()),
         SubagentRunMode::Sync,
         20,
-        Box::new(EchoLLM),
+        crate::subagent::test_support::fixture_source(
+            std::sync::Arc::new(EchoLLM),
+            "fixture-scripted",
+        ),
         Vec::new(),
         Arc::new(|_| true),
         store.facade(),

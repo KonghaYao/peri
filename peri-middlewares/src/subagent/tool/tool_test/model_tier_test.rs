@@ -36,7 +36,10 @@ fn make_recording_subagent_tool(
                 .lock()
                 .unwrap()
                 .push(alias.map(|s| s.to_string()));
-            Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>
+            crate::subagent::test_support::fixture_source(
+                std::sync::Arc::new(EchoLLM),
+                "fixture-scripted",
+            )
         }),
         "/tmp".to_string(),
     )
@@ -61,11 +64,13 @@ async fn test_agent_model_override_replaces_frontmatter() {
     let dir = tempdir().unwrap();
     write_test_agent_with_model(&dir, "sonnet");
     let aliases: Arc<std::sync::Mutex<Vec<Option<String>>>> = Arc::default();
+    let host = HostFixture::open_in(dir.path(), "fixture-model-tier").await;
     let t = with_agent_face(
         make_recording_subagent_tool(vec![], Arc::clone(&aliases)),
         dir.path(),
     )
     .await;
+    let t = host.bind(t);
     let result = t
         .invoke(
             serde_json::json!({
@@ -74,7 +79,7 @@ async fn test_agent_model_override_replaces_frontmatter() {
                 "model": "haiku",
                 "cwd": dir.path().to_str().unwrap()
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            host.context(&[]),
         )
         .await
         .unwrap();
@@ -93,11 +98,13 @@ async fn test_agent_model_inherit_uses_parent_model() {
     let dir = tempdir().unwrap();
     write_test_agent_with_model(&dir, "sonnet");
     let aliases: Arc<std::sync::Mutex<Vec<Option<String>>>> = Arc::default();
+    let host = HostFixture::open_in(dir.path(), "fixture-model-tier").await;
     let t = with_agent_face(
         make_recording_subagent_tool(vec![], Arc::clone(&aliases)),
         dir.path(),
     )
     .await;
+    let t = host.bind(t);
     let result = t
         .invoke(
             serde_json::json!({
@@ -106,7 +113,7 @@ async fn test_agent_model_inherit_uses_parent_model() {
                 "model": "inherit",
                 "cwd": dir.path().to_str().unwrap()
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            host.context(&[]),
         )
         .await
         .unwrap();
@@ -121,11 +128,13 @@ async fn test_agent_model_omitted_keeps_frontmatter() {
     let dir = tempdir().unwrap();
     write_test_agent_with_model(&dir, "sonnet");
     let aliases: Arc<std::sync::Mutex<Vec<Option<String>>>> = Arc::default();
+    let host = HostFixture::open_in(dir.path(), "fixture-model-tier").await;
     let t = with_agent_face(
         make_recording_subagent_tool(vec![], Arc::clone(&aliases)),
         dir.path(),
     )
     .await;
+    let t = host.bind(t);
     for model in [None, Some(""), Some("   ")] {
         let mut input = serde_json::json!({
             "subagent_type": "test-agent",
@@ -135,8 +144,9 @@ async fn test_agent_model_omitted_keeps_frontmatter() {
         if let Some(m) = model {
             input["model"] = serde_json::Value::String(m.to_string());
         }
+        let invocation = host.fresh_tool_call_id("omitted");
         let result = t
-            .invoke(input, peri_agent::tools::ToolContext::new(&[], "."))
+            .invoke(input, host.context_with(&[], invocation))
             .await
             .unwrap();
         assert!(result.contains("echo"), "应正常执行: {}", result);
@@ -160,11 +170,15 @@ async fn test_agent_model_omitted_inherit_or_empty_frontmatter() {
     for fm in ["inherit", ""] {
         let dir = tempdir().unwrap();
         write_test_agent_with_model(&dir, fm);
-        let t = with_agent_face(
-            make_recording_subagent_tool(vec![], Arc::clone(&aliases)),
-            dir.path(),
-        )
-        .await;
+        let host = HostFixture::open_in(dir.path(), "fixture-model-tier").await;
+        let t = host.bind(
+            with_agent_face(
+                make_recording_subagent_tool(vec![], Arc::clone(&aliases)),
+                dir.path(),
+            )
+            .await,
+        );
+        let invocation = host.fresh_tool_call_id("inherit");
         let result = t
             .invoke(
                 serde_json::json!({
@@ -172,7 +186,7 @@ async fn test_agent_model_omitted_inherit_or_empty_frontmatter() {
                     "prompt": "hello",
                     "cwd": dir.path().to_str().unwrap()
                 }),
-                peri_agent::tools::ToolContext::new(&[], "."),
+                host.context_with(&[], invocation),
             )
             .await
             .unwrap();
@@ -192,12 +206,15 @@ async fn test_agent_model_case_insensitive() {
     let dir = tempdir().unwrap();
     write_test_agent(&dir);
     let aliases: Arc<std::sync::Mutex<Vec<Option<String>>>> = Arc::default();
+    let host = HostFixture::open_in(dir.path(), "fixture-model-tier").await;
     let t = with_agent_face(
         make_recording_subagent_tool(vec![], Arc::clone(&aliases)),
         dir.path(),
     )
     .await;
+    let t = host.bind(t);
     for model in ["HAIKU", "InHerit"] {
+        let invocation = host.fresh_tool_call_id("case");
         let result = t
             .invoke(
                 serde_json::json!({
@@ -206,7 +223,7 @@ async fn test_agent_model_case_insensitive() {
                     "model": model,
                     "cwd": dir.path().to_str().unwrap()
                 }),
-                peri_agent::tools::ToolContext::new(&[], "."),
+                host.context_with(&[], invocation),
             )
             .await
             .unwrap();
@@ -226,8 +243,11 @@ async fn test_agent_model_unknown_ignored_on_fork() {
     let parent_messages: Arc<RwLock<Vec<BaseMessage>>> = Arc::new(RwLock::new(Vec::new()));
     parent_messages.write().push(BaseMessage::human("Hello"));
     let aliases: Arc<std::sync::Mutex<Vec<Option<String>>>> = Arc::default();
-    let t = make_recording_subagent_tool(vec![], Arc::clone(&aliases))
-        .with_parent_messages(parent_messages);
+    let host = HostFixture::open("fixture-model-tier-fork").await;
+    let t = host.bind(
+        make_recording_subagent_tool(vec![], Arc::clone(&aliases))
+            .with_parent_messages(parent_messages),
+    );
     let result = t
         .invoke(
             serde_json::json!({
@@ -235,7 +255,7 @@ async fn test_agent_model_unknown_ignored_on_fork() {
                 "prompt": "do the thing",
                 "model": "turbo"
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            host.context(&[]),
         )
         .await
         .expect("fork + 未知档位应成功（model 被宽容忽略）");
@@ -250,11 +270,13 @@ async fn test_agent_model_unknown_rejected() {
     let dir = tempdir().unwrap();
     write_test_agent(&dir);
     let aliases: Arc<std::sync::Mutex<Vec<Option<String>>>> = Arc::default();
+    let host = HostFixture::open_in(dir.path(), "fixture-model-tier").await;
     let t = with_agent_face(
         make_recording_subagent_tool(vec![], Arc::clone(&aliases)),
         dir.path(),
     )
     .await;
+    let t = host.bind(t);
     let result = t
         .invoke(
             serde_json::json!({
@@ -263,7 +285,7 @@ async fn test_agent_model_unknown_rejected() {
                 "model": "turbo",
                 "cwd": dir.path().to_str().unwrap()
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            host.context(&[]),
         )
         .await;
     let err_msg = result.unwrap_err().to_string();
@@ -289,8 +311,11 @@ async fn test_agent_model_ignored_on_fork() {
     let parent_messages: Arc<RwLock<Vec<BaseMessage>>> = Arc::new(RwLock::new(Vec::new()));
     parent_messages.write().push(BaseMessage::human("Hello"));
     let aliases: Arc<std::sync::Mutex<Vec<Option<String>>>> = Arc::default();
-    let t = make_recording_subagent_tool(vec![], Arc::clone(&aliases))
-        .with_parent_messages(parent_messages);
+    let host = HostFixture::open("fixture-model-tier-fork").await;
+    let t = host.bind(
+        make_recording_subagent_tool(vec![], Arc::clone(&aliases))
+            .with_parent_messages(parent_messages),
+    );
     let result = t
         .invoke(
             serde_json::json!({
@@ -298,7 +323,7 @@ async fn test_agent_model_ignored_on_fork() {
                 "prompt": "do the thing",
                 "model": "haiku"
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            host.context(&[]),
         )
         .await
         .expect("fork + model 应成功（model 被忽略）");
@@ -337,11 +362,23 @@ async fn test_resume_thread_id_ignores_model_field() {
     .await;
 
     let aliases: Arc<std::sync::Mutex<Vec<Option<String>>>> = Arc::default();
-    let t = make_recording_subagent_tool(vec![], Arc::clone(&aliases))
-        .with_session_resources(store.facade())
-        .with_parent_thread_id(parent_id.clone())
-        .with_parent_session(parent.clone());
-    let t = with_agent_face(t, dir.path()).await;
+    let mut t = with_agent_face(
+        make_recording_subagent_tool(vec![], Arc::clone(&aliases))
+            .with_session_resources(store.facade())
+            .with_parent_thread_id(parent_id.clone())
+            .with_parent_session(parent.clone()),
+        dir.path(),
+    )
+    .await;
+    t.parent_cwd = cwd.clone();
+    // resume 的子链宿主来自 owning parent session：给该 session 挂生产 host。
+    // （与 store 共享同一 SQLite 文件；此处只需耐久承载面。）
+    let durable_face = HostFixture::open_in(dir.path(), "fixture-model-tier-resume").await;
+    durable_face.attach_session_host(&parent);
+    let mut ctx = peri_agent::tools::ToolContext::new(&[], &cwd);
+    let tool_call = durable_face.fresh_tool_call_id("resume-model");
+    ctx.invocation_id = Some(tool_call.clone());
+    ctx.tool_call_id = Some(tool_call);
     let result = t
         .invoke(
             serde_json::json!({
@@ -349,7 +386,7 @@ async fn test_resume_thread_id_ignores_model_field() {
                 "model": "turbo",
                 "cwd": cwd.clone(),
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            ctx,
         )
         .await
         .expect("resume + model 应容错恢复而非报错");
@@ -381,7 +418,8 @@ async fn test_agent_model_override_applies_to_background() {
     let t = make_recording_subagent_tool(vec![], Arc::clone(&aliases))
         .with_task_manager(Arc::clone(&registry))
         .with_bg_event_sender(bg_tx);
-    let t = with_agent_face(t, dir.path()).await;
+    let host = HostFixture::open_in(dir.path(), "fixture-model-tier").await;
+    let t = host.bind(with_agent_face(t, dir.path()).await);
 
     let invoke_msg = t
         .invoke(
@@ -392,7 +430,7 @@ async fn test_agent_model_override_applies_to_background() {
                 "run_in_background": true,
                 "cwd": dir.path().to_str().unwrap()
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            host.context(&[]),
         )
         .await
         .expect("bg 应启动");
@@ -432,11 +470,14 @@ async fn test_agent_invoke_wrong_optional_types_keep_definition_and_parent_cwd()
     let dir = tempdir().unwrap();
     write_test_agent_with_model(&dir, "sonnet");
     let aliases = Arc::default();
-    let mut tool = with_agent_face(
-        make_recording_subagent_tool(vec![], Arc::clone(&aliases)),
-        dir.path(),
-    )
-    .await;
+    let host = HostFixture::open_in(dir.path(), "fixture-model-tier-optional").await;
+    let mut tool = host.bind(
+        with_agent_face(
+            make_recording_subagent_tool(vec![], Arc::clone(&aliases)),
+            dir.path(),
+        )
+        .await,
+    );
     tool.parent_cwd = dir.path().to_str().unwrap().to_string();
     let result = tool
         .invoke(
@@ -452,13 +493,19 @@ async fn test_agent_invoke_wrong_optional_types_keep_definition_and_parent_cwd()
                 "description": ["ignored"],
                 "isolation": 1
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            host.context(&[]),
         )
         .await
         .unwrap();
+    // durable 路径返回带 child_thread_id 前缀（session_resources 存在时），
+    // 执行文本仍须原样保留 prompt 前导空格。
     assert!(
-        result == "echo:   preserve spaces",
+        result.ends_with("echo:   preserve spaces"),
         "prompt 前导空格必须原样进入执行（返回文本沿用末尾 trim）：{result}"
+    );
+    assert!(
+        result.starts_with("child_thread_id: "),
+        "durable 输出应带可恢复的 child_thread_id 前缀：{result}"
     );
     assert_eq!(
         aliases.lock().unwrap().as_slice(),

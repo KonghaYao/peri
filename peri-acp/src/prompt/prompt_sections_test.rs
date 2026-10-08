@@ -522,7 +522,7 @@ fn test_default_production_template_emits_one_cache_boundary() {
     assert_eq!(
         PromptTemplate::default()
             .render(
-                &PromptEnv::with_frozen_date("/tmp", "2026-01-01"),
+                &PromptEnv::local_probe("/tmp", "2026-01-01"),
                 &AgentCatalogProvider::new(),
             )
             .matches(SYSTEM_PROMPT_DYNAMIC_BOUNDARY)

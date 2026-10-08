@@ -84,14 +84,17 @@ pub fn exists(path: &Path) -> io::Result<bool> {
 }
 
 pub fn same_file(first: &Path, second: &Path) -> io::Result<bool> {
-    let canonical = |path: &Path| match std::fs::canonicalize(path) {
+    let first = canonicalize(first)?;
+    let second = canonicalize(second)?;
+    Ok(first.is_some() && first == second)
+}
+
+pub fn canonicalize(path: &Path) -> io::Result<Option<PathBuf>> {
+    match std::fs::canonicalize(path) {
         Ok(path) => Ok(Some(path)),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error),
-    };
-    let first = canonical(first)?;
-    let second = canonical(second)?;
-    Ok(first.is_some() && first == second)
+    }
 }
 
 pub fn global_config_path() -> PathBuf {

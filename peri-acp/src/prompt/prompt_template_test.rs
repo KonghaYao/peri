@@ -358,7 +358,7 @@ fn test_prompt_template_byte_identical_to_build_system_prompt() {
                 Some(frozen_date),
                 *language,
             );
-            let env = PromptEnv::with_frozen_date(cwd, frozen_date);
+            let env = PromptEnv::local_probe(cwd, frozen_date);
             let collected = crate::session::build_collected_sections(
                 &MetaHarnessState::default(),
                 no_overrides,
@@ -382,7 +382,7 @@ fn test_prompt_template_byte_identical_to_build_system_prompt() {
                 Some(frozen_date),
                 *language,
             );
-            let env = PromptEnv::with_frozen_date(cwd, frozen_date);
+            let env = PromptEnv::local_probe(cwd, frozen_date);
             let collected = crate::session::build_collected_sections(
                 &MetaHarnessState::default(),
                 Some(&with_overrides),
@@ -406,7 +406,7 @@ fn test_prompt_template_byte_identical_to_build_system_prompt() {
                 Some(frozen_date),
                 *language,
             );
-            let env = PromptEnv::with_frozen_date(cwd, frozen_date);
+            let env = PromptEnv::local_probe(cwd, frozen_date);
             let collected = crate::session::build_collected_sections(
                 &MetaHarnessState::default(),
                 Some(&empty_overrides),

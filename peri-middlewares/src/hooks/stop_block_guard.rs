@@ -86,3 +86,22 @@ pub fn format_stop_block_feedback_no_wrapper(reason: &str, count: u32) -> String
         reason, count
     )
 }
+
+/// 构造 PostToolBatch hook block 的反馈正文（工具结果已提交，反馈用于修正）。
+pub fn format_post_tool_batch_feedback_no_wrapper(reason: &str, count: u32) -> String {
+    format!(
+        "<post_tool_batch_hook_feedback>\nThe PostToolBatch hook blocked because: {}\nThe tool results above are already committed; address this feedback before continuing.\n(Block {}/8)\n</post_tool_batch_hook_feedback>",
+        reason, count
+    )
+}
+
+/// 构造 PostToolBatch `continue:false` 的停止意图正文（客户端可诊断，不进模型）。
+pub fn format_post_tool_batch_stop_intent(stop_reason: Option<&str>) -> String {
+    match stop_reason {
+        Some(reason) => format!(
+            "<post_tool_batch_hook_stop>\nThe PostToolBatch hook stopped this run: {reason}\n</post_tool_batch_hook_stop>"
+        ),
+        None => "<post_tool_batch_hook_stop>\nThe PostToolBatch hook stopped this run.\n</post_tool_batch_hook_stop>"
+            .to_string(),
+    }
+}

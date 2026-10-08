@@ -57,6 +57,9 @@ pub enum MessageSource {
     DynamicMcpNotification,
     /// Hook 系统注入
     SystemInjected,
+    /// Hook 的显式停止意图（continue:false）：经 Receive 唯一出口停止当前 run，
+    /// 不按可唤醒消息处理，也不发起额外模型请求。
+    HookStopIntent,
     /// 工具失败警告
     ToolFailureWarning,
     /// 工作流完成

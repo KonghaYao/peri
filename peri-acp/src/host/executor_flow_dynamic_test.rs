@@ -107,13 +107,15 @@ impl peri_model::Model for FixedAnswerModel {
     }
 }
 
-fn prepared_child_model() -> Box<dyn peri_agent::agent::react::ReactLLM + Send + Sync> {
-    Box::new(peri_agent::agent::model_bridge::AgentModelBridge::new(
+/// H1：子链装配点接收模型来源（bridge 由 Agent 层构造）。
+fn prepared_child_model() -> peri_agent::session::subagent::SubagentLlmSource {
+    peri_agent::session::subagent::SubagentLlmSource::model(
         Arc::new(FixedAnswerModel),
-    ))
+        "fixed-answer-model",
+    )
 }
 
-async fn bind_child_fixture_resources(
+pub(super) async fn bind_child_fixture_resources(
     context: &mut SessionContext,
     cwd: &std::path::Path,
     frozen: &FrozenSessionData,
@@ -207,7 +209,8 @@ async fn test_production_stage_propagates_frozen_snapshot_to_main_and_child() {
                 Some(vec![]),
                 vec![],
             ),
-            system_prompt: None,
+            // H1/M3：子身份由 system_builder 投影提供，不继承父冻结字节。
+            system_prompt: Some("CHILD_PROJECTED_IDENTITY_SENTINEL".into()),
             tool_invocation_resolver: None,
             compact_config: None,
             context_budget: None,
@@ -236,7 +239,15 @@ async fn test_production_stage_propagates_frozen_snapshot_to_main_and_child() {
     .await
     .expect("child spawn 必须成功");
     let child_frozen = &child.session.store().frozen;
-    assert_eq!(&*child_frozen.system_prompt, "BASE_FROZEN_SYSTEM_SENTINEL");
+    // M3：子 FrozenContext.system_prompt = 子身份投影；父冻结字节不得复制。
+    assert_eq!(
+        &*child_frozen.system_prompt,
+        "CHILD_PROJECTED_IDENTITY_SENTINEL"
+    );
+    assert_ne!(
+        &*child_frozen.system_prompt, "BASE_FROZEN_SYSTEM_SENTINEL",
+        "parent frozen system bytes must not leak into the child identity"
+    );
     assert_eq!(&*child_frozen.claude_md, "FROZEN_CLAUDE_SENTINEL");
     assert_eq!(&*child_frozen.skill_summary, "FROZEN_SKILLS_SENTINEL");
     assert_eq!(&*child_frozen.date, "1999-12-31");
@@ -391,7 +402,9 @@ async fn test_production_stage_keeps_empty_frozen_prompt_inputs_after_late_files
     .expect("真实 loop 不得挂起");
 
     assert!(matches!(loop_result, LoopResult::Completed));
-    let contributions = chain.collect_prompt_contributions();
+    let contributions = chain
+        .collect_prompt_contributions()
+        .expect("contributions 收集不得因 reserved marker 失败");
     assert!(
         !contributions.contains("LATE_CLAUDE_MARKER"),
         "{contributions}"

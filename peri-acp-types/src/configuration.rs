@@ -29,6 +29,9 @@ pub enum ConfigurationRequest {
         first: PathBuf,
         second: PathBuf,
     },
+    Canonicalize {
+        path: PathBuf,
+    },
     Paths,
     SetGlobalPath {
         path: Option<PathBuf>,
@@ -49,6 +52,8 @@ pub enum ConfigurationValue {
     Environment(Option<String>),
     Bool(bool),
     Paths(ConfigurationPaths),
+    /// 规范化路径：`None` 表示路径不存在（缺失不是错误）。
+    CanonicalPath(Option<PathBuf>),
     Written,
 }
 

@@ -34,7 +34,7 @@ fn build_system_prompt(
     let collected = crate::session::build_collected_sections(meta_harness, overrides, language);
     let template = PromptTemplate::new(meta_harness, &collected);
     let env = if let Some(date) = frozen_date {
-        PromptEnv::with_frozen_date(cwd, date)
+        PromptEnv::local_probe(cwd, date)
     } else {
         PromptEnv::detect(cwd)
     };
@@ -60,7 +60,7 @@ fn render_cache_zones(cached: Option<&'static str>, uncached: Option<&'static st
         ));
     }
     PromptTemplate::new(&MetaHarnessState::default(), &collected).render(
-        &PromptEnv::with_frozen_date("/tmp", "2026-01-01"),
+        &PromptEnv::local_probe("/tmp", "2026-01-01"),
         &AgentCatalogProvider::new(),
     )
 }
@@ -111,3 +111,67 @@ mod overrides_tests;
 mod sections_tests;
 #[path = "prompt_template_test.rs"]
 mod template_tests;
+
+// ─── H3：重渲染只消费冻结运行环境快照 ──────────────────────────────────────
+
+/// H3：运行环境占位符取自冻结快照，不因调用时的磁盘状态（`.git`）或宿主平台
+/// 漂移——同一冻结输入两次渲染字节相同。
+#[test]
+fn frozen_runtime_env_renders_snapshot_values_not_live_probe() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cwd = tmp.path().to_str().unwrap();
+    // 会话中途出现 `.git`：冻结后渲染不得感知（快照值为 is_git_repo=false）。
+    std::fs::create_dir_all(tmp.path().join(".git")).unwrap();
+
+    let snapshot = peri_acp_types::frozen::FrozenRuntimeEnv {
+        platform: "frozen-platform".to_string(),
+        os_version: "frozen-os 1.0".to_string(),
+        is_git_repo: false,
+    };
+    let state = MetaHarnessState::default();
+    let collected = crate::session::build_collected_sections(&state, None, None);
+    let template = PromptTemplate::new(&state, &collected);
+    let catalog = AgentCatalogProvider::new();
+
+    let first = template.render(
+        &PromptEnv::frozen(cwd, "2026-01-01", Some(&snapshot)),
+        &catalog,
+    );
+    let second = template.render(
+        &PromptEnv::frozen(cwd, "2026-01-01", Some(&snapshot)),
+        &catalog,
+    );
+    assert_eq!(first, second, "同一冻结输入两次渲染必须字节相同");
+    assert!(
+        first.contains("Platform: frozen-platform"),
+        "平台取自冻结快照: {first}"
+    );
+    assert!(
+        first.contains("OS Version: frozen-os 1.0"),
+        "OS 版本取自冻结快照"
+    );
+    assert!(
+        first.contains("Is directory a git repo: No"),
+        "git 状态取自冻结快照（磁盘上已有 .git 也不重探）"
+    );
+}
+
+/// H3 旧数据策略：快照缺少结构化环境值时渲染显式 unavailable 标记，不重探
+/// 本地值冒充（也不留空）。
+#[test]
+fn unavailable_runtime_env_renders_explicit_marker() {
+    let state = MetaHarnessState::default();
+    let collected = crate::session::build_collected_sections(&state, None, None);
+    let rendered = PromptTemplate::new(&state, &collected).render(
+        &PromptEnv::frozen("/tmp", "2026-01-01", None),
+        &AgentCatalogProvider::new(),
+    );
+    assert!(
+        rendered.contains(RUNTIME_ENV_UNAVAILABLE),
+        "缺失冻结环境必须显式标记: {rendered}"
+    );
+    assert!(
+        !rendered.contains("Platform: macos") && !rendered.contains("Platform: linux"),
+        "不得用本地探测值冒充历史环境"
+    );
+}

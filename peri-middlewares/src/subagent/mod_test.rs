@@ -1,38 +1,43 @@
 use peri_acp_types::builtin_mcp::{original_tool_name_of_effective, BUILTIN_MCP_INSTANCES};
 use peri_agent::{
-    agent::{
-        react::{ReactLLM, Reasoning, StreamingContext},
-        state::AgentState,
-    },
-    messages::BaseMessage,
-    middleware::r#trait::Middleware,
-    session,
+    agent::state::AgentState, messages::BaseMessage, middleware::r#trait::Middleware, session,
 };
 
 use super::*;
 use peri_mcp_core::agent_definition::parse_agent_file;
 
+#[derive(Clone)]
 struct EchoLLM;
 
-#[async_trait::async_trait]
-impl ReactLLM for EchoLLM {
-    async fn generate_reasoning(
+impl EchoLLM {
+    async fn respond(
         &self,
-        messages: &[BaseMessage],
-        _tools: &[&dyn BaseTool],
-        _streaming: Option<StreamingContext>,
-    ) -> peri_agent::error::AgentResult<Reasoning> {
+        request: peri_model::ModelRequest,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
+        use crate::subagent::test_support::*;
+        let _ = &cancellation;
+        let messages = base_messages(&request);
+        let defined = defined_tools(&request);
+        let _tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
+
         let last = messages.last().map(|m| m.content()).unwrap_or_default();
-        Ok(Reasoning::with_answer("", format!("echo: {}", last)))
+        text_events(format!("echo: {}", last))
     }
 }
+crate::subagent::test_support::fixture_model_impl!(EchoLLM);
 
 #[test]
 fn test_middleware_name() {
     let m = SubAgentMiddleware::new(
         vec![],
         None,
-        Arc::new(|_: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
+        Arc::new(|_: Option<&str>| {
+            crate::subagent::test_support::fixture_source(
+                std::sync::Arc::new(EchoLLM),
+                "fixture-scripted",
+            )
+        }),
     );
     // Call via Middleware, explicit trait path
     assert_eq!(
@@ -46,7 +51,12 @@ fn test_middleware_collect_tools() {
     let m = SubAgentMiddleware::new(
         vec![],
         None,
-        Arc::new(|_: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
+        Arc::new(|_: Option<&str>| {
+            crate::subagent::test_support::fixture_source(
+                std::sync::Arc::new(EchoLLM),
+                "fixture-scripted",
+            )
+        }),
     );
     let tools = <SubAgentMiddleware as Middleware>::collect_tools(&m, "/tmp");
     assert_eq!(tools.len(), 1);
@@ -58,7 +68,12 @@ fn test_build_tool_returns_subagent_tool() {
     let m = SubAgentMiddleware::new(
         vec![],
         None,
-        Arc::new(|_: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
+        Arc::new(|_: Option<&str>| {
+            crate::subagent::test_support::fixture_source(
+                std::sync::Arc::new(EchoLLM),
+                "fixture-scripted",
+            )
+        }),
     );
     let tool = m.build_tool("/tmp");
     assert_eq!(tool.name(), "Agent");
@@ -79,7 +94,12 @@ async fn test_before_agent_no_longer_injects_summary() {
     let m = SubAgentMiddleware::new(
         vec![],
         None,
-        Arc::new(|_: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
+        Arc::new(|_: Option<&str>| {
+            crate::subagent::test_support::fixture_source(
+                std::sync::Arc::new(EchoLLM),
+                "fixture-scripted",
+            )
+        }),
     );
     let mut state = AgentState::new(dir.path().to_str().unwrap());
     <SubAgentMiddleware as Middleware>::before_agent(&m, &mut state)
@@ -99,7 +119,12 @@ async fn test_before_agent_no_agents_no_op() {
     let m = SubAgentMiddleware::new(
         vec![],
         None,
-        Arc::new(|_: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
+        Arc::new(|_: Option<&str>| {
+            crate::subagent::test_support::fixture_source(
+                std::sync::Arc::new(EchoLLM),
+                "fixture-scripted",
+            )
+        }),
     );
     let mut state = AgentState::new("/nonexistent");
     <SubAgentMiddleware as Middleware>::before_agent(&m, &mut state)
@@ -116,7 +141,12 @@ async fn test_before_agent_snapshots_messages() {
     let m = SubAgentMiddleware::new(
         vec![],
         None,
-        Arc::new(|_: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
+        Arc::new(|_: Option<&str>| {
+            crate::subagent::test_support::fixture_source(
+                std::sync::Arc::new(EchoLLM),
+                "fixture-scripted",
+            )
+        }),
     )
     .with_parent_messages(Arc::clone(&parent_messages));
 
@@ -146,7 +176,12 @@ fn test_build_tool_receives_parent_messages() {
     let m = SubAgentMiddleware::new(
         vec![],
         None,
-        Arc::new(|_: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
+        Arc::new(|_: Option<&str>| {
+            crate::subagent::test_support::fixture_source(
+                std::sync::Arc::new(EchoLLM),
+                "fixture-scripted",
+            )
+        }),
     )
     .with_parent_messages(Arc::clone(&parent_messages));
 
@@ -186,7 +221,12 @@ fn test_build_tool_after_set_parent_session_reads_runtime_host() {
     let m = SubAgentMiddleware::new(
         vec![],
         None,
-        Arc::new(|_: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
+        Arc::new(|_: Option<&str>| {
+            crate::subagent::test_support::fixture_source(
+                std::sync::Arc::new(EchoLLM),
+                "fixture-scripted",
+            )
+        }),
     );
     // 先注入 parent_session（模拟 set_parent_session 先于 collect_tools）
     m.set_parent_session(Arc::clone(&session));

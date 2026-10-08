@@ -48,7 +48,7 @@ fn build_ctx_with(agent_id: Option<AgentId>) -> V2SubagentContext {
     build_v2_subagent_context(
         None,
         Box::new(NullReactLLM),
-        MiddlewareChain::new(),
+        Arc::new(MiddlewareChain::new()),
         Vec::new(),
         Arc::new(|_| true),
         None,
@@ -183,32 +183,24 @@ fn test_prediction_directive_sanitize_xml_injection() {
 
 // ─── spawn_subagent 用例（L3 新增） ─────────────────────────────────────────
 
-/// 完成型 mock LLM：直接返回最终答案（与 middlewares 测试的 EchoLLM 同构）
+/// 完成型 mock 模型：回显最后一条消息（Model 形态，经生产 bridge 装配）
+#[derive(Clone)]
 struct EchoLLM;
 
-#[async_trait::async_trait]
-impl crate::agent::react::ReactLLM for EchoLLM {
-    async fn generate_reasoning(
+impl EchoLLM {
+    async fn respond(
         &self,
-        messages: &[BaseMessage],
-        _tools: &[&dyn crate::tools::BaseTool],
-        _streaming: Option<crate::agent::react::StreamingContext>,
-    ) -> crate::error::AgentResult<crate::agent::react::Reasoning> {
+        request: peri_model::ModelRequest,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
+        let _ = cancellation;
+        use crate::session::test_resources::mock::model as fixture;
+        let messages = fixture::base_messages(&request);
         let last = messages.last().map(|m| m.content()).unwrap_or_default();
-        Ok(crate::agent::react::Reasoning::with_answer(
-            "",
-            format!("echo: {}", last),
-        ))
-    }
-
-    fn model_name(&self) -> String {
-        "echo".to_string()
-    }
-
-    fn provider_capabilities(&self) -> crate::agent::compact_v2::projection::ProviderCapabilities {
-        crate::agent::compact_v2::projection::ProviderCapabilities::default()
+        fixture::text_events(format!("echo: {}", last))
     }
 }
+crate::fixture_model_impl!(EchoLLM);
 
 /// 空链装配器（测试用：无中间件）
 struct EmptyChainAssembler;
@@ -295,7 +287,10 @@ async fn test_spawn_subagent_creates_child_thread_with_parent_link() {
         fork_directive_kind: None,
         run_mode: SubagentRunMode::Sync,
         skill_names: Vec::new(),
-        llm: Box::new(EchoLLM),
+        llm: crate::session::test_resources::mock::model::fixture_source(
+            std::sync::Arc::new(EchoLLM),
+            "fixture-scripted",
+        ),
         chain_assembler: Arc::new(EmptyChainAssembler),
         tools: Vec::new(),
         tool_filter: Arc::new(|_| true),
@@ -400,7 +395,10 @@ async fn test_spawn_subagent_main_agent_via_host_writes_parent_link() {
         fork_directive_kind: None,
         run_mode: SubagentRunMode::Sync,
         skill_names: Vec::new(),
-        llm: Box::new(EchoLLM),
+        llm: crate::session::test_resources::mock::model::fixture_source(
+            std::sync::Arc::new(EchoLLM),
+            "fixture-scripted",
+        ),
         chain_assembler: Arc::new(EmptyChainAssembler),
         tools: Vec::new(),
         tool_filter: Arc::new(|_| true),
@@ -480,7 +478,10 @@ async fn test_spawn_subagent_copies_frozen_from_parent() {
         fork_directive_kind: Some(ForkDirectiveKind::Fork),
         run_mode: SubagentRunMode::Sync,
         skill_names: Vec::new(),
-        llm: Box::new(EchoLLM),
+        llm: crate::session::test_resources::mock::model::fixture_source(
+            std::sync::Arc::new(EchoLLM),
+            "fixture-scripted",
+        ),
         chain_assembler: Arc::new(EmptyChainAssembler),
         tools: Vec::new(),
         tool_filter: Arc::new(|_| true),
@@ -556,7 +557,10 @@ async fn test_spawn_subagent_without_parent_uses_config_fallback() {
         fork_directive_kind: Some(ForkDirectiveKind::Bg),
         run_mode: SubagentRunMode::Sync,
         skill_names: Vec::new(),
-        llm: Box::new(EchoLLM),
+        llm: crate::session::test_resources::mock::model::fixture_source(
+            std::sync::Arc::new(EchoLLM),
+            "fixture-scripted",
+        ),
         chain_assembler: Arc::new(EmptyChainAssembler),
         tools: Vec::new(),
         tool_filter: Arc::new(|_| true),
@@ -630,7 +634,10 @@ fn resume_config(
     resume_config_with(
         session_resources,
         thread_id,
-        Box::new(EchoLLM),
+        crate::session::test_resources::mock::model::fixture_source(
+            std::sync::Arc::new(EchoLLM),
+            "fixture-scripted",
+        ),
         SubagentRunMode::Sync,
         None,
         None,
@@ -642,7 +649,7 @@ fn resume_config(
 fn resume_config_with(
     session_resources: Arc<dyn peri_acp_types::session_resources::SessionResources>,
     thread_id: String,
-    llm: Box<dyn ReactLLM + Send + Sync>,
+    llm: SubagentLlmSource,
     run_mode: SubagentRunMode,
     task_manager: Option<Arc<TaskManager>>,
     cancel_token: Option<CancellationToken>,
@@ -700,29 +707,19 @@ impl RecordingLLM {
     }
 }
 
-#[async_trait::async_trait]
-impl crate::agent::react::ReactLLM for RecordingLLM {
-    async fn generate_reasoning(
+impl RecordingLLM {
+    async fn respond(
         &self,
-        messages: &[BaseMessage],
-        _tools: &[&dyn crate::tools::BaseTool],
-        _streaming: Option<crate::agent::react::StreamingContext>,
-    ) -> crate::error::AgentResult<crate::agent::react::Reasoning> {
-        self.received.write().push(messages.to_vec());
-        Ok(crate::agent::react::Reasoning::with_answer(
-            "",
-            self.answer.clone(),
-        ))
-    }
-
-    fn model_name(&self) -> String {
-        "recording".to_string()
-    }
-
-    fn provider_capabilities(&self) -> crate::agent::compact_v2::projection::ProviderCapabilities {
-        crate::agent::compact_v2::projection::ProviderCapabilities::default()
+        request: peri_model::ModelRequest,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
+        let _ = cancellation;
+        use crate::session::test_resources::mock::model as fixture;
+        self.received.write().push(fixture::base_messages(&request));
+        fixture::text_events(self.answer.clone())
     }
 }
+crate::fixture_model_impl!(RecordingLLM);
 
 /// 门控 mock LLM：首次 generate_reasoning 阻塞，直到测试侧 `release_tx.send(())`
 /// 放行。oneshot 有信号缓冲——即使 send 先于 LLM 的 await 发生也不会丢失唤醒。
@@ -752,14 +749,13 @@ impl GateLLM {
     }
 }
 
-#[async_trait::async_trait]
-impl crate::agent::react::ReactLLM for GateLLM {
-    async fn generate_reasoning(
+impl GateLLM {
+    async fn respond(
         &self,
-        _messages: &[BaseMessage],
-        _tools: &[&dyn crate::tools::BaseTool],
-        _streaming: Option<crate::agent::react::StreamingContext>,
-    ) -> crate::error::AgentResult<crate::agent::react::Reasoning> {
+        _request: peri_model::ModelRequest,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
+        let _ = cancellation;
         if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
             let rx = {
                 let mut guard = self.gate.lock().expect("gate mutex poisoned");
@@ -769,23 +765,14 @@ impl crate::agent::react::ReactLLM for GateLLM {
                 let _ = rx.await;
             }
         }
-        Ok(crate::agent::react::Reasoning::with_answer(
-            "",
-            "gated-answer",
-        ))
-    }
-
-    fn model_name(&self) -> String {
-        "gate".to_string()
-    }
-
-    fn provider_capabilities(&self) -> crate::agent::compact_v2::projection::ProviderCapabilities {
-        crate::agent::compact_v2::projection::ProviderCapabilities::default()
+        crate::session::test_resources::mock::model::text_events("gated-answer")
     }
 }
+crate::fixture_model_impl!(GateLLM);
 
+#[derive(Clone)]
 struct CancelGateLLM {
-    entered: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    entered: Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
 }
 
 impl CancelGateLLM {
@@ -793,27 +780,25 @@ impl CancelGateLLM {
         let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
         (
             Self {
-                entered: std::sync::Mutex::new(Some(entered_tx)),
+                entered: Arc::new(std::sync::Mutex::new(Some(entered_tx))),
             },
             entered_rx,
         )
     }
-}
 
-#[async_trait::async_trait]
-impl crate::agent::react::ReactLLM for CancelGateLLM {
-    async fn generate_reasoning(
+    async fn respond(
         &self,
-        _messages: &[BaseMessage],
-        _tools: &[&dyn crate::tools::BaseTool],
-        _streaming: Option<crate::agent::react::StreamingContext>,
-    ) -> crate::error::AgentResult<crate::agent::react::Reasoning> {
+        _request: peri_model::ModelRequest,
+        _cancellation: tokio_util::sync::CancellationToken,
+    ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
         if let Some(entered) = self.entered.lock().unwrap().take() {
             let _ = entered.send(());
         }
-        std::future::pending().await
+        // 挂起直到 bridge 因取消 abort 该流（future drop）。
+        std::future::pending::<Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>>>().await
     }
 }
+crate::fixture_model_impl!(CancelGateLLM);
 
 /// 预置可恢复 thread：创建 + 置非 active（status "done"）。
 /// 消息由各测试按需 append。
@@ -853,6 +838,8 @@ mod resume_dispatch_cases;
 #[path = "subagent/close_lifecycle_test.rs"]
 mod close_lifecycle_cases;
 
+#[path = "subagent/child_wire_capture_test.rs"]
+mod child_wire_capture_test;
 #[path = "subagent/provenance_test.rs"]
 mod provenance_tests;
 async fn create_bound_root(
@@ -932,43 +919,36 @@ enum TailOutcome {
     Cancelled,
 }
 
+#[derive(Clone)]
 struct TailChunkLLM(TailOutcome);
 
-#[async_trait::async_trait]
-impl ReactLLM for TailChunkLLM {
-    async fn generate_reasoning(
+impl TailChunkLLM {
+    async fn respond(
         &self,
-        _messages: &[BaseMessage],
-        _tools: &[&dyn crate::tools::BaseTool],
-        streaming: Option<crate::agent::react::StreamingContext>,
-    ) -> crate::error::AgentResult<crate::agent::react::Reasoning> {
-        let streaming = streaming.expect("子 agent 必须提供流式事件入口");
-        streaming
-            .event_bus
-            .emit_render(crate::agent::events_v2::RenderEvent::TextChunk {
-                turn_id: streaming.turn_id,
-                agent_id: streaming.agent_id,
-                message_id: peri_acp_types::messages::MessageId::new(),
-                chunk: "tail-chunk".into(),
-            });
-        // 最后一条增量与返回发生在同一 poll，不能靠 sleep 让 forwarder 先运行。
+        _request: peri_model::ModelRequest,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
+        use crate::session::test_resources::mock::model as fixture;
         match self.0 {
-            TailOutcome::Completed => Ok(crate::agent::react::Reasoning::with_answer("", "done")),
-            TailOutcome::ModelError => Err(crate::error::AgentError::ModelError(
+            TailOutcome::Completed => vec![
+                fixture::lead_chunk("tail-chunk"),
+                fixture::completed_event("done"),
+            ],
+            TailOutcome::ModelError => fixture::error_events(
+                vec![fixture::lead_chunk("tail-chunk")],
                 peri_model::ModelError::http_status(429, "fixture", Some("private-request")),
-            )),
+            ),
             TailOutcome::Cancelled => {
-                streaming.cancel.cancel();
-                Err(crate::error::AgentError::Interrupted)
+                // 不直接 cancel 本 token：ModelStream 会在 poll 事件之前先报取消，
+                // 已产出的末条增量会被丢弃。以 Err(cancelled) 终止同样表达取消，
+                // 且保证 `TextDelta` 先被 bridge 读到（tail drain 语义）。
+                let _ = &cancellation;
+                fixture::error_events(
+                    vec![fixture::lead_chunk("tail-chunk")],
+                    peri_model::ModelError::cancelled(),
+                )
             }
         }
     }
-
-    fn model_name(&self) -> String {
-        "tail-fixture".into()
-    }
-
-    fn provider_capabilities(&self) -> crate::agent::compact_v2::projection::ProviderCapabilities {
-        crate::agent::compact_v2::projection::ProviderCapabilities::default()
-    }
 }
+crate::fixture_model_impl!(TailChunkLLM);

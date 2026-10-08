@@ -68,6 +68,8 @@ Inbox 去重入口 `agent/stages/work_receive.rs` 使用 `SessionResources::load
 
 `agent/stages/{receive,reason,act,tool_dispatch}.rs` 使用当前进程队列及 Transcript；持久 Work checkpoint 和 SDK reverse admission 已撤销。`session/user_input_mailbox.rs` 管理当前输入交互；`session/subagent/factory.rs` 负责当前子 Agent 和显式历史续聊，不冷恢复旧委托。工具上下文的 invocation_id 与 model tool_call_id 分开传递。实施与验证见 [active plan](../../spec/issues/2026-10-07-remove-execution-recovery-plan.md)。
 
+`tool_dispatch/execution.rs` 保留工具返回的 typed `UserRejected`；拒绝理由作为 error tool result 继续交给模型，不能被 boxed 字符串误分类为未知副作用。
+
 ### RCRA 阶段（src/agent/stages/）
 
 | 功能 | 文件 | 入口/关键点 |

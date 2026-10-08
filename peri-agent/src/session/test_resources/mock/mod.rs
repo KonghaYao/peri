@@ -387,6 +387,8 @@ impl MockResumeClaim {
 // ── 子模块（按职责拆分；内部细节见各自文件头）────────────────────────────
 /// 夹具便利方法：镜像迁移前 `ThreadStore` 的常用测试调用形态。
 mod fixtures;
+/// `peri_model::Model` 形态的假模型助手（生产 bridge 装配的测试入口）。
+pub(crate) mod model;
 /// 故障注入与观察入口（只覆盖被测试的行为）。
 mod observe;
 /// `SessionResources` 门面替身：逐个方法实现契约语义。

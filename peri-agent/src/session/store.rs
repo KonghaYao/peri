@@ -67,6 +67,12 @@ pub struct FrozenContext {
     /// MetaHarness 冻结状态（段落覆盖 + middleware 关闭集合；会话内不可变，
     /// SubAgent/fork 复用——见 `docs/design/meta-harness-design.md` §2.3）。
     pub meta_harness: peri_acp_types::meta_harness::MetaHarnessState,
+    /// 冻结运行环境（平台 / OS 版本 / 是否 Git 仓库；H3）。
+    ///
+    /// 内容准入期由选定执行环境探测一次后随冻结持久化；主/子/workflow 的
+    /// 重渲染只消费它。`None` = 旧快照缺少结构化环境值（unavailable）：
+    /// 不重探本地值冒充，派生新 prompt 时显式标记限制。
+    pub runtime_env: Option<peri_acp_types::frozen::FrozenRuntimeEnv>,
 }
 
 impl FrozenContext {
@@ -91,6 +97,7 @@ pub struct FrozenContextBuilder {
     date: Option<String>,
     language: Option<Option<String>>,
     meta_harness: Option<peri_acp_types::meta_harness::MetaHarnessState>,
+    runtime_env: Option<peri_acp_types::frozen::FrozenRuntimeEnv>,
 }
 
 impl FrozenContextBuilder {
@@ -125,6 +132,12 @@ impl FrozenContextBuilder {
         self
     }
 
+    /// 设置冻结运行环境快照（H3）；未设置时保持 `None`（unavailable）。
+    pub fn runtime_env(mut self, env: Option<peri_acp_types::frozen::FrozenRuntimeEnv>) -> Self {
+        self.runtime_env = env;
+        self
+    }
+
     pub fn build(self) -> FrozenContext {
         FrozenContext {
             system_prompt: self.system_prompt.unwrap_or_default().into(),
@@ -133,6 +146,7 @@ impl FrozenContextBuilder {
             date: self.date.unwrap_or_default().into(),
             language: self.language.flatten().map(Into::into),
             meta_harness: self.meta_harness.unwrap_or_default(),
+            runtime_env: self.runtime_env,
         }
     }
 }

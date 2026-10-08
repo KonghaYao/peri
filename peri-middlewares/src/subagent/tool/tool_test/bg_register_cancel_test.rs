@@ -77,29 +77,38 @@ async fn test_bg_register_failure_does_not_execute_task() {
     let llm_calls_clone = Arc::clone(&llm_calls);
     let gate_clone = Arc::clone(&gate);
 
+    #[derive(Clone)]
     struct GateLLM {
         calls: Arc<AtomicUsize>,
     }
-    #[async_trait::async_trait]
-    impl ReactLLM for GateLLM {
-        async fn generate_reasoning(
+    impl GateLLM {
+        async fn respond(
             &self,
-            _messages: &[BaseMessage],
-            _tools: &[&dyn BaseTool],
-            _streaming: Option<StreamingContext>,
-        ) -> peri_agent::error::AgentResult<Reasoning> {
+            request: peri_model::ModelRequest,
+            cancellation: tokio_util::sync::CancellationToken,
+        ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
+            use crate::subagent::test_support::*;
+            let _ = &cancellation;
+            let _messages = base_messages(&request);
+            let defined = defined_tools(&request);
+            let _tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
+
             self.calls.fetch_add(1, Ordering::SeqCst);
-            Ok(Reasoning::with_answer("", "bg gate done"))
+            text_events("bg gate done")
         }
     }
+    crate::subagent::test_support::fixture_model_impl!(GateLLM);
 
-    let llm_factory: Arc<dyn Fn(Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync> =
+    let llm_factory: Arc<dyn Fn(Option<&str>) -> SubagentLlmSource + Send + Sync> =
         Arc::new(move |_: Option<&str>| {
             // 4 个 invoke 在此同步汇合（全部进入装配窗口后才放行）
             gate_clone.wait();
-            Box::new(GateLLM {
-                calls: Arc::clone(&llm_calls_clone),
-            }) as Box<dyn ReactLLM + Send + Sync>
+            crate::subagent::test_support::fixture_source(
+                std::sync::Arc::new(GateLLM {
+                    calls: Arc::clone(&llm_calls_clone),
+                }),
+                "fixture-scripted",
+            )
         });
 
     // register_runtime / deregister_runtime mock：记录调用
@@ -118,27 +127,44 @@ async fn test_bg_register_failure_does_not_execute_task() {
     });
 
     let (bg_tx, mut bg_rx) = mpsc::unbounded_channel::<ExecutorEvent>();
+    // 关闭的 registry 必须就是父 host 的 TaskManager（后台注册走父 host 通道）。
+    let host = HostFixture::open_in_with_background(
+        dir.path(),
+        "fixture-bg-register-failure",
+        Arc::clone(&registry),
+        bg_tx,
+    )
+    .await;
+    // 生产子链经父 host 触发 register/deregister（工具字段会被父 host 遮蔽）。
+    let host = {
+        let mut sub_host = host.parent_session_host().unwrap_or_default();
+        sub_host.register_runtime = Some(Arc::clone(&register_cb));
+        sub_host.deregister_runtime = Some(Arc::clone(&deregister_cb));
+        host.with_rebuilt_host(sub_host)
+    };
     let tool = SubAgentTool::new(
         Arc::new(vec![]),
         None,
         llm_factory,
         dir.path().to_str().unwrap().to_string(),
     )
-    .with_task_manager(Arc::clone(&registry))
-    .with_bg_event_sender(bg_tx)
     .with_register_runtime(register_cb)
     .with_deregister_runtime(deregister_cb);
-    let tool = with_agent_face(tool, dir.path()).await;
+    let tool = host.bind(with_agent_face(tool, dir.path()).await);
 
     // 4 个并发 invoke——必须各自 tokio::spawn（llm_factory 内的 Barrier::wait()
     // 是同步阻塞：若在 join_all 单任务内逐个 poll，第一个 future 会卡死当前
     // worker，其余 3 个永远不被 poll，barrier 凑不齐 4 个参与者而死锁）。
     let tool = Arc::new(tool);
     let mut handles = Vec::new();
-    for _ in 0..4 {
+    for index in 0..4 {
+        let invocation = host.fresh_tool_call_id(&format!("register-failure-{index}"));
         let tool = Arc::clone(&tool);
         let cwd = dir.path().to_str().unwrap().to_string();
+        let invocation = Some(invocation);
         handles.push(tokio::spawn(async move {
+            let mut ctx = peri_agent::tools::ToolContext::new(&[], cwd.as_str());
+            ctx.invocation_id = invocation;
             tool.invoke(
                 serde_json::json!({
                     "subagent_type": "gate-agent",
@@ -146,7 +172,7 @@ async fn test_bg_register_failure_does_not_execute_task() {
                     "prompt": "parallel bg task",
                     "cwd": cwd,
                 }),
-                peri_agent::tools::ToolContext::new(&[], "."),
+                ctx,
             )
             .await
         }));
@@ -249,31 +275,40 @@ async fn test_bg_cancel_trigger_token_and_cleanup() {
     let llm_calls_clone = Arc::clone(&llm_calls);
     let gate_clone = Arc::clone(&gate);
 
+    #[derive(Clone)]
     struct BlockingLLM {
         gate: Arc<tokio::sync::Notify>,
         calls: Arc<AtomicUsize>,
     }
-    #[async_trait::async_trait]
-    impl ReactLLM for BlockingLLM {
-        async fn generate_reasoning(
+    impl BlockingLLM {
+        async fn respond(
             &self,
-            _messages: &[BaseMessage],
-            _tools: &[&dyn BaseTool],
-            _streaming: Option<StreamingContext>,
-        ) -> peri_agent::error::AgentResult<Reasoning> {
+            request: peri_model::ModelRequest,
+            cancellation: tokio_util::sync::CancellationToken,
+        ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
+            use crate::subagent::test_support::*;
+            let _ = &cancellation;
+            let _messages = base_messages(&request);
+            let defined = defined_tools(&request);
+            let _tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
+
             self.calls.fetch_add(1, Ordering::SeqCst);
             // 阻塞直到被取消（select 放弃本 future）
             self.gate.notified().await;
-            Ok(Reasoning::with_answer("", "never"))
+            text_events("never")
         }
     }
+    crate::subagent::test_support::fixture_model_impl!(BlockingLLM);
 
-    let llm_factory: Arc<dyn Fn(Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync> =
+    let llm_factory: Arc<dyn Fn(Option<&str>) -> SubagentLlmSource + Send + Sync> =
         Arc::new(move |_: Option<&str>| {
-            Box::new(BlockingLLM {
-                gate: Arc::clone(&gate_clone),
-                calls: Arc::clone(&llm_calls_clone),
-            }) as Box<dyn ReactLLM + Send + Sync>
+            crate::subagent::test_support::fixture_source(
+                std::sync::Arc::new(BlockingLLM {
+                    gate: Arc::clone(&gate_clone),
+                    calls: Arc::clone(&llm_calls_clone),
+                }),
+                "fixture-scripted",
+            )
         });
 
     let registry = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
@@ -289,16 +324,26 @@ async fn test_bg_cancel_trigger_token_and_cleanup() {
         deregistered_clone.lock().unwrap().push(tid.to_string());
     });
 
+    let host = HostFixture::open_in_with_background(
+        dir.path(),
+        "fixture-bg-cancel",
+        Arc::clone(&registry),
+        bg_tx,
+    )
+    .await;
+    let host = {
+        let mut sub_host = host.parent_session_host().unwrap_or_default();
+        sub_host.deregister_runtime = Some(Arc::clone(&deregister_cb));
+        host.with_rebuilt_host(sub_host)
+    };
     let tool = SubAgentTool::new(
         Arc::new(vec![]),
         None,
         llm_factory,
         dir.path().to_str().unwrap().to_string(),
     )
-    .with_task_manager(Arc::clone(&registry))
-    .with_bg_event_sender(bg_tx)
     .with_deregister_runtime(deregister_cb);
-    let tool = with_agent_face(tool, dir.path()).await;
+    let tool = host.bind(with_agent_face(tool, dir.path()).await);
 
     let msg = tool
         .invoke(
@@ -308,7 +353,7 @@ async fn test_bg_cancel_trigger_token_and_cleanup() {
                 "prompt": "block forever",
                 "cwd": dir.path().to_str().unwrap(),
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            host.context(&[]),
         )
         .await
         .expect("bg task should start");
@@ -420,30 +465,39 @@ async fn test_bg_more_than_three_concurrent_tasks_start_complete_cancel() {
     let llm_calls_clone = Arc::clone(&llm_calls);
     let release_clone = Arc::clone(&release);
 
+    #[derive(Clone)]
     struct BulkLLM {
         calls: Arc<AtomicUsize>,
         release: Arc<tokio::sync::Semaphore>,
     }
-    #[async_trait::async_trait]
-    impl ReactLLM for BulkLLM {
-        async fn generate_reasoning(
+    impl BulkLLM {
+        async fn respond(
             &self,
-            _messages: &[BaseMessage],
-            _tools: &[&dyn BaseTool],
-            _streaming: Option<StreamingContext>,
-        ) -> peri_agent::error::AgentResult<Reasoning> {
+            request: peri_model::ModelRequest,
+            cancellation: tokio_util::sync::CancellationToken,
+        ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
+            use crate::subagent::test_support::*;
+            let _ = &cancellation;
+            let _messages = base_messages(&request);
+            let defined = defined_tools(&request);
+            let _tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
+
             self.calls.fetch_add(1, Ordering::SeqCst);
             let _ = self.release.acquire().await;
-            Ok(Reasoning::with_answer("", "bulk done"))
+            text_events("bulk done")
         }
     }
+    crate::subagent::test_support::fixture_model_impl!(BulkLLM);
 
-    let llm_factory: Arc<dyn Fn(Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync> =
+    let llm_factory: Arc<dyn Fn(Option<&str>) -> SubagentLlmSource + Send + Sync> =
         Arc::new(move |_: Option<&str>| {
-            Box::new(BulkLLM {
-                calls: Arc::clone(&llm_calls_clone),
-                release: Arc::clone(&release_clone),
-            }) as Box<dyn ReactLLM + Send + Sync>
+            crate::subagent::test_support::fixture_source(
+                std::sync::Arc::new(BulkLLM {
+                    calls: Arc::clone(&llm_calls_clone),
+                    release: Arc::clone(&release_clone),
+                }),
+                "fixture-scripted",
+            )
         });
 
     let deregistered: Arc<std::sync::Mutex<Vec<String>>> =
@@ -454,20 +508,31 @@ async fn test_bg_more_than_three_concurrent_tasks_start_complete_cancel() {
     });
 
     let (bg_tx, mut bg_rx) = mpsc::unbounded_channel::<ExecutorEvent>();
+    let host = HostFixture::open_in_with_background(
+        dir.path(),
+        "fixture-bg-bulk",
+        Arc::clone(&registry),
+        bg_tx,
+    )
+    .await;
+    let host = {
+        let mut sub_host = host.parent_session_host().unwrap_or_default();
+        sub_host.deregister_runtime = Some(Arc::clone(&deregister_cb));
+        host.with_rebuilt_host(sub_host)
+    };
     let tool = SubAgentTool::new(
         Arc::new(vec![]),
         None,
         llm_factory,
         dir.path().to_str().unwrap().to_string(),
     )
-    .with_task_manager(Arc::clone(&registry))
-    .with_bg_event_sender(bg_tx)
     .with_deregister_runtime(deregister_cb);
-    let tool = with_agent_face(tool, dir.path()).await;
+    let tool = host.bind(with_agent_face(tool, dir.path()).await);
 
     // 启动 6 个后台任务：全部必须成功返回（不再有并发上限拦截）
     let mut task_ids = Vec::new();
     for i in 0..6 {
+        let invocation = host.fresh_tool_call_id(&format!("bulk-{i}"));
         let msg = tool
             .invoke(
                 serde_json::json!({
@@ -476,7 +541,7 @@ async fn test_bg_more_than_three_concurrent_tasks_start_complete_cancel() {
                     "prompt": format!("bulk task {}", i),
                     "cwd": dir.path().to_str().unwrap(),
                 }),
-                peri_agent::tools::ToolContext::new(&[], "."),
+                host.context_with(&[], invocation),
             )
             .await
             .unwrap_or_else(|e| panic!("第 {} 个后台任务不应被拒绝: {}", i + 1, e));

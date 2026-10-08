@@ -86,7 +86,10 @@ async fn test_resume_subagent_legacy_history_starts_a_fresh_run_without_runtime_
     let config = resume_config_with(
         store.clone(),
         id.clone(),
-        Box::new(llm),
+        crate::session::test_resources::mock::model::fixture_source(
+            std::sync::Arc::new(llm),
+            "fixture-scripted",
+        ),
         SubagentRunMode::Sync,
         None,
         None,
@@ -248,6 +251,10 @@ async fn test_resume_subagent_pops_unpaired_tool_call_ai() {
     let thread_id = uuid::Uuid::now_v7().to_string();
     preset_resumable_thread(&store, &thread_id, None).await;
 
+    // 身份持久形态：spawn 在子会话 own history 起始写入身份 System（见 spawn
+    // 6b），恢复路径读回该条、不再重注入。夹具按同一形态预置。
+    let identity = BaseMessage::system("CHILD_IDENTITY_SENTINEL");
+
     // 完整配对轮次 + 末条未配对 AI（崩溃窗口残留形态：AI 已落盘、Tool 未落盘）
     let paired_ai = BaseMessage::ai_with_tool_calls(
         "paired-think",
@@ -270,6 +277,7 @@ async fn test_resume_subagent_pops_unpaired_tool_call_ai() {
         .append_messages(
             &thread_id,
             &[
+                identity.clone(),
                 BaseMessage::human("task"),
                 paired_ai.clone(),
                 tool_result.clone(),
@@ -283,7 +291,10 @@ async fn test_resume_subagent_pops_unpaired_tool_call_ai() {
     let config = resume_config_with(
         store.clone(),
         thread_id.clone(),
-        Box::new(llm.clone()),
+        crate::session::test_resources::mock::model::fixture_source(
+            std::sync::Arc::new(llm.clone()),
+            "fixture-scripted",
+        ),
         SubagentRunMode::Sync,
         None,
         None,
@@ -310,21 +321,43 @@ async fn test_resume_subagent_pops_unpaired_tool_call_ai() {
         "已配对轮次的 Tool 结果保留"
     );
 
-    // LLM 视角：同样不含被 pop 消息（且收到重放 + prompt）
+    // LLM 视角：同样不含被 pop 消息（且收到重放 + prompt）。
+    // Model 请求面不含 transcript message id：按内容锚定同一批消息。
     let received = llm.received.read();
     assert_eq!(received.len(), 1, "单轮 LLM 调用");
     assert!(
-        !received[0].iter().any(|m| m.id() == unpaired_ai.id()),
+        !received[0]
+            .iter()
+            .any(|m| m.content().contains("unpaired-think")),
         "被 pop 的消息不得发给 LLM"
     );
     assert!(
-        received[0].iter().any(|m| m.id() == paired_ai.id()),
+        received[0]
+            .iter()
+            .any(|m| m.content().contains("paired-think")),
         "已配对轮次发给 LLM（重放语义）"
+    );
+    // H1：身份自子会话持久历史读回（bridge 不重注入），故请求面为
+    // system(身份) + human + paired AI + tool result + prompt。
+    assert!(
+        matches!(received[0].first(), Some(BaseMessage::System { .. })),
+        "身份必须作为请求首条 system 出现: {:?}",
+        received[0]
+    );
+    assert_eq!(
+        received[0]
+            .iter()
+            .filter(|m| m.content().contains("CHILD_IDENTITY_SENTINEL"))
+            .count(),
+        1,
+        "恢复身份恰一次（来自持久历史）: {:?}",
+        received[0]
     );
     assert_eq!(
         received[0].len(),
-        4,
-        "human + paired AI + tool result + prompt"
+        5,
+        "system(身份) + human + paired AI + tool result + prompt: {:?}",
+        received[0]
     );
 }
 
@@ -429,7 +462,10 @@ async fn test_resume_subagent_interrupted_then_manual_history_continue() {
     let config = resume_config_with(
         store.clone(),
         thread_id.clone(),
-        Box::new(gate),
+        crate::session::test_resources::mock::model::fixture_source(
+            std::sync::Arc::new(gate),
+            "fixture-scripted",
+        ),
         SubagentRunMode::Sync,
         None,
         Some(token.clone()),
@@ -457,7 +493,10 @@ async fn test_resume_subagent_interrupted_then_manual_history_continue() {
     let config = resume_config_with(
         store.clone(),
         thread_id.clone(),
-        Box::new(llm),
+        crate::session::test_resources::mock::model::fixture_source(
+            std::sync::Arc::new(llm),
+            "fixture-scripted",
+        ),
         SubagentRunMode::Sync,
         None,
         None,
@@ -483,7 +522,10 @@ async fn test_resume_subagent_concurrent_resume_mutex() {
         let config = resume_config_with(
             store1.clone(),
             thread_id1,
-            Box::new(gate1.clone()),
+            crate::session::test_resources::mock::model::fixture_source(
+                std::sync::Arc::new(gate1.clone()),
+                "fixture-scripted",
+            ),
             SubagentRunMode::Sync,
             None,
             None,
@@ -617,7 +659,10 @@ async fn test_resume_subagent_background_mode_done() {
     let config = resume_config_with(
         store.clone(),
         thread_id.clone(),
-        Box::new(gate.clone()),
+        crate::session::test_resources::mock::model::fixture_source(
+            std::sync::Arc::new(gate.clone()),
+            "fixture-scripted",
+        ),
         SubagentRunMode::Background,
         Some(Arc::clone(&task_manager)),
         None,
@@ -683,7 +728,10 @@ async fn test_resume_subagent_background_mode_cancelled() {
     let mut config = resume_config_with(
         store.clone(),
         thread_id.clone(),
-        Box::new(gate),
+        crate::session::test_resources::mock::model::fixture_source(
+            std::sync::Arc::new(gate),
+            "fixture-scripted",
+        ),
         SubagentRunMode::Background,
         Some(Arc::clone(&task_manager)),
         Some(token.clone()),
@@ -731,7 +779,10 @@ async fn test_resume_subagent_bg_registration_failure_rolls_back() {
     let config = resume_config_with(
         store.clone(),
         thread_id.clone(),
-        Box::new(EchoLLM),
+        crate::session::test_resources::mock::model::fixture_source(
+            std::sync::Arc::new(EchoLLM),
+            "fixture-scripted",
+        ),
         SubagentRunMode::Background,
         None,
         None,
@@ -766,7 +817,10 @@ async fn test_resume_subagent_bg_registration_failure_rolls_back() {
     let config = resume_config_with(
         store.clone(),
         thread_id.clone(),
-        Box::new(EchoLLM),
+        crate::session::test_resources::mock::model::fixture_source(
+            std::sync::Arc::new(EchoLLM),
+            "fixture-scripted",
+        ),
         SubagentRunMode::Background,
         Some(Arc::clone(&task_manager)),
         None,
@@ -829,7 +883,10 @@ async fn test_resume_subagent_bg_beyond_previous_agent_cap() {
     let config = resume_config_with(
         store.clone(),
         thread_id.clone(),
-        Box::new(EchoLLM),
+        crate::session::test_resources::mock::model::fixture_source(
+            std::sync::Arc::new(EchoLLM),
+            "fixture-scripted",
+        ),
         SubagentRunMode::Background,
         Some(Arc::clone(&task_manager)),
         None,
@@ -894,7 +951,10 @@ async fn test_resume_subagent_bg_scope_closed_rejected_before_claim() {
     let config = resume_config_with(
         store.clone(),
         thread_id.clone(),
-        Box::new(EchoLLM),
+        crate::session::test_resources::mock::model::fixture_source(
+            std::sync::Arc::new(EchoLLM),
+            "fixture-scripted",
+        ),
         SubagentRunMode::Background,
         Some(Arc::clone(&task_manager)),
         None,

@@ -32,7 +32,9 @@ use crate::hooks::{
 /// 共享（如 future 的 standalone 复用同 tracker 的场景）。
 pub struct HookDispatcher {
     hooks: Arc<RwLock<HashMap<HookEvent, Vec<RegisteredHook>>>>,
-    llm_factory: Arc<dyn Fn() -> Box<dyn ReactLLM + Send + Sync> + Send + Sync>,
+    /// `None` = 无 LLM 工厂（standalone / 子 agent 生命周期路径）：
+    /// Prompt / Agent hook 被显式跳过（与 standalone 既有语义一致）。
+    llm_factory: Option<Arc<dyn Fn() -> Box<dyn ReactLLM + Send + Sync> + Send + Sync>>,
     once_tracker: Arc<OnceTracker>,
     /// Agent hook 执行时的工作目录（对齐原 HookMiddleware.cwd）。
     cwd: String,
@@ -48,7 +50,26 @@ impl HookDispatcher {
     ) -> Self {
         Self {
             hooks,
-            llm_factory,
+            llm_factory: Some(llm_factory),
+            once_tracker,
+            cwd,
+            task_manager: None,
+        }
+    }
+
+    /// 无 LLM 工厂的构造（standalone / 子 agent 生命周期）：Prompt / Agent hook 跳过。
+    pub fn new_without_llm(
+        registered_hooks: Vec<RegisteredHook>,
+        once_tracker: Arc<OnceTracker>,
+        cwd: String,
+    ) -> Self {
+        let mut map: HashMap<HookEvent, Vec<RegisteredHook>> = HashMap::new();
+        for hook in registered_hooks {
+            map.entry(hook.event.clone()).or_default().push(hook);
+        }
+        Self {
+            hooks: Arc::new(RwLock::new(map)),
+            llm_factory: None,
             once_tracker,
             cwd,
             task_manager: None,
@@ -58,6 +79,36 @@ impl HookDispatcher {
     pub fn with_task_manager(mut self, task_manager: Arc<dyn TaskManager>) -> Self {
         self.task_manager = Some(task_manager);
         self
+    }
+
+    /// 可选注入会话 task manager（子 agent 生命周期路径按 host 是否有 manager 传入）。
+    pub fn with_task_manager_opt(mut self, task_manager: Option<Arc<dyn TaskManager>>) -> Self {
+        self.task_manager = task_manager;
+        self
+    }
+
+    /// 子 agent 生命周期事件（SubagentStart / SubagentStop）的唯一分发入口。
+    ///
+    /// 复用完整分发语义：matcher 以子 agent 名为匹配目标、once、async spawn（含超时 /
+    /// 取消 / 进程树 owner）、执行前查找与事件一致。
+    ///
+    /// 生命周期事件没有工具输入：带 `if` 条件的 hook 按 (子 agent 名, 空输入) 求值，
+    /// 工具条件不满足即跳过，不允许"条件无效但静默执行"。
+    ///
+    /// **默认非阻断**：返回 action 仅供诊断；调用方不得据此阻断子 agent。
+    pub async fn fire_subagent_lifecycle(
+        &self,
+        event: HookEvent,
+        input: &HookInput,
+        subagent_name: &str,
+    ) -> HookAction {
+        debug_assert!(
+            matches!(event, HookEvent::SubagentStart | HookEvent::SubagentStop),
+            "fire_subagent_lifecycle 仅服务子 agent 生命周期事件"
+        );
+        let empty_input = serde_json::Value::Object(Default::default());
+        self.fire_event(event, input, Some(subagent_name), Some(&empty_input))
+            .await
     }
 
     /// 分发一次 hook 事件。
@@ -172,28 +223,16 @@ impl HookDispatcher {
                 self.once_tracker.mark_fired(registered);
             }
 
-            // Short-circuit on Block / PreventContinuation
-            match &action {
-                HookAction::Block { .. } | HookAction::PreventContinuation { .. } => return action,
-                HookAction::ModifyInput { new_input } => {
-                    final_action = HookAction::ModifyInput {
-                        new_input: new_input.clone(),
-                    };
-                }
-                HookAction::PermissionOverride { decision, reason } => {
-                    // Phase 2: 权限覆盖决策暂不改变实际权限行为，仅记录
-                    tracing::debug!(
-                        "PermissionOverride from hook: {:?} (reason: {:?})",
-                        decision,
-                        reason
-                    );
-                    final_action = HookAction::PermissionOverride {
-                        decision: decision.clone(),
-                        reason: reason.clone(),
-                    };
-                }
-                _ => {}
+            // Block / PreventContinuation 保持 fail-closed 短路
+            if matches!(
+                action,
+                HookAction::Block { .. } | HookAction::PreventContinuation { .. }
+            ) {
+                return action;
             }
+
+            // 其余结果按字段归并：deny/updatedInput/context/messages 互不吞并
+            final_action = merge_hook_actions(final_action, action);
         }
 
         final_action
@@ -211,11 +250,124 @@ impl HookDispatcher {
                 execute_command_hook_owned(hook, input, registered, self.task_manager.as_deref())
                     .await
             }
-            HookType::Prompt { .. } => execute_prompt_hook(hook, input, &self.llm_factory).await,
+            HookType::Prompt { .. } => match &self.llm_factory {
+                Some(factory) => execute_prompt_hook(hook, input, factory).await,
+                None => {
+                    tracing::debug!(
+                        event = ?input.hook_event_name,
+                        "Prompt hook skipped: dispatcher has no LLM factory"
+                    );
+                    HookAction::Allow
+                }
+            },
             HookType::Http { .. } => execute_http_hook(hook, input).await,
-            HookType::Agent { .. } => {
-                execute_agent_hook(hook, input, &self.llm_factory, &self.cwd).await
+            HookType::Agent { .. } => match &self.llm_factory {
+                Some(factory) => execute_agent_hook(hook, input, factory, &self.cwd).await,
+                None => {
+                    tracing::debug!(
+                        event = ?input.hook_event_name,
+                        "Agent hook skipped: dispatcher has no LLM factory"
+                    );
+                    HookAction::Allow
+                }
+            },
+        }
+    }
+}
+
+/// 归并多个 hook 的结果：字段级合并，任何字段都不得被其它 hook 的结果吞掉。
+///
+/// - 判定取 [`HookAction::PermissionOverride`] 中 `merge_rank` 更高者：
+///   deny/非法 > ask > allow > passthrough（deny 优先于 updatedInput）
+/// - `updated_input` / `system_message` 后者覆盖前者；
+///   `additional_context` 按顺序拼接并有界截断
+/// - Block / PreventContinuation 已在调用点短路，不会进入本函数
+fn merge_hook_actions(acc: HookAction, next: HookAction) -> HookAction {
+    match (acc, next) {
+        (HookAction::Allow, other) => other,
+        (
+            HookAction::ModifyInput { new_input },
+            HookAction::PermissionOverride {
+                decision,
+                reason,
+                additional_context,
+                system_message,
+                ..
+            },
+        ) => HookAction::PermissionOverride {
+            decision,
+            reason,
+            updated_input: Some(new_input),
+            additional_context,
+            system_message,
+        },
+        (
+            HookAction::PermissionOverride {
+                decision,
+                reason,
+                additional_context,
+                system_message,
+                ..
+            },
+            HookAction::ModifyInput { new_input },
+        ) => HookAction::PermissionOverride {
+            decision,
+            reason,
+            updated_input: Some(new_input),
+            additional_context,
+            system_message,
+        },
+        (
+            HookAction::PermissionOverride {
+                decision: prev_decision,
+                reason: prev_reason,
+                updated_input: prev_input,
+                additional_context: prev_context,
+                system_message: prev_message,
+            },
+            HookAction::PermissionOverride {
+                decision,
+                reason,
+                updated_input,
+                additional_context,
+                system_message,
+            },
+        ) => {
+            let (decision, reason) = if decision.merge_rank() > prev_decision.merge_rank() {
+                (decision, reason)
+            } else {
+                (prev_decision, prev_reason)
+            };
+            HookAction::PermissionOverride {
+                decision,
+                reason,
+                updated_input: updated_input.or(prev_input),
+                additional_context: merge_additional_context(prev_context, additional_context),
+                system_message: system_message.or(prev_message),
             }
+        }
+        // 其余单值 action 沿用「后者覆盖」语义
+        (_, other) => other,
+    }
+}
+
+/// additionalContext 归并上限：多个 hook 叠加也不产生无界上下文。
+const MAX_ADDITIONAL_CONTEXT_BYTES: usize = 16 * 1024;
+
+fn merge_additional_context(existing: Option<String>, incoming: Option<String>) -> Option<String> {
+    match (existing, incoming) {
+        (None, None) => None,
+        (Some(existing), None) => Some(existing),
+        (None, Some(incoming)) => Some(incoming),
+        (Some(mut existing), Some(incoming)) => {
+            if !existing.is_empty() {
+                existing.push('\n');
+            }
+            existing.push_str(&incoming);
+            if existing.len() > MAX_ADDITIONAL_CONTEXT_BYTES {
+                existing.truncate(existing.floor_char_boundary(MAX_ADDITIONAL_CONTEXT_BYTES));
+            }
+            Some(existing)
         }
     }
 }
@@ -383,6 +535,121 @@ pub async fn fire_standalone_lifecycle_hooks_owned(
     }
 }
 
+/// 异步 hook 输出的字段摘要（**非决策**：不生效、不投递、不追溯授权）。
+///
+/// 只保留字段名与长度，不携带 hook 正文。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct AsyncHookOutputSummary {
+    /// 决策类输出（异步路径不会应用）：block / prevent_continuation / modify_input /
+    /// permission_override。
+    pub decision: Option<&'static str>,
+    /// 需要投递但异步路径没有定义的字段名（systemMessage / additionalContext /
+    /// initialUserMessage）。
+    pub undelivered: Vec<&'static str>,
+    /// 未投递字段的字节数合计（诊断用，不含正文）。
+    pub undelivered_bytes: usize,
+}
+
+/// 分类异步 hook 的归并结果：完成（无输出）/ 决策被忽略 / 未定义投递。
+pub(crate) fn async_hook_output_summary(action: &HookAction) -> AsyncHookOutputSummary {
+    let mut summary = AsyncHookOutputSummary::default();
+    match action {
+        HookAction::Allow => {}
+        HookAction::Block { .. } => summary.decision = Some("block"),
+        HookAction::PreventContinuation { .. } => {
+            summary.decision = Some("prevent_continuation");
+        }
+        HookAction::ModifyInput { .. } => summary.decision = Some("modify_input"),
+        HookAction::PermissionOverride {
+            additional_context,
+            system_message,
+            ..
+        } => {
+            summary.decision = Some("permission_override");
+            if let Some(context) = additional_context {
+                summary.undelivered.push("additionalContext");
+                summary.undelivered_bytes += context.len();
+            }
+            if let Some(message) = system_message {
+                summary.undelivered.push("systemMessage");
+                summary.undelivered_bytes += message.len();
+            }
+        }
+        HookAction::SystemMessage { message } => {
+            summary.undelivered.push("systemMessage");
+            summary.undelivered_bytes += message.len();
+        }
+        HookAction::AdditionalContext { context } => {
+            summary.undelivered.push("additionalContext");
+            summary.undelivered_bytes += context.len();
+        }
+        HookAction::InitialUserMessage { message } => {
+            summary.undelivered.push("initialUserMessage");
+            summary.undelivered_bytes += message.len();
+        }
+    }
+    summary
+}
+
+fn async_hook_kind(hook: &HookType) -> &'static str {
+    match hook {
+        HookType::Command { .. } => "command",
+        HookType::Prompt { .. } => "prompt",
+        HookType::Http { .. } => "http",
+        HookType::Agent { .. } => "agent",
+    }
+}
+
+/// 记录异步 hook 终态：完成走 debug，决策忽略 / 未定义投递 / 取消走 warn。
+///
+/// 诊断只含字段名与长度，不含 hook 正文。
+fn record_async_hook_outcome(
+    event: &HookEvent,
+    plugin: &str,
+    hook_kind: &'static str,
+    outcome: Result<HookAction, ()>,
+) {
+    let action = match outcome {
+        Ok(action) => action,
+        Err(()) => {
+            tracing::warn!(
+                event = ?event,
+                plugin,
+                hook_kind,
+                outcome = "cancelled",
+                "Async hook cancelled by session scope; result is not applied (non-decision hook)"
+            );
+            return;
+        }
+    };
+    let summary = async_hook_output_summary(&action);
+    if summary.decision.is_none() && summary.undelivered.is_empty() {
+        tracing::debug!(
+            event = ?event,
+            plugin,
+            hook_kind,
+            outcome = "completed",
+            "Async hook completed without output"
+        );
+        return;
+    }
+    let outcome = if summary.decision.is_some() {
+        "decision_ignored"
+    } else {
+        "undelivered_output"
+    };
+    tracing::warn!(
+        event = ?event,
+        plugin,
+        hook_kind,
+        outcome,
+        decision = summary.decision,
+        undelivered_fields = ?summary.undelivered,
+        undelivered_bytes = summary.undelivered_bytes,
+        "Async hook output is not applied on the async path (non-decision hook; no delivery defined)"
+    );
+}
+
 /// Async completion stays in the session scope while its command owner drains
 /// the process tree independently of the ignored HookAction result.
 fn spawn_async_hook(
@@ -394,6 +661,9 @@ fn spawn_async_hook(
     let cancellation = manager
         .as_ref()
         .and_then(|manager| manager.execution_cancel_token());
+    let event = input.hook_event_name.clone();
+    let plugin = registered.plugin_name.clone();
+    let hook_kind = async_hook_kind(&registered.hook);
     let task = async move {
         let execute = async {
             match &registered.hook {
@@ -410,15 +680,16 @@ fn spawn_async_hook(
                 _ => HookAction::Allow,
             }
         };
-        if let Some(token) = cancellation {
+        let outcome = if let Some(token) = cancellation {
             tokio::select! {
                 biased;
-                _ = token.cancelled() => {}
-                _ = execute => {}
+                _ = token.cancelled() => Err(()),
+                action = execute => Ok(action),
             }
         } else {
-            let _ = execute.await;
-        }
+            Ok(execute.await)
+        };
+        record_async_hook_outcome(&event, &plugin, hook_kind, outcome);
     };
     match task_manager {
         Some(manager) => {

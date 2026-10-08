@@ -5,11 +5,7 @@ use parking_lot::RwLock;
 use peri_acp_types::agents::AgentOverrides;
 use peri_acp_types::identity::AgentId;
 use peri_agent::session::subagent::SubagentHost;
-use peri_agent::{
-    agent::{events::AgentEventHandler, react::ReactLLM},
-    messages::BaseMessage,
-    tools::BaseTool,
-};
+use peri_agent::{agent::events::AgentEventHandler, messages::BaseMessage, tools::BaseTool};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken as AgentCancellationToken;
 
@@ -18,7 +14,9 @@ impl super::SubAgentTool {
     pub fn new(
         parent_tools: Arc<Vec<Arc<dyn BaseTool>>>,
         event_handler: Option<Arc<dyn AgentEventHandler>>,
-        llm_factory: Arc<dyn Fn(Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync>,
+        llm_factory: Arc<
+            dyn Fn(Option<&str>) -> peri_agent::session::subagent::SubagentLlmSource + Send + Sync,
+        >,
         parent_cwd: String,
     ) -> Self {
         Self {
@@ -164,12 +162,6 @@ impl super::SubAgentTool {
         self.host.frozen_claude_md = claude_md;
         self.host.frozen_claude_local_md = claude_local_md;
         self.host.frozen_skill_summary = skill_summary;
-        self
-    }
-
-    /// 注入 main agent 捕获的 frozen system prompt（fork 路径复用以避免重建）。
-    pub fn with_frozen_system_prompt(mut self, sp: Arc<String>) -> Self {
-        self.host.frozen_system_prompt = Some(sp);
         self
     }
 

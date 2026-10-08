@@ -833,7 +833,7 @@ async fn test_dispatch_emits_fast_completion_before_atomic_batch_commit() {
         }
         async fn after_tools_batch(
             &self,
-            state: &mut dyn hook_state::StateView,
+            state: &mut dyn hook_state::AfterToolsBatchState,
             _results: &[(ToolCall, ToolResult)],
         ) -> AgentResult<()> {
             self.0.lock().push(("after_batch", state.messages().len()));

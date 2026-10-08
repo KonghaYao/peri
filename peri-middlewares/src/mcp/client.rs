@@ -334,6 +334,34 @@ impl McpClientPool {
         })
     }
 
+    /// 有效 `workspace` 声明的来源身份（H3/D1：执行环境事实）。
+    ///
+    /// 判定面覆盖**全部落进本池的来源**：
+    /// - 会话声明（`set_session_servers`；新会话来自 ACP 请求，恢复/reopen 来自
+    ///   持久 owner，两者都在 `initialize` 前可见）；
+    /// - 合并配置（部署/全局/项目/插件层 + builtin overlay，`initialize` 后可见）
+    ///   —— 部署/全局配置对 builtin `workspace` 的 HTTP 接管会标记
+    ///   [`ConfigSource::WorkspaceRemote`]。
+    ///
+    /// 会话声明优先（与 `run_initialize` 的合并顺序一致：session servers 覆盖文件
+    /// 配置）。`None` = 池中没有任何 `workspace` 条目（无 workspace 面）。
+    /// **被 `disabled` 的条目同样返回来源**：禁用只表示能力关闭，不改变
+    /// 「该声明的执行环境不在本机」这一事实。
+    pub fn workspace_source(&self) -> Option<peri_acp_types::plugin::ConfigSource> {
+        if let Some(servers) = self.session_servers.get() {
+            if let Some(source) = servers
+                .get("workspace")
+                .and_then(|config| config.source.clone())
+            {
+                return Some(source);
+            }
+        }
+        self.configs
+            .read()
+            .get("workspace")
+            .and_then(|config| config.source.clone())
+    }
+
     /// ACP session setup declarations are scoped to this pool and override file configuration.
     pub fn set_session_servers(
         &self,

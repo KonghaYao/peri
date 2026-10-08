@@ -17,8 +17,6 @@ use peri_acp_types::event::{
 };
 use peri_acp_types::event_v2::{ObserveEvent, RenderEvent};
 use peri_acp_types::identity::AgentId;
-use peri_agent::agent::model_bridge::AgentModelBridge;
-use peri_agent::agent::react::{ReactLLM, Reasoning, StreamingContext};
 use peri_agent::agent::stages::{run_react_loop, LoopResult, StageContext};
 use peri_agent::messages::BaseMessage;
 use peri_agent::session::queue::{MessageSource, QueuedMessage};
@@ -164,8 +162,9 @@ impl Model for RuntimeFailureModel {
     }
 }
 
+#[derive(Clone)]
 struct ParentDriver {
-    calls: std::sync::atomic::AtomicUsize,
+    calls: Arc<std::sync::atomic::AtomicUsize>,
     seen: Arc<Mutex<Vec<Vec<BaseMessage>>>>,
     input: serde_json::Value,
 }
@@ -182,29 +181,31 @@ impl peri_agent::agent::LangfuseBridgeLike for RecordingBridge {
     }
 }
 
-#[async_trait]
-impl ReactLLM for ParentDriver {
-    async fn generate_reasoning(
+impl ParentDriver {
+    async fn respond(
         &self,
-        messages: &[BaseMessage],
-        _tools: &[&dyn BaseTool],
-        _streaming: Option<StreamingContext>,
-    ) -> peri_agent::error::AgentResult<Reasoning> {
+        request: peri_model::ModelRequest,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
+        use crate::subagent::test_support::*;
+        let _ = &cancellation;
+        let messages = base_messages(&request);
+        let defined = defined_tools(&request);
+        let _tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
+
         self.seen.lock().unwrap().push(messages.to_vec());
         if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
-            Ok(Reasoning::with_tools(
-                "delegate",
-                vec![peri_agent::agent::react::ToolCall::new(
-                    "parent-agent-call",
-                    "Agent",
-                    self.input.clone(),
-                )],
-            ))
+            tool_events_from_react(vec![peri_agent::agent::react::ToolCall::new(
+                "parent-agent-call",
+                "Agent",
+                self.input.clone(),
+            )])
         } else {
-            Ok(Reasoning::with_answer("", "parent completed"))
+            text_events("parent completed")
         }
     }
 }
+crate::subagent::test_support::fixture_model_impl!(ParentDriver);
 
 struct SyncFixture {
     tool_message: serde_json::Value,
@@ -237,8 +238,10 @@ async fn run_sync_fixture(fixture: FailureFixture, status: Option<u16>) -> SyncF
             Arc::new(Vec::new()),
             Some(child_handler),
             Arc::new(move |_| {
-                Box::new(AgentModelBridge::from_arc(Arc::clone(&model_for_factory)))
-                    as Box<dyn ReactLLM + Send + Sync>
+                crate::subagent::test_support::fixture_source(
+                    Arc::clone(&model_for_factory),
+                    "fixture-scripted",
+                )
             }),
             cwd.clone(),
         )
@@ -268,11 +271,13 @@ async fn run_sync_fixture(fixture: FailureFixture, status: Option<u16>) -> SyncF
     let (event_bus, mut event_handles) =
         peri_agent::agent::events_v2::EventBus::new(Default::default());
     let context = StageContext::builder(turn, transcript, queue.clone())
-        .with_llm(Arc::new(ParentDriver {
-            calls: std::sync::atomic::AtomicUsize::new(0),
-            seen: Arc::clone(&seen),
-            input,
-        }))
+        .with_llm(Arc::new(
+            peri_agent::agent::model_bridge::AgentModelBridge::new(Arc::new(ParentDriver {
+                calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                seen: Arc::clone(&seen),
+                input,
+            })),
+        ))
         .with_tools(shared_tools)
         .with_event_bus(Arc::new(event_bus))
         .build();
@@ -514,8 +519,10 @@ async fn background_http_429_consumes_typed_result_and_safe_notification() {
         Arc::new(Vec::new()),
         None,
         Arc::new(move |_| {
-            Box::new(AgentModelBridge::from_arc(Arc::clone(&model_for_factory)))
-                as Box<dyn ReactLLM + Send + Sync>
+            crate::subagent::test_support::fixture_source(
+                Arc::clone(&model_for_factory),
+                "fixture-scripted",
+            )
         }),
         cwd.clone(),
     )

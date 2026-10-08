@@ -8,7 +8,6 @@ use peri_acp_types::{
 use tokio_util::sync::CancellationToken as AgentCancellationToken;
 
 use crate::agent::langfuse_bridge::LangfuseBridgeLike;
-use crate::agent::react::ReactLLM;
 use crate::session::exec::stage_builder::CachedLlmInstances;
 use crate::tools::ToolInvocationResolver;
 
@@ -102,6 +101,14 @@ impl FrozenSessionData {
     pub fn meta_harness(&self) -> &peri_acp_types::meta_harness::MetaHarnessState {
         &self.v2_frozen.meta_harness
     }
+
+    /// 冻结运行环境快照（H3）；`None` = 旧快照缺少结构化环境值（unavailable）。
+    ///
+    /// 单一事实源为 `v2_frozen.runtime_env`——渲染面只消费该快照，不在调用时
+    /// 重新探测（ARC-FROZEN-001）。
+    pub fn runtime_env(&self) -> Option<&peri_acp_types::frozen::FrozenRuntimeEnv> {
+        self.v2_frozen.runtime_env.as_ref()
+    }
 }
 
 /// Langfuse 遥测注入面（L5：ACP 宿主从 `LangfuseSession` 构造；None = 禁用）。
@@ -117,9 +124,13 @@ pub type LangfuseBridgeFactory =
 /// auto-classifier LLM 构造闭包（stage 装配注入面）。
 pub type AutoClassifierFactory =
     Arc<dyn Fn() -> Arc<tokio::sync::Mutex<Box<dyn peri_model::Model>>> + Send + Sync>;
-/// 子 agent LLM 工厂（支持 SubAgent LLM 缓存复用；stage 装配注入面）。
+/// 子 agent 模型工厂（支持 SubAgent LLM 缓存复用；stage 装配注入面）。
+///
+/// H1：只产出模型来源（[`SubagentLlmSource`]），不封装 `AgentModelBridge`——
+/// bridge 由有子链可用的一方（Agent 层 session factory）在子链装配点统一装
+/// with_system 身份与请求时 contribution provider。
 pub type SubagentLlmFactory =
-    Arc<dyn Fn(Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync>;
+    Arc<dyn Fn(Option<&str>) -> crate::session::subagent::SubagentLlmSource + Send + Sync>;
 /// 防御性 frozen 构建器（ACP 宿主渲染面构造；turn.frozen=None 时回落）。
 pub type FrozenFallbackBuilder = Arc<dyn Fn(&str, Option<&str>) -> FrozenSessionData + Send + Sync>;
 /// turn 结束 Langfuse 钩子（返回 flush JoinHandle，drop = fire-and-forget）。

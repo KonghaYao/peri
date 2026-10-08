@@ -56,6 +56,10 @@ pub fn same_file(first: &Path, second: &Path) -> io::Result<bool> {
     client()?.same_file(first, second)
 }
 
+pub fn canonicalize(path: &Path) -> io::Result<Option<PathBuf>> {
+    client()?.canonicalize(path)
+}
+
 pub fn global_config_path() -> PathBuf {
     client()
         .and_then(ConfigurationClient::paths)
