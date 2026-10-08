@@ -25,7 +25,7 @@ use crate::kit::welcome::Welcome;
 use peri_theme::atoms::{PALETTE_ATOM, THEME_ATOM};
 use ratatui_kit::prelude::*;
 use ratatui_kit::ratatui::{
-    layout::{Constraint, Direction},
+    layout::{Constraint, Direction, Position},
     style::{Modifier, Style},
     text::{Line, Span, Text as RatText},
     widgets::{Block, Padding, Paragraph, Wrap},
@@ -807,6 +807,13 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
             "gen={vm_generation}, excludes-widget-draw-and-terminal-flush"
         )),
     );
+    render_viewport(viewport_lines, scroll_offset_y)
+}
+
+fn render_viewport(
+    viewport_lines: Vec<Line<'static>>,
+    scroll_offset_y: u16,
+) -> AnyElement<'static> {
     element!(
         View(
             flex_direction: Direction::Vertical,
@@ -815,8 +822,8 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         ) {
             Text(text: Paragraph::new(RatText::from(viewport_lines))
                 .wrap(Wrap { trim: false })
-                .block(Block::default().padding(Padding::new(0, 1, 0, 0)))
-                .scroll((scroll_offset_y, 0)))
+                .block(Block::default().padding(Padding::new(0, 1, 0, 0))),
+                scroll: Position::new(scroll_offset_y, 0))
         }
     )
     .into_any()
@@ -825,3 +832,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
 #[cfg(test)]
 #[path = "mod_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "viewport_test.rs"]
+mod viewport_tests;

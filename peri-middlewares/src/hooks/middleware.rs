@@ -621,8 +621,12 @@ impl Middleware for HookMiddleware {
         );
 
         if should_fire {
+            // M10 字段路由：`PermissionRequest` 的输出同样可能携带 `systemMessage`
+            // 等受众字段。本阶段的 `BeforeToolState` 带 `HookOutputState`，有投递面，
+            // 因此必须走 `fire_event_with_delivery`——不得解析成功却只落 DEBUG 诊断。
             let action = self
-                .fire_event(
+                .fire_event_with_delivery(
+                    Some(state),
                     HookEvent::PermissionRequest,
                     &input,
                     Some(&effective_call.name),
@@ -641,7 +645,8 @@ impl Middleware for HookMiddleware {
                 || matches!(&action, HookAction::PreventContinuation { .. })
                 || override_denies;
             if is_denied {
-                self.fire_event(
+                self.fire_event_with_delivery(
+                    Some(state),
                     HookEvent::PermissionDenied,
                     &input,
                     Some(&effective_call.name),
@@ -651,7 +656,8 @@ impl Middleware for HookMiddleware {
             }
 
             // Fire Notification (agent is waiting for user permission)
-            self.fire_event(
+            self.fire_event_with_delivery(
+                Some(state),
                 HookEvent::Notification,
                 &input,
                 Some(&effective_call.name),

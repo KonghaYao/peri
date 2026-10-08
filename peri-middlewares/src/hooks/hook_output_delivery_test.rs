@@ -40,6 +40,14 @@ fn registered(event: HookEvent, stdout_json: &str) -> RegisteredHook {
 }
 
 fn make_middleware(hooks: Vec<RegisteredHook>, session_start: Option<&str>) -> HookMiddleware {
+    make_middleware_with_mode(hooks, PermissionMode::Bypass, session_start)
+}
+
+fn make_middleware_with_mode(
+    hooks: Vec<RegisteredHook>,
+    mode: PermissionMode,
+    session_start: Option<&str>,
+) -> HookMiddleware {
     let llm_factory: Arc<dyn Fn() -> Box<dyn ReactLLM + Send + Sync> + Send + Sync> =
         Arc::new(|| unimplemented!("no LLM needed in delivery tests"));
     HookMiddleware::with_session_start(
@@ -48,7 +56,7 @@ fn make_middleware(hooks: Vec<RegisteredHook>, session_start: Option<&str>) -> H
         std::env::temp_dir().to_str().unwrap(),
         "delivery-session",
         "/test/transcript.json",
-        SharedPermissionMode::new(PermissionMode::Bypass),
+        SharedPermissionMode::new(mode),
         "opus",
         session_start.map(str::to_string),
     )
@@ -204,4 +212,43 @@ async fn post_tool_batch_system_message_is_delivered_as_a_client_notice() {
     assert!(reminders[0].audiences.contains(ReminderAudience::Tui));
     assert!(!reminders[0].audiences.contains(ReminderAudience::Model));
     assert!(reminders[0].body.contains("batch note"));
+}
+
+/// `before_tool` 阶段的 `systemMessage` 也必须投递到客户端面（M10）。
+///
+/// `PermissionRequest` / `PermissionDenied` / `Notification` 由 `before_tool`
+/// 触发，该阶段的 `BeforeToolState: StateView + HookOutputState` **有投递面**，
+/// 因此解析出的受众字段不得只落 DEBUG 诊断（等价 `fire_event(None, …)`）。
+///
+/// 注：这些事件下 `additionalContext` 不可达——它只出现在 `PreToolUse` 形状的
+/// `hookSpecificOutput` 里，而事件不匹配会被 `sync_response_to_action` 显式
+/// 拒绝并报错（`invalid_output`），不属于「解析成功即假装生效」。
+#[cfg(unix)]
+#[tokio::test]
+async fn permission_request_system_message_reaches_the_client_notice() {
+    let hook = registered(
+        HookEvent::PermissionRequest,
+        r#"{"systemMessage":"permission dialog is coming"}"#,
+    );
+    // Bypass 不展示权限对话框、不触发 PermissionRequest，故必须用 Default。
+    let mw = make_middleware_with_mode(vec![hook], PermissionMode::Default, None);
+    let mut state = state_with_prompt();
+
+    let call = ToolCall::new("call-1", "Bash", serde_json::json!({"command": "echo hi"}));
+    mw.before_tool(&mut state, &call).await.unwrap();
+
+    let reminders = reminders(&state);
+    assert_eq!(
+        reminders.len(),
+        1,
+        "PermissionRequest 的 systemMessage 必须投递恰好一次"
+    );
+    assert_eq!(reminders[0].kind, "permission_request_system_message");
+    assert_eq!(reminders[0].source.0, "hook", "投递必须保留 hook 来源");
+    assert!(reminders[0].audiences.contains(ReminderAudience::Tui));
+    assert!(
+        !reminders[0].audiences.contains(ReminderAudience::Model),
+        "客户端提示不进模型上下文"
+    );
+    assert!(reminders[0].body.contains("permission dialog is coming"));
 }
