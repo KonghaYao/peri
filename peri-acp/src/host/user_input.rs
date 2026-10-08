@@ -243,7 +243,7 @@ pub(super) fn schedule_mailbox(
                 });
                 let result = super::prompt_dispatch::dispatch_prompt_turn_with_input(
                     params,
-                    true,
+                    super::PromptOrigin::QueuedUser,
                     None,
                     &sessions,
                     &prompt_locks,

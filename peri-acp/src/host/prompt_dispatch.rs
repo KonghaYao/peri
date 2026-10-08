@@ -10,6 +10,14 @@ use serde_json::Value;
 use super::{extract_session_id, run_prompt, AcpServerConfig, PromptLocks, SharedSessions};
 use crate::transport::types::AcpError;
 
+#[derive(Clone, Copy)]
+pub(crate) enum PromptOrigin {
+    User,
+    QueuedUser,
+    Continuation { mq_steering: bool },
+    Scheduled,
+}
+
 /// 用户 prompt 与内部 AsyncContinuation 的**共享执行路径**。
 ///
 /// 复用同一套：AgentPool 取出/归还、per-session prompt lock、run_prompt 后处理
@@ -20,7 +28,7 @@ use crate::transport::types::AcpError;
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn dispatch_prompt_turn(
     params: Value,
-    is_continuation: bool,
+    origin: PromptOrigin,
     continuation_epoch: Option<u64>,
     sessions: &SharedSessions,
     prompt_locks: &PromptLocks,
@@ -30,7 +38,7 @@ pub(crate) async fn dispatch_prompt_turn(
 ) -> Result<Value, AcpError> {
     dispatch_prompt_turn_with_input(
         params,
-        is_continuation,
+        origin,
         continuation_epoch,
         sessions,
         prompt_locks,
@@ -45,7 +53,7 @@ pub(crate) async fn dispatch_prompt_turn(
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn dispatch_prompt_turn_with_input(
     params: Value,
-    is_continuation: bool,
+    origin: PromptOrigin,
     continuation_epoch: Option<u64>,
     sessions: &SharedSessions,
     prompt_locks: &PromptLocks,
@@ -54,6 +62,7 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
     cont_tx: &tokio::sync::mpsc::UnboundedSender<crate::session::executor::ContinuationRequest>,
     input_ticket: Option<super::user_input::UserInputRun>,
 ) -> Result<Value, AcpError> {
+    let is_continuation = !matches!(origin, PromptOrigin::User);
     let prompt_session_id = extract_session_id(&params, "").to_string();
     let environment = sessions
         .lock()
@@ -89,6 +98,7 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
         let mut sessions = sessions.lock().await;
         if let Some(state) = sessions.get_mut(&prompt_session_id) {
             state.continuation_armed = false;
+            state.continuation_mq_steering_pending = false;
             state.continuation_epoch += 1;
         }
     }
@@ -166,7 +176,18 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
                         )
                     })
                     .unwrap_or((false, false));
-                continuation::continuation_dispatchable(state, epoch, has_subagent, has_mq)
+                let mq_steering = matches!(
+                    origin,
+                    PromptOrigin::Scheduled | PromptOrigin::Continuation { mq_steering: true }
+                );
+                continuation::continuation_dispatchable(
+                    state,
+                    epoch,
+                    has_subagent,
+                    has_mq,
+                    mq_steering,
+                ) && (!matches!(origin, PromptOrigin::Continuation { mq_steering: true })
+                    || super::activation::mq_allowed(cfg, &prompt_session_id))
             })
         };
         if !dispatchable {
@@ -211,6 +232,12 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
     )
     .await;
 
+    if result.is_err() {
+        if let Some(runtime) = cfg.session_manager.get_session(&prompt_session_id) {
+            runtime.activation.suppress();
+        }
+    }
+
     // Prediction remains admitted before pool restoration and while the prompt lock is held.
     if !is_continuation && result.is_ok() {
         super::prediction::spawn_prediction(transport, &prompt_session_id, sessions, cfg);
@@ -231,30 +258,23 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
         }
     }
 
-    let mq_continuation = {
+    let continuation_request = {
         let mut sessions = sessions.lock().await;
-        sessions.get_mut(&prompt_session_id).is_some_and(|state| {
-            let pending = state.continuation_mq_steering_pending
-                && cfg
-                    .session_manager
-                    .v2_queue_for(&prompt_session_id)
-                    .is_some_and(|queue| queue.needs_mq_continuation());
-            if pending {
-                state.continuation_mq_steering_pending = false;
-            }
-            pending
+        sessions.get_mut(&prompt_session_id).and_then(|state| {
+            state.continuation_mq_steering_pending = false;
+            let queue = cfg.session_manager.v2_queue_for(&prompt_session_id)?;
+            super::activation::pending_request(
+                &prompt_session_id,
+                state,
+                &queue,
+                super::activation::mq_allowed(cfg, &prompt_session_id),
+            )
         })
     };
-    if mq_continuation
-        && cont_tx
-            .send(crate::session::executor::ContinuationRequest {
-                session_id: prompt_session_id,
-                kind: peri_acp_types::tasks::BgTaskKind::Agent,
-                mq_steering: true,
-            })
-            .is_err()
-    {
-        tracing::warn!("continuation scheduling failed: channel closed");
+    if let Some(request) = continuation_request {
+        if cont_tx.send(request).is_err() {
+            tracing::error!(session_id = %prompt_session_id, "continuation scheduling failed: channel closed");
+        }
     }
     result
 }

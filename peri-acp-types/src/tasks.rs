@@ -96,13 +96,22 @@ pub type ExternalNotifyFn = Arc<
         + Sync,
 >;
 
-/// Durable terminal-reminder route into the session that initiated a task.
+/// Terminal-reminder route into the session that initiated a current task.
 ///
-/// The route commits the reminder into the initiator's canonical transcript
-/// (idempotent by delivery ID, so a crash before commit can retry) and
-/// best-effort wakes a live initiator through its own queue. MQ enqueue alone
-/// is not delivery.
+/// Local routes may acknowledge synchronous queue acceptance. Asynchronous
+/// routes must be awaited by their owner before acknowledging delivery.
 pub trait TaskTerminalDelivery: Send + Sync {
+    /// Accept a reminder synchronously, or explicitly reject this capability.
+    /// Failure leaves the task unsettled; it must not start detached delivery.
+    fn accept(
+        &self,
+        _delivery_id: crate::messages::MessageId,
+        _reminder: &crate::system_reminder::TrustedSystemReminder,
+        _source: crate::session::MessageSource,
+    ) -> Result<(), String> {
+        Err("terminal route requires owner-awaited asynchronous delivery".into())
+    }
+
     fn deliver<'a>(
         &'a self,
         delivery_id: crate::messages::MessageId,

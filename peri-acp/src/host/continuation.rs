@@ -2,11 +2,11 @@
 //!
 //! # 背景
 //!
-//! bg subagent 独立运行时，主 session/prompt 被 `session/cancel` 取消后，
-//! executor 的 `on_bg_complete` 闭包仍会把 bg 结果**先** route 到 SessionInbox
-//! （Defer + wake），**再**通过 [`ContinuationRequest`] 通知本 scheduler。
-//! 此时主 agent 已不在 loop 中，必须由本 scheduler 自动发起一次内部续跑，
-//! 让父 agent 消费 deferred callback。
+//! bg subagent 的完成结果进入 SessionInbox（Defer + wake）后，session 级
+//! activation listener 把待消费工作转为 [`ContinuationRequest`]。
+//! 主 prompt 自然结束后允许内部续跑；`session/cancel` 则仅保留一次已授权的
+//! 独立 bg agent 结果续跑。dispatch 收尾再次检查队列，覆盖结束与投递竞态。
+//! scheduler 复用主 prompt 执行路径，让父 agent 消费 deferred callback。
 //!
 //! # 语义约束
 //!
@@ -81,6 +81,9 @@ pub(crate) fn take_continuation_for_request(
             state.continuation_mq_steering_pending = true;
             return None;
         }
+        if state.continuation_mq_steering_pending {
+            return None;
+        }
         state.continuation_mq_steering_pending = true;
         return Some(state.continuation_epoch);
     }
@@ -128,11 +131,12 @@ pub(crate) fn continuation_dispatchable(
     epoch: u64,
     has_pending_subagent_defer: bool,
     has_pending_mq: bool,
+    mq_steering: bool,
 ) -> bool {
     if !continuation_still_valid(state, epoch) {
         return false;
     }
-    if state.continuation_mq_steering_pending {
+    if mq_steering {
         return has_pending_mq;
     }
     has_pending_subagent_defer
@@ -200,7 +204,7 @@ pub(crate) async fn run_cron_continuation_scheduler(
                 };
                 let _ = dispatch_prompt_turn(
                     continuation_params(&req.session_id),
-                    true,
+                    super::PromptOrigin::Scheduled,
                     Some(epoch),
                     &sessions,
                     &locks,
@@ -311,7 +315,21 @@ pub(crate) async fn run_continuation_scheduler(
         let epoch = {
             let mut sessions = sessions.lock().await;
             match sessions.get_mut(&req.session_id) {
-                Some(state) => take_continuation_for_request(state, &req),
+                Some(state) => {
+                    let local = state
+                        .environment
+                        .as_ref()
+                        .map(|env| &env.cfg)
+                        .unwrap_or(&cfg);
+                    if state.closing
+                        || (req.mq_steering
+                            && !super::activation::mq_allowed(local, &req.session_id))
+                    {
+                        None
+                    } else {
+                        take_continuation_for_request(state, &req)
+                    }
+                }
                 None => None,
             }
         };
@@ -342,7 +360,9 @@ pub(crate) async fn run_continuation_scheduler(
                 let params = continuation_params(&session_id);
                 let _ = dispatch_prompt_turn(
                     params,
-                    true,
+                    super::PromptOrigin::Continuation {
+                        mq_steering: req.mq_steering,
+                    },
                     Some(epoch),
                     &sessions2,
                     &locks2,

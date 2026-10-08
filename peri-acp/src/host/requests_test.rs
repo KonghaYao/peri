@@ -42,6 +42,9 @@ mod update_config_tests;
 #[path = "requests/acp_mcp_loop_test.rs"]
 mod acp_mcp_loop_tests;
 
+#[path = "activation_test.rs"]
+mod activation_tests;
+
 // ── Mock AcpTransport ─────────────────────────────────────────────────────────
 
 /// 记录全部通知的 mock transport（`Mutex<Vec<(method, payload)>>`，Slice 6

@@ -117,6 +117,19 @@ impl SessionManager {
     }
 }
 impl SessionAccessPort for SessionManager {
+    fn task_terminal_delivery(
+        &self,
+        session_id: &str,
+    ) -> Option<Arc<dyn peri_acp_types::tasks::TaskTerminalDelivery>> {
+        let session = self.inner.sessions.get(session_id)?;
+        if session.cancel_token.is_cancelled() {
+            return None;
+        }
+        Some(peri_agent::session::bg_complete::queue_terminal_delivery(
+            session.v2_message_queue.clone(),
+        ))
+    }
+
     fn v2_message_queue(&self, session_id: &str) -> Option<peri_acp_types::session::MessageQueue> {
         self.v2_queue_for(session_id)
     }

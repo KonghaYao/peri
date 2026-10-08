@@ -35,21 +35,28 @@ impl SessionTerminalDelivery {
 }
 
 impl TaskTerminalDelivery for SessionTerminalDelivery {
+    fn accept(
+        &self,
+        delivery_id: peri_acp_types::messages::MessageId,
+        reminder: &TrustedSystemReminder,
+        source: MessageSource,
+    ) -> Result<(), String> {
+        self.queue
+            .push(QueuedMessage::system_reminder_with_delivery_id(
+                MessageKind::Defer,
+                source,
+                reminder.clone(),
+                delivery_id,
+            ));
+        Ok(())
+    }
+
     fn deliver<'a>(
         &'a self,
         delivery_id: peri_acp_types::messages::MessageId,
         reminder: &'a TrustedSystemReminder,
         source: MessageSource,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>> {
-        Box::pin(async move {
-            self.queue
-                .push(QueuedMessage::system_reminder_with_delivery_id(
-                    MessageKind::Defer,
-                    source,
-                    reminder.clone(),
-                    delivery_id,
-                ));
-            Ok(())
-        })
+        Box::pin(async move { self.accept(delivery_id, reminder, source) })
     }
 }

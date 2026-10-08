@@ -65,6 +65,10 @@ use peri_acp_types::session::AgentRuntime;
 pub type TaskManagerFactory =
     Arc<dyn Fn() -> Arc<dyn peri_acp_types::tasks::TaskManager> + Send + Sync>;
 
+mod activation;
+
+pub(crate) use activation::SessionActivation;
+
 pub struct AcpSession {
     pub session_id: String,
     pub thread_id: ThreadId,
@@ -92,6 +96,7 @@ pub struct AcpSession {
     ///
     /// 内部 `Arc<Mutex<VecDeque>> + Arc<Notify>`，clone 共享底层。
     pub v2_message_queue: peri_acp_types::session::MessageQueue,
+    pub(crate) activation: Arc<SessionActivation>,
     /// Session-level inbox (await-wake wrapper around v2_message_queue).
     ///
     /// Created lazily on first access via `SessionManager::session_inbox_for`.

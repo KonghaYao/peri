@@ -38,6 +38,7 @@ mod workspace;
 #[cfg(not(target_os = "emscripten"))]
 mod workspace_resources;
 pub use lifecycle::{spawn_acp_server, AcpHostHandle, AcpHostShutdownReport};
+mod activation;
 mod continuation;
 pub mod controller_ports;
 mod diagnostics;
@@ -106,7 +107,7 @@ pub(crate) use continuation::{
 };
 pub(crate) use notify::{extract_session_id, handle_notification, send_session_info_update};
 pub(crate) use prompt::run_prompt;
-pub(crate) use prompt_dispatch::dispatch_prompt_turn;
+pub(crate) use prompt_dispatch::{dispatch_prompt_turn, PromptOrigin};
 pub(crate) use requests::handle_request;
 
 // ── Session state ────────────────────────────────────────────────────────────

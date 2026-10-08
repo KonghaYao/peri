@@ -278,6 +278,14 @@ pub(crate) async fn run_prompt(
         .iter()
         .filter_map(|payload| payload.as_message().cloned())
         .collect::<Vec<_>>();
+    if let Some(sender) = &cont_tx {
+        if !continuation || managed_input {
+            if let Some(runtime) = session_manager.get_session(&session_id) {
+                runtime.activation.allow();
+            }
+        }
+        super::activation::ensure_listener(&session_id, sessions, deployment, sender)?;
+    }
     let broker = build_transport_broker(transport, &session_id);
     let event_sink = Arc::new(TransportEventSink::new(
         Arc::clone(transport),
@@ -465,9 +473,8 @@ pub(crate) async fn run_prompt(
         cancel,
         broker,
         permission_mode: permission_mode.clone(),
-        session_access: Some(
-            Arc::new(session_manager) as Arc<dyn peri_acp_types::session::SessionAccessPort>
-        ),
+        session_access: Some(Arc::new(session_manager.clone())
+            as Arc<dyn peri_acp_types::session::SessionAccessPort>),
         session_resources: Some(session_resources.clone()),
         thread_id: Some(thread_id.clone()),
         plugin_skill_roots: plugin_skill_roots.to_vec(),
@@ -544,6 +551,11 @@ pub(crate) async fn run_prompt(
         .await
         .map_err(|e| AcpError::new(-32603, format!("run_session failed: {e}")))?;
     let result = handle.take_result();
+    if !result.ok || result.failure.is_some() {
+        if let Some(runtime) = session_manager.get_session(&session_id) {
+            runtime.activation.suppress();
+        }
+    }
     if let Some(run) = &input_ticket {
         run.mark_terminal_delivered();
     }

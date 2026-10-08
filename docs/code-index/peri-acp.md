@@ -11,6 +11,8 @@
 
 ## 架构速览
 
+当前进程的晚到异步结果由 `host/activation.rs` 监听会话队列的 retained wake 信号；`session/activation.rs` 将监听与自动续跑许可绑定运行时。主 run 正常结束不撤销监听，订阅及 dispatch 结束都复查队列，续跑统一经过 `host/continuation.rs` 与 `prompt_dispatch.rs` 的序列化和代际校验。取消 continuation 抑制再次激活，关闭取消监听；失败不自动重复。定向宿主回归入口 `host::requests::tests::activation_tests`。
+
 普通 prompt/input 经 host → Agent 运行，不要求 reverse admission。Work query/resolve、恢复执行及持久 control 方法撤销；history list/load/resume/replay 保留并装配新 runtime，不加载 owner quarantine。移除与验证见 [active plan](../../spec/issues/2026-10-07-remove-execution-recovery-plan.md)。
 
 Emscripten 的 ACP 部署入口在 `src/host/assemble.rs::assemble_wasm_server_config`：

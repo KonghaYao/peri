@@ -99,6 +99,7 @@ impl SessionManager {
                 session_id.to_string(),
             ),
             v2_message_queue: peri_acp_types::session::MessageQueue::new(),
+            activation: Arc::new(super::SessionActivation::default()),
             session_inbox: None,
             user_input_mailbox: None,
             user_input_events_cancel: CancellationToken::new(),
