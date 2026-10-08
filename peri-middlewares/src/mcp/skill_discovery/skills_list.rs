@@ -128,7 +128,7 @@ pub(super) fn entry_from_dto(dto: SkillListEntryDto) -> Result<SkillListEntry, E
 /// 逐条转换并**隔离**非法条目：坏条目单独记来源 / 字段 / 错误类别（不回显字段
 /// 正文），好条目照常进入发现结果；有隔离时另记汇总 warn——部分失败不得被
 /// 呈现成完整成功（M8）。返回 `(entries, rejected)`。
-fn collect_entries(
+pub(super) fn collect_entries(
     server: &str,
     dto_entries: Vec<SkillListEntryDto>,
     context: &str,
