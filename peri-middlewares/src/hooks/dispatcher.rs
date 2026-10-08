@@ -18,7 +18,7 @@ use crate::hooks::{
     input_builder,
     matcher::{matches_if_condition, matches_matcher},
     once_tracker::OnceTracker,
-    types::{HookAction, HookEvent, HookInput, HookType, RegisteredHook},
+    types::{HookAction, HookEvent, HookInput, HookType, PermissionDecision, RegisteredHook},
 };
 
 /// 核心分发引擎。
@@ -277,77 +277,134 @@ impl HookDispatcher {
 
 /// 归并多个 hook 的结果：字段级合并，任何字段都不得被其它 hook 的结果吞掉。
 ///
-/// - 判定取 [`HookAction::PermissionOverride`] 中 `merge_rank` 更高者：
+/// - `Allow` 是"无判定、无字段"的零元：任一侧为 Allow 时取另一侧
+/// - 判定取 [`PermissionDecision::merge_rank`] 更高者：
 ///   deny/非法 > ask > allow > passthrough（deny 优先于 updatedInput）
 /// - `updated_input` / `system_message` 后者覆盖前者；
 ///   `additional_context` 按顺序拼接并有界截断
-/// - Block / PreventContinuation 已在调用点短路，不会进入本函数
+/// - 无判定但多类字段并存（如 updatedInput + systemMessage）→ 以 `Passthrough`
+///   判定承载全部字段（与 output_parser 的 PreToolUse 组合一致），
+///   消费方不会因为后一个 hook"无判定"而丢掉先出现的判定/字段
+/// - Block / PreventContinuation 已在调用点短路，不会进入本函数；
+///   `InitialUserMessage`（SessionStart 专用、投递未接线）保持后者覆盖
 fn merge_hook_actions(acc: HookAction, next: HookAction) -> HookAction {
-    match (acc, next) {
-        (HookAction::Allow, other) => other,
-        (
-            HookAction::ModifyInput { new_input },
-            HookAction::PermissionOverride {
-                decision,
-                reason,
-                additional_context,
-                system_message,
-                ..
-            },
-        ) => HookAction::PermissionOverride {
-            decision,
-            reason,
-            updated_input: Some(new_input),
-            additional_context,
-            system_message,
-        },
-        (
-            HookAction::PermissionOverride {
-                decision,
-                reason,
-                additional_context,
-                system_message,
-                ..
-            },
-            HookAction::ModifyInput { new_input },
-        ) => HookAction::PermissionOverride {
-            decision,
-            reason,
-            updated_input: Some(new_input),
-            additional_context,
-            system_message,
-        },
-        (
-            HookAction::PermissionOverride {
-                decision: prev_decision,
-                reason: prev_reason,
-                updated_input: prev_input,
-                additional_context: prev_context,
-                system_message: prev_message,
-            },
+    match (&acc, &next) {
+        // Allow 零元：判定与字段都不因对侧"无判定"而丢失。
+        (HookAction::Allow, _) => next,
+        (_, HookAction::Allow) => acc,
+        // InitialUserMessage 无对应字段可承载（SessionStart 专用），保持后者覆盖。
+        (HookAction::InitialUserMessage { .. }, _) | (_, HookAction::InitialUserMessage { .. }) => {
+            next
+        }
+        _ => {
+            let prev = MergeFields::from_action(&acc);
+            let incoming = MergeFields::from_action(&next);
+            merge_fields(prev, incoming)
+        }
+    }
+}
+
+/// 参与归并的字段集合（判定 + PreToolUse/上下文/系统消息字段）。
+#[derive(Default)]
+struct MergeFields {
+    decision: Option<PermissionDecision>,
+    reason: Option<String>,
+    updated_input: Option<serde_json::Value>,
+    additional_context: Option<String>,
+    system_message: Option<String>,
+}
+
+impl MergeFields {
+    fn from_action(action: &HookAction) -> Self {
+        match action {
             HookAction::PermissionOverride {
                 decision,
                 reason,
                 updated_input,
                 additional_context,
                 system_message,
+            } => Self {
+                decision: Some(decision.clone()),
+                reason: reason.clone(),
+                updated_input: updated_input.clone(),
+                additional_context: additional_context.clone(),
+                system_message: system_message.clone(),
             },
-        ) => {
-            let (decision, reason) = if decision.merge_rank() > prev_decision.merge_rank() {
-                (decision, reason)
+            HookAction::ModifyInput { new_input } => Self {
+                updated_input: Some(new_input.clone()),
+                ..Self::default()
+            },
+            HookAction::SystemMessage { message } => Self {
+                system_message: Some(message.clone()),
+                ..Self::default()
+            },
+            HookAction::AdditionalContext { context } => Self {
+                additional_context: Some(context.clone()),
+                ..Self::default()
+            },
+            // Allow / Block / PreventContinuation / InitialUserMessage 不进入字段归并。
+            _ => Self::default(),
+        }
+    }
+}
+
+/// 对称归并两个字段集合：判定按 rank 取高者（同 rank 保持先出现者），字段互相吸收。
+fn merge_fields(prev: MergeFields, incoming: MergeFields) -> HookAction {
+    let (decision, reason) = match (prev.decision, incoming.decision) {
+        (Some(prev_decision), Some(decision)) => {
+            if decision.merge_rank() > prev_decision.merge_rank() {
+                (Some(decision), incoming.reason)
             } else {
-                (prev_decision, prev_reason)
-            };
-            HookAction::PermissionOverride {
-                decision,
-                reason,
-                updated_input: updated_input.or(prev_input),
-                additional_context: merge_additional_context(prev_context, additional_context),
-                system_message: system_message.or(prev_message),
+                (Some(prev_decision), prev.reason)
             }
         }
-        // 其余单值 action 沿用「后者覆盖」语义
-        (_, other) => other,
+        (Some(decision), None) => (Some(decision), prev.reason),
+        (None, decision) => (decision, incoming.reason),
+    };
+
+    // 后者覆盖前者（既有语义）；不同字段之间互不吞并。
+    let updated_input = incoming.updated_input.or(prev.updated_input);
+    let system_message = incoming.system_message.or(prev.system_message);
+    let additional_context =
+        merge_additional_context(prev.additional_context, incoming.additional_context);
+
+    if let Some(decision) = decision {
+        return HookAction::PermissionOverride {
+            decision,
+            reason,
+            updated_input,
+            additional_context,
+            system_message,
+        };
+    }
+
+    // 无判定：单一字段保持既有简单载体，多类字段以 Passthrough 承载，全部保留。
+    let field_kinds = [
+        updated_input.is_some(),
+        additional_context.is_some(),
+        system_message.is_some(),
+    ]
+    .iter()
+    .filter(|present| **present)
+    .count();
+    match field_kinds {
+        0 => HookAction::Allow,
+        1 if updated_input.is_some() => HookAction::ModifyInput {
+            new_input: updated_input.expect("checked above"),
+        },
+        1 if system_message.is_some() => HookAction::SystemMessage {
+            message: system_message.expect("checked above"),
+        },
+        1 => HookAction::AdditionalContext {
+            context: additional_context.expect("checked above"),
+        },
+        _ => HookAction::PermissionOverride {
+            decision: PermissionDecision::Passthrough,
+            reason: None,
+            updated_input,
+            additional_context,
+            system_message,
+        },
     }
 }
 
@@ -701,3 +758,7 @@ fn spawn_async_hook(
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "hook_action_merge_test.rs"]
+mod hook_action_merge_tests;
