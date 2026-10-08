@@ -16,6 +16,14 @@ fn make_frozen() -> FrozenSessionData {
             disabled_middlewares,
             built_in_subagents_enabled: false,
         },
+        // beta flag 冻结值（设计 §消费契约）：随快照持久化，恢复后不重读配置。
+        beta_flags: peri_acp_types::beta_flags::BetaFlags::from_values([(
+            peri_acp_types::beta_flags::FULL_ASYNC_TOOLS.to_string(),
+            peri_acp_types::beta_flags::BetaFlagValue {
+                enabled: true,
+                origin: peri_acp_types::beta_flags::BetaFlagOrigin::Workspace,
+            },
+        )]),
         // H3：冻结运行环境随快照持久化。
         runtime_env: Some(peri_acp_types::frozen::FrozenRuntimeEnv {
             platform: "macos".to_string(),
@@ -41,6 +49,15 @@ fn test_frozen_snapshot_roundtrip_preserves_all_fields() {
     assert_eq!(restored.date(), original.date());
     assert_eq!(restored.language(), original.language());
     assert_eq!(restored.meta_harness(), original.meta_harness());
+    // beta flag 冻结值逐条往返（含来源层）：恢复路径不按当前配置重建。
+    assert_eq!(
+        restored.v2_frozen().beta_flags,
+        original.v2_frozen().beta_flags
+    );
+    assert!(restored
+        .v2_frozen()
+        .beta_flags
+        .is_enabled(peri_acp_types::beta_flags::FULL_ASYNC_TOOLS));
     // H3：运行环境快照逐字段往返（platform / os_version / is_git_repo）。
     assert_eq!(restored.runtime_env(), original.runtime_env());
 }
@@ -66,6 +83,12 @@ fn test_frozen_snapshot_v1_without_runtime_env_decodes_as_unavailable() {
     );
     assert_eq!(restored.date(), "2026-09-01");
     assert_eq!(restored.system_prompt(), "system-v1");
+    // V1 旧 blob 缺 beta_flags 键 → 空投影（一切按 false），不按当前配置重建。
+    assert!(restored.v2_frozen().beta_flags.is_empty());
+    assert!(!restored
+        .v2_frozen()
+        .beta_flags
+        .is_enabled(peri_acp_types::beta_flags::FULL_ASYNC_TOOLS));
 }
 
 #[test]

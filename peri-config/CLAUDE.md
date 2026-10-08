@@ -40,6 +40,7 @@ session 工具池，不新增 daemon 或模型工具。环境来自选中的配�
 | Langfuse typed projection | `src/observability.rs`、`src/observability_test.rs` |
 | TUI typed projection、extra 读写 | `src/ui.rs`、`src/ui_test.rs` |
 | 资源配置开关 | `src/resources.rs`、`src/resources_test.rs`；`snapshot.resources()` |
+| beta flag 覆盖与投影 | `src/betas.rs`、`src/betas_test.rs`、`src/app.rs`（`BetasConfig`）；`snapshot.flags()`、`ConfigSource::beta_flags()` |
 
 ## 稳定不变量
 

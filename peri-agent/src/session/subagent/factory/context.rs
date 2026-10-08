@@ -206,6 +206,11 @@ pub(super) fn inherited_frozen_context(
         meta_harness: parent
             .map(|p| p.store().frozen.meta_harness.clone())
             .unwrap_or_default(),
+        // Beta flag 冻结值同样随父 session 复制：SubAgent 共享父会话的有效缺省，
+        // 不在这里重读配置（设计 §消费契约）。
+        beta_flags: parent
+            .map(|p| p.store().frozen.beta_flags.clone())
+            .unwrap_or_default(),
         // 冻结运行环境同样随父 session 复制：子 Agent 只消费继承的冻结输入，
         // 不在恢复/派生时重探（H3）。
         runtime_env: parent.and_then(|p| p.store().frozen.runtime_env.clone()),

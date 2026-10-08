@@ -68,6 +68,9 @@ pub(super) async fn build_and_execute_agent(
                         language: turn.language.clone().map(Arc::from),
                         // 防御性回退：无冻结数据时 MetaHarness 状态为空（无覆盖、无关闭）
                         meta_harness: peri_acp_types::meta_harness::MetaHarnessState::default(),
+                        // 防御性回退：无冻结数据时 beta flag 投影为空（一切按 false，
+                        // 不意外开启能力）
+                        beta_flags: peri_acp_types::beta_flags::BetaFlags::default(),
                         // 无冻结执行环境：unavailable（不探测本地值冒充，H3）
                         runtime_env: None,
                     },

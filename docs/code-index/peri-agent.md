@@ -110,6 +110,7 @@ Full 摘要不改变模型思考配置和单次输出上限。首轮正文截断
 | v2 装配与循环驱动 | session/exec/executor_helpers/v2_execute.rs | `build_and_execute_agent_v2`；`V2ExecuteRequest.frozen_session` → `StageBuildRequest.frozen_session` 单一 snapshot；根 executor_helpers.rs 声明并 re-export intercept / event_pump / collect / bg_fork 子流程 |
 | /compact 命令执行体 | session/exec/compact_pipeline.rs | `run_compact(force=true)` |
 | Stage 装配顺序与公开输入 | session/exec/stage_builder.rs | `StageBuildInput` / `build_stage_context`；保留主 Session → turn/EventBus → 父身份/host → collect_tools/catalog → StageContext 的顺序 |
+| beta flag 冻结值与装配透传 | `src/session/store.rs`（`FrozenContext::beta_flags`、builder `beta_flags()`）、`src/session/factory.rs`（`AssemblyContext::agent_default_run_in_background`）、`src/session/exec/stage_builder.rs`（`StageBuildInput` 同名字段）、`src/session/subagent/factory/context.rs`（子会话复制父冻结值） | 冻结载体成员 + 逐层透传 | 值只在 ACP 装配层由 flag id 解析为语义布尔；本层不读配置、不解析 flag 语义；空投影 = 全部 false（旧 blob 缺键同义）|
 | 模型缓存与生产链投影 | session/exec/stage_builder/agent.rs | `build_agent` / `TurnAssembly` / `project_assembly`；retry handler 先于模型工厂更新；生产 chain 包装一次，bridge provider 与 StageContext clone 同一 `Arc<MiddlewareChain>`；空 CLAUDE/skills 保留 `Some("")` 冻结缺席语义 |
 | 主 Session 与后台 owner | session/exec/stage_builder/session_setup.rs | `build_session`；同一 `FrozenSessionData` 构造 `SessionStore.frozen`，激活 persistence；session 级 cron bridge 与 print 级 CronOwner 分支、取消优先级不变 |
 | 父身份与子任务宿主 | session/exec/stage_builder/subagent_setup.rs | `attach_subagent_host` / `SubagentDependencies`；借用原 owner，移动后台事件发送端并注入同一冻结数据；必须早于 middleware `collect_tools` |

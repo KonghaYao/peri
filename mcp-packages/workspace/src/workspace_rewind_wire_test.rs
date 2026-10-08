@@ -12,7 +12,7 @@ async fn rewind_wire_requires_session_scope_without_execution_fencing() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("target.txt");
     tokio::fs::write(&file, "new").await.unwrap();
-    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy())
+    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy(), false)
         .with_task_scope_authority(TaskScopeAuthority::trusted_connection());
     let (client_io, server_io) = tokio::io::duplex(8192);
     let server_task = tokio::spawn(async move {

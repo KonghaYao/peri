@@ -21,6 +21,7 @@ fn every_domain_has_one_shape_and_environment_collection_follows_it() {
         ConfigurationField::Observability,
         ConfigurationField::Ui,
         ConfigurationField::Resources,
+        ConfigurationField::Betas,
     ];
     for field in fields {
         assert_eq!(
@@ -88,6 +89,15 @@ fn provenance_uses_declared_sources_for_each_domain() {
             SourceIdentity::GlobalFile,
             SourceIdentity::WorkspaceFile,
         ]
+    );
+    assert_eq!(
+        snapshot.explain(ConfigurationField::Betas).contributors,
+        vec![
+            SourceIdentity::Defaults,
+            SourceIdentity::GlobalFile,
+            SourceIdentity::WorkspaceFile,
+        ],
+        "flag 覆盖的参与来源是 global + workspace"
     );
     assert!(!snapshot.builtin_mcp_enabled());
 }

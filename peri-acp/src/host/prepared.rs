@@ -164,12 +164,17 @@ impl PreparedSessionInputs {
                 deployment_closed.insert(instance.policy_key.to_owned());
             }
         }
+        // beta flag 投影：从本次选中的配置来源（快照）派生一次，随冻结载体传播
+        // ——此后本会话（含 SubAgent）只消费该冻结值，执行路径不重读配置；生效项与
+        // 来源层的装配诊断在会话环境装配点记录（`host/workspace.rs`）。
+        let beta_flags = self.configuration.config_source.beta_flags();
         let mut frozen = host
             .session_manager
             .build_frozen_data_with_deployment_closure(
                 &self.configuration.config,
                 &self.cwd,
                 runtime_env.as_ref(),
+                &beta_flags,
                 docs,
                 skill_catalog,
                 instructions,

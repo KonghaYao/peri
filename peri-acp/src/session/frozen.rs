@@ -39,6 +39,9 @@ impl SessionManager {
 
     /// `runtime_env = None` = 有效 Workspace 为显式远端（执行环境未知）：
     /// 冻结标记 unavailable，不重探本地值（H3/D1）。
+    ///
+    /// beta flag 投影从合并后配置派生（无来源层信息，见
+    /// [`Self::build_frozen_data_with_deployment_closure`] 的口径）。
     pub(crate) fn build_frozen_data_with_config_and_runtime(
         &self,
         config: &crate::provider::PeriConfig,
@@ -69,10 +72,12 @@ impl SessionManager {
         skill_catalog: &[peri_acp_types::skills::SkillMetadata],
         instructions: &crate::session::executor::FrozenInstructions,
     ) -> crate::session::executor::FrozenSessionData {
+        let beta_flags = peri_config::betas::from_merged(config);
         self.build_frozen_data_with_deployment_closure(
             config,
             cwd,
             runtime_env,
+            &beta_flags,
             docs,
             skill_catalog,
             instructions,
@@ -88,6 +93,7 @@ impl SessionManager {
         config: &crate::provider::PeriConfig,
         cwd: &str,
         runtime_env: Option<&crate::prompt::PromptRuntimeEnv>,
+        beta_flags: &peri_acp_types::beta_flags::BetaFlags,
         docs: HashMap<String, String>,
         skill_catalog: &[peri_acp_types::skills::SkillMetadata],
         instructions: &crate::session::executor::FrozenInstructions,
@@ -154,6 +160,9 @@ impl SessionManager {
             date: Arc::from(frozen_date),
             language: frozen_language.map(|l| Arc::from(l.to_string())),
             meta_harness: meta_harness_state,
+            // beta flag 冻结值（设计 §消费契约）：装配期从配置快照投影一次，随冻结
+            // 载体传播；SubAgent/fork 复用同一份，执行路径不重读配置。
+            beta_flags: beta_flags.clone(),
             runtime_env: frozen_runtime_env,
         };
 

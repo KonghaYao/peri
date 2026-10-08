@@ -187,6 +187,7 @@ setup-language-press-enter = Press Enter to confirm
 # ---- Config Panel ----
 
 config-panel-title =  /config — Configuration
+config-beta-section = Beta · takes effect in new sessions
 config-field-autocompact = Autocompact
 config-field-compact-threshold = Compact Threshold
 config-field-language = Language
@@ -831,7 +832,6 @@ panel-title-cron = Cron
 panel-title-status = Status
 panel-title-memory = Memory
 panel-title-tasks = Tasks
-panel-title-betas = Betas
 panel-title-workflow = Workflow
 panel-title-ask-user = Ask User
 panel-title-theme = Theme
@@ -852,7 +852,6 @@ panel-desc-cron = Scheduled tasks
 panel-desc-status = Service snapshot
 panel-desc-memory = Persisted memory
 panel-desc-tasks = Background tasks
-panel-desc-betas = Feature flags
 panel-desc-workflow = Workflow runs
 panel-desc-ask-user = Agent user questions (auto-open)
 panel-desc-theme = Color theme selection
@@ -880,10 +879,6 @@ bg-task-status-lost = connection lost
 bg-task-status-reconciling = reconnecting
 workflow-run-not-synced = Selected workflow run is not in the current snapshot (finished or not synced yet).
 
-# ---- Betas Panel ----
-panel-betas-readonly-hint =   (read-only — feature flags are configured at build time)
-panel-betas-empty =   No active beta features
-panel-betas-nav-hint =   ↑/↓::navigate  Enter::open  Esc::close
 
 # ---- Cron Panel ----
 panel-cron-stats =   { $configured } configured, { $enabled } enabled

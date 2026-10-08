@@ -702,6 +702,52 @@ fn workspace_probe_failure_prevents_lenient_source_from_writing_global() {
     assert_eq!(std::fs::read_to_string(global_path).unwrap(), original);
 }
 
+/// fail-closed：**没有已发布快照**的 lenient 源不投影任何 flag。
+///
+/// 构造：工作区探测失败（符号链接自环）⇒ `load_at` 失败 ⇒ `load_at_lenient` 返回
+/// `authority: None` 的降级源；global 文件本身含 `config.betas` 覆盖。内存草稿视图
+/// 仍带该覆盖（前置断言证明本用例有判别力），但 `beta_flags()` 必须返回空投影——
+/// 设计「快照缺失、未覆盖与未知 id 一律按 false，配置面不可用不得导致能力意外开启」
+/// 的字面口径。
+#[cfg(unix)]
+#[test]
+fn lenient_source_without_snapshot_yields_empty_beta_flags() {
+    use peri_acp_types::beta_flags::FULL_ASYNC_TOOLS;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let cwd = tmp.path().join("workspace");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let peri_dir = cwd.join(".peri");
+    std::os::unix::fs::symlink(&peri_dir, &peri_dir).unwrap();
+    let global_path = tmp.path().join("global.json");
+    std::fs::write(
+        &global_path,
+        format!(
+            r#"{{"config":{{"active_alias":"sonnet","betas":{{"{FULL_ASYNC_TOOLS}":true}}}}}}"#
+        ),
+    )
+    .unwrap();
+
+    assert!(ConfigSource::load_at(&cwd, global_path.clone()).is_err());
+    let source = ConfigSource::load_at_lenient(&cwd, global_path);
+    assert!(
+        source.snapshot().is_none(),
+        "前置：lenient 源没有已发布快照"
+    );
+    assert_eq!(
+        source.loaded_merged().config.betas.get(FULL_ASYNC_TOOLS),
+        Some(true),
+        "前置：内存草稿视图确实带覆盖（否则本用例没有判别力）"
+    );
+
+    let flags = source.beta_flags();
+    assert!(
+        flags.is_empty(),
+        "无已发布快照必须返回空投影（fail-closed，不按草稿视图回升）：{flags:?}"
+    );
+    assert!(!flags.is_enabled(FULL_ASYNC_TOOLS));
+}
+
 #[cfg(unix)]
 #[test]
 fn lenient_source_without_selected_policy_does_not_use_default_global_config() {

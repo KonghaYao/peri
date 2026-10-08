@@ -1,6 +1,6 @@
 # Beta Flag 系统实施
 
-- **状态**：设计已批准（[beta-flags.md](../../docs/design/beta-flags.md)），实施未开始；本文记录实施范围、拆分与验收，不声称任何目标已落地。
+- **状态**：**已实施**（本分支：注册表、`config.betas` 配置面、装配期消费注入、ConfigPanel 管理区块；`BetasPanel` 已退役）。逐项验收证据见下文「验收结果」，尚未验证的项与跟进项见文末——本文不声称这些缺口已闭合。
 - **日期**：2026-10-08。
 - **设计权威**：`docs/design/beta-flags.md`。目标行为以设计为准；实施与验收中的取舍若偏离设计，先更新设计再实施。
 - **来源**：用户要求引入 flag 系统配合 settings 配置控制面，用于开启 beta 业务能力；首批能力为 `full-async-tools`（Bash 与 Agent 缺省后台），普通用户不配置时行为不变。
@@ -50,7 +50,33 @@
 - 面板：切换持久化到生效层并提示新会话生效；当前会话行为不变。
 - 生命周期：新会话使用新值，既有会话保持冻结值。
 - 回归：既有 Bash/Agent 前后台测试、配置权威面测试不回归。
-- 逐项按 `testing.md` 先验证用户可观察行为，再补回归与失败路径；每项先保留失败证据再实施。
+- 逐项按 `testing.md` 先验证用户可观察行为，再补回归与失败路径。
+
+## 验收结果（实施后记录）
+
+实现与修复提交见本分支 `git log`（主体、索引收尾、新会话投影修复、审查修复）。对应测试命令与结果：
+
+| 验收项 | 证据（命令 → 结果） |
+| --- | --- |
+| 未配置行为不变 / flag 开启走后台 / 显式 false 前台 / schema 与执行缺省一致 | `cargo test -p peri-mcp-workspace --lib -- default_run_in_background`（5 passed）；`cargo test -p peri-middlewares --lib -- beta_default`（5 passed）；`cargo test -p peri-middlewares --lib -- workspace_dispatch_propagates_bash_default_run_in_background`（1 passed） |
+| 配置面合并、未知键、类型错误、投影、explain、CAS | `cargo test -p peri-config --lib -- betas`（15 passed） |
+| 新会话使用新值（配置面 → 冻结值 → builtin Bash / Agent 工具 schema） | `cargo test -p peri-acp --lib -- beta_flag`（4 passed：Bash 差分对照 + Agent 工具 schema + 恢复分支） |
+| 既有会话保持冻结值 | 同上 `restored_session_keeps_frozen_beta_flag`；`cargo test -p peri-acp --lib -- frozen`（35 passed，blob 往返含 `beta_flags`） |
+| TUI 区块渲染/切换/失败路径 | `cargo test -p peri-tui --lib -- kit::panels::config`（16 passed）；`-- kit::panel_registry`（28 passed） |
+| 回归 | `peri-config` 149 passed；`peri-acp-types` 537 passed；`peri-mcp-workspace` 442 passed；`peri-middlewares -- subagent::tool` 121 passed；`peri-acp -- mcp_v4 / host::requests` 32 / 156 passed |
+
+未验证项（不声称已闭合）：TUI 视觉布局未眼测；进程重启后的恢复链路未做真实重启实测
+（覆盖为 blob 往返 + 恢复路径装配用例）；Agent 侧未做真实模型调用的端到端后台执行实测。
+
+## 跟进项（跨仓/后续）
+
+- `peri-cool` 文档站（submodule）仍列 `/betas` 与 `"betas": {}`：`features/cli-reference.mdx`、
+  `reference/keyboard-shortcuts.mdx`、`reference/settings.mdx` 需随 `BetasPanel` 退役更新。
+- 并行运行的两处既有测试卫生缺口（与本 flag 无关，均已单独/串行复验通过）：
+  `peri-middlewares --lib -- mcp::builtin_runtime_tests` 的 HOME 重定向与
+  machine-identity 发布交互失败；`peri-middlewares --lib -- subagent::tool` 中
+  `resume_test::test_resume_thread_id_background_combination` 的同类偶发失败。
+  上表计数为干净运行的名义值。
 
 ## 边界
 

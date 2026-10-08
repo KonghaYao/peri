@@ -132,6 +132,7 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
             todo_tx,
             goal_controller,
             meta_harness_disabled,
+            agent_default_run_in_background,
             agent_overrides,
             language,
             shared_tools,
@@ -224,7 +225,10 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
                     .with_system_builder(system_builder.clone())
                     .with_cancel(cancel.clone())
                     .with_parent_messages(Arc::new(RwLock::new(Vec::<BaseMessage>::new())))
-                    .with_registered_hooks(subagent_lifecycle_hooks),
+                    .with_registered_hooks(subagent_lifecycle_hooks)
+                    // beta flag 投影（装配参数，会话内冻结）：`Agent` 工具
+                    // `run_in_background` 的有效缺省；`false` 与 flag 引入前一致。
+                    .with_default_run_in_background(*agent_default_run_in_background),
                 )
             };
         if let Some(ref mut mw) = subagent {

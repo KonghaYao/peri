@@ -130,6 +130,7 @@ async fn deployment_with_capabilities(
             bare: false,
             drive_cron_tick,
             workspace_input: None,
+            workspace_bash_default_run_in_background: false,
             // 本夹具构造顶层装配：资源面输入保持未接线（会话路径才装载）。
             workspace_resources: None,
             // 无会话上下文（测试夹具）：A24 关闭集为空集。

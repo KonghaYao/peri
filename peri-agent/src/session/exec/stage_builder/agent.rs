@@ -261,6 +261,8 @@ fn project_assembly(input: &StageBuildInput, turn: TurnAssembly) -> AssemblyCont
         // MetaHarness：装配期关闭集合（源自会话冻结状态投影，
         // 顶层链过滤——设计 §2.5；禁止从每 turn 当前配置重建）。
         meta_harness_disabled: input.meta_harness_disabled.clone(),
+        // beta flag 投影（会话冻结）：`Agent` 工具缺省后台的语义值，随链装配下传。
+        agent_default_run_in_background: input.agent_default_run_in_background,
         // 波 4 演进 2：基础段持有者（DefaultSystemPromptMiddleware 的
         // persona 内容源 = 与 render_system_prompt 同一份 agent_overrides；
         // LangMiddleware 的语言内容源 = 冻结语言，保证链收集与渲染一致）。

@@ -331,6 +331,12 @@ pub struct AssemblyContext {
     /// `FrozenSessionData::meta_harness().disabled_middlewares`，
     /// 禁止从每 turn 当前配置重建——ARC-FROZEN-001）。
     pub meta_harness_disabled: HashSet<String>,
+    // ── beta flag 投影（设计 §消费契约）──
+    /// `Agent` 工具 `run_in_background` 的有效缺省（源自会话冻结的 beta flag 投影，
+    /// 禁止回退每 turn 当前配置）：middleware 装配参数，`false` 与 flag 引入前一致。
+    ///
+    /// 装配面只传值，不在执行路径解析 flag 语义。
+    pub agent_default_run_in_background: bool,
     // ── 基础系统提示词段持有者（波 4 演进 2）──
     /// agent overrides（DefaultSystemPromptMiddleware 的 persona 段内容源；
     /// 与 render_system_prompt 闭包收到的是同一份值，保证链收集与渲染一致）

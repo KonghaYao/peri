@@ -277,6 +277,18 @@ impl ConfigSource {
         self.raw_workspace.as_deref()
     }
 
+    /// Beta flag 有效值投影 from this selected source.
+    ///
+    /// **只**从已发布快照投影：没有快照（lenient / authority 不可用 / scope 未解析）
+    /// 时返回空投影（一切按 false）——设计「快照缺失、未覆盖与未知 id 一律按 false，
+    /// 配置面不可用不得导致能力意外开启」的字面口径，不按内存草稿视图回升。
+    /// 有快照时不重读文件。
+    pub fn beta_flags(&self) -> crate::betas::BetaFlags {
+        self.snapshot()
+            .map(|snapshot| snapshot.flags().clone())
+            .unwrap_or_default()
+    }
+
     pub fn is_workspace(&self) -> bool {
         self.workspace_path.is_some()
     }
@@ -344,7 +356,7 @@ fn load_with_raw(path: &Path) -> Result<(PeriConfig, Option<String>)> {
     }
     crate::app::warn_legacy_compact_keys(&document);
     let mut config: PeriConfig = serde_json::from_value(document).map_err(SettingsError::Json)?;
-    config.config.validate_meta_harness();
+    config.config.validate_overrides();
     Ok((config, Some(content)))
 }
 

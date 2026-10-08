@@ -389,7 +389,6 @@ const ALL_PANEL_KINDS: &[PanelKind] = &[
     PanelKind::Status,
     PanelKind::Memory,
     PanelKind::Tasks,
-    PanelKind::Betas,
     PanelKind::Workflow,
     PanelKind::AskUser,
     PanelKind::Theme,

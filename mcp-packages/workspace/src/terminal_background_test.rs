@@ -447,3 +447,130 @@ async fn test_sync_timeout_with_rejected_promotion_falls_back_to_killing_the_gro
         "shutdown 之后不得残留活跃任务（报告：{report:?}）"
     );
 }
+
+// ── beta flag `full-async-tools`：`run_in_background` 有效缺省 ──────────────
+//
+// 装配期注入的缺省只改「调用未给出该字段」时的行为：显式 `false` 仍走前台，
+// 缺省 `false`（flag 未开启）与既有行为逐位一致；schema 的 `default` 与执行路径
+// 判定同源（同一字段），不允许各自维护一份。
+
+/// 有效缺省 = true：schema 声明 `default: true`，且省略字段的调用**真的**走后台。
+#[tokio::test]
+async fn test_default_run_in_background_true_schema_and_execution_agree() {
+    let registry = Arc::new(peri_mcp_common::create_local_task_manager());
+    let _process_env = peri_mcp_common::process_env::lock().expect("process env lock");
+    let tool = BashTool::new(std::env::temp_dir().to_str().unwrap())
+        .with_task_manager(registry.clone())
+        .with_default_run_in_background(true);
+
+    let params = tool.parameters();
+    assert_eq!(
+        params["properties"]["run_in_background"]["default"],
+        serde_json::json!(true),
+        "schema default 必须跟随有效缺省"
+    );
+    assert!(
+        params["properties"]["run_in_background"]["description"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("the default is true"),
+        "描述必须说明该会话缺省为后台：{}",
+        params["properties"]["run_in_background"]["description"]
+    );
+
+    let result = tool
+        .invoke(
+            serde_json::json!({"command": "sleep 30"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .expect("省略 run_in_background 且缺省为 true 时必须走后台");
+    assert!(
+        result.contains("Background shell task started"),
+        "省略字段的调用必须走后台：{result}"
+    );
+    assert_eq!(registry.active_count(), 1, "后台任务必须已登记");
+
+    let report = registry.shutdown().await;
+    assert_eq!(
+        registry.active_count(),
+        0,
+        "shutdown 之后不得残留活跃任务（报告：{report:?}）"
+    );
+}
+
+/// 有效缺省 = true：显式 `false` 仍走前台（flag 只改缺省，不覆盖显式意图）。
+#[tokio::test]
+async fn test_default_run_in_background_true_explicit_false_stays_foreground() {
+    let registry = Arc::new(peri_mcp_common::create_local_task_manager());
+    let _process_env = peri_mcp_common::process_env::lock().expect("process env lock");
+    let tool = BashTool::new(std::env::temp_dir().to_str().unwrap())
+        .with_task_manager(registry.clone())
+        .with_default_run_in_background(true);
+
+    let result = tool
+        .invoke(
+            serde_json::json!({"command": "echo foreground-ok", "run_in_background": false}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .expect("显式 false 必须走前台且成功");
+    assert!(
+        result.contains("foreground-ok"),
+        "显式 false 必须拿到前台输出：{result}"
+    );
+    assert!(
+        !result.contains("Background shell task started"),
+        "显式 false 不得走后台：{result}"
+    );
+    assert_eq!(registry.active_count(), 0, "前台调用不得登记后台任务");
+}
+
+/// 缺省未注入（flag 未开启）：schema `default: false`，省略字段仍走前台。
+#[tokio::test]
+async fn test_default_run_in_background_absent_stays_foreground() {
+    let registry = Arc::new(peri_mcp_common::create_local_task_manager());
+    let _process_env = peri_mcp_common::process_env::lock().expect("process env lock");
+    let tool = BashTool::new(std::env::temp_dir().to_str().unwrap()).with_task_manager(registry);
+
+    let params = tool.parameters();
+    assert_eq!(
+        params["properties"]["run_in_background"]["default"],
+        serde_json::json!(false),
+        "缺省注入前的 schema default 必须是 false"
+    );
+
+    let result = tool
+        .invoke(
+            serde_json::json!({"command": "echo default-foreground"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .expect("缺省 false 时省略字段必须走前台");
+    assert!(result.contains("default-foreground"), "{result}");
+    assert!(
+        !result.contains("Background shell task started"),
+        "{result}"
+    );
+}
+
+/// 缺省 = true 但没有任务管理器：维持既有报错语义（flag 不创造未装配的能力）。
+#[tokio::test]
+async fn test_default_run_in_background_without_manager_keeps_existing_error() {
+    let _process_env = peri_mcp_common::process_env::lock().expect("process env lock");
+    let tool =
+        BashTool::new(std::env::temp_dir().to_str().unwrap()).with_default_run_in_background(true);
+
+    let error = tool
+        .invoke(
+            serde_json::json!({"command": "echo never-runs"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .expect_err("无 manager 时后台缺省必须报既有错误")
+        .to_string();
+    assert!(
+        error.contains("run_in_background is not available"),
+        "错误必须点明 run_in_background 与缺 manager：{error}"
+    );
+}

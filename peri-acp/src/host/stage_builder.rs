@@ -279,6 +279,12 @@ pub(crate) fn build_stage_context(
         // MetaHarness：装配期关闭集合与段落覆盖均从同一 frozen snapshot
         // 派生，禁止回退当轮 SessionContext/config（设计 §2.5）。
         meta_harness_disabled: frozen.meta_harness.disabled_middlewares.clone(),
+        // beta flag 投影（设计 §消费契约）：`Agent` 工具缺省后台的语义值来自**会话
+        // 冻结**的 flag 值（随会话创建定格，不重读当轮配置）；flag id 的解析只在
+        // 本装配层发生，middleware/工具不解析 flag 语义。
+        agent_default_run_in_background: frozen
+            .beta_flags
+            .is_enabled(peri_acp_types::beta_flags::FULL_ASYNC_TOOLS),
     };
 
     // 调用 peri_agent 正式 stage 装配本体（透传 V2AgentOutput）

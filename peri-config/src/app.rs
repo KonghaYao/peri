@@ -1,5 +1,6 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
+use peri_acp_types::beta_flags;
 use peri_acp_types::meta_harness::{
     BUILTIN_INSTANCE_POLICY_KEYS, BUILT_IN_SUBAGENTS_KEY, MIDDLEWARE_NAMES, SECTION_IDS,
 };
@@ -140,12 +141,43 @@ impl Profiles {
     }
 }
 
+/// `config.betas`：flag id → bool 的稀疏覆盖表（序列化形状即 `{"<id>": true}`）。
+///
+/// 键必须在注册表（`peri_acp_types::beta_flags::BETA_FLAGS`）内；未知键在解析后由
+/// [`Self::validate`] 从内存剔除并 warn（不进入快照、投影与面板），磁盘残留键在
+/// 下一次经权威保存路径写回时清理。值必须是 bool：非 bool 使该来源解析失败，
+/// 不静默降级。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
-pub struct BetasConfig {}
+#[serde(transparent)]
+pub struct BetasConfig {
+    pub overrides: BTreeMap<String, bool>,
+}
 
 impl BetasConfig {
     pub fn is_default(&self) -> bool {
-        true
+        self.overrides.is_empty()
+    }
+
+    /// 已覆盖条目的值（未覆盖返回 `None`，与显式 `false` 区分）。
+    pub fn get(&self, id: &str) -> Option<bool> {
+        self.overrides.get(id).copied()
+    }
+
+    /// 写入覆盖（面板与装配层共用的唯一写入口）。
+    pub fn set(&mut self, id: impl Into<String>, enabled: bool) {
+        self.overrides.insert(id.into(), enabled);
+    }
+
+    /// 未知键剔除（`validate_meta_harness` 同款语义与接入点）。
+    pub(crate) fn validate(&mut self) {
+        self.overrides.retain(|id, _| {
+            if beta_flags::find(id).is_some() {
+                true
+            } else {
+                tracing::warn!(flag = %id, "config.betas: unknown flag id ignored");
+                false
+            }
+        });
     }
 }
 
@@ -226,6 +258,9 @@ impl AppConfig {
             (None, Some(overrides)) => self.meta_harness = Some(overrides),
             (_, None) => {}
         }
+        // beta flag 覆盖逐 key 合并（与 MetaHarness 同款）：workspace 同名键胜出，
+        // 显式 false 可关闭 global 的 true；不做整体替换。
+        self.betas.overrides.extend(workspace.betas.overrides);
         if workspace.env.is_some() {
             self.env = workspace.env;
         }
@@ -304,6 +339,14 @@ impl AppConfig {
             (Some(current), None) => overrides.meta_harness = Some(current.clone()),
             (None, _) => {}
         }
+        // beta flag 差异提取（与 MetaHarness 同款：只写与 global 不同的键）。
+        overrides.betas.overrides = self
+            .betas
+            .overrides
+            .iter()
+            .filter(|(id, enabled)| global.betas.get(id) != Some(**enabled))
+            .map(|(id, enabled)| (id.clone(), *enabled))
+            .collect();
         overrides.extra = self
             .extra
             .iter()
@@ -311,6 +354,12 @@ impl AppConfig {
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect();
         overrides
+    }
+
+    /// 解析后校验全部覆盖键（MetaHarness + beta flags）：未知键从内存剔除并 warn。
+    pub(crate) fn validate_overrides(&mut self) {
+        self.validate_meta_harness();
+        self.betas.validate();
     }
 
     pub(crate) fn validate_meta_harness(&mut self) {
@@ -395,3 +444,7 @@ impl ProviderConfig {
 #[cfg(test)]
 #[path = "app_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "app_betas_test.rs"]
+mod betas_tests;

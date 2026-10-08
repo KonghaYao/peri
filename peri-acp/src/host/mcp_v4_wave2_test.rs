@@ -336,6 +336,8 @@ async fn assemble_host_with_workspace_input(
             workspace_input,
             // 资源面输入同为会话级（见上）：本文件断言面不含它，恒为 `None`。
             workspace_resources: None,
+            // Bash 的 beta flag 缺省同为会话级投影：本夹具无 flag 覆盖。
+            workspace_bash_default_run_in_background: false,
             // 无会话上下文（测试夹具）：A24 关闭集为空集。
             builtin_closed: Default::default(),
             // 宿主技能面关闭位与关闭集同源：本夹具无会话上下文，恒为假。

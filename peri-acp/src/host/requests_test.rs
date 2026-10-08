@@ -602,6 +602,9 @@ mod workspace_cases;
 #[path = "requests_meta_resources_test.rs"]
 mod meta_resources;
 
+#[path = "requests_beta_flags_test.rs"]
+mod beta_flags;
+
 #[path = "requests_agent_catalog_test.rs"]
 mod agent_catalog;
 

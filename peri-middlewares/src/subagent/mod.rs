@@ -195,6 +195,9 @@ pub struct SubAgentMiddleware {
     /// 后台任务管理器是否可用（能力声明，非持有；collect_tools 时决定是否
     /// 注册 AgentResultTool）
     task_manager_available: bool,
+    /// `Agent` 工具 `run_in_background` 的有效缺省（middleware 装配参数；会话内冻结，
+    /// SubAgent 共享——beta flag `full-async-tools` 的投影）。
+    default_run_in_background: bool,
 }
 
 impl SubAgentMiddleware {
@@ -226,7 +229,17 @@ impl SubAgentMiddleware {
             mcp_skill_registry: None,
             broker: None,
             task_manager_available: false,
+            default_run_in_background: false,
         }
+    }
+
+    /// 注入 `Agent` 工具的 `run_in_background` 有效缺省（装配参数，随会话冻结）。
+    ///
+    /// 未调用 = `false`：与 flag 引入前一致（未显式传参走前台）。显式 `false` 仍走
+    /// 前台；flag 只改缺省。
+    pub fn with_default_run_in_background(mut self, default: bool) -> Self {
+        self.default_run_in_background = default;
+        self
     }
 
     pub fn with_mcp_agents(
@@ -366,6 +379,8 @@ impl SubAgentMiddleware {
         if let Some(ref session) = *self.parent_session.read() {
             tool = tool.with_parent_session(Arc::clone(session));
         }
+        // beta flag（装配参数，会话内冻结）：`Agent` 工具缺省后台的单一注入点。
+        tool = tool.with_default_run_in_background(self.default_run_in_background);
         tool
     }
 }

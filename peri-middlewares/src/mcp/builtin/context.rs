@@ -83,6 +83,12 @@ pub struct BuiltinInstanceContext {
     pub workspace_resources: Option<WorkspaceResourcesInput>,
     /// Host-issued capabilities shared by all sessions using this builtin instance.
     pub task_scope_authority: std::sync::OnceLock<peri_mcp_core::task_scope::TaskScopeAuthority>,
+    /// `workspace` 实例 Bash 的**有效 `run_in_background` 缺省**（beta flag 投影）。
+    ///
+    /// 装配期一次注入：会话装配从**会话冻结**的 flag 值派生，dispatch 只读不改、
+    /// 不读配置、不派生根（AW3-11 模式）。`false` = 既有行为（未显式传参走前台）。
+    #[cfg(not(target_os = "emscripten"))]
+    pub workspace_bash_default_run_in_background: bool,
     /// A24 关闭集：`policy_key ∈ disabled_middlewares` 的实例名（唯一实现
     /// `mcp::builtin::closed_instances`，宿主经 `peri_middlewares::assembly` 的薄委托派生）。
     ///
@@ -111,6 +117,8 @@ impl BuiltinInstanceContext {
             #[cfg(not(target_os = "emscripten"))]
             workspace_resources: None,
             task_scope_authority: std::sync::OnceLock::new(),
+            #[cfg(not(target_os = "emscripten"))]
+            workspace_bash_default_run_in_background: false,
             closed: BTreeSet::new(),
             skills_face_closed: false,
         }
@@ -144,6 +152,14 @@ impl BuiltinInstanceContext {
     /// 设置 A24 关闭集（`closed_instances(...)` 的产物，原样承载）。
     pub fn with_closed(mut self, closed: BTreeSet<String>) -> Self {
         self.closed = closed;
+        self
+    }
+
+    /// 提供 `workspace` 实例 Bash 的有效 `run_in_background` 缺省（装配期 flag 投影，
+    /// 见 [`Self::workspace_bash_default_run_in_background`]；不在此处推导）。
+    #[cfg(not(target_os = "emscripten"))]
+    pub fn with_workspace_bash_default_run_in_background(mut self, default: bool) -> Self {
+        self.workspace_bash_default_run_in_background = default;
         self
     }
 

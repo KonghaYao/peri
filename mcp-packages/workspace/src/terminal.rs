@@ -85,6 +85,13 @@ pub struct BashTool {
     /// Owned foreground timeout promotion is registered synchronously before
     /// returning to the MCP request, so request cancellation cannot hide it.
     pub on_bg_started: Option<OnBgStartedFn>,
+    /// 调用未显式给出 `run_in_background` 时的**有效缺省**（装配期注入一次，
+    /// beta flag `full-async-tools` 的投影）。
+    ///
+    /// 显式 `false` 仍走前台——flag 只改缺省，不覆盖显式意图。schema 的
+    /// `default` 与描述同步该值，执行路径（[`Self::execute`] /
+    /// `WorkspaceMcpServer::call_owned_bash`）按同一字段决策。
+    pub default_run_in_background: bool,
 }
 
 impl BashTool {
@@ -94,7 +101,36 @@ impl BashTool {
             task_manager: None,
             on_bg_complete: None,
             on_bg_started: None,
+            default_run_in_background: false,
         }
+    }
+
+    /// 注入 `run_in_background` 的有效缺省（会话装配输入；默认 false 与既有行为一致）。
+    pub fn with_default_run_in_background(mut self, default: bool) -> Self {
+        self.default_run_in_background = default;
+        self
+    }
+
+    /// `run_in_background` 的 schema 声明：`default` 与描述跟随**有效缺省**。
+    ///
+    /// schema 只影响模型倾向，硬缺省仍由执行路径（[`Self::execute`]）执行；两者
+    /// 同源（同一字段），不允许各自维护一份判定。
+    fn run_in_background_schema(&self) -> Value {
+        let mut description = "If true, runs the command in the background and returns \
+             immediately with a task_id. Only use for long-running servers, watchers, or \
+             daemons. For builds/installs/tests, prefer a longer timeout instead."
+            .to_string();
+        if self.default_run_in_background {
+            description.push_str(
+                " In this session the default is true: omit the field to run in the background, \
+                 and pass false explicitly to wait for the command in the foreground.",
+            );
+        }
+        serde_json::json!({
+            "type": "boolean",
+            "default": self.default_run_in_background,
+            "description": description,
+        })
     }
 
     pub fn with_task_manager(mut self, task_manager: Arc<dyn TaskManager>) -> Self {
@@ -328,10 +364,7 @@ impl BaseTool for BashTool {
                         "Optional timeout in milliseconds. The synchronous path is always bounded: it defaults to 15000ms and is capped at {FOREGROUND_MAX_TIMEOUT_MS}ms (2 minutes) — `timeout: 0` is treated as that maximum instead of disabling the timeout, so no request can produce an unbounded synchronous wait. Foreground timeout returns an error: if background task registration succeeds, the process is promoted and the tool returns a background task receipt carrying its task id (no pid or log paths), without a new timeout; otherwise termination is requested. Background tasks (run_in_background: true) run until completion: omitting `timeout` or setting `0` leaves that background command without a timeout, and a positive `timeout` (up to 600000ms) requests termination when reached. Check the returned process status before retrying; do not duplicate a task that is still running. For builds, installs, or tests, set a longer `timeout` up to the foreground maximum, or use run_in_background: true for work that needs longer."
                     )
                 },
-                "run_in_background": {
-                    "type": "boolean",
-                    "description": "If true, runs the command in the background and returns immediately with a task_id. Only use for long-running servers, watchers, or daemons. For builds/installs/tests, prefer a longer timeout instead."
-                }
+                "run_in_background": self.run_in_background_schema()
             },
             "required": ["command"]
         })
@@ -393,7 +426,14 @@ impl BashTool {
         })?;
 
         // ── 后台执行路径 ──
-        let run_in_background = input["run_in_background"].as_bool().unwrap_or(false);
+        // 缺省来自装配期注入的有效缺省（beta flag 投影）；显式 false 仍走前台。
+        //
+        // [TRAP] 语义不对称（与 Agent 工具有意不同，勿"修平"）：缺省 true 且无
+        // task_manager 时本工具报既有错误（`run_in_background is not available`），
+        // Agent 工具则静默落回同步路径——两者各自维持各自引入前的语义。
+        let run_in_background = input["run_in_background"]
+            .as_bool()
+            .unwrap_or(self.default_run_in_background);
         if run_in_background {
             // 任务发起（TaskManager::spawn_shell 委托注入的工具执行环境：
             // 执行环境负责进程/超时/输出，Agent 保留注册与完成生命周期）。

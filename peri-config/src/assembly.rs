@@ -11,6 +11,7 @@ use serde_json::Value;
 
 use crate::{
     app::PeriConfig,
+    betas::{self, BetaFlags},
     mcp::{self, McpConfigFile},
     observability::{self, LangfuseConfig},
     provider::{self, ResolvedProvider},
@@ -92,6 +93,12 @@ const DOMAINS: &[DomainShape] = &[
         sources: &[Source::Global],
         merge_rule: "global nested disableBundledSkills precedes top-level; default false",
     },
+    DomainShape {
+        field: ConfigurationField::Betas,
+        sources: &[Source::Global, Source::Workspace],
+        merge_rule:
+            "per flag id merge; workspace wins (explicit false closes global true); default false",
+    },
 ];
 
 pub(crate) fn workspace_settings_path(cwd: &Path) -> PathBuf {
@@ -164,6 +171,7 @@ pub(crate) struct ResolvedConfiguration {
     pub observability: LangfuseConfig,
     pub ui: TuiConfig,
     pub resources: ResourceConfiguration,
+    pub betas: BetaFlags,
 }
 
 pub(crate) fn resolve(
@@ -183,6 +191,9 @@ pub(crate) fn resolve(
     let observability = observability::resolve(&global, &inputs.environment);
     let ui = TuiConfig::from_extra(&settings.config.extra);
     let resources = resources::resolve(&global);
+    // beta flag 投影由**合并后** settings 派生（workspace 覆盖已生效），来源层对照
+    // 同一 scope 的 global 层。
+    let betas = betas::resolve(&global_settings, &settings);
     Ok(ResolvedConfiguration {
         settings,
         global_settings,
@@ -191,6 +202,7 @@ pub(crate) fn resolve(
         observability,
         ui,
         resources,
+        betas,
     })
 }
 
@@ -277,7 +289,7 @@ fn parse_settings(
             domain: "settings",
         }
     })?;
-    config.config.validate_meta_harness();
+    config.config.validate_overrides();
     Ok(config)
 }
 

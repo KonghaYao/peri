@@ -111,7 +111,8 @@ impl WorkspaceMcpServer {
     ///
     /// `input` 的两名成员各自独立生效（`task_manager` 与 `on_bg_complete` 由不同装配面产出，
     /// 本构造不假定它们同时到位）：`None` 时对应字段保持 `BashTool::new` 的缺省 `None`
-    /// （退化分支见模块头），其余 6 个工具不受 `input` 影响。
+    /// （退化分支见模块头），其余 6 个工具不受 `input` 影响。`run_in_background` 的有效
+    /// 缺省不在本构造注入（只经 [`Self::standalone`]，见 `input.rs`），此处恒为前台缺省。
     pub fn new(cwd: impl Into<String>, input: Option<WorkspaceInstanceInput>) -> Self {
         let cwd = cwd.into();
         let mut bash = BashTool::new(cwd.as_str());
@@ -148,14 +149,19 @@ impl WorkspaceMcpServer {
 
     /// Build a Workspace server whose Bash jobs outlive individual MCP clients.
     /// Clones share the same task owner, including HTTP connections.
-    pub fn standalone(cwd: impl Into<String>) -> Self {
+    ///
+    /// `default_run_in_background` is the effective `run_in_background` default injected at
+    /// session assembly (beta flag projection; `false` = existing behavior). It reaches both the
+    /// tool schema and [`Self::call_owned_bash`]'s background decision from the same field.
+    pub fn standalone(cwd: impl Into<String>, default_run_in_background: bool) -> Self {
         let mut server = Self::new(cwd, None);
         let tasks = ShellTasks::new();
         let cwd = server.cwd.clone();
         let bash = Arc::new(
             BashTool::new(&cwd)
                 .with_task_manager(tasks.manager())
-                .with_on_bg_complete(tasks.completion_callback()),
+                .with_on_bg_complete(tasks.completion_callback())
+                .with_default_run_in_background(default_run_in_background),
         );
         server.tools[6] = bash.clone();
         server.bash = bash;
@@ -238,10 +244,12 @@ impl WorkspaceMcpServer {
             .expect("owned Bash requires task owner");
         let _admission = scope.map(|scope| tasks.admit(scope)).transpose()?;
         let arguments = request.arguments.as_ref();
+        // 有效缺省（beta flag 投影）与工具 schema 同源：同一字段既写进 `parameters()`
+        // 的 `default`，也在这里决定未显式传参时的路径。显式 false 仍走前台。
         let background = arguments
             .and_then(|args| args.get("run_in_background"))
             .and_then(serde_json::Value::as_bool)
-            == Some(true);
+            .unwrap_or(self.bash.default_run_in_background);
         if background {
             let command = arguments
                 .and_then(|args| args.get("command"))
@@ -274,6 +282,8 @@ impl WorkspaceMcpServer {
         let started_owner = tasks.clone();
         let started_scope = scope.map(str::to_owned);
         let started_command = command.clone();
+        // 前景路径的工具实例**不带**缺省后台位：后台/前台判定已在上方完成，这里只提供
+        // 前台执行能力与超时 promote（`false` 保持 `BashTool::new` 的缺省）。
         let bash = BashTool::new(&self.cwd)
             .with_task_manager(tasks.manager())
             .with_on_bg_complete(callback)
