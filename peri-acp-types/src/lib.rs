@@ -66,6 +66,7 @@ pub mod peri_caps;
 pub use peri_caps::PeriCaps;
 pub mod permission;
 pub mod plugin;
+pub mod plugin_scope;
 pub mod ports;
 pub mod projection;
 pub mod runtime;

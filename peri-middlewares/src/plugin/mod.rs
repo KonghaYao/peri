@@ -1,3 +1,4 @@
+pub mod admission;
 pub mod config;
 pub mod install_counts;
 pub mod installer;
@@ -6,6 +7,7 @@ pub mod marketplace;
 pub mod middleware;
 pub mod types;
 
+pub use admission::PluginSourceAdmission;
 pub use config::{
     claude_home, claude_settings_path, installed_plugins_path, known_marketplaces_path,
     load_claude_settings, load_installed_plugins, load_known_marketplaces, load_plugin_manifest,
@@ -24,7 +26,7 @@ pub use loader::{
     load_enabled_plugins, load_enabled_plugins_aggregated,
     load_enabled_plugins_aggregated_readonly, plugin_route_entries, CommandEntry, CommandProvider,
     CommandSource, LoadedPlugin, LoaderError, PluginCommandHandler, PluginCommandProvider,
-    PluginLoadResult, PluginSourceAdmission,
+    PluginLoadResult,
 };
 pub use marketplace::{
     parse_marketplace_input, AvailablePlugin, MarketplaceEntry, MarketplaceError,

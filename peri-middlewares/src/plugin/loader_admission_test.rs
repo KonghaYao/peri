@@ -11,6 +11,7 @@ use std::path::Path;
 
 use super::*;
 use crate::plugin::types::{InstallScope, InstalledPlugin, InstalledPlugins, PluginOrigin};
+use crate::plugin::PluginSourceAdmission;
 
 /// 安装并启用一个声明了 skills / commands / hooks / mcpServers 的插件。
 fn install_plugin_with_every_face(claude_dir: &Path, mcp_servers: serde_json::Value) -> PathBuf {

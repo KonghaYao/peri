@@ -9,6 +9,9 @@
 
 use std::sync::Arc;
 
+#[path = "hook_groups.rs"]
+mod hook_groups;
+
 use parking_lot::RwLock;
 use peri_acp_types::command::command_route::RouteEntry;
 use peri_acp_types::cron::CronSchedulerPort;
@@ -296,12 +299,10 @@ pub(super) fn build_session_end_task(
     })
 }
 
-/// 组装 settings hook 组（plugin → global → project → local，顺序即迁移前
-/// TUI/print/stdio 三处一致的既有顺序，ARC-MIDDLEWARE-001 不重排）。
-///
-/// `skip_settings_hooks`：bare 模式跳过 global/project/local（与 print 既有语义
-/// 一致）；plugin hooks 为空时不产生空组。三级 settings hooks 经
-/// [`SettingsHooksPort`] 注入（装配点构造，磁盘加载留在实现方）。
+/// 组装 settings hook 组（实现见 `host/hook_groups.rs`：plugin → global →
+/// project → local，顺序即迁移前 TUI/print/stdio 三处一致的既有顺序）。
+pub use hook_groups::assemble_hook_groups;
+
 /// 插件来源闭合位（M6）：从本次定格的 session-local 配置派生。
 ///
 /// ACP 侧的**唯一**入口——准备面（`prepared.rs`，装配之前）与装配面都经它判定，
@@ -312,34 +313,6 @@ pub(crate) fn plugin_face_closed(config: &PeriConfig) -> bool {
         config.config.meta_harness.as_ref(),
     )
     .is_closed()
-}
-
-pub fn assemble_hook_groups(
-    plugin_hooks: &[RegisteredHook],
-    settings_hooks: &dyn SettingsHooksPort,
-    cwd: &str,
-    skip_settings_hooks: bool,
-) -> Vec<Vec<RegisteredHook>> {
-    let mut hook_groups: Vec<Vec<RegisteredHook>> = Vec::new();
-    if !plugin_hooks.is_empty() {
-        hook_groups.push(plugin_hooks.to_vec());
-    }
-    if skip_settings_hooks {
-        return hook_groups;
-    }
-    let global_hooks = settings_hooks.global();
-    if !global_hooks.is_empty() {
-        hook_groups.push(global_hooks);
-    }
-    let project_hooks = settings_hooks.project(cwd);
-    if !project_hooks.is_empty() {
-        hook_groups.push(project_hooks);
-    }
-    let local_hooks = settings_hooks.local(cwd);
-    if !local_hooks.is_empty() {
-        hook_groups.push(local_hooks);
-    }
-    hook_groups
 }
 
 /// 构造共享 SessionManager（支撑 cascade cancel 子 agent 与 goal_state）。
