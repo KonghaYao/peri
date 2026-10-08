@@ -47,10 +47,10 @@ pub(super) fn render_subagent_group_lines(
     if recent.is_empty() {
         // 组内无任何工具调用：不渲染组头——仅 genuine parent error 保留原因行
         // （错误信息不丢），其余整组留空（子 agent 纯文本/空跑不占消息区空间）。
-        if data.is_error {
-            if let Some(reason) = subagent_error_reason(data) {
-                return subagent_error_reason_lines(grid, reason);
-            }
+        if data.is_error
+            && let Some(reason) = subagent_error_reason(data)
+        {
+            return subagent_error_reason_lines(grid, reason);
         }
         return Vec::new();
     }

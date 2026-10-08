@@ -95,6 +95,7 @@ pub(crate) struct ImageHoverState {
 // 按钮行在 slot 内是唯一视觉行（copy_button_line 已保证不折行），
 // 屏幕行 = area.y + slot 视觉偏移 + 行内视觉偏移 - scroll_y。
 // 视口外的按钮不进入映射（点不到），避免列表随会话增长。
+#[allow(clippy::too_many_arguments)] // 每帧渲染上下文（视口几何 + slot 索引 + grid）与状态原子成组传入，与同文件其余 hit 更新函数签名同构，拆分无收益
 pub(super) fn update_copy_button_hits(
     copy_buttons: State<Arc<Vec<CopyButtonHit>>>,
     vm_caches: &State<Vec<VmCacheSlot>>,

@@ -251,6 +251,7 @@ async fn run_before_tool_approvals(
 ///
 /// 每个调用走 `biased` select：cancel.cancelled() 优先于 invoke_fut，
 /// 命中时返回 `ToolExecutionFailed { reason: "interrupted by user" }`。
+#[allow(clippy::too_many_arguments)] // 与 collect_tool_results 同一决策：阶段边界显式传递调用上下文，不分组
 async fn dispatch_concurrent(
     ctx: &StageContext,
     ready_calls: &[ToolCall],
