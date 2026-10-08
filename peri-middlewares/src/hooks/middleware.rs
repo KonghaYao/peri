@@ -78,6 +78,12 @@ pub struct HookMiddleware {
     /// PreToolUse `ask` 的审批端口（与 PermissionMiddleware 同源 broker）。
     /// None = 无审批通道：宿主也不会弹窗时，ask 必须拒绝而不是放行。
     broker: Option<Arc<dyn UserInteractionBroker>>,
+    /// 宿主审批路径（PermissionMiddleware）是否真的在链上。
+    ///
+    /// `should_fire_permission_request_*` 只描述"权限面存在时会不会弹窗"；
+    /// MetaHarness 关闭 Permission 面后 Default 模式同样不会有人弹审批。
+    /// 缺失（默认）时 ask 不允许交宿主，必须走 `broker`；无 broker 明确拒绝。
+    host_approval_path: bool,
     /// broker.request 超时（与 PermissionMiddleware 同源常量）
     broker_timeout: std::time::Duration,
 }
@@ -148,8 +154,19 @@ impl HookMiddleware {
             requires_approval: crate::permission::default_requires_approval,
             stop_block_guard,
             broker: None,
+            // fail-closed 默认：未显式声明宿主审批面在链上时，ask 不得交宿主。
+            host_approval_path: false,
             broker_timeout: crate::permission::BROKER_TIMEOUT,
         }
+    }
+
+    /// 声明宿主审批路径（PermissionMiddleware）是否在链上。
+    ///
+    /// 由装配点按 MetaHarness 关闭集注入（关闭 Permission 面 → false）；
+    /// 缺失即 false：ask 走 broker，无 broker 明确拒绝。
+    pub fn with_host_approval_path(mut self, present: bool) -> Self {
+        self.host_approval_path = present;
+        self
     }
 
     /// 注入审批端口（PreToolUse `ask` 落实用）。
@@ -169,22 +186,24 @@ impl HookMiddleware {
 
     /// 落实 PreToolUse `ask`。
     ///
-    /// - 宿主权限路径本来就会弹窗（`should_fire_permission_request_*`）→ 返回 `None`
-    ///   交给宿主审批，避免同一次调用出现双重审批；
-    /// - 宿主不会弹窗（Bypass、豁免工具等）→ 必须经既有 `UserInteractionBroker`
-    ///   有界审批；无 broker、超时、拒绝都返回固定反馈的 `ToolRejected`，绝不放行。
+    /// - 宿主权限路径确实在链上，且本来就会弹窗（`should_fire_permission_request_*`）
+    ///   → 返回 `None` 交给宿主审批，避免同一次调用出现双重审批；
+    /// - 宿主路径缺失（MetaHarness 关闭 Permission 面）或本就不会弹窗（Bypass、
+    ///   豁免工具等）→ 必须经既有 `UserInteractionBroker` 有界审批；无 broker、
+    ///   超时、拒绝都返回固定反馈的 `ToolRejected`，绝不放行。
     async fn resolve_ask_approval(
         &self,
         state: &mut dyn hook_state::BeforeToolState,
         tool_call: &ToolCall,
     ) -> AgentResult<Option<ToolCall>> {
         let origin = state.tool_origin(&tool_call.id);
-        let host_will_ask = permission_gate::should_fire_permission_request_for_origin(
-            self.permission_mode.load(),
-            &tool_call.name,
-            self.requires_approval,
-            origin.as_ref(),
-        );
+        let host_will_ask = self.host_approval_path
+            && permission_gate::should_fire_permission_request_for_origin(
+                self.permission_mode.load(),
+                &tool_call.name,
+                self.requires_approval,
+                origin.as_ref(),
+            );
         if host_will_ask {
             return Ok(None);
         }
@@ -810,3 +829,7 @@ mod post_tool_batch_tests;
 #[cfg(test)]
 #[path = "async_diagnostic_test.rs"]
 mod async_diagnostic_tests;
+
+#[cfg(test)]
+#[path = "ask_host_path_test.rs"]
+mod ask_host_path_tests;

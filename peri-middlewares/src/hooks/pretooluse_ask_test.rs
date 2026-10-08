@@ -249,12 +249,14 @@ async fn test_pretooluse_ask_broker_timeout_is_rejected() {
 #[cfg(unix)]
 #[tokio::test]
 async fn test_pretooluse_ask_defers_to_host_dialog_without_double_approval() {
-    // Default 模式 + 敏感工具：宿主权限路径会弹审批，hook 层不得再弹一次
+    // Default 模式 + 敏感工具 + 宿主审批路径在链上：宿主权限路径会弹审批，
+    // hook 层不得再弹一次（装配点按 Permission 面存在性注入 host_approval_path）。
     let broker = RecordingBroker::new(BrokerReply::Approve);
     let hook = pretooluse_command_hook(
         r#"{"hook_specific_output":{"hookEventName":"PreToolUse","permissionDecision":"ask"}}"#,
     );
-    let mw = make_middleware_with_broker(vec![hook], PermissionMode::Default, broker.clone());
+    let mw = make_middleware_with_broker(vec![hook], PermissionMode::Default, broker.clone())
+        .with_host_approval_path(true);
 
     let result = mw
         .before_tool(
