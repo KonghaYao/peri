@@ -20,22 +20,20 @@
 //! - agent_status 收尾语义与迁移前一致：done / cancelled / error。
 
 mod background;
+mod child_runner;
 mod close;
 mod directives;
 mod factory;
 mod lifecycle;
 pub use close::{close_subagent_session_scope, SubagentCloseState};
 mod run_sync;
-mod settlement;
 mod types;
 mod util;
 mod v2_bridge;
 
 pub use directives::{build_bg_fork_directive, build_fork_directive, build_prediction_directive};
-pub use factory::{
-    ChildIdentityResolution, ChildResumeMetadata, ColdChildBlocked, ColdChildExecution,
-    ColdChildRuntime, SessionFactory,
-};
+pub use factory::SessionFactory;
+pub(crate) use lifecycle::flush_session_history;
 pub(crate) use lifecycle::{
     on_subagent_stop_handler, BgCleanupGuard, BgStopEmitV2, DeregisterGuard,
 };
@@ -58,8 +56,6 @@ pub(crate) use v2_bridge::{
 use crate::agent::async_tasks::{
     BackgroundTask, BackgroundTaskStatus, BgCancelHandle, BgTaskKind, TaskManager,
 };
-#[cfg(test)]
-use crate::agent::react::ReactLLM;
 #[cfg(test)]
 use crate::messages::BaseMessage;
 #[cfg(test)]

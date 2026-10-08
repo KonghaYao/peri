@@ -1,14 +1,14 @@
 use super::*;
-use crate::agent::async_tasks::durable_task_terminal_delivery;
-use crate::session::test_resources::{mock::work::bind_fixture_task, TestSession};
+use crate::agent::async_tasks::delivery::SessionTerminalDelivery;
 use peri_acp_types::session::MessageQueue;
-use peri_acp_types::session_resources::work::WorkQuery;
+use peri_acp_types::tasks::{BgTaskRegistration, TaskManager as _, TaskTerminalDelivery};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn shell_result(task_id: &str) -> BackgroundTaskResult {
     BackgroundTaskResult {
         task_id: task_id.into(),
         agent_name: "Bash".into(),
-        prompt_summary: "durable shell".into(),
+        prompt_summary: "shell".into(),
         success: true,
         output: "terminal output".into(),
         tool_calls_count: 0,
@@ -20,25 +20,187 @@ fn shell_result(task_id: &str) -> BackgroundTaskResult {
     }
 }
 
-async fn wait_for_ack(callback: &OnBgCompleteFn, result: &BackgroundTaskResult) {
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        loop {
-            if callback(result, BgTaskKind::Shell).is_ok() {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("durable terminal publication never acknowledged");
+struct FailedDelivery;
+impl peri_acp_types::tasks::TaskTerminalDelivery for FailedDelivery {
+    fn accept(
+        &self,
+        _: peri_acp_types::messages::MessageId,
+        _: &peri_acp_types::system_reminder::TrustedSystemReminder,
+        _: peri_acp_types::session::MessageSource,
+    ) -> Result<(), String> {
+        Err("current terminal delivery unavailable".into())
+    }
+
+    fn deliver<'a>(
+        &'a self,
+        _: peri_acp_types::messages::MessageId,
+        _: &'a peri_acp_types::system_reminder::TrustedSystemReminder,
+        _: peri_acp_types::session::MessageSource,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async { Err("current terminal delivery unavailable".into()) })
+    }
+}
+fn failed_terminal_callback() -> OnBgCompleteFn {
+    task_bg_complete_callback(Arc::new(FailedDelivery))
 }
 
-// ─── Inline log capture ──────────────────────────────────────────────────────
-//
-// 仓库没有 tracing 捕获测试工具，这里内联最小实现：自定义 `MakeWriter` 把
-// 默认过滤器（`INFO` 起）下的事件写进内存缓冲，供断言检查。
-// `#[tokio::test]` 默认 current_thread runtime，被 spawn 的投递任务与测试在
-// 同一线程上被轮询，因此线程局部 subscriber 能捕获异步投递结果日志。
+#[test]
+fn current_terminal_delivery_is_accepted_once_without_a_ledger() {
+    let queue = MessageQueue::new();
+    let callback = task_bg_complete_callback(SessionTerminalDelivery::for_queue(queue.clone()));
+    let result = shell_result("shell-current");
+    callback(&result, BgTaskKind::Shell).unwrap();
+    callback(&result, BgTaskKind::Shell).unwrap();
+    assert_eq!(queue.drain_batch(64).len(), 1);
+}
+
+#[test]
+fn same_terminal_identity_cannot_acknowledge_changed_payload() {
+    let queue = MessageQueue::new();
+    let callback = task_bg_complete_callback(SessionTerminalDelivery::for_queue(queue.clone()));
+    let mut result = shell_result("shell-conflict");
+    callback(&result, BgTaskKind::Shell).unwrap();
+    result.output = "changed".into();
+    assert!(callback(&result, BgTaskKind::Shell)
+        .unwrap_err()
+        .contains("conflicting"));
+    assert_eq!(queue.drain_batch(64).len(), 1);
+}
+
+fn registered_manager(task_id: &str) -> crate::agent::async_tasks::TaskManager {
+    let manager = crate::agent::async_tasks::TaskManager::new();
+    manager
+        .register(BgTaskRegistration {
+            task_id: task_id.into(),
+            kind: BgTaskKind::Agent,
+            summary: "terminal acceptance".into(),
+            pid: None,
+            kill: Some(Box::new(|| {})),
+        })
+        .unwrap();
+    manager
+}
+
+#[test]
+fn accepted_queue_delivery_settles_task_without_another_run() {
+    let queue = MessageQueue::new();
+    let callback = task_bg_complete_callback(SessionTerminalDelivery::for_queue(queue.clone()));
+    let result = shell_result("accepted-task");
+    let manager = registered_manager(&result.task_id);
+    assert!(manager
+        .settle_completed(&result.task_id, result.clone(), callback.clone())
+        .unwrap());
+    assert_eq!(manager.active_count(), 0);
+    assert!(manager.is_execution_idle());
+    assert_eq!(manager.snapshot().tasks[0].status, "completed");
+    assert!(queue.has_wake_up());
+    assert_eq!(queue.len(), 1);
+    callback(&result, BgTaskKind::Agent).unwrap();
+    assert!(!manager
+        .settle_completed(&result.task_id, result.clone(), callback)
+        .unwrap());
+    assert_eq!(manager.retry_pending_deliveries(), 0);
+    assert_eq!(queue.len(), 1);
+}
+
+struct RetryDelivery {
+    route: Arc<dyn TaskTerminalDelivery>,
+    attempts: AtomicUsize,
+}
+
+impl TaskTerminalDelivery for RetryDelivery {
+    fn accept(
+        &self,
+        delivery_id: peri_acp_types::messages::MessageId,
+        reminder: &peri_acp_types::system_reminder::TrustedSystemReminder,
+        source: peri_acp_types::session::MessageSource,
+    ) -> Result<(), String> {
+        if self.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+            return Err("queue acceptance refused".into());
+        }
+        self.route.accept(delivery_id, reminder, source)
+    }
+
+    fn deliver<'a>(
+        &'a self,
+        delivery_id: peri_acp_types::messages::MessageId,
+        reminder: &'a peri_acp_types::system_reminder::TrustedSystemReminder,
+        source: peri_acp_types::session::MessageSource,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move { self.accept(delivery_id, reminder, source) })
+    }
+}
+
+#[test]
+fn refused_queue_delivery_retains_task_and_retries_original_once() {
+    let queue = MessageQueue::new();
+    let route = Arc::new(RetryDelivery {
+        route: SessionTerminalDelivery::for_queue(queue.clone()),
+        attempts: AtomicUsize::new(0),
+    });
+    let callback = task_bg_complete_callback(route.clone());
+    let result = shell_result("refused-task");
+    let manager = registered_manager(&result.task_id);
+    let error = manager
+        .settle_completed(&result.task_id, result.clone(), callback.clone())
+        .unwrap_err();
+    assert!(error.to_string().contains("queue acceptance refused"));
+    assert_eq!(manager.active_count(), 1);
+    assert_eq!(manager.snapshot().tasks[0].status, "delivery_pending");
+    assert!(queue.is_empty());
+    assert_eq!(manager.retry_pending_deliveries(), 1);
+    assert_eq!(manager.active_count(), 0);
+    assert!(manager.is_execution_idle());
+    assert_eq!(manager.snapshot().tasks[0].status, "completed");
+    callback(&result, BgTaskKind::Agent).unwrap();
+    assert_eq!(manager.retry_pending_deliveries(), 0);
+    assert_eq!(route.attempts.load(Ordering::SeqCst), 2);
+    let accepted = queue.drain_all();
+    assert_eq!(accepted.len(), 1);
+    assert_eq!(
+        accepted[0].source,
+        peri_acp_types::session::MessageSource::SubAgentComplete
+    );
+}
+
+struct AsyncDelivery(AtomicUsize);
+
+impl TaskTerminalDelivery for AsyncDelivery {
+    fn deliver<'a>(
+        &'a self,
+        _: peri_acp_types::messages::MessageId,
+        _: &'a peri_acp_types::system_reminder::TrustedSystemReminder,
+        _: peri_acp_types::session::MessageSource,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move {
+            tokio::task::yield_now().await;
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
+    }
+}
+
+#[tokio::test]
+async fn asynchronous_route_requires_its_owner_to_await_delivery() {
+    let route = Arc::new(AsyncDelivery(AtomicUsize::new(0)));
+    let callback = task_bg_complete_callback(route.clone());
+    let result = shell_result("async-task");
+    assert!(callback(&result, BgTaskKind::Shell)
+        .unwrap_err()
+        .contains("owner-awaited asynchronous delivery"));
+    tokio::task::yield_now().await;
+    assert_eq!(route.0.load(Ordering::SeqCst), 0);
+    let reminder = background_result_reminder(&result, BgTaskKind::Shell);
+    route
+        .deliver(
+            crate::agent::async_tasks::delivery::terminal_delivery_id(&result.task_id, "terminal"),
+            &reminder,
+            peri_acp_types::session::MessageSource::ShellComplete,
+        )
+        .await
+        .unwrap();
+    assert_eq!(route.0.load(Ordering::SeqCst), 1);
+}
 
 #[derive(Clone, Default)]
 struct CapturedLogs(std::sync::Arc<parking_lot::Mutex<Vec<u8>>>);
@@ -112,148 +274,17 @@ fn capture_logs(logs: &CapturedLogs) -> tracing::subscriber::DefaultGuard {
     guard
 }
 
-async fn wait_for_log_line(logs: &CapturedLogs, needle: &str) {
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        while !logs.text().contains(needle) {
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap_or_else(|_| {
-        panic!(
-            "log line {needle:?} never appeared; captured:\n{}",
-            logs.text()
-        )
-    });
-}
-
-async fn wait_for_log_lines(logs: &CapturedLogs, needle: &str, expected: usize) {
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        while logs.count_lines(needle) < expected {
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap_or_else(|_| {
-        panic!(
-            "expected {expected} log lines containing {needle:?}; captured:\n{}",
-            logs.text()
-        )
-    });
-}
-
-/// 未绑定 task binding 的投递：必然在 `delivery.rs` 的 binding 查找处失败。
-fn unbound_terminal_callback(bound: &TestSession) -> OnBgCompleteFn {
-    durable_bg_complete_callback(durable_task_terminal_delivery(
-        bound.resources(),
-        bound.thread_id(),
-        1,
-        MessageQueue::new(),
-    ))
-}
-
-#[tokio::test]
-async fn owner_ack_requires_confirmed_reliable_inbox_not_queue_or_transcript() {
-    let bound = TestSession::open().await;
-    bind_fixture_task(bound.resources(), &bound.thread_id(), 1, "shell-durable").await;
-    let queue = MessageQueue::new();
-    let delivery =
-        durable_task_terminal_delivery(bound.resources(), bound.thread_id(), 1, queue.clone());
-    let callback = durable_bg_complete_callback(delivery);
-    let result = shell_result("shell-durable");
-    assert!(callback(&result, BgTaskKind::Shell).is_err());
-    wait_for_ack(&callback, &result).await;
-    assert!(callback(&result, BgTaskKind::Shell).is_ok());
-    let snapshot = bound
-        .resources
-        .load_session_work(&WorkQuery {
-            session_id: bound.thread_id(),
-            limit: 1,
-        })
-        .await
-        .unwrap();
-    assert_eq!(snapshot.state.deliveries.len(), 1);
-    assert_eq!(snapshot.state.task_bindings.len(), 1);
-    assert!(bound
-        .resources
-        .load_session_history(&bound.thread_id())
-        .await
-        .unwrap()
-        .is_empty());
-}
-
-#[tokio::test]
-async fn missing_immutable_task_binding_never_acknowledges_or_falls_back_to_queue() {
-    let bound = TestSession::open().await;
-    let queue = MessageQueue::new();
-    let callback = durable_bg_complete_callback(durable_task_terminal_delivery(
-        bound.resources(),
-        bound.thread_id(),
-        1,
-        queue.clone(),
-    ));
-    let result = shell_result("unbound-shell");
-    for _ in 0..10 {
-        assert!(callback(&result, BgTaskKind::Shell).is_err());
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-    assert!(queue.is_empty());
-    let snapshot = bound
-        .resources
-        .load_session_work(&WorkQuery {
-            session_id: bound.thread_id(),
-            limit: 1,
-        })
-        .await
-        .unwrap();
-    assert!(snapshot.state.deliveries.is_empty());
-    assert!(bound
-        .resources
-        .load_session_history(&bound.thread_id())
-        .await
-        .unwrap()
-        .is_empty());
-}
-
-#[tokio::test]
-async fn same_terminal_identity_cannot_acknowledge_changed_payload() {
-    let bound = TestSession::open().await;
-    bind_fixture_task(bound.resources(), &bound.thread_id(), 1, "shell-conflict").await;
-    let callback = durable_bg_complete_callback(durable_task_terminal_delivery(
-        bound.resources(),
-        bound.thread_id(),
-        1,
-        MessageQueue::new(),
-    ));
-    let mut result = shell_result("shell-conflict");
-    assert!(callback(&result, BgTaskKind::Shell).is_err());
-    wait_for_ack(&callback, &result).await;
-    result.output = "different terminal output".into();
-    assert!(callback(&result, BgTaskKind::Shell)
-        .unwrap_err()
-        .contains("conflicting"));
-    let snapshot = bound
-        .resources
-        .load_session_work(&WorkQuery {
-            session_id: bound.thread_id(),
-            limit: 1,
-        })
-        .await
-        .unwrap();
-    assert_eq!(snapshot.state.deliveries.len(), 1);
-}
-
-#[tokio::test]
-async fn terminal_publication_failure_reason_is_visible_at_default_log_level() {
-    let bound = TestSession::open().await;
+#[test]
+fn terminal_publication_failure_reason_is_visible_at_default_log_level() {
     let logs = CapturedLogs::default();
     let _capture = capture_logs(&logs);
-    let callback = unbound_terminal_callback(&bound);
+    let callback = failed_terminal_callback();
     let result = shell_result("unbound-shell");
 
-    // 同步返回值仍是 Pending 契约；真实原因只能由异步结果回写路径记录。
-    assert!(callback(&result, BgTaskKind::Shell).is_err());
-    wait_for_log_line(&logs, "terminal publication failed").await;
+    assert_eq!(
+        callback(&result, BgTaskKind::Shell).unwrap_err(),
+        "current terminal delivery unavailable"
+    );
 
     let failure_line = logs.line_with("terminal publication failed");
     assert!(
@@ -267,42 +298,23 @@ async fn terminal_publication_failure_reason_is_visible_at_default_log_level() {
         logs.text()
     );
     assert!(
-        failure_line.contains("terminal publication has no durable invocation/task binding"),
+        failure_line.contains("current terminal delivery unavailable"),
         "captured:\n{}",
         logs.text()
     );
 }
 
-#[tokio::test]
-async fn terminal_publication_retry_keeps_reason_visible_without_log_flooding() {
-    let bound = TestSession::open().await;
+#[test]
+fn terminal_publication_retry_keeps_reason_visible_without_log_flooding() {
     let logs = CapturedLogs::default();
     let _capture = capture_logs(&logs);
-    let callback = unbound_terminal_callback(&bound);
+    let callback = failed_terminal_callback();
     let result = shell_result("unbound-shell");
 
     assert!(callback(&result, BgTaskKind::Shell).is_err());
-    wait_for_log_line(&logs, "terminal publication failed").await;
     assert_eq!(logs.count_lines("terminal publication failed"), 1);
 
-    // 第二次调用进入 Failed 重试路径；若异步状态尚未回写会落到 Pending 分支，
-    // 重试调用即可，直到重试日志出现。
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        loop {
-            assert!(callback(&result, BgTaskKind::Shell).is_err());
-            // 该 callsite 与并行用例共享，全局兴趣缓存可能把它置为 never：重建后再重试，
-            // 避免把“记录被抑制”误判成“重试路径没走到”。
-            tracing::callsite::rebuild_interest_cache();
-            if logs.count_lines("retrying original terminal publication") > 0 {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap_or_else(|_| panic!("retry path never taken; captured:\n{}", logs.text()));
-
-    wait_for_log_lines(&logs, "terminal publication failed", 2).await;
+    assert!(callback(&result, BgTaskKind::Shell).is_err());
 
     let retry_line = logs.line_with("retrying original terminal publication");
     assert!(
@@ -316,12 +328,11 @@ async fn terminal_publication_retry_keeps_reason_visible_without_log_flooding() 
         logs.text()
     );
     assert!(
-        retry_line.contains("terminal publication has no durable invocation/task binding"),
+        retry_line.contains("current terminal delivery unavailable"),
         "captured:\n{}",
         logs.text()
     );
 
-    // 每次重试只新增 1 行 info（重试决策）+ 1 行 warn（本次失败原因）。
     assert_eq!(
         logs.count_lines("retrying original terminal publication"),
         1

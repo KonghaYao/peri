@@ -5,9 +5,7 @@
 //! back through the transport. ACP Host = 部署单元（`docs/top-level.md` §7/§19）：
 //! 由 cli/TUI 作为部署装配点启动，TUI 进程不再持有控制面。
 //!
-//! Admitted execution is owned by a background task so the server remains
-//! responsive to precise `session/control` requests. Unqualified legacy
-//! cancellation does not authorize execution control. Sessions are shared via
+//! Prompt execution is owned by a background task. Sessions are shared via
 //! `Arc<tokio::sync::Mutex<HashMap>>`.
 //!
 use std::{
@@ -35,23 +33,20 @@ use crate::provider::{LlmProvider, PeriConfig};
 pub mod assemble;
 pub(crate) mod compact_config;
 mod connection;
-pub mod execution_admission;
-#[cfg(not(target_os = "emscripten"))]
-pub mod execution_admission_jsonl;
 mod lifecycle;
-mod work_recovery;
 mod workspace;
 #[cfg(not(target_os = "emscripten"))]
 mod workspace_resources;
 pub use lifecycle::{spawn_acp_server, AcpHostHandle, AcpHostShutdownReport};
+mod activation;
 mod continuation;
 pub mod controller_ports;
 mod diagnostics;
+mod execution;
 #[cfg(test)]
 #[path = "executor_flow_test.rs"]
 mod executor_flow_tests;
 mod mcp_apps;
-pub(crate) mod scheduled_admission;
 // V-02（W4）的 host seam 断言：首个 LLM 请求的三个冻结 effective name、能力关闭的
 // 首个请求面、`PERI_MCP_BUILTIN=off` 语义、启动 fatal 投影、BLOCKED 缺口复证。
 // 模块名参与 `cargo test` 过滤（`host::mcp_v4_builtin`），故不沿用 `mod tests`。
@@ -74,9 +69,6 @@ mod mcp_v4_wire_fixture;
 // `BuiltinInstanceContext` 注入 → `run_initialize`（A33 的顺序），并驱动真实装配面
 // （`assemble_server_config`）验证配置合并早于 handler 构造、多 cwd 退化登记与
 // host shutdown 有界关闭。
-mod cold_execution;
-mod cold_terminal;
-mod execution;
 #[cfg(test)]
 #[path = "mcp_v4_wave2_test.rs"]
 mod mcp_v4_wave2;
@@ -116,7 +108,7 @@ pub(crate) use continuation::{
 };
 pub(crate) use notify::{extract_session_id, handle_notification, send_session_info_update};
 pub(crate) use prompt::run_prompt;
-pub(crate) use prompt_dispatch::dispatch_prompt_turn;
+pub(crate) use prompt_dispatch::{dispatch_prompt_turn, PromptOrigin};
 pub(crate) use requests::handle_request;
 
 // ── Session state ────────────────────────────────────────────────────────────
@@ -134,6 +126,10 @@ pub(crate) struct SessionState {
     /// Canonical persisted history; `history` is a compatibility projection for legacy commands.
     pub(crate) history_payloads: Vec<peri_acp_types::store::PersistedPayload>,
     pub(crate) cancel_token: Option<CancellationToken>,
+    pub(crate) continuation_armed: bool,
+    pub(crate) continuation_epoch: u64,
+    pub(crate) continuation_in_flight: bool,
+    pub(crate) continuation_mq_steering_pending: bool,
     // ── Frozen session data (populated at creation, immutable thereafter) ──
     pub(crate) frozen: Option<crate::session::executor::FrozenSessionData>,
     /// Recall items from previous turn (injected as <system-reminder> in next user message).
@@ -153,8 +149,6 @@ pub(crate) struct SessionState {
 
 /// All cross-session configuration needed by the ACP server.
 pub struct AcpServerConfig {
-    pub execution_admission_port:
-        Option<Arc<dyn peri_acp_types::execution_admission::ExecutionAdmissionPort>>,
     pub(crate) workspace_assembly: Option<assemble::WorkspaceAssembly>,
     pub(crate) host_task_owner: Option<task_scope::HostTaskOwner>,
     pub(crate) host_task_spawner: task_scope::HostTaskSpawner,
@@ -187,6 +181,12 @@ pub struct AcpServerConfig {
     /// `plugin_route_entries` 预转；会话创建时 register_all，注册顺序 =
     /// 内置 → 本地 skills（C1）→ 插件（本字段）→ 动态注入（发现管线异步））。
     pub plugin_command_entries: Vec<RouteEntry>,
+    /// 插件来源闭合位（M6）：由 frozen/session-local 策略派生，随装配注入。
+    ///
+    /// 消费面是**命令面的运行期刷新**（`requests/plugin.rs` 的 install /
+    /// uninstall RPC）——关闭的会话不得经一次管理 RPC 重新拿到可执行插件命令；
+    /// 与 `plugin_command_entries` 同批决定，不在 RPC 里回读配置。
+    pub plugin_face_closed: bool,
     pub plugin_hooks: Vec<peri_acp_types::hooks::RegisteredHook>,
     /// 仅插件 hooks（不含 settings hooks；`plugin/list` 命令面数据源——
     /// TUI hooks 面板经 ACP 拿数据，M-TUI 收口）。
@@ -334,6 +334,9 @@ async fn run_acp_server_inner(
         run_cron_continuation_scheduler(
             cron_cont_rx,
             CronContinuationContext {
+                sessions: sessions.clone(),
+                prompt_locks: prompt_locks.clone(),
+                cont_tx: Arc::clone(&cont_tx),
                 cfg: Arc::clone(&cfg),
                 transport: Arc::clone(&transport),
                 task_spawner: continuation_spawner,

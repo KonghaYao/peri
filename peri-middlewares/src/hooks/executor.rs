@@ -223,7 +223,11 @@ pub async fn execute_command_hook_owned(
     _registered: &RegisteredHook,
     _task_manager: Option<&dyn TaskManager>,
 ) -> HookAction {
-    HookAction::Allow
+    let reason = "Command hooks require a process-capable host and are unsupported on WASM";
+    tracing::error!(reason, "Command hook capability rejected");
+    HookAction::Block {
+        reason: reason.to_string(),
+    }
 }
 
 /// Execute a prompt hook (LLM evaluation).

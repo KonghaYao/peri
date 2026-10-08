@@ -658,3 +658,73 @@ mod builtin_context_tests;
 
 #[path = "client_shutdown_test.rs"]
 mod shutdown_tests;
+
+/// [M9] list→read 不一致时**只**重采集一次：第二次成功即返回结果。
+#[tokio::test]
+async fn single_recollect_retries_once_and_returns_the_second_result() {
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let result: Result<&str, String> =
+        super::collect_with_single_recollect("workspace instruction face", || {
+            let calls = std::sync::Arc::clone(&calls);
+            async move {
+                match calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+                    0 => Err("listed resource could not be read".to_string()),
+                    _ => Ok("collected"),
+                }
+            }
+        })
+        .await;
+    assert_eq!(result, Ok("collected"));
+    assert_eq!(
+        calls.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "首次失败后恰好重采集一次"
+    );
+}
+
+/// [M9] 持续抖动（两次都失败）：返回显式、可重试的内容准入错误，
+/// 不提交半套采集结果。
+#[tokio::test]
+async fn single_recollect_fails_closed_with_retryable_admission_error() {
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let result: Result<&str, String> =
+        super::collect_with_single_recollect("workspace instruction face", || {
+            let calls = std::sync::Arc::clone(&calls);
+            async move {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Err("resources/read failed".to_string())
+            }
+        })
+        .await;
+    let error = result.expect_err("持续不一致必须失败");
+    assert!(
+        error.contains("retry the session admission"),
+        "错误必须明说可重试：{error}"
+    );
+    assert!(
+        error.contains("inconsistent"),
+        "错误必须是内容准入错误：{error}"
+    );
+    assert_eq!(
+        calls.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "不稳定时不无限重试"
+    );
+}
+
+/// [M9] 首次即成功：不触发任何重采集。
+#[tokio::test]
+async fn single_recollect_never_retries_a_consistent_first_pass() {
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let result: Result<&str, String> =
+        super::collect_with_single_recollect("workspace instruction face", || {
+            let calls = std::sync::Arc::clone(&calls);
+            async move {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok("collected")
+            }
+        })
+        .await;
+    assert_eq!(result, Ok("collected"));
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+}

@@ -10,32 +10,14 @@ pub mod act;
 mod async_context;
 pub mod compact;
 mod compact_progress;
-mod execution_control;
-pub use execution_control::run_react_loop;
+mod context_builder;
 pub mod middleware_runner;
 mod null_llm;
 mod queue_to_transcript;
 pub mod reason;
 pub mod receive;
 pub mod tool_dispatch;
-mod work_boundary;
-pub use work_boundary::{SdkAdmissionObservedFn, SdkRunStartedFn};
-mod context_builder;
-#[cfg(test)]
-#[path = "work_budget_test_support.rs"]
-mod work_budget_test_support;
-mod work_dispatch;
-pub(crate) mod work_ledger;
-mod work_pipeline;
-#[cfg(test)]
-mod work_production_test;
-mod work_reason;
-mod work_receive;
-mod work_recovery;
-#[cfg(test)]
-mod work_test_support;
 pub use null_llm::NullReactLLM;
-pub use work_receive::publish_session_inbox;
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -131,16 +113,6 @@ pub struct CompactContext {
 /// 让 stages 可以自驱完整 ReAct 循环，由 [`run_react_loop`] 入口统一驱动。
 #[derive(Clone)]
 pub struct StageContext {
-    pub(crate) sdk_run_started: Option<work_boundary::SdkRunStartedFn>,
-    pub(crate) sdk_admission_observed: Option<work_boundary::SdkAdmissionObservedFn>,
-    pub recipient_lifecycle: Option<u64>,
-    pub(crate) mcp_work_binding: Option<(
-        Arc<dyn peri_acp_types::ports::McpPoolPort>,
-        Arc<dyn peri_acp_types::tasks::TaskManager>,
-    )>,
-    pub(crate) work: Arc<work_boundary::WorkBoundary>,
-    pub execution_admission_port:
-        Option<Arc<dyn peri_acp_types::execution_admission::ExecutionAdmissionPort>>,
     pub session: SessionHandle,
     pub runtime: RuntimeServices,
     pub compact: CompactContext,
@@ -156,11 +128,11 @@ pub struct StageContext {
 }
 
 impl StageContext {
-    /// 兼容旧测试：仅传会话实体时构造 minimal context（运行时字段需要单独填充）
+    /// 测试最小上下文：仅传会话实体，运行时依赖按测试行为填充。
     ///
     /// **注意**：此构造函数仅用于单元测试。生产代码请用 `StageContextBuilder`。
     #[cfg(test)]
-    pub fn new_best_effort_fixture(
+    pub fn new(
         turn: TurnContext,
         transcript: Arc<RwLock<MessageTranscript>>,
         queue: MessageQueue,
@@ -177,12 +149,6 @@ impl StageContext {
         let sctx = Arc::new(RwLock::new(std::collections::HashMap::new()));
         let rbuf = Arc::new(RwLock::new(Vec::new()));
         Self {
-            work: Arc::new(work_boundary::WorkBoundary::fixture()),
-            sdk_run_started: None,
-            sdk_admission_observed: None,
-            recipient_lifecycle: None,
-            mcp_work_binding: None,
-            execution_admission_port: None,
             session: SessionHandle {
                 turn: turn_arc,
                 transcript,
@@ -231,12 +197,6 @@ impl StageContext {
         queue: MessageQueue,
     ) -> StageContextBuilder {
         StageContextBuilder {
-            work: Arc::new(work_boundary::WorkBoundary::default()),
-            sdk_run_started: None,
-            sdk_admission_observed: None,
-            recipient_lifecycle: None,
-            mcp_work_binding: None,
-            execution_admission_port: None,
             session: SessionHandle {
                 turn: Arc::new(turn),
                 transcript,
@@ -308,16 +268,6 @@ impl StageContext {
 /// 必填：turn / transcript / queue / llm（生产场景）
 /// 可选：tools / middleware_chain / event_bus / budget / compact_config 等
 pub struct StageContextBuilder {
-    sdk_run_started: Option<work_boundary::SdkRunStartedFn>,
-    sdk_admission_observed: Option<work_boundary::SdkAdmissionObservedFn>,
-    recipient_lifecycle: Option<u64>,
-    mcp_work_binding: Option<(
-        Arc<dyn peri_acp_types::ports::McpPoolPort>,
-        Arc<dyn peri_acp_types::tasks::TaskManager>,
-    )>,
-    work: Arc<work_boundary::WorkBoundary>,
-    execution_admission_port:
-        Option<Arc<dyn peri_acp_types::execution_admission::ExecutionAdmissionPort>>,
     session: SessionHandle,
     runtime: RuntimeServices,
     compact: CompactContext,
@@ -530,7 +480,7 @@ where
 /// 控制流：Receive → Compact → Reason → Act → (回 Receive)。
 /// Receive 是循环入口，也是退出判断点。
 /// 返回循环最终结果（Completed / Interrupted / Error）。
-async fn run_react_loop_inner(context: StageContext, max_iterations: usize) -> LoopResult {
+pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> LoopResult {
     let mut loop_state = LoopState::default();
     let mut semantic_iterations = 0usize;
     let execution = context.session.turn.execution_binding();
@@ -559,14 +509,6 @@ async fn run_react_loop_inner(context: StageContext, max_iterations: usize) -> L
                 Ok(out) => out,
                 Err(e) => return e,
             };
-
-            if receive_out.wake_up_count == 0 {
-                match context.work.ensure(&context).await {
-                    Ok(Some(_)) => break 'rcra,
-                    Ok(None) => {}
-                    Err(error) => return LoopResult::Error(error.into()),
-                }
-            }
 
             // Hook 显式停止意图（PostToolBatch `continue:false`）：Receive 是循环的
             // 唯一退出口；消费到停止意图直接以 Completed 结束，不再发起模型请求。
@@ -607,9 +549,7 @@ async fn run_react_loop_inner(context: StageContext, max_iterations: usize) -> L
                     .unwrap_or(false);
                 if should_wait && context.async_ctx.idle_wait_enabled {
                     if let Some(mailbox) = &context.session.user_input_mailbox {
-                        if let Err(error) = mailbox.enter_idle_durable().await {
-                            return LoopResult::Error(anyhow::anyhow!(error).into());
-                        }
+                        mailbox.enter_idle();
                     }
                     // loading 期间的队首输入在 idle 边界交接，直接回 Receive，
                     // 不先发布一个并未真正等待的 TurnSuspended。
@@ -626,8 +566,8 @@ async fn run_react_loop_inner(context: StageContext, max_iterations: usize) -> L
                     if let Some(flag) = &context.async_ctx.idle_suspended_flag {
                         flag.store(true, Ordering::Release);
                     }
-                    context.runtime.event_bus.emit_state(
-                        crate::agent::events_v2::StateEvent::TurnSuspended {
+                    context.runtime.event_bus.emit_render(
+                        crate::agent::events_v2::RenderEvent::TurnSuspended {
                             turn_id: context.turn_id(),
                             agent_id: context.session.agent_id,
                         },

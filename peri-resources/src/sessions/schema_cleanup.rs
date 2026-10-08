@@ -1,6 +1,7 @@
 pub(super) const SCHEMA_OBJECTS_SQL: &str = "SELECT type, name, tbl_name, sql FROM sqlite_master WHERE substr(lower(name), 1, 7) <> 'sqlite_' ORDER BY type, name";
 pub(super) const THREAD_COLUMNS_SQL: &str = "SELECT name, type, \"notnull\", dflt_value, pk, hidden FROM pragma_table_xinfo('threads') ORDER BY cid";
 pub(super) const MESSAGE_COLUMNS_SQL: &str = "SELECT name, type, \"notnull\", dflt_value, pk, hidden FROM pragma_table_xinfo('messages') ORDER BY cid";
+#[cfg(test)]
 pub(super) const LEGACY_GOALS_SQL: &str = "CREATE TABLE thread_goals (
     thread_id TEXT PRIMARY KEY,
     goal_id TEXT NOT NULL,
@@ -43,21 +44,65 @@ pub(super) struct ColumnShape {
     pub hidden: i64,
 }
 
+pub(super) const RETIRED_EXECUTION_TABLES: &[(&str, &str)] = &[
+    ("session_work_state", "CREATE TABLE session_work_state (session_id TEXT PRIMARY KEY NOT NULL, state_json TEXT NOT NULL)"),
+    ("session_work_events", "CREATE TABLE session_work_events (event_key TEXT PRIMARY KEY NOT NULL, event_json TEXT NOT NULL)"),
+    ("session_work_receipts", "CREATE TABLE session_work_receipts (mutation_id TEXT PRIMARY KEY NOT NULL, session_id TEXT NOT NULL, digest TEXT NOT NULL, resolution_json TEXT NOT NULL)"),
+    ("session_work_commands", "CREATE TABLE session_work_commands (mutation_id TEXT PRIMARY KEY NOT NULL, session_id TEXT NOT NULL, digest TEXT NOT NULL, command_json TEXT NOT NULL, reconciled INTEGER NOT NULL DEFAULT 0 CHECK(reconciled IN (0,1)))"),
+    ("session_control_state", "CREATE TABLE session_control_state (session_id TEXT PRIMARY KEY NOT NULL, state_json TEXT NOT NULL)"),
+    ("session_control_receipts", "CREATE TABLE session_control_receipts (command_id TEXT PRIMARY KEY NOT NULL, session_id TEXT NOT NULL, digest TEXT NOT NULL, resolution_json TEXT NOT NULL)"),
+];
+
+pub(super) fn execution_recovery_removal_plan(
+    objects: &[SchemaObject],
+) -> Result<&'static [&'static str], &'static str> {
+    for (name, definition) in RETIRED_EXECUTION_TABLES {
+        if let Some(object) = objects
+            .iter()
+            .find(|object| object.name.eq_ignore_ascii_case(name))
+        {
+            if object.kind != "table"
+                || !object
+                    .sql
+                    .as_deref()
+                    .is_some_and(|sql| known_definition(sql, definition))
+            {
+                return Err("unrecognized retired execution table");
+            }
+        }
+    }
+    for object in objects {
+        if RETIRED_EXECUTION_TABLES
+            .iter()
+            .any(|(name, _)| object.name.eq_ignore_ascii_case(name))
+        {
+            continue;
+        }
+        if RETIRED_EXECUTION_TABLES
+            .iter()
+            .any(|(name, _)| object.table.eq_ignore_ascii_case(name))
+        {
+            return Err("unknown object attached to retired execution table");
+        }
+        if let Some(sql) = &object.sql {
+            let identifiers = tokens(sql)?;
+            if identifiers.iter().any(|token| {
+                RETIRED_EXECUTION_TABLES
+                    .iter()
+                    .any(|(name, _)| token.trim_matches('\'').eq_ignore_ascii_case(name))
+            }) {
+                return Err("schema object depends on retired execution table");
+            }
+        }
+    }
+    Ok(super::canonical::REMOVE_EXECUTION_RECOVERY_TABLES)
+}
+
 pub(super) fn removal_plan(
     objects: &[SchemaObject],
     columns: &[ColumnShape],
 ) -> Result<Vec<&'static str>, &'static str> {
-    let goals = objects
-        .iter()
-        .find(|object| object.name.eq_ignore_ascii_case("thread_goals"));
-    if let Some(object) = goals {
-        if object.kind != "table"
-            || object.sql.as_deref().map(tokens).transpose()?.as_ref()
-                != Some(&tokens(LEGACY_GOALS_SQL)?)
-        {
-            return Err("unrecognized legacy goal table");
-        }
-    }
+    execution_recovery_removal_plan(objects)?;
     let execution = objects
         .iter()
         .find(|object| object.name.eq_ignore_ascii_case("execution_runs"));
@@ -91,7 +136,7 @@ pub(super) fn removal_plan(
         }
     }
     for object in objects {
-        if ["thread_goals", "execution_runs"].iter().any(|table| {
+        if ["execution_runs"].iter().any(|table| {
             object.name.eq_ignore_ascii_case(table)
                 || (object.kind == "index" && object.table.eq_ignore_ascii_case(table))
         }) {
@@ -99,41 +144,27 @@ pub(super) fn removal_plan(
         }
         if let Some(sql) = &object.sql {
             let identifiers = tokens(sql)?;
-            let references_goals = identifiers.windows(2).any(|pair| {
-                pair[0] == "references"
-                    && pair[1]
-                        .trim_matches('\'')
-                        .eq_ignore_ascii_case("thread_goals")
-            });
             if identifiers.iter().any(|token| {
-                (goals.is_some()
+                (execution.is_some()
                     && token
                         .trim_matches('\'')
-                        .eq_ignore_ascii_case("thread_goals"))
-                    || (execution.is_some()
-                        && token
-                            .trim_matches('\'')
-                            .eq_ignore_ascii_case("execution_runs"))
+                        .eq_ignore_ascii_case("execution_runs"))
                     || (!object.name.eq_ignore_ascii_case("threads")
                         && removed
                             .iter()
                             .any(|column| token.trim_matches('\'').eq_ignore_ascii_case(column)))
-            }) || (goals.is_some() && references_goals)
-                || (!removed.is_empty()
-                    && object.kind == "view"
-                    && identifiers
-                        .iter()
-                        .any(|token| token.trim_matches('\'').eq_ignore_ascii_case("threads"))
-                    && identifiers.iter().any(|token| token == "*"))
+            }) || (!removed.is_empty()
+                && object.kind == "view"
+                && identifiers
+                    .iter()
+                    .any(|token| token.trim_matches('\'').eq_ignore_ascii_case("threads"))
+                && identifiers.iter().any(|token| token == "*"))
             {
                 return Err("schema object depends on removed session state");
             }
         }
     }
     let mut plan = Vec::new();
-    if goals.is_some() {
-        plan.push("DROP TABLE thread_goals");
-    }
     if execution.is_some() {
         plan.push("DROP TABLE execution_runs");
     }

@@ -25,7 +25,7 @@ fn context_with(middleware: impl Middleware + 'static) -> StageContext {
         FrozenContext::builder().build(),
         None,
     );
-    let mut ctx = StageContext::new_best_effort_fixture(
+    let mut ctx = StageContext::new(
         session.start_turn(),
         session.transcript(),
         session.queue().clone(),

@@ -153,7 +153,7 @@ pub async fn run_print(
     let (session_resources, session_store_shutdown) = resources.into_parts();
 
     // ── ACP host 装配（与 TUI 同源，见 peri_acp::host::assemble）──
-    let mut host_config = assemble_server_config(HostAssemblyInput {
+    let host_config = assemble_server_config(HostAssemblyInput {
         provider: provider.clone(),
         peri_config: Arc::new(parking_lot::RwLock::new(peri_config)),
         config_source: config_source.clone(),
@@ -174,6 +174,7 @@ pub async fn run_print(
         builtin_closed: Default::default(),
         // 宿主技能面关闭位与关闭集同源（会话级派生）：顶层装配恒为假。
         skills_face_closed: false,
+        plugin_face_closed: false,
         // print 装配点无准备路径提供的插件聚合：按既有语义由装配面自行加载。
         prepared_plugins: None,
         session_mcp_servers: None,
@@ -181,17 +182,10 @@ pub async fn run_print(
     .await;
     let (client_transport, server_transport) = mpsc_transport_pair();
     let (acp_client, notification_tx, mut notification_rx) = AcpTuiClient::new(client_transport);
-    let dispatcher =
-        peri_tui::sdk_execution::launch_sdk_dispatcher_for_client(acp_client.clone()).await?;
     let server_transport = Arc::new(server_transport);
-    host_config.execution_admission_port = Some(Arc::new(
-        peri_acp::host::execution_admission::ReverseExecutionAdmission::new(Arc::new(
-            peri_acp::transport::AcpRequestBridge(server_transport.clone()),
-        )),
-    ));
     let host = peri_acp::host::spawn_acp_server(server_transport, host_config);
 
-    acp_client.spawn_pump_with_execution_dispatcher(notification_tx, Some(dispatcher));
+    acp_client.spawn_pump(notification_tx);
 
     let mut deployment = AcpDeployment::new(acp_client.clone(), host);
     let mut output = PrintOutput::new(fmt);

@@ -6,6 +6,8 @@
 
 ## 状态归属
 
+2026-10-07 裁决：待发送队列、发布/领取关系和当前 run ticket 只属于当前进程；不保存 durable Work 命令或恢复发布代际，不承诺重启恢复未发送内容。已提交的 canonical 历史照常持久化。当前发送/取回/取消的身份校验与交互行为保留；实施状态见[剥离计划](../../spec/issues/2026-10-07-remove-execution-recovery-plan.md)。
+
 可靠 Inbox 的撤回、Receive 领取及重新发布统一见 [RCRA 消息权威 §8.5](rcra-message-activation.md#85-用户输入撤回与重发)。实现通过同一 Work reducer 持久保存草稿与发布命令；稳定 input ID 与发布代际分离，不因旧代际重试恢复已撤回义务。本轮持久草稿与选择发布回归尚待主线验证。
 
 Agent 会话的 `UserInputMailbox` 是投递生命周期的唯一 owner，宿主持有跨 turn 的共享实例。
@@ -50,7 +52,7 @@ Receive 与 Stop 在 Store 原子裁决领取/撤出，MQ 仅投影已确认结�
 选中内容执行到 idle 后，普通待发内容恢复逐条调度。跨 turn 的自动启动仍须等待
 transcript flush 与事件 forwarder 收尾，确认自然成功；同一 attempt 的 idle 唤醒经既有 inbox 进行。
 用户 Stop 取消尚未开始的 ticket，保留待办，并只回收明确未被 Receive 领取的内容。
-执行失败不视作自然完成；持久化状态不确定时冻结当前 generation，要求重新加载。
+执行失败不视作自然完成；当前消息写入失败显式报错，不以旧 Work 恢复状态冻结新输入。
 用户再次提交、显式继续或立即发送可以恢复停止后的处理：恢复由再次提交的那条输入带动，
 它在空闲时按新任务发布并自动解除暂停；暂停之前入队的待办不因此自动发布，仍按逐条调度交接。
 

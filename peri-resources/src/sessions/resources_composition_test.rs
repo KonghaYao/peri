@@ -214,10 +214,10 @@ impl DoubleDbFixture {
         }
     }
 
-    /// 工作区登记是**本机**执行事实：解析只落在本机库里。
+    /// 工作区归属是**本机**执行事实：解析只落在本机库里。
     ///
-    /// 数据面库需要同一份登记，只是因为这里用本机 adapter 顶替远端 store 而远端 store 根本
-    /// 没有登记表（绑定直接落在会话行上）：复制的是**同一份**登记（同 id、同快照字节），
+    /// 数据面库需要同一份归属行，只是因为这里用本机 adapter 顶替远端 store 而远端 store
+    /// 不共享本机库的事实：复制的是**同一行**（同 id、同证据字节）与它引用的项目，
     /// 不是第二份证据。这样两边的绑定指向同一个 workspace，测试打的仍然是「数据面在别的库」
     /// 这件事本身。
     async fn workspace(&self) -> ResolvedWorkspace {
@@ -226,14 +226,14 @@ impl DoubleDbFixture {
             .resolve_workspace(self.repo.path())
             .await
             .unwrap();
-        self.mirror_registration(&workspace).await;
+        self.mirror_workspace(&workspace).await;
         workspace
     }
 
-    /// 把本机库里的登记原样复制到数据面库（见 [`Self::workspace`]）。
+    /// 把本机库里的归属行与它引用的项目原样复制到数据面库（见 [`Self::workspace`]）。
     ///
     /// 两个库是两条独立连接，不能跨库 `INSERT ... SELECT`，因此逐行读出再写入。
-    async fn mirror_registration(&self, workspace: &ResolvedWorkspace) {
+    async fn mirror_workspace(&self, workspace: &ResolvedWorkspace) {
         let project: (String, String, String) =
             sqlx::query_as("SELECT id, locator, object_identity FROM projects WHERE id = ?1")
                 .bind(workspace.project_id.to_string())
@@ -249,38 +249,41 @@ impl DoubleDbFixture {
         .execute(self.data.pool())
         .await
         .unwrap();
-        let row: (String, String, String, String, String) = sqlx::query_as(
-            "SELECT id, project_id, root, root_identity, discovery FROM legacy_execution_registrations WHERE id = ?1 AND project_id = ?2",
-        )
-        .bind(workspace.execution_registration_id.to_string())
-        .bind(workspace.project_id.to_string())
-        .fetch_one(self.local.pool())
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT OR IGNORE INTO legacy_execution_registrations (id, project_id, root, root_identity, discovery)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-        )
-        .bind(&row.0)
-        .bind(&row.1)
-        .bind(&row.2)
-        .bind(&row.3)
-        .bind(&row.4)
-        .execute(self.data.pool())
-        .await
-        .unwrap();
-        let workspace_row: (String, String, String, String) = sqlx::query_as(
-            "SELECT id, machine_id, path, path_source FROM workspaces WHERE id = ?1",
+        let row: (
+            String,
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ) = sqlx::query_as(
+            "SELECT id, machine_id, path, path_source, project_id, identity, discovery
+                 FROM workspaces WHERE id = ?1",
         )
         .bind(workspace.workspace_id.to_string())
         .fetch_one(self.local.pool())
         .await
         .unwrap();
         sqlx::query("INSERT OR IGNORE INTO machines(id, name, identity_kind) VALUES (?1, '我的电脑', 'known')")
-            .bind(&workspace_row.1).execute(self.data.pool()).await.unwrap();
-        sqlx::query("INSERT OR IGNORE INTO workspaces(id, machine_id, path, path_source) VALUES (?1, ?2, ?3, ?4)")
-            .bind(&workspace_row.0).bind(&workspace_row.1).bind(&workspace_row.2).bind(&workspace_row.3)
-            .execute(self.data.pool()).await.unwrap();
+            .bind(&row.1)
+            .execute(self.data.pool())
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT OR IGNORE INTO workspaces(id, machine_id, path, path_source, project_id, identity, discovery)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        )
+        .bind(&row.0)
+        .bind(&row.1)
+        .bind(&row.2)
+        .bind(&row.3)
+        .bind(&row.4)
+        .bind(&row.5)
+        .bind(&row.6)
+        .execute(self.data.pool())
+        .await
+        .unwrap();
     }
 
     fn binding(workspace: &ResolvedWorkspace) -> SessionBinding {

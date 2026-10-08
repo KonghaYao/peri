@@ -21,11 +21,21 @@ use crate::tools::{
 pub(super) struct StageEffectiveToolDispatcher {
     context: StageContext,
     catalog: Arc<SessionToolCatalogSnapshot>,
+    model_tool_call_id: Option<String>,
 }
 
 impl StageEffectiveToolDispatcher {
     pub(super) fn new(context: StageContext, catalog: Arc<SessionToolCatalogSnapshot>) -> Self {
-        Self { context, catalog }
+        Self {
+            context,
+            catalog,
+            model_tool_call_id: None,
+        }
+    }
+
+    pub(super) fn with_tool_call_id(mut self, tool_call_id: String) -> Self {
+        self.model_tool_call_id = Some(tool_call_id);
+        self
     }
 
     async fn dispatch_result(
@@ -66,6 +76,7 @@ impl StageEffectiveToolDispatcher {
             &cancel,
             ai_message.id(),
             &ai_message,
+            self.model_tool_call_id.as_deref(),
         )
         .await
         .map_err(effective_tool_error)?;

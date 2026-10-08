@@ -25,39 +25,15 @@ use peri_acp_types::thread::CancelPolicy;
 use peri_acp_types::workspace::SessionBinding;
 use peri_agent::agent::compact_v2::CompactConfig;
 use peri_agent::agent::react::{ReactLLM, Reasoning, StreamingContext};
-use peri_agent::agent::stages::{run_react_loop, LoopResult, StageContext, StageContextBuilder};
+use peri_agent::agent::stages::{run_react_loop, LoopResult, StageContext};
 use peri_agent::agent::token::ContextBudget;
 use peri_agent::error::AgentResult;
 use peri_agent::messages::BaseMessage;
 use peri_agent::session::{
-    FrozenContext, MessageKind, MessageQueue, MessageSource, MessageTranscript, QueuedMessage,
-    Session, TurnContext,
+    FrozenContext, MessageKind, MessageSource, MessageTranscript, QueuedMessage, Session,
 };
 use peri_agent::tools::BaseTool;
 use peri_resources::sessions::SessionResourcesImpl;
-
-/// 夹具：本套件只考察投影与权威级别，使用 crate 自身的 best-effort 装配（无
-/// durable 执行）。生产装配要求 SDK 准入端口且 Reason 必须走 `prepare_reasoning`，
-/// 这里的脚本 `ReactLLM` 替身不实现该路径。该 seam 默认不进入生产构建。
-#[cfg(feature = "test-fixtures")]
-fn loop_builder(
-    turn: TurnContext,
-    transcript: Arc<parking_lot::RwLock<MessageTranscript>>,
-    queue: MessageQueue,
-) -> StageContextBuilder {
-    StageContext::best_effort_fixture_builder(turn, transcript, queue)
-}
-
-/// 缺少 `test-fixtures` 时立即失败：静默退回生产装配只会让用例以错误的夹具环境
-/// 运行（durable 路径缺少 SDK 端口），掩盖真实结论。
-#[cfg(not(feature = "test-fixtures"))]
-fn loop_builder(
-    _: TurnContext,
-    _: Arc<parking_lot::RwLock<MessageTranscript>>,
-    _: MessageQueue,
-) -> StageContextBuilder {
-    panic!("peri-agent compact 对抗测试需要 --features test-fixtures")
-}
 
 struct BoundSession {
     resources: Arc<dyn SessionResources>,
@@ -191,7 +167,7 @@ async fn test_reminder_provenance_separates_harness_envelope_from_user_forgery()
         trusted_reminder(GENUINE_BODY),
     ));
     let reasoner = RecordingReasoner::new();
-    let ctx = loop_builder(
+    let ctx = StageContext::builder(
         session.start_turn(),
         session.transcript(),
         session.queue().clone(),
@@ -293,7 +269,7 @@ async fn test_compacted_summary_stays_historical_user_material() {
         BaseMessage::human("继续"),
     ));
     let reasoner = RecordingReasoner::new();
-    let ctx = loop_builder(
+    let ctx = StageContext::builder(
         session.start_turn(),
         session.transcript(),
         session.queue().clone(),

@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::mcp::client::{McpClientHandle, OAuthStatus};
+use crate::mcp::skill_discovery::skills_list::collect_entries;
 use crate::mcp::ClientStatus;
 use peri_acp_types::mcp_skills::ServerDiscoveryState;
 use std::sync::Arc;
@@ -324,13 +325,38 @@ fn entry_from_dto_resources_omitted_vs_empty_distinguished() {
 }
 
 #[test]
-fn entry_from_dto_missing_name_returns_none() {
+fn entry_from_dto_missing_name_reports_field_and_category() {
     let dto: SkillListEntryDto = serde_json::from_value(serde_json::json!({
         "uri": "skill://a/SKILL.md",
         "frontmatter": { "description": "no name" },
     }))
     .unwrap();
-    assert!(entry_from_dto(dto).is_none());
+    let defect = entry_from_dto(dto).unwrap_err();
+    assert_eq!(defect.field, "name");
+    assert_eq!(defect.category, "missing");
+}
+
+/// M8：非字符串 name/description 同样在 discovery 边界隔离（类别 wrong-type），
+/// 诊断只带字段与类别，不回显字段正文。
+#[test]
+fn entry_from_dto_non_string_field_is_isolated() {
+    let dto: SkillListEntryDto = serde_json::from_value(serde_json::json!({
+        "uri": "skill://a/SKILL.md",
+        "frontmatter": { "name": 7, "description": { "nested": "value" } },
+    }))
+    .unwrap();
+    let defect = entry_from_dto(dto).unwrap_err();
+    assert_eq!(defect.field, "name");
+    assert_eq!(defect.category, "wrong-type");
+
+    let dto: SkillListEntryDto = serde_json::from_value(serde_json::json!({
+        "uri": "skill://a/SKILL.md",
+        "frontmatter": { "name": "a", "description": 7 },
+    }))
+    .unwrap();
+    let defect = entry_from_dto(dto).unwrap_err();
+    assert_eq!(defect.field, "description");
+    assert_eq!(defect.category, "wrong-type");
 }
 
 #[test]
@@ -954,3 +980,42 @@ mod command_projection_tests;
 
 #[path = "skill_discovery_releaser_test.rs"]
 mod releaser_tests;
+
+/// [M8] 坏条目混合好条目：坏条目被**隔离**（不整批失败），好条目照常进入发现
+/// 结果，并报出被隔离计数。
+#[test]
+fn collect_entries_isolates_bad_entries_and_keeps_good_ones() {
+    let dto = |uri: &str, frontmatter: serde_json::Value| -> SkillListEntryDto {
+        serde_json::from_value(serde_json::json!({
+            "uri": uri,
+            "frontmatter": frontmatter,
+        }))
+        .unwrap()
+    };
+    let dto_entries = vec![
+        dto(
+            "skill://a/SKILL.md",
+            serde_json::json!({ "name": "a", "description": "A" }),
+        ),
+        // 缺必填字段
+        dto(
+            "skill://b/SKILL.md",
+            serde_json::json!({ "description": "B" }),
+        ),
+        // 类型不符（非字符串）
+        dto(
+            "skill://c/SKILL.md",
+            serde_json::json!({ "name": "c", "description": 7 }),
+        ),
+        dto(
+            "skill://d/SKILL.md",
+            serde_json::json!({ "name": "d", "description": "D" }),
+        ),
+    ];
+
+    let (entries, rejected) = collect_entries("demo", dto_entries, "test");
+    assert_eq!(entries.len(), 2, "好条目必须保留");
+    assert_eq!(rejected, 2, "坏条目被隔离并计数");
+    assert_eq!(entries[0].uri, "skill://a/SKILL.md");
+    assert_eq!(entries[1].uri, "skill://d/SKILL.md");
+}

@@ -189,6 +189,34 @@ impl McpClientPool {
         Ok(())
     }
 
+    /// 绑定插件来源闭合位（M6）：会话装配从**冻结/session-local** 的
+    /// `meta_harness` 派生后在这里注入，必须早于 MCP 初始化（注入窗口与其余
+    /// 能力位同一条规则）。
+    ///
+    /// `true` ⇒ 本会话不合并插件 MCP 配置，且**不读插件目录**——关闭位的判定
+    /// 必须先于任何插件来源读取（含严格路径的清单解析）。
+    pub fn set_plugin_face_closed(&self, closed: bool) -> std::io::Result<()> {
+        let context = self.builtin_context.lock();
+        if context.initialize_started || !self.is_open() {
+            // fail-closed：注入窗口已关闭（池关闭或已开始初始化）时不得按「开」继续
+            // ——先把位强制置为关闭，再报错给调用方（调用方记录错误；此后本池也不会
+            // 再合并插件来源）。装配路径的绑定早于 `run_initialize`，正常不可达。
+            self.plugin_face_closed
+                .store(true, std::sync::atomic::Ordering::Release);
+            return Err(std::io::Error::other(
+                "MCP capability injection window is closed",
+            ));
+        }
+        self.plugin_face_closed
+            .store(closed, std::sync::atomic::Ordering::Release);
+        Ok(())
+    }
+
+    pub(crate) fn plugin_face_closed(&self) -> bool {
+        self.plugin_face_closed
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
     /// Initialize only builtin workspace tools, without loading user integrations.
     /// Uses the normal discovery, readiness and owned shutdown lifecycle.
     pub async fn run_initialize_bare(
@@ -252,6 +280,7 @@ impl McpClientPool {
                     .load(std::sync::atomic::Ordering::Acquire),
                 pool.plugin_discovery_available
                     .load(std::sync::atomic::Ordering::Acquire),
+                pool.plugin_face_closed(),
             ),
             None => super::config::load_merged_config_full_with_capabilities(
                 cwd,
@@ -260,6 +289,7 @@ impl McpClientPool {
                     .load(std::sync::atomic::Ordering::Acquire),
                 pool.plugin_discovery_available
                     .load(std::sync::atomic::Ordering::Acquire),
+                pool.plugin_face_closed(),
             ),
         };
         let (mut config, plugin_sources) = match loaded {

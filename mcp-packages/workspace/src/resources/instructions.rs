@@ -139,6 +139,14 @@ fn is_excluded(path: &Path, excludes: &[String]) -> bool {
     })
 }
 
+/// `@import` 展开的可变状态：已登记依赖、防环 visited、累计读取预算
+/// （根正文 + 整棵展开树共享，M9）。
+struct ImportState<'a> {
+    imports: &'a mut Vec<ImportRecord>,
+    visited: HashSet<PathBuf>,
+    remaining_bytes: u64,
+}
+
 /// 主文档：首个存在的候选 + `@import` 展开。
 fn scan_main(
     cwd: &Path,
@@ -149,47 +157,60 @@ fn scan_main(
 ) -> (Option<InstructionDoc>, Option<String>) {
     for relative in MAIN_CANDIDATES {
         let path = cwd.join(relative);
-        if !path.is_file() || is_excluded(&path, excludes) {
+        if is_excluded(&path, excludes) {
             continue;
         }
-        let Some(raw) = read_bounded_text(&path, budget.max_file_bytes) else {
-            tracing::warn!(
-                candidate = relative,
-                "指令候选读取失败或超预算，main 视为不存在"
-            );
-            return (None, None);
-        };
-        if raw.trim().is_empty() {
-            // 首个存在但为空：不继续尝试后继候选（现状语义）。
-            return (None, Some(relative.to_string()));
-        }
-        let text = if is_claude_series(relative) {
-            let base_dir = path.parent().unwrap_or(cwd);
-            let mut visited: HashSet<PathBuf> = HashSet::new();
-            if let Ok(canonical) = path.canonicalize() {
-                visited.insert(canonical);
+        match read_bounded_text(&path, budget.max_file_bytes) {
+            Ok(raw) => {
+                if raw.trim().is_empty() {
+                    // 首个存在但为空：不继续尝试后继候选（现状语义）。
+                    return (None, Some(relative.to_string()));
+                }
+                let mut state = ImportState {
+                    imports,
+                    visited: HashSet::new(),
+                    remaining_bytes: budget
+                        .max_instruction_total_bytes
+                        .saturating_sub(raw.len() as u64),
+                };
+                if let Ok(canonical) = path.canonicalize() {
+                    state.visited.insert(canonical);
+                }
+                let text = if is_claude_series(relative) {
+                    let base_dir = path.parent().unwrap_or(cwd);
+                    resolve_imports(
+                        &raw,
+                        base_dir,
+                        scope_canonical,
+                        IMPORT_DEPTH,
+                        budget,
+                        &mut state,
+                    )
+                } else {
+                    raw
+                };
+                let text = bound_final_text(text, budget);
+                let digest = digest_bytes(text.as_bytes());
+                return (
+                    Some(InstructionDoc {
+                        text,
+                        digest,
+                        source_label: relative.to_string(),
+                    }),
+                    Some(relative.to_string()),
+                );
             }
-            resolve_imports(
-                &raw,
-                base_dir,
-                scope_canonical,
-                IMPORT_DEPTH,
-                budget,
-                &mut visited,
-                imports,
-            )
-        } else {
-            raw
-        };
-        let digest = digest_bytes(text.as_bytes());
-        return (
-            Some(InstructionDoc {
-                text,
-                digest,
-                source_label: relative.to_string(),
-            }),
-            Some(relative.to_string()),
-        );
+            // 正常不存在：试下一个候选（不是错误，不记诊断）。
+            Err(ReadFailure::NotFound) => continue,
+            Err(failure) => {
+                tracing::warn!(
+                    candidate = relative,
+                    category = failure.category(),
+                    "指令候选读取失败（不是「不存在」），main 视为不可用"
+                );
+                return (None, None);
+            }
+        }
     }
     (None, None)
 }
@@ -201,13 +222,23 @@ fn scan_local(
     budget: &ResourceBudget,
 ) -> Option<InstructionDoc> {
     let path = cwd.join(LOCAL_FILE);
-    if !path.is_file() {
-        return None;
-    }
-    let text = read_bounded_text(&path, budget.max_file_bytes)?;
+    let text = match read_bounded_text(&path, budget.max_file_bytes) {
+        Ok(text) => text,
+        // 正常不存在：不是错误，不记诊断。
+        Err(ReadFailure::NotFound) => return None,
+        Err(failure) => {
+            tracing::warn!(
+                file = LOCAL_FILE,
+                category = failure.category(),
+                "本地指令叠加文档读取失败（不是「不存在」），本次不贡献 local 正文"
+            );
+            return None;
+        }
+    };
     if text.trim().is_empty() {
         return None;
     }
+    let text = bound_final_text(text, budget);
     let digest = digest_bytes(text.as_bytes());
     Some(InstructionDoc {
         text,
@@ -216,17 +247,86 @@ fn scan_local(
     })
 }
 
-/// 读取上限内的原始文本（UTF-8 且非空字节校验；失败返回 `None`）。
-fn read_bounded_text(path: &Path, max_bytes: u64) -> Option<String> {
-    let metadata = std::fs::metadata(path).ok()?;
+/// 读取失败分类（M9）：**正常不存在不是错误**（不记诊断），其余类别都要能在
+/// 诊断里区分——读取/编码失败与超预算是不同的问题，不能混成一个「不可用」。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReadFailure {
+    /// 正常不存在（文件缺失、非普通文件）。
+    NotFound,
+    /// 元数据 / 读取失败（权限、IO）。
+    ReadError,
+    /// 内容不是 UTF-8。
+    NotUtf8,
+    /// 超过读取预算。
+    OverBudget,
+}
+
+impl ReadFailure {
+    pub(crate) fn category(self) -> &'static str {
+        match self {
+            Self::NotFound => "not-found",
+            Self::ReadError => "read-error",
+            Self::NotUtf8 => "not-utf8",
+            Self::OverBudget => "over-budget",
+        }
+    }
+}
+
+/// 读取上限内的原始文本；失败按 [`ReadFailure`] 分类（M9）。
+pub(crate) fn read_bounded_text(path: &Path, max_bytes: u64) -> Result<String, ReadFailure> {
+    let metadata = match std::fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(ReadFailure::NotFound)
+        }
+        Err(_) => return Err(ReadFailure::ReadError),
+    };
+    if !metadata.is_file() {
+        return Err(ReadFailure::NotFound);
+    }
     if metadata.len() > max_bytes {
-        return None;
+        return Err(ReadFailure::OverBudget);
     }
-    let bytes = std::fs::read(path).ok()?;
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(ReadFailure::NotFound)
+        }
+        Err(_) => return Err(ReadFailure::ReadError),
+    };
     if bytes.len() as u64 > max_bytes {
-        return None;
+        return Err(ReadFailure::OverBudget);
     }
-    String::from_utf8(bytes).ok()
+    String::from_utf8(bytes).map_err(|_| ReadFailure::NotUtf8)
+}
+
+/// 最终文本预算（M9）：超限时保留有界前缀 + 显式截断说明（不先生成巨串再截，
+/// 也不无标记裁掉内容）。
+fn bound_final_text(text: String, budget: &ResourceBudget) -> String {
+    let limit = budget.max_instruction_text_bytes;
+    if text.len() <= limit {
+        return text;
+    }
+    let cut = floor_char_boundary(&text, limit);
+    tracing::warn!(
+        bytes = text.len(),
+        limit,
+        "指令正文超过最终文本预算：保留有界前缀并附截断说明"
+    );
+    format!(
+        "{}\n\n<!-- instruction text truncated at {limit} bytes ({} bytes total) -->",
+        &text[..cut],
+        text.len()
+    )
+}
+
+/// 不大于 `max` 的最大 UTF-8 字符边界（不切断多字节字符）。
+fn floor_char_boundary(text: &str, max: usize) -> usize {
+    let mut end = max.min(text.len());
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    end
 }
 
 fn is_claude_series(relative: &str) -> bool {
@@ -236,16 +336,15 @@ fn is_claude_series(relative: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// 递归解析 `<!-- @import path -->`（深度上限、防环、工作区根子树授权）。
-#[allow(clippy::too_many_arguments)]
+/// 递归解析 `<!-- @import path -->`（深度上限、防环、工作区根子树授权、
+/// 累计读取预算）。
 fn resolve_imports(
     content: &str,
     base_dir: &Path,
     scope_canonical: &Path,
     depth: u32,
     budget: &ResourceBudget,
-    visited: &mut HashSet<PathBuf>,
-    imports: &mut Vec<ImportRecord>,
+    state: &mut ImportState<'_>,
 ) -> String {
     if depth == 0 {
         return content.to_string();
@@ -282,12 +381,12 @@ fn resolve_imports(
             pos = placeholder_end;
             continue;
         }
-        if visited.contains(&resolved) || !resolved.is_file() {
+        if state.visited.contains(&resolved) {
             result.push_str(&content[abs_pos..placeholder_end]);
             pos = placeholder_end;
             continue;
         }
-        if imports.len() >= budget.max_imports {
+        if state.imports.len() >= budget.max_imports {
             tracing::warn!(
                 import = import_path,
                 "指令 @import 数量超过预算，保留原始占位符"
@@ -296,19 +395,47 @@ fn resolve_imports(
             pos = placeholder_end;
             continue;
         }
-        let Some(imported) = read_bounded_text(&resolved, budget.max_file_bytes) else {
+        if state.remaining_bytes == 0 {
+            tracing::warn!(
+                import = import_path,
+                limit = budget.max_instruction_total_bytes,
+                "指令 @import 累计读取预算已用尽，保留原始占位符"
+            );
             result.push_str(&content[abs_pos..placeholder_end]);
             pos = placeholder_end;
             continue;
+        }
+        // 单文件上限与**整棵展开树**的剩余累计预算取小：预算按递归共享，
+        // 不先生成巨串再截（M9）。
+        let cap = budget.max_file_bytes.min(state.remaining_bytes);
+        let imported = match read_bounded_text(&resolved, cap) {
+            Ok(imported) => imported,
+            // 正常不存在：保留原始占位符，不记诊断（与 !is_file 同语义）。
+            Err(ReadFailure::NotFound) => {
+                result.push_str(&content[abs_pos..placeholder_end]);
+                pos = placeholder_end;
+                continue;
+            }
+            Err(failure) => {
+                tracing::warn!(
+                    import = import_path,
+                    category = failure.category(),
+                    "指令 @import 读取失败（不是「不存在」），保留原始占位符"
+                );
+                result.push_str(&content[abs_pos..placeholder_end]);
+                pos = placeholder_end;
+                continue;
+            }
         };
+        state.remaining_bytes = state.remaining_bytes.saturating_sub(imported.len() as u64);
 
-        visited.insert(resolved.clone());
+        state.visited.insert(resolved.clone());
         let relative_label = resolved
             .strip_prefix(scope_canonical)
             .ok()
             .map(|relative| relative.to_string_lossy().replace('\\', "/"))
             .unwrap_or_else(|| import_path.to_string());
-        imports.push(ImportRecord {
+        state.imports.push(ImportRecord {
             relative: relative_label,
             digest: digest_bytes(imported.as_bytes()),
         });
@@ -320,8 +447,7 @@ fn resolve_imports(
             scope_canonical,
             depth - 1,
             budget,
-            visited,
-            imports,
+            state,
         );
         result.push_str(&resolved_content);
         pos = placeholder_end;

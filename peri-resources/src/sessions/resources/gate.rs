@@ -22,17 +22,10 @@ use crate::sessions::failure::{read_only_store, unavailable};
 use crate::sessions::local_port::LocalExecutionPort;
 use crate::sessions::resources::lifecycle::{Lifecycle, LifecycleState};
 
-#[path = "gate_control.rs"]
-mod control;
-#[path = "gate_work.rs"]
-mod work;
-
 #[derive(Default)]
 struct PendingWrites {
     barrier: Arc<RwLock<()>>,
     uncertain: AtomicBool,
-    control: Mutex<Option<peri_acp_types::session_resources::ControlCommand>>,
-    work: Mutex<Option<peri_acp_types::session_resources::work::WorkCommand>>,
 }
 
 pub(super) struct WriteScope {
@@ -137,18 +130,7 @@ impl MutationGate {
     }
 
     fn check_pending(pending: &PendingWrites, root: &ThreadId) -> SessionResourceResult<()> {
-        if pending.uncertain.load(Ordering::Acquire)
-            || pending
-                .work
-                .lock()
-                .expect("pending work lock poisoned")
-                .is_some()
-            || pending
-                .control
-                .lock()
-                .expect("pending control lock poisoned")
-                .is_some()
-        {
+        if pending.uncertain.load(Ordering::Acquire) {
             return Err(SessionResourceError::persistence_uncertain(Some(
                 root.clone(),
             )));
@@ -165,24 +147,12 @@ impl MutationGate {
         };
         self.ensure_session_write()?;
         Self::check_pending(&pending, root)?;
-        self.check_owned_work(root).await?;
         Ok(WriteScope {
             pending,
             _concurrent: concurrent,
             _exclusive: exclusive,
             settled: false,
         })
-    }
-
-    async fn check_owned_work(&self, root: &ThreadId) -> SessionResourceResult<()> {
-        match self.data.has_pending_work_mutations(root).await {
-            Ok(true) => Err(SessionResourceError::persistence_uncertain(Some(
-                root.clone(),
-            ))),
-            Ok(_) => Ok(()),
-            Err(error) if matches!(error.kind(), SessionResourceErrorKind::NotFound) => Ok(()),
-            Err(error) => Err(error),
-        }
     }
 
     pub(super) async fn admit(&self, id: &ThreadId) -> SessionResourceResult<WriteScope> {
@@ -259,22 +229,6 @@ impl MutationGate {
                     peri_acp_types::session_resources::SessionResourceErrorKind::Timeout,
                 )
             })?;
-        if pending
-            .work
-            .lock()
-            .expect("pending work lock poisoned")
-            .is_some()
-            || pending
-                .control
-                .lock()
-                .expect("pending control lock poisoned")
-                .is_some()
-        {
-            return Ok(PersistenceRecovery::StillBlocked);
-        }
-        if self.check_owned_work(&root).await.is_err() {
-            return Ok(PersistenceRecovery::StillBlocked);
-        }
         let result = self.data.recover_persistence(id).await?;
         if matches!(result, PersistenceRecovery::Recovered) && !self.local.is_read_only() {
             pending.uncertain.store(false, Ordering::Release);

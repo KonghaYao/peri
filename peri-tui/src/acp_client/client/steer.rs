@@ -204,7 +204,7 @@ impl AcpTuiClient {
             && let Some(request_id) = &snapshot.active_request_id
             && let Some(claims) =
                 self.lifecycle
-                    .open_user_input_run(session_id, &snapshot.generation, request_id)
+                    .open_execution(session_id, &snapshot.generation, request_id, true)
         {
             self.settle_claims_owned(claims).await;
             self.flush_buffered(vec![AcpNotification::AgentEvent {

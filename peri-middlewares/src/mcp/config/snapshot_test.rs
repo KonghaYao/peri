@@ -61,6 +61,17 @@ fn install_enabled_plugin(claude_home: &Path) {
     .unwrap();
 }
 
+/// 同形安装，但插件 MCP 声明非法（严格路径必须失败，M6 关闭位下不得被解析）。
+fn poison_plugin_mcp_config(claude_home: &Path) {
+    install_enabled_plugin(claude_home);
+    let manifest = claude_home.join("plugins/cache/market/sample/1.0.0/.claude-plugin/plugin.json");
+    std::fs::write(
+        manifest,
+        r#"{"name":"sample","version":"1.0.0","mcpServers":{"broken":{"system_mcp_tools":["Read"]}}}"#,
+    )
+    .unwrap();
+}
+
 #[test]
 fn deployment_can_skip_plugin_discovery_and_builtin_overlay() {
     let temp = tempfile::tempdir().unwrap();
@@ -79,6 +90,7 @@ fn deployment_can_skip_plugin_discovery_and_builtin_overlay() {
         &cwd,
         &claude_home,
         &snapshot,
+        false,
         false,
         false,
     )
@@ -108,6 +120,7 @@ fn snapshot_loader_accepts_the_same_directory_with_canonical_or_alternate_spelli
             &snapshot,
             false,
             false,
+            false,
         )
         .unwrap();
         assert_eq!(
@@ -122,6 +135,7 @@ fn snapshot_loader_accepts_the_same_directory_with_canonical_or_alternate_spelli
             &other_cwd,
             &temp.path().join("claude"),
             &snapshot,
+            false,
             false,
             false,
         ),
@@ -255,4 +269,73 @@ fn snapshot_loader_process_probe() {
     let enabled_bare = load_bare_config_from_snapshot(&enabled_snapshot).unwrap();
     assert!(enabled_bare.mcp_servers.contains_key("workspace"));
     assert_eq!(enabled_bare.mcp_servers.len(), 1);
+}
+
+/// M6：插件来源闭合位在 MCP 合并路径上的真实回归。
+///
+/// 同一份磁盘事实（已启用插件声明了合法 MCP server），关闭位从 `false` 变为
+/// `true` 时 `collect_plugin_mcp_servers` 收集到的 server 与 `plugin_sources`
+/// 必须同批归零——关闭的会话也不因此读取插件目录（严格路径不被触发）。
+#[test]
+fn closed_plugin_face_skips_plugin_mcp_merging() {
+    let temp = tempfile::tempdir().unwrap();
+    let cwd = temp.path().join("project");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let claude_home = temp.path().join("claude");
+    install_enabled_plugin(&claude_home);
+    let snapshot = snapshot_for(
+        &cwd,
+        &temp.path().join("settings.json"),
+        r#"{"mcpServers":{"global":{"command":"global"}}}"#,
+        "{}",
+        HashMap::new(),
+    );
+
+    let (open, open_sources) = load_merged_config_from_snapshot_with_capabilities(
+        &cwd,
+        &claude_home,
+        &snapshot,
+        false,
+        true,
+        false,
+    )
+    .unwrap();
+    assert!(open.mcp_servers.contains_key("plugin:sample:unique"));
+    assert!(open_sources.contains_key("plugin:sample:unique"));
+
+    let (closed, closed_sources) = load_merged_config_from_snapshot_with_capabilities(
+        &cwd,
+        &claude_home,
+        &snapshot,
+        false,
+        true,
+        true,
+    )
+    .unwrap();
+    assert!(
+        !closed
+            .mcp_servers
+            .keys()
+            .any(|name| name.starts_with("plugin:")),
+        "关闭位下不得留下插件来源 server：{:?}",
+        closed.mcp_servers.keys().collect::<Vec<_>>()
+    );
+    assert!(closed_sources.is_empty());
+    // 非插件来源不受关闭位影响（global 仍在）。
+    assert!(closed.mcp_servers.contains_key("global"));
+
+    // 关闭位生效的前提是「不读插件目录」：换成一个非法插件 MCP 声明，
+    // 严格路径会在开启时报错，而关闭位下连解析都不会发生。
+    let poisoned = temp.path().join("poisoned-claude");
+    poison_plugin_mcp_config(&poisoned);
+    assert!(matches!(
+        load_merged_config_from_snapshot_with_capabilities(
+            &cwd, &poisoned, &snapshot, false, true, false,
+        ),
+        Err(McpConfigError::PluginLoadError { .. })
+    ));
+    assert!(load_merged_config_from_snapshot_with_capabilities(
+        &cwd, &poisoned, &snapshot, false, true, true,
+    )
+    .is_ok());
 }

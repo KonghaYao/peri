@@ -14,7 +14,7 @@ fn make_stage_context() -> StageContext {
         .build();
     let session = Session::new(cwd, frozen, None);
     let turn = session.start_turn();
-    StageContext::new_best_effort_fixture(turn, session.transcript(), session.queue().clone())
+    StageContext::new(turn, session.transcript(), session.queue().clone())
 }
 
 /// Mock LLM：首轮返回 final_answer，无 tool_calls
@@ -288,15 +288,11 @@ async fn test_p0_2_before_agent_runs_once_after_tool_round_trip() {
         None,
     );
     let turn = session.start_turn();
-    let context = StageContext::best_effort_fixture_builder(
-        turn,
-        session.transcript(),
-        session.queue().clone(),
-    )
-    .with_llm(Arc::new(ToolRoundTripLLM(Arc::clone(&llm_calls))))
-    .with_tools(tools)
-    .with_middleware_chain(Arc::new(chain))
-    .build();
+    let context = StageContext::builder(turn, session.transcript(), session.queue().clone())
+        .with_llm(Arc::new(ToolRoundTripLLM(Arc::clone(&llm_calls))))
+        .with_tools(tools)
+        .with_middleware_chain(Arc::new(chain))
+        .build();
     context.session.queue.push(QueuedMessage::prompt(
         MessageSource::UserInput,
         BaseMessage::human("p0-2 prompt marker"),
@@ -377,14 +373,10 @@ async fn test_p0_2_before_agent_runs_once_after_receive_and_skips_empty_or_cance
     let cwd: Arc<str> = Arc::from("/tmp/p0-2-before-agent");
     let session = Session::new(cwd, FrozenContext::builder().build(), None);
     let turn = session.start_turn();
-    let context = StageContext::best_effort_fixture_builder(
-        turn,
-        session.transcript(),
-        session.queue().clone(),
-    )
-    .with_llm(Arc::new(CountingLLM(Arc::clone(&llm_calls))))
-    .with_middleware_chain(Arc::new(chain))
-    .build();
+    let context = StageContext::builder(turn, session.transcript(), session.queue().clone())
+        .with_llm(Arc::new(CountingLLM(Arc::clone(&llm_calls))))
+        .with_middleware_chain(Arc::new(chain))
+        .build();
     context.session.queue.push(QueuedMessage::prompt(
         MessageSource::UserInput,
         BaseMessage::human("p0-2 prompt marker"),
@@ -408,7 +400,7 @@ async fn test_p0_2_before_agent_runs_once_after_receive_and_skips_empty_or_cance
         None,
     );
     let empty_turn = empty_session.start_turn();
-    let empty_context = StageContext::best_effort_fixture_builder(
+    let empty_context = StageContext::builder(
         empty_turn,
         empty_session.transcript(),
         empty_session.queue().clone(),
@@ -430,7 +422,7 @@ async fn test_p0_2_before_agent_runs_once_after_receive_and_skips_empty_or_cance
         None,
     );
     let cancelled_turn = cancelled_session.start_turn();
-    let cancelled_context = StageContext::best_effort_fixture_builder(
+    let cancelled_context = StageContext::builder(
         cancelled_turn,
         cancelled_session.transcript(),
         cancelled_session.queue().clone(),

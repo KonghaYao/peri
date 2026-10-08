@@ -14,6 +14,19 @@ use peri_acp_types::thread::{AgentStatus, ThreadId};
 // The loop has released its producers before this seam. A cleanup guard must
 // only retain a Weak<EventBus>, otherwise closing the stream would deadlock.
 // Join failure is execution failure, even when the model already finished.
+pub(crate) async fn flush_session_history(
+    session: &crate::session::Session,
+) -> crate::error::AgentResult<()> {
+    let sender = session.transcript().read().persist_tx_handle();
+    if let Some(sender) = sender {
+        if let Err(error) = crate::session::MessageTranscript::flush_via_tx(&sender).await {
+            tracing::error!(session_id = ?session.store().thread_id, %error, "session history flush failed");
+            return Err(error.into());
+        }
+    }
+    Ok(())
+}
+
 pub(super) async fn drain_subagent_events(
     event_bus: Arc<EventBus>,
     forwarder: tokio_util::task::AbortOnDropHandle<Option<crate::agent::events_v2::ObserveEvent>>,
@@ -100,13 +113,10 @@ impl Drop for BgCleanupGuard {
             deregister(&self.thread_id);
         }
         if let Some(stop) = &self.stop {
-            let Some(admission) = stop.turn.work_admission() else {
-                return;
-            };
             // 单一 v2 事件构造：v2 发射（parent 身份存在时）+ v1 协议化直发
             // （sender 存在时）。ObserveEvent 身份透传：child_agent_id → instance_id。
             let ev = build_subagent_stop_v2(
-                admission.execution.turn_id,
+                stop.turn.turn_id(),
                 stop.parent_agent_id,
                 stop.child_agent_id,
                 &stop.agent_name,

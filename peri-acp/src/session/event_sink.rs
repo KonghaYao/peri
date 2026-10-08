@@ -54,6 +54,36 @@ pub struct TransportEventSink {
 }
 
 impl TransportEventSink {
+    pub(crate) async fn push_execution_started(
+        &self,
+        session_id: &str,
+        generation: String,
+        request_id: String,
+    ) -> Result<(), crate::transport::types::AcpError> {
+        let caps = self.caps_registry.get(session_id).map(|caps| caps.clone());
+        if !caps.is_some_and(|caps| caps.agent_event || caps.user_input_queue) {
+            return Ok(());
+        }
+        let event = crate::event::AcpEvent::ExecutionStarted {
+            generation,
+            request_id,
+        };
+        let event_json = serde_json::to_string(&event).map_err(|error| {
+            crate::transport::types::AcpError::new(
+                -32603,
+                format!("execution start serialization failed: {error}"),
+            )
+        })?;
+        self.transport
+            .send_notification(
+                "peri/agent_event",
+                json!({
+                    "sessionId": session_id, "event_json": event_json,
+                }),
+            )
+            .await
+    }
+
     pub(crate) async fn push_user_input_started(
         &self,
         session_id: &str,

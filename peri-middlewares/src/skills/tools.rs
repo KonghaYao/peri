@@ -1,16 +1,21 @@
 //! SkillTool + DiscoverSkillsTool — 让 LLM 在推理过程中动态发现和加载 skill
 //!
 //! 参考 Claude Code 的同名工具实现。SkillTool 按名称加载 skill 全文，
-//! DiscoverSkillsTool 搜索可用 skills 列表。两者都只消费 SkillsMiddleware
-//! 从会话级 MCP skill registry 投影出的目录（`cached_skills`），正文经统一
-//! activation（`resources/read` + digest 校验）读取——**两个工具都不触碰文件
-//! 系统**（J5：技能来源只有 MCP 侧；本地三根 / 插件根 / builtin 资产由
-//! builtin `workspace` 实例的资源面承担）。
+//! DiscoverSkillsTool 搜索可用 skills 列表。两者都**在调用时**读取会话级 MCP
+//! skill registry 的当前投影（M8：目录不依赖 `before_agent` 时刻的旧副本），
+//! 正文经统一 activation（`resources/read` + digest 校验）读取——**两个工具都
+//! 不触碰文件系统**（J5：技能来源只有 MCP 侧；本地三根 / 插件根 / builtin 资产
+//! 由 builtin `workspace` 实例的资源面承担）。
 //!
-//! 版本 2：工具不再自行扫描磁盘，改用 SkillsMiddleware 在 before_agent 时
-//! 投影缓存的 skills 列表（`cached_skills`）。
+//! 目录状态（L2）显式区分：
+//! - **未装配**（registry 缺失）：稳定可操作的「目录不可用」错误，
+//!   不泄露内部实现串，也不返回假空成功；
+//! - **初始化中**（仍有 server 的发现任务未收口）：显式告知目录尚未就绪，
+//!   不把空投影当空目录；
+//! - **Ready(empty)**：合法空目录——`DiscoverSkillsTool` 返回 `[]`；
+//! - **Ready(nonempty)**：正常投影。
 
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use peri_acp_types::mcp_skills::{mcp_skill_name, McpSkillRegistry};
@@ -30,23 +35,27 @@ const DISCOVER_SKILLS_TOOL_NAME: &str = "DiscoverSkillsTool";
 /// LLM 在推理过程中通过此工具按需加载 skill，获取其完整 frontmatter + body，
 /// 无需用户手动输入 `/skill-name`。
 pub struct SkillTool {
-    /// SkillsMiddleware 在 before_agent 时预扫描的 skills 列表缓存。
-    cached_skills: Arc<RwLock<Option<Vec<SkillMetadata>>>>,
-    /// 会话级 MCP skill 注册表（W2：MCP 来源条目经统一 activation 读取正文；
-    /// None = 未装配 → MCP 条目报装配缺口，不回落磁盘）。
+    /// 会话级 MCP skill 注册表（M8：调用时读取当前投影；None = 未装配技能面 →
+    /// 目录不可用的稳定错误，不回落磁盘、不返回假空成功）。
     mcp_registry: Option<Arc<McpSkillRegistry>>,
 }
 
 impl SkillTool {
-    pub fn new(
-        cached_skills: Arc<RwLock<Option<Vec<SkillMetadata>>>>,
-        mcp_registry: Option<Arc<McpSkillRegistry>>,
-    ) -> Self {
-        Self {
-            cached_skills,
-            mcp_registry,
-        }
+    pub fn new(mcp_registry: Option<Arc<McpSkillRegistry>>) -> Self {
+        Self { mcp_registry }
     }
+}
+
+/// 目录当前投影；「初始化中」显式失败，只有发现已收口才返回投影
+/// （空投影 = 合法空目录）。
+fn catalog_projection(
+    registry: &McpSkillRegistry,
+) -> Result<Vec<SkillMetadata>, Box<dyn std::error::Error + Send + Sync>> {
+    let skills = registry.all_skills();
+    if skills.is_empty() && registry.discovery_in_progress() {
+        return Err(super::skill_catalog_initializing_message().into());
+    }
+    Ok(skills)
 }
 
 #[async_trait]
@@ -101,25 +110,19 @@ impl BaseTool for SkillTool {
             .as_str()
             .ok_or("SkillTool: missing required parameter 'skill_name'")?;
 
-        // 只复制命中的 metadata；锁在进入 blocking 线程之前释放。
-        let skill = {
-            let cached = self.cached_skills.read().unwrap();
-            let skills = cached.as_ref().ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    "Skills cache is empty — before_agent may not have run",
-                )
-            })?;
-            find_skill(skills, skill_name)?.clone()
+        // M8：调用时读取会话 registry 的当前投影（不依赖 before_agent 旧副本）。
+        // 未装配 ⇒ 稳定可操作的「目录不可用」错误（不泄露内部实现串）。
+        let Some(registry) = self.mcp_registry.as_ref() else {
+            return Err(super::skill_catalog_unavailable_message().into());
         };
+        let skills = catalog_projection(registry)?;
+        let skill = find_skill(&skills, skill_name)?.clone();
         // W4b（F1/F8）：正文**只有**一条读取路径——统一 activation 经
         // `resources/read`（+ digest/frontmatter 校验，stale 经 `skills/get`
         // 刷新一次）。本地磁盘分支与 builtin 嵌入分支已删除（J5）：所有条目的
         // origin 都是 MCP 实例（builtin `workspace` 承担本地三根 / 插件 / 内置
-        // 资产），未装配 registry 时显式报装配缺口，不回落任何本地来源。
-        let Some(registry) = self.mcp_registry.as_ref() else {
-            return Err(super::skill_registry_unwired_message(&skill.name).into());
-        };
+        // 资产），未装配 registry 时上面的投影读取已显式报目录不可用，
+        // 不回落任何本地来源。
         match crate::mcp::skill_activation::activate(registry, &skill, None).await {
             // 内容带来源标注（与 preload / 命令面同源）。
             Ok(content) => Ok(super::annotate_mcp_content(&skill, &content)),
@@ -135,15 +138,16 @@ impl BaseTool for SkillTool {
 /// 搜索可用 skills 列表。
 ///
 /// LLM 通过此工具发现当前环境中可用的所有 skill，按名称或描述筛选。
-/// 结果以 JSON 数组返回，包含 name、description、source 字段。
+/// 结果以 JSON 数组返回，包含 name、description、source 字段；合法空目录返回
+/// `[]`（不是错误），目录未就绪 / 未装配则显式失败（不返回假空成功）。
 pub struct DiscoverSkillsTool {
-    /// SkillsMiddleware 在 before_agent 时预扫描的 skills 列表缓存。
-    cached_skills: Arc<RwLock<Option<Vec<SkillMetadata>>>>,
+    /// 会话级 MCP skill 注册表（M8：调用时读取当前投影）。
+    mcp_registry: Option<Arc<McpSkillRegistry>>,
 }
 
 impl DiscoverSkillsTool {
-    pub fn new(cached_skills: Arc<RwLock<Option<Vec<SkillMetadata>>>>) -> Self {
-        Self { cached_skills }
+    pub fn new(mcp_registry: Option<Arc<McpSkillRegistry>>) -> Self {
+        Self { mcp_registry }
     }
 }
 
@@ -195,17 +199,13 @@ impl BaseTool for DiscoverSkillsTool {
         input: Value,
         _ctx: ToolContext<'_>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        // 缓存由 SkillsMiddleware::before_agent 保证填充，不再做懒扫描回退
-        let cached = self.cached_skills.read().unwrap();
-        let skills = match cached.as_ref() {
-            Some(s) => s.clone(),
-            None => {
-                return Err(Box::new(std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    "Skills cache is empty — before_agent may not have run",
-                )));
-            }
+        // M8/L2：调用时读取会话 registry 的当前投影；未装配 ⇒ 目录不可用
+        // （稳定可操作错误，不是空目录）；发现未收口 ⇒ 目录未就绪，
+        // 不把空投影当空目录返回。
+        let Some(registry) = self.mcp_registry.as_ref() else {
+            return Err(super::skill_catalog_unavailable_message().into());
         };
+        let skills = catalog_projection(registry)?;
 
         let query = input
             .get("query")

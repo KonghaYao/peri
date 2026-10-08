@@ -161,7 +161,7 @@ async fn test_v6_upgrade_removes_execution_state_and_keeps_history() {
             .fetch_one(&mut connection)
             .await
             .unwrap();
-    assert_eq!(goals, 0);
+    assert_eq!(goals, 1);
     let frozen: (Option<String>,) =
         sqlx::query_as("SELECT frozen_context FROM threads WHERE id = 'old-root'")
             .fetch_one(&mut connection)

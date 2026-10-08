@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use parking_lot::RwLock;
-use peri_acp_types::session_resources::work::DEFAULT_AGENT_MAX_ITERATIONS;
+pub(crate) const DEFAULT_AGENT_MAX_ITERATIONS: usize = 500;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 

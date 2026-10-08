@@ -308,7 +308,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
 
     handlers::register_keepgoing_click(&mut hooks, keepgoing_rect);
 
-    handlers::register_md_copy_click(&mut hooks, copy_buttons, view_models);
+    handlers::register_copy_click(&mut hooks, copy_buttons, view_models);
 
     // ── 鼠标事件处理（滚动 + 文本拖拽选中复制）──
     // [TRAP] event_handler 闭包必须是 'static → 必须 move。但 concat_wrap_map_arc /
@@ -552,6 +552,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         vis_height,
         scroll_y,
         &slot_index,
+        grid,
     );
 
     hits::update_image_line_hits(

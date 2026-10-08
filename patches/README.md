@@ -2,7 +2,7 @@
 
 ## 版本约束与锁文件维护
 
-根 workspace 的 `rmcp` 与 `tokio` 使用精确版本约束，与脚本中的补丁版本保持一致，避免普通依赖更新选择更高版本的未打补丁发布包。Mio 是传递依赖，更新时也必须保留脚本固定的 Git 分支版本；`hyper-util` 必须解析到本地补丁源码。
+根 workspace 的 `rmcp` 与 `tokio` 使用精确版本约束，与脚本中的补丁版本保持一致，避免普通依赖更新选择更高版本的未打补丁发布包。Mio 是传递依赖，更新时也必须保留脚本固定的 Git tag 版本；`hyper-util` 必须解析到本地补丁源码。
 
 若锁文件已偏离补丁配置，保留 `dev.sh` 的 `--locked`，通过补丁脚本定向修复，而不是直接运行 `cargo update` 或删除锁文件：
 
@@ -13,7 +13,9 @@
 python3 scripts/test-cargo-patches.py
 ```
 
-`--offline` 要求依赖索引与 Git 源码已缓存；首次拉取缺失依赖时可省略它。回归测试在仓库目录和外部工作目录执行真实的 `metadata --locked --offline`，核对补丁版本、来源和锁文件未变更；运行环境需要 Python 3.9+、Rust 与本机目标依赖缓存。
+若 registry 新版与固定补丁并存，显式指定正在使用的包版本以避免歧义。例如锁文件将 Mio 解析到 registry `1.2.4`、将 Git `1.2.3` 记录为 `patch.unused` 时，执行 `./scripts/cargo-rmcp-patched.sh update --offline -p mio@1.2.4 --precise 1.2.3`。只定向修正该包，不升级其他依赖，不修改或删除第三方缓存来掩盖问题。
+
+`--offline` 要求依赖索引与 Git 源码已缓存；首次拉取缺失依赖时可省略它。回归测试在仓库目录和外部工作目录分别对本机与 `wasm32-unknown-emscripten` 执行真实的 `metadata --locked --offline`，核对补丁版本、来源、实际解析图及锁文件未变更；运行环境需要 Python 3.9+、Rust 与两个平台的依赖缓存。
 
 仓库使用 `rmcp 3.5.0`，并通过 [补丁](rmcp-3.5.0-task-subscriptions.patch)补齐 Tasks 扩展的 `taskIds` 订阅和 `notifications/tasks`。补丁不依赖 GitHub fork，也不提交第三方源码。
 
@@ -23,6 +25,14 @@ python3 scripts/test-cargo-patches.py
 ./scripts/cargo-rmcp-patched.sh check --locked --workspace
 ./scripts/cargo-rmcp-patched.sh test --locked -p peri-mcp-workspace --lib
 ```
+
+原生发布构建默认使用 Fat LTO、单个 codegen unit、`opt-level = "z"` 和符号裁剪，优先控制分发体积；dev profile 不受影响。构建发布二进制：
+
+```bash
+./scripts/cargo-rmcp-patched.sh build --locked -p peri-tui --release --bin peri
+```
+
+配置取舍与 macOS 对照范围见[体积调查](../docs/experiment-release-binary-size/conclusion.md)。不通过改变 panic unwind 语义或平台专用导出白名单缩小产物。
 
 脚本下载 crates.io 的固定发布包，核验 SHA-256，用 `patch`（缺少时以独立临时 Git 仓库执行 `git apply`）应用补丁并反向校验缓存，再以 Cargo `[patch.crates-io]` 配置运行所给命令。生成的源码位于 gitignored 的 `target/peri-*-patches/`，按补丁哈希隔离；第二次运行复用缓存。`Cargo.lock` 记录本地 patched crate，因此直接运行 `cargo --locked` 不会偷偷回退到未打补丁的 registry 版本。CI、pre-release、release、Lefthook 和 `./dev.sh` 的编译命令也使用该脚本；Windows CI 用 Git Bash 运行脚本，脚本将 crate 和 Cargo 配置路径统一转换给原生 `cargo.exe`。脚本保留调用者的工作目录，让 `./dev.sh --cwd=...` 仍以指定目录启动 TUI。Linux 的 cross 构建使用 `./scripts/cargo-rmcp-patched.sh --cross build …`。更新补丁后，使用脚本执行 `update -p <crate>` 并提交更新后的 lockfile。
 

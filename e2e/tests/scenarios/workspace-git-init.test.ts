@@ -157,7 +157,8 @@ describe("目录登记后出现 .git 的工作区", () => {
   }
 
   async function workspaceSnapshot(): Promise<{ root: string; common_dir: string | null }> {
-    const rows = await query<{ discovery: string }>("SELECT discovery FROM legacy_execution_registrations");
+    // v19 起观测证据就记在归属行上（没有独立的执行登记表）。
+    const rows = await query<{ discovery: string }>("SELECT discovery FROM workspaces");
     expect(rows, "登记后应恰好有一个工作区").toHaveLength(1);
     return JSON.parse(rows[0].discovery);
   }
@@ -190,7 +191,7 @@ describe("目录登记后出现 .git 的工作区", () => {
     const projects = await query<{ id: string }>("SELECT id FROM projects");
     expect(projects).toHaveLength(1);
     const workspaces = await query<{ id: string; project_id: string }>(
-      "SELECT id, project_id FROM legacy_execution_registrations",
+      "SELECT id, project_id FROM workspaces",
     );
     expect(workspaces).toHaveLength(1);
     expect(workspaces[0].project_id).toBe(projects[0].id);

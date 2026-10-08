@@ -72,15 +72,6 @@ fn execution_for_effective_error(code: EffectiveToolErrorCode) -> Option<ToolExe
     })
 }
 
-fn requires_outcome_reconciliation(code: EffectiveToolErrorCode) -> bool {
-    matches!(
-        code,
-        EffectiveToolErrorCode::Cancelled
-            | EffectiveToolErrorCode::Timeout
-            | EffectiveToolErrorCode::ToolFailed
-    )
-}
-
 /// 收集阶段产物（内部使用）
 pub(super) struct CollectOutcome {
     pub(super) results: Vec<(ToolCall, ToolResult)>,
@@ -110,6 +101,7 @@ pub(super) async fn collect_tool_results(
     // ai_msg_id 保留为 API 契约（未来 ToolEnd 事件可携带 message_id）
     ai_msg_id: MessageId,
     ai_msg: &BaseMessage,
+    model_tool_call_id: Option<&str>,
 ) -> AgentResult<CollectOutcome> {
     let _ = ai_msg_id;
 
@@ -134,6 +126,7 @@ pub(super) async fn collect_tool_results(
         catalog,
         cancel,
         ai_msg,
+        model_tool_call_id,
     )
     .await;
 
@@ -258,6 +251,7 @@ async fn run_before_tool_approvals(
 ///
 /// 每个调用走 `biased` select：cancel.cancelled() 优先于 invoke_fut，
 /// 命中时返回 `ToolExecutionFailed { reason: "interrupted by user" }`。
+#[allow(clippy::too_many_arguments)] // 与 collect_tool_results 同一决策：阶段边界显式传递调用上下文，不分组
 async fn dispatch_concurrent(
     ctx: &StageContext,
     ready_calls: &[ToolCall],
@@ -266,6 +260,7 @@ async fn dispatch_concurrent(
     catalog: &Arc<SessionToolCatalogSnapshot>,
     cancel: &CancellationToken,
     ai_msg: &BaseMessage,
+    model_tool_call_id: Option<&str>,
 ) -> Vec<Result<ToolOutput, EffectiveToolError>> {
     if ready_calls.is_empty() {
         return Vec::new();
@@ -292,6 +287,7 @@ async fn dispatch_concurrent(
                 .get(&call.id)
                 .cloned()
                 .unwrap_or_else(|| call.clone());
+            let model_tool_call_id = model_tool_call_id.unwrap_or(&raw_call.id).to_owned();
             let tool = all_tools.get(&call.id).cloned();
             let input = match &tool {
                 Some(t) => normalize_params(call.input.clone(), Some(t.as_ref())),
@@ -317,17 +313,16 @@ async fn dispatch_concurrent(
             async move {
                 let timeout_opt = tool.as_ref().and_then(|t| t.timeout());
                 let invoke_fut = async {
-                    super::super::execution_control::validate(&dispatch_context).await.map_err(effective_tool_error)?;
-                    let effective_call = ToolCall::new(call_id.clone(), tool_name.clone(), input.clone());
-                    let binding = super::super::work_dispatch::begin(&dispatch_context, &effective_call).await
-                        .map_err(|error| effective_tool_error(error.into()))?;
                     let mut ctx_param = crate::tools::ToolContext::new(&messages, &cwd)
                         .with_effective_tool_dispatcher(
-                            Arc::new(StageEffectiveToolDispatcher::new(
-                                dispatch_context.clone(),
-                                dispatch_catalog,
-                            )),
-                            raw_call.id.clone(),
+                            Arc::new(
+                                StageEffectiveToolDispatcher::new(
+                                    dispatch_context.clone(),
+                                    dispatch_catalog,
+                                )
+                                .with_tool_call_id(model_tool_call_id.clone()),
+                            ),
+                            uuid::Uuid::now_v7().to_string(),
                             cancel.clone(),
                         )
                         .with_session_identity(
@@ -339,23 +334,22 @@ async fn dispatch_concurrent(
                                 .cloned()
                                 .unwrap_or_else(|| dispatch_context.session.agent_id.to_string()),
                             dispatch_context.session.turn.turn_id().to_string(),
-                        );
-                    if let Some(binding) = binding {
-                        ctx_param.session_id = dispatch_context.session.turn.work_admission().map(|admission| admission.session_id.clone());
-                        ctx_param.invocation_id = Some(binding.intent.invocation_id.clone());
-                        ctx_param = ctx_param.with_work_invocation(binding.lifecycle, binding.intent, binding.target, binding.resources);
-                    }
+                        )
+                        .with_tool_call_id(model_tool_call_id);
+                    ctx_param.cancellation = cancel.clone();
+                    ctx_param.session_resources = dispatch_context
+                        .session
+                        .transcript
+                        .read()
+                        .idempotent_reminder_port()
+                        .map(|(resources, _, _)| resources);
                     // 投递归属 = 直接发起会话（本 session）；路由取自该会话的
                     // canonical 持久化句柄，不接受模型参数。
-                    if let Some(delivery) =
-                        crate::agent::async_tasks::delivery::SessionTerminalDelivery::for_transcript(
-                            &dispatch_context.session.transcript,
-                            &dispatch_context.session.queue,
-                            ctx_param.session_lifecycle,
-                        )
-                    {
-                        ctx_param = ctx_param.with_task_terminal_delivery(delivery);
-                    }
+                    ctx_param = ctx_param.with_task_terminal_delivery(
+                        crate::agent::async_tasks::delivery::SessionTerminalDelivery::for_queue(
+                            dispatch_context.session.queue.clone(),
+                        ),
+                    );
                     match tool {
                         Some(t) => t
                             .invoke_output(input, ctx_param)
@@ -394,13 +388,6 @@ async fn dispatch_concurrent(
                         }
                     }
                 };
-                if let Err(error) = &result {
-                    if requires_outcome_reconciliation(error.code) {
-                        if let Err(error) = super::super::work_dispatch::unknown(&dispatch_context, &call_id, &error.to_string()).await {
-                            tracing::error!(%error, "invocation reconciliation checkpoint unconfirmed");
-                        }
-                    }
-                }
                 // 工具完成即刻 emit ToolEnded，不等 join_all 返回
                 // 快速工具的 Langfuse observation endTime 不再被慢工具拖高
                 let (output, is_error) = match &result {
@@ -580,7 +567,3 @@ fn post_process_result(
 #[cfg(test)]
 #[path = "execution_test.rs"]
 mod tests;
-
-#[cfg(test)]
-#[path = "execution_durable_test.rs"]
-mod durable_tests;

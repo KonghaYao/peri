@@ -61,27 +61,10 @@ pub(super) async fn build_subagent_session_v2(
     let identity_system = frozen.system_prompt.to_string();
     let cancel_arc: Arc<CancellationToken> = Arc::new(cancel_token.clone());
     let mut host = parent_host.as_deref().cloned().unwrap_or_default();
-    let lifecycle = match &session_resources {
-        Some(resources) => {
-            let control = resources.load_session_control(&child_thread_id).await?;
-            if control.status != peri_acp_types::session_resources::ControlStatus::Active {
-                return Err(
-                    "Incomplete: child control is not Active; explicit Reopen required".into(),
-                );
-            }
-            Some(control.lifecycle)
-        }
-        None => None,
-    };
-    let binding = match (&host.mcp_pool, lifecycle) {
-        (Some(pool), Some(lifecycle)) => {
-            pool.clone()
-                .agent_session_binding_for_lifecycle(&child_thread_id, lifecycle)
-                .await?
-        }
-        (Some(_), None) => return Err("Incomplete: child lifecycle identity unavailable".into()),
-        (None, _) => None,
-    };
+    let binding = host
+        .mcp_pool
+        .as_ref()
+        .and_then(|pool| pool.agent_session_binding(&child_thread_id));
     let queue = binding
         .as_ref()
         .map(|(inbox, _)| inbox.queue().clone())
@@ -104,33 +87,14 @@ pub(super) async fn build_subagent_session_v2(
         None => Arc::new(crate::agent::async_tasks::TaskManager::new()),
     });
     host.parent_thread_id = Some(child_thread_id.clone());
-    host.on_bg_complete = match (&session_resources, lifecycle) {
-        (Some(resources), Some(lifecycle)) => {
-            Some(crate::session::bg_complete::durable_bg_complete_callback(
-                crate::agent::async_tasks::durable_task_terminal_delivery(
-                    resources.clone(),
-                    child_thread_id.clone(),
-                    lifecycle,
-                    session.queue().clone(),
-                ),
-            ))
-        }
-        _ => None,
-    };
-    if let (Some(pool), Some(lifecycle), Some(manager)) =
-        (&host.mcp_pool, lifecycle, &host.task_manager)
-    {
+    host.on_bg_complete = Some(crate::session::bg_complete::task_bg_complete_callback(
+        crate::agent::async_tasks::delivery::SessionTerminalDelivery::for_queue(
+            session.queue().clone(),
+        ),
+    ));
+    if let (Some(pool), Some(manager)) = (&host.mcp_pool, &host.task_manager) {
         let inbox = peri_acp_types::session::SessionInbox::new(Arc::new(session.queue().clone()));
-        pool.bind_agent_session_for_lifecycle(
-            &child_thread_id,
-            lifecycle,
-            inbox.handle(),
-            manager.clone(),
-        )?;
-        let resources = session_resources
-            .clone()
-            .ok_or("Incomplete: child session resources unavailable")?;
-        pool.bind_agent_session_resources(&child_thread_id, lifecycle, resources)?;
+        pool.bind_agent_session(&child_thread_id, inbox.handle(), manager.clone());
     }
     session.set_subagent_host(host);
 
@@ -177,9 +141,10 @@ pub(super) async fn build_subagent_session_v2(
     let llm = llm.into_react_llm(
         &identity_system,
         Arc::new(move || contribution_chain.collect_prompt_contributions()),
-        // M3 旧持久子会话归一化：v1 metadata 的身份 System 消息已在 transcript
-        // 中；模型投影吸收与身份逐字相同的那一条（恰一条），身份只经 bridge
-        // 注入一次。其余 System 消息（命令反馈等）不受影响。
+        // 归一化：身份 System 随 transcript 持久化（spawn 6b 写入；旧会话的历史
+        // 同形），模型投影吸收与身份逐字相同的那一条（恰一条），身份在请求面
+        // 只由 bridge base system 出现一次。其余 System 消息（命令反馈等）不受
+        // 影响。
         normalize_persisted_identity,
     );
 
@@ -189,7 +154,7 @@ pub(super) async fn build_subagent_session_v2(
         .into_iter()
         .filter(|tool| tool_filter(tool.as_ref()))
         .collect();
-    let mut v2_ctx = build_v2_subagent_context(
+    let v2_ctx = build_v2_subagent_context(
         Some(session.clone()),
         llm,
         Arc::clone(&chain),
@@ -204,7 +169,6 @@ pub(super) async fn build_subagent_session_v2(
         compact_llm,
         agent_id,
     );
-    v2_ctx.context.recipient_lifecycle = lifecycle;
 
     Ok((session, v2_ctx))
 }

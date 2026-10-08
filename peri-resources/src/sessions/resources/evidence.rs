@@ -60,19 +60,17 @@ impl SessionResourcesImpl {
             for _ in relative_cwd.components() {
                 root.pop();
             }
-            let (project_id, execution_registration_id) = match binding {
-                Some(binding) => (binding.project_id, binding.workspace_id),
+            // 没有绑定时项目 id 只能由会话 id 派生（展示投影，不带执行证据）；
+            // 归属 id 一律取会话行自己的 `workspace_id`——v19 起绑定与归属行同名。
+            let project_id = match binding {
+                Some(binding) => binding.project_id,
                 None => {
                     use sha2::{Digest, Sha256};
                     let digest = Sha256::digest(id.as_bytes());
-                    let identity = uuid::Uuid::from_bytes(
-                        digest[..16].try_into().expect("UUID digest prefix"),
-                    )
-                    .to_string();
-                    (
-                        identity.parse().expect("project UUID"),
-                        identity.parse().expect("workspace UUID"),
-                    )
+                    uuid::Uuid::from_bytes(digest[..16].try_into().expect("UUID digest prefix"))
+                        .to_string()
+                        .parse()
+                        .expect("project UUID")
                 }
             };
             let workspace_id = self
@@ -84,7 +82,6 @@ impl SessionResourcesImpl {
             return Ok(ResolvedWorkspace {
                 project_id,
                 workspace_id,
-                execution_registration_id,
                 cwd,
                 root,
                 relative_cwd,

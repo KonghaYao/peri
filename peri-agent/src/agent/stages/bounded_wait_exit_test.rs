@@ -26,7 +26,7 @@ fn parked_context(
     let deadline = std::sync::Arc::clone(&bounded);
     let busy = std::sync::Arc::clone(&manager);
     let handoff_manager = std::sync::Arc::clone(&manager);
-    StageContext::best_effort_fixture_builder(
+    StageContext::builder(
         session.start_turn(),
         session.transcript(),
         session.queue().clone(),
@@ -105,7 +105,7 @@ async fn test_idle_without_pending_work_does_not_park() {
     );
     let wait = std::sync::Arc::clone(&bounded);
     let deadline = std::sync::Arc::clone(&bounded);
-    let context = StageContext::best_effort_fixture_builder(
+    let context = StageContext::builder(
         session.start_turn(),
         session.transcript(),
         session.queue().clone(),

@@ -44,7 +44,7 @@ fn context() -> StageContext {
         FrozenContext::builder().build(),
         None,
     );
-    StageContext::best_effort_fixture_builder(
+    StageContext::builder(
         session.start_turn(),
         session.transcript(),
         session.queue().clone(),

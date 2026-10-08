@@ -71,25 +71,32 @@ struct RecordingTerminalDelivery {
 }
 
 impl TaskTerminalDelivery for RecordingTerminalDelivery {
+    fn accept(
+        &self,
+        delivery_id: MessageId,
+        reminder: &TrustedSystemReminder,
+        source: MessageSource,
+    ) -> Result<(), String> {
+        let mut receipts = self.receipts.lock().unwrap();
+        if receipts.insert(delivery_id.as_uuid().to_string()) {
+            self.queue
+                .push(QueuedMessage::system_reminder_with_delivery_id(
+                    MessageKind::Defer,
+                    source,
+                    reminder.clone(),
+                    delivery_id,
+                ));
+        }
+        Ok(())
+    }
+
     fn deliver<'a>(
         &'a self,
         delivery_id: MessageId,
         reminder: &'a TrustedSystemReminder,
         source: MessageSource,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>> {
-        Box::pin(async move {
-            let mut receipts = self.receipts.lock().unwrap();
-            if receipts.insert(delivery_id.as_uuid().to_string()) {
-                self.queue
-                    .push(QueuedMessage::system_reminder_with_delivery_id(
-                        MessageKind::Defer,
-                        source,
-                        reminder.clone(),
-                        delivery_id,
-                    ));
-            }
-            Ok(())
-        })
+        Box::pin(async move { self.accept(delivery_id, reminder, source) })
     }
 }
 
@@ -168,7 +175,10 @@ async fn test_cancelled_background_shell_delivers_cleanup_once_without_second_te
         .expect("取消清理必须取得终态投递回执");
     shutdown_after_receipt(&manager).await;
     let callback_calls = calls.load(Ordering::SeqCst);
-    assert!(callback_calls >= 2, "取消清理必须在 Pending 后重试确认回执");
+    assert_eq!(
+        callback_calls, 1,
+        "取消清理必须同步确认回执，不依赖后续重试"
+    );
     assert_eq!(
         manager.shutdown().await,
         peri_acp_types::tasks::TaskShutdownReport::Complete
@@ -234,7 +244,10 @@ async fn test_natural_background_shell_completion_delivers_defer_through_the_man
         .expect("自然完成必须取得终态投递回执");
     shutdown_after_receipt(&manager).await;
     let callback_calls = calls.load(Ordering::SeqCst);
-    assert!(callback_calls >= 2, "自然完成必须在 Pending 后重试确认回执");
+    assert_eq!(
+        callback_calls, 1,
+        "自然完成必须同步确认回执，不依赖后续重试"
+    );
     assert_eq!(
         manager.shutdown().await,
         peri_acp_types::tasks::TaskShutdownReport::Complete

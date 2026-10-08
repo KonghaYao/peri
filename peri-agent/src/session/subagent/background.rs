@@ -18,7 +18,7 @@ use crate::agent::async_tasks::{
     BgCancelHandle, BgTaskKind, TaskManager,
 };
 use crate::agent::events::{AgentEventHandler, ExecutorEvent};
-use crate::agent::stages::{run_react_loop, LoopResult};
+use crate::agent::stages::LoopResult;
 use crate::agent::subagent_event_forwarder::spawn_subagent_event_forwarder_for_completion;
 use crate::agent::LangfuseBridgeLike;
 use crate::session::factory::{DeregisterRuntimeFn, RegisterRuntimeFn};
@@ -87,8 +87,7 @@ pub(super) async fn spawn_background_subagent(
         let started_at = peri_time::monotonic_now();
         // context 将被 move 进 run_react_loop，turn_id 提前提取（Start/Stop emit 用）
         let execution_turn = v2_ctx.context.session.turn.clone();
-        let mut context = v2_ctx.context;
-        let owned_execution = super::settlement::OwnedSubagentExecution::capture(&context);
+        let context = v2_ctx.context;
         let session = v2_ctx.session;
         // Start/Stop emit 需要 event_bus（partial move 后仍可用）+ 统一身份键
         let event_bus_for_emit = v2_ctx.event_bus;
@@ -126,40 +125,29 @@ pub(super) async fn spawn_background_subagent(
             });
         let bg_stop_handler = bg_forwarder_handler.clone();
 
-        let previous_observer = context.sdk_admission_observed.take();
-        let start_bus = event_bus_for_emit.clone();
-        let start_handler = bg_forwarder_handler.clone();
-        let start_name = agent_name_for_task.clone();
-        let start_cwd = cwd_for_task.clone();
-        context.sdk_admission_observed = Some(Arc::new(move |admission| {
-            if let Some(observe) = &previous_observer {
-                observe(admission.clone());
-            }
-            if let Some(on_start) = &on_subagent_start {
-                on_start(&start_name, &start_cwd);
-            }
-            emit_subagent_start_v2(
-                &start_bus,
-                admission.execution.turn_id,
+        if let Some(on_start) = &on_subagent_start {
+            on_start(&agent_name_for_task, &cwd_for_task);
+        }
+        emit_subagent_start_v2(
+            &event_bus_for_emit,
+            execution_turn.turn_id(),
+            parent_agent_id,
+            subagent_agent_id,
+            &agent_name_for_task,
+            true,
+            parent_tool_call_id.clone(),
+        );
+        forward_subagent_start_v1(
+            bg_forwarder_handler.as_ref(),
+            build_subagent_start_v2(
+                execution_turn.turn_id(),
                 parent_agent_id,
                 subagent_agent_id,
-                &start_name,
+                &agent_name_for_task,
                 true,
-                parent_tool_call_id.clone(),
-            );
-            forward_subagent_start_v1(
-                start_handler.as_ref(),
-                build_subagent_start_v2(
-                    admission.execution.turn_id,
-                    parent_agent_id,
-                    subagent_agent_id,
-                    &start_name,
-                    true,
-                    parent_tool_call_id.clone(),
-                ),
-            );
-        }));
-
+                parent_tool_call_id,
+            ),
+        );
         // 启动 v2 事件转发器：消费 SubAgent EventBus 的事件，注入 source_agent_id
         // 后转发到 bg_event_sender（BG pump 独立于主 pump，主 turn 结束后仍存活）。
         // SubagentStart/Stop 不在此转发（发射侧已同步协议化直发，防双发——
@@ -171,7 +159,11 @@ pub(super) async fn spawn_background_subagent(
             child_thread_id_for_task.clone(),
         );
 
-        let loop_result = run_react_loop(context, max_iterations).await;
+        let mut loop_result =
+            super::child_runner::run_child_until_terminal(context, max_iterations, &session).await;
+        if let Err(error) = super::lifecycle::flush_session_history(&session).await {
+            loop_result = LoopResult::Error(error);
+        }
         if let LoopResult::Error(error) = &loop_result {
             if !execution_turn.cancel_token.is_cancelled()
                 && !matches!(error, crate::error::AgentError::Interrupted)
@@ -203,8 +195,8 @@ pub(super) async fn spawn_background_subagent(
 
         // Errors report their terminal result through the callback/TaskManager;
         // only successful completion and cooperative cancellation emit Completed.
-        let publish_completed = !matches!(&loop_result, LoopResult::Error(_));
-        let (output, output_summary, status, success, failure) = match loop_result {
+        let mut publish_completed = !matches!(&loop_result, LoopResult::Error(_));
+        let (output, mut output_summary, mut status, success, failure) = match loop_result {
             LoopResult::Completed => {
                 let text = extract_last_ai_text(&session);
                 let summary = text.chars().take(500).collect::<String>();
@@ -225,7 +217,7 @@ pub(super) async fn spawn_background_subagent(
                 (output, summary, "error", false, failure.safe_failure())
             }
         };
-        let result = crate::agent::events::BackgroundTaskResult {
+        let mut result = crate::agent::events::BackgroundTaskResult {
             task_id: task_id_for_task.clone(),
             agent_name: agent_name_for_task.clone(),
             prompt_summary: prompt_summary_for_task.clone(),
@@ -238,18 +230,7 @@ pub(super) async fn spawn_background_subagent(
             subagent_failure: failure.clone(),
             shell_output: None,
         };
-        if let Err(error) = owned_execution.prepare_terminal(&result).await {
-            tracing::error!(thread_id = %child_thread_id_for_task, %error, "child terminal evidence remains unfinished");
-            cleanup_guard.deregister = None;
-            cleanup_guard.disarm_stop();
-            return;
-        }
-        let Some(admission) = execution_turn.work_admission() else {
-            cleanup_guard.deregister = None;
-            cleanup_guard.disarm_stop();
-            return;
-        };
-        let subagent_turn_id = admission.execution.turn_id;
+        let subagent_turn_id = execution_turn.turn_id();
         emit_subagent_stop_v2_with_failure(
             &event_bus_for_emit,
             SubagentStopV2Input {
@@ -267,24 +248,18 @@ pub(super) async fn spawn_background_subagent(
         if let Err(error) =
             drain_subagent_events(event_bus_for_emit, forwarder_handle, langfuse_bridge).await
         {
-            // Cancellation and typed model failure remain authoritative, but
-            // successful model completion cannot hide a broken event stream.
             tracing::error!(thread_id = %child_thread_id_for_task, error = %error.user_facing_message(), causes = ?error.cause_chain(), "child event forwarding barrier incomplete");
-            cleanup_guard.deregister = None;
-            cleanup_guard.disarm_stop();
-            return;
-        }
-        if let Err(error) = owned_execution.handoff_terminal().await {
-            tracing::error!(thread_id = %child_thread_id_for_task, %error, "child terminal responsibility remains unfinished");
-            cleanup_guard.deregister = None;
-            cleanup_guard.disarm_stop();
-            return;
-        }
-        if let Err(error) = owned_execution.finish().await {
-            tracing::error!(thread_id = %child_thread_id_for_task, %error, "child execution settlement remains unfinished");
-            cleanup_guard.deregister = None;
-            cleanup_guard.disarm_stop();
-            return;
+            if result.success {
+                let failure =
+                    SubagentFailure::new(&child_thread_id_for_task, &agent_name_for_task, error);
+                result.output =
+                    format!("Background sub-agent failed: {}", failure.public_message());
+                output_summary = result.output.chars().take(500).collect();
+                result.subagent_failure = failure.safe_failure();
+                result.success = false;
+                status = "error";
+                publish_completed = false;
+            }
         }
         forward_subagent_stop_v1(
             bg_stop_handler.as_ref(),

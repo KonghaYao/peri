@@ -204,6 +204,31 @@ describe("smoke: 正式待发送队列", () => {
     expect(promptBackground(await tester!.getScreen({ stripAnsi: false })), "输入框应保持终端默认背景，不能新增底色").toBe("default");
   });
 
+  it("长中文待发送项点击可见发送图标立即中断流并交付", async () => {
+    await tester!.resize({ cols: 92, rows: 40 });
+    await submit("STEER_SEED");
+    const first = await waitRequest(1);
+    const streaming = setInterval(() => {
+      if (!first.closed) chunk(first.response, { content: " 正在持续输出中文流式回复" });
+    }, 40);
+    const text = "ragflow 架构上比较难就单独一个 rustfs 就好了。。。。它作为特例";
+    try {
+      await submit(text);
+      await queued("ragflow");
+      await tester!.paste("中文草稿保持不变");
+      await queued("ragflow");
+      await click("ragflow", "↑");
+      const second = await waitRequest(2);
+      await expect.poll(() => first.closed).toBe(true);
+      await waitPending(0);
+      expect(userContent(second)).toContain(text);
+      expect(plain(await tester!.getScreenText())).toContain("中文草稿保持不变");
+      finish(second);
+    } finally {
+      clearInterval(streaming);
+    }
+  });
+
   it("单发 B 保留 A/C，全发不带上随后新增 D，自然完成再发送 D", async () => {
     await submit("STEER_SEED");
     const first = await waitRequest(1);

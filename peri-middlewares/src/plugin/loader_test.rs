@@ -5,6 +5,16 @@ use crate::plugin::types::{
     InstallScope, InstalledPlugin, PluginAgent, PluginCommand, PluginCommandEntry, PluginOrigin,
 };
 
+/// M6 测试夹具：来源作用域身份（安装记录事实；测试不关心具体取值）。
+pub(crate) fn test_plugin_scope() -> peri_acp_types::plugin::PluginScope {
+    peri_acp_types::plugin::PluginScope {
+        plugin_id: "test-plugin@test".to_string(),
+        origin: PluginOrigin::PeriInstalled,
+        install_scope: InstallScope::User,
+        project_path: None,
+    }
+}
+
 pub(crate) fn make_manifest_with_commands(commands: Vec<PluginCommand>) -> PluginManifest {
     let entries: Vec<PluginCommandEntry> =
         commands.into_iter().map(PluginCommandEntry::Full).collect();
@@ -621,6 +631,7 @@ fn test_merge_plugin_mcp_servers() {
         data_path: PathBuf::new(),
         hooks_config: None,
         marketplace: String::new(),
+        scope: test_plugin_scope(),
     };
     p1.mcp_servers.insert(
         "db".into(),
@@ -652,6 +663,7 @@ fn test_merge_plugin_mcp_servers() {
         data_path: PathBuf::new(),
         hooks_config: None,
         marketplace: String::new(),
+        scope: test_plugin_scope(),
     };
     p2.mcp_servers.insert(
         "db".into(),

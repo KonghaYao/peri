@@ -7,7 +7,7 @@ use std::sync::{
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use peri_acp_types::{
-    command::{CommandContext, DependencyBag, FeedbackLevel},
+    command::{CommandContext, DependencyBag, FeedbackLevel, PromptStopReason},
     event::{EventSink, ExecutorEvent},
     session_resources::{FrozenSnapshotBytes, NewSession, NewSessionMeta, SessionResources},
     store::PersistedPayload,
@@ -18,14 +18,14 @@ use peri_agent::{
     agent::{
         compact_v2::CompactConfig,
         react::{ReactLLM, Reasoning, StreamingContext},
-        stages::{run_react_loop, LoopResult, StageContext, StageContextBuilder},
+        stages::{run_react_loop, LoopResult, StageContext},
         token::ContextBudget,
     },
     error::{AgentError, AgentResult},
     messages::BaseMessage,
     session::{
-        exec::compact_pipeline::execute_compact, FrozenContext, MessageQueue, MessageSource,
-        MessageTranscript, QueuedMessage, Session, TurnContext,
+        exec::compact_pipeline::execute_compact, FrozenContext, MessageSource, MessageTranscript,
+        QueuedMessage, Session,
     },
     tools::BaseTool,
 };
@@ -34,32 +34,6 @@ use peri_model::{
     StopReason, TokenUsage,
 };
 use tokio_util::sync::CancellationToken;
-
-/// 夹具：Compact 对抗套件的循环装配（当前契约）。
-///
-/// 本套件只考察预算与投影，使用 crate 自身的 best-effort 装配（无 durable 执行）。
-/// 生产装配要求 SDK 准入端口，且 Reason 必须走 `prepare_reasoning`；这里的脚本
-/// `ReactLLM` 替身不实现该路径，用生产装配驱动只会得到环境错误而非被测结论。
-/// 该 seam 默认不进入生产构建（`test-fixtures` feature）。
-#[cfg(feature = "test-fixtures")]
-fn loop_builder(
-    turn: TurnContext,
-    transcript: Arc<parking_lot::RwLock<MessageTranscript>>,
-    queue: MessageQueue,
-) -> StageContextBuilder {
-    StageContext::best_effort_fixture_builder(turn, transcript, queue)
-}
-
-/// 缺少 `test-fixtures` 时立即失败：静默退回生产装配只会让整套用例以错误的
-/// 夹具环境运行（durable 路径缺少 SDK 端口），掩盖真实结论。
-#[cfg(not(feature = "test-fixtures"))]
-fn loop_builder(
-    _: TurnContext,
-    _: Arc<parking_lot::RwLock<MessageTranscript>>,
-    _: MessageQueue,
-) -> StageContextBuilder {
-    panic!("peri-agent compact 对抗测试需要 --features test-fixtures")
-}
 
 struct BoundSession {
     resources: Arc<dyn SessionResources>,
@@ -217,7 +191,7 @@ fn make_context(
     model: Arc<PrimaryModel>,
     summary: Arc<SummaryModel>,
 ) -> StageContext {
-    loop_builder(
+    StageContext::builder(
         session.start_turn(),
         session.transcript(),
         session.queue().clone(),
@@ -314,6 +288,242 @@ impl EventSink for RecordingSink {
         self.0.lock().push(event.clone());
     }
     async fn push_done(&self, _: &str, _: &str, _: Option<&str>) {}
+}
+
+async fn manual_case(
+    failures: usize,
+    cancel_during_summary: bool,
+) -> (
+    BoundSession,
+    peri_acp_types::command::CommandResult,
+    Arc<SummaryModel>,
+    Arc<RecordingSink>,
+    Vec<BaseMessage>,
+) {
+    let token = CancellationToken::new();
+    let model = Arc::new(SummaryModel {
+        failures,
+        calls: AtomicUsize::new(0),
+        order: Default::default(),
+        cancel: cancel_during_summary.then(|| token.clone()),
+    });
+    let (bound, result, sink, history) = manual_with_model(model.clone(), token).await;
+    (bound, result, model, sink, history)
+}
+
+async fn manual_with_model(
+    model: Arc<dyn Model>,
+    token: CancellationToken,
+) -> (
+    BoundSession,
+    peri_acp_types::command::CommandResult,
+    Arc<RecordingSink>,
+    Vec<BaseMessage>,
+) {
+    let bound = BoundSession::open().await;
+    let history = vec![
+        BaseMessage::human("retain original task"),
+        BaseMessage::ai("retain original answer"),
+    ];
+    let sink = Arc::new(RecordingSink::default());
+    let mut command = CommandContext::new(
+        bound.thread_id.clone(),
+        history.clone(),
+        bound.cwd.clone(),
+        sink.clone(),
+        token,
+        DependencyBag::new(),
+    );
+    command.auxiliary_model = Some(model.clone());
+    command.session_resources = Some(bound.resources.clone());
+    command.thread_id = Some(bound.thread_id.clone());
+    let result = execute_compact(command).await;
+    (bound, result, sink, history)
+}
+
+#[tokio::test]
+async fn test_compact_session_manual_empty_summary_retries_without_next_prompt() {
+    let (bound, result, model, sink, history) = manual_case(2, false).await;
+    assert_eq!(model.calls.load(Ordering::SeqCst), 3);
+    assert!(matches!(result.stop_reason, PromptStopReason::EndTurn));
+    assert!(matches!(
+        result.feedback.unwrap().level,
+        FeedbackLevel::Info
+    ));
+    assert!(result.messages[0].content().contains("RECOVERED"));
+    let snapshot = bound
+        .resources
+        .load_session_snapshot(&bound.thread_id)
+        .await
+        .unwrap();
+    for original in history {
+        assert!(snapshot.flags[&original.id()].excluded);
+    }
+    let events = sink.0.lock();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, ExecutorEvent::CompactStarted { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, ExecutorEvent::CompactCompleted { .. }))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn test_compact_session_manual_failure_preserves_history_and_reports_feedback() {
+    let (bound, result, model, sink, history) = manual_case(usize::MAX, false).await;
+    assert_eq!(model.calls.load(Ordering::SeqCst), 3);
+    assert_eq!(
+        serde_json::to_value(&result.messages).unwrap(),
+        serde_json::to_value(&history).unwrap()
+    );
+    let feedback = result.feedback.unwrap();
+    assert!(matches!(feedback.level, FeedbackLevel::Error));
+    assert_eq!(
+        feedback.message,
+        "Full Compact failed after 3 attempts. Retry or change the compact model."
+    );
+    let snapshot = bound
+        .resources
+        .load_session_snapshot(&bound.thread_id)
+        .await
+        .unwrap();
+    assert!(snapshot.flags.values().all(|flag| !flag.excluded));
+    assert_eq!(snapshot.payloads.len(), history.len());
+    assert_eq!(
+        sink.0.lock().len(),
+        1,
+        "当前失败仅发送 Started，反馈由命令编排投影"
+    );
+}
+
+#[tokio::test]
+async fn test_compact_session_manual_cancel_preserves_history() {
+    let (bound, result, model, sink, history) = manual_case(0, true).await;
+    assert_eq!(model.calls.load(Ordering::SeqCst), 1);
+    assert!(matches!(result.stop_reason, PromptStopReason::Cancelled));
+    assert_eq!(
+        serde_json::to_value(&result.messages).unwrap(),
+        serde_json::to_value(&history).unwrap()
+    );
+    let feedback = result.feedback.unwrap();
+    assert!(matches!(feedback.level, FeedbackLevel::Warning));
+    assert_eq!(feedback.message, "compact cancelled");
+    let snapshot = bound
+        .resources
+        .load_session_snapshot(&bound.thread_id)
+        .await
+        .unwrap();
+    assert!(snapshot.flags.values().all(|flag| !flag.excluded));
+    assert_eq!(snapshot.payloads.len(), history.len());
+    assert_eq!(
+        sink.0.lock().len(),
+        1,
+        "当前取消仅发送 Started，上游用 TurnDone 结束 loading"
+    );
+}
+
+struct RejectedSummary {
+    protocol: bool,
+    cancel: Option<CancellationToken>,
+}
+
+#[async_trait]
+impl Model for RejectedSummary {
+    fn capabilities(&self) -> ModelCapabilities {
+        ModelCapabilities::default()
+    }
+    async fn stream(&self, _: ModelRequest, _: CancellationToken) -> ModelResult<ModelStream> {
+        unreachable!("摘要必须走 complete")
+    }
+    async fn complete(&self, _: ModelRequest, _: CancellationToken) -> ModelResult<ModelResponse> {
+        if let Some(cancel) = &self.cancel {
+            cancel.cancel();
+        }
+        Err(if self.protocol {
+            peri_model::ModelError::protocol_with_summary(
+                peri_model::ProtocolErrorKind::InvalidJsonObject,
+                "fixture-private-body: sk-not-a-real-key https://private.example/path",
+            )
+        } else {
+            peri_model::ModelError::http_status(401, "fixture", Some("req-compact-401"))
+        })
+    }
+}
+
+/// [回归测试] 手动 compact 必须保留逐字分类诊断（含 provider 标识）并保全原历史。
+#[tokio::test]
+async fn test_compact_session_manual_http_failure_reports_classified_cause() {
+    let (bound, result, _, history) = manual_with_model(
+        Arc::new(RejectedSummary {
+            protocol: false,
+            cancel: None,
+        }),
+        CancellationToken::new(),
+    )
+    .await;
+    let feedback = result.feedback.unwrap();
+    assert!(matches!(feedback.level, FeedbackLevel::Error));
+    assert_eq!(
+        feedback.message,
+        "An LLM API error occurred (HTTP 401, request id: req-compact-401, provider: fixture). Please try again."
+    );
+    assert_eq!(
+        serde_json::to_value(result.messages).unwrap(),
+        serde_json::to_value(history).unwrap()
+    );
+    let snapshot = bound
+        .resources
+        .load_session_snapshot(&bound.thread_id)
+        .await
+        .unwrap();
+    assert!(snapshot.flags.values().all(|flag| !flag.excluded));
+}
+
+/// [回归测试] 协议诊断必须保留分类事实与有界实际文本，不遮蔽底层原因。
+#[tokio::test]
+async fn test_compact_session_manual_protocol_failure_preserves_classified_cause() {
+    let (_, result, _, _) = manual_with_model(
+        Arc::new(RejectedSummary {
+            protocol: true,
+            cancel: None,
+        }),
+        CancellationToken::new(),
+    )
+    .await;
+    let feedback = result.feedback.unwrap();
+    assert!(matches!(feedback.level, FeedbackLevel::Error));
+    assert_eq!(
+        feedback.message,
+        "An LLM API error occurred (protocol failure: invalid JSON object, message: fixture-private-body: sk-not-a-real-key https://private.example/path). Please try again."
+    );
+}
+
+/// [回归测试] provider 同 poll 返回错误并触发取消时，终态仍必须为取消。
+#[tokio::test]
+async fn test_compact_session_manual_cancel_wins_over_ready_provider_error() {
+    let token = CancellationToken::new();
+    let (_, result, _, history) = manual_with_model(
+        Arc::new(RejectedSummary {
+            protocol: false,
+            cancel: Some(token.clone()),
+        }),
+        token,
+    )
+    .await;
+    assert!(matches!(result.stop_reason, PromptStopReason::Cancelled));
+    assert_eq!(result.feedback.unwrap().message, "compact cancelled");
+    assert_eq!(
+        serde_json::to_value(result.messages).unwrap(),
+        serde_json::to_value(history).unwrap()
+    );
 }
 
 /// [负对照] 轻上下文跨 prompt 不应新增 Full 或摘要请求。
@@ -552,7 +762,7 @@ async fn test_compact_session_micro_shrink_does_not_hide_new_before_model_growth
     let mut chain = peri_agent::middleware::MiddlewareChain::new();
     chain.add(Box::new(AppendAfterMicro(AtomicUsize::new(0))));
     let (bus, mut events) = peri_agent::agent::events_v2::EventBus::new(Default::default());
-    let context = loop_builder(
+    let context = StageContext::builder(
         session.start_turn(),
         session.transcript(),
         session.queue().clone(),
@@ -638,7 +848,7 @@ async fn test_compact_session_zero_usage_keeps_growth_and_valid_usage_settles_it
         .write()
         .append(BaseMessage::human("base"));
     let (_, summary) = make_models(false);
-    let context = loop_builder(
+    let context = StageContext::builder(
         session.start_turn(),
         session.transcript(),
         session.queue().clone(),
@@ -734,7 +944,7 @@ async fn test_compact_session_repeated_micro_view_does_not_add_pressure() {
     ] {
         session.transcript().write().append(message);
     }
-    let context = loop_builder(
+    let context = StageContext::builder(
         session.start_turn(),
         session.transcript(),
         session.queue().clone(),

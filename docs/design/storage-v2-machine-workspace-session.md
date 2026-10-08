@@ -4,6 +4,13 @@
 > [Session ID / 机器环境设计](session-id-environment.md)为准。实施与验收记录见
 > 进度与验收记录：[2026-10 月志](../../spec/history/2026-10.md)（2026-10-02 条目）。
 >
+> 后续变更（2026-10-08，schema 19）：v12 引入的 `legacy_execution_registrations` 已删除，
+> 其 `project_id`/`root_identity`/`discovery` 并回 `workspaces` 归属行；`session_bindings.workspace_id`
+> 收敛为会话归属行 ID（`threads.workspace_id`），不再存在独立的执行登记 id 空间。下文涉及
+> 「执行登记 UUID」「两个 id 不同」的表述读作 v12–v18 的历史形态，现行语义见
+> [Session ID / 机器环境设计](session-id-environment.md) §3.2 与
+> [active plan](../../spec/issues/2026-10-08-remove-legacy-execution-registrations-plan.md)。
+>
 > Scope：会话数据的机器分区、工作区身份、会话归属与归档。本文是 v2 数据结构的
 > 目标权威；不改变按 Session ID 读取历史与执行准入分离的现行原则。Session
 > 就是现有 thread：同一条记录、同一个 `ThreadId`，不另建一套会话实体。
@@ -147,6 +154,8 @@ directory 证据及执行目录相对路径。旧本机绑定只能复制迁移�
 不得用当前同名目录、本地旧 SQLite 登记或新的文件系统观测补造执行资格。
 已有远端快照的旧 v2 Session 即使执行登记 UUID 与 `threads.workspace_id` 不同，
 仍可按其远端快照、当前文件系统/Git、远端 Machine/path 归属重新复核。
+schema 19 起不再保留这份双 ID：绑定行的 `workspace_id` 在迁移中改写为会话归属行 ID，
+改写前逐行校验绑定记录的根就是归属行路径，任一行不成立即拒绝升级。
 
 选择 Turso locator 是持久化后端的全量切换：Machine、Workspace、Session、消息、
 绑定、执行发现快照与 Workspace 级 OAuth 只读写远端库。运行时可以读取机器 ID
@@ -302,12 +311,13 @@ canonical DDL 在 `peri-resources/src/sessions/canonical.rs` 保持一份，本�
 | `machines` | 新增 `id`, `name`, `identity_kind` | `id` 主键；known ID 为规范 UUID；name 非空且可改；legacy_unknown 不可作为本机当前身份 |
 | `workspaces` | 复用现表，新增 `machine_id`, `path`, `path_source`；旧 `project_id/root/root_identity/discovery` 的执行证据职责迁出 | `id` UUID 主键，`machine_id` 非空引用 machines，`path` 非空，`UNIQUE(machine_id,path)`；远端可创建无本机文件证据的行 |
 | `threads` | 增加 `workspace_id`, `archived` | workspace_id 非空引用 workspaces；archived 非空默认 false；`parent_thread_id` 及其他列保留 |
-| `session_bindings` | 历史列名 `workspace_id` 保留为**执行登记 UUID**，不是逻辑 Workspace 归属；保存版本化执行发现快照与 `evidence_origin` | 逻辑归属只通过 `threads.workspace_id` 读取；旧远端缺证据不伪造，新创建必须有完整快照。保留列名避免改写旧不可变绑定字节及其外键，类型层用 `ResolvedWorkspace.execution_registration_id` 区分 |
-| `legacy_execution_registrations`（仅本机迁移辅助） | 旧登记 UUID → 最后观测的执行发现值 | 仅本地旧库迁移使用；Turso 模式不访问该表或本地库 |
+| `session_bindings` | 历史列名 `workspace_id` 保留（v12–v18 存**执行登记 UUID**），保存版本化执行发现快照与 `evidence_origin` | 逻辑归属只通过 `threads.workspace_id` 读取；旧远端缺证据不伪造，新创建必须有完整快照。schema 19 起该列值收敛为会话归属行 ID，逐行改写并 fail-closed 校验归属与路径，类型层不再有 `execution_registration_id` 双 ID |
+| `legacy_execution_registrations`（仅本机迁移辅助） | v12–v18 的旧登记 UUID → 最后观测的执行发现值 | schema 19 迁移把证据并回 `workspaces` 归属行后 `DROP`；v19 起不存在此表，也不再需要它是登记权威 |
 | `mcp_oauth_credentials` | machine_id 改为 workspace_id | 主键 `(principal_id,workspace_id,server_key)`；不能通过 machine_id 或 server 名兜底查找 |
 
 迁移版本从当前 schema 11 推进到 12；远端 `peri_store_meta.schema_version`
-取同一版本常量，存储契约标签从 `peri.session.store/v2` 推进到 `v3`。远端已有
+取同一版本常量，存储契约标签从 `peri.session.store/v2` 推进到 `v3`（此后 schema 14
+移除执行账本、schema 19 删除执行登记表并把绑定收敛到归属行，契约标签到 `v4`）。远端已有
 10→11 路径先收敛到 11，再执行 11→12；11→12 的批在旧 schema/contract/store
 身份与对象 SQL 快照守卫下搬运全部历史行、重建受影响表、清理旧凭证，最后推进
 版本与 contract。远端批结果未知时重读身份、形状和数据验收摘要，不能把超时当
@@ -334,6 +344,9 @@ SQLite 的表重建须按已有 schema migration 方式在事务外处理外键�
 | 远端有绑定但无登记 | 保存 cwd 减去已校验 relative_cwd；组内逐条交叉核对 | 保存的 environment | 保留旧绑定 UUID；缺远端快照时只读历史，不自动补造 |
 | 无绑定但有可信本机登记（仅本地模式） | 保存 cwd 可证实的所属 root | 保存的 environment | 不伪造过去的快照；按本地 legacy 接纳规则执行；远端不接纳 legacy |
 | 无法证实 Git 根的旧记录 | 保存 cwd，`path_source=unverified` | 已知原 env；未知来源为 legacy_unknown | 历史可读；不因归组获得执行资格 |
+
+表中「执行证据」列记录 v12 迁移当时的规则；schema 19 起绑定 UUID 统一改写为会话归属行 ID，
+不再保留旧绑定 UUID，缺快照的记录仍按只读历史处理。
 
 历史路径校验与当前宿主平台无关：接受 POSIX 绝对路径、Windows 盘符绝对路径和 UNC 路径，拒绝相对路径；不读取当前文件系统，也不由历史路径推导执行资格。
 

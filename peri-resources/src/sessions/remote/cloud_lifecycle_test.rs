@@ -174,7 +174,6 @@ async fn lifecycle_flow(target: &CloudTarget, run: &str) -> Result<(), String> {
     let workspace = ResolvedWorkspace {
         project_id: binding.project_id,
         workspace_id: binding.workspace_id,
-        execution_registration_id: binding.workspace_id,
         cwd: PathBuf::from("/tmp/peri-cloud-synth"),
         root: PathBuf::from("/tmp/peri-cloud-synth"),
         relative_cwd: PathBuf::from("sub"),

@@ -23,7 +23,20 @@ enum CacheDenial {
     WorkspaceUnbound,
     Configuration,
     DynamicConnection,
+    /// 会话级 ACP 连接身份不可证明 / 与请求代不一致（M7，fail-closed）。
+    AcpConnection,
     Credentials,
+}
+
+/// 会话级 ACP 连接的 cache 身份判定（M7）。
+enum AcpCacheScope {
+    /// 该名不是会话级 ACP 连接（配置来源 / dynamic 投影的既有路径）。
+    NotAcp,
+    /// 是 ACP 连接且身份可证明：声明会话 + 连接 ID + 当前句柄代号。
+    Identified(crate::mcp::client::AcpConnectionIdentity),
+    /// 是 ACP 连接但身份当前不可证明（归属与声明不一致 / 句柄已换代但未登记 /
+    /// 已断连）⇒ 持久化 cache 一律拒绝。
+    Unidentifiable,
 }
 
 impl McpClientPool {
@@ -34,6 +47,38 @@ impl McpClientPool {
             peer.set_response_cache_config(rmcp::service::ClientCacheConfig::disabled())
                 .await;
         }
+    }
+
+    /// 当前可证明的 ACP 连接身份。
+    ///
+    /// 判定面只认池内事实：归属（`acp_owners`）与声明（`acp_connections`）必须
+    /// 一致，且句柄必须仍持有本代代号（`advance_handle_generation` 在提交时写入）
+    /// ——三者缺一即 fail-closed。
+    fn acp_cache_scope(&self, server_name: &str) -> AcpCacheScope {
+        let declaration = self.acp_connections.read().get(server_name).cloned();
+        let owner = self.acp_owners.read().get(server_name).cloned();
+        let declaration = match (declaration, owner) {
+            (None, None) => return AcpCacheScope::NotAcp,
+            (Some(declaration), Some(owner)) if declaration.session_id == owner => declaration,
+            // 只有一半、或归属与声明不一致：不猜身份。
+            _ => return AcpCacheScope::Unidentifiable,
+        };
+        let generation = {
+            let clients = self.clients.read();
+            let Some(handle) = clients.get(server_name) else {
+                return AcpCacheScope::Unidentifiable;
+            };
+            self.handle_generation(handle)
+        };
+        // 0 = 本代代号未登记（未提交 / 已换代未登记）：不视为可复用身份。
+        if generation == 0 {
+            return AcpCacheScope::Unidentifiable;
+        }
+        AcpCacheScope::Identified(crate::mcp::client::AcpConnectionIdentity {
+            session_id: declaration.session_id,
+            connection_id: declaration.connection_id,
+            generation,
+        })
     }
 
     fn config_allows_persistent_cache(config: &McpServerConfig) -> bool {
@@ -51,8 +96,23 @@ impl McpClientPool {
                 .is_none_or(std::collections::HashMap::is_empty)
     }
 
+    /// 该 server 当前可用的连接身份键。
+    ///
+    /// `None` = 会话级 ACP 连接但身份当前不可证明 ⇒ 持久化 cache 一律拒绝
+    /// （M7 fail-closed；不猜身份、不跨会话按同名 server 命中）。
+    fn connection_key_for(&self, server_name: &str) -> Option<McpConnectionKey> {
+        match self.acp_cache_scope(server_name) {
+            AcpCacheScope::NotAcp => Some(McpConnectionKey::static_server(server_name)),
+            AcpCacheScope::Identified(identity) => {
+                Some(McpConnectionKey::acp(server_name, identity))
+            }
+            AcpCacheScope::Unidentifiable => None,
+        }
+    }
+
     pub(crate) fn persistent_cache_allowed(&self, server_name: &str) -> bool {
-        self.persistent_cache_allowed_for(&McpConnectionKey::static_server(server_name))
+        self.connection_key_for(server_name)
+            .is_some_and(|connection| self.persistent_cache_allowed_for(&connection))
     }
 
     pub(crate) fn persistent_cache_allowed_for(&self, connection: &McpConnectionKey) -> bool {
@@ -72,6 +132,14 @@ impl McpClientPool {
             // Dynamic MCP 首版 fail-closed：在 scoped cache ticket/current-instance
             // fencing 完成前，不读取或写入持久化 resource cache。
             return Some(CacheDenial::DynamicConnection);
+        }
+        if let Some(identity) = connection.acp_identity() {
+            // 同代命中才可复用：换代（generation）/ 更换声明（session / connection）
+            // 或身份不可证明都拒绝——不跨会话按同名 server 命中（M7）。
+            return match self.acp_cache_scope(connection.server_name()) {
+                AcpCacheScope::Identified(current) if current == *identity => None,
+                _ => Some(CacheDenial::AcpConnection),
+            };
         }
         let allowed = self
             .configs
@@ -363,9 +431,26 @@ impl McpClientPool {
         }
     }
 
+    /// 持久化 cache origin（含 workspace 归属）。
+    ///
+    /// M7：会话级 ACP 连接**不用** transport 身份（同名 server 在不同会话、
+    /// 不同连接代下会撞同一 origin），而用「声明会话 + 连接 ID + 连接代」——
+    /// 换代 / 换会话即自然 miss；身份不可证明时给一个不可复用的占位 origin
+    /// （准入侧同时按 fail-closed 拒绝，两处不互相依赖）。
+    /// 身份段只含 opaque 值，凭据（URL query / header / env）不参与。
     pub(crate) fn cache_origin(&self, server_name: &str) -> String {
-        let config = self.configs.read().get(server_name).cloned();
-        let origin = crate::mcp::resource_cache::cache_origin(server_name, config.as_ref());
+        let origin = match self.acp_cache_scope(server_name) {
+            AcpCacheScope::Identified(identity) => {
+                format!("{server_name}\0{}", identity.cache_origin_segment())
+            }
+            AcpCacheScope::Unidentifiable => {
+                format!("{server_name}\0acp-unidentified")
+            }
+            AcpCacheScope::NotAcp => {
+                let config = self.configs.read().get(server_name).cloned();
+                crate::mcp::resource_cache::cache_origin(server_name, config.as_ref())
+            }
+        };
         match self.workspace_scope.get() {
             Some(workspace_id) => format!("{workspace_id}:{origin}"),
             None => format!("unbound:{origin}"),
@@ -377,13 +462,18 @@ impl McpClientPool {
     }
 
     pub(super) fn cache_status_for(&self, server_name: &str) -> Option<String> {
-        if let Some(reason) = self.cache_denial(&McpConnectionKey::static_server(server_name)) {
+        let denial = match self.connection_key_for(server_name) {
+            Some(connection) => self.cache_denial(&connection),
+            None => Some(CacheDenial::AcpConnection),
+        };
+        if let Some(reason) = denial {
             return Some(
                 match reason {
                     CacheDenial::Pending => "cache_pending",
                     CacheDenial::WorkspaceUnbound => "cache_disabled_workspace_unbound",
                     CacheDenial::Configuration => "cache_disabled_by_config",
                     CacheDenial::DynamicConnection => "cache_disabled_dynamic",
+                    CacheDenial::AcpConnection => "cache_disabled_acp_connection",
                     CacheDenial::Credentials => "cache_disabled",
                 }
                 .to_string(),

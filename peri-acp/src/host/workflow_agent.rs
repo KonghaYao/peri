@@ -239,9 +239,6 @@ pub(crate) fn create_session_workflow_middleware(
     agent_catalog: Arc<dyn AgentCatalogPort>,
     mcp_skill_registry: Option<Arc<McpSkillRegistry>>,
     session_resources: Arc<dyn peri_acp_types::session_resources::SessionResources>,
-    execution_admission_port: Option<
-        Arc<dyn peri_acp_types::execution_admission::ExecutionAdmissionPort>,
-    >,
 ) -> Option<Arc<dyn WorkflowMiddlewarePort>> {
     let compact_config = super::compact_config::load_compact_config(&peri_config.read());
     let (progress_tx, progress_rx) = tokio::sync::mpsc::unbounded_channel::<ProgressEvent>();
@@ -277,7 +274,6 @@ pub(crate) fn create_session_workflow_middleware(
         mcp_skill_registry,
         session_id: Some(session_id.to_string()),
         session_resources: Some(session_resources),
-        execution_admission_port,
         compact_config: Some(compact_config),
         cancel: None,
         // H2：按 workflow 能力投影重建的冻结 prompt（不再复制主冻结 prompt）。

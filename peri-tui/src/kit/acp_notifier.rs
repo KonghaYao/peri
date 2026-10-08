@@ -112,7 +112,7 @@ fn spawn_kit_notifier_inner(
 /// 把单条 `AcpNotification` 转换并推入 bridge channel。
 ///
 /// 设计决策：session/update 是流式主通道（agent_message_chunk / tool_call 等），
-/// AgentDone 通过 TurnDone 转换，AgentEvent 通过 `convert_agent_event` 转换。
+/// AgentDone 保留已有 requestId，AgentEvent 通过 `convert_agent_event` 转换。
 fn forward_notification(
     bridge_tx: &mpsc::UnboundedSender<AcpEventWithEpoch>,
     n: AcpNotification,
@@ -163,6 +163,8 @@ fn forward_notification(
                     // 丢弃早于当前 turn 的 stale 取消事件（Issue 2026-08-05）。
                     request_id,
                 }
+            } else if request_id.is_some() {
+                AcpEventData::AgentDone { request_id }
             } else {
                 AcpEventData::TurnDone
             };
@@ -293,3 +295,24 @@ fn handle_session_update(
 #[cfg(test)]
 #[path = "acp_notifier_test.rs"]
 mod tests;
+
+#[cfg(test)]
+mod execution_done_test {
+    use super::*;
+
+    #[test]
+    fn test_agent_done_preserves_request_id_for_bridge() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        forward_notification(
+            &tx,
+            AcpNotification::AgentDone {
+                session_id: "s1".into(),
+                stop_reason: "end_turn".into(),
+                request_id: Some("execution".into()),
+            },
+        );
+        assert!(matches!(rx.try_recv().unwrap(), AcpEventWithEpoch {
+            event: AcpEventData::AgentDone { request_id: Some(id) }, active_session_id,
+        } if id == "execution" && active_session_id == "s1"));
+    }
+}

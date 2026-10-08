@@ -91,7 +91,7 @@ async fn test_agent_subagent_type_missing_returns_error() {
 /// Verify subagent_type="fork" is treated as fork:true (common LLM mistake)
 #[tokio::test]
 async fn test_subagent_type_fork_treated_as_fork_mode() {
-    let host = DurableHost::open("fixture-invoke-fork").await;
+    let host = HostFixture::open("fixture-invoke-fork").await;
     let parent_messages: Arc<RwLock<Vec<BaseMessage>>> = Arc::new(RwLock::new(Vec::new()));
     parent_messages.write().push(BaseMessage::human("Hello"));
 
@@ -153,7 +153,7 @@ async fn test_tool_agent_not_found() {
 #[tokio::test]
 async fn test_tool_executes_with_valid_agent_file() {
     let dir = tempdir().unwrap();
-    let host = DurableHost::open_in(dir.path(), "fixture-invoke-valid").await;
+    let host = HostFixture::open_in(dir.path(), "fixture-invoke-valid").await;
     let agents_dir = dir.path().join(".claude").join("agents");
     std::fs::create_dir_all(&agents_dir).unwrap();
     std::fs::write(
@@ -186,7 +186,7 @@ async fn test_tool_executes_with_valid_agent_file() {
 #[tokio::test]
 async fn test_agent_reserved_fields_parsed() {
     let dir = tempdir().unwrap();
-    let host = DurableHost::open_in(dir.path(), "fixture-invoke-reserved").await;
+    let host = HostFixture::open_in(dir.path(), "fixture-invoke-reserved").await;
     let agents_dir = dir.path().join(".claude").join("agents");
     std::fs::create_dir_all(&agents_dir).unwrap();
     std::fs::write(
@@ -233,7 +233,7 @@ async fn test_agent_tool_in_list() {
 #[tokio::test]
 async fn test_system_builder_injects_system_message() {
     let dir = tempdir().unwrap();
-    let host = DurableHost::open_in(dir.path(), "fixture-invoke-system").await;
+    let host = HostFixture::open_in(dir.path(), "fixture-invoke-system").await;
     let agents_dir = dir.path().join(".claude").join("agents");
     std::fs::create_dir_all(&agents_dir).unwrap();
     std::fs::write(
@@ -285,7 +285,7 @@ async fn test_system_builder_injects_system_message() {
 #[tokio::test]
 async fn test_skill_preload_registered() {
     let dir = tempdir().unwrap();
-    let host = DurableHost::open_in(dir.path(), "fixture-invoke-skill").await;
+    let host = HostFixture::open_in(dir.path(), "fixture-invoke-skill").await;
     let agents_dir = dir.path().join(".claude").join("agents");
     let skills_dir = dir.path().join(".claude").join("skills").join("test-skill");
     std::fs::create_dir_all(&agents_dir).unwrap();
@@ -323,7 +323,7 @@ async fn test_skill_preload_registered() {
             let _ = &cancellation;
             let messages = base_messages(&request);
             let defined = defined_tools(&request);
-            let tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
+            let _tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
 
             assert!(
                 messages
@@ -417,7 +417,7 @@ fn test_agent_description_extended() {
 #[tokio::test]
 async fn test_cancel_token_interrupts_subagent() {
     let dir = tempdir().unwrap();
-    let host = DurableHost::open_in(dir.path(), "fixture-invoke-cancel").await;
+    let host = HostFixture::open_in(dir.path(), "fixture-invoke-cancel").await;
     let agents_dir = dir.path().join(".claude").join("agents");
     std::fs::create_dir_all(&agents_dir).unwrap();
     std::fs::write(
@@ -439,7 +439,7 @@ async fn test_cancel_token_interrupts_subagent() {
             let _ = &cancellation;
             let messages = base_messages(&request);
             let defined = defined_tools(&request);
-            let tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
+            let _tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
 
             if messages
                 .iter()
@@ -499,7 +499,7 @@ async fn test_cancel_token_interrupts_subagent() {
 #[tokio::test]
 async fn test_agent_invoke_mcp_background_rejection_precedes_fork_fallback() {
     let dir = tempdir().unwrap();
-    let host = DurableHost::open_in(dir.path(), "fixture-invoke-mcp-bg").await;
+    let host = HostFixture::open_in(dir.path(), "fixture-invoke-mcp-bg").await;
     let tool = host.bind(make_subagent_tool(vec![]));
     let messages = vec![BaseMessage::human("parent context")];
     let mut input = serde_json::json!({
@@ -529,7 +529,7 @@ async fn test_agent_invoke_mcp_background_rejection_precedes_fork_fallback() {
 #[tokio::test]
 async fn test_agent_invoke_parent_host_masks_fallback_runtime_and_store() {
     let dir = tempdir().unwrap();
-    let host = DurableHost::open_in(dir.path(), "fixture-invoke-parent-host").await;
+    let _host = HostFixture::open_in(dir.path(), "fixture-invoke-parent-host").await;
     let fallback_dir = tempdir().unwrap();
     let store = SessionFixture::open_in(dir.path()).await;
     let fallback_store = SessionFixture::open_in(fallback_dir.path()).await;
@@ -547,12 +547,10 @@ async fn test_agent_invoke_parent_host_masks_fallback_runtime_and_store() {
     parent.set_subagent_host(peri_agent::session::subagent::SubagentHost {
         session_resources: Some(store.facade()),
         parent_thread_id: Some(parent_id.clone()),
-        execution_admission_port: Some(Arc::new(TestAdmissionPort(store.facade()))),
         ..Default::default()
     });
-    // 委派的可信 invocation 必须登记在该父会话上（与父 host 同一门面）。
+    // 本次委派的 tool-call 身份（父侧 provenance 来源）。
     let invocation_id = "fixture-mask-invocation";
-    store.prepare_invocation(&parent_id, invocation_id).await;
     let fallback_manager = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
     let tool = make_subagent_tool(vec![])
         .with_session_resources(fallback_store.facade())
@@ -561,6 +559,7 @@ async fn test_agent_invoke_parent_host_masks_fallback_runtime_and_store() {
         .with_parent_session(parent);
     let mut ctx = peri_agent::tools::ToolContext::new(&[], &cwd);
     ctx.invocation_id = Some(invocation_id.to_string());
+    ctx.tool_call_id = Some(invocation_id.to_string());
     let result = tool.invoke(
         serde_json::json!({"fork": true, "run_in_background": true, "prompt": "sync fallback", "cwd": cwd.clone()}),
         ctx,

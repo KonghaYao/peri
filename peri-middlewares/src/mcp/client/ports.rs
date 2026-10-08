@@ -5,35 +5,6 @@ use super::*;
 // 命令面）为新增数据端口；TUI 不再直持池句柄与 watch channel。
 #[async_trait::async_trait]
 impl peri_acp_types::ports::McpPoolPort for McpClientPool {
-    async fn cold_session_tools(
-        self: Arc<Self>,
-        session_id: &str,
-    ) -> Result<Vec<Arc<dyn peri_acp_types::tools::BaseTool>>, String> {
-        use peri_agent::middleware::r#trait::Middleware;
-        if self
-            .get_all_clients_visible_to(Some(session_id))
-            .iter()
-            .any(|client| client.peer.is_none())
-        {
-            return Err("Blocked: cold session MCP owner is not connected".into());
-        }
-        Ok(crate::mcp::middleware::McpMiddleware::new(self)
-            .with_session_id(session_id)
-            .collect_tools("")
-            .into_iter()
-            .map(Arc::from)
-            .collect())
-    }
-    fn bind_agent_session_resources(
-        &self,
-        session_id: &str,
-        lifecycle: u64,
-        resources: Arc<dyn peri_acp_types::session_resources::SessionResources>,
-    ) -> Result<(), String> {
-        self.session_bindings
-            .write()
-            .bind_resources(session_id, lifecycle, resources)
-    }
     fn verify_shared_environment_close(&self, root_session_id: &str) -> Result<(), String> {
         self.session_bindings
             .read()
@@ -72,55 +43,15 @@ impl peri_acp_types::ports::McpPoolPort for McpClientPool {
         &self,
         session_id: &str,
     ) -> Option<(InboxHandle, Arc<dyn peri_acp_types::tasks::TaskManager>)> {
-        self.session_bindings.read().binding(session_id)
-    }
-
-    async fn agent_session_binding_for_lifecycle(
-        self: Arc<Self>,
-        session_id: &str,
-        lifecycle: u64,
-    ) -> Result<Option<(InboxHandle, Arc<dyn TaskManager>)>, String> {
-        let previous = {
-            let directory = self.session_bindings.read();
-            match directory.lifecycle(session_id) {
-                Some(current) if current == lifecycle => return Ok(directory.binding(session_id)),
-                Some(current) if current > lifecycle => {
-                    return Err("Incomplete: stale session lifecycle".into())
-                }
-                Some(_) => directory.manager(session_id),
-                None => None,
-            }
-        };
-        if let Some(previous) = previous {
-            let stopped = previous
-                .as_any()
-                .downcast_ref::<peri_agent::agent::async_tasks::TaskManager>()
-                .is_some_and(|manager| manager.session_close_settled());
-            if !stopped {
-                return Err("Incomplete: previous lifecycle execution resources unsettled".into());
-            }
+        let (inbox, manager) = self.session_bindings.read().binding(session_id)?;
+        if manager
+            .as_any()
+            .downcast_ref::<peri_agent::agent::async_tasks::TaskManager>()
+            .is_some_and(|manager| manager.session_close_settled())
+        {
+            return None;
         }
-        if lifecycle > 1 {
-            self.open_workspace_task_scope(session_id).await?;
-        }
-        Ok(None)
-    }
-
-    fn bind_agent_session_for_lifecycle(
-        &self,
-        session_id: &str,
-        lifecycle: u64,
-        inbox: InboxHandle,
-        manager: Arc<dyn TaskManager>,
-    ) -> Result<(), String> {
-        self.session_bindings
-            .write()
-            .bind(session_id, lifecycle, inbox, manager)?;
-        self.task_scope_tokens
-            .write()
-            .entry(session_id.to_owned())
-            .or_insert_with(|| self.task_scope_authority.issue(session_id));
-        Ok(())
+        Some((inbox, manager))
     }
 
     fn begin_shutdown(&self) {
@@ -230,18 +161,6 @@ impl peri_acp_types::ports::McpPoolPort for McpClientPool {
 
     fn bind_session_task_manager(&self, session_id: &str, manager: &Arc<dyn TaskManager>) {
         McpClientPool::bind_session_task_manager(self, session_id, manager);
-    }
-
-    async fn recover_workspace_tasks(self: Arc<Self>, session_id: &str) -> Result<(), String> {
-        McpClientPool::recover_workspace_tasks(&self, session_id).await
-    }
-
-    async fn watch_workspace_tasks(
-        self: Arc<Self>,
-        session_id: &str,
-        cancel: tokio_util::sync::CancellationToken,
-    ) {
-        McpClientPool::watch_workspace_tasks(&self, session_id, cancel).await
     }
 
     fn attach_connection_notifier(

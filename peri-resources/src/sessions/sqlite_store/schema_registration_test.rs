@@ -42,11 +42,12 @@ async fn version4_database(path: &Path, root: &Path) -> SqliteConnection {
     connection
 }
 
-/// [回归测试] schema 4 的单列唯一约束把「同一路径上的另一个文件对象」挡在登记之外，
-/// 目录被替换或换位后该路径无法建立新会话。升级只把登记键放宽为组合键：行、绑定、
-/// 外键、线程行与消息（含 frozen snapshot）都保持原样，同一定位 + 同一证据仍然唯一。
+/// [回归测试] schema 4 的单列唯一约束把「同一路径上的另一个文件对象」挡在登记之外。
+/// 升级到 v19 后归属键是 `(machine_id, path)`：同一路径仍然只能有一行，而它现在就是
+/// 工作区归属本身；行、绑定、外键、线程行与消息（含 frozen snapshot）都保持原样，
+/// 同一 (locator, 证据) 组合的项目仍然唯一。
 #[tokio::test]
-async fn test_version4_upgrade_relaxes_registration_keys_and_preserves_rows() {
+async fn test_upgrade_to_v19_keeps_one_row_per_path_and_preserves_rows() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("threads.db");
     let status = std::process::Command::new("git")
@@ -110,7 +111,7 @@ async fn test_version4_upgrade_relaxes_registration_keys_and_preserves_rows() {
         "迁移不得丢失 frozen snapshot"
     );
 
-    // 同一路径上的另一个文件对象可以登记，同一 (locator, 证据) 组合仍然唯一。
+    // 同一路径仍然只有一行归属，同一 (locator, 证据) 组合的项目仍然唯一。
     let mut probe = SqliteConnection::connect_with(
         &SqliteConnectOptions::new().filename(&path).read_only(true),
     )
@@ -125,24 +126,19 @@ async fn test_version4_upgrade_relaxes_registration_keys_and_preserves_rows() {
         "迁移不得改写线程行与消息：frozen snapshot 与历史都在其中"
     );
 
-    sqlx::query(
-        "INSERT INTO legacy_execution_registrations (id, project_id, root, root_identity, discovery)
-         SELECT '33333333-3333-4333-8333-333333333333', project_id, root, '{\"device\":9,\"inode\":9}', discovery
-         FROM legacy_execution_registrations WHERE id = '22222222-2222-4222-8222-222222222222'",
-    )
-    .execute(&store.database.pool)
-    .await
-    .unwrap();
+    // v19 起归属键是 (machine_id, path)：同一路径的第二条登记必须被唯一约束拒绝，
+    // 即使它记录的是另一个文件对象——路径就是归属身份。
     let duplicate_workspace = sqlx::query(
-        "INSERT INTO legacy_execution_registrations (id, project_id, root, root_identity, discovery)
-         SELECT '44444444-4444-4444-8444-444444444444', project_id, root, root_identity, discovery
-         FROM legacy_execution_registrations WHERE id = '22222222-2222-4222-8222-222222222222'",
+        "INSERT INTO workspaces (id, machine_id, path, path_source, project_id, identity, discovery)
+         SELECT '33333333-3333-4333-8333-333333333333', machine_id, path, path_source, project_id,
+             '{\"device\":9,\"inode\":9}', discovery
+         FROM workspaces WHERE id = '22222222-2222-4222-8222-222222222222'",
     )
     .execute(&store.database.pool)
     .await;
     assert!(
         duplicate_workspace.is_err(),
-        "同一 (root, root_identity) 不得重复登记"
+        "同一 (machine_id, path) 不得重复登记"
     );
     // 同一 locator 上的另一个文件对象可以登记（同一路径重新克隆）。
     sqlx::query(
@@ -163,11 +159,12 @@ async fn test_version4_upgrade_relaxes_registration_keys_and_preserves_rows() {
         duplicate_project.is_err(),
         "同一 (locator, object_identity) 不得重复登记"
     );
-    // 重建登记表不能丢外键：引用不存在项目的工作区仍被拒绝。
+    // 归属行仍受 projects 外键约束：引用不存在项目的工作区被拒绝。
     let orphan = sqlx::query(
-        "INSERT INTO legacy_execution_registrations (id, project_id, root, root_identity, discovery)
-         SELECT '77777777-7777-4777-8777-777777777777', 'missing-project', root || '-orphan', root_identity, discovery
-         FROM legacy_execution_registrations WHERE id = '22222222-2222-4222-8222-222222222222'",
+        "INSERT INTO workspaces (id, machine_id, path, path_source, project_id)
+         SELECT '77777777-7777-4777-8777-777777777777', machine_id, path || '-orphan', path_source,
+             'missing-project'
+         FROM workspaces WHERE id = '22222222-2222-4222-8222-222222222222'",
     )
     .execute(&store.database.pool)
     .await;
@@ -234,10 +231,6 @@ async fn assert_registration_upgrade_allows_directory_changes(version: i64) {
         assert_eq!(
             resolved.workspace_id == workspace.workspace_id,
             cwd == &original
-        );
-        assert_ne!(
-            resolved.execution_registration_id,
-            workspace.execution_registration_id
         );
         assert_ne!(resolved.project_id, workspace.project_id);
         let new_thread = store
@@ -332,7 +325,8 @@ async fn healthy_version5_database(path: &Path) -> SqliteConnection {
     connection
 }
 
-/// [回归测试] 健康 5 已允许同路径多对象、同对象多路径，补迁移不能重新收紧或归并它们。
+/// [回归测试] 健康 5 允许同路径多对象、同对象多路径；v19 起归属键是 `(machine_id, path)`，
+/// 同一路径的多条登记只并入 `id` 最小的一条，别的路径的登记连 `id` 一起原样保留。
 #[tokio::test]
 async fn test_registration_upgrade_preserves_healthy_v5_composite_registrations() {
     let dir = tempfile::tempdir().unwrap();
@@ -349,11 +343,24 @@ async fn test_registration_upgrade_preserves_healthy_v5_composite_registrations(
     let before = identity_bytes(&mut connection).await;
     let history = history_bytes(&mut connection).await;
     connection.close().await.unwrap();
+    // 幸存的行：原路径的 '22222222'（同路径 id 最小的一条）与换位路径的 '55555555'；
+    // '66666666' 是同一路径的第二条登记，并入后不再有独立行。
+    let mut expected = before.clone();
+    expected.retain(|row| !row.starts_with("[\"66666666-"));
+    assert_eq!(
+        expected.len(),
+        before.len() - 1,
+        "夹具必须恰好有一条同路径的重复登记被并入"
+    );
     // 首次开库升级，第二次开库保持同一结果；不访问 fixture 中不存在的旧目录。
     for _ in 0..2 {
         let store = SqliteThreadStore::new(&path).await.unwrap();
         let mut connection = store.database.pool.acquire().await.unwrap();
-        assert_eq!(identity_bytes(&mut connection).await, before);
+        assert_eq!(
+            identity_bytes(&mut connection).await,
+            expected,
+            "不同路径的登记必须连 id 一起原样保留，同路径的多条只并入 id 最小的一条"
+        );
         assert_eq!(history_bytes(&mut connection).await, history);
         let (version,): (i64,) = sqlx::query_as("PRAGMA user_version")
             .fetch_one(&mut *connection)

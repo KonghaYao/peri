@@ -31,7 +31,13 @@ async fn v13_upgrade_drops_execution_owner_tables_and_preserves_close_intent() {
         .await
         .unwrap();
     sqlx::raw_sql(
-        "CREATE TABLE session_execution_owners(root_id TEXT PRIMARY KEY REFERENCES threads(id), epoch INTEGER, nonce TEXT, released INTEGER);
+        // v13 的形状里还有执行登记表（v12 起由旧 `workspaces` 改名而来，v19 删除）；
+        // 夹具从新建的库出发，必须把它补回来，否则「声明为 13 的库」并不具备 v13 形状。
+        "CREATE TABLE legacy_execution_registrations (
+            id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
+            root TEXT NOT NULL, root_identity TEXT NOT NULL, discovery TEXT NOT NULL,
+            UNIQUE(root, root_identity), UNIQUE(id, project_id));
+         CREATE TABLE session_execution_owners(root_id TEXT PRIMARY KEY REFERENCES threads(id), epoch INTEGER, nonce TEXT, released INTEGER);
          CREATE TABLE session_execution_workspace_descriptors(root_id TEXT PRIMARY KEY REFERENCES session_execution_owners(root_id), endpoint TEXT);
          PRAGMA user_version = 13;",
     ).execute(&store.database.pool).await.unwrap();
@@ -77,7 +83,7 @@ async fn v13_upgrade_drops_execution_owner_tables_and_preserves_close_intent() {
 
 /// [回归测试] 实际旧库包含 thread_goals，不能因额外业务表而拒绝启动。
 #[tokio::test]
-async fn test_legacy_with_goals_upgrades_removing_goals_and_preserving_extensions() {
+async fn test_legacy_with_goals_upgrades_preserving_goals_and_extensions() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("threads.db");
     let mut connection = SqliteConnection::connect_with(
@@ -133,7 +139,7 @@ async fn test_legacy_with_goals_upgrades_removing_goals_and_preserving_extension
             .fetch_one(&mut connection)
             .await
             .unwrap();
-    assert_eq!(goals, 0);
+    assert_eq!(goals, 1);
     let after_schema: Vec<(String, Option<String>)> = sqlx::query_as(
         "SELECT name, sql FROM sqlite_schema WHERE name IN ('extension_state', 'idx_threads_parent_thread_id') ORDER BY name",
     ).fetch_all(&mut connection).await.unwrap();
@@ -744,18 +750,32 @@ async fn test_schema3_identity_migration_reuses_binding_and_survives_reopen() {
     reopened.close().await;
 }
 
-/// 记录 v2 升级不能改动的身份数据。
+/// 记录 v2 升级不能改动的身份数据：项目、登记空间与绑定三段的原样值。
+///
+/// 登记空间的**载体与列名**随版本变化：v12 之前是 `workspaces(root, root_identity)`，
+/// v12..v18 是改名为 `legacy_execution_registrations` 的原表，v19 起并回
+/// `workspaces(path, identity)`。同一 id 下的五元组 (id, project_id, 根, 根身份, 发现)
+/// 在搬运中逐字不变，所以投影按当前形状选择，跨版本的比较仍然落在同一份事实上。
 async fn identity_bytes(connection: &mut SqliteConnection) -> Vec<String> {
-    let mut values = Vec::new();
-    let migrated: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'legacy_execution_registrations'",
-    )
-    .fetch_one(&mut *connection).await.unwrap();
-    let registration_query = if migrated.0 == 0 {
-        "SELECT json_array(id, project_id, root, root_identity, discovery) FROM workspaces ORDER BY id"
-    } else {
-        "SELECT json_array(id, project_id, root, root_identity, discovery) FROM legacy_execution_registrations ORDER BY id"
+    let registrations = column_names(connection, "legacy_execution_registrations")
+        .await
+        .unwrap();
+    let workspaces = column_names(connection, "workspaces").await.unwrap();
+    let registration_query = match (registrations.is_empty(), workspaces.contains("root")) {
+        (false, _) => {
+            "SELECT json_array(id, project_id, root, root_identity, discovery)
+             FROM legacy_execution_registrations ORDER BY id"
+        }
+        (true, true) => {
+            "SELECT json_array(id, project_id, root, root_identity, discovery)
+             FROM workspaces ORDER BY id"
+        }
+        (true, false) => {
+            "SELECT json_array(id, project_id, path, identity, discovery)
+             FROM workspaces ORDER BY id"
+        }
     };
+    let mut values = Vec::new();
     for query in [
         "SELECT json_array(id, locator, object_identity) FROM projects ORDER BY id",
         registration_query,

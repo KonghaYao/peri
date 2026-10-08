@@ -371,12 +371,7 @@ async fn reason_refresh_rebinds_search_and_execute_to_same_dynamic_catalog() {
         },
         ports::SessionMcpCapabilityPort,
     };
-    use peri_agent::{
-        agent::react::{ReactLLM, Reasoning, StreamingContext},
-        messages::BaseMessage,
-        session::tool_catalog::SessionToolCatalog,
-        tools::ToolContext,
-    };
+    use peri_agent::{session::tool_catalog::SessionToolCatalog, tools::ToolContext};
 
     struct MutableCapability(RwLock<Arc<SessionMcpCapabilitySnapshot>>);
     impl SessionMcpCapabilityPort for MutableCapability {

@@ -10,8 +10,8 @@ async fn test_resume_thread_id_placeholder_ignored_and_spawns_new() {
     for placeholder in ["", "new", "__omit__"] {
         let dir = tempdir().unwrap();
         write_test_agent(&dir);
-        let fixture = SessionFixture::open_in(dir.path()).await;
-        let host = DurableHost::open_in(dir.path(), "fixture-resume-placeholder").await;
+        let _fixture = SessionFixture::open_in(dir.path()).await;
+        let host = HostFixture::open_in(dir.path(), "fixture-resume-placeholder").await;
         let t = host.bind(with_agent_face(make_subagent_tool(vec![]), dir.path()).await);
         let result = t
             .invoke(
@@ -268,13 +268,10 @@ async fn test_resume_thread_id_active_rejected() {
     meta.id = id.clone();
     meta.title = Some("fork".to_string());
     store.create_thread(meta).await.unwrap(); // ThreadMeta 默认 agent_status = Active
-    let t = install_admission_port(
-        make_subagent_tool(vec![])
-            .with_session_resources(store.facade())
-            .with_parent_thread_id(parent_id.clone())
-            .with_parent_session(parent.clone()),
-        &store,
-    );
+    let t = make_subagent_tool(vec![])
+        .with_session_resources(store.facade())
+        .with_parent_thread_id(parent_id.clone())
+        .with_parent_session(parent.clone());
     let result = t
         .invoke(
             serde_json::json!({
@@ -549,7 +546,7 @@ async fn test_resume_thread_id_fork_title_uses_parent_tools_and_200_iterations()
         ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
             use crate::subagent::test_support::*;
             let _ = &cancellation;
-            let messages = base_messages(&request);
+            let _messages = base_messages(&request);
             let defined = defined_tools(&request);
             let tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
 
@@ -664,7 +661,7 @@ async fn test_resume_thread_id_agent_def_refilters_tools() {
         ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
             use crate::subagent::test_support::*;
             let _ = &cancellation;
-            let messages = base_messages(&request);
+            let _messages = base_messages(&request);
             let defined = defined_tools(&request);
             let tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
 

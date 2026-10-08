@@ -33,13 +33,6 @@ tokio = { workspace = true, features = ["test-util"] }
 tempfile.workspace = true
 url.workspace = true
 
-[features]
-# 把 `StageContext::best_effort_fixture_builder`（无 durable 执行的最佳努力装配）
-# 暴露给本 crate 的 `tests/` 集成测试：那里的 lib 不带 `cfg(test)`，但
-# Compact 对抗套件用的脚本 `ReactLLM` 替身无法承载 durable 路径要求的
-# `prepare_reasoning`。默认关闭，生产构建不含该旁路。
-test-fixtures = []
-
 [target.'cfg(not(target_os = "emscripten"))'.dependencies]
 tokio = { workspace = true, features = ["full"] }
 peri-resources = { path = "../peri-resources" }

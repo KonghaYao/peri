@@ -225,8 +225,6 @@ fn test_steer_takeback_waits_for_receipt_and_preserves_raw_draft() {
     state.settle(
         &command,
         UserInputQueueReceipt {
-            work_receipts: Vec::new(),
-            publication_generations: Default::default(),
             snapshot: UserInputQueueSnapshot {
                 items: Vec::new(),
                 ..make_snapshot(2)
@@ -310,8 +308,6 @@ fn test_steer_takeback_discard_keeps_rejected_enqueue_recoverable() {
 
 fn takeback_receipt() -> UserInputQueueReceipt {
     UserInputQueueReceipt {
-        work_receipts: Vec::new(),
-        publication_generations: Default::default(),
         snapshot: UserInputQueueSnapshot {
             items: Vec::new(),
             ..make_snapshot(2)
@@ -391,8 +387,6 @@ fn test_steer_confirmed_takeback_survives_session_reload() {
     state.settle(
         &command,
         UserInputQueueReceipt {
-            work_receipts: Vec::new(),
-            publication_generations: Default::default(),
             snapshot: UserInputQueueSnapshot {
                 items: Vec::new(),
                 ..make_snapshot(2)
@@ -430,8 +424,6 @@ fn test_steer_takeback_receipt_after_reload_remains_recoverable() {
     state.settle(
         &command,
         UserInputQueueReceipt {
-            work_receipts: Vec::new(),
-            publication_generations: Default::default(),
             snapshot: UserInputQueueSnapshot {
                 items: Vec::new(),
                 ..make_snapshot(2)
@@ -466,8 +458,6 @@ fn test_steer_late_takeback_after_instance_change_recovers_without_replacing_sna
     state.settle(
         &command,
         UserInputQueueReceipt {
-            work_receipts: Vec::new(),
-            publication_generations: Default::default(),
             snapshot: UserInputQueueSnapshot {
                 items: Vec::new(),
                 ..make_snapshot(2)
@@ -541,8 +531,6 @@ fn test_steer_idle_submission_skips_queue_until_delivery() {
     state.settle(
         &command,
         UserInputQueueReceipt {
-            work_receipts: Vec::new(),
-            publication_generations: Default::default(),
             snapshot,
             results: Vec::new(),
             taken_back: None,
@@ -614,8 +602,6 @@ fn test_steer_idle_submission_queued_receipt_exposes_real_queue() {
     state.settle(
         &command,
         UserInputQueueReceipt {
-            work_receipts: Vec::new(),
-            publication_generations: Default::default(),
             snapshot: make_snapshot(3),
             results: Vec::new(),
             taken_back: None,
@@ -639,8 +625,6 @@ fn test_steer_idle_submission_staged_snapshot_then_dispatch_skips_queue() {
     state.settle(
         &command,
         UserInputQueueReceipt {
-            work_receipts: Vec::new(),
-            publication_generations: Default::default(),
             snapshot: make_snapshot(3),
             results: Vec::new(),
             taken_back: None,

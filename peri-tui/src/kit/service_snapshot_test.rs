@@ -31,7 +31,6 @@ fn workspace_json(cwd: &str) -> Value {
     json!({
         "project_id":"00000000-0000-0000-0000-000000000001",
         "workspace_id":"00000000-0000-0000-0000-000000000002",
-        "execution_registration_id":"00000000-0000-0000-0000-000000000002",
         "cwd":cwd,"root":cwd,"relative_cwd":""
     })
 }

@@ -163,7 +163,7 @@ fn lat09_syntax_budget_accepts_exact_boundaries_and_rejects_one_above() {
     assert!(within_highlight_budget(&exact_bytes));
     exact_bytes.push("x".to_owned());
     assert!(!within_highlight_budget(&exact_bytes));
-    assert!(!within_highlight_budget(&vec![
+    assert!(!within_highlight_budget(&[
         "x".repeat(MAX_HIGHLIGHT_LINE_BYTES + 1)
     ]));
     assert!(within_highlight_budget(&vec![

@@ -17,6 +17,7 @@ use ratatui_kit::ratatui::style::{Modifier, Style};
 use ratatui_kit::ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
+mod error;
 mod group;
 mod helpers;
 mod interaction;
@@ -26,8 +27,7 @@ mod system;
 mod tool_card;
 mod user;
 
-#[cfg(test)]
-use self::group::SubAgentSummary;
+pub(crate) use self::error::{copy_text_at, subagent_error_buttons};
 use self::group::{render_collapsed_group_lines, render_subagent_group_lines};
 use self::helpers::{format_completed_duration, place_meta, prefixed_cont_line};
 pub(crate) use self::interaction::InteractionLayout;
@@ -391,12 +391,19 @@ pub(crate) fn vm_to_lines_cached_with_layout(
             let (lines, image_lines) = render_user_bubble_lines(data, grid);
             (lines, None, None, image_lines)
         }
-        TuiRenderUnit::TuiToolCard(data) => {
-            (render_tool_card_lines(data, grid), None, None, Vec::new())
-        }
-        TuiRenderUnit::TuiSystemNote(data) => {
-            (render_system_note_lines(data, grid), None, None, Vec::new())
-        }
+        TuiRenderUnit::TuiToolCard(data) => (
+            render_tool_card_lines(data, grid),
+            data.is_error.then(|| error::icon_button(grid, 0)),
+            None,
+            Vec::new(),
+        ),
+        TuiRenderUnit::TuiSystemNote(data) => (
+            render_system_note_lines(data, grid),
+            (data.level == crate::kit::tui_render_unit::TuiNoteLevel::Error)
+                .then(|| error::icon_button(grid, 0)),
+            None,
+            Vec::new(),
+        ),
         TuiRenderUnit::TuiSystemReminder(data) => (
             render_system_reminder_lines(data, grid),
             None,

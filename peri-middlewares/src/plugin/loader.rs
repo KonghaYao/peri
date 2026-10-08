@@ -433,6 +433,7 @@ fn describe_json_error(error: &serde_json::Error) -> String {
 fn describe_server_parse_error(error: &serde_json::Error) -> String {
     let text = error.to_string();
     let rule = [
+        McpServerConfigValidationError::DisabledWithSystemMcp,
         McpServerConfigValidationError::SystemMcpToolsRequiresSystemMcp,
         McpServerConfigValidationError::SystemMcpTimeoutRequiresSystemMcp,
         McpServerConfigValidationError::SystemMcpTimeoutOutOfRange,
@@ -719,6 +720,14 @@ fn load_plugins_with_policies(
             data_path,
             hooks_config,
             marketplace: plugin.marketplace.clone(),
+            // M6：来源身份只取自安装记录（id / origin / scope / projectPath），
+            // 不由插件名、安装路径或当轮 cwd 反推。
+            scope: peri_acp_types::plugin::PluginScope {
+                plugin_id: plugin.id.clone(),
+                origin: plugin.origin,
+                install_scope: plugin.scope,
+                project_path: plugin.project_path.clone(),
+            },
         });
     }
 
@@ -870,6 +879,7 @@ pub fn load_enabled_plugins_aggregated(claude_dir: &Path, cwd: Option<&Path>) ->
             );
             return PluginLoadResult {
                 plugins: vec![],
+                scope: vec![],
                 all_skill_roots: vec![],
                 all_mcp_servers: HashMap::new(),
                 all_agent_dirs: vec![],
@@ -902,7 +912,6 @@ fn aggregate_plugin_data(plugins: Vec<LoadedPlugin>) -> PluginLoadResult {
         .iter()
         .flat_map(|p| p.skills_roots.clone())
         .collect();
-
     let all_mcp_servers = merge_plugin_mcp_servers(&plugins);
 
     let all_agent_dirs: Vec<PathBuf> = plugins.iter().flat_map(|p| p.agents_dirs.clone()).collect();
@@ -947,8 +956,13 @@ fn aggregate_plugin_data(plugins: Vec<LoadedPlugin>) -> PluginLoadResult {
         .flatten()
         .collect();
 
+    // M6：来源作用域是 `plugins` 的投影（不是第二份事实），顺序一一对应。
+    let scope: Vec<peri_acp_types::plugin::PluginScope> =
+        plugins.iter().map(|plugin| plugin.scope.clone()).collect();
+
     PluginLoadResult {
         plugins,
+        scope,
         all_skill_roots,
         all_mcp_servers,
         all_agent_dirs,
@@ -964,3 +978,7 @@ pub(crate) mod tests;
 #[cfg(test)]
 #[path = "loader_scope_test.rs"]
 mod scope_tests;
+
+#[cfg(test)]
+#[path = "loader_admission_test.rs"]
+mod admission_tests;

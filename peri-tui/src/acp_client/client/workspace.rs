@@ -143,7 +143,7 @@ impl AcpTuiClient {
         if context.binding.as_ref().is_some_and(|binding| {
             binding.schema_version != peri_acp_types::workspace::SESSION_BINDING_VERSION
                 || binding.project_id != context.workspace.project_id
-                || binding.workspace_id != context.workspace.execution_registration_id
+                || binding.workspace_id != context.workspace.workspace_id
                 || binding.cwd_relative_to_workspace != context.workspace.relative_cwd
         }) {
             return Err(AcpError::new(-32603, "inconsistent session binding"));

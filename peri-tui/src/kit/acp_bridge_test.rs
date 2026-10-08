@@ -653,6 +653,45 @@ async fn test_goal_snapshot_bridge_accepts_current_session_and_drops_stale_sessi
     *GOAL_SNAPSHOT.state().write() = old_goal;
 }
 
+/// [回归测试] 会话切换后 A 的 prompt 错误不能清除 B 的 loading。
+#[tokio::test]
+#[serial]
+async fn test_late_prompt_failure_from_previous_session_does_not_reset_loading() {
+    use crate::kit::atoms::{ACP_STATE, ACTIVE_SESSION_ID, BRIDGE_RESET_COUNTER};
+    let _restore = ReplayAtomsGuard::new();
+    let old_active = ACTIVE_SESSION_ID.state().read().clone();
+    let old_reset = BRIDGE_RESET_COUNTER.get();
+    *ACTIVE_SESSION_ID.state().write() = "s2".into();
+    BRIDGE_RESET_COUNTER.set(old_reset.wrapping_add(1));
+    let (tx, rx) = mpsc::unbounded_channel();
+    let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
+    let shutdown = CancellationToken::new();
+    let handle = spawn_acp_bridge_observed(rx, shutdown.clone(), observed_tx);
+    tx.send(AcpEventWithEpoch {
+        event: AcpEventData::PromptSubmitted {
+            request_id: Some("B".into()),
+        },
+        active_session_id: "s2".into(),
+    })
+    .unwrap();
+    assert_eq!(observed_rx.recv().await, Some(true));
+    assert!(ACP_STATE.state().read().is_loading);
+    tx.send(AcpEventWithEpoch {
+        event: AcpEventData::PromptFailed {
+            request_id: "A".into(),
+        },
+        active_session_id: "s1".into(),
+    })
+    .unwrap();
+    assert_eq!(observed_rx.recv().await, Some(false));
+    assert!(ACP_STATE.state().read().is_loading);
+    shutdown.cancel();
+    drop(tx);
+    handle.await.unwrap();
+    *ACTIVE_SESSION_ID.state().write() = old_active;
+    BRIDGE_RESET_COUNTER.set(old_reset);
+}
+
 /// [回归测试] production bridge 在 session gate 前不发布 HITL UI state。
 #[tokio::test]
 #[serial]

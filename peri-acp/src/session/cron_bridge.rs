@@ -21,9 +21,7 @@ impl SessionCronBridge {
     /// approval must happen before a trigger becomes model input.
     pub fn start(
         session_id: String,
-        recipient_lifecycle: u64,
         inbox: peri_acp_types::session::MessageQueue,
-        resources: Arc<dyn peri_acp_types::session_resources::SessionResources>,
         scheduler: &Arc<dyn CronSchedulerPort>,
         continuation_tx: mpsc::UnboundedSender<CronContinuationRequest>,
     ) -> Self {
@@ -31,12 +29,6 @@ impl SessionCronBridge {
         let shutdown = CancellationToken::new();
         let shutdown_clone = shutdown.clone();
         let handle = tokio::spawn(async move {
-            let Ok(recipient_control) = resources.load_session_control(&session_id).await else {
-                return;
-            };
-            if recipient_control.lifecycle != recipient_lifecycle {
-                return;
-            }
             loop {
                 tokio::select! {
                     biased;
@@ -45,7 +37,6 @@ impl SessionCronBridge {
                         Some(trigger) => {
                             if continuation_tx.send(CronContinuationRequest {
                                 session_id: session_id.clone(),
-                                recipient_control: recipient_control.clone(),
                                 inbox: inbox.clone(),
                                 trigger,
                             }).is_err() {
