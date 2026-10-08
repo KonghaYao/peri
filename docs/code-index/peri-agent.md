@@ -18,6 +18,8 @@ Emscripten 最小入口见 [`peri-wasm`](peri-wasm.md)：复用本 crate 的 `ru
 
 ## 架构速览
 
+Child 当前进程的晚到任务结果由 `session/subagent/child_runner.rs` 保留消费责任，后台与前台委派共享该 runner；bounded idle 退出不直接等价于委派成果完成。`background.rs` 对事件转发失败继续可靠发布失败终态并结算，不保留已退出 worker 的假 Running。挂起事件在 `RenderEvent` FIFO 中，与恢复后的输出保持顺序；子 Agent forwarder 不将自己的挂起投影到父 Agent。定向入口 `session::subagent::child_runner::tests`、`session::subagent::tests::bound_and_tail_cases` 与 `agent::subagent_event_forwarder`。
+
 后台完成回调 `session/bg_complete.rs` 使用 `TaskTerminalDelivery::accept` 同步确认当前队列接纳，成功后 TaskManager 立即结算，不再启动 detached 投递任务并保留虚假的 Completing。异步 delivery 仍由其 owner await，不能通过同步回调伪造成功；失败保留原结果供重试。回归入口 `session::bg_complete::tests`；宿主晚到激活见 ACP 代码索引。
 
 历史工具配对的模型视图修补在 `src/messages/tool_pairing.rs`；`compact_v2/projection.rs::render_persisted_llm_view` 统一供 Reason、Full 摘要与预算估算调用。缺失结果只在请求视图补充未知执行状态的错误占位，错位真实结果保持身份和内容并移到调用后；不改 canonical、不重跑工具。紧随调用的用户内容块内已有真实结果时保留内容，仅在结果块位于文本等内容之后时将结果块移到请求视图前部；内嵌结果不完整、错位、重复或孤立时发送前报错。`Raw` 内容在 `AgentModelBridge::convert_content` 直接报错，不进入 Anthropic 请求。回归入口 `messages::tool_pairing::tests`。

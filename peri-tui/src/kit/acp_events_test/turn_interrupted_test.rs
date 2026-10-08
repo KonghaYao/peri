@@ -118,7 +118,10 @@ fn test_stale_turn_interrupted_does_not_rollback_new_turn() {
     // 返工：stale 分支保留 last_submitted_text——它是最近一次提交（B）的回滚锚点，
     // 后续 B 被取消（连续取消）时零产出回滚仍需恢复 B 的输入文本。
     assert_eq!(
-        state.last_submitted_text.as_deref(),
+        state
+            .last_submitted_text
+            .as_ref()
+            .map(|input| input.text.as_str()),
         Some("B"),
         "stale TurnInterrupted 应保留最近一次提交的文本锚点"
     );
@@ -316,8 +319,7 @@ fn test_turn_interrupted_archive_branch_drains_input_buffer() {
 /// Issue 2026-08-05 返工核心验收（主导排序）：新提交 B 已发 RPC
 /// （PromptSubmitted 先到）后，旧 turn A 的 TurnInterrupted 晚到——
 /// request_id 配对判定（A1 ≠ B1）应识别为 stale：不删 B 气泡、不恢复文本；
-/// 排队输入（用户已提交的新请求，不得随旧 turn 取消作废）复位后立即
-/// drain 提交（遗留项修复）。
+/// B 仍运行，排队输入继续等待 B 的真实终态。
 #[test]
 #[serial]
 fn test_stale_turn_interrupted_request_id_mismatch() {
@@ -327,9 +329,6 @@ fn test_stale_turn_interrupted_request_id_mismatch() {
     if let Some(mu) = crate::kit::atoms::INPUT_RESTORE_TEXT.get() {
         mu.lock().take();
     }
-    // 确保 SUBMIT_TX 已初始化（stale 分支 drain 依赖）；若本次成功安装
-    // 可观察 channel，则顺带验证提交消息确实发出。
-    let mut drain_rx = ensure_submit_tx_observable();
 
     let mut state = BridgeState {
         variant: 0,
@@ -376,7 +375,6 @@ fn test_stale_turn_interrupted_request_id_mismatch() {
             request_id: Some("B1".into()),
         },
     );
-    // 排队输入（B 提交之后用户又输入的排队请求）——stale 复位后立即 drain 提交
     INPUT_BUFFER
         .state()
         .write()
@@ -398,7 +396,6 @@ fn test_stale_turn_interrupted_request_id_mismatch() {
         },
     );
 
-    // 验收：不删新气泡、不恢复旧文本；排队输入复位后立即 drain 提交
     assert_eq!(
         state.committed.len(),
         committed_before,
@@ -415,26 +412,22 @@ fn test_stale_turn_interrupted_request_id_mismatch() {
             .is_none(),
         "stale TurnInterrupted 不得恢复旧输入文本"
     );
-    assert!(
-        INPUT_BUFFER.state().read().is_empty(),
-        "排队输入属于用户已提交的新请求：stale 复位后应立即 drain 提交（不得滞留悬挂）"
+    assert_eq!(
+        INPUT_BUFFER.state().read().len(),
+        1,
+        "B 未结束时不得 drain 排队输入"
     );
-    if let Some(mut rx) = drain_rx.take() {
-        match rx.try_recv() {
-            Ok(SubmitRequest::AgentText { text: t, .. }) => assert_eq!(t, "queued"),
-            Ok(other) => panic!("stale drain 应提交 AgentText, got {other:?}"),
-            Err(e) => panic!("stale drain 应发出排队输入, got {e:?}"),
-        }
-    }
     assert_eq!(
         state.phase,
-        SessionPhase::Idle,
-        "phase 应复位（loading 解除）"
+        SessionPhase::PromptRunning,
+        "A 的旧终态不得关闭 B 的 loading"
     );
-    // 返工：stale 分支保留 last_submitted_text——它是最近一次提交（B）的回滚锚点，
-    // 后续 B 被取消（连续取消）时零产出回滚仍需恢复 B 的输入文本。
+    assert_eq!(state.current_request_id.as_deref(), Some("B1"));
     assert_eq!(
-        state.last_submitted_text.as_deref(),
+        state
+            .last_submitted_text
+            .as_ref()
+            .map(|input| input.text.as_str()),
         Some("B"),
         "stale TurnInterrupted 应保留最近一次提交的文本锚点"
     );

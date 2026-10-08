@@ -13,6 +13,8 @@ Markdown 高亮预算在 `kit/markdown/code_block.rs`，超限保留原文，仅
 
 ## 架构速览
 
+内部续跑与定时审批通过 `ExecutionStarted` 建立真实 execution 身份及 HITL 许可；`acp_client/interaction_lifecycle.rs` 对 managed 输入与 external execution 共用代际、重复和终态归属规则，但仅 managed 输入的 Stop 携带 mailbox 票据身份。`kit/acp_notifier.rs` 保留终态 request ID；bridge 不让陈旧结束或迟到提交失败清除新执行。`kit/acp_events/mod.rs::SubmittedInputRollback` 将 composer 回滚文本绑定提交请求，`turn.rs` 只允许所属请求取消回滚，internal execution 开始不重绑它。日常提交失败只发布原会话/请求所属事件，不直接写全局 loading。定向入口 `acp_client::client::pump::user_input_run_tests` 与 `kit::acp_events::acp_events_test`；批次验证见 `spec/issues/2026-10-08-async-execution-chain-fixes.md`。
+
 错误预览在 `src/kit/message_area/render/error.rs` 按显示列宽与 grapheme 折行，有界读取并最多保留三行；超出显示省略号，完整 VM 原文不修改。系统错误、工具错误与子任务错误的 ×/x 点击热区复用 `message_area/{hits,handlers}.rs` 的复制链，按 slot/hash 校验身份后复制完整错误原文（不从三行预览重建）。工具折叠态仍为单行，展开态含标题最多三行；子任务原因预览最多三行。复制反馈沿用既有字符计数提示，弹窗遮挡与陈旧点击不复制。
 
 嵌入式 TUI 与 print 由 `src/launch.rs`、`src/cli_print.rs` 创建普通 ACP host/client pump，

@@ -176,6 +176,39 @@ pub(crate) async fn approve_scheduled_trigger(
 
 #[allow(clippy::too_many_arguments)] // Shared host execution wiring plus optional Agent-owned input ticket.
 pub(crate) async fn run_prompt(
+    mut params: Value,
+    sessions: &SharedSessions,
+    deployment: &super::AcpServerConfig,
+    transport: &Arc<dyn crate::transport::AcpTransport>,
+    pool: Arc<parking_lot::Mutex<crate::session::agent_pool::AgentPool>>,
+    cont_tx: Option<tokio::sync::mpsc::UnboundedSender<executor::ContinuationRequest>>,
+    continuation: bool,
+    input_ticket: Option<super::user_input::UserInputRun>,
+) -> Result<Value, AcpError> {
+    let notifications = super::execution::ExecutionNotifications::from_params(&mut params)?;
+    let session_id = super::extract_session_id(&params, "").to_owned();
+    let result = run_prompt_attempt(
+        params,
+        sessions,
+        deployment,
+        transport,
+        pool,
+        cont_tx,
+        continuation,
+        input_ticket,
+        &notifications,
+    )
+    .await;
+    if result.is_err() {
+        notifications
+            .finish_early(&session_id, "error", deployment, transport)
+            .await;
+    }
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_prompt_attempt(
     params: Value,
     sessions: &SharedSessions,
     deployment: &super::AcpServerConfig,
@@ -184,6 +217,7 @@ pub(crate) async fn run_prompt(
     cont_tx: Option<tokio::sync::mpsc::UnboundedSender<executor::ContinuationRequest>>,
     continuation: bool,
     input_ticket: Option<super::user_input::UserInputRun>,
+    notifications: &super::execution::ExecutionNotifications,
 ) -> Result<Value, AcpError> {
     // Borrow deployment services; turn-owned callbacks clone only their existing handles.
     // Provider/config snapshots remain below, after the session snapshot is captured.
@@ -255,6 +289,15 @@ pub(crate) async fn run_prompt(
             transport,
         )
         .await?;
+    } else {
+        notifications
+            .start(
+                &session_id,
+                user_input_mailbox.generation(),
+                deployment,
+                transport,
+            )
+            .await?;
     }
     // Read session data under lock, then release immediately.
     let (cwd, history_payloads, is_empty, thread_id, frozen, incoming_recalls, workflow_middleware) = {
@@ -551,6 +594,7 @@ pub(crate) async fn run_prompt(
         .await
         .map_err(|e| AcpError::new(-32603, format!("run_session failed: {e}")))?;
     let result = handle.take_result();
+    notifications.mark_terminal();
     if !result.ok || result.failure.is_some() {
         if let Some(runtime) = session_manager.get_session(&session_id) {
             runtime.activation.suppress();

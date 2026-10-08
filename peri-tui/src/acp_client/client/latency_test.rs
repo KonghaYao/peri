@@ -160,7 +160,7 @@ async fn test_late_snapshot_does_not_reopen_stopped_or_newer_run() {
     assert!(
         client
             .lifecycle
-            .open_user_input_run("s", "g", "old")
+            .open_execution("s", "g", "old", true)
             .is_some()
     );
     for stop in [false, true] {
@@ -180,7 +180,7 @@ async fn test_late_snapshot_does_not_reopen_stopped_or_newer_run() {
             assert!(
                 client
                     .lifecycle
-                    .open_user_input_run("s", "g", "new")
+                    .open_execution("s", "g", "new", true)
                     .is_some()
             );
         }
@@ -195,7 +195,7 @@ async fn test_late_snapshot_does_not_reopen_stopped_or_newer_run() {
         assert_eq!(
             client
                 .lifecycle
-                .active_user_input_run()
+                .active_execution(false)
                 .map(|identity| identity.2),
             if stop { None } else { Some("new".into()) }
         );
@@ -229,6 +229,6 @@ async fn test_snapshot_identity_invalidates_after_pause_without_local_run() {
         .await
         .unwrap();
     refreshing.await.unwrap().unwrap();
-    assert!(client.lifecycle.active_user_input_run().is_none());
+    assert!(client.lifecycle.active_execution(false).is_none());
     client.close();
 }

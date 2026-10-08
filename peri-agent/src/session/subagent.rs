@@ -20,6 +20,7 @@
 //! - agent_status 收尾语义与迁移前一致：done / cancelled / error。
 
 mod background;
+mod child_runner;
 mod close;
 mod directives;
 mod factory;

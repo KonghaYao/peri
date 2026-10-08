@@ -267,7 +267,7 @@ impl AcpTuiClient {
             .ok_or_else(|| AcpError::new(-32603, "no active session"))?;
         let managed_run = self
             .supports_user_input_queue()
-            .then(|| self.lifecycle.active_user_input_run())
+            .then(|| self.lifecycle.active_execution(true))
             .flatten();
         let claims = self.lifecycle.cancel_active_prompt();
         self.settle_claims_owned(claims).await;

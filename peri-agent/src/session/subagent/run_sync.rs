@@ -13,7 +13,7 @@ use super::{
     SubagentStopV2Input,
 };
 use crate::agent::events::AgentEventHandler;
-use crate::agent::stages::{run_react_loop, LoopResult};
+use crate::agent::stages::LoopResult;
 use crate::agent::subagent_event_forwarder::spawn_subagent_event_forwarder_for_completion;
 use crate::agent::LangfuseBridgeLike;
 use crate::session::factory::{DeregisterRuntimeFn, RegisterRuntimeFn};
@@ -105,7 +105,9 @@ pub(super) async fn run_sync_subagent(
 
     // 运行 v2 ReAct 循环
     let execution_turn = v2_ctx.context.session.turn.clone();
-    let mut loop_result = run_react_loop(v2_ctx.context, max_iterations).await;
+    let mut loop_result =
+        super::child_runner::run_child_until_terminal(v2_ctx.context, max_iterations, &session)
+            .await;
     if let Err(error) = super::lifecycle::flush_session_history(&session).await {
         loop_result = LoopResult::Error(error);
     }
@@ -139,13 +141,13 @@ pub(super) async fn run_sync_subagent(
     }
 
     // v2 SubagentStop（C3）：一个 emit 点覆盖 Completed / Interrupted / Error 三路
-    let stop_failure = match &loop_result {
+    let mut stop_failure = match &loop_result {
         LoopResult::Error(error) => {
             SubagentFailure::safe_failure_from_error(child_thread_id, error)
         }
         _ => None,
     };
-    let (stop_result, stop_is_error) = match &loop_result {
+    let (mut stop_result, mut stop_is_error) = match &loop_result {
         LoopResult::Completed => (
             extract_last_ai_text(&session)
                 .chars()
@@ -187,17 +189,19 @@ pub(super) async fn run_sync_subagent(
     // forwarder drains queued render/observe events (including visible deltas)
     // before the synchronous v1 stop reaches the parent handler.
     if let Err(error) = drain_subagent_events(event_bus, forwarder_handle, langfuse_bridge).await {
-        // Retain cancellation and typed model diagnostics when execution had
-        // already failed; a successful loop cannot hide forwarding failure.
-        deregister_guard.deregister = None;
-        if let Some(claim) = resume_claim.take() {
-            claim.release().await?;
+        tracing::error!(thread_id = %child_thread_id, error = %error.user_facing_message(), causes = ?error.cause_chain(), "sync child event forwarding barrier incomplete");
+        if matches!(loop_result, LoopResult::Completed) {
+            stop_result = format!(
+                "{agent_name} execution failed: {}",
+                error.user_facing_message()
+            )
+            .chars()
+            .take(500)
+            .collect();
+            stop_is_error = true;
+            stop_failure = SubagentFailure::safe_failure_from_error(child_thread_id, &error);
+            loop_result = LoopResult::Error(error);
         }
-        return Err(Box::new(SubagentFailure::new(
-            child_thread_id,
-            &agent_name,
-            error,
-        )));
     }
     // v1 协议化载体直发（SubagentStopped）：与 Started 同源（v2 事件构造 +
     // observe_event_to_executor 同步映射），保证 Stopped 在 turn 收尾前到达

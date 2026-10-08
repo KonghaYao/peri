@@ -42,6 +42,7 @@ mod activation;
 mod continuation;
 pub mod controller_ports;
 mod diagnostics;
+mod execution;
 #[cfg(test)]
 #[path = "executor_flow_test.rs"]
 mod executor_flow_tests;
