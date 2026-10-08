@@ -75,12 +75,14 @@ pub(super) async fn run_sync_subagent(
     let start_agent_id = v2_ctx.agent_id;
     let start_name = agent_name.clone();
     let start_cwd = cwd.clone();
+    // 真实子会话身份：hook 载荷 agent_id 的来源（不是 agent 名）。
+    let start_thread_id = child_thread_id.to_string();
     v2_ctx.context.sdk_admission_observed = Some(Arc::new(move |admission| {
         if let Some(observe) = &previous_observer {
             observe(admission.clone());
         }
         if let Some(on_start) = &on_subagent_start {
-            on_start(&start_name, &start_cwd);
+            on_start(&start_thread_id, &start_name, &start_cwd);
         }
         emit_subagent_start_v2(
             &start_bus,

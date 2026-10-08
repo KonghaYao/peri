@@ -80,33 +80,40 @@ impl super::SubAgentTool {
             return (None, None);
         };
         let start_dispatcher = Arc::clone(&dispatcher);
-        let on_subagent_start: Option<SubagentLifecycleStart> =
-            Some(Arc::new(move |name: &str, cwd: &str| {
+        let on_subagent_start: Option<SubagentLifecycleStart> = Some(Arc::new(
+            move |child_thread_id: &str, name: &str, cwd: &str| {
                 let dispatcher = Arc::clone(&start_dispatcher);
+                let child_thread_id = child_thread_id.to_string();
                 let name = name.to_string();
                 let cwd = cwd.to_string();
                 tokio::spawn(async move {
                     use crate::hooks::types::{HookEvent, HookInput};
                     let mut input = HookInput::subagent_start("", "", &cwd, &name);
-                    // 真实身份：agent_type = 子 agent 名（agent_id 由 peri-agent 回调
-                    // 扩展接入，作为交接项）。
+                    // 真实身份：agent_id = 子会话 thread id（不是 agent 名/占位），
+                    // agent_type = 子 agent 名。
+                    input.agent_id = Some(child_thread_id);
                     input.agent_type = Some(name.clone());
                     let action = dispatcher
                         .fire_subagent_lifecycle(HookEvent::SubagentStart, &input, &name)
                         .await;
                     record_subagent_lifecycle_action(&HookEvent::SubagentStart, &name, &action);
                 });
-            }));
+            },
+        ));
         let stop_dispatcher = Arc::clone(&dispatcher);
         let on_subagent_stop: Option<SubagentLifecycleStop> = Some(Arc::new(
-            move |name: &str, cwd: &str, result: &str, is_error: bool| {
+            move |child_thread_id: &str, name: &str, cwd: &str, result: &str, is_error: bool| {
                 let dispatcher = Arc::clone(&stop_dispatcher);
+                let child_thread_id = child_thread_id.to_string();
                 let name = name.to_string();
                 let cwd = cwd.to_string();
                 let result = result.to_string();
                 tokio::spawn(async move {
                     use crate::hooks::types::{HookEvent, HookInput};
                     let mut input = HookInput::subagent_stop("", "", &cwd, &name, &result);
+                    // 真实身份：agent_id = 子会话 thread id（同一执行链路的
+                    // SubagentStart 与 SubagentStop 载荷身份必须一致）。
+                    input.agent_id = Some(child_thread_id);
                     input.agent_type = Some(name.clone());
                     let action = dispatcher
                         .fire_subagent_lifecycle(HookEvent::SubagentStop, &input, &name)

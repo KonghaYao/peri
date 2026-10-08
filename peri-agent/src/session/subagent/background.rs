@@ -131,12 +131,14 @@ pub(super) async fn spawn_background_subagent(
         let start_handler = bg_forwarder_handler.clone();
         let start_name = agent_name_for_task.clone();
         let start_cwd = cwd_for_task.clone();
+        // 真实子会话身份：hook 载荷 agent_id 的来源（不是 agent 名）。
+        let start_thread_id = child_thread_id_for_task.clone();
         context.sdk_admission_observed = Some(Arc::new(move |admission| {
             if let Some(observe) = &previous_observer {
                 observe(admission.clone());
             }
             if let Some(on_start) = &on_subagent_start {
-                on_start(&start_name, &start_cwd);
+                on_start(&start_thread_id, &start_name, &start_cwd);
             }
             emit_subagent_start_v2(
                 &start_bus,
@@ -301,6 +303,7 @@ pub(super) async fn spawn_background_subagent(
         cleanup_guard.disarm_stop();
         if let Some(ref on_stop) = on_subagent_stop {
             on_stop(
+                &child_thread_id_for_task,
                 &agent_name_for_task,
                 &cwd_for_task,
                 &output_summary,

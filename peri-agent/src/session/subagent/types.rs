@@ -123,10 +123,13 @@ pub enum SubagentRunMode {
 }
 
 /// 子 agent 生命周期 hook 触发闭包（middlewares 构造，内部触发 RegisteredHook）。
-/// 参数：(agent_name, cwd)。
-pub type SubagentLifecycleStart = Arc<dyn Fn(&str, &str) + Send + Sync>;
-/// 参数：(agent_name, cwd, result, is_error)。
-pub type SubagentLifecycleStop = Arc<dyn Fn(&str, &str, &str, bool) + Send + Sync>;
+///
+/// 参数：(child_thread_id, agent_name, cwd)。`child_thread_id` 是子会话的真实
+/// 身份（= v2 `child_agent_id`），hook 载荷的 `agent_id` 即来自它——不能用
+/// agent 名代替（同名 agent 的多次执行必须可区分）。
+pub type SubagentLifecycleStart = Arc<dyn Fn(&str, &str, &str) + Send + Sync>;
+/// 参数：(child_thread_id, agent_name, cwd, result, is_error)。
+pub type SubagentLifecycleStop = Arc<dyn Fn(&str, &str, &str, &str, bool) + Send + Sync>;
 
 // ─── 子链装配（依赖反转，ARC-MIDDLEWARE-001） ───────────────────────────────
 
