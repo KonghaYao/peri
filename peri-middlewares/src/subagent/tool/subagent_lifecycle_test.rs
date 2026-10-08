@@ -258,9 +258,10 @@ async fn subagent_start_once_hook_is_shared_across_spawns() {
     );
 }
 
-/// 证据（C 组 agent_id 真值）：真实 spawn 路径下，SubagentStart hook 载荷的
-/// `agent_id` 必须是子会话 thread id（= v2 `child_agent_id` / 工具返回的
-/// `child_thread_id`），不是 agent 名，也不是空/占位；`agent_type` 才是 agent 名。
+/// 证据（C 组 agent_id 真值）：真实 spawn 路径下，SubagentStart **与**
+/// SubagentStop hook 载荷的 `agent_id` 必须是子会话 thread id（= v2
+/// `child_agent_id` / 工具返回的 `child_thread_id`），不是 agent 名，也不是空/占位；
+/// `agent_type` 才是 agent 名，Stop 载荷另带结果摘要。
 ///
 /// 夹具不直接调用闭包：经 `SubAgentTool::invoke` 走生产 spawn → SDK 观察点
 /// （`sdk_admission_observed`）→ 生命周期闭包 → HookDispatcher → 真实 command
@@ -282,7 +283,7 @@ crate::subagent::test_support::fixture_model_impl!(LifecycleEchoModel);
 
 #[cfg(unix)]
 #[tokio::test]
-async fn subagent_lifecycle_hook_payload_carries_real_child_agent_id() {
+async fn subagent_lifecycle_hook_payloads_carry_real_child_agent_id() {
     let dir = tempfile::tempdir().unwrap();
     let agents_dir = dir.path().join(".claude").join("agents");
     std::fs::create_dir_all(&agents_dir).unwrap();
@@ -297,25 +298,33 @@ async fn subagent_lifecycle_hook_payload_carries_real_child_agent_id() {
     )
     .await;
 
-    let out = std::env::temp_dir().join(format!(
-        "peri-lifecycle-agent-id-{}-{}.json",
+    let unique = format!(
+        "{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos()
-    ));
-    let _ = std::fs::remove_file(&out);
-    let mut registered = subagent_hook(
-        HookEvent::SubagentStart,
-        r#"cat > "$CLAUDE_PLUGIN_OPTION_OUT""#,
-        None,
-        None,
-        false,
     );
-    registered
-        .plugin_options
-        .insert("out".to_string(), serde_json::json!(out.to_str().unwrap()));
+    let out_start = std::env::temp_dir().join(format!("peri-lifecycle-start-{unique}.json"));
+    let out_stop = std::env::temp_dir().join(format!("peri-lifecycle-stop-{unique}.json"));
+    let _ = std::fs::remove_file(&out_start);
+    let _ = std::fs::remove_file(&out_stop);
+    let registered_hook = |event: HookEvent, out: &std::path::Path| {
+        let mut registered = subagent_hook(
+            event,
+            r#"cat > "$CLAUDE_PLUGIN_OPTION_OUT""#,
+            None,
+            None,
+            false,
+        );
+        registered
+            .plugin_options
+            .insert("out".to_string(), serde_json::json!(out.to_str().unwrap()));
+        registered
+    };
+    let registered_start = registered_hook(HookEvent::SubagentStart, &out_start);
+    let registered_stop = registered_hook(HookEvent::SubagentStop, &out_stop);
 
     let tool = crate::subagent::tool::tests::with_agent_face(
         super::SubAgentTool::new(
@@ -332,7 +341,9 @@ async fn subagent_lifecycle_hook_payload_carries_real_child_agent_id() {
         dir.path(),
     )
     .await;
-    let tool = host.bind(tool).with_registered_hooks(vec![registered]);
+    let tool = host
+        .bind(tool)
+        .with_registered_hooks(vec![registered_start, registered_stop]);
 
     let result = tool
         .invoke(
@@ -357,30 +368,46 @@ async fn subagent_lifecycle_hook_payload_carries_real_child_agent_id() {
         "child_thread_id 必须是真实 thread id: {child_thread_id}"
     );
 
-    let mut payload = None;
+    let read_payload = |path: &std::path::Path, event: &str| -> serde_json::Value {
+        let payload: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(path)
+                .unwrap_or_else(|error| panic!("{event} hook 未在超时内落盘 stdin JSON: {error}")),
+        )
+        .expect("hook 载荷必须是合法 JSON");
+        assert_eq!(payload["hook_event_name"], event, "载荷事件名: {payload}");
+        assert_eq!(
+            payload["agent_id"].as_str(),
+            Some(child_thread_id.as_str()),
+            "{event} 载荷 agent_id 必须是真实 child_thread_id（不得为空/占位/agent 名）: {payload}"
+        );
+        assert_eq!(
+            payload["agent_type"].as_str(),
+            Some("test-agent"),
+            "agent_type 才是 agent 名: {payload}"
+        );
+        payload
+    };
+    // `cat > file` 先建空文件再写入：只等 exists 会读到半截内容，等两侧都能解析。
     for _ in 0..300 {
-        if let Ok(text) = std::fs::read_to_string(&out) {
-            payload = Some(text);
+        let parsed = |path: &std::path::Path| {
+            std::fs::read_to_string(path)
+                .ok()
+                .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        };
+        if parsed(&out_start).is_some() && parsed(&out_stop).is_some() {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
-    let payload: serde_json::Value =
-        serde_json::from_str(&payload.expect("SubagentStart hook 未在超时内落盘 stdin JSON"))
-            .expect("hook 载荷必须是合法 JSON");
-    assert_eq!(
-        payload["hook_event_name"], "SubagentStart",
-        "载荷事件名: {payload}"
+    let start_payload = read_payload(&out_start, "SubagentStart");
+    let stop_payload = read_payload(&out_stop, "SubagentStop");
+    assert!(
+        stop_payload["subagent_result"]
+            .as_str()
+            .is_some_and(|result| !result.is_empty()),
+        "SubagentStop 载荷必须带子执行结果摘要: {stop_payload}"
     );
-    assert_eq!(
-        payload["agent_id"].as_str(),
-        Some(child_thread_id.as_str()),
-        "hook 载荷 agent_id 必须是真实 child_thread_id（不得为空/占位/agent 名）: {payload}"
-    );
-    assert_eq!(
-        payload["agent_type"].as_str(),
-        Some("test-agent"),
-        "agent_type 才是 agent 名: {payload}"
-    );
-    let _ = std::fs::remove_file(&out);
+    let _ = std::fs::remove_file(&out_start);
+    let _ = std::fs::remove_file(&out_stop);
+    let _ = start_payload;
 }
