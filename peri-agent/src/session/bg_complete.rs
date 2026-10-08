@@ -1,22 +1,26 @@
 //! Frozen, current-process background-completion publication routes.
 //!
-//! Synchronous owners retain a terminal result while publication is Pending.
+//! Synchronous owners retain a terminal result when acceptance fails.
 //! Only current queue acceptance permits acknowledgment; route
 //! identity is captured once and never discovers old delegations.
 
 use std::sync::Arc;
 
-use peri_acp_types::session::SessionAccessPort;
-use peri_acp_types::tasks::BgTaskKind;
+use peri_acp_types::session::{MessageQueue, SessionAccessPort};
+use peri_acp_types::tasks::{BgTaskKind, TaskTerminalDelivery};
 
 use crate::agent::events::BackgroundTaskResult;
 use crate::session::async_router::background_result_reminder;
 use crate::session::factory::OnBgCompleteFn;
 
+pub fn queue_terminal_delivery(queue: MessageQueue) -> Arc<dyn TaskTerminalDelivery> {
+    crate::agent::async_tasks::delivery::SessionTerminalDelivery::for_queue(queue)
+}
+
 /// 由 `(SessionAccessPort, session_id)` 构造 **session 级** `on_bg_complete` 回调。
 ///
 /// 构造时冻结可靠投递路由；缺失路由不得转到未来生命周期。
-/// Pending 返回 Err，owner 必须保留原结果并重试；当前队列接纳后才返回 Ok。
+/// 同步接纳失败返回 Err，owner 保留原结果并重试；接纳成功立即返回 Ok。
 pub fn session_bg_complete_callback(
     session_access: Arc<dyn SessionAccessPort>,
     session_id: String,
@@ -40,7 +44,7 @@ type DeliveryResolver = Arc<
 >;
 
 enum PublicationStatus {
-    Pending,
+    Accepting,
     Accepted,
     Failed(String),
 }
@@ -69,10 +73,8 @@ fn publication_callback(resolve: DeliveryResolver) -> OnBgCompleteFn {
             }
             match &prior.status {
                 PublicationStatus::Accepted => return Ok(()),
-                PublicationStatus::Pending => {
-                    return Err(
-                        "terminal publication Pending: queue acceptance not confirmed".into(),
-                    )
+                PublicationStatus::Accepting => {
+                    return Err("terminal publication acceptance is in progress".into())
                 }
                 PublicationStatus::Failed(error) => {
                     tracing::info!(
@@ -84,48 +86,41 @@ fn publication_callback(resolve: DeliveryResolver) -> OnBgCompleteFn {
                 }
             }
         }
-        let delivery = resolve()?;
-        let runtime = tokio::runtime::Handle::try_current()
-            .map_err(|_| "terminal publication runtime unavailable".to_string())?;
         state.insert(
             identity.clone(),
             Publication {
                 fingerprint,
-                status: PublicationStatus::Pending,
+                status: PublicationStatus::Accepting,
             },
         );
         drop(state);
-        let publications = Arc::clone(&publications);
         let source = match kind {
             BgTaskKind::Agent => peri_acp_types::session::MessageSource::SubAgentComplete,
             BgTaskKind::Shell => peri_acp_types::session::MessageSource::ShellComplete,
             BgTaskKind::Workflow => peri_acp_types::session::MessageSource::WorkflowComplete,
             BgTaskKind::Mcp => peri_acp_types::session::MessageSource::DynamicMcpNotification,
         };
-        let task_id = result.task_id.clone();
-        runtime.spawn(async move {
-            let outcome = delivery.deliver(delivery_id, &reminder, source).await;
-            let mut state = publications.lock();
-            if let Some(publication) = state.get_mut(&identity) {
-                publication.status = match &outcome {
-                    Ok(()) => PublicationStatus::Accepted,
-                    Err(error) => PublicationStatus::Failed(error.clone()),
-                };
-            }
-            drop(state);
-            if let Err(error) = &outcome {
-                tracing::warn!(
-                    ?delivery_id,
-                    task_id = %task_id,
-                    %error,
-                    "terminal publication failed"
-                );
-            }
-        });
-        Err(
-            "terminal publication Pending: owner must retain and retry until queue acceptance"
-                .into(),
-        )
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            resolve()?.accept(delivery_id, &reminder, source)
+        }))
+        .unwrap_or_else(|_| Err("terminal publication acceptance panicked".into()));
+        let mut state = publications.lock();
+        if let Some(publication) = state.get_mut(&identity) {
+            publication.status = match &outcome {
+                Ok(()) => PublicationStatus::Accepted,
+                Err(error) => PublicationStatus::Failed(error.clone()),
+            };
+        }
+        drop(state);
+        if let Err(error) = &outcome {
+            tracing::warn!(
+                ?delivery_id,
+                task_id = %result.task_id,
+                %error,
+                "terminal publication failed"
+            );
+        }
+        outcome
     })
 }
 

@@ -126,7 +126,7 @@ impl ServerLoop<'_> {
             async move {
                 let result = dispatch_prompt_turn(
                     params,
-                    false,
+                    super::PromptOrigin::User,
                     None,
                     &sessions,
                     &prompt_locks,

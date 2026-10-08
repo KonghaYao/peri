@@ -235,12 +235,24 @@ fn test_cancel_schedule_race_eligibility() {
 fn test_continuation_dispatchable_requires_pending_defer() {
     let state = make_session_state(false, 3);
     // 代际有效 + Defer 在队 → 可 dispatch
-    assert!(continuation_dispatchable(&state, 3, true, false));
+    assert!(continuation_dispatchable(&state, 3, true, false, false));
     // 代际有效但 Defer 已被消费 → 跳过（空跑无意义）
-    assert!(!continuation_dispatchable(&state, 3, false, false));
+    assert!(!continuation_dispatchable(&state, 3, false, false, false));
     // 代际失效（用户新 prompt）→ 跳过
-    assert!(!continuation_dispatchable(&state, 3 + 1, true, false));
-    assert!(!continuation_dispatchable(&state, 3 + 1, false, false));
+    assert!(!continuation_dispatchable(
+        &state,
+        3 + 1,
+        true,
+        false,
+        false
+    ));
+    assert!(!continuation_dispatchable(
+        &state,
+        3 + 1,
+        false,
+        false,
+        false
+    ));
 }
 
 #[tokio::test]
