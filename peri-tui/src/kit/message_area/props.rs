@@ -18,17 +18,32 @@ pub(super) fn mouse_in_area(mouse_row: u16, mouse_col: u16, area: Rect) -> bool 
 
 pub(super) struct MsgAreaTracker {
     pub(super) rect: Option<Rect>,
+    geometry_changed: bool,
 }
 
 impl MsgAreaTracker {
     pub(super) fn new() -> Self {
-        Self { rect: None }
+        Self {
+            rect: None,
+            geometry_changed: false,
+        }
     }
 }
 
 impl Hook for MsgAreaTracker {
+    fn poll_change(&mut self, _cx: &mut std::task::Context) -> std::task::Poll<()> {
+        if std::mem::take(&mut self.geometry_changed) {
+            std::task::Poll::Ready(())
+        } else {
+            std::task::Poll::Pending
+        }
+    }
+
     fn pre_component_draw(&mut self, drawer: &mut ComponentDrawer) {
-        self.rect = Some(drawer.area);
+        if self.rect != Some(drawer.area) {
+            self.rect = Some(drawer.area);
+            self.geometry_changed = true;
+        }
     }
 }
 
@@ -100,3 +115,7 @@ pub struct MessageAreaProps {
     /// Transcript 水平网格（§3.1）——由 SessionColumn 按终端宽度计算。
     pub grid: GridSpec,
 }
+
+#[cfg(test)]
+#[path = "props_test.rs"]
+mod tests;

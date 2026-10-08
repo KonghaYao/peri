@@ -4,6 +4,8 @@
 
 输入反馈仍遵循 [待发送队列设计](../design/user-input-queue.md)：`kit/steer_state.rs::direct_submitting` 驱动 composer “正在提交…”，不是 Delivered 气泡。消息区用 `message_area/vm_cache.rs::read_render_snapshot` 短锁复制一致 VM/publication 后锁外派生；Transcript 跳代只重建实际变化的内容键，冷历史、布局和复制回归见 `transcript_test.rs`。
 
+消息视口几何由 `message_area/props.rs::MsgAreaTracker` 在 draw 边界记录；矩形变化后经 `poll_change` 请求一次校正帧，不依赖下一条消息或输入事件。`message_area/mod.rs::render_viewport` 通过 `Text.scroll` 传递视觉行偏移，不能只设置内层 `Paragraph.scroll`（ratatui-kit 的 `Text` 会覆盖它；当前 `Text.scroll` 的 `Position.x` 对应垂直偏移）。高度增减、宽度/位置变化与稳定后停止重绘的回归见 `props_test.rs`，折行内部和 footer 内部滚动见 `viewport_test.rs`。
+
 待发送鼠标入口：`kit/steer_queue.rs` 按最近绘制帧命中控件；正文点击只选择发送动作（下划线），按钮命中才触发提交。持续中文流式输出与长中文队列的真实点击回归见 `e2e/tests/smoke/steer-queue-live.test.ts`。
 
 Markdown 高亮预算在 `kit/markdown/code_block.rs`，超限保留原文，仅不做语法着色；`markdown/workload_test.rs` 与 `code_block_test.rs` 覆盖复杂结构及预算边界。`perf.render` 的 `message-body-total` 只覆盖消息组件准备，不能当作终端 draw/flush 或 Enter 端到端计时。
