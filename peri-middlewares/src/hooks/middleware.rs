@@ -272,9 +272,14 @@ impl HookMiddleware {
         tool_name: Option<&str>,
         tool_input: Option<&serde_json::Value>,
     ) -> HookAction {
-        self.dispatcher
-            .fire_event(event, input, tool_name, tool_input)
-            .await
+        let action = self
+            .dispatcher
+            .fire_event(event.clone(), input, tool_name, tool_input)
+            .await;
+        // M10 字段路由的唯一出口诊断：任何事件归并出的 additionalContext /
+        // systemMessage 都必须可诊断一次（投递由 F 组接线），不得静默丢弃。
+        diagnose_undelivered_output(&event, &action);
+        action
     }
 
     /// 在一批并行工具调用全部完成后触发 PostToolBatch hook。
@@ -409,12 +414,6 @@ impl Middleware for HookMiddleware {
                 "SessionStart hook prevented continuation",
             )?;
             match &action {
-                HookAction::SystemMessage { message } => {
-                    diagnose_undelivered_output(None, Some(message), "SessionStart");
-                }
-                HookAction::AdditionalContext { context } => {
-                    diagnose_undelivered_output(Some(context), None, "SessionStart");
-                }
                 HookAction::InitialUserMessage { message } => {
                     tracing::debug!(
                         event = "SessionStart",
@@ -521,19 +520,13 @@ impl Middleware for HookMiddleware {
             HookAction::PermissionOverride {
                 decision,
                 updated_input,
-                additional_context,
-                system_message,
                 ..
             } => {
                 if let Some(new_input) = updated_input {
                     effective_call.input = new_input.clone();
                 }
-                // M10 字段路由：已解析但投递尚未接线的字段必须可诊断，不记录正文
-                diagnose_undelivered_output(
-                    additional_context.as_deref(),
-                    system_message.as_deref(),
-                    "PreToolUse",
-                );
+                // M10 字段路由：additionalContext / systemMessage 已由 fire_event
+                // 出口统一诊断（不重复记录正文）。
 
                 // deny（含无法识别的判定）优先于 updatedInput：零工具执行 + 固定安全反馈
                 if decision.is_deny_like() {
@@ -791,18 +784,26 @@ const HOOK_ASK_UNAVAILABLE_REASON: &str =
 /// PreToolUse `ask` 审批超时的固定反馈。
 const HOOK_ASK_TIMEOUT_REASON: &str = "PreToolUse hook approval request timed out";
 
-/// 已解析但投递尚未接线的 hook 输出：只记录字段名与长度，绝不记录正文。
+/// 已解析但投递尚未接线的 hook 输出：只记录事件、字段名与长度，绝不记录正文。
 ///
 /// M10 字段路由（additionalContext / systemMessage）在 C 组只完成类型与可诊断
-/// 状态，实际投递由 F 组接线；未接线期间不得静默丢弃，也不得“解析成功即假装生效”。
-fn diagnose_undelivered_output(
-    additional_context: Option<&str>,
-    system_message: Option<&str>,
-    event: &str,
-) {
+/// 状态，实际投递由 F 组接线；未接线期间不得静默丢弃，也不得"解析成功即假装生效"。
+/// 在 [`HookMiddleware::fire_event`] 唯一出口诊断一次，覆盖所有事件与
+/// [`HookAction::PermissionOverride`] 携带的字段。
+fn diagnose_undelivered_output(event: &HookEvent, action: &HookAction) {
+    let (additional_context, system_message) = match action {
+        HookAction::AdditionalContext { context } => (Some(context.as_str()), None),
+        HookAction::SystemMessage { message } => (None, Some(message.as_str())),
+        HookAction::PermissionOverride {
+            additional_context,
+            system_message,
+            ..
+        } => (additional_context.as_deref(), system_message.as_deref()),
+        _ => (None, None),
+    };
     if let Some(context) = additional_context {
         tracing::debug!(
-            event,
+            event = ?event,
             field = "additionalContext",
             bytes = context.len(),
             "hook output parsed but delivery is not wired yet (M10 → F)"
@@ -810,7 +811,7 @@ fn diagnose_undelivered_output(
     }
     if let Some(message) = system_message {
         tracing::debug!(
-            event,
+            event = ?event,
             field = "systemMessage",
             bytes = message.len(),
             "hook output parsed but delivery is not wired yet (M10 → F)"
@@ -833,3 +834,7 @@ mod async_diagnostic_tests;
 #[cfg(test)]
 #[path = "ask_host_path_test.rs"]
 mod ask_host_path_tests;
+
+#[cfg(test)]
+#[path = "undelivered_output_test.rs"]
+mod undelivered_output_tests;
