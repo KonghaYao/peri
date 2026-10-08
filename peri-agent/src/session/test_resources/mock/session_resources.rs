@@ -12,7 +12,6 @@ fn doubled_workspace(cwd: &str) -> ResolvedWorkspace {
     ResolvedWorkspace {
         project_id: peri_acp_types::workspace::ProjectId::new(),
         workspace_id,
-        execution_registration_id: workspace_id,
         cwd: cwd.clone(),
         root: cwd,
         relative_cwd: std::path::PathBuf::new(),

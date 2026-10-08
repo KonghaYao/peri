@@ -15,16 +15,15 @@ async fn v17_fixture() -> (Fixture, RemoteStore, StoreSnapshot) {
     schema_upgrade::upgrade(&store, &fixture.snapshot)
         .await
         .unwrap();
+    // 升级链已经走到 v19，夹具要的是 v12..=18 的库：把 v19 删除的执行登记表补回来，
+    // 版本与契约一起退回上一代（真实 v17 库的元数据就是 (17, v3) 加这张表）。
+    fixture.declare_previous_generation(17).await;
     for (_, definition) in crate::sessions::schema_cleanup::RETIRED_EXECUTION_TABLES {
         sqlx::query(*definition)
             .execute(&fixture.transport.pool)
             .await
             .unwrap();
     }
-    sqlx::query("UPDATE peri_store_meta SET schema_version = 17")
-        .execute(&fixture.transport.pool)
-        .await
-        .unwrap();
     let StoreIdentityRead::Present(snapshot) = store.read_identity().await.unwrap() else {
         panic!("missing v17 identity")
     };
@@ -44,7 +43,8 @@ async fn remote_schema_v18_drops_six_tables_without_rebuilding_history_or_busine
     .unwrap();
     let before: Vec<(String, i64, Option<String>)> = sqlx::query_as(
         "SELECT name, rootpage, sql FROM sqlite_schema WHERE tbl_name NOT LIKE 'session_work_%'
-         AND tbl_name NOT LIKE 'session_control_%' ORDER BY name",
+         AND tbl_name NOT LIKE 'session_control_%'
+         AND tbl_name NOT IN ('legacy_execution_registrations', 'session_bindings') ORDER BY name",
     )
     .fetch_all(pool)
     .await
@@ -55,18 +55,31 @@ async fn remote_schema_v18_drops_six_tables_without_rebuilding_history_or_busine
             .await
             .unwrap();
     schema_upgrade::upgrade(&store, &snapshot).await.unwrap();
-    let after: Vec<(String, i64, Option<String>)> =
-        sqlx::query_as("SELECT name, rootpage, sql FROM sqlite_schema ORDER BY name")
-            .fetch_all(pool)
-            .await
-            .unwrap();
+    // 这一次调用走完 17 → 18 → 19 两步：v19 有意删除执行登记表、重建 `session_bindings`
+    // （去掉指向它的外键），两者不在「不重建历史与业务表」的比对里；其余对象原样保留。
+    let after: Vec<(String, i64, Option<String>)> = sqlx::query_as(
+        "SELECT name, rootpage, sql FROM sqlite_schema
+         WHERE tbl_name NOT IN ('legacy_execution_registrations', 'session_bindings') ORDER BY name",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap();
     assert_eq!(before, after);
+    let registrations: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_schema WHERE tbl_name = 'legacy_execution_registrations'",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert_eq!(registrations, 0);
     let after_identity: (String, String, String) =
         sqlx::query_as("SELECT store_id, contract, created_at FROM peri_store_meta")
             .fetch_one(pool)
             .await
             .unwrap();
-    assert_eq!(identity, after_identity);
+    assert_eq!(identity.0, after_identity.0);
+    assert_eq!(identity.2, after_identity.2);
+    assert_eq!(after_identity.1, schema::STORE_CONTRACT);
     let history: (i64, String) = sqlx::query_as("SELECT rowid, content FROM messages")
         .fetch_one(pool)
         .await
@@ -77,7 +90,7 @@ async fn remote_schema_v18_drops_six_tables_without_rebuilding_history_or_busine
         .await
         .unwrap();
     assert_eq!(receipt, "receipt");
-    assert_eq!(fixture.version().await, 18);
+    assert_eq!(fixture.version().await, schema::REMOTE_SCHEMA_VERSION);
     for table in RECOVERY_TABLES {
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_schema WHERE name = ?1")
             .bind(table)
@@ -210,10 +223,12 @@ async fn remote_schema_v18_lost_or_incomplete_commit_confirmation_stays_unknown(
             error.effect(),
             peri_acp_types::session_resources::MutationOutcome::Unknown
         );
+        // 17 → 19 分两段：丢失的回复属于 17 → 18 这一段，已提交的版本停在 18，
+        // 下一次写打开读到这个中间态时还会要求补完 v19 升级。
         assert_eq!(fixture.version().await, 18);
         assert!(matches!(
             open_step(store.read_identity().await.unwrap(), StoreAccess::ReadWrite).unwrap(),
-            OpenStep::Existing(_)
+            OpenStep::Upgrade(_)
         ));
     }
 }

@@ -32,6 +32,7 @@ pub(super) enum SchemaState {
     Version15,
     Version16,
     Version17,
+    Version18,
     Current,
 }
 
@@ -51,6 +52,7 @@ pub(super) async fn inspect(connection: &mut SqliteConnection) -> Result<SchemaS
         .await?;
     match version {
         v if v == CURRENT_SCHEMA_VERSION => return Ok(SchemaState::Current),
+        18 => return Ok(SchemaState::Version18),
         17 => return Ok(SchemaState::Version17),
         16 => return Ok(SchemaState::Version16),
         15 => return Ok(SchemaState::Version15),
@@ -163,6 +165,9 @@ impl SqliteSessionDatabase {
                 .await?;
             return Ok(());
         }
+        if state == SchemaState::Version18 {
+            return Self::remove_legacy_registrations_schema(&mut connection).await;
+        }
         if matches!(
             state,
             SchemaState::Version12
@@ -172,11 +177,13 @@ impl SqliteSessionDatabase {
                 | SchemaState::Version16
                 | SchemaState::Version17
         ) {
-            return Self::remove_execution_owner_schema(&mut connection).await;
+            Self::remove_execution_owner_schema(&mut connection).await?;
+            return Self::remove_legacy_registrations_schema(&mut connection).await;
         }
         if state == SchemaState::Version11 {
             super::storage_v2_migration::migrate_local_v2(&mut connection).await?;
-            return Self::remove_execution_owner_schema(&mut connection).await;
+            Self::remove_execution_owner_schema(&mut connection).await?;
+            return Self::remove_legacy_registrations_schema(&mut connection).await;
         }
         // 登记表重建要对被引用的父表执行 DROP TABLE：SQLite 对父表做隐式删除时会
         // 立即检查外键，`defer_foreign_keys` 也挡不住。该 PRAGMA 只在事务外生效，
@@ -199,7 +206,14 @@ impl SqliteSessionDatabase {
             migrated?;
         }
         super::storage_v2_migration::migrate_local_v2(&mut connection).await?;
-        Self::remove_execution_owner_schema(&mut connection).await
+        Self::remove_execution_owner_schema(&mut connection).await?;
+        Self::remove_legacy_registrations_schema(&mut connection).await
+    }
+
+    /// v18 → v19：把执行登记并入 `workspaces` 并删除登记表。`user_version` 与全部
+    /// DDL 在同一事务内提交；失败回滚后库仍是 18，可由上一版二进制打开。
+    async fn remove_legacy_registrations_schema(connection: &mut SqliteConnection) -> Result<()> {
+        super::storage_v19_migration::migrate_local_v19(connection).await
     }
 
     async fn remove_execution_owner_schema(connection: &mut SqliteConnection) -> Result<()> {

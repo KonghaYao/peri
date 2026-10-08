@@ -5,6 +5,8 @@
 - 裁决：删除新增执行恢复机制，不删除 history 面板的历史会话加载和正常续聊。
 - 基线：本地 `main=d7ee444e`（2026-09-29），对照本轮当前工作树；未 fetch。
 - 初始审核仅只读源码；后续实现与验证见剥离计划。未访问或修改真实数据库。
+- 后续（2026-10-08）：本文只读快照里的 `legacy_execution_registrations` 与 `session_bindings` 外键已被
+  [移除计划](2026-10-08-remove-legacy-execution-registrations-plan.md) 删除（schema 19，绑定收敛到会话归属行）；下文对该表的形状描述读作 schema 18 时点，不再是现行结构。
 - 本文表数指代码管理的新库结构，不是用户数据库的实际对象数量；旧库扩展对象另行保护。
 
 ## 1. 删除与保留的能力边界
@@ -241,6 +243,7 @@ CREATE INDEX idx_threads_workspace_archived
 - `threads.workspace_id` 指向新 Machine/path workspace。
 - `session_bindings.workspace_id` 指向旧登记身份 `legacy_execution_registrations.id`，
   两个同名字段不是同一个外键目标；当前结构如此，本轮不顺带迁移/重命名。
+  （2026-10-08 后续：schema 19 删除登记表并把该列收敛为 `threads.workspace_id`，迁移逐行校验根一致，不一致拒绝升级。）
 - `parent_thread_id`、`snapshot_at_message_id` 当前没有声明 FK，不新增未有的约束。
 - `messages` 保留隐式 `rowid`，历史读取以其排序，不改成 `WITHOUT ROWID` 或重建排序。
 - 上面是五条显式业务索引；PK/UNIQUE 还会生成 SQLite 自动索引。

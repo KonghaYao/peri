@@ -402,8 +402,9 @@ async fn remote_only_cold_recovery_uses_saved_evidence_and_old_distinct_registra
     );
     drop(first);
 
-    // Old v2 remote rows used a separate execution registration UUID. The
-    // logical owner remains the remote workspace row and its saved snapshot.
+    // Old v2 remote rows pointed the binding at a separate execution registration UUID.
+    // v19 起绑定行的 workspace_id 必须就是会话归属行的 id：不一致的行再也无法靠
+    // 「另一张表里的旧登记」被追认，只能失败关闭（与本机组合同一结论）。
     let old_registration = uuid::Uuid::new_v4().to_string();
     sqlx::query("UPDATE session_bindings SET workspace_id=?1 WHERE thread_id=?2")
         .bind(&old_registration)
@@ -412,20 +413,51 @@ async fn remote_only_cold_recovery_uses_saved_evidence_and_old_distinct_registra
         .await
         .unwrap();
     let cold = full_remote_facade(transport.clone());
-    let restored = cold
+    let error = cold
         .validate_bound_workspace(&session_id, BindingRecheck::Full)
         .await
-        .unwrap();
-    assert_eq!(restored.workspace_id, workspace.workspace_id);
-    assert_eq!(
-        restored.execution_registration_id.to_string(),
-        old_registration
+        .expect_err("a binding outside the session owner row must fail closed");
+    assert!(
+        matches!(
+            error.kind(),
+            SessionResourceErrorKind::Workspace(
+                peri_acp_types::workspace::WorkspaceError::ExecutionBindingMismatch
+            )
+        ),
+        "不是归属行的绑定必须判为绑定不匹配：{error:?}"
+    );
+    // 元数据写入同样要过绑定复核：不一致的绑定行连标题都不许改。
+    let rejected_meta = cold
+        .update_session_meta(
+            &session_id,
+            &peri_acp_types::session_resources::SessionMetaPatch {
+                title: Some(Some("must stay rejected".to_owned())),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("an inconsistent binding must block metadata writes");
+    assert!(
+        matches!(
+            rejected_meta.kind(),
+            SessionResourceErrorKind::Workspace(
+                peri_acp_types::workspace::WorkspaceError::ExecutionBindingMismatch
+            )
+        ),
+        "不是归属行的绑定必须挡下元数据写入：{rejected_meta:?}"
     );
     assert_eq!(
         std::fs::read(&poisoned_local_file).unwrap(),
         b"broken local SQLite"
     );
     drop(cold);
+    // 把这一行改回归属行：后面的阶段各自验证自己的条件，不再被这条带偏。
+    sqlx::query("UPDATE session_bindings SET workspace_id=?1 WHERE thread_id=?2")
+        .bind(workspace.workspace_id.to_string())
+        .bind(&session_id)
+        .execute(&pool)
+        .await
+        .unwrap();
 
     // Saved binding evidence authorizes metadata edits without runtime ownership.
     let unleased = full_remote_facade(transport.clone());

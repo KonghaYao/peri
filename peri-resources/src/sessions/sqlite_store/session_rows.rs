@@ -26,7 +26,7 @@ pub(super) struct ThreadRowInsert<'a> {
     pub config: Option<&'a str>,
     pub agent_status: &'a str,
     pub frozen_context: Option<&'a str>,
-    pub execution_registration_id: Option<&'a WorkspaceId>,
+    pub owner_workspace_id: Option<&'a WorkspaceId>,
 }
 
 /// 插入一条 `threads` 行
@@ -38,7 +38,7 @@ pub(super) async fn insert_thread_row(
     let workspace_id = super::workspace_identity::identity_for_new_thread(
         connection,
         row.parent_thread_id,
-        row.execution_registration_id,
+        row.owner_workspace_id,
         row.cwd,
     )
     .await?;
@@ -70,7 +70,8 @@ pub(super) async fn insert_thread_row(
 /// 插入 canonical binding 行。
 ///
 /// 绑定身份由调用方给出且必须已被本机 workspace 验证过；这里只做形状校验（版本、
-/// 相对路径）与写入。外键指向的本机登记不存在时由调用方按 workspace 语义映射。
+/// 相对路径）与写入。创建证据取归属行当前记录的执行证据：v19 之前它取自执行登记，
+/// 现在归属行的证据列就是同一份事实。
 pub(super) async fn insert_binding_row(
     connection: &mut SqliteConnection,
     thread_id: &str,
@@ -82,7 +83,7 @@ pub(super) async fn insert_binding_row(
         "INSERT INTO session_bindings (thread_id, schema_version, project_id, workspace_id, relative_cwd,
             discovery_snapshot, evidence_origin)
          VALUES (?1, ?2, ?3, ?4, ?5,
-            (SELECT discovery FROM legacy_execution_registrations WHERE id = ?4), 'creation_snapshot')",
+            (SELECT discovery FROM workspaces WHERE id = ?4), 'creation_snapshot')",
     )
     .bind(thread_id)
     .bind(version)

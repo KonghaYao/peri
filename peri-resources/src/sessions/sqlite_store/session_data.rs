@@ -271,18 +271,17 @@ impl SessionDataPort for SqliteSessionData {
         .execute(&mut *tx)
         .await
         .map_err(|error| write_failure(error.into()))?;
-        // The execution registration was established by resolve_workspace.
+        // The workspace owner was established by resolve_workspace.
         // Adoption may attach its immutable evidence, but must not fabricate a
-        // registration or change the session's logical workspace owner.
-        let registration_exists: Option<(String,)> = sqlx::query_as(
-            "SELECT id FROM legacy_execution_registrations WHERE id = ?1 AND project_id = ?2",
-        )
-        .bind(binding.workspace_id.to_string())
-        .bind(binding.project_id.to_string())
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(|error| map_sqlx(&error))?;
-        if registration_exists.is_none() {
+        // workspace owner or change the session's logical workspace.
+        let owner_exists: Option<(String,)> =
+            sqlx::query_as("SELECT id FROM workspaces WHERE id = ?1 AND project_id = ?2")
+                .bind(binding.workspace_id.to_string())
+                .bind(binding.project_id.to_string())
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|error| map_sqlx(&error))?;
+        if owner_exists.is_none() {
             return Err(SessionResourceError::new(
                 SessionResourceErrorKind::Workspace(WorkspaceError::InvalidBinding),
             ));

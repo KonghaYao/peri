@@ -77,6 +77,13 @@ impl RemoteExecution {
         if binding.schema_version != SESSION_BINDING_VERSION || binding.revision != 1 {
             return Err(WorkspaceError::InvalidBinding.into());
         }
+        // v19 起绑定行的 `workspace_id` 就是会话归属行的 id（升级把绑定收敛到 `threads`）。
+        // 不等说明这条绑定不属于本次要复核的归属：不拿观察到的根替它改判，直接失败关闭，
+        // 与本机组合「解析结果 ≠ 归属行」得到同一个结论——登记表已经没有了，那种「另一张
+        // 表里的旧登记」的追认也随之消失。
+        if binding.workspace_id != owner {
+            return Err(WorkspaceError::ExecutionBindingMismatch.into());
+        }
         if binding
             .cwd_relative_to_workspace
             .components()
@@ -109,7 +116,6 @@ impl RemoteExecution {
             return Ok(ResolvedWorkspace {
                 project_id: expected_project,
                 workspace_id: owner,
-                execution_registration_id: binding.workspace_id,
                 cwd,
                 root: root.clone(),
                 relative_cwd: binding.cwd_relative_to_workspace.clone(),
@@ -144,7 +150,6 @@ impl RemoteExecution {
             Ok(ResolvedWorkspace {
                 project_id: binding.project_id,
                 workspace_id: owner,
-                execution_registration_id: binding.workspace_id,
                 cwd: canonical_cwd,
                 root: saved.root,
                 relative_cwd: binding.cwd_relative_to_workspace.clone(),
@@ -209,7 +214,6 @@ impl LocalExecutionPort for RemoteExecution {
             let resolved = ResolvedWorkspace {
                 project_id,
                 workspace_id,
-                execution_registration_id: workspace_id,
                 cwd: cwd.to_path_buf(),
                 root: root.clone(),
                 relative_cwd,
@@ -245,7 +249,6 @@ impl LocalExecutionPort for RemoteExecution {
             let resolved = ResolvedWorkspace {
                 project_id,
                 workspace_id,
-                execution_registration_id: workspace_id,
                 cwd,
                 root: discovery.root,
                 relative_cwd,

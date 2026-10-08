@@ -122,7 +122,7 @@ async fn old_versions_upgrade_preserving_goal_extensions_thread_columns_and_hist
             .fetch_one(&mut *connection)
             .await
             .unwrap();
-        assert_eq!(version, 18);
+        assert_eq!(version, CURRENT_SCHEMA_VERSION);
         drop(connection);
         store
             .update_title(&"older".into(), "changed")
