@@ -4,6 +4,68 @@ use serde_json::{json, Value};
 use super::*;
 use crate::tools::ToolContext;
 
+struct AppOnlyTool;
+
+#[async_trait]
+impl BaseTool for AppOnlyTool {
+    fn name(&self) -> &str {
+        "AppOnly"
+    }
+    fn description(&self) -> &str {
+        "app-only fixture"
+    }
+    fn parameters(&self) -> Value {
+        json!({})
+    }
+    fn aliases(&self) -> &[&str] {
+        &["app-alias"]
+    }
+    fn visible_to_model(&self) -> bool {
+        false
+    }
+    async fn invoke(
+        &self,
+        _input: Value,
+        _ctx: ToolContext<'_>,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        Ok("app-result".to_string())
+    }
+}
+
+#[tokio::test]
+async fn model_resolution_vetoes_app_only_without_disabling_app_resolution() {
+    let target: Arc<dyn BaseTool> = Arc::new(AppOnlyTool);
+    let tools = BTreeMap::from([("app-key".to_string(), Arc::clone(&target))]);
+    for name in [
+        "app-key",
+        "APP-KEY",
+        "AppOnly",
+        "apponly",
+        "app-alias",
+        "APP-ALIAS",
+    ] {
+        let call = ToolCall::new("call", name, json!({}));
+        assert!(matches!(
+            DirectToolInvocationResolver.resolve_model(&call, &tools),
+            Err(AgentError::ToolExecutionFailed { reason, .. })
+                if reason.contains("not available to the model")
+        ));
+        let invocation = DirectToolInvocationResolver.resolve(&call, &tools).unwrap();
+        assert!(Arc::ptr_eq(&invocation.target, &target));
+    }
+    let invocation = DirectToolInvocationResolver
+        .resolve(&ToolCall::new("app-call", "AppOnly", json!({})), &tools)
+        .unwrap();
+    assert_eq!(
+        invocation
+            .target
+            .invoke(invocation.policy_call.input, ToolContext::new(&[], "."))
+            .await
+            .unwrap(),
+        "app-result"
+    );
+}
+
 struct SchemaToolStub {
     name: &'static str,
     properties: Vec<&'static str>,

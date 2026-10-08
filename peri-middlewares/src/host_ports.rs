@@ -649,9 +649,7 @@ pub fn admit_plugin_hooks(
     if hooks.is_empty() {
         return hooks;
     }
-    // 逐个**有 hooks 声明**的插件判定；键取插件根目录（与 RegisteredHook 记的
-    // `plugin_root` 是同一个值，不重新解析路径）。
-    let mut decisions: std::collections::HashMap<PathBuf, bool> = std::collections::HashMap::new();
+    let mut decisions = std::collections::HashMap::new();
     for plugin in plugins {
         if plugin.hooks_config.is_none() {
             continue;
@@ -695,12 +693,16 @@ pub fn admit_plugin_hooks(
                  in this workspace to allow them to run"
             );
         }
-        decisions.insert(plugin.install_path.clone(), trusted);
+        decisions.insert((plugin.scope.clone(), plugin.install_path.clone()), trusted);
     }
     let mut admitted = Vec::new();
     let mut unknown = 0usize;
     for hook in hooks {
-        match decisions.get(&hook.plugin_root) {
+        let decision = hook
+            .plugin_source
+            .as_ref()
+            .and_then(|source| decisions.get(&(source.clone(), hook.plugin_root.clone())));
+        match decision {
             Some(true) => admitted.push(hook),
             Some(false) => {}
             None => {

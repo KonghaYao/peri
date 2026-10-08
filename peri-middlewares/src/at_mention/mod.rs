@@ -117,10 +117,6 @@ impl BatchBudget {
 /// 单项正文按字节预算裁剪的结果。
 struct TrimmedContent {
     text: String,
-    /// 裁剪是否真的发生（未发生时不加任何说明文字）。
-    truncated: bool,
-    /// 可继续读取的 1-based 行号；无法按行续读（单行超预算 / 目录）时为 None。
-    resume_line: Option<usize>,
 }
 
 /// 按 UTF-8 字节预算裁剪正文，优先在行边界收束。
@@ -131,8 +127,6 @@ fn trim_mention_content(content: &str, first_line: Option<usize>, budget: usize)
     if content.len() <= budget {
         return TrimmedContent {
             text: content.to_string(),
-            truncated: false,
-            resume_line: None,
         };
     }
     let cut = floor_char_boundary(content, budget);
@@ -149,8 +143,6 @@ fn trim_mention_content(content: &str, first_line: Option<usize>, budget: usize)
             };
             TrimmedContent {
                 text: format!("{}\n{note}", &content[..newline]),
-                truncated: true,
-                resume_line,
             }
         }
         // 单行就超过预算：只能按字符边界切，行级续读位置不可用——明确说明。
@@ -159,8 +151,6 @@ fn trim_mention_content(content: &str, first_line: Option<usize>, budget: usize)
                 "{}\n... (单行超过 {budget} 字节预算，已按 UTF-8 边界截断；请用更小的行范围重新读取)",
                 &content[..cut]
             ),
-            truncated: true,
-            resume_line: None,
         },
     }
 }
@@ -194,8 +184,6 @@ fn trim_directory_listing(content: &str, budget: usize) -> TrimmedContent {
     if content.len() <= budget {
         return TrimmedContent {
             text: content.to_string(),
-            truncated: false,
-            resume_line: None,
         };
     }
     let cut = floor_char_boundary(content, budget);
@@ -205,8 +193,6 @@ fn trim_directory_listing(content: &str, budget: usize) -> TrimmedContent {
             "{}\n... (目录条目超过 {budget} 字节预算，已截断；请用更具体的路径缩小范围)",
             &content[..cut]
         ),
-        truncated: true,
-        resume_line: None,
     }
 }
 

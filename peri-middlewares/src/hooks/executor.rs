@@ -167,7 +167,7 @@ pub async fn execute_command_hook_owned(
             match output.status.code() {
                 Some(0) => {
                     // Parse structured output
-                    parse_command_hook_output(&stdout)
+                    parse_command_hook_output(&input.hook_event_name, &stdout)
                 }
                 Some(1) => {
                     // Exit code 1 → Allow with warning（不记录 stderr 正文）
@@ -277,7 +277,7 @@ pub async fn execute_prompt_hook(
                 .unwrap_or(reasoning.thought)
                 .trim()
                 .to_string();
-            parse_command_hook_output(&answer)
+            parse_command_hook_output(&input.hook_event_name, &answer)
         }
         Ok(Err(e)) => {
             tracing::warn!("Prompt hook LLM call failed: {}", e);
@@ -381,7 +381,7 @@ pub async fn execute_http_hook(hook: &HookType, input: &HookInput) -> HookAction
                 return HookAction::Allow;
             }
 
-            parse_http_hook_response(&body)
+            parse_http_hook_response(&input.hook_event_name, &body)
         }
         Err(e) => {
             tracing::warn!("HTTP hook request failed: {}", e);
@@ -462,7 +462,7 @@ pub async fn execute_agent_hook(
                 return HookAction::Allow;
             }
             // 复用 command hook 的 output parser 解析 JSON 决策
-            parse_command_hook_output(&text)
+            parse_command_hook_output(&input.hook_event_name, &text)
         }
         Ok(Err(e)) => {
             tracing::warn!("Hook agent: LLM failed: {}, allowing", e);

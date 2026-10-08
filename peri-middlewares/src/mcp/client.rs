@@ -61,6 +61,7 @@ use std::{
 };
 
 pub(crate) use cache::cache_scope_allows_persistence;
+pub(crate) use cache::ConnectionResourceCache;
 pub use oauth::OAuthStartDisposition;
 // System MCP 启动准入（IF-M3）：证据、等待与类型化错误；子模块声明留在本文件，
 // 不占 `mcp/mod.rs`（其 owner 为 C-INJ-02 / D-02）。消费方：B-02（证据提交 /

@@ -52,6 +52,9 @@ fn catalog_projection(
     registry: &McpSkillRegistry,
 ) -> Result<Vec<SkillMetadata>, Box<dyn std::error::Error + Send + Sync>> {
     let skills = registry.all_skills();
+    if skills.is_empty() && registry.discovery_failed() {
+        return Err(super::skill_catalog_failed_message().into());
+    }
     if skills.is_empty() && registry.discovery_in_progress() {
         return Err(super::skill_catalog_initializing_message().into());
     }

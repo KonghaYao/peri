@@ -67,6 +67,10 @@ pub(crate) fn skill_catalog_initializing_message() -> String {
         .to_string()
 }
 
+pub(crate) fn skill_catalog_failed_message() -> String {
+    "Some skill providers could not be read; the catalog may be incomplete. Use available skills, continue without skills, or reconnect the provider to reload the catalog.".to_string()
+}
+
 /// 名称未命中（含别名/全名/裸名全部形态）。
 pub(crate) fn skill_not_found_message(name: &str) -> String {
     format!("Skill '{name}' not found. Use DiscoverSkillsTool to see available skills.")
@@ -278,7 +282,18 @@ impl Middleware for SkillsMiddleware {
     }
 
     fn prompt_contribution(&self) -> Option<String> {
-        self.cached_contribution.read().unwrap().clone()
+        let summary = self.cached_contribution.read().unwrap().clone();
+        if self
+            .mcp_registry
+            .as_ref()
+            .is_some_and(|registry| registry.discovery_failed())
+        {
+            return Some(match summary {
+                Some(summary) => format!("{summary}\n\n{}", skill_catalog_failed_message()),
+                None => skill_catalog_failed_message(),
+            });
+        }
+        summary
     }
 
     fn collect_tools(&self, _cwd: &str) -> Vec<Box<dyn BaseTool>> {

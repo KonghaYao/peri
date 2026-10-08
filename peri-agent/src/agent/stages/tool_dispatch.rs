@@ -140,7 +140,7 @@ pub async fn dispatch_tools(
         let resolved = ctx
             .runtime
             .tool_invocation_resolver
-            .resolve(call, &all_tools);
+            .resolve_model(call, &all_tools);
         match resolved {
             Ok(invocation) => invocations.push(invocation),
             Err(error) => resolution_errors.push((

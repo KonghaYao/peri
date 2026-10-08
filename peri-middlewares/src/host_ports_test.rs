@@ -273,6 +273,12 @@ mod plugin_hook_trust {
             matcher: None,
             plugin_name: "sample".to_string(),
             plugin_id: "sample@market".to_string(),
+            plugin_source: Some(PluginScope {
+                plugin_id: "sample@market".to_string(),
+                origin: PluginOrigin::PeriInstalled,
+                install_scope: InstallScope::User,
+                project_path: None,
+            }),
             plugin_root: root.to_path_buf(),
             plugin_data_dir: PathBuf::from("/tmp/sample-data"),
             plugin_options: HashMap::new(),

@@ -155,7 +155,7 @@ fn read_mention_body(
 ) -> Result<MentionBody, McpError> {
     let start = line_start.unwrap_or(1).max(1);
     let end = line_end.unwrap_or(usize::MAX);
-    if start >= end {
+    if start > end {
         return Ok(MentionBody {
             content: String::new(),
             truncated: false,

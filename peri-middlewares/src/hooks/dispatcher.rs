@@ -284,13 +284,21 @@ impl HookDispatcher {
 ///   判定承载全部字段（与 output_parser 的 PreToolUse 组合一致），
 ///   消费方不会因为后一个 hook"无判定"而丢掉先出现的判定/字段
 /// - Block / PreventContinuation 已在调用点短路，不会进入本函数；
-///   `InitialUserMessage`（SessionStart 专用、投递未接线）保持后者覆盖
+///   `InitialUserMessage`（SessionStart 专用）不得覆盖 deny/非法/ask 判定
 fn merge_hook_actions(acc: HookAction, next: HookAction) -> HookAction {
     match (&acc, &next) {
         // Allow 零元：判定与字段都不因对侧"无判定"而丢失。
         (HookAction::Allow, _) => next,
         (_, HookAction::Allow) => acc,
-        // InitialUserMessage 无对应字段可承载（SessionStart 专用），保持后者覆盖。
+        (_, HookAction::InitialUserMessage { .. })
+            if matches!(
+                &acc,
+                HookAction::PermissionOverride { decision, .. }
+                    if decision.is_deny_like() || matches!(decision, PermissionDecision::Ask)
+            ) =>
+        {
+            acc
+        }
         (HookAction::InitialUserMessage { .. }, _) | (_, HookAction::InitialUserMessage { .. }) => {
             next
         }

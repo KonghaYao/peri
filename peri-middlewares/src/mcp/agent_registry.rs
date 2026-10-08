@@ -118,6 +118,31 @@ pub struct ActivatedMcpAgent {
     pub digest: String,
 }
 
+struct RejectedLocalAgent {
+    id: String,
+    origin: String,
+    source: AgentSource,
+    uri: String,
+    error: InvalidModelTier,
+}
+
+impl RejectedLocalAgent {
+    fn priority(&self) -> u8 {
+        local_priority(self.source.local_scope().expect("local rejection source"))
+    }
+
+    fn blocks(&self, entry: &McpAgentMetadata, include_builtin: bool) -> bool {
+        self.id == entry.id
+            && (include_builtin || self.source.local_scope() != Some(ResourceScope::Builtin))
+            && self.priority()
+                <= entry
+                    .source
+                    .local_scope()
+                    .map(local_priority)
+                    .unwrap_or(u8::MAX)
+    }
+}
+
 pub struct McpAgentRegistry {
     pool: Arc<McpClientPool>,
     /// 会话可见性过滤（`None` = 不过滤；ACP 归属过滤的单一入口）。
@@ -180,7 +205,12 @@ impl McpAgentRegistry {
     }
 
     pub fn entries(&self) -> Vec<McpAgentMetadata> {
+        self.collect_entries().0
+    }
+
+    fn collect_entries(&self) -> (Vec<McpAgentMetadata>, Vec<RejectedLocalAgent>) {
         let mut entries = Vec::new();
+        let mut rejected = Vec::new();
         for handle in self
             .pool
             .get_all_clients_visible_to(self.session_id.as_deref())
@@ -237,10 +267,24 @@ impl McpAgentRegistry {
                     .as_ref()
                     .and_then(|meta| meta.0.get(META_KEY_FRONTMATTER))
                     .and_then(|value| value.as_object());
-                let Some(fields) = local_catalog_fields(&name, &resource.description, frontmatter)
-                else {
-                    tracing::debug!(agent = %name, "本地 agent frontmatter 不可解析，不公开");
-                    continue;
+                let fields = match local_catalog_fields(&name, &resource.description, frontmatter) {
+                    Ok(Some(fields)) => fields,
+                    Ok(None) => {
+                        tracing::debug!(agent = %name, "本地 agent frontmatter 不可解析，不公开");
+                        continue;
+                    }
+                    Err(error) => {
+                        tracing::warn!(agent = %name, origin = %handle.name, source = ?source,
+                            uri = %resource.uri, error = %error, "本地 agent model 档位非法，已隔离");
+                        rejected.push(RejectedLocalAgent {
+                            id: name,
+                            origin: handle.name.clone(),
+                            source,
+                            uri: resource.uri.clone(),
+                            error,
+                        });
+                        continue;
+                    }
                 };
                 entries.push(McpAgentMetadata {
                     id: name.clone(),
@@ -255,7 +299,7 @@ impl McpAgentRegistry {
             }
         }
         entries.sort_by(|a, b| (&a.origin, &a.name, &a.uri).cmp(&(&b.origin, &b.name, &b.uri)));
-        entries
+        (entries, rejected)
     }
 
     /// 该句柄是否是**宿主绑定的** builtin `workspace` 实例（身份判定，不含关闭位）。
@@ -348,8 +392,8 @@ impl McpAgentRegistry {
         id: &str,
         include_builtin: bool,
     ) -> Result<McpAgentMetadata, String> {
-        let mut candidates: Vec<McpAgentMetadata> = self
-            .entries()
+        let (entries, rejected) = self.collect_entries();
+        let mut candidates: Vec<McpAgentMetadata> = entries
             .into_iter()
             .filter(|entry| entry.source.is_local() && entry.id == id)
             .filter(|entry| {
@@ -360,7 +404,25 @@ impl McpAgentRegistry {
             AgentSource::Local { scope, .. } => local_priority(*scope),
             AgentSource::Remote => u8::MAX,
         });
-        match candidates.into_iter().next() {
+        let selected = candidates.into_iter().next();
+        if let Some(rejection) = rejected
+            .iter()
+            .filter(|rejection| {
+                rejection.id == id
+                    && (include_builtin
+                        || rejection.source.local_scope() != Some(ResourceScope::Builtin))
+                    && selected
+                        .as_ref()
+                        .map_or(true, |entry| rejection.blocks(entry, include_builtin))
+            })
+            .min_by_key(|rejection| (rejection.priority(), &rejection.origin, &rejection.uri))
+        {
+            return Err(format!(
+                "agent '{}' from {:?} ({}, {}) declares {}; fix the definition before use",
+                rejection.id, rejection.source, rejection.origin, rejection.uri, rejection.error
+            ));
+        }
+        match selected {
             Some(entry) => Ok(entry),
             None => Err(format!("cannot find agent definition '{id}'")),
         }
@@ -371,12 +433,17 @@ impl McpAgentRegistry {
     /// 目录渲染面用：`include_builtin=false` 时 builtin 项不进候选
     /// （与迁移前 `scan_agents_detailed(..., include_built_ins)` 一致）。
     pub fn local_catalog(&self, include_builtin: bool) -> Vec<McpAgentMetadata> {
-        let mut entries: Vec<McpAgentMetadata> = self
-            .entries()
+        let (entries, rejected) = self.collect_entries();
+        let mut entries: Vec<McpAgentMetadata> = entries
             .into_iter()
             .filter(|entry| entry.source.is_local())
             .filter(|entry| {
                 include_builtin || entry.source.local_scope() != Some(ResourceScope::Builtin)
+            })
+            .filter(|entry| {
+                !rejected
+                    .iter()
+                    .any(|rejection| rejection.blocks(entry, include_builtin))
             })
             .collect();
         entries.sort_by(|a, b| {
@@ -613,22 +680,16 @@ fn local_catalog_fields(
     agent_id: &str,
     resource_description: &Option<String>,
     frontmatter: Option<&serde_json::Map<String, serde_json::Value>>,
-) -> Option<LocalCatalogFields> {
-    let frontmatter: ClaudeAgentFrontmatter =
-        serde_json::from_value(serde_json::Value::Object(frontmatter?.clone())).ok()?;
-    // M2：非法档位隔离该条目——既不进候选目录，也不进可执行解析面（点名启动
-    // 因此显式失败，而不是拿着未知档位静默走父模型）。其余条目照常投影：单条
-    // 坏定义不阻断会话。诊断只记 agent id 与错误类别，不回显可疑原始值。
-    let capability = match crate::subagent::infer_agent_capability(&frontmatter) {
-        Ok(capability) => capability,
-        Err(InvalidModelTier) => {
-            tracing::warn!(
-                agent = %agent_id,
-                "本地 agent 定义的 model 档位非法，已从候选目录隔离"
-            );
-            return None;
-        }
+) -> Result<Option<LocalCatalogFields>, InvalidModelTier> {
+    let Some(frontmatter) = frontmatter else {
+        return Ok(None);
     };
+    let Ok(frontmatter) = serde_json::from_value::<ClaudeAgentFrontmatter>(
+        serde_json::Value::Object(frontmatter.clone()),
+    ) else {
+        return Ok(None);
+    };
+    let capability = crate::subagent::infer_agent_capability(&frontmatter)?;
     let display_name = if frontmatter.name.trim().is_empty() {
         agent_id.to_string()
     } else {
@@ -639,12 +700,12 @@ fn local_catalog_fields(
     } else {
         frontmatter.description.trim().to_string()
     };
-    Some(LocalCatalogFields {
+    Ok(Some(LocalCatalogFields {
         display_name,
         description,
         model_tier: capability.model_tier,
         can_mutate: capability.can_mutate,
-    })
+    }))
 }
 
 pub fn mcp_agent_id(origin: &str, name: &str) -> String {

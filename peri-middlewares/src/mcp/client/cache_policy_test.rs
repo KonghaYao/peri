@@ -216,6 +216,22 @@ async fn enabled_policy_preserves_versioned_cache_hits_without_rpc() {
         None::<rmcp::model::ServerPeerInfo>,
     );
     let peer = running.peer();
+    peer.set_peer_info(rmcp::model::InitializeResult::default().into());
+    let handle = Arc::new(super::McpClientHandle {
+        name: "server".into(),
+        version: None,
+        cache_version: None,
+        peer: Some(peer.clone()),
+        tools: vec![],
+        resources: vec![],
+        status: super::ClientStatus::Connected,
+        oauth_status: super::OAuthStatus::None,
+        source: None,
+        url: None,
+        skills_capable: false,
+    });
+    pool.advance_handle_generation(&handle);
+    pool.clients.write().insert("server".into(), handle);
     assert_eq!(
         pool.list_all_tools_cached("server", peer).await.unwrap()[0].name,
         "stale"

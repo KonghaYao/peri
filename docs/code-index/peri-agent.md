@@ -82,6 +82,7 @@ Inbox 去重入口 `agent/stages/work_receive.rs` 使用 `SessionResources::load
 | Reason（LLM 推理） | stages/reason.rs | `run_reason`；只恢复已提交 projection（与自动 compact 开关独立），无 directive 使用 canonical；准备阶段新增压力时补检 Compact，绑定最终请求预算；验证 Full 后真实 usage |
 | Act（工具执行或回答） | stages/act.rs | `run_act`；emit TurnCompleted |
 | 工具批次提交 | stages/tool_dispatch.rs | `dispatch_tools`（:73）；ID/target 解析、原子转录、batch hook 与错误收敛 |
+| 模型工具准入 | `tools/invocation.rs` + `stages/tool_dispatch.rs` | Act 经 `ToolInvocationResolver::resolve_model` 在绑定真实目标后拒绝 app-only 工具；可信 App effective dispatch 保留 `resolve`。direct 与模型 visibility 正交，大小写、alias 与包装调用均不能降低目标准入。wire 回归：`peri-middlewares/tests/mcp_host_policy_contract/app_visibility.rs`。 |
 | 共享调用执行 | stages/tool_dispatch/execution.rs | `collect_tool_results`（:51）；审批/并发/结算，参数复用 `tools::normalize_params` |
 | 阶段中间件 runner | stages/middleware_runner.rs + agent_context.rs | `run_before_agent` 结束后（含 Err）drain recall；它与后续批次的 `run_before_input` 均将稳定 ID replacement reconcile；`run_before_model`/`run_after_model` 保留追加消息双写路径 |
 | 启动闸门（首个 Reason 前的准入） | stages/mod.rs + stages/middleware_runner.rs | `run_before_react_start`（middleware_runner.rs:84；`run_react_loop` 首批 `before_agent`/`before_input` 之后、Compact 之前只执行一次）；`StartupGateState` 只持本次候选，Err 不降级——`Interrupted` → `LoopResult::Interrupted`，其它 Err → `LoopResult::Error`；既有 `before_agent` 的 warn 软失败语义不变 |

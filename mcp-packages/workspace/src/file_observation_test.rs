@@ -115,6 +115,26 @@ async fn mention_reads_workspace_range_and_limits_directory_entries() {
     assert!(!result.0["content"].as_str().unwrap().contains("file100"));
 }
 
+/// [回归测试] H7 的含端点范围曾因 start >= end 将单行读成空正文。
+#[tokio::test]
+async fn mention_equal_range_endpoints_returns_requested_line() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("f"), "one\ntwo\nthree\nfour\n五").unwrap();
+    for line in [1, 5] {
+        let result = super::read_mention(
+            root.path().to_str().unwrap(),
+            CustomRequest::new(
+                "workspace/readMention",
+                Some(serde_json::json!({"path": "f", "lineStart": line, "lineEnd": line})),
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.0["content"], if line == 1 { "one" } else { "五" });
+        assert_eq!(result.0["truncated"], false);
+    }
+}
+
 #[tokio::test]
 async fn mention_rejects_traversal_and_symlink_escape() {
     let root = tempfile::tempdir().unwrap();

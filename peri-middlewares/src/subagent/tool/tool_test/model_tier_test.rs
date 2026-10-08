@@ -521,7 +521,7 @@ async fn test_agent_frontmatter_unknown_tier_is_rejected_on_pointed_launch() {
     let dir = tempdir().unwrap();
     write_test_agent_with_model(&dir, "turbo");
     let aliases: Arc<std::sync::Mutex<Vec<Option<String>>>> = Arc::default();
-    let host = DurableHost::open_in(dir.path(), "fixture-model-tier-invalid").await;
+    let host = HostFixture::open_in(dir.path(), "fixture-model-tier-invalid").await;
     let t = with_agent_face(
         make_recording_subagent_tool(vec![], Arc::clone(&aliases)),
         dir.path(),
@@ -558,7 +558,7 @@ async fn test_agent_frontmatter_tier_case_normalized_on_launch() {
     let dir = tempdir().unwrap();
     write_test_agent_with_model(&dir, "SONNET");
     let aliases: Arc<std::sync::Mutex<Vec<Option<String>>>> = Arc::default();
-    let host = DurableHost::open_in(dir.path(), "fixture-model-tier-case").await;
+    let host = HostFixture::open_in(dir.path(), "fixture-model-tier-case").await;
     let t = with_agent_face(
         make_recording_subagent_tool(vec![], Arc::clone(&aliases)),
         dir.path(),

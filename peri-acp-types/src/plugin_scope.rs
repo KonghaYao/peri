@@ -92,7 +92,6 @@ impl PluginScope {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::plugin::{McpServerConfig, McpServerConfigValidationError};
 
     /// 仅含缺省字段的 typed 配置（`McpServerConfig` 没有 `Default`）。

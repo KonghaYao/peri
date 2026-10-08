@@ -78,6 +78,7 @@ pub struct HookInput {
 /// Claude Code 的 hook 输出是扁平 JSON（非 enum），包含多个可选字段。
 /// Peri 解析为结构体后转换为内部 Action 枚举。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct SyncHookResponse {
     /// 是否继续（默认 true）。false 时阻止 agent 继续执行
     #[serde(default, rename = "continue")]
@@ -112,7 +113,7 @@ pub enum HookDecision {
 
 /// 事件特定的 hook 输出——对齐 Claude Code hookSpecificOutput discriminated union
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "hookEventName")]
+#[serde(tag = "hookEventName", deny_unknown_fields)]
 pub enum HookSpecificOutput {
     #[serde(rename = "PreToolUse")]
     PreToolUse {

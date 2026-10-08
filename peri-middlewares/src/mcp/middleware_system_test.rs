@@ -723,6 +723,11 @@ async fn successful_gate_preserves_discovery_and_status_notifications() {
         ),
         "既有 before_agent 发现行为保留"
     );
+    wait_discovered(&reg, "srv").await;
+    assert!(
+        reg.all_skills().is_empty(),
+        "真实空目录 peer 必须收尾为合法空目录"
+    );
 }
 
 /// 失败不留下可复用的半成品：同一 middleware 连续两次准入，第二次按当次句柄

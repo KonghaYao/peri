@@ -17,6 +17,15 @@ use tempfile::tempdir;
 use super::*;
 use crate::workspace_io::{WorkspaceMentionContent, WorkspaceReadError};
 
+/// [回归测试] 续读位置以模型实际收到的文本为准，无需冗余结果字段。
+#[test]
+fn trimmed_content_renders_requested_range_resume_line() {
+    let rendered = trim_mention_content("甲\n乙\n丙", Some(5), 7);
+    assert!(rendered.text.contains("已截断"));
+    assert!(rendered.text.starts_with("甲\n"));
+    assert!(rendered.text.contains("从 L6 继续读取"));
+}
+
 #[path = "work_fixture.rs"]
 pub(crate) mod work_fixture;
 

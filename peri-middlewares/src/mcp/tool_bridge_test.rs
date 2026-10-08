@@ -36,6 +36,40 @@ fn make_disconnected_handle(name: &str) -> Arc<McpClientHandle> {
 }
 
 #[test]
+fn remote_workspace_direct_promotion_preserves_app_only_visibility() {
+    let hidden: Tool = serde_json::from_value(serde_json::json!({
+        "name": "app_only",
+        "inputSchema": {"type": "object", "properties": {}},
+        "_meta": {"ui": {"visibility": ["app"]}}
+    }))
+    .unwrap();
+    let visible = make_tool("Read", Some("read fixture"));
+    let mut handle = (*make_disconnected_handle("workspace")).clone();
+    handle.status = ClientStatus::Connected;
+    handle.source = Some(super::super::config::ConfigSource::WorkspaceRemote);
+    handle.tools = vec![hidden, visible];
+    let pool = Arc::new(McpClientPool::new_pending());
+    pool.clients
+        .write()
+        .insert("workspace".to_string(), Arc::new(handle));
+    let bridges = build_typed_tool_bridges(&pool);
+    let hidden = bridges
+        .iter()
+        .find(|bridge| bridge.name() == "app_only")
+        .unwrap();
+    assert!(hidden.is_direct());
+    assert!(!hidden.visible_to_model());
+    assert_eq!(hidden.mcp_server_name(), Some("workspace"));
+    assert_eq!(hidden.mcp_tool_name(), Some("app_only"));
+    let visible = bridges
+        .iter()
+        .find(|bridge| bridge.name() == "Read")
+        .unwrap();
+    assert!(visible.is_direct());
+    assert!(visible.visible_to_model());
+}
+
+#[test]
 fn test_new_creates_correct_full_name() {
     let tool = make_tool("read_file", Some("Read a file"));
     let handle = make_disconnected_handle("fs");

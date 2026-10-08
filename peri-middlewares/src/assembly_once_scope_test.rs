@@ -18,6 +18,7 @@ use super::*;
 
 use crate::hooks::{HookInput, HookMiddleware};
 use crate::subagent::SubAgentMiddleware;
+use peri_agent::agent::react::ReactLLM;
 
 /// 构造 once 命令行 hook（`echo run >> <log>`）。
 fn once_command_hook(event: HookEvent, log: &std::path::Path) -> RegisteredHook {
@@ -37,6 +38,7 @@ fn once_command_hook(event: HookEvent, log: &std::path::Path) -> RegisteredHook 
         matcher: None,
         plugin_name: "once-scope-plugin".to_string(),
         plugin_id: "once-scope-plugin-id".to_string(),
+        plugin_source: None,
         plugin_root: PathBuf::from("/tmp/once-scope-plugin"),
         plugin_data_dir: PathBuf::from("/tmp/once-scope-plugin-data"),
         plugin_options: std::collections::HashMap::new(),

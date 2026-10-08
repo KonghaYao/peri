@@ -33,6 +33,7 @@ fn subagent_hook(
         matcher: matcher.map(str::to_string),
         plugin_name: "subagent-test-plugin".to_string(),
         plugin_id: "subagent-test-plugin-id".to_string(),
+        plugin_source: None,
         plugin_root: PathBuf::from("/tmp/subagent-test-plugin"),
         plugin_data_dir: PathBuf::from("/tmp/subagent-test-plugin-data"),
         plugin_options: HashMap::new(),

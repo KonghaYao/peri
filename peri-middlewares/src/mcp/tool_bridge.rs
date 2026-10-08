@@ -222,10 +222,8 @@ impl McpToolBridge {
 
     /// The explicitly selected HTTP Workspace publishes its complete model tool
     /// surface through the live tools/list response.
-    pub(crate) fn with_workspace_direct(mut self) -> Self {
-        self = self.with_system_direct();
-        self.model_visible = true;
-        self
+    pub(crate) fn with_workspace_direct(self) -> Self {
+        self.with_system_direct()
     }
 
     /// MCP 声明的原始工具名（未净化、未加 server 前缀）。

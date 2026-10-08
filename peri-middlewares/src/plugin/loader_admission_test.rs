@@ -79,6 +79,63 @@ fn invalid_mcp_servers() -> serde_json::Value {
 }
 
 #[test]
+#[serial_test::serial]
+fn real_loader_preserves_hook_source_trust_for_shared_roots_in_both_orders() {
+    struct TrustConfig;
+    impl Drop for TrustConfig {
+        fn drop(&mut self) {
+            peri_config::io::set_global_config_path(None);
+        }
+    }
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    peri_config::io::set_global_config_path(Some(home.path().join("peri/settings.json")));
+    let _trust_config = TrustConfig;
+    install_plugin_with_every_face(home.path(), serde_json::json!({}));
+    let path = home.path().join("plugins/installed_plugins.json");
+    let mut installed: InstalledPlugins =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let mut project = installed.plugins[0].clone();
+    project.scope = InstallScope::Project;
+    project.project_path = Some(workspace.path().to_string_lossy().into_owned());
+    installed.plugins.push(project);
+    let cwd = workspace.path().to_str().unwrap();
+    for reverse in [false, true] {
+        if reverse {
+            installed.plugins.reverse();
+        }
+        std::fs::write(&path, serde_json::to_vec(&installed).unwrap()).unwrap();
+        let data =
+            load_enabled_plugins_aggregated_readonly(home.path(), Some(workspace.path())).unwrap();
+        assert_eq!(data.all_hooks.len(), 2);
+        for hook in &data.all_hooks {
+            assert!(data.plugins.iter().any(|plugin| {
+                hook.plugin_source.as_ref() == Some(&plugin.scope)
+                    && hook.plugin_root == plugin.install_path
+            }));
+        }
+        let trusted = data
+            .plugins
+            .iter()
+            .find(|plugin| plugin.scope.install_scope == InstallScope::Project)
+            .unwrap();
+        let binding = crate::host_ports::plugin_hook_binding(workspace.path(), trusted)
+            .unwrap()
+            .unwrap();
+        peri_config::trust::grant(&binding).unwrap();
+        let admitted =
+            crate::host_ports::admit_plugin_hooks(cwd, &data.plugins, data.all_hooks.clone());
+        assert_eq!(admitted.len(), 1);
+        assert_eq!(admitted[0].plugin_source.as_ref(), Some(&trusted.scope));
+        let mut unknown = admitted[0].clone();
+        unknown.plugin_source = None;
+        assert!(
+            crate::host_ports::admit_plugin_hooks(cwd, &data.plugins, vec![unknown]).is_empty()
+        );
+    }
+}
+
+#[test]
 fn plugin_face_closed_only_tracks_the_plugin_middleware_key() {
     let mut disabled = std::collections::HashSet::new();
     assert!(!crate::assembly::plugin_face_closed(&disabled));

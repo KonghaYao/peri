@@ -2,6 +2,16 @@
 
 use super::service::peer_cache_version;
 use super::{McpClientPool, McpConnectionKey};
+#[path = "cache_connection.rs"]
+mod connection;
+pub(crate) use connection::ConnectionResourceCache;
+use connection::{CacheConnection, ConnectionCacheTicket};
+#[cfg(test)]
+#[path = "cache_fencing_test.rs"]
+mod fencing_tests;
+#[cfg(test)]
+#[path = "cache_startup_test.rs"]
+mod startup_tests;
 use crate::mcp::config::{McpCachePolicy, McpServerConfig};
 use rmcp::{
     model::{
@@ -173,27 +183,24 @@ impl McpClientPool {
         server_name: &str,
         uri: &str,
         peer: &Peer<RoleClient>,
-    ) -> Result<
-        (
-            ReadResourceResult,
-            Option<crate::mcp::resource_cache::CacheTicket>,
-        ),
-        rmcp::service::ServiceError,
-    > {
-        if uri.starts_with("peri-output://") || !self.persistent_cache_allowed(server_name) {
-            return Ok((
-                peer.read_resource(ReadResourceRequestParams::new(uri))
-                    .await?,
-                None,
-            ));
+    ) -> Result<(ReadResourceResult, Option<ConnectionCacheTicket>), rmcp::service::ServiceError>
+    {
+        let connection = self.capture_cache_connection(server_name, peer)?;
+        if uri.starts_with("peri-output://") || !self.connection_cache_allowed(&connection) {
+            let result = peer
+                .read_resource(ReadResourceRequestParams::new(uri))
+                .await?;
+            self.require_cache_connection_current(&connection)?;
+            return Ok((result, None));
         }
-        let origin = self.cache_origin(server_name);
-        let cache_version = self.cache_versions.read().get(server_name).cloned();
+        let origin = connection.origin.clone();
+        let cache_version = connection.version.clone();
         if let Some(result) = self
             .resource_cache
             .get_versioned(&origin, "resources/read", uri, cache_version.as_deref())
             .await
         {
+            self.require_cache_connection_current(&connection)?;
             return Ok((result, None));
         }
         self.resource_cache
@@ -203,16 +210,18 @@ impl McpClientPool {
             .ticket(&origin, "resources/read", uri)
             .await
         else {
-            return Ok((
-                peer.read_resource(ReadResourceRequestParams::new(uri))
-                    .await?,
-                None,
-            ));
+            let result = peer
+                .read_resource(ReadResourceRequestParams::new(uri))
+                .await?;
+            self.require_cache_connection_current(&connection)?;
+            return Ok((result, None));
         };
+        self.require_cache_connection_current(&connection)?;
         let result = peer
             .read_resource(ReadResourceRequestParams::new(uri))
             .await?;
-        Ok((result, Some(ticket)))
+        self.require_cache_connection_current(&connection)?;
+        Ok((result, Some(ConnectionCacheTicket { connection, ticket })))
     }
 
     /// 仅由资源使用方在内容验证成功后调用。这样受 SEP-2640 内容绑定保护的
@@ -220,13 +229,16 @@ impl McpClientPool {
     pub(crate) async fn cache_verified_resource(
         &self,
         server_name: &str,
-        ticket: Option<crate::mcp::resource_cache::CacheTicket>,
+        ticket: Option<ConnectionCacheTicket>,
         result: &ReadResourceResult,
     ) {
         let Some(ticket) = ticket else { return };
+        if ticket.connection.name != server_name {
+            return;
+        }
         self.persist_cacheable_response(
-            server_name,
-            &ticket,
+            &ticket.connection,
+            &ticket.ticket,
             result,
             result.ttl_ms,
             result.cache_scope,
@@ -240,12 +252,25 @@ impl McpClientPool {
         params: Option<PaginatedRequestParams>,
         peer: &Peer<RoleClient>,
     ) -> Result<rmcp::model::ListResourcesResult, rmcp::service::ServiceError> {
-        if !self.persistent_cache_allowed(server_name) {
-            return peer.list_resources(params).await;
+        let connection = self.capture_cache_connection(server_name, peer)?;
+        self.list_resources_with_connection(&connection, params, peer)
+            .await
+    }
+
+    async fn list_resources_with_connection(
+        &self,
+        connection: &CacheConnection,
+        params: Option<PaginatedRequestParams>,
+        peer: &Peer<RoleClient>,
+    ) -> Result<rmcp::model::ListResourcesResult, rmcp::service::ServiceError> {
+        if !self.connection_cache_allowed(connection) {
+            let result = peer.list_resources(params).await?;
+            self.require_cache_connection_current(connection)?;
+            return Ok(result);
         }
-        let origin = self.cache_origin(server_name);
+        let origin = connection.origin.clone();
         let params_key = serde_json::to_string(&params).unwrap_or_default();
-        let cache_version = self.cache_versions.read().get(server_name).cloned();
+        let cache_version = connection.version.clone();
         if let Some(result) = self
             .resource_cache
             .get_versioned(
@@ -256,6 +281,7 @@ impl McpClientPool {
             )
             .await
         {
+            self.require_cache_connection_current(connection)?;
             return Ok(result);
         }
         self.resource_cache
@@ -264,10 +290,12 @@ impl McpClientPool {
             .resource_cache
             .ticket(&origin, "resources/list", &params_key)
             .await;
+        self.require_cache_connection_current(connection)?;
         let result = peer.list_resources(params).await?;
+        self.require_cache_connection_current(connection)?;
         if let Some(ticket) = ticket {
             self.persist_cacheable_response(
-                server_name,
+                connection,
                 &ticket,
                 &result,
                 result.ttl_ms,
@@ -275,6 +303,7 @@ impl McpClientPool {
             )
             .await;
         }
+        self.require_cache_connection_current(connection)?;
         Ok(result)
     }
 
@@ -301,6 +330,32 @@ impl McpClientPool {
         }
     }
 
+    pub(crate) async fn list_all_resources_cached_for_startup(
+        &self,
+        server_name: &str,
+        peer: &Peer<RoleClient>,
+        config: &McpServerConfig,
+    ) -> Result<Vec<Resource>, rmcp::service::ServiceError> {
+        let connection = self.capture_startup_cache_connection(server_name, peer, config)?;
+        let mut resources = Vec::new();
+        let mut cursor = None;
+        loop {
+            let result = self
+                .list_resources_with_connection(
+                    &connection,
+                    Some(PaginatedRequestParams::default().with_cursor(cursor)),
+                    peer,
+                )
+                .await?;
+            resources.extend(result.resources);
+            cursor = result.next_cursor;
+            if cursor.is_none() {
+                self.require_cache_connection_current(&connection)?;
+                return Ok(resources);
+            }
+        }
+    }
+
     /// 缓存包装器供后续 Resource Template 消费者使用；当前 Agent 尚未暴露
     /// templates/list 的目录工具，因此不在初始化阶段进行无目的预取。
     pub async fn list_resource_templates_cached(
@@ -309,12 +364,15 @@ impl McpClientPool {
         params: Option<PaginatedRequestParams>,
         peer: &Peer<RoleClient>,
     ) -> Result<rmcp::model::ListResourceTemplatesResult, rmcp::service::ServiceError> {
-        if !self.persistent_cache_allowed(server_name) {
-            return peer.list_resource_templates(params).await;
+        let connection = self.capture_cache_connection(server_name, peer)?;
+        if !self.connection_cache_allowed(&connection) {
+            let result = peer.list_resource_templates(params).await?;
+            self.require_cache_connection_current(&connection)?;
+            return Ok(result);
         }
-        let origin = self.cache_origin(server_name);
+        let origin = connection.origin.clone();
         let params_key = serde_json::to_string(&params).unwrap_or_default();
-        let cache_version = self.cache_versions.read().get(server_name).cloned();
+        let cache_version = connection.version.clone();
         if let Some(result) = self
             .resource_cache
             .get_versioned(
@@ -325,16 +383,19 @@ impl McpClientPool {
             )
             .await
         {
+            self.require_cache_connection_current(&connection)?;
             return Ok(result);
         }
         let ticket = self
             .resource_cache
             .ticket(&origin, "resources/templates/list", &params_key)
             .await;
+        self.require_cache_connection_current(&connection)?;
         let result = peer.list_resource_templates(params).await?;
+        self.require_cache_connection_current(&connection)?;
         if let Some(ticket) = ticket {
             self.persist_cacheable_response(
-                server_name,
+                &connection,
                 &ticket,
                 &result,
                 result.ttl_ms,
@@ -342,6 +403,7 @@ impl McpClientPool {
             )
             .await;
         }
+        self.require_cache_connection_current(&connection)?;
         Ok(result)
     }
 
@@ -362,28 +424,62 @@ impl McpClientPool {
         server_name: &str,
         peer: &Peer<RoleClient>,
     ) -> Result<Vec<Tool>, rmcp::service::ServiceError> {
-        if !self.tools_cache_eligible(server_name) {
-            return peer.list_all_tools().await;
+        let connection = self.capture_cache_connection(server_name, peer)?;
+        self.list_all_tools_with_connection(&connection, peer).await
+    }
+
+    pub(crate) async fn list_all_tools_cached_for_startup(
+        &self,
+        server_name: &str,
+        peer: &Peer<RoleClient>,
+        config: &McpServerConfig,
+    ) -> Result<Vec<Tool>, rmcp::service::ServiceError> {
+        let connection = self.capture_startup_cache_connection(server_name, peer, config)?;
+        self.list_all_tools_with_connection(&connection, peer).await
+    }
+
+    async fn list_all_tools_with_connection(
+        &self,
+        connection: &CacheConnection,
+        peer: &Peer<RoleClient>,
+    ) -> Result<Vec<Tool>, rmcp::service::ServiceError> {
+        if !self.connection_cache_allowed(connection)
+            || !self.tools_cache_eligible(&connection.name)
+        {
+            let result = peer.list_all_tools().await?;
+            self.require_cache_connection_current(connection)?;
+            return Ok(result);
         }
-        let origin = self.cache_origin(server_name);
-        let cache_version = self.cache_versions.read().get(server_name).cloned();
+        let origin = connection.origin.clone();
+        let cache_version = connection.version.clone();
         if let Some(version) = cache_version.as_deref() {
             if let Some(tools) = self
                 .resource_cache
                 .get_versioned::<Vec<Tool>>(&origin, "tools/list", "", Some(version))
                 .await
             {
+                self.require_cache_connection_current(connection)?;
                 return Ok(tools);
             }
         }
         self.resource_cache.mark_live_fetch(&origin, "tools/list");
         let ticket = self.resource_cache.ticket(&origin, "tools/list", "").await;
+        self.require_cache_connection_current(connection)?;
         let tools = peer.list_all_tools().await?;
+        self.require_cache_connection_current(connection)?;
         if let (Some(ticket), Some(version)) = (ticket, cache_version.as_deref()) {
-            self.resource_cache
-                .put_ticket_versioned(&ticket, std::time::Duration::ZERO, Some(version), &tools)
-                .await;
+            if self.connection_cache_allowed(connection) {
+                self.resource_cache
+                    .put_ticket_versioned(&ticket, std::time::Duration::ZERO, Some(version), &tools)
+                    .await;
+                if !self.connection_cache_allowed(connection) {
+                    self.resource_cache
+                        .invalidate(&connection.origin, "tools/list", Some(""))
+                        .await;
+                }
+            }
         }
+        self.require_cache_connection_current(connection)?;
         Ok(tools)
     }
 
@@ -457,10 +553,6 @@ impl McpClientPool {
         }
     }
 
-    pub(crate) fn resource_cache(&self) -> crate::mcp::resource_cache::McpResourceCache {
-        self.resource_cache.clone()
-    }
-
     pub(super) fn cache_status_for(&self, server_name: &str) -> Option<String> {
         let denial = match self.connection_key_for(server_name) {
             Some(connection) => self.cache_denial(&connection),
@@ -498,16 +590,16 @@ impl McpClientPool {
 
     async fn persist_cacheable_response<T: serde::Serialize>(
         &self,
-        server_name: &str,
+        connection: &CacheConnection,
         ticket: &crate::mcp::resource_cache::CacheTicket,
         result: &T,
         ttl_ms: Option<u64>,
         cache_scope: Option<CacheScope>,
     ) {
-        if !self.persistent_cache_allowed(server_name) {
+        if ticket.origin != connection.origin || !self.connection_cache_allowed(connection) {
             return;
         }
-        let cache_version = self.cache_versions.read().get(server_name).cloned();
+        let cache_version = &connection.version;
         let can_reuse = cache_scope_allows_persistence(cache_scope)
             || (cache_scope.is_none() && ttl_ms.is_some());
         if !can_reuse {
@@ -518,6 +610,11 @@ impl McpClientPool {
             self.resource_cache
                 .put_ticket_versioned(ticket, ttl, cache_version.as_deref(), result)
                 .await;
+            if !self.connection_cache_allowed(connection) {
+                self.resource_cache
+                    .invalidate(&ticket.origin, ticket.method(), Some(ticket.params()))
+                    .await;
+            }
         }
     }
 }

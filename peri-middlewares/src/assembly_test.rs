@@ -436,6 +436,7 @@ fn make_hook() -> RegisteredHook {
         matcher: None,
         plugin_name: "test-plugin".to_string(),
         plugin_id: "test-plugin-id".to_string(),
+        plugin_source: None,
         plugin_root: PathBuf::from("/tmp/test-plugin"),
         plugin_data_dir: PathBuf::from("/tmp/test-plugin-data"),
         plugin_options: Default::default(),

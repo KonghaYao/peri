@@ -10,6 +10,7 @@ fn make_registered() -> RegisteredHook {
         matcher: None,
         plugin_name: "test-plugin".to_string(),
         plugin_id: "test-id".to_string(),
+        plugin_source: None,
         plugin_root: PathBuf::from("/tmp/test-plugin"),
         plugin_data_dir: PathBuf::from("/tmp/test-plugin-data"),
         plugin_options: std::collections::HashMap::new(),
@@ -36,11 +37,24 @@ fn make_command_hook(command: &str) -> HookType {
 
 #[tokio::test]
 async fn test_command_hook_echo_plain_text() {
-    let hook = make_command_hook("cat");
+    let hook = make_command_hook("echo plain-text-hook-output");
     let input = make_hook_input();
     let registered = make_registered();
     let action = execute_command_hook(&hook, &input, &registered).await;
     assert!(matches!(action, HookAction::Allow));
+}
+
+#[tokio::test]
+async fn test_command_hook_echo_input_json_is_rejected() {
+    let hook = make_command_hook("cat");
+    let input = make_hook_input();
+    let registered = make_registered();
+    let action = execute_command_hook(&hook, &input, &registered).await;
+    assert!(matches!(
+        action,
+        HookAction::Block { reason }
+            if reason == "Hook output is invalid or unsupported for the current event"
+    ));
 }
 
 #[cfg(unix)]

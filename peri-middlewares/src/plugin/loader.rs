@@ -935,6 +935,7 @@ fn aggregate_plugin_data(plugins: Vec<LoadedPlugin>) -> PluginLoadResult {
                                 .or_else(|| hook_def.get_matcher().cloned()),
                             plugin_name: plugin.name.clone(),
                             plugin_id: plugin.name.clone(),
+                            plugin_source: Some(plugin.scope.clone()),
                             plugin_root: plugin.install_path.clone(),
                             plugin_data_dir: plugin.data_path.clone(),
                             plugin_options: plugin

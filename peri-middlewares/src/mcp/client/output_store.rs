@@ -151,12 +151,7 @@ pub(crate) async fn format_output(
         None => Err("workspace output store not configured"),
     };
     let hint = match saved {
-        Ok(stored) => format!(
-            "\nFull output saved in tool environment: server=workspace, resource_uri={}, path={} ({} bytes). Read with mcp_read_resource(server_name=workspace, uri=resource_uri) or Read(file_path=<returned path>, offset=<start line>, limit=<line count>).",
-            serde_json::json!(stored.uri),
-            serde_json::json!(stored.path),
-            stored.byte_length
-        ),
+        Ok(stored) => saved_output_hint(&stored),
         // 落存失败必须明说：不得给出任何看似可回查的地址。
         Err(reason) => format!("\nFull output NOT saved: {reason}. No host filesystem fallback."),
     };
@@ -185,6 +180,27 @@ pub(crate) async fn format_output(
     format!("{body}{notice}")
 }
 
+fn saved_output_hint(stored: &StoredOutput) -> String {
+    let hint = format!(
+        "\nFull output saved in tool environment: server=workspace, resource_uri={}, path={} ({} bytes). Read with mcp_read_resource(server_name=workspace, uri=resource_uri) or Read(file_path=<returned path>, offset=<start line>, limit=<line count>).",
+        serde_json::json!(stored.uri),
+        serde_json::json!(stored.path),
+        stored.byte_length
+    );
+    if hint.len() <= 4096 {
+        return hint;
+    }
+    format!(
+        "\nFull output saved in tool environment: server=workspace, resource_uri={} ({} bytes). Path omitted: reference exceeds the byte budget. Read with mcp_read_resource(server_name=workspace, uri=resource_uri).",
+        serde_json::json!(stored.uri),
+        stored.byte_length
+    )
+}
+
 #[cfg(test)]
 #[path = "output_store_test.rs"]
 pub(crate) mod tests;
+
+#[cfg(test)]
+#[path = "output_budget_test.rs"]
+mod budget_tests;

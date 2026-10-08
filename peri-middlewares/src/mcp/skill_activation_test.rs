@@ -176,6 +176,7 @@ impl Fixture {
             .discovery_state(SERVER)
             .map(|state| match state {
                 peri_acp_types::mcp_skills::ServerDiscoveryState::Started { handle }
+                | peri_acp_types::mcp_skills::ServerDiscoveryState::Failed { handle }
                 | peri_acp_types::mcp_skills::ServerDiscoveryState::Discovered { handle, .. } => {
                     handle
                 }

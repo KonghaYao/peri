@@ -1,13 +1,13 @@
 use crate::hooks::types::{
-    HookAction, HookDecision, HookSpecificOutput, PermissionDecision, SyncHookResponse,
+    HookAction, HookDecision, HookEvent, HookSpecificOutput, PermissionDecision, SyncHookResponse,
 };
 
 /// 解析 command hook stdout 输出
 ///
 /// 对齐 Claude Code parseHookOutput + processHookJSONOutput:
 /// - 不以 `{` 开头 → 纯文本输出，视为 Allow
-/// - 以 `{` 开头 → 尝试解析为 SyncHookResponse JSON
-pub fn parse_command_hook_output(stdout: &str) -> HookAction {
+/// - 以 `{` 开头 → 解析并校验实际事件，无效或未知输出拒绝执行
+pub fn parse_command_hook_output(event: &HookEvent, stdout: &str) -> HookAction {
     let trimmed = stdout.trim();
 
     // 不以 { 开头 → 纯文本输出，视为 Allow
@@ -17,12 +17,8 @@ pub fn parse_command_hook_output(stdout: &str) -> HookAction {
 
     // 尝试解析为 SyncHookResponse JSON
     match serde_json::from_str::<SyncHookResponse>(trimmed) {
-        Ok(response) => sync_response_to_action(&response),
-        Err(e) => {
-            // JSON 解析失败 → 纯文本，视为 Allow（记录日志）
-            tracing::warn!("Hook stdout JSON parse failed: {}", e);
-            HookAction::Allow
-        }
+        Ok(response) => sync_response_to_action(&response, event),
+        Err(_) => invalid_output(event, "invalid_command_json"),
     }
 }
 
@@ -31,7 +27,7 @@ pub fn parse_command_hook_output(stdout: &str) -> HookAction {
 /// 对齐 Claude Code parseHttpHookOutput：
 /// - 空 body → 视为 {}（有效 JSON）
 /// - 不以 `{` 开头 → 非法（HTTP hook 必须返回 JSON）
-pub fn parse_http_hook_response(body: &str) -> HookAction {
+pub fn parse_http_hook_response(event: &HookEvent, body: &str) -> HookAction {
     let trimmed = body.trim();
 
     // 空 body → 视为 {}（有效 JSON）
@@ -46,15 +42,12 @@ pub fn parse_http_hook_response(body: &str) -> HookAction {
             bytes = trimmed.len(),
             "HTTP hook must return JSON, got non-JSON body"
         );
-        return HookAction::Allow;
+        return invalid_output(event, "non_json_http_body");
     }
 
     match serde_json::from_str::<SyncHookResponse>(trimmed) {
-        Ok(response) => sync_response_to_action(&response),
-        Err(e) => {
-            tracing::warn!("HTTP hook JSON parse failed: {}", e);
-            HookAction::Allow
-        }
+        Ok(response) => sync_response_to_action(&response, event),
+        Err(_) => invalid_output(event, "invalid_http_json"),
     }
 }
 
@@ -67,7 +60,17 @@ pub fn parse_http_hook_response(body: &str) -> HookAction {
 /// 4. systemMessage → SystemMessage
 /// 5. hookSpecificOutput → 事件特定处理
 /// 6. 以上都不满足 → Allow
-fn sync_response_to_action(response: &SyncHookResponse) -> HookAction {
+fn sync_response_to_action(response: &SyncHookResponse, event: &HookEvent) -> HookAction {
+    if let Some(specific) = &response.hook_specific_output {
+        let output_event = match specific {
+            HookSpecificOutput::PreToolUse { .. } => HookEvent::PreToolUse,
+            HookSpecificOutput::UserPromptSubmit { .. } => HookEvent::UserPromptSubmit,
+            HookSpecificOutput::SessionStart { .. } => HookEvent::SessionStart,
+        };
+        if output_event != *event {
+            return invalid_output(event, "output_event_mismatch");
+        }
+    }
     // 1. continue=false → 阻止继续
     if response.continue_run == Some(false) {
         return HookAction::PreventContinuation {
@@ -104,6 +107,13 @@ fn sync_response_to_action(response: &SyncHookResponse) -> HookAction {
     }
 
     HookAction::Allow
+}
+
+fn invalid_output(event: &HookEvent, category: &'static str) -> HookAction {
+    tracing::error!(event = ?event, category, "Hook output rejected: invalid or unsupported response");
+    HookAction::Block {
+        reason: "Hook output is invalid or unsupported for the current event".to_string(),
+    }
 }
 
 /// PreToolUse 组合输出归并。
@@ -179,3 +189,7 @@ fn hook_specific_to_action(specific: &HookSpecificOutput) -> HookAction {
 #[cfg(test)]
 #[path = "output_parser_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "output_validation_test.rs"]
+mod output_validation_tests;

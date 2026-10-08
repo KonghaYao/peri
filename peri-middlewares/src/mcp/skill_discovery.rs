@@ -91,8 +91,8 @@ const MAX_LIST_PAGES: usize = 100;
 
 /// 发现任务主体：规范/legacy 分流 → 并发读全文 → 解析/校验 → 回写 registry。
 ///
-/// - legacy 且候选空 → 直接完成（空条目，静默）；
-/// - peer 缺失 → warn + 完成（失败=空条目，不重试；重连才重扫）；
+/// - legacy 且候选空 → 模板探测后再次检查取消，再完成合法空目录；
+/// - peer 缺失或非空候选全部失败 → warn + Failed（重连才重扫）；
 /// - cancel 触发 → 回退 Started 状态（不触发 on_change），下轮可重试。
 ///
 /// 双注册表回写（决策 1 + A2）：`registry`（元数据面）完成后，若
@@ -154,12 +154,24 @@ pub(crate) async fn run_discovery_with_cache(
     handle: Arc<McpClientHandle>,
     handle_token: HandleToken,
     cancel: AgentCancellationToken,
-    cache: Option<(crate::mcp::resource_cache::McpResourceCache, String)>,
+    cache: Option<(crate::mcp::client::ConnectionResourceCache, String)>,
     // 宿主技能面关闭位（`BuiltinInstanceContext.skills_face_closed`，与 A24 关闭集
     // 同源）：真 ⇒ `core:{skill}` 裸名投影整体撤下（链槽关闭的配套半边）。
     // 由调用方从 pool 上下文读出经参数透传——发现任务不持有 pool。
     skills_face_closed: bool,
 ) {
+    if cancel.is_cancelled() {
+        registry.clear_discovery_started(&handle.name, handle_token.clone());
+        clear_command_source(&command_registry, &handle.name, handle_token);
+        return;
+    }
+    let Some(peer) = handle.peer.clone() else {
+        tracing::warn!(server = %handle.name, "MCP skill 发现：peer 缺失，发现失败");
+        registry.mark_discovery_failed(&handle.name, handle_token.clone());
+        clear_command_source(&command_registry, &handle.name, handle_token);
+        project_core_skill_commands(&command_registry, &registry, skills_face_closed);
+        return;
+    };
     // legacy 兜底：resources 里无 skill:// 候选 → 直接完成（规范模式不受
     // resources 影响——skills/list 是独立原语）。cancel 已触发时与下方
     // cancel 分支同构：回退 Started 状态（不触发 on_change），下轮可重试。
@@ -169,13 +181,11 @@ pub(crate) async fn run_discovery_with_cache(
     // 形态模板时记录可发现性信号（显式 URI 仍可经 skills/get 或读取面
     // 完整性路径解析），**空列表本身是合法结果**，不报错、不重试。
     if !handle.skills_capable && select_skill_resources(&handle.resources).is_empty() {
+        probe_skill_templates(&peer, &handle.name).await;
         if cancel.is_cancelled() {
             registry.clear_discovery_started(&handle.name, handle_token.clone());
             clear_command_source(&command_registry, &handle.name, handle_token);
             return;
-        }
-        if let Some(peer) = handle.peer.clone() {
-            probe_skill_templates(&peer, &handle.name).await;
         }
         registry.mark_discovery_completed(&handle.name, handle_token.clone(), vec![]);
         // W4b（F6）：元数据面完成后同批刷新 `core:{skill}` 裸名投影
@@ -190,23 +200,9 @@ pub(crate) async fn run_discovery_with_cache(
         );
         return;
     }
-    let Some(peer) = handle.peer.clone() else {
-        tracing::warn!(server = %handle.name, "MCP skill 发现：peer 缺失，跳过");
-        registry.mark_discovery_completed(&handle.name, handle_token.clone(), vec![]);
-        // W4b（F6）：元数据面完成后同批刷新 `core:{skill}` 裸名投影
-        //（空条目 ⇒ 撤下既有 core 技能命令；宿主技能面关闭 ⇒ 同批撤下）。
-        project_core_skill_commands(&command_registry, &registry, skills_face_closed);
-        finish_command_source(
-            &command_registry,
-            &registry,
-            &handle.name,
-            handle_token,
-            &[],
-        );
-        return;
-    };
+    let request_cache = cache.clone();
     let entries = if handle.skills_capable {
-        match cache {
+        let result = match cache {
             Some((cache, origin)) => {
                 skills_list::collect_via_skills_list_cached(
                     peer,
@@ -218,12 +214,30 @@ pub(crate) async fn run_discovery_with_cache(
                 .await
             }
             None => collect_via_skills_list(peer, &handle.name, cancel.clone()).await,
+        };
+        match result {
+            Ok(entries) => entries,
+            Err(error) => {
+                tracing::warn!(server = %handle.name, %error, "MCP skill discovery failed");
+                if cancel.is_cancelled() {
+                    registry.clear_discovery_started(&handle.name, handle_token.clone());
+                } else {
+                    registry.mark_discovery_failed(&handle.name, handle_token.clone());
+                }
+                clear_command_source(&command_registry, &handle.name, handle_token);
+                project_core_skill_commands(&command_registry, &registry, skills_face_closed);
+                return;
+            }
         }
     } else {
         let candidates = select_skill_resources(&handle.resources);
         collect_skill_entries(peer, &handle.name, candidates, cancel.clone(), cache).await
     };
-    if cancel.is_cancelled() {
+    if cancel.is_cancelled()
+        || request_cache
+            .as_ref()
+            .is_some_and(|(cache, _)| !cache.is_current())
+    {
         registry.clear_discovery_started(&handle.name, handle_token.clone());
         clear_command_source(&command_registry, &handle.name, handle_token);
         return;
@@ -233,6 +247,10 @@ pub(crate) async fn run_discovery_with_cache(
             server = %handle.name,
             "MCP skill 发现：候选非空但全部读取/校验失败，无可用条目",
         );
+        registry.mark_discovery_failed(&handle.name, handle_token.clone());
+        clear_command_source(&command_registry, &handle.name, handle_token);
+        project_core_skill_commands(&command_registry, &registry, skills_face_closed);
+        return;
     }
     let skills = entries.1;
     finish_command_source(

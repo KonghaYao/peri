@@ -34,7 +34,7 @@ fn record_subagent_lifecycle_action(
 }
 
 impl super::SubAgentTool {
-    /// 生命周期 hook 分发器（懒建、按工具/会话共享一次）。
+    /// 生命周期 hook 分发器（懒建，作用域为父 middleware 的装配寿命）。
     ///
     /// [TRAP] 共享是 once 语义的前提：`once:true` 的 SubagentStart/Stop 必须跨
     /// 同一工具的多次 spawn/resume 只触发一次；按 spawn 新建 dispatcher 会让

@@ -329,6 +329,7 @@ async fn hook_receives_canonical_alias_identity() {
         matcher: Some("Bash".to_string()),
         plugin_name: "contract".to_string(),
         plugin_id: "contract".to_string(),
+        plugin_source: None,
         plugin_root: PathBuf::from("/tmp"),
         plugin_data_dir: PathBuf::from("/tmp"),
         plugin_options: HashMap::new(),
