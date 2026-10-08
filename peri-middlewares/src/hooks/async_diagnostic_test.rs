@@ -3,6 +3,11 @@
 //! 异步 hook 是**非决策** hook：结果不追溯改变授权、不投递未定义的 context，
 //! 但也不能"只把所有结果当 Allow"静默丢弃。本文件用 warn 捕获订阅者断言
 //! 完成/决策忽略/未定义投递的可诊断性（诊断不得携带 hook 正文）。
+//!
+//! 本文件共 4 例（3 个 `#[tokio::test]` + 1 个分类器 `#[test]`）。
+//! [TRAP] 证据命令必须用**模块过滤** `--lib async_diagnostic_tests`；用
+//! `async_hook` 名称前缀过滤只会跑到 3 个 tokio 用例，分类器用例漏网，
+//! 日志与"4 passed"的文字声明对不上。
 
 use std::collections::HashMap;
 use std::path::PathBuf;

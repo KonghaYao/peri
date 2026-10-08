@@ -78,6 +78,12 @@ pub struct HookMiddleware {
     /// PreToolUse `ask` 的审批端口（与 PermissionMiddleware 同源 broker）。
     /// None = 无审批通道：宿主也不会弹窗时，ask 必须拒绝而不是放行。
     broker: Option<Arc<dyn UserInteractionBroker>>,
+    /// 宿主审批路径（PermissionMiddleware）是否真的在链上。
+    ///
+    /// `should_fire_permission_request_*` 只描述"权限面存在时会不会弹窗"；
+    /// MetaHarness 关闭 Permission 面后 Default 模式同样不会有人弹审批。
+    /// 缺失（默认）时 ask 不允许交宿主，必须走 `broker`；无 broker 明确拒绝。
+    host_approval_path: bool,
     /// broker.request 超时（与 PermissionMiddleware 同源常量）
     broker_timeout: std::time::Duration,
 }
@@ -148,8 +154,19 @@ impl HookMiddleware {
             requires_approval: crate::permission::default_requires_approval,
             stop_block_guard,
             broker: None,
+            // fail-closed 默认：未显式声明宿主审批面在链上时，ask 不得交宿主。
+            host_approval_path: false,
             broker_timeout: crate::permission::BROKER_TIMEOUT,
         }
+    }
+
+    /// 声明宿主审批路径（PermissionMiddleware）是否在链上。
+    ///
+    /// 由装配点按 MetaHarness 关闭集注入（关闭 Permission 面 → false）；
+    /// 缺失即 false：ask 走 broker，无 broker 明确拒绝。
+    pub fn with_host_approval_path(mut self, present: bool) -> Self {
+        self.host_approval_path = present;
+        self
     }
 
     /// 注入审批端口（PreToolUse `ask` 落实用）。
@@ -169,22 +186,24 @@ impl HookMiddleware {
 
     /// 落实 PreToolUse `ask`。
     ///
-    /// - 宿主权限路径本来就会弹窗（`should_fire_permission_request_*`）→ 返回 `None`
-    ///   交给宿主审批，避免同一次调用出现双重审批；
-    /// - 宿主不会弹窗（Bypass、豁免工具等）→ 必须经既有 `UserInteractionBroker`
-    ///   有界审批；无 broker、超时、拒绝都返回固定反馈的 `ToolRejected`，绝不放行。
+    /// - 宿主权限路径确实在链上，且本来就会弹窗（`should_fire_permission_request_*`）
+    ///   → 返回 `None` 交给宿主审批，避免同一次调用出现双重审批；
+    /// - 宿主路径缺失（MetaHarness 关闭 Permission 面）或本就不会弹窗（Bypass、
+    ///   豁免工具等）→ 必须经既有 `UserInteractionBroker` 有界审批；无 broker、
+    ///   超时、拒绝都返回固定反馈的 `ToolRejected`，绝不放行。
     async fn resolve_ask_approval(
         &self,
         state: &mut dyn hook_state::BeforeToolState,
         tool_call: &ToolCall,
     ) -> AgentResult<Option<ToolCall>> {
         let origin = state.tool_origin(&tool_call.id);
-        let host_will_ask = permission_gate::should_fire_permission_request_for_origin(
-            self.permission_mode.load(),
-            &tool_call.name,
-            self.requires_approval,
-            origin.as_ref(),
-        );
+        let host_will_ask = self.host_approval_path
+            && permission_gate::should_fire_permission_request_for_origin(
+                self.permission_mode.load(),
+                &tool_call.name,
+                self.requires_approval,
+                origin.as_ref(),
+            );
         if host_will_ask {
             return Ok(None);
         }
@@ -253,9 +272,14 @@ impl HookMiddleware {
         tool_name: Option<&str>,
         tool_input: Option<&serde_json::Value>,
     ) -> HookAction {
-        self.dispatcher
-            .fire_event(event, input, tool_name, tool_input)
-            .await
+        let action = self
+            .dispatcher
+            .fire_event(event.clone(), input, tool_name, tool_input)
+            .await;
+        // M10 字段路由的唯一出口诊断：任何事件归并出的 additionalContext /
+        // systemMessage 都必须可诊断一次（投递由 F 组接线），不得静默丢弃。
+        diagnose_undelivered_output(&event, &action);
+        action
     }
 
     /// 在一批并行工具调用全部完成后触发 PostToolBatch hook。
@@ -390,12 +414,6 @@ impl Middleware for HookMiddleware {
                 "SessionStart hook prevented continuation",
             )?;
             match &action {
-                HookAction::SystemMessage { message } => {
-                    diagnose_undelivered_output(None, Some(message), "SessionStart");
-                }
-                HookAction::AdditionalContext { context } => {
-                    diagnose_undelivered_output(Some(context), None, "SessionStart");
-                }
                 HookAction::InitialUserMessage { message } => {
                     tracing::debug!(
                         event = "SessionStart",
@@ -502,19 +520,13 @@ impl Middleware for HookMiddleware {
             HookAction::PermissionOverride {
                 decision,
                 updated_input,
-                additional_context,
-                system_message,
                 ..
             } => {
                 if let Some(new_input) = updated_input {
                     effective_call.input = new_input.clone();
                 }
-                // M10 字段路由：已解析但投递尚未接线的字段必须可诊断，不记录正文
-                diagnose_undelivered_output(
-                    additional_context.as_deref(),
-                    system_message.as_deref(),
-                    "PreToolUse",
-                );
+                // M10 字段路由：additionalContext / systemMessage 已由 fire_event
+                // 出口统一诊断（不重复记录正文）。
 
                 // deny（含无法识别的判定）优先于 updatedInput：零工具执行 + 固定安全反馈
                 if decision.is_deny_like() {
@@ -563,9 +575,16 @@ impl Middleware for HookMiddleware {
                 )
                 .await;
 
-            // P1-5: PermissionDenied —— 当 hook 拒绝权限时触发
+            // P1-5: PermissionDenied —— 当 hook 拒绝权限时触发。
+            // deny 也可能以 PermissionOverride（permissionDecision: deny/无法识别）
+            // 归并而来，判定必须同时看两个形状。
+            let override_denies = matches!(
+                &action,
+                HookAction::PermissionOverride { decision, .. } if decision.is_deny_like()
+            );
             let is_denied = matches!(&action, HookAction::Block { .. })
-                || matches!(&action, HookAction::PreventContinuation { .. });
+                || matches!(&action, HookAction::PreventContinuation { .. })
+                || override_denies;
             if is_denied {
                 self.fire_event(
                     HookEvent::PermissionDenied,
@@ -584,6 +603,15 @@ impl Middleware for HookMiddleware {
                 Some(&effective_call.input),
             )
             .await;
+
+            // PermissionOverride 的 deny/非法判定不经过 resolve_action_to_toolcall
+            // （该归约只认 Block/PreventContinuation）：必须显式零执行，绝不放行。
+            if override_denies {
+                return Err(AgentError::ToolRejected {
+                    tool: effective_call.name.clone(),
+                    reason: HOOK_PERMISSION_DENY_REASON.to_string(),
+                });
+            }
 
             return action_resolver::resolve_action_to_toolcall(
                 &action,
@@ -765,6 +793,9 @@ impl Middleware for HookMiddleware {
 /// PreToolUse `deny` 的固定安全反馈：不透传 hook 自述文本。
 const HOOK_DENY_REASON: &str = "PreToolUse hook denied this tool call";
 
+/// PermissionRequest `permissionDecision: deny` 的固定安全反馈：不透传 hook 自述文本。
+const HOOK_PERMISSION_DENY_REASON: &str = "PermissionRequest hook denied this tool call";
+
 /// PreToolUse `ask` 无审批端口时的固定反馈。
 const HOOK_ASK_UNAVAILABLE_REASON: &str =
     "PreToolUse hook requested approval, but no approval channel is available";
@@ -772,18 +803,26 @@ const HOOK_ASK_UNAVAILABLE_REASON: &str =
 /// PreToolUse `ask` 审批超时的固定反馈。
 const HOOK_ASK_TIMEOUT_REASON: &str = "PreToolUse hook approval request timed out";
 
-/// 已解析但投递尚未接线的 hook 输出：只记录字段名与长度，绝不记录正文。
+/// 已解析但投递尚未接线的 hook 输出：只记录事件、字段名与长度，绝不记录正文。
 ///
 /// M10 字段路由（additionalContext / systemMessage）在 C 组只完成类型与可诊断
-/// 状态，实际投递由 F 组接线；未接线期间不得静默丢弃，也不得“解析成功即假装生效”。
-fn diagnose_undelivered_output(
-    additional_context: Option<&str>,
-    system_message: Option<&str>,
-    event: &str,
-) {
+/// 状态，实际投递由 F 组接线；未接线期间不得静默丢弃，也不得"解析成功即假装生效"。
+/// 在 [`HookMiddleware::fire_event`] 唯一出口诊断一次，覆盖所有事件与
+/// [`HookAction::PermissionOverride`] 携带的字段。
+fn diagnose_undelivered_output(event: &HookEvent, action: &HookAction) {
+    let (additional_context, system_message) = match action {
+        HookAction::AdditionalContext { context } => (Some(context.as_str()), None),
+        HookAction::SystemMessage { message } => (None, Some(message.as_str())),
+        HookAction::PermissionOverride {
+            additional_context,
+            system_message,
+            ..
+        } => (additional_context.as_deref(), system_message.as_deref()),
+        _ => (None, None),
+    };
     if let Some(context) = additional_context {
         tracing::debug!(
-            event,
+            event = ?event,
             field = "additionalContext",
             bytes = context.len(),
             "hook output parsed but delivery is not wired yet (M10 → F)"
@@ -791,7 +830,7 @@ fn diagnose_undelivered_output(
     }
     if let Some(message) = system_message {
         tracing::debug!(
-            event,
+            event = ?event,
             field = "systemMessage",
             bytes = message.len(),
             "hook output parsed but delivery is not wired yet (M10 → F)"
@@ -810,3 +849,15 @@ mod post_tool_batch_tests;
 #[cfg(test)]
 #[path = "async_diagnostic_test.rs"]
 mod async_diagnostic_tests;
+
+#[cfg(test)]
+#[path = "ask_host_path_test.rs"]
+mod ask_host_path_tests;
+
+#[cfg(test)]
+#[path = "undelivered_output_test.rs"]
+mod undelivered_output_tests;
+
+#[cfg(test)]
+#[path = "permission_request_deny_test.rs"]
+mod permission_request_deny_tests;

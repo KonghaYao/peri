@@ -626,6 +626,8 @@ fn slot_middleware_name(slot: &ChainSlot) -> &'static str {
 mod baseline;
 #[path = "assembly_test_meta.rs"]
 mod meta;
+#[path = "assembly_once_scope_test.rs"]
+mod once_scope;
 #[path = "assembly_test_sections.rs"]
 mod sections;
 #[path = "assembly_test_workflow.rs"]
