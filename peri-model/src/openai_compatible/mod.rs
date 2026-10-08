@@ -182,6 +182,12 @@ impl crate::Model for OpenAiModel {
         }
     }
 
+    /// provider 已解析的单次输出上限（`config.max_tokens`）。摘要器等派生请求
+    /// 只在两个来源一致时被允许沿用，不借助请求参数覆写它（H6）。
+    fn output_token_limit(&self) -> Option<u32> {
+        Some(self.config.max_tokens)
+    }
+
     fn prepare_request(&self, request: &ModelRequest) -> ModelResult<PreparedModelRequest> {
         self.build_request(request)?.observe(&self.config.runtime)
     }

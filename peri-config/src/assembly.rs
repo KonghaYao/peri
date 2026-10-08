@@ -269,6 +269,7 @@ fn parse_settings(
     document: &Value,
     source_identity: SourceIdentity,
 ) -> Result<PeriConfig, ConfigurationError> {
+    crate::app::warn_legacy_compact_keys(document);
     let mut config: PeriConfig = serde_json::from_value(document.clone()).map_err(|error| {
         ConfigurationError::InvalidInput {
             cause: Box::new(error),

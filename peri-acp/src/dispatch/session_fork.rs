@@ -120,9 +120,6 @@ fn source_frozen(snapshot: &SessionSnapshot) -> Result<FrozenSnapshotBytes> {
     match &snapshot.frozen {
         FrozenState::Present(bytes) => Ok(bytes.clone()),
         FrozenState::LegacyAbsent => bail!("Source frozen snapshot is missing"),
-        FrozenState::Unsupported => {
-            bail!("Source frozen snapshot is not readable by this build")
-        }
     }
 }
 

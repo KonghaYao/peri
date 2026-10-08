@@ -199,12 +199,14 @@ pub enum BindingState {
 
 /// 会话 frozen 快照的状态。
 #[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// 未知版本**不在这里表达**：格式知识属于 ACP 侧解码器
+/// （`FrozenSnapshotError::UnsupportedVersion`），存储层只区分「有字节」与
+/// 「legacy 缺失」，不为制造枚举用法去理解 snapshot 格式。
 pub enum FrozenState {
     Present(FrozenSnapshotBytes),
     /// legacy 会话尚未持久化快照；由既有 legacy 规则决定能否补齐。
     LegacyAbsent,
-    /// 存在快照但本构建读不懂（版本/形状不支持）——不是「缺失」。
-    Unsupported,
 }
 
 /// 绑定复核的力度：两次复核的差别只在是否重跑一次完整发现。

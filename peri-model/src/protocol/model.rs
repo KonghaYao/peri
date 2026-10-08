@@ -167,6 +167,16 @@ impl Drop for ModelStream {
 pub trait Model: Send + Sync {
     fn capabilities(&self) -> ModelCapabilities;
 
+    /// 单次请求的有效输出上限（provider 已解析的配置值，只读）。
+    ///
+    /// 调用方（如 Compact 摘要器）据此推导派生请求的输出预算与长度目标，**不**
+    /// 覆写 provider 已解析的上限、thinking 配置或从 `ModelRequest` 反推。`None`
+    /// 表示 provider 不声明可解析上限：请求按 provider 默认执行，调用方不得代填
+    /// 任意常量。
+    fn output_token_limit(&self) -> Option<u32> {
+        None
+    }
+
     /// Freezes the complete request for a durable checkpoint before execution.
     ///
     /// Implementations must satisfy [`crate::PreparedModelCall::new`]'s full

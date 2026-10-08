@@ -9,7 +9,8 @@ use crate::{
     ToolCall, ToolDefinition, ToolResult,
 };
 
-use super::{request::body_for_test, AnthropicConfig};
+use super::{request::body_for_test, AnthropicConfig, AnthropicModel};
+use crate::Model;
 
 fn config() -> AnthropicConfig {
     config_with_retry(1)
@@ -406,4 +407,29 @@ fn system_cache_prefix_is_stable_and_dynamic_order_is_preserved() {
     );
     assert!(first_system[1].get("cache_control").is_none());
     assert!(second_system[1].get("cache_control").is_none());
+}
+
+/// [回归测试] 只读输出预算接口与 wire 解析同源（H6）。
+///
+/// Compact 摘要器据此沿用 provider 已解析的单次输出上限：既不在请求里覆写成
+/// 独立常量，也不代填任意值。未声明请求预算时 wire 仍落到同一已解析上限。
+#[test]
+fn output_token_limit_matches_the_resolved_wire_budget() {
+    let model = AnthropicModel::new(
+        config()
+            .with_max_tokens(4_096)
+            .with_extended_thinking(1_024, "high"),
+    );
+    assert_eq!(model.output_token_limit(), Some(4_096));
+    let body = body_for_test(
+        &model.config,
+        &ModelRequest::new(vec![ModelMessage::user_text("summarize")]),
+    );
+    assert_eq!(body["max_tokens"], 4_096);
+    // 摘要路径只沿用上限，不改写 thinking 配置。
+    assert_eq!(
+        body["thinking"],
+        json!({ "type": "enabled", "budget_tokens": 1_024 })
+    );
+    assert_eq!(body["output_config"], json!({ "effort": "high" }));
 }

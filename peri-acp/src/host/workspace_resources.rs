@@ -45,8 +45,9 @@ pub(crate) fn workspace_resources_input(
             SkillSource::Plugin => ResourceScope::Plugin,
             // Builtin 资产不是磁盘根：启用位已由 `disable_bundled` 表达。
             SkillSource::Builtin => continue,
-            // 根解析不产出 Global / Mcp；出现即内部错误（不静默映射 scope）。
-            SkillSource::Global | SkillSource::Mcp => {
+            // 根解析不产出 Mcp；出现即内部错误（不静默映射 scope）。旧本地
+            // `skillsDir` 来源（`SkillSource::Global`）已退出，不复活本地根。
+            SkillSource::Mcp => {
                 tracing::warn!(
                     path = %root.path.display(),
                     "skill 根解析产出不支持的 scope，跳过"

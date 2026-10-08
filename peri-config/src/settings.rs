@@ -342,6 +342,7 @@ fn load_with_raw(path: &Path) -> Result<(PeriConfig, Option<String>)> {
     if !document.is_object() {
         return Err(SettingsError::InvalidJson);
     }
+    crate::app::warn_legacy_compact_keys(&document);
     let mut config: PeriConfig = serde_json::from_value(document).map_err(SettingsError::Json)?;
     config.config.validate_meta_harness();
     Ok((config, Some(content)))

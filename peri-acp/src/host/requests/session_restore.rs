@@ -57,10 +57,6 @@ async fn load_frozen_bytes(cfg: &AcpServerConfig, session_id: &str) -> Result<St
             -32603,
             "Bound session has no frozen snapshot",
         )),
-        FrozenState::Unsupported => Err(AcpError::new(
-            -32603,
-            "Session frozen snapshot is not readable by this build",
-        )),
     }
 }
 

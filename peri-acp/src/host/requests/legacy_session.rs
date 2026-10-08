@@ -55,10 +55,6 @@ async fn persisted_frozen_bytes(
             -32603,
             "Legacy adoption did not commit a frozen snapshot",
         )),
-        FrozenState::Unsupported => Err(AcpError::new(
-            -32603,
-            "Session frozen snapshot is not readable by this build",
-        )),
     }
 }
 
@@ -110,13 +106,9 @@ pub(super) async fn prepare_for_restore(
     let workspace = resolve_saved_workspace(cfg, &meta).await?;
     let workspace_cwd = workspace.cwd.to_string_lossy().into_owned();
     match snapshot.frozen {
-        // 有快照但本构建读不懂：不是「缺失」，不能按 legacy 规则重冻覆盖既有字节。
-        FrozenState::Unsupported => Err(AcpError::new(
-            -32603,
-            "Session frozen snapshot is not readable by this build",
-        )),
         // frozen 已存在但绑定缺失：接纳只补绑定并保持既有字节（write-once），随后
-        // 按 winner 字节重新定格输入（不重建、不覆盖）。
+        // 按 winner 字节重新定格输入（不重建、不覆盖）。未知版本的唯一错误权威是
+        // 解码器（`FrozenSnapshotError::UnsupportedVersion`），存储层不表达它。
         FrozenState::Present(bytes) => {
             decode_frozen_snapshot(bytes.as_str()).map_err(workspace_error)?;
             resources

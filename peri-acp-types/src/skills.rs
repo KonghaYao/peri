@@ -24,8 +24,6 @@ pub const SKILLS_EXTENSION_ID: &str = "io.modelcontextprotocol/skills";
 pub enum SkillSource {
     /// ~/.claude/skills
     User,
-    /// ~/.peri/settings.json::skillsDir
-    Global,
     /// {cwd}/.claude/skills
     Project,
     /// 插件 manifest 声明的 skill 目录
