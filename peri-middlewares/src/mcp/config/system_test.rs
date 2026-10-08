@@ -259,21 +259,32 @@ fn test_system_mcp_empty_tools_survive_config_pipeline() {
     let expanded = expand_server_config(sys);
     assert_eq!(expanded.system_mcp_tools, Some(Vec::new()));
 
-    // 写回（切换 disabled）后原始空数组仍在文件里、仍能无损读回。
-    set_server_disabled_with_paths(&cwd, &global_path, "sys", true).unwrap();
-    let raw = std::fs::read_to_string(&project_path).unwrap();
-    let written: serde_json::Value = serde_json::from_str(&raw).unwrap();
-    let tools = &written["mcpServers"]["sys"]["system_mcp_tools"];
+    // 写回（切换 disabled）必须被拒绝：`disabled + system_mcp` 是非法组合，
+    // 写回路径不得静默去掉其中一个开关，也不得写入一个下一个会话加载不了的配置。
+    let before = std::fs::read_to_string(&project_path).unwrap();
+    let error = set_server_disabled_with_paths(&cwd, &global_path, "sys", true)
+        .expect_err("对 system server 置 disabled 必须在写盘前拒绝");
     assert!(
-        tools.as_array().is_some_and(|tools| tools.is_empty()),
-        "写回必须保留显式空数组（不得省略该 key）: {raw}"
+        matches!(
+            error,
+            McpConfigError::InvalidServer {
+                source:
+                    peri_acp_types::plugin::McpServerConfigValidationError::DisabledWithSystemMcp,
+                ..
+            }
+        ),
+        "实际错误: {error}"
     );
+    let after = std::fs::read_to_string(&project_path).unwrap();
+    assert_eq!(before, after, "被拒绝的写入不得改动既有文件");
+    // 文件仍可加载，显式空数组与 system 声明逐字保留。
     let reloaded = load_from_path(&project_path).unwrap();
     assert_eq!(
         reloaded.mcp_servers["sys"].system_mcp_tools,
         Some(Vec::new())
     );
-    assert_eq!(reloaded.mcp_servers["sys"].disabled, Some(true));
+    assert_eq!(reloaded.mcp_servers["sys"].system_mcp, Some(true));
+    assert_eq!(reloaded.mcp_servers["sys"].disabled, None);
 }
 
 #[test]
@@ -551,29 +562,19 @@ fn test_system_mcp_write_preserves_remaining_tools() {
         Some(["z".to_string(), "a".to_string(), "z".to_string()].as_slice())
     );
 
-    // 切换 disabled：数组仍原样保留（顺序与重复项都不动）。
-    set_server_disabled_with_paths(&cwd, &global_path, "sys", true).unwrap();
+    // 切换 disabled 必须被拒绝（M7）：`disabled + system_mcp` 非法，写回路径
+    // 既不静默去掉开关，也不写出后续加载不了的配置；既有数组逐字保留。
+    let before = std::fs::read_to_string(&global_path).unwrap();
+    assert!(set_server_disabled_with_paths(&cwd, &global_path, "sys", true).is_err());
+    assert_eq!(
+        before,
+        std::fs::read_to_string(&global_path).unwrap(),
+        "被拒绝的写入不得改动既有文件"
+    );
     let reloaded = load_global_config(&global_path).unwrap();
-    assert_eq!(reloaded.mcp_servers["sys"].disabled, Some(true));
+    assert_eq!(reloaded.mcp_servers["sys"].disabled, None);
     assert_eq!(
         reloaded.mcp_servers["sys"].system_mcp_tools.as_deref(),
         Some(["z".to_string(), "a".to_string(), "z".to_string()].as_slice())
-    );
-
-    // 显式 [] 写回不得被省略。
-    let empty_path = dir.path().join("empty-settings.json");
-    std::fs::write(
-        &empty_path,
-        r#"{"mcpServers":{"sys":{"command":"echo","system_mcp":true,"system_mcp_tools":[]}}}"#,
-    )
-    .unwrap();
-    set_server_disabled_with_paths(&cwd, &empty_path, "sys", true).unwrap();
-    let raw = std::fs::read_to_string(&empty_path).unwrap();
-    let written: serde_json::Value = serde_json::from_str(&raw).unwrap();
-    assert!(
-        written["mcpServers"]["sys"]["system_mcp_tools"]
-            .as_array()
-            .is_some_and(|tools| tools.is_empty()),
-        "写回必须保留显式空数组（不得省略该 key）: {raw}"
     );
 }

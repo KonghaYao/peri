@@ -210,6 +210,18 @@ pub struct HostAssemblyInput {
     /// 随 builtin 实例上下文注入 pool（发现管线的唯一消费点）。
     /// 顶层三路径（无会话上下文）恒为 `false`；会话装配从 frozen snapshot 派生。
     pub skills_face_closed: bool,
+    /// 插件来源闭合位（M6）：`"PluginMiddleware" ∈ disabled_middlewares`
+    /// （与 [`Self::builtin_closed`] / [`Self::skills_face_closed`] **同一份**
+    /// disabled 集合的投影，装配期一次派生）。
+    ///
+    /// `true` ⇒ 插件来源注入面整体关闭：插件 skill/agent roots、commands、hooks、
+    /// MCP 配置贡献与子 Agent 继承面一律不参与本会话装配，且**在读取插件目录之前**
+    /// 生效（`PluginSourceAdmission::Closed`）。关闭的是执行注入面——插件管理
+    /// （安装/卸载/marketplace）不受影响。
+    ///
+    /// 顶层三路径（无会话策略）与 bare 恒为 `false`；会话装配从 frozen snapshot
+    /// 派生（ARC-CAPABILITY-CLOSURE-001）。
+    pub plugin_face_closed: bool,
 }
 
 /// Emscripten deployment inputs. The ACP Host and request dispatch remain the
@@ -247,6 +259,7 @@ pub async fn assemble_wasm_server_config(input: WasmHostAssemblyInput) -> AcpSer
             session_mcp_servers: None,
             builtin_closed: Default::default(),
             skills_face_closed: false,
+            plugin_face_closed: false,
         },
         HostCapabilities {
             builtin_mcp: false,
@@ -289,6 +302,18 @@ pub(super) fn build_session_end_task(
 /// `skip_settings_hooks`：bare 模式跳过 global/project/local（与 print 既有语义
 /// 一致）；plugin hooks 为空时不产生空组。三级 settings hooks 经
 /// [`SettingsHooksPort`] 注入（装配点构造，磁盘加载留在实现方）。
+/// 插件来源闭合位（M6）：从本次定格的 session-local 配置派生。
+///
+/// ACP 侧的**唯一**入口——准备面（`prepared.rs`，装配之前）与装配面都经它判定，
+/// 判定实现仍在 `peri_middlewares::plugin::PluginSourceAdmission`（唯一闭合位），
+/// 本函数只做「配置 → 布尔」的投影，不复制键名或策略。
+pub(crate) fn plugin_face_closed(config: &PeriConfig) -> bool {
+    peri_middlewares::plugin::PluginSourceAdmission::from_meta_harness(
+        config.config.meta_harness.as_ref(),
+    )
+    .is_closed()
+}
+
 pub fn assemble_hook_groups(
     plugin_hooks: &[RegisteredHook],
     settings_hooks: &dyn SettingsHooksPort,
@@ -432,6 +457,7 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         session_mcp_servers,
         builtin_closed,
         skills_face_closed,
+        plugin_face_closed,
     } = input;
 
     // 用户级 `.claude` 与准备面、插件 RPC 共用同一权威（HOME 优先）：
@@ -440,14 +466,26 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         .plugins
         .then(peri_middlewares::plugin::claude_home);
 
+    // ── 插件来源准入（M6 唯一闭合位）：必须在取任何插件来源**之前**决定 ──
+    //
+    // `Closed` ⇒ 不再消费准备面已加载的聚合，也不自行加载：插件 roots / 命令 /
+    // hooks / MCP 贡献与继承面同批缺席（关闭语义要求能力不存在，而不是先读进来
+    // 再藏目录）。准备面已在本会话准备期应用同一策略（`prepared.rs`），这里是
+    // 装配面的第二次防线：策略从 frozen/session-local 派生，不从当轮配置回退。
+    let plugin_admission = if bare || !session_scoped || !capabilities.plugins || plugin_face_closed
+    {
+        peri_middlewares::plugin::PluginSourceAdmission::Closed
+    } else {
+        peri_middlewares::plugin::PluginSourceAdmission::Open
+    };
+
     // ── 插件聚合数据（bare 时跳过；准备路径消费同一聚合，不重读插件目录）──
     let (prepared_data, prepared_skill_roots) = match prepared_plugins {
         Some(prepared) => (Some(prepared.data), Some(prepared.skill_roots)),
         None => (None, None),
     };
     let prepared_supplied = prepared_skill_roots.is_some();
-    let plugin_data: Option<PluginLoadResult> = if bare || !session_scoped || !capabilities.plugins
-    {
+    let plugin_data: Option<PluginLoadResult> = if plugin_admission.is_closed() {
         None
     } else if prepared_supplied {
         // 准备路径已严格只读加载一次：装配面消费同一聚合，不重读插件目录。
@@ -504,6 +542,12 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         }
         if let Err(error) = pool.set_plugin_discovery_available(capabilities.plugins) {
             tracing::error!(%error, "MCP plugin availability binding failed");
+        }
+        // M6：插件来源闭合位随同一批能力位注入 pool，早于 `run_initialize` 的
+        // 配置加载窗口——MCP 合并（快照路径与文件路径）在被读到之前就已决定
+        // 是否读插件来源。判定源是 frozen/session-local 策略，不是当轮配置。
+        if let Err(error) = pool.set_plugin_face_closed(plugin_face_closed) {
+            tracing::error!(%error, "MCP plugin face closure binding failed");
         }
         if let Err(error) = pool.set_stdio_available(capabilities.stdio_mcp) {
             tracing::error!(%error, "MCP stdio availability binding failed");
@@ -790,12 +834,19 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
     // （技能命令改由 MCP 发现投影）；它仍是**技能资源根**的事实源，由会话环境
     // 装配（`SessionEnvironment::assemble_with_frozen` 的 provider 输入）与
     // `AcpServerConfig.plugin_skill_roots` 消费。
-    let plugin_skill_roots = prepared_skill_roots.unwrap_or_else(|| {
-        plugin_data
-            .as_ref()
-            .map(|pd| pd.all_skill_roots.clone())
-            .unwrap_or_default()
-    });
+    //
+    // M6：关闭位下准备面的 roots 也被丢弃——插件来源必须在取来源之前闭合，
+    // 不能因为「准备阶段已读到」就把内容留在装配面。
+    let plugin_skill_roots = if plugin_admission.is_closed() {
+        Vec::new()
+    } else {
+        prepared_skill_roots.unwrap_or_else(|| {
+            plugin_data
+                .as_ref()
+                .map(|pd| pd.all_skill_roots.clone())
+                .unwrap_or_default()
+        })
+    };
     // Phase 6 B2：插件命令静态条目预转（全路径引用豁免见
     // scripts/import-exemptions.conf 边 2 assemble 路径；bare 时为空）。
     let plugin_command_entries = plugin_data
@@ -810,6 +861,19 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         .as_ref()
         .map(|pd| pd.plugins.clone())
         .unwrap_or_default();
+    // M6/H4：插件来源 hooks 过与 settings 同一条信任门（默认拒绝）。
+    // 只约束执行来源——插件 skills / commands / agents / MCP 面不受影响。
+    // 关闭位下 `plugin_loaded` 与 `plugin_hooks` 已同批为空（上面的闭合位）。
+    let plugin_hooks =
+        peri_middlewares::host_ports::admit_plugin_hooks(&cwd, &plugin_loaded, plugin_hooks);
+    tracing::debug!(
+        plugin_face_closed = plugin_admission.is_closed(),
+        plugin_skill_roots = plugin_skill_roots.len(),
+        plugin_commands = plugin_command_entries.len(),
+        plugin_hooks = plugin_hooks.len(),
+        plugin_loaded = plugin_loaded.len(),
+        "插件来源注入面装配（M6 闭合位投影）"
+    );
 
     let hook_groups = assemble_hook_groups(
         &plugin_hooks,

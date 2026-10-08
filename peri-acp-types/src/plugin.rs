@@ -193,7 +193,7 @@ impl<'de> Deserialize<'de> for McpServerConfig {
             source: None,
         };
         // 非法组合在解析期拒绝，错误正文为固定契约文本。
-        config.validate().map_err(serde::de::Error::custom)?;
+        config.validate_wire().map_err(serde::de::Error::custom)?;
         Ok(config)
     }
 }
@@ -215,11 +215,22 @@ impl McpServerConfig {
     ///
     /// `disabled && system_mcp` 覆盖**全部来源**（builtin / 普通 / global / project /
     /// plugin 与配置更新）：两种开关语义互斥（既要关闭又要作为系统前置），
-    /// 合并准入期一次失败，不再每轮 Reason 才在 readiness 报 fatal。
+    /// **合并/加载准入**一次失败并定位到 server 名，不再每轮 Reason 才在 readiness
+    /// 报 fatal，也不静默选择其中一个开关。
     pub fn validate(&self) -> Result<(), McpServerConfigValidationError> {
         if self.disabled == Some(true) && self.system_mcp == Some(true) {
             return Err(McpServerConfigValidationError::DisabledWithSystemMcp);
         }
+        self.validate_wire()
+    }
+
+    /// wire 解析期可判定的规则（`system_mcp` 三个字段的自洽与 timeout 区间）。
+    ///
+    /// 与 [`Self::validate`] 的唯一差别是**不含** `disabled && system_mcp`：该组合的
+    /// 可操作诊断需要来源名字（配置键 / 插件 server 键），因此由配置文件级与合并级
+    /// 准入（`peri_config::mcp::validate_servers`、插件严格路径、写回前置校验）报出，
+    /// 解析期先按来源无关的规则拒绝，避免退化成「整份文件解析失败」的无名错误。
+    fn validate_wire(&self) -> Result<(), McpServerConfigValidationError> {
         if self.system_mcp != Some(true) {
             if self.system_mcp_tools.is_some() {
                 return Err(McpServerConfigValidationError::SystemMcpToolsRequiresSystemMcp);
@@ -805,7 +816,7 @@ mod tests {
     }
 
     /// M7：`disabled = true` 与 `system_mcp = true` 的组合对**任何** server 名都非法
-    /// （不限于 builtin 实例），wire 与 typed 两条入口都在此一次失败。
+    /// （不限于 builtin 实例）；共享 `validate` 是唯一判定，准入层据此定位到来源名。
     #[test]
     fn test_disabled_with_system_mcp_is_rejected_by_shared_validation() {
         for json in [
@@ -813,11 +824,19 @@ mod tests {
             r#"{"command":"npx","disabled":true,"system_mcp":true,"system_mcp_tools":[]}"#,
             r#"{"command":"plain","url":"https://example.invalid/mcp","disabled":true,"system_mcp":true}"#,
         ] {
-            let err = parse(json).expect_err("非法组合必须解析失败");
+            // wire 解析只做与来源无关的规则；该组合的可诊断拒绝由配置级/合并级
+            // 准入报出（`validate_servers`、插件严格路径、写回前置校验）。
+            let config = parse(json).expect("wire 解析不在此处拒绝该组合");
+            assert_eq!(
+                config.validate().unwrap_err(),
+                McpServerConfigValidationError::DisabledWithSystemMcp,
+                "共享 validate 必须拒绝: {json}"
+            );
             assert!(
-                err.to_string()
+                McpServerConfigValidationError::DisabledWithSystemMcp
+                    .to_string()
                     .contains("disabled = true cannot be combined with system_mcp = true"),
-                "固定规则正文必须保留: {json} -> {err}"
+                "固定规则正文必须保留"
             );
         }
 

@@ -241,7 +241,7 @@ impl PreparedSessionInputs {
         cwd: &str,
     ) -> Result<(PreparedConfiguration, DiscoveredPlugins), AcpError> {
         let configuration = Self::resolve_configuration(host, cwd)?;
-        let (plugin_data, skill_roots) = Self::discover_plugins(host, cwd)?;
+        let (plugin_data, skill_roots) = Self::discover_plugins(host, cwd, &configuration)?;
         Ok((configuration, (plugin_data, skill_roots)))
     }
 
@@ -276,11 +276,26 @@ impl PreparedSessionInputs {
     /// 插件发现：session 级装配经**严格只读**入口一次加载，失败即准备失败
     /// （缺失/非法清单定位到具体插件，不生成合成清单、不写插件缓存）；
     /// host 级与 bare 沿用既有形状（无插件聚合）。
-    fn discover_plugins(host: &AcpServerConfig, cwd: &str) -> Result<DiscoveredPlugins, AcpError> {
+    ///
+    /// M6：插件来源闭合位在本会话的准备期**先于任何读取**判定（取自本次定格的
+    /// session-local 配置 `meta_harness`，与冻结渲染的 `build_meta_harness_state`
+    /// 同源）——关闭的会话不读插件目录，也就不存在「先读进来再藏目录」的窗口。
+    fn discover_plugins(
+        host: &AcpServerConfig,
+        cwd: &str,
+        configuration: &PreparedConfiguration,
+    ) -> Result<DiscoveredPlugins, AcpError> {
         match host.workspace_assembly.as_ref() {
             None => Ok((None, host.plugin_skill_roots.clone())),
             Some(source) if source.bare || !source.capabilities.plugins => Ok((None, Vec::new())),
             Some(_) => {
+                if super::assemble::plugin_face_closed(configuration.config.as_ref()) {
+                    tracing::debug!(
+                        cwd,
+                        "插件来源注入面已关闭（meta_harness PluginMiddleware=false）：跳过插件发现"
+                    );
+                    return Ok((None, Vec::new()));
+                }
                 // 严格只读发现：用户级 `.claude` 由装配面解析（HOME 优先的唯一
                 // 权威在 `plugin::claude_home`，见 `assemble` 函数 doc），
                 // 准备面只提供执行目录。

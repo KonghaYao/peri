@@ -240,6 +240,7 @@ async fn assemble_stdio_config(
             // 宿主技能面关闭位与关闭集同源（会话级 frozen policy 的投影）：顶层装配
             // 无会话上下文、不建池，恒为假（发现管线在本层无对象）。
             skills_face_closed: false,
+            plugin_face_closed: false,
             // host 级装配：无准备路径提供的插件聚合，按既有语义自行加载。
             prepared_plugins: None,
             session_mcp_servers: None,

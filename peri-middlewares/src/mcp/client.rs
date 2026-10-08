@@ -84,7 +84,7 @@ use status::{mcp_error_summary, mcp_status_label};
 pub(crate) use subscription::build_subscription_filter;
 pub(crate) use subscription::setup_subscription;
 pub(crate) use transport::{build_authed_transport, build_http_transport, serve_client_auto};
-pub(crate) use types::McpConnectionKey;
+pub(crate) use types::{AcpConnectionIdentity, McpConnectionKey};
 pub use types::{
     ClientStatus, McpClientHandle, McpInitStatus, McpPoolError, OAuthStatus, ServerInfo,
 };
@@ -99,6 +99,9 @@ pub struct McpClientPool {
     pub(super) builtin_available: std::sync::atomic::AtomicBool,
     pub(super) stdio_available: std::sync::atomic::AtomicBool,
     pub(super) plugin_discovery_available: std::sync::atomic::AtomicBool,
+    /// 插件来源闭合位（M6）：会话装配从冻结/session-local 策略派生后注入，
+    /// 与 `plugin_discovery_available`（部署是否具备插件能力）是两个事实。
+    pub(super) plugin_face_closed: std::sync::atomic::AtomicBool,
     shared_services: parking_lot::Mutex<Vec<Arc<McpServiceOwner>>>,
     /// Includes failed handshakes until their actual process tree and stderr have drained.
     #[cfg(not(target_os = "emscripten"))]
@@ -180,6 +183,18 @@ pub struct McpClientPool {
     /// 无条目的 server 对所有会话可见（配置来源与 dynamic 投影的既有语义）；
     /// 有条目的仅在归属会话内可见（工具桥接与状态面据此过滤）。
     pub(crate) acp_owners: parking_lot::RwLock<HashMap<String, String>>,
+    /// 会话级 ACP 连接的**声明身份**（M7）：池内 server name → 连接 ID + 归属。
+    /// 与 `acp_owners` 同批写入、同批移除；持久化 cache 只按它 + 当前句柄代号
+    /// 计算 origin，凭据从不进入本结构。
+    pub(crate) acp_connections: parking_lot::RwLock<HashMap<String, AcpConnectionDeclaration>>,
+}
+
+/// 会话级 ACP 连接的声明事实（非凭据）：`connection_id` 是 ACP `mcp/connect`
+/// 返回的 opaque 连接句柄，随会话关闭失效。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AcpConnectionDeclaration {
+    pub(crate) session_id: String,
+    pub(crate) connection_id: String,
 }
 
 /// builtin 实例上下文槽（A33）：上下文与「initialize 已开始」标志由**同一短锁**保护
@@ -225,6 +240,8 @@ impl McpClientPool {
             builtin_available: std::sync::atomic::AtomicBool::new(true),
             stdio_available: std::sync::atomic::AtomicBool::new(crate::platform::STDIO_TRANSPORT),
             plugin_discovery_available: std::sync::atomic::AtomicBool::new(true),
+            // 默认不关闭：只有会话装配注入的冻结策略才置真（M6）。
+            plugin_face_closed: std::sync::atomic::AtomicBool::new(false),
             shared_services: parking_lot::Mutex::new(Vec::new()),
             #[cfg(not(target_os = "emscripten"))]
             processes: parking_lot::Mutex::new(Vec::new()),
@@ -260,6 +277,7 @@ impl McpClientPool {
             app_binding_leases: Arc::new(super::apps::McpAppBindingLeaseRegistry::default()),
             system_readiness: SystemReadinessTracker::new(),
             acp_owners: parking_lot::RwLock::new(HashMap::new()),
+            acp_connections: parking_lot::RwLock::new(HashMap::new()),
         }
     }
 
@@ -293,6 +311,47 @@ impl McpClientPool {
         pool.bind_cache_policy(policy).unwrap();
         pool.resource_cache = super::resource_cache::McpResourceCache::isolated_for_test();
         pool
+    }
+
+    /// 测试夹具：登记一条会话级 ACP 连接（真连接 / service 不参与）。
+    ///
+    /// 只做 `commit_acp_connection` 的身份记账：归属、声明身份、句柄与句柄代号。
+    /// 返回句柄，供测试模拟「同会话换代」时登记第二条句柄。
+    #[cfg(test)]
+    pub(crate) fn install_acp_connection_for_test(
+        self: &Arc<Self>,
+        session_id: &str,
+        connection_id: &str,
+        name: &str,
+    ) -> Arc<McpClientHandle> {
+        let handle = Arc::new(McpClientHandle {
+            name: name.to_string(),
+            version: None,
+            cache_version: None,
+            peer: None,
+            tools: Vec::new(),
+            resources: Vec::new(),
+            status: ClientStatus::Connected,
+            oauth_status: OAuthStatus::default(),
+            source: Some(crate::mcp::config::ConfigSource::Acp),
+            url: None,
+            skills_capable: false,
+        });
+        self.acp_owners
+            .write()
+            .insert(name.to_string(), session_id.to_string());
+        self.acp_connections.write().insert(
+            name.to_string(),
+            AcpConnectionDeclaration {
+                session_id: session_id.to_string(),
+                connection_id: connection_id.to_string(),
+            },
+        );
+        self.advance_handle_generation(&handle);
+        self.clients
+            .write()
+            .insert(name.to_string(), Arc::clone(&handle));
+        handle
     }
 
     pub fn set_configuration_snapshot(
