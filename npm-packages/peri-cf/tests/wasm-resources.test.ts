@@ -43,6 +43,31 @@ describe("per-instance WASM resource observations", () => {
     expect(snapshot.memory?.allocatedBytes).toBe(65_536);
   });
 
+  test("records host startup stage timings and the observed terminal time", () => {
+    const resources = new WasmResources();
+    expect(resources.snapshot()).toMatchObject({
+      endedAt: null,
+      startup: { moduleReadyMs: null, nativeReadyMs: null, acpReadyMs: null },
+    });
+    resources.markStartup("module-ready", 3.4);
+    resources.markStartup("native-ready", 71.6);
+    resources.markStartup("acp-ready", -5);
+    resources.attach(memoryInstance());
+    resources.ready("generation-1");
+    expect(resources.snapshot()).toMatchObject({
+      phase: "ready", endedAt: null,
+      startup: { moduleReadyMs: 3, nativeReadyMs: 72, acpReadyMs: 0 },
+    });
+    const closedAt = () => resources.snapshot().endedAt;
+    resources.closing();
+    expect(closedAt()).toBeNull();
+    resources.closed();
+    const endedAt = closedAt();
+    expect(endedAt).not.toBeNull();
+    resources.closeUnconfirmed();
+    expect(closedAt()).toBe(endedAt);
+  });
+
   test("failed startup and unconfirmed close are distinct and instances are isolated", () => {
     const failed = new WasmResources();
     failed.failed();

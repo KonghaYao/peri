@@ -21,7 +21,9 @@ export async function startTransport(env: Env, resources = new WasmResources(), 
     logError("Peri WASM configuration failed", error, { instanceId: resources.instanceId });
     throw new WasmStartupError(error, Promise.resolve({ confirmed: true }));
   }
-  return startOwnedWasmHost({ config, resources, signal, load: (ownership) => new Promise<WasmModule>((resolve, reject) => {
+  const startedAt = performance.now();
+  const elapsedMs = () => Math.round(performance.now() - startedAt);
+  const transport = await startOwnedWasmHost({ config, resources, signal, load: (ownership) => new Promise<WasmModule>((resolve, reject) => {
     console.info("Peri WASM startup", { stage: "module-loading" });
     Module({
       periDns: workerDns(env.PERI_DNS_OVERRIDES),
@@ -40,6 +42,22 @@ export async function startTransport(env: Env, resources = new WasmResources(), 
             receiveInstance(instance, wasmModule);
           }).catch(reject);
       },
-    }).then(resolve, reject);
+    }).then((module: WasmModule) => {
+      resources.markStartup("module-ready", elapsedMs());
+      console.info("Peri WASM startup", { stage: "module-ready", elapsedMs: elapsedMs() });
+      resolve({
+        PeriWasmAcp: {
+          start: async (configJson: string) => {
+            const native = await module.PeriWasmAcp.start(configJson);
+            resources.markStartup("native-ready", elapsedMs());
+            console.info("Peri WASM startup", { stage: "native-ready", elapsedMs: elapsedMs() });
+            return native;
+          },
+        },
+      });
+    }, reject);
   }) });
+  resources.markStartup("acp-ready", elapsedMs());
+  console.info("Peri WASM startup", { stage: "acp-ready", elapsedMs: elapsedMs() });
+  return transport;
 }

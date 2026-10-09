@@ -12,6 +12,8 @@
 
 `GET /api/chats/:id/resources` 在应用层观测每次 WASM Host 启动的独立身份、实际 SDK 代次与导出线性内存；不把 Worker 进程指标归属于 Agent。没有实例 CPU 计数时明确返回不可用，关闭后只保留最后观测，DO 重启不恢复虚假的存活实例。契约与限制见 README 的 Agent 实例资源查询。
 
+`GET /api/instances` 与前端“实例监控”页（`web/instances/`）只做只读扇出聚合：按固定并发上限读取各聊天 DO 的采样器，不新增实例存储、不保留历史、不提供实例操作；单个会话读取失败降级为该项，不伪装成“没有实例”，也不把观测当作存活探测。轮询会唤醒被观测的聊天 DO，这是页面刷新的已知代价。
+
 列表由 TS 经 SDK `TursoStorage` 直接查询外部 Turso/libSQL 的 Rust Store，不设置目录 DO，不复制聊天列表或维护平行会话表。新聊天经 ACP 创建和命名，再从 Store 查询读回；聊天 ID 就是实际 ACP Session ID。每聊天 DO 保存展示历史与执行协调状态，DO 与 Rust Store 没有跨存储事务，不依赖 D1。共享 Bearer token 是一个信任域，不是多租户身份。模型与存储密钥禁止进入浏览器或 `VITE_*` 环境变量。
 
 同聊天只允许单轮执行。取消必须等待真实 ACP Host 关闭及状态持久化，未确认停止应阻断重跑。实例重启不自动恢复在途执行；展示消息不得重造 Rust 工作义务。

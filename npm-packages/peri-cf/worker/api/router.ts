@@ -4,6 +4,7 @@ import { authenticatedApp } from "./app";
 import { normalizeChatId, logError, errorResponse } from "./http";
 import { jsonRequest } from "./json";
 import { createChatBodySchema } from "../../shared/chat";
+import { collectChatInstances } from "../instances/collect";
 import type { ChatRepository, Env } from "../types";
 
 export function createApi(
@@ -19,6 +20,21 @@ export function createApi(
     const repository = repositoryFactory(context.env, (promise) => context.executionCtx.waitUntil(promise));
     return context.json(await repository.create(title), 201);
   });
+  app.get("/api/instances", async (context) => {
+    const repository = repositoryFactory(context.env, (promise) => context.executionCtx.waitUntil(promise));
+    const chats = await repository.list();
+    const authorization = context.req.header("Authorization") ?? "";
+    const instances = await collectChatInstances(chats, async (chatId) => {
+      const session = context.env.CHAT_SESSIONS.get(context.env.CHAT_SESSIONS.idFromName(chatId));
+      const response = await session.fetch(new Request(new URL(`/api/chats/${encodeURIComponent(chatId)}/resources`, context.req.url), {
+        headers: { Authorization: authorization },
+      }));
+      if (!response.ok) throw new Error(`Chat instance observation failed with HTTP ${response.status}`);
+      return response.json();
+    });
+    return context.json({ generatedAt: new Date().toISOString(), instances });
+  });
+  app.all("/api/instances", () => { throw new HTTPException(405, { message: "Method not allowed" }); });
   for (const [path, method] of [
     ["/api/chats/:id", "GET"],
     ["/api/chats/:id/messages", "POST"],

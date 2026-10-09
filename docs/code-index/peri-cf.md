@@ -11,6 +11,7 @@
 - 不设置目录 Durable Object，不保存独立聊天列表，也不在 TS 新建平行会话表。TS 复用 SDK 的元数据查询；新建经 ACP `session/new` 与 `session/rename` 写入 Rust Store，然后从 Turso 读回。聊天 ID 就是实际 ACP Session ID。
 - 每聊天 Durable Object 只保存展示历史和运行协调状态，元数据从 Turso 刷新；Rust Store 是 Peri 会话数据的权威。不依赖 D1，DO 与 Rust Store 不具有跨存储原子事务。展示历史仍是本应用 DO 内的流式投影，不宣称能从任意已有 Rust 会话重建全部展示消息。
 - Workers 使用既有 SDK WASM transport，应用内 `worker/sdk/index.ts` 集中接入工作区 SDK 的可移植模块，不新增 SDK public entry 或构建目标，不加载 Bun/stdio Agent 管理入口。SDK 的唯一准入实现 `AdmissionCore` 与 DO durable registry/ledger adapter 负责 ticket、entry、settlement 和停止证据；本应用不是通用 `ManagedAgents` 或 child runtime 的 Cloudflare 移植，不宣称在途计算恢复或分布式接管。
+- 实例监控页是只读视图：`GET /api/instances` 按并发上限扇出读取各聊天 DO 的采样器快照，不新增实例存储、不保留历史、不提供实例操作；单会话读取失败降级为该项，DO 回收后不显示实例，也不把观测当作存活探测。
 - Bearer token 对应单一共享信任域，不提供多租户所有权隔离。模型与存储密钥只在服务端配置；前端 token 设置不携带提供商密钥。
 - 工具默认关闭，不将 Emscripten 虚拟目录当作真实文件系统。未来接入工具需经 MCP 能力边界单独设计授权与生命周期。
 - 停止通过 SDK 的 exact-target SessionControl；仅下一次显式发送可凭本应用保存的 Stop 控制代次恢复，控制权发生变化则拒绝恢复。部署须配置持久 `PERI_MACHINE_ID`，不使用跨部署共享的示例身份。
@@ -36,6 +37,7 @@
 | 工作区 SDK 接线唯一入口 | `npm-packages/peri-cf/worker/sdk/index.ts` |
 | 静态 WASM 实例化与部署配置 | `npm-packages/peri-cf/worker/wasm/` |
 | 每 Agent 实例资源查询 DTO 与线性内存采样 | `npm-packages/peri-cf/shared/resources.ts`、`worker/wasm/resources.ts`；`GET /api/chats/:id/resources` |
+| 实例监控页的只读聚合与前端页面 | `npm-packages/peri-cf/worker/instances/collect.ts`、`shared/instances.ts`、`web/instances/`；`GET /api/instances`，入口见 `web/App.tsx` |
 | Workers TCP/DNS/调度 glue 适配 | `npm-packages/peri-cf/scripts/worker-glue.ts`、`worker/wasm/dns.ts` |
 | 仅开发服务的本机 DNS 解析 | `npm-packages/peri-cf/scripts/local-dns.ts` |
 | 编译 Worker 的默认 Wrangler 本地启动 | `npm-packages/peri-cf/scripts/local-preview.ts`、`local-preview-command.ts` |

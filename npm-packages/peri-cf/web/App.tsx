@@ -1,6 +1,6 @@
 import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import {
-  ArrowRight, ArrowUp, BookOpen, ChevronDown, Code2, Feather, Menu, MessageSquare,
+  Activity, ArrowRight, ArrowUp, BookOpen, ChevronDown, Code2, Feather, Menu, MessageSquare,
   PanelLeftClose, Plus, RefreshCw, Settings2, ShieldCheck, Sparkles, Square, X,
 } from 'lucide-react';
 import { Settings } from './settings/Settings';
@@ -8,6 +8,7 @@ import { useChat } from './chat/useChat';
 import type { Chat } from './chat/types';
 
 const MessageList = lazy(() => import('./chat/MessageList').then((module) => ({ default: module.MessageList })));
+const InstancesPanel = lazy(() => import('./instances/InstancesPanel').then((module) => ({ default: module.InstancesPanel })));
 
 const tokenKey = 'peri.access-token';
 const suggestions = [
@@ -52,6 +53,7 @@ export default function App() {
 function Workspace({ token, onTokenChange }: { token: string; onTokenChange: (token: string) => void }) {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [instancesOpen, setInstancesOpen] = useState(() => window.location.hash === '#instances');
   const [draft, setDraft] = useState('');
   const [storageError, setStorageError] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -89,9 +91,16 @@ function Workspace({ token, onTokenChange }: { token: string; onTokenChange: (to
     return () => { document.removeEventListener('keydown', handleKey); sidebarTrigger.current?.focus(); };
   }, [sidebarOpen]);
 
+  const showInstances = (open: boolean) => {
+    setInstancesOpen(open);
+    const base = `${window.location.pathname}${window.location.search}`;
+    window.history.replaceState(null, '', open ? `${base}#instances` : base);
+  };
+
   const navigate = async (target: Chat | null) => {
     setSidebarOpen(false);
     setDraft('');
+    showInstances(false);
     await chat.selectChat(target);
   };
 
@@ -143,10 +152,22 @@ function Workspace({ token, onTokenChange }: { token: string; onTokenChange: (to
           <button type="button" className="settings-button" disabled={busy} onClick={() => setSettingsOpen(true)}><span className="user-avatar">你</span><span>我的空间<small>设置与访问令牌</small></span><Settings2 size={18} /></button>
         </div>
       </aside>
-      <main className="main-panel">
+      {instancesOpen && <Suspense fallback={<div className="main-panel instances-loading" role="status">
+        <RefreshCw className="spinning" size={22} /><p>正在加载实例监控…</p></div>}>
+        <InstancesPanel token={token} onClose={() => showInstances(false)} onOpenChat={(chatId) => {
+          const target = chat.chats.find((item) => item.id === chatId);
+          if (target) void navigate(target);
+          else showInstances(false);
+        }} />
+      </Suspense>}
+      {!instancesOpen && <main className="main-panel">
         <header className="topbar"><div className="topbar-left"><button ref={sidebarTrigger} type="button" className="icon-button mobile-only" aria-label="打开会话列表" aria-expanded={sidebarOpen} onClick={() => setSidebarOpen(true)}><Menu size={21} /></button>
           <span className="topbar-name">Peri <ChevronDown size={14} /></span><span className="topbar-divider" /><span className="topbar-subtitle">{chat.selected?.title || '让想法，自由生长'}</span></div>
-          <span className="topbar-badge"><span />专注于你的下一步</span>
+          <div className="topbar-actions">
+            <button type="button" className="icon-button" aria-label="实例监控" title="实例监控" disabled={!token}
+              onClick={() => showInstances(true)}><Activity size={18} /></button>
+            <span className="topbar-badge"><span />专注于你的下一步</span>
+          </div>
         </header>
         <div className="content-area">
           {chat.selected && !chat.historyReady && chat.phase !== 'loading' && !chat.error && <div className="error-banner" role="status"><span>正在同步会话，连接就绪后可以发送消息。</span></div>}
@@ -175,7 +196,7 @@ function Workspace({ token, onTokenChange }: { token: string; onTokenChange: (to
                 : <button className="send-button" type="submit" aria-label="发送消息" disabled={!token || busy || !draft.trim() || !chat.historyReady}><ArrowUp size={20} /></button>}</div></div>
           </form><p className="composer-disclaimer">AI 也会有不确定的时候，重要信息请记得核实。<span>保持好奇，也保持判断。</span></p></div>
         </div>
-      </main>
+      </main>}
       {settingsOpen && <Settings token={token} error={storageError} onSave={saveToken} onClose={() => { setSettingsOpen(false); setStorageError(''); }} />}
     </div>
   );

@@ -22,11 +22,21 @@ React + Vite 聊天前端，Hono / Cloudflare Workers API，TypeScript 通过 SD
 
 - `instance.instanceId` 区分每次 Host 启动；`generationId` 在 transport 就绪后来自实际 SDK 代次。
 - `phase` 区分加载、启动、就绪、关闭中、已关闭、启动失败与关闭未确认；`running` 表示聊天任务状态，`executionBlocked` 表示停止未确认导致的准入阻塞。
+- `startup` 记录宿主侧测得的模块加载、原生启动与 ACP 就绪耗时（相对本次启动的单调计时）；未发生的阶段为 `null`，不推算也不补零。`endedAt` 只在观测到关闭、启动失败或关闭未确认时写入，保留首次终止时刻。
 - `memory.allocatedBytes` / `pages` 直接采样该 WASM 实例导出的线性内存（每页 64 KiB）；不是 Rust 活跃堆、整个 isolate 的 RSS 或 Cloudflare 内存配额。`heapUsedBytes: null` 表示目前没有分配器使用量指标；`peakObservedBytes` 仅为已采样最大值，不保证捕获所有瞬时峰值。
 - 内存未取得时为 `null`。实例关闭或启动失败后释放监测器的内存引用，保留 `observation: "last-observed"` 和 `observedAt` 的最后观测，不把历史值称为当前存活内存，也不保证平台立即 GC。
 - `cpu.supported: false`，`timeMs` / `utilizationPercent` 为 `null`。Cloudflare 不提供此 WASM 实例的进程 CPU 计数；生产 Workers 的计时器仅在 I/O 后推进，不能把 prompt 耗时、I/O 等待或本地计时器差值冒充 CPU 时间。平台请求级 CPU 统计也不能归属为单个 WASM 实例。限制依据为 Cloudflare 官方 Performance and timers 文档：`https://developers.cloudflare.com/workers/runtime-apis/performance/`。若后续需要可用的实例 CPU 数据，应另设计具备计数能力的运行环境或平台遥测归因，不新增虚假估算。
 
 该接口仅观测应用实例，不修改 SDK、不加载数据库列表、不暴露模型或存储配置。相关契约位于 `shared/resources.ts`，采样实现位于 `worker/wasm/resources.ts`。
+
+## 实例监控页面
+
+`GET /api/instances` 用同一 Bearer 鉴权按会话汇总上述观测，供前端“实例监控”页面（顶栏 Activity 按钮，路由 `#instances`）轮询展示实例身份、阶段、启动耗时、线性内存与挂载会话。
+
+- 聚合只读取各聊天 DO 的内存采样器：从 Store 取会话列表后按固定并发上限逐会话请求 `GET /api/chats/:id/resources`，不新增存储、不写库、不跨会话合并身份。
+- 单个会话读取失败（宿主不可达或响应不符合 schema）降级为该项 `failure`，不影响其他会话，也不把失败伪装成“没有实例”。“无观测”与“读取失败”在数据上区分。
+- 观测仍然只存在于各聊天 DO 的内存中：DO 被回收后该会话不再有实例观测，页面不伪造存活实例，也没有历史记录。轮询会唤醒被观测的聊天 DO，这是页面刷新的已知代价；页面在后台标签页停止轮询。
+- 页面只做只读展示，不提供启动、停止或清理实例的操作；会话操作仍走聊天本身。
 
 ## 本地启动
 
@@ -42,8 +52,9 @@ React + Vite 聊天前端，Hono / Cloudflare Workers API，TypeScript 通过 SD
 - `worker/api/`：Hono app、HTTP 边界与可注入 repository 的路由入口。
 - `worker/chat/`：会话查询、ACP 创建、聊天 DO 生命周期、启动与聊天路由。
 - `worker/execution/`：SDK 准入/控制 dispatcher 和 DO 事务存储 adapter。
+- `worker/instances/`：实例监控页的只读聚合，按并发上限扇出读取各聊天 DO 的资源观测。
 - `worker/wasm/`：Host、配置与准备的 WASM 产物；`worker/sdk/` 是本地 SDK facade，`worker/types.ts` 保存应用契约。
-- `web/api/`：带 Bearer 鉴权的 HTTP 命令/查询与只读 WebSocket 同步客户端；`web/chat/` 管理聊天状态与消息展示，`web/settings/` 管理配置界面。
+- `web/api/`：带 Bearer 鉴权的 HTTP 命令/查询与只读 WebSocket 同步客户端；`web/chat/` 管理聊天状态与消息展示，`web/settings/` 管理配置界面，`web/instances/` 是只读实例监控页。
 
 ## 库与自有逻辑
 
@@ -102,6 +113,8 @@ HTTP 查询和命令均需 Bearer token。WebSocket 在升级后通过第一帧�
 | GET | `/api/chats/:id` | JSON `{ chat, messages }` |
 | POST | `/api/chats/:id/messages` | JSON `{ "content": "你好" }`，202 接受执行；不表示执行完成 |
 | POST | `/api/chats/:id/cancel` | 请求取消当前生成，JSON `{ cancelled: boolean }` |
+| GET | `/api/chats/:id/resources` | JSON `AgentResources`，见 Agent 实例资源查询 |
+| GET | `/api/instances` | JSON `{ generatedAt, instances: ChatInstanceObservation[] }`，见实例监控页面 |
 | GET / WS | `/api/chats/:id/sync` | 首帧鉴权后接收 SDK Yjs snapshot / update |
 
 `Chat` 为 `{ id, title, updatedAt }`。消息为 `{ id, role, content, createdAt, status, error? }`，`status` 为 `running`、`completed`、`cancelled` 或 `error`。聊天 ID 使用 UUID；忙碌返回 409，未鉴权返回 401，未配置 app token 返回 503。创建、发送需要 `Content-Type: application/json`；无效内容返回 400。
