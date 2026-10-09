@@ -36,13 +36,13 @@ export function createApi(
   }
   app.all("/api/chats", () => { throw new HTTPException(405, { message: "Method not allowed" }); });
   const frontdoor = new Hono<{ Bindings: Env }>();
-  frontdoor.get("/api/chats/:id/sync", (context) => {
+  frontdoor.get("/api/chats/:id/sync", async (context) => {
     const id = normalizeChatId(context.req.param("id"));
     if (context.req.header("Upgrade")?.toLowerCase() !== "websocket")
       return context.json({ error: "WebSocket upgrade required" }, 426, { "Cache-Control": "no-store" });
     if (new URL(context.req.url).searchParams.has("token"))
       return context.json({ error: "URL credentials are not supported" }, 400, { "Cache-Control": "no-store" });
-    return context.env.CHAT_SESSIONS.get(context.env.CHAT_SESSIONS.idFromName(id)).fetch(context.req.raw);
+    return await context.env.CHAT_SESSIONS.get(context.env.CHAT_SESSIONS.idFromName(id)).fetch(context.req.raw);
   });
   frontdoor.onError((error, context) => {
     if (!(error instanceof HTTPException) || error.status >= 500 || error.cause !== undefined)
