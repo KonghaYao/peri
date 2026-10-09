@@ -222,3 +222,74 @@ fn test_delete_noncurrent_preserves_active_pending_generation() {
     assert!(lifecycle.is_pending_owner(&request.owner));
     assert_eq!(lifecycle.current_session_id().as_deref(), Some("s1"));
 }
+
+#[test]
+fn cancelled_execution_closes_interactions_but_waits_for_one_terminal() {
+    for managed in [false, true] {
+        let lifecycle = InteractionLifecycle::new();
+        lifecycle.force_stable("s1", false);
+        assert!(lifecycle.bind_user_input_generation("s1", 1, "g1"));
+        lifecycle
+            .open_execution("s1", "g1", "run-1", managed)
+            .unwrap();
+        let request = register(&lifecycle, RequestId::Number(1));
+        assert_eq!(lifecycle.cancel_active_prompt().len(), 1);
+        assert!(!lifecycle.is_pending_owner(&request.owner));
+        assert!(lifecycle.active_execution(false).is_none());
+        assert!(
+            lifecycle
+                .open_execution("s1", "g1", "run-1", managed)
+                .is_none()
+        );
+        assert!(lifecycle.should_forward_prompt_terminal("s1", Some("run-1")));
+        lifecycle.close_prompt_by_wire_identity("s1", Some("run-1"));
+        assert!(!lifecycle.should_forward_prompt_terminal("s1", Some("run-1")));
+    }
+}
+
+#[test]
+fn cancelled_old_execution_terminal_cannot_end_the_next_execution() {
+    let lifecycle = InteractionLifecycle::new();
+    lifecycle.force_stable("s1", false);
+    assert!(lifecycle.bind_user_input_generation("s1", 1, "g1"));
+    lifecycle.open_execution("s1", "g1", "run-1", true).unwrap();
+    lifecycle.cancel_active_prompt();
+    lifecycle.open_execution("s1", "g1", "run-2", true).unwrap();
+    assert!(!lifecycle.should_forward_prompt_terminal("s1", Some("run-1")));
+    lifecycle.cancel_active_prompt();
+    assert!(!lifecycle.should_forward_prompt_terminal("s1", Some("run-1")));
+    assert!(lifecycle.should_forward_prompt_terminal("s1", Some("run-2")));
+    lifecycle.close_prompt_by_wire_identity("s1", Some("run-1"));
+    assert!(lifecycle.should_forward_prompt_terminal("s1", Some("run-2")));
+}
+
+#[test]
+fn repeated_cancel_does_not_discard_the_pending_terminal() {
+    let lifecycle = InteractionLifecycle::new();
+    lifecycle.force_stable("s1", false);
+    assert!(lifecycle.bind_user_input_generation("s1", 1, "g1"));
+    lifecycle.open_execution("s1", "g1", "run-1", true).unwrap();
+    lifecycle.cancel_active_prompt();
+    lifecycle.cancel_active_prompt();
+    assert!(lifecycle.should_forward_prompt_terminal("s1", Some("run-1")));
+    lifecycle.close_prompt_by_wire_identity("s1", Some("run-1"));
+    assert!(!lifecycle.should_forward_prompt_terminal("s1", Some("run-1")));
+}
+
+#[test]
+fn cancelled_local_prompt_lease_does_not_acknowledge_the_execution_terminal() {
+    let lifecycle = InteractionLifecycle::new();
+    lifecycle.force_stable("s1", false);
+    let lease = lifecycle.open_prompt(Some("run-1".into())).unwrap();
+    assert!(lifecycle.bind_user_input_generation("s1", 1, "g1"));
+    assert!(
+        lifecycle
+            .open_execution("s1", "g1", "run-1", false)
+            .is_none()
+    );
+    lifecycle.cancel_active_prompt();
+    lease.finish();
+    assert!(lifecycle.should_forward_prompt_terminal("s1", Some("run-1")));
+    lifecycle.close_prompt_by_wire_identity("s1", Some("run-1"));
+    assert!(!lifecycle.should_forward_prompt_terminal("s1", Some("run-1")));
+}

@@ -1,6 +1,6 @@
 # Cancel 后仍 loading：排查与现场验收
 
-状态：阶段 hook 取消漏洞已修复；现场复核待验收。
+状态：阶段 hook 取消漏洞已提交；流式取消终态过滤漏洞已复现并修复，现场复核待验收。
 
 ## 问题与边界
 
@@ -39,6 +39,32 @@ cancel。修复前四项均未在测试的 200ms 防挂死窗口退出，预取�
 
 回归入口：`peri-agent/src/agent/stages/middleware_cancel_test.rs`。
 
+## 流式 thinking / 正文的新增确认根因
+
+用户进一步明确：thinking 和正文流式输出期间取消有问题。
+沿真实 ACP transport → client pump → notifier → bridge handler 建立回归，
+分别发送 ExecutionStarted、agent_thought_chunk / agent_message_chunk、调用
+`AcpTuiClient::cancel`，再发送服务端匹配的 cancelled done。
+修复前，两种场景都因终态未交付而触发测试防挂死窗口，loading 保持 true。
+
+原因在 `InteractionLifecycle::cancel_active_prompt` → `close_prompt_exact`：
+关闭交互 owner 时同时把执行 request 标记 retired；随后
+`should_forward_prompt_terminal` 把这个请求真正的结束通知当作旧请求丢弃。
+这不是模型流没有收到 cancel，而是客户端丢失了已经到达的执行终态。
+
+修复为 `ExecutionRuns::pending_terminal_request` 独立保存当前待确认执行终态：
+cancel 仍关闭交互并阻止迟到 start / snapshot 重开，但匹配的 done 可透传一次；
+done 消费后结清 pending，重复 done 被过滤；新的 execution 替换 pending，
+旧终态不能清除新 turn 的 loading。短 prompt RPC lease 收尾也不能替代 done 确认。
+没有在发送 cancel 时强制把 UI 变为空闲。
+
+回归入口：`peri-tui/src/kit/acp_bridge_cancel_test.rs`、
+`peri-tui/src/acp_client/client/cancel_test.rs` 和 `interaction_lifecycle_test.rs`；
+同时扩展 Agent ModelStream 测试，验证 thinking 中途取消与正文一样停止继续发 chunk。
+
+两位受派审查 subagent 均因 token refresh 的 403 鉴权错误中断，未产出报告；
+本节证据由主 agent 本地复现获得，不宣称已完成独立对抗审查。
+
 ## 尚未证明的现场因素
 
 以下是链路上仍可能延迟终态的等待边界，不是本次已复现的根因：
@@ -60,10 +86,15 @@ cancel。修复前四项均未在测试的 200ms 防挂死窗口退出，预取�
 ./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp -p peri-tui --lib -- cancel
 ```
 
-2026-10-09 本轮实际结果：Agent 1042 项单元测试、15 项 doc tests 通过；
+2026-10-09 首次 hook 修复验证：Agent 1042 项单元测试、15 项 doc tests 通过；
 其中新增取消回归 13 项通过。ACP 与 TUI 的 cancel 过滤各命中 29 项并通过，
 不代表两 crate 全量测试或真实终端现场已验收。依赖方向门、文件规模扫描、
 变更 Rust 文件格式检查和 `git diff --check` 均通过。
+
+流式终态修复后再次运行全量单元测试：Agent 1043 项通过；TUI 1724 项通过，
+6 项 ignored。新覆盖 thinking、正文、混合流、managed request、重复与旧终态、
+重复 cancel、prompt lease 收尾，以及模型 thinking 取消停止继续输出。
+这验证客户端终态消费链及模型取消边界，不替代真实外部 provider/终端现场验收。
 
 现场复核普通问答、System MCP 尚在连接、工具审批挂起和回答后处理时的取消；
 检查取消后能提交下一轮，历史与已完成工具结果未丢失。若仍复现，保留 session ID、

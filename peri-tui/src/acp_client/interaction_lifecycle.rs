@@ -178,6 +178,7 @@ struct ExecutionRuns {
     generation: String,
     local_generation: u64,
     latest_request: Option<String>,
+    pending_terminal_request: Option<String>,
     managed_input: bool,
     retired: HashSet<String>,
 }
@@ -570,6 +571,7 @@ impl InteractionLifecycle {
                 generation: generation.to_owned(),
                 local_generation,
                 latest_request: None,
+                pending_terminal_request: None,
                 managed_input: false,
                 retired: HashSet::new(),
             });
@@ -580,6 +582,7 @@ impl InteractionLifecycle {
             }
             runs.generation = generation.to_owned();
             runs.latest_request = None;
+            runs.pending_terminal_request = None;
             runs.retired.clear();
         }
         runs.local_generation = local_generation;
@@ -658,6 +661,7 @@ impl InteractionLifecycle {
         }) {
             let runs = state.execution_runs.get_mut(session_id)?;
             runs.managed_input = managed_input;
+            runs.pending_terminal_request = Some(request_id.to_owned());
             if let Some(previous) = runs.latest_request.replace(request_id.to_owned())
                 && previous != request_id
             {
@@ -675,6 +679,7 @@ impl InteractionLifecycle {
         });
         let runs = state.execution_runs.get_mut(session_id)?;
         runs.managed_input = managed_input;
+        runs.pending_terminal_request = Some(request_id.to_owned());
         if let Some(previous) = runs.latest_request.replace(request_id.to_owned())
             && previous != request_id
         {
@@ -758,6 +763,11 @@ impl InteractionLifecycle {
         };
         let marker = {
             let mut state = self.state.lock().unwrap();
+            if let Some(runs) = state.execution_runs.get_mut(session_id)
+                && runs.pending_terminal_request.as_deref() == Some(request_id)
+            {
+                runs.pending_terminal_request = None;
+            }
             retire_execution(&mut state, session_id, Some(request_id));
             state.active_prompt.as_ref().and_then(|marker| {
                 (marker.session_id == session_id
@@ -786,7 +796,8 @@ impl InteractionLifecycle {
         let Some(runs) = state.execution_runs.get(session_id) else {
             return true;
         };
-        !request_id.is_some_and(|request_id| runs.retired.contains(request_id))
+        request_id.is_some() && runs.pending_terminal_request.as_deref() == request_id
+            || !request_id.is_some_and(|request_id| runs.retired.contains(request_id))
     }
 
     pub fn cancel_active_prompt(&self) -> Vec<ClaimedInteraction> {

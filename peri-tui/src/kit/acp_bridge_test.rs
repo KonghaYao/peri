@@ -3,6 +3,9 @@ use crate::kit::acp_types::PendingInteraction;
 use peri_acp_types::event_data::{AskUser, HitlPending};
 use serial_test::serial;
 
+#[path = "acp_bridge_cancel_test.rs"]
+mod cancel_tests;
+
 pub(super) fn scheduler_state() -> BridgeState {
     crate::kit::atoms::init_atoms();
     BridgeState {

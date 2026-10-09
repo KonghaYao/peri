@@ -144,6 +144,8 @@ core `ConfigSource::save(expected_revision, &PeriConfig)` 返回 accepted snapsh
 
 ### ACP 事件链（src/kit/acp_notifier.rs / acp_bridge.rs / acp_events/）
 
+流式取消的终态接纳在 `src/acp_client/interaction_lifecycle.rs`：`ExecutionRuns::pending_terminal_request` 独立于交互 owner 的 retired 标记，`cancel_active_prompt` 后仍等待匹配 done，`close_prompt_by_wire_identity` 确认收到后结清。`src/kit/acp_bridge_cancel_test.rs` 经真实 ACP transport/pump/notifier 验证 thinking、正文与混合流取消后 loading 复位、部分内容保留且动画冻结；`client/cancel_test.rs` 与 `interaction_lifecycle_test.rs` 验证 managed run、重复终态、旧终态、新 turn 与 lease 收尾隔离。
+
 | 功能 | 文件 | 入口/关键点 |
 | --- | --- | --- |
 | 通知消费与状态发布 | kit/acp_notifier.rs | `spawn_kit_notifier_with_client` / `forward_notification` / `handle_session_update` / `convert_agent_event`；commands/plan/spinner/context 保持同步发布后送 bridge，reverse 投递失败按 owner 结算；transport 关闭复位 loading + 断连提示 |
