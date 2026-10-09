@@ -9,7 +9,9 @@
 | `TERM` | `dumb` 时关闭颜色并降级 ASCII 字符；其他值按常规能力探测。 | 同上 |
 | `COLORTERM` | `truecolor` 或 `24bit` 宣告 24 位颜色；有其他值时关闭 truecolor 判定，未设置时参考终端品牌。 | 同上 |
 | `TERM_PROGRAM` | 辅助判断 truecolor、italic 和图片协议；Kitty/Ghostty/WezTerm/Warp 可自动选 Kitty，iTerm.app 记录 iTerm2。 | 同上 |
-| `TMUX` | 存在时禁止自动选择图片协议；显式 `PERI_IMAGE` 覆盖优先。 | 同上 |
+| `TMUX` | 存在时禁止自动选择图片协议；显式 `PERI_IMAGE` 覆盖优先。复制文本改经 OSC 52 写入终端剪贴板。 | `peri-tui/src/kit/terminal_caps.rs`、`peri-tui/src/kit/clipboard.rs` |
+| `SSH_CONNECTION`、`SSH_CLIENT`、`SSH_TTY` | 任一存在时，文本复制经 OSC 52 发往客户端终端，不写 SSH 服务端的系统剪贴板。 | `peri-tui/src/kit/clipboard.rs` |
+| `HERDR_ENV` | 存在时，文本复制经 OSC 52 发往终端，由 herdr 转发。 | 同上 |
 | `LC_ALL` | 终端 locale 的优先来源；为 `C` 或 `POSIX` 时使用 ASCII 符号。 | 同上 |
 | `LANG` | `LC_ALL` 缺失时的 locale；为 `C` 或 `POSIX` 时使用 ASCII 符号。 | 同上 |
 | `PERI_SCROLL_THROTTLE_MS` | 消息滚动节流毫秒数；有效整数至少按 1 ms 处理，`TuiConfig.scroll_fps` 优先；缺省 50 ms。 | `peri-tui/src/kit/message_area/scroll/throttle.rs` |

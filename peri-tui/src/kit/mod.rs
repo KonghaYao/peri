@@ -16,6 +16,7 @@ pub mod bg_task_area;
 pub mod bg_task_click;
 pub mod bg_task_identity;
 pub mod bg_task_live;
+pub(crate) mod clipboard;
 pub mod diff_parser;
 pub mod entry;
 pub(crate) mod entry_render_cache;
