@@ -41,7 +41,7 @@
 | Workers TCP/DNS/调度 glue 适配 | `npm-packages/peri-cf/scripts/worker-glue.ts`、`worker/wasm/dns.ts` |
 | 仅开发服务的本机 DNS 解析 | `npm-packages/peri-cf/scripts/local-dns.ts` |
 | 编译 Worker 的默认 Wrangler 本地启动 | `npm-packages/peri-cf/scripts/local-preview.ts`、`local-preview-command.ts` |
-| 真实浏览器操作验收（无模型/数据库 mock） | `npm-packages/peri-cf/scripts/e2e.mjs`、`E2E.md` |
+| 真实浏览器操作验收（无模型/数据库 mock） | `npm-packages/peri-cf/scripts/e2e.mjs` |
 | 浏览器 HTTP 查询/命令 | `npm-packages/peri-cf/web/api/client.ts` |
 | 浏览器 SDK Yjs 副本与 WS 生命周期 | `npm-packages/peri-cf/web/api/sync.ts` |
 | 聊天展示与生成生命周期 | `npm-packages/peri-cf/web/chat/` |

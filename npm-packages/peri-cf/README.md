@@ -94,13 +94,13 @@ WASM 的平台适配留在本应用：准备阶段为 Emscripten glue 注入静�
 
 `bun run dev` 构建应用，再由 Wrangler 在本地 workerd 启动编译后的 Worker，默认地址为 `http://127.0.0.1:8791`；已有构建可直接 `bun run preview`。启动时仅在服务端用本机 DNS 解析配置的存储与模型域名，将临时 `PERI_DNS_OVERRIDES` 写入忽略提交的构建目录 `.dev.vars`。不会改动源 `.dev.vars` 或生产配置，部署时须重新执行干净构建，生产环境使用 Workers DNS resolver；本地映射随开发服务重启刷新。
 
-默认启动不使用 Vite preview：2026-10-07 对相同产物和配置的对照探测，Vite preview 在 ACP 已创建会话后的 TS 元数据查询阶段返回 `Network connection lost.`，而独立 Wrangler 查询及关闭均返回 200、创建返回 201。没有重试创建来掩盖错误；完整真实浏览器复验记录在 `E2E-RESULTS.md`。`dev:hmr` 仍是显式的 Vite 开发入口，不作为完整 runtime 验收路径。
+默认启动不使用 Vite preview：2026-10-07 对相同产物和配置的对照探测，Vite preview 在 ACP 已创建会话后的 TS 元数据查询阶段返回 `Network connection lost.`，而独立 Wrangler 查询及关闭均返回 200、创建返回 201。没有重试创建来掩盖错误。`dev:hmr` 仍是显式的 Vite 开发入口，不作为完整 runtime 验收路径。
 
 `bun run dev:hmr` 保留 Vite HMR 调试入口，但真实外部存储验证中其 ModuleRunner 路径出现了列表 500 和 I/O 请求错误，不作为完整 WASM 聊天的验收入口。默认本地启动绕过这条路径；直接 `preview` 不负责生成本地 DNS 绑定，不能据此宣称部署网络已验收。
 
-真实浏览器验收使用 `bun run test:e2e`，覆盖 UI 登录、多轮回答、Yjs/WS 同步、刷新历史、停止后继续与移动端布局，不 mock 模型或数据库。浏览器安装、费用及运行条件见 [E2E 指南](E2E.md)。
+真实浏览器验收使用 `bun run test:e2e`，覆盖 UI 登录、多轮回答、Yjs/WS 同步、刷新历史、停止后继续与移动端布局，不 mock 模型或数据库。
 
-当前真实配置曾完整通过一轮，但连续复跑仍存在存储 I/O 间歇失败，尚不能宣称稳定可用；已验证的修复和未解决的问题见 [E2E 结果](E2E-RESULTS.md)。
+当前真实配置曾完整通过一轮，但连续复跑仍存在存储 I/O 间歇失败，尚不能宣称稳定可用。
 
 ## API
 
