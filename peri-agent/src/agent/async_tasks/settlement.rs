@@ -2,6 +2,10 @@ use super::{BackgroundRegistryError, BackgroundTaskRegistry};
 use crate::agent::events::BackgroundTaskResult;
 use peri_acp_types::tasks::{BgRegistryEvent, BgTaskKind, OnBgCompleteFn};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+
+#[path = "delivery_retry.rs"]
+mod delivery_retry;
 
 struct SettlementGuard<'owner>(&'owner AtomicUsize);
 
@@ -27,7 +31,7 @@ pub(super) struct PendingTaskDelivery {
 
 impl BackgroundTaskRegistry {
     pub fn settle_completed(
-        &self,
+        self: &Arc<Self>,
         task_id: &str,
         mut result: BackgroundTaskResult,
         delivery: OnBgCompleteFn,
@@ -37,10 +41,12 @@ impl BackgroundTaskRegistry {
         let commit_terminal = self.claim_completion(task_id);
         let kind = if commit_terminal {
             kind.ok_or_else(|| BackgroundRegistryError::TaskNotFound(task_id.into()))?
-        } else if self.claim_cancelled_shell_cleanup(task_id) {
+        } else if let Some(kind) = self.claim_cancelled_cleanup(task_id) {
             result.success = false;
-            result.output = "Shell command cancelled; read the output files as needed.".into();
-            BgTaskKind::Shell
+            if kind == BgTaskKind::Shell {
+                result.output = "Shell command cancelled; read the output files as needed.".into();
+            }
+            kind
         } else {
             return match self.projection_status(task_id).as_deref() {
                 Some("completed" | "failed" | "cancelled") => Ok(false),
@@ -49,12 +55,16 @@ impl BackgroundTaskRegistry {
             };
         };
         result.task_id = task_id.to_owned();
-        self.deliver_pending(PendingTaskDelivery {
+        let outcome = self.deliver_pending(PendingTaskDelivery {
             result,
             kind,
             delivery,
             commit_terminal,
-        })
+        });
+        if outcome.is_err() {
+            self.start_delivery_worker();
+        }
+        outcome
     }
 
     pub fn retry_pending_deliveries(&self) -> usize {

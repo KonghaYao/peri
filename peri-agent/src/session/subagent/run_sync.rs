@@ -135,8 +135,8 @@ pub(super) async fn run_sync_subagent(
     .await
     {
         deregister_guard.deregister = None;
-        if let Some(claim) = resume_claim.take() {
-            claim.release().await?;
+        if let Some(mut claim) = resume_claim.take() {
+            claim.release().await?.accept()?;
         }
         return Err(error.into());
     }

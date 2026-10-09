@@ -164,8 +164,9 @@ pub struct BackgroundTaskRegistry {
     session_id: parking_lot::RwLock<String>,
     pub(super) scope: Arc<super::scope::ExecutionScope>,
     unsettled_external: parking_lot::Mutex<HashSet<String>>,
-    cancelled_shells_waiting_cleanup: parking_lot::Mutex<HashSet<String>>,
+    cancelled_tasks_waiting_cleanup: parking_lot::Mutex<HashMap<String, BgTaskKind>>,
     pending_deliveries: parking_lot::Mutex<HashMap<String, settlement::PendingTaskDelivery>>,
+    delivery_worker_running: parking_lot::Mutex<bool>,
     settlements_in_flight: std::sync::atomic::AtomicUsize,
 }
 
@@ -215,8 +216,9 @@ impl BackgroundTaskRegistry {
             session_id: parking_lot::RwLock::new(String::new()),
             scope: super::scope::ExecutionScope::new(),
             unsettled_external: parking_lot::Mutex::new(HashSet::new()),
-            cancelled_shells_waiting_cleanup: parking_lot::Mutex::new(HashSet::new()),
+            cancelled_tasks_waiting_cleanup: parking_lot::Mutex::new(HashMap::new()),
             pending_deliveries: parking_lot::Mutex::new(HashMap::new()),
+            delivery_worker_running: parking_lot::Mutex::new(false),
             settlements_in_flight: std::sync::atomic::AtomicUsize::new(0),
         }
     }
@@ -396,10 +398,8 @@ impl BackgroundTaskRegistry {
         }
     }
 
-    /// A cancelled shell still emits one owner cleanup callback after process
-    /// wait and pipe drain. It must never publish a second registry terminal.
-    pub(super) fn claim_cancelled_shell_cleanup(&self, task_id: &str) -> bool {
-        self.cancelled_shells_waiting_cleanup.lock().remove(task_id)
+    pub(super) fn claim_cancelled_cleanup(&self, task_id: &str) -> Option<BgTaskKind> {
+        self.cancelled_tasks_waiting_cleanup.lock().remove(task_id)
     }
 
     /// Unsettled tasks for the bounded-wait handoff record: public identity plus
@@ -746,10 +746,13 @@ impl BackgroundTaskRegistry {
             ));
         }
         if let Some(task) = tasks.remove(task_id) {
-            if task.kind == BgTaskKind::Shell {
-                self.cancelled_shells_waiting_cleanup
+            if task.kind == BgTaskKind::Shell
+                || (task.kind == BgTaskKind::Agent
+                    && matches!(task.cancel_handle, BgCancelHandle::Abort(_)))
+            {
+                self.cancelled_tasks_waiting_cleanup
                     .lock()
-                    .insert(task_id.to_owned());
+                    .insert(task_id.to_owned(), task.kind);
             }
             if let Some(inbox) = &task.agent_inbox {
                 inbox.close();

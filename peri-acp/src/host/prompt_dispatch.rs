@@ -161,9 +161,19 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
     }
     super::workspace::validate_expected(cfg, &prompt_session_id, None).await?;
     if let Some(epoch) = continuation_epoch {
+        #[cfg(test)]
+        admission_gate::wait(&prompt_session_id).await;
         let dispatchable = {
-            let sessions = sessions.lock().await;
-            sessions.get(&prompt_session_id).is_some_and(|state| {
+            let mut sessions = sessions.lock().await;
+            sessions.get_mut(&prompt_session_id).is_some_and(|state| {
+                if state.closing
+                    || cfg
+                        .session_manager
+                        .get_session(&prompt_session_id)
+                        .is_none_or(|runtime| runtime.cancel_token.is_cancelled())
+                {
+                    return false;
+                }
                 let (has_subagent, has_mq) = cfg
                     .session_manager
                     .get_session(&prompt_session_id)
@@ -180,14 +190,21 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
                     origin,
                     PromptOrigin::Scheduled | PromptOrigin::Continuation { mq_steering: true }
                 );
-                continuation::continuation_dispatchable(
-                    state,
-                    epoch,
-                    has_subagent,
-                    has_mq,
-                    mq_steering,
-                ) && (!matches!(origin, PromptOrigin::Continuation { mq_steering: true })
-                    || super::activation::mq_allowed(cfg, &prompt_session_id))
+                let dispatchable =
+                    continuation::continuation_dispatchable(
+                        state,
+                        epoch,
+                        has_subagent,
+                        has_mq,
+                        mq_steering,
+                    ) && (!matches!(origin, PromptOrigin::Continuation { mq_steering: true })
+                        || super::activation::mq_allowed(cfg, &prompt_session_id));
+                if dispatchable {
+                    state.continuation_in_flight = true;
+                    state.continuation_mq_steering_pending = false;
+                    state.cancel_token = Some(tokio_util::sync::CancellationToken::new());
+                }
+                dispatchable
             })
         };
         if !dispatchable {
@@ -197,11 +214,8 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
             );
             return Ok(serde_json::Value::Null);
         }
-        let mut sessions = sessions.lock().await;
-        if let Some(state) = sessions.get_mut(&prompt_session_id) {
-            state.continuation_in_flight = true;
-            state.continuation_mq_steering_pending = false;
-        }
+        #[cfg(test)]
+        admission_gate::wait(&format!("{prompt_session_id}:committed")).await;
     }
 
     // Extract AgentPool from session, wrap in Arc<Mutex> for
@@ -271,4 +285,37 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
         }
     }
     result
+}
+
+#[cfg(test)]
+pub(crate) mod admission_gate {
+    use std::collections::HashMap;
+    use std::sync::{Arc, LazyLock, Mutex};
+    use tokio::sync::Notify;
+
+    #[derive(Default)]
+    pub(crate) struct Gate {
+        pub(crate) entered: Notify,
+        pub(crate) release: Notify,
+    }
+
+    static GATES: LazyLock<Mutex<HashMap<String, Arc<Gate>>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    pub(crate) fn install(session_id: &str) -> Arc<Gate> {
+        let gate = Arc::new(Gate::default());
+        GATES
+            .lock()
+            .unwrap()
+            .insert(session_id.into(), gate.clone());
+        gate
+    }
+
+    pub(super) async fn wait(session_id: &str) {
+        let gate = GATES.lock().unwrap().remove(session_id);
+        if let Some(gate) = gate {
+            gate.entered.notify_one();
+            gate.release.notified().await;
+        }
+    }
 }

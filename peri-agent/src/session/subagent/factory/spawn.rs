@@ -371,6 +371,7 @@ pub(super) async fn spawn_subagent_impl(
                 parent_tool_call_id,
                 cancel_token.clone(),
                 v2_ctx,
+                None,
             )
             .await?;
             Ok(SubagentSpawned {

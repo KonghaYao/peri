@@ -55,12 +55,16 @@ pub(crate) fn handle_notification(
                     // Legacy cancellation also revokes a ticket still waiting for its prompt lock.
                     mailbox.stop();
                 }
-                let token = state.cancel_token.as_ref()?;
-                token.cancel();
+                state.continuation_epoch += 1;
                 if let Some(runtime) = cfg.session_manager.get_session(session_id) {
                     runtime.activation.suppress();
                 }
                 state.continuation_mq_steering_pending = false;
+                let Some(token) = state.cancel_token.as_ref() else {
+                    state.continuation_armed = false;
+                    return None;
+                };
+                token.cancel();
                 // 置位内部续跑标记（只影响当前被取消的 prompt）：被取消 prompt
                 // 的独立 bg agent 结果完成时，continuation scheduler 原子 take
                 // 后运行一次 AsyncContinuation，使父 agent 消费 deferred callback。

@@ -227,3 +227,44 @@ async fn test_claim_child_resume_serializes_and_restores_previous_state() {
         SessionResourceErrorKind::InvalidInput { .. }
     ));
 }
+
+#[tokio::test]
+async fn test_background_handoff_preparation_failure_restores_previous_claim_record() {
+    let fixture = Fixture::new().await;
+    fixture.create("s-handoff-root").await;
+    let child = fixture.child("s-handoff-child", "s-handoff-root").await;
+    let child_id = child.target.thread_id;
+    fixture
+        .facade
+        .update_session_meta(
+            &child_id,
+            &SessionMetaPatch {
+                status: Some(AgentStatus::Done),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let claim = fixture
+        .facade
+        .claim_child_resume(&child_id, &"s-handoff-root".to_owned())
+        .await
+        .unwrap();
+    claim.hand_off_to_background().await.unwrap();
+    claim.mark_failed().await.unwrap();
+    claim.mark_failed().await.unwrap();
+    let record = fixture
+        .facade
+        .gate
+        .data()
+        .load_child_resume_record(&child_id)
+        .await
+        .unwrap();
+    assert_eq!(record.status, AgentStatus::Done);
+    assert!(!record.claimed);
+    fixture
+        .facade
+        .claim_child_resume(&child_id, &"s-handoff-root".to_owned())
+        .await
+        .unwrap();
+}

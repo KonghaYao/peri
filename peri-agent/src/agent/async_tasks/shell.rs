@@ -78,7 +78,7 @@ pub fn parse_background_timeout(input: &serde_json::Value) -> Option<u64> {
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::type_complexity)]
 pub fn finalize_bg_shell(
-    registry: &BackgroundTaskRegistry,
+    registry: &Arc<BackgroundTaskRegistry>,
     on_bg_complete: &Option<peri_acp_types::tasks::OnBgCompleteFn>,
     task_id: String,
     prompt_summary: String,
@@ -121,7 +121,7 @@ pub fn finalize_bg_shell(
     if registry.claim_completion(&task_id) {
         registry.complete(&result.task_id.clone(), result);
     } else {
-        registry.claim_cancelled_shell_cleanup(&task_id);
+        registry.claim_cancelled_cleanup(&task_id);
     }
 }
 

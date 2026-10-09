@@ -484,9 +484,10 @@ pub trait SessionInitialization: Send + Sync {
 pub trait ChildResumeClaim: Send + Sync {
     /// 认领成功并开始运行。
     async fn mark_running(&self) -> SessionResourceResult<()>;
-    /// 移交后台执行（仍属本次认领）。
+    /// 移交后台执行（仍属本次认领）；完成后调用方才可放行后台执行。
     async fn hand_off_to_background(&self) -> SessionResourceResult<()>;
     /// 认领后准备失败：恢复到认领前的状态，不留 active 残留。
+    /// 移交失败或移交后启动被取消也可补偿，但调用方须确保后台执行尚未放行。
     async fn mark_failed(&self) -> SessionResourceResult<()>;
     /// 认领终止（取消/宿主退出）：恢复到认领前的状态。
     async fn mark_terminated(&self) -> SessionResourceResult<()>;

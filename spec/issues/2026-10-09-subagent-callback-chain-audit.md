@@ -1,6 +1,6 @@
 # Subagent 回调与 loop 激活全链路核查
 
-- 状态：当前源码缺口已修复；现场旧进程需退出后重新启动，真实场景验收未完成。
+- 状态：源码缺口与并行 review 问题已修复，确定性集成验收通过；现场旧进程需退出后重新启动，现场任务精确归因与验收未完成。
 - 范围：当前进程投递、父队列、Receive、宿主 continuation；不改表结构、不恢复旧执行。
 
 ## 现场证据
@@ -50,7 +50,32 @@ SessionFactory/background owner，等待任务排空后验证父 MQ，再实际�
 修复使 resume 与 spawn 共用已有 `completion_delivery`，不新增兼容层或规则副本。
 生产宿主通常已注入 callback，故不能把这个缺口直接认定为现场 Pending 的根因。
 
-## 验证与剩余验收
+## 并行 review 后的修复
+
+派出三个 worker，分别负责后台生命周期、取消与投递、宿主调度；主线负责生产资源契约补偿、E2E、文档和集成。以下均为代码可复现缺陷或验收缺口，不把任一项未经现场关联就认定为用户截图的根因。
+
+| 问题 | 修复与证据 |
+| --- | --- |
+| 取消本地后台 Agent 后，registry 移除条目导致 owner 回调丢失 | 协作退出认领一次 cancelled cleanup，交付原 task ID；不重复 registry 终态，也不绕过父 Stop/关闭。真实 child 取消回归覆盖父 MQ。 |
+| resume 执行先于认领移交，快终态被迟到 Active 覆盖 | 注册与资源移交共同闸门，接受凭证确认执行放行；闸门、调用者 drop、移交失败先红后绿。生产 mark_failed 支持放行前 HandedOff 准备失败补偿，mark_terminated 继续拒绝覆盖已移交后台。 |
+| panic 路径不写会话终态 | 正常/panic 共用状态持久化与 owner 结算；等待事件 drain 与 stop hook 后再写终态。Store 拒写明确投递失败并保留诊断，不声称已修复元数据。 |
+| 同步接纳暂时 Err 仍需新输入重试 | 单一 ExecutionScope-owned worker，Weak owner、退避、关闭撤销；只重试队列接纳，不重跑工具/模型。永久拒绝保持 pending 并报告 Incomplete；ACK 歧义重用 ID、载荷一致去重且不二次唤醒。 |
+| 宿主 eligibility 与 in-flight 提交之间的竞态 | 同一 sessions 临界区完成 epoch/closing/runtime/MQ/activation 复核及取消令牌提交；run_prompt 复用令牌。User/Stop/closing 三种确定性交错先红后绿，新增真实 scheduler HTTP 失败恢复与一次 child 续跑。 |
+| 后台 E2E 读取已删除 Work 表，无法验收当前实现 | 删除旧 helper，改为只读当前 canonical threads/messages；隔离 HOME、真实 TUI、本地模型重放覆盖 Agent/fork/shell。一次用户输入后，核对一次结果进入后续模型请求、父回答、child 终态和 delivery 身份。 |
+
+集成时另捕获启动失败未注册却注销运行时的问题：完整 middleware subagent suite 首轮在既有 `test_bg_register_failure_does_not_execute_task` 失败（注销 4 次，期望 0）。修复为准备 guard 与执行 guard 共享一次性运行时清理权限，未注册不注销；新增移交等待/失败/drop 的注册注销计数断言，完整 suite 重跑通过。
+
+## 本轮集成验证
+
+- `peri-agent --lib`：1029 passed；`peri-acp --lib`：805 passed。
+- `peri-resources --lib`：448 passed / 21 ignored；`peri-middlewares --lib subagent:: -- --test-threads=1`：211 passed。
+- E2E 当前 canonical helper 9 项、真实 TUI Agent/fork/shell 3 项通过；后台任务测试重复运行通过，最终运行使用本轮重建二进制。
+- 五个受影响 crate 的 library clippy、Rust fmt、层间依赖检查和 diff whitespace 检查通过；全库大小扫描无超限。
+- 五个受影响 crate 的 doc tests：16 passed / 5 ignored；受影响 Markdown 本地链接检查 19 项，无缺失。
+- 修改范围 TypeScript 类型检查通过；E2E 全量 `tsc --noEmit` 仍有未修改的 `helpers/workspace-mcp-fixture.ts` 两处 TS2322，不将其标记为本轮通过或修改无关 fixture。
+- 本轮没有生产数据库表结构变更，没有恢复旧 Agent 执行，也没有终止用户现有进程。
+
+## 首次核查验证与剩余现场验收
 
 - 新回归修复后通过；`session::subagent` 88 项、`agent::stages` 156 项、
   宿主 `activation_tests` 12 项均在修复后通过。

@@ -22,7 +22,10 @@ use peri_acp_types::thread::{AgentStatus, ThreadId, ThreadMeta};
 /// 调用方提交给认领 worker 的领域结果。
 enum ClaimDecision {
     /// 成功移交后台执行：终态状态此后由后台执行持有（仍属本次认领）。
-    HandOff,
+    HandOff {
+        ready: oneshot::Sender<Result<(), String>>,
+        accepted: oneshot::Receiver<()>,
+    },
     /// 同步收尾：先结清认领，再写领域终态。
     Finish(AgentStatus),
     CancelRunning(Arc<crate::session::Session>),
@@ -34,6 +37,16 @@ pub(in crate::session::subagent) struct ResumeClaim {
     /// worker 的写入不能被调用方取消：只 detach（不 abort）。
     worker: JoinHandle<Result<(), String>>,
     running: Option<Arc<crate::session::Session>>,
+}
+
+pub(in crate::session::subagent) struct BackgroundHandoff(oneshot::Sender<()>);
+
+impl BackgroundHandoff {
+    pub(in crate::session::subagent) fn accept(self) -> Result<(), String> {
+        self.0
+            .send(())
+            .map_err(|_| "resume hand-off worker stopped before acceptance".to_string())
+    }
 }
 
 impl ResumeClaim {
@@ -67,11 +80,19 @@ impl ResumeClaim {
     }
 
     /// 成功移交给后台执行：终态状态此后由后台执行持有。
-    pub(in crate::session::subagent) async fn release(mut self) -> Result<(), String> {
-        self.decide(ClaimDecision::HandOff);
-        (&mut self.worker)
+    pub(in crate::session::subagent) async fn release(
+        &mut self,
+    ) -> Result<BackgroundHandoff, String> {
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let (accepted_tx, accepted_rx) = oneshot::channel();
+        self.decide(ClaimDecision::HandOff {
+            ready: ready_tx,
+            accepted: accepted_rx,
+        });
+        ready_rx
             .await
-            .map_err(|error| format!("resume hand-off worker failed: {error}"))?
+            .map_err(|error| format!("resume hand-off worker failed: {error}"))??;
+        Ok(BackgroundHandoff(accepted_tx))
     }
 
     pub(in crate::session::subagent) fn mark_running(
@@ -169,11 +190,23 @@ async fn own_claim(
     // 调用方已消失时发送失败，但认领证据已落库：下面的决定分支会给出补偿。
     let _ = meta_tx.send(Ok(meta));
     match decision.await {
-        Ok(ClaimDecision::HandOff) => {
-            handle
-                .hand_off_to_background()
-                .await
-                .map_err(|error| format!("resume claim hand-off failed: {error}"))?;
+        Ok(ClaimDecision::HandOff { ready, accepted }) => {
+            let handoff = handle.hand_off_to_background().await;
+            let accepted = match handoff {
+                Ok(()) => ready.send(Ok(())).is_ok() && accepted.await.is_ok(),
+                Err(error) => {
+                    let error = format!("resume claim hand-off failed: {error}");
+                    tracing::error!(%thread_id, %error, "background hand-off failed");
+                    let _ = ready.send(Err(error));
+                    false
+                }
+            };
+            if !accepted {
+                handle
+                    .mark_failed()
+                    .await
+                    .map_err(|error| format!("resume hand-off rollback failed: {error}"))?;
+            }
         }
         Ok(ClaimDecision::Finish(status)) => {
             // 顺序不可反——结清会把记录写回认领前的值，先写终态会被它覆盖。

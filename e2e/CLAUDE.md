@@ -40,7 +40,7 @@ run-e2e.mjs → vitest worker → helpers/peri.ts → dev.sh → Peri TUI (tmux)
 | 当前 Peri 二进制构建 | `helpers/build.ts`（统一 patched Cargo + `--locked`；不得用裸 Cargo 改写 lockfile） |
 | stdio 执行准入桥接 | `helpers/stdio-execution-fixture.ts`（真实 Peri + SDK 协议，隔离 registry；不是 SDK 独立测试或构建） |
 | Workflow 等待（磁盘 + 可选屏幕） | `helpers/workflow.ts` |
-| 后台任务可靠完成屏障 | `helpers/bg-task-durable-boundary.ts`（直接发起会话的 required delivery、Satisfied 批次与 child 终态 ACK；不依赖内部提醒的可见文案） |
+| 后台任务完成与模型消费证据 | `helpers/bg-task-boundary.ts`（只读当前 threads/messages，canonical delivery 身份、直接父会话后续回答和 child 终态）；`tests/subagent/bg-task-area.test.ts` 用隔离 HOME 与本地模型重放核对真实请求中的一次结果，无需新用户输入，不依赖已删除的 Work 表 |
 | LLM Judge | `helpers/judge.ts` |
 | 录制 | `helpers/recorder.ts` |
 | 控制面 / 分层门禁 | `scripts/run-e2e.mjs` + `config/tiers.mjs` |

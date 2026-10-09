@@ -1,4 +1,5 @@
 use std::panic::AssertUnwindSafe;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use futures::FutureExt;
@@ -49,6 +50,7 @@ pub(super) async fn spawn_background_subagent(
     parent_tool_call_id: Option<String>,
     cancel_token: CancellationToken,
     v2_ctx: V2SubagentContext,
+    resume_claim: Option<&mut super::factory::ResumeClaim>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let task_manager =
         task_manager.ok_or("Background tasks not available: no task manager configured")?;
@@ -76,8 +78,25 @@ pub(super) async fn spawn_background_subagent(
     let panic_prompt_summary = prompt_summary.clone();
     let panic_on_complete = on_bg_complete.clone();
     let panic_manager = Arc::clone(&task_manager);
+    let panic_resources = session_resources.clone();
+    let runtime_started = Arc::new(AtomicBool::new(false));
+    let cleanup_runtime: Option<DeregisterRuntimeFn> = deregister_runtime.map(|deregister| {
+        let runtime_started = runtime_started.clone();
+        Arc::new(move |thread_id: &str| {
+            if runtime_started.swap(false, Ordering::AcqRel) {
+                deregister(thread_id);
+            }
+        }) as DeregisterRuntimeFn
+    });
+    let cleanup_guard = BgCleanupGuard {
+        thread_id: child_thread_id.clone(),
+        deregister: cleanup_runtime.clone(),
+        stop: None,
+    };
 
     let execution = async move {
+        let mut cleanup_guard = cleanup_guard;
+        let inbox_guard = inbox_guard;
         // S3.1 门控：注册结果（失败时调用方已发 Err；sender 被 drop 同样返回）
         match reg_rx.await {
             Ok(Ok(())) => {}
@@ -96,23 +115,15 @@ pub(super) async fn spawn_background_subagent(
         // S3.2 同步收尾 guard：abort/panic 时 deregister_runtime + 补发
         // v2 SubagentStop（含 v1 协议化直发，与 SubagentStarted 配对）。
         // 必须在本段事件 emit 之前构造。
-        let mut cleanup_guard = BgCleanupGuard {
-            thread_id: child_thread_id_for_task.clone(),
-            deregister: deregister_runtime.clone(),
-            stop: Some(BgStopEmitV2 {
-                event_bus: Arc::downgrade(&event_bus_for_emit),
-                turn: execution_turn.clone(),
-                parent_agent_id,
-                child_agent_id: subagent_agent_id,
-                agent_name: agent_name_for_task.clone(),
-                // v1 协议化直发目标（bg 泵；None = 无 bg 通道，仅 v2 补发）
-                sender: bg_event_sender.clone(),
-            }),
-        };
-        // Declared after cleanup_guard so panic/abort revokes admission before
-        // cleanup publishes deregistration or SubagentStop (reverse drop order).
-        let inbox_guard = inbox_guard;
-
+        cleanup_guard.stop = Some(BgStopEmitV2 {
+            event_bus: Arc::downgrade(&event_bus_for_emit),
+            turn: execution_turn.clone(),
+            parent_agent_id,
+            child_agent_id: subagent_agent_id,
+            agent_name: agent_name_for_task.clone(),
+            // v1 协议化直发目标（bg 泵；None = 无 bg 通道，仅 v2 补发）
+            sender: bg_event_sender.clone(),
+        });
         // v1 协议化发射目标（bg 泵）：BG pump 独立于主 pump，主 turn 结束后仍存活。
         // 构造提前到 Started 直发之前（start 借用、stop 直发 clone、forwarder move）。
         let bg_forwarder_handler: Option<Arc<dyn AgentEventHandler>> =
@@ -205,12 +216,12 @@ pub(super) async fn spawn_background_subagent(
             LoopResult::Completed => {
                 let text = extract_last_ai_text(&session);
                 let summary = text.chars().take(500).collect::<String>();
-                (text, summary, "done", true, None)
+                (text, summary, AgentStatus::Done, true, None)
             }
             LoopResult::Interrupted => (
                 "Background sub-agent was interrupted".to_string(),
                 "interrupted".to_string(),
-                "cancelled",
+                AgentStatus::Cancelled,
                 false,
                 None,
             ),
@@ -219,7 +230,13 @@ pub(super) async fn spawn_background_subagent(
                     SubagentFailure::new(&child_thread_id_for_task, &agent_name_for_task, error);
                 let output = format!("Background sub-agent failed: {}", failure.public_message());
                 let summary = output.chars().take(500).collect::<String>();
-                (output, summary, "error", false, failure.safe_failure())
+                (
+                    output,
+                    summary,
+                    AgentStatus::Error,
+                    false,
+                    failure.safe_failure(),
+                )
             }
         };
         let mut result = crate::agent::events::BackgroundTaskResult {
@@ -245,7 +262,7 @@ pub(super) async fn spawn_background_subagent(
                 agent_name: &agent_name_for_task,
                 result: &output_summary,
                 is_error: !result.success,
-                subagent_failure: failure,
+                subagent_failure: result.subagent_failure.clone(),
             },
         );
         // The guard retains only a Weak producer and stays armed throughout
@@ -262,9 +279,29 @@ pub(super) async fn spawn_background_subagent(
                 output_summary = result.output.chars().take(500).collect();
                 result.subagent_failure = failure.safe_failure();
                 result.success = false;
-                status = "error";
                 publish_completed = false;
+                status = AgentStatus::Error;
             }
+        }
+        if let Some(ref on_stop) = on_subagent_stop {
+            on_stop(
+                &child_thread_id_for_task,
+                &agent_name_for_task,
+                &cwd_for_task,
+                &output_summary,
+                !result.success,
+            );
+        }
+        if !persist_background_terminal(
+            session_resources.as_deref(),
+            &child_thread_id_for_task,
+            status,
+            &mut result,
+        )
+        .await
+        {
+            publish_completed = false;
+            output_summary = result.output.chars().take(500).collect();
         }
         forward_subagent_stop_v1(
             bg_stop_handler.as_ref(),
@@ -279,34 +316,6 @@ pub(super) async fn spawn_background_subagent(
             ),
         );
         cleanup_guard.disarm_stop();
-        if let Some(ref on_stop) = on_subagent_stop {
-            on_stop(
-                &child_thread_id_for_task,
-                &agent_name_for_task,
-                &cwd_for_task,
-                &output_summary,
-                !result.success,
-            );
-        }
-        if let Some(ref store) = session_resources {
-            let status = match status {
-                "error" => AgentStatus::Error,
-                "cancelled" => AgentStatus::Cancelled,
-                _ => AgentStatus::Done,
-            };
-            if let Err(error) = store
-                .update_session_meta(
-                    &ThreadId::from(child_thread_id_for_task.as_str()),
-                    &SessionMetaPatch {
-                        status: Some(status),
-                        ..Default::default()
-                    },
-                )
-                .await
-            {
-                tracing::warn!(thread_id = %child_thread_id_for_task, %error, "subagent terminal status write failed");
-            }
-        }
 
         // Preserve the error-path protocol: Stopped is the last wire event,
         // while the typed result still reaches the shared completion callback.
@@ -320,49 +329,46 @@ pub(super) async fn spawn_background_subagent(
                 );
             }
         }
-        if let Some(on_complete) = on_bg_complete {
-            if let Err(error) =
-                task_manager_spawn.settle_completed(&task_id_for_task, result, on_complete)
-            {
-                tracing::error!(task_id = %task_id_for_task, %error, "subagent terminal delivery is pending");
-            }
-        } else {
-            task_manager_spawn.complete(&task_id_for_task, result);
-        }
+        settle_background_terminal(&task_manager_spawn, result, on_bg_complete);
         // deregister 由 cleanup_guard drop 统一执行（正常/abort/panic 三路）
     };
     let join_handle = peri_acp_types::tasks::TaskManager::spawn_owned(
         task_manager.as_ref(),
         Box::pin(async move {
             let started_at = peri_time::monotonic_now();
-            if AssertUnwindSafe(execution).catch_unwind().await.is_err() {
+            if let Err(payload) = AssertUnwindSafe(execution).catch_unwind().await {
+                let diagnostic = payload
+                    .downcast_ref::<String>()
+                    .map(String::as_str)
+                    .or_else(|| payload.downcast_ref::<&str>().copied())
+                    .unwrap_or("non-string panic payload");
                 tracing::error!(
                     task_id = %panic_task_id,
                     thread_id = %panic_thread_id,
+                    panic = %diagnostic,
                     "background subagent execution panicked"
                 );
-                let result = crate::agent::events::BackgroundTaskResult {
+                let mut result = crate::agent::events::BackgroundTaskResult {
                     task_id: panic_task_id.clone(),
                     agent_name: panic_agent_name,
                     prompt_summary: panic_prompt_summary,
                     success: false,
-                    output: "Background sub-agent execution panicked".into(),
+                    output: format!("Background sub-agent execution panicked: {diagnostic}"),
                     tool_calls_count: 0,
                     duration_ms: started_at.elapsed().as_millis() as u64,
-                    child_thread_id: Some(panic_thread_id),
+                    child_thread_id: Some(panic_thread_id.clone()),
                     timed_out: false,
                     subagent_failure: None,
                     shell_output: None,
                 };
-                if let Some(on_complete) = panic_on_complete {
-                    if let Err(error) =
-                        panic_manager.settle_completed(&panic_task_id, result, on_complete)
-                    {
-                        tracing::error!(task_id = %panic_task_id, %error, "subagent terminal delivery is pending");
-                    }
-                } else {
-                    panic_manager.complete(&panic_task_id, result);
-                }
+                persist_background_terminal(
+                    panic_resources.as_deref(),
+                    &panic_thread_id,
+                    AgentStatus::Error,
+                    &mut result,
+                )
+                .await;
+                settle_background_terminal(&panic_manager, result, panic_on_complete);
             }
             // panic 已在边界内收敛；正常返回让 spawn_owned 确认执行已停止。
         }),
@@ -395,12 +401,93 @@ pub(super) async fn spawn_background_subagent(
         let _ = reg_tx.send(Err(e.to_string()));
         return Err(format!("Failed to register background task: {}", e).into());
     }
+    let mut registration = PendingBackgroundRegistration {
+        manager: task_manager.clone(),
+        task_id: Some(task_id.clone()),
+        runtime_cleanup: cleanup_runtime.map(|cleanup| (child_thread_id.clone(), cleanup)),
+    };
+    let handoff = match resume_claim {
+        Some(claim) => Some(claim.release().await?),
+        None => None,
+    };
     // 注册成功：先注册运行时（active_agents，与任务内 guard 的 deregister 配对），
     // 再放行包装任务继续执行。
+    runtime_started.store(true, Ordering::Release);
     if let Some(register) = &register_runtime {
         register(child_thread_id.clone(), cancel_token, "independent".into());
     }
-    let _ = reg_tx.send(Ok(()));
+    reg_tx
+        .send(Ok(()))
+        .map_err(|_| "background execution stopped before startup acceptance")?;
+    if let Some(handoff) = handoff {
+        handoff.accept()?;
+    }
+    registration.task_id = None;
+    registration.runtime_cleanup = None;
 
     Ok(())
+}
+
+async fn persist_background_terminal(
+    store: Option<&dyn SessionResources>,
+    thread_id: &str,
+    status: AgentStatus,
+    result: &mut crate::agent::events::BackgroundTaskResult,
+) -> bool {
+    let Some(store) = store else {
+        return true;
+    };
+    if let Err(error) = store
+        .update_session_meta(
+            &ThreadId::from(thread_id),
+            &SessionMetaPatch {
+                status: Some(status),
+                ..Default::default()
+            },
+        )
+        .await
+    {
+        tracing::error!(%thread_id, %error, "subagent terminal status write failed");
+        result.success = false;
+        result.output = format!(
+            "{}; subagent terminal status write failed: {error}",
+            result.output
+        );
+        return false;
+    }
+    true
+}
+
+fn settle_background_terminal(
+    manager: &TaskManager,
+    result: crate::agent::events::BackgroundTaskResult,
+    delivery: Option<peri_acp_types::tasks::OnBgCompleteFn>,
+) {
+    let task_id = result.task_id.clone();
+    if let Some(delivery) = delivery {
+        if let Err(error) = manager.settle_completed(&task_id, result, delivery) {
+            tracing::error!(%task_id, %error, "subagent terminal delivery is pending");
+        }
+    } else {
+        manager.complete(&task_id, result);
+    }
+}
+
+struct PendingBackgroundRegistration {
+    manager: Arc<TaskManager>,
+    task_id: Option<String>,
+    runtime_cleanup: Option<(String, DeregisterRuntimeFn)>,
+}
+
+impl Drop for PendingBackgroundRegistration {
+    fn drop(&mut self) {
+        if let Some(task_id) = self.task_id.take() {
+            if let Err(error) = self.manager.cancel(&task_id) {
+                tracing::error!(%task_id, %error, "background preparation cancellation failed");
+            }
+        }
+        if let Some((thread_id, cleanup)) = self.runtime_cleanup.take() {
+            cleanup(&thread_id);
+        }
+    }
 }

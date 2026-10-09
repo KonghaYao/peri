@@ -112,24 +112,25 @@ impl ChildResumeClaim for ChildResumeClaimHandle {
     }
 
     async fn mark_failed(&self) -> SessionResourceResult<()> {
-        self.settle().await
+        self.settle(true).await
     }
 
     async fn mark_terminated(&self) -> SessionResourceResult<()> {
-        self.settle().await
+        self.settle(false).await
     }
 }
 
 impl ChildResumeClaimHandle {
     /// 收尾：恢复到认领前的记录，不留 active 残留。
     ///
-    /// 已移交后台时拒绝改写——后台执行才是终态的持有者，前台的终止声明不能覆盖它。
-    async fn settle(&self) -> SessionResourceResult<()> {
+    /// 后台尚未启动时可补偿移交准备失败；终止声明不能覆盖后台执行持有的终态。
+    async fn settle(&self, preparation_failed: bool) -> SessionResourceResult<()> {
         {
             let mut phase = self.phase()?;
             match *phase {
                 ClaimPhase::Preparing | ClaimPhase::Running => *phase = ClaimPhase::Settled,
                 ClaimPhase::Settled => {}
+                ClaimPhase::HandedOff if preparation_failed => *phase = ClaimPhase::Settled,
                 ClaimPhase::HandedOff => return Err(Self::handed_off()),
             }
         }

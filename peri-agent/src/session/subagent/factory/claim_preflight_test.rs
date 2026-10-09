@@ -16,6 +16,8 @@ struct ClaimResources {
     claim_error: Mutex<Option<SessionResourceError>>,
     claims: AtomicUsize,
     commit_before_error: bool,
+    handoff_gate: Option<Arc<HandoffGate>>,
+    terminal_error: bool,
 }
 
 impl ClaimResources {
@@ -26,6 +28,8 @@ impl ClaimResources {
             claim_error: Mutex::new(None),
             claims: AtomicUsize::new(0),
             commit_before_error: false,
+            handoff_gate: None,
+            terminal_error: false,
         })
     }
 }
@@ -51,7 +55,15 @@ impl SessionResources for ClaimResources {
         if let Some(error) = self.claim_error.lock().unwrap().take() {
             return Err(error);
         }
-        self.inner.claim_child_resume(child, root).await
+        let inner = self.inner.claim_child_resume(child, root).await?;
+        Ok(match &self.handoff_gate {
+            Some(gate) => Box::new(GatedClaim {
+                inner,
+                gate: gate.clone(),
+                handed_off: std::sync::atomic::AtomicBool::new(false),
+            }),
+            None => inner,
+        })
     }
     async fn inspect_availability(
         &self,
@@ -194,6 +206,13 @@ impl SessionResources for ClaimResources {
         id: &ThreadId,
         patch: &SessionMetaPatch,
     ) -> SessionResourceResult<()> {
+        if self.terminal_error && patch.status.is_some_and(|status| !status.is_active()) {
+            return Err(SessionResourceError::new(
+                SessionResourceErrorKind::Unavailable {
+                    detail: "terminal store offline".into(),
+                },
+            ));
+        }
         self.inner.update_session_meta(id, patch).await
     }
     async fn delete_session_tree(&self, id: &ThreadId) -> SessionResourceResult<()> {
@@ -209,6 +228,10 @@ impl SessionResources for ClaimResources {
         self.inner.drain_persistence(id).await
     }
 }
+
+#[path = "background_handoff_test.rs"]
+mod background_handoff_tests;
+use background_handoff_tests::{GatedClaim, HandoffGate};
 
 async fn acquire_error(
     store: Arc<dyn SessionResources>,

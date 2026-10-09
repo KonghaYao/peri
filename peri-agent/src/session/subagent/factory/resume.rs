@@ -133,7 +133,7 @@ pub(super) async fn resume_subagent_impl(
         })
         .transpose()?;
     let cluster_root = super::execution_root(session_resources.as_ref(), &thread_id).await?;
-    let (meta, claim) = ResumeClaim::acquire(
+    let (meta, mut claim) = ResumeClaim::acquire(
         Arc::clone(&session_resources),
         thread_id.clone(),
         cluster_root,
@@ -347,10 +347,11 @@ pub(super) async fn resume_subagent_impl(
                 parent_tool_call_id,
                 cancel_token.clone(),
                 v2_ctx,
+                Some(&mut claim),
             )
             .await
             {
-                Ok(()) => claim.release().await?,
+                Ok(()) => {}
                 Err(e) => {
                     // review MEDIUM-1 回滚：注册失败（task_manager 缺失 /
                     // register_with_kind 撞 per-kind 上限）时任务未执行——status

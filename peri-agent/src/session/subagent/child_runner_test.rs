@@ -101,7 +101,13 @@ fn settle_nested_task(child: &Session, manager: &TaskManager) {
             child.queue().clone(),
         ),
     );
-    let result = BackgroundTaskResult {
+    assert!(manager
+        .settle_completed("nested-task", nested_result(), delivery)
+        .unwrap());
+}
+
+fn nested_result() -> BackgroundTaskResult {
+    BackgroundTaskResult {
         task_id: "nested-task".into(),
         agent_name: "nested".into(),
         prompt_summary: "nested work".into(),
@@ -113,10 +119,7 @@ fn settle_nested_task(child: &Session, manager: &TaskManager) {
         timed_out: false,
         subagent_failure: None,
         shell_output: None,
-    };
-    assert!(manager
-        .settle_completed("nested-task", result, delivery)
-        .unwrap());
+    }
 }
 
 #[tokio::test(start_paused = true)]
@@ -165,6 +168,52 @@ async fn nested_child_late_result_is_processed_before_delegation_completes() {
     assert_eq!(initial_calls.load(Ordering::SeqCst), 1);
     assert_eq!(result_calls.load(Ordering::SeqCst), 1);
     assert!(super::super::util::extract_last_ai_text(&child).contains("processed nested result"));
+}
+
+/// [回归测试] child 已经过 bounded wait 且无人输入时，投递暂时失败仍能自动继续。
+#[tokio::test(start_paused = true)]
+async fn nested_child_recovers_pending_delivery_without_input() {
+    let (child, manager, built, initial_calls, result_calls) = child_with_nested_task();
+    let owner_child = child.clone();
+    let mut owner =
+        tokio::spawn(
+            async move { run_child_until_terminal(built.context, 10, &owner_child).await },
+        );
+    assert!(tokio::time::timeout(Duration::from_secs(121), &mut owner)
+        .await
+        .is_err());
+    let delivery = crate::session::bg_complete::task_bg_complete_callback(
+        crate::agent::async_tasks::delivery::SessionTerminalDelivery::for_queue(
+            child.queue().clone(),
+        ),
+    );
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let called = attempts.clone();
+    assert!(manager
+        .settle_completed(
+            "nested-task",
+            nested_result(),
+            Arc::new(move |result, kind| {
+                if called.fetch_add(1, Ordering::SeqCst) == 0 {
+                    Err("temporary queue acceptance failure".into())
+                } else {
+                    delivery(result, kind)
+                }
+            })
+        )
+        .is_err());
+    assert_eq!(manager.snapshot().tasks[0].status, "delivery_pending");
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(1), owner)
+            .await
+            .unwrap()
+            .unwrap(),
+        LoopResult::Completed
+    ));
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    assert_eq!(initial_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(result_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(manager.active_count(), 0);
 }
 
 #[tokio::test(start_paused = true)]
@@ -259,6 +308,7 @@ async fn background_child_reports_parent_completion_after_nested_result() {
         None,
         child.config().cancel_token.as_ref().clone(),
         built,
+        None,
     )
     .await
     .unwrap();
@@ -278,4 +328,85 @@ async fn background_child_reports_parent_completion_after_nested_result() {
     assert!(result.output.contains("processed nested result"));
     assert_eq!(result_calls.load(Ordering::SeqCst), 1);
     assert_eq!(deliveries.load(Ordering::SeqCst), 1);
+}
+
+/// [回归测试] session/cancel-bg-task 的协作取消必须给直接父队列投递一次原身份终态。
+#[tokio::test(start_paused = true)]
+async fn background_child_cancellation_delivers_original_terminal_to_parent_queue() {
+    let (child, nested_manager, built, initial_calls, _result_calls) = child_with_nested_task();
+    let parent_manager = Arc::new(TaskManager::new());
+    let parent = Session::new(Arc::from("/tmp"), FrozenContext::builder().build(), None);
+    let deliveries = Arc::new(AtomicUsize::new(0));
+    let called = deliveries.clone();
+    let recorded = Arc::new(parking_lot::Mutex::new(None));
+    let record = recorded.clone();
+    let callback = crate::session::bg_complete::task_bg_complete_callback(
+        crate::agent::async_tasks::delivery::SessionTerminalDelivery::for_queue(
+            parent.queue().clone(),
+        ),
+    );
+    let callback: peri_acp_types::tasks::OnBgCompleteFn = Arc::new(move |result, kind| {
+        called.fetch_add(1, Ordering::SeqCst);
+        *record.lock() = Some(result.clone());
+        callback(result, kind)
+    });
+    let mut events = parent_manager.subscribe_events();
+    super::super::background::spawn_background_subagent(
+        "parent-task".into(),
+        child.store().thread_id.clone().unwrap(),
+        "fixture".into(),
+        "initial child work".into(),
+        "/tmp".into(),
+        10,
+        None,
+        Some(parent_manager.clone()),
+        Some(callback.clone()),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        child.config().cancel_token.as_ref().clone(),
+        built,
+        None,
+    )
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_secs(121)).await;
+    assert_eq!(initial_calls.load(Ordering::SeqCst), 1);
+    assert!(nested_manager.complete("nested-task", nested_result()));
+    parent_manager.cancel_async("parent-task").await.unwrap();
+    assert!(tokio::time::timeout(Duration::from_secs(4), async {
+        while deliveries.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .is_ok());
+    let result = recorded.lock().clone().unwrap();
+    assert_eq!(result.task_id, "parent-task");
+    assert_eq!(result.child_thread_id, child.store().thread_id);
+    assert!(!result.success);
+    assert_eq!(parent.queue().len(), 1);
+    assert!(!parent_manager
+        .settle_completed("parent-task", result, callback)
+        .unwrap());
+    assert_eq!(deliveries.load(Ordering::SeqCst), 1);
+    assert_eq!(parent_manager.snapshot().tasks[0].status, "cancelled");
+    let mut cancelled = 0;
+    while let Ok(change) = events.try_recv() {
+        match change.event {
+            peri_acp_types::tasks::BgRegistryEvent::Cancelled { .. } => cancelled += 1,
+            peri_acp_types::tasks::BgRegistryEvent::Completed { .. } => panic!("ghost terminal"),
+            _ => {}
+        }
+    }
+    assert_eq!(cancelled, 1);
+    assert_eq!(
+        TaskManagerPort::shutdown(parent_manager.as_ref()).await,
+        peri_acp_types::tasks::TaskShutdownReport::Complete
+    );
 }

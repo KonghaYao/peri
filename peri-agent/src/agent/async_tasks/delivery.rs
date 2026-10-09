@@ -26,11 +26,16 @@ pub(crate) fn terminal_delivery_id(
 
 pub(crate) struct SessionTerminalDelivery {
     queue: MessageQueue,
+    accepted:
+        parking_lot::Mutex<std::collections::HashMap<peri_acp_types::messages::MessageId, String>>,
 }
 
 impl SessionTerminalDelivery {
     pub(crate) fn for_queue(queue: MessageQueue) -> Arc<dyn TaskTerminalDelivery> {
-        Arc::new(Self { queue })
+        Arc::new(Self {
+            queue,
+            accepted: parking_lot::Mutex::new(std::collections::HashMap::new()),
+        })
     }
 }
 
@@ -41,6 +46,16 @@ impl TaskTerminalDelivery for SessionTerminalDelivery {
         reminder: &TrustedSystemReminder,
         source: MessageSource,
     ) -> Result<(), String> {
+        let fingerprint = serde_json::to_string(&(reminder.as_reminder(), &source))
+            .map_err(|error| error.to_string())?;
+        let mut accepted = self.accepted.lock();
+        if let Some(prior) = accepted.get(&delivery_id) {
+            return if prior == &fingerprint {
+                Ok(())
+            } else {
+                Err("conflicting terminal queue acceptance identity".into())
+            };
+        }
         self.queue
             .push(QueuedMessage::system_reminder_with_delivery_id(
                 MessageKind::Defer,
@@ -48,6 +63,7 @@ impl TaskTerminalDelivery for SessionTerminalDelivery {
                 reminder.clone(),
                 delivery_id,
             ));
+        accepted.insert(delivery_id, fingerprint);
         Ok(())
     }
 

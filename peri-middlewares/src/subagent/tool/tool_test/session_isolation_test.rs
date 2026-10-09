@@ -367,3 +367,211 @@ async fn completed_child_shell_blocks_shared_close_and_reopen_rebuilds_binding()
     assert!(pool.verify_shared_environment_close(&root_id).is_ok());
     assert!(old_manager.spawn_owned(Box::pin(async {})).is_err());
 }
+
+async fn spawn_completed_child(
+    tool: &SubAgentTool,
+    cwd: &str,
+    prompt: &str,
+) -> peri_agent::session::subagent::SubagentSpawned {
+    let config = tool.spawn_config_base(
+        "fork".into(),
+        prompt.into(),
+        Vec::new(),
+        SubagentCancelPolicy::Cascade,
+        20,
+        None,
+        SubagentRunMode::Sync,
+        crate::subagent::test_support::fixture_source(Arc::new(EchoLLM), "fixture-scripted"),
+        Vec::new(),
+        Arc::new(|_| true),
+        None,
+        Vec::new(),
+        cwd.into(),
+        None,
+    );
+    tool.spawn(config).await.unwrap()
+}
+
+async fn wait_for_background_idle(manager: &TaskManager) {
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        while !manager.is_execution_idle() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn background_grandchild_resumes_route_to_direct_parent_with_unique_delivery() {
+    use peri_agent::agent::events::ExecutorEvent;
+    let dir = tempdir().unwrap();
+    let store = SessionFixture::open_in(dir.path()).await;
+    let cwd = store.workspace_cwd();
+    let root_id = store
+        .create_thread(ThreadMeta::new_at(cwd.clone(), peri_time::now_wall()))
+        .await
+        .unwrap();
+    let root = Session::new(
+        Arc::from(cwd.as_str()),
+        FrozenContext::builder().build(),
+        Some(root_id.clone()),
+    );
+    root.set_subagent_host(SubagentHost {
+        session_resources: Some(store.facade()),
+        task_manager: Some(Arc::new(TaskManager::new())),
+        ..Default::default()
+    });
+    let root_tool = make_subagent_tool(Vec::new()).with_parent_session(root.clone());
+    let child = spawn_completed_child(&root_tool, &cwd, "child").await;
+    let child_tool = make_subagent_tool(Vec::new()).with_parent_session(child.session.clone());
+    let grandchild = spawn_completed_child(&child_tool, &cwd, "grandchild").await;
+    assert_eq!(
+        store
+            .load_meta(&grandchild.child_thread_id)
+            .await
+            .unwrap()
+            .parent_thread_id,
+        Some(child.child_thread_id.clone())
+    );
+    let manager = child
+        .session
+        .subagent_host()
+        .unwrap()
+        .task_manager
+        .clone()
+        .unwrap();
+    let mut task_ids = std::collections::HashSet::new();
+    let mut delivery_ids = std::collections::HashSet::new();
+    for index in 0..2 {
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut config = child_tool.resume_config_base(
+            grandchild.child_thread_id.clone(),
+            Some(format!("explicit resume {index}")),
+            SubagentRunMode::Background,
+            20,
+            crate::subagent::test_support::fixture_source(Arc::new(EchoLLM), "fixture-scripted"),
+            Vec::new(),
+            Arc::new(|_| true),
+            store.facade(),
+            cwd.clone(),
+            Some(format!("resume-call-{index}")),
+        );
+        config.bg_event_sender = Some(event_tx);
+        let resumed = child_tool.resume(config).await.unwrap();
+        wait_for_background_idle(&manager).await;
+        assert!(task_ids.insert(resumed.task_id.clone().unwrap()));
+        assert_eq!(resumed.child_thread_id, grandchild.child_thread_id);
+        assert!(root.queue().is_empty());
+        assert!(resumed.session.queue().is_empty());
+        let delivered = child.session.queue().drain_all();
+        assert_eq!(delivered.len(), 1);
+        assert!(delivery_ids.insert(delivered[0].delivery_id.unwrap()));
+        let mut terminal = None;
+        while let Ok(event) = event_rx.try_recv() {
+            if let ExecutorEvent::BackgroundTaskCompleted(result) = event {
+                terminal = Some(result);
+            }
+        }
+        let result = terminal.unwrap();
+        let router =
+            peri_agent::session::async_router::AsyncRouter::for_queue(child.session.queue());
+        let delivery: peri_acp_types::tasks::OnBgCompleteFn = Arc::new(move |result, kind| {
+            router.route_bg_result(result, kind);
+            Ok(())
+        });
+        assert!(!manager
+            .settle_completed(&result.task_id.clone(), result, delivery)
+            .unwrap());
+        assert!(child.session.queue().is_empty());
+        assert!(root.queue().is_empty());
+        assert_eq!(
+            store
+                .load_meta(&grandchild.child_thread_id)
+                .await
+                .unwrap()
+                .agent_status,
+            peri_agent::thread::AgentStatus::Done
+        );
+    }
+}
+
+#[tokio::test]
+async fn configured_background_callback_overrides_live_parent_and_retries_original_target() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let dir = tempdir().unwrap();
+    let store = SessionFixture::open_in(dir.path()).await;
+    let cwd = store.workspace_cwd();
+    let root_id = store
+        .create_thread(ThreadMeta::new_at(cwd.clone(), peri_time::now_wall()))
+        .await
+        .unwrap();
+    let parent = Session::new(
+        Arc::from(cwd.as_str()),
+        FrozenContext::builder().build(),
+        Some(root_id),
+    );
+    let manager = Arc::new(TaskManager::new());
+    parent.set_subagent_host(SubagentHost {
+        session_resources: Some(store.facade()),
+        task_manager: Some(manager.clone()),
+        ..Default::default()
+    });
+    let tool = make_subagent_tool(Vec::new()).with_parent_session(parent.clone());
+    let child = spawn_completed_child(&tool, &cwd, "child").await;
+    let target = Session::new(
+        Arc::from(cwd.as_str()),
+        FrozenContext::builder().build(),
+        None,
+    );
+    let allowed = Arc::new(AtomicBool::new(false));
+    let attempted = Arc::new(tokio::sync::Notify::new());
+    let result = Arc::new(std::sync::Mutex::new(None));
+    let configured = peri_agent::session::bg_complete::task_bg_complete_callback(
+        peri_agent::session::bg_complete::queue_terminal_delivery(target.queue().clone()),
+    );
+    let delivery: peri_acp_types::tasks::OnBgCompleteFn = {
+        let allowed = allowed.clone();
+        let attempted = attempted.clone();
+        let result = result.clone();
+        Arc::new(move |terminal, kind| {
+            *result.lock().unwrap() = Some(terminal.clone());
+            attempted.notify_one();
+            if !allowed.load(Ordering::SeqCst) {
+                return Err("configured target unavailable".into());
+            }
+            configured(terminal, kind)
+        })
+    };
+    let mut config = tool.resume_config_base(
+        child.child_thread_id.clone(),
+        Some("background resume".into()),
+        SubagentRunMode::Background,
+        20,
+        crate::subagent::test_support::fixture_source(Arc::new(EchoLLM), "fixture-scripted"),
+        Vec::new(),
+        Arc::new(|_| true),
+        store.facade(),
+        cwd,
+        None,
+    );
+    config.on_bg_complete = Some(delivery.clone());
+    tool.resume(config).await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(3), attempted.notified())
+        .await
+        .unwrap();
+    assert!(parent.queue().is_empty());
+    assert!(target.queue().is_empty());
+    assert_eq!(manager.active_count(), 1);
+    allowed.store(true, Ordering::SeqCst);
+    manager.retry_pending_deliveries();
+    wait_for_background_idle(&manager).await;
+    assert!(parent.queue().is_empty());
+    let delivered = target.queue().drain_all();
+    assert_eq!(delivered.len(), 1);
+    assert!(delivered[0].delivery_id.is_some());
+    let result = result.lock().unwrap().clone().unwrap();
+    delivery(&result, peri_acp_types::tasks::BgTaskKind::Agent).unwrap();
+    assert!(target.queue().is_empty());
+    assert!(parent.queue().is_empty());
+}

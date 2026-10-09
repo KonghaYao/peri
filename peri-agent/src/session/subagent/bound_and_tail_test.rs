@@ -96,7 +96,7 @@ async fn background_subagent_panic_settles_and_logs() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn subagent_terminal_write_failure_logs_and_continues() {
+async fn subagent_terminal_write_failure_logs_and_background_reports_failure() {
     for background in [false, true] {
         let (logs, _capture) = capture_logs();
         let store = MockSessionResources::new();
@@ -122,11 +122,11 @@ async fn subagent_terminal_write_failure_logs_and_continues() {
             .expect("终态状态 patch 失败不能中断原流程");
         if background {
             wait_execution_idle(&manager).await;
-            assert_eq!(*delivered.lock(), vec![true]);
-            assert_eq!(manager.snapshot().tasks[0].status, "completed");
+            assert_eq!(*delivered.lock(), vec![false]);
+            assert_eq!(manager.snapshot().tasks[0].status, "failed");
         }
         let line = matching_log(&logs, "subagent terminal status write failed");
-        assert!(line.contains("WARN"));
+        assert!(line.contains(if background { "ERROR" } else { "WARN" }));
         assert!(line.contains(&format!("thread_id={}", spawned.child_thread_id)));
         let error = peri_acp_types::session_resources::SessionResourceError::new(
             peri_acp_types::session_resources::SessionResourceErrorKind::Unsupported,

@@ -277,7 +277,14 @@ async fn run_prompt_attempt(
     // Create cancel token and register in sessions.
     // `AgentCancellationToken` 即 `tokio_util::sync::CancellationToken` 别名
     // （peri-agent re-export；ACP 协议面直接使用底层类型，不经业务 crate）。
-    let cancel = tokio_util::sync::CancellationToken::new();
+    let cancel = {
+        let sessions = sessions.lock().await;
+        sessions
+            .get(&session_id)
+            .filter(|state| continuation && state.continuation_in_flight)
+            .and_then(|state| state.cancel_token.clone())
+            .unwrap_or_default()
+    };
     let managed_input = input_ticket.is_some();
     let input_attempt = match &input_ticket {
         Some(run) => {
