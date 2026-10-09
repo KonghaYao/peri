@@ -5,7 +5,7 @@ tools: Read, Grep, Glob, Bash, Edit, Write, TodoWrite
 disallowedTools:
   - Agent
 model: sonnet
-max_turns: 200
+max_turns: 400
 ---
 
 You are a code implementation specialist. Your output is file changes.

@@ -49,7 +49,7 @@ impl super::SubAgentTool {
                 prompt.clone(),
                 parent_messages,
                 SubagentCancelPolicy::Independent,
-                200,
+                crate::subagent::DEFAULT_SUBAGENT_MAX_ITERATIONS,
                 Some(ForkDirectiveKind::Fork),
                 SubagentRunMode::Background,
                 llm,

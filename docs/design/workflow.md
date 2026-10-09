@@ -347,7 +347,7 @@ pub struct AgentProgress {
 | Frozen data | 完整 | **透传**（从 session frozen） |
 | System prompt | 冻结 base + request-time contribution | 继承父 session frozen base，并按 Workflow Agent chain 应用能力闭包 |
 | LLM Model | 用户选择 | 跟随 session provider（`ctx.provider.clone().into_model()`，无 Anthropic 回退） |
-| max_iterations | 500 | 200 |
+| max_iterations | 500 | 400 |
 | HITL | 完整 | 共享 session 权限模式 |
 | Langfuse | 完整 | 启用 |
 

@@ -367,7 +367,10 @@ async fn resolve_agent_definition_via_registry(
         disallowed_tools: frontmatter.disallowed_tools.to_vec(),
         skill_names: frontmatter.skills,
         allowed_write_dirs: frontmatter.allowed_write_dirs,
-        max_iterations: frontmatter.max_turns.unwrap_or(200) as usize,
+        max_iterations: frontmatter
+            .max_turns
+            .map(|turns| turns as usize)
+            .unwrap_or(crate::subagent::DEFAULT_SUBAGENT_MAX_ITERATIONS),
         prompt_overrides,
     })
 }

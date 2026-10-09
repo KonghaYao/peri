@@ -44,7 +44,7 @@ impl super::SubAgentTool {
             prompt.to_string(),
             parent_messages,
             SubagentCancelPolicy::Cascade,
-            200,
+            crate::subagent::DEFAULT_SUBAGENT_MAX_ITERATIONS,
             Some(ForkDirectiveKind::Fork),
             SubagentRunMode::Sync,
             llm,

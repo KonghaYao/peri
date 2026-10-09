@@ -594,7 +594,11 @@ impl McpAgentRegistry {
                 .model
                 .as_deref()
                 .unwrap_or("inherit"),
-            agent.definition.frontmatter.max_turns.unwrap_or(200),
+            agent
+                .definition
+                .frontmatter
+                .max_turns
+                .unwrap_or(crate::subagent::DEFAULT_SUBAGENT_MAX_ITERATIONS as u32),
         )
     }
 

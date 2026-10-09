@@ -560,7 +560,7 @@ async fn test_resume_thread_id_success_replays_and_completes() {
 /// 历史背景：旧夹具固定调用 ID 并持续请求不存在工具，基线提前报执行错误而非耗尽预算。
 /// 每轮改为有效工具及唯一调用身份，并核对 typed 失败原因，避免只按模型调用数猜测预算。
 #[tokio::test]
-async fn test_resume_thread_id_fork_title_uses_parent_tools_and_200_iterations() {
+async fn test_resume_thread_id_fork_title_uses_parent_tools_and_default_iterations() {
     let dir = tempdir().unwrap();
     let store = SessionFixture::open_in(dir.path()).await;
     let cwd = store.workspace_cwd();
@@ -646,7 +646,7 @@ async fn test_resume_thread_id_fork_title_uses_parent_tools_and_200_iterations()
             preset_child_ctx(&id, "."),
         )
         .await;
-    // 迭代上限耗尽 → MaxIterationsExceeded 错误（fork resume 上限 = 200）
+    // 迭代上限耗尽 → MaxIterationsExceeded 错误（fork resume 上限 = DEFAULT_SUBAGENT_MAX_ITERATIONS）
     let error = result.unwrap_err();
     let failure = error
         .downcast_ref::<peri_agent::session::subagent::SubagentFailure>()
@@ -666,7 +666,11 @@ async fn test_resume_thread_id_fork_title_uses_parent_tools_and_200_iterations()
         *budget,
         "fork resume 必须耗尽配置预算，不能因无效工具调用提前退出"
     );
-    assert_eq!(*budget, 200, "fork resume 的当前默认预算必须与 fork 一致");
+    assert_eq!(
+        *budget,
+        crate::subagent::DEFAULT_SUBAGENT_MAX_ITERATIONS,
+        "fork resume 的当前默认预算必须与 fork 一致"
+    );
     let captured = tools_capture.lock().unwrap();
     assert!(
         captured.contains(&"Agent".to_string()),

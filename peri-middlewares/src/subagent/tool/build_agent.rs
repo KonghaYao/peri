@@ -31,7 +31,8 @@ pub(crate) struct AgentBuildResult {
     pub system_prompt: Option<String>,
     /// agent 定义声明的 skills（SkillPreload 装配输入）
     pub skill_names: Vec<String>,
-    /// ReAct 循环最大迭代次数（来自 agent_def.max_turns，默认 200）
+    /// ReAct 循环最大迭代次数（来自 agent_def.max_turns，缺省/0 时回落
+    /// [`DEFAULT_SUBAGENT_MAX_ITERATIONS`](crate::subagent::DEFAULT_SUBAGENT_MAX_ITERATIONS)）
     pub max_iterations: usize,
 }
 
@@ -149,9 +150,13 @@ impl super::SubAgentTool {
         let llm = (self.llm_factory)(model_alias.as_deref());
 
         // 3. Max iterations
-        let raw_turns = agent_def.frontmatter.max_turns.unwrap_or(200);
+        let default_turns = crate::subagent::DEFAULT_SUBAGENT_MAX_ITERATIONS;
+        let raw_turns = agent_def
+            .frontmatter
+            .max_turns
+            .unwrap_or(default_turns as u32);
         let max_iterations = if raw_turns == 0 {
-            200
+            default_turns
         } else {
             raw_turns as usize
         };

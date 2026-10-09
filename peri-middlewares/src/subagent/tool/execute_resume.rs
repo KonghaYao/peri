@@ -153,7 +153,8 @@ impl super::SubAgentTool {
         let title = meta.title.clone().unwrap_or_default();
 
         // 2. 按 title 恢复工具集 / LLM / 迭代上限：
-        //    - "fork" → 父工具集 clone（execute_fork.rs 同款，无过滤）+ 200 迭代
+        //    - "fork" → 父工具集 clone（execute_fork.rs 同款，无过滤）+
+        //      DEFAULT_SUBAGENT_MAX_ITERATIONS
         //    - 其他 → load_agent_def(title) 重新应用过滤（tools/disallowed，
         //      权限漂移防护）+ agent_def 声明的 max_turns
         //    二者均不注入 skill_names / system_prompt（R-H1 / F4）
@@ -164,7 +165,7 @@ impl super::SubAgentTool {
                 llm,
                 tools,
                 Arc::new(|_: &dyn BaseTool| true) as peri_agent::session::tool_catalog::ToolFilter,
-                200,
+                crate::subagent::DEFAULT_SUBAGENT_MAX_ITERATIONS,
             )
         } else {
             let agent_def = if title.starts_with("mcp__") {
